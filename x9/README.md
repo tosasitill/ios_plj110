@@ -35,11 +35,64 @@ MediaTek LK
   -> this repository's plain arm64 SWEET XNU (xnu-8796.141.3)
 ```
 
-**Current result: host-verified source and a loader-test candidate, not a verified
-phone boot.** The generated default `boot.img` uses a tiny Mach-O stub, not an XNU
-kernel. No device or partition was written during this implementation.
+**Current result: the phone boots this XNU and runs the unmodified iOS 16.7.16
+userland, through the GUI.** What is still missing is GPU display: the render
+engine and its Metal/PanVK plugins are loaded and complete GPU submissions, but
+Metal device creation fails, so the compositor never receives a GPU device and
+frames are still produced on the CPU. The generated default `boot.img` with no
+`--kernel` is a loader stub, not XNU. This repository's tools never write a
+device; the owner flashes by hand.
 
-## Hardware result so far
+## Hardware status (2026-10-29)
+
+Everything in this table was observed on the physical PLJ110 (12 GiB RAM,
+1256x2760 panel, 64 MiB boot partition) through the pstore/disk-log channels.
+Host builds and service registration are not evidence and are not listed.
+
+| Area | Verified on hardware | Notes |
+| --- | --- | --- |
+| Boot chain | LK accepts the v4 image, decompresses the legacy LZ4 arm64 Image, jumps at `+0x1000`; the shim loads SWEETXNU and enters XNU `8796.141.3` | `lk finished --> jump to linux kernel 64Bit` in every run |
+| Kernel | Board selection, early page tables, `arm_vm_init`, `startup_initialize_upto`, BSD init, `vfs_mountroot returned 0` | milestones 14-80 and BSD stages |
+| Root disk | Kernel's own X9 UFS driver takes over the controller, DMA and block device, then mounts the 16 GiB HFSX volume read-write | root is a dedicated extent copy inside `userdata`; Android data preserved |
+| UFS link | HS-G1, Rate B, 2 lanes per direction, read back from the device after switching (`mode 0x44`) | ~130-155 MiB/s in-kernel IO accounting; not a wall-clock benchmark |
+| iOS userland | Unmodified launchd PID1 and system daemons run: decmpfs codecs, keybag `DONE MKB_INIT`, `DONE UMD_INIT`, `Cache sent to launchd successfully`, cryptex aliases, `Early boot complete` | Apple binary bytes unchanged |
+| Display | LK scanout preserved; kernel publishes `AppleCLCD` 1256x2760 stride 5120 at `0xfc910000`; `GUI takeover, text console muted` and continuous swaps | frames are still copied into the panel buffer by the CPU |
+| Touch | S3910 controller initialises and its IRQ path stays alive | taps were confirmed by the owner in earlier candidates; idle runs log `reports=0 contacts=000` |
+| Keys / battery | PMIC power/volume keys arrive as HID consumer keys (lock/wake works), and the battery service answers | backlight is not controlled yet, see below |
+| Network identity | Network stack, status-bar provider and device identity come up, so SpringBoard renders a status bar | no real Wi-Fi/modem data path |
+| GPU session | Persistent CSF MCU: boot plus two PINGs, 8 CSG slots / 8 resident groups, AS0 live, GPUEB power retained, `caps=0x3f`, cache atom 256 | one session is kept for the life of the kernel |
+| GPU compute | Hardware shader compute passes: `ADD32` cases, a 75-dispatch vector campaign with matching digests, private tile copy of 2048 pixels with intact guards | the same engine that desktop Metal submits through |
+| Metal plugins | The versioned `X9GeneralMetal*.bundle` / `X9PanVK*.bundle` install from the pinned mailbox and are hash-verified at boot; backboardd reads `MetalPluginName` / `MetalPluginClassName` and opens a real render client | plugin binaries live on the iOS root, never in `boot` |
+| GPU submission | backboardd creates a 3-stream CS group and four submissions complete with independent fence, extract, guards, group suspend, GPU cache flush and AS1 detach | pan181/pan183 |
+| Completion fence | The 64-bit fence is only visible to the CPU after a bounded GPU cache acquire of the private fence page | without it every submission timed out with `fence=0` |
+
+### What still does not work
+
+| Item | State |
+| --- | --- |
+| Metal device | pan183 ended in `native-metal: device refused: device: OutOfMemory(Device)`: the runtime's device priming demanded `HOST_COHERENT`, which this backend deliberately does not advertise. pan184 relaxes that for its never-submitted probe command buffer and is **built but not yet flashed** |
+| Desktop GPU frames | none yet. No submission has carried a desktop draw, and no GPU-produced pixel has reached the panel |
+| Tiling / fragment / 3D | unverified. Tiler teardown reported "uncertain" and its heap and descriptor references were deliberately retained rather than recycled |
+| Scanout | still CPU copy; no GPU mapping of the panel, no DSC or command-mode re-initialisation, no MIPI work |
+| Frame pacing | no hardware vsync; the compositor is paced by the kernel's swap accounting |
+| Backlight | no `backlight-control` service matches, so brightness stays whatever LK left; brightness changes do not reach the panel |
+| Daemons | some still crash on every boot (e.g. `locationd`, the speech synthesisers); SpringBoard crash-looped in pan169 |
+| Submit plan | no cross-stream waits, no internal dependencies, no cross-process fd/sync-file payloads |
+| Storage semantics | a dedicated extent copy with an HFSX volume, not APFS; Data-volume and persona semantics are emulated |
+
+### How to read a run
+
+The owner flashes every candidate by hand and restores the stock Android boot
+image afterwards, so `boot_a` read back from a running Android always holds the
+Android image and says nothing about what was flashed. Evidence comes from the
+persistent console (pstore) and from the dedicated disk-log sidecar; those logs
+are not committed here. A candidate that hangs and is force-restarted leaves no
+record at all, so "no log" is not "no boot".
+
+## Early bring-up history (stage 14-80)
+
+The records below are the original bring-up survey, kept because they name what
+actually executed. Their log files are not part of this repository.
 
 One attempt was flashed by the device owner (not by this repository's tools) and
 read back from `expdb` afterwards. It did **not** reach a boot:
