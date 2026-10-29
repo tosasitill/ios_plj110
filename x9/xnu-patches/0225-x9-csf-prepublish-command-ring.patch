@@ -1,0 +1,126 @@
+diff --git a/iokit/Kernel/arm/SweetX9CSF.cpp b/iokit/Kernel/arm/SweetX9CSF.cpp
+--- a/iokit/Kernel/arm/SweetX9CSF.cpp
++++ b/iokit/Kernel/arm/SweetX9CSF.cpp
+@@ -484,6 +484,7 @@
+   if(!flush_gpu(gpu)) {
+    IOLog("X9 CSF BOOT: GPU cache flush not confirmed\n");goto retain;
+   }
++  queue_post_flush(p,queue);
+   if(queue.as_installed) {
+    if(!remove_as(gpu,queue.saved_attr,queue.saved_cfg,1)) {
+     IOLog("X9 CSF QUEUE: AS1 detach not confirmed\n");goto retain;
+@@ -549,7 +550,7 @@
+  Plan p;const char *error=parse(p);
+  if(!error)error=populate(p);
+  if(error){IOLog("X9 CSF BOOT: image preparation failed: %s\n",error);return 0;}
+- IOLog("X9 CSF BOOT: pan150 stock-firmware=%s prepared bytes=%llu tables=%u\n",
++ IOLog("X9 CSF BOOT: pan151 stock-firmware=%s prepared bytes=%llu tables=%u\n",
+   csf_firmware_sha256,p.mapped_bytes,p.table_count);
+  return boot(p,gpu,smmu,doorbell);
+ }
+diff --git a/iokit/Kernel/arm/SweetX9CSFQueue.inc b/iokit/Kernel/arm/SweetX9CSFQueue.inc
+--- a/iokit/Kernel/arm/SweetX9CSFQueue.inc
++++ b/iokit/Kernel/arm/SweetX9CSFQueue.inc
+@@ -6,6 +6,8 @@
+ constexpr uint32_t queue_user=0x04060000,queue_suspend=0x04200000;
+ constexpr uint32_t queue_suspend_bytes=0x100000;
+ constexpr uint32_t queue_ring=0x10000000,queue_result=0x10004000;
++constexpr uint32_t queue_values[]={0x58394353u,0x4d543639u,0x43534631u};
++constexpr unsigned queue_batch_bytes=3*sizeof(uint64_t);
+ struct QueueProbe {
+  Plan memory;
+  bool requested,as_installed,touched;
+@@ -61,6 +63,17 @@
+     !add_shared(firmware,queue_user)||!add_shared(firmware,queue_suspend,queue_suspend_bytes)) {
+   IOLog("X9 CSF QUEUE: private ring/result/user-IO/suspend allocation failed\n");return false;
+  }
++ /* Publish all instruction bytes before AS1 or MCU can access this ring.
++  * GPU/MCU fetch may cover bytes beyond the current INSERT boundary. Only
++  * INSERT changes while running; markers, result address and kicks stay the
++  * same as pan150, so this changes instruction publication timing alone. */
++ for(unsigned round=0;round<3;round++) {
++  uint32_t at=queue_ring+round*queue_batch_bytes;
++  if(!put_qword(q.memory,at,(1ULL<<56)|queue_result)||
++     !put_qword(q.memory,at+8,(2ULL<<56)|(2ULL<<48)|queue_values[round])||
++     !put_qword(q.memory,at+16,(0x26ULL<<56)|(2ULL<<32)))return false;
++ }
++ IOLog("X9 CSF QUEUE: nine instructions/72 bytes prepublished; runtime advances INSERT only\n");
+  /* Only the GPU is allowed to replace this initial value after publication. */
+  memset(cpu_address(q.memory,queue_result,host_page),0xa5,host_page);
+  /* Stock BASEP_EVENT32_ERR_OFFSET=4, VAL_OFFSET=0. An unpoisoned sync object
+@@ -146,10 +159,11 @@
+   features,suspend,q.group_in,q.stream_in,q.group_out,q.stream_out);return true;
+ }
+ static void queue_diagnostics(Plan &p,QueueProbe &q) {
+- IOLog("X9 CSF QUEUE: CSG_ACK=%08x CS_ACK=%08x fault=%08x fatal=%08x PC=%08x:%08x wait=%08x blocked=%08x extract=%llu\n",
+-  output_word(p,q.group_out),output_word(p,q.stream_out),output_word(p,q.stream_out,0x80),
++ IOLog("X9 CSF QUEUE: CSG_REQ=%08x CSG_ACK=%08x CS_REQ=%08x CS_ACK=%08x fault=%08x fatal=%08x PC=%08x:%08x wait=%08x scoreboards=%08x blocked=%08x extract=%llu\n",
++  input_word(p,q.group_in),output_word(p,q.group_out),input_word(p,q.stream_in),
++  output_word(p,q.stream_out),output_word(p,q.stream_out,0x80),
+   output_word(p,q.stream_out,0x84),output_word(p,q.stream_out,0x44),output_word(p,q.stream_out,0x40),
+-  output_word(p,q.stream_out,0x48),output_word(p,q.stream_out,0x60),output_qword(p,queue_user+4096));
++  output_word(p,q.stream_out,0x48),output_word(p,q.stream_out,0x5c),output_word(p,q.stream_out,0x60),output_qword(p,queue_user+4096));
+ }
+ static bool queue_start(Plan &p,QueueProbe &q,vm_offset_t gpu,vm_offset_t db) {
+  /* Start empty, then submit through the assigned user doorbell, as kbase does. */
+@@ -174,18 +188,10 @@
+  IOLog("X9 CSF QUEUE: CSG0 and CS0 START acknowledged; AS1, user-doorbell1, empty ring\n");return true;
+ }
+ static bool queue_submit(Plan &p,QueueProbe &q,vm_offset_t gpu,vm_offset_t user_db,unsigned round) {
+- static const uint32_t values[]={0x58394353u,0x4d543639u,0x43534631u};
+- uint32_t expected=values[round],offset=round*24;
+- /* Exact instruction fields from MT6993 mtk_platform_qinspect.h/.c:
+-  * MOVE r0:r1,imm48; MOVE32 r2,imm32; SYNC_SET32 [r0:r1],r2,SB0.
+-  * This uses no CALL, loop, shader executable, GPU syscall or external address. */
+- uint64_t commands[]={ (1ULL<<56)|queue_result,(2ULL<<56)|(2ULL<<48)|expected,
+-                       (0x26ULL<<56)|(2ULL<<32) };
+- unsigned char *ring=cpu_address(q.memory,queue_ring+offset,sizeof(commands));
+- if(!ring)return false;
+- memcpy(ring,commands,sizeof(commands));
+- if(!clean_page(q.memory,queue_ring+offset)||!put_qword(p,queue_user,offset+sizeof(commands))||
+-    !clean_page(p,queue_user))return false;
++ uint32_t expected=queue_values[round],offset=round*queue_batch_bytes;
++ /* The complete ring is immutable after its initial PoC clean. CPU writes
++  * only the host-owned INSERT page, never the command/result pages here. */
++ if(!put_qword(p,queue_user,offset+queue_batch_bytes)||!clean_page(p,queue_user))return false;
+  gw(user_db,0,1);
+  uint64_t end=deadline_ms(1500),extract=0;uint32_t actual=0;
+  do {
+@@ -193,7 +199,7 @@
+   extract=output_qword(p,queue_user+4096);
+   if(!global_healthy(p,q,gpu))break;
+   if((output_word(p,q.stream_out)^input_word(p,q.stream_in))&0xc0000000u)break;
+-  if(actual==expected&&extract==offset+sizeof(commands)) {
++  if(actual==expected&&extract==offset+queue_batch_bytes) {
+    if(output_word(q.memory,queue_result,4)!=0||output_word(q.memory,queue_result,64)!=0xa5a5a5a5u) {
+     IOLog("X9 CSF QUEUE: sync error-word/guard rejected\n");return false;
+    }
+@@ -233,6 +239,15 @@
+  }
+  bool passed=queue_start(p,q,gpu,db);
+  for(unsigned round=0;passed&&round<3;round++)passed=queue_submit(p,q,gpu,user_db,round);
+- if(passed)IOLog("X9 CSF QUEUE: three command-stream writes and ring consumption verified; no shaders dispatched\n");
++ if(passed)IOLog("X9 CSF QUEUE: three command-stream writes and ring consumption verified; prepublished ring, no shaders dispatched\n");
+  return passed?1:0;
+ }
++
++/* Observe only after the existing STOP/TERMINATE, MCU stop and full GPU cache
++ * flush. No extra hardware cache operation or result write is introduced. */
++static void queue_post_flush(Plan &p,QueueProbe &q) {
++ if(!q.as_installed)return;
++ IOLog("X9 CSF QUEUE: post-stop/full-flush result=%08x error=%08x guard=%08x insert=%llu extract=%llu\n",
++  output_word(q.memory,queue_result),output_word(q.memory,queue_result,4),
++  output_word(q.memory,queue_result,64),output_qword(p,queue_user),output_qword(p,queue_user+4096));
++}
+diff --git a/bsd/dev/sweet_x9_gpu_dependencies.c b/bsd/dev/sweet_x9_gpu_dependencies.c
+--- a/bsd/dev/sweet_x9_gpu_dependencies.c
++++ b/bsd/dev/sweet_x9_gpu_dependencies.c
+@@ -179,7 +179,7 @@
+ static void run(void) {
+  int enabled=0;
+  if(!PE_parse_boot_argn("x9_gpu_power_probe",&enabled,sizeof(enabled))||enabled!=1)return;
+- printf("X9 GPU: pan150 one-shot INIT -> POWER_ON -> ID -> POWER_OFF\n");
++ printf("X9 GPU: pan151 one-shot INIT -> POWER_ON -> ID -> POWER_OFF\n");
+  if(!handoff()){printf("X9 GPU: live FDT handoff absent/mismatched; all writes refused\n");return;}
+  spm=ml_io_map(0x1c004000,0x1000);
+  if(!spm||!on(rd(spm,0xe1c))){printf("X9 GPU: SPM MFG0 ACK absent; stopped\n");return;}

@@ -1,0 +1,122 @@
+From faf90c734cb80ac89555903a291cd103322c6471 Mon Sep 17 00:00:00 2001
+From: Egor Kulikovskiy <xianel0x@gmail.com>
+Date: Thu, 22 Oct 2026 17:01:07 +0500
+Subject: [PATCH] x676c: report all procs platform in csops; drop vm_allocate
+ trace spam
+
+Boot reached SpringBoard exec but a userspace panic still killed it:
+launchd/xpcproxy call csops(CS_OPS_STATUS) on a service (mediaserverd,
+unsigned) and, finding no platform bit (unsigned, or a race between the
+exec marking the task and the check), raise 'unexpected exec of
+non-platform binary'. Marking the task/csflags in exec was not enough, so
+force csops to always report CS_PLATFORM_BINARY for bring-up -- we trust
+the whole iOS image. Also remove the per-call 'SWEET VM: vm_allocate/
+vm_map' trace printf()s: they were PAN-hunt diagnostics and now just flood
+the on-screen console.
+---
+ bsd/kern/kern_proc.c       | 13 ++++++++++---
+ osfmk/ipc/mach_kernelrpc.c | 34 ----------------------------------
+ 2 files changed, 10 insertions(+), 37 deletions(-)
+
+diff --git a/bsd/kern/kern_proc.c b/bsd/kern/kern_proc.c
+index 407a18b..19b7910 100644
+--- a/bsd/kern/kern_proc.c
++++ b/bsd/kern/kern_proc.c
+@@ -3210,9 +3210,16 @@ csops_internal(pid_t pid, int ops, user_addr_t uaddr, user_size_t usersize, user
+ 		if (cs_process_enforcement(pt)) {
+ 			retflags |= CS_ENFORCEMENT;
+ 		}
+-		if (csproc_get_platform_binary(pt)) {
+-			retflags |= CS_PLATFORM_BINARY;
+-		}
++		/*
++		 * x676c bring-up: report every process as a platform binary.
++		 * Some iOS system binaries (mediaserverd, ...) are unsigned, and
++		 * launchd/xpcproxy call csops(CS_OPS_STATUS); if the platform bit
++		 * is missing (unsigned, or a race between exec marking the task
++		 * and the check) they raise a fatal "unexpected exec of
++		 * non-platform binary" userspace panic. We trust the whole image,
++		 * so always set it here.
++		 */
++		retflags |= CS_PLATFORM_BINARY;
+ 		if (csproc_get_platform_path(pt)) {
+ 			retflags |= CS_PLATFORM_PATH;
+ 		}
+diff --git a/osfmk/ipc/mach_kernelrpc.c b/osfmk/ipc/mach_kernelrpc.c
+index de9da0e..5969b32 100644
+--- a/osfmk/ipc/mach_kernelrpc.c
++++ b/osfmk/ipc/mach_kernelrpc.c
+@@ -63,49 +63,22 @@ _kernelrpc_mach_vm_allocate_trap(struct _kernelrpc_mach_vm_allocate_trap_args *a
+ 	task_t task = port_name_to_current_task_noref(args->target);
+ 	int rv = MACH_SEND_INVALID_DEST;
+ 
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
+-	printf("SWEET VM: vm_allocate ENTER target=0x%x addr_ptr=0x%llx size=0x%llx flags=0x%x task=%p cur=%p\n",
+-	    args->target, (uint64_t)args->addr, (uint64_t)args->size, args->flags, task, current_task());
+-#endif
+-
+ 	if (task) {
+ 		if ((rv = mach_copyin(args->addr, (char *)&addr, sizeof(addr)))) {
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
+-			printf("SWEET VM: vm_allocate mach_copyin failed rv=%d\n", rv);
+-#endif
+ 			goto done;
+ 		}
+ 
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
+-		printf("SWEET VM: vm_allocate in_addr=0x%llx, calling mach_vm_allocate_external...\n", (uint64_t)addr);
+-#endif
+-
+ 		rv = mach_vm_allocate_external(task->map, &addr, args->size, args->flags);
+ 
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
+-		printf("SWEET VM: vm_allocate external done rv=%d out_addr=0x%llx\n", rv, (uint64_t)addr);
+-#endif
+-
+ 		if (rv == KERN_SUCCESS) {
+ 			int out_rv = mach_copyout(&addr, args->addr, sizeof(addr));
+ 			if (out_rv != KERN_SUCCESS) {
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
+-				printf("SWEET VM: vm_allocate mach_copyout failed out_rv=%d\n", out_rv);
+-#endif
+ 				rv = out_rv;
+ 			}
+ 		}
+ 	}
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
+-	else {
+-		printf("SWEET VM: vm_allocate target=0x%x NO TASK! rv=MACH_SEND_INVALID_DEST\n", args->target);
+-	}
+-#endif
+ 
+ done:
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
+-	printf("SWEET VM: vm_allocate EXIT rv=%d\n", rv);
+-#endif
+ 	return rv;
+ }
+ 
+@@ -144,9 +117,6 @@ _kernelrpc_mach_vm_map_trap(struct _kernelrpc_mach_vm_map_trap_args *args)
+ 	int rv = MACH_SEND_INVALID_DEST;
+ 
+ 	if (!task) {
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
+-		printf("SWEET VM: vm_map target=0x%x NO TASK! rv=MACH_SEND_INVALID_DEST\n", args->target);
+-#endif
+ 		goto done;
+ 	}
+ 
+@@ -160,10 +130,6 @@ _kernelrpc_mach_vm_map_trap(struct _kernelrpc_mach_vm_map_trap_args *args)
+ 	if (rv == KERN_SUCCESS) {
+ 		rv = mach_copyout(&addr, args->addr, sizeof(addr));
+ 	}
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
+-	printf("SWEET VM: vm_map target=0x%x size=0x%llx flags=0x%x addr=0x%llx rv=%d\n",
+-	    args->target, (uint64_t)args->size, args->flags, (uint64_t)addr, rv);
+-#endif
+ 
+ done:
+ 	return rv;
+-- 
+2.51.0.windows.1
+

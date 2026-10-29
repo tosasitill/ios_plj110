@@ -1,0 +1,88 @@
+--- a/iokit/Kernel/arm/SweetSurface.h
++++ b/iokit/Kernel/arm/SweetSurface.h
+@@ -74,5 +74,9 @@
+ /* Send right for the surface in task (IOSurfaceLookupFromMachPort). */
+ mach_port_name_t sweet_surface_port_in_task(SweetSurface *surface, task_t task);
+ 
++/* Owned RAM surface for the opt-in X9 render target; never a panel alias. */
++SweetSurface *sweet_surface_create_buffer(uint32_t width, uint32_t height,
++    uint32_t bytesPerRow, uint32_t pixelFormat);
++
+ #endif /* SWEET */
+ #endif /* _SWEET_SURFACE_H */
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -335,6 +335,37 @@
+ 		s->release();
+ 		return NULL;
+ 	}
++	return s;
++}
++
++SweetSurface *
++sweet_surface_create_buffer(uint32_t width, uint32_t height,
++    uint32_t bytesPerRow, uint32_t pixelFormat)
++{
++	if (!width || !height || width > UINT32_MAX / 4 || bytesPerRow < width * 4)
++		return NULL;
++	uint64_t used = (uint64_t)bytesPerRow * height;
++	if (!used || used > (128ULL << 20) - page_size)
++		return NULL;
++	SweetSurface *s = sweet_surface_alloc();
++	if (!s) return NULL;
++	s->width = width; s->height = height; s->bytesPerRow = bytesPerRow;
++	s->bytesPerElement = 4; s->elementWidth = s->elementHeight = 1;
++	s->pixelFormat = pixelFormat; s->allocSize = (uint32_t)round_page(used);
++	IOBufferMemoryDescriptor *memory = NULL;
++	if ((uint64_t)OSAddAtomic64(s->allocSize, (volatile SInt64 *)&sweet_surface_wired) +
++	    s->allocSize <= SWEET_SURFACE_WIRED_MAX) {
++		memory = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
++		    kIODirectionInOut | kIOMemoryKernelUserShared, s->allocSize, page_size);
++	}
++	if (!memory) {
++		OSAddAtomic64(-(SInt64)s->allocSize, (volatile SInt64 *)&sweet_surface_wired);
++		s->release(); return NULL;
++	}
++	s->memory = memory; s->mapCache = kIOMapDefaultCache;
++	if (!memory->getBytesNoCopy()) { s->release(); return NULL; }
++	bzero(memory->getBytesNoCopy(), s->allocSize);
++	if (!sweet_surface_publish(s)) { s->release(); return NULL; }
+ 	return s;
+ }
+ 
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -448,6 +448,24 @@
+ 	fClients = OSArray::withCapacity(4);
+ 	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
+ 	fPixels = fSurface != NULL ? fSurface->kernelAddress() : 0;
++	int x9_render = 0;
++	if (sweet_board_x9() && PE_parse_boot_argn("x9_metal_render", &x9_render, sizeof(x9_render)) &&
++	    x9_render == 1 && fSurface != NULL && fPixels != 0) {
++		SweetSurface *target = sweet_surface_create_buffer(fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
++		uintptr_t targetPixels = target != NULL ? target->kernelAddress() : 0;
++		if (targetPixels != 0) {
++			memcpy((void *)targetPixels, (const void *)fPixels, (size_t)fRowBytes * fHeight);
++			/* The published physical surface remains retained by the ID table,
++			 * keeping the panel CPU mapping alive; fPixels remains scanout. */
++			fSurface->release(); fSurface = target;
++			IOLog("X9 RENDER DISPLAY: RAM default surface %u; panel copied through existing LK path, no GPU panel mapping\n", fSurface->id);
++		} else {
++			OSSafeReleaseNULL(target);
++			IOLog("X9 RENDER DISPLAY: RAM surface allocation failed; framebuffer setup refused\n");
++			fPixels = 0;
++		}
++	}
++
+ 	fWorkLoop = IOWorkLoop::workLoop();
+ 	if (fLock == NULL || fClients == NULL || fPixels == 0 || fWorkLoop == NULL) {
+ 		IOLog("SWEET FB: setup failed\n");
+@@ -1479,7 +1497,7 @@
+ 			    s ? s->pixelFormat : 0, s ? s->bytesPerRow : 0, sx, sy, get32(a, 8),
+ 			    get32(a, 12), dx, dy, w, h);
+ 		}
+-		if (s == NULL || s == fSurface) {
++		if (s == NULL || (s == fSurface && s->kernelAddress() == fPixels)) {
+ 			if (sweet_board_x9()) {
+ 				static unsigned skipped;
+ 				if (skipped++ < 24) IOLog("X9 SWAP layer: id=%u layer=%u %s\n", id, layer,

@@ -1,0 +1,91 @@
+From 85b3a851786cd7ed84567237d7a557d3fe1da98c Mon Sep 17 00:00:00 2001
+From: Egor Kulikovskiy <xianel0x@gmail.com>
+Date: Thu, 22 Oct 2026 22:05:52 +0500
+Subject: [PATCH] x676c: fix pstore wrap and gate vfs open trace
+
+---
+ bsd/vfs/vfs_syscalls.c    | 15 +++++++++++----
+ osfmk/arm64/sweet_early.c | 32 +++++++++++++++++++++++++-------
+ 2 files changed, 36 insertions(+), 11 deletions(-)
+
+diff --git a/bsd/vfs/vfs_syscalls.c b/bsd/vfs/vfs_syscalls.c
+index 5036134..4c699eb 100644
+--- a/bsd/vfs/vfs_syscalls.c
++++ b/bsd/vfs/vfs_syscalls.c
+@@ -5057,17 +5057,24 @@ openat_internal(vfs_context_t ctx, user_addr_t path, int flags, int mode,
+ 	    segflg, path, ctx);
+ 
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+-	proc_t p = vfs_context_proc(ctx);
++	static int sweet_launchd_open_debug = -1;
++	if (sweet_launchd_open_debug == -1) {
++		sweet_launchd_open_debug = 0;
++		PE_parse_boot_argn("sweet_launchd_open_debug", &sweet_launchd_open_debug, sizeof(sweet_launchd_open_debug));
++	}
+ 	char pbuf[160] = {0};
+-	if (p != NULL && proc_getpid(p) == 1 && segflg == UIO_USERSPACE) {
+-		(void)copyinstr(path, pbuf, sizeof(pbuf), NULL);
++	if (sweet_launchd_open_debug) {
++		proc_t p = vfs_context_proc(ctx);
++		if (p != NULL && proc_getpid(p) == 1 && segflg == UIO_USERSPACE) {
++			(void)copyinstr(path, pbuf, sizeof(pbuf), NULL);
++		}
+ 	}
+ #endif
+ 
+ 	error = open1at(ctx, ndp, flags, vap, NULL, NULL, retval, fd, AUTH_OPEN_NOAUTHFD);
+ 
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+-	if (pbuf[0]) {
++	if (sweet_launchd_open_debug && pbuf[0]) {
+ 		printf("open [1(launchd)] \"%s\" flags 0x%x error %d fd %d\n", pbuf, flags, error, error ? -1 : *retval);
+ 	}
+ #endif
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+index e5b48cb..4682c80 100644
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -40,15 +40,33 @@ sweet_pstore_append(const char *buf, int len)
+ 		hdr[1] = 0;
+ 		hdr[2] = 0;
+ 	}
+-	uint32_t at = __atomic_fetch_add((uint32_t *)&hdr[1], (uint32_t)len, __ATOMIC_RELAXED);
++
++	/* Atomically reserve 'len' bytes in the ring buffer without overflowing PSTORE_CAP */
++	uint32_t old_start, new_start;
++	do {
++		old_start = hdr[1];
++		if (old_start >= PSTORE_CAP) {
++			old_start = 0;
++		}
++		new_start = (old_start + (uint32_t)len) % PSTORE_CAP;
++	} while (!__atomic_compare_exchange_n((uint32_t *)&hdr[1], &old_start, new_start, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED));
++
+ 	for (int i = 0; i < len; i++) {
+-		data[(at + (uint32_t)i) % PSTORE_CAP] = buf[i];
+-	}
+-	uint32_t old_sz = hdr[2];
+-	if (old_sz < PSTORE_CAP) {
+-		uint32_t new_sz = (old_sz + (uint32_t)len > PSTORE_CAP) ? PSTORE_CAP : (old_sz + (uint32_t)len);
+-		hdr[2] = new_sz;
++		data[(old_start + (uint32_t)i) % PSTORE_CAP] = buf[i];
+ 	}
++
++	/* Update size, saturating at PSTORE_CAP */
++	uint32_t old_sz, new_sz;
++	do {
++		old_sz = hdr[2];
++		if (old_sz >= PSTORE_CAP) {
++			break;
++		}
++		new_sz = old_sz + (uint32_t)len;
++		if (new_sz > PSTORE_CAP) {
++			new_sz = PSTORE_CAP;
++		}
++	} while (!__atomic_compare_exchange_n((uint32_t *)&hdr[2], &old_sz, new_sz, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+ }
+ 
+ void
+-- 
+2.51.0.windows.1
+

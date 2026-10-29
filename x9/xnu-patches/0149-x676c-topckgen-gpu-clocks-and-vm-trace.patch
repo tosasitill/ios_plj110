@@ -1,0 +1,195 @@
+From 1ba0455dd08e71c568c8aab92eed52344c6a454c Mon Sep 17 00:00:00 2001
+From: Egor Kulikovskiy <xianel0x@gmail.com>
+Date: Wed, 21 Oct 2026 23:12:29 +0500
+Subject: [PATCH] x676c: un-gate topckgen MFG clocks, trace PID 1 mach_vm
+ traps, and name A76 SMP
+
+---
+ bsd/dev/sweet_sample.c                |  6 ++-
+ iokit/Kernel/arm/SweetCPU.cpp         |  2 +-
+ iokit/Kernel/arm/SweetFramebuffer.cpp | 58 ++++++++++++++++++++-------
+ osfmk/ipc/mach_kernelrpc.c            | 20 +++++++++
+ 4 files changed, 68 insertions(+), 18 deletions(-)
+
+diff --git a/bsd/dev/sweet_sample.c b/bsd/dev/sweet_sample.c
+index a6d85d5..39ab84d 100644
+--- a/bsd/dev/sweet_sample.c
++++ b/bsd/dev/sweet_sample.c
+@@ -72,10 +72,12 @@ sweet_sample_thread(__unused void *arg, __unused wait_result_t wr)
+ 		return;
+ 	}
+ 	uint32_t delay_s = 60;
++	uint32_t count = 120;
+ 	(void)PE_parse_boot_argn("sweetsample_delay", &delay_s, sizeof(delay_s));
++	(void)PE_parse_boot_argn("sweetsample_count", &count, sizeof(count));
+ 	(void)tsleep(&chan, PZERO, "sweetsmp", (int)(delay_s * hz));
+-	for (int i = 0; i < 60; i++) {
+-		printf("SMP --- sample %d\n", i);
++	for (uint32_t i = 0; i < count; i++) {
++		printf("SMP --- sample %u\n", i);
+ 		proc_iterate(PROC_ALLPROCLIST, sweet_sample_proc, NULL, NULL, NULL);
+ 		(void)tsleep(&chan, PZERO, "sweetsmp", 3 * hz);
+ 	}
+diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
+index e307b2c..41227c3 100644
+--- a/iokit/Kernel/arm/SweetCPU.cpp
++++ b/iokit/Kernel/arm/SweetCPU.cpp
+@@ -89,7 +89,7 @@ SweetCPU::start(IOService *provider)
+ 	if (!IOCPU::start(provider)) {
+ 		return false;
+ 	}
+-	cpuName = OSSymbol::withCStringNoCopy(sweet_board_x676c() ? "Cortex-A55" : "Kryo 260");
++	cpuName = OSSymbol::withCStringNoCopy(sweet_board_x676c() ? (cpu->phys_id >= 0x600 ? "Cortex-A76" : "Cortex-A55") : "Kryo 260");
+ 	if (cpuName == NULL) {
+ 		return false;
+ 	}
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 9276355..e4c1f78 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -381,27 +381,53 @@ AppleCLCD::start(IOService *provider)
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ 			if (sweet_board_x676c()) {
+ 				IOLog("SWEET GPU: powering on MT6789 Mali-G57 subsystem...\n");
++
++				/* 1. Un-gate topckgen MFG clock distribution at 0x10000000 */
++				volatile uint32_t *topck = (volatile uint32_t *)ml_io_map(0x10000000, 0x1000);
++				if (topck != NULL) {
++					/* MT6789 topckgen CLK_CFG_3_CLR is at offset 0x0058: clear bits 18 (mfgcfg) and 7 */
++					topck[0x0058 / 4] = (1u << 18) | (1u << 7);
++					/* CLK_CFG_UPDATE is at offset 0x0004: trigger bit 3 (mfg) */
++					topck[0x0004 / 4] = (1u << 3);
++					IODelay(20);
++					IOLog("SWEET GPU: topckgen at 0x10000000: clk_cfg_3=0x%08x\n", topck[0x0050 / 4]);
++				}
++
++				/* 2. Sequence SCPSYS SPM_MFG_PWR_CON at 0x10006338 */
+ 				volatile uint32_t *scpsys = (volatile uint32_t *)ml_io_map(0x10006000, 0x1000);
+-				volatile uint32_t *mfg_top = (volatile uint32_t *)ml_io_map(0x13fbf000, 0x1000);
+ 				if (scpsys != NULL) {
+ 					uint32_t pwr_sta = scpsys[0x0180 / 4];
+ 					uint32_t con_338 = scpsys[0x0338 / 4];
+ 					IOLog("SWEET GPU: SCPSYS initial: sta=0x%08x con_338=0x%08x\n", pwr_sta, con_338);
+ 
+-					/* Sequence SCPSYS SPM_MFG_PWR_CON (0x338) */
+ 					scpsys[0x0338 / 4] |= (1u << 0) | (1u << 1) | (1u << 3);
+ 					scpsys[0x0338 / 4] &= ~((1u << 2) | (0xful << 8));
+ 					IODelay(20);
+ 				}
+ 
++				/* 3. Un-gate MFG_TOP_CONFIG clock gates and apply external CG */
++				volatile uint32_t *mfg_top = (volatile uint32_t *)ml_io_map(0x13fbf000, 0x1000);
+ 				if (mfg_top != NULL) {
++					/* Clear all clock gating registers in MFG_TOP at 0x0008 */
++					mfg_top[0x0008 / 4] = 0xffffffff;
++					IODelay(20);
++
++					/* Apply external CG control from vendor mtk_gpufreq_mt6789 */
++					mfg_top[0x0020 / 4] |= 0x03c00000;
++					mfg_top[0x00b0 / 4] &= ~0x0600;
++					mfg_top[0x00b4 / 4] |= 0x0010;
++					mfg_top[0x00b0 / 4] = (mfg_top[0x00b0 / 4] & ~0x100) | 0x80000;
++					mfg_top[0x0024 / 4] |= 1;
++					mfg_top[0x0f60 / 4] |= 1;
++					IODelay(20);
++
+ 					uint32_t c0 = mfg_top[0x0308 / 4];
+ 					uint32_t c1 = mfg_top[0x030c / 4];
+ 					uint32_t c2 = mfg_top[0x0310 / 4];
+ 					uint32_t c3 = mfg_top[0x0314 / 4];
+ 					uint32_t s0 = mfg_top[0x016c / 4];
+ 					uint32_t s1 = mfg_top[0x0170 / 4];
+-					IOLog("SWEET GPU: MFG_TOP_CONFIG at 0x13fbf000 initial: ctl[0..3]=0x%08x 0x%08x 0x%08x 0x%08x sta=0x%08x 0x%08x\n",
++					IOLog("SWEET GPU: MFG_TOP_CONFIG at 0x13fbf000: ctl[0..3]=0x%08x 0x%08x 0x%08x 0x%08x sta=0x%08x 0x%08x\n",
+ 					    c0, c1, c2, c3, s0, s1);
+ 
+ 					/* Sequence all 4 MFG power domains: Core 0 (0x308), Core 1 (0x30c), Tiler (0x310), L2/Bus (0x314) */
+@@ -420,6 +446,7 @@ AppleCLCD::start(IOService *provider)
+ 					    mfg_top[0x0308 / 4], mfg_top[0x030c / 4], mfg_top[0x016c / 4], mfg_top[0x0170 / 4]);
+ 				}
+ 
++				/* 4. Read Mali hardware registers */
+ 				volatile uint32_t *mali = (volatile uint32_t *)ml_io_map(0x13000000, 0x4000);
+ 				if (mali != NULL) {
+ 					uint32_t gpu_id = mali[0x0000 / 4];
+@@ -433,18 +460,19 @@ AppleCLCD::start(IOService *provider)
+ 					    gpu_id, (gpu_id >> 16) & 0xff, (gpu_id >> 12) & 0xf,
+ 					    l2_feat, tiler_feat, mem_feat, mmu_feat, as_present, js_present);
+ 
+-					/* Physical hardware ID on MT6789 is 0x9093 (Valhall r0p1, 2 cores) */
+-					uint32_t effective_id = (gpu_id != 0 && gpu_id != ~0u) ? gpu_id : 0x90930001;
+-
+-					/* Register Metal accelerator properties for Metal.framework */
+-					accel->setProperty("MetalPluginName", "MaliMetal");
+-					accel->setProperty("MetalPluginClassName", "MaliMetalDevice");
+-					accel->setProperty("IOGPUResourcePolicy", 1ULL, 32);
+-					accel->setProperty("vendor-id", 0x13b5ULL, 32);
+-					accel->setProperty("device-id", (unsigned long long)effective_id, 32);
+-					accel->setProperty("gpu-core-count", 2ULL, 32);
+-					IOLog("SWEET GPU: Mali-G57 registered as MaliMetal / MaliMetalDevice (vendor 0x13b5, device 0x%04x)\n",
+-					    effective_id >> 16);
++					/* Only register accelerator if hardware returned a valid, responding GPU ID */
++					if (gpu_id != 0 && gpu_id != ~0u) {
++						accel->setProperty("MetalPluginName", "MaliMetal");
++						accel->setProperty("MetalPluginClassName", "MaliMetalDevice");
++						accel->setProperty("IOGPUResourcePolicy", 1ULL, 32);
++						accel->setProperty("vendor-id", 0x13b5ULL, 32);
++						accel->setProperty("device-id", (unsigned long long)gpu_id, 32);
++						accel->setProperty("gpu-core-count", 2ULL, 32);
++						IOLog("SWEET GPU: Mali-G57 registered as MaliMetal / MaliMetalDevice (vendor 0x13b5, device 0x%04x)\n",
++						    gpu_id >> 16);
++					} else {
++						IOLog("SWEET GPU: Mali-G57 not responding (ID=0x%08x), skipping accelerator registration\n", gpu_id);
++					}
+ 				}
+ 			}
+ #endif
+diff --git a/osfmk/ipc/mach_kernelrpc.c b/osfmk/ipc/mach_kernelrpc.c
+index 4b6dc6f..f2c7a59 100644
+--- a/osfmk/ipc/mach_kernelrpc.c
++++ b/osfmk/ipc/mach_kernelrpc.c
+@@ -72,7 +72,18 @@ _kernelrpc_mach_vm_allocate_trap(struct _kernelrpc_mach_vm_allocate_trap_args *a
+ 		if (rv == KERN_SUCCESS) {
+ 			rv = mach_copyout(&addr, args->addr, sizeof(addr));
+ 		}
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++		if (task_pid(task) == 1) {
++			printf("SWEET VM: pid 1 vm_allocate target=0x%x size=0x%llx flags=0x%x addr=0x%llx rv=%d\n",
++			    args->target, (uint64_t)args->size, args->flags, (uint64_t)addr, rv);
++		}
++#endif
++	}
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	else {
++		printf("SWEET VM: vm_allocate target=0x%x NO TASK! rv=MACH_SEND_INVALID_DEST\n", args->target);
+ 	}
++#endif
+ 
+ done:
+ 	return rv;
+@@ -113,6 +124,9 @@ _kernelrpc_mach_vm_map_trap(struct _kernelrpc_mach_vm_map_trap_args *args)
+ 	int rv = MACH_SEND_INVALID_DEST;
+ 
+ 	if (!task) {
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++		printf("SWEET VM: vm_map target=0x%x NO TASK! rv=MACH_SEND_INVALID_DEST\n", args->target);
++#endif
+ 		goto done;
+ 	}
+ 
+@@ -126,6 +140,12 @@ _kernelrpc_mach_vm_map_trap(struct _kernelrpc_mach_vm_map_trap_args *args)
+ 	if (rv == KERN_SUCCESS) {
+ 		rv = mach_copyout(&addr, args->addr, sizeof(addr));
+ 	}
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	if (task_pid(task) == 1) {
++		printf("SWEET VM: pid 1 vm_map target=0x%x size=0x%llx flags=0x%x addr=0x%llx rv=%d\n",
++		    args->target, (uint64_t)args->size, args->flags, (uint64_t)addr, rv);
++	}
++#endif
+ 
+ done:
+ 	return rv;
+-- 
+2.51.0.windows.1
+

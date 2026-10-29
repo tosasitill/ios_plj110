@@ -1,0 +1,55 @@
+From 1572b6fb497bca1188f1789aac6a9c97409906ef Mon Sep 17 00:00:00 2001
+From: Egor Kulikovskiy <xianel0x@gmail.com>
+Date: Fri, 23 Oct 2026 07:46:46 +0500
+Subject: [PATCH] x676c: gate per-exec AMFI/platform-binary debug prints behind
+ flags
+
+The 'exec %s' and 'SWEET AMFI: sig ...' lines printed once per spawned binary
+and flooded the ~256 KB pstore ring, scrolling the early GPU power-on probe out
+of the capture. Gate them behind cs_debug / sweet_amfi_debug (both off by
+default now); the 'setting platform binary' and entitlement lines were already
+gated by those flags.
+---
+ bsd/kern/kern_exec.c  | 7 +++++--
+ bsd/kern/sweet_amfi.c | 7 +++----
+ 2 files changed, 8 insertions(+), 6 deletions(-)
+
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+index 379b10f..1fe436f 100644
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7415,8 +7415,11 @@ process_signature(proc_t p, struct image_params *imgp)
+ 				goto done;
+ 			}
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+-			/* SWEET runs every iOS binary this way: one short line per exec. */
+-			printf("exec %s\n", p->p_name);
++			/* One line per exec; gated behind cs_debug so it does not flood the
++			 * small (~256 KB) pstore ring and scroll earlier logs out. */
++			if (cs_debug) {
++				printf("exec %s\n", p->p_name);
++			}
+ #else
+ 			printf("Allowing spawn of iOS binary %s since it has "
+ 			    "com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch "
+diff --git a/bsd/kern/sweet_amfi.c b/bsd/kern/sweet_amfi.c
+index 6aa149d..6cab564 100644
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -267,10 +267,9 @@ sweet_amfi_vnode_check_signature(struct vnode *vp, __unused struct label *label,
+ 	if (mp != NULL && (vfs_flags(mp) & MNT_ROOTFS)) {
+ 		*cs_flags |= CS_PLATFORM_BINARY;
+ 	}
+-	/* Bring-up diag: a userspace "non-platform binary" panic (mediaserverd)
+-	 * means some exec's task is not platform. Log what each signed binary
+-	 * gets so we can see whether it reaches here and is marked platform. */
+-	{
++	/* Bring-up diag, gated behind sweet_amfi_debug: unconditional it logs one
++	 * line per signed binary and floods the small (~256 KB) pstore ring. */
++	if (sweet_amfi_debug) {
+ 		const char *nm = vnode_getname(vp);
+ 		printf("SWEET AMFI: sig %s rootfs=%d cs_flags=0x%x\n",
+ 		    nm ? nm : "?", (mp && (vfs_flags(mp) & MNT_ROOTFS)) ? 1 : 0, *cs_flags);
+-- 
+2.51.0.windows.1
+

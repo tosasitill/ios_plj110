@@ -1,0 +1,410 @@
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+index 824c022..063789d 100644
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -12,6 +12,7 @@
+ #include <IOKit/pwr_mgt/IOPMPowerSource.h>
+ #include <libkern/c++/OSCollectionIterator.h>
+ #include <pexpert/pexpert.h>
++#include "SweetBoard.h"
+ /* bsd/dev/sweet_spmi.c */
+ extern "C" int sweet_spmi_init(void);
+ extern "C" int sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out);
+@@ -323,10 +324,14 @@ SweetBattery::start(IOService *provider)
+ 	if (!IOPMPowerSource::start(provider)) {
+ 		return false;
+ 	}
+-	(void)sweet_cpufreq_max();
++	/* x676c: Qualcomm cpufreq-hw and GENI I2C1 do not exist; static source only. */
++	bool qcom = !sweet_board_x676c();
++	if (qcom) {
++		(void)sweet_cpufreq_max();
++	}
+ 	int real = 1;   /* topaz: real gauge by default; sweetbattery=0 for the static fallback */
+ 	(void)PE_parse_boot_argn("sweetbattery", &real, sizeof(real));
+-	fReal = real == 1 && sweet_i2c1_init() == 0;
++	fReal = qcom && real == 1 && sweet_i2c1_init() == 0;
+ 	/* Publish a complete source BEFORE registerService wakes powerd. */
+ 	poll();
+ 	if (fReal) {
+diff --git a/iokit/Kernel/arm/SweetBoard.h b/iokit/Kernel/arm/SweetBoard.h
+new file mode 100644
+index 0000000..f24283d
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetBoard.h
+@@ -0,0 +1,55 @@
++/*
++ * Which board this SWEET kernel runs on. One kernel serves the Qualcomm
++ * boards (sweet, topaz) and the Infinix X676C (MediaTek MT6789). Drivers
++ * that poke Qualcomm MMIO at fixed physical addresses (MDP/DSI, cpufreq-hw,
++ * GENI I2C, the modem) must stay off on the X676C: those addresses belong
++ * to unrelated MediaTek blocks there. The ADT root compatible decides
++ * (x676c/tools/mkadt.py puts 'infinix,x676c' in it); it is read straight
++ * from the flattened ADT, like bsd/dev/sweet_ufs.c does, so it works before
++ * and independently of the IORegistry device-tree plane.
++ */
++#ifndef _IOKIT_ARM_SWEETBOARD_H
++#define _IOKIT_ARM_SWEETBOARD_H
++
++#include <pexpert/device_tree.h>
++
++/* NUL-separated string list `list` of `size` bytes contains `want`. */
++static inline bool
++sweet_strlist_has(const char *list, unsigned int size, const char *want)
++{
++	unsigned int i = 0;
++
++	while (i < size) {
++		unsigned int j = 0;
++		while (i + j < size && want[j] != '\0' && list[i + j] == want[j]) {
++			j++;
++		}
++		if (want[j] == '\0' && (i + j == size || list[i + j] == '\0')) {
++			return true;
++		}
++		while (i < size && list[i] != '\0') {
++			i++;
++		}
++		i++;
++	}
++	return false;
++}
++
++static inline bool
++sweet_board_x676c(void)
++{
++	static int cached = -1;
++
++	if (cached < 0) {
++		DTEntry root;
++		void const *prop;
++		unsigned int size;
++
++		cached = SecureDTLookupEntry(NULL, "/", &root) == kSuccess &&
++		    SecureDTGetProperty(root, "compatible", &prop, &size) == kSuccess &&
++		    sweet_strlist_has((const char *)prop, size, "infinix,x676c");
++	}
++	return cached == 1;
++}
++
++#endif /* _IOKIT_ARM_SWEETBOARD_H */
+diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
+index 96c557b..78aed70 100644
+--- a/iokit/Kernel/arm/SweetCPU.cpp
++++ b/iokit/Kernel/arm/SweetCPU.cpp
+@@ -145,12 +145,15 @@ SweetCPU::startAll(void *arg __unused, wait_result_t result __unused)
+ 		IOSleep(1);
+ 	}
+ 	/*
+-	 * topaz: the ADT lists only the A73 (gold) cores and the shim boots xnu
+-	 * on gold CPU 0x100 (the silver cluster has no 16K granule).
++	 * The shim enters xnu on the core the ADT lists first: topaz gold 0x100
++	 * (its silver cluster has no 16K granule), x676c A55 0x000. Check against
++	 * the ADT instead of a per-board MPIDR.
+ 	 */
+-	if (topology->boot_cpu->cpu_id != 0 || topology->boot_cpu->phys_id != 0x100) {
+-		panic("SWEET CPU: expected boot MPIDR 0x100 and logical CPU 0, got 0x%x/%u",
+-		    topology->boot_cpu->phys_id, topology->boot_cpu->cpu_id);
++	if (topology->boot_cpu->cpu_id != 0 ||
++	    topology->boot_cpu->phys_id != topology->cpus[0].phys_id) {
++		panic("SWEET CPU: boot CPU 0x%x/%u is not the ADT's cpu0 (0x%x)",
++		    topology->boot_cpu->phys_id, topology->boot_cpu->cpu_id,
++		    topology->cpus[0].phys_id);
+ 	}
+ 	for (unsigned int i = 0; i < topology->num_cpus; i++) {
+ 		SweetCPU *cpu = __atomic_load_n(&sweet_cpus[i], __ATOMIC_ACQUIRE);
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 6f29fba..0575018 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -35,6 +35,7 @@
+  * the first swap on (it still reaches the persistent log; panics draw).
+  */
+ #include "SweetSurface.h"
++#include "SweetBoard.h"
+ 
+ extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
+ extern "C" void sweet_console_retarget(vm_offset_t va);   /* osfmk/console/video_console.c */
+@@ -267,7 +268,9 @@ AppleCLCD::start(IOService *provider)
+ 	if (!IOService::start(provider)) {
+ 		return false;
+ 	}
+-	topaz_modem_init();
++	if (!sweet_board_x676c()) {
++		topaz_modem_init();
++	}
+ 	sweet_busy_init();
+ 	PE_current_console(&video);
+ 	fPhys = video.v_baseAddr;
+@@ -305,9 +308,16 @@ AppleCLCD::start(IOService *provider)
+ 		IOLog("SWEET FB: no vsync timer\n");
+ 		return false;
+ 	}
+-	fVig0 = (volatile uint32_t *)ml_io_map(0x05e05000, 0x1000);
+-	fCtl0 = (volatile uint32_t *)ml_io_map(0x05e02000, 0x1000);
+-	fDsi = (volatile uint8_t *)ml_io_map(0x05e94000, 0x1000);
++	/*
++	 * Qualcomm MDP/DSI0 (SM6225). x676c: left NULL, which keeps the
++	 * framebuffer on the software path (no direct scanout, no DCS
++	 * brightness); the shim's display pump pushes the console layer.
++	 */
++	if (!sweet_board_x676c()) {
++		fVig0 = (volatile uint32_t *)ml_io_map(0x05e05000, 0x1000);
++		fCtl0 = (volatile uint32_t *)ml_io_map(0x05e02000, 0x1000);
++		fDsi = (volatile uint8_t *)ml_io_map(0x05e94000, 0x1000);
++	}
+ 	fDsiBuf = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
+ 	    kIODirectionInOut | kIOMemoryPhysicallyContiguous, page_size, 0x00000000fffff000ull);
+ 	fDsiBufPhys = fDsiBuf ? fDsiBuf->getPhysicalSegment(0, NULL, kIOMemoryMapperNone) : 0;
+@@ -350,7 +360,7 @@ AppleCLCD::start(IOService *provider)
+ 	}
+ 	OSSafeReleaseNULL(accel);
+ 	/* dpu sm6115 catalog: intf_1 at mdp+0x6a800, mdp at 0x5e01000 */
+-	fIntf1 = (volatile uint32_t *)ml_io_map(0x05e6b000, 0x1000);
++	fIntf1 = sweet_board_x676c() ? NULL : (volatile uint32_t *)ml_io_map(0x05e6b000, 0x1000);
+ 	if (fIntf1 != NULL) {
+ 		volatile uint32_t *r = fIntf1 + 0x800 / 4;
+ 		r[0x0a8 / 4] = 0x3;     /* FRAME_LINE_COUNT_EN */
+diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
+index 06bb568..bafe1bf 100644
+--- a/osfmk/arm64/arm_vm_init.c
++++ b/osfmk/arm64/arm_vm_init.c
+@@ -1828,25 +1828,33 @@ init_ptpages(tt_entry_t *tt, vm_map_address_t start, vm_map_address_t end, bool
+ #if defined(SWEET)
+ /*
+  * The reserved low-globals/kernel region is excluded from VM allocation.
+- * Use the otherwise empty 32MB block above low globals and below gVirtBase
+- * for a Normal-NC framebuffer alias that survives bootstrap TTBR0 teardown.
++ * Use the otherwise empty 32MB blocks above low globals and below gVirtBase
++ * for Device aliases of the splash framebuffer block and the pstore block
++ * (see SWEET.h) that survive bootstrap TTBR0 teardown.
+  */
+ #define SWEET_EARLY_FB_VA (VM_MIN_KERNEL_ADDRESS + ARM_TT_L2_SIZE)
++static_assert(SWEET_EARLY_BLOCK_SIZE == ARM_TT_L2_SIZE, "SWEET.h block size");
+ 
+ static void
+-sweet_early_map_final(void)
++sweet_early_map_block(vm_map_address_t va, pmap_paddr_t pa)
+ {
+-	const vm_map_address_t va = SWEET_EARLY_FB_VA;
+ 	assert(va + ARM_TT_L2_SIZE <= gVirtBase);
+ 	tt_entry_t l1 = cpu_tte[(va & ARM_TT_L1_INDEX_MASK) >> ARM_TT_L1_SHIFT];
+ 	assert((l1 & (ARM_TTE_VALID | ARM_TTE_TYPE_MASK)) == (ARM_TTE_VALID | ARM_TTE_TYPE_TABLE));
+ 	tt_entry_t *l2 = (tt_entry_t *)phystokv(l1 & ARM_TTE_TABLE_MASK);
+ 	tt_entry_t *slot = &l2[(va & ARM_TT_L2_INDEX_MASK) >> ARM_TT_L2_SHIFT];
+ 	assert(*slot == ARM_TTE_EMPTY);
+-	*slot = 0x9c000000ULL | ARM_TTE_VALID | ARM_TTE_TYPE_BLOCK |
++	*slot = pa | ARM_TTE_VALID | ARM_TTE_TYPE_BLOCK |
+ 	    ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) |
+-	    ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) |
++	    ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_DISABLE) |
+ 	    ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX;
++}
++
++static void
++sweet_early_map_final(void)
++{
++	sweet_early_map_block(SWEET_EARLY_FB_VA, SWEET_EARLY_FB_BLOCK);
++	sweet_early_map_block(SWEET_EARLY_FB_VA + ARM_TT_L2_SIZE, SWEET_PSTORE_BLOCK);
+ 	__asm__ volatile("dsb ishst" ::: "memory");
+ }
+ #endif
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+index 023086f..e7b918f 100644
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -515,7 +515,7 @@ LEXT(start_first_cpu)
+ 
+ #if defined(SWEET)
+ 	/* Stage 0: white 64x32 band, no stack or page tables needed. */
+-	MOV64	x0, (0x9c000000 + 2368 * 4320)
++	MOV64	x0, (SWEET_EARLY_FB_PA + 2368 * 4320)
+ 	mov		w1, #-1
+ 	mov		x2, #32
+ 	mov		x4, #4320
+@@ -680,18 +680,27 @@ Lkernelcache_base_found:
+ 
+ #if defined(SWEET)
+ 	/*
+-	 * Splash framebuffer: one 32MB Normal-NC block in the EXISTING V=P
+-	 * L2 table. Both framebuffer and RAM use L1 index 0; another call to
+-	 * create_bootstrap_mapping would replace the RAM L2 table.
+-	 * SWEET uses 16K pages and all bring-up RAM is below 4GB, so the first
+-	 * V=P L2 page is bootstrap_pagetables + 2*PGBYTES.
++	 * Splash framebuffer and pstore: one 32MB Device block each in the
++	 * EXISTING V=P L2 table. Both blocks and RAM use L1 index 0 (16K pages:
++	 * one L1 entry spans 64GB); another call to create_bootstrap_mapping
++	 * would replace the RAM L2 table, so the first V=P L2 page
++	 * (bootstrap_pagetables + 2*PGBYTES) is patched directly.
++	 * Device, not Normal-NC: the blocks also hold TrustZone carve-outs that
++	 * must never see a speculative access (see SWEET.h).
+ 	 */
+-	MOV64	x10, 0x9c000000
+-	MOV64	x11, (ARM_TTE_TYPE_BLOCK | ARM_TTE_VALID | ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) | ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) | ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX)
++#define SWEET_EARLY_BLOCK_TTE (ARM_TTE_TYPE_BLOCK | ARM_TTE_VALID | ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) | ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_DISABLE) | ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX)
++	add		x13, x25, #(2 * PGBYTES)
++	MOV64	x10, SWEET_EARLY_FB_BLOCK
++	MOV64	x11, SWEET_EARLY_BLOCK_TTE
++	orr		x11, x11, x10
++	and		x12, x10, #(ARM_TT_L2_INDEX_MASK)
++	lsr		x12, x12, #(ARM_TT_L2_SHIFT)
++	str		x11, [x13, x12, lsl #TTE_SHIFT]
++	MOV64	x10, SWEET_PSTORE_BLOCK
++	MOV64	x11, SWEET_EARLY_BLOCK_TTE
+ 	orr		x11, x11, x10
+ 	and		x12, x10, #(ARM_TT_L2_INDEX_MASK)
+ 	lsr		x12, x12, #(ARM_TT_L2_SHIFT)
+-	add		x13, x25, #(2 * PGBYTES)
+ 	str		x11, [x13, x12, lsl #TTE_SHIFT]
+ #endif
+ 
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+index 6928957..29111ab 100644
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -1,9 +1,10 @@
+ /*
+- * Redmi Note 10 Pro bootstrap console. No allocation, locks, ADT parsing or
+- * per-CPU state: panic() can reach this before a current thread exists.
+- * start.s maps the splash framebuffer VA=PA as Normal Non-Cacheable memory.
+- * arm_vm_init installs a reserved kernel VA alias before removing TTBR0;
+- * retain this console until the normal framebuffer serial console is ready.
++ * Bootstrap console. No allocation, locks, ADT parsing or per-CPU state:
++ * panic() can reach this before a current thread exists.
++ * start.s maps the splash framebuffer and pstore blocks VA=PA as Device
++ * memory. arm_vm_init installs reserved kernel VA aliases before removing
++ * TTBR0; retain this console until the normal framebuffer serial console is
++ * ready. The pstore mirror stays for the whole boot (see sweet_pstore_putc).
+  */
+ #include <arm64/sweet_early.h>
+ 
+@@ -11,7 +12,38 @@
+ #include <stdint.h>
+ #include <kern/misc_protos.h>
+ 
+-static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)0x9c000000;
++static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)SWEET_EARLY_FB_PA;
++
++/*
++ * x676c: everything the consoles print is also appended to the ramoops
++ * console zone, behind the shim's own log. Same ring discipline as Linux
++ * persistent_ram: header {sig, start = next write offset, size = valid
++ * bytes}, data after it. The next Android boot exposes it as
++ * /sys/fs/pstore/console-ramoops-0, which survives any hang or panic here.
++ */
++#define PSTORE_SIG 0x43474244u          /* PERSISTENT_RAM_SIG, "DBGC" */
++#define PSTORE_HDR 12u
++#define PSTORE_CAP (SWEET_PSTORE_SIZE - PSTORE_HDR)
++static volatile uint32_t *pstore = (volatile uint32_t *)(uintptr_t)SWEET_PSTORE_PA;
++
++void
++sweet_pstore_putc(char c)
++{
++	volatile uint32_t *hdr = pstore;
++	volatile char *data = (volatile char *)hdr + PSTORE_HDR;
++
++	if (hdr[0] != PSTORE_SIG || hdr[1] >= PSTORE_CAP || hdr[2] > PSTORE_CAP) {
++		hdr[0] = PSTORE_SIG;
++		hdr[1] = 0;
++		hdr[2] = 0;
++	}
++	uint32_t start = hdr[1];
++	data[start] = c;
++	hdr[1] = start + 1 == PSTORE_CAP ? 0 : start + 1;
++	if (hdr[2] < PSTORE_CAP) {
++		hdr[2] = hdr[2] + 1;
++	}
++}
+ #define EARLY_FB early_fb
+ #define EARLY_WIDTH 1080u
+ #define EARLY_HEIGHT 2400u
+@@ -45,6 +77,7 @@ sweet_early_putc(char c)
+ 	if (early_disabled) {
+ 		return;
+ 	}
++	sweet_pstore_putc(c);
+ 	if (!early_started) {
+ 		early_started = 1;
+ 		sweet_early_clear_row();
+@@ -129,7 +162,10 @@ void
+ sweet_early_relocate(uint64_t base)
+ {
+ 	sweet_early_mark(8, "leaving bootstrap TTBR0");
+-	early_fb = (volatile uint32_t *)(uintptr_t)base;
++	/* arm_vm_init: framebuffer block alias at base, pstore block right above */
++	early_fb = (volatile uint32_t *)(uintptr_t)(base + (SWEET_EARLY_FB_PA - SWEET_EARLY_FB_BLOCK));
++	pstore = (volatile uint32_t *)(uintptr_t)(base + SWEET_EARLY_BLOCK_SIZE +
++	    (SWEET_PSTORE_PA - SWEET_PSTORE_BLOCK));
+ 	__asm__ volatile("dsb sy" ::: "memory");
+ 	sweet_early_mark(9, "kernel framebuffer VA live");
+ }
+diff --git a/osfmk/arm64/sweet_early.h b/osfmk/arm64/sweet_early.h
+index d7a25f2..d705d3b 100644
+--- a/osfmk/arm64/sweet_early.h
++++ b/osfmk/arm64/sweet_early.h
+@@ -12,6 +12,8 @@ void sweet_early_putc(char c);
+ void sweet_early_panic(const char *fmt, va_list *args);
+ void sweet_early_relocate(uint64_t base);
+ void sweet_early_disable(void);
++/* Append one console character to the ramoops console zone (x676c). */
++void sweet_pstore_putc(char c);
+ #else
+ static inline void sweet_early_mark(unsigned int stage, const char *label)
+ {
+@@ -19,6 +21,10 @@ static inline void sweet_early_mark(unsigned int stage, const char *label)
+ 	(void)label;
+ }
+ static inline void sweet_early_disable(void) {}
++static inline void sweet_pstore_putc(char c)
++{
++	(void)c;
++}
+ #endif
+ 
+ #endif
+diff --git a/pexpert/arm/pe_serial.c b/pexpert/arm/pe_serial.c
+index 19f27cd..2a2f9bf 100644
+--- a/pexpert/arm/pe_serial.c
++++ b/pexpert/arm/pe_serial.c
+@@ -761,6 +761,7 @@ fbcon_transmit_ready(void)
+ static void
+ fbcon_transmit_data(uint8_t c)
+ {
++	sweet_pstore_putc((char)c);
+ 	if (c == '\r') {
+ 		fbcon_col = 0;
+ 		return;
+diff --git a/pexpert/pexpert/arm64/SWEET.h b/pexpert/pexpert/arm64/SWEET.h
+index 424e1c0..d781db8 100644
+--- a/pexpert/pexpert/arm64/SWEET.h
++++ b/pexpert/pexpert/arm64/SWEET.h
+@@ -46,9 +46,28 @@
+ /*
+  * Qualcomm numbers the architected timer PPIs 1/2/3/0 (secure phys, phys,
+  * virt, hyp) instead of the usual 13/14/11/10: the virtual timer XNU uses
+- * (CNTV) is INTID 16 + 3 = 19.
++ * (CNTV) is INTID 16 + 3 = 19. Default only: the ADT's gic
++ * virtual-timer-intid overrides it (x676c: 27, standard PPI 11).
+  */
+ #define SWEET_VTIMER_INTID        19
++
++/*
++ * x676c (Infinix X676C, MediaTek MT6789). The early console and the pstore
++ * mirror reach physical memory through one 32MB L2 block each (16K pages),
++ * VA=PA under the bootstrap TTBR0 and at fixed kernel VAs afterwards.
++ *  - EARLY_FB: OVL0 L1, the opaque splash layer LK leaves on the panel;
++ *    the shim's display pump on CPU 0x700 pushes it to the command-mode glass.
++ *  - PSTORE: ramoops console zone (mem 0x48090000, console 0x40000); the
++ *    next Android boot shows it as /sys/fs/pstore/console-ramoops-0.
++ * Both blocks also contain TrustZone carve-outs (tkv-reserved 0xffff7000,
++ * BL31 0x48200000), so they are mapped Device-nGnRnE: never speculated.
++ */
++#define SWEET_EARLY_BLOCK_SIZE    0x2000000
++#define SWEET_EARLY_FB_PA         0xfeabe000
++#define SWEET_EARLY_FB_BLOCK      0xfe000000
++#define SWEET_PSTORE_PA           0x4811f000
++#define SWEET_PSTORE_SIZE         0x40000
++#define SWEET_PSTORE_BLOCK        0x48000000
+ #define SWEET_IPI_SGI             1       // SGI used for cross-CPU signals
+ 
+ #define GIC_SPURIOUS_IRQ          1023    // IRQ no. for GIC spurious interrupt

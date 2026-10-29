@@ -1,0 +1,12 @@
+diff --git a/bsd/dev/sweet_x9_ufs.c b/bsd/dev/sweet_x9_ufs.c
+--- a/bsd/dev/sweet_x9_ufs.c
++++ b/bsd/dev/sweet_x9_ufs.c
+@@ -155,6 +155,8 @@
+  case DKIOCGETPHYSICALBLOCKSIZE:*u=4096;return 0;
+  case DKIOCGETBLOCKCOUNT:*q=xu.bytes/xu.sector;return 0;
+  case DKIOCISWRITABLE:*u=xu.writable;return 0;
++ /* MT6993 UFS is solid-state: HFS must not relocate files as for rotating disks. */
++ case DKIOCISSOLIDSTATE:*u=1;return 0;
+  case DKIOCSYNCHRONIZE:case DKIOCSYNCHRONIZECACHE: {
+   if(!xu.writable)return 0;
+   lck_mtx_lock(&x9ufs_lock);pet();int error=x9u_sync_image(&xu.host);

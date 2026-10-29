@@ -1,0 +1,69 @@
+From 3019d2475ac044f7a2fa45c1a184854008fc8c15 Mon Sep 17 00:00:00 2001
+From: Egor Kulikovskiy <xianel0x@gmail.com>
+Date: Thu, 22 Oct 2026 02:59:25 +0500
+Subject: [PATCH] x676c: capture the deepest non-idle stack as the worker
+ profile
+
+block_hint is 0 (not blocked on any primitive) yet the CPU is mostly in
+machine_idle, so the stuck launchd is runnable and briefly running in
+copyin, not sleeping. The per-tick live stack is usually the idle loop;
+keep the latest deep (>5 frame) capture separately as the worker stack so
+we see launchd's real path (copyin -> fault -> ...) in one boot.
+---
+ osfmk/arm64/sleh.c     | 12 ++++++++++++
+ osfmk/kern/exception.c |  9 +++++++++
+ 2 files changed, 21 insertions(+)
+
+diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+index b46f37e..0b9d0ec 100644
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -276,6 +276,10 @@ uint64_t sweet_kprof_cnt[SWEET_KPROF_N];
+ #define SWEET_KPROF_DEPTH 16
+ uint64_t sweet_kprof_stack[SWEET_KPROF_DEPTH];
+ uint32_t sweet_kprof_sp_depth;
++/* Deepest non-idle stack seen: the idle loop is only ~4 frames, so a
++ * deeper capture is the actual worker (launchd in copyin/fault). */
++uint64_t sweet_kprof_work[SWEET_KPROF_DEPTH];
++uint32_t sweet_kprof_work_depth;
+ extern vm_offset_t vm_kernel_stext, vm_kernel_etext;
+ 
+ static void
+@@ -330,6 +334,14 @@ sweet_kprof_sample(arm_saved_state_t *state)
+ 		fp = next_fp;
+ 	}
+ 	sweet_kprof_sp_depth = d;
++
++	/* Keep the latest deep (non-idle) capture as the worker stack. */
++	if (d > 5) {
++		for (uint32_t i = 0; i < d; i++) {
++			sweet_kprof_work[i] = sweet_kprof_stack[i];
++		}
++		sweet_kprof_work_depth = d;
++	}
+ }
+ #endif
+ 
+diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
+index 85b4bdb..a2c0bf8 100644
+--- a/osfmk/kern/exception.c
++++ b/osfmk/kern/exception.c
+@@ -1039,6 +1039,15 @@ sweet_sample_task(const char *name, int pid, task_t task)
+ 			    sweet_kprof_stack[i] - (uint64_t)vm_kernel_slide);
+ 		}
+ 		printf("%s\n", kp);
++
++		extern uint64_t sweet_kprof_work[];
++		extern uint32_t sweet_kprof_work_depth;
++		kpn = snprintf(kp, sizeof(kp), "SMP kprof work");
++		for (uint32_t i = 0; i < sweet_kprof_work_depth && kpn < (int)sizeof(kp) - 24; i++) {
++			kpn += snprintf(kp + kpn, sizeof(kp) - kpn, " 0x%llx",
++			    sweet_kprof_work[i] - (uint64_t)vm_kernel_slide);
++		}
++		printf("%s\n", kp);
+ 	}
+ 
+ 	queue_iterate(&task->threads, thread, thread_t, task_threads) {
+-- 
+2.51.0.windows.1
+

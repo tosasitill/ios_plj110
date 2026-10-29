@@ -1,0 +1,150 @@
+From: HelioDarwin
+Subject: [PATCH] x9: retain progress logs with diagnostic resets disabled
+
+Keep late milestone text independent of reset policy and trace root matching,
+mount return values and user-task bootstrap. Native root-selection behavior
+and existing recovery handling are unchanged.
+
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -309,7 +309,6 @@
+ {
+ 	sweet_diag_journal(stage);
+ 	sweet_early_mark(stage, label);
+-#if SWEET_X9_DIAG_RESET
+ 	/*
+ 	 * sweet_early_mark() goes silent after sweet_early_disable(), and on X9 that
+ 	 * happens right after the kprintf milestone. Every record therefore stopped
+@@ -317,7 +316,7 @@
+ 	 * build that reset at 49 showed its final line as "SWEET EARLY 20". Write the
+ 	 * label straight to the persistent record so each checkpoint proves itself.
+ 	 */
+-	if (early_disabled && __atomic_load_n(
++	if ((board_x9 || SWEET_X9_DIAG_RESET) && early_disabled && __atomic_load_n(
+ 	    (volatile uint32_t * volatile *)&pstore, __ATOMIC_ACQUIRE) != NULL) {
+ 		int len = 0;
+ 		while (label[len]) {
+@@ -327,6 +326,7 @@
+ 		sweet_pstore_append(label, len);
+ 		sweet_pstore_append("\n", 1);
+ 	}
++#if SWEET_X9_DIAG_RESET
+ 	/*
+ 	 * The reset has to come from the kernel. A candidate that hangs can only be
+ 	 * recovered with a forced restart, and that is a cold reset: DRAM is
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -441,6 +441,7 @@
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <arm64/sweet_early.h>
+ /* Read-only startup diagnostics. Other boards do not print, journal or reset. */
++#define sweet_bsd_is_x9() sweet_early_is_x9()
+ static inline void
+ sweet_bsd_mark(unsigned stage, const char *label)
+ {
+@@ -450,6 +451,7 @@
+ }
+ #else
+ #define sweet_bsd_mark(stage, label) ((void)0)
++#define sweet_bsd_is_x9() 0
+ #endif
+ 
+ #define RAMDEV "md0"
+@@ -902,12 +904,15 @@
+ 		bsd_init_kprintf("calling setconf\n");
+ 		sweet_bsd_mark(99, "bsd_root_select_enter");
+ 		setconf();
++		if (sweet_bsd_is_x9()) printf("X9 root: selected %s; calling vfs_mountroot\n", rootdevice);
+ #if CONFIG_NETBOOT
+ 		netboot = (mountroot == netboot_mountroot);
+ #endif
+ 
+ 		bsd_init_kprintf("vfs_mountroot\n");
+-		if (0 == (err = vfs_mountroot())) {
++		err = vfs_mountroot();
++		if (sweet_bsd_is_x9()) printf("X9 root: vfs_mountroot returned %d\n", err);
++		if (err == 0) {
+ 			break;
+ 		}
+ 		rootdevice[0] = '\0';
+@@ -927,6 +932,7 @@
+ 		printf("cannot mount root, errno = %d\n", err);
+ 	}
+ 
++	if (sweet_bsd_is_x9()) printf("X9 root: filesystem mounted; securing BSD root\n");
+ 	IOSecureBSDRoot(rootdevice);
+ 
+ 	mountlist.tqh_first->mnt_flag |= MNT_ROOTFS;
+@@ -1072,7 +1078,9 @@
+ 	siginit(kernproc);
+ 
+ 	bsd_init_kprintf("calling bsd_utaskbootstrap\n");
++	if (sweet_bsd_is_x9()) printf("X9 BSD: starting user-task bootstrap\n");
+ 	bsd_utaskbootstrap();
++	if (sweet_bsd_is_x9()) printf("X9 BSD: user-task bootstrap returned\n");
+ 
+ 	pal_kernel_announce();
+ 
+diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -44,6 +44,12 @@
+ #include <vm/vm_map.h>
+ #include <pexpert/pexpert.h>
+ #include <kern/clock.h>
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <arm64/sweet_early.h>
++#define X9_ROOT_LOG(...) do { if (sweet_early_is_x9()) IOLog(__VA_ARGS__); } while (0)
++#else
++#define X9_ROOT_LOG(...) do { } while (0)
++#endif
+ #if CONFIG_KDP_INTERACTIVE_DEBUGGING
+ #include <kern/debug.h>
+ #endif
+@@ -678,6 +684,7 @@
+ 
+ 	int xchar, dchar;
+ 
++	X9_ROOT_LOG("X9 root: IOFindBSDRoot entered; waiting for IOBSD resource\n");
+ 	// stall here for anyone matching on the IOBSD resource to finish (filesystems)
+ 	matching = IOService::serviceMatching(gIOResourcesKey);
+ 	assert(matching);
+@@ -690,6 +697,7 @@
+ 	}
+ 	matching->release();
+ 	matching = NULL;
++	X9_ROOT_LOG("X9 root: IOBSD resource wait returned\n");
+ 
+ 	if (mountAttempts++) {
+ 		IOLog("mount(%d) failed\n", mountAttempts);
+@@ -706,6 +714,7 @@
+ 	    && !PE_parse_boot_argn("rootdev", rdBootVar, kMaxBootVar )) {
+ 		rdBootVar[0] = 0;
+ 	}
++	X9_ROOT_LOG("X9 root: rd=%s root-selection attempt=%d\n", rdBootVar[0] ? rdBootVar : "<automatic>", mountAttempts);
+ 
+ 	if ((regEntry = IORegistryEntry::fromPath( "/chosen", gIODTPlane ))) {
+ 		do {
+@@ -909,10 +918,12 @@
+ 	}
+ 
+ 	do {
++		X9_ROOT_LOG("X9 root: waiting for matching device (timeout=%u seconds)\n", (unsigned)ROOTDEVICETIMEOUT);
+ 		t.tv_sec = ROOTDEVICETIMEOUT;
+ 		t.tv_nsec = 0;
+ 		matching->retain();
+ 		service = IOService::waitForService( matching, &t );
++		X9_ROOT_LOG("X9 root: device wait returned %s\n", service ? "matched" : "no match");
+ 		if ((!service) || (mountAttempts == 10)) {
+ #if !XNU_TARGET_OS_OSX || !defined(__arm64__)
+ 			PE_display_icon( 0, "noroot");
+@@ -936,6 +947,7 @@
+ 
+ #if XNU_TARGET_OS_OSX && defined(__arm64__)
+ 			// The disk isn't found - have the user pick from System Recovery.
++			X9_ROOT_LOG("X9 root: no matching boot media; calling existing recovery handler\n");
+ 			(void)IOSetRecoveryBoot(BSD_BOOTFAIL_MEDIA_MISSING, NULL, true);
+ #elif XNU_TARGET_OS_IOS
+ 			panic("Failed to mount root device");

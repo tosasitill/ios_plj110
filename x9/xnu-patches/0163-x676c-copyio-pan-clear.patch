@@ -1,0 +1,60 @@
+From 4360f425bd524589f8ede6fc3aede2131897d6cd Mon Sep 17 00:00:00 2001
+From: Egor Kulikovskiy <xianel0x@gmail.com>
+Date: Thu, 22 Oct 2026 03:53:14 +0500
+Subject: [PATCH] x676c: clear PSTATE.PAN around user copies in the A53-built
+ kernel
+
+The real fix for the copyin permission-fault storm. SCTLR.SPAN=1 via
+SCTLR_EL1_DEFAULT (0161) did not take effect in the built kernel (the
+assembled SCTLR immediate stayed 0x3454593d, SPAN=0 -- likely a stale
+start.o), and SPAN alone would not clear an already-set PAN anyway. Do it
+where it belongs: copyio's user_access_enable()/disable() are no-ops on
+this ARMv8.0 build (__ARM_PAN_AVAILABLE__ undefined) even though the
+A55/A76 silicon auto-sets PSTATE.PAN=1 on EL1 entry. Emit MSR PAN,#0/#1
+directly (via .inst, since the armv8.0 assembler rejects the mnemonic) so
+every copyin/copyout drops PAN for the user access and restores it. This
+is C, so it recompiles reliably regardless of the assembly ccache.
+---
+ osfmk/arm64/copyio.c | 19 +++++++++++++++----
+ 1 file changed, 15 insertions(+), 4 deletions(-)
+
+diff --git a/osfmk/arm64/copyio.c b/osfmk/arm64/copyio.c
+index 15b949c..0bf647c 100644
+--- a/osfmk/arm64/copyio.c
++++ b/osfmk/arm64/copyio.c
+@@ -88,8 +88,18 @@ user_access_enable(void)
+ #if __ARM_PAN_AVAILABLE__
+ 	assert(__builtin_arm_rsr("pan") != 0);
+ 	__builtin_arm_wsr("pan", 0);
+-#endif  /* __ARM_PAN_AVAILABLE__ */
+-
++#elif defined(ARM64_BOARD_CONFIG_SWEET)
++	/*
++	 * x676c: the SWEET kernel is built -mcpu=cortex-a53 (ARMv8.0), so the
++	 * toolchain reports PAN unavailable and the block above is compiled
++	 * out. But the MT6789 A55/A76 silicon implements FEAT_PAN and, with
++	 * SCTLR_EL1.SPAN=0, auto-sets PSTATE.PAN=1 on every EL1 entry -- so a
++	 * copyin of user memory faults forever (permission fault, ESR
++	 * 0x9600000f). Clear PAN around the copy; .inst emits MSR PAN,#0 which
++	 * the ARMv8.0 assembler would otherwise reject.
++	 */
++	asm volatile (".inst 0xd500409f" ::: "memory"); /* MSR PAN, #0 */
++#endif
+ }
+ 
+ static inline void
+@@ -97,8 +107,9 @@ user_access_disable(void)
+ {
+ #if __ARM_PAN_AVAILABLE__
+ 	__builtin_arm_wsr("pan", 1);
+-#endif  /* __ARM_PAN_AVAILABLE__ */
+-
++#elif defined(ARM64_BOARD_CONFIG_SWEET)
++	asm volatile (".inst 0xd500419f" ::: "memory"); /* MSR PAN, #1 */
++#endif
+ }
+ 
+ /*
+-- 
+2.51.0.windows.1
+

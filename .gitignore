@@ -8,3 +8,8 @@ shim/out/
 xnu/out/
 xnu/out-*/
 __pycache__/
+# X9 artifacts: build outputs, logs, device dumps
+x9/out/
+work/**/build-*/
+work/**/*.log
+*.o

@@ -1,0 +1,79 @@
+diff --git a/bsd/dev/x9_usb_log.c b/bsd/dev/x9_usb_log.c
+--- a/bsd/dev/x9_usb_log.c
++++ b/bsd/dev/x9_usb_log.c
+@@ -4,6 +4,7 @@
+ #include <sys/kernel.h>
+ #include <kern/thread.h>
+ #include <kern/clock.h>
++#include <kern/sched_prim.h>
+ #include <machine/machine_routines.h>
+ #include <libkern/libkern.h>
+ #include "x9_usb_log_protocol.h"
+@@ -29,7 +30,7 @@
+ #define W1C (RX|SETUP|SENTSTALL)
+ static volatile uint32_t *mac,*ippc,*phy;
+ static int channel;
+-static uint8_t data[128];static unsigned sent,length,want,configured;
++static uint8_t data[X9LOG_BATCH_FRAME];static unsigned sent,length,want,configured;
+ static enum {X9USB_IDLE,X9USB_SEND,X9USB_SEND_END} phase;
+ static uint32_t rr(unsigned off){return mac[off/4];}
+ static void wr(unsigned off,uint32_t value){mac[off/4]=value;__asm__ volatile("dsb sy":::"memory");}
+@@ -56,6 +57,7 @@
+  else if((type==0x80||type==0x81)&&req==0&&n==2&&!value&&!index){data[0]=data[1]=0;count=2;}
+  else if(type==0x81&&req==10&&n==1&&!value&&!index){data[0]=0;count=1;}
+  else if(type==1&&req==11&&!n&&!value&&!index){}
++ else if(type==0xc0&&req==X9LOG_BATCH_REQ&&configured&&n==X9LOG_BATCH_FRAME){int k=x9log_read_capacity(&reader,(uint32_t)value|((uint32_t)index<<16),data,sizeof(data),2);if(k<0){stall(0);return;}count=(unsigned)k;}
+  else if(type==0xc0&&req==X9LOG_REQ&&configured&&n==64){int k=x9log_read(&reader,(uint32_t)value|((uint32_t)index<<16),data,2);if(k<0){stall(0);return;}count=(unsigned)k;}
+  else{stall(n?0:SETUP);return;}
+  if(!n){wr(EP0,epcsr()|SETUP|DATAEND);return;}
+@@ -86,5 +88,5 @@
+  ip[0x98/4]|=1;usb_delay(1);ip[0x98/4]&=~1U;uint32_t info=rr(0xc10);if(!(info&31)||!((info>>8)&31))return -3;
+  wr(0x141c,rr(0x141c)&~BIT(0));wr(0xc,0xffffffff);wr(0x8c,0xffffffff);wr(CONFIG,rr(CONFIG)&~(0x7fU<<24));wr(EP0,64);wr(EPISR,0x10001);wr(COMMON,0xffffffff);wr(0x88,0x10001);wr(0x2418,BIT(2)|BIT(5));wr(POWER,rr(POWER)|BIT(6)|BIT(5)|BIT(0));return 0;
+ }
+-static void thread_main(void *arg,wait_result_t why){(void)arg;(void)why;int e=init();if(e){printf("X9 USB LOG init failed %d\n",e);thread_terminate_self();return;}printf("X9 USB LOG polling active\n");for(;;){poll();(void)tsleep(&channel,PZERO,"x9usb",1);}}
++static void thread_main(void *arg,wait_result_t why){(void)arg;(void)why;int e=init();if(e){printf("X9 USB LOG init failed %d\n",e);thread_terminate_self();return;}printf("X9 USB LOG polling active; batch4096 poll1ms\n");for(;;){poll();uint64_t deadline;clock_interval_to_deadline(1,NSEC_PER_MSEC,&deadline);(void)assert_wait_deadline(&channel,THREAD_UNINT,deadline);thread_block(THREAD_CONTINUE_NULL);}}
+ void x9_usb_log_start(void){thread_t thread;if(kernel_thread_start(thread_main,NULL,&thread)==KERN_SUCCESS)thread_deallocate(thread);else printf("X9 USB LOG thread unavailable\n");}
+diff --git a/bsd/dev/x9_usb_log_protocol.h b/bsd/dev/x9_usb_log_protocol.h
+--- a/bsd/dev/x9_usb_log_protocol.h
++++ b/bsd/dev/x9_usb_log_protocol.h
+@@ -4,6 +4,8 @@
+ #include <stddef.h>
+ #define X9LOG_REQ 0x46u
+ #define X9LOG_FRAME 64u
++#define X9LOG_BATCH_REQ 0x47u
++#define X9LOG_BATCH_FRAME 4096u
+ #define X9LOG_DATA 40u
+ #define X9LOG_MAGIC 0x474f4c58u
+ #define X9LOG_VERSION 1u
+@@ -16,21 +18,26 @@
+ };
+ static inline void x9log_u32(uint8_t *p,uint32_t x){for(unsigned i=0;i<4;i++)p[i]=(uint8_t)(x>>(8*i));}
+ static inline void x9log_u64(uint8_t *p,uint64_t x){x9log_u32(p,(uint32_t)x);x9log_u32(p+4,(uint32_t)(x>>32));}
+-/* Caller provides 64-byte output; callback copy may advance cursor on overrun.
++/* Caller provides capacity bytes of output; callback copy may advance cursor on overrun.
+  * Cursor is 32-bit on wire; total >= 2^32 is not representable, return error.
+  * Empty frames carry 24-byte header and do not advance cursor. */
+-static inline int x9log_read(const struct x9log_reader *r,uint32_t request,uint8_t out[X9LOG_FRAME],uint32_t epoch)
++static inline int x9log_read_capacity(const struct x9log_reader *r,uint32_t request,uint8_t *out,uint32_t capacity,uint32_t epoch)
+ {
+- if(!r||!r->position||!r->copy||!out||!epoch)return -1;
++ if(!r||!r->position||!r->copy||!out||!epoch||
++    (capacity!=X9LOG_FRAME&&capacity!=X9LOG_BATCH_FRAME))return -1;
+  uint64_t total=r->position(r->ctx),pos=request;
+  if(total>UINT32_MAX)return -1;
+  uint32_t flags=0;
+  if(pos>total){pos=total;flags|=X9LOG_AHEAD;}
+- uint64_t start=pos;uint32_t n=r->copy(r->ctx,&pos,(char*)out+24,X9LOG_DATA);
+- if(n>X9LOG_DATA||pos<n||pos>UINT32_MAX)return -1;
++ uint64_t start=pos;uint32_t n=r->copy(r->ctx,&pos,(char*)out+24,capacity-24);
++ if(n>capacity-24||pos<n||pos>UINT32_MAX)return -1;
+  /* Producer may append while copy executes; refresh the advertised limit. */
+  if(pos>total){total=r->position(r->ctx);if(total<pos||total>UINT32_MAX)return -1;}
+  uint64_t actual=pos-n;if(actual>start)flags|=X9LOG_GAP;
+  x9log_u32(out,X9LOG_MAGIC);x9log_u32(out+4,epoch);x9log_u32(out+8,(uint32_t)actual);x9log_u32(out+12,(uint32_t)pos);x9log_u32(out+16,(uint32_t)total);x9log_u32(out+20,flags);
+  return (int)(24+n);
+ }
++
++/* Legacy request keeps its original 64-byte header/payload contract. */
++static inline int x9log_read(const struct x9log_reader *r,uint32_t request,uint8_t out[X9LOG_FRAME],uint32_t epoch)
++{return x9log_read_capacity(r,request,out,X9LOG_FRAME,epoch);}

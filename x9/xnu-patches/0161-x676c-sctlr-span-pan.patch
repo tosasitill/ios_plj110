@@ -1,0 +1,51 @@
+From 17098abfb27118ae11520009e5e769d67b4e94c3 Mon Sep 17 00:00:00 2001
+From: Egor Kulikovskiy <xianel0x@gmail.com>
+Date: Thu, 22 Oct 2026 03:25:00 +0500
+Subject: [PATCH] x676c: set SCTLR_EL1.SPAN so PAN stays off for the A53-built
+ kernel
+
+Root cause of the launchd hang: the SWEET kernel is built
+-mcpu=cortex-a53 (ARMv8.0), so __ARM_PAN_AVAILABLE__ is undefined and
+copyio's user_access_enable()/disable() are no-ops -- copyin never clears
+PSTATE.PAN. The MT6789 A55/A76 cores implement FEAT_PAN, and because
+SCTLR_EL1_DEFAULT left SPAN=0 the CPU sets PSTATE.PAN=1 on every EL1
+entry. dyld's first mach_vm_allocate does a copyin of a user address;
+with PAN=1 that read takes a permission fault (ESR 0x9600000f, DFSC L3),
+arm_fast_fault cannot resolve it, and the thread spins re-faulting
+(~60M faults, CPU mostly idle, block_hint 0). Add SCTLR_PAN_UNCHANGED so
+PAN is left unchanged (0) on exception entry, which matches a kernel that
+does not manage PAN. Revisit if we later rebuild for ARMv8.1+ and let
+copyio manage PAN properly.
+---
+ osfmk/arm64/proc_reg.h | 11 ++++++++++-
+ 1 file changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/osfmk/arm64/proc_reg.h b/osfmk/arm64/proc_reg.h
+index e01c124..1f7dec4 100644
+--- a/osfmk/arm64/proc_reg.h
++++ b/osfmk/arm64/proc_reg.h
+@@ -651,11 +651,20 @@
+ #define SCTLR_JOP_KEYS_DEFAULT  0
+ #endif
+ 
++/*
++ * x676c: the SWEET kernel is built -mcpu=cortex-a53 (ARMv8.0), so
++ * __ARM_PAN_AVAILABLE__ is off and copyio's user_access_enable()/disable()
++ * are no-ops that never clear PSTATE.PAN. The MT6789 cores (A55/A76) do
++ * implement FEAT_PAN, and with SCTLR.SPAN=0 the CPU sets PSTATE.PAN=1 on
++ * every EL1 entry -- so copyin() faults forever reading user memory
++ * (permission fault L3, ESR 0x9600000f). Set SPAN so PAN is left unchanged
++ * on exception entry (stays 0), matching a kernel that does not manage PAN.
++ */
+ #define SCTLR_EL1_DEFAULT \
+ 	(SCTLR_RESERVED | SCTLR_UCI_ENABLED | SCTLR_nTWE_WFE_ENABLED | SCTLR_DZE_ENABLED | \
+ 	 SCTLR_I_ENABLED | SCTLR_SED_DISABLED | SCTLR_CP15BEN_ENABLED |                    \
+ 	 SCTLR_SA0_ENABLED | SCTLR_SA_ENABLED | SCTLR_C_ENABLED | SCTLR_M_ENABLED |        \
+-	 SCTLR_CSEH_DEFAULT | SCTLR_DSSBS_DEFAULT |                                        \
++	 SCTLR_CSEH_DEFAULT | SCTLR_DSSBS_DEFAULT | SCTLR_PAN_UNCHANGED |                  \
+ 	 SCTLR_ROP_KEYS_DEFAULT | SCTLR_JOP_KEYS_DEFAULT)
+ 
+ /*
+-- 
+2.51.0.windows.1
+

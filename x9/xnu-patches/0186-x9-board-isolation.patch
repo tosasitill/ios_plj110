@@ -1,0 +1,1053 @@
+Subject: [PATCH] x9: isolate MT6993 direct-LK bring-up from legacy MMIO
+
+Select OPPO Find X9 only after PE_init_platform initializes SecureDT. Remove
+pre-ADT physical drawing and unconditional X676C framebuffer/pstore aliases.
+Validate boot video, map only its first frame, and share the larger bounded
+console shadow. Persistent logging uses an explicit optional X9 console zone,
+Normal-NC memory and a bounded keep-head writer; early messages stay local
+until the record can be mapped.
+
+Pet the captured MT6993 TOPRGU watchdog independently of display scanout from
+the virtual-timer IRQ. Keep MT6789 and Qualcomm display, accelerator, battery,
+UFS and input initialization off on X9. Bound GIC redistributor walking and
+account for optional stride/GICR_TYPER.VLPIS. X9 remains CPU0-only.
+
+This is board isolation and a kernel-entry candidate, not hardware evidence
+of X9 execution, display scanout, storage, GPU or userland boot.
+---
+diff --git a/bsd/dev/sweet_keys.c b/bsd/dev/sweet_keys.c
+--- a/bsd/dev/sweet_keys.c
++++ b/bsd/dev/sweet_keys.c
+@@ -12,6 +12,7 @@
+ #include <kern/sched_prim.h>
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
++#include <arm64/sweet_early.h>
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern void sweet_hid_key(int key, int down);
+@@ -176,6 +177,9 @@
+ void
+ sweet_keys_init(void)
+ {
++	if (sweet_early_is_x9()) {
++		return; /* No MT6993 keypad driver yet. */
++	}
+ 	int enabled = 1;
+ 	thread_t thread;
+ 	if (keys_started) {
+diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -16,6 +16,7 @@
+ #include <kern/sched_prim.h>
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
++#include <arm64/sweet_early.h>
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ /* Mach MIG declaration is not included by BSD's exported thread.h. */
+@@ -868,6 +869,9 @@
+ void
+ sweet_touch_init(void)
+ {
++	if (sweet_early_is_x9()) {
++		return; /* Do not start a thread that probes legacy I2C/GPIO addresses. */
++	}
+ 	int enabled = 1;
+ 	thread_t thread;
+ 	if (st.started) {
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -37,6 +37,7 @@
+ #include <vm/vm_kern.h>
+ #include <pexpert/pexpert.h>
+ #include <pexpert/device_tree.h>
++#include <arm64/sweet_early.h>
+ #include <libkern/libkern.h>
+ #include <machine/atomic.h>
+ 
+@@ -739,6 +740,9 @@
+ static int
+ sweet_ufs_init(void)
+ {
++	if (sweet_early_is_x9()) {
++		return ENXIO; /* MT6993 UFS is not the Qualcomm host. */
++	}
+ 	DTEntry node;
+ 	uintptr_t const *reg = NULL;
+ 	unsigned int size = 0;
+diff --git a/bsd/dev/ufs/ufs_disk.c b/bsd/dev/ufs/ufs_disk.c
+--- a/bsd/dev/ufs/ufs_disk.c
++++ b/bsd/dev/ufs/ufs_disk.c
+@@ -34,6 +34,7 @@
+ #include <vm/vm_kern.h>
+ #include <pexpert/pexpert.h>
+ #include <pexpert/device_tree.h>
++#include <arm64/sweet_early.h>
+ #include <libkern/libkern.h>
+ #include <libkern/crc.h>
+ #include "ufshci.h"
+@@ -610,6 +611,9 @@
+ static int
+ ufs_disk_bringup(void)
+ {
++	if (sweet_early_is_x9()) {
++		return ENXIO; /* MT6789 reset/PHY sequences do not apply to MT6993. */
++	}
+ 	DTEntry node;
+ 	uintptr_t const *reg = NULL;
+ 	unsigned int size = 0;
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -324,8 +324,8 @@
+ 	if (!IOPMPowerSource::start(provider)) {
+ 		return false;
+ 	}
+-	/* x676c: Qualcomm cpufreq-hw and GENI I2C1 do not exist; static source only. */
+-	bool qcom = !sweet_board_x676c();
++	/* MediaTek boards do not have Qualcomm cpufreq-hw or GENI I2C1. */
++	bool qcom = sweet_board_qcom();
+ 	if (qcom) {
+ 		(void)sweet_cpufreq_max();
+ 	}
+diff --git a/iokit/Kernel/arm/SweetBoard.h b/iokit/Kernel/arm/SweetBoard.h
+--- a/iokit/Kernel/arm/SweetBoard.h
++++ b/iokit/Kernel/arm/SweetBoard.h
+@@ -1,55 +1,29 @@
+ /*
+- * Which board this SWEET kernel runs on. One kernel serves the Qualcomm
+- * boards (sweet, topaz) and the Infinix X676C (MediaTek MT6789). Drivers
+- * that poke Qualcomm MMIO at fixed physical addresses (MDP/DSI, cpufreq-hw,
+- * GENI I2C, the modem) must stay off on the X676C: those addresses belong
+- * to unrelated MediaTek blocks there. The ADT root compatible decides
+- * (x676c/tools/mkadt.py puts 'infinix,x676c' in it); it is read straight
+- * from the flattened ADT, like bsd/dev/sweet_ufs.c does, so it works before
+- * and independently of the IORegistry device-tree plane.
++ * The boot CPU selects the board from the bounded ADT compatible list after
++ * PE_init_platform. Keep MT6789 and MT6993 distinct: neither may enter the
++ * Qualcomm fixed-MMIO paths, and X9 must never run an X676C power sequence.
+  */
+ #ifndef _IOKIT_ARM_SWEETBOARD_H
+ #define _IOKIT_ARM_SWEETBOARD_H
+ 
+-#include <pexpert/device_tree.h>
+-
+-/* NUL-separated string list `list` of `size` bytes contains `want`. */
+-static inline bool
+-sweet_strlist_has(const char *list, unsigned int size, const char *want)
+-{
+-	unsigned int i = 0;
+-
+-	while (i < size) {
+-		unsigned int j = 0;
+-		while (i + j < size && want[j] != '\0' && list[i + j] == want[j]) {
+-			j++;
+-		}
+-		if (want[j] == '\0' && (i + j == size || list[i + j] == '\0')) {
+-			return true;
+-		}
+-		while (i < size && list[i] != '\0') {
+-			i++;
+-		}
+-		i++;
+-	}
+-	return false;
+-}
++#include <arm64/sweet_early.h>
+ 
+ static inline bool
+ sweet_board_x676c(void)
+ {
+-	static int cached = -1;
++	return sweet_early_is_x676c() != 0;
++}
+ 
+-	if (cached < 0) {
+-		DTEntry root;
+-		void const *prop;
+-		unsigned int size;
++static inline bool
++sweet_board_x9(void)
++{
++	return sweet_early_is_x9() != 0;
++}
+ 
+-		cached = SecureDTLookupEntry(NULL, "/", &root) == kSuccess &&
+-		    SecureDTGetProperty(root, "compatible", &prop, &size) == kSuccess &&
+-		    sweet_strlist_has((const char *)prop, size, "infinix,x676c");
+-	}
+-	return cached == 1;
++static inline bool
++sweet_board_qcom(void)
++{
++	return !sweet_board_x676c() && !sweet_board_x9();
+ }
+ 
+ #endif /* _IOKIT_ARM_SWEETBOARD_H */
+diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
+--- a/iokit/Kernel/arm/SweetCPU.cpp
++++ b/iokit/Kernel/arm/SweetCPU.cpp
+@@ -78,6 +78,10 @@
+ 	if (sweet_board_x676c()) {
+ 		/* x676c (MT6789): MPIDR Aff1 = core: 0x000-0x500 A55, 0x600/0x700 A76 */
+ 		valid = cpu->phys_id <= 0x700 && (cpu->phys_id & 0xff) == 0;
++	} else if (sweet_board_x9()) {
++		/* MT6993 baseline: only the actual boot CPU, not an SMP topology. */
++		valid = topology->num_cpus == 1 && cpu->cpu_id == 0 &&
++		    cpu == topology->boot_cpu && cpu->phys_id == 0;
+ 	} else {
+ 		/* topaz (SM6225): MPIDR Aff1 = cluster, Aff0 = core: 0x0-0x3 A53, 0x100-0x103 A73 */
+ 		valid = (cpu->phys_id >> 8) <= 1 && (cpu->phys_id & 0xff) <= 3;
+@@ -89,7 +93,8 @@
+ 	if (!IOCPU::start(provider)) {
+ 		return false;
+ 	}
+-	cpuName = OSSymbol::withCStringNoCopy(sweet_board_x676c() ? (cpu->phys_id >= 0x600 ? "Cortex-A76" : "Cortex-A55") : "Kryo 260");
++	cpuName = OSSymbol::withCStringNoCopy(sweet_board_x9() ? "MT6993 cpu0" :
++	    sweet_board_x676c() ? (cpu->phys_id >= 0x600 ? "Cortex-A76" : "Cortex-A55") : "Kryo 260");
+ 	if (cpuName == NULL) {
+ 		return false;
+ 	}
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -85,6 +85,9 @@
+ static void
+ mtk_dsi_push_hw(void)
+ {
++	if (!sweet_board_x676c()) {
++		return;
++	}
+ 	/*
+ 	 * Native MT6789 DSI scanout on ili7835 panel at 60 Hz VSYNC.
+ 	 * Replaces the bare-metal shim CPU 7 display pump.
+@@ -291,6 +294,7 @@
+ 	    IOMemoryDescriptor **memory) APPLE_KEXT_OVERRIDE {
+ 		if (memory == NULL) return kIOReturnBadArgument;
+ 		*memory = NULL;
++		if (!sweet_board_x676c()) return kIOReturnUnsupported;
+ 		if (type == 0) {
+ 			/* Type 0: Map ARM Mali-G57 physical MMIO registers (0x13000000, 64KB) */
+ 			IOMemoryDescriptor *desc = IOMemoryDescriptor::withPhysicalAddress(0x13000000, 0x10000, kIODirectionInOut);
+@@ -389,7 +393,7 @@
+ 	if (!IOService::start(provider)) {
+ 		return false;
+ 	}
+-	if (!sweet_board_x676c()) {
++	if (sweet_board_qcom()) {
+ 		topaz_modem_init();
+ 	}
+ 	sweet_busy_init();
+@@ -398,8 +402,14 @@
+ 	fWidth = (uint32_t)video.v_width;
+ 	fHeight = (uint32_t)video.v_height;
+ 	fRowBytes = (uint32_t)video.v_rowBytes;
+-	if (fPhys == 0 || fWidth == 0 || fHeight == 0 || fRowBytes < fWidth * 4) {
+-		IOLog("SWEET FB: no boot framebuffer\n");
++	if (sweet_board_x9() && (video.v_baseAddr != 0xfc910000ULL ||
++	    video.v_width != 1256 || video.v_height != 2760 || video.v_rowBytes != 5120)) {
++		IOLog("SWEET FB: invalid X9 boot framebuffer\n");
++		return false;
++	}
++	if (!sweet_fb_layout_valid(video.v_baseAddr, UINT64_MAX, video.v_width,
++	    video.v_height, video.v_rowBytes)) {
++		IOLog("SWEET FB: no valid boot framebuffer\n");
+ 		return false;
+ 	}
+ 	int native = 0;
+@@ -438,7 +448,7 @@
+ 		sMtkDsi = fMtkDsi;
+ 		sMtkMutex = fMtkMutex;
+ 		IOLog("SWEET FB: MT6789 DSI0 (0x14013000) and MUTEX0 (0x14001000) mapped for HW scanout\n");
+-	} else {
++	} else if (sweet_board_qcom()) {
+ 		fVig0 = (volatile uint32_t *)ml_io_map(0x05e05000, 0x1000);
+ 		fCtl0 = (volatile uint32_t *)ml_io_map(0x05e02000, 0x1000);
+ 		fDsi = (volatile uint8_t *)ml_io_map(0x05e94000, 0x1000);
+@@ -475,11 +485,11 @@
+ 	}
+ 	uint32_t accelOn = 1;
+ 	(void)PE_parse_boot_argn("sweetaccel", &accelOn, sizeof(accelOn));
+-	IOAcceleratorES *accel = accelOn ? OSTypeAlloc(IOAcceleratorES) : NULL;
++	IOAcceleratorES *accel = accelOn && !sweet_board_x9() ? OSTypeAlloc(IOAcceleratorES) : NULL;
+ 	if (accel != NULL && accel->init()) {
+ 		accel->setName("sgx");
+ 		if (accel->attach(this)) {
+-			if (!sweet_board_x676c()) {
++			if (sweet_board_qcom()) {
+ 				accel->registerService();
+ 				IOLog("SWEET FB: empty IOAcceleratorES published (no 30 s wait in CAMetalContextCreate)\n");
+ 			}
+@@ -701,7 +711,7 @@
+ 	}
+ 	OSSafeReleaseNULL(accel);
+ 	/* dpu sm6115 catalog: intf_1 at mdp+0x6a800, mdp at 0x5e01000 */
+-	fIntf1 = sweet_board_x676c() ? NULL : (volatile uint32_t *)ml_io_map(0x05e6b000, 0x1000);
++	fIntf1 = sweet_board_qcom() ? (volatile uint32_t *)ml_io_map(0x05e6b000, 0x1000) : NULL;
+ 	if (fIntf1 != NULL) {
+ 		volatile uint32_t *r = fIntf1 + 0x800 / 4;
+ 		r[0x0a8 / 4] = 0x3;     /* FRAME_LINE_COUNT_EN */
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -365,6 +365,7 @@
+ #endif /* defined(HAS_APPLE_PAC) */
+ 
+ 	PE_init_platform(FALSE, args); /* Get platform expert set up */
++	sweet_early_init(args);
+ 	sweet_early_mark(2, "PE_init_platform done");
+ 
+ #if __arm64__
+@@ -523,6 +524,7 @@
+ 
+ 	sweet_early_mark(7, "entering arm_vm_init");
+ 	arm_vm_init(xmaxmem, args);
++	sweet_early_late_init();
+ 	sweet_early_mark(15, "arm_vm_init returned");
+ 
+ 	if (debug_boot_arg) {
+diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
+--- a/osfmk/arm64/arm_vm_init.c
++++ b/osfmk/arm64/arm_vm_init.c
+@@ -1828,9 +1828,9 @@
+ #if defined(SWEET)
+ /*
+  * The reserved low-globals/kernel region is excluded from VM allocation.
+- * Use the otherwise empty 32MB blocks above low globals and below gVirtBase
+- * for Device aliases of the splash framebuffer block and the pstore block
+- * (see SWEET.h) that survive bootstrap TTBR0 teardown.
++ * Keep the validated boot framebuffer block at a reserved Device alias above
++ * low globals and below gVirtBase. Persistent console RAM is mapped separately
++ * as Normal-NC memory after VM setup; it never uses an unconditional alias.
+  */
+ #define SWEET_EARLY_FB_VA (VM_MIN_KERNEL_ADDRESS + ARM_TT_L2_SIZE)
+ static_assert(SWEET_EARLY_BLOCK_SIZE == ARM_TT_L2_SIZE, "SWEET.h block size");
+@@ -1853,9 +1853,11 @@
+ static void
+ sweet_early_map_final(void)
+ {
+-	sweet_early_map_block(SWEET_EARLY_FB_VA, SWEET_EARLY_FB_BLOCK);
+-	sweet_early_map_block(SWEET_EARLY_FB_VA + ARM_TT_L2_SIZE, SWEET_PSTORE_BLOCK);
+-	__asm__ volatile("dsb ishst" ::: "memory");
++	pmap_paddr_t pa = sweet_early_fb_block();
++	if (pa != 0) {
++		sweet_early_map_block(SWEET_EARLY_FB_VA, pa);
++		__asm__ volatile("dsb ishst" ::: "memory");
++	}
+ }
+ #endif
+ 
+diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -35,6 +35,7 @@
+ #include <arm/machine_cpu.h>
+ #include <arm/trap.h> /* for IS_ARM_GDB_TRAP() et al */
+ #include <arm64/proc_reg.h>
++#include <arm64/sweet_early.h>
+ #include <arm64/machine_machdep.h>
+ #include <arm64/monotonic.h>
+ #include <arm64/instructions.h>
+@@ -2048,6 +2049,7 @@
+ 	}
+ 	sweet_irq_total++;
+ 	if (intid == sweet_vtimer_intid) {
++		sweet_watchdog_pet();
+ 		sweet_irq_timer++;
+ 		sweet_kprof_sample(state);
+ 		sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_TIMER);
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -513,25 +513,6 @@
+ 	mov		x20, x0
+ 	mov		x21, #0
+ 
+-#if defined(SWEET)
+-	/* Stage 0: white 64x32 band, no stack or page tables needed. */
+-	MOV64	x0, (SWEET_EARLY_FB_PA + 2368 * 4320)
+-	mov		w1, #-1
+-	mov		x2, #32
+-	mov		x4, #4320
+-Lsweet_mark_row:
+-	mov		x3, #64
+-	mov		x5, x0
+-Lsweet_mark_pixel:
+-	str		w1, [x5], #4
+-	subs	x3, x3, #1
+-	b.ne	Lsweet_mark_pixel
+-	add		x0, x0, x4
+-	subs	x2, x2, #1
+-	b.ne	Lsweet_mark_row
+-	dsb		sy
+-#endif
+-
+ 	// Set low reset vector before attempting any loads
+ 	adrp	x0, EXT(LowExceptionVectorBase)@page
+ 	add		x0, x0, EXT(LowExceptionVectorBase)@pageoff
+@@ -680,28 +661,32 @@
+ 
+ #if defined(SWEET)
+ 	/*
+-	 * Splash framebuffer and pstore: one 32MB Device block each in the
+-	 * EXISTING V=P L2 table. Both blocks and RAM use L1 index 0 (16K pages:
+-	 * one L1 entry spans 64GB); another call to create_bootstrap_mapping
+-	 * would replace the RAM L2 table, so the first V=P L2 page
+-	 * (bootstrap_pagetables + 2*PGBYTES) is patched directly.
+-	 * Device, not Normal-NC: the blocks also hold TrustZone carve-outs that
+-	 * must never see a speculative access (see SWEET.h).
++	 * Boot video only: patch an empty slot in the existing first V=P L2
++	 * table. Both supported boards use L1 index 0 (16K pages: 64GB).
++	 * Never write physical pixels or map a guessed pstore block here.
++	 * Device attributes prevent speculation into adjacent carve-outs;
++	 * sweet_early_init validates that the first frame fits this block.
+ 	 */
+ #define SWEET_EARLY_BLOCK_TTE (ARM_TTE_TYPE_BLOCK | ARM_TTE_VALID | ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) | ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_DISABLE) | ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX)
++	ldr		x10, [x20, #40]				// boot_args.Video.v_baseAddr
++	cbz		x10, Lsweet_fb_mapping_done
++	lsr		x11, x10, #36
++	cbnz	x11, Lsweet_fb_mapping_done
++	ldr		x11, [x20, BA_PHYS_BASE]
++	lsr		x11, x11, #36
++	cbnz	x11, Lsweet_fb_mapping_done
++	lsr		x10, x10, #(ARM_TT_L2_SHIFT)
++	lsl		x10, x10, #(ARM_TT_L2_SHIFT)
++	cbz		x10, Lsweet_fb_mapping_done
+ 	add		x13, x25, #(2 * PGBYTES)
+-	MOV64	x10, SWEET_EARLY_FB_BLOCK
++	and		x12, x10, #(ARM_TT_L2_INDEX_MASK)
++	lsr		x12, x12, #(ARM_TT_L2_SHIFT)
++	ldr		x11, [x13, x12, lsl #TTE_SHIFT]
++	cbnz	x11, Lsweet_fb_mapping_done		// do not replace a RAM mapping
+ 	MOV64	x11, SWEET_EARLY_BLOCK_TTE
+ 	orr		x11, x11, x10
+-	and		x12, x10, #(ARM_TT_L2_INDEX_MASK)
+-	lsr		x12, x12, #(ARM_TT_L2_SHIFT)
+ 	str		x11, [x13, x12, lsl #TTE_SHIFT]
+-	MOV64	x10, SWEET_PSTORE_BLOCK
+-	MOV64	x11, SWEET_EARLY_BLOCK_TTE
+-	orr		x11, x11, x10
+-	and		x12, x10, #(ARM_TT_L2_INDEX_MASK)
+-	lsr		x12, x12, #(ARM_TT_L2_SHIFT)
+-	str		x11, [x13, x12, lsl #TTE_SHIFT]
++Lsweet_fb_mapping_done:
+ #endif
+ 
+ 	/* Ensure TTEs are visible */
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -1,94 +1,280 @@
+ /*
+- * Bootstrap console. No allocation, locks, ADT parsing or per-CPU state:
+- * panic() can reach this before a current thread exists.
+- * start.s maps the splash framebuffer and pstore blocks VA=PA as Device
+- * memory. arm_vm_init installs reserved kernel VA aliases before removing
+- * TTBR0; retain this console until the normal framebuffer serial console is
+- * ready. The pstore mirror stays for the whole boot (see sweet_pstore_putc).
++ * Bootstrap console, selected only after PE_init_platform initializes the ADT.
++ * start.s maps the boot video block as Device memory; arm_vm_init retains that
++ * block at a reserved kernel VA. No framebuffer or persistent-RAM pointer is
++ * usable before explicit initialization. A small local buffer retains the
++ * first messages until an optional console record can be mapped.
+  */
+ #include <arm64/sweet_early.h>
+ 
+ #if defined(SWEET)
+ #include <stdint.h>
+ #include <kern/misc_protos.h>
+-
+-static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)SWEET_EARLY_FB_PA;
+-
+-/*
+- * x676c: everything the consoles print is also appended to the ramoops
+- * console zone, behind the shim's own log. Same ring discipline as Linux
+- * persistent_ram: header {sig, start = next write offset, size = valid
+- * bytes}, data after it. The next Android boot exposes it as
+- * /sys/fs/pstore/console-ramoops-0, which survives any hang or panic here.
+- */
+-#define PSTORE_SIG 0x43474244u          /* PERSISTENT_RAM_SIG, "DBGC" */
++#include <machine/machine_routines.h>
++#include <mach/vm_param.h>
++#include <pexpert/arm64/boot.h>
++#include <pexpert/device_tree.h>
++
++_Static_assert(__builtin_offsetof(boot_args, Video) == 40, "start.s boot video offset");
++
++static volatile uint32_t *early_fb;
++static uint64_t early_fb_pa, early_fb_block;
++static unsigned int early_width, early_height, early_stride;
++static int early_initialized, board_x676c, board_x9;
++static volatile uint32_t *x9_wdt;
++static const char x9_kernel_tag[] __attribute__((used)) = "HelioDarwin-X9-0186\n";
++
++/* persistent_ram header: signature, next write offset, valid byte count. */
++#define PSTORE_SIG 0x43474244u
+ #define PSTORE_HDR 12u
+-#define PSTORE_CAP (SWEET_PSTORE_SIZE - PSTORE_HDR)
+-static volatile uint32_t *pstore = (volatile uint32_t *)(uintptr_t)SWEET_PSTORE_PA;
++#define EARLY_LOG_CAP 0x4000u
++static volatile uint32_t *pstore;
++static uint32_t pstore_cap, pstore_next;
++static char early_log[EARLY_LOG_CAP];
++static uint32_t early_log_size;
++
++/* Reserve a bounded, non-wrapping range. Safe even for nested console calls. */
++static uint32_t
++sweet_log_reserve(uint32_t *next, uint32_t cap, uint32_t *count)
++{
++	uint32_t at = __atomic_load_n(next, __ATOMIC_RELAXED);
++	for (;;) {
++		if (at >= cap) {
++			*count = 0;
++			return cap;
++		}
++		uint32_t n = *count < cap - at ? *count : cap - at;
++		if (__atomic_compare_exchange_n(next, &at, at + n, 0,
++		    __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
++			*count = n;
++			return at;
++		}
++	}
++}
++
++static int
++sweet_compatible_has(const char *list, unsigned int size, const char *want)
++{
++	unsigned int i = 0;
++	while (i < size) {
++		unsigned int end = i;
++		while (end < size && list[end]) {
++			end++;
++		}
++		if (end == size) {
++			return 0;
++		}
++		unsigned int j = 0;
++		while (i + j < end && want[j] && list[i + j] == want[j]) {
++			j++;
++		}
++		if (i + j == end && !want[j]) {
++			return 1;
++		}
++		i = end + 1;
++	}
++	return 0;
++}
++
++int
++sweet_early_is_x676c(void)
++{
++	return board_x676c;
++}
++
++int
++sweet_early_is_x9(void)
++{
++	return board_x9;
++}
++
++uint64_t
++sweet_early_fb_block(void)
++{
++	return early_fb_block;
++}
++
++void
++sweet_early_init(const boot_args *args)
++{
++	if (early_initialized) {
++		return;
++	}
++	DTEntry root;
++	void const *prop;
++	unsigned int size;
++	if (SecureDTLookupEntry(NULL, "/", &root) == kSuccess &&
++	    SecureDTGetProperty(root, "compatible", &prop, &size) == kSuccess) {
++		board_x676c = sweet_compatible_has(prop, size, "infinix,x676c");
++		/* The X9 DT LK hands over carries only this SoC string at "/";
++		 * it has no "oppo,x9". Match what the hardware actually reports. */
++		board_x9 = sweet_compatible_has(prop, size, "mediatek,MT6993");
++	}
++	/* Conflicting board identities must never enable a legacy MMIO path. */
++	if (board_x9) {
++		board_x676c = 0;
++	}
++	early_initialized = 1;
++	if (board_x9) {
++		/* Also identifies a kernel with the X9 isolation patch to host tools. */
++		sweet_pstore_append(x9_kernel_tag, sizeof(x9_kernel_tag) - 1);
++	}
++	if (args == NULL) {
++		return;
++	}
++	const Boot_Video *video = &args->Video;
++	uint64_t pa = video->v_baseAddr, stride = video->v_rowBytes;
++	if ((video->v_depth & kBootVideoDepthMask) != 32 ||
++	    !sweet_fb_layout_valid(pa, UINT64_MAX, video->v_width,
++	    video->v_height, stride)) {
++		return;
++	}
++	uint64_t bytes = stride * video->v_height;
++	uint64_t block = pa & ~((uint64_t)SWEET_EARLY_BLOCK_SIZE - 1);
++	/* start.s only patches the first V=P L1 entry, and never a RAM slot. */
++	if (!block || (pa >> 36) || bytes > SWEET_EARLY_BLOCK_SIZE - (pa - block) ||
++	    args->physBase > UINT64_MAX - args->memSize ||
++	    (block < args->physBase + args->memSize &&
++	    args->physBase < block + SWEET_EARLY_BLOCK_SIZE)) {
++		return;
++	}
++	if (board_x9 && (pa != 0xfc910000ULL || video->v_width != 1256 ||
++	    video->v_height != 2760 || stride != 5120)) {
++		return;
++	}
++	early_fb_pa = pa;
++	early_fb_block = block;
++	early_width = (unsigned int)video->v_width;
++	early_height = (unsigned int)video->v_height;
++	early_stride = (unsigned int)(stride / 4);
++	early_fb = (volatile uint32_t *)(uintptr_t)pa;
++}
+ 
+ void
+ sweet_pstore_append(const char *buf, int len)
+ {
+-	volatile uint32_t *hdr = pstore;
+-	if (hdr == NULL || len <= 0) {
+-		return;
+-	}
++	if (buf == NULL || len <= 0) {
++		return;
++	}
++	uint32_t n = (uint32_t)len;
++	volatile uint32_t *hdr = __atomic_load_n(&pstore, __ATOMIC_ACQUIRE);
++	if (hdr == NULL) {
++		uint32_t at = sweet_log_reserve(&early_log_size, EARLY_LOG_CAP, &n);
++		for (uint32_t i = 0; i < n; i++) {
++			early_log[at + i] = buf[i];
++		}
++		return;
++	}
++	uint32_t at = sweet_log_reserve(&pstore_next, pstore_cap, &n);
+ 	volatile char *data = (volatile char *)hdr + PSTORE_HDR;
+-
+-	if (hdr[0] != PSTORE_SIG || hdr[1] >= PSTORE_CAP || hdr[2] > PSTORE_CAP) {
++	for (uint32_t i = 0; i < n; i++) {
++		data[at + i] = buf[i];
++	}
++	if (!n) {
++		return;
++	}
++	/* Normal-NC mapping: atomics here must not target Device memory. */
++	uint32_t end = at + n;
++	uint32_t old_size = __atomic_load_n((uint32_t *)&hdr[2], __ATOMIC_RELAXED);
++	while (old_size < end && !__atomic_compare_exchange_n((uint32_t *)&hdr[2],
++	    &old_size, end, 0, __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {
++	}
++	for (;;) {
++		uint32_t size = __atomic_load_n((uint32_t *)&hdr[2], __ATOMIC_ACQUIRE);
++		uint32_t start = size == pstore_cap ? 0 : size;
++		uint32_t old_start = __atomic_load_n((uint32_t *)&hdr[1], __ATOMIC_RELAXED);
++		if ((old_start == start || __atomic_compare_exchange_n((uint32_t *)&hdr[1],
++		    &old_start, start, 0, __ATOMIC_RELEASE, __ATOMIC_RELAXED)) &&
++		    __atomic_load_n((uint32_t *)&hdr[2], __ATOMIC_ACQUIRE) == size) {
++			break;
++		}
++	}
++	__asm__ volatile("dsb sy" ::: "memory");
++}
++
++void
++sweet_pstore_putc(char c)
++{
++	sweet_pstore_append(&c, 1);
++}
++
++void
++sweet_watchdog_pet(void)
++{
++	volatile uint32_t *wdt = __atomic_load_n(&x9_wdt, __ATOMIC_ACQUIRE);
++	if (wdt != NULL) {
++		wdt[0x08 / 4] = 0x1971;
++		__asm__ volatile("dsb sy" ::: "memory");
++	}
++}
++
++void
++sweet_early_late_init(void)
++{
++	if (!early_initialized) {
++		return;
++	}
++	if (board_x9 && x9_wdt == NULL) {
++		volatile uint32_t *wdt = (volatile uint32_t *)ml_io_map(0x1c010000, 0x1000);
++		__atomic_store_n(&x9_wdt, wdt, __ATOMIC_RELEASE);
++		sweet_watchdog_pet();
++	}
++	if (pstore != NULL) {
++		return;
++	}
++	uint64_t pa = 0;
++	uint32_t size = 0;
++	if (board_x676c) {
++		pa = SWEET_PSTORE_PA;
++		size = SWEET_PSTORE_SIZE;
++	} else if (board_x9) {
++		DTEntry chosen;
++		void const *base_prop, *size_prop;
++		unsigned int base_len, size_len;
++		if (SecureDTLookupEntry(NULL, "/chosen", &chosen) != kSuccess ||
++		    SecureDTGetProperty(chosen, "x9-console-base", &base_prop, &base_len) != kSuccess ||
++		    SecureDTGetProperty(chosen, "x9-console-size", &size_prop, &size_len) != kSuccess ||
++		    base_len != sizeof(uint64_t) || size_len != sizeof(uint32_t)) {
++			return;
++		}
++		pa = *(const uint64_t *)base_prop;
++		size = *(const uint32_t *)size_prop;
++		if ((pa & 3) || pa < 0xaec00000ULL || pa >= 0xaef10000ULL ||
++		    size < 16 || size > 0xaef10000ULL - pa) {
++			return;
++		}
++	}
++	if (!pa || size < 16) {
++		return;
++	}
++	/* Normal-NC, not Device. Align the physical request to reserve every
++	 * early-I/O VA page, including a partial first page on X676C. */
++	vm_offset_t offset = pa & PAGE_MASK;
++	vm_size_t map_size = round_page((vm_size_t)size + offset);
++	vm_offset_t mapping = ml_io_map_wcomb(pa - offset, map_size);
++	if (!mapping) {
++		return;
++	}
++	volatile uint32_t *hdr = (volatile uint32_t *)(mapping + offset);
++	pstore_cap = size - PSTORE_HDR;
++	if (hdr[0] != PSTORE_SIG || hdr[2] > pstore_cap ||
++	    (hdr[2] < pstore_cap && hdr[1] != hdr[2])) {
+ 		hdr[0] = PSTORE_SIG;
+ 		hdr[1] = 0;
+ 		hdr[2] = 0;
+ 	}
+-
+-	/*
+-	 * Keep-head discipline: once the buffer is full, stop appending instead of
+-	 * wrapping. The Android ramoops console record is only ~256 KB, and a late
+-	 * userland flood (e.g. a daemon retry loop) would otherwise scroll the boot
+-	 * start -- framebuffer geometry, GPU power-on probe, first userland errors --
+-	 * out of the capture. Preserving the head keeps that early evidence.
+-	 */
+-	if (hdr[2] >= PSTORE_CAP) {
+-		return;
+-	}
+-
+-	/* Atomically reserve 'len' bytes in the ring buffer without overflowing PSTORE_CAP */
+-	uint32_t old_start, new_start;
+-	do {
+-		old_start = hdr[1];
+-		if (old_start >= PSTORE_CAP) {
+-			old_start = 0;
+-		}
+-		new_start = (old_start + (uint32_t)len) % PSTORE_CAP;
+-	} while (!__atomic_compare_exchange_n((uint32_t *)&hdr[1], &old_start, new_start, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+-
+-	for (int i = 0; i < len; i++) {
+-		data[(old_start + (uint32_t)i) % PSTORE_CAP] = buf[i];
+-	}
+-
+-	/* Update size, saturating at PSTORE_CAP */
+-	uint32_t old_sz, new_sz;
+-	do {
+-		old_sz = hdr[2];
+-		if (old_sz >= PSTORE_CAP) {
+-			break;
+-		}
+-		new_sz = old_sz + (uint32_t)len;
+-		if (new_sz > PSTORE_CAP) {
+-			new_sz = PSTORE_CAP;
+-		}
+-	} while (!__atomic_compare_exchange_n((uint32_t *)&hdr[2], &old_sz, new_sz, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+-}
+-
+-void
+-sweet_pstore_putc(char c)
+-{
+-	sweet_pstore_append(&c, 1);
++	if (hdr[2] == pstore_cap && hdr[1] >= pstore_cap) {
++		hdr[1] = 0;
++	}
++	pstore_next = hdr[2];
++	__atomic_store_n(&pstore, hdr, __ATOMIC_RELEASE);
++	/* Called on the boot CPU with interrupts masked, before SMP startup. */
++	sweet_pstore_append(early_log, (int)early_log_size);
+ }
+ #define EARLY_FB early_fb
+-#define EARLY_WIDTH 1080u
+-#define EARLY_HEIGHT 2400u
+-#define EARLY_STRIDE (4320u / 4)
++#define EARLY_WIDTH early_width
++#define EARLY_HEIGHT early_height
++#define EARLY_STRIDE early_stride
+ #define EARLY_SCALE 2u
+ #define EARLY_CELL_W (8u * EARLY_SCALE)
+ #define EARLY_CELL_H (16u * EARLY_SCALE)
+@@ -96,8 +280,7 @@
+ #define EARLY_COLS (EARLY_WIDTH / EARLY_CELL_W)
+ 
+ extern unsigned char iso_font[256 * 16];
+-#define FBCON_MAX_PIXELS (1080 * 2400)
+-extern uint32_t fbcon_shadow[FBCON_MAX_PIXELS];
++extern uint32_t fbcon_shadow[SWEET_FBCON_MAX_PIXELS];
+ 
+ /* Initialized data must remain writable until disable, including panics. */
+ static unsigned int early_row, early_col;
+@@ -139,10 +322,10 @@
+ void
+ sweet_early_putc(char c)
+ {
+-	if (early_disabled) {
+-		return;
+-	}
+ 	sweet_pstore_putc(c);
++	if (early_disabled || early_fb == NULL) {
++		return;
++	}
+ 	if (!early_started) {
+ 		early_started = 1;
+ 		/* Clear the whole panel once, so the console starts on a clean
+@@ -204,13 +387,16 @@
+ 	if (early_disabled || stage > 20) {
+ 		return;
+ 	}
+-	uint32_t color = 0xff00ff00u | ((stage & 7u) * 32u << 16);
+-	for (unsigned int y = EARLY_HEIGHT - 32; y < EARLY_HEIGHT; y++) {
+-		for (unsigned int x = stage * 48; x < (stage + 1) * 48; x++) {
+-			EARLY_FB[y * EARLY_STRIDE + x] = color;
+-		}
+-	}
+-	__asm__ volatile("dsb sy" ::: "memory");
++	if (early_fb != NULL) {
++		uint32_t color = 0xff00ff00u | ((stage & 7u) * 32u << 16);
++		for (unsigned int y = EARLY_HEIGHT - 32; y < EARLY_HEIGHT; y++) {
++			for (unsigned int x = stage * 48;
++			    x < (stage + 1) * 48 && x < EARLY_WIDTH; x++) {
++				EARLY_FB[y * EARLY_STRIDE + x] = color;
++			}
++		}
++		__asm__ volatile("dsb sy" ::: "memory");
++	}
+ 	sweet_early_string("SWEET EARLY ");
+ 	if (stage >= 10) {
+ 		sweet_early_putc((char)('0' + stage / 10));
+@@ -241,10 +427,10 @@
+ sweet_early_relocate(uint64_t base)
+ {
+ 	sweet_early_mark(8, "leaving bootstrap TTBR0");
+-	/* arm_vm_init: framebuffer block alias at base, pstore block right above */
+-	early_fb = (volatile uint32_t *)(uintptr_t)(base + (SWEET_EARLY_FB_PA - SWEET_EARLY_FB_BLOCK));
+-	pstore = (volatile uint32_t *)(uintptr_t)(base + SWEET_EARLY_BLOCK_SIZE +
+-	    (SWEET_PSTORE_PA - SWEET_PSTORE_BLOCK));
++	if (early_fb_block) {
++		early_fb = (volatile uint32_t *)(uintptr_t)(base + early_fb_pa - early_fb_block);
++	}
++	/* Persistent console memory has no bootstrap alias; mapped in late_init. */
+ 	__asm__ volatile("dsb sy" ::: "memory");
+ 	sweet_early_mark(9, "kernel framebuffer VA live");
+ }
+diff --git a/osfmk/arm64/sweet_early.h b/osfmk/arm64/sweet_early.h
+--- a/osfmk/arm64/sweet_early.h
++++ b/osfmk/arm64/sweet_early.h
+@@ -6,16 +6,50 @@
+ #include <stdarg.h>
+ #include <stdint.h>
+ 
++#define SWEET_FBCON_MAX_PIXELS (1256u * 2760u)
++
++/* Shared by the bootstrap and serial consoles; size describes reserved RAM. */
++static inline int
++sweet_fb_layout_valid(uint64_t pa, uint64_t size, uint64_t width,
++    uint64_t height, uint64_t stride)
++{
++	if (!pa || (pa & 7) || width < 16 || height < 64 || (width & 1) ||
++	    width > SWEET_FBCON_MAX_PIXELS / height || (stride & 7) ||
++	    stride < width * 4 || height > UINT64_MAX / stride) {
++		return 0;
++	}
++	uint64_t bytes = height * stride;
++	return bytes <= 0x2000000ULL && bytes <= size && pa <= UINT64_MAX - bytes;
++}
++
++struct boot_args;
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
+ #if defined(SWEET)
++void sweet_early_init(const struct boot_args *args);
++void sweet_early_late_init(void);
++int sweet_early_is_x676c(void);
++int sweet_early_is_x9(void);
++uint64_t sweet_early_fb_block(void);
++void sweet_watchdog_pet(void);
+ void sweet_early_mark(unsigned int stage, const char *label);
+ void sweet_early_putc(char c);
+ void sweet_early_panic(const char *fmt, va_list *args);
+ void sweet_early_relocate(uint64_t base);
+ void sweet_early_disable(void);
+-/* Append to the ramoops console zone (x676c). */
++/* Optional persistent console record, mapped only after arm_vm_init. */
+ void sweet_pstore_append(const char *buf, int len);
+ void sweet_pstore_putc(char c);
+ #else
++static inline void sweet_early_init(const struct boot_args *args) { (void)args; }
++static inline void sweet_early_late_init(void) {}
++static inline int sweet_early_is_x676c(void) { return 0; }
++static inline int sweet_early_is_x9(void) { return 0; }
++static inline uint64_t sweet_early_fb_block(void) { return 0; }
++static inline void sweet_watchdog_pet(void) {}
+ static inline void sweet_early_mark(unsigned int stage, const char *label)
+ {
+ 	(void)stage;
+@@ -33,4 +67,8 @@
+ }
+ #endif
+ 
++#ifdef __cplusplus
++}
+ #endif
++
++#endif
+diff --git a/pexpert/arm/pe_fiq.c b/pexpert/arm/pe_fiq.c
+--- a/pexpert/arm/pe_fiq.c
++++ b/pexpert/arm/pe_fiq.c
+@@ -25,6 +25,7 @@
+ static vm_offset_t gicd_base;
+ static vm_offset_t gicr_base;
+ static vm_offset_t gicr_size;
++static vm_offset_t gicr_stride;
+ 
+ static uint32_t
+ _gic_read32(vm_offset_t addr)
+@@ -56,9 +57,16 @@
+ 	// We only care about aff1 and aff0
+ 	uint32_t phys_id = __builtin_arm_rsr64("MPIDR_EL1") & (MPIDR_AFF1_MASK | MPIDR_AFF0_MASK);
+ 
+-	for (vm_offset_t offset = 0; offset < gicr_size; offset += GICR_PE_SIZE) {
++	for (vm_offset_t offset = 0; offset <= gicr_size &&
++	    gicr_size - offset >= GICR_PE_SIZE;) {
+ 		vm_offset_t gicr_pe_base = gicr_base + offset;
+ 		uint64_t gicr_typer = gicr_read64(GICR_TYPER);
++		/* GICv4 adds VLPI/reserved frames when GICR_TYPER.VLPIS is set. */
++		vm_offset_t minimum = (gicr_typer & (1ULL << 1)) ? 0x40000 : GICR_PE_SIZE;
++		vm_offset_t stride = gicr_stride ? gicr_stride : minimum;
++		if (stride < minimum || stride > gicr_size - offset) {
++			break;
++		}
+ 		uint32_t aff_value = (uint32_t) (gicr_typer >> GICR_TYPER_AFFINITY_VALUE_SHIFT) & (MPIDR_AFF1_MASK | MPIDR_AFF0_MASK);
+ 
+ 		if (phys_id == aff_value) {
+@@ -68,6 +76,7 @@
+ 		if (gicr_typer & GICR_TYPER_LAST) {
+ 			break;
+ 		}
++		offset += stride;
+ 	}
+ 
+ 	panic("%s: cannot find GICR base for core %u", __func__, ml_get_cpu_number(phys_id));
+@@ -125,6 +134,26 @@
+ 		uint64_t const gicd_size_prop = ((uint64_t const *) prop)[1];
+ 		uint64_t const gicr_base_prop = ((uint64_t const *) prop)[2];
+ 		uint64_t const gicr_size_prop = ((uint64_t const *) prop)[3];
++
++		if (gicr_size_prop < GICR_PE_SIZE ||
++		    gicr_base_prop > UINT64_MAX - soc_base_phys ||
++		    gicr_size_prop > UINT64_MAX - soc_base_phys - gicr_base_prop ||
++		    gicd_base_prop > UINT64_MAX - soc_base_phys ||
++		    !gicd_size_prop || gicd_size_prop > UINT64_MAX - soc_base_phys - gicd_base_prop) {
++			panic("%s: invalid GIC region bounds", __func__);
++		}
++		void const *stride_prop;
++		unsigned int stride_size;
++		if (SecureDTGetProperty(entry, "redistributor-stride", &stride_prop, &stride_size) == kSuccess) {
++			if (stride_size != sizeof(uint64_t)) {
++				panic("%s: invalid redistributor-stride size", __func__);
++			}
++			uint64_t stride = *(const uint64_t *)stride_prop;
++			if (stride < GICR_PE_SIZE || (stride & 0xffff) || stride > gicr_size_prop) {
++				panic("%s: invalid redistributor-stride value", __func__);
++			}
++			gicr_stride = stride;
++		}
+ 
+ 		// Find GICD base address
+ 		gicd_base = ml_io_map(soc_base_phys + gicd_base_prop, gicd_size_prop);
+diff --git a/pexpert/arm/pe_serial.c b/pexpert/arm/pe_serial.c
+--- a/pexpert/arm/pe_serial.c
++++ b/pexpert/arm/pe_serial.c
+@@ -716,7 +716,7 @@
+ #define FBCON_SCALE     2
+ #define FBCON_FG        0xffffffffu
+ #define FBCON_BG        0xff000000u
+-#define FBCON_MAX_PIXELS (1080 * 2400)
++#define FBCON_MAX_PIXELS SWEET_FBCON_MAX_PIXELS
+ #define FBCON_GRID_MAX_COLS 136
+ #define FBCON_GRID_MAX_ROWS 150
+ 
+@@ -894,24 +894,41 @@
+ 	unsigned int size;
+ 
+ 	if (SecureDTFindEntry("name", "sweet-fbcon", &entry) != kSuccess ||
+-	    SecureDTGetProperty(entry, "reg", (void const **)&reg, &size) != kSuccess || size < 16) {
++	    SecureDTGetProperty(entry, "reg", (void const **)&reg, &size) != kSuccess || size != 16) {
+ 		return;
+ 	}
+-	if (SecureDTGetProperty(entry, "width", (void const **)&val, &size) == kSuccess) {
+-		fbcon_width = *val;
+-	}
+-	if (SecureDTGetProperty(entry, "height", (void const **)&val, &size) == kSuccess) {
+-		fbcon_height = *val;
+-	}
+-	if (SecureDTGetProperty(entry, "stride", (void const **)&val, &size) == kSuccess) {
+-		fbcon_stride = *val;
+-	}
+-	if (!fbcon_width || !fbcon_height || fbcon_stride < fbcon_width * 4 ||
+-	    (uint64_t)fbcon_width * fbcon_height > FBCON_MAX_PIXELS) {
++	if (SecureDTGetProperty(entry, "width", (void const **)&val, &size) != kSuccess ||
++	    size != sizeof(*val)) {
+ 		return;
+ 	}
++	fbcon_width = *val;
++	if (SecureDTGetProperty(entry, "height", (void const **)&val, &size) != kSuccess ||
++	    size != sizeof(*val)) {
++		return;
++	}
++	fbcon_height = *val;
++	if (SecureDTGetProperty(entry, "stride", (void const **)&val, &size) != kSuccess ||
++	    size != sizeof(*val)) {
++		return;
++	}
++	fbcon_stride = *val;
++	if (!sweet_fb_layout_valid(reg[0], reg[1], fbcon_width, fbcon_height, fbcon_stride)) {
++		return;
++	}
++	if (sweet_early_is_x9() && (reg[0] != 0xfc910000ULL ||
++	    fbcon_width != 1256 || fbcon_height != 2760 || fbcon_stride != 5120 ||
++	    reg[1] > 0x3660000ULL)) {
++		return;
++	}
++	uint64_t frame_bytes = (uint64_t)fbcon_stride * fbcon_height;
+ 	sweet_early_mark(17, "fbcon config read; mapping");
+-	fbcon_base = (volatile uint32_t *)ml_io_map_wcomb(reg[0], reg[1]);
++	/* Map one frame, not the entire multi-buffer display carveout. Align the
++	 * request ourselves: early io_map otherwise under-reserves VA for an
++	 * unaligned physical address that crosses one more kernel page. */
++	vm_offset_t offset = reg[0] & 0x3fffULL;
++	vm_size_t map_size = (frame_bytes + offset + 0x3fffULL) & ~0x3fffULL;
++	vm_offset_t mapping = ml_io_map_wcomb(reg[0] - offset, map_size);
++	fbcon_base = mapping ? (volatile uint32_t *)(mapping + offset) : NULL;
+ 	sweet_early_mark(18, "fbcon mapping returned");
+ 	if (fbcon_base != NULL) {
+ 		register_serial_functions(&sweet_fbcon_serial_functions);

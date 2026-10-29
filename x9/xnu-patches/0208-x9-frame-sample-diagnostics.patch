@@ -1,0 +1,55 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -914,6 +914,25 @@
+ }
+ 
+ static uint32_t sweet_fb_swaps_logged;
++/* X9-only bounded sample of 32x32 pixel grid. Numeric aggregates only: no
++ * screenshot, no MMIO writes. CRC is an observation, not integrity proof. */
++struct x9_fb_sample { uint32_t samples,nonblack,opaque,checksum; };
++static struct x9_fb_sample
++x9_fb_sample_grid(const uint8_t *pixels,uint32_t width,uint32_t height,uint32_t stride)
++{
++ struct x9_fb_sample sample={};
++ if(!pixels||!width||!height||stride<(uint64_t)width*4)return sample;
++ for(uint32_t y=0;y<32;y++)for(uint32_t x=0;x<32;x++){
++  uint32_t v;uint64_t off=(uint64_t)((uint64_t)y*(height-1)/31)*stride+(uint64_t)((uint64_t)x*(width-1)/31)*4;
++  memcpy(&v,pixels+off,sizeof(v));sample.samples++;
++  if(v&0x00ffffffU)sample.nonblack++;
++  if(v>>24)sample.opaque++;
++  sample.checksum=(sample.checksum*16777619U)^v;
++ }
++ return sample;
++}
++static uint32_t x9_fb_probe_count;
++
+ static uint64_t sweet_fb_swap_count;
+ 
+ /* Copy each enabled layer's surface into the panel memory (no scaling). */
+@@ -1419,6 +1438,12 @@
+ 			src = 0;
+ 		}
+ 		if (src != 0 && bpe == 4) {
++			if(sweet_board_x9()&&x9_fb_probe_count<4&&sx==0&&sy==0&&dx==0&&dy==0&&
++			   w==(int32_t)fWidth&&h==(int32_t)fHeight){
++				struct x9_fb_sample z=x9_fb_sample_grid((const uint8_t *)(src+s->offset),fWidth,fHeight,s->bytesPerRow);
++				IOLog("X9 FB PROBE source: sample=%u nonblack=%u alpha=%u checksum=%08x surface=%u\n",
++				  z.samples,z.nonblack,z.opaque,z.checksum,id);
++			}
+ 			for (int32_t y = 0; y < h; y++) {
+ 				memcpy((void *)(dst + (uint64_t)(dy + y) * fRowBytes + (uint64_t)dx * 4),
+ 				    (const void *)(src + s->offset + (uint64_t)(sy + y) * s->bytesPerRow + (uint64_t)sx * 4),
+@@ -1426,6 +1451,12 @@
+ 			}
+ 		}
+ 		s->release();
++	}
++	if(sweet_board_x9()&&x9_fb_probe_count<4&&dst!=NULL){
++		struct x9_fb_sample z=x9_fb_sample_grid(dst,fWidth,fHeight,fRowBytes);
++		IOLog("X9 FB PROBE destination: sample=%u nonblack=%u alpha=%u checksum=%08x is_boot_fb=%u mask=%08x\n",
++		  z.samples,z.nonblack,z.opaque,z.checksum,dst==(uint8_t *)fPixels,mask);
++		x9_fb_probe_count++;
+ 	}
+ 	if (fFlip[0] != NULL) {
+ 		flipBack();

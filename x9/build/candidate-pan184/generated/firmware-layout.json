@@ -1,0 +1,332 @@
+{
+  "bytes": 339968,
+  "sha256": "f87731dc7bb713606ef87a3a27dbd33ea94741b30d1ddee6662e5ceeaa279833",
+  "header_version": "0.3",
+  "version_hash": "0x4060000",
+  "entries_end": 824,
+  "entries": [
+    {
+      "offset": 20,
+      "type": 0,
+      "size": 32,
+      "optional": false,
+      "updatable": false,
+      "region": 0
+    },
+    {
+      "offset": 52,
+      "type": 0,
+      "size": 32,
+      "optional": false,
+      "updatable": false,
+      "region": 1
+    },
+    {
+      "offset": 84,
+      "type": 0,
+      "size": 32,
+      "optional": false,
+      "updatable": false,
+      "region": 2
+    },
+    {
+      "offset": 116,
+      "type": 0,
+      "size": 32,
+      "optional": false,
+      "updatable": false,
+      "region": 3
+    },
+    {
+      "offset": 148,
+      "type": 0,
+      "size": 32,
+      "optional": false,
+      "updatable": false,
+      "region": 4
+    },
+    {
+      "offset": 180,
+      "type": 0,
+      "size": 32,
+      "optional": false,
+      "updatable": false,
+      "region": 5
+    },
+    {
+      "offset": 212,
+      "type": 0,
+      "size": 32,
+      "optional": false,
+      "updatable": false,
+      "region": 6
+    },
+    {
+      "offset": 244,
+      "type": 0,
+      "size": 32,
+      "optional": false,
+      "updatable": false,
+      "region": 7
+    },
+    {
+      "offset": 276,
+      "type": 0,
+      "size": 32,
+      "optional": false,
+      "updatable": false,
+      "region": 8
+    },
+    {
+      "offset": 308,
+      "type": 1,
+      "size": 32,
+      "optional": true,
+      "updatable": true
+    },
+    {
+      "offset": 340,
+      "type": 1,
+      "size": 24,
+      "optional": true,
+      "updatable": false
+    },
+    {
+      "offset": 364,
+      "type": 3,
+      "size": 40,
+      "optional": true,
+      "updatable": false
+    },
+    {
+      "offset": 404,
+      "type": 3,
+      "size": 48,
+      "optional": true,
+      "updatable": false
+    },
+    {
+      "offset": 452,
+      "type": 3,
+      "size": 40,
+      "optional": true,
+      "updatable": true
+    },
+    {
+      "offset": 492,
+      "type": 3,
+      "size": 44,
+      "optional": true,
+      "updatable": false
+    },
+    {
+      "offset": 536,
+      "type": 3,
+      "size": 44,
+      "optional": true,
+      "updatable": true
+    },
+    {
+      "offset": 580,
+      "type": 3,
+      "size": 52,
+      "optional": true,
+      "updatable": true
+    },
+    {
+      "offset": 632,
+      "type": 3,
+      "size": 52,
+      "optional": true,
+      "updatable": true
+    },
+    {
+      "offset": 684,
+      "type": 3,
+      "size": 44,
+      "optional": true,
+      "updatable": true
+    },
+    {
+      "offset": 728,
+      "type": 7,
+      "size": 16,
+      "optional": true,
+      "updatable": false
+    },
+    {
+      "offset": 744,
+      "type": 6,
+      "size": 12,
+      "optional": true,
+      "updatable": false,
+      "build_info": "git_sha: d39012e54da2730c3ecef94e42b7a76ff8ad4a7a "
+    },
+    {
+      "offset": 756,
+      "type": 5,
+      "size": 20,
+      "optional": true,
+      "updatable": false
+    },
+    {
+      "offset": 776,
+      "type": 9,
+      "size": 12,
+      "optional": true,
+      "updatable": false
+    },
+    {
+      "offset": 788,
+      "type": 4,
+      "size": 28,
+      "optional": true,
+      "updatable": false
+    },
+    {
+      "offset": 816,
+      "type": 8,
+      "size": 8,
+      "optional": true,
+      "updatable": false
+    }
+  ],
+  "regions": [
+    {
+      "flags": 9,
+      "virtual_start": 4194304,
+      "virtual_end": 4259840,
+      "data_start": 4932,
+      "data_end": 5092,
+      "name": "",
+      "virtual_exe_start": 4194304,
+      "protected": false,
+      "shared": false,
+      "zero": false,
+      "executable": false,
+      "gpu_pages": 16,
+      "host_pages": 4
+    },
+    {
+      "flags": 9,
+      "virtual_start": 4259840,
+      "virtual_end": 4325376,
+      "data_start": 5104,
+      "data_end": 10900,
+      "name": "",
+      "virtual_exe_start": 4259840,
+      "protected": false,
+      "shared": false,
+      "zero": false,
+      "executable": false,
+      "gpu_pages": 16,
+      "host_pages": 4
+    },
+    {
+      "flags": 9,
+      "virtual_start": 0,
+      "virtual_end": 65536,
+      "data_start": 4932,
+      "data_end": 5092,
+      "name": "",
+      "virtual_exe_start": 0,
+      "protected": false,
+      "shared": false,
+      "zero": false,
+      "executable": false,
+      "gpu_pages": 16,
+      "host_pages": 4
+    },
+    {
+      "flags": 13,
+      "virtual_start": 8388608,
+      "virtual_end": 8519680,
+      "data_start": 10900,
+      "data_end": 99572,
+      "name": "",
+      "virtual_exe_start": 8388608,
+      "protected": false,
+      "shared": false,
+      "zero": false,
+      "executable": true,
+      "gpu_pages": 32,
+      "host_pages": 8
+    },
+    {
+      "flags": 2147483659,
+      "virtual_start": 33554432,
+      "virtual_end": 33816576,
+      "data_start": 99576,
+      "data_end": 311920,
+      "name": "",
+      "virtual_exe_start": 33554432,
+      "protected": false,
+      "shared": false,
+      "zero": true,
+      "executable": false,
+      "gpu_pages": 64,
+      "host_pages": 16
+    },
+    {
+      "flags": 2147483657,
+      "virtual_start": 16777216,
+      "virtual_end": 17039360,
+      "data_start": 99576,
+      "data_end": 311920,
+      "name": "",
+      "virtual_exe_start": 16777216,
+      "protected": false,
+      "shared": false,
+      "zero": true,
+      "executable": false,
+      "gpu_pages": 64,
+      "host_pages": 16
+    },
+    {
+      "flags": 43,
+      "virtual_start": 50331648,
+      "virtual_end": 50593792,
+      "data_start": 0,
+      "data_end": 0,
+      "name": "",
+      "virtual_exe_start": 50331648,
+      "protected": true,
+      "shared": false,
+      "zero": false,
+      "executable": false,
+      "gpu_pages": 64,
+      "host_pages": 16
+    },
+    {
+      "flags": 9,
+      "virtual_start": 12582912,
+      "virtual_end": 12648448,
+      "data_start": 311920,
+      "data_end": 327772,
+      "name": "",
+      "virtual_exe_start": 0,
+      "protected": false,
+      "shared": false,
+      "zero": false,
+      "executable": false,
+      "gpu_pages": 16,
+      "host_pages": 4
+    },
+    {
+      "flags": 3221225499,
+      "virtual_start": 67108864,
+      "virtual_end": 67174400,
+      "data_start": 331776,
+      "data_end": 339968,
+      "name": "",
+      "virtual_exe_start": 67108864,
+      "protected": false,
+      "shared": true,
+      "zero": true,
+      "executable": false,
+      "gpu_pages": 16,
+      "host_pages": 4
+    }
+  ],
+  "mapped_bytes": 983040
+}

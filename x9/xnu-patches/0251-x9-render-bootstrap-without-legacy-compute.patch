@@ -1,0 +1,99 @@
+diff --git a/iokit/Kernel/arm/SweetX9CSFResident.inc b/iokit/Kernel/arm/SweetX9CSFResident.inc
+--- a/iokit/Kernel/arm/SweetX9CSFResident.inc
++++ b/iokit/Kernel/arm/SweetX9CSFResident.inc
+@@ -108,6 +108,7 @@
+  int enabled=0;
+  if(!metal_startup_verified||resident||!gpu||active_metal_job||active_desktop_job||resident_epoch_counter==UINT64_MAX||
+     !PE_parse_boot_argn("x9_metal_render",&enabled,sizeof(enabled))||enabled!=1)return 0;
++ const char *stage="initial-state";
+  auto *s=new ResidentSession;if(!s)return 0;resident=s;s->gpu=gpu;s->epoch=++resident_epoch_counter;
+  s->smmu=ml_io_map(0x48600000,0x1000);s->doorbell=ml_io_map(0x48080000,0x1000);
+  s->saved_cfg=gr64(gpu,0x2430);s->saved_attr=gr64(gpu,0x2408);s->gpu_mask=gr(gpu,0x28);s->job_mask=gr(gpu,0x1008);
+@@ -118,6 +119,7 @@
+     gr64(gpu,0x2440)||((s->saved_cfg&15)!=0&&(s->saved_cfg&15)!=1)||!present||present==~0ULL||initial==~0ULL||
+     gr(gpu,0x1000)&0x80000001u||gr(gpu,0x20)&(1u<<17)||!no_faults(gpu))goto clean_failure;
+  {
++  stage="firmware-and-queue-backing";
+   const char *error=parse(s->image);if(!error)error=populate(s->image);
+   if(error||!resident_trace_setup(s->image)||!queue_prepare(s->image,s->policy,gpu,pa_bits)||!s->policy.requested||!s->policy.compute)goto clean_failure;
+   for(unsigned i=0;i<8;i++) {
+@@ -126,6 +128,7 @@
+   }
+   if(!sync_to_device(s->image,pa_bits)||!bypass(s->smmu)||!idle_as(gpu))goto clean_failure;
+  }
++ stage="power-delegation-and-AS0";
+  if(!shader_delegate(s->policy,gpu))goto cleanup_failure;
+  s->l2_owned=present&~initial;
+  if(!power_l2(gpu,s->l2_owned,true)){s->uncertain=true;goto cleanup_failure;}
+@@ -135,6 +138,7 @@
+  if(!install_as(gpu,s->image.tables[0].pa))goto cleanup_failure;
+  gw(gpu,0x700,2);s->mcu_started=true;
+  {
++  stage="fresh-MCU-IRQ";
+   bool fresh=false;uint64_t end=deadline_ms(3000);
+   do {
+    if(!no_faults(gpu))break;
+@@ -142,16 +146,22 @@
+   }while(mach_absolute_time()<end);
+   if(!fresh)goto cleanup_failure;gw(gpu,0x1004,0x80000000u);
+   uint32_t input=0,output=0;
++  stage="firmware-capabilities-and-PING";
+   if(!capabilities(s->image,&input,&output)||!ping(s->image,gpu,s->doorbell,input,output,1)||
+-     !ping(s->image,gpu,s->doorbell,input,output,2)||!resident_capabilities(*s,input,output)||
+-     !queue_interfaces(s->image,s->policy,input,output)||!global_configure(s->image,s->policy,gpu,s->doorbell))goto cleanup_failure;
++     !ping(s->image,gpu,s->doorbell,input,output,2))goto cleanup_failure;
++  stage="three-stream-capabilities";
++  if(!resident_capabilities(*s,input,output))goto cleanup_failure;
++  stage="global-configuration";
++  if(!queue_interfaces(s->image,s->policy,input,output)||!global_configure(s->image,s->policy,gpu,s->doorbell))goto cleanup_failure;
+  }
+  s->ready=true;
+  IOLog("X9 RENDER SESSION: resident MCU with%u three-stream slots;AS0 live;GPUEB refs retained;render service not published\n",s->slot_count);
+  return 2;
+ cleanup_failure:
++ IOLog("X9 RENDER SESSION: startup failed stage=%s; checking cleanup\n",stage);
+  if(!resident_cleanup(*s)){s->uncertain=true;IOLog("X9 RENDER SESSION: cleanup uncertain;all DMA/power refs retained,no reset\n");return -1;}
+ clean_failure:
++ IOLog("X9 RENDER SESSION: startup unavailable stage=%s; no reset\n",stage);
+  delete s;resident=nullptr;return 0;
+ }
+ static int resident_end() {
+diff --git a/iokit/Kernel/arm/SweetX9CSF.cpp b/iokit/Kernel/arm/SweetX9CSF.cpp
+--- a/iokit/Kernel/arm/SweetX9CSF.cpp
++++ b/iokit/Kernel/arm/SweetX9CSF.cpp
+@@ -641,12 +641,19 @@
+ extern "C" void sweet_x9_render_bootstrap(void) {
+  int opt=0;
+  if(!PE_parse_boot_argn("x9_metal_render",&opt,sizeof(opt))||opt!=1||render_engine_installed)return;
++ /* The render flag replaces the legacy compute flag. Bootstrap cannot
++  * depend on compute publication to allocate the shared owner lock. This is
++  * the sole startup worker; no service is published before allocation. */
++ if(!metal_service_lock)metal_service_lock=IOLockAlloc();
+  if(!sweet_x9_render_owner_enter())return;
+  int result=sweet_x9_gpu_render_begin();
+  if(result==2)render_engine_installed=true;
+  sweet_x9_render_owner_leave();
+  if(result==2) {
+   sweet_x9_render_install(&resident_engine);sweet_x9_render_publish();
++  X9RenderCaps caps={};
++  if(render_caps(&caps))IOLog("X9 RENDER CAPS: abi=%u capabilities=0x%x streams=%u cache-atom=%u;no legacy compute publication\n",
++   caps.abi,caps.capabilities,caps.max_streams,X9_RENDER_CACHE_ATOM);
+   IOLog("X9 RENDER: resident multi-stream engine callbacks installed;experimental opt-in,no hardware rendering claim\n");
+  }else IOLog("X9 RENDER: resident engine unavailable result=%d;no render service published\n",result);
+ }
+diff --git a/bsd/dev/sweet_x9_gpu_dependencies.c b/bsd/dev/sweet_x9_gpu_dependencies.c
+--- a/bsd/dev/sweet_x9_gpu_dependencies.c
++++ b/bsd/dev/sweet_x9_gpu_dependencies.c
+@@ -268,7 +268,11 @@
+  }
+  status(&s);log_status("released",&s);snapshot("released");
+  printf("X9 GPU: one-shot finished ID_valid=%d; power reference released, shared carveout retained\n",id_ok);
+- if(id_ok){sweet_x9_compute_publish();sweet_x9_render_bootstrap();}
++ if(id_ok) {
++  int render=0;
++  if(PE_parse_boot_argn("x9_metal_render",&render,sizeof(render))&&render==1)sweet_x9_render_bootstrap();
++  else sweet_x9_compute_publish();
++ }
+ }
+ static void worker(void *arg,wait_result_t result) {
+  (void)arg;(void)result;sweet_x9_csf_prepare();run();(void)thread_terminate(current_thread());

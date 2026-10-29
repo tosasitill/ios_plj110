@@ -1,0 +1,177 @@
+From e9cc579aa5b9feb3898eae669a05333d345735f4 Mon Sep 17 00:00:00 2001
+From: Egor Kulikovskiy <xianel0x@gmail.com>
+Date: Thu, 22 Oct 2026 00:02:04 +0500
+Subject: [PATCH] x676c: unwind kernel stacks in SMP sampler, trace
+ mach_vm_allocate phases, and un-gate infracfg_ao clock distribution
+
+exception.c now includes <kern/thread_kernel_state.h> directly for
+thread_get_kernel_state(). That header has an #ifndef guard but was
+missing its #define, so the second include (via arm/thread.h) redefined
+struct thread_kernel_state and broke the build. Add the missing define.
+---
+ iokit/Kernel/arm/SweetFramebuffer.cpp | 12 +++++++-
+ osfmk/ipc/mach_kernelrpc.c            | 40 +++++++++++++++++++--------
+ osfmk/kern/exception.c                | 27 ++++++++++++++++++
+ osfmk/kern/thread_kernel_state.h      |  1 +
+ 4 files changed, 68 insertions(+), 12 deletions(-)
+
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index e4c1f78..48ae2da 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -382,7 +382,17 @@ AppleCLCD::start(IOService *provider)
+ 			if (sweet_board_x676c()) {
+ 				IOLog("SWEET GPU: powering on MT6789 Mali-G57 subsystem...\n");
+ 
+-				/* 1. Un-gate topckgen MFG clock distribution at 0x10000000 */
++				/* 1. Un-gate infracfg_ao clock distribution and topckgen MFG clocks */
++				volatile uint32_t *infra_ao = (volatile uint32_t *)ml_io_map(0x10001000, 0x1000);
++				if (infra_ao != NULL) {
++					infra_ao[0x0088 / 4] = 0xffffffff;
++					infra_ao[0x008c / 4] = 0xffffffff;
++					infra_ao[0x0094 / 4] = 0xffffffff;
++					IODelay(20);
++					IOLog("SWEET GPU: infracfg_ao at 0x10001000: cg0=0x%08x cg1=0x%08x\n",
++					    infra_ao[0x0080 / 4], infra_ao[0x0084 / 4]);
++				}
++
+ 				volatile uint32_t *topck = (volatile uint32_t *)ml_io_map(0x10000000, 0x1000);
+ 				if (topck != NULL) {
+ 					/* MT6789 topckgen CLK_CFG_3_CLR is at offset 0x0058: clear bits 18 (mfgcfg) and 7 */
+diff --git a/osfmk/ipc/mach_kernelrpc.c b/osfmk/ipc/mach_kernelrpc.c
+index f2c7a59..de9da0e 100644
+--- a/osfmk/ipc/mach_kernelrpc.c
++++ b/osfmk/ipc/mach_kernelrpc.c
+@@ -59,25 +59,42 @@ extern lck_mtx_t g_dyldinfo_mtx;
+ int
+ _kernelrpc_mach_vm_allocate_trap(struct _kernelrpc_mach_vm_allocate_trap_args *args)
+ {
+-	mach_vm_offset_t addr;
++	mach_vm_offset_t addr = 0;
+ 	task_t task = port_name_to_current_task_noref(args->target);
+ 	int rv = MACH_SEND_INVALID_DEST;
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	printf("SWEET VM: vm_allocate ENTER target=0x%x addr_ptr=0x%llx size=0x%llx flags=0x%x task=%p cur=%p\n",
++	    args->target, (uint64_t)args->addr, (uint64_t)args->size, args->flags, task, current_task());
++#endif
++
+ 	if (task) {
+ 		if ((rv = mach_copyin(args->addr, (char *)&addr, sizeof(addr)))) {
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++			printf("SWEET VM: vm_allocate mach_copyin failed rv=%d\n", rv);
++#endif
+ 			goto done;
+ 		}
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++		printf("SWEET VM: vm_allocate in_addr=0x%llx, calling mach_vm_allocate_external...\n", (uint64_t)addr);
++#endif
++
+ 		rv = mach_vm_allocate_external(task->map, &addr, args->size, args->flags);
++
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++		printf("SWEET VM: vm_allocate external done rv=%d out_addr=0x%llx\n", rv, (uint64_t)addr);
++#endif
++
+ 		if (rv == KERN_SUCCESS) {
+-			rv = mach_copyout(&addr, args->addr, sizeof(addr));
+-		}
++			int out_rv = mach_copyout(&addr, args->addr, sizeof(addr));
++			if (out_rv != KERN_SUCCESS) {
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+-		if (task_pid(task) == 1) {
+-			printf("SWEET VM: pid 1 vm_allocate target=0x%x size=0x%llx flags=0x%x addr=0x%llx rv=%d\n",
+-			    args->target, (uint64_t)args->size, args->flags, (uint64_t)addr, rv);
+-		}
++				printf("SWEET VM: vm_allocate mach_copyout failed out_rv=%d\n", out_rv);
+ #endif
++				rv = out_rv;
++			}
++		}
+ 	}
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ 	else {
+@@ -86,6 +103,9 @@ _kernelrpc_mach_vm_allocate_trap(struct _kernelrpc_mach_vm_allocate_trap_args *a
+ #endif
+ 
+ done:
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	printf("SWEET VM: vm_allocate EXIT rv=%d\n", rv);
++#endif
+ 	return rv;
+ }
+ 
+@@ -141,10 +161,8 @@ _kernelrpc_mach_vm_map_trap(struct _kernelrpc_mach_vm_map_trap_args *args)
+ 		rv = mach_copyout(&addr, args->addr, sizeof(addr));
+ 	}
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+-	if (task_pid(task) == 1) {
+-		printf("SWEET VM: pid 1 vm_map target=0x%x size=0x%llx flags=0x%x addr=0x%llx rv=%d\n",
+-		    args->target, (uint64_t)args->size, args->flags, (uint64_t)addr, rv);
+-	}
++	printf("SWEET VM: vm_map target=0x%x size=0x%llx flags=0x%x addr=0x%llx rv=%d\n",
++	    args->target, (uint64_t)args->size, args->flags, (uint64_t)addr, rv);
+ #endif
+ 
+ done:
+diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
+index b5ccab7..7c3a65e 100644
+--- a/osfmk/kern/exception.c
++++ b/osfmk/kern/exception.c
+@@ -93,6 +93,7 @@
+ #include <string.h>
+ 
+ #include <pexpert/pexpert.h>
++#include <kern/thread_kernel_state.h>
+ 
+ #include <os/log.h>
+ #include <os/system_event_log.h>
+@@ -1051,6 +1052,32 @@ sweet_sample_task(const char *name, int pid, task_t task)
+ 		printf("SMP %s t%d kern [state=0x%x cont=0x%llx (unslid 0x%llx) wait_event=0x%llx wr=%d rsn=0x%x]\n",
+ 		    name, cur_tn, thread->state, cont, cont_unslid,
+ 		    (uint64_t)thread->wait_event, thread->wait_result, (uint32_t)thread->reason);
++
++		if (thread->kernel_stack != 0) {
++			arm_kernel_saved_state_t *kstate = &thread_get_kernel_state(thread)->machine.ss;
++			if (kstate) {
++				char kline[400];
++				uint64_t kfp = kstate->fp;
++				uint64_t klr = kstate->lr ? (kstate->lr - (uint64_t)vm_kernel_slide) : 0;
++				uint64_t ksp = kstate->sp;
++				int kn = snprintf(kline, sizeof(kline), "SMP %s t%d ksp 0x%llx kfp 0x%llx klr 0x%llx kbt",
++				    name, cur_tn, ksp, kfp, klr);
++				for (int ki = 0; ki < 16 && kfp != 0 && (kfp & 7) == 0 && kn < (int)sizeof(kline) - 30; ki++) {
++					if (kfp < VM_MIN_KERNEL_ADDRESS || kfp >= VM_MAX_KERNEL_ADDRESS) {
++						break;
++					}
++					uint64_t *frame = (uint64_t *)kfp;
++					uint64_t next_fp = frame[0];
++					uint64_t ret_pc = frame[1] ? (frame[1] - (uint64_t)vm_kernel_slide) : 0;
++					kn += snprintf(kline + kn, sizeof(kline) - kn, " 0x%llx", ret_pc);
++					if (next_fp <= kfp || next_fp >= VM_MAX_KERNEL_ADDRESS) {
++						break;
++					}
++					kfp = next_fp;
++				}
++				printf("%s\n", kline);
++			}
++		}
+ 	}
+ 	task_unlock(task);
+ }
+diff --git a/osfmk/kern/thread_kernel_state.h b/osfmk/kern/thread_kernel_state.h
+index 36e95fb..18a0ac8 100644
+--- a/osfmk/kern/thread_kernel_state.h
++++ b/osfmk/kern/thread_kernel_state.h
+@@ -27,6 +27,7 @@
+  */
+ 
+ #ifndef _KERN_THREAD_KERNEL_STATE_H_
++#define _KERN_THREAD_KERNEL_STATE_H_
+ 
+ #include <vm/vm_kern.h>
+ 
+-- 
+2.51.0.windows.1
+

@@ -1,0 +1,249 @@
+diff --git a/bsd/dev/sweet_x9_gpu_dependencies.c b/bsd/dev/sweet_x9_gpu_dependencies.c
+--- a/bsd/dev/sweet_x9_gpu_dependencies.c
++++ b/bsd/dev/sweet_x9_gpu_dependencies.c
+@@ -1,7 +1,7 @@
+ /* MT6993 one-shot GPUEB mailbox power/ID bring-up. Source contract:
+  * gpufreq_v2.c / gpufreq_ipi.h; gpueb_ipi.c; mtk-mbox.c; captured PLJ110 DT.
+  * Uses an already resumed GPUEB only. No GHPM reset, rail/clock guessing,
+- * OPP changes, CSF firmware loading, job submission or display changes.
++ * OPP changes, MCU firmware execution, job submission or display changes.
+  * All writes require this boot's shim-validated ADT contract and boot opt-in.
+  */
+ #include <sys/systm.h>
+@@ -16,6 +16,7 @@
+ extern vm_offset_t ml_io_map(vm_offset_t,vm_size_t);
+ extern int sweet_early_is_x9(void);
+ extern kern_return_t thread_terminate(thread_t);
++extern void sweet_x9_csf_prepare(void);
+ 
+ #define ACK 0xc0000000u
+ #define CHANNEL_BIT 2u
+@@ -58,7 +59,7 @@
+  if(SecureDTLookupEntry(NULL,"/chosen",&chosen)!=kSuccess||
+     SecureDTGetProperty(chosen,"x9-gpu-handoff",&property,&size)!=kSuccess||size!=64)return 0;
+  const uint8_t *p=property;
+- return le32(p)==1&&le32(p+4)==1&&le64(p+8)==SHARED_PA&&le64(p+16)==0x180000&&
++ return le32(p)==2&&le32(p+4)==1&&le64(p+8)==SHARED_PA&&le64(p+16)==0x180000&&
+   le32(p+24)==SHARED_SIZE&&le32(p+28)==4&&le32(p+32)==55&&le32(p+36)==8&&
+   le64(p+40)==0x4b09fd80&&le64(p+48)==0x4b170000&&le64(p+56)==0x4b09fc80;
+ }
+@@ -160,10 +161,23 @@
+  }while(1);
+  return -1;
+ }
++/* Read-only capability/state capture after power/count/ID gates. Source:
++ * a16w CSF regmap and MT6993 gpufreq_reg; SMMUv3 common header offsets.
++ * Enabled translation or bypass state does not establish a DMA mapping. */
++static void observe_memory_prerequisites(vm_offset_t gpu) {
++ printf("X9 CSF HW: L2_FEATURES=%08x MMU_FEATURES=%08x AS_PRESENT=%08x MCU_STATUS=%08x\n",
++  rd(gpu,4),rd(gpu,0x14),rd(gpu,0x18),rd(gpu,0x704));
++ vm_offset_t smmu=ml_io_map(0x48600000,0x1000);
++ if(!smmu){printf("X9 CSF HW: MFG SMMU mapping failed; DMA not enabled\n");return;}
++ uint32_t cr0=rd(smmu,0x20),ack=rd(smmu,0x24),gbpa=rd(smmu,0x44);
++ printf("X9 CSF HW: SMMU_CR0=%08x CR0ACK=%08x GBPA=%08x enable=%u abort=%u; no SMMU writes\n",
++  cr0,ack,gbpa,cr0&1,(gbpa>>20)&1);
++ printf("X9 CSF HW: host image/table preparation is separate; MCU start waits for explicit DMA ownership\n");
++}
+ static void run(void) {
+  int enabled=0;
+  if(!PE_parse_boot_argn("x9_gpu_power_probe",&enabled,sizeof(enabled))||enabled!=1)return;
+- printf("X9 GPU: pan146 one-shot INIT -> POWER_ON -> ID -> POWER_OFF\n");
++ printf("X9 GPU: pan147 one-shot INIT -> POWER_ON -> ID -> POWER_OFF\n");
+  if(!handoff()){printf("X9 GPU: live FDT handoff absent/mismatched; all writes refused\n");return;}
+  spm=ml_io_map(0x1c004000,0x1000);
+  if(!spm||!on(rd(spm,0xe1c))){printf("X9 GPU: SPM MFG0 ACK absent; stopped\n");return;}
+@@ -224,6 +238,7 @@
+   uint32_t id=rd(gpu,0);__asm__ volatile("dsb sy" ::: "memory");uint32_t again=rd(gpu,0);
+   id_ok=id&&id!=0xffffffffu&&id==again;
+   printf("X9 GPU: GPU_ID=%08x repeat=%08x stable-valid=%d (no jobs/CSF firmware)\n",id,again,id_ok);
++  if(id_ok)observe_memory_prerequisites(gpu);
+  }
+ cleanup:
+  if(channel_uncertain) {
+@@ -243,7 +258,7 @@
+  printf("X9 GPU: one-shot finished ID_valid=%d; power reference released, shared carveout retained\n",id_ok);
+ }
+ static void worker(void *arg,wait_result_t result) {
+- (void)arg;(void)result;run();(void)thread_terminate(current_thread());
++ (void)arg;(void)result;sweet_x9_csf_prepare();run();(void)thread_terminate(current_thread());
+ }
+ /* Replaces the pan143 observer entry point, preserving its UFS startup hook. */
+ void sweet_x9_gpu_dependencies(void) {
+diff --git a/iokit/Kernel/arm/SweetX9CSF.cpp b/iokit/Kernel/arm/SweetX9CSF.cpp
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetX9CSF.cpp
+@@ -0,0 +1,174 @@
++/* MT6993 CSF host-memory preparation, from OPPO a16w firmware/MMU sources.
++ * Parses stock CSF0.3, creates private image buffers and a 4-KiB AArch64
++ * page-table candidate using 16-KiB XNU allocations. Never publishes a root,
++ * enables an address space, writes SMMU or starts the MCU. CPU physical
++ * addresses in this candidate require an explicit GPU DMA mapping backend
++ * before they can become hardware-visible addresses. */
++#include <IOKit/IOBufferMemoryDescriptor.h>
++#include <IOKit/IOLib.h>
++#include <mach/mach_types.h>
++#include <pexpert/pexpert.h>
++#include <libkern/libkern.h>
++#include "x9_csf_firmware.inc"
++extern "C" int sweet_early_is_x9(void);
++extern "C" void sweet_x9_csf_prepare(void);
++
++namespace {
++constexpr unsigned gpu_page=4096, host_page=16384, max_regions=32, max_tables=32;
++constexpr uint64_t pa_mask=0x0000fffffffff000ULL;
++constexpr uint32_t flag_protected=32, flag_shared=1u<<30, supported_flags=0xc000003f;
++struct Region {
++ uint32_t flags,begin,end,data_begin,data_end,exe;
++ IOBufferMemoryDescriptor *memory;
++};
++struct Table {
++ IOBufferMemoryDescriptor *memory;
++ uint64_t *entries,pa;
++};
++struct Plan {
++ Region regions[max_regions];Table tables[max_tables];
++ unsigned region_count,table_count,entry_count,protected_count,mapped_pages;
++ uint64_t mapped_bytes;
++ Plan():region_count(0),table_count(0),entry_count(0),protected_count(0),mapped_pages(0),mapped_bytes(0) {
++  bzero(regions,sizeof(regions));bzero(tables,sizeof(tables));
++ }
++ ~Plan() {
++  /* No device ever receives these addresses, so all allocations can be
++   * released even after partial failure without waiting for GPU quiescence. */
++  for(unsigned i=0;i<region_count;i++)if(regions[i].memory)regions[i].memory->release();
++  for(unsigned i=0;i<table_count;i++)if(tables[i].memory)tables[i].memory->release();
++ }
++};
++static uint32_t get32(const unsigned char *p) {
++ return p[0]|(uint32_t)p[1]<<8|(uint32_t)p[2]<<16|(uint32_t)p[3]<<24;
++}
++static const char *parse(Plan &p) {
++ const unsigned char *b=csf_firmware_bytes;size_t bytes=sizeof(csf_firmware_bytes);
++ if(bytes<20||bytes>(4u<<20)||get32(b)!=0xc3f13a6e||b[4]!=3||b[5]!=0)return "header/version";
++ uint32_t end=get32(b+16),at=20;
++ if(end<20||end>bytes||(end&3))return "entry table bounds";
++ while(at<end) {
++  if(end-at<4||p.entry_count++>=128)return "entry count/header";
++  uint32_t h=get32(b+at),size=(h>>8)&255,type=h&255;
++  if(size<4||(size&3)||size>end-at)return "entry length";
++  if(type==0) {
++   if(size<28||p.region_count==max_regions)return "region length/count";
++   const unsigned char *e=b+at+4;
++   Region r={get32(e),get32(e+4),get32(e+8),get32(e+12),get32(e+16),0,NULL};
++   if(r.flags&~supported_flags||!(r.flags&3))return "region flags";
++   if(r.begin>=r.end||((r.begin|r.end)&4095)||r.end-r.begin>(4u<<20))return "region VA";
++   if(r.data_begin>r.data_end||r.data_end>bytes||r.data_end-r.data_begin>r.end-r.begin)return "region file range";
++   unsigned name=24;
++   while(name<size&&b[at+name])name++;
++   if(name==size||size-name-1<4)return "region name/execution field";
++   r.exe=get32(b+at+name+1);
++   for(unsigned i=0;i<p.region_count;i++)
++    if(r.begin<p.regions[i].end&&p.regions[i].begin<r.end)return "overlapping virtual regions";
++   if(r.flags&flag_protected)p.protected_count++;
++   else p.mapped_bytes+=(uint64_t)r.end-r.begin;
++   if(p.mapped_bytes>(16u<<20))return "image allocation budget";
++   p.regions[p.region_count++]=r;
++  }else if(type!=1&&type!=3&&type!=4&&type!=6&&type!=7&&type!=8&&type!=9&&!(h&0x80000000u)) {
++   return "unknown required entry";
++  }
++  at+=size;
++ }
++ unsigned shared=0;
++ for(unsigned i=0;i<p.region_count;i++)if((p.regions[i].flags&flag_shared)&&!(p.regions[i].flags&flag_protected)) {
++  if(p.regions[i].begin!=0x04000000u)return "shared interface address";
++  shared++;
++ }
++ return at==end&&p.mapped_bytes&&shared==1?NULL:"missing shared interface";
++}
++static bool physical(IOBufferMemoryDescriptor *m,uint64_t off,uint64_t *pa) {
++ IOByteCount length=0;
++ uint64_t value=m->getPhysicalSegment(off,&length,kIOMemoryMapperNone);
++ if(!value||length<gpu_page||(value&4095)||(value&~pa_mask))return false;
++ *pa=value;return true;
++}
++static int table_alloc(Plan &p) {
++ if(p.table_count==max_tables)return -1;
++ IOBufferMemoryDescriptor *m=IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,kIODirectionInOut,host_page,host_page);
++ if(!m)return -1;
++ uint64_t pa;
++ if(!physical(m,0,&pa)||(pa&(host_page-1))){m->release();return -1;}
++ void *va=m->getBytesNoCopy();
++ if(!va){m->release();return -1;}
++ bzero(va,host_page);
++ unsigned i=p.table_count++;p.tables[i]={m,(uint64_t *)va,pa};return (int)i;
++}
++static int table_find(const Plan &p,uint64_t pa) {
++ for(unsigned i=0;i<p.table_count;i++)if(p.tables[i].pa==pa)return (int)i;
++ return -1;
++}
++static uint64_t attributes(uint32_t flags) {
++ /* DT system-coherency=0. Follow stock convert_mem_flags: coherent cache
++  * modes fall back to non-cacheable; ordinary cached mode uses index0. */
++ unsigned cache=(flags>>3)&3,index=cache==1?0:5;
++ uint64_t result=(uint64_t)index<<2;
++ result|=(flags&2)?(1ULL<<6):(3ULL<<6);
++ if(!(flags&4))result|=1ULL<<54;
++ return result|0x400ULL|3;
++}
++static bool map_page(Plan &p,uint32_t address,uint64_t physical,uint32_t flags) {
++ unsigned table=0;
++ for(unsigned level=0;level<3;level++) {
++  unsigned slot=((uint64_t)address>>(39-level*9))&511;
++  uint64_t old=p.tables[table].entries[slot];int next;
++  if(!old) {
++   next=table_alloc(p);if(next<0)return false;
++   /* Same descriptor bits as stock entry_set_pte (type3 + access bit). */
++   p.tables[table].entries[slot]=p.tables[next].pa|0x400ULL|3;
++  }else {
++   if((old&3)!=3)return false;
++   next=table_find(p,old&pa_mask);if(next<0)return false;
++  }
++  table=(unsigned)next;
++ }
++ unsigned slot=(address>>12)&511;
++ if(p.tables[table].entries[slot])return false;
++ p.tables[table].entries[slot]=physical|attributes(flags);p.mapped_pages++;return true;
++}
++static const char *populate(Plan &p) {
++ if(PAGE_SIZE!=host_page)return "requires 16-KiB host pages";
++ if(table_alloc(p)!=0)return "root table allocation";
++ for(unsigned i=0;i<p.region_count;i++) {
++  Region &r=p.regions[i];
++  if(r.flags&flag_protected) {
++   IOLog("X9 CSF: region=%u va=%08x..%08x protected; left unmapped\n",i,r.begin,r.end);continue;
++  }
++  uint32_t bytes=r.end-r.begin;
++  uint32_t allocated=(bytes+host_page-1)&~(host_page-1);
++  r.memory=IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,kIODirectionInOut,allocated,host_page);
++  if(!r.memory)return "image buffer allocation";
++  void *va=r.memory->getBytesNoCopy();if(!va)return "image CPU mapping";
++  /* Initialize the whole owned allocation; file bytes are copied unchanged.
++   * No bytes from the previous page owner can become firmware-visible. */
++  bzero(va,allocated);memcpy(va,csf_firmware_bytes+r.data_begin,r.data_end-r.data_begin);
++  for(uint32_t off=0;off<bytes;off+=gpu_page) {
++   uint64_t pa;
++   if(!physical(r.memory,off,&pa)||!map_page(p,r.begin+off,pa,r.flags))return "page-address/table allocation";
++  }
++  IOLog("X9 CSF: region=%u va=%08x..%08x flags=%08x data=%u host16K=%u gpu4K=%u exe=%08x prepared\n",
++   i,r.begin,r.end,r.flags,r.data_end-r.data_begin,allocated/host_page,bytes/gpu_page,r.exe);
++ }
++ return (uint64_t)p.mapped_pages*gpu_page==p.mapped_bytes?NULL:"mapped byte count";
++}
++}
++extern "C" void sweet_x9_csf_prepare(void) {
++ int enabled=0;
++ if(!sweet_early_is_x9()||!PE_parse_boot_argn("x9_csf_prepare",&enabled,sizeof(enabled))||enabled!=1)return;
++ Plan p;
++ IOLog("X9 CSF: stock bytes=%lu sha256=%s host-only preparation, GPU execution disabled\n",
++  (unsigned long)sizeof(csf_firmware_bytes),csf_firmware_sha256);
++ const char *error=parse(p);
++ if(!error)error=populate(p);
++ if(error) {
++  IOLog("X9 CSF: preparation stopped: %s; allocations released without device ownership\n",error);return;
++ }
++ IOLog("X9 CSF: image prepared entries=%u regions=%u protected-skipped=%u bytes=%llu GPU-pages=%u tables=%u root-CPU-PA=%llx\n",
++  p.entry_count,p.region_count,p.protected_count,p.mapped_bytes,p.mapped_pages,p.table_count,p.tables[0].pa);
++ IOLog("X9 CSF: candidate tables not installed; CPU PA is not confirmed GPU DMA address; MCU/AS/SMMU untouched\n");
++ /* Destructor releases everything; future submission must retain buffers until
++  * both GPU-MMU and outer SMMU references have been quiesced. */
++}

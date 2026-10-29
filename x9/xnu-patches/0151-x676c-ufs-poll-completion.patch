@@ -1,0 +1,81 @@
+From ea18ea1e3376068567440e6a56eae689c2b29755 Mon Sep 17 00:00:00 2001
+From: Egor Kulikovskiy <xianel0x@gmail.com>
+Date: Thu, 22 Oct 2026 00:35:44 +0500
+Subject: [PATCH] x676c: poll UFS completion instead of sleeping until the
+ timer is live
+
+ufs_slot_wait() slept via assert_wait_deadline + thread_block once the
+calling context allowed it (interrupts enabled, preemptible). That wakeup
+depends on the scheduler's deadline timer, but the virtual timer PPI is
+not yet delivered on this bring-up, so the first read issued from the
+launchd page-fault path (dyld mapping the shared cache) blocked in
+thread_invoke forever: 56 reads completed on the early-boot busy-poll
+path, command 57 wedged. The driver is polled by design, so drop the
+sleeping wait and busy-poll the doorbell -- delay() keeps interrupts
+unmasked and CMD_TIMEOUT_US still bounds the wait. Remove the now-unused
+ufs_can_sleep().
+---
+ bsd/dev/ufs/ufshci.c | 36 +++++++++++++-----------------------
+ 1 file changed, 13 insertions(+), 23 deletions(-)
+
+diff --git a/bsd/dev/ufs/ufshci.c b/bsd/dev/ufs/ufshci.c
+index 0e49628..dffccf5 100644
+--- a/bsd/dev/ufs/ufshci.c
++++ b/bsd/dev/ufs/ufshci.c
+@@ -201,40 +201,30 @@ ufs_slot_put(struct ufs_hba *hba, unsigned slot)
+ 	lck_mtx_unlock(&hba->lock);
+ }
+ 
+-static bool
+-ufs_can_sleep(void)
+-{
+-	return ml_get_interrupts_enabled() && !ml_at_interrupt_context() &&
+-	       get_preemption_level() == 0;
+-}
+-
+-/* Wait for the doorbell bit of `slot` to clear: spin briefly, then sleep. */
++/*
++ * Wait for the doorbell bit of `slot` to clear. The driver is polled by
++ * design (see the file banner): UFS completion SPIs stay masked. A sleeping
++ * waiter would depend on the scheduler's deadline timer to wake it, but on
++ * this bring-up the virtual timer PPI is not yet delivered, so such a wait
++ * never returns. Busy-poll the doorbell instead; delay() leaves interrupts
++ * unmasked, so the display pump and other handlers keep running, and the
++ * CMD_TIMEOUT_US bound stays effective. Restore a sleeping wait once the
++ * timer/SMP bring-up lands and deadline wakeups are proven to fire.
++ */
+ static int
+ ufs_slot_wait(struct ufs_hba *hba, unsigned slot)
+ {
+-	uint64_t end = deadline_us(CMD_TIMEOUT_US), spin_end = deadline_us(SPIN_US);
+-	uint64_t step;
+-	bool sleep = ufs_can_sleep();
++	uint64_t end = deadline_us(CMD_TIMEOUT_US);
+ 
+-	nanoseconds_to_absolutetime(SLEEP_US * NSEC_PER_USEC, &step);
+ 	while (ufs_rd(hba, UFS_REG_UTRLDBR) & (1u << slot)) {
+-		uint64_t now = mach_absolute_time();
+-		if (now > end) {
++		if (mach_absolute_time() > end) {
+ 			return ETIMEDOUT;
+ 		}
+ 		if (ufs_rd(hba, UFS_REG_IS) & UFS_IS_ERRORS) {
+ 			printf("ufshci: fatal host error, IS 0x%x\n", ufs_rd(hba, UFS_REG_IS));
+ 			return EIO;
+ 		}
+-		if (sleep && now >= spin_end) {
+-			if (assert_wait_deadline_with_leeway((event_t)&hba->utrl[slot],
+-			    THREAD_UNINT, TIMEOUT_URGENCY_SYS_CRITICAL, now + step, 0) ==
+-			    THREAD_WAITING) {
+-				thread_block(THREAD_CONTINUE_NULL);
+-			}
+-		} else {
+-			delay(1);
+-		}
++		delay(SPIN_US);
+ 	}
+ 	return 0;
+ }
+-- 
+2.51.0.windows.1
+

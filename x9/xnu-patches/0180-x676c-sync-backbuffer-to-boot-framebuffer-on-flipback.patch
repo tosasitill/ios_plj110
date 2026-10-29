@@ -1,0 +1,28 @@
+From 4b4588fbd443d7b5907243e8dac448b1767c0cb9 Mon Sep 17 00:00:00 2001
+From: Egor Kulikovskiy <xianel0x@gmail.com>
+Date: Fri, 23 Oct 2026 03:50:38 +0500
+Subject: [PATCH] x676c: sync backbuffer to boot framebuffer on flipBack for
+ native MTK scanout
+
+---
+ iokit/Kernel/arm/SweetFramebuffer.cpp | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index b7ea13d..8d27eb0 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -1132,6 +1132,10 @@ AppleCLCD::flipBack(void)
+ 	scanFrom(fFlipPhys[idx], fRowBytes);
+ 	fFlipIdx = idx;
+ 	if (sweet_board_x676c()) {
++		if (fPixels != 0 && fFlip[idx] != NULL) {
++			memcpy((void *)fPixels, fFlip[idx]->getBytesNoCopy(), (size_t)fRowBytes * fHeight);
++			sweet_dcache_clean((vm_offset_t)fPixels, (unsigned)((size_t)fRowBytes * fHeight));
++		}
+ 		mtkDsiPush();
+ 	}
+ }
+-- 
+2.51.0.windows.1
+

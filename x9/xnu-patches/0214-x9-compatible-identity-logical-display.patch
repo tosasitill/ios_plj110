@@ -1,0 +1,555 @@
+diff --git a/iokit/Kernel/arm/SweetPlatformExpert.cpp b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+--- a/iokit/Kernel/arm/SweetPlatformExpert.cpp
++++ b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+@@ -13,6 +13,7 @@
+ #include <libkern/c++/OSString.h>
+ 
+ extern "C" int sweet_early_is_x9(void);
++#include <arm64/sweet_early.h>
+ 
+ class SweetPlatformExpert : public IODTPlatformExpert {
+ 	OSDeclareDefaultStructors(SweetPlatformExpert);
+@@ -35,6 +36,21 @@
+ 		return false;
+ 	}
+ 	registerService();
++	/* dali0210: publish readiness; inherited software-time fallback remains. */
++	if(sweet_early_is_x9())publishResource("IORTC",this);
++	if (sweet_early_is_x9()) {
++		char product[64] = {}, board[64] = {};
++		getProductName(product, sizeof(product));
++		getTargetName(board, sizeof(board));
++		IORegistryEntry *entry = IORegistryEntry::fromPath("IODeviceTree:/product");
++		OSData *description = entry ? OSDynamicCast(OSData, entry->getProperty("product-description")) : NULL;
++		OSData *model = OSDynamicCast(OSData, provider->getProperty("model-number"));
++		IOLog("X9 IDENTITY: product=%s board=%s hardware=MT6993; description=%.*s model=%.*s\n",
++		    product, board, description ? (int)description->getLength() : 0,
++		    description ? (const char *)description->getBytesNoCopy() : "",
++		    model ? (int)model->getLength() : 0, model ? (const char *)model->getBytesNoCopy() : "");
++		OSSafeReleaseNULL(entry);
++	}
+ 	IOLog("SWEET: platform expert registered\n");
+ 	return true;
+ }
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -37,6 +37,9 @@
+ #include "SweetSurface.h"
+ #include "SweetBoard.h"
+ 
++extern "C" int x9_lk_gui_present(void);
++extern "C" int x9_lk_gui_busy(void);
++extern "C" void x9_lk_gui_probe(void);
+ extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
+ extern "C" void sweet_console_retarget(vm_offset_t va);   /* osfmk/console/video_console.c */
+ extern "C" void (*sweet_console_show_hook)(void);
+@@ -184,13 +187,18 @@
+ 	int32_t       fOffX, fOffY;             /* logical origin of the panel */
+ 	uintptr_t     fPixels;          /* kernel mapping of the panel memory */
+ 	IOMemoryMap  *fMap;
+-	SweetSurface *fSurface;         /* the panel memory as an IOSurface */
++	SweetSurface *fSurface;         /* physical panel/console memory */
++	SweetSurface *fDefaultSurface;  /* logical canvas returned to iOS */
++	bool fX9Scaled;
++	uint32_t fX9ScaleX[1256];
+ 	IOLock       *fLock;            /* swaps and client list */
+ 	OSArray      *fClients;
+ 	uint32_t      fSwapID;
+ 	bool          fConsolePaused;
+ 	uint8_t       fPending[SWEET_FB_SWAP_REC_SIZE];     /* latest swap, not yet shown */
+ 	bool          fDirty;
++ bool          fX9SubmitPending, fX9ObservePending;
++ unsigned      fX9RetryTicks, fX9BusyTicks;
+ 	/* topaz direct MDP scanout (VIG0 / CTL0 from TopazGpuW disp.c) */
+ 	volatile uint32_t *fVig0;
+ 	volatile uint32_t *fCtl0;
+@@ -420,16 +428,33 @@
+ 		fLogicalW = SWEET_FB_LOGICAL_W;
+ 		fLogicalH = SWEET_FB_LOGICAL_H;
+ 	}
++	fX9Scaled = sweet_board_x9() && !native;
++	if (fX9Scaled) {
++		fLogicalW = SWEET_FB_LOGICAL_W;
++		fLogicalH = SWEET_FB_LOGICAL_H;
++	}
+ 	/* x rounded down to 4 pixels: the panel window must start 16-byte aligned (MDP fetch) */
+ 	fOffX = ((int32_t)(fLogicalW - fWidth) / 2) & ~3;
+ 	fOffY = (int32_t)(fLogicalH - fHeight) / 2;
++	if (fX9Scaled) {
++		fOffX = fOffY = 0;
++		for (uint32_t x = 0; x < fWidth; x++) {
++			fX9ScaleX[x] = (uint32_t)((uint64_t)x * fLogicalW / fWidth);
++		}
++	}
+ 	fLock = IOLockAlloc();
+ 	fClients = OSArray::withCapacity(4);
+ 	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
+ 	fPixels = fSurface != NULL ? fSurface->kernelAddress() : 0;
++	fDefaultSurface = fSurface;
++	if (fX9Scaled) {
++		uint32_t row = (fLogicalW * 4 + 63) & ~63u;
++		fDefaultSurface = sweet_surface_create_cached(fLogicalW, fLogicalH, row, SWEET_FB_FORMAT_BGRA);
++	}
+ 	fWorkLoop = IOWorkLoop::workLoop();
+-	if (fLock == NULL || fClients == NULL || fPixels == 0 || fWorkLoop == NULL) {
++	if (fLock == NULL || fClients == NULL || fPixels == 0 || fWorkLoop == NULL || fDefaultSurface == NULL) {
+ 		IOLog("SWEET FB: setup failed\n");
++		if (fDefaultSurface != fSurface) OSSafeReleaseNULL(fDefaultSurface);
+ 		OSSafeReleaseNULL(fSurface);    /* stays published: also held by the table */
+ 		OSSafeReleaseNULL(fWorkLoop);
+ 		return false;
+@@ -485,11 +510,13 @@
+ 	}
+ 	uint32_t accelOn = 1;
+ 	(void)PE_parse_boot_argn("sweetaccel", &accelOn, sizeof(accelOn));
+-	IOAcceleratorES *accel = accelOn && !sweet_board_x9() ? OSTypeAlloc(IOAcceleratorES) : NULL;
++	/* hackios: a passive accelerator class ends CoreAnimation's wait; X9
++	 * gets no driver properties or MT6789 power/MMIO initialization. */
++	IOAcceleratorES *accel = accelOn ? OSTypeAlloc(IOAcceleratorES) : NULL;
+ 	if (accel != NULL && accel->init()) {
+ 		accel->setName("sgx");
+ 		if (accel->attach(this)) {
+-			if (sweet_board_qcom()) {
++			if (sweet_board_qcom() || sweet_board_x9()) {
+ 				accel->registerService();
+ 				IOLog("SWEET FB: empty IOAcceleratorES published (no 30 s wait in CAMetalContextCreate)\n");
+ 			}
+@@ -766,6 +793,8 @@
+ 	setProperty("external", false);
+ 	setProperty("DisplayPipePlaneBaseAlignment", 64ULL, 32);
+ 	registerService();
++	if (fX9Scaled) IOLog("X9 DISPLAY: logical=%ux%u panel=%ux%u default=%u; normalized touch maps full panel\n",
++	    fLogicalW, fLogicalH, fWidth, fHeight, fDefaultSurface->id);
+ 	IOLog("SWEET FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u\n",
+ 	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH);
+ 	return true;
+@@ -878,6 +907,36 @@
+ 		bzero(fb->fShowHold, sizeof(fb->fShowHold));
+ 		IOLockUnlock(fb->fLock);
+ 	}
++	/* Retry a busy GUI submission on the same serialized timer workloop.
++	 * No timeout/reset or clock/PHY changes. Latest composed pixels win. */
++	if (sweet_board_x9()) {
++		static unsigned heartbeat;
++		if (++heartbeat % 600 == 0) {
++			IOLog("X9 GUI heartbeat: swap_id=%u dirty=%u retry=%u power_off=%u busy=%d\n",
++			 fb->fSwapID,fb->fDirty,fb->fX9SubmitPending,fb->fPowerOff,x9_lk_gui_busy());
++			x9_lk_gui_probe();
++		}
++		if (fb->fX9SubmitPending && ++fb->fX9RetryTicks <= 120) {
++			int result=x9_lk_gui_present();
++			fb->fX9SubmitPending=result==0;
++			if (result==1) { fb->fX9ObservePending=true; fb->fX9BusyTicks=0; }
++			if (result!=0 || fb->fX9RetryTicks==120) {
++				IOLog("X9 GUI retry: ticks=%u result=%d\n",fb->fX9RetryTicks,result);
++				if (fb->fX9RetryTicks==120) fb->fX9SubmitPending=false;
++			}
++		}
++		if (fb->fX9ObservePending) {
++			int busy=x9_lk_gui_busy();
++			if (busy!=1 || ++fb->fX9BusyTicks==120) {
++				fb->fX9ObservePending=false;
++				static unsigned observations;
++				if (observations++<12) {
++					IOLog("X9 GUI status: ticks=%u busy=%d (idle is not scanout proof)\n",fb->fX9BusyTicks,busy);
++					x9_lk_gui_probe();
++				}
++			}
++		}
++	}
+ 	if (sweet_board_x676c()) {
+ 		fb->mtkDsiPush();
+ 	}
+@@ -912,6 +971,23 @@
+ }
+ 
+ static uint32_t sweet_fb_swaps_logged;
++struct x9_fb_sample { uint32_t samples,nonblack,opaque,checksum; };
++static struct x9_fb_sample
++x9_fb_sample_grid(const uint8_t *pixels,uint32_t width,uint32_t height,uint32_t stride)
++{
++ struct x9_fb_sample sample={};
++ if(!pixels||!width||!height||stride<(uint64_t)width*4)return sample;
++ for(uint32_t y=0;y<32;y++)for(uint32_t x=0;x<32;x++){
++  uint32_t v;uint64_t off=(uint64_t)((uint64_t)y*(height-1)/31)*stride+(uint64_t)((uint64_t)x*(width-1)/31)*4;
++  memcpy(&v,pixels+off,sizeof(v));sample.samples++;
++  if(v&0x00ffffffU)sample.nonblack++;
++  if(v>>24)sample.opaque++;
++  sample.checksum=(sample.checksum*16777619U)^v;
++ }
++ return sample;
++}
++static uint64_t x9_fb_present_seq;
++static unsigned x9_fb_probe_count;
+ static uint64_t sweet_fb_swap_count;
+ 
+ /* Copy each enabled layer's surface into the panel memory (no scaling). */
+@@ -928,7 +1004,7 @@
+ 	uint32_t mask = get32(rec, 0x104);
+ 	for (uint32_t i = 0; i < 4 && i < SWEET_FB_LAYERS; i++) {
+ 		uint32_t sid = get32(rec, 0x54 + 4 * i);
+-		if ((mask & (1u << i)) && sid != 0 && (held[i] = sweet_surface_copy(sid)) != NULL) {
++		if ((sweet_board_x9() || (mask & (1u << i))) && sid != 0 && (held[i] = sweet_surface_copy(sid)) != NULL) {
+ 			sweet_hold(held[i], true);
+ 		}
+ 	}
+@@ -1288,6 +1364,11 @@
+ AppleCLCD::present(const uint8_t *rec)
+ {
+ 	uint32_t mask = get32(rec, 0x104);
++	bool x9_probe = false;
++	if (sweet_board_x9()) {
++		uint64_t seq = ++x9_fb_present_seq;
++		x9_probe = seq <= 128 || seq % 10 == 0;
++	}
+ 	static int console_only = -1;
+ 
+ 	/* boot-arg sweetfb_console=1: debugging, the panel keeps showing the kernel console */
+@@ -1323,7 +1404,12 @@
+ 	 * flip, like the direct path. Composing into the scanned, uncached boot
+ 	 * framebuffer showed every multi-layer frame (dims, apps) drawn top-down.
+ 	 */
+-	uint8_t *dst = fFlip[0] != NULL ? backBuffer() : (uint8_t *)fPixels;
++	uint8_t *dst = fX9Scaled ? (uint8_t *)fDefaultSurface->kernelAddress() :
++	    (fFlip[0] != NULL ? backBuffer() : (uint8_t *)fPixels);
++	uint32_t copyWidth = fX9Scaled ? fLogicalW : fWidth;
++	uint32_t copyHeight = fX9Scaled ? fLogicalH : fHeight;
++	uint32_t copyStride = fX9Scaled ? fDefaultSurface->bytesPerRow : fRowBytes;
++	if (dst == NULL) return;
+ 	if (fFlip[0] == NULL && fVig0 != NULL && fScanPhys != fBootSrc) {
+ 		scanFrom(fBootSrc, fBootStride);
+ 	}
+@@ -1342,8 +1428,26 @@
+ 		}
+ 	}
+ 
+-	if (dst != NULL) {
+-		bzero(dst, (size_t)fRowBytes * fHeight);
++	/* Reference: hackios c84b4634277a70beac73921029b1fb6afc2530af,
++	 * MiniIOMobileFramebuffer::show (20F66). The 20H392 request also has
++	 * surface IDs at +0x54, set bits at +0x104 and cleared bits at +0x108.
++	 * X9 has no flip buffer: its default surface aliases dst. Do not erase
++	 * that surface before presenting it, or interpret set bits as enable.
++	 * Only an explicit removal of layer zero clears the retained picture.
++	 * No MT6993 MMIO or page-size-dependent ABI changes here.
++	 */
++	if (dst != NULL && (!sweet_board_x9() ||
++	    ((mask & 1u) && get32(rec, 0x54) == 0))) {
++		bzero(dst, (size_t)copyStride * copyHeight);
++	}
++	if (sweet_board_x9()) {
++		static unsigned records;
++		if (x9_probe) {
++			records++;
++			IOLog("X9 SWAP record: id=%u set=%08x clear=%08x surfaces=%u,%u,%u,%u\n",
++			    get32(rec, 0x50), mask, get32(rec, 0x108),
++			    get32(rec, 0x54), get32(rec, 0x58), get32(rec, 0x5c), get32(rec, 0x60));
++		}
+ 	}
+ 
+ 	for (uint32_t layer = 0; layer < SWEET_FB_LAYERS; layer++) {
+@@ -1354,7 +1458,7 @@
+ 		int32_t dx = (int32_t)get32(b, 0), dy = (int32_t)get32(b, 4);
+ 		int32_t w = (int32_t)get32(b, 8), h = (int32_t)get32(b, 12);
+ 
+-		if (!(mask & (1u << layer)) || id == 0) {
++		if ((!sweet_board_x9() && !(mask & (1u << layer))) || id == 0) {
+ 			continue;
+ 		}
+ 		SweetSurface *s = sweet_surface_copy(id);
+@@ -1365,7 +1469,12 @@
+ 			    s ? s->pixelFormat : 0, s ? s->bytesPerRow : 0, sx, sy, get32(a, 8),
+ 			    get32(a, 12), dx, dy, w, h);
+ 		}
+-		if (s == NULL || s == fSurface) {
++		if (s == NULL || s == fSurface || (fX9Scaled && s == fDefaultSurface)) {
++			if (sweet_board_x9()) {
++				static unsigned skipped;
++				if (skipped++ < 24) IOLog("X9 SWAP layer: id=%u layer=%u %s\n", id, layer,
++				    s == NULL ? "missing surface" : "default surface retained in place");
++			}
+ 			OSSafeReleaseNULL(s);
+ 			continue;
+ 		}
+@@ -1400,35 +1509,78 @@
+ 		if (h > (int32_t)s->height - sy) {
+ 			h = (int32_t)s->height - sy;
+ 		}
+-		if (w > (int32_t)fWidth - dx) {
+-			w = (int32_t)fWidth - dx;
+-		}
+-		if (h > (int32_t)fHeight - dy) {
+-			h = (int32_t)fHeight - dy;
++		if (w > (int32_t)copyWidth - dx) {
++			w = (int32_t)copyWidth - dx;
++		}
++		if (h > (int32_t)copyHeight - dy) {
++			h = (int32_t)copyHeight - dy;
+ 		}
+ 		uint64_t last = (uint64_t)s->offset + (uint64_t)(sy + h - 1) * s->bytesPerRow +
+ 		    (uint64_t)(sx + w) * 4;
+ 		if (w <= 0 || h <= 0 || s->elementWidth != 1 || s->elementHeight != 1 ||
+ 		    s->memory == NULL || last > s->memory->getLength()) {
+-			if (sweet_board_x676c()) {
++			if (sweet_board_x676c() || (sweet_board_x9() && x9_probe)) {
+ 				IOLog("SWEET FB: copy skipped: w=%d h=%d mem=%p len=%llu last=%llu\n",
+ 				    w, h, s->memory, s->memory ? (unsigned long long)s->memory->getLength() : 0, (unsigned long long)last);
+ 			}
+ 			src = 0;
+ 		}
+ 		if (src != 0 && bpe == 4) {
++			if (x9_probe && sx == 0 && sy == 0 && dx == 0 && dy == 0 && w == (int32_t)copyWidth && h == (int32_t)copyHeight) {
++				struct x9_fb_sample z = x9_fb_sample_grid((const uint8_t *)(src + s->offset), copyWidth, copyHeight, s->bytesPerRow);
++				IOLog("X9 FRAME source seq=%llu id=%u sample=%u nonblack=%u alpha=%u checksum=%08x\n", x9_fb_present_seq, id, z.samples, z.nonblack, z.opaque, z.checksum);
++			}
+ 			for (int32_t y = 0; y < h; y++) {
+-				memcpy((void *)(dst + (uint64_t)(dy + y) * fRowBytes + (uint64_t)dx * 4),
++				memcpy((void *)(dst + (uint64_t)(dy + y) * copyStride + (uint64_t)dx * 4),
+ 				    (const void *)(src + s->offset + (uint64_t)(sy + y) * s->bytesPerRow + (uint64_t)sx * 4),
+ 				    (size_t)w * 4);
+ 			}
+ 		}
+ 		s->release();
++	}
++	if (fX9Scaled) {
++		/* CPU nearest-neighbor scaling; physical LK geometry/MMIO is untouched.
++		 * Each output row samples the same normalized domain as HID coordinates. */
++		uint8_t *panel = (uint8_t *)fPixels;
++		for (uint32_t y = 0; y < fHeight; y++) {
++			uint32_t sy = (uint32_t)((uint64_t)y * copyHeight / fHeight);
++			const uint32_t *in = (const uint32_t *)(dst + (uint64_t)sy * copyStride);
++			uint32_t *row = (uint32_t *)(panel + (uint64_t)y * fRowBytes);
++			for (uint32_t x = 0; x < fWidth; x++) row[x] = in[fX9ScaleX[x]];
++		}
++		dst = panel;
++	}
++	if (sweet_board_x9() && dst != NULL) {
++		struct x9_fb_sample z = x9_fb_sample_grid(dst, fWidth, fHeight, fRowBytes);
++		static int previous_black=-1;
++		int black=z.samples && !z.nonblack;
++		bool transition=black!=previous_black;
++		previous_black=black;
++		if (transition) {
++			x9_probe=true;
++			IOLog("X9 FRAME black-transition: seq=%llu id=%u black=%d set=%08x clear=%08x surfaces=%u,%u,%u,%u\n",
++			 x9_fb_present_seq,get32(rec,0x50),black,mask,get32(rec,0x108),
++			 get32(rec,0x54),get32(rec,0x58),get32(rec,0x5c),get32(rec,0x60));
++		}
++		if(x9_probe) {
++		IOLog("X9 FRAME destination seq=%llu sample=%u nonblack=%u alpha=%u checksum=%08x mask=%08x\n", x9_fb_present_seq, z.samples, z.nonblack, z.opaque, z.checksum, mask);
++		x9_fb_probe_count++;
++		}
+ 	}
+ 	if (fFlip[0] != NULL) {
+ 		flipBack();
+ 	} else if (sweet_board_x676c()) {
+ 		mtkDsiPush();
++	} else if (sweet_board_x9() && dst != NULL && dst == (uint8_t *)fPixels) {
++		int result = x9_lk_gui_present();
++		fX9SubmitPending=result==0; fX9RetryTicks=0;
++		if (result==1) { fX9ObservePending=true; fX9BusyTicks=0; }
++		if (x9_probe) IOLog("X9 FRAME submit seq=%llu result=%d\n", x9_fb_present_seq, result);
++		static unsigned logged;
++		if (logged < 4) {
++			IOLog("X9 GUI LK submit: result=%d (-1 unavailable, 0 busy, 1 started)\n", result);
++			logged++;
++		}
+ 	}
+ }
+ 
+@@ -1513,7 +1665,7 @@
+ 
+ 	switch (selector) {
+ 	case kSweetFBGetLayerDefaultSurface:
+-		out[0] = sweet_surface_port_in_task(fFB->fSurface, fTask);
++		out[0] = sweet_surface_port_in_task(fFB->fDefaultSurface, fTask);
+ 		outCount = 1;
+ 		break;
+ 	case kSweetFBSwapBegin:
+diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -338,6 +338,51 @@
+ 	return s;
+ }
+ 
++SweetSurface *
++sweet_surface_create_cached(uint32_t width, uint32_t height,
++    uint32_t bytesPerRow, uint32_t pixelFormat)
++{
++    uint64_t bytes = (uint64_t)bytesPerRow * height;
++    if (!width || !height || width > SWEET_SURFACE_MAX_DIM ||
++        height > SWEET_SURFACE_MAX_DIM || bytesPerRow < (uint64_t)width * 4 ||
++        bytes > SWEET_SURFACE_WIRED_MAX || round_page(bytes) > UINT32_MAX) {
++        return NULL;
++    }
++    SweetSurface *s = sweet_surface_alloc();
++    if (!s) {
++        return NULL;
++    }
++    s->width = width;
++    s->height = height;
++    s->bytesPerRow = bytesPerRow;
++    s->bytesPerElement = 4;
++    s->elementWidth = s->elementHeight = 1;
++    s->pixelFormat = pixelFormat;
++    s->allocSize = (uint32_t)round_page(bytes);
++    uint64_t before = (uint64_t)OSAddAtomic64(s->allocSize,
++        (volatile SInt64 *)&sweet_surface_wired);
++    if (before + s->allocSize > SWEET_SURFACE_WIRED_MAX) {
++        OSAddAtomic64(-(SInt64)s->allocSize, (volatile SInt64 *)&sweet_surface_wired);
++        s->release();
++        return NULL;
++    }
++    IOBufferMemoryDescriptor *mem = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
++        kIODirectionInOut | kIOMemoryKernelUserShared, s->allocSize, page_size);
++    if (!mem) {
++        OSAddAtomic64(-(SInt64)s->allocSize, (volatile SInt64 *)&sweet_surface_wired);
++        s->release();
++        return NULL;
++    }
++    s->memory = mem;
++    s->mapCache = kIOMapDefaultCache;
++    bzero(mem->getBytesNoCopy(), s->allocSize);
++    if (!sweet_surface_publish(s)) {
++        s->release();
++        return NULL;
++    }
++    return s;
++}
++
+ mach_port_name_t
+ sweet_surface_port_in_task(SweetSurface *s, task_t task)
+ {
+@@ -354,6 +399,13 @@
+ }
+ 
+ static IOReturn sweet_surface_use_task_memory(SweetSurface *s, task_t task, uint64_t address, uint64_t size);
++
++/* dali0199: explicit zero requests a kernel-selected default size. */
++static uint32_t
++sweet_dict_u32_nz(OSDictionary *dict,const char *key,uint32_t def)
++{
++ uint32_t value=sweet_dict_u32(dict,key,0);return value?value:def;
++}
+ 
+ static uint32_t
+ sweet_div_up(uint32_t a, uint32_t b)
+@@ -386,7 +438,7 @@
+ 	    s->bytesPerElement > 64 || s->elementWidth == 0 || s->elementHeight == 0) {
+ 		return kIOReturnBadArgument;
+ 	}
+-	s->bytesPerRow = sweet_dict_u32(props, "IOSurfaceBytesPerRow",
++	s->bytesPerRow = sweet_dict_u32_nz(props, "IOSurfaceBytesPerRow",
+ 	    sweet_row_bytes(s->width, s->elementWidth, s->bytesPerElement));
+ 	if (s->bytesPerRow < (uint64_t)sweet_div_up(s->width, s->elementWidth) * s->bytesPerElement) {
+ 		return kIOReturnBadArgument;
+@@ -415,11 +467,14 @@
+ 			    p->bytesPerElement > 64 || p->elementWidth == 0 || p->elementHeight == 0) {
+ 				return kIOReturnBadArgument;
+ 			}
+-			p->bytesPerRow = sweet_dict_u32(pd, "IOSurfacePlaneBytesPerRow",
++			p->bytesPerRow = sweet_dict_u32_nz(pd, "IOSurfacePlaneBytesPerRow",
+ 			    sweet_row_bytes(p->width, p->elementWidth, p->bytesPerElement));
+ 			p->offset = sweet_dict_u32(pd, "IOSurfacePlaneOffset", (uint32_t)next);
+-			p->size = sweet_dict_u32(pd, "IOSurfacePlaneSize",
+-			    p->bytesPerRow * sweet_div_up(p->height, p->elementHeight));
++			uint64_t minimum_row=(uint64_t)sweet_div_up(p->width,p->elementWidth)*p->bytesPerElement;
++			uint64_t plane_size=(uint64_t)p->bytesPerRow*sweet_div_up(p->height,p->elementHeight);
++			if(p->bytesPerRow<minimum_row||plane_size>UINT32_MAX)return kIOReturnBadArgument;
++			p->size = sweet_dict_u32_nz(pd, "IOSurfacePlaneSize",(uint32_t)plane_size);
++			if(p->size<plane_size)return kIOReturnBadArgument;
+ 			next = round_page((uint64_t)p->offset + p->size);
+ 			if ((uint64_t)p->offset + p->size > end) {
+ 				end = (uint64_t)p->offset + p->size;
+@@ -696,7 +751,8 @@
+ 		const struct sweet_surface_plane *pl = &s->planes[i];
+ 		put32(p, 0x00, pl->width);
+ 		put32(p, 0x04, pl->height);
+-		put32(p, 0x08, pl->bytesPerRow);
++		put32(p, 0x08, pl->bytesPerRow); /* preserve the established slot */
++		put32(p, 0x10, pl->bytesPerRow); /* dali0204 plane accessor slot */
+ 		put32(p, 0x0c, pl->offset);
+ 		put32(p, 0x14, pl->size);
+ 		memcpy(p + 0x18, &pl->bytesPerElement, 2);
+@@ -712,7 +768,13 @@
+ 		if (len > args->structureOutputDescriptor->getLength()) {
+ 			return kIOReturnNoSpace;
+ 		}
+-		args->structureOutputDescriptor->writeBytes(0, buf, len);
++		IOMemoryDescriptor *out = args->structureOutputDescriptor;
++		IOReturn result = out->prepare();
++		if (result != kIOReturnSuccess) return result;
++		IOByteCount written = out->writeBytes(0, buf, len);
++		IOReturn completed = out->complete();
++		if (written != len) return kIOReturnUnderrun;
++		if (completed != kIOReturnSuccess) return completed;
+ 		args->structureOutputDescriptorSize = len;
+ 		return kIOReturnSuccess;
+ 	}
+@@ -769,7 +831,14 @@
+ 		if (copy == NULL) {
+ 			return kIOReturnNoMemory;
+ 		}
+-		args->structureInputDescriptor->readBytes(0, copy, len);
++		IOMemoryDescriptor *input = args->structureInputDescriptor;
++		ret = input->prepare();
++		if (ret != kIOReturnSuccess) { IOFreeData(copy, len); return ret; }
++		IOByteCount read = input->readBytes(0, copy, len);
++		IOReturn completed = input->complete();
++		if (read != len || completed != kIOReturnSuccess) {
++			IOFreeData(copy, len); return read != len ? kIOReturnUnderrun : completed;
++		}
+ 		buf = copy;
+ 	}
+ 	OSObject *obj = (buf != NULL && len > 0) ? OSUnserializeXML(buf, len) : NULL;
+@@ -944,8 +1013,13 @@
+ 		return NULL;
+ 	}
+ 	if (args->structureInputDescriptor != NULL) {
+-		args->structureInputDescriptor->readBytes(0, copy, *len);
++		IOMemoryDescriptor *input = args->structureInputDescriptor;
++		if (input->prepare() != kIOReturnSuccess) { IOFreeData(copy, *len); return NULL; }
++		IOByteCount read = input->readBytes(0, copy, *len);
++		IOReturn completed = input->complete();
++		if (read != *len || completed != kIOReturnSuccess) { IOFreeData(copy, *len); return NULL; }
+ 	} else {
++		if (args->structureInput == NULL) { IOFreeData(copy, *len); return NULL; }
+ 		memcpy(copy, args->structureInput, *len);
+ 	}
+ 	return copy;
+@@ -1068,12 +1142,14 @@
+ 			if (out->getLength() < total) {
+ 				ret = kIOReturnNoSpace;
+ 			} else if ((ret = out->prepare()) == kIOReturnSuccess) {
+-				out->writeBytes(0, header, sizeof(header));
+-				if (length != 0) {
+-					out->writeBytes(sizeof(header), ser->text(), length);
++				IOByteCount written = out->writeBytes(0, header, sizeof(header));
++				if (written == sizeof(header) && length != 0) {
++					written += out->writeBytes(sizeof(header), ser->text(), length);
+ 				}
+-				out->complete();
+-				args->structureOutputDescriptorSize = total;
++				IOReturn completed = out->complete();
++				if (written != total) ret = kIOReturnUnderrun;
++				else if (completed != kIOReturnSuccess) ret = completed;
++				else args->structureOutputDescriptorSize = total;
+ 			}
+ 		} else if (args->structureOutput == NULL || args->structureOutputSize < total) {
+ 			ret = kIOReturnNoSpace;
+diff --git a/iokit/Kernel/arm/SweetSurface.h b/iokit/Kernel/arm/SweetSurface.h
+--- a/iokit/Kernel/arm/SweetSurface.h
++++ b/iokit/Kernel/arm/SweetSurface.h
+@@ -64,6 +64,10 @@
+ SweetSurface *sweet_surface_create_physical(uint64_t phys, uint32_t width,
+     uint32_t height, uint32_t bytesPerRow, uint32_t pixelFormat);
+ 
++/* A kernel-owned cached default canvas, published through normal IOSurface IDs. */
++SweetSurface *sweet_surface_create_cached(uint32_t width, uint32_t height,
++    uint32_t bytesPerRow, uint32_t pixelFormat);
++
+ /*
+  * topaz scanout pool: physically contiguous low memory (below 4 GiB, unused by
+  * xnu, which runs in the upper DDR bank) so the MDP can fetch a surface

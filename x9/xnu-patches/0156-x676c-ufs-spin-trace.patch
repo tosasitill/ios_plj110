@@ -1,0 +1,69 @@
+From 5425a08d10c824ff7028658c031d3f8e2331cf9a Mon Sep 17 00:00:00 2001
+From: Egor Kulikovskiy <xianel0x@gmail.com>
+Date: Thu, 22 Oct 2026 02:06:49 +0500
+Subject: [PATCH] x676c: diag -- trace the UFS busy-poll spinners
+
+The stuck launchd thread is TH_RUN with wait_event 0, so it is spinning
+in the kernel, not sleeping (the kframes were a stale saved state). The
+timer is alive (tens of thousands of ticks), so this is a busy-loop in
+the UFS poll path, not a wakeup problem. Trace both spinners: slot_get
+prints the busy mask (it has no timeout and loops forever if slots never
+free), and slot_wait prints the doorbell, IS and now vs end (to show why
+the 10s CMD_TIMEOUT is not firing).
+---
+ bsd/dev/ufs/ufshci.c | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/bsd/dev/ufs/ufshci.c b/bsd/dev/ufs/ufshci.c
+index 4067866..61d184f 100644
+--- a/bsd/dev/ufs/ufshci.c
++++ b/bsd/dev/ufs/ufshci.c
+@@ -192,6 +192,7 @@ static int
+ ufs_slot_get(struct ufs_hba *hba, unsigned *slot, uint8_t *tag)
+ {
+ 	uint32_t all = hba->nslots == 32 ? ~0u : (1u << hba->nslots) - 1;
++	uint64_t spins = 0;
+ 
+ 	for (;;) {
+ 		ufs_lock_diag(hba, 1);
+@@ -203,10 +204,14 @@ ufs_slot_get(struct ufs_hba *hba, unsigned *slot, uint8_t *tag)
+ 			lck_mtx_unlock(&hba->lock);
+ 			return 0;
+ 		}
++		uint32_t busy = hba->busy;
+ 		lck_mtx_unlock(&hba->lock);
+ 		if (!ml_get_interrupts_enabled() || get_preemption_level()) {
+ 			return EBUSY;
+ 		}
++		if ((++spins % 100000) == 0) {
++			printf("ufshci: slot_get spin %llu busy=0x%x all=0x%x\n", spins, busy, all);
++		}
+ 		delay(SLEEP_US);
+ 	}
+ }
+@@ -233,15 +238,21 @@ static int
+ ufs_slot_wait(struct ufs_hba *hba, unsigned slot)
+ {
+ 	uint64_t end = deadline_us(CMD_TIMEOUT_US);
++	uint64_t spins = 0;
+ 
+ 	while (ufs_rd(hba, UFS_REG_UTRLDBR) & (1u << slot)) {
+-		if (mach_absolute_time() > end) {
++		uint64_t now = mach_absolute_time();
++		if (now > end) {
+ 			return ETIMEDOUT;
+ 		}
+ 		if (ufs_rd(hba, UFS_REG_IS) & UFS_IS_ERRORS) {
+ 			printf("ufshci: fatal host error, IS 0x%x\n", ufs_rd(hba, UFS_REG_IS));
+ 			return EIO;
+ 		}
++		if ((++spins % 100000) == 0) {
++			printf("ufshci: slot_wait spin %llu slot %u door=0x%x IS=0x%x now=%llu end=%llu\n",
++			    spins, slot, ufs_rd(hba, UFS_REG_UTRLDBR), ufs_rd(hba, UFS_REG_IS), now, end);
++		}
+ 		delay(SPIN_US);
+ 	}
+ 	return 0;
+-- 
+2.51.0.windows.1
+

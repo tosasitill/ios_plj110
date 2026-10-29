@@ -1,0 +1,179 @@
+diff --git a/bsd/kern/x9_metal_deploy.inc b/bsd/kern/x9_metal_deploy.inc
+--- a/bsd/kern/x9_metal_deploy.inc
++++ b/bsd/kern/x9_metal_deploy.inc
+@@ -47,36 +47,36 @@
+  if(!PE_parse_boot_argn("x9_metal_system",&enabled,sizeof(enabled))||(enabled!=1&&enabled!=2))return 0;
+  if(!sweet_early_is_x9()||!sweet_x9_ufs_root_writable()||!proc_is64bit(p))return EINVAL;
+  static const char target[]="/System/Library/xpc/launchd.plist";
+- static const char backup[]="/System/Library/xpc/launchd.x9-metal-pan167-before.plist";
+- static const char temporary[]="/System/Library/xpc/launchd.x9-metal-pan167.tmp";
+- static const char directory[]="/private/var/x9-metal-pan167";
+- static const char executable[]="/private/var/x9-metal-pan167/x9-metal-probe";
++ static const char backup[]="/System/Library/xpc/launchd.x9-metal-pan168-before.plist";
++ static const char temporary[]="/System/Library/xpc/launchd.x9-metal-pan168.tmp";
++ static const char directory[]="/private/var/x9-metal-pan168";
++ static const char executable[]="/private/var/x9-metal-pan168/x9-metal-probe";
+  boolean_t installed=!x9_metal_same(target,x9_launchd_metal,sizeof(x9_launchd_metal));
+  boolean_t previous=!installed&&!x9_metal_same(target,x9_launchd_previous,sizeof(x9_launchd_previous));
+  boolean_t older=!installed&&!previous&&!x9_metal_same(target,x9_launchd_older,sizeof(x9_launchd_older));
+  int error=(installed||previous||older)?0:x9_metal_same(target,x9_launchd_original,sizeof(x9_launchd_original));
+  if(error){printf("X9 METAL DEPLOY: unrecognized launchd cache errno=%d; no replacement\n",error);return error;}
+- printf("X9 METAL DEPLOY: pan167 predecessor=%s; unique paths, exact cache guard\n",installed?"pan167":previous?"pan166":older?"pan165":"original");
++ printf("X9 METAL DEPLOY: pan168 predecessor=%s; unique paths, exact cache guard\n",installed?"pan168":previous?"pan167":older?"pan166":"original");
+  if(scratch>end||sizeof(backup)+sizeof(temporary)+4096>end-scratch)return E2BIG;
+  int32_t rv=0;error=copyout(directory,scratch,sizeof(directory));if(error)return error;
+  struct mkdir_args md={.path=scratch,.mode=0755};error=mkdir(p,&md,&rv);if(error&&error!=EEXIST)return error;
+  vnode_t dir=NULLVP;error=vnode_lookup(directory,VNODE_LOOKUP_NOFOLLOW,&dir,vfs_context_kernel());
+  if(error)return error;boolean_t isdir=vnode_isdir(dir);vnode_put(dir);if(!isdir)return ENOTDIR;
+  error=x9_metal_install(p,scratch,end,executable,x9_probe_bytes,sizeof(x9_probe_bytes),0755);if(error)return error;
+- error=x9_metal_install(p,scratch,end,"/private/var/x9-metal-pan167/x9-metal-mobile",x9_probe_bytes,sizeof(x9_probe_bytes),0755);if(error)return error;
+- static const char bundle[]="/System/Library/Extensions/X9MetalCompute167.bundle";
++ error=x9_metal_install(p,scratch,end,"/private/var/x9-metal-pan168/x9-metal-mobile",x9_probe_bytes,sizeof(x9_probe_bytes),0755);if(error)return error;
++ static const char bundle[]="/System/Library/Extensions/X9MetalCompute168.bundle";
+  error=copyout(bundle,scratch,sizeof(bundle));if(error)return error;
+  md.path=scratch;error=mkdir(p,&md,&rv);if(error&&error!=EEXIST)return error;
+  dir=NULLVP;error=vnode_lookup(bundle,VNODE_LOOKUP_NOFOLLOW,&dir,vfs_context_kernel());
+  if(error)return error;isdir=vnode_isdir(dir);vnode_put(dir);if(!isdir)return ENOTDIR;
+- error=x9_metal_install(p,scratch,end,"/System/Library/Extensions/X9MetalCompute167.bundle/X9MetalCompute",x9_plugin_bytes,sizeof(x9_plugin_bytes),0755);if(error)return error;
+- error=x9_metal_install(p,scratch,end,"/System/Library/Extensions/X9MetalCompute167.bundle/Info.plist",x9_plugin_info,sizeof(x9_plugin_info),0644);if(error)return error;
+- static const char signatures[]="/System/Library/Extensions/X9MetalCompute167.bundle/_CodeSignature";
++ error=x9_metal_install(p,scratch,end,"/System/Library/Extensions/X9MetalCompute168.bundle/X9MetalCompute",x9_plugin_bytes,sizeof(x9_plugin_bytes),0755);if(error)return error;
++ error=x9_metal_install(p,scratch,end,"/System/Library/Extensions/X9MetalCompute168.bundle/Info.plist",x9_plugin_info,sizeof(x9_plugin_info),0644);if(error)return error;
++ static const char signatures[]="/System/Library/Extensions/X9MetalCompute168.bundle/_CodeSignature";
+  error=copyout(signatures,scratch,sizeof(signatures));if(error)return error;
+  md.path=scratch;error=mkdir(p,&md,&rv);if(error&&error!=EEXIST)return error;
+  dir=NULLVP;error=vnode_lookup(signatures,VNODE_LOOKUP_NOFOLLOW,&dir,vfs_context_kernel());
+  if(error)return error;isdir=vnode_isdir(dir);vnode_put(dir);if(!isdir)return ENOTDIR;
+- error=x9_metal_install(p,scratch,end,"/System/Library/Extensions/X9MetalCompute167.bundle/_CodeSignature/CodeResources",x9_plugin_resources,sizeof(x9_plugin_resources),0644);if(error)return error;
++ error=x9_metal_install(p,scratch,end,"/System/Library/Extensions/X9MetalCompute168.bundle/_CodeSignature/CodeResources",x9_plugin_resources,sizeof(x9_plugin_resources),0644);if(error)return error;
+  if(installed)return 0;
+  error=copyout(target,scratch,sizeof(target));if(error)return error;
+  user_addr_t dest=scratch+sizeof(target);error=copyout(backup,dest,sizeof(backup));if(error)return error;
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -289,7 +289,7 @@
+    char name[32]={0};(void)proc_selfname(name,sizeof(name));
+    if(!x9_metal_render_owner(name)) {
+     IOLog("X9 METAL DISCOVERY: property=%s caller=%s system-compute\n",key,name);
+-    return OSString::withCString(!strcmp(key,"MetalPluginName")?"X9MetalCompute167":"X9Device");
++    return OSString::withCString(!strcmp(key,"MetalPluginName")?"X9MetalCompute168":"X9Device");
+    }
+   }
+   return IOService::copyProperty(key);
+@@ -1367,7 +1367,7 @@
+ void
+ AppleCLCD::present(const uint8_t *rec)
+ {
+-	if (sweet_board_x9()) {static unsigned entered; if (entered++ < 2) IOLog("X9 DISPLAY: pan167 present entered;CPU first-frame,staged GPU output opt-in\n");}
++	if (sweet_board_x9()) {static unsigned entered; if (entered++ < 2) IOLog("X9 DISPLAY: pan168 present entered;CPU first-frame,staged GPU output opt-in\n");}
+ 	uint32_t mask = get32(rec, 0x104);
+ 	bool x9_probe = false;
+ 	if (sweet_board_x9()) {
+diff --git a/iokit/Kernel/arm/SweetX9CSF.cpp b/iokit/Kernel/arm/SweetX9CSF.cpp
+--- a/iokit/Kernel/arm/SweetX9CSF.cpp
++++ b/iokit/Kernel/arm/SweetX9CSF.cpp
+@@ -580,7 +580,7 @@
+  Plan p;const char *error=parse(p);
+  if(!error)error=populate(p);
+  if(error){IOLog("X9 CSF BOOT: image preparation failed: %s\n",error);return 0;}
+- IOLog("X9 CSF BOOT: pan167 stock-firmware=%s prepared bytes=%llu tables=%u\n",
++ IOLog("X9 CSF BOOT: pan168 stock-firmware=%s prepared bytes=%llu tables=%u\n",
+   csf_firmware_sha256,p.mapped_bytes,p.table_count);
+  return boot(p,gpu,smmu,doorbell);
+ }
+diff --git a/iokit/Kernel/arm/SweetX9CSFDesktop.inc b/iokit/Kernel/arm/SweetX9CSFDesktop.inc
+--- a/iokit/Kernel/arm/SweetX9CSFDesktop.inc
++++ b/iokit/Kernel/arm/SweetX9CSFDesktop.inc
+@@ -82,7 +82,8 @@
+   (uint64_t)j->source_stride|((uint64_t)j->destination_stride<<32),0};
+  memcpy(fau,params,sizeof(params));
+  if(!vector_sync(q,gpu,0,shader_desc_va,gpu_page))return false;
+- unsigned local=1;while(local<128&&j->width%(local*2)==0)local*=2;
++ const unsigned local_x=8,local_y=8;
++ if(j->width%local_x||j->height%local_y)return false;
+  uint32_t fence=0x44000000u|(j->sequence&0xffffffu);
+  uint64_t commands[28];memcpy(commands,x9_campaign_cs[3],sizeof(commands));
+  for(unsigned i=0;i<28;i++) {
+@@ -91,9 +92,9 @@
+    uint32_t value=(uint32_t)commands[i];
+    if(reg==8)value=shader_desc_va+512;
+    if(reg==16)value=(shader_desc_va+192)|(uint32_t)(commands[i]&15);
+-   if(reg==33)value=(1u<<31)|(local-1);
+-   if(reg==37)value=j->width/local;
+-   if(reg==38)value=j->height;
++   if(reg==33)value=x9_desktop_workgroup;
++   if(reg==37)value=j->width/local_x;
++   if(reg==38)value=j->height/local_y;
+    if(reg==42)value=fence;
+    commands[i]=(commands[i]&~0xffffffffULL)|value;
+   }else if(opcode==1&&reg==16) {
+@@ -103,12 +104,15 @@
+  }
+  memcpy(body,commands,sizeof(commands));
+  if(!vector_sync(q,gpu,0,queue_bodies,gpu_page)||!put_qword(p,queue_user,24)||!clean_page(p,queue_user))return false;
++ uint64_t submitted=mach_absolute_time();
+  gw(user_db,0,1);uint64_t end=deadline_ms(3000);
+  do {
+   if(!global_healthy(p,q,gpu)||((output_word(p,q.stream_out)^input_word(p,q.stream_in))&0xc0000000u))break;
+   if(output_word(q.memory,queue_result)==fence&&output_qword(p,queue_user+4096)==24) {
+    q.completed=1;j->computed=true;
+-   IOLog("X9 DESKTOP FRAME: sequence=%u shader fence=%08x extract=24 rectangle=%ux%u local=%u; private GPU output; no live-panel mapping\n",j->sequence,fence,j->width,j->height,local);
++   uint64_t dispatch_ns=0;absolutetime_to_nanoseconds(mach_absolute_time()-submitted,&dispatch_ns);
++   IOLog("X9 DESKTOP FRAME: sequence=%u shader fence=%08x extract=24 rectangle=%ux%u local=%ux%u groups=%ux%u doorbell-to-fence-us=%llu;private GPU output,panel unmapped\n",
++    j->sequence,fence,j->width,j->height,local_x,local_y,j->width/local_x,j->height/local_y,dispatch_ns/1000);
+    return true;
+   }
+   sleep_ms();
+diff --git a/iokit/Kernel/arm/SweetX9DesktopWorker.inc b/iokit/Kernel/arm/SweetX9DesktopWorker.inc
+--- a/iokit/Kernel/arm/SweetX9DesktopWorker.inc
++++ b/iokit/Kernel/arm/SweetX9DesktopWorker.inc
+@@ -6,7 +6,7 @@
+ struct DesktopFramePool {
+  X9DesktopJob job;
+  IOBufferMemoryDescriptor *input,*output;
+- uint64_t generation;
++ uint64_t generation,worker_ns;
+ };
+ static DesktopFrameState desktop_frame_state=FrameCold;
+ static DesktopFramePool *desktop_frame_pool;
+@@ -41,10 +41,12 @@
+  }
+  DesktopFramePool *pool=(DesktopFramePool *)argument;
+  IOLog("X9 DESKTOP FRAME: worker BEGIN sequence=%u generation=%llu;display thread continues\n",pool->job.sequence,pool->generation);
++ uint64_t worker_started=mach_absolute_time();
+  IOLockLock(metal_service_lock);
+  int result=metal_service_disabled?0:sweet_x9_gpu_desktop(&pool->job);
+  if(result<0)metal_service_disabled=true;
+  IOLockUnlock(metal_service_lock);
++ absolutetime_to_nanoseconds(mach_absolute_time()-worker_started,&pool->worker_ns);
+  IOLockLock(desktop_frame_lock);
+  if(result==1&&pool->job.computed&&pool->job.cleaned)desktop_frame_state=FrameReady;
+  else {
+@@ -53,6 +55,7 @@
+  }
+  IOLog("X9 DESKTOP FRAME: worker sequence=%u result=%d computed=%u cleaned=%u generation=%llu;publication still gated\n",
+   pool->job.sequence,result,pool->job.computed,pool->job.cleaned,pool->generation);
++ IOLog("X9 DESKTOP FRAME: sequence=%u end-to-end-us=%llu;includes setup,dispatch,full-check,cleanup\n",pool->job.sequence,pool->worker_ns/1000);
+  if(result<0)IOLog("X9 DESKTOP FRAME: private DMA buffers/PM refs retained;display CPU path continues;no retry/reset\n");
+  IOLockUnlock(desktop_frame_lock);
+  desktop_frame_thread_exit();
+@@ -116,6 +119,10 @@
+  if(desktop_frame_state!=FrameReady&&desktop_frame_state!=FrameCPUReady) {IOLockUnlock(desktop_frame_lock);return false;}
+  DesktopFramePool *pool=desktop_frame_pool;
+  if(pool->generation!=generation) {
++  if(pool->worker_ns>100000000ULL) {
++   desktop_frame_no_more=true;
++   IOLog("X9 DESKTOP FRAME: missed100ms frame budget sequence=%u worker-us=%llu;staged experiment disabled for this boot,CPU display continues\n",pool->job.sequence,pool->worker_ns/1000);
++  }
+   IOLog("X9 DESKTOP FRAME: stale result sequence=%u generation=%llu current=%llu discarded;newer CPU frame kept\n",pool->job.sequence,pool->generation,generation);
+   desktop_frame_state=desktop_frame_no_more||desktop_frame_attempts>=8?FrameDisabled:FrameIdle;
+   if(desktop_frame_state==FrameDisabled)desktop_frame_retire_clean_pool();
+diff --git a/iokit/Kernel/arm/x9_desktop_program.inc b/iokit/Kernel/arm/x9_desktop_program.inc
+--- a/iokit/Kernel/arm/x9_desktop_program.inc
++++ b/iokit/Kernel/arm/x9_desktop_program.inc
+@@ -10,3 +10,4 @@
+  0x18,0x00,0x00,0x80,0x00,0x30,0x01,0x00,0x00,0x02,0x01,0x10,0x00,0x00,0x00,0x00,
+  0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+ };
++static constexpr uint32_t x9_desktop_workgroup=0x80001c07u;

@@ -1,0 +1,266 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -657,3 +657,7 @@
+ bsd/skywalk/packet/pbufpool.c			optional skywalk
+ bsd/skywalk/packet/pbufpool_kern.c		optional skywalk
+ bsd/dev/cpu_copy_in_cksum_gen.c			optional skywalk
++
++# Built-in X9 decmpfs zlib reader; no image rewriting.
++bsd/dev/sweet_x9_decmpfs.c	standard
++bsd/dev/x9_decmpfs/zlib_resource.c	standard
+diff --git a/bsd/dev/sweet_x9_decmpfs.c b/bsd/dev/sweet_x9_decmpfs.c
+new file mode 100644
+--- /dev/null
++++ b/bsd/dev/sweet_x9_decmpfs.c
+@@ -0,0 +1,132 @@
++/* X9 built-in decmpfs zlib readers, types 3 (xattr) and 4 (resource fork).
++ * Resource bytes are read through VFS in decmpfs_ctx; no file mutation,
++ * compressed-flag clearing, binary edits, resigning or block-device writes.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET) && FS_COMPRESSION
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/errno.h>
++#include <sys/vnode_internal.h>
++#include <sys/uio_internal.h>
++#include <sys/xattr.h>
++#include <sys/decmpfs.h>
++#include <kern/kalloc.h>
++#include <libkern/libkern.h>
++#include <libkern/zlib.h>
++#include <arm64/sweet_early.h>
++#include "x9_decmpfs/zlib_resource.h"
++struct context {vnode_t vnode;size_t resource_size;int error;};
++struct allocation {size_t bytes;uint64_t pad;};
++static voidpf allocate(voidpf ignored,unsigned items,unsigned bytes)
++{
++ (void)ignored;
++ if(!items||!bytes||(size_t)items>SIZE_MAX/bytes)return Z_NULL;
++ size_t n=(size_t)items*bytes;
++ if(n>(2U<<20)||n>SIZE_MAX-sizeof(struct allocation))return Z_NULL;
++ struct allocation *p=kalloc_data(sizeof(*p)+n,Z_WAITOK|Z_ZERO);
++ if(!p)return Z_NULL;p->bytes=n;return p+1;
++}
++static void release(voidpf ignored,voidpf memory)
++{
++ (void)ignored;if(!memory)return;
++ struct allocation *p=(struct allocation *)memory-1;kfree_data(p,sizeof(*p)+p->bytes);
++}
++static int inflate_block(void *ignored,const uint8_t *input,size_t n,uint8_t *output,size_t expected)
++{
++ (void)ignored;
++ z_stream stream={0};stream.zalloc=allocate;stream.zfree=release;
++ stream.next_in=(Bytef *)(uintptr_t)input;stream.avail_in=(uInt)n;
++ stream.next_out=output;stream.avail_out=(uInt)expected;
++ int result=inflateInit(&stream);if(result!=Z_OK)return X9DC_INFLATE;
++ result=inflate(&stream,Z_FINISH);
++ int ok=result==Z_STREAM_END&&stream.total_out==expected;
++ int ended=inflateEnd(&stream);
++ return ok&&ended==Z_OK?0:X9DC_INFLATE;
++}
++static int read_resource(void *opaque,uint64_t offset,void *buffer,size_t length)
++{
++ struct context *c=opaque;
++ if(offset>c->resource_size||length>c->resource_size-offset){c->error=EINVAL;return -1;}
++ UIO_STACKBUF(storage,1);
++ uio_t uio=uio_createwithbuffer(1,(off_t)offset,UIO_SYSSPACE,UIO_READ,storage,sizeof(storage));
++ if(!uio){c->error=ENOMEM;return -1;}
++ int error=uio_addiov(uio,CAST_USER_ADDR_T(buffer),length);
++ size_t reported=0;
++ if(!error)error=vn_getxattr(c->vnode,XATTR_RESOURCEFORK_NAME,uio,&reported,XATTR_NOSECURITY|XATTR_SHOWCOMPRESSION,decmpfs_ctx);
++ if(!error&&uio_resid(uio))error=EIO;
++ uio_free(uio);c->error=error;return error?-1:0;
++}
++static int setup(vnode_t vnode,decmpfs_header *header,struct context *c,struct x9dc_io *io,struct x9dc_resource *r)
++{
++ if(header->compression_magic!=DECMPFS_MAGIC||header->attr_size<sizeof(decmpfs_disk_header))return EINVAL;
++ *c=(struct context){.vnode=vnode};
++ *io=(struct x9dc_io){.context=c,.read=read_resource,.inflate=inflate_block};
++ if(header->compression_type==3) {
++  uint64_t bytes=decmpfs_get_uncompressed_size(header);
++  size_t compressed=header->attr_size-sizeof(decmpfs_disk_header);
++  return bytes&&bytes<=X9DC_BLOCK&&compressed&&compressed<=X9DC_INPUT?0:EINVAL;
++ }
++ if(header->compression_type!=4)return ENOTSUP;
++ int error=vn_getxattr(vnode,XATTR_RESOURCEFORK_NAME,NULL,&c->resource_size,XATTR_NOSECURITY|XATTR_SHOWCOMPRESSION,decmpfs_ctx);
++ if(error)return error;
++ io->resource_size=c->resource_size;
++ int result=x9dc_open(io,decmpfs_get_uncompressed_size(header),r);
++ return result?(c->error?c->error:EINVAL):0;
++}
++static int validate_file(vnode_t vnode,vfs_context_t ignored,decmpfs_header *header)
++{
++ (void)ignored;struct context context;struct x9dc_io io;struct x9dc_resource resource;
++ return setup(vnode,header,&context,&io,&resource);
++}
++static int fetch_file(vnode_t vnode,vfs_context_t ignored,decmpfs_header *header,off_t offset,
++                     user_ssize_t requested,int vectors,decmpfs_vector *vec,uint64_t *bytes_read)
++{
++ (void)ignored;
++ if(bytes_read)*bytes_read=0;
++ if(offset<0||requested<0||vectors<0||vectors>1024||(!vec&&vectors))return EINVAL;
++ uint64_t size=decmpfs_get_uncompressed_size(header);
++ if((uint64_t)offset>size)return EINVAL;
++ uint64_t want=(uint64_t)requested;if(want>size-(uint64_t)offset)want=size-(uint64_t)offset;
++ uint64_t space=0;
++ for(int i=0;i<vectors;i++) {
++  if(vec[i].size<0||(!vec[i].buf&&vec[i].size)||(uint64_t)vec[i].size>UINT64_MAX-space)return EINVAL;
++  space+=(uint64_t)vec[i].size;
++ }
++ if(space<want)return EINVAL;
++ if(!want)return 0;
++ struct context context;struct x9dc_io io;struct x9dc_resource resource;
++ int error=setup(vnode,header,&context,&io,&resource);if(error)return error;
++ struct x9dc_workspace *work=kalloc_data(sizeof(*work),Z_WAITOK);
++ if(!work)return ENOMEM;
++ if(header->compression_type==3) {
++  int result=x9dc_decode(&io,header->attr_bytes,header->attr_size-sizeof(decmpfs_disk_header),work->output,(size_t)size);
++  if(result){error=EIO;goto done;}
++ }
++ uint64_t copied=0;
++ for(int i=0;i<vectors&&copied<want;i++) {
++  size_t n=(size_t)vec[i].size;if(n>want-copied)n=(size_t)(want-copied);
++  if(header->compression_type==3)memcpy(vec[i].buf,work->output+(uint64_t)offset+copied,n);
++  else {
++   int result=x9dc_read(&io,&resource,(uint64_t)offset+copied,vec[i].buf,n,work);
++   if(result){error=context.error?context.error:EIO;goto done;}
++  }
++  copied+=n;
++ }
++ if(bytes_read)*bytes_read=copied;
++ done:
++ if(error)printf("X9 decmpfs decode failed type=%u offset=%lld size=%lld errno=%d\n",header->compression_type,offset,requested,error);
++ kfree_data(work,sizeof(*work));return error;
++}
++static decmpfs_registration zlib_registration={
++ .decmpfs_registration=DECMPFS_REGISTRATION_VERSION,
++ .validate=validate_file,.adjust_fetch=NULL,.fetch=fetch_file,.free_data=NULL,.get_flags=NULL
++};
++void sweet_x9_decmpfs_init(void)
++{
++ if(!sweet_early_is_x9())return;
++ int a=register_decmpfs_decompressor(3,&zlib_registration);
++ int b=register_decmpfs_decompressor(4,&zlib_registration);
++ if(a||b)panic("X9 decmpfs zlib registration failed type3=%d type4=%d",a,b);
++ printf("X9 decmpfs: zlib xattr type3 + resource type4 registered (read-only)\n");
++}
++#endif
+diff --git a/bsd/dev/x9_decmpfs/zlib_resource.c b/bsd/dev/x9_decmpfs/zlib_resource.c
+new file mode 100644
+--- /dev/null
++++ b/bsd/dev/x9_decmpfs/zlib_resource.c
+@@ -0,0 +1,70 @@
++#include "zlib_resource.h"
++static uint32_t le32(const uint8_t *p)
++{return p[0]|(uint32_t)p[1]<<8|(uint32_t)p[2]<<16|(uint32_t)p[3]<<24;}
++static uint32_t be32(const uint8_t *p)
++{return (uint32_t)p[0]<<24|(uint32_t)p[1]<<16|(uint32_t)p[2]<<8|p[3];}
++static void copy(void *d,const void *s,size_t n)
++{uint8_t *a=d;const uint8_t *b=s;while(n--)*a++=*b++;}
++static int read_at(const struct x9dc_io *io,uint64_t offset,void *out,size_t size)
++{
++ if(offset>io->resource_size||size>io->resource_size-offset)return X9DC_FORMAT;
++ return io->read(io->context,offset,out,size)?X9DC_IO:0;
++}
++int x9dc_decode(const struct x9dc_io *io,const uint8_t *input,size_t length,uint8_t *out,size_t expected)
++{
++ if(!io||!io->inflate||!input||!out||!length||length>X9DC_INPUT||!expected||expected>X9DC_BLOCK)return X9DC_FORMAT;
++ if((input[0]&15)==15) {
++  if(length-1!=expected)return X9DC_FORMAT;
++  copy(out,input+1,expected);return 0;
++ }
++ if(length<2||input[0]!=0x78||(((unsigned)input[0]<<8|input[1])%31)||input[1]&0x20)return X9DC_FORMAT;
++ return io->inflate(io->context,input,length,out,expected)?X9DC_INFLATE:0;
++}
++int x9dc_open(const struct x9dc_io *io,uint64_t bytes,struct x9dc_resource *out)
++{
++ if(!io||!io->read||!io->inflate||!out||!bytes||bytes>(64ULL<<30))return X9DC_FORMAT;
++ uint8_t header[16],prefix[8];int error=read_at(io,0,header,sizeof(header));if(error)return error;
++ uint64_t data=be32(header),map=be32(header+4),length=be32(header+8),map_bytes=be32(header+12);
++ if(data<16||length<8||data>io->resource_size||length>io->resource_size-data||
++    map<data+length||map>io->resource_size||map_bytes>io->resource_size-map)return X9DC_FORMAT;
++ error=read_at(io,data,prefix,sizeof(prefix));if(error)return error;
++ uint32_t record=be32(prefix),blocks=le32(prefix+4);
++ uint64_t expected=(bytes+X9DC_BLOCK-1)/X9DC_BLOCK;
++ if(record!=length-4||blocks!=expected||!blocks||4+(uint64_t)blocks*8>record)return X9DC_FORMAT;
++ out->base=data+4;out->length=record;out->file_size=bytes;out->blocks=blocks;return 0;
++}
++static int entry(const struct x9dc_io *io,const struct x9dc_resource *r,uint32_t index,uint32_t *offset,uint32_t *length)
++{
++ if(index>=r->blocks)return X9DC_FORMAT;
++ uint8_t raw[8];int error=read_at(io,r->base+4+(uint64_t)index*8,raw,sizeof(raw));if(error)return error;
++ *offset=le32(raw);*length=le32(raw+4);
++ uint64_t table=4+(uint64_t)r->blocks*8;
++ if(*offset<table||!*length||*length>X9DC_INPUT||*offset>r->length||*length>r->length-*offset)return X9DC_FORMAT;
++ return 0;
++}
++int x9dc_read(const struct x9dc_io *io,const struct x9dc_resource *r,uint64_t offset,void *destination,size_t length,struct x9dc_workspace *w)
++{
++ if(!io||!r||!w||(!destination&&length)||offset>r->file_size||length>r->file_size-offset)return X9DC_RANGE;
++ if(r->base>io->resource_size||r->length>io->resource_size-r->base)return X9DC_FORMAT;
++ uint8_t *out=destination;
++ while(length) {
++  uint32_t index=(uint32_t)(offset/X9DC_BLOCK),start,n;
++  int error=entry(io,r,index,&start,&n);if(error)return error;
++  /* Check adjacent entries: table aliasing/overlap cannot redirect a block. */
++  if(index) {
++   uint32_t prior,bytes;error=entry(io,r,index-1,&prior,&bytes);if(error)return error;
++   if((uint64_t)prior+bytes>start)return X9DC_FORMAT;
++  }
++  if(index+1<r->blocks) {
++   uint32_t next,bytes;error=entry(io,r,index+1,&next,&bytes);if(error)return error;
++   if((uint64_t)start+n>next)return X9DC_FORMAT;
++  }
++  error=read_at(io,r->base+start,w->input,n);if(error)return error;
++  uint64_t base=(uint64_t)index*X9DC_BLOCK,remaining=r->file_size-base;
++  size_t expected=remaining<X9DC_BLOCK?(size_t)remaining:X9DC_BLOCK;
++  error=x9dc_decode(io,w->input,n,w->output,expected);if(error)return error;
++  size_t skip=(size_t)(offset%X9DC_BLOCK),take=expected-skip;if(take>length)take=length;
++  copy(out,w->output+skip,take);out+=take;offset+=take;length-=take;
++ }
++ return 0;
++}
+diff --git a/bsd/dev/x9_decmpfs/zlib_resource.h b/bsd/dev/x9_decmpfs/zlib_resource.h
+new file mode 100644
+--- /dev/null
++++ b/bsd/dev/x9_decmpfs/zlib_resource.h
+@@ -0,0 +1,24 @@
++/* Read-only decmpfs zlib format parser. No vnode, allocation or media writes.
++ * Format: BE resource envelope, length-prefixed LE block table, 64KiB units.
++ * Independent implementation; bounded against supplied resource/file sizes.
++ */
++#pragma once
++#include <stddef.h>
++#include <stdint.h>
++#define X9DC_BLOCK 65536U
++#define X9DC_INPUT (X9DC_BLOCK+1U)
++enum {X9DC_FORMAT=-1,X9DC_IO=-2,X9DC_INFLATE=-3,X9DC_RANGE=-4};
++struct x9dc_io {
++ void *context;
++ uint64_t resource_size;
++ int (*read)(void *,uint64_t,void *,size_t);
++ /* Must reach a valid zlib stream end and produce exactly expected bytes.
++  * Actual Apple type4 entries include non-stream tail bytes: table bounds,
++  * not zlib total_in, determine the next block. Never decode tails as data. */
++ int (*inflate)(void *,const uint8_t *,size_t,uint8_t *,size_t);
++};
++struct x9dc_resource {uint64_t base,length,file_size;uint32_t blocks;};
++struct x9dc_workspace {uint8_t input[X9DC_INPUT],output[X9DC_BLOCK];};
++int x9dc_open(const struct x9dc_io *,uint64_t,struct x9dc_resource *);
++int x9dc_read(const struct x9dc_io *,const struct x9dc_resource *,uint64_t,void *,size_t,struct x9dc_workspace *);
++int x9dc_decode(const struct x9dc_io *,const uint8_t *,size_t,uint8_t *,size_t);
+diff --git a/bsd/kern/decmpfs.c b/bsd/kern/decmpfs.c
+--- a/bsd/kern/decmpfs.c
++++ b/bsd/kern/decmpfs.c
+@@ -2360,6 +2360,10 @@
+ 	decmpfs_ctx = vfs_context_create(vfs_context_kernel());
+ 
+ 	register_decmpfs_decompressor(CMP_Type1, &Type1Reg);
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	extern void sweet_x9_decmpfs_init(void);
++	sweet_x9_decmpfs_init();
++#endif
+ 
+ 	ktriage_register_subsystem_strings(KDBG_TRIAGE_SUBSYS_DECMPFS, &ktriage_decmpfs_subsystem_strings);
+ 

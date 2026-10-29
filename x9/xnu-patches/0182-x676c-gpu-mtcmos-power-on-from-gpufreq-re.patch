@@ -1,0 +1,211 @@
+From 334f4acb2650ef3e351f6f8cef6edbb23e680d4c Mon Sep 17 00:00:00 2001
+From: Egor Kulikovskiy <xianel0x@gmail.com>
+Date: Fri, 23 Oct 2026 07:20:32 +0500
+Subject: [PATCH] x676c: Mali-G57 MTCMOS power-on from stock gpufreq RE + kbase
+ regmap
+
+Reverse-engineered the AP-direct GPU power path from the device's own
+mtk_gpufreq_mt6789.ko and clk-mt6789*.ko (GPUEB off on MT6789):
+- MFG power domains MFG0-3 live in the SPM bank (0x10006308/30c/310/314),
+  status in PWR_STATUS 0x16c/0x170 - not in MFG_TOP as the old code assumed.
+- Replace the wrong SPM+0x338 / MFG_TOP power-bit writes with the exact
+  MTCMOS sequence (PWR_ON/2ND -> wait status -> clear CLK_DIS/ISO -> RST_B
+  -> clear SRAM_PDN -> wait SRAM ack) for each domain, plus the MFG1
+  infracfg_ao bus-protection release, then bg3d subsys CG (mfgcfg
+  syscon@13fbf000: SETCLR gate sta0/clr8/set4) and MFG_TOP external CG.
+- Read AS_PRESENT/JS_PRESENT from 0x18/0x1c (kbase), not 0x20/0x24.
+
+Not yet hardware-verified: the GPU bank still reads 0x0 until this runs on
+device; MFGPLL/mux parent-select and the MT6366 VGPU encoding are still open.
+---
+ iokit/Kernel/arm/SweetFramebuffer.cpp | 148 ++++++++++++++++----------
+ 1 file changed, 93 insertions(+), 55 deletions(-)
+
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index f705735..84914a3 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -543,78 +543,116 @@ AppleCLCD::start(IOService *provider)
+ 					    vgpu_post, vsram_post);
+ 				}
+ 
+-				/* 1. Un-gate infracfg_ao clock distribution and topckgen MFG clocks */
++				/*
++				 * MT6789 Mali-G57 power-on, reverse-engineered from the stock
++				 * mtk_gpufreq_mt6789.ko (GPUEB off => AP-direct MTCMOS path):
++				 * __gpufreq_power_control + __gpufreq_mfg[0-3]_control +
++				 * __gpufreq_external_cg_control. Bases: SPM 0x10006000,
++				 * infracfg_ao 0x10001000, MFG_TOP 0x13fbf000, topckgen 0x10000000.
++				 * The power-domain PWR_CON registers live in the SPM bank (NOT in
++				 * MFG_TOP as the earlier bring-up wrongly assumed); status is read
++				 * from SPM PWR_STATUS (0x16c) and PWR_STATUS_2ND (0x170).
++				 */
+ 				volatile uint32_t *infra_ao = (volatile uint32_t *)ml_io_map(0x10001000, 0x1000);
+-				if (infra_ao != NULL) {
+-					infra_ao[0x0088 / 4] = 0xffffffff;
+-					infra_ao[0x008c / 4] = 0xffffffff;
+-					infra_ao[0x0094 / 4] = 0xffffffff;
+-					IODelay(20);
+-					IOLog("SWEET GPU: infracfg_ao at 0x10001000: cg0=0x%08x cg1=0x%08x\n",
+-					    infra_ao[0x0080 / 4], infra_ao[0x0084 / 4]);
+-				}
+-
+ 				volatile uint32_t *topck = (volatile uint32_t *)ml_io_map(0x10000000, 0x1000);
++				volatile uint32_t *spm = (volatile uint32_t *)ml_io_map(0x10006000, 0x1000);
++				volatile uint32_t *mfg_top = (volatile uint32_t *)ml_io_map(0x13fbf000, 0x1000);
++
++				/* 1. Enable the MFG reference-clock mux in topckgen (CLK_CFG_3). */
+ 				if (topck != NULL) {
+-					/* MT6789 topckgen CLK_CFG_3_CLR is at offset 0x0058: clear bits 18 (mfgcfg) and 7 */
+-					topck[0x0058 / 4] = (1u << 18) | (1u << 7);
+-					/* CLK_CFG_UPDATE is at offset 0x0004: trigger bit 3 (mfg) */
+-					topck[0x0004 / 4] = (1u << 3);
++					topck[0x0058 / 4] = (1u << 18) | (1u << 7); /* CLK_CFG_3_CLR: ungate mfg mux */
++					topck[0x0004 / 4] = (1u << 3);              /* CLK_CFG_UPDATE: mfg */
+ 					IODelay(20);
+-					IOLog("SWEET GPU: topckgen at 0x10000000: clk_cfg_3=0x%08x\n", topck[0x0050 / 4]);
+ 				}
+ 
+-				/* 2. Sequence SCPSYS SPM_MFG_PWR_CON at 0x10006338 */
+-				volatile uint32_t *scpsys = (volatile uint32_t *)ml_io_map(0x10006000, 0x1000);
+-				if (scpsys != NULL) {
+-					uint32_t pwr_sta = scpsys[0x0180 / 4];
+-					uint32_t con_338 = scpsys[0x0338 / 4];
+-					IOLog("SWEET GPU: SCPSYS initial: sta=0x%08x con_338=0x%08x\n", pwr_sta, con_338);
++				/*
++				 * 2. MTCMOS power-domain bring-up in the SPM bank. PWR_CON bits:
++				 *    0=RST_B 1=ISO 2=PWR_ON 3=PWR_ON_2ND 4=CLK_DIS
++				 *    8=SRAM_PDN 12=SRAM_PDN_ACK. Per-domain status bit in
++				 *    PWR_STATUS(0x16c)+PWR_STATUS_2ND(0x170): MFG0=0x4 MFG1=0x8
++				 *    MFG2=0x10 MFG3=0x20. CON offsets 0x308/0x30c/0x310/0x314.
++				 */
++				if (spm != NULL) {
++					volatile uint32_t *sta  = &spm[0x016c / 4];
++					volatile uint32_t *sta2 = &spm[0x0170 / 4];
++					auto mfg_power_on = [&](uint32_t con_off, uint32_t sta_bit) {
++						volatile uint32_t *con = &spm[con_off / 4];
++						*con |= (1u << 2);                  /* PWR_ON */
++						*con |= (1u << 3);                  /* PWR_ON_2ND */
++						for (int i = 0; i < 2000; i++) {
++							if ((*sta & sta_bit) && (*sta2 & sta_bit)) break;
++							IODelay(10);
++						}
++						IODelay(100);                       /* power settle */
++						*con &= ~(1u << 4);                 /* clear CLK_DIS */
++						*con &= ~(1u << 1);                 /* clear ISO */
++						*con |= (1u << 0);                  /* RST_B */
++						*con &= ~(1u << 8);                 /* clear SRAM_PDN */
++						for (int i = 0; i < 2000; i++) {
++							if ((*con & (1u << 12)) == 0) break; /* SRAM_PDN_ACK clear */
++							IODelay(10);
++						}
++					};
+ 
+-					scpsys[0x0338 / 4] |= (1u << 0) | (1u << 1) | (1u << 3);
+-					scpsys[0x0338 / 4] &= ~((1u << 2) | (0xful << 8));
+-					IODelay(20);
++					IOLog("SWEET GPU: SPM PWR_STATUS pre=0x%08x/0x%08x MFG0_CON=0x%08x\n",
++					    *sta, *sta2, spm[0x0308 / 4]);
++
++					mfg_power_on(0x0308, 0x4);   /* MFG0 (async/bus) */
++					mfg_power_on(0x030c, 0x8);   /* MFG1 (core) */
++
++					/* MFG1 up -> release MFG bus protection in infracfg_ao. */
++					if (infra_ao != NULL) {
++						infra_ao[0x0718 / 4] = 0x80;
++						infra_ao[0x02a4 / 4] = 0x600000;
++						infra_ao[0x0718 / 4] = 0x60;
++						infra_ao[0x02ac / 4] = 0x200000;
++						IODelay(20);
++					}
++
++					mfg_power_on(0x0310, 0x10);  /* MFG2 (shader stack 0) */
++					mfg_power_on(0x0314, 0x20);  /* MFG3 (shader stack 1) */
++
++					IOLog("SWEET GPU: SPM PWR_STATUS post=0x%08x/0x%08x MFG_CON[0..3]=0x%08x 0x%08x 0x%08x 0x%08x\n",
++					    *sta, *sta2, spm[0x0308 / 4], spm[0x030c / 4], spm[0x0310 / 4], spm[0x0314 / 4]);
+ 				}
+ 
+-				/* 3. Un-gate MFG_TOP_CONFIG clock gates and apply external CG */
+-				volatile uint32_t *mfg_top = (volatile uint32_t *)ml_io_map(0x13fbf000, 0x1000);
++				/*
++				 * 3. MFG_TOP external clock-gate control (__gpufreq_external_cg_control).
++				 * Runs only after the MFG domains are powered (it writes the MFG_TOP
++				 * bank which is itself inside the MFG power domain).
++				 */
+ 				if (mfg_top != NULL) {
+-					/* Clear all clock gating registers in MFG_TOP at 0x0008 */
+-					mfg_top[0x0008 / 4] = 0xffffffff;
+-					IODelay(20);
++					/*
++					 * bg3d subsys clock gate (mfgcfg lives in syscon@0x13fbf000,
++					 * confirmed from device-tree). mtk SETCLR gate reversed from
++					 * clk-mt6789-mfgcfg.ko: {sta 0x0, clr 0x8, set 0x4}, shift 0.
++					 * Enable = write bit0 to CLR; gated when sta bit0 == 1.
++					 */
++					mfg_top[0x0008 / 4] = (1u << 0);
++					for (int i = 0; i < 1000; i++) {
++						if ((mfg_top[0x0000 / 4] & (1u << 0)) == 0) break;
++						IODelay(10);
++					}
+ 
+-					/* Apply external CG control from vendor mtk_gpufreq_mt6789 */
+ 					mfg_top[0x0020 / 4] |= 0x03c00000;
+ 					mfg_top[0x00b0 / 4] &= ~0x0600;
+ 					mfg_top[0x00b4 / 4] |= 0x0010;
+-					mfg_top[0x00b0 / 4] = (mfg_top[0x00b0 / 4] & ~0x100) | 0x80000;
++					mfg_top[0x00b0 / 4] = (mfg_top[0x00b0 / 4] & ~0x00080100u) | 0x80000;
+ 					mfg_top[0x0024 / 4] |= 1;
+ 					mfg_top[0x0f60 / 4] |= 1;
+ 					IODelay(20);
+ 
+-					uint32_t c0 = mfg_top[0x0308 / 4];
+-					uint32_t c1 = mfg_top[0x030c / 4];
+-					uint32_t c2 = mfg_top[0x0310 / 4];
+-					uint32_t c3 = mfg_top[0x0314 / 4];
+-					uint32_t s0 = mfg_top[0x016c / 4];
+-					uint32_t s1 = mfg_top[0x0170 / 4];
+-					IOLog("SWEET GPU: MFG_TOP_CONFIG at 0x13fbf000: ctl[0..3]=0x%08x 0x%08x 0x%08x 0x%08x sta=0x%08x 0x%08x\n",
+-					    c0, c1, c2, c3, s0, s1);
+-
+-					/* Sequence all 4 MFG power domains: Core 0 (0x308), Core 1 (0x30c), Tiler (0x310), L2/Bus (0x314) */
+-					static const uint32_t mfg_regs[4] = { 0x0308, 0x030c, 0x0310, 0x0314 };
+-					for (int i = 0; i < 4; i++) {
+-						uint32_t off = mfg_regs[i] / 4;
+-						mfg_top[off] |= (1u << 2) | (1u << 3);  /* Assert PWR_ON + PWR_ON_2ND */
+-						IODelay(20);
+-						mfg_top[off] &= ~((1u << 4) | (1u << 1)); /* Clear isolation and sleep */
+-						mfg_top[off] |= (1u << 0);                /* Set enable */
+-						mfg_top[off] &= ~(1u << 8);               /* Clear SRAM_PDN */
+-						IODelay(20);
++					/* topckgen MFG clock-stable poll (bit 0x40000 @ CLK_CFG_3 0x50). */
++					if (topck != NULL) {
++						uint32_t ck = 0;
++						for (int i = 0; i < 1000; i++) {
++							ck = topck[0x0050 / 4];
++							if (ck & 0x40000) break;
++							IODelay(10);
++						}
++						IOLog("SWEET GPU: topckgen CLK_CFG_3=0x%08x (mfg stable=%d)\n",
++						    ck, (ck & 0x40000) ? 1 : 0);
+ 					}
+-
+-					IOLog("SWEET GPU: MFG_TOP_CONFIG post-power: ctl0=0x%08x ctl1=0x%08x sta=0x%08x 0x%08x\n",
+-					    mfg_top[0x0308 / 4], mfg_top[0x030c / 4], mfg_top[0x016c / 4], mfg_top[0x0170 / 4]);
+ 				}
+ 
+ 				/* 4. Read Mali hardware registers */
+@@ -625,8 +663,8 @@ AppleCLCD::start(IOService *provider)
+ 					uint32_t tiler_feat = mali[0x000c / 4];
+ 					uint32_t mem_feat = mali[0x0010 / 4];
+ 					uint32_t mmu_feat = mali[0x0014 / 4];
+-					uint32_t as_present = mali[0x0020 / 4];
+-					uint32_t js_present = mali[0x0024 / 4];
++					uint32_t as_present = mali[0x0018 / 4];  /* kbase AS_PRESENT = 0x18 */
++					uint32_t js_present = mali[0x001c / 4];  /* kbase JS_PRESENT = 0x1c */
+ 					IOLog("SWEET GPU: Mali-G57 ID=0x%08x (Arch %u Rev %u) L2=0x%08x Tiler=0x%08x Mem=0x%08x MMU=0x%08x AS=0x%x JS=0x%x\n",
+ 					    gpu_id, (gpu_id >> 16) & 0xff, (gpu_id >> 12) & 0xf,
+ 					    l2_feat, tiler_feat, mem_feat, mmu_feat, as_present, js_present);
+-- 
+2.51.0.windows.1
+

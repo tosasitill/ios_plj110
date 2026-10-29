@@ -1,0 +1,126 @@
+From: HelioDarwin
+Subject: [PATCH] x9: add named BSD initialization milestones 81-90
+
+Record process0, buffers, VFS, filesystems, mbufs, POSIX, network and sysctl
+progress without changing boot semantics or the default reset policy.
+Stage90 precedes bsd_autoconf, well before root mount and userspace.
+
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -392,6 +392,16 @@
+ 	{ "trust_cache_init", 78 },
+ 	{ "machine_lockdown", 79 },
+ 	{ "bsd_init", 80 },
++	{ "bsd_entered", 81 },
++	{ "bsd_proc0_ready", 82 },
++	{ "bsd_buffers_ready", 83 },
++	{ "bsd_vfs_ready", 84 },
++	{ "bsd_filesystems_registered", 85 },
++	{ "bsd_mbuf_ready", 86 },
++	{ "bsd_posix_ready", 87 },
++	{ "bsd_network_ready", 88 },
++	{ "bsd_sysctl_ready", 89 },
++	{ "bsd_autoconf_enter", 90 },
+ };
+ 
+ /*
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -438,6 +438,20 @@
+ 	}
+ }
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <arm64/sweet_early.h>
++/* Read-only startup diagnostics. Other boards do not print, journal or reset. */
++static inline void
++sweet_bsd_mark(unsigned stage, const char *label)
++{
++ if (!sweet_early_is_x9()) return;
++ printf("X9 BSD %u: %s\n", stage, label);
++ sweet_bootstrap_mark(label);
++}
++#else
++#define sweet_bsd_mark(stage, label) ((void)0)
++#endif
++
+ #define RAMDEV "md0"
+ 
+ bool
+@@ -498,6 +512,7 @@
+ #define bsd_init_kprintf(x, ...)
+ #endif
+ 
++	sweet_bsd_mark(81, "bsd_entered");
+ 	throttle_init();
+ 
+ 	printf(copyright);
+@@ -630,6 +645,7 @@
+ 	mac_cred_label_associate_kernel(vfs_context0.vc_ucred);
+ #endif
+ 	proc_update_creds_onproc(kernproc);
++	sweet_bsd_mark(82, "bsd_proc0_ready");
+ 
+ 	TAILQ_INIT(&kernproc->p_aio_activeq);
+ 	TAILQ_INIT(&kernproc->p_aio_doneq);
+@@ -680,6 +696,7 @@
+ 	 */
+ 	bsd_init_kprintf("calling bsd_bufferinit\n");
+ 	bsd_bufferinit();
++	sweet_bsd_mark(83, "bsd_buffers_ready");
+ 
+ 	/*
+ 	 * Initialize the calendar.
+@@ -690,6 +707,7 @@
+ 	/* Initialize the file systems. */
+ 	bsd_init_kprintf("calling vfsinit\n");
+ 	vfsinit();
++	sweet_bsd_mark(84, "bsd_vfs_ready");
+ 
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ 	/* AMFI's MAC policy is built in on SWEET (bsd/kern/sweet_amfi.c). */
+@@ -702,6 +720,7 @@
+ 	extern void sweet_hfs_register(void);
+ 	sweet_hfs_register();
+ #endif
++	sweet_bsd_mark(85, "bsd_filesystems_registered");
+ 
+ #if CONFIG_PROC_UUID_POLICY
+ 	/* Initial proc_uuid_policy subsystem */
+@@ -718,6 +737,7 @@
+ 	mbinit();
+ 	restricted_in_port_init();
+ #endif /* SOCKETS */
++	sweet_bsd_mark(86, "bsd_mbuf_ready");
+ 
+ 	/*
+ 	 * Initializes security event auditing.
+@@ -746,6 +766,7 @@
+ 	pshm_cache_init();
+ 	bsd_init_kprintf("calling psem_cache_init\n");
+ 	psem_cache_init();
++	sweet_bsd_mark(87, "bsd_posix_ready");
+ 
+ 	/*
+ 	 * Initialize protocols.  Block reception of incoming packets
+@@ -778,6 +799,7 @@
+ #endif
+ 	netagent_init();
+ #endif /* NETWORKING */
++	sweet_bsd_mark(88, "bsd_network_ready");
+ 
+ #if CONFIG_FREEZE
+ #ifndef CONFIG_MEMORYSTATUS
+@@ -796,8 +818,10 @@
+ 
+ 	bsd_init_kprintf("calling sysctl_mib_init\n");
+ 	sysctl_mib_init();
++	sweet_bsd_mark(89, "bsd_sysctl_ready");
+ 
+ 	bsd_init_kprintf("calling bsd_autoconf\n");
++	sweet_bsd_mark(90, "bsd_autoconf_enter");
+ 	bsd_autoconf();
+ 
+ #if CONFIG_DTRACE

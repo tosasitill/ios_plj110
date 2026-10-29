@@ -1,0 +1,139 @@
+diff --git a/iokit/Kernel/arm/SweetX9CSF.cpp b/iokit/Kernel/arm/SweetX9CSF.cpp
+--- a/iokit/Kernel/arm/SweetX9CSF.cpp
++++ b/iokit/Kernel/arm/SweetX9CSF.cpp
+@@ -571,7 +571,7 @@
+  Plan p;const char *error=parse(p);
+  if(!error)error=populate(p);
+  if(error){IOLog("X9 CSF BOOT: image preparation failed: %s\n",error);return 0;}
+- IOLog("X9 CSF BOOT: pan159 stock-firmware=%s prepared bytes=%llu tables=%u\n",
++ IOLog("X9 CSF BOOT: pan160 stock-firmware=%s prepared bytes=%llu tables=%u\n",
+   csf_firmware_sha256,p.mapped_bytes,p.table_count);
+  return boot(p,gpu,smmu,doorbell);
+ }
+diff --git a/iokit/Kernel/arm/SweetX9ComputeService.inc b/iokit/Kernel/arm/SweetX9ComputeService.inc
+--- a/iokit/Kernel/arm/SweetX9ComputeService.inc
++++ b/iokit/Kernel/arm/SweetX9ComputeService.inc
+@@ -7,6 +7,8 @@
+ static IOLock *metal_service_lock;
+ static bool metal_service_disabled;
+ static uint32_t metal_sequence;
++static bool metal_discovery_enabled;
++extern "C" bool sweet_x9_metal_discovery_ready(void) { return metal_discovery_enabled; }
+ class SweetX9ComputeUserClient : public IOUserClient {
+  OSDeclareDefaultStructors(SweetX9ComputeUserClient);
+ public:
+@@ -84,19 +86,12 @@
+  service->setName(X9_METAL_SERVICE);
+  service->setProperty("X9ComputeABI",X9_METAL_ABI,32);
+  service->setProperty("X9ComputeMaxElements",X9_METAL_MAX,32);
+- /* Publish plugin properties before making the private service visible:
+-  * the probe waits for this service before Metal's once-per-process discovery. */
++ /* Discovery strings are synthesized by IOAcceleratorES::copyProperty
++  * only for the exact probe process. Keep the shared property table passive. */
+  int opt=0;
+  if(PE_parse_boot_argn("x9_metal_probe",&opt,sizeof(opt))&&opt==1) {
+-  auto matching=IOService::serviceMatching("IOAcceleratorES");
+-  if(matching) {
+-   auto accelerator=IOService::copyMatchingService(matching);matching->release();
+-   if(accelerator) {
+-    accelerator->setProperty("MetalPluginName","X9MetalCompute");
+-    accelerator->setProperty("MetalPluginClassName","X9Device");
+-    IOLog("X9 METAL API: IOAcceleratorES plugin=X9MetalCompute class=X9Device (probe process only)\n");
+-   }
+-  }
++  __asm__ volatile("dmb ish" ::: "memory");metal_discovery_enabled=true;
++  IOLog("X9 METAL API: discovery enabled for x9-metal-probe property reads only; no global plugin properties\n");
+  }
+  published=true;service->registerService();
+  IOLog("X9 METAL API: SweetX9Compute registered after75-dispatch baseline and power release; copied root-only ABI1, max256\n");
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -276,8 +276,21 @@
+  * One without MetalPluginName/MetalPluginClassName is found and then passed
+  * over by Metal (MTLRegisterDevices), which leaves the renderers as they were.
+  */
++extern "C" bool sweet_x9_metal_discovery_ready(void);
+ class IOAcceleratorES : public IOService {
+ 	OSDeclareDefaultStructors(IOAcceleratorES);
++public:
++ virtual OSPtr<OSObject> copyProperty(const char *key) const APPLE_KEXT_OVERRIDE {
++  if(key&&sweet_board_x9()&&sweet_x9_metal_discovery_ready()&&
++     (!strcmp(key,"MetalPluginName")||!strcmp(key,"MetalPluginClassName"))) {
++   char name[32]={0};(void)proc_selfname(name,sizeof(name));
++   if(!strcmp(name,"x9-metal-probe")) {
++    IOLog("X9 METAL DISCOVERY: property=%s caller=x9-metal-probe scoped\n",key);
++    return OSString::withCString(!strcmp(key,"MetalPluginName")?"X9MetalCompute160":"X9Device");
++   }
++  }
++  return IOService::copyProperty(key);
++ }
+ };
+ 
+ OSDefineMetaClassAndStructors(IOAcceleratorES, IOService);
+diff --git a/bsd/dev/sweet_x9_gpu_dependencies.c b/bsd/dev/sweet_x9_gpu_dependencies.c
+--- a/bsd/dev/sweet_x9_gpu_dependencies.c
++++ b/bsd/dev/sweet_x9_gpu_dependencies.c
+@@ -181,7 +181,7 @@
+ static void run(void) {
+  int enabled=0;
+  if(!PE_parse_boot_argn("x9_gpu_power_probe",&enabled,sizeof(enabled))||enabled!=1)return;
+- printf("X9 GPU: pan159 startup campaign INIT -> POWER_ON -> ID -> POWER_OFF\n");
++ printf("X9 GPU: pan160 startup campaign INIT -> POWER_ON -> ID -> POWER_OFF\n");
+  if(!handoff()){printf("X9 GPU: live FDT handoff absent/mismatched; all writes refused\n");return;}
+  spm=ml_io_map(0x1c004000,0x1000);
+  if(!spm||!on(rd(spm,0xe1c))){printf("X9 GPU: SPM MFG0 ACK absent; stopped\n");return;}
+diff --git a/bsd/kern/x9_metal_deploy.inc b/bsd/kern/x9_metal_deploy.inc
+--- a/bsd/kern/x9_metal_deploy.inc
++++ b/bsd/kern/x9_metal_deploy.inc
+@@ -46,12 +46,13 @@
+  if(!PE_parse_boot_argn("x9_metal_probe",&enabled,sizeof(enabled))||enabled!=1)return 0;
+  if(!sweet_early_is_x9()||!sweet_x9_ufs_root_writable()||!proc_is64bit(p))return EINVAL;
+  static const char target[]="/System/Library/xpc/launchd.plist";
+- static const char backup[]="/System/Library/xpc/launchd.x9-metal-pan159-before.plist";
+- static const char temporary[]="/System/Library/xpc/launchd.x9-metal-pan159.tmp";
+- static const char directory[]="/private/var/x9-metal-pan159";
+- static const char executable[]="/private/var/x9-metal-pan159/x9-metal-probe";
++ static const char backup[]="/System/Library/xpc/launchd.x9-metal-pan160-before.plist";
++ static const char temporary[]="/System/Library/xpc/launchd.x9-metal-pan160.tmp";
++ static const char directory[]="/private/var/x9-metal-pan160";
++ static const char executable[]="/private/var/x9-metal-pan160/x9-metal-probe";
+  boolean_t installed=!x9_metal_same(target,x9_launchd_metal,sizeof(x9_launchd_metal));
+- int error=installed?0:x9_metal_same(target,x9_launchd_original,sizeof(x9_launchd_original));
++ boolean_t previous=!installed&&!x9_metal_same(target,x9_launchd_previous,sizeof(x9_launchd_previous));
++ int error=(installed||previous)?0:x9_metal_same(target,x9_launchd_original,sizeof(x9_launchd_original));
+  if(error)return error; /* Conflict: no cache, files or launch jobs changed. */
+  if(scratch>end||sizeof(backup)+sizeof(temporary)+4096>end-scratch)return E2BIG;
+  int32_t rv=0;error=copyout(directory,scratch,sizeof(directory));if(error)return error;
+@@ -59,24 +60,25 @@
+  vnode_t dir=NULLVP;error=vnode_lookup(directory,VNODE_LOOKUP_NOFOLLOW,&dir,vfs_context_kernel());
+  if(error)return error;boolean_t isdir=vnode_isdir(dir);vnode_put(dir);if(!isdir)return ENOTDIR;
+  error=x9_metal_install(p,scratch,end,executable,x9_probe_bytes,sizeof(x9_probe_bytes),0755);if(error)return error;
+- static const char bundle[]="/System/Library/Extensions/X9MetalCompute.bundle";
++ static const char bundle[]="/System/Library/Extensions/X9MetalCompute160.bundle";
+  error=copyout(bundle,scratch,sizeof(bundle));if(error)return error;
+  md.path=scratch;error=mkdir(p,&md,&rv);if(error&&error!=EEXIST)return error;
+  dir=NULLVP;error=vnode_lookup(bundle,VNODE_LOOKUP_NOFOLLOW,&dir,vfs_context_kernel());
+  if(error)return error;isdir=vnode_isdir(dir);vnode_put(dir);if(!isdir)return ENOTDIR;
+- error=x9_metal_install(p,scratch,end,"/System/Library/Extensions/X9MetalCompute.bundle/X9MetalCompute",x9_plugin_bytes,sizeof(x9_plugin_bytes),0755);if(error)return error;
+- error=x9_metal_install(p,scratch,end,"/System/Library/Extensions/X9MetalCompute.bundle/Info.plist",x9_plugin_info,sizeof(x9_plugin_info),0644);if(error)return error;
+- static const char signatures[]="/System/Library/Extensions/X9MetalCompute.bundle/_CodeSignature";
++ error=x9_metal_install(p,scratch,end,"/System/Library/Extensions/X9MetalCompute160.bundle/X9MetalCompute",x9_plugin_bytes,sizeof(x9_plugin_bytes),0755);if(error)return error;
++ error=x9_metal_install(p,scratch,end,"/System/Library/Extensions/X9MetalCompute160.bundle/Info.plist",x9_plugin_info,sizeof(x9_plugin_info),0644);if(error)return error;
++ static const char signatures[]="/System/Library/Extensions/X9MetalCompute160.bundle/_CodeSignature";
+  error=copyout(signatures,scratch,sizeof(signatures));if(error)return error;
+  md.path=scratch;error=mkdir(p,&md,&rv);if(error&&error!=EEXIST)return error;
+  dir=NULLVP;error=vnode_lookup(signatures,VNODE_LOOKUP_NOFOLLOW,&dir,vfs_context_kernel());
+  if(error)return error;isdir=vnode_isdir(dir);vnode_put(dir);if(!isdir)return ENOTDIR;
+- error=x9_metal_install(p,scratch,end,"/System/Library/Extensions/X9MetalCompute.bundle/_CodeSignature/CodeResources",x9_plugin_resources,sizeof(x9_plugin_resources),0644);if(error)return error;
++ error=x9_metal_install(p,scratch,end,"/System/Library/Extensions/X9MetalCompute160.bundle/_CodeSignature/CodeResources",x9_plugin_resources,sizeof(x9_plugin_resources),0644);if(error)return error;
+  if(installed)return 0;
+  error=copyout(target,scratch,sizeof(target));if(error)return error;
+  user_addr_t dest=scratch+sizeof(target);error=copyout(backup,dest,sizeof(backup));if(error)return error;
+  struct link_args l={.path=scratch,.link=dest};error=link(p,&l,&rv);
+- if(error==EEXIST)error=x9_metal_same(backup,x9_launchd_original,sizeof(x9_launchd_original));
++ if(error==EEXIST)error=previous?x9_metal_same(backup,x9_launchd_previous,sizeof(x9_launchd_previous)):
++  x9_metal_same(backup,x9_launchd_original,sizeof(x9_launchd_original));
+  if(error)return error;
+  error=x9_metal_install(p,scratch,end,temporary,x9_launchd_metal,sizeof(x9_launchd_metal),0644);if(error)return error;
+  error=copyout(temporary,scratch,sizeof(temporary));if(error)return error;

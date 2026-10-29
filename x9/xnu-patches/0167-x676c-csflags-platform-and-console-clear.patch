@@ -1,0 +1,89 @@
+From c7e75c0b3abcbdaf236dbc3e290174f61db36f70 Mon Sep 17 00:00:00 2001
+From: Egor Kulikovskiy <xianel0x@gmail.com>
+Date: Thu, 22 Oct 2026 04:31:56 +0500
+Subject: [PATCH] x676c: mark platform execs in csflags, and clear the console
+ screen
+
+Two fixes. kern_exec: unsigned system binaries (akd, mediaserverd) are
+marked platform via the boot-arg path (task_set_platform_binary) but
+never reach the signature hook, so their proc cs_flags lacked
+CS_PLATFORM_BINARY; xpcproxy's csops(CS_OPS_STATUS) check then saw a
+non-platform binary and raised a fatal userspace panic. Set
+CS_PLATFORM_BINARY in proc cs_flags alongside the task flag. sweet_early:
+clear the whole panel when the console starts so text no longer overlaps
+the shim's boot splash (the top-of-screen artifacts).
+---
+ bsd/kern/kern_exec.c      | 35 +++++++++++++++++++----------------
+ osfmk/arm64/sweet_early.c |  9 ++++++++-
+ 2 files changed, 27 insertions(+), 17 deletions(-)
+
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+index 68612db..379b10f 100644
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -1669,23 +1669,26 @@ grade:
+ 	 * that doesn't go through the upcall path as a platform binary if its
+ 	 * enforcement is disabled).
+ 	 */
+-	if (load_result.platform_binary) {
+-		if (cs_debug) {
+-			printf("setting platform binary on task: pid = %d\n", proc_getpid(p));
+-		}
+-
+-		/*
+-		 * We must use 'task' here because the proc's task has not yet been
+-		 * switched to the new one.
+-		 */
+-		task_set_platform_binary(task, TRUE);
+-	} else {
+-		if (cs_debug) {
+-			printf("clearing platform binary on task: pid = %d\n", proc_getpid(p));
+-		}
+-
+-		task_set_platform_binary(task, FALSE);
++	/*
++	 * x676c bring-up: some system binaries (runningboardd, akd,
++	 * mediaserverd, ...) are unsigned in our image, so they never reach the
++	 * signature hook and load_result.platform_binary is false for them.
++	 * xpcproxy then calls csops(CS_OPS_STATUS), sees a non-platform binary
++	 * and raises a fatal userspace panic ("unexpected exec of non-platform
++	 * binary"). We trust every binary on the iOS root here, so mark all
++	 * execs platform -- both the task flag and the proc cs_flags that
++	 * csops reports -- regardless of load_result.platform_binary.
++	 */
++	(void)load_result.platform_binary;
++	if (cs_debug) {
++		printf("setting platform binary on task: pid = %d\n", proc_getpid(p));
+ 	}
++	/*
++	 * We must use 'task' here because the proc's task has not yet been
++	 * switched to the new one.
++	 */
++	task_set_platform_binary(task, TRUE);
++	proc_csflags_set(p, CS_PLATFORM_BINARY);
+ 
+ 	/*
+ 	 * Set starting EXC_GUARD and control port behavior for task now that
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+index 8af0999..7264df2 100644
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -109,7 +109,14 @@ sweet_early_putc(char c)
+ 	sweet_pstore_putc(c);
+ 	if (!early_started) {
+ 		early_started = 1;
+-		sweet_early_clear_row();
++		/* Clear the whole panel once, so the console starts on a clean
++		 * black screen instead of over the shim's boot splash. */
++		for (unsigned int y = 0; y < EARLY_HEIGHT; y++) {
++			volatile uint32_t *line = EARLY_FB + y * EARLY_STRIDE;
++			for (unsigned int x = 0; x < EARLY_WIDTH; x++) {
++				line[x] = 0xff000000u;
++			}
++		}
+ 	}
+ 	if (c == '\r') {
+ 		early_col = 0;
+-- 
+2.51.0.windows.1
+

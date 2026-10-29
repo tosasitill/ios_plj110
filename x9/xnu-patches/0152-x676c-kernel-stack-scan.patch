@@ -1,0 +1,54 @@
+From 9037098b1114e6399add146856232b9208aaaeff Mon Sep 17 00:00:00 2001
+From: Egor Kulikovskiy <xianel0x@gmail.com>
+Date: Thu, 22 Oct 2026 00:52:41 +0500
+Subject: [PATCH] x676c: scan the kernel stack for the blocked-thread call
+ chain
+
+The SMP sampler unwinds the kernel stack by frame pointer, but the chain
+breaks immediately at machine_switch_context, which builds no standard
+frame, so a thread blocked in thread_block_reason showed only two frames
+and the wait path stayed invisible. Scan the stack from ksp upward and
+print every word that lands in kernel text (vm_kernel_stext..etext) as a
+backstop; the leading hits are the real wait path (vm_fault,
+lck_mtx_sleep, vm_page_wait, ...).
+---
+ osfmk/kern/exception.c | 23 +++++++++++++++++++++++
+ 1 file changed, 23 insertions(+)
+
+diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
+index 7c3a65e..b30d1c9 100644
+--- a/osfmk/kern/exception.c
++++ b/osfmk/kern/exception.c
+@@ -1076,6 +1076,29 @@ sweet_sample_task(const char *name, int pid, task_t task)
+ 					kfp = next_fp;
+ 				}
+ 				printf("%s\n", kline);
++
++				/*
++				 * The fp chain breaks at machine_switch_context (an asm
++				 * routine that builds no standard frame), so scan the
++				 * kernel stack for return addresses that land in kernel
++				 * text as a backstop. This recovers the real call chain
++				 * of a thread blocked in thread_block_reason: the first
++				 * few hits are its wait path (vm_fault, lck_mtx_sleep,
++				 * vm_page_wait, ...).
++				 */
++				uint64_t stacktop = thread->kernel_stack + kernel_stack_size;
++				uint64_t pscan = ksp & ~7ull;
++				char sline[400];
++				int sn = snprintf(sline, sizeof(sline), "SMP %s t%d kscan", name, cur_tn);
++				for (uint64_t p = pscan; p >= VM_MIN_KERNEL_ADDRESS && p < stacktop &&
++				    (p - pscan) < 0x3000 && sn < (int)sizeof(sline) - 20; p += 8) {
++					uint64_t v = *(uint64_t *)p;
++					if (v >= vm_kernel_stext && v < vm_kernel_etext) {
++						sn += snprintf(sline + sn, sizeof(sline) - sn, " 0x%llx",
++						    v - (uint64_t)vm_kernel_slide);
++					}
++				}
++				printf("%s\n", sline);
+ 			}
+ 		}
+ 	}
+-- 
+2.51.0.windows.1
+

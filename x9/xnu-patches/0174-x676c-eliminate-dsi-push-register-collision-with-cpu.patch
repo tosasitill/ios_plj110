@@ -1,0 +1,59 @@
+From d1f009688a57e28b2cc516c51c457ad76b4ef582 Mon Sep 17 00:00:00 2001
+From: Egor Kulikovskiy <xianel0x@gmail.com>
+Date: Fri, 23 Oct 2026 00:25:27 +0500
+Subject: [PATCH] x676c: eliminate dsi push register collision with cpu7 pump
+ and silence ufshci lock spam
+
+---
+ bsd/dev/ufs/ufshci.c                  |  9 ++-------
+ iokit/Kernel/arm/SweetFramebuffer.cpp | 14 ++++++++------
+ 2 files changed, 10 insertions(+), 13 deletions(-)
+
+diff --git a/bsd/dev/ufs/ufshci.c b/bsd/dev/ufs/ufshci.c
+index 61d184f..6cb65d0 100644
+--- a/bsd/dev/ufs/ufshci.c
++++ b/bsd/dev/ufs/ufshci.c
+@@ -179,13 +179,8 @@ ucd_pa(struct ufs_hba *hba, unsigned slot)
+ static void
+ ufs_lock_diag(struct ufs_hba *hba, int site)
+ {
+-	if (!lck_mtx_try_lock(&hba->lock)) {
+-		volatile uint64_t *r = (volatile uint64_t *)&hba->lock;
+-		printf("ufshci: lock site %d contended raw0=0x%llx raw1=0x%llx me=%p\n",
+-		    site, r[0], r[1], current_thread());
+-		lck_mtx_lock(&hba->lock);
+-		printf("ufshci: lock site %d acquired\n", site);
+-	}
++	(void)site;
++	lck_mtx_lock(&hba->lock);
+ }
+ 
+ static int
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index fbd4add..f221932 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -81,12 +81,14 @@ static volatile uint32_t *sMtkMutex = NULL;
+ static void
+ mtk_dsi_push_hw(void)
+ {
+-	if (sMtkDsi != NULL && sMtkMutex != NULL) {
+-		sMtkDsi[0x0c / 4] = 0;      /* DSI_INTSTA = 0 */
+-		sMtkMutex[0x20 / 4] = 1;    /* MUTEX0_EN = 1 */
+-		sMtkDsi[0x00 / 4] = 0;      /* DSI_START = 0 */
+-		sMtkDsi[0x00 / 4] = 1;      /* DSI_START = 1 */
+-	}
++	/*
++	 * On MT6789 (x676c), the dedicated display pump on CPU core 7 (second A76)
++	 * continuously pushes DSI frames from fPixels (0xfeabe000) every 33 ms.
++	 * Concurrent register writes from XNU cores corrupt the DSI command FIFO
++	 * and freeze the panel. Leave hardware DSI triggers exclusively to CPU 7.
++	 */
++	(void)sMtkDsi;
++	(void)sMtkMutex;
+ }
+ 
+ #if defined(SWEET)
+-- 
+2.51.0.windows.1
+

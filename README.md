@@ -1,5 +1,13 @@
 # ios-sweet
 
+> **This repository also carries the OPPO Find X9 port (`x9/`).** That work is a
+> separate bring-up for the OPPO Find X9 / PLJ110 / MT6993: direct LK shim,
+> XNU `8796.141.3` with its own patch series, native UFS extent root, and the
+> Mali/PanVK/Metal render path. It shares the boot-flow ideas below but none of
+> the Qualcomm (SM7150) code. Start at [`x9/README.md`](x9/README.md) for status
+> and [`x9/BUILD.md`](x9/BUILD.md) to build it. Everything below describes the
+> sweet port.
+
 **Apple's iOS 16 running on a Redmi Note 10 Pro.**
 
 This project ports Apple's open-source XNU kernel (xnu-8796, the iOS 16 generation) to the Xiaomi Redmi Note 10 Pro (`sweet`, Qualcomm SM7150 / Snapdragon 732G). On top of it runs the **unmodified iOS 16.7.16 (20H392) userland of the iPhone X**: launchd, the system daemons, backboardd, SpringBoard and the stock apps.

@@ -1,0 +1,44 @@
+diff --git a/bsd/dev/sweet_x9_gpu_dependencies.c b/bsd/dev/sweet_x9_gpu_dependencies.c
+--- a/bsd/dev/sweet_x9_gpu_dependencies.c
++++ b/bsd/dev/sweet_x9_gpu_dependencies.c
+@@ -139,12 +139,22 @@
+  printf("X9 GPU: command=%u state=%u firmware-return=%d\n",command,state,*count);
+  return *count>=0&&*count<=16?0:-1;
+ }
++/* pan145 hardware: firmware POWER+ACTIVE produced power=1/active=1,
++ * buck=1/mtcmos=1/cg=2, MFG1=c001770d and MFG37=c000110d while
++ * MFG2 stayed00001112. The original MT6993 AP platform reads MALI_GPU_ID
++ * after the successful power callback without requiring MFG2 ACK.
++ * Keep ACK checks on both observed activated domains; MFG2 remains logged,
++ * never forced on. This is a conservative ID-read gate, not a complete
++ * model of MT6993 internal power-domain topology. */
++static int gpu_id_domains_ready(void) {
++ return on(rd(rpc,0x500))&&on(rd(rpc,0x594));
++}
+ static int wait_counts(int power,int active,int require_domains) {
+  uint64_t until;clock_interval_to_deadline(500,NSEC_PER_MSEC,&until);
+  do {
+   struct gpu_shared_prefix s;status(&s);
+   if(valid_status(&s)&&s.power_count==power&&s.active_count==active&&eb_ready()&&
+-     (!require_domains||(on(rd(rpc,0x500))&&on(rd(rpc,0x508)))))return 0;
++     (!require_domains||gpu_id_domains_ready()))return 0;
+   if(expired(until))break;
+   pause_ms();
+  }while(1);
+@@ -153,7 +163,7 @@
+ static void run(void) {
+  int enabled=0;
+  if(!PE_parse_boot_argn("x9_gpu_power_probe",&enabled,sizeof(enabled))||enabled!=1)return;
+- printf("X9 GPU: pan145 one-shot INIT -> POWER_ON -> ID -> POWER_OFF\n");
++ printf("X9 GPU: pan146 one-shot INIT -> POWER_ON -> ID -> POWER_OFF\n");
+  if(!handoff()){printf("X9 GPU: live FDT handoff absent/mismatched; all writes refused\n");return;}
+  spm=ml_io_map(0x1c004000,0x1000);
+  if(!spm||!on(rd(spm,0xe1c))){printf("X9 GPU: SPM MFG0 ACK absent; stopped\n");return;}
+@@ -206,6 +216,7 @@
+   printf("X9 GPU: power/count/domain confirmation failed; GPU bank not read\n");goto cleanup;
+  }
+  snapshot("power-confirmed");status(&s);log_status("power-confirmed",&s);
++ printf("X9 GPU: ID gate uses shared counts + MFG1/MFG37 ACK; MFG2 is observation only\n");
+  /* Original MT6993 gpufreq_reg_mt6993.h MALI_GPU_ID at0x48000000;
+   * Mali CSF regmap GPU_ID is a 32-bit read. No GPU commands are issued. */
+  vm_offset_t gpu=ml_io_map(0x48000000,0x1000);

@@ -1,0 +1,172 @@
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -6896,6 +6896,7 @@
+ }
+ 
+ #include "x9_metal_deploy.inc"
++#include "x9_render_deploy.inc"
+ /* Explicit opt-in: seed migration preferences before original launchd starts.
+  * Preserve any previous preference through a same-directory hard-link backup. */
+ static int
+@@ -7258,6 +7259,8 @@
+ 	 int metal_error=sweet_x9_metal_deploy(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
+ 	 extern int sweet_x9_metal_payload_ready;
+ 	 sweet_x9_metal_payload_ready=metal_error==0;
++	 int render_error=sweet_x9_render_deploy(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
++	 printf("X9 RENDER DEPLOY: full desktop payload errno=%d; original launchd continues\n",render_error);
+ 	 printf("X9 METAL DEPLOY: probe/cache installation errno=%d; original launchd continues\n",metal_error);
+ 	}
+ 	{
+diff --git a/bsd/kern/x9_render_deploy.inc b/bsd/kern/x9_render_deploy.inc
+new file mode 100644
+--- /dev/null
++++ b/bsd/kern/x9_render_deploy.inc
+@@ -0,0 +1,55 @@
++/* SPDX-License-Identifier: MIT */
++/* Included after x9_metal_deploy.inc, reusing its bounded exclusive install. */
++#include "x9_render_payload.h"
++extern int sweet_x9_render_payload_ready;
++static int x9_render_directory(proc_t p,user_addr_t scratch,user_addr_t end,const char *path) {
++ size_t n=strlen(path)+1;if(scratch>end||n>end-scratch)return E2BIG;
++ int error=copyout(path,scratch,n);if(error)return error;int32_t rv=0;
++ struct mkdir_args request={.path=scratch,.mode=0755};error=mkdir(p,&request,&rv);
++ if(error&&error!=EEXIST)return error;
++ vnode_t dir=NULLVP;error=vnode_lookup(path,VNODE_LOOKUP_NOFOLLOW,&dir,vfs_context_kernel());if(error)return error;
++ boolean_t valid=vnode_isdir(dir);vnode_put(dir);return valid?0:ENOTDIR;
++}
++static int sweet_x9_render_deploy(proc_t p,user_addr_t scratch,user_addr_t end) {
++ int mode=0;extern boolean_t sweet_x9_ufs_root_writable(void);
++ if(!PE_parse_boot_argn("x9_metal_render",&mode,sizeof(mode))||mode!=1)return 0;
++ if(!sweet_early_is_x9()||!sweet_x9_ufs_root_writable()||!proc_is64bit(p))return EINVAL;
++ static const char target[]="/System/Library/xpc/launchd.plist";
++ static const char backup[]="/System/Library/xpc/launchd.x9-render-pan170-before.plist";
++ static const char temporary[]="/System/Library/xpc/launchd.x9-render-pan170.tmp";
++ struct {const unsigned char *bytes;size_t size;} known[]={
++  {x9_launchd_original,sizeof(x9_launchd_original)},
++  {x9_launchd_older,sizeof(x9_launchd_older)},
++  {x9_launchd_previous,sizeof(x9_launchd_previous)},
++  {x9_launchd_metal,sizeof(x9_launchd_metal)},
++  {x9_render_launchd,x9_render_launchd_size},
++ };
++ unsigned selected=0;while(selected<sizeof(known)/sizeof(known[0])&&x9_metal_same(target,known[selected].bytes,known[selected].size))selected++;
++ if(selected==sizeof(known)/sizeof(known[0])) {
++  printf("X9 RENDER DEPLOY: launchd cache unrecognized; conflict preserved, no files installed\n");return EEXIST;
++ }
++ for(unsigned i=0;i<sizeof(x9_render_directories)/sizeof(x9_render_directories[0]);i++) {
++  int error=x9_render_directory(p,scratch,end,x9_render_directories[i]);if(error)return error;
++ }
++ for(unsigned i=0;i<sizeof(x9_render_files)/sizeof(x9_render_files[0]);i++) {
++  const struct X9RenderPayloadFile *file=&x9_render_files[i];
++  int error=x9_metal_install(p,scratch,end,file->path,file->data,file->bytes,file->mode);
++  if(error){printf("X9 RENDER DEPLOY: file install failed path=%s errno=%d; existing conflicts kept\n",file->path,error);return error;}
++ }
++ if(selected!=sizeof(known)/sizeof(known[0])-1) {
++  if(scratch>end||sizeof(target)+sizeof(backup)+4096>end-scratch)return E2BIG;
++  int32_t rv=0;int error=copyout(target,scratch,sizeof(target));if(error)return error;
++  user_addr_t dest=scratch+sizeof(target);error=copyout(backup,dest,sizeof(backup));if(error)return error;
++  struct link_args link_request={.path=scratch,.link=dest};error=link(p,&link_request,&rv);
++  if(error==EEXIST)error=x9_metal_same(backup,known[selected].bytes,known[selected].size);
++  if(error)return error;
++  error=x9_metal_install(p,scratch,end,temporary,x9_render_launchd,x9_render_launchd_size,0644);if(error)return error;
++  error=x9_metal_same(target,known[selected].bytes,known[selected].size);if(error)return error;
++  error=copyout(temporary,scratch,sizeof(temporary));if(error)return error;
++  dest=scratch+sizeof(temporary);error=copyout(target,dest,sizeof(target));if(error)return error;
++  struct rename_args rename_request={.from=scratch,.to=dest};error=rename(p,&rename_request,&rv);if(error)return error;
++ }
++ __atomic_store_n(&sweet_x9_render_payload_ready,1,__ATOMIC_RELEASE);
++ printf("X9 RENDER DEPLOY: pan170 general Metal+native PanVK+render probe installed; exact cache/backup/exclusive files; desktop discovery armed\n");
++ return 0;
++}
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -280,10 +280,18 @@
+  */
+ #include "X9MetalPolicy.h"
+ extern "C" bool sweet_x9_metal_discovery_ready(void);
++extern "C" bool sweet_x9_render_discovery_ready(void);
+ class IOAcceleratorES : public IOService {
+ 	OSDeclareDefaultStructors(IOAcceleratorES);
+ public:
+  virtual OSPtr<OSObject> copyProperty(const char *key) const APPLE_KEXT_OVERRIDE {
++  if(key&&sweet_board_x9()&&(!strcmp(key,"MetalPluginName")||!strcmp(key,"MetalPluginClassName"))&&
++     sweet_x9_render_discovery_ready()) {
++   char name[32]={0};proc_selfname(name,sizeof(name));
++   IOLog("X9 RENDER DISCOVERY: caller=%s property=%s native desktop Metal\n",name,key);
++   return OSString::withCString(!strcmp(key,"MetalPluginName")?"X9GeneralMetal170":"X9GeneralMetalFactory");
++  }
++
+   if(key&&sweet_board_x9()&&sweet_x9_metal_discovery_ready()&&
+      (!strcmp(key,"MetalPluginName")||!strcmp(key,"MetalPluginClassName"))) {
+    char name[32]={0};(void)proc_selfname(name,sizeof(name));
+diff --git a/iokit/Kernel/arm/SweetX9RenderService.cpp b/iokit/Kernel/arm/SweetX9RenderService.cpp
+--- a/iokit/Kernel/arm/SweetX9RenderService.cpp
++++ b/iokit/Kernel/arm/SweetX9RenderService.cpp
+@@ -4,10 +4,27 @@
+ #include <IOKit/IOService.h>
+ #include <IOKit/IOLib.h>
+ #include <kern/task.h>
++#include <sys/proc.h>
++#include <pexpert/pexpert.h>
+ #include <pexpert/pexpert.h>
+ #include <libkern/libkern.h>
+ static const X9RenderEngine *render_engine;
+ static bool render_published;
++extern "C" { int sweet_x9_render_payload_ready=0; }
++/* Invoked by the existing accelerator's caller-scoped property lookup.
++ * Desktop discovery may precede the async GPU worker: wait for actual service
++ * registration, without holding the GPU owner lock or creating a fake device. */
++extern "C" bool sweet_x9_render_discovery_ready(void) {
++ int mode=0;
++ if(!__atomic_load_n(&sweet_x9_render_payload_ready,__ATOMIC_ACQUIRE)||
++    !PE_parse_boot_argn("x9_metal_render",&mode,sizeof(mode))||mode!=1)return false;
++ for(unsigned ms=0;ms<10000;ms++) {
++  if(__atomic_load_n(&render_published,__ATOMIC_ACQUIRE))return true;
++  IOSleep(1);
++ }
++ IOLog("X9 RENDER DISCOVERY: native service not registered within10s;no device returned\n");
++ return false;
++}
+ static bool render_caps_ready(X9RenderCaps *caps) {
+  if(!render_engine||!render_engine->caps||!render_engine->submit||!render_engine->wait||
+     !render_engine->group_create||!render_engine->group_destroy||!render_engine->cache||
+@@ -132,7 +149,9 @@
+       !request.max_compute||request.max_compute>__builtin_popcountll(request.compute_mask)||
+       !request.max_fragment||request.max_fragment>__builtin_popcountll(request.fragment_mask)||request.max_tiler!=1||
+       !request.tiler_heap_bytes||request.tiler_heap_bytes>X9_RENDER_BUFFER_LIMIT||(request.tiler_heap_bytes&4095))return kIOReturnBadArgument;
+-   return render_engine->group_create(context,&request,(X9RenderGroup *)a->structureOutput);
++   IOReturn kr=render_engine->group_create(context,&request,(X9RenderGroup *)a->structureOutput);
++   if(kr==kIOReturnSuccess)IOLog("X9 RENDER GROUP: created pid=%d group=%u three CS streams\n",proc_selfpid(),((X9RenderGroup *)a->structureOutput)->handle);
++   return kr;
+   }
+   if(selector==X9RenderDestroyGroup) {
+    if(a->structureInputSize!=sizeof(X9RenderHandle)||a->structureOutputSize)return kIOReturnBadArgument;
+@@ -152,6 +171,7 @@
+    }
+    context->next_submission=request.submission_id;
+    IOReturn kr=render_engine->submit(context,&request,(X9RenderCompletion *)a->structureOutput);
++   if(kr!=kIOReturnSuccess)IOLog("X9 RENDER SUBMIT: failed pid=%d group=%u id=%llu kr=%x exposed=%u\n",proc_selfpid(),request.group,request.submission_id,kr,context->exposed);
+    if(context->exposed)context->disabled=true; /* DMA lifetime unresolved: no retry. */
+    return kr;
+   }
+@@ -176,7 +196,9 @@
+   context->owner=task;task_reference(task);
+   X9RenderCaps caps;if(!render_caps_ready(&caps))return false;
+   if(render_engine->context_open(context)!=kIOReturnSuccess)return false;
+-  context->engine_open=true;return true;
++  context->engine_open=true;
++  char caller[32]={0};proc_selfname(caller,sizeof(caller));
++  IOLog("X9 RENDER CLIENT: opened caller=%s pid=%d real context\n",caller,proc_selfpid());return true;
+  }
+  IOReturn clientClose(void) APPLE_KEXT_OVERRIDE {if(!isInactive())terminate();return kIOReturnSuccess;}
+  void free(void) APPLE_KEXT_OVERRIDE {
+@@ -231,5 +253,7 @@
+   if(service){if(service->getProvider()==root)service->detach(root);service->release();}return;
+  }
+  service->setName(X9_RENDER_SERVICE);service->setProperty("X9RenderABI",X9_RENDER_ABI,32);service->setProperty("X9RenderReady",true);
+- service->setProperty("X9RenderCapabilities",caps.capabilities,32);render_published=true;service->registerService();
++ service->setProperty("X9RenderCapabilities",caps.capabilities,32);service->registerService(kIOServiceSynchronous);
++ __atomic_store_n(&render_published,true,__ATOMIC_RELEASE);
++ IOLog("X9 RENDER SERVICE: registered caps=0x%x;native Metal discovery allowed after guarded payload deployment\n",caps.capabilities);
+ }

@@ -1,0 +1,60 @@
+From 92f4ccf2fe5809d9a38d7a0c717b0b6a943cb2de Mon Sep 17 00:00:00 2001
+From: Egor Kulikovskiy <xianel0x@gmail.com>
+Date: Thu, 22 Oct 2026 04:11:36 +0500
+Subject: [PATCH] x676c: scroll the early console instead of wrapping to the
+ top
+
+The early framebuffer console advanced rows with (early_row + 1) %
+EARLY_ROWS, so once it filled the screen it wrapped back to the top and
+overwrote old text -- the display never scrolled down. Shift the text
+area up one glyph row and clear the bottom when full, so output scrolls.
+---
+ osfmk/arm64/sweet_early.c | 25 +++++++++++++++++++++++--
+ 1 file changed, 23 insertions(+), 2 deletions(-)
+
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+index c502eaa..8af0999 100644
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -83,6 +83,23 @@ sweet_early_clear_row(void)
+ 	}
+ }
+ 
++/* Shift the whole text area up one glyph row and clear the bottom, so the
++ * console scrolls instead of wrapping back to the top. */
++static void
++sweet_early_scroll(void)
++{
++	unsigned int top = (EARLY_ROWS - 1) * EARLY_CELL_H;
++	for (unsigned int y = 0; y < top; y++) {
++		volatile uint32_t *dst = EARLY_FB + y * EARLY_STRIDE;
++		volatile uint32_t *src = EARLY_FB + (y + EARLY_CELL_H) * EARLY_STRIDE;
++		for (unsigned int x = 0; x < EARLY_WIDTH; x++) {
++			dst[x] = src[x];
++		}
++	}
++	early_row = EARLY_ROWS - 1;
++	sweet_early_clear_row();
++}
++
+ void
+ sweet_early_putc(char c)
+ {
+@@ -100,8 +117,12 @@ sweet_early_putc(char c)
+ 	}
+ 	if (c == '\n' || early_col == EARLY_COLS) {
+ 		early_col = 0;
+-		early_row = (early_row + 1) % EARLY_ROWS;
+-		sweet_early_clear_row();
++		if (early_row + 1 >= EARLY_ROWS) {
++			sweet_early_scroll();
++		} else {
++			early_row++;
++			sweet_early_clear_row();
++		}
+ 		if (c == '\n') {
+ 			return;
+ 		}
+-- 
+2.51.0.windows.1
+

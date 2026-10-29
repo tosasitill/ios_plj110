@@ -1,0 +1,12 @@
+diff --git a/iokit/Kernel/arm/SweetX9RenderService.cpp b/iokit/Kernel/arm/SweetX9RenderService.cpp
+--- a/iokit/Kernel/arm/SweetX9RenderService.cpp
++++ b/iokit/Kernel/arm/SweetX9RenderService.cpp
+@@ -131,7 +131,7 @@
+       ((request.compute_mask|request.fragment_mask)&~caps.shader_present)||
+       !request.max_compute||request.max_compute>__builtin_popcountll(request.compute_mask)||
+       !request.max_fragment||request.max_fragment>__builtin_popcountll(request.fragment_mask)||request.max_tiler!=1||
+-      !request.tiler_heap_bytes||request.tiler_heap_bytes>(64u<<20)||(request.tiler_heap_bytes&4095))return kIOReturnBadArgument;
++      !request.tiler_heap_bytes||request.tiler_heap_bytes>X9_RENDER_BUFFER_LIMIT||(request.tiler_heap_bytes&4095))return kIOReturnBadArgument;
+    return render_engine->group_create(context,&request,(X9RenderGroup *)a->structureOutput);
+   }
+   if(selector==X9RenderDestroyGroup) {

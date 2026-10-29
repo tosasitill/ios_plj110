@@ -1,0 +1,207 @@
+diff --git a/bsd/dev/sweet_sample.c b/bsd/dev/sweet_sample.c
+index b40eccd..2b19400 100644
+--- a/bsd/dev/sweet_sample.c
++++ b/bsd/dev/sweet_sample.c
+@@ -51,7 +51,7 @@ sweet_sample_proc(proc_t p, __unused void *arg)
+ {
+ 	char name[32];
+ 	proc_name(proc_pid(p), name, sizeof(name));
+-	if (sweet_sample_wanted(name)) {
++	if (proc_pid(p) == 1 || sweet_sample_wanted(name)) {
+ 		task_t task = proc_task(p);
+ 		if (task != TASK_NULL) {
+ 			sweet_sample_task(name, proc_pid(p), task);
+@@ -64,17 +64,20 @@ static void
+ sweet_sample_thread(__unused void *arg, __unused wait_result_t wr)
+ {
+ 	static int chan;
++	printf("SWEET SAMPLE: thread started\n");
+ 	if (!PE_parse_boot_argn("sweetsample", sweet_sample_names, sizeof(sweet_sample_names))) {
+-		strlcpy(sweet_sample_names, "SpringBoard,backboardd", sizeof(sweet_sample_names));
++		strlcpy(sweet_sample_names, "launchd,dyld,init,SpringBoard,backboardd", sizeof(sweet_sample_names));
+ 	}
+ 	if (sweet_sample_names[0] == '-') {
+ 		return;
+ 	}
+-	(void)tsleep(&chan, PZERO, "sweetsmp", 90 * hz);
+-	for (int i = 0; i < 40; i++) {
++	uint32_t delay_s = 2;
++	(void)PE_parse_boot_argn("sweetsample_delay", &delay_s, sizeof(delay_s));
++	(void)tsleep(&chan, PZERO, "sweetsmp", (int)(delay_s * hz));
++	for (int i = 0; i < 60; i++) {
+ 		printf("SMP --- sample %d\n", i);
+ 		proc_iterate(PROC_ALLPROCLIST, sweet_sample_proc, NULL, NULL, NULL);
+-		(void)tsleep(&chan, PZERO, "sweetsmp", 120 * hz);
++		(void)tsleep(&chan, PZERO, "sweetsmp", 3 * hz);
+ 	}
+ }
+ 
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+index f0d72a9..b06cafc 100644
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -855,7 +855,7 @@ static uint32_t sweet_log_secs = SWEET_LOG_SECS;
+ 
+ /* Called for all console output, any context: never blocks. */
+ void sweet_log_append(const char *c, int size);
+-extern void sweet_pstore_putc(char c);
++extern void sweet_pstore_append(const char *buf, int len);
+ 
+ void
+ sweet_log_append(const char *c, int size)
+@@ -863,9 +863,7 @@ sweet_log_append(const char *c, int size)
+ 	if (size <= 0) {
+ 		return;
+ 	}
+-	for (int i = 0; i < size; i++) {
+-		sweet_pstore_putc(c[i]);
+-	}
++	sweet_pstore_append(c, size);
+ 	uint64_t at = os_atomic_add_orig(&sweet_log_total, (uint64_t)size, relaxed);
+ 	for (int i = 0; i < size; i++) {
+ 		sweet_log_ring[(at + (uint64_t)i) % SWEET_LOG_SIZE] = c[i];
+diff --git a/bsd/dev/ufs/ufs_disk.c b/bsd/dev/ufs/ufs_disk.c
+index 4ca6273..12931bf 100644
+--- a/bsd/dev/ufs/ufs_disk.c
++++ b/bsd/dev/ufs/ufs_disk.c
+@@ -670,6 +670,8 @@ ufs_disk_bringup(void)
+ 	}
+ 	printf("ufs_disk: LUN %u, %llu MiB, %u partitions\n", ud.lun,
+ 	    ud.lun_blocks * UFS_BLOCK >> 20, ud.nparts);
++	extern void sweet_sample_start(void);
++	sweet_sample_start();
+ 	return 0;
+ }
+ 
+diff --git a/bsd/dev/ufs/ufshci.c b/bsd/dev/ufs/ufshci.c
+index 783ce6e..0e49628 100644
+--- a/bsd/dev/ufs/ufshci.c
++++ b/bsd/dev/ufs/ufshci.c
+@@ -407,7 +407,7 @@ ufs_scsi(struct ufs_hba *hba, struct ufs_xfer *x)
+ 	 * the driver is still serving page-fault reads (slow) or wedged (hung).
+ 	 */
+ 	static volatile uint64_t ufs_cmds;      /* a dropped count now and then is fine */
+-	static uint32_t ufs_beat = 4096;
++	static uint32_t ufs_beat = 64;
+ 	static int ufs_beat_parsed;
+ 	if (!ufs_beat_parsed) {
+ 		(void)PE_parse_boot_argn("ufsbeat", &ufs_beat, sizeof(ufs_beat));
+@@ -415,7 +415,7 @@ ufs_scsi(struct ufs_hba *hba, struct ufs_xfer *x)
+ 	}
+ 	if (x->len) {
+ 		uint64_t n = ++ufs_cmds;
+-		if (ufs_beat && (n % ufs_beat) == 0) {
++		if (n <= 128 || (ufs_beat && (n % ufs_beat) == 0)) {
+ 			printf("ufshci: %llu data commands, last op 0x%02x lba %llu\n",
+ 			    n, x->cdb[0], x->cdb_len >= 10 ?
+ 			    ((uint64_t)x->cdb[2] << 56 | (uint64_t)x->cdb[3] << 48 |
+diff --git a/bsd/vfs/vfs_syscalls.c b/bsd/vfs/vfs_syscalls.c
+index 90e68bb..5036134 100644
+--- a/bsd/vfs/vfs_syscalls.c
++++ b/bsd/vfs/vfs_syscalls.c
+@@ -5056,8 +5056,22 @@ openat_internal(vfs_context_t ctx, user_addr_t path, int flags, int mode,
+ 	NDINIT(ndp, LOOKUP, OP_OPEN, FOLLOW | AUDITVNPATH1,
+ 	    segflg, path, ctx);
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	proc_t p = vfs_context_proc(ctx);
++	char pbuf[160] = {0};
++	if (p != NULL && proc_getpid(p) == 1 && segflg == UIO_USERSPACE) {
++		(void)copyinstr(path, pbuf, sizeof(pbuf), NULL);
++	}
++#endif
++
+ 	error = open1at(ctx, ndp, flags, vap, NULL, NULL, retval, fd, AUTH_OPEN_NOAUTHFD);
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	if (pbuf[0]) {
++		printf("open [1(launchd)] \"%s\" flags 0x%x error %d fd %d\n", pbuf, flags, error, error ? -1 : *retval);
++	}
++#endif
++
+ 	kfree_type(typeof(*__open_data), __open_data);
+ 
+ 	return error;
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+index 29111ab..c502eaa 100644
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -27,9 +27,12 @@ static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)SWEET_EARLY
+ static volatile uint32_t *pstore = (volatile uint32_t *)(uintptr_t)SWEET_PSTORE_PA;
+ 
+ void
+-sweet_pstore_putc(char c)
++sweet_pstore_append(const char *buf, int len)
+ {
+ 	volatile uint32_t *hdr = pstore;
++	if (hdr == NULL || len <= 0) {
++		return;
++	}
+ 	volatile char *data = (volatile char *)hdr + PSTORE_HDR;
+ 
+ 	if (hdr[0] != PSTORE_SIG || hdr[1] >= PSTORE_CAP || hdr[2] > PSTORE_CAP) {
+@@ -37,12 +40,21 @@ sweet_pstore_putc(char c)
+ 		hdr[1] = 0;
+ 		hdr[2] = 0;
+ 	}
+-	uint32_t start = hdr[1];
+-	data[start] = c;
+-	hdr[1] = start + 1 == PSTORE_CAP ? 0 : start + 1;
+-	if (hdr[2] < PSTORE_CAP) {
+-		hdr[2] = hdr[2] + 1;
++	uint32_t at = __atomic_fetch_add((uint32_t *)&hdr[1], (uint32_t)len, __ATOMIC_RELAXED);
++	for (int i = 0; i < len; i++) {
++		data[(at + (uint32_t)i) % PSTORE_CAP] = buf[i];
+ 	}
++	uint32_t old_sz = hdr[2];
++	if (old_sz < PSTORE_CAP) {
++		uint32_t new_sz = (old_sz + (uint32_t)len > PSTORE_CAP) ? PSTORE_CAP : (old_sz + (uint32_t)len);
++		hdr[2] = new_sz;
++	}
++}
++
++void
++sweet_pstore_putc(char c)
++{
++	sweet_pstore_append(&c, 1);
+ }
+ #define EARLY_FB early_fb
+ #define EARLY_WIDTH 1080u
+diff --git a/osfmk/arm64/sweet_early.h b/osfmk/arm64/sweet_early.h
+index d705d3b..e7f11ea 100644
+--- a/osfmk/arm64/sweet_early.h
++++ b/osfmk/arm64/sweet_early.h
+@@ -12,7 +12,8 @@ void sweet_early_putc(char c);
+ void sweet_early_panic(const char *fmt, va_list *args);
+ void sweet_early_relocate(uint64_t base);
+ void sweet_early_disable(void);
+-/* Append one console character to the ramoops console zone (x676c). */
++/* Append to the ramoops console zone (x676c). */
++void sweet_pstore_append(const char *buf, int len);
+ void sweet_pstore_putc(char c);
+ #else
+ static inline void sweet_early_mark(unsigned int stage, const char *label)
+@@ -21,6 +22,11 @@ static inline void sweet_early_mark(unsigned int stage, const char *label)
+ 	(void)label;
+ }
+ static inline void sweet_early_disable(void) {}
++static inline void sweet_pstore_append(const char *buf, int len)
++{
++	(void)buf;
++	(void)len;
++}
+ static inline void sweet_pstore_putc(char c)
+ {
+ 	(void)c;
+diff --git a/pexpert/arm/pe_serial.c b/pexpert/arm/pe_serial.c
+index 2a2f9bf..19f27cd 100644
+--- a/pexpert/arm/pe_serial.c
++++ b/pexpert/arm/pe_serial.c
+@@ -761,7 +761,6 @@ fbcon_transmit_ready(void)
+ static void
+ fbcon_transmit_data(uint8_t c)
+ {
+-	sweet_pstore_putc((char)c);
+ 	if (c == '\r') {
+ 		fbcon_col = 0;
+ 		return;

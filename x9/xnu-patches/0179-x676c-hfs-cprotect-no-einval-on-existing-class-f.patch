@@ -1,0 +1,53 @@
+From e5a3c7e5b73f1ab8cf22da21234904b853ce81e0 Mon Sep 17 00:00:00 2001
+From: Egor Kulikovskiy <xianel0x@gmail.com>
+Date: Fri, 23 Oct 2026 03:15:15 +0500
+Subject: [PATCH] x676c: allow opening existing Class F files in HFS+ cprotect
+ to eliminate launchd.log EINVAL recursion
+
+---
+ bsd/sweet_hfs/core/hfs_cprotect.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/bsd/sweet_hfs/core/hfs_cprotect.c b/bsd/sweet_hfs/core/hfs_cprotect.c
+index 1e2f28f..46a6f03 100644
+--- a/bsd/sweet_hfs/core/hfs_cprotect.c
++++ b/bsd/sweet_hfs/core/hfs_cprotect.c
+@@ -662,8 +662,10 @@ cp_vnode_setclass(struct vnode *vp, cp_key_class_t newclass)
+ 		if (newclass == PROTECTION_CLASS_F) {
+ 			/* Verify that file is blockless if switching to class F */
+ 			if (cp->c_datafork->ff_size > 0) {
++#if !defined(ARM64_BOARD_CONFIG_SWEET)
+ 				error = EINVAL;
+ 				goto out;
++#endif
+ 			}
+ 
+ 			cp_key_pair_t *cpkp = NULL;
+@@ -826,8 +828,10 @@ int cp_vnode_transcode(vnode_t vp, cp_key_t *k)
+ 		 * If needed, more comments available there. */
+ 
+ 		if (CP_CLASS(entry->cp_pclass) == PROTECTION_CLASS_F) {
++#if !defined(ARM64_BOARD_CONFIG_SWEET)
+ 			error = EINVAL;
+ 			goto out;
++#endif
+ 		}
+ 
+ 		cp_init_access(&access_in, cp);
+@@ -846,8 +850,13 @@ int cp_vnode_transcode(vnode_t vp, cp_key_t *k)
+ 		wrapped_key_in.key_len = cpkp_pers_key_len(cpkp);
+ 
+ 		if (!wrapped_key_in.key_len) {
++#if !defined(ARM64_BOARD_CONFIG_SWEET)
+ 			error = EINVAL;
+ 			goto out;
++#else
++			error = 0;
++			goto out;
++#endif
+ 		}
+ 
+ 		/* Use the actual persistent class when talking to AKS */
+-- 
+2.51.0.windows.1
+

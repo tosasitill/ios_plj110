@@ -1,0 +1,161 @@
+From 42ce155b6d3974651c2aaab27fdad5308e8d8977 Mon Sep 17 00:00:00 2001
+From: Egor Kulikovskiy <xianel0x@gmail.com>
+Date: Fri, 23 Oct 2026 03:03:47 +0500
+Subject: [PATCH] x676c: power on Mali PMIC regulators via PWRAP and implement
+ SweetMaliUserClient memory mapping
+
+---
+ iokit/Kernel/arm/SweetFramebuffer.cpp | 116 ++++++++++++++++++++++----
+ 1 file changed, 102 insertions(+), 14 deletions(-)
+
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 7006a0e..0a6210c 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -272,8 +272,8 @@ class IOAcceleratorES : public IOService {
+ OSDefineMetaClassAndStructors(IOAcceleratorES, IOService);
+ 
+ /*
+- * SweetMaliUserClient stub for Mali-G57 Metal accelerator.
+- * Handles IOServiceOpen from Metal.framework / QuartzCore.
++ * SweetMaliUserClient for Mali-G57 Metal accelerator.
++ * Handles IOServiceOpen from Metal.framework / QuartzCore and memory mapping.
+  */
+ class SweetMaliUserClient : public IOUserClient {
+ 	OSDeclareDefaultStructors(SweetMaliUserClient);
+@@ -284,6 +284,30 @@ public:
+ 	    void *reference) APPLE_KEXT_OVERRIDE {
+ 		return kIOReturnSuccess;
+ 	}
++	IOReturn clientMemoryForType(UInt32 type, IOOptionBits *options,
++	    IOMemoryDescriptor **memory) APPLE_KEXT_OVERRIDE {
++		if (memory == NULL) return kIOReturnBadArgument;
++		*memory = NULL;
++		if (type == 0) {
++			/* Type 0: Map ARM Mali-G57 physical MMIO registers (0x13000000, 64KB) */
++			IOMemoryDescriptor *desc = IOMemoryDescriptor::withPhysicalAddress(0x13000000, 0x10000, kIODirectionInOut);
++			if (desc != NULL) {
++				*memory = desc;
++				return kIOReturnSuccess;
++			}
++			return kIOReturnNoMemory;
++		} else if (type == 1) {
++			/* Type 1: Map shared command ringbuffer / job descriptors */
++			IOBufferMemoryDescriptor *buf = IOBufferMemoryDescriptor::inTaskWithOptions(
++			    kernel_task, kIODirectionInOut, 1024 * 1024, page_size);
++			if (buf != NULL) {
++				*memory = buf;
++				return kIOReturnSuccess;
++			}
++			return kIOReturnNoMemory;
++		}
++		return kIOReturnUnsupported;
++	}
+ };
+ 
+ OSDefineMetaClassAndStructors(SweetMaliUserClient, IOUserClient);
+@@ -460,6 +484,57 @@ AppleCLCD::start(IOService *provider)
+ 			if (sweet_board_x676c()) {
+ 				IOLog("SWEET GPU: powering on MT6789 Mali-G57 subsystem...\n");
+ 
++				/* 0. Power on Mali GPU PMIC rails (VGPU + VSRAM_GPU) via MT6789 PWRAP at 0x10026000 */
++				volatile uint32_t *pwrap = (volatile uint32_t *)ml_io_map(0x10026000, 0x1000);
++				if (pwrap != NULL) {
++					auto pwrap_wait_idle = [](volatile uint32_t *p) -> bool {
++						for (int retry = 0; retry < 10000; retry++) {
++							uint32_t rdata = p[0x0c24 / 4];
++							if (((rdata >> 1) & 0x7) == 0) {
++								return true;
++							}
++							IODelay(1);
++						}
++						return false;
++					};
++					auto pwrap_write = [pwrap_wait_idle](volatile uint32_t *p, uint32_t reg, uint32_t val) -> bool {
++						if (!pwrap_wait_idle(p)) return false;
++						p[0x0c20 / 4] = (1u << 31) | (((reg >> 1) & 0x7fff) << 16) | (val & 0xffff);
++						return pwrap_wait_idle(p);
++					};
++					auto pwrap_read = [pwrap_wait_idle](volatile uint32_t *p, uint32_t reg) -> uint32_t {
++						if (!pwrap_wait_idle(p)) return ~0u;
++						p[0x0c20 / 4] = (((reg >> 1) & 0x7fff) << 16);
++						for (int retry = 0; retry < 10000; retry++) {
++							uint32_t rdata = p[0x0c24 / 4];
++							if (rdata & 1) {
++								p[0x0c28 / 4] = 1;
++								return rdata & 0xffff;
++							}
++							IODelay(1);
++						}
++						return ~0u;
++					};
++
++					uint32_t vgpu_init = pwrap_read(pwrap, 0x1508);
++					uint32_t vsram_init = pwrap_read(pwrap, 0x1bc8);
++					IOLog("SWEET GPU: PWRAP initial PMIC rails: VGPU_CON0=0x%04x VSRAM_CON0=0x%04x\n",
++					    vgpu_init, vsram_init);
++
++					/* Set VGPU target voltage to 0.800V (ELR0 = 0x30) */
++					pwrap_write(pwrap, 0x1514, 0x0030);
++					/* Enable VGPU Buck regulator (bit 0 = 1) */
++					pwrap_write(pwrap, 0x1508, 0x0001);
++					/* Enable VSRAM_GPU LDO regulator (bit 0 = 1) */
++					pwrap_write(pwrap, 0x1bc8, 0x0001);
++					IODelay(500); /* 500us rail ramp-up time */
++
++					uint32_t vgpu_post = pwrap_read(pwrap, 0x1508);
++					uint32_t vsram_post = pwrap_read(pwrap, 0x1bc8);
++					IOLog("SWEET GPU: PWRAP post-enable PMIC rails: VGPU_CON0=0x%04x VSRAM_CON0=0x%04x\n",
++					    vgpu_post, vsram_post);
++				}
++
+ 				/* 1. Un-gate infracfg_ao clock distribution and topckgen MFG clocks */
+ 				volatile uint32_t *infra_ao = (volatile uint32_t *)ml_io_map(0x10001000, 0x1000);
+ 				if (infra_ao != NULL) {
+@@ -548,18 +623,31 @@ AppleCLCD::start(IOService *provider)
+ 					    gpu_id, (gpu_id >> 16) & 0xff, (gpu_id >> 12) & 0xf,
+ 					    l2_feat, tiler_feat, mem_feat, mmu_feat, as_present, js_present);
+ 
+-					/* Register Mali-G57 accelerator properties unconditionally for CoreAnimation */
+-					uint64_t dev_id = (gpu_id != 0 && gpu_id != ~0u) ? (unsigned long long)gpu_id : 0x9093ULL;
+-					accel->setProperty("MetalPluginName", "MaliMetal");
+-					accel->setProperty("MetalPluginClassName", "MaliMetalDevice");
+-					accel->setProperty("IOGPUResourcePolicy", 1ULL, 32);
+-					accel->setProperty("vendor-id", 0x13b5ULL, 32);
+-					accel->setProperty("device-id", dev_id, 32);
+-					accel->setProperty("gpu-core-count", 2ULL, 32);
+-					accel->setProperty(kIOUserClientClassKey, "SweetMaliUserClient");
+-					accel->registerService();
+-					IOLog("SWEET GPU: Mali-G57 registered as MaliMetal / MaliMetalDevice (vendor 0x13b5, device 0x%04llx)\n",
+-					    dev_id & 0xffff);
++					bool hw_ok = (gpu_id != 0 && gpu_id != ~0u);
++					if (hw_ok) {
++						accel->setProperty("MetalPluginName", "MaliMetal");
++						accel->setProperty("MetalPluginClassName", "MaliMetalDevice");
++						accel->setProperty("IOGPUResourcePolicy", 1ULL, 32);
++						accel->setProperty("vendor-id", 0x13b5ULL, 32);
++						accel->setProperty("device-id", (unsigned long long)gpu_id, 32);
++						accel->setProperty("gpu-core-count", 2ULL, 32);
++						accel->setProperty(kIOUserClientClassKey, "SweetMaliUserClient");
++						accel->registerService();
++						IOLog("SWEET GPU: Mali-G57 registered as MaliMetal / MaliMetalDevice (vendor 0x13b5, device 0x%04x)\n",
++						    gpu_id >> 16);
++					} else {
++						/* RADICAL HONESTY: never spoof device-id 0x9093 when hardware bus returns 0 */
++						accel->setProperty("MetalPluginName", "MaliMetal");
++						accel->setProperty("MetalPluginClassName", "MaliMetalDevice");
++						accel->setProperty("IOGPUResourcePolicy", 1ULL, 32);
++						accel->setProperty("vendor-id", 0x13b5ULL, 32);
++						accel->setProperty("device-id", 0ULL, 32);
++						accel->setProperty("gpu-hardware-status", "offline-stub");
++						accel->setProperty(kIOUserClientClassKey, "SweetMaliUserClient");
++						accel->registerService();
++						IOLog("SWEET GPU: Mali hardware did not respond (ID=0x%08x). Registered software-stub MaliMetal (device-id 0, offline-stub)\n",
++						    gpu_id);
++					}
+ 				}
+ 			}
+ #endif
+-- 
+2.51.0.windows.1
+

@@ -1,0 +1,269 @@
+diff --git a/iokit/Kernel/arm/SweetX9CSF.cpp b/iokit/Kernel/arm/SweetX9CSF.cpp
+--- a/iokit/Kernel/arm/SweetX9CSF.cpp
++++ b/iokit/Kernel/arm/SweetX9CSF.cpp
+@@ -476,12 +476,12 @@
+   IOLog("X9 CSF BOOT: firmware boot + global capabilities + two PING acknowledgements verified\n");
+   if(queue.requested) {
+    int result=queue_run(p,queue,gpu,doorbell,input,output);
+-   IOLog("X9 CSF QUEUE: result=%d (1 three GPU command-stream writes verified;0 skip/failure)\n",result);
++   IOLog("X9 CSF QUEUE: result=%d (1 all requested command-stream writes verified;0 skip/failure)\n",result);
+   }
+  }
+ cleanup:
+- if(queue.range_uncertain) {
+-  IOLog("X9 CSF QUEUE: range command may still be active; no further GPU commands or resource release\n");goto retain;
++ if(queue.range_uncertain||queue.stop_uncertain) {
++  IOLog("X9 CSF QUEUE: range/stop outcome uncertain; no retry, further GPU commands or resource release\n");goto retain;
+  }
+  if(!queue_stop(p,queue,gpu,doorbell)) {
+   IOLog("X9 CSF QUEUE: STOP/TERMINATE not confirmed; MCU, AS0/AS1 and power references retained\n");goto retain;
+@@ -557,7 +557,7 @@
+  Plan p;const char *error=parse(p);
+  if(!error)error=populate(p);
+  if(error){IOLog("X9 CSF BOOT: image preparation failed: %s\n",error);return 0;}
+- IOLog("X9 CSF BOOT: pan153 stock-firmware=%s prepared bytes=%llu tables=%u\n",
++ IOLog("X9 CSF BOOT: pan154 stock-firmware=%s prepared bytes=%llu tables=%u\n",
+   csf_firmware_sha256,p.mapped_bytes,p.table_count);
+  return boot(p,gpu,smmu,doorbell);
+ }
+diff --git a/iokit/Kernel/arm/SweetX9CSFQueue.inc b/iokit/Kernel/arm/SweetX9CSFQueue.inc
+--- a/iokit/Kernel/arm/SweetX9CSFQueue.inc
++++ b/iokit/Kernel/arm/SweetX9CSFQueue.inc
+@@ -8,13 +8,25 @@
+ constexpr uint32_t queue_ring=0x10000000,queue_result=0x10004000;
+ constexpr uint32_t queue_bodies=0x10008000;
+ constexpr uint32_t queue_values[]={0x58394353u,0x4d543639u,0x43534631u};
++/*32-byte immutable dispatch packets divide the existing16KiB ring exactly.
++ * Four task pages also divide the512 slots, so the same dispatch bytes remain
++ * correct across ring wrap. NOP opcode0 is documented by stock csf_sync.c. */
++constexpr unsigned queue_dispatch_bytes=32,queue_dispatch_slots=host_page/queue_dispatch_bytes;
++static uint32_t queue_expected(unsigned round) {
++ return round<3?queue_values[round]:(0x58490000u|(round+1));
++}
++static bool queue_verbose(unsigned round) {
++ return round<4||round%64==0||(round>=30&&round<=33)||
++        (round>=510&&round<=513)||round>=574;
++}
+ constexpr unsigned queue_batch_bytes=3*sizeof(uint64_t);
+ struct QueueProbe {
+  Plan memory;
+- bool requested,as_installed,touched,dynamic,indirect,range_uncertain;
++ bool requested,as_installed,touched,dynamic,indirect,reuse,range_uncertain,stop_uncertain;
++ unsigned completed;
+  uint64_t saved_cfg,saved_attr;
+  uint32_t global_in,global_out,group_in,group_out,stream_in,stream_out;
+- QueueProbe():requested(false),as_installed(false),touched(false),dynamic(false),indirect(false),range_uncertain(false),saved_cfg(0),saved_attr(0),
++ QueueProbe():requested(false),as_installed(false),touched(false),dynamic(false),indirect(false),reuse(false),range_uncertain(false),stop_uncertain(false),completed(0),saved_cfg(0),saved_attr(0),
+   global_in(0),global_out(0),group_in(0),group_out(0),stream_in(0),stream_out(0) {}
+ };
+ static bool clean_page(Plan &p,uint32_t va) {
+@@ -59,6 +71,11 @@
+  q.dynamic=PE_parse_boot_argn("x9_csf_dynamic_ring",&enabled,sizeof(enabled))&&enabled==1;
+  enabled=0;
+  q.indirect=PE_parse_boot_argn("x9_csf_indirect",&enabled,sizeof(enabled))&&enabled==1;
++ enabled=0;
++ q.reuse=PE_parse_boot_argn("x9_csf_reuse",&enabled,sizeof(enabled))&&enabled==1;
++ if(q.reuse&&!q.indirect) {
++  IOLog("X9 CSF QUEUE: body reuse requires immutable CALL dispatch\n");return false;
++ }
+  if(q.indirect&&q.dynamic) {
+   IOLog("X9 CSF QUEUE: select either dynamic direct-ring or indirect mode\n");return false;
+  }
+@@ -71,26 +88,27 @@
+     !add_shared(firmware,queue_user)||!add_shared(firmware,queue_suspend,queue_suspend_bytes)) {
+   IOLog("X9 CSF QUEUE: private ring/result/user-IO/suspend allocation failed\n");return false;
+  }
+- /* Publish all instruction bytes before AS1 or MCU can access this ring.
+-  * GPU/MCU fetch may cover bytes beyond the current INSERT boundary. Only
+-  * INSERT changes while running; markers, result address and kicks stay the
+-  * same as pan150, so this changes instruction publication timing alone. */
+- for(unsigned round=0;!q.dynamic&&round<3;round++) {
+-  uint32_t at=queue_ring+round*queue_batch_bytes;
++ /* Keep the root dispatch immutable after publication. In campaign mode,
++  * fill all512 slots so wrapping never re-exposes an uninitialized root slot.
++  * Only task bodies and the host-owned producer page change while running. */
++ for(unsigned round=0;!q.dynamic&&round<(q.reuse?queue_dispatch_slots:3u);round++) {
++  uint32_t at=queue_ring+round*(q.reuse?queue_dispatch_bytes:queue_batch_bytes);
+   if(q.indirect) {
+    /* Immutable dispatch triplet: MOVE r4:r5,body; MOVE32 r6,24;
+     * CALL opcode20,src0=r4:r5 bits40,src1=r6 bits32. Task bytes
+     * remain zero here and are generated only after queue START. */
+-   if(!put_qword(q.memory,at,(1ULL<<56)|(4ULL<<48)|(queue_bodies+round*gpu_page))||
++   if(!put_qword(q.memory,at,(1ULL<<56)|(4ULL<<48)|(queue_bodies+(round%(q.reuse?4u:3u))*gpu_page))||
+       !put_qword(q.memory,at+8,(2ULL<<56)|(6ULL<<48)|queue_batch_bytes)||
+       !put_qword(q.memory,at+16,(0x20ULL<<56)|(4ULL<<40)|(6ULL<<32)))return false;
++   if(q.reuse&&!put_qword(q.memory,at+24,0))return false;
+    continue;
+   }
+   if(!put_qword(q.memory,at,(1ULL<<56)|queue_result)||
+      !put_qword(q.memory,at+8,(2ULL<<56)|(2ULL<<48)|queue_values[round])||
+      !put_qword(q.memory,at+16,(0x26ULL<<56)|(2ULL<<32)))return false;
+  }
+- if(q.indirect)IOLog("X9 CSF QUEUE: immutable CALL dispatch ring; three private4KiB bodies generated after START\n");
++ if(q.reuse)IOLog("X9 CSF QUEUE: 512 immutable CALL+NOP packets; four private4KiB task pages; reuse/wrap/restart campaign608\n");
++ else if(q.indirect)IOLog("X9 CSF QUEUE: immutable CALL dispatch ring; three private4KiB bodies generated after START\n");
+  else if(q.dynamic)IOLog("X9 CSF QUEUE: dynamic ring; each append requires CPU clean + GPU PA-range completion before INSERT\n");
+  else IOLog("X9 CSF QUEUE: nine instructions/72 bytes prepublished; runtime advances INSERT only\n");
+  /* Only the GPU is allowed to replace this initial value after publication. */
+@@ -186,6 +204,14 @@
+ }
+ static bool queue_start(Plan &p,QueueProbe &q,vm_offset_t gpu,vm_offset_t db) {
+  /* Start empty, then submit through the assigned user doorbell, as kbase does. */
++ if(q.reuse) {
++  uint64_t previous=output_qword(p,queue_user+4096),insert=output_qword(p,queue_user);
++  if(previous!=(uint64_t)q.completed*queue_dispatch_bytes||insert!=previous) {
++   IOLog("X9 CSF QUEUE: restart offsets rejected completed=%u insert=%llu extract=%llu\n",
++    q.completed,insert,previous);return false;
++  }
++  if(!put_qword(p,queue_user+8,previous)||!clean_page(p,queue_user))return false;
++ }
+  q.touched=true; /* Conservatively own the queue before input publication. */
+  if(!host_set(p,q.stream_in+0x10,queue_ring)||!host_set(p,q.stream_in+0x14,0)||
+     !host_set(p,q.stream_in+0x18,host_page)||
+@@ -204,7 +230,7 @@
+  uint32_t global,group;
+  if(!ring_stream(p,q,db,&global,&group)||!wait_group(p,q,gpu,global,group,1,false,1000)||
+     !wait_group(p,q,gpu,global,group,1,true,1000))return false;
+- IOLog("X9 CSF QUEUE: CSG0 and CS0 START acknowledged; AS1, user-doorbell1, empty ring\n");return true;
++ IOLog("X9 CSF QUEUE: CSG0 and CS0 START acknowledged; AS1, user-doorbell1, producer caught up\n");return true;
+ }
+ /* Stock kbase_gpu_cache_flush_pa_range_and_busy_wait: ARG0=start PA,
+  * ARG1=inclusive end PA, command08 with FULL clean/invalidate payload73.
+@@ -236,7 +262,7 @@
+    gw(gpu,0x24,done);
+    gw64(gpu,0xd0,old_arg0);gw64(gpu,0xd8,old_arg1);
+    q.range_uncertain=false;
+-   IOLog("X9 CSF QUEUE: round=%u GPU command PA-range clean/invalidate complete va=%08x pa=%llx bytes=%u\n",
++   if(!q.reuse||queue_verbose(round))IOLog("X9 CSF QUEUE: round=%u GPU command PA-range clean/invalidate complete va=%08x pa=%llx bytes=%u\n",
+     round+1,va,pa,gpu_page);return true;
+   }
+   sleep_ms();
+@@ -245,26 +271,41 @@
+   round+1,gr(gpu,0x20));return false;
+ }
+ static bool queue_submit(Plan &p,QueueProbe &q,vm_offset_t gpu,vm_offset_t user_db,unsigned round) {
+- uint32_t expected=queue_values[round],offset=round*queue_batch_bytes;
++ uint32_t expected=queue_expected(round),stride=q.reuse?queue_dispatch_bytes:queue_batch_bytes;
++ uint32_t offset=round*stride;
+  if(q.dynamic||q.indirect) {
+-  uint32_t at=q.indirect?queue_bodies+round*gpu_page:queue_ring+offset;
++  uint32_t at=q.indirect?queue_bodies+(round%(q.reuse?4u:3u))*gpu_page:queue_ring+offset;
+   if(q.indirect) {
+-   /* This address was allocated before root publication, but no instruction
+-    * bytes or marker have been written here before this runtime submission. */
++   /* Every prior submission must finish before a page can change owner.
++    * Validate old body bytes before reusing them; never modify a live body. */
++   if(q.completed!=round||output_qword(p,queue_user+4096)!=(uint64_t)offset) {
++    IOLog("X9 CSF QUEUE: body ownership rejected round=%u completed=%u\n",round+1,q.completed);return false;
++   }
+    unsigned char *prior=cpu_address(q.memory,at,queue_batch_bytes);
+    if(!prior)return false;
+-   for(unsigned i=0;i<queue_batch_bytes;i++)if(prior[i])return false;
++   if(round<(q.reuse?4u:3u)) {
++    for(unsigned i=0;i<queue_batch_bytes;i++)if(prior[i])return false;
++   }else {
++    uint64_t old_words[3];memcpy(old_words,prior,sizeof(old_words));
++    if(old_words[0]!=((1ULL<<56)|queue_result)||
++       old_words[1]!=((2ULL<<56)|(2ULL<<48)|queue_expected(round-(q.reuse?4u:3u)))||
++       old_words[2]!=((0x26ULL<<56)|(2ULL<<32))) {
++     IOLog("X9 CSF QUEUE: old task-body contents rejected before reuse\n");return false;
++    }
++    if(!q.reuse||queue_verbose(round))IOLog("X9 CSF QUEUE: round=%u reclaim body=%08x previous-round=%u after extract=%u\n",
++     round+1,at,round+1-(q.reuse?4u:3u),offset);
++   }
+   }
+   if(!put_qword(q.memory,at,(1ULL<<56)|queue_result)||
+      !put_qword(q.memory,at+8,(2ULL<<56)|(2ULL<<48)|expected)||
+      !put_qword(q.memory,at+16,(0x26ULL<<56)|(2ULL<<32))||
+      !clean_page(q.memory,at)||!queue_sync_ring(q,gpu,round,at&~4095u))return false;
+-  if(q.indirect)IOLog("X9 CSF QUEUE: round=%u live body=%08x bytes=%u generated and synchronized\n",
++  if(q.indirect&&(!q.reuse||queue_verbose(round)))IOLog("X9 CSF QUEUE: round=%u live body=%08x bytes=%u generated and synchronized\n",
+    round+1,at,queue_batch_bytes);
+  }
+  /* Expose only bytes whose CPU publication and optional GPU cache sync
+   * finished. Static mode keeps pan151's immutable prepublished stream. */
+- if(!put_qword(p,queue_user,offset+queue_batch_bytes)||!clean_page(p,queue_user))return false;
++ if(!put_qword(p,queue_user,offset+stride)||!clean_page(p,queue_user))return false;
+  gw(user_db,0,1);
+  uint64_t end=deadline_ms(1500),extract=0;uint32_t actual=0;
+  do {
+@@ -272,17 +313,18 @@
+   extract=output_qword(p,queue_user+4096);
+   if(!global_healthy(p,q,gpu))break;
+   if((output_word(p,q.stream_out)^input_word(p,q.stream_in))&0xc0000000u)break;
+-  if(actual==expected&&extract==offset+queue_batch_bytes) {
++  if(actual==expected&&extract==offset+stride) {
+    if(output_word(q.memory,queue_result,4)!=0||output_word(q.memory,queue_result,64)!=0xa5a5a5a5u) {
+     IOLog("X9 CSF QUEUE: sync error-word/guard rejected\n");return false;
+    }
+-   IOLog("X9 CSF QUEUE: round=%u SYNC_SET32=%08x extract=%llu verified; no CPU result writes after publication\n",
++   q.completed=round+1;
++   if(!q.reuse||queue_verbose(round))IOLog("X9 CSF QUEUE: round=%u SYNC_SET32=%08x extract=%llu verified; no CPU result writes after publication\n",
+     round+1,actual,extract);return true;
+   }
+   sleep_ms();
+  }while(mach_absolute_time()<end);
+  IOLog("X9 CSF QUEUE: round=%u incomplete expected=%08x actual=%08x insert=%u extract=%llu\n",
+-  round+1,expected,actual,offset+24,extract);queue_diagnostics(p,q);return false;
++  round+1,expected,actual,offset+stride,extract);queue_diagnostics(p,q);return false;
+ }
+ static bool queue_stop(Plan &p,QueueProbe &q,vm_offset_t gpu,vm_offset_t db) {
+  if(!q.touched)return true;
+@@ -310,10 +352,41 @@
+  if(!install_as(gpu,q.memory.tables[0].pa,1)) {
+   IOLog("X9 CSF QUEUE: AS1 install failed\n");return 0;
+  }
+- bool passed=queue_start(p,q,gpu,db);
+- for(unsigned round=0;passed&&round<3;round++)passed=queue_submit(p,q,gpu,user_db,round);
+- if(passed)IOLog("X9 CSF QUEUE: three command-stream writes and ring consumption verified; %s ring, no shaders dispatched\n",
+-  q.indirect?"indirect live-body":(q.dynamic?"dynamic synchronized":"prepublished"));
++ bool passed=true;
++ if(q.reuse) {
++  /* One boot covers initial reuse, wrap past16KiB and two full STOP/START
++   * cycles. No root-ring rewrites, MCU resets or automatic retries. */
++  const unsigned rounds[]={32,544,32};
++  uint64_t campaign_end=deadline_ms(30000);
++  for(unsigned phase=0;passed&&phase<3;phase++) {
++   IOLog("X9 CSF QUEUE: phase=%u BEGIN completed=%u target=%u producer=%llu\n",
++    phase+1,q.completed,rounds[phase],(uint64_t)q.completed*queue_dispatch_bytes);
++   passed=queue_start(p,q,gpu,db);
++   for(unsigned i=0;passed&&i<rounds[phase];i++) {
++    if(mach_absolute_time()>=campaign_end) {
++     IOLog("X9 CSF QUEUE: campaign30s deadline reached at completed=%u\n",q.completed);
++     passed=false;break;
++    }
++    unsigned round=q.completed;
++    passed=queue_submit(p,q,gpu,user_db,round);
++    if(passed&&q.completed%queue_dispatch_slots==0)
++     IOLog("X9 CSF QUEUE: ring wrap verified completed=%u extract=%llu cycle=%u\n",
++      q.completed,output_qword(p,queue_user+4096),q.completed/queue_dispatch_slots);
++   }
++   if(!passed)break;
++   if(!queue_stop(p,q,gpu,db)){q.stop_uncertain=true;passed=false;break;}
++   IOLog("X9 CSF QUEUE: phase=%u PASS completed=%u insert=%llu extract=%llu result=%08x\n",
++    phase+1,q.completed,output_qword(p,queue_user),output_qword(p,queue_user+4096),
++    output_word(q.memory,queue_result));
++  }
++  if(passed)IOLog("X9 CSF QUEUE: campaign PASS608 writes,604 page reuses,ring wrap,two restarts; extract=19456; no shaders\n");
++ }else {
++  passed=queue_start(p,q,gpu,db);
++  for(unsigned round=0;passed&&round<3;round++)passed=queue_submit(p,q,gpu,user_db,round);
++  if(passed)IOLog("X9 CSF QUEUE: three command-stream writes and ring consumption verified; %s ring, no shaders dispatched\n",
++   q.indirect?"indirect live-body":(q.dynamic?"dynamic synchronized":"prepublished"));
++ }
++
+  return passed?1:0;
+ }
+ 
+diff --git a/bsd/dev/sweet_x9_gpu_dependencies.c b/bsd/dev/sweet_x9_gpu_dependencies.c
+--- a/bsd/dev/sweet_x9_gpu_dependencies.c
++++ b/bsd/dev/sweet_x9_gpu_dependencies.c
+@@ -179,7 +179,7 @@
+ static void run(void) {
+  int enabled=0;
+  if(!PE_parse_boot_argn("x9_gpu_power_probe",&enabled,sizeof(enabled))||enabled!=1)return;
+- printf("X9 GPU: pan153 one-shot INIT -> POWER_ON -> ID -> POWER_OFF\n");
++ printf("X9 GPU: pan154 one-shot INIT -> POWER_ON -> ID -> POWER_OFF\n");
+  if(!handoff()){printf("X9 GPU: live FDT handoff absent/mismatched; all writes refused\n");return;}
+  spm=ml_io_map(0x1c004000,0x1000);
+  if(!spm||!on(rd(spm,0xe1c))){printf("X9 GPU: SPM MFG0 ACK absent; stopped\n");return;}

@@ -1,0 +1,91 @@
+From c84ee2c277e0dd6e8dbc697dd8057dfdc6010008 Mon Sep 17 00:00:00 2001
+From: Egor Kulikovskiy <xianel0x@gmail.com>
+Date: Fri, 23 Oct 2026 04:31:33 +0500
+Subject: [PATCH] x676c: fix SweetFB swap deadlock and MT6789 PWRAP WACS2
+ register map
+
+---
+ iokit/Kernel/arm/SweetFramebuffer.cpp | 33 ++++++++++++++++++++-------
+ 1 file changed, 25 insertions(+), 8 deletions(-)
+
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 8d27eb0..f705735 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -53,6 +53,9 @@ extern "C" int sweet_console_copy_dirty(void *dst);
+ static void
+ sweet_hold(SweetSurface *s, bool on)
+ {
++	if (sweet_board_x676c()) {
++		return;
++	}
+ 	OSAddAtomic64(on ? 1 : -1, (volatile SInt64 *)((uint8_t *)s->state->getBytesNoCopy() + 0x18));
+ }
+ 
+@@ -489,27 +492,32 @@ AppleCLCD::start(IOService *provider)
+ 				if (pwrap != NULL) {
+ 					auto pwrap_wait_idle = [](volatile uint32_t *p) -> bool {
+ 						for (int retry = 0; retry < 10000; retry++) {
+-							uint32_t rdata = p[0x0c24 / 4];
+-							if (((rdata >> 1) & 0x7) == 0) {
++							uint32_t rdata = p[0x0ca8 / 4];
++							uint32_t fsm = (rdata >> 16) & 0x7;
++							if (fsm == 0) {
+ 								return true;
+ 							}
++							if (fsm == 6) {
++								p[0x0ca4 / 4] = 1;
++							}
+ 							IODelay(1);
+ 						}
+ 						return false;
+ 					};
+ 					auto pwrap_write = [pwrap_wait_idle](volatile uint32_t *p, uint32_t reg, uint32_t val) -> bool {
+ 						if (!pwrap_wait_idle(p)) return false;
+-						p[0x0c20 / 4] = (1u << 31) | (((reg >> 1) & 0x7fff) << 16) | (val & 0xffff);
++						p[0x0c80 / 4] = (1u << 31) | (((reg >> 1) & 0x7fff) << 16) | (val & 0xffff);
+ 						return pwrap_wait_idle(p);
+ 					};
+ 					auto pwrap_read = [pwrap_wait_idle](volatile uint32_t *p, uint32_t reg) -> uint32_t {
+ 						if (!pwrap_wait_idle(p)) return ~0u;
+-						p[0x0c20 / 4] = (((reg >> 1) & 0x7fff) << 16);
++						p[0x0c80 / 4] = (((reg >> 1) & 0x7fff) << 16);
+ 						for (int retry = 0; retry < 10000; retry++) {
+-							uint32_t rdata = p[0x0c24 / 4];
+-							if (rdata & 1) {
+-								p[0x0c28 / 4] = 1;
+-								return rdata & 0xffff;
++							uint32_t rdata = p[0x0ca8 / 4];
++							if (((rdata >> 16) & 0x7) == 6) {
++								uint32_t val = rdata & 0xffff;
++								p[0x0ca4 / 4] = 1;
++								return val;
+ 							}
+ 							IODelay(1);
+ 						}
+@@ -816,6 +824,11 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ 		memcpy(fb->fRetireHold, fb->fShowHold, sizeof(taken));
+ 		memcpy(fb->fShowHold, taken, sizeof(taken));
+ 		IOLockUnlock(fb->fLock);
++	} else {
++		IOLockLock(fb->fLock);
++		memcpy(fb->fRetireHold, fb->fShowHold, sizeof(fb->fRetireHold));
++		bzero(fb->fShowHold, sizeof(fb->fShowHold));
++		IOLockUnlock(fb->fLock);
+ 	}
+ 	if (sweet_board_x676c()) {
+ 		fb->mtkDsiPush();
+@@ -1281,6 +1294,10 @@ AppleCLCD::present(const uint8_t *rec)
+ 		}
+ 	}
+ 
++	if (dst != NULL) {
++		bzero(dst, (size_t)fRowBytes * fHeight);
++	}
++
+ 	for (uint32_t layer = 0; layer < SWEET_FB_LAYERS; layer++) {
+ 		uint32_t id = get32(rec, 0x54 + 4 * layer);
+ 		const uint8_t *a = rec + 0x64 + 16 * layer;
+-- 
+2.51.0.windows.1
+

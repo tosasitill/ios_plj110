@@ -1,0 +1,64 @@
+From 4b39fc99532cac84084c021f77e09dc4b1fca2e4 Mon Sep 17 00:00:00 2001
+From: Egor Kulikovskiy <xianel0x@gmail.com>
+Date: Thu, 22 Oct 2026 01:14:30 +0500
+Subject: [PATCH] x676c: diag -- report hba->lock holder when contended
+
+The launchd page-fault thread sleeps in lck_mtx_lock(&hba->lock) inside
+ufs_slot_put (confirmed by disassembly: ufs_exec+0x3a4 returns from
+lck_mtx_lock). For a single thread a free mutex must not block, so print
+the owner: try_lock first and, on failure, dump the mutex's first words
+(owner thread) and current_thread() before blocking. Distinguishes
+self-recursion from another holder from a wedged/free mutex.
+---
+ bsd/dev/ufs/ufshci.c | 22 ++++++++++++++++++++--
+ 1 file changed, 20 insertions(+), 2 deletions(-)
+
+diff --git a/bsd/dev/ufs/ufshci.c b/bsd/dev/ufs/ufshci.c
+index dffccf5..4067866 100644
+--- a/bsd/dev/ufs/ufshci.c
++++ b/bsd/dev/ufs/ufshci.c
+@@ -170,13 +170,31 @@ ucd_pa(struct ufs_hba *hba, unsigned slot)
+ 	return hba->dma_pa + DMA_UCD + slot * UFS_UCD_SIZE;
+ }
+ 
++/*
++ * Diagnostic lock: if hba->lock is contended, print who holds it before
++ * blocking. lck_mtx_t's first word carries the owner thread pointer, so
++ * raw0 vs current_thread() tells self-recursion from another holder from
++ * a free lock (raw0 == 0 would mean the mutex itself is wedging).
++ */
++static void
++ufs_lock_diag(struct ufs_hba *hba, int site)
++{
++	if (!lck_mtx_try_lock(&hba->lock)) {
++		volatile uint64_t *r = (volatile uint64_t *)&hba->lock;
++		printf("ufshci: lock site %d contended raw0=0x%llx raw1=0x%llx me=%p\n",
++		    site, r[0], r[1], current_thread());
++		lck_mtx_lock(&hba->lock);
++		printf("ufshci: lock site %d acquired\n", site);
++	}
++}
++
+ static int
+ ufs_slot_get(struct ufs_hba *hba, unsigned *slot, uint8_t *tag)
+ {
+ 	uint32_t all = hba->nslots == 32 ? ~0u : (1u << hba->nslots) - 1;
+ 
+ 	for (;;) {
+-		lck_mtx_lock(&hba->lock);
++		ufs_lock_diag(hba, 1);
+ 		uint32_t free = ~hba->busy & all;
+ 		if (free) {
+ 			*slot = (unsigned)__builtin_ctz(free);
+@@ -196,7 +214,7 @@ ufs_slot_get(struct ufs_hba *hba, unsigned *slot, uint8_t *tag)
+ static void
+ ufs_slot_put(struct ufs_hba *hba, unsigned slot)
+ {
+-	lck_mtx_lock(&hba->lock);
++	ufs_lock_diag(hba, 2);
+ 	hba->busy &= ~(1u << slot);
+ 	lck_mtx_unlock(&hba->lock);
+ }
+-- 
+2.51.0.windows.1
+

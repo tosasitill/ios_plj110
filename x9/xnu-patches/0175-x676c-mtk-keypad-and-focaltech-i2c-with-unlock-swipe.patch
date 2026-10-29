@@ -1,0 +1,325 @@
+From 1fd49519d6b677c4bd488ae928e34e7c2e1eb92a Mon Sep 17 00:00:00 2001
+From: Egor Kulikovskiy <xianel0x@gmail.com>
+Date: Fri, 23 Oct 2026 01:14:03 +0500
+Subject: [PATCH] x676c: implement MediaTek MT6789 Keypad and FocalTech I2C
+ touch with unlock swipe
+
+---
+ bsd/dev/sweet_keys.c  | 105 +++++++++++++++++++++++++++++++
+ bsd/dev/sweet_touch.c | 139 ++++++++++++++++++++++++++++++++++++++++--
+ 2 files changed, 239 insertions(+), 5 deletions(-)
+
+diff --git a/bsd/dev/sweet_keys.c b/bsd/dev/sweet_keys.c
+index 65970f9..091630b 100644
+--- a/bsd/dev/sweet_keys.c
++++ b/bsd/dev/sweet_keys.c
+@@ -15,8 +15,19 @@
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern void sweet_hid_key(int key, int down);
++extern void sweet_hid_touch(int finger, int down, int x, int y);
+ void sweet_keys_init(void);
+ 
++/* MediaTek MT6789 Keypad (Infinix Note 12 2023 / X676C) */
++#define MTK_KPD_PA       0x10010000u
++#define MTK_KPD_STA      0x0000u
++#define MTK_KPD_MEM1     0x0004u
++#define MTK_KPD_DEBOUNCE 0x0018u
++#define MTK_KPD_SEL      0x0020u
++#define MTK_KPD_EN       0x0024u
++
++static vm_offset_t keys_mtk_base;
++
+ /* topaz (SM6225, sm6125.dtsi spmi_bus; PM6125 USID 0): PON 0x800, Vol+ = GPIO5 */
+ #define KEYS_CORE_PA     0x01c40000u
+ #define KEYS_OBS_PA      0x03e00000u
+@@ -91,6 +102,82 @@ keys_wait(void)
+ 	thread_block(THREAD_CONTINUE_NULL);
+ }
+ 
++static void
++sweet_simulate_unlock_swipe(void)
++{
++	printf("SWEET KEYS: performing unlock swipe-up gesture\n");
++	/* Finger 0 down at bottom edge center (540, 2380) with edge tip flag */
++	sweet_hid_touch(0, 1, 540, 2380);
++	delay(16000);
++
++	/* Smooth swipe up from 2380 to 900 */
++	for (int y = 2300; y >= 900; y -= 100) {
++		sweet_hid_touch(0, 1, 540, y);
++		delay(16000);
++	}
++
++	/* Finger 0 up at 900 */
++	sweet_hid_touch(0, 0, 540, 900);
++	printf("SWEET KEYS: unlock swipe-up gesture completed\n");
++}
++
++static void
++keys_thread_mtk(void *arg, wait_result_t result)
++{
++	int state[3] = {0, 0, 0}; /* 0: Power, 1: Vol Up, 2: Vol Down */
++	unsigned count = 0;
++	bool unlocked = false;
++	int autounlock = 1;
++	(void)arg;
++	(void)result;
++
++	(void)PE_parse_boot_argn("sweetunlock", &autounlock, sizeof(autounlock));
++	printf("SWEET KEYS: MTK Keypad polling started (autounlock=%d)\n", autounlock);
++
++	for (;;) {
++		count++;
++		/* Auto-unlock after ~6 seconds (300 ticks * 20ms = 6s) */
++		if (autounlock && !unlocked && count == 300) {
++			unlocked = true;
++			sweet_simulate_unlock_swipe();
++		}
++
++		uint32_t mem1 = *(volatile uint32_t *)(keys_mtk_base + MTK_KPD_MEM1);
++		__asm__ volatile("dmb oshld" ::: "memory");
++
++		/*
++		 * MediaTek Keypad is active-low:
++		 * 0 = pressed, 1 = released
++		 * Bit 0: Volume Up (key 1 in sweet_hid_key)
++		 * Bit 1: Volume Down (key 2 in sweet_hid_key)
++		 * Bit 8: Power (key 0 in sweet_hid_key)
++		 */
++		int now[3] = {
++			!(mem1 & (1u << 8)), /* 0: Power */
++			!(mem1 & (1u << 0)), /* 1: Vol Up */
++			!(mem1 & (1u << 1))  /* 2: Vol Down */
++		};
++
++		for (int k = 0; k < 3; ++k) {
++			if (now[k] != state[k]) {
++				state[k] = now[k];
++				printf("SWEET KEYS: key=%d (%s) down=%d mem1=%#x\n",
++				    k, k == 0 ? "Power" : (k == 1 ? "Vol+" : "Vol-"),
++				    state[k], mem1);
++				sweet_hid_key(k, state[k]);
++
++				/* On first user key press, if screen was still locked, swipe up */
++				if (!unlocked && state[k]) {
++					unlocked = true;
++					sweet_simulate_unlock_swipe();
++				}
++			}
++		}
++
++		keys_wait();
++	}
++}
++
+ static void
+ keys_thread(void *arg, wait_result_t result)
+ {
+@@ -137,6 +224,24 @@ sweet_keys_init(void)
+ 		printf("SWEET KEYS: disabled (sweetkeys=0)\n");
+ 		return;
+ 	}
++
++	/* Try MediaTek MT6789 Keypad first */
++	keys_mtk_base = ml_io_map(MTK_KPD_PA, 0x1000);
++	if (keys_mtk_base) {
++		uint32_t sta = *(volatile uint32_t *)(keys_mtk_base + MTK_KPD_STA);
++		uint32_t mem1 = *(volatile uint32_t *)(keys_mtk_base + MTK_KPD_MEM1);
++		printf("SWEET KEYS: MTK MT6789 Keypad detected at %p (STA=%#x MEM1=%#x)\n",
++		    (void *)keys_mtk_base, sta, mem1);
++		*(volatile uint32_t *)(keys_mtk_base + MTK_KPD_EN) = 1;
++		*(volatile uint32_t *)(keys_mtk_base + MTK_KPD_DEBOUNCE) = 0x400;
++
++		kern_return_t kr = kernel_thread_start(keys_thread_mtk, NULL, &thread);
++		if (kr == KERN_SUCCESS) {
++			thread_deallocate(thread);
++			return;
++		}
++		printf("SWEET KEYS: kernel_thread_start (MTK) failed %d\n", kr);
++	}
+ 	keys_core = ml_io_map(KEYS_CORE_PA, 0x2000);
+ 	keys_cnfg = ml_io_map(KEYS_CNFG_PA, 0x1000);
+ 	keys_obs = ml_io_map(KEYS_OBS_PA, 0x10000);
+diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
+index ff9d858..78ed65e 100644
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -28,6 +28,28 @@ void sweet_touch_init(void);
+ #define TOUCH_GCC_PA     0x01400000u
+ #define TOUCH_WEST_PA    0x00500000u /* TLMM 0x400000 + WEST tile: GPIO 6/7/80/86 */
+ #define TOUCH_EAST_PA    0x00d00000u /* TLMM 0x400000 + EAST tile: GPIO 36 */
++
++/* MediaTek MT6789 I2C (Infinix Note 12 2023 / X676C) */
++#define MTK_I2C_TOUCH_PA      0x11e00000u
++#define MTK_I2C_DATA_PORT     0x00u
++#define MTK_I2C_SLAVE_ADDR    0x04u
++#define MTK_I2C_INTR_MASK     0x08u
++#define MTK_I2C_INTR_STAT     0x0cu
++#define MTK_I2C_CONTROL       0x10u
++#define MTK_I2C_TRANSFER_LEN  0x14u
++#define MTK_I2C_TRANSAC_LEN   0x18u
++#define MTK_I2C_DELAY_LEN     0x1cu
++#define MTK_I2C_TIMING        0x20u
++#define MTK_I2C_START         0x24u
++#define MTK_I2C_FIFO_STAT     0x30u
++#define MTK_I2C_FIFO_THRESH   0x34u
++#define MTK_I2C_FIFO_ADDR_CLR 0x38u
++#define MTK_I2C_SOFTRESET     0x50u
++
++#define MTK_I2C_INTR_COMP     (1u << 0)
++#define MTK_I2C_INTR_ACKERR   (1u << 1)
++
++static vm_offset_t mtk_touch_i2c;
+ #define TOUCH_GCC_VOTE   0x7900cu    /* QUP0 wrapper + SE2 vote, bits 0x13c0 */
+ #define TOUCH_RCG       0x1f3a8u    /* QUP0 S2 CMD; CFG +4, CBCR -4 (gcc-khaje.c) */
+ #define TOUCH_PIN_RESET  86u
+@@ -316,18 +338,87 @@ touch_msg_run(uint8_t addr, const uint8_t *tx, unsigned nt, uint8_t *rx,
+ 	return err;
+ }
+ 
++static inline uint32_t
++mtk_touch_rd(uint32_t off)
++{
++	uint32_t v = *(volatile uint32_t *)(mtk_touch_i2c + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return v;
++}
++
++static inline void
++mtk_touch_wr(uint32_t off, uint32_t val)
++{
++	*(volatile uint32_t *)(mtk_touch_i2c + off) = val;
++	__asm__ volatile("dsb osh" ::: "memory");
++}
++
++static int
++mtk_touch_msg_run(uint8_t addr, const uint8_t *tx, unsigned nt, uint8_t *rx,
++    unsigned nr, bool stretch)
++{
++	(void)stretch;
++	if (!mtk_touch_i2c) {
++		return ENODEV;
++	}
++
++	/* Clear FIFO and status flags */
++	mtk_touch_wr(MTK_I2C_FIFO_ADDR_CLR, 1);
++	mtk_touch_wr(MTK_I2C_INTR_STAT, 0xffffffffu);
++
++	/* Set slave address (7-bit address shifted << 1, bit 0 is R/W) */
++	mtk_touch_wr(MTK_I2C_SLAVE_ADDR, ((uint32_t)addr << 1) | (nr ? 1u : 0u));
++	mtk_touch_wr(MTK_I2C_TRANSAC_LEN, 1);
++	mtk_touch_wr(MTK_I2C_TRANSFER_LEN, nr ? nr : nt);
++
++	/* Write TX payload into data port */
++	if (nt && tx) {
++		for (unsigned i = 0; i < nt; ++i) {
++			mtk_touch_wr(MTK_I2C_DATA_PORT, tx[i]);
++		}
++	}
++
++	/* Trigger transfer */
++	mtk_touch_wr(MTK_I2C_START, 1);
++
++	for (unsigned i = 0; i < 5000; ++i) {
++		uint32_t stat = mtk_touch_rd(MTK_I2C_INTR_STAT);
++		if (stat & MTK_I2C_INTR_ACKERR) {
++			mtk_touch_wr(MTK_I2C_INTR_STAT, stat);
++			return ENXIO;
++		}
++		if (stat & MTK_I2C_INTR_COMP) {
++			mtk_touch_wr(MTK_I2C_INTR_STAT, stat);
++			if (nr && rx) {
++				for (unsigned j = 0; j < nr; ++j) {
++					rx[j] = (uint8_t)mtk_touch_rd(MTK_I2C_DATA_PORT);
++				}
++			}
++			return 0;
++		}
++		delay(2);
++	}
++
++	mtk_touch_wr(MTK_I2C_SOFTRESET, 1);
++	return ETIMEDOUT;
++}
++
+ static int
+ touch_msg(uint8_t addr, const uint8_t *tx, unsigned nt, uint8_t *rx,
+     unsigned nr, bool stretch)
+ {
+ 	st.irq_status = st.irq_last = 0;
+ 	st.sent = st.got = 0;
+-	int err = touch_msg_run(addr, tx, nt, rx, nr, stretch);
++	int err;
++	if (mtk_touch_i2c) {
++		err = mtk_touch_msg_run(addr, tx, nt, rx, nr, stretch);
++	} else {
++		err = touch_msg_run(addr, tx, nt, rx, nr, stretch);
++	}
+ 	if (st.probing) {
+-		printf("SWEET TOUCH: probe xfer addr=%#x %s len=%u stretch=%u err=%d irq=%#x seen=%#x tx=%u rx=%u status=%#x\n",
++		printf("SWEET TOUCH: probe xfer addr=%#x %s len=%u stretch=%u err=%d tx=%u rx=%u\n",
+ 		    addr, nr ? "read" : "write", nr ? nr : nt, stretch ? 1u : 0u,
+-		    err, st.irq_last, st.irq_status, st.sent, st.got,
+-		    touch_rd(st.se, SE_STATUS));
++		    err, st.sent, st.got);
+ 	}
+ 	return err;
+ }
+@@ -613,7 +704,7 @@ touch_se_init(void)
+ static void
+ touch_thread(void *arg, wait_result_t result)
+ {
+-	unsigned delay_s = 45;
++	unsigned delay_s = 5;
+ 	(void)arg;
+ 	(void)result;
+ 	/*
+@@ -623,6 +714,44 @@ touch_thread(void *arg, wait_result_t result)
+ 	(void)PE_parse_boot_argn("sweettouchdelay", &delay_s, sizeof(delay_s));
+ 	printf("SWEET TOUCH: starting in %u s\n", delay_s);
+ 	touch_wait(delay_s * 1000u);
++
++	/* Try MediaTek MT6789 I2C controller first (Infinix Note 12 2023) */
++	mtk_touch_i2c = ml_io_map(MTK_I2C_TOUCH_PA, 0x1000);
++	if (mtk_touch_i2c) {
++		printf("SWEET TOUCH: MTK MT6789 I2C mapped at %p\n", (void *)mtk_touch_i2c);
++		st.stage = "probe mtk";
++		st.probing = true;
++		uint8_t fid1 = 0, fid2 = 0;
++		int fe1 = touch_read(0x38, 0xa3, false, &fid1, 1);
++		int fe2 = touch_read(0x38, 0x9f, false, &fid2, 1);
++		printf("SWEET TOUCH: MTK probe 0x38 err=%d/%d chip-id=%02x:%02x\n",
++		    fe1, fe2, fid1, fid2);
++		st.probing = false;
++		st.kind = TOUCH_FTS;
++		st.irq_hint = 0; /* continuous 10ms polling */
++		st.stage = "polling mtk";
++		printf("SWEET TOUCH: MTK FocalTech selected, 1080x2400, poll=10ms\n");
++		unsigned errors = 0;
++		while (!st.dead) {
++			int err = touch_focaltech();
++			if (err) {
++				st.s_errs++;
++				st.s_lasterr = err;
++				if ((errors++ % 100u) == 0) {
++					printf("SWEET TOUCH: report err=%d\n", err);
++				}
++				if (errors == 10) {
++					touch_report(0, st.x, st.y);
++				}
++			} else {
++				errors = 0;
++			}
++			touch_wait(10);
++		}
++		touch_report(0, st.x, st.y);
++		goto out;
++	}
++
+ 	st.stage = "map";
+ 	printf("SWEET TOUCH: mapping GCC/TLMM/SE2\n");
+ 	st.gcc = ml_io_map(TOUCH_GCC_PA, 0x80000);
+-- 
+2.51.0.windows.1
+

@@ -1,0 +1,72 @@
+From: HelioDarwin
+Subject: [PATCH] x9: extend bootstrap milestones through the BSD entry boundary
+
+Add named checkpoints 72-80 without changing the default diagnostic-reset policy.
+Stage 80 is before bsd_init, not proof of BSD initialization.
+
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -302,6 +302,15 @@
+ 	{ "sched_startup", 69 },
+ 	{ "thread_daemon_init", 70 },
+ 	{ "clock_service_create", 71 },
++	{ "device_service_create", 72 },
++	{ "PE_init_iokit", 73 },
++	{ "early_boot_ready", 74 },
++	{ "interrupts_enabled", 75 },
++	{ "screen_acquired", 76 },
++	{ "commpage_ready", 77 },
++	{ "trust_cache_init", 78 },
++	{ "machine_lockdown", 79 },
++	{ "bsd_init", 80 },
+ };
+ 
+ /*
+diff --git a/osfmk/kern/startup.c b/osfmk/kern/startup.c
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -670,6 +670,7 @@
+ 	/*
+ 	 *	Create the device service.
+ 	 */
++	kernel_bootstrap_thread_log("device_service_create");
+ 	device_service_create();
+ 
+ 	phys_carveout_init();
+@@ -720,23 +721,27 @@
+ 	 * interrupts or preemption enabled may begin enforcement.
+ 	 */
+ 	kernel_startup_initialize_upto(STARTUP_SUB_EARLY_BOOT);
++	kernel_bootstrap_thread_log("early_boot_ready");
+ 
+ #if SCHED_HYGIENE_DEBUG
+ 	// Reset interrupts masked timeout before we enable interrupts
+ 	ml_spin_debug_clear_self();
+ #endif
+ 	(void) spllo();         /* Allow interruptions */
++	kernel_bootstrap_thread_log("interrupts_enabled");
+ 
+ 	/*
+ 	 * This will start displaying progress to the user, start as early as possible
+ 	 */
+ 	initialize_screen(NULL, kPEAcquireScreen);
++	kernel_bootstrap_thread_log("screen_acquired");
+ 
+ 	/*
+ 	 *	Initialize the shared region module.
+ 	 */
+ 	vm_commpage_init();
+ 	vm_commpage_text_init();
++	kernel_bootstrap_thread_log("commpage_ready");
+ 
+ #if CONFIG_MACF
+ 	kernel_bootstrap_log("mac_policy_initmach");
+@@ -811,6 +816,7 @@
+ 	 *	Start the user bootstrap.
+ 	 */
+ #ifdef  MACH_BSD
++	kernel_bootstrap_thread_log("bsd_init");
+ 	bsd_init();
+ #endif
+ 

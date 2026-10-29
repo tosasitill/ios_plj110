@@ -1,0 +1,51 @@
+diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
+index a20a764..8d3cbd6 100644
+--- a/osfmk/kern/exception.c
++++ b/osfmk/kern/exception.c
+@@ -1009,7 +1009,9 @@ sweet_sample_task(const char *name, int pid, task_t task)
+ 		slide = sr->sr_slide;
+ 		vm_shared_region_deallocate(sr);
+ 	}
+-	printf("SMP %s[%d] slide 0x%llx mh 0x%llx\n", name, pid, slide, task->mach_header_vm_address);
++	extern vm_offset_t vm_kernel_slide;
++	printf("SMP %s[%d] slide 0x%llx mh 0x%llx kslide 0x%llx\n", name, pid, slide,
++	    task->mach_header_vm_address, (uint64_t)vm_kernel_slide);
+ 
+ 	task_lock(task);
+ 	queue_iterate(&task->threads, thread, thread_t, task_threads) {
+@@ -1017,12 +1019,13 @@ sweet_sample_task(const char *name, int pid, task_t task)
+ 		char line[400];
+ 		int n;
+ 		uint64_t fp;
++		int cur_tn = tn++;
+ 
+ 		if (ss == NULL || !is_saved_state64(ss)) {
+ 			continue;
+ 		}
+ 		fp = get_saved_state_fp(ss);
+-		n = snprintf(line, sizeof(line), "SMP %s t%d pc 0x%llx lr 0x%llx sp 0x%llx bt", name, tn++,
++		n = snprintf(line, sizeof(line), "SMP %s t%d pc 0x%llx lr 0x%llx sp 0x%llx bt", name, cur_tn,
+ 		    get_saved_state_pc(ss), get_saved_state_lr(ss), get_saved_state_sp(ss));
+ 		for (int i = 0; i < 16 && fp != 0 && (fp & 7) == 0 && n < (int)sizeof(line) - 20; i++) {
+ 			uint64_t frame[2];
+@@ -1036,6 +1039,20 @@ sweet_sample_task(const char *name, int pid, task_t task)
+ 			fp = frame[0];
+ 		}
+ 		printf("%s\n", line);
++
++		arm_saved_state64_t *s64 = saved_state64(ss);
++		uint32_t insn = 0;
++		kern_return_t kr_insn = vm_map_read_user(map, get_saved_state_pc(ss), &insn, sizeof(insn));
++		printf("SMP %s t%d insn 0x%08x [x16=%lld/0x%llx x0=0x%llx x1=0x%llx x2=0x%llx x3=0x%llx x4=0x%llx x5=0x%llx cpsr=0x%x]\n",
++		    name, cur_tn, (kr_insn == KERN_SUCCESS) ? insn : 0,
++		    (long long)(int64_t)s64->x[16], s64->x[16],
++		    s64->x[0], s64->x[1], s64->x[2], s64->x[3], s64->x[4], s64->x[5], s64->cpsr);
++
++		uint64_t cont = (uint64_t)thread->continuation;
++		uint64_t cont_unslid = cont ? (cont - (uint64_t)vm_kernel_slide) : 0;
++		printf("SMP %s t%d kern [state=0x%x cont=0x%llx (unslid 0x%llx) wait_event=0x%llx wr=%d rsn=0x%x]\n",
++		    name, cur_tn, thread->state, cont, cont_unslid,
++		    (uint64_t)thread->wait_event, thread->wait_result, (uint32_t)thread->reason);
+ 	}
+ 	task_unlock(task);
+ }

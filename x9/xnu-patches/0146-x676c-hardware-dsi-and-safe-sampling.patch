@@ -1,0 +1,129 @@
+diff --git a/bsd/dev/sweet_sample.c b/bsd/dev/sweet_sample.c
+index 2b19400..a6d85d5 100644
+--- a/bsd/dev/sweet_sample.c
++++ b/bsd/dev/sweet_sample.c
+@@ -71,7 +71,7 @@ sweet_sample_thread(__unused void *arg, __unused wait_result_t wr)
+ 	if (sweet_sample_names[0] == '-') {
+ 		return;
+ 	}
+-	uint32_t delay_s = 2;
++	uint32_t delay_s = 60;
+ 	(void)PE_parse_boot_argn("sweetsample_delay", &delay_s, sizeof(delay_s));
+ 	(void)tsleep(&chan, PZERO, "sweetsmp", (int)(delay_s * hz));
+ 	for (int i = 0; i < 60; i++) {
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index eb0d7e5..35d8217 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -75,6 +75,20 @@ static void sweet_bl_log(const char *who, OSDictionary *d);
+ extern "C" void sweet_dcache_clean(vm_offset_t addr, unsigned length);  /* osfmk/arm/caches.c */
+ extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+ 
++static volatile uint32_t *sMtkDsi = NULL;
++static volatile uint32_t *sMtkMutex = NULL;
++
++static void
++mtk_dsi_push_hw(void)
++{
++	if (sMtkDsi != NULL && sMtkMutex != NULL) {
++		sMtkDsi[0x0c / 4] = 0;      /* DSI_INTSTA = 0 */
++		sMtkMutex[0x20 / 4] = 1;    /* MUTEX0_EN = 1 */
++		sMtkDsi[0x00 / 4] = 0;      /* DSI_START = 0 */
++		sMtkDsi[0x00 / 4] = 1;      /* DSI_START = 1 */
++	}
++}
++
+ #if defined(SWEET)
+ #include <IOKit/IOService.h>
+ #include <IOKit/IOUserClient.h>
+@@ -192,6 +206,10 @@ public:
+ 	volatile uint8_t *fDsi;
+ 	IOBufferMemoryDescriptor *fDsiBuf;
+ 	uint64_t      fDsiBufPhys;
++	/* MT6789 (x676c) hardware DSI push */
++	volatile uint32_t *fMtkDsi;
++	volatile uint32_t *fMtkMutex;
++	void          mtkDsiPush(void);
+ 	IOLock       *fBlLock;
+ 	uint32_t      fBlLevel;       /* panel DBV 1..0x7ff, kept while the display is off */
+ 	uint32_t      fBlSent;        /* last level sent to the panel */
+@@ -309,11 +327,15 @@ AppleCLCD::start(IOService *provider)
+ 		return false;
+ 	}
+ 	/*
+-	 * Qualcomm MDP/DSI0 (SM6225). x676c: left NULL, which keeps the
+-	 * framebuffer on the software path (no direct scanout, no DCS
+-	 * brightness); the shim's display pump pushes the console layer.
++	 * Qualcomm MDP/DSI0 (SM6225). x676c: MediaTek DSI0 and DISP_MUTEX0.
+ 	 */
+-	if (!sweet_board_x676c()) {
++	if (sweet_board_x676c()) {
++		fMtkDsi = (volatile uint32_t *)ml_io_map(0x14013000, 0x1000);
++		fMtkMutex = (volatile uint32_t *)ml_io_map(0x14001000, 0x1000);
++		sMtkDsi = fMtkDsi;
++		sMtkMutex = fMtkMutex;
++		IOLog("SWEET FB: MT6789 DSI0 (0x14013000) and MUTEX0 (0x14001000) mapped for HW scanout\n");
++	} else {
+ 		fVig0 = (volatile uint32_t *)ml_io_map(0x05e05000, 0x1000);
+ 		fCtl0 = (volatile uint32_t *)ml_io_map(0x05e02000, 0x1000);
+ 		fDsi = (volatile uint8_t *)ml_io_map(0x05e94000, 0x1000);
+@@ -556,6 +578,9 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ 		memcpy(fb->fShowHold, taken, sizeof(taken));
+ 		IOLockUnlock(fb->fLock);
+ 	}
++	if (sweet_board_x676c()) {
++		fb->mtkDsiPush();
++	}
+ 	sender->setTimeoutUS(SWEET_FB_VSYNC_US);
+ }
+ 
+@@ -824,6 +849,13 @@ sweet_cons_show(void)
+ 	if (fb != NULL && fb->fVig0 != NULL && fb->fScanPhys != fb->fConsPhys) {
+ 		fb->scanFrom(fb->fConsPhys, fb->fRowBytes);
+ 	}
++	mtk_dsi_push_hw();
++}
++
++void
++AppleCLCD::mtkDsiPush(void)
++{
++	mtk_dsi_push_hw();
+ }
+ 
+ void
+@@ -860,6 +892,9 @@ AppleCLCD::flipBack(void)
+ 	sweet_dcache_clean((vm_offset_t)(uintptr_t)fFlip[idx]->getBytesNoCopy(), (unsigned)fFlip[idx]->getLength());
+ 	scanFrom(fFlipPhys[idx], fRowBytes);
+ 	fFlipIdx = idx;
++	if (sweet_board_x676c()) {
++		mtkDsiPush();
++	}
+ }
+ 
+ void
+@@ -1072,6 +1107,8 @@ AppleCLCD::present(const uint8_t *rec)
+ 	}
+ 	if (fFlip[0] != NULL) {
+ 		flipBack();
++	} else if (sweet_board_x676c()) {
++		mtkDsiPush();
+ 	}
+ }
+ 
+diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
+index 8d3cbd6..b5ccab7 100644
+--- a/osfmk/kern/exception.c
++++ b/osfmk/kern/exception.c
+@@ -1041,10 +1041,8 @@ sweet_sample_task(const char *name, int pid, task_t task)
+ 		printf("%s\n", line);
+ 
+ 		arm_saved_state64_t *s64 = saved_state64(ss);
+-		uint32_t insn = 0;
+-		kern_return_t kr_insn = vm_map_read_user(map, get_saved_state_pc(ss), &insn, sizeof(insn));
+-		printf("SMP %s t%d insn 0x%08x [x16=%lld/0x%llx x0=0x%llx x1=0x%llx x2=0x%llx x3=0x%llx x4=0x%llx x5=0x%llx cpsr=0x%x]\n",
+-		    name, cur_tn, (kr_insn == KERN_SUCCESS) ? insn : 0,
++		printf("SMP %s t%d regs [x16=%lld/0x%llx x0=0x%llx x1=0x%llx x2=0x%llx x3=0x%llx x4=0x%llx x5=0x%llx cpsr=0x%x]\n",
++		    name, cur_tn,
+ 		    (long long)(int64_t)s64->x[16], s64->x[16],
+ 		    s64->x[0], s64->x[1], s64->x[2], s64->x[3], s64->x[4], s64->x[5], s64->cpsr);
+ 

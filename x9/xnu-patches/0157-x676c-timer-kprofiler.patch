@@ -1,0 +1,138 @@
+From 2890ec2f33ce60c400792ced7a73482f47e1cecb Mon Sep 17 00:00:00 2001
+From: Egor Kulikovskiy <xianel0x@gmail.com>
+Date: Thu, 22 Oct 2026 02:35:46 +0500
+Subject: [PATCH] x676c: profile the interrupted kernel PC and live stack on
+ timer ticks
+
+The stuck thread is TH_RUN, so its saved state is stale -- the earlier
+kframes pointed at UFS code that was not actually running. Sample the
+interrupted kernel context on each vtimer tick instead: keep a top-N hot
+PC histogram and unwind the live (valid) frame pointer chain of the
+interrupted thread. The sampler prints both, pinning the busy-loop in one
+boot instead of chasing stale frames across several.
+---
+ osfmk/arm64/sleh.c     | 70 ++++++++++++++++++++++++++++++++++++++++++
+ osfmk/kern/exception.c | 19 ++++++++++++
+ 2 files changed, 89 insertions(+)
+
+diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+index b4cf3ab..b46f37e 100644
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -262,6 +262,75 @@ extern unsigned int gFastIPI;
+ /* Bring-up: count IRQs taken so the sampler can tell whether the vtimer
+  * (and thus scheduler wakeups) is actually firing. */
+ volatile uint64_t sweet_irq_total, sweet_irq_timer, sweet_irq_ipi, sweet_irq_other;
++
++/*
++ * Bring-up profiler: the stuck thread is TH_RUN (spinning in the kernel),
++ * so its saved state is stale and useless. Sample the *interrupted*
++ * kernel PC on every timer tick instead -- the hot address is where the
++ * busy-loop actually is. Keep a tiny top-N histogram.
++ */
++#define SWEET_KPROF_N 8
++uint64_t sweet_kprof_pc[SWEET_KPROF_N];
++uint64_t sweet_kprof_cnt[SWEET_KPROF_N];
++/* Live stack of the interrupted kernel thread (valid: it is running). */
++#define SWEET_KPROF_DEPTH 16
++uint64_t sweet_kprof_stack[SWEET_KPROF_DEPTH];
++uint32_t sweet_kprof_sp_depth;
++extern vm_offset_t vm_kernel_stext, vm_kernel_etext;
++
++static void
++sweet_kprof_sample(arm_saved_state_t *state)
++{
++	if (!PSR64_IS_KERNEL(get_saved_state_cpsr(state))) {
++		return; /* interrupted userland, not our spin */
++	}
++	uint64_t pc = get_saved_state_pc(state);
++
++	/* top-N histogram of the hot PC */
++	int placed = 0;
++	for (int i = 0; i < SWEET_KPROF_N; i++) {
++		if (sweet_kprof_cnt[i] && sweet_kprof_pc[i] == pc) {
++			sweet_kprof_cnt[i]++;
++			placed = 1;
++			break;
++		}
++	}
++	if (!placed) {
++		int m = 0;
++		for (int i = 0; i < SWEET_KPROF_N; i++) {
++			if (sweet_kprof_cnt[i] == 0) {
++				m = i;
++				break;
++			}
++			if (sweet_kprof_cnt[i] < sweet_kprof_cnt[m]) {
++				m = i;
++			}
++		}
++		sweet_kprof_pc[m] = pc;
++		sweet_kprof_cnt[m] = 1;
++	}
++
++	/* live FP unwind of the interrupted kernel context */
++	uint32_t d = 0;
++	sweet_kprof_stack[d++] = pc;
++	uint64_t fp = get_saved_state_fp(state);
++	for (int i = 0; i < SWEET_KPROF_DEPTH - 1 && fp && (fp & 7) == 0; i++) {
++		if (fp < VM_MIN_KERNEL_ADDRESS || fp >= VM_MAX_KERNEL_ADDRESS) {
++			break;
++		}
++		uint64_t *frame = (uint64_t *)fp;
++		uint64_t next_fp = frame[0];
++		uint64_t lr = frame[1];
++		if (lr >= vm_kernel_stext && lr < vm_kernel_etext) {
++			sweet_kprof_stack[d++] = lr;
++		}
++		if (next_fp <= fp || next_fp >= VM_MAX_KERNEL_ADDRESS) {
++			break;
++		}
++		fp = next_fp;
++	}
++	sweet_kprof_sp_depth = d;
++}
+ #endif
+ 
+ static arm_saved_state64_t *original_faulting_state = NULL;
+@@ -1954,6 +2023,7 @@ sleh_irq(arm_saved_state_t *state)
+ 	sweet_irq_total++;
+ 	if (intid == sweet_vtimer_intid) {
+ 		sweet_irq_timer++;
++		sweet_kprof_sample(state);
+ 		sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_TIMER);
+ 		cdp->cpu_decrementer = -1; /* Large */
+ 		INTERRUPT_MASKED_DEBUG_START(rtclock_intr, DBG_INTR_TYPE_TIMER);
+diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
+index c15a260..cc6b3b9 100644
+--- a/osfmk/kern/exception.c
++++ b/osfmk/kern/exception.c
+@@ -1020,6 +1020,25 @@ sweet_sample_task(const char *name, int pid, task_t task)
+ 		printf("SMP irq total=%llu timer=%llu ipi=%llu other=%llu abstime=%llu\n",
+ 		    sweet_irq_total, sweet_irq_timer, sweet_irq_ipi, sweet_irq_other,
+ 		    mach_absolute_time());
++
++		extern uint64_t sweet_kprof_pc[], sweet_kprof_cnt[];
++		extern uint64_t sweet_kprof_stack[];
++		extern uint32_t sweet_kprof_sp_depth;
++		char kp[400];
++		int kpn = snprintf(kp, sizeof(kp), "SMP kprof hot");
++		for (int i = 0; i < 8 && kpn < (int)sizeof(kp) - 40; i++) {
++			if (sweet_kprof_cnt[i]) {
++				kpn += snprintf(kp + kpn, sizeof(kp) - kpn, " 0x%llx:%llu",
++				    sweet_kprof_pc[i] - (uint64_t)vm_kernel_slide, sweet_kprof_cnt[i]);
++			}
++		}
++		printf("%s\n", kp);
++		kpn = snprintf(kp, sizeof(kp), "SMP kprof live");
++		for (uint32_t i = 0; i < sweet_kprof_sp_depth && kpn < (int)sizeof(kp) - 24; i++) {
++			kpn += snprintf(kp + kpn, sizeof(kp) - kpn, " 0x%llx",
++			    sweet_kprof_stack[i] - (uint64_t)vm_kernel_slide);
++		}
++		printf("%s\n", kp);
+ 	}
+ 
+ 	queue_iterate(&task->threads, thread, thread_t, task_threads) {
+-- 
+2.51.0.windows.1
+

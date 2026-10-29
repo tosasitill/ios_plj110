@@ -1,0 +1,1802 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 21cdb5c..c340a71 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -105,6 +105,9 @@ bsd/dev/random/randomdev.c		standard
+ 
+ bsd/dev/memdev.c			standard
+ bsd/dev/sweet_ufs.c			standard
++bsd/dev/ufs/ufshci.c			standard
++bsd/dev/ufs/ufs_mtk.c			standard
++bsd/dev/ufs/ufs_disk.c			standard
+ bsd/dev/sweet_sample.c			standard
+ bsd/dev/sweet_keys.c			standard
+ bsd/dev/sweet_touch.c			standard
+diff --git a/bsd/dev/ufs/ufs_disk.c b/bsd/dev/ufs/ufs_disk.c
+new file mode 100644
+index 0000000..4ca6273
+--- /dev/null
++++ b/bsd/dev/ufs/ufs_disk.c
+@@ -0,0 +1,707 @@
++/*
++ * The UFS user LU as BSD disks: one block device /dev/disk0sN and one
++ * character device /dev/rdisk0sN per GPT partition (N = GPT entry index + 1).
++ *
++ * The user LU is found from the unit descriptors (pick_lun). Its GPT is
++ * accepted only when the primary header and its entry array both pass
++ * their CRC32 checks. Partitions keep their GPT names; the console log
++ * lists N -> name. Boot-args:
++ *   rd=ufs            root on the partition named by ufsroot=
++ *   ufsroot=NAME      default "userdata"
++ *   ufsrw=NAME        the one partition that may be written; without it
++ *                     everything is read-only. Bounds are re-checked right
++ *                     before every WRITE is issued.
++ *
++ * I/O: 4096-byte device blocks. Requests aligned to them go straight to the
++ * buffer's physical pages (up to 1 MiB per command, several commands in
++ * flight across threads); smaller or unaligned ones (HFS may set a 512-byte
++ * block size) go through a bounce buffer, read-modify-write for writes.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/buf.h>
++#include <sys/conf.h>
++#include <sys/disk.h>
++#include <sys/errno.h>
++#include <sys/fcntl.h>
++#include <sys/proc.h>
++#include <sys/uio.h>
++#include <miscfs/devfs/devfs.h>
++#include <kern/locks.h>
++#include <machine/machine_routines.h>
++#include <vm/pmap.h>
++#include <vm/vm_kern.h>
++#include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
++#include <libkern/libkern.h>
++#include <libkern/crc.h>
++#include "ufshci.h"
++
++extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
++extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++
++#define UFS_BLOCK               4096u
++#define MAX_PARTS               128
++#define NAME_MAX_GPT            36
++#define XFER_MAX                (1u << 20)              /* bytes per command */
++#define BOUNCE_SIZE             XFER_MAX
++#define SEG_MAX                 64
++
++struct ufs_part {
++	uint64_t first, nblocks;        /* in device blocks */
++	uint32_t secsize;               /* logical size the BSD layer uses */
++	bool writable;
++	char name[NAME_MAX_GPT + 1];
++};
++
++static struct {
++	struct ufs_hba hba;
++	uint8_t lun;
++	uint64_t lun_blocks;
++	struct ufs_part parts[MAX_PARTS];
++	unsigned nparts;                /* highest index in use + 1 */
++	int bmajor, cmajor;
++	vm_offset_t bounce;             /* contiguous, BOUNCE_SIZE */
++	uint64_t bounce_pa;
++	lck_mtx_t bounce_lock;
++	int init_error;
++	bool inited;
++} ud;
++
++static LCK_GRP_DECLARE(ufs_disk_grp, "ufs_disk");
++static LCK_MTX_DECLARE(ufs_disk_init_lock, &ufs_disk_grp);
++
++/* ---- SCSI helpers ---- */
++
++static void
++be64(uint8_t *p, uint64_t v)
++{
++	for (int i = 7; i >= 0; i--, v >>= 8) {
++		p[i] = (uint8_t)v;
++	}
++}
++
++static void
++be32(uint8_t *p, uint32_t v)
++{
++	p[0] = (uint8_t)(v >> 24);
++	p[1] = (uint8_t)(v >> 16);
++	p[2] = (uint8_t)(v >> 8);
++	p[3] = (uint8_t)v;
++}
++
++static uint64_t
++rd_be(const uint8_t *p, int n)
++{
++	uint64_t v = 0;
++	for (int i = 0; i < n; i++) {
++		v = v << 8 | p[i];
++	}
++	return v;
++}
++
++static int
++scsi_simple(uint8_t op, uint8_t dir, const struct ufs_seg *segs, unsigned nsegs, uint32_t len,
++    const uint8_t *cdb, unsigned cdb_len, struct ufs_xfer *out)
++{
++	struct ufs_xfer x = {
++		.lun = ud.lun, .dir = dir, .cdb_len = cdb_len, .segs = segs,
++		.nsegs = nsegs, .len = len,
++	};
++	memcpy(x.cdb, cdb, cdb_len);
++	x.cdb[0] = op;
++	int error = ufs_scsi(&ud.hba, &x);
++	if (out) {
++		*out = x;
++	}
++	return error;
++}
++
++static int
++lun_ready(void)
++{
++	uint8_t cdb[6] = { 0 };
++	struct ufs_xfer x;
++	int error = EIO;
++
++	/* the first commands after a reset report UNIT ATTENTION (sense key 6) */
++	for (int i = 0; i < 5; i++) {
++		error = scsi_simple(0x00, UFS_DD_NONE, NULL, 0, 0, cdb, sizeof(cdb), &x);
++		if (!error || x.sense_key != 0x6) {
++			break;
++		}
++	}
++	if (error) {
++		printf("ufs_disk: LUN %u not ready: status 0x%x sense %x/%x/%x\n", ud.lun,
++		    x.scsi_status, x.sense_key, x.asc, x.ascq);
++	}
++	return error;
++}
++
++/* Data transfer between device blocks and physical segments. */
++static int
++blocks_io(bool write, uint64_t lba, uint32_t count, const struct ufs_seg *segs, unsigned nsegs)
++{
++	uint8_t cdb[16] = { 0 };
++
++	be64(&cdb[2], lba);
++	be32(&cdb[10], count);
++	return scsi_simple(write ? 0x8a : 0x88, write ? UFS_DD_TO_DEVICE : UFS_DD_FROM_DEVICE,
++	           segs, nsegs, count * UFS_BLOCK, cdb, sizeof(cdb), NULL);
++}
++
++static int
++bounce_io(bool write, uint64_t lba, uint32_t count)
++{
++	struct ufs_seg seg = { .pa = ud.bounce_pa, .len = count * UFS_BLOCK };
++	return blocks_io(write, lba, count, &seg, 1);
++}
++
++/*
++ * The user LU: enabled, not a boot LU, largest. On the X676C, LUs 0 and 1
++ * are the 4 MiB boot LUs (preloader) and LU 2 holds the GPT.
++ * Unit descriptor (JESD220): bLUEnable 0x03, bBootLunID 0x04,
++ * bLogicalBlockSize 0x0a (log2), qLogicalBlockCount 0x0b (BE).
++ */
++#define DEVDESC_NUMBER_LU       0x06
++#define UNITDESC_LU_ENABLE      0x03
++#define UNITDESC_BOOT_LUN_ID    0x04
++#define UNITDESC_BLOCK_SIZE     0x0a
++#define UNITDESC_BLOCK_COUNT    0x0b
++
++static int
++pick_lun(void)
++{
++	uint8_t desc[255];
++	uint64_t best_blocks = 0;
++	int error, best = -1;
++
++	bzero(desc, sizeof(desc));
++	if ((error = ufs_read_desc(&ud.hba, DESC_DEVICE, 0, desc, sizeof(desc)))) {
++		return error;
++	}
++	unsigned nlu = desc[DEVDESC_NUMBER_LU];
++	for (unsigned lun = 0; lun < 8; lun++) {
++		bzero(desc, sizeof(desc));
++		if (ufs_read_desc(&ud.hba, DESC_UNIT, (uint8_t)lun, desc, sizeof(desc))) {
++			continue;
++		}
++		uint64_t blocks = rd_be(desc + UNITDESC_BLOCK_COUNT, 8);
++		unsigned shift = desc[UNITDESC_BLOCK_SIZE];
++		bool enabled = desc[UNITDESC_LU_ENABLE] != 0;
++		unsigned boot = desc[UNITDESC_BOOT_LUN_ID];
++		if (!enabled) {
++			continue;
++		}
++		printf("ufs_disk: LU %u: %llu MiB, %u-byte blocks%s\n", lun,
++		    shift < 32 ? (blocks << shift) >> 20 : 0, shift < 32 ? 1u << shift : 0,
++		    boot ? (boot == 1 ? ", boot LU A" : ", boot LU B") : "");
++		if (!boot && blocks > best_blocks) {
++			best_blocks = blocks;
++			best = (int)lun;
++		}
++	}
++	if (best < 0) {
++		printf("ufs_disk: no user LU among %u\n", nlu);
++		return ENXIO;
++	}
++	ud.lun = (uint8_t)best;
++	return 0;
++}
++
++/* ---- GPT ---- */
++
++struct gpt_header {
++	char sig[8];
++	uint32_t rev, size, crc, rsvd;
++	uint64_t self, alt, first_usable, last_usable;
++	uint8_t guid[16];
++	uint64_t entries_lba;
++	uint32_t nentries, entry_size, entries_crc;
++} __attribute__((packed));
++
++struct gpt_entry {
++	uint8_t type[16], guid[16];
++	uint64_t first, last, attrs;
++	uint16_t name[NAME_MAX_GPT];
++} __attribute__((packed));
++
++static int
++gpt_load(void)
++{
++	struct gpt_header h;
++	int error;
++
++	if ((error = bounce_io(false, 1, 1))) {
++		return error;
++	}
++	memcpy(&h, (void *)ud.bounce, sizeof(h));
++	if (memcmp(h.sig, "EFI PART", 8) || h.size < sizeof(h) || h.size > UFS_BLOCK) {
++		printf("ufs_disk: no GPT on LUN %u\n", ud.lun);
++		return ENXIO;
++	}
++	uint32_t want = h.crc;
++	struct gpt_header *raw = (struct gpt_header *)ud.bounce;
++	raw->crc = 0;
++	if (crc32(0, raw, h.size) != want) {
++		printf("ufs_disk: GPT header CRC mismatch\n");
++		return EIO;
++	}
++	uint64_t bytes = (uint64_t)h.nentries * h.entry_size;
++	if (h.entry_size < sizeof(struct gpt_entry) || h.nentries == 0 || bytes > BOUNCE_SIZE ||
++	    h.entries_lba >= ud.lun_blocks) {
++		printf("ufs_disk: GPT entry array not supported (%u x %u)\n", h.nentries, h.entry_size);
++		return EIO;
++	}
++	uint32_t blocks = (uint32_t)((bytes + UFS_BLOCK - 1) / UFS_BLOCK);
++	if ((error = bounce_io(false, h.entries_lba, blocks))) {
++		return error;
++	}
++	if (crc32(0, (void *)ud.bounce, (size_t)bytes) != h.entries_crc) {
++		printf("ufs_disk: GPT entries CRC mismatch\n");
++		return EIO;
++	}
++
++	for (uint32_t i = 0; i < h.nentries && i < MAX_PARTS; i++) {
++		const struct gpt_entry *e = (const struct gpt_entry *)(ud.bounce + (size_t)i * h.entry_size);
++		static const uint8_t unused[16];
++		if (!memcmp(e->type, unused, sizeof(unused)) || e->last < e->first ||
++		    e->last >= ud.lun_blocks) {
++			continue;
++		}
++		struct ufs_part *p = &ud.parts[i];
++		p->first = e->first;
++		p->nblocks = e->last - e->first + 1;
++		p->secsize = UFS_BLOCK;
++		for (int c = 0; c < NAME_MAX_GPT; c++) {
++			uint16_t ch = e->name[c];
++			if (!ch) {
++				break;
++			}
++			p->name[c] = ch < 0x80 ? (char)ch : '?';
++		}
++		ud.nparts = i + 1;
++	}
++	return 0;
++}
++
++static struct ufs_part *
++part_named(const char *name)
++{
++	for (unsigned i = 0; i < ud.nparts; i++) {
++		if (ud.parts[i].nblocks && !strcmp(ud.parts[i].name, name)) {
++			return &ud.parts[i];
++		}
++	}
++	return NULL;
++}
++
++static struct ufs_part *
++part_of(dev_t dev)
++{
++	unsigned i = (unsigned)minor(dev);
++	return i < ud.nparts && ud.parts[i].nblocks ? &ud.parts[i] : NULL;
++}
++
++/* ---- block I/O ---- */
++
++/* Physical segments of [va, va + len) in kernel_pmap, merged when contiguous. */
++static unsigned
++phys_segments(vm_offset_t va, uint32_t len, struct ufs_seg *segs)
++{
++	unsigned n = 0;
++
++	while (len) {
++		uint32_t in_page = (uint32_t)MIN((vm_offset_t)len, PAGE_SIZE - (va & PAGE_MASK));
++		ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)va);
++		if (!pn) {
++			return 0;
++		}
++		uint64_t pa = ptoa_64(pn) | (va & PAGE_MASK);
++		if (n && segs[n - 1].pa + segs[n - 1].len == pa) {
++			segs[n - 1].len += in_page;
++		} else if (n == SEG_MAX) {
++			return 0;
++		} else {
++			segs[n].pa = pa;
++			segs[n].len = in_page;
++			n++;
++		}
++		va += in_page;
++		len -= in_page;
++	}
++	return n;
++}
++
++static bool
++write_allowed(const struct ufs_part *p, uint64_t lba, uint32_t count)
++{
++	return p->writable && lba >= p->first && count <= p->nblocks &&
++	       lba - p->first <= p->nblocks - count;
++}
++
++/* Bytes [off, off + len) of partition p, through the bounce buffer. */
++static int
++part_io_bounce(struct ufs_part *p, bool write, uint64_t off, caddr_t va, uint32_t len)
++{
++	int error = 0;
++
++	lck_mtx_lock(&ud.bounce_lock);
++	for (uint32_t done = 0; done < len && !error;) {
++		uint64_t pos = off + done;
++		uint64_t lba = p->first + pos / UFS_BLOCK;
++		uint32_t skip = (uint32_t)(pos % UFS_BLOCK);
++		uint32_t n = MIN(len - done, BOUNCE_SIZE - skip);
++		uint32_t blocks = (skip + n + UFS_BLOCK - 1) / UFS_BLOCK;
++
++		if (!write) {
++			if (!(error = bounce_io(false, lba, blocks))) {
++				memcpy(va + done, (void *)(ud.bounce + skip), n);
++			}
++		} else if (!write_allowed(p, lba, blocks)) {
++			error = EROFS;
++		} else {
++			if (skip || (n % UFS_BLOCK)) {
++				error = bounce_io(false, lba, blocks);
++			}
++			if (!error) {
++				memcpy((void *)(ud.bounce + skip), va + done, n);
++				error = bounce_io(true, lba, blocks);
++			}
++		}
++		done += n;
++	}
++	lck_mtx_unlock(&ud.bounce_lock);
++	return error;
++}
++
++/* Block-aligned bytes, DMA straight to/from the buffer's pages. */
++static int
++part_io_direct(struct ufs_part *p, bool write, uint64_t off, caddr_t va, uint32_t len)
++{
++	struct ufs_seg segs[SEG_MAX];
++
++	for (uint32_t done = 0; done < len;) {
++		uint32_t n = MIN(len - done, XFER_MAX);
++		unsigned nsegs = phys_segments((vm_offset_t)(va + done), n, segs);
++		if (!nsegs) {
++			return part_io_bounce(p, write, off + done, va + done, len - done);
++		}
++		uint64_t lba = p->first + (off + done) / UFS_BLOCK;
++		uint32_t blocks = n / UFS_BLOCK;
++		if (write && !write_allowed(p, lba, blocks)) {
++			return EROFS;
++		}
++		int error = blocks_io(write, lba, blocks, segs, nsegs);
++		if (error) {
++			return error;
++		}
++		done += n;
++	}
++	return 0;
++}
++
++static void
++ufs_disk_strategy(buf_t bp)
++{
++	struct ufs_part *p = part_of(buf_device(bp));
++	bool write = !(buf_flags(bp) & B_READ);
++	uint32_t len = buf_count(bp);
++	caddr_t va = NULL;
++	int error = 0;
++
++	buf_setresid(bp, len);
++	if (!p) {
++		error = ENXIO;
++		goto done;
++	}
++	uint64_t off = (uint64_t)buf_blkno(bp) * p->secsize;
++	uint64_t size = p->nblocks * UFS_BLOCK;
++	if (off > size || len > size - off) {
++		error = EINVAL;
++		goto done;
++	}
++	if (write && !p->writable) {
++		error = EROFS;
++		goto done;
++	}
++	if (!len) {
++		goto done;
++	}
++	if (buf_map(bp, &va)) {
++		error = EIO;
++		goto done;
++	}
++	bool aligned = !(off % UFS_BLOCK) && !(len % UFS_BLOCK) && !((vm_offset_t)va & 3);
++	error = aligned ? part_io_direct(p, write, off, va, len) :
++	    part_io_bounce(p, write, off, va, len);
++	buf_unmap(bp);
++	if (!error) {
++		buf_setresid(bp, 0);
++	}
++done:
++	if (error) {
++		buf_seterror(bp, error);
++	}
++	buf_biodone(bp);
++}
++
++/* ---- devsw ---- */
++
++static int
++ufs_disk_open(dev_t dev, int flags, __unused int devtype, __unused struct proc *proc)
++{
++	struct ufs_part *p = part_of(dev);
++	if (!p) {
++		return ENXIO;
++	}
++	return ((flags & FWRITE) && !p->writable) ? EROFS : 0;
++}
++
++static int
++ufs_disk_close(__unused dev_t dev, __unused int flags, __unused int devtype,
++    __unused struct proc *proc)
++{
++	return 0;
++}
++
++static int
++ufs_disk_ioctl(dev_t dev, u_long cmd, caddr_t data, bool is_char)
++{
++	struct ufs_part *p = part_of(dev);
++	uint32_t *u32 = (uint32_t *)data;
++	uint64_t *u64 = (uint64_t *)data;
++
++	if (!p) {
++		return ENXIO;
++	}
++	switch (cmd) {
++	case DKIOCGETBLOCKSIZE:
++		*u32 = p->secsize;
++		return 0;
++	case DKIOCSETBLOCKSIZE:
++		if (is_char) {
++			return ENODEV;
++		}
++		if (*u32 < DEV_BSIZE || *u32 > UFS_BLOCK || (*u32 & (*u32 - 1))) {
++			return EINVAL;
++		}
++		p->secsize = *u32;
++		return 0;
++	case DKIOCGETPHYSICALBLOCKSIZE:
++		*u32 = UFS_BLOCK;
++		return 0;
++	case DKIOCGETBLOCKCOUNT:
++		*u64 = p->nblocks * UFS_BLOCK / p->secsize;
++		return 0;
++	case DKIOCISWRITABLE:
++		*u32 = p->writable;
++		return 0;
++	case DKIOCSYNCHRONIZE:
++	case DKIOCSYNCHRONIZECACHE: {
++		uint8_t cdb[10] = { 0 };
++		return p->writable ? scsi_simple(0x35, UFS_DD_NONE, NULL, 0, 0, cdb, sizeof(cdb), NULL) : 0;
++	}
++	case DKIOCGETMAXBLOCKCOUNTREAD:
++	case DKIOCGETMAXBLOCKCOUNTWRITE:
++		*u64 = XFER_MAX / p->secsize;
++		return 0;
++	case DKIOCGETMAXSEGMENTCOUNTREAD:
++	case DKIOCGETMAXSEGMENTCOUNTWRITE:
++		*u64 = SEG_MAX;
++		return 0;
++	case DKIOCGETMAXSEGMENTBYTECOUNTREAD:
++	case DKIOCGETMAXSEGMENTBYTECOUNTWRITE:
++		*u64 = UFS_PRD_BYTES_MAX;
++		return 0;
++	default:
++		return ENOTTY;
++	}
++}
++
++static int
++ufs_disk_bioctl(dev_t dev, u_long cmd, caddr_t data, __unused int flag, __unused struct proc *proc)
++{
++	return ufs_disk_ioctl(dev, cmd, data, false);
++}
++
++static int
++ufs_disk_cioctl(dev_t dev, u_long cmd, caddr_t data, __unused int flag, __unused struct proc *proc)
++{
++	return ufs_disk_ioctl(dev, cmd, data, true);
++}
++
++static int
++ufs_disk_psize(dev_t dev)
++{
++	struct ufs_part *p = part_of(dev);
++	return p ? (int)MIN(p->nblocks * UFS_BLOCK / p->secsize, (uint64_t)INT_MAX) : -1;
++}
++
++static int
++ufs_disk_read(dev_t dev, struct uio *uio, __unused int ioflag)
++{
++	struct ufs_part *p = part_of(dev);
++	return p ? physio(ufs_disk_strategy, NULL, dev, B_READ, minphys, uio, (int)p->secsize) : ENXIO;
++}
++
++static int
++ufs_disk_write(dev_t dev, struct uio *uio, __unused int ioflag)
++{
++	struct ufs_part *p = part_of(dev);
++	if (!p) {
++		return ENXIO;
++	}
++	return p->writable ?
++	       physio(ufs_disk_strategy, NULL, dev, B_WRITE, minphys, uio, (int)p->secsize) : EROFS;
++}
++
++static const struct bdevsw ufs_disk_bdevsw = {
++	.d_open     = ufs_disk_open,
++	.d_close    = ufs_disk_close,
++	.d_strategy = ufs_disk_strategy,
++	.d_ioctl    = ufs_disk_bioctl,
++	.d_dump     = eno_dump,
++	.d_psize    = ufs_disk_psize,
++	.d_type     = D_DISK,
++};
++
++static const struct cdevsw ufs_disk_cdevsw = {
++	.d_open       = ufs_disk_open,
++	.d_close      = ufs_disk_close,
++	.d_read       = ufs_disk_read,
++	.d_write      = ufs_disk_write,
++	.d_ioctl      = ufs_disk_cioctl,
++	.d_stop       = eno_stop,
++	.d_reset      = eno_reset,
++	.d_ttys       = NULL,
++	.d_select     = eno_select,
++	.d_mmap       = eno_mmap,
++	.d_strategy   = eno_strat,
++	.d_reserved_1 = eno_getc,
++	.d_reserved_2 = eno_putc,
++	.d_type       = D_DISK,
++};
++
++/* ---- bring-up ---- */
++
++static int
++ufs_disk_capacity(void)
++{
++	uint8_t cdb[16] = { 0 }, *cap = (uint8_t *)ud.bounce;
++	struct ufs_seg seg = { .pa = ud.bounce_pa, .len = 32 };
++
++	cdb[1] = 0x10;                  /* READ CAPACITY(16) service action */
++	be32(&cdb[10], 32);
++	int error = scsi_simple(0x9e, UFS_DD_FROM_DEVICE, &seg, 1, 32, cdb, sizeof(cdb), NULL);
++	if (error) {
++		return error;
++	}
++	uint32_t blen = (uint32_t)rd_be(cap + 8, 4);
++	if (blen != UFS_BLOCK) {
++		printf("ufs_disk: LUN %u block size %u, expected %u\n", ud.lun, blen, UFS_BLOCK);
++		return ENXIO;
++	}
++	ud.lun_blocks = rd_be(cap, 8) + 1;
++	return 0;
++}
++
++static int
++ufs_disk_bringup(void)
++{
++	DTEntry node;
++	uintptr_t const *reg = NULL;
++	unsigned int size = 0;
++	int error;
++
++	if (SecureDTLookupEntry(NULL, "/x676c-ufs", &node) != kSuccess ||
++	    SecureDTGetProperty(node, "reg", (void const **)&reg, &size) != kSuccess ||
++	    size < 2 * sizeof(uintptr_t)) {
++		printf("ufs_disk: no /x676c-ufs node in the device tree\n");
++		return ENXIO;
++	}
++	vm_offset_t regs = ml_io_map(reg[0], reg[1]);
++	if (!regs) {
++		return ENOMEM;
++	}
++	if (kmem_alloc_contig(kernel_map, &ud.bounce, BOUNCE_SIZE, PAGE_MASK, 0, 0,
++	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++		return ENOMEM;
++	}
++	ud.bounce_pa = ptoa_64(pmap_find_phys(kernel_pmap, (addr64_t)ud.bounce));
++	lck_mtx_init(&ud.bounce_lock, &ufs_disk_grp, LCK_ATTR_NULL);
++
++	if ((error = ufs_hba_init(&ud.hba, regs, &ufs_mtk_platform))) {
++		printf("ufs_disk: host bring-up failed: %d\n", error);
++		return error;
++	}
++	if ((error = pick_lun()) || (error = lun_ready()) || (error = ufs_disk_capacity()) ||
++	    (error = gpt_load())) {
++		return error;
++	}
++
++	char rw[NAME_MAX_GPT + 1] = "";
++	PE_parse_boot_argn("ufsrw", rw, sizeof(rw));
++	struct ufs_part *wp = rw[0] ? part_named(rw) : NULL;
++
++	ud.bmajor = bdevsw_add(-1, &ufs_disk_bdevsw);
++	ud.cmajor = ud.bmajor < 0 ? -1 : cdevsw_add_with_bdev(-1, &ufs_disk_cdevsw, ud.bmajor);
++	if (ud.cmajor < 0) {
++		return ENXIO;
++	}
++	for (unsigned i = 0; i < ud.nparts; i++) {
++		struct ufs_part *p = &ud.parts[i];
++		if (!p->nblocks) {
++			continue;
++		}
++		devfs_make_node(makedev(ud.bmajor, i), DEVFS_BLOCK, UID_ROOT, GID_OPERATOR, 0640,
++		    "disk0s%u", i + 1);
++		devfs_make_node(makedev(ud.cmajor, i), DEVFS_CHAR, UID_ROOT, GID_OPERATOR, 0640,
++		    "rdisk0s%u", i + 1);
++		printf("ufs_disk: disk0s%u %-16s %8llu MiB%s\n", i + 1, p->name,
++		    p->nblocks * UFS_BLOCK >> 20, p == wp ? " (read-write)" : "");
++	}
++	/* Only now, with the bounds known, may the named partition be written. */
++	if (wp) {
++		wp->writable = true;
++	} else if (rw[0]) {
++		printf("ufs_disk: ufsrw=%s: no such partition, everything read-only\n", rw);
++	}
++	printf("ufs_disk: LUN %u, %llu MiB, %u partitions\n", ud.lun,
++	    ud.lun_blocks * UFS_BLOCK >> 20, ud.nparts);
++	return 0;
++}
++
++static int
++ufs_disk_init(void)
++{
++	lck_mtx_lock(&ufs_disk_init_lock);
++	if (!ud.inited) {
++		ud.init_error = ufs_disk_bringup();
++		ud.inited = true;
++	}
++	lck_mtx_unlock(&ufs_disk_init_lock);
++	return ud.init_error;
++}
++
++/* Root device for rd=ufs (IOFindBSDRoot). */
++int
++ufs_disk_rootdev(dev_t *dev)
++{
++	char want[NAME_MAX_GPT + 1] = "userdata";
++	int error = ufs_disk_init();
++
++	if (error) {
++		return error;
++	}
++	PE_parse_boot_argn("ufsroot", want, sizeof(want));
++	struct ufs_part *p = part_named(want);
++	if (!p) {
++		printf("ufs_disk: root partition \"%s\" not found\n", want);
++		return ENOENT;
++	}
++	*dev = makedev(ud.bmajor, (int)(p - ud.parts));
++	return 0;
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/ufs/ufs_mtk.c b/bsd/dev/ufs/ufs_mtk.c
+new file mode 100644
+index 0000000..369ec68
+--- /dev/null
++++ b/bsd/dev/ufs/ufs_mtk.c
+@@ -0,0 +1,132 @@
++/*
++ * MediaTek glue for the UFSHCI core ("mediatek,mt8183-ufshci", MT6789).
++ *
++ * Power, clocks and resets the AP may not touch directly are owned by TF-A
++ * and reached through one SiP call, MTK_SIP_UFS_CONTROL, with a sub-command
++ * in x1. Regulators and the UFS/M-PHY clocks are left on by LK and stay on.
++ *
++ * Vendor registers (offsets from the UFSHCI base):
++ *   0x140 XOUFS_CTRL   0x144 REFCLK_CTRL: bit 0 request, bit 1 ack
++ * Vendor DME attributes:
++ *   0xd0a6 VS_SAVEPOWERCONTROL (bit 6: deep stall)
++ *   0xd0a8 VS_UNIPROPOWERDOWNCONTROL (UniPro low-power mode)
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/errno.h>
++#include <kern/clock.h>
++#include "ufshci.h"
++
++#define MTK_SIP_UFS_CONTROL             0xc2000276ul    /* SMC64 fast, SiP 0x276 */
++#define UFS_MTK_SIP_DEVICE_RESET        (1u << 1)
++#define UFS_MTK_SIP_REF_CLK_NOTIFICATION (1u << 3)
++#define MTK_STAGE_PRE                   0
++#define MTK_STAGE_POST                  1
++
++#define MTK_REG_REFCLK_CTRL             0x144
++#define MTK_REFCLK_REQUEST              (1u << 0)
++#define MTK_REFCLK_ACK                  (1u << 1)
++#define MTK_REFCLK_TIMEOUT_US           3000
++
++#define VS_SAVEPOWERCONTROL             0xd0a6
++#define VS_SAVEPOWER_DEEP_STALL         (1u << 6)
++#define VS_UNIPROPOWERDOWNCONTROL       0xd0a8
++
++static uint64_t
++mtk_sip(uint64_t cmd, uint64_t a1, uint64_t a2)
++{
++	register uint64_t x0 __asm__("x0") = MTK_SIP_UFS_CONTROL;
++	register uint64_t x1 __asm__("x1") = cmd;
++	register uint64_t x2 __asm__("x2") = a1;
++	register uint64_t x3 __asm__("x3") = a2;
++
++	__asm__ volatile ("smc #0"
++            : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3)
++            :
++            : "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13",
++              "x14", "x15", "x16", "x17", "memory");
++	return x0;
++}
++
++/* Request (or release) the UFS reference clock and wait for the ack. */
++static int
++mtk_ref_clk(struct ufs_hba *hba, bool on)
++{
++	uint32_t want = on ? MTK_REFCLK_REQUEST : 0;
++	uint32_t v = ufs_rd(hba, MTK_REG_REFCLK_CTRL);
++
++	if ((v & MTK_REFCLK_REQUEST) == want && ((v & MTK_REFCLK_ACK) >> 1) == (v & 1)) {
++		return 0;       /* already there (LK leaves it requested and acked) */
++	}
++	(void)mtk_sip(UFS_MTK_SIP_REF_CLK_NOTIFICATION, on, MTK_STAGE_PRE);
++	ufs_wr(hba, MTK_REG_REFCLK_CTRL, want);
++	for (unsigned waited = 0;; waited += 100) {
++		v = ufs_rd(hba, MTK_REG_REFCLK_CTRL);
++		if (((v & MTK_REFCLK_ACK) >> 1) == (v & MTK_REFCLK_REQUEST)) {
++			break;
++		}
++		if (waited >= MTK_REFCLK_TIMEOUT_US) {
++			printf("ufs_mtk: reference clock %s not acked (0x%x)\n", on ? "on" : "off", v);
++			(void)mtk_sip(UFS_MTK_SIP_REF_CLK_NOTIFICATION, false, MTK_STAGE_POST);
++			return ETIMEDOUT;
++		}
++		delay(100);
++	}
++	(void)mtk_sip(UFS_MTK_SIP_REF_CLK_NOTIFICATION, on, MTK_STAGE_POST);
++	return 0;
++}
++
++/* RST_n low for >= 10 us (the device needs >= 1 us), then time to respond. */
++static int
++mtk_device_reset(struct ufs_hba *hba __unused)
++{
++	(void)mtk_sip(UFS_MTK_SIP_DEVICE_RESET, 0, 0);
++	delay(15);
++	(void)mtk_sip(UFS_MTK_SIP_DEVICE_RESET, 1, 0);
++	delay(15000);
++	return 0;
++}
++
++static int
++mtk_pre_link(struct ufs_hba *hba)
++{
++	uint32_t v;
++	int error;
++
++	/* UniPro out of low-power mode, both TX LCCs off after link startup */
++	if ((error = ufs_dme_set(hba, VS_UNIPROPOWERDOWNCONTROL, 0)) ||
++	    (error = ufs_dme_set(hba, PA_LOCAL_TX_LCC_ENABLE, 0)) ||
++	    (error = ufs_dme_get(hba, VS_SAVEPOWERCONTROL, &v))) {
++		return error;
++	}
++	return ufs_dme_set(hba, VS_SAVEPOWERCONTROL, v & ~VS_SAVEPOWER_DEEP_STALL);
++}
++
++/* Debug probe: DEBUG_SEL 0x20 makes PROBE[31:28] the UniPro link state. */
++#define MTK_REG_DEBUG_SEL               0x22c0
++#define MTK_REG_PROBE                   0x22c8
++#define MTK_DEBUG_SEL_LINK              0x20
++
++static void
++mtk_dump(struct ufs_hba *hba)
++{
++	static const char *const states[] = {
++		"disabled", "down", "up", "hibern8", "lost", "cfg",
++	};
++	ufs_wr(hba, MTK_REG_DEBUG_SEL, MTK_DEBUG_SEL_LINK);
++	uint32_t probe = ufs_rd(hba, MTK_REG_PROBE), link = probe >> 28;
++	printf("ufs_mtk: link %s (probe 0x%x), REFCLK_CTRL 0x%x\n",
++	    link < sizeof(states) / sizeof(states[0]) ? states[link] : "?", probe,
++	    ufs_rd(hba, MTK_REG_REFCLK_CTRL));
++}
++
++const struct ufs_platform ufs_mtk_platform = {
++	.name         = "MediaTek",
++	.ref_clk      = mtk_ref_clk,
++	.device_reset = mtk_device_reset,
++	.pre_link     = mtk_pre_link,
++	.post_link    = NULL,
++	.dump         = mtk_dump,
++};
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/ufs/ufshci.c b/bsd/dev/ufs/ufshci.c
+new file mode 100644
+index 0000000..4092467
+--- /dev/null
++++ b/bsd/dev/ufs/ufshci.c
+@@ -0,0 +1,697 @@
++/*
++ * JEDEC UFSHCI core (see ufshci.h for the layering).
++ *
++ * Bring-up takes one of two paths:
++ *  - adopt: the bootloader read our boot image through this host, so the
++ *    controller is enabled and the link is up in HS mode. After checking
++ *    exactly that (HCE, HCS ready bits, no outstanding requests), point the
++ *    request lists at our memory and verify the host took them.
++ *  - full: the standard sequence, also used when adopting fails or with
++ *    boot-arg ufsreset=1: reference clock, HCE off, device reset, HCE on,
++ *    DME_LINKSTARTUP, request lists, NOP OUT, fDeviceInit, power mode change
++ *    to the fastest gear both sides support.
++ *
++ * Transfers: every slot the host reports (up to 32) can be in flight. Each
++ * slot owns a 4 KiB command descriptor (UPIU, response, PRDT) in one
++ * contiguous DMA area; data is scatter-gathered from the caller's physical
++ * segments, no bounce buffer. The host is not cache coherent: descriptors
++ * and data are cleaned/invalidated around each request. Completion is
++ * polled per slot (interrupts stay masked until the GIC driver routes SPIs);
++ * waiters sleep in short steps when the context allows it.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/errno.h>
++#include <kern/clock.h>
++#include <kern/locks.h>
++#include <kern/sched_prim.h>
++#include <machine/machine_routines.h>
++#include <arm/caches_internal.h>
++#include <vm/pmap.h>
++#include <vm/vm_kern.h>
++#include <pexpert/pexpert.h>
++#include <libkern/libkern.h>
++#include "ufshci.h"
++
++extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
++extern int get_preemption_level(void);
++
++static LCK_GRP_DECLARE(ufs_lck_grp, "ufshci");
++
++#define DMA_UTRL                0x0000          /* 32 x 32 B, 1 KiB aligned */
++#define DMA_UTMRL               0x0400          /* 8 x 80 B, 1 KiB aligned */
++#define DMA_UCD                 0x1000          /* nslots x UFS_UCD_SIZE */
++#define DMA_SIZE(n)             (DMA_UCD + (n) * UFS_UCD_SIZE)
++#define UCD_RESP                UFS_UPIU_SIZE
++#define UCD_PRDT                (2 * UFS_UPIU_SIZE)
++
++#define CMD_TIMEOUT_US          (10 * 1000 * 1000)
++#define UIC_TIMEOUT_US          (500 * 1000)
++#define HCE_TIMEOUT_US          (1000 * 1000)
++#define INIT_FLAG_TIMEOUT_US    (1500 * 1000)
++#define SPIN_US                 50
++#define SLEEP_US                100
++
++_Static_assert(sizeof(struct ufs_utrd) == 32, "UTRD layout");
++_Static_assert(sizeof(struct ufs_prd) == 16, "PRD layout");
++_Static_assert(UCD_PRDT + UFS_PRD_MAX * sizeof(struct ufs_prd) <= UFS_UCD_SIZE, "UCD layout");
++
++uint32_t
++ufs_rd(struct ufs_hba *hba, uint32_t off)
++{
++	return *(volatile uint32_t *)(hba->regs + off);
++}
++
++void
++ufs_wr(struct ufs_hba *hba, uint32_t off, uint32_t val)
++{
++	*(volatile uint32_t *)(hba->regs + off) = val;
++}
++
++static uint64_t
++deadline_us(uint64_t us)
++{
++	uint64_t t;
++	nanoseconds_to_absolutetime(us * NSEC_PER_USEC, &t);
++	return mach_absolute_time() + t;
++}
++
++/* Poll until (reg & mask) == want. Busy-waits: bring-up and UIC only. */
++static int
++ufs_wait_reg(struct ufs_hba *hba, uint32_t off, uint32_t mask, uint32_t want, uint64_t us)
++{
++	uint64_t end = deadline_us(us);
++	while ((ufs_rd(hba, off) & mask) != want) {
++		if (mach_absolute_time() > end) {
++			return ETIMEDOUT;
++		}
++		delay(10);
++	}
++	return 0;
++}
++
++/* Host, UIC error and vendor state, for every failure path. */
++static void
++ufs_dump_state(struct ufs_hba *hba, const char *why)
++{
++	printf("ufshci: %s: HCE 0x%x HCS 0x%x IS 0x%x DBR 0x%x RSR 0x%x\n", why,
++	    ufs_rd(hba, UFS_REG_HCE), ufs_rd(hba, UFS_REG_HCS), ufs_rd(hba, UFS_REG_IS),
++	    ufs_rd(hba, UFS_REG_UTRLDBR), ufs_rd(hba, UFS_REG_UTRLRSR));
++	printf("ufshci: UIC errors PA 0x%x DL 0x%x N 0x%x T 0x%x DME 0x%x\n",
++	    ufs_rd(hba, UFS_REG_UECPA), ufs_rd(hba, UFS_REG_UECDL), ufs_rd(hba, UFS_REG_UECN),
++	    ufs_rd(hba, UFS_REG_UECT), ufs_rd(hba, UFS_REG_UECDME));
++	if (hba->plat->dump) {
++		hba->plat->dump(hba);
++	}
++}
++
++/* ---- UIC (DME) commands ---- */
++
++static int
++ufs_uic(struct ufs_hba *hba, uint32_t cmd, uint32_t arg1, uint32_t arg2, uint32_t *arg3)
++{
++	if (ufs_wait_reg(hba, UFS_REG_HCS, UFS_HCS_UCRDY, UFS_HCS_UCRDY, UIC_TIMEOUT_US)) {
++		printf("ufshci: UIC not ready for 0x%x\n", cmd);
++		return EBUSY;
++	}
++	ufs_wr(hba, UFS_REG_IS, UFS_IS_UCCS);
++	ufs_wr(hba, UFS_REG_UICCMDARG1, arg1);
++	ufs_wr(hba, UFS_REG_UICCMDARG2, arg2);
++	ufs_wr(hba, UFS_REG_UICCMDARG3, arg3 ? *arg3 : 0);
++	ufs_wr(hba, UFS_REG_UICCMD, cmd);
++	if (ufs_wait_reg(hba, UFS_REG_IS, UFS_IS_UCCS, UFS_IS_UCCS, UIC_TIMEOUT_US)) {
++		printf("ufshci: UIC 0x%x (0x%x) timed out\n", cmd, arg1);
++		return ETIMEDOUT;
++	}
++	ufs_wr(hba, UFS_REG_IS, UFS_IS_UCCS);
++	uint32_t result = ufs_rd(hba, UFS_REG_UICCMDARG2) & 0xff;
++	if (result) {
++		printf("ufshci: UIC 0x%x (0x%x) failed: %u\n", cmd, arg1, result);
++		return EIO;
++	}
++	if (arg3) {
++		*arg3 = ufs_rd(hba, UFS_REG_UICCMDARG3);
++	}
++	return 0;
++}
++
++int
++ufs_dme_get(struct ufs_hba *hba, uint16_t attr, uint32_t *val)
++{
++	*val = 0;
++	return ufs_uic(hba, UIC_DME_GET, UIC_ARG_MIB(attr), 0, val);
++}
++
++static int
++ufs_dme_peer_get(struct ufs_hba *hba, uint16_t attr, uint32_t *val)
++{
++	*val = 0;
++	return ufs_uic(hba, UIC_DME_PEER_GET, UIC_ARG_MIB(attr), 0, val);
++}
++
++int
++ufs_dme_set(struct ufs_hba *hba, uint16_t attr, uint32_t val)
++{
++	return ufs_uic(hba, UIC_DME_SET, UIC_ARG_MIB(attr), 0, &val);
++}
++
++/* ---- UTP transfer requests ---- */
++
++static inline uint8_t *
++ucd(struct ufs_hba *hba, unsigned slot)
++{
++	return (uint8_t *)(hba->dma + DMA_UCD + slot * UFS_UCD_SIZE);
++}
++
++static inline uint64_t
++ucd_pa(struct ufs_hba *hba, unsigned slot)
++{
++	return hba->dma_pa + DMA_UCD + slot * UFS_UCD_SIZE;
++}
++
++static int
++ufs_slot_get(struct ufs_hba *hba, unsigned *slot, uint8_t *tag)
++{
++	uint32_t all = hba->nslots == 32 ? ~0u : (1u << hba->nslots) - 1;
++
++	for (;;) {
++		lck_mtx_lock(&hba->lock);
++		uint32_t free = ~hba->busy & all;
++		if (free) {
++			*slot = (unsigned)__builtin_ctz(free);
++			hba->busy |= 1u << *slot;
++			*tag = ++hba->tag_seq;
++			lck_mtx_unlock(&hba->lock);
++			return 0;
++		}
++		lck_mtx_unlock(&hba->lock);
++		if (!ml_get_interrupts_enabled() || get_preemption_level()) {
++			return EBUSY;
++		}
++		delay(SLEEP_US);
++	}
++}
++
++static void
++ufs_slot_put(struct ufs_hba *hba, unsigned slot)
++{
++	lck_mtx_lock(&hba->lock);
++	hba->busy &= ~(1u << slot);
++	lck_mtx_unlock(&hba->lock);
++}
++
++static bool
++ufs_can_sleep(void)
++{
++	return ml_get_interrupts_enabled() && !ml_at_interrupt_context() &&
++	       get_preemption_level() == 0;
++}
++
++/* Wait for the doorbell bit of `slot` to clear: spin briefly, then sleep. */
++static int
++ufs_slot_wait(struct ufs_hba *hba, unsigned slot)
++{
++	uint64_t end = deadline_us(CMD_TIMEOUT_US), spin_end = deadline_us(SPIN_US);
++	uint64_t step;
++	bool sleep = ufs_can_sleep();
++
++	nanoseconds_to_absolutetime(SLEEP_US * NSEC_PER_USEC, &step);
++	while (ufs_rd(hba, UFS_REG_UTRLDBR) & (1u << slot)) {
++		uint64_t now = mach_absolute_time();
++		if (now > end) {
++			return ETIMEDOUT;
++		}
++		if (ufs_rd(hba, UFS_REG_IS) & UFS_IS_ERRORS) {
++			printf("ufshci: fatal host error, IS 0x%x\n", ufs_rd(hba, UFS_REG_IS));
++			return EIO;
++		}
++		if (sleep && now >= spin_end) {
++			if (assert_wait_deadline_with_leeway((event_t)&hba->utrl[slot],
++			    THREAD_UNINT, TIMEOUT_URGENCY_SYS_CRITICAL, now + step, 0) ==
++			    THREAD_WAITING) {
++				thread_block(THREAD_CONTINUE_NULL);
++			}
++		} else {
++			delay(1);
++		}
++	}
++	return 0;
++}
++
++/*
++ * Run one request whose UPIU (32-byte header + CDB/query fields) the caller
++ * built in `req`. Data moves through `segs`. The response UPIU (up to 512
++ * bytes) is copied to `resp`. Returns 0 or an errno for transport errors;
++ * the caller checks the UPIU response itself.
++ */
++static int
++ufs_exec(struct ufs_hba *hba, const uint8_t req[32], unsigned req_len, uint8_t dir,
++    const struct ufs_seg *segs, unsigned nsegs, uint8_t *resp, unsigned resp_len)
++{
++	unsigned slot;
++	uint8_t tag;
++	int error = ufs_slot_get(hba, &slot, &tag);
++	if (error) {
++		return error;
++	}
++
++	uint8_t *cd = ucd(hba, slot);
++	struct ufs_prd *prd = (struct ufs_prd *)(cd + UCD_PRDT);
++	struct ufs_utrd *d = &hba->utrl[slot];
++	unsigned nprd = 0;
++
++	bzero(cd, UCD_PRDT);
++	memcpy(cd, req, req_len);
++	cd[3] = tag;
++	for (unsigned i = 0; i < nsegs; i++) {
++		for (uint32_t off = 0; off < segs[i].len;) {
++			uint32_t n = MIN(segs[i].len - off, UFS_PRD_BYTES_MAX);
++			if (nprd == UFS_PRD_MAX || ((segs[i].pa + off) & 3) || (n & 3)) {
++				ufs_slot_put(hba, slot);
++				return EINVAL;
++			}
++			prd[nprd].addr_lo = (uint32_t)(segs[i].pa + off);
++			prd[nprd].addr_hi = (uint32_t)((segs[i].pa + off) >> 32);
++			prd[nprd].rsvd = 0;
++			prd[nprd].dbc = n - 1;
++			nprd++;
++			off += n;
++		}
++	}
++
++	bzero(d, sizeof(*d));
++	d->dw0 = (1u << 28) | ((uint32_t)dir << 25);
++	d->dw2 = UFS_OCS_INVALID;
++	d->ucdba = (uint32_t)ucd_pa(hba, slot);
++	d->ucdbau = (uint32_t)(ucd_pa(hba, slot) >> 32);
++	d->resp = (UCD_RESP / 4) << 16 | (UFS_UPIU_SIZE / 4);
++	d->prdt = nprd ? ((UCD_PRDT / 4) << 16 | nprd) : 0;
++
++	flush_dcache64((addr64_t)ucd_pa(hba, slot), UFS_UCD_SIZE, TRUE);
++	flush_dcache64((addr64_t)(hba->dma_pa + DMA_UTRL + slot * sizeof(*d)), sizeof(*d), TRUE);
++	for (unsigned i = 0; i < nsegs; i++) {
++		if (dir == UFS_DD_TO_DEVICE) {
++			clean_dcache64((addr64_t)segs[i].pa, segs[i].len, TRUE);
++		} else {
++			flush_dcache64((addr64_t)segs[i].pa, segs[i].len, TRUE);
++		}
++	}
++	__builtin_arm_dsb(0xf);
++
++	ufs_wr(hba, UFS_REG_UTRLDBR, 1u << slot);
++	error = ufs_slot_wait(hba, slot);
++	if (error) {
++		/* UTRLCLR: a 0 bit aborts that slot */
++		ufs_wr(hba, UFS_REG_UTRLCLR, ~(1u << slot));
++		ufs_wait_reg(hba, UFS_REG_UTRLDBR, 1u << slot, 0, UIC_TIMEOUT_US);
++		printf("ufshci: slot %u (UPIU 0x%02x op 0x%02x) %s\n", slot, req[0],
++		    req_len > 16 ? (unsigned)req[16] : 0u, error == ETIMEDOUT ? "timed out" : "aborted");
++		ufs_slot_put(hba, slot);
++		return error;
++	}
++	__builtin_arm_dsb(0xf);
++
++	flush_dcache64((addr64_t)(hba->dma_pa + DMA_UTRL + slot * sizeof(*d)), sizeof(*d), TRUE);
++	flush_dcache64((addr64_t)(ucd_pa(hba, slot) + UCD_RESP), UFS_UPIU_SIZE, TRUE);
++	if (dir == UFS_DD_FROM_DEVICE) {
++		for (unsigned i = 0; i < nsegs; i++) {
++			flush_dcache64((addr64_t)segs[i].pa, segs[i].len, TRUE);
++		}
++	}
++
++	uint32_t ocs = d->dw2 & 0xff;
++	if (resp) {
++		memcpy(resp, cd + UCD_RESP, MIN(resp_len, UFS_UPIU_SIZE));
++	}
++	ufs_slot_put(hba, slot);
++	if (ocs != UFS_OCS_SUCCESS) {
++		printf("ufshci: UPIU 0x%02x OCS 0x%x\n", req[0], ocs);
++		return EIO;
++	}
++	return 0;
++}
++
++static int
++ufs_nop(struct ufs_hba *hba)
++{
++	uint8_t req[32] = { UPIU_NOP_OUT }, resp[32];
++	int error = ufs_exec(hba, req, sizeof(req), UFS_DD_NONE, NULL, 0, resp, sizeof(resp));
++	if (!error && (resp[0] & 0x3f) != UPIU_NOP_IN) {
++		error = EIO;
++	}
++	return error;
++}
++
++/* Query request: opcode, idn, index; flag/attribute value in *val. */
++static int
++ufs_query(struct ufs_hba *hba, uint8_t func, uint8_t op, uint8_t idn, uint8_t index,
++    uint16_t len, uint32_t *val, uint8_t *data, unsigned data_len)
++{
++	uint8_t req[32] = { 0 }, resp[UFS_UPIU_SIZE];
++
++	req[0] = UPIU_QUERY_REQ;
++	req[5] = func;
++	req[12] = op;
++	req[13] = idn;
++	req[14] = index;
++	req[18] = (uint8_t)(len >> 8);
++	req[19] = (uint8_t)len;
++	int error = ufs_exec(hba, req, sizeof(req), UFS_DD_NONE, NULL, 0, resp, sizeof(resp));
++	if (error) {
++		return error;
++	}
++	if ((resp[0] & 0x3f) != UPIU_QUERY_RESP || resp[6]) {
++		printf("ufshci: query op 0x%x idn 0x%x: response 0x%x\n", op, idn, resp[6]);
++		return EIO;
++	}
++	if (val) {
++		*val = (uint32_t)resp[28] << 24 | (uint32_t)resp[29] << 16 |
++		    (uint32_t)resp[30] << 8 | resp[31];
++	}
++	if (data) {
++		unsigned n = (unsigned)resp[10] << 8 | resp[11];
++		memcpy(data, resp + 32, MIN(MIN(n, data_len), UFS_UPIU_SIZE - 32));
++	}
++	return 0;
++}
++
++int
++ufs_read_desc(struct ufs_hba *hba, uint8_t idn, uint8_t index, uint8_t *buf, unsigned len)
++{
++	return ufs_query(hba, QUERY_FUNC_READ, QUERY_READ_DESC, idn, index,
++	           (uint16_t)MIN(len, 255u), NULL, buf, len);
++}
++
++/* ---- SCSI ---- */
++
++int
++ufs_scsi(struct ufs_hba *hba, struct ufs_xfer *x)
++{
++	uint8_t req[32] = { 0 }, resp[UFS_UPIU_SIZE];
++
++	req[0] = UPIU_COMMAND;
++	req[1] = x->dir == UFS_DD_FROM_DEVICE ? 0x40 : x->dir == UFS_DD_TO_DEVICE ? 0x20 : 0;
++	req[2] = x->lun;
++	req[12] = (uint8_t)(x->len >> 24);
++	req[13] = (uint8_t)(x->len >> 16);
++	req[14] = (uint8_t)(x->len >> 8);
++	req[15] = (uint8_t)x->len;
++	memcpy(&req[16], x->cdb, MIN(x->cdb_len, 16u));
++
++	x->scsi_status = 0xff;
++	x->sense_key = x->asc = x->ascq = 0;
++	int error = ufs_exec(hba, req, sizeof(req), x->dir, x->segs, x->nsegs, resp, sizeof(resp));
++	if (error) {
++		return error;
++	}
++	if ((resp[0] & 0x3f) != UPIU_RESPONSE) {
++		printf("ufshci: SCSI 0x%02x LUN %u: UPIU 0x%x flags 0x%x response 0x%x status 0x%x\n",
++		    x->cdb[0], x->lun, resp[0], resp[1], resp[6], resp[7]);
++		return EIO;
++	}
++	/*
++	 * The SCSI status decides, not the UPIU Response field: devices set
++	 * Response to "target failure" along with CHECK CONDITION, e.g. for the
++	 * UNIT ATTENTION every LU reports after a device reset.
++	 */
++	x->scsi_status = resp[7];
++	if (x->scsi_status == 0) {
++		return 0;
++	}
++	/* sense data: 2-byte length, then fixed-format sense */
++	if (((unsigned)resp[10] << 8 | resp[11]) >= 16) {
++		x->sense_key = resp[34 + 2] & 0x0f;
++		x->asc = resp[34 + 12];
++		x->ascq = resp[34 + 13];
++	}
++	if (x->sense_key != 0x6) {      /* UNIT ATTENTION is expected; retried by callers */
++		printf("ufshci: SCSI 0x%02x LUN %u: status 0x%x response 0x%x sense %x/%02x/%02x\n",
++		    x->cdb[0], x->lun, x->scsi_status, resp[6], x->sense_key, x->asc, x->ascq);
++	}
++	return EIO;
++}
++
++/* ---- bring-up ---- */
++
++static void
++ufs_lists_program(struct ufs_hba *hba)
++{
++	uint64_t utrl = hba->dma_pa + DMA_UTRL, utmrl = hba->dma_pa + DMA_UTMRL;
++
++	ufs_wr(hba, UFS_REG_UTRLBA, (uint32_t)utrl);
++	ufs_wr(hba, UFS_REG_UTRLBAU, (uint32_t)(utrl >> 32));
++	ufs_wr(hba, UFS_REG_UTMRLBA, (uint32_t)utmrl);
++	ufs_wr(hba, UFS_REG_UTMRLBAU, (uint32_t)(utmrl >> 32));
++}
++
++static bool
++ufs_lists_ours(struct ufs_hba *hba)
++{
++	uint64_t utrl = hba->dma_pa + DMA_UTRL;
++	return ufs_rd(hba, UFS_REG_UTRLBA) == (uint32_t)utrl &&
++	       ufs_rd(hba, UFS_REG_UTRLBAU) == (uint32_t)(utrl >> 32);
++}
++
++/* Reuse the host and link the bootloader left running. */
++static int
++ufs_adopt(struct ufs_hba *hba)
++{
++	uint32_t hce = ufs_rd(hba, UFS_REG_HCE), hcs = ufs_rd(hba, UFS_REG_HCS);
++	uint32_t ready = UFS_HCS_DP | UFS_HCS_UTRLRDY | UFS_HCS_UTMRLRDY | UFS_HCS_UCRDY;
++
++	if (!(hce & 1) || (hcs & ready) != ready) {
++		printf("ufshci: nothing to adopt (HCE 0x%x HCS 0x%x)\n", hce, hcs);
++		return ENXIO;
++	}
++	if (ufs_rd(hba, UFS_REG_UTRLDBR) || ufs_rd(hba, UFS_REG_UTMRLDBR)) {
++		printf("ufshci: bootloader requests still outstanding\n");
++		return EBUSY;
++	}
++	ufs_wr(hba, UFS_REG_IE, 0);
++	ufs_wr(hba, UFS_REG_IS, ufs_rd(hba, UFS_REG_IS));
++	ufs_wr(hba, UFS_REG_UTRLRSR, 0);
++	ufs_wr(hba, UFS_REG_UTMRLRSR, 0);
++	ufs_lists_program(hba);
++	ufs_wr(hba, UFS_REG_UTRLRSR, 1);
++	ufs_wr(hba, UFS_REG_UTMRLRSR, 1);
++	/* Never ring a doorbell unless the host uses our lists. */
++	if (!ufs_lists_ours(hba) || !(ufs_rd(hba, UFS_REG_UTRLRSR) & 1)) {
++		printf("ufshci: host kept the bootloader's request list\n");
++		return EIO;
++	}
++	return 0;
++}
++
++static int
++ufs_link_startup(struct ufs_hba *hba)
++{
++	int error = EIO;
++
++	for (int attempt = 0; attempt < 3; attempt++) {
++		error = ufs_uic(hba, UIC_DME_LINKSTARTUP, 0, 0, NULL);
++		if (!error && (ufs_rd(hba, UFS_REG_HCS) & UFS_HCS_DP)) {
++			return 0;
++		}
++		error = error ? error : ENXIO;
++		ufs_wr(hba, UFS_REG_IS, ufs_rd(hba, UFS_REG_IS));
++		delay(1000);
++	}
++	printf("ufshci: link startup failed: %d\n", error);
++	return error;
++}
++
++/* Fastest HS gear and all connected lanes both ends agree on. */
++static int
++ufs_power_mode(struct ufs_hba *hba)
++{
++	uint32_t tx_lanes, rx_lanes, local_gear, peer_gear;
++	int error;
++
++	if ((error = ufs_dme_get(hba, PA_CONNECTEDTXDATALANES, &tx_lanes)) ||
++	    (error = ufs_dme_get(hba, PA_CONNECTEDRXDATALANES, &rx_lanes)) ||
++	    (error = ufs_dme_get(hba, PA_MAXRXHSGEAR, &local_gear)) ||
++	    (error = ufs_dme_peer_get(hba, PA_MAXRXHSGEAR, &peer_gear))) {
++		return error;
++	}
++	if (!tx_lanes || !rx_lanes || !local_gear || !peer_gear) {
++		return ENXIO;
++	}
++	/* TX gear is bounded by what the peer can receive, RX by what we can. */
++	if ((error = ufs_dme_set(hba, PA_TXGEAR, peer_gear)) ||
++	    (error = ufs_dme_set(hba, PA_RXGEAR, local_gear)) ||
++	    (error = ufs_dme_set(hba, PA_ACTIVETXDATALANES, tx_lanes)) ||
++	    (error = ufs_dme_set(hba, PA_ACTIVERXDATALANES, rx_lanes)) ||
++	    (error = ufs_dme_set(hba, PA_TXTERMINATION, 1)) ||
++	    (error = ufs_dme_set(hba, PA_RXTERMINATION, 1)) ||
++	    (error = ufs_dme_set(hba, PA_HSSERIES, UFS_HS_RATE_B))) {
++		return error;
++	}
++	ufs_wr(hba, UFS_REG_IS, UFS_IS_UPMS);
++	if ((error = ufs_dme_set(hba, PA_PWRMODE, UFS_PWR_FAST << 4 | UFS_PWR_FAST))) {
++		return error;
++	}
++	if (ufs_wait_reg(hba, UFS_REG_IS, UFS_IS_UPMS, UFS_IS_UPMS, UIC_TIMEOUT_US)) {
++		return ETIMEDOUT;
++	}
++	ufs_wr(hba, UFS_REG_IS, UFS_IS_UPMS);
++	uint32_t upmcrs = UFS_HCS_UPMCRS(ufs_rd(hba, UFS_REG_HCS));
++	if (upmcrs != UFS_UPMCRS_PWR_LOCAL) {
++		printf("ufshci: power mode change status %u\n", upmcrs);
++		return EIO;
++	}
++	printf("ufshci: HS gear tx %u rx %u, lanes tx %u rx %u, rate B\n",
++	    peer_gear, local_gear, tx_lanes, rx_lanes);
++	return 0;
++}
++
++static int
++ufs_full_init(struct ufs_hba *hba)
++{
++	const struct ufs_platform *p = hba->plat;
++	int error;
++
++	if (p->ref_clk && (error = p->ref_clk(hba, true))) {
++		return error;
++	}
++	ufs_wr(hba, UFS_REG_HCE, 0);
++	if (ufs_wait_reg(hba, UFS_REG_HCE, 1, 0, HCE_TIMEOUT_US)) {
++		printf("ufshci: HCE did not clear\n");
++		return ETIMEDOUT;
++	}
++	if (p->device_reset && (error = p->device_reset(hba))) {
++		return error;
++	}
++	ufs_wr(hba, UFS_REG_HCE, 1);
++	if (ufs_wait_reg(hba, UFS_REG_HCE, 1, 1, HCE_TIMEOUT_US) ||
++	    ufs_wait_reg(hba, UFS_REG_HCS, UFS_HCS_UCRDY, UFS_HCS_UCRDY, HCE_TIMEOUT_US)) {
++		printf("ufshci: host enable timed out (HCS 0x%x)\n", ufs_rd(hba, UFS_REG_HCS));
++		return ETIMEDOUT;
++	}
++	if (p->pre_link && (error = p->pre_link(hba))) {
++		return error;
++	}
++	if ((error = ufs_link_startup(hba))) {
++		return error;
++	}
++	if (p->post_link && (error = p->post_link(hba))) {
++		return error;
++	}
++	ufs_wr(hba, UFS_REG_IE, 0);
++	ufs_wr(hba, UFS_REG_IS, ufs_rd(hba, UFS_REG_IS));
++	ufs_lists_program(hba);
++	ufs_wr(hba, UFS_REG_UTRLRSR, 1);
++	ufs_wr(hba, UFS_REG_UTMRLRSR, 1);
++	uint32_t lists = UFS_HCS_UTRLRDY | UFS_HCS_UTMRLRDY;
++	if (ufs_wait_reg(hba, UFS_REG_HCS, lists, lists, HCE_TIMEOUT_US) || !ufs_lists_ours(hba)) {
++		printf("ufshci: request lists not ready (HCS 0x%x)\n", ufs_rd(hba, UFS_REG_HCS));
++		return EIO;
++	}
++	return 0;
++}
++
++/* The device answers NOP OUT and has finished fDeviceInit. */
++static int
++ufs_device_ready(struct ufs_hba *hba, bool init)
++{
++	int error = EIO;
++	uint32_t flag = 0;
++
++	for (int i = 0; i < 10 && (error = ufs_nop(hba)); i++) {
++		delay(1000);
++	}
++	if (error) {
++		printf("ufshci: no NOP IN from the device\n");
++		return error;
++	}
++	if (init && (error = ufs_query(hba, QUERY_FUNC_WRITE, QUERY_SET_FLAG,
++	    FLAG_DEVICE_INIT, 0, 0, NULL, NULL, 0))) {
++		return error;
++	}
++	uint64_t end = deadline_us(INIT_FLAG_TIMEOUT_US);
++	do {
++		if ((error = ufs_query(hba, QUERY_FUNC_READ, QUERY_READ_FLAG,
++		    FLAG_DEVICE_INIT, 0, 0, &flag, NULL, 0))) {
++			return error;
++		}
++		if (!(flag & 1)) {
++			return 0;
++		}
++		delay(1000);
++	} while (mach_absolute_time() < end);
++	printf("ufshci: fDeviceInit still set\n");
++	return ETIMEDOUT;
++}
++
++int
++ufs_hba_init(struct ufs_hba *hba, vm_offset_t regs, const struct ufs_platform *plat)
++{
++	int error;
++
++	bzero(hba, sizeof(*hba));
++	hba->regs = regs;
++	hba->plat = plat;
++	hba->cap = ufs_rd(hba, UFS_REG_CAP);
++	hba->ver = ufs_rd(hba, UFS_REG_VER);
++	hba->nslots = MIN(UFS_CAP_NUTRS(hba->cap), 32u);
++	lck_mtx_init(&hba->lock, &ufs_lck_grp, LCK_ATTR_NULL);
++
++	if (kmem_alloc_contig(kernel_map, &hba->dma, round_page(DMA_SIZE(hba->nslots)),
++	    PAGE_MASK, 0, 0, KMA_DATA | KMA_ZERO | KMA_PERMANENT,
++	    VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++		return ENOMEM;
++	}
++	ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)hba->dma);
++	if (!pn) {
++		return ENOMEM;
++	}
++	hba->dma_pa = ptoa_64(pn);
++	hba->utrl = (struct ufs_utrd *)(hba->dma + DMA_UTRL);
++	if ((hba->dma_pa + DMA_SIZE(hba->nslots) - 1) >> 32 && !(hba->cap & UFS_CAP_64AS)) {
++		printf("ufshci: DMA memory above 4 GiB but no 64-bit addressing\n");
++		return ENXIO;
++	}
++	printf("ufshci: %s host, UFSHCI %x.%x, %u slots, CAP 0x%x, DMA at 0x%llx\n",
++	    plat->name, hba->ver >> 8, (hba->ver >> 4) & 0xf, hba->nslots, hba->cap, hba->dma_pa);
++
++	uint32_t force_reset = 0;
++	PE_parse_boot_argn("ufsreset", &force_reset, sizeof(force_reset));
++	ufs_dump_state(hba, "as found");
++	lck_mtx_lock(&hba->lock);
++	error = force_reset ? ENXIO : ufs_adopt(hba);
++	lck_mtx_unlock(&hba->lock);
++	/*
++	 * Registers can look ready while the link is not (the bootloader may
++	 * leave it in Hibern8 or power the M-PHY down): the adopted link must
++	 * carry one NOP OUT, else start over with the full sequence.
++	 */
++	if (!error && (error = ufs_nop(hba))) {
++		ufs_dump_state(hba, "adopted link does not carry a NOP");
++	}
++	hba->adopted = !error;
++	if (error) {
++		lck_mtx_lock(&hba->lock);
++		error = ufs_full_init(hba);
++		lck_mtx_unlock(&hba->lock);
++		if (error) {
++			ufs_dump_state(hba, "full init failed");
++			return error;
++		}
++	}
++	if ((error = ufs_device_ready(hba, !hba->adopted))) {
++		ufs_dump_state(hba, "device not ready");
++		return error;
++	}
++	if (!hba->adopted) {
++		lck_mtx_lock(&hba->lock);
++		error = ufs_power_mode(hba);
++		lck_mtx_unlock(&hba->lock);
++		if (error) {
++			printf("ufshci: staying in PWM mode: %d\n", error);
++		}
++	}
++	hba->ready = true;
++	printf("ufshci: ready (%s)\n", hba->adopted ? "adopted the bootloader link" : "full init");
++	return 0;
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/ufs/ufshci.h b/bsd/dev/ufs/ufshci.h
+new file mode 100644
+index 0000000..b09c97e
+--- /dev/null
++++ b/bsd/dev/ufs/ufshci.h
+@@ -0,0 +1,202 @@
++/*
++ * UFS host controller driver for the SWEET machine config, written for the
++ * Infinix X676C (MediaTek MT6789, "mediatek,mt8183-ufshci").
++ *
++ * Layers:
++ *   ufshci.c   JEDEC UFSHCI core: host bring-up, UIC (DME) commands, UTP
++ *              transfer requests in all slots, query requests, SCSI.
++ *   ufs_mtk.c  MediaTek platform glue (TF-A SiP calls, reference clock,
++ *              device reset, link quirks), behind struct ufs_platform.
++ *   ufs_disk.c LUN 0 GPT, one BSD block/char device per partition, the
++ *              root device, and the write policy.
++ *
++ * References: JESD223 (UFSHCI 2.1/3.0), JESD220 (UFS 2.1/3.0), MIPI UniPro
++ * attribute numbers. No code from other drivers.
++ */
++#ifndef _BSD_DEV_UFS_UFSHCI_H_
++#define _BSD_DEV_UFS_UFSHCI_H_
++
++#include <sys/types.h>
++#include <stdbool.h>
++#include <kern/locks.h>
++
++/* ---- UFSHCI registers (JESD223) ---- */
++#define UFS_REG_CAP             0x00
++#define UFS_REG_VER             0x08
++#define UFS_REG_IS              0x20
++#define UFS_REG_IE              0x24
++#define UFS_REG_HCS             0x30
++#define UFS_REG_HCE             0x34
++#define UFS_REG_UECPA           0x38
++#define UFS_REG_UECDL           0x3c
++#define UFS_REG_UECN            0x40
++#define UFS_REG_UECT            0x44
++#define UFS_REG_UECDME          0x48
++#define UFS_REG_UTRLBA          0x50
++#define UFS_REG_UTRLBAU         0x54
++#define UFS_REG_UTRLDBR         0x58
++#define UFS_REG_UTRLCLR         0x5c
++#define UFS_REG_UTRLRSR         0x60
++#define UFS_REG_UTMRLBA         0x70
++#define UFS_REG_UTMRLBAU        0x74
++#define UFS_REG_UTMRLDBR        0x78
++#define UFS_REG_UTMRLCLR        0x7c
++#define UFS_REG_UTMRLRSR        0x80
++#define UFS_REG_UICCMD          0x90
++#define UFS_REG_UICCMDARG1      0x94
++#define UFS_REG_UICCMDARG2      0x98
++#define UFS_REG_UICCMDARG3      0x9c
++
++#define UFS_CAP_NUTRS(c)        (((c) & 0x1f) + 1)
++#define UFS_CAP_64AS            (1u << 24)
++
++#define UFS_IS_UTRCS            (1u << 0)
++#define UFS_IS_UE               (1u << 2)       /* UIC error */
++#define UFS_IS_UPMS             (1u << 4)       /* UIC power mode status */
++#define UFS_IS_UCCS             (1u << 10)      /* UIC command completion */
++#define UFS_IS_ERRORS           0x0007f000u     /* DFES, UTPES, HCFES, SBFES, CEFES */
++
++#define UFS_HCS_DP              (1u << 0)
++#define UFS_HCS_UTRLRDY         (1u << 1)
++#define UFS_HCS_UTMRLRDY        (1u << 2)
++#define UFS_HCS_UCRDY           (1u << 3)
++#define UFS_HCS_UPMCRS(h)       (((h) >> 8) & 7)
++#define UFS_UPMCRS_PWR_LOCAL    1
++
++/* UIC commands and the DME attributes this driver uses (UniPro 1.6). */
++#define UIC_DME_GET             0x01
++#define UIC_DME_SET             0x02
++#define UIC_DME_PEER_GET        0x03
++#define UIC_DME_LINKSTARTUP     0x16
++#define UIC_ARG_MIB(attr)       ((uint32_t)(attr) << 16)
++
++#define PA_ACTIVETXDATALANES    0x1560
++#define PA_CONNECTEDTXDATALANES 0x1561
++#define PA_TXGEAR               0x1568
++#define PA_TXTERMINATION        0x1569
++#define PA_HSSERIES             0x156a
++#define PA_PWRMODE              0x1571
++#define PA_ACTIVERXDATALANES    0x1580
++#define PA_CONNECTEDRXDATALANES 0x1581
++#define PA_RXGEAR               0x1583
++#define PA_RXTERMINATION        0x1584
++#define PA_MAXRXHSGEAR          0x1587
++#define PA_LOCAL_TX_LCC_ENABLE  0x155e
++
++#define UFS_PWR_FAST            1
++#define UFS_HS_RATE_B           2
++
++/* ---- UTP transfer request descriptor and command descriptor ---- */
++struct ufs_utrd {
++	uint32_t dw0;           /* [28] CT=UFS, [26:25] DD, [24] I */
++	uint32_t dw1;
++	uint32_t dw2;           /* [7:0] OCS */
++	uint32_t dw3;
++	uint32_t ucdba, ucdbau;
++	uint32_t resp;          /* [31:16] response UPIU offset, [15:0] length (DWORDs) */
++	uint32_t prdt;          /* [31:16] PRDT offset (DWORDs), [15:0] entries */
++};
++
++struct ufs_prd {
++	uint32_t addr_lo, addr_hi, rsvd;
++	uint32_t dbc;           /* byte count - 1, at most 256 KiB, DWORD aligned */
++};
++
++#define UFS_DD_NONE             0
++#define UFS_DD_TO_DEVICE        1
++#define UFS_DD_FROM_DEVICE      2
++#define UFS_OCS_SUCCESS         0
++#define UFS_OCS_INVALID         0x0f
++
++#define UFS_UPIU_SIZE           512
++#define UFS_PRD_MAX             66              /* 1 MiB + page misalignment */
++#define UFS_UCD_SIZE            4096            /* per slot: cmd, resp, PRDT */
++#define UFS_PRD_BYTES_MAX       (256u << 10)
++
++/* UPIU transaction codes and query opcodes (JESD220). */
++#define UPIU_NOP_OUT            0x00
++#define UPIU_COMMAND            0x01
++#define UPIU_QUERY_REQ          0x16
++#define UPIU_NOP_IN             0x20
++#define UPIU_RESPONSE           0x21
++#define UPIU_QUERY_RESP         0x36
++
++#define QUERY_READ_DESC         0x01
++#define QUERY_READ_ATTR         0x03
++#define QUERY_READ_FLAG         0x05
++#define QUERY_SET_FLAG          0x06
++
++#define QUERY_FUNC_READ         0x01
++#define QUERY_FUNC_WRITE        0x81
++
++#define FLAG_DEVICE_INIT        0x01
++#define DESC_DEVICE             0x00
++#define DESC_UNIT               0x02
++#define DESC_GEOMETRY           0x07
++
++/* ---- driver state shared by the three files ---- */
++struct ufs_hba;
++
++/* Platform hooks; any may be NULL. Called with the host lock held. */
++struct ufs_platform {
++	const char *name;
++	int (*ref_clk)(struct ufs_hba *hba, bool on);
++	int (*device_reset)(struct ufs_hba *hba);
++	int (*pre_link)(struct ufs_hba *hba);
++	int (*post_link)(struct ufs_hba *hba);
++	void (*dump)(struct ufs_hba *hba);      /* vendor state for diagnostics */
++};
++
++struct ufs_hba {
++	vm_offset_t regs;
++	uint32_t cap, ver;
++	unsigned nslots;
++	const struct ufs_platform *plat;
++
++	/* one physically contiguous, 4 KiB aligned DMA area */
++	vm_offset_t dma;
++	uint64_t dma_pa;
++	struct ufs_utrd *utrl;          /* nslots descriptors at dma + 0 */
++
++	lck_mtx_t lock;                 /* slot allocation, UIC, bring-up */
++	uint32_t busy;                  /* slots handed out */
++	uint8_t tag_seq;
++	bool adopted;                   /* reused the link LK left up */
++	bool ready;
++};
++
++/* One SCSI or query transaction. Data is described by physical segments. */
++struct ufs_seg {
++	uint64_t pa;
++	uint32_t len;
++};
++
++struct ufs_xfer {
++	uint8_t lun;
++	uint8_t dir;                    /* UFS_DD_* */
++	uint8_t cdb[16];
++	unsigned cdb_len;
++	const struct ufs_seg *segs;
++	unsigned nsegs;
++	uint32_t len;                   /* total data bytes */
++	/* out */
++	uint8_t scsi_status;
++	uint8_t sense_key, asc, ascq;
++};
++
++/* ufshci.c */
++int ufs_hba_init(struct ufs_hba *hba, vm_offset_t regs, const struct ufs_platform *plat);
++int ufs_dme_get(struct ufs_hba *hba, uint16_t attr, uint32_t *val);
++int ufs_dme_set(struct ufs_hba *hba, uint16_t attr, uint32_t val);
++int ufs_scsi(struct ufs_hba *hba, struct ufs_xfer *x);
++int ufs_read_desc(struct ufs_hba *hba, uint8_t idn, uint8_t index, uint8_t *buf, unsigned len);
++uint32_t ufs_rd(struct ufs_hba *hba, uint32_t off);
++void ufs_wr(struct ufs_hba *hba, uint32_t off, uint32_t val);
++
++/* ufs_mtk.c */
++extern const struct ufs_platform ufs_mtk_platform;
++
++/* ufs_disk.c */
++int ufs_disk_rootdev(dev_t *dev);
++
++#endif /* _BSD_DEV_UFS_UFSHCI_H_ */
+diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
+index e6c74aa..2ba1039 100644
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -768,6 +768,21 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
+ 
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ //
++//	x676c: root on the GPT partition named by ufsroot= (bsd/dev/ufs/ufs_disk.c)
++//
++	if (strcmp(rdBootVar, "ufs") == 0) {
++		extern int ufs_disk_rootdev(dev_t *dev);
++		OSSafeReleaseNULL(matching);
++		int ufs_error = ufs_disk_rootdev(root);
++		if (ufs_error) {
++			panic("IOFindBSDRoot: UFS root unavailable: %d", ufs_error);
++		}
++		snprintf(rootName, rootNameSize, "disk0s%d", minor(*root) + 1);
++		IOLog("BSD root: %s, major %d, minor %d\n", rootName, major(*root), minor(*root));
++		*oflags = 0;
++		goto iofrootx;
++	}
++//
+ //	SWEET: root on a GPT partition of the internal UFS (bsd/dev/sweet_ufs.c)
+ //
+ 	if (strcmp(rdBootVar, "ufsroot0") == 0) {

@@ -1,0 +1,86 @@
+From: HelioDarwin
+Subject: [PATCH] x9: exclude scheduled timer and IPI events from IRQ entropy
+
+Do not credit software-scheduled timer/IPI arrivals as entropy on X9. Retain
+external IRQ sampling, existing entropy filters/health thresholds, and fatal
+handling of genuine failures. Add health statistics to PRNG failure output.
+No TRNG or qualified external entropy source is claimed by this change.
+
+diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -36,6 +36,7 @@
+ #include <arm/trap.h> /* for IS_ARM_GDB_TRAP() et al */
+ #include <arm64/proc_reg.h>
+ #include <arm64/sweet_early.h>
++#include "sweet_irq_entropy.h"
+ #include <arm64/machine_machdep.h>
+ #include <arm64/monotonic.h>
+ #include <arm64/instructions.h>
+@@ -2091,7 +2092,13 @@
+ #endif
+ #endif /* SWEET */
+ 
++#if defined(SWEET)
++	if (sweet_irq_entropy_allowed(sweet_early_is_x9(), intid, sweet_vtimer_intid)) {
++		entropy_collect();
++	}
++#else
+ 	entropy_collect();
++#endif
+ 
+ 
+ 	sleh_interrupt_handler_epilogue();
+diff --git a/osfmk/arm64/sweet_irq_entropy.h b/osfmk/arm64/sweet_irq_entropy.h
+--- /dev/null
++++ b/osfmk/arm64/sweet_irq_entropy.h
+@@ -0,0 +1,11 @@
++/* X9 timer/IPI delivery is scheduled software activity, not an external
++ * entropy source. Keep the existing collector behavior on other SWEET boards.
++ * Spurious GIC interrupts have already returned before this predicate. */
++#ifndef SWEET_IRQ_ENTROPY_H
++#define SWEET_IRQ_ENTROPY_H
++static inline int
++sweet_irq_entropy_allowed(int is_x9, unsigned int intid, unsigned int timer_intid)
++{
++ return !is_x9 || (intid >= 16 && intid != timer_intid);
++}
++#endif
+diff --git a/osfmk/prng/prng_random.c b/osfmk/prng/prng_random.c
+--- a/osfmk/prng/prng_random.c
++++ b/osfmk/prng/prng_random.c
+@@ -154,6 +154,7 @@
+  * This registers only the PRNG, not the unrelated g_crypto_funcs table.
+  */
+ #include <kern/startup.h>
++#include <arm64/sweet_early.h>
+ 
+ static LCK_GRP_DECLARE(sweet_prng_group, "sweet-prng");
+ static LCK_MTX_DECLARE(sweet_prng_lock, &sweet_prng_group);
+@@ -236,7 +237,14 @@
+ 	size_t nbytes = sizeof(entropy);
+ 	int32_t nsamples = sweet_getentropy(&nbytes, entropy, sweet_getentropy_arg);
+ 	if (nsamples < 0) {
+-		panic("SWEET PRNG entropy health test failed");
++		panic("SWEET PRNG entropy health test failed: RCT failures=%u max=%u "
++		    "APT failures=%u max=%u accepted=%llu rejected=%llu",
++		    entropy_health_rct_stats.failure_count,
++		    entropy_health_rct_stats.max_observation_count,
++		    entropy_health_apt_stats.failure_count,
++		    entropy_health_apt_stats.max_observation_count,
++		    (unsigned long long)entropy_filter_accepted_sample_count,
++		    (unsigned long long)entropy_filter_rejected_sample_count);
+ 	}
+ 	if (nsamples >= 256) {
+ 		assert(nbytes >= SEED_SIZE && nbytes <= sizeof(entropy));
+@@ -275,6 +283,10 @@
+ 	};
+ 	register_and_init_prng(&sweet_prng_ctx, &funcs);
+ 	kprintf("SWEET PRNG: HMAC-SHA256 registered\n");
++	if (sweet_early_is_x9()) {
++		kprintf("X9 PRNG: timer/IPI entropy excluded; boot-seeded DRBG, "
++		    "external IRQ entropy health tests retained\n");
++	}
+ }
+ STARTUP(EARLY_BOOT, STARTUP_RANK_FIRST, sweet_prng_startup);
+ #endif /* SWEET */

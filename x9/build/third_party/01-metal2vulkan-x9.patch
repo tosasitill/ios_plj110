@@ -1,0 +1,926 @@
+diff --git a/crates/metal2vulkan-air/src/canon/const_loads.rs b/crates/metal2vulkan-air/src/canon/const_loads.rs
+index 7b3dfd7..98976df 100644
+--- a/crates/metal2vulkan-air/src/canon/const_loads.rs
++++ b/crates/metal2vulkan-air/src/canon/const_loads.rs
+@@ -1,4 +1,4 @@
+-//! Pointers loaded from fields of constant globals.
++//! Values loaded from fields of constant globals.
+ //!
+ //! A constant global whose initializer is known once function constants are bound and the static
+ //! initializers have run may hold pointers: a program-scope `constexpr sampler` taken by value is
+@@ -9,18 +9,28 @@
+ //! constant and threadgroup spaces, so such a module was refused, under the values that made the
+ //! select one global.
+ //!
++//! The same holds for every other first-class field. An uber-shader takes its whole configuration
++//! as one struct of function constants that a static initializer copies into an internal
++//! `constant` global (QuartzCore's `fc_fragment_shader_config`, read field by field after a
++//! function-constant `select` between it and a buffer). SCCP folds that select to the global but
++//! not the field loads, so every branch the configuration decides survived: QuartzCore's
++//! `fixed_frag` became about 46000 SPIR-V instructions where its specialized form is a few
++//! hundred, and the driver compiled each such pipeline for about a second. Metal's compiler
++//! specializes these reads away, so a module that reads them is translated as Metal compiles it.
++//!
+ //! This pass reads such a load as the initializer's constant at the field: a non-volatile,
+-//! non-atomic load of a pointer whose address is a field of a constant global at constant indices
+-//! (a `getelementptr` instruction or constant expression over the global's own value type, its
+-//! first index 0), where the field's type is the load's. A copy LLVM made through an integer (a
+-//! load of the field as an integer of the pointer's size, then `inttoptr` to the field's type)
+-//! reads the same constant at its `inttoptr`. The global is never written (it is `constant`, and
+-//! initialized by no one else), so every run reads that constant: the address of the sampler
+-//! state, which the sampler family reads as the sampler it names. Only pointers are read this
+-//! way: a load of any other type from a constant global is lowered from the global's form (its
+-//! typed private copy, or the constant blob), and reading it here would change those modules
+-//! without changing what they compute. SCCP then runs again over a body this pass changed, so
+-//! what the constants decide (an aggregate of them, a phi of them, a member of either) folds too.
++//! non-atomic load of a scalar, vector or pointer whose address is a field of a constant global at
++//! constant indices (a `getelementptr` instruction or constant expression over the global's own
++//! value type, its first index 0), where the field's type is the load's. A copy LLVM made through
++//! an integer (a load of a pointer field as an integer of the pointer's size, then `inttoptr` to
++//! the field's type) reads the same constant at its `inttoptr`. The global is never written (it
++//! is `constant`, and initialized by no one else), so every run reads that constant: for a
++//! pointer, the address of the sampler state, which the sampler family reads as the sampler it
++//! names. An aggregate load, a load of another type than the field's, and a field the initializer
++//! leaves `undef` (an unsupplied constant's) are left to the global's lowered form. SCCP then runs
++//! again over a body this pass changed, so what the constants decide (a branch, an aggregate of
++//! them, a phi of them, a member of either) folds too, and the two alternate until a round folds
++//! nothing: a decided branch can expose a further select of the global.
+ 
+ use crate::budget::Meter;
+ use crate::error::Error;
+@@ -29,9 +39,9 @@ use crate::ir::{InstId, InstKind, ModuleParts, Type, TypeId, Value};
+ 
+ use super::rewrite::{apply, scoped, BodyEdit};
+ 
+-/// Read every load of a pointer from a field of a constant global in `body`, and every
+-/// `inttoptr` of such a field's integer copy, as the field's constant (module docs), and say
+-/// whether there was one. Returns `body` itself when there is none.
++/// Read every first-class load from a field of a constant global in `body`, and every `inttoptr`
++/// of a pointer field's integer copy, as the field's constant (module docs), and say whether there
++/// was one. Returns `body` itself when there is none.
+ pub(super) fn fold(
+     body: Body,
+     parts: &mut ModuleParts,
+@@ -61,8 +71,8 @@ pub(super) fn fold(
+     }
+ }
+ 
+-/// Each instruction of `body` that reads a pointer field of a constant global (module docs), with
+-/// the field's constant.
++/// Each instruction of `body` that reads a first-class field of a constant global (module docs),
++/// with the field's constant.
+ fn find(
+     body: &Body,
+     parts: &mut ModuleParts,
+@@ -71,24 +81,27 @@ fn find(
+ ) -> Result<(), Error> {
+     for (id, inst) in body.insts.iter() {
+         m.tick(1)?;
+-        let Some(space) = parts.types.ptr_space(inst.ty) else {
+-            continue;
+-        };
+-        if !matches!(parts.types.get(inst.ty), Some(Type::Ptr { .. })) {
+-            continue;
+-        }
++        let first_class = parts
++            .types
++            .get(inst.ty)
++            .is_some_and(|t| t.is_sized() && !t.is_aggregate());
++        let pointer = matches!(parts.types.get(inst.ty), Some(Type::Ptr { .. }));
+         let ptr = match inst.kind {
+             InstKind::Load {
+                 ptr,
+                 volatile: false,
+                 atomic: None,
+                 ..
+-            } => ptr,
++            } if first_class => ptr,
+             // `inttoptr` of an integer load of the pointer's size: a copy through an integer.
+             InstKind::Cast {
+                 op: CastOp::IntToPtr,
+                 v: Value::Inst(l),
+-            } => match body.insts.get(l).map(|l| (&l.kind, l.ty)) {
++            } if pointer => {
++                let Some(space) = parts.types.ptr_space(inst.ty) else {
++                    continue;
++                };
++                match body.insts.get(l).map(|l| (&l.kind, l.ty)) {
+                 Some((
+                     &InstKind::Load {
+                         ptr,
+@@ -104,7 +117,8 @@ fn find(
+                     ptr
+                 }
+                 _ => continue,
+-            },
++                }
++            }
+             _ => continue,
+         };
+         let Some((g, path)) = field_address(body, parts, ptr) else {
+diff --git a/crates/metal2vulkan-air/src/canon/mod.rs b/crates/metal2vulkan-air/src/canon/mod.rs
+index bd05d94..e3bd590 100644
+--- a/crates/metal2vulkan-air/src/canon/mod.rs
++++ b/crates/metal2vulkan-air/src/canon/mod.rs
+@@ -567,11 +567,17 @@ pub fn specialize_dynamic(
+     };
+     body.release(m);
+     let body = solved;
+-    // A pointer loaded from a field of a constant global is the field's constant: a `constexpr
+-    // sampler` that SCCP's folded select picked is its sampler state. SCCP runs again over a body
+-    // that changed, to fold what those constants decide.
+-    let (body, folded) = const_loads::fold(body, &mut parts, m)?;
+-    let body = if folded {
++    // A value loaded from a field of a constant global is the field's constant: a `constexpr
++    // sampler` that SCCP's folded select picked is its sampler state, and an uber-shader's
++    // configuration struct of function constants is its members. SCCP runs again over a body that
++    // changed, to fold what those constants decide; the two alternate until a round folds nothing.
++    let mut body = body;
++    loop {
++        let (next, folded) = const_loads::fold(body, &mut parts, m)?;
++        if !folded {
++            body = next;
++            break;
++        }
+         let solved = {
+             let mut cx = sccp::Context {
+                 folder: fold::Folder {
+@@ -583,13 +589,11 @@ pub fn specialize_dynamic(
+                 fcs: &fcs,
+                 name: name.clone(),
+             };
+-            sccp::run(&body, &mut cx, m)?
++            sccp::run(&next, &mut cx, m)?
+         };
+-        body.release(m);
+-        solved
+-    } else {
+-        body
+-    };
++        next.release(m);
++        body = solved;
++    }
+     matmul2d::refuse_left(&body, &parts, &ep.stage, &name, m)?;
+     post_check(&body, &parts, &stubs, &name, &control_points(ep), m)?;
+     // Rasterization-rate maps: each `float2` map call becomes Apple's GPU decoder of the parameter
+diff --git a/crates/metal2vulkan-air/src/canon/sccp.rs b/crates/metal2vulkan-air/src/canon/sccp.rs
+index e47e683..f89e2fc 100644
+--- a/crates/metal2vulkan-air/src/canon/sccp.rs
++++ b/crates/metal2vulkan-air/src/canon/sccp.rs
+@@ -995,6 +995,30 @@ impl<'b> Solver<'b> {
+         self.set(i, new, m, held)
+     }
+ 
++    /// Whether `v` is an aggregate built by `insertvalue` chains whose only unsupplied-constant
++    /// taint sits in individual inserted members, so those members alone can become `undef`
++    /// (Metal leaves an unsupplied optional constant's value indeterminate) while the rest of
++    /// the aggregate keeps its computed members.
++    fn leafwise(&self, v: Value) -> bool {
++        let mut cur = v;
++        loop {
++            if !matches!(self.lat(cur), Lat::Fc(_)) {
++                return true;
++            }
++            let Value::Inst(i) = cur else { return false };
++            let Some(inst) = self.body.insts.get(i) else {
++                return false;
++            };
++            let InstKind::InsertValue { agg, val, .. } = &inst.kind else {
++                return false;
++            };
++            if matches!(self.lat(*val), Lat::Fc(_)) && !matches!(val, Value::Inst(_)) {
++                return false;
++            }
++            cur = *agg;
++        }
++    }
++
+     /// After the fixpoint: every reachable non-pure use of an unsupplied constant needs the
+     /// caller's value, and a reachable branch on a literal `undef`/`poison` is refused.
+     fn check(&self, cx: &Context<'_>) -> Result<(), Error> {
+@@ -1031,6 +1055,11 @@ impl<'b> Solver<'b> {
+                         )));
+                     }
+                 }
++                if let InstKind::Ret(Some(v)) = &inst.kind {
++                    if self.leafwise(*v) {
++                        continue;
++                    }
++                }
+                 let mut needs = None;
+                 inst.kind.for_each_value(|v| {
+                     if let Lat::Fc(index) = self.lat(v) {
+@@ -1070,7 +1099,11 @@ impl<'b> Solver<'b> {
+                 let deletable = is_pure(&inst.kind)
+                     || is_normalize(&inst.kind)
+                     || is_defined_arg(&inst.kind, cx.folder.consts, cx.fcs).is_some();
++                let leaf_chain = matches!(inst.kind, InstKind::InsertValue { .. })
++                    && matches!(lat, Lat::Fc(_))
++                    && self.leafwise(Value::Inst(i));
+                 match (&inst.kind, lat) {
++                    _ if leaf_chain => {}
+                     (_, Lat::Const(c)) if deletable => edit.replace(i, Value::Const(c)),
+                     (_, Lat::Fc(_)) if deletable => {
+                         let undef = cx.folder.consts.intern(
+diff --git a/crates/metal2vulkan-air/src/canon/tests.rs b/crates/metal2vulkan-air/src/canon/tests.rs
+index fb0dad5..93edc0a 100644
+--- a/crates/metal2vulkan-air/src/canon/tests.rs
++++ b/crates/metal2vulkan-air/src/canon/tests.rs
+@@ -1658,7 +1658,18 @@ fn a_deeply_nested_written_global_is_rebuilt_on_a_small_stack() {
+         static_init(&mut m, "init", |f| store(f, five, gaddr));
+         let fty = m.fn_ty(void, &[dev]);
+         let mut f = m.define("k", fty);
+-        let v = load(&mut f, i32t, gaddr);
++        // A volatile read keeps the global: a plain one now reads the rebuilt initializer's leaf
++        // as its constant, and the unused global is pruned.
++        let v = f.push(
++            i32t,
++            InstKind::Load {
++                ptr: gaddr,
++                align: Align::from_bytes(4),
++                volatile: true,
++                atomic: None,
++                range: None,
++            },
++        );
+         store(&mut f, v, arg(0));
+         f.ret(None);
+         let k = f.finish();
+@@ -2359,9 +2370,12 @@ fn a_pointer_loaded_from_a_constant_globals_field_is_the_fields_constant() {
+             assert!(text.contains(kept) && !text.contains(gone), "{text}");
+         }
+     }
+-    // A field of any other type is left to the memory plan: its load stays.
+-    let text = body_text(&picked_field(Some(1), 1).unwrap());
+-    assert!(text.contains("getelementptr"), "{text}");
++    // A field of any other first-class type reads the same way: the picked struct's own `i64`.
++    for (flag, kept, gone) in [(1, "333", "444"), (0, "444", "333")] {
++        let text = body_text(&picked_field(Some(flag), 1).unwrap());
++        assert!(!text.contains("getelementptr") && !text.contains("load"), "{text}");
++        assert!(text.contains(kept) && !text.contains(gone), "{text}");
++    }
+     // Unsupplied, the select stays undecided, as before.
+     assert_eq!(
+         picked_field(None, 0).unwrap_err(),
+diff --git a/crates/metal2vulkan-runtime/src/buffer_descriptor.rs b/crates/metal2vulkan-runtime/src/buffer_descriptor.rs
+index 902a821..20b11b0 100644
+--- a/crates/metal2vulkan-runtime/src/buffer_descriptor.rs
++++ b/crates/metal2vulkan-runtime/src/buffer_descriptor.rs
+@@ -433,6 +433,10 @@ impl Device {
+             .as_ref()
+             .map_err(|unsupported| Error::Unsupported(unsupported.clone()))?;
+         let (pointer, source) = memory.into_parts();
++        let atom = lock(&shared.memory).submission_cache_atom();
++        if !((pointer.as_ptr() as u64) | length).is_multiple_of(atom) {
++            return Err(not_importable());
++        }
+         let host = host_window(call, importer, pointer, length, source)?;
+         let window = host.window;
+         if of_heap && window.offset != 0 {
+@@ -550,6 +554,10 @@ impl Device {
+             .as_ref()
+             .map_err(|unsupported| Error::Unsupported(unsupported.clone()))?;
+         let (pointer, source) = memory.into_parts();
++        let atom = lock(&shared.memory).submission_cache_atom();
++        if !((pointer.as_ptr() as u64) | length).is_multiple_of(atom) {
++            return Err(not_importable());
++        }
+         let host = host_window(call, importer, pointer, length, source)?;
+         let window = host.window;
+         if heap.is_some() && window.offset != 0 {
+diff --git a/crates/metal2vulkan-runtime/src/device/adopt.rs b/crates/metal2vulkan-runtime/src/device/adopt.rs
+index 73f84ba..ab36d6f 100644
+--- a/crates/metal2vulkan-runtime/src/device/adopt.rs
++++ b/crates/metal2vulkan-runtime/src/device/adopt.rs
+@@ -233,6 +233,7 @@ impl Device {
+             }
+         });
+         let parts = Parts {
++            submission_cache_atom: 0,
+             instance: Arc::new(InstanceShared {
+                 entry,
+                 raw: instance,
+diff --git a/crates/metal2vulkan-runtime/src/device/create.rs b/crates/metal2vulkan-runtime/src/device/create.rs
+index 76a0d07..7c995a6 100644
+--- a/crates/metal2vulkan-runtime/src/device/create.rs
++++ b/crates/metal2vulkan-runtime/src/device/create.rs
+@@ -169,6 +169,7 @@ pub struct DeviceOptions {
+     /// No Metal counterpart.
+     #[doc(hidden)]
+     pub record_executions: bool,
++    pub(super) submission_cache_atom: u64,
+ }
+ 
+ /// One setting of an instance layer (`VkLayerSettingEXT`).
+@@ -1248,6 +1249,7 @@ fn create_on(
+         gpu_times_from_host: options.gpu_times_from_host,
+         announce_each: options.announce_each.clone(),
+         record_executions: options.record_executions,
++        submission_cache_atom: options.submission_cache_atom,
+         view_reinterpretation,
+         generated_commands,
+         host_image_copy,
+@@ -1297,6 +1299,27 @@ pub(crate) fn kept_cache_is_metals(driver: Option<metal2vulkan::vk::DriverId>) -
+     driver == Some(metal2vulkan::vk::DriverId::MOLTENVK)
+ }
+ 
++impl DeviceOptions {
++    /// Enable Metal shared storage on a driver that transfers CPU/GPU cache
++    /// ownership around every synchronous submission. No Vulkan memory flag changes.
++    ///
++    /// # Safety
++    ///
++    /// Every driver submission, including internal/staging submissions, must clean
++    /// and invalidate host caches before GPU access and after confirmed GPU
++    /// quiescence, before any completion/fence/semaphore becomes visible. Cached
++    /// imports and every CPU alias must be maintained. CPU access to GPU-owned
++    /// resource atoms must be synchronized. `atom` must cover all CPU cache lines
++    /// and be a power of two no larger than256 bytes (heap buffer alignment).
++    /// The runtime aligns separate placements and refuses partial-atom no-copy
++    /// imports; aliases of one resource still share its ownership contract.
++    pub unsafe fn with_submission_cache_ownership(mut self, atom: std::num::NonZeroU64) -> Self {
++        assert!(atom.get().is_power_of_two() && atom.get() <= crate::heap::PLACEMENT_ALIGNMENT);
++        self.submission_cache_atom = atom.get();
++        self
++    }
++}
++
+ /// The devices `system_default_with` and `all_with` made, by the options they were made with
+ /// (the module docs): each group's instance and its devices by physical device, held weakly. A
+ /// group whose instance is gone has no device left (each device holds its instance), and is
+@@ -1356,6 +1379,7 @@ fn same_options(a: &DeviceOptions, b: &DeviceOptions) -> bool {
+         announce_each,
+         metal_level,
+         record_executions,
++        submission_cache_atom,
+     } = a;
+     *policy == b.policy
+         && *layers == b.layers
+@@ -1374,6 +1398,7 @@ fn same_options(a: &DeviceOptions, b: &DeviceOptions) -> bool {
+         && *announce_each == b.announce_each
+         && *metal_level == b.metal_level
+         && *record_executions == b.record_executions
++        && *submission_cache_atom == b.submission_cache_atom
+ }
+ 
+ /// The group of `made` for `options`: the live one, or a new one on a new instance. Its index.
+diff --git a/crates/metal2vulkan-runtime/src/device/mod.rs b/crates/metal2vulkan-runtime/src/device/mod.rs
+index 990c892..be7de88 100644
+--- a/crates/metal2vulkan-runtime/src/device/mod.rs
++++ b/crates/metal2vulkan-runtime/src/device/mod.rs
+@@ -751,6 +751,7 @@ pub(super) struct Parts {
+     pub(super) announce_each: BTreeSet<Degradation>,
+     /// Its command buffers keep execution records (`DeviceOptions::record_executions`).
+     pub(super) record_executions: bool,
++    pub(super) submission_cache_atom: u64,
+     /// Its views may reinterpret an image's components ([`DeviceShared`]'s field), outside
+     /// `enabled`'s vocabulary.
+     pub(super) view_reinterpretation: bool,
+@@ -818,6 +819,7 @@ impl Device {
+             gpu_times_from_host,
+             announce_each,
+             record_executions,
++            submission_cache_atom,
+             view_reinterpretation,
+             generated_commands,
+             host_image_copy,
+@@ -962,6 +964,21 @@ impl Device {
+         // SAFETY: the device is live, of `physical`, and enables timeline semaphores, and
+         // `bufferDeviceAddress` where `device_address` says so; `queues` holds at least one of
+         // its queues, which nothing uses yet.
++        let priming_has = prime::Has {
++            timestamps: timestamp_bits > 0,
++            device_addresses: device_address,
++            generated_commands: generated_commands.is_some(),
++            sparse_binding: sparse.binds(),
++        };
++        // Raw disk/cache I/O only: starting the ordinary guarded cache or its
++        // worker before priming would change the destructor ordering it protects.
++        let priming_cache = cache.priming(
++            &unsafe { instance.raw.get_physical_device_properties(physical) },
++            compile.profile_fingerprint(),
++            instance.settings,
++            prime::cache_key(priming_has, queue_family),
++            instance.sink().cloned(),
++        );
+         if let Err(error) = unsafe {
+             prime::prime(
+                 &instance.raw,
+@@ -971,13 +988,10 @@ impl Device {
+                 queue_family,
+                 &queues,
+                 Sharing::new(&queue_families),
+-                prime::Has {
+-                    timestamps: timestamp_bits > 0,
+-                    device_addresses: device_address,
+-                    generated_commands: generated_commands.is_some(),
+-                    sparse_binding: sparse.binds(),
+-                },
++                priming_has,
+                 generated_commands.as_ref(),
++                submission_cache_atom,
++                priming_cache,
+             )
+         } {
+             scheduler.stop();
+@@ -995,13 +1009,14 @@ impl Device {
+         // SAFETY: as above.
+         let memory_properties =
+             unsafe { instance.raw.get_physical_device_memory_properties(physical) };
+-        let memory = Memory::new(
++        let mut memory = Memory::new(
+             &memory_properties,
+             max_allocation,
+             device_address,
+             properties.has_unified_memory,
+             queue_families.clone(),
+         );
++        memory.set_submission_cache_atom(submission_cache_atom);
+         // SAFETY: as above.
+         let physical_properties = unsafe { instance.raw.get_physical_device_properties(physical) };
+         let limits = physical_properties.limits;
+@@ -1009,6 +1024,7 @@ impl Device {
+             16,
+             limits.min_storage_buffer_offset_alignment,
+             limits.min_uniform_buffer_offset_alignment,
++            submission_cache_atom.max(1),
+         ]
+         .into_iter()
+         .fold(1, u64::max);
+diff --git a/crates/metal2vulkan-runtime/src/device/prime.rs b/crates/metal2vulkan-runtime/src/device/prime.rs
+index 91791ba..dc8c316 100644
+--- a/crates/metal2vulkan-runtime/src/device/prime.rs
++++ b/crates/metal2vulkan-runtime/src/device/prime.rs
+@@ -52,9 +52,11 @@ use crate::generated_commands::{
+ use crate::loader_word::LoaderWord;
+ use crate::memory;
+ use crate::release::{self, Generated, Released};
++use crate::shader_cache::PrimingCache;
+ use crate::sharing::Sharing;
+ use crate::tracker::Barrier;
+ use ash::vk;
++use sha2::{Digest, Sha256};
+ use std::time::{Duration, Instant};
+ 
+ use super::QueueSlot;
+@@ -184,7 +186,7 @@ const VERTEX_SHADER: [u32; 29] = [
+ 
+ /// What the device primed has: a queue family that writes timestamps, device addresses,
+ /// `VK_EXT_device_generated_commands`, and sparse binding on its queues.
+-#[derive(Clone, Copy)]
++#[derive(Clone, Copy, Debug)]
+ pub(crate) struct Has {
+     pub(crate) timestamps: bool,
+     pub(crate) device_addresses: bool,
+@@ -192,6 +194,16 @@ pub(crate) struct Has {
+     pub(crate) sparse_binding: bool,
+ }
+ 
++/// Identity includes every byte of the helper implementation, enabled compile
++/// profile (in Records), instance settings, driver identity, and these choices.
++/// No pointer/handle or host path enters the persistent key.
++pub(super) fn cache_key(has: Has, queue_family: u32) -> metal2vulkan::cache::Hash256 {
++    crate::shader_cache::driver::Making::new("entry-point-priming-v1")
++        .digest(&Sha256::digest(include_bytes!("prime.rs")).into())
++        .text(&(has, queue_family))
++        .finish()
++}
++
+ /// Prime `device` of `physical`, made from `instance`, whose queues are `queues`, the first of
+ /// its primary family `queue_family`, its buffers and images shared as `sharing` says, on this
+ /// thread; `has` says what the device has, and `generated` holds the commands of
+@@ -213,6 +225,8 @@ pub(super) unsafe fn prime(
+     sharing: Sharing<'_>,
+     has: Has,
+     generated: Option<&Commands>,
++    submission_cache_atom: u64,
++    mut disk: PrimingCache,
+ ) -> Result<(), Error> {
+     let mut primer = Primer {
+         device,
+@@ -220,8 +234,11 @@ pub(super) unsafe fn prime(
+         sharing,
+         // SAFETY: the caller's.
+         memory: unsafe { instance.get_physical_device_memory_properties(physical) },
++        submission_cache_atom,
+         calls: 0,
+         held: Vec::new(),
++        disk: &mut disk,
++        pipeline_cache: vk::PipelineCache::null(),
+     };
+     // SAFETY: the caller's.
+     let primed = unsafe {
+@@ -239,6 +256,10 @@ pub(super) unsafe fn prime(
+     unsafe {
+         let _ = device.device_wait_idle();
+         primer.made(Call::DeviceWaitIdle);
++        if primed.is_ok() && primer.pipeline_cache != vk::PipelineCache::null() {
++            primer.disk.keep(device, loader_word, primer.pipeline_cache);
++            primer.made(Call::GetPipelineCacheData);
++        }
+         while let Some(release) = primer.held.pop() {
+             let call = release(device);
+             primer.made(call);
+@@ -299,10 +320,14 @@ struct Primer<'a> {
+     /// How the device's buffers and images are shared among its queue families.
+     sharing: Sharing<'a>,
+     memory: vk::PhysicalDeviceMemoryProperties,
++    /// Negotiated synchronous native cache ownership, or zero if absent.
++    submission_cache_atom: u64,
+     /// The table's entry points called, one bit each.
+     calls: u128,
+     /// What was made, released last first.
+     held: Vec<Release>,
++    disk: &'a mut PrimingCache,
++    pipeline_cache: vk::PipelineCache,
+ }
+ 
+ impl Primer<'_> {
+@@ -575,7 +600,7 @@ impl Primer<'_> {
+                 .layout(layout)
+                 .push_next(&mut flags);
+             let pipeline = device
+-                .create_compute_pipelines(vk::PipelineCache::null(), &[info], None)
++                .create_compute_pipelines(self.pipeline_cache, &[info], None)
+                 .map_err(|(_, error)| vulkan(error))?[0];
+             self.hold(pipeline);
+             let pipelines = ExecutionSetPipelineInfo::new(pipeline, 1);
+@@ -647,8 +672,16 @@ impl Primer<'_> {
+             self.made(Call::CreateBuffer);
+             let requirements = device.get_buffer_memory_requirements(buffer);
+             self.made(Call::GetBufferMemoryRequirements);
+-            let host =
+-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
++            // This buffer is mapped and used only for command recording;
++            // the recorded command buffer is never submitted. The existing
++            // native ownership contract therefore permits a visible,
++            // noncoherent type without pretending Vulkan memory is coherent.
++            let host = vk::MemoryPropertyFlags::HOST_VISIBLE
++                | if self.submission_cache_atom == 0 {
++                    vk::MemoryPropertyFlags::HOST_COHERENT
++                } else {
++                    vk::MemoryPropertyFlags::empty()
++                };
+             let memory = match self.allocate(requirements, host, device_addresses) {
+                 Ok(memory) => memory,
+                 Err(error) => {
+@@ -848,9 +881,8 @@ impl Primer<'_> {
+             let module = device.create_shader_module(&info, None).map_err(vulkan)?;
+             self.made(Call::CreateShaderModule);
+             self.hold(module);
+-            let cache = device
+-                .create_pipeline_cache(&vk::PipelineCacheCreateInfo::default(), None)
+-                .map_err(vulkan)?;
++            let cache = self.disk.open(device, self.loader_word).map_err(vulkan)?;
++            self.pipeline_cache = cache;
+             self.made(Call::CreatePipelineCache);
+             self.hold(cache);
+             let stage = vk::PipelineShaderStageCreateInfo::default()
+diff --git a/crates/metal2vulkan-runtime/src/heap.rs b/crates/metal2vulkan-runtime/src/heap.rs
+index 751024d..4e6ece7 100644
+--- a/crates/metal2vulkan-runtime/src/heap.rs
++++ b/crates/metal2vulkan-runtime/src/heap.rs
+@@ -1066,7 +1066,8 @@ impl Heap {
+     /// An automatic heap's lowest free range of `length` bytes at a multiple of `alignment`, now
+     /// taken; `None` where none has room.
+     pub(super) fn allocate(&self, length: u64, alignment: u64) -> Option<u64> {
+-        lock(&self.0.ranges).allocate(length, alignment)
++        let atom = lock(&self.device().shared().memory).submission_cache_atom();
++        lock(&self.0.ranges).allocate(length, alignment.max(atom))
+     }
+ 
+     /// `texture`, made in the heap, is among the heap's textures while it lives, numbered after
+diff --git a/crates/metal2vulkan-runtime/src/memory.rs b/crates/metal2vulkan-runtime/src/memory.rs
+index de3df1e..73beeea 100644
+--- a/crates/metal2vulkan-runtime/src/memory.rs
++++ b/crates/metal2vulkan-runtime/src/memory.rs
+@@ -32,6 +32,14 @@
+ //!   buffer's or a heap's bytes lies in that buffer's memory, at the offset Metal's layout gives
+ //!   it. Images are placed at a multiple of `bufferImageGranularity` and rounded up to it
+ //!   (`texture.rs`'s `ImagePlacement`).
++//!
++//! - **Submission cache ownership.** By default host-visible classes require
++//!   HOST_COHERENT. A consumer can negotiate an unsafe driver contract through
++//!   DeviceOptions::with_submission_cache_ownership: the synchronous driver
++//!   maintains CPU aliases at every submission's start and confirmed completion.
++//!   Only then may those classes use noncoherent host-visible types. Separate
++//!   placements start at whole cache atoms; partial-atom host imports refuse.
++//!   Vulkan flags stay unchanged and host image copy stays coherent-only.
+ 
+ use super::buffer::usage;
+ use super::device::lock;
+@@ -210,6 +218,13 @@ pub(super) fn candidates(
+     allowed: u32,
+     class: MemoryClass,
+     unified: bool,
++) -> Vec<u32> {
++    candidates_with_ownership(types, allowed, class, unified, false)
++}
++
++fn candidates_with_ownership(
++    types: &[vk::MemoryType], allowed: u32, class: MemoryClass,
++    unified: bool, maintained: bool,
+ ) -> Vec<u32> {
+     use vk::MemoryPropertyFlags as P;
+     let usable = |index: usize| allowed & (1 << index) != 0;
+@@ -238,6 +253,7 @@ pub(super) fn candidates(
+             P::empty(),
+         ),
+     };
++    let required = if maintained { required & !P::HOST_COHERENT } else { required };
+     let lacks = |flags: P, wanted: P| u8::from(!wanted.is_empty() && !flags.contains(wanted));
+     let mut ranked: Vec<((u8, u8), u32)> = types
+         .iter()
+@@ -649,6 +665,7 @@ impl Placement {
+ /// The device's memory: one [`Pool`] per memory type for buffers, and one for images.
+ pub(super) struct Memory {
+     types: Vec<vk::MemoryType>,
++    submission_cache_atom: u64,
+     /// The buffers' pools by memory type, then the images' ([`Memory::pool`]).
+     pools: Vec<Pool<Block>>,
+     block_bytes: u64,
+@@ -689,6 +706,7 @@ impl Memory {
+                 .map(|_| Pool::default())
+                 .collect(),
+             types,
++            submission_cache_atom: 0,
+             block_bytes: BLOCK_BYTES.min(max_allocation.max(1)),
+             device_address,
+             address_types: None,
+@@ -699,6 +717,20 @@ impl Memory {
+         }
+     }
+ 
++    pub(super) fn set_submission_cache_atom(&mut self, atom: u64) {
++        assert!(atom == 0 || atom.is_power_of_two());
++        self.submission_cache_atom = atom;
++    }
++
++    /// Cache ownership granularity:1 for normal coherent-only allocation.
++    pub(super) fn submission_cache_atom(&self) -> u64 {
++        self.submission_cache_atom.max(1)
++    }
++
++    fn candidates(&self, allowed: u32, class: MemoryClass) -> Vec<u32> {
++        candidates_with_ownership(&self.types, allowed, class, self.unified, self.submission_cache_atom != 0)
++    }
++
+     /// The bytes of `VkDeviceMemory` allocated so far for blocks of the runtime's own memory,
+     /// pooled or dedicated, whether freed since or not: host memory imported counts in none.
+     pub(super) fn allocated(&self) -> u64 {
+@@ -742,7 +774,7 @@ impl Memory {
+ 
+     /// The memory types of `class` among those `allowed` names, as bits.
+     pub(super) fn class_types(&self, allowed: u32, class: MemoryClass) -> u32 {
+-        candidates(&self.types, allowed, class, self.unified)
++        self.candidates(allowed, class)
+             .into_iter()
+             .fold(0, |bits, index| bits | 1 << index)
+     }
+@@ -850,7 +882,7 @@ impl Memory {
+         let buffers = buffer_types(device, usage(false), sharing)? & addresses;
+         let images = color_image_types(device, sharing)?;
+         let best = |bits: u32, class: MemoryClass| {
+-            candidates(&self.types, bits, class, self.unified)
++            self.candidates(bits, class)
+                 .first()
+                 .copied()
+         };
+@@ -982,7 +1014,7 @@ impl Memory {
+         export_metal: bool,
+     ) -> Result<Placement, ImportFailure> {
+         let mut failure = ImportFailure::NoMemoryType;
+-        for type_index in candidates(&self.types, allowed, class, self.unified) {
++        for type_index in self.candidates(allowed, class) {
+             let mut import = vk::ImportMemoryHostPointerInfoEXT::default()
+                 .handle_type(vk::ExternalMemoryHandleTypeFlags::HOST_ALLOCATION_EXT)
+                 .host_pointer(pointer.as_ptr().cast());
+@@ -1040,7 +1072,7 @@ impl Memory {
+     ) -> Result<(vk::DeviceMemory, u32), ImportFailure> {
+         use std::os::fd::{AsRawFd, IntoRawFd};
+         let mut failure = ImportFailure::NoMemoryType;
+-        for type_index in candidates(&self.types, allowed, class, self.unified) {
++        for type_index in self.candidates(allowed, class) {
+             let mut import = vk::ImportMemoryFdInfoKHR::default()
+                 .handle_type(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT)
+                 .fd(fd.as_raw_fd());
+@@ -1361,12 +1393,14 @@ fn place(
+     fit: Fit,
+ ) -> Result<Placement, Error> {
+     let size = requirements.size.max(1);
+-    let align = requirements.alignment.max(1);
++    // Different host resources never share a CPU cache atom. Their logical
++    // sizes remain unchanged; the next placement also starts at an atom.
++    let align = requirements.alignment.max(lock(memory).submission_cache_atom());
+     let (candidates, maker) = {
+         let memory = lock(memory);
+         let bits = requirements.memory_type_bits;
+         (
+-            candidates(&memory.types, bits, class, memory.unified),
++            memory.candidates(bits, class),
+             memory.maker(),
+         )
+     };
+diff --git a/crates/metal2vulkan-runtime/src/shader_cache/mod.rs b/crates/metal2vulkan-runtime/src/shader_cache/mod.rs
+index 88e0fad..513fe37 100644
+--- a/crates/metal2vulkan-runtime/src/shader_cache/mod.rs
++++ b/crates/metal2vulkan-runtime/src/shader_cache/mod.rs
+@@ -282,6 +282,106 @@ impl CacheSetup {
+     }
+ }
+ 
++/// Disk access for entry-point priming, before any exit hook is registered.
++/// Deliberately no worker, exit-guard section, or ordinary driver::make call.
++/// Priming keeps its raw call/cleanup ordering and records every entry point.
++pub(super) struct PrimingCache {
++    store: Store,
++    identity: driver::Identity,
++    name: String,
++    loaded: Option<Vec<u8>>,
++}
++
++impl CacheSetup {
++    pub(super) fn priming(
++        &self,
++        properties: &vk::PhysicalDeviceProperties,
++        profile: Hash256,
++        settings: Hash256,
++        key: Hash256,
++        sink: Option<MessageSink>,
++    ) -> PrimingCache {
++        let identity = driver::Identity::of(properties);
++        let name = Records {
++            identity,
++            settings,
++            profile,
++        }
++        .name(Making::new("device-entry-point-priming").digest(&key));
++        PrimingCache {
++            store: Store::new(self.directory.clone(), sink),
++            identity,
++            name,
++            loaded: None,
++        }
++    }
++}
++
++impl PrimingCache {
++    /// The caller owns the raw cache and primes/releases its entry points.
++    /// No exit_guard::called/enter may happen here, before priming is finished.
++    pub(super) unsafe fn open(
++        &mut self,
++        raw: &ash::Device,
++        word: &crate::loader_word::LoaderWord,
++    ) -> Result<vk::PipelineCache, vk::Result> {
++        let seed = match self.store.load_content(&self.name, |bytes| {
++            let data = driver::open(&self.identity, &bytes)?;
++            Some(bytes[data].to_vec())
++        }) {
++            Lookup::Hit(bytes) => Some(bytes),
++            _ => None,
++        };
++        if let Some(bytes) = seed {
++            let info = vk::PipelineCacheCreateInfo::default().initial_data(&bytes);
++            // SAFETY: the caller owns the live device and the info's bytes outlive the call.
++            if let Ok(cache) = unsafe {
++                word.restore();
++                raw.create_pipeline_cache(&info, None)
++            } {
++                self.loaded = Some(bytes);
++                return Ok(cache);
++            }
++        }
++        // Invalid/absent/refused data is never treated as a successful load.
++        // SAFETY: as above; the empty create info outlives the call.
++        unsafe {
++            word.restore();
++            raw.create_pipeline_cache(&vk::PipelineCacheCreateInfo::default(), None)
++        }
++    }
++
++    /// Called after all priming (including graphics/generated helpers) succeeds,
++    /// before its raw cache is destroyed and before exit-hook registration.
++    pub(super) unsafe fn keep(
++        &self,
++        raw: &ash::Device,
++        word: &crate::loader_word::LoaderWord,
++        cache: vk::PipelineCache,
++    ) {
++        // SAFETY: priming owns the live device/cache and every making has returned.
++        let Ok(data) = (unsafe {
++            word.restore();
++            raw.get_pipeline_cache_data(cache)
++        }) else {
++            return;
++        };
++        if self.loaded.as_deref() == Some(data.as_slice()) {
++            return;
++        }
++        if self.identity.check_vulkan_header(&data).is_err() {
++            return;
++        }
++        if self
++            .store
++            .write_record(&self.name, &driver::seal(&self.identity, &data))
++            .is_err()
++        {
++            self.store.write_failed();
++        }
++    }
++}
++
+ /// One device's shader cache: its memo, its view of the directory, what names its makings'
+ /// records, and the cache thread.
+ pub(super) struct ShaderCache {
+diff --git a/crates/metal2vulkan-runtime/src/texture/heap.rs b/crates/metal2vulkan-runtime/src/texture/heap.rs
+index 1210427..8e56312 100644
+--- a/crates/metal2vulkan-runtime/src/texture/heap.rs
++++ b/crates/metal2vulkan-runtime/src/texture/heap.rs
+@@ -1035,7 +1035,10 @@ impl Device {
+             layout => layout?,
+         };
+         if layout.texture_type == TextureType::TextureBuffer {
+-            return texture_buffer_size_and_align(&layout);
++            let mut answer = texture_buffer_size_and_align(&layout)?;
++            answer.align = answer.align.max(
++                crate::device::lock(&self.shared().memory).submission_cache_atom());
++            return Ok(answer);
+         }
+         Ok(self.heap_plan(CALL, descriptor, layout)?.size_and_align)
+     }
+@@ -1290,6 +1293,8 @@ impl Device {
+             }
+             size_and_align = metal;
+         }
++        size_and_align.align = size_and_align.align.max(
++            crate::device::lock(&self.shared().memory).submission_cache_atom());
+         check_heap_base(size_and_align.align)?;
+         // The size answered is the optimized texture's where the driver keeps the layout.
+         self.degrade_optimized_layout(descriptor, &layout);
+diff --git a/crates/metal2vulkan-runtime/src/used_resources.rs b/crates/metal2vulkan-runtime/src/used_resources.rs
+index 7521345..03001a8 100644
+--- a/crates/metal2vulkan-runtime/src/used_resources.rs
++++ b/crates/metal2vulkan-runtime/src/used_resources.rs
+@@ -58,6 +58,62 @@ pub struct UsedResources {
+     pub heaps: Vec<Heap>,
+ }
+ 
++// Compare host address ranges without touching their bytes. Object identity covers private
++// memory; host ranges additionally cover distinct imports of an IOSurface or overlapping
++// no-copy buffers. Unknown arithmetic is conservative. Rebinding is not performed by this
++// consumer, and callers must not remap these ranges while the resources are in use.
++fn buffers_overlap(a: &Buffer, b: &Buffer) -> bool {
++    if a == b {
++        return true;
++    }
++    let (Some(a_start), Some(b_start)) = (a.contents(), b.contents()) else {
++        return false;
++    };
++    let (Ok(a_len), Ok(b_len)) = (usize::try_from(a.length()), usize::try_from(b.length())) else {
++        return true;
++    };
++    let a_start = a_start.as_ptr() as usize;
++    let b_start = b_start.as_ptr() as usize;
++    let (Some(a_end), Some(b_end)) = (a_start.checked_add(a_len), b_start.checked_add(b_len)) else {
++        return true;
++    };
++    a_start < b_end && b_start < a_end
++}
++
++impl UsedResources {
++    fn references_buffer(&self, buffer: &Buffer) -> bool {
++        if buffer.heap().is_some_and(|heap| self.heaps.contains(heap)) {
++            return true;
++        }
++        self.buffers.iter().any(|other| buffers_overlap(buffer, other))
++            || self.heaps.iter().any(|heap| heap.bytes().is_some_and(|bytes| buffers_overlap(buffer, bytes)))
++    }
++
++    /// Whether this list names a resource's storage, including a view's root, a buffer
++    /// texture's backing buffer, a heap's resources and overlapping imported host ranges.
++    /// A caller may skip waiting only while this is false. This consumer does not rebind
++    /// or remap live backing ranges. Indirect command buffers remain conservative.
++    pub fn references_resource(&self, resource: super::resource::ResourceRef<'_>) -> bool {
++        use super::resource::ResourceRef;
++        match resource {
++            ResourceRef::Buffer(buffer) => self.references_buffer(buffer),
++            ResourceRef::Texture(texture) => match texture.memory() {
++                TextureMemory::Heap(heap) => self.references_heap(heap),
++                TextureMemory::Buffer(buffer) => self.references_buffer(buffer),
++                TextureMemory::Own(root) => self.textures.contains(root),
++            },
++            ResourceRef::IndirectCommandBuffer(_) => true,
++        }
++    }
++
++    /// Heap storage is treated as one dependency, conservatively including its disjoint
++    /// members. Imports over its host range are dependencies too.
++    pub fn references_heap(&self, heap: &Heap) -> bool {
++        self.heaps.contains(heap)
++            || heap.bytes().is_some_and(|bytes| self.references_buffer(bytes))
++    }
++}
++
+ /// The kind of a command encoder ([`EndedEncoder::kind`]), by the Metal protocol it is.
+ #[non_exhaustive]
+ #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

@@ -1,0 +1,71 @@
+From 8d005243b607e113bbe85baed85bf31e507555ed Mon Sep 17 00:00:00 2001
+From: Egor Kulikovskiy <xianel0x@gmail.com>
+Date: Thu, 22 Oct 2026 03:10:36 +0500
+Subject: [PATCH] x676c: report last abort ESR/FAR and hardware access-flag
+ config
+
+The worker stack pins the hang in arm_fast_fault spinning on the pmap
+rwlock while servicing a fault during copyin inside vm_allocate. Confirm
+the fault type and whether hardware access-flag management is on: stash
+the last D/I-abort ESR+FAR in sleh_synchronous and print them with
+TCR_EL1.HA/HD and ID_AA64MMFR1.HAFDBS in the sampler. If the ESR DFSC is
+an access-flag fault and HAFDBS>0 while TCR.HA=0, the fix is to enable
+hardware AF so these faults never reach the recursive software path.
+---
+ osfmk/arm64/sleh.c     | 13 +++++++++++++
+ osfmk/kern/exception.c |  8 ++++++++
+ 2 files changed, 21 insertions(+)
+
+diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+index 0b9d0ec..6fc9fda 100644
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -262,6 +262,7 @@ extern unsigned int gFastIPI;
+ /* Bring-up: count IRQs taken so the sampler can tell whether the vtimer
+  * (and thus scheduler wakeups) is actually firing. */
+ volatile uint64_t sweet_irq_total, sweet_irq_timer, sweet_irq_ipi, sweet_irq_other;
++volatile uint64_t sweet_last_esr, sweet_last_far, sweet_fault_count;
+ 
+ /*
+  * Bring-up profiler: the stuck thread is TH_RUN (spinning in the kernel),
+@@ -691,6 +692,18 @@ sleh_synchronous(arm_context_t *context, uint32_t esr, vm_offset_t far)
+ 	esr_exception_class_t  class   = ESR_EC(esr);
+ 	arm_saved_state_t    * state   = &context->ss;
+ 	thread_t               thread  = current_thread();
++#if defined(SWEET)
++	/* Bring-up: remember the last data/instruction abort so the sampler can
++	 * report its ESR (fault status code: access flag vs translation vs
++	 * permission) and FAR without printing on every fault. */
++	extern volatile uint64_t sweet_last_esr, sweet_last_far, sweet_fault_count;
++	if (class == ESR_EC_DABORT_EL0 || class == ESR_EC_DABORT_EL1 ||
++	    class == ESR_EC_IABORT_EL0 || class == ESR_EC_IABORT_EL1) {
++		sweet_last_esr = esr;
++		sweet_last_far = far;
++		sweet_fault_count++;
++	}
++#endif
+ #if MACH_ASSERT
+ 	int                    preemption_level = sleh_get_preemption_level();
+ #endif
+diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
+index a2c0bf8..2891f28 100644
+--- a/osfmk/kern/exception.c
++++ b/osfmk/kern/exception.c
+@@ -1021,6 +1021,14 @@ sweet_sample_task(const char *name, int pid, task_t task)
+ 		    sweet_irq_total, sweet_irq_timer, sweet_irq_ipi, sweet_irq_other,
+ 		    mach_absolute_time());
+ 
++		extern volatile uint64_t sweet_last_esr, sweet_last_far, sweet_fault_count;
++		uint64_t tcr = __builtin_arm_rsr64("TCR_EL1");
++		uint64_t mmfr1 = __builtin_arm_rsr64("ID_AA64MMFR1_EL1");
++		/* TCR_EL1.HA = bit 39, HD = bit 40; ID_AA64MMFR1.HAFDBS = bits[3:0] */
++		printf("SMP fault esr=0x%llx far=0x%llx cnt=%llu TCR.HA=%llu TCR.HD=%llu HAFDBS=%llu\n",
++		    sweet_last_esr, sweet_last_far, sweet_fault_count,
++		    (tcr >> 39) & 1, (tcr >> 40) & 1, mmfr1 & 0xf);
++
+ 		extern uint64_t sweet_kprof_pc[], sweet_kprof_cnt[];
+ 		extern uint64_t sweet_kprof_stack[];
+ 		extern uint32_t sweet_kprof_sp_depth;
+-- 
+2.51.0.windows.1
+

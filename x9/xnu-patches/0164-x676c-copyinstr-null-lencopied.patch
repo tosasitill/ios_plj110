@@ -1,0 +1,44 @@
+From 0af53a75e10c48844620c80012939fef096ea5d7 Mon Sep 17 00:00:00 2001
+From: Egor Kulikovskiy <xianel0x@gmail.com>
+Date: Thu, 22 Oct 2026 04:05:06 +0500
+Subject: [PATCH] x676c: allow NULL lencopied in copyinstr
+
+With PAN cleared, launchd got past vm_allocate and into openat_internal,
+which panicked (kernel data abort, translation fault, far 0) at
+copyinstr+0x18 'str xzr,[x3]'. openat_internal deliberately calls
+copyinstr(path, buf, 0xa0, NULL) -- x3=xzr -- because it does not need
+the copied length, and this tree's copyinstr dereferenced lencopied
+unconditionally. Guard both writes with a NULL check, which is what the
+caller contract expects.
+---
+ osfmk/arm64/copyio.c | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/osfmk/arm64/copyio.c b/osfmk/arm64/copyio.c
+index 0bf647c..6887478 100644
+--- a/osfmk/arm64/copyio.c
++++ b/osfmk/arm64/copyio.c
+@@ -323,7 +323,10 @@ copyinstr(const user_addr_t user_addr, char *kernel_addr, vm_size_t nbytes, vm_s
+ 	int result;
+ 	vm_size_t bytes_copied = 0;
+ 
+-	*lencopied = 0;
++	/* lencopied is optional: openat_internal and other callers pass NULL. */
++	if (lencopied) {
++		*lencopied = 0;
++	}
+ 	if (__improbable(nbytes == 0)) {
+ 		return ENAMETOOLONG;
+ 	}
+@@ -336,7 +339,7 @@ copyinstr(const user_addr_t user_addr, char *kernel_addr, vm_size_t nbytes, vm_s
+ 	result = _bcopyinstr((const char *)user_addr, kernel_addr, nbytes,
+ 	    &bytes_copied);
+ 	user_access_disable();
+-	if (result != EFAULT) {
++	if (result != EFAULT && lencopied) {
+ 		*lencopied = bytes_copied;
+ 	}
+ 	return result;
+-- 
+2.51.0.windows.1
+

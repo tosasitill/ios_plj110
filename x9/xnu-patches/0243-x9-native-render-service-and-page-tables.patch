@@ -1,0 +1,505 @@
+diff --git a/iokit/Kernel/arm/X9RenderABI.h b/iokit/Kernel/arm/X9RenderABI.h
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/X9RenderABI.h
+@@ -0,0 +1,77 @@
++/* SPDX-License-Identifier: MIT */
++#pragma once
++#include <stdint.h>
++/* Native transport, not Linux ioctl numbers. All scalar records have explicit
++ * widths. Pointer payloads always refer to the caller's own address space. */
++#define X9_RENDER_ABI 1u
++#define X9_RENDER_SERVICE "SweetX9Render"
++#define X9_RENDER_MAX_STREAMS 3u
++#define X9_RENDER_MAX_MAPPINGS 1024u
++#define X9_RENDER_MIN_VA 0x40000000ULL
++#define X9_RENDER_MAX_VA 0xc0000000ULL
++#define X9_RENDER_BUFFER_LIMIT (128ULL<<20)
++#define X9_RENDER_CLIENT_LIMIT (512ULL<<20)
++enum X9RenderOperation {
++ X9RenderGetCaps=0, X9RenderAllocate=1, X9RenderImportHost=2,
++ X9RenderRelease=3, X9RenderMap=4, X9RenderUnmap=5,
++ X9RenderCache=6, X9RenderCreateGroup=7, X9RenderSubmit=8,
++ X9RenderWait=9, X9RenderDestroyGroup=10, X9RenderTimestamp=11
++};
++enum X9RenderBufferFlags { X9RenderGPURead=1u, X9RenderGPUWrite=2u, X9RenderGPUExecute=4u };
++enum X9RenderCacheOperation { X9RenderClean=1u, X9RenderInvalidate=2u };
++enum X9RenderCapabilities { X9RenderBufferObjects=1u, X9RenderHostImport=2u, X9RenderCSFSubmit=4u, X9RenderTiler=8u, X9RenderFragment=16u };
++struct X9RenderCaps {
++ uint32_t abi,bytes,capabilities,host_page_bytes;
++ uint64_t gpu_id,gpu_features,shader_present,timestamp_frequency;
++ uint32_t core_features,l2_features,tiler_features,mem_features,mmu_features;
++ uint32_t max_threads,max_workgroup_threads,max_barrier_threads,thread_features,tls_alloc;
++ uint32_t texture_features[4],afbc_features,cs_registers,cs_unpreserved_registers;
++ uint32_t max_streams,max_mappings,reserved;
++ uint64_t va_start,va_end,max_buffer_bytes,max_client_bytes;
++};
++struct X9RenderAllocation {
++ uint32_t abi,flags;
++ uint64_t bytes,host_address;
++};
++struct X9RenderBuffer {
++ uint32_t abi,handle,memory_type,flags;
++ uint64_t bytes;
++};
++struct X9RenderHandle { uint32_t abi,handle; };
++struct X9RenderMapping {
++ uint32_t abi,handle,flags,reserved;
++ uint64_t buffer_offset,gpu_address,bytes;
++};
++struct X9RenderCacheRequest {
++ uint32_t abi,handle,operation,reserved;
++ uint64_t offset,bytes;
++};
++struct X9RenderGroup {
++ uint32_t abi,handle,stream_count,priority;
++ uint64_t compute_mask,fragment_mask,tiler_mask;
++ uint32_t max_compute,max_fragment,max_tiler,reserved;
++ uint64_t tiler_heap_bytes;
++};
++struct X9RenderStream {
++ uint32_t index,reserved;
++ uint64_t gpu_address,bytes;
++};
++struct X9RenderSubmission {
++ uint32_t abi,group,stream_count,flags;
++ uint64_t submission_id;
++ struct X9RenderStream streams[X9_RENDER_MAX_STREAMS];
++};
++struct X9RenderCompletion {
++ uint32_t abi,status,group,reserved;
++ uint64_t submission_id,completed_id;
++ uint32_t fault_status,exception_type;
++ uint64_t fault_address;
++};
++struct X9RenderWaitRequest {
++ uint32_t abi,group;
++ uint64_t submission_id,timeout_ns;
++};
++#if defined(__cplusplus)
++static_assert(sizeof(struct X9RenderMapping)==40,"mapping ABI");
++static_assert(sizeof(struct X9RenderSubmission)==96,"submission ABI");
++#endif
+diff --git a/iokit/Kernel/arm/X9RenderKernel.h b/iokit/Kernel/arm/X9RenderKernel.h
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/X9RenderKernel.h
+@@ -0,0 +1,50 @@
++/* SPDX-License-Identifier: MIT */
++#pragma once
++#include "X9RenderABI.h"
++#include <IOKit/IOBufferMemoryDescriptor.h>
++#include <IOKit/IOMemoryDescriptor.h>
++#include <IOKit/IOLocks.h>
++/* Shared only by the native service and CSF engine. Never copied to userspace. */
++struct X9RenderResource {
++ IOMemoryDescriptor *memory;
++ uint64_t bytes;
++ uint32_t handle,flags;
++ bool prepared;
++};
++struct X9RenderVMEntry {
++ X9RenderResource *resource;
++ uint64_t offset,address,bytes;
++ uint32_t flags;
++};
++struct X9RenderContext {
++ IOLock *lock;
++ task_t owner;
++ X9RenderResource resources[X9_RENDER_MAX_MAPPINGS];
++ X9RenderVMEntry mappings[X9_RENDER_MAX_MAPPINGS];
++ uint64_t allocated_bytes,next_submission,completed_submission;
++ uint32_t next_handle,mapping_count;
++ void *engine_private;
++ bool exposed,disabled,engine_open;
++};
++/* The engine installs this interface only after taking ownership of actual
++ * hardware caps and resource/stream/heap support. NULL methods stay refused. */
++struct X9RenderEngine {
++ bool (*caps)(X9RenderCaps *);
++ /* Failed open must unwind privately. close must detach all GPU mappings,
++  * groups and page tables before returning true, even when no job ran. */
++ IOReturn (*context_open)(X9RenderContext *);
++ bool (*context_close)(X9RenderContext *);
++ /* Map/unmap success includes hardware translation visibility. On uncertain
++  * rollback the engine sets disabled/exposed and retains all backing memory. */
++ IOReturn (*map)(X9RenderContext *,const X9RenderVMEntry *);
++ IOReturn (*unmap)(X9RenderContext *,const X9RenderVMEntry *);
++ IOReturn (*group_create)(X9RenderContext *,const X9RenderGroup *,X9RenderGroup *);
++ IOReturn (*group_destroy)(X9RenderContext *,uint32_t);
++ IOReturn (*submit)(X9RenderContext *,const X9RenderSubmission *,X9RenderCompletion *);
++ IOReturn (*wait)(X9RenderContext *,const X9RenderWaitRequest *,X9RenderCompletion *);
++ IOReturn (*cache)(X9RenderContext *,X9RenderResource *,const X9RenderCacheRequest *);
++ IOReturn (*timestamp)(uint64_t *);
++ bool (*quiesce)(X9RenderContext *);
++};
++extern "C" void sweet_x9_render_install(const X9RenderEngine *);
++extern "C" void sweet_x9_render_publish(void);
+diff --git a/iokit/Kernel/arm/X9RenderPageTable.h b/iokit/Kernel/arm/X9RenderPageTable.h
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/X9RenderPageTable.h
+@@ -0,0 +1,13 @@
++/* SPDX-License-Identifier: MIT */
++#pragma once
++#include "X9RenderKernel.h"
++/* AArch64 4-KiB GPU tables backed by prepared 16-KiB XNU allocations.
++ * The engine must detach the AS and confirm cache/TLB completion before edits
++ * or destruction. Binding and detaching hardware remain engine operations. */
++struct X9RenderPageTable;
++X9RenderPageTable *x9_render_vm_create();
++IOReturn x9_render_vm_map(X9RenderPageTable *,const X9RenderVMEntry *);
++IOReturn x9_render_vm_unmap(X9RenderPageTable *,const X9RenderVMEntry *);
++uint64_t x9_render_vm_publish(X9RenderPageTable *);
++void x9_render_vm_mark_detached(X9RenderPageTable *);
++bool x9_render_vm_destroy(X9RenderPageTable *);
+diff --git a/iokit/Kernel/arm/X9RenderPageTable.cpp b/iokit/Kernel/arm/X9RenderPageTable.cpp
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/X9RenderPageTable.cpp
+@@ -0,0 +1,105 @@
++/* SPDX-License-Identifier: MIT */
++#include "X9RenderPageTable.h"
++#include <IOKit/IOLib.h>
++#include <kern/task.h>
++#include <libkern/libkern.h>
++extern "C" void clean_dcache64(uint64_t,unsigned,int);
++namespace {
++/* Same table/leaf descriptor contract as pan168 SweetX9CSF.cpp. */
++constexpr uint64_t pa_mask=0x000000fffffff000ULL;
++constexpr unsigned table_limit=1028; /* two GiB of VA, 1024 leaves + upper levels */
++struct Table { IOBufferMemoryDescriptor *memory; uint64_t *entries,pa; };
++}
++struct X9RenderPageTable { Table tables[table_limit]; unsigned count; bool attached; };
++static int allocate_table(X9RenderPageTable *vm) {
++ if(vm->count==table_limit)return -1;
++ auto *m=IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,kIODirectionInOut,16384,16384);
++ if(!m)return -1;
++ if(m->prepare(kIODirectionInOut)!=kIOReturnSuccess){m->release();return -1;}
++ IOByteCount span=0;uint64_t pa=m->getPhysicalSegment(0,&span,kIOMemoryMapperNone);
++ auto *entries=(uint64_t *)m->getBytesNoCopy();
++ if(!entries||!pa||(pa&16383)||(pa&~pa_mask)||span<4096) {
++  m->complete(kIODirectionInOut);m->release();return -1;
++ }
++ bzero(entries,16384);unsigned index=vm->count++;
++ vm->tables[index]={m,entries,pa};return (int)index;
++}
++static uint64_t *leaf(X9RenderPageTable *vm,uint64_t va,bool create) {
++ unsigned table=0;
++ for(unsigned level=0;level<3;level++) {
++  auto &entry=vm->tables[table].entries[(va>>(39-level*9))&511];
++  if(!entry) {
++   if(!create)return nullptr;
++   int child=allocate_table(vm);if(child<0)return nullptr;
++   entry=vm->tables[child].pa|0x403ULL;
++  }
++  if((entry&3)!=3)return nullptr;
++  unsigned child=0;while(child<vm->count&&vm->tables[child].pa!=(entry&pa_mask))child++;
++  if(child==vm->count)return nullptr;table=child;
++ }
++ return &vm->tables[table].entries[(va>>12)&511];
++}
++static bool valid(const X9RenderVMEntry *m) {
++ return m&&m->resource&&m->resource->memory&&m->resource->prepared&&m->bytes&&
++  m->flags&&!(m->flags&~7u)&&!((m->flags&4)&&(m->flags&2))&&!(m->flags&~m->resource->flags)&&
++  !((m->address|m->offset|m->bytes)&4095)&&m->address>=X9_RENDER_MIN_VA&&
++  m->address<X9_RENDER_MAX_VA&&m->bytes<=X9_RENDER_MAX_VA-m->address&&
++  m->offset<=m->resource->bytes&&m->bytes<=m->resource->bytes-m->offset;
++}
++static bool physical(const X9RenderVMEntry *m,uint64_t offset,uint64_t *pa) {
++ IOByteCount span=0;*pa=m->resource->memory->getPhysicalSegment(m->offset+offset,&span,kIOMemoryMapperNone);
++ return *pa&& !(*pa&~pa_mask)&&span>=4096&&
++  !(*pa<0xfc910000ULL+5120u*2760u&&*pa+4096>0xfc910000ULL);
++}
++static uint64_t attrs(uint32_t flags) {
++ /* Cached index0, software cache maintenance, RO/RW and execute-never. */
++ return 0x403ULL|((flags&2)?(1ULL<<6):(3ULL<<6))|((flags&4)?0:(1ULL<<54));
++}
++X9RenderPageTable *x9_render_vm_create() {
++ auto *vm=(X9RenderPageTable *)IOMallocZero(sizeof(X9RenderPageTable));
++ if(vm&&allocate_table(vm)<0){IOFree(vm,sizeof(*vm));return nullptr;}return vm;
++}
++IOReturn x9_render_vm_map(X9RenderPageTable *vm,const X9RenderVMEntry *m) {
++ if(!vm||!valid(m))return kIOReturnBadArgument;
++ if(vm->attached)return kIOReturnBusy;
++ /* Preflight all destinations and allocate intermediate tables before writing
++  * leaves. Empty tables retained on failure remain bounded by the VA window. */
++ for(uint64_t off=0;off<m->bytes;off+=4096) {
++  uint64_t pa;if(!physical(m,off,&pa))return kIOReturnBadArgument;
++  auto *pte=leaf(vm,m->address+off,true);if(!pte)return kIOReturnNoMemory;
++  if(*pte)return kIOReturnExclusiveAccess;
++ }
++ uint64_t off=0;
++ for(;off<m->bytes;off+=4096) {
++  uint64_t pa;if(!physical(m,off,&pa))break;
++  *leaf(vm,m->address+off,false)=pa|attrs(m->flags);
++ }
++ if(off==m->bytes)return kIOReturnSuccess;
++ while(off){off-=4096;*leaf(vm,m->address+off,false)=0;}return kIOReturnBadArgument;
++}
++IOReturn x9_render_vm_unmap(X9RenderPageTable *vm,const X9RenderVMEntry *m) {
++ if(!vm||!valid(m))return kIOReturnBadArgument;
++ if(vm->attached)return kIOReturnBusy;
++ for(uint64_t off=0;off<m->bytes;off+=4096) {
++  uint64_t pa;auto *pte=leaf(vm,m->address+off,false);
++  if(!physical(m,off,&pa)||!pte||*pte!=(pa|attrs(m->flags)))return kIOReturnBadArgument;
++ }
++ for(uint64_t off=0;off<m->bytes;off+=4096)*leaf(vm,m->address+off,false)=0;
++ return kIOReturnSuccess;
++}
++uint64_t x9_render_vm_publish(X9RenderPageTable *vm) {
++ if(!vm||vm->attached)return 0;
++ for(unsigned i=0;i<vm->count;i++)clean_dcache64(vm->tables[i].pa,4096,1);
++ __asm__ volatile("dsb sy":::"memory");vm->attached=true;return vm->tables[0].pa;
++}
++void x9_render_vm_mark_detached(X9RenderPageTable *vm) {
++ /* Caller must have confirmed GPU stop, flush and AS detach, not just a fence. */
++ if(vm)vm->attached=false;
++}
++bool x9_render_vm_destroy(X9RenderPageTable *vm) {
++ if(!vm)return true;if(vm->attached)return false;
++ for(unsigned i=0;i<vm->count;i++) {
++  vm->tables[i].memory->complete(kIODirectionInOut);vm->tables[i].memory->release();
++ }
++ IOFree(vm,sizeof(*vm));return true;
++}
+diff --git a/iokit/Kernel/arm/SweetX9RenderService.cpp b/iokit/Kernel/arm/SweetX9RenderService.cpp
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetX9RenderService.cpp
+@@ -0,0 +1,235 @@
++/* SPDX-License-Identifier: MIT */
++#include "X9RenderKernel.h"
++#include <IOKit/IOUserClient.h>
++#include <IOKit/IOService.h>
++#include <IOKit/IOLib.h>
++#include <kern/task.h>
++#include <pexpert/pexpert.h>
++#include <libkern/libkern.h>
++static const X9RenderEngine *render_engine;
++static bool render_published;
++static bool render_caps_ready(X9RenderCaps *caps) {
++ if(!render_engine||!render_engine->caps||!render_engine->submit||!render_engine->wait||
++    !render_engine->group_create||!render_engine->group_destroy||!render_engine->cache||
++    !render_engine->timestamp||!render_engine->quiesce||!render_engine->context_open||
++    !render_engine->context_close||!render_engine->map||!render_engine->unmap)return false;
++ bzero(caps,sizeof(*caps));
++ if(!render_engine->caps(caps))return false;
++ unsigned required=X9RenderBufferObjects|X9RenderHostImport|X9RenderCSFSubmit|X9RenderTiler|X9RenderFragment;
++ return caps->abi==X9_RENDER_ABI&&caps->bytes==sizeof(*caps)&&caps->gpu_id==0xe8800010ULL&&
++  caps->host_page_bytes==16384&&caps->max_streams==3&&caps->max_mappings==X9_RENDER_MAX_MAPPINGS&&
++  (caps->capabilities&required)==required&&caps->va_start==X9_RENDER_MIN_VA&&caps->va_end==X9_RENDER_MAX_VA&&
++  caps->max_buffer_bytes==X9_RENDER_BUFFER_LIMIT&&caps->max_client_bytes==X9_RENDER_CLIENT_LIMIT;
++}
++class SweetX9RenderUserClient : public IOUserClient {
++ OSDeclareDefaultStructors(SweetX9RenderUserClient);
++ X9RenderContext *context=nullptr;
++ static bool good_flags(uint32_t flags) {return flags&&(flags&~7u)==0&&(!(flags&4u)||!(flags&2u));}
++ X9RenderResource *resource(uint32_t handle) {
++  for(auto &r:context->resources)if(r.memory&&r.handle==handle)return &r;
++  return nullptr;
++ }
++ bool mapping_exists(X9RenderResource *r) {
++  for(unsigned i=0;i<context->mapping_count;i++)if(context->mappings[i].resource==r)return true;
++  return false;
++ }
++ bool stream_mapped(const X9RenderStream &stream) {
++  if(stream.index>=3||stream.reserved||!stream.bytes||(stream.gpu_address&7)||(stream.bytes&7)||stream.bytes>(1u<<20))return false;
++  for(unsigned i=0;i<context->mapping_count;i++) {
++   const auto &m=context->mappings[i];
++   if((m.flags&X9RenderGPURead)&&stream.gpu_address>=m.address&&
++      stream.gpu_address-m.address<=m.bytes&&stream.bytes<=m.bytes-(stream.gpu_address-m.address))return true;
++  }
++  return false;
++ }
++ IOReturn operation(uint32_t selector,IOExternalMethodArguments *a) {
++  if(selector==X9RenderGetCaps) {
++   X9RenderCaps caps;
++   if(a->structureInputSize||a->structureOutputSize!=sizeof(caps))return kIOReturnBadArgument;
++   if(!render_caps_ready(&caps))return kIOReturnNotReady;
++   memcpy(a->structureOutput,&caps,sizeof(caps));return kIOReturnSuccess;
++  }
++  if(context->disabled)return kIOReturnNotReady;
++  if(selector==X9RenderAllocate||selector==X9RenderImportHost) {
++   if(a->structureInputSize!=sizeof(X9RenderAllocation)||a->structureOutputSize!=sizeof(X9RenderBuffer))return kIOReturnBadArgument;
++   const auto &request=*(const X9RenderAllocation *)a->structureInput;
++   if(request.abi!=X9_RENDER_ABI||!good_flags(request.flags)||!request.bytes||(request.bytes&16383)||
++      request.bytes>X9_RENDER_BUFFER_LIMIT||request.bytes>X9_RENDER_CLIENT_LIMIT-context->allocated_bytes)return kIOReturnBadArgument;
++   if(selector==X9RenderAllocate&&request.host_address)return kIOReturnBadArgument;
++   if(selector==X9RenderImportHost&&(!request.host_address||(request.host_address&16383)||request.host_address+request.bytes<request.host_address||
++      request.host_address>=0x0000800000000000ULL||request.bytes>0x0000800000000000ULL-request.host_address))return kIOReturnBadArgument;
++   unsigned slot=0;while(slot<X9_RENDER_MAX_MAPPINGS&&context->resources[slot].memory)slot++;
++   if(slot==X9_RENDER_MAX_MAPPINGS||context->next_handle==UINT32_MAX)return kIOReturnNoResources;
++   IOMemoryDescriptor *memory=selector==X9RenderAllocate?
++    IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,kIODirectionInOut|kIOMemoryKernelUserShared,request.bytes,16384):
++    IOMemoryDescriptor::withAddressRange(request.host_address,request.bytes,kIODirectionInOut,context->owner);
++   if(!memory)return kIOReturnNoMemory;
++   IOReturn kr=memory->prepare(kIODirectionInOut);
++   if(kr!=kIOReturnSuccess){memory->release();return kr;}
++   if(selector==X9RenderAllocate)bzero(((IOBufferMemoryDescriptor *)memory)->getBytesNoCopy(),request.bytes);
++   uint32_t handle=++context->next_handle;
++   context->resources[slot]={memory,request.bytes,handle,request.flags,true};context->allocated_bytes+=request.bytes;
++   X9RenderBuffer reply={X9_RENDER_ABI,handle,slot+1,request.flags,request.bytes};
++   memcpy(a->structureOutput,&reply,sizeof(reply));return kIOReturnSuccess;
++  }
++  if(selector==X9RenderRelease) {
++   if(a->structureInputSize!=sizeof(X9RenderHandle)||a->structureOutputSize)return kIOReturnBadArgument;
++   const auto &request=*(const X9RenderHandle *)a->structureInput;auto *r=resource(request.handle);
++   if(request.abi!=X9_RENDER_ABI||!r)return kIOReturnBadArgument;
++   if(context->exposed||mapping_exists(r))return kIOReturnBusy;
++   if(r->prepared)r->memory->complete(kIODirectionInOut);
++   r->memory->release();context->allocated_bytes-=r->bytes;bzero(r,sizeof(*r));return kIOReturnSuccess;
++  }
++  if(selector==X9RenderMap||selector==X9RenderUnmap) {
++   if(a->structureInputSize!=sizeof(X9RenderMapping)||a->structureOutputSize)return kIOReturnBadArgument;
++   const auto &request=*(const X9RenderMapping *)a->structureInput;auto *r=resource(request.handle);
++   if(request.abi!=X9_RENDER_ABI||!r||request.reserved||!good_flags(request.flags)||
++      (request.flags&~r->flags)||!request.bytes||((request.buffer_offset|request.gpu_address|request.bytes)&4095)||
++      request.buffer_offset>r->bytes||request.bytes>r->bytes-request.buffer_offset||
++      request.gpu_address<X9_RENDER_MIN_VA||request.gpu_address>=X9_RENDER_MAX_VA||request.bytes>X9_RENDER_MAX_VA-request.gpu_address)return kIOReturnBadArgument;
++   if(context->exposed)return kIOReturnBusy;
++   if(selector==X9RenderUnmap) {
++    for(unsigned i=0;i<context->mapping_count;i++) {
++     auto &m=context->mappings[i];
++     if(m.resource==r&&m.offset==request.buffer_offset&&m.address==request.gpu_address&&m.bytes==request.bytes&&m.flags==request.flags) {
++      IOReturn kr=render_engine->unmap(context,&m);
++      if(kr!=kIOReturnSuccess)return kr;
++      m=context->mappings[--context->mapping_count];return kIOReturnSuccess;
++     }
++    }
++    return kIOReturnBadArgument;
++   }
++   if(context->mapping_count==X9_RENDER_MAX_MAPPINGS)return kIOReturnNoResources;
++   for(unsigned i=0;i<context->mapping_count;i++) {
++    const auto &m=context->mappings[i];
++    if(request.gpu_address<m.address+m.bytes&&m.address<request.gpu_address+request.bytes)return kIOReturnBadArgument;
++   }
++   for(uint64_t offset=0;offset<request.bytes;offset+=4096) {
++    IOByteCount span=0;uint64_t pa=r->memory->getPhysicalSegment(request.buffer_offset+offset,&span,kIOMemoryMapperNone);
++    if(!pa||(pa&4095)||span<4096||pa>=(1ULL<<40)||
++       (pa<0xfc910000ULL+5120u*2760u&&pa+4096>0xfc910000ULL))return kIOReturnBadArgument;
++   }
++   X9RenderVMEntry entry={r,request.buffer_offset,request.gpu_address,request.bytes,request.flags};
++   IOReturn kr=render_engine->map(context,&entry);
++   if(kr!=kIOReturnSuccess)return kr;
++   context->mappings[context->mapping_count++]=entry;
++   return kIOReturnSuccess;
++  }
++  if(selector==X9RenderCache) {
++   if(a->structureInputSize!=sizeof(X9RenderCacheRequest)||a->structureOutputSize)return kIOReturnBadArgument;
++   const auto &request=*(const X9RenderCacheRequest *)a->structureInput;auto *r=resource(request.handle);
++   if(request.abi!=X9_RENDER_ABI||!r||request.reserved||!request.operation||(request.operation&~3u)||!request.bytes||
++      request.offset>r->bytes||request.bytes>r->bytes-request.offset||context->exposed)return kIOReturnBadArgument;
++   return render_engine->cache(context,r,&request);
++  }
++  if(selector==X9RenderCreateGroup) {
++   if(a->structureInputSize!=sizeof(X9RenderGroup)||a->structureOutputSize!=sizeof(X9RenderGroup))return kIOReturnBadArgument;
++   const auto &request=*(const X9RenderGroup *)a->structureInput;
++   X9RenderCaps caps;if(!render_caps_ready(&caps))return kIOReturnNotReady;
++   if(request.abi!=X9_RENDER_ABI||request.handle||request.reserved||request.stream_count!=3||request.priority>1||
++      !request.compute_mask||!request.fragment_mask||!request.tiler_mask||request.tiler_mask!=1||
++      ((request.compute_mask|request.fragment_mask)&~caps.shader_present)||
++      !request.max_compute||request.max_compute>__builtin_popcountll(request.compute_mask)||
++      !request.max_fragment||request.max_fragment>__builtin_popcountll(request.fragment_mask)||request.max_tiler!=1||
++      !request.tiler_heap_bytes||request.tiler_heap_bytes>(64u<<20)||(request.tiler_heap_bytes&4095))return kIOReturnBadArgument;
++   return render_engine->group_create(context,&request,(X9RenderGroup *)a->structureOutput);
++  }
++  if(selector==X9RenderDestroyGroup) {
++   if(a->structureInputSize!=sizeof(X9RenderHandle)||a->structureOutputSize)return kIOReturnBadArgument;
++   const auto &request=*(const X9RenderHandle *)a->structureInput;
++   if(request.abi!=X9_RENDER_ABI||!request.handle)return kIOReturnBadArgument;
++   return render_engine->group_destroy(context,request.handle);
++  }
++  if(selector==X9RenderSubmit) {
++   if(a->structureInputSize!=sizeof(X9RenderSubmission)||a->structureOutputSize!=sizeof(X9RenderCompletion))return kIOReturnBadArgument;
++   X9RenderSubmission request;memcpy(&request,a->structureInput,sizeof(request));
++   if(request.abi!=X9_RENDER_ABI||!request.group||!request.stream_count||request.stream_count>3||request.flags||
++      !request.submission_id||context->next_submission==UINT64_MAX||request.submission_id!=context->next_submission+1)return kIOReturnBadArgument;
++   unsigned seen=0;
++   for(unsigned i=0;i<request.stream_count;i++) {
++    if(!stream_mapped(request.streams[i])||(seen&(1u<<request.streams[i].index)))return kIOReturnBadArgument;
++    seen|=1u<<request.streams[i].index;
++   }
++   context->next_submission=request.submission_id;
++   IOReturn kr=render_engine->submit(context,&request,(X9RenderCompletion *)a->structureOutput);
++   if(context->exposed)context->disabled=true; /* DMA lifetime unresolved: no retry. */
++   return kr;
++  }
++  if(selector==X9RenderWait) {
++   if(a->structureInputSize!=sizeof(X9RenderWaitRequest)||a->structureOutputSize!=sizeof(X9RenderCompletion))return kIOReturnBadArgument;
++   const auto &request=*(const X9RenderWaitRequest *)a->structureInput;
++   if(request.abi!=X9_RENDER_ABI||!request.group||!request.submission_id||request.submission_id>context->next_submission||request.timeout_ns>10000000000ULL)return kIOReturnBadArgument;
++   return render_engine->wait(context,&request,(X9RenderCompletion *)a->structureOutput);
++  }
++  if(selector==X9RenderTimestamp) {
++   if(a->structureInputSize||a->structureOutputSize!=sizeof(uint64_t))return kIOReturnBadArgument;
++   return render_engine->timestamp((uint64_t *)a->structureOutput);
++  }
++  return kIOReturnUnsupported;
++ }
++public:
++ bool initWithTask(task_t task,void *security,UInt32 type,OSDictionary *props) APPLE_KEXT_OVERRIDE {
++  if(type||clientHasPrivilege(task,kIOClientPrivilegeForeground)!=kIOReturnSuccess)return false;
++  if(!IOUserClient::initWithTask(task,security,type,props))return false;
++  context=(X9RenderContext *)IOMallocZero(sizeof(X9RenderContext));if(!context)return false;
++  context->lock=IOLockAlloc();if(!context->lock)return false;
++  context->owner=task;task_reference(task);
++  X9RenderCaps caps;if(!render_caps_ready(&caps))return false;
++  if(render_engine->context_open(context)!=kIOReturnSuccess)return false;
++  context->engine_open=true;return true;
++ }
++ IOReturn clientClose(void) APPLE_KEXT_OVERRIDE {if(!isInactive())terminate();return kIOReturnSuccess;}
++ void free(void) APPLE_KEXT_OVERRIDE {
++  if(context) {
++   if(context->engine_open&&!render_engine->context_close(context)) {
++    IOLog("X9 RENDER: unresolved client teardown;prepared resources/context retained,no reset\n");context=nullptr;
++   }else {
++    for(auto &r:context->resources)if(r.memory){if(r.prepared)r.memory->complete(kIODirectionInOut);r.memory->release();}
++    if(context->owner)task_deallocate(context->owner);if(context->lock)IOLockFree(context->lock);
++    IOFree(context,sizeof(*context));context=nullptr;
++   }
++  }
++  IOUserClient::free();
++ }
++ IOReturn clientMemoryForType(UInt32 type,IOOptionBits *options,IOMemoryDescriptor **memory) APPLE_KEXT_OVERRIDE {
++  if(!context||!options||!memory||!type||type>X9_RENDER_MAX_MAPPINGS||
++     current_task()!=context->owner||clientHasPrivilege(current_task(),kIOClientPrivilegeForeground)!=kIOReturnSuccess)return kIOReturnBadArgument;
++  IOLockLock(context->lock);auto &r=context->resources[type-1];
++  if(!r.memory){IOLockUnlock(context->lock);return kIOReturnBadArgument;}
++  r.memory->retain();*memory=r.memory;*options=0;IOLockUnlock(context->lock);return kIOReturnSuccess;
++ }
++ IOReturn externalMethod(uint32_t selector,IOExternalMethodArguments *args,IOExternalMethodDispatch *,OSObject *,void *) APPLE_KEXT_OVERRIDE {
++  if(!context||!args||!context->lock||current_task()!=context->owner||
++     clientHasPrivilege(current_task(),kIOClientPrivilegeForeground)!=kIOReturnSuccess)return kIOReturnNotPrivileged;
++  if(args->structureInputSize>sizeof(X9RenderSubmission)||args->structureOutputSize>sizeof(X9RenderCaps)||
++     args->scalarInputCount||args->scalarOutputCount||args->structureInputDescriptor||args->structureOutputDescriptor||
++     (args->structureInputSize&&!args->structureInput)||(args->structureOutputSize&&!args->structureOutput))return kIOReturnBadArgument;
++  IOLockLock(context->lock);
++  if(args->structureOutputSize)bzero(args->structureOutput,args->structureOutputSize);
++  IOReturn kr=operation(selector,args);IOLockUnlock(context->lock);return kr;
++ }
++};
++OSDefineMetaClassAndStructors(SweetX9RenderUserClient,IOUserClient);
++class SweetX9Render : public IOService {
++ OSDeclareDefaultStructors(SweetX9Render);
++public:
++ IOReturn newUserClient(task_t task,void *security,UInt32 type,OSDictionary *props,IOUserClient **handler) APPLE_KEXT_OVERRIDE {
++  if(!handler)return kIOReturnBadArgument;
++  auto *client=new SweetX9RenderUserClient;if(!client)return kIOReturnNoMemory;
++  if(!client->initWithTask(task,security,type,props)||!client->attach(this)||!client->start(this)) {
++   if(client->getProvider()==this)client->detach(this);client->release();return kIOReturnNotPrivileged;
++  }
++  *handler=client;return kIOReturnSuccess;
++ }
++};
++OSDefineMetaClassAndStructors(SweetX9Render,IOService);
++extern "C" void sweet_x9_render_install(const X9RenderEngine *engine) {if(!render_engine&&!render_published)render_engine=engine;}
++extern "C" void sweet_x9_render_publish(void) {
++ if(render_published)return;X9RenderCaps caps;if(!render_caps_ready(&caps))return;
++ auto *service=new SweetX9Render;IOService *root=IOService::getServiceRoot();
++ if(!service||!root||!service->init()||!service->attach(root)||!service->start(root)) {
++  if(service){if(service->getProvider()==root)service->detach(root);service->release();}return;
++ }
++ service->setName(X9_RENDER_SERVICE);service->setProperty("X9RenderABI",X9_RENDER_ABI,32);service->setProperty("X9RenderReady",true);
++ service->setProperty("X9RenderCapabilities",caps.capabilities,32);render_published=true;service->registerService();
++}

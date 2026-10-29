@@ -1,0 +1,15 @@
+{
+  "candidate": "pan184-coherent-prime",
+  "base": "/Users/tosasitill/HelioDarwin-x9-lk-preserve/x9/out/pan169-native-render-cache",
+  "runtime_status": "NOT RUN",
+  "plugins": "/Users/tosasitill/HelioDarwin-x9-lk-preserve/x9/out/pan184-coherent-prime/x9-metal-plugins-ios.tar.gz",
+  "target": "iOS writable root System/Library/Extensions",
+  "boot_contains_plugin_binaries": false,
+  "boot_contains_render_probe": false,
+  "installation_status": "NOT INSTALLED; adb device not attached",
+  "exact_file_manifest": "/Users/tosasitill/HelioDarwin-x9-lk-preserve/x9/out/pan184-coherent-prime/plugin-package/manifest.json",
+  "console_base": "0xaec0f000",
+  "console_size": "0x200000",
+  "pstore_mirror": true,
+  "purpose": "metal2vulkan device priming accepts negotiated noncoherent visible memory; native IOKit map lifecycle fixes retained"
+}

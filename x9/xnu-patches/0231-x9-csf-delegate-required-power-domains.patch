@@ -1,0 +1,212 @@
+diff --git a/iokit/Kernel/arm/SweetX9CSF.cpp b/iokit/Kernel/arm/SweetX9CSF.cpp
+--- a/iokit/Kernel/arm/SweetX9CSF.cpp
++++ b/iokit/Kernel/arm/SweetX9CSF.cpp
+@@ -448,7 +448,7 @@
+   IOLog("X9 CSF BOOT: host L2 power command not confirmed; retaining power\n");return -1;
+  }
+  if(!bypass(smmu)||gr(gpu,0x704)!=0) {
+-  if(queue.shader_delegated) {
++  if(queue.delegated_domains) {
+    IOLog("X9 SHADER: runtime ownership changed after delegation; outer power retained\n");return -1;
+   }
+   IOLog("X9 CSF BOOT: bypass/MCU state changed after L2 request; AS0 not installed\n");
+@@ -568,7 +568,7 @@
+  Plan p;const char *error=parse(p);
+  if(!error)error=populate(p);
+  if(error){IOLog("X9 CSF BOOT: image preparation failed: %s\n",error);return 0;}
+- IOLog("X9 CSF BOOT: pan156 stock-firmware=%s prepared bytes=%llu tables=%u\n",
++ IOLog("X9 CSF BOOT: pan157 stock-firmware=%s prepared bytes=%llu tables=%u\n",
+   csf_firmware_sha256,p.mapped_bytes,p.table_count);
+  return boot(p,gpu,smmu,doorbell);
+ }
+diff --git a/iokit/Kernel/arm/SweetX9CSFQueue.inc b/iokit/Kernel/arm/SweetX9CSFQueue.inc
+--- a/iokit/Kernel/arm/SweetX9CSFQueue.inc
++++ b/iokit/Kernel/arm/SweetX9CSFQueue.inc
+@@ -24,13 +24,13 @@
+ constexpr unsigned queue_batch_bytes=3*sizeof(uint64_t);
+ struct QueueProbe {
+  Plan memory;
+- bool requested,as_installed,touched,dynamic,indirect,reuse,range_uncertain,stop_uncertain,compute,shader_delegated,power_uncertain,shader_dumped;
+- uint32_t shader_pwroff_count;
++ bool requested,as_installed,touched,dynamic,indirect,reuse,range_uncertain,stop_uncertain,compute,power_uncertain,shader_dumped;
++ uint32_t shader_pwroff_count,power_domains,delegated_domains;
+  uint64_t shader_mask;
+  unsigned completed;
+  uint64_t saved_cfg,saved_attr;
+  uint32_t global_in,global_out,group_in,group_out,stream_in,stream_out;
+- QueueProbe():requested(false),as_installed(false),touched(false),dynamic(false),indirect(false),reuse(false),range_uncertain(false),stop_uncertain(false),compute(false),shader_delegated(false),power_uncertain(false),shader_dumped(false),shader_pwroff_count(0),shader_mask(0),completed(0),saved_cfg(0),saved_attr(0),
++ QueueProbe():requested(false),as_installed(false),touched(false),dynamic(false),indirect(false),reuse(false),range_uncertain(false),stop_uncertain(false),compute(false),power_uncertain(false),shader_dumped(false),shader_pwroff_count(0),power_domains(0),delegated_domains(0),shader_mask(0),completed(0),saved_cfg(0),saved_attr(0),
+   global_in(0),global_out(0),group_in(0),group_out(0),stream_in(0),stream_out(0) {}
+ };
+ static bool clean_page(Plan &p,uint32_t va) {
+diff --git a/iokit/Kernel/arm/SweetX9CSFCompute.inc b/iokit/Kernel/arm/SweetX9CSFCompute.inc
+--- a/iokit/Kernel/arm/SweetX9CSFCompute.inc
++++ b/iokit/Kernel/arm/SweetX9CSFCompute.inc
+@@ -9,11 +9,22 @@
+  if(!q.compute)return true;
+  uint64_t present=gr64(gpu,0xa00),ready=gr64(gpu,0xa08);
+  uint64_t stack=gr64(gpu,0xbc8),base=gr64(gpu,0xb88),control=gr64(gpu,0x820);
++ uint32_t features=gr(gpu,0x60);
++ /* Stock delegate_pm_domains_control_to_fw always hands TILER and SHADER
++  * to firmware, even for compute-only jobs. NEURAL depends on GPU_FEATURES4. */
++ q.power_domains=(1u<<1)|(1u<<8);
++ if(features&(1u<<4))q.power_domains|=1u<<9;
+  IOLog("X9 SHADER: present=%llx ready=%llx stack=%llx base=%llx PWR_STATUS=%llx\n",
+   present,ready,stack,base,control);
+- if(!present||present==~0ULL||ready||stack||base||!(control&(1ULL<<8))||
+-    (control&((1ULL<<24)|(1ULL<<41)|(1ULL<<43)))) {
+-  IOLog("X9 SHADER: exclusive shader-domain ownership gate rejected\n");return false;
++ IOLog("X9 SHADER: GPU_FEATURES=%08x required-domains=%08x tiler-ready=%llx neural=%u\n",
++  features,q.power_domains,gr64(gpu,0x948),!!(features&(1u<<4)));
++ if(features==~0u||!present||present==~0ULL||ready||stack||base||
++    gr64(gpu,0xa10)||gr64(gpu,0xb90)||gr64(gpu,0xbd0)||
++    gr64(gpu,0x948)||gr64(gpu,0x950)||
++    ((q.power_domains&(1u<<9))&&(gr64(gpu,0xa48)||gr64(gpu,0xa50)))||
++    (control&q.power_domains)!=q.power_domains||
++    (control&(((uint64_t)q.power_domains<<16)|(1ULL<<41)|(1ULL<<43)))) {
++  IOLog("X9 SHADER: exclusive required-domain ownership/all-off gate rejected\n");return false;
+  }
+  uint64_t freq;__asm__ volatile("mrs %0,cntfrq_el0":"=r"(freq));
+  /* Stock convert_dur_to_core_pwroff_count: duration800000ns * CNTFRQ /1e9,
+@@ -48,22 +59,38 @@
+ }
+ static bool shader_delegate(QueueProbe &q,vm_offset_t gpu) {
+  if(!q.compute)return true;
+- /* Stock delegate_pm_domain_control_to_fw(SHADER=8), before L2 up.
+-  * Host control bit8 must become0 and delegated bit24 must become1. */
++ /* Match stock before-L2 order: TILER1, SHADER8, NEURAL9 if present.
++  * Completion is tracked per domain, so a partial failure never loses the
++  * outstanding ownership obligation or releases outer power. */
+  uint64_t state=gr64(gpu,0x820);
+- if(!(state&(1ULL<<8))||(state&((1ULL<<24)|(1ULL<<41)|(1ULL<<43))))return false;
+- q.power_uncertain=true;
+- gw(gpu,0x828,0x820u);
+- uint64_t end=deadline_ms(1000);
+- do {
+-  state=gr64(gpu,0x820);
+-  if(state!=~0ULL&&!(state&(1ULL<<8))&&(state&(1ULL<<24))&&!(state&(1ULL<<41))) {
+-   q.shader_delegated=true;q.power_uncertain=false;
+-   IOLog("X9 SHADER: shader-domain8 control delegated to MCU, PWR_STATUS=%llx\n",state);return true;
+-  }
+-  sleep_ms();
+- }while(mach_absolute_time()<end);
+- IOLog("X9 SHADER: delegation not confirmed PWR_STATUS=%llx; outer power retained\n",state);return false;
++ if((state&q.power_domains)!=q.power_domains||
++    (state&(((uint64_t)q.power_domains<<16)|(1ULL<<41)|(1ULL<<43))))return false;
++ const unsigned domains[]={1,8,9};
++ for(unsigned i=0;i<3;i++) {
++  unsigned domain=domains[i];uint32_t bit=1u<<domain;
++  if(!(q.power_domains&bit))continue;
++  q.power_uncertain=true;gw(gpu,0x828,(domain<<8)|0x20u);
++  uint64_t end=deadline_ms(1000);
++  do {
++   state=gr64(gpu,0x820);
++   uint32_t expected=q.delegated_domains|bit;
++   if(state!=~0ULL&&!(state&expected)&&
++      (state&((uint64_t)expected<<16))==((uint64_t)expected<<16)&&
++      !(state&((1ULL<<41)|(1ULL<<43)))) {
++    q.delegated_domains=expected;q.power_uncertain=false;break;
++   }
++   sleep_ms();
++  }while(mach_absolute_time()<end);
++  if(q.power_uncertain) {
++   IOLog("X9 SHADER: delegation not confirmed domain=%u completed=%08x PWR_STATUS=%llx; outer power retained\n",
++    domain,q.delegated_domains,state);return false;
++  }
++  IOLog("X9 SHADER: delegated %s domain=%u completed=%08x PWR_STATUS=%llx\n",
++   domain==1?"TILER":domain==8?"SHADER":"NEURAL",domain,q.delegated_domains,state);
++ }
++ IOLog("X9 SHADER: required power-domain delegation complete required=%08x completed=%08x before L2/MCU\n",
++  q.power_domains,q.delegated_domains);
++ return q.delegated_domains==q.power_domains;
+ }
+ static bool shader_power_off(vm_offset_t gpu,unsigned domain,unsigned ready_off,unsigned trans_off) {
+  uint64_t owned=gr64(gpu,ready_off),state=gr64(gpu,0x820);
+@@ -84,26 +111,38 @@
+   domain,gr64(gpu,ready_off),gr64(gpu,trans_off));return false;
+ }
+ static bool shader_quiesce(QueueProbe &q,vm_offset_t gpu) {
+- if(!q.compute||!q.shader_delegated)return true;
+- /* Caller already confirmed CSG terminate, MCU stopped and GPU cache flush.
+-  * Stock RETRACT pendingbit43 then explicit host control confirmation. */
+- q.power_uncertain=true;gw(gpu,0x828,0x821u);
+- uint64_t end=deadline_ms(1000),state=0;
+- do {
+-  state=gr64(gpu,0x820);
+-  if(state!=~0ULL&&!(state&((1ULL<<24)|(1ULL<<41)|(1ULL<<43)))&&(state&(1ULL<<8))) {
+-   q.shader_delegated=false;q.power_uncertain=false;break;
+-  }
+-  sleep_ms();
+- }while(mach_absolute_time()<end);
+- if(q.power_uncertain) {
+-  IOLog("X9 SHADER: retract not confirmed PWR_STATUS=%llx; retaining DMA and power\n",state);return false;
+- }
+- /* Mirror stock host order SHADER -> BASE -> STACK, never power down a
+-  * domain unless the live host ownership mask allows that exact command. */
++ if(!q.compute)return true;
++ if(q.power_uncertain)return false;
++ /* Caller confirmed CSG terminate, MCU stopped and GPU cache flush.
++  * Retract only successfully delegated domains, in stock TILER/SHADER/NEURAL
++  * order. A failed/uncertain step stops here without retry or GPU reset. */
++ const unsigned domains[]={1,8,9};
++ for(unsigned i=0;i<3;i++) {
++  unsigned domain=domains[i];uint32_t bit=1u<<domain;
++  if(!(q.delegated_domains&bit))continue;
++  q.power_uncertain=true;gw(gpu,0x828,(domain<<8)|0x21u);
++  uint64_t end=deadline_ms(1000),state=0;
++  do {
++   state=gr64(gpu,0x820);
++   if(state!=~0ULL&&!(state&(((uint64_t)bit<<16)|(1ULL<<41)|(1ULL<<43)))&&(state&bit)) {
++    q.delegated_domains&=~bit;q.power_uncertain=false;break;
++   }
++   sleep_ms();
++  }while(mach_absolute_time()<end);
++  if(q.power_uncertain) {
++   IOLog("X9 SHADER: retract not confirmed domain=%u remaining=%08x PWR_STATUS=%llx; retaining DMA and power\n",
++    domain,q.delegated_domains,state);return false;
++  }
++  IOLog("X9 SHADER: retracted domain=%u remaining=%08x PWR_STATUS=%llx\n",domain,q.delegated_domains,state);
++ }
++ /* Return every domain to its observed initial all-off state. No command
++  * is sent for an already-off domain or one not permitted by live host control.
++  * TILER must be off before the caller releases L2. */
+  if(!shader_power_off(gpu,8,0xa08,0xa10)||
+-    !shader_power_off(gpu,14,0xb88,0xb90)||!shader_power_off(gpu,15,0xbc8,0xbd0))return false;
+- IOLog("X9 SHADER: control retracted and shader/base/stack returned to initial all-off state\n");return true;
++    ((q.power_domains&(1u<<9))&&!shader_power_off(gpu,9,0xa48,0xa50))||
++    !shader_power_off(gpu,14,0xb88,0xb90)||!shader_power_off(gpu,15,0xbc8,0xbd0)||
++    !shader_power_off(gpu,1,0x948,0x950))return false;
++ IOLog("X9 SHADER: all delegated domains retracted; shader/neural/base/stack/tiler returned to initial all-off state\n");return true;
+ }
+ static void shader_diagnostics(Plan &p,QueueProbe &q,vm_offset_t gpu) {
+  if(!q.compute||q.shader_dumped)return;
+@@ -114,6 +153,8 @@
+  IOLog("X9 SHADER DIAG: shader ready/trans=%llx/%llx base=%llx/%llx stack=%llx/%llx L2=%llx/%llx\n",
+   gr64(gpu,0xa08),gr64(gpu,0xa10),gr64(gpu,0xb88),gr64(gpu,0xb90),
+   gr64(gpu,0xbc8),gr64(gpu,0xbd0),gr64(gpu,0x908),gr64(gpu,0x910));
++ IOLog("X9 SHADER DIAG: required-domains=%08x delegated=%08x TILERready/trans=%llx/%llx\n",
++  q.power_domains,q.delegated_domains,gr64(gpu,0x948),gr64(gpu,0x950));
+  const unsigned char *b=csf_firmware_bytes;unsigned at=20,end=get32(b+16);
+  while(at<end) {
+   unsigned h=get32(b+at),size=(h>>8)&255;
+@@ -126,7 +167,7 @@
+    uint32_t insert=output_word(p,insert_va),extract=output_word(p,extract_va);
+    IOLog("X9 SHADER DIAG: fwlog data=%08x size=%u insert=%u extract=%u\n",data_va,bytes,insert,extract);
+    if(bytes!=host_page||insert>=bytes||extract>=bytes||!cpu_address(p,data_va,bytes))return;
+-   unsigned available=(insert+bytes-extract)%bytes,amount=available<1024?available:1024;
++   unsigned available=(insert+bytes-extract)%bytes,amount=available<4096?available:4096;
+    unsigned first=(insert+bytes-amount)%bytes;
+    for(unsigned off=0;off<amount;off+=32) {
+     unsigned n=amount-off<32?amount-off:32;char hex[65];
+diff --git a/bsd/dev/sweet_x9_gpu_dependencies.c b/bsd/dev/sweet_x9_gpu_dependencies.c
+--- a/bsd/dev/sweet_x9_gpu_dependencies.c
++++ b/bsd/dev/sweet_x9_gpu_dependencies.c
+@@ -179,7 +179,7 @@
+ static void run(void) {
+  int enabled=0;
+  if(!PE_parse_boot_argn("x9_gpu_power_probe",&enabled,sizeof(enabled))||enabled!=1)return;
+- printf("X9 GPU: pan156 one-shot INIT -> POWER_ON -> ID -> POWER_OFF\n");
++ printf("X9 GPU: pan157 one-shot INIT -> POWER_ON -> ID -> POWER_OFF\n");
+  if(!handoff()){printf("X9 GPU: live FDT handoff absent/mismatched; all writes refused\n");return;}
+  spm=ml_io_map(0x1c004000,0x1000);
+  if(!spm||!on(rd(spm,0xe1c))){printf("X9 GPU: SPM MFG0 ACK absent; stopped\n");return;}

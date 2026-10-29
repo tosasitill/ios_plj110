@@ -1,0 +1,57 @@
+From cf23bc7343b942ed2dbedb8a3b66e70140311186 Mon Sep 17 00:00:00 2001
+From: Egor Kulikovskiy <xianel0x@gmail.com>
+Date: Fri, 23 Oct 2026 02:07:49 +0500
+Subject: [PATCH] x676c: eliminate display pump and enable native 60Hz DSI
+ scanout with WDT kick in SweetFramebuffer
+
+---
+ iokit/Kernel/arm/SweetFramebuffer.cpp | 27 +++++++++++++++++++++------
+ 1 file changed, 21 insertions(+), 6 deletions(-)
+
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index f07e52a..7006a0e 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -77,18 +77,33 @@ extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+ 
+ static volatile uint32_t *sMtkDsi = NULL;
+ static volatile uint32_t *sMtkMutex = NULL;
++static volatile uint32_t *sMtkWdt = NULL;
+ 
+ static void
+ mtk_dsi_push_hw(void)
+ {
+ 	/*
+-	 * On MT6789 (x676c), the dedicated display pump on CPU core 7 (second A76)
+-	 * continuously pushes DSI frames from fPixels (0xfeabe000) every 33 ms.
+-	 * Concurrent register writes from XNU cores corrupt the DSI command FIFO
+-	 * and freeze the panel. Leave hardware DSI triggers exclusively to CPU 7.
++	 * Native MT6789 DSI scanout on ili7835 panel at 60 Hz VSYNC.
++	 * Replaces the bare-metal shim CPU 7 display pump.
+ 	 */
+-	(void)sMtkDsi;
+-	(void)sMtkMutex;
++	if (sMtkDsi == NULL) {
++		sMtkDsi = (volatile uint32_t *)ml_io_map(0x14013000, 0x1000);
++	}
++	if (sMtkMutex == NULL) {
++		sMtkMutex = (volatile uint32_t *)ml_io_map(0x14001000, 0x1000);
++	}
++	if (sMtkWdt == NULL) {
++		sMtkWdt = (volatile uint32_t *)ml_io_map(0x10007000, 0x1000);
++	}
++	if (sMtkWdt != NULL) {
++		sMtkWdt[0x08 / 4] = 0x1971; /* Kick MTK TOPRGU watchdog */
++	}
++	if (sMtkDsi != NULL && sMtkMutex != NULL) {
++		sMtkDsi[0x0c / 4] = 0;   /* DSI_INTSTA */
++		sMtkMutex[0x20 / 4] = 1; /* MUTEX0_EN */
++		sMtkDsi[0x00 / 4] = 0;   /* DSI_START = 0 */
++		sMtkDsi[0x00 / 4] = 1;   /* DSI_START = 1 */
++	}
+ }
+ 
+ #if defined(SWEET)
+-- 
+2.51.0.windows.1
+

@@ -1,0 +1,1826 @@
+{
+  "serial": "<device-serial>",
+  "files": [
+    {
+      "file": "/data/local/tmp/x9-metal-update-20261029/mailbox.bin",
+      "inode": 690468,
+      "bytes": 134217728,
+      "android_extents": {
+        "file": "/data/local/tmp/x9-metal-update-20261029/mailbox.bin",
+        "size": 134217728,
+        "extents": [
+          [
+            0,
+            13610516480,
+            6291456,
+            4232
+          ],
+          [
+            6291456,
+            13625196544,
+            2097152,
+            4232
+          ],
+          [
+            8388608,
+            13629390848,
+            2097152,
+            4232
+          ],
+          [
+            10485760,
+            13637779456,
+            10485760,
+            4232
+          ],
+          [
+            20971520,
+            13650362368,
+            2097152,
+            4232
+          ],
+          [
+            23068672,
+            13654556672,
+            2097152,
+            4232
+          ],
+          [
+            25165824,
+            13665042432,
+            2097152,
+            4232
+          ],
+          [
+            27262976,
+            13671333888,
+            4194304,
+            4232
+          ],
+          [
+            31457280,
+            13679722496,
+            4194304,
+            4232
+          ],
+          [
+            35651584,
+            13719568384,
+            2097152,
+            4232
+          ],
+          [
+            37748736,
+            13725859840,
+            2097152,
+            4232
+          ],
+          [
+            39845888,
+            13732151296,
+            2097152,
+            4232
+          ],
+          [
+            41943040,
+            13755219968,
+            2097152,
+            4232
+          ],
+          [
+            44040192,
+            13759414272,
+            2097152,
+            4232
+          ],
+          [
+            46137344,
+            13776191488,
+            2097152,
+            4232
+          ],
+          [
+            48234496,
+            13782482944,
+            2097152,
+            4232
+          ],
+          [
+            50331648,
+            13795065856,
+            2097152,
+            4232
+          ],
+          [
+            52428800,
+            13805551616,
+            2097152,
+            4232
+          ],
+          [
+            54525952,
+            13818134528,
+            2097152,
+            4232
+          ],
+          [
+            56623104,
+            13876854784,
+            2097152,
+            4232
+          ],
+          [
+            58720256,
+            13912506368,
+            2097152,
+            4232
+          ],
+          [
+            60817408,
+            13935575040,
+            2097152,
+            4232
+          ],
+          [
+            62914560,
+            13952352256,
+            2097152,
+            4232
+          ],
+          [
+            65011712,
+            13962838016,
+            2097152,
+            4232
+          ],
+          [
+            67108864,
+            14069792768,
+            2097152,
+            4232
+          ],
+          [
+            69206016,
+            14076084224,
+            4194304,
+            4232
+          ],
+          [
+            73400320,
+            14090764288,
+            2097152,
+            4232
+          ],
+          [
+            75497472,
+            14094958592,
+            2097152,
+            4232
+          ],
+          [
+            77594624,
+            14103347200,
+            2097152,
+            4232
+          ],
+          [
+            79691776,
+            14118027264,
+            2097152,
+            4232
+          ],
+          [
+            81788928,
+            14122221568,
+            2097152,
+            4232
+          ],
+          [
+            83886080,
+            14128513024,
+            2097152,
+            4232
+          ],
+          [
+            85983232,
+            14157873152,
+            2097152,
+            4232
+          ],
+          [
+            88080384,
+            14162067456,
+            2097152,
+            4232
+          ],
+          [
+            90177536,
+            14180941824,
+            2097152,
+            4232
+          ],
+          [
+            92274688,
+            14210301952,
+            4194304,
+            4232
+          ],
+          [
+            96468992,
+            14216593408,
+            2097152,
+            4232
+          ],
+          [
+            98566144,
+            14237564928,
+            2097152,
+            4232
+          ],
+          [
+            100663296,
+            14302576640,
+            2097152,
+            4232
+          ],
+          [
+            102760448,
+            14313062400,
+            2097152,
+            4232
+          ],
+          [
+            104857600,
+            14319353856,
+            2097152,
+            4232
+          ],
+          [
+            106954752,
+            14327742464,
+            4194304,
+            4232
+          ],
+          [
+            111149056,
+            14359199744,
+            4194304,
+            4232
+          ],
+          [
+            115343360,
+            14367588352,
+            2097152,
+            4232
+          ],
+          [
+            117440512,
+            14415822848,
+            4194304,
+            4232
+          ],
+          [
+            121634816,
+            14428405760,
+            2097152,
+            4232
+          ],
+          [
+            123731968,
+            14453571584,
+            4194304,
+            4232
+          ],
+          [
+            127926272,
+            14470348800,
+            2097152,
+            4232
+          ],
+          [
+            130023424,
+            14480834560,
+            4194304,
+            4233
+          ]
+        ]
+      },
+      "extents": [
+        {
+          "file_block": 0,
+          "partition_block": 3322880,
+          "blocks": 1536
+        },
+        {
+          "file_block": 1536,
+          "partition_block": 3326464,
+          "blocks": 512
+        },
+        {
+          "file_block": 2048,
+          "partition_block": 3327488,
+          "blocks": 512
+        },
+        {
+          "file_block": 2560,
+          "partition_block": 3329536,
+          "blocks": 2560
+        },
+        {
+          "file_block": 5120,
+          "partition_block": 3332608,
+          "blocks": 512
+        },
+        {
+          "file_block": 5632,
+          "partition_block": 3333632,
+          "blocks": 512
+        },
+        {
+          "file_block": 6144,
+          "partition_block": 3336192,
+          "blocks": 512
+        },
+        {
+          "file_block": 6656,
+          "partition_block": 3337728,
+          "blocks": 1024
+        },
+        {
+          "file_block": 7680,
+          "partition_block": 3339776,
+          "blocks": 1024
+        },
+        {
+          "file_block": 8704,
+          "partition_block": 3349504,
+          "blocks": 512
+        },
+        {
+          "file_block": 9216,
+          "partition_block": 3351040,
+          "blocks": 512
+        },
+        {
+          "file_block": 9728,
+          "partition_block": 3352576,
+          "blocks": 512
+        },
+        {
+          "file_block": 10240,
+          "partition_block": 3358208,
+          "blocks": 512
+        },
+        {
+          "file_block": 10752,
+          "partition_block": 3359232,
+          "blocks": 512
+        },
+        {
+          "file_block": 11264,
+          "partition_block": 3363328,
+          "blocks": 512
+        },
+        {
+          "file_block": 11776,
+          "partition_block": 3364864,
+          "blocks": 512
+        },
+        {
+          "file_block": 12288,
+          "partition_block": 3367936,
+          "blocks": 512
+        },
+        {
+          "file_block": 12800,
+          "partition_block": 3370496,
+          "blocks": 512
+        },
+        {
+          "file_block": 13312,
+          "partition_block": 3373568,
+          "blocks": 512
+        },
+        {
+          "file_block": 13824,
+          "partition_block": 3387904,
+          "blocks": 512
+        },
+        {
+          "file_block": 14336,
+          "partition_block": 3396608,
+          "blocks": 512
+        },
+        {
+          "file_block": 14848,
+          "partition_block": 3402240,
+          "blocks": 512
+        },
+        {
+          "file_block": 15360,
+          "partition_block": 3406336,
+          "blocks": 512
+        },
+        {
+          "file_block": 15872,
+          "partition_block": 3408896,
+          "blocks": 512
+        },
+        {
+          "file_block": 16384,
+          "partition_block": 3435008,
+          "blocks": 512
+        },
+        {
+          "file_block": 16896,
+          "partition_block": 3436544,
+          "blocks": 1024
+        },
+        {
+          "file_block": 17920,
+          "partition_block": 3440128,
+          "blocks": 512
+        },
+        {
+          "file_block": 18432,
+          "partition_block": 3441152,
+          "blocks": 512
+        },
+        {
+          "file_block": 18944,
+          "partition_block": 3443200,
+          "blocks": 512
+        },
+        {
+          "file_block": 19456,
+          "partition_block": 3446784,
+          "blocks": 512
+        },
+        {
+          "file_block": 19968,
+          "partition_block": 3447808,
+          "blocks": 512
+        },
+        {
+          "file_block": 20480,
+          "partition_block": 3449344,
+          "blocks": 512
+        },
+        {
+          "file_block": 20992,
+          "partition_block": 3456512,
+          "blocks": 512
+        },
+        {
+          "file_block": 21504,
+          "partition_block": 3457536,
+          "blocks": 512
+        },
+        {
+          "file_block": 22016,
+          "partition_block": 3462144,
+          "blocks": 512
+        },
+        {
+          "file_block": 22528,
+          "partition_block": 3469312,
+          "blocks": 1024
+        },
+        {
+          "file_block": 23552,
+          "partition_block": 3470848,
+          "blocks": 512
+        },
+        {
+          "file_block": 24064,
+          "partition_block": 3475968,
+          "blocks": 512
+        },
+        {
+          "file_block": 24576,
+          "partition_block": 3491840,
+          "blocks": 512
+        },
+        {
+          "file_block": 25088,
+          "partition_block": 3494400,
+          "blocks": 512
+        },
+        {
+          "file_block": 25600,
+          "partition_block": 3495936,
+          "blocks": 512
+        },
+        {
+          "file_block": 26112,
+          "partition_block": 3497984,
+          "blocks": 1024
+        },
+        {
+          "file_block": 27136,
+          "partition_block": 3505664,
+          "blocks": 1024
+        },
+        {
+          "file_block": 28160,
+          "partition_block": 3507712,
+          "blocks": 512
+        },
+        {
+          "file_block": 28672,
+          "partition_block": 3519488,
+          "blocks": 1024
+        },
+        {
+          "file_block": 29696,
+          "partition_block": 3522560,
+          "blocks": 512
+        },
+        {
+          "file_block": 30208,
+          "partition_block": 3528704,
+          "blocks": 1024
+        },
+        {
+          "file_block": 31232,
+          "partition_block": 3532800,
+          "blocks": 512
+        },
+        {
+          "file_block": 31744,
+          "partition_block": 3535360,
+          "blocks": 1024
+        }
+      ],
+      "safe_extents": [
+        {
+          "file_block": 512,
+          "partition_block": 3323392,
+          "blocks": 1024
+        },
+        {
+          "file_block": 1536,
+          "partition_block": 3326464,
+          "blocks": 512
+        },
+        {
+          "file_block": 2048,
+          "partition_block": 3327488,
+          "blocks": 512
+        },
+        {
+          "file_block": 2560,
+          "partition_block": 3329536,
+          "blocks": 2560
+        },
+        {
+          "file_block": 5120,
+          "partition_block": 3332608,
+          "blocks": 512
+        },
+        {
+          "file_block": 6656,
+          "partition_block": 3337728,
+          "blocks": 1024
+        },
+        {
+          "file_block": 12288,
+          "partition_block": 3367936,
+          "blocks": 512
+        },
+        {
+          "file_block": 17408,
+          "partition_block": 3437056,
+          "blocks": 512
+        },
+        {
+          "file_block": 22528,
+          "partition_block": 3469312,
+          "blocks": 512
+        },
+        {
+          "file_block": 23552,
+          "partition_block": 3470848,
+          "blocks": 512
+        },
+        {
+          "file_block": 24064,
+          "partition_block": 3475968,
+          "blocks": 512
+        },
+        {
+          "file_block": 28160,
+          "partition_block": 3507712,
+          "blocks": 512
+        },
+        {
+          "file_block": 28672,
+          "partition_block": 3519488,
+          "blocks": 512
+        },
+        {
+          "file_block": 29696,
+          "partition_block": 3522560,
+          "blocks": 512
+        }
+      ],
+      "pinned": true,
+      "immutable": true
+    },
+    {
+      "file": "/data/local/tmp/x9-metal-update-20261029/mailbox2.bin",
+      "inode": 690520,
+      "bytes": 268435456,
+      "android_extents": {
+        "file": "/data/local/tmp/x9-metal-update-20261029/mailbox2.bin",
+        "size": 268435456,
+        "extents": [
+          [
+            0,
+            14491320320,
+            2097152,
+            4232
+          ],
+          [
+            2097152,
+            14508097536,
+            2097152,
+            4232
+          ],
+          [
+            4194304,
+            14512291840,
+            4194304,
+            4232
+          ],
+          [
+            8388608,
+            14518583296,
+            4194304,
+            4232
+          ],
+          [
+            12582912,
+            14560526336,
+            4194304,
+            4232
+          ],
+          [
+            16777216,
+            14581497856,
+            2097152,
+            4232
+          ],
+          [
+            18874368,
+            14610857984,
+            2097152,
+            4232
+          ],
+          [
+            20971520,
+            14631829504,
+            2097152,
+            4232
+          ],
+          [
+            23068672,
+            14665383936,
+            2097152,
+            4232
+          ],
+          [
+            25165824,
+            14684258304,
+            2097152,
+            4232
+          ],
+          [
+            27262976,
+            14696841216,
+            2097152,
+            4232
+          ],
+          [
+            29360128,
+            14701035520,
+            2097152,
+            4232
+          ],
+          [
+            31457280,
+            14705229824,
+            2097152,
+            4232
+          ],
+          [
+            33554432,
+            14709424128,
+            8388608,
+            4232
+          ],
+          [
+            41943040,
+            14722007040,
+            2097152,
+            4232
+          ],
+          [
+            44040192,
+            14726201344,
+            2097152,
+            4232
+          ],
+          [
+            46137344,
+            14736687104,
+            2097152,
+            4232
+          ],
+          [
+            48234496,
+            14759755776,
+            2097152,
+            4232
+          ],
+          [
+            50331648,
+            14776532992,
+            2097152,
+            4232
+          ],
+          [
+            52428800,
+            14780727296,
+            4194304,
+            4232
+          ],
+          [
+            56623104,
+            14793310208,
+            2097152,
+            4232
+          ],
+          [
+            58720256,
+            14799601664,
+            2097152,
+            4232
+          ],
+          [
+            60817408,
+            14948499456,
+            2097152,
+            4232
+          ],
+          [
+            62914560,
+            14986248192,
+            2097152,
+            4232
+          ],
+          [
+            65011712,
+            14992539648,
+            2097152,
+            4232
+          ],
+          [
+            67108864,
+            15005122560,
+            2097152,
+            4232
+          ],
+          [
+            69206016,
+            15028191232,
+            2097152,
+            4232
+          ],
+          [
+            71303168,
+            15036579840,
+            2097152,
+            4232
+          ],
+          [
+            73400320,
+            15040774144,
+            2097152,
+            4232
+          ],
+          [
+            75497472,
+            15047065600,
+            2097152,
+            4232
+          ],
+          [
+            77594624,
+            15068037120,
+            2097152,
+            4232
+          ],
+          [
+            79691776,
+            15078522880,
+            2097152,
+            4232
+          ],
+          [
+            81788928,
+            15093202944,
+            2097152,
+            4232
+          ],
+          [
+            83886080,
+            15097397248,
+            2097152,
+            4232
+          ],
+          [
+            85983232,
+            15114174464,
+            2097152,
+            4232
+          ],
+          [
+            88080384,
+            15126757376,
+            2097152,
+            4232
+          ],
+          [
+            90177536,
+            15130951680,
+            2097152,
+            4232
+          ],
+          [
+            92274688,
+            15139340288,
+            2097152,
+            4232
+          ],
+          [
+            94371840,
+            15158214656,
+            2097152,
+            4232
+          ],
+          [
+            96468992,
+            15162408960,
+            2097152,
+            4232
+          ],
+          [
+            98566144,
+            15172894720,
+            4194304,
+            4232
+          ],
+          [
+            102760448,
+            15187574784,
+            2097152,
+            4232
+          ],
+          [
+            104857600,
+            15206449152,
+            2097152,
+            4232
+          ],
+          [
+            106954752,
+            15231614976,
+            2097152,
+            4232
+          ],
+          [
+            109051904,
+            15240003584,
+            6291456,
+            4232
+          ],
+          [
+            115343360,
+            15260975104,
+            4194304,
+            4232
+          ],
+          [
+            119537664,
+            15267266560,
+            4194304,
+            4232
+          ],
+          [
+            123731968,
+            15300820992,
+            2097152,
+            4232
+          ],
+          [
+            125829120,
+            15313403904,
+            6291456,
+            4232
+          ],
+          [
+            132120576,
+            15321792512,
+            4194304,
+            4232
+          ],
+          [
+            136314880,
+            15340666880,
+            4194304,
+            4232
+          ],
+          [
+            140509184,
+            15346958336,
+            4194304,
+            4232
+          ],
+          [
+            144703488,
+            15386804224,
+            2097152,
+            4232
+          ],
+          [
+            146800640,
+            15426650112,
+            2097152,
+            4232
+          ],
+          [
+            148897792,
+            15432941568,
+            2097152,
+            4232
+          ],
+          [
+            150994944,
+            15437135872,
+            6291456,
+            4232
+          ],
+          [
+            157286400,
+            15445524480,
+            2097152,
+            4232
+          ],
+          [
+            159383552,
+            15462301696,
+            4194304,
+            4232
+          ],
+          [
+            163577856,
+            15483273216,
+            2097152,
+            4232
+          ],
+          [
+            165675008,
+            15489564672,
+            2097152,
+            4232
+          ],
+          [
+            167772160,
+            15497953280,
+            2097152,
+            4232
+          ],
+          [
+            169869312,
+            15510536192,
+            4194304,
+            4232
+          ],
+          [
+            174063616,
+            15518924800,
+            4194304,
+            4232
+          ],
+          [
+            178257920,
+            15565062144,
+            2097152,
+            4232
+          ],
+          [
+            180355072,
+            15571353600,
+            4194304,
+            4232
+          ],
+          [
+            184549376,
+            15577645056,
+            2097152,
+            4232
+          ],
+          [
+            186646528,
+            15583936512,
+            2097152,
+            4232
+          ],
+          [
+            188743680,
+            15592325120,
+            2097152,
+            4232
+          ],
+          [
+            190840832,
+            15607005184,
+            2097152,
+            4232
+          ],
+          [
+            192937984,
+            15619588096,
+            2097152,
+            4232
+          ],
+          [
+            195035136,
+            15659433984,
+            2097152,
+            4232
+          ],
+          [
+            197132288,
+            15667822592,
+            6291456,
+            4232
+          ],
+          [
+            203423744,
+            15676211200,
+            2097152,
+            4232
+          ],
+          [
+            205520896,
+            15688794112,
+            6291456,
+            4232
+          ],
+          [
+            211812352,
+            15699279872,
+            2097152,
+            4232
+          ],
+          [
+            213909504,
+            15705571328,
+            6291456,
+            4232
+          ],
+          [
+            220200960,
+            15713959936,
+            8388608,
+            4232
+          ],
+          [
+            228589568,
+            15724445696,
+            2097152,
+            4232
+          ],
+          [
+            230686720,
+            15745417216,
+            8388608,
+            4232
+          ],
+          [
+            239075328,
+            15758000128,
+            10485760,
+            4232
+          ],
+          [
+            249561088,
+            15778971648,
+            2097152,
+            4232
+          ],
+          [
+            251658240,
+            15783165952,
+            2097152,
+            4232
+          ],
+          [
+            253755392,
+            15810428928,
+            2097152,
+            4232
+          ],
+          [
+            255852544,
+            15814623232,
+            2097152,
+            4232
+          ],
+          [
+            257949696,
+            15818817536,
+            4194304,
+            4232
+          ],
+          [
+            262144000,
+            15825108992,
+            4194304,
+            4232
+          ],
+          [
+            266338304,
+            15841886208,
+            2097152,
+            4233
+          ]
+        ]
+      },
+      "extents": [
+        {
+          "file_block": 0,
+          "partition_block": 3537920,
+          "blocks": 512
+        },
+        {
+          "file_block": 512,
+          "partition_block": 3542016,
+          "blocks": 512
+        },
+        {
+          "file_block": 1024,
+          "partition_block": 3543040,
+          "blocks": 1024
+        },
+        {
+          "file_block": 2048,
+          "partition_block": 3544576,
+          "blocks": 1024
+        },
+        {
+          "file_block": 3072,
+          "partition_block": 3554816,
+          "blocks": 1024
+        },
+        {
+          "file_block": 4096,
+          "partition_block": 3559936,
+          "blocks": 512
+        },
+        {
+          "file_block": 4608,
+          "partition_block": 3567104,
+          "blocks": 512
+        },
+        {
+          "file_block": 5120,
+          "partition_block": 3572224,
+          "blocks": 512
+        },
+        {
+          "file_block": 5632,
+          "partition_block": 3580416,
+          "blocks": 512
+        },
+        {
+          "file_block": 6144,
+          "partition_block": 3585024,
+          "blocks": 512
+        },
+        {
+          "file_block": 6656,
+          "partition_block": 3588096,
+          "blocks": 512
+        },
+        {
+          "file_block": 7168,
+          "partition_block": 3589120,
+          "blocks": 512
+        },
+        {
+          "file_block": 7680,
+          "partition_block": 3590144,
+          "blocks": 512
+        },
+        {
+          "file_block": 8192,
+          "partition_block": 3591168,
+          "blocks": 2048
+        },
+        {
+          "file_block": 10240,
+          "partition_block": 3594240,
+          "blocks": 512
+        },
+        {
+          "file_block": 10752,
+          "partition_block": 3595264,
+          "blocks": 512
+        },
+        {
+          "file_block": 11264,
+          "partition_block": 3597824,
+          "blocks": 512
+        },
+        {
+          "file_block": 11776,
+          "partition_block": 3603456,
+          "blocks": 512
+        },
+        {
+          "file_block": 12288,
+          "partition_block": 3607552,
+          "blocks": 512
+        },
+        {
+          "file_block": 12800,
+          "partition_block": 3608576,
+          "blocks": 1024
+        },
+        {
+          "file_block": 13824,
+          "partition_block": 3611648,
+          "blocks": 512
+        },
+        {
+          "file_block": 14336,
+          "partition_block": 3613184,
+          "blocks": 512
+        },
+        {
+          "file_block": 14848,
+          "partition_block": 3649536,
+          "blocks": 512
+        },
+        {
+          "file_block": 15360,
+          "partition_block": 3658752,
+          "blocks": 512
+        },
+        {
+          "file_block": 15872,
+          "partition_block": 3660288,
+          "blocks": 512
+        },
+        {
+          "file_block": 16384,
+          "partition_block": 3663360,
+          "blocks": 512
+        },
+        {
+          "file_block": 16896,
+          "partition_block": 3668992,
+          "blocks": 512
+        },
+        {
+          "file_block": 17408,
+          "partition_block": 3671040,
+          "blocks": 512
+        },
+        {
+          "file_block": 17920,
+          "partition_block": 3672064,
+          "blocks": 512
+        },
+        {
+          "file_block": 18432,
+          "partition_block": 3673600,
+          "blocks": 512
+        },
+        {
+          "file_block": 18944,
+          "partition_block": 3678720,
+          "blocks": 512
+        },
+        {
+          "file_block": 19456,
+          "partition_block": 3681280,
+          "blocks": 512
+        },
+        {
+          "file_block": 19968,
+          "partition_block": 3684864,
+          "blocks": 512
+        },
+        {
+          "file_block": 20480,
+          "partition_block": 3685888,
+          "blocks": 512
+        },
+        {
+          "file_block": 20992,
+          "partition_block": 3689984,
+          "blocks": 512
+        },
+        {
+          "file_block": 21504,
+          "partition_block": 3693056,
+          "blocks": 512
+        },
+        {
+          "file_block": 22016,
+          "partition_block": 3694080,
+          "blocks": 512
+        },
+        {
+          "file_block": 22528,
+          "partition_block": 3696128,
+          "blocks": 512
+        },
+        {
+          "file_block": 23040,
+          "partition_block": 3700736,
+          "blocks": 512
+        },
+        {
+          "file_block": 23552,
+          "partition_block": 3701760,
+          "blocks": 512
+        },
+        {
+          "file_block": 24064,
+          "partition_block": 3704320,
+          "blocks": 1024
+        },
+        {
+          "file_block": 25088,
+          "partition_block": 3707904,
+          "blocks": 512
+        },
+        {
+          "file_block": 25600,
+          "partition_block": 3712512,
+          "blocks": 512
+        },
+        {
+          "file_block": 26112,
+          "partition_block": 3718656,
+          "blocks": 512
+        },
+        {
+          "file_block": 26624,
+          "partition_block": 3720704,
+          "blocks": 1536
+        },
+        {
+          "file_block": 28160,
+          "partition_block": 3725824,
+          "blocks": 1024
+        },
+        {
+          "file_block": 29184,
+          "partition_block": 3727360,
+          "blocks": 1024
+        },
+        {
+          "file_block": 30208,
+          "partition_block": 3735552,
+          "blocks": 512
+        },
+        {
+          "file_block": 30720,
+          "partition_block": 3738624,
+          "blocks": 1536
+        },
+        {
+          "file_block": 32256,
+          "partition_block": 3740672,
+          "blocks": 1024
+        },
+        {
+          "file_block": 33280,
+          "partition_block": 3745280,
+          "blocks": 1024
+        },
+        {
+          "file_block": 34304,
+          "partition_block": 3746816,
+          "blocks": 1024
+        },
+        {
+          "file_block": 35328,
+          "partition_block": 3756544,
+          "blocks": 512
+        },
+        {
+          "file_block": 35840,
+          "partition_block": 3766272,
+          "blocks": 512
+        },
+        {
+          "file_block": 36352,
+          "partition_block": 3767808,
+          "blocks": 512
+        },
+        {
+          "file_block": 36864,
+          "partition_block": 3768832,
+          "blocks": 1536
+        },
+        {
+          "file_block": 38400,
+          "partition_block": 3770880,
+          "blocks": 512
+        },
+        {
+          "file_block": 38912,
+          "partition_block": 3774976,
+          "blocks": 1024
+        },
+        {
+          "file_block": 39936,
+          "partition_block": 3780096,
+          "blocks": 512
+        },
+        {
+          "file_block": 40448,
+          "partition_block": 3781632,
+          "blocks": 512
+        },
+        {
+          "file_block": 40960,
+          "partition_block": 3783680,
+          "blocks": 512
+        },
+        {
+          "file_block": 41472,
+          "partition_block": 3786752,
+          "blocks": 1024
+        },
+        {
+          "file_block": 42496,
+          "partition_block": 3788800,
+          "blocks": 1024
+        },
+        {
+          "file_block": 43520,
+          "partition_block": 3800064,
+          "blocks": 512
+        },
+        {
+          "file_block": 44032,
+          "partition_block": 3801600,
+          "blocks": 1024
+        },
+        {
+          "file_block": 45056,
+          "partition_block": 3803136,
+          "blocks": 512
+        },
+        {
+          "file_block": 45568,
+          "partition_block": 3804672,
+          "blocks": 512
+        },
+        {
+          "file_block": 46080,
+          "partition_block": 3806720,
+          "blocks": 512
+        },
+        {
+          "file_block": 46592,
+          "partition_block": 3810304,
+          "blocks": 512
+        },
+        {
+          "file_block": 47104,
+          "partition_block": 3813376,
+          "blocks": 512
+        },
+        {
+          "file_block": 47616,
+          "partition_block": 3823104,
+          "blocks": 512
+        },
+        {
+          "file_block": 48128,
+          "partition_block": 3825152,
+          "blocks": 1536
+        },
+        {
+          "file_block": 49664,
+          "partition_block": 3827200,
+          "blocks": 512
+        },
+        {
+          "file_block": 50176,
+          "partition_block": 3830272,
+          "blocks": 1536
+        },
+        {
+          "file_block": 51712,
+          "partition_block": 3832832,
+          "blocks": 512
+        },
+        {
+          "file_block": 52224,
+          "partition_block": 3834368,
+          "blocks": 1536
+        },
+        {
+          "file_block": 53760,
+          "partition_block": 3836416,
+          "blocks": 2048
+        },
+        {
+          "file_block": 55808,
+          "partition_block": 3838976,
+          "blocks": 512
+        },
+        {
+          "file_block": 56320,
+          "partition_block": 3844096,
+          "blocks": 2048
+        },
+        {
+          "file_block": 58368,
+          "partition_block": 3847168,
+          "blocks": 2560
+        },
+        {
+          "file_block": 60928,
+          "partition_block": 3852288,
+          "blocks": 512
+        },
+        {
+          "file_block": 61440,
+          "partition_block": 3853312,
+          "blocks": 512
+        },
+        {
+          "file_block": 61952,
+          "partition_block": 3859968,
+          "blocks": 512
+        },
+        {
+          "file_block": 62464,
+          "partition_block": 3860992,
+          "blocks": 512
+        },
+        {
+          "file_block": 62976,
+          "partition_block": 3862016,
+          "blocks": 1024
+        },
+        {
+          "file_block": 64000,
+          "partition_block": 3863552,
+          "blocks": 1024
+        },
+        {
+          "file_block": 65024,
+          "partition_block": 3867648,
+          "blocks": 512
+        }
+      ],
+      "safe_extents": [
+        {
+          "file_block": 3072,
+          "partition_block": 3554816,
+          "blocks": 1024
+        },
+        {
+          "file_block": 5120,
+          "partition_block": 3572224,
+          "blocks": 512
+        },
+        {
+          "file_block": 9728,
+          "partition_block": 3592704,
+          "blocks": 512
+        },
+        {
+          "file_block": 11264,
+          "partition_block": 3597824,
+          "blocks": 512
+        },
+        {
+          "file_block": 12288,
+          "partition_block": 3607552,
+          "blocks": 512
+        },
+        {
+          "file_block": 12800,
+          "partition_block": 3608576,
+          "blocks": 512
+        },
+        {
+          "file_block": 15360,
+          "partition_block": 3658752,
+          "blocks": 512
+        },
+        {
+          "file_block": 16384,
+          "partition_block": 3663360,
+          "blocks": 512
+        },
+        {
+          "file_block": 19456,
+          "partition_block": 3681280,
+          "blocks": 512
+        },
+        {
+          "file_block": 49152,
+          "partition_block": 3826176,
+          "blocks": 512
+        }
+      ],
+      "pinned": true,
+      "immutable": true
+    }
+  ],
+  "map": [
+    {
+      "logical_block": 0,
+      "file": "/data/local/tmp/x9-metal-update-20261029/mailbox.bin",
+      "file_block": 512,
+      "partition_block": 3323392,
+      "blocks": 1024
+    },
+    {
+      "logical_block": 1024,
+      "file": "/data/local/tmp/x9-metal-update-20261029/mailbox.bin",
+      "file_block": 1536,
+      "partition_block": 3326464,
+      "blocks": 512
+    },
+    {
+      "logical_block": 1536,
+      "file": "/data/local/tmp/x9-metal-update-20261029/mailbox.bin",
+      "file_block": 2048,
+      "partition_block": 3327488,
+      "blocks": 512
+    },
+    {
+      "logical_block": 2048,
+      "file": "/data/local/tmp/x9-metal-update-20261029/mailbox.bin",
+      "file_block": 2560,
+      "partition_block": 3329536,
+      "blocks": 2560
+    },
+    {
+      "logical_block": 4608,
+      "file": "/data/local/tmp/x9-metal-update-20261029/mailbox.bin",
+      "file_block": 5120,
+      "partition_block": 3332608,
+      "blocks": 512
+    },
+    {
+      "logical_block": 5120,
+      "file": "/data/local/tmp/x9-metal-update-20261029/mailbox.bin",
+      "file_block": 6656,
+      "partition_block": 3337728,
+      "blocks": 1024
+    },
+    {
+      "logical_block": 6144,
+      "file": "/data/local/tmp/x9-metal-update-20261029/mailbox.bin",
+      "file_block": 12288,
+      "partition_block": 3367936,
+      "blocks": 512
+    },
+    {
+      "logical_block": 6656,
+      "file": "/data/local/tmp/x9-metal-update-20261029/mailbox.bin",
+      "file_block": 17408,
+      "partition_block": 3437056,
+      "blocks": 512
+    },
+    {
+      "logical_block": 7168,
+      "file": "/data/local/tmp/x9-metal-update-20261029/mailbox.bin",
+      "file_block": 22528,
+      "partition_block": 3469312,
+      "blocks": 512
+    },
+    {
+      "logical_block": 7680,
+      "file": "/data/local/tmp/x9-metal-update-20261029/mailbox.bin",
+      "file_block": 23552,
+      "partition_block": 3470848,
+      "blocks": 512
+    },
+    {
+      "logical_block": 8192,
+      "file": "/data/local/tmp/x9-metal-update-20261029/mailbox.bin",
+      "file_block": 24064,
+      "partition_block": 3475968,
+      "blocks": 512
+    },
+    {
+      "logical_block": 8704,
+      "file": "/data/local/tmp/x9-metal-update-20261029/mailbox.bin",
+      "file_block": 28160,
+      "partition_block": 3507712,
+      "blocks": 512
+    },
+    {
+      "logical_block": 9216,
+      "file": "/data/local/tmp/x9-metal-update-20261029/mailbox.bin",
+      "file_block": 28672,
+      "partition_block": 3519488,
+      "blocks": 512
+    },
+    {
+      "logical_block": 9728,
+      "file": "/data/local/tmp/x9-metal-update-20261029/mailbox.bin",
+      "file_block": 29696,
+      "partition_block": 3522560,
+      "blocks": 512
+    },
+    {
+      "logical_block": 10240,
+      "file": "/data/local/tmp/x9-metal-update-20261029/mailbox2.bin",
+      "file_block": 3072,
+      "partition_block": 3554816,
+      "blocks": 1024
+    },
+    {
+      "logical_block": 11264,
+      "file": "/data/local/tmp/x9-metal-update-20261029/mailbox2.bin",
+      "file_block": 5120,
+      "partition_block": 3572224,
+      "blocks": 512
+    },
+    {
+      "logical_block": 11776,
+      "file": "/data/local/tmp/x9-metal-update-20261029/mailbox2.bin",
+      "file_block": 9728,
+      "partition_block": 3592704,
+      "blocks": 512
+    },
+    {
+      "logical_block": 12288,
+      "file": "/data/local/tmp/x9-metal-update-20261029/mailbox2.bin",
+      "file_block": 11264,
+      "partition_block": 3597824,
+      "blocks": 512
+    },
+    {
+      "logical_block": 12800,
+      "file": "/data/local/tmp/x9-metal-update-20261029/mailbox2.bin",
+      "file_block": 12288,
+      "partition_block": 3607552,
+      "blocks": 512
+    },
+    {
+      "logical_block": 13312,
+      "file": "/data/local/tmp/x9-metal-update-20261029/mailbox2.bin",
+      "file_block": 12800,
+      "partition_block": 3608576,
+      "blocks": 512
+    },
+    {
+      "logical_block": 13824,
+      "file": "/data/local/tmp/x9-metal-update-20261029/mailbox2.bin",
+      "file_block": 15360,
+      "partition_block": 3658752,
+      "blocks": 512
+    },
+    {
+      "logical_block": 14336,
+      "file": "/data/local/tmp/x9-metal-update-20261029/mailbox2.bin",
+      "file_block": 16384,
+      "partition_block": 3663360,
+      "blocks": 512
+    },
+    {
+      "logical_block": 14848,
+      "file": "/data/local/tmp/x9-metal-update-20261029/mailbox2.bin",
+      "file_block": 19456,
+      "partition_block": 3681280,
+      "blocks": 512
+    },
+    {
+      "logical_block": 15360,
+      "file": "/data/local/tmp/x9-metal-update-20261029/mailbox2.bin",
+      "file_block": 49152,
+      "partition_block": 3826176,
+      "blocks": 512
+    }
+  ],
+  "logical_blocks": 15872
+}

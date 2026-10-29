@@ -1,0 +1,67 @@
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+index 143db60..f0d72a9 100644
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -855,6 +855,7 @@ static uint32_t sweet_log_secs = SWEET_LOG_SECS;
+ 
+ /* Called for all console output, any context: never blocks. */
+ void sweet_log_append(const char *c, int size);
++extern void sweet_pstore_putc(char c);
+ 
+ void
+ sweet_log_append(const char *c, int size)
+@@ -862,6 +863,9 @@ sweet_log_append(const char *c, int size)
+ 	if (size <= 0) {
+ 		return;
+ 	}
++	for (int i = 0; i < size; i++) {
++		sweet_pstore_putc(c[i]);
++	}
+ 	uint64_t at = os_atomic_add_orig(&sweet_log_total, (uint64_t)size, relaxed);
+ 	for (int i = 0; i < size; i++) {
+ 		sweet_log_ring[(at + (uint64_t)i) % SWEET_LOG_SIZE] = c[i];
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 0575018..eb0d7e5 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -356,6 +356,40 @@ AppleCLCD::start(IOService *provider)
+ 		if (accel->attach(this)) {
+ 			accel->registerService();
+ 			IOLog("SWEET FB: empty IOAcceleratorES published (no 30 s wait in CAMetalContextCreate)\n");
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++			if (sweet_board_x676c()) {
++				IOLog("SWEET GPU: probing MT6789 Mali-G57 subsystem...\n");
++				volatile uint32_t *scpsys = (volatile uint32_t *)ml_io_map(0x10006000, 0x1000);
++				if (scpsys != NULL) {
++					uint32_t pwr_sta = scpsys[0x0180 / 4];
++					uint32_t pwr_sta2 = scpsys[0x0184 / 4];
++					IOLog("SWEET GPU: SCPSYS pwr_status=0x%08x pwr_status_2nd=0x%08x\n", pwr_sta, pwr_sta2);
++					volatile uint32_t *mfgcfg = (volatile uint32_t *)ml_io_map(0x13f00000, 0x1000);
++					if (mfgcfg != NULL) {
++						uint32_t cg_con = mfgcfg[0x0000 / 4];
++						IOLog("SWEET GPU: MFGCFG cg_con=0x%08x\n", cg_con);
++					}
++					if (pwr_sta & (1u << 4)) {
++						if (mfgcfg != NULL) {
++							mfgcfg[0x0008 / 4] = 0xf;
++						}
++						volatile uint32_t *mali = (volatile uint32_t *)ml_io_map(0x13000000, 0x4000);
++						if (mali != NULL) {
++							uint32_t gpu_id = mali[0x0000 / 4];
++							uint32_t l2_feat = mali[0x0004 / 4];
++							uint32_t tiler_feat = mali[0x000c / 4];
++							uint32_t mem_feat = mali[0x0010 / 4];
++							uint32_t mmu_feat = mali[0x0014 / 4];
++							IOLog("SWEET GPU: Mali-G57 ID=0x%08x (Arch %u Rev %u) L2=0x%08x Tiler=0x%08x Mem=0x%08x MMU=0x%08x\n",
++							    gpu_id, (gpu_id >> 16) & 0xff, (gpu_id >> 12) & 0xf,
++							    l2_feat, tiler_feat, mem_feat, mmu_feat);
++						}
++					} else {
++						IOLog("SWEET GPU: MFG power domain is gated (sta bit 4 = 0)\n");
++					}
++				}
++			}
++#endif
+ 		}
+ 	}
+ 	OSSafeReleaseNULL(accel);

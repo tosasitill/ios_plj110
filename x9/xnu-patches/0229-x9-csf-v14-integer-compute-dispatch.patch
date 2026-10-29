@@ -1,0 +1,393 @@
+diff --git a/iokit/Kernel/arm/SweetX9CSF.cpp b/iokit/Kernel/arm/SweetX9CSF.cpp
+--- a/iokit/Kernel/arm/SweetX9CSF.cpp
++++ b/iokit/Kernel/arm/SweetX9CSF.cpp
+@@ -2,8 +2,8 @@
+  * Parses stock CSF0.3, creates private image buffers and a 4-KiB AArch64
+  * page tables using16-KiB XNU allocations. Optional bounded hardware phase
+  * uses live SMMU bypass, installs AS0, boots MCU and verifies two PINGs.
+- * Optional private AS1/CSG0/CS0 probe submits three SYNC_SET32 writes.
+- * Never changes SMMU translation or submits shader jobs. */
++ * Optional private AS1/CSG0/CS0 probes include real v14 compute arithmetic.
++ * Never changes SMMU translation; shader dispatch requires x9_cs_compute=1. */
+ #include <IOKit/IOBufferMemoryDescriptor.h>
+ #include <IOKit/IOLib.h>
+ #include <mach/mach_types.h>
+@@ -237,13 +237,13 @@
+  if(!where||(va&3))return false;
+  memcpy(where,&value,4);return true;
+ }
+-static bool add_shared(Plan &p,uint32_t begin,uint32_t bytes=host_page) {
++static bool add_shared(Plan &p,uint32_t begin,uint32_t bytes=host_page,uint32_t flags=0xc0000003u) {
+  if(!bytes||(bytes&(host_page-1))||bytes>0x100000u||begin>0xffffffffu-bytes)return false;
+  if(p.region_count==max_regions)return false;
+  for(unsigned i=0;i<p.region_count;i++)
+   if(begin<p.regions[i].end&&p.regions[i].begin<begin+bytes)return false;
+  Region &r=p.regions[p.region_count++];
+- r={0xc0000003u,begin,begin+bytes,0,0,0,NULL};
++ r={flags,begin,begin+bytes,0,0,0,NULL};
+  r.memory=IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,kIODirectionInOut,bytes,host_page);
+  if(!r.memory||!r.memory->getBytesNoCopy())return false;
+  bzero(r.memory->getBytesNoCopy(),bytes);
+@@ -439,11 +439,18 @@
+  }
+  IOLog("X9 CSF BOOT: SMMU bypass selected for direct DMA; owned buffers cleaned to PoC\n");
+  if(!bypass(smmu)||gr(gpu,0x704)!=0||!idle_as(gpu))return 0;
++ if(!shader_delegate(queue,gpu)) {
++  IOLog("X9 SHADER: delegation gate/command failed before L2/AS publication\n");
++  return queue.power_uncertain?-1:0;
++ }
+  l2_owned=l2_present&~l2_initial;
+  if(!power_l2(gpu,l2_owned,true)) {
+   IOLog("X9 CSF BOOT: host L2 power command not confirmed; retaining power\n");return -1;
+  }
+  if(!bypass(smmu)||gr(gpu,0x704)!=0) {
++  if(queue.shader_delegated) {
++   IOLog("X9 SHADER: runtime ownership changed after delegation; outer power retained\n");return -1;
++  }
+   IOLog("X9 CSF BOOT: bypass/MCU state changed after L2 request; AS0 not installed\n");
+   return power_l2(gpu,l2_owned,false)?0:-1;
+  }
+@@ -454,7 +461,7 @@
+   IOLog("X9 CSF BOOT: AS0 install failed\n");goto cleanup;
+  }
+  IOLog("X9 CSF BOOT: AS0 root=%llx MEMATTR=%llx TRANSCFG=%llx installed\n",p.tables[0].pa,memattr,transcfg);
+- /* AUTO follows original boot_csf_firmware. No GPU/shader jobs submitted. */
++ /* AUTO follows original boot_csf_firmware. Compute remains separately gated. */
+  gw(gpu,0x700,2);mcu_started=true;
+  {
+   uint64_t end=deadline_ms(3000);bool irq=false;
+@@ -480,7 +487,7 @@
+   }
+  }
+ cleanup:
+- if(queue.range_uncertain||queue.stop_uncertain) {
++ if(queue.range_uncertain||queue.stop_uncertain||queue.power_uncertain) {
+   IOLog("X9 CSF QUEUE: range/stop outcome uncertain; no retry, further GPU commands or resource release\n");goto retain;
+  }
+  if(!queue_stop(p,queue,gpu,doorbell)) {
+@@ -492,6 +499,10 @@
+    IOLog("X9 CSF BOOT: GPU cache flush not confirmed\n");goto retain;
+   }
+   queue_post_flush(p,queue);
++  shader_post_flush(queue);
++  if(!shader_quiesce(queue,gpu)) {
++   IOLog("X9 SHADER: shader power cleanup not confirmed; DMA buffers and outer power retained\n");goto retain;
++  }
+   if(queue.as_installed) {
+    if(!remove_as(gpu,queue.saved_attr,queue.saved_cfg,1)) {
+     IOLog("X9 CSF QUEUE: AS1 detach not confirmed\n");goto retain;
+@@ -557,7 +568,7 @@
+  Plan p;const char *error=parse(p);
+  if(!error)error=populate(p);
+  if(error){IOLog("X9 CSF BOOT: image preparation failed: %s\n",error);return 0;}
+- IOLog("X9 CSF BOOT: pan154 stock-firmware=%s prepared bytes=%llu tables=%u\n",
++ IOLog("X9 CSF BOOT: pan155 stock-firmware=%s prepared bytes=%llu tables=%u\n",
+   csf_firmware_sha256,p.mapped_bytes,p.table_count);
+  return boot(p,gpu,smmu,doorbell);
+ }
+diff --git a/iokit/Kernel/arm/SweetX9CSFQueue.inc b/iokit/Kernel/arm/SweetX9CSFQueue.inc
+--- a/iokit/Kernel/arm/SweetX9CSFQueue.inc
++++ b/iokit/Kernel/arm/SweetX9CSFQueue.inc
+@@ -1,8 +1,10 @@
+ /* Private CSF queue bring-up, included inside SweetX9CSF's namespace.
+  * ABI: OPPO MT6993 a16w csf firmware/scheduler/registers and qinspect decoder.
+- * Runs MOVE/MOVE32/CALL/SYNC_SET32 only: no shader, tiler, fragment or neural work.
++ * Default probes use MOVE/MOVE32/CALL/SYNC_SET32; opt-in compute also
++ * dispatches a v14 integer shader. No tiler, fragment or neural work.
+  * AS1 maps only our command ring, task bodies and result; MCU AS0 owns user IO/suspend.
+  */
++#include "x9_compute_program.inc"
+ constexpr uint32_t queue_user=0x04060000,queue_suspend=0x04200000;
+ constexpr uint32_t queue_suspend_bytes=0x100000;
+ constexpr uint32_t queue_ring=0x10000000,queue_result=0x10004000;
+@@ -22,11 +24,12 @@
+ constexpr unsigned queue_batch_bytes=3*sizeof(uint64_t);
+ struct QueueProbe {
+  Plan memory;
+- bool requested,as_installed,touched,dynamic,indirect,reuse,range_uncertain,stop_uncertain;
++ bool requested,as_installed,touched,dynamic,indirect,reuse,range_uncertain,stop_uncertain,compute,shader_delegated,power_uncertain;
++ uint64_t shader_mask;
+  unsigned completed;
+  uint64_t saved_cfg,saved_attr;
+  uint32_t global_in,global_out,group_in,group_out,stream_in,stream_out;
+- QueueProbe():requested(false),as_installed(false),touched(false),dynamic(false),indirect(false),reuse(false),range_uncertain(false),stop_uncertain(false),completed(0),saved_cfg(0),saved_attr(0),
++ QueueProbe():requested(false),as_installed(false),touched(false),dynamic(false),indirect(false),reuse(false),range_uncertain(false),stop_uncertain(false),compute(false),shader_delegated(false),power_uncertain(false),shader_mask(0),completed(0),saved_cfg(0),saved_attr(0),
+   global_in(0),global_out(0),group_in(0),group_out(0),stream_in(0),stream_out(0) {}
+ };
+ static bool clean_page(Plan &p,uint32_t va) {
+@@ -63,6 +66,7 @@
+  /* Firmware host-input/output tables live only in the owned shared image. */
+  return va>=0x04000000&&!(va&63)&&(uint64_t)va+bytes<=0x04010000&&cpu_address(p,va,bytes);
+ }
++#include "SweetX9CSFCompute.inc"
+ static bool queue_prepare(Plan &firmware,QueueProbe &q,vm_offset_t gpu,unsigned pa_bits) {
+  int enabled=0;
+  q.requested=PE_parse_boot_argn("x9_csf_queue_probe",&enabled,sizeof(enabled))&&enabled==1;
+@@ -73,6 +77,11 @@
+  q.indirect=PE_parse_boot_argn("x9_csf_indirect",&enabled,sizeof(enabled))&&enabled==1;
+  enabled=0;
+  q.reuse=PE_parse_boot_argn("x9_csf_reuse",&enabled,sizeof(enabled))&&enabled==1;
++ enabled=0;
++ q.compute=PE_parse_boot_argn("x9_cs_compute",&enabled,sizeof(enabled))&&enabled==1;
++ if(q.compute&&(!q.indirect||q.reuse||q.dynamic)) {
++  IOLog("X9 SHADER: compute requires three immutable CALL dispatch packets\n");return false;
++ }
+  if(q.reuse&&!q.indirect) {
+   IOLog("X9 CSF QUEUE: body reuse requires immutable CALL dispatch\n");return false;
+  }
+@@ -88,6 +97,7 @@
+     !add_shared(firmware,queue_user)||!add_shared(firmware,queue_suspend,queue_suspend_bytes)) {
+   IOLog("X9 CSF QUEUE: private ring/result/user-IO/suspend allocation failed\n");return false;
+  }
++ if(!shader_prepare(q,gpu))return false;
+  /* Keep the root dispatch immutable after publication. In campaign mode,
+   * fill all512 slots so wrapping never re-exposes an uninitialized root slot.
+   * Only task bodies and the host-owned producer page change while running. */
+@@ -98,7 +108,7 @@
+     * CALL opcode20,src0=r4:r5 bits40,src1=r6 bits32. Task bytes
+     * remain zero here and are generated only after queue START. */
+    if(!put_qword(q.memory,at,(1ULL<<56)|(4ULL<<48)|(queue_bodies+(round%(q.reuse?4u:3u))*gpu_page))||
+-      !put_qword(q.memory,at+8,(2ULL<<56)|(6ULL<<48)|queue_batch_bytes)||
++      !put_qword(q.memory,at+8,(2ULL<<56)|(6ULL<<48)|(q.compute?x9_compute_cs_bytes:queue_batch_bytes))||
+       !put_qword(q.memory,at+16,(0x20ULL<<56)|(4ULL<<40)|(6ULL<<32)))return false;
+    if(q.reuse&&!put_qword(q.memory,at+24,0))return false;
+    continue;
+@@ -107,7 +117,8 @@
+      !put_qword(q.memory,at+8,(2ULL<<56)|(2ULL<<48)|queue_values[round])||
+      !put_qword(q.memory,at+16,(0x26ULL<<56)|(2ULL<<32)))return false;
+  }
+- if(q.reuse)IOLog("X9 CSF QUEUE: 512 immutable CALL+NOP packets; four private4KiB task pages; reuse/wrap/restart campaign608\n");
++ if(q.compute)IOLog("X9 SHADER: three immutable CALL packets dispatch real compute with separate arithmetic outputs\n");
++ else if(q.reuse)IOLog("X9 CSF QUEUE: 512 immutable CALL+NOP packets; four private4KiB task pages; reuse/wrap/restart campaign608\n");
+  else if(q.indirect)IOLog("X9 CSF QUEUE: immutable CALL dispatch ring; three private4KiB bodies generated after START\n");
+  else if(q.dynamic)IOLog("X9 CSF QUEUE: dynamic ring; each append requires CPU clean + GPU PA-range completion before INSERT\n");
+  else IOLog("X9 CSF QUEUE: nine instructions/72 bytes prepublished; runtime advances INSERT only\n");
+@@ -130,12 +141,15 @@
+  return true;
+ }
+ static bool global_configure(Plan &p,QueueProbe &q,vm_offset_t gpu,vm_offset_t db) {
+- /* Command-only phase: shader allocation mask0. No power-domain delegation
+-  * or shader endpoints are requested. Host deadline bounds all requests. */
+- const uint32_t mask=6u,idle_mask=1u<<10;
++ /* Command-only mode keeps allocation0. Compute mode permits one present
++  * shader core and explicitly disables firmware auto-poweroff for this
++  * bounded task; no tiler/fragment/neural endpoints are requested. */
++ const uint32_t mask=q.compute?14u:6u,idle_mask=1u<<10;
++ uint64_t alloc=q.compute?q.shader_mask:0;
+  uint32_t req=input_word(p,q.global_in),ack=output_word(p,q.global_out);
+  uint32_t wanted=(req&~(mask|idle_mask))|((ack^mask)&mask);
+- if(!host_set(p,q.global_in+0x18,0)||!host_set(p,q.global_in+0x1c,0)||
++ if(!host_set(p,q.global_in+0x18,(uint32_t)alloc)||!host_set(p,q.global_in+0x1c,(uint32_t)(alloc>>32))||
++    (q.compute&&!host_set(p,q.global_in+0x14,0))||
+     !host_set(p,q.global_in+0x10,0xffffffffu)||
+     !host_set(p,q.global_in+4,input_word(p,q.global_in,4)|mask|(1u<<27))||
+     !host_set(p,q.global_in,wanted)||!clean_page(p,q.global_in))return false;
+@@ -145,7 +159,7 @@
+   ack=output_word(p,q.global_out);
+   if(!global_healthy(p,q,gpu))return false;
+   if(!((ack^wanted)&(mask|idle_mask))) {
+-   IOLog("X9 CSF QUEUE: global allocation/progress configuration acknowledged, shader-mask=0\n");return true;
++   IOLog("X9 CSF QUEUE: global configuration acknowledged shader-mask=%llx firmware-power=%u\n",alloc,q.compute);return true;
+   }
+   sleep_ms();
+  }while(mach_absolute_time()<end);
+@@ -220,8 +234,12 @@
+     !host_set(p,q.stream_in+4,1u<<8)||!host_set(p,q.stream_in+0xc,0xffffffffu))return false;
+  uint32_t csreq=(input_word(p,q.stream_in)&~7u)|1u|(1u<<8)|(1u<<10)|(1u<<12);
+  if(!host_set(p,q.stream_in,csreq))return false;
+- /* No endpoints: these commands touch only the ring, registers and sync object. */
++ /* Default probes request no endpoints; compute enables just one compute
++  * endpoint from the shader mask whose power control we delegated. */
+  for(unsigned off=0x18;off<=0x3c;off+=4)if(!host_set(p,q.group_in+off,0))return false;
++ if(q.compute&&(!host_set(p,q.group_in+0x20,(uint32_t)q.shader_mask)||
++    !host_set(p,q.group_in+0x24,(uint32_t)(q.shader_mask>>32))||
++    !host_set(p,q.group_in+0x38,1)))return false;
+  if(!host_set(p,q.group_in+0x40,queue_suspend)||!host_set(p,q.group_in+0x44,0)||
+     !host_set(p,q.group_in+0x48,0)||!host_set(p,q.group_in+0x4c,0)||
+     !host_set(p,q.group_in+0x50,1)||!host_set(p,q.group_in+4,0xffffffffu)||
+@@ -271,6 +289,7 @@
+   round+1,gr(gpu,0x20));return false;
+ }
+ static bool queue_submit(Plan &p,QueueProbe &q,vm_offset_t gpu,vm_offset_t user_db,unsigned round) {
++ if(q.compute)return shader_submit(p,q,gpu,user_db,round);
+  uint32_t expected=queue_expected(round),stride=q.reuse?queue_dispatch_bytes:queue_batch_bytes;
+  uint32_t offset=round*stride;
+  if(q.dynamic||q.indirect) {
+@@ -383,7 +402,8 @@
+  }else {
+   passed=queue_start(p,q,gpu,db);
+   for(unsigned round=0;passed&&round<3;round++)passed=queue_submit(p,q,gpu,user_db,round);
+-  if(passed)IOLog("X9 CSF QUEUE: three command-stream writes and ring consumption verified; %s ring, no shaders dispatched\n",
++  if(passed&&q.compute)IOLog("X9 SHADER: three compute dispatches and arithmetic readbacks verified\n");
++  else if(passed)IOLog("X9 CSF QUEUE: three command-stream writes and ring consumption verified; %s ring, no shaders dispatched\n",
+    q.indirect?"indirect live-body":(q.dynamic?"dynamic synchronized":"prepublished"));
+  }
+ 
+diff --git a/bsd/dev/sweet_x9_gpu_dependencies.c b/bsd/dev/sweet_x9_gpu_dependencies.c
+--- a/bsd/dev/sweet_x9_gpu_dependencies.c
++++ b/bsd/dev/sweet_x9_gpu_dependencies.c
+@@ -179,7 +179,7 @@
+ static void run(void) {
+  int enabled=0;
+  if(!PE_parse_boot_argn("x9_gpu_power_probe",&enabled,sizeof(enabled))||enabled!=1)return;
+- printf("X9 GPU: pan154 one-shot INIT -> POWER_ON -> ID -> POWER_OFF\n");
++ printf("X9 GPU: pan155 one-shot INIT -> POWER_ON -> ID -> POWER_OFF\n");
+  if(!handoff()){printf("X9 GPU: live FDT handoff absent/mismatched; all writes refused\n");return;}
+  spm=ml_io_map(0x1c004000,0x1000);
+  if(!spm||!on(rd(spm,0xe1c))){printf("X9 GPU: SPM MFG0 ACK absent; stopped\n");return;}
+diff --git a/iokit/Kernel/arm/SweetX9CSFCompute.inc b/iokit/Kernel/arm/SweetX9CSFCompute.inc
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetX9CSFCompute.inc
+@@ -0,0 +1,151 @@
++/* MT6993 shader compute bring-up. Descriptor/CS input comes from frozen
++ * Mesa v14 XML and hw_runner; power protocol comes from stock a16w driver.
++ * Only the shader writes the output allocation after the initial sentinel. */
++constexpr uint32_t shader_code_va=0x10010000,shader_desc_va=0x10014000,shader_data_va=0x10018000;
++static bool global_healthy(Plan &,QueueProbe &,vm_offset_t);
++static void queue_diagnostics(Plan &,QueueProbe &);
++static bool queue_sync_ring(QueueProbe &,vm_offset_t,unsigned,uint32_t);
++static bool shader_prepare(QueueProbe &q,vm_offset_t gpu) {
++ if(!q.compute)return true;
++ uint64_t present=gr64(gpu,0xa00),ready=gr64(gpu,0xa08);
++ uint64_t stack=gr64(gpu,0xbc8),base=gr64(gpu,0xb88),control=gr64(gpu,0x820);
++ IOLog("X9 SHADER: present=%llx ready=%llx stack=%llx base=%llx PWR_STATUS=%llx\n",
++  present,ready,stack,base,control);
++ if(!present||present==~0ULL||ready||stack||base||!(control&(1ULL<<8))||
++    (control&((1ULL<<24)|(1ULL<<41)|(1ULL<<43)))) {
++  IOLog("X9 SHADER: exclusive shader-domain ownership gate rejected\n");return false;
++ }
++ q.shader_mask=present&(~present+1); /* One actually present shader core. */
++ if(!add_shared(q.memory,shader_code_va,host_page,0xdu)||
++    !add_shared(q.memory,shader_desc_va)||!add_shared(q.memory,shader_data_va))return false;
++ unsigned char *code=cpu_address(q.memory,shader_code_va,sizeof(x9_compute_shader));
++ unsigned char *desc=cpu_address(q.memory,shader_desc_va,host_page);
++ unsigned char *data=cpu_address(q.memory,shader_data_va,host_page);
++ if(!code||!desc||!data)return false;
++ memcpy(code,x9_compute_shader,sizeof(x9_compute_shader));
++ memcpy(desc,x9_compute_spd,sizeof(x9_compute_spd));
++ memcpy(desc+64,x9_compute_tsd,sizeof(x9_compute_tsd));
++ memset(data,0xa5,host_page);
++ for(unsigned i=0;i<3;i++) {
++  uint64_t pointer=shader_data_va+i*128;
++  uint64_t operands=(uint64_t)x9_compute_operands[i][0]|((uint64_t)x9_compute_operands[i][1]<<32);
++  memcpy(desc+256+i*64,&pointer,8);memcpy(desc+264+i*64,&operands,8);
++ }
++ IOLog("X9 SHADER: assembled40-byte MOV/MOV/MOV/IADD/STORE.end; RX code=%08x descriptor=%08x output=%08x; mask=%llx\n",
++  shader_code_va,shader_desc_va,shader_data_va,q.shader_mask);
++ return true;
++}
++static bool shader_delegate(QueueProbe &q,vm_offset_t gpu) {
++ if(!q.compute)return true;
++ /* Stock delegate_pm_domain_control_to_fw(SHADER=8), before L2 up.
++  * Host control bit8 must become0 and delegated bit24 must become1. */
++ uint64_t state=gr64(gpu,0x820);
++ if(!(state&(1ULL<<8))||(state&((1ULL<<24)|(1ULL<<41)|(1ULL<<43))))return false;
++ q.power_uncertain=true;
++ gw(gpu,0x828,0x820u);
++ uint64_t end=deadline_ms(1000);
++ do {
++  state=gr64(gpu,0x820);
++  if(state!=~0ULL&&!(state&(1ULL<<8))&&(state&(1ULL<<24))&&!(state&(1ULL<<41))) {
++   q.shader_delegated=true;q.power_uncertain=false;
++   IOLog("X9 SHADER: shader-domain8 control delegated to MCU, PWR_STATUS=%llx\n",state);return true;
++  }
++  sleep_ms();
++ }while(mach_absolute_time()<end);
++ IOLog("X9 SHADER: delegation not confirmed PWR_STATUS=%llx; outer power retained\n",state);return false;
++}
++static bool shader_power_off(vm_offset_t gpu,unsigned domain,unsigned ready_off,unsigned trans_off) {
++ uint64_t owned=gr64(gpu,ready_off),state=gr64(gpu,0x820);
++ if(owned==~0ULL||state==~0ULL)return false;
++ if(!owned)return gr64(gpu,trans_off)==0;
++ if(!(state&(1ULL<<domain))||(state&(1ULL<<(16+domain)))||
++    (state&((1ULL<<41)|(1ULL<<43)))) {
++  IOLog("X9 SHADER: power-off ownership rejected domain=%u ready=%llx PWR_STATUS=%llx\n",domain,owned,state);return false;
++ }
++ gw64(gpu,0x830,owned);gw(gpu,0x828,(domain<<8)|0x11u);
++ uint64_t end=deadline_ms(1000);
++ do {
++  uint64_t ready=gr64(gpu,ready_off),trans=gr64(gpu,trans_off);
++  if(ready!=~0ULL&&trans!=~0ULL&&!(ready&owned)&&!(trans&owned))return true;
++  sleep_ms();
++ }while(mach_absolute_time()<end);
++ IOLog("X9 SHADER: power-off not confirmed domain=%u ready=%llx trans=%llx\n",
++  domain,gr64(gpu,ready_off),gr64(gpu,trans_off));return false;
++}
++static bool shader_quiesce(QueueProbe &q,vm_offset_t gpu) {
++ if(!q.compute||!q.shader_delegated)return true;
++ /* Caller already confirmed CSG terminate, MCU stopped and GPU cache flush.
++  * Stock RETRACT pendingbit43 then explicit host control confirmation. */
++ q.power_uncertain=true;gw(gpu,0x828,0x821u);
++ uint64_t end=deadline_ms(1000),state=0;
++ do {
++  state=gr64(gpu,0x820);
++  if(state!=~0ULL&&!(state&((1ULL<<24)|(1ULL<<41)|(1ULL<<43)))&&(state&(1ULL<<8))) {
++   q.shader_delegated=false;q.power_uncertain=false;break;
++  }
++  sleep_ms();
++ }while(mach_absolute_time()<end);
++ if(q.power_uncertain) {
++  IOLog("X9 SHADER: retract not confirmed PWR_STATUS=%llx; retaining DMA and power\n",state);return false;
++ }
++ /* Mirror stock host order SHADER -> BASE -> STACK, never power down a
++  * domain unless the live host ownership mask allows that exact command. */
++ if(!shader_power_off(gpu,8,0xa08,0xa10)||
++    !shader_power_off(gpu,14,0xb88,0xb90)||!shader_power_off(gpu,15,0xbc8,0xbd0))return false;
++ IOLog("X9 SHADER: control retracted and shader/base/stack returned to initial all-off state\n");return true;
++}
++static bool shader_submit(Plan &p,QueueProbe &q,vm_offset_t gpu,vm_offset_t user_db,unsigned round) {
++ if(round>=3||q.completed!=round||output_qword(p,queue_user+4096)!=(uint64_t)round*queue_batch_bytes)return false;
++ uint32_t body=queue_bodies+round*gpu_page;
++ unsigned char *where=cpu_address(q.memory,body,x9_compute_cs_bytes);
++ if(!where)return false;
++ for(unsigned i=0;i<x9_compute_cs_bytes;i++)if(where[i])return false;
++ /* Whole compute dispatch is generated only now; shader code/descriptors
++  * and each immutable case's FAUs were published before GPU ownership. */
++ memcpy(where,x9_compute_cs[round],x9_compute_cs_bytes);
++ if(!clean_page(q.memory,body)||!queue_sync_ring(q,gpu,round,body))return false;
++ uint32_t producer=(round+1)*queue_batch_bytes;
++ if(!put_qword(p,queue_user,producer)||!clean_page(p,queue_user))return false;
++ uint32_t a=x9_compute_operands[round][0],b=x9_compute_operands[round][1];
++ uint32_t expected=a+b,fence=0x53484400u+round+1;
++ IOLog("X9 SHADER: dispatch=%u inputs=%08x+%08x case-output=%08x CS-bytes=%u\n",
++  round+1,a,b,shader_data_va+round*128,x9_compute_cs_bytes);
++ gw(user_db,0,1);
++ uint64_t end=deadline_ms(3000),extract=0;uint32_t actual=0,seen_fence=0;
++ do {
++  actual=output_word(q.memory,shader_data_va+round*128);
++  seen_fence=output_word(q.memory,queue_result);
++  extract=output_qword(p,queue_user+4096);
++  if(!global_healthy(p,q,gpu)||
++     ((output_word(p,q.stream_out)^input_word(p,q.stream_in))&0xc0000000u))break;
++  if(actual==expected&&seen_fence==fence&&extract==producer) {
++   /* Each result owns a128-byte slot: shader may change only its first u32. */
++   unsigned char *slot=cpu_address(q.memory,shader_data_va+round*128,128);
++   if(!slot)return false;
++   invalidate_cpu(slot,128);
++   for(unsigned i=4;i<128;i++)if(slot[i]!=0xa5) {
++    IOLog("X9 SHADER: result guard corruption at slot=%u byte=%u\n",round,i);return false;
++   }
++   if(output_word(q.memory,queue_result,4)||output_word(q.memory,queue_result,64)!=0xa5a5a5a5u)return false;
++   q.completed=round+1;
++   IOLog("X9 SHADER: compute=%u ADD32 a=%08x b=%08x expected=%08x actual=%08x fence=%08x extract=%llu PASS ready=%llx\n",
++    round+1,a,b,expected,actual,seen_fence,extract,gr64(gpu,0xa08));return true;
++  }
++  sleep_ms();
++ }while(mach_absolute_time()<end);
++ IOLog("X9 SHADER: compute=%u failed expected=%08x actual=%08x fence=%08x/%08x extract=%llu/%u ready=%llx trans=%llx PWR=%llx\n",
++  round+1,expected,actual,seen_fence,fence,extract,producer,gr64(gpu,0xa08),gr64(gpu,0xa10),gr64(gpu,0x820));
++ queue_diagnostics(p,q);return false;
++}
++static void shader_post_flush(QueueProbe &q) {
++ if(!q.compute||!q.as_installed)return;
++ bool passed=q.completed==3;
++ for(unsigned i=0;i<3;i++) {
++  uint32_t actual=output_word(q.memory,shader_data_va+i*128);
++  uint32_t expected=x9_compute_operands[i][0]+x9_compute_operands[i][1];
++  if(actual!=expected)passed=false;
++  IOLog("X9 SHADER: final case=%u result=%08x expected=%08x\n",i+1,actual,expected);
++ }
++ IOLog("X9 SHADER: shader arithmetic/readback %s, cases=%u/3; CSF fence is a separate allocation\n",
++  passed?"PASS":"INCOMPLETE",q.completed);
++}

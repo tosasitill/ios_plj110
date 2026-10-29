@@ -1,0 +1,174 @@
+From: HelioDarwin
+Subject: [PATCH] x9: opt-in CRC milestone journal in the captured pmsg zone
+
+Keep console and pmsg evidence separate. Normal builds leave the extra mapping
+disabled; diagnostics adopt only the known shim record and never erase it.
+Selected bootstrap checkpoints retain the console-free PSCI entry probe.
+
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -71,6 +71,86 @@
+ 	}
+ }
+ 
++#include <arm64/sweet_diag_record.h>
++
++#if SWEET_X9_DIAG_PMSG
++/* Only the owner-captured ramoops pmsg zone; no search or fallback addresses. */
++static volatile uint32_t *diag_pmsg;
++static uint32_t diag_pmsg_next;
++#define X9_DIAG_PMSG_CAP (0x80000u - PSTORE_HDR)
++#endif
++
++static void
++sweet_diag_journal(unsigned int stage)
++{
++#if SWEET_X9_DIAG_PMSG
++	volatile uint32_t *hdr = __atomic_load_n(&diag_pmsg, __ATOMIC_ACQUIRE);
++	if (hdr == NULL || !board_x9 || stage > 99) {
++		return;
++	}
++	uint32_t flags = 4u | (pstore != NULL ? 1u : 0u) |
++	    (early_disabled ? 2u : 0u);
++	char line[SWEET_DIAG_RECORD_SIZE];
++	sweet_diag_record_encode(line, stage, flags);
++	/* Reserve whole copies, so exhaustion cannot emit a truncated record. */
++	uint32_t n = 5u * SWEET_DIAG_RECORD_SIZE;
++	uint32_t at = sweet_log_reserve(&diag_pmsg_next, X9_DIAG_PMSG_CAP, &n);
++	volatile char *data = (volatile char *)hdr + PSTORE_HDR;
++	uint32_t written = n - n % SWEET_DIAG_RECORD_SIZE;
++	for (uint32_t i = 0; i < written; i++) {
++		data[at + i] = line[i % SWEET_DIAG_RECORD_SIZE];
++	}
++	if (!written) {
++		return;
++	}
++	uint32_t end = at + written;
++	uint32_t old = __atomic_load_n((uint32_t *)&hdr[2], __ATOMIC_RELAXED);
++	while (old < end && !__atomic_compare_exchange_n((uint32_t *)&hdr[2],
++	    &old, end, 0, __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {
++	}
++	/* CPU0-only diagnostic build; keep the non-wrapping ring header valid. */
++	uint32_t size = __atomic_load_n((uint32_t *)&hdr[2], __ATOMIC_ACQUIRE);
++	__atomic_store_n((uint32_t *)&hdr[1], size,
++	    __ATOMIC_RELEASE);
++	__asm__ volatile("dsb sy" ::: "memory");
++#else
++	(void)stage;
++#endif
++}
++
++static void
++sweet_diag_pmsg_init(uint64_t console_base, uint32_t console_size)
++{
++#if SWEET_X9_DIAG_PMSG
++	if (!board_x9 || console_base != 0xaec0f000ULL ||
++	    console_size != 0x200000u || diag_pmsg != NULL) {
++		return;
++	}
++	/* Pmsg is 1 MiB at 0xaee0f000. Use only its lower half; avoid ECC tail. */
++	uint64_t pa = console_base + console_size;
++	vm_offset_t offset = pa & PAGE_MASK;
++	vm_offset_t mapping = ml_io_map_wcomb(pa - offset,
++	    round_page((vm_size_t)0x80000u + offset));
++	if (!mapping) {
++		return;
++	}
++	volatile uint32_t *hdr = (volatile uint32_t *)(mapping + offset);
++	uint32_t size = hdr[2], start = hdr[1];
++	/* Never erase the shim's evidence to manufacture a fresh record. */
++	if (hdr[0] != PSTORE_SIG || size > X9_DIAG_PMSG_CAP ||
++	    start > X9_DIAG_PMSG_CAP ||
++	    start != size) {
++		return;
++	}
++	diag_pmsg_next = size;
++	__atomic_store_n(&diag_pmsg, hdr, __ATOMIC_RELEASE);
++	sweet_diag_journal(21);
++#else
++	(void)console_base;
++	(void)console_size;
++#endif
++}
++
+ static int
+ sweet_compatible_has(const char *list, unsigned int size, const char *want)
+ {
+@@ -227,6 +307,7 @@
+ __attribute__((noinline)) void
+ sweet_diag_checkpoint(unsigned int stage, const char *label)
+ {
++	sweet_diag_journal(stage);
+ 	sweet_early_mark(stage, label);
+ #if SWEET_X9_DIAG_RESET
+ 	/*
+@@ -394,6 +475,11 @@
+ 			got++;
+ 		}
+ 		if (!*want && !*got) {
++			/* Independent breadcrumb first; reset itself stays console-free. */
++			if (sweet_bootstrap_stages[i].stage == SWEET_X9_CHECKPOINT_STAGE) {
++				sweet_diag_journal(sweet_bootstrap_stages[i].stage);
++			}
++			sweet_diag_entry_reset(sweet_bootstrap_stages[i].stage);
+ 			sweet_diag_checkpoint(sweet_bootstrap_stages[i].stage, message);
+ 			return;
+ 		}
+@@ -470,6 +556,7 @@
+ 	}
+ 	pstore_next = hdr[2];
+ 	__atomic_store_n(&pstore, hdr, __ATOMIC_RELEASE);
++	sweet_diag_pmsg_init(pa, size);
+ 	/* Called on the boot CPU with interrupts masked, before SMP startup. */
+ 	sweet_pstore_append(early_log, (int)early_log_size);
+ 
+diff --git a/osfmk/arm64/sweet_early.h b/osfmk/arm64/sweet_early.h
+--- a/osfmk/arm64/sweet_early.h
++++ b/osfmk/arm64/sweet_early.h
+@@ -42,6 +42,10 @@
+  * sweet_early.c would silently turn every checkpoint in arm_init.c off. */
+ #ifndef SWEET_X9_CHECKPOINT_STAGE
+ #define SWEET_X9_CHECKPOINT_STAGE 24
++#endif
++/* Opt-in CRC milestone copy in the captured X9 pmsg zone. */
++#ifndef SWEET_X9_DIAG_PMSG
++#define SWEET_X9_DIAG_PMSG 0
+ #endif
+ /* Highest milestone number sweet_early_mark will print. */
+ #ifndef SWEET_X9_MAX_STAGE
+diff --git a/osfmk/arm64/sweet_diag_record.h b/osfmk/arm64/sweet_diag_record.h
+new file mode 100644
+--- /dev/null
++++ b/osfmk/arm64/sweet_diag_record.h
+@@ -0,0 +1,30 @@
++#ifndef _ARM64_SWEET_DIAG_RECORD_H_
++#define _ARM64_SWEET_DIAG_RECORD_H_
++#include <stdint.h>
++
++/* x9m:<decimal stage>:<flags>:<CRC32>\n; CRC covers the first 15 bytes. */
++#define SWEET_DIAG_RECORD_SIZE 25u
++static inline void
++sweet_diag_record_encode(char line[SWEET_DIAG_RECORD_SIZE], unsigned stage,
++    uint32_t flags)
++{
++	static const char hex[] = "0123456789abcdef";
++	line[0] = 'x'; line[1] = '9'; line[2] = 'm'; line[3] = ':';
++	line[4] = '0' + stage / 10; line[5] = '0' + stage % 10;
++	line[6] = line[15] = ':'; line[24] = '\n';
++	for (unsigned n = 0; n < 8; n++) {
++		line[7 + n] = hex[(flags >> ((7 - n) * 4)) & 15];
++	}
++	uint32_t crc = 0xffffffffu;
++	for (unsigned n = 0; n < 15; n++) {
++		crc ^= (unsigned char)line[n];
++		for (unsigned bit = 0; bit < 8; bit++) {
++			crc = (crc >> 1) ^ (0xedb88320u & (0u - (crc & 1u)));
++		}
++	}
++	crc = ~crc;
++	for (unsigned n = 0; n < 8; n++) {
++		line[16 + n] = hex[(crc >> ((7 - n) * 4)) & 15];
++	}
++}
++#endif

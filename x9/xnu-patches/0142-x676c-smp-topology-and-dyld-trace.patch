@@ -1,0 +1,112 @@
+diff --git a/bsd/dev/mem.c b/bsd/dev/mem.c
+index 291a546..e94645a 100644
+--- a/bsd/dev/mem.c
++++ b/bsd/dev/mem.c
+@@ -170,7 +170,7 @@ sweet_null_tee(char *name, size_t len)
+ {
+ 	if (!sweet_null_parsed) {
+ 		if (!PE_parse_boot_argn("sweetnull", sweet_null_names, sizeof(sweet_null_names))) {
+-			strlcpy(sweet_null_names, "backboardd,SpringBoard", sizeof(sweet_null_names));
++			strlcpy(sweet_null_names, "launchd,dyld,backboardd,SpringBoard", sizeof(sweet_null_names));
+ 		}
+ 		sweet_null_parsed = 1;
+ 	}
+diff --git a/bsd/dev/ufs/ufshci.c b/bsd/dev/ufs/ufshci.c
+index 4092467..783ce6e 100644
+--- a/bsd/dev/ufs/ufshci.c
++++ b/bsd/dev/ufs/ufshci.c
+@@ -401,6 +401,29 @@ ufs_scsi(struct ufs_hba *hba, struct ufs_xfer *x)
+ 
+ 	x->scsi_status = 0xff;
+ 	x->sense_key = x->asc = x->ascq = 0;
++	/*
++	 * Heartbeat (boot-arg ufsbeat=N, default 4096): every N data commands,
++	 * print a line. During the dyld shared-cache mapping this says whether
++	 * the driver is still serving page-fault reads (slow) or wedged (hung).
++	 */
++	static volatile uint64_t ufs_cmds;      /* a dropped count now and then is fine */
++	static uint32_t ufs_beat = 4096;
++	static int ufs_beat_parsed;
++	if (!ufs_beat_parsed) {
++		(void)PE_parse_boot_argn("ufsbeat", &ufs_beat, sizeof(ufs_beat));
++		ufs_beat_parsed = 1;
++	}
++	if (x->len) {
++		uint64_t n = ++ufs_cmds;
++		if (ufs_beat && (n % ufs_beat) == 0) {
++			printf("ufshci: %llu data commands, last op 0x%02x lba %llu\n",
++			    n, x->cdb[0], x->cdb_len >= 10 ?
++			    ((uint64_t)x->cdb[2] << 56 | (uint64_t)x->cdb[3] << 48 |
++			     (uint64_t)x->cdb[4] << 40 | (uint64_t)x->cdb[5] << 32 |
++			     (uint64_t)x->cdb[6] << 24 | (uint64_t)x->cdb[7] << 16 |
++			     (uint64_t)x->cdb[8] << 8 | x->cdb[9]) : 0);
++		}
++	}
+ 	int error = ufs_exec(hba, req, sizeof(req), x->dir, x->segs, x->nsegs, resp, sizeof(resp));
+ 	if (error) {
+ 		return error;
+diff --git a/bsd/vm/vm_unix.c b/bsd/vm/vm_unix.c
+index bb4a5d8..82203ec 100644
+--- a/bsd/vm/vm_unix.c
++++ b/bsd/vm/vm_unix.c
+@@ -2892,6 +2892,10 @@ shared_region_map_and_slide_2_np(
+ 
+ 	files_count = uap->files_count;
+ 	mappings_count = uap->mappings_count;
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	printf("shared_region: [%d(%s)] map_and_slide: %u files, %u mappings\n",
++	    proc_getpid(p), p->p_comm, files_count, mappings_count);
++#endif
+ 
+ 	if (files_count == 0) {
+ 		SHARED_REGION_TRACE_INFO(
+@@ -2997,6 +3001,10 @@ shared_region_map_and_slide_2_np(
+ 
+ 	kr = _shared_region_map_and_slide(p, files_count, shared_files, mappings_count, mappings);
+ done:
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	printf("shared_region: [%d(%s)] map_and_slide done kr=0x%x\n",
++	    proc_getpid(p), p->p_comm, kr);
++#endif
+ 	kfree_data(shared_files, files_count * sizeof(shared_files[0]));
+ 	kfree_data(mappings, mappings_count * sizeof(mappings[0]));
+ 	return kr;
+diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
+index 78aed70..e307b2c 100644
+--- a/iokit/Kernel/arm/SweetCPU.cpp
++++ b/iokit/Kernel/arm/SweetCPU.cpp
+@@ -17,6 +17,7 @@
+ #include <kern/thread.h>
+ #include <mach/mach_time.h>
+ #include <pexpert/pexpert.h>
++#include "SweetBoard.h"
+ 
+ extern "C" void sweet_secondary_entry(void);
+ extern "C" boolean_t sweet_cpu_signal_is_enabled(unsigned int cpu);
+@@ -73,16 +74,22 @@ SweetCPU::start(IOService *provider)
+ 	if (*(const uint32_t *)reg->getBytesNoCopy() != cpu->phys_id) {
+ 		return false;
+ 	}
+-	/* topaz (SM6225): MPIDR Aff1 = cluster, Aff0 = core: 0x0-0x3 A53, 0x100-0x103 A73 */
+-	if ((cpu->phys_id >> 8) > 1 || (cpu->phys_id & 0xff) > 3 ||
+-	    topology->num_cpus > SWEET_SMP_MAX_CPUS) {
++	bool valid;
++	if (sweet_board_x676c()) {
++		/* x676c (MT6789): MPIDR Aff1 = core: 0x000-0x500 A55, 0x600/0x700 A76 */
++		valid = cpu->phys_id <= 0x700 && (cpu->phys_id & 0xff) == 0;
++	} else {
++		/* topaz (SM6225): MPIDR Aff1 = cluster, Aff0 = core: 0x0-0x3 A53, 0x100-0x103 A73 */
++		valid = (cpu->phys_id >> 8) <= 1 && (cpu->phys_id & 0xff) <= 3;
++	}
++	if (!valid || topology->num_cpus > SWEET_SMP_MAX_CPUS) {
+ 		panic("SWEET CPU: invalid topology cpu=%u mpidr=0x%x count=%u",
+ 		    cpu->cpu_id, cpu->phys_id, topology->num_cpus);
+ 	}
+ 	if (!IOCPU::start(provider)) {
+ 		return false;
+ 	}
+-	cpuName = OSSymbol::withCStringNoCopy("Kryo 260");
++	cpuName = OSSymbol::withCStringNoCopy(sweet_board_x676c() ? "Cortex-A55" : "Kryo 260");
+ 	if (cpuName == NULL) {
+ 		return false;
+ 	}

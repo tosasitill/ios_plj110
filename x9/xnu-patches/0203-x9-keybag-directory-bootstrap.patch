@@ -1,0 +1,56 @@
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -6760,6 +6760,29 @@
+  * cache remains at its populated Cryptex path; no filesystem alias or write.
+  * Only PID 1 receives this variable. Later processes can reuse the shared region.
+  */
++/* Prepare only the missing data directory. Original keybagd creates its own
++ * plist/keybag via the existing no-effaceable-storage path; never fabricate
++ * a keybag, change the executable or overwrite persistent user data here. */
++static int
++sweet_x9_prepare_keybags(proc_t p,user_addr_t scratch,user_addr_t end)
++{
++ static const char directory[]="/private/var/keybags";
++ int enabled=0;
++ extern boolean_t sweet_x9_ufs_root_writable(void);
++ if(!PE_parse_boot_argn("x9_bootstrap_dirs",&enabled,sizeof(enabled))||enabled!=1)return 0;
++ if(!sweet_x9_ufs_root_writable())return EROFS;
++ if(!proc_is64bit(p)||scratch>end||sizeof(directory)>end-scratch)return E2BIG;
++ int error=copyout(directory,scratch,sizeof(directory));if(error)return error;
++ struct mkdir_args request={.path=scratch,.mode=0700};int32_t retval=0;
++ error=mkdir(p,&request,&retval);
++ if(error&&error!=EEXIST){printf("X9 bootstrap: mkdir keybags errno=%d\n",error);return error;}
++ vnode_t vp=NULLVP;
++ error=vnode_lookup(directory,VNODE_LOOKUP_NOFOLLOW,&vp,vfs_context_kernel());
++ if(!error){if(!vnode_isdir(vp))error=ENOTDIR;vnode_put(vp);}
++ if(!error)printf("X9 bootstrap: /private/var/keybags ready; original keybagd owns bag creation\n");
++ return error;
++}
++
+ static int
+ sweet_x9_init_cache_env(proc_t p, user_addr_t cursor, user_addr_t end,
+     user_addr_t *envp)
+@@ -6880,6 +6903,8 @@
+ 	init_exec_args.argp = scratch_addr;
+ 	init_exec_args.envp = USER_ADDR_NULL;
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
++	error=sweet_x9_prepare_keybags(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
++	if(error)return error;
+ 	/* argv occupies three words; place env strings and its vector after it. */
+ 	error = sweet_x9_init_cache_env(p, scratch_addr + 3 * sizeof(user64_addr_t),
+ 	    scratch_end, &init_exec_args.envp);
+diff --git a/bsd/dev/sweet_x9_ufs.c b/bsd/dev/sweet_x9_ufs.c
+--- a/bsd/dev/sweet_x9_ufs.c
++++ b/bsd/dev/sweet_x9_ufs.c
+@@ -353,6 +353,10 @@
+  return 0;
+ }
+ /* Read-only query; never initializes hardware from an exec path. */
++boolean_t sweet_x9_ufs_root_writable(void)
++{
++ return xu.ready && xu.writable && !xu.failed;
++}
+ boolean_t sweet_x9_ufs_root_active(void)
+ {
+  return xu.ready && !xu.failed;

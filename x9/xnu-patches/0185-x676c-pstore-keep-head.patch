@@ -1,0 +1,40 @@
+From 5af54a84ee9406e3b7dcf9fbe240e2379cb45f69 Mon Sep 17 00:00:00 2001
+From: Egor Kulikovskiy <xianel0x@gmail.com>
+Date: Fri, 23 Oct 2026 08:24:53 +0500
+Subject: [PATCH] x676c: pstore keep-head so a late flood can't scroll out the
+ boot start
+
+The Android ramoops console record is ~256 KB. A userland retry loop (e.g.
+launchd spinning on fopen) wraps the ring and scrolls out the early boot log
+-- framebuffer geometry, GPU power-on probe, first userland errors -- which is
+exactly the evidence we need. Switch sweet_pstore_append to keep the head:
+once full, stop appending instead of wrapping.
+---
+ osfmk/arm64/sweet_early.c | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+index 4682c80..bbb9318 100644
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -41,6 +41,17 @@ sweet_pstore_append(const char *buf, int len)
+ 		hdr[2] = 0;
+ 	}
+ 
++	/*
++	 * Keep-head discipline: once the buffer is full, stop appending instead of
++	 * wrapping. The Android ramoops console record is only ~256 KB, and a late
++	 * userland flood (e.g. a daemon retry loop) would otherwise scroll the boot
++	 * start -- framebuffer geometry, GPU power-on probe, first userland errors --
++	 * out of the capture. Preserving the head keeps that early evidence.
++	 */
++	if (hdr[2] >= PSTORE_CAP) {
++		return;
++	}
++
+ 	/* Atomically reserve 'len' bytes in the ring buffer without overflowing PSTORE_CAP */
+ 	uint32_t old_start, new_start;
+ 	do {
+-- 
+2.51.0.windows.1
+

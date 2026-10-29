@@ -1,0 +1,34 @@
+From e9f0f07bef6d86e15f19ddeda7c432f5a45e9c95 Mon Sep 17 00:00:00 2001
+From: Egor Kulikovskiy <xianel0x@gmail.com>
+Date: Thu, 22 Oct 2026 02:47:17 +0500
+Subject: [PATCH] x676c: print thread block_hint in the sampler
+
+The profiler showed the CPU is almost always in machine_idle, so the
+stuck launchd is not spinning -- it is blocked and the system is idle.
+block_hint records what primitive last blocked a thread (kernel mutex,
+rwlock, compressor, page wait, ...), so print it (and pending_block_hint)
+to name the exact wait type without guessing.
+---
+ osfmk/kern/exception.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
+index cc6b3b9..85b4bdb 100644
+--- a/osfmk/kern/exception.c
++++ b/osfmk/kern/exception.c
+@@ -1075,9 +1075,10 @@ sweet_sample_task(const char *name, int pid, task_t task)
+ 
+ 		uint64_t cont = (uint64_t)thread->continuation;
+ 		uint64_t cont_unslid = cont ? (cont - (uint64_t)vm_kernel_slide) : 0;
+-		printf("SMP %s t%d kern [state=0x%x cont=0x%llx (unslid 0x%llx) wait_event=0x%llx wr=%d rsn=0x%x]\n",
++		printf("SMP %s t%d kern [state=0x%x cont=0x%llx (unslid 0x%llx) wait_event=0x%llx wr=%d rsn=0x%x block_hint=0x%x pending=0x%x]\n",
+ 		    name, cur_tn, thread->state, cont, cont_unslid,
+-		    (uint64_t)thread->wait_event, thread->wait_result, (uint32_t)thread->reason);
++		    (uint64_t)thread->wait_event, thread->wait_result, (uint32_t)thread->reason,
++		    (uint32_t)thread->block_hint, (uint32_t)thread->pending_block_hint);
+ 
+ 		if (thread->kernel_stack != 0) {
+ 			arm_kernel_saved_state_t *kstate = &thread_get_kernel_state(thread)->machine.ss;
+-- 
+2.51.0.windows.1
+

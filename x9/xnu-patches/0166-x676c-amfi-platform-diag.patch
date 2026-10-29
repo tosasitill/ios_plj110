@@ -1,0 +1,40 @@
+From 2523e7a824d3e3b27aa8f800f21031b5675fdd15 Mon Sep 17 00:00:00 2001
+From: Egor Kulikovskiy <xianel0x@gmail.com>
+Date: Thu, 22 Oct 2026 04:19:27 +0500
+Subject: [PATCH] x676c: diag -- log platform-binary marking per signed exec
+
+launchd got deep into service startup (many xpcproxy execs) then hit a
+userspace panic: 'unexpected exec of non-platform binary: mediaserverd'.
+That string is in userspace (launchd/xpcproxy), raised because the target
+task was not marked platform. Log each signed binary's name, whether its
+mount is MNT_ROOTFS, and the resulting cs_flags so we can see whether
+mediaserverd reaches this hook and gets CS_PLATFORM_BINARY.
+---
+ bsd/kern/sweet_amfi.c | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/bsd/kern/sweet_amfi.c b/bsd/kern/sweet_amfi.c
+index cb67b4d..6aa149d 100644
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -267,6 +267,17 @@ sweet_amfi_vnode_check_signature(struct vnode *vp, __unused struct label *label,
+ 	if (mp != NULL && (vfs_flags(mp) & MNT_ROOTFS)) {
+ 		*cs_flags |= CS_PLATFORM_BINARY;
+ 	}
++	/* Bring-up diag: a userspace "non-platform binary" panic (mediaserverd)
++	 * means some exec's task is not platform. Log what each signed binary
++	 * gets so we can see whether it reaches here and is marked platform. */
++	{
++		const char *nm = vnode_getname(vp);
++		printf("SWEET AMFI: sig %s rootfs=%d cs_flags=0x%x\n",
++		    nm ? nm : "?", (mp && (vfs_flags(mp) & MNT_ROOTFS)) ? 1 : 0, *cs_flags);
++		if (nm) {
++			vnode_putname(nm);
++		}
++	}
+ 	if (cs_blob != cs_blob->csb_ro_addr && cs_blob->csb_entitlements == NULL) {
+ 		sweet_amfi_attach_entitlements(cs_blob);
+ 	}
+-- 
+2.51.0.windows.1
+
