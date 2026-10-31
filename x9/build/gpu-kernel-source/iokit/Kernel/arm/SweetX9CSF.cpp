@@ -204,6 +204,19 @@ static void sleep_ms(void) {
 static uint64_t deadline_ms(unsigned ms) {
  uint64_t until;clock_interval_to_deadline(ms,NSEC_PER_MSEC,&until);return until;
 }
+/* Cache flushes, AS updates and short jobs finish in microseconds, but every
+ * sleep_ms() costs at least one 1ms timer wakeup. Spin ~1ms in 16us steps
+ * first, then fall back to sleeping. Callers keep their own deadlines. */
+static constexpr unsigned poll_spin_limit=64;
+static void poll_pause(unsigned *polls) {
+ if(*polls<poll_spin_limit) {
+  (*polls)++;
+  uint64_t until;nanoseconds_to_absolutetime(16000,&until);until+=mach_absolute_time();
+  while(mach_absolute_time()<until)__asm__ volatile("yield");
+  return;
+ }
+ sleep_ms();
+}
 static void invalidate_cpu(void *base,size_t length) {
  if(!length)return;
  uint64_t ctr;__asm__ volatile("mrs %0, ctr_el0":"=r"(ctr));
@@ -217,12 +230,12 @@ static bool bypass(vm_offset_t smmu) {
  return gr(smmu,0x20)==0&&gr(smmu,0x24)==0&&gr(smmu,0x44)==0;
 }
 static bool idle_as(vm_offset_t gpu,unsigned ms=1000,unsigned as=0) {
- uint64_t end=deadline_ms(ms);
+ uint64_t end=deadline_ms(ms);unsigned polls=0;
  do {
   uint32_t v=gr(gpu,0x2428+as*0x40);
   if(v==0xffffffffu)return false;
   if(!(v&1))return true;
-  sleep_ms();
+  poll_pause(&polls);
  }while(mach_absolute_time()<end);
  return false;
 }
@@ -366,12 +379,12 @@ static bool stop_mcu(vm_offset_t gpu) {
 static bool flush_gpu(vm_offset_t gpu) {
  if(gr(gpu,0x20)&(1u<<17))return false; /* Do not accept an old completion. */
  gw(gpu,0x30,0x23304u); /* FLUSH_CACHES: L2+LSC clean/invalidate, others invalidate */
- uint64_t end=deadline_ms(1000);
+ uint64_t end=deadline_ms(1000);unsigned polls=0;
  do {
   uint32_t irq=gr(gpu,0x20);
   if(irq==0xffffffffu)return false;
   if(irq&(1u<<17)){gw(gpu,0x24,1u<<17);return true;}
-  sleep_ms();
+  poll_pause(&polls);
  }while(mach_absolute_time()<end);
  return false;
 }

@@ -141,12 +141,19 @@ static int resident_begin(vm_offset_t gpu) {
   // report: type 0 = none, 1 = ACE-Lite, 2 = ACE. A non-zero type is a register
   // capability, not proof that this interconnect snoops CPU caches for client
   // addresses; the boot-arg is the operator's explicit claim and both are needed.
+  // Skipping CPU CIVAC is only valid once the GPU side issues snooping
+  // transactions too: COHERENCY_ENABLE (0x304) written, AS MEMATTR with a
+  // coherent index and outer-shareable PTEs. attributes()/install_as() program
+  // none of that (SH=0, MEMATTR index0=0x88, 0x304 only read), so the request
+  // is logged and refused; per-submit CIVAC stays on.
+  static constexpr bool gpu_side_coherency_programmed=false;
   uint32_t groups=gr(gpu,0x300),group_type=gr(gpu,0x308)&3;
   int coherent_arg=0;
   bool want=PE_parse_boot_argn("x9_gpu_coherent",&coherent_arg,sizeof(coherent_arg))&&coherent_arg==1;
-  s->coherent=want&&groups&&groups<=64&&(group_type==1||group_type==2);
-  IOLog("X9 RENDER coherency: groups=%u group0_type=%u requested=%d active=%u;register capability,interconnect not proven\n",
-   groups,group_type,coherent_arg,s->coherent?1:0);
+  bool capable=groups&&groups<=64&&(group_type==1||group_type==2);
+  s->coherent=want&&capable&&gpu_side_coherency_programmed;
+  IOLog("X9 RENDER coherency: groups=%u group0_type=%u requested=%d capable=%u gpu_side=%u active=%u;CIVAC kept unless GPU snoop is programmed\n",
+   groups,group_type,coherent_arg,capable?1:0,gpu_side_coherency_programmed?1:0,s->coherent?1:0);
   for(unsigned i=0;i<8;i++) {
    uint32_t va=0x04400000u+i*0x200000u;
    if(!add_shared(s->image,va,0x10000)||!add_shared(s->image,va+0x10000,0x100000))goto clean_failure;

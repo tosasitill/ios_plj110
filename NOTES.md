@@ -1,5 +1,25 @@
 ## X9 Metal perf / rendering review (2026-10-31, static source read only)
 
+**Update (same day): fixes 1-2 applied in source, NOT built/booted.** No clang or
+XNU tree on this Linux host, so not even a single-file compile was run.
+- `SweetX9CSF.cpp`: new `poll_pause()` spins up to 64 x 16us (~1ms) before
+  falling back to `sleep_ms()`. Used by `idle_as`, `flush_gpu`,
+  `render_page_sync` and the `render_submit` fence wait; during the spin phase
+  the fence page is acquired on every poll instead of every 1ms. Deadlines
+  and all fence/extract/guard checks are unchanged.
+- `SweetX9CSFResident.inc`: `x9_gpu_coherent=1` now logs `capable=/gpu_side=`
+  and is refused (`gpu_side_coherency_programmed=false`) until PTE SH,
+  MEMATTR and COHERENCY_ENABLE are actually programmed.
+- Both edits mirrored in `x9/metal/General/kernel/`.
+- Log `/home/ubuntu/2.txt` (user-provided, not committed, ~14s, no GUI frames
+  yet): `x9_gpu_coherent=1` was passed but `group0_type=0 active=0`, so the
+  coherent skip was NOT active in that run. Submit wall times from log
+  timestamps: backboardd seq1 ~100ms, seq2 ~9ms, later ~3-6ms; mediaserverd
+  ~4ms each. No `X9 RENDER timing` summary printed (needs >2s of jobs).
+Next: build on the macOS host, boot, and compare `X9 RENDER timing`
+(`storage_us`/`start_us`/`wait_us`/`retire_us`) and `X9 DISPLAY cadence`
+`gpu_defer` against this log.
+
 No device log or build was available in this checkout; everything below comes from
 reading `x9/build/gpu-kernel-source` and `x9/metal/General`. Hypotheses still need
 the `X9 RENDER timing` / `X9 DISPLAY cadence` lines from a real run to confirm.

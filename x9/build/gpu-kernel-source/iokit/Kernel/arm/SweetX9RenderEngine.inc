@@ -42,10 +42,10 @@ static bool render_page_sync(X9RenderResource &r,uint64_t off) {
  /* Stock v14 PA-range FULL operation on a held private GPU page. */
  uint64_t old0=gr64(gpu,0xd0),old1=gr64(gpu,0xd8);
  gw64(gpu,0xd0,pa);gw64(gpu,0xd8,pa+gpu_page-1);gw(gpu,0x30,0x7308u);
- bool done=false;uint64_t end=deadline_ms(1000);
+ bool done=false;uint64_t end=deadline_ms(1000);unsigned polls=0;
  do {
   if(!no_faults(gpu))break;
-  if(gr(gpu,0x20)&(1u<<20)){done=true;break;}sleep_ms();
+  if(gr(gpu,0x20)&(1u<<20)){done=true;break;}poll_pause(&polls);
  }while(mach_absolute_time()<end);
  if(!done)return false;
  gw(gpu,0x24,1u<<20);gw64(gpu,0xd0,old0);gw64(gpu,0xd8,old1);return true;
@@ -355,7 +355,7 @@ static IOReturn render_submit(X9RenderContext *c,const X9RenderSubmission *reque
    if(!put_qword(resident->image,va,expected[i])||!clean_page(resident->image,va))goto uncertain;
   }
   vm_offset_t db=ml_io_map(0x48090000,0x1000);if(!db)goto uncertain;
-  gw(db,0,1);phase="completion-wait";bool done=false;uint64_t end=deadline_ms(10000),next_sync=0;
+  gw(db,0,1);phase="completion-wait";bool done=false;uint64_t end=deadline_ms(10000),next_sync=0;unsigned polls=0;
   times[4]=mach_absolute_time();
   do {
    if(x9_csf_group_health(&io,&g->control,resident->epoch)!=kIOReturnSuccess)goto uncertain;
@@ -367,9 +367,10 @@ static IOReturn render_submit(X9RenderContext *c,const X9RenderSubmission *reque
     phase="fence-cache-acquire";
     for(unsigned i=0;i<3;i++)if((active&(1u<<i))&&!render_page_sync(g->storage[i],0x8000))goto uncertain;
     // pan204's short jobs waited ~10.4ms for the next cache acquisition.
-    // Keep the same private-page sync and all fence/extract/guard checks;
-    // observe at1ms instead of rounding every short submission to10ms.
-    next_sync=deadline_ms(1);phase="completion-wait";
+    // Keep the same private-page sync and all fence/extract/guard checks.
+    // While poll_pause() is still spinning, acquire on every poll so a short
+    // job is seen within ~16us; after that, acquire at1ms as before.
+    next_sync=polls<poll_spin_limit?0:deadline_ms(1);phase="completion-wait";
    }
    done=true;
    for(unsigned i=0;i<3;i++)if(active&(1u<<i)) {
@@ -380,7 +381,7 @@ static IOReturn render_submit(X9RenderContext *c,const X9RenderSubmission *reque
     for(unsigned j=16;j<64;j++)if(fence[j]!=0xa5)goto uncertain;
     if(actual!=request->submission_id||output_qword(resident->image,slot.user_io+i*host_page+gpu_page)!=expected[i])done=false;
    }
-   if(done)break;sleep_ms();
+   if(done)break;poll_pause(&polls);
   }while(mach_absolute_time()<end);
   if(!done)goto uncertain;
   times[5]=mach_absolute_time();
