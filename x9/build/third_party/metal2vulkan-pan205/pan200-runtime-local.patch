@@ -1,0 +1,3201 @@
+--- a/crates/metal2vulkan/src/bind/graphics.rs
++++ b/crates/metal2vulkan/src/bind/graphics.rs
+@@ -898,13 +898,18 @@
+     stages: impl ExactSizeIterator<Item = vk::ShaderStage>,
+     tessellated: bool,
+     emulated: bool,
++    captured: bool,
+ ) -> Result<Vec<(Stage, vk::ShaderStage)>, BindError> {
+     let stages: Vec<vk::ShaderStage> = stages.collect();
+     let mut out = Vec::with_capacity(stages.len());
+     for (i, &s) in stages.iter().enumerate() {
+         let compute = s == vk::ShaderStage::COMPUTE && emulated;
+         let object_first = compute && stages.get(i + 1) == Some(&vk::ShaderStage::COMPUTE);
+-        let stage = if s == vk::ShaderStage::FRAGMENT {
++        let stage = if captured && s == vk::ShaderStage::COMPUTE {
++            Stage::Vertex
++        } else if captured && s == vk::ShaderStage::VERTEX {
++            continue;
++        } else if s == vk::ShaderStage::FRAGMENT {
+             Stage::Fragment
+         } else if object_first {
+             Stage::Object
+@@ -1087,6 +1092,7 @@
+         p.stages.iter().map(|m| m.stage),
+         p.graphics.tessellation.is_some(),
+         records.is_some(),
++        p.graphics.vertex_capture.is_some(),
+     )?;
+     let stages: Vec<Stage> = modules.iter().map(|(stage, _)| *stage).collect();
+     // A mesh render pipeline (`Device::compile_mesh_pipeline`) is drawn by mesh draws.
+@@ -1585,12 +1591,13 @@
+             .find(|(s, _)| *s == stage)
+             .map_or_else(|| vk_stage(stage), |(_, m)| *m)
+     };
+-    let stage_flags: fn(Stage) -> vk::PipelineStageFlags2 =
+-        match (&p.graphics.tessellation, records) {
++    let stage_flags: fn(Stage) -> vk::PipelineStageFlags2 = if p.graphics.vertex_capture.is_some() {
++        |stage| if stage == Stage::Vertex { vk::PipelineStageFlags2::COMPUTE_SHADER } else { pipeline_stage(stage) }
++    } else { match (&p.graphics.tessellation, records) {
+             (Some(_), _) => tessellated_pipeline_stage,
+             (None, Some(_)) => emulated_mesh_pipeline_stage,
+             (None, None) => pipeline_stage,
+-        };
++        }};
+     let bindings = bindings(&p.layout);
+     let stage_shape = |s: Stage| shape.stages.get(&s);
+ 
+@@ -1993,6 +2000,7 @@
+                         WriteSource::ControlPointIndices
+                     }
+                     // An emulated mesh function's records and work buffer, each draw's own.
++                    SyntheticBinding::VertexCaptureRecords if p.graphics.vertex_capture.is_some() => WriteSource::VertexCaptureRecords,
+                     SyntheticBinding::MeshRecords if records.is_some() => WriteSource::MeshRecords,
+                     SyntheticBinding::MeshWork if records.is_some() => WriteSource::MeshWork,
+                     // An emulated tessellation draw's work buffer and records, each its own.
+--- a/crates/metal2vulkan/src/bind/plan.rs
++++ b/crates/metal2vulkan/src/bind/plan.rs
+@@ -777,6 +777,8 @@
+     /// the consumer binds whole for the mesh dispatch and the draw alike
+     /// ([`MeshDispatch`](crate::bind::MeshDispatch)).
+     MeshRecords,
++    /// A Metal vertex capture draw's header and instance-major output records.
++    VertexCaptureRecords,
+     /// An emulated mesh draw's work buffer (`SyntheticBinding::MeshWork`, the object and mesh
+     /// stages' alike): the draw's region of `MeshDispatch::work_bytes`, holding
+     /// `MeshDispatch::work`, bound whole ([`MeshDispatch`](crate::bind::MeshDispatch)).
+--- a/crates/metal2vulkan/src/cache/codec.rs
++++ b/crates/metal2vulkan/src/cache/codec.rs
+@@ -48,7 +48,8 @@
+     AccessSet, BufferForm, BufferKind, BufferSlot, CommandWrites, DescriptorView, MeshRecords,
+     NumberedSampler, PatchDomain, PipelineInterface, PlacedField, PushLoc, PushPlacement,
+     RecordField, RecordValue, SamplerSlot, SlotInterface, StageDescriptor, StageInterface,
+-    StageSpec, TessellationStage, TextureAccess, TextureSlot, ThreadgroupArgument, Window,
++    StageSpec, TessellationStage, TextureAccess, TextureSlot, ThreadgroupArgument, VertexCapture,
++    VertexCaptureField, Window,
+ };
+ use crate::pipeline::layout::{
+     BindingSource, DescriptorBinding, DescriptorSetLayout, PipelineLayout, PushConstantRange,
+@@ -80,8 +81,8 @@
+ use crate::vk;
+ use crate::vk::{ComponentMapping, SamplerDesc};
+ 
++use super::PipelineKey;
+ use super::digest::Node;
+-use super::PipelineKey;
+ 
+ /// The bytes do not decode as the expected value (always a corrupt artifact).
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+@@ -838,6 +839,7 @@
+         TileMemory,
+         FunctionTableSnapshot,
+         MeshRecords,
++        VertexCaptureRecords,
+         MeshWork,
+         TessellationWork,
+         TessellationRecords,
+@@ -1100,7 +1102,7 @@
+     CommandWrites { operations, primitive_types }
+     StageInterface {
+         stage, slots, threadgroup, push, descriptors, spec, needs_pointer_translation,
+-        needs_handle_translation, io, tessellation, writes_memory, mesh_records, emulated_payload,
++        needs_handle_translation, io, tessellation, writes_memory, mesh_records, vertex_capture, vertex_capture_fields, emulated_payload,
+         payload, reaches_command_buffers, command_writes, writes_textures, numbered_samplers,
+         own_pixel_textures,
+         snapshot_textures, private_bytes,
+@@ -1111,6 +1113,8 @@
+         output_winding_order, control_point_index_type, factor_scale_enabled,
+     }
+     MeshRecords { vertices, primitives, corners, vertex_words, primitive_words, fields, slot_words }
++    VertexCapture { stride_words, local_size, partial_groups }
++    VertexCaptureField { record, flat, no_perspective, centroid, sample, packed, index, invariant }
+     RecordField { value, per_primitive, offset, words, numeric }
+     BufferSlot { access, window, form, kind }
+     TextureSlot { texture_type, sampled_type, depth_compare, access }
+@@ -1349,7 +1353,7 @@
+         rasterization_order_attachment_access, max_vertex_amplification_count, declares_layer,
+         tessellation,
+         fragment_imageblock, sample_shading, vertex_writes_memory, writes_viewport_index,
+-        storage_attachments, shadow_stencil, early_fragment_tests, mesh_records,
++        storage_attachments, shadow_stencil, early_fragment_tests, mesh_records, vertex_capture, sample_replay_safe,
+         emulated_tessellation,
+         writes_point_size, flat_fragment_inputs,
+         clip_distances, writes_depth, reads_barycentric_coord, reads_primitive_id,
+--- a/crates/metal2vulkan/src/cache/mod.rs
++++ b/crates/metal2vulkan/src/cache/mod.rs
+@@ -61,7 +61,7 @@
+ /// [`ARTIFACT_FORMAT_VERSION`]. The commit that bumps it says what changed; this comment keeps no
+ /// history.
+ // X9 pan197: raw linear-shadow kernels and native split normalized depth/stencil.
+-pub const SEMANTICS_VERSION: u32 = 1970001;
++pub const SEMANTICS_VERSION: u32 = 2000002;
+ 
+ /// The byte-layout version of encoded artifacts (`CompiledFunction::to_bytes` and the
+ /// [`PipelineArtifact`] encodings). Every encoded artifact carries it, and a decode under another
+@@ -71,7 +71,7 @@
+ /// re-typed in an encoded type, its `codec` body or its `envelope`. A variant removed while its tag
+ /// stays unused needs no bump: an entry holding it fails to decode, which is a miss. The commit that
+ /// bumps it says what changed; this comment keeps no history.
+-pub const ARTIFACT_FORMAT_VERSION: u32 = 1970001;
++pub const ARTIFACT_FORMAT_VERSION: u32 = 2000002;
+ 
+ /// The version of what this crate's runtime does with a compiled pipeline: instantiating a binding
+ /// plan (`BindingPlan::instantiate_*`: descriptor ranges, push bytes, root, argument, and handle
+@@ -96,7 +96,7 @@
+ /// keeps no history.
+ // X9 pan195: sampled-source copies, memoryless resolve backing, aspect clear reach
+ // and linear-allocation padding change execution under otherwise identical inputs.
+-pub const RUNTIME_VERSION: u32 = 1980001;
++pub const RUNTIME_VERSION: u32 = 2000002;
+ 
+ /// The digest of the sources this build of the crate was compiled from: SHA-256, as lowercase hex,
+ /// of the manifest, the build script, and exactly the files the crate roots' module tree compiles
+--- a/crates/metal2vulkan/src/lower/access/absent.rs
++++ b/crates/metal2vulkan/src/lower/access/absent.rs
+@@ -118,7 +118,7 @@
+ /// it can ([`state_status`] then states how it reaches the buffer).
+ pub fn status_short(cx: &SelectCx<'_>) -> Option<StatusShort> {
+     let enabled = &cx.profile.fields().enabled.features;
+-    super::dynamic::stage_stores(cx.stage)
++    super::dynamic::stage_stores(if cx.inputs.vertex_capture { Stage::Kernel } else { cx.stage })
+         .find(|f| !enabled.contains(f))
+         .map(StatusShort::Stores)
+ }
+--- a/crates/metal2vulkan/src/lower/access/dynamic.rs
++++ b/crates/metal2vulkan/src/lower/access/dynamic.rs
+@@ -410,7 +410,7 @@
+ fn plan_misses(cx: &mut SelectCx<'_>) -> Result<(), Error> {
+     if cx.profile.fields().isolation == GuestIsolation::On {
+         let enabled = &cx.profile.fields().enabled.features;
+-        if let Some(f) = stage_stores(cx.stage).find(|f| !enabled.contains(f)) {
++        if let Some(f) = stage_stores(if cx.inputs.vertex_capture { Stage::Kernel } else { cx.stage }).find(|f| !enabled.contains(f)) {
+             return Err(Unsupported::needs(
+                 Feature::DereferenceLoadedPointer,
+                 Capability::Feature(f),
+--- a/crates/metal2vulkan/src/lower/access/encode.rs
++++ b/crates/metal2vulkan/src/lower/access/encode.rs
+@@ -398,7 +398,7 @@
+         .into());
+     }
+     let store = match cx.stage {
+-        Stage::Vertex if !f.leaf.vertex_stores_and_atomics => {
++        Stage::Vertex if !cx.inputs.vertex_capture && !f.leaf.vertex_stores_and_atomics => {
+             Some(VkFeature::VertexPipelineStoresAndAtomics)
+         }
+         Stage::Fragment if !f.leaf.fragment_stores_and_atomics => {
+--- a/crates/metal2vulkan/src/lower/emit.rs
++++ b/crates/metal2vulkan/src/lower/emit.rs
+@@ -34,11 +34,11 @@
+ use std::collections::{BTreeMap, BTreeSet};
+ use std::rc::Rc;
+ 
++use crate::air::Entry;
+ use crate::air::ir::{Body, InstId, InstKind, Value, ValueId, ValueIndex};
+-use crate::air::Entry;
+-use crate::budget::{tree_bytes, vec_bytes, Growth, Meter};
++use crate::budget::{Growth, Meter, tree_bytes, vec_bytes};
+ use crate::error::{Error, InternalError, InternalKind, LowerFamily};
+-use crate::lower::select::{entry_param_family, param_binding, FamilyPlans, Plan, SelectorForm};
++use crate::lower::select::{FamilyPlans, Plan, SelectorForm, entry_param_family, param_binding};
+ use crate::lower::strategy::Strategy;
+ use crate::lower::view::EntryView;
+ use crate::lower::{
+@@ -49,7 +49,7 @@
+ use crate::pipeline::sym::{PushField, SlotRef, Stage};
+ use crate::spirv::builder::constructs::{ArmEnd, ArmFn};
+ use crate::spirv::builder::{FunctionBuilder, ModuleBuilder};
+-use crate::spirv::dead::{remove_dead_keeping, Offer};
++use crate::spirv::dead::{Offer, remove_dead_keeping};
+ use crate::spirv::error::{BResult, BuildError, Dangling};
+ use crate::spirv::ids::{
+     BlockId as SBlockId, ConstId, DemoteTy, FuncId, GlobalId, TypeId, Value as SValue, VarId,
+@@ -440,10 +440,10 @@
+                 };
+             }
+             PushField::SlotGuestBase(slot) if self.plan.families.access.replay => {
+-                return access::replay_guest_base(self, fb, slot)
++                return access::replay_guest_base(self, fb, slot);
+             }
+             PushField::DispatchRegion if self.plan.families.access.replay || flat => {
+-                return access::replay_region(self, fb)
++                return access::replay_region(self, fb);
+             }
+             _ => {}
+         }
+@@ -1347,6 +1347,7 @@
+         // The tile staging's entry-wrapper hook: a tile function that stages an attachment runs
+         // `body` between the loads and the stores of its tile's cells.
+         let mut wrapper = em.cx.for_new_function();
++        let func = stage_io::wrap_capture_entry(&mut wrapper, &mut mb, func)?;
+         let func = match (
+             access::tile::wrap_entry(&mut wrapper, &mut mb, func),
+             &wrapper.fault,
+@@ -1399,6 +1400,7 @@
+             {
+                 ExecModel::TessellationEvaluation
+             }
++            Stage::Vertex if plan.families.stage_io.capture.is_some() => ExecModel::GLCompute,
+             Stage::Vertex => ExecModel::Vertex,
+             Stage::Fragment => ExecModel::Fragment,
+             // An emulated object or mesh function is a compute entry.
+@@ -1435,9 +1437,9 @@
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++    use crate::air::ir::BlockId;
+     use crate::air::ir::build::ModuleBuilder as AirBuilder;
+     use crate::air::ir::inst::FastMath;
+-    use crate::air::ir::BlockId;
+     use crate::spirv::ids::ScalarTy;
+ 
+     /// A phi's incoming value is read by the parallel copy at the end of its incoming block, so
+--- a/crates/metal2vulkan/src/lower/select.rs
++++ b/crates/metal2vulkan/src/lower/select.rs
+@@ -744,7 +744,7 @@
+             Builtin::ThreadIndexInQuadgroup
+             | Builtin::ThreadIndexInSimdgroup
+             | Builtin::ThreadsPerSimdgroup,
+-        ) if stage == Stage::Fragment => LowerFamily::Simd,
++        ) if matches!(stage, Stage::Fragment | Stage::Vertex) => LowerFamily::Simd,
+         ParamRole::Builtin(_)
+         | ParamRole::StageIn { .. }
+         | ParamRole::VertexInput { .. }
+@@ -1569,6 +1569,13 @@
+ ) -> Result<Plan, Error> {
+     let p = cx.profile;
+     let stage = cx.stage;
++    // The capture record descriptor belongs to this compute entry in addition to the original
++    // vertex resources. Count it before slot selection so any uniform-buffer fallback sees the
++    // actual compute-stage pressure. Vulkan's per-stage descriptor limits are shared by stages;
++    // retain the Vertex identity in the resource census for the original Metal slots.
++    if cx.inputs.vertex_capture {
++        cx.descriptors.storage_buffers = cx.descriptors.storage_buffers.saturating_add(1);
++    }
+     // Each family completes its own plan and contributes its descriptors, facts, simd class,
+     // and tangled instructions before the combined checks below.
+     stage_io::finish(&mut cx)?;
+@@ -1618,6 +1625,7 @@
+     // order is only exact on emulated simdgroups emulates them on every dispatch, which no variant
+     // selects.
+     let model = &p.fields().subgroup;
++    let subgroup_stage = if cx.inputs.vertex_capture { Stage::Kernel } else { stage };
+     let variant = cx.inputs.emulated_simdgroups && stage == Stage::Kernel;
+     let tier = if variant || (cx.entry.lockstep.emulated && stage == Stage::Kernel) {
+         if variant {
+@@ -1625,8 +1633,15 @@
+         }
+         subgroup::emulated_tier(&cx.simd, stage, model)?
+     } else {
+-        subgroup::tier(&cx.simd, stage, model)?
++        subgroup::tier(&cx.simd, subgroup_stage, model)?
+     };
++    if cx.inputs.vertex_capture && (tier == Tier::Emulated || (tier == Tier::Cluster32
++        && sel.strategy.iter().flatten().any(|s| matches!(s,
++            Strategy::Barrier(sync::barrier::BarrierStrategy::Barrier(b))
++                if b.scope == crate::spirv::ir::Scope::Subgroup)))) {
++        // A wider Vulkan subgroup cannot implement a control barrier of one 32-lane cluster.
++        return Err(Unsupported::not_implemented(Feature::SimdWidth).into());
++    }
+     if tier == Tier::Emulated {
+         // The emulated tier's exchange carries its own active flags.
+         cx.families.simd.partly_live.clear();
+@@ -1657,7 +1672,7 @@
+         // A vertex function's subgroups its driver runs as Metal does without the stage listed: its
+         // module needs that fact in place of the stage.
+         metal_vertex_simdgroups: cx.families.simd.prefix_lane,
+-        ..subgroup::requirement(tier, stage, &p.fields().subgroup)
++        ..subgroup::requirement(tier, subgroup_stage, &p.fields().subgroup)
+     };
+     let dispatch = match stage {
+         Stage::Kernel | Stage::Object | Stage::Mesh => Some(dispatch::plan_kernel(&mut cx, tier)?),
+--- a/crates/metal2vulkan/src/lower/simd/mod.rs
++++ b/crates/metal2vulkan/src/lower/simd/mod.rs
+@@ -285,6 +285,34 @@
+     pub prefix_lane: bool,
+ }
+ 
++/// Whether a vertex entry requires subgroup execution on a profile lacking native vertex
++/// subgroups. The read-only barrier proof is the same one used by barrier selection.
++pub(crate) fn needs_vertex_capture(entry: &crate::air::Entry, profile: &crate::device::DeviceProfile) -> bool {
++    if profile.fields().subgroup.stage(Stage::Vertex).supported
++        || profile.takes_driver_deviation(crate::error::DriverDeviation::MetalVertexSimdgroups)
++    {
++        return false;
++    }
++    let Some(body) = entry.module.func(entry.func).and_then(|f| f.body.as_ref()) else {
++        return false;
++    };
++    use crate::air::abi::{Builtin, ParamRole};
++    if entry.ep.params.iter().any(|p| matches!(p.role,
++        ParamRole::Builtin(Builtin::ThreadIndexInSimdgroup | Builtin::ThreadIndexInQuadgroup))) {
++        return true;
++    }
++    let independent = crate::lower::sync::barrier::independent_vertex(body);
++    body.insts.values().any(|inst| match &inst.kind {
++        InstKind::Call(call) => match &call.callee {
++            Callee::Air { op: AirIntrinsic::Group(_) | AirIntrinsic::SimdMatrix(_), .. }
++            | Callee::Llvm { op: LlvmIntrinsic::Agx(_), .. } => true,
++            Callee::Air { op: AirIntrinsic::Sync(crate::air::intrinsics::Sync::Barrier { scope: crate::air::intrinsics::ThreadScope::Simdgroup, flags, .. }), .. } => !independent || flags.threadgroup || flags.threadgroup_imageblock || flags.object_data,
++            _ => false,
++        },
++        _ => false,
++    })
++}
++
+ /// The census name of the places the device's simdgroup lockstep orders, with no words.
+ pub const DEVICE_LOCKSTEP: &str = "barrier.lockstep.device";
+ 
+@@ -343,6 +371,7 @@
+         cx.precision
+             .insert(PrecisionNote::FragmentSimdgroupGrouping);
+     }
++    let subgroup_stage = if cx.inputs.vertex_capture { Stage::Kernel } else { cx.stage };
+     let plan = &cx.families.simd;
+     if plan.groups {
+         let model = &cx.profile.fields().subgroup;
+@@ -357,10 +386,10 @@
+         cx.simd = if emulated {
+             direct
+         } else {
+-            match subgroup::tier(&direct, cx.stage, model) {
++            match subgroup::tier(&direct, subgroup_stage, model) {
+                 Ok(Tier::Cluster32) => cluster,
+                 Ok(Tier::Emulated) | Err(_)
+-                    if subgroup::tier(&cluster, cx.stage, model) == Ok(Tier::Cluster32) =>
++                    if subgroup::tier(&cluster, subgroup_stage, model) == Ok(Tier::Cluster32) =>
+                 {
+                     cluster
+                 }
+@@ -375,7 +404,7 @@
+     if cx.families.simd.device_lane {
+         let model = &cx.profile.fields().subgroup;
+         if matches!(
+-            subgroup::tier(&cx.simd, cx.stage, model),
++            subgroup::tier(&cx.simd, subgroup_stage, model),
+             Ok(t) if t != Tier::Direct
+         ) {
+             use crate::device::requirements::VkProperty;
+@@ -383,7 +412,7 @@
+                 Feature::SimdWidth,
+                 vec![
+                     vec![Capability::Property(VkProperty::MetalFragmentSimdgroups)],
+-                    subgroup::width_needs(cx.stage, model.stage(cx.stage)),
++                    subgroup::width_needs(subgroup_stage, model.stage(subgroup_stage)),
+                 ],
+             )
+             .into());
+@@ -395,6 +424,7 @@
+     // post-tessellation vertex function runs as a tessellation evaluation stage, where nothing
+     // was measured: it needs the stage listed.
+     if cx.stage == Stage::Vertex
++        && !cx.inputs.vertex_capture
+         && cx.simd != SimdClass::None
+         && cx
+             .profile
+@@ -736,7 +766,7 @@
+             builtin @ (Builtin::ThreadIndexInQuadgroup
+             | Builtin::ThreadIndexInSimdgroup
+             | Builtin::ThreadsPerSimdgroup),
+-        ) if cx.stage == Stage::Fragment => *builtin,
++        ) if matches!(cx.stage, Stage::Fragment | Stage::Vertex) => *builtin,
+         _ => return Err(cx.invariant("a parameter routed to the simd family it does not own")),
+     };
+     let ty = cx
+@@ -748,6 +778,11 @@
+     }
+     let ops = match builtin {
+         Builtin::ThreadsPerSimdgroup => return Ok(()),
++        Builtin::ThreadIndexInSimdgroup if cx.stage == Stage::Vertex => {
++            cx.families.simd.device_lane = true;
++            cx.families.simd.simdgroup_members = true;
++            OpBits::BASIC
++        }
+         Builtin::ThreadIndexInSimdgroup => {
+             if crate::lower::fragment::loops_samples(cx) {
+                 return Err(
+@@ -767,6 +802,7 @@
+             }
+             OpBits::BASIC
+         }
++        Builtin::ThreadIndexInQuadgroup if cx.stage == Stage::Vertex => OpBits::QUAD,
+         _ => {
+             let quad = SimdClass::CrossLane(OpBits::QUAD);
+             if subgroup::tier(&quad, Stage::Fragment, &cx.profile.fields().subgroup).is_err() {
+--- a/crates/metal2vulkan/src/lower/stage_io/mod.rs
++++ b/crates/metal2vulkan/src/lower/stage_io/mod.rs
+@@ -162,25 +162,25 @@
+ use crate::air::abi::{Builtin, ParamBinding, ParamRole};
+ use crate::air::ir::{ArgIdx, InstId, Value, ValueId};
+ use crate::error::{Error, Feature, LowerFamily, Unsupported};
+-use crate::lower::arith::{narrow, ops, FloatFmt, Form, Held};
++use crate::lower::arith::{FloatFmt, Form, Held, narrow, ops};
+ use crate::lower::emit::EmitCx;
+ use crate::lower::select::{Plan, SelectCx};
+ use crate::pipeline::stage_io::{IoNumeric, StageIo};
+ use crate::pipeline::sym::{PushField, SpecKey, Stage, VaryingKey};
+ use crate::spirv::builder::constructs::KillForm;
+ use crate::spirv::builder::{FunctionBuilder, ModuleBuilder};
+-use crate::spirv::error::BResult;
++use crate::spirv::error::{BResult, BuildError, TypeRule};
+ use crate::spirv::ids::{GlobalId, TypeId, Value as SValue};
+ use crate::spirv::ir::{
+     BinOp, ConstBits, Constant, ConvOp, ExecMode, GlslOp, IoDecor, IoDir, MemAccess, StorageClass,
+     Type as SType, UnOp,
+ };
+ 
++pub use plan::{DrawBase, Link, Place, Shape};
+ pub(crate) use plan::{
+     amplification_count_form, finish_merged, note_device_point_size, output_types,
+     view_index_enabled,
+ };
+-pub use plan::{DrawBase, Link, Place, Shape};
+ 
+ fn not_lowered() -> Error {
+     Unsupported::not_implemented(Feature::Lowering(LowerFamily::StageIo)).into()
+@@ -360,6 +360,8 @@
+ /// The stage-IO part of the per-function plan (`select::FamilyPlans`).
+ #[derive(Clone, Debug, Default, PartialEq, Eq)]
+ pub struct StageIoPlan {
++    /// Compute capture of a vertex entry, when requested by the graphics linker.
++    pub capture: Option<VertexCapturePlan>,
+     /// Every interface object, in declaration order.
+     pub objects: Vec<IoObject>,
+     /// Every used stage-IO parameter.
+@@ -469,6 +471,79 @@
+     pub primitive_id: Option<PrimitiveIdStore>,
+ }
+ 
++/// Private output globals and their record layout for a capture compute entry.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct VertexCapturePlan {
++    pub records: crate::pipeline::sym::ResourceSlot,
++    pub local_size: u32,
++    pub partial_groups: bool,
++    pub fields: Vec<crate::pipeline::link::vertex_capture::CaptureField>,
++    pub indices: Vec<usize>,
++    pub stride: u32,
++}
++
++/// Configure a selected vertex plan for compute capture. The caller rounds the dispatch up
++/// to full workgroups, one row per instance; the entry wrapper excludes inactive tail lanes
++/// before any vertex fetch, side effect or subgroup operation. Producers with execution
++/// barriers instead require a whole number of groups and need no divergent entry wrapper.
++pub fn configure_capture(
++    plan: &mut Plan,
++    records: crate::pipeline::sym::ResourceSlot,
++    local_size: u32,
++) -> BResult<(
++    Vec<crate::pipeline::link::vertex_capture::CaptureField>,
++    u32,
++)> {
++    use crate::spv::BuiltIn as B;
++    if plan.stage != crate::pipeline::sym::Stage::Vertex || local_size == 0 {
++        return Err(BuildError::Type(TypeRule::VectorShape));
++    }
++    // A divergent call around an execution barrier is not a valid way to mask a tail.
++    // SIMD emulation also emits workgroup barriers, even without an explicit AIR barrier.
++    let partial_groups = plan.simd.1 != crate::device::subgroup::Tier::Emulated
++        && !plan.strategy.iter().flatten().any(|s| {
++            matches!(
++                s,
++                crate::lower::strategy::Strategy::Barrier(
++                    crate::lower::sync::barrier::BarrierStrategy::Barrier(_)
++                )
++            )
++        });
++    let sp = &mut plan.families.stage_io;
++    if sp.objects.iter().any(|o| match o {
++        IoObject::Builtin {
++            builtin,
++            dir: IoDir::Input,
++            ..
++        } => !matches!(
++            builtin,
++            B::VertexIndex | B::InstanceIndex | B::BaseVertex | B::BaseInstance
++        ),
++        IoObject::User {
++            dir: IoDir::Input, ..
++        } => true,
++        _ => false,
++    }) || sp.merged.is_some()
++        || sp.captured_index.is_some()
++        || !sp.amplified.is_empty()
++        || sp.primitive_id.is_some()
++        || plan.families.tessellation.eval.is_some()
++    {
++        return Err(BuildError::Type(TypeRule::VectorShape));
++    }
++    let (fields, indices, stride) =
++        crate::pipeline::link::vertex_capture::output_layout(&sp.objects, sp.invariant)?;
++    sp.capture = Some(VertexCapturePlan {
++        records,
++        local_size,
++        partial_groups,
++        fields: fields.clone(),
++        indices,
++        stride,
++    });
++    Ok((fields, stride))
++}
++
+ /// How a vertex function compiled under `LoweringInputs::merged_draws` finds the command its
+ /// corner falls in: at entry, before the body, from its `VertexIndex` and `InstanceIndex` (the
+ /// input builtins' objects `vertex` and `instance`) and the header at
+@@ -646,6 +721,8 @@
+ #[derive(Clone, Debug, Default)]
+ pub struct Declared {
+     pub globals: Vec<GlobalId>,
++    pub capture_buffer: Option<GlobalId>,
++    pub capture_invocation: Option<GlobalId>,
+     /// By object, the `Private` array a sample-qualified varying of a function looping over its
+     /// covered samples is read into at every sample before the loop, where the driver's
+     /// interpolation needs the whole quad ([`read_at_every_sample`]).
+@@ -1115,6 +1192,7 @@
+ /// come after it in program order and never reach it, as Metal's attribute is fetched before its
+ /// function runs.
+ pub fn emit_entry(cx: &mut EmitCx<'_>, fb: &mut FunctionBuilder<'_>) -> BResult<()> {
++    capture_entry(cx, fb)?;
+     // The de-indexed or private list form's raw index, read once in the first block, where it
+     // dominates every use, and the private list form's base vertex.
+     if let Some(c) = cx.plan.families.stage_io.captured_index {
+@@ -1238,13 +1316,13 @@
+             return ops::mask(fb, form, x);
+         }
+         Some(Source::StageInRegion { size, projection }) => {
+-            return stage_in::region_value(cx, fb, size, projection)
++            return stage_in::region_value(cx, fb, size, projection);
+         }
+         Some(Source::Pulled(_)) => {
+             return Err(cx.fail(format!(
+                 "pulled parameter {} was not fetched at entry",
+                 b.param
+-            )))
++            )));
+         }
+         Some(Source::Uniform(link)) => {
+             let p = pointer(cx, fb, &link)?;
+@@ -1337,7 +1415,7 @@
+             return Err(cx.fail(format!(
+                 "stage-IO object {} is read at the pixel center",
+                 link.object
+-            )))
++            )));
+         }
+     };
+     to_lowered(cx, fb, link, x)
+@@ -1585,7 +1663,7 @@
+         (None, Returned::Void) => {}
+         (None, _) => return Err(cx.fail("an entry with outputs returns no value")),
+         (Some(v), Returned::Void) => {
+-            return Err(cx.fail(format!("the entry returns {v:?} without outputs")))
++            return Err(cx.fail(format!("the entry returns {v:?} without outputs")));
+         }
+         // Every output is gated off: the value is stored nowhere.
+         (Some(_), _) if outputs.is_empty() => {}
+@@ -1685,6 +1763,7 @@
+         let one = fb.module().const_value(one)?;
+         fb.store(p, one, MemAccess::default())?;
+     }
++    capture_return(cx, fb)?;
+     Ok(())
+ }
+ 
+@@ -2035,10 +2114,10 @@
+     };
+     let texel =
+         crate::lower::fragment::input_blend_texel(cx, fb, (color, ib), (form, part), second)?;
+-    if ib.form==crate::metal::format::ExtendedRange::A1Bgr5 {
+-        let original=extended_color::four_lanes(fb,form,part)?;
+-        let alpha=fb.composite_extract(original,&[3])?;
+-        return extended_color::a1_attachment(fb,texel,alpha);
++    if ib.form == crate::metal::format::ExtendedRange::A1Bgr5 {
++        let original = extended_color::four_lanes(fb, form, part)?;
++        let alpha = fb.composite_extract(original, &[3])?;
++        return extended_color::a1_attachment(fb, texel, alpha);
+     }
+     extended_color::raw_components(fb, ib.form, texel)
+ }
+@@ -2626,7 +2705,11 @@
+                     d.at_samples
+                         .insert(i, mb.plain_global(StorageClass::Private, array, None)?);
+                 }
+-                let g = mb.io(key.clone(), *dir, ty, *deco)?;
++                let g = if sp.capture.is_some() {
++                    mb.plain_global(StorageClass::Private, ty, None)?
++                } else {
++                    mb.io(key.clone(), *dir, ty, *deco)?
++                };
+                 // An input of a key the mesh function writes per primitive, flat alone behind an
+                 // emulated mesh function.
+                 if *dir == IoDir::Input
+@@ -2644,16 +2727,24 @@
+                 enabler,
+             } => {
+                 let ty = shape.spirv_type(mb)?;
+-                let g = mb.builtin(*builtin, *dir, ty)?;
+-                if let Some(cap) = enabler {
+-                    mb.enable_builtin(g, *cap)?;
++                let g = if sp.capture.is_some() {
++                    mb.plain_global(StorageClass::Private, ty, None)?
++                } else {
++                    mb.builtin(*builtin, *dir, ty)?
++                };
++                if let Some(cap) = enabler.filter(|_| sp.capture.is_none()) {
++                    mb.enable_builtin(g, cap)?;
+                 }
+                 g
+             }
+         };
+         d.globals.push(g);
+     }
+-    if let Some(g) = sp.invariant.and_then(|i| d.globals.get(i)) {
++    if let Some(g) = sp
++        .invariant
++        .filter(|_| sp.capture.is_none())
++        .and_then(|i| d.globals.get(i))
++    {
+         mb.invariant(*g)?;
+     }
+     if sp.invariant_fragment_outputs {
+@@ -2669,6 +2760,161 @@
+             }
+         }
+     }
+-    modes.extend(sp.modes.iter().copied());
++    if let Some(c) = &sp.capture {
++        let u = mb.ty(SType::Int {
++            width: 32,
++            signed: false,
++        })?;
++        let v = mb.ty(SType::Vector { elem: u, len: 3 })?;
++        d.capture_invocation =
++            Some(mb.builtin(crate::spv::BuiltIn::GlobalInvocationId, IoDir::Input, v)?);
++        let words = mb.ty(SType::RuntimeArray {
++            elem: u,
++            stride: Some(4),
++        })?;
++        let layout = crate::spirv::ir::natural_layout(
++            mb.types(),
++            crate::spirv::ir::LayoutRule::Std430,
++            true,
++            &[words],
++        )?;
++        let block = mb.ty(SType::Struct {
++            members: [words].into(),
++            layout: Some(layout),
++        })?;
++        d.capture_buffer = Some(mb.resource(c.records, StorageClass::StorageBuffer, block)?);
++        modes.push(ExecMode::LocalSize {
++            x: c.local_size,
++            y: 1,
++            z: 1,
++        });
++    } else {
++        modes.extend(sp.modes.iter().copied());
++    }
+     Ok(d)
+ }
++
++fn capture_word(fb: &mut FunctionBuilder<'_>, buffer: GlobalId, index: u32) -> BResult<SValue> {
++    let p = fb.module().global_value(buffer)?;
++    let zero = crate::memory::leaf::k32(fb, 0)?;
++    let index = crate::memory::leaf::k32(fb, index)?;
++    let p = fb.access_chain(p, &[zero, index])?;
++    fb.load(p, MemAccess::default())
++}
++
++fn capture_ids(
++    cx: &mut EmitCx<'_>,
++    fb: &mut FunctionBuilder<'_>,
++) -> BResult<(GlobalId, SValue, SValue)> {
++    let d = &cx.decl.families.stage_io;
++    let (Some(buffer), Some(invocation)) = (d.capture_buffer, d.capture_invocation) else {
++        return Err(cx.fail("capture declaration missing"));
++    };
++    let p = fb.module().global_value(invocation)?;
++    let id = fb.load(p, MemAccess::default())?;
++    let vertex = fb.composite_extract(id, &[0])?;
++    let instance = fb.composite_extract(id, &[1])?;
++    Ok((buffer, vertex, instance))
++}
++
++fn capture_entry(cx: &mut EmitCx<'_>, fb: &mut FunctionBuilder<'_>) -> BResult<()> {
++    if cx.plan.families.stage_io.capture.is_none() {
++        return Ok(());
++    }
++    let (buffer, vertex, instance) = capture_ids(cx, fb)?;
++    let start = capture_word(fb, buffer, 1)?;
++    let base = capture_word(fb, buffer, 2)?;
++    let vertex = fb.binary(BinOp::IAdd, vertex, start)?;
++    let instance = fb.binary(BinOp::IAdd, instance, base)?;
++    use crate::spv::BuiltIn as B;
++    for (object, global) in cx
++        .plan
++        .families
++        .stage_io
++        .objects
++        .iter()
++        .zip(&cx.decl.families.stage_io.globals)
++    {
++        let IoObject::Builtin {
++            builtin,
++            dir: IoDir::Input,
++            ..
++        } = object
++        else {
++            continue;
++        };
++        let value = match builtin {
++            B::VertexIndex => vertex,
++            B::InstanceIndex => instance,
++            B::BaseVertex => start,
++            B::BaseInstance => base,
++            _ => return Err(BuildError::Type(TypeRule::VectorShape)),
++        };
++        let ptr = fb.module().global_value(*global)?;
++        fb.store(ptr, value, MemAccess::default())?;
++    }
++    Ok(())
++}
++
++fn capture_return(cx: &mut EmitCx<'_>, fb: &mut FunctionBuilder<'_>) -> BResult<()> {
++    let Some(capture) = cx.plan.families.stage_io.capture.clone() else {
++        return Ok(());
++    };
++    let (buffer, vertex, instance) = capture_ids(cx, fb)?;
++    let count = capture_word(fb, buffer, 0)?;
++    let row = fb.binary(BinOp::IMul, instance, count)?;
++    let ordinal = fb.binary(BinOp::IAdd, row, vertex)?;
++    let stride = crate::memory::leaf::k32(fb, capture.stride)?;
++    let offset = fb.binary(BinOp::IMul, ordinal, stride)?;
++    let header = crate::memory::leaf::k32(fb, 4)?;
++    let record = fb.binary(BinOp::IAdd, offset, header)?;
++    let globals: Vec<_> = capture
++        .indices
++        .iter()
++        .map(|&i| cx.decl.families.stage_io.globals[i])
++        .collect();
++    crate::pipeline::link::vertex_capture::store_record(
++        fb,
++        buffer,
++        record,
++        &capture.fields,
++        &globals,
++    )
++}
++
++/// Guard the entire captured vertex body, not just its output stores. In particular, padding
++/// invocations must not fetch attributes, participate in reductions, or write Metal resources.
++pub fn wrap_capture_entry(
++    cx: &mut EmitCx<'_>,
++    mb: &mut ModuleBuilder,
++    body: crate::spirv::ids::FuncId,
++) -> BResult<crate::spirv::ids::FuncId> {
++    if !cx
++        .plan
++        .families
++        .stage_io
++        .capture
++        .as_ref()
++        .is_some_and(|c| c.partial_groups)
++    {
++        return Ok(body);
++    }
++    let void = mb.ty(SType::Void)?;
++    let mut fb = mb.function(void)?;
++    let (buffer, vertex, _) = capture_ids(cx, &mut fb)?;
++    let count = capture_word(&mut fb, buffer, 0)?;
++    let active = fb.binary(BinOp::ULessThan, vertex, count)?;
++    fb.if_(
++        cx,
++        active,
++        Box::new(move |fb, _| {
++            fb.call(body, &[])?;
++            Ok(crate::spirv::builder::constructs::ArmEnd::FallThrough(
++                Vec::new(),
++            ))
++        }),
++        None,
++    )?;
++    fb.ret(None)?;
++    fb.finish()
++}
+--- a/crates/metal2vulkan/src/lower/stage_io/plan.rs
++++ b/crates/metal2vulkan/src/lower/stage_io/plan.rs
+@@ -3101,7 +3101,7 @@
+     // and mesh functions as compute entries: their stores need none.
+     let leaf = &cx.profile.fields().leaf;
+     let store = match cx.stage {
+-        Stage::Vertex => Some((
++        Stage::Vertex if !cx.inputs.vertex_capture => Some((
+             leaf.vertex_stores_and_atomics,
+             VkFeature::VertexPipelineStoresAndAtomics,
+         )),
+@@ -3109,7 +3109,7 @@
+             leaf.fragment_stores_and_atomics,
+             VkFeature::FragmentStoresAndAtomics,
+         )),
+-        Stage::Kernel | Stage::Object | Stage::Mesh => None,
++        Stage::Vertex | Stage::Kernel | Stage::Object | Stage::Mesh => None,
+     };
+     let writes = cx.memory.slots.iter().any(|s| s.access.write || s.atomic);
+     if let Some((false, feature)) = store.filter(|_| writes) {
+--- a/crates/metal2vulkan/src/lower/sync/barrier.rs
++++ b/crates/metal2vulkan/src/lower/sync/barrier.rs
+@@ -337,7 +337,7 @@
+ /// publish a write, perform an atomic/volatile access, or communicate cross-lane.
+ /// A simdgroup barrier cannot establish a read-from dependency among these
+ /// read-only participants. Unknown calls/opcodes retain the normal stage gate.
+-fn independent_vertex(body: &crate::air::ir::Body) -> bool {
++pub(crate) fn independent_vertex(body: &crate::air::ir::Body) -> bool {
+     body.insts.values().all(|inst| match &inst.kind {
+         InstKind::Gep { .. } | InstKind::Load { volatile: false, atomic: None, .. } => true,
+         InstKind::BinOp { .. } | InstKind::FNeg { .. } | InstKind::Cast { .. }
+--- a/crates/metal2vulkan/src/lower/texture/slot.rs
++++ b/crates/metal2vulkan/src/lower/texture/slot.rs
+@@ -660,7 +660,7 @@
+ pub(super) fn stage_stores(cx: &SelectCx<'_>) -> Result<(), Error> {
+     let leaf = &cx.profile.fields().leaf;
+     match cx.stage {
+-        Stage::Vertex if !leaf.vertex_stores_and_atomics => Err(needs(
++        Stage::Vertex if !cx.inputs.vertex_capture && !leaf.vertex_stores_and_atomics => Err(needs(
+             Feature::StorageTextureInVertexStage,
+             VkFeature::VertexPipelineStoresAndAtomics,
+         )),
+--- a/crates/metal2vulkan/src/pipeline/artifact.rs
++++ b/crates/metal2vulkan/src/pipeline/artifact.rs
+@@ -54,6 +54,9 @@
+         let Some(stage) = self.stages.get(at) else {
+             return false;
+         };
++        if stage.stage == vk::ShaderStage::COMPUTE {
++            return false;
++        }
+         if stage.stage != vk::ShaderStage::GEOMETRY {
+             return true;
+         }
+--- a/crates/metal2vulkan/src/pipeline/compile/api.rs
++++ b/crates/metal2vulkan/src/pipeline/compile/api.rs
+@@ -898,6 +898,17 @@
+         for a in artifacts.iter().skip(1) {
+             requirements = p.union_requirements(&requirements, &a.requirements);
+         }
++        if let Some(capture) = vertex.artifact().interface.vertex_capture {
++            let fields = vertex.artifact().interface.vertex_capture_fields.iter()
++                .map(crate::pipeline::link::vertex_capture::CaptureField::try_from)
++                .collect::<Result<Vec<_>, _>>()?;
++            let (pull, needed) = crate::pipeline::link::vertex_capture::synthesized_stage(
++                crate::pipeline::link::VERTEX_CAPTURE_SLOT, capture.stride_words,
++                &fields, &linked, p, m,
++            )?;
++            requirements = p.union_requirements(&requirements, &needed);
++            stages.insert(1, pull);
++        }
+         // A tessellation pipeline's synthesized vertex and control stages come first.
+         if let Some(c) = &linked.control {
+             note_evaluation_stage(c, p, &mut stages);
+--- a/crates/metal2vulkan/src/pipeline/compile/key.rs
++++ b/crates/metal2vulkan/src/pipeline/compile/key.rs
+@@ -154,6 +154,9 @@
+     let inputs = canonical_inputs(inputs);
+     h.bytes(inputs_encoding(&inputs).as_bytes());
+     // Appended only when set, so a function compiled without them keeps its key.
++    if inputs.vertex_capture {
++        h.bytes(b"vertex-capture");
++    }
+     if inputs.emulated_simdgroups {
+         h.bytes(b"emulated-simdgroups");
+     }
+--- a/crates/metal2vulkan/src/pipeline/compile.rs
++++ b/crates/metal2vulkan/src/pipeline/compile.rs
+@@ -23,7 +23,7 @@
+ mod tests;
+ 
+ use std::collections::{BTreeMap, BTreeSet, VecDeque};
+-use std::panic::{catch_unwind, AssertUnwindSafe};
++use std::panic::{AssertUnwindSafe, catch_unwind};
+ use std::sync::Arc;
+ 
+ use crate::air::abi::{AbiInt, AirAbi, OutputRole, ParamRole, Stage as AbiStage};
+@@ -388,7 +388,7 @@
+                 return DynamicOrder {
+                     libraries: order,
+                     unloaded: Some(name),
+-                }
++                };
+             }
+         }
+     }
+@@ -2041,8 +2041,9 @@
+             .copied()
+             .flatten()
+             .is_some_and(|c| {
+-                (c.blending_enabled || (c.pixel_format==crate::metal::PixelFormat::A1BGR5Unorm
+-                    && c.write_mask!=crate::metal::ColorWriteMask::ALL))
++                (c.blending_enabled
++                    || (c.pixel_format == crate::metal::PixelFormat::A1BGR5Unorm
++                        && c.write_mask != crate::metal::ColorWriteMask::ALL))
+                     && crate::metal::format::ExtendedRange::of(c.pixel_format).is_some()
+             })
+     };
+@@ -2265,7 +2266,9 @@
+             let attributes = declared_attributes(spec);
+             // The primitive ID's de-indexed form and the private list form pull every attribute,
+             // whatever the caller's projection would fetch in fixed function.
+-            let pull_every = variant.primitive_id_indices.is_some() || variant.private_list;
++            let capture = crate::lower::simd::needs_vertex_capture(spec, p);
++            let pull_every =
++                capture || variant.primitive_id_indices.is_some() || variant.private_list;
+             let projection = crate::pipeline::link::vertex::vertex_fetch_projection_for(
+                 desc,
+                 &attributes,
+@@ -2279,6 +2282,7 @@
+             // Only on a device that cannot declare a fragment `PrimitiveId`: elsewhere a plain
+             // vertex function's fragment function reads Vulkan's, Metal's there.
+             out.primitive_id_varying = primitive_id && primitive_id_varying_on(p);
++            out.vertex_capture = capture;
+             out.instanced_attributes = instanced_attributes(spec, &out, desc, m)?;
+             Ok(key::canonical_inputs(&out))
+         }
+@@ -2470,7 +2474,29 @@
+         (&linked, &r.dynamic.key()),
+     );
+     let memory = crate::memory::plan::analyze_memory(&spec, p, m)?;
+-    let plan = crate::lower::select::select(&spec, &memory, p, &inputs, m)?;
++    let mut plan = crate::lower::select::select(&spec, &memory, p, &inputs, m)?;
++    if inputs.vertex_capture {
++        if inputs.replay_bindings
++            || inputs.merged_draws
++            || inputs.private_list
++            || inputs.primitive_id_varying
++            || inputs.amplification_draws.is_some()
++        {
++            return Err(Unsupported::not_implemented(Feature::SimdWidth).into());
++        }
++        let local_size = plan.subgroup.local_size_multiple.max(1);
++        let limits = &p.fields().limits;
++        if local_size > limits.max_compute_work_group_size[0]
++            || local_size > limits.max_compute_work_group_invocations
++        {
++            return Err(Unsupported::not_implemented(Feature::SimdWidth).into());
++        }
++        crate::lower::stage_io::configure_capture(
++            &mut plan,
++            crate::pipeline::link::VERTEX_CAPTURE_SLOT,
++            local_size,
++        )?;
++    }
+     let kernel = KernelFacts {
+         max_total_threads: spec.ep.stage.max_total_threads(),
+         flat_local_size: plan
+@@ -2862,7 +2888,7 @@
+             return Ok(KeptAnswers {
+                 reflection: None,
+                 slot_writes: reflection::entry_slot_writes(&spec.ep),
+-            })
++            });
+         }
+         Err(error) => return Err(error),
+     };
+@@ -2999,6 +3025,25 @@
+         io: plan.families.stage_io.interface.clone(),
+         tessellation: crate::lower::tessellation::interface(plan),
+         writes_memory,
++        vertex_capture: plan.families.stage_io.capture.as_ref().map(|c| {
++            crate::pipeline::interface::VertexCapture {
++                stride_words: c.stride,
++                local_size: c.local_size,
++                partial_groups: c.partial_groups,
++            }
++        }),
++        vertex_capture_fields: plan
++            .families
++            .stage_io
++            .capture
++            .as_ref()
++            .map(|c| {
++                c.fields
++                    .iter()
++                    .map(crate::pipeline::interface::VertexCaptureField::from)
++                    .collect()
++            })
++            .unwrap_or_default(),
+         mesh_records: crate::lower::mesh::records(&plan.families.mesh),
+         emulated_payload: crate::lower::mesh::emulated_payload(&plan.families.mesh),
+         payload: plan.families.mesh.payload,
+--- a/crates/metal2vulkan/src/pipeline/graphics.rs
++++ b/crates/metal2vulkan/src/pipeline/graphics.rs
+@@ -8,8 +8,8 @@
+ use std::collections::BTreeSet;
+ 
+ use crate::air::container::Hash256;
++use crate::device::DeviceProfile;
+ use crate::device::requirements::{VkFeature, VkProperty};
+-use crate::device::DeviceProfile;
+ use crate::error::{
+     Attachment, Capability, Error, Feature, InternalError, InternalKind, Unsupported,
+ };
+@@ -146,6 +146,13 @@
+     /// every other pipeline.
+     #[cfg_attr(feature = "serde", serde(default))]
+     pub mesh_records: Option<MeshRecords>,
++    /// Metal vertex SIMD executed by compute capture followed by a vertex pull draw.
++    pub vertex_capture: Option<crate::pipeline::interface::VertexCapture>,
++    /// Whether the fragment interface can run with viewport-shifted, isolated sample draws.
++    /// Cross-sample coverage, window coordinates and memory/attachment side effects are excluded.
++    /// This is an execution contract, not a claim of full programmable-sample-position support.
++    #[cfg_attr(feature = "serde", serde(default))]
++    pub sample_replay_safe: bool,
+     /// A render pipeline whose vertex function is a post-tessellation vertex function, on a
+     /// device without `tessellationShader`: the function is the pipeline's `VERTEX` module, which
+     /// draws the tessellator's triangles itself as a `TRIANGLE_LIST` from an emulated draw's
+@@ -415,6 +422,8 @@
+             storage_attachments: Vec::new(),
+             shadow_stencil: None,
+             early_fragment_tests: false,
++            vertex_capture: None,
++            sample_replay_safe: false,
+             mesh_records: None,
+             emulated_tessellation: None,
+             writes_point_size: false,
+@@ -637,7 +646,7 @@
+                     "dynamic state {} has no modelled requirement",
+                     other.as_raw()
+                 ),
+-            )))
++            )));
+         }
+     })
+ }
+--- a/crates/metal2vulkan/src/pipeline/interface.rs
++++ b/crates/metal2vulkan/src/pipeline/interface.rs
+@@ -312,6 +312,12 @@
+     /// which the pipeline's synthesized vertex stage draws.
+     #[cfg_attr(feature = "serde", serde(default))]
+     pub mesh_records: Option<MeshRecords>,
++    /// Compute capture of a Metal vertex function; the records feed a vertex pull stage.
++    #[cfg_attr(feature = "serde", serde(default))]
++    pub vertex_capture: Option<VertexCapture>,
++    /// Ordered output fields of the capture producer, including their interpolation contract.
++    #[cfg_attr(feature = "serde", serde(default))]
++    pub vertex_capture_fields: Vec<VertexCaptureField>,
+     /// An object or mesh function compiled for a device without `VK_EXT_mesh_shader` (a
+     /// `GLCompute` entry): its payload's words (0 without a payload), which its object
+     /// threadgroup's slot of the draw's work buffer holds (`MeshRecords::slot_words`). `None`
+@@ -559,11 +565,43 @@
+     }
+ }
+ 
++/// Layout of a compute-captured Metal vertex draw. The four-word header stores
++/// vertex count, vertex start, base instance and a reserved zero word.
++#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
++#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
++pub struct VertexCapture {
++    /// Words per vertex record, following the four-word header, instance-major.
++    pub stride_words: u32,
++    /// Compute workgroup width. The last group may be masked only under `partial_groups`.
++    pub local_size: u32,
++    /// The producer can exclude padding invocations before running its body. False for
++    /// control barriers and workgroup-memory SIMD emulation: those need full workgroups.
++    #[cfg_attr(feature = "serde", serde(default))]
++    pub partial_groups: bool,
++}
++
++/// A captured Metal vertex output and the decorations restored by the pull stage.
++#[derive(Clone, Debug, PartialEq, Eq, Hash)]
++#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
++pub struct VertexCaptureField {
++    pub record: RecordField,
++    pub flat: bool,
++    pub no_perspective: bool,
++    pub centroid: bool,
++    pub sample: bool,
++    pub packed: bool,
++    pub index: Option<u32>,
++    pub invariant: bool,
++}
++
+ impl StageInterface {
+     /// The Vulkan stage of the module: the evaluation stage for a post-tessellation vertex
+     /// function (the vertex stage where it is emulated), the compute stage for an emulated object
+     /// or mesh function, else the Metal stage's.
+     pub fn vk_stage(&self) -> vk::ShaderStage {
++        if self.vertex_capture.is_some() {
++            return vk::ShaderStage::COMPUTE;
++        }
+         match (self.tessellation, self.emulated_payload) {
+             (Some(t), _) if t.emulated.is_some() => vk::ShaderStage::VERTEX,
+             (Some(_), _) => vk::ShaderStage::TESSELLATION_EVALUATION,
+--- a/crates/metal2vulkan/src/pipeline/link/graphics.rs
++++ b/crates/metal2vulkan/src/pipeline/link/graphics.rs
+@@ -186,22 +186,22 @@
+     Unsupported,
+ };
+ use crate::metal;
++use crate::metal::PrimitiveTopologyClass;
+ use crate::metal::format::{
+-    color_output_components, sampled_type, vk_format, ExtendedRange, FormatEmulation,
++    ExtendedRange, FormatEmulation, color_output_components, sampled_type, vk_format,
+ };
+ use crate::metal::state::{
+     blend_factors, check_constant_alpha, color_write_mask, constant_alpha_withheld,
+ };
+-use crate::metal::PrimitiveTopologyClass;
+ use crate::pipeline::artifact::PrecisionNote;
+ use crate::pipeline::color_writes;
+ use crate::pipeline::graphics::{
+     ColorAttachmentState, GraphicsState, InputAttachmentUse, TessellationState,
+ };
+ use crate::pipeline::interface::StageInterface;
++use crate::pipeline::link::RenderLinkInputs;
+ use crate::pipeline::link::vertex::FixedFunctionNotes;
+-use crate::pipeline::link::RenderLinkInputs;
+-use crate::pipeline::rotated_blend::{alpha_in_red_blend, rotated_blend, RotatedBlend};
++use crate::pipeline::rotated_blend::{RotatedBlend, alpha_in_red_blend, rotated_blend};
+ use crate::pipeline::stage_io::{
+     CoverageLoop, Interpolation, IoNumeric, IoRole, Sampling, StageBuiltin, StageIo,
+ };
+@@ -226,7 +226,7 @@
+                     ty: "rasterSampleCount",
+                     value,
+                 },
+-            ))
++            ));
+         }
+     })
+ }
+@@ -452,9 +452,13 @@
+                         (Some(form), None) => extended_write_mask(form, descriptor_mask)?,
+                         (None, _) => descriptor_mask,
+                     };
+-                    let descriptor_mask=if a.pixel_format==metal::PixelFormat::A1BGR5Unorm && !descriptor_mask.is_empty() {
+-                        vk::ColorComponentFlags::R|vk::ColorComponentFlags::G
+-                    } else {descriptor_mask};
++                    let descriptor_mask = if a.pixel_format == metal::PixelFormat::A1BGR5Unorm
++                        && !descriptor_mask.is_empty()
++                    {
++                        vk::ColorComponentFlags::R | vk::ColorComponentFlags::G
++                    } else {
++                        descriptor_mask
++                    };
+                     let write_mask = if written.contains(&(index as u32)) {
+                         descriptor_mask
+                     } else {
+@@ -562,7 +566,7 @@
+             let word =
+                 color_writes::word_color(color, &attachment, r.alpha_to_coverage, p).is_some();
+             let format_class = match ExtendedRange::of(attachment.pixel_format) {
+-                Some(ExtendedRange::A1Bgr5)=>SampledType::Float,
++                Some(ExtendedRange::A1Bgr5) => SampledType::Float,
+                 Some(_) => SampledType::Uint,
+                 None if word => SampledType::Uint,
+                 None => sampled_type(attachment.pixel_format).unwrap_or(SampledType::Float),
+@@ -681,6 +685,25 @@
+                 .any(|o| matches!(o.role, IoRole::SelectedViewport | IoRole::ViewportIndex)),
+         early_fragment_tests: fs.is_some_and(|fs| fs.io.early_fragment_tests),
+         // An emulated mesh function's pipeline states its records (`link`).
++        vertex_capture: None,
++        sample_replay_safe: fs.is_none_or(|fs| {
++            !fs.writes_memory
++                && !fs.io.varyings_at_pixel
++                && !reads_barycentric_coord(&fs.io)
++                && fs.io.builtins.iter().all(|b| {
++                    matches!(
++                        b,
++                        StageBuiltin::FrontFacing
++                            | StageBuiltin::SampleId
++                            | StageBuiltin::PrimitiveId
++                            | StageBuiltin::Layer
++                            | StageBuiltin::ViewportIndex
++                            | StageBuiltin::ViewIndex
++                            | StageBuiltin::FragDepth(_)
++                            | StageBuiltin::SampleMaskOut
++                    )
++                })
++        }),
+         mesh_records: None,
+         emulated_tessellation: None,
+         writes_point_size: vs.writes_point_size(),
+@@ -887,7 +910,7 @@
+             CoverageLoop::NotNeeded => {
+                 return Err(
+                     Unsupported::not_representable(Feature::PixelCoverageAtSampleRate).into(),
+-                )
++                );
+             }
+             CoverageLoop::DriverRunsPerSample => {}
+         }
+@@ -994,8 +1017,10 @@
+     }
+     // An extended-range attachment 0 is written as raw texels, whose alpha the coverage cannot
+     // read: what Metal's coverage is there is unmeasured.
+-    if r.color_attachments[0].is_some_and(|a| ExtendedRange::of(a.pixel_format).is_some()
+-        && a.pixel_format!=metal::PixelFormat::A1BGR5Unorm) {
++    if r.color_attachments[0].is_some_and(|a| {
++        ExtendedRange::of(a.pixel_format).is_some()
++            && a.pixel_format != metal::PixelFormat::A1BGR5Unorm
++    }) {
+         let refused = Unsupported::not_implemented(Feature::Format);
+         return Err(refused.at_attachment(Attachment::Color(0)).into());
+     }
+--- a/crates/metal2vulkan/src/pipeline/link/mesh.rs
++++ b/crates/metal2vulkan/src/pipeline/link/mesh.rs
+@@ -160,7 +160,7 @@
+     ))
+ }
+ 
+-fn ku(fb: &mut FunctionBuilder<'_>, v: u32) -> BResult<Value> {
++pub(super) fn ku(fb: &mut FunctionBuilder<'_>, v: u32) -> BResult<Value> {
+     let c = fb.u32_const(v)?;
+     fb.module().const_value(c)
+ }
+@@ -175,7 +175,7 @@
+ }
+ 
+ /// Word `at` of the records.
+-fn word(fb: &mut FunctionBuilder<'_>, records: GlobalId, at: Value) -> BResult<Value> {
++pub(super) fn word(fb: &mut FunctionBuilder<'_>, records: GlobalId, at: Value) -> BResult<Value> {
+     let zero = ku(fb, 0)?;
+     let base = fb.module().global_value(records)?;
+     let ptr = fb.access_chain(base, &[zero, at])?;
+@@ -183,7 +183,7 @@
+ }
+ 
+ /// The scalar type of `numeric`.
+-fn scalar(mb: &mut ModuleBuilder, numeric: IoNumeric) -> BResult<TypeId> {
++pub(super) fn scalar(mb: &mut ModuleBuilder, numeric: IoNumeric) -> BResult<TypeId> {
+     match numeric {
+         IoNumeric::Float => mb.ty(Type::Float { width: 32 }),
+         IoNumeric::Sint => mb.ty(Type::Int {
+@@ -198,7 +198,7 @@
+ }
+ 
+ /// The lanes of field `f` of the record at word `record`, each of its numeric type.
+-fn lanes(
++pub(super) fn lanes(
+     fb: &mut FunctionBuilder<'_>,
+     records: GlobalId,
+     record: Value,
+--- /dev/null
++++ b/crates/metal2vulkan/src/pipeline/link/vertex_capture.rs
+@@ -0,0 +1,370 @@
++//! A vertex stage that reads linear capture records.
++//!
++//! The buffer starts with four words (vertices per instance, vertex start, base instance, reserved), followed by fixed-size records of `u32`
++//! words, ordered by instance then vertex. The draw uses zero first vertex and first instance.
++//! This module only constructs the pull stage; a producer must write exactly this layout.
++
++use crate::budget::Meter;
++use crate::device::DeviceProfile;
++use crate::device::requirements::Requirements;
++use crate::error::Error;
++use crate::lower::stage_io::{IoObject, Shape};
++use crate::pipeline::artifact::{Reconvergence, SpecializationLayout, StageModule, StrategyCensus};
++use crate::pipeline::interface::{RecordField, RecordValue};
++use crate::pipeline::link::mesh::{ku, lanes, scalar, word};
++use crate::pipeline::stage_io::IoNumeric;
++use crate::pipeline::sym::ResourceSlot;
++use crate::spirv::builder::{FunctionBuilder, ModuleBuilder};
++use crate::spirv::error::{BResult, BuildError, TypeRule};
++use crate::spirv::ids::{GlobalId, Value};
++use crate::spirv::ir::{
++    BinOp, ConstBits, Constant, ConvOp, ExecModel, IoDecor, IoDir, LayoutRule, MemAccess,
++    StorageClass, Type, TypedModule, natural_layout,
++};
++use crate::spirv::serialize::{ENTRY_NAME, SymbolTable};
++use crate::spv::BuiltIn;
++use crate::vk;
++use std::collections::HashSet;
++
++/// One captured output and its original interface decorations.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct CaptureField {
++    /// Word offset, type and output identity.
++    pub record: RecordField,
++    /// Interpolation and location packing of a user varying.
++    pub decoration: IoDecor,
++    /// Whether the original output was invariant.
++    pub invariant: bool,
++}
++
++impl From<&CaptureField> for crate::pipeline::interface::VertexCaptureField {
++    fn from(field: &CaptureField) -> Self {
++        use crate::spirv::ir::{Interpolation, Sampling};
++        Self {
++            record: field.record.clone(),
++            flat: field.decoration.interpolation == Interpolation::Flat,
++            no_perspective: field.decoration.interpolation == Interpolation::NoPerspective,
++            centroid: field.decoration.sampling == Sampling::Centroid,
++            sample: field.decoration.sampling == Sampling::Sample,
++            packed: field.decoration.packed,
++            index: field.decoration.index,
++            invariant: field.invariant,
++        }
++    }
++}
++
++impl TryFrom<&crate::pipeline::interface::VertexCaptureField> for CaptureField {
++    type Error = BuildError;
++    fn try_from(field: &crate::pipeline::interface::VertexCaptureField) -> BResult<Self> {
++        use crate::spirv::ir::{Interpolation, Sampling};
++        if (field.flat && field.no_perspective) || (field.centroid && field.sample) {
++            return Err(BuildError::Type(TypeRule::VectorShape));
++        }
++        Ok(Self {
++            record: field.record.clone(),
++            decoration: IoDecor {
++                interpolation: if field.flat {
++                    Interpolation::Flat
++                } else if field.no_perspective {
++                    Interpolation::NoPerspective
++                } else {
++                    Interpolation::Smooth
++                },
++                sampling: if field.centroid {
++                    Sampling::Centroid
++                } else if field.sample {
++                    Sampling::Sample
++                } else {
++                    Sampling::Center
++                },
++                packed: field.packed,
++                index: field.index,
++            },
++            invariant: field.invariant,
++        })
++    }
++}
++
++/// Verify, serialize and relocate a capture pull stage under the pipeline's link table.
++pub fn synthesized_stage(
++    records: ResourceSlot,
++    stride: u32,
++    fields: &[CaptureField],
++    table: &impl SymbolTable,
++    profile: &DeviceProfile,
++    meter: &mut Meter,
++) -> Result<(StageModule, Requirements), Error> {
++    let module = vertex_module(records, stride, fields)?;
++    let stats = crate::spirv::verify::verify(&module, profile, meter)?;
++    let module = crate::spirv::serialize::serialize_for(module, profile)?;
++    let words = crate::spirv::serialize::relocate(&module, table)?;
++    Ok((
++        StageModule {
++            stage: vk::ShaderStage::VERTEX,
++            entry_point: ENTRY_NAME.to_owned(),
++            spirv: words.into(),
++            specialization: SpecializationLayout::default(),
++            required_subgroup_size: None,
++            stage_flags: vk::PipelineShaderStageCreateFlags::empty(),
++            reconvergence: Reconvergence::Guaranteed,
++            precision_notes: Vec::new(),
++            strategies: StrategyCensus::default(),
++            constant_blob: None,
++            rounded_colors: Vec::new(),
++            specialized_notes: Vec::new(),
++            own_pixel_textures: Vec::new(),
++            snapshot_textures: Vec::new(),
++            private_bytes: 0,
++            stats,
++        },
++        module.requirements,
++    ))
++}
++
++/// Derive the record layout and corresponding object indices from a planned vertex interface.
++/// Inputs are omitted; an unsupported output shape is rejected rather than silently dropped.
++pub fn output_layout(
++    objects: &[IoObject],
++    invariant: Option<usize>,
++) -> BResult<(Vec<CaptureField>, Vec<usize>, u32)> {
++    let invalid = || BuildError::Type(TypeRule::VectorShape);
++    let mut fields = Vec::new();
++    let mut indices = Vec::new();
++    let mut offset = 0u32;
++    for (index, object) in objects.iter().enumerate() {
++        let (value, numeric, words, decoration) = match object {
++            IoObject::User {
++                key,
++                dir: IoDir::Output,
++                numeric,
++                components,
++                deco,
++                half: false,
++            } => (
++                RecordValue::Varying(key.clone()),
++                *numeric,
++                u32::from(*components),
++                *deco,
++            ),
++            IoObject::Builtin {
++                builtin,
++                dir: IoDir::Output,
++                shape,
++                ..
++            } => {
++                let (value, numeric, words) = match (builtin, shape) {
++                    (BuiltIn::Position, Shape::FVec(4)) => {
++                        (RecordValue::Position, IoNumeric::Float, 4)
++                    }
++                    (BuiltIn::PointSize, Shape::F32) => {
++                        (RecordValue::PointSize, IoNumeric::Float, 1)
++                    }
++                    (BuiltIn::ClipDistance, Shape::F32Array(n)) => {
++                        (RecordValue::ClipDistance, IoNumeric::Float, *n)
++                    }
++                    (BuiltIn::Layer, Shape::U32) => (RecordValue::Layer, IoNumeric::Uint, 1),
++                    (BuiltIn::ViewportIndex, Shape::U32) => {
++                        (RecordValue::ViewportIndex, IoNumeric::Uint, 1)
++                    }
++                    _ => return Err(invalid()),
++                };
++                (value, numeric, words, IoDecor::default())
++            }
++            IoObject::User {
++                dir: IoDir::Output, ..
++            } => return Err(invalid()),
++            _ => continue,
++        };
++        fields.push(CaptureField {
++            record: RecordField {
++                value,
++                per_primitive: false,
++                offset,
++                words,
++                numeric,
++            },
++            decoration,
++            invariant: invariant == Some(index),
++        });
++        indices.push(index);
++        offset = offset
++            .checked_add(words)
++            .ok_or(BuildError::IdSpaceExhausted)?;
++    }
++    Ok((fields, indices, offset))
++}
++
++/// Emit stores of one invocation's output globals into its capture record.
++///
++/// `record` is the first word of the invocation's record, including the header offset;
++/// `buffer` is a `Block { uint[] }` storage buffer. Globals have the types described by
++/// `fields`. The caller guards this code for valid invocations and establishes the required
++/// producer-to-vertex memory dependency. This helper does not execute the vertex function.
++pub fn store_record(
++    fb: &mut FunctionBuilder<'_>,
++    buffer: GlobalId,
++    record: Value,
++    fields: &[CaptureField],
++    globals: &[GlobalId],
++) -> BResult<()> {
++    if fields.len() != globals.len() {
++        return Err(BuildError::Type(TypeRule::VectorShape));
++    }
++    let uint = scalar(fb.module(), IoNumeric::Uint)?;
++    let base = fb.module().global_value(buffer)?;
++    let zero = ku(fb, 0)?;
++    for (capture, &global) in fields.iter().zip(globals) {
++        let field = &capture.record;
++        let ptr = fb.module().global_value(global)?;
++        let value = fb.load(ptr, MemAccess::default())?;
++        for lane in 0..field.words {
++            let part = if field.words == 1 && !matches!(field.value, RecordValue::ClipDistance) {
++                value
++            } else {
++                fb.composite_extract(value, &[lane])?
++            };
++            let bits = match field.numeric {
++                IoNumeric::Uint => part,
++                IoNumeric::Float | IoNumeric::Sint => fb.convert(ConvOp::Bitcast, part, uint)?,
++            };
++            let offset = field
++                .offset
++                .checked_add(lane)
++                .ok_or(BuildError::IdSpaceExhausted)?;
++            let offset = ku(fb, offset)?;
++            let at = fb.binary(BinOp::IAdd, record, offset)?;
++            let dst = fb.access_chain(base, &[zero, at])?;
++            fb.store(dst, bits, MemAccess::default())?;
++        }
++    }
++    Ok(())
++}
++
++/// Generate a vertex shader reading captured vertex outputs from `records`.
++///
++/// Every field occupies `words` 32-bit words from its `offset` in a record of `stride` words.
++/// All fields are per vertex; a position must be supplied. The caller must allocate the buffer,
++/// write its header and records, synchronize the producer with vertex reads, bind it at `records`,
++/// and draw with first vertex and first instance zero. This does not generate a capture producer.
++pub fn vertex_module(
++    records: ResourceSlot,
++    stride: u32,
++    fields: &[CaptureField],
++) -> BResult<TypedModule> {
++    let invalid = || BuildError::Type(TypeRule::VectorShape);
++    let mut seen = HashSet::new();
++    let mut occupied = Vec::new();
++    let mut position = false;
++    for capture in fields {
++        let field = &capture.record;
++        let end = field.offset.checked_add(field.words).ok_or_else(invalid)?;
++        if field.per_primitive
++            || field.words == 0
++            || end > stride
++            || occupied
++                .iter()
++                .any(|&(start, stop)| field.offset < stop && start < end)
++            || !seen.insert(field.value.clone())
++        {
++            return Err(invalid());
++        }
++        occupied.push((field.offset, end));
++        match &field.value {
++            RecordValue::Position if field.numeric == IoNumeric::Float && field.words == 4 => {
++                position = true
++            }
++            RecordValue::PointSize if field.numeric == IoNumeric::Float && field.words == 1 => (),
++            RecordValue::ClipDistance if field.numeric == IoNumeric::Float => (),
++            RecordValue::Layer | RecordValue::ViewportIndex
++                if field.numeric == IoNumeric::Uint && field.words == 1 =>
++            {
++                ()
++            }
++            RecordValue::Varying(_) if field.words <= 4 => (),
++            _ => return Err(invalid()),
++        }
++    }
++    if !position {
++        return Err(invalid());
++    }
++
++    let mut mb = ModuleBuilder::new();
++    let u32_ = scalar(&mut mb, IoNumeric::Uint)?;
++    let void = mb.ty(Type::Void)?;
++    let words = mb.ty(Type::RuntimeArray {
++        elem: u32_,
++        stride: Some(4),
++    })?;
++    let layout = natural_layout(mb.types(), LayoutRule::Std430, true, &[words])?;
++    let block = mb.ty(Type::Struct {
++        members: [words].into(),
++        layout: Some(layout),
++    })?;
++    let buffer = mb.resource(records, StorageClass::StorageBuffer, block)?;
++    let vertex = mb.builtin(BuiltIn::VertexIndex, IoDir::Input, u32_)?;
++    let instance = mb.builtin(BuiltIn::InstanceIndex, IoDir::Input, u32_)?;
++    let mut outputs = Vec::with_capacity(fields.len());
++    for capture in fields {
++        let field = &capture.record;
++        let elem = scalar(&mut mb, field.numeric)?;
++        let ty = match &field.value {
++            RecordValue::ClipDistance => {
++                let len = mb.constant(Constant::Scalar {
++                    ty: u32_,
++                    bits: ConstBits(u64::from(field.words)),
++                })?;
++                mb.ty(Type::Array {
++                    elem,
++                    len,
++                    stride: None,
++                })?
++            }
++            _ if field.words == 1 => elem,
++            _ => mb.ty(Type::Vector {
++                elem,
++                len: field.words as u8,
++            })?,
++        };
++        let global = match &field.value {
++            RecordValue::Position => mb.builtin(BuiltIn::Position, IoDir::Output, ty)?,
++            RecordValue::PointSize => mb.builtin(BuiltIn::PointSize, IoDir::Output, ty)?,
++            RecordValue::ClipDistance => mb.builtin(BuiltIn::ClipDistance, IoDir::Output, ty)?,
++            RecordValue::Layer => mb.builtin(BuiltIn::Layer, IoDir::Output, ty)?,
++            RecordValue::ViewportIndex => mb.builtin(BuiltIn::ViewportIndex, IoDir::Output, ty)?,
++            RecordValue::Varying(key) => {
++                mb.io(key.clone(), IoDir::Output, ty, capture.decoration)?
++            }
++            _ => return Err(invalid()),
++        };
++        if capture.invariant {
++            mb.invariant(global)?;
++        }
++        outputs.push((field, global, ty));
++    }
++    let mut fb = mb.function(void)?;
++    let vp = fb.module().global_value(vertex)?;
++    let v = fb.load(vp, MemAccess::default())?;
++    let ip = fb.module().global_value(instance)?;
++    let i = fb.load(ip, MemAccess::default())?;
++    let zero = ku(&mut fb, 0)?;
++    let count = word(&mut fb, buffer, zero)?;
++    let instance_base = fb.binary(BinOp::IMul, i, count)?;
++    let ordinal = fb.binary(BinOp::IAdd, instance_base, v)?;
++    let stride = ku(&mut fb, stride)?;
++    let offset = fb.binary(BinOp::IMul, ordinal, stride)?;
++    let header = ku(&mut fb, 4)?;
++    let record = fb.binary(BinOp::IAdd, offset, header)?;
++    for (field, global, ty) in outputs {
++        let parts = lanes(&mut fb, buffer, record, field)?;
++        let value = match parts.as_slice() {
++            [single] if !matches!(field.value, RecordValue::ClipDistance) => *single,
++            _ => fb.composite_construct(ty, &parts)?,
++        };
++        let ptr = fb.module().global_value(global)?;
++        fb.store(ptr, value, MemAccess::default())?;
++    }
++    fb.ret(None)?;
++    let entry = fb.finish()?;
++    mb.entry(ExecModel::Vertex, entry, Vec::new())?;
++    mb.finalize()
++}
+--- a/crates/metal2vulkan/src/pipeline/link.rs
++++ b/crates/metal2vulkan/src/pipeline/link.rs
+@@ -58,6 +58,13 @@
+ pub mod tessellation;
+ pub mod varyings;
+ pub mod vertex;
++pub mod vertex_capture;
++
++pub const VERTEX_CAPTURE_SLOT: crate::pipeline::sym::ResourceSlot = crate::pipeline::sym::ResourceSlot {
++    stage: crate::pipeline::sym::Stage::Vertex,
++    kind: crate::pipeline::sym::ResourceKind::Synthetic(crate::pipeline::sym::SyntheticBinding::VertexCaptureRecords),
++    index: 0,
++};
+ 
+ #[cfg(test)]
+ mod tests;
+@@ -382,6 +389,9 @@
+         synthesized.push((mesh::RECORDS_SLOT, vk::ShaderStageFlags::VERTEX));
+         synthesized.push((mesh::WORK_SLOT, vk::ShaderStageFlags::VERTEX));
+     }
++    if ifaces.iter().any(|i| i.vertex_capture.is_some()) {
++        synthesized.push((VERTEX_CAPTURE_SLOT, vk::ShaderStageFlags::VERTEX));
++    }
+     let mut layout = layout(&ifaces, &synthesized, &mut table, p)?;
+     count_variables(&mut layout, stages, &table);
+     let control = match plan {
+@@ -414,7 +424,9 @@
+                     let vi = vertex::vertex_input_state(
+                         vs,
+                         r.vertex_descriptor.as_ref(),
+-                        &r.pulled_vertex_buffers,
++                        &if vs.vertex_capture.is_some() {
++                            vs.io.pulled.iter().filter_map(|a| match a.fetch { crate::pipeline::lower_inputs::VertexFetch::Pulled { buffer_index, .. } => Some(buffer_index), _ => None }).collect()
++                        } else { r.pulled_vertex_buffers.clone() },
+                         &table.locations,
+                         p,
+                     )?;
+@@ -425,6 +437,12 @@
+             };
+             let ts = control.map(|(plan, offset)| plan.state(offset));
+             let mut gs = render_state(r, vs, stages.get(1).copied(), &vi, ts, p)?;
++            if let Some(capture) = vs.vertex_capture {
++                if r.max_vertex_amplification_count > 1 || ts.is_some() || emulated.is_some() {
++                    return Err(Unsupported::not_implemented(Feature::SimdWidth).into());
++                }
++                gs.vertex_capture = Some(capture);
++            }
+             // An emulated tessellation pipeline draws a triangle list, which no draw changes.
+             if let Some(e) = emulated {
+                 gs.topology = vk::PrimitiveTopology::TRIANGLE_LIST;
+--- a/crates/metal2vulkan/src/pipeline/lower_inputs.rs
++++ b/crates/metal2vulkan/src/pipeline/lower_inputs.rs
+@@ -26,6 +26,10 @@
+ #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+ #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+ pub struct LoweringInputs {
++    /// Execute a Metal vertex function as compute, retaining its vertex resource slots.
++    /// The render pipeline supplies a capture buffer and a synthesized vertex pull stage.
++    #[cfg_attr(feature = "serde", serde(default))]
++    pub vertex_capture: bool,
+     /// How each vertex attribute is fetched; `None` for non-vertex functions.
+     pub vertex_fetch: Option<VertexFetchProjection>,
+     /// The representation chosen for each storage texture slot whose format is a variant.
+--- a/crates/metal2vulkan/src/pipeline/mod.rs
++++ b/crates/metal2vulkan/src/pipeline/mod.rs
+@@ -122,7 +122,7 @@
+ };
+ pub use interface::{
+     AccessSet, AttributeFetch, BufferForm, BufferKind, BufferSlot, CommandWrites, DescriptorView,
+-    MeshRecords, NumberedSampler, PatchDomain, PipelineInterface, PlacedField, PushLoc,
++    VertexCapture, VertexCaptureField, MeshRecords, NumberedSampler, PatchDomain, PipelineInterface, PlacedField, PushLoc,
+     PushPlacement, RecordField, RecordValue, SamplerSlot, SlotInterface, TextureAccess,
+     TextureSlot, ThreadgroupArgument, Window,
+ };
+--- a/crates/metal2vulkan/src/pipeline/sym.rs
++++ b/crates/metal2vulkan/src/pipeline/sym.rs
+@@ -335,6 +335,8 @@
+     /// compute entry writes and the pipeline's synthesized vertex stage reads. Declared with the
+     /// mesh stage's symbols.
+     MeshRecords,
++    /// Compute-captured Metal vertex records, shared with the synthesized pull stage.
++    VertexCaptureRecords,
+     /// An emulated mesh pipeline's work buffer for one draw: its object threadgroups' grids and
+     /// payloads, their offsets in the draw's mesh threadgroups, and where its records begin,
+     /// which its object function writes and its mesh function and synthesized vertex stage read
+--- a/crates/metal2vulkan-runtime/src/binding.rs
++++ b/crates/metal2vulkan-runtime/src/binding.rs
+@@ -407,6 +407,8 @@
+     /// An emulated mesh draw's work buffer and records, for its `MeshWork` and `MeshRecords`
+     /// writes.
+     pub(super) mesh: Option<MeshRegions>,
++    /// The capture records shared by the compute and pull vertex stages.
++    pub(super) vertex_capture: Option<vk::DescriptorBufferInfo>,
+     /// An emulated tessellation draw's work buffer and records, for its `TessellationWork` and
+     /// `TessellationRecords` writes.
+     pub(super) tessellation: Option<MeshRegions>,
+@@ -1894,6 +1896,9 @@
+         },
+         // An emulated mesh draw's records and work buffer, whole: the draw's own regions, or the
+         // command buffer's records pool (`render/mesh.rs`).
++        WriteSource::VertexCaptureRecords => command.vertex_capture.ok_or_else(|| {
++            internal("a vertex capture records write without its draw")
++        })?,
+         WriteSource::MeshRecords => {
+             command
+                 .mesh
+--- a/crates/metal2vulkan-runtime/src/compute.rs
++++ b/crates/metal2vulkan-runtime/src/compute.rs
+@@ -2307,6 +2307,7 @@
+             .map(|blob| (Stage::Kernel, blob))
+             .collect(),
+         mesh: None,
++        vertex_capture: None,
+         tessellation: None,
+     };
+     let mut uses = binding::command_uses(call, plan, &command, &bound_tables, None, None)?;
+--- a/crates/metal2vulkan-runtime/src/degradation.rs
++++ b/crates/metal2vulkan-runtime/src/degradation.rs
+@@ -58,9 +58,9 @@
+ use super::device::{DebugMessage, Device, MessageKind, MessageSeverity};
+ use super::error::Error;
+ use super::fragment_imageblock::PassImageblock;
+-use super::pipeline::objects::{may_pass_support, set_layout_support, SetSupport};
++use super::pipeline::objects::{SetSupport, may_pass_support, set_layout_support};
+ use super::render_pass::{ColorTarget, PassLayout, Target};
+-use super::render_target::{self, depth_stencil_steps, HandedDontCare, PassShape};
++use super::render_target::{self, HandedDontCare, PassShape, depth_stencil_steps};
+ use super::render_values::{LoadAction, StoreAction};
+ use super::resolve::ResolveMode;
+ use super::resource::{ObjectId, ResourceKey};
+@@ -416,8 +416,17 @@
+              device-local heap), between barriers, two for a run of such draws over one arguments \
+              and one index buffer, and the draw is two indirect draws; a draw the pool cannot \
+              hold fails the command buffer";
+-        /// A mesh render pipeline's draws on a device without `VK_EXT_mesh_shader`
+-        /// (`render/mesh.rs`).
++        /// Custom sample positions without native sample locations, on a standard-location
++        /// device with sample-rate shading (`sample_positions.rs`).
++        ShiftedSampleRasterization = "shifted-sample-rasterization", Precision,
++            "custom sample coverage and depth/stencil are rasterized as isolated samples with \
++             shifted viewports; fragment interpolation runs at sample rate rather than pixel or \
++             centroid rate; cross-sample and unlowered coordinate semantics are refused";
++        /// A vertex function executes once in compute, then the raster draw reads its records.
++        VertexComputeCapture = "vertex-compute-capture", Performance,
++            "the vertex function runs in compute subgroups, with inactive tail lanes excluded, \
++             before a synchronized pull draw; subgroup grouping is implementation dependent";
++        /// A mesh render pipeline's compute capture and synthesized raster draw.
+         EmulatedMeshDraws = "emulated-mesh-draws", Performance,
+             "the object and mesh functions run as compute dispatches before the pass, between \
+              barriers, writing records a synthesized vertex stage draws; a draw whose mesh \
+--- a/crates/metal2vulkan-runtime/src/error.rs
++++ b/crates/metal2vulkan-runtime/src/error.rs
+@@ -1265,6 +1265,8 @@
+ #[non_exhaustive]
+ #[derive(Clone, Debug, PartialEq, Eq)]
+ pub enum RuntimeGap {
++    /// A vertex SIMD capture draw whose shape or dispatch cannot yet be represented safely.
++    VertexCaptureDraw,
+     /// Textures and texture buffers.
+     Textures,
+     /// The resource-ID heap, descriptor set 1.
+@@ -1486,6 +1488,9 @@
+     /// takes them only at the pass's begin (`VkRenderPassSampleLocationsBeginInfoEXT`)
+     /// (`sample_positions.rs`).
+     SamplePositionsAtBegin,
++    /// A shifted-sample raster draw with cross-sample or screen-coordinate semantics not yet
++    /// lowered, shader attachment tests, side effects, or a replay/rate-map/mesh combination.
++    SamplePositionReplayDraw,
+     /// A shared event handle opened on a device other than its event's: another physical
+     /// device's, or one made with other options or adopted (equal options make one device, as
+     /// Metal's calls do). Vulkan semaphores do not cross devices unless exported, which the runtime
+@@ -2380,8 +2385,7 @@
+ 
+     /// Metal's `localizedDescription` of [`CommandBufferError::PredicationOpenAtUnitEnd`] (an M3
+     /// Max under macOS 27.0.1).
+-    pub(crate) const PREDICATION_OPEN_AT_UNIT_END_DESCRIPTION: &'static str =
+-        "Discarded (victim of GPU error/recovery) \
++    pub(crate) const PREDICATION_OPEN_AT_UNIT_END_DESCRIPTION: &'static str = "Discarded (victim of GPU error/recovery) \
+          (00000005:kIOGPUCommandBufferCallbackErrorInnocentVictim)";
+ 
+     /// The error of Metal's `MTLCommandBufferError` code `code` (not 0), as the driver relayed it
+--- a/crates/metal2vulkan-runtime/src/gpu_execute.rs
++++ b/crates/metal2vulkan-runtime/src/gpu_execute.rs
+@@ -703,6 +703,7 @@
+         uses: &[],
+         blobs: Vec::new(),
+         mesh: None,
++        vertex_capture: None,
+         tessellation: None,
+     };
+     let mut uses = Vec::new();
+--- a/crates/metal2vulkan-runtime/src/pipeline/graphics.rs
++++ b/crates/metal2vulkan-runtime/src/pipeline/graphics.rs
+@@ -22,10 +22,10 @@
+ use super::libraries::{Linked, Part};
+ use super::objects::{RawPipeline, VariantObjects};
+ use crate::degradation::BoundFormats;
+-use crate::error::{internal, vulkan, Error};
++use crate::error::{Error, internal, vulkan};
+ use crate::render_target::{PassShape, RenderPassObject};
+ use crate::shader_cache::driver::Making;
+-use crate::shader_cache::{found_in_cache, REPORTED_STAGES};
++use crate::shader_cache::{REPORTED_STAGES, found_in_cache};
+ use ash::vk;
+ use metal2vulkan::cache::Hash256;
+ use metal2vulkan::cache::SpecializationKey;
+@@ -51,6 +51,8 @@
+     /// The pass's sample positions in sixteenths of a pixel, empty for the device's own
+     /// (`sample_positions.rs`).
+     pub(crate) sample_positions: Vec<[u8; 2]>,
++    /// Isolate this standard-grid sample for viewport-shifted coverage/depth emulation.
++    pub(crate) replay_sample: Option<u32>,
+ }
+ 
+ /// A [`GraphicsKey`] of a draw's own values, borrowed: what a draw compares with the key its state
+@@ -65,6 +67,7 @@
+     pub(crate) strides: &'a [(u32, u32)],
+     pub(crate) fixed: FixedState,
+     pub(crate) sample_positions: &'a [[u8; 2]],
++    pub(crate) replay_sample: Option<u32>,
+ }
+ 
+ impl DrawKey<'_> {
+@@ -78,6 +81,7 @@
+             strides,
+             fixed,
+             sample_positions,
++            replay_sample,
+         } = key;
+         self.specialization == specialization
+             && self.topology == *topology
+@@ -86,6 +90,7 @@
+             && self.strides == &strides[..]
+             && self.fixed == *fixed
+             && self.sample_positions == &sample_positions[..]
++            && self.replay_sample == *replay_sample
+     }
+ 
+     /// The key, owned.
+@@ -98,6 +103,7 @@
+             strides: self.strides.to_vec(),
+             fixed: self.fixed,
+             sample_positions: self.sample_positions.to_vec(),
++            replay_sample: self.replay_sample,
+         }
+     }
+ }
+@@ -573,6 +579,7 @@
+                 graphics.alpha_to_one,
+                 graphics.sample_mask,
+                 &key.sample_positions,
++                key.replay_sample,
+             )
+         };
+         let named = Making::new(part.kind()).text(&graphics.dynamic_states);
+@@ -1081,13 +1088,17 @@
+             front_face: key.fixed.front_face.into(),
+             depth_bias: bias.enable,
+             samples: graphics.rasterization_samples.into(),
+-            sample_shading: graphics.sample_shading,
++            sample_shading: graphics.sample_shading || key.replay_sample.is_some(),
+             alpha_to_coverage: graphics.alpha_to_coverage,
+             alpha_to_one: graphics.alpha_to_one,
+-            sample_mask: graphics.sample_mask,
++            sample_mask: match key.replay_sample {
++                Some(sample) => Some(graphics.sample_mask.unwrap_or(u32::MAX) & (1u32 << sample)),
++                None => graphics.sample_mask,
++            },
+             sample_locations: key
+                 .sample_positions
+                 .iter()
++                .filter(|_| key.replay_sample.is_none())
+                 .map(|&[x, y]| vk::SampleLocationEXT {
+                     x: f32::from(x) / 16.0,
+                     y: f32::from(y) / 16.0,
+@@ -1356,8 +1367,8 @@
+ #[cfg(test)]
+ mod tests {
+     use super::FixedState;
+-    use metal2vulkan::metal::state::{depth_stencil_state, DepthStencilDescriptor};
+     use metal2vulkan::metal::CompareFunction;
++    use metal2vulkan::metal::state::{DepthStencilDescriptor, depth_stencil_state};
+     use metal2vulkan::vk::{CullModeFlags, DynamicState, FrontFace};
+ 
+     fn state(
+@@ -1457,8 +1468,8 @@
+     /// keeps them static, each type keys its own topology and Metal's restart for it.
+     #[test]
+     fn a_dynamic_topology_keys_its_class_list() {
++        use metal2vulkan::metal::PrimitiveType;
+         use metal2vulkan::metal::state::input_assembly;
+-        use metal2vulkan::metal::PrimitiveType;
+         use metal2vulkan::vk::PrimitiveTopology as T;
+         let dynamic = [
+             DynamicState::PRIMITIVE_TOPOLOGY,
+--- a/crates/metal2vulkan-runtime/src/pipeline/predicted.rs
++++ b/crates/metal2vulkan-runtime/src/pipeline/predicted.rs
+@@ -85,9 +85,9 @@
+ //! waits a bound for it (`render/pending.rs`). A key predicted on the early-tests variant (above)
+ //! is made there, on that variant.
+ 
++use super::BufferForms;
+ use super::graphics::{FixedState, GraphicsKey};
+ use super::render::{GraphicsState, RenderVariant, StateDescriptor};
+-use super::BufferForms;
+ use crate::color_list::ColorList;
+ use crate::fetch_reach::format_bytes;
+ use crate::framebuffer_fetch;
+@@ -306,6 +306,7 @@
+             strides,
+             fixed: FixedState::without_dynamic(fixed, &graphics.dynamic_states),
+             sample_positions: Vec::new(),
++            replay_sample: None,
+         };
+         Some(key)
+     }
+--- a/crates/metal2vulkan-runtime/src/pipeline/render/residual.rs
++++ b/crates/metal2vulkan-runtime/src/pipeline/render/residual.rs
+@@ -151,6 +151,7 @@
+             strides: key.strides.clone(),
+             fixed: key.fixed,
+             sample_positions: key.sample_positions.clone(),
++            replay_sample: key.replay_sample,
+         })
+     }
+ 
+--- a/crates/metal2vulkan-runtime/src/render/executions.rs
++++ b/crates/metal2vulkan-runtime/src/render/executions.rs
+@@ -268,6 +268,8 @@
+ //!   word and Metal reads stride 0, which the plan path gives exactly, so the command is taken, as
+ //!   the encoder's own draw reads such a buffer at stride 0 (`render/vertex_strides.rs`).
+ 
++use super::RenderCall;
++use super::RenderCommandEncoder;
+ use super::bound::Bound;
+ use super::mesh::MeshGrid;
+ use super::pass_start_reads::{PassStartReads, PassStartTables};
+@@ -277,13 +279,12 @@
+ use super::replay::SharedCheck;
+ use super::shadows::InstanceShadows;
+ use super::tile_memory::TileMemory;
+-use super::RenderCall;
+-use super::RenderCommandEncoder;
+ use super::{
+-    index_size, Assembly, Before, DrawBuffers, DrawingState, IndexedDraw, Instance,
+-    InterlockedStorage, Next, PatchDraw, PendingDraw, Piece, PrivateForm, RenderLowering,
+-    RenderStateKind, PASS_DRAW_STAGES,
++    Assembly, Before, DrawBuffers, DrawingState, IndexedDraw, Instance, InterlockedStorage, Next,
++    PASS_DRAW_STAGES, PatchDraw, PendingDraw, Piece, PrivateForm, RenderLowering, RenderStateKind,
++    index_size,
+ };
++use crate::Device;
+ use crate::amplification::Amplification;
+ use crate::argument_table::ArgumentTable;
+ use crate::attachment_stand_in::{self, Cause, StandIn, StandInCopies};
+@@ -294,17 +295,17 @@
+ use crate::device::functions::Vk;
+ use crate::device::lock;
+ use crate::encoder::{EncoderCore, RecordedSegment};
+-use crate::error::{internal, invalid, vulkan, CommandBufferError, Error, Problem, RuntimeGap};
++use crate::error::{CommandBufferError, Error, Problem, RuntimeGap, internal, invalid, vulkan};
+ use crate::executed_commands::{ExecutedCommand, RecordsRead};
+ use crate::fragment_imageblock::PassImageblock;
+ use crate::indirect_command_buffer::{
+     IndirectCommandBuffer, IndirectCommandCheck, IndirectCommandCheckNeeds, NineDraw, Reader,
+ };
+ use crate::indirect_dispatch;
+-use crate::indirect_execute::{self, unstrided_buffer, ExecutionRange};
+-use crate::pipeline::budget::Urgency;
++use crate::indirect_execute::{self, ExecutionRange, unstrided_buffer};
+ use crate::pipeline::RenderPipelineState;
+ use crate::pipeline::Settled;
++use crate::pipeline::budget::Urgency;
+ use crate::pipeline::{
+     BufferForms, DrawPipeline, FixedState, GraphicsKey, Pending, RawPipeline, RenderVariant,
+ };
+@@ -313,7 +314,7 @@
+ use crate::render_state::EncoderState;
+ use crate::render_target::{self, Feedback, PassShape, Position, RenderPassObject};
+ use crate::render_values::DrawPrimitiveType;
+-use crate::residency::{every_render_stage, Residency};
++use crate::residency::{Residency, every_render_stage};
+ use crate::resource::ResourceKey;
+ use crate::sample_planes::{PlanesCommands, PlanesStep};
+ use crate::sampler::ArgumentSamplers;
+@@ -326,7 +327,6 @@
+ use crate::versioned::Versioned;
+ use crate::visibility::{Lent, Visibility};
+ use crate::written_commands::{Writers, WrittenCommands};
+-use crate::Device;
+ use ahead::Ahead;
+ use ash::vk;
+ use cause::HostStepCause;
+@@ -1894,6 +1894,12 @@
+             .contains(&metal2vulkan::vk::DynamicState::VERTEX_INPUT_BINDING_STRIDE);
+         let own_strides = !dynamic_strides && plan.vertex_buffers.iter().any(|b| b.per_bind_stride);
+         if fetches
++            || graphics.vertex_capture.is_some()
++            || crate::sample_positions::replayed(
++                self.core.device(),
++                self.layout.samples,
++                &self.layout.sample_positions,
++            )
+             || graphics.shadow_stencil.is_some()
+             || graphics.shader_tests.is_some()
+             || plan.views != ViewSetup::default()
+@@ -1938,6 +1944,7 @@
+             strides: Vec::new(),
+             fixed: FixedState::without_dynamic(fixed, &graphics.dynamic_states),
+             sample_positions: self.layout.sample_positions.clone(),
++            replay_sample: None,
+         };
+         // The formats the encoder's tables bind, which are the command's own.
+         let stages = [
+@@ -3110,7 +3117,7 @@
+             (_, _) => {
+                 return Err(internal(
+                     "a run of a shader-side stencil without its shadow or stencil",
+-                ))
++                ));
+             }
+         };
+         // Each instance's runs: its pieces in order, a new run at each execution's run past its
+@@ -3154,7 +3161,7 @@
+                         // An execution's first run shares its instance's render pass instance
+                         // with what runs before it: nothing records before it alone.
+                         Some((first, _)) if !first.before.is_empty() => {
+-                            return Err(internal("an execution's first run with steps before it"))
++                            return Err(internal("an execution's first run with steps before it"));
+                         }
+                         Some((first, later)) => (first.draws, later),
+                         None => return Err(internal("an execution of no runs")),
+@@ -3432,7 +3439,7 @@
+ 
+ #[cfg(test)]
+ mod tests {
+-    use super::{patch_scale, Scale};
++    use super::{Scale, patch_scale};
+ 
+     /// What each scale does, as Metal rounds it to `half`: 1 nothing to the factors, another
+     /// positive `half` multiplies them, and what is not positive or is 0 as a `half` culls (the
+--- a/crates/metal2vulkan-runtime/src/render/mesh.rs
++++ b/crates/metal2vulkan-runtime/src/render/mesh.rs
+@@ -92,10 +92,10 @@
+ //!   (`CommandBufferError::MeshGridPastLimits`), and one whose slots the pool cannot hold as a
+ //!   records overflow (`CommandBufferError::MeshRecordsOverflow`, naming no mesh threadgroup).
+ 
+-use super::replay::Samplers;
+ use super::RenderCommandEncoder;
+ use super::RenderLowering;
+-use super::{check_arguments, draw_problem, Assembly, DrawBuffers, DrawProblem};
++use super::replay::Samplers;
++use super::{Assembly, DrawBuffers, DrawProblem, check_arguments, draw_problem};
+ use super::{RenderCall, Table};
+ use crate::binding::{MeshRegions, PushWrite};
+ use crate::buffer::Buffer;
+@@ -103,7 +103,7 @@
+ use crate::device::functions::Vk;
+ use crate::draw_source::DrawSource;
+ use crate::encoder::EncoderCore;
+-use crate::error::{internal, invalid, Error, Problem};
++use crate::error::{Error, Problem, internal, invalid};
+ use crate::owned_kernel::{OwnedKernel, OwnedModule, OwnedSets};
+ use crate::pipeline::RawPipeline;
+ use crate::resource::ResourceKey;
+@@ -912,6 +912,98 @@
+ fn axes(call: &'static str, size: Size) -> Result<[u32; 3], Error> {
+     size.axes()
+         .ok_or_else(|| invalid(call, Problem::SizeOutOfRange))
++}
++
++/// The records shared by a vertex capture dispatch and its pull draw.
++pub(crate) struct VertexCaptureWork {
++    records: Upload,
++    pub(crate) groups: [u32; 3],
++}
++
++impl VertexCaptureWork {
++    pub(crate) fn new(
++        core: &EncoderCore,
++        draw: DrawCall,
++        capture: &metal2vulkan::pipeline::VertexCapture,
++        module: &metal2vulkan::pipeline::StageModule,
++    ) -> Result<Self, Error> {
++        let DrawCall::Primitives {
++            vertex_start,
++            vertex_count,
++            instance_count,
++            base_instance,
++        } = draw
++        else {
++            return Err(Error::NotImplemented(
++                crate::error::RuntimeGap::VertexCaptureDraw,
++            ));
++        };
++        let refuse = || Error::NotImplemented(crate::error::RuntimeGap::VertexCaptureDraw);
++        if capture.local_size == 0
++            || capture.stride_words == 0
++            || (!capture.partial_groups && vertex_count % capture.local_size != 0)
++            || vertex_start
++                .checked_add(vertex_count.saturating_sub(1))
++                .is_none()
++            || base_instance
++                .checked_add(instance_count.saturating_sub(1))
++                .is_none()
++        {
++            return Err(refuse());
++        }
++        let words = u64::from(vertex_count)
++            .checked_mul(u64::from(instance_count))
++            .and_then(|n| n.checked_mul(u64::from(capture.stride_words)))
++            .and_then(|n| n.checked_add(4))
++            .ok_or_else(refuse)?;
++        let bytes = words.checked_mul(4).ok_or_else(refuse)?;
++        let groups = [vertex_count.div_ceil(capture.local_size), instance_count, 1];
++        let device = core.device();
++        let description = &device.properties().description;
++        let limits = &description.limits;
++        let flags: vk::PipelineShaderStageCreateFlags = module.stage_flags.into();
++        let full = flags.contains(vk::PipelineShaderStageCreateFlags::REQUIRE_FULL_SUBGROUPS);
++        let subgroup_size = module.required_subgroup_size.unwrap_or_else(|| {
++            if flags.contains(vk::PipelineShaderStageCreateFlags::ALLOW_VARYING_SUBGROUP_SIZE) {
++                description.subgroup.max_size
++            } else {
++                description.subgroup.size
++            }
++        });
++        if module.stage != metal2vulkan::vk::ShaderStage::COMPUTE
++            || capture.local_size > limits.max_compute_work_group_size[0]
++            || capture.local_size > limits.max_compute_work_group_invocations
++            || module
++                .required_subgroup_size
++                .is_some_and(|n| n == 0 || capture.local_size % n != 0)
++            || (full && (subgroup_size == 0 || capture.local_size % subgroup_size != 0))
++            || words > u64::from(u32::MAX)
++            || bytes > u64::from(limits.max_storage_buffer_range)
++            || groups
++                .iter()
++                .zip(limits.max_compute_work_group_count)
++                .any(|(n, max)| *n > max)
++        {
++            return Err(refuse());
++        }
++        let header: Vec<u8> = [vertex_count, vertex_start, base_instance, 0u32]
++            .into_iter()
++            .flat_map(u32::to_le_bytes)
++            .collect();
++        let records = core
++            .command_buffer()
++            .state()
++            .uploads
++            .upload(device, &header, bytes)?;
++        Ok(Self { records, groups })
++    }
++
++    pub(crate) fn region(&self) -> vk::DescriptorBufferInfo {
++        vk::DescriptorBufferInfo::default()
++            .buffer(self.records.raw())
++            .offset(self.records.offset())
++            .range(self.records.len())
++    }
+ }
+ 
+ /// An emulated mesh draw's work buffer and records (`DrawCommands::mesh_dispatch`), made for the
+--- a/crates/metal2vulkan-runtime/src/render/tile_dispatch.rs
++++ b/crates/metal2vulkan-runtime/src/render/tile_dispatch.rs
+@@ -1060,6 +1060,7 @@
+                 .map(|blob| (Stage::Kernel, blob))
+                 .collect(),
+             mesh: None,
++            vertex_capture: None,
+             tessellation: None,
+         };
+         let stages = [(Stage::Kernel, &self.tile)];
+--- a/crates/metal2vulkan-runtime/src/render.rs
++++ b/crates/metal2vulkan-runtime/src/render.rs
+@@ -264,7 +264,7 @@
+ 
+ use super::address_map::{self, SamplerMaps};
+ use super::amplification::{Amplification, VertexAmplificationViewMapping};
+-use super::argument_table::{check_index, ArgumentTable};
++use super::argument_table::{ArgumentTable, check_index};
+ use super::attachment_stand_in::{self, Cause, HiddenClear, StandIn, StandInCopies};
+ use super::binding;
+ use super::blit::TRANSFER;
+@@ -282,12 +282,12 @@
+ use super::depth_stencil::{DepthStencilState, FailingDraw};
+ use super::depth_stencil_resolve::DrawnResolve;
+ use super::depth_stencil_scratch::{ScratchCopy, Separate};
+-use super::device::{lock, Device};
++use super::device::{Device, lock};
+ use super::draw_source::{CopySteps, DrawSource, IndexBind};
+ use super::dynamic_state::ExtendedDynamicState;
+ use super::encoder::{EncoderCore, Replayed};
+ use super::error::{
+-    internal, invalid, vulkan, CommandBufferError, EncoderCall, Error, Problem, RuntimeGap,
++    CommandBufferError, EncoderCall, Error, Problem, RuntimeGap, internal, invalid, vulkan,
+ };
+ use super::execution::{ExecutedPipeline, Execution};
+ use super::fragment_imageblock::PassImageblock;
+@@ -301,7 +301,7 @@
+ use super::linear_attachment;
+ use super::linear_merge::LinearMerge;
+ use super::live_bind::{Emptied, LiveBind, Reshape};
+-use super::nan_clear::{keeps_nan_sign, NanDepthWrite};
++use super::nan_clear::{NanDepthWrite, keeps_nan_sign};
+ use super::owned_kernel::OwnedModule;
+ use super::pipeline::Settled;
+ use super::pipeline::{BufferForms, DrawPipeline};
+@@ -312,12 +312,12 @@
+ };
+ use super::rate_mapped_pass::{self, RateMappedPass};
+ use super::render_pass::{
+-    self, AspectTarget, Attachment, DepthStencilTarget, PassLayout, RenderPassDescriptor,
+-    RenderPassProblem, Target, MAX_COLOR_ATTACHMENTS,
++    self, AspectTarget, Attachment, DepthStencilTarget, MAX_COLOR_ATTACHMENTS, PassLayout,
++    RenderPassDescriptor, RenderPassProblem, Target,
+ };
+-use super::render_state::{self, DepthBiasRecord, EncoderState, ViewportList, MAX_VIEWPORTS};
++use super::render_state::{self, DepthBiasRecord, EncoderState, MAX_VIEWPORTS, ViewportList};
+ use super::render_state::{Compensation, DepthBiasEffect, WrittenDepthClamp};
+-use super::render_target::{self, covers, Feedback, PassShape, Position, RenderPassObject};
++use super::render_target::{self, Feedback, PassShape, Position, RenderPassObject, covers};
+ use super::render_values::{
+     DrawPrimitiveType, LoadAction, ScissorRect, StoreAction, StoreActionOptions, Viewport,
+ };
+@@ -335,8 +335,8 @@
+ use super::shadow_stencil::ShadowStencil;
+ use super::sparse::emulated::Scrub;
+ use super::tessellation::{FactorBuffer, Factors};
++use super::texture::Texture;
+ use super::texture::held_depth;
+-use super::texture::Texture;
+ use super::tracker::{self, Access, Barrier, GeometryWrites, IndirectReads, UnorderedWrites, Use};
+ use super::used_resources::EncoderKind;
+ use super::versioned::Versioned;
+@@ -364,7 +364,7 @@
+ use metal2vulkan::error::BindError;
+ use metal2vulkan::error::Feature as ErrorFeature;
+ use metal2vulkan::error::RuntimeDriverDefect;
+-use metal2vulkan::metal::format::{ycbcr_renders, ExtendedRange};
++use metal2vulkan::metal::format::{ExtendedRange, ycbcr_renders};
+ use metal2vulkan::metal::state::DepthStencilDescriptor;
+ use metal2vulkan::metal::{
+     CullMode, DepthClipMode, IndexType, PixelFormat, PrimitiveType, RenderStages, TriangleFillMode,
+@@ -420,9 +420,9 @@
+ 
+ use bound::{Bound, EqualShapes, Now, Recorded};
+ use deferral::Logged;
+-pub(crate) use deferral::{lowering, DeferredEncoders, EndInFlight};
+ #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
+ pub(crate) use deferral::{BATCH_CALLS, HANDED_BATCHES};
++pub(crate) use deferral::{DeferredEncoders, EndInFlight, lowering};
+ pub(crate) use inline_splits::SpareKept;
+ use replay::{
+     DrawIndexed, DrawIndexedIndirect, DrawIndexedPatches, DrawIndexedPatchesIndirect, DrawPatches,
+@@ -5793,7 +5793,7 @@
+                 StorageAttachmentView::SamplePlanes { .. } => {
+                     return Err(internal(
+                         "sample planes of another count than the pass's samples",
+-                    ))
++                    ));
+                 }
+             }
+         }
+@@ -7350,6 +7350,45 @@
+             ..
+         } = &settings;
+         let graphics = &variant.pipeline().graphics;
++        let replay_samples =
++            sample_positions::replayed(&device, self.layout.samples, &self.layout.sample_positions);
++        if replay_samples
++            && (!graphics.sample_replay_safe
++                || self.replaying
++                || self.rerouting
++                || self.rate_map.is_some()
++                || self.layout.fetch_inputs
++                || graphics.fragment_writes_memory
++                || (graphics.vertex_writes_memory && graphics.vertex_capture.is_none())
++                || graphics.mesh_records.is_some()
++                || graphics.tessellation.is_some()
++                || graphics.emulated_tessellation.is_some()
++                || graphics.alpha_to_coverage
++                || !graphics.storage_attachments.is_empty()
++                || !graphics.input_attachments.is_empty()
++                || graphics.fragment_imageblock.is_some()
++                || graphics.shader_tests.is_some()
++                || graphics.shadow_stencil.is_some()
++                || graphics.snapshot_reads
++                || !matches!(
++                    topology,
++                    metal2vulkan::vk::PrimitiveTopology::TRIANGLE_LIST
++                        | metal2vulkan::vk::PrimitiveTopology::TRIANGLE_STRIP
++                        | metal2vulkan::vk::PrimitiveTopology::TRIANGLE_FAN
++                ))
++        {
++            return Err(Error::NotImplemented(RuntimeGap::SamplePositionReplayDraw));
++        }
++        if graphics.vertex_capture.is_some()
++            && (self.replaying
++                || self.rerouting
++                || restarted.is_some()
++                || settings.amplification.count != 1
++                || !settings.amplification.view_mappings.is_empty()
++                || !matches!(draw, DrawCall::Primitives { .. }))
++        {
++            return Err(Error::NotImplemented(RuntimeGap::VertexCaptureDraw));
++        }
+         // A fragment function that runs the draw's depth test itself computes and clamps its
+         // depth by the draw's own Vulkan depth range, read as push data.
+         if graphics.shader_tests.is_some() {
+@@ -7881,7 +7920,12 @@
+             (&fetched, Some(&pipeline)),
+             (stencil_use.is_some(), tests_use.is_some()),
+             views,
+-            (ordered || after_barrier || apart || first_write) && !self.replaying,
++            (ordered
++                || after_barrier
++                || apart
++                || first_write
++                || (graphics.vertex_capture.is_some() && self.current.recorded))
++                && !self.replaying,
+             hidden,
+             &routing.locations,
+             &reformats,
+@@ -8069,7 +8113,7 @@
+                 )?)
+             }
+             (Some(_), None, false) => {
+-                return Err(internal("a mesh arguments pass without its arguments"))
++                return Err(internal("a mesh arguments pass without its arguments"));
+             }
+             _ => None,
+         };
+@@ -8179,6 +8223,18 @@
+             .map(|dispatch| tessellation_scan::TessellationWork::new(&self.core, dispatch))
+             .transpose()?;
+         let pipeline_objects = variant.pipeline();
++        let vertex_capture_work = graphics
++            .vertex_capture
++            .as_ref()
++            .map(|capture| {
++                let module = pipeline_objects
++                    .stages
++                    .iter()
++                    .find(|module| module.stage == metal2vulkan::vk::ShaderStage::COMPUTE)
++                    .ok_or_else(|| internal("vertex capture without its compute module"))?;
++                mesh::VertexCaptureWork::new(&self.core, draw, capture, module)
++            })
++            .transpose()?;
+         let mut blobs = Vec::new();
+         for (index, module) in pipeline_objects.stages.iter().enumerate() {
+             // A tessellation pipeline's synthesized stages are its vertex function's.
+@@ -8195,6 +8251,9 @@
+                 {
+                     Stage::Object
+                 }
++                metal2vulkan::vk::ShaderStage::COMPUTE if vertex_capture_work.is_some() => {
++                    Stage::Vertex
++                }
+                 metal2vulkan::vk::ShaderStage::COMPUTE => Stage::Mesh,
+                 _ => Stage::Vertex,
+             };
+@@ -8214,6 +8273,9 @@
+             uses: &commands.uses,
+             blobs,
+             mesh: mesh_work.as_ref().map(mesh::MeshWork::regions),
++            vertex_capture: vertex_capture_work
++                .as_ref()
++                .map(mesh::VertexCaptureWork::region),
+             tessellation: tessellation_work
+                 .as_ref()
+                 .map(tessellation_scan::TessellationWork::regions),
+@@ -8424,6 +8486,9 @@
+             true => &[],
+             false => &commands.vertex_strides,
+         };
++        if replay_samples && fixed.polygon_mode != metal2vulkan::vk::PolygonMode::FILL {
++            return Err(Error::NotImplemented(RuntimeGap::SamplePositionReplayDraw));
++        }
+         // The draw's graphics key, borrowed: made only where the draw looks it up.
+         let draw_key = || DrawKey {
+             specialization,
+@@ -8433,6 +8498,7 @@
+             strides,
+             fixed: FixedState::without_dynamic(fixed, &graphics.dynamic_states),
+             sample_positions: &self.layout.sample_positions,
++            replay_sample: replay_samples.then_some(0),
+         };
+         // What each of the draw's recordings takes of its two draws where it reads through
+         // snapshots (`render/snapshot.rs`): the drawing draw's masks are the ones the pipeline
+@@ -8506,7 +8572,7 @@
+             fixed,
+             topology: (keyed_topology, keyed_restart),
+         };
+-        let token = shape_token.filter(|_| commands.specialization.is_none());
++        let token = shape_token.filter(|_| commands.specialization.is_none() && !replay_samples);
+         let found = token.and_then(|token| self.shape_memo.pipeline(token, &looked));
+         let reused_pipeline = found.is_some();
+         let draw_pipeline = match found {
+@@ -8586,6 +8652,63 @@
+                 draw_pipeline
+             }
+         };
++        // Prepare every pipeline and shifted viewport before recording anything. Each pipeline
++        // enables one *hardware* sample, so color, stencil and depth retain their sample indices.
++        // Capture remains outside this loop: a Metal vertex function is never re-executed here.
++        let mut sample_recordings = Vec::new();
++        if replay_samples {
++            let offsets =
++                sample_positions::offsets(self.layout.samples, &self.layout.sample_positions)
++                    .ok_or_else(|| internal("a replayed grid without its standard positions"))?;
++            // SAFETY: this physical device belongs to the live instance.
++            let limits = unsafe {
++                device
++                    .shared()
++                    .instance
++                    .raw
++                    .get_physical_device_properties(device.shared().physical)
++            }
++            .limits;
++            for (sample, [dx, dy]) in offsets.into_iter().enumerate() {
++                let mut key = draw_key();
++                key.replay_sample = Some(sample as u32);
++                let (made, _) = variant.graphics_pipeline_now(
++                    &device,
++                    &key,
++                    &compatible,
++                    (&pipeline, &formats),
++                )?;
++                let states = (0..commands.amplifications.len().max(1))
++                    .map(|a| {
++                        draw_states
++                            .of(a)
++                            .iter()
++                            .map(|state| {
++                                let mut shifted = state.clone();
++                                for viewport in shifted.viewports.iter_mut() {
++                                    viewport.x += dx;
++                                    viewport.y += dy;
++                                    let [lo, hi] = limits.viewport_bounds_range;
++                                    if !viewport.x.is_finite()
++                                        || !viewport.y.is_finite()
++                                        || viewport.x < lo
++                                        || viewport.x + viewport.width > hi
++                                        || viewport.y.min(viewport.y + viewport.height) < lo
++                                        || viewport.y.max(viewport.y + viewport.height) > hi
++                                    {
++                                        return Err(Error::NotImplemented(
++                                            RuntimeGap::SamplePositionReplayDraw,
++                                        ));
++                                    }
++                                }
++                                Ok(shifted)
++                            })
++                            .collect::<Result<Vec<_>, Error>>()
++                    })
++                    .collect::<Result<Vec<_>, Error>>()?;
++                sample_recordings.push((made, states));
++            }
++        }
+         if reused_state && reused_pipeline {
+             device.shared().counts.draw_shape_reused();
+         }
+@@ -8676,7 +8799,29 @@
+             ),
+             None => None,
+         };
+-        let (vk_draws, count) = match (&rewrite, &bounds, index, &mesh_work, commands.draw) {
++        let pull_draw = match (vertex_capture_work.as_ref(), commands.draw) {
++            (
++                Some(_),
++                metal2vulkan::vk::DrawCommand::Draw {
++                    vertex_count,
++                    instance_count,
++                    ..
++                },
++            ) => metal2vulkan::vk::DrawCommand::Draw {
++                vertex_count,
++                instance_count,
++                first_vertex: 0,
++                first_instance: 0,
++            },
++            (Some(_), _) => return Err(Error::NotImplemented(RuntimeGap::VertexCaptureDraw)),
++            (None, draw) => draw,
++        };
++        if vertex_capture_work.is_some()
++            && (listed_draw.is_some() || rewrite.is_some() || bounds.is_some())
++        {
++            return Err(Error::NotImplemented(RuntimeGap::VertexCaptureDraw));
++        }
++        let (vk_draws, count) = match (&rewrite, &bounds, index, &mesh_work, pull_draw) {
+             _ if listed_draw.is_some() => {
+                 let (bind, arguments, draw) =
+                     listed_draw.ok_or_else(|| internal("a written list's draw"))?;
+@@ -8789,7 +8934,7 @@
+             _ => one((
+                 index.and_then(|source| IndexBind::of(source, commands.draw, sized)),
+                 indirect.map(|source| source.raw),
+-                commands.draw,
++                pull_draw,
+             )),
+         };
+         let vk_draws = &vk_draws[..count];
+@@ -8813,7 +8958,8 @@
+         // An emulated mesh draw's dispatch, or an emulated tessellation draw's scan, which reads
+         // what an earlier draw or tile dispatch of the encoder wrote behind a memory barrier, or
+         // writes what one read or wrote, records before the draw's render pass instance too.
+-        let scanned = commands.mesh_dispatch.is_some()
++        let scanned = vertex_capture_work.is_some()
++            || commands.mesh_dispatch.is_some()
+             || commands.tessellation_dispatch.is_some()
+             || arguments.is_some();
+         let mesh_uses: Vec<Use<ResourceKey>> = match scanned {
+@@ -8883,6 +9029,15 @@
+                     || before_instance
+             }
+         };
++        // A capture that must follow earlier work cannot be placed before an instance that
++        // already holds draws. A separate instance is needed to preserve that ordering.
++        if vertex_capture_work.is_some()
++            && mesh_before
++            && self.current.recorded
++            && matches!(&next, Next::Current | Next::New { split: false, .. })
++        {
++            return Err(Error::NotImplemented(RuntimeGap::VertexCaptureDraw));
++        }
+         let stages = uses
+             .iter()
+             .fold(vk::PipelineStageFlags2::empty(), |all, used| {
+@@ -8926,14 +9081,14 @@
+                     }
+                     (None, _) => None,
+                     (Some(_), None) => {
+-                        return Err(internal("a tessellation scan without the factor buffer"))
++                        return Err(internal("a tessellation scan without the factor buffer"));
+                     }
+                 };
+                 let arguments = match (dispatch.arguments, indirect) {
+                     (Some(range), Some(source)) => Some((source.raw, range)),
+                     (None, _) => None,
+                     (Some(_), None) => {
+-                        return Err(internal("a tessellation scan without its arguments"))
++                        return Err(internal("a tessellation scan without its arguments"));
+                     }
+                 };
+                 Some(tessellation_scan::TessellationSteps::new(
+@@ -8976,7 +9131,7 @@
+                     )?),
+                     (None, _) => None,
+                     (Some(_), None) => {
+-                        return Err(internal("an object arguments pass without its arguments"))
++                        return Err(internal("an object arguments pass without its arguments"));
+                     }
+                 };
+                 let launch = match (dispatch.object_groups, &arguments) {
+@@ -8994,7 +9149,7 @@
+                     (Some(launch), Some(pipeline)) => Some((pipeline, launch)),
+                     (None, _) => None,
+                     (Some(_), None) => {
+-                        return Err(internal("an object dispatch without the object's pipeline"))
++                        return Err(internal("an object dispatch without the object's pipeline"));
+                     }
+                 };
+                 let (scan, launch) = match dispatch.mesh {
+@@ -9004,7 +9159,7 @@
+                             (Some(range), Some(source)) => Some((source.raw, range)),
+                             (None, _) => None,
+                             (Some(_), None) => {
+-                                return Err(internal("a mesh scan without its arguments"))
++                                return Err(internal("a mesh scan without its arguments"));
+                             }
+                         };
+                         let scan = mesh::Scan::new(
+@@ -9029,7 +9184,36 @@
+                     scan,
+                     pipeline: pipelines.mesh,
+                     launch,
+-                    uses: mesh_uses,
++                    uses: mesh_uses.clone(),
++                })
++            }
++            _ => None,
++        };
++        let capture_steps = match vertex_capture_work.as_ref() {
++            Some(work) if !(empty || culled) => {
++                let pipeline = variant.mesh_pipelines(specialization, &formats)?.mesh;
++                let push = pushes
++                    .first()
++                    .map(|writes| {
++                        writes
++                            .iter()
++                            .filter(|(stages, ..)| stages.contains(vk::ShaderStageFlags::COMPUTE))
++                            .cloned()
++                            .collect()
++                    })
++                    .unwrap_or_default();
++                Some(mesh::MeshSteps {
++                    layout: objects.layout(),
++                    sets: set.as_slice().to_vec(),
++                    offsets: live.offsets.clone(),
++                    heap: heap_set,
++                    push,
++                    arguments: None,
++                    object: None,
++                    scan: None,
++                    pipeline,
++                    launch: mesh::Launch::Direct(work.groups),
++                    uses: mesh_uses.clone(),
+                 })
+             }
+             _ => None,
+@@ -9039,6 +9223,17 @@
+             DrawPipeline::Made(made) if records => vec![made.created_in],
+             _ => Vec::new(),
+         };
++        if records {
++            created.extend(
++                sample_recordings
++                    .iter()
++                    .skip(1)
++                    .map(|(made, _)| made.created_in),
++            );
++        }
++        if let Some(steps) = capture_steps.as_ref().filter(|_| records) {
++            created.push(steps.pipeline.created_in);
++        }
+         if let Some(steps) = mesh_steps.as_ref().filter(|_| records) {
+             created.extend(
+                 steps
+@@ -9074,7 +9269,8 @@
+         // subpass (`render/reroute.rs`). A stand-in arriving with it does not stop it: the pass's
+         // layout keeps the stand-in from the draw on, so the draw records again into it, as a later
+         // draw would.
+-        let again = !self.replaying
++        let again = vertex_capture_work.is_none()
++            && !self.replaying
+             && !self.layout.fetch_inputs
+             && self.layout.samples == 1
+             && self.rate_map.is_none()
+@@ -9247,6 +9443,17 @@
+                     false => pass.record(&mut self.core),
+                 }
+             }
++            if let Some(steps) = capture_steps {
++                device.degrade(Degradation::VertexComputeCapture, || (
++                    "a vertex SIMD draw".to_owned(),
++                    "compute capture, producer-to-vertex barrier, and one pull draw; tail invocations do not execute the vertex body".to_owned(),
++                ));
++                self.core.retain(Arc::clone(&steps.pipeline));
++                match mesh_before {
++                    true => self.steps_before().push(Before::Mesh(steps)),
++                    false => steps.record(&mut self.core),
++                }
++            }
+             if let Some(mut steps) = mesh_steps {
+                 steps.retain(&mut self.core);
+                 match mesh_before {
+@@ -9400,91 +9607,98 @@
+                 }
+             };
+             for &phase in phases {
+-                let mut first = true;
+-                // Amplification by amplification, each through its recordings' regions: Metal
+-                // renders every primitive of one before the next's, and a pixel's regions are one.
+-                // An emulated tessellation draw's chunks, likewise, in order.
+-                for a in 0..entries {
+-                    let (push, vk_draws) = entry(a);
+-                    for state in draw_states.of(a) {
+-                        for &(index, indirect, draw) in vk_draws {
+-                            if indirect.is_some()
+-                                && phase != Some(snapshot::Phase::Snapshot)
+-                                && matches!(
++                for sample in 0..sample_recordings.len().max(1) {
++                    let sample_recording = sample_recordings.get(sample);
++                    let made_now = sample_recording.map(|(made, _)| made.raw).or(made_now);
++                    let mut first = true;
++                    // Amplification by amplification, each through its recordings' regions: Metal
++                    // renders every primitive of one before the next's, and a pixel's regions are one.
++                    // An emulated tessellation draw's chunks, likewise, in order.
++                    for a in 0..entries {
++                        let (push, vk_draws) = entry(a);
++                        let states = sample_recording
++                            .map(|(_, states)| &states[a][..])
++                            .unwrap_or_else(|| draw_states.of(a));
++                        for state in states {
++                            for &(index, indirect, draw) in vk_draws {
++                                if indirect.is_some()
++                                    && phase != Some(snapshot::Phase::Snapshot)
++                                    && matches!(
++                                        draw,
++                                        metal2vulkan::vk::DrawCommand::DrawIndirect { .. }
++                                            | metal2vulkan::vk::DrawCommand::DrawIndexedIndirect { .. }
++                                    )
++                                {
++                                    device.shared().counts.pool_compiled(
++                                        crate::work_counts::PoolCompiled::IndirectDraw,
++                                        1,
++                                    );
++                                }
++                                let pair = match (&pair_base, phase) {
++                                    (Some(base), Some(phase)) => {
++                                        let at_first = first;
++                                        first = false;
++                                        Some(snapshot::Pair {
++                                            phase,
++                                            first: at_first,
++                                            ..base.clone()
++                                        })
++                                    }
++                                    _ => None,
++                                };
++                                let recording = Recording {
++                                    raw: device.shared().vk(),
++                                    command_buffer: self.current.draws,
++                                    layout: objects.layout(),
++                                    shape: objects.set_zero_shape(),
++                                    pipeline: made_now.unwrap_or_default(),
++                                    sets: set.as_slice(),
++                                    offsets: &live.offsets,
++                                    pushed,
++                                    push_descriptor: device.shared().push_descriptor,
++                                    pushes_after_pipeline_binds: (device.shared())
++                                        .pushes_after_pipeline_binds,
++                                    heap: heap_set,
++                                    push,
++                                    vertex_buffers,
++                                    index,
++                                    indirect,
++                                    dynamic,
++                                    topology,
++                                    primitive_restart,
++                                    state,
++                                    extended,
++                                    mesh: device.shared().mesh_draws.as_ref(),
+                                     draw,
+-                                    metal2vulkan::vk::DrawCommand::DrawIndirect { .. }
+-                                        | metal2vulkan::vk::DrawCommand::DrawIndexedIndirect { .. }
+-                                )
+-                            {
+-                                device.shared().counts.pool_compiled(
+-                                    crate::work_counts::PoolCompiled::IndirectDraw,
+-                                    1,
+-                                );
+-                            }
+-                            let pair = match (&pair_base, phase) {
+-                                (Some(base), Some(phase)) => {
+-                                    let at_first = first;
+-                                    first = false;
+-                                    Some(snapshot::Pair {
+-                                        phase,
+-                                        first: at_first,
+-                                        ..base.clone()
+-                                    })
++                                    pair,
++                                };
++                                match (made_now, &mut self.current.kept) {
++                                    // An instance recorded inline after a split keeps its draws until
++                                    // its copies are known (`render/inline_splits.rs`).
++                                    (Some(made), Some(kept)) => kept.draw(&recording, made),
++                                    // SAFETY: the secondary command buffer (or the pass's, inline) is
++                                    // recording inside the compatible pass, and only this encoder records
++                                    // it; every object recorded is live until the command buffer
++                                    // completes (retained below, and the index bounds pass's uploads with
++                                    // the command buffer); the record is of what the draws recorded into
++                                    // that command buffer bound there: the instance's, or the pass's
++                                    // command buffer's for an inline one.
++                                    (Some(_), None) => {
++                                        let bound = match self.current.inline {
++                                            true => &mut self.held_bound,
++                                            false => &mut self.current.bound,
++                                        };
++                                        // A device replay's: each command's draw after it
++                                        // (`render/executions/gpu.rs`).
++                                        states_recorded += match &self.replayed {
++                                            Some(replayed) => unsafe {
++                                                replayed.record(&recording, bound, &replay_holes)
++                                            },
++                                            None => unsafe { recording.record(bound) },
++                                        }
++                                    }
++                                    (None, _) => owned.push(recording.owned()),
+                                 }
+-                                _ => None,
+-                            };
+-                            let recording = Recording {
+-                                raw: device.shared().vk(),
+-                                command_buffer: self.current.draws,
+-                                layout: objects.layout(),
+-                                shape: objects.set_zero_shape(),
+-                                pipeline: made_now.unwrap_or_default(),
+-                                sets: set.as_slice(),
+-                                offsets: &live.offsets,
+-                                pushed,
+-                                push_descriptor: device.shared().push_descriptor,
+-                                pushes_after_pipeline_binds: (device.shared())
+-                                    .pushes_after_pipeline_binds,
+-                                heap: heap_set,
+-                                push,
+-                                vertex_buffers,
+-                                index,
+-                                indirect,
+-                                dynamic,
+-                                topology,
+-                                primitive_restart,
+-                                state,
+-                                extended,
+-                                mesh: device.shared().mesh_draws.as_ref(),
+-                                draw,
+-                                pair,
+-                            };
+-                            match (made_now, &mut self.current.kept) {
+-                                // An instance recorded inline after a split keeps its draws until
+-                                // its copies are known (`render/inline_splits.rs`).
+-                                (Some(made), Some(kept)) => kept.draw(&recording, made),
+-                                // SAFETY: the secondary command buffer (or the pass's, inline) is
+-                                // recording inside the compatible pass, and only this encoder records
+-                                // it; every object recorded is live until the command buffer
+-                                // completes (retained below, and the index bounds pass's uploads with
+-                                // the command buffer); the record is of what the draws recorded into
+-                                // that command buffer bound there: the instance's, or the pass's
+-                                // command buffer's for an inline one.
+-                                (Some(_), None) => {
+-                                    let bound = match self.current.inline {
+-                                        true => &mut self.held_bound,
+-                                        false => &mut self.current.bound,
+-                                    };
+-                                    // A device replay's: each command's draw after it
+-                                    // (`render/executions/gpu.rs`).
+-                                    states_recorded += match &self.replayed {
+-                                        Some(replayed) => unsafe {
+-                                            replayed.record(&recording, bound, &replay_holes)
+-                                        },
+-                                        None => unsafe { recording.record(bound) },
+-                                    }
+-                                }
+-                                (None, _) => owned.push(recording.owned()),
+                             }
+                         }
+                     }
+@@ -9533,7 +9747,10 @@
+                 self.visibility.resume(raw, self.current.draws, next);
+             }
+             if let Some(raw) = made_now {
+-                if !self.layout.sample_positions.is_empty() && self.current.positioned.is_none() {
++                if !replay_samples
++                    && !self.layout.sample_positions.is_empty()
++                    && self.current.positioned.is_none()
++                {
+                     self.current.positioned = Some(raw);
+                 }
+             }
+@@ -9592,6 +9809,15 @@
+             };
+             execution.with_index_padding(padding)
+         });
++        if !sample_recordings.is_empty() {
++            device.degrade(Degradation::ShiftedSampleRasterization, || (
++                format!("a {}-sample draw with custom positions", self.layout.samples),
++                "one masked hardware draw per sample; viewport translation changes actual coverage and depth/stencil, not only a shader position LUT".to_owned(),
++            ));
++            for (made, _) in sample_recordings {
++                self.core.retain(made);
++            }
++        }
+         let made = match draw_pipeline {
+             DrawPipeline::Made(made) => Some(made),
+             DrawPipeline::Making(_) => None,
+@@ -11765,7 +11991,7 @@
+             return Err(store_problem(
+                 call,
+                 RenderPassProblem::CustomSampleDepthStore(which),
+-            ))
++            ));
+         }
+         _ => action,
+     };
+@@ -11808,7 +12034,7 @@
+ #[cfg(test)]
+ mod tests {
+     use super::{
+-        check_arguments, draw_problem, late_store, store_problem, DrawProblem, RenderPassProblem,
++        DrawProblem, RenderPassProblem, check_arguments, draw_problem, late_store, store_problem,
+     };
+     use crate::{Attachment, StoreAction};
+ 
+@@ -11955,31 +12181,48 @@
+ 
+ impl RenderLowering {
+     /// Record a real timestamp among this render instance's commands.
+-    pub(crate) fn sample_counters_in_buffer(&mut self,buffer:&crate::CounterSampleBuffer,index:usize,barrier:bool)->Result<(),Error> {
+-        self.log(|_|RenderCall::SampleCounters(buffer.clone(),index,barrier));
+-        self.core.check_device("sample_counters",buffer.device())?;
+-        if self.later_group_encoder(){return Ok(())}
+-        let sample=buffer.prepare(index)?;
++    pub(crate) fn sample_counters_in_buffer(
++        &mut self,
++        buffer: &crate::CounterSampleBuffer,
++        index: usize,
++        barrier: bool,
++    ) -> Result<(), Error> {
++        self.log(|_| RenderCall::SampleCounters(buffer.clone(), index, barrier));
++        self.core.check_device("sample_counters", buffer.device())?;
++        if self.later_group_encoder() {
++            return Ok(());
++        }
++        let sample = buffer.prepare(index)?;
+         self.begin_current_draws()?;
+-        if barrier { self.barrier_before_next_draw(); }
+-        if let Some(kept)=&mut self.current.kept {
++        if barrier {
++            self.barrier_before_next_draw();
++        }
++        if let Some(kept) = &mut self.current.kept {
+             kept.timestamp(sample.clone());
+         } else {
+-            sample.write(self.core.device().shared().vk(),self.current.draws);
++            sample.write(self.core.device().shared().vk(), self.current.draws);
+         }
+         // A query must not be dropped by draw-only re-recording.
+-        self.current.rerecord=None;
+-        self.current.recorded=true;
+-        self.core.retain(sample);Ok(())
++        self.current.rerecord = None;
++        self.current.recorded = true;
++        self.core.retain(sample);
++        Ok(())
+     }
+ }
+ impl RenderCommandEncoder {
+     /// `sampleCountersInBuffer:atSampleIndex:withBarrier:` at this render
+     /// command's actual GPU execution point.
+-    pub fn sample_counters_in_buffer(&mut self,buffer:&crate::CounterSampleBuffer,index:usize,barrier:bool)->Result<(),Error> {
+-        match self.lowers_at_call(){
+-            true=>self.at_call(|lowering|lowering.sample_counters_in_buffer(buffer,index,barrier)),
+-            false=>self.defer(|_|RenderCall::SampleCounters(buffer.clone(),index,barrier)),
++    pub fn sample_counters_in_buffer(
++        &mut self,
++        buffer: &crate::CounterSampleBuffer,
++        index: usize,
++        barrier: bool,
++    ) -> Result<(), Error> {
++        match self.lowers_at_call() {
++            true => {
++                self.at_call(|lowering| lowering.sample_counters_in_buffer(buffer, index, barrier))
++            }
++            false => self.defer(|_| RenderCall::SampleCounters(buffer.clone(), index, barrier)),
+         }
+     }
+ }
+--- a/crates/metal2vulkan-runtime/src/sample_positions.rs
++++ b/crates/metal2vulkan-runtime/src/sample_positions.rs
+@@ -105,16 +105,26 @@
+ //! combined format that takes them; and on a device without `variableSampleLocations`, which takes
+ //! positions only at a pass's begin.
+ //!
+-//! **The device's own lack** is its own answer, never the caller's error: a device whose
+-//! `sampleLocationSampleCounts` does not hold the pass's sample count refuses the pass
+-//! `Unsupported(SamplePositions)` naming that property
+-//! ([`Needs::AnyOf`](metal2vulkan::error::Needs::AnyOf)), which says this GPU cannot do it rather
+-//! than that the consumer passed bad arguments.
+-
+-use super::error::{invalid, Error, Problem, RuntimeGap};
++//! **Without native sample locations**, a device with standard raster positions, at least four
++//! subpixel bits and sample-rate shading can rasterize a filled triangle once per sample. Each
++//! recording enables just that hardware sample and translates every viewport by the standard
++//! position minus the requested one. Coverage and the primitive's interpolated depth are thus
++//! evaluated at the requested point, while depth, stencil, blending and storage keep the original
++//! sample index. Scissors do not move; a captured vertex function runs only once, before the
++//! masked pull draws. No sample-location extension structures or compatible-depth flag are used.
++//!
++//! This fallback is not full programmable-position support: pixel-center or window-coordinate
++//! reads, cross-sample coverage, framebuffer reads, fragment memory side effects, and unsupported
++//! draw combinations are refused as `SamplePositionReplayDraw`. Full sample-rate interpolation
++//! can change centroid/interpolation frequency and is announced as `ShiftedSampleRasterization`.
++//! The device capability query remains the native full-support query. If neither native locations
++//! nor the raster fallback is available, `Unsupported(SamplePositions)` names the missing device
++//! property rather than blaming the caller's coordinates.
++
++use super::Device;
++use super::error::{Error, Problem, RuntimeGap, invalid};
+ use super::render_pass::{Attachment, RenderPassProblem};
+ use super::render_values::{SamplePosition, StoreAction, StoreActionOptions};
+-use super::Device;
+ use metal2vulkan::device::{DeviceProfile, VkProperty};
+ use metal2vulkan::error::{Capability, Feature, Unsupported};
+ use metal2vulkan::vk::{Format, ImageCreateFlags, SampleCountFlags};
+@@ -198,13 +208,16 @@
+     }
+ }
+ 
+-/// Whether `device` takes `positions` in a pass of `samples` samples as [`grid`] takes them,
+-/// whatever the pass's depth/stencil attachment: [`positioned`] under the device's rules with no
+-/// attachment, so the two can never disagree about a pass.
++/// Whether `positions` use native custom locations and therefore need a compatible depth image.
++/// A standard grid or the shifted-sample fallback never needs that image flag.
+ pub(super) fn taken(device: &Device, positions: &[SamplePosition], samples: u32) -> bool {
++    // Only native custom positions require depth images made for VK_EXT_sample_locations.
++    // The shifted-sample path keeps ordinary depth/stencil storage in its original sample slots.
+     let rules = PositionRules::of(device, samples);
+-    let _ = rules;
+-    grid("sample_positions",device,positions,samples,None).is_ok_and(|grid|!grid.is_empty())
++    rules.located_at_samples
++        && rules.variable
++        && grid("sample_positions", device, positions, samples, None)
++            .is_ok_and(|grid| !grid.is_empty())
+ }
+ 
+ /// The pass's sample positions on `device`, in sixteenths of a pixel (empty for the device's
+@@ -223,13 +236,32 @@
+     // sample-location extension or depth compatibility flag is then needed:
+     // validate and quantize it as Metal does, and use the device's own grid.
+     if !positions.is_empty() {
+-        let checked=positioned(PositionRules{located_at_samples:true,variable:true},positions,samples,None)
+-            .map_err(|refusal|refusal_error(call,refusal))?;
+-        if standard_grid(samples).is_some_and(|standard|standard==checked.as_slice()) {
+-            let shared=device.shared();
++        let checked = positioned(
++            PositionRules {
++                located_at_samples: true,
++                variable: true,
++            },
++            positions,
++            samples,
++            None,
++        )
++        .map_err(|refusal| refusal_error(call, refusal))?;
++        if !rules.located_at_samples && replay_capable(device, samples) {
++            if standard_grid(samples).is_some_and(|standard| standard == checked.as_slice()) {
++                return Ok(Vec::new());
++            }
++            return Ok(checked);
++        }
++        if standard_grid(samples).is_some_and(|standard| standard == checked.as_slice()) {
++            let shared = device.shared();
+             // SAFETY: the physical device belongs to this live instance.
+-            let properties=unsafe {shared.instance.raw.get_physical_device_properties(shared.physical)};
+-            if properties.limits.standard_sample_locations==ash::vk::TRUE {
++            let properties = unsafe {
++                shared
++                    .instance
++                    .raw
++                    .get_physical_device_properties(shared.physical)
++            };
++            if properties.limits.standard_sample_locations == ash::vk::TRUE {
+                 return Ok(Vec::new());
+             }
+         }
+@@ -294,16 +326,94 @@
+         .collect())
+ }
+ 
++/// The fallback relies on actual standard raster locations, not just the compiler's LUT.
++/// It uses full sample-rate shading and isolates a hardware sample with pSampleMask.
++pub(super) fn replay_capable(device: &Device, samples: u32) -> bool {
++    use metal2vulkan::device::VkFeature;
++    let shared = device.shared();
++    // SAFETY: the physical device belongs to the live instance.
++    let limits = unsafe {
++        shared
++            .instance
++            .raw
++            .get_physical_device_properties(shared.physical)
++    }
++    .limits;
++    standard_grid(samples).is_some()
++        && samples <= 32
++        && limits.standard_sample_locations == ash::vk::TRUE
++        && limits.sub_pixel_precision_bits >= 4
++        && device
++            .compile_device()
++            .profile()
++            .enabled()
++            .features
++            .contains(&VkFeature::SampleRateShading)
++}
++
++/// Whether this validated grid needs the viewport-shifted rasterization path.
++pub(super) fn replayed(device: &Device, samples: u32, grid: &[Sixteenths]) -> bool {
++    !grid.is_empty()
++        && !PositionRules::of(device, samples).located_at_samples
++        && replay_capable(device, samples)
++}
++
++/// Translating geometry by native minus requested makes the fixed hardware sample evaluate
++/// the requested point in the original primitive, including interpolated depth and depth bias.
++pub(super) fn offsets(samples: u32, grid: &[Sixteenths]) -> Option<Vec<[f32; 2]>> {
++    let native = standard_grid(samples)?;
++    if grid.len() != native.len() {
++        return None;
++    }
++    Some(
++        native
++            .iter()
++            .zip(grid)
++            .map(|(n, p)| {
++                [
++                    (f32::from(n[0]) - f32::from(p[0])) / 16.0,
++                    (f32::from(n[1]) - f32::from(p[1])) / 16.0,
++                ]
++            })
++            .collect(),
++    )
++}
++
+ /// Vulkan's standard sample locations, in sample-index order and sixteenths.
+ /// Empty/custom/reordered patterns never enter this path.
+-fn standard_grid(samples:u32)->Option<&'static [Sixteenths]> {
++pub(super) fn standard_grid(samples: u32) -> Option<&'static [Sixteenths]> {
+     match samples {
+-        2=>Some(&[[12,12],[4,4]]),
+-        4=>Some(&[[6,2],[14,6],[2,10],[10,14]]),
+-        8=>Some(&[[9,5],[7,11],[13,9],[5,3],[3,13],[1,7],[11,15],[15,1]]),
+-        16=>Some(&[[9,9],[7,5],[5,10],[12,7],[3,6],[10,13],[13,11],[11,3],
+-                   [6,14],[8,1],[4,2],[2,12],[0,8],[15,4],[14,15],[1,0]]),
+-        _=>None,
++        2 => Some(&[[12, 12], [4, 4]]),
++        4 => Some(&[[6, 2], [14, 6], [2, 10], [10, 14]]),
++        8 => Some(&[
++            [9, 5],
++            [7, 11],
++            [13, 9],
++            [5, 3],
++            [3, 13],
++            [1, 7],
++            [11, 15],
++            [15, 1],
++        ]),
++        16 => Some(&[
++            [9, 9],
++            [7, 5],
++            [5, 10],
++            [12, 7],
++            [3, 6],
++            [10, 13],
++            [13, 11],
++            [11, 3],
++            [6, 14],
++            [8, 1],
++            [4, 2],
++            [2, 12],
++            [0, 8],
++            [15, 4],
++            [14, 15],
++            [1, 0],
++        ]),
++        _ => None,
+     }
+ }
+ 

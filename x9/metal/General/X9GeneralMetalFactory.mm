@@ -52,9 +52,17 @@ static void missing_selector(const char *object,const char *selector) {
  struct X9RenderConnection *connection=x9_render_open(&caps);
  if(!connection)return nil;
  x9_render_close(connection);
+ if(!caps.shader_present)return nil;
+ native_bridge_metal_set_shader_core_mask(caps.shader_present);
  uint64_t registry=0;
  if(IORegistryEntryGetRegistryEntryID(port,&registry)!=KERN_SUCCESS)return nil;
  const char *cache=geteuid()==0?"/private/var/root/Library/Caches/X9GeneralMetal":"/private/var/mobile/Library/Caches/X9GeneralMetal";
+ int entry_fd=open("/dev/console",O_WRONLY|O_NOCTTY);
+ if(entry_fd>=0) {
+  const char *image=class_getImageName([self class]);
+  dprintf(entry_fd,"X9 GENERAL METAL: begin caller=%s image=%s loader=%s\n",
+   getprogname(),image?image:"unknown",X9_PANVK_BUNDLE_PATH);close(entry_fd);
+ }
  id device=native_bridge_metal_open(X9_PANVK_BUNDLE_PATH,cache,registry,missing_selector);
  int fd=open("/dev/console",O_WRONLY|O_NOCTTY);
  if(fd>=0){dprintf(fd,"X9 GENERAL METAL: factory caller=%s uid=%u registry=%llu device=%s\n",getprogname(),(unsigned)geteuid(),registry,device?class_getName([device class]):"nil");close(fd);}

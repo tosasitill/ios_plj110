@@ -1,0 +1,16 @@
+--- a/iokit/Kernel/arm/SweetX9RenderService.cpp
++++ b/iokit/Kernel/arm/SweetX9RenderService.cpp
+@@ -96,7 +96,12 @@
+     return kIOReturnNoMemory;
+    }
+    IOReturn kr=memory->prepare(kIODirectionInOut);
+-   if(kr!=kIOReturnSuccess){memory->release();return kr;}
++   if(kr!=kIOReturnSuccess) {
++    IOLog("X9 RENDER IMPORT: prepare refused op=%u host=%llx bytes=%llu kr=%x;no handle published\n",
++     selector,(unsigned long long)request.host_address,(unsigned long long)request.bytes,kr);
++    memory->release();
++    return selector==X9RenderImportHost&&kr==KERN_PROTECTION_FAILURE?kIOReturnNotPermitted:kr;
++   }
+    if(selector==X9RenderAllocate)bzero(((IOBufferMemoryDescriptor *)memory)->getBytesNoCopy(),request.bytes);
+    uint32_t handle=++context->next_handle;
+    context->resources[slot]={memory,request.bytes,handle,request.flags,true};context->allocated_bytes+=request.bytes;

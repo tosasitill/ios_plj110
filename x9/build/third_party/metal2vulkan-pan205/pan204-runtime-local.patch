@@ -1,0 +1,83 @@
+--- a/crates/metal2vulkan/src/cache/mod.rs
++++ b/crates/metal2vulkan/src/cache/mod.rs
+@@ -61,7 +61,7 @@
+ /// [`ARTIFACT_FORMAT_VERSION`]. The commit that bumps it says what changed; this comment keeps no
+ /// history.
+ // X9 pan197: raw linear-shadow kernels and native split normalized depth/stencil.
+-pub const SEMANTICS_VERSION: u32 = 2030001;
++pub const SEMANTICS_VERSION: u32 = 2040001;
+ 
+ /// The byte-layout version of encoded artifacts (`CompiledFunction::to_bytes` and the
+ /// [`PipelineArtifact`] encodings). Every encoded artifact carries it, and a decode under another
+@@ -71,7 +71,7 @@
+ /// re-typed in an encoded type, its `codec` body or its `envelope`. A variant removed while its tag
+ /// stays unused needs no bump: an entry holding it fails to decode, which is a miss. The commit that
+ /// bumps it says what changed; this comment keeps no history.
+-pub const ARTIFACT_FORMAT_VERSION: u32 = 2030001;
++pub const ARTIFACT_FORMAT_VERSION: u32 = 2040001;
+ 
+ /// The version of what this crate's runtime does with a compiled pipeline: instantiating a binding
+ /// plan (`BindingPlan::instantiate_*`: descriptor ranges, push bytes, root, argument, and handle
+@@ -96,7 +96,7 @@
+ /// keeps no history.
+ // X9 pan195: sampled-source copies, memoryless resolve backing, aspect clear reach
+ // and linear-allocation padding change execution under otherwise identical inputs.
+-pub const RUNTIME_VERSION: u32 = 2030001;
++pub const RUNTIME_VERSION: u32 = 2040001;
+ 
+ /// The digest of the sources this build of the crate was compiled from: SHA-256, as lowercase hex,
+ /// of the manifest, the build script, and exactly the files the crate roots' module tree compiles
+--- a/crates/metal2vulkan-runtime/src/memory.rs
++++ b/crates/metal2vulkan-runtime/src/memory.rs
+@@ -1185,6 +1185,12 @@
+     pub(super) fn set_submission_cache_atom(&mut self, atom: u64) {
+         assert!(atom == 0 || atom.is_power_of_two());
+         self.submission_cache_atom = atom;
++        // X9 has a per-client 512 MiB BO budget shared with PanVK's internal
++        // storage and host imports. Do not reserve 64 MiB per small pool, or
++        // sweep those unused bytes on every native ownership transition.
++        if atom != 0 {
++            self.block_bytes = self.block_bytes.min(16 << 20);
++        }
+     }
+ 
+     /// Cache ownership granularity:1 for normal coherent-only allocation.
+@@ -1485,10 +1491,15 @@
+     /// Release every kept empty pooled block of memory type `type_index`, of buffers and of
+     /// images, as a block of that type fails to be made ([`place`]): how many went.
+     fn release_kept(&mut self, device: &ash::Device, type_index: u32) -> usize {
+-        let blocks: Vec<Block> = [Holds::Buffers, Holds::Images]
+-            .into_iter()
+-            .flat_map(|holds| self.pool(holds, type_index).take_kept())
+-            .collect();
++        let blocks: Vec<Block> = if self.submission_cache_atom != 0 {
++            // The native budget is shared by all memory types: pressure on an
++            // image allocation must also reclaim empty buffer pools. Only
++            // take_kept's unplaced, no-longer-in-flight blocks qualify.
++            self.pools.iter_mut().flat_map(Pool::take_kept).collect()
++        } else {
++            [Holds::Buffers, Holds::Images].into_iter()
++                .flat_map(|holds| self.pool(holds, type_index).take_kept()).collect()
++        };
+         let count = blocks.len();
+         for block in blocks {
+             // SAFETY: nothing is placed in a kept empty block, and no command reads it.
+--- a/crates/metal2vulkan-runtime/src/command_buffer/mod.rs
++++ b/crates/metal2vulkan-runtime/src/command_buffer/mod.rs
+@@ -3004,6 +3004,16 @@
+         }
+     }
+ 
++    /// Conservative native-frontend release gate, not a general GPU quiescence
++    /// claim. `submitted` is monotonic and set in `first_submission` BEFORE
++    /// queue work (including grouped batches). A failure after that boundary,
++    /// even an OOM, stays quarantined by the frontend.
++    pub fn failed_before_submission_with_oom(&self) -> bool {
++        matches!(self.error(), Some(CommandBufferError::OutOfMemory))
++            && !self.0.device.is_lost()
++            && !self.state().submitted
++    }
++
+     /// `error.localizedDescription`, where the driver relayed Metal's failure of the command
+     /// buffer's work ([`CommandBufferError::Execution`], and the `PageFault` and `DeviceLost` it
+     /// maps codes 3 and 11 to): Metal's description, as MoltenVK's message gave it after the

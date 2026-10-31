@@ -1,0 +1,103 @@
+--- a/MaliMetal/X9/General/kernel/SweetX9CSFResident.inc
++++ b/MaliMetal/X9/General/kernel/SweetX9CSFResident.inc
+@@ -12,8 +12,12 @@
+  uint32_t gpu_mask,job_mask;
+  unsigned slot_count;
+  bool masked,installed,mcu_started,ready,uncertain;
++ /* Opt-in only. Native panthor performs no cache maintenance for IO_COHERENT
++  * BOs; matching that here skips the per-submit CPU CIVAC fallback. */
++ bool coherent;
+  ResidentSession():gpu(0),smmu(0),doorbell(0),saved_cfg(0),saved_attr(0),l2_owned(0),epoch(0),
+-  gpu_mask(0),job_mask(0),slot_count(0),masked(false),installed(false),mcu_started(false),ready(false),uncertain(false) {
++  gpu_mask(0),job_mask(0),slot_count(0),masked(false),installed(false),mcu_started(false),ready(false),uncertain(false),
++  coherent(false) {
+   bzero(slots,sizeof(slots));bzero(&caps,sizeof(caps));
+  }
+ };
+@@ -133,6 +137,16 @@
+   s->policy.shader_mask=shaders;
+   IOLog("X9 RENDER shader-policy: present=%llx requested=%llx cores=%u;pending firmware delegation/config ACK\n",
+    shaders,s->policy.shader_mask,(unsigned)__builtin_popcountll(shaders));
++  // COHERENCY_NUM_GROUPS (0x300) and COHERENCY_GROUP_0 (0x308) are the GPU's own
++  // report: type 0 = none, 1 = ACE-Lite, 2 = ACE. A non-zero type is a register
++  // capability, not proof that this interconnect snoops CPU caches for client
++  // addresses; the boot-arg is the operator's explicit claim and both are needed.
++  uint32_t groups=gr(gpu,0x300),group_type=gr(gpu,0x308)&3;
++  int coherent_arg=0;
++  bool want=PE_parse_boot_argn("x9_gpu_coherent",&coherent_arg,sizeof(coherent_arg))&&coherent_arg==1;
++  s->coherent=want&&groups&&groups<=64&&(group_type==1||group_type==2);
++  IOLog("X9 RENDER coherency: groups=%u group0_type=%u requested=%d active=%u;register capability,interconnect not proven\n",
++   groups,group_type,coherent_arg,s->coherent?1:0);
+   for(unsigned i=0;i<8;i++) {
+    uint32_t va=0x04400000u+i*0x200000u;
+    if(!add_shared(s->image,va,0x10000)||!add_shared(s->image,va+0x10000,0x100000))goto clean_failure;
+--- a/MaliMetal/X9/General/kernel/SweetX9RenderEngine.inc
++++ b/MaliMetal/X9/General/kernel/SweetX9RenderEngine.inc
+@@ -252,10 +252,12 @@
+  uint64_t cache_bytes[2]={0,0},shader_ready_seen=0;
+  uint64_t private_skip[2]={0,0},initial_bytes=0,fallback_bytes=0;
+  uint64_t reach_saved[2]={0,0},import_bytes[2]={0,0},full_import_bytes[2]={0,0};
++ uint64_t coherent_skip[2]={0,0};
+  RenderOwner owner;if(!owner.locked||!render_ready()||!c||!request||!reply||c->exposed)return kIOReturnNotReady;
+  times[1]=mach_absolute_time();
+  auto *g=render_group(c,request->group);if(!g||c->disabled)return kIOReturnBadArgument;
+  vm_offset_t gpu=resident->gpu;
++ const bool coherent=resident->coherent;
+  const char *phase="storage-sync";
+  if(gr64(gpu,0x2440))return kIOReturnBusy;
+  for(unsigned i=0;i<resident->slot_count;i++) {
+@@ -278,8 +280,15 @@
+   * of other, unused host resources in a BO while discarding stale clean ones.
+   * Unmapped bytes cannot be touched through this context. An alias reachable
+   * through another resource is maintained through that resource's descriptor.
+-  * The runtime must isolate independently owned resources to cache atoms. */
++  * The runtime must isolate independently owned resources to cache atoms.
++  * The opt-in coherent path below is the ONLY exception: it assumes the GPU
++  * snoops CPU caches, so exposed client bytes need no CIVAC here. Command and
++  * fence storage keep their explicit syncs regardless, and flush_gpu, group
++  * start/halt and every uncertainty check stay unchanged. */
+  for(auto &r:c->resources)if(r.memory) {
++  if(coherent&&r.cpu_exposed) {
++   coherent_skip[0]+=r.cache_end>r.cache_begin?r.cache_end-r.cache_begin:0;continue;
++  }
+   if(!r.cpu_exposed&&r.initial_cache_clean){private_skip[0]+=r.bytes;continue;}
+   uint64_t offset=0,bytes=r.bytes;
+   if(r.cpu_exposed) {
+@@ -384,6 +393,9 @@
+  times[6]=mach_absolute_time();
+  for(unsigned i=0;i<3;i++)if(active&(1u<<i))g->producer[i]=expected[i];
+  for(auto &r:c->resources)if(r.memory&&(r.flags&X9RenderGPUWrite)) {
++  if(coherent&&r.cpu_exposed) {
++   coherent_skip[1]+=r.write_end>r.write_begin?r.write_end-r.write_begin:0;continue;
++  }
+   // No CPU consumer exists for a never-exposed allocation. Keep GPU flush,
+   // CSG suspend and AS detach above; a fence alone does not return ownership.
+   if(!r.cpu_exposed){private_skip[1]+=r.bytes;continue;}
+@@ -408,6 +420,7 @@
+   static uint64_t cache_total[2]={0,0},ready_mask=0;
+   static uint64_t skipped_total[2]={0,0},initial_total=0,fallback_total=0;
+   static uint64_t reach_total[2]={0,0},import_total[2]={0,0},full_import_total[2]={0,0};
++  static uint64_t coherent_total[2]={0,0};
+   if(!began)began=times[0];
+   uint64_t elapsed=0,whole=0;
+   absolutetime_to_nanoseconds(times[7]-times[0],&whole);
+@@ -417,7 +430,7 @@
+   cache_total[0]+=cache_bytes[0];cache_total[1]+=cache_bytes[1];ready_mask|=shader_ready_seen;
+   skipped_total[0]+=private_skip[0];skipped_total[1]+=private_skip[1];
+   initial_total+=initial_bytes;fallback_total+=fallback_bytes;
+-  for(unsigned i=0;i<2;i++){reach_total[i]+=reach_saved[i];import_total[i]+=import_bytes[i];full_import_total[i]+=full_import_bytes[i];}
++  for(unsigned i=0;i<2;i++){reach_total[i]+=reach_saved[i];import_total[i]+=import_bytes[i];full_import_total[i]+=full_import_bytes[i];coherent_total[i]+=coherent_skip[i];}
+   if(elapsed>=2000000000ULL) {
+    IOLog("X9 RENDER timing: elapsed_ms=%llu jobs=%llu owner_us=%llu pre_cache_us=%llu storage_us=%llu start_us=%llu wait_us=%llu retire_us=%llu post_cache_us=%llu max_job_us=%llu;averages,not shader time\n",
+     elapsed/1000000,count,total[0]/count/1000,total[1]/count/1000,total[2]/count/1000,total[3]/count/1000,
+@@ -428,7 +441,9 @@
+     count,skipped_total[0]/count,skipped_total[1]/count,initial_total/count,fallback_total/count);
+    IOLog("X9 RENDER cache-reach: jobs=%llu pre_skip_avg=%llu post_skip_avg=%llu import_pre_avg=%llu import_pre_full_avg=%llu import_post_avg=%llu import_post_full_avg=%llu;kernel mapping bounds,not dirty tracking\n",
+     count,reach_total[0]/count,reach_total[1]/count,import_total[0]/count,full_import_total[0]/count,import_total[1]/count,full_import_total[1]/count);
+-   for(unsigned i=0;i<2;i++)reach_total[i]=import_total[i]=full_import_total[i]=0;
++   IOLog("X9 RENDER cache-coherent: jobs=%llu active=%u pre_skip_avg=%llu post_skip_avg=%llu;opt-in skips CIVAC on exposed client bytes,assumes GPU snoop\n",
++    count,coherent?1:0,coherent_total[0]/count,coherent_total[1]/count);
++   for(unsigned i=0;i<2;i++)reach_total[i]=import_total[i]=full_import_total[i]=coherent_total[i]=0;
+    cache_total[0]=cache_total[1]=ready_mask=0;
+    skipped_total[0]=skipped_total[1]=initial_total=fallback_total=0;
+    began=times[7];count=0;bzero(total,sizeof(total));max_ns=0;

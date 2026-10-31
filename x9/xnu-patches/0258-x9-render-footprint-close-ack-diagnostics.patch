@@ -1,0 +1,81 @@
+--- a/iokit/Kernel/arm/SweetX9RenderService.cpp
++++ b/iokit/Kernel/arm/SweetX9RenderService.cpp
+@@ -5,7 +5,6 @@
+ #include <IOKit/IOLib.h>
+ #include <kern/task.h>
+ #include <sys/proc.h>
+-#include <pexpert/pexpert.h>
+ #include <pexpert/pexpert.h>
+ #include <libkern/libkern.h>
+ static const X9RenderEngine *render_engine;
+@@ -42,6 +41,13 @@
+  OSDeclareDefaultStructors(SweetX9RenderUserClient);
+  X9RenderContext *context=nullptr;
+  static bool good_flags(uint32_t flags) {return flags&&(flags&~7u)==0&&(!(flags&4u)||!(flags&2u));}
++ void footprint(const char *phase) {
++  if(!context||!context->owner)return;
++  IOLog("X9 RENDER FOOTPRINT: phase=%s pid=%d native_bytes=%llu footprint=%llu limit=%llu;no limit override\n",
++   phase,pid_from_task(context->owner),(unsigned long long)context->allocated_bytes,
++   (unsigned long long)get_task_phys_footprint(context->owner),
++   (unsigned long long)get_task_phys_footprint_limit(context->owner));
++ }
+  X9RenderResource *resource(uint32_t handle) {
+   for(auto &r:context->resources)if(r.memory&&r.handle==handle)return &r;
+   return nullptr;
+@@ -105,6 +111,7 @@
+    if(selector==X9RenderAllocate)bzero(((IOBufferMemoryDescriptor *)memory)->getBytesNoCopy(),request.bytes);
+    uint32_t handle=++context->next_handle;
+    context->resources[slot]={memory,request.bytes,handle,request.flags,true};context->allocated_bytes+=request.bytes;
++   if(request.bytes>=(4u<<20))footprint(selector==X9RenderImportHost?"import":"allocate");
+    X9RenderBuffer reply={X9_RENDER_ABI,handle,handle,request.flags,request.bytes};
+    memcpy(a->structureOutput,&reply,sizeof(reply));return kIOReturnSuccess;
+   }
+@@ -217,11 +224,12 @@
+   if(render_engine->context_open(context)!=kIOReturnSuccess)return false;
+   context->engine_open=true;
+   char caller[32]={0};proc_selfname(caller,sizeof(caller));
+-  IOLog("X9 RENDER CLIENT: opened caller=%s pid=%d real context\n",caller,proc_selfpid());return true;
++  IOLog("X9 RENDER CLIENT: opened caller=%s pid=%d real context\n",caller,proc_selfpid());footprint("open");return true;
+  }
+  IOReturn clientClose(void) APPLE_KEXT_OVERRIDE {if(!isInactive())terminate();return kIOReturnSuccess;}
+  void free(void) APPLE_KEXT_OVERRIDE {
+   if(context) {
++   footprint("close");
+    if(context->engine_open&&!render_engine->context_close(context)) {
+     IOLog("X9 RENDER: unresolved client teardown;prepared resources/context retained,no reset\n");context=nullptr;
+    }else {
+--- a/iokit/Kernel/arm/X9CSFRenderQueue.cpp
++++ b/iokit/Kernel/arm/X9CSFRenderQueue.cpp
+@@ -33,6 +33,23 @@
+  *global_req=(old&~mask)|((ack^mask)&mask);
+  return write(io,f.global_input+8,*global_req)&&clean(io,f.global_input,4096)&&io->doorbell(io->cookie);
+ }
++static void ack_snapshot(const X9CSFQueueIO *io,const X9CSFRenderGroup *g,unsigned state,bool streams,
++ uint32_t global_req,uint32_t group_req) {
++ const auto &f=g->interface;
++ uint32_t gr=0,ga=0,cr=0,ca=0,dr=0,da=0;
++ bool ok=read(io,f.global_input+8,&gr)&&read(io,f.global_output+8,&ga)&&
++  read(io,f.group_input,&cr)&&read(io,f.group_output,&ca)&&
++  read(io,f.group_input+8,&dr)&&read(io,f.group_output+8,&da);
++ IOLog("X9 CSF ACK TIMEOUT: slot=%u want=%u streams=%u suspended=%u running=%u read=%u global=%08x/%08x expected=%08x CSG=%08x/%08x CSDB=%08x/%08x expected=%08x\n",
++  f.group_index,state,streams,g->suspended,g->running,ok,gr,ga,global_req,cr,ca,dr,da,group_req);
++ for(unsigned i=0;i<3;i++)if(g->streams_touched&(1u<<i)) {
++  uint32_t req=0,ack=0,fault=0,fatal=0;
++  bool valid=read(io,f.streams[i].input,&req)&&read(io,f.streams[i].output,&ack)&&
++   read(io,f.streams[i].output+0x80,&fault)&&read(io,f.streams[i].output+0x84,&fatal);
++  IOLog("X9 CSF ACK TIMEOUT: slot=%u stream=%u read=%u REQ=%08x ACK=%08x FAULT=%08x FATAL=%08x\n",
++   f.group_index,i,valid,req,ack,fault,fatal);
++ }
++}
+ static IOReturn wait_ack(const X9CSFQueueIO *io,X9CSFRenderGroup *g,unsigned state,bool streams,
+  uint32_t global_req,uint32_t group_req,uint64_t epoch,uint64_t end) {
+  for(;;) {
+@@ -49,7 +66,7 @@
+    }
+   }else ready=ready&&(ack&state_mask)==state;
+   if(ready)return kIOReturnSuccess;
+-  if(io->now_ns(io->cookie)>=end)return kIOReturnTimeout;
++  if(io->now_ns(io->cookie)>=end){ack_snapshot(io,g,state,streams,global_req,group_req);return kIOReturnTimeout;}
+   io->yield(io->cookie);
+  }
+ }

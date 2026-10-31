@@ -2,6 +2,25 @@
 #pragma once
 #include "kmod/pan_kmod.h"
 #include "../X9RenderABI.h"
+#include <stdarg.h>
+#include <stdio.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
+/* Explicit console path: daemon stderr may not reach the persistent log. */
+static inline __attribute__((format(printf, 1, 2))) void
+x9_panvk_log(const char *format, ...) {
+ int saved=errno;
+ char line[768];va_list ap;va_start(ap,format);
+ int n=vsnprintf(line,sizeof(line)-2,format,ap);va_end(ap);
+ if(n>=0) {
+  size_t count=(size_t)n<sizeof(line)-2?(size_t)n:sizeof(line)-3;
+  line[count++]='\n';
+  int fd=open("/dev/console",O_WRONLY|O_NOCTTY);
+  if(fd>=0){(void)write(fd,line,count);close(fd);}
+ }
+ errno=saved;
+}
 /* Explicit native constructor. Takes ownership of sync_ops only on success.
  * Not registered with DRM enumeration: the queue/timeline port must provide
  * its real sync provider before enabling this backend in device discovery. */

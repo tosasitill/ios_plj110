@@ -4,6 +4,7 @@
 #include "../X9RenderTransport.h"
 #include "drm-uapi/panthor_drm.h"
 #include <errno.h>
+#include "util/log.h"
 #include <string.h>
 #define X9_BO_FLAGS (PAN_KMOD_BO_FLAG_EXECUTABLE|PAN_KMOD_BO_FLAG_NO_MMAP|PAN_KMOD_BO_FLAG_WB_MMAP)
 struct x9_dev {
@@ -16,6 +17,7 @@ struct x9_dev {
  struct X9RenderMapping mappings[X9_RENDER_MAX_MAPPINGS];
  uint32_t count,groups[32],group_count,last_group;
  uint64_t last_submission;
+ uint64_t cache_ops,cache_range_bytes,cache_bo_bytes,cache_merged;
  bool failed;
 };
 struct x9_bo {struct pan_kmod_bo base;uint32_t memory_type,native_flags;void *imported_host;};
@@ -24,7 +26,13 @@ static int error(int e){errno=e;return -1;}
 static int call(struct x9_dev *d,uint32_t op,const void *in,size_t ilen,void *out,size_t olen) {
  if(d->failed)return error(EIO);
  int ret=x9_render_call(d->connection,op,in,ilen,out,olen);
- if(ret)d->failed=true;
+ if(ret) {
+  int saved_errno=errno;
+  bool recoverable=(op==X9RenderAllocate||op==X9RenderImportHost)&&(saved_errno==ENOMEM||saved_errno==ENOSPC);
+  x9_panvk_log("X9 PANVK CALL: op=%u ret=%d errno=%d recoverable=%d detail=%s",op,ret,saved_errno,recoverable,x9_render_last_error());
+  if(!recoverable)d->failed=true;
+  errno=saved_errno;
+ }
  return ret;
 }
 static void destroy(struct pan_kmod_dev *dev) {
@@ -39,7 +47,11 @@ static struct pan_kmod_va_range va_range(const struct pan_kmod_dev *dev) {
 }
 static struct pan_kmod_bo *allocate(struct pan_kmod_dev *dev,struct pan_kmod_vm *vm,uint64_t size,uint32_t flags) {
  struct x9_dev *d=device(dev);
- if(!size||size>d->caps.max_buffer_bytes||(flags&~X9_BO_FLAGS)|| (vm&&vm!=d->vm)){errno=EINVAL;return NULL;}
+ if(!size||size>d->caps.max_buffer_bytes||(flags&~X9_BO_FLAGS)|| (vm&&vm!=d->vm)) {
+  x9_panvk_log("X9 PANVK ALLOC: refuse size=%llu max=%llu flags=%x bits=%x vm=%d/%d",(unsigned long long)size,
+    (unsigned long long)d->caps.max_buffer_bytes,flags,flags&~X9_BO_FLAGS,vm!=NULL,(vm==d->vm));
+  errno=EINVAL;return NULL;
+ }
  uint64_t bytes=(size+16383)&~16383ULL;
  struct x9_bo *b=pan_kmod_dev_alloc(dev,sizeof(*b));if(!b)return NULL;
  uint32_t permissions=X9RenderGPURead|((flags&PAN_KMOD_BO_FLAG_EXECUTABLE)?X9RenderGPUExecute:X9RenderGPUWrite);
@@ -50,7 +62,12 @@ static struct pan_kmod_bo *allocate(struct pan_kmod_dev *dev,struct pan_kmod_vm 
   d->failed=true;ret=error(EPROTO);
  }
  simple_mtx_unlock(&d->lock);
- if(ret){pan_kmod_dev_free(dev,b);return NULL;}
+ if(ret) {
+  x9_panvk_log("X9 PANVK ALLOC: kernel refused size=%llu bytes=%llu ret=%d errno=%d used_failed=%d",(unsigned long long)size,
+    (unsigned long long)bytes,ret,errno,(int)d->failed);
+  pan_kmod_dev_free(dev,b);return NULL;
+ }
+ if(bytes>=(4u<<20))x9_panvk_log("X9 PANVK ALLOC: size=%llu ok",(unsigned long long)bytes);
  b->memory_type=reply.memory_type;b->native_flags=permissions;
  pan_kmod_bo_init(&b->base,dev,vm,bytes,flags,reply.handle);return &b->base;
 }
@@ -69,35 +86,74 @@ static int export_bo(struct pan_kmod_bo *bo){(void)bo;return error(ENOTSUP);}
 static void *map_cpu(struct pan_kmod_bo *bo,int prot,int flags,void *hint) {
  struct x9_dev *d=device(bo->dev);struct x9_bo *b=container_of(bo,struct x9_bo,base);
  if(hint||flags!=MAP_SHARED||prot!=(PROT_READ|PROT_WRITE)||(bo->flags&PAN_KMOD_BO_FLAG_NO_MMAP)){errno=ENOTSUP;return MAP_FAILED;}
- if(b->imported_host)return b->imported_host;
+ if(b->imported_host) {
+  // Vulkan's map entrypoint requests Read+Write. Do not return a read-only
+  // owner's pointer as a writable mapping; no-copy users retain their pointer.
+  if((prot&PROT_WRITE)&&!(b->native_flags&X9RenderGPUWrite)){errno=EACCES;return MAP_FAILED;}
+  return b->imported_host;
+ }
  simple_mtx_lock(&d->lock);uint64_t bytes=0;
  void *ptr=d->failed?NULL:x9_render_map_buffer(d->connection,b->memory_type,&bytes);
  if(ptr&&bytes!=bo->size){x9_render_unmap_buffer(d->connection,b->memory_type,ptr);ptr=NULL;d->failed=true;errno=EPROTO;}
  simple_mtx_unlock(&d->lock);return ptr?ptr:MAP_FAILED;
 }
-int x9_pan_kmod_sync_cpu(struct pan_kmod_bo *bo,uint64_t offset,uint64_t bytes,enum pan_kmod_bo_sync_type type) {
+/* Offset/size are BO-relative, not virtual addresses. Round outward only
+ * inside the allocation's cache atoms; never wrap or widen to unrelated BOs.
+ * This describes THIS cache operation, not all CPU writes or GPU resources. */
+static int cache_request(struct pan_kmod_bo *bo,uint64_t offset,uint64_t bytes,
+ enum pan_kmod_bo_sync_type type,struct X9RenderCacheRequest *req) {
  if(!bo||!bytes||offset>=bo->size||bytes>bo->size-offset||
     (type!=PAN_KMOD_BO_SYNC_CPU_CACHE_FLUSH&&type!=PAN_KMOD_BO_SYNC_CPU_CACHE_FLUSH_AND_INVALIDATE))return error(EINVAL);
- struct x9_dev *d=device(bo->dev);
  uint64_t start=offset&~(uint64_t)(X9_RENDER_CACHE_ATOM-1);
+ if(offset+bytes>UINT64_MAX-(X9_RENDER_CACHE_ATOM-1))return error(EINVAL);
  uint64_t end=(offset+bytes+X9_RENDER_CACHE_ATOM-1)&~(uint64_t)(X9_RENDER_CACHE_ATOM-1);
  if(end>bo->size)return error(EINVAL);
- struct X9RenderCacheRequest req={X9_RENDER_ABI,bo->handle,
+ *req=(struct X9RenderCacheRequest){X9_RENDER_ABI,bo->handle,
   type==PAN_KMOD_BO_SYNC_CPU_CACHE_FLUSH?X9RenderClean:(X9RenderClean|X9RenderInvalidate),0,start,end-start};
- simple_mtx_lock(&d->lock);int ret=call(d,X9RenderCache,&req,sizeof(req),NULL,0);simple_mtx_unlock(&d->lock);
+ return 0;
+}
+/* Caller holds d->lock. Byte counts describe completed cache calls, not GPU
+ * work, a complete dirty set or bytes saved inside render_submit. */
+static int cache_call(struct x9_dev *d,struct pan_kmod_bo *bo,const struct X9RenderCacheRequest *req) {
+ int ret=call(d,X9RenderCache,req,sizeof(*req),NULL,0);
+ if(!ret) {
+  d->cache_ops++;d->cache_range_bytes+=req->bytes;d->cache_bo_bytes+=bo->size;
+  if(d->cache_ops<=4||d->cache_ops%128==0)
+   x9_panvk_log("X9 PANVK CACHE RANGE: calls=%llu range_bytes_avg=%llu bo_bytes_avg=%llu merged=%llu;explicit ops only,submission fallback retained",
+    (unsigned long long)d->cache_ops,(unsigned long long)(d->cache_range_bytes/d->cache_ops),
+    (unsigned long long)(d->cache_bo_bytes/d->cache_ops),(unsigned long long)d->cache_merged);
+ }
+ return ret;
+}
+int x9_pan_kmod_sync_cpu(struct pan_kmod_bo *bo,uint64_t offset,uint64_t bytes,enum pan_kmod_bo_sync_type type) {
+ struct X9RenderCacheRequest req;
+ if(cache_request(bo,offset,bytes,type,&req))return -1;
+ struct x9_dev *d=device(bo->dev);
+ simple_mtx_lock(&d->lock);int ret=cache_call(d,bo,&req);simple_mtx_unlock(&d->lock);
  return ret;
 }
 static int flush_maps(struct pan_kmod_dev *dev) {
  struct x9_dev *d=device(dev);int result=0;simple_mtx_lock(&d->lock);
+ struct pan_kmod_bo *pending_bo=NULL;struct X9RenderCacheRequest pending={0};
  util_dynarray_foreach(&dev->pending_bo_syncs.array,struct pan_kmod_deferred_bo_sync,sync) {
-  if(sync->start>sync->bo->size||sync->size>sync->bo->size-sync->start){result=error(EINVAL);d->failed=true;break;}
+  if(!sync->bo||sync->bo->dev!=dev||sync->start>sync->bo->size||sync->size>sync->bo->size-sync->start){result=error(EINVAL);d->failed=true;break;}
   if(!sync->size)continue;
-  /* Use entire buffer: allocation owns every surrounding cache line. This
-   * runs before submission; post-GPU invalidate belongs to completion. */
-  struct X9RenderCacheRequest req={X9_RENDER_ABI,sync->bo->handle,
-   sync->type==PAN_KMOD_BO_SYNC_CPU_CACHE_FLUSH?X9RenderClean:(X9RenderClean|X9RenderInvalidate),0,0,sync->bo->size};
-  result=call(d,X9RenderCache,&req,sizeof(req),NULL,0);if(result)break;
+  /* Deferred uploads (imports included) already carry exact ranges. Merge
+   * consecutive overlapping/adjacent operations only for the SAME BO and
+   * operation. Never reorder an invalidate past a clean or across another BO
+   * which could be an alias. No merging across submits or immediate calls. */
+  struct X9RenderCacheRequest req;
+  if(cache_request(sync->bo,sync->start,sync->size,sync->type,&req)){result=-1;d->failed=true;break;}
+  if(pending_bo==sync->bo&&pending.operation==req.operation&&
+     req.offset<=pending.offset+pending.bytes&&pending.offset<=req.offset+req.bytes) {
+   uint64_t start=MIN2(pending.offset,req.offset),end=MAX2(pending.offset+pending.bytes,req.offset+req.bytes);
+   pending.offset=start;pending.bytes=end-start;d->cache_merged++;
+  }else {
+   if(pending_bo){result=cache_call(d,pending_bo,&pending);if(result)break;}
+   pending_bo=sync->bo;pending=req;
+  }
  }
+ if(!result&&pending_bo)result=cache_call(d,pending_bo,&pending);
  simple_mtx_unlock(&d->lock);return result;
 }
 static bool wait_bo(struct pan_kmod_bo *bo,int64_t timeout,bool read_only) {
@@ -325,12 +381,36 @@ struct pan_kmod_bo *x9_pan_kmod_import_host(struct pan_kmod_dev *dev,struct pan_
  struct x9_dev *d=device(dev);struct x9_bo *bo=pan_kmod_dev_alloc(dev,sizeof(*bo));if(!bo)return NULL;
  struct X9RenderAllocation req={X9_RENDER_ABI,X9RenderGPURead|X9RenderGPUWrite,bytes,(uint64_t)(uintptr_t)host};
  struct X9RenderBuffer reply={0};simple_mtx_lock(&d->lock);
- int ret=vm!=d->vm?error(EINVAL):call(d,X9RenderImportHost,&req,sizeof(req),&reply,sizeof(reply));
+ int ret;
+ if(vm!=d->vm||d->failed)ret=error(EIO);
+ else {
+  ret=x9_render_call(d->connection,X9RenderImportHost,&req,sizeof(req),&reply,sizeof(reply));
+  if(ret&&errno==EACCES) {
+   // The kernel guarantees this protection refusal published no handle. Retry
+   // exactly once with an explicit read-only grant, not a copied allocation or
+   // a VM-region guess. bind_vm carries native_flags to the GPU PTEs; stores
+   // through this BO must fault rather than write pages the owner cannot write.
+   req.flags=X9RenderGPURead;
+   memset(&reply,0,sizeof(reply));
+   ret=x9_render_call(d->connection,X9RenderImportHost,&req,sizeof(req),&reply,sizeof(reply));
+  }
+  if(ret) {
+   int saved_errno=errno;
+   x9_panvk_log("X9 PANVK IMPORT: host=%llx bytes=%llu flags=%x errno=%d detail=%s",
+    (unsigned long long)req.host_address,(unsigned long long)bytes,req.flags,saved_errno,x9_render_last_error());
+   /* The service explicitly guarantees that this refusal publishes no handle.
+    * Protocol, mapping, cache and submission uncertainty still poison the VM. */
+   if(saved_errno!=EACCES&&saved_errno!=ENOMEM&&saved_errno!=ENOSPC)d->failed=true;
+   errno=saved_errno;
+  }
+ }
  if(!ret&&(reply.abi!=X9_RENDER_ABI||!reply.handle||!reply.memory_type||reply.flags!=req.flags||reply.bytes!=bytes)) {
   d->failed=true;ret=error(EPROTO);
  }
  simple_mtx_unlock(&d->lock);
  if(ret){pan_kmod_dev_free(dev,bo);return NULL;}
+ if(req.flags==X9RenderGPURead)x9_panvk_log("X9 PANVK IMPORT: read-only grant host=%llx bytes=%llu handle=%u;GPU stores forbidden",
+  (unsigned long long)req.host_address,(unsigned long long)bytes,reply.handle);
  bo->memory_type=reply.memory_type;bo->native_flags=req.flags;bo->imported_host=host;
  pan_kmod_bo_init(&bo->base,dev,vm,bytes,PAN_KMOD_BO_FLAG_IMPORTED|PAN_KMOD_BO_FLAG_WB_MMAP,reply.handle);
  /* Unlike bo_alloc's wrapper, this explicit import must install its BO lookup

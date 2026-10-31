@@ -1,0 +1,260 @@
+--- a/MaliMetal/X9/General/kernel/X9RenderKernel.h
++++ b/MaliMetal/X9/General/kernel/X9RenderKernel.h
+@@ -15,7 +15,12 @@
+   * VM aliases and IOSurface writers need no dirty notification. Only a native
+   * allocation that has NEVER been exposed may skip repeated CPU maintenance.
+   * Private command/fence storage has its separate explicit sync path. */
+- bool cpu_exposed,initial_cache_clean;
++ bool cpu_exposed,initial_cache_clean,imported;
++ /* Rebuilt under the context + GPU owner locks from EVERY live GPU mapping,
++  * not from a draw's resource list or dirty notifications. Bounding intervals
++  * deliberately include holes between mappings and all indirect accesses.
++  * Empty means not GPU-addressable in this submission's page table. */
++ uint64_t cache_begin,cache_end,write_begin,write_end;
+ };
+ struct X9RenderVMEntry {
+  X9RenderResource *resource;
+--- a/MaliMetal/X9/General/kernel/X9RenderMemory.cpp
++++ b/MaliMetal/X9/General/kernel/X9RenderMemory.cpp
+@@ -39,11 +39,19 @@
+  // direction fix by failing after import, on the first flush.
+  IOOptionBits options=kIOMapAnywhere;
+  if(r->memory->getDirection()==kIODirectionOut)options|=kIOMapReadOnly;
+- auto *mapping=r->memory->createMappingInTask(kernel_task,0,options);
+- if(!mapping)return kIOReturnNoMemory;
+- uint64_t address=mapping->getAddress(),length=mapping->getLength();
++ /* Native BOs already have a descriptor-owned kernel alias. Do not repeatedly
++  * create/destroy VM mappings for every small explicit upload and submission.
++  * Host imports retain their real pinned descriptor and permission-checked
++  * temporary alias; no snapshot/copy can replace no-copy or IOSurface memory. */
++ IOMemoryMap *mapping=nullptr;
++ uint64_t address=0,length=r->memory->getLength();
++ if(r->imported) {
++  mapping=r->memory->createMappingInTask(kernel_task,0,options);
++  if(!mapping)return kIOReturnNoMemory;
++  address=mapping->getAddress();length=mapping->getLength();
++ }else address=(uint64_t)((IOBufferMemoryDescriptor *)r->memory)->getBytesNoCopy();
+  if(!address||(address&(line-1))||length<r->bytes||address+length<address) {
+-  mapping->release();return kIOReturnBadArgument;
++  if(mapping)mapping->release();return kIOReturnBadArgument;
+  }
+  uint64_t begin=address+request->offset,end=begin+request->bytes;
+  __asm__ volatile("dsb sy":::"memory");
+@@ -58,7 +66,7 @@
+  // A partial upload cannot discharge the allocation's initial zero-fill.
+  if((request->operation&X9RenderClean)&&!request->offset&&request->bytes==r->bytes)
+   r->initial_cache_clean=true;
+- mapping->release();return kIOReturnSuccess;
++ if(mapping)mapping->release();return kIOReturnSuccess;
+ }
+ uint64_t x9_render_memory_publish(X9RenderContext *c) {
+  if(!c||!c->page_table||c->exposed||c->disabled)return 0;
+--- a/MaliMetal/X9/General/kernel/SweetX9RenderService.cpp
++++ b/MaliMetal/X9/General/kernel/SweetX9RenderService.cpp
+@@ -172,7 +172,7 @@
+    }
+    if(selector==X9RenderAllocate)bzero(((IOBufferMemoryDescriptor *)memory)->getBytesNoCopy(),request.bytes);
+    uint32_t handle=++context->next_handle;
+-   context->resources[slot]={memory,request.bytes,handle,request.flags,true,selector==X9RenderImportHost,false};
++   context->resources[slot]={memory,request.bytes,handle,request.flags,true,selector==X9RenderImportHost,false,selector==X9RenderImportHost};
+    context->allocated_bytes+=request.bytes;
+    if(request.bytes>=(4u<<20))footprint(selector==X9RenderImportHost?"import":"allocate");
+    X9RenderBuffer reply={X9_RENDER_ABI,handle,handle,request.flags,request.bytes};
+--- a/MaliMetal/X9/General/kernel/SweetX9RenderEngine.inc
++++ b/MaliMetal/X9/General/kernel/SweetX9RenderEngine.inc
+@@ -220,10 +220,38 @@
+  RenderOwner owner;if(!owner.locked||!c)return kIOReturnNotReady;
+  auto *g=render_group(c,id);return g?render_destroy_locked(c,g):kIOReturnBadArgument;
+ }
++/* The page table is the authority for reachability, including argument-buffer
++ * pointers and aliased GPU VAs. A caller's upload list is never sufficient.
++ * Rebuild both intervals on EVERY submit: unmap/remap, permission changes and
++ * new CPU aliases cannot leave a stale smaller interval. No allocation or
++ * resource-list-sized kernel stack array is needed here. */
++static bool render_cache_bounds(X9RenderContext *c) {
++ if(c->mapping_count>X9_RENDER_MAX_MAPPINGS)return false;
++ for(auto &r:c->resources) {
++  r.cache_begin=r.write_begin=r.bytes;r.cache_end=r.write_end=0;
++ }
++ uintptr_t base=(uintptr_t)&c->resources[0],end=(uintptr_t)&c->resources[X9_RENDER_MAX_MAPPINGS];
++ for(unsigned i=0;i<c->mapping_count;i++) {
++  const auto &m=c->mappings[i];uintptr_t p=(uintptr_t)m.resource;
++  if(p<base||p>=end||(p-base)%sizeof(X9RenderResource))return false;
++  auto &r=*m.resource;
++  if(!r.memory||!m.bytes||!m.flags||(m.flags&~r.flags)||
++     ((m.offset|m.bytes)&(X9_RENDER_CACHE_ATOM-1))||m.offset>r.bytes||m.bytes>r.bytes-m.offset)return false;
++  uint64_t limit=m.offset+m.bytes;
++  if(m.offset<r.cache_begin)r.cache_begin=m.offset;
++  if(limit>r.cache_end)r.cache_end=limit;
++  if(m.flags&X9RenderGPUWrite) {
++   if(m.offset<r.write_begin)r.write_begin=m.offset;
++   if(limit>r.write_end)r.write_end=limit;
++  }
++ }
++ return true;
++}
+ static IOReturn render_submit(X9RenderContext *c,const X9RenderSubmission *request,X9RenderCompletion *reply) {
+  uint64_t times[8]={mach_absolute_time(),0,0,0,0,0,0,0};
+  uint64_t cache_bytes[2]={0,0},shader_ready_seen=0;
+  uint64_t private_skip[2]={0,0},initial_bytes=0,fallback_bytes=0;
++ uint64_t reach_saved[2]={0,0},import_bytes[2]={0,0},full_import_bytes[2]={0,0};
+  RenderOwner owner;if(!owner.locked||!render_ready()||!c||!request||!reply||c->exposed)return kIOReturnNotReady;
+  times[1]=mach_absolute_time();
+  auto *g=render_group(c,request->group);if(!g||c->disabled)return kIOReturnBadArgument;
+@@ -234,8 +262,11 @@
+   unsigned state=output_word(resident->image,resident->slots[i].access.interface.group_output)&7;
+   if(state==1||state==3)return kIOReturnBusy;
+  }
++ if(!render_cache_bounds(c))return kIOReturnBadArgument;
+  /* CPU exposure, not a missing memcpy notification, selects the fast path.
+-  * Every imported or ever CPU-mapped BO keeps the full fallback: this covers
++  * Every imported or ever CPU-mapped BO keeps a full fallback WITHIN ALL GPU
++  * mappings' bounding interval (holes included). The bounds are kernel-owned,
++  * derived from actual page-table mappings, not opt-in dirty hints. This covers
+   * direct contents stores, shared aliases and indirect GPU accesses without
+   * relying on an incomplete draw-resource list. Native never-exposed BOs
+   * have only the kernel's initial zero-fill to clean, once. Later CPU mapping
+@@ -245,12 +276,20 @@
+   * CIVAC before GPU access removes dirty host lines as well as speculative
+   * clean copies. CIVAC after confirmed GPU quiescence preserves dirty lines
+   * of other, unused host resources in a BO while discarding stale clean ones.
++  * Unmapped bytes cannot be touched through this context. An alias reachable
++  * through another resource is maintained through that resource's descriptor.
+   * The runtime must isolate independently owned resources to cache atoms. */
+  for(auto &r:c->resources)if(r.memory) {
+   if(!r.cpu_exposed&&r.initial_cache_clean){private_skip[0]+=r.bytes;continue;}
+-  if(r.cpu_exposed)fallback_bytes+=r.bytes;else initial_bytes+=r.bytes;
+-  cache_bytes[0]+=r.bytes;
+-  X9RenderCacheRequest cache={X9_RENDER_ABI,r.handle,X9RenderClean|X9RenderInvalidate,0,0,r.bytes};
++  uint64_t offset=0,bytes=r.bytes;
++  if(r.cpu_exposed) {
++   offset=r.cache_begin;bytes=r.cache_end>offset?r.cache_end-offset:0;
++   reach_saved[0]+=r.bytes-bytes;fallback_bytes+=bytes;
++   if(r.imported){import_bytes[0]+=bytes;full_import_bytes[0]+=r.bytes;}
++  }else initial_bytes+=bytes; // initial kernel zero-fill is still cleaned whole
++  if(!bytes)continue;
++  cache_bytes[0]+=bytes;
++  X9RenderCacheRequest cache={X9_RENDER_ABI,r.handle,X9RenderClean|X9RenderInvalidate,0,offset,bytes};
+   IOReturn kr=x9_render_memory_cache(c,&r,&cache);if(kr!=kIOReturnSuccess)return kr;
+  }
+  times[2]=mach_absolute_time();
+@@ -348,8 +387,12 @@
+   // No CPU consumer exists for a never-exposed allocation. Keep GPU flush,
+   // CSG suspend and AS detach above; a fence alone does not return ownership.
+   if(!r.cpu_exposed){private_skip[1]+=r.bytes;continue;}
+-  cache_bytes[1]+=r.bytes;
+-  X9RenderCacheRequest cache={X9_RENDER_ABI,r.handle,X9RenderClean|X9RenderInvalidate,0,0,r.bytes};
++  uint64_t offset=r.write_begin,bytes=r.write_end>offset?r.write_end-offset:0;
++  reach_saved[1]+=r.bytes-bytes;
++  if(r.imported){import_bytes[1]+=bytes;full_import_bytes[1]+=r.bytes;}
++  if(!bytes)continue;
++  cache_bytes[1]+=bytes;
++  X9RenderCacheRequest cache={X9_RENDER_ABI,r.handle,X9RenderClean|X9RenderInvalidate,0,offset,bytes};
+   IOReturn kr=x9_render_memory_cache(c,&r,&cache);if(kr!=kIOReturnSuccess){c->disabled=true;resident->uncertain=true;return kr;}
+  }
+  times[7]=mach_absolute_time();
+@@ -364,6 +407,7 @@
+   static uint64_t began=0,count=0,total[7]={},max_ns=0;
+   static uint64_t cache_total[2]={0,0},ready_mask=0;
+   static uint64_t skipped_total[2]={0,0},initial_total=0,fallback_total=0;
++  static uint64_t reach_total[2]={0,0},import_total[2]={0,0},full_import_total[2]={0,0};
+   if(!began)began=times[0];
+   uint64_t elapsed=0,whole=0;
+   absolutetime_to_nanoseconds(times[7]-times[0],&whole);
+@@ -373,14 +417,18 @@
+   cache_total[0]+=cache_bytes[0];cache_total[1]+=cache_bytes[1];ready_mask|=shader_ready_seen;
+   skipped_total[0]+=private_skip[0];skipped_total[1]+=private_skip[1];
+   initial_total+=initial_bytes;fallback_total+=fallback_bytes;
++  for(unsigned i=0;i<2;i++){reach_total[i]+=reach_saved[i];import_total[i]+=import_bytes[i];full_import_total[i]+=full_import_bytes[i];}
+   if(elapsed>=2000000000ULL) {
+    IOLog("X9 RENDER timing: elapsed_ms=%llu jobs=%llu owner_us=%llu pre_cache_us=%llu storage_us=%llu start_us=%llu wait_us=%llu retire_us=%llu post_cache_us=%llu max_job_us=%llu;averages,not shader time\n",
+     elapsed/1000000,count,total[0]/count/1000,total[1]/count/1000,total[2]/count/1000,total[3]/count/1000,
+     total[4]/count/1000,total[5]/count/1000,total[6]/count/1000,max_ns/1000);
+    IOLog("X9 RENDER cache: jobs=%llu pre_bytes_avg=%llu post_bytes_avg=%llu shader_ready_seen=%llx allowed=%llx;READY snapshots,not utilization\n",
+     count,cache_total[0]/count,cache_total[1]/count,ready_mask,resident->caps.shader_present);
+-   IOLog("X9 RENDER cache-scope: jobs=%llu private_pre_skip_avg=%llu private_post_skip_avg=%llu initial_clean_avg=%llu full_fallback_avg=%llu;imports/ever-mapped stay full,indirect included\n",
++   IOLog("X9 RENDER cache-scope: jobs=%llu private_pre_skip_avg=%llu private_post_skip_avg=%llu initial_clean_avg=%llu full_fallback_avg=%llu;full inside all GPU mapping bounds,indirect included\n",
+     count,skipped_total[0]/count,skipped_total[1]/count,initial_total/count,fallback_total/count);
++   IOLog("X9 RENDER cache-reach: jobs=%llu pre_skip_avg=%llu post_skip_avg=%llu import_pre_avg=%llu import_pre_full_avg=%llu import_post_avg=%llu import_post_full_avg=%llu;kernel mapping bounds,not dirty tracking\n",
++    count,reach_total[0]/count,reach_total[1]/count,import_total[0]/count,full_import_total[0]/count,import_total[1]/count,full_import_total[1]/count);
++   for(unsigned i=0;i<2;i++)reach_total[i]=import_total[i]=full_import_total[i]=0;
+    cache_total[0]=cache_total[1]=ready_mask=0;
+    skipped_total[0]=skipped_total[1]=initial_total=fallback_total=0;
+    began=times[7];count=0;bzero(total,sizeof(total));max_ns=0;
+--- a/MaliMetal/X9/General/panvk/X9PanVKMemory.c
++++ b/MaliMetal/X9/General/panvk/X9PanVKMemory.c
+@@ -17,7 +17,7 @@
+  struct X9RenderMapping mappings[X9_RENDER_MAX_MAPPINGS];
+  uint32_t count,groups[32],group_count,last_group;
+  uint64_t last_submission;
+- uint64_t cache_ops,cache_range_bytes,cache_bo_bytes;
++ uint64_t cache_ops,cache_range_bytes,cache_bo_bytes,cache_merged;
+  bool failed;
+ };
+ struct x9_bo {struct pan_kmod_bo base;uint32_t memory_type,native_flags;void *imported_host;};
+@@ -119,9 +119,9 @@
+  if(!ret) {
+   d->cache_ops++;d->cache_range_bytes+=req->bytes;d->cache_bo_bytes+=bo->size;
+   if(d->cache_ops<=4||d->cache_ops%128==0)
+-   x9_panvk_log("X9 PANVK CACHE RANGE: calls=%llu range_bytes_avg=%llu bo_bytes_avg=%llu;explicit ops only,submission fallback retained",
++   x9_panvk_log("X9 PANVK CACHE RANGE: calls=%llu range_bytes_avg=%llu bo_bytes_avg=%llu merged=%llu;explicit ops only,submission fallback retained",
+     (unsigned long long)d->cache_ops,(unsigned long long)(d->cache_range_bytes/d->cache_ops),
+-    (unsigned long long)(d->cache_bo_bytes/d->cache_ops));
++    (unsigned long long)(d->cache_bo_bytes/d->cache_ops),(unsigned long long)d->cache_merged);
+  }
+  return ret;
+ }
+@@ -134,16 +134,26 @@
+ }
+ static int flush_maps(struct pan_kmod_dev *dev) {
+  struct x9_dev *d=device(dev);int result=0;simple_mtx_lock(&d->lock);
++ struct pan_kmod_bo *pending_bo=NULL;struct X9RenderCacheRequest pending={0};
+  util_dynarray_foreach(&dev->pending_bo_syncs.array,struct pan_kmod_deferred_bo_sync,sync) {
+   if(!sync->bo||sync->bo->dev!=dev||sync->start>sync->bo->size||sync->size>sync->bo->size-sync->start){result=error(EINVAL);d->failed=true;break;}
+   if(!sync->size)continue;
+-  /* Deferred uploads already carry exact ranges. Do not clean the whole pool
+-   * for each small descriptor update. This does NOT certify complete tracking:
+-   * kernel submission fallback still covers every CPU-exposed BO in full. */
++  /* Deferred uploads (imports included) already carry exact ranges. Merge
++   * consecutive overlapping/adjacent operations only for the SAME BO and
++   * operation. Never reorder an invalidate past a clean or across another BO
++   * which could be an alias. No merging across submits or immediate calls. */
+   struct X9RenderCacheRequest req;
+   if(cache_request(sync->bo,sync->start,sync->size,sync->type,&req)){result=-1;d->failed=true;break;}
+-  result=cache_call(d,sync->bo,&req);if(result)break;
+- }
++  if(pending_bo==sync->bo&&pending.operation==req.operation&&
++     req.offset<=pending.offset+pending.bytes&&pending.offset<=req.offset+req.bytes) {
++   uint64_t start=MIN2(pending.offset,req.offset),end=MAX2(pending.offset+pending.bytes,req.offset+req.bytes);
++   pending.offset=start;pending.bytes=end-start;d->cache_merged++;
++  }else {
++   if(pending_bo){result=cache_call(d,pending_bo,&pending);if(result)break;}
++   pending_bo=sync->bo;pending=req;
++  }
++ }
++ if(!result&&pending_bo)result=cache_call(d,pending_bo,&pending);
+  simple_mtx_unlock(&d->lock);return result;
+ }
+ static bool wait_bo(struct pan_kmod_bo *bo,int64_t timeout,bool read_only) {
+--- a/MaliMetal/X9/General/NativeBridgeMetalFrontend.mm
++++ b/MaliMetal/X9/General/NativeBridgeMetalFrontend.mm
+@@ -1410,7 +1410,18 @@
+   if(!handle){NBLOG(@"native-metal: planar surface texture refused: %@",lastError());return nil;}
+   texture=[NBTexture new];texture.handle=handle;nmb_texture_describe(handle,&desc);texture.descriptor=desc;texture.buffer=buffer;texture.offset=start-(uintptr_t)base;texture.rowBytes=row;
+  }
+- if(!texture)return nil;texture.surface=(IOSurfaceRef)CFRetain(surface);texture.surfacePlane=plane;return (id<MTLTexture>)texture;
++ if(!texture)return nil;texture.surface=(IOSurfaceRef)CFRetain(surface);texture.surfacePlane=plane;
++ // Observe the actual surface-to-runtime layout, not width*4 guesses. This
++ // samples successful imports only; neither changes row pitch nor suppresses
++ // a clear or a failed render. No pixel data is copied for diagnostics.
++ static std::atomic<uint64_t> imports{0};const uint64_t count=++imports;
++ if(count<=8||count%128==0)
++  NBLOG(@"X9 SURFACE layout: imports=%llu id=%u plane=%llu/%llu surface=%llux%llu texture=%llux%llu format=%llu fourcc=%08x row=%llu offset=%llu allocation=%llu import=%llu",
++   (unsigned long long)count,IOSurfaceGetID(surface),(unsigned long long)plane,(unsigned long long)planes,
++   (unsigned long long)IOSurfaceGetWidth(surface),(unsigned long long)IOSurfaceGetHeight(surface),
++   (unsigned long long)d.width,(unsigned long long)d.height,(unsigned long long)d.pixelFormat,IOSurfaceGetPixelFormat(surface),
++   (unsigned long long)row,(unsigned long long)(start-(uintptr_t)base),(unsigned long long)allocation,(unsigned long long)bytes);
++ return (id<MTLTexture>)texture;
+ }
+ - (id<MTLLibrary>)newLibraryWithData:(dispatch_data_t)data error:(NSError **)error {
+  if(!data){if(error)*error=nbError(@"no library data");return nil;}

@@ -1,0 +1,58 @@
+--- a/iokit/Kernel/arm/SweetX9RenderEngine.inc
++++ b/iokit/Kernel/arm/SweetX9RenderEngine.inc
+@@ -75,8 +75,17 @@
+  c->engine_private=p;return kIOReturnSuccess;
+ }
+ static IOReturn render_map(X9RenderContext *c,const X9RenderVMEntry *entry) {
+- RenderOwner owner;if(!owner.locked||!render_ready())return kIOReturnNotReady;
+- return x9_render_memory_map(c,entry);
++ RenderOwner owner;
++ if(!owner.locked){IOLog("X9 RENDER MAP: owner lock unavailable\n");return kIOReturnNotReady;}
++ if(!render_ready()) {
++  IOLog("X9 RENDER MAP: session not ready installed=%u resident=%u ready=%u uncertain=%u GPU_RAW=%x MMU_RAW=%x\n",
++   render_engine_installed,resident!=nullptr,resident?resident->ready:0,resident?resident->uncertain:0,
++   resident?gr(resident->gpu,0x20):0,resident?gr(resident->gpu,0x2000):0);
++  return kIOReturnNotReady;
++ }
++ IOReturn kr=x9_render_memory_map(c,entry);
++ if(kr!=kIOReturnSuccess)IOLog("X9 RENDER MAP: memory refused kr=%x disabled=%u exposed=%u table=%u\n",kr,c?c->disabled:0,c?c->exposed:0,c&&c->page_table);
++ return kr;
+ }
+ static IOReturn render_unmap(X9RenderContext *c,const X9RenderVMEntry *entry) {
+  RenderOwner owner;if(!owner.locked||!render_ready())return kIOReturnNotReady;
+@@ -148,10 +157,19 @@
+ static IOReturn render_destroy_locked(X9RenderContext *c,RenderKernelGroup *g) {
+  if(!render_ready()||c->exposed)return kIOReturnNotReady;
+  auto &slot=resident->slots[g->slot];X9CSFQueueIO io=x9_csf_queue_access_io(&slot.access);
+- if(x9_csf_group_halt(&io,&g->control,resident->epoch,false,1000000000ULL)!=kIOReturnSuccess) {
++ IOReturn halt=x9_csf_group_halt(&io,&g->control,resident->epoch,false,1000000000ULL);
++ if(halt!=kIOReturnSuccess) {
++  IOLog("X9 RENDER CLOSE: group=%u slot=%u halt=%x running=%u group_uncertain=%u;retain session\n",
++   g->request.handle,g->slot,halt,g->control.running,g->control.uncertain);
+   resident->uncertain=true;c->disabled=true;return kIOReturnIOError;
+  }
+- if(!render_drop_storage(c,g)||!sweet_x9_csf_resident_release_slot(g->slot,resident->epoch)) {
++ if(!render_drop_storage(c,g)) {
++  IOLog("X9 RENDER CLOSE: group=%u slot=%u storage release uncertain\n",g->request.handle,g->slot);
++  c->disabled=true;return kIOReturnIOError;
++ }
++ if(!sweet_x9_csf_resident_release_slot(g->slot,resident->epoch)) {
++  IOLog("X9 RENDER CLOSE: group=%u slot=%u resident release uncertain;session_uncertain=%u\n",
++   g->request.handle,g->slot,resident->uncertain);
+   c->disabled=true;return kIOReturnIOError;
+  }
+  auto *p=(RenderKernelContext *)c->engine_private;
+--- a/iokit/Kernel/arm/SweetX9RenderService.cpp
++++ b/iokit/Kernel/arm/SweetX9RenderService.cpp
+@@ -66,7 +66,10 @@
+    if(!render_caps_ready(&caps))return kIOReturnNotReady;
+    memcpy(a->structureOutput,&caps,sizeof(caps));return kIOReturnSuccess;
+   }
+-  if(context->disabled)return kIOReturnNotReady;
++  if(context->disabled) {
++   IOLog("X9 RENDER CLIENT: disabled operation=%u exposed=%u\n",selector,context->exposed);
++   return kIOReturnNotReady;
++  }
+   if(selector==X9RenderAllocate||selector==X9RenderImportHost) {
+    if(a->structureInputSize!=sizeof(X9RenderAllocation)||a->structureOutputSize!=sizeof(X9RenderBuffer))return kIOReturnBadArgument;
+    const auto &request=*(const X9RenderAllocation *)a->structureInput;

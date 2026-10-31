@@ -1,0 +1,804 @@
+--- a/crates/metal2vulkan/src/cache/mod.rs
++++ b/crates/metal2vulkan/src/cache/mod.rs
+@@ -61,7 +61,7 @@
+ /// [`ARTIFACT_FORMAT_VERSION`]. The commit that bumps it says what changed; this comment keeps no
+ /// history.
+ // X9 pan197: raw linear-shadow kernels and native split normalized depth/stencil.
+-pub const SEMANTICS_VERSION: u32 = 2000002;
++pub const SEMANTICS_VERSION: u32 = 2010001;
+ 
+ /// The byte-layout version of encoded artifacts (`CompiledFunction::to_bytes` and the
+ /// [`PipelineArtifact`] encodings). Every encoded artifact carries it, and a decode under another
+@@ -71,7 +71,7 @@
+ /// re-typed in an encoded type, its `codec` body or its `envelope`. A variant removed while its tag
+ /// stays unused needs no bump: an entry holding it fails to decode, which is a miss. The commit that
+ /// bumps it says what changed; this comment keeps no history.
+-pub const ARTIFACT_FORMAT_VERSION: u32 = 2000002;
++pub const ARTIFACT_FORMAT_VERSION: u32 = 2010001;
+ 
+ /// The version of what this crate's runtime does with a compiled pipeline: instantiating a binding
+ /// plan (`BindingPlan::instantiate_*`: descriptor ranges, push bytes, root, argument, and handle
+@@ -96,7 +96,7 @@
+ /// keeps no history.
+ // X9 pan195: sampled-source copies, memoryless resolve backing, aspect clear reach
+ // and linear-allocation padding change execution under otherwise identical inputs.
+-pub const RUNTIME_VERSION: u32 = 2000002;
++pub const RUNTIME_VERSION: u32 = 2010001;
+ 
+ /// The digest of the sources this build of the crate was compiled from: SHA-256, as lowercase hex,
+ /// of the manifest, the build script, and exactly the files the crate roots' module tree compiles
+--- a/crates/metal2vulkan/src/lower/stage_io/mod.rs
++++ b/crates/metal2vulkan/src/lower/stage_io/mod.rs
+@@ -2821,9 +2821,49 @@
+     if cx.plan.families.stage_io.capture.is_none() {
+         return Ok(());
+     }
++    use crate::pipeline::interface::VertexCapture as Header;
+     let (buffer, vertex, instance) = capture_ids(cx, fb)?;
+-    let start = capture_word(fb, buffer, 1)?;
+-    let base = capture_word(fb, buffer, 2)?;
++    let start = capture_word(fb, buffer, Header::BASE_VERTEX)?;
++    let base = capture_word(fb, buffer, Header::BASE_INSTANCE)?;
++    let width = capture_word(fb, buffer, Header::INDEX_BYTES)?;
++    let zero = crate::memory::leaf::k32(fb, 0)?;
++    let indexed = fb.binary(BinOp::INotEqual, width, zero)?;
++    // Do not speculatively read the index tail for a non-indexed draw: it has no tail.
++    // The index stream is shared by all instances and preserves duplicate references.
++    let vertex = fb
++        .if_(
++            cx,
++            indexed,
++            Box::new(move |fb, _| {
++                let first = capture_word(fb, buffer, Header::INDEX_WORD_OFFSET)?;
++                let two = crate::memory::leaf::k32(fb, 2)?;
++                let one = crate::memory::leaf::k32(fb, 1)?;
++                let half = fb.binary(BinOp::IEqual, width, two)?;
++                let packed = fb.binary(BinOp::ShiftRightLogical, vertex, one)?;
++                let offset = fb.select(half, packed, vertex)?;
++                let offset = fb.binary(BinOp::IAdd, first, offset)?;
++                let ptr = fb.module().global_value(buffer)?;
++                let ptr = fb.access_chain(ptr, &[zero, offset])?;
++                let word = fb.load(ptr, MemAccess::default())?;
++                let lane = fb.binary(BinOp::BitwiseAnd, vertex, one)?;
++                let four = crate::memory::leaf::k32(fb, 4)?;
++                let shift = fb.binary(BinOp::ShiftLeftLogical, lane, four)?;
++                let shifted = fb.binary(BinOp::ShiftRightLogical, word, shift)?;
++                let mask = crate::memory::leaf::k32(fb, 0xffff)?;
++                let short = fb.binary(BinOp::BitwiseAnd, shifted, mask)?;
++                let index = fb.select(half, short, word)?;
++                Ok(crate::spirv::builder::constructs::ArmEnd::FallThrough(
++                    vec![index],
++                ))
++            }),
++            Some(Box::new(move |_, _| {
++                Ok(crate::spirv::builder::constructs::ArmEnd::FallThrough(
++                    vec![vertex],
++                ))
++            })),
++        )?
++        .0[0];
++    // IAdd preserves the signed base vertex's two's-complement wrapping semantics.
+     let vertex = fb.binary(BinOp::IAdd, vertex, start)?;
+     let instance = fb.binary(BinOp::IAdd, instance, base)?;
+     use crate::spv::BuiltIn as B;
+@@ -2861,12 +2901,13 @@
+         return Ok(());
+     };
+     let (buffer, vertex, instance) = capture_ids(cx, fb)?;
+-    let count = capture_word(fb, buffer, 0)?;
++    let count = capture_word(fb, buffer, crate::pipeline::interface::VertexCapture::COUNT)?;
+     let row = fb.binary(BinOp::IMul, instance, count)?;
+     let ordinal = fb.binary(BinOp::IAdd, row, vertex)?;
+     let stride = crate::memory::leaf::k32(fb, capture.stride)?;
+     let offset = fb.binary(BinOp::IMul, ordinal, stride)?;
+-    let header = crate::memory::leaf::k32(fb, 4)?;
++    let header =
++        crate::memory::leaf::k32(fb, crate::pipeline::interface::VertexCapture::HEADER_WORDS)?;
+     let record = fb.binary(BinOp::IAdd, offset, header)?;
+     let globals: Vec<_> = capture
+         .indices
+@@ -2902,7 +2943,11 @@
+     let void = mb.ty(SType::Void)?;
+     let mut fb = mb.function(void)?;
+     let (buffer, vertex, _) = capture_ids(cx, &mut fb)?;
+-    let count = capture_word(&mut fb, buffer, 0)?;
++    let count = capture_word(
++        &mut fb,
++        buffer,
++        crate::pipeline::interface::VertexCapture::COUNT,
++    )?;
+     let active = fb.binary(BinOp::ULessThan, vertex, count)?;
+     fb.if_(
+         cx,
+--- a/crates/metal2vulkan/src/pipeline/graphics.rs
++++ b/crates/metal2vulkan/src/pipeline/graphics.rs
+@@ -149,7 +149,8 @@
+     /// Metal vertex SIMD executed by compute capture followed by a vertex pull draw.
+     pub vertex_capture: Option<crate::pipeline::interface::VertexCapture>,
+     /// Whether the fragment interface can run with viewport-shifted, isolated sample draws.
+-    /// Cross-sample coverage, window coordinates and memory/attachment side effects are excluded.
++    /// Cross-sample coverage, position z/w and memory/attachment side effects are excluded.
++    /// Pixel-center position x/y reads are supported after multisample lowering.
+     /// This is an execution contract, not a claim of full programmable-sample-position support.
+     #[cfg_attr(feature = "serde", serde(default))]
+     pub sample_replay_safe: bool,
+--- a/crates/metal2vulkan/src/pipeline/interface.rs
++++ b/crates/metal2vulkan/src/pipeline/interface.rs
+@@ -565,12 +565,13 @@
+     }
+ }
+ 
+-/// Layout of a compute-captured Metal vertex draw. The four-word header stores
+-/// vertex count, vertex start, base instance and a reserved zero word.
++/// Layout of a compute-captured Metal vertex draw. A header is followed by instance-major
++/// vertex records and, for an indexed draw, a GPU-copied index stream. The raster draw reads
++/// the records linearly; no CPU index readback is needed.
+ #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+ #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+ pub struct VertexCapture {
+-    /// Words per vertex record, following the four-word header, instance-major.
++    /// Words per vertex record, following `HEADER_WORDS`, instance-major.
+     pub stride_words: u32,
+     /// Compute workgroup width. The last group may be masked only under `partial_groups`.
+     pub local_size: u32,
+@@ -578,6 +579,21 @@
+     /// control barriers and workgroup-memory SIMD emulation: those need full workgroups.
+     #[cfg_attr(feature = "serde", serde(default))]
+     pub partial_groups: bool,
++}
++
++impl VertexCapture {
++    /// Header size in `u32` words; unused words are zero.
++    pub const HEADER_WORDS: u32 = 8;
++    /// Number of vertex invocations per instance (index references for indexed draws).
++    pub const COUNT: u32 = 0;
++    /// Vertex start, or the indexed draw's signed base vertex represented as `u32` bits.
++    pub const BASE_VERTEX: u32 = 1;
++    /// The draw's base instance; records themselves use zero-based instance ordinals.
++    pub const BASE_INSTANCE: u32 = 2;
++    /// Index element size: zero for a non-indexed draw, otherwise 2 or 4 bytes.
++    pub const INDEX_BYTES: u32 = 3;
++    /// Word offset of the copied index stream, relative to the descriptor's byte zero.
++    pub const INDEX_WORD_OFFSET: u32 = 4;
+ }
+ 
+ /// A captured Metal vertex output and the decorations restored by the pull stage.
+--- a/crates/metal2vulkan/src/pipeline/link/graphics.rs
++++ b/crates/metal2vulkan/src/pipeline/link/graphics.rs
+@@ -691,17 +691,23 @@
+                 && !fs.io.varyings_at_pixel
+                 && !reads_barycentric_coord(&fs.io)
+                 && fs.io.builtins.iter().all(|b| {
+-                    matches!(
+-                        b,
+-                        StageBuiltin::FrontFacing
+-                            | StageBuiltin::SampleId
+-                            | StageBuiltin::PrimitiveId
+-                            | StageBuiltin::Layer
+-                            | StageBuiltin::ViewportIndex
+-                            | StageBuiltin::ViewIndex
+-                            | StageBuiltin::FragDepth(_)
+-                            | StageBuiltin::SampleMaskOut
+-                    )
++                    // Metal's multisampled position.xy is already lowered to
++                    // floor(FragCoord.xy) + 0.5. A viewport shift does not change that pixel,
++                    // unlike z/w or an interpolated varying's pixel-center value.
++                    (matches!(b, StageBuiltin::FragCoord)
++                        && fs.io.multisampled
++                        && !fs.io.position_depth)
++                        || matches!(
++                            b,
++                            StageBuiltin::FrontFacing
++                                | StageBuiltin::SampleId
++                                | StageBuiltin::PrimitiveId
++                                | StageBuiltin::Layer
++                                | StageBuiltin::ViewportIndex
++                                | StageBuiltin::ViewIndex
++                                | StageBuiltin::FragDepth(_)
++                                | StageBuiltin::SampleMaskOut
++                        )
+                 })
+         }),
+         mesh_records: None,
+--- a/crates/metal2vulkan/src/pipeline/link/vertex_capture.rs
++++ b/crates/metal2vulkan/src/pipeline/link/vertex_capture.rs
+@@ -1,7 +1,8 @@
+ //! A vertex stage that reads linear capture records.
+ //!
+-//! The buffer starts with four words (vertices per instance, vertex start, base instance, reserved), followed by fixed-size records of `u32`
+-//! words, ordered by instance then vertex. The draw uses zero first vertex and first instance.
++//! The buffer starts with `VertexCapture::HEADER_WORDS` words, followed by fixed-size records of
++//! `u32` words, ordered by instance then vertex. An indexed capture also appends its index stream;
++//! only the producer reads that stream. The pull draw uses zero first vertex and first instance.
+ //! This module only constructs the pull stage; a producer must write exactly this layout.
+ 
+ use crate::budget::Meter;
+@@ -346,13 +347,16 @@
+     let v = fb.load(vp, MemAccess::default())?;
+     let ip = fb.module().global_value(instance)?;
+     let i = fb.load(ip, MemAccess::default())?;
+-    let zero = ku(&mut fb, 0)?;
+-    let count = word(&mut fb, buffer, zero)?;
++    let count_word = ku(&mut fb, crate::pipeline::interface::VertexCapture::COUNT)?;
++    let count = word(&mut fb, buffer, count_word)?;
+     let instance_base = fb.binary(BinOp::IMul, i, count)?;
+     let ordinal = fb.binary(BinOp::IAdd, instance_base, v)?;
+     let stride = ku(&mut fb, stride)?;
+     let offset = fb.binary(BinOp::IMul, ordinal, stride)?;
+-    let header = ku(&mut fb, 4)?;
++    let header = ku(
++        &mut fb,
++        crate::pipeline::interface::VertexCapture::HEADER_WORDS,
++    )?;
+     let record = fb.binary(BinOp::IAdd, offset, header)?;
+     for (field, global, ty) in outputs {
+         let parts = lanes(&mut fb, buffer, record, field)?;
+--- a/crates/metal2vulkan/src/spirv/requirements/writes/tests.rs
++++ b/crates/metal2vulkan/src/spirv/requirements/writes/tests.rs
+@@ -8,9 +8,9 @@
+ use crate::spirv::builder::{FunctionBuilder, ModuleBuilder};
+ use crate::spirv::ids::{FuncId, GlobalId, TypeId, Value};
+ use crate::spirv::ir::{
+-    natural_layout, AtomicOp, BinOp, ConstBits, Constant, ConvOp, Dim, ExecModel, ImageOperands,
+-    ImageType, ImageUsage, LayoutRule, MemAccess, Scope, Semantics, StorageClass, TexelMemory,
+-    Type, TypedModule,
++    AtomicOp, BinOp, ConstBits, Constant, ConvOp, Dim, ExecModel, ImageOperands, ImageType,
++    ImageUsage, LayoutRule, MemAccess, Scope, Semantics, StorageClass, TexelMemory, Type,
++    TypedModule, natural_layout,
+ };
+ 
+ /// What a fragment writes beside the status words.
+@@ -132,9 +132,9 @@
+     fragment(b, main)
+ }
+ 
+-/// A fragment whose only write is an atomic on word `Status` of the `Synthetic(ExecutionStatus)`
+-/// storage buffer, the status buffer's binding.
+-fn status_binding() -> TypedModule {
++/// A fragment whose only write is an atomic on word `Status` of a storage buffer of `kind`.
++/// Only runtime-owned status and capture bindings may be excluded from guest memory writes.
++fn status_binding(kind: ResourceKind) -> TypedModule {
+     let mut b = ModuleBuilder::new();
+     let u32_ = int(&mut b, 32);
+     let rta = b
+@@ -152,7 +152,7 @@
+         .expect("block");
+     let slot = ResourceSlot {
+         stage: Stage::Fragment,
+-        kind: ResourceKind::Synthetic(SyntheticBinding::ExecutionStatus),
++        kind,
+         index: 0,
+     };
+     let g = b
+@@ -184,7 +184,20 @@
+     assert!(!writes_memory(&miss_counting(Guest::Reads)).expect("reads"));
+     assert!(writes_memory(&miss_counting(Guest::Stores)).expect("stores"));
+     assert!(writes_memory(&miss_counting(Guest::StoresThroughAnotherAddress)).expect("root"));
+-    assert!(!writes_memory(&status_binding()).expect("binding"));
++    assert!(
++        !writes_memory(&status_binding(ResourceKind::Synthetic(
++            SyntheticBinding::ExecutionStatus
++        )))
++        .expect("binding")
++    );
++}
++
++/// Capture-output writes must not hide or invent the guest side effects used by indexed draws.
++#[test]
++fn vertex_capture_records_are_not_guest_writes() {
++    let records = ResourceKind::Synthetic(SyntheticBinding::VertexCaptureRecords);
++    assert!(!writes_memory(&status_binding(records)).expect("capture records"));
++    assert!(writes_memory(&status_binding(ResourceKind::Buffer)).expect("guest buffer"));
+ }
+ 
+ /// A fragment whose only write is an image write of a `uint` 2D storage image bound as `kind`.
+--- a/crates/metal2vulkan/src/spirv/requirements/writes.rs
++++ b/crates/metal2vulkan/src/spirv/requirements/writes.rs
+@@ -29,6 +29,9 @@
+ //! vertex stage, as a mesh function's output variables would. So is an emulated object function's
+ //! slot of its draw's work buffer (`Synthetic(MeshWork)`), which hands its grid and payload to the
+ //! mesh function, as `OpEmitMeshTasksEXT` would.
++//! A vertex capture's `Synthetic(VertexCaptureRecords)` has the same role: storing an output
++//! for the pull stage is not a guest memory side effect. Real vertex buffer/image writes still
++//! count, so an indexed capture cannot duplicate them by executing duplicate references.
+ //!
+ //! The shader-side stencil's shadow (`Synthetic(ShadowStencil)`) is the product's too: its writes
+ //! carry Metal's stencil test, which Metal applies per sample whether the function runs per pixel
+@@ -99,8 +102,7 @@
+ /// is traced through.
+ #[derive(Default)]
+ struct Status<'m> {
+-    /// The variables of the `Synthetic(ExecutionStatus)`, `Synthetic(MeshRecords)` and
+-    /// `Synthetic(MeshWork)` bindings.
++    /// The variables of the status, mesh work/records and vertex capture record bindings.
+     bindings: Vec<Value>,
+     /// The variables of the `Synthetic(ShadowStencil)`, `Synthetic(DepthStandIn)`,
+     /// `Synthetic(StencilStandIn)`, `TileAttachment`, `ExtendedShadow` and `SnapshotTexels`
+@@ -127,6 +129,7 @@
+                             SyntheticBinding::ExecutionStatus
+                                 | SyntheticBinding::MeshRecords
+                                 | SyntheticBinding::MeshWork
++                                | SyntheticBinding::VertexCaptureRecords
+                         )
+                     ) =>
+                 {
+@@ -228,7 +231,7 @@
+                     (true, false) => *b,
+                     // The product's address plus any offset.
+                     (false, false) => {
+-                        return Ok(self.loads_member(m, *a)? || self.loads_member(m, *b)?)
++                        return Ok(self.loads_member(m, *a)? || self.loads_member(m, *b)?);
+                     }
+                     (true, true) => return Ok(false),
+                 },
+--- a/crates/metal2vulkan-runtime/src/degradation.rs
++++ b/crates/metal2vulkan-runtime/src/degradation.rs
+@@ -426,6 +426,11 @@
+         VertexComputeCapture = "vertex-compute-capture", Performance,
+             "the vertex function runs in compute subgroups, with inactive tail lanes excluded, \
+              before a synchronized pull draw; subgroup grouping is implementation dependent";
++        /// A direct indexed vertex capture runs references, rather than cached unique vertices.
++        IndexedVertexCapture = "indexed-vertex-capture", Precision,
++            "one compute invocation per index reference, including duplicates, can change SIMD \
++             membership and collective results relative to hardware vertex-cache grouping; \
++             observable vertex memory writes are refused instead of being duplicated";
+         /// A mesh render pipeline's compute capture and synthesized raster draw.
+         EmulatedMeshDraws = "emulated-mesh-draws", Performance,
+             "the object and mesh functions run as compute dispatches before the pass, between \
+--- a/crates/metal2vulkan-runtime/src/error.rs
++++ b/crates/metal2vulkan-runtime/src/error.rs
+@@ -1267,6 +1267,9 @@
+ pub enum RuntimeGap {
+     /// A vertex SIMD capture draw whose shape or dispatch cannot yet be represented safely.
+     VertexCaptureDraw,
++    /// Indexed vertex SIMD capture would execute duplicate index references separately and
++    /// therefore duplicate a Metal vertex function's observable memory writes.
++    IndexedVertexCaptureWrites,
+     /// Textures and texture buffers.
+     Textures,
+     /// The resource-ID heap, descriptor set 1.
+--- a/crates/metal2vulkan-runtime/src/render/mesh.rs
++++ b/crates/metal2vulkan-runtime/src/render/mesh.rs
+@@ -918,43 +918,89 @@
+ pub(crate) struct VertexCaptureWork {
+     records: Upload,
+     pub(crate) groups: [u32; 3],
++    pub(crate) indices: Option<CaptureIndexCopy>,
+ }
+ 
+ impl VertexCaptureWork {
+     pub(crate) fn new(
+         core: &EncoderCore,
+         draw: DrawCall,
++        index: Option<&DrawSource<'_>>,
+         capture: &metal2vulkan::pipeline::VertexCapture,
+         module: &metal2vulkan::pipeline::StageModule,
+     ) -> Result<Self, Error> {
+-        let DrawCall::Primitives {
+-            vertex_start,
+-            vertex_count,
+-            instance_count,
+-            base_instance,
+-        } = draw
+-        else {
+-            return Err(Error::NotImplemented(
+-                crate::error::RuntimeGap::VertexCaptureDraw,
+-            ));
++        use metal2vulkan::pipeline::VertexCapture as Header;
++        let refuse = || Error::NotImplemented(crate::error::RuntimeGap::VertexCaptureDraw);
++        let (vertex_count, vertex_start, instance_count, base_instance, index_width) = match draw {
++            DrawCall::Primitives {
++                vertex_start,
++                vertex_count,
++                instance_count,
++                base_instance,
++            } => {
++                if vertex_start
++                    .checked_add(vertex_count.saturating_sub(1))
++                    .is_none()
++                {
++                    return Err(refuse());
++                }
++                (
++                    vertex_count,
++                    vertex_start,
++                    instance_count,
++                    base_instance,
++                    0u32,
++                )
++            }
++            DrawCall::Indexed {
++                index_count,
++                instance_count,
++                base_vertex,
++                base_instance,
++                index_type,
++                index_offset,
++                ..
++            } => {
++                let width = match index_type {
++                    metal2vulkan::vk::IndexType::UINT16 => 2,
++                    metal2vulkan::vk::IndexType::UINT32 => 4,
++                    _ => return Err(refuse()),
++                };
++                if index.is_none_or(|source| {
++                    source.at != index_offset
++                        || source.bound(source.at) < u64::from(index_count) * u64::from(width)
++                }) {
++                    return Err(refuse());
++                }
++                (
++                    index_count,
++                    base_vertex as u32,
++                    instance_count,
++                    base_instance,
++                    width,
++                )
++            }
++            _ => return Err(refuse()),
+         };
+-        let refuse = || Error::NotImplemented(crate::error::RuntimeGap::VertexCaptureDraw);
+         if capture.local_size == 0
+             || capture.stride_words == 0
+             || (!capture.partial_groups && vertex_count % capture.local_size != 0)
+-            || vertex_start
+-                .checked_add(vertex_count.saturating_sub(1))
+-                .is_none()
+             || base_instance
+                 .checked_add(instance_count.saturating_sub(1))
+                 .is_none()
+         {
+             return Err(refuse());
+         }
+-        let words = u64::from(vertex_count)
++        let record_words = u64::from(vertex_count)
+             .checked_mul(u64::from(instance_count))
+             .and_then(|n| n.checked_mul(u64::from(capture.stride_words)))
+-            .and_then(|n| n.checked_add(4))
++            .and_then(|n| n.checked_add(u64::from(Header::HEADER_WORDS)))
++            .ok_or_else(refuse)?;
++        let index_bytes = u64::from(vertex_count) * u64::from(index_width);
++        // Round only the allocation, never the source copy: an odd u16 count must not read
++        // another index. The upload zeroes the unused high half of the last packed word.
++        let words = record_words
++            .checked_add(index_bytes.div_ceil(4))
+             .ok_or_else(refuse)?;
+         let bytes = words.checked_mul(4).ok_or_else(refuse)?;
+         let groups = [vertex_count.div_ceil(capture.local_size), instance_count, 1];
+@@ -986,16 +1032,39 @@
+         {
+             return Err(refuse());
+         }
+-        let header: Vec<u8> = [vertex_count, vertex_start, base_instance, 0u32]
+-            .into_iter()
+-            .flat_map(u32::to_le_bytes)
+-            .collect();
++        let mut header = [0u32; Header::HEADER_WORDS as usize];
++        header[Header::COUNT as usize] = vertex_count;
++        header[Header::BASE_VERTEX as usize] = vertex_start;
++        header[Header::BASE_INSTANCE as usize] = base_instance;
++        header[Header::INDEX_BYTES as usize] = index_width;
++        header[Header::INDEX_WORD_OFFSET as usize] = if index_width == 0 {
++            0
++        } else {
++            record_words as u32
++        };
++        let header: Vec<_> = header.into_iter().flat_map(u32::to_le_bytes).collect();
+         let records = core
+             .command_buffer()
+             .state()
+             .uploads
+             .upload(device, &header, bytes)?;
+-        Ok(Self { records, groups })
++        let indices = match index.filter(|_| index_bytes != 0) {
++            Some(source) => Some(CaptureIndexCopy {
++                from: source.raw,
++                into: records.raw(),
++                region: vk::BufferCopy {
++                    src_offset: source.at,
++                    dst_offset: records.offset() + record_words * 4,
++                    size: index_bytes,
++                },
++            }),
++            None => None,
++        };
++        Ok(Self {
++            records,
++            groups,
++            indices,
++        })
+     }
+ 
+     pub(crate) fn region(&self) -> vk::DescriptorBufferInfo {
+@@ -1004,6 +1073,14 @@
+             .offset(self.records.offset())
+             .range(self.records.len())
+     }
++}
++
++/// An indexed capture's GPU-only index snapshot, after DrawSource's bounds/alignment copy.
++#[derive(Clone, Copy)]
++pub(crate) struct CaptureIndexCopy {
++    from: vk::Buffer,
++    into: vk::Buffer,
++    region: vk::BufferCopy,
+ }
+ 
+ /// An emulated mesh draw's work buffer and records (`DrawCommands::mesh_dispatch`), made for the
+@@ -1153,6 +1230,8 @@
+     pub(crate) heap: Option<vk::DescriptorSet>,
+     /// The draw's push writes of the compute stage.
+     pub(crate) push: Vec<PushWrite>,
++    /// The index snapshot of a vertex capture, before its compute dispatch.
++    pub(crate) capture_indices: Option<CaptureIndexCopy>,
+     /// The object arguments pass, of an indirect draw with an object function.
+     pub(crate) arguments: Option<Scan>,
+     /// The object function's pipeline and its launch, where the pipeline has one: indirect from
+@@ -1195,14 +1274,16 @@
+     /// everything before and one to everything after.
+     pub(crate) fn record(&self, core: &mut EncoderCore) {
+         core.barrier(Barrier::everything());
+-        core.command(
+-            vk::PipelineStageFlags2::COMPUTE_SHADER,
+-            &self.uses,
+-            |raw, command_buffer| {
+-                // SAFETY: the encoder's command buffer is recording outside a render pass.
+-                unsafe { self.dispatches(raw, command_buffer) }
+-            },
+-        );
++        let stages = vk::PipelineStageFlags2::COMPUTE_SHADER
++            | if self.capture_indices.is_some() {
++                crate::blit::TRANSFER
++            } else {
++                vk::PipelineStageFlags2::empty()
++            };
++        core.command(stages, &self.uses, |raw, command_buffer| {
++            // SAFETY: the encoder's command buffer is recording outside a render pass.
++            unsafe { self.dispatches(raw, command_buffer) }
++        });
+         core.barrier(Barrier::everything());
+     }
+ 
+@@ -1232,6 +1313,14 @@
+     /// pipelines, the sets and what they name are live until it completes (the draw retains
+     /// them, and the command buffer the scan's set).
+     unsafe fn dispatches(&self, raw: &Vk, command_buffer: vk::CommandBuffer) {
++        if let Some(copy) = self.capture_indices {
++            // SAFETY: both ranges were bounded before recording; the source's optional copy
++            // precedes these steps, and the command buffer retains its buffer and our upload.
++            unsafe {
++                raw.cmd_copy_buffer(command_buffer, copy.from, copy.into, &[copy.region]);
++                Barrier::everything().record(raw, command_buffer);
++            }
++        }
+         let point = vk::PipelineBindPoint::COMPUTE;
+         // A pipeline of the draw's layout, its sets and its push writes.
+         let bind = |pipeline: vk::Pipeline| {
+--- a/crates/metal2vulkan-runtime/src/render/vertex_reach.rs
++++ b/crates/metal2vulkan-runtime/src/render/vertex_reach.rs
+@@ -14,7 +14,8 @@
+ //!   bytes past its bind offset, which Metal reads outside the buffer.
+ //! - **The furthest element** a draw may fetch of each step: a direct draw's own (its last
+ //!   vertex, its last instance divided by the step rate, its last patch or control point); an
+-//!   indexed draw's index type's largest index plus its base vertex; `2^32 - 1` for a patch's
++//!   indexed draw's index type's largest index plus a nonnegative base vertex, or `2^32 - 1`
++//!   for a negative base that may wrap a low index; `2^32 - 1` for a patch's
+ //!   index or a control point's read from a buffer; and no bound for a draw whose counts and
+ //!   starts are read from an indirect buffer. A constant step fetches its first element alone,
+ //!   and a stride of 0 reads every element at the attribute's offset. So an indexed draw of
+@@ -23,7 +24,7 @@
+ 
+ use super::RenderLowering;
+ use crate::error::{Error, RuntimeGap};
+-use crate::fetch_reach::{format_bytes, reach, REACHED};
++use crate::fetch_reach::{REACHED, format_bytes, reach};
+ use metal2vulkan::bind::DrawCall;
+ use metal2vulkan::metal::VertexStepFunction;
+ use metal2vulkan::pipeline::{PulledAttribute, VertexStride};
+@@ -118,7 +119,14 @@
+             } else {
+                 largest
+             };
+-            let element = index.saturating_add_signed(i64::from(base_vertex));
++            // GPU indices are not inspected on the CPU. A negative base can wrap a low index
++            // to the top of u32; the largest raw u16 index alone would underestimate it.
++            // Keep the conservative widened bound for a positive base.
++            let element = if base_vertex < 0 {
++                largest
++            } else {
++                index + base_vertex as u64
++            };
+             (index_count != 0).then_some(element)
+         }
+         (
+@@ -210,8 +218,8 @@
+         assert_eq!(furthest_element(S::PerVertex, 1, &primitives(10, 0)), None);
+     }
+ 
+-    /// An indexed draw's furthest vertex is its index type's largest plus the base vertex
+-    /// (the reach of an element, `fetch_reach.rs`).
++    /// An indexed draw's reach includes large indices and low indices wrapping under a
++    /// negative base vertex (the reach of an element, `fetch_reach.rs`).
+     #[test]
+     fn an_indexed_draw_fetches_up_to_its_largest_index() {
+         let indexed = |index_type, base_vertex| DrawCall::Indexed {
+@@ -225,7 +233,12 @@
+         };
+         let vertex = VertexStepFunction::PerVertex;
+         let short = indexed(vk::IndexType::UINT16, -5);
+-        assert_eq!(furthest_element(vertex, 1, &short), Some(65530));
++        assert_eq!(
++            furthest_element(vertex, 1, &short),
++            Some(u64::from(u32::MAX))
++        );
++        let short_positive = indexed(vk::IndexType::UINT16, 7);
++        assert_eq!(furthest_element(vertex, 1, &short_positive), Some(65542));
+         let long = indexed(vk::IndexType::UINT32, 7);
+         assert_eq!(
+             furthest_element(vertex, 1, &long),
+--- a/crates/metal2vulkan-runtime/src/render.rs
++++ b/crates/metal2vulkan-runtime/src/render.rs
+@@ -7385,9 +7385,22 @@
+                 || restarted.is_some()
+                 || settings.amplification.count != 1
+                 || !settings.amplification.view_mappings.is_empty()
+-                || !matches!(draw, DrawCall::Primitives { .. }))
++                || !matches!(draw, DrawCall::Primitives { .. } | DrawCall::Indexed { .. })
++                || (matches!(draw, DrawCall::Indexed { .. })
++                    && (topology != metal2vulkan::vk::PrimitiveTopology::TRIANGLE_LIST
++                        || primitive_restart)))
+         {
+             return Err(Error::NotImplemented(RuntimeGap::VertexCaptureDraw));
++        }
++        // De-indexed capture executes every reference, including duplicates. Do not duplicate
++        // a Metal vertex function's observable writes while emulating a hardware vertex cache.
++        if graphics.vertex_capture.is_some()
++            && graphics.vertex_writes_memory
++            && matches!(draw, DrawCall::Indexed { .. })
++        {
++            return Err(Error::NotImplemented(
++                RuntimeGap::IndexedVertexCaptureWrites,
++            ));
+         }
+         // A fragment function that runs the draw's depth test itself computes and clamps its
+         // depth by the draw's own Vulkan depth range, read as push data.
+@@ -8232,7 +8245,13 @@
+                     .iter()
+                     .find(|module| module.stage == metal2vulkan::vk::ShaderStage::COMPUTE)
+                     .ok_or_else(|| internal("vertex capture without its compute module"))?;
+-                mesh::VertexCaptureWork::new(&self.core, draw, capture, module)
++                mesh::VertexCaptureWork::new(
++                    &self.core,
++                    draw,
++                    buffers.index.as_ref(),
++                    capture,
++                    module,
++                )
+             })
+             .transpose()?;
+         let mut blobs = Vec::new();
+@@ -8292,6 +8311,29 @@
+             &mut live.uses,
+         )?;
+         let uses = &mut live.uses;
++        // These bytes are consumed by a transfer before compute, not by the pull draw's
++        // vertex-input unit. Track that real stage as well as the binder's index reach, using
++        // its already-normalized original Metal-buffer ranges (including padded sources).
++        let capture_index_uses: Vec<_> = if vertex_capture_work
++            .as_ref()
++            .is_some_and(|work| work.indices.is_some())
++        {
++            uses.iter()
++                .filter(|used| {
++                    used.read
++                        .stages
++                        .contains(vk::PipelineStageFlags2::INDEX_INPUT)
++                })
++                .map(|used| Use {
++                    read: Access::new(crate::blit::TRANSFER, vk::AccessFlags2::TRANSFER_READ),
++                    write: Access::NONE,
++                    ..used.clone()
++                })
++                .collect()
++        } else {
++            Vec::new()
++        };
++        uses.extend(capture_index_uses.iter().cloned());
+         // A use of an attachment's memory other than as the attachment, inside its instance,
+         // which no copy serves (`texture/attached_reads.rs`): a draw that reads through snapshots
+         // reads no attachment otherwise (`snapshot_holds`).
+@@ -8813,6 +8855,19 @@
+                 first_vertex: 0,
+                 first_instance: 0,
+             },
++            (
++                Some(_),
++                metal2vulkan::vk::DrawCommand::DrawIndexed {
++                    index_count,
++                    instance_count,
++                    ..
++                },
++            ) => metal2vulkan::vk::DrawCommand::Draw {
++                vertex_count: index_count,
++                instance_count,
++                first_vertex: 0,
++                first_instance: 0,
++            },
+             (Some(_), _) => return Err(Error::NotImplemented(RuntimeGap::VertexCaptureDraw)),
+             (None, draw) => draw,
+         };
+@@ -8932,7 +8987,7 @@
+                 ))
+             }
+             _ => one((
+-                index.and_then(|source| IndexBind::of(source, commands.draw, sized)),
++                index.and_then(|source| IndexBind::of(source, pull_draw, sized)),
+                 indirect.map(|source| source.raw),
+                 pull_draw,
+             )),
+@@ -8946,6 +9001,7 @@
+                 .into_iter()
+                 .chain(indirect)
+                 .filter_map(DrawSource::copy_reads)
++                .chain(capture_index_uses.iter().cloned())
+                 .chain(
+                     bounds
+                         .iter()
+@@ -8970,6 +9026,7 @@
+                         .contains(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                 })
+                 .cloned()
++                .chain(capture_index_uses.iter().cloned())
+                 .collect(),
+             false => Vec::new(),
+         };
+@@ -9179,6 +9236,7 @@
+                     offsets: live.offsets.clone(),
+                     heap: heap_set,
+                     push,
++                    capture_indices: None,
+                     arguments,
+                     object,
+                     scan,
+@@ -9208,6 +9266,7 @@
+                     offsets: live.offsets.clone(),
+                     heap: heap_set,
+                     push,
++                    capture_indices: work.indices,
+                     arguments: None,
+                     object: None,
+                     scan: None,
+@@ -9444,6 +9503,12 @@
+                 }
+             }
+             if let Some(steps) = capture_steps {
++                if steps.capture_indices.is_some() {
++                    device.degrade(Degradation::IndexedVertexCapture, || (
++                        "an indexed vertex SIMD draw".to_owned(),
++                        "GPU-copied indices run one compute invocation per reference, with wrapping base-vertex addition; functions with observable memory writes are refused".to_owned(),
++                    ));
++                }
+                 device.degrade(Degradation::VertexComputeCapture, || (
+                     "a vertex SIMD draw".to_owned(),
+                     "compute capture, producer-to-vertex barrier, and one pull draw; tail invocations do not execute the vertex body".to_owned(),
+--- a/crates/metal2vulkan-runtime/src/sample_positions.rs
++++ b/crates/metal2vulkan-runtime/src/sample_positions.rs
+@@ -113,13 +113,17 @@
+ //! sample index. Scissors do not move; a captured vertex function runs only once, before the
+ //! masked pull draws. No sample-location extension structures or compatible-depth flag are used.
+ //!
+-//! This fallback is not full programmable-position support: pixel-center or window-coordinate
++//! This fallback is not full programmable-position support: pixel-center varying or position z/w
+ //! reads, cross-sample coverage, framebuffer reads, fragment memory side effects, and unsupported
+ //! draw combinations are refused as `SamplePositionReplayDraw`. Full sample-rate interpolation
+ //! can change centroid/interpolation frequency and is announced as `ShiftedSampleRasterization`.
+ //! The device capability query remains the native full-support query. If neither native locations
+ //! nor the raster fallback is available, `Unsupported(SamplePositions)` names the missing device
+ //! property rather than blaming the caller's coordinates.
++//!
++//! Position x/y alone is supported when multisample lowering already reads it as
++//! `floor(FragCoord.xy) + 0.5`: every masked recording still shades the same framebuffer pixel.
++//! This does not license center-sampled varyings, whose interpolation would need compensation.
+ 
+ use super::Device;
+ use super::error::{Error, Problem, RuntimeGap, invalid};

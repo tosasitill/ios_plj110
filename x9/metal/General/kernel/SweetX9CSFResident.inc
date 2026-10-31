@@ -12,8 +12,12 @@ struct ResidentSession {
  uint32_t gpu_mask,job_mask;
  unsigned slot_count;
  bool masked,installed,mcu_started,ready,uncertain;
+ /* Opt-in only. Native panthor performs no cache maintenance for IO_COHERENT
+  * BOs; matching that here skips the per-submit CPU CIVAC fallback. */
+ bool coherent;
  ResidentSession():gpu(0),smmu(0),doorbell(0),saved_cfg(0),saved_attr(0),l2_owned(0),epoch(0),
-  gpu_mask(0),job_mask(0),slot_count(0),masked(false),installed(false),mcu_started(false),ready(false),uncertain(false) {
+  gpu_mask(0),job_mask(0),slot_count(0),masked(false),installed(false),mcu_started(false),ready(false),uncertain(false),
+  coherent(false) {
   bzero(slots,sizeof(slots));bzero(&caps,sizeof(caps));
  }
 };
@@ -122,6 +126,27 @@ static int resident_begin(vm_offset_t gpu) {
   stage="firmware-and-queue-backing";
   const char *error=parse(s->image);if(!error)error=populate(s->image);
   if(error||!resident_trace_setup(s->image)||!queue_prepare(s->image,s->policy,gpu,pa_bits)||!s->policy.requested||!s->policy.compute)goto clean_failure;
+  // queue_prepare retains the one-core bring-up policy for its scalar probes.
+  // The resident renderer uses the actual SHADER_PRESENT mask. Stock a16w
+  // delegates the entire SHADER domain8 (not one power domain per core);
+  // its scheduler intersects this mask with each group's compute/fragment
+  // masks. Use the same value for global allocation, group admission and
+  // public caps. Firmware delegation and global ACK remain mandatory below.
+  uint64_t shaders=gr64(gpu,0xa00);
+  if(!shaders||shaders==~0ULL||(s->policy.shader_mask&~shaders))goto clean_failure;
+  s->policy.shader_mask=shaders;
+  IOLog("X9 RENDER shader-policy: present=%llx requested=%llx cores=%u;pending firmware delegation/config ACK\n",
+   shaders,s->policy.shader_mask,(unsigned)__builtin_popcountll(shaders));
+  // COHERENCY_NUM_GROUPS (0x300) and COHERENCY_GROUP_0 (0x308) are the GPU's own
+  // report: type 0 = none, 1 = ACE-Lite, 2 = ACE. A non-zero type is a register
+  // capability, not proof that this interconnect snoops CPU caches for client
+  // addresses; the boot-arg is the operator's explicit claim and both are needed.
+  uint32_t groups=gr(gpu,0x300),group_type=gr(gpu,0x308)&3;
+  int coherent_arg=0;
+  bool want=PE_parse_boot_argn("x9_gpu_coherent",&coherent_arg,sizeof(coherent_arg))&&coherent_arg==1;
+  s->coherent=want&&groups&&groups<=64&&(group_type==1||group_type==2);
+  IOLog("X9 RENDER coherency: groups=%u group0_type=%u requested=%d active=%u;register capability,interconnect not proven\n",
+   groups,group_type,coherent_arg,s->coherent?1:0);
   for(unsigned i=0;i<8;i++) {
    uint32_t va=0x04400000u+i*0x200000u;
    if(!add_shared(s->image,va,0x10000)||!add_shared(s->image,va+0x10000,0x100000))goto clean_failure;

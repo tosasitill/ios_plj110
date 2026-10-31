@@ -1,0 +1,54 @@
+--- a/iokit/Kernel/arm/SweetX9RenderEngine.inc
++++ b/iokit/Kernel/arm/SweetX9RenderEngine.inc
+@@ -157,11 +157,51 @@
+ static IOReturn render_destroy_locked(X9RenderContext *c,RenderKernelGroup *g) {
+  if(!render_ready()||c->exposed)return kIOReturnNotReady;
+  auto &slot=resident->slots[g->slot];X9CSFQueueIO io=x9_csf_queue_access_io(&slot.access);
++ /* A suspended CSG does not acknowledge a direct TERMINATE on this firmware
++  * (pan192: global DB ACK matched; CSG REQ=0,ACK=0x30000002). Restore its
++  * already-drained context before composing the existing RESUME and
++  * CS STOP -> CSG TERMINATE handshakes. Never resume a faulted or partially executed job. */
++ const bool resume_empty=g->control.suspended;
++ if(g->control.uncertain||g->control.running)return kIOReturnNotReady;
++ if(resume_empty) {
++  vm_offset_t gpu=resident->gpu;
++  if(!no_faults(gpu)||gr64(gpu,0x2440))return kIOReturnNotReady;
++  for(unsigned i=0;i<resident->slot_count;i++) {
++   unsigned state=output_word(resident->image,resident->slots[i].access.interface.group_output)&7;
++   if(state==1||state==3)return kIOReturnBusy;
++  }
++  for(unsigned i=0;i<3;i++) {
++   uint32_t user=slot.user_io+i*host_page;
++   if(output_qword(resident->image,user)!=g->producer[i]||
++      output_qword(resident->image,user+gpu_page)!=g->producer[i]) {
++    IOLog("X9 RENDER CLOSE: group=%u stream=%u not drained;retain without resume\n",g->request.handle,i);
++    return kIOReturnNotReady;
++   }
++  }
++  uint64_t root=x9_render_memory_publish(c);
++  if(!root)return kIOReturnNotReady;
++  if(!flush_gpu(gpu)||!install_as(gpu,root,1)||
++     x9_csf_group_start(&io,&g->control,resident->epoch,1000000000ULL)!=kIOReturnSuccess) {
++   c->disabled=true;resident->uncertain=true;
++   IOLog("X9 RENDER CLOSE: empty resume uncertain;AS/DMA refs retained,no reset or retry\n");
++   return kIOReturnIOError;
++  }
++  IOLog("X9 RENDER CLOSE: group=%u slot=%u drained queues resumed for STOP/TERMINATE;no work published\n",g->request.handle,g->slot);
++ }
+  IOReturn halt=x9_csf_group_halt(&io,&g->control,resident->epoch,false,1000000000ULL);
+  if(halt!=kIOReturnSuccess) {
+   IOLog("X9 RENDER CLOSE: group=%u slot=%u halt=%x running=%u group_uncertain=%u;retain session\n",
+    g->request.handle,g->slot,halt,g->control.running,g->control.uncertain);
+   resident->uncertain=true;c->disabled=true;return kIOReturnIOError;
++ }
++ if(resume_empty) {
++  if(!flush_gpu(resident->gpu)||!remove_as(resident->gpu,resident->policy.saved_attr,resident->policy.saved_cfg,1)) {
++   c->disabled=true;resident->uncertain=true;
++   IOLog("X9 RENDER CLOSE: terminated group but AS/cache detach uncertain;retain resources\n");
++   return kIOReturnIOError;
++  }
++  x9_render_memory_detached(c);
++  IOLog("X9 RENDER CLOSE: group=%u slot=%u STOP/TERMINATE acknowledged;AS1 detached before release\n",g->request.handle,g->slot);
+  }
+  if(!render_drop_storage(c,g)) {
+   IOLog("X9 RENDER CLOSE: group=%u slot=%u storage release uncertain\n",g->request.handle,g->slot);

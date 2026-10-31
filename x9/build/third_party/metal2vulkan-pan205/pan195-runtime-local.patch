@@ -1,0 +1,593 @@
+--- a/crates/metal2vulkan/src/cache/mod.rs
++++ b/crates/metal2vulkan/src/cache/mod.rs
+@@ -60,7 +60,8 @@
+ /// unchanged version, and its bless records the version. Independent of the crate's version and of
+ /// [`ARTIFACT_FORMAT_VERSION`]. The commit that bumps it says what changed; this comment keeps no
+ /// history.
+-pub const SEMANTICS_VERSION: u32 = 1929;
++// X9 pan195: independent-vertex barrier proof and inherited ulong swizzle lowering.
++pub const SEMANTICS_VERSION: u32 = 1950001;
+ 
+ /// The byte-layout version of encoded artifacts (`CompiledFunction::to_bytes` and the
+ /// [`PipelineArtifact`] encodings). Every encoded artifact carries it, and a decode under another
+@@ -93,7 +94,9 @@
+ /// changes no behaviour, and then updates that hash alone with the commit saying why, or changes
+ /// behaviour and also bumps this version. The commit that bumps it says what changed; this comment
+ /// keeps no history.
+-pub const RUNTIME_VERSION: u32 = 1709;
++// X9 pan195: sampled-source copies, memoryless resolve backing, aspect clear reach
++// and linear-allocation padding change execution under otherwise identical inputs.
++pub const RUNTIME_VERSION: u32 = 1950001;
+ 
+ /// The digest of the sources this build of the crate was compiled from: SHA-256, as lowercase hex,
+ /// of the manifest, the build script, and exactly the files the crate roots' module tree compiles
+--- a/crates/metal2vulkan/src/lower/sync/barrier.rs
++++ b/crates/metal2vulkan/src/lower/sync/barrier.rs
+@@ -168,6 +168,8 @@
+     Fence(Fence),
+     /// A fence that orders nothing another invocation observes: nothing is emitted.
+     NoFence,
++    /// A vertex function proven to have no memory or cross-invocation effects.
++    IndependentVertex,
+     /// `OpDPdx`, `OpDPdy`, or `OpFwidth`, or the fine kind of each in fragment.
+     Derivative(Deriv),
+ }
+@@ -188,6 +190,7 @@
+             BarrierStrategy::Fence(f) if f.seq_cst => "barrier.fence.seq_cst",
+             BarrierStrategy::Fence(_) => "barrier.fence",
+             BarrierStrategy::NoFence => "barrier.fence.none",
++            BarrierStrategy::IndependentVertex => "barrier.vertex.independent",
+             BarrierStrategy::Derivative(_) => "barrier.derivative",
+         })
+     }
+@@ -198,7 +201,7 @@
+             // one's status word address and atomic.
+             BarrierStrategy::Barrier(b) => 16 + SEQ_CST_WORDS * u32::from(b.seq_cst),
+             BarrierStrategy::Fence(f) => 12 + SEQ_CST_WORDS * u32::from(f.seq_cst),
+-            BarrierStrategy::NoFence => 0,
++            BarrierStrategy::NoFence | BarrierStrategy::IndependentVertex => 0,
+             BarrierStrategy::Derivative(_) => 4,
+         }
+     }
+@@ -209,6 +212,8 @@
+ pub struct BarrierPlan {
+     /// A kernel uses derivatives (`DerivativeGroupLinearKHR`).
+     pub compute_derivatives: bool,
++    /// Cached whole-function proof; its cost is linear even with many barriers.
++    pub independent_vertex:Option<bool>,
+     /// The threadgroup barriers `lower::simd::lockstep` inserted: each stands at a place its
+     /// placement proved the whole threadgroup reaches together
+     /// (`uniform::Uniformity::under_barriers`), so, though tangled, none depends on how subgroups
+@@ -327,6 +332,25 @@
+     }
+ }
+ 
++/// A deliberately closed proof over the canonical entry (one defined function).
++/// No loads, stores, atomics, pointer traffic, texture access, unresolved calls,
++/// group operations or volatile effects are admitted. The returned stage outputs
++/// are invocation-private values. An unknown opcode keeps the barrier intact.
++fn independent_vertex(body:&crate::air::ir::Body)->bool {
++    body.insts.values().all(|inst|match &inst.kind {
++        InstKind::BinOp{..}|InstKind::FNeg{..}|InstKind::Cast{..}|
++        InstKind::ICmp{..}|InstKind::FCmp{..}|InstKind::Select{..}|
++        InstKind::Freeze(..)|InstKind::ExtractElement{..}|InstKind::InsertElement{..}|
++        InstKind::ShuffleVector{..}|InstKind::ExtractValue{..}|InstKind::InsertValue{..}|
++        InstKind::Phi{..}|InstKind::Ret(..)|InstKind::Br{..}|InstKind::CondBr{..}|
++        InstKind::Switch{..}|InstKind::Unreachable=>true,
++        InstKind::Call(call)=>matches!(&call.callee,Callee::Air{op:
++            AirIntrinsic::Math(..)|AirIntrinsic::Convert(..)|AirIntrinsic::Pack(..)|
++            AirIntrinsic::BoolReduce(..)|AirIntrinsic::Sync(Sync::Barrier{scope:ThreadScope::Simdgroup,..}),..}),
++        _=>false,
++    })
++}
++
+ /// Select a barrier of execution scope `scope` and memory scope `memory` that orders `flags`' memories
+ /// at `order`.
+ fn select_barrier(
+@@ -335,6 +359,20 @@
+     (flags, order): (MemFlags, AirOrder),
+     (scope, memory): (ThreadScope, ThreadScope),
+ ) -> Result<BarrierStrategy, Error> {
++    if cx.stage==Stage::Vertex && scope==ThreadScope::Simdgroup && origin==Origin::Program
++        && !flags.threadgroup && !flags.threadgroup_imageblock && !flags.object_data {
++        // Do not invent a vertex subgroup. A barrier has no observable
++        // ordering effect in a function with no shared access, side effects or
++        // cross-lane operations. All other functions retain the normal gate.
++        let independent=match cx.families.barrier.independent_vertex {
++            Some(value)=>value,
++            None=>{
++                let value=independent_vertex(cx.body);
++                cx.families.barrier.independent_vertex=Some(value);value
++            }
++        };
++        if independent {return Ok(BarrierStrategy::IndependentVertex);}
++    }
+     let scope = match scope {
+         ThreadScope::Threadgroup if cx.stage.has_workgroup() => Scope::Workgroup,
+         ThreadScope::Threadgroup => return Err(tile_shading()),
+@@ -580,7 +618,7 @@
+                 false => Ok(()),
+             }
+         }
+-        BarrierStrategy::NoFence => Ok(()),
++        BarrierStrategy::NoFence | BarrierStrategy::IndependentVertex => Ok(()),
+         BarrierStrategy::Derivative(d) => {
+             let a = cx.operand(fb, d.value)?;
+             let x = fb.derivative(d.op, a)?;
+--- a/crates/metal2vulkan-runtime/src/buffer.rs
++++ b/crates/metal2vulkan-runtime/src/buffer.rs
+@@ -2724,6 +2724,18 @@
+         }
+     }
+ 
++    /// Bytes a linear texture may safely address without growing or rebinding
++    /// this buffer. Only fixed runtime-owned buffers have their known 16-byte
++    /// allocation padding: caller buffers, imports, copied host memory, heaps
++    /// and detach/rebind storage retain their declared bounds.
++    pub(super) fn linear_allocation_length(&self)->u64 {
++        match &self.0.bytes {
++            Bytes::Own(OwnBytes{owner:Owner::Runtime,lie:Lie::Fixed(_),..})
++                if !self.copied()=>self.padded_length(),
++            _=>self.length(),
++        }
++    }
++
+     /// The length padded to 16 bytes: the bytes the `VkBuffer` holds from [`Buffer::base`].
+     pub(super) fn padded_length(&self) -> u64 {
+         self.0.length.next_multiple_of(16)
+--- a/crates/metal2vulkan-runtime/src/buffer_texture.rs
++++ b/crates/metal2vulkan-runtime/src/buffer_texture.rs
+@@ -694,8 +694,18 @@
+                 id_use,
+             );
+         }
+-        let placed = plan_buffer_texture(&texture, &buffer)
+-            .map_err(|refusal| refusal_error(call, refusal))?;
++        let placed = plan_buffer_texture(&texture, &buffer).or_else(|refusal| {
++            // Plain Metal reaches the allocation, not merely `length`, at a
++            // texture's last row. Never infer that allocation from a heap block
++            // or page size: use only padding this buffer actually owns.
++            if matches!(refusal,BufferRefusal::TexelsPastLength) && !surface {
++                let available=self.linear_allocation_length();
++                if available>buffer.length {
++                    return plan_buffer_texture(&texture,&BufferFacts{length:available});
++                }
++            }
++            Err(refusal)
++        }).map_err(|refusal| refusal_error(call, refusal))?;
+         if self.device().is_lost() {
+             return Err(Error::DeviceLost);
+         }
+@@ -1199,7 +1209,7 @@
+     /// Whether the texels lie in the buffer: every texture's but a rotated one's whose rows run
+     /// past it (`rotated_rows`).
+     pub(super) fn reached(&self) -> bool {
+-        self.span().end <= self.buffer.length()
++        self.span().end <= self.buffer.linear_allocation_length()
+     }
+ 
+     /// Whether Metal's GPU reads and writes two of the texels' rows over bytes they share: an
+@@ -1662,7 +1672,7 @@
+             .ok_or_else(|| invalid(call, Problem::Copy(CopyProblem::CpuAccessPrivate)))?;
+         // The texture lies in the buffer, and so do the rows of a region checked in its level.
+         let end = len.and_then(|len| start.checked_add(len));
+-        let Some(end) = end.filter(|&end| end <= self.buffer.length()) else {
++        let Some(end) = end.filter(|&end| end <= self.buffer.linear_allocation_length()) else {
+             return Err(internal("a texture's rows past its buffer"));
+         };
+         // SAFETY: `start` lies in the buffer's mapped bytes (checked above).
+--- a/crates/metal2vulkan-runtime/src/shadow.rs
++++ b/crates/metal2vulkan-runtime/src/shadow.rs
+@@ -400,7 +400,7 @@
+     pub(super) fn of(buffer: &Buffer, raw: vk::Buffer) -> ShadowBuffer {
+         match buffer.caller_memory() {
+             Some(CallerMemory::HostPages) => ShadowBuffer::Rebound(buffer.downgrade()),
+-            _ => ShadowBuffer::Fixed(raw, buffer.start() + buffer.length()),
++            _ => ShadowBuffer::Fixed(raw, buffer.start() + buffer.linear_allocation_length()),
+         }
+     }
+ 
+--- a/crates/metal2vulkan-runtime/src/clear_reach.rs
++++ b/crates/metal2vulkan-runtime/src/clear_reach.rs
+@@ -580,6 +580,22 @@
+ }
+ 
+ impl ReachClears {
++    /// A measured separate depth/stencil clear, clipped to its own tile reach.
++    /// Called after the main pass, before its aspect copy back, so the copied
++    /// render area replaces the clear there and pixels beyond the reach survive.
++    pub(super) fn aspect(device:&Device,target:&Target,extent:[u32;2],
++        aspect:vk::ImageAspectFlags,value:vk::ClearDepthStencilValue)->Result<ReachClears,Error> {
++        let (pass,framebuffer,uses)=render_target::reach_pass(device,target,false,extent)?;
++        let clear=ReachClear {
++            attachment:Reached::DepthStencil {
++                depth:aspect.contains(vk::ImageAspectFlags::DEPTH),
++                stencil:aspect.contains(vk::ImageAspectFlags::STENCIL),
++            },
++            pass,framebuffer,area:rect(extent),rects:vec![rect(extent)],
++            layers:target.layers,aspects:aspect,value:vk::ClearValue{depth_stencil:value},
++        };
++        Ok(ReachClears{clears:vec![clear],uses})
++    }
+     /// The clears of `layout`'s attachments, a pass with a draw call where `called` (the module
+     /// docs); `left_out` names the color indices whose clear the pass must make before it
+     /// whatever their store action (its first instance leaves them out, and no whole-subresource
+--- a/crates/metal2vulkan-runtime/src/depth_stencil_resolve.rs
++++ b/crates/metal2vulkan-runtime/src/depth_stencil_resolve.rs
+@@ -40,6 +40,9 @@
+ //! everything after.
+ 
+ use super::device::{device_error, lock};
++use super::command_buffer::CommandBuffer;
++use super::blit::TRANSFER;
++use super::tracker::Access;
+ use super::encoder::EncoderCore;
+ use super::error::{internal, vulkan, Error, RuntimeGap};
+ use super::release;
+@@ -437,7 +440,7 @@
+     {
+         return Err(internal("a drawn resolve of other aspects or samples"));
+     }
+-    if !sampled(source)? {
++    if !can_sample_source(device,source,aspects|ImageAspectFlags::DEPTH)? {
+         return Err(Error::NotImplemented(RuntimeGap::DepthStencilResolve));
+     }
+     device
+@@ -445,8 +448,70 @@
+         .map(|_| ())
+ }
+ 
++/// A same-format, same-sample-count copy into a sampled image. In particular,
++/// copying each aspect keeps every depth/stencil sample's bits; no depth draw
++/// or sample resolve substitutes for this copy.
++pub(super) struct SampledSourceCopy {
++    from:vk::Image,
++    to:vk::Image,
++    regions:Vec<vk::ImageCopy>,
++    uses:Vec<Use<ResourceKey>>,
++    held:Target,
++}
++
++pub(super) fn can_sample_source(device:&Device,source:&Target,aspects:ImageAspectFlags)->Result<bool,Error> {
++    if !image_aspects(source.format).contains(aspects){return Ok(false);}
++    if sampled(source)? {return Ok(true);}
++    let plan=source.texture.image_plan()?;
++    let facts=device.shared().textures.facts(device.compile_device().profile());
++    Ok(plan.usage.contains(metal2vulkan::vk::ImageUsageFlags::TRANSFER_SRC)
++        && facts.optimal(source.format).contains(
++            metal2vulkan::vk::FormatFeatureFlags2::SAMPLED_IMAGE |
++            metal2vulkan::vk::FormatFeatureFlags2::TRANSFER_DST))
++}
++impl SampledSourceCopy {
++    pub(super) fn record(self,core:&mut EncoderCore) {
++        core.barrier(Barrier::everything());
++        core.command(TRANSFER,&self.uses,|raw,command|unsafe {
++            raw.cmd_copy_image(command,self.from,vk::ImageLayout::GENERAL,
++                self.to,vk::ImageLayout::GENERAL,&self.regions);
++        });
++        core.barrier(Barrier::everything());
++        core.retain(self.held);
++    }
++}
++pub(super) fn sampled_source(maker:&CommandBuffer,source:&Target,aspects:ImageAspectFlags)
++    ->Result<(Target,Option<SampledSourceCopy>),Error> {
++    if sampled(source)? {return Ok((source.clone(),None));}
++    let usage=metal2vulkan::vk::ImageUsageFlags::SAMPLED | metal2vulkan::vk::ImageUsageFlags::TRANSFER_DST;
++    let target=super::resolve::scratch(maker,source,usage,source.samples)?;
++    if !can_sample_source(maker.device(),source,aspects)? {
++        return Err(Error::NotImplemented(RuntimeGap::DepthStencilResolve));
++    }
++    let required=aspects;
++    let regions=[ImageAspectFlags::DEPTH,ImageAspectFlags::STENCIL].into_iter()
++        .filter(|aspect|required.contains(*aspect)).map(|aspect|{
++            let sub=|t:&Target|vk::ImageSubresourceLayers {
++                aspect_mask:aspect.into(),mip_level:t.level,base_array_layer:t.layer,
++                // Picked resolves consume the first layer, as the existing
++                // Metal resolve contract does, regardless of the pass's layers.
++                layer_count:1,
++            };
++            vk::ImageCopy {src_subresource:sub(source),src_offset:vk::Offset3D::default(),
++                dst_subresource:sub(&target),dst_offset:vk::Offset3D::default(),
++                extent:vk::Extent3D{width:source.extent[0],height:source.extent[1],depth:1}}
++        }).collect();
++    let read=Access::new(TRANSFER,vk::AccessFlags2::TRANSFER_READ);
++    let write=Access::new(TRANSFER,vk::AccessFlags2::TRANSFER_WRITE);
++    let uses=vec![source.texture.image_use(source.level..source.level+1,source.layer..source.layer+1,read,false)?,
++        target.texture.image_use(0..1,0..1,write,true)?];
++    let copy=SampledSourceCopy{from:source.texture.raw_image()?,to:target.texture.raw_image()?,regions,uses,held:target.clone()};
++    Ok((target,Some(copy)))
++}
++
+ /// A pass's drawn depth/stencil resolve, planned before the pass records and recorded after it.
+ pub(super) struct DrawnResolve {
++    source_copy:Option<SampledSourceCopy>,
+     objects: PassObjects,
+     shaders: Shaders,
+     made: Pipelines,
+@@ -461,9 +526,10 @@
+     /// by depth (`ResolveMode::Picked`), into its first step's resolve attachment or its own;
+     /// `None` where it has none.
+     pub(super) fn plan(
+-        device: &Device,
++        maker: &CommandBuffer,
+         layout: &PassLayout,
+     ) -> Result<Option<DrawnResolve>, Error> {
++        let device=maker.device();
+         let Some(ds) = layout.depth_stencil.as_ref() else {
+             return Ok(None);
+         };
+@@ -479,6 +545,8 @@
+             .attachment;
+         let source = &ds.target;
+         draws_run(device, source, into, pick, aspects)?;
++        let (sampled,source_copy)=sampled_source(maker,source,aspects|ImageAspectFlags::DEPTH)?;
++        let source=&sampled;
+         let drawn = Drawn::of(aspects).ok_or_else(|| internal("a drawn resolve of no aspect"))?;
+         let (shaders, made) = device.resolve_draws(pick, drawn, source.samples, into.format)?;
+         let mut views = vec![(SET[0], aspect_view(source, ImageAspectFlags::DEPTH)?)];
+@@ -488,6 +556,7 @@
+         let (mut objects, set) = PassObjects::with_set(device, shaders.set_layout, &views)?;
+         draw_framebuffer(&mut objects, made.render_pass, into, layout.extent)?;
+         Ok(Some(DrawnResolve {
++            source_copy,
+             objects,
+             shaders,
+             made,
+@@ -502,6 +571,7 @@
+     /// buffer completes.
+     pub(super) fn record(self, core: &mut EncoderCore) {
+         let DrawnResolve {
++            source_copy,
+             objects,
+             shaders,
+             made,
+@@ -510,6 +580,7 @@
+             uses,
+         } = self;
+         let framebuffer = objects.framebuffer;
++        if let Some(copy)=source_copy {copy.record(core);}
+         core.barrier(Barrier::everything());
+         core.command(DRAW_STAGES, &uses, |device, raw| {
+             // SAFETY: the encoder's command buffer is recording outside a render pass; the
+--- a/crates/metal2vulkan-runtime/src/depth_stencil_scratch.rs
++++ b/crates/metal2vulkan-runtime/src/depth_stencil_scratch.rs
+@@ -46,8 +46,9 @@
+ //!   `Depth32Float` and 16 for `Stencil8` (a 64x64 depth cleared at 0..31, a 64x64 stencil at
+ //!   0..15, an 8x8 depth whole, each beside a 4x4 texture; and 32 alike under 16x16 tiles). A
+ //!   texture that ends inside those tiles, cleared and stored, is cleared whole before the copies
+-//!   back (`cleared_whole`); one past them, of another format, or of more samples, unmeasured, is
+-//!   `NotImplemented(Render)` (`check_sizes`).
++//!   back (`cleared_whole`); a larger texture clears only its clipped tile rectangle
++//!   by an aspect-only clear pass before copying the rendered region back. Other
++//!   format/sample pairs remain unmeasured and refused (`check_sizes`).
+ //! - **A layered pass** (`renderTargetArrayLength` 2 or more) renders through a scratch image of
+ //!   its layers, each texture's from its slice, and the copies move every layer; the copies' draws,
+ //!   each of one layer, run once per layer.
+@@ -255,6 +256,13 @@
+     }
+ }
+ 
++/// The known separate-aspect clear rectangle, clipped to the texture. Unknown
++/// format/sample pairs remain a gap rather than borrowing another GPU's tiles.
++fn clear_extent(target:&Target,extent:[u32;2],samples:u32)->Option<[u32;2]> {
++    clear_tile(target.texture.pixel_format(),samples).map(|tile|[0,1].map(|axis|
++        extent[axis].div_ceil(tile).saturating_mul(tile).min(target.extent[axis])))
++}
++
+ /// Whether `target`, a separate texture of a pass of `samples` over the render area `extent`,
+ /// lies past the render area but inside the tiles Metal's clear reaches (the module docs).
+ pub(super) fn cleared_whole(target: &Target, extent: [u32; 2], samples: u32) -> bool {
+@@ -279,7 +287,7 @@
+     }
+     for target in separate.targets() {
+         let past = (0..2).any(|axis| target.extent[axis] > extent[axis]);
+-        if past && !cleared_whole(target, extent, samples) {
++        if past && clear_extent(target, extent, samples).is_none() {
+             return Err(Error::NotImplemented(RuntimeGap::Render));
+         }
+     }
+@@ -403,7 +411,7 @@
+             }
+         };
+         if loads[index] == LoadAction::Load {
+-            if !stencil_copy::sampled(target)? {
++            if !super::depth_stencil_resolve::can_sample_source(device,target,aspect)? {
+                 return Err(Error::Unsupported(refused));
+             }
+             draws_run(format)?;
+@@ -607,6 +615,8 @@
+ /// One direction of a pass's copies between its separate textures and its scratch image, over
+ /// the render area: into the scratch image before the pass, or back after it.
+ pub(super) struct ScratchCopy {
++    clears:Vec<super::clear_reach::ReachClears>,
++    source_copies:Vec<super::depth_stencil_resolve::SampledSourceCopy>,
+     /// What the copies go through, held until the command buffer completes: a staging buffer
+     /// (single-sampled aspects) or multisampled colour images.
+     staging: Option<Buffer>,
+@@ -692,6 +702,7 @@
+             depth: 1,
+         };
+         let mut uses = Vec::new();
++        let mut clears=Vec::new();
+         let (mut first, mut second) = (Vec::new(), Vec::new());
+         if scratch.samples == 1 {
+             let texels = u64::from(width) * u64::from(height);
+@@ -715,12 +726,12 @@
+             // A texture larger than the render area, cleared and stored, inside the tiles
+             // Metal's clear reaches, is cleared whole before its copy back (the module docs).
+             for &(texture, action, aspect) in &actions {
+-                if into_scratch
+-                    || action.load != LoadAction::Clear
+-                    || !cleared_whole(texture, extent, scratch.samples)
+-                {
++                if into_scratch || action.load != LoadAction::Clear {
+                     continue;
+                 }
++                let Some(reach)=clear_extent(texture,extent,scratch.samples) else {continue;};
++                if reach==extent {continue;}
++
+                 let value = match action.clear {
+                     AspectClear::Depth(depth) => vk::ClearDepthStencilValue { depth, stencil: 0 },
+                     AspectClear::Stencil(stencil) => vk::ClearDepthStencilValue {
+@@ -735,7 +746,11 @@
+                     base_array_layer: texture.layer,
+                     layer_count: count,
+                 };
+-                first.push(Step::Clear(texture.texture.raw_image()?, value, range));
++                if cleared_whole(texture,extent,scratch.samples) {
++                    first.push(Step::Clear(texture.texture.raw_image()?, value, range));
++                } else {
++                    clears.push(super::clear_reach::ReachClears::aspect(device,texture,reach,aspect.into(),value)?);
++                }
+             }
+             for (&(texture, aspect), offset) in wanted.iter().zip(offsets) {
+                 let region = |target: &Target| vk::BufferImageCopy {
+@@ -757,6 +772,8 @@
+                 second.push(Step::FromBuffer(to.texture.raw_image()?, region(to)));
+             }
+             return Ok(Some(ScratchCopy {
++                clears,
++                source_copies:Vec::new(),
+                 staging: Some(staging),
+                 colours: Vec::new(),
+                 first,
+@@ -768,6 +785,7 @@
+             }));
+         }
+         let mut colours = Vec::new();
++        let mut source_copies=Vec::new();
+         let (mut depth, mut planes) = (Vec::new(), Vec::new());
+         let mut inexact_depth = None;
+         for &(texture, aspect) in &wanted {
+@@ -801,6 +819,8 @@
+                         ..target.clone()
+                     };
+                     let (from, to) = (layer(from), layer(to));
++                    let (from,copy)=super::depth_stencil_resolve::sampled_source(maker,&from,aspect)?;
++                    if let Some(copy)=copy {source_copies.push(copy);}
+                     uses.push(stencil_copy::sampled_use(&from)?);
+                     uses.push(stencil_copy::attachment_use(&to)?);
+                     if aspect == ImageAspectFlags::DEPTH {
+@@ -849,6 +869,8 @@
+             colours.push(colour);
+         }
+         Ok(Some(ScratchCopy {
++            clears,
++            source_copies,
+             staging: None,
+             colours,
+             first,
+@@ -864,6 +886,8 @@
+     /// to everything after, and hold what they go through until the command buffer completes.
+     pub(super) fn record(self, core: &mut EncoderCore) {
+         let ScratchCopy {
++            clears,
++            source_copies,
+             staging,
+             colours,
+             first,
+@@ -873,6 +897,8 @@
+             uses,
+             inexact_depth,
+         } = self;
++        for copy in source_copies {copy.record(core);}
++        for clear in clears {clear.record(core);}
+         if let Some((changes, format)) = inexact_depth {
+             depth_copy::announce_changes(core.device(), changes, || {
+                 format!(
+--- a/crates/metal2vulkan-runtime/src/render.rs
++++ b/crates/metal2vulkan-runtime/src/render.rs
+@@ -4397,7 +4397,7 @@
+             ShaderResolves::plan(core.command_buffer(), &layout, &last_shape.storage)?;
+         // The depth and stencil resolves picked by depth, drawn after the pass from the samples
+         // its last instance stores (`depth_stencil_resolve.rs`).
+-        let picked_resolve = DrawnResolve::plan(&device, &layout)?;
++        let picked_resolve = DrawnResolve::plan(core.command_buffer(), &layout)?;
+         // The instances' shapes, and the resolving instance's after them where the pass has one,
+         // kept for the announcements once the instances are taken apart below.
+         let mut shapes: Vec<PassShape> = instances
+--- a/crates/metal2vulkan-runtime/src/render_pass.rs
++++ b/crates/metal2vulkan-runtime/src/render_pass.rs
+@@ -2212,15 +2212,27 @@
+     // through a stand-in made for them, each aspect copied in where the pass loads it and back
+     // where it stores it (`attachment_stand_in.rs`), as plain Metal renders it at them; so does
+     // one without depth/stencil attachment usage.
++    // A picked stencil resolve must read every depth/stencil sample after
++    // rasterization. A memoryless source has no transferable persistent image;
++    // render into an owned backing from the beginning and keep it to the draw.
++    // It has no copy-in/copy-back and no change to the caller's store semantics.
++    let picked_memoryless = target.samples>1 && memoryless(&target.texture)
++        && s.resolve_texture.is_some()
++        && matches!(s.store_action,StoreAction::MultisampleResolve|StoreAction::StoreAndMultisampleResolve)
++        && s.stencil_resolve_filter==super::render_values::MultisampleStencilResolveFilter::DepthResolvedSample
++        && matches!(d.depth_resolve_filter,
++            super::render_values::MultisampleDepthResolveFilter::Min|
++            super::render_values::MultisampleDepthResolveFilter::Max);
+     let cause = match separate.is_none() {
+         false => None,
++        true if picked_memoryless => Some(Cause::Backing),
+         true if unattachable(&target)? => Some(Cause::Unattachable),
+         true if positioned_stand_in(device, descriptor, &target)? => Some(Cause::Positions),
+         true => None,
+     };
+     let (target, stand_in) = match cause {
+         Some(cause) => {
+-            let stood = attachment_stand_in::stand_in(maker, &target, true)?;
++            let stood = attachment_stand_in::stand_in(maker, &target, cause!=Cause::Backing)?;
+             let own = StandIn {
+                 own: target,
+                 cause,
+--- a/crates/metal2vulkan-runtime/src/sample_positions.rs
++++ b/crates/metal2vulkan-runtime/src/sample_positions.rs
+@@ -203,7 +203,8 @@
+ /// attachment, so the two can never disagree about a pass.
+ pub(super) fn taken(device: &Device, positions: &[SamplePosition], samples: u32) -> bool {
+     let rules = PositionRules::of(device, samples);
+-    !positions.is_empty() && positioned(rules, positions, samples, None).is_ok()
++    let _ = rules;
++    grid("sample_positions",device,positions,samples,None).is_ok_and(|grid|!grid.is_empty())
+ }
+ 
+ /// The pass's sample positions on `device`, in sixteenths of a pixel (empty for the device's
+@@ -218,6 +219,21 @@
+     depth_stencil: Option<ImageCreateFlags>,
+ ) -> Result<Vec<Sixteenths>, Error> {
+     let rules = PositionRules::of(device, samples);
++    // A caller may explicitly provide the standard rasterization grid. No
++    // sample-location extension or depth compatibility flag is then needed:
++    // validate and quantize it as Metal does, and use the device's own grid.
++    if !positions.is_empty() {
++        let checked=positioned(PositionRules{located_at_samples:true,variable:true},positions,samples,None)
++            .map_err(|refusal|refusal_error(call,refusal))?;
++        if standard_grid(samples).is_some_and(|standard|standard==checked.as_slice()) {
++            let shared=device.shared();
++            // SAFETY: the physical device belongs to this live instance.
++            let properties=unsafe {shared.instance.raw.get_physical_device_properties(shared.physical)};
++            if properties.limits.standard_sample_locations==ash::vk::TRUE {
++                return Ok(Vec::new());
++            }
++        }
++    }
+     positioned(rules, positions, samples, depth_stencil)
+         .map_err(|refusal| refusal_error(call, refusal))
+ }
+@@ -276,6 +292,19 @@
+         .chain(std::iter::repeat(corner))
+         .take(samples as usize)
+         .collect())
++}
++
++/// Vulkan's standard sample locations, in sample-index order and sixteenths.
++/// Empty/custom/reordered patterns never enter this path.
++fn standard_grid(samples:u32)->Option<&'static [Sixteenths]> {
++    match samples {
++        2=>Some(&[[12,12],[4,4]]),
++        4=>Some(&[[6,2],[14,6],[2,10],[10,14]]),
++        8=>Some(&[[9,5],[7,11],[13,9],[5,3],[3,13],[1,7],[11,15],[15,1]]),
++        16=>Some(&[[9,9],[7,5],[5,10],[12,7],[3,6],[10,13],[13,11],[11,3],
++                   [6,14],[8,1],[4,2],[2,12],[0,8],[15,4],[14,15],[1,0]]),
++        _=>None,
++    }
+ }
+ 
+ /// A coordinate in `[0, 1)` as Metal samples at it: the nearest sixteenth, a tie up, at most

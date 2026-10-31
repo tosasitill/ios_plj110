@@ -51,6 +51,7 @@ bool nmb_device_max_threads_per_threadgroup(const NmbDevice *, uint64_t out[3]);
  * and the public queries. A selector's kind says its result and argument. */
 enum {NMB_ANSWER_COUNT = 0, NMB_ANSWER_FLAG = 1, NMB_ANSWER_COUNT_ARG = 2, NMB_ANSWER_FLAG_ARG = 3};
 const char *nmb_device_answer_selector(size_t index, uint32_t *kind /* NMB_ANSWER_* */); /* NULL past the last */
+size_t nmb_device_family_blockers(const NmbDevice *,int64_t family,char *,size_t);
 bool nmb_device_answer(const NmbDevice *, const char *selector, uint64_t arg, uint64_t *out); /* false: no answer, nmb_last_error says why */
 size_t nmb_device_vendor_name(const NmbDevice *, char *out, size_t size);
 uint64_t nmb_device_linear_bytes_per_row(const NmbDevice *, uint64_t format, uint64_t width); /* 0: refused */
@@ -66,10 +67,12 @@ NmbBuffer *nmb_buffer_new_no_copy(NmbDevice *, void *pointer, uint64_t length, u
 void nmb_buffer_release(NmbBuffer *);
 void *nmb_buffer_contents(const NmbBuffer *);
 uint64_t nmb_buffer_length(const NmbBuffer *);
+uint64_t nmb_buffer_allocated_size(const NmbBuffer *);
 uint64_t nmb_buffer_gpu_address(const NmbBuffer *);
 
 struct NmbTextureDescriptor {
     uint64_t type, format, width, height, depth, levels, samples, array_length, usage, options;
+    uint64_t allow_optimized,swizzle[4];
 };
 /* Heaps: type 0 automatic / 1 placement; offset UINT64_MAX asks an automatic heap to place the resource. */
 NmbHeap *nmb_heap_new(NmbDevice *, uint64_t type, uint64_t size, uint64_t options);
@@ -128,6 +131,13 @@ struct NmbRenderPipelineDescriptor {
     uint64_t vertex_inputs; /* 0: no vertex descriptor */
     struct NmbVertexAttribute attributes[31];
     struct NmbVertexLayout layouts[31];
+    uint64_t alpha_to_coverage,alpha_to_one,max_amplification,indirect;
+    uint64_t vertex_call_depth,fragment_call_depth,adding_vertex,adding_fragment;
+    uint64_t vertex_mutability[31],fragment_mutability[31];
+    NmbFunction *const *vertex_linked; uint64_t vertex_linked_count;
+    NmbFunction *const *vertex_private_linked; uint64_t vertex_private_linked_count;
+    NmbFunction *const *fragment_linked; uint64_t fragment_linked_count;
+    NmbFunction *const *fragment_private_linked; uint64_t fragment_private_linked_count;
 };
 NmbRenderPipeline *nmb_render_pipeline_new(NmbDevice *, const struct NmbRenderPipelineDescriptor *);
 /* Descriptor binaryArchives and MTLPipelineOption bits. NULL options means defaults.
@@ -137,6 +147,8 @@ struct NmbComputePipelineDescriptor {
     NmbFunction *function;
     uint64_t max_threads, multiple_of_execution_width, indirect, max_call_stack_depth, adding_binary_functions;
     uint64_t mutability[31];
+    NmbFunction *const *linked; uint64_t linked_count;
+    NmbFunction *const *private_linked; uint64_t private_linked_count;
 };
 NmbComputePipeline *nmb_compute_pipeline_new_with_options(NmbDevice *, NmbFunction *, const struct NmbPipelineOptions *);
 NmbComputePipeline *nmb_compute_pipeline_new_with_descriptor(NmbDevice *, const struct NmbComputePipelineDescriptor *, const struct NmbPipelineOptions *);
@@ -147,9 +159,16 @@ bool nmb_binary_archive_add_compute(NmbBinaryArchive *, NmbFunction *);
 bool nmb_binary_archive_add_compute_descriptor(NmbBinaryArchive *, const struct NmbComputePipelineDescriptor *);
 void nmb_render_pipeline_release(NmbRenderPipeline *);
 
+typedef struct NmbReflection NmbReflection;
+NmbReflection *nmb_render_pipeline_reflection(const struct NmbRenderPipelineDescriptor *);
+NmbReflection *nmb_compute_pipeline_reflection(const struct NmbComputePipelineDescriptor *);
+const char *nmb_reflection_json(const NmbReflection *);
+void nmb_reflection_release(NmbReflection *);
+
 struct NmbSamplerDescriptor {
     uint64_t min_filter, mag_filter, mip_filter, s_address, t_address, r_address, border_color, normalized, max_anisotropy, compare, lod_average;
     float lod_min, lod_max;
+    uint64_t argument_buffers;
 };
 NmbSampler *nmb_sampler_new(NmbDevice *, const struct NmbSamplerDescriptor *);
 void nmb_sampler_release(NmbSampler *);
@@ -181,6 +200,8 @@ int nmb_command_buffer_wait(NmbCommandBuffer *, uint64_t timeout_ms);
 /* Metal's MTLCommandBufferStatus (0 not enqueued .. 4 completed, 5 error). */
 uint64_t nmb_command_buffer_status(const NmbCommandBuffer *);
 size_t nmb_command_buffer_error(const NmbCommandBuffer *, char *out, size_t size);
+uint64_t nmb_command_buffer_error_code(const NmbCommandBuffer *);
+bool nmb_command_buffer_unsubmitted_oom(const NmbCommandBuffer *);
 double nmb_command_buffer_gpu_time(const NmbCommandBuffer *, bool end);
 
 /* Events: an MTLEvent (shared false) or an MTLSharedEvent within this process. */
@@ -206,11 +227,15 @@ struct NmbPassAttachment {
     NmbTexture *texture;
     uint64_t level, slice, depth_plane, load, store;
     double clear[4]; /* color, or clear[0] depth / stencil */
+    NmbTexture *resolve;
+    uint64_t resolve_level,resolve_slice,resolve_depth_plane,store_options,resolve_filter;
 };
 struct NmbRenderPassDescriptor {
     struct NmbPassAttachment colors[8], depth, stencil;
     uint64_t width, height, array_length, samples;
     NmbBuffer *visibility; /* the pass's visibility result buffer, or null */
+    const float *sample_positions; /* owned x,y pairs copied before return */
+    uint64_t sample_position_count;
 };
 NmbEncoder *nmb_render_encoder_new(NmbCommandBuffer *, const struct NmbRenderPassDescriptor *);
 bool nmb_encoder_end(NmbEncoder *);
@@ -254,6 +279,7 @@ bool nmb_blit_texture_to_buffer(NmbEncoder *, NmbTexture *source, uint64_t slice
                                 const uint64_t size[3], NmbBuffer *destination, uint64_t offset, uint64_t bytes_per_row,
                                 uint64_t bytes_per_image);
 bool nmb_blit_generate_mipmaps(NmbEncoder *, NmbTexture *);
+#include "NativeMetalExtras.h"
 #ifdef __cplusplus
 }
 #endif

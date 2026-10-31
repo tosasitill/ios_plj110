@@ -1,0 +1,77 @@
+--- a/crates/metal2vulkan-air/src/container/mtlb.rs
++++ b/crates/metal2vulkan-air/src/container/mtlb.rs
+@@ -41,6 +41,10 @@
+ const FILE_TYPE_EXECUTABLE: u8 = 0;
+ /// `file_type` of a dynamic library (`MTLLibraryTypeDynamic`).
+ const FILE_TYPE_DYNAMIC: u8 = 2;
++// UniXNU AdrenoMetal 7183e588, patch0010: CoreImage kernel libraries.
++// TYPE 5 functions are stitched from their bitcode, not standalone entry points.
++const FILE_TYPE_CI_KERNELS: u8 = 1;
++const TYPE_CI_KERNEL: u8 = 5;
+ 
+ /// A metallib's library type (`MTLLibraryType`), from its header's `file_type`.
+ #[non_exhaustive]
+@@ -248,7 +252,10 @@
+             6,
+         ));
+     }
+-    if header.file_type != FILE_TYPE_EXECUTABLE && header.file_type != FILE_TYPE_DYNAMIC {
++    if header.file_type != FILE_TYPE_EXECUTABLE
++        && header.file_type != FILE_TYPE_DYNAMIC
++        && header.file_type != FILE_TYPE_CI_KERNELS
++    {
+         return Err(InputError::new(
+             InputErrorKind::Unsupported(Feature::LibraryKind(header.file_type)),
+             Location::container(10),
+@@ -331,7 +338,7 @@
+ 
+     // Function bitcode ranges are disjoint, so verifying every hash is linear in the file size. A
+     // dynamic library's functions may share one range exactly, which is hashed once.
+-    let shared = header.file_type == FILE_TYPE_DYNAMIC;
++    let shared = header.file_type == FILE_TYPE_DYNAMIC || header.file_type == FILE_TYPE_CI_KERNELS;
+     let mut ranges: Vec<(u64, u64, u64, usize)> = parsed
+         .iter()
+         .enumerate()
+@@ -362,6 +369,13 @@
+         if digest != p.function.hash {
+             return Err(container_error(ContainerError::HashMismatch, entry));
+         }
++    }
++
++    // Keep the reference's empty public functionNames for TYPE5, but validate
++    // their shared bitcode ranges and hashes before hiding the entries. Their
++    // original library bytes are later consumed by the stitching compiler.
++    if header.file_type == FILE_TYPE_CI_KERNELS {
++        parsed.retain(|p| p.function.stage != FunctionStage::Other(TYPE_CI_KERNEL));
+     }
+ 
+     // Metadata records are parsed only after their offsets are known to be disjoint, so each
+--- a/crates/metal2vulkan/src/cache/mod.rs
++++ b/crates/metal2vulkan/src/cache/mod.rs
+@@ -61,7 +61,7 @@
+ /// [`ARTIFACT_FORMAT_VERSION`]. The commit that bumps it says what changed; this comment keeps no
+ /// history.
+ // X9 pan197: raw linear-shadow kernels and native split normalized depth/stencil.
+-pub const SEMANTICS_VERSION: u32 = 2010001;
++pub const SEMANTICS_VERSION: u32 = 2030001;
+ 
+ /// The byte-layout version of encoded artifacts (`CompiledFunction::to_bytes` and the
+ /// [`PipelineArtifact`] encodings). Every encoded artifact carries it, and a decode under another
+@@ -71,7 +71,7 @@
+ /// re-typed in an encoded type, its `codec` body or its `envelope`. A variant removed while its tag
+ /// stays unused needs no bump: an entry holding it fails to decode, which is a miss. The commit that
+ /// bumps it says what changed; this comment keeps no history.
+-pub const ARTIFACT_FORMAT_VERSION: u32 = 2010001;
++pub const ARTIFACT_FORMAT_VERSION: u32 = 2030001;
+ 
+ /// The version of what this crate's runtime does with a compiled pipeline: instantiating a binding
+ /// plan (`BindingPlan::instantiate_*`: descriptor ranges, push bytes, root, argument, and handle
+@@ -96,7 +96,7 @@
+ /// keeps no history.
+ // X9 pan195: sampled-source copies, memoryless resolve backing, aspect clear reach
+ // and linear-allocation padding change execution under otherwise identical inputs.
+-pub const RUNTIME_VERSION: u32 = 2010001;
++pub const RUNTIME_VERSION: u32 = 2030001;
+ 
+ /// The digest of the sources this build of the crate was compiled from: SHA-256, as lowercase hex,
+ /// of the manifest, the build script, and exactly the files the crate roots' module tree compiles

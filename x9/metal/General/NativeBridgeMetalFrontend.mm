@@ -5,26 +5,39 @@
 // Every result comes from the runtime and the GPU: a refused call returns nil/NO with the runtime's reason, an encoder call the runtime
 // refuses fails its command buffer (status Error, handlers run) instead of being dropped. A selector this frontend does not implement is
 // reported through the missing-selector hook before the usual exception, so a hardware run names the gap.
-// Shared events work within this process (no cross-process handle yet). Not yet implemented here: heaps, argument buffers, indirect commands, drawables/presentation.
+// Shared events stay within this process. Resource, heap, argument-buffer and indirect APIs
+// use the same runtime. Drawable presentation follows successful command completion.
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <IOSurface/IOSurfaceRef.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 #include <algorithm>
 #include <atomic>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
+#include <string>
+#include <functional>
+#include <pthread.h>
+#include <dlfcn.h>
+#include <mach-o/dyld.h>
+#include <mach-o/getsect.h>
+#include <mach-o/loader.h>
+#include <unistd.h>
 #include <sys/mman.h>
 #include <CommonCrypto/CommonDigest.h>
 #include "bridge/NativeMetalObjects.h"
 #include "NativeBridgeMetalFrontend.h"
 
-extern "C" void sys_dcache_flush(void *start, size_t length);
 
 static NmbDevice *gDevice;
 static id gDeviceObject;
 static uint64_t gRegistryID;
+static std::atomic<unsigned> gShaderCoreCount{0};
+extern "C" void native_bridge_metal_set_shader_core_mask(uint64_t mask) {
+ gShaderCoreCount.store((unsigned)__builtin_popcountll(mask));
+}
 static NSString *gName;
 static void (*gMissing)(const char *, const char *);
 
@@ -43,8 +56,6 @@ static Timed gTimePipeline,gTimeLibrary,gTimeFunction,gTimeEncodeToCommit;
 static Timed gTimeWaitScheduled,gTimeWaitCompleted;
 static Timed gTimeResourceWait;
 static std::atomic<uint64_t> gResourceChecks,gResourceSkipped;
-static Timed gTimeSurfaceFlush;
-static std::atomic<uint64_t> gSurfaceFlushBytes,gSurfaceFlushDuplicates;
 struct EncodedWork {uint32_t passes,draws,dispatches,blits;uint64_t pixels;};
 struct CommitRecord {uint64_t committedUs=0,callbackUs=0,ageUs=0;int64_t scheduledUs=-1;uint32_t index=0;EncodedWork work={};};
 static CommitRecord gCommitRing[32];
@@ -71,6 +82,8 @@ static NSError *nbError(NSString *why) {
 }
 static NSString *lastError() {return [NSString stringWithUTF8String:nmb_last_error()];}
 
+#include "NativeMetalCompiler.inc"
+
 @interface NBObject : NSObject
 @property(atomic,copy) NSString *label;
 @end
@@ -93,15 +106,12 @@ static void waitForResource(id resource);
 #define NB_RESOURCE_SPI \
 - (uint64_t)protectionOptions {return 0;} \
 - (id<MTLHeap>)heap {return _parentHeap;} \
-- (BOOL)isAliasable {return NO;} \
 - (int)setOwnerWithIdentity:(unsigned)identity {(void)identity;return 46; /* KERN_NOT_SUPPORTED */} \
 - (void)waitUntilComplete {waitForResource(self);}
 @interface NBBuffer : NBObject
 @property(nonatomic) NmbBuffer *handle;
 @property(nonatomic) MTLResourceOptions options;
-@property(nonatomic,copy) void (^deallocator)(void *,NSUInteger);
 @property(nonatomic) void *wrapped;
-@property(nonatomic) IOSurfaceRef surfaceOwner; // keeps a shared import's CPU mapping alive
 @property(nonatomic,strong) id<MTLHeap> parentHeap;   // the heap that made the buffer, nil otherwise
 @property(nonatomic) NSUInteger heapOffset;
 @end
@@ -110,17 +120,18 @@ static void waitForResource(id resource);
 @property(nonatomic) NmbTextureDescriptor descriptor;
 @property(nonatomic,strong) NBBuffer *buffer;
 @property(nonatomic) IOSurfaceRef surface;
-@property(nonatomic) NSUInteger offset,rowBytes;
+@property(nonatomic) NSUInteger offset,rowBytes,surfacePlane;
 @property(nonatomic,strong) id<MTLTexture> parent;
 @property(nonatomic,strong) id<MTLHeap> parentHeap;
 @property(nonatomic) NSUInteger heapOffset;
 @end
-@implementation NBBuffer
-- (void)dealloc {
- const NSUInteger length=nmb_buffer_length(_handle);nmb_buffer_release(_handle);
- if(_deallocator)_deallocator(_wrapped,length);
- if(_surfaceOwner)CFRelease(_surfaceOwner);
+static void x9_release_no_copy_block(void *context,void *pointer,uint64_t length) {
+ void (^block)(void *,NSUInteger)=(__bridge_transfer void (^)(void *,NSUInteger))context;
+ if(block)block(pointer,(NSUInteger)length);
 }
+static void x9_release_import_surface(void *context,void *,uint64_t) {CFRelease((IOSurfaceRef)context);}
+@implementation NBBuffer
+- (void)dealloc {nmb_buffer_release(_handle);}
 - (NSUInteger)length {return nmb_buffer_length(_handle);}
 - (void *)contents {return nmb_buffer_contents(_handle);}
 - (uint64_t)gpuAddress {return nmb_buffer_gpu_address(_handle);}
@@ -128,13 +139,16 @@ static void waitForResource(id resource);
 - (MTLStorageMode)storageMode {return (MTLStorageMode)((_options&MTLResourceStorageModeMask)>>MTLResourceStorageModeShift);}
 - (MTLCPUCacheMode)cpuCacheMode {return (MTLCPUCacheMode)((_options&MTLResourceCPUCacheModeMask)>>MTLResourceCPUCacheModeShift);}
 - (MTLHazardTrackingMode)hazardTrackingMode {return (MTLHazardTrackingMode)((_options&MTLResourceHazardTrackingModeMask)>>MTLResourceHazardTrackingModeShift);}
-- (void)didModifyRange:(NSRange)range {(void)range;}
+- (void)didModifyRange:(NSRange)range {
+ if(range.location>self.length||range.length>self.length-range.location)NBLOG(@"native-metal: didModifyRange outside buffer");
+ // Shared storage is cleaned under exclusive ownership by native submission.
+}
 - (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state {
  const uint64_t answer=nmb_buffer_set_purgeable_state(_handle,state);
  if(!answer)NBLOG(@"native-metal: buffer setPurgeableState refused: %@",lastError());
  return (MTLPurgeableState)answer;
 }
-- (NSUInteger)allocatedSize {return nmb_buffer_length(_handle);}
+- (NSUInteger)allocatedSize {return nmb_buffer_allocated_size(_handle);}
 - (IOSurfaceRef)iosurface {return nullptr;}   // a buffer is never the backing of a surface here (surfaces back textures)
 NB_RESOURCE_SPI
 @end
@@ -153,10 +167,9 @@ static NBBuffer *surfaceBuffer(IOSurfaceRef surface,void *base,size_t bytes) {
  if(!gSurfaceImports)gSurfaceImports=[NSMapTable strongToWeakObjectsMapTable];
  NBBuffer *buffer=key?[gSurfaceImports objectForKey:key]:nil;
  if(buffer)return buffer;
- NmbBuffer *handle=nmb_buffer_new_no_copy(gDevice,base,bytes,MTLResourceStorageModeShared);
- if(!handle){NBLOG(@"native-metal: surface import refused: %@",lastError());return nil;}
+ NmbBuffer *handle=nmb_buffer_new_no_copy_releasing(gDevice,base,bytes,MTLResourceStorageModeShared,x9_release_import_surface,(void *)CFRetain(surface));
+ if(!handle){CFRelease(surface);NBLOG(@"native-metal: surface import refused: %@",lastError());return nil;}
  buffer=[NBBuffer new];buffer.handle=handle;buffer.options=MTLResourceStorageModeShared;
- buffer.surfaceOwner=(IOSurfaceRef)CFRetain(surface);
  if(key) {
   // Bound metadata without retaining old frames. Evicting an association is
   // harmless: its owners still retain the actual import until their own end.
@@ -171,7 +184,8 @@ static NBBuffer *surfaceBuffer(IOSurfaceRef surface,void *base,size_t bytes) {
 }
 static bool textureDescriptor(MTLTextureDescriptor *d,NmbTextureDescriptor *out) {
  if(!d)return false;
- *out={(uint64_t)d.textureType,(uint64_t)d.pixelFormat,d.width,d.height,d.depth,d.mipmapLevelCount,d.sampleCount,d.arrayLength,(uint64_t)d.usage,(uint64_t)d.resourceOptions};
+ *out={(uint64_t)d.textureType,(uint64_t)d.pixelFormat,d.width,d.height,d.depth,d.mipmapLevelCount,d.sampleCount,d.arrayLength,(uint64_t)d.usage,(uint64_t)d.resourceOptions,(uint64_t)d.allowGPUOptimizedContents,
+  {(uint64_t)d.swizzle.red,(uint64_t)d.swizzle.green,(uint64_t)d.swizzle.blue,(uint64_t)d.swizzle.alpha}};
  return true;
 }
 @implementation NBTexture
@@ -190,7 +204,7 @@ static bool textureDescriptor(MTLTextureDescriptor *d,NmbTextureDescriptor *out)
 - (MTLCPUCacheMode)cpuCacheMode {return (MTLCPUCacheMode)((_descriptor.options&MTLResourceCPUCacheModeMask)>>MTLResourceCPUCacheModeShift);}
 - (BOOL)isFramebufferOnly {return NO;}
 - (IOSurfaceRef)iosurface {return _surface;}
-- (NSUInteger)iosurfacePlane {return 0;}
+- (NSUInteger)iosurfacePlane {return _surfacePlane;}
 - (id<MTLBuffer>)buffer {return _surface?nil:(id<MTLBuffer>)_buffer;}
 - (NSUInteger)bufferOffset {return _offset;}
 - (NSUInteger)bufferBytesPerRow {return _rowBytes;}
@@ -205,7 +219,7 @@ NB_RESOURCE_SPI
 - (id<MTLTexture>)view:(NmbTexture *)handle {
  if(!handle){NBLOG(@"native-metal: texture view refused: %@",lastError());return nil;}
  NBTexture *view=[NBTexture new];view.handle=handle;NmbTextureDescriptor descriptor;nmb_texture_describe(handle,&descriptor);view.descriptor=descriptor;
- view.parent=(id<MTLTexture>)self;view.buffer=_buffer;view.offset=_offset;view.rowBytes=_rowBytes;
+ view.parent=(id<MTLTexture>)self;view.buffer=_buffer;view.offset=_offset;view.rowBytes=_rowBytes;view.surfacePlane=_surfacePlane;
  if(_surface)view.surface=(IOSurfaceRef)CFRetain(_surface);
  return (id<MTLTexture>)view;
 }
@@ -233,25 +247,7 @@ NB_RESOURCE_SPI
  [self getBytes:bytes bytesPerRow:row bytesPerImage:row*r.size.height fromRegion:r mipmapLevel:level slice:0];
 }
 @end
-// A command can use many independent imports/views of one IOSurface. Their
-// owners keep the mapping live through this phase. Maintain each exact CPU
-// range once; no address identity or decision is carried into another phase
-// or command, and distinct/partially overlapping ranges retain their calls.
-static void flushSurfaces(NSMutableSet *surfaces) {
- if(!surfaces.count)return;
- std::vector<std::pair<uintptr_t,size_t>> ranges;
- ranges.reserve(surfaces.count);
- for(NBTexture *texture in surfaces)if(texture.surface)
-  ranges.emplace_back(reinterpret_cast<uintptr_t>(IOSurfaceGetBaseAddress(texture.surface)),IOSurfaceGetAllocSize(texture.surface));
- std::sort(ranges.begin(),ranges.end());
- const auto last=std::unique(ranges.begin(),ranges.end());
- gSurfaceFlushDuplicates+=(uint64_t)(ranges.end()-last);
- for(auto it=ranges.begin();it!=last;++it) {
-  const uint64_t began=nowUs();
-  sys_dcache_flush(reinterpret_cast<void *>(it->first),it->second);
-  gSurfaceFlushBytes+=it->second;gTimeSurfaceFlush.add(began);
- }
-}
+// The native kernel owns cache maintenance and DMA handoff for surface imports.
 static NBTexture *textureOnBuffer(NBBuffer *buffer,MTLTextureDescriptor *d,NSUInteger offset,NSUInteger row,bool surface) {
  NmbTextureDescriptor descriptor;if(!buffer || !textureDescriptor(d,&descriptor))return nil;
  NmbTexture *handle=nmb_texture_new_on_buffer(buffer.handle,&descriptor,offset,row,surface);
@@ -275,13 +271,34 @@ static NBTexture *textureOnBuffer(NBBuffer *buffer,MTLTextureDescriptor *d,NSUIn
 // ---- libraries, functions, states ----
 @interface NBLibrary : NBObject
 @property(nonatomic) NmbLibrary *handle;
+@property(nonatomic,strong) id storage;
+@property(nonatomic) const uint8_t *bytes;
+@property(nonatomic) size_t length;
+@property(nonatomic) uint64_t diagnosticID;
+@property(nonatomic,copy) NSString *origin;
 @end
 @interface NBFunction : NBObject
 @property(nonatomic) NmbFunction *handle;
 @property(nonatomic,copy) NSString *name;
 @property(nonatomic) MTLFunctionType functionType;
+@property(nonatomic,strong) NBLibrary *library;
+@property(nonatomic,strong) NSData *bitCodeHashData;
 @end
 @implementation NBFunction
+// _MTLFunction's bitCodeHash (32 bytes), read by the stitched-library path (createStitchingScriptHash): a digest naming this function
+// object, its name and a serial no other function in the process has.
+- (const void *)bitCodeHash {
+ @synchronized(self) {
+  if(!_bitCodeHashData) {
+   static std::atomic<uint64_t> serial;
+   NSData *text=[[NSString stringWithFormat:@"%@#%llu",_name,(unsigned long long)++serial] dataUsingEncoding:NSUTF8StringEncoding];
+   NSMutableData *digest=[NSMutableData dataWithLength:CC_SHA256_DIGEST_LENGTH];
+   CC_SHA256(text.bytes,(CC_LONG)text.length,(unsigned char *)digest.mutableBytes);
+   _bitCodeHashData=digest;
+  }
+  return _bitCodeHashData.bytes;
+ }
+}
 - (void)dealloc {nmb_function_release(_handle);}
 - (MTLFunctionOptions)options {return MTLFunctionOptionNone;}
 @end
@@ -300,27 +317,54 @@ static bool methodABI(id object,SEL selector,const char *encoding) {
  Method method=class_getInstanceMethod(object_getClass(object),selector);
  return method && !strcmp(method_getTypeEncoding(method),encoding);
 }
-// Bytes of a function constant of MTLDataType `type` (scalars and 2/4-wide vectors; 3-wide vectors are not qualified).
+// Packed constant bytes. The AIR binder requires width * lanes, including
+// three-wide vectors without their native SIMD storage padding.
 static uint64_t constantBytes(uint64_t type) {
  switch(type) {
   case 3:case 29:case 33:return 4;
   case 4:case 30:case 34:return 8;
+  case 5:case 31:case 35:return 12;
   case 6:case 32:case 36:return 16;
   case 16:case 37:case 41:return 2;
   case 17:case 38:case 42:return 4;
+  case 18:case 39:case 43:return 6;
   case 19:case 40:case 44:return 8;
   case 45:case 49:case 53:return 1;
   case 46:case 50:case 54:return 2;
+  case 47:case 51:case 55:return 3;
   case 48:case 52:case 56:return 4;
   case 81:case 85:return 8;
   case 82:case 86:return 16;
+  case 83:case 87:return 24;
   case 84:case 88:return 32;
   default:return 0;
  }
 }
+static NBFunction *ciKernelFunction(NBLibrary *library,NSString *name);
+static NSData *functionBitcode(NBFunction *function);
+static bool forEachLibraryEntry(NBLibrary *library,const std::function<bool(const std::string &,int)> &visit);
+static void logFunctionLookupFailure(NBLibrary *library,NSString *name,NSString *reason);
 @implementation NBLibrary
+- (instancetype)init {
+ if((self=[super init])){static std::atomic<uint64_t> serial{0};_diagnosticID=++serial;}
+ return self;
+}
 - (void)dealloc {nmb_library_release(_handle);}
 - (id<MTLFunction>)newFunctionWithName:(NSString *)name constantValues:(MTLFunctionConstantValues *)values error:(NSError **)error {
+ if(NBFunction *kernel=ciKernelFunction(self,name)) {
+  // TYPE5 entries are input bitcode, not standalone specialized functions.
+  if(values && (!methodABI(values,@selector(newIndexedConstantArray),"@16@0:8") ||
+     !methodABI(values,@selector(newNamedConstantArray),"@16@0:8") ||
+     [values newIndexedConstantArray].count || [values newNamedConstantArray].count)) {
+   if(error)*error=nbError(@"CI kernel constants must be represented in the stitching graph");return nil;
+  }
+  if(error)*error=nil;return (id<MTLFunction>)kernel;
+ }
+ if(name && !values) {
+  id<MTLFunction> function=[self newFunctionWithName:name];
+  if(error)*error=function?nil:nbError([NSString stringWithFormat:@"function %@: %@",name,lastError()]);
+  return function;
+ }
  if(!name || !values || !methodABI(values,@selector(newIndexedConstantArray),"@16@0:8") || !methodABI(values,@selector(newNamedConstantArray),"@16@0:8")) {
   if(error)*error=nbError(@"unqualified function constant values");return nil;
  }
@@ -334,14 +378,27 @@ static uint64_t constantBytes(uint64_t type) {
   }
   id<NBOriginalConstantValue> v=value;
   const uint64_t bytes=constantBytes(v.dataType);
-  if(!bytes || !v.data){if(error)*error=nbError([NSString stringWithFormat:@"constant type %lu is not qualified",(unsigned long)v.dataType]);return nil;}
+  if(!bytes || !v.data){NBLOG(@"native-metal: function %@ constant type %lu unavailable",name,(unsigned long)v.dataType);if(error)*error=nbError([NSString stringWithFormat:@"constant type %lu is not qualified",(unsigned long)v.dataType]);return nil;}
   constants.push_back({v.dataType,group?0:v.index,group?v.name.UTF8String:nullptr,v.data,bytes});
  }
  const uint64_t functionBegan=nowUs();
  NmbFunction *handle=nmb_function_new_specialized(_handle,name.UTF8String,constants.data(),(uint32_t)constants.size());gTimeFunction.add(functionBegan);
- if(!handle){if(error)*error=nbError([NSString stringWithFormat:@"specialized function: %@",lastError()]);return nil;}
- NBFunction *function=[NBFunction new];function.handle=handle;function.name=name;function.functionType=(MTLFunctionType)nmb_function_type(handle);
+ if(!handle){NSString *reason=lastError();logFunctionLookupFailure(self,name,reason);NBLOG(@"native-metal: specialized function %@ refused: %@",name,reason);if(error)*error=nbError([NSString stringWithFormat:@"specialized function: %@",reason]);return nil;}
+ NBFunction *function=[NBFunction new];function.handle=handle;function.name=name;function.functionType=(MTLFunctionType)nmb_function_type(handle);function.library=self;
  if(error)*error=nil;return (id<MTLFunction>)function;
+}
+// Original iOS16 _MTLLibrary extracts [pipelineLibrary functionCache] and
+// forwards the unchanged name/constants to its cache-aware overload. This
+// backend owns its runtime's function/shader cache; Apple cache objects remain
+// opaque hints, while every supplied constant still reaches specialization.
+- (id<MTLFunction>)newFunctionWithName:(NSString *)name constantValues:(MTLFunctionConstantValues *)values pipelineLibrary:(id)pipelineLibrary error:(NSError **)error {
+ static std::atomic<unsigned> logged{0};
+ if(logged.fetch_add(1)<12)NBLOG(@"native-metal: library function %@ constants=%u pipelineLibrary=%s",name,values!=nil,pipelineLibrary?class_getName([pipelineLibrary class]):"nil");
+ return [self newFunctionWithName:name constantValues:values error:error];
+}
+- (id<MTLFunction>)newFunctionWithName:(NSString *)name constantValues:(MTLFunctionConstantValues *)values functionCache:(id)functionCache error:(NSError **)error {
+ (void)functionCache;
+ return [self newFunctionWithName:name constantValues:values error:error];
 }
 - (void)newFunctionWithName:(NSString *)name constantValues:(MTLFunctionConstantValues *)values completionHandler:(void (^)(id<MTLFunction>,NSError *))handler {
  NSError *error=nil;id<MTLFunction> function=[self newFunctionWithName:name constantValues:values error:&error];
@@ -364,13 +421,29 @@ static uint64_t constantBytes(uint64_t type) {
  }
  return names;
 }
+// _MTLLibrary's externFunctionNames: the entries of external linkage (TYPE 5), an empty array for a library without any. iPadOS 27's Core
+// Image collects the precompiled kernels' names so (DAGPrecompiledKernels: [CIKernelLibrary externFunctionNames] of ci_stdlib and
+// ci_filters) and links a kernel into its DAG only when its name is there or in a stitchable library; without the answer (nil, an unknown
+// selector) create_metal_dag gave a null program and iconservicesagent crashed in create_program_and_arguments. Apple's Metal on macOS
+// 26.5.1 answers 228 names for its ci_stdlib and 612 for ci_filters, none for a stitchable library.
+- (NSArray<NSString *> *)externFunctionNames {
+ NSMutableArray<NSString *> *names=[NSMutableArray array];
+ forEachLibraryEntry(self,[&](const std::string &entry,int type) {
+  if(type==5 && !entry.empty())if(NSString *name=@(entry.c_str()))[names addObject:name];
+  return true;
+ });
+ return names;
+}
 - (id<MTLFunction>)newFunctionWithName:(NSString *)name {
+ if(NBFunction *kernel=ciKernelFunction(self,name))return (id<MTLFunction>)kernel;
  const uint64_t functionBegan=nowUs();
- NmbFunction *handle=name?nmb_function_new(_handle,name.UTF8String):nullptr;gTimeFunction.add(functionBegan);if(!handle)return nil;
- NBFunction *function=[NBFunction new];function.handle=handle;function.name=name;function.functionType=(MTLFunctionType)nmb_function_type(handle);
+ NmbFunction *handle=name?nmb_function_new(_handle,name.UTF8String):nullptr;gTimeFunction.add(functionBegan);if(!handle){if(name)logFunctionLookupFailure(self,name,lastError());return nil;}
+ NBFunction *function=[NBFunction new];function.handle=handle;function.name=name;function.functionType=(MTLFunctionType)nmb_function_type(handle);function.library=self;
  return (id<MTLFunction>)function;
 }
 @end
+#include "NativeMetalStitching.inc"
+
 @interface NBComputePipeline : NBObject
 @property(nonatomic) NmbComputePipeline *handle;
 @end
@@ -464,8 +537,8 @@ static void notified(void *context,uint64_t value) {
 @property(nonatomic) uint32_t commitIndex;
 @property(nonatomic,strong) NSMutableArray *scheduledHandlers,*completedHandlers;
 @property(nonatomic,strong) NSMutableSet *surfaces;
-// Runtime handles retain GPU storage, but only the Objective-C owner retains
-// a no-copy deallocator, its memory owner and texture/heap ancestry.
+// Runtime handles retain storage and no-copy release contexts. Also keep the
+// Objective-C texture/heap ancestry through success, and quarantine it on GPU errors.
 @property(nonatomic,strong) NSMutableSet *resourceOwners;
 @property(nonatomic,strong) dispatch_group_t handlers;
 @property(nonatomic,strong) dispatch_group_t schedulingHandlers;
@@ -473,8 +546,13 @@ static void notified(void *context,uint64_t value) {
 - (void)refuse:(NSString *)what;
 @end
 @interface NBEncoder : NBObject
+@property(nonatomic,readonly) uint64_t globalTraceObjectID;
 @property(nonatomic) NmbEncoder *handle;
 @property(nonatomic,strong) NBCommandBuffer *commandBuffer;
+@end
+@interface NBEncoder (X9ResidencyAPI)
+- (void)residentResource:(id)resource usage:(MTLResourceUsage)usage stages:(MTLRenderStages)stages;
+- (void)residentHeap:(id)heap stages:(MTLRenderStages)stages;
 @end
 static void waitForResource(id resource) {
  const uint64_t began=nowUs();
@@ -491,6 +569,17 @@ static void waitForResource(id resource) {
  gTimeResourceWait.add(began);
 }
 @implementation NBEncoder
+- (instancetype)init {
+ if((self=[super init])) {
+  // Stable for the entire encoder lifetime (including after endEncoding), not
+  // a recyclable object pointer. PID separates concurrent processes' traces.
+  static std::atomic<uint32_t> nextTraceID{0};
+  uint32_t serial=nextTraceID.fetch_add(1,std::memory_order_relaxed)+1;
+  if(!serial)abort(); // do not silently reuse a trace identity on wrap
+  _globalTraceObjectID=((uint64_t)(uint32_t)getpid()<<32)|serial;
+ }
+ return self;
+}
 - (void)dealloc {if(_handle)nmb_encoder_discard(_handle);}
 - (bool)check:(bool)ok what:(const char *)what {
  if(!ok)[_commandBuffer refuse:[NSString stringWithFormat:@"%s: %@",what,lastError()]];
@@ -564,8 +653,8 @@ static void waitForResource(id resource) {
 }
 - (void)dispatchThreads:(MTLSize)t threadsPerThreadgroup:(MTLSize)g {[self dispatch:t group:g threads:true];}
 - (void)dispatchThreadgroups:(MTLSize)t threadsPerThreadgroup:(MTLSize)g {[self dispatch:t group:g threads:false];}
-- (void)useResource:(id<MTLResource>)r usage:(MTLResourceUsage)u {(void)r;(void)u;}
-- (void)memoryBarrierWithScope:(MTLBarrierScope)s {(void)s;}
+- (void)useResource:(id<MTLResource>)r usage:(MTLResourceUsage)u {[self residentResource:r usage:u stages:0];}
+- (void)memoryBarrierWithScope:(MTLBarrierScope)s {[self check:nmb_compute_barrier(self.handle,s) what:"memoryBarrierWithScope"];}
 @end
 
 @interface NBRenderEncoder : NBEncoder
@@ -663,7 +752,7 @@ static void waitForResource(id resource) {
 - (void)drawIndexedPrimitives:(MTLPrimitiveType)t indexCount:(NSUInteger)n indexType:(MTLIndexType)k indexBuffer:(id<MTLBuffer>)b indexBufferOffset:(NSUInteger)o {
  [self drawIndexedPrimitives:t indexCount:n indexType:k indexBuffer:b indexBufferOffset:o instanceCount:1 baseVertex:0 baseInstance:0];
 }
-- (void)useResource:(id<MTLResource>)r usage:(MTLResourceUsage)u stages:(MTLRenderStages)s {(void)r;(void)u;(void)s;}
+- (void)useResource:(id<MTLResource>)r usage:(MTLResourceUsage)u stages:(MTLRenderStages)s {[self residentResource:r usage:u stages:s];}
 - (void)updateFence:(id<MTLFence>)fence afterStages:(MTLRenderStages)stages {[self fence:fence stages:stages update:true];}
 - (void)waitForFence:(id<MTLFence>)fence beforeStages:(MTLRenderStages)stages {[self fence:fence stages:stages update:false];}
 @end
@@ -728,12 +817,39 @@ static void waitForResource(id resource) {
  if(![self textures:NB_OBJECTS(t) count:1])return;
  [self check:nmb_blit_generate_mipmaps(self.handle,[(NBTexture *)t handle]) what:"generateMipmapsForTexture"];
 }
-- (void)synchronizeResource:(id<MTLResource>)r {(void)r;}
+- (void)synchronizeResource:(id<MTLResource>)r {
+ NmbBuffer *b=nullptr;NmbTexture *t=nullptr;
+ if([(id)r isKindOfClass:[NBBuffer class]])b=[(NBBuffer *)r handle];
+ else if([(id)r isKindOfClass:[NBTexture class]])t=[(NBTexture *)r handle];
+ else{[self.commandBuffer refuse:@"foreign synchronization resource"];return;}
+ [self.commandBuffer.resourceOwners addObject:r];[self check:nmb_blit_synchronize_resource(self.handle,b,t) what:"synchronizeResource"];
+}
 @end
 
 static void completed(void *context);
 static void scheduled(void *context);
+// A dispatch queue callback is outside the runtime's own-handler TLS scope.
+// Preserve an explicit frontend marker so waiting cannot wait for its own block to return.
+static thread_local void *gActiveCommandCallback=nullptr;
+struct NBCommandCallbackScope {
+ void *previous;
+ explicit NBCommandCallbackScope(void *command):previous(gActiveCommandCallback){gActiveCommandCallback=command;}
+ ~NBCommandCallbackScope(){gActiveCommandCallback=previous;}
+};
 @implementation NBCommandBuffer
+// MPSCommandBufferImageCache requires persistent per-command-buffer state.
+// This is not GPU storage and must not be shared between command buffers.
+static char kUserDictionaryKey;
+- (id)userDictionary {
+ @synchronized(self) {
+  NSMutableDictionary *dictionary=objc_getAssociatedObject(self,&kUserDictionaryKey);
+  if(!dictionary) {
+   dictionary=[NSMutableDictionary dictionary];
+   objc_setAssociatedObject(self,&kUserDictionaryKey,dictionary,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+  }
+  return dictionary;
+ }
+}
 - (instancetype)init {
  if((self=[super init])){_scheduledHandlers=[NSMutableArray array];_completedHandlers=[NSMutableArray array];_surfaces=[NSMutableSet set];_resourceOwners=[NSMutableSet set];_handlers=dispatch_group_create();_schedulingHandlers=dispatch_group_create();}
  if(self)createdUs=nowUs();
@@ -757,7 +873,8 @@ static void scheduled(void *context);
  if(self.failedLocally)return nbError(self.encodeFailure);
  if(self.status!=MTLCommandBufferStatusError)return nil;
  char text[512]={};nmb_command_buffer_error(_handle,text,sizeof text);
- return nbError([NSString stringWithUTF8String:text]);
+ return [NSError errorWithDomain:MTLCommandBufferErrorDomain code:(NSInteger)nmb_command_buffer_error_code(_handle)
+  userInfo:@{NSLocalizedDescriptionKey:[NSString stringWithUTF8String:text]?:@"GPU command failed"}];
 }
 // Debug groups and cache hints name work for tools and the driver's caches; they change nothing the GPU computes here.
 - (void)pushDebugGroup:(NSString *)name {(void)name;}
@@ -765,14 +882,17 @@ static void scheduled(void *context);
 - (void)encodeCacheHintTag:(uint64_t)tag resourceGroups:(const id __unsafe_unretained [])groups count:(NSUInteger)count {(void)tag;(void)groups;(void)count;}
 - (void)encodeCacheHintFinalize:(uint64_t)tag resourceGroups:(const id __unsafe_unretained [])groups count:(NSUInteger)count {(void)tag;(void)groups;(void)count;}
 // The kernel driver's own submission times are not recorded: 0 is Metal's answer where they are unavailable.
-- (CFTimeInterval)kernelStartTime {return 0;}
-- (CFTimeInterval)kernelEndTime {return 0;}
+- (CFTimeInterval)kernelStartTime {return nmb_command_buffer_kernel_time(self.handle,false);}
+- (CFTimeInterval)kernelEndTime {return nmb_command_buffer_kernel_time(self.handle,true);}
 - (BOOL)commitAndWaitUntilSubmitted {[(id<MTLCommandBuffer>)self commit];[self waitUntilScheduled];return !self.failedLocally;}
 - (CFTimeInterval)GPUStartTime {return nmb_command_buffer_gpu_time(_handle,false);}
 - (CFTimeInterval)GPUEndTime {return nmb_command_buffer_gpu_time(_handle,true);}
 - (id)encoder:(NBEncoder *)encoder handle:(NmbEncoder *)handle what:(NSString *)what {
  if(self.committed){[self refuse:[what stringByAppendingString:@" after commit"]];return nil;}
- if(!handle){[self refuse:[NSString stringWithFormat:@"%@: %@",what,lastError()]];return nil;}
+ // RenderBox caches encoder IMPs. Returning nil after an encoding refusal made
+ // it call address zero in UniXNU; return a typed refusing object instead. Its
+ // buffer remains failed and is never submitted as successful GPU work.
+ if(!handle){[self refuse:[NSString stringWithFormat:@"%@: %@",what,lastError()]];encoder.commandBuffer=self;return encoder;}
  encoder.handle=handle;encoder.commandBuffer=self;return encoder;
 }
 - (id<MTLComputeCommandEncoder>)computeCommandEncoder {
@@ -787,7 +907,15 @@ static void scheduled(void *context);
  return [self encoder:[NBBlitEncoder new] handle:self.committed?nullptr:nmb_blit_encoder_new(_handle) what:@"blitCommandEncoder"];
 }
 - (id<MTLRenderCommandEncoder>)renderCommandEncoderWithDescriptor:(MTLRenderPassDescriptor *)d {
+ if(!d){[self refuse:@"nil render pass descriptor"];return nil;}
+ for(NSUInteger i=0;i<4;i++)if(d.sampleBufferAttachments[i].sampleBuffer){[self refuse:@"render counter sample attachments unavailable"];return nil;}
+ if(d.rasterizationRateMap){[self refuse:@"rasterization rate maps unavailable in frontend"];return nil;}
+ NSUInteger positionCount=[d getSamplePositions:nullptr count:0];
+ if(positionCount>32){[self refuse:@"sample position count exceeds descriptor capacity"];return nil;}
+ MTLSamplePosition positions[32]={};
+ if(positionCount && [d getSamplePositions:positions count:positionCount]!=positionCount){[self refuse:@"sample position descriptor changed while copying"];return nil;}
  NmbRenderPassDescriptor pass={};
+ pass.sample_positions=positionCount?&positions[0].x:nullptr;pass.sample_position_count=positionCount;
  {
   id<MTLTexture> first=d.colorAttachments[0].texture;
   if(first) {
@@ -798,11 +926,17 @@ static void scheduled(void *context);
   }
  }
  auto attachment=[&](MTLRenderPassAttachmentDescriptor *a,NmbPassAttachment &out)->bool {
-  if(!a.texture)return true;
+  if(!a.texture)return !a.resolveTexture;
   if(![(id)a.texture isKindOfClass:[NBTexture class]])return false;
   NBTexture *texture=(NBTexture *)a.texture;if(texture.surface)[_surfaces addObject:texture];
   [_resourceOwners addObject:texture];
   out.texture=texture.handle;out.level=a.level;out.slice=a.slice;out.depth_plane=a.depthPlane;out.load=a.loadAction;out.store=a.storeAction;
+  out.store_options=a.storeActionOptions;
+  if(a.resolveTexture){
+   if(![(id)a.resolveTexture isKindOfClass:[NBTexture class]])return false;
+   NBTexture *resolve=(NBTexture *)a.resolveTexture;[_resourceOwners addObject:resolve];if(resolve.surface)[_surfaces addObject:resolve];
+   out.resolve=resolve.handle;out.resolve_level=a.resolveLevel;out.resolve_slice=a.resolveSlice;out.resolve_depth_plane=a.resolveDepthPlane;
+  }
   return true;
  };
  for(unsigned i=0;i<8;i++) {
@@ -812,6 +946,7 @@ static void scheduled(void *context);
  }
  if(!attachment(d.depthAttachment,pass.depth) || !attachment(d.stencilAttachment,pass.stencil)){[self refuse:@"foreign depth/stencil attachment"];return nil;}
  pass.depth.clear[0]=d.depthAttachment.clearDepth;pass.stencil.clear[0]=d.stencilAttachment.clearStencil;
+ pass.depth.resolve_filter=d.depthAttachment.depthResolveFilter;pass.stencil.resolve_filter=d.stencilAttachment.stencilResolveFilter;
  pass.width=d.renderTargetWidth;pass.height=d.renderTargetHeight;pass.array_length=d.renderTargetArrayLength;pass.samples=d.defaultRasterSampleCount;
  if(d.visibilityResultBuffer) {
   if(![(id)d.visibilityResultBuffer isKindOfClass:[NBBuffer class]]){[self refuse:@"foreign visibility result buffer"];return nil;}
@@ -845,6 +980,7 @@ static void scheduled(void *context);
   _schedulingDelivered=YES;handlers=[_scheduledHandlers copy];[_scheduledHandlers removeAllObjects];
  }
  void (^run)(void)=^{
+  NBCommandCallbackScope scope((__bridge void *)self);
   for(MTLCommandBufferHandler block in handlers)block((id<MTLCommandBuffer>)self);
   dispatch_group_leave(self->_schedulingHandlers);
  };
@@ -854,11 +990,14 @@ static void scheduled(void *context);
 }
 // After completion (or a refusal): invalidate the CPU's view of imported surfaces, then completed handlers, once.
 - (void)finish {
- flushSurfaces(_surfaces);
- // Actual GPU completion (or a local refusal that never submitted) is the
- // release point. A retained completed command must not pin every old frame.
- [_surfaces removeAllObjects];[_resourceOwners removeAllObjects];
- @synchronized(gInFlight){[gInFlight removeObject:self];}
+ // Cache ownership transfers in the native kernel after confirmed group suspension
+ // and AS detach. Never flush user mappings while DMA ownership may be uncertain.
+ const bool safeRelease=self.failedLocally || nmb_command_buffer_status(_handle)==MTLCommandBufferStatusCompleted ||
+  nmb_command_buffer_unsubmitted_oom(_handle);
+ if(safeRelease){
+  [_surfaces removeAllObjects];[_resourceOwners removeAllObjects];
+  @synchronized(gInFlight){[gInFlight removeObject:self];}
+ }else NBLOG(@"native-metal: failed GPU command retained with its IOSurfaces;ownership uncertain");
  NSArray *completedHandlers;
  @synchronized(self){
   // A frontend refusal or a failed submission never scheduled. Unblock its waiter without inventing a scheduled event.
@@ -866,6 +1005,7 @@ static void scheduled(void *context);
   completedHandlers=[_completedHandlers copy];[_completedHandlers removeAllObjects];
  }
  void (^run)(void)=^{
+  NBCommandCallbackScope scope((__bridge void *)self);
   for(MTLCommandBufferHandler block in completedHandlers)block((id<MTLCommandBuffer>)self);
   dispatch_group_leave(self->_handlers);
  };
@@ -887,7 +1027,7 @@ static void scheduled(void *context);
  dispatch_group_enter(_schedulingHandlers);
  @synchronized(gInFlight){[gInFlight addObject:self];}
  if(!self.encodeFailure) {
-  flushSurfaces(_surfaces);
+  // Native submission performs cache handoff under exclusive GPU ownership.
   // Completion owns this reference; the runtime orders the non-owning scheduled callback before it.
   void *context=(__bridge_retained void *)self;
   if(nmb_command_buffer_on_completed(_handle,completed,context) &&
@@ -901,13 +1041,15 @@ static void scheduled(void *context);
 - (void)waitUntilCompleted {
  if(!self.committed)return;
  const uint64_t began=nowUs();
- if(!self.failedLocally)nmb_command_buffer_wait(_handle,0);
+ if(gActiveCommandCallback==(__bridge void *)self){NBLOG(@"native-metal: waitUntilCompleted refused from own callback");return;}
+ if(!self.failedLocally && nmb_command_buffer_wait(_handle,0)!=0){NBLOG(@"native-metal: waitUntilCompleted refused: %@",lastError());return;}
  dispatch_group_wait(_handlers,DISPATCH_TIME_FOREVER);
  gTimeWaitCompleted.add(began);
 }
 - (void)waitUntilScheduled {
  if(!self.committed)return;
  const uint64_t began=nowUs();
+ if(gActiveCommandCallback==(__bridge void *)self){NBLOG(@"native-metal: waitUntilScheduled refused from own callback");return;}
  if(!self.failedLocally && !nmb_command_buffer_wait_scheduled(_handle)){
   NBLOG(@"native-metal: waitUntilScheduled refused: %@",lastError());return;
  }
@@ -942,6 +1084,8 @@ static void completed(void *context) {
 - (void)setSubmissionQueue:(dispatch_queue_t)queue {(void)queue;}   // submission happens on the caller's thread here
 // setCompletionQueue: is the property's setter.
 // GPU priorities are not applied (one hardware queue): reported as not applied.
+- (NSUInteger)getGPUPriority {return 1;}
+- (NSUInteger)getBackgroundGPUPriority {return 3;}
 - (BOOL)setGPUPriority:(NSUInteger)priority {(void)priority;return NO;}
 - (BOOL)setBackgroundGPUPriority:(NSUInteger)priority {(void)priority;return NO;}
 - (id<MTLCommandBuffer>)commandBufferWithDescriptor:(MTLCommandBufferDescriptor *)d {(void)d;return [self commandBuffer];}
@@ -954,11 +1098,39 @@ template <typename T> static T failWith(NSError **error,NSString *what,T value) 
  return value;
 }
 // A render pipeline descriptor in the bridge's form; false, with the error, for a function of another device.
-static bool renderDescriptor(MTLRenderPipelineDescriptor *d,NmbRenderPipelineDescriptor *p,NSError **error) {
+struct NBRenderDescriptor : NmbRenderPipelineDescriptor {std::vector<NmbFunction *> linked[4];};
+static bool linkedHandles(NSArray<id<MTLFunction>> *functions,std::vector<NmbFunction *> &out) {
+ for(id<MTLFunction> f in functions) {
+  if(![(id)f isKindOfClass:[NBFunction class]] || ![(NBFunction *)f handle])return false;
+  out.push_back([(NBFunction *)f handle]);
+ }
+ return true;
+}
+static bool renderDescriptor(MTLRenderPipelineDescriptor *d,NBRenderDescriptor *p,NSError **error) {
  if(![(id)d.vertexFunction isKindOfClass:[NBFunction class]] || (d.fragmentFunction && ![(id)d.fragmentFunction isKindOfClass:[NBFunction class]])) {
   if(error)*error=nbError(@"foreign function");return false;
  }
+ if(![(NBFunction *)d.vertexFunction handle] || (d.fragmentFunction && ![(NBFunction *)d.fragmentFunction handle])) {
+  if(error)*error=nbError(@"a Core Image kernel function is only stitched");return false;
+ }
  p->vertex=[(NBFunction *)d.vertexFunction handle];p->fragment=d.fragmentFunction?[(NBFunction *)d.fragmentFunction handle]:nullptr;
+ // Each stage's visible functions (MTLRenderPipelineDescriptor vertexLinkedFunctions/fragmentLinkedFunctions): RenderBox's fragment
+ // functions call custom_blend through them; without them the runtime refused the pipeline (MissingInput LinkedFunction) and the render
+ // server aborted in CA::OGL::MetalContext::create_pipeline_state.
+ MTLLinkedFunctions *stages[2]={d.vertexLinkedFunctions,d.fragmentLinkedFunctions};
+ for(unsigned stage=0;stage<2;++stage) {
+  MTLLinkedFunctions *linked=stages[stage];
+  if(linked.binaryFunctions.count || linked.groups.count) {
+   if(error)*error=nbError(@"render binary/grouped linked functions are not implemented");return false;
+  }
+  if(!linkedHandles(linked.functions,p->linked[stage*2]) || !linkedHandles(linked.privateFunctions,p->linked[stage*2+1])) {
+   if(error)*error=nbError(@"foreign linked function");return false;
+  }
+ }
+ p->vertex_linked=p->linked[0].data();p->vertex_linked_count=p->linked[0].size();
+ p->vertex_private_linked=p->linked[1].data();p->vertex_private_linked_count=p->linked[1].size();
+ p->fragment_linked=p->linked[2].data();p->fragment_linked_count=p->linked[2].size();
+ p->fragment_private_linked=p->linked[3].data();p->fragment_private_linked_count=p->linked[3].size();
  for(unsigned i=0;i<8;i++) {
   MTLRenderPipelineColorAttachmentDescriptor *a=d.colorAttachments[i];
   p->colors[i]={(uint64_t)a.pixelFormat,(uint64_t)a.writeMask,(uint64_t)a.blendingEnabled,(uint64_t)a.sourceRGBBlendFactor,(uint64_t)a.destinationRGBBlendFactor,
@@ -966,6 +1138,11 @@ static bool renderDescriptor(MTLRenderPipelineDescriptor *d,NmbRenderPipelineDes
  }
  p->depth_format=d.depthAttachmentPixelFormat;p->stencil_format=d.stencilAttachmentPixelFormat;p->samples=d.rasterSampleCount;
  p->topology=d.inputPrimitiveTopology;p->rasterization=d.rasterizationEnabled;
+ p->alpha_to_coverage=d.alphaToCoverageEnabled;p->alpha_to_one=d.alphaToOneEnabled;
+ p->max_amplification=d.maxVertexAmplificationCount;p->indirect=d.supportIndirectCommandBuffers;
+ p->vertex_call_depth=d.maxVertexCallStackDepth;p->fragment_call_depth=d.maxFragmentCallStackDepth;
+ p->adding_vertex=d.supportAddingVertexBinaryFunctions;p->adding_fragment=d.supportAddingFragmentBinaryFunctions;
+ for(NSUInteger i=0;i<31;i++){p->vertex_mutability[i]=d.vertexBuffers[i].mutability;p->fragment_mutability[i]=d.fragmentBuffers[i].mutability;}
  if(MTLVertexDescriptor *v=d.vertexDescriptor) {
   for(unsigned i=0;i<31;i++) {
    MTLVertexAttributeDescriptor *a=v.attributes[i];if(a.format==MTLVertexFormatInvalid)continue;
@@ -975,6 +1152,8 @@ static bool renderDescriptor(MTLRenderPipelineDescriptor *d,NmbRenderPipelineDes
  }
  return true;
 }
+
+#include "NativeMetalReflection.inc"
 
 // ---- heaps ----
 // Metal heaps over the runtime's: an automatic heap places each resource, a placement heap takes an offset. Resources made from one keep it
@@ -1029,8 +1208,9 @@ static bool renderDescriptor(MTLRenderPipelineDescriptor *d,NmbRenderPipelineDes
 @end
 
 // Creation and archive population must use the same complete supported descriptor.
-static bool computeDescriptor(MTLComputePipelineDescriptor *d,NmbComputePipelineDescriptor *p,NSError **error) {
- if(!d || ![(id)d.computeFunction isKindOfClass:[NBFunction class]]){if(error)*error=nbError(@"foreign compute function");return false;}
+static bool computeDescriptor(MTLComputePipelineDescriptor *d,NmbComputePipelineDescriptor *p,std::vector<NmbFunction *> &linkedStore,
+                              std::vector<NmbFunction *> &privateStore,NSError **error) {
+ if(!d || ![(id)d.computeFunction isKindOfClass:[NBFunction class]] || ![(NBFunction *)d.computeFunction handle]){if(error)*error=nbError(@"foreign compute function");return false;}
  // Metal may materialize empty stage/linked descriptors on access. Preserve the
  // default meaning while refusing state this frontend cannot yet represent.
  MTLStageInputOutputDescriptor *stage=d.stageInputDescriptor;
@@ -1042,10 +1222,14 @@ static bool computeDescriptor(MTLComputePipelineDescriptor *d,NmbComputePipeline
  }
  if(!empty){if(error)*error=nbError(@"compute stage inputs are not implemented");return false;}
  MTLLinkedFunctions *linked=d.linkedFunctions;
- if(linked.functions.count || linked.binaryFunctions.count || linked.privateFunctions.count || linked.groups.count ||
-    d.preloadedLibraries.count || d.insertLibraries.count) {
-  if(error)*error=nbError(@"compute linked/dynamic libraries are not implemented");return false;
+ if(linked.binaryFunctions.count || linked.groups.count || d.preloadedLibraries.count || d.insertLibraries.count) {
+  if(error)*error=nbError(@"compute binary/grouped linked functions and dynamic libraries are not implemented");return false;
  }
+ if(!linkedHandles(linked.functions,linkedStore) || !linkedHandles(linked.privateFunctions,privateStore)) {
+  if(error)*error=nbError(@"foreign linked function");return false;
+ }
+ p->linked=linkedStore.data();p->linked_count=linkedStore.size();
+ p->private_linked=privateStore.data();p->private_linked_count=privateStore.size();
  p->function=[(NBFunction *)d.computeFunction handle];p->max_threads=d.maxTotalThreadsPerThreadgroup;
  p->multiple_of_execution_width=d.threadGroupSizeIsMultipleOfThreadExecutionWidth;p->indirect=d.supportIndirectCommandBuffers;
  p->max_call_stack_depth=d.maxCallStackDepth;p->adding_binary_functions=d.supportAddingBinaryFunctions;
@@ -1061,13 +1245,14 @@ static bool computeDescriptor(MTLComputePipelineDescriptor *d,NmbComputePipeline
 - (void)dealloc {nmb_binary_archive_release(_handle);}
 - (NSUInteger)options {return 0;}
 - (BOOL)addRenderPipelineFunctionsWithDescriptor:(MTLRenderPipelineDescriptor *)d error:(NSError **)error {
- auto *p=new NmbRenderPipelineDescriptor();
+ auto *p=new NBRenderDescriptor();
  const bool ok=renderDescriptor(d,p,error) && nmb_binary_archive_add_render(_handle,p);delete p;
  if(!ok)return failWith<BOOL>(error,@"archive render pipeline",NO);
  if(error)*error=nil;return YES;
 }
 - (BOOL)addComputePipelineFunctionsWithDescriptor:(MTLComputePipelineDescriptor *)d error:(NSError **)error {
- NmbComputePipelineDescriptor p={};if(!computeDescriptor(d,&p,error))return NO;
+ NmbComputePipelineDescriptor p={};std::vector<NmbFunction *> linked,privateLinked;
+ if(!computeDescriptor(d,&p,linked,privateLinked,error))return NO;
  if(!nmb_binary_archive_add_compute_descriptor(_handle,&p))return failWith<BOOL>(error,@"archive compute pipeline",NO);
  if(error)*error=nil;return YES;
 }
@@ -1086,19 +1271,34 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
  return true;
 }
 
+@protocol NBOriginalStitching
+- (NSString *)newDagStringWithGraphs:(NSArray<MTLFunctionStitchingGraph *> *)graphs;
+@end
 @interface NBDeviceMethods : NSObject
 @end
 @implementation NBDeviceMethods
 - (NSString *)name {return gName;}
+- (NSUInteger)gpuCoreCount {return gShaderCoreCount.load();}
+- (uint64_t)dedicatedMemorySize {return 0;}
+- (uint64_t)sharedMemorySize {return [NSProcessInfo processInfo].physicalMemory;}
+- (NSUInteger)minimumTextureBufferAlignmentForPixelFormat:(NSUInteger)format {
+ return [(id<MTLDevice>)self minimumLinearTextureAlignmentForPixelFormat:(MTLPixelFormat)format];
+}
+- (NSUInteger)iosurfaceReadOnlyTextureAlignmentBytes {
+ return [(id<MTLDevice>)self minimumLinearTextureAlignmentForPixelFormat:MTLPixelFormatRGBA16Float];
+}
 - (uint64_t)registryID {return gRegistryID;}
 - (NSUInteger)maxBufferLength {return nmb_device_max_buffer_length(gDevice);}
 - (BOOL)hasUnifiedMemory {return YES;}
 - (BOOL)isLowPower {return NO;}
 - (BOOL)isRemovable {return NO;}
 - (BOOL)isHeadless {return NO;}
-// supportsFamily: and the other queries the runtime answers are installed from it (installAnswers). No legacy feature set is claimed: the
-// base implementation reads Apple tables this device does not have.
-- (BOOL)supportsFeatureSet:(MTLFeatureSet)set {(void)set;return NO;}
+// UniXNU's explicit OS admission policy; feature rows and encoders remain strict.
+- (BOOL)supportsFeatureSet:(MTLFeatureSet)set {
+ static const uint8_t families[]={1,2,1,2,3,1,2,3,1,2,3,4,1,2,3,4,5};
+ if((NSUInteger)set>=sizeof families)return NO;
+ return [(id<MTLDevice>)self supportsFamily:(MTLGPUFamily)(MTLGPUFamilyApple1+families[set]-1)];
+}
 // The original discovery (_MTLAddDevice) runs these four on every device it registers. The target's own versions fill the base class's limits
 // and feature tables from a hardware profile (`featureProfile`, `indirectArgumentBufferCapabilities`, a table of Apple GPUs) that this device
 // has not got: running them would claim an Apple GPU's capabilities. They are empty here, so a limit or feature the runtime measured is answered
@@ -1171,10 +1371,11 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
  NBBuffer *buffer=[NBBuffer new];buffer.handle=handle;buffer.options=options;return (id<MTLBuffer>)buffer;
 }
 - (id<MTLBuffer>)newBufferWithBytesNoCopy:(void *)pointer length:(NSUInteger)length options:(MTLResourceOptions)options deallocator:(void (^)(void *,NSUInteger))deallocator {
- NmbBuffer *handle=nmb_buffer_new_no_copy(gDevice,pointer,length,options);
- if(!handle){NBLOG(@"native-metal: no-copy buffer refused: %@",lastError());return nil;}
+ void *context=deallocator?(__bridge_retained void *)[deallocator copy]:nullptr;
+ NmbBuffer *handle=nmb_buffer_new_no_copy_releasing(gDevice,pointer,length,options,context?x9_release_no_copy_block:nullptr,context);
+ if(!handle){if(context)(void)(__bridge_transfer id)context;NBLOG(@"native-metal: no-copy buffer refused: %@",lastError());return nil;}
  NBBuffer *buffer=[NBBuffer new];buffer.handle=handle;buffer.options=options;
- buffer.wrapped=pointer;buffer.deallocator=deallocator;
+ buffer.wrapped=pointer;
  return (id<MTLBuffer>)buffer;
 }
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d {
@@ -1187,27 +1388,57 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
 // pages into the X9 GPU context. Runtime memory/coherency requirements must be
 // satisfied before this call can create a usable texture.
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d iosurface:(IOSurfaceRef)surface plane:(NSUInteger)plane {
- if(!surface || !d || plane || IOSurfaceGetPlaneCount(surface))return nil;
+ const size_t planes=surface?IOSurfaceGetPlaneCount(surface):0;
+ if(!surface||!d||(planes?plane>=planes:plane!=0))return nil;
  void *base=IOSurfaceGetBaseAddress(surface);const size_t page=(size_t)getpagesize(),allocation=IOSurfaceGetAllocSize(surface);
- if(!page || (page&(page-1)) || !base || ((uintptr_t)base&(page-1)) || !allocation || allocation>SIZE_MAX-(page-1))return nil;
+ if(!page||(page&(page-1))||!base||((uintptr_t)base&(page-1))||!allocation||allocation>SIZE_MAX-(page-1))return nil;
+ const uintptr_t start=planes?(uintptr_t)IOSurfaceGetBaseAddressOfPlane(surface,plane):(uintptr_t)base;
+ const size_t row=planes?IOSurfaceGetBytesPerRowOfPlane(surface,plane):IOSurfaceGetBytesPerRow(surface);
+ if(start<(uintptr_t)base||start-(uintptr_t)base>=allocation||!row)return nil;
  const size_t bytes=(allocation+page-1)&~(page-1);
  NBBuffer *buffer=surfaceBuffer(surface,base,bytes);if(!buffer)return nil;
- NBTexture *texture=textureOnBuffer(buffer,d,0,IOSurfaceGetBytesPerRow(surface),true);if(!texture)return nil;
- texture.surface=(IOSurfaceRef)CFRetain(surface);return (id<MTLTexture>)texture;
+ NBTexture *texture=nil;
+ if(planes<2)texture=textureOnBuffer(buffer,d,start-(uintptr_t)base,row,true);
+ else {
+  if(planes!=2)return nil;
+  uintptr_t chroma=(uintptr_t)IOSurfaceGetBaseAddressOfPlane(surface,1);
+  size_t chromaRow=IOSurfaceGetBytesPerRowOfPlane(surface,1);
+  if(chroma<(uintptr_t)base||chroma-(uintptr_t)base>=allocation||!chromaRow)return nil;
+  NmbTextureDescriptor desc;if(!textureDescriptor(d,&desc))return nil;
+  NmbTexture *handle=nmb_texture_new_on_surface(buffer.handle,&desc,start-(uintptr_t)base,row,IOSurfaceGetPixelFormat(surface),plane,
+   IOSurfaceGetWidth(surface),IOSurfaceGetHeight(surface),chroma-(uintptr_t)base,chromaRow);
+  if(!handle){NBLOG(@"native-metal: planar surface texture refused: %@",lastError());return nil;}
+  texture=[NBTexture new];texture.handle=handle;nmb_texture_describe(handle,&desc);texture.descriptor=desc;texture.buffer=buffer;texture.offset=start-(uintptr_t)base;texture.rowBytes=row;
+ }
+ if(!texture)return nil;texture.surface=(IOSurfaceRef)CFRetain(surface);texture.surfacePlane=plane;
+ // Observe the actual surface-to-runtime layout, not width*4 guesses. This
+ // samples successful imports only; neither changes row pitch nor suppresses
+ // a clear or a failed render. No pixel data is copied for diagnostics.
+ static std::atomic<uint64_t> imports{0};const uint64_t count=++imports;
+ if(count<=8||count%128==0)
+  NBLOG(@"X9 SURFACE layout: imports=%llu id=%u plane=%llu/%llu surface=%llux%llu texture=%llux%llu format=%llu fourcc=%08x row=%llu offset=%llu allocation=%llu import=%llu",
+   (unsigned long long)count,IOSurfaceGetID(surface),(unsigned long long)plane,(unsigned long long)planes,
+   (unsigned long long)IOSurfaceGetWidth(surface),(unsigned long long)IOSurfaceGetHeight(surface),
+   (unsigned long long)d.width,(unsigned long long)d.height,(unsigned long long)d.pixelFormat,IOSurfaceGetPixelFormat(surface),
+   (unsigned long long)row,(unsigned long long)(start-(uintptr_t)base),(unsigned long long)allocation,(unsigned long long)bytes);
+ return (id<MTLTexture>)texture;
 }
 - (id<MTLLibrary>)newLibraryWithData:(dispatch_data_t)data error:(NSError **)error {
+ if(!data){if(error)*error=nbError(@"no library data");return nil;}
  const void *bytes=nullptr;size_t size=0;dispatch_data_t mapped=dispatch_data_create_map(data,&bytes,&size);
  const uint64_t libraryBegan=nowUs();
- NmbLibrary *handle=nmb_library_new(gDevice,bytes,size,false);(void)mapped;gTimeLibrary.add(libraryBegan);
+ NmbLibrary *handle=nmb_library_new(gDevice,bytes,size,false);gTimeLibrary.add(libraryBegan);
  if(!handle)return failWith<id<MTLLibrary>>(error,@"library",nil);
- NBLibrary *library=[NBLibrary new];library.handle=handle;if(error)*error=nil;return (id<MTLLibrary>)library;
+ NBLibrary *library=[NBLibrary new];library.handle=handle;library.storage=mapped;library.bytes=(const uint8_t *)bytes;library.length=size;library.origin=@"dispatch-data";
+ if(error)*error=nil;return (id<MTLLibrary>)library;
 }
 - (id<MTLLibrary>)newLibraryWithFile:(NSString *)path error:(NSError **)error {
  NSData *bytes=path?[NSData dataWithContentsOfFile:path options:NSDataReadingMappedIfSafe error:error]:nil;if(!bytes)return nil;
  const uint64_t libraryBegan=nowUs();
  NmbLibrary *handle=nmb_library_new(gDevice,bytes.bytes,bytes.length,false);gTimeLibrary.add(libraryBegan);
  if(!handle)return failWith<id<MTLLibrary>>(error,@"library",nil);
- NBLibrary *library=[NBLibrary new];library.handle=handle;if(error)*error=nil;return (id<MTLLibrary>)library;
+ NBLibrary *library=[NBLibrary new];library.handle=handle;library.storage=bytes;library.bytes=(const uint8_t *)bytes.bytes;library.length=bytes.length;library.origin=path;
+ if(error)*error=nil;return (id<MTLLibrary>)library;
 }
 - (id<MTLLibrary>)newLibraryWithURL:(NSURL *)url error:(NSError **)error {
  if(!url.isFileURL){if(error)*error=nbError(@"a file URL is required");return nil;}
@@ -1219,31 +1450,52 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
  return [(id<MTLDevice>)self newLibraryWithURL:url error:error];
 }
 - (id<MTLLibrary>)newDefaultLibrary {return [(id<MTLDevice>)self newDefaultLibraryWithBundle:[NSBundle mainBundle] error:nil];}
+#include "NativeMetalLibraryMethods.inc"
+
 - (id<MTLComputePipelineState>)newComputePipelineStateWithFunction:(id<MTLFunction>)function error:(NSError **)error {
  return [(id<MTLDevice>)self newComputePipelineStateWithFunction:function options:MTLPipelineOptionNone reflection:nil error:error];
 }
 - (id<MTLComputePipelineState>)newComputePipelineStateWithFunction:(id<MTLFunction>)function options:(MTLPipelineOption)options
                                                          reflection:(MTLAutoreleasedComputePipelineReflection *)reflection error:(NSError **)error {
  if(reflection)*reflection=nil;
- if(![(id)function isKindOfClass:[NBFunction class]]){if(error)*error=nbError(@"foreign function");return nil;}
+ if(![(id)function isKindOfClass:[NBFunction class]] || ![(NBFunction *)function handle]){if(error)*error=nbError(@"foreign or stitch-only compute function");return nil;}
  const NmbPipelineOptions creation={(uint64_t)options,nullptr,0};
  const uint64_t pipelineBegan=nowUs();
  NmbComputePipeline *handle=nmb_compute_pipeline_new_with_options(gDevice,[(NBFunction *)function handle],&creation);gTimePipeline.add(pipelineBegan);
  if(!handle)return failWith<id<MTLComputePipelineState>>(error,@"compute pipeline",nil);
+ if(reflection && wantsReflection(options)) {
+  NmbComputePipelineDescriptor p={};p.function=[(NBFunction *)function handle];p.max_call_stack_depth=1;
+  *reflection=(MTLComputePipelineReflection *)computeReflection(&p);
+  if(!*reflection){nmb_compute_pipeline_release(handle);return failWith<id<MTLComputePipelineState>>(error,@"compute reflection",nil);}
+ }
  NBComputePipeline *state=[NBComputePipeline new];state.handle=handle;gPipelines++;if(error)*error=nil;return (id<MTLComputePipelineState>)state;
 }
 - (id<MTLComputePipelineState>)newComputePipelineStateWithDescriptor:(MTLComputePipelineDescriptor *)d options:(MTLPipelineOption)options
                                                        reflection:(MTLAutoreleasedComputePipelineReflection *)reflection error:(NSError **)error {
  if(reflection)*reflection=nil;
- NmbComputePipelineDescriptor p={};if(!computeDescriptor(d,&p,error))return nil;
+ NmbComputePipelineDescriptor p={};std::vector<NmbFunction *> linked,privateLinked;
+ if(!computeDescriptor(d,&p,linked,privateLinked,error))return nil;
  std::vector<NmbBinaryArchive *> archives;
  if(!pipelineArchives(d.binaryArchives,archives,error))return nil;
  const NmbPipelineOptions creation={(uint64_t)options,archives.data(),archives.size()};
  const uint64_t pipelineBegan=nowUs();
  NmbComputePipeline *handle=nmb_compute_pipeline_new_with_descriptor(gDevice,&p,&creation);gTimePipeline.add(pipelineBegan);
  if(!handle)return failWith<id<MTLComputePipelineState>>(error,@"compute pipeline",nil);
+ if(reflection && wantsReflection(options)) {
+  *reflection=(MTLComputePipelineReflection *)computeReflection(&p);
+  if(!*reflection){nmb_compute_pipeline_release(handle);return failWith<id<MTLComputePipelineState>>(error,@"compute reflection",nil);}
+ }
  NBComputePipeline *state=[NBComputePipeline new];state.handle=handle;state.label=d.label;gPipelines++;
  if(error)*error=nil;return (id<MTLComputePipelineState>)state;
+}
+- (id<MTLComputePipelineState>)newComputePipelineStateWithDescriptor:(MTLComputePipelineDescriptor *)d error:(NSError **)error {
+ return [(id<MTLDevice>)self newComputePipelineStateWithDescriptor:d options:MTLPipelineOptionNone reflection:nil error:error];
+}
+- (void)newComputePipelineStateWithDescriptor:(MTLComputePipelineDescriptor *)d options:(MTLPipelineOption)options
+                            completionHandler:(MTLNewComputePipelineStateWithReflectionCompletionHandler)handler {
+ NSError *error=nil;MTLComputePipelineReflection *reflection=nil;
+ id<MTLComputePipelineState> state=[(id<MTLDevice>)self newComputePipelineStateWithDescriptor:d options:options reflection:&reflection error:&error];
+ if(handler)handler(state,reflection,error);
 }
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)d error:(NSError **)error {
  return [(id<MTLDevice>)self newRenderPipelineStateWithDescriptor:d options:MTLPipelineOptionNone reflection:nil error:error];
@@ -1251,13 +1503,18 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)d options:(MTLPipelineOption)options
                                                         reflection:(MTLAutoreleasedRenderPipelineReflection *)reflection error:(NSError **)error {
  if(reflection)*reflection=nil;
- auto *p=new NmbRenderPipelineDescriptor();
+ auto *p=new NBRenderDescriptor();
  if(!renderDescriptor(d,p,error)){delete p;return nil;}
  std::vector<NmbBinaryArchive *> archives;
  if(!pipelineArchives(d.binaryArchives,archives,error)){delete p;return nil;}
  const NmbPipelineOptions creation={(uint64_t)options,archives.data(),archives.size()};
  const uint64_t pipelineBegan=nowUs();
- NmbRenderPipeline *handle=nmb_render_pipeline_new_with_options(gDevice,p,&creation);delete p;gTimePipeline.add(pipelineBegan);
+ NmbRenderPipeline *handle=nmb_render_pipeline_new_with_options(gDevice,p,&creation);gTimePipeline.add(pipelineBegan);
+ if(handle && reflection && wantsReflection(options)) {
+  *reflection=(MTLRenderPipelineReflection *)renderReflection(p);
+  if(!*reflection){nmb_render_pipeline_release(handle);delete p;return failWith<id<MTLRenderPipelineState>>(error,@"render reflection",nil);}
+ }
+ delete p;
  if(!handle)return failWith<id<MTLRenderPipelineState>>(error,@"render pipeline",nil);
  NBRenderPipeline *state=[NBRenderPipeline new];state.handle=handle;gPipelines++;if(error)*error=nil;return (id<MTLRenderPipelineState>)state;
 }
@@ -1274,7 +1531,7 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
 }
 - (id<MTLSamplerState>)newSamplerStateWithDescriptor:(MTLSamplerDescriptor *)d {
  NmbSamplerDescriptor s={(uint64_t)d.minFilter,(uint64_t)d.magFilter,(uint64_t)d.mipFilter,(uint64_t)d.sAddressMode,(uint64_t)d.tAddressMode,(uint64_t)d.rAddressMode,
-     (uint64_t)d.borderColor,(uint64_t)d.normalizedCoordinates,d.maxAnisotropy,(uint64_t)d.compareFunction,(uint64_t)d.lodAverage,d.lodMinClamp,d.lodMaxClamp};
+     (uint64_t)d.borderColor,(uint64_t)d.normalizedCoordinates,d.maxAnisotropy,(uint64_t)d.compareFunction,(uint64_t)d.lodAverage,d.lodMinClamp,d.lodMaxClamp,(uint64_t)d.supportArgumentBuffers};
  NmbSampler *handle=nmb_sampler_new(gDevice,&s);
  if(!handle){NBLOG(@"native-metal: sampler refused: %@",lastError());return nil;}
  NBSampler *sampler=[NBSampler new];sampler.handle=handle;return (id<MTLSamplerState>)sampler;
@@ -1293,6 +1550,19 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
 // The device queries the runtime answers (nmb_device_answer_selector), as methods of the device class. One without an argument is read once
 // and installed only where the device has an answer of its own; one with an argument asks the runtime each call, and a refusal answers 0/NO
 // with the reason logged.
+// iOS16 Metal's library builder probes this optional private selector before
+// dereferencing TargetDeviceInfo+0x10. _MTLDevice inherits an implementation
+// that returns NULL; this backend does not supply Apple's target descriptor.
+// Report its absence so the original builder takes its explicit fallback.
+static BOOL deviceRespondsToSelector(id object,SEL method,SEL query) {
+ if(query==sel_registerName("targetDeviceInfo")) {
+  static std::atomic<bool> logged{false};
+  if(!logged.exchange(true))NBLOG(@"native-metal: targetDeviceInfo unavailable; using framework fallback");
+  return NO;
+ }
+ struct objc_super parent={object,class_getSuperclass(object_getClass(object))};
+ return ((BOOL (*)(struct objc_super *,SEL,SEL))objc_msgSendSuper)(&parent,method,query);
+}
 static std::unordered_map<SEL,uint64_t> gAnswers;
 static NSUInteger countAnswer(id,SEL cmd) {return (NSUInteger)gAnswers.at(cmd);}
 static BOOL flagAnswer(id,SEL cmd) {return gAnswers.at(cmd)!=0;}
@@ -1323,12 +1593,28 @@ static void installAnswers(Class cls) {
  }
 }
 
+#include "NativeMetalAPISupplement.inc"
+#if X9_RUNTIME_LATEST
+#include "NativeMetalIO.inc"
+#include "NativeMetalCounters.inc"
+#endif
+
 extern "C" id native_bridge_metal_open(const char *loader,const char *cache,uint64_t registryID,void (*missing)(const char *,const char *)) {
  if(gDeviceObject)return gDeviceObject;
  gMissing=missing;gInFlight=[NSMutableSet set];
  gDevice=nmb_device_open(loader,cache);
  if(!gDevice){NBLOG(@"native-metal: device refused: %s",nmb_last_error());return nil;}
  char name[128]={};nmb_device_name(gDevice,name,sizeof name);gName=[NSString stringWithUTF8String:name];gRegistryID=registryID;
+ // Keep all waived rows visible. Admission never rewrites a hardware feature.
+ const int64_t admitted[]={1001,1002,1003,3001,3002};
+ for(int64_t family:admitted) {
+  char reasons[16384]={};size_t bytes=nmb_device_family_blockers(gDevice,family,reasons,sizeof reasons);
+  for(NSString *line in [[NSString stringWithUTF8String:reasons] componentsSeparatedByString:@"\n"])
+   if(line.length)NSLog(@"native-metal: family admission %@",line);
+  if(bytes>=sizeof reasons)NSLog(@"native-metal: family admission truncated bytes=%lu",(unsigned long)bytes);
+ }
+ NSLog(@"native-metal: UniXNU admission policy; Mali shader cores=%u; individual API refusals retained",gShaderCoreCount.load());
+
  Class base=objc_getClass("_MTLDevice");
 #if !TARGET_OS_IPHONE
  // Host instrument: on NSObject every selector a client sends that this file lacks reaches the missing hook, instead of the host's
@@ -1344,10 +1630,27 @@ extern "C" id native_bridge_metal_open(const char *loader,const char *cache,uint
  Class cls=objc_allocateClassPair(base,"X9GeneralMetalDevice",0);if(!cls)return nil;
  unsigned count=0;Method *methods=class_copyMethodList([NBDeviceMethods class],&count);
  for(unsigned i=0;i<count;i++)class_addMethod(cls,method_getName(methods[i]),method_getImplementation(methods[i]),method_getTypeEncoding(methods[i]));
- free(methods);installAnswers(cls);class_addProtocol(cls,@protocol(MTLDevice));
+ free(methods);
+ class_addMethod(cls,@selector(respondsToSelector:),(IMP)deviceRespondsToSelector,
+  method_getTypeEncoding(class_getInstanceMethod(base,@selector(respondsToSelector:))));
+ installAnswers(cls);class_addProtocol(cls,@protocol(MTLDevice));
  // The original registration (_MTLAddDevice) asserts that a plugin's device conforms to Metal's private device protocol as well; the target's own
  // drivers get it from their IOGPU base class. Conformance only answers conformsToProtocol:, the methods are still looked up one by one.
  if(Protocol *spi=objc_getProtocol("MTLDeviceSPI"))class_addProtocol(cls,spi);
+ // UniXNU's MPS object identity fix: MPS rejects a command buffer which does
+ // not conform to MTLCommandBuffer before it even asks for userDictionary.
+ static const char *const conformances[][2]={
+  {"NBBuffer","MTLBuffer"},{"NBTexture","MTLTexture"},{"NBLibrary","MTLLibrary"},{"NBFunction","MTLFunction"},
+  {"NBComputePipeline","MTLComputePipelineState"},{"NBRenderPipeline","MTLRenderPipelineState"},
+  {"NBSampler","MTLSamplerState"},{"NBDepthStencil","MTLDepthStencilState"},{"NBEvent","MTLEvent"},
+  {"NBSharedEvent","MTLSharedEvent"},{"NBFence","MTLFence"},{"NBQueue","MTLCommandQueue"},
+  {"NBCommandBuffer","MTLCommandBuffer"},{"NBEncoder","MTLCommandEncoder"},
+  {"NBComputeEncoder","MTLComputeCommandEncoder"},{"NBRenderEncoder","MTLRenderCommandEncoder"},
+  {"NBBlitEncoder","MTLBlitCommandEncoder"},{"NBHeap","MTLHeap"},{"NBBinaryArchive","MTLBinaryArchive"}
+ };
+ for(const auto &c:conformances) {
+  Class k=objc_getClass(c[0]);Protocol *pr=objc_getProtocol(c[1]);if(k&&pr)class_addProtocol(k,pr);
+ }
  objc_registerClassPair(cls);
  gDeviceObject=[cls new];
  return gDeviceObject;
@@ -1462,6 +1765,7 @@ extern "C" size_t native_bridge_metal_benchmark(id device,const char *metallib,u
 }
 // The telemetry table the plugin streams to the kernel's log: newline-separated rows of at most 90 characters.
 extern "C" size_t native_bridge_metal_telemetry(char *out,size_t size) {
+ if(!out||!size)return 0;
  size_t at=0;out[0]=0;
  auto row=[&](const char *format,auto... args){
   char text[200];int n=snprintf(text,sizeof text,format,args...);if(n<=0)return;if(n>90)n=90;
@@ -1482,9 +1786,7 @@ extern "C" size_t native_bridge_metal_telemetry(char *out,size_t size) {
  row("J completed wait n=%llu total=%llums max=%llums",(unsigned long long)gTimeWaitCompleted.count.load(),ms(gTimeWaitCompleted.total.load()),ms(gTimeWaitCompleted.slowest.load()));
  row("J resource wait n=%llu total=%llums max=%llums",(unsigned long long)gTimeResourceWait.count.load(),ms(gTimeResourceWait.total.load()),ms(gTimeResourceWait.slowest.load()));
  row("J resource checks=%llu skipped=%llu",(unsigned long long)gResourceChecks.load(),(unsigned long long)gResourceSkipped.load());
- row("J surface cache n=%llu bytes=%llu dup=%llu us=%llu max=%llu",(unsigned long long)gTimeSurfaceFlush.count.load(),
-  (unsigned long long)gSurfaceFlushBytes.load(),(unsigned long long)gSurfaceFlushDuplicates.load(),
-  (unsigned long long)gTimeSurfaceFlush.total.load(),(unsigned long long)gTimeSurfaceFlush.slowest.load());
+ row("%s","J surface cache ownership=native-kernel");
  // The runtime's VkPipeline makings (the creation log, METAL2VULKAN_LOG_PIPELINES; they happen at draws, not at the state's creation) and
  // its shader cache: where the driver's compile time goes.
  uint64_t work[10]={};

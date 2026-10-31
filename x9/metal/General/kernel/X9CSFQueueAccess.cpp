@@ -69,7 +69,9 @@ static bool doorbell(void *cookie) {
 }
 static uint64_t now(void *) {uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);return ns;}
 static void yield(void *) {
- static int event;uint64_t deadline;clock_interval_to_deadline(1,NSEC_PER_MSEC,&deadline);
+ // Sleep, do not busy-spin. Each of the four START/SUSPEND ACK stages used
+ // to add an unconditional1ms on a miss, even for sub-millisecond replies.
+ static int event;uint64_t deadline;clock_interval_to_deadline(100,NSEC_PER_USEC,&deadline);
  (void)assert_wait_deadline(&event,THREAD_UNINT,deadline);thread_block(THREAD_CONTINUE_NULL);
 }
 }

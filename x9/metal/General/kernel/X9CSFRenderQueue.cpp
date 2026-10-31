@@ -33,6 +33,23 @@ static bool notify(const X9CSFQueueIO *io,X9CSFRenderGroup *group,bool streams,u
  *global_req=(old&~mask)|((ack^mask)&mask);
  return write(io,f.global_input+8,*global_req)&&clean(io,f.global_input,4096)&&io->doorbell(io->cookie);
 }
+static void ack_snapshot(const X9CSFQueueIO *io,const X9CSFRenderGroup *g,unsigned state,bool streams,
+ uint32_t global_req,uint32_t group_req) {
+ const auto &f=g->interface;
+ uint32_t gr=0,ga=0,cr=0,ca=0,dr=0,da=0;
+ bool ok=read(io,f.global_input+8,&gr)&&read(io,f.global_output+8,&ga)&&
+  read(io,f.group_input,&cr)&&read(io,f.group_output,&ca)&&
+  read(io,f.group_input+8,&dr)&&read(io,f.group_output+8,&da);
+ IOLog("X9 CSF ACK TIMEOUT: slot=%u want=%u streams=%u suspended=%u running=%u read=%u global=%08x/%08x expected=%08x CSG=%08x/%08x CSDB=%08x/%08x expected=%08x\n",
+  f.group_index,state,streams,g->suspended,g->running,ok,gr,ga,global_req,cr,ca,dr,da,group_req);
+ for(unsigned i=0;i<3;i++)if(g->streams_touched&(1u<<i)) {
+  uint32_t req=0,ack=0,fault=0,fatal=0;
+  bool valid=read(io,f.streams[i].input,&req)&&read(io,f.streams[i].output,&ack)&&
+   read(io,f.streams[i].output+0x80,&fault)&&read(io,f.streams[i].output+0x84,&fatal);
+  IOLog("X9 CSF ACK TIMEOUT: slot=%u stream=%u read=%u REQ=%08x ACK=%08x FAULT=%08x FATAL=%08x\n",
+   f.group_index,i,valid,req,ack,fault,fatal);
+ }
+}
 static IOReturn wait_ack(const X9CSFQueueIO *io,X9CSFRenderGroup *g,unsigned state,bool streams,
  uint32_t global_req,uint32_t group_req,uint64_t epoch,uint64_t end) {
  for(;;) {
@@ -49,7 +66,7 @@ static IOReturn wait_ack(const X9CSFQueueIO *io,X9CSFRenderGroup *g,unsigned sta
    }
   }else ready=ready&&(ack&state_mask)==state;
   if(ready)return kIOReturnSuccess;
-  if(io->now_ns(io->cookie)>=end)return kIOReturnTimeout;
+  if(io->now_ns(io->cookie)>=end){ack_snapshot(io,g,state,streams,global_req,group_req);return kIOReturnTimeout;}
   io->yield(io->cookie);
  }
 }

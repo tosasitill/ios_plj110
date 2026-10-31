@@ -10,6 +10,19 @@ struct X9RenderResource {
  uint64_t bytes;
  uint32_t handle,flags;
  bool prepared;
+ /* Monotonic CPU exposure: imports start exposed; returning a descriptor to
+  * userspace exposes it forever, even after unmap. Retained contents pointers,
+  * VM aliases and IOSurface writers need no dirty notification. Only a native
+  * allocation that has NEVER been exposed may skip repeated CPU maintenance.
+  * Private command/fence storage has its separate explicit sync path. */
+ bool cpu_exposed,initial_cache_clean,imported;
+ /* Rebuilt under the context + GPU owner locks from EVERY live GPU mapping,
+  * not from a draw's resource list or dirty notifications. Bounding intervals
+  * deliberately include holes between mappings and all indirect accesses.
+  * Empty means not GPU-addressable in this submission's page table. */
+ uint64_t cache_begin,cache_end,write_begin,write_end;
+ /* Kernel alias retained only while this prepared import remains alive. */
+ IOMemoryMap *cache_mapping;
 };
 struct X9RenderVMEntry {
  X9RenderResource *resource;

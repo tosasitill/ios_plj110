@@ -1,0 +1,26 @@
+--- a/iokit/Kernel/arm/SweetX9RenderService.cpp
++++ b/iokit/Kernel/arm/SweetX9RenderService.cpp
+@@ -251,9 +251,21 @@
+ public:
+  IOReturn newUserClient(task_t task,void *security,UInt32 type,OSDictionary *props,IOUserClient **handler) APPLE_KEXT_OVERRIDE {
+   if(!handler)return kIOReturnBadArgument;
++  *handler=nullptr;
+   auto *client=new SweetX9RenderUserClient;if(!client)return kIOReturnNoMemory;
+-  if(!client->initWithTask(task,security,type,props)||!client->attach(this)||!client->start(this)) {
+-   if(client->getProvider()==this)client->detach(this);client->release();return kIOReturnNotPrivileged;
++  /* A denied init may return before IORegistryEntry has its reserved state.
++   * Never call getProvider() on that object. Detach only after attach succeeds. */
++  if(!client->initWithTask(task,security,type,props)) {
++   IOLog("X9 RENDER CLIENT: init refused pid=%d type=%u;release before attach\n",proc_selfpid(),type);
++   client->release();return kIOReturnNotPrivileged;
++  }
++  if(!client->attach(this)) {
++   IOLog("X9 RENDER CLIENT: attach refused pid=%d\n",proc_selfpid());
++   client->release();return kIOReturnNotPrivileged;
++  }
++  if(!client->start(this)) {
++   IOLog("X9 RENDER CLIENT: start refused pid=%d\n",proc_selfpid());
++   client->detach(this);client->release();return kIOReturnNotPrivileged;
+   }
+   *handler=client;return kIOReturnSuccess;
+  }

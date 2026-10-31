@@ -1,3 +1,8 @@
+## X9 GPU source handoff (2026-10-31)
+
+- Imported latest available X9 Metal/PanVK sources, XNU GPU patches 0254–0260 and 0263, plus runtime patches pan194–pan205 based on metal2vulkan `219f01365dc4c8eb346816c405b5b17403793764`. The retained kernel source includes pan209 coherency gating and pan212 persistent import mappings. Plugin inputs correspond to pan207; derive plugin identity from a verified allowlist.
+- Source integration only: the repository build recipe remains pan184 and must be updated before claiming a reproducible current build. No build or device test ran in this checkout. Later device captures show repeated UI hangs without a captured GPU fault; no claim of a fix or measured performance improvement. No device data, Apple files, root manifests or binaries were included.
+
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
 ## Agent handoff / active work (2026-10-15, latest)

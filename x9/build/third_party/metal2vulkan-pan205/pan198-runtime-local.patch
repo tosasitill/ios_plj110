@@ -1,0 +1,1440 @@
+--- a/crates/metal2vulkan/src/bind/mod.rs
++++ b/crates/metal2vulkan/src/bind/mod.rs
+@@ -161,6 +161,7 @@
+ pub(crate) mod sample_planes;
+ pub(crate) mod shadow_copy_back;
+ pub(crate) mod shadow_copy_in;
++mod raw_shadow;
+ pub(crate) mod shadow_merge;
+ pub(crate) mod shadow_merge_image;
+ pub(crate) mod state;
+@@ -305,6 +306,7 @@
+ };
+ pub use shadow_copy_back::{shadow_copy_back_module, ShadowCopyBackModule, ShadowTexelView};
+ pub use shadow_copy_in::{shadow_copy_in_module, ShadowCopyInModule};
++pub use raw_shadow::{raw_shadow_module,RawShadowModule,RawShadowTexel,RawShadowDirection};
+ pub use shadow_merge::{shadow_merge_module, ShadowMergeModule, ShadowMergeStores};
+ pub use shadow_merge_image::{
+     shadow_merge_image_module, shadow_merge_kept_image_module, ShadowMergeImageModule,
+--- /dev/null
++++ b/crates/metal2vulkan/src/bind/raw_shadow.rs
+@@ -0,0 +1,118 @@
++//! Exact raw texel moves for linear shadows whose images have no transfer usage.
++//!
++//! A compatible unsigned-integer view preserves every bit, including NaN payloads.
++//! One invocation moves one texel. Byte and halfword physical-buffer accesses
++//! preserve adjacent bytes without a read/modify/write race. The caller validates
++//! every addressed row/layer against the retained backing before recording.
++use std::sync::Arc;
++use crate::budget::{Budget, Meter};
++use crate::device::Device;
++use crate::device::requirements::Requirements;
++use crate::error::{Error, Feature, Unsupported};
++use crate::pipeline::sym::{PushField, ResourceKind, ResourceSlot, Stage, Symbol};
++use crate::spirv::builder::{FunctionBuilder, ModuleBuilder};
++use crate::spirv::builder::constructs::{ArmEnd, ArmFn};
++use crate::spirv::error::BResult;
++use crate::spirv::ids::Value;
++use crate::spirv::ir::{BinOp, ConvOp, Dim, ExecMode, ExecModel, ImageOperands,
++    ImageType, ImageUsage, IoDir, MemAccess, StorageClass, TexelMemory, Type};
++use crate::vk::Format;
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
++pub enum RawShadowTexel { U8, U16, U32, U32x2, U32x4 }
++impl RawShadowTexel {
++    pub fn of_bytes(bytes:u32)->Option<Self> {Some(match bytes {1=>Self::U8,2=>Self::U16,4=>Self::U32,8=>Self::U32x2,16=>Self::U32x4,_=>return None})}
++    pub fn bytes(self)->u32 {match self {Self::U8=>1,Self::U16=>2,Self::U32=>4,Self::U32x2=>8,Self::U32x4=>16}}
++    pub fn lanes(self)->u32 {match self {Self::U32x2=>2,Self::U32x4=>4,_=>1}}
++    pub fn format(self)->Format {match self {Self::U8=>Format::R8_UINT,Self::U16=>Format::R16_UINT,Self::U32=>Format::R32_UINT,Self::U32x2=>Format::R32G32_UINT,Self::U32x4=>Format::R32G32B32A32_UINT}}
++    fn storage(self)->crate::spv::ImageFormat {use crate::spv::ImageFormat as I;match self {Self::U8=>I::R8ui,Self::U16=>I::R16ui,Self::U32=>I::R32ui,Self::U32x2=>I::Rg32ui,Self::U32x4=>I::Rgba32ui}}
++}
++#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
++pub enum RawShadowDirection { IntoImage, FromImage }
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct RawShadowModule {pub spirv:Arc<[u32]>,pub requirements:Requirements}
++impl RawShadowModule {pub const PUSH_BYTES:u32=40;pub const LOCAL_SIZE:u32=64;}
++const IMAGE:ResourceSlot=ResourceSlot{stage:Stage::Kernel,kind:ResourceKind::Texture,index:0};
++fn k(f:&mut FunctionBuilder<'_>,n:u32)->BResult<Value>{let c=f.u32_const(n)?;f.module().const_value(c)}
++
++pub fn raw_shadow_module(device:&Device,texel:RawShadowTexel,direction:RawShadowDirection)->Result<RawShadowModule,Error>{
++    let into=direction==RawShadowDirection::IntoImage;
++    let mut b=ModuleBuilder::new();
++    let u=b.ty(Type::Int{width:32,signed:false})?;
++    let u64_=b.ty(Type::Int{width:64,signed:false})?;
++    let unit=(texel.bytes()/texel.lanes()).min(4);
++    let element=b.ty(Type::Int{width:(unit*8) as u8,signed:false})?;
++    let v3=b.ty(Type::Vector{elem:u,len:3})?;
++    let v4=b.ty(Type::Vector{elem:u,len:4})?;
++    let shape=b.push_member(PushField::DispatchRegion,v4,0)?;
++    let strides=b.push_member(PushField::StageInRegion,v4,16)?;
++    let address=b.push_member(PushField::CommandRecordsAddress,u64_,32)?;
++    let push=b.push_global()?;
++    let it=b.ty(Type::Image(ImageType{sampled_type:u,dim:Dim::D2,depth:false,arrayed:true,multisampled:false,
++        usage:if into {ImageUsage::Storage}else{ImageUsage::Sampled},
++        format:if into {texel.storage()}else{crate::spv::ImageFormat::Unknown}}))?;
++    let image=b.resource(IMAGE,StorageClass::UniformConstant,it)?;
++    let gid=b.builtin(crate::spv::BuiltIn::GlobalInvocationId,IoDir::Input,v3)?;
++    let void=b.ty(Type::Void)?;
++    let mut f=b.function(void)?;
++    let zero=k(&mut f,0)?;
++    let gv=f.module().global_value(gid)?;
++    let gv=f.load(gv,MemAccess::default())?;
++    let x=f.composite_extract(gv,&[0])?;let y=f.composite_extract(gv,&[1])?;let z=f.composite_extract(gv,&[2])?;
++    let pv=f.module().global_value(push)?;
++    let mut values=Vec::new();
++    for field in [shape.index,strides.index,address.index] {
++        let i=k(&mut f,field)?;let p=f.access_chain(pv,&[i])?;values.push(f.load(p,MemAccess::default())?);
++    }
++    let s=values[0];let st=values[1];let base=values[2];
++    let width=f.composite_extract(s,&[2])?;let height=f.composite_extract(s,&[3])?;
++    let a=f.binary(BinOp::ULessThan,x,width)?;let c=f.binary(BinOp::ULessThan,y,height)?;
++    let inside=f.binary(BinOp::LogicalAnd,a,c)?;
++    let ig=f.module().global_value(image)?;
++    let image=f.load(ig,MemAccess::default())?;
++    let copy:ArmFn<'_,()>=Box::new(move|f,_|{
++        let x0=f.composite_extract(s,&[0])?;let y0=f.composite_extract(s,&[1])?;
++        let layer=f.composite_extract(st,&[2])?;
++        let ix=f.binary(BinOp::IAdd,x0,x)?;let iy=f.binary(BinOp::IAdd,y0,y)?;let iz=f.binary(BinOp::IAdd,layer,z)?;
++        let coord=f.composite_construct(v3,&[ix,iy,iz])?;
++        let row=f.composite_extract(st,&[0])?;let slice=f.composite_extract(st,&[1])?;
++        let mut offset=k(f,0)?;offset=f.convert(ConvOp::UConvert,offset,u64_)?;
++        for (index,stride) in [(x,k(f,texel.bytes())?),(y,row),(z,slice)] {
++            let i=f.convert(ConvOp::UConvert,index,u64_)?;let t=f.convert(ConvOp::UConvert,stride,u64_)?;
++            let at=f.binary(BinOp::IMul,i,t)?;offset=f.binary(BinOp::IAdd,offset,at)?;
++        }
++        let first=f.binary(BinOp::IAdd,base,offset)?;
++        let fetched=if into {None}else{Some(f.fetch(image,coord,&ImageOperands{lod:Some(zero),..ImageOperands::default()})?)};
++        let mut channels=Vec::new();
++        for lane in 0..texel.lanes() {
++            let off=k(f,lane*unit)?;let off=f.convert(ConvOp::UConvert,off,u64_)?;
++            let at=f.binary(BinOp::IAdd,first,off)?;
++            let place=f.device_place(at,element)?;
++            let mem=MemAccess{aligned:Some(unit),..MemAccess::default()};
++            if into {
++                let value=f.load(place,mem)?;
++                channels.push(if unit==4 {value}else{f.convert(ConvOp::UConvert,value,u)?});
++            } else {
++                let value=f.composite_extract(fetched.expect("from-image module"),&[lane])?;
++                let value=if unit==4 {value}else{f.convert(ConvOp::UConvert,value,element)?};
++                f.store(place,value,mem)?;
++            }
++        }
++        if into {
++            while channels.len()<4 {channels.push(zero);}
++            let value=f.composite_construct(v4,&channels)?;
++            f.write(image,coord,value,&ImageOperands::default(),TexelMemory::default())?;
++        }
++        Ok(ArmEnd::FallThrough(Vec::new()))
++    });
++    f.if_(&mut (),inside,copy,None)?;f.ret(None)?;let entry=f.finish()?;
++    b.entry(ExecModel::GLCompute,entry,vec![ExecMode::LocalSize{x:RawShadowModule::LOCAL_SIZE,y:1,z:1}])?;
++    let m=b.finalize()?;let profile=device.profile();
++    profile.check(m.requirements()).map_err(|c|Error::Unsupported(Unsupported::needs(Feature::Format,c)))?;
++    let mut meter=Meter::new(&Budget::default());crate::spirv::verify::verify(&m,profile,&mut meter)?;
++    let r=crate::spirv::serialize::serialize(m)?;
++    let words=crate::spirv::serialize::relocate(&r,&|sym:&Symbol|match sym {
++        Symbol::DescriptorSet(_)=>Some(0),Symbol::Binding(s) if *s==IMAGE=>Some(0),_=>None,
++    })?;
++    Ok(RawShadowModule{spirv:words.into(),requirements:r.requirements})
++}
+--- a/crates/metal2vulkan/src/cache/mod.rs
++++ b/crates/metal2vulkan/src/cache/mod.rs
+@@ -60,8 +60,8 @@
+ /// unchanged version, and its bless records the version. Independent of the crate's version and of
+ /// [`ARTIFACT_FORMAT_VERSION`]. The commit that bumps it says what changed; this comment keeps no
+ /// history.
+-// X9 pan195: independent-vertex barrier proof and inherited ulong swizzle lowering.
+-pub const SEMANTICS_VERSION: u32 = 1960001;
++// X9 pan197: raw linear-shadow kernels and native split normalized depth/stencil.
++pub const SEMANTICS_VERSION: u32 = 1970001;
+ 
+ /// The byte-layout version of encoded artifacts (`CompiledFunction::to_bytes` and the
+ /// [`PipelineArtifact`] encodings). Every encoded artifact carries it, and a decode under another
+@@ -71,7 +71,7 @@
+ /// re-typed in an encoded type, its `codec` body or its `envelope`. A variant removed while its tag
+ /// stays unused needs no bump: an entry holding it fails to decode, which is a miss. The commit that
+ /// bumps it says what changed; this comment keeps no history.
+-pub const ARTIFACT_FORMAT_VERSION: u32 = 1960001;
++pub const ARTIFACT_FORMAT_VERSION: u32 = 1970001;
+ 
+ /// The version of what this crate's runtime does with a compiled pipeline: instantiating a binding
+ /// plan (`BindingPlan::instantiate_*`: descriptor ranges, push bytes, root, argument, and handle
+@@ -96,7 +96,7 @@
+ /// keeps no history.
+ // X9 pan195: sampled-source copies, memoryless resolve backing, aspect clear reach
+ // and linear-allocation padding change execution under otherwise identical inputs.
+-pub const RUNTIME_VERSION: u32 = 1960001;
++pub const RUNTIME_VERSION: u32 = 1980001;
+ 
+ /// The digest of the sources this build of the crate was compiled from: SHA-256, as lowercase hex,
+ /// of the manifest, the build script, and exactly the files the crate roots' module tree compiles
+--- a/crates/metal2vulkan/src/lower/fragment/color.rs
++++ b/crates/metal2vulkan/src/lower/fragment/color.rs
+@@ -359,7 +359,7 @@
+             continue;
+         }
+         // An extended-range attachment's image holds the raw format's `uint` texels.
+-        let float = c.form.is_float() && c.extended.is_none();
++        let float = c.form.is_float() && (c.extended.is_none() || c.extended==Some(ExtendedRange::A1Bgr5));
+         out.insert(c.color, input_attachment(mb, c.color, float, multisampled)?);
+     }
+     // A storage-form attachment the function writes without reading it: an extended-range
+@@ -375,7 +375,8 @@
+         .map(|(&c, _)| c);
+     for color in blended.chain(merges.keys().copied()) {
+         if let std::collections::btree_map::Entry::Vacant(e) = out.entry(color) {
+-            e.insert(input_attachment(mb, color, false, multisampled)?);
++            let float=blends.get(&color).is_some_and(|b|b.form==ExtendedRange::A1Bgr5);
++            e.insert(input_attachment(mb, color, float, multisampled)?);
+         }
+     }
+     Ok(out)
+@@ -475,5 +476,27 @@
+     let origin = fb.module().constant(Constant::Null { ty: ivec2 })?;
+     let origin = fb.module().const_value(origin)?;
+     let ops = super::fetch::operands(cx, fb)?;
+-    fb.read(img, origin, &ops, TexelMemory::PRIVATE)
+-}
++    let value=fb.read(img, origin, &ops, TexelMemory::PRIVATE)?;
++    let packed=cx.plan.families.stage_io.interface.extended_range_colors.get(&color)
++        .is_some_and(|e|e.form==ExtendedRange::A1Bgr5);
++    if !packed {return Ok(value);}
++    // Reconstruct the identical packed word from the attachment's two bytes.
++    use crate::spirv::ir::{BinOp,ConvOp,GlslOp};
++    let ft=fb.module().ty(SType::Float{width:32})?;
++    let ut=fb.module().ty(SType::Int{width:32,signed:false})?;
++    let uv=fb.module().ty(SType::Vector{elem:ut,len:4})?;
++    let scale=fb.module().constant(Constant::Scalar{ty:ft,bits:crate::spirv::ir::ConstBits(u64::from(255.0f32.to_bits()))})?;
++    let scale=fb.module().const_value(scale)?;
++    let mut bytes=Vec::new();
++    for lane in 0..2 {
++        let x=fb.composite_extract(value,&[lane])?;
++        let x=fb.binary(BinOp::FMul,x,scale)?;
++        let x=fb.glsl(GlslOp::RoundEven,&[x])?;
++        bytes.push(fb.convert(ConvOp::ConvertFToU,x,ut)?);
++    }
++    let sh=fb.u32_const(8)?;let sh=fb.module().const_value(sh)?;
++    let hi=fb.binary(BinOp::ShiftLeftLogical,bytes[1],sh)?;
++    let word=fb.binary(BinOp::BitwiseOr,bytes[0],hi)?;
++    let z=fb.u32_const(0)?;let z=fb.module().const_value(z)?;
++    fb.composite_construct(uv,&[word,z,z,z])
++}
+--- a/crates/metal2vulkan/src/lower/stage_io/extended_color.rs
++++ b/crates/metal2vulkan/src/lower/stage_io/extended_color.rs
+@@ -83,8 +83,8 @@
+     cx.families.arith.converts(e.form);
+     cx.families.stage_io.extended.insert(color, e);
+     Ok(Some(IoType {
+-        numeric: IoNumeric::Uint,
+-        components: e.form.raw_components() as u8,
++        numeric: if e.form==ExtendedRange::A1Bgr5 {IoNumeric::Float}else{IoNumeric::Uint},
++        components: if e.form==ExtendedRange::A1Bgr5 {4}else{e.form.raw_components() as u8},
+         source_bits: 32,
+     }))
+ }
+@@ -103,7 +103,34 @@
+         true => bfloat_output(fb, e, f, x)?,
+         false => texel(fb, form, f, x)?,
+     };
++    if form==ExtendedRange::A1Bgr5 {
++        let original=four_lanes(fb,f,x)?;
++        let alpha=fb.composite_extract(original,&[3])?;
++        return a1_attachment(fb,texel,alpha);
++    }
+     raw_components(fb, form, texel)
++}
++
++/// Encode both bytes as normalized channels, with the original output's
++/// alpha available to coverage. Each byte roundtrips through RG8_UNORM exactly;
++/// its 1/255 quotient is far inside that byte's quantization interval.
++pub(crate) fn a1_attachment(fb:&mut FunctionBuilder<'_>,raw:Value,alpha:Value)->BResult<Value>{
++    use crate::spirv::ir::{BinOp,ConvOp};
++    let word=fb.composite_extract(raw,&[0])?;
++    let mask=fb.u32_const(255)?;let mask=fb.module().const_value(mask)?;
++    let shift=fb.u32_const(8)?;let shift=fb.module().const_value(shift)?;
++    let low=fb.binary(BinOp::BitwiseAnd,word,mask)?;
++    let high=fb.binary(BinOp::ShiftRightLogical,word,shift)?;
++    let ft=fb.module().ty(Type::Float{width:32})?;
++    let vt=fb.module().ty(Type::Vector{elem:ft,len:4})?;
++    let c=fb.module().constant(Constant::Scalar{ty:ft,bits:ConstBits(u64::from((1.0f32/255.0).to_bits()))})?;
++    let scale=fb.module().const_value(c)?;
++    let r=fb.convert(ConvOp::ConvertUToF,low,ft)?;
++    let r=fb.binary(BinOp::FMul,r,scale)?;
++    let g=fb.convert(ConvOp::ConvertUToF,high,ft)?;
++    let g=fb.binary(BinOp::FMul,g,scale)?;
++    let z=fb.module().constant(Constant::Null{ty:ft})?;let z=fb.module().const_value(z)?;
++    fb.composite_construct(vt,&[r,g,z,alpha])
+ }
+ 
+ /// The raw format's components of `texel`, a `uvec4` raw texel of an attachment held in `form`:
+--- a/crates/metal2vulkan/src/lower/stage_io/mod.rs
++++ b/crates/metal2vulkan/src/lower/stage_io/mod.rs
+@@ -2035,6 +2035,11 @@
+     };
+     let texel =
+         crate::lower::fragment::input_blend_texel(cx, fb, (color, ib), (form, part), second)?;
++    if ib.form==crate::metal::format::ExtendedRange::A1Bgr5 {
++        let original=extended_color::four_lanes(fb,form,part)?;
++        let alpha=fb.composite_extract(original,&[3])?;
++        return extended_color::a1_attachment(fb,texel,alpha);
++    }
+     extended_color::raw_components(fb, ib.form, texel)
+ }
+ 
+--- a/crates/metal2vulkan/src/metal/format/mod.rs
++++ b/crates/metal2vulkan/src/metal/format/mod.rs
+@@ -1755,6 +1755,19 @@
+     usages: &BTreeSet<FormatUsage>,
+     profile: &DeviceProfile,
+ ) -> Result<FormatMapping, Error> {
++    // A1BGR5 renders its raw two bytes through RG8_UNORM. The float4
++    // output's alpha remains available to native alpha-to-coverage even though
++    // the stored texel has no alpha channel in this view. Sampling/storage keep
++    // R16_UINT and decode the original packed word.
++    if pf==PixelFormat::A1BGR5Unorm && usages.contains(&FormatUsage::ColorAttachment)
++        && !usages.contains(&FormatUsage::ColorAttachmentBlend) {
++        let format=vk::Format::R8G8_UNORM;
++        if let Some(&usage)=usages.iter().find(|&&u|!profile.supports_format(format,u)) {
++            return Err(Unsupported::needs(Feature::Format,Capability::Format{format,usage}).into());
++        }
++        return Ok(FormatMapping{format,components:vk::ComponentMapping::IDENTITY,
++            aspects:vk::ImageAspectFlags::COLOR,emulation:FormatEmulation::ExtendedRange});
++    }
+     let (aspects, candidates) = candidates(pf)?;
+     if let Some(&usage) = usages.iter().find(|&&u| !aspects_admit(aspects, u)) {
+         return Err(Error::InvalidDescriptor(
+--- a/crates/metal2vulkan/src/pipeline/link/graphics.rs
++++ b/crates/metal2vulkan/src/pipeline/link/graphics.rs
+@@ -452,6 +452,9 @@
+                         (Some(form), None) => extended_write_mask(form, descriptor_mask)?,
+                         (None, _) => descriptor_mask,
+                     };
++                    let descriptor_mask=if a.pixel_format==metal::PixelFormat::A1BGR5Unorm && !descriptor_mask.is_empty() {
++                        vk::ColorComponentFlags::R|vk::ColorComponentFlags::G
++                    } else {descriptor_mask};
+                     let write_mask = if written.contains(&(index as u32)) {
+                         descriptor_mask
+                     } else {
+@@ -559,6 +562,7 @@
+             let word =
+                 color_writes::word_color(color, &attachment, r.alpha_to_coverage, p).is_some();
+             let format_class = match ExtendedRange::of(attachment.pixel_format) {
++                Some(ExtendedRange::A1Bgr5)=>SampledType::Float,
+                 Some(_) => SampledType::Uint,
+                 None if word => SampledType::Uint,
+                 None => sampled_type(attachment.pixel_format).unwrap_or(SampledType::Float),
+@@ -990,7 +994,8 @@
+     }
+     // An extended-range attachment 0 is written as raw texels, whose alpha the coverage cannot
+     // read: what Metal's coverage is there is unmeasured.
+-    if r.color_attachments[0].is_some_and(|a| ExtendedRange::of(a.pixel_format).is_some()) {
++    if r.color_attachments[0].is_some_and(|a| ExtendedRange::of(a.pixel_format).is_some()
++        && a.pixel_format!=metal::PixelFormat::A1BGR5Unorm) {
+         let refused = Unsupported::not_implemented(Feature::Format);
+         return Err(refused.at_attachment(Attachment::Color(0)).into());
+     }
+--- a/crates/metal2vulkan-runtime/src/buffer.rs
++++ b/crates/metal2vulkan-runtime/src/buffer.rs
+@@ -83,6 +83,9 @@
+     /// Its identity (`object_id`).
+     object_id: ObjectId,
+     length: u64,
++    /// Capacity of the actual VkBuffer backing; never inferred from spare
++    /// allocator pages. Published once before the new buffer becomes visible.
++    allocation_capacity: AtomicU64,
+     /// The options with the hazard tracking mode resolved, as `resourceOptions` reports them.
+     options: ResourceOptions,
+     address: GpuAddress,
+@@ -2092,9 +2095,13 @@
+         }
+         let shared = self.shared();
+         let raw_device = shared.vk();
+-        // Padded to 16 bytes, so a device fill clears every byte too.
++        // Reserve Metal's page-rounded tail in the actual VkBuffer as well as
++        // the memory/address range. Heap ranges retain their own layout.
++        let granularity=if !of_heap && length>=super::linear_plan::METAL_PAGE {
++            super::linear_plan::METAL_PAGE
++        } else {16};
+         let size = length
+-            .checked_next_multiple_of(16)
++            .checked_next_multiple_of(granularity)
+             .ok_or_else(|| nil(call, Problem::BufferLength { length }))?;
+         // A heap is never `Managed` (`heap.rs`).
+         let mirror = if class == MemoryClass::Managed && !self.properties().has_unified_memory {
+@@ -2142,7 +2149,7 @@
+         // Its range of the address space is a new one, as a new buffer's; the buffer and its
+         // memory go again where none is left.
+         let place_address = |raw, memory: Placement| {
+-            let address = lock(&shared.addresses).place(placement, length);
++            let address = lock(&shared.addresses).place(placement, size);
+             match address {
+                 Ok(address) => Ok((raw, (memory, address))),
+                 Err(error) => {
+@@ -2167,7 +2174,7 @@
+                 let placed = if of_heap {
+                     self.place_heap_buffer(raw, length, class, placement)
+                 } else {
+-                    self.place_buffer(raw, length, class, placement)
++                    self.place_buffer(raw, size, class, placement)
+                 };
+                 match placed {
+                     Ok(placed) => {
+@@ -2208,6 +2215,7 @@
+             #[cfg(unix)]
+             again: None,
+         });
++        buffer.0.allocation_capacity.store(size,Ordering::Relaxed);
+         Ok((buffer, bytes))
+     }
+ 
+@@ -2494,6 +2502,7 @@
+             device: self.clone(),
+             object_id: ObjectId::new(),
+             length,
++            allocation_capacity:AtomicU64::new(length.next_multiple_of(16)),
+             options,
+             address,
+             attributes: ResourceAttributes::new(),
+@@ -2684,6 +2693,7 @@
+             device: heap_bytes.device().clone(),
+             object_id: ObjectId::new(),
+             length,
++            allocation_capacity:AtomicU64::new(length.next_multiple_of(16)),
+             options,
+             address: GpuAddress(heap_bytes.gpu_address().0 + offset),
+             attributes: ResourceAttributes::new(),
+@@ -2725,7 +2735,7 @@
+     }
+ 
+     /// Bytes a linear texture may safely address without growing or rebinding
+-    /// this buffer. Only fixed runtime-owned buffers have their known 16-byte
++    /// this buffer. Only fixed runtime-owned buffers have explicitly reserved
+     /// allocation padding: caller buffers, imports, copied host memory, heaps
+     /// and detach/rebind storage retain their declared bounds.
+     pub(super) fn linear_allocation_length(&self)->u64 {
+@@ -2738,7 +2748,13 @@
+ 
+     /// The length padded to 16 bytes: the bytes the `VkBuffer` holds from [`Buffer::base`].
+     pub(super) fn padded_length(&self) -> u64 {
+-        self.0.length.next_multiple_of(16)
++        self.0.allocation_capacity.load(Ordering::Relaxed)
++    }
++
++    /// Bytes reserved in this buffer's actual backing. Imports and placed heap
++    /// buffers expose no capacity outside their original range.
++    pub fn allocated_size(&self)->u64 {
++        self.linear_allocation_length()
+     }
+ 
+     /// The bytes of the buffer's memory from its byte 0 ([`Buffer::memory`]'s offset) to the end
+--- a/crates/metal2vulkan-runtime/src/buffer_texture.rs
++++ b/crates/metal2vulkan-runtime/src/buffer_texture.rs
+@@ -1418,7 +1418,7 @@
+         image: vk::Image,
+         identity: Identity,
+         aspects: vk::ImageAspectFlags,
+-        (words, unorm): (Option<WordView>, Option<UnormView>),
++        (words, unorm,raw): (Option<WordView>, Option<UnormView>,Option<Arc<super::raw_shadow::RawImageTransfers>>),
+     ) -> Result<ShadowCopies, Error> {
+         let layout = &self.layout;
+         let (buffer, at) = self.buffer.at_for(layout.offset, ReadApart::Texture);
+@@ -1433,12 +1433,30 @@
+         } else {
+             Some(self.staging(layout, at)?)
+         };
++        // Raw transfers use the address of the allocation's addressable buffer, not
++        // necessarily the VkBuffer used for copies (placed buffers may lack address usage).
++        if raw.is_some() {
++            let addressable = |buffer: &Buffer| {
++                buffer.device_address().and_then(|address| address.checked_sub(buffer.start())).is_some_and(|address| address != 0)
++            };
++            if !addressable(&self.buffer) || staging.as_ref().is_some_and(|staging| !addressable(&staging.buffer)) {
++                return Err(Error::NotImplemented(RuntimeGap::Textures));
++            }
++        }
+         let start = staging
+             .as_ref()
+             .map_or(at, |staging| staging.into.dst_offset);
+         // The descriptor's checks bound a texture's extent and slices to `u32`s.
+         let slices = layout.slices as u32;
+         let (regions, back) = plane_copy_regions(layout, self.texel_bytes, start, aspects);
++        if raw.is_some() && (!super::raw_shadow::RawImageTransfers::regions_fit(
++            metal2vulkan::bind::RawShadowTexel::of_bytes(self.texel_bytes as u32)
++                .ok_or(Error::NotImplemented(RuntimeGap::Textures))?,&regions)
++            || !super::raw_shadow::RawImageTransfers::regions_fit(
++                metal2vulkan::bind::RawShadowTexel::of_bytes(self.texel_bytes as u32)
++                    .ok_or(Error::NotImplemented(RuntimeGap::Textures))?,&back)) {
++            return Err(Error::NotImplemented(RuntimeGap::Textures));
++        }
+         // A copy back dispatches, and a merge fetches, over one region copied in place alone.
+         let one_region = regions.len() == 1 && slices == 1 && staging.is_none();
+         let (bytes, tracked) = self.buffer.tracked(layout.offset..layout.end());
+@@ -1448,6 +1466,7 @@
+                 key: bytes.key,
+                 bytes: tracked,
+                 target: ShadowTarget::Image {
++                    raw,
+                     words: words.filter(|_| one_region),
+                     unorm: unorm.filter(|_| one_region),
+                     image,
+--- a/crates/metal2vulkan-runtime/src/clear_value.rs
++++ b/crates/metal2vulkan-runtime/src/clear_value.rs
+@@ -357,6 +357,11 @@
+     route: ClearRoute,
+ ) -> Option<vk::ClearColorValue> {
+     let value = self::color(pf, color, route)?;
++    if pf==PixelFormat::A1BGR5Unorm && format==Format::R8G8_UNORM {
++        let word=unsafe {value.uint32[0]};
++        return Some(vk::ClearColorValue{float32:[(word&255) as f32/255.0,
++            ((word>>8)&255) as f32/255.0,0.0,0.0]});
++    }
+     if alpha_in_red_format(pf) != Some(format) {
+         return Some(value);
+     }
+--- a/crates/metal2vulkan-runtime/src/degradation.rs
++++ b/crates/metal2vulkan-runtime/src/degradation.rs
+@@ -1161,6 +1161,11 @@
+             "each sample's depth is written by a fragment-depth draw, where Metal copies its \
+              bytes: the values the driver's fragment depth changes or may change, which the \
+              reason names, can land changed; every other value lands as Metal's copy leaves it";
++        /// A separate depth/stencil format/sample pair whose clear's reach past
++        /// the render rectangle is unmeasured: clear the checked rectangle only.
++        SeparateAspectClearBounds = "separate-aspect-clear-bounds", Precision,
++            "texels outside the render rectangle are kept for an unmeasured separate-aspect \
++             tile reach; native sample depth/stencil behavior inside the rectangle is preserved";
+         /// A texture bound by a slot as a storage image without `ShaderWrite` usage, or as a
+         /// sampled one without `ShaderRead`, whose image lacks that usage because adding it
+         /// would cost the image its size or the driver's compression: the binding takes an image
+--- a/crates/metal2vulkan-runtime/src/depth_copy.rs
++++ b/crates/metal2vulkan-runtime/src/depth_copy.rs
+@@ -24,8 +24,8 @@
+ //!   depth copies. Its reason names the values the driver is measured to change
+ //!   ([`fragment_depth_changes`]: MoltenVK, NVIDIA's), or, on a driver whose fragment depth is not
+ //!   measured (another driver, or a release of lavapipe not measured), those Vulkan leaves to the
+-//!   driver ([`UNMEASURED_FLOAT_DEPTH`]). A 16-bit depth is drawn only where its codes are
+-//!   measured kept; elsewhere its consumer refuses, typed.
++//!   driver ([`UNMEASURED_FLOAT_DEPTH`]). A 16-bit depth without a measured code-identity fact
++//!   runs through native UNORM conversion with its own explicit quantization notice.
+ //!
+ //! - **The bits draws** ([`DepthDraw::bits`]): the other way, a depth or stencil aspect's samples
+ //!   into a multisampled unsigned colour image of their bits (`R32_UINT`, `R16_UINT`, `R8_UINT`),
+@@ -134,8 +134,11 @@
+ /// What the draw does to a depth aspect of `format` on `device` ([`Drawn`]): exact where
+ /// [`copies_exactly`]; a 32-bit float depth on a driver measured to change some values changes
+ /// them, and on any other driver may change the values Vulkan leaves to it. `None` for any other
+-/// depth (a 16-bit one whose codes are not measured kept), where the copy is refused.
++/// depth. An unmeasured normalized roundtrip runs with an explicit precision notice.
+ pub(super) fn drawn(device: &Device, format: Format) -> Option<Drawn> {
++    if copies_exactly(device, format) {
++        return Some(Drawn::Exact);
++    }
+     let description = &device.properties().description;
+     drawn_by(
+         &device.properties().driver_facts,
+@@ -153,9 +156,18 @@
+     if copies_exactly_by(facts, format) {
+         return Some(Drawn::Exact);
+     }
++    if unorm16_depth(format) {
++        return Some(Drawn::Changes(UNMEASURED_UNORM16_DEPTH));
++    }
+     float_depth(format)
+         .then(|| Drawn::Changes(fragment_depth_changes(driver).unwrap_or(UNMEASURED_FLOAT_DEPTH)))
+ }
++
++/// Native normalized depth conversion is executable without claiming an
++/// unmeasured identity of every code. The existing exact driver fact still wins.
++const UNMEASURED_UNORM16_DEPTH:&str = "its driver's 16-bit normalized fragment-depth roundtrip \
++    is not measured over every code: fetched depths are written through the device's native \
++    UNORM conversion, so quantization may change a stored code; no exact-copy driver fact is claimed";
+ 
+ /// What the `FragDepth` draw may change of a 32-bit float depth on a driver whose fragment depth
+ /// is not measured: what Vulkan leaves to the driver. A fragment depth outside the depth range
+--- a/crates/metal2vulkan-runtime/src/depth_stencil_resolve.rs
++++ b/crates/metal2vulkan-runtime/src/depth_stencil_resolve.rs
+@@ -14,11 +14,10 @@
+ //!   reading every sample's depth (and stencil) of the multisampled attachment through sampled
+ //!   views and taking Metal's sample by depth ([`DepthPick`]), of the draws of
+ //!   `bind::depth_stencil_resolve_modules`. A picked depth is [`ResolveWrite::Depth`]'s draw, its
+-//!   `FragDepth` written under compare `ALWAYS` with the stencil test off: only where
+-//!   `depth_copy::copies_exactly` holds (a 32-bit float depth, on a driver whose fragment depth
+-//!   stores every value unchanged, `DriverFact::FragmentDepthStoresUnchanged`, or a 16-bit one
+-//!   whose codes it keeps, `DriverFact::FragmentDepthKeepsDepth16Codes`), which
+-//!   `resolve.rs` checks before it picks; elsewhere the device's missing mode stays refused. A
++//!   `FragDepth` written under compare `ALWAYS` with the stencil test off. It uses
++//!   `depth_copy::drawn`'s executable representations: exact where measured driver facts hold,
++//!   otherwise with an announced native conversion difference. An unimplemented representation
++//!   or a source that cannot be sampled, even through a same-format copy, remains refused. A
+ //!   picked stencil is the eight bit-plane draws ([`ResolveWrite::StencilPlane`]) over the
+ //!   stencil cleared to 0 over the render area: each survives where its sample's stencil has its
+ //!   bit, which the draw sets under write mask [`StencilBit::mask`], reference 0xFF, compare
+@@ -443,9 +442,19 @@
+     if !can_sample_source(device,source,aspects|ImageAspectFlags::DEPTH)? {
+         return Err(Error::NotImplemented(RuntimeGap::DepthStencilResolve));
+     }
+-    device
+-        .resolve_draws(pick, drawn, source.samples, into.format)
+-        .map(|_| ())
++    let conversion = if drawn.depth() {
++        Some(super::depth_copy::drawn(device, into.format)
++            .ok_or(Error::NotImplemented(RuntimeGap::DepthStencilResolve))?)
++    } else {
++        None
++    };
++    device.resolve_draws(pick, drawn, source.samples, into.format)?;
++    if let Some(super::depth_copy::Drawn::Changes(changes)) = conversion {
++        super::depth_copy::announce_changes(device, changes, || {
++            format!("a {pick:?} depth resolve from {:?} into {:?}", source.format, into.format)
++        });
++    }
++    Ok(())
+ }
+ 
+ /// A same-format, same-sample-count copy into a sampled image. In particular,
+--- a/crates/metal2vulkan-runtime/src/depth_stencil_scratch.rs
++++ b/crates/metal2vulkan-runtime/src/depth_stencil_scratch.rs
+@@ -272,23 +272,23 @@
+     })
+ }
+ 
+-/// `separate`'s textures of different sizes in a pass of `samples` over the render area
+-/// `extent`: each that lies past the render area must end inside the tiles Metal's clear reaches
+-/// (`cleared_whole`), else the pass is `NotImplemented(Render)` (the module docs).
+-pub(super) fn check_sizes(
+-    separate: &Separate,
+-    extent: [u32; 2],
+-    samples: u32,
+-) -> Result<(), Error> {
+-    let mut extents = separate.targets().map(|target| target.extent);
+-    let first = extents.next();
+-    if extents.all(|extent| Some(extent) == first) {
+-        return Ok(());
+-    }
++/// Different aspect extents do not prevent scratch rendering: every copy is
++/// clipped to the common render area. Known Metal clear reaches are preserved;
++/// unmeasured format/sample pairs use a bounded native clear and announce that
++/// its outside-area reach differs instead of guessing another chip's tile size.
++pub(super) fn check_sizes(separate:&Separate,extent:[u32;2],samples:u32)->Result<(),Error> {
+     for target in separate.targets() {
+-        let past = (0..2).any(|axis| target.extent[axis] > extent[axis]);
+-        if past && clear_extent(target, extent, samples).is_none() {
+-            return Err(Error::NotImplemented(RuntimeGap::Render));
++        if (0..2).any(|axis|target.extent[axis]<extent[axis]) {
++            return Err(internal("a separate attachment smaller than the checked render area"));
++        }
++        if (0..2).any(|axis|target.extent[axis]>extent[axis])
++            && clear_extent(target,extent,samples).is_none() {
++            let pf=target.texture.pixel_format();
++            target.texture.device().degrade(super::degradation::Degradation::SeparateAspectClearBounds,||(
++                format!("a separate {pf:?} attachment with {samples} samples"),
++                "the native clear writes the checked render rectangle; Metal's outside-area \
++                 tile reach for this separate aspect/sample pair is unmeasured, so texels \
++                 outside that rectangle are preserved rather than cleared at a guessed tile boundary".into()));
+         }
+     }
+     Ok(())
+@@ -704,25 +704,6 @@
+         let mut uses = Vec::new();
+         let mut clears=Vec::new();
+         let (mut first, mut second) = (Vec::new(), Vec::new());
+-        if scratch.samples == 1 {
+-            let texels = u64::from(width) * u64::from(height);
+-            let mut length = 0u64;
+-            let mut offsets = Vec::new();
+-            for &(texture, aspect) in &wanted {
+-                let bytes = copy_units(texture.format, texture.texture.pixel_format())
+-                    .into_iter()
+-                    .find(|unit| unit.0 == aspect)
+-                    .map(|unit| u64::from(unit.1))
+-                    .ok_or_else(|| internal("a separate attachment without its aspect"))?;
+-                // A depth/stencil copy's buffer offset is a multiple of 4; its layers lie one
+-                // after another.
+-                let offset = length.next_multiple_of(4);
+-                length = offset + bytes * texels * u64::from(count);
+-                offsets.push(offset);
+-            }
+-            let staging = device.own_buffer(length, ResourceOptions::private())?;
+-            uses.push(writes(&staging, 0..length));
+-            uses.push(reads(&staging, 0..length));
+             // A texture larger than the render area, cleared and stored, inside the tiles
+             // Metal's clear reaches, is cleared whole before its copy back (the module docs).
+             for &(texture, action, aspect) in &actions {
+@@ -752,6 +733,25 @@
+                     clears.push(super::clear_reach::ReachClears::aspect(device,texture,reach,aspect.into(),value)?);
+                 }
+             }
++        if scratch.samples == 1 {
++            let texels = u64::from(width) * u64::from(height);
++            let mut length = 0u64;
++            let mut offsets = Vec::new();
++            for &(texture, aspect) in &wanted {
++                let bytes = copy_units(texture.format, texture.texture.pixel_format())
++                    .into_iter()
++                    .find(|unit| unit.0 == aspect)
++                    .map(|unit| u64::from(unit.1))
++                    .ok_or_else(|| internal("a separate attachment without its aspect"))?;
++                // A depth/stencil copy's buffer offset is a multiple of 4; its layers lie one
++                // after another.
++                let offset = length.next_multiple_of(4);
++                length = offset + bytes * texels * u64::from(count);
++                offsets.push(offset);
++            }
++            let staging = device.own_buffer(length, ResourceOptions::private())?;
++            uses.push(writes(&staging, 0..length));
++            uses.push(reads(&staging, 0..length));
+             for (&(texture, aspect), offset) in wanted.iter().zip(offsets) {
+                 let region = |target: &Target| vk::BufferImageCopy {
+                     buffer_offset: staging.at(offset).1,
+--- a/crates/metal2vulkan-runtime/src/image_plan.rs
++++ b/crates/metal2vulkan-runtime/src/image_plan.rs
+@@ -562,11 +562,13 @@
+         FormatUsage::ColorAttachment
+     };
+     let attachment_mapping = vk_format(pf, &[attachment_usage].into(), profile);
++    let raw_a1=pf==PixelFormat::A1BGR5Unorm;
++    let direct=if raw_a1 {Format::R16_UINT}else{direct};
+     // A two-plane YCbCr texture's image holds the texels its planes read, which no pass renders
+     // into: its attachment format is its render shadow's or a pipeline's alone
+     // (`FormatEmulation::YCbCrRendered`, `YCbCrPassRefused`).
+     let attachment = attachment_mapping.as_ref().ok().copied().filter(|m| {
+-        m.format == direct
++        (m.format == direct || (raw_a1 && m.format==Format::R8G8_UNORM))
+             && !matches!(
+                 m.emulation,
+                 FormatEmulation::YCbCrRendered | FormatEmulation::YCbCrPassRefused
+@@ -599,17 +601,18 @@
+         if layout.texture_type == TextureType::Type3D && !depth_stencil {
+             flags |= render_3d_flags(profile);
+         }
++        if raw_a1 {flags|=ImageCreateFlags::MUTABLE_FORMAT;}
+         return Ok(ImagePlan {
+             pixel_format: pf,
+             flags,
+             image_type,
+-            format: direct,
++            format: if raw_a1 {Format::R8G8_UNORM}else{direct},
+             extent: layout.extent,
+             levels: layout.levels,
+             layers: layout.layers,
+             samples,
+             usage: attachment_flag(depth_stencil, profile) | ImageUsageFlags::TRANSIENT_ATTACHMENT,
+-            view_formats: Vec::new(),
++            view_formats: if raw_a1 {vec![Format::R8G8_UNORM,Format::R16_UINT]}else{Vec::new()},
+             mapping,
+             // A memoryless texture is a render target only.
+             unavailable: usage.difference(TextureUsage::RENDER_TARGET),
+@@ -676,6 +679,7 @@
+     // The image format: the sampled representation, unless a storage view or an attachment needs
+     // the direct format, or nothing samples the texture.
+     let mapping = match (sampled, attachment) {
++        (Some(m),_) if raw_a1=>m,
+         (Some(m), _)
+             if m.format == direct
+                 || twin_stored(&m)
+@@ -758,9 +762,9 @@
+         }
+     }
+     if wants(TextureUsage::RENDER_TARGET) {
+-        if wants_attachment && format == direct {
++        if wants_attachment && (format == direct || raw_a1) {
+             usage_flags |= attachment_flag(depth_stencil, profile);
+-            views.insert(format);
++            views.insert(if raw_a1 {Format::R8G8_UNORM}else{format});
+             // A multisampled depth attachment is made for a pass's custom sample positions
+             // where the device takes them (`sample_positions::compatible_depth`).
+             if depth_stencil {
+@@ -916,6 +920,9 @@
+             FormatUsage::ColorAttachment
+         };
+         out.extend(direct_format(pf).filter(|&f| profile.supports_format(f, need)));
++        if pf==PixelFormat::A1BGR5Unorm && profile.supports_format(Format::R8G8_UNORM,need) {
++            out.push(Format::R8G8_UNORM);
++        }
+         // A format the device samples but does not render renders through its word's view.
+         if usage.contains(ImageUsageFlags::COLOR_ATTACHMENT) {
+             out.extend(WordAttachment::of(pf, profile).map(|w| w.word_format()));
+--- a/crates/metal2vulkan-runtime/src/lib.rs
++++ b/crates/metal2vulkan-runtime/src/lib.rs
+@@ -201,6 +201,7 @@
+ mod shadow;
+ mod shadow_copy_back;
+ mod shadow_copy_in;
++mod raw_shadow;
+ mod shadow_merge;
+ mod shadow_stencil;
+ mod sharing;
+--- a/crates/metal2vulkan-runtime/src/owned_kernel.rs
++++ b/crates/metal2vulkan-runtime/src/owned_kernel.rs
+@@ -107,6 +107,8 @@
+     /// by one dispatch (`shadow_copy_in.rs`). Its shadow's unsigned-integer view is its storage
+     /// image.
+     ShadowCopyIn(ShadowTexelView),
++    /// Bit-preserving raw linear-shadow moves, including byte/halfword texels.
++    RawShadow(metal2vulkan::bind::RawShadowTexel,metal2vulkan::bind::RawShadowDirection),
+     /// `bind::mipmap_filter_module` of one kernel: a level of a mipmap chain from the level
+     /// above it, by the compute filter of a format the device's blits cannot filter
+     /// (`mipmap_filter.rs`); a kernel that fetches the first level binds its sampled view first.
+@@ -196,6 +198,7 @@
+     fn images(self) -> u32 {
+         match self {
+             OwnedModule::MipmapFilter(kernel) => u32::from(kernel.fetches()),
++            OwnedModule::RawShadow(_,metal2vulkan::bind::RawShadowDirection::FromImage)=>1,
+             OwnedModule::ShadowCopyBack(_) | OwnedModule::ShadowMergeImage(..) => 1,
+             OwnedModule::ShadowMergeKeptImage(..) => 2,
+             // The combined image sampler of the planes' (or pairs') image.
+@@ -227,6 +230,7 @@
+             | OwnedModule::YCbCrSample(..)
+             | OwnedModule::YCbCrWrite
+             | OwnedModule::ShadowCopyIn(_) => 1,
++            OwnedModule::RawShadow(_,metal2vulkan::bind::RawShadowDirection::IntoImage)=>1,
+             OwnedModule::ExtendedShadowLoad(_) => 2,
+             _ => 0,
+         }
+@@ -350,6 +354,11 @@
+                 .map_err(Error::Compile)?;
+                 let push_bytes = metal2vulkan::bind::ShadowMergeImageModule::PUSH_BYTES;
+                 Ok((module.spirv.to_vec(), 1, push_bytes))
++            }
++            OwnedModule::RawShadow(texel,direction)=>{
++                let module=metal2vulkan::bind::raw_shadow_module(device.compile_device(),texel,direction)
++                    .map_err(Error::Compile)?;
++                Ok((module.spirv.to_vec(),0,metal2vulkan::bind::RawShadowModule::PUSH_BYTES))
+             }
+             OwnedModule::ShadowCopyIn(view) => {
+                 let module =
+@@ -546,6 +555,7 @@
+     shadow_merge_images: HashMap<(ShadowMergeRead, ShadowMergeStores), OwnedKernel>,
+     shadow_merge_kept_images: HashMap<(ShadowTexelView, ShadowMergeStores), OwnedKernel>,
+     shadow_copy_ins: HashMap<ShadowTexelView, OwnedKernel>,
++    raw_shadows:HashMap<(metal2vulkan::bind::RawShadowTexel,metal2vulkan::bind::RawShadowDirection),OwnedKernel>,
+     mipmap_filters: HashMap<MipmapFilterKernel, OwnedKernel>,
+     mesh_scan: Option<OwnedKernel>,
+     mesh_object_arguments: Option<OwnedKernel>,
+@@ -617,6 +627,7 @@
+         .chain(self.shadow_merge_images.values().copied())
+         .chain(self.shadow_merge_kept_images.values().copied())
+         .chain(self.shadow_copy_ins.values().copied())
++        .chain(self.raw_shadows.values().copied())
+         .chain(self.mipmap_filters.values().copied())
+         .chain(self.index_rewrites.values().copied())
+         .chain(self.index_rewrite_runs.values().copied())
+@@ -664,6 +675,7 @@
+                 self.shadow_merge_kept_images.get(&(view, stores)).copied()
+             }
+             OwnedModule::ShadowCopyIn(view) => self.shadow_copy_ins.get(&view).copied(),
++            OwnedModule::RawShadow(t,d)=>self.raw_shadows.get(&(t,d)).copied(),
+             OwnedModule::MipmapFilter(kernel) => self.mipmap_filters.get(&kernel).copied(),
+             OwnedModule::IndexRewrite(program, phase) => {
+                 self.index_rewrites.get(&(program, phase)).copied()
+@@ -698,6 +710,7 @@
+             OwnedModule::ShadowCopyIn(view) => {
+                 self.shadow_copy_ins.insert(view, kernel);
+             }
++            OwnedModule::RawShadow(t,d)=>{self.raw_shadows.insert((t,d),kernel);}
+             OwnedModule::MipmapFilter(key) => {
+                 self.mipmap_filters.insert(key, kernel);
+             }
+@@ -758,7 +771,8 @@
+             OwnedModule::FlatDispatch => &mut self.flat_dispatch,
+             OwnedModule::ShadowMerge(ShadowMergeStores::Words) => &mut self.shadow_merge,
+             OwnedModule::ShadowMerge(ShadowMergeStores::Blocks) => &mut self.shadow_merge_blocks,
+-            OwnedModule::ShadowCopyBack(_)
++            OwnedModule::RawShadow(..)
++            | OwnedModule::ShadowCopyBack(_)
+             | OwnedModule::ShadowMergeImage(..)
+             | OwnedModule::ShadowMergeKeptImage(..)
+             | OwnedModule::ShadowCopyIn(_)
+--- /dev/null
++++ b/crates/metal2vulkan-runtime/src/raw_shadow.rs
+@@ -0,0 +1,104 @@
++//! Bit-preserving compute transfers for linear image shadows without transfer usage.
++use super::Device;
++use super::binding_view::VkView;
++use super::error::{Error,RuntimeGap};
++use super::image_plan::{ImagePlan,ImageFacts,compatible};
++use super::owned_kernel::{OwnedModule,OwnedKernel,OwnedBinds,OwnedSet};
++use super::tracker::Barrier;
++use crate::device::functions::Vk;
++use ash::vk;
++use metal2vulkan::bind::{RawShadowTexel,RawShadowDirection,RawShadowModule};
++use metal2vulkan::vk::{FormatFeatureFlags2 as F,ImageCreateFlags as C,ImageUsageFlags as U,ImageAspectFlags};
++use std::sync::Arc;
++
++/// Add a compatible integer view with the usages the actual format supports.
++/// Linear textures have one mip and single-sampled 2D images (possibly arrays).
++pub(super) fn plan(mut plan:ImagePlan,facts:&ImageFacts<'_>)->Option<(ImagePlan,RawShadowTexel)> {
++    if plan.levels!=1 || plan.samples.as_raw()!=1 || plan.extent[2]!=1 {return None;}
++    let block=plan.format.block()?;
++    if block.texels!=1 || block.color.is_none() {return None;}
++    let texel=RawShadowTexel::of_bytes(block.size)?;
++    let format=texel.format();
++    if !compatible(plan.format,format,false) || !facts.optimal(format).contains(F::SAMPLED_IMAGE|F::STORAGE_IMAGE) {return None;}
++    let unrestricted=plan.flags.contains(C::MUTABLE_FORMAT) && plan.view_formats.is_empty();
++    plan.flags|=C::MUTABLE_FORMAT;
++    if !facts.optimal(plan.format).contains(F::SAMPLED_IMAGE|F::STORAGE_IMAGE) {plan.flags|=C::EXTENDED_USAGE;}
++    plan.usage|=U::SAMPLED|U::STORAGE;
++    if !unrestricted {
++        if plan.view_formats.is_empty(){plan.view_formats.push(plan.format);}
++        if !plan.view_formats.contains(&format){plan.view_formats.push(format);}
++    }
++    Some((plan,texel))
++}
++
++pub(super) fn view(texel:RawShadowTexel,layers:u32)->VkView {
++    VkView{view_type:metal2vulkan::vk::ImageViewType::TYPE_2D_ARRAY,format:texel.format(),
++        components:metal2vulkan::vk::ComponentMapping::IDENTITY,aspect:ImageAspectFlags::COLOR,
++        base_level:0,level_count:1,base_layer:0,layer_count:layers,usage:U::SAMPLED|U::STORAGE}
++}
++struct Run {kernel:OwnedKernel,binds:OwnedBinds}
++pub(super) struct RawImageTransfers {into:Run,back:Run,texel:RawShadowTexel,chunk:[u32;3]}
++impl RawImageTransfers {
++    pub(super) fn new(device:&Device,texel:RawShadowTexel,view:vk::ImageView)->Result<Arc<Self>,Error>{
++        let make=|direction|->Result<Run,Error>{
++            let kernel=device.owned_kernel(OwnedModule::RawShadow(texel,direction))?;
++            let set=OwnedSet{images:if direction==RawShadowDirection::FromImage {vec![view]}else{Vec::new()},
++                storage_images:if direction==RawShadowDirection::IntoImage {vec![view]}else{Vec::new()},buffers:Vec::new()};
++            let binds=OwnedBinds::new(device,&kernel,&[set])?;Ok(Run{kernel,binds})
++        };
++        let max=device.properties().description.limits.max_compute_work_group_count;
++        if max.contains(&0){return Err(Error::NotImplemented(RuntimeGap::Textures));}
++        Ok(Arc::new(Self{into:make(RawShadowDirection::IntoImage)?,back:make(RawShadowDirection::FromImage)?,texel,
++            chunk:[max[0].saturating_mul(RawShadowModule::LOCAL_SIZE),max[1],max[2]]}))
++    }
++    /// The texture's checked layouts imply these bounds; reject before publishing
++    /// its shadow if a shape cannot be represented by this kernel's push ABI.
++    pub(super) fn regions_fit(texel:RawShadowTexel,regions:&[vk::BufferImageCopy])->bool {
++        regions.iter().all(|r|{
++            let width=r.image_extent.width;
++            let row=if r.buffer_row_length==0 {width}else{r.buffer_row_length};
++            let height=if r.buffer_image_height==0 {r.image_extent.height}else{r.buffer_image_height};
++            u64::from(row).checked_mul(u64::from(texel.bytes()))
++                .and_then(|n|n.checked_mul(u64::from(height)))
++                .is_some_and(|n|n<=u64::from(u32::MAX))
++                && r.image_extent.depth==1 && r.image_offset.x>=0 && r.image_offset.y>=0
++                && r.image_subresource.mip_level==0
++        })
++    }
++    /// Record after retained-backing/layout checks; all resources and views live
++    /// until GPU completion. The address is obtained now so detach/rebind cannot
++    /// leave a descriptor referencing a previous VkBuffer.
++    pub(super) unsafe fn record(&self,device:&Vk,command:vk::CommandBuffer,base:u64,regions:&[vk::BufferImageCopy],into:bool){
++        let run=if into {&self.into}else{&self.back};
++        unsafe {
++            Barrier::everything().record(device,command);
++            device.cmd_bind_pipeline(command,vk::PipelineBindPoint::COMPUTE,run.kernel.pipeline);
++            run.binds.bind(device,command,&run.kernel,0);
++        }
++        for r in regions {
++            let row=if r.buffer_row_length==0 {r.image_extent.width}else{r.buffer_row_length};
++            let rows=if r.buffer_image_height==0 {r.image_extent.height}else{r.buffer_image_height};
++            let row_bytes=row*self.texel.bytes();let slice_bytes=row_bytes*rows;
++            for z in (0..r.image_subresource.layer_count).step_by(self.chunk[2] as usize) {
++                for y in (0..r.image_extent.height).step_by(self.chunk[1] as usize) {
++                    for x in (0..r.image_extent.width).step_by(self.chunk[0] as usize) {
++                        let width=(r.image_extent.width-x).min(self.chunk[0]);
++                        let height=(r.image_extent.height-y).min(self.chunk[1]);
++                        let layers=(r.image_subresource.layer_count-z).min(self.chunk[2]);
++                        let address=base+r.buffer_offset+u64::from(z)*u64::from(slice_bytes)+u64::from(y)*u64::from(row_bytes)+u64::from(x)*u64::from(self.texel.bytes());
++                        let words=[r.image_offset.x as u32+x,r.image_offset.y as u32+y,width,height,
++                            row_bytes,slice_bytes,r.image_subresource.base_array_layer+z,0];
++                        let mut push=[0u8;40];
++                        for (dst,n) in push[..32].chunks_exact_mut(4).zip(words){dst.copy_from_slice(&n.to_le_bytes());}
++                        push[32..40].copy_from_slice(&address.to_le_bytes());
++                        unsafe {
++                            device.cmd_push_constants(command,run.kernel.layout,vk::ShaderStageFlags::COMPUTE,0,&push);
++                            device.cmd_dispatch(command,width.div_ceil(RawShadowModule::LOCAL_SIZE),height,layers);
++                        }
++                    }
++                }
++            }
++        }
++        unsafe{Barrier::everything().record(device,command);}
++    }
++}
+--- a/crates/metal2vulkan-runtime/src/render_pass.rs
++++ b/crates/metal2vulkan-runtime/src/render_pass.rs
+@@ -1984,6 +1984,15 @@
+             }
+         }
+     }
++    if let Attachment::Color(_) = which {
++        if pixel_format==PixelFormat::A1BGR5Unorm {
++            let format=metal2vulkan::vk::Format::R8G8_UNORM;
++            if profile.supports_format(format,FormatUsage::ColorAttachment) && views_as(plan,format,family) {
++                return Ok(format);
++            }
++            return Err(Error::NotImplemented(RuntimeGap::Render));
++        }
++    }
+     if plan.pixel_format == pixel_format {
+         return Ok(plan.format);
+     }
+--- a/crates/metal2vulkan-runtime/src/resolve.rs
++++ b/crates/metal2vulkan-runtime/src/resolve.rs
+@@ -166,13 +166,12 @@
+ //!   which the last instance stores) through sampled views and picks Metal's sample by depth. The
+ //!   attachment's image must be sampled, and the pass of one layer.
+ //! - **`Min` or `Max` on a device without the mode** (lavapipe has neither): the depth is drawn
+-//!   after the pass the same way, as `FragDepth`, where that stores the picked value unchanged
+-//!   (`depth_copy::copies_exactly`: a 32-bit float depth on a driver measured to,
+-//!   `DriverFact::FragmentDepthStoresUnchanged`, or a 16-bit one, whose code is kept where
+-//!   `DriverFact::FragmentDepthKeepsDepth16Codes` holds); its stencil then too after
+-//!   `DepthResolvedSample`. Where the subpass resolves no aspect, the draws write the resolve
+-//!   texture (or a scratch image copied there) themselves. Elsewhere the missing mode stays
+-//!   refused, `NotImplemented(DepthStencilResolve)`.
++//!   after the pass the same way, as `FragDepth`, where `depth_copy::drawn` supports its
++//!   representation. Measured exact driver facts take precedence; otherwise native depth
++//!   conversion differences are announced as `drawn-depth-copy`, not used as a capability
++//!   refusal. Its stencil is drawn too after `DepthResolvedSample`. Where the subpass resolves
++//!   no aspect, the draws write the resolve texture (or a scratch image copied there) themselves.
++//!   An unsupported representation or an unavailable sample/copy path remains refused.
+ //! - A resolve texture whose image cannot be an attachment (Metal's texture has no
+ //!   `RenderTarget` usage) is resolved into a scratch image of the pass, whose render area is
+ //!   copied into the texture after the pass.
+@@ -837,11 +836,12 @@
+         .or_else(|| stencil_destination.clone())
+         .ok_or_else(|| internal("a depth/stencil resolve without its attachment"))?;
+     let modes = ResolveModes::of(device.compile_device().profile());
+-    // A `Min` or `Max` depth the device has no mode for is drawn after the pass where its
+-    // fragment depth stores the picked value unchanged (`depth_copy::copies_exactly`).
+-    let exact_depth = super::depth_copy::copies_exactly(device, source.format)
+-        && super::depth_copy::copies_exactly(device, destination.target.format);
+-    let pick_or = |mode: ResolveMode, pick: DepthPick| match exact_depth
++    // Missing native MIN/MAX modes use the existing sample-picking draw where
++    // fragment-depth conversion is executable. Exact driver facts are not a
++    // capability gate: draws_run announces any native-conversion difference.
++    let drawable_depth = super::depth_copy::drawn(device, source.format).is_some()
++        && super::depth_copy::drawn(device, destination.target.format).is_some();
++    let pick_or = |mode: ResolveMode, pick: DepthPick| match drawable_depth
+         && !modes.depth.contains(mode.vk())
+     {
+         true => ResolveMode::Picked(pick),
+@@ -1373,12 +1373,24 @@
+             // source's format (the same Metal format), copied in bytes (`Destination::attach`).
+             // A twin resolve has no such scratch: the twin's own format is the one format Metal's
+             // resolve encodes into, so a device that does not render it resolves nothing exactly.
+-            Err(Error::Unsupported(_)) if !twin => (
+-                source.format,
+-                plan.usage.difference(
+-                    ImageUsageFlags::COLOR_ATTACHMENT | ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+-                ),
+-            ),
++            Err(Error::Unsupported(_)) if !twin => {
++                let aspect = match which {
++                    Attachment::Depth => ImageAspectFlags::DEPTH,
++                    Attachment::Stencil => ImageAspectFlags::STENCIL,
++                    Attachment::Color(_) => ImageAspectFlags::COLOR,
++                };
++                if aspect != ImageAspectFlags::COLOR
++                    && !aspect_copy_compatible(source.format, plan.format, aspect)
++                {
++                    return Err(Error::NotImplemented(RuntimeGap::DepthStencilResolve));
++                }
++                (
++                    source.format,
++                    plan.usage.difference(
++                        ImageUsageFlags::COLOR_ATTACHMENT | ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
++                    ),
++                )
++            }
+             Err(error) => return Err(error),
+         };
+     // A subpass's resolve attachment is of its color attachment's format
+@@ -1664,6 +1676,23 @@
+     out_of_buffer: Vec<(vk::Image, vk::BufferImageCopy)>,
+ }
+ 
++/// Whether a staged depth/stencil copy preserves the aspect's representation.
++/// Equal byte widths alone are insufficient: D24 UNORM and D32 float both
++/// transfer four bytes, but cannot be reinterpreted as each other's depth.
++fn aspect_copy_compatible(from: Format, to: Format, aspects: ImageAspectFlags) -> bool {
++    if !image_aspects(from).contains(aspects) || !image_aspects(to).contains(aspects) {
++        return false;
++    }
++    let depth = |format| match format {
++        Format::D16_UNORM | Format::D16_UNORM_S8_UINT => Some(Format::D16_UNORM),
++        Format::X8_D24_UNORM_PACK32 | Format::D24_UNORM_S8_UINT => Some(Format::X8_D24_UNORM_PACK32),
++        Format::D32_SFLOAT | Format::D32_SFLOAT_S8_UINT => Some(Format::D32_SFLOAT),
++        _ => None,
++    };
++    !aspects.contains(ImageAspectFlags::DEPTH)
++        || (depth(from).is_some() && depth(from) == depth(to))
++}
++
+ impl ResolveCopies {
+     /// The copies of `resolves` (each with the aspects it resolved) over the render area
+     /// `extent`; `None` when no resolve went through a scratch image.
+@@ -1696,6 +1725,14 @@
+                 continue;
+             };
+             let from = &resolve.attachment;
++            // Inspect the images that Vulkan will actually copy, not the
++            // attachment/view format that a scratch fallback may have selected.
++            let from_format = from.texture.image_plan()?.format;
++            let to_format = to.texture.image_plan()?.format;
++            let depth_stencil = aspect.intersects(ImageAspectFlags::DEPTH | ImageAspectFlags::STENCIL);
++            if depth_stencil && !aspect_copy_compatible(from_format, to_format, aspect) {
++                return Err(Error::NotImplemented(RuntimeGap::DepthStencilResolve));
++            }
+             let count = to.layers;
+             let [width, height] = [extent[0].min(to.extent[0]), extent[1].min(to.extent[1])];
+             uses.push(
+@@ -1716,7 +1753,9 @@
+                 };
+                 clears.push((to.texture.raw_image()?, bits, range));
+             }
+-            if aspect == image_aspects(from.format) {
++            if aspect == image_aspects(from.format)
++                && (!depth_stencil || from_format == to_format)
++            {
+                 let region = vk::ImageCopy {
+                     src_subresource: layers(from, aspect, count),
+                     src_offset: vk::Offset3D::default(),
+--- a/crates/metal2vulkan-runtime/src/shadow.rs
++++ b/crates/metal2vulkan-runtime/src/shadow.rs
+@@ -384,7 +384,7 @@
+ pub(super) enum ShadowBuffer {
+     /// One for good: a buffer's the runtime made, or the caller's own `VkBuffer`; and where the
+     /// buffer's bytes end in it.
+-    Fixed(vk::Buffer, u64),
++    Fixed(vk::Buffer, u64, Option<u64>),
+     /// A buffer over host pages, which a rebind gives other pages (`rebind.rs`): its `VkBuffer`
+     /// is read as each copy is recorded. A rebind keeps the bytes' offset in it (a heap's bytes
+     /// start at its first byte, and a no-copy buffer with a texture over it keeps its offset in
+@@ -400,7 +400,7 @@
+     pub(super) fn of(buffer: &Buffer, raw: vk::Buffer) -> ShadowBuffer {
+         match buffer.caller_memory() {
+             Some(CallerMemory::HostPages) => ShadowBuffer::Rebound(buffer.downgrade()),
+-            _ => ShadowBuffer::Fixed(raw, buffer.start() + buffer.linear_allocation_length()),
++            _ => ShadowBuffer::Fixed(raw, buffer.start() + buffer.linear_allocation_length(), buffer.device_address().and_then(|address| address.checked_sub(buffer.start()))),
+         }
+     }
+ 
+@@ -409,7 +409,7 @@
+     /// writes whole words of them up to it (`shadow_merge.rs`). 0 once a rebound buffer went.
+     pub(super) fn end(&self) -> u64 {
+         match self {
+-            ShadowBuffer::Fixed(_, end) => *end,
++            ShadowBuffer::Fixed(_, end, _) => *end,
+             ShadowBuffer::Rebound(buffer) => buffer
+                 .upgrade()
+                 .map_or(0, |buffer| buffer.start() + buffer.length()),
+@@ -424,11 +424,22 @@
+     /// `ShadowMerge::new`).
+     pub(super) fn raw(&self) -> vk::Buffer {
+         match self {
+-            ShadowBuffer::Fixed(raw, _) => *raw,
++            ShadowBuffer::Fixed(raw, _, _) => *raw,
+             ShadowBuffer::Rebound(buffer) => buffer
+                 .upgrade()
+                 .and_then(|buffer| buffer.attached_at(0))
+                 .map_or(vk::Buffer::null(), |(raw, _)| raw),
++        }
++    }
++
++    /// Address corresponding to byte zero in the current VkBuffer's offset space.
++    fn address(&self) -> Option<u64> {
++        match self {
++            ShadowBuffer::Fixed(_, _, address) => *address,
++            ShadowBuffer::Rebound(buffer) => {
++                let buffer = buffer.upgrade()?;
++                buffer.device_address()?.checked_sub(buffer.start())
++            }
+         }
+     }
+ }
+@@ -456,6 +467,7 @@
+         /// (`shadow_copy_back.rs`): through which its copies back dispatch and its merges read
+         /// the texels the commands left (`shadow_merge.rs`); `None` where they copy.
+         words: Option<WordView>,
++        raw:Option<Arc<super::raw_shadow::RawImageTransfers>>,
+         /// The image's view of its own 8-bit unsigned normalized format, where it has no
+         /// unsigned-integer view: through which its merges read the texels the commands left
+         /// (`shadow_merge.rs`); `None` where they copy.
+@@ -954,7 +966,7 @@
+         &self,
+         device: &Vk,
+         command_buffer: vk::CommandBuffer,
+-        (to, at): (vk::Buffer, u64),
++        (to, at, address): (vk::Buffer, u64, Option<u64>),
+         moves: Option<&SampleMoves>,
+     ) {
+         if let ShadowSource::Bytes {
+@@ -976,7 +988,7 @@
+             }
+         }
+         // SAFETY: the caller's contract.
+-        unsafe { self.record_out(device, command_buffer, (to, at), moves) };
++        unsafe { self.record_out(device, command_buffer, (to, at, address), moves) };
+     }
+ 
+     /// Record a copy of the shadow's texels into `to` from `at`, laid out as in the buffer from
+@@ -992,7 +1004,7 @@
+         &self,
+         device: &Vk,
+         command_buffer: vk::CommandBuffer,
+-        (to, at): (vk::Buffer, u64),
++        (to, at, address): (vk::Buffer, u64, Option<u64>),
+         moves: Option<&SampleMoves>,
+     ) {
+         // An image's shadow keeps no bytes, a rotated texture's keeps them turned, and a heap's
+@@ -1013,7 +1025,7 @@
+                     tiles.record_out(device, command_buffer, (*image, moves), staging, (to, at));
+                 }
+             }
+-            ShadowTarget::Image { image, .. } => {
++            ShadowTarget::Image { image,raw, .. } => {
+                 let back = target.image_regions(false).unwrap_or_default();
+                 let origin = back.first().map_or(0, |region| region.buffer_offset);
+                 let moved: Vec<vk::BufferImageCopy> = back
+@@ -1023,6 +1035,10 @@
+                         ..*region
+                     })
+                     .collect();
++                if let Some(raw)=raw {
++                    unsafe {raw.record(device,command_buffer,address.expect("raw shadow scratch has a device address"),&moved,false);}
++                    return;
++                }
+                 // SAFETY: the caller's contract; the regions keep their offsets from the first
+                 // texel, multiples of the texel's size, and `at` is one too.
+                 unsafe {
+@@ -1473,6 +1489,9 @@
+     /// (`ShadowMerge::dispatches`) that kernel, and a converted texture's copy in its refresh and
+     /// its conversion, dispatched through indirect arguments.
+     pub(super) fn stages(&self) -> vk::PipelineStageFlags2 {
++        if matches!(self.copies.target(),Some(ShadowTarget::Image{raw:Some(_),..})) {
++            return vk::PipelineStageFlags2::TRANSFER|vk::PipelineStageFlags2::COMPUTE_SHADER;
++        }
+         let tiled = matches!(self.copies.target(), Some(ShadowTarget::Tiled { .. }));
+         let rotated = tiled
+             || matches!(
+@@ -1516,14 +1535,13 @@
+     /// keep's and a merge's as `ShadowMerge` gives them.
+     pub(super) fn uses(&self) -> Vec<Use<ResourceKey>> {
+         let c = &self.copies;
+-        let read = Access::new(
+-            vk::PipelineStageFlags2::COPY,
+-            vk::AccessFlags2::TRANSFER_READ,
+-        );
+-        let write = Access::new(
+-            vk::PipelineStageFlags2::COPY,
+-            vk::AccessFlags2::TRANSFER_WRITE,
+-        );
++        let raw=matches!(c.target(),Some(ShadowTarget::Image{raw:Some(_),..}));
++        let read = if raw {Access::new(vk::PipelineStageFlags2::COMPUTE_SHADER,
++            vk::AccessFlags2::SHADER_STORAGE_READ|vk::AccessFlags2::SHADER_SAMPLED_READ)} else {Access::new(
++            vk::PipelineStageFlags2::COPY,vk::AccessFlags2::TRANSFER_READ)};
++        let write = if raw {Access::new(vk::PipelineStageFlags2::COMPUTE_SHADER,
++            vk::AccessFlags2::SHADER_STORAGE_WRITE)} else {Access::new(
++            vk::PipelineStageFlags2::COPY,vk::AccessFlags2::TRANSFER_WRITE)};
+         let (truth, range) = c.truth();
+         if let ShadowSource::Converted { conversion, .. } = &c.source {
+             // The planes' bytes are copied (a whole conversion) or read by the refresh's
+@@ -1882,6 +1900,31 @@
+             }
+         };
+         let texels = staging.map_or(buffer, ShadowStaging::raw);
++        if let ShadowTarget::Image{raw:Some(raw),..}=target {
++            let address = match staging {
++                Some(staging) => staging.buffer.device_address().and_then(|address| address.checked_sub(staging.buffer.start())),
++                None => match &c.source {
++                    ShadowSource::Bytes { buffer, .. } => buffer.address(),
++                    _ => None,
++                },
++            }.expect("raw shadow backing has a device address");
++            unsafe {
++                if into_shadow {
++                    if let Some(staging)=staging {
++                        device.cmd_copy_buffer(command_buffer,buffer,texels,&[staging.into]);
++                        Barrier::everything().record(device,command_buffer);
++                    }
++                    if let Some(gate)=gate.filter(|_|staging.is_none()) {
++                        let mut chosen=Vec::new();gate.regions(&regions,&mut chosen);
++                        if !chosen.is_empty(){raw.record(device,command_buffer,address,&chosen,true);}
++                    } else {raw.record(device,command_buffer,address,&regions,true);}
++                } else {
++                    raw.record(device,command_buffer,address,&regions,false);
++                    if let Some(staging)=staging {record_back(device,command_buffer,(staging,buffer),back);}
++                }
++            }
++            return;
++        }
+         // SAFETY: the caller's contract; the regions lie in the buffers and the image (checked
+         // when the texture was made), and the staging buffer lives with the texture.
+         unsafe {
+--- a/crates/metal2vulkan-runtime/src/shadow_merge.rs
++++ b/crates/metal2vulkan-runtime/src/shadow_merge.rs
+@@ -228,6 +228,7 @@
+ struct Part {
+     raw: vk::Buffer,
+     at: u64,
++    address: Option<u64>,
+ }
+ 
+ /// The bytes a merge writes: the texture's, in its buffer.
+@@ -394,7 +395,8 @@
+         let options = ResourceOptions::private();
+         let place = |buffer: &Buffer, at: u64| {
+             let (raw, at) = buffer.at(at);
+-            Part { raw, at }
++            let address = buffer.device_address().and_then(|address| address.checked_sub(buffer.start()));
++            Part { raw, at, address }
+         };
+         let length = roles * part;
+         let counts = &device.shared().counts;
+@@ -491,6 +493,11 @@
+             (_, &[kept, changed, current]) => (KeptIn::Part(kept), Some(changed), Some(current)),
+             _ => return Err(internal("a merge's scratch of another number of parts")),
+         };
++        if matches!(copies.target(), Some(ShadowTarget::Image { raw: Some(_), .. }))
++            && placed.iter().any(|part| !part.address.is_some_and(|address| address != 0))
++        {
++            return Err(internal("a raw shadow merge scratch without a device address"));
++        }
+         let kept_part = |buffer: Option<&Buffer>| {
+             let buffer = buffer.ok_or_else(|| internal("a merge without its scratch"))?;
+             let (identity, range) = buffer.tracked(0..part);
+@@ -836,17 +843,15 @@
+         // the texture's bytes.
+         unsafe {
+             match &self.cut {
+-                Some(Cut { image, region, .. }) => device.cmd_copy_image_to_buffer(
+-                    command_buffer,
+-                    *image,
+-                    vk::ImageLayout::GENERAL,
+-                    part.raw,
+-                    &[vk::BufferImageCopy {
+-                        buffer_offset: part.at,
+-                        ..*region
+-                    }],
+-                ),
+-                None => copies.record_out(device, command_buffer, (part.raw, part.at), moves),
++                Some(Cut { image, region, .. }) => {
++                    let region = vk::BufferImageCopy { buffer_offset: part.at, ..*region };
++                    if let Some(ShadowTarget::Image { raw: Some(raw), .. }) = copies.target() {
++                        raw.record(device, command_buffer, part.address.expect("raw shadow scratch has a device address"), &[region], false);
++                    } else {
++                        device.cmd_copy_image_to_buffer(command_buffer, *image, vk::ImageLayout::GENERAL, part.raw, &[region]);
++                    }
++                }
++                None => copies.record_out(device, command_buffer, (part.raw, part.at, part.address), moves),
+             }
+         }
+     }
+@@ -873,7 +878,8 @@
+     /// part, by a copy or a dispatch.
+     pub(super) fn keep_uses(&self, copies: &ShadowCopies) -> Vec<Use<ResourceKey>> {
+         let (key, tracked, range) = self.kept.clone();
+-        let write = match self.dispatches() {
++        let dispatched = self.dispatches() || matches!(copies.target(), Some(ShadowTarget::Image { raw: Some(_), .. }));
++        let write = match dispatched {
+             true => Access::new(
+                 vk::PipelineStageFlags2::COMPUTE_SHADER,
+                 vk::AccessFlags2::SHADER_STORAGE_WRITE,
+@@ -881,7 +887,7 @@
+             false => transfer(vk::AccessFlags2::TRANSFER_WRITE),
+         };
+         vec![
+-            ShadowMerge::shadow_read(copies, self.dispatches()),
++            ShadowMerge::shadow_read(copies, dispatched),
+             Use::writes(key, tracked, range, write),
+         ]
+     }
+@@ -902,7 +908,7 @@
+                 storage(vk::AccessFlags2::SHADER_STORAGE_WRITE),
+             ),
+         };
+-        let dispatched = match self.changed {
++        let dispatched = matches!(copies.target(), Some(ShadowTarget::Image { raw: Some(_), .. })) || match self.changed {
+             Changed::Copied { ref dispatch, .. } => dispatch.is_some(),
+             Changed::Fetched => true,
+         };
+@@ -945,7 +951,7 @@
+                 (Some(keep), _) => keep.record(device, command_buffer),
+                 (None, KeptIn::Part(kept)) => match self.cut {
+                     Some(_) => self.record_out(device, command_buffer, (copies, moves), kept),
+-                    None => copies.record_kept(device, command_buffer, (kept.raw, kept.at), moves),
++                    None => copies.record_kept(device, command_buffer, (kept.raw, kept.at, kept.address), moves),
+                 },
+                 (
+                     None,
+--- a/crates/metal2vulkan-runtime/src/texture.rs
++++ b/crates/metal2vulkan-runtime/src/texture.rs
+@@ -2303,24 +2303,23 @@
+             }
+         };
+         let plan = self.with_undeclared_usage(plan, layout, usage, &facts)?;
+-        if !plan
+-            .usage
+-            .contains(ImageUsageFlags::TRANSFER_SRC | ImageUsageFlags::TRANSFER_DST)
+-        {
+-            return Err(Error::NotImplemented(RuntimeGap::Textures));
+-        }
++        let (plan,raw_texel)=if !plan.usage.contains(ImageUsageFlags::TRANSFER_SRC|ImageUsageFlags::TRANSFER_DST) {
++            let (plan,texel)=super::raw_shadow::plan(plan,&facts)
++                .ok_or(Error::NotImplemented(RuntimeGap::Textures))?;
++            (plan,Some(texel))
++        } else {(plan,None)};
+         // Where the device copies a shadow back faster by a dispatch, the image takes the
+         // integer view the dispatch reads (`shadow_copy_back.rs`).
+-        let (plan, word) = match shadow_copy_back::dispatches(self) {
++        let (plan, word) = match raw_texel.is_none() && shadow_copy_back::dispatches(self) {
+             true => with_word_view(plan, &facts, shadow_copy_back::dispatches_in(self)),
+             false => (plan, None),
+         };
+         // Without it, an 8-bit unsigned normalized image takes the view of its own format its
+         // merges read through (`shadow_merge.rs`).
+-        let (plan, unorm) = match word {
++        let (plan, unorm) = if raw_texel.is_some() {(plan,None)} else {match word {
+             Some(_) => (plan, None),
+             None => with_unorm_view(plan, &facts),
+-        };
++        }};
+         let hazard = texels.options().hazard_tracking_mode()?;
+         // A depth or stencil texture over a surface's plane copies the aspect the plane holds
+         // alone (`copy_plan::surface_depth_unit`); its image's other aspect stays the zeros it
+@@ -2381,7 +2380,11 @@
+             });
+             view.ok().map(|view| UnormView { view, read })
+         });
+-        let views = (words, unorm);
++        let raw=raw_texel.map(|texel|{
++            let view=image.own_view(&super::raw_shadow::view(texel,image.plan().layers))?;
++            super::raw_shadow::RawImageTransfers::new(self,texel,view)
++        }).transpose()?;
++        let views = (words, unorm,raw);
+         let copies = texels.shadow_copies(image.raw.get(), image.identity, aspects, views)?;
+         // Its copies keep its own image, which it presents again once the bytes lie in pages.
+         self.stand_in_while_detached(&texels.buffer, &image)?;
+--- a/crates/metal2vulkan-runtime/src/texture/heap.rs
++++ b/crates/metal2vulkan-runtime/src/texture/heap.rs
+@@ -3419,6 +3419,7 @@
+                     key: heap_bytes.key,
+                     bytes: tracked,
+                     target: ShadowTarget::Image {
++                        raw:None,
+                         image,
+                         // A heap's depth or stencil texture holds no byte twice: its copies back
+                         // are its copies in.
+--- a/crates/metal2vulkan-runtime/src/texture/rotation.rs
++++ b/crates/metal2vulkan-runtime/src/texture/rotation.rs
+@@ -239,7 +239,7 @@
+             image.raw.get(),
+             image.identity,
+             texture_aspects(image.plan()),
+-            (None, None),
++            (None, None, None),
+         )?;
+         copies.drops_writes = true;
+         self.degrade(Degradation::ShadowedTexture, || {
+--- a/crates/metal2vulkan-runtime/src/texture/usage_shadow.rs
++++ b/crates/metal2vulkan-runtime/src/texture/usage_shadow.rs
+@@ -282,7 +282,7 @@
+                     image.raw.get(),
+                     image.identity,
+                     texture_aspects(image.plan()),
+-                    (None, None),
++                    (None, None, None),
+                 )?;
+                 // The texture's own image lies in the bytes too where it aliases them.
+                 if matches!(self.0.storage, Storage::Alias { .. }) {

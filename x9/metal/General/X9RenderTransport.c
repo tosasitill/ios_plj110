@@ -50,7 +50,14 @@ int x9_render_call(struct X9RenderConnection *connection,uint32_t operation,cons
  if(!connection||operation>X9RenderTimestamp||(input_bytes&&!input)||(output_bytes&&!output)) {errno=EINVAL;return -1;}
  size_t actual=output_bytes;
  kern_return_t result=IOConnectCallStructMethod(connection->port,operation,input,input_bytes,output,&actual);
- if(result!=KERN_SUCCESS)return failure("native operation",result);
+ if(result!=KERN_SUCCESS) {
+  failure("native operation",result);
+  /* These allocation/import refusals publish no handle; all other operations
+   * retain their existing fail-closed policy, including cache/map ENOMEM. */
+  if((operation==X9RenderAllocate||operation==X9RenderImportHost)&&result==kIOReturnNoResources)errno=ENOSPC;
+  if(operation==X9RenderImportHost&&result==kIOReturnNotPermitted)errno=EACCES;
+  return -1;
+ }
  if(actual!=output_bytes){snprintf(x9_render_error,sizeof(x9_render_error),"native reply size %zu != %zu",actual,output_bytes);errno=EPROTO;return -1;}
  return 0;
 }

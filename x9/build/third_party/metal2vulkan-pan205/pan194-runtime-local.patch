@@ -1,0 +1,1788 @@
+--- a/crates/metal2vulkan/src/lower/texture/emit.rs
++++ b/crates/metal2vulkan/src/lower/texture/emit.rs
+@@ -1681,7 +1681,8 @@
+     match form.conv {
+         TexelConv::F32 | TexelConv::F16 => Ok((f32_ty(fb)?, u64::from(1.0f32.to_bits()))),
+         TexelConv::I32 | TexelConv::I16 { .. } => Ok((u32_ty(fb)?, 1)),
+-        TexelConv::U64Words { .. } => Err(cx.fail("a swizzled `ulong` texel")),
++        TexelConv::U64Words { wide:false } => Ok((u64_ty(fb)?,1)),
++        TexelConv::U64Words { wide:true } => Err(cx.fail("a split ulong needs both word vectors")),
+     }
+ }
+ 
+@@ -1697,6 +1698,18 @@
+     texel: SValue,
+     word: SValue,
+ ) -> BResult<SValue> {
++    if matches!(form.conv,TexelConv::U64Words{wide:true}) {
++        // The AIR value is held as two uvec4s. Constant one belongs only in
++        // the low vector; reordering both vectors identically preserves all bits.
++        let low=fb.composite_extract(texel,&[0])?;
++        let high=fb.composite_extract(texel,&[1])?;
++        let u=u32_ty(fb)?;
++        let low=swizzle_lanes(fb,(u,1),low,word)?;
++        let high=swizzle_lanes(fb,(u,0),high,word)?;
++        let uv=vec(fb,u,4)?;
++        let ty=fb.module().ty(SType::Struct{members:vec![uv,uv].into(),layout:None})?;
++        return fb.composite_construct(ty,&[low,high]);
++    }
+     let lane = held_lane(cx, fb, form)?;
+     swizzle_lanes(fb, lane, texel, word)
+ }
+@@ -1714,6 +1727,16 @@
+     v: SValue,
+     word: SValue,
+ ) -> BResult<SValue> {
++    if matches!(form.conv,TexelConv::U64Words{wide:true}) {
++        let low=fb.composite_extract(v,&[0])?;
++        let high=fb.composite_extract(v,&[1])?;
++        let form=TexelForm{conv:TexelConv::I32,lanes:4};
++        let low=unswizzled(cx,fb,form,low,word)?;
++        let high=unswizzled(cx,fb,form,high,word)?;
++        let u=u32_ty(fb)?;let uv=vec(fb,u,4)?;
++        let ty=fb.module().ty(SType::Struct{members:vec![uv,uv].into(),layout:None})?;
++        return fb.composite_construct(ty,&[low,high]);
++    }
+     let (elem, _) = held_lane(cx, fb, form)?;
+     let ty = vec(fb, elem, 4)?;
+     let mut lanes = Vec::with_capacity(4);
+--- a/crates/metal2vulkan/src/lower/texture/mod.rs
++++ b/crates/metal2vulkan/src/lower/texture/mod.rs
+@@ -2854,18 +2854,22 @@
+     // Metal's unmapped value, zero memory as the bound format reads it, which is the out-of-bounds
+     // texel, where a device's block that holds no mapped tile reads the device's value. A texture
+     // buffer's swizzle applies to its reads: Metal returns each channel from the source the bound
+-    // texture buffer's swizzle names, out of bounds too. A `ulong` read's swizzle is not measured;
+-    // the binder refuses a swizzled texture buffer there.
++    // texture buffer's swizzle names, out of bounds too. A ulong applies it after
++    // joining its words below; other classes apply it to the image's channels.
+     let swizzle = matches!(image, ImageRef::Slot(_))
+         && shape.dim == ImageDim::Buffer
+         && !matches!(texel.conv, TexelConv::U64Words { .. });
+     // A storage slot bound to a swizzled texture applies the swizzle under its variant, to the
+-    // converted texel, out of bounds too, as plain Metal reads it. A `ulong` texel's swizzle, and a
+-    // read of fewer lanes, are not measured. So does an extended-range sampled slot of the variant,
++    // converted texel, out of bounds too, as plain Metal reads it. A read of fewer
++    // lanes is not accepted here. So does an extended-range sampled slot of the variant,
+     // to the decoded texel. So does a packed normalized sampled slot of the
+     // variant, to the texel its class converts: the variant holds no other sampled slot.
+-    let storage_swizzle = shape.dim != ImageDim::Buffer && swizzled_storage(cx, image)?;
+-    if storage_swizzle && (texel.lanes != 4 || matches!(texel.conv, TexelConv::U64Words { .. })) {
++    // A ulong's image carries low/high words, not channels. Swizzle its
++    // converted four-channel result, so a channel never exchanges the words.
++    let storage_swizzle = (shape.dim != ImageDim::Buffer && swizzled_storage(cx, image)?)
++        || (matches!(image, ImageRef::Slot(_)) && shape.dim == ImageDim::Buffer
++            && matches!(texel.conv, TexelConv::U64Words { .. }));
++    if storage_swizzle && texel.lanes != 4 {
+         return Err(Unsupported::not_implemented(Feature::TextureSwizzle).into());
+     }
+     // A `ulong` read's lanes past the first are Metal's constants `(0, 0, 1)` in and out of
+@@ -3177,7 +3181,7 @@
+     // A storage slot bound to a swizzled texture stores each channel from the lane the swizzle
+     // takes it to, under its variant, as plain Metal writes it. A `ulong` texel's is not measured.
+     let swizzle = shape.dim != ImageDim::Buffer && swizzled_storage(cx, image)?;
+-    if swizzle && (texel.lanes != 4 || matches!(texel.conv, TexelConv::U64Words { .. })) {
++    if swizzle && texel.lanes != 4 {
+         return Err(Unsupported::not_implemented(Feature::TextureSwizzle).into());
+     }
+     if let (true, ImageRef::Slot(index)) = (swizzle, image) {
+--- a/crates/metal2vulkan-air/src/canon/const_loads.rs
++++ b/crates/metal2vulkan-air/src/canon/const_loads.rs
+@@ -1,4 +1,4 @@
+-//! Pointers loaded from fields of constant globals.
++//! Values loaded from fields of constant globals.
+ //!
+ //! A constant global whose initializer is known once function constants are bound and the static
+ //! initializers have run may hold pointers: a program-scope `constexpr sampler` taken by value is
+@@ -9,18 +9,28 @@
+ //! constant and threadgroup spaces, so such a module was refused, under the values that made the
+ //! select one global.
+ //!
++//! The same holds for every other first-class field. An uber-shader takes its whole configuration
++//! as one struct of function constants that a static initializer copies into an internal
++//! `constant` global (QuartzCore's `fc_fragment_shader_config`, read field by field after a
++//! function-constant `select` between it and a buffer). SCCP folds that select to the global but
++//! not the field loads, so every branch the configuration decides survived: QuartzCore's
++//! `fixed_frag` became about 46000 SPIR-V instructions where its specialized form is a few
++//! hundred, and the driver compiled each such pipeline for about a second. Metal's compiler
++//! specializes these reads away, so a module that reads them is translated as Metal compiles it.
++//!
+ //! This pass reads such a load as the initializer's constant at the field: a non-volatile,
+-//! non-atomic load of a pointer whose address is a field of a constant global at constant indices
+-//! (a `getelementptr` instruction or constant expression over the global's own value type, its
+-//! first index 0), where the field's type is the load's. A copy LLVM made through an integer (a
+-//! load of the field as an integer of the pointer's size, then `inttoptr` to the field's type)
+-//! reads the same constant at its `inttoptr`. The global is never written (it is `constant`, and
+-//! initialized by no one else), so every run reads that constant: the address of the sampler
+-//! state, which the sampler family reads as the sampler it names. Only pointers are read this
+-//! way: a load of any other type from a constant global is lowered from the global's form (its
+-//! typed private copy, or the constant blob), and reading it here would change those modules
+-//! without changing what they compute. SCCP then runs again over a body this pass changed, so
+-//! what the constants decide (an aggregate of them, a phi of them, a member of either) folds too.
++//! non-atomic load of a scalar, vector or pointer whose address is a field of a constant global at
++//! constant indices (a `getelementptr` instruction or constant expression over the global's own
++//! value type, its first index 0), where the field's type is the load's. A copy LLVM made through
++//! an integer (a load of a pointer field as an integer of the pointer's size, then `inttoptr` to
++//! the field's type) reads the same constant at its `inttoptr`. The global is never written (it
++//! is `constant`, and initialized by no one else), so every run reads that constant: for a
++//! pointer, the address of the sampler state, which the sampler family reads as the sampler it
++//! names. An aggregate load, a load of another type than the field's, and a field the initializer
++//! leaves `undef` (an unsupplied constant's) are left to the global's lowered form. SCCP then runs
++//! again over a body this pass changed, so what the constants decide (a branch, an aggregate of
++//! them, a phi of them, a member of either) folds too, and the two alternate until a round folds
++//! nothing: a decided branch can expose a further select of the global.
+ 
+ use crate::budget::Meter;
+ use crate::error::Error;
+@@ -29,9 +39,9 @@
+ 
+ use super::rewrite::{apply, scoped, BodyEdit};
+ 
+-/// Read every load of a pointer from a field of a constant global in `body`, and every
+-/// `inttoptr` of such a field's integer copy, as the field's constant (module docs), and say
+-/// whether there was one. Returns `body` itself when there is none.
++/// Read every first-class load from a field of a constant global in `body`, and every `inttoptr`
++/// of a pointer field's integer copy, as the field's constant (module docs), and say whether there
++/// was one. Returns `body` itself when there is none.
+ pub(super) fn fold(
+     body: Body,
+     parts: &mut ModuleParts,
+@@ -61,8 +71,8 @@
+     }
+ }
+ 
+-/// Each instruction of `body` that reads a pointer field of a constant global (module docs), with
+-/// the field's constant.
++/// Each instruction of `body` that reads a first-class field of a constant global (module docs),
++/// with the field's constant.
+ fn find(
+     body: &Body,
+     parts: &mut ModuleParts,
+@@ -71,24 +81,27 @@
+ ) -> Result<(), Error> {
+     for (id, inst) in body.insts.iter() {
+         m.tick(1)?;
+-        let Some(space) = parts.types.ptr_space(inst.ty) else {
+-            continue;
+-        };
+-        if !matches!(parts.types.get(inst.ty), Some(Type::Ptr { .. })) {
+-            continue;
+-        }
++        let first_class = parts
++            .types
++            .get(inst.ty)
++            .is_some_and(|t| t.is_sized() && !t.is_aggregate());
++        let pointer = matches!(parts.types.get(inst.ty), Some(Type::Ptr { .. }));
+         let ptr = match inst.kind {
+             InstKind::Load {
+                 ptr,
+                 volatile: false,
+                 atomic: None,
+                 ..
+-            } => ptr,
++            } if first_class => ptr,
+             // `inttoptr` of an integer load of the pointer's size: a copy through an integer.
+             InstKind::Cast {
+                 op: CastOp::IntToPtr,
+                 v: Value::Inst(l),
+-            } => match body.insts.get(l).map(|l| (&l.kind, l.ty)) {
++            } if pointer => {
++                let Some(space) = parts.types.ptr_space(inst.ty) else {
++                    continue;
++                };
++                match body.insts.get(l).map(|l| (&l.kind, l.ty)) {
+                 Some((
+                     &InstKind::Load {
+                         ptr,
+@@ -104,7 +117,8 @@
+                     ptr
+                 }
+                 _ => continue,
+-            },
++                }
++            }
+             _ => continue,
+         };
+         let Some((g, path)) = field_address(body, parts, ptr) else {
+--- a/crates/metal2vulkan-air/src/canon/mod.rs
++++ b/crates/metal2vulkan-air/src/canon/mod.rs
+@@ -591,11 +591,17 @@
+     };
+     body.release(m);
+     let body = solved;
+-    // A pointer loaded from a field of a constant global is the field's constant: a `constexpr
+-    // sampler` that SCCP's folded select picked is its sampler state. SCCP runs again over a body
+-    // that changed, to fold what those constants decide.
+-    let (body, folded) = const_loads::fold(body, &mut parts, m)?;
+-    let body = if folded {
++    // A value loaded from a field of a constant global is the field's constant: a `constexpr
++    // sampler` that SCCP's folded select picked is its sampler state, and an uber-shader's
++    // configuration struct of function constants is its members. SCCP runs again over a body that
++    // changed, to fold what those constants decide; the two alternate until a round folds nothing.
++    let mut body = body;
++    loop {
++        let (next, folded) = const_loads::fold(body, &mut parts, m)?;
++        if !folded {
++            body = next;
++            break;
++        }
+         let solved = {
+             let mut cx = sccp::Context {
+                 folder: fold::Folder {
+@@ -607,13 +613,11 @@
+                 fcs: &fcs,
+                 name: name.clone(),
+             };
+-            sccp::run(&body, &mut cx, m)?
++            sccp::run(&next, &mut cx, m)?
+         };
+-        body.release(m);
+-        solved
+-    } else {
+-        body
+-    };
++        next.release(m);
++        body = solved;
++    }
+     matmul2d::refuse_left(&body, &parts, &ep.stage, &name, m)?;
+     post_check(&body, &parts, &stubs, &name, &control_points(ep), m)?;
+     // A branch's short arms that Metal's backend speculates, where a group operation in them
+--- a/crates/metal2vulkan-air/src/canon/sccp.rs
++++ b/crates/metal2vulkan-air/src/canon/sccp.rs
+@@ -995,6 +995,30 @@
+         self.set(i, new, m, held)
+     }
+ 
++    /// Whether `v` is an aggregate built by `insertvalue` chains whose only unsupplied-constant
++    /// taint sits in individual inserted members, so those members alone can become `undef`
++    /// (Metal leaves an unsupplied optional constant's value indeterminate) while the rest of
++    /// the aggregate keeps its computed members.
++    fn leafwise(&self, v: Value) -> bool {
++        let mut cur = v;
++        loop {
++            if !matches!(self.lat(cur), Lat::Fc(_)) {
++                return true;
++            }
++            let Value::Inst(i) = cur else { return false };
++            let Some(inst) = self.body.insts.get(i) else {
++                return false;
++            };
++            let InstKind::InsertValue { agg, val, .. } = &inst.kind else {
++                return false;
++            };
++            if matches!(self.lat(*val), Lat::Fc(_)) && !matches!(val, Value::Inst(_)) {
++                return false;
++            }
++            cur = *agg;
++        }
++    }
++
+     /// After the fixpoint: every reachable non-pure use of an unsupplied constant needs the
+     /// caller's value, and a reachable branch on a literal `undef`/`poison` is refused.
+     fn check(&self, cx: &Context<'_>) -> Result<(), Error> {
+@@ -1031,6 +1055,11 @@
+                         )));
+                     }
+                 }
++                if let InstKind::Ret(Some(v)) = &inst.kind {
++                    if self.leafwise(*v) {
++                        continue;
++                    }
++                }
+                 let mut needs = None;
+                 inst.kind.for_each_value(|v| {
+                     if let Lat::Fc(index) = self.lat(v) {
+@@ -1070,7 +1099,11 @@
+                 let deletable = is_pure(&inst.kind)
+                     || is_normalize(&inst.kind)
+                     || is_defined_arg(&inst.kind, cx.folder.consts, cx.fcs).is_some();
++                let leaf_chain = matches!(inst.kind, InstKind::InsertValue { .. })
++                    && matches!(lat, Lat::Fc(_))
++                    && self.leafwise(Value::Inst(i));
+                 match (&inst.kind, lat) {
++                    _ if leaf_chain => {}
+                     (_, Lat::Const(c)) if deletable => edit.replace(i, Value::Const(c)),
+                     (_, Lat::Fc(_)) if deletable => {
+                         let undef = cx.folder.consts.intern(
+--- a/crates/metal2vulkan-air/src/canon/tests.rs
++++ b/crates/metal2vulkan-air/src/canon/tests.rs
+@@ -1678,7 +1678,18 @@
+         static_init(&mut m, "init", |f| store(f, five, gaddr));
+         let fty = m.fn_ty(void, &[dev]);
+         let mut f = m.define("k", fty);
+-        let v = load(&mut f, i32t, gaddr);
++        // A volatile read keeps the global: a plain one now reads the rebuilt initializer's leaf
++        // as its constant, and the unused global is pruned.
++        let v = f.push(
++            i32t,
++            InstKind::Load {
++                ptr: gaddr,
++                align: Align::from_bytes(4),
++                volatile: true,
++                atomic: None,
++                range: None,
++            },
++        );
+         store(&mut f, v, arg(0));
+         f.ret(None);
+         let k = f.finish();
+@@ -2379,9 +2390,12 @@
+             assert!(text.contains(kept) && !text.contains(gone), "{text}");
+         }
+     }
+-    // A field of any other type is left to the memory plan: its load stays.
+-    let text = body_text(&picked_field(Some(1), 1).unwrap());
+-    assert!(text.contains("getelementptr"), "{text}");
++    // A field of any other first-class type reads the same way: the picked struct's own `i64`.
++    for (flag, kept, gone) in [(1, "333", "444"), (0, "444", "333")] {
++        let text = body_text(&picked_field(Some(flag), 1).unwrap());
++        assert!(!text.contains("getelementptr") && !text.contains("load"), "{text}");
++        assert!(text.contains(kept) && !text.contains(gone), "{text}");
++    }
+     // Unsupplied, the select stays undecided, as before.
+     assert_eq!(
+         picked_field(None, 0).unwrap_err(),
+--- a/crates/metal2vulkan-runtime/src/buffer_descriptor.rs
++++ b/crates/metal2vulkan-runtime/src/buffer_descriptor.rs
+@@ -493,6 +493,10 @@
+             runs,
+         } = memory.into_parts();
+         let host = host_window(call, importer, pointer, length, source, drops_writes)?;
++        let atom = lock(&shared.memory).submission_cache_atom();
++        if !((pointer.as_ptr() as u64) | length).is_multiple_of(atom) {
++            return Err(not_importable());
++        }
+         let window = host.window;
+         if of_heap && window.offset != 0 {
+             let alignment = importer.page.max(importer.alignment);
+@@ -730,6 +734,10 @@
+         // A buffer whose GPU writes are dropped keeps them dropped over its new pages.
+         let drops_writes = cell.drops_writes();
+         let host = host_window(call, importer, pointer, length, source, drops_writes)?;
++        let atom = lock(&shared.memory).submission_cache_atom();
++        if !((pointer.as_ptr() as u64) | length).is_multiple_of(atom) {
++            return Err(not_importable());
++        }
+         let window = host.window;
+         if heap.is_some() && window.offset != 0 {
+             let alignment = importer.page.max(importer.alignment);
+--- a/crates/metal2vulkan-runtime/src/buffer_texture.rs
++++ b/crates/metal2vulkan-runtime/src/buffer_texture.rs
+@@ -19,8 +19,9 @@
+ //!   the runtime's buffers are made for both kinds, and Vulkan views a buffer only in a format
+ //!   that serves every usage the view has, so such a view names the one usage it needs
+ //!   (`VkBufferUsageFlags2CreateInfoKHR`), which `maintenance5` allows ([`view_usage`]).
+-//! - **Not yet** (`NotImplemented`): that view on a device that did not enable `maintenance5`;
+-//!   views, blits and mipmaps of textures over buffers.
++//! - Without `maintenance5`, a buffer of only the view's usage aliases its owned
++//!   memory. Imported buffers use the existing owned staging shadow first.
++//!   Reduced-usage aliases and their views are retained and parked together.
+ 
+ use super::address::ObjectsToken;
+ use super::apple_only::AppleOnly;
+@@ -116,7 +117,21 @@
+ /// with those pages (`rebind.rs`), and the next bind makes them again over the new ones.
+ pub(super) struct TexelViews {
+     device: Device,
+-    views: Mutex<KeyMap<(Format, bool, u64, u64), vk::BufferView>>,
++    views: Mutex<KeyMap<(Format, bool, u64, u64), TexelView>>,
++}
++
++// A reduced-usage buffer aliases the same owned memory when maintenance5
++// cannot narrow a view's usage. The tracker uses global memory barriers and
++// the original byte identity, so aliases share every dependency.
++struct TexelView {
++    view: vk::BufferView,
++    alias: Option<vk::Buffer>,
++}
++impl TexelView {
++    unsafe fn release(&self,raw:&ash::Device) {
++        unsafe { release::object(raw,self.view); }
++        if let Some(buffer)=self.alias { unsafe { release::object(raw,buffer); } }
++    }
+ }
+ 
+ impl TexelViews {
+@@ -140,8 +155,8 @@
+         // SAFETY: no pending command buffer uses a view: a committed command buffer holds every
+         // texture it binds until it completes.
+         unsafe {
+-            for &view in lock(&self.views).values() {
+-                release::object(raw, view);
++            for view in lock(&self.views).values() {
++                view.release(raw);
+             }
+         }
+     }
+@@ -151,7 +166,7 @@
+ /// ([`TexelViews::park`]).
+ pub(super) struct ViewObjects {
+     device: Device,
+-    views: Vec<vk::BufferView>,
++    views: Vec<TexelView>,
+ }
+ 
+ impl Drop for ViewObjects {
+@@ -163,8 +178,8 @@
+         // SAFETY: the pages that keep them go once every command buffer that used them
+         // completed.
+         unsafe {
+-            for &view in &self.views {
+-                release::object(raw, view);
++            for view in &self.views {
++                view.release(raw);
+             }
+         }
+     }
+@@ -1284,7 +1299,12 @@
+         let (raw, at) = (texels.buffer).at_for(texels.shader.offset, ReadApart::Texture);
+         let device = texels.buffer.device();
+         let limits = device.compile_device().profile().limits();
+-        if at.is_multiple_of(limits.min_texel_buffer_offset_alignment.max(1)) {
++        // A reduced-usage alias must not bind imported memory without its
++        // external-handle contract. Keep such a texture over an owned staging
++        // buffer instead; its existing shadow copies preserve byte semantics.
++        let imported_alias = texels.buffer.caller_memory().is_some()
++            && !device.enabled().features.contains(&VkFeature::Maintenance5);
++        if !imported_alias && at.is_multiple_of(limits.min_texel_buffer_offset_alignment.max(1)) {
+             return Ok(texels);
+         }
+         let staging = texels.staging(&texels.shader, at)?;
+@@ -1319,11 +1339,13 @@
+             .device()
+             .degrade(Degradation::StagedTextureBuffer, || {
+                 let object = format!("texture buffer over a buffer at offset {offset}");
+-                let reason = format!(
++                let reason = if imported_alias {
++                    "imported bytes require an owned staging buffer for reduced-usage texel views without maintenance5".to_owned()
++                } else { format!(
+                     "its texels start at byte {at} of the buffer's VkBuffer, and the device views \
+                      texels only at multiples of {alignment} bytes \
+                      (minTexelBufferOffsetAlignment)"
+-                );
++                ) };
+                 (object, reason)
+             });
+         Ok(texels)
+@@ -1538,8 +1560,8 @@
+     ) -> Result<vk::BufferView, Error> {
+         let key = (format, storage, offset, range);
+         let mut views = lock(&self.views.views);
+-        if let Some(&view) = views.get(&key) {
+-            return Ok(view);
++        if let Some(view) = views.get(&key) {
++            return Ok(view.view);
+         }
+         let device = self.buffer.device();
+         let profile = device.compile_device().profile();
+@@ -1549,7 +1571,38 @@
+             device.enabled().features.contains(&VkFeature::Maintenance5),
+         )?;
+         // The range is the viewed `VkBuffer`'s already ([`Texels::bound`]).
+-        let (buffer, _) = self.viewed();
++        let (mut buffer, _) = self.viewed();
++        let alias = if matches!(usage,ViewUsage::Aliased{..}) {
++            // Staged imports use the owned staging buffer; other buffers bind
++            // their own allocation. Preserve the original view's byte offsets.
++            let owner = match self.staged.as_deref().and_then(ShadowCopies::target) {
++                Some(ShadowTarget::Buffer(staging))=>&staging.buffer,
++                _=>&self.buffer,
++            };
++            if owner.caller_memory().is_some() {
++                return Err(internal("an imported texel view missed owned staging"));
++            }
++            let raw=device.shared().vk();
++            let size=offset.checked_add(range).ok_or_else(||internal("texel alias range overflow"))?;
++            let wanted=if storage {vk::BufferUsageFlags::STORAGE_TEXEL_BUFFER} else {vk::BufferUsageFlags::UNIFORM_TEXEL_BUFFER};
++            let create=vk::BufferCreateInfo::default().size(size).usage(wanted).sharing_mode(vk::SharingMode::EXCLUSIVE);
++            let alias=unsafe {raw.create_buffer(&create,None)}.map_err(vulkan)?;
++            let requirements=unsafe {raw.get_buffer_memory_requirements(alias)};
++            let (memory,logical,type_index)=owner.memory();
++            let prefix=owner.start();
++            let at=logical.checked_sub(prefix);
++            if at.is_none_or(|at|at%requirements.alignment!=0)
++                || type_index>=32 || requirements.memory_type_bits&(1u32<<type_index)==0
++                || requirements.size>owner.memory_room().saturating_add(prefix) {
++                unsafe {release::object(raw,alias)};
++                return Err(internal("incompatible reduced-usage texel buffer requirements"));
++            }
++            if let Err(error)=unsafe {raw.bind_buffer_memory(alias,memory,at.unwrap())} {
++                unsafe {release::object(raw,alias)};
++                return Err(vulkan(error));
++            }
++            buffer=alias;Some(alias)
++        } else {None};
+         let mut only = vk::BufferUsageFlags2CreateInfoKHR::default();
+         let mut info = vk::BufferViewCreateInfo::default()
+             .buffer(buffer)
+@@ -1564,9 +1617,14 @@
+         // usages the view has (both, or the one its `VkBufferUsageFlags2CreateInfoKHR` names
+         // under the `maintenance5` the device enabled, [`view_usage`]); the binding plan aligned
+         // the range and bounded its texels (`bind::instantiate::texel_ranges`).
+-        let view =
+-            unsafe { device.shared().vk().create_buffer_view(&info, None) }.map_err(vulkan)?;
+-        views.insert(key, view);
++        let view = match unsafe { device.shared().vk().create_buffer_view(&info, None) } {
++            Ok(view)=>view,
++            Err(error)=>{
++                if let Some(alias)=alias {unsafe {release::object(device.shared().vk(),alias)};}
++                return Err(vulkan(error));
++            }
++        };
++        views.insert(key, TexelView{view,alias});
+         Ok(view)
+     }
+ 
+@@ -1670,13 +1728,15 @@
+     /// Only the view's own kind, a storage texel buffer (`storage`) or a uniform one
+     /// (`VkBufferUsageFlags2CreateInfoKHR`): the format serves it and not the other.
+     Only { storage: bool },
++    /// A buffer object of only this usage over the same owned allocation.
++    Aliased { storage: bool },
+ }
+ 
+ impl ViewUsage {
+     /// The usage a view of [`ViewUsage::Only`] names, or `None` for the buffer's.
+     fn named(self) -> Option<vk::BufferUsageFlags2KHR> {
+         match self {
+-            ViewUsage::Buffer => None,
++            ViewUsage::Buffer | ViewUsage::Aliased{..} => None,
+             ViewUsage::Only { storage: true } => {
+                 Some(vk::BufferUsageFlags2KHR::STORAGE_TEXEL_BUFFER)
+             }
+@@ -1715,6 +1775,7 @@
+     match (supports(own), supports(other)) {
+         (true, true) => Ok(ViewUsage::Buffer),
+         (true, false) if maintenance5 => Ok(ViewUsage::Only { storage }),
++        (true, false) => Ok(ViewUsage::Aliased { storage }),
+         _ => Err(Error::NotImplemented(RuntimeGap::Textures)),
+     }
+ }
+--- /dev/null
++++ b/crates/metal2vulkan-runtime/src/counter_samples.rs
+@@ -0,0 +1,139 @@
++//! Timestamp counter sample buffers backed by real Vulkan timestamp queries.
++//! A fresh query is retained for each encoded sample so reuse of an index cannot
++//! reset a query still referenced by an earlier command buffer.
++use crate::device::lock;
++use crate::encoder::EncoderCore;
++use crate::error::{invalid, vulkan, Error, Problem, RuntimeGap};
++use crate::tracker::Barrier;
++use crate::{exit_guard, release, BlitCommandEncoder, ComputeCommandEncoder, Device};
++use ash::vk;
++use std::sync::{Arc, Mutex};
++
++/// `MTLCounterSampleBuffer` for the timestamp counter set. Results are GPU ticks;
++/// an absent or not-yet-available sample resolves to `MTLCounterErrorValue`.
++#[derive(Clone)]
++pub struct CounterSampleBuffer(Arc<Samples>);
++struct Samples {
++    device: Device,
++    slots: Mutex<Vec<Option<Arc<Sample>>>>,
++}
++pub(crate) struct Sample {
++    device: Device,
++    pool: vk::QueryPool,
++}
++impl std::fmt::Debug for CounterSampleBuffer {
++    fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result {f.debug_struct("CounterSampleBuffer").field("sample_count",&self.sample_count()).finish()}
++}
++impl Drop for Sample {
++    fn drop(&mut self) {
++        if let Some(_busy)=exit_guard::enter() {
++            // SAFETY: the encoder retains this sample until its commands complete.
++            unsafe {release::object(self.device.shared().vk(),self.pool)};
++        }
++    }
++}
++impl Device {
++    /// Whether the selected queue family can write hardware timestamps.
++    pub fn supports_timestamp_counters(&self)->bool {self.owns_vulkan_device() && self.shared().timing.clock().is_some()}
++    /// `newCounterSampleBufferWithDescriptor:error:` for the timestamp set,
++    /// with at most 4096 samples (32768 resolved bytes).
++    pub fn new_counter_sample_buffer(&self,count:usize)->Result<CounterSampleBuffer,Error> {
++        if count==0||count>4096{return Err(invalid("new_counter_sample_buffer",Problem::LengthMismatch))}
++        if !self.supports_timestamp_counters(){return Err(Error::NotImplemented(RuntimeGap::CounterSampleBuffers))}
++        Ok(CounterSampleBuffer(Arc::new(Samples{device:self.clone(),slots:Mutex::new(vec![None;count])})))
++    }
++}
++impl CounterSampleBuffer {
++    /// `sampleCount`.
++    pub fn sample_count(&self)->usize {lock(&self.0.slots).len()}
++    /// The device whose query pools hold these samples.
++    pub fn device(&self)->&Device {&self.0.device}
++    pub(crate) fn prepare(&self,index:usize)->Result<Arc<Sample>,Error> {
++        let Some(_busy)=exit_guard::enter() else {return Err(Error::NotImplemented(RuntimeGap::CounterSampleBuffers))};
++        let mut slots=lock(&self.0.slots);
++        let destination=slots.get_mut(index).ok_or_else(||invalid("sample_counters",Problem::LengthMismatch))?;
++        let raw=self.device().shared().vk();
++        let info=vk::QueryPoolCreateInfo::default().query_type(vk::QueryType::TIMESTAMP).query_count(1);
++        // SAFETY: this device was created with hostQueryReset enabled. This fresh
++        // pool is unpublished and no command can access its query yet.
++        let pool=unsafe{raw.create_query_pool(&info,None)}.map_err(vulkan)?;
++        unsafe{raw.reset_query_pool(pool,0,1)};
++        let sample=Arc::new(Sample{device:self.device().clone(),pool});
++        *destination=Some(sample.clone());Ok(sample)
++    }
++    /// `resolveCounterRange:`: available samples in `[start,start+count)`,
++    /// without waiting on queries that have never been submitted.
++    pub fn resolve(&self,start:usize,count:usize)->Result<Vec<u64>,Error> {
++        let Some(_busy)=exit_guard::enter() else {return Err(Error::NotImplemented(RuntimeGap::CounterSampleBuffers))};
++        let slots=lock(&self.0.slots);
++        let range=start.checked_add(count).filter(|end|*end<=slots.len()).ok_or_else(||invalid("resolve_counters",Problem::LengthMismatch))?;
++        let mut values=Vec::with_capacity(count);
++        for slot in &slots[start..range] {
++            let mut value=[u64::MAX];
++            if let Some(sample)=slot {
++                // SAFETY: pool and output are live, and one 64-bit result is requested.
++                match unsafe{self.device().shared().vk().get_query_pool_results(sample.pool,0,&mut value,vk::QueryResultFlags::TYPE_64)} {
++                    Ok(())=>{},Err(vk::Result::NOT_READY)=>value[0]=u64::MAX,Err(error)=>return Err(vulkan(error)),
++                }
++            }
++            values.push(value[0]);
++        }
++        Ok(values)
++    }
++}
++impl Sample {
++    /// Write this freshly reset query at the command's actual execution point.
++    pub(crate) fn write(&self,raw:&crate::device::functions::Vk,command:vk::CommandBuffer) {
++        // SAFETY: the encoder owns this recording and retains the query until completion.
++        unsafe{raw.cmd_write_timestamp(command,vk::PipelineStageFlags::BOTTOM_OF_PIPE,self.pool,0)};
++    }
++}
++impl EncoderCore {
++    fn sample_timestamp(&mut self,buffer:&CounterSampleBuffer,index:usize,barrier:bool)->Result<(),Error> {
++        self.check_device("sample_counters",buffer.device())?;
++        let sample=buffer.prepare(index)?;
++        if barrier{self.barrier(Barrier::everything());}
++        self.command(vk::PipelineStageFlags2::ALL_COMMANDS,&[],|raw,command|sample.write(raw,command));
++        self.retain(sample);Ok(())
++    }
++}
++impl BlitCommandEncoder {
++    /// `sampleCountersInBuffer:atSampleIndex:withBarrier:` using a GPU timestamp.
++    pub fn sample_counters_in_buffer(&mut self,buffer:&CounterSampleBuffer,index:usize,barrier:bool)->Result<(),Error> {
++        self.core().sample_timestamp(buffer,index,barrier)
++    }
++}
++impl ComputeCommandEncoder {
++    /// `sampleCountersInBuffer:atSampleIndex:withBarrier:` using a GPU timestamp.
++    pub fn sample_counters_in_buffer(&mut self,buffer:&CounterSampleBuffer,index:usize,barrier:bool)->Result<(),Error> {
++        self.core().sample_timestamp(buffer,index,barrier)
++    }
++}
++
++impl BlitCommandEncoder {
++    /// `resolveCounters:inRange:destinationBuffer:destinationOffset:` records
++    /// actual query copies into the destination, ordered with the encoder.
++    pub fn resolve_counters(&mut self,counters:&CounterSampleBuffer,start:usize,count:usize,destination:&crate::Buffer,offset:u64)->Result<(),Error> {
++        self.core().check_device("resolve_counters",counters.device())?;
++        self.core().check_device("resolve_counters",destination.device())?;
++        let bytes=(count as u64).checked_mul(8).ok_or_else(||invalid("resolve_counters",Problem::LengthMismatch))?;
++        if offset%8!=0||offset>destination.length()||bytes>destination.length()-offset{return Err(invalid("resolve_counters",Problem::LengthMismatch))}
++        let slots=lock(&counters.0.slots);
++        let end=start.checked_add(count).filter(|end|*end<=slots.len()).ok_or_else(||invalid("resolve_counters",Problem::LengthMismatch))?;
++        let samples=slots[start..end].to_vec();drop(slots);
++        let (buffer,base)=destination.at(offset);
++        let uses=[crate::blit::writes(destination,offset..offset+bytes)];
++        self.command(&uses,|raw,command| {
++            for (i,sample) in samples.iter().enumerate() {
++                let at=base+i as u64*8;
++                // SAFETY: the checked range is writable, every pool is retained,
++                // and samples are resolved only after commands that wrote them.
++                unsafe{match sample {
++                    Some(sample)=>raw.cmd_copy_query_pool_results(command,sample.pool,0,1,buffer,at,8,vk::QueryResultFlags::TYPE_64|vk::QueryResultFlags::WAIT),
++                    None=>raw.cmd_fill_buffer(command,buffer,at,8,u32::MAX),
++                }}
++            }
++        })?;
++        self.core().retain(samples);Ok(())
++    }
++}
+--- a/crates/metal2vulkan-runtime/src/depth_stencil_scratch.rs
++++ b/crates/metal2vulkan-runtime/src/depth_stencil_scratch.rs
+@@ -360,7 +360,11 @@
+     // Each aspect's copies through colour images where they move it, else by draws: in, from
+     // its texture, which is read, where it loads; out, from the scratch image, which is then
+     // read, where it may store.
+-    let mut read_scratch = false;
++    // A later DepthResolvedSample resolve reads the scratch even when the
++    // caller stores no multisampled aspect. Request sampled usage wherever
++    // supported, including that resolve-only case.
++    let mut read_scratch = multisampled
++        && facts.optimal(format).contains(FormatFeatureFlags2::SAMPLED_IMAGE);
+     let aspects = [
+         (0, separate.depth.as_ref(), ImageAspectFlags::DEPTH),
+         (1, Some(&separate.stencil), ImageAspectFlags::STENCIL),
+--- a/crates/metal2vulkan-runtime/src/device/adopt.rs
++++ b/crates/metal2vulkan-runtime/src/device/adopt.rs
+@@ -297,6 +297,7 @@
+         let memory_reads = MemoryReads::of(family, named);
+         let extensions = raw.device_extensions.clone();
+         let parts = Parts {
++            submission_cache_atom: 0,
+             instance: Arc::new(InstanceShared {
+                 entry,
+                 raw: instance,
+--- a/crates/metal2vulkan-runtime/src/device/create.rs
++++ b/crates/metal2vulkan-runtime/src/device/create.rs
+@@ -196,6 +196,7 @@
+     /// devices of one option (it is compared by identity, as [`messages`](Self::messages) is).
+     /// No Metal counterpart: Metal keeps its own compiled pipelines in the OS's caches.
+     pub pipeline_records: Option<Arc<dyn Fn(crate::PipelineRecord) + Send + Sync>>,
++    pub(super) submission_cache_atom: u64,
+ }
+ 
+ impl std::fmt::Debug for DeviceOptions {
+@@ -223,6 +224,7 @@
+             record_executions,
+             fail_in_place_check,
+             pipeline_records,
++            submission_cache_atom,
+         } = self;
+         f.debug_struct("DeviceOptions")
+             .field("policy", policy)
+@@ -252,6 +254,7 @@
+                 "pipeline_records",
+                 &pipeline_records.as_ref().map(|_| "hook"),
+             )
++            .field("submission_cache_atom", submission_cache_atom)
+             .finish()
+     }
+ }
+@@ -1506,6 +1509,7 @@
+                 .queue_priorities(&priorities[..count])
+         })
+         .collect();
++    super::prime::diagnostic(format_args!("M2V DEV: vkCreateDevice queues={}", plan.queues.len()));
+     // At the user-initiated class: MoltenVK compiles its command shaders as it makes the device.
+     let raw = enables
+         .with_create_info(&queues, |info| {
+@@ -1518,6 +1522,7 @@
+             })
+         })
+         .map_err(vulkan)?;
++    super::prime::diagnostic(format_args!("M2V DEV: vkCreateDevice ok; assemble"));
+     // SAFETY: the device was just created: its word is the loader's.
+     let loader_word = unsafe { LoaderWord::of_device(raw.handle()) };
+     let primary = families.get(queue_family as usize);
+@@ -1545,6 +1550,7 @@
+         record_executions: options.record_executions,
+         pipeline_records: options.pipeline_records.clone(),
+         fail_in_place_check: options.fail_in_place_check,
++        submission_cache_atom: options.submission_cache_atom,
+         view_reinterpretation,
+         generated_commands,
+         host_image_copy,
+@@ -1596,6 +1602,27 @@
+ /// and announces `driver-pipeline-cache-kept`.
+ pub(crate) fn kept_cache_is_metals(driver: Option<metal2vulkan::vk::DriverId>) -> bool {
+     driver == Some(metal2vulkan::vk::DriverId::MOLTENVK)
++}
++
++impl DeviceOptions {
++    /// Enable Metal shared storage on a driver that transfers CPU/GPU cache
++    /// ownership around every synchronous submission. No Vulkan memory flag changes.
++    ///
++    /// # Safety
++    ///
++    /// Every driver submission, including internal/staging submissions, must clean
++    /// and invalidate host caches before GPU access and after confirmed GPU
++    /// quiescence, before any completion/fence/semaphore becomes visible. Cached
++    /// imports and every CPU alias must be maintained. CPU access to GPU-owned
++    /// resource atoms must be synchronized. `atom` must cover all CPU cache lines
++    /// and be a power of two no larger than256 bytes (heap buffer alignment).
++    /// The runtime aligns separate placements and refuses partial-atom no-copy
++    /// imports; aliases of one resource still share its ownership contract.
++    pub unsafe fn with_submission_cache_ownership(mut self, atom: std::num::NonZeroU64) -> Self {
++        assert!(atom.get().is_power_of_two() && atom.get() <= crate::heap::PLACEMENT_ALIGNMENT);
++        self.submission_cache_atom = atom.get();
++        self
++    }
+ }
+ 
+ /// The devices `system_default_with` and `all_with` made, by the options they were made with
+@@ -1685,6 +1712,7 @@
+         record_executions,
+         fail_in_place_check,
+         pipeline_records: _,
++        submission_cache_atom,
+     } = a;
+     *policy == b.policy
+         && *layers == b.layers
+@@ -1705,6 +1733,7 @@
+         && *lowering_refuses == b.lowering_refuses
+         && *record_executions == b.record_executions
+         && *fail_in_place_check == b.fail_in_place_check
++        && *submission_cache_atom == b.submission_cache_atom
+ }
+ 
+ /// The group of `made` for `options`: the live one, or a new one on a new instance. Its index.
+--- a/crates/metal2vulkan-runtime/src/device/mod.rs
++++ b/crates/metal2vulkan-runtime/src/device/mod.rs
+@@ -1011,6 +1011,8 @@
+             .any(|enabled| enabled.as_c_str() == name)
+     }
+ 
++    pub(super) fn owns_vulkan_device(&self)->bool {self.0.owned}
++
+     pub(super) fn shared(&self) -> &DeviceShared {
+         &self.0
+     }
+@@ -1168,6 +1170,7 @@
+     /// Its check of the first move over host pages fails whatever the moves did
+     /// (`DeviceOptions::fail_in_place_check`).
+     pub(super) fail_in_place_check: bool,
++    pub(super) submission_cache_atom: u64,
+     /// Its views may reinterpret an image's components ([`DeviceShared`]'s field), outside
+     /// `enabled`'s vocabulary.
+     pub(super) view_reinterpretation: bool,
+@@ -1244,6 +1247,7 @@
+             record_executions,
+             pipeline_records,
+             fail_in_place_check,
++            submission_cache_atom,
+             view_reinterpretation,
+             generated_commands,
+             host_image_copy,
+@@ -1512,6 +1516,31 @@
+         // SAFETY: the device is live, of `physical`, and enables timeline semaphores, and
+         // `bufferDeviceAddress` where `device_address` says so; `queues` holds at least one of
+         // its queues, which nothing uses yet.
++        let priming_has = drawn.has(prime::Has {
++                    timestamps: timestamp_bits > 0,
++                    // A device the runtime created enables it (`enables.rs`).
++                    host_query_reset: owned,
++                    device_addresses: device_address,
++                    generated_commands: generated_commands.is_some(),
++                    sparse_binding: sparse.binds(),
++                    push_descriptor: push_descriptor.is_some(),
++                    calibration: calibrated.is_some(),
++                    object_names: object_name.is_some(),
++                    extended_dynamic_state: false,
++                    primitive_restart: false,
++                    color_write_masks: false,
++                    sized_index_bind: false,
++                    ycbcr_conversion: ycbcr_formats.primer().is_some(),
++                });
++        // Raw disk/cache I/O only: starting the ordinary guarded cache or its
++        // worker before priming would change the destructor ordering it protects.
++        let priming_cache = cache.priming(
++            &unsafe { instance.raw.get_physical_device_properties(physical) },
++            compile.profile_fingerprint(),
++            instance.settings,
++            prime::cache_key(priming_has, queue_family),
++            instance.sink().cloned(),
++        );
+         if let Err(error) = unsafe {
+             prime::prime(
+                 &instance.raw,
+@@ -1527,27 +1556,14 @@
+                 queue_family,
+                 &queues,
+                 Sharing::new(&queue_families),
+-                drawn.has(prime::Has {
+-                    timestamps: timestamp_bits > 0,
+-                    // A device the runtime created enables it (`enables.rs`).
+-                    host_query_reset: owned,
+-                    device_addresses: device_address,
+-                    generated_commands: generated_commands.is_some(),
+-                    sparse_binding: sparse.binds(),
+-                    push_descriptor: push_descriptor.is_some(),
+-                    calibration: calibrated.is_some(),
+-                    object_names: object_name.is_some(),
+-                    extended_dynamic_state: false,
+-                    primitive_restart: false,
+-                    color_write_masks: false,
+-                    sized_index_bind: false,
+-                    ycbcr_conversion: ycbcr_formats.primer().is_some(),
+-                }),
++                priming_has,
+                 generated_commands.as_ref(),
+                 push_descriptor,
+                 calibrated,
+                 drawn,
+                 ycbcr_formats.primer(),
++                submission_cache_atom,
++                priming_cache,
+             )
+         } {
+             scheduler.stop();
+@@ -1556,6 +1572,7 @@
+             undo(&timelines);
+             return Err(error);
+         }
++        prime::diagnostic(format_args!("M2V DEV: primed; query and memory next"));
+         // SAFETY: `physical` belongs to `instance`, created at Vulkan 1.2 or later (the compile
+         // device exists, so the description's version passed the floor).
+         let (identity, max_allocation) =
+@@ -1585,6 +1602,7 @@
+             properties.description.driver_id,
+         );
+         memory.log_to(MemoryLog::new(instance.sink()));
++        memory.set_submission_cache_atom(submission_cache_atom);
+         // SAFETY: as above.
+         let physical_properties = unsafe { instance.raw.get_physical_device_properties(physical) };
+         let limits = physical_properties.limits;
+@@ -1592,6 +1610,7 @@
+             16,
+             limits.min_storage_buffer_offset_alignment,
+             limits.min_uniform_buffer_offset_alignment,
++            submission_cache_atom.max(1),
+         ]
+         .into_iter()
+         .fold(1, u64::max);
+@@ -1934,6 +1953,7 @@
+         device.recall_in_place_checks();
+         device.degrade_argument_buffers_unread();
+         device.degrade_float_tininess();
++        prime::diagnostic(format_args!("M2V DEV: created"));
+         Ok(device)
+     }
+ }
+--- a/crates/metal2vulkan-runtime/src/device/prime.rs
++++ b/crates/metal2vulkan-runtime/src/device/prime.rs
+@@ -82,9 +82,11 @@
+ use crate::loader_word::LoaderWord;
+ use crate::memory;
+ use crate::release::{self, Generated, Released};
++use crate::shader_cache::PrimingCache;
+ use crate::sharing::Sharing;
+ use crate::tracker::Barrier;
+ use ash::vk;
++use sha2::{Digest, Sha256};
+ use std::time::{Duration, Instant};
+ 
+ use super::functions::Vk;
+@@ -361,7 +363,7 @@
+ /// What the device primed has: a queue family that writes timestamps, `hostQueryReset`, device
+ /// addresses, `VK_EXT_device_generated_commands`, sparse binding on its queues, the push command,
+ /// calibrated timestamps, and the render encoder's commands of [`PrimedDraws`].
+-#[derive(Clone, Copy)]
++#[derive(Clone, Copy, Debug)]
+ pub(crate) struct Has {
+     pub(crate) timestamps: bool,
+     pub(crate) host_query_reset: bool,
+@@ -401,6 +403,33 @@
+             ..has
+         }
+     }
++}
++
++/// Identity includes every byte of the helper implementation, enabled compile
++/// profile (in Records), instance settings, driver identity, and these choices.
++/// No pointer/handle or host path enters the persistent key.
++pub(super) fn cache_key(has: Has, queue_family: u32) -> metal2vulkan::cache::Hash256 {
++    crate::shader_cache::driver::Making::new("entry-point-priming-v1")
++        .digest(&Sha256::digest(include_bytes!("prime.rs")).into())
++        .text(&(has, queue_family))
++        .finish()
++}
++
++pub(super) fn diagnostic(args: std::fmt::Arguments<'_>) {
++    #[cfg(target_os = "ios")]
++    {
++        use std::io::Write;
++        if let Ok(mut file) = std::fs::OpenOptions::new().write(true).open("/dev/console") {
++            let line = format!("{args}\n");
++            let _ = file.write_all(line.as_bytes());
++        }
++    }
++    #[cfg(not(target_os = "ios"))]
++    std::eprintln!("{args}");
++}
++
++macro_rules! eprintln {
++    ($($arg:tt)*) => { diagnostic(format_args!($($arg)*)) };
+ }
+ 
+ /// Prime `device` of `physical`, made from `instance`, whose queues are `queues`, the first of
+@@ -430,6 +459,8 @@
+     calibration: Option<Calibration>,
+     drawn: PrimedDraws,
+     ycbcr: Option<vk::SamplerYcbcrConversionCreateInfo<'static>>,
++    submission_cache_atom: u64,
++    mut disk: PrimingCache,
+ ) -> Result<(), Error> {
+     let mut primer = Primer {
+         device,
+@@ -440,9 +471,31 @@
+         drawn,
+         // SAFETY: the caller's.
+         memory: unsafe { instance.get_physical_device_memory_properties(physical) },
++        submission_cache_atom,
+         calls: 0,
+         held: Vec::new(),
++        disk: &mut disk,
++        pipeline_cache: vk::PipelineCache::null(),
+     };
++    let mut types = format!(
++        "M2V PRIME: heaps={} types={}",
++        primer.memory.memory_heap_count, primer.memory.memory_type_count
++    );
++    for (index, kind) in primer
++        .memory
++        .memory_types
++        .iter()
++        .take(primer.memory.memory_type_count as usize)
++        .enumerate()
++    {
++        types.push_str(&format!(
++            " [{} flags={:#x} heap{}]",
++            index,
++            kind.property_flags.as_raw(),
++            kind.heap_index
++        ));
++    }
++    eprintln!("{types}");
+     // SAFETY: the caller's.
+     let primed = unsafe {
+         primer
+@@ -455,11 +508,19 @@
+             .and_then(|()| primer.sparse(queues, has.sparse_binding))
+             .and_then(|()| primer.ycbcr(ycbcr))
+     };
++    eprintln!(
++        "M2V PRIME: result {}",
++        if primed.is_ok() { "ok" } else { "failed" }
++    );
+     // SAFETY: the submission completed, or was never made, or the device is lost; nothing else
+     // uses the objects held.
+     unsafe {
+         let _ = device.device_wait_idle();
+         primer.made(Call::DeviceWaitIdle);
++        if primed.is_ok() && primer.pipeline_cache != vk::PipelineCache::null() {
++            primer.disk.keep(device, loader_word, primer.pipeline_cache);
++            primer.made(Call::GetPipelineCacheData);
++        }
+         while let Some(release) = primer.held.pop() {
+             let call = release(device);
+             primer.made(call);
+@@ -543,10 +604,14 @@
+     /// The render encoder's commands the device has.
+     drawn: PrimedDraws,
+     memory: vk::PhysicalDeviceMemoryProperties,
++    /// Negotiated synchronous native cache ownership, or zero if absent.
++    submission_cache_atom: u64,
+     /// The table's entry points called, one bit each.
+     calls: u128,
+     /// What was made, released last first.
+     held: Vec<Release>,
++    disk: &'a mut PrimingCache,
++    pipeline_cache: vk::PipelineCache,
+ }
+ 
+ impl Primer<'_> {
+@@ -840,7 +905,7 @@
+                 .layout(layout)
+                 .push_next(&mut flags);
+             let pipeline = device
+-                .create_compute_pipelines(vk::PipelineCache::null(), &[info], None)
++                .create_compute_pipelines(self.pipeline_cache, &[info], None)
+                 .map_err(|(_, error)| vulkan(error))?[0];
+             self.hold(pipeline);
+             let pipelines = ExecutionSetPipelineInfo::new(pipeline, 1);
+@@ -934,8 +999,16 @@
+             self.made(Call::CreateBuffer);
+             let requirements = device.get_buffer_memory_requirements(buffer);
+             self.made(Call::GetBufferMemoryRequirements);
+-            let host =
+-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
++            // This buffer is mapped and used only for command recording;
++            // the recorded command buffer is never submitted. The existing
++            // native ownership contract therefore permits a visible,
++            // noncoherent type without pretending Vulkan memory is coherent.
++            let host = vk::MemoryPropertyFlags::HOST_VISIBLE
++                | if self.submission_cache_atom == 0 {
++                    vk::MemoryPropertyFlags::HOST_COHERENT
++                } else {
++                    vk::MemoryPropertyFlags::empty()
++                };
+             let memory = match self.allocate(requirements, host, device_addresses) {
+                 Ok(memory) => memory,
+                 Err(error) => {
+@@ -1171,9 +1244,8 @@
+             let module = device.create_shader_module(&info, None).map_err(vulkan)?;
+             self.made(Call::CreateShaderModule);
+             self.hold(module);
+-            let cache = device
+-                .create_pipeline_cache(&vk::PipelineCacheCreateInfo::default(), None)
+-                .map_err(vulkan)?;
++            let cache = self.disk.open(device, self.loader_word).map_err(vulkan)?;
++            self.pipeline_cache = cache;
+             self.made(Call::CreatePipelineCache);
+             self.hold(cache);
+             let specialization = specialization();
+@@ -1621,7 +1693,23 @@
+                     && kind.property_flags.contains(properties)
+             })
+             .map(|(index, _)| index)
+-            .ok_or_else(|| vulkan(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY))?;
++            .ok_or_else(|| {
++                let mut all = String::new();
++                for (index, kind) in types.iter().enumerate() {
++                    all.push_str(&format!(
++                        " [{index} flags={:#x}]",
++                        kind.property_flags.as_raw()
++                    ));
++                }
++                eprintln!(
++                    "M2V ALLOC: no memory type size={} bits={:#x} need={:#x} types{}",
++                    requirements.size,
++                    requirements.memory_type_bits,
++                    properties.as_raw(),
++                    all
++                );
++                vulkan(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY)
++            })?;
+         let mut flags =
+             vk::MemoryAllocateFlagsInfo::default().flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS);
+         let mut info = vk::MemoryAllocateInfo::default()
+@@ -1631,7 +1719,16 @@
+             info = info.push_next(&mut flags);
+         }
+         // SAFETY: the caller's; the type is one the requirements allow.
+-        let memory = unsafe { self.device.allocate_memory(&info, None) }.map_err(vulkan)?;
++        let memory = unsafe { self.device.allocate_memory(&info, None) }.map_err(|error| {
++            eprintln!(
++                "M2V ALLOC: vkAllocateMemory size={} type={} need={:#x} -> {:?}",
++                requirements.size,
++                index,
++                properties.as_raw(),
++                error
++            );
++            vulkan(error)
++        })?;
+         self.made(Call::AllocateMemory);
+         self.hold(memory);
+         Ok(memory)
+--- a/crates/metal2vulkan-runtime/src/families/features.rs
++++ b/crates/metal2vulkan-runtime/src/families/features.rs
+@@ -982,11 +982,10 @@
+             | F::NonprivateDepthStencilTextures
+             | F::ClampToEdgeTextureReads
+             | F::QueryTextureLod => RowState::Exact,
+-            // `TextureDescriptor::swizzle`: a swizzled texture's sampled view composes it, and a
+-            // function applies a texture buffer's, but for a texture buffer read as `ulong` texels,
+-            // whose swizzled texel Metal is not measured to give (`bind::plan::resources`,
+-            // `NotImplemented(TextureSwizzle)`).
+-            F::TextureSwizzle => first([not_implemented(Feature::TextureSwizzle)]),
++            // Sampled views compose their channels. Texture-buffer ulong reads
++            // swizzle after joining their word pairs; split 64-bit values move
++            // both vectors together and put constant one in the low vector only.
++            F::TextureSwizzle => RowState::Exact,
+             // `access::read_write` textures in kernels need read-write tier 1 (a storage form of
+             // `R32Float`, `R32Uint` and `R32Sint`), and in vertex and fragment functions the
+             // stages' store features.
+--- a/crates/metal2vulkan-runtime/src/families/limits.rs
++++ b/crates/metal2vulkan-runtime/src/families/limits.rs
+@@ -695,12 +695,10 @@
+             at_least(need, feature, limit, u64::from(available))
+         };
+         match self {
+-            // A vertex descriptor's attributes: `maxVertexInputAttributes`.
+-            L::VertexAttributes => first([at_least(
+-                Feature::InterfaceComponents,
+-                VkLimit::MaxVertexInputAttributes,
+-                l.max_vertex_input_attributes,
+-            )]),
++            // The vertex projection pulls attributes past the fixed-function limit
++            // from their bound buffers (pipeline::link::vertex::resolve). Metal's
++            // 31 descriptor entries therefore do not consume 31 Vulkan locations.
++            L::VertexAttributes => RowState::Exact,
+             // A function's buffers, constant ones among them: by device address where the device
+             // has them, else storage buffer descriptors.
+             L::BufferArgumentEntries | L::ConstantBufferArguments => {
+--- a/crates/metal2vulkan-runtime/src/families/mod.rs
++++ b/crates/metal2vulkan-runtime/src/families/mod.rs
+@@ -412,7 +412,7 @@
+     pub fn family_rows(&self, family: GpuFamily) -> Vec<RowAudit> {
+         let compile = self.compile_device();
+         let format = |pf: PixelFormat| self.format_answers(pf);
+-        audit(
++        let mut rows = audit(
+             family,
+             &Facts {
+                 profile: compile.profile(),
+@@ -420,7 +420,19 @@
+                 properties: self.properties(),
+                 format: &format,
+             },
+-        )
++        );
++        // Apple's columns require 32768 resolved bytes and 32 live buffers.
++        // The timestamp implementation provides 4096 64-bit samples per buffer;
++        // Mac columns' unbounded limits are deliberately not answered by it.
++        let apple = matches!(family,GpuFamily::Apple1|GpuFamily::Apple2|GpuFamily::Apple3|GpuFamily::Apple4|GpuFamily::Apple5|GpuFamily::Apple6|GpuFamily::Apple7|GpuFamily::Apple8|GpuFamily::Apple9|GpuFamily::Apple10);
++        if apple && self.supports_timestamp_counters() {
++            for row in &mut rows {
++                if matches!(row.row,FamilyRow::Limit(LimitRow::CounterSampleBufferLength|LimitRow::CounterSampleBuffers)) {
++                    row.state=RowState::Exact;
++                }
++            }
++        }
++        rows
+     }
+ 
+     /// The rows that keep `family` from being claimed on this device (refused or gaps), with
+--- a/crates/metal2vulkan-runtime/src/heap.rs
++++ b/crates/metal2vulkan-runtime/src/heap.rs
+@@ -1117,7 +1117,8 @@
+     /// An automatic heap's lowest free range of `length` bytes at a multiple of `alignment`, now
+     /// taken; `None` where none has room.
+     pub(super) fn allocate(&self, length: u64, alignment: u64) -> Option<u64> {
+-        lock(&self.0.ranges).allocate(length, alignment)
++        let atom = lock(&self.device().shared().memory).submission_cache_atom();
++        lock(&self.0.ranges).allocate(length, alignment.max(atom))
+     }
+ 
+     /// `texture`, made in the heap, is among the heap's textures while it lives, numbered after
+--- a/crates/metal2vulkan-runtime/src/lib.rs
++++ b/crates/metal2vulkan-runtime/src/lib.rs
+@@ -113,6 +113,8 @@
+ mod gpu_execute;
+ mod gpu_pools;
+ mod gpu_time;
++mod counter_samples;
++pub use counter_samples::CounterSampleBuffer;
+ mod heap;
+ mod heap_sets;
+ mod host_aliases;
+--- a/crates/metal2vulkan-runtime/src/memory.rs
++++ b/crates/metal2vulkan-runtime/src/memory.rs
+@@ -43,6 +43,14 @@
+ //!   buffer's or a heap's bytes lies in that buffer's memory, at the offset Metal's layout gives
+ //!   it. Images are placed at a multiple of `bufferImageGranularity` and rounded up to it
+ //!   (`texture.rs`'s `ImagePlacement`).
++//!
++//! - **Submission cache ownership.** By default host-visible classes require
++//!   HOST_COHERENT. A consumer can negotiate an unsafe driver contract through
++//!   DeviceOptions::with_submission_cache_ownership: the synchronous driver
++//!   maintains CPU aliases at every submission's start and confirmed completion.
++//!   Only then may those classes use noncoherent host-visible types. Separate
++//!   placements start at whole cache atoms; partial-atom host imports refuse.
++//!   Vulkan flags stay unchanged and host image copy stays coherent-only.
+ 
+ use super::buffer::usage;
+ use super::device::lock;
+@@ -252,6 +260,13 @@
+     allowed: u32,
+     class: MemoryClass,
+     unified: bool,
++) -> Vec<u32> {
++    candidates_with_ownership(types, allowed, class, unified, false)
++}
++
++fn candidates_with_ownership(
++    types: &[vk::MemoryType], allowed: u32, class: MemoryClass,
++    unified: bool, maintained: bool,
+ ) -> Vec<u32> {
+     use vk::MemoryPropertyFlags as P;
+     let usable = |index: usize| allowed & (1 << index) != 0;
+@@ -280,6 +295,7 @@
+             P::empty(),
+         ),
+     };
++    let required = if maintained { required & !P::HOST_COHERENT } else { required };
+     let lacks = |flags: P, wanted: P| u8::from(!wanted.is_empty() && !flags.contains(wanted));
+     let mut ranked: Vec<((u8, u8), u32)> = types
+         .iter()
+@@ -1031,6 +1047,7 @@
+ /// The device's memory: one [`Pool`] per memory type for buffers, and one for images.
+ pub(super) struct Memory {
+     types: Vec<vk::MemoryType>,
++    submission_cache_atom: u64,
+     /// The buffers' pools by memory type, then the images' ([`Memory::pool`]).
+     pools: Vec<Pool<Block>>,
+     block_bytes: u64,
+@@ -1088,6 +1105,7 @@
+                 .map(|_| Pool::default())
+                 .collect(),
+             types,
++            submission_cache_atom: 0,
+             block_bytes: BLOCK_BYTES.min(max_allocation.max(1)),
+             device_address,
+             address_types: None,
+@@ -1164,6 +1182,20 @@
+         self.parking = Some(parking);
+     }
+ 
++    pub(super) fn set_submission_cache_atom(&mut self, atom: u64) {
++        assert!(atom == 0 || atom.is_power_of_two());
++        self.submission_cache_atom = atom;
++    }
++
++    /// Cache ownership granularity:1 for normal coherent-only allocation.
++    pub(super) fn submission_cache_atom(&self) -> u64 {
++        self.submission_cache_atom.max(1)
++    }
++
++    fn candidates(&self, allowed: u32, class: MemoryClass) -> Vec<u32> {
++        candidates_with_ownership(&self.types, allowed, class, self.unified, self.submission_cache_atom != 0)
++    }
++
+     /// The bytes of `VkDeviceMemory` allocated so far for blocks of the runtime's own memory,
+     /// pooled or dedicated, whether freed since or not: host memory imported counts in none.
+     pub(super) fn allocated(&self) -> u64 {
+@@ -1207,7 +1239,7 @@
+ 
+     /// The memory types of `class` among those `allowed` names, as bits.
+     pub(super) fn class_types(&self, allowed: u32, class: MemoryClass) -> u32 {
+-        candidates(&self.types, allowed, class, self.unified)
++        self.candidates(allowed, class)
+             .into_iter()
+             .fold(0, |bits, index| bits | 1 << index)
+     }
+@@ -1320,7 +1352,7 @@
+         let buffers = buffer_types(device, usage(false), sharing)? & addresses;
+         let images = color_image_types(device, sharing)?;
+         let best = |bits: u32, class: MemoryClass| {
+-            candidates(&self.types, bits, class, self.unified)
++            self.candidates(bits, class)
+                 .first()
+                 .copied()
+         };
+@@ -1578,7 +1610,7 @@
+         allowed: u32,
+         class: MemoryClass,
+     ) -> Result<Placement, ImportFailure> {
+-        let types = candidates(&self.types, allowed, class, self.unified);
++        let types = self.candidates(allowed, class);
+         let imported = view.as_ref().map_or(pointer, ReadOnlyView::pointer);
+         // SAFETY: the caller's contract; the view stays mapped while the block holds it.
+         let (memory, type_index) =
+@@ -1600,7 +1632,7 @@
+ 
+     /// The best memory type of `class` among `allowed`, where it has one.
+     pub(super) fn best_type(&self, allowed: u32, class: MemoryClass) -> Option<u32> {
+-        candidates(&self.types, allowed, class, self.unified)
++        self.candidates(allowed, class)
+             .first()
+             .copied()
+     }
+@@ -1645,7 +1677,7 @@
+     ) -> Result<(vk::DeviceMemory, u32), ImportFailure> {
+         use std::os::fd::{AsRawFd, IntoRawFd};
+         let mut failure = ImportFailure::NoMemoryType;
+-        for type_index in candidates(&self.types, allowed, class, self.unified) {
++        for type_index in self.candidates(allowed, class) {
+             // The descriptor the driver takes, which it owns once the import succeeds and may
+             // close even when it fails (the doc above): never `fd`, and never closed here.
+             let handed = match fd.try_clone() {
+@@ -2100,12 +2132,14 @@
+     fit: Fit,
+ ) -> Result<Placement, Error> {
+     let size = requirements.size.max(1);
+-    let align = requirements.alignment.max(1);
++    // Different host resources never share a CPU cache atom. Their logical
++    // sizes remain unchanged; the next placement also starts at an atom.
++    let align = requirements.alignment.max(lock(memory).submission_cache_atom());
+     let (candidates, maker) = {
+         let memory = lock(memory);
+         let bits = requirements.memory_type_bits;
+         (
+-            candidates(&memory.types, bits, class, memory.unified),
++            memory.candidates(bits, class),
+             memory.maker(),
+         )
+     };
+--- a/crates/metal2vulkan-runtime/src/render/call_checks.rs
++++ b/crates/metal2vulkan-runtime/src/render/call_checks.rs
+@@ -382,6 +382,7 @@
+             // The encoder's queries, threadgroup lengths and fences, which these checks do not
+             // hold; patch and mesh draws, whose pipeline states lower every call at its call.
+             C::VisibilityResultMode(..)
++            | C::SampleCounters(..)
+             | C::ThreadgroupMemoryLength(..)
+             | C::ObjectThreadgroupMemoryLength(..)
+             | C::UpdateFence(..)
+--- a/crates/metal2vulkan-runtime/src/render/inline_splits.rs
++++ b/crates/metal2vulkan-runtime/src/render/inline_splits.rs
+@@ -156,6 +156,8 @@
+ 
+ /// One of [`Kept`]'s commands.
+ enum KeptCommand {
++    /// A timestamp retained at its exact place among kept commands.
++    Timestamp(std::sync::Arc<crate::counter_samples::Sample>),
+     /// The next of its draws.
+     Draw,
+     /// A memory barrier between its draws over the render targets, of the view mask
+@@ -173,6 +175,9 @@
+ }
+ 
+ impl Kept {
++    pub(super) fn timestamp(&mut self,sample:std::sync::Arc<crate::counter_samples::Sample>) {
++        self.room.commands.push(KeptCommand::Timestamp(sample));
++    }
+     /// Keep a draw's `recording`, of its made `pipeline`: over the room an earlier instance's
+     /// recording left where there is one.
+     pub(super) fn draw(&mut self, recording: &Recording, pipeline: vk::Pipeline) {
+@@ -582,6 +587,7 @@
+         let mut draws = kept.room.recordings[..kept.draws].iter();
+         for command in &kept.room.commands {
+             match command {
++                KeptCommand::Timestamp(sample) => sample.write(raw,held),
+                 KeptCommand::Draw => {
+                     let Some((owned, pipeline)) = draws.next() else {
+                         break;
+--- a/crates/metal2vulkan-runtime/src/render/replay.rs
++++ b/crates/metal2vulkan-runtime/src/render/replay.rs
+@@ -244,6 +244,7 @@
+     ThreadsPerTileInRegion(Box<(Size, Region, Option<u32>)>),
+     ThreadgroupMemoryLength(u64, u64, u32),
+     ObjectThreadgroupMemoryLength(u32, u32),
++    SampleCounters(crate::CounterSampleBuffer,usize,bool),
+     UpdateFence(Fence, RenderStages),
+     WaitForFence(Fence, RenderStages),
+     BarrierWithScope(BarrierScope, RenderStages, RenderStages),
+@@ -539,6 +540,7 @@
+             C::ThreadsPerTileInRegion(_) => "dispatchThreadsPerTile:inRegion:",
+             C::ThreadgroupMemoryLength(..) => "setThreadgroupMemoryLength:offset:atIndex:",
+             C::ObjectThreadgroupMemoryLength(..) => "setObjectThreadgroupMemoryLength:atIndex:",
++            C::SampleCounters(..) => "sampleCountersInBuffer:atSampleIndex:withBarrier:",
+             C::UpdateFence(..) => "updateFence:afterStages:",
+             C::WaitForFence(..) => "waitForFence:beforeStages:",
+             C::BarrierWithScope(..) => "memoryBarrierWithScope:afterStages:beforeStages:",
+@@ -1005,6 +1007,7 @@
+         C::ObjectThreadgroupMemoryLength(length, index) => {
+             encoder.set_object_threadgroup_memory_length(*length, *index)
+         }
++        C::SampleCounters(buffer,index,barrier)=>encoder.sample_counters_in_buffer(buffer,*index,*barrier),
+         C::UpdateFence(fence, stages) => encoder.update_fence(fence, *stages),
+         C::WaitForFence(fence, stages) => encoder.wait_for_fence(fence, *stages),
+         C::BarrierWithScope(scope, after, before) => {
+--- a/crates/metal2vulkan-runtime/src/render.rs
++++ b/crates/metal2vulkan-runtime/src/render.rs
+@@ -11952,3 +11952,34 @@
+         }
+     }
+ }
++
++impl RenderLowering {
++    /// Record a real timestamp among this render instance's commands.
++    pub(crate) fn sample_counters_in_buffer(&mut self,buffer:&crate::CounterSampleBuffer,index:usize,barrier:bool)->Result<(),Error> {
++        self.log(|_|RenderCall::SampleCounters(buffer.clone(),index,barrier));
++        self.core.check_device("sample_counters",buffer.device())?;
++        if self.later_group_encoder(){return Ok(())}
++        let sample=buffer.prepare(index)?;
++        self.begin_current_draws()?;
++        if barrier { self.barrier_before_next_draw(); }
++        if let Some(kept)=&mut self.current.kept {
++            kept.timestamp(sample.clone());
++        } else {
++            sample.write(self.core.device().shared().vk(),self.current.draws);
++        }
++        // A query must not be dropped by draw-only re-recording.
++        self.current.rerecord=None;
++        self.current.recorded=true;
++        self.core.retain(sample);Ok(())
++    }
++}
++impl RenderCommandEncoder {
++    /// `sampleCountersInBuffer:atSampleIndex:withBarrier:` at this render
++    /// command's actual GPU execution point.
++    pub fn sample_counters_in_buffer(&mut self,buffer:&crate::CounterSampleBuffer,index:usize,barrier:bool)->Result<(),Error> {
++        match self.lowers_at_call(){
++            true=>self.at_call(|lowering|lowering.sample_counters_in_buffer(buffer,index,barrier)),
++            false=>self.defer(|_|RenderCall::SampleCounters(buffer.clone(),index,barrier)),
++        }
++    }
++}
+--- a/crates/metal2vulkan-runtime/src/resolve.rs
++++ b/crates/metal2vulkan-runtime/src/resolve.rs
+@@ -361,6 +361,9 @@
+     /// The resolve attachment the draws write where no step resolves into one (every resolved
+     /// aspect drawn): the resolve texture's level and slice, or a scratch image copied there.
+     pub(super) drawn_into: Option<Resolve>,
++    /// Copies of drawn aspects into distinct resolve destinations. They share
++    /// the drawn scratch image but copy only their own aspect after the draws.
++    pub(super) drawn_copies: Vec<(Resolve, ImageAspectFlags)>,
+     /// Its aspects resolve into different textures (separate ones, or two for one combined
+     /// texture): each step resolves one aspect into a scratch image copied into its own.
+     pub(super) split: bool,
+@@ -375,10 +378,7 @@
+     /// The resolve attachment the drawn aspects are written into: the first step's, or the
+     /// draws' own.
+     pub(super) fn drawn_target(&self) -> Option<&Resolve> {
+-        self.steps
+-            .first()
+-            .map(|step| &step.resolve)
+-            .or(self.drawn_into.as_ref())
++        self.drawn_into.as_ref().or_else(||self.steps.first().map(|step|&step.resolve))
+     }
+ 
+     /// Each resolve attachment it writes, with the aspects of the resolve texture written there
+@@ -389,6 +389,7 @@
+             .map_or(ImageAspectFlags::empty(), |(_, aspects)| aspects);
+         let steps = self.steps.iter().map(|step| (&step.resolve, step.aspects));
+         steps.chain(self.drawn_into.iter().map(move |resolve| (resolve, drawn)))
++            .chain(self.drawn_copies.iter().map(|(resolve,aspects)|(resolve,*aspects)))
+     }
+ }
+ 
+@@ -886,19 +887,36 @@
+     };
+     // Every resolved aspect drawn: no subpass resolves, and the draws write their own resolve
+     // attachment.
++    let mut drawn_copies=Vec::new();
+     let (mut steps, drawn_into) = if split {
+-        // A split resolve resolves each aspect into a scratch image of `source` in a subpass of
+-        // its own, and copies that aspect alone into its texture after the pass. An aspect drawn
+-        // after the pass writes the first step's attachment, which a split resolve does not
+-        // copy whole: not built.
+-        if picked(depth_mode, stencil_mode).is_some() {
+-            return Err(Error::NotImplemented(RuntimeGap::DepthStencilResolve));
+-        }
++        // Subpass modes keep separate scratch attachments. Picked aspects draw
++        // into their own common scratch after those subpasses, then each aspect
++        // is copied into its checked destination. Never attach a NONE/NONE
++        // subpass resolve just to arrange a later copy.
+         let aspects = [
+-            (depth_mode, ImageAspectFlags::DEPTH, depth_destination),
+-            (stencil_mode, ImageAspectFlags::STENCIL, stencil_destination),
++            (depth_mode.in_subpass(), ImageAspectFlags::DEPTH, depth_destination.clone()),
++            (stencil_mode.in_subpass(), ImageAspectFlags::STENCIL, stencil_destination.clone()),
+         ];
+-        (split_steps(maker, source, aspects, &modes)?, None)
++        let steps=split_steps(maker, source, aspects, &modes)?;
++        let drawn=if let Some((_,picked_aspects))=picked(depth_mode,stencil_mode) {
++            let target=scratch(maker,source,ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT|ImageUsageFlags::TRANSFER_SRC,1)?;
++            let into=Resolve{attachment:target,copy_to:None,shader:None,twin:false,clear:None};
++            for (aspect,destination) in [
++                (ImageAspectFlags::DEPTH,depth_destination),
++                (ImageAspectFlags::STENCIL,stencil_destination),
++            ] {
++                if !picked_aspects.contains(aspect){continue;}
++                let destination=destination.ok_or_else(||internal("a picked split aspect without its destination"))?;
++                if !destination.usage.contains(ImageUsageFlags::TRANSFER_DST)
++                    || super::render_pass::not_2d(&destination.target) {
++                    return Err(Error::NotImplemented(RuntimeGap::DepthStencilResolve));
++                }
++                let mut copy=into.clone();copy.copy_to=Some(destination.target);
++                drawn_copies.push((copy,aspect));
++            }
++            Some(into)
++        } else {None};
++        (steps,drawn)
+     } else if subpass_depth == none && subpass_stencil == none {
+         let usage = ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT;
+         (
+@@ -918,15 +936,17 @@
+     };
+     // A drawn aspect is written into the first step's resolve attachment, which then holds it
+     // too (a scratch image's copy takes it), or into the draws' own.
+-    if let (Some((_, aspects)), Some(step)) = (picked(depth_mode, stencil_mode), steps.first_mut())
+-    {
+-        step.aspects |= aspects;
++    if !split {
++        if let (Some((_, aspects)), Some(step)) = (picked(depth_mode, stencil_mode), steps.first_mut()) {
++            step.aspects |= aspects;
++        }
+     }
+     let resolve = DepthStencilResolve {
+         depth_mode,
+         stencil_mode,
+         steps,
+         drawn_into,
++        drawn_copies,
+         split,
+     };
+     if let Some((pick, aspects)) = resolve.picked() {
+--- a/crates/metal2vulkan-runtime/src/shader_cache/mod.rs
++++ b/crates/metal2vulkan-runtime/src/shader_cache/mod.rs
+@@ -383,6 +383,106 @@
+     }
+ }
+ 
++/// Disk access for entry-point priming, before any exit hook is registered.
++/// Deliberately no worker, exit-guard section, or ordinary driver::make call.
++/// Priming keeps its raw call/cleanup ordering and records every entry point.
++pub(super) struct PrimingCache {
++    store: Store,
++    identity: driver::Identity,
++    name: String,
++    loaded: Option<Vec<u8>>,
++}
++
++impl CacheSetup {
++    pub(super) fn priming(
++        &self,
++        properties: &vk::PhysicalDeviceProperties,
++        profile: Hash256,
++        settings: Hash256,
++        key: Hash256,
++        sink: Option<MessageSink>,
++    ) -> PrimingCache {
++        let identity = driver::Identity::of(properties);
++        let name = Records {
++            identity,
++            settings,
++            profile,
++        }
++        .name(&Making::new("device-entry-point-priming").digest(&key).finish());
++        PrimingCache {
++            store: Store::new(self.directory.clone(), sink, None),
++            identity,
++            name,
++            loaded: None,
++        }
++    }
++}
++
++impl PrimingCache {
++    /// The caller owns the raw cache and primes/releases its entry points.
++    /// No exit_guard::called/enter may happen here, before priming is finished.
++    pub(super) unsafe fn open(
++        &mut self,
++        raw: &ash::Device,
++        word: &crate::loader_word::LoaderWord,
++    ) -> Result<vk::PipelineCache, vk::Result> {
++        let seed = match self.store.load_content(&self.name, |bytes| {
++            let data = driver::open(&self.identity, &bytes)?;
++            Some(bytes[data].to_vec())
++        }) {
++            Lookup::Hit(bytes) => Some(bytes),
++            _ => None,
++        };
++        if let Some(bytes) = seed {
++            let info = vk::PipelineCacheCreateInfo::default().initial_data(&bytes);
++            // SAFETY: the caller owns the live device and the info's bytes outlive the call.
++            if let Ok(cache) = unsafe {
++                word.restore();
++                raw.create_pipeline_cache(&info, None)
++            } {
++                self.loaded = Some(bytes);
++                return Ok(cache);
++            }
++        }
++        // Invalid/absent/refused data is never treated as a successful load.
++        // SAFETY: as above; the empty create info outlives the call.
++        unsafe {
++            word.restore();
++            raw.create_pipeline_cache(&vk::PipelineCacheCreateInfo::default(), None)
++        }
++    }
++
++    /// Called after all priming (including graphics/generated helpers) succeeds,
++    /// before its raw cache is destroyed and before exit-hook registration.
++    pub(super) unsafe fn keep(
++        &self,
++        raw: &ash::Device,
++        word: &crate::loader_word::LoaderWord,
++        cache: vk::PipelineCache,
++    ) {
++        // SAFETY: priming owns the live device/cache and every making has returned.
++        let Ok(data) = (unsafe {
++            word.restore();
++            raw.get_pipeline_cache_data(cache)
++        }) else {
++            return;
++        };
++        if self.loaded.as_deref() == Some(data.as_slice()) {
++            return;
++        }
++        if self.identity.check_vulkan_header(&data).is_err() {
++            return;
++        }
++        if self
++            .store
++            .write_record_soon(&self.name, driver::seal(&self.identity, &data))
++            .is_err()
++        {
++            self.store.write_failed();
++        }
++    }
++}
++
+ /// One device's shader cache: its memo, its view of the directory, what names its makings'
+ /// records, the `VkPipelineCache` it keeps for each record, and the cache thread.
+ pub(super) struct ShaderCache {
+--- a/crates/metal2vulkan-runtime/src/texture/heap.rs
++++ b/crates/metal2vulkan-runtime/src/texture/heap.rs
+@@ -1528,7 +1528,10 @@
+             return Ok(answer);
+         }
+         if layout.texture_type == TextureType::TextureBuffer {
+-            return texture_buffer_size_and_align(&layout);
++            let mut answer = texture_buffer_size_and_align(&layout)?;
++            answer.align = answer.align.max(
++                crate::device::lock(&self.shared().memory).submission_cache_atom());
++            return Ok(answer);
+         }
+         if descriptor.resource_options.storage_mode()? == StorageMode::Memoryless {
+             return self.memoryless_answer(CALL, descriptor, &layout);
+@@ -1881,6 +1884,8 @@
+         }
+         // Only a texture an image of binds into the heap's own memory is held to the heap's base,
+         // and the routes decide that (`holds_heap_base`).
++        size_and_align.align = size_and_align.align.max(
++            crate::device::lock(&self.shared().memory).submission_cache_atom());
+         check_heap_base(image.route, size_and_align.align)?;
+         // The size answered is the optimized texture's where the driver keeps the layout, but for
+         // a shadow of Metal's tiles.
+--- a/crates/metal2vulkan-runtime/src/used_resources.rs
++++ b/crates/metal2vulkan-runtime/src/used_resources.rs
+@@ -59,6 +59,62 @@
+     pub heaps: Vec<Heap>,
+ }
+ 
++// Compare host address ranges without touching their bytes. Object identity covers private
++// memory; host ranges additionally cover distinct imports of an IOSurface or overlapping
++// no-copy buffers. Unknown arithmetic is conservative. Rebinding is not performed by this
++// consumer, and callers must not remap these ranges while the resources are in use.
++fn buffers_overlap(a: &Buffer, b: &Buffer) -> bool {
++    if a == b {
++        return true;
++    }
++    let (Some(a_start), Some(b_start)) = (a.contents(), b.contents()) else {
++        return false;
++    };
++    let (Ok(a_len), Ok(b_len)) = (usize::try_from(a.length()), usize::try_from(b.length())) else {
++        return true;
++    };
++    let a_start = a_start.as_ptr() as usize;
++    let b_start = b_start.as_ptr() as usize;
++    let (Some(a_end), Some(b_end)) = (a_start.checked_add(a_len), b_start.checked_add(b_len)) else {
++        return true;
++    };
++    a_start < b_end && b_start < a_end
++}
++
++impl UsedResources {
++    fn references_buffer(&self, buffer: &Buffer) -> bool {
++        if buffer.heap().is_some_and(|heap| self.heaps.contains(heap)) {
++            return true;
++        }
++        self.buffers.iter().any(|other| buffers_overlap(buffer, other))
++            || self.heaps.iter().any(|heap| heap.bytes().is_some_and(|bytes| buffers_overlap(buffer, bytes)))
++    }
++
++    /// Whether this list names a resource's storage, including a view's root, a buffer
++    /// texture's backing buffer, a heap's resources and overlapping imported host ranges.
++    /// A caller may skip waiting only while this is false. This consumer does not rebind
++    /// or remap live backing ranges. Indirect command buffers remain conservative.
++    pub fn references_resource(&self, resource: super::resource::ResourceRef<'_>) -> bool {
++        use super::resource::ResourceRef;
++        match resource {
++            ResourceRef::Buffer(buffer) => self.references_buffer(buffer),
++            ResourceRef::Texture(texture) => match texture.memory() {
++                TextureMemory::Heap(heap) => self.references_heap(heap),
++                TextureMemory::Buffer(buffer) => self.references_buffer(buffer),
++                TextureMemory::Own(root) => self.textures.contains(root),
++            },
++            ResourceRef::IndirectCommandBuffer(_) => true,
++        }
++    }
++
++    /// Heap storage is treated as one dependency, conservatively including its disjoint
++    /// members. Imports over its host range are dependencies too.
++    pub fn references_heap(&self, heap: &Heap) -> bool {
++        self.heaps.contains(heap)
++            || heap.bytes().is_some_and(|bytes| self.references_buffer(bytes))
++    }
++}
++
+ /// The kind of a command encoder ([`EndedEncoder::kind`]), by the Metal protocol it is.
+ #[non_exhaustive]
+ #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

@@ -13,13 +13,13 @@ use metal2vulkan::metal::{
     TextureUsage, TriangleFillMode, VertexFormat, VertexStepFunction, Winding,
 };
 use metal2vulkan::pipeline::{
-    ColorAttachmentDescriptor, ComputePipelineDescriptor, RenderPipelineDescriptor, StageSource, VertexAttributeDescriptor, VertexBufferLayoutDescriptor,
+    ColorAttachmentDescriptor, ComputePipelineDescriptor, LinkedFunction, LinkedFunctions, RenderPipelineDescriptor, StageSource, VertexAttributeDescriptor, VertexBufferLayoutDescriptor,
     VertexDescriptor,
 };
 use metal2vulkan_runtime::{
     BinaryArchive, BinaryArchiveDescriptor, BlitCommandEncoder, FamilyRow, FeatureRow, GpuFamily, RowState, BlitOption, Buffer, ClearColor, CommandBuffer, CommandQueue, ComputeCommandEncoder,
-    ComputePipelineState, DebugMessage, DepthStencilState, Device, DeviceOptions, MessageSeverity, MessageSink, Event, EventRef, Fence, Function, Heap, HeapDescriptor, HeapType, HostMemory, IoSurfacePlane, Library, LoadAction,
-    MetalLevel, Origin, PipelineOption, PipelineOptions, PurgeableState, PrivateCount, PrivateFlag, PrivateProperties, MAX_COLOR_ATTACHMENTS, Region, RenderCommandEncoder, RenderPassDescriptor, RenderPipelineState, ResourceOptions,
+    ComputePipelineState, DebugMessage, DepthStencilState, Device, DeviceOptions, MessageSeverity, MessageSink, Event, EventRef, Fence, Function, Heap, HeapDescriptor, HeapType, HostMemory, IoSurfacePlane, Deallocator, Library, LoadAction,
+    Origin, PipelineOption, PipelineOptions, PurgeableState, PrivateCount, PrivateFlag, PrivateProperties, MAX_COLOR_ATTACHMENTS, Region, RenderCommandEncoder, RenderPassDescriptor, RenderPipelineState, ResourceOptions,
     SamplerState, ScissorRect, SharedEvent, SharedEventListener, Size, StoreAction, Texture, TextureDescriptor, Viewport, VisibilityResultMode,
 };
 use std::cell::RefCell;
@@ -140,6 +140,9 @@ pub unsafe extern "C" fn nmb_function_constant_air(length: *mut usize) -> *const
 
 // ---- device ----
 
+#[cfg(not(x9_runtime_latest))]
+use metal2vulkan_runtime::MetalLevel;
+
 pub struct NmbDevice(Device, std::sync::OnceLock<PrivateProperties>, std::sync::Mutex<()>);
 
 impl NmbDevice {
@@ -169,7 +172,8 @@ pub unsafe extern "C" fn nmb_device_open(loader: *const c_char, cache: *const c_
         // synchronous submission owns every mapped CPU/GPU cache handoff.
         options = unsafe { options.with_submission_cache_ownership(atom) };
         options.loader = Some(PathBuf::from(loader.to_string_lossy().into_owned()));
-        options.metal_level = Some(MetalLevel::NEWEST);
+        #[cfg(not(x9_runtime_latest))]
+        { options.metal_level = Some(MetalLevel::NEWEST); }
         options.shader_cache = metal2vulkan_runtime::ShaderCacheOptions::in_directory(cache.to_string_lossy().into_owned());
         options.messages = Some(MessageSink::new(observe_message));
         Ok(boxed(NmbDevice(Device::system_default_with(&options).map_err(e("device"))?, std::sync::OnceLock::new(), std::sync::Mutex::new(()))))
@@ -350,6 +354,44 @@ fn answer_selectors() -> &'static [(std::ffi::CString, u32)] {
     })
 }
 
+// Family rows owned by the Objective-C adapter are composed here, beside the
+// runtime's rows. The runtime alone still reports its lack of an I/O API. The
+// linked frontend supplies file/codec reads, ordered GPU uploads, events and
+// cancellation, and does not cap a command buffer below 8192 operations.
+fn frontend_family_rows(d:&Device,family:GpuFamily)->Vec<metal2vulkan_runtime::RowAudit> {
+    #[allow(unused_mut)]
+    let mut rows=d.family_rows(family);
+    #[cfg(x9_runtime_latest)]
+    for row in &mut rows {
+        if matches!(row.row,FamilyRow::Feature(FeatureRow::FastResourceLoading)|FamilyRow::Limit(metal2vulkan_runtime::LimitRow::IoCommandsPerBuffer)) {
+            row.state=RowState::Exact;
+        }
+    }
+    rows
+}
+
+// UniXNU AdrenoMetal 7183e588: framework admission is separate from exact
+// runtime capability. CoreImage requires Apple2 even to select its Metal path.
+// Do not alter RowState, individual feature answers, or encoder refusals here.
+const TARGET_FAMILIES: [GpuFamily; 5] = [
+    GpuFamily::Apple1, GpuFamily::Apple2, GpuFamily::Apple3,
+    GpuFamily::Common1, GpuFamily::Common2,
+];
+
+/// Explain strict family refusals independently of the framework admission policy.
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_device_family_blockers(device:*const NmbDevice,family:i64,out:*mut c_char,size:usize)->usize {
+    guard(0,||{
+        let family=GpuFamily::from_raw(family).ok_or("unknown Metal family")?;
+        let d=&get(device)?.0;
+        let rows:Vec<_>=frontend_family_rows(d,family).into_iter().filter(|r|r.state.blocks()).collect();
+        let admission=rows.is_empty() || TARGET_FAMILIES.contains(&family);
+        let mut text=format!("{family:?} advertised={} strict_support={} waived_rows={}\n",admission,rows.is_empty(),if admission {rows.len()} else {0});
+        for row in rows {text+=&format!("{}: {:?}\n",row.row.label(),row.state);}
+        Ok(copy_out(&text,out,size))
+    })
+}
+
 /// The selector at `index` of the ones `nmb_device_answer` takes and its kind; null past the last.
 ///
 /// # Safety
@@ -367,6 +409,11 @@ pub unsafe extern "C" fn nmb_device_answer_selector(index: usize, kind: *mut u32
 fn device_answer(device: &NmbDevice, selector: &str, arg: u64) -> Result<u64, String> {
     let d = &device.0;
     let p = d.properties();
+    // Limit device discovery to operations exported by this adapter, even if
+    // the underlying runtime has additional implementations of its own.
+    if matches!(selector,"supportsRasterizationRateMapWithLayerCount:"|"supportsSharedTextureHandles"|"supportsResourceDetachBacking"|
+        "supportsDynamicAttributeStride"|"supportsCommandBufferJump"|"supportsImageBlocks"|
+        "supportsNonSquareTileShaders"|"supportsTileShaders") {return Ok(0)}
     let none = || format!("the device has no answer for {selector}");
     if let Some(c) = PrivateCount::ALL.into_iter().find(|c| c.selector() == selector) {
         return device.private().count(c).value().ok_or_else(none);
@@ -393,7 +440,7 @@ fn device_answer(device: &NmbDevice, selector: &str, arg: u64) -> Result<u64, St
         }
         "areRasterOrderGroupsSupported" | "supportsRasterOrderGroups" => gap(p.are_raster_order_groups_supported())?,
         "isDepth24Stencil8PixelFormatSupported" => gap(p.is_depth24_stencil8_pixel_format_supported())?,
-        "areProgrammableSamplePositionsSupported" => gap(p.are_programmable_sample_positions_supported())?,
+        "areProgrammableSamplePositionsSupported" | "supportsProgrammableSamplePositions" => gap(p.are_programmable_sample_positions_supported())?,
         "supports32BitFloatFiltering" => p.supports_32bit_float_filtering as u64,
         // A Memoryless texture is a transient render attachment (texture.rs), which every device makes.
         "supportsMemorylessRenderTargets" => 1,
@@ -412,7 +459,8 @@ fn device_answer(device: &NmbDevice, selector: &str, arg: u64) -> Result<u64, St
         "supportsTextureSampleCount:" => gap(p.supports_texture_sample_count(arg))?,
         "supportsVertexAmplificationCount:" => gap(p.supports_vertex_amplification_count(arg))?,
         "supportsRasterizationRateMapWithLayerCount:" => gap(p.supports_rasterization_rate_map_with_layer_count(arg))?,
-        "supportsFamily:" => d.supports_family(arg as i64) as u64,
+        "supportsFamily:" => GpuFamily::from_raw(arg as i64).is_some_and(|family|
+            TARGET_FAMILIES.contains(&family) || frontend_family_rows(d,family).iter().all(|r|!r.state.blocks())) as u64,
         "supportsPrimitiveType:" => p.supports_primitive_type(arg) as u64,
         "supportsTextureWriteRoundingMode:" => p.supports_texture_write_rounding_mode(arg) as u64,
         _ => return Err(format!("{selector} is not a device query of the bridge")),
@@ -503,6 +551,40 @@ pub unsafe extern "C" fn nmb_buffer_new(device: *mut NmbDevice, length: u64, opt
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nmb_buffer_new_no_copy(device: *mut NmbDevice, pointer: *mut c_void, length: u64, options_word: u64)
                                                 -> *mut NmbBuffer {
+    // SAFETY: the caller's contract.
+    unsafe { no_copy(device, pointer, length, options_word, None) }
+}
+
+/// The C side of a no-copy deallocator: `release(context, pointer, length)`.
+pub type NmbRelease = unsafe extern "C" fn(*mut c_void, *mut c_void, u64);
+
+struct ReleaseContext(*mut c_void);
+// SAFETY: the caller hands the context over for a call on any thread (Metal's deallocator contract).
+unsafe impl Send for ReleaseContext {}
+
+/// `nmb_buffer_new_no_copy` with Metal's deallocator: `release` runs once, on any thread, when the runtime frees its import of the pages
+/// (the last buffer over them and every command buffer using them are gone), so the pages stay pinned until then and are never unmapped
+/// under the GPU. A refused call never runs it: the caller still owns `context`.
+///
+/// # Safety
+/// `pointer` is page aligned, holds `length` bytes and stays mapped until `release` runs.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nmb_buffer_new_no_copy_releasing(device: *mut NmbDevice, pointer: *mut c_void, length: u64, options_word: u64,
+                                                          release: Option<NmbRelease>, context: *mut c_void) -> *mut NmbBuffer {
+    let deallocator = release.map(|release| {
+        let context = ReleaseContext(context);
+        Box::new(move |pointer: NonNull<u8>, length: u64| {
+            let context = context;
+            // SAFETY: the caller's contract.
+            unsafe { release(context.0, pointer.as_ptr() as *mut c_void, length) }
+        }) as Deallocator
+    });
+    // SAFETY: the caller's contract.
+    unsafe { no_copy(device, pointer, length, options_word, deallocator) }
+}
+
+unsafe fn no_copy(device: *mut NmbDevice, pointer: *mut c_void, length: u64, options_word: u64, deallocator: Option<Deallocator>)
+                  -> *mut NmbBuffer {
     guard(std::ptr::null_mut(), || {
         let device = get(device)?;
         // SAFETY: the caller's contract.
@@ -512,14 +594,14 @@ pub unsafe extern "C" fn nmb_buffer_new_no_copy(device: *mut NmbDevice, pointer:
         // simultaneous first constructors can allocate distinct imports of the
         // same pages. Cover every native ABI no-copy call, including mixtures
         // of raw buffers and IOSurface textures. Each call still gets its own
-        // buffer object. This ABI passes neither a dma-buf source nor a runtime
-        // deallocator; no caller callback runs under this gate. Drop it before
+        // buffer object. This ABI passes no dma-buf source; a deallocator runs
+        // only when an import is freed, never under this gate. Drop it before
         // returning/formatting a failure; GPU work and resource release never
         // take it. A device's unrelated APIs and other devices remain separate.
         let buffer = {
             let _gate = device.2.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             // SAFETY: as above.
-            unsafe { device.0.new_buffer_with_bytes_no_copy(memory, length, modes, None) }
+            unsafe { device.0.new_buffer_with_bytes_no_copy(memory, length, modes, deallocator) }
         };
         Ok(boxed(NmbBuffer(buffer.map_err(e("no-copy buffer"))?)))
     })
@@ -533,6 +615,14 @@ pub extern "C" fn nmb_buffer_release(buffer: *mut NmbBuffer) {
 #[unsafe(no_mangle)]
 pub extern "C" fn nmb_buffer_contents(buffer: *const NmbBuffer) -> *mut c_void {
     guard(std::ptr::null_mut(), || Ok(get(buffer)?.0.contents().map_or(std::ptr::null_mut(), |p| p.as_ptr() as *mut c_void)))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_buffer_allocated_size(buffer:*const NmbBuffer)->u64 {
+    guard(0,|| {
+        #[cfg(x9_runtime_latest)] {Ok(get(buffer)?.0.allocated_size())}
+        #[cfg(not(x9_runtime_latest))] {Ok(get(buffer)?.0.length())}
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -632,6 +722,7 @@ pub struct NmbTextureDescriptor {
     pub array_length: u64,
     pub usage: u64,
     pub options: u64,
+    pub allow_optimized:u64,pub swizzle:[u64;4],
 }
 
 pub struct NmbTexture(Texture);
@@ -649,6 +740,12 @@ fn texture_descriptor(d: *const NmbTextureDescriptor) -> Result<TextureDescripto
     out.array_length = d.array_length;
     out.usage = raw::<TextureUsage>(d.usage, "texture usage")?;
     out.resource_options = options(d.options)?;
+    out.allow_gpu_optimized_contents=d.allow_optimized!=0;
+    out.swizzle=metal2vulkan::metal::TextureSwizzleChannels::new(
+        raw::<metal2vulkan::metal::TextureSwizzle>(d.swizzle[0],"texture swizzle")?,
+        raw::<metal2vulkan::metal::TextureSwizzle>(d.swizzle[1],"texture swizzle")?,
+        raw::<metal2vulkan::metal::TextureSwizzle>(d.swizzle[2],"texture swizzle")?,
+        raw::<metal2vulkan::metal::TextureSwizzle>(d.swizzle[3],"texture swizzle")?);
     Ok(out)
 }
 
@@ -747,6 +844,8 @@ pub extern "C" fn nmb_texture_describe(texture: *const NmbTexture, out: *mut Nmb
             array_length: t.array_length(),
             usage: t.usage().as_raw() as u64,
             options: t.resource_options().raw(),
+            allow_optimized:u64::from(t.allow_gpu_optimized_contents()),
+            swizzle:[t.swizzle().red.as_raw() as u64,t.swizzle().green.as_raw() as u64,t.swizzle().blue.as_raw() as u64,t.swizzle().alpha.as_raw() as u64],
         };
         Ok(())
     })
@@ -948,11 +1047,32 @@ pub struct NmbComputePipelineDescriptor {
     pub max_call_stack_depth: u64,
     pub adding_binary_functions: u64,
     pub mutability: [u64; 31],
+    pub linked: *const *mut NmbFunction,
+    pub linked_count: u64,
+    pub private_linked: *const *mut NmbFunction,
+    pub private_linked_count: u64,
+}
+
+/// The linked functions of a counted array of live function handles.
+fn linked_list(functions: *const *mut NmbFunction, count: u64) -> Result<Vec<LinkedFunction>, String> {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    if functions.is_null() || count > (isize::MAX as usize / std::mem::size_of::<*mut NmbFunction>()) as u64 {
+        return Err("null linked functions".into());
+    }
+    // SAFETY: the caller's contract: `count` live handles.
+    let handles = unsafe { std::slice::from_raw_parts(functions, usize::try_from(count).map_err(e("linked function count"))?) };
+    handles.iter().map(|&function| Ok(get(function)?.0.linked_function())).collect()
 }
 
 fn compute_descriptor(descriptor: *const NmbComputePipelineDescriptor) -> Result<ComputePipelineDescriptor, String> {
     let d = get(descriptor)?;
-    let mut out = ComputePipelineDescriptor::new(StageSource::Function(get(d.function)?.0.function_descriptor()));
+    let mut linked = LinkedFunctions::new();
+    linked.functions = linked_list(d.linked, d.linked_count)?;
+    linked.private_functions = linked_list(d.private_linked, d.private_linked_count)?;
+    let kernel = get(d.function)?.0.function_descriptor().with_linked(linked);
+    let mut out = ComputePipelineDescriptor::new(StageSource::Function(kernel));
     out.max_total_threads_per_threadgroup = if d.max_threads == 0 { None } else { Some(u32::try_from(d.max_threads).map_err(e("compute max threads"))?) };
     out.threadgroup_size_is_multiple_of_execution_width = d.multiple_of_execution_width != 0;
     out.support_indirect_command_buffers = d.indirect != 0;
@@ -1033,6 +1153,13 @@ pub struct NmbRenderPipelineDescriptor {
     pub vertex_inputs: u64,
     pub attributes: [NmbVertexAttribute; 31],
     pub layouts: [NmbVertexLayout; 31],
+    pub alpha_to_coverage:u64,pub alpha_to_one:u64,pub max_amplification:u64,pub indirect:u64,
+    pub vertex_call_depth:u64,pub fragment_call_depth:u64,pub adding_vertex:u64,pub adding_fragment:u64,
+    pub vertex_mutability:[u64;31],pub fragment_mutability:[u64;31],
+    pub vertex_linked: *const *mut NmbFunction, pub vertex_linked_count: u64,
+    pub vertex_private_linked: *const *mut NmbFunction, pub vertex_private_linked_count: u64,
+    pub fragment_linked: *const *mut NmbFunction, pub fragment_linked_count: u64,
+    pub fragment_private_linked: *const *mut NmbFunction, pub fragment_private_linked_count: u64,
 }
 
 fn optional_format(value: u64) -> Result<Option<PixelFormat>, String> {
@@ -1086,9 +1213,20 @@ pub unsafe extern "C" fn nmb_render_pipeline_new_with_options(device: *mut NmbDe
 
 fn render_descriptor(descriptor: *const NmbRenderPipelineDescriptor) -> Result<RenderPipelineDescriptor, String> {
         let d = get(descriptor)?;
-        let mut out = RenderPipelineDescriptor::new(StageSource::Function(get(d.vertex)?.0.function_descriptor()));
+        // Each stage's linked functions ride on its function descriptor, as the compute pipeline's do (compute_descriptor).
+        let stage_linked = |functions, count, private, private_count| -> Result<LinkedFunctions, String> {
+            let mut linked = LinkedFunctions::new();
+            linked.functions = linked_list(functions, count)?;
+            linked.private_functions = linked_list(private, private_count)?;
+            Ok(linked)
+        };
+        let vertex = get(d.vertex)?.0.function_descriptor()
+            .with_linked(stage_linked(d.vertex_linked, d.vertex_linked_count, d.vertex_private_linked, d.vertex_private_linked_count)?);
+        let mut out = RenderPipelineDescriptor::new(StageSource::Function(vertex));
         if !d.fragment.is_null() {
-            out.fragment = Some(StageSource::Function(get(d.fragment)?.0.function_descriptor()));
+            let fragment = get(d.fragment)?.0.function_descriptor().with_linked(stage_linked(
+                d.fragment_linked, d.fragment_linked_count, d.fragment_private_linked, d.fragment_private_linked_count)?);
+            out.fragment = Some(StageSource::Function(fragment));
         }
         for (slot, c) in out.color_attachments.iter_mut().zip(d.colors.iter()) {
             if c.format == 0 {
@@ -1110,6 +1248,18 @@ fn render_descriptor(descriptor: *const NmbRenderPipelineDescriptor) -> Result<R
         out.raster_sample_count = d.samples.max(1) as u32;
         out.input_primitive_topology = raw::<PrimitiveTopologyClass>(d.topology, "topology")?;
         out.rasterization_enabled = d.rasterization != 0;
+        out.alpha_to_coverage=d.alpha_to_coverage!=0;
+        out.alpha_to_one=d.alpha_to_one!=0;
+        out.max_vertex_amplification_count=u32::try_from(d.max_amplification.max(1)).map_err(e("amplification count"))?;
+        out.support_indirect_command_buffers=d.indirect!=0;
+        out.max_vertex_call_stack_depth=u32::try_from(d.vertex_call_depth.max(1)).map_err(e("vertex call depth"))?;
+        out.max_fragment_call_stack_depth=u32::try_from(d.fragment_call_depth.max(1)).map_err(e("fragment call depth"))?;
+        out.support_adding_vertex_binary_functions=d.adding_vertex!=0;
+        out.support_adding_fragment_binary_functions=d.adding_fragment!=0;
+        for i in 0..31 {
+            out.vertex_buffers.insert(i as u32,raw::<metal2vulkan::metal::Mutability>(d.vertex_mutability[i],"vertex mutability")?);
+            out.fragment_buffers.insert(i as u32,raw::<metal2vulkan::metal::Mutability>(d.fragment_mutability[i],"fragment mutability")?);
+        }
         if d.vertex_inputs != 0 {
             let mut inputs = VertexDescriptor::new();
             for (i, a) in d.attributes.iter().enumerate() {
@@ -1133,6 +1283,187 @@ fn render_descriptor(descriptor: *const NmbRenderPipelineDescriptor) -> Result<R
 #[unsafe(no_mangle)]
 pub extern "C" fn nmb_render_pipeline_release(pipeline: *mut NmbRenderPipeline) {
     release(pipeline)
+}
+
+// ---- pipeline reflection ----
+
+/// A pipeline's reflection, as the `reflection:` out-parameter of a pipeline's creation answers it, in JSON for the frontend's
+/// MTLArgument/MTLBinding objects: Metal's raw enumeration values, and a buffer's struct, array, pointer and texture reference types
+/// nested as Metal nests them. GFXBench's NGL engine (Aztec Ruins) finds every uniform's buffer offset and every texture's index in it.
+pub struct NmbReflection(std::ffi::CString);
+
+mod reflection_json {
+    use metal2vulkan::reflection::{ArrayType, Binding, PointerType, StructType, TextureReferenceType};
+    use std::fmt::Write;
+
+    fn string(out: &mut String, s: &str) {
+        out.push('"');
+        for c in s.chars() {
+            match c {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                c if (c as u32) < 0x20 => {
+                    let _ = write!(out, "\\u{:04x}", c as u32);
+                }
+                c => out.push(c),
+            }
+        }
+        out.push('"');
+    }
+
+    fn structure(out: &mut String, s: &StructType) {
+        out.push_str("{\"members\":[");
+        for (i, m) in s.members().iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str("{\"name\":");
+            string(out, m.name());
+            let _ = write!(out, ",\"offset\":{},\"dataType\":{},\"argumentIndex\":{}", m.offset(), m.data_type().as_raw(), m.argument_index());
+            if let Some(t) = m.struct_type() {
+                out.push_str(",\"struct\":");
+                structure(out, t);
+            }
+            if let Some(t) = m.array_type() {
+                out.push_str(",\"array\":");
+                array(out, t);
+            }
+            if let Some(t) = m.pointer_type() {
+                out.push_str(",\"pointer\":");
+                pointer(out, t);
+            }
+            if let Some(t) = m.texture_reference_type() {
+                out.push_str(",\"texture\":");
+                texture_reference(out, t);
+            }
+            out.push('}');
+        }
+        out.push_str("]}");
+    }
+
+    fn array(out: &mut String, a: &ArrayType) {
+        let _ = write!(out, "{{\"elementType\":{},\"length\":{},\"stride\":{},\"argumentIndexStride\":{}", a.element_type().as_raw(),
+                       a.array_length(), a.stride(), a.argument_index_stride());
+        if let Some(t) = a.element_struct_type() {
+            out.push_str(",\"struct\":");
+            structure(out, t);
+        }
+        if let Some(t) = a.element_array_type() {
+            out.push_str(",\"array\":");
+            array(out, t);
+        }
+        if let Some(t) = a.element_pointer_type() {
+            out.push_str(",\"pointer\":");
+            pointer(out, t);
+        }
+        if let Some(t) = a.element_texture_reference_type() {
+            out.push_str(",\"texture\":");
+            texture_reference(out, t);
+        }
+        out.push('}');
+    }
+
+    fn pointer(out: &mut String, p: &PointerType) {
+        let _ = write!(out, "{{\"elementType\":{},\"access\":{},\"alignment\":{},\"size\":{},\"argumentBuffer\":{}", p.element_type().as_raw(),
+                       p.access().as_raw(), p.alignment(), p.data_size(), p.element_is_argument_buffer());
+        if let Some(t) = p.element_struct_type() {
+            out.push_str(",\"struct\":");
+            structure(out, t);
+        }
+        if let Some(t) = p.element_array_type() {
+            out.push_str(",\"array\":");
+            array(out, t);
+        }
+        out.push('}');
+    }
+
+    fn texture_reference(out: &mut String, t: &TextureReferenceType) {
+        let _ = write!(out, "{{\"dataType\":{},\"textureType\":{},\"access\":{},\"depth\":{}}}", t.texture_data_type().as_raw(),
+                       t.texture_type().as_raw(), t.access().as_raw(), t.is_depth_texture());
+    }
+
+    fn binding(out: &mut String, b: &Binding) {
+        out.push_str("{\"name\":");
+        string(out, b.name());
+        let _ = write!(out, ",\"type\":{},\"access\":{},\"index\":{},\"used\":{},\"argument\":{}", b.binding_type().as_raw(), b.access().as_raw(),
+                       b.index(), b.is_used(), b.is_argument());
+        if let Some(buffer) = b.buffer() {
+            let _ = write!(out, ",\"buffer\":{{\"alignment\":{},\"size\":{},\"dataType\":{}", buffer.buffer_alignment(), buffer.buffer_data_size(),
+                           buffer.buffer_data_type().as_raw());
+            if let Some(t) = buffer.buffer_struct_type() {
+                out.push_str(",\"struct\":");
+                structure(out, t);
+            }
+            if let Some(t) = buffer.buffer_pointer_type() {
+                out.push_str(",\"pointer\":");
+                pointer(out, t);
+            }
+            out.push('}');
+        }
+        if let Some(t) = b.threadgroup() {
+            let _ = write!(out, ",\"threadgroup\":{{\"alignment\":{},\"size\":{}}}", t.threadgroup_memory_alignment(), t.threadgroup_memory_data_size());
+        }
+        if let Some(t) = b.texture() {
+            let _ = write!(out, ",\"texture\":{{\"textureType\":{},\"dataType\":{},\"depth\":{},\"arrayLength\":{}}}", t.texture_type().as_raw(),
+                           t.texture_data_type().as_raw(), t.is_depth_texture(), t.array_length());
+        }
+        out.push('}');
+    }
+
+    /// `"name":[binding,...]`.
+    pub(super) fn stage(out: &mut String, name: &str, bindings: &[Binding]) {
+        let _ = write!(out, "\"{name}\":[");
+        for (i, b) in bindings.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            binding(out, b);
+        }
+        out.push(']');
+    }
+}
+
+fn reflection_handle(json: String) -> Result<*mut NmbReflection, String> {
+    Ok(boxed(NmbReflection(std::ffi::CString::new(json).map_err(|_| "a NUL in the reflection".to_string())?)))
+}
+
+/// The reflection of the render pipeline `descriptor` describes: `{"vertex":[...],"fragment":[...]}`.
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_render_pipeline_reflection(descriptor: *const NmbRenderPipelineDescriptor) -> *mut NmbReflection {
+    guard(std::ptr::null_mut(), || {
+        let budget = metal2vulkan::Budget::with_deadline(None);
+        let reflection = render_descriptor(descriptor)?.reflection(&budget).map_err(e("render pipeline reflection"))?;
+        let mut json = String::from("{");
+        reflection_json::stage(&mut json, "vertex", reflection.vertex_bindings());
+        json.push(',');
+        reflection_json::stage(&mut json, "fragment", reflection.fragment_bindings());
+        json.push('}');
+        reflection_handle(json)
+    })
+}
+
+/// The reflection of the compute pipeline `descriptor` describes: `{"bindings":[...]}`.
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_compute_pipeline_reflection(descriptor: *const NmbComputePipelineDescriptor) -> *mut NmbReflection {
+    guard(std::ptr::null_mut(), || {
+        let budget = metal2vulkan::Budget::with_deadline(None);
+        let reflection = compute_descriptor(descriptor)?.reflection(&budget).map_err(e("compute pipeline reflection"))?;
+        let mut json = String::from("{");
+        reflection_json::stage(&mut json, "bindings", reflection.bindings());
+        json.push('}');
+        reflection_handle(json)
+    })
+}
+
+/// The reflection's JSON, valid until its release.
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_reflection_json(reflection: *const NmbReflection) -> *const c_char {
+    guard(std::ptr::null(), || Ok(get(reflection)?.0.as_ptr()))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_reflection_release(reflection: *mut NmbReflection) {
+    release(reflection)
 }
 
 // ---- binary archives ----
@@ -1211,6 +1542,7 @@ pub struct NmbSamplerDescriptor {
     pub lod_average: u64,
     pub lod_min: f32,
     pub lod_max: f32,
+    pub argument_buffers:u64,
 }
 
 #[unsafe(no_mangle)]
@@ -1231,7 +1563,9 @@ pub extern "C" fn nmb_sampler_new(device: *mut NmbDevice, descriptor: *const Nmb
         out.lod_average = d.lod_average != 0;
         out.lod_min_clamp = d.lod_min;
         out.lod_max_clamp = d.lod_max;
-        Ok(boxed(NmbSampler(get(device)?.0.new_sampler_state(&out).map_err(e("sampler"))?)))
+        let mut sampler_options=metal2vulkan_runtime::SamplerStateOptions::default();
+        sampler_options.support_argument_buffers=d.argument_buffers!=0;
+        Ok(boxed(NmbSampler(get(device)?.0.new_sampler_state_with_options(&out,sampler_options).map_err(e("sampler"))?)))
     })
 }
 
@@ -1397,7 +1731,27 @@ pub extern "C" fn nmb_command_buffer_status(command_buffer: *const NmbCommandBuf
 
 #[unsafe(no_mangle)]
 pub extern "C" fn nmb_command_buffer_error(command_buffer: *const NmbCommandBuffer, out: *mut c_char, size: usize) -> usize {
-    guard(0, || Ok(get(command_buffer)?.0.error_description().map_or(0, |text| copy_out(&text, out, size))))
+    guard(0, || {
+        let command = &get(command_buffer)?.0;
+        let text = command.error_description().filter(|s| !s.is_empty())
+            .or_else(|| command.error().map(|error| format!("{error:?}")));
+        Ok(text.map_or(0, |text| copy_out(&text, out, size)))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_command_buffer_error_code(command_buffer: *const NmbCommandBuffer) -> u64 {
+    guard(1, || Ok(get(command_buffer)?.0.error().map_or(1, |error| error.metal_code())))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_command_buffer_unsubmitted_oom(command_buffer: *const NmbCommandBuffer) -> bool {
+    guard(false, || {
+        #[cfg(x9_runtime_latest)]
+        { Ok(get(command_buffer)?.0.failed_before_submission_with_oom()) }
+        #[cfg(not(x9_runtime_latest))]
+        { let _ = command_buffer; Ok(false) }
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -1437,7 +1791,10 @@ fn shared<'a>(event: *const NmbEvent) -> Result<&'a SharedEvent, String> {
 /// forwards to it).
 fn listener() -> Result<&'static SharedEventListener, String> {
     static LISTENER: std::sync::OnceLock<Result<SharedEventListener, String>> = std::sync::OnceLock::new();
-    LISTENER.get_or_init(|| SharedEventListener::new().map_err(e("listener"))).as_ref().map_err(|why| why.clone())
+    #[cfg(x9_runtime_latest)]
+    { LISTENER.get_or_init(|| Ok(SharedEventListener::new())).as_ref().map_err(|why| why.clone()) }
+    #[cfg(not(x9_runtime_latest))]
+    { LISTENER.get_or_init(|| SharedEventListener::new().map_err(e("listener"))).as_ref().map_err(|why| why.clone()) }
 }
 
 #[unsafe(no_mangle)]
@@ -1572,6 +1929,9 @@ pub struct NmbPassAttachment {
     pub load: u64,
     pub store: u64,
     pub clear: [f64; 4],
+    pub resolve:*mut NmbTexture,
+    pub resolve_level:u64,pub resolve_slice:u64,pub resolve_depth_plane:u64,
+    pub store_options:u64,pub resolve_filter:u64,
 }
 
 #[repr(C)]
@@ -1584,6 +1944,8 @@ pub struct NmbRenderPassDescriptor {
     pub array_length: u64,
     pub samples: u64,
     pub visibility: *const NmbBuffer,
+    pub sample_positions:*const f32,
+    pub sample_position_count:u64,
 }
 
 fn texture_of(a: &NmbPassAttachment) -> Result<Option<Texture>, String> {
@@ -1604,6 +1966,9 @@ pub extern "C" fn nmb_render_encoder_new(command_buffer: *mut NmbCommandBuffer, 
             slot.load_action = LoadAction::from_raw(a.load).map_err(e("load action"))?;
             slot.store_action = StoreAction::from_raw(a.store).map_err(e("store action"))?;
             slot.clear_color = ClearColor::new(a.clear[0], a.clear[1], a.clear[2], a.clear[3]);
+            slot.resolve_texture=optional(a.resolve)?.map(|t|t.0.clone());
+            slot.resolve_level=a.resolve_level;slot.resolve_slice=a.resolve_slice;slot.resolve_depth_plane=a.resolve_depth_plane;
+            slot.store_action_options=metal2vulkan_runtime::StoreActionOptions::from_raw(a.store_options).map_err(e("color store options"))?;
         }
         let depth = &mut pass.depth_attachment;
         depth.texture = texture_of(&d.depth)?;
@@ -1612,6 +1977,10 @@ pub extern "C" fn nmb_render_encoder_new(command_buffer: *mut NmbCommandBuffer, 
         depth.depth_plane = d.depth.depth_plane;
         depth.load_action = LoadAction::from_raw(d.depth.load).map_err(e("load action"))?;
         depth.store_action = StoreAction::from_raw(d.depth.store).map_err(e("store action"))?;
+        depth.resolve_texture=optional(d.depth.resolve)?.map(|t|t.0.clone());
+        depth.resolve_level=d.depth.resolve_level;depth.resolve_slice=d.depth.resolve_slice;depth.resolve_depth_plane=d.depth.resolve_depth_plane;
+        depth.store_action_options=metal2vulkan_runtime::StoreActionOptions::from_raw(d.depth.store_options).map_err(e("depth store options"))?;
+        depth.depth_resolve_filter=metal2vulkan_runtime::MultisampleDepthResolveFilter::from_raw(d.depth.resolve_filter).map_err(e("depth resolve filter"))?;
         depth.clear_depth = d.depth.clear[0];
         let stencil = &mut pass.stencil_attachment;
         stencil.texture = texture_of(&d.stencil)?;
@@ -1620,11 +1989,22 @@ pub extern "C" fn nmb_render_encoder_new(command_buffer: *mut NmbCommandBuffer, 
         stencil.depth_plane = d.stencil.depth_plane;
         stencil.load_action = LoadAction::from_raw(d.stencil.load).map_err(e("load action"))?;
         stencil.store_action = StoreAction::from_raw(d.stencil.store).map_err(e("store action"))?;
+        stencil.resolve_texture=optional(d.stencil.resolve)?.map(|t|t.0.clone());
+        stencil.resolve_level=d.stencil.resolve_level;stencil.resolve_slice=d.stencil.resolve_slice;stencil.resolve_depth_plane=d.stencil.resolve_depth_plane;
+        stencil.store_action_options=metal2vulkan_runtime::StoreActionOptions::from_raw(d.stencil.store_options).map_err(e("stencil store options"))?;
+        stencil.stencil_resolve_filter=metal2vulkan_runtime::MultisampleStencilResolveFilter::from_raw(d.stencil.resolve_filter).map_err(e("stencil resolve filter"))?;
         stencil.clear_stencil = d.stencil.clear[0] as u32;
         pass.render_target_width = d.width;
         pass.render_target_height = d.height;
         pass.render_target_array_length = d.array_length;
         pass.default_raster_sample_count = d.samples;
+        if d.sample_position_count>32 || (d.sample_position_count>0 && d.sample_positions.is_null()) {
+            return Err("invalid sample position array".into());
+        }
+        if d.sample_position_count>0 {
+            let positions=unsafe {std::slice::from_raw_parts(d.sample_positions,d.sample_position_count as usize*2)};
+            pass.sample_positions=positions.chunks_exact(2).map(|p|metal2vulkan_runtime::SamplePosition::new(p[0],p[1])).collect();
+        }
         if !d.visibility.is_null() {
             pass.visibility_result_buffer = Some(get(d.visibility)?.0.clone());
         }
@@ -1993,3 +2373,6 @@ pub extern "C" fn nmb_blit_generate_mipmaps(encoder: *mut NmbEncoder, texture: *
         Ok(true)
     })
 }
+
+#[path = "NativeMetalExtras.rs"]
+mod extras;

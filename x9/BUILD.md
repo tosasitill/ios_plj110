@@ -1,5 +1,15 @@
 # Building the X9 (OPPO Find X9 / PLJ110 / MT6993) boot candidate
 
+> The scripts and allowlist below describe the older pan184 candidate. The updated
+> GPU sources in `metal/General` and the frozen `build/gpu-kernel-source`
+> include later pan207/pan209/pan212 work; they
+> have not been integrated into this pan184 recipe or built in this checkout.
+> Runtime patches for metal2vulkan commit `219f01365dc4c8eb346816c405b5b17403793764`
+> are in `build/third_party/metal2vulkan-pan205/`, in numeric order. The
+> pan207 and pan209 patches there document additional native kernel changes,
+> not metal2vulkan patches. Plugin versions must be derived from a newly
+> generated, verified allowlist before installation.
+
 This directory holds the complete X9 work: the bare-metal shim, the XNU patch
 series, the Mali/PanVK/Metal userspace, the kernel render engine and the
 plugin update mailbox. Logs, device dumps, build objects and `boot.img`
