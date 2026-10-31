@@ -242,6 +242,10 @@ public:
 	uint32_t      fLastStride;
 	SweetSurface *fLastSurf;      /* keeps fLastVA alive */
 	SweetSurface *fPendHold[4], *fShowHold[4], *fRetireHold[4];   /* in-use holds */
+	/* X9: cached shadow of the panel, used when upper layers must be blended
+	 * so the write-combined panel mapping is never read back per pixel. */
+	IOBufferMemoryDescriptor *fX9Compose;
+	bool          fX9ComposeValid;  /* shadow holds what the panel shows */
 	void          fadeStep(const uint8_t *src, uint32_t srcStride, uint32_t step);
 
 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
@@ -390,7 +394,27 @@ public:
 	IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args,
 	    IOExternalMethodDispatch *dispatch, OSObject *target,
 	    void *reference) APPLE_KEXT_OVERRIDE {
-		return kIOReturnSuccess;
+		/*
+		 * No scaler is implemented. Reporting success made every
+		 * IOSurfaceAccelerator transfer "complete" with the destination
+		 * untouched (blank or stale surfaces). Refuse instead so callers take
+		 * their failure/fallback path. sweet_scaler_stub=1 restores the old
+		 * always-success behaviour.
+		 */
+		static int stub = -1;
+		if (stub < 0) {
+			int arg = 0;
+			PE_parse_boot_argn("sweet_scaler_stub", &arg, sizeof(arg));
+			stub = arg != 0 || !sweet_board_x9();  /* other boards keep the stub */
+		}
+		static unsigned logged;
+		if (sweet_board_x9() && logged++ < 16) {
+			IOLog("SWEET SCALER: sel %u in %u/%u out %u/%u -> %s\n", selector,
+			    args->scalarInputCount, args->structureInputSize,
+			    args->scalarOutputCount, args->structureOutputSize,
+			    stub ? "success (stub)" : "unsupported");
+		}
+		return stub ? kIOReturnSuccess : kIOReturnUnsupported;
 	}
 };
 
@@ -953,6 +977,7 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 		fb->fIntfFrames = frames;
 	}
 	if (fb->fPowerOff) {
+		fb->fX9ComposeValid = false;  /* the fade below writes the panel directly */
 		if(sweet_board_x9()) {
 			// Do not let an armed GUI transfer start after a power-off request,
 			// or fade memory while DSI is still reading the previous picture.
@@ -1070,6 +1095,7 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 		IOLockUnlock(fb->fLock);
 		if(sweet_x9_desktop_frame_poll((uint8_t *)fb->fPixels,fb->fRowBytes,fb->fWidth,fb->fHeight,x9_fb_present_seq,
 		    publish_allowed&&x9_lk_gui_busy()==0)) {
+			fb->fX9ComposeValid=false;  // GPU result was copied into the panel
 			fb->x9QueuePresent();
 			IOLog("X9 DESKTOP FRAME: generation=%llu LK asynchronous fresh-TE submit\n",x9_fb_present_seq);
 		}
@@ -1514,6 +1540,138 @@ AppleCLCD::directPresent(const uint8_t *rec)
 	return ok;
 }
 
+/*
+ * X9 layer drawing. IOMFB layers are stacked bottom-up by index; CoreAnimation
+ * surfaces carry premultiplied alpha. The bottom drawn layer is copied as is
+ * (premultiplied over black is the same pixels); upper layers are blended.
+ * Source formats other than BGRA are converted or refused rather than copied
+ * as if they were BGRA. sweetfb_blend=0 restores the old opaque copies.
+ */
+enum { X9_FMT_BGRA, X9_FMT_RGBA, X9_FMT_ARGB, X9_FMT_UNSUPPORTED };
+
+static int
+x9_layer_format(uint32_t format)
+{
+	switch (format) {
+	case 0:                 /* unset: what the copy path always assumed */
+	case 0x42475241:        /* 'BGRA' */
+		return X9_FMT_BGRA;
+	case 0x52474241:        /* 'RGBA' */
+		return X9_FMT_RGBA;
+	case 0x41524742:        /* 'ARGB' */
+		return X9_FMT_ARGB;
+	default:
+		return X9_FMT_UNSUPPORTED;
+	}
+}
+
+static bool
+x9_blend_enabled(void)
+{
+	static int enabled = -1;
+	if (enabled < 0) {
+		int arg = 1;
+		PE_parse_boot_argn("sweetfb_blend", &arg, sizeof(arg));
+		enabled = arg != 0;
+	}
+	return enabled != 0;
+}
+
+/* Little-endian words: BGRA bytes read as 0xAARRGGBB. */
+static inline uint32_t
+x9_to_bgra(uint32_t v, int format)
+{
+	if (format == X9_FMT_RGBA) {
+		return (v & 0xff00ff00u) | ((v >> 16) & 0xffu) | ((v & 0xffu) << 16);
+	}
+	if (format == X9_FMT_ARGB) {
+		return __builtin_bswap32(v);
+	}
+	return v;
+}
+
+/* Premultiplied source-over: d = s + d * (255 - a) / 255, per channel. */
+static inline uint32_t
+x9_blend_pixel(uint32_t s, uint32_t d)
+{
+	uint32_t a = s >> 24;
+	if (a == 0xff) {
+		return s;
+	}
+	if (s == 0) {
+		return d;
+	}
+	uint32_t inv = 255 - a;
+	uint32_t rb = (d & 0x00ff00ffu) * inv + 0x00800080u;
+	rb = ((rb + ((rb >> 8) & 0x00ff00ffu)) >> 8) & 0x00ff00ffu;
+	uint32_t ag = ((d >> 8) & 0x00ff00ffu) * inv + 0x00800080u;
+	ag = (ag + ((ag >> 8) & 0x00ff00ffu)) & 0xff00ff00u;
+	return s + (rb | ag);
+}
+
+static void
+x9_layer_row(uint8_t *dst, const uint8_t *src, uint32_t count, int format, bool blend)
+{
+	if (format == X9_FMT_BGRA && !blend) {
+		memcpy(dst, src, (size_t)count * 4);
+		return;
+	}
+	for (uint32_t x = 0; x < count; x++) {
+		uint32_t s, d;
+		memcpy(&s, src + (uint64_t)x * 4, 4);
+		s = x9_to_bgra(s, format);
+		if (blend) {
+			memcpy(&d, dst + (uint64_t)x * 4, 4);
+			s = x9_blend_pixel(s, d);
+		}
+		memcpy(dst + (uint64_t)x * 4, &s, 4);
+	}
+}
+
+/*
+ * Nearest-neighbour scaled layer: source rect (sx,sy,sw,sh) onto panel rect
+ * (dx,dy,dw,dh), clipped to the panel. The caller has bounds-checked the
+ * whole source rect against the surface memory.
+ */
+static void
+x9_layer_scaled(uint8_t *dst, uint32_t dstStride, uint32_t panelW, uint32_t panelH,
+    const uint8_t *src, uint32_t srcStride, int32_t sx, int32_t sy, int32_t sw, int32_t sh,
+    int32_t dx, int32_t dy, int32_t dw, int32_t dh, int format, bool blend)
+{
+	int32_t x0 = dx < 0 ? 0 : dx, y0 = dy < 0 ? 0 : dy;
+	int32_t x1 = dx + dw > (int32_t)panelW ? (int32_t)panelW : dx + dw;
+	int32_t y1 = dy + dh > (int32_t)panelH ? (int32_t)panelH : dy + dh;
+	if (x0 >= x1 || y0 >= y1) {
+		return;
+	}
+	uint64_t xstep = ((uint64_t)sw << 16) / (uint64_t)dw;
+	uint64_t ystep = ((uint64_t)sh << 16) / (uint64_t)dh;
+	for (int32_t y = y0; y < y1; y++) {
+		uint64_t row = ((uint64_t)(y - dy) * ystep) >> 16;
+		if (row >= (uint64_t)sh) {
+			row = (uint64_t)sh - 1;
+		}
+		const uint8_t *srow = src + (uint64_t)(sy + (int32_t)row) * srcStride + (uint64_t)sx * 4;
+		uint8_t *drow = dst + (uint64_t)y * dstStride;
+		uint64_t fx = (uint64_t)(x0 - dx) * xstep;
+		for (int32_t x = x0; x < x1; x++, fx += xstep) {
+			uint64_t col = fx >> 16;
+			if (col >= (uint64_t)sw) {
+				col = (uint64_t)sw - 1;
+			}
+			uint32_t s, d;
+			memcpy(&s, srow + col * 4, 4);
+			s = x9_to_bgra(s, format);
+			if (blend) {
+				memcpy(&d, drow + (uint64_t)x * 4, 4);
+				s = x9_blend_pixel(s, d);
+			}
+			memcpy(drow + (uint64_t)x * 4, &s, 4);
+		}
+	}
+}
+
+
 void
 AppleCLCD::present(const uint8_t *rec)
 {
@@ -1587,6 +1745,47 @@ AppleCLCD::present(const uint8_t *rec)
 		}
 	}
 
+	/* X9 with more than one drawable layer: compose in the cached shadow and
+	 * copy it to the panel once, so blending never reads the write-combined
+	 * panel. A layer that is the panel itself (userspace draws in place)
+	 * makes the shadow stale, so that frame stays on the direct path. */
+	uint8_t *x9_panel = NULL;
+	unsigned x9_layers = 0;
+	bool x9_inplace = false;
+	if (sweet_board_x9() && dst != NULL && x9_blend_enabled()) {
+		for (uint32_t layer = 0; layer < SWEET_FB_LAYERS; layer++) {
+			uint32_t id = get32(rec, 0x54 + 4 * layer);
+			SweetSurface *s = id != 0 ? sweet_surface_copy(id) : NULL;
+			if (s == NULL) {
+				continue;
+			}
+			if (s == fSurface && s->kernelAddress() == fPixels) {
+				x9_inplace = true;
+			} else {
+				x9_layers++;
+			}
+			s->release();
+		}
+		if (x9_layers > 1 && !x9_inplace && dst == (uint8_t *)fPixels) {
+			if (fX9Compose == NULL) {
+				fX9Compose = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
+				    kIODirectionInOut, (vm_size_t)fRowBytes * fHeight, page_size);
+				IOLog("X9 COMPOSE: shadow %ux%u stride %u %s\n", fWidth, fHeight, fRowBytes,
+				    fX9Compose != NULL ? "allocated" : "allocation failed;opaque copies");
+			}
+			if (fX9Compose != NULL) {
+				uint8_t *shadow = (uint8_t *)fX9Compose->getBytesNoCopy();
+				if (!fX9ComposeValid) {
+					/* One read of the panel to keep retained pixels. */
+					memcpy(shadow, (const void *)fPixels, (size_t)fRowBytes * fHeight);
+				}
+				x9_panel = dst;
+				dst = shadow;
+			}
+		}
+	}
+	bool x9_first_drawn = true;
+
 	/* Reference: hackios c84b4634277a70beac73921029b1fb6afc2530af,
 	 * MiniIOMobileFramebuffer::show (20F66). The 20H392 request also has
 	 * surface IDs at +0x54, set bits at +0x104 and cleared bits at +0x108.
@@ -1640,6 +1839,42 @@ AppleCLCD::present(const uint8_t *rec)
 		}
 		uintptr_t src = s->kernelAddress();
 		uint32_t bpe = s->bytesPerElement ? s->bytesPerElement : 4;
+		int x9_format = X9_FMT_BGRA;
+		bool x9_blend = false;
+		if (sweet_board_x9()) {
+			/* sweetfb_blend=0 is the whole old compositor: raw BGRA copies. */
+			x9_format = x9_blend_enabled() ? x9_layer_format(s->pixelFormat) : X9_FMT_BGRA;
+			if (x9_format == X9_FMT_UNSUPPORTED && bpe == 4) {
+				static unsigned refused;
+				if (refused++ < 16) IOLog("X9 COMPOSE: layer %u surface %u format 0x%x not drawn;no BGRA conversion\n",
+				    layer, id, s->pixelFormat);
+				s->release();
+				continue;
+			}
+			/* Blend only into a cached target; never read the panel back. */
+			x9_blend = !x9_first_drawn && x9_blend_enabled() && dst != (uint8_t *)fPixels;
+			/* Scale only when the source rect is plain pixels inside the
+			 * surface; anything else keeps the unscaled copy below. */
+			int32_t aw = (int32_t)get32(a, 8), ah = (int32_t)get32(a, 12);
+			if (bpe == 4 && src != 0 && x9_blend_enabled() && w > 0 && h > 0 && aw > 0 && ah > 0 &&
+			    sx >= 0 && sy >= 0 && (int64_t)sx + aw <= (int64_t)s->width &&
+			    (int64_t)sy + ah <= (int64_t)s->height && (aw != w || ah != h) &&
+			    s->elementWidth == 1 && s->elementHeight == 1 && s->memory != NULL) {
+				uint64_t slast = (uint64_t)s->offset + (uint64_t)(sy + ah - 1) * s->bytesPerRow +
+				    (uint64_t)(sx + aw) * 4;
+				if (slast <= s->memory->getLength()) {
+					int32_t pdx = (dx < 0 || dy < 0) ? 0 : dx, pdy = (dx < 0 || dy < 0) ? 0 : dy;
+					x9_layer_scaled(dst, fRowBytes, fWidth, fHeight, (const uint8_t *)(src + s->offset),
+					    s->bytesPerRow, sx, sy, aw, ah, pdx - fOffX, pdy - fOffY, w, h, x9_format, x9_blend);
+					x9_first_drawn = false;
+					static unsigned scaled;
+					if (scaled++ < 8) IOLog("X9 COMPOSE: layer %u surface %u scaled %dx%d -> %dx%d blend=%u\n",
+					    layer, id, aw, ah, w, h, x9_blend ? 1 : 0);
+				}
+				s->release();
+				continue;
+			}
+		}
 		if (w <= 0 || h <= 0) {
 			w = (int32_t)s->width;
 			h = (int32_t)s->height;
@@ -1690,14 +1925,32 @@ AppleCLCD::present(const uint8_t *rec)
 				struct x9_fb_sample z = x9_fb_sample_grid((const uint8_t *)(src + s->offset), fWidth, fHeight, s->bytesPerRow);
 				IOLog("X9 FRAME source seq=%llu id=%u sample=%u nonblack=%u alpha=%u checksum=%08x\n", x9_fb_present_seq, id, z.samples, z.nonblack, z.opaque, z.checksum);
 			}
-			for (int32_t y = 0; y < h; y++) {
-				memcpy((void *)(dst + (uint64_t)(dy + y) * fRowBytes + (uint64_t)dx * 4),
-				    (const void *)(src + s->offset + (uint64_t)(sy + y) * s->bytesPerRow + (uint64_t)sx * 4),
-				    (size_t)w * 4);
+			if (sweet_board_x9()) {
+				for (int32_t y = 0; y < h; y++) {
+					x9_layer_row(dst + (uint64_t)(dy + y) * fRowBytes + (uint64_t)dx * 4,
+					    (const uint8_t *)(src + s->offset + (uint64_t)(sy + y) * s->bytesPerRow + (uint64_t)sx * 4),
+					    (uint32_t)w, x9_format, x9_blend);
+				}
+				x9_first_drawn = false;
+			} else {
+				for (int32_t y = 0; y < h; y++) {
+					memcpy((void *)(dst + (uint64_t)(dy + y) * fRowBytes + (uint64_t)dx * 4),
+					    (const void *)(src + s->offset + (uint64_t)(sy + y) * s->bytesPerRow + (uint64_t)sx * 4),
+					    (size_t)w * 4);
+				}
 			}
 
 		}
 		s->release();
+	}
+	if (x9_panel != NULL) {
+		memcpy(x9_panel, dst, (size_t)fRowBytes * fHeight);
+		dst = x9_panel;
+		fX9ComposeValid = true;
+		static unsigned composed;
+		if (composed++ < 4) IOLog("X9 COMPOSE: %u layers blended in shadow, copied to panel\n", x9_layers);
+	} else if (sweet_board_x9()) {
+		fX9ComposeValid = false;  /* the panel was written directly or not at all from the shadow */
 	}
 	if (sweet_board_x9() && dst != NULL) {
 		struct x9_fb_sample z = x9_fb_sample_grid(dst, fWidth, fHeight, fRowBytes);

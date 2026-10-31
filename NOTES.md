@@ -16,6 +16,29 @@ XNU tree on this Linux host, so not even a single-file compile was run.
   coherent skip was NOT active in that run. Submit wall times from log
   timestamps: backboardd seq1 ~100ms, seq2 ~9ms, later ~3-6ms; mediaserverd
   ~4ms each. No `X9 RENDER timing` summary printed (needs >2s of jobs).
+**Update 2 (same day): fixes 3-4 applied in `SweetFramebuffer.cpp`, NOT built/booted.**
+- X9 compositor: layers stacked bottom-up by index. The bottom drawn layer is
+  copied as before; upper layers are blended premultiplied source-over. With
+  more than one drawable layer and no in-place panel layer, composition goes
+  into a lazily allocated cached shadow (`fX9Compose`, ~14 MB) and is copied
+  to the panel once, so blending never reads the WC panel. The shadow is
+  seeded from the panel (one slow read) whenever it is stale: after any
+  direct-path frame, fade or GPU publication. Single-layer frames keep the
+  plain memcpy path (no extra cost).
+- 'RGBA'/'ARGB' are converted to BGRA; other 4-byte formats are not drawn and
+  logged (`X9 COMPOSE: ... not drawn`). Source rects that differ from the
+  destination are nearest-neighbour scaled, only when the source rect is plain
+  pixels inside the surface (`X9 COMPOSE: ... scaled`).
+- Layer enable mask still ignored on X9: that was a deliberate earlier
+  decision for the 20H392 record (see comment above the bzero), not changed.
+- `sweetfb_blend=0` restores the old raw opaque copies entirely.
+- Scaler user client on X9 now returns `kIOReturnUnsupported` and logs the
+  first 16 selectors (`SWEET SCALER: sel ...`). `sweet_scaler_stub=1` restores
+  always-success. Other boards unchanged.
+- Risks to watch: an upper layer whose alpha channel is not really alpha
+  (opaque content with alpha 0) would now disappear; if CoreAnimation treats
+  the scaler failure as fatal instead of falling back, use
+  `sweet_scaler_stub=1`. Per-pixel blend of a full-screen overlay is scalar C.
 Next: build on the macOS host, boot, and compare `X9 RENDER timing`
 (`storage_us`/`start_us`/`wait_us`/`retire_us`) and `X9 DISPLAY cadence`
 `gpu_defer` against this log.
