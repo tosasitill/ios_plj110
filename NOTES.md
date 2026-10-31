@@ -1,3 +1,40 @@
+## X9 Metal perf / rendering review (2026-10-31, static source read only)
+
+No device log or build was available in this checkout; everything below comes from
+reading `x9/build/gpu-kernel-source` and `x9/metal/General`. Hypotheses still need
+the `X9 RENDER timing` / `X9 DISPLAY cadence` lines from a real run to confirm.
+
+Frame time (observed in code):
+- `render_submit` (`SweetX9RenderEngine.inc`) runs fully synchronously under the
+  global `metal_service_lock`: whole-range CIVAC of every CPU-exposed BO
+  (bounding interval of all its GPU mappings) -> `flush_gpu` -> `install_as` ->
+  CSG start -> doorbell -> poll fence -> CSG suspend -> `flush_gpu` ->
+  `remove_as` -> post-CIVAC. Every Metal command buffer pays this.
+- Every poll helper (`flush_gpu`, `idle_as`, completion wait, `stop_mcu`) uses
+  `sleep_ms()` = 1 ms `assert_wait_deadline` + `thread_block`, with no short spin
+  first. A job that finishes in microseconds still costs roughly 5-8 timer
+  sleeps (2x flush, AS update/disable idles, fence poll), plus timer leeway.
+- The display tick does `sweet_x9_render_display_try_enter()` (TryLock on the same
+  lock); while any submit is in flight the frame is deferred to the next 16.7 ms
+  tick (`gpu_defer` counter). Long submits therefore also drop display frames.
+- `present()` copies every full-screen layer (1256x2760x4 = 13.9 MB) into the
+  write-combined panel mapping on the CPU every frame.
+Guess: most of the frame time is the per-submit sleep/flush/AS cycle times the
+number of command buffers per CA frame, not shader time.
+
+Rendering errors (observed in code):
+- `x9_gpu_coherent=1` (pan209) only skips the CPU CIVAC. GPU PTEs still have
+  SH=0 (non-shareable, `attributes()` in `SweetX9CSF.cpp`), MEMATTR index 0 is
+  0x88 and COHERENCY_ENABLE (0x304) is only read, never written. If that boot-arg
+  is set, CPU and GPU see stale data in both directions. pan184 boot-args do not
+  set it; check the args of the run that showed the errors.
+- `present()` memcpy's layers opaquely: no alpha blending, no pixel-format check
+  or conversion, no scaling (source size taken from the destination rect), and on
+  X9 the layer enable mask is ignored (any non-zero surface id is drawn).
+- `AppleM2ScalerCSCDriverUserClient::externalMethod` returns success for every
+  selector without doing anything, so IOSurfaceAccelerator transfers "succeed"
+  and leave the destination stale/blank.
+
 ## X9 GPU source handoff (2026-10-31)
 
 - Imported latest available X9 Metal/PanVK sources, XNU GPU patches 0254–0260 and 0263, plus runtime patches pan194–pan205 based on metal2vulkan `219f01365dc4c8eb346816c405b5b17403793764`. The retained kernel source includes pan209 coherency gating and pan212 persistent import mappings. Plugin inputs correspond to pan207; derive plugin identity from a verified allowlist.
