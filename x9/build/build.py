@@ -5,6 +5,8 @@
     python3 -I x9/build/build.py kernel          # compile + link + strip only
     python3 -I x9/build/build.py boot --kernel K # package an existing kernel
     python3 -I x9/build/build.py --dry-run       # print every command
+    python3 -I x9/build/build.py plugins --revision 208       # Metal/PanVK + package
+    python3 -I x9/build/build.py all --revision 208           # plugins, kernel, boot
 
 Inputs:
   x9/kernel/recipe.json      compile templates, per-object sources, link/strip
@@ -95,13 +97,24 @@ class Builder:
             text = text.replace(key, value)
         return text
 
-    def run(self, cmd, cwd, env=None, label=None):
-        """Run one command with stdout+stderr captured and logged as a block.
+    def run(self, cmd, cwd, env=None, label=None, stream=False):
+        """Run one command with stdout+stderr captured and logged as a block
+        (stream=True: line by line as it runs, for long sequential steps).
         Returns (ok, output); a failure is reported, not raised."""
         shown = f'+ (cd {shlex.quote(str(cwd))} && ' + ' '.join(shlex.quote(c) for c in cmd) + ')'
         if self.dry_run:
             self.log(shown)
             return True, ''
+        if stream:
+            self.log(shown)
+            p = subprocess.Popen(cmd, cwd=cwd, env=env or self.env, stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT, text=True, errors='replace')
+            for line in p.stdout:
+                self.log(line.rstrip('\n'))
+            p.wait()
+            if p.returncode:
+                self.log(f'!! {label or Path(cmd[0]).name} failed with exit code {p.returncode}')
+            return p.returncode == 0, ''
         p = subprocess.run(cmd, cwd=cwd, env=env or self.env, stdout=subprocess.PIPE,
                            stderr=subprocess.STDOUT, text=True, errors='replace')
         block = shown + ('\n' + p.stdout.rstrip() if p.stdout.strip() else '')
@@ -110,8 +123,8 @@ class Builder:
         self.log(block)
         return p.returncode == 0, p.stdout
 
-    def run_or_exit(self, cmd, cwd, env=None, label=None):
-        ok, _ = self.run(cmd, cwd, env, label)
+    def run_or_exit(self, cmd, cwd, env=None, label=None, stream=False):
+        ok, _ = self.run(cmd, cwd, env, label, stream)
         if not ok:
             self.log(f'build stopped: {label or Path(cmd[0]).name} failed; full log: {self.out / "build.log"}')
             sys.exit(1)
@@ -185,6 +198,27 @@ class Builder:
                          label='strip')
         return kernel
 
+    # ---- Metal/PanVK plugins ---------------------------------------------------
+    def plugins(self, revision, panvk):
+        """Build X9PanVK<N> and X9GeneralMetal<N> from x9/metal/General and the
+        .local third-party trees, package them for the mailbox into the output
+        directory and rewrite the kernel allowlist, so a following kernel build
+        accepts exactly these files (mailbox/update.py stages the package)."""
+        scripts, work = HERE / 'scripts', ROOT / '.local/x9/work/x9-metal-render'
+        env = dict(self.env, X9_HOMEBREW=self.cfg.get('homebrew') or '/opt/homebrew')
+        py = [sys.executable, '-I']
+        self.run_or_exit(py + [str(HERE / 'prepare-local.py'), '--check'], ROOT, env, 'prepare-local --check', True)
+        configured = (work / 'build-panvk-native-ios/build.ninja').is_file()
+        if panvk == 'full' or (panvk == 'auto' and not configured):
+            self.run_or_exit(py + [str(scripts / 'build-panvk-native-ios.py')], ROOT, env, 'PanVK full build', True)
+        elif panvk != 'skip':
+            self.run_or_exit(py + [str(scripts / 'build-panvk-incremental.py')], ROOT, env, 'PanVK incremental build', True)
+        rev = ['--revision', str(revision)]
+        self.run_or_exit(py + [str(scripts / 'package-panvk-native.py')] + rev, ROOT, env, 'package X9PanVK', True)
+        self.run_or_exit(py + [str(scripts / 'build-general-metal.py')] + rev, ROOT, env, 'build X9GeneralMetal', True)
+        self.run_or_exit(py + [str(scripts / 'package-plugins.py')] + rev + ['--out', str(self.out)], ROOT, env,
+                         'package plugins + kernel allowlist', True)
+
     # ---- boot.img --------------------------------------------------------------
     def boot(self, kernel):
         opts = json.loads((HERE / 'boot.json').read_text())
@@ -213,7 +247,10 @@ class Builder:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
-    ap.add_argument('step', nargs='?', choices=['all', 'kernel', 'boot'], default='all')
+    ap.add_argument('step', nargs='?', choices=['all', 'kernel', 'boot', 'plugins'], default='all')
+    ap.add_argument('--revision', type=int, help='plugin revision (X9GeneralMetal<N>/X9PanVK<N>); with "all", build plugins first')
+    ap.add_argument('--panvk', choices=['auto', 'incremental', 'full', 'skip'], default='auto',
+                    help='PanVK rebuild: auto = incremental if already configured, else full')
     ap.add_argument('--config', type=Path, default=HERE / 'local.json')
     ap.add_argument('--name', help='output directory name under x9/out')
     ap.add_argument('--kernel', type=Path, help='boot step only: kernel to package')
@@ -225,6 +262,15 @@ def main():
     if not a.dry_run:
         out.mkdir(parents=True, exist_ok=True)
     b = Builder(cfg, out, a.dry_run, a.jobs)
+    if a.step == 'plugins' and a.revision is None:
+        sys.exit('plugins needs --revision N')
+    if a.revision is not None and a.step in ('plugins', 'all'):
+        if not 170 <= a.revision <= 9999:
+            sys.exit('--revision must be 170..9999')
+        b.plugins(a.revision, a.panvk)
+    if a.step == 'plugins':
+        b.log(f'output: {out}')
+        return
     kernel = a.kernel
     if a.step in ('all', 'kernel'):
         b.compile()

@@ -2,11 +2,18 @@
 """Build the native iOS resource/transport archive, without executing it."""
 from pathlib import Path
 import subprocess
+# Machine paths: environment, then x9/build/local.json, then the defaults.
+import json as _json, os as _os
+from pathlib import Path as _Path
+_local = _Path(__file__).resolve().parents[1] / 'local.json'
+_cfg = _json.loads(_local.read_text()) if _local.is_file() else {}
+DEV = _os.environ.get('DEVELOPER_DIR') or _cfg.get('developer_dir') or '/Applications/Xcode.app/Contents/Developer'
+BREW = _os.environ.get('X9_HOMEBREW') or _cfg.get('homebrew') or '/opt/homebrew'
 w=Path(__file__).resolve().parents[3] / '.local/x9/work/x9-metal-render'
 root=w.parents[1]
 src=root/'MaliMetal/X9/General'
 out=w/'render-user-objects';out.mkdir(exist_ok=True)
-dev=Path('/Users/tosasitill/Downloads/Xcode.app/Contents/Developer')
+dev=_Path(DEV)
 tools=dev/'Toolchains/XcodeDefault.xctoolchain/usr/bin'
 sdk=dev/'Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk'
 objects=[]

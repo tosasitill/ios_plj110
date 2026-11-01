@@ -1,3 +1,5 @@
+> 2026-11-01 脚本整合：`build.py plugins|all --revision N` 统一编译 PanVK/GeneralMetal、打包插件（`package-plugins.py`，从 git 历史恢复的 pan171-174 打包逻辑，已用 207 插件包逐字节核对）并更新内核白名单；用户态脚本的 Xcode/Homebrew 路径改读 `local.json` 的 `developer_dir`/`homebrew`；一次性 prepare 与分阶段局部编译脚本移入 `legacy/work/x9-metal-render/`；mailbox 根盘预检默认使用 `tools/check_plaintext_root.py` + `root_manifest`。下文的“mailbox ROOT/check-root.sh 缺口”“旧布局路径”已按此处理。
+
 > 2026-11-01 迁移更新：以下是迁移前盘点。当前依赖已集中到仓库内 `.local/`，路径和验证结果见 `BUILD.md`；脚本见 `build/scripts/` 与 `legacy/`。新工作区仅保留一份最新的历史安装 root 和当前运行时源码，已删除旧镜像副本及 Rust 缓存。后经用户授权，已删除旧目录中对应的过期镜像、运行时副本和缓存；设备分区备份未改动。
 
 # X9 外部依赖盘点（2026-11-01）

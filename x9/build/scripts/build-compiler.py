@@ -2,6 +2,13 @@
 """Build the pinned AIR frontend and Mesa NIR; no test execution."""
 from pathlib import Path
 import os, shutil, subprocess
+# Machine paths: environment, then x9/build/local.json, then the defaults.
+import json as _json, os as _os
+from pathlib import Path as _Path
+_local = _Path(__file__).resolve().parents[1] / 'local.json'
+_cfg = _json.loads(_local.read_text()) if _local.is_file() else {}
+DEV = _os.environ.get('DEVELOPER_DIR') or _cfg.get('developer_dir') or '/Applications/Xcode.app/Contents/Developer'
+BREW = _os.environ.get('X9_HOMEBREW') or _cfg.get('homebrew') or '/opt/homebrew'
 w=Path(__file__).resolve().parents[3] / '.local/x9/work/x9-metal-render'
 root=w.parents[1]
 src=w/'mesa-source'
@@ -22,10 +29,10 @@ p=src/'src/compiler/meson.build'
 s=p.read_text()
 if "subdir('air')" not in s:p.write_text(s.replace("subdir('nir')","subdir('nir')\nsubdir('air')"))
 env=os.environ.copy()
-env['PATH']=str(w/'build-env/bin')+':/opt/homebrew/bin:/usr/bin:/bin'
+env['PATH']=str(w/'build-env/bin')+':'+BREW+'/bin:/usr/bin:/bin'
 env['CC']='/usr/bin/clang';env['CXX']='/usr/bin/clang++'
 args=[str(w/'build-env/bin/meson'),'setup',str(w/'build-host'),str(src),'--buildtype=release','-Dplatforms=[]','-Dgallium-drivers=[]','-Dvulkan-drivers=[]','-Dglx=disabled','-Degl=disabled','-Dgbm=disabled','-Dopengl=false','-Dgles1=disabled','-Dgles2=disabled','-Dllvm=disabled','-Dbuild-tests=false','-Dtools=[]','-Dvalgrind=disabled','-Dlibunwind=disabled','-Dzstd=disabled','-Dshader-cache=disabled']
 if (w/'build-host/build.ninja').exists():args.insert(2,'--reconfigure')
 subprocess.run(args,env=env,check=True)
-subprocess.run(['/opt/homebrew/bin/ninja','-C',str(w/'build-host'),'src/compiler/air/air2nir'],env=env,check=True)
+subprocess.run([BREW+'/bin/ninja','-C',str(w/'build-host'),'src/compiler/air/air2nir'],env=env,check=True)
 print('AIR/NIR host compiler build completed; no probes or tests executed',flush=True)

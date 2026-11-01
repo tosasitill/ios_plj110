@@ -1,9 +1,10 @@
 {
-  "_comment": "Copy to x9/build/local.json (gitignored) and adjust for this machine. compiler_launcher is optional (ccache from PATH or an absolute path).",
-  "developer_dir": "/Users/tosasitill/Downloads/Xcode.app/Contents/Developer",
-  "dxb": ".local/dxb",
-  "llvm_clang": "/opt/homebrew/opt/llvm@22/bin/clang",
-  "lld": "/opt/homebrew/opt/lld@22/bin/ld.lld",
-  "root_manifest": ".local/x9/x9/out/pan220-batched-cache-ranges/root-manifest.json",
-  "compiler_launcher": "ccache"
+ "_comment": "Copy to x9/build/local.json (gitignored) and adjust for this machine. Relative dxb/root_manifest resolve against the repository root. compiler_launcher is optional (ccache from PATH or an absolute path). developer_dir and homebrew are also read by the Metal/PanVK scripts in x9/build/scripts.",
+ "developer_dir": "/Users/tosasitill/Downloads/Xcode.app/Contents/Developer",
+ "dxb": ".local/dxb",
+ "llvm_clang": "/opt/homebrew/opt/llvm@22/bin/clang",
+ "lld": "/opt/homebrew/opt/lld@22/bin/ld.lld",
+ "root_manifest": ".local/x9/x9/out/pan220-batched-cache-ranges/root-manifest.json",
+ "compiler_launcher": "ccache",
+ "homebrew": "/opt/homebrew"
 }

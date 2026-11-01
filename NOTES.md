@@ -1,3 +1,29 @@
+## Build script consolidation (2026-11-01, after the user's dde45d7 migration)
+
+- `build.py plugins --revision N` / `all --revision N`: prepare-local --check,
+  PanVK (incremental ninja if configured, else full; `--panvk`), package
+  X9PanVK<N>, build X9GeneralMetal<N>, `package-plugins.py` -> `x9/out/<name>/
+  plugin-package/` + kernel allowlist; `all` continues with kernel + boot into
+  the same directory (a complete candidate for `mailbox/update.py`). Long
+  steps stream into build.log.
+- `package-plugins.py` restores the pan171-174 packager from git history
+  (4 KiB-aligned offsets from 4096, 0755 executables, identity = SHA-256 of
+  sorted compact JSON file list, mailbox capacity check); reproduces the 207
+  package's mailbox.json and allowlist exactly. `--from-mailbox` replaces the
+  removed gen-plugin-allowlist.py.
+- Maintained user-space scripts read Xcode/Homebrew from local.json
+  (`developer_dir`, new `homebrew`; env DEVELOPER_DIR/X9_HOMEBREW override).
+- Moved to legacy/work/x9-metal-render: one-shot prepare-panvk*/
+  prepare-shared-cache passes, staged partial PanVK builds, build-render-
+  deploy.py, prepare-pan208.py; build-pan206/207-panvk.py -> one
+  build-panvk-incremental.py. prepare-local drops dangling links to moved
+  scripts.
+- mailbox/update.py: root preflight defaults to tools/check_plaintext_root.py
+  with root_manifest from local.json (never skipped); pinfile path derived
+  from the manifest (same as the old constant).
+- Not run here (no Xcode/Rust on this host): only dry-run of build.py and the
+  packager check against the 207 package.
+
 ## Old workspace cleanup (2026-11-01)
 
 - User explicitly requested deletion of unwanted leftovers after migration. Removed 20 selected entries from the old HelioDarwin-x9-lk-preserve workspace: seven historical root images (including the duplicate of the retained latest image), Rust general-target cache, 11 superseded runtime trees, and legacy xnu_x9/out build output.

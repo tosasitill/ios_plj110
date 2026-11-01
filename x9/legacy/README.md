@@ -30,3 +30,15 @@ repositories and partition backups remain. Exact deletions are recorded in
 `.local/old-workspace-cleanup.json`.
 
 Apple images, device dumps, logs and manifests remain outside git.
+
+## Superseded user-space build steps (moved 2026-11-01)
+
+`work/x9-metal-render/` also holds scripts moved out of `build/scripts/`
+because the retained `.local` Mesa tree already contains their effect or a
+newer entrypoint replaces them: the one-shot source preparation passes
+(`prepare-panvk*.py`, `prepare-shared-cache.py`), the staged partial PanVK
+builds (`build-panvk.py`, `build-panvk-ios.py`, `build-panvk-native*.py`
+other than `build-panvk-native-ios.py`), the pan170 in-kernel probe deployment
+(`build-render-deploy.py`) and the candidate-chain `prepare-pan208.py`. They
+edit third-party trees in place without recording what was applied; use them
+only to rebuild the Mesa tree from scratch, after `00-mesa-panvk-x9.patch`.

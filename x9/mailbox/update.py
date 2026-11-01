@@ -13,12 +13,31 @@ def adb(c,data=None):
 
 def main():
  global SERIAL
- ap=argparse.ArgumentParser();ap.add_argument('candidate',type=Path);ap.add_argument('--serial',default=SERIAL);ap.add_argument('--root-check',type=Path,required=True,help='Existing root verification script (required; never bypassed)');a=ap.parse_args()
+ ap=argparse.ArgumentParser();ap.add_argument('candidate',type=Path);ap.add_argument('--serial',default=SERIAL)
+ ap.add_argument('--root-manifest',type=Path,help='device root-manifest.json (default: root_manifest in x9/build/local.json)')
+ ap.add_argument('--root-check',type=Path,help='custom root verification script instead of x9/tools/check_plaintext_root.py')
+ a=ap.parse_args()
  SERIAL=a.serial
  if not SERIAL:raise SystemExit('pass --serial or set X9_SERIAL')
+ # The root preflight is never skipped: check_plaintext_root.py verifies the
+ # device serial, pin+immutable, inode, FIEMAP, userdata geometry, dm route and
+ # the live HFS UUID/geometry against the private root manifest.
+ manifest=a.root_manifest
+ if manifest is None:
+  local=ROOT/'x9/build/local.json'
+  cfg=json.loads(local.read_text()) if local.is_file() else {}
+  manifest=Path(cfg['root_manifest']).expanduser() if cfg.get('root_manifest') else None
+  if manifest is not None and not manifest.is_absolute():manifest=ROOT/manifest
+ if a.root_check is None and manifest is None:raise SystemExit('pass --root-manifest (or set root_manifest in x9/build/local.json) or --root-check')
+ global TOOL
+ if manifest is not None:
+  rm=json.loads(manifest.read_text())
+  # pinfile sits next to the root image on the device
+  TOOL=str(Path(rm['device_file']).parent/'pinfile')
  pkg=a.candidate/'plugin-package'
  desc=json.loads((pkg/'mailbox.json').read_text());m=json.loads((P/'mailbox-manifest.json').read_text())
- subprocess.run(['/bin/bash',str(a.root_check.resolve())],check=True)
+ if a.root_check is not None:subprocess.run(['/bin/bash',str(a.root_check.resolve())],check=True)
+ else:subprocess.run(['python3','-I',str(ROOT/'x9/tools/check_plaintext_root.py'),'--manifest',str(manifest),'--serial',SERIAL],check=True)
  for f in m['files']:
   path=f['file'];status=adb(f'{TOOL} status {path}; lsattr {path}; stat -c "%i %s" {path}').decode()
   if ': pinned (GC move failures 0)' not in status or 'i' not in status.splitlines()[1].split()[0] or status.splitlines()[-1]!=f"{f['inode']} {f['bytes']}":raise ValueError('mailbox identity or protection changed: '+path)

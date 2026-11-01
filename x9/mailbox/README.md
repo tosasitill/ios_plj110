@@ -19,7 +19,7 @@ With Android running and the device connected, stage a candidate built with
 this mailbox format:
 
 ```
-python3 x9/mailbox/update.py <candidate-dir> --serial "$X9_SERIAL" --root-check /path/to/verified-check-root.sh
+python3 x9/mailbox/update.py <candidate-dir> --serial "$X9_SERIAL"   # root preflight: tools/check_plaintext_root.py + local.json root_manifest
 ```
 
 The updater verifies root and mailbox identity, pin and immutable status and
@@ -36,6 +36,10 @@ installed, hashes re-checked, discovery armed) and completed four GPU
 submissions, but device creation still failed; no desktop frame has been
 produced by the GPU yet.
 
-Migration note: the old generated `check-root.sh` was not present in the
-supplied directories. Supply an independently verified root preflight script;
-updates require it and do not silently skip root verification.
+Root preflight: the old generated `check-root.sh` was not present in the
+supplied directories. `update.py` now runs `x9/tools/check_plaintext_root.py`
+against the private root manifest (`--root-manifest`, default `root_manifest`
+in `x9/build/local.json`) and derives the device's `pinfile` from it;
+`--root-check <script>` substitutes another verified preflight. The check is
+never skipped. `x9/build/build.py all --revision N` produces a candidate
+directory this updater accepts.

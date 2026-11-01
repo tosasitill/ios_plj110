@@ -41,6 +41,14 @@ def main():
     links = [(LOCAL / 'x9/MaliMetal/X9/General', ROOT / 'x9/metal/General')]
     links += [(WORK / p.name, p) for p in (ROOT / 'x9/build/scripts').glob('*.py')
               if "'.local/x9/work/x9-metal-render'" in p.read_text()]
+    # Scripts moved out of build/scripts (e.g. to legacy/) leave dangling links.
+    stale = [p for p in WORK.glob('*.py') if p.is_symlink() and not p.exists()
+             and (ROOT / 'x9/build/scripts') in (p.parent / os.readlink(p)).resolve().parents]
+    for p in stale:
+        if a.check:
+            print('note: dangling link to a moved script: ' + str(p.relative_to(ROOT)))
+        else:
+            p.unlink()
     for link, target in links:
         if link.is_symlink() and link.resolve() == target.resolve():
             continue

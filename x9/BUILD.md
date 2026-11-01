@@ -22,13 +22,8 @@ The migrated Mesa configuration text and venv entrypoints were rebased to the
 new workspace. For another checkout location regenerate build configurations
 and the venv; copying Meson caches is not a portable installation method.
 
-Maintained user-space entrypoints are now invoked from the repository:
-
-```sh
-python3 -I x9/build/scripts/build-panvk-native-ios.py
-python3 -I x9/build/scripts/build-general-metal.py --revision <N>
-python3 -I x9/build/scripts/package-panvk-native.py --revision <N>
-```
+User-space plugins are built through `build.py` (see "Metal/PanVK plugins"
+below); the individual entrypoints in `build/scripts/` remain callable.
 
 Metal defaults to the retained pan205 runtime and enables the latest runtime
 bridge macros. `--runtime-source` and `--source-library` options from the old
@@ -124,45 +119,61 @@ documents how the X9 sources evolved; the build does not apply it.
 `build/scripts/collect-build-inputs.py` gathers a candidate directory's real
 build inputs from the build Mac; it produced the current `kernel/` import.
 
-## PanVK (Mesa)
+## Metal/PanVK plugins
+
+One command builds both plugins, packages them for the mailbox and points the
+kernel at them; with `all` it then builds the kernel and boot.img into the
+same output directory, which is then a complete candidate:
 
 ```bash
-git clone https://gitlab.freedesktop.org/mesa/mesa.git mesa-render-source
-git -C mesa-render-source checkout 300b5fd7b44120b80607d1c90b40bb126e8d3ec8
-git -C mesa-render-source apply ../../x9/build/third_party/00-mesa-panvk-x9.patch
-python3 build-panvk-native-ios.py   # meson cross build -> libvulkan_panfrost.dylib
-# build-panvk-native-ios.py shells out to host shader tools built by
-# build-compiler.py / build-v14.py and to the meson+ninja venv in build-env/
+python3 x9/build/prepare-local.py                     # once / after moving scripts: links .local
+python3 -I x9/build/build.py all --revision 208       # plugins + kernel + boot.img
+python3 -I x9/build/build.py plugins --revision 208   # plugins + package only
 ```
 
-The patch adds the `X9_NATIVE_KMOD` backend (native IOKit user client instead of
-DRM), the Mach-O build-id length fix, the fixed 256-byte cache atom, paired
-IOKit mapping release, and disables the capabilities the backend does not
-implement (`EXT_map_memory_placed`, DRM format modifiers, external fd
-handles).
+Steps (all logged to `x9/out/<name>/build.log`, long steps streamed):
 
-## Metal runtime (metal2vulkan)
+1. `prepare-local.py --check`: the `.local` inputs and links exist.
+2. PanVK: `build/scripts/build-panvk-incremental.py` (ninja on the configured
+   `build-panvk-native-ios`, which compiles `x9/metal/General/panvk/*.c` as
+   external sources) or, if not configured yet or `--panvk full`,
+   `build-panvk-native-ios.py`. `--panvk skip` reuses the last library.
+3. `package-panvk-native.py --revision N` -> `X9PanVK<N>.bundle`.
+4. `build-general-metal.py --revision N` -> `X9GeneralMetal<N>.bundle`
+   (pan205 runtime by default, `--runtime-source` to override).
+5. `package-plugins.py --revision N --out x9/out/<name>`: copies both bundles
+   to `plugin-package/` with `manifest.json`, `mailbox.json`, `SHA256SUMS`,
+   `install-on-ios.sh`, and rewrites `kernel/generated/x9_render_external_manifest.h`.
+   Commit that header with the revision it names: a kernel accepts only the
+   plugin files it lists.
 
-```bash
-git clone https://github.com/steelbrain/metal2vulkan.git metal2vulkan-source
-git -C metal2vulkan-source checkout 720ef1ce9ae2a2068999a8675717418b9416283e
-git -C metal2vulkan-source apply ../../x9/build/third_party/01-metal2vulkan-x9.patch
-python3 build-general-metal.py --revision <N>   # X9GeneralMetal<N>.bundle
-python3 package-panvk-native.py --revision <N>  # X9PanVK<N>.bundle
-```
+`package-plugins.py --from-mailbox <plugin-package>/mailbox.json` rewrites only
+the allowlist (e.g. to go back to the installed 207 package). The Xcode and
+Homebrew locations come from `developer_dir` and `homebrew` in `local.json`
+(environment `DEVELOPER_DIR` / `X9_HOMEBREW` override).
 
-Runtime patches for metal2vulkan commit `219f01365dc4c8eb346816c405b5b17403793764`
-are in `build/third_party/metal2vulkan-pan205/`, in numeric order; the pan207
-and pan209 files there document kernel changes, not metal2vulkan patches.
-These userspace scripts expect the `work/x9-metal-render/` layout of the
-original workspace and have not been folded into `build.py`.
+Third-party trees (`.local/x9/work/x9-metal-render/`): Mesa
+`300b5fd7b44120b80607d1c90b40bb126e8d3ec8` + `build/third_party/00-mesa-panvk-x9.patch`
+(PanVK), the AIR frontend Mesa tree (`build-compiler.py`, `build-v14.py`,
+`prepare-build.py` rebuild its host tools), metal2vulkan
+`219f01365dc4c8eb346816c405b5b17403793764` + `build/third_party/metal2vulkan-pan205/`
+in numeric order (`prepare-general-runtime.py` installs the Rust toolchain).
+`build-render-cs.py` regenerates the kernel's CS packing include. The one-shot
+source preparation and staged partial builds that produced these trees are in
+`legacy/work/x9-metal-render/`.
 
 ## Plugin mailbox
 
+With Android running, stage a candidate's `plugin-package/`:
+
 ```bash
-python3 x9/mailbox/update.py <candidate-dir> --serial "$X9_SERIAL" --root-check /path/to/verified-check-root.sh   # stage plugins while Android runs
+python3 x9/mailbox/update.py x9/out/<name> --serial "$X9_SERIAL"
 ```
 
-`mailbox/README.md` documents the mailbox contract and its safety rules. The
-mailbox is a device-specific reserved area; both backing files must stay
-pinned and immutable, and only the listed slices are ever written.
+The root preflight is never skipped: by default it runs
+`tools/check_plaintext_root.py` against `root_manifest` from `local.json`
+(device serial, pin+immutable, inode, FIEMAP, userdata geometry, dm route,
+live HFS UUID/geometry); `--root-manifest` or a custom `--root-check` script
+override it. `mailbox/README.md` documents the mailbox contract and its safety
+rules. Both backing files must stay pinned and immutable, and only the listed
+slices are ever written. Then flash the candidate's boot.img by hand.
