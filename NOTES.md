@@ -1,3 +1,22 @@
+## Mailbox 208 built and staged (2026-11-01)
+
+- User requested the latest mailbox build and adb installation. Built current
+  source ca5b8d5 with `python3 -I x9/build/build.py all --revision 208
+  --name mailbox208-ca5b8d5`; exit 0, plugins signed/packaged, matching kernel
+  and boot.img produced. Local build, no CI run. First attempt stopped at
+  stale migration symlinks; `python3 x9/build/prepare-local.py` repaired them.
+- Candidate: `x9/out/mailbox208-ca5b8d5/`; boot.img 9,416,704 bytes.
+  Generated kernel allowlist now names X9GeneralMetal208 and X9PanVK208.
+  Build log: candidate `build.log` (including the first failed preflight).
+- Ran `python3 -I x9/mailbox/update.py x9/out/mailbox208-ca5b8d5
+  --serial "$X9_SERIAL"` using the private root manifest's device identity.
+  Root and mailbox preflight passed; updater exited 0 and reported
+  `Mailbox committed: 51191808 bytes; each written range read back`.
+  Exact updater output: candidate `mailbox-update.log`.
+- Mailbox staging is complete; XNU installation/discovery of 208 has NOT
+  been observed. No boot partition write or reboot. Next: user boots the
+  matching candidate and verifies plugin installation and GPU behavior.
+
 ## Build script consolidation (2026-11-01, after the user's dde45d7 migration)
 
 - `build.py plugins --revision N` / `all --revision N`: prepare-local --check,
