@@ -54,7 +54,7 @@ static uint64_t nowUs() {return clock_gettime_nsec_np(CLOCK_UPTIME_RAW)/1000;}
 // Diagnostic state must not retain resources, copy setBytes, format render
 // graphs or add GPU readbacks on the normal path. Opt in at boot, once per
 // process; pixel readback is a separate, explicitly intrusive option.
-struct X9CaptureOptions {bool inputs=false,pixels=false;};
+struct X9CaptureOptions {bool inputs=false,pixels=false,geometry=false;uint64_t geometryStartUs=45000000;};
 static const X9CaptureOptions &captureOptions() {
  static const X9CaptureOptions options=[] {
   X9CaptureOptions out;
@@ -73,7 +73,23 @@ static const X9CaptureOptions &captureOptions() {
   };
   out.pixels=enabled("x9_metal_pixels=1");
   out.inputs=out.pixels||enabled("x9_metal_capture=1");
+  // The current payload has only five boot-arg bytes spare; x9vg is the
+  // exact short alias, not a substring match or a change to the payload ABI.
+  out.geometry=enabled("x9_metal_geometry=1")||enabled("x9vg");
+  // Exact token, bounded decimal seconds; never enable other diagnostics.
+  const char *key="x9_metal_geometry_start=";const size_t n=strlen(key);
+  for(const char *p=args;*p;) {
+   while(*p && (unsigned char)*p<=32)++p;
+   const char *end=p;while(*end && (unsigned char)*end>32)++end;
+   if((size_t)(end-p)>n && !memcmp(p,key,n)) {
+    uint64_t seconds=0;bool valid=true;
+    for(const char *q=p+n;q<end;++q){if(*q<'0'||*q>'9'||seconds>3600){valid=false;break;}seconds=seconds*10+(*q-'0');}
+    if(valid && seconds<=3600)out.geometryStartUs=seconds*1000000;
+   }
+   p=end;
+  }
   NSLog(@"X9 METAL capture: inputs=%u pixels=%u;opt-in diagnostics",out.inputs,out.pixels);
+  if(out.geometry)NSLog(@"X9 GEOM capture: start_us=%llu windows=3x30s max_draws=18 indices=96;CPU-only",(unsigned long long)out.geometryStartUs);
   return out;
  }();
  return options;
@@ -579,6 +595,7 @@ static void notified(void *context,uint64_t value) {
 @property(nonatomic) uint32_t commitIndex;
 @property(nonatomic) uint64_t traceID;
 @property(nonatomic) BOOL traceGraphUsed;
+@property(nonatomic) BOOL traceGeometryUsed;
 @property(nonatomic) unsigned tracePixelWindow,tracePixelCount;
 @property(nonatomic) uint64_t tracePixelBytes;
 @property(nonatomic,strong) NSMutableArray *scheduledHandlers,*completedHandlers;
@@ -712,10 +729,13 @@ static void waitForResource(id resource) {
 @property(nonatomic,strong) NSDictionary *tracePixelOutput;
 @property(nonatomic,strong) NBTexture *tracePixelSource;
 @property(nonatomic) unsigned traceGraphFirst,traceGraphLast;
+@property(nonatomic) MTLViewport traceViewport;
+@property(nonatomic) MTLScissorRect traceScissor;
+@property(nonatomic) BOOL traceViewportSet,traceScissorSet;
 - (void)traceGraph:(MTLPrimitiveType)type count:(NSUInteger)count;
 - (void)tracePixelSelect:(bool)blur;
 - (void)tracePixelCopy:(NBTexture *)texture role:(NSString *)role;
-- (void)traceDraw:(MTLPrimitiveType)type start:(NSUInteger)start count:(NSUInteger)count indices:(NBBuffer *)indices offset:(NSUInteger)offset indexType:(MTLIndexType)indexType baseVertex:(NSInteger)baseVertex;
+- (void)traceDraw:(MTLPrimitiveType)type start:(NSUInteger)start count:(NSUInteger)count indices:(NBBuffer *)indices offset:(NSUInteger)offset indexType:(MTLIndexType)indexType baseVertex:(NSInteger)baseVertex instances:(NSUInteger)instances baseInstance:(NSUInteger)baseInstance;
 @end
 @implementation NBRenderEncoder
 #include "X9BlurCapture.inc"
@@ -723,7 +743,7 @@ static void waitForResource(id resource) {
 #include "X9RenderPixelCapture.inc"
 - (void)setRenderPipelineState:(id<MTLRenderPipelineState>)state {
  if(![(id)state isKindOfClass:[NBRenderPipeline class]]){[self.commandBuffer refuse:@"foreign render pipeline"];return;}
- if(captureOptions().inputs)self.tracePipeline=(NBRenderPipeline *)state;
+ if(captureOptions().inputs||captureOptions().geometry)self.tracePipeline=(NBRenderPipeline *)state;
  [self check:nmb_render_set_pipeline(self.handle,[(NBRenderPipeline *)state handle]) what:"setRenderPipelineState"];
 }
 - (void)setVertexBuffer:(id<MTLBuffer>)b offset:(NSUInteger)o atIndex:(NSUInteger)i {[self buffer:b offset:o index:i stage:1];}
@@ -750,10 +770,12 @@ static void waitForResource(id resource) {
  [self check:nmb_render_set_depth_stencil(self.handle,state?[(NBDepthStencil *)state handle]:nullptr) what:"setDepthStencilState"];
 }
 - (void)setViewport:(MTLViewport)v {
+ if(captureOptions().geometry){self.traceViewport=v;self.traceViewportSet=YES;}
  const double values[6]={v.originX,v.originY,v.width,v.height,v.znear,v.zfar};
  [self check:nmb_render_set_viewport(self.handle,values) what:"setViewport"];
 }
 - (void)setScissorRect:(MTLScissorRect)r {
+ if(captureOptions().geometry){self.traceScissor=r;self.traceScissorSet=YES;}
  const uint64_t values[4]={r.x,r.y,r.width,r.height};
  [self check:nmb_render_set_scissor(self.handle,values) what:"setScissorRect"];
 }
@@ -791,7 +813,7 @@ static void waitForResource(id resource) {
  const float c[4]={r,g,b,a};[self check:nmb_render_set_blend_color(self.handle,c) what:"setBlendColor"];
 }
 - (void)drawPrimitives:(MTLPrimitiveType)t vertexStart:(NSUInteger)s vertexCount:(NSUInteger)n instanceCount:(NSUInteger)i baseInstance:(NSUInteger)b {
- [self traceDraw:t start:s count:n indices:nil offset:0 indexType:MTLIndexTypeUInt16 baseVertex:0];
+ [self traceDraw:t start:s count:n indices:nil offset:0 indexType:MTLIndexTypeUInt16 baseVertex:0 instances:i baseInstance:b];
  gDraws++;self.commandBuffer->encodedWork.draws++;
  [self check:nmb_render_draw(self.handle,t,(uint32_t)s,(uint32_t)n,(uint32_t)i,(uint32_t)b) what:"drawPrimitives"];
 }
@@ -805,7 +827,7 @@ static void waitForResource(id resource) {
                 instanceCount:(NSUInteger)i baseVertex:(NSInteger)v baseInstance:(NSUInteger)bi {
  if(![(id)b isKindOfClass:[NBBuffer class]]){[self.commandBuffer refuse:@"foreign index buffer"];return;}
  [self.commandBuffer.resourceOwners addObject:b];
- [self traceDraw:t start:0 count:n indices:(NBBuffer *)b offset:o indexType:k baseVertex:v];
+ [self traceDraw:t start:0 count:n indices:(NBBuffer *)b offset:o indexType:k baseVertex:v instances:i baseInstance:bi];
  gDraws++;self.commandBuffer->encodedWork.draws++;
  [self check:nmb_render_draw_indexed(self.handle,t,(uint32_t)n,k,[(NBBuffer *)b handle],o,(uint32_t)i,(int32_t)v,(uint32_t)bi) what:"drawIndexedPrimitives"];
 }
@@ -1018,7 +1040,7 @@ static char kUserDictionaryKey;
   pass.visibility=[(NBBuffer *)d.visibilityResultBuffer handle];
  }
  NBRenderEncoder *encoder=[self encoder:[NBRenderEncoder new] handle:self.committed?nullptr:nmb_render_encoder_new(_handle,&pass) what:@"renderCommandEncoder"];
- if(captureOptions().inputs) {
+ if(captureOptions().inputs||captureOptions().geometry) {
  NSMutableString *trace=[NSMutableString stringWithFormat:@"requested=%llux%llu",(unsigned long long)pass.width,(unsigned long long)pass.height];
  for(unsigned i=0;i<8;i++)if(d.colorAttachments[i].texture) {
   MTLRenderPassColorAttachmentDescriptor *a=d.colorAttachments[i];NBTexture *t=(NBTexture *)a.texture;
@@ -1096,6 +1118,7 @@ static char kUserDictionaryKey;
   // Assign once under the same lock as publication. A concurrent commit cannot reuse this index.
   const uint32_t index=(uint32_t)(gCommits.fetch_add(1)+1);self.commitIndex=index;
   if(self.traceGraphUsed)NBLOG(@"X9 GRAPH COMMIT: cb=%llu commit=%u",(unsigned long long)self.traceID,index);
+  if(self.traceGeometryUsed)NSLog(@"X9 GEOM COMMIT: cb=%llu commit=%u uptime_us=%llu",(unsigned long long)self.traceID,index,(unsigned long long)self.committedUs);
   CommitRecord &r=gCommitRing[index%32];
   r={};r.index=index;r.committedUs=self.committedUs;r.ageUs=self.committedUs-createdUs;r.work=encodedWork;
  }
@@ -1147,6 +1170,7 @@ static void completed(void *context) {
   if(r.index==commandBuffer.commitIndex)r.callbackUs=took;
  }
  if(commandBuffer.traceGraphUsed)NBLOG(@"X9 GRAPH COMPLETE: cb=%llu commit=%u status=%llu",(unsigned long long)commandBuffer.traceID,commandBuffer.commitIndex,(unsigned long long)nmb_command_buffer_status(commandBuffer.handle));
+ if(commandBuffer.traceGeometryUsed)NSLog(@"X9 GEOM COMPLETE: cb=%llu commit=%u status=%llu",(unsigned long long)commandBuffer.traceID,commandBuffer.commitIndex,(unsigned long long)nmb_command_buffer_status(commandBuffer.handle));
  [commandBuffer finish];
 }
 
@@ -1600,9 +1624,9 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
  delete p;
  if(!handle)return failWith<id<MTLRenderPipelineState>>(error,@"render pipeline",nil);
  NBRenderPipeline *state=[NBRenderPipeline new];state.handle=handle;
- if(captureOptions().inputs) {
+ if(captureOptions().inputs||captureOptions().geometry) {
  state.traceVertex=d.vertexFunction.name;state.traceFragment=d.fragmentFunction.name;
- if([d.vertexFunction.name containsString:@"blur"] || [d.fragmentFunction.name containsString:@"blur"])state.traceLayout=[d.vertexDescriptor copy];
+ if(captureOptions().geometry || [d.vertexFunction.name containsString:@"blur"] || [d.fragmentFunction.name containsString:@"blur"])state.traceLayout=[d.vertexDescriptor copy];
  NSMutableString *blend=[NSMutableString string];
  for(unsigned i=0;i<8;i++)if(d.colorAttachments[i].pixelFormat!=MTLPixelFormatInvalid) {
   MTLRenderPipelineColorAttachmentDescriptor *a=d.colorAttachments[i];

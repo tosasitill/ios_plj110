@@ -1,4 +1,4 @@
-## Active:216 CANCELLED; restore215 HSR and prioritize vertex/triangle corruption (2026-11-01)
+## Active:217 vertex/triangle observation built; NOT staged;216 CANCELLED (2026-11-01)
 
 - User explicitly rejected the HSR direction and now asks to first locate the
   vertex/corner defect.216 is CANCELLED; its local output remains archival,
@@ -6,14 +6,72 @@
   Device's last verified run remains215 + confirmed renderer task-limit fix.
 - Restored215 source patch03, build entrypoints/helper and215 allowlist from
   930123a^; active local Mesa compile.rs/panvk_vX_cmd_draw.c restored from the
-  saved pre216 copies. Keep2cb9897 task-limit repair. No new build or device
-  operation. The historical216 handoff below is superseded in full.
+  saved pre216 copies. Keep2cb9897 task-limit repair. Restoration itself did
+  not build or touch a device; subsequent217 build is recorded below. The
+  historical216 deployment instructions are superseded in full.
 - Current narrow investigation: original draw indices/full vertex inputs,
   buffer offsets/lifetimes and vertex-to-raster state. Prior six-index
   captures do NOT validate count54 draws; viewport/scissor were not captured.
   Scheduled/group/display and performance investigation are deferred at the
   user's priority, not established root causes. Do not retry deindex210 or
   relabel unused half-color/HSR/cache hypotheses as confirmed geometry bugs.
+
+- Baseline restoration committed49a0e08. Source inspection confirms frontend
+  indexed arguments reach runtime and CmdDrawIndexed unchanged; live vertex
+  binding memo includes buffer+offset+stride, index memo includes buffer+
+  offset+type+size. This rules out those specific source omissions, NOT GPU
+  fetch/output correctness. No evidence yet identifies the corrupt triangle.
+- Implemented separate opt-in x9_metal_geometry CPU capture to close the
+  count54/late-window gap, without GPU waits/readbacks/deindex/shader changes.
+  Starts uptime45s, three30s windows, independent two-draw quotas for multi-
+  quad blur/ordinary blur/non-blur composition (max18/process). Full effective
+  indices up to96, unique referenced shared vertices, layout+buffer offsets,
+  matrix/UV/EDR state, viewport/scissor/raster, CB commit/completion identity.
+  Private/missing/instance-stepped/OOB/truncated inputs are marked, not
+  silently validated. Fixed diagnostic offset-after-setBytes to mirror active
+  runtime's zeroing; did NOT change runtime offset semantics.
+- Geometry mode is independent of old inputs/graph/pixels; normal boot.json
+  remains unchanged. Separate exact build input:
+  .local/analysis-geometry217/boot.json. Added explicit --boot-config to the
+  normal builder.217 is an OBSERVABILITY candidate, not a visual/FPS repair.
+  Exact normal build command (final input uses short alias x9vg):
+  python3 -I x9/build/build.py all --revision 217 --name mailbox217-geometry --boot-config .local/analysis-geometry217/boot.json
+  No extra tests/device operations.
+
+- First normal217 attempt: PanVK/Metal and51/51 kernel compilation/link
+  succeeded; boot packaging FAILED because normal boot args already602 bytes
+  and long diagnostic tokens produced649 > existing607-byte payload bound.
+  No device operation. Did not remove any original boot arg or enlarge ABI.
+  Added exact short alias x9vg, using default45s; separate final boot input
+  now607 bytes. Retried the same normal build; final result follows.
+
+- FINAL217 normal build SUCCEEDED exit0. Rust release1.21s; frontend,
+  transport/factory compiled+linked+signed;10-file plugin payload51290112
+  bytes; exact217 kernel allowlist generated;51/51 overlay objects+6 prebuilt
+  linked+stripped; shim packaged. Build reports boot.img9420800 bytes.
+  No CI run,additional tests/suites,artifact secondary inspection/hash/
+  disassembly/rebuild comparison. Both attempts remain in candidate build.log
+  and .local/analysis-geometry217/build-console.log. No217 runtime evidence.
+- Candidate:x9/out/mailbox217-geometry/boot.img. Plugins in the same directory.
+  LOCAL ONLY; device last verified215 + renderer-limit. Do NOT boot217 image
+  with215 mailbox. No ADB/root-preflight/mailbox update/flash/boot/reboot/root
+  write was performed this turn. Normal authorized updater,after user reports
+  Android/ADB ready, must run with private serial and preserve readback log:
+  python3 -I x9/mailbox/update.py x9/out/mailbox217-geometry --serial <private>
+  Follow existing root preflight+protected-extents+per-range-readback gates;
+  do not write boot/root or use cancelled216. User manually boots matching217.
+- Exact next replay: from kernel boot uptime45..75,75..105,105..135 seconds,
+  open/close Control Center/folder/App Library to reproduce polygon defect.
+  Preserve a fresh complete2.txt and,if possible,visual clip of the same time.
+  Confirm plugin217,capture inputs0/pixels0 and X9 GEOM capture line; gather
+  GEOM DRAW/ARGS/BASE/PASS/VIEWPORT/SCISSOR/RASTER/INDICES/INDEX/ATTR/BIND/DATA/
+  END plus matched COMMIT/COMPLETE. For count54 require complete1,all54
+  effective indices and no relevant SKIP/OOB/truncated records before claiming
+  CPU input validation. Evaluate original AIR for each referenced vertex and
+  triangle,then distinguish wrong CPU geometry from GPU fetch/vertex/raster
+  or sampled-texture artifacts. The capture is at encode time,not GPU output
+  or necessarily the later Shared-buffer contents. No root-cause/visual/FPS
+  repair claim is warranted. Do not rate FPS during diagnostic log bursts.
 
 ## Historical:216 HSR rollback built but CANCELLED, never deployed (2026-11-01)
 

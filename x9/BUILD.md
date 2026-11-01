@@ -64,6 +64,23 @@ resource tables, format per-pass graphs, add readback encoders or dump pixels.
 capture; `x9_metal_pixels=1` also enables the intrusive GPU pixel readbacks.
 The existing surface-route and aggregate render/display counters remain on.
 
+Vertex/triangle-only investigation uses `x9_metal_geometry=1` (exact short
+alias `x9vg` when the607-byte boot-arg payload is full), independently
+of the old input/graph/pixel flags. It captures CPU inputs in three 30-second
+uptime windows starting at45s (`x9_metal_geometry_start=<0..3600>` overrides
+the start). Each window reserves two draws each for multi-quad blur, ordinary
+blur and non-blur composition, at most18 draws/process. Up to96 effective
+indices, every uniquely referenced shared-CPU vertex record (up to64 bytes),
+vertex layouts/bindings, matrix/UV inputs, explicit/default viewport/scissor,
+raster state and CB commit/completion identities are recorded. Counts beyond
+the cap, unavailable/private data, instance stepping, OOB records and
+truncated records are explicitly marked; these are not validated full draws.
+Inline-byte offset records follow the active runtime's zeroing behavior.
+This adds no GPU commands, barriers, readback or shader substitution, but CPU
+logging/retention still perturbs timing. It is not a measured GPU-output or
+FPS fix. Keep the normal `boot.json` unchanged: pass a separate packaging
+JSON through `build.py --boot-config <path>` for this diagnostic candidate.
+
 Validation: full kernel compile/link/boot packaging succeeded at
 `x9/out/migration-check/boot.img` (9,416,704 bytes). PanVK rebuilt successfully
 (836 Ninja steps) and a temporary revision 9999 bundle packaged/signed.
