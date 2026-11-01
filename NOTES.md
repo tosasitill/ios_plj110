@@ -80,6 +80,34 @@ should be checked for compile errors before flashing.
   Fix direction needs a decision: per-submission resource list from the
   runtime (ABI + PanVK/bridge + plugin rebuild + new allowlist) vs. other
   ways to avoid full-union maintenance.
+- Option 1 (user chose 2026-11-01): narrow per-submit cache maintenance.
+  Findings from metal2vulkan 219f013 + pan194-205 (cloned to the session
+  scratchpad, all patches apply):
+  - The runtime does NO flush/invalidate for host-visible memory; it relies
+    on the kernel ownership contract (memory.rs "Submission cache
+    ownership"). Its own CPU writes (staging, argument encoders, descriptor
+    arenas, copied host buffers) go into the same host-visible blocks.
+  - Memory is pooled: many resources per VkDeviceMemory block; large
+    resources and host imports (IOSurfaces) get dedicated blocks.
+  - Per-command uses are tracked (`Use<ResourceKey>`, residency.rs, heaps as
+    whole ranges; dirty_pages.rs already derives GPU-written host ranges per
+    command buffer at commit).
+  - vkQueueSubmit is called from ~10 places (command_buffer/mod.rs,
+    group.rs batched submits, rerun.rs, device/staging.rs, device/relay.rs
+    relay thread, sparse/bind.rs, device/prime.rs, submit_stalls.rs), so a
+    thread-local hint is unsafe; a scope must ride on the VkCommandBuffer
+    (PanVK private entry point storing ranges on panvk_cmd_buffer, unioned at
+    driver submit; any CB without a scope => full fallback).
+  - PanVK-internal BOs (CS, descriptors, queries) must stay on full
+    maintenance; only runtime-declared blocks may be narrowed.
+  Pieces: kernel ABI (new selector/flag + capability bit, backward
+  compatible with 207 plugins: userspace checks caps by mask), Mesa PanVK
+  patch (cmd-buffer scope + submit), runtime patch (collect used host-visible
+  placements per CB, incl. its own CPU-written internal blocks), plugin
+  rebuild + new allowlist header. Nothing implemented yet.
+- Separate blocker: after a few animations the phone hard-hangs and reboots
+  ~10 s later; disk log stops at 68.23 s with no panic text (logger thread
+  stopped too). Needs pstore console right after the automatic reboot.
 - Still required on the Mac for building: `HelioDarwin/xnu/build-dxb/dxb`
   (frozen objects, EXPORT_HDRS, fakeroot, dxb/xnu), Xcode 15, llvm/lld 22,
   and the device root-manifest.json (local.json currently points into the
