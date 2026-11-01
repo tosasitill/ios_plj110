@@ -1,3 +1,10 @@
+## External dependency audit (2026-11-01)
+
+- Audited local build config and the three user-specified directories; see `x9/EXTERNAL-DEPENDENCIES.md` for paths and script comparisons.
+- Confirmed 1069 external frozen XNU link inputs exist under HelioDarwin dxb; current root manifest remains in the old X9 candidate.
+- Userspace scripts retain the old relative layout; two imported scripts lack options present in old workspace. Mailbox updater ROOT and legacy check-root.sh path also need migration.
+- No builds, CI runs, device actions or file migration performed. Next: consolidate configurable dependencies and userspace/package paths; preserve private artifacts outside git.
+
 ## X9 build reproducibility (2026-11-01)
 
 **Current state (read first):** the repo now builds the kernel and boot.img
