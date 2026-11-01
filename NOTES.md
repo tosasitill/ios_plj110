@@ -45,6 +45,8 @@
   Added exact short alias x9vg, using default45s; separate final boot input
   now607 bytes. Retried the same normal build; final result follows.
 
+- Implementation/build/217 allowlist commit:f25f87b; baseline restoration
+  commit:49a0e08. No CI run; local normal build only.
 - FINAL217 normal build SUCCEEDED exit0. Rust release1.21s; frontend,
   transport/factory compiled+linked+signed;10-file plugin payload51290112
   bytes; exact217 kernel allowlist generated;51/51 overlay objects+6 prebuilt
