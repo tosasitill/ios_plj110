@@ -1,3 +1,65 @@
+## Active:215 renderer task-limit fix built; manual runtime pending (2026-11-01)
+
+- User reports215 has MORE rendering errors, still flickers/low FPS. Latest
+  /Users/tosasitill/2.txt preserved separately as
+  .local/analysis-mailbox215/runtime215-followup.raw.log (689585 bytes,
+  ends323.673s). Earlier215 capture remains runtime215.raw.log (251.341s).
+  Active plugin215,capture inputs0/pixels0 and actual tile-reading DCD
+  can_cull0/can_be_culled0 are all runtime-confirmed. The visual regression
+  cannot yet be attributed to HSR vs diagnostic removal; no shader rollback
+  has been performed. Do NOT claim these HSR fields repaired hardware pixels.
+- NEW decisive failure beyond the truncated214 log: SBRendererService dies
+  15 times,38.535..188.196s,roughly every10.65s,at Metal/PanVK initialization.
+  At38.531..38.533s its first3 one-stream submissions complete; second10MiB
+  allocation at38.535s brings native_bytes21676032,followed immediately by
+  SIGKILL,reason namespace1/code7. Close footprint24871392 exceeds its
+ 16777216-byte task limit. Repeat60.201s has footprint24838544, same limit
+  and reason. Local XNU kern_memorystatus.h defines7 as
+  JETSAM_REASON_MEMORY_PERPROCESSLIMIT, and on_ledger_footprint_exceeded
+  creates exactly that reason. This is a confirmed finite-task-limit restart
+  loop, NOT DeviceLost, a measured shader bug, or proof of flicker's cause.
+- Native PanVK utrace_context_init unconditionally allocates10MiB even
+  without enabled tracing. It explains a source-level initialization cost;
+  second10MiB allocation's exact producer is not resolved. Do not label both
+  allocations tiler heap, whose native queue reserves128MiB separately.
+- Consulted local UniXNU ae687009348296e97e49ce6e925795044f363ce6 and
+  hackios c84b4634277a70beac73921029b1fb6afc2530af: no exact renderer
+  per-process-limit repair found. hackios xnu/hakios.patch uses sane_size
+  for global pressure percentages; that is NOT this code7 fatal task-limit
+  failure and was not ported. Existing X9 mediaserverd inactive floor is the
+  local integration precedent; retain it unchanged for mediaserverd.
+- Implemented a bounded128MiB floor for positive active/inactive limits ONLY
+  on X9, x9_metal_render=1 and exact p_name SBRendererService. Preserve
+  <=0 default/unlimited limits,higher limits,fatal attributes,priority,
+  memory accounting and global pressure kills. x9_sbrender_mb=0 restores
+  original limit policy;32..256 adjusts floor, invalid values use128.
+  Both SET limit paths preserve it across later updates; real render-client
+  open repairs pre-exec launchd-installed limits before native BO mappings,
+  using a held proc reference,owner/task match and proc_list_lock.
+- Normal KERNEL ONLY build succeeded exit0:
+  python3 -I x9/build/build.py --name mailbox215-sbrender-limit
+  Compiled51/51 overlay objects (6 prebuilt), linked+stripped, shim packaged;
+  build reports boot.img9420800 bytes. Log:
+  x9/out/mailbox215-sbrender-limit/build.log. No CI,test suite,secondary
+  artifact inspection/hash/disassembly/rebuild comparison or device operation.
+  Candidate:x9/out/mailbox215-sbrender-limit/boot.img, reusing already-staged215
+  allowlist/plugins. This isolates the confirmed task-limit defect without
+  simultaneously changing HSR,texture policy,Metal diagnostics or Apple
+  shader bytes. NO new mailbox update needed if installed mailbox remains215.
+  User manually starts this candidate; no automatic flash,boot or reboot.
+  Next manual runtime: same interactions through>40s; check X9 JETSAM floor
+  log and live task limit134217728,absence of recurring code7 renderer kills,
+  then compare visible errors and cadence. If visual regression remains,
+  HSR rollback remains a separate comparison, not a substitute for this
+  confirmed process failure.128MiB is headroom,not a measured steady budget.
+- Remaining observed constraints: interaction still pays several ms per job
+  on all-import pre/post cache maintenance plus GPU wait; this scoped task
+  floor is not a full FPS fix. Repeated WSI pitch-alignment errors still
+  accompany fallback for smaller textures; main1256x2760,row5120 explicitly
+  imports. No mapping protection,alignment,cache or completion guard weakened.
+  Later copies/submits0 do not prove a GPU hang. Actual late display producer
+  and photographed polygon corruption still need runtime correspondence.
+
 ## Mailbox215 built: Kraid HSR metadata and normal-path capture removal (2026-11-01)
 
 - Subsequent user readiness message: adb get-state confirmed device. Normal

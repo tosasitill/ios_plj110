@@ -176,9 +176,44 @@ extern void get_largest_zone_info(char *zone_name, size_t zone_name_len, uint64_
  * soon be in effect down in the ledgers.
  */
 
+/* The original SBRendererService budget assumes Apple's native Metal driver.
+ * On X9 its in-process Metal/PanVK initialization alone reached 24 MiB and
+ * repeatedly hit the 16 MiB fatal task limit before it could render. Keep a
+ * finite floor in BOTH stored variants, so a later launchd limit update or
+ * active/inactive transition cannot put the task back into that restart loop.
+ * Do not change other processes, unlimited/default limits, fatal attributes,
+ * jetsam priority, memory accounting or system-pressure victim selection. */
+static int
+x9_render_memory_floor(proc_t p)
+{
+#if defined(ARM64_BOARD_CONFIG_SWEET)
+ int mode = 0;
+ if (sweet_early_is_x9() && !strcmp(p->p_name, "SBRendererService") &&
+     PE_parse_boot_argn("x9_metal_render", &mode, sizeof(mode)) && mode == 1) {
+  int mb = 128;
+  PE_parse_boot_argn("x9_sbrender_mb", &mb, sizeof(mb));
+  if (mb == 0) return 0; /* Exact baseline policy for a manual comparison. */
+  return (mb >= 32 && mb <= 256) ? mb : 128;
+ }
+#endif
+ return 0;
+}
+
+static int
+x9_render_memory_limit(proc_t p, int limit, const char *variant)
+{
+ int floor = x9_render_memory_floor(p);
+ if (limit > 0 && limit < floor) {
+  printf("X9 JETSAM: SBRendererService pid=%d %s %d -> %d MiB;finite task limit,pressure policy unchanged\n",
+      proc_getpid(p), variant, limit, floor);
+  return floor;
+ }
+ return limit;
+}
+
 #define SET_ACTIVE_LIMITS_LOCKED(p, limit, is_fatal)                    \
 MACRO_BEGIN                                                             \
-(p)->p_memstat_memlimit_active = (limit);                               \
+(p)->p_memstat_memlimit_active = x9_render_memory_limit((p), (limit), "active"); \
    if (is_fatal) {                                                      \
 	   (p)->p_memstat_state |= P_MEMSTAT_MEMLIMIT_ACTIVE_FATAL;     \
    } else {                                                             \
@@ -189,6 +224,7 @@ MACRO_END
 static int
 x9_inactive_memory_limit(proc_t p, int limit)
 {
+ limit = x9_render_memory_limit(p, limit, "inactive");
 #if defined(ARM64_BOARD_CONFIG_SWEET)
  if (sweet_early_is_x9() && !strcmp(p->p_name, "mediaserverd") && limit > 0 && limit < 512) {
   printf("X9 JETSAM: mediaserverd inactive %d -> 512 MiB\n", limit);
@@ -7741,6 +7777,34 @@ memorystatus_set_memlimit_properties_internal(proc_t p, memorystatus_memlimit_pr
 	}
 
 	return error;
+}
+
+/* Limits may have been installed while the child still had launchd's name.
+ * The real accelerator open is the earliest reliable post-exec boundary;
+ * repair those stored limits before userspace maps its first native BO. */
+int
+sweet_x9_render_memlimit(task_t owner)
+{
+ if (!owner || owner == kernel_task) return 0;
+ proc_t p = proc_find(pid_from_task(owner));
+ if (!p) return ESRCH;
+ int error = 0;
+ proc_list_lock();
+ int floor = proc_task(p) == owner ? x9_render_memory_floor(p) : 0;
+ if (floor && !proc_list_exited(p) &&
+     ((p->p_memstat_memlimit_active > 0 && p->p_memstat_memlimit_active < floor) ||
+      (p->p_memstat_memlimit_inactive > 0 && p->p_memstat_memlimit_inactive < floor))) {
+  memorystatus_memlimit_properties_t entry = {
+   .memlimit_active = p->p_memstat_memlimit_active,
+   .memlimit_active_attr = (p->p_memstat_state & P_MEMSTAT_MEMLIMIT_ACTIVE_FATAL) ? MEMORYSTATUS_MEMLIMIT_ATTR_FATAL : 0,
+   .memlimit_inactive = p->p_memstat_memlimit_inactive,
+   .memlimit_inactive_attr = (p->p_memstat_state & P_MEMSTAT_MEMLIMIT_INACTIVE_FATAL) ? MEMORYSTATUS_MEMLIMIT_ATTR_FATAL : 0,
+  };
+  error = memorystatus_set_memlimit_properties_internal(p, &entry);
+ }
+ proc_list_unlock();
+ proc_rele(p);
+ return error;
 }
 
 bool

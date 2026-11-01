@@ -13,6 +13,7 @@
 #include <libkern/libkern.h>
 extern "C" vm_map_address_t phystokv(uint64_t pa);
 extern "C" unsigned int pmap_cache_attributes(ppnum_t pn);
+extern "C" int sweet_x9_render_memlimit(task_t owner);
 /* A fresh write-combined BO's pages were zero-filled by the VM through the
  * cacheable physical aperture. Whether those lines were written back before
  * the pages turned non-cacheable is not something to rely on: with this
@@ -114,7 +115,7 @@ class SweetX9RenderUserClient : public IOUserClient {
  static bool good_flags(uint32_t flags) {return flags&&(flags&~7u)==0&&(!(flags&4u)||!(flags&2u));}
  void footprint(const char *phase) {
   if(!context||!context->owner)return;
-  IOLog("X9 RENDER FOOTPRINT: phase=%s pid=%d native_bytes=%llu footprint=%llu limit=%llu;no limit override\n",
+  IOLog("X9 RENDER FOOTPRINT: phase=%s pid=%d native_bytes=%llu footprint=%llu limit=%llu;task ledger,native allocation bytes separate\n",
    phase,pid_from_task(context->owner),(unsigned long long)context->allocated_bytes,
    (unsigned long long)get_task_phys_footprint(context->owner),
    (unsigned long long)get_task_phys_footprint_limit(context->owner));
@@ -383,6 +384,7 @@ public:
   context->lock=IOLockAlloc();if(!context->lock)return false;
   context->owner=task;task_reference(task);
   X9RenderCaps caps;if(!render_caps_ready(&caps))return false;
+  if(sweet_x9_render_memlimit(task)!=0)return false;
   if(render_engine->context_open(context)!=kIOReturnSuccess)return false;
   context->engine_open=true;
   char caller[32]={0};proc_selfname(caller,sizeof(caller));
