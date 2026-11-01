@@ -7,7 +7,7 @@
 - Maintained userspace scripts use local dependencies and canonical x9/metal/General through symlinks. Restored runtime-source/source-library options, latest-runtime macros and compression link. Default retained runtime is pan205 (used by pan207). Complete Metal Rust rebuild not run after cache pruning.
 - Historical helper sources archived under x9/legacy; syntax checked, serial literal redacted, not device-tested. Old differential restore plans require their exact removed baselines and must not be reused with the newer retained root.
 - Mailbox ROOT fixed; requires explicit --root-check because original generated check-root.sh was absent. This missing private preflight remains a device-update prerequisite, not bypassed.
-- Next: regenerate a verified root preflight before any mailbox deployment; rebuild Metal when needed. See x9/BUILD.md and x9/legacy/README.md. Migration commit recorded in git history.
+- Next: regenerate a verified root preflight before any mailbox deployment; rebuild Metal when needed. See x9/BUILD.md and x9/legacy/README.md. Migration commit: `dde45d7` (sources, build paths, helpers and documentation).
 
 ## External dependency audit (2026-11-01)
 
