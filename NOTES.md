@@ -1,3 +1,54 @@
+## Flicker continuation: BLEND encoding, flat UV gate and native heap contract (2026-11-01)
+
+- Finished the pending BLEND format check. Kraid encode_v9.rs::OpBlend uses
+  op_encode_sr_read to carry the color's DataType. proc/isa/encoder.rs maps
+  register_format to sr_src.data_type.scalar_type() and vecsize to comps().
+  v14 ISA uses F32=2/F16=3; its count expression yields four/two registers
+  for vec4 respectively. Thus omission of a manual register_format field in
+  OpBlend::encode is not an omitted hardware format. PC-relative return
+  offset is encoded in eight-byte units, with 16-byte blend return prologue.
+- Ordinary MRT outputs use BlendCall; ra.rs::instr_clobbered_regs lists
+  r0-r15 plus BlendReturnAddr, protecting still-live later attachment values.
+  nir.rs records typed blend_types before any untyped-output conversion;
+  v14 does not use the old pre-v9 descriptor register_format field. No direct
+  first-attachment clobber/half4-vs-float4 mismatch demonstrated.
+- Traced an additional diagonal-color hypothesis: translator can deliberately
+  turn a primitive-uniform varying flat. Original narrow7 UV metadata is
+  air.center + air.perspective; original downsample UV is texcoord*scale+bias.
+  ABI parser preserves both keys; fragment_input_deco leaves float smooth
+  unless per-primitive/uniform analysis proves otherwise. Uniformity treats
+  VertexInput as divergent; arithmetic propagates that fact through UV.
+  All21 captured212 layouts have buffer1,stride48,PerVertex1,rate1 for each
+  of attributes0-3. So this source route does not classify these UVs uniform
+  through instance/constant stepping. No emitted specialized SPIR-V inspected;
+  this is scoped contract evidence, not proof of actual interpolation.
+- Native completion/ownership chain read beyond runtime documentation:
+  X9PanVKSync.c leaves output fences pending until x9_pan_kmod_submit returns.
+  SweetX9RenderEngine.inc requires each active stream's submission fence,
+  extract pointer and guards, then CSG halt, GPU flush and AS removal, then
+  client post-cache acquisition before returning completion. Frontend finish
+  follows runtime completion. No simple early-completion vertex/index-buffer
+  reuse defect found here; caller writes concurrent with work remain unobserved.
+- New native tiler-heap audit: X9PanVKTilerHeap.c initializes zero context,
+  64-byte headers and next=(GPU_VA | chunk_size>>12). Compared with upstream
+  Linux panthor_heap.c (raw torvalds/linux/master, accessed this turn): opaque
+  context zeroing and next-address/4KiB-unit chunk encoding agree; context is
+  separately16KiB-aligned. PanVK sets HEAP_SET to context, initial TILER_HEAP
+  bottom=base+64/top=base+size. Native header format not shown defective.
+  Source: https://raw.githubusercontent.com/torvalds/linux/master/drivers/gpu/drm/panthor/panthor_heap.c
+- Concrete capacity difference: native bridge passes max_chunks to heap_create,
+  allocating all64*2MiB=128MiB plus16KiB context per queue. Ordinary PanVK
+  requests initial_chunks5 (10MiB) with max64, growing through its KMD. X9
+  keeps the full initial chain to avoid depending on absent dynamic growth.
+  This identifies memory overhead, not heap exhaustion, a measured FPS cause,
+  or polygon corruption. Do not just reduce capacity without growth handling.
+- Root cause remains unresolved.212 late interaction151-160s is still outside
+  pixel/vertex captures; first6 indices do not cover count54. Existing HSR
+  metadata gap remains unproven at the faulty draw. No rendering patch, test,
+  build, device action or shader substitution. Mailbox212 unchanged. Further
+  checks should resolve a new concrete state/producer discrepancy, not repeat
+  BLEND format, uniform-UV gate or early native completion as new findings.
+
 ## Flicker continuation: local vertex capture vs native v14 IDVS (2026-11-01)
 
 - Examined X9 local vertex execution modifications as a separate possible
