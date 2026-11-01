@@ -1,5 +1,17 @@
 ## Mailbox215 built: Kraid HSR metadata and normal-path capture removal (2026-11-01)
 
+- Subsequent user readiness message: adb get-state confirmed device. Normal
+  mailbox215 update succeeded exit0 with serial from private root manifest:
+  python3 -I x9/mailbox/update.py x9/out/mailbox215-hsr-clean-render --serial <private>
+  Root preflight verified device,pin+immutable,inode/map/partition,protected
+  extents,current HFS UUID/geometry. Mailbox committed51269632 bytes;
+  each written range read back. Log:
+  x9/out/mailbox215-hsr-clean-render/mailbox-update.log. Only the approved
+  mailbox updated; no boot write,flash,reboot or iOS-root-file modification.
+  Supersedes LOCAL ONLY below:215 is now STAGED, manual boot/runtime pending.
+  Matching boot:x9/out/mailbox215-hsr-clean-render/boot.img. No215 visual/FPS
+  success evidence; next action remains user's manual boot+blur interaction.
+
 - User's new /Users/tosasitill/2.txt still reports flicker and low FPS. Preserved
   separately at .local/analysis-mailbox214/runtime214.raw.log; ends mid-line
   at34.987s, NOT a complete late-interaction capture. At3.345s active plugin
