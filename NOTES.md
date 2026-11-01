@@ -1,3 +1,39 @@
+## Flicker continuation: local vertex capture vs native v14 IDVS (2026-11-01)
+
+- Examined X9 local vertex execution modifications as a separate possible
+  source of polygon corruption. compile::lower_inputs selects capture only
+  through simd::needs_vertex_capture: unsupported vertex subgroup features,
+  lane/quad indices, group/SIMD-matrix/AGX ops or qualifying SIMD barriers.
+  Original downsample_blur_vert_lph has only matrix/UV arithmetic, no such
+  builtins or calls. Thus this shader does not select local compute capture
+  by these source conditions. Ordinary vertex state defaults capture None;
+  link copies capture only if the compiled interface explicitly has it.
+  No IndexedVertexCapture notice found in212 log; absence alone is not proof.
+- Native v14 path: pan_nir_lower_vs_outputs separates position/attribute/
+  generic varying buckets by load_shader_output_pan, emits each bucket's
+  stores under matching output-mask bit. Unified IDVS clones body per bucket
+  and substitutes the local output mask before constant/DCE cleanup.
+  Kraid ShaderOutput FAU page3,index4 matches Valhall special-FAU definition.
+- Kraid IDVS output-buffer index uses InternalId r59; BIR uses same r59.
+  VertexId r60,InstanceId r61,DrawId r62 also match. Generic varyings write
+  hardware buffer1 on v12+, with linked layout byte offset; position FIFO
+  buffer0. Fragment generic descriptors target buffer1. No simple wrong
+  preload register/buffer-number difference found between backends.
+- Kraid secondary_enable for unified VS is set iff outputs include anything
+  outside position/extended-FIFO outputs, so plain float2 UV qualifies.
+  PanVK secondary_shader is enabled iff secondary_enable and FS present;
+  VS/FS/IDVS changes participate in tiler-flags dirty calculation.
+- Correct DVS hypothesis scope: v14 direct and indirect launch sites explicitly
+  pass MALI_IDVS_SHADING_MODE_EARLY to RUN_IDVS2; enum distinguishes Early0
+  from Deferred1. Do not assume generic G925 deferred-small-triangle replay
+  is enabled merely from hardware model or the term IDVS. Exact emitted
+  command state still not captured, no new GPU execution proof.
+- No demonstrated vertex-route defect. No tests/build/device action, Apple
+  shader substitution or driver patch. Mailbox212 unchanged. Root cause
+  still unresolved; keep full multi-quad GPU input and actual specialized
+  instruction/descriptor evidence gaps open rather than rechecking these
+  same route-selection conditions next turn.
+
 ## Repository push (2026-11-01)
 
 - User requested push. git push origin main succeeded, updating remote
