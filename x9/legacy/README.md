@@ -24,7 +24,9 @@ The one retained root is pan172/edited-root.hfs, selected using original
 modification times plus its successful fsck/install logs. Its copied content
 was SHA256-verified against the original; the digest and cleanup inventory
 are in `.local/migration-cleanup.json`. It is a historical install image, not
-a snapshot of the current phone. Original source workspaces and partition
-backups were left intact; cleanup applies to the migrated local workspace.
+a snapshot of the current phone. After verification, the user authorized deleting the corresponding obsolete
+images, runtime trees and build caches from the old workspace too. Source
+repositories and partition backups remain. Exact deletions are recorded in
+`.local/old-workspace-cleanup.json`.
 
 Apple images, device dumps, logs and manifests remain outside git.

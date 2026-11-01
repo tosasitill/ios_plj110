@@ -1,3 +1,10 @@
+## Old workspace cleanup (2026-11-01)
+
+- User explicitly requested deletion of unwanted leftovers after migration. Removed 20 selected entries from the old HelioDarwin-x9-lk-preserve workspace: seven historical root images (including the duplicate of the retained latest image), Rust general-target cache, 11 superseded runtime trees, and legacy xnu_x9/out build output.
+- Before deletion, rehashed the retained `.local/x9/work/x9-metal-install-pan172/edited-root.hfs` and matched the migration SHA256; checked retained pan205 source and built boot.img. `prepare-local.py --check` passed after cleanup.
+- Actual filesystem free space increased from 12.17 GiB to 55.23 GiB (~43.06 GiB reclaimed; APFS clone sharing means summed file sizes differ). Exact private removal inventory: `.local/old-workspace-cleanup.json`.
+- Device partition backups, current local dependencies, source repositories and unrelated work directories remain. No device actions. This supersedes earlier statements that all old workspace originals were left intact.
+
 ## Dependency migration and pruning (2026-11-01)
 
 - User requested migration + commit, then explicitly requested retaining only newest useful versions. Local APFS snapshots moved inputs under gitignored `.local/`; original workspaces and partition backups remain intact.
