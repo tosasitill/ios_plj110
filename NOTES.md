@@ -1,3 +1,45 @@
+## Static continuation: indexed forwarding, EDR and measured driver costs (2026-11-01)
+
+- Followed indexed draws frontend -> nmb_render_draw_indexed -> runtime
+  draw_indexed -> bind/graphics.rs -> vkCmdDrawIndexed -> PanVK launch_draw.
+  Count54 is forwarded intact; index bytes are bound at index_buffer_offset,
+  first_index0 and base_vertex as vertex_offset. PanVK emits INDEX_COUNT,
+  INDEX_OFFSET, VERTEX_OFFSET separately and maps2/4-byte indices to UINT16/32.
+  No simple count6 cap or double application of byte offset demonstrated in
+  this route. Diagnostic cap6 remains separate from actual draw count.
+- EDR setters: frontend scalar/range/bytes/offset setters all forward arbitrary
+  fragment index, Rust maps FRAGMENT to matching runtime setters. No slot6
+  special case dropping it. Exact live slot6 value and setter sequence absent.
+- Concrete diagnostic mismatch: runtime ArgumentTable::set_buffer_offset
+  after inline setBytes replaces that slot with zero upload at any offset;
+  X9BlurCapture.inc offset override merely modifies the old NSData snapshot's
+  offset. A capture of that call sequence would disagree with runtime binding.
+  Current log does not record setter sequence, so reachability is UNKNOWN;
+  do not label this the rendering root cause or change valid-call semantics.
+- Re-read actual212 timing at the151-162s blur interaction: display timer
+  ~120 ticks/2s with missed0, only20-33 submits/2s and gpu_defer1-21. Copies
+  ~1.65-1.83ms average, TE timeout0. These are submission/software counters,
+  NOT measured panel FPS. Render job averages at158.128s: pre-cache3354us,
+  storage353us,start536us,wait12500us,retire374us,post-cache1768us. At160.128s
+  wait18682us. These intervals contain diagnostics; do not extrapolate normal
+  performance or equate wait_us to shader time.
+- Current poll helper already has pan219 short-spin/backoff:64*16us spins,
+  then20*100us deadline sleeps, then1ms sleeps. Old NOTES describing no spin
+  are historical, not current. Completion wait also acquires active private
+  fence pages via render_page_sync (v14 PA-range FULL0x7308, completion poll),
+  every poll during spin and at >=1ms thereafter. Thus wait_us includes
+  explicit GPU cache commands, CPU observation and scheduling, not shader
+  timing. No counter splits these costs in current log.
+- Source still serializes submission under RenderOwner while running cache,
+  AS, CSG and fence handling; display TryLock failure increments gpu_defer.
+  This establishes a direct contention mechanism, but does not prove whether
+  GPU work or fence/cache observation dominates. Preserve fence publication,
+  guards and completion checks; no speculative removal or new build made.
+- No tests/device operation/render behavior change. Mailbox212 unchanged.
+  Next useful evidence must distinguish actual GPU completion from fence-page
+  cache-acquire/sleep latency and record full54-index/EDR data. Source-only
+  review has not yet established the polygon or color root cause.
+
 ## Static/runtime-input continuation: exact blur vertex route (2026-11-01)
 
 - Reused already extracted original AIR in .local/analysis-blur-root/
