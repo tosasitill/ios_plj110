@@ -1,3 +1,69 @@
+## Fresh UniXNU upstream references: iOS QoS and pipeline waits (2026-11-01)
+
+- User supplied github.com/UniXNU/AdrenoMetal and /Adreno740. Fetched current
+  public main heads, preserved separate source snapshots and API comparisons:
+  .local/analysis-blur212/unixnu-current/{AdrenoMetal,Adreno740}.
+  AdrenoMetal831a9dcbd6ac7de89a11bdaf031e07b9aadfa3c8;
+  Adreno740a9a2cbb43b89d672e2921e19721a6438b738b17f.
+  Prior acquisition pins ce5e19e/5c8c145 are stale: API comparison reports
+  161/90 commits ahead and50/47 changed paths respectively. These counts
+  include merged branch history, not161/90 distinct fixes. Current bridge
+  has24 patches, not the prior16. Read current AGENTS, READMEs and official
+  component pages/catalog. No reference tests/builds or device operations.
+- Also pinned UniXNU build repository6790e7ce6e77f67a9174fba1255e64eacf1c41ad,
+  saved relevant build scripts, dependency inputs and two Mesa patches under
+  unixnu-current/UniXNU. Its current translator pin is624bab3918de5b978e1101517abca2b4fa426565,
+  Mesa c823a83e8f373a5c36c2b9ed1d7dc98a4f3360ee. X9 active runtime remains
+  older219f013 base plus local patches; patch filenames alone are insufficient
+  to compare current behavior. No automatic version bump or patch application.
+- NEW portable scheduling difference: bridge patch0023-quality-of-service-on-ios
+  expands exit_guard.rs Apple QoS cfgs from macOS to macOS+ios for
+  raise_to_user_initiated,run_at_user_interactive,at_least_user_initiated and
+  their fallbacks. X9 current source still has macOS-only implementations;
+  iOS run/raise are empty and at_least returns true. Real call sites include
+  scheduler/mod.rs633,render/lowering_worker.rs93,completion.rs262,
+  pipeline/pool.rs473 and device/compiles.rs311. Thus a real missing iOS
+  scheduling request is established in source. Reference build script reports
+  default-class iPad wake delays up to50ms; that is reference observation,
+  NOT a measured X9 delay, FPS gain, or flicker explanation. This is a focused
+  candidate for a later portable fix, independent of Mali instruction encoding.
+- NEW pipeline omission difference: current reference NativeMetalObjects.rs189
+  sets PipelineWaitPolicy::Exact. X9 nmb_device_open leaves default Bounded,
+  whose policy has4500ms creation/commit bounds. Current X9 pending.rs
+  record_once calls drop_late_draw on timeout and records no draw; mod.rs
+  drop_late_draw counts draws_dropped_still_making and announces degradation.
+  Source route exists, but current212 log does not establish a timeout. Sink
+  stores counts/last warning for telemetry; absence of a console string is not
+  a no-timeout proof. Exact changes compile/wait latency, so no speculative
+  policy switch made. Whole-draw omission alone does not prove a half-quad bug.
+- NEW current texture policy: reference185 sets InPlaceWrites; patches0014/15
+  permit rendered/written padded surfaces in place,0020 removes host-page
+  tile-fit restriction. Inspected actual companion
+  turnip-render-mode-for-attachment-memory.patch: tu_attachment_unpadded
+  recognizes linear explicit-layout/host-import attachments not whole GMEM
+  blocks; load uses draw path and store uses unaligned path over texels alone.
+  It can KEEP GMEM rendering.0020's inline comment about rendering without
+  tile memory is not the current companion implementation; do not repeat it
+  as fact. Build bridge script explicitly names this dependency. X9 defaults
+  InPlace but in_place rejects render/write usage; shadows remain expected.
+  No proof PanVK offers equivalent edge-store behavior, so do not copy this
+  opt-in or infer a missing generic Vulkan barrier from the Turnip-specific fix.
+- Reference0012 adds rounded-model fallback for unsupported fast extended-range
+  sRGB blending (comments identify Astronomy BGRA10_XR_sRGB). Captured X9
+  ordinary blur targets are format80 linear BGRA8. The patch is not evidence
+  for those polygons or color regression; wallpaper use of that format not
+  established here. Patches0001/0002 retain old semantics;0004 differences
+  mostly rebase positions, not a newly missing constant-folding repair.
+- Current A740 kernel changes include actual-page noncacheable classification,
+  bounded cache-maintenance runs, memory allocation and two-ring preemption.
+  Hardware/context/cache contracts differ from X9 CSF; no ring/preemption or
+  import-maintenance shortcut transplanted. X9 native submission remains
+  synchronous; new reference timing figures are not X9 runtime measurements.
+- No render/runtime code change, new build, tests, installation or shader
+  substitution. Mailbox212 unchanged, polygon flicker root cause unresolved.
+  Best NEW portable lead is iOS QoS; source-proven pipeline omission route
+  needs late-draw counters or concrete warning before causal attribution.
+
 ## Flicker continuation: BLEND encoding, flat UV gate and native heap contract (2026-11-01)
 
 - Finished the pending BLEND format check. Kraid encode_v9.rs::OpBlend uses
