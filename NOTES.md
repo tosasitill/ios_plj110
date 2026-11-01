@@ -1,3 +1,43 @@
+## Flicker focus: framebuffer-fetch HSR safety remains open (2026-11-01)
+
+- User explicitly prioritizes flicker again; no performance behavior edits.
+- Inspected color1/memoryless preservation across internal pass splitting:
+  render_target::load_at uses LOAD after first instance, store_at forces STORE
+  before last instance even for memoryless originals (the memoryless DontCare
+  selection only affects final-store policy). No simple intermediate-mask
+  loss through original DontCare established at this site.
+- Important narrowing from ORIGINAL luma_boost_lph AIR: both half4 color and
+  float2 UV inputs are air.arg_unused, as is position. Its RGB uses current
+  render_target0 color d0 and a luminance-derived LUT sample, alpha from d0.
+  A wrong interpolated UV/half-color cannot directly change this shader's
+  value. Geometry, input attachment contents/order and compiled fetch/LUT
+  execution are separate possible causes. Live211 graph contains this pass.
+- Correct the weight of the earlier HSR exclusion: prepass default OFF does
+  NOT prove that all HSR behavior is disabled. v14 fragment flags separately
+  encode prepass11, interleaving12, filter13, hierarchical optimizations14;
+  csf/panvk_vX_cmd_draw.c:1489-1490 enables the latter two unconditionally.
+  DCD hsr_can_cull/be_culled is populated regardless of prepass setting.
+  No authoritative semantics found proving whether those fields matter in
+  the non-prepass path; therefore retain this as OPEN, not excluded or causal.
+- Reachable compiler discrepancy: default Kraid leaves fs.hsr zero while
+  BIR va_gather_hsr_info marks LD_TILE. For a plain framebuffer-read luma
+  shader (no discard/memory side effects/coverage), build_dcd_flags would
+  permit hsr_can_be_culled with zero metadata; BIR's ld_tile would forbid it.
+  rt_read & rt_written independently blocks hsr_can_cull but does NOT block
+  hsr_can_be_culled. This is a concrete source safety-contract mismatch for
+  a live shader family, not proof of active hardware mis-culling or that an
+  HSR change repairs the photographed polygons.
+- Also noticed readonly_color_mask's final loop references ial color_map
+  while looping cal array; current runtime uses identity locations for these
+  MRTs, so no reachable remap error demonstrated. Do not chase as live root.
+- Consulted upstream primary Mesa mirrors for HSR semantics; indexed results
+  did not establish non-prepass behavior. No reliance on unrelated results,
+  no third-party hardware anecdote used as proof. No repeat of failed probes.
+- No tests/build/device operations, shader substitution or speculative HSR
+  patch. Mailbox212 unchanged. Next decisive evidence is actual DCD+FBD HSR
+  state for the framebuffer-fetch luma draw / non-prepass semantics; existing
+  frontend pipeline names and Completed status cannot settle this boundary.
+
 ## Static continuation: indexed forwarding, EDR and measured driver costs (2026-11-01)
 
 - Followed indexed draws frontend -> nmb_render_draw_indexed -> runtime
