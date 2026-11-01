@@ -1,3 +1,42 @@
+## Static continuation: v14 interpolation, uploads and message waits (2026-11-01)
+
+- Read Kraid encode_v9.rs OpLdVarBuf -> isa-v9-v14.xml v14 LD_VAR_BUF and
+  LD_VAR_BUF_IMM definitions. Source type F32/F16 encodes2/3; update Store,
+  Retrieve, Clobber encodes0/1/3, matching the Valhall ISA definitions. v14
+  immediate byte offset is11 bits at8, not the old v9/v10 8-bit field at16;
+  encoder permits <2048 on arch>=11. F16 destination staging count is packed
+  as ceil(component_count/2), F32 as component_count. No demonstrated field
+  mismatch from source reading; no binary/secondary build-artifact inspection.
+- Metal vertex Half4 maps R16G16B16A16_SFLOAT. Original std_vert1 AIR returns
+  unchanged half4 color plus float2 transformed UV, so source/destination width
+  separation in LD_VAR_BUF matters; it is explicitly represented by mem_type
+  versus dst_type. This does not prove the actual compiled shader is correct.
+- PanVK physical-device source advertises shaderFloat16 on arch>=10; runtime
+  enables it and private supportsNativeHardwareFP16 reflects that feature.
+  half_chain.rs only holds half operations at float on a profile WITHOUT native
+  shaderFloat16. Thus this emulation is not the default v14 route. Exact live
+  profile still not dumped; do not attribute polygons to half-chain rounding.
+- Followed setVertexBytes -> argument_table::set_bytes -> Uploads::upload:
+  immediate copy, per-command-buffer chunks, monotonic aligned used offset,
+  InlineBytes retains Buffer+offset+length, binding adds region offset once.
+  Completed cleanup takes uploads only after completed handlers. No simple
+  inline-byte arena wrap/early reuse seen. This does NOT cover caller-owned
+  mutable MTLBuffers or prove DMA/cache visibility on hardware.
+- Kraid message_slots.rs computes the first physical-register access deadline
+  for each message result, at whole-register granularity (including packed-half
+  overlap), and inserts waits before consumption/overwrite. Blocks drain their
+  active message slots unless shader end. required_waits.rs additionally waits
+  Resource for LD_TILE_RES, Barrier for ordinary color LD_TILE/ST_TILE, and
+  ZS+Barrier for blend. Reference BIR va_insert_flow.c explicitly states outbound
+  staging operands are latched/stalled by hardware, so tracking only message
+  destinations is intentional, not a missing source-register lifetime fence.
+  This is source consistency evidence, not proof that all generated waits or
+  v14 hardware semantics are correct. No new confirmed root cause.
+- Next focused static lead: actual Kraid register allocation/flow coalescing
+  of the mixed half-color/float-UV shader and texture fusion; caller-owned
+  vertex/index buffer mutation must remain distinct from copied inline bytes.
+  No tests, build, device changes or shader replacement. Mailbox212 unchanged.
+
 ## Static continuation: actual compiler and HSR enable gate (2026-11-01)
 
 - Followed the actual backend dispatcher, not just its name: build-panvk-native-ios.py
