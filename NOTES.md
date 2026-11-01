@@ -1,3 +1,68 @@
+## Mailbox215 built: Kraid HSR metadata and normal-path capture removal (2026-11-01)
+
+- User's new /Users/tosasitill/2.txt still reports flicker and low FPS. Preserved
+  separately at .local/analysis-mailbox214/runtime214.raw.log; ends mid-line
+  at34.987s, NOT a complete late-interaction capture. At3.345s active plugin
+  is verified214 (the earlier missing-file line precedes mailbox installation).
+  At16.508s backboardd's1256x2760,row5120 surface has direct1,pitched1,shadow0;
+  subsequent matching surfaces increase pitched to4. Thus214's explicit-pitch
+  route WORKS on hardware; do not diagnose this run as modifier negotiation
+  failure. Other formats/pitches still shadow. No215 hardware evidence yet.
+- Captured display copies are sparse during startup, with no missed software
+  ticks or TE timeouts; cannot calculate interactive FPS or identify the later
+  photographed producer from this truncated log. Last aggregate render batch
+  at33.631s is9 jobs: pre241us,storage289us,start525us,wait498us,retire353us,
+  post107us. These startup jobs are not a measurement of later blur load.
+  GPU coherency remains capable0,active0; explicit cache maintenance retained.
+- Implementation/build commit e33cb0a. Maintained local PanVK patch
+  x9/build/third_party/03-kraid-hsr-metadata.patch now fills Kraid's omitted
+  fragment fs.hsr from final scheduled/lowered instructions. Mirrors current
+  retained BIR valhall/va_gather_hsr_info.c: LD_TILE (both NIR load variants),
+  generic/special centroid and rasterizer coverage, generic varyings and
+  WAIT/WAIT_RESOURCE/tile work before ATEST or ZS_EMIT. Flow classification
+  follows Kraid encode_flow, not all message-slot waits. Gather precedes
+  pan_shader_update_info, which preserves hsr; no shader instruction, Apple
+  AIR, attachment identity, ROA flag, global HSR policy or prepass enable
+  substitution. Full/incremental native builds consume03 after02 via the
+  existing zero-fuzz/already-applied source gate. No upstream submission.
+- This repairs a SOURCE-PROVEN metadata contract omission, NOT a proven
+  hardware flicker root cause: prior notes left non-prepass HSR consumption
+  uncertain. Existing PanVK DCD logic now rejects tile readers for can_cull
+  and can_be_culled. First4 tile-reading DCD builds/process log X9 HSR tile-read
+  with read/write masks,safety bits and actual packed-field decisions. No
+  per-draw dumps or added GPU synchronization. Need215 log+visual result.
+- Detailed Metal capture is now explicitly opt-in via exact whitespace-delimited
+  kern.bootargs tokens, read once/process. Default inputs0,pixels0 bypasses
+  diagnostic buffer/texture tables,setBytes copies,pipeline/sampler/pass string
+  formatting,blur/graph logs,pixel readback encoders and asynchronous dumps.
+  x9_metal_capture=1 restores bounded CPU input/graph capture;
+  x9_metal_pixels=1 also enables intrusive pixel readbacks. These are absent
+  from normal215 bootargs. Real runtime bindings/resourceOwners/IOSurface
+  lifetime,completion ordering and sampled surface/aggregate counters unchanged.
+  Removes definite instrumentation work; no measured sustained FPS gain claim.
+- First normal build stopped in Kraid at Rust E0502: gather used Shader's
+  immutable NIR borrow after pan_shader_update_info's mutable FFI coercion.
+  Fixed ordering to gather before the update (same preserved hsr fields);
+  failed console retained .local/analysis-mailbox214/mailbox215-build-first-failed.log.
+  C DCD object compiled in that attempt; later incremental build reused it.
+- Normal build then succeeded exit0:
+  python3 -I x9/build/build.py all --revision 215 --name mailbox215-hsr-clean-render
+  Kraid compiled/native
+  PanVK linked; Rust Metal release1.50s,frontend/transport/factory compiled,
+  plugins signed+packaged215; exact allowlist regenerated,51/51 kernel overlay
+  objects compiled,linked/stripped,shim packaged. Build reports boot.img
+  9,420,800 bytes. Logs:x9/out/mailbox215-hsr-clean-render/build.log and
+  .local/analysis-mailbox214/mailbox215-build.log. No CI,test suite,secondary
+  artifact inspection/hash/disassembly/rebuild comparison or device operation.
+- 215 is LOCAL ONLY. Device remains last-tested214. Normal mailbox update must
+  precede user manual boot of x9/out/mailbox215-hsr-clean-render/boot.img;
+  retain all root preflight/readback. No auto flash,reboot or partition write.
+  Next: capture215 through actual Control Center/folder/App Library interaction,
+  confirm capture inputs0,pixels0 and tile-read DCD can_cull0/can_be_culled0,
+  compare visual corruption and render/display aggregate timings. If flicker
+  persists despite corrected DCD, do not re-label the old metadata omission
+  as established cause; full faulty-draw inputs/EDR/actual GPU output remain open.
+
 ## Mailbox214 updated: host-pointer explicit-pitch texture repair (2026-11-01)
 
 - User reconnected adb and requested the prepared mailbox update. The normal
