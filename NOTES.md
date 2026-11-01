@@ -1,3 +1,58 @@
+## Mailbox 208: blur flicker, performance and wallpaper investigation (2026-11-01)
+
+- User confirms touch/unlock is now OK; reports polygon-like flicker where
+  blur is present, low frame rate, and missing wallpaper. New input
+  `/Users/tosasitill/2.txt` preserved in `.local/analysis-render208/runtime.raw.log`
+  (156.857 s). Do not confuse it with the previous 64 s lockscreen log.
+- 28 PosterBoard SIGABRT events, no captured GPU DeviceLost. Per-submit
+  medians: pre-cache 3272 us, wait 8842 us, post-cache 2486 us. Display
+  windows with >=20 copies: 9.9–27.3 copies/s, median 17.5; NOT panel FPS.
+  498 read-only import grants: the preceding prepare kr=2 refusals are
+  recoverable permission negotiation, not proof of missing textures.
+- Original 20H392 cache, matching symbol UUID checked by existing reader:
+  slide 0x212f8000, PosterBoard -> PBFWallpaperKitBridge defaultWallpaperIdentifier
+  -> WKDefaultWallpaperManager defaultWallpaperManager; CollectionsPoster
+  throws at unslid 0x1b23dcc40 in _loadSystemWallpaperCollections. Exact
+  throw: Collections.plist lacks a valid `order` array. File lookup uses
+  MGCopyAnswer(GSDeviceName).lowercaseString -> Collections~NAME.plist,
+  falling back to Collections.plist. Default wallpaper lookup separately
+  uses DefaultWallpapers~NAME.plist. No Apple bytes modified.
+- Checked MG hashed dispatch for GSDeviceName (9s45ldrCC1WF+7b6C4H2BA):
+  callback 0x19c56ea44 derives class from hw.product, NOT product-name.
+  Runtime X9 IDENTITY reports iPhone10,3/D22AP. Thus custom iPhone20 display
+  name is NOT established as the cause. Local historical pan172 HFS has
+  valid readable ~iphone files/order; it is NOT the live device root.
+  Actual path/read failure or corrupt live file remains unknown.
+- Local analysis scripts/results under `.local/analysis-render208/`;
+  readonly pan172 HFS was mounted at /tmp/x9-symbol-root for analysis.
+  Existing historical .ips reports corroborate the same exception site.
+  UniXNU's iPadOS17 wallpaper PNG replacement and hackios media injection
+  do not fix this iOS16 collection lookup exception; not transplanted.
+- Candidate `x9/out/mailbox208-wallpaper-wc/boot.img` (9,420,800 bytes):
+  explicitly sets kIOMapWriteCombineCache for native WC BO user views;
+  host imports unchanged. This makes the no-maintenance mapping contract
+  explicit; cache-attribute drift has NOT been observed, no flicker fix claim.
+  References: local UniXNU-gpu Adreno740/NativeAdrenoCpu.cpp and XNU
+  IOMemoryDescriptor mapping code. Did not force page attributes on imports.
+- Added at most 48 Wallpaper plist open observations from PosterBoard/
+  CollectionsPoste and one filtered heap-string scan per process name on
+  first abort. Scan budget now bounds attempted reads too (previous loop
+  could exceed the intended bound within a large region). No file mutation,
+  lookup fallback, shader substitution, or synchronization removal.
+- Build: `python3 -I x9/build/build.py --name mailbox208-wallpaper-wc`,
+  exit 0 after replacing unavailable strstr calls with a local bounded-by-NUL
+  helper. Local build only, built-in checks only; no CI/additional tests.
+  Uses existing 208 plugins; no mailbox restaging required. No device online
+  over adb, no device writes or reboot. Changes are a mapping correction and
+  diagnostic candidate, NOT a completed wallpaper/performance repair.
+- Next user hardware run: reproduce blur flicker and collect X9 WALLPAPER
+  OPEN plus first STR scan. Determine exact failing plist/path/content before
+  changing root. CoreImage _blendWithAlphaMaskB0 lookup in stitchable library
+  has no raw entry (194 entries); may be optional fallback probing, not yet
+  proven the cause of visual errors. Resource-scoped synchronization remains
+  the larger performance direction; do not skip shared imported memory
+  maintenance based merely on unchanged CPU-write counters.
+
 ## Mailbox 208 lockscreen failure: touch worker exit (2026-11-01)
 
 - User reports lockscreen cannot reach desktop. Input `/Users/tosasitill/2.txt`

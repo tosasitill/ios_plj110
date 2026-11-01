@@ -424,6 +424,10 @@ public:
   // raw userclient mapping API either. Driver-owned executable BOs were pinned
   // InOut and still need writable CPU mappings to upload their instructions.
   *options=r->memory->getDirection()==kIODirectionOut?kIOMapReadOnly:0;
+  // Preserve the allocation's cache contract explicitly for every user view.
+  // Submission skips CPU maintenance for these BOs; a default/cacheable view
+  // would make that skip invalid. Host imports keep their existing mode.
+  if(r->write_combined)*options|=kIOMapWriteCombineCache;
   IOLockUnlock(context->lock);return kIOReturnSuccess;
  }
  IOReturn externalMethod(uint32_t selector,IOExternalMethodArguments *args,IOExternalMethodDispatch *,OSObject *,void *) APPLE_KEXT_OVERRIDE {

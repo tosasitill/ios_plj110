@@ -4539,8 +4539,8 @@ fg_vn_data_free(void *fgvndata)
  *
  * XXX Need to implement uid, gid
  */
-int
-open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
+static int
+sweet_open1_impl(vfs_context_t ctx, struct nameidata *ndp, int uflags,
     struct vnode_attr *vap, fp_initfn_t fp_init, void *initarg, int32_t *retval, int authfd)
 {
 	proc_t p = vfs_context_proc(ctx);
@@ -4837,6 +4837,44 @@ bad:
 	vnode_put(vp);
 	fp_free(p, indx, fp);
 
+	return error;
+}
+
+static int
+sweet_text_contains(const char *text, const char *needle)
+{
+ size_t n = strlen(needle);
+ for (; *text; text++) if (!strncmp(text, needle, n)) return 1;
+ return 0;
+}
+
+/* Observe the actual WallpaperKit path and open result, before namei frees
+ * its pathname. No path rewriting, file writes, or permission overrides. */
+int
+open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
+    struct vnode_attr *vap, fp_initfn_t fp_init, void *initarg, int32_t *retval, int authfd)
+{
+#if defined(ARM64_BOARD_CONFIG_SWEET)
+	static unsigned observations;
+	char path[256] = "";
+	proc_t p = vfs_context_proc(ctx);
+	int observe = 0;
+	extern int sweet_early_is_x9(void);
+	if (sweet_early_is_x9() && observations < 48 &&
+	    (!strcmp(p->p_comm, "PosterBoard") || !strcmp(p->p_comm, "CollectionsPoste")) &&
+	    UIO_SEG_IS_USER_SPACE(ndp->ni_segflg)) {
+		size_t copied = 0;
+		if (!copyinstr(ndp->ni_dirp, path, sizeof(path), &copied) &&
+		    sweet_text_contains(path, "Wallpaper") && sweet_text_contains(path, ".plist")) {
+			observe = __sync_fetch_and_add(&observations, 1) < 48;
+		}
+	}
+#endif
+	int error = sweet_open1_impl(ctx, ndp, uflags, vap, fp_init, initarg, retval, authfd);
+#if defined(ARM64_BOARD_CONFIG_SWEET)
+	if (observe) printf("X9 WALLPAPER OPEN: caller=%s path=%s flags=%x errno=%d fd=%d\n",
+	    p->p_comm, path, uflags, error, error ? -1 : *retval);
+#endif
 	return error;
 }
 

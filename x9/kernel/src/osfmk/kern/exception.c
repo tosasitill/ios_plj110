@@ -906,6 +906,14 @@ sweet_crash_log(const char *name, int pid, int sig, uint64_t code, uint64_t subc
  * "STR text", at most 700 lines. An uncaught NSException's reason string
  * is among them: the abort message only carries the exception's type.
  */
+static int
+sweet_text_contains(const char *text, const char *needle)
+{
+ size_t n = strlen(needle);
+ for (; *text; text++) if (!strncmp(text, needle, n)) return 1;
+ return 0;
+}
+
 static void
 sweet_crash_strings(const char *name)
 {
@@ -916,6 +924,13 @@ sweet_crash_strings(const char *name)
 	uint64_t scanned = 0;
 	int lines = 0;
 	char last[96] = "";
+	/* WallpaperKit currently aborts before reporting its exception reason.
+	 * Scan only the first crash of each affected process name, and emit only
+	 * relevant text so crash loops cannot flood USB or repeatedly scan heaps. */
+	static unsigned wallpaper_scanned;
+	unsigned wallpaper_bit = !strcmp(name, "PosterBoard") ? 1u :
+	    (!strcmp(name, "CollectionsPoste") ? 2u : 0u);
+	if (wallpaper_bit && (__sync_fetch_and_or(&wallpaper_scanned, wallpaper_bit) & wallpaper_bit)) return;
 
 	if (!PE_parse_boot_argn("sweetscan", names, sizeof(names))) {
 		strlcpy(names, "backboardd,SpringBoard", sizeof(names));
@@ -933,7 +948,7 @@ sweet_crash_strings(const char *name)
 		}
 		t = end + 1;
 	}
-	if (!found) {
+	if (!found && !wallpaper_bit) {
 		return;
 	}
 	buf = kalloc_data(65536, Z_WAITOK);
@@ -957,12 +972,12 @@ sweet_crash_strings(const char *name)
 		    (VM_PROT_READ | VM_PROT_WRITE) || info.user_tag < 1 || info.user_tag > 11) {
 			continue;
 		}
-		for (vm_map_offset_t off = 0; off < size && lines < 700; off += 65536) {
+		for (vm_map_offset_t off = 0; off < size && lines < 700 && scanned < (96ull << 20); off += 65536) {
 			size_t len = (size - off) < 65536 ? (size_t)(size - off) : 65536;
+			scanned += len;
 			if (copyin((user_addr_t)(base + off), buf, len) != 0) {
 				continue;
 			}
-			scanned += len;
 			size_t start = 0;
 			int spaces = 0;
 			for (size_t i = 0; i <= len; i++) {
@@ -973,11 +988,13 @@ sweet_crash_strings(const char *name)
 				}
 				size_t run = i - start;
 				if (run >= 24 && spaces >= 2) {
-					char text[160];
+					char text[384];
 					size_t m = run < sizeof(text) - 1 ? run : sizeof(text) - 1;
 					memcpy(text, buf + start, m);
 					text[m] = 0;
-					if (strncmp(text, last, sizeof(last) - 1) != 0) {
+					if ((!wallpaper_bit || sweet_text_contains(text, "Wallpaper") || sweet_text_contains(text, "wallpaper") ||
+					    sweet_text_contains(text, "Collections") || sweet_text_contains(text, "Exception") || sweet_text_contains(text, "keypath")) &&
+					    strncmp(text, last, sizeof(last) - 1) != 0) {
 						printf("STR %s\n", text);
 						lines++;
 						strlcpy(last, text, sizeof(last));
