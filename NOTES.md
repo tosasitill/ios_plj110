@@ -1,3 +1,31 @@
+## Mailbox 208 lockscreen failure: touch worker exit (2026-11-01)
+
+- User reports lockscreen cannot reach desktop. Input `/Users/tosasitill/2.txt`
+  preserved as `x9/out/mailbox208-ca5b8d5/lockscreen-runtime.raw.log`.
+- Runtime proves 208 installed/verified at 2.680 s and active at 3.525 s.
+  GPU DVFS firmware return 0, reports 858000/572000 kHz. Touch starts at
+  19.817 s; at 24.842 s continued-read header is `ff ff` for 50-byte payload,
+  then releases contact and prints `stream failed; stopped`. Source returns
+  from touch_run and terminates the worker. This explains absent subsequent
+  swipe input; underlying SPI/TCM failure cause is NOT established.
+- Power-key HID events continue at 45/46/60 s and display/GPU activity
+  continues. No SpringBoard/backboardd CRASH or GPU DeviceLost captured.
+  PosterBoard and other daemon aborts persist (previously observed shared
+  abort path); not established as the cause of this touch loss.
+- Added at most three fresh-header retries after message read errors, with
+  contact release, partial-frame discard and 20 ms scheduler waits. Only a
+  validated, correctly sized touch report resets the error budget. Controller
+  reset and invalid payload/status paths retain their existing stop behavior.
+  Checked local UniXNU/hackios reference trees: no matching S3910 TCM
+  continued-read implementation found. No speculative reset/MMIO changes.
+- Built with `python3 -I x9/build/build.py --name mailbox208-touch-recovery`:
+  exit 0, `x9/out/mailbox208-touch-recovery/boot.img` 9,420,800 bytes;
+  built-in checks only, no extra tests, local build (no CI run). Matching
+  plugin allowlist remains 208; mailbox does not need restaging.
+- NOT booted/device-verified. User should boot this candidate and swipe;
+  capture `validated touch stream resumed` or recovery-budget exhaustion
+  and subsequent HID contacts to assess recovery. No device writes/reboot.
+
 ## Mailbox 208 built and staged (2026-11-01)
 
 - User requested the latest mailbox build and adb installation. Built current

@@ -367,11 +367,23 @@ static void touch_run(void)
  if(request(0x27,NULL,0,response,&n)){printf("X9 TOUCH: rezero failed\n");return;}
  if(request(5,&report,1,response,&n)){printf("X9 TOUCH: enable report rejected\n");return;}
  printf("X9 TOUCH: LBP reporting enabled; waiting for actual contacts\n");
- unsigned reports=0;uint64_t heartbeat=0;clock_interval_to_deadline(10,NSEC_PER_SEC,&heartbeat);
+ unsigned reports=0,stream_errors=0;uint64_t heartbeat=0;clock_interval_to_deadline(10,NSEC_PER_SEC,&heartbeat);
  for(;;){
-  if(message(&code,response,&n)){release_all();printf("X9 TOUCH: stream failed; stopped\n");return;}
+  if(message(&code,response,&n)){
+   /* A failed continued read invalidates the whole frame. Release contacts
+    * and retry from a fresh TCM header, never reuse a partial payload.
+    * Only a fully validated touch report replenishes the retry budget;
+    * idle replies alone must not hide a persistently broken stream. */
+   release_all();
+   if(++stream_errors>3){printf("X9 TOUCH: stream failed; recovery budget exhausted; stopped\n");return;}
+   printf("X9 TOUCH: stream failed; contacts released; retry=%u/3\n",stream_errors);
+   uint64_t retry_deadline;clock_interval_to_deadline(20,NSEC_PER_MSEC,&retry_deadline);
+   (void)assert_wait_deadline(&downmask,THREAD_UNINT,retry_deadline);thread_block(THREAD_CONTINUE_NULL);
+   continue;
+  }
   if(code==0x11){
    if(n!=objects*5){release_all();printf("X9 TOUCH: invalid touch payload len=%u expected=%u\n",n,objects*5);return;}
+   if(stream_errors){printf("X9 TOUCH: validated touch stream resumed after %u errors\n",stream_errors);stream_errors=0;}
    unsigned mask=0;
    for(unsigned i=0;i<objects;i++){
     unsigned status=response[i*5],x=le16(response+i*5+1),y=le16(response+i*5+3);
