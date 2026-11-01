@@ -1,3 +1,41 @@
+## Flicker continuation: texture fusion and AIR sample operand contract (2026-11-01)
+
+- Switched from repeatedly reviewing barriers to texture lowering. Read
+  pan_nir_lower_tex.c va_try_lower_tex_dual/va_opt_var_tex, Kraid nir.rs
+  texture result reconstruction, and AIR intrinsic/sampler selector sources.
+- TEX_DUAL requires same opcode/source count, identical SSA for every
+  non-handle operand including coordinate/LOD, same dimension/result type,
+  array/compare/components. It combines handles, not unrelated coordinates.
+  Narrow7's uv-offset0, uv+offset0, uv-offset1, uv+offset1 are different SSA
+  coordinates, so no direct conflation of those taps through this match.
+  If prior optimization proves taps identical, combining them alone is not
+  wrong. No generated variant available to establish actual selected ops.
+- VAR_TEX fusion requires backend source directly be load_var[_buf], with
+  only one use,32-bit interpolation result, no explicit offset/LOD, center
+  or a verified centroid source. An arithmetic uv+offset result does not
+  pass that source-shape check. Thus do not assume every blur sample fuses
+  the interpolator or blame that fusion without actual compiled evidence.
+- Kraid TEX result reconstruction separates two destinations at whole-register
+  boundaries and picks packed-half lanes according to write masks. No
+  demonstrated simple half4/float4 or second-result lane mix found here.
+- Correct AIR operand interpretation: in original narrow7 call the first
+  i1 true after float2 coord is OFFSET PRESENT, with zero integer offset;
+  following i1 false is implicit LOD/Bias, value0 and min-lod0. It is NOT a
+  normalized-coordinate flag. Sampler normalization is separate descriptor
+  state. Intrinsic texture.rs binds both flags separately; sampler/select.rs
+  makes fragment Bias0 implicit and Level explicit. Pan lower_tex and Kraid
+  carry computed/explicit/zero/gradient LOD modes distinctly. No reversal seen.
+- Captured ordinary narrow-chain input textures have one mip. An implicit
+  LOD error cannot select another undefined mip within those single-level
+  image views; texture filtering/coords/helper execution still matter. The
+  variable blur10-mip feedback chain remains a separate case and cannot
+  alone explain all ordinary narrow-blur artifacts.
+- No new proven rendering fault or patch. No tests/build/device action;
+  mailbox212 unchanged. Further source-only global texture-fusion searches
+  are low yield without the actual faulty draw's specialized shader. Keep
+  unresolved full54-index inputs, EDR slot6 and HSR metadata/hardware-state
+  boundaries distinct; none has yet been established as photographed flicker.
+
 ## FB order continuation: fragment retirement and descriptor lifetime (2026-11-01)
 
 - Extended the prior same-pixel read/BLEND chain to render-pass retirement:
