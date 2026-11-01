@@ -1,0 +1,28 @@
+--- a/iokit/Kernel/arm/SweetKeyStore.cpp
++++ b/iokit/Kernel/arm/SweetKeyStore.cpp
+@@ -18,6 +18,7 @@
+ 
+ #if defined(SWEET)
+ #include <IOKit/IOService.h>
++#include <arm64/sweet_early.h>
+ #include <IOKit/IOUserClient.h>
+ #include <IOKit/IOKitKeys.h>
+ #include <IOKit/IOLib.h>
+@@ -255,10 +256,13 @@
+ 		break;
+ 	}
+ 
+-	char name[32];
+-	proc_selfname(name, sizeof(name));
+-	IOLog("SWEET AKS: %s sel %u arg0 %llu in %u/%u out %u/%u -> 0x%x\n", name, selector,
+-	    arg0, in_scalars, in_struct, out_scalars, out_struct, ret);
++	/* Selector 17 succeeds thousands of times during normal X9 UI work. */
++	if (!(sweet_early_is_x9() && selector == 17 && ret == kIOReturnSuccess)) {
++		char name[32];
++		proc_selfname(name, sizeof(name));
++		IOLog("SWEET AKS: %s sel %u arg0 %llu in %u/%u out %u/%u -> 0x%x\n", name, selector,
++		    arg0, in_scalars, in_struct, out_scalars, out_struct, ret);
++	}
+ 	return ret;
+ }
+ #endif /* SWEET */

@@ -1,5 +1,6 @@
 #include "loader.h"
 #include "hw.h"
+#include "x9_ram_ranges.h"
 
 _Static_assert(offsetof(struct payload, segs) == 0x2a8, "payload layout");
 _Static_assert(offsetof(struct boot_args, Video) == 40, "boot_args layout");
@@ -27,7 +28,8 @@ const char *payload_validate(const void *data, size_t size, uint64_t *adt_pa,
 	uint64_t table_end = sizeof(*p) + p->nsegs * sizeof(struct payload_seg);
 	if (table_end > size)
 		return "truncated segment table";
-	if (!((p->phys_base == KERNEL_RAM_LO &&
+	if (!((p->phys_base == X9_RAM_LO && p->mem_size == X9_RAM_SPAN) ||
+              (p->phys_base == KERNEL_RAM_LO &&
 	       p->mem_size <= KERNEL_RAM_HI - KERNEL_RAM_LO) ||
 	      (p->phys_base == KERNEL_LARGE_RAM_LO &&
 	       p->mem_size <= KERNEL_LARGE_RAM_HI - KERNEL_LARGE_RAM_LO)) ||

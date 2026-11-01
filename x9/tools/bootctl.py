@@ -13,7 +13,7 @@ import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from shared import load
-control = load('x9_shared_bootctl', 'x676c/tools/bootctl_block.py')
+control = load('x9_shared_bootctl', 'tools/bootctl_block.py')
 
 
 def prepare(blob, slot):

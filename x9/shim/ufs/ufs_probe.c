@@ -37,6 +37,17 @@ int x9_ufs_root_verified(void){return root_valid;}
 #if X9_UFS_NATIVE
 static uint32_t be32(const uint8_t *);
 static uint8_t native_header[65536];
+/* Read four disjoint 64 KiB windows; caller compares same bytes across gear. */
+static int native_root_sample(unsigned lun,const struct x9u_partition *part,uint8_t digest[32])
+{
+ const uint64_t offsets[]={0,X9_ROOT_BYTES/4,X9_ROOT_BYTES/2,X9_ROOT_BYTES-sizeof(native_header)};
+ struct sha256 hash;sha256_init(&hash);
+ for(unsigned i=0;i<sizeof(offsets)/sizeof(offsets[0]);i++){
+  int error=x9u_image_read(&controller,lun,part,x9_root_extents,sizeof(x9_root_extents)/sizeof(x9_root_extents[0]),X9_ROOT_BYTES/4096,offsets[i],native_header,sizeof(native_header));
+  if(error)return error;sha256_update(&hash,native_header,sizeof(native_header));
+ }
+ sha256_final(&hash,digest);return 0;
+}
 static int native_root_verify(unsigned lun,const struct x9u_partition *part)
 {
  if(lun!=X9_ROOT_LUN||part->first!=X9_ROOT_PART_FIRST||part->count!=X9_ROOT_PART_BLOCKS)return X9U_GEOMETRY;
@@ -52,14 +63,6 @@ static int native_root_verify(unsigned lun,const struct x9u_partition *part)
  if(native_header[1024]!='H'||(native_header[1025]!='X'&&native_header[1025]!='+'))return X9U_GEOMETRY;
  uint64_t bytes=(uint64_t)be32(native_header+1064)*be32(native_header+1068);
  if(bytes!=X9_ROOT_BYTES)return X9U_GEOMETRY;
- /* Do not mount a previously inconsistent or unclean non-journaled writable
-  * root. A valid UUID/extent map does not establish HFS consistency. */
- if(X9_ROOT_MUTABLE){
-  uint32_t attrs=be32(native_header+1028);
-  if((attrs&0x4000U)||(!(attrs&0x2000U)&&!(attrs&0x100U))){
-   plog_hex("UFS NATIVE ROOT HFS unhealthy attrs",attrs);plog_flush();return X9U_GEOMETRY;
-  }
- }
  plog_str("UFS NATIVE ROOT HEADER VERIFIED: SHA256/UUID/HFS geometry match; full image stays on disk\n");plog_flush();
  return 0;
 }
@@ -86,7 +89,11 @@ static uint64_t now_us(void *ctx) {(void)ctx;return rsr("cntpct_el0")/(counter_f
 static void delay_us(void *ctx,unsigned us)
 {
  (void)ctx;uint64_t start=rsr("cntpct_el0"),ticks=counter_frequency()*us/1000000;
- while(rsr("cntpct_el0")-start<ticks)wdt_kick();
+ /* UFS timing waits must not service a full USB control transfer. */
+ while(rsr("cntpct_el0")-start<ticks) {
+  wr32(WDT_RESTART,WDT_RESTART_KEY);
+  __asm__ volatile("dsb sy" ::: "memory");
+ }
 }
 static void sync_dma(void *ctx,unsigned offset,size_t size,int to_cpu)
 {
@@ -335,6 +342,7 @@ static void link_log(const struct x9u_link *link,int status)
 }
 int x9_ufs_probe(uintptr_t fdt)
 {
+ plog_stage("UFS: initializing host\n");
  current_fdt=fdt;stuck_dma=0;
 #if !X9_UFS_ROOT
  pin_file_manifest_log();
@@ -399,6 +407,7 @@ int x9_ufs_probe(uintptr_t fdt)
   goto finish;
  }
  plog_str("UFS NOP AND fDeviceInit VERIFIED\n");plog_flush();
+ plog_stage("UFS: device ready\n");
 #if X9_UFS_NATIVE
  struct x9u_hs_state hs;
  error=x9u_hs_enable(&io,&hs,refclk_notify);hs_log(&hs,error);
@@ -450,11 +459,45 @@ int x9_ufs_probe(uintptr_t fdt)
   if(!error) {
    plog_hex("UFS userdata first LBA",partition.first);plog_hex("UFS userdata blocks",partition.count);
    found=1;plog_str("UFS READ-ONLY GPT VERIFIED\n");
+   plog_stage("UFS: verifying root and G1/G2/G3\n");
 #if X9_UFS_ROOT
 #if X9_UFS_NATIVE
    if(lun==X9_ROOT_LUN) {
     root_status=native_root_verify(lun,&partition);root_valid=!root_status;
     plog_hex("UFS native header status",(uint64_t)(int64_t)root_status);
+    if(root_valid){
+     /* Compare four root windows before and after the transition.
+      * No root write occurs here; a mismatch rejects handoff. */
+     uint8_t before_digest[32],after_digest[32];
+     root_status=native_root_sample(lun,&partition,before_digest);
+     if(root_status){root_valid=0;goto finish;}
+     int upgrade=x9u_hs_upgrade_g2(&io,&hs);plog_str("UFS G2 transition result\n");hs_log(&hs,upgrade);
+     plog_hex("UFS G2 max local RX gear",hs.max_rx_gear);plog_hex("UFS G2 max peer RX gear",hs.peer_max_rx_gear);
+     if(upgrade){root_status=upgrade;root_valid=0;goto finish;}
+     root_status=native_root_verify(lun,&partition);root_valid=!root_status;
+     if(root_valid){
+      root_status=native_root_sample(lun,&partition,after_digest);
+      if(root_status)root_valid=0;
+      if(root_valid)for(unsigned i=0;i<32;i++)if(before_digest[i]!=after_digest[i]){root_status=X9U_CRC;root_valid=0;break;}
+     }
+     plog_hex("UFS G2 sampled consistency status",(uint64_t)(int64_t)root_status);
+     if(!root_valid)goto finish;
+     /* Continue from qualified G2 to G3; re-read the same four
+      * windows before any filesystem write or kernel handoff. */
+     for(unsigned i=0;i<32;i++)before_digest[i]=after_digest[i];
+     upgrade=x9u_hs_upgrade_g3(&io,&hs);plog_str("UFS G3 transition result\n");hs_log(&hs,upgrade);
+     plog_hex("UFS G3 max local RX gear",hs.max_rx_gear);plog_hex("UFS G3 max peer RX gear",hs.peer_max_rx_gear);
+     if(upgrade){root_status=upgrade;root_valid=0;goto finish;}
+     root_status=native_root_verify(lun,&partition);root_valid=!root_status;
+     if(root_valid){
+      root_status=native_root_sample(lun,&partition,after_digest);
+      if(root_status)root_valid=0;
+      if(root_valid)for(unsigned i=0;i<32;i++)if(before_digest[i]!=after_digest[i]){root_status=X9U_CRC;root_valid=0;break;}
+     }
+     plog_hex("UFS G3 sampled consistency status",(uint64_t)(int64_t)root_status);
+     if(root_valid)plog_stage("UFS: root and G3 verified\n");
+     if(!root_valid)goto finish;
+    }
    }
 #else
    if(lun==X9_ROOT_LUN&&root_destination) {

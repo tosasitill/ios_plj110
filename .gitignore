@@ -13,3 +13,7 @@ x9/out/
 work/**/build-*/
 work/**/*.log
 *.o
+# objects whose compile command is not reconstructed yet (see x9/kernel/README.md)
+!x9/kernel/prebuilt/*.o
+# machine-local build paths
+x9/build/local.json

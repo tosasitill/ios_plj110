@@ -174,11 +174,7 @@ static void poll_ep0(void)
     wr(EPISR,interrupt&(BIT(0)|BIT(16)));
     uint32_t csr=rr(EP0);
     if (interrupt&BIT(16)) { phase=IDLE;transferred=0; }
-    if (csr&SENTSTALL) {
-        wr(EP0,(csr&~(W1C|STALL))|SENTSTALL);
-        phase=IDLE;
-        csr=rr(EP0); /* Process a new SETUP using the post-ack state. */
-    }
+    if (csr&SENTSTALL) { wr(EP0,(csr&~W1C)|SENTSTALL);phase=IDLE; }
     if (csr&SETUP) {
         if (rr(0x108)!=8) {stall(SETUP);return;}
         setup();return;

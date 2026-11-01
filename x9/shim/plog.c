@@ -7,6 +7,9 @@
 
 static char logbuf[LOCAL_SIZE];
 static uint32_t pos;
+#define USB_RING_SIZE (128u * 1024u)
+static char usb_ring[USB_RING_SIZE];
+static uint32_t usb_total;
 static void (*screen_put)(char);
 static void (*screen_flush)(void);
 static unsigned screen_hidden;
@@ -46,7 +49,9 @@ static uint32_t con_pos;
 
 static void put(char c)
 {
-	if (screen_put && !screen_hidden) screen_put(c);
+ usb_ring[usb_total % USB_RING_SIZE]=c;
+ if (usb_total != UINT32_MAX) usb_total++;
+	/* Verbose bytes stay in RAM/USB/pstore; screen is stage-only. */
 	if (pos != LOCAL_SIZE - 1) {
 		logbuf[pos++] = c;
 		logbuf[pos] = 0;
@@ -84,7 +89,7 @@ static void put(char c)
 void plog_init(void)
 {
 	screen_put = 0; screen_flush = 0; screen_hidden = 0;
-	pos = 0;
+	pos = 0; usb_total = 0;
 	logbuf[0] = 0;
 #if X9_PSTORE_MIRROR
 	/* Discards whatever Android left in the console zone. That record is the
@@ -125,7 +130,7 @@ static uint32_t resume_zone(volatile uint32_t *h, uint32_t cap)
 void plog_resume(void)
 {
 	screen_put = 0; screen_flush = 0; screen_hidden = 0;
-	pos = 0;
+	pos = 0; usb_total = 0;
 	logbuf[0] = 0;
 #if X9_PSTORE_MIRROR
 	prz_pos = resume_zone(prz, PRZ_CAP);
@@ -149,16 +154,7 @@ void plog_resume(void)
 void plog_attach_console(void (*write)(char), void (*flush)(void))
 {
  screen_put = write; screen_flush = flush;
- /* Replay early human-readable lines, keeping CRC MMIO records in pstore. */
- for (unsigned i = 0; i < pos;) {
-  unsigned hide = diagnostic_line(logbuf + i);
-  do {
-   char c = logbuf[i++];
-   if (!hide && screen_put) screen_put(c);
-   if (c == '\n') break;
-  } while (i < pos);
- }
- if (screen_flush) screen_flush();
+
 }
 
 void plog_detach_console(void)
@@ -174,7 +170,7 @@ void plog_str(const char *s)
   newline |= *s == '\n';
   put(*s++);
  }
- if (newline && !screen_hidden && screen_flush) screen_flush();
+ (void)newline;
  screen_hidden = saved;
 }
 
@@ -187,11 +183,33 @@ void plog_hex(const char *label, uint64_t v)
 		put(d < 10 ? '0' + d : 'a' + d - 10);
 	}
 	put('\n');
-	if (screen_flush) screen_flush();
 }
 
 void plog_flush(void)
 {
 	if (screen_flush) screen_flush();
 	__asm__ volatile("dsb sy" ::: "memory");
+}
+
+uint64_t plog_position(void) { return usb_total; }
+uint32_t plog_copy(uint64_t *cursor,char *out,uint32_t max)
+{
+ if(!cursor||!out||*cursor>usb_total)return 0;
+ uint64_t earliest=usb_total>USB_RING_SIZE?usb_total-USB_RING_SIZE:0;
+ if(*cursor<earliest)*cursor=earliest;
+ uint32_t n=usb_total-(uint32_t)*cursor;if(n>max)n=max;
+ for(uint32_t i=0;i<n;i++)out[i]=usb_ring[(*cursor+i)%USB_RING_SIZE];
+ *cursor+=n;return n;
+}
+
+/* Explicit short stage messages are the only screen text. No replay/scroll
+ * of verbose logs; keep the same message in every normal log channel. */
+void plog_stage(const char *message)
+{
+ plog_str(message);
+ if (screen_put) {
+  const char *p = message;
+  while (*p) screen_put(*p++);
+  if (screen_flush) screen_flush();
+ }
 }

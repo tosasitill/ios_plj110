@@ -20,9 +20,11 @@ uint64_t counter_frequency(void)
 	return freq ? freq : CNTFRQ_FALLBACK;
 }
 
+extern void x9_shim_usb_poll(void);
 void wdt_kick(void)
 {
 	wr32(WDT_RESTART, WDT_RESTART_KEY);
+	x9_shim_usb_poll();
 	__asm__ volatile("dsb sy" ::: "memory");
 }
 

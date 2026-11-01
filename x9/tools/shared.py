@@ -22,5 +22,5 @@ def load(name, relative):
     return module
 
 
-adt = load('adt', 'x676c/tools/adt.py')
-payload = load('x9_shared_payload', 'x676c/tools/mkpayload.py')
+adt = load('adt', 'tools/adt.py')
+payload = load('x9_shared_payload', 'tools/mkpayload.py')

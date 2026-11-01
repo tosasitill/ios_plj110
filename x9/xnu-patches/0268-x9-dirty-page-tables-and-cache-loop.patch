@@ -1,0 +1,104 @@
+--- a/iokit/Kernel/arm/X9RenderPageTable.cpp
++++ b/iokit/Kernel/arm/X9RenderPageTable.cpp
+@@ -8,7 +8,7 @@
+ /* Same table/leaf descriptor contract as pan168 SweetX9CSF.cpp. */
+ constexpr uint64_t pa_mask=0x000000fffffff000ULL;
+ constexpr unsigned table_limit=1152; /* bounded sparse tables; backing <=18MiB */
+-struct Table { IOBufferMemoryDescriptor *memory; uint64_t *entries,pa; };
++struct Table { IOBufferMemoryDescriptor *memory; uint64_t *entries,pa; bool dirty; };
+ }
+ struct X9RenderPageTable { Table tables[table_limit]; unsigned count; bool attached; };
+ static int allocate_table(X9RenderPageTable *vm) {
+@@ -23,7 +23,7 @@
+   m->complete(kIODirectionInOut);m->release();return -1;
+  }
+  bzero(entries,16384);if(index==vm->count)vm->count++;
+- vm->tables[index]={m,entries,pa};return (int)index;
++ vm->tables[index]={m,entries,pa,true};return (int)index;
+ }
+ static uint64_t *leaf(X9RenderPageTable *vm,uint64_t va,bool create) {
+  unsigned table=0;
+@@ -33,11 +33,16 @@
+    if(!create)return nullptr;
+    int child=allocate_table(vm);if(child<0)return nullptr;
+    entry=vm->tables[child].pa|0x403ULL;
++   vm->tables[table].dirty=true;
+   }
+   if((entry&3)!=3)return nullptr;
+   unsigned child=0;while(child<vm->count&&vm->tables[child].pa!=(entry&pa_mask))child++;
+   if(child==vm->count)return nullptr;table=child;
+  }
++ /* Every caller which can write a leaf passes here, including rollback.
++  * Read-only preflight may conservatively dirty a page; steady submissions
++  * never call leaf(). CPU-only tables cannot be modified by imported aliases. */
++ vm->tables[table].dirty=true;
+  return &vm->tables[table].entries[(va>>12)&511];
+ }
+ /* Reclaim empty intermediate tables only while the address space is detached.
+@@ -50,7 +55,7 @@
+    unsigned child=0;while(child<vm->count&&vm->tables[child].pa!=(entry&pa_mask))child++;
+    if(child<vm->count&&vm->tables[child].memory&&prune(vm,child,level+1)) {
+     vm->tables[child].memory->complete(kIODirectionInOut);vm->tables[child].memory->release();
+-    bzero(&vm->tables[child],sizeof(Table));entry=0;
++    bzero(&vm->tables[child],sizeof(Table));entry=0;vm->tables[table].dirty=true;
+    }
+   }
+   if(entry)empty=false;
+@@ -111,8 +116,23 @@
+ }
+ uint64_t x9_render_vm_publish(X9RenderPageTable *vm) {
+  if(!vm||vm->attached)return 0;
+- for(unsigned i=0;i<vm->count;i++)if(vm->tables[i].memory)clean_dcache64(vm->tables[i].pa,4096,1);
+- __asm__ volatile("dsb sy":::"memory");vm->attached=true;return vm->tables[0].pa;
++ /* No cache-attribute/coherency assumption: skip only CPU-private page
++  * tables which have not changed since their last completed clean. Parent
++  * links, leaf writes, removals and rollbacks all retain dirty tracking.
++  * Translation installation/invalidation and GPU detach are unchanged. */
++ uint64_t cleaned=0,unchanged=0;
++ for(unsigned i=0;i<vm->count;i++)if(vm->tables[i].memory) {
++  if(vm->tables[i].dirty){clean_dcache64(vm->tables[i].pa,4096,1);cleaned+=4096;}
++  else unchanged+=4096;
++ }
++ __asm__ volatile("dsb sy":::"memory");
++ for(unsigned i=0;i<vm->count;i++)if(vm->tables[i].memory)vm->tables[i].dirty=false;
++ static uint64_t calls=0,clean_total=0,skip_total=0;
++ clean_total+=cleaned;skip_total+=unchanged;
++ if(++calls%512==0) {
++  IOLog("X9 RENDER table-cache: calls=%llu cleaned_avg=%llu unchanged_skip_avg=%llu;CPU-private tables only,TLB/AS protocol unchanged\n",calls,clean_total/calls,skip_total/calls);
++ }
++ vm->attached=true;return vm->tables[0].pa;
+ }
+ void x9_render_vm_mark_detached(X9RenderPageTable *vm) {
+  /* Caller must have confirmed GPU stop, flush and AS detach, not just a fence. */
+--- a/iokit/Kernel/arm/X9RenderMemory.cpp
++++ b/iokit/Kernel/arm/X9RenderMemory.cpp
+@@ -59,13 +59,22 @@
+  }
+  uint64_t begin=address+request->offset,end=begin+request->bytes;
+  __asm__ volatile("dsb sy":::"memory");
+- for(uint64_t at=begin;at<end;at+=line) {
+-  if(request->operation==(X9RenderClean|X9RenderInvalidate))
+-   __asm__ volatile("dc civac, %0"::"r"(at):"memory");
+-  else if(request->operation==X9RenderClean)
+-   __asm__ volatile("dc cvac, %0"::"r"(at):"memory");
+-  else __asm__ volatile("dc ivac, %0"::"r"(at):"memory");
+- }
++ /* Choose the cache opcode once, then issue four independent lines per
++  * loop. Both paths cover exactly [begin,end); no prefetch or cache op may
++  * cross an allocation boundary. Keep DSB SY on both sides for all callers. */
++#define X9_CACHE_LINES(instruction) do { \
++ uint64_t at=begin; \
++ for(;end-at>=4*line;at+=4*line) { \
++  __asm__ volatile(instruction ", %0\n\t" instruction ", %1\n\t" \
++                   instruction ", %2\n\t" instruction ", %3" \
++   ::"r"(at),"r"(at+line),"r"(at+2*line),"r"(at+3*line):"memory"); \
++ } \
++ for(;at<end;at+=line)__asm__ volatile(instruction ", %0"::"r"(at):"memory"); \
++} while(0)
++ if(request->operation==(X9RenderClean|X9RenderInvalidate)) { X9_CACHE_LINES("dc civac"); }
++ else if(request->operation==X9RenderClean) { X9_CACHE_LINES("dc cvac"); }
++ else { X9_CACHE_LINES("dc ivac"); }
++#undef X9_CACHE_LINES
+  __asm__ volatile("dsb sy":::"memory");
+  // A partial upload cannot discharge the allocation's initial zero-fill.
+  if((request->operation&X9RenderClean)&&!request->offset&&request->bytes==r->bytes)

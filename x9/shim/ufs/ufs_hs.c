@@ -112,3 +112,70 @@ int x9u_hs_enable(const struct x9u_io *io,struct x9u_hs_state *s,
     s->after[3]!=s->tx_lanes||s->after[4]!=s->rx_lanes||s->after[5]!=2)return X9U_RESPONSE;
  s->stage=10;return 0;
 }
+
+/* Run only after the proven G1 path and an initial stable root read. */
+int x9u_hs_upgrade_g2(const struct x9u_io *io,struct x9u_hs_state *s)
+{
+ if(!s)return X9U_ARGUMENT;
+ int e=ready(io);if(e)return e;
+ uint32_t cur[6];if((e=x9u_hs_read(io,s,cur)))return e;
+ for(unsigned n=0;n<6;n++)s->after[n]=cur[n];
+ /* Never lower an inherited faster link or alter an unexpected mode. */
+ if(!x9u_hs_valid(cur))return X9U_UNSUPPORTED;
+ if(cur[1]>=2 && cur[2]>=2){s->stage=20;return 0;}
+ if(cur[0]!=0x44||cur[1]!=1||cur[2]!=1||cur[3]!=2||cur[4]!=2||cur[5]!=2){s->stage=21;return 0;}
+ s->stage=22;
+ if((e=get(io,s,1,0x1587,&s->max_rx_gear))||
+    (e=get(io,s,3,0x1587,&s->peer_max_rx_gear)))return e;
+ if(s->max_rx_gear<2||s->peer_max_rx_gear<2){s->stage=21;return 0;}
+ if(rd(io,0x20)&UPMS)return X9U_BUSY;
+ /* Linux ufshcd: NO_ADAPT for negotiated gear below G4. */
+ s->stage=23;
+ if((e=set(io,s,0x15d4,3))||(e=set(io,s,0x1583,2))||
+    (e=set(io,s,0x1568,2)))return e;
+ if(rd(io,0x20)&UPMS)return X9U_BUSY;
+ s->stage=24;s->changed=1;
+ if((e=set(io,s,0x1571,0x44)))return e;
+ s->stage=25;
+ if((e=wait(io,0x20,UPMS,UPMS,500000)))return e;
+ s->upmcrs=(rd(io,0x30)>>8)&7;wr(io,0x20,UPMS);
+ if(s->upmcrs!=1)return X9U_RESPONSE;
+ s->stage=26;
+ if((e=x9u_hs_read(io,s,s->after)))return e;
+ if(s->after[0]!=cur[0]||s->after[1]!=2||s->after[2]!=2||
+    s->after[3]!=cur[3]||s->after[4]!=cur[4]||s->after[5]!=cur[5])return X9U_RESPONSE;
+ s->stage=20;return 0;
+}
+
+/* UniPro/Linux use NO_ADAPT for G3 (below G4).
+ * Clock/voltage state is inherited from LK: do not guess clock/power MMIO. */
+int x9u_hs_upgrade_g3(const struct x9u_io *io,struct x9u_hs_state *s)
+{
+ if(!s)return X9U_ARGUMENT;
+ int e=ready(io);if(e)return e;
+ uint32_t cur[6];if((e=x9u_hs_read(io,s,cur)))return e;
+ for(unsigned n=0;n<6;n++)s->after[n]=cur[n];
+ if(!x9u_hs_valid(cur))return X9U_UNSUPPORTED;
+ if(cur[1]>=3 && cur[2]>=3){s->stage=30;return 0;}
+ if(cur[0]!=0x44||cur[1]!=2||cur[2]!=2||cur[3]!=2||cur[4]!=2||cur[5]!=2){s->stage=31;return 0;}
+ s->stage=32;
+ if((e=get(io,s,1,0x1587,&s->max_rx_gear))||
+    (e=get(io,s,3,0x1587,&s->peer_max_rx_gear)))return e;
+ if(s->max_rx_gear<3||s->peer_max_rx_gear<3){s->stage=31;return 0;}
+ if(rd(io,0x20)&UPMS)return X9U_BUSY;
+ s->stage=33;
+ if((e=set(io,s,0x15d4,3))||(e=set(io,s,0x1583,3))||
+    (e=set(io,s,0x1568,3)))return e;
+ if(rd(io,0x20)&UPMS)return X9U_BUSY;
+ s->stage=34;s->changed=1;
+ if((e=set(io,s,0x1571,0x44)))return e;
+ s->stage=35;
+ if((e=wait(io,0x20,UPMS,UPMS,500000)))return e;
+ s->upmcrs=(rd(io,0x30)>>8)&7;wr(io,0x20,UPMS);
+ if(s->upmcrs!=1)return X9U_RESPONSE;
+ s->stage=36;
+ if((e=x9u_hs_read(io,s,s->after)))return e;
+ if(s->after[0]!=cur[0]||s->after[1]!=3||s->after[2]!=3||
+    s->after[3]!=cur[3]||s->after[4]!=cur[4]||s->after[5]!=cur[5])return X9U_RESPONSE;
+ s->stage=30;return 0;
+}

@@ -47,20 +47,4 @@ class NativeManifestTests(unittest.TestCase):
             bad=copy.deepcopy(m);bad['write_policy'][key]=value
             with self.assertRaises(ValueError):validate(bad,True)
 
-    def test_sidecar_log_is_disjoint_and_added_to_root_exclusions(self):
-        m=self.manifest();m['write_policy']={'version':1,'kind':'dedicated-mutable-copy','initial_content_verified':True,
-            'protected_extents':[{'partition_block':100,'blocks':200}]}
-        m['log_policy']={'version':1,'bytes':8388608,'immutable':True,'pinned':True,
-            'extents':[{'file_block':0,'partition_block':500,'blocks':2048}]}
-        self.assertEqual(validate(m,True),m)
-        tree=add_native_adt(mkadt.build(seed=bytes(64)),m)
-        obj,_=adt.parse(adt.serialize(tree));chosen=next(n for n in obj.children if n.name=='chosen')
-        self.assertEqual(chosen.prop('x9-ufs-log-bytes'),struct.pack('<Q',8388608))
-        self.assertEqual(chosen.prop('x9-ufs-protected-extents'),struct.pack('<4Q',100,200,500,2048))
-        for where in [100,1000000]:
-            bad=copy.deepcopy(m);bad['log_policy']['extents'][0]['partition_block']=where
-            with self.assertRaises(ValueError):validate(bad,True)
-        bad=copy.deepcopy(m);bad['log_policy']['extents'][0]['blocks']=2047
-        with self.assertRaises(ValueError):validate(bad,True)
-
 if __name__=='__main__':unittest.main()

@@ -56,11 +56,18 @@ def main():
     ap.add_argument('--pstore-mirror', action='store_true',
                     help='also mirror the shim log into the X9 ramoops console zone')
     a = ap.parse_args()
+    if a.ram_window == 'segmented8g':
+        if a.stub or a.ufs_root_manifest or a.ramdisk or a.sparse_ramdisk:
+            ap.error('segmented8g requires a real kernel and no RAM root')
+        if 'x9_ram_8g=1' not in a.boot_args.split():
+            ap.error('segmented8g requires x9_ram_8g=1')
+        if b'X9 RAM: missing live map' not in a.kernel.read_bytes():
+            ap.error('segmented8g requires the kernel RAM allocator patch')
     if a.ufs_native_manifest and a.ufs_root_manifest:
         ap.error('select either native UFS or RAM md0 handoff')
     root_manifest=a.ufs_native_manifest or a.ufs_root_manifest
     if root_manifest:
-        if a.stub or a.usb_receiver or a.diag_only or a.ramdisk or a.sparse_ramdisk or a.ram_window!='legacy512':
+        if a.stub or a.usb_receiver or a.diag_only or a.ramdisk or a.sparse_ramdisk or a.ram_window not in ('legacy512','segmented8g'):
             ap.error('--ufs-root-manifest needs real kernel, legacy512, and no embedded root/USB/diag')
         from ufs_root_manifest import load
         root_info=load(root_manifest,native=bool(a.ufs_native_manifest))
@@ -118,6 +125,8 @@ def main():
                    'device_written': False, 'boot_control_prepared': bctl is not None,
                    'ram_window': a.ram_window, 'dram_base': hex(mkadt.RAM_WINDOWS[a.ram_window][0]),
                    'dram_size': hex(mkadt.RAM_WINDOWS[a.ram_window][1]),
+                   'dram_usable_source': 'live LK FDT -> chosen/x9-ram-map' if a.ram_window=='segmented8g' else 'fixed window',
+                   'dram_usable_upper_bound_bytes': 9161670656 if a.ram_window=='segmented8g' else mkadt.RAM_WINDOWS[a.ram_window][1],
                    'boot_partition_size': a.boot_partition_size,
                    'max_image_size': a.max_image_size,
                    'ramdisk_transport': 'native-ufs-extent-root' if a.ufs_native_manifest else 'ufs-plaintext-to-ram' if a.ufs_root_manifest else info.get('ramdisk_transport', 'dense-v1'),

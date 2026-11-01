@@ -13,3 +13,10 @@ void plog_flush(void);
 
 void plog_attach_console(void (*write)(char), void (*flush)(void));
 void plog_detach_console(void);
+
+/* Read local shim output without modifying the producer cursor. */
+uint64_t plog_position(void);
+uint32_t plog_copy(uint64_t *,char *,uint32_t);
+
+/* Short screen milestone, also recorded in the complete log. */
+void plog_stage(const char *);

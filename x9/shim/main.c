@@ -19,9 +19,11 @@ int x9_ufs_probe(uintptr_t);
 int x9_ufs_dma_pending(void);
 #endif
 
+extern void x9_shim_usb_start(void);
 void shim_main(uint64_t dtb, uint64_t boot_el)
 {
 	plog_init();
+	x9_shim_usb_start();
 	plog_str("x9 shim: direct XNU loader\n");
 	plog_hex("boot EL", boot_el);
 	plog_hex("load", (uintptr_t)_head);
@@ -38,7 +40,8 @@ void shim_main(uint64_t dtb, uint64_t boot_el)
 	if (display_lk_console_init((uintptr_t)dtb)) {
 		fbconsole_init();
 		plog_attach_console(fbconsole_putc, fbconsole_flush);
-		plog_str("pan51: LK console active; proceeding to XNU checkpoint80\n");
+		plog_str("pan131: S3910 LBP bringup; no-auto-dim; live RAM; reset OFF\n");
+		plog_stage("X9: starting loader\n");
 	}
 
 #if X9_UFS_PROBE && !X9_UFS_ROOT
@@ -67,6 +70,7 @@ void shim_main(uint64_t dtb, uint64_t boot_el)
 				 (size_t)(_payload_end - _payload_start));
 
 #endif
+	plog_stage("X9: loader stopped; details in USB log\n");
 	plog_str("loader: ");
 	plog_str(why);
 #if X9_USB_RECEIVER || X9_UFS_ROOT
@@ -85,7 +89,7 @@ void shim_main(uint64_t dtb, uint64_t boot_el)
 
 void shim_exception(uint64_t esr, uint64_t elr, uint64_t far)
 {
-	plog_str("x9 shim EXCEPTION\n");
+	plog_stage("x9 shim EXCEPTION\n");
 	plog_hex("esr", esr);
 	plog_hex("elr", elr);
 	plog_hex("far", far);
@@ -97,7 +101,7 @@ void shim_exception(uint64_t esr, uint64_t elr, uint64_t far)
 /* Reached only if the EL2 setup in start.S traps before the ERET to EL1. */
 void shim_el2_exception(uint64_t esr, uint64_t elr, uint64_t far)
 {
-	plog_str("x9 shim EL2 EXCEPTION\n");
+	plog_stage("x9 shim EL2 EXCEPTION\n");
 	plog_hex("esr", esr);
 	plog_hex("elr", elr);
 	plog_hex("far", far);

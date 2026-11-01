@@ -1,0 +1,48 @@
+--- a/iokit/Kernel/arm/SweetX9CSF.cpp
++++ b/iokit/Kernel/arm/SweetX9CSF.cpp
+@@ -201,6 +201,15 @@
+  uint64_t until;clock_interval_to_deadline(1,NSEC_PER_MSEC,&until);
+  (void)assert_wait_deadline(&sleep_cookie,THREAD_UNINT,until);thread_block(THREAD_CONTINUE_NULL);
+ }
++/* Short render cache commands frequently complete below 1 ms. Sleep in
++ * 100 us quanta for the first 2 ms, then return to the original 1 ms backoff.
++ * This changes observation latency only: callers retain absolute deadlines,
++ * completion/error checks and all cache/AS ordering. No busy-spin loop. */
++static void render_cache_wait(unsigned *polls) {
++ if((*polls)++>=20){sleep_ms();return;}
++ uint64_t until;clock_interval_to_deadline(100,NSEC_PER_USEC,&until);
++ (void)assert_wait_deadline(&sleep_cookie,THREAD_UNINT,until);thread_block(THREAD_CONTINUE_NULL);
++}
+ static uint64_t deadline_ms(unsigned ms) {
+  uint64_t until;clock_interval_to_deadline(ms,NSEC_PER_MSEC,&until);return until;
+ }
+@@ -366,12 +375,12 @@
+ static bool flush_gpu(vm_offset_t gpu) {
+  if(gr(gpu,0x20)&(1u<<17))return false; /* Do not accept an old completion. */
+  gw(gpu,0x30,0x23304u); /* FLUSH_CACHES: L2+LSC clean/invalidate, others invalidate */
+- uint64_t end=deadline_ms(1000);
++ uint64_t end=deadline_ms(1000);unsigned cache_polls=0;
+  do {
+   uint32_t irq=gr(gpu,0x20);
+   if(irq==0xffffffffu)return false;
+   if(irq&(1u<<17)){gw(gpu,0x24,1u<<17);return true;}
+-  sleep_ms();
++  render_cache_wait(&cache_polls);
+  }while(mach_absolute_time()<end);
+  return false;
+ }
+--- a/iokit/Kernel/arm/SweetX9RenderEngine.inc
++++ b/iokit/Kernel/arm/SweetX9RenderEngine.inc
+@@ -46,10 +46,10 @@
+  /* Stock v14 PA-range FULL operation on a held private GPU page. */
+  uint64_t old0=gr64(gpu,0xd0),old1=gr64(gpu,0xd8);
+  gw64(gpu,0xd0,pa);gw64(gpu,0xd8,pa+gpu_page-1);gw(gpu,0x30,0x7308u);
+- bool done=false;uint64_t end=deadline_ms(1000);
++ bool done=false;uint64_t end=deadline_ms(1000);unsigned cache_polls=0;
+  do {
+   if(!no_faults(gpu))break;
+-  if(gr(gpu,0x20)&(1u<<20)){done=true;break;}sleep_ms();
++  if(gr(gpu,0x20)&(1u<<20)){done=true;break;}render_cache_wait(&cache_polls);
+  }while(mach_absolute_time()<end);
+  if(!done)return false;
+  gw(gpu,0x24,1u<<20);gw64(gpu,0xd0,old0);gw64(gpu,0xd8,old1);return true;

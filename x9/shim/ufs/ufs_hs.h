@@ -15,3 +15,9 @@ int x9u_hs_valid(const uint32_t state[6]);
  */
 int x9u_hs_enable(const struct x9u_io *,struct x9u_hs_state *,
                   int (*refclk)(void *,unsigned,unsigned));
+
+/* Optional verified G1 -> G2 transition; fail closed on uncertainty. */
+int x9u_hs_upgrade_g2(const struct x9u_io *,struct x9u_hs_state *);
+
+/* G3 NO_ADAPT and strict readback. */
+int x9u_hs_upgrade_g3(const struct x9u_io *,struct x9u_hs_state *);

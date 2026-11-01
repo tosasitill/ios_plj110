@@ -1,0 +1,43 @@
+--- a/bsd/kern/kern_memorystatus.c
++++ b/bsd/kern/kern_memorystatus.c
+@@ -186,9 +186,21 @@
+    }                                                                    \
+ MACRO_END
+ 
++static int
++x9_inactive_memory_limit(proc_t p, int limit)
++{
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++ if (sweet_early_is_x9() && !strcmp(p->p_name, "mediaserverd") && limit > 0 && limit < 512) {
++  printf("X9 JETSAM: mediaserverd inactive %d -> 512 MiB\n", limit);
++  return 512;
++ }
++#endif
++ return limit;
++}
++
+ #define SET_INACTIVE_LIMITS_LOCKED(p, limit, is_fatal)                  \
+ MACRO_BEGIN                                                             \
+-(p)->p_memstat_memlimit_inactive = (limit);                             \
++(p)->p_memstat_memlimit_inactive = x9_inactive_memory_limit((p), (limit));                             \
+    if (is_fatal) {                                                      \
+ 	   (p)->p_memstat_state |= P_MEMSTAT_MEMLIMIT_INACTIVE_FATAL;   \
+    } else {                                                             \
+@@ -7697,16 +7709,7 @@
+ 	 * Store the inactive limit variants in the proc.
+ 	 */
+ 	SET_INACTIVE_LIMITS_LOCKED(p, p_entry->memlimit_inactive, p_entry->memlimit_inactive_attr);
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
+-	/* X9 Metal/PanVK currently needs ~300 MiB during mediaserverd startup.
+-	 * Keep a finite inactive limit; preserve fatal attributes and all other
+-	 * processes. Active/inactive transitions still use standard jetsam logic. */
+-	if (sweet_early_is_x9() && !strcmp(p->p_name, "mediaserverd") &&
+-	    p->p_memstat_memlimit_inactive > 0 && p->p_memstat_memlimit_inactive < 512) {
+-		SET_INACTIVE_LIMITS_LOCKED(p, 512, p_entry->memlimit_inactive_attr);
+-		printf("X9 JETSAM: mediaserverd inactive limit raised to 512 MiB\n");
+-	}
+-#endif
++
+ 
+ 	/*
+ 	 * Enforce appropriate limit variant by updating the cached values
