@@ -1,3 +1,44 @@
+## Static continuation: Kraid RA/flow and shadow-copy execution (2026-11-01)
+
+- Kraid ra.rs::RegAlignConstraint::for_op_dst reserves a full register even
+  for a sub-word staging result, with even-register alignment for >32-bit
+  staging results. The allocation request carries this widened ra_bytes;
+  later rewrite keeps staging destination lanes at ssa_bytes. Hardware
+  last_use is assigned only to killed32-bit SSA sources, not packed halves.
+  No simple half-result sharing/last-use omission demonstrated by this read.
+- opt_flow::merge_waits can combine Resource with another wait in one direction;
+  encode_v9::encode_flow explicitly promotes that combination to full Wait.
+  Barrier also encodes full Wait; ZS plus regular slots becomes Wait0126.
+  Thus combined flow bits are not silently truncated to one slot. dce_flow
+  removes only Resource/ZS/Barrier waits already satisfied in CFG state;
+  generic message slots0..2 are not removed there. Actual generated program
+  and v14 execution still unobserved; this is not a compiler correctness proof.
+- Followed original constant values through frontend snapshot/indexed+named
+  extraction -> Rust bytes.to_vec and owned FunctionConstantValues. GraphicsKey
+  and DrawKey::is include SpecializationKey, topology, pass and strides.
+  No missing specialization in this cache key found. Exact FC4/FC5 etc values
+  of the live fixed_frag variants remain unknown; shader name alone insufficient.
+- Extended the reachable variable-mip shadow investigation past CPU version
+  invalidation: ShadowCopy::uses declares truth read + shadow write; record
+  emits vkCmdCopyImage with GENERAL layouts and planned per-mip regions.
+  Inline kept instances: record_kept ends prior render pass, records
+  Barrier::everything, held_shadow_copies records copies outside render pass,
+  and inserts another Barrier::everything after the copy run before resume.
+  First-instance copies go through EncoderCore::shadow_copies/shadow_command;
+  ordered encoders use command_named tracking, unordered use ShadowRun guards.
+  Therefore a simple absent pre/post barrier at this inline copy site is not
+  supported by source. Does not prove PanVK executes the barriers correctly.
+- Concrete performance-relevant behavior: Barrier::everything is ALL_COMMANDS
+  MEMORY_WRITE -> ALL_COMMANDS MEMORY_READ|MEMORY_WRITE; repeated feedback
+  instances can require render-pass breaks, copies and global memory barriers.
+  This is a reachable cost mechanism, NOT a measured explanation of low FPS,
+  nor permission to remove required synchronization. Need actual instance/
+  copy count and timings before an optimization claim.
+- No tests, builds, device changes or speculative rendering patch. Mailbox212
+  unchanged. Root cause unresolved. Next useful static boundary is PanVK's
+  global-memory-barrier cache flushing and fragment/tiler ordering for the
+  confirmed copy -> sample route, rather than rechecking CPU shadow invalidation.
+
 ## Static continuation: v14 interpolation, uploads and message waits (2026-11-01)
 
 - Read Kraid encode_v9.rs OpLdVarBuf -> isa-v9-v14.xml v14 LD_VAR_BUF and
