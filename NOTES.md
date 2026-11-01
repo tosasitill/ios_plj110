@@ -1,5 +1,7 @@
 ## Active:216 HSR rollback built, awaiting mailbox update/manual boot; visual fix unproven (2026-11-01)
 
+- Implementation/build/216 allowlist commit:930123a. Runtime-evidence handoff
+  commit:8857ca6. No CI run; the successful build was local.
 - Normal build SUCCEEDED exit0:
   python3 -I x9/build/build.py all --revision 216 --name mailbox216-hsr-rollback
   x9/out/mailbox216-hsr-rollback/boot.img (build reports9420800 bytes).
