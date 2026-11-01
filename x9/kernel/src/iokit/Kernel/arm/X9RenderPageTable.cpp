@@ -3,7 +3,7 @@
 #include <IOKit/IOLib.h>
 #include <kern/task.h>
 #include <libkern/libkern.h>
-extern "C" void clean_dcache64(uint64_t,unsigned,int);
+#include "X9GPUCache.h"
 namespace {
 /* Same table/leaf descriptor contract as pan168 SweetX9CSF.cpp. */
 constexpr uint64_t pa_mask=0x000000fffffff000ULL;
@@ -122,7 +122,7 @@ uint64_t x9_render_vm_publish(X9RenderPageTable *vm) {
   * Translation installation/invalidation and GPU detach are unchanged. */
  uint64_t cleaned=0,unchanged=0;
  for(unsigned i=0;i<vm->count;i++)if(vm->tables[i].memory) {
-  if(vm->tables[i].dirty){clean_dcache64(vm->tables[i].pa,4096,1);cleaned+=4096;}
+  if(vm->tables[i].dirty){x9_gpu_clean(vm->tables[i].pa,4096,1);cleaned+=4096;}
   else unchanged+=4096;
  }
  __asm__ volatile("dsb sy":::"memory");

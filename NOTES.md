@@ -1,3 +1,44 @@
+## Blur flicker / frame rate: explicit GPU cache publication (2026-11-01)
+
+- User prioritizes polygon flicker in blurred UI and low frame rate; wallpaper
+  still visually missing and should not distract this investigation. Latest
+  /Users/tosasitill/2.txt preserved as
+  `.local/analysis-render-cache/before.raw.log` (48.373 s).
+- Wallpaper alias ready at 0.859 s; no PosterBoard CRASH captured this time.
+  User observation remains missing wallpaper; do not call visible wallpaper
+  fixed. No further wallpaper changes in this candidate.
+- GPU still submits without DeviceLost in captured interval. backboardd grows
+  to 866 resources / 591 MiB (209 imports / 98 MiB) at 43.310 s. Late submit
+  cache maintenance ~4.5 ms pre + 2.25 ms post; wait ~6–10 ms. All mapped
+  imports still scanned each submit. _blendWithAlphaMaskB0 lookup refusal
+  persists; direct cause of flicker not proven.
+- Found driver calls to clean_dcache64 for command bodies, queue pages,
+  resident firmware/data and dirty GPU page tables. Local frozen dependency
+  source caches_asm.s branches clean_dcache64 to clean_dcache; coherent
+  caches.c implementation is DSB-only. No new binary disassembly/secondary
+  artifact checks performed (user preference). Thus do not assert measured
+  stale GPU reads or prove that frozen object exactly matches this source.
+- Added X9GPUCache.h: explicit DC CVAC + DSB SY on held wired driver memory,
+  <=4 KiB runs with preemption disabled through closing DSB, physical input
+  translated via phystokv. Replaces those X9 CSF and render page-table calls;
+  does not change global cache functions or imported-resource policy.
+- GPU PA-range FULL sync now combines actual contiguous physical segments of
+  each private 64 KiB storage allocation instead of 16 separate 4 KiB commands.
+  Bounds/PA width/segment length validation retained; never covers holes or
+  other allocations. Fence sync remains a single held 4 KiB page. Every
+  completion/fault/timeout check and GPU flush/AS teardown remains.
+- Build: `python3 -I x9/build/build.py --name mailbox208-gpu-cache-publish`,
+  exit 0; candidate `x9/out/mailbox208-gpu-cache-publish/boot.img`, 9,420,800
+  bytes, build.log in same directory. Local only, no CI/additional tests.
+  Existing 208 plugins unchanged, no mailbox restage needed. No device write
+  or reboot. This is a cache correctness/overhead candidate, NOT a verified
+  fix for visual flicker or achieved frame rate.
+- Next: user reproduces the same blurred scene; compare flicker and storage,
+  start/wait/cache timings, ensuring no command/fence regressions. If flicker
+  persists, investigate render-pass hazards/temporary texture lifetimes and
+  WC attribute drift with exact runtime evidence. Larger remaining cache cost
+  requires sound resource scoping, not blindly dropping import maintenance.
+
 ## Wallpaper fallback ENOENT confirmed and candidate fixed (2026-11-01)
 
 - New user `/Users/tosasitill/2.txt` is the wallpaper-wc run (56.601 s),

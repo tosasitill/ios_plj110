@@ -21,7 +21,7 @@ extern "C" int sweet_early_is_x9(void);
 extern "C" void sweet_x9_csf_prepare(void);
 extern "C" int sweet_x9_csf_boot(vm_offset_t gpu);
 extern "C" vm_offset_t ml_io_map(vm_offset_t,vm_size_t);
-extern "C" void clean_dcache64(uint64_t,unsigned,int);
+#include "X9GPUCache.h"
 
 namespace {
 static X9MetalJob *active_metal_job;
@@ -316,12 +316,12 @@ static bool sync_to_device(Plan &p,unsigned pa_bits) {
   for(unsigned off=0;off<r.end-r.begin;off+=gpu_page) {
    uint64_t pa;
    if(!physical(r.memory,off,&pa)||pa>limit-gpu_page)return false;
-   clean_dcache64(pa,gpu_page,1);
+   x9_gpu_clean(pa,gpu_page,1);
   }
  }
  for(unsigned i=0;i<p.table_count;i++) {
   if(p.tables[i].pa>limit-gpu_page)return false;
-  clean_dcache64(p.tables[i].pa,gpu_page,1);
+  x9_gpu_clean(p.tables[i].pa,gpu_page,1);
  }
  __asm__ volatile("dsb sy" ::: "memory");return true;
 }
@@ -427,7 +427,7 @@ static bool ping(Plan &p,vm_offset_t gpu,vm_offset_t doorbell,uint32_t in,uint32
   Region &r=p.regions[i];
   if(r.memory&&in>=r.begin&&(uint64_t)in+64<=r.end) {
    uint64_t pa;if(!physical(r.memory,(in-r.begin)&~4095u,&pa))return false;
-   clean_dcache64(pa,gpu_page,1);break;
+   x9_gpu_clean(pa,gpu_page,1);break;
   }
  }
  __asm__ volatile("dsb sy" ::: "memory");

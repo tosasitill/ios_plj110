@@ -17,7 +17,7 @@ static bool desktop_borrow(QueueProbe &q,IOMemoryDescriptor *m,uint32_t gpu_va,I
   if(!physical(buffer,off,&pa)||pa>=(1ULL<<40)||
      (pa<0xfc910000ULL+5120u*2760u&&pa+gpu_page>0xfc910000ULL))return false;
   if(!map_page(q.memory,gpu_va+off,pa,direction==kIODirectionOut?0xc0000001u:0xc0000003u))return false;
-  clean_dcache64(pa,gpu_page,1);
+  x9_gpu_clean(pa,gpu_page,1);
  }
  __asm__ volatile("dsb sy" ::: "memory");return true;
 }

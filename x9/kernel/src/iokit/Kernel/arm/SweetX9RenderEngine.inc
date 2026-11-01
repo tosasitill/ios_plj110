@@ -38,14 +38,15 @@ static RenderKernelGroup *render_group(X9RenderContext *c,uint32_t id) {
 static uint64_t render_va(const RenderKernelGroup *g,unsigned stream) {
  return 0x10000000ULL+(uint64_t)g->slot*0x100000+stream*render_storage_bytes;
 }
-static bool render_page_sync(X9RenderResource &r,uint64_t off) {
+static bool render_span_sync(X9RenderResource &r,uint64_t off,uint64_t bytes) {
  vm_offset_t gpu=resident->gpu;
- if((off&(gpu_page-1))||off>r.bytes||gpu_page>r.bytes-off)return false;
+ if(!bytes||((off|bytes)&(gpu_page-1))||off>r.bytes||bytes>r.bytes-off)return false;
  IOByteCount span=0;uint64_t pa=r.memory->getPhysicalSegment(off,&span,kIOMemoryMapperNone);
- if(!pa||(pa&4095)||span<gpu_page||pa>=1ULL<<40||!no_faults(gpu)||(gr(gpu,0x20)&(1u<<20)))return false;
- /* Stock v14 PA-range FULL operation on a held private GPU page. */
+ if(!pa||(pa&4095)||span<bytes||pa>=1ULL<<40||bytes>(1ULL<<40)-pa||!no_faults(gpu)||(gr(gpu,0x20)&(1u<<20)))return false;
+ /* Stock v14 PA-range FULL operation on held, physically contiguous private
+  * storage. Never bridge a hole or another allocation to save a command. */
  uint64_t old0=gr64(gpu,0xd0),old1=gr64(gpu,0xd8);
- gw64(gpu,0xd0,pa);gw64(gpu,0xd8,pa+gpu_page-1);gw(gpu,0x30,0x7308u);
+ gw64(gpu,0xd0,pa);gw64(gpu,0xd8,pa+bytes-1);gw(gpu,0x30,0x7308u);
  bool done=false;uint64_t end=deadline_ms(1000);unsigned cache_polls=0;
  do {
   if(!no_faults(gpu))break;
@@ -54,13 +55,22 @@ static bool render_page_sync(X9RenderResource &r,uint64_t off) {
  if(!done)return false;
  gw(gpu,0x24,1u<<20);gw64(gpu,0xd0,old0);gw64(gpu,0xd8,old1);return true;
 }
+static bool render_page_sync(X9RenderResource &r,uint64_t off) {
+ return render_span_sync(r,off,gpu_page);
+}
 static bool render_range_sync(X9RenderResource &r) {
- for(uint64_t off=0;off<r.bytes;off+=gpu_page)if(!render_page_sync(r,off))return false;
+ for(uint64_t off=0;off<r.bytes;) {
+  IOByteCount span=0;
+  if(!r.memory->getPhysicalSegment(off,&span,kIOMemoryMapperNone))return false;
+  if(span>r.bytes-off)span=r.bytes-off;
+  if(!span||(span&(gpu_page-1))||!render_span_sync(r,off,span))return false;
+  off+=span;
+ }
  return true;
 }
 static void render_storage_clean(X9RenderResource &r) {
  auto *m=(IOBufferMemoryDescriptor *)r.memory;
- clean_dcache64((uint64_t)m->getBytesNoCopy(),(unsigned)r.bytes,0);
+ x9_gpu_clean((uint64_t)m->getBytesNoCopy(),(unsigned)r.bytes,0);
  __asm__ volatile("dsb sy":::"memory");
 }
 static bool render_caps(X9RenderCaps *caps) {

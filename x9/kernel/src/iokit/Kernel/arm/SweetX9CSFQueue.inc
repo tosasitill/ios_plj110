@@ -39,7 +39,7 @@ static bool clean_page(Plan &p,uint32_t va) {
   if(r.memory&&va>=r.begin&&va<r.end) {
    uint64_t pa;
    if(!physical(r.memory,(va-r.begin)&~4095u,&pa))return false;
-   clean_dcache64(pa,gpu_page,1);__asm__ volatile("dsb sy" ::: "memory");return true;
+   x9_gpu_clean(pa,gpu_page,1);__asm__ volatile("dsb sy" ::: "memory");return true;
   }
  }
  return false;
