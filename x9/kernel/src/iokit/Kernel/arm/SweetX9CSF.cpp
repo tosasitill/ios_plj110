@@ -201,17 +201,25 @@ static void sleep_ms(void) {
  uint64_t until;clock_interval_to_deadline(1,NSEC_PER_MSEC,&until);
  (void)assert_wait_deadline(&sleep_cookie,THREAD_UNINT,until);thread_block(THREAD_CONTINUE_NULL);
 }
-/* Short render cache commands frequently complete below 1 ms. Sleep in
- * 100 us quanta for the first 2 ms, then return to the original 1 ms backoff.
- * This changes observation latency only: callers retain absolute deadlines,
- * completion/error checks and all cache/AS ordering. No busy-spin loop. */
-static void render_cache_wait(unsigned *polls) {
- if((*polls)++>=20){sleep_ms();return;}
- uint64_t until;clock_interval_to_deadline(100,NSEC_PER_USEC,&until);
- (void)assert_wait_deadline(&sleep_cookie,THREAD_UNINT,until);thread_block(THREAD_CONTINUE_NULL);
-}
 static uint64_t deadline_ms(unsigned ms) {
  uint64_t until;clock_interval_to_deadline(ms,NSEC_PER_MSEC,&until);return until;
+}
+/* Cache flushes, AS updates and short jobs finish in microseconds, but every
+ * sleep_ms() costs at least one 1ms timer wakeup. Spin ~1ms in 16us steps,
+ * then sleep in 100us quanta for ~2ms (pan219), then fall back to the original
+ * 1ms backoff. Observation latency only: callers keep absolute deadlines,
+ * completion/error checks and all cache/AS ordering. */
+static constexpr unsigned poll_spin_limit=64,poll_short_limit=poll_spin_limit+20;
+static void poll_pause(unsigned *polls) {
+ unsigned n=(*polls)++;
+ if(n<poll_spin_limit) {
+  uint64_t until;nanoseconds_to_absolutetime(16000,&until);until+=mach_absolute_time();
+  while(mach_absolute_time()<until)__asm__ volatile("yield");
+  return;
+ }
+ if(n>=poll_short_limit){sleep_ms();return;}
+ uint64_t until;clock_interval_to_deadline(100,NSEC_PER_USEC,&until);
+ (void)assert_wait_deadline(&sleep_cookie,THREAD_UNINT,until);thread_block(THREAD_CONTINUE_NULL);
 }
 static void invalidate_cpu(void *base,size_t length) {
  if(!length)return;
@@ -226,12 +234,12 @@ static bool bypass(vm_offset_t smmu) {
  return gr(smmu,0x20)==0&&gr(smmu,0x24)==0&&gr(smmu,0x44)==0;
 }
 static bool idle_as(vm_offset_t gpu,unsigned ms=1000,unsigned as=0) {
- uint64_t end=deadline_ms(ms);
+ uint64_t end=deadline_ms(ms);unsigned polls=0;
  do {
   uint32_t v=gr(gpu,0x2428+as*0x40);
   if(v==0xffffffffu)return false;
   if(!(v&1))return true;
-  sleep_ms();
+  poll_pause(&polls);
  }while(mach_absolute_time()<end);
  return false;
 }
@@ -380,7 +388,7 @@ static bool flush_gpu(vm_offset_t gpu) {
   uint32_t irq=gr(gpu,0x20);
   if(irq==0xffffffffu)return false;
   if(irq&(1u<<17)){gw(gpu,0x24,1u<<17);return true;}
-  render_cache_wait(&cache_polls);
+  poll_pause(&cache_polls);
  }while(mach_absolute_time()<end);
  return false;
 }

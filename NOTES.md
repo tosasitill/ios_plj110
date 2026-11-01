@@ -1,5 +1,27 @@
 ## X9 build reproducibility (2026-11-01)
 
+**Current state (read first):** the repo now builds the kernel and boot.img
+itself: `python3 -I x9/build/build.py` on the build Mac, with
+`x9/build/local.json` copied from `config.example.json`. See `x9/BUILD.md` and
+`x9/kernel/README.md`. Commits: `06bcfaf` (pristine pan220 baseline + build
+flow), next commit (the four perf/rendering fixes re-merged onto pan220).
+Not yet built anywhere: this Linux host has no Xcode; `--dry-run` renders all
+54 commands (51 compiles, link, strip, boot-xnu). First real run on the Mac
+should be checked for compile errors before flashing.
+- Six pan117 objects stay prebuilt (`x9/kernel/prebuilt`), so edits to
+  `sweet_early.c`, `sleh.c`, `start.s`, `SweetCPU.cpp`, `prng_random.c`,
+  `IOKitBSDInit.cpp` have no effect until a compile command is reconstructed.
+- The frozen XNU object tree (`dxb/build/xnu.obj`) is still an external
+  input. Its source is `dxb/xnu` = `xnu-8796.141.3` (`1b191cb`) + a working-tree
+  diff (87 files) + 240 untracked files (captured in the second archive under
+  `xnu/tree1-*`, extension-filtered, so e.g. `config/MASTER.arm64.sweet` is
+  missing). Not imported yet.
+- Fix merge onto pan220: `poll_pause()` = spin 64x16us, then pan219's 100us
+  sleeps x20, then 1ms; replaces pan219 `render_cache_wait()` and also covers
+  `idle_as` and the fence wait. Framebuffer/scaler and coherency changes were
+  identical-base patches.
+
+
 - pan220 (`/home/ubuntu/agsbx/pan220-batched-cache-ranges`, user-provided, not
   in git) links 1126 objects: ~1069 from the frozen XNU tree on the build Mac
   (`/Users/tosasitill/HelioDarwin/xnu/build-dxb/.../DEVELOPMENT_ARM64_SWEET`),
