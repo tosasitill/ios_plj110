@@ -1,3 +1,36 @@
+## Static continuation: shadow invalidation and masked MRT (2026-11-01)
+
+- Followed render/shadows.rs::plan -> EncoderCore::plan_shadows/before and
+  shadows_used/after -> ShadowSync. target_uses includes COLOR_ATTACHMENT_WRITE
+  for target.level..level+1. ShadowCopies::meets compares backing identity and
+  overlapping mip/layer ranges; view_shadow.rs retains base identity/range.
+  after loses matching current copies as Lost(Written); before schedules
+  Step::Into with CopyCause::Changed. Whole overwrite optimization is gated.
+  Thus no evidence for the simple hypothesis that a10-mip feedback shadow is
+  copied only once and reused forever. GPU copy execution remains unverified.
+- Followed VS/FS layout changes: compile_shaders hands the preceding HW VS
+  layout to linked FS; unlinked FS descriptor generation resolves each FS slot
+  against current VS by location. fs_desc_dirty explicitly includes VS dirty,
+  so a VS change is not omitted from FS descriptor rebuild conditions.
+  No confirmed mixed-half/float stale-layout bug from this review.
+- Specific unresolved masked-MRT lead: attachment_clear emits outputs0+1 but
+  live pipeline masks0 off and1 on. panvk color_attachment_written_mask uses
+  shader outputs+attachment location map, whereas blend creation separately
+  skips write-disabled/zero-mask attachments. DCD render_target_mask/write_mask
+  and HSR use the former. Must establish hardware semantics before treating
+  this difference as incorrect: separate blend-mask handling may be intended.
+  Local reference mesa-panfrost has same structure; not a missing X9 patch.
+  FPK already checks rasterization-order color access; HSR has separate rules.
+  Do not blindly mask DCD outputs or disable HSR as a claimed fix.
+- Read original fixed_frag AIR destination branch: framebuffer_fetch FC4
+  selects passed attachment inputs; sample FC5 instead samples destination
+  textures at pixel-center coordinates divided by their dimensions. These
+  paths differ from ordinary blur texture3 and need specialized constants to
+  distinguish. No new pipeline behavior/build/device action/tests this turn.
+- Next static work: masked MRT DCD/HSR semantics and original/reference v14
+  descriptors, actual shaders' output/read masks, and fixed_frag specialization
+  contract. Root cause still unproven; active device mailbox212 unchanged.
+
 ## Static vertex/blur/blend route and reference comparison (2026-11-01)
 
 - User requests static source tracing and reference comparisons, not another
