@@ -38,6 +38,16 @@ should be checked for compile errors before flashing.
   NOT flashed / NOT hardware-verified. It is pan220 + the four fixes
   (d62cfc7); a pan220-only rebuild (revert d62cfc7) would separate rebuild
   regressions from fix regressions.
+- First hardware run of x9-976b339 (`/tmp/2.txt`, USB log, user reports a
+  panic): coherency line confirms the new kernel (`capable=0 gpu_side=0
+  active=0`). 4 GPU submits per client OK at 7.7/8.6 s, no swaps yet
+  (`copies=0`). Log stops mid-line at 15.278 s right after backboardd created
+  IOSurface id 3 (1256x2760, 14 MB) and imported it (`X9 RENDER FOOTPRINT:
+  phase=import`). No panic text in the USB log. The earlier pan2xx log
+  (`/home/ubuntu/2.txt`) stopped at the same point (14.413 s,
+  `thermalmonitord sel 78`), so the stop predates the four fixes (guess,
+  until the panic string is read). Next: pstore console + disk sidecar of this
+  run; optionally flash a pan220-only rebuild (revert d62cfc7) to compare.
 - Still required on the Mac for building: `HelioDarwin/xnu/build-dxb/dxb`
   (frozen objects, EXPORT_HDRS, fakeroot, dxb/xnu), Xcode 15, llvm/lld 22,
   and the device root-manifest.json (local.json currently points into the
