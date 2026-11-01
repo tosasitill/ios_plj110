@@ -1,3 +1,39 @@
+## Flicker continuation: Arm's fetch/prepass contract and actual ROA flags (2026-11-01)
+
+- Read Arm primary documentation, not inference from descriptor names:
+  https://developer.arm.com/community/arm-community-blogs/b/mobile-graphics-and-gaming-blog/posts/immortalis-g925-the-fragment-prepass
+  The article distinguishes fragment prepass from other HSR (FPK can remain
+  active when prepass is disabled). Its incompatibility case5 specifically
+  covers helper-lane tile reads propagated across lanes, including tile-read
+  values used as coordinates of implicit-LOD sampling. This is the precise
+  dataflow in original luma_boost_lph: d0 -> luminance -> LUT coordinates ->
+  air.sample_texture_2d. Therefore Kraid's absent LD_TILE classification
+  violates the conservative eligibility policy implemented in the BIR path
+  for an actually used shader family. It still does NOT prove that prepass
+  executes with current defaults, nor give register-level meaning for FBD
+  hierarchical enable with prepass disabled. Do not call it confirmed flicker.
+- Also read Arm's framebuffer-fetch implementation requirements:
+  https://developer.arm.com/community/arm-community-blogs/b/mobile-graphics-and-gaming-blog/posts/framebuffer-fetch-in-vulkan
+  Ordered input-attachment feedback requires the color-blend pipeline flag
+  and, for render-pass objects, the matching subpass flag. Current runtime
+  has BOTH: pipeline/graphics.rs:1057 (also output-library creation1248) and
+  render_target.rs:1771. Thus an omitted API-level ROA flag is not supported
+  by source. Lower fragment/color.rs creates SubpassData at attachment index;
+  PanVK lowers it to tile loads. This does not prove actual device execution.
+- Rechecked actual mesa-render-source Kraid compile.rs and pan_compiler.c:
+  no alternate HSR writeback there; lack of metadata is not merely reading
+  the host reference rather than iOS build source. Existing frontend log
+  lacks FBD/DCD bit values and compile-backend identity per draw, so cannot
+  demonstrate active non-prepass hardware consumption from this capture.
+- Main constraints remain: latent compiler metadata gap is concrete;
+  missing API raster-order flags and simple lost intermediate DontCare are
+  unsupported. Runtime defect was not captured by212's startup-only pixel
+  windows, so no pixel comparison establishes the first bad producer yet.
+- No tests/build/device action or speculative behavior change. Mailbox212
+  unchanged. Source/document review has reached a hardware-state boundary
+  on this lead; do not repeat generic HSR searches or declare it excluded
+  from only the default prepass toggle.
+
 ## Flicker focus: framebuffer-fetch HSR safety remains open (2026-11-01)
 
 - User explicitly prioritizes flicker again; no performance behavior edits.
