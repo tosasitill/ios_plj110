@@ -1,3 +1,39 @@
+## Wallpaper fallback ENOENT confirmed and candidate fixed (2026-11-01)
+
+- New user `/Users/tosasitill/2.txt` is the wallpaper-wc run (56.601 s),
+  preserved separately at `.local/analysis-wallpaper-wc/runtime.raw.log`.
+  17.793 s actual open of /Library/Wallpaper/Collections/Collections.plist
+  returns errno 2. First heap scans of CollectionsPoste and PosterBoard
+  explicitly report NSInvalidArgumentException: that exact missing file lacks
+  a valid `order` value. Other wallpaper collection/resource plists open OK.
+  This establishes the immediate abort cause, not why the idiom lookup missed.
+- Added before launchd a missing-only symlink from that generic fallback to
+  /Library/Wallpaper/Collections/Collections~iphone.plist, reusing the existing
+  x9_cryptex_aliases opt-in and writable-native-root gate. Source must be a
+  regular file; created/existing link must resolve to its held vnode. Existing
+  regular fallback is preserved; conflicting entries are never overwritten.
+  Failure is logged without blocking boot. No Apple file bytes replaced.
+  Source existence/content on the current device still awaits candidate boot;
+  original local pan172 resource was validated during the preceding analysis.
+- Rechecked local UniXNU/hackios source for Collections.plist: no matching
+  repair. Reused this project's existing verified ObjC resource alias helper.
+- Build command: `python3 -I x9/build/build.py --name mailbox208-wallpaper-collections`.
+  Initial packaging rejected a new boot argument (>607 bytes); removed it and
+  used existing alias opt-in. Final compile/link/package exit 0. Candidate:
+  `x9/out/mailbox208-wallpaper-collections/boot.img`, 9,420,800 bytes. Build log
+  in same directory. Local build only, no CI run, no additional tests.
+- Uses installed mailbox 208; no restaging. No device operations/boot performed.
+  On user boot this creates only the absent alias inside the dedicated iOS
+  root. Verify `X9 Wallpaper: Collections.plist -> original ... ready`, then
+  successful collection open and whether PosterBoard passes this exception.
+  DefaultWallpapers lookup/actual wallpaper rendering may expose later issues;
+  do not claim visible wallpaper before hardware feedback.
+- This run still has 8 PosterBoard crashes before the fix; active submissions
+  (>=35 s) median pre-cache 2247 us + post-cache 1712 us, GPU wait 8809 us.
+  CoreImage _blendWithAlphaMaskB0 EntryNotFound remains. No DeviceLost/panic
+  captured. Different UI workload prevents a WC performance comparison;
+  polygon flicker/low FPS remain open, no new shader/sync change in this fix.
+
 ## Mailbox 208: blur flicker, performance and wallpaper investigation (2026-11-01)
 
 - User confirms touch/unlock is now OK; reports polygon-like flicker where

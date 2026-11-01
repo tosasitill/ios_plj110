@@ -6895,6 +6895,50 @@ sweet_x9_prepare_objc_trampolines(proc_t p,user_addr_t scratch,user_addr_t end)
  return error;
 }
 
+/* iOS16 WallpaperKit falls back to Collections.plist when its idiom-specific
+ * lookup misses. The live trace proves ENOENT followed by the missing-order
+ * exception. Supply only that absent fallback, using the original iPhone
+ * resource; never replace an existing plist or suppress parsing failures.
+ * Shares the existing x9_cryptex_aliases opt-in for original-resource aliases;
+ * requires a writable native root and runs before launchd. */
+static int
+sweet_x9_prepare_wallpaper_collections(proc_t p,user_addr_t scratch,user_addr_t end)
+{
+ static const char target[]="/Library/Wallpaper/Collections/Collections~iphone.plist";
+ static const char alias[]="/Library/Wallpaper/Collections/Collections.plist";
+ int enabled=0,error;vnode_t entry=NULLVP,source=NULLVP,resolved=NULLVP;
+ extern boolean_t sweet_x9_ufs_root_writable(void);
+ if(!PE_parse_boot_argn("x9_cryptex_aliases",&enabled,sizeof(enabled))||enabled!=1)return 0;
+ if(!sweet_x9_ufs_root_writable())return EROFS;
+ if(!proc_is64bit(p)||scratch>end||sizeof(target)+sizeof(alias)>end-scratch)return E2BIG;
+ error=vnode_lookup(alias,VNODE_LOOKUP_NOFOLLOW,&entry,vfs_context_kernel());
+ if(!error){
+  if(vnode_isreg(entry)){vnode_put(entry);printf("X9 Wallpaper: existing Collections.plist preserved\n");return 0;}
+  int islink=vnode_islnk(entry);vnode_put(entry);
+  if(!islink)return EEXIST;
+ }else if(error!=ENOENT)return error;
+ int absent=error==ENOENT;
+ error=vnode_lookup(target,0,&source,vfs_context_kernel());if(error)return error;
+ if(!vnode_isreg(source)){vnode_put(source);return EINVAL;}
+ if(absent){
+  error=copyout(target,scratch,sizeof(target));
+  if(!error)error=copyout(alias,scratch+sizeof(target),sizeof(alias));
+  if(!error){
+   struct symlink_args request={.path=scratch,.link=scratch+sizeof(target)};int32_t retval=0;
+   error=symlink(p,&request,&retval);
+   if(error==EEXIST)error=0; /* Check a racing creator; never overwrite. */
+  }
+ }
+ if(!error){
+  error=vnode_lookup(alias,0,&resolved,vfs_context_kernel());
+  if(!error){if(resolved!=source)error=EEXIST;vnode_put(resolved);}
+ }
+ vnode_put(source);
+ if(!error)printf("X9 Wallpaper: Collections.plist -> original Collections~iphone.plist ready\n");
+ else printf("X9 Wallpaper: collections alias errno=%d\n",error);
+ return error;
+}
+
 #include "x9_render_external.inc"
 /* Explicit opt-in: seed migration preferences before original launchd starts.
  * Preserve any previous preference through a same-directory hard-link backup. */
@@ -7248,6 +7292,10 @@ load_init_program_at_path(proc_t p, user_addr_t scratch_addr, const char* path)
 #if defined(ARM64_BOARD_CONFIG_SWEET)
 	error=sweet_x9_prepare_objc_trampolines(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	if(error)return error;
+	{
+	 int wallpaper_error=sweet_x9_prepare_wallpaper_collections(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
+	 if(wallpaper_error)printf("X9 Wallpaper: fallback unavailable errno=%d; continuing boot\n",wallpaper_error);
+	}
 	error=sweet_x9_prepare_keybags(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	if(error)return error;
 	error=sweet_x9_seed_migration(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
