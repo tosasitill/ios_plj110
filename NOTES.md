@@ -1,3 +1,66 @@
+## Mailbox214 built: host-pointer explicit-pitch texture repair (2026-11-01)
+
+- User asks to fix the explicit-pitch/direct-rendering blocker described in
+  the preceding turn. Implemented the runtime+X9 native integration path,
+  preserving213's iOS QoS fix. No Apple shader substitution or Kraid/HSR tweak.
+- Maintained native integration patch:
+  x9/build/third_party/02-panvk-host-linear-images.patch. Under X9_NATIVE_KMOD
+  it enables EXT_image_drm_format_modifier while leaving fd,dma-buf,foreign
+  queue and WSI features disabled. Existing native host image format query
+  now accepts ordinary LINEAR or DRM_FORMAT_MODIFIER_EXT only when its queried
+  modifier is DRM_FORMAT_MOD_LINEAR, host handle is HOST_ALLOCATION_EXT and
+  type is2D. General format/usage/extent queries still run before this check;
+  native external memory stays importable only, no dedicated-only claim.
+  Applied to the two existing X9 integration sections of mesa-render-source;
+  no upstream compiler/rasterizer change, no Mesa upstream submission.
+- Maintained runtime patch0025-host-pointer-linear-textures.patch:
+  device/create.rs enables the modifier name independently where host import
+  is enabled and the driver lists it (dma-buf route already adds it where
+  present). Enables::push_name already deduplicates names. Adopted devices
+  are checked against their actual enabled extension list. host_pitched_image
+  now checks host importer availability+Device::enables_extension, instead of
+  requiring Importer::makes_dma_buf_images. Existing modifier format features,
+  external-importability, memory-type, dedicated requirement, reported layout,
+  alignment and allocation-bound checks retained. Existing explicit-plane
+  driver-defect guard retained. Unsupported cases still return a shadow.
+- Added consumer opt-in HostPageTexturePolicy::InPlaceWrites based on current
+  UniXNU AdrenoMetal0014 policy; global default InPlace and exact policy Shadow
+  unchanged. X9 bridge opts in under x9_runtime_latest. This bypasses the
+  read-only qualification/write-usage policy gate, NOT image/binding checks.
+  It targets host-page textures; no owned-buffer padded-row relaxation or
+  arbitrary Turnip16x4 rule copied. Native linear-row sizing/framebuffer bounds
+  were traced earlier; actual G925 edge behavior still requires runtime proof.
+- Build integration: shared apply-source-patches.py handles forward or
+  already-applied source with zero-fuzz applicability, rejecting drift.
+  Both incremental/full PanVK entrypoints apply native02 before compilation;
+  Metal entrypoint applies0023 then0025. x9/BUILD.md documents the patch stack
+  and the source lock as migration baseline. Source locks were not rehashed.
+- Minimal observability: nmb_device_texture_import_stats gives six counters
+  (host textures direct,pitched images,shadows,pitch/image/placement refusals).
+  Existing sampled IOSurface log cadence (first8,then every128) also prints
+  X9 TEXTURE routes. Counts are cumulative per process/device, not an exact
+  per-texture verdict; early first-surface deltas can demonstrate the route.
+  No new pixel/vertex/shader capture, sync, per-draw logging or forced delays.
+- Normal build succeeded with exit0:
+  python3 -I x9/build/build.py all --revision 214 --name mailbox214-host-linear
+  Native incremental5 Ninja steps compiled both modified source units and
+  linked; Rust release53.38s; Metal frontend/bridge linked and signed; both
+  bundles packaged214; kernel allowlist regenerated, kernel linked and boot
+  packaged. Build reports boot.img9,420,800 bytes under
+  x9/out/mailbox214-host-linear/. Logs: that directory/build.log and
+  .local/analysis-blur212/mailbox214-host-linear-build.log. No CI run.
+- No tests/suites or secondary artifact inspections/hash/disassembly/rebuild
+  checks, per user preference. No device operation/update/reboot. Device
+  remains mailbox212;213 and214 are LOCAL ONLY.214 must be installed using
+  its matching plugin mailbox before booting its image. Hardware/visual/FPS
+  success NOT established by the build.
+- Next runtime evidence: reproduce same Control Center/folder/App Library
+  blur after paired214 update+manual boot; preserve new2.txt separately. Match
+  X9 SURFACE layout1256x2760,row5120 with increasing direct/pitched counts,
+  inspect refusal counters if absent, then compare visible polygons/colors
+  and cadence. This validates the repaired route; it is not yet a claim that
+  the photographed flicker has the same cause.
+
 ## Texture/blur continuation after QoS build: explicit pitch is blocked (2026-11-01)
 
 - QoS port is committed bf1a007; local mailbox213-ios-qos build succeeded,

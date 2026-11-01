@@ -1,0 +1,33 @@
+diff --git a/src/panfrost/vulkan/panvk_vX_physical_device.c b/src/panfrost/vulkan/panvk_vX_physical_device.c
+--- a/src/panfrost/vulkan/panvk_vX_physical_device.c
++++ b/src/panfrost/vulkan/panvk_vX_physical_device.c
+@@ -272,7 +272,8 @@
+    ext->KHR_external_semaphore_fd = false;
+    ext->EXT_external_memory_dma_buf = false;
+    ext->EXT_physical_device_drm = false;
+-   ext->EXT_image_drm_format_modifier = false;
++   /* Explicit linear layouts also describe imported host pointers without fds. */
++   ext->EXT_image_drm_format_modifier = true;
+    ext->EXT_map_memory_placed = false;
+    ext->EXT_queue_family_foreign = false;
+    ext->KHR_swapchain = false;
+diff --git a/src/panfrost/vulkan/panvk_physical_device.c b/src/panfrost/vulkan/panvk_physical_device.c
+--- a/src/panfrost/vulkan/panvk_physical_device.c
++++ b/src/panfrost/vulkan/panvk_physical_device.c
+@@ -1628,8 +1628,15 @@
+ {
+ #ifdef X9_NATIVE_KMOD
+    /* Native IOSurface image aliases use imported host memory, never dma-buf. */
++   bool linear = pImageFormatInfo->tiling == VK_IMAGE_TILING_LINEAR;
++   if (pImageFormatInfo->tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT) {
++      const VkPhysicalDeviceImageDrmFormatModifierInfoEXT *modifier =
++         vk_find_struct_const(pImageFormatInfo->pNext,
++                              PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT);
++      linear = modifier && modifier->drmFormatModifier == DRM_FORMAT_MOD_LINEAR;
++   }
+    if (handleType != VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT ||
+-       pImageFormatInfo->type != VK_IMAGE_TYPE_2D || pImageFormatInfo->tiling != VK_IMAGE_TILING_LINEAR)
++       pImageFormatInfo->type != VK_IMAGE_TYPE_2D || !linear)
+       return VK_ERROR_FORMAT_NOT_SUPPORTED;
+    *external_properties = (VkExternalMemoryProperties){
+       .externalMemoryFeatures = VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT,

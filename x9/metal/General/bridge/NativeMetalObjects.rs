@@ -171,6 +171,10 @@ pub unsafe extern "C" fn nmb_device_open(loader: *const c_char, cache: *const c_
         // SAFETY: the factory negotiated the actual X9 native service, whose
         // synchronous submission owns every mapped CPU/GPU cache handoff.
         options = unsafe { options.with_submission_cache_ownership(atom) };
+        // Native host-pointer images support explicit linear row pitches and
+        // render directly into the imported surface when its layout is valid.
+        #[cfg(x9_runtime_latest)]
+        { options.policy.host_page_textures = metal2vulkan::device::HostPageTexturePolicy::InPlaceWrites; }
         options.loader = Some(PathBuf::from(loader.to_string_lossy().into_owned()));
         #[cfg(not(x9_runtime_latest))]
         { options.metal_level = Some(MetalLevel::NEWEST); }
@@ -238,6 +242,24 @@ pub extern "C" fn nmb_device_work_stats(device: *const NmbDevice, out: *mut u64)
         out[7] = cache.hits;
         out[8] = cache.misses;
         out[9] = cache.writes;
+        Ok(true)
+    })
+}
+
+/// Host texture route counters: direct, explicit pitch, shadows, pitch/image/placement refusals.
+///
+/// # Safety
+/// `out` points to six writable u64 words.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nmb_device_texture_import_stats(device: *const NmbDevice, out: *mut u64) -> bool {
+    guard(false, || {
+        if out.is_null() { return Err("null texture import stats".into()); }
+        let counts = get(device)?.0.work_counts();
+        // SAFETY: the caller's six-word output contract.
+        let out = unsafe { std::slice::from_raw_parts_mut(out, 6) };
+        out.copy_from_slice(&[counts.host_textures_in_place, counts.pitched_host_images,
+            counts.shadowed_textures, counts.host_texture_shadows_refused_pitch,
+            counts.host_texture_shadows_refused_image, counts.host_texture_shadows_refused_placement]);
         Ok(true)
     })
 }

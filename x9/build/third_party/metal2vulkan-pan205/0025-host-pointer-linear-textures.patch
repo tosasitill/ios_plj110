@@ -1,0 +1,68 @@
+diff --git a/crates/metal2vulkan-runtime/src/device/create.rs b/crates/metal2vulkan-runtime/src/device/create.rs
+--- a/crates/metal2vulkan-runtime/src/device/create.rs
++++ b/crates/metal2vulkan-runtime/src/device/create.rs
+@@ -1362,6 +1362,12 @@
+     // The runtime's own needs, outside the vocabulary, where listed (`dma_buf.rs`).
+     let dma_buf = dma_buf_names(&listed);
+     let dma_buf_images = dma_buf_image_names(&listed);
++    // Explicit row pitches over host pointers need no fd import or foreign queue.
++    // The dma-buf route already enables this name where it is available.
++    let host_modifier = (set.extensions.contains(&VkExtension::ExtExternalMemoryHost)
++        && dma_buf_images.is_none()
++        && listed.contains(ash::ext::image_drm_format_modifier::NAME))
++    .then_some(ash::ext::image_drm_format_modifier::NAME);
+     let extra: Vec<CString> = options
+         .device_extensions
+         .iter()
+@@ -1370,6 +1376,7 @@
+         .chain((creation_feedback && !feedback_asked).then(|| feedback_name.to_owned()))
+         .chain(dma_buf.into_iter().flatten().map(CStr::to_owned))
+         .chain(dma_buf_images.into_iter().flatten().map(CStr::to_owned))
++        .chain(host_modifier.map(CStr::to_owned))
+         .collect();
+     let mut enables = Enables::of(&set, api, &listed, &extra)?;
+     // The features of the caller's extensions whose structures the runtime knows, as the device
+diff --git a/crates/metal2vulkan-runtime/src/texture/in_place_image.rs b/crates/metal2vulkan-runtime/src/texture/in_place_image.rs
+--- a/crates/metal2vulkan-runtime/src/texture/in_place_image.rs
++++ b/crates/metal2vulkan-runtime/src/texture/in_place_image.rs
+@@ -405,8 +405,8 @@
+         use crate::dma_buf::{memory_plane_0, ModifierMemory, DRM_FORMAT_MOD_LINEAR};
+         let (row_pitch, slice_pitch) = (layout.row_pitch, layout.slice_pitch);
+         let raw_device = self.shared().vk();
+-        let enabled = (self.shared().host_import.as_ref())
+-            .is_ok_and(|importer| importer.makes_dma_buf_images());
++        let enabled = self.shared().host_import.is_ok()
++            && self.enables_extension(ash::ext::image_drm_format_modifier::NAME);
+         if !enabled {
+             return Ok(Err((
+                 Refusal::Pitch,
+diff --git a/crates/metal2vulkan-runtime/src/in_place.rs b/crates/metal2vulkan-runtime/src/in_place.rs
+--- a/crates/metal2vulkan-runtime/src/in_place.rs
++++ b/crates/metal2vulkan-runtime/src/in_place.rs
+@@ -251,6 +251,11 @@
+     if policy == HostPageTexturePolicy::Shadow {
+         return Err(ShadowCause::Exact);
+     }
++    // Explicit consumer opt-in, as in UniXNU's written host-page texture route.
++    // Image format, pitch, import and binding checks still run in in_place_image.
++    if policy == HostPageTexturePolicy::InPlaceWrites {
++        return Ok(());
++    }
+     if usage.contains(TextureUsage::RENDER_TARGET) {
+         return Err(ShadowCause::RenderTarget);
+     }
+diff --git a/crates/metal2vulkan/src/device/policy.rs b/crates/metal2vulkan/src/device/policy.rs
+--- a/crates/metal2vulkan/src/device/policy.rs
++++ b/crates/metal2vulkan/src/device/policy.rs
+@@ -271,6 +271,11 @@
+     /// texels into before each use and merge back after each write, whose copies touch the
+     /// texels alone.
+     Shadow,
++    /// Try an image over host pages for rendering and shader writes too, without
++    /// the read-only qualification check. The consumer must establish that its
++    /// driver writes only the texture's texels. Unsupported layouts, formats or
++    /// imports still use a shadow. The default remains [`InPlace`](Self::InPlace).
++    InPlaceWrites,
+ }
+ 
+ /// How a chain of `half` additions, subtractions and products rounds on a device without

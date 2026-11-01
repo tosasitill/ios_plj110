@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Cross-build PanVK v14 render objects for iOS16, reusing host shader tools."""
 from pathlib import Path
-import os,subprocess
+import os,subprocess,sys
 # Machine paths: environment, then x9/build/local.json, then the defaults.
 import json as _json, os as _os
 from pathlib import Path as _Path
@@ -10,6 +10,9 @@ _cfg = _json.loads(_local.read_text()) if _local.is_file() else {}
 DEV = _os.environ.get('DEVELOPER_DIR') or _cfg.get('developer_dir') or '/Applications/Xcode.app/Contents/Developer'
 BREW = _os.environ.get('X9_HOMEBREW') or _cfg.get('homebrew') or '/opt/homebrew'
 w=Path(__file__).resolve().parents[3] / '.local/x9/work/x9-metal-render'
+subprocess.run([sys.executable,'-I',str(Path(__file__).with_name('apply-source-patches.py')),
+ '--source',str(w/'mesa-render-source'),
+ str(Path(__file__).resolve().parents[1]/'third_party/02-panvk-host-linear-images.patch')],check=True)
 # Native tiler has no dynamic OOM growth: freeze an honest fixed capacity
 # before configuring or compiling Mesa.
 subprocess.run(['python3',str(w/'prepare-panvk-native-budget.py')],check=True)

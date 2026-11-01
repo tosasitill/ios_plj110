@@ -17,7 +17,8 @@ Without `--check` it connects the local workspace to maintained scripts and
 `x9/metal/General` with relative symlinks, preserving replaced entries.
 Inputs must already exist; cloning git alone does not supply private data or
 third-party build trees. `requirements-metal.txt` records the migrated venv
-versions; `local-source-lock.json` records retained source snapshot hashes.
+versions; `local-source-lock.json` records the source snapshot hashes before
+the maintained build-time patches described below.
 The migrated Mesa configuration text and venv entrypoints were rebased to the
 new workspace. For another checkout location regenerate build configurations
 and the venv; copying Meson caches is not a portable installation method.
@@ -37,6 +38,17 @@ The Metal build applies `0023-quality-of-service-on-ios.patch` before compiling
 the runtime, and accepts an already-patched source snapshot. It enables Apple's
 QoS requests on iOS for submission, completion and compiler threads. The patch
 comes from [AdrenoMetal at 831a9dc](https://github.com/UniXNU/AdrenoMetal/blob/831a9dcbd6ac7de89a11bdaf031e07b9aadfa3c8/bridge/patches/0023-quality-of-service-on-ios.patch).
+
+The native PanVK builds also apply `02-panvk-host-linear-images.patch` to the
+retained X9 integration. It enables modifier image layouts and accepts only
+the linear modifier for host-pointer imports; fd sharing stays disabled.
+The Metal build applies `0025-host-pointer-linear-textures.patch`, which
+negotiates the modifier extension independently of dma-buf support. The X9
+bridge opts into direct rendering to host textures, following AdrenoMetal's
+`InPlaceWrites` policy. Format, usage, explicit pitch, memory type, alignment
+and allocation bounds are checked before binding; unsupported textures keep
+their shadow path. `X9 TEXTURE routes` logs direct imports, explicit-pitch
+images and fallback counters at the existing sampled surface-log cadence.
 
 Validation: full kernel compile/link/boot packaging succeeded at
 `x9/out/migration-check/boot.img` (9,416,704 bytes). PanVK rebuilt successfully

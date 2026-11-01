@@ -1462,12 +1462,18 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
  // samples successful imports only; neither changes row pitch nor suppresses
  // a clear or a failed render. No pixel data is copied for diagnostics.
  static std::atomic<uint64_t> imports{0};const uint64_t count=++imports;
- if(count<=8||count%128==0)
+ if(count<=8||count%128==0) {
   NBLOG(@"X9 SURFACE layout: imports=%llu id=%u plane=%llu/%llu surface=%llux%llu texture=%llux%llu format=%llu fourcc=%08x row=%llu offset=%llu allocation=%llu import=%llu",
    (unsigned long long)count,IOSurfaceGetID(surface),(unsigned long long)plane,(unsigned long long)planes,
    (unsigned long long)IOSurfaceGetWidth(surface),(unsigned long long)IOSurfaceGetHeight(surface),
    (unsigned long long)d.width,(unsigned long long)d.height,(unsigned long long)d.pixelFormat,IOSurfaceGetPixelFormat(surface),
    (unsigned long long)row,(unsigned long long)(start-(uintptr_t)base),(unsigned long long)allocation,(unsigned long long)bytes);
+  uint64_t routes[6]={};
+  if(nmb_device_texture_import_stats(gDevice,routes))
+   NBLOG(@"X9 TEXTURE routes: direct=%llu pitched=%llu shadow=%llu reject_pitch=%llu reject_image=%llu reject_memory=%llu",
+    (unsigned long long)routes[0],(unsigned long long)routes[1],(unsigned long long)routes[2],
+    (unsigned long long)routes[3],(unsigned long long)routes[4],(unsigned long long)routes[5]);
+ }
  return (id<MTLTexture>)texture;
 }
 - (id<MTLLibrary>)newLibraryWithData:(dispatch_data_t)data error:(NSError **)error {
