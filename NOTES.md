@@ -103,6 +103,15 @@ should be checked for compile errors before flashing.
   submit (NativeAdrenoReassertWriteCombined) because a view can turn out
   cacheable; not ported yet - watch for stale-content rendering errors.
   This makes option 1 mostly unnecessary (imports ~30 MB remain).
+- PosterBoard (user asked to fix if possible): crash-loops with SIGABRT
+  (ns 2 code 6) every ~10 s from 18 s on, 72 crash lines in `/tmp/2.txt`, no
+  own log output. Unslid (minus shared-cache slide) its pc 0x1C2617198 /
+  lr 0x1D1BA65F8 and backtrace (0x18DC5C4B8 0x1D1ADEF54 0x1D1ACFA4C
+  0x1800D2AFC 0x1D1ADE424 ...) are identical for CollectionsPoster and, in
+  the earlier run (slide 0x3ffc4000), KonaSynthesizer/SiriTTSSynthesizer/
+  MacinTalkAUSP: one shared abort path, predating the GPU OOM; probably a
+  missing service/kernel interface, not GPU. Needs symbolization against
+  the 20H392 dyld shared cache on the Mac (not available here).
 - User-supplied references for MT6993 kernel behaviour:
   github.com/oppo-source/android_kernel_oppo_mt6993,
   github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_mt6993.
