@@ -1,3 +1,46 @@
+## Static continuation: PanVK cache flush and meta state restoration (2026-11-01)
+
+- Completed source trace of global barrier -> CmdPipelineBarrier2 ->
+  add_cs_deps/normalize_dependency -> collect_cs_deps -> emit_barrier_csf.
+  vk_synchronization.c expands MEMORY_READ into stage-specific reads and
+  SHADER_READ into sampled/storage reads, so generic masks do not omit the
+  texture-unit read class. collect_cache_flush_info filters per subqueue;
+  add_memory_dependency invalidates RO L1 via others for sampled, transfer,
+  input-attachment and color reads. L2/LS only flush for host interactions
+  under the source's stated coherent-cache model. Hardware coherence itself
+  is not proven by this source assumption.
+- emit_barrier_csf waits source iterator scoreboards, issues cs_flush_caches
+  with others INVALIDATE, waits IMM_FLUSH, signals subqueue sync objects and
+  inserts destination cross-subqueue waits. COPY maps to BOTH fragment and
+  compute subqueues in panvk_get_subqueue_stages; CmdCopyImage2 chooses gfx
+  for AFBC (or COPY_GFX debug) and otherwise compute. Thus transfer mapping
+  does not simply miss one internal copy engine. Source flush/wait code is
+  the same in mesa-source and actual mesa-render-source (only native CSIF
+  lookup/include differ in that file). No device trace of these instructions.
+- CmdEndRendering2KHR flushes tiling and issues fragment jobs before resetting
+  render.tiler and render.flags. Barrier after pass end is therefore not
+  classified as an in-pass by-region dependency by those state checks.
+  issue_fragment_jobs waits tiling; v14 uses RUN_FRAGMENT2. No source support
+  for the hypothesis that end-pass merely clears state without submitting
+  outstanding attachment stores.
+- Checked CRC complication: global barriers carry no image CRC invalidation,
+  but compute CmdCopyImage2 explicitly invalidates destination CRC if copied
+  mip0 overlaps its CRC plane; AFBC writes go through gfx. Lack of image
+  barriers alone is not evidence of stale CRC for this copy route. References
+  have same structure; do not invent a blanket CRC-reset repair.
+- Inspected meta_gfx_start/end as a post-copy geometry-corruption lead:
+  save/restore shader descriptors, push constants, vb0, vertex-input and sample
+  state plus all dynamic state; restore clears VS/FS resource-table addresses
+  and dirties VS, FS, VB, DESC_STATE, RENDER_STATE and all set dynamic states.
+  vk_meta_draw_rects changes vb0 only and uses nonindexed CmdDraw, so absence
+  of saved index-buffer state is not by itself a bug. Compute meta restores
+  CS descriptors/push data and marks CS/DESC_STATE/PUSH_UNIFORMS dirty.
+  No demonstrated missing restoration yet.
+- No tests, builds, device changes or speculative patch. Mailbox212 unchanged.
+  Root cause remains unproven. Default barrier and meta-restoration routes now
+  have source consistency evidence; actual specialized shader output / GPU
+  vertex data and hardware cache behavior remain the main evidence gaps.
+
 ## Static continuation: Kraid RA/flow and shadow-copy execution (2026-11-01)
 
 - Kraid ra.rs::RegAlignConstraint::for_op_dst reserves a full register even
