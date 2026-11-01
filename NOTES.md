@@ -103,6 +103,18 @@ should be checked for compile errors before flashing.
   submit (NativeAdrenoReassertWriteCombined) because a view can turn out
   cacheable; not ported yet - watch for stale-content rendering errors.
   This makes option 1 mostly unnecessary (imports ~30 MB remain).
+- Run of f977d6a (`/tmp/2.txt`, "keeps scrolling text"): backboardd's 4th
+  submit, the first 3-stream job, timed out after 10 s: streams 0/1 done,
+  stream 2 stuck mid-buffer (extract 48/64, WAIT=0xc1000000 sync wait,
+  BLOCK=3); engine marked uncertain (by design no reset), so every later
+  client open is refused, the display tick never gets the owner lock
+  (gpu_defer=121/2 s), SpringBoard derefs a nil Metal device (pc 0) and
+  crash-loops. The same job succeeded on 608d5dc; only write-combined BOs
+  changed. Guess: VM zero-fill of the new WC pages stayed in CPU caches, the
+  GPU read stale DRAM in a sync object. Fix: scrub each WC BO once by DC
+  CIVAC over its physical pages via phystokv (not flush_dcache64), and log
+  the first pages' WIMG (expect 6 = VM_WIMG_WCOMB). Fallback if it recurs:
+  boot-arg `x9_bo_wc=0`.
 - PosterBoard (user asked to fix if possible): crash-loops with SIGABRT
   (ns 2 code 6) every ~10 s from 18 s on, 72 crash lines in `/tmp/2.txt`, no
   own log output. Unslid (minus shared-cache slide) its pc 0x1C2617198 /

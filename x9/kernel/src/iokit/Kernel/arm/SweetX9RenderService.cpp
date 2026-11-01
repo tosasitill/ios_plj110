@@ -11,6 +11,33 @@
 #include <sys/proc.h>
 #include <pexpert/pexpert.h>
 #include <libkern/libkern.h>
+extern "C" vm_map_address_t phystokv(uint64_t pa);
+extern "C" unsigned int pmap_cache_attributes(ppnum_t pn);
+/* A fresh write-combined BO's pages were zero-filled by the VM through the
+ * cacheable physical aperture. Whether those lines were written back before
+ * the pages turned non-cacheable is not something to rely on: with this
+ * allocation the first 3-stream job hung on a sync object (stream 2 WAIT
+ * 0xc1000000), consistent with the GPU reading stale DRAM, and a dirty line
+ * evicted later would overwrite GPU results. Clean+invalidate every line of
+ * the BO's physical pages by DC CIVAC through the physical aperture (the
+ * maintenance applies to the PA whatever the alias), not through
+ * flush_dcache64, which some XNU configurations compile to a no-op.
+ * Afterwards DRAM holds the zeros and no CPU cache holds the pages. */
+static bool render_wc_scrub(IOMemoryDescriptor *m,uint64_t bytes) {
+ uint64_t ctr;__asm__ volatile("mrs %0, ctr_el0":"=r"(ctr));
+ const uint64_t line=4ULL<<((ctr>>16)&15);
+ __asm__ volatile("dsb sy":::"memory");
+ for(uint64_t off=0;off<bytes;) {
+  IOByteCount span=0;uint64_t pa=m->getPhysicalSegment(off,&span,kIOMemoryMapperNone);
+  if(!pa||!span||(pa&(line-1)))return false;
+  if(span>bytes-off)span=bytes-off;
+  uint64_t va=phystokv(pa);if(!va)return false;
+  for(uint64_t at=va;at<va+span;at+=line)__asm__ volatile("dc civac, %0"::"r"(at):"memory");
+  off+=span;
+ }
+ __asm__ volatile("dsb sy":::"memory");
+ return true;
+}
 static const X9RenderEngine *render_engine;
 static bool render_published;
 extern "C" { int sweet_x9_render_payload_ready=0; }
@@ -219,8 +246,21 @@ class SweetX9RenderUserClient : public IOUserClient {
     return selector==X9RenderImportHost&&kr==KERN_PROTECTION_FAILURE?kIOReturnNotPermitted:kr;
    }
    // A write-combined BO has no kernel mapping; its pageable pages come from
-   // the VM zero-filled and enter no CPU cache, so neither bzero nor a clean.
+   // the VM zero-filled. Scrub them once (render_wc_scrub) instead of bzero.
    if(selector==X9RenderAllocate&&!wc)bzero(((IOBufferMemoryDescriptor *)memory)->getBytesNoCopy(),request.bytes);
+   if(wc) {
+    if(!render_wc_scrub(memory,request.bytes)) {
+     IOLog("X9 RENDER MEM: write-combined scrub failed size=%llu;no handle published\n",(unsigned long long)request.bytes);
+     memory->complete(direction);memory->release();return kIOReturnNoMemory;
+    }
+    static unsigned told;
+    if(told<4) {
+     told++;
+     IOByteCount span=0;uint64_t pa=memory->getPhysicalSegment(0,&span,kIOMemoryMapperNone);
+     IOLog("X9 RENDER WC: size=%llu first_pa=%llx wimg=%x (VM_WIMG_WCOMB=6 expected)\n",
+      (unsigned long long)request.bytes,(unsigned long long)pa,pa?pmap_cache_attributes((ppnum_t)(pa>>PAGE_SHIFT)):0xffffffffu);
+    }
+   }
    uint32_t handle=++context->next_handle;
    context->resources[slot]={memory,request.bytes,handle,request.flags,true,selector==X9RenderImportHost,false,selector==X9RenderImportHost};
    context->resources[slot].write_combined=wc;
