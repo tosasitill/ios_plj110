@@ -108,6 +108,15 @@ should be checked for compile errors before flashing.
 - Separate blocker: after a few animations the phone hard-hangs and reboots
   ~10 s later; disk log stops at 68.23 s with no panic text (logger thread
   stopped too). Needs pstore console right after the automatic reboot.
+  pstore console of the next freeze (`/tmp/1.txt`, x9-4e72465): panic at
+  54.946 s `kmem_alloc(0xfffffe100ab71600, 16384, 0x100021): failed with 3
+  @vm_kern.c:178`, caller 0xfffffe0007bf6070. 3 = KERN_NO_SPACE (VA, not
+  physical). The map pointer lies just inside the zones range, i.e. a
+  dynamically created submap, not the 256 GB data range. GPU use at the time:
+  backboardd ~335 MB native, another client ~95 MB, import handles up to 808.
+  Waiting for `nm -n` of x9-4e72465's unstripped kernel to symbolize the
+  caller (check slide with the earlier pc 0xfffffe0007bcaddc, expected in
+  x9_render_memory_cache_spans).
 - Still required on the Mac for building: `HelioDarwin/xnu/build-dxb/dxb`
   (frozen objects, EXPORT_HDRS, fakeroot, dxb/xnu), Xcode 15, llvm/lld 22,
   and the device root-manifest.json (local.json currently points into the
