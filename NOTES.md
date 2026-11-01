@@ -37,6 +37,7 @@
   open repairs pre-exec launchd-installed limits before native BO mappings,
   using a held proc reference,owner/task match and proc_list_lock.
 - Normal KERNEL ONLY build succeeded exit0:
+  Implementation/build commit:2cb9897.
   python3 -I x9/build/build.py --name mailbox215-sbrender-limit
   Compiled51/51 overlay objects (6 prebuilt), linked+stripped, shim packaged;
   build reports boot.img9420800 bytes. Log:
