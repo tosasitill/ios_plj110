@@ -1,3 +1,62 @@
+## UniXNU GPU comparison: patch inventory and backend ordering (2026-11-01)
+
+- User explicitly requests careful UniXNU GPU source comparison. Read local
+  AdrenoMetal and Adreno740 AGENTS/README, official component docs/catalog,
+  the16 AdrenoMetal bridge patches, relevant frontend/Rust bridge, A740
+  submit/cache publication code, and local Turnip ROA implementation.
+  No tests required by reference instructions were run: user explicitly
+  forbids extra tests and requested static work. No reference code edited.
+- Provenance from existing unixnu-gpu-20261030-inputs.json (not outer git HEAD):
+  AdrenoMetal main inventory ce5e19e33e05e1873d38d818e23cabfe0ac708c3;
+  A740 main5c8c1453c67d6ef6b10ec43ab1f8fc570a2f33e1; parity branches differ.
+  Vendored dirs lack independent.git; inventory is acquisition provenance,
+  not a fresh verification of exact local-file revision. Component build
+  entrypoint scripts/Cargo manifest were not present in this partial export;
+  do not claim full resolved UniXNU build inputs reconstructed. X9 active
+  build-general-metal.py points pan205 source; old prepare script720ef pin is
+  NOT authoritative active source. Recorded pan201 provenance base219f013...
+- Private comparison artifacts: .local/analysis-blur212/unixnu-objects.diff,
+  unixnu-frontend.diff, unixnu-gpu-comparison.json. JSON lists all16 patches
+  with applicability, equivalent mechanism vs unmatched status. No new report.
+- Correctness patches already represented in X9:0001 optional constant output
+  leafwise SCCP,0002 overlapping host-range/heap resource waits,0004 constant
+  global field load folding. Frontend draw count/baseVertex/index offset,
+  vertex descriptor, blend factors/write masks and pass dimensions match
+  reference forwarding. X9 has additional linked-function/pipeline fields;
+  removing them to match older reference would lose capabilities.
+- Cache/allocation changes0003/0009/0010/0011/0012/0014 have current mechanisms
+  (PrimingCache, KeptRenderPasses, FieldBytes/ViewportList, instantiate_draw_into,
+  command_uses_into, KeyMap); exact old patch equality is not asserted.
+  0005 uses a different decode/profile cache arrangement;0013 unchanged-rebind
+  optimization not fully matched. Neither is a demonstrated flicker repair.
+  0006 null-pipeline skip is failed-compile handling, not blur correctness.
+- Explicit deltas: UniXNU0008 enables AliasWrites for padded texture rows,
+  0016 guards A74016x4 store overreach; X9 holding() refuses such alias and
+  creates a shadow. Do NOT transplant16x4 geometry to Mali or bypass shadow
+  safety blindly. Live main IOSurface1256x2760 BGRA,row5120,plane0/0 is padded,
+  so extra-copy cost is relevant; no evidence this causes diagonal flicker.
+  0007 _RB4 two-plane RGB and0015 uninitialized two-plane shadow optimization
+  are not a match for that main single-plane BGRA source. X9 planar bridge
+  exists in NativeMetalExtras.rs; absence in Objects.rs was not a missing ABI.
+- Kernel publication differs intentionally: A740 publishes mapped BOs,
+  reasserts WC and audits IB/cache vs DRAM before ring submission, retaining
+  job handles through completion. X9 negotiates submission cache ownership
+  and delegates cache handoff to synchronous KMD; frontend does not repeat
+  UniXNU flushSurfaces. Old X9 WC audit observed no drift (see earlier notes).
+  Do not add unsynchronized user cache flushes during uncertain DMA ownership.
+- Most useful backend-specific distinction: local Turnip tu_pipeline.cc
+  tu6_emit_prim_mode_sysmem uses FLUSH_PER_OVERLAP_AND_OVERWRITE for ROA or
+  feedback, and parse_rasterization_order uses FLUSH_PER_OVERLAP in GMEM.
+  PanVK normal draws implement tile loads/Barrier waits and FPK restrictions;
+  primitive_barrier appears only in explicit cmd_fb_barrier. Both advertise
+  rasterizationOrderColorAttachmentAccess, so UniXNU does NOT automatically
+  use a storage-interlock route while X9 uses input attachments. Turnip snippet
+  is local reference backend source, not a proven exact UniXNU Turnip pin.
+- This makes framebuffer feedback ordering/FPK/HSR a concrete backend boundary
+  to compare further; fields differ by architecture, no direct field port is
+  justified. No confirmed root cause, no tests/build/device changes or shader
+  substitution. Mailbox212 remains staged.
+
 ## Flicker continuation: Arm's fetch/prepass contract and actual ROA flags (2026-11-01)
 
 - Read Arm primary documentation, not inference from descriptor names:
