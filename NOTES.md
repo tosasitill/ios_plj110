@@ -26,6 +26,12 @@ should be checked for compile errors before flashing.
   objects); importer committed as `x9/build/scripts/import-build-inputs.py`.
   Waiting for a third collector run; then import into scratch and add only
   the new headers to `x9/kernel/src` (keep the four edited files).
+  Third run (11:07 Mac time): 0 missing; 13 headers added to
+  `x9/kernel/src` (11 named relatively by debug info + macro-only
+  `lzfse_tunables.h`, `kern_exec_internal.h`). Importer notes about older
+  `x9_usb_log_protocol.h` (pan111) and `SweetSurface.h` (pan111/141) are
+  harmless: only x9_usb_log.c and SweetSurface/Framebuffer.cpp include them,
+  and those used the kept pan150/pan205 copies. Rebuild on the Mac pending.
 - Fix merge onto pan220: `poll_pause()` = spin 64x16us, then pan219's 100us
   sleeps x20, then 1ms; replaces pan219 `render_cache_wait()` and also covers
   `idle_as` and the fence wait. Framebuffer/scaler and coherency changes were
