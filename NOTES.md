@@ -1,4 +1,21 @@
-## Active:216 HSR rollback built, awaiting mailbox update/manual boot; visual fix unproven (2026-11-01)
+## Active:216 CANCELLED; restore215 HSR and prioritize vertex/triangle corruption (2026-11-01)
+
+- User explicitly rejected the HSR direction and now asks to first locate the
+  vertex/corner defect.216 is CANCELLED; its local output remains archival,
+  NOT a deployment candidate. No216 mailbox update or device boot occurred.
+  Device's last verified run remains215 + confirmed renderer task-limit fix.
+- Restored215 source patch03, build entrypoints/helper and215 allowlist from
+  930123a^; active local Mesa compile.rs/panvk_vX_cmd_draw.c restored from the
+  saved pre216 copies. Keep2cb9897 task-limit repair. No new build or device
+  operation. The historical216 handoff below is superseded in full.
+- Current narrow investigation: original draw indices/full vertex inputs,
+  buffer offsets/lifetimes and vertex-to-raster state. Prior six-index
+  captures do NOT validate count54 draws; viewport/scissor were not captured.
+  Scheduled/group/display and performance investigation are deferred at the
+  user's priority, not established root causes. Do not retry deindex210 or
+  relabel unused half-color/HSR/cache hypotheses as confirmed geometry bugs.
+
+## Historical:216 HSR rollback built but CANCELLED, never deployed (2026-11-01)
 
 - Implementation/build/216 allowlist commit:930123a. Runtime-evidence handoff
   commit:8857ca6. No CI run; the successful build was local.

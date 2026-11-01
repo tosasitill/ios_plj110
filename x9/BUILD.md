@@ -50,15 +50,12 @@ and allocation bounds are checked before binding; unsupported textures keep
 their shadow path. `X9 TEXTURE routes` logs direct imports, explicit-pitch
 images and fallback counters at the existing sampled surface-log cadence.
 
-Revision 216 retires 215's Kraid HSR metadata change for a single-variable
-visual-regression comparison. The original patch is preserved at
-`third_party/retired/03-kraid-hsr-metadata.patch`. Both full and incremental
-native entrypoints use `apply-source-patches.py --retire` to reverse it in
-already-patched Mesa snapshots, or require the original unpatched baseline.
-Neither direction accepts fuzzy matches or unexplained source drift. This
-returns Kraid metadata/DCD behavior to 214; it does not disable HSR globally,
-change the Apple shader inputs, or establish the cause of flicker. 215's
-diagnostic removal, 214's host-pitch imports/QoS and the renderer-limit fix stay.
+`03-kraid-hsr-metadata.patch` fills Kraid's previously empty fragment HSR
+metadata from its final scheduled instructions, following the retained BIR
+`va_gather_hsr_info.c` contract. Tile reads, centroid/coverage reads and work
+before ATEST/ZS_EMIT feed the existing DCD eligibility decisions. This neither
+enables the HSR prepass nor disables HSR globally. The first four tile-reading
+DCD decisions log `X9 HSR tile-read`; hardware flicker repair is not yet proven.
 
 Detailed Metal blur/graph/pixel capture is now opt-in, not normal rendering
 work. Default builds do not copy diagnostic setBytes data, retain diagnostic
