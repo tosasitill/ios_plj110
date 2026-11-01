@@ -10,6 +10,7 @@ IOReturn x9_render_memory_unmap(X9RenderContext *,const X9RenderVMEntry *);
 IOReturn x9_render_memory_cache(X9RenderContext *,X9RenderResource *,const X9RenderCacheRequest *);
 uint64_t x9_render_memory_publish(X9RenderContext *);
 void x9_render_memory_detached(X9RenderContext *);
+IOReturn x9_render_memory_reassert_wc(X9RenderContext *,uint64_t *,uint64_t *);
 
 /* Kernel-only batch. No user pointer or access declaration is accepted here.
  * Each span belongs to one retained resource, sorted and disjoint. */

@@ -1,3 +1,42 @@
+## Control Center photo: triangle corruption / WC invariant (2026-11-01)
+
+- User provided control-center photo and new /Users/tosasitill/2.txt.
+  Preserved `.local/analysis-blur-photo/control-center.png` and runtime.raw.log
+  (~175+ seconds). Photo shows dark/light splits along panel diagonals and
+  long thin triangles across panels, while many glyphs remain recognizable.
+  This suggests draw/vertex/interpolation or stale per-draw data; it does NOT
+  identify a specific shader/compiler defect on its own.
+- No GPU DeviceLost or PosterBoard CRASH captured. Still visually missing
+  wallpaper per user's prior feedback. Do not change wallpaper scope now.
+  Active timing batches (jobs>=20) median storage 351 us, pre-cache 4749 us,
+  post-cache 3105 us, wait 9633 us. Workloads differ from earlier captures;
+  no measured FPS gain claim for last candidate.
+- Read Metal draw parameter forwarding, setBytes copies, Vulkan cmd_draw/
+  cmd_draw_indexed dispatch, PanVK varying descriptors and v14 interpolation
+  lowering. No concrete forwarding bug established. Do not substitute a
+  shader or blame optional _blendWithAlphaMaskB0 probing without proof.
+- Ported the missing UniXNU NativeAdrenoReassertWriteCombined invariant from
+  `.local/x9/work/references/UniXNU-gpu/Adreno740/NativeAdrenoCpu.cpp`:
+  before submission, check physical page WIMG for held native WC BOs, restore
+  WCOMB only where changed, verify it took effect, fail before GPU exposure
+  on invalid descriptor/range or failed restoration. Uses X9 16 KiB pages,
+  not reference's 4 KiB pages. Host imports never modified. Existing pmap
+  transition is responsible for syncing formerly cacheable lines.
+- Logs `X9 RENDER WC CHECK` accumulated checked/restored pages, last restored
+  count, average check time and return code. This addresses a real missing
+  guard for skipping maintenance; runtime attribute drift is still unproven.
+  If restored remains zero, do NOT present this as cause/fix for the photo.
+  Checking adds CPU work, included in pre-cache timings; measure overhead.
+- Build `python3 -I x9/build/build.py --name mailbox208-wc-reassert` exit 0,
+  `x9/out/mailbox208-wc-reassert/boot.img` 9,420,800 bytes. Local build only,
+  no CI/additional tests or artifact reinspection. Existing 208 mailbox works;
+  no device operations or reboot. NOT hardware verified.
+- Next user run should reproduce Control Center and provide WC CHECK restored
+  counters plus visual result. If no drift, investigate actual per-draw vertex/
+  index/varying behavior with bounded capture rather than more cache guesses.
+  Shared imported memory maintenance remains the major CPU cost and must
+  retain correctness until a sound submission resource contract is added.
+
 ## Blur flicker / frame rate: explicit GPU cache publication (2026-11-01)
 
 - User prioritizes polygon flicker in blurred UI and low frame rate; wallpaper

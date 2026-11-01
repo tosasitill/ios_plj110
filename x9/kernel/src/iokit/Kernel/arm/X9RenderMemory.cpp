@@ -3,6 +3,37 @@
 #include <kern/task.h>
 #include <kern/cpu_data.h>
 #include <libkern/libkern.h>
+#include <vm/memory_types.h>
+extern "C" unsigned int pmap_cache_attributes(ppnum_t);
+extern "C" void pmap_set_cache_attributes(ppnum_t,unsigned int);
+
+/* UniXNU NativeAdrenoReassertWriteCombined, adapted to retained 16 KiB
+ * IOMemoryDescriptors. Never alter host imports: only driver-owned WC BOs
+ * qualify. Creation-time mode is not proof that later views kept that mode.
+ * pmap's attribute transition synchronizes cacheable lines before WC use. */
+IOReturn x9_render_memory_reassert_wc(X9RenderContext *c,uint64_t *checked,uint64_t *reset) {
+ if(!c||!checked||!reset||c->disabled||c->exposed)return kIOReturnNotReady;
+ *checked=*reset=0;
+ for(auto &r:c->resources)if(r.memory&&r.write_combined) {
+  if(r.imported||!r.prepared||(r.bytes&(PAGE_SIZE-1)))return kIOReturnBadArgument;
+  for(uint64_t off=0;off<r.bytes;) {
+   IOByteCount bytes=0;
+   uint64_t pa=r.memory->getPhysicalSegment(off,&bytes,kIOMemoryMapperNone);
+   if(bytes>r.bytes-off)bytes=r.bytes-off;
+   if(!pa||!bytes||((pa|bytes)&(PAGE_SIZE-1))||pa+bytes<pa)return kIOReturnBadArgument;
+   for(uint64_t at=pa;at<pa+bytes;at+=PAGE_SIZE) {
+    ppnum_t page=(ppnum_t)(at>>PAGE_SHIFT);++*checked;
+    if((pmap_cache_attributes(page)&VM_WIMG_MASK)!=VM_WIMG_WCOMB) {
+     pmap_set_cache_attributes(page,VM_WIMG_WCOMB);++*reset;
+     if((pmap_cache_attributes(page)&VM_WIMG_MASK)!=VM_WIMG_WCOMB)return kIOReturnNotReady;
+    }
+   }
+   off+=bytes;
+  }
+ }
+ __asm__ volatile("dsb sy":::"memory");
+ return kIOReturnSuccess;
+}
 IOReturn x9_render_memory_open(X9RenderContext *c) {
  if(!c||c->page_table||c->exposed||c->disabled)return kIOReturnBadArgument;
  c->page_table=x9_render_vm_create();return c->page_table?kIOReturnSuccess:kIOReturnNoMemory;

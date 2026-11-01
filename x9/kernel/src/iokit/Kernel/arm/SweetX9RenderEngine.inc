@@ -278,6 +278,19 @@ static IOReturn render_submit(X9RenderContext *c,const X9RenderSubmission *reque
  auto *g=render_group(c,request->group);if(!g||c->disabled)return kIOReturnBadArgument;
  vm_offset_t gpu=resident->gpu;
  const bool coherent=resident->coherent;
+ {
+  uint64_t began=mach_absolute_time(),checked=0,reset=0,ns=0;
+  IOReturn kr=x9_render_memory_reassert_wc(c,&checked,&reset);
+  absolutetime_to_nanoseconds(mach_absolute_time()-began,&ns);
+  static uint64_t calls=0,pages=0,resets=0,total_ns=0,last=0;
+  calls++;pages+=checked;resets+=reset;total_ns+=ns;
+  if(reset||kr!=kIOReturnSuccess||!last||mach_absolute_time()>=last) {
+   IOLog("X9 RENDER WC CHECK: calls=%llu pages=%llu restored=%llu last_restored=%llu avg_us=%llu kr=%x\n",
+    calls,pages,resets,reset,total_ns/calls/1000,kr);
+   last=deadline_ms(2000);
+  }
+  if(kr!=kIOReturnSuccess)return kr;
+ }
  const char *phase="storage-sync";
  if(gr64(gpu,0x2440))return kIOReturnBusy;
  for(unsigned i=0;i<resident->slot_count;i++) {
