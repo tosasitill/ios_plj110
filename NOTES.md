@@ -1,4 +1,36 @@
-## Active:215 renderer task-limit fix built; manual runtime pending (2026-11-01)
+## Active:215 task-limit runtime confirmed; visual errors persist, isolate HSR rollback (2026-11-01)
+
+- User confirms flicker is still obvious and rendering errors remain after
+  the renderer-limit candidate. Do not report the visual/FPS objective fixed.
+- Latest /Users/tosasitill/2.txt contains TWO boots. Full capture preserved at
+  .local/analysis-sbrender-limit/runtime-20261101-225011.raw.log (1570353 bytes).
+  The second Darwin header begins at raw line7428; the old215 prefix includes
+  the previously recorded15 renderer crashes and is NOT a new regression.
+  New boot alone: .local/analysis-sbrender-limit/current-run.log (763920 bytes),
+  ends681.390s. Selected evidence and boot identity are in the same directory.
+- Runtime proves the 2cb9897 repair executes: plugin215 at1.305s;
+  37.748s SBRendererService pid283 inactive16->128MiB; task limit134217728
+  persists through native_bytes34291712/footprint30228880 at38.468s and
+  Metal factory initialization. This boot contains0 SBRendererService,
+  backboardd or SpringBoard CRASH lines,0 DeviceLost and0 panic. This confirms
+  disappearance of the captured initialization code7 kill loop, NOT pixels.
+- Active display windows record38..55 copies per~2s (roughly19..27 software
+  updates/s,NOT measured panel FPS),missed0 and TE timeouts0. Late job averages
+  still pay cache~4..5.5ms and GPU wait~12..15.5ms; neither cost is fixed by the
+  task limit. No weakened cache/coherency/completion guard is justified.
+- At96.058s and679.574s frame records explicitly clear all four surfaces
+  (set=clear=80000007);675.642s surfaces restore and render/display submissions
+  resume. Long black/idle windows do NOT prove GPU hang; reason for upper-layer
+  clear is unresolved. Capture remains inputs0/pixels0; old WSI pitch fallback
+  and _blendWithAlphaMaskB0 lookup refusal are not newly established causes.
+- Next candidate216 will ONLY retire 03-kraid-hsr-metadata.patch, including
+  reverse migration of already-patched local Mesa, while keeping215 diagnostic
+  removal,214 host-pitch imports/QoS and confirmed renderer task-limit repair.
+  This is a single-variable visual-regression comparison, not proof HSR caused
+  the corruption. Apple shader/executable bytes remain unchanged. Normal build
+  only; no extra tests/artifact inspection, no automatic device boot/flash.
+
+## 215 renderer task-limit fix built; subsequent runtime recorded above (2026-11-01)
 
 - User reports215 has MORE rendering errors, still flickers/low FPS. Latest
   /Users/tosasitill/2.txt preserved separately as
