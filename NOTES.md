@@ -59,6 +59,27 @@ should be checked for compile errors before flashing.
   off. pan219 had no preemption-off section. Fixed: `kIOMapPrefault` on the
   alias and a page-touch pass over imported spans before the loop. Rebuild +
   run pending; this is a pan220 bug, independent of d62cfc7.
+- Run of x9-4e72465 (`/tmp/2.txt`, ~50 s USB log; user: freezes after a few
+  animations, rendering errors). Import panic gone; desktop frames flow.
+  Observed:
+  - `X9 RENDER timing` per job: start ~0.55 ms, storage ~0.45, retire ~0.35
+    (poll_pause works), but pre_cache 4-15 ms + post_cache 4-14 ms, wait
+    0.4-13.6 ms, max_job up to 69 ms; worsens over time.
+  - `X9 RENDER cache`: pre_bytes_avg grows 27 MB -> 194 MB, post ~188 MB per
+    job; mapped spans 16 -> 677. Every job CIVACs the union of ALL
+    CPU-exposed client mappings twice (submission ABI has no resource list).
+  - backboardd native_bytes peaks 519 MB (client limit 512 MB), drops to
+    ~60-80 MB later: churn, not a pure leak.
+  - Display: 10-15 copies/s, gpu_defer 26-54 per 2 s (vsync tick finds the
+    render owner lock held by long submits). Only single-layer swaps
+    (no `X9 COMPOSE`), two black frames from explicit layer removal.
+  - `SWEET SCALER: sel 1 in 0/368` twice at ~45 s, now refused.
+  Guess: perceived freeze = cache-maintenance-bound submits (20-70 ms) times
+  ~2.3 submits per frame plus display deferral; log ends at 50.2 s while
+  still running, so a real hang after that is not captured.
+  Fix direction needs a decision: per-submission resource list from the
+  runtime (ABI + PanVK/bridge + plugin rebuild + new allowlist) vs. other
+  ways to avoid full-union maintenance.
 - Still required on the Mac for building: `HelioDarwin/xnu/build-dxb/dxb`
   (frozen objects, EXPORT_HDRS, fakeroot, dxb/xnu), Xcode 15, llvm/lld 22,
   and the device root-manifest.json (local.json currently points into the
