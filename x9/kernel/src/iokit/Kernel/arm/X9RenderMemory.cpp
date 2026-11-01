@@ -37,6 +37,12 @@ IOReturn x9_render_memory_cache_spans(X9RenderContext *c,X9RenderResource *r,
      (i&&span.begin<prior_end))return kIOReturnBadArgument;
   total+=span.end-span.begin;prior_end=span.end;
  }
+ /* A write-combined BO's lines never enter a CPU cache (no cacheable alias:
+  * the memory entry's cache mode covers the pages and every view), and it
+  * has no kernel mapping to address anyway: nothing to maintain. */
+ if(r->write_combined) {
+  r->initial_cache_clean=true;*completed_bytes=total;return kIOReturnSuccess;
+ }
  /* Prefault: the cache loop below runs with preemption disabled, where a
   * lazily populated kernel alias of task memory cannot take a page fault. */
  IOOptionBits options=kIOMapAnywhere|kIOMapPrefault;

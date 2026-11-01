@@ -262,6 +262,7 @@ static IOReturn render_submit(X9RenderContext *c,const X9RenderSubmission *reque
  uint64_t private_skip[2]={0,0},initial_bytes=0,fallback_bytes=0;
  uint64_t reach_saved[2]={0,0},import_bytes[2]={0,0},full_import_bytes[2]={0,0};
  uint64_t coherent_skip[2]={0,0};
+ uint64_t wc_skip[2]={0,0};
  RenderOwner owner;if(!owner.locked||!render_ready()||!c||!request||!reply||c->exposed)return kIOReturnNotReady;
  times[1]=mach_absolute_time();
  auto *g=render_group(c,request->group);if(!g||c->disabled)return kIOReturnBadArgument;
@@ -312,6 +313,7 @@ static IOReturn render_submit(X9RenderContext *c,const X9RenderSubmission *reque
   * fence storage keep their explicit syncs regardless, and flush_gpu, group
   * start/halt and every uncertainty check stay unchanged. */
  for(auto &r:c->resources)if(r.memory) {
+  if(r.write_combined){wc_skip[0]+=r.bytes;continue;}   // never cached, see X9RenderResource
   if(coherent&&r.cpu_exposed) {
    coherent_skip[0]+=r.cache_end>r.cache_begin?r.cache_end-r.cache_begin:0;continue;
   }
@@ -433,6 +435,7 @@ static IOReturn render_submit(X9RenderContext *c,const X9RenderSubmission *reque
  times[6]=mach_absolute_time();
  for(unsigned i=0;i<3;i++)if(active&(1u<<i))g->producer[i]=expected[i];
  for(auto &r:c->resources)if(r.memory&&(r.flags&X9RenderGPUWrite)) {
+  if(r.write_combined){wc_skip[1]+=r.bytes;continue;}
   if(coherent&&r.cpu_exposed) {
    coherent_skip[1]+=r.write_end>r.write_begin?r.write_end-r.write_begin:0;continue;
   }
@@ -463,6 +466,7 @@ static IOReturn render_submit(X9RenderContext *c,const X9RenderSubmission *reque
   static uint64_t skipped_total[2]={0,0},initial_total=0,fallback_total=0;
   static uint64_t reach_total[2]={0,0},import_total[2]={0,0},full_import_total[2]={0,0};
   static uint64_t coherent_total[2]={0,0};
+  static uint64_t wc_total[2]={0,0};
   static uint64_t hole_total[2]={0,0},span_total[2]={0,0};
   static uint64_t plan_rebuilds=0,plan_reuses=0;
   if(!began)began=times[0];
@@ -476,7 +480,7 @@ static IOReturn render_submit(X9RenderContext *c,const X9RenderSubmission *reque
   cache_total[0]+=cache_bytes[0];cache_total[1]+=cache_bytes[1];ready_mask|=shader_ready_seen;
   skipped_total[0]+=private_skip[0];skipped_total[1]+=private_skip[1];
   initial_total+=initial_bytes;fallback_total+=fallback_bytes;
-  for(unsigned i=0;i<2;i++){reach_total[i]+=reach_saved[i];import_total[i]+=import_bytes[i];full_import_total[i]+=full_import_bytes[i];coherent_total[i]+=coherent_skip[i];}
+  for(unsigned i=0;i<2;i++){reach_total[i]+=reach_saved[i];import_total[i]+=import_bytes[i];full_import_total[i]+=full_import_bytes[i];coherent_total[i]+=coherent_skip[i];wc_total[i]+=wc_skip[i];}
   if(elapsed>=2000000000ULL) {
    IOLog("X9 RENDER timing: elapsed_ms=%llu jobs=%llu owner_us=%llu pre_cache_us=%llu storage_us=%llu start_us=%llu wait_us=%llu retire_us=%llu post_cache_us=%llu max_job_us=%llu;averages,not shader time\n",
     elapsed/1000000,count,total[0]/count/1000,total[1]/count/1000,total[2]/count/1000,total[3]/count/1000,
@@ -494,7 +498,9 @@ static IOReturn render_submit(X9RenderContext *c,const X9RenderSubmission *reque
    IOLog("X9 RENDER cache-plan: builds=%llu reuses=%llu;mapping mutation invalidates,shared cache ops still per submission\n",plan_rebuilds,plan_reuses);
    plan_rebuilds=plan_reuses=0;
    for(unsigned i=0;i<2;i++)hole_total[i]=span_total[i]=0;
-   for(unsigned i=0;i<2;i++)reach_total[i]=import_total[i]=full_import_total[i]=coherent_total[i]=0;
+   IOLog("X9 RENDER cache-wc: jobs=%llu pre_skip_avg=%llu post_skip_avg=%llu;write-combined BOs need no CPU maintenance\n",
+    count,wc_total[0]/count,wc_total[1]/count);
+   for(unsigned i=0;i<2;i++)reach_total[i]=import_total[i]=full_import_total[i]=coherent_total[i]=wc_total[i]=0;
    cache_total[0]=cache_total[1]=ready_mask=0;
    skipped_total[0]=skipped_total[1]=initial_total=fallback_total=0;
    began=times[7];count=0;bzero(total,sizeof(total));max_ns=0;

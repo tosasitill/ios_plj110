@@ -4,6 +4,7 @@
 #include <IOKit/IOService.h>
 #include <IOKit/IOLib.h>
 #include <kern/task.h>
+#include <kern/clock.h>
 #include <mach/mach_vm.h>
 #include <mach/vm_region.h>
 #include <vm/vm_map.h>
@@ -91,6 +92,49 @@ class SweetX9RenderUserClient : public IOUserClient {
    (unsigned long long)get_task_phys_footprint(context->owner),
    (unsigned long long)get_task_phys_footprint_limit(context->owner));
  }
+ /* Kernel-side budget. The caps keep reporting X9_RENDER_CLIENT_LIMIT, which
+  * plugins built before this change require to be exactly 512 MiB; enforcement
+  * may be larger. backboardd reached 512 MiB within a minute of animations and
+  * never recovered from the refusals (no desktop until reboot). Write-combined
+  * BOs need no CPU maintenance, so a larger budget does not lengthen submits.
+  * x9_gpu_client_mb=<MiB> overrides; never below the reported limit. */
+ static uint64_t client_budget() {
+  static uint64_t budget;
+  if(!budget) {
+   uint32_t mb=1024;PE_parse_boot_argn("x9_gpu_client_mb",&mb,sizeof(mb));
+   uint64_t bytes=(uint64_t)mb<<20;
+   budget=bytes<X9_RENDER_CLIENT_LIMIT?X9_RENDER_CLIENT_LIMIT:bytes;
+  }
+  return budget;
+ }
+ static bool write_combined_bos() {
+  static int enabled=-1;
+  if(enabled<0){int arg=1;PE_parse_boot_argn("x9_bo_wc",&arg,sizeof(arg));enabled=arg!=0;}
+  return enabled!=0;
+ }
+ /* Every 2 s per client (and on a budget refusal): what is alive, how much
+  * came and went, and how much has stayed for 30 s or more, to tell a leak
+  * from a high working set. */
+ void live_report(const char *why,bool force) {
+  uint64_t now=mach_absolute_time(),period=0,old=0;
+  nanoseconds_to_absolutetime(2000000000ULL,&period);nanoseconds_to_absolutetime(30000000000ULL,&old);
+  if(!force&&context->live_report_at&&now-context->live_report_at<period)return;
+  context->live_report_at=now;
+  uint32_t count=0,wc=0,imported=0,aged=0,big=0;uint64_t bytes=0,wc_bytes=0,imported_bytes=0,aged_bytes=0;
+  for(auto &r:context->resources)if(r.memory) {
+   count++;bytes+=r.bytes;
+   if(r.write_combined){wc++;wc_bytes+=r.bytes;}
+   if(r.imported){imported++;imported_bytes+=r.bytes;}
+   if(r.created&&now-r.created>=old){aged++;aged_bytes+=r.bytes;}
+   if(r.bytes>=(8u<<20))big++;
+  }
+  IOLog("X9 RENDER LIVE: pid=%d why=%s resources=%u MiB=%llu wc=%u/%lluMiB imported=%u/%lluMiB big8M=%u old30s=%u/%lluMiB "
+   "window alloc=%u/%lluMiB release=%u/%lluMiB mappings=%u budget=%lluMiB\n",
+   pid_from_task(context->owner),why,count,bytes>>20,wc,wc_bytes>>20,imported,imported_bytes>>20,big,aged,aged_bytes>>20,
+   context->window_allocs,context->window_alloc_bytes>>20,context->window_releases,context->window_release_bytes>>20,
+   context->mapping_count,client_budget()>>20);
+  context->window_allocs=context->window_releases=0;context->window_alloc_bytes=context->window_release_bytes=0;
+ }
  X9RenderResource *resource(uint32_t handle) {
   for(auto &r:context->resources)if(r.memory&&r.handle==handle)return &r;
   return nullptr;
@@ -134,9 +178,10 @@ class SweetX9RenderUserClient : public IOUserClient {
       request.host_address>=0x0000800000000000ULL||request.bytes>0x0000800000000000ULL-request.host_address))return kIOReturnBadArgument;
    // Budget exhaustion is not a malformed request or a lost GPU. Nothing has
    // been pinned, published or exposed yet: userspace may free and retry.
-   if(context->allocated_bytes>X9_RENDER_CLIENT_LIMIT||request.bytes>X9_RENDER_CLIENT_LIMIT-context->allocated_bytes) {
+   if(context->allocated_bytes>client_budget()||request.bytes>client_budget()-context->allocated_bytes) {
     IOLog("X9 RENDER MEM: budget size=%llu used=%llu limit=%llu;no handle published,recoverable\n",
-     (unsigned long long)request.bytes,(unsigned long long)context->allocated_bytes,(unsigned long long)X9_RENDER_CLIENT_LIMIT);
+     (unsigned long long)request.bytes,(unsigned long long)context->allocated_bytes,(unsigned long long)client_budget());
+    live_report("budget",true);
     return kIOReturnNoMemory;
    }
    unsigned slot=0;while(slot<X9_RENDER_MAX_MAPPINGS&&context->resources[slot].memory)slot++;
@@ -149,8 +194,11 @@ class SweetX9RenderUserClient : public IOUserClient {
    // with GPURead after a no-handle protection refusal, and retain that grant.
    IODirection direction=selector==X9RenderImportHost&&!(request.flags&X9RenderGPUWrite)?
     kIODirectionOut:kIODirectionInOut;
+   const bool wc=selector==X9RenderAllocate&&write_combined_bos();
    IOMemoryDescriptor *memory=selector==X9RenderAllocate?
-    IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,kIODirectionInOut|kIOMemoryKernelUserShared,request.bytes,16384):
+    (wc?IOBufferMemoryDescriptor::inTaskWithOptions(TASK_NULL,
+      kIODirectionInOut|kIOMemoryMapperNone|kIOMemoryPageable|kIOMapWriteCombineCache,request.bytes,16384):
+     IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,kIODirectionInOut|kIOMemoryKernelUserShared,request.bytes,16384)):
     IOMemoryDescriptor::withAddressRange(request.host_address,request.bytes,direction,context->owner);
    if(!memory) {
     IOLog("X9 RENDER MEM: kernel allocation failed size=%llu used=%llu\n",(unsigned long long)request.bytes,(unsigned long long)context->allocated_bytes);
@@ -170,10 +218,17 @@ class SweetX9RenderUserClient : public IOUserClient {
     memory->release();
     return selector==X9RenderImportHost&&kr==KERN_PROTECTION_FAILURE?kIOReturnNotPermitted:kr;
    }
-   if(selector==X9RenderAllocate)bzero(((IOBufferMemoryDescriptor *)memory)->getBytesNoCopy(),request.bytes);
+   // A write-combined BO has no kernel mapping; its pageable pages come from
+   // the VM zero-filled and enter no CPU cache, so neither bzero nor a clean.
+   if(selector==X9RenderAllocate&&!wc)bzero(((IOBufferMemoryDescriptor *)memory)->getBytesNoCopy(),request.bytes);
    uint32_t handle=++context->next_handle;
    context->resources[slot]={memory,request.bytes,handle,request.flags,true,selector==X9RenderImportHost,false,selector==X9RenderImportHost};
+   context->resources[slot].write_combined=wc;
+   context->resources[slot].initial_cache_clean=wc;
+   context->resources[slot].created=mach_absolute_time();
    context->allocated_bytes+=request.bytes;
+   context->window_allocs++;context->window_alloc_bytes+=request.bytes;
+   live_report("periodic",false);
    if(request.bytes>=(4u<<20))footprint(selector==X9RenderImportHost?"import":"allocate");
    X9RenderBuffer reply={X9_RENDER_ABI,handle,handle,request.flags,request.bytes};
    memcpy(a->structureOutput,&reply,sizeof(reply));return kIOReturnSuccess;
@@ -185,7 +240,9 @@ class SweetX9RenderUserClient : public IOUserClient {
    if(context->exposed||mapping_exists(r))return kIOReturnBusy;
    if(r->cache_mapping){r->cache_mapping->release();r->cache_mapping=nullptr;}
    if(r->prepared)r->memory->complete(r->memory->getDirection());
-   r->memory->release();context->allocated_bytes-=r->bytes;bzero(r,sizeof(*r));return kIOReturnSuccess;
+   r->memory->release();context->allocated_bytes-=r->bytes;
+   context->window_releases++;context->window_release_bytes+=r->bytes;
+   bzero(r,sizeof(*r));return kIOReturnSuccess;
   }
   if(selector==X9RenderMap||selector==X9RenderUnmap) {
    if(a->structureInputSize!=sizeof(X9RenderMapping)||a->structureOutputSize)return kIOReturnBadArgument;

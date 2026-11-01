@@ -23,6 +23,12 @@ struct X9RenderResource {
  uint64_t cache_begin,cache_end,write_begin,write_end;
  /* Kernel alias retained only while this prepared import remains alive. */
  IOMemoryMap *cache_mapping;
+ /* Native allocation made write-combined (UniXNU Adreno740 systemDescriptor):
+  * pageable, no kernel mapping, the memory entry's cache mode applies to the
+  * pages and every client view, so no CPU cache ever holds its lines and it
+  * needs no CPU maintenance. Imports keep their owner's cacheable attribute. */
+ bool write_combined;
+ uint64_t created;   /* mach_absolute_time() at allocation/import */
 };
 struct X9RenderVMEntry {
  X9RenderResource *resource;
@@ -37,6 +43,9 @@ struct X9RenderContext {
  X9RenderVMEntry mappings[X9_RENDER_MAX_MAPPINGS];
  uint64_t allocated_bytes,next_submission,completed_submission;
  uint32_t next_handle,mapping_count;
+ /* Live-resource telemetry window (X9 RENDER LIVE), under the context lock. */
+ uint64_t live_report_at,window_alloc_bytes,window_release_bytes;
+ uint32_t window_allocs,window_releases;
  X9RenderPageTable *page_table;
  void *engine_private;
  bool exposed,disabled,engine_open;

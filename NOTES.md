@@ -80,6 +80,32 @@ should be checked for compile errors before flashing.
   Fix direction needs a decision: per-submission resource list from the
   runtime (ABI + PanVK/bridge + plugin rebuild + new allowlist) vs. other
   ways to avoid full-union maintenance.
+- Run after 608d5dc (`/tmp/2.txt`): no panic, kernel alive to 110 s, keys and
+  sleep/wake work, but no desktop: backboardd's native GPU memory climbed
+  ~60 -> 512 MiB (16 MiB runtime pool blocks per pan204 + ~13.9 MiB
+  full-screen textures), the 512 MiB budget refused allocations at 63.8 s
+  (also 56 `X9 PANVK PRIV` driver-private refusals), backboardd never
+  submitted again (swap_id frozen at 392). GPU memory is not in the task
+  footprint (footprint ~125 MB vs native 400+ MB), so iOS memory pressure
+  never sees it.
+- Fix direction taken (user: "method A", reference UniXNU): UniXNU
+  Adreno740 `systemDescriptor()` allocates BOs as
+  `IOBufferMemoryDescriptor::inTaskWithOptions(nullptr, InOut|MapperNone|
+  Pageable|kIOMapWriteCombineCache)` + prepare(): no kernel mapping, the
+  memory entry's WC mode covers pages and every client view, so no CPU
+  maintenance. X9 now does the same for X9RenderAllocate (boot-arg
+  `x9_bo_wc=0` reverts), skips WC BOs in pre/post maintenance (only imports
+  remain), enforces a kernel budget of 1 GiB (`x9_gpu_client_mb`) while caps
+  still report 512 MiB (X9RenderResources.c in the 207 plugin rejects a
+  larger reported value), and logs `X9 RENDER LIVE` per client every 2 s and
+  on refusal (alive/WC/imported/old30s/window alloc+release) to tell a leak
+  from a high working set. UniXNU also re-asserts WC page attributes at
+  submit (NativeAdrenoReassertWriteCombined) because a view can turn out
+  cacheable; not ported yet - watch for stale-content rendering errors.
+  This makes option 1 mostly unnecessary (imports ~30 MB remain).
+- User-supplied references for MT6993 kernel behaviour:
+  github.com/oppo-source/android_kernel_oppo_mt6993,
+  github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_mt6993.
 - Option 1 (user chose 2026-11-01): narrow per-submit cache maintenance.
   Findings from metal2vulkan 219f013 + pan194-205 (cloned to the session
   scratchpad, all patches apply):
