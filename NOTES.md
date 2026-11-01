@@ -1,3 +1,45 @@
+## Static/runtime-input continuation: exact blur vertex route (2026-11-01)
+
+- Reused already extracted original AIR in .local/analysis-blur-root/
+  downsample_blur_vert_lph.ll and narrow_blur_7_frag_lph.ll; no binary changes,
+  new disassembly, builds or tests. Important scope correction: downsample
+  vertex declares half4 color as air.arg_unused and does NOT output it. Its
+  only outputs are float4 position and float2 UV. Mixed half-color varying
+  packing is therefore not reachable in this vertex/fragment blur pair;
+  fixed/std/luma paths still have separate contracts.
+- Decoded mailbox212 CPU capture and evaluated the actual original AIR:
+  clip[r] = sum(matrix[c*4+r]*position[c]); uv = input_uv*texmat.xy+texmat.zw.
+  Private derived .local/analysis-blur212/vertex-route.json contains19 draws
+  using downsample_blur_vert_lph. Excludes15/16 variable_blur_vert_lph, whose
+  source formula has not been established. Captured four corner positions
+  yield finite clip/UV and w1, so no perspective singularity at those inputs.
+  This evaluates CPU snapshots, not GPU vertex output or later buffer bytes.
+- Resolved the old8x8 alpha-footprint lead quantitatively: captured narrow27
+  draw8 clip x=-1.03125..-0.75, y=1.03125..0.75 maps through a64x64 viewport
+  to pixel rectangle[-1,8] in both axes; clipped coverage0..8 is compatible
+  with the readback's8x8 alpha bbox. Draw7's preceding geometry maps to1..10
+  on114x73. Thus the final texture's small footprint is already present in
+  the submitted geometry; cannot call it a broken full64x64 rasterization.
+  Matching a particular readback window still needs draw identity/viewport
+  correspondence; no claim of captured polygon defect or repair.
+- Exact narrow7 fragment source reads float2 offsets at0/8, half weights at64,
+  divide half at80, and EDR scale half from fragment buffer6. Uses four samples,
+  optional division by max(alpha,~0.001), then scales RGB only, preserving alpha.
+  Live19/20 have weight0=0.5 and other weights0, near-zero first offsets and
+  divide0/1. Tiny offset alone is consistent with a near-identity blur; no
+  evidence to label it corrupted. AIR layout/GEP uses element alloc_size and
+  explicit datalayout vector alignment: float2 stride8, weights64, divide80,
+  struct alloc88. No demonstrated std140-style stride16 mistranslation.
+- Critical evidence limits: X9BlurCapture.inc caps indices at MIN(count,6).
+  count54 draws1/4/6 cover only their first quad; remaining48 indices and
+  vertices have NOT been validated. Historical input/deindex conclusions
+  must not exclude the whole multi-quad draw. Fragment capture only stage2
+  slot1; EDR scale slot6 is absent. Base bridge forwards arbitrary buffer
+  index, so missing capture is NOT evidence that slot6 is unbound.
+- No tests/build/device action or speculative patch; mailbox212 unchanged.
+  Root cause unresolved. Next concrete source/evidence scope: remaining
+  multi-quad inputs and EDR binding, not unused half-color blur varyings.
+
 ## Static continuation: PanVK cache flush and meta state restoration (2026-11-01)
 
 - Completed source trace of global barrier -> CmdPipelineBarrier2 ->
