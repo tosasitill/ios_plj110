@@ -3,7 +3,7 @@
 // add synchronization/work; an improvement on this build is not a repair claim.
 // No draw, shader, attachment store action or handler ordering is substituted.
 - (void)tracePixelSelect:(bool)blur {
- if(!blur||self.commandBuffer.tracePixelWindow)return;
+ if(!captureOptions().pixels||!blur||self.commandBuffer.tracePixelWindow)return;
  static std::mutex mutex;static unsigned windows;static uint64_t last,lastCB;
  const uint64_t now=nowUs();
  {
@@ -18,6 +18,7 @@
  NBLOG(@"X9 PIXEL WINDOW: pid=%u window=%u cb=%llu",(unsigned)getpid(),self.commandBuffer.tracePixelWindow,(unsigned long long)self.commandBuffer.traceID);
 }
 - (void)tracePixelCopy:(NBTexture *)texture role:(NSString *)role {
+ if(!captureOptions().pixels)return;
  NBCommandBuffer *cb=self.commandBuffer;
  if(!texture||cb.encodeFailure||!cb.tracePixelWindow||cb.tracePixelCount>=24)return;
  const uint64_t w=texture.width,h=texture.height;

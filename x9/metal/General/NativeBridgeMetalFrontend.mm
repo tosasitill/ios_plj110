@@ -26,6 +26,7 @@
 #include <mach-o/loader.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#include <sys/sysctl.h>
 #include <CommonCrypto/CommonDigest.h>
 #include "bridge/NativeMetalObjects.h"
 #include "NativeBridgeMetalFrontend.h"
@@ -50,6 +51,33 @@ static std::atomic<uint64_t> gPasses,gDraws,gPassPixels,gDispatches,gBlits,gBigg
 // Where the time goes on the CPU side of the bridge: pipeline, library and function creation (count, total and slowest, in microseconds), and the
 // last commits with what each held and how long the GPU took (commit to completion).
 static uint64_t nowUs() {return clock_gettime_nsec_np(CLOCK_UPTIME_RAW)/1000;}
+// Diagnostic state must not retain resources, copy setBytes, format render
+// graphs or add GPU readbacks on the normal path. Opt in at boot, once per
+// process; pixel readback is a separate, explicitly intrusive option.
+struct X9CaptureOptions {bool inputs=false,pixels=false;};
+static const X9CaptureOptions &captureOptions() {
+ static const X9CaptureOptions options=[] {
+  X9CaptureOptions out;
+  char args[4096]={};size_t bytes=sizeof(args)-1;
+  if(sysctlbyname("kern.bootargs",args,&bytes,nullptr,0))return out;
+  args[sizeof(args)-1]=0;
+  auto enabled=[&](const char *key) {
+   const size_t n=strlen(key);
+   for(const char *p=args;*p;) {
+    while(*p && (unsigned char)*p<=32)++p;
+    const char *end=p;while(*end && (unsigned char)*end>32)++end;
+    if((size_t)(end-p)==n && !memcmp(p,key,n))return true;
+    p=end;
+   }
+   return false;
+  };
+  out.pixels=enabled("x9_metal_pixels=1");
+  out.inputs=out.pixels||enabled("x9_metal_capture=1");
+  NSLog(@"X9 METAL capture: inputs=%u pixels=%u;opt-in diagnostics",out.inputs,out.pixels);
+  return out;
+ }();
+ return options;
+}
 struct Timed {std::atomic<uint64_t> count{0},total{0},slowest{0};
  void add(uint64_t began){const uint64_t took=nowUs()-began;count++;total+=took;uint64_t seen=slowest.load();while(took>seen && !slowest.compare_exchange_weak(seen,took)){}}};
 static Timed gTimePipeline,gTimeLibrary,gTimeFunction,gTimeEncodeToCommit;
@@ -478,7 +506,7 @@ static void logFunctionLookupFailure(NBLibrary *library,NSString *name,NSString 
 @end
 static const char graphSamplersKey=0;
 static void graphSampler(id encoder,id sampler,NSUInteger index,uint32_t stage,NSString *lod) {
- if(stage!=2||index>=16)return;
+ if(!captureOptions().inputs||stage!=2||index>=16)return;
  NSMutableDictionary *states=objc_getAssociatedObject(encoder,&graphSamplersKey);
  if(!states){states=[NSMutableDictionary dictionary];objc_setAssociatedObject(encoder,&graphSamplersKey,states,OBJC_ASSOCIATION_RETAIN_NONATOMIC);}
  if([(id)sampler isKindOfClass:[NBSampler class]])states[@(index)]=[NSString stringWithFormat:@"%@ %@",[(NBSampler *)sampler traceState],lod];
@@ -695,7 +723,7 @@ static void waitForResource(id resource) {
 #include "X9RenderPixelCapture.inc"
 - (void)setRenderPipelineState:(id<MTLRenderPipelineState>)state {
  if(![(id)state isKindOfClass:[NBRenderPipeline class]]){[self.commandBuffer refuse:@"foreign render pipeline"];return;}
- self.tracePipeline=(NBRenderPipeline *)state;
+ if(captureOptions().inputs)self.tracePipeline=(NBRenderPipeline *)state;
  [self check:nmb_render_set_pipeline(self.handle,[(NBRenderPipeline *)state handle]) what:"setRenderPipelineState"];
 }
 - (void)setVertexBuffer:(id<MTLBuffer>)b offset:(NSUInteger)o atIndex:(NSUInteger)i {[self buffer:b offset:o index:i stage:1];}
@@ -990,6 +1018,7 @@ static char kUserDictionaryKey;
   pass.visibility=[(NBBuffer *)d.visibilityResultBuffer handle];
  }
  NBRenderEncoder *encoder=[self encoder:[NBRenderEncoder new] handle:self.committed?nullptr:nmb_render_encoder_new(_handle,&pass) what:@"renderCommandEncoder"];
+ if(captureOptions().inputs) {
  NSMutableString *trace=[NSMutableString stringWithFormat:@"requested=%llux%llu",(unsigned long long)pass.width,(unsigned long long)pass.height];
  for(unsigned i=0;i<8;i++)if(d.colorAttachments[i].texture) {
   MTLRenderPassColorAttachmentDescriptor *a=d.colorAttachments[i];NBTexture *t=(NBTexture *)a.texture;
@@ -997,7 +1026,8 @@ static char kUserDictionaryKey;
  }
  encoder.tracePass=trace;
  MTLRenderPassColorAttachmentDescriptor *c0=d.colorAttachments[0];
- if(c0.texture)encoder.tracePixelOutput=@{@"texture":c0.texture,@"level":@(c0.level),@"slice":@(c0.slice),@"depth":@(c0.depthPlane),@"store":@(c0.storeAction)};
+ if(captureOptions().pixels && c0.texture)encoder.tracePixelOutput=@{@"texture":c0.texture,@"level":@(c0.level),@"slice":@(c0.slice),@"depth":@(c0.depthPlane),@"store":@(c0.storeAction)};
+ }
  return (id<MTLRenderCommandEncoder>)encoder;
 }
 - (void)addScheduledHandler:(MTLCommandBufferHandler)block {if(block)@synchronized(self){[_scheduledHandlers addObject:[block copy]];}}
@@ -1570,6 +1600,7 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
  delete p;
  if(!handle)return failWith<id<MTLRenderPipelineState>>(error,@"render pipeline",nil);
  NBRenderPipeline *state=[NBRenderPipeline new];state.handle=handle;
+ if(captureOptions().inputs) {
  state.traceVertex=d.vertexFunction.name;state.traceFragment=d.fragmentFunction.name;
  if([d.vertexFunction.name containsString:@"blur"] || [d.fragmentFunction.name containsString:@"blur"])state.traceLayout=[d.vertexDescriptor copy];
  NSMutableString *blend=[NSMutableString string];
@@ -1578,6 +1609,7 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
   [blend appendFormat:@" c%u=fmt%llu/mask%llu/en%u/rgb%llu,%llu,%llu/a%llu,%llu,%llu",i,(unsigned long long)a.pixelFormat,(unsigned long long)a.writeMask,a.blendingEnabled,(unsigned long long)a.sourceRGBBlendFactor,(unsigned long long)a.destinationRGBBlendFactor,(unsigned long long)a.rgbBlendOperation,(unsigned long long)a.sourceAlphaBlendFactor,(unsigned long long)a.destinationAlphaBlendFactor,(unsigned long long)a.alphaBlendOperation];
  }
  state.traceBlend=blend;
+ }
  gPipelines++;if(error)*error=nil;return (id<MTLRenderPipelineState>)state;
 }
 - (id<MTLBinaryArchive>)newBinaryArchiveWithDescriptor:(MTLBinaryArchiveDescriptor *)d error:(NSError **)error {
@@ -1597,7 +1629,7 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
  NmbSampler *handle=nmb_sampler_new(gDevice,&s);
  if(!handle){NBLOG(@"native-metal: sampler refused: %@",lastError());return nil;}
  NBSampler *sampler=[NBSampler new];sampler.handle=handle;
- sampler.traceState=[NSString stringWithFormat:@"min%llu/mag%llu/mip%llu/address%llu,%llu,%llu/norm%llu/lod%g,%g",s.min_filter,s.mag_filter,s.mip_filter,s.s_address,s.t_address,s.r_address,s.normalized,s.lod_min,s.lod_max];
+ if(captureOptions().inputs)sampler.traceState=[NSString stringWithFormat:@"min%llu/mag%llu/mip%llu/address%llu,%llu,%llu/norm%llu/lod%g,%g",s.min_filter,s.mag_filter,s.mip_filter,s.s_address,s.t_address,s.r_address,s.normalized,s.lod_min,s.lod_max];
  return (id<MTLSamplerState>)sampler;
 }
 - (id<MTLDepthStencilState>)newDepthStencilStateWithDescriptor:(MTLDepthStencilDescriptor *)d {

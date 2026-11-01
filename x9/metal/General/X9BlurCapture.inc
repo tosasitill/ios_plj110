@@ -1,7 +1,7 @@
 // Limited CPU-side input capture for the original QuartzCore blur draws.
 // No shader substitution, pixel readback or GPU synchronization changes.
 - (void)buffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset index:(NSUInteger)index stage:(uint32_t)stage {
- if((stage==1 && index<4)||(stage==2 && index==1)) {
+ if(captureOptions().inputs && ((stage==1 && index<4)||(stage==2 && index==1))) {
   if(!self.traceBuffers)self.traceBuffers=[NSMutableDictionary dictionary];
   if(buffer && [(id)buffer isKindOfClass:[NBBuffer class]])
    self.traceBuffers[@(stage*32+index)]=@{@"buffer":buffer,@"offset":@(offset)};
@@ -10,7 +10,7 @@
  [super buffer:buffer offset:offset index:index stage:stage];
 }
 - (void)bytes:(const void *)bytes length:(NSUInteger)length index:(NSUInteger)index stage:(uint32_t)stage {
- if((stage==1 && index<4)||(stage==2 && index==1)) {
+ if(captureOptions().inputs && ((stage==1 && index<4)||(stage==2 && index==1))) {
   if(!self.traceBuffers)self.traceBuffers=[NSMutableDictionary dictionary];
   if(bytes && length<=4096)
    self.traceBuffers[@(stage*32+index)]=@{@"bytes":[NSData dataWithBytes:bytes length:MIN(length,512ul)],@"offset":@0};
@@ -19,11 +19,14 @@
  [super bytes:bytes length:length index:index stage:stage];
 }
 - (void)offset:(NSUInteger)offset index:(NSUInteger)index stage:(uint32_t)stage {
- NSDictionary *old=self.traceBuffers[@(stage*32+index)];
- if(old) {NSMutableDictionary *entry=[old mutableCopy];entry[@"offset"]=@(offset);self.traceBuffers[@(stage*32+index)]=entry;}
+ if(captureOptions().inputs) {
+  NSDictionary *old=self.traceBuffers[@(stage*32+index)];
+  if(old) {NSMutableDictionary *entry=[old mutableCopy];entry[@"offset"]=@(offset);self.traceBuffers[@(stage*32+index)]=entry;}
+ }
  [super offset:offset index:index stage:stage];
 }
 - (void)traceDraw:(MTLPrimitiveType)type start:(NSUInteger)start count:(NSUInteger)count indices:(NBBuffer *)indices offset:(NSUInteger)offset indexType:(MTLIndexType)indexType baseVertex:(NSInteger)baseVertex {
+ if(!captureOptions().inputs)return;
  [self traceGraph:type count:count];
  NBRenderPipeline *pipeline=self.tracePipeline;
  if(![pipeline.traceVertex containsString:@"blur"] && ![pipeline.traceFragment containsString:@"blur"])return;

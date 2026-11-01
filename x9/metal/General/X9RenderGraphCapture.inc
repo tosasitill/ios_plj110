@@ -2,7 +2,7 @@
 // captures, when selected, are separately identified. Texture IDs live for an object's lifetime;
 // parent and surface IDs expose aliases without logging process pointers.
 - (void)texture:(id<MTLTexture>)texture index:(NSUInteger)index stage:(uint32_t)stage {
- if(stage==2 && index<128) {
+ if(captureOptions().inputs && stage==2 && index<128) {
   if(!self.traceTextures)self.traceTextures=[NSMutableDictionary dictionary];
   if(texture && [(id)texture isKindOfClass:[NBTexture class]])self.traceTextures[@(index)]=texture;
   else [self.traceTextures removeObjectForKey:@(index)];
@@ -10,6 +10,7 @@
  [super texture:texture index:index stage:stage];
 }
 - (void)traceGraph:(MTLPrimitiveType)type count:(NSUInteger)count {
+ if(!captureOptions().inputs)return;
  NBRenderPipeline *p=self.tracePipeline;if(!p)return;
  bool blur=[p.traceVertex containsString:@"blur"]||[p.traceFragment containsString:@"blur"];
  [self tracePixelSelect:blur];

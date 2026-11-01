@@ -1,0 +1,145 @@
+diff --git a/src/panfrost/compiler/kraid/compile.rs b/src/panfrost/compiler/kraid/compile.rs
+--- a/src/panfrost/compiler/kraid/compile.rs
++++ b/src/panfrost/compiler/kraid/compile.rs
+@@ -3,9 +3,10 @@
+ 
+ use crate::data_type::NumericType;
+ use crate::debug::*;
++use crate::flow::FlowWaitBit;
+ use crate::ir::*;
+ use crate::model::model_for_arch;
+-use crate::ops::OpNop;
++use crate::ops::{OpNop, SamplePosition};
+ use compiler::bindings::*;
+ use compiler::memstream::MemStream;
+ use kraid_bindings::*;
+@@ -139,6 +140,93 @@
+     }
+ }
+ 
++// Match BIR's va_gather_hsr_info using the final scheduled Kraid instructions.
++// In particular, LD_TILE must not look like a cullable write-only shader merely
++// because Kraid did not populate the HSR metadata. This does not change code,
++// enable the HSR prepass, or override the driver's draw-state decisions.
++fn gather_hsr_info(s: &Shader, nir: &nir_shader, info: &mut pan_shader_info) {
++    if nir.info.stage() != MESA_SHADER_FRAGMENT {
++        return;
++    }
++
++    let hsr = unsafe { &mut info.__bindgen_anon_1.fs.hsr };
++    *hsr = Default::default();
++    if let Some(entry) = nir.get_entrypoint() {
++        hsr.rasterizer_coverage_read = entry
++            .iter_blocks()
++            .flat_map(|b| b.iter_instr_list())
++            .filter_map(|i| i.as_intrinsic())
++            .any(|i| i.intrinsic == nir_intrinsic_load_sample_mask_in);
++    }
++
++    let mut found_atest = false;
++    let mut found_zsemit = false;
++    let mut wait_before_atest = false;
++    let mut wait_before_zsemit = false;
++    let mut varying_before_atest = false;
++    let mut varying_before_zsemit = false;
++
++    for instr in s.blocks.iter().flat_map(|b| b.instrs.iter()) {
++        let sample = match &instr.op {
++            Op::LdVar(op) => Some(op.sample_position),
++            Op::LdVarBuf(op) => Some(op.sample_position),
++            Op::LdVarBufFlat(_) | Op::LdVarFlat(_) => Some(SamplePosition::None),
++            Op::VarTexBufDual(op) => Some(op.sample_position),
++            Op::VarTexBufGather(op) => Some(op.sample_position),
++            Op::VarTexBufGradient(op) => Some(op.sample_position),
++            Op::VarTexBufSingle(op) => Some(op.sample_position),
++            Op::VarTexDual(op) => Some(op.sample_position),
++            Op::VarTexGather(op) => Some(op.sample_position),
++            Op::VarTexGradient(op) => Some(op.sample_position),
++            Op::VarTexSingle(op) => Some(op.sample_position),
++            // Special varyings contribute centroid safety, but not the
++            // generic varying-shader prepass requirement, just as in BIR.
++            Op::LdVarSpecial(op) => {
++                hsr.centroid_interpolation |=
++                    op.sample_position == SamplePosition::Centroid;
++                None
++            }
++            _ => None,
++        };
++        if let Some(sample) = sample {
++            hsr.centroid_interpolation |= sample == SamplePosition::Centroid;
++            varying_before_atest |= !found_atest;
++            varying_before_zsemit |= !found_zsemit;
++        }
++
++        let tile_access = match &instr.op {
++            Op::LdTile(_) => {
++                hsr.ld_tile = true;
++                true
++            }
++            Op::StTile(_) | Op::Blend(_) | Op::BlendCall(_) => true,
++            Op::ATest(_) => {
++                found_atest = true;
++                false
++            }
++            Op::ZSEmit(_) => {
++                found_zsemit = true;
++                false
++            }
++            _ => false,
++        };
++        // encode_flow maps barrier/resource waits and reconvergence combined
++        // with waits to WAIT/WAIT_RESOURCE. Plain slot/ZS waits are distinct.
++        let wait = instr.flow.get_wait_bit(FlowWaitBit::Barrier)
++            || instr.flow.get_wait_bit(FlowWaitBit::Resource)
++            || (instr.flow.get_reconverge() && instr.flow.wait != 0);
++        if tile_access || wait {
++            wait_before_atest |= !found_atest;
++            wait_before_zsemit |= !found_zsemit;
++        }
++    }
++
++    hsr.varying_before_atest_zsemit =
++        (varying_before_atest && found_atest) || (varying_before_zsemit && found_zsemit);
++    hsr.wait_or_tile_access_before_atest_zsemit =
++        (wait_before_atest && found_atest) || (wait_before_zsemit && found_zsemit);
++}
++
+ fn write_back_info(
+     model: &dyn Model,
+     src: &ShaderInfo,
+@@ -354,6 +442,7 @@
+     }
+ 
+     write_back_info(model.as_ref(), &s.info, nir, info, idvs);
++    gather_hsr_info(&s, nir, info);
+     unsafe { pan_shader_update_info(info, nir, model.arch().into()) };
+ 
+     if DEBUG.contains(DebugFlags::STATS) {
+diff --git a/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c b/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c
+--- a/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c
++++ b/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c
+@@ -2651,6 +2651,24 @@
+             &cmdbuf->vk.dynamic_graphics_state.ds;
+          cfg.z_write_or_stencil =
+             writes_z || (has_stencil_att(cmdbuf) && ds->stencil.test_enable);
++#ifdef X9_NATIVE_KMOD
++         /* Prove the final DCD decision for a bounded set of tile-reading
++          * draws. No per-frame logging or instrumentation-induced barrier. */
++         if (fs->info.fs.hsr.ld_tile) {
++            static unsigned samples;
++            unsigned sample = __atomic_fetch_add(&samples, 1, __ATOMIC_RELAXED);
++            if (sample < 4)
++               x9_panvk_log("X9 HSR tile-read: sample=%u read=%x write=%x "
++                            "ld_tile=%u wait_before_zs=%u coverage=%u centroid=%u "
++                            "can_cull=%u can_be_culled=%u",
++                            sample + 1, out->rt_read, out->rt_written,
++                            fs->info.fs.hsr.ld_tile,
++                            fs->info.fs.hsr.wait_or_tile_access_before_atest_zsemit,
++                            fs->info.fs.hsr.rasterizer_coverage_read,
++                            fs->info.fs.hsr.centroid_interpolation,
++                            cfg.hsr_can_cull, cfg.hsr_can_be_culled);
++         }
++#endif
+       } else {
+          cfg.hsr_can_cull = false;
+          cfg.hsr_can_be_culled = false;

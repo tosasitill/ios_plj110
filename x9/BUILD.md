@@ -50,6 +50,20 @@ and allocation bounds are checked before binding; unsupported textures keep
 their shadow path. `X9 TEXTURE routes` logs direct imports, explicit-pitch
 images and fallback counters at the existing sampled surface-log cadence.
 
+`03-kraid-hsr-metadata.patch` fills Kraid's previously empty fragment HSR
+metadata from its final scheduled instructions, following the retained BIR
+`va_gather_hsr_info.c` contract. Tile reads, centroid/coverage reads and work
+before ATEST/ZS_EMIT feed the existing DCD eligibility decisions. This neither
+enables the HSR prepass nor disables HSR globally. The first four tile-reading
+DCD decisions log `X9 HSR tile-read`; hardware flicker repair is not yet proven.
+
+Detailed Metal blur/graph/pixel capture is now opt-in, not normal rendering
+work. Default builds do not copy diagnostic setBytes data, retain diagnostic
+resource tables, format per-pass graphs, add readback encoders or dump pixels.
+`x9_metal_capture=1` in the boot arguments enables bounded CPU input/graph
+capture; `x9_metal_pixels=1` also enables the intrusive GPU pixel readbacks.
+The existing surface-route and aggregate render/display counters remain on.
+
 Validation: full kernel compile/link/boot packaging succeeded at
 `x9/out/migration-check/boot.img` (9,416,704 bytes). PanVK rebuilt successfully
 (836 Ninja steps) and a temporary revision 9999 bundle packaged/signed.
