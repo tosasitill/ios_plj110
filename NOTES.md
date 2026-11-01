@@ -1,3 +1,16 @@
+## Mailbox 210 staged over adb (2026-11-01)
+
+- User reported adb ready; adb get-state=device. Normal updater against
+  `x9/out/mailbox210-blur-deindex` using private root manifest serial exited 0.
+  Root/mailbox preflight passed, marker published after payload readback:
+  `Mailbox committed: 51212288 bytes; each written range read back`.
+  Exact output: candidate `mailbox-update.log`.
+- Supersedes 210 pending-staging status below. No boot partition write,
+  reboot or direct iOS root modification. User can now boot matching
+  `x9/out/mailbox210-blur-deindex/boot.img` and reproduce blurred UI.
+- Next evidence: X9 BLUR DEINDEX ok=1 and visual comparison of diagonal/
+  triangle defects. XNU installation and experiment outcome not yet observed.
+
 ## Mailbox 209 inputs decoded; 210 indexed-draw isolation pending staging (2026-11-01)
 
 - New user /Users/tosasitill/2.txt preserved at
