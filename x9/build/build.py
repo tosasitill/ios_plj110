@@ -46,6 +46,10 @@ def load_config(path):
     missing = [k for k in REQUIRED if not cfg.get(k)]
     if missing:
         sys.exit(f'{path}: missing {", ".join(missing)}')
+    for key in ('dxb', 'root_manifest'):
+        if cfg.get(key):
+            path = Path(cfg[key]).expanduser()
+            cfg[key] = str(path if path.is_absolute() else ROOT / path)
     return cfg
 
 

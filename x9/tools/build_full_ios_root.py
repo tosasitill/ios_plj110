@@ -91,7 +91,7 @@ def patch_catalog(path,metadata):
 
 def main():
     ap=argparse.ArgumentParser(description=__doc__);ap.add_argument('--out',type=Path,required=True)
-    args=ap.parse_args();out=args.out.resolve();sources=Path('/Users/tosasitill/HelioDarwin/work/ios16-20H392')
+    args=ap.parse_args();out=args.out.resolve();sources=Path(__file__).resolve().parents[2]/'.local/heliodarwin/work/ios16-20H392'
     output=out/'ios16-full.hfs';target=out/'root-mount';target.mkdir(exist_ok=True)
     if output.exists():raise ValueError('output exists')
     metadata=json.loads((out/'os-original-metadata.json').read_text());mounts={

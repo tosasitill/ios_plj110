@@ -2,7 +2,7 @@
 """Prepare the pinned general Metal runtime and toolchain; no tests/device access."""
 from pathlib import Path
 import subprocess,urllib.request,tarfile,json
-w=Path(__file__).resolve().parent
+w=Path(__file__).resolve().parents[3] / '.local/x9/work/x9-metal-render'
 pin='720ef1ce9ae2a2068999a8675717418b9416283e'
 source=w/'metal2vulkan-source'
 archive=w/f'metal2vulkan-{pin}.tar.gz'

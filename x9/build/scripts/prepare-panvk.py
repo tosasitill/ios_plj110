@@ -2,7 +2,7 @@
 """Prepare separate PanVK port sources and host compiler dependencies."""
 from pathlib import Path
 import tarfile,urllib.request,hashlib
-w=Path(__file__).resolve().parent
+w=Path(__file__).resolve().parents[3] / '.local/x9/work/x9-metal-render'
 commit='300b5fd7b44120b80607d1c90b40bb126e8d3ec8'
 source=w/'mesa-render-source'
 if not source.exists():

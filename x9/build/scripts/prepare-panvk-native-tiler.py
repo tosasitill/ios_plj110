@@ -2,7 +2,7 @@
 """Wire the split native tiler allocation into the guarded Mesa queue path."""
 from pathlib import Path
 import difflib,subprocess
-w=Path(__file__).resolve().parent
+w=Path(__file__).resolve().parents[3] / '.local/x9/work/x9-metal-render'
 subprocess.run(['python3',str(w/'prepare-panvk-native-groups.py')],check=True)
 relative='src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c'
 header='src/panfrost/vulkan/csf/panvk_queue.h'

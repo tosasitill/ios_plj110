@@ -2,7 +2,7 @@
 """Compile native PanVK memory ops against the frozen iOS Mesa build headers."""
 from pathlib import Path
 import json,shlex,subprocess
-w=Path(__file__).resolve().parent
+w=Path(__file__).resolve().parents[3] / '.local/x9/work/x9-metal-render'
 root=w.parents[1]
 entries=json.loads((w/'build-panvk-ios/compile_commands.json').read_text())
 entry=next(e for e in entries if e['file'].endswith('/panthor_kmod.c'))

@@ -2,7 +2,7 @@
 """Complete native queue status and remove unadvertised WSI dispatch imports."""
 from pathlib import Path
 import difflib
-w=Path(__file__).resolve().parent;base=w/'mesa-render-source';diff=[]
+w=Path(__file__).resolve().parents[3] / '.local/x9/work/x9-metal-render';base=w/'mesa-render-source';diff=[]
 for relative in ['src/panfrost/vulkan/panvk_instance.c','src/panfrost/vulkan/panvk_vX_device.c']:
  p=base/relative;s=p.read_text();old=s
  kind='instance' if relative.endswith('/panvk_instance.c') else 'device'

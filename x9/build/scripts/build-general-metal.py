@@ -2,11 +2,11 @@
 """Cross-compile the generic Metal object/runtime bridge; never execute it."""
 from pathlib import Path
 import os,json,shutil,subprocess,plistlib,argparse
-ap=argparse.ArgumentParser();ap.add_argument("--revision",type=int,default=170);opts=ap.parse_args()
+ap=argparse.ArgumentParser();ap.add_argument("--revision",type=int,default=170);ap.add_argument("--runtime-source",type=Path,default=Path(__file__).resolve().parents[3] / ".local/x9/work/x9-metal-render/metal2vulkan-pan205-source");opts=ap.parse_args()
 if not 170<=opts.revision<=9999:ap.error("revision must be170..9999")
-w=Path(__file__).resolve().parent
+w=Path(__file__).resolve().parents[3] / '.local/x9/work/x9-metal-render'
 root=w.parents[1]
-source=w/'metal2vulkan-source'
+source=opts.runtime_source.resolve() if opts.runtime_source else w/'metal2vulkan-source'
 bridge=root/'MaliMetal/X9/General'
 bridge.mkdir(parents=True,exist_ok=True)
 reference=root/'work/legacy-import/xnu_x9/drivers/NativeMetal'
@@ -26,6 +26,7 @@ generated=w/'general-build-inputs';generated.mkdir(exist_ok=True)
 llvm_as='/opt/homebrew/opt/llvm/bin/llvm-as'
 fixtures=[('NMB_FIXTURE_AIR','runtime_examples.air','crates/metal2vulkan-validation/fixtures/public/examples/runtime_examples.ll'),('NMB_FC_AIR','function_constant.air','crates/metal2vulkan-validation/fixtures/public/kernel_function_constant_gate_fold.ll')]
 env=os.environ.copy()
+if opts.runtime_source:env['RUSTFLAGS']=(env.get('RUSTFLAGS','')+' --cfg x9_runtime_latest --check-cfg=cfg(x9_runtime_latest)').strip()
 for variable,name,path in fixtures:
  subprocess.run([llvm_as,str(source/path),'-o',str(generated/name)],check=True)
  env[variable]=str(generated/name)
@@ -39,14 +40,14 @@ env['SDKROOT']=env['DEVELOPER_DIR']+'/Platforms/iPhoneOS.platform/Developer/SDKs
 env['PATH']='/opt/homebrew/bin:'+env['DEVELOPER_DIR']+'/Toolchains/XcodeDefault.xctoolchain/usr/bin:/usr/bin:/bin'
 subprocess.run(['/opt/homebrew/bin/rustup','run','1.98.0','cargo','build','--release','--manifest-path',str(manifest),'--target','aarch64-apple-ios','--target-dir',str(w/'general-target')],env=env,check=True)
 cc=env['DEVELOPER_DIR']+'/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang++'
-subprocess.run([cc,'-target','arm64-apple-ios16.0','-isysroot',env['SDKROOT'],'-std=c++17','-fobjc-arc','-fblocks','-O2','-g','-Wno-protocol','-Wno-incomplete-implementation','-Wno-objc-protocol-property-synthesis','-Wno-deprecated-declarations','-c',str(bridge/'NativeBridgeMetalFrontend.mm'),'-o',str(generated/'X9GeneralMetalFrontend.o')],env=env,check=True)
+subprocess.run([cc,'-target','arm64-apple-ios16.0','-isysroot',env['SDKROOT'],*( ['-DX9_RUNTIME_LATEST=1'] if opts.runtime_source else [] ),'-std=c++17','-fobjc-arc','-fblocks','-O2','-g','-Wno-protocol','-Wno-incomplete-implementation','-Wno-objc-protocol-property-synthesis','-Wno-deprecated-declarations','-c',str(bridge/'NativeBridgeMetalFrontend.mm'),'-o',str(generated/'X9GeneralMetalFrontend.o')],env=env,check=True)
 transport=generated/'X9RenderTransport.o'
 subprocess.run([env['DEVELOPER_DIR']+'/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang','-target','arm64-apple-ios16.0','-isysroot',env['SDKROOT'],'-std=c11','-O2','-Wall','-Wextra','-Werror','-c',str(bridge/'X9RenderTransport.c'),'-o',str(transport)],env=env,check=True)
 factory=generated/'X9GeneralMetalFactory.o'
-flags=[cc,'-DX9_PANVK_BUNDLE_PATH="/System/Library/Extensions/X9PanVK'+str(opts.revision)+'.bundle/X9PanVK"','-target','arm64-apple-ios16.0','-isysroot',env['SDKROOT'],'-std=c++17','-fobjc-arc','-fblocks','-O2','-g','-Wno-protocol','-Wno-incomplete-implementation','-Wno-objc-protocol-property-synthesis','-Wno-deprecated-declarations']
+flags=[cc,'-DX9_PANVK_BUNDLE_PATH="/System/Library/Extensions/X9PanVK'+str(opts.revision)+'.bundle/X9PanVK"','-target','arm64-apple-ios16.0','-isysroot',env['SDKROOT'],*( ['-DX9_RUNTIME_LATEST=1'] if opts.runtime_source else [] ),'-std=c++17','-fobjc-arc','-fblocks','-O2','-g','-Wno-protocol','-Wno-incomplete-implementation','-Wno-objc-protocol-property-synthesis','-Wno-deprecated-declarations']
 subprocess.run(flags+['-c',str(bridge/'X9GeneralMetalFactory.mm'),'-o',str(factory)],env=env,check=True)
 bundle=w/f'X9GeneralMetal{opts.revision}.bundle';bundle.mkdir(exist_ok=True)
-subprocess.run(flags+['-bundle',str(factory),str(transport),str(generated/'X9GeneralMetalFrontend.o'),str(w/'general-target/aarch64-apple-ios/release/libx9_general_metal_bridge.a'),'-framework','Foundation','-framework','Metal','-framework','IOSurface','-framework','IOKit','-framework','Security','-Wl,-dead_strip','-o',str(bundle/'X9GeneralMetal')],env=env,check=True)
+subprocess.run(flags+['-bundle',str(factory),str(transport),str(generated/'X9GeneralMetalFrontend.o'),str(w/'general-target/aarch64-apple-ios/release/libx9_general_metal_bridge.a'),'-framework','Foundation','-framework','Metal','-framework','IOSurface','-framework','IOKit','-framework','Security','-lcompression','-Wl,-dead_strip','-o',str(bundle/'X9GeneralMetal')],env=env,check=True)
 (bundle/'Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier':'org.heliodarwin.X9GeneralMetal'+str(opts.revision),'CFBundleExecutable':'X9GeneralMetal','CFBundlePackageType':'BNDL','CFBundleVersion':'1','NSPrincipalClass':'X9GeneralMetalFactory','MinimumOSVersion':'16.0'},fmt=plistlib.FMT_XML))
 for name in ['LICENSE','LICENSE-GPL-2.0','LICENSE-LGPL-3.0','LICENSE-GPL-3.0']:shutil.copyfile(source/name,bundle/name)
 subprocess.run([env['DEVELOPER_DIR']+'/Toolchains/XcodeDefault.xctoolchain/usr/bin/strip','-S',str(bundle/'X9GeneralMetal')],check=True)

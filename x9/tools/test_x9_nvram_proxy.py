@@ -2,7 +2,7 @@
 import ast,importlib.util,struct,subprocess,tempfile,unittest,zlib
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[2]
-XNU=Path('/Users/tosasitill/HelioDarwin/xnu/build-dxb/dxb/xnu')
+XNU=Path(__file__).resolve().parents[2]/'.local/dxb/xnu'
 spec=importlib.util.spec_from_file_location('proxy',ROOT/'x9/tools/nvram_proxy.py');proxy=importlib.util.module_from_spec(spec);spec.loader.exec_module(proxy)
 def function(source,needle):
  start=source.index(needle);brace=source.index('{',start);level=1;end=brace+1

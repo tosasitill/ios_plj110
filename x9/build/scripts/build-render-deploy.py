@@ -4,7 +4,7 @@ Only compile/link/sign/generate build inputs; never execute a device probe.
 """
 from pathlib import Path
 import os,subprocess,plistlib,json
-w=Path(__file__).resolve().parent;root=w.parents[1]
+w=Path(__file__).resolve().parents[3] / '.local/x9/work/x9-metal-render';root=w.parents[1]
 source=root/'MaliMetal/X9/General/probe';out=w/'desktop-deploy-inputs';out.mkdir(exist_ok=True)
 dev=Path('/Users/tosasitill/Downloads/Xcode.app/Contents/Developer');tools=dev/'Toolchains/XcodeDefault.xctoolchain/usr/bin';sdk=dev/'Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk'
 env=os.environ.copy();env['DEVELOPER_DIR']=str(dev);env['SDKROOT']=str(sdk)

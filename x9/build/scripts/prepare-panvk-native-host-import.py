@@ -2,7 +2,7 @@
 """Wire host-memory imports used by IOSurface textures into native PanVK."""
 from pathlib import Path
 import difflib
-w=Path(__file__).resolve().parent;base=w/'mesa-render-source';patch=[]
+w=Path(__file__).resolve().parents[3] / '.local/x9/work/x9-metal-render';base=w/'mesa-render-source';patch=[]
 def save(rel,old,new):
  if old!=new:
   patch.extend(difflib.unified_diff(old.splitlines(True),new.splitlines(True),fromfile='a/'+rel,tofile='b/'+rel));(base/rel).write_text(new)

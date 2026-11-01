@@ -2,7 +2,7 @@
 """Normal build preparation for the X9 AIR/NIR/v14 compiler. Never runs probes."""
 from pathlib import Path
 import json, subprocess, tarfile, urllib.request, shutil
-work=Path(__file__).resolve().parent
+work=Path(__file__).resolve().parents[3] / '.local/x9/work/x9-metal-render'
 root=work.parents[1]
 commit='300b5fd7b44120b80607d1c90b40bb126e8d3ec8'
 archive=work/f'mesa-{commit}.tar.gz'

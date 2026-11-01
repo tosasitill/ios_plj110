@@ -5,7 +5,7 @@ Uses a separate pinned source export. Does not run a renderer or test suite.
 """
 from pathlib import Path
 import os,subprocess
-w=Path(__file__).resolve().parent
+w=Path(__file__).resolve().parents[3] / '.local/x9/work/x9-metal-render'
 src=w/'mesa-render-source'
 # Native IOKit KMD will provide resource/queue/sync transport. Keep the public
 # DRM declarations for Mesa's existing CSF queue records while porting it.

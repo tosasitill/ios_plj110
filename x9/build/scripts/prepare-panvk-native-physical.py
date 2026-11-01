@@ -2,7 +2,7 @@
 """Guarded IOKit physical enumeration and non-coherent native heap policy."""
 from pathlib import Path
 import difflib,subprocess
-w=Path(__file__).resolve().parent
+w=Path(__file__).resolve().parents[3] / '.local/x9/work/x9-metal-render'
 subprocess.run(['python3',str(w/'prepare-panvk-native-device.py')],check=True)
 base=w/'mesa-render-source';changes=[]
 def save(relative,old,new):

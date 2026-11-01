@@ -2,7 +2,7 @@
 """Build Mesa's v14 compiler without Linux DRM, WSI, Vulkan or test runners."""
 from pathlib import Path
 import os,subprocess
-w=Path(__file__).resolve().parent
+w=Path(__file__).resolve().parents[3] / '.local/x9/work/x9-metal-render'
 src=w/'mesa-source'
 p=src/'meson.build';s=p.read_text()
 anchor='# X9 standalone v14 backend'

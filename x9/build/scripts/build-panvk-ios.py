@@ -2,7 +2,7 @@
 """Cross-build PanVK v14 render objects for iOS16, reusing host shader tools."""
 from pathlib import Path
 import os,subprocess
-w=Path(__file__).resolve().parent
+w=Path(__file__).resolve().parents[3] / '.local/x9/work/x9-metal-render'
 sdk='/Users/tosasitill/Downloads/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk'
 toolchain='/Users/tosasitill/Downloads/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/'
 rustc=subprocess.check_output(['/opt/homebrew/bin/rustup','which','--toolchain','1.98.0','rustc'],text=True).strip()

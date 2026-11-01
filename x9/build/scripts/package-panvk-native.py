@@ -2,10 +2,12 @@
 """Package the just-linked native ICD for its Metal runtime path. No deployment."""
 from pathlib import Path
 import shutil,subprocess,plistlib,argparse
-ap=argparse.ArgumentParser();ap.add_argument("--revision",type=int,default=170);opts=ap.parse_args()
+ap=argparse.ArgumentParser();ap.add_argument("--revision",type=int,default=170)
+ap.add_argument("--source-library",type=Path,help="Repackage a specific existing ICD without rebuilding or changing its driver code")
+opts=ap.parse_args()
 if not 170<=opts.revision<=9999:ap.error("revision must be170..9999")
-w=Path(__file__).resolve().parent
-source=w/'build-panvk-native-ios/src/panfrost/vulkan/libvulkan_panfrost.dylib'
+w=Path(__file__).resolve().parents[3] / '.local/x9/work/x9-metal-render'
+source=opts.source_library.resolve() if opts.source_library else w/'build-panvk-native-ios/src/panfrost/vulkan/libvulkan_panfrost.dylib'
 bundle=w/f'X9PanVK{opts.revision}.bundle';bundle.mkdir(exist_ok=True)
 executable=bundle/'X9PanVK'
 shutil.copyfile(source,executable)

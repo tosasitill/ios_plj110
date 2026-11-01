@@ -4,7 +4,7 @@ Never writes HFS metadata or boot; commit header is published last.
 """
 from pathlib import Path
 import argparse,hashlib,json,os,subprocess
-P=Path(__file__).resolve().parent;ROOT=P.parents[2];SERIAL=os.environ.get('X9_SERIAL','');TOOL='/data/local/tmp/x9-ios-pan92-20261027-1215/pinfile';DEV='/dev/block/sdc100';B=4096
+P=Path(__file__).resolve().parent;ROOT=P.parents[1];SERIAL=os.environ.get('X9_SERIAL','');TOOL='/data/local/tmp/x9-ios-pan92-20261027-1215/pinfile';DEV='/dev/block/sdc100';B=4096
 
 def adb(c,data=None):
  p=subprocess.run(['adb','-s',SERIAL]+(['exec-out'] if data is None else ['shell','-T'])+['su','-c',c],input=data,capture_output=True,timeout=120)
@@ -13,12 +13,12 @@ def adb(c,data=None):
 
 def main():
  global SERIAL
- ap=argparse.ArgumentParser();ap.add_argument('candidate',type=Path);ap.add_argument('--serial',default=SERIAL);a=ap.parse_args()
+ ap=argparse.ArgumentParser();ap.add_argument('candidate',type=Path);ap.add_argument('--serial',default=SERIAL);ap.add_argument('--root-check',type=Path,required=True,help='Existing root verification script (required; never bypassed)');a=ap.parse_args()
  SERIAL=a.serial
  if not SERIAL:raise SystemExit('pass --serial or set X9_SERIAL')
  pkg=a.candidate/'plugin-package'
  desc=json.loads((pkg/'mailbox.json').read_text());m=json.loads((P/'mailbox-manifest.json').read_text())
- subprocess.run(['/bin/bash',str(ROOT/'x9/out/pan97-amfi-aks-only/check-root.sh')],check=True)
+ subprocess.run(['/bin/bash',str(a.root_check.resolve())],check=True)
  for f in m['files']:
   path=f['file'];status=adb(f'{TOOL} status {path}; lsattr {path}; stat -c "%i %s" {path}').decode()
   if ': pinned (GC move failures 0)' not in status or 'i' not in status.splitlines()[1].split()[0] or status.splitlines()[-1]!=f"{f['inode']} {f['bytes']}":raise ValueError('mailbox identity or protection changed: '+path)

@@ -2,7 +2,7 @@
 """Guarded native logical-device construction and compiler CSF queries."""
 from pathlib import Path
 import difflib,subprocess
-w=Path(__file__).resolve().parent
+w=Path(__file__).resolve().parents[3] / '.local/x9/work/x9-metal-render'
 subprocess.run(['python3',str(w/'prepare-panvk-native-tiler.py')],check=True)
 base=w/'mesa-render-source'
 files=['src/panfrost/vulkan/panvk_vX_device.c']+['src/panfrost/vulkan/csf/'+n for n in ['panvk_vX_cmd_buffer.c','panvk_vX_exception_handler.c','panvk_vX_utrace.c','panvk_vX_cmd_draw.c']]

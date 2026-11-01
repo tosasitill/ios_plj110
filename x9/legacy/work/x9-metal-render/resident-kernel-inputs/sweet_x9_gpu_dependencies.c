@@ -1,0 +1,338 @@
+extern void sweet_x9_render_bootstrap(void);
+/* MT6993 one-shot GPUEB mailbox power/ID bring-up. Source contract:
+ * gpufreq_v2.c / gpufreq_ipi.h; gpueb_ipi.c; mtk-mbox.c; captured PLJ110 DT.
+ * Uses an already resumed GPUEB only. No GHPM reset, rail/clock guessing,
+ * OPP changes, shader job submission or display changes. The CSF extension
+ * performs its own bounded MCU boot/stop under the retained power reference.
+ * All writes require this boot's shim-validated ADT contract and boot opt-in.
+ */
+#include <sys/systm.h>
+#include <kern/clock.h>
+#include <kern/thread.h>
+#include <kern/sched_prim.h>
+#include <mach/mach_types.h>
+#include <pexpert/pexpert.h>
+#include <pexpert/device_tree.h>
+#include <stddef.h>
+#include "gpu_shared_prefix.h"
+extern vm_offset_t ml_io_map(vm_offset_t,vm_size_t);
+extern int sweet_early_is_x9(void);
+extern kern_return_t thread_terminate(thread_t);
+extern void sweet_x9_csf_prepare(void);
+extern int sweet_x9_csf_boot(vm_offset_t);
+extern int sweet_x9_csf_user(vm_offset_t,void *);
+extern void sweet_x9_compute_publish(void);
+
+#define ACK 0xc0000000u
+#define CHANNEL_BIT 2u
+#define CMD_INIT 0u
+#define CMD_POWER 6u
+#define CMD_ACTIVE 7u
+#define SHARED_PA 0xf1080000ULL
+#define SHARED_SIZE 0x4000u
+struct gpu_ipi {
+ uint32_t magic,cmd,target,padding;
+ union {int32_t result;uint32_t power;struct {uint64_t base;uint32_t size,pad;} mem;} u;
+};
+_Static_assert(sizeof(struct gpu_ipi)==32,"GPUEB IPI size");
+_Static_assert(offsetof(struct gpu_ipi,u)==16,"GPUEB union offset");
+_Static_assert(offsetof(struct gpu_shared_prefix,power_count)==28,"GPUEB power count");
+_Static_assert(offsetof(struct gpu_shared_prefix,power_control)==204,"GPUEB power control");
+_Static_assert(offsetof(struct gpu_shared_prefix,active_sleep_control)==208,"GPUEB active control");
+static vm_offset_t spm,rpc,gpr,mbox,ctrl,shared;
+static uint32_t magic;
+static unsigned wait_cookie;
+static int channel_uncertain;
+static uint32_t rd(vm_offset_t b,unsigned off){return *(volatile uint32_t *)(b+off);}
+static void wr(vm_offset_t b,unsigned off,uint32_t value){
+ *(volatile uint32_t *)(b+off)=value;__asm__ volatile("dsb sy" ::: "memory");
+}
+static void pause_ms(void) {
+ uint64_t until;clock_interval_to_deadline(1,NSEC_PER_MSEC,&until);
+ (void)assert_wait_deadline(&wait_cookie,THREAD_UNINT,until);
+ thread_block(THREAD_CONTINUE_NULL);
+}
+static int expired(uint64_t end){return mach_absolute_time()>=end;}
+static int on(uint32_t value){return value!=0xffffffffu&&(value&ACK)==ACK;}
+static int eb_ready(void) {
+ return on(rd(spm,0xe1c))&&on(rd(rpc,0x504))&&rd(gpr,40)==1;
+}
+static uint32_t le32(const uint8_t *p){return p[0]|(uint32_t)p[1]<<8|(uint32_t)p[2]<<16|(uint32_t)p[3]<<24;}
+static uint64_t le64(const uint8_t *p){return le32(p)|(uint64_t)le32(p+4)<<32;}
+static int handoff(void) {
+ DTEntry chosen;const void *property;unsigned size=0;
+ if(SecureDTLookupEntry(NULL,"/chosen",&chosen)!=kSuccess||
+    SecureDTGetProperty(chosen,"x9-gpu-handoff",&property,&size)!=kSuccess||size!=64)return 0;
+ const uint8_t *p=property;
+ return le32(p)==3&&le32(p+4)==1&&le64(p+8)==SHARED_PA&&le64(p+16)==0x180000&&
+  le32(p+24)==SHARED_SIZE&&le32(p+28)==4&&le32(p+32)==55&&le32(p+36)==8&&
+  le64(p+40)==0x4b09fd80&&le64(p+48)==0x4b170000&&le64(p+56)==0x4b09fc80;
+}
+static void snapshot(const char *stage) {
+ printf("X9 GPU: %s MFG0=%08x MFG1=%08x MFG2=%08x MFG37=%08x GPR10=%08x send=%08x recv=%08x\n",
+  stage,rd(rpc,0x504),rd(rpc,0x500),rd(rpc,0x508),rd(rpc,0x594),rd(gpr,40),rd(ctrl,0),rd(ctrl,0x78));
+}
+/* A single transmit and bounded reply wait, no resending or stale-ACK discard.
+ * Hardware clear-before-read matches mtk_mbox_polling, ACK permits sender reuse.
+ * The firmware reply's command must match; reply magic is logged, not assumed
+ * to echo request magic (the AP driver does not require an echo). */
+static int exchange(struct gpu_ipi *request,struct gpu_ipi *reply) {
+ uint64_t until;clock_interval_to_deadline(10000,NSEC_PER_MSEC,&until);
+ if(channel_uncertain||!eb_ready())return -1;
+ if((rd(ctrl,0)|rd(ctrl,0x78))&CHANNEL_BIT){
+  printf("X9 GPU: command=%u channel1 not idle; no transmit\n",request->cmd);return -1;
+ }
+ request->magic=magic;
+ const uint32_t *tx=(const uint32_t *)request;
+ for(unsigned i=0;i<8;i++)wr(mbox,16+i*4,tx[i]);
+ printf("X9 GPU: TX command=%u target=%u union=%08x,%08x,%08x,%08x\n",
+  request->cmd,request->target,tx[4],tx[5],tx[6],tx[7]);
+ /* W1S channel1; never touch other send/receive bits. */
+ wr(ctrl,4,CHANNEL_BIT);
+ channel_uncertain=1;
+ unsigned ticks=0;
+ for(;;) {
+  uint32_t received=rd(ctrl,0x78);
+  if(received==0xffffffffu)break;
+  if(received&CHANNEL_BIT) {
+   __asm__ volatile("dsb sy" ::: "memory");
+   wr(ctrl,0x74,CHANNEL_BIT);
+   uint32_t *rx=(uint32_t *)reply;
+   for(unsigned i=0;i<8;i++)rx[i]=rd(mbox,220+i*4);
+   __asm__ volatile("dsb sy" ::: "memory");
+   printf("X9 GPU: RX words=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x\n",
+    rx[0],rx[1],rx[2],rx[3],rx[4],rx[5],rx[6],rx[7]);
+   if(reply->cmd!=request->cmd) {
+    printf("X9 GPU: reply command mismatch expected=%u actual=%u; channel abandoned\n",request->cmd,reply->cmd);return -1;
+   }
+   while(rd(ctrl,0)&CHANNEL_BIT) {
+    if(expired(until))goto failed;
+    pause_ms();
+   }
+   channel_uncertain=0;return 0;
+  }
+  if(expired(until))break;
+  if(++ticks%1000==0) {
+   printf("X9 GPU: waiting command=%u send=%08x recv=%08x\n",request->cmd,rd(ctrl,0),received);
+   if(!eb_ready())break;
+  }
+  pause_ms();
+ }
+failed:
+ printf("X9 GPU: command=%u completion timeout/state failure; no retry and no speculative rollback\n",request->cmd);
+ snapshot("failed");return -1;
+}
+static void status(struct gpu_shared_prefix *s) {
+ uint32_t *p=(uint32_t *)s;
+ for(unsigned i=0;i<sizeof(*s)/4;i++)p[i]=rd(shared,i*4);
+ __asm__ volatile("dsb sy" ::: "memory");
+}
+static void log_status(const char *stage,const struct gpu_shared_prefix *s) {
+ printf("X9 GPU: shared %s magic=%08x opp=%d/%d power=%d active=%d buck=%d mtcmos=%d cg=%d controls=%u/%u freq=%u/%u volt=%u/%u shaders=%08x\n",
+  stage,(unsigned)s->magic,s->opp_num_gpu,s->opp_num_stack,s->power_count,s->active_count,
+  s->buck_count,s->mtcmos_count,s->cg_count,s->power_control,s->active_sleep_control,
+  s->cur_fgpu,s->cur_fstack,s->cur_vgpu,s->cur_vstack,s->shader_present);
+}
+static int valid_status(const struct gpu_shared_prefix *s) {
+ return s->opp_num_gpu>0&&s->opp_num_gpu<=256&&s->opp_num_stack>=0&&s->opp_num_stack<=256&&
+  s->power_count>=0&&s->power_count<=16&&s->active_count>=0&&s->active_count<=16&&
+  s->power_control<=1&&s->active_sleep_control<=1;
+}
+static int power_command(unsigned command,unsigned state,int32_t *count) {
+ struct gpu_ipi req={0},resp={0};req.cmd=command;req.u.power=state;
+ if(exchange(&req,&resp))return -1;
+ *count=resp.u.result;
+ printf("X9 GPU: command=%u state=%u firmware-return=%d\n",command,state,*count);
+ return *count>=0&&*count<=16?0:-1;
+}
+/* pan145 hardware: firmware POWER+ACTIVE produced power=1/active=1,
+ * buck=1/mtcmos=1/cg=2, MFG1=c001770d and MFG37=c000110d while
+ * MFG2 stayed00001112. The original MT6993 AP platform reads MALI_GPU_ID
+ * after the successful power callback without requiring MFG2 ACK.
+ * Keep ACK checks on both observed activated domains; MFG2 remains logged,
+ * never forced on. This is a conservative ID-read gate, not a complete
+ * model of MT6993 internal power-domain topology. */
+static int gpu_id_domains_ready(void) {
+ return on(rd(rpc,0x500))&&on(rd(rpc,0x594));
+}
+static int wait_counts(int power,int active,int require_domains) {
+ uint64_t until;clock_interval_to_deadline(500,NSEC_PER_MSEC,&until);
+ do {
+  struct gpu_shared_prefix s;status(&s);
+  if(valid_status(&s)&&s.power_count==power&&s.active_count==active&&eb_ready()&&
+     (!require_domains||gpu_id_domains_ready()))return 0;
+  if(expired(until))break;
+  pause_ms();
+ }while(1);
+ return -1;
+}
+/* Read-only capability/state capture after power/count/ID gates. Source:
+ * a16w CSF regmap and MT6993 gpufreq_reg; SMMUv3 common header offsets.
+ * Enabled translation or bypass state does not establish a DMA mapping. */
+static void observe_memory_prerequisites(vm_offset_t gpu) {
+ printf("X9 CSF HW: L2_FEATURES=%08x MMU_FEATURES=%08x AS_PRESENT=%08x MCU_STATUS=%08x\n",
+  rd(gpu,4),rd(gpu,0x14),rd(gpu,0x18),rd(gpu,0x704));
+ vm_offset_t smmu=ml_io_map(0x48600000,0x1000);
+ if(!smmu){printf("X9 CSF HW: MFG SMMU mapping failed; DMA not enabled\n");return;}
+ uint32_t cr0=rd(smmu,0x20),ack=rd(smmu,0x24),gbpa=rd(smmu,0x44);
+ printf("X9 CSF HW: SMMU_CR0=%08x CR0ACK=%08x GBPA=%08x enable=%u abort=%u; no SMMU writes\n",
+  cr0,ack,gbpa,cr0&1,(gbpa>>20)&1);
+ printf("X9 CSF HW: MCU startup uses separate runtime ownership and cache gates\n");
+}
+static void run(void) {
+ int enabled=0;
+ if(!PE_parse_boot_argn("x9_gpu_power_probe",&enabled,sizeof(enabled))||enabled!=1)return;
+ printf("X9 GPU: pan165 system compute startup INIT -> POWER_ON -> ID -> POWER_OFF\n");
+ if(!handoff()){printf("X9 GPU: live FDT handoff absent/mismatched; all writes refused\n");return;}
+ spm=ml_io_map(0x1c004000,0x1000);
+ if(!spm||!on(rd(spm,0xe1c))){printf("X9 GPU: SPM MFG0 ACK absent; stopped\n");return;}
+ rpc=ml_io_map(0x4b800000,0x1000);
+ if(!rpc||!on(rd(rpc,0x504))){printf("X9 GPU: RPC MFG0 ACK absent; stopped\n");return;}
+ gpr=ml_io_map(0x4b09fc80,0x100);
+ if(!gpr||rd(gpr,40)!=1){printf("X9 GPU: GPUEB not resumed; no cold-start guessed\n");return;}
+ mbox=ml_io_map(0x4b09fd80,0x280);ctrl=ml_io_map(0x4b170000,0x1000);
+ /* This window is a verified no-map firmware carveout below XNU RAM.
+  * Device mapping + aligned volatile words avoid cached aliases and SIMD
+  * accesses to Device memory. Only the captured 16 KiB GPUFREQ slice is written. */
+ shared=ml_io_map(SHARED_PA,SHARED_SIZE);
+ if(!mbox||!ctrl||!shared){printf("X9 GPU: mapping failed before ownership\n");return;}
+ snapshot("entry");
+ magic=rd(gpr,52);
+ if(!magic||magic==0xffffffffu||!eb_ready()||
+    ((rd(ctrl,0)|rd(ctrl,0x78))&CHANNEL_BIT)) {
+  printf("X9 GPU: startup magic/channel unavailable; no writes\n");return;
+ }
+ /* Verify magic is stable immediately before ownership; never restore it
+  * after transmitting: a delayed firmware command may still reference SRAM. */
+ if(rd(gpr,52)!=magic)return;
+ for(unsigned off=0;off<SHARED_SIZE;off+=4)wr(shared,off,0);
+ if(!eb_ready()||rd(gpr,52)!=magic||((rd(ctrl,0)|rd(ctrl,0x78))&CHANNEL_BIT)) {
+  printf("X9 GPU: state changed during shared prepare; no command transmitted\n");return;
+ }
+ wr(gpr,52,0);
+ printf("X9 GPU: ownership acquired; shared=%llx size=%x (reserved), magic consumed\n",SHARED_PA,SHARED_SIZE);
+ struct gpu_ipi req={0},resp={0};req.cmd=CMD_INIT;req.u.mem.base=SHARED_PA;req.u.mem.size=SHARED_SIZE;
+ if(exchange(&req,&resp))return;
+ /* Stock ignores the union of INIT's response. Validate firmware-populated
+  * shared state instead of interpreting a possibly echoed pointer as errno. */
+ struct gpu_shared_prefix s;uint64_t until;clock_interval_to_deadline(500,NSEC_PER_MSEC,&until);
+ do {status(&s);if(valid_status(&s))break;if(expired(until))break;pause_ms();}while(1);
+ log_status("after-init",&s);
+ if(!valid_status(&s)||s.power_count!=0||s.active_count!=0||s.power_control!=1) {
+  printf("X9 GPU: shared ABI/initial ownership unsupported; no power command\n");return;
+ }
+ int32_t count=0;int powered=0,active=0,id_ok=0;
+ if(power_command(CMD_POWER,1,&count))return;
+ powered=1;
+ if(count!=1){printf("X9 GPU: unexpected power refcount=%d; skip ID\n",count);goto cleanup;}
+ if(s.active_sleep_control) {
+  if(power_command(CMD_ACTIVE,1,&count))goto cleanup;
+  active=1;
+  if(count!=1){printf("X9 GPU: unexpected active refcount=%d; skip ID\n",count);goto cleanup;}
+ }
+ if(wait_counts(1,active,1)) {
+  status(&s);log_status("not-ready",&s);snapshot("power-not-confirmed");
+  printf("X9 GPU: power/count/domain confirmation failed; GPU bank not read\n");goto cleanup;
+ }
+ snapshot("power-confirmed");status(&s);log_status("power-confirmed",&s);
+ printf("X9 GPU: ID gate uses shared counts + MFG1/MFG37 ACK; MFG2 is observation only\n");
+ /* Original MT6993 gpufreq_reg_mt6993.h MALI_GPU_ID at0x48000000;
+  * Mali CSF regmap GPU_ID is a 32-bit read. No GPU commands are issued. */
+ vm_offset_t gpu=ml_io_map(0x48000000,0x4000);
+ if(gpu) {
+  uint32_t id=rd(gpu,0);__asm__ volatile("dsb sy" ::: "memory");uint32_t again=rd(gpu,0);
+  id_ok=id&&id!=0xffffffffu&&id==again;
+  printf("X9 GPU: GPU_ID=%08x repeat=%08x stable-valid=%d (before CSF startup; no shader jobs)\n",id,again,id_ok);
+  if(id_ok) {
+   observe_memory_prerequisites(gpu);
+   int csf_result=sweet_x9_csf_boot(gpu);
+   printf("X9 GPU: CSF MCU result=%d (1 boot+PING,0 clean skip/failure,-1 retain power)\n",csf_result);
+   if(csf_result<0) {
+    printf("X9 GPU: CSF cleanup incomplete; outer power/active references retained, no reset\n");return;
+   }
+  }
+ }
+cleanup:
+ if(channel_uncertain) {
+  printf("X9 GPU: mailbox outcome uncertain; retain shared memory, no more commands\n");return;
+ }
+ if(active) {
+  if(power_command(CMD_ACTIVE,0,&count))return;
+  if(count!=0){printf("X9 GPU: active release count=%d; stopping\n",count);return;}
+ }
+ if(powered) {
+  if(power_command(CMD_POWER,0,&count))return;
+  if(count!=0||wait_counts(0,0,0)) {
+   printf("X9 GPU: power release not confirmed; stopping\n");return;
+  }
+ }
+ status(&s);log_status("released",&s);snapshot("released");
+ printf("X9 GPU: one-shot finished ID_valid=%d; power reference released, shared carveout retained\n",id_ok);
+ if(id_ok) {
+  int render=0;
+  if(PE_parse_boot_argn("x9_metal_render",&render,sizeof(render))&&render==1)sweet_x9_render_bootstrap();
+  else sweet_x9_compute_publish();
+ }
+}
+static void worker(void *arg,wait_result_t result) {
+ (void)arg;(void)result;sweet_x9_csf_prepare();run();(void)thread_terminate(current_thread());
+}
+/* Replaces the pan143 observer entry point, preserving its UFS startup hook. */
+void sweet_x9_gpu_dependencies(void) {
+ int enabled=0;static int started;
+ if(!sweet_early_is_x9()||started||!PE_parse_boot_argn("x9_gpu_power_probe",&enabled,sizeof(enabled))||enabled!=1)return;
+ started=1;thread_t t;
+ if(kernel_thread_start(worker,NULL,&t)==KERN_SUCCESS)thread_deallocate(t);
+ else printf("X9 GPU: worker creation failed\n");
+}
+
+/* Called only by the single serialized private user-client method, after the
+ * startup campaign and its complete release. Reuse the initialized GPUEB ABI;
+ * never repeat INIT or consume old startup magic after this boot's ownership. */
+extern int sweet_x9_csf_desktop(vm_offset_t,void *);
+extern int sweet_x9_csf_resident_begin(vm_offset_t);
+extern int sweet_x9_csf_resident_end(void);
+static int render_active_refs=-1;
+static int gpu_owned_request(void *job,int desktop) {
+ if(!job||!shared||channel_uncertain||!eb_ready())return -1;
+ struct gpu_shared_prefix s;status(&s);
+ if(!valid_status(&s)||s.power_count||s.active_count)return -1;
+ int32_t count=0;int active=0;
+ if(power_command(CMD_POWER,1,&count)||count!=1||wait_counts(1,0,0))return -1;
+ if(s.active_sleep_control) {
+  if(power_command(CMD_ACTIVE,1,&count)||count!=1)return -1;
+  active=1;
+ }
+ if(wait_counts(1,active,1))return -1;
+ vm_offset_t gpu=ml_io_map(0x48000000,0x4000);
+ if(!gpu||rd(gpu,0)!=0xe8800010u)return -1;
+ int result=desktop==2?sweet_x9_csf_resident_begin(gpu):
+  (desktop?sweet_x9_csf_desktop(gpu,job):sweet_x9_csf_user(gpu,job));
+ if(desktop==2&&result==2) {
+  render_active_refs=active;
+  printf("X9 RENDER: resident session owns GPUEB power1/active%d;no per-request shutdown\n",active);
+  return 2;
+ }
+ if(result<0||channel_uncertain)return -1;
+ if(active&&(power_command(CMD_ACTIVE,0,&count)||count!=0))return -1;
+ if(power_command(CMD_POWER,0,&count)||count!=0||wait_counts(0,0,0))return -1;
+ printf("X9 METAL GPU: request cleanup complete GPUEB active/power=0 result=%d\n",result);
+ return result;
+}
+int sweet_x9_gpu_user_compute(void *job) {return gpu_owned_request(job,0);}
+int sweet_x9_gpu_desktop(void *job) {return gpu_owned_request(job,1);}
+
+
+/* Caller holds the shared GPU owner lock; begin/end are not root RPCs. */
+int sweet_x9_gpu_render_begin(void) {
+ static int token;
+ if(render_active_refs>=0)return -1;
+ return gpu_owned_request(&token,2);
+}
+int sweet_x9_gpu_render_end(void) {
+ if(render_active_refs<0||channel_uncertain||sweet_x9_csf_resident_end()!=0)return -1;
+ int32_t count=0;
+ if(render_active_refs&&(power_command(CMD_ACTIVE,0,&count)||count!=0))return -1;
+ if(power_command(CMD_POWER,0,&count)||count!=0||wait_counts(0,0,0))return -1;
+ render_active_refs=-1;return 1;
+}

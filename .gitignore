@@ -17,3 +17,7 @@ work/**/*.log
 !x9/kernel/prebuilt/*.o
 # machine-local build paths
 x9/build/local.json
+
+# Local dependency snapshots, Apple inputs and private device state
+.local/
+.DS_Store

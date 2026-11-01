@@ -2,7 +2,7 @@
 """Build the native iOS resource/transport archive, without executing it."""
 from pathlib import Path
 import subprocess
-w=Path(__file__).resolve().parent
+w=Path(__file__).resolve().parents[3] / '.local/x9/work/x9-metal-render'
 root=w.parents[1]
 src=root/'MaliMetal/X9/General'
 out=w/'render-user-objects';out.mkdir(exist_ok=True)

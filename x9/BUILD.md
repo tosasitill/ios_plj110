@@ -1,3 +1,57 @@
+# Local migration status (2026-11-01)
+
+The build Mac now keeps required inputs inside this repository's gitignored
+`.local/` directory. `local.json` and `config.example.json` resolve relative
+`dxb` and `root_manifest` paths against the repository root.
+
+| Local input | Purpose |
+| --- | --- |
+| `.local/dxb/` | Frozen XNU objects, export headers, source headers and fakeroot |
+| `.local/x9/x9/out/pan220-batched-cache-ranges/` | Private root extent manifest and retained candidate inputs |
+| `.local/x9/work/x9-metal-render/` | Mesa/AIR frontend, latest pan205 runtime source used by pan207, libdrm and host build tools |
+| `.local/heliodarwin/work/ios16-20H392/` | Apple input for root construction (never commit) |
+| `.local/x9/work/x9-metal-install-pan172/edited-root.hfs` | Single retained historical installation root; NOT a current device backup |
+
+`python3 x9/build/prepare-local.py --check` verifies the required layout.
+Without `--check` it connects the local workspace to maintained scripts and
+`x9/metal/General` with relative symlinks, preserving replaced entries.
+Inputs must already exist; cloning git alone does not supply private data or
+third-party build trees. `requirements-metal.txt` records the migrated venv
+versions; `local-source-lock.json` records retained source snapshot hashes.
+The migrated Mesa configuration text and venv entrypoints were rebased to the
+new workspace. For another checkout location regenerate build configurations
+and the venv; copying Meson caches is not a portable installation method.
+
+Maintained user-space entrypoints are now invoked from the repository:
+
+```sh
+python3 -I x9/build/scripts/build-panvk-native-ios.py
+python3 -I x9/build/scripts/build-general-metal.py --revision <N>
+python3 -I x9/build/scripts/package-panvk-native.py --revision <N>
+```
+
+Metal defaults to the retained pan205 runtime and enables the latest runtime
+bridge macros. `--runtime-source` and `--source-library` options from the old
+workspace are preserved. Rust's old `general-target` cache was discarded;
+its next build will regenerate it. Mesa/AIR and PanVK source trees serve
+different purposes and must not be collapsed into one “newest Mesa” tree.
+The patch snapshots below preserve historical provenance (including original
+paths); applying them to fresh dependencies still requires path substitution.
+
+Validation: full kernel compile/link/boot packaging succeeded at
+`x9/out/migration-check/boot.img` (9,416,704 bytes). PanVK rebuilt successfully
+(836 Ninja steps) and a temporary revision 9999 bundle packaged/signed.
+Logs are in `x9/out/migration-check/`. No device operations were run, no
+allowlist changed, and the complete Metal Rust rebuild was not run after
+cache deletion. These artifacts are not hardware-verified.
+
+Historical diagnostic/recovery/install scripts are retained under
+`x9/legacy/`; read its README before using them. The original generated
+`check-root.sh` is absent from the supplied workspace. Mailbox updates now
+require an explicit `--root-check` script; the check is never bypassed.
+
+---
+
 # Building the X9 (OPPO Find X9 / PLJ110 / MT6993) boot image
 
 This directory holds the complete X9 work: the bare-metal shim, the kernel
@@ -106,7 +160,7 @@ original workspace and have not been folded into `build.py`.
 ## Plugin mailbox
 
 ```bash
-python3 x9/mailbox/update.py <candidate-dir>   # stage plugins while Android runs
+python3 x9/mailbox/update.py <candidate-dir> --serial "$X9_SERIAL" --root-check /path/to/verified-check-root.sh   # stage plugins while Android runs
 ```
 
 `mailbox/README.md` documents the mailbox contract and its safety rules. The

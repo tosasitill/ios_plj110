@@ -1,3 +1,14 @@
+## Dependency migration and pruning (2026-11-01)
+
+- User requested migration + commit, then explicitly requested retaining only newest useful versions. Local APFS snapshots moved inputs under gitignored `.local/`; original workspaces and partition backups remain intact.
+- Pruned six superseded experimental root images, Rust general-target cache, 11 old runtime source trees, obsolete reference build output/history. Local snapshot size fell from ~180 GiB to ~35 GiB (du, shared APFS extents; not physical space reclaimed).
+- Retained pan172 edited-root.hfs based on original mtime, successful fsck and verified install logs; copy SHA256 matched original. It is NOT the current phone state. Private cleanup inventory: `.local/migration-cleanup.json`.
+- Kernel full build with migrated dxb passed: `x9/out/migration-check/boot.img` 9416704 bytes, Image 18735104 bytes. PanVK reconfigure/rebuild (836 steps) and revision 9999 package/sign passed. Logs in that candidate directory. No CI run or device operations; no hardware claim.
+- Maintained userspace scripts use local dependencies and canonical x9/metal/General through symlinks. Restored runtime-source/source-library options, latest-runtime macros and compression link. Default retained runtime is pan205 (used by pan207). Complete Metal Rust rebuild not run after cache pruning.
+- Historical helper sources archived under x9/legacy; syntax checked, serial literal redacted, not device-tested. Old differential restore plans require their exact removed baselines and must not be reused with the newer retained root.
+- Mailbox ROOT fixed; requires explicit --root-check because original generated check-root.sh was absent. This missing private preflight remains a device-update prerequisite, not bypassed.
+- Next: regenerate a verified root preflight before any mailbox deployment; rebuild Metal when needed. See x9/BUILD.md and x9/legacy/README.md. Migration commit recorded in git history.
+
 ## External dependency audit (2026-11-01)
 
 - Audited local build config and the three user-specified directories; see `x9/EXTERNAL-DEPENDENCIES.md` for paths and script comparisons.

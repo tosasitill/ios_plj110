@@ -2,7 +2,7 @@
 """Generate native CS root/body packing from the pinned Mesa v14 XML."""
 from pathlib import Path
 import xml.etree.ElementTree as E
-w=Path(__file__).resolve().parent
+w=Path(__file__).resolve().parents[3] / '.local/x9/work/x9-metal-render'
 root=w.parents[1]
 xml=E.parse(w/'mesa-render-source/src/panfrost/genxml/v14.xml').getroot()
 enums={e.get('name'):{v.get('name'):int(v.get('value'),0) for v in e.findall('value')} for e in xml.findall('enum')}

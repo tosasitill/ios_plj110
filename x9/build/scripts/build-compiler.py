@@ -2,7 +2,7 @@
 """Build the pinned AIR frontend and Mesa NIR; no test execution."""
 from pathlib import Path
 import os, shutil, subprocess
-w=Path(__file__).resolve().parent
+w=Path(__file__).resolve().parents[3] / '.local/x9/work/x9-metal-render'
 root=w.parents[1]
 src=w/'mesa-source'
 air=src/'src/compiler/air'

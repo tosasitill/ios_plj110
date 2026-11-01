@@ -2,7 +2,7 @@
 """Apply the guarded X9 group-submit call-site port to the pinned Mesa export."""
 from pathlib import Path
 import difflib
-w=Path(__file__).resolve().parent
+w=Path(__file__).resolve().parents[3] / '.local/x9/work/x9-metal-render'
 relative='src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c'
 p=w/'mesa-render-source'/relative
 s=p.read_text()

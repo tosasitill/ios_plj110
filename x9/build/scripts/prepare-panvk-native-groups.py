@@ -2,7 +2,7 @@
 """Port guarded group lifecycle and queue-local CSF property access."""
 from pathlib import Path
 import difflib,subprocess
-w=Path(__file__).resolve().parent
+w=Path(__file__).resolve().parents[3] / '.local/x9/work/x9-metal-render'
 subprocess.run(['python3',str(w/'prepare-panvk-native-queue.py')],check=True)
 relative='src/panfrost/vulkan/csf/panvk_vX_gpu_queue.c'
 p=w/'mesa-render-source'/relative

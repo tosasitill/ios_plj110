@@ -1,0 +1,21 @@
+{
+  "description": "Migrated source snapshots after path relocation; tree digest hashes sorted relative filenames and content SHA256 digests, excluding .git/__pycache__/target and symlinks. Absolute local paths in sources make hashes specific to this migration location.",
+  "sources": {
+    "metal2vulkan-pan205-source": {
+      "files": 2000,
+      "tree_sha256": "93c6e726921516544c1701f3be7249295acf1535cb354aeb92b6d0ad3a06c4db"
+    },
+    "mesa-source": {
+      "files": 13302,
+      "tree_sha256": "f1ca8725213d8e94aac1d1aaf82c5d11230cce1e81a3118464b505ad4907da15"
+    },
+    "mesa-render-source": {
+      "files": 13288,
+      "tree_sha256": "a114011897d02f41dd827f407d0a4fe9369d5c34100c826709b0406ad509e87c"
+    },
+    "libdrm-2.4.133": {
+      "files": 313,
+      "tree_sha256": "7fc7c4e7552f922a43ecf354b4eb2c02fd036daaa57d072c01f184f283a2dfc0"
+    }
+  }
+}

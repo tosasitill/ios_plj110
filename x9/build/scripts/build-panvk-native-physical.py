@@ -2,7 +2,7 @@
 """Compile guarded native instance/physical-device enumeration objects."""
 from pathlib import Path
 import json,shlex,subprocess
-w=Path(__file__).resolve().parent;root=w.parents[1]
+w=Path(__file__).resolve().parents[3] / '.local/x9/work/x9-metal-render';root=w.parents[1]
 subprocess.run(['python3',str(w/'prepare-panvk-native-physical.py')],check=True)
 entries=json.loads((w/'build-panvk-ios/compile_commands.json').read_text())
 out=w/'render-user-objects';out.mkdir(exist_ok=True)

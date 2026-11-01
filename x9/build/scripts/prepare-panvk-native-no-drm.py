@@ -2,7 +2,7 @@
 """Exclude Linux-only providers from the X9 native link; never fake DRM success."""
 from pathlib import Path
 import difflib
-w=Path(__file__).resolve().parent;base=w/'mesa-render-source';patch=[]
+w=Path(__file__).resolve().parents[3] / '.local/x9/work/x9-metal-render';base=w/'mesa-render-source';patch=[]
 def apply(rel,fn):
  p=base/rel;old=p.read_text();new=fn(old)
  if old!=new:
