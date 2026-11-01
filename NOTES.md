@@ -31,7 +31,17 @@ should be checked for compile errors before flashing.
   `lzfse_tunables.h`, `kern_exec_internal.h`). Importer notes about older
   `x9_usb_log_protocol.h` (pan111) and `SweetSurface.h` (pan111/141) are
   harmless: only x9_usb_log.c and SweetSurface/Framebuffer.cpp include them,
-  and those used the kept pan150/pan205 copies. Rebuild on the Mac pending.
+  and those used the kept pan150/pan205 copies.
+- **First complete repo build (2026-11-01, Mac, commit 976b339):** 51/51
+  overlay objects compiled (ccache), link + strip + shim packaging OK,
+  `x9/out/x9-976b339/boot.img` (shim-boot.img 9416704 bytes, Image 18735104).
+  NOT flashed / NOT hardware-verified. It is pan220 + the four fixes
+  (d62cfc7); a pan220-only rebuild (revert d62cfc7) would separate rebuild
+  regressions from fix regressions.
+- Still required on the Mac for building: `HelioDarwin/xnu/build-dxb/dxb`
+  (frozen objects, EXPORT_HDRS, fakeroot, dxb/xnu), Xcode 15, llvm/lld 22,
+  and the device root-manifest.json (local.json currently points into the
+  pan220 candidate directory).
 - Fix merge onto pan220: `poll_pause()` = spin 64x16us, then pan219's 100us
   sleeps x20, then 1ms; replaces pan219 `render_cache_wait()` and also covers
   `idle_as` and the fence wait. Framebuffer/scaler and coherency changes were
