@@ -187,6 +187,7 @@
 @end
 @implementation NBEncoder (X9SamplerLOD)
 - (void)sampler:(id<MTLSamplerState>)sampler min:(float)min max:(float)max index:(NSUInteger)index stage:(uint32_t)stage {
+ graphSampler(self,sampler,index,stage,[NSString stringWithFormat:@"override=%g,%g",min,max]);
  if(sampler&&![(id)sampler isKindOfClass:[NBSampler class]]){[self.commandBuffer refuse:@"foreign sampler"];return;}
  if(sampler)[self.commandBuffer.resourceOwners addObject:sampler];
  [self check:nmb_encoder_sampler_lod(self.handle,stage,sampler?[(NBSampler *)sampler handle]:nullptr,min,max,(uint32_t)index) what:"sampler LOD clamps"];

@@ -116,6 +116,7 @@ static void waitForResource(id resource);
 @property(nonatomic) NSUInteger heapOffset;
 @end
 @interface NBTexture : NBObject
+@property(nonatomic) uint64_t traceID;
 @property(nonatomic) NmbTexture *handle;
 @property(nonatomic) NmbTextureDescriptor descriptor;
 @property(nonatomic,strong) NBBuffer *buffer;
@@ -189,6 +190,7 @@ static bool textureDescriptor(MTLTextureDescriptor *d,NmbTextureDescriptor *out)
  return true;
 }
 @implementation NBTexture
+- (instancetype)init {if((self=[super init])){static std::atomic<uint64_t> next{0};_traceID=++next;}return self;}
 - (void)dealloc {nmb_texture_release(_handle);if(_surface)CFRelease(_surface);}
 - (MTLTextureType)textureType {return (MTLTextureType)_descriptor.type;}
 - (MTLPixelFormat)pixelFormat {return (MTLPixelFormat)_descriptor.format;}
@@ -456,6 +458,7 @@ static void logFunctionLookupFailure(NBLibrary *library,NSString *name,NSString 
 @property(nonatomic) NmbRenderPipeline *handle;
 @property(nonatomic,copy) NSString *traceVertex,*traceFragment;
 @property(nonatomic,strong) MTLVertexDescriptor *traceLayout;
+@property(nonatomic,copy) NSString *traceBlend;
 @end
 @implementation NBRenderPipeline
 - (void)dealloc {nmb_render_pipeline_release(_handle);}
@@ -467,11 +470,20 @@ static void logFunctionLookupFailure(NBLibrary *library,NSString *name,NSString 
 @end
 @interface NBSampler : NBObject
 @property(nonatomic) NmbSampler *handle;
+@property(nonatomic,copy) NSString *traceState;
 @end
 @implementation NBSampler
 - (void)dealloc {nmb_sampler_release(_handle);}
 - (NSUInteger)pixelFormat {return MTLPixelFormatInvalid;}   // SPI: a sampler built from a plain descriptor names no format
 @end
+static const char graphSamplersKey=0;
+static void graphSampler(id encoder,id sampler,NSUInteger index,uint32_t stage,NSString *lod) {
+ if(stage!=2||index>=16)return;
+ NSMutableDictionary *states=objc_getAssociatedObject(encoder,&graphSamplersKey);
+ if(!states){states=[NSMutableDictionary dictionary];objc_setAssociatedObject(encoder,&graphSamplersKey,states,OBJC_ASSOCIATION_RETAIN_NONATOMIC);}
+ if([(id)sampler isKindOfClass:[NBSampler class]])states[@(index)]=[NSString stringWithFormat:@"%@ %@",[(NBSampler *)sampler traceState],lod];
+ else [states removeObjectForKey:@(index)];
+}
 @interface NBDepthStencil : NBObject
 @property(nonatomic) NmbDepthStencil *handle;
 @end
@@ -537,6 +549,8 @@ static void notified(void *context,uint64_t value) {
 @property(atomic) BOOL committed,failedLocally;
 @property(nonatomic) uint64_t committedUs;
 @property(nonatomic) uint32_t commitIndex;
+@property(nonatomic) uint64_t traceID;
+@property(nonatomic) BOOL traceGraphUsed;
 @property(nonatomic,strong) NSMutableArray *scheduledHandlers,*completedHandlers;
 @property(nonatomic,strong) NSMutableSet *surfaces;
 // Runtime handles retain storage and no-copy release contexts. Also keep the
@@ -608,6 +622,7 @@ static void waitForResource(id resource) {
  [self check:nmb_encoder_set_texture(_handle,stage,texture?[(NBTexture *)texture handle]:nullptr,(uint32_t)index) what:"setTexture"];
 }
 - (void)sampler:(id<MTLSamplerState>)sampler index:(NSUInteger)index stage:(uint32_t)stage {
+ graphSampler(self,sampler,index,stage,@"lod=descriptor");
  if(sampler && ![(id)sampler isKindOfClass:[NBSampler class]]){[_commandBuffer refuse:@"foreign sampler"];return;}
  [self check:nmb_encoder_set_sampler(_handle,stage,sampler?[(NBSampler *)sampler handle]:nullptr,(uint32_t)index) what:"setSamplerState"];
 }
@@ -662,10 +677,14 @@ static void waitForResource(id resource) {
 @interface NBRenderEncoder : NBEncoder
 @property(nonatomic,strong) NBRenderPipeline *tracePipeline;
 @property(nonatomic,strong) NSMutableDictionary *traceBuffers;
+@property(nonatomic,strong) NSMutableDictionary *traceTextures;
+@property(nonatomic,copy) NSString *tracePass;
+- (void)traceGraph:(MTLPrimitiveType)type count:(NSUInteger)count;
 - (void)traceDraw:(MTLPrimitiveType)type start:(NSUInteger)start count:(NSUInteger)count indices:(NBBuffer *)indices offset:(NSUInteger)offset indexType:(MTLIndexType)indexType baseVertex:(NSInteger)baseVertex;
 @end
 @implementation NBRenderEncoder
 #include "X9BlurCapture.inc"
+#include "X9RenderGraphCapture.inc"
 - (void)setRenderPipelineState:(id<MTLRenderPipelineState>)state {
  if(![(id)state isKindOfClass:[NBRenderPipeline class]]){[self.commandBuffer refuse:@"foreign render pipeline"];return;}
  self.tracePipeline=(NBRenderPipeline *)state;
@@ -861,7 +880,7 @@ static char kUserDictionaryKey;
 }
 - (instancetype)init {
  if((self=[super init])){_scheduledHandlers=[NSMutableArray array];_completedHandlers=[NSMutableArray array];_surfaces=[NSMutableSet set];_resourceOwners=[NSMutableSet set];_handlers=dispatch_group_create();_schedulingHandlers=dispatch_group_create();}
- if(self)createdUs=nowUs();
+ if(self){createdUs=nowUs();static std::atomic<uint64_t> next{0};_traceID=++next;}
  return self;
 }
 - (void)dealloc {nmb_command_buffer_release(_handle);}
@@ -962,7 +981,13 @@ static char kUserDictionaryKey;
   [_resourceOwners addObject:d.visibilityResultBuffer];
   pass.visibility=[(NBBuffer *)d.visibilityResultBuffer handle];
  }
- return [self encoder:[NBRenderEncoder new] handle:self.committed?nullptr:nmb_render_encoder_new(_handle,&pass) what:@"renderCommandEncoder"];
+ NBRenderEncoder *encoder=[self encoder:[NBRenderEncoder new] handle:self.committed?nullptr:nmb_render_encoder_new(_handle,&pass) what:@"renderCommandEncoder"];
+ NSMutableString *trace=[NSMutableString stringWithFormat:@"requested=%llux%llu",(unsigned long long)pass.width,(unsigned long long)pass.height];
+ for(unsigned i=0;i<8;i++)if(d.colorAttachments[i].texture) {
+  MTLRenderPassColorAttachmentDescriptor *a=d.colorAttachments[i];NBTexture *t=(NBTexture *)a.texture;
+  [trace appendFormat:@" c%u=%llu/%llu/%llux%llu/m%llu/s%llu/load%llu/store%llu/resolve%llu",i,(unsigned long long)t.traceID,(unsigned long long)t.pixelFormat,(unsigned long long)t.width,(unsigned long long)t.height,(unsigned long long)a.level,(unsigned long long)a.slice,(unsigned long long)a.loadAction,(unsigned long long)a.storeAction,(unsigned long long)([(id)a.resolveTexture isKindOfClass:[NBTexture class]]?[(NBTexture *)a.resolveTexture traceID]:0)];
+ }
+ encoder.tracePass=trace;return (id<MTLRenderCommandEncoder>)encoder;
 }
 - (void)addScheduledHandler:(MTLCommandBufferHandler)block {if(block)@synchronized(self){[_scheduledHandlers addObject:[block copy]];}}
 - (void)addCompletedHandler:(MTLCommandBufferHandler)block {if(block)@synchronized(self){[_completedHandlers addObject:[block copy]];}}
@@ -1029,6 +1054,7 @@ static char kUserDictionaryKey;
   std::lock_guard<std::mutex> lock(gCommitLock);
   // Assign once under the same lock as publication. A concurrent commit cannot reuse this index.
   const uint32_t index=(uint32_t)(gCommits.fetch_add(1)+1);self.commitIndex=index;
+  if(self.traceGraphUsed)NBLOG(@"X9 GRAPH COMMIT: cb=%llu commit=%u",(unsigned long long)self.traceID,index);
   CommitRecord &r=gCommitRing[index%32];
   r={};r.index=index;r.committedUs=self.committedUs;r.ageUs=self.committedUs-createdUs;r.work=encodedWork;
  }
@@ -1079,6 +1105,7 @@ static void completed(void *context) {
   CommitRecord &r=gCommitRing[commandBuffer.commitIndex%32];
   if(r.index==commandBuffer.commitIndex)r.callbackUs=took;
  }
+ if(commandBuffer.traceGraphUsed)NBLOG(@"X9 GRAPH COMPLETE: cb=%llu commit=%u status=%llu",(unsigned long long)commandBuffer.traceID,commandBuffer.commitIndex,(unsigned long long)nmb_command_buffer_status(commandBuffer.handle));
  [commandBuffer finish];
 }
 
@@ -1526,9 +1553,14 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
  delete p;
  if(!handle)return failWith<id<MTLRenderPipelineState>>(error,@"render pipeline",nil);
  NBRenderPipeline *state=[NBRenderPipeline new];state.handle=handle;
- if([d.vertexFunction.name containsString:@"blur"] || [d.fragmentFunction.name containsString:@"blur"]) {
-  state.traceVertex=d.vertexFunction.name;state.traceFragment=d.fragmentFunction.name;state.traceLayout=[d.vertexDescriptor copy];
+ state.traceVertex=d.vertexFunction.name;state.traceFragment=d.fragmentFunction.name;
+ if([d.vertexFunction.name containsString:@"blur"] || [d.fragmentFunction.name containsString:@"blur"])state.traceLayout=[d.vertexDescriptor copy];
+ NSMutableString *blend=[NSMutableString string];
+ for(unsigned i=0;i<8;i++)if(d.colorAttachments[i].pixelFormat!=MTLPixelFormatInvalid) {
+  MTLRenderPipelineColorAttachmentDescriptor *a=d.colorAttachments[i];
+  [blend appendFormat:@" c%u=fmt%llu/mask%llu/en%u/rgb%llu,%llu,%llu/a%llu,%llu,%llu",i,(unsigned long long)a.pixelFormat,(unsigned long long)a.writeMask,a.blendingEnabled,(unsigned long long)a.sourceRGBBlendFactor,(unsigned long long)a.destinationRGBBlendFactor,(unsigned long long)a.rgbBlendOperation,(unsigned long long)a.sourceAlphaBlendFactor,(unsigned long long)a.destinationAlphaBlendFactor,(unsigned long long)a.alphaBlendOperation];
  }
+ state.traceBlend=blend;
  gPipelines++;if(error)*error=nil;return (id<MTLRenderPipelineState>)state;
 }
 - (id<MTLBinaryArchive>)newBinaryArchiveWithDescriptor:(MTLBinaryArchiveDescriptor *)d error:(NSError **)error {
@@ -1547,7 +1579,9 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
      (uint64_t)d.borderColor,(uint64_t)d.normalizedCoordinates,d.maxAnisotropy,(uint64_t)d.compareFunction,(uint64_t)d.lodAverage,d.lodMinClamp,d.lodMaxClamp,(uint64_t)d.supportArgumentBuffers};
  NmbSampler *handle=nmb_sampler_new(gDevice,&s);
  if(!handle){NBLOG(@"native-metal: sampler refused: %@",lastError());return nil;}
- NBSampler *sampler=[NBSampler new];sampler.handle=handle;return (id<MTLSamplerState>)sampler;
+ NBSampler *sampler=[NBSampler new];sampler.handle=handle;
+ sampler.traceState=[NSString stringWithFormat:@"min%llu/mag%llu/mip%llu/address%llu,%llu,%llu/norm%llu/lod%g,%g",s.min_filter,s.mag_filter,s.mip_filter,s.s_address,s.t_address,s.r_address,s.normalized,s.lod_min,s.lod_max];
+ return (id<MTLSamplerState>)sampler;
 }
 - (id<MTLDepthStencilState>)newDepthStencilStateWithDescriptor:(MTLDepthStencilDescriptor *)d {
  auto face=[](MTLStencilDescriptor *s)->NmbStencil {

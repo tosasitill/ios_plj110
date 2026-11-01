@@ -1,3 +1,51 @@
+## 211 render graph capture built and staged; root cause unresolved (2026-11-01)
+
+- User requested continued investigation after 210 failed and introduced color
+  errors. No new runtime log provided this turn. Continued from preserved
+  .local/analysis-blur209 and blur210 logs and CPU input reconstructions.
+- Reviewed render-pass frontend attachment/resolve/load/store forwarding,
+  sampler normalization/LOD and C/Rust blend fields; no confirmed mismatch.
+  Reviewed runtime shadow/feedback/snapshot ordering and local PanVK barriers.
+  No new shader/sync/format workaround applied. 210 deindex remains removed.
+- Inspected external reference patches from zenithblue-oss/panvk-kbase-android
+  via GitHub API; private copies under .local/analysis-blur-upstream. The v14
+  sparse TLS alias issue reports same shader mask 0x3300ff but X9 allocates
+  full core-ID-range TLS with independent BO backing (cmd_buffer.c emit_tls),
+  no sparse aliases. Not applicable and NOT ported. Bifrost scheduler patch139
+  concerns same-tuple FMA descriptor encoding, not v14 Valhall tuple-free ISA;
+  not ported. Treat third-party claims as leads, not device evidence.
+- New `X9RenderGraphCapture.inc`: after first blur-named draw in a process,
+  log <=96 draws and <=6 per shader pair, including subsequent non-blur/final
+  composite pipelines. DRAW includes stable CB/encoder IDs and exact shader
+  names; PASS records attachment texture IDs/formats/dimensions/mip/slice/
+  load/store/resolve; BLEND records enabled/masks/factors/operations; TEX and
+  TEXMEM record bound fragment textures, parent/view IDs, IOSurface IDs,
+  dimensions/formats/pitch/offset/usage/options/swizzles; SAMPLER includes
+  normalization/filter/address/descriptor LOD and setter overrides. COMMIT and
+  COMPLETE correlate traced buffers with real submission order/status.
+- Texture IDs are monotonic object IDs, not raw pointers. Records describe
+  bound state, NOT proof a shader actually reads every bound slot or proof
+  rendered pixel content. Graph window is bounded, may omit later writes.
+  Capturing the graph does not add GPU commands/barriers/readback or alter
+  original shader/format/blend/load/store. Logging and small metadata retention
+  can perturb timing; do not measure performance from the initial trace burst.
+  Detailed CPU input capture remains limited to blur shaders as in 209.
+- Build `python3 -I x9/build/build.py all --revision 211 --name mailbox211-blur-graph`:
+  final exit0, signed plugins/package and matching boot.img 9,420,800 bytes.
+  Initial sampler-metadata compile failed on uninitialized const char key;
+  fixed =0 and final rebuild passed. Local only; no CI/tests/artifact secondary
+  checks. Exact build log candidate build.log (all attempts preserved).
+- adb became available; updater using private manifest serial against
+  x9/out/mailbox211-blur-graph exited0. Root/mailbox preflight passed,
+  `Mailbox committed: 51216384 bytes; each written range read back`.
+  Exact updater output: candidate mailbox-update.log. No boot partition write
+  or reboot. Device mailbox now211; use matching candidate boot.img, not209.
+- Next requires user hardware run: open Control Center immediately after UI
+  available and retain full USB log including X9 GRAPH records. Reconstruct
+  blur-output -> sample -> final IOSurface chain, detect actual format/alias/
+  load-store/feedback/order contradictions before changing GPU behavior.
+  No root-cause or visual repair claim is warranted yet; 211 is observability.
+
 ## 210 ineffective, color regression reported; rolled mailbox back to 209 (2026-11-01)
 
 - Latest /Users/tosasitill/2.txt preserved at

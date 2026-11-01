@@ -24,7 +24,9 @@
  [super offset:offset index:index stage:stage];
 }
 - (void)traceDraw:(MTLPrimitiveType)type start:(NSUInteger)start count:(NSUInteger)count indices:(NBBuffer *)indices offset:(NSUInteger)offset indexType:(MTLIndexType)indexType baseVertex:(NSInteger)baseVertex {
- NBRenderPipeline *pipeline=self.tracePipeline;if(!pipeline.traceFragment)return;
+ [self traceGraph:type count:count];
+ NBRenderPipeline *pipeline=self.tracePipeline;
+ if(![pipeline.traceVertex containsString:@"blur"] && ![pipeline.traceFragment containsString:@"blur"])return;
  // Two draws per shader pair, at most 24 in a process. No pointer identities.
  static std::mutex mutex;static NSMutableDictionary *seen;static unsigned total;
  unsigned serial;
