@@ -1,4 +1,17 @@
-## Mailbox214 built: host-pointer explicit-pitch texture repair (2026-11-01)
+## Mailbox214 updated: host-pointer explicit-pitch texture repair (2026-11-01)
+
+- User reconnected adb and requested the prepared mailbox update. The normal
+  updater completed with exit0 using the serial from the private root manifest
+  (not recorded here):
+  python3 -I x9/mailbox/update.py x9/out/mailbox214-host-linear --serial <private>
+  Mutable-root preflight verified device,pin+immutable,inode/map/partition,
+  protected extents,current HFS UUID/geometry before writes. Log reports
+  Mailbox committed:51273728 bytes; each written range read back.
+  Log:x9/out/mailbox214-host-linear/mailbox-update.log. Only the authorized
+  mailbox was updated; no flash,reboot,boot-partition write or root-file change.
+  Matching boot:x9/out/mailbox214-host-linear/boot.img. User must manually
+  start214; no214 runtime/visual/FPS evidence yet, flicker root cause still open.
+  Implementation/build commit353ae1c (iOS QoS portbf1a007 included).
 
 - User asks to fix the explicit-pitch/direct-rendering blocker described in
   the preceding turn. Implemented the runtime+X9 native integration path,
@@ -50,10 +63,9 @@
   x9/out/mailbox214-host-linear/. Logs: that directory/build.log and
   .local/analysis-blur212/mailbox214-host-linear-build.log. No CI run.
 - No tests/suites or secondary artifact inspections/hash/disassembly/rebuild
-  checks, per user preference. No device operation/update/reboot. Device
-  remains mailbox212;213 and214 are LOCAL ONLY.214 must be installed using
-  its matching plugin mailbox before booting its image. Hardware/visual/FPS
-  success NOT established by the build.
+  checks, per user preference. At build completion213 and214 were LOCAL ONLY;
+  subsequent214 mailbox update succeeded as recorded above. No automatic boot
+  or reboot; hardware/visual/FPS success NOT established by build or update.
 - Next runtime evidence: reproduce same Control Center/folder/App Library
   blur after paired214 update+manual boot; preserve new2.txt separately. Match
   X9 SURFACE layout1256x2760,row5120 with increasing direct/pitched counts,
