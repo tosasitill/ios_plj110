@@ -1,3 +1,55 @@
+## Static vertex/blur/blend route and reference comparison (2026-11-01)
+
+- User requests static source tracing and reference comparisons, not another
+  capture build. No device operation, build, shader substitution or test run.
+- Compared AdrenoMetal-20261030-parity/NativeBridgeMetalFrontend.mm draw and
+  render-pass forwarding with X9: same primitive/start/count/baseVertex/index
+  byte-offset bridge calls, renderTargetWidth/Height forwarding. Reference's
+  skipDraw/log hooks are diagnostics, not missing correctness fixes. Private
+  full diff: .local/analysis-blur212/frontend-reference.diff.
+- Reference bridge/quartzcore_blur_host.mm exercises 32x24 RGBA16Float,
+  nonindexed6 vertices, stride40 Float4+Float2+Float4 in slot0, identity matrix,
+  one attachment, narrow7 with explicit half uniform88 bytes and scale slot6.
+  This does NOT cover live stride48 slot1/half4, indexed count54, BGRA8, mixed
+  attachments, fixed_frag specialization or framebuffer fetch. Read source
+  only; no new host pass claim. Local UniXNU-gpu is a vendored directory with
+  no .git: git -C rev-parse walks into outer repo; NEVER use that as its SHA.
+- hackios userland/src/eagl.c:1846-1983 + rc.jobs.vblur describe variable blur
+  source/destination feedback and opacity mixing, plus mask edge clamp. That
+  route replaces GLES shaders and synthesizes a separate level chain; it is
+  not an original Metal shader repair and must not be transplanted wholesale.
+- Concrete live correspondence: 211 graph draws51-54 cb76 write tex209 mip1..4
+  (384x32,192x16,96x8,48x4), sample SAME tex209 with all10 levels bound. Draw55
+  samples tex209 plus tex211 mask to tex207. This is not ordinary ping-pong.
+  Runtime texture/attached_reads.rs::attached_in checks bound view mip range
+  against target mip, so this shape triggers attachment-read handling;
+  snapshot_color rejects it (target mip differs from base_level0).
+  usage_shadow.rs::slot_view/new_usage_shadow selects a copied image retaining
+  levels, render/shadows.rs::plan calls plan_shadows then shadows_used for
+  each instance. Its one_image optimization explicitly requires1 mip, so the
+  whole-image clear elision does NOT directly apply to this10-level texture.
+  Still need trace shadow version/range invalidation through encoder.rs and
+  shadow.rs to prove or exclude stale lower mip reuse. Same texture IDs alone
+  do NOT prove an invalid same-subresource GPU feedback operation.
+- Vertex route read: translator pipeline/link/varyings.rs matches user keys
+  and type, checks uniform-input contract; PanVK emit_vs_attrib uses declared
+  attribute offset/format/stride, VS outputs build_attr_buf_write selects
+  hardware buffer1 for generic varyings on arch>=12; FS varying descriptors
+  select buffer1 too. Compact layout aligns each varying to next-power-of-two
+  component byte size; resize pass adjusts16/32-bit IO to linked layout.
+  No proven mismatch yet; actual compiled variant/layout still unobserved.
+- Mixing route: fixed_frag original AIR conditional fetch/sample flags are
+  FC indices4/5, attachment count6, has_attachment0 index13. These function
+  variants share shader names: graph name alone cannot identify destination
+  fetch vs sampled-color branch. luma_boost reads target0 unconditionally.
+  PanVK blend descriptor uses4 components and RT-format conversion; no simple
+  BGRA/RGBA exchange or blend-factor forwarding error established.
+- Static next focus: shadow mip invalidation for the live10-level chain;
+  fixed_frag specialization values and attachment1 preservation; linked VS/FS
+  mixed-width varying layout. These are scoped investigations, not root-cause
+  claims. Ordinary narrow blur and triangle geometry need their own evidence;
+  a variable-blur-only fault cannot explain all reported controls by itself.
+
 ## 212 runtime pixel capture decoded; interaction window missed (2026-11-01)
 
 - Latest user log preserved `.local/analysis-blur212/runtime-latest.raw.log`.
