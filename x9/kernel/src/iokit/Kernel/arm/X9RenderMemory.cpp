@@ -24,7 +24,7 @@ IOReturn x9_render_memory_unmap(X9RenderContext *c,const X9RenderVMEntry *entry)
 }
 IOReturn x9_render_memory_cache_spans(X9RenderContext *c,X9RenderResource *r,
  const X9RenderCacheSpan *spans,unsigned count,uint32_t operation,uint64_t *completed_bytes) {
- if(!c||!r||!r->memory||!r->prepared||!completed_bytes||count>X9_RENDER_MAX_MAPPINGS||
+ if(!c||!r||!r->memory||!r->prepared||!completed_bytes||count>X9_RENDER_KERNEL_MAPPINGS||
     (count&&!spans)||!operation||(operation&~3u))return kIOReturnBadArgument;
  *completed_bytes=0;
  if(c->disabled)return kIOReturnNotReady;if(c->exposed)return kIOReturnBusy;

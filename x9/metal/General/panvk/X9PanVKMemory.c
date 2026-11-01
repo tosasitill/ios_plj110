@@ -7,6 +7,12 @@
 #include "util/log.h"
 #include <string.h>
 #define X9_BO_FLAGS (PAN_KMOD_BO_FLAG_EXECUTABLE|PAN_KMOD_BO_FLAG_NO_MMAP|PAN_KMOD_BO_FLAG_WB_MMAP)
+/* Native mappings this device may hold. The caps still report the ABI's 1024
+ * (X9_RENDER_MAX_MAPPINGS) for older plugins; kernels from 2026-11-01 accept
+ * X9_RENDER_KERNEL_MAPPINGS (4096). With 1024, backboardd filled this table
+ * after a minute of animations and the whole device was failed (DeviceLost).
+ * Against an older kernel the kernel's own limit still refuses cleanly. */
+#define X9_PANVK_MAX_MAPPINGS 4096u
 struct x9_dev {
  struct pan_kmod_dev base;
  struct X9RenderConnection *connection;
@@ -14,7 +20,7 @@ struct x9_dev {
  struct drm_panthor_csif_info csif;
  simple_mtx_t lock;
  struct pan_kmod_vm *vm;
- struct X9RenderMapping mappings[X9_RENDER_MAX_MAPPINGS];
+ struct X9RenderMapping mappings[X9_PANVK_MAX_MAPPINGS];
  uint32_t count,groups[32],group_count,last_group;
  uint64_t last_submission;
  uint64_t cache_ops,cache_range_bytes,cache_bo_bytes,cache_merged;
@@ -207,7 +213,7 @@ static int bind_vm(struct pan_kmod_vm *vm,enum pan_kmod_vm_op_mode mode,struct p
      r->va.start<d->caps.va_start||r->va.start>=d->caps.va_end||r->va.size>d->caps.va_end-r->va.start){result=error(EINVAL);break;}
   if(r->type==PAN_KMOD_VM_OP_TYPE_MAP) {
    if(!r->map.bo||r->map.bo->dev!=vm->dev||r->map.bo_offset<0||((uint64_t)r->map.bo_offset&4095)||
-      (uint64_t)r->map.bo_offset>r->map.bo->size||r->va.size>r->map.bo->size-(uint64_t)r->map.bo_offset||d->count==X9_RENDER_MAX_MAPPINGS) {
+      (uint64_t)r->map.bo_offset>r->map.bo->size||r->va.size>r->map.bo->size-(uint64_t)r->map.bo_offset||d->count==X9_PANVK_MAX_MAPPINGS) {
     result=error(EINVAL);break;
    }
    struct x9_bo *b=container_of(r->map.bo,struct x9_bo,base);

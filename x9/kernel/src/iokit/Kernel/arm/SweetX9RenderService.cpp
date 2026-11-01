@@ -211,8 +211,8 @@ class SweetX9RenderUserClient : public IOUserClient {
     live_report("budget",true);
     return kIOReturnNoMemory;
    }
-   unsigned slot=0;while(slot<X9_RENDER_MAX_MAPPINGS&&context->resources[slot].memory)slot++;
-   if(slot==X9_RENDER_MAX_MAPPINGS||context->next_handle==UINT32_MAX) {
+   unsigned slot=0;while(slot<X9_RENDER_KERNEL_MAPPINGS&&context->resources[slot].memory)slot++;
+   if(slot==X9_RENDER_KERNEL_MAPPINGS||context->next_handle==UINT32_MAX) {
     IOLog("X9 RENDER MEM: no slot for size=%llu used=%llu\n",(unsigned long long)request.bytes,(unsigned long long)context->allocated_bytes);
     return kIOReturnNoResources;
    }
@@ -303,7 +303,7 @@ class SweetX9RenderUserClient : public IOUserClient {
     }
     return kIOReturnBadArgument;
    }
-   if(context->mapping_count==X9_RENDER_MAX_MAPPINGS)return kIOReturnNoResources;
+   if(context->mapping_count==X9_RENDER_KERNEL_MAPPINGS)return kIOReturnNoResources;
    for(unsigned i=0;i<context->mapping_count;i++) {
     const auto &m=context->mappings[i];
     if(request.gpu_address<m.address+m.bytes&&m.address<request.gpu_address+request.bytes)return kIOReturnBadArgument;

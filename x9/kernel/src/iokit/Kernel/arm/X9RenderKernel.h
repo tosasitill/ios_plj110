@@ -5,6 +5,13 @@
 #include <IOKit/IOMemoryDescriptor.h>
 #include <IOKit/IOLocks.h>
 /* Shared only by the native service and CSF engine. Never copied to userspace. */
+/* Kernel capacity for one client's resources and GPU mappings. The caps keep
+ * reporting X9_RENDER_MAX_MAPPINGS (1024): plugins up to 207 refuse a larger
+ * reported value (X9RenderResources.c) and size their own tables by it. With
+ * 1024, backboardd's PanVK filled its table at 65 s (~900 BOs: write-combined
+ * BOs, many small private ones, plus ~200 IOSurface imports) and lost the
+ * device. A plugin built with a larger table can now use up to this many. */
+#define X9_RENDER_KERNEL_MAPPINGS 4096u
 struct X9RenderResource {
  IOMemoryDescriptor *memory;
  uint64_t bytes;
@@ -39,8 +46,8 @@ struct X9RenderPageTable;
 struct X9RenderContext {
  IOLock *lock;
  task_t owner;
- X9RenderResource resources[X9_RENDER_MAX_MAPPINGS];
- X9RenderVMEntry mappings[X9_RENDER_MAX_MAPPINGS];
+ X9RenderResource resources[X9_RENDER_KERNEL_MAPPINGS];
+ X9RenderVMEntry mappings[X9_RENDER_KERNEL_MAPPINGS];
  uint64_t allocated_bytes,next_submission,completed_submission;
  uint32_t next_handle,mapping_count;
  /* Live-resource telemetry window (X9 RENDER LIVE), under the context lock. */

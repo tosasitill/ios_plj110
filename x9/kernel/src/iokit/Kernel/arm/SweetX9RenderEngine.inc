@@ -235,11 +235,11 @@ static IOReturn render_destroy_group(X9RenderContext *c,uint32_t id) {
  * rollback. Resource permissions/backing are immutable while mapped; CPU
  * exposure is evaluated at execution. No large kernel stack arrays. */
 static bool render_cache_bounds(X9RenderContext *c) {
- if(c->mapping_count>X9_RENDER_MAX_MAPPINGS)return false;
+ if(c->mapping_count>X9_RENDER_KERNEL_MAPPINGS)return false;
  for(auto &r:c->resources) {
   r.cache_begin=r.write_begin=r.bytes;r.cache_end=r.write_end=0;
  }
- uintptr_t base=(uintptr_t)&c->resources[0],end=(uintptr_t)&c->resources[X9_RENDER_MAX_MAPPINGS];
+ uintptr_t base=(uintptr_t)&c->resources[0],end=(uintptr_t)&c->resources[X9_RENDER_KERNEL_MAPPINGS];
  for(unsigned i=0;i<c->mapping_count;i++) {
   const auto &m=c->mappings[i];uintptr_t p=(uintptr_t)m.resource;
   if(p<base||p>=end||(p-base)%sizeof(X9RenderResource))return false;
@@ -274,7 +274,7 @@ static IOReturn render_submit(X9RenderContext *c,const X9RenderSubmission *reque
   unsigned state=output_word(resident->image,resident->slots[i].access.interface.group_output)&7;
   if(state==1||state==3)return kIOReturnBusy;
  }
- if(!c->engine_private||c->mapping_count>X9_RENDER_MAX_MAPPINGS)return kIOReturnBadArgument;
+ if(!c->engine_private||c->mapping_count>X9_RENDER_KERNEL_MAPPINGS)return kIOReturnBadArgument;
  auto *kernel_context=(RenderKernelContext *)c->engine_private;
  auto *plan=&kernel_context->cache_plan;
  bool plan_rebuilt=false;

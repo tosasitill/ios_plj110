@@ -115,6 +115,28 @@ should be checked for compile errors before flashing.
   CIVAC over its physical pages via phystokv (not flush_dcache64), and log
   the first pages' WIMG (expect 6 = VM_WIMG_WCOMB). Fallback if it recurs:
   boot-arg `x9_bo_wc=0`.
+- Run of dcb008b (`/tmp/2.txt`): desktop works, WC confirmed (`wimg=6`).
+  Per job pre/post cache 3.1/2.4 ms (was ~10/10), 350-450 MB/job skipped
+  as WC, display ~18-19 copies/s; GPU wait 8-14 ms now dominates. GPU ran
+  at the boot OPP 390/260 MHz (57 OPPs) - no DVFS policy runs here.
+  User reports rendering errors, flicker, blur problems: backboardd's Metal
+  device went DeviceLost at 65.5 s (6897 refused command buffers after it):
+  PanVK's own mapping table hit X9_RENDER_MAX_MAPPINGS=1024 (`X9 PANVK PRIV:
+  bind ... errno=22` comes from its userspace check), PanVK failed the whole
+  device; resource count jumps with UI (175 -> 585 -> ~900), ~150-210 of them
+  IOSurface imports. What showed afterwards was not GPU-rendered.
+- Fixes (not built): kernel capacity X9_RENDER_KERNEL_MAPPINGS=4096 for
+  arrays/checks while caps keep reporting 1024 (the 207 plugin's
+  X9RenderResources.c refuses a larger reported value); PanVK's own table
+  X9_PANVK_MAX_MAPPINGS=4096 (needs a plugin rebuild, e.g. revision 208);
+  GPU DVFS: at resident session start query all OPP frequencies
+  (CMD_GET_FREQ_BY_IDX=1, TARGET_GPU=1) and CMD_DUAL_COMMIT=9 the fastest at
+  or below `x9_gpu_khz` (default 900000), from OnePlus MT6993 gpufreq_ipi.h /
+  gpufreq_v2.c; `x9/build/scripts/gen-plugin-allowlist.py <mailbox.json>`
+  regenerates kernel/generated/x9_render_external_manifest.h (verified
+  identical for 207). Plugin builds read `<workspace>/MaliMetal/X9/General`,
+  not this repo; the plugin-package/mailbox.json packager lives in the
+  user's Mac workspace, not in git.
 - PosterBoard (user asked to fix if possible): crash-loops with SIGABRT
   (ns 2 code 6) every ~10 s from 18 s on, 72 crash lines in `/tmp/2.txt`, no
   own log output. Unslid (minus shared-cache slide) its pc 0x1C2617198 /

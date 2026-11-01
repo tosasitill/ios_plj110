@@ -7,8 +7,8 @@
  */
 using RenderCacheSpan = X9RenderCacheSpan;
 struct RenderCachePlan {
- RenderCacheSpan spans[2][X9_RENDER_MAX_MAPPINGS];
- unsigned count[2],first[2][X9_RENDER_MAX_MAPPINGS+1];
+ RenderCacheSpan spans[2][X9_RENDER_KERNEL_MAPPINGS];
+ unsigned count[2],first[2][X9_RENDER_KERNEL_MAPPINGS+1];
  uint64_t holes[2],overlap[2];
 };
 static bool cache_span_less(const RenderCacheSpan &a,const RenderCacheSpan &b) {
@@ -30,9 +30,9 @@ static void cache_span_sort(RenderCacheSpan *a,unsigned n) {
  }
 }
 static bool render_cache_plan_build(X9RenderContext *c,RenderCachePlan *p) {
- if(!p||c->mapping_count>X9_RENDER_MAX_MAPPINGS)return false;
+ if(!p||c->mapping_count>X9_RENDER_KERNEL_MAPPINGS)return false;
  p->count[0]=p->count[1]=0;
- uintptr_t base=(uintptr_t)c->resources,limit=(uintptr_t)(c->resources+X9_RENDER_MAX_MAPPINGS);
+ uintptr_t base=(uintptr_t)c->resources,limit=(uintptr_t)(c->resources+X9_RENDER_KERNEL_MAPPINGS);
  for(unsigned i=0;i<c->mapping_count;i++) {
   const auto &m=c->mappings[i];uintptr_t ptr=(uintptr_t)m.resource;
   if(ptr<base||ptr>=limit||(ptr-base)%sizeof(X9RenderResource))return false;
@@ -60,7 +60,7 @@ static bool render_cache_plan_build(X9RenderContext *c,RenderCachePlan *p) {
   }
   p->count[phase]=merged;
   unsigned at=0;
-  for(unsigned id=0;id<X9_RENDER_MAX_MAPPINGS;id++) {
+  for(unsigned id=0;id<X9_RENDER_KERNEL_MAPPINGS;id++) {
    p->first[phase][id]=at;
    uint64_t bytes=0;
    while(at<merged&&a[at].resource==id){bytes+=a[at].end-a[at].begin;at++;}
@@ -71,7 +71,7 @@ static bool render_cache_plan_build(X9RenderContext *c,RenderCachePlan *p) {
    /* Match executed shared-resource work; private zero-fill remains whole. */
    if(r.memory&&r.cpu_exposed)p->holes[phase]+=bounding-bytes;
   }
-  p->first[phase][X9_RENDER_MAX_MAPPINGS]=at;
+  p->first[phase][X9_RENDER_KERNEL_MAPPINGS]=at;
   if(at!=merged)return false;
  }
  return true;
@@ -79,7 +79,7 @@ static bool render_cache_plan_build(X9RenderContext *c,RenderCachePlan *p) {
 static IOReturn render_cache_plan_resource(X9RenderContext *c,RenderCachePlan *p,
  X9RenderResource &r,unsigned phase,uint64_t *bytes) {
  unsigned id=(unsigned)(&r-c->resources);
- if(phase>1||id>=X9_RENDER_MAX_MAPPINGS)return kIOReturnBadArgument;
+ if(phase>1||id>=X9_RENDER_KERNEL_MAPPINGS)return kIOReturnBadArgument;
  unsigned first=p->first[phase][id],last=p->first[phase][id+1];
  if(first>last||last>p->count[phase])return kIOReturnBadArgument;
  return x9_render_memory_cache_spans(c,&r,p->spans[phase]+first,last-first,

@@ -26,13 +26,17 @@ extern void sweet_x9_compute_publish(void);
 #define ACK 0xc0000000u
 #define CHANNEL_BIT 2u
 #define CMD_INIT 0u
+#define CMD_GET_FREQ_BY_IDX 1u
 #define CMD_POWER 6u
 #define CMD_ACTIVE 7u
+#define CMD_DUAL_COMMIT 9u
+#define TARGET_GPU 1u
 #define SHARED_PA 0xf1080000ULL
 #define SHARED_SIZE 0x4000u
 struct gpu_ipi {
  uint32_t magic,cmd,target,padding;
- union {int32_t result;uint32_t power;struct {uint64_t base;uint32_t size,pad;} mem;} u;
+ union {int32_t result;int32_t oppidx;uint32_t freq;uint32_t power;struct {uint64_t base;uint32_t size,pad;} mem;
+  struct {int32_t gpu_oppidx,stack_oppidx;} dual;} u;
 };
 _Static_assert(sizeof(struct gpu_ipi)==32,"GPUEB IPI size");
 _Static_assert(offsetof(struct gpu_ipi,u)==16,"GPUEB union offset");
@@ -144,6 +148,42 @@ static int power_command(unsigned command,unsigned state,int32_t *count) {
  *count=resp.u.result;
  printf("X9 GPU: command=%u state=%u firmware-return=%d\n",command,state,*count);
  return *count>=0&&*count<=16?0:-1;
+}
+/* Nothing on this kernel runs MediaTek's GED DVFS policy, which on Android
+ * commits OPPs by load through gpufreq_dual_commit(): the GPU stayed at the
+ * boot OPP (390/260 MHz GPU/stack observed) and frames were GPU-bound. Once,
+ * with the GPU powered: read every GPU OPP's frequency (CMD_GET_FREQ_BY_IDX,
+ * index 0 is the fastest) and dual-commit the fastest at or below a cap, the
+ * same index for GPU and stack as their tables have equal length.
+ * CMD_DUAL_COMMIT goes through GPUEB's limiter (ceiling/floor), unlike the
+ * debug CMD_FIX_*. There is no thermal governor here, hence a moderate
+ * default cap. x9_gpu_khz=<kHz> sets it; 0 leaves the OPP alone.
+ * Sources: OnePlus/OPPO MT6993 gpufreq_ipi.h and gpufreq_v2.c. */
+static void gpu_select_performance(void) {
+ static int done;
+ if(done)return;
+ done=1;
+ uint32_t cap=900000;PE_parse_boot_argn("x9_gpu_khz",&cap,sizeof(cap));
+ if(!cap){printf("X9 GPU DVFS: x9_gpu_khz=0, boot OPP kept\n");return;}
+ struct gpu_shared_prefix s;status(&s);
+ if(!valid_status(&s)||s.opp_num_stack!=s.opp_num_gpu){printf("X9 GPU DVFS: unexpected OPP tables gpu=%d stack=%d\n",s.opp_num_gpu,s.opp_num_stack);return;}
+ int best=-1;uint32_t best_khz=0,max_khz=0,min_khz=0xffffffffu;
+ for(int i=0;i<s.opp_num_gpu;i++) {
+  struct gpu_ipi req={0},resp={0};req.cmd=CMD_GET_FREQ_BY_IDX;req.target=TARGET_GPU;req.u.oppidx=i;
+  if(exchange(&req,&resp)){printf("X9 GPU DVFS: frequency query %d failed\n",i);return;}
+  uint32_t khz=resp.u.freq;
+  if(khz>max_khz)max_khz=khz;
+  if(khz&&khz<min_khz)min_khz=khz;
+  if(khz&&khz<=cap&&khz>best_khz){best=i;best_khz=khz;}
+ }
+ printf("X9 GPU DVFS: GPU OPPs %d..%d kHz, current %u/%u kHz, cap %u kHz -> index %d (%u kHz)\n",
+  (int)min_khz,(int)max_khz,s.cur_fgpu,s.cur_fstack,cap,best,best_khz);
+ if(best<0)return;
+ struct gpu_ipi req={0},resp={0};req.cmd=CMD_DUAL_COMMIT;req.u.dual.gpu_oppidx=best;req.u.dual.stack_oppidx=best;
+ if(exchange(&req,&resp)){printf("X9 GPU DVFS: commit failed\n");return;}
+ status(&s);
+ printf("X9 GPU DVFS: commit index %d firmware-return=%d now gpu=%u kHz stack=%u kHz volt=%u/%u oppidx=%d/%d ceiling=%u floor=%u\n",
+  best,resp.u.result,s.cur_fgpu,s.cur_fstack,s.cur_vgpu,s.cur_vstack,s.cur_oppidx_gpu,s.cur_oppidx_stack,s.cur_ceiling,s.cur_floor);
 }
 /* pan145 hardware: firmware POWER+ACTIVE produced power=1/active=1,
  * buck=1/mtcmos=1/cg=2, MFG1=c001770d and MFG37=c000110d while
@@ -304,6 +344,7 @@ static int gpu_owned_request(void *job,int desktop) {
   active=1;
  }
  if(wait_counts(1,active,1))return -1;
+ if(desktop==2)gpu_select_performance();   // resident render session start
  /* ml_io_map() VA is permanent (fixed io_submap): map once, not per request. */
  static vm_offset_t gpu;
  if(!gpu)gpu=ml_io_map(0x48000000,0x4000);
