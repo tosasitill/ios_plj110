@@ -33,6 +33,11 @@ different purposes and must not be collapsed into one “newest Mesa” tree.
 The patch snapshots below preserve historical provenance (including original
 paths); applying them to fresh dependencies still requires path substitution.
 
+The Metal build applies `0023-quality-of-service-on-ios.patch` before compiling
+the runtime, and accepts an already-patched source snapshot. It enables Apple's
+QoS requests on iOS for submission, completion and compiler threads. The patch
+comes from [AdrenoMetal at 831a9dc](https://github.com/UniXNU/AdrenoMetal/blob/831a9dcbd6ac7de89a11bdaf031e07b9aadfa3c8/bridge/patches/0023-quality-of-service-on-ios.patch).
+
 Validation: full kernel compile/link/boot packaging succeeded at
 `x9/out/migration-check/boot.img` (9,416,704 bytes). PanVK rebuilt successfully
 (836 Ninja steps) and a temporary revision 9999 bundle packaged/signed.

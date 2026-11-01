@@ -1,3 +1,35 @@
+## Mailbox213 built: upstream0023 iOS QoS port (2026-11-01)
+
+- User explicitly asks to port0023, then continue texture/blur source review.
+  Maintained patch x9/build/third_party/metal2vulkan-pan205/
+  0023-quality-of-service-on-ios.patch ports AdrenoMetal831a9dc's Apple QoS
+  cfg changes to the current retained runtime. Local source's intervening
+  lower_to_utility function differs from newer reference context; adapted
+  hunks at the same six implementation/fallback gates, with zero-fuzz apply.
+  Submission/lowering/completion threads now request USER_INTERACTIVE on iOS;
+  driver compile threads request at least USER_INITIATED. Warm-thread utility
+  behavior, pipeline-wait policy and texture policy unchanged.
+- build-general-metal.py applies this maintained patch before compilation,
+  accepts an already-applied source via reverse applicability, and rejects
+  unrelated source drift. x9/BUILD.md records upstream source and behavior.
+  Actual retained .local runtime was patched by this build, not just a loose
+  patch saved without a consuming build step. No Mesa source edits.
+- Initial unadapted reference patch was rejected by source applicability
+  before Metal compilation (one of four hunks); no partial source mutation.
+  Adapted normal build succeeded:
+  python3 -I x9/build/build.py all --revision 213 --name mailbox213-ios-qos --panvk skip
+  Build process exit0, Rust release24.94s; existing PanVK repackaged213,
+  Metal compiled/linked/signed, plugin package+exact kernel allowlist generated,
+  kernel compiled/linked and boot packaged. No CI run.
+  x9/out/mailbox213-ios-qos/boot.img: build reports9,420,800 bytes.
+  Normal build log x9/out/mailbox213-ios-qos/build.log; console copy
+  .local/analysis-blur212/mailbox213-ios-qos-build.log.
+- No extra tests, build-artifact inspections, hash checks, disassembly or
+  second verification rebuild. No device operation/update/reboot; device
+  mailbox212 unchanged.213 is built locally, NOT installed/hardware verified.
+  QoS effect on X9 FPS and polygon flicker remains unmeasured. Texture/blur
+  review continues separately; no speculative InPlaceWrites/Exact switch.
+
 ## Fresh UniXNU upstream references: iOS QoS and pipeline waits (2026-11-01)
 
 - User supplied github.com/UniXNU/AdrenoMetal and /Adreno740. Fetched current

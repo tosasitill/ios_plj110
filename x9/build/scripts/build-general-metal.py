@@ -14,6 +14,19 @@ if not 170<=opts.revision<=9999:ap.error("revision must be170..9999")
 w=Path(__file__).resolve().parents[3] / '.local/x9/work/x9-metal-render'
 root=w.parents[1]
 source=opts.runtime_source.resolve() if opts.runtime_source else w/'metal2vulkan-source'
+# Keep portable runtime fixes in the maintained tree, including for a restored
+# local source snapshot. Accept an already-applied patch; refuse other drift.
+runtime_patch=Path(__file__).resolve().parents[1]/'third_party/metal2vulkan-pan205/0023-quality-of-service-on-ios.patch'
+patch_cmd=['/usr/bin/patch','--batch','--fuzz=0','-p1','-i',str(runtime_patch)]
+forward=subprocess.run(patch_cmd+['--dry-run','--forward'],cwd=source,capture_output=True,text=True)
+if forward.returncode==0:
+ subprocess.run(patch_cmd+['--forward'],cwd=source,check=True)
+ print('Applied runtime iOS QoS patch0023',flush=True)
+else:
+ reverse=subprocess.run(patch_cmd+['--dry-run','--reverse'],cwd=source,capture_output=True,text=True)
+ if reverse.returncode!=0:
+  raise SystemExit('Runtime iOS QoS patch0023 does not match this source:\n'+forward.stdout+forward.stderr)
+ print('Runtime iOS QoS patch0023 already applied',flush=True)
 bridge=root/'MaliMetal/X9/General'
 bridge.mkdir(parents=True,exist_ok=True)
 reference=root/'work/legacy-import/xnu_x9/drivers/NativeMetal'
