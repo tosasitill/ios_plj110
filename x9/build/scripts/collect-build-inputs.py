@@ -91,10 +91,18 @@ def read_depfile(path):
 
 
 def dwarf_paths(path, workspace):
-    """Workspace source paths named in an object's debug info (compiled -g)."""
+    """Workspace source paths named in an object's debug info (compiled -g).
+    Line tables often name headers relative to the compile directory (the
+    home directory here), e.g. "HelioDarwin-x9-lk-preserve/x9/...h"."""
     data = Path(path).read_bytes()
-    pat = re.escape(workspace.encode()) + rb"/[\x21-\x7e]+?\.(?:c|cc|cpp|s|S|m|mm|h|hpp|inc)(?=[\x00\s])"
-    return sorted({m.decode() for m in re.findall(pat, data)})
+    parent, base = workspace.rsplit("/", 1)
+    pat = rb"(?:" + re.escape(parent.encode()) + rb"/)?" + re.escape(base.encode()) + \
+        rb"/[\x21-\x7e]+?\.(?:c|cc|cpp|s|S|m|mm|h|hpp|inc)(?=[\x00\s])"
+    found = set()
+    for m in re.findall(pat, data):
+        p = m.decode()
+        found.add(p if p.startswith("/") else parent + "/" + p)
+    return sorted(found)
 
 
 def output_of(record):
@@ -231,6 +239,21 @@ def main():
                     for sib in Path(c.local(p)).parent.glob("*"):
                         if sib.suffix in (".d", ".json") and sib.is_file():
                             c.add(str(sib).replace(c.local(p).rsplit("/", 1)[0], p.rsplit("/", 1)[0], 1))
+        # Without a depfile the header set is unknown (debug info omits
+        # macro-only headers): take the headers next to the source and in
+        # every workspace -I directory of its command, non-recursively.
+        if not entry["depfile"]:
+            dirs = {s.rsplit("/", 1)[0] for s in entry["sources"] + entry.get("dwarf_sources", [])
+                    if re.search(r"\.(c|cc|cpp|s|S)$", s)}
+            for a in (entry["command"] or {}).get("args", []):
+                if a.startswith("-I" + workspace):
+                    dirs.add(a[2:].rstrip("/"))
+            entry["header_dirs"] = sorted(dirs)
+            for d in dirs:
+                ld = Path(c.local(d))
+                for h in sorted(ld.glob("*")) if ld.is_dir() else []:
+                    if h.suffix in (".h", ".hpp", ".inc") and h.is_file():
+                        c.add(d + "/" + h.name)
         objects.append(entry)
 
     if args.with_xnu_objects:

@@ -16,6 +16,16 @@ should be checked for compile errors before flashing.
   diff (87 files) + 240 untracked files (captured in the second archive under
   `xnu/tree1-*`, extension-filtered, so e.g. `config/MASTER.arm64.sweet` is
   missing). Not imported yet.
+- First Mac build (`/tmp/build.log`, 2026-11-01, commit 20f001d): 38/51
+  compiled, 13 failed, all "file not found" for headers of the depfile-less
+  pan111/pan150 objects (x9_ufs/*.h, x9_decmpfs/*.h, vendor lzfse/lzvn
+  headers, x9_usb_log_protocol.h, x9_update_map.h, sweet_irq_entropy.h).
+  Cause: debug info names them relative to the compile dir
+  ("HelioDarwin-x9-lk-preserve/..."), which the collector ignored. Collector
+  fixed (+ headers next to the source and in -I dirs for depfile-less
+  objects); importer committed as `x9/build/scripts/import-build-inputs.py`.
+  Waiting for a third collector run; then import into scratch and add only
+  the new headers to `x9/kernel/src` (keep the four edited files).
 - Fix merge onto pan220: `poll_pause()` = spin 64x16us, then pan219's 100us
   sleeps x20, then 1ms; replaces pan219 `render_cache_wait()` and also covers
   `idle_as` and the fence wait. Framebuffer/scaler and coherency changes were
