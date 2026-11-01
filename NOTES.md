@@ -1,3 +1,40 @@
+## FB order continuation: fragment retirement and descriptor lifetime (2026-11-01)
+
+- Extended the prior same-pixel read/BLEND chain to render-pass retirement:
+  issue_fragment_jobs emits RUN_FRAGMENT2 on v14, followed by FINISH_FRAGMENT
+  under cs_iter_sb_update. Finish waits current iterator and signals next;
+  cs_iter_sb_update_end sets indirect wait/stream masks excluding conflicting
+  direct reuse. Descriptor ring release, when used, is deferred after finish.
+  Current local code includes the ordering mechanism for the upstream
+  FINISH_FRAGMENT ordering issue; version/release-note exposure alone is not
+  a missing patch. Did not infer hardware success from comments.
+- Actual runtime primary submission and inline-first render commands use
+  ONE_TIME_SUBMIT; SIMULTANEOUS_USE descriptor-ring allocation/release is a
+  separate PanVK branch. No evidence this draw accidentally reuses the
+  simultaneous ring. Ordinary descriptor pools remain command-buffer-owned
+  until completion (earlier lifecycle trace). No early descriptor release
+  found in this static path.
+- Reconfirmed luma outputs lower through ATEST then BLEND; skip_atest applies
+  only internal blit shaders without ZS output, not ordinary luma. Both
+  load_tile variants preserve pixel/sample/coverage/conversion operands into
+  Kraid; is_resource selects Resource pre-wait vs Barrier. They share one
+  hardware LD_TILE opcode, so the flag not appearing in opcode encoding is
+  intentional; do not claim a missing LD_TILE_RES opcode bit.
+- Kraid BlendCall lowering happens after wait/flow assignment and preserves
+  the original BLEND flow; adds fixed return/jump prologue for blend-shader
+  descriptors. No evidence BGRA8 replacement luma uses a shader-blend
+  descriptor, so this exceptional branch cannot be treated as its active bug.
+- Targeted upstream primary-source searches did not find a matching Kraid
+  HSR metadata repair. Historical PanVK input-attachment memory-dependency,
+  BY_REGION, and FINISH_FRAGMENT fixes are not newly missing merely because
+  they appear in search results; current relevant mechanisms were traced.
+  No broad version update or workaround justified from those titles.
+- No confirmed new rendering defect. Remaining strong evidence gap is actual
+  specialized draw's DCD/FBD and generated tile-read/store operations versus
+  the source contract; startup212 pixels miss late interaction. Do not keep
+  recycling the same wait/barrier source checks as further root-cause progress.
+  No tests/build/device operation. Mailbox212 unchanged.
+
 ## FB read/write order: same-pixel chain traced (2026-11-01)
 
 - User asks specifically for framebuffer read/write order. Followed one
