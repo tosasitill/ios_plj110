@@ -1,3 +1,53 @@
+## FB read/write order: same-pixel chain traced (2026-11-01)
+
+- User asks specifically for framebuffer read/write order. Followed one
+  narrow chain: earlier color write -> input-attachment tile read -> luma
+  shader's use -> color BLEND writeback. No device operation/tests/build.
+- Runtime binds WriteSource::Attachment input descriptor from tables.pass's
+  color.target via render_target::viewed/color_view, not the original caller's
+  IOSurface texture. Uses/layout resolve the selected stand-in before binding.
+  Subpass input references use the SAME attachment reference as color outputs,
+  in GENERAL with COLOR aspect. No separate old-image read binding demonstrated.
+- Every pipeline of key.pass.fetch_inputs sets color-blend ROA, even ordinary
+  writers that do not themselves fetch. The subpass sets matching ROA. Common
+  Vulkan state copies rasterization_order_access into bound dynamic state.
+  Thus prior ordinary writer -> later fetching pipeline is covered in API
+  state, not only fetch -> fetch. No omitted prior-pipeline flag found.
+- PanVK lowers input load to load_tile_pan (read/write attachment) or
+  load_tile_res_pan (read-only attachment). Kraid translates both to OpLdTile;
+  required_waits inserts Barrier for color R/W or Resource for read-only.
+  These are hardware dependency waits, not a CPU fence. Result consumption
+  waits its message slot. Output lowering emits blend_pan, translated to
+  OpBlend/BlendCall, preceded by ZS+Barrier; actual BLEND conversion/write mask
+  determines attachment store. load/store data dependencies remain in IR.
+- Kraid scheduler classifies LD_TILE as memory Read and BLEND/ST_TILE as Write;
+  its dependency tracker covers RAW/WAW and reverse WAR. message-slot pass
+  additionally waits result-register hazards. No plain reordering of color
+  store ahead of a consumed tile load demonstrated. This source trace cannot
+  establish ordering across fragment invocations on actual v14 hardware.
+- Pipeline/state-switch audit: prepare_draw calls prepare_blend BEFORE DCD;
+  any_dest_read is fresh when DCD FPK/HSR conditions are computed. FS changes,
+  color write enables/count/masks are covered by fs_user_dirty; blend equations,
+  enables, input map and render state also participate. Initial suspicion that
+  CB_COLOR_WRITE_ENABLES was absent in DCD's local list is false: macro includes
+  it. No proven stale write-mask or FS-switch FPK state at these sites.
+- FPK direction matters: allow_forward_pixel_to_kill is false for roa_color;
+  all pipelines above are ROA, so later writers cannot kill earlier fragments
+  through this FPK eligibility bit. allow_forward_pixel_to_be_killed may stay
+  true, but it is not by itself permission for any later draw to kill it.
+  Do not describe that lone bit as confirmed mis-culling.
+- Remaining concrete discrepancy: Kraid zero fs.hsr vs BIR LD_TILE safety
+  classification still changes hsr_can_be_culled on fetched-color shaders.
+  Hardware consumption outside enabled prepass remains unknown. No direct
+  Turnip FLUSH_PER_OVERLAP -> Mali primitive_barrier equivalence established;
+  injecting a barrier draw between API draws cannot fix same-draw overlapping
+  primitives by itself. Do not transplant it as a proven order repair.
+- Outcome: no demonstrated missing runtime attachment identity, API ROA flag,
+  tile pre-wait, result wait, blend pre-wait or DCD invalidation in this chain.
+  Must identify actual compiled instructions/DCD or the first bad framebuffer
+  producer to go beyond these source contracts. Mailbox212 unchanged; flicker
+  root cause not yet confirmed.
+
 ## UniXNU GPU comparison: patch inventory and backend ordering (2026-11-01)
 
 - User explicitly requests careful UniXNU GPU source comparison. Read local
