@@ -1,3 +1,68 @@
+## Texture/blur continuation after QoS build: explicit pitch is blocked (2026-11-01)
+
+- QoS port is committed bf1a007; local mailbox213-ios-qos build succeeded,
+  device remains212 (no install or boot). Continued static texture review,
+  no second build or tests, no texture policy/driver/shader changes.
+- Concrete NEW optimization blocker beyond HostPageTexturePolicy's write
+  rejection: actual native Mesa tree mesa-render-source/panvk_vX_physical_device.c
+  X9_NATIVE_KMOD override sets EXT_image_drm_format_modifier=false,
+  KHR_external_memory_fd=false,EXT_external_memory_dma_buf=false and
+  EXT_queue_family_foreign=false. Read actual built-source override, not
+  base mesa-source's upstream extension table. Same code in maintained
+  00-mesa-panvk-x9.patch around1097. Host-pointer import remains supported.
+- Current runtime texture/in_place_image.rs::in_place_unbound accepts an
+  ordinary linear host image only if reported offset0 and row_pitch exactly
+  match Metal's (array pitch too for arrays). Otherwise host_pitched_image
+  requires Importer::makes_dma_buf_images; device/create.rs::dma_buf_image_names
+  unnecessarily groups modifier+foreign with external-memory-fd+dma-buf,
+  and host_memory.rs further requires dma_buf.is_some(). Thus this route is
+  unavailable under X9's enabled capabilities, even after a hypothetical
+  InPlaceWrites port. cfg(unix) includes iOS; this is NOT a Linux-only cfg bug.
+- Captured main IOSurface texture1256x2760 BGRA8 has row5120,offset0,
+  allocation14139392. Native linear layout path pan_mod_linear_init_slice_layout
+  aligns BGRA8 rows to64: align(1256*4,64)=5056, NOT5120. Explicit layout
+  would pass row5120 through WSI constraints; ordinary host linear image
+  cannot represent it. Therefore flipping the policy alone still shadows this
+  concrete main-surface layout. This is a proven source-contract performance
+  obstacle, not proof of an actual bad pixel producer or measured copy cost.
+- Consulted current Vulkan primary spec: image_drm_format_modifier depends on
+  Vulkan1.2 (or its core/extension prerequisites), not external-memory-fd or
+  dma-buf, and explicitly permits other external memory handle types.
+  https://docs.vulkan.org/refpages/latest/refpages/source/VK_EXT_image_drm_format_modifier.html
+  A future host-pointer explicit-pitch route should negotiate modifier support
+  independently, keep current fd/dma-buf features disabled, and retain external
+  format/importability/dedicated-requirement/plane-layout/memory-bound checks.
+  No driver extension advertised without implementation review this turn.
+- Downloaded reference base624bab's three relevant runtime sources under
+  .local/analysis-blur212/unixnu-current/runtime624 and its companion
+  UniXNU/patches/mesa/turnip-host-import-images.patch. Current reference still
+  uses the same dma-buf grouping. Companion patch relaxes dedicated-image
+  requirements specifically for host-pointer imports; it is a distinct
+  prerequisite from padded-row/tile-edge handling, not generic Mali code.
+- PanVK native linear image contract read: pan_layout.h gives64-byte BGRA8
+  row/offset alignment; pan_mod.c sizes a linear surface by row_stride*actual
+  mip height, rounded to row alignment (not a16x4 tile-height pad). pan_desc.c
+  pan_emit_linear_color_attachment emits LINEAR with actual base,row_stride,
+  surface_stride; pan_fb.c emits framebuffer width/height and clamps bounds
+  to framebuffer extent. Explicit/ordinary non-WSI linear images disable CRC
+  in panvk_should_checksum, avoiding untracked external writes behind CRC.
+  These source contracts differ from Turnip's16x4 GMEM block blits; actual
+  G925 edge-store behavior is not measured or licensed by those contracts.
+- Blur color round-trip check: current BGRA8/RGBA8 shadows can select
+  shadow_merge::with_unorm_view (one mip/layer, sampleable optimal format).
+  bind/shadow_merge_image.rs uses OpImageFetch (no sampler/filter), RoundEven
+  after *255 and ConvertFToU; BGRA uses order[2,1,0,3] before packing bytes.
+  sRGB is excluded from that path. No direct extra filtering, sRGB conversion
+  or R/B packing omission found. Native copy-back dispatch cost facts apply
+  to Intel in current measured table, not a demonstrated Mali fast path.
+  Source check does not prove which kernel corrupted the live output.
+- InPlaceWrites targets imported/buffer-backed surfaces; surface0 in graph
+  does not establish small blur intermediate allocation/storage kind. Keep
+  that optimization separate from sampled same-image10-mip feedback and
+  the photographed per-triangle artifact. Original narrow7 still normalizes
+  alpha conditionally and scales RGB by EDR slot6; exact live slot6 remains
+  uncaptured. No new root-cause/visual improvement claim.
+
 ## Mailbox213 built: upstream0023 iOS QoS port (2026-11-01)
 
 - User explicitly asks to port0023, then continue texture/blur source review.
