@@ -1,3 +1,41 @@
+## 210 ineffective, color regression reported; rolled mailbox back to 209 (2026-11-01)
+
+- Latest /Users/tosasitill/2.txt preserved at
+  `.local/analysis-blur210/runtime.raw.log`, decoded inputs in same directory
+  (decode.py/decoded.txt), aggregate observations.json. 210 installed/verified
+  at 2.456 s, active at 3.296 s. DEINDEX logs through draws=640, all ok=1.
+  No GPU DeviceLost/panic or SpringBoard/backboardd crash captured.
+- User explicitly reports no improvement and additional wrong colors. Treat
+  210 as ineffective and a suspected visual regression, not as a root fix.
+  Source deindex hook/method removed and generated allowlist restored from
+  original 209 package. No new speculative shader/format modifications.
+- Experiment limitations: it changed vertex snapshot/allocation as well as
+  indexed versus nonindexed execution; it covered canonical count6 downsample
+  blur quads, not count54 downsample draws, variable_blur vertex shaders or
+  every final compositing shader. Therefore no global claim that indexing,
+  geometry or texture sampling has been ruled out. CPU correctness applies
+  only to the captured records. Original control-center triangles may appear
+  in final compositing rather than in the captured blur intermediate passes.
+- Active batches jobs>=20 median us: pre3025/storage351/start539/wait8799/
+  retire368/post1680. Different workload + diagnostic input logging prevents
+  frame-rate comparison. No captured blit/framebuffer data proves which pass
+  first corrupts the image. ROOT CAUSE REMAINS UNRESOLVED.
+- adb was connected. Ran normal updater against original
+  x9/out/mailbox209-blur-inputs with private root manifest serial; preflight
+  passed, exit0, `Mailbox committed: 51212288 bytes; each written range read
+  back`. Log: candidate `mailbox-rollback-from210.log`. Previous staging log
+  preserved. No boot partition write, reboot or direct HFS file editing.
+- Device mailbox now 209. User must use matching
+  `x9/out/mailbox209-blur-inputs/boot.img` (already built), NOT 210 boot.img.
+  XNU rollback not yet booted/observed; files210 may remain versioned on HFS
+  and are not removed. These are ignored by 209's exact allowlist.
+- Next work should follow actual render-pass outputs through final blur
+  sampling/compositing (attachment identity, load/store, formats, blending,
+  feedback dependencies), locating the first corrupted output. Do not make
+  another shader replacement or attribute/cache experiment without stronger
+  per-pass evidence. C/Rust NmbColorAttachment field ordering checked and
+  agrees; no concrete blend ABI mismatch found. No new build/tests/CI.
+
 ## Mailbox 210 staged over adb (2026-11-01)
 
 - User reported adb ready; adb get-state=device. Normal updater against
