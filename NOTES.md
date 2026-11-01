@@ -1,3 +1,16 @@
+## Mailbox 209 staged over adb (2026-11-01)
+
+- User said connection ready; adb get-state reports device. Ran normal
+  `python3 -I x9/mailbox/update.py x9/out/mailbox209-blur-inputs --serial
+  "$X9_SERIAL"` with serial from private root manifest.
+- Root/mailbox preflight passed. Updater exit 0:
+  `Mailbox committed: 51212288 bytes; each written range read back`.
+  Exact output: `x9/out/mailbox209-blur-inputs/mailbox-update.log`.
+  This supersedes prior pending-staging status. No flash/reboot/root edits.
+- Next: user boots `x9/out/mailbox209-blur-inputs/boot.img` and opens Control
+  Center/folder/App Library to capture original blur DRAW/ATTR/DATA input logs.
+  XNU plugin 209 installation and root cause still await hardware evidence.
+
 ## Blur investigation: WC drift ruled out; input capture 209 pending staging (2026-11-01)
 
 - User reports slight subjective improvement but corruption consistently occurs
