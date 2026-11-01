@@ -1,3 +1,53 @@
+## Blur investigation: WC drift ruled out; input capture 209 pending staging (2026-11-01)
+
+- User reports slight subjective improvement but corruption consistently occurs
+  with blurred backgrounds (Control Center, folders, App Library); explicitly
+  requests root cause. New /Users/tosasitill/2.txt preserved at
+  `.local/analysis-blur-root/runtime.raw.log` (~60 s). Do NOT call root cause
+  found or visual defect fixed.
+- Live WC CHECK: 638 submissions, 12,841,266 pages checked, restored=0 throughout;
+  average check grows to 1103 us. The attribute-drift hypothesis is ruled out
+  for this run. Gated that scan behind explicit `x9_wc_check=1` (off by default)
+  to remove its per-submit overhead; explicit WC mappings remain unchanged.
+- Read original QuartzCore default.metallib from historical pan172 HFS mounted
+  read-only. Extracted downsample_blur_vert_lpf/lph and narrow_blur_7_frag_lpf/lph
+  AIR into `.local/analysis-blur-root/`; llvm-dis output for lph there.
+  Original vertex shader is position*matrix (buffer2) plus UV scale/offset
+  (buffer3); fragment samples texture3 using interpolated float2 UV, float2
+  offsets/half weights in buffer1 and half EDR scale in buffer6. No authored
+  spike geometry. This establishes expected input semantics, NOT actual live
+  pipeline selection or a compiler error. Apple shader bytes untouched.
+- Reviewed runtime argument-table inline-byte copies, draw forwarding, texture
+  shadow/feedback ordering, PanVK vertex/varying descriptions and v14 ISA
+  interpolation encoding. No concrete defective forwarding/instruction found.
+  Local UniXNU-gpu blur reference and its reverted early-handler experiment
+  were read; X9 already delivers completed handlers after actual completion.
+  Do not transplant early completion or substitute shaders.
+- Added bounded `X9BlurCapture.inc` to Metal frontend. Original pipelines whose
+  vertex/fragment name contains `blur`: retain shader names/vertex layout,
+  track vertex slots0..3 and fragment buffer1, capture at most two draws per
+  shader pair and 24 per process. DRAW includes topology/count and first six
+  absolute indices; ATTR records formats/offsets/stride/step/rate; DATA records
+  raw hex rows of shared CPU-readable vertex/matrix/uniform data at draw time.
+  Inline bytes copied (<=512 captured) when set, matching runtime copy timing;
+  private/GPU-only buffers are not mapped for capture. No pixel readback or
+  added GPU barriers; bounded logging can transiently perturb timing.
+- Built `python3 -I x9/build/build.py all --revision 209 --name mailbox209-blur-inputs`:
+  final exit 0, plugins signed/packaged, matching kernel/boot built. Candidate
+  `x9/out/mailbox209-blur-inputs/`, build.log there; local only, no CI/tests or
+  artifact reinspection. Header now allowlists 209. PanVK unchanged except
+  revision identity, Metal contains capture. Historical photo/raw logs private.
+- IMPORTANT: adb get-state reports no devices. 209 mailbox NOT staged; no
+  device write/boot. Do not boot 209 candidate alone against installed 208.
+  Once Android adb is available, run normal mailbox/update.py with private
+  manifest serial and keep all preflight/readback. Then user boots candidate
+  and reproduces Control Center blur to collect X9 BLUR DRAW/ATTR/DATA.
+  Required before root-cause attribution: reconstruct position/UV/matrix for
+  the exact original blur draw; distinguish invalid CPU geometry from varying,
+  texture/attachment, and shader execution corruption. Existing aggregate
+  submit log cannot make that distinction. Scope remains blur first; wallpaper
+  not pursued in this milestone.
+
 ## Control Center photo: triangle corruption / WC invariant (2026-11-01)
 
 - User provided control-center photo and new /Users/tosasitill/2.txt.

@@ -454,6 +454,8 @@ static void logFunctionLookupFailure(NBLibrary *library,NSString *name,NSString 
 @end
 @interface NBRenderPipeline : NBObject
 @property(nonatomic) NmbRenderPipeline *handle;
+@property(nonatomic,copy) NSString *traceVertex,*traceFragment;
+@property(nonatomic,strong) MTLVertexDescriptor *traceLayout;
 @end
 @implementation NBRenderPipeline
 - (void)dealloc {nmb_render_pipeline_release(_handle);}
@@ -658,10 +660,15 @@ static void waitForResource(id resource) {
 @end
 
 @interface NBRenderEncoder : NBEncoder
+@property(nonatomic,strong) NBRenderPipeline *tracePipeline;
+@property(nonatomic,strong) NSMutableDictionary *traceBuffers;
+- (void)traceDraw:(MTLPrimitiveType)type start:(NSUInteger)start count:(NSUInteger)count indices:(NBBuffer *)indices offset:(NSUInteger)offset indexType:(MTLIndexType)indexType baseVertex:(NSInteger)baseVertex;
 @end
 @implementation NBRenderEncoder
+#include "X9BlurCapture.inc"
 - (void)setRenderPipelineState:(id<MTLRenderPipelineState>)state {
  if(![(id)state isKindOfClass:[NBRenderPipeline class]]){[self.commandBuffer refuse:@"foreign render pipeline"];return;}
+ self.tracePipeline=(NBRenderPipeline *)state;
  [self check:nmb_render_set_pipeline(self.handle,[(NBRenderPipeline *)state handle]) what:"setRenderPipelineState"];
 }
 - (void)setVertexBuffer:(id<MTLBuffer>)b offset:(NSUInteger)o atIndex:(NSUInteger)i {[self buffer:b offset:o index:i stage:1];}
@@ -729,6 +736,7 @@ static void waitForResource(id resource) {
  const float c[4]={r,g,b,a};[self check:nmb_render_set_blend_color(self.handle,c) what:"setBlendColor"];
 }
 - (void)drawPrimitives:(MTLPrimitiveType)t vertexStart:(NSUInteger)s vertexCount:(NSUInteger)n instanceCount:(NSUInteger)i baseInstance:(NSUInteger)b {
+ [self traceDraw:t start:s count:n indices:nil offset:0 indexType:MTLIndexTypeUInt16 baseVertex:0];
  gDraws++;self.commandBuffer->encodedWork.draws++;
  [self check:nmb_render_draw(self.handle,t,(uint32_t)s,(uint32_t)n,(uint32_t)i,(uint32_t)b) what:"drawPrimitives"];
 }
@@ -742,6 +750,7 @@ static void waitForResource(id resource) {
                 instanceCount:(NSUInteger)i baseVertex:(NSInteger)v baseInstance:(NSUInteger)bi {
  if(![(id)b isKindOfClass:[NBBuffer class]]){[self.commandBuffer refuse:@"foreign index buffer"];return;}
  [self.commandBuffer.resourceOwners addObject:b];
+ [self traceDraw:t start:0 count:n indices:(NBBuffer *)b offset:o indexType:k baseVertex:v];
  gDraws++;self.commandBuffer->encodedWork.draws++;
  [self check:nmb_render_draw_indexed(self.handle,t,(uint32_t)n,k,[(NBBuffer *)b handle],o,(uint32_t)i,(int32_t)v,(uint32_t)bi) what:"drawIndexedPrimitives"];
 }
@@ -1516,7 +1525,11 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
  }
  delete p;
  if(!handle)return failWith<id<MTLRenderPipelineState>>(error,@"render pipeline",nil);
- NBRenderPipeline *state=[NBRenderPipeline new];state.handle=handle;gPipelines++;if(error)*error=nil;return (id<MTLRenderPipelineState>)state;
+ NBRenderPipeline *state=[NBRenderPipeline new];state.handle=handle;
+ if([d.vertexFunction.name containsString:@"blur"] || [d.fragmentFunction.name containsString:@"blur"]) {
+  state.traceVertex=d.vertexFunction.name;state.traceFragment=d.fragmentFunction.name;state.traceLayout=[d.vertexDescriptor copy];
+ }
+ gPipelines++;if(error)*error=nil;return (id<MTLRenderPipelineState>)state;
 }
 - (id<MTLBinaryArchive>)newBinaryArchiveWithDescriptor:(MTLBinaryArchiveDescriptor *)d error:(NSError **)error {
  if(d.url && !d.url.isFileURL){if(error)*error=nbError(@"a file URL is required");return nil;}

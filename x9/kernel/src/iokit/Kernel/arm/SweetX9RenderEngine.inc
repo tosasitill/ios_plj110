@@ -278,7 +278,8 @@ static IOReturn render_submit(X9RenderContext *c,const X9RenderSubmission *reque
  auto *g=render_group(c,request->group);if(!g||c->disabled)return kIOReturnBadArgument;
  vm_offset_t gpu=resident->gpu;
  const bool coherent=resident->coherent;
- {
+ int wc_check=0;PE_parse_boot_argn("x9_wc_check",&wc_check,sizeof(wc_check));
+ if(wc_check) {
   uint64_t began=mach_absolute_time(),checked=0,reset=0,ns=0;
   IOReturn kr=x9_render_memory_reassert_wc(c,&checked,&reset);
   absolutetime_to_nanoseconds(mach_absolute_time()-began,&ns);
