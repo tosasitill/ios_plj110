@@ -1,8 +1,9 @@
 {
- "_comment": "Copy to x9/build/local.json (gitignored) and adjust for this machine.",
+ "_comment": "Copy to x9/build/local.json (gitignored) and adjust for this machine. compiler_launcher is optional (ccache from PATH or an absolute path).",
  "developer_dir": "/Users/tosasitill/Downloads/Xcode.app/Contents/Developer",
  "dxb": "/Users/tosasitill/HelioDarwin/xnu/build-dxb/dxb",
  "llvm_clang": "/opt/homebrew/opt/llvm@22/bin/clang",
  "lld": "/opt/homebrew/opt/lld@22/bin/ld.lld",
- "root_manifest": "/Users/tosasitill/HelioDarwin-x9-lk-preserve/x9/out/pan220-batched-cache-ranges/root-manifest.json"
+ "root_manifest": "/Users/tosasitill/HelioDarwin-x9-lk-preserve/x9/out/pan220-batched-cache-ranges/root-manifest.json",
+ "compiler_launcher": "ccache"
 }

@@ -42,10 +42,14 @@ python3 -I x9/build/build.py                           # kernel + boot.img
 | `dxb` | XNU build directory `.../xnu/build-dxb/dxb`: frozen object tree, `EXPORT_HDRS`, `fakeroot`, `dxb/xnu` |
 | `llvm_clang`, `lld` | LLVM/lld 22 for the bare-metal shim |
 | `root_manifest` | the device's `root-manifest.json` (holds the serial and extent map; never commit it) |
+| `compiler_launcher` | optional, e.g. `ccache`: prefixes every kernel compile, so a new output directory (every commit gets one) reuses earlier compiles |
 
 The output goes to `x9/out/<name>/` (default `x9-<git hash>[-dirty]`):
 `kernel-objects/`, `kernel-link.filelist`, `kernel.development.sweet`, and
-`boot.img` with its `boot.json`. Other forms:
+`boot.img` with its `boot.json`, plus `build.log` with every command and its
+output. A failed compile prints the compiler output followed by
+`!! <object> failed`, the remaining objects still compile, and the build stops
+with the list of failed objects. Other forms:
 
 ```bash
 python3 -I x9/build/build.py kernel                  # compile, link, strip only

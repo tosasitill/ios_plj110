@@ -15,16 +15,21 @@ Inputs:
   x9/build/boot.json         packaging options and boot-args
   x9/build/local.json        machine paths (copy config.example.json)
 
-Outputs go to x9/out/<name>/ (default name: x9-<git short hash>[-dirty]).
-Compiles are incremental through compiler depfiles. Nothing touches a device.
+Outputs go to x9/out/<name>/ (default name: x9-<git short hash>[-dirty]),
+with everything printed also written to x9/out/<name>/build.log.
+Compiles are incremental through compiler depfiles; with "compiler_launcher"
+(e.g. "ccache") in local.json, a fresh output directory reuses earlier
+compiles too. Nothing touches a device.
 """
 import argparse
 import concurrent.futures
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -64,16 +69,48 @@ class Builder:
                      '{SRC}': str(KERNEL / 'src'),
                      '{GEN}': str(KERNEL / 'generated')}
         self.env = dict(os.environ, DEVELOPER_DIR=self.vars['{DEVELOPER_DIR}'])
+        self.lock = threading.Lock()
+        self.logfile = None if dry_run else open(out / 'build.log', 'a')
+        self.launcher = []
+        if cfg.get('compiler_launcher'):
+            found = shutil.which(cfg['compiler_launcher'])
+            if found:
+                self.launcher = [found]
+            else:
+                self.log(f'warning: compiler_launcher {cfg["compiler_launcher"]!r} not found; compiling without it')
+
+    def log(self, text):
+        with self.lock:
+            print(text, flush=True)
+            if self.logfile:
+                self.logfile.write(text + '\n')
+                self.logfile.flush()
 
     def sub(self, text):
         for key, value in self.vars.items():
             text = text.replace(key, value)
         return text
 
-    def run(self, cmd, cwd, env=None):
-        print('+', f'(cd {shlex.quote(str(cwd))} &&', ' '.join(shlex.quote(c) for c in cmd) + ')', flush=True)
-        if not self.dry_run:
-            subprocess.run(cmd, cwd=cwd, env=env or self.env, check=True)
+    def run(self, cmd, cwd, env=None, label=None):
+        """Run one command with stdout+stderr captured and logged as a block.
+        Returns (ok, output); a failure is reported, not raised."""
+        shown = f'+ (cd {shlex.quote(str(cwd))} && ' + ' '.join(shlex.quote(c) for c in cmd) + ')'
+        if self.dry_run:
+            self.log(shown)
+            return True, ''
+        p = subprocess.run(cmd, cwd=cwd, env=env or self.env, stdout=subprocess.PIPE,
+                           stderr=subprocess.STDOUT, text=True, errors='replace')
+        block = shown + ('\n' + p.stdout.rstrip() if p.stdout.strip() else '')
+        if p.returncode:
+            block += f'\n!! {label or Path(cmd[0]).name} failed with exit code {p.returncode}'
+        self.log(block)
+        return p.returncode == 0, p.stdout
+
+    def run_or_exit(self, cmd, cwd, env=None, label=None):
+        ok, _ = self.run(cmd, cwd, env, label)
+        if not ok:
+            self.log(f'build stopped: {label or Path(cmd[0]).name} failed; full log: {self.out / "build.log"}')
+            sys.exit(1)
 
     # ---- compile -------------------------------------------------------------
     def stale(self, obj, dep, src):
@@ -91,9 +128,12 @@ class Builder:
         obj, dep = self.objdir / entry['name'], self.objdir / (entry['name'] + '.d')
         if not self.stale(obj, dep, src):
             return False
-        cmd = [self.sub(t['compiler'])] + [self.sub(a) for a in t['args']] + \
+        cmd = self.launcher + [self.sub(t['compiler'])] + [self.sub(a) for a in t['args']] + \
               ['-MD', '-MF', str(dep), '-c', str(src), '-o', str(obj)]
-        self.run(cmd, self.sub(t['cwd']))
+        ok, _ = self.run(cmd, self.sub(t['cwd']), label=entry['name'])
+        if not ok:
+            obj.unlink(missing_ok=True)   # never link a stale object after a failed compile
+            return entry['name']
         return True
 
     def compile(self):
@@ -101,9 +141,16 @@ class Builder:
             self.objdir.mkdir(parents=True, exist_ok=True)
         todo = [e for e in self.recipe['objects'] if 'prebuilt' not in e]
         with concurrent.futures.ThreadPoolExecutor(self.jobs) as pool:
-            built = sum(pool.map(self.compile_one, todo))
-        print(f'compiled {built}/{len(todo)} overlay objects '
-              f'({len(self.recipe["objects"]) - len(todo)} prebuilt)')
+            results = list(pool.map(self.compile_one, todo))
+        failed = [r for r in results if isinstance(r, str)]
+        built = sum(1 for r in results if r is True)
+        self.log(f'compiled {built}/{len(todo)} overlay objects '
+                 f'({len(self.recipe["objects"]) - len(todo)} prebuilt)'
+                 + (f' via {self.launcher[0]}' if self.launcher else ''))
+        if failed:
+            self.log(f'build stopped: {len(failed)} object(s) failed: {", ".join(failed)}; '
+                     f'compiler output is above each "!!" line in {self.out / "build.log"}')
+            sys.exit(1)
 
     # ---- link ----------------------------------------------------------------
     def link(self):
@@ -118,7 +165,8 @@ class Builder:
                 missing.append(str(p))
             paths.append(str(p))
         if missing and not self.dry_run:
-            sys.exit(f'{len(missing)} frozen XNU objects missing, e.g. {missing[0]}')
+            self.log(f'build stopped: {len(missing)} frozen XNU objects missing, e.g. {missing[0]}')
+            sys.exit(1)
         filelist = self.out / 'kernel-link.filelist'
         unstripped = self.out / 'kernel.development.sweet.unstripped'
         kernel = self.out / 'kernel.development.sweet'
@@ -126,9 +174,11 @@ class Builder:
             filelist.write_text('\n'.join(paths) + '\n')
         link = self.recipe['link']
         self.vars.update({'{FILELIST}': str(filelist), '{UNSTRIPPED}': str(unstripped)})
-        self.run([self.sub(link['compiler'])] + [self.sub(a) for a in link['args']], self.sub(link['cwd']))
+        self.run_or_exit([self.sub(link['compiler'])] + [self.sub(a) for a in link['args']], self.sub(link['cwd']),
+                         label='link')
         strip = self.recipe['strip']
-        self.run([self.sub(strip['tool'])] + strip['args'] + [str(unstripped), '-o', str(kernel)], self.out)
+        self.run_or_exit([self.sub(strip['tool'])] + strip['args'] + [str(unstripped), '-o', str(kernel)], self.out,
+                         label='strip')
         return kernel
 
     # ---- boot.img --------------------------------------------------------------
@@ -154,7 +204,7 @@ class Builder:
                    SDKROOT=dev + '/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk')
         cmd = [sys.executable, '-I', str(X9 / 'tools/boot-xnu.py'), '--kernel', str(kernel), '--out', str(self.out),
                '--ufs-native-manifest', manifest, '--boot-args', ' '.join(opts['boot_args'])] + opts['options']
-        self.run(cmd, ROOT, env)
+        self.run_or_exit(cmd, ROOT, env, label='boot-xnu.py')
 
 
 def main():
@@ -182,7 +232,7 @@ def main():
             if not cfg.get(key):
                 sys.exit(f'{a.config}: {key} is required to package boot.img')
         b.boot(kernel)
-    print(f'output: {out}')
+    b.log(f'output: {out}')
 
 
 if __name__ == '__main__':
