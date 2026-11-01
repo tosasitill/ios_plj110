@@ -1,3 +1,10 @@
+## Repository push (2026-11-01)
+
+- User requested push. git push origin main succeeded, updating remote
+  ca5b8d5 -> b3c843d, including the accumulated rendering investigation commits.
+- Rendering root cause remains unresolved; mailbox212 unchanged. No build or
+  device action. Untracked1.txt,sys.txt and input tarball were not staged.
+
 ## Flicker continuation: texture fusion and AIR sample operand contract (2026-11-01)
 
 - Switched from repeatedly reviewing barriers to texture lowering. Read
