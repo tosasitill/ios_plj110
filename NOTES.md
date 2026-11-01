@@ -1,3 +1,46 @@
+## Mailbox 209 inputs decoded; 210 indexed-draw isolation pending staging (2026-11-01)
+
+- New user /Users/tosasitill/2.txt preserved at
+  `.local/analysis-blur209/runtime.raw.log`; installed/verified 209 at 2.498 s,
+  active at 3.333 s. Captured 22 original blur draws in backboardd, including
+  downsample_4/8, narrow_blur_7/11/15/19/23/27, single_pass_blur_3 and variable
+  blur, all lph. No DeviceLost, panic or SpringBoard/backboardd crash captured.
+- Decoded raw input in `.local/analysis-blur209/decode.py` -> decoded.txt.
+  Captured first six indices are 0,1,2,2,3,0. Vertex buffer1 stride48 has
+  position Float4@0, UV Float2@16, auxiliary Float2@24, half4@32. Matrix
+  buffer2/texture-transform buffer3 reconstruct ordinary rectangles and affine
+  UVs. Example draw2 clips (+/-0.982456,+/-0.972603,0,1), UV range about
+  -0.01..1.01 for blur border. Variable blur rectangles extending past clip
+  bounds are expected scissored drawing, not spikes; their aux UVs are finite.
+  Garbage in UNUSED auxiliary fields of ordinary downsample vertices is not
+  evidence of wrong inputs. For count54 draws only first six indices captured.
+- CPU inputs for captured canonical rectangles are valid. This does NOT yet
+  prove GPU shader/compiler, index fetch, vertex reuse, interpolation or image
+  synchronization as the culprit. Root cause still unresolved; do not label
+  the following experiment a verified repair.
+- 210: controlled deindexing ONLY when original vertex name is exactly
+  downsample_blur_vert_lph, Triangle/count6/instance1/baseInstance0, all vertex
+  attributes use buffer1, fixed stride48/perVertex/rate1, CPU Shared vertex and
+  index buffers, and canonical relative quad indices. Copy six original
+  48-byte records into inline vertex bytes, draw six unindexed triangles with
+  unchanged pipeline/shaders/uniforms/textures, restore original buffer bind.
+  Original AIR has no vertex/instance-ID input, making this transformation
+  equivalent for the captured shader. All other draws remain indexed.
+  Bounds checks precede copies; failure before encoding falls back. Encoding
+  failure fails command buffer, never silently fabricates success. Logs
+  X9 BLUR DEINDEX include bounded call counts and result.
+- Build: `python3 -I x9/build/build.py all --revision 210 --name mailbox210-blur-deindex`,
+  exit 0; signed plugin-package + matching boot.img (9,420,800 bytes) under
+  `x9/out/mailbox210-blur-deindex/`, build.log there. Local only, no CI/tests
+  or second artifact checks. Shader bytes and wallpaper unchanged.
+- adb get-state: no devices. 210 mailbox NOT staged, no device writes/boot.
+  Installed device remains 209. Do not boot 210 image alone. When Android adb
+  is ready run normal updater with private manifest serial, then user boots
+  210 and reproduces same blur scene. If diagonal corruption disappears with
+  successful DEINDEX logs, focus on indexed/reused vertex GPU path; if not,
+  investigate varying/fragment and render-target paths. Variable-blur vertex
+  shader intentionally untouched, so not all blur draws use the experiment.
+
 ## Mailbox 209 staged over adb (2026-11-01)
 
 - User said connection ready; adb get-state reports device. Ran normal

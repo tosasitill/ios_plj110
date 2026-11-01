@@ -74,3 +74,46 @@
   }
  }
 }
+// Controlled isolation of the v14 indexed/reused-vertex path. The original
+// downsample blur vertex AIR reads position/UV and buffer2/3 only: no vertex
+// or instance ID. Expand just the captured six-index, one-instance quad into
+// six identical vertex records; keep its shader, winding and every fragment
+// input unchanged. Anything outside that exact contract takes the old path.
+- (bool)drawBlurWithoutIndex:(MTLPrimitiveType)type count:(NSUInteger)count indices:(NBBuffer *)indices offset:(NSUInteger)offset indexType:(MTLIndexType)indexType instances:(NSUInteger)instances baseVertex:(NSInteger)baseVertex baseInstance:(NSUInteger)baseInstance {
+ if(type!=MTLPrimitiveTypeTriangle||count!=6||instances!=1||baseInstance||
+    ![self.tracePipeline.traceVertex isEqualToString:@"downsample_blur_vert_lph"]||
+    indices.storageMode!=MTLStorageModeShared)return false;
+ MTLVertexDescriptor *layout=self.tracePipeline.traceLayout;
+ if(!layout)return false;
+ for(unsigned a=0;a<31;a++) {
+  MTLVertexAttributeDescriptor *attr=layout.attributes[a];
+  if(attr.format!=MTLVertexFormatInvalid && attr.bufferIndex!=1)return false;
+ }
+ MTLVertexBufferLayoutDescriptor *binding=layout.layouts[1];
+ if(binding.stride!=48||binding.stepFunction!=MTLVertexStepFunctionPerVertex||binding.stepRate!=1)return false;
+ NSDictionary *entry=self.traceBuffers[@33];NBBuffer *buffer=entry[@"buffer"];
+ if(!buffer||buffer.storageMode!=MTLStorageModeShared||!buffer.contents||!indices.contents)return false;
+ unsigned width=indexType==MTLIndexTypeUInt16?2:4;uint32_t vertex[6];
+ if(offset>indices.length||6*width>indices.length-offset)return false;
+ for(unsigned j=0;j<6;j++) {
+  uint32_t value=0;memcpy(&value,(const uint8_t *)indices.contents+offset+j*width,width);
+  int64_t adjusted=(int64_t)value+baseVertex;if(adjusted<0||adjusted>UINT32_MAX)return false;vertex[j]=(uint32_t)adjusted;
+ }
+ if(vertex[0]!=vertex[5]||vertex[2]!=vertex[3]||vertex[1]!=vertex[0]+1||
+    vertex[2]!=vertex[0]+2||vertex[4]!=vertex[0]+3)return false;
+ uint64_t base=[entry[@"offset"] unsignedLongLongValue];uint8_t expanded[6*48];
+ for(unsigned j=0;j<6;j++) {
+  uint64_t at=base+(uint64_t)vertex[j]*48;
+  if(at<base||at>buffer.length||48>buffer.length-at)return false;
+  memcpy(expanded+j*48,(const uint8_t *)buffer.contents+at,48);
+ }
+ // The runtime copies inline bytes now and snapshots bindings per draw.
+ // Restore the original binding so subsequent encoder calls see identical state.
+ bool ok=nmb_encoder_set_bytes(self.handle,1,expanded,sizeof(expanded),1);
+ if(ok)ok=nmb_render_draw(self.handle,type,0,6,1,0);
+ bool restored=nmb_encoder_set_buffer(self.handle,1,buffer.handle,base,1);
+ [self check:ok&&restored what:"blur deindex isolation"];
+ static std::atomic<unsigned> draws{0};unsigned n=++draws;
+ if(n<=4||n%128==0)NBLOG(@"X9 BLUR DEINDEX: draws=%u original_indices=%u,%u,%u,%u,%u,%u original_vertex_bytes=288 ok=%u",n,vertex[0],vertex[1],vertex[2],vertex[3],vertex[4],vertex[5],ok&&restored);
+ return true;
+}

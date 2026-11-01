@@ -663,6 +663,7 @@ static void waitForResource(id resource) {
 @property(nonatomic,strong) NBRenderPipeline *tracePipeline;
 @property(nonatomic,strong) NSMutableDictionary *traceBuffers;
 - (void)traceDraw:(MTLPrimitiveType)type start:(NSUInteger)start count:(NSUInteger)count indices:(NBBuffer *)indices offset:(NSUInteger)offset indexType:(MTLIndexType)indexType baseVertex:(NSInteger)baseVertex;
+- (bool)drawBlurWithoutIndex:(MTLPrimitiveType)type count:(NSUInteger)count indices:(NBBuffer *)indices offset:(NSUInteger)offset indexType:(MTLIndexType)indexType instances:(NSUInteger)instances baseVertex:(NSInteger)baseVertex baseInstance:(NSUInteger)baseInstance;
 @end
 @implementation NBRenderEncoder
 #include "X9BlurCapture.inc"
@@ -752,6 +753,7 @@ static void waitForResource(id resource) {
  [self.commandBuffer.resourceOwners addObject:b];
  [self traceDraw:t start:0 count:n indices:(NBBuffer *)b offset:o indexType:k baseVertex:v];
  gDraws++;self.commandBuffer->encodedWork.draws++;
+ if([self drawBlurWithoutIndex:t count:n indices:(NBBuffer *)b offset:o indexType:k instances:i baseVertex:v baseInstance:bi])return;
  [self check:nmb_render_draw_indexed(self.handle,t,(uint32_t)n,k,[(NBBuffer *)b handle],o,(uint32_t)i,(int32_t)v,(uint32_t)bi) what:"drawIndexedPrimitives"];
 }
 - (void)drawIndexedPrimitives:(MTLPrimitiveType)t indexCount:(NSUInteger)n indexType:(MTLIndexType)k indexBuffer:(id<MTLBuffer>)b indexBufferOffset:(NSUInteger)o
