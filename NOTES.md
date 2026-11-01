@@ -1,3 +1,27 @@
+## X9 build reproducibility (2026-11-01)
+
+- pan220 (`/home/ubuntu/agsbx/pan220-batched-cache-ranges`, user-provided, not
+  in git) links 1126 objects: ~1069 from the frozen XNU tree on the build Mac
+  (`/Users/tosasitill/HelioDarwin/xnu/build-dxb/.../DEVELOPMENT_ARM64_SWEET`),
+  ~39 from 11 older candidates (pan117 incl. `reconstructed-inputs`, 118, 119,
+  126, 128, 129, 131, 139, 141, 143, 150), 18 in pan220 itself. Each candidate's
+  prepare.py copies the previous one, string-patches files and recompiles only
+  a few objects; most compile commands live in ancestor commands.json.
+- Repo is behind pan220: pan219/220 already changed `SweetX9CSF.cpp` and
+  `SweetX9RenderEngine.inc` (100us cache waits, cache plan/spans). The 4
+  edits in `8c29858`/`0fba7b6` were made on older sources and must be re-merged
+  on top of pan220 (`SweetFramebuffer.cpp`, `SweetX9CSFResident.inc` are
+  identical to pan220, the other two conflict).
+- pan220 `packaging-source/x9/tools/pull_disk_log.py` hard-codes the device
+  serial as a default; strip it before importing tools into git.
+  `root-manifest.json` holds the serial and extent map: keep out of git.
+- `x9/build/scripts/collect-build-inputs.py` (run on the Mac) archives, for a
+  candidate, every non-XNU linked object with its compile command (exact or
+  by object name from ancestors), depfile and workspace deps, plus all
+  candidates' recipes, XNU git state, workspace `xnu/patches`, tool versions.
+  Dry-run here with `--path-map` only (other candidates absent). Waiting for
+  the user to run it on the Mac and hand back the tarball.
+
 ## X9 Metal perf / rendering review (2026-10-31, static source read only)
 
 **Update (same day): fixes 1-2 applied in source, NOT built/booted.** No clang or
