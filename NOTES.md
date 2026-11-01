@@ -1,3 +1,85 @@
+## Mailbox212 successfully staged after user reconnected adb (2026-11-01)
+
+- Normal updater (no adb retry shim) against x9/out/mailbox212-blur-pixels
+  exited0. Root/mailbox preflight passed; `Mailbox committed: 51236864 bytes;
+  each written range read back`. Commit marker published successfully.
+- Exact log: x9/out/mailbox212-blur-pixels/mailbox-update-reconnected-190207.log.
+  Supersedes all failed/disconnected attempts below. Device mailbox now212.
+- User boots matching x9/out/mailbox212-blur-pixels/boot.img manually. No boot
+  partition write/reboot performed. Open Control Center promptly, retain full
+  USB log for at least20 seconds for asynchronous X9 PIXEL output.
+- 212 is pixel observability, NOT a proven blur repair or FPS improvement.
+  Actual212 runtime/visual result pending. Completed diagnostic source and
+  generated212 allowlist committed with this handoff; no extra tests or
+  secondary build artifact inspection.
+
+## 211 runtime analyzed; 212 per-pass pixel capture built (2026-11-01)
+
+- User supplied /Users/tosasitill/2.txt from an actual 211 run; private copy
+  `.local/analysis-blur211/runtime.raw.log` (8,862 splitlines). 211 active at
+  3.695 s. Decoded graph/JSON and original AIR extracts in that directory.
+  No captured DeviceLost/panic or SpringBoard/backboardd CRASH. Unrelated
+  Siri synthesis/locationd crashes exist; do not describe this as crash-free.
+- Graph follows BGRA8 source IOSurface -> downsample -> narrow blur -> fixed
+  composite -> original IOSurface; normalized samplers and completed status4.
+  No demonstrated format mismatch or bad sampler. Retained slot bindings may
+  be unused. 211's <=6 records per shader pair omit writes/variants and do not
+  identify the first corrupted pixel. Root cause remains UNPROVEN.
+- Original QuartzCore `luma_boost_lph` AIR reads render_target0 (framebuffer
+  fetch), samples LUT at texture3, and adjusts current attachment RGB while
+  preserving alpha. `attachment_clear_frag_lph` writes zero to two targets;
+  captured pipeline enables only color1. Its count4 draw is TriangleStrip
+  (Metal type4), not a malformed triangle list. Private graph parser now retains primitive type in JSON/text; raw DRAW
+  lines remain authoritative. Do not infer a bug from n4.
+- Reviewed input attachment mapping, PanVK tile-load/DCD/HSR read/write masks,
+  rasterization-order flags, render_target input references and runtime split
+  preservation. No concrete reachable violation established. Historical
+  pan172 HFS was read-only; detached /tmp/x9-symbol-root (disk7 ejected).
+- 211 active timing batches jobs>=20: 10 batches, medians pre3323/storage348.5/
+  start538.5/wait14456.5/retire422/post1735.5 us. Different workload and trace
+  logging prevent an FPS or regression comparison. Wallpaper unaddressed.
+- 212 adds `X9RenderPixelCapture.inc`: three blur-containing command buffers
+  per process, >=2 seconds and >=12 CB IDs apart. After existing encoder ends,
+  copy source texture3 of the first blur pass (AFTER that pass, not pre-draw)
+  plus stored color0 of subsequent passes into independent shared buffers.
+  Original drawing/indexing/shaders/store actions are untouched. Only BGRA8,
+  single-sample 2D, nonview/nonmemoryless textures, level/slice/depth0 output,
+  Store are eligible. DontCare/color1 are NOT forced to store or read as valid.
+  <=24 copies/CB, <=16MiB/image, <=64MiB/CB. Budget skips mean incomplete chain.
+- Readback buffers are read only after actual Completed, retained on a separate
+  serial dump queue; app completed handlers do not wait for row printing.
+  Encoding failures fail the CB; failed completion never dereferences pixels.
+  Raw BGRA bytes: <=128x128 intermediates logged whole, other images nearest
+  32x32 grid (endpoints included); full-image FNV excludes padding. COPY ties
+  each image to CB/encoder/draw range/texture/role/dimensions/pitch; DATA/ROW/END
+  carry PID, preventing different processes' CB IDs from being conflated.
+  Selected CBs log all draw pairs (global graph bound256); elsewhere pair cap6.
+- Diagnostic copies introduce GPU work/barriers and logging overhead; a visual
+  change on212 does NOT prove a repair. It may expose a synchronization lead.
+  Large-image grids cannot prove all pixels correct or validate full-image FNV.
+- Added `x9/tools/decode_render_pixels.py`: reconstruct complete grids as RGB
+  PNG + alpha PNG + raw BGRA and manifest.json (including graph draw topology).
+  Missing END/rows, conflicting or malformed chunks never produce an image.
+  Replay when new log arrives:
+  `python3 -I x9/tools/decode_render_pixels.py /Users/tosasitill/2.txt --output
+  .local/analysis-blur212/pixels` (one shell line). Decoder not yet exercised
+  against actual212 output; no synthetic tests run per user instructions.
+- Final normal build `python3 -I x9/build/build.py all --revision 212 --name
+  mailbox212-blur-pixels` exit0; signed plugins/package and matching boot.img
+  9,420,800 bytes. Build.log preserves initial/follow-up compilations. Local
+  only, no CI/tests/secondary artifact inspection. Generated allowlist now212.
+- Staging: initial adb absent, then user connected it. First normal updater
+  passed root/mailbox preflight and invalidated marker, but adb disconnected
+  mid-payload; exit1. Log candidate mailbox-update.log. Connection recovered;
+  full normal updater retried with preflight/readback, separate log
+  mailbox-update-retry.log also failed after 33MiB; retry2 failed preflight.
+  Private read-only adb retry shim attempt failed on short mailbox read. All
+  failed attempts kept marker invalid. Superseded by successful staging above.
+- Next hardware evidence: boot matching212 only after successful staging, open
+  Control Center promptly, keep blur open and retain USB log for at least20 s
+  so asynchronous pixel rows finish. Locate earliest bad stored output versus
+  source; use graph to isolate pass/shader before another behavioral change.
+
 ## 211 render graph capture built and staged; root cause unresolved (2026-11-01)
 
 - User requested continued investigation after 210 failed and introduced color

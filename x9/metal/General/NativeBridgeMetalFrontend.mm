@@ -551,6 +551,8 @@ static void notified(void *context,uint64_t value) {
 @property(nonatomic) uint32_t commitIndex;
 @property(nonatomic) uint64_t traceID;
 @property(nonatomic) BOOL traceGraphUsed;
+@property(nonatomic) unsigned tracePixelWindow,tracePixelCount;
+@property(nonatomic) uint64_t tracePixelBytes;
 @property(nonatomic,strong) NSMutableArray *scheduledHandlers,*completedHandlers;
 @property(nonatomic,strong) NSMutableSet *surfaces;
 // Runtime handles retain storage and no-copy release contexts. Also keep the
@@ -679,12 +681,18 @@ static void waitForResource(id resource) {
 @property(nonatomic,strong) NSMutableDictionary *traceBuffers;
 @property(nonatomic,strong) NSMutableDictionary *traceTextures;
 @property(nonatomic,copy) NSString *tracePass;
+@property(nonatomic,strong) NSDictionary *tracePixelOutput;
+@property(nonatomic,strong) NBTexture *tracePixelSource;
+@property(nonatomic) unsigned traceGraphFirst,traceGraphLast;
 - (void)traceGraph:(MTLPrimitiveType)type count:(NSUInteger)count;
+- (void)tracePixelSelect:(bool)blur;
+- (void)tracePixelCopy:(NBTexture *)texture role:(NSString *)role;
 - (void)traceDraw:(MTLPrimitiveType)type start:(NSUInteger)start count:(NSUInteger)count indices:(NBBuffer *)indices offset:(NSUInteger)offset indexType:(MTLIndexType)indexType baseVertex:(NSInteger)baseVertex;
 @end
 @implementation NBRenderEncoder
 #include "X9BlurCapture.inc"
 #include "X9RenderGraphCapture.inc"
+#include "X9RenderPixelCapture.inc"
 - (void)setRenderPipelineState:(id<MTLRenderPipelineState>)state {
  if(![(id)state isKindOfClass:[NBRenderPipeline class]]){[self.commandBuffer refuse:@"foreign render pipeline"];return;}
  self.tracePipeline=(NBRenderPipeline *)state;
@@ -987,7 +995,10 @@ static char kUserDictionaryKey;
   MTLRenderPassColorAttachmentDescriptor *a=d.colorAttachments[i];NBTexture *t=(NBTexture *)a.texture;
   [trace appendFormat:@" c%u=%llu/%llu/%llux%llu/m%llu/s%llu/load%llu/store%llu/resolve%llu",i,(unsigned long long)t.traceID,(unsigned long long)t.pixelFormat,(unsigned long long)t.width,(unsigned long long)t.height,(unsigned long long)a.level,(unsigned long long)a.slice,(unsigned long long)a.loadAction,(unsigned long long)a.storeAction,(unsigned long long)([(id)a.resolveTexture isKindOfClass:[NBTexture class]]?[(NBTexture *)a.resolveTexture traceID]:0)];
  }
- encoder.tracePass=trace;return (id<MTLRenderCommandEncoder>)encoder;
+ encoder.tracePass=trace;
+ MTLRenderPassColorAttachmentDescriptor *c0=d.colorAttachments[0];
+ if(c0.texture)encoder.tracePixelOutput=@{@"texture":c0.texture,@"level":@(c0.level),@"slice":@(c0.slice),@"depth":@(c0.depthPlane),@"store":@(c0.storeAction)};
+ return (id<MTLRenderCommandEncoder>)encoder;
 }
 - (void)addScheduledHandler:(MTLCommandBufferHandler)block {if(block)@synchronized(self){[_scheduledHandlers addObject:[block copy]];}}
 - (void)addCompletedHandler:(MTLCommandBufferHandler)block {if(block)@synchronized(self){[_completedHandlers addObject:[block copy]];}}
