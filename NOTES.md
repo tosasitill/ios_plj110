@@ -21,6 +21,23 @@
   candidates' recipes, XNU git state, workspace `xnu/patches`, tool versions.
   Dry-run here with `--path-map` only (other candidates absent). Waiting for
   the user to run it on the Mac and hand back the tarball.
+  First Mac run (2026-11-01, `/tmp/x9-build-inputs-...-20261101.tar.gz`,
+  extracted to `/home/ubuntu/agsbx/inputs-pan220`, not in git): 0 missing,
+  6/57 overlay objects without a command (pan117 reconstructed-inputs + start.o
+  + SweetCPU.cpo). Findings:
+  - `HelioDarwin/xnu` is at 0185 (`513bc9a`) with no X9 edits; but compiles
+    include `HelioDarwin/xnu/build-dxb/dxb/xnu/...` (has `bsd/sweet_hfs`), a
+    second XNU tree whose state was not recorded yet.
+  - prng_random.o, sleh.o, IOKitBSDInit.o come from
+    `work/x9-usb-live/recover-build/` (found via DWARF strings, not collected).
+  - By-name command matches can point at a later copy (sweet_x9_ufs.o: DWARF
+    says pan207, by-name gave pan209). Use depfile/DWARF as source truth.
+  - Flags are one template per subsystem (osfmk c, bsd c, iokit c++, pexpert
+    c) plus per-object extras (`-DX9U_EXTENT_WRITES=1`, `-include
+    sweet_hfs_compat.h`, warning switches). Headers: EXPORT_HDRS, dxb/fakeroot,
+    MacOSX14.0.sdk Kernel.framework PrivateHeaders.
+  Collector updated (DWARF sources, real XNU tree git state + untracked
+  sources, kernel-compile-commands.json); second Mac run requested.
 
 ## X9 Metal perf / rendering review (2026-10-31, static source read only)
 

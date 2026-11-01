@@ -31,7 +31,7 @@ import tarfile
 from pathlib import Path
 
 DEFAULT_CANDIDATE = "/Users/tosasitill/HelioDarwin-x9-lk-preserve/x9/out/pan220-batched-cache-ranges"
-RECIPE_FILES = ["commands.json", "kernel-link.filelist", "build.sh", "build-kernel.py",
+RECIPE_FILES = ["commands.json", "kernel-compile-commands.json", "kernel-link.filelist", "build.sh", "build-kernel.py",
                 "boot-args.txt", "boot.json", "cache-batch-inputs.json",
                 "external-metal-verification.patch"]
 NEVER = re.compile(r"(root-manifest|boot\.img|payload\.bin|kernel\.development|\.adt$|"
@@ -88,6 +88,13 @@ def read_depfile(path):
         _, rest = line.split(":", 1)
         deps += [d.replace("\\ ", " ") for d in re.split(r"(?<!\\)\s+", rest.strip()) if d]
     return deps
+
+
+def dwarf_paths(path, workspace):
+    """Workspace source paths named in an object's debug info (compiled -g)."""
+    data = Path(path).read_bytes()
+    pat = re.escape(workspace.encode()) + rb"/[\x21-\x7e]+?\.(?:c|cc|cpp|s|S|m|mm|h|hpp|inc)(?=[\x00\s])"
+    return sorted({m.decode() for m in re.findall(pat, data)})
 
 
 def output_of(record):
@@ -214,6 +221,16 @@ def main():
                 break
         for s in entry["sources"]:
             c.add(s)
+        # Debug info names the file that was really compiled; a by-name
+        # command can point at a later copy. Collect it plus its directory's
+        # depfiles and command records when no depfile exists.
+        if lo.is_file():
+            entry["dwarf_sources"] = dwarf_paths(lo, workspace)
+            for p in entry["dwarf_sources"]:
+                if c.add(p) and not entry["depfile"]:
+                    for sib in Path(c.local(p)).parent.glob("*"):
+                        if sib.suffix in (".d", ".json") and sib.is_file():
+                            c.add(str(sib).replace(c.local(p).rsplit("/", 1)[0], p.rsplit("/", 1)[0], 1))
         objects.append(entry)
 
     if args.with_xnu_objects:
@@ -222,14 +239,38 @@ def main():
 
     # XNU source state: the frozen object tree was built from this checkout.
     xnu = {"object_root": xnu_obj_root, "source_root": xnu_src_root, "objects": len(xnu_objs)}
-    if xnu_src_root and Path(c.local(xnu_src_root)).is_dir():
-        g = ["git", "-C", c.local(xnu_src_root)]
-        xnu["head"] = run(g + ["rev-parse", "HEAD"])
-        xnu["describe"] = run(g + ["log", "-1", "--format=%H %ad %s"])
-        xnu["status"] = run(g + ["status", "--porcelain"])
-        diff = run(g + ["diff", "HEAD"])
-        if diff and not diff.startswith("<unavailable"):
-            c.add_bytes("xnu/working-tree.diff", diff)
+    # The compiles include the XNU tree under the build directory (-I .../dxb/xnu/...),
+    # which may differ from the checkout the object tree is named after.
+    roots = {xnu_src_root} if xnu_src_root else set()
+    for e in objects:
+        for a in (e["command"] or {}).get("args", []):
+            mm = re.match(r"-I(.*?/dxb/xnu)(/|$)", a)
+            if mm:
+                roots.add(mm.group(1))
+    xnu["source_trees"] = {}
+    for i, root in enumerate(sorted(roots)):
+        info = {}
+        if Path(c.local(root)).is_dir():
+            g = ["git", "-C", c.local(root)]
+            info["toplevel"] = run(g + ["rev-parse", "--show-toplevel"])
+            info["head"] = run(g + ["rev-parse", "HEAD"])
+            info["describe"] = run(g + ["log", "-1", "--format=%H %ad %s"])
+            info["status"] = run(g + ["status", "--porcelain", "--untracked-files=normal", "--", "."])
+            diff = run(g + ["diff", "HEAD", "--", "."])
+            if diff and not diff.startswith("<unavailable"):
+                c.add_bytes(f"xnu/tree{i}-working-tree.diff", diff)
+            # Untracked kernel sources (e.g. added sweet_* files), text only.
+            for line in info["status"].splitlines():
+                if line.startswith("?? "):
+                    rel = line[3:].strip('"')
+                    if re.search(r"\.(c|cpp|h|s|inc|exports|txt)$|/$", rel) and not NEVER.search(rel):
+                        lp = Path(c.local(root)) / rel
+                        for f in ([lp] if lp.is_file() else lp.rglob("*") if lp.is_dir() else []):
+                            if f.is_file() and f.stat().st_size <= 4 << 20:
+                                c.files[f"xnu/tree{i}-untracked/{f.relative_to(c.local(root))}"] = f
+        else:
+            info["present"] = False
+        xnu["source_trees"][root] = info
     lxo = Path(c.local(xnu_obj_root)) if xnu_obj_root else None
     if lxo and lxo.is_dir():
         listing = []
