@@ -1,4 +1,39 @@
-## Active:215 task-limit runtime confirmed; visual errors persist, isolate HSR rollback (2026-11-01)
+## Active:216 HSR rollback built, awaiting mailbox update/manual boot; visual fix unproven (2026-11-01)
+
+- Normal build SUCCEEDED exit0:
+  python3 -I x9/build/build.py all --revision 216 --name mailbox216-hsr-rollback
+  x9/out/mailbox216-hsr-rollback/boot.img (build reports9420800 bytes).
+  Log:x9/out/mailbox216-hsr-rollback/build.log. PanVK rebuilt Kraid+draw objects
+  and linked; Metal Rust release1.50s,frontend/transport/factory compiled;
+  both216 plugins signed+packaged (10 files,payload51273728 bytes),kernel
+  exact216 allowlist regenerated,51/51 overlay objects+6 prebuilt linked,
+  stripped and shim packaged. No CI,extra tests/suites or secondary artifact
+  inspection/hash/disassembly/rebuild comparison. Compile success is NOT
+  hardware or visual/FPS success.
+- Build log confirms Retired (reversed):03-kraid-hsr-metadata.patch and
+  Already applied:02-panvk-host-linear-images.patch. Both full/incremental
+  entrypoints now retire03 before applying02; helper uses zero-fuzz reverse
+  for patched snapshots or zero-fuzz forward applicability for original ones,
+  refusing unmatched drift. Historical03 is preserved in third_party/retired.
+  Pre-change local compile.rs and panvk_vX_cmd_draw.c are preserved separately
+  in .local/analysis-mailbox216/before-hsr-rollback/. No global HSR override,
+  extra sync or Apple shader/executable byte edits. Returning to214 metadata
+  is a narrow REGRESSION COMPARISON,not a source-level correctness claim.
+- adb get-state returned error:no devices/emulators found. No root preflight,
+  mailbox update,device write,flash,boot or reboot was performed. Device remains
+  last-tested215 + renderer-limit kernel.216 is LOCAL ONLY; MUST update its
+  plugin package via the normal authorized updater with root preflight and
+  per-range readback BEFORE user manually boots its matching boot.img.
+  Once Android/ADB reconnects:
+  python3 -I x9/mailbox/update.py x9/out/mailbox216-hsr-rollback --serial <private>
+  Preserve update output at that candidate/mailbox-update.log. Do not print
+  or commit serial. Do not touch the root image,protected extents or boot.
+- Next replay: same Control Center/folder/App Library interaction after>40s,
+  preserving a fresh2.txt and visual feedback/clip. Confirm active plugin216,
+  task limit134217728 and no recurring code7 renderer kills; compare visible
+  flicker/polygon/color errors and aggregate timing to215-limit. If unchanged,
+  the isolated HSR rollback did not resolve the observed defect; do not repeat
+  it or re-label old WSI/BLEND/cache speculation as new proof.
 
 - User confirms flicker is still obvious and rendering errors remain after
   the renderer-limit candidate. Do not report the visual/FPS objective fixed.
@@ -23,7 +58,7 @@
   resume. Long black/idle windows do NOT prove GPU hang; reason for upper-layer
   clear is unresolved. Capture remains inputs0/pixels0; old WSI pitch fallback
   and _blendWithAlphaMaskB0 lookup refusal are not newly established causes.
-- Next candidate216 will ONLY retire 03-kraid-hsr-metadata.patch, including
+- Candidate216 ONLY retires 03-kraid-hsr-metadata.patch, including
   reverse migration of already-patched local Mesa, while keeping215 diagnostic
   removal,214 host-pitch imports/QoS and confirmed renderer task-limit repair.
   This is a single-variable visual-regression comparison, not proof HSR caused
