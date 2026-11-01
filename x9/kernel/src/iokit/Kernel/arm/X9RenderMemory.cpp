@@ -37,7 +37,9 @@ IOReturn x9_render_memory_cache_spans(X9RenderContext *c,X9RenderResource *r,
      (i&&span.begin<prior_end))return kIOReturnBadArgument;
   total+=span.end-span.begin;prior_end=span.end;
  }
- IOOptionBits options=kIOMapAnywhere;
+ /* Prefault: the cache loop below runs with preemption disabled, where a
+  * lazily populated kernel alias of task memory cannot take a page fault. */
+ IOOptionBits options=kIOMapAnywhere|kIOMapPrefault;
  if(r->memory->getDirection()==kIODirectionOut)options|=kIOMapReadOnly;
  /* Native BOs already have a descriptor-owned kernel alias. Do not repeatedly
   * create/destroy VM mappings for every small explicit upload and submission.
@@ -56,6 +58,17 @@ IOReturn x9_render_memory_cache_spans(X9RenderContext *c,X9RenderResource *r,
  }else address=(uint64_t)((IOBufferMemoryDescriptor *)r->memory)->getBytesNoCopy();
  if(!address||(address&(X9_RENDER_CACHE_ATOM-1))||length<r->bytes||address+length<address) {
   if(mapping){mapping->release();r->cache_mapping=nullptr;}return kIOReturnBadArgument;
+ }
+
+ /* A host import's kernel alias maps another task's wired pages and may
+  * still lack PTEs (pan220 panicked: DC CIVAC translation fault, ESR
+  * 0x96000147, at the first line of an imported 14 MB IOSurface). Fault
+  * every page in while preemption is still enabled; the pages are wired,
+  * so the entries stay valid for the loop below. */
+ if(r->imported) {
+  for(unsigned i=0;i<count;i++)
+   for(uint64_t at=spans[i].begin&~(uint64_t)(PAGE_SIZE-1);at<spans[i].end;at+=PAGE_SIZE)
+    (void)*(volatile const uint8_t *)(address+at);
  }
 
  /* Adapted from UniXNU Adreno740 8638683: close each bounded run's DSB

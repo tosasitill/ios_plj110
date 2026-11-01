@@ -48,6 +48,17 @@ should be checked for compile errors before flashing.
   `thermalmonitord sel 78`), so the stop predates the four fixes (guess,
   until the panic string is read). Next: pstore console + disk sidecar of this
   run; optionally flash a pan220-only rebuild (revert d62cfc7) to compare.
+- Panic of that run (screen photo OCR from the user): `Kernel data abort`,
+  pc 0xfffffe0007bcaddc, esr 0x96000147 (EC 0x25, CM=1 WnR=1, DFSC 0x07 L3
+  translation fault), far = x24 = start of a 64 KiB run, x0..x2 = +0x40..+0xc0,
+  x16 = +0x10000, x28 = 0xd7c000 (= the 14 MB IOSurface import). Cause
+  (inferred from registers + code): pan220's batched cache loop
+  (`x9_render_memory_cache_spans`, 0271) runs DC CIVAC with preemption
+  disabled; a host import's kernel alias (`createMappingInTask` of task
+  memory) can lack PTEs, and the fault cannot be serviced with preemption
+  off. pan219 had no preemption-off section. Fixed: `kIOMapPrefault` on the
+  alias and a page-touch pass over imported spans before the loop. Rebuild +
+  run pending; this is a pan220 bug, independent of d62cfc7.
 - Still required on the Mac for building: `HelioDarwin/xnu/build-dxb/dxb`
   (frozen objects, EXPORT_HDRS, fakeroot, dxb/xnu), Xcode 15, llvm/lld 22,
   and the device root-manifest.json (local.json currently points into the
