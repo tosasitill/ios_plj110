@@ -1,3 +1,47 @@
+## Static continuation: actual compiler and HSR enable gate (2026-11-01)
+
+- Followed the actual backend dispatcher, not just its name: build-panvk-native-ios.py
+  enables panfrost-rust; pan_use_kraid defaults to ALL. pan_shader_compile calls
+  bifrost_compile_shader_nir, but bifrost_nir.c:1499 dispatches that call to
+  kraid_compile_variant/kraid_compile_nir. The function name does NOT prove BIR
+  compilation. No PAN_USE_KRAID override found in searched X9 launch/build sources;
+  process environment / compiled variant has not been captured independently.
+- Concrete latent source gap: Kraid compile.rs::write_back_info and final
+  pan_shader_update_info do not populate fs.hsr. pan_postprocess_nir zeroes info;
+  va_gather_hsr_info is called only in bi_compile_variant. Kraid emits OpLdTile
+  for both load_tile_pan and load_tile_res_pan without filling this HSR metadata.
+  BIR handles both with BI_OPCODE_LD_TILE (resource form adds wait_resource), so
+  the earlier suspicion of a distinct unrecognized LD_TILE_RES opcode is false.
+  Local mesa-panfrost reference has the same Kraid omission.
+- Crucial reachability gate: csf/panvk_vX_cmd_draw.c:1773 sets allow_hsr_prepass
+  only for PANVK_DEBUG(HSR_PREPASS); instance.c parses PANVK_DEBUG, no default
+  hsr_prepass. Framebuffer emission gates hsr_prepass_enable with this flag and
+  pan_fb_can_pipeline_zs. No hsr_prepass enable found in searched X9 sources.
+  Therefore do NOT call the Kraid metadata omission the current blur root cause
+  or ship a speculative HSR-disable candidate; default prepass is already off.
+  Exact running environment and non-prepass hardware interpretation remain unobserved.
+- The DCD pack also reads cfg.z_write_or_stencil before assigning it, but this
+  needs coverage-changing + depth/stencil behavior to matter; ordinary blur
+  does not establish those conditions. No repair made for this unrelated lead.
+- Independent fetch protection: input-attachment lowering records read bits
+  before selecting load_tile/load_tile_res; luma reads target0 and writes0, so
+  rt_read & rt_written already forbids hsr_can_cull even with missing metadata.
+  hsr_can_be_culled has no equivalent read-mask guard, but is not evidence of
+  active prepass. PanVK advertises rasterizationOrderColorAttachmentAccess on
+  arch>=10; runtime input-fetch passes order all their color accesses, and FPK
+  can-kill checks !roa_color. Broad shader output masks are not alone proof of
+  incorrectly discarding masked MRT contents (Gallium also separates blend OFF).
+- Returned to default Kraid interpolation: opt_var tracks hidden-register
+  Store/Retrieve/Clobber via CFG dataflow; schedule.rs has forward RAW/WAW and
+  reverse WAR dependencies for that hidden register. No simple scheduler
+  reordering omission. lower_fs_inputs uses linked slot byte offsets, forwards
+  memory type to OpLdVarBuf, applies component swizzle and noperspective FragW;
+  encode_v9 selects source_format F16/F32 separately from destination type.
+  Still need examine v14 instruction field encodings / actual shader variant
+  and blur half arithmetic; no demonstrated interpolation fault yet.
+- Read-only source work, no tests/build/device action or runtime behavior changes.
+  Mailbox212 stays staged. Root cause and low-FPS cause remain unresolved.
+
 ## Static continuation: shadow invalidation and masked MRT (2026-11-01)
 
 - Followed render/shadows.rs::plan -> EncoderCore::plan_shadows/before and
