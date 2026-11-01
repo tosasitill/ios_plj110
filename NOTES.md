@@ -1,3 +1,33 @@
+## 212 runtime pixel capture decoded; interaction window missed (2026-11-01)
+
+- Latest user log preserved `.local/analysis-blur212/runtime-latest.raw.log`.
+  Active212 at3.435s. Decoder ran against actual log: 26 images, all26 complete;
+  PNG/RGB, alpha, BGRA and manifest under pixels-latest. Private contact.png
+  and active-regions.png inspected. No X9 PIXEL FAILED captured.
+- Pixel windows selected cb22 at33.686s, cb34 at35.829s, cb46 at40.000s.
+  New narrow15/23, variable blur, narrow11/7 and single-pass3 draws appear
+  at151-160s, AFTER all three capture windows were exhausted. This later
+  interaction has no pixel readback. Do not claim original polygon defect
+  reproduced or disappeared based on these initial captures.
+- cb22 source-after-pass tex23 is already magenta across the32x32 grid;
+  initial downsample/narrow19 intermediates propagate magenta. It is present
+  before these blur outputs/luma_boost, but source-after-pass is not a pre-draw
+  snapshot and source provenance is untraced. ASTC error color/heap alias are
+  possible leads ONLY, not confirmed causes.
+- cb34/46 source grids show wallpaper-like repeated imagery and clock. Pooled
+  tex45 64x64 is rendered only in26x26, tex37 114x73 in28x28: colors/images
+  outside requested region are old contents, not by themselves corruption.
+  Cropped active-region images remove those distracting pooled leftovers.
+- cb34/46 final narrow27 tex71 alpha nonzero bbox is(0,0,8,8) in64x64;
+  initial downsample tex69 bbox(2,2,46,46). Small coverage alone does not prove
+  wrong viewport/UV: full draw geometry/scissors and intended footprint absent.
+  Frontend viewport six-double forwarding inspected, no mismatch established.
+- Root cause still unresolved. No source behavior changes/build/staging in
+  this analysis turn; mailbox remains212. Next capture must cover actual late
+  interaction (event/manual trigger or late window), plus viewport/scissor and
+  geometry for those exact draws. Do not repeat startup-only pixel capture.
+  Diagnostic blits perturb synchronization and cannot validate ordinary FPS.
+
 ## Mailbox212 successfully staged after user reconnected adb (2026-11-01)
 
 - Normal updater (no adb retry shim) against x9/out/mailbox212-blur-pixels
