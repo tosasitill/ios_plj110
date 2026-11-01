@@ -304,7 +304,9 @@ static int gpu_owned_request(void *job,int desktop) {
   active=1;
  }
  if(wait_counts(1,active,1))return -1;
- vm_offset_t gpu=ml_io_map(0x48000000,0x4000);
+ /* ml_io_map() VA is permanent (fixed io_submap): map once, not per request. */
+ static vm_offset_t gpu;
+ if(!gpu)gpu=ml_io_map(0x48000000,0x4000);
  if(!gpu||rd(gpu,0)!=0xe8800010u)return -1;
  int result=desktop==2?sweet_x9_csf_resident_begin(gpu):
   (desktop?sweet_x9_csf_desktop(gpu,job):sweet_x9_csf_user(gpu,job));

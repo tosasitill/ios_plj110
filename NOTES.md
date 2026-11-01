@@ -114,9 +114,16 @@ should be checked for compile errors before flashing.
   physical). The map pointer lies just inside the zones range, i.e. a
   dynamically created submap, not the 256 GB data range. GPU use at the time:
   backboardd ~335 MB native, another client ~95 MB, import handles up to 808.
-  Waiting for `nm -n` of x9-4e72465's unstripped kernel to symbolize the
-  caller (check slide with the earlier pc 0xfffffe0007bcaddc, expected in
-  x9_render_memory_cache_spans).
+  Symbolized with `nm -n` of x9-4e72465 (`/tmp/sys.txt`; slide 0: the earlier
+  pc lands in x9_render_memory_cache_spans+0x32c). Caller =
+  `__kmem_failed_panic`; flags 0x100021 = KMA_NOFAIL|KMA_PAGEABLE|
+  KMA_PERMANENT, which in xnu-8796.141.3 is exactly `io_map()`
+  (osfmk/arm/io_map.c): permanent VA from the fixed 8 MiB io_submap, never
+  freed. Root cause: render_submit called `ml_io_map(0x48090000,0x1000)`
+  (user doorbell) on EVERY submit -> ~400 jobs exhaust io_submap -> panic.
+  (Last log line before the panic: backboardd sequence=360.) Fixed by
+  mapping once (also gpu_owned_request's per-request GPU register map).
+  Every other ml_io_map call site runs once at init.
 - Still required on the Mac for building: `HelioDarwin/xnu/build-dxb/dxb`
   (frozen objects, EXPORT_HDRS, fakeroot, dxb/xnu), Xcode 15, llvm/lld 22,
   and the device root-manifest.json (local.json currently points into the

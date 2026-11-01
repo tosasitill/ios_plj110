@@ -387,7 +387,13 @@ static IOReturn render_submit(X9RenderContext *c,const X9RenderSubmission *reque
    uint32_t va=slot.user_io+i*host_page;
    if(!put_qword(resident->image,va,expected[i])||!clean_page(resident->image,va))goto uncertain;
   }
-  vm_offset_t db=ml_io_map(0x48090000,0x1000);if(!db)goto uncertain;
+  /* ml_io_map() takes permanent VA from the fixed 8 MiB io_submap and is
+   * never released: mapping per submit exhausted it after ~400 jobs and
+   * panicked in kmem_alloc (KERN_NO_SPACE). Map the user doorbell page once;
+   * submits are serialized by the render owner lock held here. */
+  static vm_offset_t user_doorbell;
+  if(!user_doorbell)user_doorbell=ml_io_map(0x48090000,0x1000);
+  vm_offset_t db=user_doorbell;if(!db)goto uncertain;
   gw(db,0,1);phase="completion-wait";bool done=false;uint64_t end=deadline_ms(10000),next_sync=0;unsigned polls=0;
   times[4]=mach_absolute_time();
   do {
