@@ -94,7 +94,7 @@ static const X9CaptureOptions &captureOptions() {
   // x9vf: whole backboardd command buffers (every draw) at fixed uptimes,
   // plus a GPU copy of each draw's vertex/index bytes compared after completion.
   out.frame=enabled("x9vf");
-  if(out.frame)NSLog(@"X9 FRAME capture: start_us=%llu triggers=4x20s cbs_per_trigger=3 max_draws=160;CPU snapshot+GPU blit compare",
+  if(out.frame)NSLog(@"X9 FRAME capture: start_us=%llu triggers=2x20s cbs_per_trigger=3 max_draws=400;CPU snapshot+function constants",
    (unsigned long long)(out.startGiven?out.geometryStartUs:60000000ull));
   return out;
  }();
@@ -396,6 +396,7 @@ static NBFunction *ciKernelFunction(NBLibrary *library,NSString *name);
 static NSData *functionBitcode(NBFunction *function);
 static bool forEachLibraryEntry(NBLibrary *library,const std::function<bool(const std::string &,int)> &visit);
 static void logFunctionLookupFailure(NBLibrary *library,NSString *name,NSString *reason);
+static void x9LogFunctionConstants(id function,NSString *name,const std::vector<NmbConstant> &constants);
 @implementation NBLibrary
 - (instancetype)init {
  if((self=[super init])){static std::atomic<uint64_t> serial{0};_diagnosticID=++serial;}
@@ -437,6 +438,7 @@ static void logFunctionLookupFailure(NBLibrary *library,NSString *name,NSString 
  NmbFunction *handle=nmb_function_new_specialized(_handle,name.UTF8String,constants.data(),(uint32_t)constants.size());gTimeFunction.add(functionBegan);
  if(!handle){NSString *reason=lastError();logFunctionLookupFailure(self,name,reason);NBLOG(@"native-metal: specialized function %@ refused: %@",name,reason);if(error)*error=nbError([NSString stringWithFormat:@"specialized function: %@",reason]);return nil;}
  NBFunction *function=[NBFunction new];function.handle=handle;function.name=name;function.functionType=(MTLFunctionType)nmb_function_type(handle);function.library=self;
+ x9LogFunctionConstants(function,name,constants);
  if(error)*error=nil;return (id<MTLFunction>)function;
 }
 // Original iOS16 _MTLLibrary extracts [pipelineLibrary functionCache] and
@@ -507,6 +509,7 @@ static void logFunctionLookupFailure(NBLibrary *library,NSString *name,NSString 
 @interface NBRenderPipeline : NBObject
 @property(nonatomic) NmbRenderPipeline *handle;
 @property(nonatomic,copy) NSString *traceVertex,*traceFragment;
+@property(nonatomic) uint64_t traceVertexID,traceFragmentID;
 @property(nonatomic,strong) MTLVertexDescriptor *traceLayout;
 @property(nonatomic,copy) NSString *traceBlend;
 @end
@@ -1638,6 +1641,7 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
  NBRenderPipeline *state=[NBRenderPipeline new];state.handle=handle;
  if(captureOptions().inputs||captureOptions().tracksGeometry()) {
  state.traceVertex=d.vertexFunction.name;state.traceFragment=d.fragmentFunction.name;
+ state.traceVertexID=x9FrameObjectID(d.vertexFunction);state.traceFragmentID=x9FrameObjectID(d.fragmentFunction);
  if(captureOptions().tracksGeometry() || [d.vertexFunction.name containsString:@"blur"] || [d.fragmentFunction.name containsString:@"blur"])state.traceLayout=[d.vertexDescriptor copy];
  NSMutableString *blend=[NSMutableString string];
  for(unsigned i=0;i<8;i++)if(d.colorAttachments[i].pixelFormat!=MTLPixelFormatInvalid) {

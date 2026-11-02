@@ -16,6 +16,27 @@ static uint64_t x9FrameObjectID(id object) {
  if(!value){value=@(++next);objc_setAssociatedObject(object,&key,value,OBJC_ASSOCIATION_RETAIN);}
  return value.unsignedLongLongValue;
 }
+// x9vf: the exact function-constant values of every specialized function
+// (CoreAnimation's uber shaders), keyed by the same object ID FRAME STATE
+// prints, so a captured draw can be recompiled offline with its constants.
+static void x9LogFunctionConstants(id function,NSString *name,const std::vector<NmbConstant> &constants) {
+ if(!captureOptions().frame)return;
+ static std::mutex mutex;static unsigned lines;
+ std::lock_guard<std::mutex> lock(mutex);
+ if(lines>=6000)return;
+ const uint64_t fid=x9FrameObjectID(function);
+ NSLog(@"X9 FC FUNC: pid=%d fid=%llu name=%@ count=%zu",getpid(),(unsigned long long)fid,name,constants.size());lines++;
+ for(size_t row=0;row<constants.size();row+=12) {
+  NSMutableString *s=[NSMutableString string];
+  for(size_t i=row;i<MIN(row+12,constants.size());i++) {
+   const NmbConstant &c=constants[i];
+   if(c.name)[s appendFormat:@" %s:%llu:",c.name,(unsigned long long)c.type];
+   else [s appendFormat:@" %llu:%llu:",(unsigned long long)c.index,(unsigned long long)c.type];
+   for(uint64_t b=0;b<c.length&&b<32;b++)[s appendFormat:@"%02x",((const uint8_t *)c.bytes)[b]];
+  }
+  NSLog(@"X9 FC C: fid=%llu row=%zu%@",(unsigned long long)fid,row,s);lines++;
+ }
+}
 static NSString *x9FrameDecode(const uint8_t *p,uint64_t format) {
  // MTLVertexFormat: Half2..4 = 25..27, Float..Float4 = 28..31.
  if(format>=28&&format<=31) {
@@ -38,7 +59,7 @@ static void x9FrameSelect(NBCommandBuffer *cb) {
  static std::mutex mutex;static unsigned trigger,remaining,frames;
  const uint64_t start=options.startGiven?options.geometryStartUs:60000000ull,now=nowUs();
  std::lock_guard<std::mutex> lock(mutex);
- if(!remaining && trigger<4 && now>=start+(uint64_t)trigger*20000000ull){trigger++;remaining=3;}
+ if(!remaining && trigger<2 && now>=start+(uint64_t)trigger*20000000ull){trigger++;remaining=3;}
  if(!remaining)return;
  remaining--;cb.traceFrame=++frames;cb.traceFrameTrigger=trigger;
  NSLog(@"X9 FRAME CB: f=%u trigger=%u cb=%llu uptime_us=%llu",cb.traceFrame,trigger,(unsigned long long)cb.traceID,(unsigned long long)now);
@@ -107,7 +128,7 @@ static void x9FrameFlush(NBCommandBuffer *cb) {
 }
 - (void)traceFrameDraw:(MTLPrimitiveType)type start:(NSUInteger)start count:(NSUInteger)count indices:(NBBuffer *)indices offset:(NSUInteger)offset indexType:(MTLIndexType)indexType baseVertex:(NSInteger)baseVertex instances:(NSUInteger)instances {
  NBCommandBuffer *cb=self.commandBuffer;NBRenderPipeline *pipeline=self.tracePipeline;
- if(!cb.traceFrame||!pipeline||cb.traceFrameDraws>=160)return;
+ if(!cb.traceFrame||!pipeline||cb.traceFrameDraws>=400)return;
  const unsigned n=++cb.traceFrameDraws,f=cb.traceFrame;
  const unsigned width=indexType==MTLIndexTypeUInt16?2:4;
  MTLVertexDescriptor *layoutSet=pipeline.traceLayout;
@@ -121,6 +142,7 @@ static void x9FrameFlush(NBCommandBuffer *cb) {
  NSLog(@"X9 FRAME DRAW: f=%u n=%u cb=%llu enc=%llu vs=%@ fs=%@ type=%llu count=%llu start=%llu indexed=%u itype=%llu ioff=%llu ibuf=%llu ilen=%llu istorage=%lld base_vertex=%lld inst=%llu",
   f,n,(unsigned long long)cb.traceID,(unsigned long long)self.globalTraceObjectID,pipeline.traceVertex,pipeline.traceFragment,(unsigned long long)type,(unsigned long long)count,(unsigned long long)start,
   indices!=nil,(unsigned long long)indexType,(unsigned long long)offset,(unsigned long long)x9FrameObjectID(indices),(unsigned long long)(indices?indices.length:0),indices?(long long)indices.storageMode:-1ll,(long long)baseVertex,(unsigned long long)instances);
+ NSLog(@"X9 FRAME FUNCS: f=%u n=%u vfid=%llu ffid=%llu",f,n,(unsigned long long)pipeline.traceVertexID,(unsigned long long)pipeline.traceFragmentID);
  NSLog(@"X9 FRAME STATE: f=%u n=%u pass=%@ vp=%@ sc=%@ cull=%llu wind=%llu blend=%@",f,n,self.tracePass,
   self.traceViewportSet?[NSString stringWithFormat:@"%g,%g,%g,%g",self.traceViewport.originX,self.traceViewport.originY,self.traceViewport.width,self.traceViewport.height]:@"default",
   self.traceScissorSet?[NSString stringWithFormat:@"%llu,%llu,%llu,%llu",(unsigned long long)self.traceScissor.x,(unsigned long long)self.traceScissor.y,(unsigned long long)self.traceScissor.width,(unsigned long long)self.traceScissor.height]:@"default",
@@ -169,8 +191,9 @@ static void x9FrameFlush(NBCommandBuffer *cb) {
   for(unsigned i=0;i<16;i++)[s appendFormat:@"%s%.6g",i?",":"",m[i]];
   NSLog(@"X9 FRAME U: f=%u n=%u slot=%u base=%llu f32=%@",f,n,slot,(unsigned long long)base,s);
  }
- // GPU-visible copy of exactly the bytes this draw fetches.
- if(cb.traceFrameBytes>=4*1024*1024)return;
+ // GPU-visible copy: 219 showed it matches the CPU for every real vertex
+ // fetch, so it is off now to keep the capture from adding GPU work.
+ if(true||cb.traceFrameBytes>=4*1024*1024)return;
  NSMutableDictionary *copy=[NSMutableDictionary dictionaryWithObject:@(n) forKey:@"n"];
  // Blit ranges are widened to 4-byte alignment inside the buffer.
  auto aligned=[](uint64_t from,uint64_t len,uint64_t total,uint64_t *outFrom,uint64_t *outLen) {
