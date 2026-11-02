@@ -39,6 +39,34 @@
 #include "X9Desktop.h"
 static uint64_t x9_fb_present_seq;
 
+/*
+ * Diagnostic logging enabled by the exact boot-arg token x9vf, the same token
+ * the userspace capture reads. It only raises the sample density and adds
+ * layer/damage lines: no panel timing, copy or compositing decision changes.
+ */
+static bool
+x9_diag_logging(void)
+{
+	static int enabled = -1;
+	if (enabled < 0) {
+		enabled = 0;
+		char *args = PE_boot_args();
+		for (const char *p = args; p != NULL && *p != 0;) {
+			while (*p != 0 && (unsigned char)*p <= 32)
+				p++;
+			const char *end = p;
+			while (*end != 0 && (unsigned char)*end > 32)
+				end++;
+			if (end - p == 4 && memcmp(p, "x9vf", 4) == 0)
+				enabled = 1;
+			p = end;
+		}
+		if (enabled)
+			IOLog("X9 DIAG: x9vf active; panel sampler 64x64, layer and damage rectangles logged\n");
+	}
+	return enabled != 0;
+}
+
 extern "C" int x9_lk_gui_present(void);
 extern "C" int x9_lk_gui_busy(void);
 extern "C" int x9_lk_gui_cancel(void);
@@ -1153,12 +1181,13 @@ get32(const uint8_t *p, uint32_t off)
 static uint32_t sweet_fb_swaps_logged;
 struct x9_fb_sample { uint32_t samples,nonblack,opaque,checksum; };
 static struct x9_fb_sample
-x9_fb_sample_grid(const uint8_t *pixels,uint32_t width,uint32_t height,uint32_t stride)
+x9_fb_sample_grid(const uint8_t *pixels,uint32_t width,uint32_t height,uint32_t stride,uint32_t grid)
 {
  struct x9_fb_sample sample={};
  if(!pixels||!width||!height||stride<(uint64_t)width*4)return sample;
- for(uint32_t y=0;y<32;y++)for(uint32_t x=0;x<32;x++){
-  uint32_t v;uint64_t off=(uint64_t)((uint64_t)y*(height-1)/31)*stride+(uint64_t)((uint64_t)x*(width-1)/31)*4;
+ if(grid<2||grid>128)grid=32;
+ for(uint32_t y=0;y<grid;y++)for(uint32_t x=0;x<grid;x++){
+  uint32_t v;uint64_t off=(uint64_t)((uint64_t)y*(height-1)/(grid-1))*stride+(uint64_t)((uint64_t)x*(width-1)/(grid-1))*4;
   memcpy(&v,pixels+off,sizeof(v));sample.samples++;
   if(v&0x00ffffffU)sample.nonblack++;
   if(v>>24)sample.opaque++;
@@ -1705,6 +1734,62 @@ AppleCLCD::present(const uint8_t *rec)
 	}
 	bool x9_first_drawn = true;
 
+	/*
+	 * Diagnostic (x9vf): the layer rectangles CoreAnimation presented and
+	 * their union — the only damage region the kernel can observe. Logged
+	 * when the set changes and every 240 identical frames so a static
+	 * desktop does not fill the log. Read-only.
+	 */
+	if (x9_diag_logging() && sweet_board_x9()) {
+		static uint64_t last_sig;
+		static unsigned same;
+		int32_t ux0 = 0x7fffffff, uy0 = 0x7fffffff;
+		int32_t ux1 = -0x7fffffff, uy1 = -0x7fffffff;
+		uint32_t count = 0;
+		uint64_t sig = 1469598103934665603ULL;
+		for (uint32_t layer = 0; layer < SWEET_FB_LAYERS; layer++) {
+			uint32_t id = get32(rec, 0x54 + 4 * layer);
+			if (!(mask & (1u << layer)) || id == 0)
+				continue;
+			const uint8_t *b = rec + 0xc4 + 16 * layer;
+			int32_t dx = (int32_t)get32(b, 0), dy = (int32_t)get32(b, 4);
+			int32_t w = (int32_t)get32(b, 8), h = (int32_t)get32(b, 12);
+			count++;
+			if (w > 0 && h > 0) {
+				ux0 = MIN(ux0, dx); uy0 = MIN(uy0, dy);
+				ux1 = MAX(ux1, dx + w); uy1 = MAX(uy1, dy + h);
+			}
+			sig = (sig ^ ((uint64_t)id << 32 | layer)) * 1099511628211ULL;
+			sig = (sig ^ ((uint64_t)(uint32_t)dx << 32 | (uint32_t)dy)) * 1099511628211ULL;
+			sig = (sig ^ ((uint64_t)(uint32_t)w << 32 | (uint32_t)h)) * 1099511628211ULL;
+		}
+		if (count == 0) {
+			ux0 = uy0 = ux1 = uy1 = 0;
+		}
+		sig = (sig ^ mask) * 1099511628211ULL;
+		sig = (sig ^ get32(rec, 0x50)) * 1099511628211ULL;
+		if (sig != last_sig || ++same >= 240) {
+			const bool covers = count != 0 && ux0 <= 0 && uy0 <= 0 &&
+			    ux1 >= (int32_t)fLogicalW && uy1 >= (int32_t)fLogicalH;
+			IOLog("X9 DAMAGE: seq=%llu id=%u layers=%u union=%d,%d,%dx%d panel=%ux%u covers=%u mask=%08x\n",
+			    x9_fb_present_seq, get32(rec, 0x50), count, ux0, uy0, ux1 - ux0, uy1 - uy0,
+			    fLogicalW, fLogicalH, covers, mask);
+			for (uint32_t layer = 0; layer < SWEET_FB_LAYERS; layer++) {
+				uint32_t id = get32(rec, 0x54 + 4 * layer);
+				if (!(mask & (1u << layer)) || id == 0)
+					continue;
+				const uint8_t *a = rec + 0x64 + 16 * layer;
+				const uint8_t *b = rec + 0xc4 + 16 * layer;
+				IOLog("X9 LAYER: seq=%llu l=%u id=%u src=%d,%d,%dx%d dst=%d,%d,%dx%d\n",
+				    x9_fb_present_seq, layer, id,
+				    (int32_t)get32(a, 0), (int32_t)get32(a, 4), (int32_t)get32(a, 8), (int32_t)get32(a, 12),
+				    (int32_t)get32(b, 0), (int32_t)get32(b, 4), (int32_t)get32(b, 8), (int32_t)get32(b, 12));
+			}
+			last_sig = sig;
+			same = 0;
+		}
+	}
+
 	/* Reference: hackios c84b4634277a70beac73921029b1fb6afc2530af,
 	 * MiniIOMobileFramebuffer::show (20F66). The 20H392 request also has
 	 * surface IDs at +0x54, set bits at +0x104 and cleared bits at +0x108.
@@ -1841,7 +1926,7 @@ AppleCLCD::present(const uint8_t *rec)
 		}
 		if (src != 0 && bpe == 4) {
 			if (x9_probe && sx == 0 && sy == 0 && dx == 0 && dy == 0 && w == (int32_t)fWidth && h == (int32_t)fHeight) {
-				struct x9_fb_sample z = x9_fb_sample_grid((const uint8_t *)(src + s->offset), fWidth, fHeight, s->bytesPerRow);
+				struct x9_fb_sample z = x9_fb_sample_grid((const uint8_t *)(src + s->offset), fWidth, fHeight, s->bytesPerRow, x9_diag_logging() ? 64 : 32);
 				IOLog("X9 FRAME source seq=%llu id=%u sample=%u nonblack=%u alpha=%u checksum=%08x\n", x9_fb_present_seq, id, z.samples, z.nonblack, z.opaque, z.checksum);
 			}
 			if (sweet_board_x9()) {
@@ -1872,7 +1957,7 @@ AppleCLCD::present(const uint8_t *rec)
 		fX9ComposeValid = false;  /* the panel was written directly or not at all from the shadow */
 	}
 	if (sweet_board_x9() && dst != NULL) {
-		struct x9_fb_sample z = x9_fb_sample_grid(dst, fWidth, fHeight, fRowBytes);
+		struct x9_fb_sample z = x9_fb_sample_grid(dst, fWidth, fHeight, fRowBytes, x9_diag_logging() ? 64 : 32);
 		static int previous_black=-1;
 		int black=z.samples && !z.nonblack;
 		bool transition=black!=previous_black;

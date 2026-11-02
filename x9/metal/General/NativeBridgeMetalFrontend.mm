@@ -97,7 +97,7 @@ static const X9CaptureOptions &captureOptions() {
   // x9vf: whole backboardd command buffers (every draw) at fixed uptimes,
   // plus a GPU copy of each draw's vertex/index bytes compared after completion.
   out.frame=enabled("x9vf");
-  if(out.frame)NSLog(@"X9 FRAME capture: start_us=%llu triggers=2x20s cbs_per_trigger=3 max_draws=400;CPU snapshot+function constants",
+  if(out.frame)NSLog(@"X9 FRAME capture: start_us=%llu triggers=3x20s cbs_per_trigger=3 max_draws=400;CPU snapshot+coverage+texture/surface+FBF",
    (unsigned long long)(out.startGiven?out.geometryStartUs:60000000ull));
   return out;
  }();
@@ -142,9 +142,13 @@ static void emitTelemetry() {
 }
 struct Timed {std::atomic<uint64_t> count{0},total{0},slowest{0};
  std::atomic<uint32_t> buckets[32]{};   // floor(log2(microseconds)), 32 buckets
- void add(uint64_t began){const uint64_t took=nowUs()-began;count++;total+=took;uint64_t seen=slowest.load();
+ // Sample an already-measured duration. Every caller must go through this:
+ // a count/total-only increment leaves the histogram empty and makes the
+ // percentiles fall back to max.
+ void record(uint64_t took){count++;total+=took;uint64_t seen=slowest.load();
   while(took>seen && !slowest.compare_exchange_weak(seen,took)){}
-  const uint32_t bucket=took?63u-(uint32_t)__builtin_clzll(took):0u;buckets[bucket>31?31:bucket]++;}};
+  const uint32_t bucket=took?63u-(uint32_t)__builtin_clzll(took):0u;buckets[bucket>31?31:bucket]++;}
+ void add(uint64_t began){record(nowUs()-began);}};
 // Upper bound of the bucket that contains the requested rank: p95<=reported.
 static uint64_t timedPercentile(const Timed &t,unsigned percent) {
  const uint64_t n=t.count.load();if(!n)return 0;
@@ -617,6 +621,7 @@ static void x9LogFunctionConstants(id function,NSString *name,const std::vector<
 @property(nonatomic) uint64_t traceVertexID,traceFragmentID;
 @property(nonatomic,strong) MTLVertexDescriptor *traceLayout;
 @property(nonatomic,copy) NSString *traceBlend;
+@property(nonatomic,strong) NSArray *traceWriteMasks;   // per colour attachment, MTLColorWriteMask
 @end
 @implementation NBRenderPipeline
 - (void)dealloc {nmb_render_pipeline_release(_handle);}
@@ -854,6 +859,7 @@ static void waitForResource(id resource) {
 @property(nonatomic) BOOL traceViewportSet,traceScissorSet;
 @property(nonatomic,strong) NSMutableDictionary *traceSamplers;
 @property(nonatomic,strong) NSArray *traceAttachments;
+@property(nonatomic,strong) NSArray *traceAttachmentState;   // per colour attachment: level/slice/load/store
 - (void)traceGraph:(MTLPrimitiveType)type count:(NSUInteger)count;
 - (void)tracePixelSelect:(bool)blur;
 - (void)tracePixelCopy:(NBTexture *)texture role:(NSString *)role;
@@ -1168,13 +1174,27 @@ static char kUserDictionaryKey;
  NSMutableString *trace=[NSMutableString stringWithFormat:@"requested=%llux%llu",(unsigned long long)pass.width,(unsigned long long)pass.height];
  for(unsigned i=0;i<8;i++)if(d.colorAttachments[i].texture) {
   MTLRenderPassColorAttachmentDescriptor *a=d.colorAttachments[i];NBTexture *t=(NBTexture *)a.texture;
-  [trace appendFormat:@" c%u=%llu/%llu/%llux%llu/m%llu/s%llu/load%llu/store%llu/resolve%llu",i,(unsigned long long)t.traceID,(unsigned long long)t.pixelFormat,(unsigned long long)t.width,(unsigned long long)t.height,(unsigned long long)a.level,(unsigned long long)a.slice,(unsigned long long)a.loadAction,(unsigned long long)a.storeAction,(unsigned long long)([(id)a.resolveTexture isKindOfClass:[NBTexture class]]?[(NBTexture *)a.resolveTexture traceID]:0)];
+  const uint64_t parent=[(id)t.parent isKindOfClass:[NBTexture class]]?[(NBTexture *)t.parent traceID]:0;
+  [trace appendFormat:@" c%u=%llu/%llu/%llux%llu/m%llu/s%llu/load%llu/store%llu/resolve%llu/surface%u/parent%llu",i,(unsigned long long)t.traceID,(unsigned long long)t.pixelFormat,(unsigned long long)t.width,(unsigned long long)t.height,(unsigned long long)a.level,(unsigned long long)a.slice,(unsigned long long)a.loadAction,(unsigned long long)a.storeAction,(unsigned long long)([(id)a.resolveTexture isKindOfClass:[NBTexture class]]?[(NBTexture *)a.resolveTexture traceID]:0),t.surface?IOSurfaceGetID(t.surface):0,(unsigned long long)parent];
+ }
+ if(d.depthAttachment.texture) {
+  NBTexture *z=(NBTexture *)d.depthAttachment.texture;
+  [trace appendFormat:@" z=%llu/%llu/%llux%llu/load%llu/store%llu/surface%u",(unsigned long long)z.traceID,(unsigned long long)z.pixelFormat,(unsigned long long)z.width,(unsigned long long)z.height,(unsigned long long)d.depthAttachment.loadAction,(unsigned long long)d.depthAttachment.storeAction,z.surface?IOSurfaceGetID(z.surface):0];
+ }
+ if(d.stencilAttachment.texture) {
+  NBTexture *s=(NBTexture *)d.stencilAttachment.texture;
+  [trace appendFormat:@" st=%llu/%llu/load%llu/store%llu/surface%u",(unsigned long long)s.traceID,(unsigned long long)s.pixelFormat,(unsigned long long)d.stencilAttachment.loadAction,(unsigned long long)d.stencilAttachment.storeAction,s.surface?IOSurfaceGetID(s.surface):0];
  }
  encoder.tracePass=trace;
  if(captureOptions().frame) {
-  NSMutableArray *attachments=[NSMutableArray array];
-  for(unsigned i=0;i<8;i++)[attachments addObject:d.colorAttachments[i].texture?:(id)[NSNull null]];
+  NSMutableArray *attachments=[NSMutableArray array],*states=[NSMutableArray array];
+  for(unsigned i=0;i<8;i++) {
+   MTLRenderPassColorAttachmentDescriptor *a=d.colorAttachments[i];
+   [attachments addObject:a.texture?:(id)[NSNull null]];
+   [states addObject:@{@"load":@(a.loadAction),@"store":@(a.storeAction),@"level":@(a.level),@"slice":@(a.slice)}];
+  }
   encoder.traceAttachments=attachments;
+  encoder.traceAttachmentState=states;
  }
  MTLRenderPassColorAttachmentDescriptor *c0=d.colorAttachments[0];
  if(captureOptions().pixels && c0.texture)encoder.tracePixelOutput=@{@"texture":c0.texture,@"level":@(c0.level),@"slice":@(c0.slice),@"depth":@(c0.depthPlane),@"store":@(c0.storeAction)};
@@ -1321,8 +1341,7 @@ static void completed(void *context) {
  NBCommandBuffer *commandBuffer=(__bridge_transfer NBCommandBuffer *)context;
  {
   const uint64_t took=nowUs()-commandBuffer.committedUs;
-  gTimeEncodeToCommit.count++;gTimeEncodeToCommit.total+=took;
-  uint64_t seen=gTimeEncodeToCommit.slowest.load();while(took>seen && !gTimeEncodeToCommit.slowest.compare_exchange_weak(seen,took)){}
+  gTimeEncodeToCommit.record(took);
   std::lock_guard<std::mutex> lock(gCommitLock);
   CommitRecord &r=gCommitRing[commandBuffer.commitIndex%32];
   if(r.index==commandBuffer.commitIndex)r.callbackUs=took;
@@ -1809,12 +1828,15 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
  state.traceVertex=d.vertexFunction.name;state.traceFragment=d.fragmentFunction.name;
  state.traceVertexID=x9FrameObjectID(d.vertexFunction);state.traceFragmentID=x9FrameObjectID(d.fragmentFunction);
  if(captureOptions().tracksGeometry() || [d.vertexFunction.name containsString:@"blur"] || [d.fragmentFunction.name containsString:@"blur"])state.traceLayout=[d.vertexDescriptor copy];
- NSMutableString *blend=[NSMutableString string];
- for(unsigned i=0;i<8;i++)if(d.colorAttachments[i].pixelFormat!=MTLPixelFormatInvalid) {
+  NSMutableString *blend=[NSMutableString string];
+  NSMutableArray *masks=[NSMutableArray array];
+  for(unsigned i=0;i<8;i++) {
   MTLRenderPipelineColorAttachmentDescriptor *a=d.colorAttachments[i];
+  [masks addObject:@(a.pixelFormat!=MTLPixelFormatInvalid?a.writeMask:0)];
+  if(a.pixelFormat==MTLPixelFormatInvalid)continue;
   [blend appendFormat:@" c%u=fmt%llu/mask%llu/en%u/rgb%llu,%llu,%llu/a%llu,%llu,%llu",i,(unsigned long long)a.pixelFormat,(unsigned long long)a.writeMask,a.blendingEnabled,(unsigned long long)a.sourceRGBBlendFactor,(unsigned long long)a.destinationRGBBlendFactor,(unsigned long long)a.rgbBlendOperation,(unsigned long long)a.sourceAlphaBlendFactor,(unsigned long long)a.destinationAlphaBlendFactor,(unsigned long long)a.alphaBlendOperation];
  }
- state.traceBlend=blend;
+ state.traceBlend=blend;state.traceWriteMasks=masks;
  }
  gPipelines++;if(error)*error=nil;return (id<MTLRenderPipelineState>)state;
 }

@@ -1,0 +1,173 @@
+diff --git a/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c b/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c
+--- a/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c
++++ b/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c
+@@ -1792,8 +1792,157 @@
+          continue;
+ 
+       panvk_per_arch(cmd_invalidate_crc)(b, rt->crc_header_addr);
++   }
++}
++
++#ifdef X9_NATIVE_KMOD
++
++/* FBD evidence, gated on the exact boot-arg token x9vf (same token the
++ * frontend capture reads). One line per distinct render-pass shape: the
++ * render/tiling area, per-RT load/store decisions and the colour write mask
++ * in force. Read-only; it does not alter any FBD field. */
++static int __attribute__((unused))
++x9_fbd_enabled(void)
++{
++   static int enabled = -1;
++   int e = __atomic_load_n(&enabled, __ATOMIC_RELAXED);
++   if (e >= 0)
++      return e;
++   e = 0;
++   char args[4096] = {0};
++   size_t bytes = sizeof(args) - 1;
++   if (!sysctlbyname("kern.bootargs", args, &bytes, NULL, 0)) {
++      args[sizeof(args) - 1] = 0;
++      for (const char *p = args; *p;) {
++         while (*p && (unsigned char)*p <= 32)
++            p++;
++         const char *end = p;
++         while (*end && (unsigned char)*end > 32)
++            end++;
++         if (end - p == 4 && !memcmp(p, "x9vf", 4))
++            e = 1;
++         p = end;
++      }
++   }
++   __atomic_store_n(&enabled, e, __ATOMIC_RELAXED);
++   if (e)
++      x9_panvk_log("X9 FBD log: proc=%s render-pass load/store and write masks enabled (x9vf)",
++                   getprogname());
++   return e;
++}
++
++static void __attribute__((unused))
++x9_fbd_note(struct panvk_cmd_buffer *cmdbuf)
++{
++   static uint64_t total;
++   static uint64_t seen[64];
++   static unsigned seen_count;
++   static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
++
++   const struct panvk_rendering_state *render = &cmdbuf->state.gfx.render;
++   const struct pan_fb_layout *fb = &render->fb.layout;
++   const struct pan_fb_load *load = &render->fb.load;
++   const struct pan_fb_store *store = &render->fb.store;
++   const struct vk_dynamic_graphics_state *dyns =
++      &cmdbuf->vk.dynamic_graphics_state;
++
++   uint64_t sig = 1469598103934665603ULL;
++#define X9_FBD_MIX(v) (sig = (sig ^ (uint64_t)(v)) * 1099511628211ULL)
++   X9_FBD_MIX(fb->width_px);
++   X9_FBD_MIX(fb->height_px);
++   X9_FBD_MIX(fb->render_area_px.min_x);
++   X9_FBD_MIX(fb->render_area_px.min_y);
++   X9_FBD_MIX(fb->render_area_px.max_x);
++   X9_FBD_MIX(fb->render_area_px.max_y);
++   X9_FBD_MIX(fb->tiling_area_px.min_x);
++   X9_FBD_MIX(fb->tiling_area_px.min_y);
++   X9_FBD_MIX(fb->tiling_area_px.max_x);
++   X9_FBD_MIX(fb->tiling_area_px.max_y);
++   X9_FBD_MIX(fb->sample_count);
++   X9_FBD_MIX(fb->tile_size_px);
++   X9_FBD_MIX(fb->rt_count);
++   X9_FBD_MIX(fb->z_format);
++   X9_FBD_MIX(fb->s_format);
++   X9_FBD_MIX(dyns->cb.color_write_enables);
++   for (uint32_t rt = 0; rt < fb->rt_count; rt++) {
++      X9_FBD_MIX(fb->rt_formats[rt]);
++      X9_FBD_MIX(load->rts[rt].in_bounds_load);
++      X9_FBD_MIX(load->rts[rt].border_load);
++      X9_FBD_MIX(load->rts[rt].always);
++      X9_FBD_MIX(load->rts[rt].msaa);
++      X9_FBD_MIX(store->rts[rt].store);
++      X9_FBD_MIX(store->rts[rt].always);
++      X9_FBD_MIX(store->rts[rt].msaa);
++      if (rt < ARRAY_SIZE(dyns->cb.attachments))
++         X9_FBD_MIX(dyns->cb.attachments[rt].write_mask);
++   }
++   X9_FBD_MIX(load->z.in_bounds_load);
++   X9_FBD_MIX(load->z.border_load);
++   X9_FBD_MIX(load->z.always);
++   X9_FBD_MIX(store->zs.store);
++   X9_FBD_MIX(store->zs.always);
++   X9_FBD_MIX(load->s.in_bounds_load);
++   X9_FBD_MIX(load->s.border_load);
++   X9_FBD_MIX(load->s.always);
++   X9_FBD_MIX(store->s.store);
++   X9_FBD_MIX(store->s.always);
++#undef X9_FBD_MIX
++
++   uint64_t n = __atomic_add_fetch(&total, 1, __ATOMIC_RELAXED);
++   unsigned count = __atomic_load_n(&seen_count, __ATOMIC_ACQUIRE);
++   bool known = false;
++   for (unsigned i = 0; i < count && !known; i++)
++      known = __atomic_load_n(&seen[i], __ATOMIC_RELAXED) == sig;
++   if (!known && count < ARRAY_SIZE(seen)) {
++      pthread_mutex_lock(&lock);
++      for (unsigned i = 0; i < seen_count && !known; i++)
++         known = seen[i] == sig;
++      if (!known && seen_count < ARRAY_SIZE(seen)) {
++         __atomic_store_n(&seen[seen_count], sig, __ATOMIC_RELAXED);
++         __atomic_store_n(&seen_count, seen_count + 1, __ATOMIC_RELEASE);
++         x9_panvk_log("X9 FBD PASS: proc=%s n=%llu sig=%u fb=%ux%u render=%u,%u-%u,%u "
++                      "tiling=%u,%u-%u,%u tile=%u samples=%u rts=%u zfmt=%u sfmt=%u",
++                      getprogname(), (unsigned long long)n, seen_count,
++                      fb->width_px, fb->height_px,
++                      fb->render_area_px.min_x, fb->render_area_px.min_y,
++                      fb->render_area_px.max_x, fb->render_area_px.max_y,
++                      fb->tiling_area_px.min_x, fb->tiling_area_px.min_y,
++                      fb->tiling_area_px.max_x, fb->tiling_area_px.max_y,
++                      fb->tile_size_px, fb->sample_count, fb->rt_count,
++                      (unsigned)fb->z_format, (unsigned)fb->s_format);
++         for (uint32_t rt = 0; rt < fb->rt_count; rt++) {
++            if (fb->rt_formats[rt] == PIPE_FORMAT_NONE)
++               continue;
++            x9_panvk_log("X9 FBD RT: proc=%s sig=%u rt=%u fmt=%u load=%u/%u lalways=%u "
++                         "lmsaa=%u liview=%u store=%u salways=%u smsaa=%u siview=%u "
++                         "en=%u wmask=%x",
++                         getprogname(), seen_count, rt, (unsigned)fb->rt_formats[rt],
++                         load->rts[rt].in_bounds_load, load->rts[rt].border_load,
++                         load->rts[rt].always, load->rts[rt].msaa,
++                         load->rts[rt].iview != NULL, store->rts[rt].store,
++                         store->rts[rt].always, store->rts[rt].msaa,
++                         store->rts[rt].iview != NULL,
++                         (dyns->cb.color_write_enables >> rt) & 1,
++                         (unsigned)(rt < ARRAY_SIZE(dyns->cb.attachments)
++                            ? dyns->cb.attachments[rt].write_mask : 0));
++         }
++         if (fb->z_format != PIPE_FORMAT_NONE || fb->s_format != PIPE_FORMAT_NONE)
++            x9_panvk_log("X9 FBD ZS: proc=%s sig=%u zload=%u/%u zalways=%u zstore=%u "
++                         "zsalways=%u sload=%u/%u salways=%u sstore=%u ssalways=%u",
++                         getprogname(), seen_count,
++                         load->z.in_bounds_load, load->z.border_load, load->z.always,
++                         store->zs.store, store->zs.always,
++                         load->s.in_bounds_load, load->s.border_load, load->s.always,
++                         store->s.store, store->s.always);
++      }
++      pthread_mutex_unlock(&lock);
+    }
++   if ((n >= 256 && !(n & (n - 1))) || !(n % 65536))
++      x9_panvk_log("X9 FBD totals: proc=%s passes=%llu distinct=%u",
++                   getprogname(), (unsigned long long)n,
++                   __atomic_load_n(&seen_count, __ATOMIC_ACQUIRE));
+ }
++#endif
+ 
+ static VkResult
+ get_fb_descs(struct panvk_cmd_buffer *cmdbuf)
+@@ -1882,6 +2031,11 @@
+       .allow_hsr_prepass = PAN_ARCH >= 13 && PANVK_DEBUG(HSR_PREPASS),
+       .tiler_ctx = &tiler_ctx,
+    };
++
++#ifdef X9_NATIVE_KMOD
++   if (x9_fbd_enabled())
++      x9_fbd_note(cmdbuf);
++#endif
+ 
+    VkResult result = panvk_per_arch(cmd_get_frame_shaders)(
+       cmdbuf, fbd_info.fb, fbd_info.load, &render->fb.resolve,

@@ -1,5 +1,5 @@
 // x9vf whole-frame geometry capture (backboardd only, opt-in).
-// At four uptime triggers, every draw of the next three command buffers is
+// At three uptime triggers, every draw of the next three command buffers is
 // logged compactly (shaders, blend/write masks, pass, indices, decoded vertex
 // position/texcoord, first 64 bytes of vertex slots 2/3). The vertex and index
 // byte ranges each draw references are snapshotted at encode time and also
@@ -59,7 +59,7 @@ static void x9FrameSelect(NBCommandBuffer *cb) {
  static std::mutex mutex;static unsigned trigger,remaining,frames;
  const uint64_t start=options.startGiven?options.geometryStartUs:60000000ull,now=nowUs();
  std::lock_guard<std::mutex> lock(mutex);
- if(!remaining && trigger<2 && now>=start+(uint64_t)trigger*20000000ull){trigger++;remaining=3;}
+ if(!remaining && trigger<3 && now>=start+(uint64_t)trigger*20000000ull){trigger++;remaining=3;}
  if(!remaining)return;
  remaining--;cb.traceFrame=++frames;cb.traceFrameTrigger=trigger;
  NSLog(@"X9 FRAME CB: f=%u trigger=%u cb=%llu uptime_us=%llu",cb.traceFrame,trigger,(unsigned long long)cb.traceID,(unsigned long long)now);
@@ -341,6 +341,42 @@ static void x9FrameFlush(NBCommandBuffer *cb) {
   NSLog(@"X9 FRAME REPLAY VTX: f=%llu n=%u v=%llu off=%llu hex=%@",(unsigned long long)cb.traceID,n,(unsigned long long)i,(unsigned long long)r0,hex);
  }
 }
+// CPU projection of the captured position attribute through fragment buffer
+// slot 2 (the same transform the replay uses) into drawable pixels. Reports a
+// bounding box only: no GPU work, no state change. False when a binding is not
+// CPU readable so the caller records the gap instead of a guessed rectangle.
+static bool x9FrameCoverage(NBRenderEncoder *encoder,NBRenderPipeline *pipeline,
+                            const uint8_t *vertices,uint64_t vertexBase,uint64_t vertexLength,
+                            uint64_t stride,MTLVertexAttributeDescriptor *a0,
+                            const uint32_t *ids,unsigned idCount,double box[4]) {
+ if(!encoder||!pipeline||!vertices||!a0||a0.format!=MTLVertexFormatFloat4||!stride)return false;
+ NSDictionary *entry=encoder.traceBuffers[@(32+2)];NBBuffer *buffer=entry[@"buffer"];NSData *data=entry[@"bytes"];
+ const uint8_t *m=buffer?(buffer.storageMode==MTLStorageModeShared?(const uint8_t *)buffer.contents:nullptr):(const uint8_t *)data.bytes;
+ const uint64_t base=[entry[@"offset"] unsignedLongLongValue],length=buffer?buffer.length:data.length;
+ if(!m||base>length||length-base<64)return false;
+ float M[16];memcpy(M,m+base,64);
+ double vx=0,vy=0,vw=0,vh=0;
+ if(encoder.traceViewportSet){vx=encoder.traceViewport.originX;vy=encoder.traceViewport.originY;vw=encoder.traceViewport.width;vh=encoder.traceViewport.height;}
+ else {
+  id att=encoder.traceAttachments.count?encoder.traceAttachments[0]:nil;
+  if(![att isKindOfClass:[NBTexture class]])return false;
+  vw=[(NBTexture *)att width];vh=[(NBTexture *)att height];
+ }
+ if(vw<=0||vh<=0||vertexBase>vertexLength)return false;
+ double x0=1e30,y0=1e30,x1=-1e30,y1=-1e30;unsigned used=0;
+ for(unsigned k=0;k<idCount;k++) {
+  const uint64_t at=(uint64_t)ids[k];
+  if(at>(vertexLength-vertexBase)/stride)continue;
+  if(vertexBase+at*stride+a0.offset+16>vertexLength)continue;
+  float p[4];memcpy(p,vertices+vertexBase+at*stride+a0.offset,16);
+  double c[4];for(unsigned r=0;r<4;r++)c[r]=M[r]*p[0]+M[4+r]*p[1]+M[8+r]*p[2]+M[12+r]*p[3];
+  if(c[3]<=1e-6)continue;
+  const double px=(c[0]/c[3]+1)/2*vw+vx,py=(1-c[1]/c[3])/2*vh+vy;
+  x0=MIN(x0,px);y0=MIN(y0,py);x1=MAX(x1,px);y1=MAX(y1,py);used++;
+ }
+ if(!used)return false;
+ box[0]=x0;box[1]=y0;box[2]=x1;box[3]=y1;return true;
+}
 - (void)traceFrameDraw:(MTLPrimitiveType)type start:(NSUInteger)start count:(NSUInteger)count indices:(NBBuffer *)indices offset:(NSUInteger)offset indexType:(MTLIndexType)indexType baseVertex:(NSInteger)baseVertex instances:(NSUInteger)instances {
  NBCommandBuffer *cb=self.commandBuffer;NBRenderPipeline *pipeline=self.tracePipeline;
  if(!cb.traceFrame||cb.traceFrameReplaying||!pipeline||cb.traceFrameDraws>=400)return;
@@ -365,6 +401,30 @@ static void x9FrameFlush(NBCommandBuffer *cb) {
  NSLog(@"X9 FRAME VBUF: f=%u n=%u slot=%u vbuf=%llu base=%llu length=%llu stride=%llu step=%llu inline=%u a0=%llu/%llu a1=%llu/%llu",f,n,vslot,
   (unsigned long long)x9FrameObjectID(vbuf),(unsigned long long)vbase,(unsigned long long)vlength,(unsigned long long)stride,(unsigned long long)(vl?vl.stepFunction:0),vdata!=nil,
   (unsigned long long)(hasA0?a0.format:0),(unsigned long long)(hasA0?a0.offset:0),(unsigned long long)(hasA1?a1.format:0),(unsigned long long)(hasA1?a1.offset:0));
+ // Fragment texture slots as bound at this draw. tex is the Metal object,
+ // surface is the IOSurface the kernel presents (the same ID space as
+ // SWEET FB swap / X9 LAYER), parent names an aliased view.
+ for(NSNumber *slot in [[self.traceTextures allKeys] sortedArrayUsingSelector:@selector(compare:)]) {
+  NBTexture *t=self.traceTextures[slot];
+  const uint64_t parent=[(id)t.parent isKindOfClass:[NBTexture class]]?[(NBTexture *)t.parent traceID]:0;
+  NSLog(@"X9 FRAME TEX: f=%u n=%u slot=%u tex=%llu parent=%llu surface=%u format=%llu size=%llux%llu levels=%llu",f,n,slot.unsignedIntValue,
+   (unsigned long long)t.traceID,(unsigned long long)parent,t.surface?IOSurfaceGetID(t.surface):0,(unsigned long long)t.pixelFormat,(unsigned long long)t.width,(unsigned long long)t.height,(unsigned long long)t.mipmapLevelCount);
+ }
+ // Framebuffer fetch / read-back: a colour attachment also bound as a
+ // fragment texture is read through tile memory (or a copy back). Load/store
+ // and the pipeline colour-write mask state what the tile path may write.
+ for(unsigned rt=0;rt<8;rt++) {
+  id o=self.traceAttachments.count>rt?self.traceAttachments[rt]:nil;
+  if(![o isKindOfClass:[NBTexture class]])continue;
+  NBTexture *att=(NBTexture *)o;int bound=-1;
+  for(NSNumber *slot in self.traceTextures)if([(NBTexture *)self.traceTextures[slot] traceID]==att.traceID){bound=(int)slot.unsignedIntValue;break;}
+  NSDictionary *st=self.traceAttachmentState.count>rt?self.traceAttachmentState[rt]:nil;
+  NSArray *masks=pipeline.traceWriteMasks;
+  const long long wmask=masks.count>rt?[masks[rt] longLongValue]:-1;
+  NSLog(@"X9 FRAME FBF: f=%u n=%u rt=%u tex=%llu surface=%u bound_as_texture=%u slot=%d load=%llu store=%llu wmask=%lld",f,n,rt,
+   (unsigned long long)att.traceID,att.surface?IOSurfaceGetID(att.surface):0,bound>=0,bound,
+   (unsigned long long)[st[@"load"] unsignedLongLongValue],(unsigned long long)[st[@"store"] unsignedLongLongValue],wmask);
+ }
  // Effective vertex ids, as Metal fetches them.
  const unsigned used=(unsigned)MIN(count,96ul);uint32_t ids[96]={};bool readable=true;const char *reason="ok";
  const uint8_t *ib=nullptr;
@@ -395,6 +455,23 @@ static void x9FrameFlush(NBCommandBuffer *cb) {
   const uint8_t *p=vb+vbase+(uint64_t)v*stride;
   NSLog(@"X9 FRAME V: f=%u n=%u v=%u p=%@ t=%@",f,n,v,x9FrameDecode(p+a0.offset,a0.format),hasA1?x9FrameDecode(p+a1.offset,a1.format):@"-");
  }
+ // Per-draw pixel coverage: the projected position bbox, clipped to the
+ // explicit scissor and the render target. CPU-only; shows whether a draw can
+ // reach the region under investigation and whether a scissor excludes it.
+ if(vok) {
+  double box[4];
+  if(x9FrameCoverage(self,pipeline,vb,vbase,vlength,stride,a0,ids,readable?used:0,box)) {
+   id att=self.traceAttachments.count?self.traceAttachments[0]:nil;
+   const double areaW=[att isKindOfClass:[NBTexture class]]?[(NBTexture *)att width]:0;
+   const double areaH=[att isKindOfClass:[NBTexture class]]?[(NBTexture *)att height]:0;
+   const double sx=self.traceScissorSet?self.traceScissor.x:0,sy=self.traceScissorSet?self.traceScissor.y:0;
+   const double sw=self.traceScissorSet?self.traceScissor.width:areaW,sh=self.traceScissorSet?self.traceScissor.height:areaH;
+   const int64_t ix0=MAX((int64_t)floor(box[0]),(int64_t)sx),iy0=MAX((int64_t)floor(box[1]),(int64_t)sy);
+   const int64_t ix1=MIN((int64_t)ceil(box[2]),(int64_t)(sx+sw)),iy1=MIN((int64_t)ceil(box[3]),(int64_t)(sy+sh));
+   NSLog(@"X9 FRAME COVER: f=%u n=%u bbox=%.1f,%.1f,%.1fx%.1f scissor=%.1f,%.1f,%.1fx%.1f clipped=%lld,%lld,%lldx%lld area=%.0fx%.0f clipped_nonempty=%u",
+    f,n,box[0],box[1],box[2]-box[0],box[3]-box[1],sx,sy,sw,sh,ix0,iy0,ix1-ix0,iy1-iy0,areaW,areaH,ix1>ix0&&iy1>iy0);
+  } else NSLog(@"X9 FRAME COVER: f=%u n=%u unavailable=projection-binding",f,n);
+ } else NSLog(@"X9 FRAME COVER: f=%u n=%u unavailable=%s",f,n,!readable?"indices":!vb?"vertices":!hasA0?"position-attribute":"vertex-layout");
  for(unsigned slot=2;slot<=3;slot++) {
   NSDictionary *e=self.traceBuffers[@(32+slot)];if(!e||slot==vslot)continue;
   NBBuffer *b=e[@"buffer"];NSData *d=e[@"bytes"];
