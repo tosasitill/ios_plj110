@@ -39,7 +39,8 @@
 - (void)traceDraw:(MTLPrimitiveType)type start:(NSUInteger)start count:(NSUInteger)count indices:(NBBuffer *)indices offset:(NSUInteger)offset indexType:(MTLIndexType)indexType baseVertex:(NSInteger)baseVertex instances:(NSUInteger)instances baseInstance:(NSUInteger)baseInstance {
  const X9CaptureOptions &options=captureOptions();
  NBRenderPipeline *pipeline=self.tracePipeline;
- if(options.frame)[self traceFrameDraw:type start:start count:count indices:indices offset:offset indexType:indexType baseVertex:baseVertex instances:instances];
+ if(options.frame){[self traceFrameDraw:type start:start count:count indices:indices offset:offset indexType:indexType baseVertex:baseVertex instances:instances];
+  [self traceReplayCandidate:type start:start count:count indexed:indices!=nil];}
  if(options.geometry && pipeline) {
   const uint64_t uptime=nowUs();
   if(uptime>=options.geometryStartUs && uptime-options.geometryStartUs<90000000) {

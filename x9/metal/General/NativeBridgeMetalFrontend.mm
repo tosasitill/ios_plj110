@@ -1134,7 +1134,8 @@ static char kUserDictionaryKey;
 }
 - (void)commit {
  if(self.committed){NBLOG(@"native-metal: commit twice");return;}
- if(self.traceFrame){x9FrameReplay(self);x9FrameFlush(self);}
+ if(self.traceFrameReplays.count)x9FrameReplay(self);
+ if(self.traceFrame)x9FrameFlush(self);
  self.committed=YES;
  self.committedUs=nowUs();
  {

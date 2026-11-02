@@ -76,9 +76,9 @@ static void x9FrameReplay(NBCommandBuffer *cb) {
   NSArray *box=r[@"box"];const uint64_t bw=[box[2] unsignedLongLongValue],bh=[box[3] unsignedLongLongValue];
   total+=((bw*4+255)&~255ull)*bh*6;
  }
- if(total>128ull*1024*1024){NSLog(@"X9 FRAME REPLAY SKIP: f=%u bytes=%llu reason=budget",cb.traceFrame,(unsigned long long)total);cb.traceFrameReplaying=NO;return;}
+ if(total>128ull*1024*1024){NSLog(@"X9 FRAME REPLAY SKIP: f=%llu bytes=%llu reason=budget",(unsigned long long)cb.traceID,(unsigned long long)total);cb.traceFrameReplaying=NO;return;}
  id<MTLBuffer> readback=[device newBufferWithLength:total options:MTLResourceStorageModeShared];
- if(!readback){NSLog(@"X9 FRAME REPLAY SKIP: f=%u reason=readback",cb.traceFrame);cb.traceFrameReplaying=NO;return;}
+ if(!readback){NSLog(@"X9 FRAME REPLAY SKIP: f=%llu reason=readback",(unsigned long long)cb.traceID);cb.traceFrameReplaying=NO;return;}
  uint64_t at=0;
  for(NSDictionary *r in replays) {
   NBTexture *a0=r[@"att0"];id a1=r[@"att1"];
@@ -134,7 +134,7 @@ static void x9FrameReplay(NBCommandBuffer *cb) {
   }
  }
  cb.traceFrameReplaying=NO;
- const unsigned f=cb.traceFrame;
+ const unsigned f=(unsigned)cb.traceID;
  NSLog(@"X9 FRAME REPLAY ENCODED: f=%u draws=%llu passes=%llu",f,(unsigned long long)replays.count,(unsigned long long)results.count);
  [(id<MTLCommandBuffer>)cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
   if(done.status!=MTLCommandBufferStatusCompleted){NSLog(@"X9 FRAME REPLAY FAILED: f=%u status=%llu",f,(unsigned long long)done.status);return;}
@@ -240,6 +240,29 @@ static void x9FrameFlush(NBCommandBuffer *cb) {
  }
  [super sampler:sampler index:index stage:stage];
 }
+// Any backboardd command buffer after the start time can contribute replay
+// candidates (process budget 8), so the capture no longer depends on the
+// user having Control Center open at a fixed uptime.
+- (void)traceReplayCandidate:(MTLPrimitiveType)type start:(NSUInteger)start count:(NSUInteger)count indexed:(bool)indexed {
+ NBCommandBuffer *cb=self.commandBuffer;NBRenderPipeline *pipeline=self.tracePipeline;
+ if(cb.traceFrameReplaying||!pipeline||indexed||type!=MTLPrimitiveTypeTriangle||count<6||count>48||count%3)return;
+ static const bool server=!strcmp(getprogname(),"backboardd");
+ if(!server)return;
+ const X9CaptureOptions &options=captureOptions();
+ if(nowUs()<(options.startGiven?options.geometryStartUs:45000000ull))return;
+ static std::atomic<unsigned> budget{0};
+ if(budget.load()>=8||cb.traceFrameReplays.count>=8)return;
+ MTLVertexAttributeDescriptor *a0=pipeline.traceLayout.attributes[0];
+ if(!a0||a0.format!=MTLVertexFormatFloat4)return;
+ MTLVertexBufferLayoutDescriptor *vl=pipeline.traceLayout.layouts[a0.bufferIndex];
+ NSDictionary *ventry=self.traceBuffers[@(32+a0.bufferIndex)];NBBuffer *vbuf=ventry[@"buffer"];NSData *vdata=ventry[@"bytes"];
+ const uint8_t *vb=vbuf?(vbuf.storageMode==MTLStorageModeShared?(const uint8_t *)vbuf.contents:nullptr):(const uint8_t *)vdata.bytes;
+ const uint64_t vbase=[ventry[@"offset"] unsignedLongLongValue],vlength=vbuf?vbuf.length:vdata.length,stride=vl?vl.stride:0;
+ if(!vb||!stride||vl.stepFunction!=MTLVertexStepFunctionPerVertex||vbase>vlength||(uint64_t)(start+count)*stride>vlength-vbase)return;
+ const NSUInteger before=cb.traceFrameReplays.count;
+ [self traceFrameSelectReplay:type start:start count:count indexed:false n:(unsigned)(budget.load()+1) vertices:vb+vbase stride:stride a0:a0];
+ if(cb.traceFrameReplays.count>before)budget++;
+}
 - (void)traceFrameSelectReplay:(MTLPrimitiveType)type start:(NSUInteger)start count:(NSUInteger)count indexed:(bool)indexed n:(unsigned)n vertices:(const uint8_t *)vertices stride:(uint64_t)stride a0:(MTLVertexAttributeDescriptor *)a0 {
  NBCommandBuffer *cb=self.commandBuffer;
  if(indexed||type!=MTLPrimitiveTypeTriangle||count<6||count>48||count%3||!vertices||!a0||a0.format!=MTLVertexFormatFloat4)return;
@@ -270,16 +293,16 @@ static void x9FrameFlush(NBCommandBuffer *cb) {
  if(!cb.traceFrameReplays)cb.traceFrameReplays=[NSMutableArray array];
  MTLViewport v=self.traceViewportSet?self.traceViewport:(MTLViewport){0,0,(double)t0.width,(double)t0.height,0,1};
  id att1=self.traceAttachments.count>1?self.traceAttachments[1]:nil;
- [cb.traceFrameReplays addObject:@{@"n":@(n),@"f":@(cb.traceFrame),@"pipeline":self.tracePipeline,@"start":@(start),@"count":@(count),
+ [cb.traceFrameReplays addObject:@{@"n":@(n),@"f":@(cb.traceID),@"pipeline":self.tracePipeline,@"start":@(start),@"count":@(count),
   @"buffers":[self.traceBuffers copy]?:@{},@"textures":[self.traceTextures copy]?:@{},@"samplers":[self.traceSamplers copy]?:@{},
   @"viewport":[NSValue valueWithBytes:&v objCType:@encode(MTLViewport)],@"att0":t0,@"att1":att1?:[NSNull null],
   @"cull":objc_getAssociatedObject(self,"cull")?:@0,@"winding":objc_getAssociatedObject(self,"winding")?:@0,
   @"points":pts,@"box":@[@(bx),@(by),@(ex-bx),@(ey-by)]}];
- NSLog(@"X9 FRAME REPLAY PICK: f=%u n=%u count=%llu box=%lld,%lld,%lldx%lld",cb.traceFrame,n,(unsigned long long)count,bx,by,ex-bx,ey-by);
+ NSLog(@"X9 FRAME REPLAY PICK: f=%llu n=%u count=%llu box=%lld,%lld,%lldx%lld fs=%@ ffid=%llu",(unsigned long long)cb.traceID,n,(unsigned long long)count,bx,by,ex-bx,ey-by,self.tracePipeline.traceFragment,(unsigned long long)self.tracePipeline.traceFragmentID);
  for(NSUInteger i=0;i<count;i++)for(uint64_t r0=0;r0<stride&&r0<64;r0+=24) {
   NSMutableString *hex=[NSMutableString string];
   for(uint64_t b=r0;b<MIN(r0+24,stride);b++)[hex appendFormat:@"%02x",vertices[(uint64_t)(start+i)*stride+b]];
-  NSLog(@"X9 FRAME REPLAY VTX: f=%u n=%u v=%llu off=%llu hex=%@",cb.traceFrame,n,(unsigned long long)i,(unsigned long long)r0,hex);
+  NSLog(@"X9 FRAME REPLAY VTX: f=%llu n=%u v=%llu off=%llu hex=%@",(unsigned long long)cb.traceID,n,(unsigned long long)i,(unsigned long long)r0,hex);
  }
 }
 - (void)traceFrameDraw:(MTLPrimitiveType)type start:(NSUInteger)start count:(NSUInteger)count indices:(NBBuffer *)indices offset:(NSUInteger)offset indexType:(MTLIndexType)indexType baseVertex:(NSInteger)baseVertex instances:(NSUInteger)instances {
@@ -347,7 +370,6 @@ static void x9FrameFlush(NBCommandBuffer *cb) {
   for(unsigned i=0;i<16;i++)[s appendFormat:@"%s%.6g",i?",":"",m[i]];
   NSLog(@"X9 FRAME U: f=%u n=%u slot=%u base=%llu f32=%@",f,n,slot,(unsigned long long)base,s);
  }
- [self traceFrameSelectReplay:type start:start count:count indexed:indices!=nil n:n vertices:vok?vb+vbase:nullptr stride:stride a0:hasA0?a0:nil];
  // GPU-visible copy: 219 showed it matches the CPU for every real vertex
  // fetch, so it is off now to keep the capture from adding GPU work.
  if(true||cb.traceFrameBytes>=4*1024*1024)return;
