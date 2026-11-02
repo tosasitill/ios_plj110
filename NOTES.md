@@ -1,4 +1,15 @@
-## Active:226 replay logs raw vertices + rotated lost triangle (2026-11-02)
+## Active:227 replay picks from any backboardd CB (2026-11-02)
+
+- 226 RUNTIME (/tmp/2_226.txt, plugin226): no REPLAY records: frames at
+  60/80 s uptime held only a simple 16-draw scene (CC not open then). Not a
+  fix; user confirms still flickering/split.
+- 227 (commit 0baa33e): replay candidates (non-indexed CC-sized triangle
+  lists, float4 position) are picked from ANY backboardd command buffer after
+  45 s (or x9_metal_geometry_start), process budget 8, and replayed at that
+  CB's commit; PICK logs the fragment function and fid. Variants/VTX as 226.
+  Not syntax-checked (tunnel down).
+
+## Previous:226 replay logs raw vertices + rotated lost triangle (2026-11-02)
 
 - 225 RUNTIME (.local/analysis-mailbox225/2_225.txt): 16 picks (CC-sized
   non-indexed 6-vertex quads, vertex fid25 texcoord_count0, fragment fid76:
