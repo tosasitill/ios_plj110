@@ -16,7 +16,8 @@ w = Path(__file__).resolve().parents[3] / '.local/x9/work/x9-metal-render'
 subprocess.run([sys.executable, '-I', str(Path(__file__).with_name('apply-source-patches.py')),
     '--source', str(w / 'mesa-render-source'),
     str(Path(__file__).resolve().parents[1] / 'third_party/02-panvk-host-linear-images.patch'),
-    str(Path(__file__).resolve().parents[1] / 'third_party/03-kraid-hsr-metadata.patch')], check=True)
+    str(Path(__file__).resolve().parents[1] / 'third_party/03-kraid-hsr-metadata.patch'),
+    str(Path(__file__).resolve().parents[1] / 'third_party/04-panvk-hsr-cull-all-rts.patch')], check=True)
 env = os.environ.copy()
 env.pop('CC', None)
 env.pop('CXX', None)

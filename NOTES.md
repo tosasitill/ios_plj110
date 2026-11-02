@@ -1,4 +1,42 @@
-## Active:217 runtime decoded; CPU geometry clean; PanVK v14 HSR can_cull gap (2026-11-02)
+## Active:218 PanVK HSR all-RTs cull fix + A/B tokens; source only, NOT built (2026-11-02)
+
+- User approved implementing the hsr_can_cull fix below and asked to push,
+  collecting all needed evidence in one run.
+- New maintained x9/build/third_party/04-panvk-hsr-cull-all-rts.patch,
+  applied after03 by build-panvk-incremental.py and build-panvk-native-ios.py.
+  Verified locally only: zero-fuzz forward apply and "Already applied" reverse
+  check on upstream Mesa300b5fd panvk_vX_cmd_draw.c + 00 + 03 hunks (that file
+  only; reconstructed, not the Mac's mesa-render-source). Helper code compiled
+  with gcc -Wall -Wextra -Werror against stubs. NOT compiled in Mesa/iOS.
+- Behaviour: per-process mode from exact kern.bootargs token (same sysctl the
+  frontend already uses successfully for x9vg):
+  default 1 = hsr_can_cull also requires effective_written != 0 and
+  !(rt_mask & ~effective_written); effective excludes RTs with colour write
+  disabled or write_mask 0. x9h2 = unmodified upstream (217 behaviour).
+  x9h0 = hsr_can_cull=0 and hsr_can_be_culled=0. Only removes culling.
+- Logs: "X9 HSR policy: proc= mode=", <=48 "X9 HSR DCD" distinct signatures
+  per process (rt_mask/written/effective/read/dest_read/ld_tile/coverage/
+  upstream_can_cull/can_cull/can_be_culled), "X9 HSR totals" at power-of-two
+  draws >=256 and every65536 (blocked = upstream would cull, now not).
+- build.py gained --boot-arg TOKEN (repeatable; rejects whitespace and
+  duplicates). Normal boot args are602 bytes; one4-byte token fits the607 bound.
+- Exact build on the Mac (normal boot.json, no x9vg):
+  python3 -I x9/build/build.py all --revision 218 --name mailbox218-hsr-allrt
+  then commit the regenerated x9/kernel/generated/x9_render_external_manifest.h.
+  Variant images reusing the same kernel/plugins (boot step only):
+  python3 -I x9/build/build.py boot --kernel x9/out/mailbox218-hsr-allrt/kernel.development.sweet --name mailbox218-hsr-off --boot-arg x9h0
+  python3 -I x9/build/build.py boot --kernel x9/out/mailbox218-hsr-allrt/kernel.development.sweet --name mailbox218-hsr-upstream --boot-arg x9h2
+  One mailbox update (218 plugins) serves all three boot images.
+- Next replay, one session if possible, same Control Center/App Library
+  interaction for each boot, keep each 2.txt separately plus a photo/clip:
+  (a) default fix, (b) x9h0, (c) optional x9h2 control. Read X9 HSR policy
+  mode, DCD signatures with rt_mask&~effective!=0 and upstream_can_cull=1,
+  totals blocked>0. Interpretation: (a) fixes -> RT-mask HSR gap confirmed;
+  (a) fails but (b) fixes -> other HSR culling (can_be_culled/hierarchical)
+  involved; (b) also fails -> HSR excluded entirely, look at tiler/IDVS/
+  varyings next. blocked=0 in (a) means the gap is not reached.
+
+## Previous:217 runtime decoded; CPU geometry clean; PanVK v14 HSR can_cull gap (2026-11-02)
 
 - User ran217 (plugin X9GeneralMetal217 at3.302s, capture inputs0/pixels0,
   x9vg active) reproducing Control Center/App Library blur defect: diagonal
@@ -31,7 +69,7 @@
   one triangle of a static quad) nor X9 kernel cache path. Non-prepass HSR
   semantics on G925 remain unverified; no per-draw can_cull log for RT0-only
   writers yet. User previously rejected an HSR rollback; this is a DIFFERENT,
-  narrower change. Awaiting user decision before implementing.
+  narrower change. (User approved; implemented as 218 above.)
 - Proposed single-variable candidate218: add !(rt_mask & ~out->rt_written)
   to hsr_can_cull (mirrors FPK), optional bounded log of can_cull for draws
   with rt_mask&~rt_written. Only removes culling; no shader/sync changes.

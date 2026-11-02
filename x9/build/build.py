@@ -220,9 +220,16 @@ class Builder:
                          'package plugins + kernel allowlist', True)
 
     # ---- boot.img --------------------------------------------------------------
-    def boot(self, kernel, boot_config):
+    def boot(self, kernel, boot_config, extra_args=()):
         opts = json.loads(boot_config.read_text())
         self.log(f'boot configuration: {boot_config}')
+        for arg in extra_args:
+            if not arg or any(c.isspace() for c in arg):
+                sys.exit(f'--boot-arg must be one non-empty token: {arg!r}')
+            if arg in opts['boot_args']:
+                sys.exit(f'--boot-arg {arg} is already in {boot_config}')
+            opts['boot_args'].append(arg)
+            self.log(f'extra boot arg: {arg}')
         manifest = self.cfg.get('root_manifest')
         if not manifest:
             sys.exit('local.json: root_manifest is required to package boot.img')
@@ -257,6 +264,8 @@ def main():
     ap.add_argument('--kernel', type=Path, help='boot step only: kernel to package')
     ap.add_argument('--boot-config', type=Path, default=HERE / 'boot.json',
                     help='packaging/boot-args JSON; default unchanged, diagnostic overrides stay separate')
+    ap.add_argument('--boot-arg', action='append', default=[], metavar='TOKEN',
+                    help='append one boot-arg token to the boot config (repeatable), e.g. x9h0')
     ap.add_argument('--dry-run', action='store_true', help='print commands, run nothing')
     ap.add_argument('-j', '--jobs', type=int, default=os.cpu_count() or 4)
     a = ap.parse_args()
@@ -284,7 +293,7 @@ def main():
         for key in ('llvm_clang', 'lld'):
             if not cfg.get(key):
                 sys.exit(f'{a.config}: {key} is required to package boot.img')
-        b.boot(kernel, a.boot_config)
+        b.boot(kernel, a.boot_config, a.boot_arg)
     b.log(f'output: {out}')
 
 

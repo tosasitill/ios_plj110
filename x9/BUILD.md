@@ -57,6 +57,22 @@ before ATEST/ZS_EMIT feed the existing DCD eligibility decisions. This neither
 enables the HSR prepass nor disables HSR globally. The first four tile-reading
 DCD decisions log `X9 HSR tile-read`; hardware flicker repair is not yet proven.
 
+`04-panvk-hsr-cull-all-rts.patch` (applied after 03) closes a gap between
+upstream v13+ `hsr_can_cull` and the legacy FPK rule: FPK refuses to kill
+earlier fragments unless the draw writes every bound colour RT
+(`!(rt_mask & ~rt_written)`), HSR did not. CoreAnimation keeps a memoryless
+colour1 scratch across draws and reads it back with LD_TILE, so an RT0-only
+opaque draw could cull an earlier draw's colour1 writes. With the patch a
+draw may cull only if it really writes every bound RT (write-disabled or
+zero-mask RTs count as unwritten). It only removes culling. Policy is chosen
+once per process from an exact boot-arg token, so one plugin build supports
+an A/B without a mailbox update: none = fixed rule, `x9h2` = unmodified
+upstream, `x9h0` = HSR cull and be-culled both off. Logs: `X9 HSR policy`,
+up to 48 distinct `X9 HSR DCD` signatures per process and `X9 HSR totals`
+at power-of-two draw counts (>=256) and every 65536 draws. Variant boot
+images: `build.py boot --kernel <out>/kernel.development.sweet --name <n>
+--boot-arg x9h0` (the normal 602-byte args leave room for one 4-byte token).
+
 Detailed Metal blur/graph/pixel capture is now opt-in, not normal rendering
 work. Default builds do not copy diagnostic setBytes data, retain diagnostic
 resource tables, format per-pass graphs, add readback encoders or dump pixels.
