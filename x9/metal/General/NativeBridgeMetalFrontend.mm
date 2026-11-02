@@ -608,6 +608,8 @@ static void notified(void *context,uint64_t value) {
 @property(nonatomic) unsigned traceFrame,traceFrameTrigger,traceFrameDraws;
 @property(nonatomic) uint64_t traceFrameBytes;
 @property(nonatomic,strong) NSMutableArray *traceFrameCopies;
+@property(nonatomic,strong) NSMutableArray *traceFrameReplays;
+@property(nonatomic) BOOL traceFrameReplaying;
 @property(nonatomic) unsigned tracePixelWindow,tracePixelCount;
 @property(nonatomic) uint64_t tracePixelBytes;
 @property(nonatomic,strong) NSMutableArray *scheduledHandlers,*completedHandlers;
@@ -744,6 +746,8 @@ static void waitForResource(id resource) {
 @property(nonatomic) MTLViewport traceViewport;
 @property(nonatomic) MTLScissorRect traceScissor;
 @property(nonatomic) BOOL traceViewportSet,traceScissorSet;
+@property(nonatomic,strong) NSMutableDictionary *traceSamplers;
+@property(nonatomic,strong) NSArray *traceAttachments;
 - (void)traceGraph:(MTLPrimitiveType)type count:(NSUInteger)count;
 - (void)tracePixelSelect:(bool)blur;
 - (void)tracePixelCopy:(NBTexture *)texture role:(NSString *)role;
@@ -1061,6 +1065,11 @@ static char kUserDictionaryKey;
   [trace appendFormat:@" c%u=%llu/%llu/%llux%llu/m%llu/s%llu/load%llu/store%llu/resolve%llu",i,(unsigned long long)t.traceID,(unsigned long long)t.pixelFormat,(unsigned long long)t.width,(unsigned long long)t.height,(unsigned long long)a.level,(unsigned long long)a.slice,(unsigned long long)a.loadAction,(unsigned long long)a.storeAction,(unsigned long long)([(id)a.resolveTexture isKindOfClass:[NBTexture class]]?[(NBTexture *)a.resolveTexture traceID]:0)];
  }
  encoder.tracePass=trace;
+ if(captureOptions().frame) {
+  NSMutableArray *attachments=[NSMutableArray array];
+  for(unsigned i=0;i<8;i++)[attachments addObject:d.colorAttachments[i].texture?:(id)[NSNull null]];
+  encoder.traceAttachments=attachments;
+ }
  MTLRenderPassColorAttachmentDescriptor *c0=d.colorAttachments[0];
  if(captureOptions().pixels && c0.texture)encoder.tracePixelOutput=@{@"texture":c0.texture,@"level":@(c0.level),@"slice":@(c0.slice),@"depth":@(c0.depthPlane),@"store":@(c0.storeAction)};
  }
@@ -1125,7 +1134,7 @@ static char kUserDictionaryKey;
 }
 - (void)commit {
  if(self.committed){NBLOG(@"native-metal: commit twice");return;}
- if(self.traceFrame)x9FrameFlush(self);
+ if(self.traceFrame){x9FrameReplay(self);x9FrameFlush(self);}
  self.committed=YES;
  self.committedUs=nowUs();
  {

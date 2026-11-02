@@ -2,7 +2,7 @@
 // captures, when selected, are separately identified. Texture IDs live for an object's lifetime;
 // parent and surface IDs expose aliases without logging process pointers.
 - (void)texture:(id<MTLTexture>)texture index:(NSUInteger)index stage:(uint32_t)stage {
- if(captureOptions().inputs && stage==2 && index<128) {
+ if((captureOptions().inputs||captureOptions().frame) && stage==2 && index<128) {
   if(!self.traceTextures)self.traceTextures=[NSMutableDictionary dictionary];
   if(texture && [(id)texture isKindOfClass:[NBTexture class]])self.traceTextures[@(index)]=texture;
   else [self.traceTextures removeObjectForKey:@(index)];
