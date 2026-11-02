@@ -101,6 +101,15 @@ pulled to vertex 0 while GPU-visible index/vertex bytes were correct. Exact
 token `x9i0` keeps the requested size for A/B. Logs `X9 PANVK IB policy` and
 up to 8 `X9 PANVK IB WIDEN` lines per process.
 
+`07-panvk-fpk-write-masks.patch` (after 04/05): upstream
+`allow_forward_pixel_to_kill` requires `!(rt_mask & ~rt_written)`, but
+`rt_written` is the shader's outputs and ignores colour write masks.
+CoreAnimation's mask/clear draws output both RTs with colour0 write mask 0,
+so they were allowed to kill earlier, still-unshaded colour0 fragments they
+never overwrite. With the patch the rule uses the RTs really written
+(write-disabled or zero-mask RTs excluded). Token `x9f0` keeps upstream FPK.
+Logs `X9 FPK policy`, up to 32 `X9 FPK DCD` signatures and `X9 FPK totals`.
+
 Detailed Metal blur/graph/pixel capture is now opt-in, not normal rendering
 work. Default builds do not copy diagnostic setBytes data, retain diagnostic
 resource tables, format per-pass graphs, add readback encoders or dump pixels.

@@ -1,4 +1,34 @@
-## Active:220 widen tight index-buffer range (PanVK 06); source only, NOT built (2026-11-02)
+## Active:221 PanVK FPK honours colour write masks (07); source only, NOT built (2026-11-02)
+
+- 220 RUNTIME: logs .local/analysis-mailbox220/2_{widen,exact}.txt. plugin220,
+  IB policy widen=1 resp. 0 confirmed, IB WIDEN e.g. requested=12 bound=261712.
+  User: both still flicker, no visible difference. => tight index-range
+  hypothesis FALSIFIED. 06 is harmless and kept for now; can be dropped.
+- Re-read of 219 frame (observation): in the 316x692 platter pass each
+  nine-patch draw (c0 blend, c1 mask0) is followed by path_blit_vert/
+  attachment_clear (c0 writeMask 0, c1 mask15) and mask quads with c0 mask 0.
+  HSR logs show these as rt_mask=3 written=3 effective=2.
+- SOURCE: upstream FPK rule uses rt_written = shader outputs (write masks not
+  considered; blend setup skips zero-mask RTs so any_dest_read stays 0). So
+  those draws get allow_forward_pixel_to_kill=1 and may kill earlier colour0
+  fragments they never write. FPK kills fragments still queued, i.e. the
+  most recently submitted triangles of the previous draw = its LAST triangle
+  -> matches nine-patch centre lower-left and quad (2,3,0) loss, timing-
+  dependent flicker, and HSR-off only helping a bit (x9h0 never touched FPK).
+  INFERENCE until hardware confirms.
+- 221 change: x9/build/third_party/07-panvk-fpk-write-masks.patch: FPK
+  requires effective (really written) RTs to cover rt_mask; x9f0 token =
+  upstream. Zero-fuzz apply/idempotence with 04/05 checked; helper+block
+  compiled with gcc stubs (CA case written=3 eff=2: upstream 1 -> 0).
+- Build on Mac:
+  python3 -I x9/build/build.py all --revision 221 --name mailbox221-fpk
+  python3 -I x9/build/build.py boot --kernel x9/out/mailbox221-fpk/kernel.development.sweet --name mailbox221-fpk-upstream --boot-arg x9f0
+  commit regenerated manifest header; mailbox update with 221 package.
+- Check: X9 FPK policy mode=1, X9 FPK DCD with written=3 effective=1/2
+  upstream_kill=1 kill=0; CC static platters whole? swipe flicker? Then x9f0
+  image as control.
+
+## Previous:220 widen tight index-buffer range (PanVK 06) (2026-11-02)
 
 - 219 RUNTIME (user): plugin219, x9vf active. Log .local/analysis-mailbox219/
   2_219.txt, photo control-center-219.png (CC static, badly broken).

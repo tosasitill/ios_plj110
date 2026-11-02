@@ -1,0 +1,136 @@
+diff --git a/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c b/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c
+--- a/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c
++++ b/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c
+@@ -2552,10 +2552,106 @@
+    struct pan_earlyzs_state earlyzs;
+    uint8_t rt_written;
+    uint8_t rt_read;
+ };
+ 
++#ifdef X9_NATIVE_KMOD
++
++/* RTs a draw really writes: shader outputs minus colour-write-disabled or
++ * zero-mask attachments (blend setup skips those, any_dest_read ignores them). */
++static uint32_t __attribute__((unused))
++x9_effective_written(const struct vk_dynamic_graphics_state *dyns,
++                     uint32_t written)
++{
++   for (uint32_t i = 0; i < 8; i++) {
++      if (!(written & (1u << i)))
++         continue;
++      if (!(dyns->cb.color_write_enables & (1u << i)) ||
++          (i < ARRAY_SIZE(dyns->cb.attachments) &&
++           !dyns->cb.attachments[i].write_mask))
++         written &= ~(1u << i);
++   }
++   return written;
++}
++
++/* Legacy forward-pixel-kill gets the same rule: a draw may kill earlier
++ * fragments only if it really writes every bound RT. Exact token x9f0 keeps
++ * the upstream decision (A/B). */
++static int __attribute__((unused))
++x9_fpk_mode(void)
++{
++   static int mode = -1;
++   int m = __atomic_load_n(&mode, __ATOMIC_RELAXED);
++   if (m >= 0)
++      return m;
++   m = 1;
++   char args[4096] = {0};
++   size_t bytes = sizeof(args) - 1;
++   if (!sysctlbyname("kern.bootargs", args, &bytes, NULL, 0)) {
++      args[sizeof(args) - 1] = 0;
++      for (const char *p = args; *p;) {
++         while (*p && (unsigned char)*p <= 32)
++            p++;
++         const char *end = p;
++         while (*end && (unsigned char)*end > 32)
++            end++;
++         if (end - p == 4 && !memcmp(p, "x9f0", 4))
++            m = 0;
++         p = end;
++      }
++   }
++   __atomic_store_n(&mode, m, __ATOMIC_RELAXED);
++   x9_panvk_log("X9 FPK policy: proc=%s mode=%d;1=all-bound-RTs-really-written 0=upstream (x9f0)",
++                getprogname(), m);
++   return m;
++}
++
++static void __attribute__((unused))
++x9_fpk_note(uint32_t rt_mask, uint32_t written, uint32_t effective,
++            uint32_t read, bool dest_read, bool can_fpk, bool upstream,
++            bool final, int mode)
++{
++   static uint64_t total, up_total, final_total;
++   static uint32_t seen[32];
++   static unsigned seen_count;
++   static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
++
++   uint64_t n = __atomic_add_fetch(&total, 1, __ATOMIC_RELAXED);
++   if (upstream)
++      __atomic_add_fetch(&up_total, 1, __ATOMIC_RELAXED);
++   if (final)
++      __atomic_add_fetch(&final_total, 1, __ATOMIC_RELAXED);
++   uint32_t key = (rt_mask & 0xff) | (written & 0xff) << 8 |
++                  (effective & 0xff) << 16 | (read & 0x1f) << 24 |
++                  (uint32_t)dest_read << 29 | (uint32_t)can_fpk << 30 |
++                  (uint32_t)upstream << 31;
++   unsigned count = __atomic_load_n(&seen_count, __ATOMIC_ACQUIRE);
++   bool known = false;
++   for (unsigned i = 0; i < count && !known; i++)
++      known = __atomic_load_n(&seen[i], __ATOMIC_RELAXED) == key;
++   if (!known && count < 32) {
++      pthread_mutex_lock(&lock);
++      for (unsigned i = 0; i < seen_count && !known; i++)
++         known = seen[i] == key;
++      if (!known && seen_count < 32) {
++         __atomic_store_n(&seen[seen_count], key, __ATOMIC_RELAXED);
++         __atomic_store_n(&seen_count, seen_count + 1, __ATOMIC_RELEASE);
++         x9_panvk_log("X9 FPK DCD: proc=%s mode=%d sig=%u draw=%llu rt_mask=%x written=%x "
++                      "effective=%x read=%x dest_read=%u can_fpk=%u upstream_kill=%u kill=%u",
++                      getprogname(), mode, seen_count, (unsigned long long)n, rt_mask,
++                      written, effective, read, dest_read, can_fpk, upstream, final);
++      }
++      pthread_mutex_unlock(&lock);
++   }
++   if ((n >= 256 && !(n & (n - 1))) || !(n % 65536))
++      x9_panvk_log("X9 FPK totals: proc=%s mode=%d draws=%llu upstream_kill=%llu kill=%llu",
++                   getprogname(), mode, (unsigned long long)n,
++                   (unsigned long long)__atomic_load_n(&up_total, __ATOMIC_RELAXED),
++                   (unsigned long long)__atomic_load_n(&final_total, __ATOMIC_RELAXED));
++}
++#endif
++
+ static void
+ build_dcd_flags(struct panvk_cmd_buffer *cmdbuf,
+                 const struct panvk_shader_variant *fs,
+                 struct panvk_dcd_flags *out)
+ {
+@@ -2615,10 +2711,25 @@
+ 
+          cfg.allow_forward_pixel_to_kill =
+             fs->info.fs.can_fpk && !(rt_mask & ~out->rt_written) &&
+             !(out->rt_read & out->rt_written) && !alpha_to_coverage &&
+             !cmdbuf->state.gfx.cb.info.any_dest_read && !roa_color;
++#ifdef X9_NATIVE_KMOD
++         {
++            const int fpk_mode = x9_fpk_mode();
++            const uint32_t effective =
++               x9_effective_written(dyns, out->rt_written);
++            const bool upstream_kill = cfg.allow_forward_pixel_to_kill;
++            if (fpk_mode)
++               cfg.allow_forward_pixel_to_kill =
++                  upstream_kill && effective && !(rt_mask & ~effective);
++            x9_fpk_note(rt_mask, out->rt_written, effective, out->rt_read,
++                        cmdbuf->state.gfx.cb.info.any_dest_read,
++                        fs->info.fs.can_fpk, upstream_kill,
++                        cfg.allow_forward_pixel_to_kill, fpk_mode);
++         }
++#endif
+ 
+          cfg.allow_forward_pixel_to_be_killed = !fs->info.writes_global;
+ 
+          bool writes_zs = writes_z || writes_s;
+          bool zs_always_passes = ds_test_always_passes(cmdbuf);

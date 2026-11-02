@@ -16,7 +16,8 @@ subprocess.run([sys.executable,'-I',str(Path(__file__).with_name('apply-source-p
  str(Path(__file__).resolve().parents[1]/'third_party/03-kraid-hsr-metadata.patch'),
  str(Path(__file__).resolve().parents[1]/'third_party/04-panvk-hsr-cull-all-rts.patch'),
  str(Path(__file__).resolve().parents[1]/'third_party/05-panvk-index-fetch-audit.patch'),
- str(Path(__file__).resolve().parents[1]/'third_party/06-panvk-widen-index-range.patch')],check=True)
+ str(Path(__file__).resolve().parents[1]/'third_party/06-panvk-widen-index-range.patch'),
+ str(Path(__file__).resolve().parents[1]/'third_party/07-panvk-fpk-write-masks.patch')],check=True)
 # Native tiler has no dynamic OOM growth: freeze an honest fixed capacity
 # before configuring or compiling Mesa.
 subprocess.run(['python3',str(w/'prepare-panvk-native-budget.py')],check=True)
