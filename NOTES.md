@@ -1,4 +1,29 @@
-## Active:221 PanVK FPK honours colour write masks (07); source only, NOT built (2026-11-02)
+## Active: three fix hypotheses falsified; need GPU-output evidence (2026-11-02)
+
+- 221 RUNTIME (user): still flickers; control image not flashed. Log
+  .local/analysis-mailbox221/2_fpk.txt, plugin221, FPK policy mode=1.
+- OBSERVED: CA's 2-RT draws already had upstream_kill=0 (e.g. rt_mask=3
+  written=3 effective=2 can_fpk=1 upstream_kill=0): roa_color (rasterization
+  order access, enabled by metal2vulkan for framebuffer fetch) blocks FPK in
+  every 2-RT pass. FPK killed only rt_mask=1 draws (legit). => 07 is a no-op
+  for CA; FPK hypothesis FALSIFIED. 04 (HSR) and 06 (index range) also showed
+  no visible effect. Keep them only as harmless; do not present as fixes.
+- Kraid tile-access waits compared to BIR va_insert_flow.c at 300b5fd:
+  LD_TILE waits Barrier(7) -> encode_flow emits full .wait, same as BIR;
+  BLEND/ST_TILE likewise; ATEST/ZS_EMIT -> wait0126. No discrepancy found.
+- Established so far: CA inputs correct (217/219), GPU-visible vertex/index
+  bytes == CPU (219), no index OOB, HSR/FPK/index-range toggles no effect.
+  Per photo the LAST triangle of nine-patch/quad draws is lost and wedges
+  share one apex. Mechanism still UNKNOWN; layer not yet isolated.
+- Proposed next evidence (await user choice):
+  A) device: copy colour0 of the CC platter offscreen pass (316x692, stored)
+     after the pass and after each split point, compare with a CPU raster of
+     the captured draws -> first wrong draw/pass.
+  B) desktop: replay a captured frame through metal2vulkan on lavapipe (needs
+     the CA shader AIR from the Mac) -> correct on lavapipe = PanVK/X9 side;
+     wrong = metal2vulkan.
+
+## Previous:221 PanVK FPK honours colour write masks (07) (2026-11-02)
 
 - 220 RUNTIME: logs .local/analysis-mailbox220/2_{widen,exact}.txt. plugin220,
   IB policy widen=1 resp. 0 confirmed, IB WIDEN e.g. requested=12 bound=261712.
