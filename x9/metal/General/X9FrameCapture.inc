@@ -74,9 +74,9 @@ static void x9FrameReplay(NBCommandBuffer *cb) {
  NSMutableArray *results=[NSMutableArray array];uint64_t total=0;
  for(NSDictionary *r in replays) {
   NSArray *box=r[@"box"];const uint64_t bw=[box[2] unsignedLongLongValue],bh=[box[3] unsignedLongLongValue];
-  total+=((bw*4+255)&~255ull)*bh*3;
+  total+=((bw*4+255)&~255ull)*bh*6;
  }
- if(total>96ull*1024*1024){NSLog(@"X9 FRAME REPLAY SKIP: f=%u bytes=%llu reason=budget",cb.traceFrame,(unsigned long long)total);cb.traceFrameReplaying=NO;return;}
+ if(total>128ull*1024*1024){NSLog(@"X9 FRAME REPLAY SKIP: f=%u bytes=%llu reason=budget",cb.traceFrame,(unsigned long long)total);cb.traceFrameReplaying=NO;return;}
  id<MTLBuffer> readback=[device newBufferWithLength:total options:MTLResourceStorageModeShared];
  if(!readback){NSLog(@"X9 FRAME REPLAY SKIP: f=%u reason=readback",cb.traceFrame);cb.traceFrameReplaying=NO;return;}
  uint64_t at=0;
@@ -93,9 +93,14 @@ static void x9FrameReplay(NBCommandBuffer *cb) {
   NSArray *box=r[@"box"];const uint64_t bx=[box[0] unsignedLongLongValue],by=[box[1] unsignedLongLongValue],bw=[box[2] unsignedLongLongValue],bh=[box[3] unsignedLongLongValue];
   const uint64_t row=(bw*4+255)&~255ull;const NSUInteger start=[r[@"start"] unsignedIntegerValue],count=[r[@"count"] unsignedIntegerValue];
   MTLViewport v;[r[@"viewport"] getValue:&v];
-  const NSUInteger ranges[3][2]={{start,count},{start+count-3,3},{start+6,count-6}};
-  for(unsigned variant=0;variant<3;variant++) {
-   if(!ranges[variant][1])continue;
+  // 0 whole, 1 last alone, 2 without first two, 3/4 last alone with its
+  // vertex order rotated (different provoking vertex), 5 first alone.
+  const NSUInteger ranges[6][2]={{start,count},{start+count-3,3},{start+6,count-6},{0,3},{0,3},{start,3}};
+  const uint16_t rotated[2][3]={{(uint16_t)(start+count-2),(uint16_t)(start+count-1),(uint16_t)(start+count-3)},
+                                {(uint16_t)(start+count-1),(uint16_t)(start+count-3),(uint16_t)(start+count-2)}};
+  id<MTLBuffer> rotation=[device newBufferWithBytes:rotated length:sizeof(rotated) options:MTLResourceStorageModeShared];
+  for(unsigned variant=0;variant<6;variant++) {
+   if(!ranges[variant][1]||(variant>=3&&variant<=4&&(!rotation||start+count>65535)))continue;
    MTLRenderPassDescriptor *pd=[MTLRenderPassDescriptor renderPassDescriptor];
    pd.colorAttachments[0].texture=c0;pd.colorAttachments[0].loadAction=MTLLoadActionClear;
    pd.colorAttachments[0].clearColor=MTLClearColorMake(1,0,1,1);pd.colorAttachments[0].storeAction=MTLStoreActionStore;
@@ -115,13 +120,16 @@ static void x9FrameReplay(NBCommandBuffer *cb) {
    }
    NSDictionary *textures=r[@"textures"];for(NSNumber *key in textures)[e setFragmentTexture:textures[key] atIndex:key.unsignedIntegerValue];
    NSDictionary *samplers=r[@"samplers"];for(NSNumber *key in samplers)[e setFragmentSamplerState:samplers[key] atIndex:key.unsignedIntegerValue];
-   [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:ranges[variant][0] vertexCount:ranges[variant][1]];
+   if(variant==3||variant==4)
+    [e drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:3 indexType:MTLIndexTypeUInt16 indexBuffer:rotation indexBufferOffset:(variant-3)*6];
+   else [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:ranges[variant][0] vertexCount:ranges[variant][1]];
    [e endEncoding];
    id<MTLBlitCommandEncoder> blit=[(id<MTLCommandBuffer>)cb blitCommandEncoder];
    [blit copyFromTexture:c0 sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(bx,by,0) sourceSize:MTLSizeMake(bw,bh,1)
                 toBuffer:readback destinationOffset:at destinationBytesPerRow:row destinationBytesPerImage:row*bh];
    [blit endEncoding];
-   [results addObject:@{@"r":r,@"variant":@(variant),@"at":@(at),@"row":@(row),@"first":@(ranges[variant][0]-start),@"count":@(ranges[variant][1])}];
+   const NSUInteger rel=variant==3||variant==4?count-3:ranges[variant][0]-start;
+   [results addObject:@{@"r":r,@"variant":@(variant),@"at":@(at),@"row":@(row),@"first":@(rel),@"count":@(ranges[variant][1])}];
    at+=row*bh;
   }
  }
@@ -268,6 +276,11 @@ static void x9FrameFlush(NBCommandBuffer *cb) {
   @"cull":objc_getAssociatedObject(self,"cull")?:@0,@"winding":objc_getAssociatedObject(self,"winding")?:@0,
   @"points":pts,@"box":@[@(bx),@(by),@(ex-bx),@(ey-by)]}];
  NSLog(@"X9 FRAME REPLAY PICK: f=%u n=%u count=%llu box=%lld,%lld,%lldx%lld",cb.traceFrame,n,(unsigned long long)count,bx,by,ex-bx,ey-by);
+ for(NSUInteger i=0;i<count;i++)for(uint64_t r0=0;r0<stride&&r0<64;r0+=24) {
+  NSMutableString *hex=[NSMutableString string];
+  for(uint64_t b=r0;b<MIN(r0+24,stride);b++)[hex appendFormat:@"%02x",vertices[(uint64_t)(start+i)*stride+b]];
+  NSLog(@"X9 FRAME REPLAY VTX: f=%u n=%u v=%llu off=%llu hex=%@",cb.traceFrame,n,(unsigned long long)i,(unsigned long long)r0,hex);
+ }
 }
 - (void)traceFrameDraw:(MTLPrimitiveType)type start:(NSUInteger)start count:(NSUInteger)count indices:(NBBuffer *)indices offset:(NSUInteger)offset indexType:(MTLIndexType)indexType baseVertex:(NSInteger)baseVertex instances:(NSUInteger)instances {
  NBCommandBuffer *cb=self.commandBuffer;NBRenderPipeline *pipeline=self.tracePipeline;
