@@ -1,4 +1,31 @@
-## Active:222 capture CA function constants for offline lavapipe replay (2026-11-02)
+## Active:222 result: CC platter shader translation is per-vertex trivial (2026-11-02)
+
+- 222 RUNTIME: .local/analysis-mailbox222/2_222.txt (plugin222, x9vf). 98 X9 FC
+  FUNC records; FC C rows of 12 constants are split by the USB console at
+  ~256 chars, losing a few names/values (fix: shorter rows next time).
+- CC platters in the framebuffer: nine-patch count54 draws, vertex fid41
+  (fixed_vert_lph_spc: generic0,texcoord_count0/1=1,vertex_layout0) and
+  fragment fid72 (fixed_frag_lph_cph: attachment_count2, blend_function54,
+  framebuffer_fetch1, framebuffer_sample0, memoryless_index0/1=0,
+  has_image_0A1, image_function1=9, texture_function5, lod_bias1, ...).
+  Two values lost to line splits and assumed: has_asg_77_weights=false,
+  image_count=1. Args saved as fc72.full.
+- Mac translation (lavapipe profile) of fid41+fid72: spirv-val PASS
+  (cc72.vert/frag.spv + cc72.json saved). Vertex shader is exactly
+  position = M*pos (UBO slot2 + push bind offset), uv = scale*tc+bias; fragment
+  samples one texture, no input attachment, no flat inputs, one colour output.
+  => metal2vulkan's translation of this pipeline has no per-triangle
+  dependency; it cannot drop one triangle of a quad. Layer is GPU execution:
+  PanVK v14 and/or the X9 PanVK backend/kernel. (INFERENCE from SPIR-V,
+  lavapipe image replay not run.)
+- Checked: X9 tiler heap is fixed 10 MiB (5x2 MiB, prepare-panvk-native-
+  budget.py), kernel has no OOM servicing, but x9_csf_group_health returns
+  NoMemory on any CS TILER_OOM toggle and no such failure is logged -> heap
+  exhaustion not indicated; enlarging it is NOT expected to help.
+- Server note: leftover local rustc from the aborted translator build caused
+  VPS lag; killed. All builds now on the Mac only.
+
+## Previous:222 capture CA function constants for offline lavapipe replay (2026-11-02)
 
 - User: all builds/compiles now run on the Mac (reverse SSH -p 2222 to
   tosasitill@localhost when the tunnel is up); this server only analyses.
