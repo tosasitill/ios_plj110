@@ -110,6 +110,13 @@ never overwrite. With the patch the rule uses the RTs really written
 (write-disabled or zero-mask RTs excluded). Token `x9f0` keeps upstream FPK.
 Logs `X9 FPK policy`, up to 32 `X9 FPK DCD` signatures and `X9 FPK totals`.
 
+`08-panvk-serialize-passes.patch` (after 07) is a diagnostic switch, off by
+default: exact token `x9s1` makes each render pass's vertex/tiler work wait
+for all earlier fragment work of the queue, so render passes never overlap.
+`X9 PASS SERIALIZE` logs the mode per process. Separately, the X9 queue bridge
+accepts `x9tb` to link 16 tiler-heap chunks (32 MiB) instead of 5 (10 MiB);
+`X9 TILER HEAP` logs requested/linked chunks.
+
 Detailed Metal blur/graph/pixel capture is now opt-in, not normal rendering
 work. Default builds do not copy diagnostic setBytes data, retain diagnostic
 resource tables, format per-pass graphs, add readback encoders or dump pixels.

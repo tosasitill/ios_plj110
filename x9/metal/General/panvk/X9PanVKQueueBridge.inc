@@ -4,6 +4,9 @@
  * Panthor-specific property getters, group allocation or the native engine. */
 #include "X9PanVKQueue.h"
 #include "X9PanVKTilerHeap.h"
+#include <stdlib.h>
+#include <string.h>
+#include <sys/sysctl.h>
 struct x9_panvk_call_allocation { struct panvk_priv_mem memory; };
 static int
 x9_panvk_call_allocate(void *cookie,uint64_t bytes,struct X9PanVKCallBuffer *buffer,void **token)
@@ -74,10 +77,37 @@ x9_panvk_group_create(struct pan_kmod_dev *dev,struct drm_panthor_group_create *
  return ret;
 }
 
+/* Diagnostic A/B (exact boot-arg token x9tb): link 16 tiler heap chunks
+ * (32 MiB) instead of Mesa's fixed initial 5 (10 MiB). Default unchanged. */
+static uint32_t
+x9_panvk_tiler_chunks(uint32_t requested)
+{
+ static int big=-1;
+ if(big<0) {
+  int m=0;char args[4096]={0};size_t bytes=sizeof(args)-1;
+  if(!sysctlbyname("kern.bootargs",args,&bytes,NULL,0)) {
+   args[sizeof(args)-1]=0;
+   for(const char *p=args;*p;) {
+    while(*p&&(unsigned char)*p<=32)p++;
+    const char *end=p;while(*end&&(unsigned char)*end>32)end++;
+    if(end-p==4&&!memcmp(p,"x9tb",4))m=1;
+    p=end;
+   }
+  }
+  big=m;
+ }
+ return big&&requested<16?16:requested;
+}
 static int
 x9_panvk_tiler_create(struct panvk_device *dev,struct panvk_tiler_heap *heap,struct drm_panthor_tiler_heap_create *request)
 {
  if(request->vm_id||!request->initial_chunk_count||request->initial_chunk_count>request->max_chunks){errno=EINVAL;return -1;}
+ {
+  const uint32_t chunks=x9_panvk_tiler_chunks(request->max_chunks);
+  x9_panvk_log("X9 TILER HEAP: proc=%s chunk=%u requested=%u linked=%u bytes=%llu;x9tb=32MiB A/B",
+   getprogname(),request->chunk_size,request->max_chunks,chunks,(unsigned long long)chunks*request->chunk_size);
+  request->max_chunks=chunks;
+ }
  uint64_t bytes=x9_panvk_heap_bytes(request->chunk_size,request->max_chunks);
  if(!bytes){errno=ENOTSUP;return -1;}
  uint64_t address=panvk_as_alloc(dev,PANVK_NO_EXEC_VA_HEAP,bytes,16384);

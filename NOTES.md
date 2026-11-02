@@ -1,4 +1,21 @@
-## Active:222 result: CC platter shader translation is per-vertex trivial (2026-11-02)
+## Active:223 PanVK-vs-X9 split switches x9s1 / x9tb; source only (2026-11-02)
+
+- User chose option B. 08-panvk-serialize-passes.patch: token x9s1 -> at
+  CmdBeginRendering (not resuming) the VT subqueue waits FRAGMENT syncobj >
+  progress_seqno+relative_sync_point (same wait form as PanVK barriers), i.e.
+  no render-pass overlap. X9PanVKQueueBridge.inc: token x9tb -> 16 heap
+  chunks (32 MiB) instead of 5. Both default off; logs X9 PASS SERIALIZE and
+  X9 TILER HEAP. 08 zero-fuzz apply/idempotence checked on reconstructed
+  upstream+00+03..07; NOT compiled here.
+- Build/test (Mac): build.py all --revision 223 --name mailbox223-split; then
+  boot images with --boot-arg x9s1 and --boot-arg x9tb (one token each fits
+  the 607-byte bound). Same CC static + swipe check on three boots.
+- Reading: x9s1 fixes -> cross-pass overlap (shared heap/descriptor ring/
+  sync between passes: X9 backend or PanVK CSF sync); x9tb fixes -> heap
+  capacity despite no OOM event; neither -> single-draw execution on v14
+  (PanVK/HW), next step a per-draw GPU readback inside the platter pass.
+
+## Previous:222 result: CC platter shader translation is per-vertex trivial (2026-11-02)
 
 - 222 RUNTIME: .local/analysis-mailbox222/2_222.txt (plugin222, x9vf). 98 X9 FC
   FUNC records; FC C rows of 12 constants are split by the USB console at
