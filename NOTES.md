@@ -1,4 +1,54 @@
-## Active: Task 9 rev231 audit + Task 10 first-frame audit (2026-11-02)
+## Active: rev233 logging build (2026-11-02)
+
+- Branch feat/G1Ultra, HEAD 0f9745a. Built and packaged locally; NOT flashed,
+  NOT booted. Candidate artifacts:
+  x9/out/x9-rev233-log/boot.img (9420800 B),
+  x9/out/x9-rev233-log/kernel.development.sweet,
+  x9/out/x9-rev233-log/plugin-package/ (10 files, payload 51,347,456 B,
+  X9GeneralMetal233.bundle + X9PanVK233.bundle with SHA256SUMS).
+  Kernel overlay compiled 51/51 (6 prebuilt). Boot args now 607/608 bytes:
+  the base 602-byte line plus the single umbrella token x9vf (4 chars).
+- Build: python3 x9/build/build.py all --revision 233 --name x9-rev233-log
+  --boot-arg x9vf. PanVK patch 11 (11-panvk-fbd-log.patch) is registered in
+  both build-panvk-native-ios.py and build-panvk-incremental.py; applying it to
+  the pre-patch source reproduces the working tree byte-for-byte. The CSF
+  object was compiled alone before the full build.
+- What x9vf now emits (all logging only; no compositing, submission or cache
+  decision changes):
+  - X9 FRAME COVER (frontend): per-draw CPU projection of the position
+    attribute through fragment buffer slot 2, bbox plus scissor clip and
+    clipped_nonempty; unavailable=<reason> when a binding is not CPU readable.
+  - X9 FRAME TEX: per fragment texture slot tex/parent/surface/format/size.
+  - X9 FRAME FBF: per colour attachment bound also as fragment texture, with
+    load/store and pipeline write mask.
+  - PASS line extended with surface=<IOSurface ID> and parent=<traceID> for
+    colour, depth and stencil attachments.
+  - Kernel (SweetFramebuffer.cpp): under x9vf only, the panel sampler grid
+    rises 32x32 to 64x64, and X9 DAMAGE (union of presented layer dst rects,
+    layer mask, full-panel coverage) plus X9 LAYER lines are logged on change
+    or every 240 identical frames.
+  - PanVK (patch 11): first X9 FBD RT: line per distinct render-pass shape
+    (bounded 64 signatures) with fb/render/tiling area, tile size, samples,
+    per-RT format, in_bounds/border load op, load.always, store, store.always,
+    iview presence, colour_write_enables and write mask; X9 FBD ZS for
+    depth/stencil; X9 FBD totals at 256/512/... and every 65536 passes.
+- Trigger schedule is now three 20 s windows at 60/80/100 s after start
+  (3 CBs each, 400 draws/CB). To capture Control Center, open and manipulate
+  it inside one of those windows; backgroundd only.
+- Observations: the artefacts contain the new format strings (kernel: X9
+  DIAG/X9 DAMAGE/X9 LAYER; X9PanVK: X9 FBD PASS/RT/ZS; X9GeneralMetal: X9
+  FRAME COVER/TEX/FBF). Compile and package success is not runtime evidence:
+  none of these lines has been observed on hardware yet.
+- The Timed::record() histogram fix that was already in the working tree is
+  included in 0f9745a. The rev233 manifest replaced the earlier rev232 one.
+- Still unresolved: the Control Center platter diagonal split. Task 10 found no
+  damage region, no presented-surface mapping and no FBD evidence at the old
+  sampling; this build exists to produce that evidence, not to claim a cause.
+- Next: user flashes boot.img + plugin-package, opens Control Center inside a
+  trigger window, and returns the log. Also required: the plugin install on
+  the iOS root (install-on-ios.sh) before the first boot that loads them.
+
+## Previous: Task 9 rev231 audit + Task 10 first-frame audit (2026-11-02)
 
 - Branch feat/G1Ultra, HEAD 681f64e. READ-ONLY audit; no production code,
   kernel, PanVK, runtime or build input was modified, built or flashed by this
