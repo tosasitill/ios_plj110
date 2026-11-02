@@ -117,6 +117,13 @@ for all earlier fragment work of the queue, so render passes never overlap.
 accepts `x9tb` to link 16 tiler-heap chunks (32 MiB) instead of 5 (10 MiB);
 `X9 TILER HEAP` logs requested/linked chunks.
 
+`09-panvk-v14-cull-zero-area.patch` (after 08): upstream sets the DCD
+`Cull Zero Area` bit only below v14, although the v14 DCD still has it.
+CoreAnimation's Control Center platter draws are triangle lists whose first
+two triangles are zero-area; on v14 their last real triangle was missing.
+The patch sets the bit on v14 (default); token `x9z0` keeps upstream.
+`X9 CULL ZERO AREA` logs the mode per process.
+
 Detailed Metal blur/graph/pixel capture is now opt-in, not normal rendering
 work. Default builds do not copy diagnostic setBytes data, retain diagnostic
 resource tables, format per-pass graphs, add readback encoders or dump pixels.

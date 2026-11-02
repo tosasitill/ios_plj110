@@ -1,0 +1,46 @@
+diff --git a/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c b/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c
+--- a/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c
++++ b/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c
+@@ -2799,10 +2799,42 @@
+                VK_CONSERVATIVE_RASTERIZATION_MODE_OVERESTIMATE_EXT
+             ? MALI_CONSERVATIVE_RAST_MODE_OVER_ESTIMATE
+             : MALI_CONSERVATIVE_RAST_MODE_DISABLED;
+ #if PAN_ARCH < 14
+       cfg.cull_zero_area = true;
++#elif defined(X9_NATIVE_KMOD)
++      {
++         /* X9: CoreAnimation emits zero-area triangles inside triangle lists
++          * (e.g. Control Center platters: two degenerate, then two real), and
++          * on v14 the last real triangle of such draws goes missing. Upstream
++          * sets Cull Zero Area only below v14; the v14 DCD still has the bit.
++          * Default on; exact boot-arg token x9z0 keeps upstream (off). */
++         static int zero_area_mode = -1;
++         int zm = __atomic_load_n(&zero_area_mode, __ATOMIC_RELAXED);
++         if (zm < 0) {
++            zm = 1;
++            char args[4096] = {0};
++            size_t bytes = sizeof(args) - 1;
++            if (!sysctlbyname("kern.bootargs", args, &bytes, NULL, 0)) {
++               args[sizeof(args) - 1] = 0;
++               for (const char *p = args; *p;) {
++                  while (*p && (unsigned char)*p <= 32)
++                     p++;
++                  const char *end = p;
++                  while (*end && (unsigned char)*end > 32)
++                     end++;
++                  if (end - p == 4 && !memcmp(p, "x9z0", 4))
++                     zm = 0;
++                  p = end;
++               }
++            }
++            __atomic_store_n(&zero_area_mode, zm, __ATOMIC_RELAXED);
++            x9_panvk_log("X9 CULL ZERO AREA: proc=%s mode=%d;1=cull on v14 0=upstream (x9z0)",
++                         getprogname(), zm);
++         }
++         cfg.cull_zero_area = zm;
++      }
+ #endif
+ #endif
+    }
+ 
+    pan_pack(&out->flags_1, DCD_FLAGS_1, cfg) {

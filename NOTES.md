@@ -1,4 +1,28 @@
-## Active:223 PanVK-vs-X9 split switches x9s1 / x9tb; source only (2026-11-02)
+## Active:224 v14 Cull Zero Area (09); source only, NOT built (2026-11-02)
+
+- 223 RUNTIME (user, no logs): x9s1 (no render-pass overlap) and x9tb (32 MiB
+  heap) both NO visible change -> not cross-pass concurrency, not heap size.
+- Correction to 222 reading: the five count54 nine-patch draws (fids 41/72)
+  are a small rotated ~70x60 px shape, NOT the CC modules. The real CC module
+  draws in f=6 (CC frame at 102 s) are n=139..142 / n=130..133 (505x505 at
+  (89,236) and (662,236)). n=140/141 are NON-indexed triangle lists of 12
+  vertices: tris (BR,TL,BR) and (TL,TL,BR) are zero-area, then (TL,TR,BR) and
+  (TL,BR,BL). Clip coords valid (z=0,w=1.0033), inside scissor 89,236,505,505.
+  The photo shows exactly (TL,TR,BR) present and the LAST triangle (TL,BR,BL)
+  missing. Full-screen count6 quads without degenerate tris do not split.
+  Non-indexed -> all index-buffer hypotheses irrelevant here.
+- SOURCE: csf/panvk_vX_cmd_draw.c sets cfg.cull_zero_area only #if
+  PAN_ARCH < 14 (introduced in refactor 305dd36, no stated reason); v14.xml
+  DCD Flags 0 still has Cull Zero Area bit 26. Gallium does not use it.
+  HYPOTHESIS: on v14 uncull'd zero-area triangles disturb the following
+  primitive(s) of the draw (last triangle lost / pulled to a stale vertex).
+- 224: 09-panvk-v14-cull-zero-area.patch sets the bit on v14 by default;
+  token x9z0 = upstream. Zero-fuzz/idempotence checked; not compiled here.
+- Build: build.py all --revision 224 --name mailbox224-zero-area (+ optional
+  --boot-arg x9z0 control). If not fixed, next: frontend strips zero-area
+  triangles from non-indexed triangle lists before encoding (A/B).
+
+## Previous:223 PanVK-vs-X9 split switches x9s1 / x9tb; source only (2026-11-02)
 
 - User chose option B. 08-panvk-serialize-passes.patch: token x9s1 -> at
   CmdBeginRendering (not resuming) the VT subqueue waits FRAGMENT syncobj >
