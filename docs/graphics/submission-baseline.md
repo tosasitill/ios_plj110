@@ -81,11 +81,21 @@ No Metal API result, ordering, retention, cache operation, mapping, fence or
 ABI is changed. Overhead is a few atomics per commit/didSchedule plus one
 `clock_gettime_nsec_np` around `nmb_command_buffer_commit`.
 
-## 4. How to collect a baseline (`NOT TESTED`)
+## 4. How to collect a baseline (`GAP FOUND ON DEVICE`)
 
-The telemetry table is streamed through the existing
-`native_bridge_metal_telemetry` consumer into the kernel log. On a device with
-the bundle loaded:
+Correction after the first rev 230 boot log (2026-11-02): the table below is
+**not** streamed anywhere yet. `native_bridge_metal_telemetry` and
+`native_bridge_metal_status` are exported by the bundle, but neither the kernel
+overlay nor any userspace tool in this repository calls them, and the frozen
+XNU tree contains no reference either. `X9 RENDER timing` is a different,
+kernel-side series emitted by `render_submit`; it is real and was captured, but
+it does not contain the `G`/`T`/`Q` rows.
+
+Consequence: the userspace baseline of this phase is `NOT COLLECTED`. A reader
+is required — either an in-plugin opt-in emitter (boot-arg gated) or a kernel
+ABI selector that pulls the table — before steps 2–6 can be measured.
+
+Once a reader exists:
 
 1. Boot the candidate, leave the desktop idle for 60 s.
 2. Open/close Control Center and one app.

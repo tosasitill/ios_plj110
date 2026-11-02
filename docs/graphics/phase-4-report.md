@@ -68,20 +68,32 @@ Adding the instrumentation did not break the bundle link.
 
 ## 9. Runtime Result
 
-`NOT TESTED`. No device run. The new rows have not been observed in a device
-log.
+`DEVICE VERIFIED` for boot and bundle load: rev 230 booted, the allowlist
+accepted `X9GeneralMetal230`/`X9PanVK230`, the factory opened in `backboardd`
+and `mediaserverd`, and the desktop rendered through the CPU copy path for the
+whole captured session (72.5 s, no graphics panic).
+
+The new `G`/`T`/`Q` rows were **not observed**, and the cause is source-level:
+`native_bridge_metal_telemetry` has no caller in the kernel overlay, the frozen
+XNU tree or any repository tool. The instrumentation is therefore exported but
+unreachable. Userspace baseline: `NOT COLLECTED`. Kernel-side `X9 RENDER
+timing` was captured and is usable as a coarse reference only.
 
 ## 10. Performance
 
-No measurement exists; no performance claim is made. Sampling adds one
-monotonic clock read around `nmb_command_buffer_commit` and a few atomic
-increments per commit (`INFERENCE`, not measured).
+No userspace measurement exists; no performance claim is made. Kernel-side
+`X9 RENDER timing` from the same boot shows `wait_us` averages peaking at
+10,952 µs and single jobs up to 35,092 µs, but that series measures
+`render_submit` phases, not commit-to-callback. Sampling adds one monotonic
+clock read around `nmb_command_buffer_commit` and a few atomic increments per
+commit (`INFERENCE`, not measured).
 
 ## 11. Regression
 
-Compile and link only. No test suite was run (compile/package policy since
-2026-10-28). Correctness of the metric labels is source-level; the values
-remain `NOT TESTED` until a device log is collected.
+No regression observed in the captured session: 60 Hz cadence ticks with
+`missed=0`, TE frames observed, present copies ~1.3–1.8 ms average, touch and
+SpringBoard input dispatch working. Compile/link results are `BUILD VERIFIED`;
+the absence of the new rows is a wiring gap, not a runtime failure.
 
 ## 12. Rollback
 

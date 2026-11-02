@@ -92,19 +92,28 @@ flashing and no device write was performed.
 
 ## 9. Runtime Result
 
-`NOT TESTED`. No device boot, no panel observation, no direct-scanout A/B.
+`DEVICE VERIFIED` for the extracted path under the copy presenter: the rev 230
+boot log shows `X9 DISPLAY: pan168 present entered` on the first frames, the
+extracted `validate()` accepted the same full-screen surfaces, and the copy
+path ran for the session with cadence `copies=27–45` per 2 s, `missed=0`,
+`copy_avg_us≈1.3–1.8 ms`, and `X9 DISPLAY TE: frames=… timeouts=0`. No display
+panic and no crash referable to the extraction. Direct scanout was not enabled,
+so no `directPresent()` DMA A/B exists (`NOT TESTED`).
 
 ## 10. Performance
 
-No measurement and no performance claim. The extraction is intended to be
-neutral: the same loops, format conversions, blends and clipping run in the
-same order. Copying instead of direct scanning is unchanged for this phase.
+The copy path's own counters from the device log are the only numbers: average
+copy 1.3–1.8 ms, max 2.4 ms, `late_max_us≈1 ms`, no missed cadence ticks. They
+describe copying into the flip buffer, not scanout of the client surface. No
+performance claim is made for direct scanout.
 
 ## 11. Regression
 
-Compile only. The behavior-preserving requirement is checked by keeping every
-condition of `directPresent()` and every call-site signature. Device visual
-correctness (black frames, tearing, stale frames) remains `NOT TESTED`.
+`DEVICE VERIFIED` in the captured session: no black/garbled full-screen
+presentation attributable to the extraction, TE observed with zero timeouts,
+and the desktop stayed up until the capture ended (72.5 s). Visual correctness
+of individual layers over long sessions and the Control Center platter remain
+`NOT TESTED`/unresolved.
 
 ## 12. Rollback
 

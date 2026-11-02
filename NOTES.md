@@ -6,8 +6,21 @@
   X9FrameCapture warnings), kernel 51/51 objects linked and stripped
   (kernel.development.sweet 17995904 B), boot.img packaged (9420800 B,
   SWEET-XNU candidate, entry 0x1000). Artifacts under
-  x9/out/x9-5b3caad-dirty/ (name carries the pre-commit hash). No flash, no
-  device write, no device run; boot remains NOT TESTED.
+  x9/out/x9-5b3caad-dirty/ (name carries the pre-commit hash). Pushed as
+  origin/feat/G1Ultra, commit 681f64e.
+- DEVICE VERIFIED (log /Users/tosasitill/2.txt, 72.5 s session): rev 230 boot,
+  allowlist accepted X9GeneralMetal230/X9PanVK230, factory opened in
+  backboardd and mediaserverd, desktop rendered through the CPU copy path,
+  display cadence ticks 120/121 per 2 s with missed=0, copies 27-45 per 2 s,
+  copy_avg 1.3-1.8 ms, TE frames with timeouts=0, touch/SpringBoard input
+  working, no graphics panic. Kernel X9 RENDER timing moved: wait_us window
+  average max 10,952 us, single job max 35,092 us.
+- GAP (source-confirmed): the Task 6 userspace rows G/T/Q never appear because
+  native_bridge_metal_telemetry has no caller in the kernel overlay, frozen
+  XNU tree or any repo tool; the bundle only exports it. Userspace baseline is
+  NOT COLLECTED. Docs corrected in submission-baseline.md and phase-4 report.
+  A reader (opt-in in-plugin emitter or kernel ABI selector) is required before
+  Task 6 steps 2-6 can be measured.
 - Host tooling note for repro: boot packaging needs llvm-objcopy/llvm-nm from
   /opt/homebrew/opt/llvm@22/bin on PATH and the lz4 module visible under
   `python -I`; used .local/build-venv (gitignored) for the latter. build.py
@@ -23,10 +36,10 @@
   mapped_addresses() in the original order (kernelAddress can map lazily);
   x9_layer_* remain thin wrappers :1556-1590 so present() call sites and
   behavior are unchanged.
-- BUILD VERIFIED (single translation unit): the exact CI compile command for
-  SweetFramebuffer.cpp (development SWEET arm64) exits 0 with 18 pre-existing
-  warnings and no new one. Full kernel link/package NOT run; kernel allowlist
-  untouched.
+- BUILD VERIFIED end to end (rev 230 full build): SweetFramebuffer.cpp
+  compiled without new warnings, the kernel linked 51/51 overlay objects and
+  boot.img packaged; the extraction is exercised on device through the copy
+  presenter.
 - NOT IMPLEMENTED (deliberate): true client-surface direct scanout (current
   directPresent copies into the flip buffer to avoid half-drawn frames);
   show/retire hold enrollment for the direct surface; separate display fence;
@@ -37,7 +50,9 @@
   scheduled queue latency and in-flight depth (rows G ctc, T submit, T queue,
   Q inflight). BUILD VERIFIED with build-general-metal.py --revision 230:
   boundary clean (metal, 27 sources), bundle linked/signed; the two
-  pre-existing X9FrameCapture.inc:147,148 warnings. NOT TESTED on device.
+  pre-existing X9FrameCapture.inc:147,148 warnings. On device the rows are
+  absent (no consumer; see GAP above), so the instrumentation itself is
+  NOT TESTED.
 - Task 6 steps 2-6 (lock split, submission queue, resource set, cache
   precision, fence wait) are NOT IMPLEMENTED: they need a measured baseline
   first and steps 3+ need the ABI v2 async path from the Task 2 design.
@@ -46,10 +61,11 @@
   architecture-inventory.md.
 - Control Center platter triangles remain UNRESOLVED; neither task changed
   rendering.
-- Next: the user flashes x9/out/x9-5b3caad-dirty/boot.img manually together
-  with the rev 230 plugin package (install-on-ios.sh), then collects the new
-  telemetry rows for the Task 6 baseline. After a measured baseline: (a)
-  direct-scanout A/B with hold enrollment, (b) Task 2 async submission.
+- Next: wire one reader for native_bridge_metal_telemetry (preferred: an
+  x9_telemetry=1 opt-in emitter inside the plugin that NSLogs the table every
+  N commits; alternative: a kernel selector that pulls it), rebuild rev 231,
+  then collect the userspace baseline. After that: (a) direct-scanout A/B with
+  hold enrollment, (b) Task 2 async submission.
 
 ## Previous:230 Task 5 Buffer Manager (2026-11-02)
 
