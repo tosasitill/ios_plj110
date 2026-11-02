@@ -1,0 +1,76 @@
+diff --git a/src/panfrost/vulkan/panvk_vX_cmd_draw.c b/src/panfrost/vulkan/panvk_vX_cmd_draw.c
+--- a/src/panfrost/vulkan/panvk_vX_cmd_draw.c
++++ b/src/panfrost/vulkan/panvk_vX_cmd_draw.c
+@@ -4,8 +4,49 @@
+  * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "panvk_buffer.h"
++#ifdef X9_NATIVE_KMOD
++#include "X9PanVKSync.h"
++#include <stdlib.h>
++#include <string.h>
++#include <sys/sysctl.h>
++
++/* X9: metal2vulkan binds index buffers with the exact size of the indices a
++ * draw reads (vkCmdBindIndexBuffer2). On the X9 Mali v14 path the last
++ * triangle of such draws is observed lost or redirected to vertex 0, as if the
++ * tail of a tight INDEX_BUFFER_SIZE reads as zero. Widen the bound range to
++ * the end of the VkBuffer (never past it). Exact boot-arg token x9i0 keeps the
++ * requested size, for A/B comparison. */
++static bool
++x9_ib_widen(void)
++{
++   static int mode = -1;
++   int m = __atomic_load_n(&mode, __ATOMIC_RELAXED);
++   if (m >= 0)
++      return m;
++   m = 1;
++   char args[4096] = {0};
++   size_t bytes = sizeof(args) - 1;
++   if (!sysctlbyname("kern.bootargs", args, &bytes, NULL, 0)) {
++      args[sizeof(args) - 1] = 0;
++      for (const char *p = args; *p;) {
++         while (*p && (unsigned char)*p <= 32)
++            p++;
++         const char *end = p;
++         while (*end && (unsigned char)*end > 32)
++            end++;
++         if (end - p == 4 && !memcmp(p, "x9i0", 4))
++            m = 0;
++         p = end;
++      }
++   }
++   __atomic_store_n(&mode, m, __ATOMIC_RELAXED);
++   x9_panvk_log("X9 PANVK IB policy: proc=%s widen=%d;1=bind to VkBuffer end 0=exact (x9i0)",
++                getprogname(), m);
++   return m;
++}
++#endif
+ #include "panvk_cmd_alloc.h"
+ #include "panvk_cmd_buffer.h"
+ #include "panvk_device_memory.h"
+ #include "panvk_entrypoints.h"
+@@ -1063,8 +1104,22 @@
+    VK_FROM_HANDLE(panvk_buffer, buf, buffer);
+ 
+    if (buf) {
+       cmdbuf->state.gfx.ib.size = panvk_buffer_range(buf, offset, size);
++#ifdef X9_NATIVE_KMOD
++      if (size != VK_WHOLE_SIZE && x9_ib_widen()) {
++         const uint64_t requested = cmdbuf->state.gfx.ib.size;
++         const uint64_t whole = panvk_buffer_range(buf, offset, VK_WHOLE_SIZE);
++         cmdbuf->state.gfx.ib.size = MIN2(whole, (uint64_t)UINT32_MAX);
++         static unsigned logged;
++         if (whole != requested &&
++             __atomic_fetch_add(&logged, 1, __ATOMIC_RELAXED) < 8)
++            x9_panvk_log("X9 PANVK IB WIDEN: proc=%s offset=%llu requested=%llu bound=%llu",
++                         getprogname(), (unsigned long long)offset,
++                         (unsigned long long)requested,
++                         (unsigned long long)cmdbuf->state.gfx.ib.size);
++      }
++#endif
+       assert(cmdbuf->state.gfx.ib.size <= UINT32_MAX);
+       cmdbuf->state.gfx.ib.dev_addr = panvk_buffer_gpu_ptr(buf, offset);
+    } else {
+       cmdbuf->state.gfx.ib.size = 0;

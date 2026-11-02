@@ -93,6 +93,14 @@ to 24 `X9 FRAME GPU DIFF` rows. The blit is extra work after the original
 passes; original draws/state are unchanged. Use the normal boot.json plus
 `--boot-arg x9vf` (fills the 607-byte bound, so no x9h* token together).
 
+`06-panvk-widen-index-range.patch` (common panvk_vX_cmd_draw.c): when an index
+buffer is bound with an explicit size (metal2vulkan's maintenance5 path binds
+exactly count*indexSize), the bound range is widened to the end of the
+VkBuffer, never past it. 219 showed the last triangle of such draws lost or
+pulled to vertex 0 while GPU-visible index/vertex bytes were correct. Exact
+token `x9i0` keeps the requested size for A/B. Logs `X9 PANVK IB policy` and
+up to 8 `X9 PANVK IB WIDEN` lines per process.
+
 Detailed Metal blur/graph/pixel capture is now opt-in, not normal rendering
 work. Default builds do not copy diagnostic setBytes data, retain diagnostic
 resource tables, format per-pass graphs, add readback encoders or dump pixels.

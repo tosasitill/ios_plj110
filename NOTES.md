@@ -1,4 +1,46 @@
-## Active:219 whole-frame geometry + GPU-visible byte compare; NOT built (2026-11-02)
+## Active:220 widen tight index-buffer range (PanVK 06); source only, NOT built (2026-11-02)
+
+- 219 RUNTIME (user): plugin219, x9vf active. Log .local/analysis-mailbox219/
+  2_219.txt, photo control-center-219.png (CC static, badly broken).
+  7 FRAME CBs (f=4 hit the 160-draw cap; backboardd then produced no CB from
+  80 s to 253 s, cause not examined). 580 GPU CHECKs.
+- OBSERVED: every vertex/index range a draw fetches, copied by GPU blit after
+  the passes, equals the encode-time CPU snapshot, EXCEPT 14 ranges, all of
+  path_blit_vert_lph/attachment_clear draws: that shader reads one float4 rect
+  (vertex 0 = 0,0,1256,2760), not 4x48-byte vertices, so the next draw's data
+  at base+16..80 legitimately follows; gpu_diff==cpu_changed there. Capture
+  artifact, NOT a memory fault. => X9 kernel cache/mapping and CPU ownership
+  are excluded for these draws.
+- OBSERVED: no X9 PANVK IDX OOB. backboardd indexed kinds: prim4 isize2
+  count6 bound=12 (exact), isize4 count3 bound=256. metal2vulkan binds the
+  index buffer with exactly count*isize via vkCmdBindIndexBuffer2.
+- OBSERVED (data+photo): CC platters are 4x4 nine-patch count54 draws whose
+  last six indices are 5,6,10,10,9,5 (centre cell); the photo shows the centre
+  cell's upper-right triangle present and the last triangle (10,9,5) missing,
+  the same "last triangle" of count6 quads (2,3,0) seen earlier; thin wedges
+  converge on one apex, consistent with a vertex-0 substitution.
+- INFERENCE (not proven): the tail of a tight INDEX_BUFFER_SIZE is read as
+  zero by the v14 index fetch (coarser bounds granularity than bytes), making
+  the last triangle degenerate (idx 0,0) or pulled to vertex 0. Alignment-
+  dependent, which fits "only some draws" and motion-dependent flicker.
+  Layer: PanVK/HW contract for INDEX_BUFFER_SIZE, exposed by metal2vk's exact
+  sized binds. Also seen: CA draws path masks with MTLPrimitiveTypeLine 1-px
+  spans (count 68..654) into colour1; not yet examined.
+- 220 change: x9/build/third_party/06-panvk-widen-index-range.patch on the
+  COMMON src/panfrost/vulkan/panvk_vX_cmd_draw.c (upstream 300b5fd file, no
+  earlier patch touches it; reconstructed, not the Mac tree): explicit-size
+  index binds widened to the VkBuffer end. Token x9i0 = exact size (A/B).
+  Zero-fuzz apply + idempotence checked; helper gcc-stub compiled only.
+- Build on Mac:
+  python3 -I x9/build/build.py all --revision 220 --name mailbox220-ib-widen
+  python3 -I x9/build/build.py boot --kernel x9/out/mailbox220-ib-widen/kernel.development.sweet --name mailbox220-ib-exact --boot-arg x9i0
+  commit regenerated x9/kernel/generated/x9_render_external_manifest.h; mailbox
+  update with 220 package. Boot default image first (fix), then x9i0 (control).
+- Check: X9 PANVK IB policy widen=1 and IB WIDEN lines; CC static platters
+  whole? diagonal/wedges gone? blur halves? flicker while swiping?
+  If fixed with widen and back with x9i0 -> confirmed.
+
+## Previous:219 whole-frame geometry + GPU-visible byte compare (2026-11-02)
 
 - 218 RUNTIME (user, three boots, one mailbox): logs preserved (gitignored)
   .local/analysis-mailbox218/2_{allrt,off,upstream}.txt + control-center-218.png.
