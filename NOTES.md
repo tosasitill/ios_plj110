@@ -1,4 +1,26 @@
-## Active: three fix hypotheses falsified; need GPU-output evidence (2026-11-02)
+## Active:222 capture CA function constants for offline lavapipe replay (2026-11-02)
+
+- User: all builds/compiles now run on the Mac (reverse SSH -p 2222 to
+  tosasitill@localhost when the tunnel is up); this server only analyses.
+- Mac: iOS 20H392 QuartzCore default.metallib extracted read-only from
+  .local/heliodarwin/work/ios16-20H392/OS.dmg (detached) to
+  .local/analysis-shaders/. metal2vulkan CLI built from the pan205 runtime
+  source into .local/analysis-shaders/m2v-target (separate target dir).
+  Offline translation for lavapipe profile works (spirv-val PASS) for
+  downsample_blur_vert_lph+narrow_blur_7 and path_blit+attachment_clear.
+- fixed_vert_lph_spc/fixed_frag_lph_cph (CC platters) are QuartzCore's uber
+  shader (~60 function constants incl. fc_framebuffer_sample,
+  fc_memoryless_index0/1); cannot be translated without CA's live values.
+- 222 change (commit ac7f0e6): with x9vf, log every specialized function's
+  constants (X9 FC FUNC/X9 FC C, keyed by fid) and per captured draw the
+  vertex/fragment fids (X9 FRAME FUNCS); draw cap 400/CB, 2 triggers
+  (60/80 s), GPU byte compare off. Not syntax-checked (tunnel dropped).
+- Next: build revision 222 with --boot-arg x9vf, open CC before 60 s, keep
+  static to ~90 s. Then translate the exact CC pipelines on the Mac and
+  replay the 316x692 platter pass on lavapipe here: correct there -> PanVK/X9
+  side; wrong -> metal2vulkan translation.
+
+## Previous: three fix hypotheses falsified; need GPU-output evidence (2026-11-02)
 
 - 221 RUNTIME (user): still flickers; control image not flashed. Log
   .local/analysis-mailbox221/2_fpk.txt, plugin221, FPK policy mode=1.
