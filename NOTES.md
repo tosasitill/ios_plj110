@@ -35,18 +35,41 @@
 - Trigger schedule is now three 20 s windows at 60/80/100 s after start
   (3 CBs each, 400 draws/CB). To capture Control Center, open and manipulate
   it inside one of those windows; backgroundd only.
-- Observations: the artefacts contain the new format strings (kernel: X9
-  DIAG/X9 DAMAGE/X9 LAYER; X9PanVK: X9 FBD PASS/RT/ZS; X9GeneralMetal: X9
-  FRAME COVER/TEX/FBF). Compile and package success is not runtime evidence:
-  none of these lines has been observed on hardware yet.
 - The Timed::record() histogram fix that was already in the working tree is
   included in 0f9745a. The rev233 manifest replaced the earlier rev232 one.
-- Still unresolved: the Control Center platter diagonal split. Task 10 found no
-  damage region, no presented-surface mapping and no FBD evidence at the old
-  sampling; this build exists to produce that evidence, not to claim a cause.
-- Next: user flashes boot.img + plugin-package, opens Control Center inside a
-  trigger window, and returns the log. Also required: the plugin install on
-  the iOS root (install-on-ios.sh) before the first boot that loads them.
+- Runtime observed (device log /Users/tosasitill/2.txt, 45,247 lines, ends at
+  uptime 100.05 s inside f=8): boot-args end with x9vf; "X9 DIAG: x9vf active"
+  at 17.964; sampler sample=4096 (64x64) confirmed; X9 FRAME COVER 679,
+  TEX 810, FBF 1360, DRAW 680, DAMAGE 187, LAYER 184, FBD PASS 135 (backboardd
+  64 distinct, mediaserverd 28, SpringBoard 21, chronod 18, SBRendererService 4;
+  FBD ZS 11). Render-area emulation confirmed: fb=64x64 with
+  render=0,0-56,56 tiling=0,0-63,63 (log 4895) and 64x64 with render 0..31.
+- Observed limits, not guesses: (a) FBD signature budget (64/proc) is exhausted
+  by backboardd at passes=256 (log 5226), so the 59-60 s window (uptime 91-92 s)
+  produced no FBD lines; (b) frontend capture is process-agnostic but only
+  backboardd produced records - SpringBoard printed the capture init and no CB;
+  (c) /dev/console writes from other processes interleave into some X9 lines;
+  (d) COVER is a vertex-projected bbox, not fill; path_blit draws (no a0) report
+  a meaningless bbox while clipped still follows the scissor.
+- New evidence from that log: damage/present is always the whole 1256x2760
+  panel, one layer, surface ids 2/3 alternating, so no partial-damage path
+  exists at display level. All 1360 FBF rows have bound_as_texture=0: no
+  captured draw reads its own colour attachment. Per-draw write masks are c0=15
+  and c1=0 except the 1064x450 offscreen pass at f=4 n=1..4, where c0=0 and
+  c1=15 with both attachments load=clear/store - the inverted-mask shape Task 10
+  predicted, now directly observed. Texture-to-present mapping works: tex 23
+  aliases surface 3 (the presented layer id), and tex 59 -> surface 71 ->
+  offscreen 80 -> composited into surface 3 at (96,288) 1064x450.
+- Still unresolved: the Control Center platter diagonal split. The 59-60 s
+  capture does contain a CC-like chain (1064x450 backdrop composite at
+  (96,288), 316x692 blur reads of surface 3, 57x57/64x64 and 110x69/355x36
+  passes) with full pass/attachment/pipeline/vertex-input records, but nothing
+  in this log proves the diagonal's cause and the FBD data for those passes is
+  missing.
+- Next (needs a new build): make the FBD table rotate instead of dropping new
+  signatures, and extend/segment the capture windows so the CC window lands
+  inside an incomplete trigger (the log stops mid f=8). Path_blit coverage
+  should be marked unavailable rather than printing the projection garbage.
 
 ## Previous: Task 9 rev231 audit + Task 10 first-frame audit (2026-11-02)
 
