@@ -1,4 +1,47 @@
-## Active:230 Task 7 Display backend boundary (2026-11-02)
+## Active: Task 9 rev231 audit + Task 10 first-frame audit (2026-11-02)
+
+- Branch feat/G1Ultra, HEAD 681f64e. READ-ONLY audit; no production code,
+  kernel, PanVK, runtime or build input was modified, built or flashed by this
+  task. Unrelated working-tree edits were already present and were left alone:
+  x9/kernel/generated/x9_render_external_manifest.h now names rev 232, and
+  NativeBridgeMetalFrontend.mm has a Timed::record() histogram fix. They are not
+  part of this commit and their state is whatever the earlier rev 232 work left.
+- Task 9 deliverables (earlier session): docs/graphics/rev231-runtime-audit.md,
+  rev231-metal-latency.md, rev231-wsi-pitch.md, rev231-buffer-lifecycle.md,
+  rev231-submission-performance.md. Input log /Users/tosasitill/2.txt.
+- Task 10 deliverables (this session): docs/graphics/first-frame-rendering-audit.md,
+  damage-tracking-audit.md, cross-frame-attachment-audit.md,
+  control-center-vs-folder-rendering.md, first-frame-experiment-plan.md.
+  architecture-inventory.md (Module I/J + cross-module note) and
+  refactor-issues.md (MEM-7, DISP-6) updated.
+- Captured facts (rev 211 folder / rev 212 swipe logs):
+  - All panel-sized colour-0 passes are Load+Store (17 in rev 211, 43 in rev 212).
+    No panel-sized pass uses a Clear load. The `attachment_clear` pipeline
+    (path_blit_vert + attachment_clear_frag, 4-vertex strip) logs write mask 0 on
+    colour 0 and 15 on colour 1 in every occurrence, so it does not zero colour 0.
+  - The only Clear actions are full-panel blur intermediates after the swipe
+    (rev 212 ids 134/135/138/139/140/141 at 157.652-162.335 s), followed by a
+    Load pass (id 142). No composite was captured (6-draw per-pair cap).
+  - No damage region exists at any layer: WSI ignores VkPresentRegionKHR,
+    render area is full-attachment, PanVK incremental rendering is tiler-OOM only.
+  - Display/GPU completion are separate events; the kernel's completed_id already
+    implies cache visibility (clean/invalidate before reply), so CPU cache is not a
+    mechanism for mixed pixels.
+- Control Center screenshot (only pixel evidence; no CC runtime log): each rounded
+  card is split by one constant-x+y diagonal with different mean colours on the two
+  sides (measured L1 3.6-39.3). It matches the path_blit_vert strip diagonal, is not
+  tile-aligned, and is deterministic, so it is not cross-frame reuse or a tile-clear
+  boundary. Per-triangle cause (interpolation/attributes/FBF order) is UNKNOWN.
+- NOT IMPLEMENTED (by instruction): the four experiments in
+  first-frame-experiment-plan.md are design only. No flash, no build, no boot.
+- NOT PROVEN: that a swipe redraws the exact corrupted pixels; that the presented
+  surface is the captured colour 0; any root cause. The folder/App Library
+  "inherited surface bytes" explanation stays a hypothesis.
+- Next: user review of the five reports. If an experiment is approved, start with
+  experiment 3 (m2v_no_recycle, build-cfg only) then experiment 1; experiments 2
+  and 4 need new instrumentation/barriers and an explicit go-ahead.
+
+## Previous:230 Task 7 Display backend boundary (2026-11-02)
 
 - Branch feat/G1Ultra. Tasks 4-7 and the rev 230 allowlist are committed
   together. Full rev 230 build ran: PanVK incremental + X9PanVK230 + 

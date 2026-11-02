@@ -483,11 +483,33 @@ Owns shadow/staging resources; host images alias client memory when the route pe
 Render-target or shader-write usage forces a shadow (`ShadowCause`); many IOSurface
 geometries are refused rather than handled.
 
+**First-frame attachment semantics (Task 10, `SOURCE CONFIRMED`)**
+- Load/store mapping: `Load→LOAD`, `Clear→CLEAR`, `DontCare→DONT_CARE`; on PanVK a
+  `DontCare`/`MultisampleResolve` store becomes `STORE` (`render_target.rs:374-397`).
+  Encoder instances after the first load `LOAD`, instances before the last store
+  `STORE` (`:473-489`).
+- The `DontCare` load rewrite is `Load` where no tile is reached, `Clear` where every
+  tile is reached, and `Clear` bounded to whole 32×32 tiles otherwise
+  (`render.rs:4289-4326`, `clear_reach.rs:152-268`). It fires only for
+  `load==DontCare && stores(store)`; no captured pass uses that combination.
+- The render area is the smallest attachment extent (`render_pass.rs:1392-1427`); the
+  pass is never partial. Scissors only shrink draws (`render_state.rs:895-953`).
+- Framebuffer fetch lowers to input attachments under ordered access, else storage
+  images; PanVK lowerers read tile memory. Only a self-dependency exists, no
+  `VK_SUBPASS_EXTERNAL` (`render_target.rs:1785-1815`).
+- No damage/update region is consumed: the Metal WSI accepts `VkPresentRegionKHR` and
+  ignores it (`wsi_common_metal.c:688-723`); the runtime has no dirty-tile path.
+- Captured panel-sized passes are all `Load`+`Store`; the `attachment_clear` pipeline
+  inside them logs write mask 0 on colour 0 (`docs/graphics/first-frame-rendering-audit.md`
+  §6.3). Evidence index: `damage-tracking-audit.md`,
+  `cross-frame-attachment-audit.md`, `control-center-vs-folder-rendering.md`.
+
 **Refactoring opportunities** — none required for Task 1; route telemetry is the useful
 next step.
 
 **Evidence**
-`in_place.rs:245`; `linear_plan.rs:458-653`.
+`in_place.rs:245`; `linear_plan.rs:458-653`; `render_target.rs:374-397, 473-489,
+1785-1815`; `render.rs:4289-4326, 5025-5029`; `clear_reach.rs:152-268`.
 
 ---
 
@@ -543,6 +565,14 @@ allocations with quarantine.
 3. Submit is synchronous and returns EPROTO if the completion id does not match.
 4. BO waits wait for the last submission of the connection, not for the BO.
 5. Split unmap of the descriptor ring is refused.
+6. PanVK's only incremental rendering is the tiler-OOM exception handler: first pass
+   uses the original load, middle passes load the spill image, the last pass stores it
+   (`csf/panvk_cmd_buffer.h:68-73`, `panvk_vX_cmd_draw.c:1833-1894`,
+   `panvk_vX_exception_handler.c:235-330`). It is not damage-driven, and it preserves
+   per-tile load/store semantics rather than skipping tiles.
+7. Colour `CLEAR` is the only load that enables clean-tile write-back; a `LOAD` pass
+   writes back only dirtied tiles (`pan_fb.c:326-333, 396-434`). Border pixels always
+   load (`pan_fb.h:272-279`).
 
 **Refactoring opportunities**
 - Track per-BO last-use submissions so waits and cache plans become precise.
@@ -674,5 +704,11 @@ this process.
 | CSF engine (E) | yes (hardware) | no | no | firmware/slots |
 | Display (G) | no (TryLock) | no | yes | framebuffer |
 | Build (K) | no | no | no | artifacts |
+
+Attachment contents are decided per layer as follows (`SOURCE CONFIRMED`, Task 10):
+the client (Metal) chooses load/store; metal2vulkan rewrites only the `DontCare` load
+and instance actions; PanVK turns the actions into tile preload/store; the kernel
+composites the whole surface and never clears it. No layer consumes a damage region.
+See `docs/graphics/damage-tracking-audit.md` for the per-layer table.
 
 This separation is the factual basis for the six-layer map in `abi-map.md`.

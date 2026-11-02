@@ -115,6 +115,16 @@ Direction: only after hardware capability is confirmed (see `phase-0-report.md` 
 pointer range. Aliasing/overlap checks are range-based (`overlap_held`, `linear_plan.rs:493`).
 This is `NOT A PROBLEM` for correctness but limits surface-aware policy.
 
+### MEM-7 — No attachment provenance or damage region exists `CONFIRMED`
+No layer tracks which submission last wrote a subresource, and no layer consumes a
+damage/update region: the Metal WSI takes `VkPresentRegionKHR` and ignores it
+(`wsi_common_metal.c:688-723`), the runtime's render area is always the full attachment
+(`render.rs:5025-5029`), and PanVK's incremental rendering is tiler-OOM recovery only.
+Consequence: the stack can neither prove nor skip a partial redraw, and a first frame's
+inherited attachment contents cannot be attributed to a producer.
+Direction: emit per-draw scissor and presented-image footprint before changing policy.
+Evidence: `docs/graphics/damage-tracking-audit.md`.
+
 ---
 
 ## Synchronization Coupling
@@ -214,6 +224,17 @@ This is `NOT A PROBLEM` (intentional panel protection).
 Pool is hard-coded to 1256×2760 with source stride 5120 and destination 5184
 (`SweetX9DesktopWorker.inc`; `sweet_x9_desktop_frame_begin` validates `stride==5120`).
 Direction: derive geometry from the framebuffer instance.
+
+### DISP-6 — No layer guarantees initial content of the panel-sized target `CONFIRMED`
+Captured panel-sized passes are all `Load`+`Store`; the `attachment_clear` pipeline
+bound inside them has write mask 0 on colour 0 (`X9 GRAPH BLEND`, rev 211/212), so it
+does not zero that attachment. The kernel composites the whole surface and never clears
+it. A first frame therefore inherits whatever the target held, and only pixels the frame
+covers are replaced.
+This is a client-contract question, not by itself a driver defect, but no design document
+assigns the responsibility. Direction: decide between a WSI acquire clear and a
+client-side full-coverage guarantee; the acquire-clear A/B is experiment 2 in
+`docs/graphics/first-frame-experiment-plan.md`.
 
 ---
 
