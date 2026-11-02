@@ -1,4 +1,28 @@
-## Active:225 isolated per-triangle GPU replay of CC draws (2026-11-02)
+## Active:226 replay logs raw vertices + rotated lost triangle (2026-11-02)
+
+- 225 RUNTIME (.local/analysis-mailbox225/2_225.txt): 16 picks (CC-sized
+  non-indexed 6-vertex quads, vertex fid25 texcoord_count0, fragment fid76:
+  framebuffer_fetch1, blend_function0x29, no textures, blending OFF). Isolated
+  replay on a magenta target: triangle 0 (TL,TR,BR) -> a000a0ff = magenta*0.63
+  (shader darkens the destination by the vertex colour); triangle 1
+  (BR,BL,TL) -> ff00ffff unchanged, in 14 of 15 draws, ALSO when drawn alone
+  (variant1). One draw (n=179) had tri1 covered in the whole draw but not
+  alone. OBSERVATION: the loss is intrinsic to that triangle, not to other
+  draws, not "last triangle", not pass overlap. Positions are a clean
+  axis-aligned rectangle; v3=v2, v5=v0 positions/texcoords.
+- 226 (commit 1a438f1): replay also logs each picked vertex's 48 raw bytes
+  (X9 FRAME REPLAY VTX) and adds variants 3/4 (triangle 1 alone with rotated
+  vertex order via a 16-bit index buffer = other provoking vertex) and 5
+  (triangle 0 alone). Not syntax-checked (tunnel down).
+- Reading: VTX colour of v3..v5 zero/transparent -> CPU input differs per
+  triangle (then explain why Apple draws it); colours equal but rotation
+  changes coverage -> flat/provoking-vertex varying handling on v14 (PanVK
+  provoking vertex / metal2vk flat inputs); no variant ever covers tri1 ->
+  fragment shader result for that triangle (varyings/derivatives) or raster.
+- This clone now has local git user.name/email set to the repo owner identity
+  (matching existing commits) so rebases stop failing.
+
+## Previous:225 isolated per-triangle GPU replay of CC draws (2026-11-02)
 
 - 224 RUNTIME: log .local/analysis-mailbox224/2_224.txt, CULL ZERO AREA
   mode=1 active. User: CC static still split diagonally, swipe still flickers
