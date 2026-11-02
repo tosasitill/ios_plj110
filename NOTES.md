@@ -1,4 +1,22 @@
-## Active:224 v14 Cull Zero Area (09); source only, NOT built (2026-11-02)
+## Active:225 isolated per-triangle GPU replay of CC draws (2026-11-02)
+
+- 224 RUNTIME: log .local/analysis-mailbox224/2_224.txt, CULL ZERO AREA
+  mode=1 active. User: CC static still split diagonally, swipe still flickers
+  -> zero-area culling is NOT the cause (09 harmless, kept as no-op candidate).
+- 225 (commit 1dc0ebd, frontend only): with x9vf, up to 8 non-indexed
+  triangle-list draws (6..48 verts, float4 position, box >150x150, BGRA8
+  full-screen pass) per captured CB are re-drawn after the original passes
+  with the same pipeline/buffers/textures/samplers into a magenta-cleared
+  target: variant0 whole draw, variant1 last triangle alone, variant2 without
+  the first two triangles. Box read back; logs X9 FRAME REPLAY PICK/ENCODED/
+  RESULT/TRI (covered samples per real triangle) /END. Fragment buffers and
+  textures/samplers of all slots now tracked in x9vf mode; inline bytes kept
+  up to 4 KiB. NOT syntax-checked (tunnel down).
+- Reading: variant0 last tri covered=0 but variant1 covered -> intra-draw loss
+  in PanVK/HW; all covered in isolation -> loss depends on preceding work in
+  the original pass (state/ordering), not the draw itself.
+
+## Previous:224 v14 Cull Zero Area (09); source only, NOT built (2026-11-02)
 
 - 223 RUNTIME (user, no logs): x9s1 (no render-pass overlap) and x9tb (32 MiB
   heap) both NO visible change -> not cross-pass concurrency, not heap size.
