@@ -1,0 +1,96 @@
+diff --git a/src/panfrost/compiler/pan_compiler.c b/src/panfrost/compiler/pan_compiler.c
+--- a/src/panfrost/compiler/pan_compiler.c
++++ b/src/panfrost/compiler/pan_compiler.c
+@@ -14,8 +14,13 @@
+ #include "midgard/disassemble.h"
+ #include "midgard/midgard_compile.h"
+ #include "midgard/midgard_quirks.h"
+ #include "kraid/kraid.h"
++#ifdef X9_NATIVE_KMOD
++#include <stdio.h>
++#include <string.h>
++#include <sys/sysctl.h>
++#endif
+ 
+ #include "panfrost/model/pan_model.h"
+ 
+ bool
+@@ -55,16 +60,62 @@
+ DEBUG_GET_ONCE_FLAGS_OPTION(use_kraid, "PAN_USE_KRAID",
+                             pan_use_kraid_flags, USE_KRAID_ALL)
+ #endif
+ 
++#ifdef X9_NATIVE_KMOD
++/* X9 A/B (exact boot-arg tokens, one per boot): x9bf compiles external
++ * fragment shaders with BIR, x9bv vertex shaders, x9ba both; internal and
++ * compute shaders keep Kraid. Default: upstream (Kraid everywhere). */
++static int __attribute__((unused))
++x9_bir_mode(void)
++{
++   static int x9_bir = -1;
++   int mode = __atomic_load_n(&x9_bir, __ATOMIC_RELAXED);
++   if (mode >= 0)
++      return mode;
++   mode = 0;
++   char args[4096] = {0};
++   size_t bytes = sizeof(args) - 1;
++   if (!sysctlbyname("kern.bootargs", args, &bytes, NULL, 0)) {
++      args[sizeof(args) - 1] = 0;
++      for (const char *p = args; *p;) {
++         while (*p && (unsigned char)*p <= 32)
++            p++;
++         const char *end = p;
++         while (*end && (unsigned char)*end > 32)
++            end++;
++         if (end - p == 4 && !memcmp(p, "x9bf", 4))
++            mode = 1;
++         else if (end - p == 4 && !memcmp(p, "x9bv", 4))
++            mode = 2;
++         else if (end - p == 4 && !memcmp(p, "x9ba", 4))
++            mode = 3;
++         p = end;
++      }
++   }
++   __atomic_store_n(&x9_bir, mode, __ATOMIC_RELAXED);
++   fprintf(stderr, "MESA: info: X9 compiler A/B mode=%d (1=BIR fs 2=BIR vs 3=BIR vs+fs)\n", mode);
++   return mode;
++}
++#endif
++
+ bool
+ pan_use_kraid(unsigned arch, mesa_shader_stage stage, bool internal)
+ {
+ #ifdef WITH_PANFROST_RUST
+    if (arch < 9)
+       return false;
+ 
+    uint64_t use_kraid = debug_get_option_use_kraid();
++#ifdef X9_NATIVE_KMOD
++   {
++      const int mode = x9_bir_mode();
++      if (!internal && (mode & 1))
++         use_kraid &= ~USE_KRAID_FS;
++      if (!internal && (mode & 2))
++         use_kraid &= ~USE_KRAID_VS;
++   }
++#endif
+    if (internal && !(use_kraid & USE_KRAID_INTERNAL))
+       return false;
+ 
+    switch (stage) {
+@@ -94,9 +145,15 @@
+ pan_get_compiler_flags(unsigned arch)
+ {
+    if (arch >= 6) {
+ #ifdef WITH_PANFROST_RUST
++#ifdef X9_NATIVE_KMOD
++      /* Keep caches from returning binaries of the other compiler. */
++      const uint32_t use_kraid = debug_get_option_use_kraid() &
++         ~(((x9_bir_mode() & 1) ? USE_KRAID_FS : 0) | ((x9_bir_mode() & 2) ? USE_KRAID_VS : 0));
++#else
+       const uint32_t use_kraid = debug_get_option_use_kraid();
++#endif
+       const uint32_t kraid_flags = kraid_get_compiler_flags();
+ #else
+       const uint32_t use_kraid = 0, kraid_flags = 0;
+ #endif

@@ -124,6 +124,12 @@ two triangles are zero-area; on v14 their last real triangle was missing.
 The patch sets the bit on v14 (default); token `x9z0` keeps upstream.
 `X9 CULL ZERO AREA` logs the mode per process.
 
+`10-pan-compiler-bir-ab.patch` (src/panfrost/compiler/pan_compiler.c) is a
+compiler A/B: exact token `x9bf` compiles external fragment shaders with BIR
+instead of Kraid, `x9bv` vertex shaders, `x9ba` both; internal and compute
+shaders stay on Kraid; default unchanged. The compiler-flags cache key follows
+the override. Logs `MESA: info: X9 compiler A/B mode=`.
+
 Detailed Metal blur/graph/pixel capture is now opt-in, not normal rendering
 work. Default builds do not copy diagnostic setBytes data, retain diagnostic
 resource tables, format per-pass graphs, add readback encoders or dump pixels.

@@ -1,4 +1,22 @@
-## Active:227 replay picks from any backboardd CB (2026-11-02)
+## Active:228 Kraid-vs-BIR compiler A/B (10); source only (2026-11-02)
+
+- 227 RUNTIME (.local/analysis-mailbox227/2_227.txt): 8 CC picks replayed
+  (46 passes). fid68/fid76-type pipelines (fixed_frag_lph_cph with
+  framebuffer_fetch, no texture, vertex colour 003c x4 = opaque white for ALL
+  vertices): the triangle (BR,BL,TL) is never rasterized/written in isolation,
+  in any vertex order (variants 3/4 rotate provoking vertex) -> not provoking
+  vertex, not input data, not other draws. Some CA draws also carry duplicated
+  (degenerate) vertices by design (e.g. n=6 v1=v2=v3=BR). 3D-perspective CC
+  draws (w=0.25) render both halves.
+- Only fragment-shader execution distinguishes the two triangles now.
+  pan_compiler.c selects Kraid (Rust, new) vs BIR via PAN_USE_KRAID (default
+  all Kraid). 10-pan-compiler-bir-ab.patch: tokens x9bf/x9bv/x9ba -> BIR for
+  external FS / VS / both; cache flags follow. Zero-fuzz/idempotence checked
+  on upstream 300b5fd pan_compiler.c (no earlier patch touches it).
+- Test: build 228, boot with --boot-arg x9bf (then x9bv/x9ba if needed);
+  CC static split gone with x9bf -> Kraid fragment codegen bug.
+
+## Previous:227 replay picks from any backboardd CB (2026-11-02)
 
 - 226 RUNTIME (/tmp/2_226.txt, plugin226): no REPLAY records: frames at
   60/80 s uptime held only a simple 16-draw scene (CC not open then). Not a
