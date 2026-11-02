@@ -74,9 +74,9 @@ static void x9FrameReplay(NBCommandBuffer *cb) {
  NSMutableArray *results=[NSMutableArray array];uint64_t total=0;
  for(NSDictionary *r in replays) {
   NSArray *box=r[@"box"];const uint64_t bw=[box[2] unsignedLongLongValue],bh=[box[3] unsignedLongLongValue];
-  total+=((bw*4+255)&~255ull)*bh*6;
+  total+=((bw*4+255)&~255ull)*bh*10;
  }
- if(total>128ull*1024*1024){NSLog(@"X9 FRAME REPLAY SKIP: f=%llu bytes=%llu reason=budget",(unsigned long long)cb.traceID,(unsigned long long)total);cb.traceFrameReplaying=NO;return;}
+ if(total>192ull*1024*1024){NSLog(@"X9 FRAME REPLAY SKIP: f=%llu bytes=%llu reason=budget",(unsigned long long)cb.traceID,(unsigned long long)total);cb.traceFrameReplaying=NO;return;}
  id<MTLBuffer> readback=[device newBufferWithLength:total options:MTLResourceStorageModeShared];
  if(!readback){NSLog(@"X9 FRAME REPLAY SKIP: f=%llu reason=readback",(unsigned long long)cb.traceID);cb.traceFrameReplaying=NO;return;}
  uint64_t at=0;
@@ -99,8 +99,37 @@ static void x9FrameReplay(NBCommandBuffer *cb) {
   const uint16_t rotated[2][3]={{(uint16_t)(start+count-2),(uint16_t)(start+count-1),(uint16_t)(start+count-3)},
                                 {(uint16_t)(start+count-1),(uint16_t)(start+count-3),(uint16_t)(start+count-2)}};
   id<MTLBuffer> rotation=[device newBufferWithBytes:rotated length:sizeof(rotated) options:MTLResourceStorageModeShared];
-  for(unsigned variant=0;variant<6;variant++) {
-   if(!ranges[variant][1]||(variant>=3&&variant<=4&&(!rotation||start+count>65535)))continue;
+  // 6..9 draw from a buffer this capture owns, bound at offset 0: 6 the last
+  // triangle moved to vertices 0..2, 7 the whole draw copied, 8/9 the last
+  // triangle mirrored horizontally/vertically in object space.
+  NSData *raw=r[@"raw"];const uint64_t vstride=[r[@"stride"] unsignedLongLongValue],posoff=[r[@"posoff"] unsignedLongLongValue];
+  const unsigned vslot=[r[@"slot"] unsignedIntValue];
+  NSArray *allPts=r[@"points"];
+  id<MTLBuffer> owned[4]={nil,nil,nil,nil};NSArray *ownedPts[4]={nil,nil,nil,nil};
+  if(raw.length==count*vstride&&vstride>=posoff+8) {
+   const uint8_t *src=(const uint8_t *)raw.bytes;const uint8_t *last=src+(count-3)*vstride;
+   owned[0]=[device newBufferWithBytes:last length:3*vstride options:MTLResourceStorageModeShared];
+   ownedPts[0]=[allPts subarrayWithRange:NSMakeRange(count-3,3)];
+   owned[1]=[device newBufferWithBytes:src length:count*vstride options:MTLResourceStorageModeShared];
+   ownedPts[1]=allPts;
+   for(unsigned axis=0;axis<2;axis++) {
+    NSMutableData *m=[NSMutableData dataWithBytes:last length:3*vstride];uint8_t *d=(uint8_t *)m.mutableBytes;
+    float lo=INFINITY,hi=-INFINITY;double slo=INFINITY,shi=-INFINITY;
+    for(unsigned k=0;k<3;k++){float v;memcpy(&v,d+k*vstride+posoff+axis*4,4);lo=MIN(lo,v);hi=MAX(hi,v);
+     const double sv=[ownedPts[0][k][axis] doubleValue];slo=MIN(slo,sv);shi=MAX(shi,sv);}
+    NSMutableArray *mp=[NSMutableArray array];
+    for(unsigned k=0;k<3;k++) {
+     float v;memcpy(&v,d+k*vstride+posoff+axis*4,4);v=lo+hi-v;memcpy(d+k*vstride+posoff+axis*4,&v,4);
+     double x=[ownedPts[0][k][0] doubleValue],y=[ownedPts[0][k][1] doubleValue];
+     if(axis==0)x=slo+shi-x;else y=slo+shi-y;
+     [mp addObject:@[@(x),@(y)]];
+    }
+    owned[2+axis]=[device newBufferWithBytes:d length:3*vstride options:MTLResourceStorageModeShared];ownedPts[2+axis]=mp;
+   }
+  }
+  for(unsigned variant=0;variant<10;variant++) {
+   if(variant>=6&&!owned[variant-6])continue;
+   if(variant<6&&(!ranges[variant][1]||(variant>=3&&variant<=4&&(!rotation||start+count>65535))))continue;
    MTLRenderPassDescriptor *pd=[MTLRenderPassDescriptor renderPassDescriptor];
    pd.colorAttachments[0].texture=c0;pd.colorAttachments[0].loadAction=MTLLoadActionClear;
    pd.colorAttachments[0].clearColor=MTLClearColorMake(1,0,1,1);pd.colorAttachments[0].storeAction=MTLStoreActionStore;
@@ -120,7 +149,10 @@ static void x9FrameReplay(NBCommandBuffer *cb) {
    }
    NSDictionary *textures=r[@"textures"];for(NSNumber *key in textures)[e setFragmentTexture:textures[key] atIndex:key.unsignedIntegerValue];
    NSDictionary *samplers=r[@"samplers"];for(NSNumber *key in samplers)[e setFragmentSamplerState:samplers[key] atIndex:key.unsignedIntegerValue];
-   if(variant==3||variant==4)
+   if(variant>=6) {
+    [e setVertexBuffer:owned[variant-6] offset:0 atIndex:vslot];
+    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:variant==7?count:3];
+   } else if(variant==3||variant==4)
     [e drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:3 indexType:MTLIndexTypeUInt16 indexBuffer:rotation indexBufferOffset:(variant-3)*6];
    else [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:ranges[variant][0] vertexCount:ranges[variant][1]];
    [e endEncoding];
@@ -128,8 +160,10 @@ static void x9FrameReplay(NBCommandBuffer *cb) {
    [blit copyFromTexture:c0 sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(bx,by,0) sourceSize:MTLSizeMake(bw,bh,1)
                 toBuffer:readback destinationOffset:at destinationBytesPerRow:row destinationBytesPerImage:row*bh];
    [blit endEncoding];
-   const NSUInteger rel=variant==3||variant==4?count-3:ranges[variant][0]-start;
-   [results addObject:@{@"r":r,@"variant":@(variant),@"at":@(at),@"row":@(row),@"first":@(rel),@"count":@(ranges[variant][1])}];
+   const NSUInteger rel=variant>=6?0:variant==3||variant==4?count-3:ranges[variant][0]-start;
+   const NSUInteger vcount=variant>=6?(variant==7?count:3):ranges[variant][1];
+   [results addObject:@{@"r":r,@"variant":@(variant),@"at":@(at),@"row":@(row),@"first":@(rel),@"count":@(vcount),
+    @"pts":variant>=6?ownedPts[variant-6]:allPts}];
    at+=row*bh;
   }
  }
@@ -140,7 +174,7 @@ static void x9FrameReplay(NBCommandBuffer *cb) {
   if(done.status!=MTLCommandBufferStatusCompleted){NSLog(@"X9 FRAME REPLAY FAILED: f=%u status=%llu",f,(unsigned long long)done.status);return;}
   const uint8_t *bytes=(const uint8_t *)readback.contents;if(!bytes)return;
   for(NSDictionary *res in results) {
-   NSDictionary *r=res[@"r"];NSArray *pts=r[@"points"];NSArray *box=r[@"box"];
+   NSDictionary *r=res[@"r"];NSArray *pts=res[@"pts"];NSArray *box=r[@"box"];
    const double bx=[box[0] doubleValue],by=[box[1] doubleValue];const int64_t bw=[box[2] longLongValue],bh=[box[3] longLongValue];
    const uint64_t base=[res[@"at"] unsignedLongLongValue],row=[res[@"row"] unsignedLongLongValue];
    const unsigned first=[res[@"first"] unsignedIntValue],cnt=[res[@"count"] unsignedIntValue];
@@ -251,7 +285,7 @@ static void x9FrameFlush(NBCommandBuffer *cb) {
  const X9CaptureOptions &options=captureOptions();
  if(nowUs()<(options.startGiven?options.geometryStartUs:45000000ull))return;
  static std::atomic<unsigned> budget{0};
- if(budget.load()>=8||cb.traceFrameReplays.count>=8)return;
+ if(budget.load()>=4||cb.traceFrameReplays.count>=4)return;
  MTLVertexAttributeDescriptor *a0=pipeline.traceLayout.attributes[0];
  if(!a0||a0.format!=MTLVertexFormatFloat4)return;
  MTLVertexBufferLayoutDescriptor *vl=pipeline.traceLayout.layouts[a0.bufferIndex];
@@ -297,7 +331,9 @@ static void x9FrameFlush(NBCommandBuffer *cb) {
   @"buffers":[self.traceBuffers copy]?:@{},@"textures":[self.traceTextures copy]?:@{},@"samplers":[self.traceSamplers copy]?:@{},
   @"viewport":[NSValue valueWithBytes:&v objCType:@encode(MTLViewport)],@"att0":t0,@"att1":att1?:[NSNull null],
   @"cull":objc_getAssociatedObject(self,"cull")?:@0,@"winding":objc_getAssociatedObject(self,"winding")?:@0,
-  @"points":pts,@"box":@[@(bx),@(by),@(ex-bx),@(ey-by)]}];
+  @"points":pts,@"box":@[@(bx),@(by),@(ex-bx),@(ey-by)],
+  @"raw":[NSData dataWithBytes:vertices+(uint64_t)start*stride length:(NSUInteger)(count*stride)],
+  @"stride":@(stride),@"slot":@(a0.bufferIndex),@"posoff":@(a0.offset)}];
  NSLog(@"X9 FRAME REPLAY PICK: f=%llu n=%u count=%llu box=%lld,%lld,%lldx%lld fs=%@ ffid=%llu",(unsigned long long)cb.traceID,n,(unsigned long long)count,bx,by,ex-bx,ey-by,self.tracePipeline.traceFragment,(unsigned long long)self.tracePipeline.traceFragmentID);
  for(NSUInteger i=0;i<count;i++)for(uint64_t r0=0;r0<stride&&r0<64;r0+=24) {
   NSMutableString *hex=[NSMutableString string];

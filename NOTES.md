@@ -1,4 +1,21 @@
-## Active:228 Kraid-vs-BIR compiler A/B (10); source only (2026-11-02)
+## Active:229 owned-buffer / mirrored replays of the lost triangle (2026-11-02)
+
+- 228 RUNTIME: x9bf, x9bv, x9ba all still split/flicker (user). x9ba log
+  .local/analysis-mailbox228/2_228_x9ba.txt shows compiler A/B mode=3 in
+  backboardd/SpringBoard. => NOT a Kraid codegen bug (BIR identical result).
+  Excluded so far: CA inputs, metal2vulkan translation, GPU-visible memory,
+  index ranges, HSR, FPK, pass overlap, heap size, zero-area cull, provoking
+  vertex, compiler. The lost triangle is the lower-left half (BR,BL,TL) of
+  framebuffer-fetch platter quads (fid68/fid76), even drawn alone.
+- 229: replay variants 6..9 draw from a buffer the capture owns at offset 0:
+  6 lost triangle moved to vertex 0..2, 7 whole draw copied, 8/9 lost triangle
+  mirrored horizontally / vertically in object space. Replay picks per process
+  reduced to 4 (readback memory). Not syntax-checked unless noted.
+- Reading: 6 covered -> depends on vertex index/offset in the original buffer
+  (attribute fetch / descriptor); 7 still lost but 6 covered -> vertex index>=3;
+  8 or 9 covered -> geometric (edge orientation) rasterizer/tiler behaviour.
+
+## Previous:228 Kraid-vs-BIR compiler A/B (10); source only (2026-11-02)
 
 - 227 RUNTIME (.local/analysis-mailbox227/2_227.txt): 8 CC picks replayed
   (46 passes). fid68/fid76-type pipelines (fixed_frag_lph_cph with
