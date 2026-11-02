@@ -29,6 +29,7 @@
 #include <sys/sysctl.h>
 #include <CommonCrypto/CommonDigest.h>
 #include <cstring>
+#include <cstdlib>
 #include "X9BufferManager.h"
 #include "bridge/NativeMetalObjects.h"
 #include "NativeBridgeMetalFrontend.h"
@@ -101,6 +102,43 @@ static const X9CaptureOptions &captureOptions() {
   return out;
  }();
  return options;
+}
+// Opt-in reader for the telemetry table. The bundle exports the table but the
+// kernel never pulls it, so the rows reach the log only when the boot args
+// contain the exact token x9_telemetry=1. The payload has ~5 bytes spare, so
+// x9t is the exact short alias (like x9vg), not a substring match. Logging
+// happens on a utility queue so the completion callback and the
+// commit-to-completion samples it reports are not distorted by NSLog.
+static bool x9TelemetryEnabled() {
+ static const bool enabled=[] {
+  char args[4096]={};size_t bytes=sizeof(args)-1;
+  if(sysctlbyname("kern.bootargs",args,&bytes,nullptr,0))return false;
+  args[sizeof(args)-1]=0;
+  for(const char *p=args;*p;) {
+   while(*p && (unsigned char)*p<=32)++p;
+   const char *end=p;while(*end && (unsigned char)*end>32)++end;
+   const size_t n=(size_t)(end-p);
+   if((n==14 && !memcmp(p,"x9_telemetry=1",14)) || (n==3 && !memcmp(p,"x9t",3)))return true;
+   p=end;
+  }
+  return false;
+ }();
+ return enabled;
+}
+static const uint64_t kTelemetryCommits=120;
+static void emitTelemetry() {
+ char *table=(char *)malloc(8192);
+ if(!table)return;
+ const size_t n=native_bridge_metal_telemetry(table,8192);
+ for(size_t at=0;at<n;) {
+  char *line=table+at;
+  char *nl=(char *)memchr(line,'\n',n-at);
+  if(nl)*nl='\0';
+  NSLog(@"X9 METAL %s",line);
+  if(!nl)break;
+  at=(size_t)(nl-table)+1;
+ }
+ free(table);
 }
 struct Timed {std::atomic<uint64_t> count{0},total{0},slowest{0};
  std::atomic<uint32_t> buckets[32]{};   // floor(log2(microseconds)), 32 buckets
@@ -1278,6 +1316,8 @@ static void scheduled(void *context) {[(__bridge NBCommandBuffer *)context didSc
 // The runtime's completion: the command buffer's own reference, taken at commit, is given back here.
 static void completed(void *context) {
  gCompleted++;
+ if(x9TelemetryEnabled() && gCompleted.load()%kTelemetryCommits==0)
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{emitTelemetry();});
  NBCommandBuffer *commandBuffer=(__bridge_transfer NBCommandBuffer *)context;
  {
   const uint64_t took=nowUs()-commandBuffer.committedUs;

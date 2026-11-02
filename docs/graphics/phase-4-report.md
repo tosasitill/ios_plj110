@@ -66,6 +66,12 @@ added, removed, reordered or held longer across a GPU wait.
 allowlist to `X9GeneralMetal230`/`X9PanVK230` (10 files, 51331072 bytes).
 Adding the instrumentation did not break the bundle link.
 
+Rev 231 adds the missing reader: exact boot token `x9_telemetry=1`, or its
+3-byte alias `x9t` because the payload has only ~5 spare boot-arg bytes, makes
+the plugin log its table every 120 completions from a utility queue (off by
+default). The alias was added to the rev 231 candidate through `--boot-arg`, so
+`boot.json` keeps its default arguments.
+
 ## 9. Runtime Result
 
 `DEVICE VERIFIED` for boot and bundle load: rev 230 booted, the allowlist
@@ -73,11 +79,13 @@ accepted `X9GeneralMetal230`/`X9PanVK230`, the factory opened in `backboardd`
 and `mediaserverd`, and the desktop rendered through the CPU copy path for the
 whole captured session (72.5 s, no graphics panic).
 
-The new `G`/`T`/`Q` rows were **not observed**, and the cause is source-level:
-`native_bridge_metal_telemetry` has no caller in the kernel overlay, the frozen
-XNU tree or any repository tool. The instrumentation is therefore exported but
-unreachable. Userspace baseline: `NOT COLLECTED`. Kernel-side `X9 RENDER
-timing` was captured and is usable as a coarse reference only.
+The new `G`/`T`/`Q` rows were **not observed** in the rev 230 log, and the
+cause is source-level: `native_bridge_metal_telemetry` had no caller in the
+kernel overlay, the frozen XNU tree or any repository tool. Rev 231 adds the
+in-plugin opt-in reader (`x9_telemetry=1`, 120-completion cadence). Its own
+device capture has not happened yet, so the userspace baseline remains
+`NOT COLLECTED`. Kernel-side `X9 RENDER timing` from the rev 230 boot is usable
+as a coarse reference only.
 
 ## 10. Performance
 

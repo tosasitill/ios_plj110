@@ -72,6 +72,8 @@ Missing relative to §6.7:
 | `:1162` | `didSchedule` records commit → scheduled latency in `gTimeQueue`. |
 | `:1238-1250` | `commit` records in-flight depth after insertion and times `nmb_command_buffer_commit` in `gTimeSubmit` (failed commits included). |
 | `:2045-2053` | Telemetry rows: `G ctc … p50/p95/p99`, `T submit`, `T queue`, `Q inflight`. |
+| `:106-138` | Rev 231 opt-in reader: exact boot token `x9_telemetry=1` or its 3-byte alias `x9t`; every 120 completions logs the table on a utility queue as `X9 METAL <row>`. Off by default. |
+| `:1290-1293` | `completed()` triggers the reader after its own bookkeeping, outside the scoped commit lock. |
 
 Percentiles are deliberately reported as `<=`: the value is the upper edge of
 the containing power-of-two bucket, not an exact sample. The slowest exact
@@ -83,21 +85,21 @@ ABI is changed. Overhead is a few atomics per commit/didSchedule plus one
 
 ## 4. How to collect a baseline (`GAP FOUND ON DEVICE`)
 
-Correction after the first rev 230 boot log (2026-11-02): the table below is
-**not** streamed anywhere yet. `native_bridge_metal_telemetry` and
+Correction after the first rev 230 boot log (2026-11-02): the table was not
+streamed anywhere. `native_bridge_metal_telemetry` and
 `native_bridge_metal_status` are exported by the bundle, but neither the kernel
-overlay nor any userspace tool in this repository calls them, and the frozen
+overlay nor any userspace tool in this repository called them, and the frozen
 XNU tree contains no reference either. `X9 RENDER timing` is a different,
 kernel-side series emitted by `render_submit`; it is real and was captured, but
 it does not contain the `G`/`T`/`Q` rows.
 
-Consequence: the userspace baseline of this phase is `NOT COLLECTED`. A reader
-is required — either an in-plugin opt-in emitter (boot-arg gated) or a kernel
-ABI selector that pulls the table — before steps 2–6 can be measured.
+Rev 231 adds the reader in the plugin: exact boot token `x9_telemetry=1` (short
+alias `x9t`, because the payload has only ~5 spare boot-arg bytes), one table
+every 120 completed command buffers, logged on a utility queue. With the token
+absent the reader never runs. Userspace baseline state remains `NOT COLLECTED`
+until a rev 231 boot with the token is captured.
 
-Once a reader exists:
-
-1. Boot the candidate, leave the desktop idle for 60 s.
+1. Boot the candidate with `x9t`, leave the desktop idle for 60 s.
 2. Open/close Control Center and one app.
 3. Capture the `X9 RENDER timing`, `X9 RENDER cache`, and `Q timing` rows.
 4. Use at least one continuous 5-minute session; compare P95/P99, not means.

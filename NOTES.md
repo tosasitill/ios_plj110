@@ -19,8 +19,8 @@
   native_bridge_metal_telemetry has no caller in the kernel overlay, frozen
   XNU tree or any repo tool; the bundle only exports it. Userspace baseline is
   NOT COLLECTED. Docs corrected in submission-baseline.md and phase-4 report.
-  A reader (opt-in in-plugin emitter or kernel ABI selector) is required before
-  Task 6 steps 2-6 can be measured.
+  The reader is implemented in rev 231 (see below); steps 2-6 stay blocked
+  until a rev 231 log with the rows is captured.
 - Host tooling note for repro: boot packaging needs llvm-objcopy/llvm-nm from
   /opt/homebrew/opt/llvm@22/bin on PATH and the lz4 module visible under
   `python -I`; used .local/build-venv (gitignored) for the latter. build.py
@@ -61,11 +61,18 @@
   architecture-inventory.md.
 - Control Center platter triangles remain UNRESOLVED; neither task changed
   rendering.
-- Next: wire one reader for native_bridge_metal_telemetry (preferred: an
-  x9_telemetry=1 opt-in emitter inside the plugin that NSLogs the table every
-  N commits; alternative: a kernel selector that pulls it), rebuild rev 231,
-  then collect the userspace baseline. After that: (a) direct-scanout A/B with
-  hold enrollment, (b) Task 2 async submission.
+- Rev 231 (BUILD VERIFIED, not flashed): the plugin now reads the telemetry
+  table itself when the boot args contain the exact token x9_telemetry=1 or
+  its 3-byte alias x9t (the payload has ~5 spare bytes), once every 120
+  completions, on a utility queue so ctc samples are not distorted. Off by
+  default; boot.json is unchanged and the candidate carries x9t via
+  --boot-arg. Artifacts: x9/out/x9-rev231-telemetry/boot.img (9420800 B,
+  sha256 6d914c7a...c826e6), plugin-package, allowlist regenerated to 231,
+  kernel 51/51 linked. Build needed the same llvm@22 PATH + build-venv lz4.
+- Next: user flashes rev 231 boot.img + rev 231 plugin package, leaves the
+  desktop idle ~60 s, opens Control Center once, captures the X9 METAL G/T/Q
+  rows. Then fill the baseline and start steps 2-6; afterwards (a)
+  direct-scanout A/B with hold enrollment, (b) Task 2 async submission.
 
 ## Previous:230 Task 5 Buffer Manager (2026-11-02)
 
