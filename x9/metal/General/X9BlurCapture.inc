@@ -2,7 +2,7 @@
 // No shader substitution, pixel readback or GPU synchronization changes.
 - (void)buffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset index:(NSUInteger)index stage:(uint32_t)stage {
  if((captureOptions().inputs && ((stage==1 && index<4)||(stage==2 && index==1))) ||
-    (captureOptions().geometry && ((stage==1 && index<31)||(stage==2 && (index==1||index==6))))) {
+    (captureOptions().tracksGeometry() && ((stage==1 && index<31)||(stage==2 && (index==1||index==6))))) {
   if(!self.traceBuffers)self.traceBuffers=[NSMutableDictionary dictionary];
   if(buffer && [(id)buffer isKindOfClass:[NBBuffer class]])
    self.traceBuffers[@(stage*32+index)]=@{@"buffer":buffer,@"offset":@(offset)};
@@ -12,7 +12,7 @@
 }
 - (void)bytes:(const void *)bytes length:(NSUInteger)length index:(NSUInteger)index stage:(uint32_t)stage {
  if((captureOptions().inputs && ((stage==1 && index<4)||(stage==2 && index==1))) ||
-    (captureOptions().geometry && ((stage==1 && index<31)||(stage==2 && (index==1||index==6))))) {
+    (captureOptions().tracksGeometry() && ((stage==1 && index<31)||(stage==2 && (index==1||index==6))))) {
   if(!self.traceBuffers)self.traceBuffers=[NSMutableDictionary dictionary];
   if(bytes && length<=4096)
    self.traceBuffers[@(stage*32+index)]=@{@"bytes":[NSData dataWithBytes:bytes length:MIN(length,512ul)],@"length":@(length),@"offset":@0};
@@ -21,7 +21,7 @@
  [super bytes:bytes length:length index:index stage:stage];
 }
 - (void)offset:(NSUInteger)offset index:(NSUInteger)index stage:(uint32_t)stage {
- if(captureOptions().inputs||captureOptions().geometry) {
+ if(captureOptions().inputs||captureOptions().tracksGeometry()) {
   NSDictionary *old=self.traceBuffers[@(stage*32+index)];
   if(old) {
    NSMutableDictionary *entry=[old mutableCopy];
@@ -39,6 +39,7 @@
 - (void)traceDraw:(MTLPrimitiveType)type start:(NSUInteger)start count:(NSUInteger)count indices:(NBBuffer *)indices offset:(NSUInteger)offset indexType:(MTLIndexType)indexType baseVertex:(NSInteger)baseVertex instances:(NSUInteger)instances baseInstance:(NSUInteger)baseInstance {
  const X9CaptureOptions &options=captureOptions();
  NBRenderPipeline *pipeline=self.tracePipeline;
+ if(options.frame)[self traceFrameDraw:type start:start count:count indices:indices offset:offset indexType:indexType baseVertex:baseVertex instances:instances];
  if(options.geometry && pipeline) {
   const uint64_t uptime=nowUs();
   if(uptime>=options.geometryStartUs && uptime-options.geometryStartUs<90000000) {

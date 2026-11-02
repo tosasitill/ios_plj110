@@ -1,4 +1,52 @@
-## Active:218 PanVK HSR all-RTs cull fix + A/B tokens; source only, NOT built (2026-11-02)
+## Active:219 whole-frame geometry + GPU-visible byte compare; NOT built (2026-11-02)
+
+- 218 RUNTIME (user, three boots, one mailbox): logs preserved (gitignored)
+  .local/analysis-mailbox218/2_{allrt,off,upstream}.txt + control-center-218.png.
+  All three show plugin218 and the expected X9 HSR policy mode per process.
+  backboardd totals at65536 draws: mode1 upstream_can_cull=20156 can_cull=4190
+  blocked=15966; mode2 18739/18739/0; mode0 17196/0/17196 and can_be_culled=0.
+  DCD signatures confirm CA uses rt_mask=3 with written=3 effective=1/2
+  (write-masked RTs) and read=1/2/3 LD_TILE draws.
+- USER OBSERVATION: x9h0 (HSR fully off) somewhat less flicker/errors but
+  NOT fixed. Most errors appear while swiping (flicker, alpha errors, diagonal
+  triangles scattered); static scenes mostly fine EXCEPT Control Center, which
+  is badly broken statically. Mode of the photo not stated.
+- PHOTO (observation): every CC module platter is split along its TL->BR
+  diagonal; the upper-right triangle (v0,v1,v2) has the dark material, the
+  lower-left (v2,v3,v0) is missing it. Long thin dark wedges run from one
+  module's diagonal to a corner of another module (e.g. camera -> rotation
+  lock -> module1 icons). Interpretation (INFERENCE): the triangle that alone
+  uses v3 is drawn with a wrong v3 position, often another quad's vertex.
+  That is a vertex-fetch/index/position problem, not HSR culling (HSR cannot
+  create triangles outside a primitive). HSR is at most a secondary flicker
+  contributor; 04 default fix kept.
+- 217 CPU data for its captured draws was correct, but the CC platter draws
+  were NOT among the 18 captured (quota). Their CPU inputs are unverified.
+- 219 changes (source only; no Mac build here, no compile of ObjC/Mesa):
+  * x9/metal/General/X9FrameCapture.inc + hooks in NativeBridgeMetalFrontend.mm
+    / X9BlurCapture.inc: x9vf whole-frame capture (see x9/BUILD.md) with GPU
+    blit copy of each draw's vertex/index bytes compared after completion.
+    tracksGeometry() = geometry||frame for the existing tracking hooks.
+  * x9/build/third_party/05-panvk-index-fetch-audit.patch: logs indexed draws
+    whose index range exceeds INDEX_BUFFER_SIZE + distinct index kinds.
+    Verified zero-fuzz apply/idempotence on reconstructed upstream+00+03+04;
+    block compiled with gcc stubs only.
+- Build on Mac:
+  python3 -I x9/build/build.py all --revision 219 --name mailbox219-frame
+  python3 -I x9/build/build.py boot --kernel x9/out/mailbox219-frame/kernel.development.sweet --name mailbox219-frame-x9vf --boot-arg x9vf
+  commit regenerated x9/kernel/generated/x9_render_external_manifest.h;
+  mailbox update with 219 package; boot the x9vf image.
+- Replay: open Control Center BEFORE 60 s uptime and keep it static until
+  ~130 s (triggers 60/80/100/120 s). Save 2.txt + photo. Then (same boot or
+  not) swipe for flicker data is optional.
+- Decision table: FRAME GPU CHECK gpu_diff>0 on the platter draws -> memory
+  visibility/mapping (X9 kernel/PanVK BO path). gpu_diff=0 and CPU vertices
+  correct but photo still split -> GPU vertex fetch/IDVS (PanVK/hardware);
+  IDX OOB lines -> metal2vk index binding size. CPU vertices themselves wrong
+  (v3 already off) -> frontend/CA input path. cpu_changed>0 -> CPU rewrote
+  bytes before GPU completion (ownership/completion ordering).
+
+## Previous:218 PanVK HSR all-RTs cull fix + A/B tokens (2026-11-02)
 
 - User approved implementing the hsr_can_cull fix below and asked to push,
   collecting all needed evidence in one run.

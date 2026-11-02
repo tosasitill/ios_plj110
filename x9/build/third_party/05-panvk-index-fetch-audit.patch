@@ -1,0 +1,74 @@
+diff --git a/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c b/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c
+--- a/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c
++++ b/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c
+@@ -3734,16 +3734,70 @@
+       .index = panvk_draw_info_index(cmdbuf, firstIndex),
+       .vertex.base = vertexOffset,
+       .vertex.count = indexCount,
+       .instance.count = instanceCount,
+       .instance.base = firstInstance,
+       .prim = panvk_get_client_prim(cmdbuf),
+    };
+ 
++#ifdef X9_NATIVE_KMOD
++   {
++      /* Bounded audit of what the hardware is told to fetch: an index range
++       * past INDEX_BUFFER_SIZE reads out-of-bounds (zero) indices, which
++       * would collapse or redirect whole triangles. No state is changed. */
++      static uint64_t draws, oob;
++      static uint32_t seen[16];
++      static unsigned seen_count;
++      const uint64_t isize = draw.index.index_size;
++      const uint64_t need = ((uint64_t)firstIndex + indexCount) * isize;
++      const bool bad = !isize || need > draw.index.buffer_size;
++      uint64_t n = __atomic_add_fetch(&draws, 1, __ATOMIC_RELAXED);
++      uint64_t o = bad ? __atomic_add_fetch(&oob, 1, __ATOMIC_RELAXED) : 0;
++      if (bad && (o <= 32 || !(o & (o - 1))))
++         x9_panvk_log("X9 PANVK IDX OOB: proc=%s n=%llu oob=%llu first=%u count=%u "
++                      "isize=%llu bound=%llu need=%llu vertex_offset=%d prim=%u restart=%u",
++                      getprogname(), (unsigned long long)n, (unsigned long long)o,
++                      firstIndex, indexCount, (unsigned long long)isize,
++                      (unsigned long long)draw.index.buffer_size, (unsigned long long)need,
++                      vertexOffset, (unsigned)draw.prim,
++                      (unsigned)draw.index.restart_enable);
++      const uint32_t key = (uint32_t)draw.prim | (uint32_t)isize << 8 |
++                           (uint32_t)draw.index.restart_enable << 16 |
++                           (uint32_t)(instanceCount > 1) << 17 |
++                           (uint32_t)(vertexOffset != 0) << 18 |
++                           (uint32_t)(firstIndex != 0) << 19;
++      unsigned count = __atomic_load_n(&seen_count, __ATOMIC_ACQUIRE);
++      bool known = false;
++      for (unsigned i = 0; i < count && !known; i++)
++         known = __atomic_load_n(&seen[i], __ATOMIC_RELAXED) == key;
++      if (!known && count < 16) {
++         static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
++         pthread_mutex_lock(&lock);
++         for (unsigned i = 0; i < seen_count && !known; i++)
++            known = seen[i] == key;
++         if (!known && seen_count < 16) {
++            __atomic_store_n(&seen[seen_count], key, __ATOMIC_RELAXED);
++            __atomic_store_n(&seen_count, seen_count + 1, __ATOMIC_RELEASE);
++            x9_panvk_log("X9 PANVK IDX KIND: proc=%s n=%llu prim=%u isize=%llu restart=%u "
++                         "instances=%u vertex_offset=%d first=%u count=%u bound=%llu",
++                         getprogname(), (unsigned long long)n, (unsigned)draw.prim,
++                         (unsigned long long)isize, (unsigned)draw.index.restart_enable,
++                         instanceCount, vertexOffset, firstIndex, indexCount,
++                         (unsigned long long)draw.index.buffer_size);
++         }
++         pthread_mutex_unlock(&lock);
++      }
++      if (!(n % 65536))
++         x9_panvk_log("X9 PANVK IDX totals: proc=%s draws=%llu oob=%llu",
++                      getprogname(), (unsigned long long)n,
++                      (unsigned long long)__atomic_load_n(&oob, __ATOMIC_RELAXED));
++   }
++#endif
++
+    panvk_cmd_draw(cmdbuf, draw);
+ }
+ 
+ VKAPI_ATTR void VKAPI_CALL
+ panvk_per_arch(CmdDrawIndirect)(VkCommandBuffer commandBuffer, VkBuffer _buffer,
+                                 VkDeviceSize offset, uint32_t drawCount,
+                                 uint32_t stride)
+ {

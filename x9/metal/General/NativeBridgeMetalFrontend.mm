@@ -54,7 +54,8 @@ static uint64_t nowUs() {return clock_gettime_nsec_np(CLOCK_UPTIME_RAW)/1000;}
 // Diagnostic state must not retain resources, copy setBytes, format render
 // graphs or add GPU readbacks on the normal path. Opt in at boot, once per
 // process; pixel readback is a separate, explicitly intrusive option.
-struct X9CaptureOptions {bool inputs=false,pixels=false,geometry=false;uint64_t geometryStartUs=45000000;};
+struct X9CaptureOptions {bool inputs=false,pixels=false,geometry=false,frame=false,startGiven=false;uint64_t geometryStartUs=45000000;
+ bool tracksGeometry() const {return geometry||frame;}};
 static const X9CaptureOptions &captureOptions() {
  static const X9CaptureOptions options=[] {
   X9CaptureOptions out;
@@ -84,12 +85,17 @@ static const X9CaptureOptions &captureOptions() {
    if((size_t)(end-p)>n && !memcmp(p,key,n)) {
     uint64_t seconds=0;bool valid=true;
     for(const char *q=p+n;q<end;++q){if(*q<'0'||*q>'9'||seconds>3600){valid=false;break;}seconds=seconds*10+(*q-'0');}
-    if(valid && seconds<=3600)out.geometryStartUs=seconds*1000000;
+    if(valid && seconds<=3600){out.geometryStartUs=seconds*1000000;out.startGiven=true;}
    }
    p=end;
   }
   NSLog(@"X9 METAL capture: inputs=%u pixels=%u;opt-in diagnostics",out.inputs,out.pixels);
   if(out.geometry)NSLog(@"X9 GEOM capture: start_us=%llu windows=3x30s max_draws=18 indices=96;CPU-only",(unsigned long long)out.geometryStartUs);
+  // x9vf: whole backboardd command buffers (every draw) at fixed uptimes,
+  // plus a GPU copy of each draw's vertex/index bytes compared after completion.
+  out.frame=enabled("x9vf");
+  if(out.frame)NSLog(@"X9 FRAME capture: start_us=%llu triggers=4x20s cbs_per_trigger=3 max_draws=160;CPU snapshot+GPU blit compare",
+   (unsigned long long)(out.startGiven?out.geometryStartUs:60000000ull));
   return out;
  }();
  return options;
@@ -596,6 +602,9 @@ static void notified(void *context,uint64_t value) {
 @property(nonatomic) uint64_t traceID;
 @property(nonatomic) BOOL traceGraphUsed;
 @property(nonatomic) BOOL traceGeometryUsed;
+@property(nonatomic) unsigned traceFrame,traceFrameTrigger,traceFrameDraws;
+@property(nonatomic) uint64_t traceFrameBytes;
+@property(nonatomic,strong) NSMutableArray *traceFrameCopies;
 @property(nonatomic) unsigned tracePixelWindow,tracePixelCount;
 @property(nonatomic) uint64_t tracePixelBytes;
 @property(nonatomic,strong) NSMutableArray *scheduledHandlers,*completedHandlers;
@@ -736,14 +745,16 @@ static void waitForResource(id resource) {
 - (void)tracePixelSelect:(bool)blur;
 - (void)tracePixelCopy:(NBTexture *)texture role:(NSString *)role;
 - (void)traceDraw:(MTLPrimitiveType)type start:(NSUInteger)start count:(NSUInteger)count indices:(NBBuffer *)indices offset:(NSUInteger)offset indexType:(MTLIndexType)indexType baseVertex:(NSInteger)baseVertex instances:(NSUInteger)instances baseInstance:(NSUInteger)baseInstance;
+- (void)traceFrameDraw:(MTLPrimitiveType)type start:(NSUInteger)start count:(NSUInteger)count indices:(NBBuffer *)indices offset:(NSUInteger)offset indexType:(MTLIndexType)indexType baseVertex:(NSInteger)baseVertex instances:(NSUInteger)instances;
 @end
 @implementation NBRenderEncoder
 #include "X9BlurCapture.inc"
 #include "X9RenderGraphCapture.inc"
 #include "X9RenderPixelCapture.inc"
+#include "X9FrameCapture.inc"
 - (void)setRenderPipelineState:(id<MTLRenderPipelineState>)state {
  if(![(id)state isKindOfClass:[NBRenderPipeline class]]){[self.commandBuffer refuse:@"foreign render pipeline"];return;}
- if(captureOptions().inputs||captureOptions().geometry)self.tracePipeline=(NBRenderPipeline *)state;
+ if(captureOptions().inputs||captureOptions().tracksGeometry())self.tracePipeline=(NBRenderPipeline *)state;
  [self check:nmb_render_set_pipeline(self.handle,[(NBRenderPipeline *)state handle]) what:"setRenderPipelineState"];
 }
 - (void)setVertexBuffer:(id<MTLBuffer>)b offset:(NSUInteger)o atIndex:(NSUInteger)i {[self buffer:b offset:o index:i stage:1];}
@@ -770,12 +781,12 @@ static void waitForResource(id resource) {
  [self check:nmb_render_set_depth_stencil(self.handle,state?[(NBDepthStencil *)state handle]:nullptr) what:"setDepthStencilState"];
 }
 - (void)setViewport:(MTLViewport)v {
- if(captureOptions().geometry){self.traceViewport=v;self.traceViewportSet=YES;}
+ if(captureOptions().tracksGeometry()){self.traceViewport=v;self.traceViewportSet=YES;}
  const double values[6]={v.originX,v.originY,v.width,v.height,v.znear,v.zfar};
  [self check:nmb_render_set_viewport(self.handle,values) what:"setViewport"];
 }
 - (void)setScissorRect:(MTLScissorRect)r {
- if(captureOptions().geometry){self.traceScissor=r;self.traceScissorSet=YES;}
+ if(captureOptions().tracksGeometry()){self.traceScissor=r;self.traceScissorSet=YES;}
  const uint64_t values[4]={r.x,r.y,r.width,r.height};
  [self check:nmb_render_set_scissor(self.handle,values) what:"setScissorRect"];
 }
@@ -938,7 +949,7 @@ static char kUserDictionaryKey;
 }
 - (instancetype)init {
  if((self=[super init])){_scheduledHandlers=[NSMutableArray array];_completedHandlers=[NSMutableArray array];_surfaces=[NSMutableSet set];_resourceOwners=[NSMutableSet set];_handlers=dispatch_group_create();_schedulingHandlers=dispatch_group_create();}
- if(self){createdUs=nowUs();static std::atomic<uint64_t> next{0};_traceID=++next;}
+ if(self){createdUs=nowUs();static std::atomic<uint64_t> next{0};_traceID=++next;x9FrameSelect(self);}
  return self;
 }
 - (void)dealloc {nmb_command_buffer_release(_handle);}
@@ -1040,7 +1051,7 @@ static char kUserDictionaryKey;
   pass.visibility=[(NBBuffer *)d.visibilityResultBuffer handle];
  }
  NBRenderEncoder *encoder=[self encoder:[NBRenderEncoder new] handle:self.committed?nullptr:nmb_render_encoder_new(_handle,&pass) what:@"renderCommandEncoder"];
- if(captureOptions().inputs||captureOptions().geometry) {
+ if(captureOptions().inputs||captureOptions().tracksGeometry()) {
  NSMutableString *trace=[NSMutableString stringWithFormat:@"requested=%llux%llu",(unsigned long long)pass.width,(unsigned long long)pass.height];
  for(unsigned i=0;i<8;i++)if(d.colorAttachments[i].texture) {
   MTLRenderPassColorAttachmentDescriptor *a=d.colorAttachments[i];NBTexture *t=(NBTexture *)a.texture;
@@ -1111,6 +1122,7 @@ static char kUserDictionaryKey;
 }
 - (void)commit {
  if(self.committed){NBLOG(@"native-metal: commit twice");return;}
+ if(self.traceFrame)x9FrameFlush(self);
  self.committed=YES;
  self.committedUs=nowUs();
  {
@@ -1624,9 +1636,9 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
  delete p;
  if(!handle)return failWith<id<MTLRenderPipelineState>>(error,@"render pipeline",nil);
  NBRenderPipeline *state=[NBRenderPipeline new];state.handle=handle;
- if(captureOptions().inputs||captureOptions().geometry) {
+ if(captureOptions().inputs||captureOptions().tracksGeometry()) {
  state.traceVertex=d.vertexFunction.name;state.traceFragment=d.fragmentFunction.name;
- if(captureOptions().geometry || [d.vertexFunction.name containsString:@"blur"] || [d.fragmentFunction.name containsString:@"blur"])state.traceLayout=[d.vertexDescriptor copy];
+ if(captureOptions().tracksGeometry() || [d.vertexFunction.name containsString:@"blur"] || [d.fragmentFunction.name containsString:@"blur"])state.traceLayout=[d.vertexDescriptor copy];
  NSMutableString *blend=[NSMutableString string];
  for(unsigned i=0;i<8;i++)if(d.colorAttachments[i].pixelFormat!=MTLPixelFormatInvalid) {
   MTLRenderPipelineColorAttachmentDescriptor *a=d.colorAttachments[i];

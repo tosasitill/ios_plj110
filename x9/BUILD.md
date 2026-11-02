@@ -73,6 +73,26 @@ at power-of-two draw counts (>=256) and every 65536 draws. Variant boot
 images: `build.py boot --kernel <out>/kernel.development.sweet --name <n>
 --boot-arg x9h0` (the normal 602-byte args leave room for one 4-byte token).
 
+`05-panvk-index-fetch-audit.patch` (after 04) only logs: every vkCmdDrawIndexed
+whose (firstIndex+indexCount)*indexSize exceeds the bound INDEX_BUFFER_SIZE
+(`X9 PANVK IDX OOB`, first 32 then powers of two), up to 16 distinct
+topology/index-size/restart/instancing kinds (`X9 PANVK IDX KIND`) and totals
+every 65536 indexed draws. No state change.
+
+`x9vf` (exact boot-arg token, frontend) captures whole backboardd command
+buffers: at uptime 60/80/100/120 s (or `x9_metal_geometry_start=` + k*20 s) the
+next three command buffers, at most 160 draws each. Per draw: shaders, blend
+and write masks, pass attachments, viewport/scissor, raster, index buffer
+identity/offset/length, effective vertex ids (up to 96), decoded attribute 0/1
+of every referenced vertex (up to 64) and the first 16 floats of vertex slots
+2/3 (`X9 FRAME DRAW/STATE/VBUF/IDX/I/V/U`). The vertex and index byte ranges
+each draw fetches are snapshotted at encode and copied again by a GPU blit
+appended at commit; after completion `X9 FRAME GPU CHECK` reports differing
+bytes (GPU copy vs encode snapshot) and CPU bytes changed since encode, with up
+to 24 `X9 FRAME GPU DIFF` rows. The blit is extra work after the original
+passes; original draws/state are unchanged. Use the normal boot.json plus
+`--boot-arg x9vf` (fills the 607-byte bound, so no x9h* token together).
+
 Detailed Metal blur/graph/pixel capture is now opt-in, not normal rendering
 work. Default builds do not copy diagnostic setBytes data, retain diagnostic
 resource tables, format per-pass graphs, add readback encoders or dump pixels.
