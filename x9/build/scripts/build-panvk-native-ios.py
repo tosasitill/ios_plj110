@@ -21,6 +21,9 @@ subprocess.run([sys.executable,'-I',str(Path(__file__).with_name('apply-source-p
  str(Path(__file__).resolve().parents[1]/'third_party/08-panvk-serialize-passes.patch'),
  str(Path(__file__).resolve().parents[1]/'third_party/09-panvk-v14-cull-zero-area.patch'),
  str(Path(__file__).resolve().parents[1]/'third_party/10-pan-compiler-bir-ab.patch')],check=True)
+# PanVK core must not reach XNU, IOKit, display or XNU VM headers directly;
+# only the X9 integration sources may name the native transport.
+subprocess.run([sys.executable,'-I',str(Path(__file__).with_name('check-native-boundary.py')),'--panvk'],check=True)
 # Native tiler has no dynamic OOM growth: freeze an honest fixed capacity
 # before configuring or compiling Mesa.
 subprocess.run(['python3',str(w/'prepare-panvk-native-budget.py')],check=True)

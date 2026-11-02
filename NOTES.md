@@ -1,4 +1,199 @@
-## Active:229 owned-buffer / mirrored replays of the lost triangle (2026-11-02)
+## Active:230 Task 7 Display backend boundary (2026-11-02)
+
+- Branch feat/G1Ultra. Tasks 4-7 and the rev 230 allowlist are committed
+  together. Full rev 230 build ran: PanVK incremental + X9PanVK230 + 
+  X9GeneralMetal230 (boundary clean, 27 sources, two pre-existing
+  X9FrameCapture warnings), kernel 51/51 objects linked and stripped
+  (kernel.development.sweet 17995904 B), boot.img packaged (9420800 B,
+  SWEET-XNU candidate, entry 0x1000). Artifacts under
+  x9/out/x9-5b3caad-dirty/ (name carries the pre-commit hash). No flash, no
+  device write, no device run; boot remains NOT TESTED.
+- Host tooling note for repro: boot packaging needs llvm-objcopy/llvm-nm from
+  /opt/homebrew/opt/llvm@22/bin on PATH and the lz4 module visible under
+  `python -I`; used .local/build-venv (gitignored) for the latter. build.py
+  itself did not need a change.
+- Task 7 step 1 (partial), steps 3/4 groundwork: new
+  x9/kernel/src/iokit/Kernel/arm/X9DisplayBackend.inc holds
+  x9_display::Surface/Scanout, format/blend/row/rows/scaled copy primitives,
+  validate() and mapped_addresses(). It encodes exactly the pre-mapping
+  acceptance conditions directPresent() used inline (scanoutPhys, 4-byte
+  elements, >= panel size, 16-byte aligned fetch, below 4 GiB) plus a
+  diagnostic Reject reason. SweetFramebuffer.cpp:1474 includes it;
+  directPresent() :1482-1535 uses validate(), then calls kernelAddress() and
+  mapped_addresses() in the original order (kernelAddress can map lazily);
+  x9_layer_* remain thin wrappers :1556-1590 so present() call sites and
+  behavior are unchanged.
+- BUILD VERIFIED (single translation unit): the exact CI compile command for
+  SweetFramebuffer.cpp (development SWEET arm64) exits 0 with 18 pre-existing
+  warnings and no new one. Full kernel link/package NOT run; kernel allowlist
+  untouched.
+- NOT IMPLEMENTED (deliberate): true client-surface direct scanout (current
+  directPresent copies into the flip buffer to avoid half-drawn frames);
+  show/retire hold enrollment for the direct surface; separate display fence;
+  three-buffer queue object; modifier/IOMMU/display-DMA-domain verification.
+  Steps 5-8 remain open; device test (step 10) is the user's.
+- Task 6 (submission baseline, step 1 only): NativeBridgeMetalFrontend.mm now
+  reports commit-to-completion P50/P95/P99, submit-call duration, commit to
+  scheduled queue latency and in-flight depth (rows G ctc, T submit, T queue,
+  Q inflight). BUILD VERIFIED with build-general-metal.py --revision 230:
+  boundary clean (metal, 27 sources), bundle linked/signed; the two
+  pre-existing X9FrameCapture.inc:147,148 warnings. NOT TESTED on device.
+- Task 6 steps 2-6 (lock split, submission queue, resource set, cache
+  precision, fence wait) are NOT IMPLEMENTED: they need a measured baseline
+  first and steps 3+ need the ABI v2 async path from the Task 2 design.
+- Docs: docs/graphics/submission-baseline.md, phase-4-report.md,
+  display-backend.md, phase-5-report.md; Module F/G evidence updated in
+  architecture-inventory.md.
+- Control Center platter triangles remain UNRESOLVED; neither task changed
+  rendering.
+- Next: the user flashes x9/out/x9-5b3caad-dirty/boot.img manually together
+  with the rev 230 plugin package (install-on-ios.sh), then collects the new
+  telemetry rows for the Task 6 baseline. After a measured baseline: (a)
+  direct-scanout A/B with hold enrollment, (b) Task 2 async submission.
+
+## Previous:230 Task 5 Buffer Manager (2026-11-02)
+
+- HEAD 5b3caad, branch feat/G1Ultra. FOUR files changed (2 new sources, 1 edited
+  source, 1 build script) plus docs; NO ABI header, kernel, PanVK, manifest or
+  display change; NO allocation/mapping/cache/fence behavior change; NO device run.
+- Task 5 (P3): added a userspace Buffer Manager metadata/lifecycle registry in
+  the Metal bundle. New x9/metal/General/X9BufferManager.{h,c} — keyed by
+  NmbBuffer*/NmbTexture*, X9BufferDesc (kind IOSurface/HostLinear/Shadow/
+  GPUOwned/Display, ownership, usage bits, format domain, <=3 planes) and
+  X9BufferLifecycle (separate GPU and display state + refs, use counters).
+  Lifecycle transitions are registered explicitly; GPU state is tracked
+  separately from display state, and unregister tombstones while refs are held
+  (reclaim-last semantics).
+- Integration (NativeBridgeMetalFrontend.mm): root registration for IOSurface
+  (:267), heap buffer/texture (:1388/:1401), device buffers (:1571/:1579/:1588),
+  device texture (:1596), planar IOSurface with 2 planes (:1625-1634) and
+  buffer views (:359); unregister in dealloc (:226/:288); GPU refs acquired at
+  encode (:1211-1212) and released in finish (:1172-1177).
+- All calls are ADVISORY: a failed register/ref cannot refuse a Metal resource;
+  no Metal object retention changed; no allocation, map, cache or fence change.
+- BUILD VERIFIED (userspace bundle only): build-general-metal.py --revision 230
+  -> boundary check clean (metal, 27 sources), compiled/linked/stripped/signed;
+  only the two pre-existing X9FrameCapture.inc:147,148 warnings. nm audit:
+  bundle defines all eight _x9_buffer_* symbols; frontend object references
+  register/unregister/gpu_acquire/gpu_release/describe; no new IOKit or
+  x9_render_* references from the Buffer Manager object.
+- NOT IMPLEMENTED (deliberate): shadow (X9BufferKindShadow) and display
+  (X9BufferKindDisplay) registration — metal2vulkan exposes only aggregate
+  shadow counters and scanout state is not visible to the process; no
+  registration site was invented. Modifier fields are zero. NOT TESTED at
+  runtime: no lifecycle observation on a device.
+- NOT done: PanVK 230 build, package-plugins.py, kernel allowlist (still 229),
+  kernel build, flash. Bundle 230 remains non-deployable until a user-approved
+  candidate. Control Center platter triangles remain UNRESOLVED.
+- Docs: docs/graphics/buffer-manager.md, docs/graphics/phase-3-report.md, plus a
+  Module L entry in docs/graphics/architecture-inventory.md.
+- Next: WAIT for direction — (a) 230 package+allowlist+kernel candidate,
+  (b) Task 6 submission optimization, (c) Task 7 Display Backend / direct
+  scanout, or (d) rework of Task 2 design into implementation.
+
+## Previous:230 Task 4 PanVK / XNU backend boundary (2026-11-02)
+
+- HEAD 5b3caad, branch feat/G1Ultra. THREE files changed (1 new, 2 edited); NO
+  kernel, PanVK, ABI header, manifest or display change; NO device run.
+- Task 4 (P2): audited the native integration and made the PanVK <-> XNU
+  boundary build-enforced. New x9/build/scripts/check-native-boundary.py with
+  two policies: --panvk forbids IOKit/IOSurface/display/mach_vm/libkern and
+  limits the transport + x9_render_* to x9/metal/General/panvk; --metal allows
+  IOKit/transport only in X9RenderTransport.c and bridge/NativeBackendProbe.mm.
+  Wired at build-panvk-native-ios.py:26 (after patches, before budget/meson)
+  and build-general-metal.py:40 (before Rust compile).
+- Audit (SOURCE CONFIRMED): PanVK core has no direct XNU/IOKit/display
+  dependency (only comments mention them); X9 integration includes only the POD
+  X9RenderABI.h, X9RenderTransport.h, pan_kmod and panthor uapi; kernel owns
+  CSF/queue/doorbell (X9CSFRenderQueue.cpp), GPU VM/PTEs (X9RenderPageTable.cpp),
+  BOs (SweetX9RenderService.cpp:194-277) and the cache span plan
+  (X9RenderCachePlan.inc); userspace mappings[4096] is bookkeeping only. Fence:
+  timeline signals only after validated synchronous completion; no fixed sleep;
+  kernel render_wait is a 64-entry history lookup.
+- BUILD VERIFIED (userspace only): build-general-metal.py --revision 230 ->
+  check clean (metal, 25 sources), bundle linked/signed; only the two
+  pre-existing X9FrameCapture.inc:147,148 warnings. build-panvk-native-ios.py ->
+  check clean (panvk, 109 sources), dylib linked (no-op rebuild). Negative
+  self-test: a temporary panvk file including IOKit made --panvk exit 1.
+- NOT done: kernel build, PanVK packaging, allowlist regen, flash. Bundle 230
+  still not deployable (manifest pins 229); that needs a user-decided candidate.
+- Findings not fixed: patch 00 (third_party/00-mesa-panvk-x9.patch) embeds
+  /Users/tosasitill/HelioDarwin-x9-lk-preserve absolute paths and no script
+  applies it, so a fresh tree is not reproducible; BO wait is connection-wide,
+  not per-BO; the check is direct-dependency only (no transitive/object audit).
+- Control Center platter triangles remain UNRESOLVED; no rendering path touched.
+- Reports: docs/graphics/panvk-backend-boundary.md (audit) and
+  docs/graphics/phase-2-report.md (13-section). Next: WAIT for direction —
+  (a) 230 package+allowlist+kernel candidate, (b) Task 2 implementation,
+  (c) Task 5/6, or (d) Task 7 display.
+
+## Previous:230 Task 3 Metal/native boundary split (2026-11-02)
+
+- HEAD 5b3caad, branch feat/G1Ultra. FOUR files changed (2 new, 2 edited); NO
+  kernel, PanVK, ABI header, manifest or display change; NO device run.
+- Task 3 (P1) moved the Metal runtime's last cross-layer reach into a bridge
+  boundary: x9/metal/General/bridge/NativeBackendProbe.{h,mm} now owns the
+  IOKit SweetX9Render probe, the x9_render_open/close liveness check, the
+  accelerator-port -> registry-ID lookup and X9_PANVK_BUNDLE_PATH.
+  X9GeneralMetalFactory.mm keeps only the boot-arg gate, cache path, logging and
+  calls nmb_backend_{probe,loader_path,open}. build-general-metal.py compiles and
+  links the new .mm.
+- BUILD VERIFIED (userspace bundle only): python3
+  x9/build/scripts/build-general-metal.py --revision 230 -> compiled, linked,
+  stripped, ad-hoc signed (pagesize 16384). Two pre-existing warnings in
+  X9FrameCapture.inc:147,148. nm audit: factory/frontend objects have 0 IOKit
+  and 0 x9_render_* undefined symbols; NativeBackendProbe.o is the only object
+  with IOKit (3) / transport (1) refs.
+- Behavior: same gate, same probe order, same nil results, same device open
+  arguments. Log-only deltas: (a) "begin" now prints before a failed registry
+  lookup (before: silent nil); (b) second log prints port=%u, not registry=%llu.
+- NOT done, deliberately: PanVK 230 build, package-plugins.py, kernel allowlist
+  (still pins X9GeneralMetal229/X9PanVK229), kernel build, flash. Bundle 230 is
+  therefore not deployable yet; that needs a new flash candidate = user's call.
+- Control Center platter triangles remain UNRESOLVED; this refactor does not
+  touch and does not explain them.
+- Next: report written to docs/graphics/phase-1-report.md. WAIT for direction:
+  (a) package+allowlist+kernel for a 230 candidate, (b) Task 2 implementation,
+  or (c) further Task 3 boundary work (a build-time check that the Metal objects
+  never re-import IOKit/transport).
+
+## Previous:230 Task 1 audit + Task 2 submission design (2026-11-02)
+
+- HEAD 5b3caad, branch feat/G1Ultra. NO source/build/ABI changes; NO build and NO
+  device run. Working tree only adds docs/graphics/ and this handoff.
+- Task 1 wrote docs/graphics/{architecture-inventory,call-graph,refactor-issues,
+  abi-map,phase-0-report}.md. No GPU submission, cache, HSR, DCD,
+  framebuffer-fetch or display behavior was touched.
+- Task 2 wrote docs/graphics/submission-decoupling-design.md (design only,
+  awaiting approval). It proposes: M3 front-end / M4 kernel queue / M5 backend /
+  M6 fence / M7 display split; ABI v2 additive selectors 12-15
+  (SubmitAsync/FenceWait/FenceQuery/SubmissionRelease) gated by caps bit 64;
+  BO/VM refs per submission; lock order fLock->conn->queue->bo->vm->hw->fence;
+  hw_lock only around AS/doorbell/halt; resource-set cache plan with
+  reachability fallback; build matrix (stages D1-D2 kernel-only, D3-D4 need
+  plugin + allowlist revision, metal2vulkan unused).
+- Findings (source-confirmed unless noted):
+  - Submit is synchronous end to end: render_submit polls the fence and
+    x9_pan_kmod_submit requires completed_id == submission_id; render_wait is a
+    64-entry history lookup, not a blocking wait.
+  - render_submit holds metal_service_lock across cache maintenance, AS install,
+    doorbell and the completion poll; display uses TryLock and skips ticks.
+  - Cache maintenance is per-mapping span-exact with holes excluded and
+    WC/coherent/never-exposed skips; the plan doc's "whole-BO CIVAC" premise is
+    outdated. Remaining imprecision is the reachability scope.
+  - Display is CPU composition + LK GUI submit with fresh TE; GPU result is
+    copied back and memcmp-verified. No GPU direct scanout; GPU/display do not
+    share an IOVA domain. Hardware capability for either is UNKNOWN.
+  - PanVK has no submit-time user-resource list (only panvk_priv_bo refs);
+    metal2vulkan does track used_resources() but it cannot cross Vulkan.
+  - externalMethod rejects descriptors and caps input at 96 B; it also holds the
+    per-context lock for the whole selector, so FenceWait needs its own path.
+- Not re-verified: build or runtime. Per rule since 2026-10-28, compile/package
+  only, and this session ran neither.
+- Next: WAIT for explicit approval of the Task 2 design (5 decisions in §10).
+  Do not start implementation; 1-3 touch submit/cache semantics.
+
+## Previous:229 owned-buffer / mirrored replays of the lost triangle (2026-11-02)
 
 - 228 RUNTIME: x9bf, x9bv, x9ba all still split/flicker (user). x9ba log
   .local/analysis-mailbox228/2_228_x9ba.txt shows compiler A/B mode=3 in

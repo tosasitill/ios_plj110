@@ -1471,6 +1471,8 @@ AppleCLCD::flipFrom(const uint8_t *src, uint32_t srcStride)
 	flipBack();
 }
 
+#include "X9DisplayBackend.inc"
+
 /*
  * topaz: a swap that shows one full-screen surface from the scanout pool is
  * presented by pointing the MDP at it (no 10 MB CPU copy). Returns false to
@@ -1497,43 +1499,48 @@ AppleCLCD::directPresent(const uint8_t *rec)
 		return false;
 	}
 	bool ok = false;
-	if (s->scanoutPhys != 0 && s->bytesPerElement == 4 &&
-	    s->width >= fWidth && s->height >= fHeight) {
-		/* full-screen surface: panel window at the logical offset */
-		uint32_t ox = (s->width - fWidth) / 2, oy = (s->height - fHeight) / 2;
-		if (s->width == fLogicalW && s->height == fLogicalH) {
-			ox = (uint32_t)fOffX;
-			oy = (uint32_t)fOffY;
-		}
-		uint64_t pa = s->scanoutPhys + s->offset + (uint64_t)oy * s->bytesPerRow + (uint64_t)ox * 4;
-		if ((pa & 0xf) == 0 && pa + (uint64_t)fHeight * s->bytesPerRow < (1ull << 32)) {
-			uintptr_t va = s->kernelAddress();
-			if (va != 0) {
-				/*
-				 * Copy into our back buffer and flip: CoreAnimation may start the
-				 * next frame in this surface at once, so scanning it directly let
-				 * the panel show frames half drawn. Cached to cached, a few ms.
-				 */
-				if (fFlip[0] != NULL) {
-					flipFrom((const uint8_t *)(va + s->offset + (uint64_t)oy * s->bytesPerRow + (uint64_t)ox * 4),
-					    s->bytesPerRow);
-				} else {
-					sweet_dcache_clean((vm_offset_t)(va + s->offset + (uint64_t)oy * s->bytesPerRow), (unsigned)((uint64_t)fHeight * s->bytesPerRow));
-					scanFrom(pa, s->bytesPerRow);
-				}
-				ok = true;
-				IOLockLock(fLock);
-				if (fLastSurf != s) {
-					s->retain();
-					if (fLastSurf != NULL) {
-						fLastSurf->release();
-					}
-					fLastSurf = s;
-				}
-				fLastVA = (const uint8_t *)(va + s->offset + (uint64_t)oy * s->bytesPerRow + (uint64_t)ox * 4);
-				fLastStride = s->bytesPerRow;
-				IOLockUnlock(fLock);
+	x9_display::Surface surface = {
+		.scanout_phys = s->scanoutPhys,
+		.offset = s->offset,
+		.memory_length = s->memory ? s->memory->getLength() : 0,
+		.kernel_address = 0,
+		.pixel_format = s->pixelFormat,
+		.bytes_per_element = s->bytesPerElement,
+		.element_width = s->elementWidth,
+		.element_height = s->elementHeight,
+		.width = s->width,
+		.height = s->height,
+		.bytes_per_row = s->bytesPerRow,
+	};
+	x9_display::Scanout scanout;
+	if (x9_display::validate(surface, true, fWidth, fHeight, fLogicalW, fLogicalH,
+	    fOffX, fOffY, &scanout, NULL)) {
+		const uintptr_t va = s->kernelAddress();
+		if (va != 0) {
+			x9_display::mapped_addresses(surface, va, &scanout);
+			/*
+			 * Copy into our back buffer and flip: CoreAnimation may start the
+			 * next frame in this surface at once, so scanning it directly let
+			 * the panel show frames half drawn. Cached to cached, a few ms.
+			 */
+			if (fFlip[0] != NULL) {
+				flipFrom((const uint8_t *)scanout.kernel_address, scanout.stride);
+			} else {
+				sweet_dcache_clean((vm_offset_t)scanout.cache_address, (unsigned)((uint64_t)fHeight * scanout.stride));
+				scanFrom(scanout.phys, scanout.stride);
 			}
+			ok = true;
+			IOLockLock(fLock);
+			if (fLastSurf != s) {
+				s->retain();
+				if (fLastSurf != NULL) {
+					fLastSurf->release();
+				}
+				fLastSurf = s;
+			}
+			fLastVA = (const uint8_t *)scanout.kernel_address;
+			fLastStride = scanout.stride;
+			IOLockUnlock(fLock);
 		}
 	}
 	s->release();
@@ -1546,129 +1553,41 @@ AppleCLCD::directPresent(const uint8_t *rec)
  * (premultiplied over black is the same pixels); upper layers are blended.
  * Source formats other than BGRA are converted or refused rather than copied
  * as if they were BGRA. sweetfb_blend=0 restores the old opaque copies.
+ * The primitives live in X9DisplayBackend.inc; the call sites below keep their
+ * previous names and argument order so this extraction changes no behavior.
  */
-enum { X9_FMT_BGRA, X9_FMT_RGBA, X9_FMT_ARGB, X9_FMT_UNSUPPORTED };
+enum {
+	X9_FMT_BGRA = x9_display::FormatBGRA,
+	X9_FMT_RGBA = x9_display::FormatRGBA,
+	X9_FMT_ARGB = x9_display::FormatARGB,
+	X9_FMT_UNSUPPORTED = x9_display::FormatUnsupported,
+};
 
 static int
 x9_layer_format(uint32_t format)
 {
-	switch (format) {
-	case 0:                 /* unset: what the copy path always assumed */
-	case 0x42475241:        /* 'BGRA' */
-		return X9_FMT_BGRA;
-	case 0x52474241:        /* 'RGBA' */
-		return X9_FMT_RGBA;
-	case 0x41524742:        /* 'ARGB' */
-		return X9_FMT_ARGB;
-	default:
-		return X9_FMT_UNSUPPORTED;
-	}
+	return (int)x9_display::format(format);
 }
 
 static bool
 x9_blend_enabled(void)
 {
-	static int enabled = -1;
-	if (enabled < 0) {
-		int arg = 1;
-		PE_parse_boot_argn("sweetfb_blend", &arg, sizeof(arg));
-		enabled = arg != 0;
-	}
-	return enabled != 0;
-}
-
-/* Little-endian words: BGRA bytes read as 0xAARRGGBB. */
-static inline uint32_t
-x9_to_bgra(uint32_t v, int format)
-{
-	if (format == X9_FMT_RGBA) {
-		return (v & 0xff00ff00u) | ((v >> 16) & 0xffu) | ((v & 0xffu) << 16);
-	}
-	if (format == X9_FMT_ARGB) {
-		return __builtin_bswap32(v);
-	}
-	return v;
-}
-
-/* Premultiplied source-over: d = s + d * (255 - a) / 255, per channel. */
-static inline uint32_t
-x9_blend_pixel(uint32_t s, uint32_t d)
-{
-	uint32_t a = s >> 24;
-	if (a == 0xff) {
-		return s;
-	}
-	if (s == 0) {
-		return d;
-	}
-	uint32_t inv = 255 - a;
-	uint32_t rb = (d & 0x00ff00ffu) * inv + 0x00800080u;
-	rb = ((rb + ((rb >> 8) & 0x00ff00ffu)) >> 8) & 0x00ff00ffu;
-	uint32_t ag = ((d >> 8) & 0x00ff00ffu) * inv + 0x00800080u;
-	ag = (ag + ((ag >> 8) & 0x00ff00ffu)) & 0xff00ff00u;
-	return s + (rb | ag);
+	return x9_display::blend_enabled();
 }
 
 static void
 x9_layer_row(uint8_t *dst, const uint8_t *src, uint32_t count, int format, bool blend)
 {
-	if (format == X9_FMT_BGRA && !blend) {
-		memcpy(dst, src, (size_t)count * 4);
-		return;
-	}
-	for (uint32_t x = 0; x < count; x++) {
-		uint32_t s, d;
-		memcpy(&s, src + (uint64_t)x * 4, 4);
-		s = x9_to_bgra(s, format);
-		if (blend) {
-			memcpy(&d, dst + (uint64_t)x * 4, 4);
-			s = x9_blend_pixel(s, d);
-		}
-		memcpy(dst + (uint64_t)x * 4, &s, 4);
-	}
+	x9_display::row(dst, src, count, (x9_display::Format)format, blend);
 }
 
-/*
- * Nearest-neighbour scaled layer: source rect (sx,sy,sw,sh) onto panel rect
- * (dx,dy,dw,dh), clipped to the panel. The caller has bounds-checked the
- * whole source rect against the surface memory.
- */
 static void
 x9_layer_scaled(uint8_t *dst, uint32_t dstStride, uint32_t panelW, uint32_t panelH,
     const uint8_t *src, uint32_t srcStride, int32_t sx, int32_t sy, int32_t sw, int32_t sh,
     int32_t dx, int32_t dy, int32_t dw, int32_t dh, int format, bool blend)
 {
-	int32_t x0 = dx < 0 ? 0 : dx, y0 = dy < 0 ? 0 : dy;
-	int32_t x1 = dx + dw > (int32_t)panelW ? (int32_t)panelW : dx + dw;
-	int32_t y1 = dy + dh > (int32_t)panelH ? (int32_t)panelH : dy + dh;
-	if (x0 >= x1 || y0 >= y1) {
-		return;
-	}
-	uint64_t xstep = ((uint64_t)sw << 16) / (uint64_t)dw;
-	uint64_t ystep = ((uint64_t)sh << 16) / (uint64_t)dh;
-	for (int32_t y = y0; y < y1; y++) {
-		uint64_t row = ((uint64_t)(y - dy) * ystep) >> 16;
-		if (row >= (uint64_t)sh) {
-			row = (uint64_t)sh - 1;
-		}
-		const uint8_t *srow = src + (uint64_t)(sy + (int32_t)row) * srcStride + (uint64_t)sx * 4;
-		uint8_t *drow = dst + (uint64_t)y * dstStride;
-		uint64_t fx = (uint64_t)(x0 - dx) * xstep;
-		for (int32_t x = x0; x < x1; x++, fx += xstep) {
-			uint64_t col = fx >> 16;
-			if (col >= (uint64_t)sw) {
-				col = (uint64_t)sw - 1;
-			}
-			uint32_t s, d;
-			memcpy(&s, srow + col * 4, 4);
-			s = x9_to_bgra(s, format);
-			if (blend) {
-				memcpy(&d, drow + (uint64_t)x * 4, 4);
-				s = x9_blend_pixel(s, d);
-			}
-			memcpy(drow + (uint64_t)x * 4, &s, 4);
-		}
-	}
+	x9_display::scaled(dst, dstStride, panelW, panelH, src, srcStride, sx, sy, sw, sh,
+	    dx, dy, dw, dh, (x9_display::Format)format, blend);
 }
 
 

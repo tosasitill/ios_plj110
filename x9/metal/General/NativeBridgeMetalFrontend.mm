@@ -28,6 +28,8 @@
 #include <sys/mman.h>
 #include <sys/sysctl.h>
 #include <CommonCrypto/CommonDigest.h>
+#include <cstring>
+#include "X9BufferManager.h"
 #include "bridge/NativeMetalObjects.h"
 #include "NativeBridgeMetalFrontend.h"
 
@@ -101,11 +103,22 @@ static const X9CaptureOptions &captureOptions() {
  return options;
 }
 struct Timed {std::atomic<uint64_t> count{0},total{0},slowest{0};
- void add(uint64_t began){const uint64_t took=nowUs()-began;count++;total+=took;uint64_t seen=slowest.load();while(took>seen && !slowest.compare_exchange_weak(seen,took)){}}};
+ std::atomic<uint32_t> buckets[32]{};   // floor(log2(microseconds)), 32 buckets
+ void add(uint64_t began){const uint64_t took=nowUs()-began;count++;total+=took;uint64_t seen=slowest.load();
+  while(took>seen && !slowest.compare_exchange_weak(seen,took)){}
+  const uint32_t bucket=took?63u-(uint32_t)__builtin_clzll(took):0u;buckets[bucket>31?31:bucket]++;}};
+// Upper bound of the bucket that contains the requested rank: p95<=reported.
+static uint64_t timedPercentile(const Timed &t,unsigned percent) {
+ const uint64_t n=t.count.load();if(!n)return 0;
+ const uint64_t rank=((uint64_t)percent*n+99)/100;uint64_t seen=0;
+ for(unsigned b=0;b<32;b++){seen+=t.buckets[b].load();if(seen>=rank)return b>=31?t.slowest.load():(1ull<<(b+1))-1;}
+ return t.slowest.load();
+}
 static Timed gTimePipeline,gTimeLibrary,gTimeFunction,gTimeEncodeToCommit;
 static Timed gTimeWaitScheduled,gTimeWaitCompleted;
 static Timed gTimeResourceWait;
-static std::atomic<uint64_t> gResourceChecks,gResourceSkipped;
+static Timed gTimeSubmit,gTimeQueue;
+static std::atomic<uint64_t> gResourceChecks,gResourceSkipped,gInFlightMax;
 struct EncodedWork {uint32_t passes,draws,dispatches,blits;uint64_t pixels;};
 struct CommitRecord {uint64_t committedUs=0,callbackUs=0,ageUs=0;int64_t scheduledUs=-1;uint32_t index=0;EncodedWork work={};};
 static CommitRecord gCommitRing[32];
@@ -176,13 +189,52 @@ static void waitForResource(id resource);
 @property(nonatomic,strong) id<MTLHeap> parentHeap;
 @property(nonatomic) NSUInteger heapOffset;
 @end
+// Buffer Manager metadata. Registration and reference calls are advisory: a
+// metadata miss never refuses a Metal resource, and the kernel backend still
+// owns allocation, mapping and cache maintenance.
+static uint64_t bufferKey(const void *handle) {return (uint64_t)(uintptr_t)handle;}
+static uint32_t bufferUsageFromMetal(MTLTextureUsage usage) {
+ uint32_t out=0;
+ if(usage&MTLTextureUsageShaderRead)out|=X9BufferUsageSampled;
+ if(usage&MTLTextureUsageShaderWrite)out|=X9BufferUsageStorage;
+ if(usage&MTLTextureUsageRenderTarget)out|=X9BufferUsageRenderTarget;
+ return out;
+}
+static void registerRootBuffer(NmbBuffer *handle,uint32_t kind,uint32_t ownership,uint64_t bytes,uint64_t surface_id) {
+ if(!handle)return;
+ struct X9BufferDesc desc;memset(&desc,0,sizeof(desc));
+ desc.abi=X9_BUFFER_ABI;desc.kind=kind;desc.ownership=ownership;
+ desc.bytes=bytes;desc.surface_id=surface_id;
+ desc.plane_count=1;desc.planes[0].size=bytes;
+ x9_buffer_register(bufferKey(handle),&desc);
+}
+static void registerBufferView(NmbTexture *handle,uint64_t parent,uint32_t kind,uint32_t ownership,
+                               uint32_t usage,uint32_t format_domain,uint32_t format,
+                               uint64_t width,uint64_t height,uint64_t offset,uint64_t stride,uint64_t bytes,
+                               uint64_t surface_id) {
+ if(!handle)return;
+ struct X9BufferDesc desc;memset(&desc,0,sizeof(desc));
+ desc.abi=X9_BUFFER_ABI;desc.kind=kind?kind:X9BufferKindGPUOwned;desc.ownership=ownership;
+ desc.usage=usage;desc.format_domain=format_domain;desc.format=format;
+ desc.width=width;desc.height=height;desc.bytes=bytes;desc.parent=parent;desc.surface_id=surface_id;
+ desc.plane_count=1;desc.planes[0].offset=offset;desc.planes[0].stride=stride;desc.planes[0].size=bytes;
+ x9_buffer_register(bufferKey(handle),&desc);
+}
+static uint32_t bufferKind(NmbBuffer *handle) {
+ struct X9BufferDesc desc;struct X9BufferLifecycle life;
+ return handle&&x9_buffer_describe(bufferKey(handle),&desc,&life)?desc.kind:X9BufferKindUnknown;
+}
+static uint64_t bufferSurfaceID(NmbBuffer *handle) {
+ struct X9BufferDesc desc;struct X9BufferLifecycle life;
+ return handle&&x9_buffer_describe(bufferKey(handle),&desc,&life)?desc.surface_id:0;
+}
 static void x9_release_no_copy_block(void *context,void *pointer,uint64_t length) {
  void (^block)(void *,NSUInteger)=(__bridge_transfer void (^)(void *,NSUInteger))context;
  if(block)block(pointer,(NSUInteger)length);
 }
 static void x9_release_import_surface(void *context,void *,uint64_t) {CFRelease((IOSurfaceRef)context);}
 @implementation NBBuffer
-- (void)dealloc {nmb_buffer_release(_handle);}
+- (void)dealloc {if(_handle)x9_buffer_unregister(bufferKey(_handle));nmb_buffer_release(_handle);}
 - (NSUInteger)length {return nmb_buffer_length(_handle);}
 - (void *)contents {return nmb_buffer_contents(_handle);}
 - (uint64_t)gpuAddress {return nmb_buffer_gpu_address(_handle);}
@@ -221,6 +273,9 @@ static NBBuffer *surfaceBuffer(IOSurfaceRef surface,void *base,size_t bytes) {
  NmbBuffer *handle=nmb_buffer_new_no_copy_releasing(gDevice,base,bytes,MTLResourceStorageModeShared,x9_release_import_surface,(void *)CFRetain(surface));
  if(!handle){CFRelease(surface);NBLOG(@"native-metal: surface import refused: %@",lastError());return nil;}
  buffer=[NBBuffer new];buffer.handle=handle;buffer.options=MTLResourceStorageModeShared;
+ // The surface stays owned by its creator; the import (and this metadata) is
+ // the runtime's reference. Size is the pinned page-rounded allocation.
+ registerRootBuffer(handle,X9BufferKindIOSurface,X9BufferOwnershipImported,bytes,IOSurfaceGetID(surface));
  if(key) {
   // Bound metadata without retaining old frames. Evicting an association is
   // harmless: its owners still retain the actual import until their own end.
@@ -241,7 +296,7 @@ static bool textureDescriptor(MTLTextureDescriptor *d,NmbTextureDescriptor *out)
 }
 @implementation NBTexture
 - (instancetype)init {if((self=[super init])){static std::atomic<uint64_t> next{0};_traceID=++next;}return self;}
-- (void)dealloc {nmb_texture_release(_handle);if(_surface)CFRelease(_surface);}
+- (void)dealloc {if(_handle)x9_buffer_unregister(bufferKey(_handle));nmb_texture_release(_handle);if(_surface)CFRelease(_surface);}
 - (MTLTextureType)textureType {return (MTLTextureType)_descriptor.type;}
 - (MTLPixelFormat)pixelFormat {return (MTLPixelFormat)_descriptor.format;}
 - (NSUInteger)width {return _descriptor.width;}
@@ -273,6 +328,11 @@ NB_RESOURCE_SPI
  NBTexture *view=[NBTexture new];view.handle=handle;NmbTextureDescriptor descriptor;nmb_texture_describe(handle,&descriptor);view.descriptor=descriptor;
  view.parent=(id<MTLTexture>)self;view.buffer=_buffer;view.offset=_offset;view.rowBytes=_rowBytes;view.surfacePlane=_surfacePlane;
  if(_surface)view.surface=(IOSurfaceRef)CFRetain(_surface);
+ struct X9BufferDesc inherited;struct X9BufferLifecycle life;
+ if(x9_buffer_describe(bufferKey(_handle),&inherited,&life)) {
+  inherited.abi=X9_BUFFER_ABI;inherited.parent=bufferKey(handle);
+  x9_buffer_register(bufferKey(handle),&inherited);
+ }
  return (id<MTLTexture>)view;
 }
 - (id<MTLTexture>)newTextureViewWithPixelFormat:(MTLPixelFormat)format {
@@ -305,7 +365,14 @@ static NBTexture *textureOnBuffer(NBBuffer *buffer,MTLTextureDescriptor *d,NSUIn
  NmbTexture *handle=nmb_texture_new_on_buffer(buffer.handle,&descriptor,offset,row,surface);
  if(!handle){NBLOG(@"native-metal: texture over buffer refused: %@",lastError());return nil;}
  NBTexture *texture=[NBTexture new];texture.handle=handle;nmb_texture_describe(handle,&descriptor);texture.descriptor=descriptor;
- texture.buffer=buffer;texture.offset=offset;texture.rowBytes=row;return texture;
+ texture.buffer=buffer;texture.offset=offset;texture.rowBytes=row;
+ const uint64_t bytes=descriptor.height&&row<=UINT64_MAX/descriptor.height?row*(uint64_t)descriptor.height:0;
+ registerBufferView(handle,bufferKey(buffer.handle),
+  surface?X9BufferKindIOSurface:bufferKind(buffer.handle),
+  surface?X9BufferOwnershipImported:X9BufferOwnershipDriver,
+  bufferUsageFromMetal(d.usage),X9BufferFormatMetal,(uint32_t)descriptor.format,
+  descriptor.width,descriptor.height,offset,row,bytes,bufferSurfaceID(buffer.handle));
+ return texture;
 }
 @implementation NBBuffer (Textures)
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d offset:(NSUInteger)offset bytesPerRow:(NSUInteger)row {
@@ -617,6 +684,7 @@ static void notified(void *context,uint64_t value) {
 // Runtime handles retain storage and no-copy release contexts. Also keep the
 // Objective-C texture/heap ancestry through success, and quarantine it on GPU errors.
 @property(nonatomic,strong) NSMutableSet *resourceOwners;
+@property(atomic) BOOL bufferRefsHeld;
 @property(nonatomic,strong) dispatch_group_t handlers;
 @property(nonatomic,strong) dispatch_group_t schedulingHandlers;
 @property(nonatomic) BOOL schedulingDelivered;
@@ -1091,6 +1159,7 @@ static char kUserDictionaryKey;
 - (void)didSchedule {
  {
   const uint64_t took=nowUs()-self.committedUs;
+  gTimeQueue.add(self.committedUs);
   std::lock_guard<std::mutex> lock(gCommitLock);
   CommitRecord &r=gCommitRing[self.commitIndex%32];
   if(r.index==self.commitIndex)r.scheduledUs=took;
@@ -1110,6 +1179,15 @@ static char kUserDictionaryKey;
 }
 // After completion (or a refusal): invalidate the CPU's view of imported surfaces, then completed handlers, once.
 - (void)finish {
+ // Completion or refusal ends the GPU-visible interval exactly once. Memory is
+ // still freed by its owner; this only closes the Buffer Manager's GPU state.
+ if(self.bufferRefsHeld) {
+  self.bufferRefsHeld=NO;
+  for(id r in _resourceOwners) {
+   if([r isKindOfClass:[NBBuffer class]])x9_buffer_gpu_release(bufferKey([(NBBuffer *)r handle]));
+   else if([r isKindOfClass:[NBTexture class]])x9_buffer_gpu_release(bufferKey([(NBTexture *)r handle]));
+  }
+ }
  // Cache ownership transfers in the native kernel after confirmed group suspension
  // and AS detach. Never flush user mappings while DMA ownership may be uncertain.
  const bool safeRelease=self.failedLocally || nmb_command_buffer_status(_handle)==MTLCommandBufferStatusCompleted ||
@@ -1138,6 +1216,14 @@ static char kUserDictionaryKey;
  if(self.traceFrame)x9FrameFlush(self);
  self.committed=YES;
  self.committedUs=nowUs();
+ // Mark the GPU-visible lifetime before submission. The frontend's completion
+ // or refusal path releases it; the Buffer Manager only records the interval.
+ if(!self.encodeFailure) {
+  for(id r in _resourceOwners) {
+   if([r isKindOfClass:[NBBuffer class]])self.bufferRefsHeld|=x9_buffer_gpu_acquire(bufferKey([(NBBuffer *)r handle]));
+   else if([r isKindOfClass:[NBTexture class]])self.bufferRefsHeld|=x9_buffer_gpu_acquire(bufferKey([(NBTexture *)r handle]));
+  }
+ }
  {
   std::lock_guard<std::mutex> lock(gCommitLock);
   // Assign once under the same lock as publication. A concurrent commit cannot reuse this index.
@@ -1149,13 +1235,20 @@ static char kUserDictionaryKey;
  }
  dispatch_group_enter(_handlers);
  dispatch_group_enter(_schedulingHandlers);
- @synchronized(gInFlight){[gInFlight addObject:self];}
+ @synchronized(gInFlight){
+  [gInFlight addObject:self];
+  const uint64_t depth=gInFlight.count,seen=gInFlightMax.load();
+  if(depth>seen)gInFlightMax.store(depth);
+ }
  if(!self.encodeFailure) {
   // Native submission performs cache handoff under exclusive GPU ownership.
   // Completion owns this reference; the runtime orders the non-owning scheduled callback before it.
   void *context=(__bridge_retained void *)self;
-  if(nmb_command_buffer_on_completed(_handle,completed,context) &&
-     nmb_command_buffer_on_scheduled(_handle,scheduled,context) && nmb_command_buffer_commit(_handle))return;
+  const uint64_t submitBegan=nowUs();
+  const bool submitted=nmb_command_buffer_on_completed(_handle,completed,context) &&
+     nmb_command_buffer_on_scheduled(_handle,scheduled,context) && nmb_command_buffer_commit(_handle);
+  gTimeSubmit.add(submitBegan);
+  if(submitted)return;
   (void)CFBridgingRelease(context);   // refused registration/commit cannot call the registered handlers
   [self refuse:[@"commit: " stringByAppendingString:lastError()]];
  }
@@ -1310,7 +1403,9 @@ static bool renderDescriptor(MTLRenderPipelineDescriptor *d,NBRenderDescriptor *
  NmbBuffer *handle=nmb_heap_new_buffer(_handle,length,options,offset);
  if(!handle){NBLOG(@"native-metal: heap buffer refused: %@",lastError());return nil;}
  NBBuffer *buffer=[NBBuffer new];buffer.handle=handle;buffer.options=options;buffer.parentHeap=(id<MTLHeap>)self;
- buffer.heapOffset=offset==UINT64_MAX?0:offset;return (id<MTLBuffer>)buffer;
+ buffer.heapOffset=offset==UINT64_MAX?0:offset;
+ registerRootBuffer(handle,X9BufferKindGPUOwned,X9BufferOwnershipDriver,length,0);
+ return (id<MTLBuffer>)buffer;
 }
 - (id<MTLBuffer>)newBufferWithLength:(NSUInteger)length options:(MTLResourceOptions)options {return [self bufferWithLength:length options:options offset:UINT64_MAX];}
 - (id<MTLBuffer>)newBufferWithLength:(NSUInteger)length options:(MTLResourceOptions)options offset:(NSUInteger)offset {
@@ -1321,7 +1416,10 @@ static bool renderDescriptor(MTLRenderPipelineDescriptor *d,NBRenderDescriptor *
  NmbTexture *handle=nmb_heap_new_texture(_handle,&descriptor,offset);
  if(!handle){NBLOG(@"native-metal: heap texture refused: %@",lastError());return nil;}
  NBTexture *texture=[NBTexture new];texture.handle=handle;nmb_texture_describe(handle,&descriptor);texture.descriptor=descriptor;
- texture.parentHeap=(id<MTLHeap>)self;texture.heapOffset=offset==UINT64_MAX?0:offset;return (id<MTLTexture>)texture;
+ texture.parentHeap=(id<MTLHeap>)self;texture.heapOffset=offset==UINT64_MAX?0:offset;
+ registerBufferView(handle,0,X9BufferKindGPUOwned,X9BufferOwnershipDriver,bufferUsageFromMetal(d.usage),
+  X9BufferFormatMetal,(uint32_t)descriptor.format,descriptor.width,descriptor.height,0,0,0,0);
+ return (id<MTLTexture>)texture;
 }
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d {return [self textureWithDescriptor:d offset:UINT64_MAX];}
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d offset:(NSUInteger)offset {return [self textureWithDescriptor:d offset:offset];}
@@ -1488,13 +1586,17 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
 - (id<MTLBuffer>)newBufferWithLength:(NSUInteger)length options:(MTLResourceOptions)options {
  NmbBuffer *handle=nmb_buffer_new(gDevice,length,options,nullptr);
  if(!handle){NBLOG(@"native-metal: buffer refused: %@",lastError());return nil;}
- NBBuffer *buffer=[NBBuffer new];buffer.handle=handle;buffer.options=options;return (id<MTLBuffer>)buffer;
+ NBBuffer *buffer=[NBBuffer new];buffer.handle=handle;buffer.options=options;
+ registerRootBuffer(handle,X9BufferKindGPUOwned,X9BufferOwnershipDriver,length,0);
+ return (id<MTLBuffer>)buffer;
 }
 - (id<MTLBuffer>)newBufferWithBytes:(const void *)bytes length:(NSUInteger)length options:(MTLResourceOptions)options {
  if(!bytes)return nil;
  NmbBuffer *handle=nmb_buffer_new(gDevice,length,options,bytes);
  if(!handle){NBLOG(@"native-metal: buffer refused: %@",lastError());return nil;}
- NBBuffer *buffer=[NBBuffer new];buffer.handle=handle;buffer.options=options;return (id<MTLBuffer>)buffer;
+ NBBuffer *buffer=[NBBuffer new];buffer.handle=handle;buffer.options=options;
+ registerRootBuffer(handle,X9BufferKindGPUOwned,X9BufferOwnershipDriver,length,0);
+ return (id<MTLBuffer>)buffer;
 }
 - (id<MTLBuffer>)newBufferWithBytesNoCopy:(void *)pointer length:(NSUInteger)length options:(MTLResourceOptions)options deallocator:(void (^)(void *,NSUInteger))deallocator {
  void *context=deallocator?(__bridge_retained void *)[deallocator copy]:nullptr;
@@ -1502,13 +1604,17 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
  if(!handle){if(context)(void)(__bridge_transfer id)context;NBLOG(@"native-metal: no-copy buffer refused: %@",lastError());return nil;}
  NBBuffer *buffer=[NBBuffer new];buffer.handle=handle;buffer.options=options;
  buffer.wrapped=pointer;
+ registerRootBuffer(handle,X9BufferKindHostLinear,X9BufferOwnershipImported,length,0);
  return (id<MTLBuffer>)buffer;
 }
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d {
  NmbTextureDescriptor descriptor;if(!textureDescriptor(d,&descriptor))return nil;
  NmbTexture *handle=nmb_texture_new(gDevice,&descriptor);noteFormat((uint32_t)descriptor.format,handle!=nullptr);
  if(!handle){NBLOG(@"native-metal: texture refused: %@",lastError());return nil;}
- NBTexture *texture=[NBTexture new];texture.handle=handle;nmb_texture_describe(handle,&descriptor);texture.descriptor=descriptor;return (id<MTLTexture>)texture;
+ NBTexture *texture=[NBTexture new];texture.handle=handle;nmb_texture_describe(handle,&descriptor);texture.descriptor=descriptor;
+ registerBufferView(handle,0,X9BufferKindGPUOwned,X9BufferOwnershipDriver,bufferUsageFromMetal(d.usage),
+  X9BufferFormatMetal,(uint32_t)descriptor.format,descriptor.width,descriptor.height,0,0,0,0);
+ return (id<MTLTexture>)texture;
 }
 // The native host-import path pins this process's surface mapping and maps its
 // pages into the X9 GPU context. Runtime memory/coherency requirements must be
@@ -1535,6 +1641,16 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
    IOSurfaceGetWidth(surface),IOSurfaceGetHeight(surface),chroma-(uintptr_t)base,chromaRow);
   if(!handle){NBLOG(@"native-metal: planar surface texture refused: %@",lastError());return nil;}
   texture=[NBTexture new];texture.handle=handle;nmb_texture_describe(handle,&desc);texture.descriptor=desc;texture.buffer=buffer;texture.offset=start-(uintptr_t)base;texture.rowBytes=row;
+  struct X9BufferDesc planar;memset(&planar,0,sizeof(planar));
+  planar.abi=X9_BUFFER_ABI;planar.kind=X9BufferKindIOSurface;planar.ownership=X9BufferOwnershipImported;
+  planar.usage=bufferUsageFromMetal(d.usage);planar.format_domain=X9BufferFormatIOSurface;
+  planar.format=(uint32_t)IOSurfaceGetPixelFormat(surface);
+  planar.width=IOSurfaceGetWidth(surface);planar.height=IOSurfaceGetHeight(surface);
+  planar.surface_id=IOSurfaceGetID(surface);planar.parent=bufferKey(buffer.handle);
+  planar.plane_count=2;
+  planar.planes[0].offset=start-(uintptr_t)base;planar.planes[0].stride=row;
+  planar.planes[1].offset=chroma-(uintptr_t)base;planar.planes[1].stride=chromaRow;
+  x9_buffer_register(bufferKey(handle),&planar);
  }
  if(!texture)return nil;texture.surface=(IOSurfaceRef)CFRetain(surface);texture.surfacePlane=plane;
  // Observe the actual surface-to-runtime layout, not width*4 guesses. This
@@ -1926,8 +2042,15 @@ extern "C" size_t native_bridge_metal_telemetry(char *out,size_t size) {
  row("T library n=%llu total=%llums max=%llums",(unsigned long long)gTimeLibrary.count.load(),ms(gTimeLibrary.total.load()),ms(gTimeLibrary.slowest.load()));
  row("T function n=%llu total=%llums max=%llums",
   (unsigned long long)gTimeFunction.count.load(),ms(gTimeFunction.total.load()),ms(gTimeFunction.slowest.load()));
- row("G commit-to-complete n=%llu total=%llums max=%llums mean=%lluus",(unsigned long long)gTimeEncodeToCommit.count.load(),ms(gTimeEncodeToCommit.total.load()),
-  ms(gTimeEncodeToCommit.slowest.load()),(unsigned long long)(gTimeEncodeToCommit.count.load()?gTimeEncodeToCommit.total.load()/gTimeEncodeToCommit.count.load():0));
+ row("G ctc n=%llu p50<=%lluus p95<=%lluus p99<=%lluus max=%llums",(unsigned long long)gTimeEncodeToCommit.count.load(),
+  (unsigned long long)timedPercentile(gTimeEncodeToCommit,50),(unsigned long long)timedPercentile(gTimeEncodeToCommit,95),
+  (unsigned long long)timedPercentile(gTimeEncodeToCommit,99),ms(gTimeEncodeToCommit.slowest.load()));
+ row("T submit n=%llu p95<=%lluus max=%llums",(unsigned long long)gTimeSubmit.count.load(),
+  (unsigned long long)timedPercentile(gTimeSubmit,95),ms(gTimeSubmit.slowest.load()));
+ row("T queue n=%llu p95<=%lluus max=%llums",(unsigned long long)gTimeQueue.count.load(),
+  (unsigned long long)timedPercentile(gTimeQueue,95),ms(gTimeQueue.slowest.load()));
+ uint64_t inflight=0;@synchronized(gInFlight){inflight=gInFlight.count;}
+ row("Q inflight max=%llu now=%llu",(unsigned long long)gInFlightMax.load(),(unsigned long long)inflight);
  row("J scheduled wait n=%llu total=%llums max=%llums",(unsigned long long)gTimeWaitScheduled.count.load(),ms(gTimeWaitScheduled.total.load()),ms(gTimeWaitScheduled.slowest.load()));
  row("J completed wait n=%llu total=%llums max=%llums",(unsigned long long)gTimeWaitCompleted.count.load(),ms(gTimeWaitCompleted.total.load()),ms(gTimeWaitCompleted.slowest.load()));
  row("J resource wait n=%llu total=%llums max=%llums",(unsigned long long)gTimeResourceWait.count.load(),ms(gTimeResourceWait.total.load()),ms(gTimeResourceWait.slowest.load()));
