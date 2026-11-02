@@ -1,3 +1,42 @@
+## Active:217 runtime decoded; CPU geometry clean; PanVK v14 HSR can_cull gap (2026-11-02)
+
+- User ran217 (plugin X9GeneralMetal217 at3.302s, capture inputs0/pixels0,
+  x9vg active) reproducing Control Center/App Library blur defect: diagonal
+  half-quad missing blur + flicker. Log preserved (gitignored) at
+  .local/analysis-geometry217/runtime217.raw.log; decoder decode_geom.py and
+  output geometry-decoded.txt in the same directory.
+- OBSERVED: 18 GEOM draws over3 windows incl. count54x5/48/24/18 multi-quad
+  draws. Every draw INDICES complete=1 readable=1, no SKIP/OOB/truncation;
+  all quads canonical (n,n+1,n+2,n+2,n+3,n) or a consistent 4x4 nine-patch;
+  positions form exact rectangles/parallelograms, UVs affine with positions,
+  w=1, viewport/scissor match attachments, cull0. CA packs uniforms,vertices
+  and indices contiguously in one256KiB ring (e.g. verts3408+36*48=idx5136).
+  8 COMMIT/COMPLETE pairs, all status4. => Apple input + X9 frontend encode
+  are correct for these draws. (CPU encode snapshot; GPU fetch not observed.)
+- OBSERVED: kernel flush_gpu (FLUSH_CACHES0x23304,L2+LSC clean/inv) before
+  and after every job; coherent skip inactive (group0_type=0); CIVAC kept for
+  cacheable exposed; jobs complete before return.
+- OBSERVED (log, 03 patch probe): CA tile-reading shaders read RT1 (read=2)
+  with write=1 or3, i.e. memoryless color1 (load0/store0) is a tile-local
+  scratch carried BETWEEN draws of one pass.
+- SOURCE (upstream Mesa300b5fd csf/panvk_vX_cmd_draw.c ~2510 vs ~2605): legacy
+  FPK requires !(rt_mask & ~rt_written) (draw must write EVERY bound RT before
+  killing earlier fragments); v13+ hsr_can_cull omits that term (only !ld_tile,
+  rt_written!=0, !(read&written), !any_dest_read). A later opaque draw writing
+  only RT0 can thus be marked able to cull an earlier draw whose RT1 output a
+  later LD_TILE draw needs. Culling follows the later primitive's triangles
+  and in-flight timing -> matches diagonal halves + flicker.
+- INFERENCE, NOT PROVEN: layer most likely PanVK (v14 HSR DCD flags), not
+  metal2vk (deterministic per-vertex translation cannot intermittently drop
+  one triangle of a static quad) nor X9 kernel cache path. Non-prepass HSR
+  semantics on G925 remain unverified; no per-draw can_cull log for RT0-only
+  writers yet. User previously rejected an HSR rollback; this is a DIFFERENT,
+  narrower change. Awaiting user decision before implementing.
+- Proposed single-variable candidate218: add !(rt_mask & ~out->rt_written)
+  to hsr_can_cull (mirrors FPK), optional bounded log of can_cull for draws
+  with rt_mask&~rt_written. Only removes culling; no shader/sync changes.
+  No build, device action or commit of code this turn.
+
 ## Active:217 vertex/triangle observation built; NOT staged;216 CANCELLED (2026-11-01)
 
 - User explicitly rejected the HSR direction and now asks to first locate the
