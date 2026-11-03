@@ -25,6 +25,9 @@ static unsigned x9_lk_count, x9_lk_id, x9_lk_mask, x9_lk_active;
 static volatile uint32_t *x9_lk_canonical;
 static unsigned x9_lk_submit_lock;
 static unsigned x9_lk_gui_armed;
+/* Every scanned EXDMA engine, kept for the read-only layer dump. */
+static volatile uint32_t *x9_lk_engines[13];
+static uint64_t x9_lk_engine_pa[13];
 
 static int
 x9_lk_layer(volatile uint32_t *p, uint64_t *address, unsigned *swap)
@@ -86,6 +89,7 @@ x9_lk_prepare(volatile uint32_t *canonical)
   uint64_t address;
   unsigned swap;
   if (!p) return 0;
+  x9_lk_engines[i] = p; x9_lk_engine_pa[i] = engine[i];
   if (!x9_lk_layer(p, &address, &swap)) continue;
   if (format_seen && first_swap != swap) return 0;
   format_seen = 1; first_swap = swap;

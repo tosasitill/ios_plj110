@@ -738,8 +738,48 @@ int x9_lk_gui_busy(void) {
 }
 /* Read only: known LK buffers and the already used DSI status register.
  * No guessed addresses and no extra MMIO writes. */
+/* Once: every EXDMA engine LK left configured, accepted or not. LK's
+ * orange-state banner stays on screen while we only refresh the accepted
+ * full-screen layer; this names the layer that still carries it. Read only. */
+static void x9_lk_engine_dump(void) {
+ static int done;if(done)return;done=1;
+ for(unsigned i=0;i<13;i++) {
+  volatile uint32_t *p=x9_lk_engines[i];if(!p)continue;
+  uint32_t en=X9_LK_READ(p,0x20),layer=X9_LK_READ(p,0x40),size=X9_LK_READ(p,0x48),fmt=X9_LK_READ(p,0x50);
+  uint32_t high=X9_LK_READ(p,0xf4c);uint64_t address=X9_LK_READ(p,0xf40)|((uint64_t)(high&15)<<32);
+  unsigned accepted=0;for(unsigned j=0;j<x9_lk_count;j++)accepted|=x9_lk_addresses[j]==address;
+  printf("X9 LK engine: i=%u pa=%llx en=%08x layer=%08x size=%ux%u fmt=%08x pitch=%u off44=%08x off4c=%08x r2f0=%08x r300=%08x addr=%llx accepted=%u\n",
+   i,x9_lk_engine_pa[i],en,layer,size&0x3fffu,(size>>16)&0x3fffu,fmt,X9_LK_READ(p,0x2f4)&0xffffu,
+   X9_LK_READ(p,0x44),X9_LK_READ(p,0x4c),X9_LK_READ(p,0x2f0),X9_LK_READ(p,0x300),address,accepted);
+ }
+}
+/* Boot token x9lo: clear (to transparent black) the buffer of every other
+ * enabled LK layer whose memory lies inside LK's framebuffer reservation:
+ * the orange-state banner. Memory only; no display register is written. */
+static void x9_lk_clear_overlays(void) {
+ static int done;if(done)return;done=1;
+ int v=0;if(!PE_parse_boot_argn("x9lo",&v,sizeof(v)))return;
+ for(unsigned i=0;i<13;i++) {
+  volatile uint32_t *p=x9_lk_engines[i];if(!p)continue;
+  uint32_t en=X9_LK_READ(p,0x20),layer=X9_LK_READ(p,0x40),size=X9_LK_READ(p,0x48);
+  uint32_t high=X9_LK_READ(p,0xf4c);uint64_t address=X9_LK_READ(p,0xf40)|((uint64_t)(high&15)<<32);
+  uint32_t w=size&0x3fffu,h=(size>>16)&0x3fffu,pitch=X9_LK_READ(p,0x2f4)&0xffffu;
+  unsigned accepted=0;for(unsigned j=0;j<x9_lk_count;j++)accepted|=x9_lk_addresses[j]==address;
+  if(!(en&1)||!(layer&1)||accepted||!w||!h||pitch<w*4||(high&~15u))continue;
+  uint64_t bytes=(uint64_t)pitch*h;
+  if(address<X9_LK_FB||address+bytes>X9_LK_FB+X9_LK_RESERVE){
+   printf("X9 LK overlay: i=%u addr=%llx %ux%u outside LK reservation; left alone\n",i,address,w,h);continue;}
+  volatile uint32_t *fb=X9_LK_MAP_FB(address);
+  if(!fb){printf("X9 LK overlay: i=%u map failed\n",i);continue;}
+  for(uint64_t k=0;k<bytes/4;k++){fb[k]=0;if(!(k&0xffffu))X9_LK_PET();}
+  X9_LK_FENCE();
+  printf("X9 LK overlay: i=%u addr=%llx %ux%u pitch=%u cleared (x9lo)\n",i,address,w,h,pitch);
+ }
+}
 void x9_lk_gui_probe(void) {
  if(!x9_lk_active)return;
+ x9_lk_engine_dump();
+ x9_lk_clear_overlays();
  printf("X9 LK status: dsi=%08x buffers=%u mask=%x id=%u te_armed=%u\n",
      X9_LK_READ(x9_lk_dsi,0x0c),x9_lk_count,x9_lk_mask,x9_lk_id,x9_lk_gui_armed);
  for(unsigned i=0;i<x9_lk_count;i++) {

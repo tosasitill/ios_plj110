@@ -15,7 +15,8 @@ IOReturn x9_render_memory_reassert_wc(X9RenderContext *c,uint64_t *checked,uint6
  if(!c||!checked||!reset||c->disabled||c->exposed)return kIOReturnNotReady;
  *checked=*reset=0;
  for(auto &r:c->resources)if(r.memory&&r.write_combined) {
-  if(r.imported||!r.prepared||(r.bytes&(PAGE_SIZE-1)))return kIOReturnBadArgument;
+  if(r.imported)continue;   // write-combined host imports keep their own pages' mode
+  if(!r.prepared||(r.bytes&(PAGE_SIZE-1)))return kIOReturnBadArgument;
   for(uint64_t off=0;off<r.bytes;) {
    IOByteCount bytes=0;
    uint64_t pa=r.memory->getPhysicalSegment(off,&bytes,kIOMemoryMapperNone);

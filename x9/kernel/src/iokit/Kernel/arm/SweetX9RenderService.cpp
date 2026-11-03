@@ -12,6 +12,7 @@
 #include <pexpert/pexpert.h>
 #include <libkern/libkern.h>
 extern "C" vm_map_address_t phystokv(uint64_t pa);
+#include <vm/memory_types.h>
 extern "C" unsigned int pmap_cache_attributes(ppnum_t pn);
 extern "C" int sweet_x9_render_memlimit(task_t owner);
 /* A fresh write-combined BO's pages were zero-filled by the VM through the
@@ -262,10 +263,34 @@ class SweetX9RenderUserClient : public IOUserClient {
       (unsigned long long)request.bytes,(unsigned long long)pa,pa?pmap_cache_attributes((ppnum_t)(pa>>PAGE_SHIFT)):0xffffffffu);
     }
    }
+   /* An imported host range whose every physical page is write-combined
+    * (e.g. SweetSurface IOSurfaces) has no cacheable alias: the WIMG mode is
+    * per physical page and shared by all its mappings. Treat it like a WC BO
+    * and skip per-submission CIVAC (rev246: ~82 MB cleaned and ~47 MB
+    * invalidated per job across all imports). One cacheable page keeps the
+    * full maintenance. Boot token x9iw disables this. */
+   bool import_wc=false;
+   if(selector==X9RenderImportHost) {
+    static int off=-1;if(off<0){int v=0;off=PE_parse_boot_argn("x9iw",&v,sizeof(v))?1:0;}
+    import_wc=!off;
+    for(uint64_t at=0;import_wc&&at<request.bytes;) {
+     IOByteCount span=0;uint64_t pa=memory->getPhysicalSegment(at,&span,kIOMemoryMapperNone);
+     if(!pa||!span){import_wc=false;break;}
+     if(span>request.bytes-at)span=request.bytes-at;
+     for(uint64_t page=pa&~((uint64_t)PAGE_MASK);page<pa+span;page+=PAGE_SIZE)
+      if((pmap_cache_attributes((ppnum_t)(page>>PAGE_SHIFT))&VM_WIMG_MASK)!=VM_WIMG_WCOMB){import_wc=false;break;}
+     at+=span;
+    }
+    static uint64_t imports=0,wc_imports=0,wc_bytes=0,cached_bytes=0;
+    imports++;if(import_wc){wc_imports++;wc_bytes+=request.bytes;}else cached_bytes+=request.bytes;
+    if(imports<=4||!(imports&63))
+     IOLog("X9 RENDER IMPORT WC: imports=%llu wc=%llu wc_bytes=%llu cached_bytes=%llu last=%llu/%s%s\n",imports,wc_imports,wc_bytes,cached_bytes,
+      (unsigned long long)request.bytes,import_wc?"wc":"cached",off?" (x9iw: skip disabled)":"");
+   }
    uint32_t handle=++context->next_handle;
    context->resources[slot]={memory,request.bytes,handle,request.flags,true,selector==X9RenderImportHost,false,selector==X9RenderImportHost};
-   context->resources[slot].write_combined=wc;
-   context->resources[slot].initial_cache_clean=wc;
+   context->resources[slot].write_combined=wc||import_wc;
+   context->resources[slot].initial_cache_clean=wc||import_wc;
    context->resources[slot].created=mach_absolute_time();
    context->allocated_bytes+=request.bytes;
    context->window_allocs++;context->window_alloc_bytes+=request.bytes;

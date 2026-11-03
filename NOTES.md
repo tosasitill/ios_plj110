@@ -1,3 +1,25 @@
+## rev246 results; rev247: WC host-import skip, LK layer dump / x9lo (2026-11-03)
+
+- 15.txt default rev246: status bar OK (DynamicSplitMedium errno=0). per job pre 4.0 + wait 6.6 + post 2.3
+  = 12.9 ms, 26.1 jobs/s, display 8.9 copies/s, gpu_defer 5.2/s.
+- 16.txt x9qd: USER: severe screen jitter, touch uncontrollable. per job 7.3 ms but display 2.2
+  copies/s. Reading: with a userspace submit thread, CoreAnimation's swap can reach the kernel
+  before the GPU job does; the lock-free present then copies incomplete/old surfaces. Async submit
+  needs per-surface present fences (design 3.4) first. x9qd stays opt-in, not to be used.
+- Cache cost source (15.txt cache-reach): import_pre_avg 82,440,691 B cleaned and import_post_avg
+  47,055,047 B invalidated PER JOB = every import of backboardd (LIVE: imported=202/93MiB), "kernel
+  mapping bounds, not dirty tracking"; WC BOs already skip ~480 MB/job.
+- rev247 kernel: X9RenderImportHost whose every physical page has pmap WIMG == VM_WIMG_WCOMB
+  (SweetSurface IOSurfaces map WC) is marked write_combined -> no per-job CIVAC, like WC BOs.
+  Boot token x9iw disables. Log "X9 RENDER IMPORT WC: imports wc wc_bytes cached_bytes".
+  x9_render_memory_reassert_wc now skips imports instead of failing.
+- LK orange-state banner (user: always shown at the top, "another layer not refreshed"): kernel
+  x9_lk_layer accepts only the 1256x2760/5120-pitch layer (buffers=1). rev247 logs every scanned EXDMA
+  engine once ("X9 LK engine: i pa en layer size fmt pitch addr accepted"); boot token x9lo zeroes the
+  buffer of other enabled layers inside the LK reservation (memory only, no register writes,
+  "X9 LK overlay: ... cleared"). LK RE material on the Mac: ~/Downloads/03-安全研究/LK-C17,
+  .local/x9/work/lk-preserve-dali (references/legacy-notes/wiki/MT6993-Display.md).
+
 ## Active: rev246 built, awaiting device test (2026-11-03)
 
 - x9/out/x9-rev246 (default) and x9/out/x9-rev246-qd (boot-arg x9qd), same kernel and plugin package
