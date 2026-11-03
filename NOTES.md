@@ -1,3 +1,27 @@
+## MT6993 DSP/audio port feasibility assessed against the UniXNU `porting/power` page (2026-11-03, docs only)
+
+- 源码取证 (read-only pass over `~/HelioDarwin/oppo-source`, nothing built, nothing flashed):
+  the assessment landed as [docs/audio/porting-difficulty.md](docs/audio/porting-difficulty.md).
+  Verdict 中高, staged: A = AFE `0x1a110000` (GIC_SPI 384) → ADDA → MTKAIF v4 → MT6681 over I2C,
+  no DSP at all; B = ADSP offload; C = capture; D = SCP voice (not scheduled).
+- The UniXNU page is Qualcomm-only (GLINK/SMEM, AudioReach/GPR, q6apm, WCD938x/SoundWire).
+  取证: `adsp|audio_ipi|audio_dsp|audio_scp` give **0** hits for `audio_reach|gpr|apm|tplg|topology`
+  and **0** for `request_firmware|iova|iommu|dma_map_`. What we CAN reuse is their OS-side shape
+  only: `hal/ShengAudioPlugIn.c` (703 lines, a plain `AudioServerPlugIn` bundle),
+  `package/ShengAudioService.cpp` (143 lines, `IOService` + `clientMemoryForType` rings +
+  `NativeSandboxGrantProcess = audiomxd,mediaserverd`) and the host-clock 24 MHz fix.
+  MTK needs no graph objects: opening a path is 4 messages (`OPEN/HWPARAM/PREPARE/START`),
+  81 message IDs, 16-byte header + 96-byte payload (`MAX_IPI_MSG_BUF_SIZE 112`), 10 ms queue timeout.
+- Two blockers are cheap to settle and are NOT resolved:
+  1. this build reads AFE IRQ status through `arm_smccc_smc(SMC_SC_NBL_VHM_REQ, 0x90000000, hwirq…)`
+     (`mt6993-afe-pcm.c:7049`) instead of `regmap_read` - test a direct MMIO read from XNU first;
+  2. nothing in-tree loads the ADSP image ("Reserved memory allocated from lk") - probe whether the
+     carve-out still carries firmware when we boot our shim instead of Android.
+- 推断 (not measured): A ≈ 3-6 周, B +4-8 周, C ≈ 2-3 周. No audio behaviour is DEVICE VERIFIED anywhere
+  in this document; the sweet `VirtualAudio.plugin → HAL.disabled` move only masked the symptom.
+- Next: capture the live board DTB (the attached dts is SoC-level; audio-json/board wiring is absent),
+  then the A0/A1 read-only probe list. No production code changed by this assessment.
+
 ## rev249-lo device-verified: banner blanked AND picture restored once the 249 payload was staged into the mailbox (2026-11-03)
 
 - 实测 (22.txt, 7234 lines to 102 s, user flashed after running the staging command):
