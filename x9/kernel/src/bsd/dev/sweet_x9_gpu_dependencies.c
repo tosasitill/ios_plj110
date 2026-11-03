@@ -201,7 +201,7 @@ static void gov_thread(void *arg,wait_result_t result) {
  const uint64_t period_ns=50ull*1000*1000;
  uint64_t last_busy=sweet_x9_gpu_busy_ns,last_log=mach_absolute_time(),commits=0,busy_acc=0,ticks=0;
  int last_temp=0;
- printf("X9 GPU GOV: start floor=%d(%u kHz) ceiling=%d(%u kHz) slowest=%d period=50ms up>80%% down<30%%\n",
+ printf("X9 GPU GOV: start floor=%d(%u kHz) ceiling=%d(%u kHz) slowest=%d period=50ms up>=20%% down<5%%\n",
   gov_floor,opp_khz[gov_floor],gov_ceiling,opp_khz[gov_ceiling],gov_slowest);
  for(;;) {
   gov_sleep_ms(50);
@@ -215,7 +215,10 @@ static void gov_thread(void *arg,wait_result_t result) {
   if(temp<1||temp>150||temp>=80)fastest=gov_floor;
   if(temp>=90&&temp<=150)fastest=gov_slowest;
   int target=gov_index<0?gov_floor:gov_index;
-  if(util>80)target-=4;else if(util<30)target+=2;
+  /* Submissions are synchronous and serialized: frame time is the sum of
+   * per-job GPU latency, so any sustained load benefits from a higher clock
+   * (rev244: 23% util, 10 ms wait per job, 9 frames/s). */
+  if(util>=20)target-=4;else if(util<5)target+=2;
   if(target<fastest)target=fastest;
   const int slowest_allowed=fastest>gov_floor?fastest:gov_floor;
   if(target>slowest_allowed)target=slowest_allowed;

@@ -2002,18 +2002,19 @@ static void installAnswers(Class cls) {
 extern "C" id native_bridge_metal_open(const char *loader,const char *cache,uint64_t registryID,void (*missing)(const char *,const char *)) {
  if(gDeviceObject)return gDeviceObject;
  gMissing=missing;gInFlight=[NSMutableSet set];
- // A/B (boot-arg token x9h0): host-page textures keep metal2vulkan's default
- // InPlace policy (render targets and shader writes through a shadow) instead
- // of rendering directly into imported IOSurface pages (InPlaceWrites, since
- // 353ae1c). The swipe mosaic appeared after that change.
+ // Host-page textures (boot-arg token x9h1 opts back in to InPlaceWrites):
+ // rendering directly into imported IOSurface pages (353ae1c) caused the swipe
+ // mosaic (rev244: gone with metal2vulkan's default InPlace policy, where
+ // render targets and shader writes use a shadow). Default is that safe policy
+ // until the imported-memory cache handoff for in-place render targets is fixed.
  {
-  char args[4096]={};size_t bytes=sizeof(args)-1;bool shadow=false;
+  char args[4096]={};size_t bytes=sizeof(args)-1;bool writes=false;
   if(!sysctlbyname("kern.bootargs",args,&bytes,nullptr,0)) {
    args[sizeof(args)-1]=0;
-   for(const char *p=args;*p;){while(*p&&(unsigned char)*p<=32)++p;const char *e=p;while(*e&&(unsigned char)*e>32)++e;if(e-p==4&&!memcmp(p,"x9h0",4))shadow=true;p=e;}
+   for(const char *p=args;*p;){while(*p&&(unsigned char)*p<=32)++p;const char *e=p;while(*e&&(unsigned char)*e>32)++e;if(e-p==4&&!memcmp(p,"x9h1",4))writes=true;p=e;}
   }
-  if(shadow)setenv("X9_HOST_TEXTURE_SHADOW","1",1);
-  NBLOG(@"X9 HOST TEXTURES: policy=%s (x9h0 = InPlace with render-target shadows)",shadow?"InPlace":"InPlaceWrites");
+  if(writes)setenv("X9_HOST_TEXTURE_INPLACE_WRITES","1",1);
+  NBLOG(@"X9 HOST TEXTURES: policy=%s (x9h1 = InPlaceWrites, mosaic risk)",writes?"InPlaceWrites":"InPlace");
  }
  gDevice=nmb_device_open(loader,cache);
  if(!gDevice){NBLOG(@"native-metal: device refused: %s",nmb_last_error());return nil;}

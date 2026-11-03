@@ -1,3 +1,27 @@
+## Active: mosaic root cause = 353ae1c InPlaceWrites; performance breakdown; rev245 (2026-11-03)
+
+- rev244 x9h0 (/tmp/12.txt, "X9 HOST TEXTURES: policy=InPlace" in backboardd+SpringBoard): USER: NO
+  mosaic, but very laggy. => swipe mosaic is caused by host-page textures rendering directly into
+  imported IOSurface pages (353ae1c, HostPageTexturePolicy::InPlaceWrites). Exact missing cache
+  handoff for in-place render targets not yet located.
+- Performance (job-weighted averages from X9 RENDER timing, both runs ~22-23 jobs/s):
+  11.txt InPlaceWrites: pre_cache 3.9 + wait 7.9 + post_cache 2.2 = 14.0 ms/job, display 10.4 copies/s
+  12.txt InPlace:       pre_cache 4.2 + wait 10.0 + post_cache 2.5 = 16.6 ms/job, display 8.9 copies/s
+  (gpu_defer 3-5/s). ~2.3 synchronous jobs per frame, nothing overlaps -> ~9-10 frames/s on screen.
+  Shadows cost ~+19%/job; CPU cache maintenance of imports ~6.7 ms/job (~40%); GPU wait 10 ms is
+  per-job latency (governor util 12-25% is misleading for a serialized pipeline).
+- UniXNU porting/gpu (zh, read 2026-11-03): WC pageable BOs without CPU maintenance, batch maps with no
+  TLB invalidation at submit, completion thread instead of blocking callers, spare BO/image reuse,
+  shader prewarm; "per-call overhead decides smoothness". No numbers; Adreno/Turnip, not Mali.
+- rev245 changes: (1) default host-page policy is the safe InPlace; token x9h1 re-enables
+  InPlaceWrites (env X9_HOST_TEXTURE_INPLACE_WRITES); x9h0 removed. (2) governor latency-oriented:
+  up 4 indices at util >= 20% per 50 ms window, down 2 below 5% (thermal limits unchanged).
+  NOT built (tunnel down).
+- Biggest remaining levers (needs user decisions in docs/graphics/submission-decoupling-design.md
+  section 10): asynchronous kernel submission queue (removes the 10 ms wait from the Metal call path,
+  lets CA encode/display overlap); exact per-submission resource sets to cut the 6.7 ms of import
+  cache maintenance; then fix in-place render-target coherence to drop the shadows.
+
 ## Swipe mosaic regression bisect: rev244 tokens x9h0 / x9r1 / x9r3 (2026-11-03)
 
 - rev243 result (/tmp/10.txt x9c0, /tmp/11.txt control): mosaic in BOTH -> CRC hypothesis
