@@ -355,7 +355,11 @@ static void x9FrameFlush(NBCommandBuffer *cb) {
   const double px=(c[0]/c[3]+1)/2*vw+vx,py=(1-c[1]/c[3])/2*vh+vy;
   [pts addObject:@[@(px),@(py)]];x0=MIN(x0,px);y0=MIN(y0,py);x1=MAX(x1,px);y1=MAX(y1,py);
  }
- if(x1-x0<150||y1-y0<150)return;
+ // Whole draw on screen and at least 200x200: CC module cards (~511x511),
+ // not edge strips whose vertices run off the target (rev234 burned both
+ // picks on a 105x834 clipped strip at x=1151 before CC was opened).
+ if(x1-x0<200||y1-y0<200)return;
+ if(x0<-0.5||y0<-0.5||x1>t0.width+0.5||y1>t0.height+0.5)return;
  const int64_t bx=MAX((int64_t)floor(x0)-2,0ll),by=MAX((int64_t)floor(y0)-2,0ll);
  const int64_t ex=MIN((int64_t)ceil(x1)+2,(int64_t)t0.width),ey=MIN((int64_t)ceil(y1)+2,(int64_t)t0.height);
  if(ex<=bx||ey<=by)return;

@@ -1,3 +1,20 @@
+## Active: rev234 ran but picked no CC draw; rev235 pick filter (source only) (2026-11-03)
+
+- User re-staged the mailbox; /tmp/3.txt (2.96 MB) shows "active plugin=X9GeneralMetal234"
+  at 3.430 s. The earlier errno=2 line at 0.982 s is from before the plugin root was ready.
+- Log timestamps are ~32 s behind uptime (FRAME CB f=1 log 32.612 = uptime 64.477 s).
+- Replay ran cleanly: f=51 (uptime ~69 s), 2 picks, ffid66, both the same 6-vertex strip,
+  box 1151,0,105x834 (vertices off the right edge, clipped). 24 passes, GRID printed, no failure.
+  All variants including 10 are ~all magenta. Not CC; no evidence about the triangle.
+- The capture windows (uptime 64/80/125 s) held no 9-vertex CC card draws, so CC was not
+  open during them.
+- rev235 change (X9FrameCapture.inc): a replay pick needs the projected draw fully inside
+  the target and at least 200x200. Earlier CC picks (82.8..593.7, 511 px) still qualify.
+  NOT compiled (tunnel down).
+- Test: build rev235, run mailbox/update.py, boot. Open CC as soon as the desktop appears
+  and keep it open and static for ~2 min (picks are the first 2 qualifying draws after
+  uptime 45 s).
+
 ## Active: rev234 first boot failed: plugin package not staged (2026-11-03)
 
 - Log /tmp/3.txt (2,683 lines, to ~94 s). Kernel is rev234: at 0.844 s
