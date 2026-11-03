@@ -1,3 +1,33 @@
+## GPU 优化空间评估 vs UniXNU `porting/gpu` + 厂商 Avalon DDK (2026-11-03, docs only)
+
+- 取证 (read-only; nothing built, nothing flashed): report at
+  [docs/graphics/gpu-optimization-headroom.md](docs/graphics/gpu-optimization-headroom.md). Inputs =
+  the UniXNU Adreno740 page, our kernel/userspace tree, and
+  `~/HelioDarwin/oppo-source/modules/vendor/mediatek/kernel_modules/gpu` — MT6993 builds
+  `gpu_mali/mali_avalon/a16w` = Arm DDK **r54p1-11eac0**, CSF (`fragment/mt6993.fragment:5`).
+- 结论: 那篇页面的映射微优化对我们只部分适用 — (a) WC 分配和 (d) 的"只填无效叶子"我们已有，
+  (b)/(c) 没有对应物因为我们 SMMU 是 bypass、Mali AS 没有 per-page TLBI。真正的余量在
+  实测 12,011 µs/job 的三块: `wait` 51% (同步 submit-and-wait + 每轮 poll 重发缓存命令)、
+  `pre_cache+post_cache` 38% (59.2+33.5 MB/job 软件缓存维护)、`start+retire` 7%
+  (每次提交 2× `FLUSH_CACHES` + `install_as/remove_as` 4 次 `idle_as` 轮询)。
+- 结构性根因 (取证): `map()/unmap()` 在 `vm->attached` 时直接返回 busy
+  (`X9RenderPageTable.cpp:96,104`)，而 `attached` 只有在提交末尾 detach 时才为假 —
+  所以映射无法与执行重叠。厂商在同一 GPU 上用的是 per-AS、VA-range、`FLUSH_PT|FLUSH_MEM`
+  且 arch>11 只做 TLB-invalidate、且**不在提交路径** (`mali_kbase_mmu_hw_direct.c:543-608`)。
+- 厂商另外证明了两件事: MT6993 唯一启用 `CONFIG_MALI_MTK_COHERENT_DMA_BUF=y` +
+  `of_dma_is_coherent` → 他们几乎不做 CPU 缓存维护 (池页只在分配时同步一次);
+  以及 `CSG_SUSPEND_TIMEOUT` 从 3100M 砍到 150M cycles。我们的 `x9_gpu_coherent=1`
+  是**未验证就跳过** CIVAC，同一个东西既是最大性能项也是最大正确性风险 (CACHE-3)。
+- 完全缺失 (取证): pipeline 预热 (`__primelist`/prime 线程/pipeline pack 一个都没有，
+  `NativeMetalCompiler.inc:6-18` 是调用者 join 的同步编译)、client BO 池与 spare 老化、
+  batch map (PanVK 只接受 IMMEDIATE，一个 op 一次 IOKit call)、O(1) handle 索引
+  (5 处 O(4096) 扫描/提交)、transient/memoryless 附件、damage present、任何线程优先级。
+- 度量缺口 (必须先补): 全仓库没有 FPS/stutter 指标、GPU 时间戳未与 CPU 阶段链对齐、
+  `wait` 内队列 vs GPU 执行仍无法拆分; `first-frame-experiment-plan.md` 仍是设计稿。
+- Next (待用户选): 1) 先落 P3 度量并刷机取一轮日志; 2) P0-B 一致性实测探针 (读回 L2/SMMU
+  snoop + CPU/GPU 竞态回读), 有证据后再扩大 coherent 路径; 3) P0-C 常驻 AS + 范围失效原型。
+  No production code changed by this assessment; CC platter bug remains unresolved per spec §3.2D.
+
 ## MT6993 DSP/audio port feasibility assessed against the UniXNU `porting/power` page (2026-11-03, docs only)
 
 - 源码取证 (read-only pass over `~/HelioDarwin/oppo-source`, nothing built, nothing flashed):
