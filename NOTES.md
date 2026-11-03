@@ -1,3 +1,19 @@
+## Active: rev234 first boot failed: plugin package not staged (2026-11-03)
+
+- Log /tmp/3.txt (2,683 lines, to ~94 s). Kernel is rev234: at 0.844 s
+  "X9 RENDER EXTERNAL: missing/mismatched path=/System/Library/Extensions/
+  X9GeneralMetal234.bundle/Info.plist errno=2; discovery disabled", then
+  "not armed errno=2". No X9 GENERAL METAL / RENDER DISCOVERY lines, so the
+  Metal plugin never loaded and the a3517e9 probe code never ran.
+- Consequence: SpringBoard sig 11 pc=0 x11 restart loop (first at 24.8 s),
+  no desktop. The locationd/Intents/TTS crashes are secondary.
+- Cause (observed): boot.img expects the rev234 bundles, but the device mailbox
+  still holds an older package (ENOENT on the 234 path). This is a staging step,
+  not a compile error.
+- Fix: python3 -I x9/mailbox/update.py x9/out/x9-rev234-uv --serial <serial>
+  (from Android, needs "Mailbox committed ... read back"), then fastboot boot
+  the matching x9/out/x9-rev234-uv/boot.img.
+
 ## Active: rev233 replay re-read + UV-gradient probe (source only) (2026-11-03)
 
 - Log /tmp/2.txt on the analysis server (rev233, x9vf, 49,308 lines, to uptime 1020 s).
