@@ -1,3 +1,19 @@
+## Brightness (backlight) porting assessed: difficulty 中低, lowest open subsystem; doc landed (2026-11-03)
+
+- Read-only assessment written to `docs/brightness/porting-difficulty.md`; no production code
+  changed, no build, no device touched.
+- 实测 from source: X9 brightness is **not** the I2C/GENI path the unixnu display page
+  demonstrates. The board DT (`oppo-source/modules/vendor/oplus/kernel/devicetree/oplus-display/`,
+  panel `ac287`, board `mt6993-zhujiang-24203`) sets it with a MIPI DCS `0x51` long write,
+  range 1..4094, and `display_backlight_on()` at x9/shim/display.c:497 already lit the glass
+  in LP mode (pan36, recorded in that file's own comment; pan35 HS failed with SoT errors).
+- Remaining work is small: swap the QCOM `dsiSend()` register layout for the MT6993 LP long
+  write, change the nits->DBV constant 0x7ff -> 0xffe, and un-gate `AppleARMBacklight` (it is
+  currently blocked on `fDsi`, which only the QCOM branch maps). Top risk is injecting a DCS
+  write into the per-frame fresh-TE/DSI_START loop, and CoreBrightness digital dimming.
+- Not verified (stopped per the user's no-disk-scan rule): the `mtk_drm_setbacklight()` body is
+  not in the two oplus dirs, so "level is passed straight through" stays 推断, listed as open.
+
 ## GPU 优化空间评估 vs UniXNU `porting/gpu` + 厂商 Avalon DDK (2026-11-03, docs only)
 
 - 取证 (read-only; nothing built, nothing flashed): report at
