@@ -1,3 +1,47 @@
+## Active: rev233 replay re-read + UV-gradient probe (source only) (2026-11-03)
+
+- Log /tmp/2.txt on the analysis server (rev233, x9vf, 49,308 lines, to uptime 1020 s).
+  Replay picks: ONE CB only (cb=81 = capture f=5, uptime ~92 s), 4 picks =
+  draws n=93 (vfid25/ffid24, A8 122x62 mask at slot 3), n=94 (vfid27/ffid35,
+  507x507 surface 79 at slot 3), n=95 (24-vertex nine-patch corners, ffid68),
+  n=102 (second card at x=660, ffid24). All non-indexed, stride 48,
+  a0=Float4@0, a1=Float2@16; 9-vertex order: (BR,TL,BR) zero-area, (TL,TR,BR), (BR,BL,TL).
+- OBSERVED: whole-draw replays (variants 0 and 7) cover the "lost"
+  triangle (BR,BL,TL) 4/4 for n=93/94 (3/4 for n=102). So in this pipeline set the
+  triangle is rasterized. Every 3-vertex replay (1..6, 8, 9) covered 0 of its
+  sample points, including the vertically/horizontally mirrored copies.
+- OBSERVED harness flaw: rev233 is pre-6c80fa7 (shared target per pick).
+  n=93 variant 5 is a zero-area triangle alone yet left 836 non-magenta
+  samples (box_uncovered 15805/16641), and identical variants 1/2 disagree
+  (16641 vs 15257). So 3-vertex results in this log are not trustworthy.
+- OBSERVED, not proof: n=94 whole draw, tri1 samples vary
+  (af8425/ae8425/b68f44/b0862e), tri2's four samples (uv y 0.5..0.83) are all
+  ~bd9e5e on a 507x507 real texture. Consistent with tri2 getting a constant/wrong
+  texcoord varying instead of not being rasterized.
+- INFERENCE: "covered = pixel != magenta" cannot tell "not rasterized" from
+  "rasterized but shader output == destination". For the FBF darkening shaders
+  (fid76 in 225), a wrong colour/uv varying would look exactly like a lost
+  triangle. The earlier "triangle never rasterized" readings (225-228) are
+  therefore not proven; varying/IDVS output is the better-supported lead.
+- Merged main 6c80fa7 into this branch (77a9811): per-pass box-sized
+  targets, variants 0,1,5,6,8 x2 repeats, 2 picks/process, 2D draws only.
+- New (this commit, X9FrameCapture.inc only, x9vf only): variant 10 = whole
+  draw with every fragment texture slot bound to a 256x256 BGRA8 gradient
+  (B=0x40, G=y, R=x). Printed bgra = 40 GG RR ff -> sampled uv ~ (RR+0.5)/256,
+  (GG+0.5)/256. Run twice like the others. X9 FRAME REPLAY GRID lines: 16x16
+  box-relative grid (cell centres) for variant 0 and 10, repeat 0.
+  Readback budget factor 10 -> 12 passes/pick. NOT compiled: tunnel down
+  (ssh -p 2222 refused, 2026-11-03).
+- Reading the next log: variant 10 grid smooth and continuous across the
+  diagonal and matching vertex texcoords -> varyings fine, look at the FS/
+  FBF path; tri2 flat or discontinuous at the diagonal -> varying (IDVS
+  generic varying buffer / attribute fetch for vertices 6..8) wrong while
+  position is right -> next instrument PanVK varying buffer for that draw.
+  If GRID equals magenta in tri2 for variant 10 too -> really not rasterized.
+- Build: python3 x9/build/build.py all --revision 234 --name x9-rev234-uv
+  --boot-arg x9vf; open CC before ~45-60 s and keep it static (picks are the
+  first 2 eligible draws after 45 s in backboardd).
+
 ## Active: rev233 logging build (2026-11-02)
 
 - Branch feat/G1Ultra, HEAD 0f9745a. Built and packaged locally; NOT flashed,

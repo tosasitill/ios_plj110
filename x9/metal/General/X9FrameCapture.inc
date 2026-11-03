@@ -74,11 +74,25 @@ static void x9FrameReplay(NBCommandBuffer *cb) {
  NSMutableArray *results=[NSMutableArray array];uint64_t total=0;
  for(NSDictionary *r in replays) {
   NSArray *box=r[@"box"];const uint64_t bw=[box[2] unsignedLongLongValue],bh=[box[3] unsignedLongLongValue];
-  total+=((bw*4+255)&~255ull)*bh*10;
+  total+=((bw*4+255)&~255ull)*bh*12;
  }
  if(total>192ull*1024*1024){NSLog(@"X9 FRAME REPLAY SKIP: f=%llu bytes=%llu reason=budget",(unsigned long long)cb.traceID,(unsigned long long)total);cb.traceFrameReplaying=NO;return;}
  id<MTLBuffer> readback=[device newBufferWithLength:total options:MTLResourceStorageModeShared];
  if(!readback){NSLog(@"X9 FRAME REPLAY SKIP: f=%llu reason=readback",(unsigned long long)cb.traceID);cb.traceFrameReplaying=NO;return;}
+ // Variant 10 binds this in place of every fragment texture: 256x256 BGRA8,
+ // R=x G=y B=0x40, so each written pixel encodes the interpolated texcoord
+ // the shader sampled with (fetch -> varying -> raster, end to end).
+ static id<MTLTexture> gradient;
+ if(!gradient) {
+  MTLTextureDescriptor *gd=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:256 height:256 mipmapped:NO];
+  gd.usage=MTLTextureUsageShaderRead;gd.storageMode=MTLStorageModeShared;
+  gradient=[device newTextureWithDescriptor:gd];
+  if(gradient) {
+   NSMutableData *g=[NSMutableData dataWithLength:256*256*4];uint8_t *q=(uint8_t *)g.mutableBytes;
+   for(unsigned y=0;y<256;y++)for(unsigned x=0;x<256;x++){uint8_t *o=q+(y*256+x)*4;o[0]=0x40;o[1]=(uint8_t)y;o[2]=(uint8_t)x;o[3]=0xff;}
+   [gradient replaceRegion:MTLRegionMake2D(0,0,256,256) mipmapLevel:0 withBytes:q bytesPerRow:256*4];
+  }
+ }
  uint64_t at=0;
  for(NSDictionary *r in replays) {
   NBTexture *a0=r[@"att0"];id a1=r[@"att1"];
@@ -122,10 +136,12 @@ static void x9FrameReplay(NBCommandBuffer *cb) {
   // Every pass gets its own box-sized targets (viewport shifted by the box
   // origin), so no pass's readback can race a later pass's clear; variants
   // 0,1,5,6,8 each run twice to measure whether the GPU result repeats.
-  for(unsigned pass=0;pass<20;pass++) {
-   const unsigned variant=pass%10,repeat=pass/10;
-   if(variant!=0&&variant!=1&&variant!=5&&variant!=6&&variant!=8)continue;
-   if(variant>=6&&!owned[variant-6])continue;
+  // 10 is the whole draw with the UV-gradient texture in every slot.
+  for(unsigned pass=0;pass<22;pass++) {
+   const unsigned variant=pass%11,repeat=pass/11;
+   if(variant!=0&&variant!=1&&variant!=5&&variant!=6&&variant!=8&&variant!=10)continue;
+   if(variant==10&&!gradient)continue;
+   if(variant>=6&&variant<10&&!owned[variant-6])continue;
    if(variant<6&&!ranges[variant][1])continue;
    MTLTextureDescriptor *td=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:a0.pixelFormat width:bw height:bh mipmapped:NO];
    td.usage=MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead;td.storageMode=MTLStorageModePrivate;
@@ -153,9 +169,10 @@ static void x9FrameReplay(NBCommandBuffer *cb) {
     if(stage==1){if(b)[e setVertexBuffer:b offset:off atIndex:slot];else if(bytes.length)[e setVertexBytes:bytes.bytes length:bytes.length atIndex:slot];}
     else if(stage==2){if(b)[e setFragmentBuffer:b offset:off atIndex:slot];else if(bytes.length)[e setFragmentBytes:bytes.bytes length:bytes.length atIndex:slot];}
    }
-   NSDictionary *textures=r[@"textures"];for(NSNumber *key in textures)[e setFragmentTexture:textures[key] atIndex:key.unsignedIntegerValue];
+   NSDictionary *textures=r[@"textures"];for(NSNumber *key in textures)[e setFragmentTexture:variant==10?gradient:textures[key] atIndex:key.unsignedIntegerValue];
    NSDictionary *samplers=r[@"samplers"];for(NSNumber *key in samplers)[e setFragmentSamplerState:samplers[key] atIndex:key.unsignedIntegerValue];
-   if(variant>=6) {
+   if(variant==10)[e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:start vertexCount:count];
+   else if(variant>=6) {
     [e setVertexBuffer:owned[variant-6] offset:0 atIndex:vslot];
     [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:variant==7?count:3];
    } else if(variant==3||variant==4)
@@ -166,10 +183,11 @@ static void x9FrameReplay(NBCommandBuffer *cb) {
    [blit copyFromTexture:c0 sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(bw,bh,1)
                 toBuffer:readback destinationOffset:at destinationBytesPerRow:row destinationBytesPerImage:row*bh];
    [blit endEncoding];
-   const NSUInteger rel=variant>=6?0:variant==3||variant==4?count-3:ranges[variant][0]-start;
-   const NSUInteger vcount=variant>=6?(variant==7?count:3):ranges[variant][1];
+   const bool whole=variant==10;
+   const NSUInteger rel=whole?0:variant>=6?0:variant==3||variant==4?count-3:ranges[variant][0]-start;
+   const NSUInteger vcount=whole?count:variant>=6?(variant==7?count:3):ranges[variant][1];
    [results addObject:@{@"r":r,@"variant":@(variant),@"repeat":@(repeat),@"at":@(at),@"row":@(row),@"first":@(rel),@"count":@(vcount),
-    @"pts":variant>=6?ownedPts[variant-6]:allPts}];
+    @"pts":whole?allPts:variant>=6?ownedPts[variant-6]:allPts}];
    at+=row*bh;
   }
  }
@@ -187,6 +205,16 @@ static void x9FrameReplay(NBCommandBuffer *cb) {
    uint64_t magenta=0,sampled=0;
    for(int64_t y=0;y<bh;y+=4)for(int64_t x=0;x<bw;x+=4){const uint8_t *q=bytes+base+y*row+x*4;sampled++;if(q[0]==255&&q[1]==0&&q[2]==255&&q[3]==255)magenta++;}
    NSLog(@"X9 FRAME REPLAY RESULT: f=%u n=%@ variant=%@ repeat=%@ first=%u count=%u box_uncovered=%llu/%llu",f,r[@"n"],res[@"variant"],res[@"repeat"],first,cnt,(unsigned long long)magenta,(unsigned long long)sampled);
+   // 16x16 pixel grid over the box (cell centres), one row per line, for
+   // the whole draw with real (0) and gradient (10) textures. Box-relative.
+   const unsigned variantN=[res[@"variant"] unsignedIntValue];
+   if((variantN==0||variantN==10)&&[res[@"repeat"] unsignedIntValue]==0)
+    for(unsigned gy=0;gy<16;gy++) {
+     NSMutableString *line=[NSMutableString string];const int64_t iy=(int64_t)((gy+0.5)*bh/16);
+     for(unsigned gx=0;gx<16;gx++){const int64_t ix=(int64_t)((gx+0.5)*bw/16);const uint8_t *q=bytes+base+iy*row+ix*4;
+      [line appendFormat:@" %02x%02x%02x%02x",q[0],q[1],q[2],q[3]];}
+     NSLog(@"X9 FRAME REPLAY GRID: f=%u n=%@ v=%u y=%lld%@",f,r[@"n"],variantN,iy,line);
+    }
    for(unsigned t=first;t+3<=first+cnt;t+=3) {
     double P[3][2];for(unsigned k=0;k<3;k++){P[k][0]=[pts[t+k][0] doubleValue];P[k][1]=[pts[t+k][1] doubleValue];}
     const double area=((P[1][0]-P[0][0])*(P[2][1]-P[0][1])-(P[2][0]-P[0][0])*(P[1][1]-P[0][1]))/2;
