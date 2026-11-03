@@ -621,6 +621,7 @@ static void x9LogFunctionConstants(id function,NSString *name,const std::vector<
 @property(nonatomic,copy) NSString *traceVertex,*traceFragment;
 @property(nonatomic) uint64_t traceVertexID,traceFragmentID;
 @property(nonatomic,strong) MTLVertexDescriptor *traceLayout;
+@property(nonatomic,strong) MTLVertexDescriptor *padLayout;   // always kept: x9PadDraw
 @property(nonatomic,copy) NSString *traceBlend;
 @property(nonatomic,strong) NSArray *traceWriteMasks;   // per colour attachment, MTLColorWriteMask
 @end
@@ -757,7 +758,12 @@ static void waitForResource(id resource) {
  }
  gTimeResourceWait.add(began);
 }
-@implementation NBEncoder
+@implementation NBEncoder {
+ @public
+ // Vertex-stage bindings as the app set them, for the partial-vertex-group
+ // workaround in NBRenderEncoder (x9PadDraw): buffer+offset or inline bytes.
+ NBBuffer *_padBuf[31];NSUInteger _padOff[31];NSData *_padBytes[31];
+}
 - (instancetype)init {
  if((self=[super init])) {
   // Stable for the entire encoder lifetime (including after endEncoding), not
@@ -786,6 +792,7 @@ static void waitForResource(id resource) {
 - (void)buffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset index:(NSUInteger)index stage:(uint32_t)stage {
  if(buffer && ![(id)buffer isKindOfClass:[NBBuffer class]]){[_commandBuffer refuse:@"foreign buffer"];return;}
  if(buffer)[_commandBuffer.resourceOwners addObject:buffer];
+ if(stage==1&&index<31){_padBuf[index]=(NBBuffer *)buffer;_padOff[index]=offset;_padBytes[index]=nil;}
  [self check:nmb_encoder_set_buffer(_handle,stage,buffer?[(NBBuffer *)buffer handle]:nullptr,offset,(uint32_t)index) what:"setBuffer"];
 }
 - (void)texture:(id<MTLTexture>)texture index:(NSUInteger)index stage:(uint32_t)stage {
@@ -800,6 +807,7 @@ static void waitForResource(id resource) {
  [self check:nmb_encoder_set_sampler(_handle,stage,sampler?[(NBSampler *)sampler handle]:nullptr,(uint32_t)index) what:"setSamplerState"];
 }
 - (void)bytes:(const void *)bytes length:(NSUInteger)length index:(NSUInteger)index stage:(uint32_t)stage {
+ if(stage==1&&index<31){_padBuf[index]=nil;_padOff[index]=0;_padBytes[index]=bytes&&length<=4096?[NSData dataWithBytes:bytes length:length]:nil;}
  [self check:nmb_encoder_set_bytes(_handle,stage,bytes,length,(uint32_t)index) what:"setBytes"];
 }
 - (void)fence:(id<MTLFence>)fence stages:(uint64_t)stages update:(bool)update {
@@ -810,6 +818,7 @@ static void waitForResource(id resource) {
 - (void)updateFence:(id<MTLFence>)fence {[self fence:fence stages:0 update:true];}
 - (void)waitForFence:(id<MTLFence>)fence {[self fence:fence stages:0 update:false];}
 - (void)offset:(NSUInteger)offset index:(NSUInteger)index stage:(uint32_t)stage {
+ if(stage==1&&index<31)_padOff[index]=offset;
  [self check:nmb_encoder_set_buffer_offset(_handle,stage,offset,(uint32_t)index) what:"setBufferOffset"];
 }
 @end
@@ -849,6 +858,7 @@ static void waitForResource(id resource) {
 
 @interface NBRenderEncoder : NBEncoder
 @property(nonatomic,strong) NBRenderPipeline *tracePipeline;
+@property(nonatomic,strong) NBRenderPipeline *padPipeline;
 @property(nonatomic,strong) NSMutableDictionary *traceBuffers;
 @property(nonatomic,strong) NSMutableDictionary *traceTextures;
 @property(nonatomic,copy) NSString *tracePass;
@@ -875,6 +885,7 @@ static void waitForResource(id resource) {
 - (void)setRenderPipelineState:(id<MTLRenderPipelineState>)state {
  if(![(id)state isKindOfClass:[NBRenderPipeline class]]){[self.commandBuffer refuse:@"foreign render pipeline"];return;}
  if(captureOptions().inputs||captureOptions().tracksGeometry())self.tracePipeline=(NBRenderPipeline *)state;
+ self.padPipeline=(NBRenderPipeline *)state;
  [self check:nmb_render_set_pipeline(self.handle,[(NBRenderPipeline *)state handle]) what:"setRenderPipelineState"];
 }
 - (void)setVertexBuffer:(id<MTLBuffer>)b offset:(NSUInteger)o atIndex:(NSUInteger)i {[self buffer:b offset:o index:i stage:1];}
@@ -943,9 +954,72 @@ static void waitForResource(id resource) {
 - (void)setBlendColorRed:(float)r green:(float)g blue:(float)b alpha:(float)a {
  const float c[4]={r,g,b,a};[self check:nmb_render_set_blend_color(self.handle,c) what:"setBlendColor"];
 }
+// Partial final IDVS vertex group workaround (default on; boot-arg token x9p0
+// disables it). rev240/241 replays: in non-indexed triangle lists whose vertex
+// count is not a multiple of 4, the LAST vertex is intermittently placed wrong
+// (Control Center card diagonal split); the same draw padded with copies of its
+// last vertex to 12/24/48 vertices was exact and deterministic every time.
+// Pads to a multiple of 12 (3 and 4) through inline vertex bytes, then restores
+// the app's bindings. Anything it cannot copy exactly takes the original path.
+static bool x9PadEnabled() {
+ static int enabled=-1;
+ if(enabled<0) {
+  int off=0;char args[4096]={};size_t bytes=sizeof(args)-1;
+  if(!sysctlbyname("kern.bootargs",args,&bytes,nullptr,0)) {
+   args[sizeof(args)-1]=0;
+   for(const char *p=args;*p;){while(*p&&(unsigned char)*p<=32)++p;const char *e=p;while(*e&&(unsigned char)*e>32)++e;if(e-p==4&&!memcmp(p,"x9p0",4))off=1;p=e;}
+  }
+  enabled=!off;
+  NSLog(@"X9 PAD: partial vertex group padding %s (x9p0 disables)",enabled?"on":"off");
+ }
+ return enabled;
+}
+static std::atomic<uint64_t> gPadDone{0},gPadSkipped{0};
+- (bool)x9PadDraw:(MTLPrimitiveType)t start:(NSUInteger)s count:(NSUInteger)n instances:(NSUInteger)i baseInstance:(NSUInteger)b {
+ if(t!=MTLPrimitiveTypeTriangle||s!=0||i!=1||n<3||n%12==0||n>96||!x9PadEnabled())return false;
+ MTLVertexDescriptor *layout=self.padPipeline.padLayout;
+ if(!layout){gPadSkipped++;return false;}
+ const NSUInteger padN=(n+11)/12*12;
+ uint32_t slots=0;
+ for(unsigned a=0;a<31;a++) {
+  MTLVertexAttributeDescriptor *ad=layout.attributes[a];
+  if(ad.format==MTLVertexFormatInvalid)continue;
+  if(ad.bufferIndex>=31){gPadSkipped++;return false;}
+  slots|=1u<<ad.bufferIndex;
+ }
+ if(!slots){gPadSkipped++;return false;}
+ NSData *data[31]={};
+ for(unsigned k=0;k<31;k++)if(slots>>k&1) {
+  MTLVertexBufferLayoutDescriptor *vl=layout.layouts[k];
+  const uint64_t stride=vl.stride;
+  if(vl.stepFunction!=MTLVertexStepFunctionPerVertex||!stride||padN*stride>4096){gPadSkipped++;return false;}
+  const uint8_t *src=nullptr;uint64_t avail=0;
+  if(_padBuf[k]) {
+   NBBuffer *buffer=_padBuf[k];
+   if(buffer.storageMode!=MTLStorageModeShared||!buffer.contents||_padOff[k]>buffer.length){gPadSkipped++;return false;}
+   src=(const uint8_t *)buffer.contents+_padOff[k];avail=buffer.length-_padOff[k];
+  } else if(_padBytes[k]){src=(const uint8_t *)_padBytes[k].bytes;avail=_padBytes[k].length;}
+  if(!src||avail<n*stride){gPadSkipped++;return false;}
+  NSMutableData *m=[NSMutableData dataWithBytes:src length:n*stride];
+  for(NSUInteger v=n;v<padN;v++)[m appendBytes:src+(n-1)*stride length:stride];
+  data[k]=m;
+ }
+ bool ok=true;
+ for(unsigned k=0;k<31;k++)if(data[k])ok=ok&&nmb_encoder_set_bytes(self.handle,1,data[k].bytes,data[k].length,k);
+ if(ok)ok=nmb_render_draw(self.handle,t,0,(uint32_t)padN,1,(uint32_t)b);
+ for(unsigned k=0;k<31;k++)if(data[k]) {
+  if(_padBuf[k])nmb_encoder_set_buffer(self.handle,1,[_padBuf[k] handle],_padOff[k],k);
+  else nmb_encoder_set_bytes(self.handle,1,_padBytes[k].bytes,_padBytes[k].length,k);
+ }
+ if(!ok){[self check:false what:"drawPrimitives (padded)"];return true;}
+ const uint64_t done=++gPadDone;
+ if(done==1||!(done&16383))NSLog(@"X9 PAD: padded=%llu skipped=%llu last=%llu->%llu",(unsigned long long)done,(unsigned long long)gPadSkipped.load(),(unsigned long long)n,(unsigned long long)padN);
+ return true;
+}
 - (void)drawPrimitives:(MTLPrimitiveType)t vertexStart:(NSUInteger)s vertexCount:(NSUInteger)n instanceCount:(NSUInteger)i baseInstance:(NSUInteger)b {
  [self traceDraw:t start:s count:n indices:nil offset:0 indexType:MTLIndexTypeUInt16 baseVertex:0 instances:i baseInstance:b];
  gDraws++;self.commandBuffer->encodedWork.draws++;
+ if(!self.commandBuffer.traceFrameReplaying&&[self x9PadDraw:t start:s count:n instances:i baseInstance:b])return;
  [self check:nmb_render_draw(self.handle,t,(uint32_t)s,(uint32_t)n,(uint32_t)i,(uint32_t)b) what:"drawPrimitives"];
 }
 - (void)drawPrimitives:(MTLPrimitiveType)t vertexStart:(NSUInteger)s vertexCount:(NSUInteger)n instanceCount:(NSUInteger)i {
@@ -1825,6 +1899,7 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
  delete p;
  if(!handle)return failWith<id<MTLRenderPipelineState>>(error,@"render pipeline",nil);
  NBRenderPipeline *state=[NBRenderPipeline new];state.handle=handle;
+ state.padLayout=[d.vertexDescriptor copy];
  if(captureOptions().inputs||captureOptions().tracksGeometry()) {
  state.traceVertex=d.vertexFunction.name;state.traceFragment=d.fragmentFunction.name;
  state.traceVertexID=x9FrameObjectID(d.vertexFunction);state.traceFragmentID=x9FrameObjectID(d.fragmentFunction);

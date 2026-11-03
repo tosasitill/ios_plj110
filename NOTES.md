@@ -1,3 +1,29 @@
+## Active: rev241 confirms partial final vertex group; rev242 frontend padding workaround (2026-11-03)
+
+- rev241 log /tmp/8.txt (backboardd 128 MiB heap, X9GeneralMetal241). Picks: n1 6-vertex ffid66
+  (290,494,259x258), n2 CC card 9-vertex ffid24 (80,228,516x516).
+- OBSERVED: padded variants 13/14/15 (12/24/48 vertices) give ONE hash each over all 10
+  passes: n1 ae1f81b5... (3857 uncovered), n2 b3fb843a... (257 uncovered = exactly the 1-column
+  + 1-row box border, i.e. geometrically exact). Unpadded v0/v7: n2 mostly 234 (23 samples
+  drawn OUTSIDE the card -> a vertex overshoots) and v0 r3 910; n1 mostly nothing written
+  (4225), v0 r3 4224. Padding to 12 == 24 == 48.
+- CONCLUSION (replay level): non-indexed triangle lists whose count is not a multiple of 4 get a
+  wrong position for the last vertex (deterministically wrong or intermittently wrong);
+  padding with copies of the last vertex makes the draw exact. PanVK passes INDEX_COUNT =
+  vertex count unchanged (csf launch_draw), so masking of the extra lanes in the last group is
+  hardware/firmware or shared lowering; BIR vs Kraid (rev228) made no difference.
+- rev242 change (NativeBridgeMetalFrontend.mm): x9PadDraw, default ON, boot-arg x9p0 disables.
+  Non-indexed MTLPrimitiveTypeTriangle, vertexStart 0, 1 instance, count%12 != 0, count<=96,
+  all attributes per-vertex in CPU-readable buffers/inline bytes, padded size <= 4 KiB: copy
+  count vertices + copies of the last vertex up to a multiple of 12 into inline vertex bytes,
+  draw, restore the app's bindings. Replay passes (traceFrameReplaying) are NOT padded, so the
+  replay keeps showing the raw bug. Encoder now mirrors vertex bindings (_padBuf/_padOff/
+  _padBytes in NBEncoder); pipelines keep padLayout. Logs "X9 PAD: ... on" once and
+  "X9 PAD: padded=N skipped=M" at 1 and every 16384. NOT compiled (tunnel down).
+- Test: build rev242 with --boot-arg x9vt (capture + 128 MiB backboardd heap + padding).
+  Visual A/B without capture: --boot-arg x9p0 (padding off). If the CC split is gone with
+  padding, keep the workaround and then hunt the root cause (indexed draws are not covered).
+
 ## Active: rev240 = heap ruled out; last vertex of 9-vertex draws misplaced; rev241 padding probe (2026-11-03)
 
 - rev240 log /tmp/7.txt (3.1 MB): "X9 TILER HEAP: proc=backboardd ... linked=64 bytes=134217728"
