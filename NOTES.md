@@ -1,3 +1,58 @@
+## rev247-lo panic root-caused; rev248 moves the x9lo clear into AppleCLCD (2026-11-03)
+
+- rev247-lo (x9lo) did panic, and the reason is now measured, not guessed. The 8 MiB disk ring
+  (.local/x9/work/x9-disk-log/x9-rev247lo-20261103-200934.log, header CRC valid, seq 11) stops
+  mid-line at [10.236] "X9 LK engine: i=7". Android pstore went further:
+  .local/x9/work/x9-disk-log/pstore-20261103-201049/console-ramoops-0.raw (heavily bit-flipped,
+  fields not reconstructed) reaches engine i=12 at [10.275], then
+  [10.281] `kmem_alloc(0xfffffe000ec22668, 14139392, 0x100020): failed with 3 @vm_kern.c:178` and
+  [10.287] `panic: (cpu 7 caller 0xfffffe0007bf8ca0)`, then [10.291] the shim prints "log ready"
+  again = reset. So x9_lk_clear_overlays() never printed a single "X9 LK overlay" line.
+- Cause (measured): 14139392 = round_page(5120*2760) at 16 KiB pages, i.e. the exact
+  X9_LK_MAP_FB()/ml_io_map_wcomb() size. flags 0x100020 = KMA_NOFAIL|KMA_PAGEABLE|KMA_PERMANENT,
+  which in xnu-8796.141.3 is io_map()'s permanent 8 MiB io_submap (same class as the earlier
+  ml_io_map-per-submit panic in this file). A frame-sized request can never be satisfied there,
+  and KMA_NOFAIL turns that into a panic instead of a NULL. pexpert has no IOMemoryDescriptor, so
+  the clear cannot live in pe_serial.c at 10 s; the identical 14 MiB map only works early because
+  fbcon_probe() does it before that budget is committed.
+- Orange-state banner root cause (实测, from the clean 17.txt engine dump, not pstore): EXDMA
+  i=3 pa=32970000 en=00000011 layer=00000001 size=1256x2760 fmt=00000002 **pitch=5024**
+  addr=fd6a8000 accepted=0, while the accepted boot layer i=2 is the same geometry at pitch=5120.
+  5024 = 1256*4 (no padding), so x9_lk_layer()'s `pitch == 5120` term is what rejects it; every
+  other predicate passes and 0xfd6a8000 is exactly one 14,254,080-byte slot inside the reservation.
+  buffers=1 in both rev247 runs: LK keeps blending that stale layer over every frame we push and
+  nothing ever writes it. rev248 keeps it rejected (mirroring our 5120-stride frame into a
+  5024-stride buffer would shear the image) and only zeroes it.
+- rev248: pe_serial.c x9_lk_clear_overlays() -> x9_lk_scan_overlays(), which discovers and queues
+  (address/rounded bytes/engine, max 4) and maps nothing; new x9_lk_overlay(index,...) accessor.
+  AppleCLCD got sweet_x9_clear_lk_overlays() (SweetFramebuffer.cpp), called right after both
+  x9_lk_gui_probe() sites, using IOMemoryDescriptor::withPhysicalAddress + map
+  (kIOMapWriteCombineCache) - the same route the boot scanout surface already uses, NULL-checkable
+  instead of panicking - then a store loop with sweet_watchdog_pet() every 256 KiB. It samples a
+  256-point strided grid before and after ("X9 LK overlay: i=.. before/after ... nonblack=.. checksum=..
+  zero wrote in .. us"), so the run proves whether the banner pixels really live at 0xfd6a8000.
+  Engine dump now also prints f4c (the only register x9_lk_layer() tests that was not printed).
+- Why zeroing is safe rather than screen-blackening: our content is visible everywhere except the
+  banner strip, so that layer's blend honours per-pixel alpha; an opaque layer would already have
+  hidden the console. 推断, to be confirmed by the after-clear screenshot.
+- 18.txt "not smoother" is a separate, unchanged problem: rev247's WC host-import skip matched
+  nothing (imports=832 wc=0) and per-job cache traffic is the same as rev246 (65.9 vs 67.5 MB
+  cleaned, 31.0 vs 36.1 MB invalidated). The 17-vs-15 delta is GPU completion wait
+  (median 6.82 -> 10.93 ms), with the display path identical; still needs an x9iw control run.
+- Build env on this Mac broke for the documented `python3 -I x9/build/build.py`: PATH had no
+  llvm-objcopy and -I hides ~/Library/Python/3.15/lib/python/site-packages, where lz4 now lives,
+  so packaging failed after the kernel linked. Workaround used here (kernel itself unchanged):
+  export X9_OBJCOPY/X9_NM=/opt/homebrew/opt/llvm@22/bin/... and run the same boot-xnu.py command
+  line taken from `--dry-run` without `-I`. Worth fixing properly (install lz4 into the brew
+  python's own site, or stop using -I in build.py) before the next agent burns time on it.
+- Artifacts: x9/out/x9-rev248 (default) and x9/out/x9-rev248-lo (same kernel, extra boot-arg
+  x9lo), boot.img 9,428,992 B each, plugins X9GeneralMetal248/X9PanVK248, allowlist regenerated.
+  Kernel binary contains 8 "X9 LK overlay" strings. Device test is the user's; expect boot to
+  survive past 10.3 s with x9lo this time.
+- Next if the banner survives a successful clear: the buffer was the wrong target, and the 13
+  EXDMA nodes are exhausted (dump shows only i=2/i=3 enabled), so the remaining suspects are the
+  BL1/OUTPROC/DLO/PQ/RSZ blocks, which this kernel has never read.
+
 ## rev246 results; rev247: WC host-import skip, LK layer dump / x9lo (2026-11-03)
 
 - 15.txt default rev246: status bar OK (DynamicSplitMedium errno=0). per job pre 4.0 + wait 6.6 + post 2.3
