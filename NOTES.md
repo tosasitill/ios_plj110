@@ -1,3 +1,13 @@
+## USB log tool restored (2026-11-03)
+
+- The user's log capture tool usb_log.py (formerly
+  /Users/tosasitill/HelioDarwin-x9-lk-preserve/work/x9-usb-live/usb_log.py) was in x9/legacy,
+  removed in 81069e5; the old workspace is deleted. It is now maintained at
+  x9/tools/usb-live/ (usb_log.py, tests, log_protocol.h, kernel-prototype/build-kernel.py).
+  SHA-256 b2b0509a... identical to .local/x9/work/x9-usb-live/usb_log.py (still present).
+  Usage: python3 x9/tools/usb-live/usb_log.py --output /tmp/N.txt
+- USER (rev240, backboardd 128 MiB): flicker NOT reduced vs 32 MiB.
+
 ## Active: rev239 result (32 MiB heap real) + rev240 backboardd 128 MiB (2026-11-03)
 
 - rev239 log /tmp/6.txt (3.7 MB, X9GeneralMetal239). "X9 TILER HEAP ... requested=5 linked=16
