@@ -1,3 +1,52 @@
+## rev248-lo: banner gone, black screen is SpringBoard's null-call crash loop; rev249 adds read-only x9ob (2026-11-03)
+
+- rev248-lo 实测 (14.txt, 2689 lines to 88.6 s, no panic, no kmem_alloc this time):
+  `[10.362] X9 LK overlay: i=3 addr=fd6a8000 1256x2760 pitch=5024 13877248 B queued`,
+  `before sampled=256 nonblack=1 checksum=fffffc03` → `after clear ... nonblack=0
+  checksum=00000000 zero wrote in 3258 us`, and the user confirms the orange-state banner
+  disappeared. So the target address and the mechanism are both right.
+- That cleared buffer is NOT the picture: only 1 of 256 grid samples had any RGB bits set, i.e.
+  banner ink over a black/transparent background. A buffer carrying a picture samples ~256/256
+  (17.txt slot0 at 34.573 s: `nonblack=255`, then 256 and held there to 80 s).
+- The picture is missing in 14.txt because XNU produced no frames at all: cadence shows
+  copies=1 then copies=2 and then copies=0 forever (last non-zero window 12.208 s), heartbeat
+  `swap_id` stuck at 5 from 20 s to 80 s, slot0 (0xfc910000) samples stay nonblack<=2 the whole
+  run. 17.txt (rev247 default, x9lo off) in the same wall clock reaches copies 3..50 per 2 s
+  window, swap_id 889 and a full-content slot0.
+- Reason, measured: SpringBoard segfaults repeatedly - 10 events, `sig 11 code 0x100000001`,
+  `pc 0x0 lr 0x1d7c5c58c`, each ~4 ms after `IOK SpringBoard: matching1 ... IOAcceleratorES ->
+  IOAcceleratorES`, every ~7 s from 23.068 s to 84.713 s (PIDs 26,257,274,286,296,...). In
+  17.txt SpringBoard (pid 26) survives to 66 s, never calls matching1 for the accelerator
+  (only the iterator `matching` -> 1 found at 29.128 s) and goes on to create IOSurfaces.
+  14.txt also has 0 `MESA: error` lines where 17.txt has 337: the GPU/WSI path was never
+  reached because the client kept dying. locationd/WeatherIntents/... crash loops are much
+  heavier in 14.txt too (104 vs 88 locationd, 44 vs 4 IntentsExtension).
+- 推断, not proven by one run: the overlay write is not what kills SpringBoard (it lands 12 s
+  earlier on a different path). rev249 makes this testable with a single binary:
+  `x9lo` (bare, which XNU parses as -1, or `=1`) blanks the queued layer; `x9ob` (bare) and
+  `x9lo=2` sample it and write nothing. The 607-byte boot-arg budget fits " x9lo"/" x9ob"
+  exactly (607 used) but not " x9lo=2", hence the separate short token.
+- rev249 code: pe_serial.c keeps the token level (`x9_lk_overlay_mode`) and now also exports
+  each queued layer's pitch and height through `x9_lk_overlay()`; AppleCLCD got
+  `sweet_x9_report_lk_overlay()`, a 256x256 grid that classifies every sample as ink /
+  opaque_black (0xff000000) / transparent (alpha 0) / other_alpha, reports the ink bounding
+  box, the rolling checksum and the measured read time, printed before and after the store
+  loop plus the zeroing duration. Descriptor direction changed to kIODirectionInOut, which
+  removes rev248-lo's `warning: creating writable mapping from IOMemoryDescriptor
+  (kIODirectionOut)` and its Backtrace line; the mapping route itself (withPhysicalAddress +
+  kIOMapWriteCombineCache) is unchanged and demonstrably safe (the whole write stayed inside
+  LK's reservation: 0xfd6a8000 + 0xD3C000 = 0xfe3e4000 < 0xfff70000).
+- Artifacts: x9/out/x9-rev249-lo and x9/out/x9-rev249-obs, same kernel, boot.img 9,428,992 B
+  each, plugins X9GeneralMetal249/X9PanVK249. Kernel compile emitted no new warnings (only the
+  pre-existing kern_exec.c -Wdeclaration-after-statement list). Build still needs the env
+  workaround: X9_OBJCOPY/X9_NM from /opt/homebrew/opt/llvm@22/bin and boot-xnu.py run without
+  -I with X9_CC=<out>/build-tools/x9-clang, X9_LD=lld@22, SDKROOT/DEVELOPER_DIR from Xcode.
+- Next: flash both; whichever one shows SpringBoard surviving is the display baseline. If the
+  crash loop appears in both, the overlay write is exonerated and the black screen is the
+  IOAcceleratorES open path (null function pointer at pc=0 right after matching1) - the same
+  family as the older "no Apple logo" reports, and the ink bounding box from x9ob then tells us
+  whether a targeted banner-only blank would have been enough anyway.
+
 ## rev247-lo panic root-caused; rev248 moves the x9lo clear into AppleCLCD (2026-11-03)
 
 - rev247-lo (x9lo) did panic, and the reason is now measured, not guessed. The 8 MiB disk ring

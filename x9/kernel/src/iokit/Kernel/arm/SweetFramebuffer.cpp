@@ -71,7 +71,9 @@ extern "C" int x9_lk_gui_present(void);
 extern "C" int x9_lk_gui_busy(void);
 extern "C" int x9_lk_gui_cancel(void);
 extern "C" void x9_lk_gui_probe(void);
-extern "C" int x9_lk_overlay(unsigned index, uint64_t *address, uint64_t *bytes, unsigned *engine);
+extern "C" int x9_lk_overlay(unsigned index, uint64_t *address, uint64_t *bytes,
+    unsigned *engine, uint32_t *pitch, uint32_t *height);
+extern "C" int x9_lk_overlay_level(void);
 extern "C" void sweet_watchdog_pet(void);   /* osfmk/arm64/sweet_early.c */
 extern "C" int sweet_x9_render_display_try_enter(void);
 extern "C" void sweet_x9_render_owner_leave(void);
@@ -985,7 +987,53 @@ void AppleCLCD::x9PresentFired(OSObject *owner,IOTimerEventSource *sender) {
  * register is touched. IOMemoryDescriptor::withPhysicalAddress is the route
  * the boot scanout already uses; a frame-sized ml_io_map_wcomb() from pexpert
  * would take io_map()'s permanent 8 MiB io_submap and panic (rev247 lo:
- * kmem_alloc(14139392) failed with KERN_NO_SPACE 10 s into boot). */
+ * kmem_alloc(14139392) failed with KERN_NO_SPACE 10 s into boot).
+ * rev248 lo proved the target (the banner vanished) but also logged
+ * "creating writable mapping from IOMemoryDescriptor(kIODirectionOut)": the
+ * direction is kIODirectionInOut now, like sweet_surface_create_physical().
+ * x9lo=2 reads and reports the same statistics without writing, so one binary
+ * can answer whether the clear itself is what changes the run. */
+static void
+sweet_x9_report_lk_overlay(const char *stage, unsigned engine, uint64_t address,
+    const volatile uint32_t *pixels, uint32_t pitch, uint32_t height)
+{
+	const uint32_t row_words = pitch / 4;
+	uint32_t hash = 0;
+	unsigned sampled = 0, ink = 0, opaque_black = 0, transparent = 0, other_alpha = 0;
+	unsigned min_x = 0xffffffffu, max_x = 0, min_y = 0xffffffffu, max_y = 0;
+	const uint64_t started = mach_absolute_time();
+	for (unsigned y = 0; y < 256; y++) {
+		const uint32_t row = (uint32_t)((uint64_t) y * height / 256);
+		for (unsigned x = 0; x < 256; x++) {
+			const uint32_t col = (uint32_t)((uint64_t) x * row_words / 256);
+			const uint32_t word = pixels[(uint64_t) row * row_words + col];
+			hash = (hash << 5) | (hash >> 27);
+			hash ^= word;
+			sampled++;
+			const unsigned alpha = word >> 24;
+			if (alpha == 0) {
+				transparent++;
+			} else if (word == 0xff000000u) {
+				opaque_black++;
+			} else if (word & 0xffffffu) {
+				ink++;
+				if (col < min_x) min_x = col;
+				if (col > max_x) max_x = col;
+				if (row < min_y) min_y = row;
+				if (row > max_y) max_y = row;
+			} else {
+				other_alpha++;
+			}
+		}
+	}
+	const uint64_t read_us = (mach_absolute_time() - started) / 1000;
+	IOLog("X9 LK overlay %s: i=%u pa=%llx %ux%u grid=%u ink=%u opaque_black=%u "
+	    "transparent=%u other_alpha=%u bbox=%d..%d,%d..%d checksum=%08x in %llu us\n",
+	    stage, engine, address, row_words, height, sampled, ink, opaque_black,
+	    transparent, other_alpha, ink ? (int) min_x : -1, ink ? (int) max_x : -1,
+	    ink ? (int) min_y : -1, ink ? (int) max_y : -1, hash, read_us);
+}
+
 static void
 sweet_x9_clear_lk_overlays(void)
 {
@@ -994,23 +1042,25 @@ sweet_x9_clear_lk_overlays(void)
 		return;
 	}
 	done = true;
+	const int level = x9_lk_overlay_level();
 	unsigned queued = 0;
 	for (unsigned index = 0; ; index++) {
 		uint64_t address = 0, bytes = 0;
 		unsigned engine = 0;
-		if (!x9_lk_overlay(index, &address, &bytes, &engine)) {
+		uint32_t pitch = 0, height = 0;
+		if (!x9_lk_overlay(index, &address, &bytes, &engine, &pitch, &height)) {
 			break;
 		}
 		queued++;
 		IOMemoryDescriptor *memory = IOMemoryDescriptor::withPhysicalAddress(
-		    address, bytes, kIODirectionOut);
+		    address, bytes, kIODirectionInOut);
 		if (memory == NULL) {
 			IOLog("X9 LK overlay: i=%u pa=%llx no descriptor\n", engine, address);
 			continue;
 		}
 		IOMemoryMap *map = NULL;
 		volatile uint32_t *pixels = NULL;
-		if (memory->prepare(kIODirectionOut) == kIOReturnSuccess) {
+		if (memory->prepare(kIODirectionInOut) == kIOReturnSuccess) {
 			map = memory->map(kIOMapWriteCombineCache);
 			if (map != NULL) {
 				pixels = (volatile uint32_t *)(uintptr_t)map->getVirtualAddress();
@@ -1018,46 +1068,32 @@ sweet_x9_clear_lk_overlays(void)
 		}
 		if (pixels == NULL) {
 			IOLog("X9 LK overlay: i=%u pa=%llx not mapped; banner left alone\n", engine, address);
+		} else if (level != 1) {
+			sweet_x9_report_lk_overlay("observe", engine, address, pixels, pitch, height);
+			IOLog("X9 LK overlay: i=%u pa=%llx nothing written (x9lo=%d)\n", engine, address, level);
 		} else {
+			sweet_x9_report_lk_overlay("before", engine, address, pixels, pitch, height);
 			const uint64_t words = bytes / 4;
-			const uint64_t step = words / 256 + 1;
-			uint64_t clear_ns = 0;
-			for (unsigned pass = 0; pass < 2; pass++) {
-				if (pass) {
-					const uint64_t started = mach_absolute_time();
-					for (uint64_t k = 0; k < words; k++) {
-						pixels[k] = 0;
-						if (!(k & 0x3ffffu)) {
-							sweet_watchdog_pet();
-						}
-					}
-					__asm__ volatile("dsb sy" ::: "memory");
-					clear_ns = mach_absolute_time() - started;
-				}
-				uint32_t hash = 0;
-				unsigned sampled = 0, nonblack = 0;
-				for (uint64_t k = 0; k < words; k += step) {
-					hash = (hash << 5) | (hash >> 27);
-					hash ^= pixels[k];
-					nonblack += !!(pixels[k] & 0xffffffu);
-					sampled++;
-				}
-				if (pass) {
-					IOLog("X9 LK overlay: i=%u pa=%llx after clear sampled=%u nonblack=%u checksum=%08x zero wrote in %llu us\n",
-					    engine, address, sampled, nonblack, hash, clear_ns / 1000);
-				} else {
-					IOLog("X9 LK overlay: i=%u pa=%llx before sampled=%u nonblack=%u checksum=%08x\n",
-					    engine, address, sampled, nonblack, hash);
+			const uint64_t started = mach_absolute_time();
+			for (uint64_t k = 0; k < words; k++) {
+				pixels[k] = 0;
+				if (!(k & 0x3ffffu)) {
+					sweet_watchdog_pet();
 				}
 			}
+			__asm__ volatile("dsb sy" ::: "memory");
+			const uint64_t clear_us = (mach_absolute_time() - started) / 1000;
+			sweet_x9_report_lk_overlay("after", engine, address, pixels, pitch, height);
+			IOLog("X9 LK overlay: i=%u pa=%llx %llu B zeroed in %llu us\n",
+			    engine, address, (unsigned long long) bytes, (unsigned long long) clear_us);
 		}
 		if (map != NULL) {
 			map->release();
 		}
-		memory->complete(kIODirectionOut);
+		memory->complete(kIODirectionInOut);
 		memory->release();
 	}
-	IOLog("X9 LK overlay: %u rejected layer buffer(s) queued (x9lo)\n", queued);
+	IOLog("X9 LK overlay: %u rejected layer buffer(s) queued (x9lo=%d)\n", queued, level);
 }
 
 void

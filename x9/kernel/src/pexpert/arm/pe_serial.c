@@ -763,11 +763,21 @@ static void x9_lk_engine_dump(void) {
  * = KERN_NO_SPACE @ vm_kern.c:178). */
 static uint64_t x9_lk_overlay_address[4];
 static uint64_t x9_lk_overlay_bytes[4];
+static uint32_t x9_lk_overlay_pitch[4];
+static uint32_t x9_lk_overlay_height[4];
 static unsigned x9_lk_overlay_engine[4];
 static unsigned x9_lk_overlays;
+static int x9_lk_overlay_mode;
 static void x9_lk_scan_overlays(void) {
  static int done;if(done)return;done=1;
- int v=0;if(!PE_parse_boot_argn("x9lo",&v,sizeof(v)))return;
+ int v=0;
+ if(PE_parse_boot_argn("x9lo",&v,sizeof(v))&&v!=0)
+  x9_lk_overlay_mode=(v<0||v==1)?1:2;   /* bare "x9lo" parses as -1 */
+ else if(PE_parse_boot_argn("x9ob",&v,sizeof(v)))
+  x9_lk_overlay_mode=2;                /* separate token: the 607-byte boot-arg
+                                        * budget has room for " x9ob" but not
+                                        * for " x9lo=2" */
+ if(!x9_lk_overlay_mode)return;
  for(unsigned i=0;i<13&&x9_lk_overlays<4;i++) {
   volatile uint32_t *p=x9_lk_engines[i];if(!p)continue;
   uint32_t en=X9_LK_READ(p,0x20),layer=X9_LK_READ(p,0x40),size=X9_LK_READ(p,0x48);
@@ -780,18 +790,26 @@ static void x9_lk_scan_overlays(void) {
    printf("X9 LK overlay: i=%u addr=%llx %ux%u outside LK reservation; left alone\n",i,address,w,h);continue;}
   x9_lk_overlay_address[x9_lk_overlays]=address;
   x9_lk_overlay_bytes[x9_lk_overlays]=bytes;
+  x9_lk_overlay_pitch[x9_lk_overlays]=pitch;
+  x9_lk_overlay_height[x9_lk_overlays]=h;
   x9_lk_overlay_engine[x9_lk_overlays]=i;
   x9_lk_overlays++;
-  printf("X9 LK overlay: i=%u addr=%llx %ux%u pitch=%u %llu B queued\n",
-   i,address,w,h,pitch,(unsigned long long)bytes);
+  printf("X9 LK overlay: i=%u addr=%llx %ux%u pitch=%u %llu B queued (%s)\n",
+   i,address,w,h,pitch,(unsigned long long)bytes,x9_lk_overlay_mode==1?"clear":"observe only");
  }
  if(!x9_lk_overlays)printf("X9 LK overlay: none queued\n");
 }
-int x9_lk_overlay(unsigned index, uint64_t *address, uint64_t *bytes, unsigned *engine) {
+int x9_lk_overlay(unsigned index, uint64_t *address, uint64_t *bytes, unsigned *engine,
+ uint32_t *pitch, uint32_t *height) {
  if(index>=x9_lk_overlays)return 0;
  *address=x9_lk_overlay_address[index];*bytes=x9_lk_overlay_bytes[index];
  *engine=x9_lk_overlay_engine[index];
+ *pitch=x9_lk_overlay_pitch[index];*height=x9_lk_overlay_height[index];
  return 1;
+}
+/* 1 = blank the queued layer, >=2 = read it and leave it untouched. */
+int x9_lk_overlay_level(void) {
+ return x9_lk_overlay_mode;
 }
 void x9_lk_gui_probe(void) {
  if(!x9_lk_active)return;
