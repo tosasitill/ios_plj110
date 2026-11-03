@@ -1,3 +1,27 @@
+## Active: rev239 = first build with the repo PanVK bridge (heap A/B now real) (2026-11-03)
+
+- Toolchain: user ran `sudo xcode-select -s /Users/tosasitill/Downloads/Xcode.app/Contents/Developer`
+  (revert: `sudo xcode-select -s /Library/Developer/CommandLineTools`). Fresh PanVK configure
+  needed two script fixes: ed9fa79 (cross rust_args -isysroot iPhoneOS SDK) and 77c2055
+  (native rust_args -isysroot Xcode MacOSX.sdk); rustc links through clang without
+  -isysroot and clang otherwise picked CommandLineTools MacOSX27.0.sdk.
+- Fresh build-panvk-native-ios: 868/868 OK; build.ninja and meson-private have 0 references
+  to HelioDarwin-x9-lk-preserve; dylib contains "X9 TILER HEAP", "x9vt", "X9 PASS SERIALIZE".
+  Old build dir kept at .local/x9/work/x9-metal-render/build-panvk-native-ios.bak-20261103.
+  c04cc5d: 00-mesa-panvk-x9.patch text and collect-build-inputs.py default now point at
+  ~/ios_plj110/.local (live tree already did).
+- Built on the Mac: x9/out/x9-rev239-heap (build.py all --revision 239 --boot-arg x9vt).
+  boot.img 9,420,800 B; plugin-package X9GeneralMetal239 + X9PanVK239 (X9PanVK has
+  1 x "X9 TILER HEAP"); kernel allowlist rev 239 committed. The boot step needs the login
+  shell (Homebrew llvm-objcopy in PATH, anaconda python3 with lz4); /usr/bin/python3 lacks lz4.
+- This is also the first X9PanVK with the repo X9PanVKQueueBridge.inc (only diff vs the old
+  copy: the x9tb/x9vt heap switch + log). X9PanVKMemory.c (4096 mappings) was already built.
+- Test: mailbox/update.py x9/out/x9-rev239-heap, boot it. Expect "X9 TILER HEAP: ...
+  linked=16 bytes=33554432" lines. Then report whether CC split/flicker changes. A control
+  boot (x9vf, 10 MiB) can be packed from the same kernel with build.py boot.
+- Pending: delete /Users/tosasitill/HelioDarwin-x9-lk-preserve (13 GB) after the user confirms
+  the listing; nothing in the build references it any more.
+
 ## Build-path migration attempt (Mac, 2026-11-03)
 
 - SSH to the Mac works (key added by user; repo ~/ios_plj110, fast-forwarded to 81069e5).
