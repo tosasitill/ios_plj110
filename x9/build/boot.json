@@ -12,7 +12,7 @@
   "--pstore-mirror"
  ],
  "boot_args": [
-  "x9_statusbar_provider=1",
+  "x9_statusbar_provider=2",
   "x9_pmic_keys=1",
   "x9_gpu_dependencies=1",
   "x9_gpu_power_probe=1",
