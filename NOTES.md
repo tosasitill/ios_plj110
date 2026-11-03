@@ -1,3 +1,31 @@
+## Active: rev238 x9vt run; CORRECTION: heap enlargement very likely never built in (2026-11-03)
+
+- User flashed only the x9vt image (log /tmp/5.txt, boot-args contain x9vt, plugin 238
+  active). User: screen STILL flickers / splits.
+- Replays in 5.txt are fully deterministic: n1 (ffid66, 259x258) 13/13 identical hash
+  36ef2c39eca31e33 (nothing written), n2 (CC card, 12 vertices, 83,230,513x514, ffid24)
+  13/13 identical hash d1530d05c867e713 with full coverage (512 uncovered = border).
+- CORRECTION to the rev238 entry below: this determinism can NOT be attributed to the heap.
+  Evidence: no "X9 TILER HEAP" line exists in ANY log ever (incl. the rev223 x9tb test),
+  although x9_panvk_tiler_create in x9/metal/General/panvk/X9PanVKQueueBridge.inc logs it
+  unconditionally; 5.txt still has 10 x "X9 PANVK ALLOC: size=10485760" (= 5 x 2 MiB) and no
+  32 MiB allocation. So x9tb/x9vt most likely never changed the heap, and the rev223 "x9tb
+  no visible change" result is void too. Different picks (12- vs 9-vertex card) and run
+  state may explain rev237 vs rev238; the cause of the replay non-determinism is still OPEN.
+- Build-path facts (source, not verified on the Mac):
+  - 00-mesa-panvk-x9.patch meson.build lists X9RenderTransport.c and X9PanVK{Memory,Sync,
+    TilerHeap,SubmitPlan,Queue}.c by absolute path under the OLD workspace
+    /Users/tosasitill/HelioDarwin-x9-lk-preserve/MaliMetal/X9/General/ (also known in
+    x9/EXTERNAL-DEPENDENCIES.md:20-21). Repo edits to those .c files are not compiled
+    unless that path is a symlink to this repo.
+  - csf/panvk_vX_gpu_queue.c does #include "X9PanVKQueueBridge.inc": a quoted include looks
+    in the csf/ directory first, so a stale copy there would shadow the repo's file (the -I
+    path .local/x9/MaliMetal/X9/General/panvk is a prepare-local.py symlink to the repo).
+  - prepare-panvk-native-budget.py pins Mesa max_chunks = initial_chunks = 5 (10 MiB).
+- Needed from the Mac before any heap conclusion: whether that old path is a symlink to the
+  repo, whether csf/ holds a stale X9PanVKQueueBridge.inc, and whether the built X9PanVK
+  binary contains the strings "X9 TILER HEAP" / "x9vt".
+
 ## Active: rev237 reproduces the CC split in replay; rev238 heap A/B token x9vt (2026-11-03)
 
 - rev237 log /tmp/4.txt (2.9 MB, X9GeneralMetal237 active). Pick n2 = CC card,
