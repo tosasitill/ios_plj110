@@ -90,7 +90,7 @@ static void x9FrameReplay(NBCommandBuffer *cb) {
  NSMutableArray *results=[NSMutableArray array];uint64_t total=0;
  for(NSDictionary *r in replays) {
   NSArray *box=r[@"box"];const uint64_t bw=[box[2] unsignedLongLongValue],bh=[box[3] unsignedLongLongValue];
-  total+=((bw*4+255)&~255ull)*bh*14;
+  total+=((bw*4+255)&~255ull)*bh*24;
  }
  if(total>192ull*1024*1024){NSLog(@"X9 FRAME REPLAY SKIP: f=%llu bytes=%llu reason=budget",(unsigned long long)cb.traceID,(unsigned long long)total);cb.traceFrameReplaying=NO;return;}
  id<MTLBuffer> readback=[device newBufferWithLength:total options:MTLResourceStorageModeShared];
@@ -149,6 +149,18 @@ static void x9FrameReplay(NBCommandBuffer *cb) {
     owned[2+axis]=[device newBufferWithBytes:d length:3*vstride options:MTLResourceStorageModeShared];ownedPts[2+axis]=mp;
    }
   }
+  // 13/14/15: the whole draw from an owned copy padded with copies of its
+  // last vertex (zero-area triangles) to 12/24/48 vertices. rev240: only the
+  // LAST vertex of 9-vertex draws lands in a wrong place, 12/24-vertex draws
+  // never fail -> test whether a partial final IDVS vertex group is the cause.
+  id<MTLBuffer> padded[3]={nil,nil,nil};NSArray *paddedPts[3]={nil,nil,nil};
+  const NSUInteger padTo[3]={12,24,48};
+  if(raw.length==count*vstride&&count)for(unsigned k=0;k<3;k++) {
+   if(padTo[k]<count)continue;
+   NSMutableData *m=[NSMutableData dataWithData:raw];NSMutableArray *mp=[allPts mutableCopy];
+   for(NSUInteger i=count;i<padTo[k];i++){[m appendBytes:(const uint8_t *)raw.bytes+(count-1)*vstride length:vstride];[mp addObject:allPts[count-1]];}
+   padded[k]=[device newBufferWithBytes:m.bytes length:m.length options:MTLResourceStorageModeShared];paddedPts[k]=mp;
+  }
   // Every pass gets its own box-sized targets (viewport shifted by the box
   // origin), so no pass's readback can race a later pass's clear; variants
   // 10 is the whole draw with the UV-gradient texture in every slot; 11 is
@@ -160,12 +172,15 @@ static void x9FrameReplay(NBCommandBuffer *cb) {
   for(NSNumber *key in snap){NSData *d=snap[key];id<MTLBuffer> fb=[device newBufferWithBytes:d.bytes length:d.length options:MTLResourceStorageModeShared];if(fb)frozen[key]=fb;}
   // 12 = whole draw, live inputs, colour attachment 1 cleared to (1,1,1,1)
   // instead of 0: a different result means the shader reads attachment 1.
-  static const uint8_t schedule[][2]={{0,0},{11,0},{12,0},{0,1},{11,1},{12,1},{0,2},{11,2},{12,2},{0,3},{0,4},{0,5},{10,0},{1,0}};
+  // 0 live whole draw, 7 owned unpadded copy (control for 13..15).
+  static const uint8_t schedule[][2]={{0,0},{7,0},{13,0},{14,0},{15,0},{0,1},{7,1},{13,1},{14,1},{15,1},
+   {0,2},{7,2},{13,2},{14,2},{15,2},{0,3},{7,3},{13,3},{14,3},{15,3},{0,4},{13,4},{0,5},{13,5}};
   for(unsigned pass=0;pass<sizeof schedule/sizeof schedule[0];pass++) {
    const unsigned variant=schedule[pass][0],repeat=schedule[pass][1];
    if(variant==11&&!frozen.count)continue;
    if(variant==10&&!gradient)continue;
    if(variant>=6&&variant<10&&!owned[variant-6])continue;
+   if(variant>=13&&!padded[variant-13])continue;
    if(variant<6&&!ranges[variant][1])continue;
    MTLTextureDescriptor *td=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:a0.pixelFormat width:bw height:bh mipmapped:NO];
    td.usage=MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead;td.storageMode=MTLStorageModePrivate;
@@ -197,7 +212,10 @@ static void x9FrameReplay(NBCommandBuffer *cb) {
    }
    NSDictionary *textures=r[@"textures"];for(NSNumber *key in textures)[e setFragmentTexture:variant==10?gradient:textures[key] atIndex:key.unsignedIntegerValue];
    NSDictionary *samplers=r[@"samplers"];for(NSNumber *key in samplers)[e setFragmentSamplerState:samplers[key] atIndex:key.unsignedIntegerValue];
-   if(variant>=10)[e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:start vertexCount:count];
+   if(variant>=13) {
+    [e setVertexBuffer:padded[variant-13] offset:0 atIndex:vslot];
+    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:padTo[variant-13]];
+   } else if(variant>=10)[e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:start vertexCount:count];
    else if(variant>=6) {
     [e setVertexBuffer:owned[variant-6] offset:0 atIndex:vslot];
     [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:variant==7?count:3];
@@ -209,11 +227,11 @@ static void x9FrameReplay(NBCommandBuffer *cb) {
    [blit copyFromTexture:c0 sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(bw,bh,1)
                 toBuffer:readback destinationOffset:at destinationBytesPerRow:row destinationBytesPerImage:row*bh];
    [blit endEncoding];
-   const bool whole=variant>=10;
-   const NSUInteger rel=whole?0:variant>=6?0:variant==3||variant==4?count-3:ranges[variant][0]-start;
-   const NSUInteger vcount=whole?count:variant>=6?(variant==7?count:3):ranges[variant][1];
+   const bool whole=variant>=10&&variant<13,pad=variant>=13;
+   const NSUInteger rel=whole||pad?0:variant>=6?0:variant==3||variant==4?count-3:ranges[variant][0]-start;
+   const NSUInteger vcount=pad?padTo[variant-13]:whole?count:variant>=6?(variant==7?count:3):ranges[variant][1];
    [results addObject:@{@"r":r,@"variant":@(variant),@"repeat":@(repeat),@"at":@(at),@"row":@(row),@"first":@(rel),@"count":@(vcount),
-    @"pts":whole?allPts:variant>=6?ownedPts[variant-6]:allPts}];
+    @"pts":pad?paddedPts[variant-13]:whole?allPts:variant>=6?ownedPts[variant-6]:allPts}];
    at+=row*bh;
   }
  }

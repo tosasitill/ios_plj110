@@ -1,3 +1,24 @@
+## Active: rev240 = heap ruled out; last vertex of 9-vertex draws misplaced; rev241 padding probe (2026-11-03)
+
+- rev240 log /tmp/7.txt (3.1 MB): "X9 TILER HEAP: proc=backboardd ... linked=64 bytes=134217728"
+  (others 32 MiB). USER: flicker NOT reduced vs 32 MiB.
+- Replay n2 = CC card, 9 vertices, box 659,234,510x509, ffid24 (same card as rev237):
+  v0=v3=v4=v6=BR, v1=v5=v8=TL, v2=TR, v7=BL -> tri0 (BR,TL,TR), tri1 (BR,BR,TL) zero-area,
+  tri2 (BR,BL,TL). Good passes hash c3c16d6b50ee546b (485 uncovered); bad: v0 r2 and v11 r2
+  (4263, d6f837e2...), v12 r0 (1172). So non-determinism persists with a 128 MiB heap:
+  HEAP SIZE IS NOT THE CAUSE (neither of the replay error nor of the visible flicker).
+- MAP of bad passes: tri2 is drawn with its LAST vertex v8 (TL) displaced by a varying amount
+  (v0 r2: to about (736,483); v12 r0: ~2 grid columns right). Other vertices correct.
+- Pattern across runs: 12-vertex card (rev238/239) and 24-vertex corners always exact; 9- and
+  6-vertex draws flaky. HYPOTHESIS: the last valid vertex in a partially filled final IDVS
+  vertex group gets a bad position (PanVK / HW / masked-lane store in the position shader).
+- rev241 change (X9FrameCapture.inc): variants 13/14/15 = owned copy padded with copies of the
+  last vertex to 12/24/48 vertices; 7 = owned unpadded copy as control. Schedule 24 passes:
+  0 x6, 7 x4, 13 x6, 14 x4, 15 x4 (readback factor 24). Heap setting unchanged from rev240.
+- Reading: 0/7 fail sometimes but 13..15 never -> partial final vertex group confirmed; a
+  frontend workaround (pad non-indexed draws to a group multiple) becomes the next step,
+  then locate the exact PanVK/HW cause. 13..15 also fail -> not group padding.
+
 ## USB log tool restored (2026-11-03)
 
 - The user's log capture tool usb_log.py (formerly
