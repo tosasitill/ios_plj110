@@ -24,7 +24,8 @@ subprocess.run([sys.executable, '-I', str(Path(__file__).with_name('apply-source
     str(Path(__file__).resolve().parents[1] / 'third_party/08-panvk-serialize-passes.patch'),
     str(Path(__file__).resolve().parents[1] / 'third_party/09-panvk-v14-cull-zero-area.patch'),
     str(Path(__file__).resolve().parents[1] / 'third_party/10-pan-compiler-bir-ab.patch'),
-    str(Path(__file__).resolve().parents[1] / 'third_party/11-panvk-fbd-log.patch')], check=True)
+    str(Path(__file__).resolve().parents[1] / 'third_party/11-panvk-fbd-log.patch'),
+    str(Path(__file__).resolve().parents[1] / 'third_party/12-panvk-crc-ab.patch')], check=True)
 env = os.environ.copy()
 env.pop('CC', None)
 env.pop('CXX', None)

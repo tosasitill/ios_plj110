@@ -1,0 +1,78 @@
+--- a/src/panfrost/vulkan/panvk_image.c	2026-11-03 12:00:15
++++ b/src/panfrost/vulkan/panvk_image.c	2026-11-03 12:00:15
+@@ -1,5 +1,7 @@
+ #ifdef X9_NATIVE_KMOD
+ #include "X9PanVKMemory.h"
++#include <string.h>
++#include <sys/sysctl.h>
+ #endif
+ /*
+  * Copyright (C) 2026 NXP
+@@ -410,10 +412,67 @@
+    };
+ }
+ 
++#ifdef X9_NATIVE_KMOD
++/* Diagnostic A/B (exact boot-arg token x9c0): no transaction-elimination CRC
++ * on any image, as PANVK_DEBUG=no_crc. Swipe-only mosaic that clears when
++ * motion stops matches stale CRC tiles after writes CRC tracking misses. */
+ static bool
++x9_no_crc(void)
++{
++   static int mode = -1;
++   int m = __atomic_load_n(&mode, __ATOMIC_RELAXED);
++   if (m >= 0)
++      return m;
++   m = 0;
++   char args[4096] = {0};
++   size_t bytes = sizeof(args) - 1;
++   if (!sysctlbyname("kern.bootargs", args, &bytes, NULL, 0)) {
++      args[sizeof(args) - 1] = 0;
++      for (const char *p = args; *p;) {
++         while (*p && (unsigned char)*p <= 32)
++            p++;
++         const char *end = p;
++         while (*end && (unsigned char)*end > 32)
++            end++;
++         if (end - p == 4 && !memcmp(p, "x9c0", 4))
++            m = 1;
++         p = end;
++      }
++   }
++   __atomic_store_n(&mode, m, __ATOMIC_RELAXED);
++   x9_panvk_log("X9 CRC: proc=%s mode=%d;1=transaction elimination off (x9c0)", getprogname(), m);
++   return m;
++}
++#endif
++
++static bool panvk_should_checksum_impl(struct panvk_image *image,
++                                       const VkImageCreateInfo *pCreateInfo);
++
++static bool
+ panvk_should_checksum(struct panvk_image *image,
+                       const VkImageCreateInfo *pCreateInfo)
+ {
++#ifdef X9_NATIVE_KMOD
++   if (x9_no_crc())
++      return false;
++#endif
++   bool crc = panvk_should_checksum_impl(image, pCreateInfo);
++#ifdef X9_NATIVE_KMOD
++   static unsigned logged;
++   if (crc && __atomic_fetch_add(&logged, 1, __ATOMIC_RELAXED) < 32)
++      x9_panvk_log("X9 CRC IMAGE: proc=%s %ux%u vkfmt=%d usage=%x flags=%x tiling=%d samples=%d",
++                   getprogname(), pCreateInfo->extent.width, pCreateInfo->extent.height,
++                   (int)pCreateInfo->format, (unsigned)vk_image_usage_flags(pCreateInfo),
++                   (unsigned)vk_image_create_flags(pCreateInfo), (int)pCreateInfo->tiling,
++                   (int)pCreateInfo->samples);
++#endif
++   return crc;
++}
++
++static bool
++panvk_should_checksum_impl(struct panvk_image *image,
++                           const VkImageCreateInfo *pCreateInfo)
++{
+    if (PANVK_DEBUG(NO_CRC))
+       return false;
+ 
