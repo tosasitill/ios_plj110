@@ -32,8 +32,10 @@ sdk=DEV+'/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk'
 toolchain=DEV+'/Toolchains/XcodeDefault.xctoolchain/usr/bin/'
 rustc=subprocess.check_output([BREW+'/bin/rustup','which','--toolchain','1.98.0','rustc'],text=True).strip()
 flags=['-target','arm64-apple-ios16.0','-isysroot',sdk,'-DX9_NATIVE_KMOD=1','-I'+str(w.parents[1]/'MaliMetal/X9/General/panvk')]
+# rustc links iOS objects through clang without -isysroot; clang then falls back to
+# whatever default SDK it finds (a newer CommandLineTools macOS SDK breaks Xcode's ld).
 cross=w/'panvk-native-ios.cross'
-cross.write_text("[binaries]\nc = "+repr(toolchain+'clang')+"\ncpp = "+repr(toolchain+'clang++')+"\nobjc = "+repr(toolchain+'clang')+"\nrust = "+repr(rustc)+"\nar = '/usr/bin/ar'\nstrip = '/usr/bin/strip'\npkg-config = '/usr/bin/false'\n[host_machine]\nsystem = 'darwin'\ncpu_family = 'aarch64'\ncpu = 'arm64'\nendian = 'little'\n[properties]\nneeds_exe_wrapper = true\n[built-in options]\n"+''.join(k+' = '+repr(flags)+'\n' for k in ['c_args','cpp_args','objc_args','c_link_args','cpp_link_args','objc_link_args'])+"rust_args = ['--target', 'aarch64-apple-ios']\n")
+cross.write_text("[binaries]\nc = "+repr(toolchain+'clang')+"\ncpp = "+repr(toolchain+'clang++')+"\nobjc = "+repr(toolchain+'clang')+"\nrust = "+repr(rustc)+"\nar = '/usr/bin/ar'\nstrip = '/usr/bin/strip'\npkg-config = '/usr/bin/false'\n[host_machine]\nsystem = 'darwin'\ncpu_family = 'aarch64'\ncpu = 'arm64'\nendian = 'little'\n[properties]\nneeds_exe_wrapper = true\n[built-in options]\n"+''.join(k+' = '+repr(flags)+'\n' for k in ['c_args','cpp_args','objc_args','c_link_args','cpp_link_args','objc_link_args'])+"rust_args = "+repr(['--target','aarch64-apple-ios','-C','link-arg=-isysroot','-C','link-arg='+sdk])+"\n")
 native=w/'panvk-native-ios.native'
 native.write_text("[binaries]\nc = '/usr/bin/clang'\ncpp = '/usr/bin/clang++'\nrust = "+repr(rustc)+"\n")
 env=os.environ.copy();env.pop('RUSTC',None);env.pop('CC',None);env.pop('CXX',None)
