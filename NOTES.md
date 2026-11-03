@@ -1,3 +1,20 @@
+## Active: rev243 built (CRC A/B + governor + padding), awaiting device test (2026-11-03)
+
+- Swipe mosaic hypothesis: PanVK transaction elimination (CRC). Mesa's own comment in
+  panvk_should_checksum: images the host can modify must not use CRC; X9 imports IOSurfaces
+  written outside PanVK. Patch 12 (12-panvk-crc-ab.patch, generated against the live tree,
+  dry-run clean): boot token x9c0 -> no CRC on any image (as PANVK_DEBUG=no_crc); otherwise
+  logs the first 32 CRC images per process ("X9 CRC IMAGE: proc WxH vkfmt usage flags tiling").
+- Built on the Mac (login shell): x9/out/x9-rev243-crc (boot-arg x9c0) and x9/out/x9-rev243-ctl
+  (same kernel, no extra token), boot.img 9,424,896 B each; same plugin-package
+  (X9GeneralMetal243/X9PanVK243). Verified strings: X9PanVK "X9 CRC", GeneralMetal "X9 PAD",
+  kernel "X9 GPU GOV" (governor first build, untested on device). Allowlist rev243 = b4221f0.
+- Mac stashes kept: stash@{1} rev242 allowlist from the user build, stash@{0} rev243 (identical
+  to b4221f0). G1UltraMetal main c3b239c has patch 12.
+- Test: mailbox stage x9/out/x9-rev243-crc once; boot -crc, swipe; boot -ctl, swipe. Mosaic gone
+  only with x9c0 -> CRC tracking misses writes; then find which writes (X9 CRC IMAGE lines) and
+  invalidate CRC there instead of disabling it. Also check "X9 GPU GOV" lines (temperature units).
+
 ## G1UltraMetal repo split (2026-11-03)
 
 - Pushed git@github.com:tosasitill/G1UltraMetal.git main 75439c9 (fresh history, from
