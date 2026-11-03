@@ -1,3 +1,31 @@
+## rev249-lo device-verified: banner blanked AND picture restored once the 249 payload was staged into the mailbox (2026-11-03)
+
+- 实测 (22.txt, 7234 lines to 102 s, user flashed after running the staging command):
+  `[4.510] X9 UPDATE: payload installed and verified from reserved mailbox` →
+  `[4.512] X9 UPDATE: install result errno=0` →
+  `[4.512] X9 RENDER EXTERNAL: active plugin=X9GeneralMetal249 from verified allowlist`.
+  Discovery is armed again, which is exactly what 20/21.txt lacked.
+- Banner: `[10.647] X9 LK overlay: i=3 addr=fd6a8000 1256x2760 pitch=5024 13877248 B queued (clear)`,
+  `before ... ink=29 opaque_black=231 transparent=65276 bbox=0..397,1380..1433 checksum=56b1fc1b in 3589 us`
+  → `after ... ink=0 transparent=65536 checksum=00000000` → `13877248 B zeroed in 3125 us`,
+  `1 rejected layer buffer(s) queued (x9lo=1)`. Same content signature as the obs run, so the
+  A/B conclusion stands: the blank is harmless and costs ~3.1 ms once per boot.
+- Picture (this is the part 14/20/21.txt never had): slot0 `index=0 pa=fc910000 sample=256
+  nonblack=253` at 36.722 s then `nonblack=256` held for every later probe; heartbeats climb
+  `swap_id=0 → 6 → 66 → ... → 1183`; `X9 GPU GOV` commits climb to 270 with DVFS reaching
+  1300000 kHz; 382 MESA WSI lines (17.txt had 337). **0** `CRASH SpringBoard` events, versus
+  10 in 14.txt and 6/5 in 20/21.txt. User confirms the screen shows the desktop with no
+  orange-state banner.
+- 推断 (the operational rule this fixes): `build.py all --revision N` renames the plugin bundles
+  and regenerates the kernel allowlist, but the bytes reach the device only through
+  `python3 x9/mailbox/update.py <candidate-dir>`. Any new revision must ship as boot.img **and**
+  a mailbox staging step, or Metal discovery stays `not armed errno=2` and the screen is black
+  for reasons unrelated to the display code.
+- Not covered by this run: `locationd` still crash-loops (pre-existing), GPU coherency reports
+  `capable=0`, and the optional band-only blank (rows 1380..1433, ~1 MiB instead of 13.9 MiB)
+  remains unimplemented - the whole-layer blank is proven harmless so there is no reason to
+  rush it.
+
 ## rev249 A/B verdict: blanking is innocent; the black screen is unstaged Metal plugins (mailbox still holds the rev247 payload) (2026-11-03)
 
 - 实测 (20.txt = x9-rev249-lo, 21.txt = x9-rev249-obs, both user-reported black): the two runs
