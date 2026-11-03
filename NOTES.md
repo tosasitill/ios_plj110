@@ -1,3 +1,26 @@
+## Build-path migration attempt (Mac, 2026-11-03)
+
+- SSH to the Mac works (key added by user; repo ~/ios_plj110, fast-forwarded to 81069e5).
+- Old workspace diff (MaliMetal/X9/General/panvk vs repo): only X9PanVKMemory.c (repo raises
+  native mappings 1024 -> 4096, 2026-11-01 DeviceLost fix) and X9PanVKQueueBridge.inc
+  (repo adds x9tb/x9vt heap switch + X9 TILER HEAP log) differ.
+- Live mesa-render-source meson.build already lists the six X9 .c files via the repo
+  symlink .local/x9/MaliMetal/X9/General -> x9/metal/General, so the .c files (incl. the
+  4096 mappings) ARE built from the repo. But build-panvk-native-ios/build.ninja carries
+  750 x -I/Users/tosasitill/HelioDarwin-x9-lk-preserve/MaliMetal/X9/General/panvk from the
+  OLD cross file baked into meson coredata, so csf/panvk_vX_gpu_queue.c includes the OLD
+  X9PanVKQueueBridge.inc. That is why x9tb/x9vt never existed in any binary.
+- `meson setup --reconfigure` keeps the stored cross file (verified: -I unchanged, dylib has
+  0 x "X9 TILER HEAP").
+- Fresh configure (old dir moved aside) FAILS before any compile: rustc sanity link uses
+  Xcode 15.0.1 clang/ld against /Library/Developer/CommandLineTools/SDKs/MacOSX27.0.sdk
+  ("tapi error: unknown architecture arm64e.x1-macos"); xcode-select -p is
+  /Library/Developer/CommandLineTools. Old build dir restored unchanged (build.ninja present);
+  failed attempt kept at .local/x9/work/x9-metal-render/x9-failed-fresh-configure-20261103.
+- Old workspace is still required by the build dir: -I panvk headers/.inc, and the regenerate
+  rule's panvk-native-ios.cross/.native under HelioDarwin-x9-lk-preserve/work/x9-metal-render.
+  Do NOT delete it until a fresh configure works.
+
 ## Cleanup + build-path finding (2026-11-03)
 
 - Mac check by user (rev238): /Users/tosasitill/HelioDarwin-x9-lk-preserve/MaliMetal/X9/General
