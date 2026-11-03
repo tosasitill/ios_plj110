@@ -52,6 +52,42 @@
 - Next: capture the live board DTB (the attached dts is SoC-level; audio-json/board wiring is absent),
   then the A0/A1 read-only probe list. No production code changed by this assessment.
 
+## Wi-Fi assessment landed (read-only, 2026-11-03) — MT6653 over PCIe, no code written, P0 pending
+
+- New handoff doc: `docs/network/wifi-porting-assessment.md` (assessment + difficulty table +
+  P0 collection checklist). Nothing implemented; nothing here authorises a device action.
+- 实测 from the user-supplied `oppo-source`: the Wi-Fi function is **MT6653 / CONNAC 3.0 with
+  PCIe HIF** (`wlan/core/gen4m/Kbuild.6993_6653:5-13`, module
+  `wlan_drv_gen4m_6993_6653`), not the gen4-mt79xx path. RC base used by the driver is
+  `ioremap(0x16910000, 0x2000)` (`chips/mt6653/mt6653.c:3564`), and the host glue is MediaTek
+  gen3 (`android_kernel_oppo_mt6993/drivers/pci/controller/pcie-mediatek-gen3.c`:
+  RST_CTRL `0x148`, LINK_STATUS `0x154`, LTSSM `0x150`, INT_ENABLE `0x180`, trans-table
+  `0x800`, MSI sets `0xc00+i*0x10`), 1 MSI vector, 36-bit DMA mask, EP BAR ≥2 MiB.
+- 实测: MTK ships an OS abstraction — `os/linux/include/gl_os.h` (2217 lines) plus existing
+  `os/uefi`, `os/windows`, `os/none` implementations, so a `os/darwin/` KAL is the sanctioned
+  route. Coupling is at the edge: `net_device` appears 1287 times with only 24 outside `os/`,
+  and the core makes 3 direct cfg80211 calls and 0 `netif_*` calls.
+- 实测 contrast with `https://unixnu.com/zh/porting/network`: that page's asset is a Qualcomm
+  prebuilt OS-neutral library reached via `nw_abi.h`/`lx_platform`/`nw_board`. We have no such
+  library, so its step 3 becomes "compile MTK's core against our own KAL". Its 4-step shape
+  and its gotchas still transfer — notably MAC-zero: `CFG_TC1_FEATURE` is off here, so the MAC
+  comes from the NVRAM cal file, i.e. a missing cal reproduces their zero-MAC case.
+- 实测 XNU side today: BSD stack is already linked (`-DINET` 11 sites, `-DNETWORKING`,
+  `-DSOCKETS`, `-DNECP`, `-DPRIVATE_WIFI_ONLY=1`, `if.o`/`dlil.o`/`bpf.o`/`ndrv.o` in
+  link-order) but there is **no INET6**, **no PCIe host**, **no conninfra code**, **no
+  MediaTek coprocessor mailbox**, and `SweetX9NetworkStack.cpp:8-10` admits there is no
+  IONetworkInterface producer. The old `ue0` USB-ECM win belongs to SM7150, not X9.
+- Difficulty verdict: hardest subsystem so far. P1 conninfra power = L/highest correctness
+  risk; P2 PCIe RC in XNU = XL (new substrate, needs `mkadt.py` nodes + built-in class since
+  there is no kext loader); P3 `os/darwin` + firmware download = L but mechanical; P4 own
+  ifnet + WPA2 = M (real IP, no system UI); P5 wifid/Apple80211 ABI = XL research. Do not make
+  P5 a prerequisite for P4.
+- Open question that most affects the estimate: **the supplied tree has no MT6993 device
+  tree**, so PCIe/conninfra GIC SPI numbers, `memory-region` and whether the connectivity RC
+  sits behind the SMMU are unknown. P0 item 2 (`cat /sys/firmware/fdt` on stock Android, then
+  `dtc -I dtb -O dts` locally — `/opt/homebrew/bin/dtc` exists) closes it. All P0 steps are
+  read-only and stage under the gitignored `x9/.local/x9-wifi-probe/`.
+
 ## rev249-lo device-verified: banner blanked AND picture restored once the 249 payload was staged into the mailbox (2026-11-03)
 
 - 实测 (22.txt, 7234 lines to 102 s, user flashed after running the staging command):
