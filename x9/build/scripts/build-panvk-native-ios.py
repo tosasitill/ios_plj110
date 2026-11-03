@@ -37,7 +37,8 @@ flags=['-target','arm64-apple-ios16.0','-isysroot',sdk,'-DX9_NATIVE_KMOD=1','-I'
 cross=w/'panvk-native-ios.cross'
 cross.write_text("[binaries]\nc = "+repr(toolchain+'clang')+"\ncpp = "+repr(toolchain+'clang++')+"\nobjc = "+repr(toolchain+'clang')+"\nrust = "+repr(rustc)+"\nar = '/usr/bin/ar'\nstrip = '/usr/bin/strip'\npkg-config = '/usr/bin/false'\n[host_machine]\nsystem = 'darwin'\ncpu_family = 'aarch64'\ncpu = 'arm64'\nendian = 'little'\n[properties]\nneeds_exe_wrapper = true\n[built-in options]\n"+''.join(k+' = '+repr(flags)+'\n' for k in ['c_args','cpp_args','objc_args','c_link_args','cpp_link_args','objc_link_args'])+"rust_args = "+repr(['--target','aarch64-apple-ios','-C','link-arg=-isysroot','-C','link-arg='+sdk])+"\n")
 native=w/'panvk-native-ios.native'
-native.write_text("[binaries]\nc = '/usr/bin/clang'\ncpp = '/usr/bin/clang++'\nrust = "+repr(rustc)+"\n")
+macsdk=DEV+'/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk'
+native.write_text("[binaries]\nc = '/usr/bin/clang'\ncpp = '/usr/bin/clang++'\nrust = "+repr(rustc)+"\n[built-in options]\nrust_args = "+repr(['-C','link-arg=-isysroot','-C','link-arg='+macsdk])+"\n")
 env=os.environ.copy();env.pop('RUSTC',None);env.pop('CC',None);env.pop('CXX',None)
 host=w/'build-panvk-host'
 env['PATH']=str(w/'build-env/bin')+':'+str(w/'build-tools/bin')+':'+str(host/'src/compiler/clc')+':'+str(host/'src/compiler/spirv')+':'+str(host/'src/panfrost/clc')+':'+BREW+'/bin:/usr/bin:/bin'
