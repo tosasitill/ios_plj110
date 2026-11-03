@@ -1,3 +1,24 @@
+## Cleanup + build-path finding (2026-11-03)
+
+- Mac check by user (rev238): /Users/tosasitill/HelioDarwin-x9-lk-preserve/MaliMetal/X9/General
+  is a REAL directory (not a link to this repo); its panvk/X9PanVKMemory.c and
+  X9PanVKQueueBridge.inc differ from x9/metal/General/panvk; csf/ has no X9PanVK* copy;
+  the built x9/out/x9-rev238-heap/plugin-package/X9PanVK238.bundle/X9PanVK contains
+  0 x "X9 TILER HEAP" and 0 x "x9vt". CONFIRMED: repo edits under x9/metal/General/panvk
+  have not been compiled into X9PanVK (x9tb in rev223 and x9vt in rev238 were no-ops).
+  Likely mechanism: the six .c files come from 00-mesa-panvk-x9.patch:399-404 (old absolute
+  paths) and the configured build-panvk-native-ios dir still carries the old -I path
+  (build.py only runs incremental ninja once build.ninja exists). Not yet seen on the Mac.
+- User approved: (a) delete the old Mac workspace AFTER the build is migrated to the repo
+  and a full PanVK rebuild is verified; (b) delete x9/legacy. Declined: server-side old
+  copies (/home/ubuntu/agsbx, old session scratchpads) stay.
+- Done (b): git rm x9/legacy (145 files); last tree at ca5b8d5. BUILD.md,
+  EXTERNAL-DEPENDENCIES.md and prepare-local.py comment updated.
+- Pending (a): needs SSH; the server key is not authorized on the Mac (publickey denied).
+  Steps: diff old vs repo panvk sources, point meson files()/libdrm/.rsp and -I at repo
+  paths, `build.py plugins --panvk full`, verify strings, then list and delete the old
+  workspace with the user's confirmation.
+
 ## Active: rev238 x9vt run; CORRECTION: heap enlargement very likely never built in (2026-11-03)
 
 - User flashed only the x9vt image (log /tmp/5.txt, boot-args contain x9vt, plugin 238

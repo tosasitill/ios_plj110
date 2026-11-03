@@ -161,8 +161,9 @@ Logs are in `x9/out/migration-check/`. No device operations were run, no
 allowlist changed, and the complete Metal Rust rebuild was not run after
 cache deletion. These artifacts are not hardware-verified.
 
-Historical diagnostic/recovery/install scripts are retained under
-`x9/legacy/`; read its README before using them. The original generated
+Historical diagnostic/recovery/install scripts (formerly `x9/legacy/`) were
+removed on 2026-11-03; recover them with `git show ca5b8d5:x9/legacy/<path>` and
+read `x9/legacy/README.md` there before using any of them. The original generated
 `check-root.sh` is absent from the supplied workspace. Mailbox updates now
 require an explicit `--root-check` script; the check is never bypassed.
 
@@ -280,8 +281,8 @@ Third-party trees (`.local/x9/work/x9-metal-render/`): Mesa
 `219f01365dc4c8eb346816c405b5b17403793764` + `build/third_party/metal2vulkan-pan205/`
 in numeric order (`prepare-general-runtime.py` installs the Rust toolchain).
 `build-render-cs.py` regenerates the kernel's CS packing include. The one-shot
-source preparation and staged partial builds that produced these trees are in
-`legacy/work/x9-metal-render/`.
+source preparation and staged partial builds that produced these trees were in
+`x9/legacy/work/x9-metal-render/` (removed; see git history at ca5b8d5).
 
 ## Plugin mailbox
 
