@@ -1,3 +1,39 @@
+## Active: rev235 shows GPU replay output is NOT repeatable; rev236 frozen-input A/B (source only) (2026-11-03)
+
+- rev235 log /tmp/3.txt (1.95 MB, plugin X9GeneralMetal235 active at 3.360 s).
+  Picks: cb=47 (log 35.29 s, not a captured frame, so no DRAW records), 2 picks of the same
+  9-vertex draw, box 339,529,222x221, ffid66 (fixed_frag_lph_cph, framebuffer_fetch=1,
+  texture_function 0x0e, specialized at 35.224 s), vfid41 (texcoord_count0/1=1).
+- Vertices (VTX, observed): v0=v2=v5=v6=BR(558.25,747.57), v1=v3=v4=v8=TR(558.25,531.19),
+  v7=BL(341.87,747.57). tri0/tri1 zero-area; tri2=(BR,BL,TR) = lower-RIGHT half.
+  a1@16 = (-1,-1)/(-1,0)/(0,-1); texcoord1@24 = pixel-like (437.25,436.57) etc.
+- OBSERVED: same draw, same CB, separate box-sized targets, different coverage per repeat:
+  n1 v0 r0/r1 = 1641/1641, n1 v10 r0/r1 = 2392/1641, n1 v6 2249/3136, n2 v0 1641/3095,
+  n2 v8 3136/2832 (box_uncovered of 3136). Covered colour is 00000000.
+- OBSERVED (GRID): n1 v0 r0 wrote exactly the lower-LEFT half (TL,BL,BR), not the expected
+  lower-right half. TL is no vertex of the data (x of v7, y of v8). n1 v10 r0 wrote a thin
+  band along the TL-BR diagonal instead. n2 v0 r1 wrote ~nothing.
+- READING: GPU output for identical work is not deterministic, and the written geometry is
+  not the CPU-projected triangle. Either live inputs (CA uniform/vertex ring memory, or the
+  X9 inline-bytes upload) change between encode and execution, or post-transform positions
+  are corrupted in the GPU/driver (PanVK IDVS position output / tiler / kernel). Caveat:
+  a mirrored CPU projection was not excluded, but it would not explain the variance.
+- rev236 change (X9FrameCapture.inc, x9vf only):
+  - at pick, each stage-1/2 buffer binding is snapshotted (offset .. max(4 KiB, stride*
+    (start+count)), clipped) and logged: X9 FRAME REPLAY BIND (kind=buffer|bytes, obj,
+    offset, len, FNV hash).
+  - variant 11 = whole draw with every buffer binding replaced by a fresh buffer of that
+    snapshot (offset 0). Schedule: 0,11 alternating x4, then 10 x2, then 1,5,6,8 once
+    (14 passes/pick; readback budget factor 14).
+  - X9 FRAME REPLAY MAP: 32x32 ASCII coverage map ('#' written, '.' clear kept) per pass.
+  - X9 FRAME REPLAY LIVE at completion: re-hash of each live binding vs the pick snapshot.
+  - NOT compiled (tunnel down).
+- Reading rev236: v11 repeats identical while v0 varies -> live inputs mutate (LIVE same=0
+  names the binding). v11 also varies with all inputs frozen -> GPU/driver side; next
+  instrument PanVK IDVS position buffer for one draw. MAP shape vs CPU triangle tells
+  whether the projection itself is mirrored.
+- Test: build rev236, run mailbox/update.py, boot. Picks need not be CC.
+
 ## Active: rev234 ran but picked no CC draw; rev235 pick filter (source only) (2026-11-03)
 
 - User re-staged the mailbox; /tmp/3.txt (2.96 MB) shows "active plugin=X9GeneralMetal234"

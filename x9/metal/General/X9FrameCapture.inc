@@ -64,6 +64,22 @@ static void x9FrameSelect(NBCommandBuffer *cb) {
  remaining--;cb.traceFrame=++frames;cb.traceFrameTrigger=trigger;
  NSLog(@"X9 FRAME CB: f=%u trigger=%u cb=%llu uptime_us=%llu",cb.traceFrame,trigger,(unsigned long long)cb.traceID,(unsigned long long)now);
 }
+// Bytes a replay binding can reach, from its offset: enough for the draw's
+// vertices (stride*(start+count)) and at least 4 KiB of uniforms, clipped to
+// the buffer. Null when the buffer is not CPU readable.
+static NSData *x9ReplayBindingBytes(NSDictionary *entry,uint64_t want) {
+ NBBuffer *b=entry[@"buffer"];NSData *d=entry[@"bytes"];
+ if(!b)return d.length?[d copy]:nil;
+ if(b.storageMode!=MTLStorageModeShared||!b.contents)return nil;
+ const uint64_t off=[entry[@"offset"] unsignedLongLongValue];if(off>=b.length)return nil;
+ const uint64_t n=MIN(b.length-off,MAX(want,(uint64_t)4096));
+ return [NSData dataWithBytes:(const uint8_t *)b.contents+off length:(NSUInteger)n];
+}
+static uint64_t x9ReplayHash(NSData *d) {
+ uint64_t h=1469598103934665603ull;const uint8_t *p=(const uint8_t *)d.bytes;
+ for(NSUInteger i=0;i<d.length;i++){h^=p[i];h*=1099511628211ull;}
+ return h;
+}
 // Appended at commit, after every original encoder ended. Returns false only
 // on a local refusal, which is reported and leaves the command buffer as is.
 static void x9FrameReplay(NBCommandBuffer *cb) {
@@ -74,7 +90,7 @@ static void x9FrameReplay(NBCommandBuffer *cb) {
  NSMutableArray *results=[NSMutableArray array];uint64_t total=0;
  for(NSDictionary *r in replays) {
   NSArray *box=r[@"box"];const uint64_t bw=[box[2] unsignedLongLongValue],bh=[box[3] unsignedLongLongValue];
-  total+=((bw*4+255)&~255ull)*bh*12;
+  total+=((bw*4+255)&~255ull)*bh*14;
  }
  if(total>192ull*1024*1024){NSLog(@"X9 FRAME REPLAY SKIP: f=%llu bytes=%llu reason=budget",(unsigned long long)cb.traceID,(unsigned long long)total);cb.traceFrameReplaying=NO;return;}
  id<MTLBuffer> readback=[device newBufferWithLength:total options:MTLResourceStorageModeShared];
@@ -135,11 +151,17 @@ static void x9FrameReplay(NBCommandBuffer *cb) {
   }
   // Every pass gets its own box-sized targets (viewport shifted by the box
   // origin), so no pass's readback can race a later pass's clear; variants
-  // 0,1,5,6,8 each run twice to measure whether the GPU result repeats.
-  // 10 is the whole draw with the UV-gradient texture in every slot.
-  for(unsigned pass=0;pass<22;pass++) {
-   const unsigned variant=pass%11,repeat=pass/11;
-   if(variant!=0&&variant!=1&&variant!=5&&variant!=6&&variant!=8&&variant!=10)continue;
+  // 10 is the whole draw with the UV-gradient texture in every slot; 11 is
+  // the whole draw with every buffer binding replaced by the CPU snapshot
+  // taken at pick time (inputs frozen). 0 and 11 alternate, 4 repeats each,
+  // so live-input mutation and GPU non-determinism can be told apart.
+  NSMutableDictionary *frozen=[NSMutableDictionary dictionary];
+  NSDictionary *snap=r[@"snap"];
+  for(NSNumber *key in snap){NSData *d=snap[key];id<MTLBuffer> fb=[device newBufferWithBytes:d.bytes length:d.length options:MTLResourceStorageModeShared];if(fb)frozen[key]=fb;}
+  static const uint8_t schedule[][2]={{0,0},{11,0},{0,1},{11,1},{0,2},{11,2},{0,3},{11,3},{10,0},{10,1},{1,0},{5,0},{6,0},{8,0}};
+  for(unsigned pass=0;pass<sizeof schedule/sizeof schedule[0];pass++) {
+   const unsigned variant=schedule[pass][0],repeat=schedule[pass][1];
+   if(variant==11&&!frozen.count)continue;
    if(variant==10&&!gradient)continue;
    if(variant>=6&&variant<10&&!owned[variant-6])continue;
    if(variant<6&&!ranges[variant][1])continue;
@@ -166,12 +188,14 @@ static void x9FrameReplay(NBCommandBuffer *cb) {
     const unsigned stage=key.unsignedIntValue/32,slot=key.unsignedIntValue%32;
     NSDictionary *entry=buffers[key];NBBuffer *b=entry[@"buffer"];NSData *bytes=entry[@"bytes"];
     const NSUInteger off=[entry[@"offset"] unsignedIntegerValue];
+    id<MTLBuffer> fz=variant==11?frozen[key]:nil;
+    if(fz){if(stage==1)[e setVertexBuffer:fz offset:0 atIndex:slot];else if(stage==2)[e setFragmentBuffer:fz offset:0 atIndex:slot];continue;}
     if(stage==1){if(b)[e setVertexBuffer:b offset:off atIndex:slot];else if(bytes.length)[e setVertexBytes:bytes.bytes length:bytes.length atIndex:slot];}
     else if(stage==2){if(b)[e setFragmentBuffer:b offset:off atIndex:slot];else if(bytes.length)[e setFragmentBytes:bytes.bytes length:bytes.length atIndex:slot];}
    }
    NSDictionary *textures=r[@"textures"];for(NSNumber *key in textures)[e setFragmentTexture:variant==10?gradient:textures[key] atIndex:key.unsignedIntegerValue];
    NSDictionary *samplers=r[@"samplers"];for(NSNumber *key in samplers)[e setFragmentSamplerState:samplers[key] atIndex:key.unsignedIntegerValue];
-   if(variant==10)[e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:start vertexCount:count];
+   if(variant==10||variant==11)[e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:start vertexCount:count];
    else if(variant>=6) {
     [e setVertexBuffer:owned[variant-6] offset:0 atIndex:vslot];
     [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:variant==7?count:3];
@@ -183,7 +207,7 @@ static void x9FrameReplay(NBCommandBuffer *cb) {
    [blit copyFromTexture:c0 sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(bw,bh,1)
                 toBuffer:readback destinationOffset:at destinationBytesPerRow:row destinationBytesPerImage:row*bh];
    [blit endEncoding];
-   const bool whole=variant==10;
+   const bool whole=variant==10||variant==11;
    const NSUInteger rel=whole?0:variant>=6?0:variant==3||variant==4?count-3:ranges[variant][0]-start;
    const NSUInteger vcount=whole?count:variant>=6?(variant==7?count:3):ranges[variant][1];
    [results addObject:@{@"r":r,@"variant":@(variant),@"repeat":@(repeat),@"at":@(at),@"row":@(row),@"first":@(rel),@"count":@(vcount),
@@ -208,6 +232,14 @@ static void x9FrameReplay(NBCommandBuffer *cb) {
    // 16x16 pixel grid over the box (cell centres), one row per line, for
    // the whole draw with real (0) and gradient (10) textures. Box-relative.
    const unsigned variantN=[res[@"variant"] unsignedIntValue];
+   // 32x32 coverage map of every pass: '.' clear colour kept, '#' written.
+   for(unsigned my=0;my<32;my++) {
+    char line[33];const int64_t iy=(int64_t)((my+0.5)*bh/32);
+    for(unsigned mx=0;mx<32;mx++){const int64_t ix=(int64_t)((mx+0.5)*bw/32);const uint8_t *q=bytes+base+iy*row+ix*4;
+     line[mx]=(q[0]==255&&q[1]==0&&q[2]==255&&q[3]==255)?'.':'#';}
+    line[32]=0;
+    NSLog(@"X9 FRAME REPLAY MAP: f=%u n=%@ v=%u r=%@ y=%02u %s",f,r[@"n"],variantN,res[@"repeat"],my,line);
+   }
    if((variantN==0||variantN==10)&&[res[@"repeat"] unsignedIntValue]==0)
     for(unsigned gy=0;gy<16;gy++) {
      NSMutableString *line=[NSMutableString string];const int64_t iy=(int64_t)((gy+0.5)*bh/16);
@@ -230,6 +262,15 @@ static void x9FrameReplay(NBCommandBuffer *cb) {
     }
     NSLog(@"X9 FRAME REPLAY TRI: f=%u n=%@ variant=%@ repeat=%@ tri=%u area=%.1f p=(%.1f,%.1f)(%.1f,%.1f)(%.1f,%.1f) covered=%u/%u bgra=%@",
      f,r[@"n"],res[@"variant"],res[@"repeat"],t/3,area,P[0][0],P[0][1],P[1][0],P[1][1],P[2][0],P[2][1],covered,tested,px);
+   }
+  }
+  // Did any live binding change between pick (encode) and GPU completion?
+  for(NSDictionary *r in replays) {
+   NSDictionary *snap=r[@"snap"],*buffers=r[@"buffers"];
+   for(NSNumber *key in snap) {
+    NSData *now=x9ReplayBindingBytes(buffers[key],[snap[key] length]);
+    NSLog(@"X9 FRAME REPLAY LIVE: f=%u n=%@ stage=%u slot=%u len=%llu pick=%016llx done=%016llx same=%u",f,r[@"n"],key.unsignedIntValue/32,key.unsignedIntValue%32,
+     (unsigned long long)[snap[key] length],(unsigned long long)x9ReplayHash(snap[key]),now?(unsigned long long)x9ReplayHash(now):0ull,now&&[now isEqualToData:snap[key]]);
    }
   }
   NSLog(@"X9 FRAME REPLAY END: f=%u",f);
@@ -363,6 +404,17 @@ static void x9FrameFlush(NBCommandBuffer *cb) {
  const int64_t bx=MAX((int64_t)floor(x0)-2,0ll),by=MAX((int64_t)floor(y0)-2,0ll);
  const int64_t ex=MIN((int64_t)ceil(x1)+2,(int64_t)t0.width),ey=MIN((int64_t)ceil(y1)+2,(int64_t)t0.height);
  if(ex<=bx||ey<=by)return;
+ // Freeze every vertex/fragment buffer binding as the CPU sees it now.
+ NSMutableDictionary *snap=[NSMutableDictionary dictionary];
+ for(NSNumber *key in self.traceBuffers) {
+  NSDictionary *entry=self.traceBuffers[key];const unsigned stage=key.unsignedIntValue/32;
+  if(stage!=1&&stage!=2)continue;
+  NSData *d=x9ReplayBindingBytes(entry,(uint64_t)(start+count)*stride);
+  NBBuffer *b=entry[@"buffer"];
+  NSLog(@"X9 FRAME REPLAY BIND: f=%llu n=%u stage=%u slot=%u kind=%s obj=%llu offset=%llu len=%llu hash=%016llx",(unsigned long long)cb.traceID,n,stage,key.unsignedIntValue%32,
+   b?"buffer":"bytes",(unsigned long long)(b?x9FrameObjectID(b):0),(unsigned long long)[entry[@"offset"] unsignedLongLongValue],(unsigned long long)d.length,d?(unsigned long long)x9ReplayHash(d):0ull);
+  if(d)snap[key]=d;
+ }
  if(!cb.traceFrameReplays)cb.traceFrameReplays=[NSMutableArray array];
  MTLViewport v=self.traceViewportSet?self.traceViewport:(MTLViewport){0,0,(double)t0.width,(double)t0.height,0,1};
  id att1=self.traceAttachments.count>1?self.traceAttachments[1]:nil;
@@ -372,7 +424,7 @@ static void x9FrameFlush(NBCommandBuffer *cb) {
   @"cull":objc_getAssociatedObject(self,"cull")?:@0,@"winding":objc_getAssociatedObject(self,"winding")?:@0,
   @"points":pts,@"box":@[@(bx),@(by),@(ex-bx),@(ey-by)],
   @"raw":[NSData dataWithBytes:vertices+(uint64_t)start*stride length:(NSUInteger)(count*stride)],
-  @"stride":@(stride),@"slot":@(a0.bufferIndex),@"posoff":@(a0.offset)}];
+  @"stride":@(stride),@"slot":@(a0.bufferIndex),@"posoff":@(a0.offset),@"snap":snap}];
  NSLog(@"X9 FRAME REPLAY PICK: f=%llu n=%u count=%llu box=%lld,%lld,%lldx%lld fs=%@ ffid=%llu",(unsigned long long)cb.traceID,n,(unsigned long long)count,bx,by,ex-bx,ey-by,self.tracePipeline.traceFragment,(unsigned long long)self.tracePipeline.traceFragmentID);
  for(NSUInteger i=0;i<count;i++)for(uint64_t r0=0;r0<stride&&r0<64;r0+=24) {
   NSMutableString *hex=[NSMutableString string];
