@@ -332,6 +332,23 @@
 - Next: WAIT for explicit approval of the Task 2 design (5 decisions in §10).
   Do not start implementation; 1-3 touch submit/cache semantics.
 
+## Previous: main 6c80fa7 race-free repeated replays, merged into feat/G1Ultra 2026-11-03 (main called it "230"; unrelated to the branch rev230 boundary build)
+
+- 229 RUNTIME (.local/analysis-mailbox229/2_229.txt): picks were 3D/
+  perspective CC transition strips (box 124x830), not 2D platter quads. Same
+  draw at variant 1 and variant 2 (identical for count 9) gave 6448 vs 496
+  uncovered samples (n=3), rotations differed too. Either GPU
+  non-determinism or a harness artefact: all variants of one pick shared one
+  target texture, so a pass's readback could race the next pass's clear.
+- USER OBSERVATION: Today-view (negative-one screen) blur is completely fine;
+  the problem is transparency/alpha compositing (CC/App Library platters use
+  framebuffer-fetch darkening shaders), not blur itself.
+- 230: every replay pass uses its own box-sized targets (viewport shifted
+  by the box origin); variants 0,1,5,6,8 each run twice (repeat=0/1); picks
+  limited to 2 per process and to non-perspective draws (clip w 0.99..1.01).
+  Determinism question: same variant, different repeat -> different coverage
+  means the GPU result itself is not repeatable.
+
 ## Previous:229 owned-buffer / mirrored replays of the lost triangle (2026-11-02)
 
 - 228 RUNTIME: x9bf, x9bv, x9ba all still split/flicker (user). x9ba log

@@ -82,14 +82,6 @@ static void x9FrameReplay(NBCommandBuffer *cb) {
  uint64_t at=0;
  for(NSDictionary *r in replays) {
   NBTexture *a0=r[@"att0"];id a1=r[@"att1"];
-  MTLTextureDescriptor *td=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:a0.pixelFormat width:a0.width height:a0.height mipmapped:NO];
-  td.usage=MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead;td.storageMode=MTLStorageModePrivate;
-  id<MTLTexture> c0=[device newTextureWithDescriptor:td],c1=nil;
-  if([a1 isKindOfClass:[NBTexture class]]) {
-   MTLTextureDescriptor *t1=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:[(NBTexture *)a1 pixelFormat] width:a0.width height:a0.height mipmapped:NO];
-   t1.usage=MTLTextureUsageRenderTarget;t1.storageMode=MTLStorageModePrivate;c1=[device newTextureWithDescriptor:t1];
-  }
-  if(!c0){NSLog(@"X9 FRAME REPLAY SKIP: n=%@ reason=texture",r[@"n"]);continue;}
   NSArray *box=r[@"box"];const uint64_t bx=[box[0] unsignedLongLongValue],by=[box[1] unsignedLongLongValue],bw=[box[2] unsignedLongLongValue],bh=[box[3] unsignedLongLongValue];
   const uint64_t row=(bw*4+255)&~255ull;const NSUInteger start=[r[@"start"] unsignedIntegerValue],count=[r[@"count"] unsignedIntegerValue];
   MTLViewport v;[r[@"viewport"] getValue:&v];
@@ -127,9 +119,23 @@ static void x9FrameReplay(NBCommandBuffer *cb) {
     owned[2+axis]=[device newBufferWithBytes:d length:3*vstride options:MTLResourceStorageModeShared];ownedPts[2+axis]=mp;
    }
   }
-  for(unsigned variant=0;variant<10;variant++) {
+  // Every pass gets its own box-sized targets (viewport shifted by the box
+  // origin), so no pass's readback can race a later pass's clear; variants
+  // 0,1,5,6,8 each run twice to measure whether the GPU result repeats.
+  for(unsigned pass=0;pass<20;pass++) {
+   const unsigned variant=pass%10,repeat=pass/10;
+   if(variant!=0&&variant!=1&&variant!=5&&variant!=6&&variant!=8)continue;
    if(variant>=6&&!owned[variant-6])continue;
-   if(variant<6&&(!ranges[variant][1]||(variant>=3&&variant<=4&&(!rotation||start+count>65535))))continue;
+   if(variant<6&&!ranges[variant][1])continue;
+   MTLTextureDescriptor *td=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:a0.pixelFormat width:bw height:bh mipmapped:NO];
+   td.usage=MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead;td.storageMode=MTLStorageModePrivate;
+   id<MTLTexture> c0=[device newTextureWithDescriptor:td],c1=nil;
+   if([a1 isKindOfClass:[NBTexture class]]) {
+    MTLTextureDescriptor *t1=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:[(NBTexture *)a1 pixelFormat] width:bw height:bh mipmapped:NO];
+    t1.usage=MTLTextureUsageRenderTarget;t1.storageMode=MTLStorageModePrivate;c1=[device newTextureWithDescriptor:t1];
+   }
+   if(!c0){NSLog(@"X9 FRAME REPLAY SKIP: n=%@ reason=texture",r[@"n"]);break;}
+   MTLViewport shifted=v;shifted.originX-=(double)bx;shifted.originY-=(double)by;
    MTLRenderPassDescriptor *pd=[MTLRenderPassDescriptor renderPassDescriptor];
    pd.colorAttachments[0].texture=c0;pd.colorAttachments[0].loadAction=MTLLoadActionClear;
    pd.colorAttachments[0].clearColor=MTLClearColorMake(1,0,1,1);pd.colorAttachments[0].storeAction=MTLStoreActionStore;
@@ -137,7 +143,7 @@ static void x9FrameReplay(NBCommandBuffer *cb) {
     pd.colorAttachments[1].clearColor=MTLClearColorMake(0,0,0,0);pd.colorAttachments[1].storeAction=MTLStoreActionDontCare;}
    id<MTLRenderCommandEncoder> e=[(id<MTLCommandBuffer>)cb renderCommandEncoderWithDescriptor:pd];
    if(!e){NSLog(@"X9 FRAME REPLAY SKIP: n=%@ reason=encoder",r[@"n"]);break;}
-   [e setRenderPipelineState:r[@"pipeline"]];[e setViewport:v];
+   [e setRenderPipelineState:r[@"pipeline"]];[e setViewport:shifted];
    [e setCullMode:(MTLCullMode)[r[@"cull"] unsignedIntegerValue]];[e setFrontFacingWinding:(MTLWinding)[r[@"winding"] unsignedIntegerValue]];
    NSDictionary *buffers=r[@"buffers"];
    for(NSNumber *key in buffers) {
@@ -157,12 +163,12 @@ static void x9FrameReplay(NBCommandBuffer *cb) {
    else [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:ranges[variant][0] vertexCount:ranges[variant][1]];
    [e endEncoding];
    id<MTLBlitCommandEncoder> blit=[(id<MTLCommandBuffer>)cb blitCommandEncoder];
-   [blit copyFromTexture:c0 sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(bx,by,0) sourceSize:MTLSizeMake(bw,bh,1)
+   [blit copyFromTexture:c0 sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(bw,bh,1)
                 toBuffer:readback destinationOffset:at destinationBytesPerRow:row destinationBytesPerImage:row*bh];
    [blit endEncoding];
    const NSUInteger rel=variant>=6?0:variant==3||variant==4?count-3:ranges[variant][0]-start;
    const NSUInteger vcount=variant>=6?(variant==7?count:3):ranges[variant][1];
-   [results addObject:@{@"r":r,@"variant":@(variant),@"at":@(at),@"row":@(row),@"first":@(rel),@"count":@(vcount),
+   [results addObject:@{@"r":r,@"variant":@(variant),@"repeat":@(repeat),@"at":@(at),@"row":@(row),@"first":@(rel),@"count":@(vcount),
     @"pts":variant>=6?ownedPts[variant-6]:allPts}];
    at+=row*bh;
   }
@@ -180,7 +186,7 @@ static void x9FrameReplay(NBCommandBuffer *cb) {
    const unsigned first=[res[@"first"] unsignedIntValue],cnt=[res[@"count"] unsignedIntValue];
    uint64_t magenta=0,sampled=0;
    for(int64_t y=0;y<bh;y+=4)for(int64_t x=0;x<bw;x+=4){const uint8_t *q=bytes+base+y*row+x*4;sampled++;if(q[0]==255&&q[1]==0&&q[2]==255&&q[3]==255)magenta++;}
-   NSLog(@"X9 FRAME REPLAY RESULT: f=%u n=%@ variant=%@ first=%u count=%u box_uncovered=%llu/%llu",f,r[@"n"],res[@"variant"],first,cnt,(unsigned long long)magenta,(unsigned long long)sampled);
+   NSLog(@"X9 FRAME REPLAY RESULT: f=%u n=%@ variant=%@ repeat=%@ first=%u count=%u box_uncovered=%llu/%llu",f,r[@"n"],res[@"variant"],res[@"repeat"],first,cnt,(unsigned long long)magenta,(unsigned long long)sampled);
    for(unsigned t=first;t+3<=first+cnt;t+=3) {
     double P[3][2];for(unsigned k=0;k<3;k++){P[k][0]=[pts[t+k][0] doubleValue];P[k][1]=[pts[t+k][1] doubleValue];}
     const double area=((P[1][0]-P[0][0])*(P[2][1]-P[0][1])-(P[2][0]-P[0][0])*(P[1][1]-P[0][1]))/2;
@@ -194,8 +200,8 @@ static void x9FrameReplay(NBCommandBuffer *cb) {
      if(!(q[0]==255&&q[1]==0&&q[2]==255&&q[3]==255))covered++;
      [px appendFormat:@" %02x%02x%02x%02x",q[0],q[1],q[2],q[3]];
     }
-    NSLog(@"X9 FRAME REPLAY TRI: f=%u n=%@ variant=%@ tri=%u area=%.1f p=(%.1f,%.1f)(%.1f,%.1f)(%.1f,%.1f) covered=%u/%u bgra=%@",
-     f,r[@"n"],res[@"variant"],t/3,area,P[0][0],P[0][1],P[1][0],P[1][1],P[2][0],P[2][1],covered,tested,px);
+    NSLog(@"X9 FRAME REPLAY TRI: f=%u n=%@ variant=%@ repeat=%@ tri=%u area=%.1f p=(%.1f,%.1f)(%.1f,%.1f)(%.1f,%.1f) covered=%u/%u bgra=%@",
+     f,r[@"n"],res[@"variant"],res[@"repeat"],t/3,area,P[0][0],P[0][1],P[1][0],P[1][1],P[2][0],P[2][1],covered,tested,px);
    }
   }
   NSLog(@"X9 FRAME REPLAY END: f=%u",f);
@@ -285,7 +291,7 @@ static void x9FrameFlush(NBCommandBuffer *cb) {
  const X9CaptureOptions &options=captureOptions();
  if(nowUs()<(options.startGiven?options.geometryStartUs:45000000ull))return;
  static std::atomic<unsigned> budget{0};
- if(budget.load()>=4||cb.traceFrameReplays.count>=4)return;
+ if(budget.load()>=2||cb.traceFrameReplays.count>=2)return;
  MTLVertexAttributeDescriptor *a0=pipeline.traceLayout.attributes[0];
  if(!a0||a0.format!=MTLVertexFormatFloat4)return;
  MTLVertexBufferLayoutDescriptor *vl=pipeline.traceLayout.layouts[a0.bufferIndex];
@@ -316,7 +322,8 @@ static void x9FrameFlush(NBCommandBuffer *cb) {
  for(NSUInteger i=0;i<count;i++) {
   float p[4];memcpy(p,vertices+(uint64_t)(start+i)*stride+a0.offset,16);
   double c[4];for(unsigned r=0;r<4;r++)c[r]=M[r]*p[0]+M[4+r]*p[1]+M[8+r]*p[2]+M[12+r]*p[3];
-  if(c[3]<=1e-6)return;
+  // 2D platter quads only (perspective CC transitions render both halves).
+  if(c[3]<0.99||c[3]>1.01)return;
   const double px=(c[0]/c[3]+1)/2*vw+vx,py=(1-c[1]/c[3])/2*vh+vy;
   [pts addObject:@[@(px),@(py)]];x0=MIN(x0,px);y0=MIN(y0,py);x1=MAX(x1,px);y1=MAX(y1,py);
  }
