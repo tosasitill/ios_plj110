@@ -1,3 +1,16 @@
+## Async submission step 1: x9q1 = Mesa threaded vk_queue submit (source only, 2026-11-03)
+
+- Finding: the blocking point is userspace PanVK vkQueueSubmit -> X9PanVKSync.c submit_sync_common ->
+  x9_pan_kmod_submit (synchronous kernel call); the frontend's commit does not wait afterwards
+  (completion handlers fire from fence signals). Mesa's vk_queue has a threaded submit mode
+  (MESA_VK_ENABLE_SUBMIT_THREAD) that moves driver_submit to a per-queue thread; our sync provider
+  implements DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT. NOT verified against the Mac Mesa tree whether
+  the X9 sync type advertises WAIT_PENDING (threaded mode requires it) - check the first log.
+- Frontend: boot token x9q1 -> setenv MESA_VK_ENABLE_SUBMIT_THREAD=1 before nmb_device_open; log
+  "X9 SUBMIT: vk_queue mode=...". This is a userspace stand-in for decision 1 (kernel worker); the
+  kernel queue, display lock decoupling and exact resource sets (decisions 3/4) follow if it helps.
+- Next build (rev245): host-texture default InPlace, latency governor, x9q1 token.
+
 ## DECISION 2026-11-03: user accepted all five submission-decoupling defaults
 
 docs/graphics/submission-decoupling-design.md section 10: (1) kernel worker-thread queue,
