@@ -1,3 +1,17 @@
+## G1UltraMetal repo split (2026-11-03)
+
+- Pushed git@github.com:tosasitill/G1UltraMetal.git main 75439c9 (fresh history, from
+  ios_plj110 4abe1e3): metal/ (= x9/metal), build/third_party (all Mesa + metal2vulkan patches),
+  build/scripts (13 plugin-chain scripts; build-render-cs and collect/import-build-inputs stay
+  here), build/prepare-local.py (kernel inputs dropped from its required list),
+  build/build.py (plugins only), build/mailbox-manifest.json, docs/graphics,
+  docs/partial-vertex-group.md, README, MIT LICENSE. Paths rebased (parents[3] -> [2],
+  x9/metal -> metal); package-plugins writes the allowlist header to <out>/ or --header.
+- NOT build-verified (tunnel down). Expected setup on the Mac: clone to ~/G1UltraMetal,
+  `ln -s ~/ios_plj110/.local .local`, copy build/local.example.json -> build/local.json.
+- ios_plj110 x9/metal is still the live copy; until G1UltraMetal builds identically, keep
+  changes in both or switch ios_plj110 to a submodule.
+
 ## GPU load governor (source only, 2026-11-03)
 
 - User chose a simple load governor. sweet_x9_gpu_dependencies.c: the old one-shot commit
