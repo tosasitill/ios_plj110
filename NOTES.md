@@ -19,8 +19,15 @@
 - Test: mailbox/update.py x9/out/x9-rev239-heap, boot it. Expect "X9 TILER HEAP: ...
   linked=16 bytes=33554432" lines. Then report whether CC split/flicker changes. A control
   boot (x9vf, 10 MiB) can be packed from the same kernel with build.py boot.
-- Pending: delete /Users/tosasitill/HelioDarwin-x9-lk-preserve (13 GB) after the user confirms
-  the listing; nothing in the build references it any more.
+- DELETED 2026-11-03 with user confirmation: /Users/tosasitill/HelioDarwin-x9-lk-preserve (13 GB),
+  build-panvk-native-ios.bak-20261103, x9-failed-fresh-configure-20261103. Prior audit
+  (x9/out/old-workspace-audit/result.json on the Mac): 181,667 files byte-identical under
+  .local/x9; no-copy/different files were build caches, old scripts (git history ca5b8d5),
+  the old MaliMetal bridge copy, and Mu-Silicium-X9 .git stores (upstream
+  Project-Silicium/Mu-Silicium @ 6c67550). Its 25 uncommitted local changes are identical in
+  .local and were also exported to .local/x9/work/legacy-import/Mu-Silicium-X9.local-changes/
+  (top-level.patch, sub/Mu_Basecore.patch, base commit, status, untracked list). After deletion
+  `ninja -n` in build-panvk-native-ios resolves all inputs.
 
 ## Build-path migration attempt (Mac, 2026-11-03)
 
