@@ -77,7 +77,7 @@ x9_panvk_group_create(struct pan_kmod_dev *dev,struct drm_panthor_group_create *
  return ret;
 }
 
-/* Diagnostic A/B (exact boot-arg token x9tb): link 16 tiler heap chunks
+/* Diagnostic A/B (exact boot-arg token x9tb, or x9vt = x9vf capture + this): link 16 tiler heap chunks
  * (32 MiB) instead of Mesa's fixed initial 5 (10 MiB). Default unchanged. */
 static uint32_t
 x9_panvk_tiler_chunks(uint32_t requested)
@@ -90,7 +90,7 @@ x9_panvk_tiler_chunks(uint32_t requested)
    for(const char *p=args;*p;) {
     while(*p&&(unsigned char)*p<=32)p++;
     const char *end=p;while(*end&&(unsigned char)*end>32)end++;
-    if(end-p==4&&!memcmp(p,"x9tb",4))m=1;
+    if(end-p==4&&(!memcmp(p,"x9tb",4)||!memcmp(p,"x9vt",4)))m=1;
     p=end;
    }
   }

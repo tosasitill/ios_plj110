@@ -96,7 +96,8 @@ static const X9CaptureOptions &captureOptions() {
   if(out.geometry)NSLog(@"X9 GEOM capture: start_us=%llu windows=3x30s max_draws=18 indices=96;CPU-only",(unsigned long long)out.geometryStartUs);
   // x9vf: whole backboardd command buffers (every draw) at fixed uptimes,
   // plus a GPU copy of each draw's vertex/index bytes compared after completion.
-  out.frame=enabled("x9vf");
+  // x9vt = x9vf plus the 32 MiB tiler heap (x9tb); both do not fit the boot-arg bound.
+  out.frame=enabled("x9vf")||enabled("x9vt");
   if(out.frame)NSLog(@"X9 FRAME capture: start_us=%llu triggers=3x20s cbs_per_trigger=3 max_draws=400;CPU snapshot+coverage+texture/surface+FBF",
    (unsigned long long)(out.startGiven?out.geometryStartUs:60000000ull));
   return out;

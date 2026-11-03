@@ -1,3 +1,36 @@
+## Active: rev237 reproduces the CC split in replay; rev238 heap A/B token x9vt (2026-11-03)
+
+- rev237 log /tmp/4.txt (2.9 MB, X9GeneralMetal237 active). Pick n2 = CC card,
+  cb=117, 9 vertices, box 659,232,511x511, ffid24; vertices exactly
+  v0=v1=v3=v6=TL, v2=v5=v7=BR, v4=TR, v8=BL; tri1=(TL,TR,BR), tri2=(TL,BR,BL).
+  Geometry matches the CPU projection here (no mirror).
+- OBSERVED (14 passes in one CB, one encoder each, box-sized fresh targets), in pass order:
+  uncovered 765, 490, 459, 255, 255, 255, 255 | 7431, 7250, 8256, 6909, 6741, 6586
+  (v0/v11/v12 interleaved; last pass v1 alone = 16384). MAP: early passes full card,
+  from pass 8 on the lower-left triangle tri2 (the LAST triangle) is missing. Frozen inputs
+  (v11) behave identically. Every box hash differs (also between early full passes).
+  This IS the CC diagonal split, reproduced inside one command buffer.
+- Pick n1 (cb=112, ffid70, 6 vertices, 424x424): mostly nothing written with a stable hash
+  7025d5873cfddd83; sporadic deviations (v11 r1, v12 r1, v0 r4 = 11035).
+- v12 (attachment 1 cleared to 1,1,1,1) is no different from v0/v11 -> no evidence ffid24
+  depends on attachment 1. RT1 hypothesis not supported for this pipeline.
+- LIVE same=0 even for the exact 432-byte vertex range: CA rewrote its ring obj=29 between
+  pick and completion (completion took 2.6-5.2 s). Not the cause (frozen v11 identical);
+  note it for the real frames.
+- No TILER OOM / fault / X9 TILER HEAP line in the log.
+- HYPOTHESIS (best fit): pass-order dependence + last triangle lost points to the CSF
+  tiler heap (IDVS writes position/varyings into it). X9PanVKTilerHeap.c is a fixed
+  pre-linked chain (Mesa's 5 x 2 MiB), no growth, no OOM servicing. Chunk recycling at
+  FINISH_FRAGMENT or exhaustion would show exactly "fine for N passes, then the tail of
+  the draw is lost".
+- rev238 change: boot token x9vt = x9vf capture + 16-chunk (32 MiB) heap (x9vf + x9tb
+  do not fit the 608-byte bound). Frontend: out.frame = x9vf || x9vt; PanVK bridge:
+  big heap for x9tb || x9vt. Kernel-side x9vf logging is not enabled by x9vt. NOT compiled.
+- Test: build all rev238 --boot-arg x9vt, then a second boot.img from the same kernel with
+  --boot-arg x9vf (control). One mailbox staging serves both. Reading: with x9vt the
+  flip moves later or disappears -> heap capacity/recycling confirmed; unchanged -> not
+  heap size (look at chunk recycling / heap context state next).
+
 ## Active: rev236 = non-determinism is GPU/driver side; rev237 attachment-1 probe (source only) (2026-11-03)
 
 - rev236 log /tmp/3.txt (2.98 MB, X9GeneralMetal236 active). Picks cb=54: both the same
