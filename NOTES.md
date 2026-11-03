@@ -1,3 +1,23 @@
+## Active: rev239 result (32 MiB heap real) + rev240 backboardd 128 MiB (2026-11-03)
+
+- rev239 log /tmp/6.txt (3.7 MB, X9GeneralMetal239). "X9 TILER HEAP ... requested=5 linked=16
+  bytes=33554432" for backboardd, mediaserverd, SpringBoard, chronod, SBRendererService:
+  the heap enlargement is in effect for the first time. 5 x 32 MiB allocations logged.
+- USER: flicker seems reduced (not gone).
+- Replays deterministic: n2 = CC card (12 vertices, 83,230,513x514, ffid24) identical hash
+  d1530d05c867e713 for all 13 whole-draw passes, full coverage; n1 (27 vertices, 578x578,
+  ffid65) identical 0473e8590a4f2730; its v12 (RT1 cleared to 1) is consistently different
+  (2097e3f1daece45f) -> ffid65 reads attachment 1, deterministically.
+- Memory: backboardd peak X9 RENDER MEM used=544,391,168 with 32 MiB heaps; kernel client
+  budget defaults to 1024 MiB (x9_gpu_client_mb), per-BO limit 128 MiB (inclusive).
+- rev240 change (X9PanVKQueueBridge.inc): with x9tb/x9vt, backboardd links 64 chunks
+  (128 MiB = upstream Mesa max_chunks = per-BO limit), all other processes 16 (32 MiB).
+- Build: build.py all --revision 240 --name x9-rev240-heap128 --boot-arg x9vt (Mac, login
+  shell). Expect "X9 TILER HEAP: proc=backboardd ... linked=64 bytes=134217728".
+- Reading: flicker gone at 128 MiB -> capacity (no OOM servicing) is the mechanism; then a
+  real fix is TILER_OOM servicing / incremental rendering, or a fixed upstream-sized heap.
+  Unchanged vs 32 MiB -> residual flicker has another cause (chunk recycling or non-heap).
+
 ## Active: rev239 = first build with the repo PanVK bridge (heap A/B now real) (2026-11-03)
 
 - Toolchain: user ran `sudo xcode-select -s /Users/tosasitill/Downloads/Xcode.app/Contents/Developer`

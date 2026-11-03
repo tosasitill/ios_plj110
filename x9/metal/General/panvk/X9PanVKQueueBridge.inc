@@ -77,8 +77,12 @@ x9_panvk_group_create(struct pan_kmod_dev *dev,struct drm_panthor_group_create *
  return ret;
 }
 
-/* Diagnostic A/B (exact boot-arg token x9tb, or x9vt = x9vf capture + this): link 16 tiler heap chunks
- * (32 MiB) instead of Mesa's fixed initial 5 (10 MiB). Default unchanged. */
+/* Diagnostic A/B (exact boot-arg token x9tb, or x9vt = x9vf capture + this):
+ * link more tiler heap chunks than Mesa's fixed initial 5 (10 MiB): backboardd,
+ * which composites Control Center, gets 64 (128 MiB = upstream Mesa's
+ * max_chunks and the per-BO limit), every other process 16 (32 MiB).
+ * rev239 with 32 MiB everywhere made replays deterministic and reduced the
+ * visible flicker. Default unchanged. */
 static uint32_t
 x9_panvk_tiler_chunks(uint32_t requested)
 {
@@ -96,7 +100,9 @@ x9_panvk_tiler_chunks(uint32_t requested)
   }
   big=m;
  }
- return big&&requested<16?16:requested;
+ if(!big)return requested;
+ const uint32_t want=!strcmp(getprogname(),"backboardd")?64:16;
+ return requested<want?want:requested;
 }
 static int
 x9_panvk_tiler_create(struct panvk_device *dev,struct panvk_tiler_heap *heap,struct drm_panthor_tiler_heap_create *request)
@@ -104,7 +110,7 @@ x9_panvk_tiler_create(struct panvk_device *dev,struct panvk_tiler_heap *heap,str
  if(request->vm_id||!request->initial_chunk_count||request->initial_chunk_count>request->max_chunks){errno=EINVAL;return -1;}
  {
   const uint32_t chunks=x9_panvk_tiler_chunks(request->max_chunks);
-  x9_panvk_log("X9 TILER HEAP: proc=%s chunk=%u requested=%u linked=%u bytes=%llu;x9tb=32MiB A/B",
+  x9_panvk_log("X9 TILER HEAP: proc=%s chunk=%u requested=%u linked=%u bytes=%llu;x9tb/x9vt A/B: backboardd 128MiB, others 32MiB",
    getprogname(),request->chunk_size,request->max_chunks,chunks,(unsigned long long)chunks*request->chunk_size);
   request->max_chunks=chunks;
  }
