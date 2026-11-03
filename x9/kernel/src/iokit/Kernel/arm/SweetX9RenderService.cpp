@@ -429,7 +429,10 @@ public:
   // Preserve the allocation's cache contract explicitly for every user view.
   // Submission skips CPU maintenance for these BOs; a default/cacheable view
   // would make that skip invalid. Host imports keep their existing mode.
-  if(r->write_combined)*options|=kIOMapWriteCombineCache;
+  // A/B (boot-arg token x9r1): pre-efef710 default-cache user views.
+  static int default_views=-1;
+  if(default_views<0){int v=0;default_views=PE_parse_boot_argn("x9r1",&v,sizeof(v))?1:0;}
+  if(r->write_combined&&!default_views)*options|=kIOMapWriteCombineCache;
   IOLockUnlock(context->lock);return kIOReturnSuccess;
  }
  IOReturn externalMethod(uint32_t selector,IOExternalMethodArguments *args,IOExternalMethodDispatch *,OSObject *,void *) APPLE_KEXT_OVERRIDE {

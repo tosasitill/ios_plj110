@@ -1,7 +1,9 @@
 /* SPDX-License-Identifier: MIT */
 #pragma once
 #include <kern/cpu_data.h>
+#include <pexpert/pexpert.h>
 extern "C" vm_offset_t phystokv(uint64_t);
+extern "C" void clean_dcache64(uint64_t,unsigned,int);
 
 /* Only held, wired driver allocations: never user VAs or arbitrary MMIO.
  * The frozen Apple-coherent cache API may be a DSB-only implementation.
@@ -10,6 +12,10 @@ extern "C" vm_offset_t phystokv(uint64_t);
 static inline void x9_gpu_clean(uint64_t address,unsigned bytes,int physical)
 {
  if(!bytes)return;
+ /* A/B (boot-arg token x9r3): the pre-0efed90 Apple cache API. */
+ static int legacy=-1;
+ if(legacy<0){int v=0;legacy=PE_parse_boot_argn("x9r3",&v,sizeof(v))?1:0;}
+ if(legacy){clean_dcache64(address,bytes,physical);return;}
  if(physical)address=phystokv(address);
  while(bytes) {
   unsigned run=bytes>4096?4096:bytes;

@@ -1,3 +1,21 @@
+## Swipe mosaic regression bisect: rev244 tokens x9h0 / x9r1 / x9r3 (2026-11-03)
+
+- rev243 result (/tmp/10.txt x9c0, /tmp/11.txt control): mosaic in BOTH -> CRC hypothesis
+  FALSIFIED. Governor works: GPUEB temperature is in degrees C (37..43), util_avg only 12-25%
+  during use, so it stays at the 858 MHz floor (0 and 3 commits) - not GPU-bound.
+- USER: mosaic started with commits after 2026-11-01 14:15 +0800 (06:15 UTC); before that only
+  the missing triangle. Candidates that change behaviour (commit dates mix +0000/+0800):
+  efef710 WC flag on user views; 0efed90 x9_gpu_clean + batched range sync (more cleaning);
+  40ed1cf reassert WC (off by default since d15598c -> excluded); 353ae1c (21:32 +0800,
+  mailbox214) host-page textures InPlaceWrites: GPU renders directly into imported IOSurface
+  pages with a linear layout instead of a shadow (strongest suspect: imported memory relies on
+  the kernel cache plan with write_begin/write_end ranges and 256-byte atoms).
+- rev244 tokens (one per boot; same kernel/plugins):
+  x9h0  frontend sets X9_HOST_TEXTURE_SHADOW -> bridge keeps the runtime default InPlace policy
+        (log "X9 HOST TEXTURES: policy=...").
+  x9r1  kernel: user views of WC BOs without kIOMapWriteCombineCache (pre-efef710).
+  x9r3  kernel: x9_gpu_clean -> clean_dcache64 (pre-0efed90 API; batching kept).
+
 ## Active: rev243 built (CRC A/B + governor + padding), awaiting device test (2026-11-03)
 
 - Swipe mosaic hypothesis: PanVK transaction elimination (CRC). Mesa's own comment in
