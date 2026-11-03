@@ -6,7 +6,7 @@ index a0a826f..39860ba 100644
    # dependencies (such as vk-runtime) linking to it
    dep_libdrm = null_dep
  endif
-+dep_libdrm = declare_dependency(include_directories : include_directories('/Users/tosasitill/HelioDarwin-x9-lk-preserve/work/x9-metal-render/libdrm-2.4.133', '/Users/tosasitill/HelioDarwin-x9-lk-preserve/work/x9-metal-render/libdrm-2.4.133/include/drm')) # X9 PanVK transport declarations
++dep_libdrm = declare_dependency(include_directories : include_directories('/Users/tosasitill/ios_plj110/.local/x9/work/x9-metal-render/libdrm-2.4.133', '/Users/tosasitill/ios_plj110/.local/x9/work/x9-metal-render/libdrm-2.4.133/include/drm')) # X9 PanVK transport declarations
  if dep_libdrm.found()
    pre_args += '-DHAVE_LIBDRM'
    if with_dri_platform == 'drm' and with_dri
@@ -396,12 +396,12 @@ index 7c87fe4..f085f76 100644
 +# X9 native transport sources selected by the native build option.
 +if get_option('x9-native-kmod')
 +  libpanvk_files += files(
-+    '/Users/tosasitill/HelioDarwin-x9-lk-preserve/MaliMetal/X9/General/X9RenderTransport.c',
-+    '/Users/tosasitill/HelioDarwin-x9-lk-preserve/MaliMetal/X9/General/panvk/X9PanVKMemory.c',
-+    '/Users/tosasitill/HelioDarwin-x9-lk-preserve/MaliMetal/X9/General/panvk/X9PanVKSync.c',
-+    '/Users/tosasitill/HelioDarwin-x9-lk-preserve/MaliMetal/X9/General/panvk/X9PanVKTilerHeap.c',
-+    '/Users/tosasitill/HelioDarwin-x9-lk-preserve/MaliMetal/X9/General/panvk/X9PanVKSubmitPlan.c',
-+    '/Users/tosasitill/HelioDarwin-x9-lk-preserve/MaliMetal/X9/General/panvk/X9PanVKQueue.c',
++    '/Users/tosasitill/ios_plj110/.local/x9/MaliMetal/X9/General/X9RenderTransport.c',
++    '/Users/tosasitill/ios_plj110/.local/x9/MaliMetal/X9/General/panvk/X9PanVKMemory.c',
++    '/Users/tosasitill/ios_plj110/.local/x9/MaliMetal/X9/General/panvk/X9PanVKSync.c',
++    '/Users/tosasitill/ios_plj110/.local/x9/MaliMetal/X9/General/panvk/X9PanVKTilerHeap.c',
++    '/Users/tosasitill/ios_plj110/.local/x9/MaliMetal/X9/General/panvk/X9PanVKSubmitPlan.c',
++    '/Users/tosasitill/ios_plj110/.local/x9/MaliMetal/X9/General/panvk/X9PanVKQueue.c',
 +  )
 +endif
 +
@@ -419,7 +419,7 @@ index 7c87fe4..f085f76 100644
    ],
    c_args : [no_override_init_args, panvk_flags, soong_compat_c_args],
 -  link_args : [vulkan_icd_link_args, ld_args_bsymbolic, ld_args_gc_sections, ld_args_build_id],
-+  link_args : [x9_link_frameworks, vulkan_icd_link_args, ld_args_bsymbolic, ld_args_gc_sections, ld_args_build_id, '-Wl,@/Users/tosasitill/HelioDarwin-x9-lk-preserve/work/x9-metal-render/render-link-inputs/optional-vulkan-entrypoints.rsp'],
++  link_args : [x9_link_frameworks, vulkan_icd_link_args, ld_args_bsymbolic, ld_args_gc_sections, ld_args_build_id, '-Wl,@/Users/tosasitill/ios_plj110/.local/x9/work/x9-metal-render/render-link-inputs/optional-vulkan-entrypoints.rsp'],
    link_depends: vulkan_icd_link_depends,
    gnu_symbol_visibility : 'hidden',
    install : true,

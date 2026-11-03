@@ -30,7 +30,7 @@ import sys
 import tarfile
 from pathlib import Path
 
-DEFAULT_CANDIDATE = "/Users/tosasitill/HelioDarwin-x9-lk-preserve/x9/out/pan220-batched-cache-ranges"
+DEFAULT_CANDIDATE = str(Path(__file__).resolve().parents[3] / '.local/x9/x9/out/pan220-batched-cache-ranges')
 RECIPE_FILES = ["commands.json", "kernel-compile-commands.json", "kernel-link.filelist", "build.sh", "build-kernel.py",
                 "boot-args.txt", "boot.json", "cache-batch-inputs.json",
                 "external-metal-verification.patch"]

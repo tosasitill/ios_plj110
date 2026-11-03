@@ -17,7 +17,7 @@
 
 - 第三方源码：`mesa-render-source/`、`mesa-source/`（AIR frontend）、`metal2vulkan-source/` 及多个 `metal2vulkan-pan*-source/`、`libdrm-2.4.133/`。版本与补丁部分已入库，不应简单把所有历史副本一起搬入。
 - 构建环境/生成输入：`build-env/`、`build-tools/`、`build-host/`、`build-panvk-host/`、`render-link-inputs/optional-vulkan-entrypoints.rsp` 等。建议重建虚拟环境并固定依赖；不直接搬含绝对路径的构建缓存。
-- `x9/build/third_party/00-mesa-panvk-x9.patch` 仍硬编码旧工作区的 libdrm、`MaliMetal/X9/General/` 和 rsp 路径。
+- 2026-11-03：`00-mesa-panvk-x9.patch` 的 libdrm、`MaliMetal/X9/General/` 和 rsp 路径已改为 `~/ios_plj110/.local/x9/...`（与已打补丁的 Mesa 树一致）。此前 PanVK 构建目录的 meson 交叉文件仍带旧工作区的 `-I`，导致 `X9PanVKQueueBridge.inc` 一直取自旧工作区；已用新交叉文件重新全量配置，构建目录不再引用旧工作区。
 - 已入库脚本仍使用 `w=脚本所在目录`、`root=w.parents[1]` 的旧布局。现在位于 `x9/build/scripts/`，会找这里的源码/venv，并把桥接路径解析为 `x9/MaliMetal/X9/General`，实际仓库代码在 `x9/metal/General`。不能因脚本已复制就认定可运行。
 - 旧 `build-general-metal.py` 比入库副本多 `--runtime-source`、`x9_runtime_latest` Rust cfg、`X9_RUNTIME_LATEST` C 宏和 `-lcompression`。
 - 旧 `package-panvk-native.py` 比入库副本多 `--source-library`。
