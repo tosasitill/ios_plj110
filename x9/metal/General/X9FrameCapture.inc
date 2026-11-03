@@ -158,7 +158,9 @@ static void x9FrameReplay(NBCommandBuffer *cb) {
   NSMutableDictionary *frozen=[NSMutableDictionary dictionary];
   NSDictionary *snap=r[@"snap"];
   for(NSNumber *key in snap){NSData *d=snap[key];id<MTLBuffer> fb=[device newBufferWithBytes:d.bytes length:d.length options:MTLResourceStorageModeShared];if(fb)frozen[key]=fb;}
-  static const uint8_t schedule[][2]={{0,0},{11,0},{0,1},{11,1},{0,2},{11,2},{0,3},{11,3},{10,0},{10,1},{1,0},{5,0},{6,0},{8,0}};
+  // 12 = whole draw, live inputs, colour attachment 1 cleared to (1,1,1,1)
+  // instead of 0: a different result means the shader reads attachment 1.
+  static const uint8_t schedule[][2]={{0,0},{11,0},{12,0},{0,1},{11,1},{12,1},{0,2},{11,2},{12,2},{0,3},{0,4},{0,5},{10,0},{1,0}};
   for(unsigned pass=0;pass<sizeof schedule/sizeof schedule[0];pass++) {
    const unsigned variant=schedule[pass][0],repeat=schedule[pass][1];
    if(variant==11&&!frozen.count)continue;
@@ -178,7 +180,7 @@ static void x9FrameReplay(NBCommandBuffer *cb) {
    pd.colorAttachments[0].texture=c0;pd.colorAttachments[0].loadAction=MTLLoadActionClear;
    pd.colorAttachments[0].clearColor=MTLClearColorMake(1,0,1,1);pd.colorAttachments[0].storeAction=MTLStoreActionStore;
    if(c1){pd.colorAttachments[1].texture=c1;pd.colorAttachments[1].loadAction=MTLLoadActionClear;
-    pd.colorAttachments[1].clearColor=MTLClearColorMake(0,0,0,0);pd.colorAttachments[1].storeAction=MTLStoreActionDontCare;}
+    pd.colorAttachments[1].clearColor=variant==12?MTLClearColorMake(1,1,1,1):MTLClearColorMake(0,0,0,0);pd.colorAttachments[1].storeAction=MTLStoreActionDontCare;}
    id<MTLRenderCommandEncoder> e=[(id<MTLCommandBuffer>)cb renderCommandEncoderWithDescriptor:pd];
    if(!e){NSLog(@"X9 FRAME REPLAY SKIP: n=%@ reason=encoder",r[@"n"]);break;}
    [e setRenderPipelineState:r[@"pipeline"]];[e setViewport:shifted];
@@ -195,7 +197,7 @@ static void x9FrameReplay(NBCommandBuffer *cb) {
    }
    NSDictionary *textures=r[@"textures"];for(NSNumber *key in textures)[e setFragmentTexture:variant==10?gradient:textures[key] atIndex:key.unsignedIntegerValue];
    NSDictionary *samplers=r[@"samplers"];for(NSNumber *key in samplers)[e setFragmentSamplerState:samplers[key] atIndex:key.unsignedIntegerValue];
-   if(variant==10||variant==11)[e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:start vertexCount:count];
+   if(variant>=10)[e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:start vertexCount:count];
    else if(variant>=6) {
     [e setVertexBuffer:owned[variant-6] offset:0 atIndex:vslot];
     [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:variant==7?count:3];
@@ -207,7 +209,7 @@ static void x9FrameReplay(NBCommandBuffer *cb) {
    [blit copyFromTexture:c0 sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(bw,bh,1)
                 toBuffer:readback destinationOffset:at destinationBytesPerRow:row destinationBytesPerImage:row*bh];
    [blit endEncoding];
-   const bool whole=variant==10||variant==11;
+   const bool whole=variant>=10;
    const NSUInteger rel=whole?0:variant>=6?0:variant==3||variant==4?count-3:ranges[variant][0]-start;
    const NSUInteger vcount=whole?count:variant>=6?(variant==7?count:3):ranges[variant][1];
    [results addObject:@{@"r":r,@"variant":@(variant),@"repeat":@(repeat),@"at":@(at),@"row":@(row),@"first":@(rel),@"count":@(vcount),
@@ -228,7 +230,9 @@ static void x9FrameReplay(NBCommandBuffer *cb) {
    const unsigned first=[res[@"first"] unsignedIntValue],cnt=[res[@"count"] unsignedIntValue];
    uint64_t magenta=0,sampled=0;
    for(int64_t y=0;y<bh;y+=4)for(int64_t x=0;x<bw;x+=4){const uint8_t *q=bytes+base+y*row+x*4;sampled++;if(q[0]==255&&q[1]==0&&q[2]==255&&q[3]==255)magenta++;}
-   NSLog(@"X9 FRAME REPLAY RESULT: f=%u n=%@ variant=%@ repeat=%@ first=%u count=%u box_uncovered=%llu/%llu",f,r[@"n"],res[@"variant"],res[@"repeat"],first,cnt,(unsigned long long)magenta,(unsigned long long)sampled);
+   uint64_t boxHash=1469598103934665603ull;
+   for(int64_t y=0;y<bh;y++)for(int64_t x=0;x<bw*4;x++){boxHash^=bytes[base+y*row+x];boxHash*=1099511628211ull;}
+   NSLog(@"X9 FRAME REPLAY RESULT: f=%u n=%@ variant=%@ repeat=%@ first=%u count=%u box_uncovered=%llu/%llu hash=%016llx",f,r[@"n"],res[@"variant"],res[@"repeat"],first,cnt,(unsigned long long)magenta,(unsigned long long)sampled,(unsigned long long)boxHash);
    // 16x16 pixel grid over the box (cell centres), one row per line, for
    // the whole draw with real (0) and gradient (10) textures. Box-relative.
    const unsigned variantN=[res[@"variant"] unsignedIntValue];
@@ -237,7 +241,7 @@ static void x9FrameReplay(NBCommandBuffer *cb) {
     char line[33];const int64_t iy=(int64_t)((my+0.5)*bh/32);
     for(unsigned mx=0;mx<32;mx++){const int64_t ix=(int64_t)((mx+0.5)*bw/32);const uint8_t *q=bytes+base+iy*row+ix*4;
      line[mx]=(q[0]==255&&q[1]==0&&q[2]==255&&q[3]==255)?'.':'#';}
-    line[32]=0;
+    line[32]=0;if(!strchr(line,'#'))continue;
     NSLog(@"X9 FRAME REPLAY MAP: f=%u n=%@ v=%u r=%@ y=%02u %s",f,r[@"n"],variantN,res[@"repeat"],my,line);
    }
    if((variantN==0||variantN==10)&&[res[@"repeat"] unsignedIntValue]==0)
@@ -268,9 +272,15 @@ static void x9FrameReplay(NBCommandBuffer *cb) {
   for(NSDictionary *r in replays) {
    NSDictionary *snap=r[@"snap"],*buffers=r[@"buffers"];
    for(NSNumber *key in snap) {
-    NSData *now=x9ReplayBindingBytes(buffers[key],[snap[key] length]);
+    // Only bytes this draw can read: the vertex range for the position slot,
+    // the first 256 bytes for every other binding (later draws fill the ring
+    // after the pick, so a whole 4 KiB window always differs).
+    const bool vtx=key.unsignedIntValue==32+[r[@"slot"] unsignedIntValue];
+    const NSUInteger want=MIN([snap[key] length],vtx?(NSUInteger)([r[@"start"] unsignedLongLongValue]+[r[@"count"] unsignedLongLongValue])*[r[@"stride"] unsignedLongLongValue]:(NSUInteger)256);
+    NSData *now=x9ReplayBindingBytes(buffers[key],want),*was=[snap[key] subdataWithRange:NSMakeRange(0,want)];
+    if(now.length>want)now=[now subdataWithRange:NSMakeRange(0,want)];
     NSLog(@"X9 FRAME REPLAY LIVE: f=%u n=%@ stage=%u slot=%u len=%llu pick=%016llx done=%016llx same=%u",f,r[@"n"],key.unsignedIntValue/32,key.unsignedIntValue%32,
-     (unsigned long long)[snap[key] length],(unsigned long long)x9ReplayHash(snap[key]),now?(unsigned long long)x9ReplayHash(now):0ull,now&&[now isEqualToData:snap[key]]);
+     (unsigned long long)want,(unsigned long long)x9ReplayHash(was),now?(unsigned long long)x9ReplayHash(now):0ull,now&&[now isEqualToData:was]);
    }
   }
   NSLog(@"X9 FRAME REPLAY END: f=%u",f);
@@ -359,8 +369,10 @@ static void x9FrameFlush(NBCommandBuffer *cb) {
  if(!server)return;
  const X9CaptureOptions &options=captureOptions();
  if(nowUs()<(options.startGiven?options.geometryStartUs:45000000ull))return;
- static std::atomic<unsigned> budget{0};
+ static std::atomic<unsigned> budget{0};static std::atomic<uint64_t> firstFragment{0};
  if(budget.load()>=2||cb.traceFrameReplays.count>=2)return;
+ // The second pick must use another fragment function (rev236 spent both on ffid66).
+ if(budget.load()==1&&pipeline.traceFragmentID==firstFragment.load())return;
  MTLVertexAttributeDescriptor *a0=pipeline.traceLayout.attributes[0];
  if(!a0||a0.format!=MTLVertexFormatFloat4)return;
  MTLVertexBufferLayoutDescriptor *vl=pipeline.traceLayout.layouts[a0.bufferIndex];
@@ -370,7 +382,7 @@ static void x9FrameFlush(NBCommandBuffer *cb) {
  if(!vb||!stride||vl.stepFunction!=MTLVertexStepFunctionPerVertex||vbase>vlength||(uint64_t)(start+count)*stride>vlength-vbase)return;
  const NSUInteger before=cb.traceFrameReplays.count;
  [self traceFrameSelectReplay:type start:start count:count indexed:false n:(unsigned)(budget.load()+1) vertices:vb+vbase stride:stride a0:a0];
- if(cb.traceFrameReplays.count>before)budget++;
+ if(cb.traceFrameReplays.count>before){if(!budget.load())firstFragment=pipeline.traceFragmentID;budget++;}
 }
 - (void)traceFrameSelectReplay:(MTLPrimitiveType)type start:(NSUInteger)start count:(NSUInteger)count indexed:(bool)indexed n:(unsigned)n vertices:(const uint8_t *)vertices stride:(uint64_t)stride a0:(MTLVertexAttributeDescriptor *)a0 {
  NBCommandBuffer *cb=self.commandBuffer;

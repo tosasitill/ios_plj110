@@ -1,3 +1,33 @@
+## Active: rev236 = non-determinism is GPU/driver side; rev237 attachment-1 probe (source only) (2026-11-03)
+
+- rev236 log /tmp/3.txt (2.98 MB, X9GeneralMetal236 active). Picks cb=54: both the same
+  6-vertex ffid66 draw, box 290,494,259x258; v0=v1=v5=TR, v2=v3=BR, v4=BL ->
+  one real triangle (BR,BL,TR).
+- OBSERVED: most passes write nothing (4225/4225). Non-empty: n1 v0 r3 4102, n1 v11 r2 4102,
+  n1 v10 r1 3924, n1 v1 3100, n2 v8 4214. Frozen inputs (v11) vary like live (v0).
+  => input mutation is NOT the cause; the result varies with identical frozen inputs.
+- OBSERVED MAP: the written pixels lie on the TL->BR main diagonal (1 px line, sometimes
+  wider), while the CPU-expected hypotenuse is BL->TR. Together with rev235's lower-left
+  half, GPU geometry = horizontal mirror of the CPU projection every time. Likely a CPU
+  projection mismatch (vfid41 is more than M*pos); systematic, not the variance.
+- LIVE same=0 for every binding is uninformative: all bindings live in ring obj=29
+  (262144 B) and the 4 KiB windows include space later draws write after the pick.
+- HYPOTHESIS (unproven): ffid66 is FBF with attachment_count=2, memoryless_index1=2; the
+  output varies at edge pixels, so attachment 1 tile reads (PanVK FBF / ROA for RT1) may be
+  unreliable. That would also give a triangle-dependent split in real CC passes.
+- rev237 change (X9FrameCapture.inc):
+  - schedule: 0 x6, 11 x3, 12 x3, 10, 1. Variant 12 = live whole draw with colour
+    attachment 1 cleared to (1,1,1,1).
+  - RESULT gains hash= (FNV of the whole box readback): exact repeat comparison.
+  - MAP prints only rows containing '#'.
+  - LIVE compares only the vertex range (position slot) / first 256 bytes (others).
+  - Second pick per process must use a different fragment function.
+  - NOT compiled (tunnel down).
+- Reading rev237: v0 hashes differ across repeats -> confirmed GPU non-determinism with
+  one encoder per pass. v12 differs from v0 consistently -> shader reads RT1 (then test
+  PanVK FBF of RT1). A second pipeline that repeats exactly -> non-determinism is
+  pipeline-specific (FBF), not general.
+
 ## Active: rev235 shows GPU replay output is NOT repeatable; rev236 frozen-input A/B (source only) (2026-11-03)
 
 - rev235 log /tmp/3.txt (1.95 MB, plugin X9GeneralMetal235 active at 3.360 s).
