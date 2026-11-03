@@ -1,3 +1,44 @@
+## rev249 A/B verdict: blanking is innocent; the black screen is unstaged Metal plugins (mailbox still holds the rev247 payload) (2026-11-03)
+
+- 实测 (20.txt = x9-rev249-lo, 21.txt = x9-rev249-obs, both user-reported black): the two runs
+  behave identically, so writing the LK layer is not what removes the picture.
+  `X9 LK overlay before/observe: i=3 pa=fd6a8000 1256x2760 grid=65536 ink=29
+  opaque_black=231 transparent=65276 other_alpha=0 bbox=0..397,1380..1433
+  checksum=56b1fc1b` appears in both with the same checksum; after the lo blank everything is
+  transparent (`ink=0 transparent=65536 checksum=00000000`, 13877248 B zeroed in 4394 us).
+  So that stale layer is 99.6% transparent and carries ink only in a 54-row band - it never
+  carried the desktop. Sampling cost measured ~21 ms (20884/20865 us lo, 25150 us obs).
+- Real cause, measured in the same two logs:
+  `[0.986] X9 RENDER EXTERNAL: missing/mismatched path=/System/Library/Extensions/
+  X9GeneralMetal249.bundle/Info.plist errno=2; discovery disabled` →
+  `[0.991] X9 UPDATE: install result errno=2` → `[0.997] X9 RENDER EXTERNAL: not armed errno=2`.
+  14.txt (rev248-lo) shows the same trio for `X9GeneralMetal248`. 17.txt (rev247, the run that
+  produced a picture) instead shows `[2.536] X9 UPDATE: payload installed and verified from
+  reserved mailbox`, `[2.539] install result errno=0`, `[3.382] active plugin=X9GeneralMetal247
+  from verified allowlist` and then `X9 RENDER DISCOVERY ... MetalPluginName=X9GeneralMetal247`
+  for backboardd/mediaserverd/SpringBoard.
+- Why: `x9/build/build.py all --revision N` renames the bundles to X9GeneralMetalN/X9PanVKN and
+  regenerates the kernel's built-in allowlist, but the payload is not in boot.img - it lives in
+  the reserved mailbox and is staged by `python3 x9/mailbox/update.py <candidate-dir>` (see
+  x9/mailbox/README.md). I bumped 247 -> 248 -> 249 and never staged the new payload, so the
+  kernel looks for bundles that are neither installed on the root volume nor present in the
+  mailbox, leaves discovery disabled, and every Metal client dies on the null path
+  (SpringBoard sig 11 pc=0x0, 6 loops in 20.txt / 5 in 21.txt; swap_id stuck at 6/4; only 5/3
+  copies ever; 0 MESA lines vs 337 in 17.txt). This is my error, not a device regression.
+- Prepared (local only, no device touched): copied `x9/out/x9-rev249/plugin-package` into both
+  `x9-rev249-lo/` and `x9-rev249-obs/` so each directory is a candidate `update.py` accepts
+  (10 files, payload_end 0x30fc000, identity af930ccd1d1573d9..., all package hashes match).
+- Next, both are the user's actions:
+  1. cheap confirmation without any device write: flash `x9/out/x9-rev247/boot.img` - its
+     allowlist matches what the mailbox/root already has, so the picture should return with the
+     orange banner still present.
+  2. real fix: with Android running, `X9_SERIAL=<serial> python3 x9/mailbox/update.py
+     x9/out/x9-rev249-lo` (root preflight + mailbox slices only, no boot partition), then flash
+     `x9/out/x9-rev249-lo/boot.img`. Expect `install result errno=0`,
+     `active plugin=X9GeneralMetal249`, frames again and no banner.
+- Banner follow-up (only after the picture returns): a band-only blank (rows ~1380..1433) would
+  touch ~1 MiB instead of 13.9 MiB; the current whole-layer blank is proven harmless.
+
 ## rev248-lo: banner gone, black screen is SpringBoard's null-call crash loop; rev249 adds read-only x9ob (2026-11-03)
 
 - rev248-lo 实测 (14.txt, 2689 lines to 88.6 s, no panic, no kmem_alloc this time):
