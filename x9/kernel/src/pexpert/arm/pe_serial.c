@@ -748,38 +748,55 @@ static void x9_lk_engine_dump(void) {
   uint32_t en=X9_LK_READ(p,0x20),layer=X9_LK_READ(p,0x40),size=X9_LK_READ(p,0x48),fmt=X9_LK_READ(p,0x50);
   uint32_t high=X9_LK_READ(p,0xf4c);uint64_t address=X9_LK_READ(p,0xf40)|((uint64_t)(high&15)<<32);
   unsigned accepted=0;for(unsigned j=0;j<x9_lk_count;j++)accepted|=x9_lk_addresses[j]==address;
-  printf("X9 LK engine: i=%u pa=%llx en=%08x layer=%08x size=%ux%u fmt=%08x pitch=%u off44=%08x off4c=%08x r2f0=%08x r300=%08x addr=%llx accepted=%u\n",
+  printf("X9 LK engine: i=%u pa=%llx en=%08x layer=%08x size=%ux%u fmt=%08x pitch=%u off44=%08x off4c=%08x r2f0=%08x r300=%08x addr=%llx f4c=%08x accepted=%u\n",
    i,x9_lk_engine_pa[i],en,layer,size&0x3fffu,(size>>16)&0x3fffu,fmt,X9_LK_READ(p,0x2f4)&0xffffu,
-   X9_LK_READ(p,0x44),X9_LK_READ(p,0x4c),X9_LK_READ(p,0x2f0),X9_LK_READ(p,0x300),address,accepted);
+   X9_LK_READ(p,0x44),X9_LK_READ(p,0x4c),X9_LK_READ(p,0x2f0),X9_LK_READ(p,0x300),address,high,accepted);
  }
 }
-/* Boot token x9lo: clear (to transparent black) the buffer of every other
- * enabled LK layer whose memory lies inside LK's framebuffer reservation:
- * the orange-state banner. Memory only; no display register is written. */
-static void x9_lk_clear_overlays(void) {
+/* Boot token x9lo: discover the buffer of every other enabled LK layer whose
+ * memory lies inside LK's framebuffer reservation: the orange-state banner.
+ * Discovery only, no display register and no mapping. The clear itself runs in
+ * AppleCLCD (see sweet_x9_clear_lk_overlays): pexpert has no IOMemoryDescriptor
+ * and ml_io_map_wcomb() would take io_map()'s permanent 8 MiB io_submap, which
+ * cannot serve a frame-sized request this late (rev247 lo panicked at 10.28 s,
+ * right after the engine dump, with kmem_alloc(14139392) failed with 3
+ * = KERN_NO_SPACE @ vm_kern.c:178). */
+static uint64_t x9_lk_overlay_address[4];
+static uint64_t x9_lk_overlay_bytes[4];
+static unsigned x9_lk_overlay_engine[4];
+static unsigned x9_lk_overlays;
+static void x9_lk_scan_overlays(void) {
  static int done;if(done)return;done=1;
  int v=0;if(!PE_parse_boot_argn("x9lo",&v,sizeof(v)))return;
- for(unsigned i=0;i<13;i++) {
+ for(unsigned i=0;i<13&&x9_lk_overlays<4;i++) {
   volatile uint32_t *p=x9_lk_engines[i];if(!p)continue;
   uint32_t en=X9_LK_READ(p,0x20),layer=X9_LK_READ(p,0x40),size=X9_LK_READ(p,0x48);
   uint32_t high=X9_LK_READ(p,0xf4c);uint64_t address=X9_LK_READ(p,0xf40)|((uint64_t)(high&15)<<32);
   uint32_t w=size&0x3fffu,h=(size>>16)&0x3fffu,pitch=X9_LK_READ(p,0x2f4)&0xffffu;
   unsigned accepted=0;for(unsigned j=0;j<x9_lk_count;j++)accepted|=x9_lk_addresses[j]==address;
   if(!(en&1)||!(layer&1)||accepted||!w||!h||pitch<w*4||(high&~15u))continue;
-  uint64_t bytes=(uint64_t)pitch*h;
+  uint64_t bytes=((uint64_t)pitch*h+0x3fff)&~(uint64_t)0x3fff;
   if(address<X9_LK_FB||address+bytes>X9_LK_FB+X9_LK_RESERVE){
    printf("X9 LK overlay: i=%u addr=%llx %ux%u outside LK reservation; left alone\n",i,address,w,h);continue;}
-  volatile uint32_t *fb=X9_LK_MAP_FB(address);
-  if(!fb){printf("X9 LK overlay: i=%u map failed\n",i);continue;}
-  for(uint64_t k=0;k<bytes/4;k++){fb[k]=0;if(!(k&0xffffu))X9_LK_PET();}
-  X9_LK_FENCE();
-  printf("X9 LK overlay: i=%u addr=%llx %ux%u pitch=%u cleared (x9lo)\n",i,address,w,h,pitch);
+  x9_lk_overlay_address[x9_lk_overlays]=address;
+  x9_lk_overlay_bytes[x9_lk_overlays]=bytes;
+  x9_lk_overlay_engine[x9_lk_overlays]=i;
+  x9_lk_overlays++;
+  printf("X9 LK overlay: i=%u addr=%llx %ux%u pitch=%u %llu B queued\n",
+   i,address,w,h,pitch,(unsigned long long)bytes);
  }
+ if(!x9_lk_overlays)printf("X9 LK overlay: none queued\n");
+}
+int x9_lk_overlay(unsigned index, uint64_t *address, uint64_t *bytes, unsigned *engine) {
+ if(index>=x9_lk_overlays)return 0;
+ *address=x9_lk_overlay_address[index];*bytes=x9_lk_overlay_bytes[index];
+ *engine=x9_lk_overlay_engine[index];
+ return 1;
 }
 void x9_lk_gui_probe(void) {
  if(!x9_lk_active)return;
  x9_lk_engine_dump();
- x9_lk_clear_overlays();
+ x9_lk_scan_overlays();
  printf("X9 LK status: dsi=%08x buffers=%u mask=%x id=%u te_armed=%u\n",
      X9_LK_READ(x9_lk_dsi,0x0c),x9_lk_count,x9_lk_mask,x9_lk_id,x9_lk_gui_armed);
  for(unsigned i=0;i<x9_lk_count;i++) {

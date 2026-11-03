@@ -71,6 +71,8 @@ extern "C" int x9_lk_gui_present(void);
 extern "C" int x9_lk_gui_busy(void);
 extern "C" int x9_lk_gui_cancel(void);
 extern "C" void x9_lk_gui_probe(void);
+extern "C" int x9_lk_overlay(unsigned index, uint64_t *address, uint64_t *bytes, unsigned *engine);
+extern "C" void sweet_watchdog_pet(void);   /* osfmk/arm64/sweet_early.c */
 extern "C" int sweet_x9_render_display_try_enter(void);
 extern "C" void sweet_x9_render_owner_leave(void);
 extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
@@ -975,6 +977,89 @@ void AppleCLCD::x9PresentFired(OSObject *owner,IOTimerEventSource *sender) {
 	} else {x9_lk_gui_cancel();IOLog("X9 DISPLAY TE: unavailable=%d;frame not started\n",result);}
 }
 
+/* Boot token x9lo (see x9_lk_scan_overlays in pe_serial.c): LK leaves its
+ * orange-state layer enabled, a 1256x2760 buffer at a 5024-byte pitch that
+ * x9_lk_layer() rejects because it demands the 5120 boot stride. Nothing ever
+ * refreshes that layer, so LK's banner keeps blending over every frame we
+ * push. Zeroing its memory makes it contribute transparent black; no display
+ * register is touched. IOMemoryDescriptor::withPhysicalAddress is the route
+ * the boot scanout already uses; a frame-sized ml_io_map_wcomb() from pexpert
+ * would take io_map()'s permanent 8 MiB io_submap and panic (rev247 lo:
+ * kmem_alloc(14139392) failed with KERN_NO_SPACE 10 s into boot). */
+static void
+sweet_x9_clear_lk_overlays(void)
+{
+	static bool done;
+	if (done) {
+		return;
+	}
+	done = true;
+	unsigned queued = 0;
+	for (unsigned index = 0; ; index++) {
+		uint64_t address = 0, bytes = 0;
+		unsigned engine = 0;
+		if (!x9_lk_overlay(index, &address, &bytes, &engine)) {
+			break;
+		}
+		queued++;
+		IOMemoryDescriptor *memory = IOMemoryDescriptor::withPhysicalAddress(
+		    address, bytes, kIODirectionOut);
+		if (memory == NULL) {
+			IOLog("X9 LK overlay: i=%u pa=%llx no descriptor\n", engine, address);
+			continue;
+		}
+		IOMemoryMap *map = NULL;
+		volatile uint32_t *pixels = NULL;
+		if (memory->prepare(kIODirectionOut) == kIOReturnSuccess) {
+			map = memory->map(kIOMapWriteCombineCache);
+			if (map != NULL) {
+				pixels = (volatile uint32_t *)(uintptr_t)map->getVirtualAddress();
+			}
+		}
+		if (pixels == NULL) {
+			IOLog("X9 LK overlay: i=%u pa=%llx not mapped; banner left alone\n", engine, address);
+		} else {
+			const uint64_t words = bytes / 4;
+			const uint64_t step = words / 256 + 1;
+			uint64_t clear_ns = 0;
+			for (unsigned pass = 0; pass < 2; pass++) {
+				if (pass) {
+					const uint64_t started = mach_absolute_time();
+					for (uint64_t k = 0; k < words; k++) {
+						pixels[k] = 0;
+						if (!(k & 0x3ffffu)) {
+							sweet_watchdog_pet();
+						}
+					}
+					__asm__ volatile("dsb sy" ::: "memory");
+					clear_ns = mach_absolute_time() - started;
+				}
+				uint32_t hash = 0;
+				unsigned sampled = 0, nonblack = 0;
+				for (uint64_t k = 0; k < words; k += step) {
+					hash = (hash << 5) | (hash >> 27);
+					hash ^= pixels[k];
+					nonblack += !!(pixels[k] & 0xffffffu);
+					sampled++;
+				}
+				if (pass) {
+					IOLog("X9 LK overlay: i=%u pa=%llx after clear sampled=%u nonblack=%u checksum=%08x zero wrote in %llu us\n",
+					    engine, address, sampled, nonblack, hash, clear_ns / 1000);
+				} else {
+					IOLog("X9 LK overlay: i=%u pa=%llx before sampled=%u nonblack=%u checksum=%08x\n",
+					    engine, address, sampled, nonblack, hash);
+				}
+			}
+		}
+		if (map != NULL) {
+			map->release();
+		}
+		memory->complete(kIODirectionOut);
+		memory->release();
+	}
+	IOLog("X9 LK overlay: %u rejected layer buffer(s) queued (x9lo)\n", queued);
+}
+
 void
 AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 {
@@ -1142,6 +1227,7 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 			IOLog("X9 GUI heartbeat: swap_id=%u dirty=%u retry=%u power_off=%u busy=%d\n",
 			 fb->fSwapID,fb->fDirty,fb->fX9SubmitPending,fb->fPowerOff,x9_lk_gui_busy());
 			x9_lk_gui_probe();
+			sweet_x9_clear_lk_overlays();
 		}
 		if (fb->fX9ObservePending) {
 			int busy=x9_lk_gui_busy();
@@ -1151,6 +1237,7 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 				if (observations++<12) {
 					IOLog("X9 GUI status: ticks=%u busy=%d (idle is not scanout proof)\n",fb->fX9BusyTicks,busy);
 					x9_lk_gui_probe();
+					sweet_x9_clear_lk_overlays();
 				}
 			}
 		}
