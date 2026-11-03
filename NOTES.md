@@ -1,3 +1,10 @@
+## DECISION 2026-11-03: user accepted all five submission-decoupling defaults
+
+docs/graphics/submission-decoupling-design.md section 10: (1) kernel worker-thread queue,
+(2) fence = (group, submission_id), (3) exact resource sets tracked in PanVK, (4) bound 64 ranges per
+submission with reachability fallback, (5) first candidate behaviour-neutral: x9_submit_async=0 and
+ExactSet off by default, A/B by boot token.
+
 ## Active: mosaic root cause = 353ae1c InPlaceWrites; performance breakdown; rev245 (2026-11-03)
 
 - rev244 x9h0 (/tmp/12.txt, "X9 HOST TEXTURES: policy=InPlace" in backboardd+SpringBoard): USER: NO
