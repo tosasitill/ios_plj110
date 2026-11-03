@@ -1,3 +1,19 @@
+## Active: rev246 built, awaiting device test (2026-11-03)
+
+- x9/out/x9-rev246 (default) and x9/out/x9-rev246-qd (boot-arg x9qd), same kernel and plugin package
+  (X9GeneralMetal246/X9PanVK246), boot.img 9,424,896 B each; allowlist fa4ecfb. Kernel contains
+  "DynamicSplitMedium" and "X9 DISPLAY: present"; GeneralMetal contains "x9qd".
+- Default image: InPlace host textures (no mosaic), latency governor, padding, Dynamic Island status
+  bar (boot.json x9_statusbar_provider=2 -> _UIStatusBarVisualProvider_DynamicSplitMedium; =3
+  DynamicSplit; =1 LegacyPhone). Provider class names read from the 20H392 SystemOS cryptex
+  dyld_shared_cache_arm64.* (mounted read-only, detached). Expect "X9 STATUSBAR: UIKit provider ...".
+- x9qd image: plus Mesa threaded submit and lock-free display present.
+- DRM question (user): iOS has no DRM/KMS; the equivalent is direct scanout through the MT6993
+  display controller (OVL/RDMA/DSI) instead of the CPU copy + LK DSI push. Copy cost is 0.6-1.7 ms
+  per frame; the measured limits are synchronous submits (~2.3 x 13-17 ms per frame) and the display
+  lock coupling. Decide after the x9qd result.
+- Mac stashes: rev242/243/245/246 allowlists kept (all but 242/245 identical to commits).
+
 ## rev245 results + x9qd lock-free display A/B (2026-11-03)
 
 - 13.txt (default) vs 14.txt (x9q1, "vk_queue mode=threaded" in backboardd+SpringBoard; threaded mode
