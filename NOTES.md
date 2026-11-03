@@ -1,3 +1,21 @@
+## rev245 results + x9qd lock-free display A/B (2026-11-03)
+
+- 13.txt (default) vs 14.txt (x9q1, "vk_queue mode=threaded" in backboardd+SpringBoard; threaded mode
+  worked, no init failure): jobs/s 23.3 -> 27.3, per job 13.1 -> 14.2 ms, display copies/s 3.7 -> 5.1,
+  gpu_defer/s 2.9 -> 10.1. USER: async "very laggy". Reading: the display tick TryLocks
+  metal_service_lock (sweet_x9_render_display_try_enter), held for every whole synchronous job; with
+  a submit thread the GPU lock is almost always taken, so presents are deferred.
+- Governor (latency thresholds): during swipes util 34-39% -> index 33 (1300 MHz); idle at 858 MHz.
+- Steady-state present is a CPU copy: GPU desktop staging stops after 3 frames
+  (SweetX9DesktopWorker.inc desktop_frame_presented>=3); 14.txt has 0 "X9 DESKTOP FRAME".
+  The presented surface is protected by fShowHold/fPendHold IOSurface holds, not by the GPU lock.
+- rev246 change: token x9qd = frontend threaded submit + kernel display tick skips
+  sweet_x9_render_display_try_enter (log "X9 DISPLAY: present without the GPU owner lock (x9qd)");
+  GPU staging requires fX9OwnerHeld, so it is skipped without the lock. Default unchanged.
+- Status bar: kern_exec.c sweet_x9_seed_uikit_statusbar writes UIStatusBarVisualProviderClassName =
+  _UIStatusBarVisualProvider_LegacyPhone (x9_statusbar_provider=1). User wants the iPhone 14 Pro
+  (Dynamic Island) style; exact iOS 16 class name must be read from 20H392 UIKitCore on the Mac first.
+
 ## Async submission step 1: x9q1 = Mesa threaded vk_queue submit (source only, 2026-11-03)
 
 - Finding: the blocking point is userspace PanVK vkQueueSubmit -> X9PanVKSync.c submit_sync_common ->

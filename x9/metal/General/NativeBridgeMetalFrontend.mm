@@ -2025,10 +2025,10 @@ extern "C" id native_bridge_metal_open(const char *loader,const char *cache,uint
   char args[4096]={};size_t bytes=sizeof(args)-1;bool threaded=false;
   if(!sysctlbyname("kern.bootargs",args,&bytes,nullptr,0)) {
    args[sizeof(args)-1]=0;
-   for(const char *p=args;*p;){while(*p&&(unsigned char)*p<=32)++p;const char *e=p;while(*e&&(unsigned char)*e>32)++e;if(e-p==4&&!memcmp(p,"x9q1",4))threaded=true;p=e;}
+   for(const char *p=args;*p;){while(*p&&(unsigned char)*p<=32)++p;const char *e=p;while(*e&&(unsigned char)*e>32)++e;if(e-p==4&&(!memcmp(p,"x9q1",4)||!memcmp(p,"x9qd",4)))threaded=true;p=e;}
   }
   if(threaded)setenv("MESA_VK_ENABLE_SUBMIT_THREAD","1",1);
-  NBLOG(@"X9 SUBMIT: vk_queue mode=%s (x9q1 = Mesa submit thread)",threaded?"threaded":"immediate");
+  NBLOG(@"X9 SUBMIT: vk_queue mode=%s (x9q1/x9qd = Mesa submit thread; x9qd also lock-free display)",threaded?"threaded":"immediate");
  }
  gDevice=nmb_device_open(loader,cache);
  if(!gDevice){NBLOG(@"native-metal: device refused: %s",nmb_last_error());return nil;}

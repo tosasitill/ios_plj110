@@ -238,6 +238,7 @@ public:
 	bool          fConsolePaused;
 	uint8_t       fPending[SWEET_FB_SWAP_REC_SIZE];     /* latest swap, not yet shown */
 	bool          fDirty;
+	bool          fX9OwnerHeld;   /* display tick holds the GPU owner lock for this present */
  bool          fX9SubmitPending, fX9ObservePending;
  unsigned      fX9RetryTicks, fX9BusyTicks;
 	/* topaz direct MDP scanout (VIG0 / CTL0 from TopazGpuW disp.c) */
@@ -1070,7 +1071,14 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 		// fLock -> GPU owner is TRY-only; never wait in the inverse order.
 		// Hold native GPU ownership from before taking the pending frame through
 		// its CPU copy. Keep dirty+IOSurface holds intact when either engine is busy.
-		displayOwner=sweet_x9_render_display_try_enter();
+		/* A/B (boot-arg token x9qd, with the frontend's threaded submit): the
+		 * steady-state present is a CPU copy of a held IOSurface (GPU staging
+		 * only runs for the first frames), so do not compete with GPU submits
+		 * for metal_service_lock. rev245 x9q1: gpu_defer rose 2.9 -> 10.1/s. */
+		static int lockFree=-1;
+		if(lockFree<0){int v=0;lockFree=PE_parse_boot_argn("x9qd",&v,sizeof(v))?1:0;
+			IOLog("X9 DISPLAY: present %s the GPU owner lock (x9qd)\n",lockFree?"without":"with");}
+		displayOwner=lockFree?0:sweet_x9_render_display_try_enter();
 		if(displayOwner<0) {fb->fCadenceGpuBusy++;flush=false;}
 		else if(fb->fX9SubmitPending || x9_lk_gui_busy()==1) {fb->fCadenceDisplayBusy++;flush=false;}
 	}
@@ -1097,7 +1105,9 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 	}
 	if (rec != NULL) {
 		uint64_t began=mach_absolute_time();
+		fb->fX9OwnerHeld=displayOwner>0||!sweet_board_x9();
 		fb->present(rec);
+		fb->fX9OwnerHeld=false;
 		if(displayOwner>0) {sweet_x9_render_owner_leave();displayOwner=0;}
 		if(sweet_board_x9()) {
 			uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time()-began,&ns);
@@ -1671,7 +1681,7 @@ AppleCLCD::present(const uint8_t *rec)
 		if(get32(rec,0x54+4*layer)==fSurface->id)x9_default_surface=true;
 	/* In-place userspace drawing into the default panel surface cannot be
 	 * protected by this driver's swap-generation counter. Keep it on CPU. */
-	if (sweet_board_x9() && !x9_default_surface && fConsolePaused && !fPowerOff && dst==(uint8_t *)fPixels && x9_lk_gui_busy()==0) {
+	if (sweet_board_x9() && fX9OwnerHeld && !x9_default_surface && fConsolePaused && !fPowerOff && dst==(uint8_t *)fPixels && x9_lk_gui_busy()==0) {
 		uint8_t *stage=sweet_x9_desktop_frame_begin(dst,fRowBytes,fWidth,fHeight,x9_fb_present_seq);
 		if(stage) {dst=stage;x9_staged=true;}
 	}
