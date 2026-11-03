@@ -1,3 +1,21 @@
+## Active: rev242 padding FIXES the CC split (user confirmed); next: swipe mosaic, GPU clock, repo split (2026-11-03)
+
+- rev242 (X9GeneralMetal242, log /tmp/9.txt): "X9 PAD: partial vertex group padding on",
+  first pad 6->12. USER: the Control Center diagonal split is gone; static frames correct.
+- REMAINING (user): mosaic while swiping, disappears on release and when static. No capture of it yet.
+  HYPOTHESIS (unproven): Mali transaction elimination (tile CRC). PanVK v14 enables
+  crc_read/crc_write on CRC render targets (csf panvk_vX_cmd_draw.c ~1583-1731, CRC header
+  "valid" flag, cmd_invalidate_crc). Writes that are not CRC-tracked render passes (blits/copies,
+  host/IOSurface writes, other processes) without CRC invalidation would leave stale tiles
+  during motion. Test: a boot token that disables CRC (needs the Mac Mesa tree; tunnel down).
+- GPU clock (observed 9.txt): "X9 GPU DVFS: GPU OPPs 390000..1716000 kHz ... cap 900000 kHz ->
+  index 44 (858000 kHz)", stack 572 MHz, volt 61500/58000, ceiling=0 floor=56. Cap is
+  x9_gpu_khz (default 900000 in sweet_x9_gpu_dependencies.c gpu_select_performance, one fixed
+  dual-commit, no governor, no thermal input; battery temperature is a fixed estimate).
+  boot-args are 602 B; x9vt makes 607 of 608, so a larger cap needs a code default change.
+- PanVK upstream: the bug is not yet localized inside PanVK (count passed unchanged); a report
+  needs a minimal non-CA repro (non-indexed triangle list, count 9, last vertex distinct).
+
 ## Active: rev241 confirms partial final vertex group; rev242 frontend padding workaround (2026-11-03)
 
 - rev241 log /tmp/8.txt (backboardd 128 MiB heap, X9GeneralMetal241). Picks: n1 6-vertex ffid66
