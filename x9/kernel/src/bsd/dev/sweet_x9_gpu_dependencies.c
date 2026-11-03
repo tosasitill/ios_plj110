@@ -10,6 +10,7 @@ extern void sweet_x9_render_bootstrap(void);
 #include <kern/clock.h>
 #include <kern/thread.h>
 #include <kern/sched_prim.h>
+#include <kern/locks.h>
 #include <mach/mach_types.h>
 #include <pexpert/pexpert.h>
 #include <pexpert/device_tree.h>
@@ -80,7 +81,19 @@ static void snapshot(const char *stage) {
  * Hardware clear-before-read matches mtk_mbox_polling, ACK permits sender reuse.
  * The firmware reply's command must match; reply magic is logged, not assumed
  * to echo request magic (the AP driver does not require an echo). */
+static int ipi_quiet;
+static int exchange_unlocked(struct gpu_ipi *request,struct gpu_ipi *reply);
+/* The DVFS governor thread and the power/ID requests share one mailbox
+ * channel: serialize every exchange. Governor commits set ipi_quiet. */
+static LCK_GRP_DECLARE(x9_gpu_ipi_grp,"x9_gpu_ipi");
+static LCK_MTX_DECLARE(x9_gpu_ipi_lock,&x9_gpu_ipi_grp);
 static int exchange(struct gpu_ipi *request,struct gpu_ipi *reply) {
+ lck_mtx_lock(&x9_gpu_ipi_lock);
+ int r=exchange_unlocked(request,reply);
+ lck_mtx_unlock(&x9_gpu_ipi_lock);
+ return r;
+}
+static int exchange_unlocked(struct gpu_ipi *request,struct gpu_ipi *reply) {
  uint64_t until;clock_interval_to_deadline(10000,NSEC_PER_MSEC,&until);
  if(channel_uncertain||!eb_ready())return -1;
  if((rd(ctrl,0)|rd(ctrl,0x78))&CHANNEL_BIT){
@@ -89,7 +102,7 @@ static int exchange(struct gpu_ipi *request,struct gpu_ipi *reply) {
  request->magic=magic;
  const uint32_t *tx=(const uint32_t *)request;
  for(unsigned i=0;i<8;i++)wr(mbox,16+i*4,tx[i]);
- printf("X9 GPU: TX command=%u target=%u union=%08x,%08x,%08x,%08x\n",
+ if(!ipi_quiet)printf("X9 GPU: TX command=%u target=%u union=%08x,%08x,%08x,%08x\n",
   request->cmd,request->target,tx[4],tx[5],tx[6],tx[7]);
  /* W1S channel1; never touch other send/receive bits. */
  wr(ctrl,4,CHANNEL_BIT);
@@ -104,7 +117,7 @@ static int exchange(struct gpu_ipi *request,struct gpu_ipi *reply) {
    uint32_t *rx=(uint32_t *)reply;
    for(unsigned i=0;i<8;i++)rx[i]=rd(mbox,220+i*4);
    __asm__ volatile("dsb sy" ::: "memory");
-   printf("X9 GPU: RX words=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x\n",
+   if(!ipi_quiet)printf("X9 GPU: RX words=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x\n",
     rx[0],rx[1],rx[2],rx[3],rx[4],rx[5],rx[6],rx[7]);
    if(reply->cmd!=request->cmd) {
     printf("X9 GPU: reply command mismatch expected=%u actual=%u; channel abandoned\n",request->cmd,reply->cmd);return -1;
@@ -159,12 +172,69 @@ static int power_command(unsigned command,unsigned state,int32_t *count) {
  * debug CMD_FIX_*. There is no thermal governor here, hence a moderate
  * default cap. x9_gpu_khz=<kHz> sets it; 0 leaves the OPP alone.
  * Sources: OnePlus/OPPO MT6993 gpufreq_ipi.h and gpufreq_v2.c. */
+/* Load governor (2026-11-03). The fixed commit below is the FLOOR (old
+ * behaviour, 858 MHz with the old 900 MHz cap); a kernel thread then raises the
+ * OPP up to x9_gpu_khz (default 1300 MHz) from GPU busy time, measured by the
+ * synchronous render submit path (doorbell -> fence) in sweet_x9_gpu_busy_ns.
+ * Thermal: GPUEB shared temperature >= 80 limits to the floor, >= 90 to the
+ * slowest OPP; an implausible reading never allows more than the floor.
+ * x9_gpu_gov=0 keeps the single fixed commit at the floor. */
+#define X9_GOV_FLOOR_KHZ 900000u
+volatile uint64_t sweet_x9_gpu_busy_ns;
+static uint32_t opp_khz[256];static int opp_count,gov_floor=-1,gov_ceiling=-1,gov_slowest=-1,gov_index=-1;
+static int render_active_refs=-1;
+static unsigned gov_cookie;
+static void gov_sleep_ms(unsigned ms) {
+ uint64_t until;clock_interval_to_deadline(ms,NSEC_PER_MSEC,&until);
+ (void)assert_wait_deadline(&gov_cookie,THREAD_UNINT,until);thread_block(THREAD_CONTINUE_NULL);
+}
+static int gov_commit(int index) {
+ struct gpu_ipi req={0},resp={0};req.cmd=CMD_DUAL_COMMIT;req.u.dual.gpu_oppidx=index;req.u.dual.stack_oppidx=index;
+ lck_mtx_lock(&x9_gpu_ipi_lock);ipi_quiet=1;
+ int r=exchange_unlocked(&req,&resp);
+ ipi_quiet=0;lck_mtx_unlock(&x9_gpu_ipi_lock);
+ if(!r)gov_index=index;
+ return r;
+}
+static void gov_thread(void *arg,wait_result_t result) {
+ (void)arg;(void)result;
+ const uint64_t period_ns=50ull*1000*1000;
+ uint64_t last_busy=sweet_x9_gpu_busy_ns,last_log=mach_absolute_time(),commits=0,busy_acc=0,ticks=0;
+ int last_temp=0;
+ printf("X9 GPU GOV: start floor=%d(%u kHz) ceiling=%d(%u kHz) slowest=%d period=50ms up>80%% down<30%%\n",
+  gov_floor,opp_khz[gov_floor],gov_ceiling,opp_khz[gov_ceiling],gov_slowest);
+ for(;;) {
+  gov_sleep_ms(50);
+  if(channel_uncertain){printf("X9 GPU GOV: mailbox uncertain; governor stops\n");break;}
+  const uint64_t busy=sweet_x9_gpu_busy_ns,delta=busy-last_busy;last_busy=busy;
+  if(render_active_refs<0)continue;      // no resident session: GPU may be off
+  const unsigned util=delta>=period_ns?100:(unsigned)(delta*100/period_ns);
+  struct gpu_shared_prefix st;status(&st);
+  const int temp=st.temperature;last_temp=temp;
+  int fastest=gov_ceiling;               // smaller index is faster
+  if(temp<1||temp>150||temp>=80)fastest=gov_floor;
+  if(temp>=90&&temp<=150)fastest=gov_slowest;
+  int target=gov_index<0?gov_floor:gov_index;
+  if(util>80)target-=4;else if(util<30)target+=2;
+  if(target<fastest)target=fastest;
+  const int slowest_allowed=fastest>gov_floor?fastest:gov_floor;
+  if(target>slowest_allowed)target=slowest_allowed;
+  if(target!=gov_index){if(gov_commit(target)){printf("X9 GPU GOV: commit %d failed; governor stops\n",target);break;}commits++;}
+  busy_acc+=util;ticks++;
+  uint64_t now=mach_absolute_time(),ns=0;absolutetime_to_nanoseconds(now-last_log,&ns);
+  if(ns>=2000000000ull) {
+   printf("X9 GPU GOV: util_avg=%llu%% temp=%d idx=%d gpu=%u kHz commits=%llu limiter=%u/%u ceiling=%u floor=%u\n",
+    ticks?busy_acc/ticks:0,last_temp,gov_index,gov_index>=0?opp_khz[gov_index]:0,commits,st.cur_c_limiter,st.cur_f_limiter,st.cur_ceiling,st.cur_floor);
+   last_log=now;busy_acc=ticks=0;
+  }
+ }
+ (void)thread_terminate(current_thread());
+}
 static void gpu_select_performance(void) {
  static int done;
  if(done)return;
  done=1;
- uint32_t cap=900000;PE_parse_boot_argn("x9_gpu_khz",&cap,sizeof(cap));
- if(!cap){printf("X9 GPU DVFS: x9_gpu_khz=0, boot OPP kept\n");return;}
+ const uint32_t cap=X9_GOV_FLOOR_KHZ;   // floor; x9_gpu_khz is the governor ceiling
  struct gpu_shared_prefix s;status(&s);
  if(!valid_status(&s)||s.opp_num_stack!=s.opp_num_gpu){printf("X9 GPU DVFS: unexpected OPP tables gpu=%d stack=%d\n",s.opp_num_gpu,s.opp_num_stack);return;}
  int best=-1;uint32_t best_khz=0,max_khz=0,min_khz=0xffffffffu;
@@ -175,7 +245,9 @@ static void gpu_select_performance(void) {
   if(khz>max_khz)max_khz=khz;
   if(khz&&khz<min_khz)min_khz=khz;
   if(khz&&khz<=cap&&khz>best_khz){best=i;best_khz=khz;}
+  opp_khz[i]=khz;
  }
+ opp_count=s.opp_num_gpu;
  printf("X9 GPU DVFS: GPU OPPs %d..%d kHz, current %u/%u kHz, cap %u kHz -> index %d (%u kHz)\n",
   (int)min_khz,(int)max_khz,s.cur_fgpu,s.cur_fstack,cap,best,best_khz);
  if(best<0)return;
@@ -184,6 +256,22 @@ static void gpu_select_performance(void) {
  status(&s);
  printf("X9 GPU DVFS: commit index %d firmware-return=%d now gpu=%u kHz stack=%u kHz volt=%u/%u oppidx=%d/%d ceiling=%u floor=%u\n",
   best,resp.u.result,s.cur_fgpu,s.cur_fstack,s.cur_vgpu,s.cur_vstack,s.cur_oppidx_gpu,s.cur_oppidx_stack,s.cur_ceiling,s.cur_floor);
+ gov_index=best;
+ printf("X9 GPU DVFS: shared temperature=%d comp_norm=%d comp_high=%d limiter=%u/%u priority=%u/%u dvfs_state=%u\n",
+  s.temperature,s.temper_comp_norm_gpu,s.temper_comp_high_gpu,s.cur_c_limiter,s.cur_f_limiter,s.cur_c_priority,s.cur_f_priority,s.dvfs_state);
+ int gov=1;PE_parse_boot_argn("x9_gpu_gov",&gov,sizeof(gov));
+ uint32_t ceiling_khz=1300000;PE_parse_boot_argn("x9_gpu_khz",&ceiling_khz,sizeof(ceiling_khz));
+ if(!gov||!ceiling_khz){printf("X9 GPU GOV: disabled (x9_gpu_gov=%d x9_gpu_khz=%u); fixed index %d\n",gov,ceiling_khz,best);return;}
+ int ceiling=-1,slowest=-1;uint32_t ceiling_best=0,slow_khz=0xffffffffu;
+ for(int i=0;i<opp_count;i++) {
+  if(opp_khz[i]&&opp_khz[i]<=ceiling_khz&&opp_khz[i]>ceiling_best){ceiling=i;ceiling_best=opp_khz[i];}
+  if(opp_khz[i]&&opp_khz[i]<slow_khz){slowest=i;slow_khz=opp_khz[i];}
+ }
+ if(ceiling<0||slowest<0||ceiling>best){printf("X9 GPU GOV: no ceiling above floor; fixed index %d\n",best);return;}
+ gov_floor=best;gov_ceiling=ceiling;gov_slowest=slowest;
+ thread_t t;
+ if(kernel_thread_start(gov_thread,NULL,&t)==KERN_SUCCESS)thread_deallocate(t);
+ else printf("X9 GPU GOV: thread creation failed; fixed index %d\n",best);
 }
 /* pan145 hardware: firmware POWER+ACTIVE produced power=1/active=1,
  * buck=1/mtcmos=1/cg=2, MFG1=c001770d and MFG37=c000110d while
@@ -332,7 +420,6 @@ void sweet_x9_gpu_dependencies(void) {
 extern int sweet_x9_csf_desktop(vm_offset_t,void *);
 extern int sweet_x9_csf_resident_begin(vm_offset_t);
 extern int sweet_x9_csf_resident_end(void);
-static int render_active_refs=-1;
 static int gpu_owned_request(void *job,int desktop) {
  if(!job||!shared||channel_uncertain||!eb_ready())return -1;
  struct gpu_shared_prefix s;status(&s);

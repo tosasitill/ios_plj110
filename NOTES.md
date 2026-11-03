@@ -1,3 +1,19 @@
+## GPU load governor (source only, 2026-11-03)
+
+- User chose a simple load governor. sweet_x9_gpu_dependencies.c: the old one-shot commit
+  (fastest OPP <= 900 MHz = index 44, 858 MHz) is now the FLOOR; gov_thread samples every 50 ms
+  GPU busy ns (sweet_x9_gpu_busy_ns, accumulated in SweetX9RenderEngine.inc from doorbell to
+  fence of each synchronous submit), util > 80% -> 4 OPP indices faster, < 30% -> 2 slower,
+  clamped to [ceiling, floor]. Ceiling = fastest OPP <= x9_gpu_khz (default now 1300000).
+  Thermal: GPUEB shared `temperature` >= 80 -> floor, >= 90 -> slowest OPP; values outside
+  1..150 (unknown units) never allow more than the floor. Only runs while the resident render
+  session holds power (render_active_refs >= 0). x9_gpu_gov=0 or x9_gpu_khz=0 -> fixed floor.
+- All GPUEB exchanges now serialized by x9_gpu_ipi_lock; governor commits are quiet (no TX/RX
+  lines). Logs: "X9 GPU DVFS: shared temperature=..." once, "X9 GPU GOV: start ..." and every
+  2 s "X9 GPU GOV: util_avg temp idx gpu commits limiter ceiling floor".
+- NOT compiled (tunnel down). Check the temperature units from the first log before trusting
+  the thermal thresholds.
+
 ## Active: rev242 padding FIXES the CC split (user confirmed); next: swipe mosaic, GPU clock, repo split (2026-11-03)
 
 - rev242 (X9GeneralMetal242, log /tmp/9.txt): "X9 PAD: partial vertex group padding on",

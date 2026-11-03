@@ -21,6 +21,7 @@ extern "C" int sweet_early_is_x9(void);
 extern "C" void sweet_x9_csf_prepare(void);
 extern "C" int sweet_x9_csf_boot(vm_offset_t gpu);
 extern "C" vm_offset_t ml_io_map(vm_offset_t,vm_size_t);
+extern "C" volatile uint64_t sweet_x9_gpu_busy_ns;
 #include "X9GPUCache.h"
 
 namespace {

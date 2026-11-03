@@ -450,6 +450,10 @@ static IOReturn render_submit(X9RenderContext *c,const X9RenderSubmission *reque
   }while(mach_absolute_time()<end);
   if(!done)goto uncertain;
   times[5]=mach_absolute_time();
+  { // GPU busy time for the DVFS governor (sweet_x9_gpu_dependencies.c).
+   uint64_t busy_ns=0;absolutetime_to_nanoseconds(times[5]-times[4],&busy_ns);
+   __atomic_fetch_add(&sweet_x9_gpu_busy_ns,busy_ns,__ATOMIC_RELAXED);
+  }
   phase="group-suspend";
   if(x9_csf_group_halt(&io,&g->control,resident->epoch,true,1000000000ULL)!=kIOReturnSuccess)goto uncertain;
   phase="final-flush-and-as-detach";
