@@ -1,3 +1,20 @@
+## 32.txt (rev252h-nowifi): keyboard freeze is NOT Wi-Fi related (2026-11-04)
+
+- USER: still freezes with no fake radio (0 X9 WIFI lines, no wifid/en0). Preferences[277] t0 again in
+  the dictation loop (UIDictationConnection dictationIsAvailableForLanguage -> UISystemKeyboardDockController
+  updateDockItemsVisibility -> UIKeyboardInputModeController activeDictationLanguages /
+  suggestedDictationLanguagesForDeviceLanguage / CFPrefs reads -> NSNotification ...).
+- SOURCE (UIKitCore/AssistantServices 20H392): UIDictationConnection only forwards to AFDictationConnection;
+  -[AFDictationConnection dictationIsAvailableForLanguage:synchronous:] keeps a per-language dict
+  (CheckLanguageAvailable, LanguageAvailableOverNetwork, HQ/LQAssetsAvailable), consults
+  AFNetworkAvailability isAvailable and forcedOfflineDictationIsAvailableForLanguage:synchronous:.
+  AFNetworkAvailability addObserver path calls _startObservingAvailability then _availabilityChanged
+  (0x19bf085bc) -> every new observer gets an immediate change callback.
+- 推断 (unverified), two candidates: (1) the dock creates a fresh dictation connection per update, each
+  new observer gets "changed" -> next update (self-sustaining); (2) keyboard/language preferences never
+  set (Setup skipped by x9_skip_setup) -> enabledInputModeIdentifiers recomputed/written each pass ->
+  prefs change notification -> recompute. User check requested: Settings > General > Keyboard > Keyboards.
+
 ## 31.txt (rev252h): dictation seed not enough; B1/B2 probe result; A/B build (2026-11-04)
 
 - 实测 B1/B2 probe (read-only): GPIO251 PMIC_EN in/0 (MT6653 OFF: LK never powers it), GPIO248 POR
