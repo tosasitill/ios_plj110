@@ -1,3 +1,27 @@
+## rev250-bl device result: purple + near-frozen UI from publishing AppleARMBacklight; service off again (2026-11-04)
+
+- 实测 (23.txt, 4977 lines to 100 s): `X9 BL: DCS 0x51 via inherited LK DSI0` and
+  `AppleARMBacklight published` at 0.18 s; payload staged fine (`install result errno=0`,
+  `active plugin=X9GeneralMetal250`). backboardd `backlight-control` -> AppleARMBacklight
+  (8.216 s), SpringBoard too. USER: purple screen, very laggy.
+- **No `X9 BL: DBV` and no `SWEET BL` line at all**: CoreBrightness never set brightness-nits or
+  IOMFBBrightnessLevel, so not a single DCS 0x51 was sent. The DSI change is not implicated.
+- Damage, measured: GUI heartbeat swap_id=13 at 100.2 s (15.txt: 985 at 80 s); cadence copies
+  0-1 per 2 s window; GPU GOV util_avg 0-1%, commits=27 by 99 s; backboardd allocates extra
+  full-screen BGRA surfaces (ids 56,58,59,63,65,66 at 20.6-35.0 s); new abort loops
+  AegirPoster x28 / GradientPosterExtension x16 (sig 6). IOMFB selector set identical to 15.txt.
+- 推断: this is R3 / topaz patch 0110 again - with a backlight service CoreBrightness/CA turns
+  on digital dimming (offscreen colour-filter pass); purple = that path mis-rendered on our stack.
+  Not proven which property triggers it.
+- Fix (next commit): X9 does not publish AppleARMBacklight unless sweetbl=1, and
+  IOMFBBrightnessLevel on AppleCLCD is only set when a service is published (= rev249 userspace
+  view). Transport check instead: first 10 s GUI heartbeat with swap_id>=60 enters fBlCall ->
+  one `X9 BL: DBV 1433` + readback line. Expected: rev249 picture/speed back, plus a visible
+  brightness step to 35% if the LP write lands mid-session.
+- Slider: needs a different route than AppleARMBacklight (open question: what makes
+  CoreBrightness skip digital dimming - e.g. AAB/"DisplayDigitalDimming"-style properties - not yet
+  researched).
+
 ## Active: brightness (DCS 0x51) code committed, NOT BUILT, NOT TESTED (2026-11-04)
 
 - Commit 9b63862 on feat/G1Ultra (origin/main's docs fast-forwarded in first, incl.

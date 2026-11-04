@@ -612,17 +612,22 @@ AppleCLCD::start(IOService *provider)
 		if (fDsi != NULL) {
 			IOLog("SWEET FB: DSI0 ctrl %#x, brightness via DCS 0x51\n", *(volatile uint32_t *)(fDsi + 0x004));
 		}
-		setProperty("IOMFBBrightnessLevel", (unsigned long long)(200u << 16), 32);
 		/*
 		 * Off unless sweetbl=1: with a backlight service CoreBrightness also
 		 * runs digital dimming, a colour filter over every frame, which the
 		 * CPU renderer cannot afford (the UI dropped to under 1 fps).
-		 * X9 defaults on (Metal renders; the boot-arg budget is full),
-		 * sweetbl=0 turns it off.
+		 * X9 too: rev250 (23.txt) published it by default and got a purple,
+		 * near-frozen UI (swap_id 13 at 100 s vs ~1000, extra full-screen
+		 * offscreen surfaces, AegirPoster/GradientPoster abort loops) while
+		 * CoreBrightness never sent a single level. X9 keeps the DCS 0x51
+		 * transport and sends one default DBV from the heartbeat instead.
 		 */
-		uint32_t blOn = fX9Bl ? 1 : 0;
+		uint32_t blOn = 0;
 		(void)PE_parse_boot_argn("sweetbl", &blOn, sizeof(blOn));
 		AppleARMBacklight *bl = blOn ? OSTypeAlloc(AppleARMBacklight) : NULL;
+		if (fDsi != NULL || bl != NULL) {
+			setProperty("IOMFBBrightnessLevel", (unsigned long long)(200u << 16), 32);
+		}
 		if (bl != NULL && bl->init()) {
 			bl->fFB = this;
 			bl->setProperty("backlight-control", true);
@@ -1287,6 +1292,13 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 			 fb->fSwapID,fb->fDirty,fb->fX9SubmitPending,fb->fPowerOff,x9_lk_gui_busy());
 			x9_lk_gui_probe();
 			sweet_x9_clear_lk_overlays();
+			/* Transport check without CoreBrightness: once the desktop is
+			 * composing, send the default DBV once (with 0x52/0x0A readback). */
+			static bool blProbe;
+			if (fb->fX9Bl && !blProbe && fb->fSwapID >= 60 && fb->fBlCall != NULL) {
+				blProbe = true;
+				thread_call_enter(fb->fBlCall);
+			}
 		}
 		if (fb->fX9ObservePending) {
 			int busy=x9_lk_gui_busy();
