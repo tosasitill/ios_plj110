@@ -1,3 +1,19 @@
+## 28.txt: wifid never ran -> missing DT node "wlan"; rev252f-wifi built (2026-11-04)
+
+- 实测 28.txt (rev252e-wifi): all 4 Apple80211 requests were configd[36] (IPConfiguration via
+  IO80211.framework: user client refused -> ioctl bind, card caps, SSID). No `IOK wifid` line and wifid
+  absent from all 6 sampler passes -> wifid not running.
+- SOURCE: com.apple.wifid.plist (RunAtLoad, KeepAlive) has _LimitLoadToDeviceTree = [wlan,
+  marconi-wifi]; launchd 20H392 per-name check 0x10003d1f0 = IOKit MIG 2887
+  io_device_tree_entry_exists_with_name. Our ADT had no node named wlan.
+- LK DT copy complete (16 KiB, 272 lines): pcie0 @0x16910000 status "okay", SPI 0x171 (369); pcie1
+  "disabled"; phy@16900000 "okay"; wifi node emi-addr 0xe1000000 emi-size 0x1900000; wifi-tx-cma
+  emi-size 0x5400000; wifi-misc 0x100000.
+- Commit 150dfdb: mkadt.py adds /arm-io/wlan (device_type wlan, compatible wlan-pcie,mt6653, fake MAC)
+  when the boot line has x9_wifi_fake=1. Built x9/out/x9-rev252f-wifi/boot.img (x9_wifi_fake=1 x9bl
+  sweetiolog=wifid,configd), allowlist 252, no restaging. Expect: wifid in sampler + IOK wifid lines +
+  wifid's X9 WIFI REQ (power/scan); Settings Wi-Fi toggle enabled, fake networks listed.
+
 ## 27.txt (rev252d-wifi) analysed; rev252e-wifi diagnostic built (2026-11-04)
 
 - 实测 27.txt: LK DT copy works (160 lines, cut at pcie@16910000 by the 8 KiB limit). Wi-Fi EMI from
