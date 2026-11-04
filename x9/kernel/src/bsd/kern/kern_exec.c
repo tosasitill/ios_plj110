@@ -7125,6 +7125,111 @@ sweet_x9_seed_assistant_dictation(proc_t p, user_addr_t scratch, user_addr_t end
  return error;
 }
 
+/* x9_kbd_dictation (default 1): 40.txt proves the stall is a per-frame dictation
+ * recompute on the app main thread (12/12 Spotlight t0 samples, ~10 frames/s):
+ * UISystemKeyboardDockController updateDockItemsVisibility ->
+ * +[UIDictationController dictationIsFunctional] ->
+ * -[UIKeyboardInputMode dictationLanguage] ->
+ * -[UIKeyboardInputModeController isDictationLanguageEnabled:] -> when the
+ * language is not in DictationLanguagesEnabled it runs
+ * updateEnabledDictationLanguages: (block, re-entrant lookup) and
+ * -[AFDictationConnection forcedOfflineDictationIsAvailableForLanguage:] ->
+ * AFPreferences init + Darwin observers + CFPreferences read of
+ * com.apple.assistant.support (sync cfprefsd XPC) -> availability callback ->
+ * UIKeyboardDictationAvailabilityDidChange -> dock update again.
+ * UIKit takes the cheap path only when the current language is already present
+ * in the preferences, so seed en_US (MKBUserSessionLanguage) as disabled in
+ * com.apple.keyboard.preferences. An existing plist is merged, never replaced:
+ * the key pair is inserted before the last </dict> and a binary plist or an
+ * unexpectedly large file is left alone. x9_kbd_dictation=0 disables. */
+#define X9_KBD_PREFS_MAX 8192
+static int
+sweet_x9_seed_kbd_dictation(proc_t p, user_addr_t scratch, user_addr_t end)
+{
+ static const char target[]="/private/var/mobile/Library/Preferences/com.apple.keyboard.preferences.plist";
+ static const char backup[]="/private/var/mobile/Library/Preferences/com.apple.keyboard.preferences.x9-before-seed.plist";
+ static const char temp[]="/private/var/mobile/Library/Preferences/com.apple.keyboard.preferences.x9-seed.tmp";
+ static const char frag[]="\t<key>DictationLanguagesEnabled</key>\n\t<dict>\n\t\t<key>en_US</key>\n\t\t<false/>\n\t</dict>\n\t<key>DictationLanguagesLastUsed</key>\n\t<dict/>\n";
+ static const char fresh[]="<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>DictationLanguagesEnabled</key>\n\t<dict>\n\t\t<key>en_US</key>\n\t\t<false/>\n\t</dict>\n\t<key>DictationLanguagesLastUsed</key>\n\t<dict/>\n</dict>\n</plist>\n";
+ int enabled=0,error,fd; int32_t rv=0; user_ssize_t written=0; vnode_t vp=NULLVP;
+ char *src=NULL; size_t srclen=0,ins=0,got=0,bodylen=0;
+ extern boolean_t sweet_x9_ufs_root_writable(void);
+ if((enabled=sweet_x9_arg("x9_kbd_dictation",1))!=1)return 0;
+ if(!sweet_x9_ufs_root_writable())return EROFS;
+ if(!proc_is64bit(p)||scratch>end)return E2BIG;
+ error=vnode_lookup(target,VNODE_LOOKUP_NOFOLLOW,&vp,vfs_context_kernel());
+ if(error==ENOENT){
+  src=NULL;
+ }else if(error){
+  return error;
+ }else{
+  struct vnode_attr va; struct uio *auio; user_ssize_t left;
+  if(!vnode_isreg(vp)){vnode_put(vp);return EINVAL;}
+  VATTR_INIT(&va); VATTR_WANTED(&va,va_data_size);
+  if(vnode_getattr(vp,&va,vfs_context_kernel())!=0||va.va_data_size<=0||
+      va.va_data_size>(off_t)(X9_KBD_PREFS_MAX-sizeof(frag)))
+   {vnode_put(vp);printf("X9 KBD DICT: existing preferences too large to merge; left alone\n");return 0;}
+  srclen=(size_t)va.va_data_size;
+  src=kalloc_data(srclen,Z_WAITOK);
+  if(src==NULL){vnode_put(vp);return ENOMEM;}
+  auio=uio_create(1,0,UIO_SYSSPACE,UIO_READ);
+  if(auio==NULL||uio_addiov(auio,CAST_USER_ADDR_T(src),srclen)!=0||
+      VNOP_READ(vp,auio,0,vfs_context_kernel())!=0){error=EIO;}
+  else{ left=uio_resid(auio); got=left<0?0:srclen-(size_t)left; if(got!=srclen)error=EIO; }
+  if(auio!=NULL)uio_free(auio);
+  vnode_put(vp);
+  if(error){kfree_data(src,srclen);return error;}
+  if(srclen>=8&&!memcmp(src,"bplist00",8)){
+   printf("X9 KBD DICT: com.apple.keyboard.preferences is a binary plist (%zu bytes); left alone\n",srclen);
+   kfree_data(src,srclen);return 0;
+  }
+  /* insert before the last </dict> so the rest of the preferences survive */
+  for(size_t i=srclen>=7?srclen-7:0;;i--){
+   if(!memcmp(src+i,"</dict>",7)){ins=i;break;}
+   if(i==0){ins=(size_t)-1;break;}
+  }
+  if(ins==(size_t)-1){
+   printf("X9 KBD DICT: no </dict> in the existing plist; left alone\n");
+   kfree_data(src,srclen);return 0;
+  }
+  bodylen=ins+sizeof(frag)-1+(srclen-ins);
+ } 
+ if(src==NULL)bodylen=sizeof(fresh)-1;
+ if(bodylen==0)bodylen=sizeof(fresh)-1;
+ if((size_t)(end-scratch)<sizeof(target)+sizeof(backup)+sizeof(temp)+bodylen){
+  if(src!=NULL)kfree_data(src,srclen);return E2BIG;
+ }
+ {
+  user_addr_t t=scratch,b=t+sizeof(target),tmp=b+sizeof(backup),data=tmp+sizeof(temp);
+  if((error=copyout(target,t,sizeof(target)))||(error=copyout(backup,b,sizeof(backup)))||(error=copyout(temp,tmp,sizeof(temp))))goto out;
+  if(src==NULL){
+   error=copyout(fresh,data,sizeof(fresh));
+   if(error)goto out;
+  }else{
+   if(ins>0&&(error=copyout(src,data,ins)))goto out;
+   if((error=copyout(frag,data+ins,sizeof(frag)-1)))goto out;
+   if(srclen>ins&&(error=copyout(src+ins,data+ins+sizeof(frag)-1,srclen-ins)))goto out;
+  }
+  error=vnode_lookup(target,VNODE_LOOKUP_NOFOLLOW,&vp,vfs_context_kernel());
+  if(!error){
+   if(!vnode_isreg(vp)){vnode_put(vp);error=EINVAL;goto out;} vnode_put(vp);
+   struct link_args l={.path=t,.link=b};error=link(p,&l,&rv);if(error&&error!=EEXIST)goto out;
+  }else if(error!=ENOENT)goto out;
+  struct open_args o={.path=tmp,.flags=O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW,.mode=0600};
+  error=open(p,&o,&rv);if(error)goto out;fd=rv;
+  struct fchown_args ch={.fd=fd,.uid=501,.gid=501};error=fchown(p,&ch,&rv);
+  if(!error){struct write_args w={.fd=fd,.cbuf=data,.nbyte=(size_t)bodylen};error=write(p,&w,&written);if(!error&&written!=(user_ssize_t)bodylen)error=EIO;}
+  {struct close_args c={.fd=fd};int ce=sys_close(p,&c,&rv);if(!error)error=ce;}
+  if(!error){struct rename_args r={.from=tmp,.to=t};error=rename(p,&r,&rv);}
+  if(error){struct unlink_args u={.path=tmp};(void)unlink(p,&u,&rv);}
+  printf("X9 KBD DICT: com.apple.keyboard.preferences merged (%s) errno=%d bytes=%d; original backed up if present\n",
+      src==NULL?"new file":"existing plist",error,(int)bodylen);
+ }
+out:
+ if(src!=NULL)kfree_data(src,srclen);
+ return error;
+}
+
 /* x9_siri_off (default 1): route B for the keyboard stall. 33.txt: the app's
  * main thread recomputes dictation availability whenever a Siri voice plugin
  * aborts (SiriTTSSynthesizer/MacinTalkAUSP/KonaSynthesizer sig 6, ~10 s) and
@@ -8010,6 +8115,8 @@ load_init_program_at_path(proc_t p, user_addr_t scratch_addr, const char* path)
 	 if(statusbar_error)printf("X9 STATUSBAR: preference not installed errno=%d; continuing boot\n",statusbar_error);
 	 int dictation_error=sweet_x9_seed_assistant_dictation(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	 if(dictation_error)printf("X9 DICTATION: preference not installed errno=%d; continuing boot\n",dictation_error);
+	 int kbd_dictation_error=sweet_x9_seed_kbd_dictation(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
+	 if(kbd_dictation_error)printf("X9 KBD DICT: preference not installed errno=%d; continuing boot\n",kbd_dictation_error);
 	 int siri_error=sweet_x9_siri_off(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	 if(siri_error)printf("X9 SIRI: launchd.plist not changed errno=%d; continuing boot\n",siri_error);
 	 int jobs_error=sweet_x9_seed_disabled_jobs(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);

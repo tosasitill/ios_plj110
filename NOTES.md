@@ -1,3 +1,59 @@
+## 40.txt: the stall is a per-frame dictation recompute; rev252s seeds the keyboard pref (2026-11-04)
+
+- 实测 40.txt is the rev252r boot: 40.txt:1069 boot args `x9_metal_render=1
+  launchd_unsecure_cache=1 launchdsuffix=release x9_wifi_fake=1 x9_wifi_probe=1 x9_siri_off=1
+  x9_lite=1 x9_sandbox_ops=1 x9_sample_procs=SpringBoard,Spotlight,kbd,Preferences`; log ends 140.558 s.
+- 实测 the appex/TTS storm is still gone: 0 lines naming SiriTTSSynthesizer/MacinTalkAUSP/
+  KonaSynthesizer/IntentsExtension/assetsd in the whole log (38.txt had 12 each). WirelessRadioMan
+  and syncdefaultsd both continue (56 CRASH lines each = 14 aborts). So rev252r's ENOENT answer
+  for ops 5/6/0x43 did not stop syncdefaultsd; the rev252q 推断 that a success answer without a
+  token/handle caused it is falsified.
+- 实测 `SWEET Sandbox op:` wrote exactly 24 lines and every one is op 4 (container path), so ops
+  5/6/0x43 were never named: the shared budget is consumed in arrival order. rev252s gives op 4
+  its own 8-line budget so the other ops get the 24.
+- 实测 the assistant.support seed survives: 40.txt:4148 `X9 PREF: ...assistant.support.plist
+  size=268 mtime=34 mode=0100600 uid=501` with the XML body at 40.txt:4149-4151, unchanged at
+  40.140/50.143. So cfprefsd did not rewrite it; X9 JOBS 40.txt:793 `already disable=7 lite=1 size=601`.
+- 实测 all 12 Spotlight[274] passes (30.136..140.178 s) have t0 (run=1, main thread) inside the
+  dictation availability chain. Host symbolication of the 12 t0 stacks against the 20H392 cache
+  (slide 0x255cc000): UISystemKeyboardDockController updateDockItemsVisibility ->
+  +[UIDictationController dictationIsFunctional] -> -[UIKeyboardInputMode dictationLanguage] ->
+  -[UIKeyboardInputModeController isDictationLanguageEnabled:] ->
+  -[UIDictationConnection dictationIsAvailableForLanguage:] ->
+  -[AFDictationConnection ...synchronous:] -> forcedOfflineDictationIsAvailableForLanguage: ->
+  +[AFPreferences sharedPreferencesWithInstanceContext:] (init + Darwin observers + CFPreferences
+  read -> sync cfprefsd XPC, kevent_id/_dispatch_kq_poll) -> _tellSpeechDelegateAvailabilityChanged
+  -> UIKeyboardDictationAvailabilityDidChange -> dock update again.
+- 实测 host disassembly of the same binaries (not device): -[UIKeyboardInputMode dictationLanguage]
+  calls isDictationLanguageEnabled: up to 5x per invocation; isDictationLanguageEnabled: reads
+  "DictationLanguagesEnabled" through -[UIKeyboardPreferencesController valueForPreferenceKey:] ->
+  TIPreferencesController, whose domain is com.apple.keyboard.preferences, and only calls
+  updateEnabledDictationLanguages: and dictationIsAvailableForLanguage: when the current language
+  is absent from that dictionary. +[UIDictationController dictationIsFunctional] also calls
+  dictationIsAvailableForLanguage: unconditionally after its locked/telephony/passcode gates.
+- 实测 the kernel/compositor are not the limiter: 42 of the 2-s `X9 DISPLAY cadence` windows report
+  copies=20 submits=20 with target=60 (the app commits 10 frames/s while the kernel presents every
+  tick); 14 windows report 0/0.
+- 推断: the missing en_US entry is what makes every dock update recompute, so seeding
+  DictationLanguagesEnabled={en_US:false} and DictationLanguagesLastUsed={} into
+  com.apple.keyboard.preferences should reduce the per-frame path to dictionary lookups. It cannot
+  remove dictationIsFunctional's own availability call, so the lag may only shrink. If the on-disk
+  plist is bplist00 the merge is declined (logged), which the new probe reports.
+- rev252s (built, not flashed): `sweet_x9_seed_kbd_dictation` in kern_exec.c merges the two keys
+  before the last `</dict>` of
+  /private/var/mobile/Library/Preferences/com.apple.keyboard.preferences.plist (creates the file
+  when absent; hardlink backup .x9-before-seed.plist; temp 0600 501:501 + rename; refuses binary,
+  >8 KiB and </dict>-less files), and `x9_prefcheck` also dumps that plist plus its backup (size/
+  mtime each pass, bytes on the first). Boot args identical to 40.txt.
+- Output x9/out/x9-rev252s-kbddict/boot.img: image 18821120 / boot.img 9469952 bytes, sha256
+  2edd2fdc72524e35c70f7a46d6cc33832ea15cd2d4c468e2b023bf689cd5e248. Host-built only,
+  not hardware-verified.
+- Test: flash rev252s, type in Spotlight between ~35 s and ~140 s, pull the log. Read:
+  (1) `X9 KBD DICT:` (new file / merged / binary / no </dict>); (2) `X9 PREF:` size + first bytes
+  for com.apple.keyboard.preferences (bplist00 vs XML) and whether size/mtime change between
+  passes; (3) whether the 12 Spotlight t0 stacks are still deep in AFPreferences/cfprefsd;
+  (4) `SWEET Sandbox op:` lines for ops 5/6/0x43.
+
 ## 39.txt: rev252q fixed the appex storm; syncdefaultsd regressed; lag still unexplained (2026-11-04)
 
 - 实测 39.txt is the rev252q boot (boot args 39.txt:742: x9_wifi_fake/probe=1 x9_siri_off=1 x9_lite=1;

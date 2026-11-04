@@ -176,6 +176,12 @@ x9_prefcheck(int dump_bytes) {
  if(!enabled) return;
  x9_prefdump("/private/var/mobile/Library/Preferences/com.apple.assistant.support.plist",dump_bytes);
  x9_prefdump("/private/var/mobile/Library/Preferences/com.apple.assistant.support.x9-before-seed.plist",0);
+ /* 40.txt: the app main thread re-reads DictationLanguagesEnabled every frame
+  * through TIPreferencesController (domain com.apple.keyboard.preferences). The
+  * seed can only merge XML, so report the on-disk format/size here: bplist00
+  * means the seed declined, and a size/mtime change means cfprefsd rewrote it. */
+ x9_prefdump("/private/var/mobile/Library/Preferences/com.apple.keyboard.preferences.plist",dump_bytes);
+ x9_prefdump("/private/var/mobile/Library/Preferences/com.apple.keyboard.preferences.x9-before-seed.plist",0);
 }
 /* Route B needs the live launchd.plist byte layout before anything may rewrite
  * it in place (recovery has no hfsplus, so no dd by name; the recorded v5

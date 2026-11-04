@@ -324,6 +324,10 @@ static uint64_t sweet_sandbox_seen;
 #define SWEET_SANDBOX_CONTAINER_PATH    4
 #define SWEET_SANDBOX_CONTAINER_VAR     "CFFIXED_USER_HOME="
 #define SWEET_SANDBOX_LOG_MAX           24
+/* op 4 asks the container question for every appex/container path and alone
+ * filled the whole 24-line budget in 40.txt, so ops 5/6/0x43 were never
+ * named. Give op 4 its own smaller budget. */
+#define SWEET_SANDBOX_CONTAINER_LOG_MAX  8
 
 /* x9_sandbox_ops=1: one line per (process, operation) for ops 4/5/6/0x43,
  * and the container answer's errno/length. Bounded so the console stays
@@ -331,8 +335,10 @@ static uint64_t sweet_sandbox_seen;
 static struct {
 	int pid;
 	int call;
-} sweet_sandbox_logged[SWEET_SANDBOX_LOG_MAX];
+} sweet_sandbox_logged[SWEET_SANDBOX_LOG_MAX + SWEET_SANDBOX_CONTAINER_LOG_MAX];
+static unsigned int sweet_sandbox_logged_total;
 static unsigned int sweet_sandbox_logged_count;
+static unsigned int sweet_sandbox_container_logged;
 static int sweet_sandbox_ops_on = -1;
 static int sweet_sandbox_ext_ok_on = -1;
 static size_t sweet_sandbox_container_len;
@@ -348,25 +354,41 @@ static void
 sweet_sandbox_op_log(struct proc *p, int call, int ret)
 {
 	int pid = proc_pid(p);
-	unsigned int i;
+	unsigned int i, count, limit;
 	char name[32];
 
 	if (sweet_sandbox_ops_on < 0) {
 		sweet_sandbox_ops_on = sweet_sandbox_boot_arg("x9_sandbox_ops");
 	}
-	if (!sweet_sandbox_ops_on ||
-	    sweet_sandbox_logged_count >= SWEET_SANDBOX_LOG_MAX) {
+	if (!sweet_sandbox_ops_on) {
 		return;
 	}
-	for (i = 0; i < sweet_sandbox_logged_count; i++) {
+	if (call == SWEET_SANDBOX_CONTAINER_PATH) {
+		count = sweet_sandbox_container_logged;
+		limit = SWEET_SANDBOX_CONTAINER_LOG_MAX;
+	} else {
+		count = sweet_sandbox_logged_count;
+		limit = SWEET_SANDBOX_LOG_MAX;
+	}
+	if (count >= limit ||
+	    sweet_sandbox_logged_total >=
+	    sizeof(sweet_sandbox_logged) / sizeof(sweet_sandbox_logged[0])) {
+		return;
+	}
+	for (i = 0; i < sweet_sandbox_logged_total; i++) {
 		if (sweet_sandbox_logged[i].pid == pid &&
 		    sweet_sandbox_logged[i].call == call) {
 			return;
 		}
 	}
-	sweet_sandbox_logged[i].pid = pid;
-	sweet_sandbox_logged[i].call = call;
-	sweet_sandbox_logged_count++;
+	sweet_sandbox_logged[sweet_sandbox_logged_total].pid = pid;
+	sweet_sandbox_logged[sweet_sandbox_logged_total].call = call;
+	sweet_sandbox_logged_total++;
+	if (call == SWEET_SANDBOX_CONTAINER_PATH) {
+		sweet_sandbox_container_logged++;
+	} else {
+		sweet_sandbox_logged_count++;
+	}
 	proc_name(pid, name, sizeof(name));
 	printf("SWEET Sandbox op: %s[%d] op %d ret=%d len=%lu\n", name, pid,
 	    call, ret, (unsigned long)sweet_sandbox_container_len);
