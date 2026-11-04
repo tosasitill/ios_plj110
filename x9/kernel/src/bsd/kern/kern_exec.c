@@ -7363,6 +7363,416 @@ sweet_x9_siri_off(proc_t p, user_addr_t scratch, user_addr_t end)
 	return error;
 }
 
+static char *
+x9_jobs_last(char *hay, size_t hl, const char *needle, size_t nl)
+{
+	char *found = NULL;
+
+	if (nl == 0 || hl < nl) {
+		return NULL;
+	}
+	for (size_t i = 0; i + nl <= hl; i++) {
+		if (memcmp(hay + i, needle, nl) == 0) {
+			found = hay + i;
+		}
+	}
+	return found;
+}
+
+/* Append one comma-separated label to list if it is valid and not there yet. */
+static int
+x9_jobs_add(char *list, size_t cap, const char *s, size_t len)
+{
+	char *t = list;
+	size_t used;
+
+	if (len == 0 || len > 96) {
+		return EINVAL;
+	}
+	for (size_t i = 0; i < len; i++) {
+		char c = s[i];
+
+		if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+		    (c >= '0' && c <= '9') || c == '.' || c == '-')) {
+			return EINVAL;
+		}
+	}
+	while (*t) {
+		char *e = strchr(t, ',');
+		size_t tl = e ? (size_t)(e - t) : strlen(t);
+
+		if (tl == len && memcmp(t, s, len) == 0) {
+			return 0;
+		}
+		if (e == NULL) {
+			break;
+		}
+		t = e + 1;
+	}
+	used = strlen(list);
+	if (used + (used ? 1 : 0) + len >= cap) {
+		return E2BIG;
+	}
+	if (used) {
+		list[used++] = ',';
+	}
+	memcpy(list + used, s, len);
+	list[used + len] = '\0';
+	return 0;
+}
+
+static int
+x9_jobs_read(const char *path, char *buf, size_t cap, size_t *len)
+{
+	vfs_context_t ctx = vfs_context_kernel();
+	struct vnode_attr va;
+	vnode_t vp = NULLVP;
+	int error;
+
+	*len = 0;
+	error = vnode_lookup(path, VNODE_LOOKUP_NOFOLLOW, &vp, ctx);
+	if (error) {
+		return error;
+	}
+	if (!vnode_isreg(vp)) {
+		vnode_put(vp);
+		return EINVAL;
+	}
+	VATTR_INIT(&va);
+	VATTR_WANTED(&va, va_data_size);
+	error = vnode_getattr(vp, &va, ctx);
+	if (error == 0 && (va.va_data_size < 0 || (uint64_t)va.va_data_size > cap)) {
+		error = E2BIG;
+	}
+	if (error == 0 && va.va_data_size > 0) {
+		error = x9_siri_read(vp, 0, buf, (size_t)va.va_data_size, ctx);
+		if (error == 0) {
+			*len = (size_t)va.va_data_size;
+		}
+	}
+	vnode_put(vp);
+	return error;
+}
+
+/* Write src to path through the boot process, root:wheel, then fsync. The
+ * payload goes out in 1 KiB pieces through the scratch window so the seed fits
+ * whatever page size this port runs. */
+static int
+x9_jobs_write(proc_t p, user_addr_t path, user_addr_t data, const char *src,
+    size_t len, mode_t mode)
+{
+	struct open_args o = { .path = path,
+	    .flags = O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, .mode = mode };
+	int32_t rv = 0;
+	int error, fd;
+
+	error = open(p, &o, &rv);
+	if (error) {
+		return error;
+	}
+	fd = rv;
+	for (size_t sent = 0; sent < len && error == 0;) {
+		size_t piece = len - sent < 1024 ? len - sent : 1024;
+		struct write_args w = { .fd = fd, .cbuf = data, .nbyte = piece };
+		user_ssize_t written = 0;
+
+		error = copyout(src + sent, data, piece);
+		if (error == 0) {
+			error = write(p, &w, &written);
+			if (error == 0 && written != (user_ssize_t)piece) {
+				error = EIO;
+			}
+		}
+		sent += piece;
+	}
+	if (error == 0) {
+		struct fchown_args ch = { .fd = fd, .uid = 0, .gid = 0 };
+
+		error = fchown(p, &ch, &rv);
+	}
+	if (error == 0) {
+		struct fchmod_args cm = { .fd = fd, .mode = mode };
+
+		error = fchmod(p, &cm, &rv);
+	}
+	if (error == 0) {
+		struct fsync_args fs = { .fd = fd };
+
+		error = fsync(p, &fs, &rv);
+	}
+	{
+		struct close_args c = { .fd = fd };
+		int ce = sys_close(p, &c, &rv);
+
+		if (error == 0) {
+			error = ce;
+		}
+	}
+	return error;
+}
+
+/* x9_disable_jobs=<label>,... and x9_lite=1: the UniXNU-sheng bring-up launch
+ * policy, ported here. sheng's hardware stacks show identityservicesd,
+ * contextstored and locationd in a cycle of synchronous XPC waits, and the
+ * same shape appears on this board (33.txt: the app main thread and assistantd
+ * both parked in reply-sync XPC while locationd traps every ~3.3 s). A job
+ * disabled in launchd's own database makes its Mach service lookups fail at
+ * once instead of hanging. Before launchd starts, write every label as
+ * <key>label</key><true/> into
+ * /private/var/db/com.apple.xpc.launchd/disabled.plist, spliced in front of
+ * the closing </dict> so the entries launchd already keeps there survive. The
+ * pristine file is copied once to disabled.x9-orig.plist and every rewrite
+ * starts from it, so a changed label list never accumulates keys. The empty
+ * disabled.migrated marker says the database needs no migration. Labels were
+ * checked against 20H392's LaunchDaemons: sheng's fairplayd.A2 is H2 here and
+ * its findmybeaconingd/eyereliefd labels do not exist, so they are dropped.
+ * Boot-arg gated, non-fatal. */
+static int
+sweet_x9_seed_disabled_jobs(proc_t p, user_addr_t scratch, user_addr_t end)
+{
+	static const char directory[] = "/private/var/db/com.apple.xpc.launchd";
+	static const char target[] = "/private/var/db/com.apple.xpc.launchd/disabled.plist";
+	static const char backup[] = "/private/var/db/com.apple.xpc.launchd/disabled.x9-orig.plist";
+	static const char temp[] = "/private/var/db/com.apple.xpc.launchd/disabled.x9-temp.plist";
+	static const char marker[] = "/private/var/db/com.apple.xpc.launchd/disabled.migrated";
+	static const char header[] =
+	    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+	    "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+	    "<plist version=\"1.0\">\n<dict>\n";
+	static const char tail[] = "</dict>\n</plist>\n";
+	static const char lite[] =
+	    "com.apple.identityservicesd,com.apple.locationd,com.apple.CommCenter,com.apple.bluetoothd,"
+	    "com.apple.photoanalysisd,com.apple.mediaanalysisd,com.apple.mediastream.mstreamd,com.apple.icloud.searchpartyd,"
+	    "com.apple.familycircled,com.apple.financed,com.apple.softwareupdateservicesd,com.apple.ndoagent,com.apple.biomesyncd,"
+	    "com.apple.email.maild,com.apple.amsengagementd,com.apple.adid,com.apple.fairplayd.H2,com.apple.passd,"
+	    "com.apple.mobile.obliteration,com.apple.coreduetd,com.apple.assistantd,com.apple.sirittsd";
+	static char base[4096], body[10240], list[512], jobs[512];
+	char label[128], tag[160];
+	extern boolean_t sweet_x9_ufs_root_writable(void);
+	int lite_flag, error = 0, added = 0, kept = 0, have_target = 0;
+	size_t base_len = 0, bn, kn = 0, keyoff;
+	int32_t rv = 0;
+	user_addr_t t, b, tp, mk, d, data;
+
+	lite_flag = sweet_x9_arg("x9_lite", 0) == 1;
+	jobs[0] = '\0';
+	if (PE_parse_boot_argn("x9_disable_jobs", jobs, sizeof(jobs)) == FALSE) {
+		jobs[0] = '\0';
+	}
+	jobs[sizeof(jobs) - 1] = '\0';
+	if (jobs[0] == 0 && !lite_flag) {
+		return 0;
+	}
+	if (!sweet_x9_ufs_root_writable()) {
+		return EROFS;
+	}
+	if (!proc_is64bit(p) || scratch > end ||
+	    sizeof(target) + sizeof(backup) + sizeof(temp) + sizeof(marker) +
+	    sizeof(directory) + 1024 > end - scratch) {
+		return E2BIG;
+	}
+	t = scratch;
+	b = t + sizeof(target);
+	tp = b + sizeof(backup);
+	mk = tp + sizeof(temp);
+	d = mk + sizeof(marker);
+	data = d + sizeof(directory);
+	error = copyout(target, t, sizeof(target));
+	if (error == 0) error = copyout(backup, b, sizeof(backup));
+	if (error == 0) error = copyout(temp, tp, sizeof(temp));
+	if (error == 0) error = copyout(marker, mk, sizeof(marker));
+	if (error == 0) error = copyout(directory, d, sizeof(directory));
+	if (error) {
+		return error;
+	}
+	list[0] = '\0';
+	for (int s = 0; s < 2; s++) {
+		const char *c = s == 0 ? (lite_flag ? lite : NULL) : jobs;
+
+		if (c == NULL) {
+			continue;
+		}
+		while (*c) {
+			const char *e = strchr(c, ',');
+			size_t len = e ? (size_t)(e - c) : strlen(c);
+
+			error = x9_jobs_add(list, sizeof(list), c, len);
+			if (error) {
+				printf("X9 JOBS: bad label near '%s' errno=%d; not written\n", c, error);
+				return error;
+			}
+			if (e == NULL) {
+				break;
+			}
+			c = e + 1;
+		}
+	}
+	if (list[0] == '\0') {
+		return 0;
+	}
+	error = x9_jobs_read(target, base, sizeof(base), &base_len);
+	if (error == 0) {
+		have_target = 1;
+	} else if (error == ENOENT) {
+		error = 0;
+		base_len = 0;
+	} else {
+		printf("X9 JOBS: %s read errno=%d; not written\n", target, error);
+		return error;
+	}
+	{
+		int present = 0, total = 0;
+
+		for (char *c = list; *c;) {
+			char *e = strchr(c, ',');
+			size_t len = e ? (size_t)(e - c) : strlen(c);
+
+			memcpy(label, c, len);
+			label[len] = '\0';
+			(void)snprintf(tag, sizeof(tag), "<key>%s</key>", label);
+			total++;
+			if (x9_jobs_last(base, base_len, tag, strlen(tag))) {
+				present++;
+			}
+			if (e == NULL) {
+				break;
+			}
+			c = e + 1;
+		}
+		if (have_target && present == total) {
+			printf("X9 JOBS: already disable=%d lite=%d size=%d\n",
+			    total, lite_flag, (int)base_len);
+			return 0;
+		}
+	}
+	{
+		size_t blen = 0;
+		int berr = x9_jobs_read(backup, base, sizeof(base), &blen);
+
+		if (berr == 0) {
+			base_len = blen;
+		} else if (berr != ENOENT) {
+			printf("X9 JOBS: backup read errno=%d; not written\n", berr);
+			return berr;
+		} else if (have_target) {
+			error = x9_jobs_write(p, b, data, base, base_len, 0644);
+			printf("X9 JOBS: original kept as disabled.x9-orig.plist errno=%d\n", error);
+			if (error) {
+				return error;
+			}
+		}
+	}
+	if (base_len) {
+		char *cut = x9_jobs_last(base, base_len, "</dict>", strlen("</dict>"));
+
+		if (cut) {
+			bn = (size_t)(cut - base);
+			memcpy(body, base, bn);
+		} else {
+			printf("X9 JOBS: %s has no closing dict; rewritten from scratch\n", target);
+			memcpy(body, header, sizeof(header) - 1);
+			bn = sizeof(header) - 1;
+		}
+	} else {
+		memcpy(body, header, sizeof(header) - 1);
+		bn = sizeof(header) - 1;
+	}
+	if (bn && body[bn - 1] != '\n') {
+		body[bn++] = '\n';
+	}
+	keyoff = bn;
+	kn = 0;
+	for (char *c = list; *c;) {
+		char *e = strchr(c, ',');
+		size_t len = e ? (size_t)(e - c) : strlen(c);
+		size_t tl;
+
+		memcpy(label, c, len);
+		label[len] = '\0';
+		tl = (size_t)snprintf(tag, sizeof(tag), "<key>%s</key>", label);
+		if (base_len && x9_jobs_last(base, base_len, tag, tl)) {
+			kept++;
+		} else {
+			if (bn + tl + strlen("<true/>\n") >= sizeof(body)) {
+				printf("X9 JOBS: label list too long; not written\n");
+				return E2BIG;
+			}
+			memcpy(body + bn, tag, tl);
+			bn += tl;
+			memcpy(body + bn, "<true/>\n", strlen("<true/>\n"));
+			bn += strlen("<true/>\n");
+			kn += tl + strlen("<true/>\n");
+			added++;
+		}
+		if (e == NULL) {
+			break;
+		}
+		c = e + 1;
+	}
+	if (bn + sizeof(tail) - 1 > sizeof(body)) {
+		return E2BIG;
+	}
+	memcpy(body + bn, tail, sizeof(tail) - 1);
+	bn += sizeof(tail) - 1;
+	{
+		struct mkdir_args md = { .path = d, .mode = 0755 };
+
+		error = mkdir(p, &md, &rv);
+		if (error == EEXIST) {
+			error = 0;
+		}
+	}
+	if (error == 0) {
+		error = x9_jobs_write(p, tp, data, body, bn, 0644);
+	}
+	if (error == 0) {
+		struct rename_args r = { .from = tp, .to = t };
+
+		error = rename(p, &r, &rv);
+	}
+	if (error) {
+		struct unlink_args u = { .path = tp };
+
+		(void)unlink(p, &u, &rv);
+		printf("X9 JOBS: disabled.plist not replaced errno=%d\n", error);
+		return error;
+	}
+	{
+		struct open_args o = { .path = mk,
+		    .flags = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, .mode = 0644 };
+		int merr = open(p, &o, &rv);
+
+		if (merr == 0) {
+			struct close_args c = { .fd = rv };
+
+			(void)sys_close(p, &c, &rv);
+		} else if (merr != EEXIST) {
+			printf("X9 JOBS: disabled.migrated errno=%d\n", merr);
+		}
+	}
+	{
+		size_t rlen = 0;
+		int bad = 0;
+		int rerr = x9_jobs_read(target, base, sizeof(base), &rlen);
+
+		if (rerr == 0) {
+			if (rlen != bn) {
+				bad++;
+			}
+			if (kn && (keyoff + kn > rlen ||
+			    memcmp(base + keyoff, body + keyoff, kn) != 0)) {
+				bad++;
+			}
+		} else {
+			bad++;
+		}
+		printf("X9 JOBS: disable=%d lite=%d added=%d kept=%d size=%d errno=%d\n",
+		    added + kept, lite_flag, added, kept, (int)bn, rerr);
+		printf("X9 JOBS: readback mismatches=%d\n", bad);
+	}
+	return 0;
+}
+
 /* Reference: UniXNU ae687009348296e97e49ce6e925795044f363ce6,
  * scripts/seed-data-skip-setup.py (21H461). Preference-only adaptation for
  * 20H392 / MT6993 / 16 KiB; actual Setup decision remains original userland.
@@ -7603,6 +8013,8 @@ load_init_program_at_path(proc_t p, user_addr_t scratch_addr, const char* path)
 	 if(dictation_error)printf("X9 DICTATION: preference not installed errno=%d; continuing boot\n",dictation_error);
 	 int siri_error=sweet_x9_siri_off(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	 if(siri_error)printf("X9 SIRI: launchd.plist not changed errno=%d; continuing boot\n",siri_error);
+	 int jobs_error=sweet_x9_seed_disabled_jobs(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
+	 if(jobs_error)printf("X9 JOBS: disabled.plist not written errno=%d; continuing boot\n",jobs_error);
 	}
 	error=sweet_x9_seed_frontboard(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	if(error)return error;
