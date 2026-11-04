@@ -98,6 +98,7 @@ sweet_sample_start(void)
 #include <sys/proc_internal.h>
 #include <sys/uio.h>
 #include <sys/vnode.h>
+#include <kern/kalloc.h>
 #include <kern/task.h>
 #include <kern/thread.h>
 #include <pexpert/pexpert.h>
@@ -176,6 +177,126 @@ x9_prefcheck(int dump_bytes) {
  x9_prefdump("/private/var/mobile/Library/Preferences/com.apple.assistant.support.plist",dump_bytes);
  x9_prefdump("/private/var/mobile/Library/Preferences/com.apple.assistant.support.x9-before-seed.plist",0);
 }
+/* Route B needs the live launchd.plist byte layout before anything may rewrite
+ * it in place (recovery has no hfsplus, so no dd by name; the recorded v5
+ * offset is stale after the v8/v13 plistlib rewrites). Read-only probe:
+ * size, bplist magic, trailer fields and every occurrence of the Siri/
+ * assistant job strings with a short escaped context. x9_xpcscan=1 enables. */
+static const char *const x9_xpc_needles[] = {
+ "com.apple.assistantd", "com.apple.siriactionsd", "com.apple.SiriTTSService",
+ "SiriTTSSynthesizer", "MacinTalkAUSP", "KonaSynthesizer", "/usr/libexec/assistantd"
+};
+#define X9_XPC_NEEDLES (sizeof(x9_xpc_needles)/sizeof(x9_xpc_needles[0]))
+static void
+x9_xpcescape(char *out, size_t cap, const unsigned char *p, size_t n)
+{
+ size_t o = 0;
+ for (size_t i = 0; i < n && o + 1 < cap; i++) {
+  out[o++] = (p[i] >= 0x20 && p[i] < 0x7f) ? (char)p[i] : '.';
+ }
+ out[o] = 0;
+}
+static void
+x9_xpcscan(void)
+{
+ int enabled = 0;
+ static const char path[] = "/System/Library/xpc/launchd.plist";
+ vnode_t vp = NULLVP;
+ vfs_context_t ctx = vfs_context_kernel();
+ struct vnode_attr va;
+ uint64_t size = 0;
+ size_t cap = 2u << 20, got = 0;
+ char *buf;
+ errno_t error = vnode_lookup(path, VNODE_LOOKUP_NOFOLLOW, &vp, ctx);
+
+ if (!(PE_parse_boot_argn("x9_xpcscan", &enabled, sizeof(enabled)) && enabled)) {
+  return;
+ }
+ if (error) {
+  printf("X9 XPC: lookup errno=%d\n", error);
+  return;
+ }
+ VATTR_INIT(&va);
+ VATTR_WANTED(&va, va_data_size);
+ if (vnode_getattr(vp, &va, ctx) == 0) {
+  size = va.va_data_size;
+ }
+ buf = kalloc_data(cap, Z_WAITOK);
+ if (buf == NULL) {
+  printf("X9 XPC: no memory for %lu bytes\n", (unsigned long)cap);
+  vnode_put(vp);
+  return;
+ }
+ while (got < cap && (uint64_t)got < size) {
+  size_t want = cap - got, r = 0;
+  uio_t auio;
+  if (want > (256u << 10)) {
+   want = 256u << 10;
+  }
+  auio = uio_create(1, (off_t)got, UIO_SYSSPACE, UIO_READ);
+  if (auio == NULL) {
+   break;
+  }
+  if (uio_addiov(auio, CAST_USER_ADDR_T(buf + got), want) == 0 &&
+      VNOP_READ(vp, auio, 0, ctx) == 0) {
+   user_ssize_t left = uio_resid(auio);
+   if (left >= 0 && (size_t)left <= want) {
+    r = want - (size_t)left;
+   }
+  }
+  uio_free(auio);
+  if (r == 0) {
+   break;
+  }
+  got += r;
+ }
+ printf("X9 XPC: %s size=%llu got=%lu\n", path,
+     (unsigned long long)size, (unsigned long)got);
+ if (got >= 8) {
+  char magic[9];
+  memcpy(magic, buf, 8);
+  magic[8] = 0;
+  printf("X9 XPC: magic=%s head=%02x %02x %02x %02x %02x %02x\n", magic,
+      (unsigned char)buf[8], (unsigned char)buf[9], (unsigned char)buf[10],
+      (unsigned char)buf[11], (unsigned char)buf[12], (unsigned char)buf[13]);
+ }
+ if (got >= 32) {
+  const unsigned char *t = (const unsigned char *)buf + got - 32;
+  uint64_t num = 0, top = 0, table = 0;
+  for (int i = 0; i < 8; i++) {
+   num = (num << 8) | t[8 + i];
+   top = (top << 8) | t[16 + i];
+   table = (table << 8) | t[24 + i];
+  }
+  printf("X9 XPC: trailer offSize=%u refSize=%u numObjects=%llu top=%llu table=%llu\n",
+      (unsigned)t[6], (unsigned)t[7], (unsigned long long)num,
+      (unsigned long long)top, (unsigned long long)table);
+ }
+ for (size_t k = 0; k < X9_XPC_NEEDLES; k++) {
+  const char *needle = x9_xpc_needles[k];
+  size_t n = strlen(needle);
+  unsigned count = 0, shown = 0;
+  for (size_t i = 0; i + n <= got; i++) {
+   if (buf[i] != needle[0] || memcmp(buf + i, needle, n) != 0) {
+    continue;
+   }
+   count++;
+   if (shown < 4) {
+    size_t pre = i < 16 ? i : 16;
+    size_t post = (got - i - n) < 16 ? (size_t)(got - i - n) : 16;
+    char before[20], after[20];
+    x9_xpcescape(before, sizeof(before), (const unsigned char *)buf + i - pre, pre);
+    x9_xpcescape(after, sizeof(after), (const unsigned char *)buf + i + n, post);
+    printf("X9 XPC: %lu #%u off=%lu ctx=[%s]%s[%s]\n", (unsigned long)k, count,
+        (unsigned long)i, before, needle, after);
+    shown++;
+   }
+  }
+  printf("X9 XPC: needle %lu \"%s\" count=%u\n", (unsigned long)k, needle, count);
+ }
+ kfree_data(buf, cap);
+ vnode_put(vp);
+}
 /* x9_thread_sample=1: 60 s, then every 120 s, 4 samples. Bare token x9bl
  * (short sampler for diagnostics; AppleARMBacklight is default-on now):
  * 40 s, then every 15 s, 6 samples, to catch backboardd while it stalls. */
@@ -187,6 +308,7 @@ static void sample_thread(__unused void *arg, __unused wait_result_t wr) {
  (void)tsleep(&chan,PZERO,"x9sample",(int)(sample_delay*hz));
  for(unsigned i=0;i<sample_count;i++) {
   x9_prefcheck(i==0);
+  if(i==0)x9_xpcscan();
   printf("X9 SAMPLE: begin %u\n",i+1);
   proc_iterate(PROC_ALLPROCLIST,sample_proc,NULL,NULL,NULL);
   printf("X9 SAMPLE: end %u\n",i+1);

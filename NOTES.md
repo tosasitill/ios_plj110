@@ -1,3 +1,32 @@
+## rev252j: read-only launchd.plist layout probe for route B (built 2026-11-04, not flashed)
+
+- Why: route B (make the assistantd/Siri TTS launchd jobs disappear) must be delivered as a
+  same-length in-place byte edit of `/System/Library/xpc/launchd.plist`, because the only local root
+  image is pan172-era and NOTES says it is NOT the current phone state, so a root reflash would roll
+  the device back. A same-length edit needs the live byte layout first: recovery has no hfsplus, so
+  there is no dd-by-name, and the recorded v5 offset 0x1e025f000 / 1456980 bytes is stale after the
+  v8 and v13 plistlib rewrites. Decision (user): probe first, then patch with verified offsets.
+- New code (x9/kernel/src/bsd/dev/sweet_sample.c, read-only, boot-arg `x9_xpcscan=1`): at the first
+  sampler pass (t=30 s) open the plist, read up to 2 MiB in 256 KiB chunks, and print
+  `X9 XPC: <path> size=... got=...`, `X9 XPC: magic=bplist00 head=..`, the bplist trailer
+  (`offSize refSize numObjects top table`), and for each needle in
+  com.apple.assistantd / com.apple.siriactionsd / com.apple.SiriTTSService / SiriTTSSynthesizer /
+  MacinTalkAUSP / KonaSynthesizer / /usr/libexec/assistantd the total count plus up to 4 hits as
+  `X9 XPC: <idx> #<n> off=<byte offset> ctx=[16 bytes before]<needle>[16 bytes after]`
+  (non-printables as '.'). Nothing is written; `x9_prefcheck` from rev252i still runs alongside.
+- Build: same two commands as rev252i (`all`/`boot`, PATH needs /opt/homebrew/opt/llvm/bin) with
+  `--boot-arg x9_wifi_fake=1 --boot-arg x9_wifi_probe=1
+  --boot-arg x9_sample_procs=Preferences,kbd,assistantd --boot-arg sweetiolog=assistantd
+  --boot-arg x9_xpcscan=1`. Output x9/out/x9-rev252j/boot.img: image 18804736 / boot 9461760 bytes,
+  allowlist 252, no restaging, boot.img sha256
+  570694c9ccc442b36c9cf2f065ca3e9820f7b9d62c380fb14404f9474f6677c0, kernel sha256
+  767fdb476f7b0bbeba4dcee863b99f71b0be8f430e60de8b02f6d67071ce1a24. Host-built only.
+- Test: flash x9-rev252j, keep the keyboard up past ~130 s (12 passes) so the pref read-back and the
+  XPC scan both land, then pull the log as usual. Then: use the printed offsets/counts to pick the
+  single-byte target (prefer the `Program`/binary path string, which only that job uses, over the
+  label string that other jobs may reference) and build the patcher with a byte-window check before
+  each write plus a backup file and a restore switch.
+
 ## rev252i: plist read-back from the sampler + assistantd sampled (built 2026-11-04, not flashed)
 
 - 实测 correction to the section below: the "SWEET AKS" lines are the AppleKeyStore IOKit
