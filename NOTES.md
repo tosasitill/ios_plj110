@@ -1,3 +1,15 @@
+## Brightness DONE (default-on); Wi-Fi plan written (2026-11-04)
+
+- USER-verified rev252b-bl: slider + fade work, no stall. Commit cad84a1 publishes AppleARMBacklight
+  by default on X9 (sweetbl=0 off; x9bl = sampler only). Built x9/out/x9-rev252c/boot.img (no tokens,
+  allowlist 252 -> no restaging), sha256 a0d22420..., not yet device-run.
+- Wi-Fi plan: docs/network/wifi-plan.md. Key new facts: Wi-Fi on pcie0 @0x16910000 SPI 369, PHY
+  0x16900000/0x16920000, MEM window 0x50000000/128 MiB, no iommus on pcie nodes (SMMU likely not
+  needed), connv3 node + pins, Wi-Fi EMI allocated at boot (emi-addr 0, MPU via ATF) -> must reuse
+  LK's region. iOS side templated by UniXNU WifiNet.cpp (IO80211Controller/Interface stand-ins,
+  ifnet en0, SIOCG/SA80211, KEV class 6) over nw_abi.h station API. Next: track A with a fake radio
+  + read-only dump of LK FDT reserved-memory/connv3/pcie0/wifi nodes.
+
 ## rev252b-bl: IODisplayParameters fix for the backlight-service stall (2026-11-04)
 
 - Root cause (SOURCE CONFIRMED, CoreBrightness 20H392): the display setup reads IODisplayParameters
