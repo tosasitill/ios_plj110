@@ -16,23 +16,50 @@
   four named apps), so this boot still has no stack of the stalling process. Sampling by name keeps
   missing it; the next build identifies it by thread state instead (rev252m).
 
-## rev252m: stall finder walks every process (built 2026-11-04, not flashed)
+## 36.txt: the all-process stall finder panicked the kernel on its first pass (2026-11-04)
 
-- Code: `x9_scan_task()` in x9/kernel/src/osfmk/kern/exception.c (same capture as x9_sample_task)
-  prints one `X9 SCAN:` line per process for the main thread (t0) plus any other thread with
-  `run_state` TH_STATE_RUNNING (1) or TH_STATE_UNINTERRUPTIBLE (4), each with slide, thread count,
-  run/flags/sleep, pc/lr/sp/fp and a 12-frame fp backtrace. Waiting t1+ threads are skipped to keep
-  the log small; t0 is always printed so a main thread blocked in a sync XPC reply is still seen.
-  `x9_stall_scan=1` in x9/kernel/src/bsd/dev/sweet_sample.c turns it on, ignores `x9_sample_procs`
-  and uses 20 s delay / 10 s interval / 12 passes.
-- Build: same command as rev252k with `--name x9-rev252m --boot-arg x9_stall_scan=1` (plus
-  x9_wifi_fake=1 x9_wifi_probe=1 x9_siri_off=1). Build printed Image 18804736 bytes, shim-boot.img
-  9465856 bytes, candidate x9/out/x9-rev252m/boot.img. Host-built only, not flashed.
-- Test: boot, open the app where typing stalls (any app; it no longer has to be named), type with
-  the keyboard up through ~140 s so all 12 passes land, then pull the log. Read: the `X9 SCAN:`
-  block of the foreground app. A frozen main thread should be t0 `run=3` waiting in mach_msg with
-  the UIKit/dictation frames in bt (or `run=1` if it spins). The process name in that line is the
-  app we have been missing.
+- 实测 rev252m was flashed (`x9_stall_scan=1` in 36.txt:859, `[36.txt:119] X9 SAMPLE: enabled
+  delay=20 interval=10 count=12 scan=1`), the launchd patch ran normally again
+  (`X9 SIRI: ... already=32 changed=0 errno=0` 36.txt:737, readback 0 36.txt:752), the GUI took
+  over at 16.654 s, and the last normal line is `[20.085] X9 GPU GOV`. Then the console holds the
+  first `X9 SCAN:` lines (mediaserverd[29] t16, sharingd, identityservices, thermalmonitord,
+  mobiletimerd, DumpPanic, amfid, remoted, keybagd, wifid, logd, runningboardd, UserEventAgent[23],
+  SpringBoard[26] t0 run=1, launchd[1] t0) and the phone reset; the user could not reach the
+  desktop (「直接重启了 进不去桌面」).
+- 实测 panic tail: `Kernel data abort. at pc 0xfffffe00075349e0, lr 0xfffffe00075349c8`,
+  `esr 0x96000005 far 0x0`, `panic(cpu 0 caller 0xfffffe0007c1653c)`,
+  `handshake structure not initialized`.
+- 符号化: pc -> `_machine_thread_get_state + 0x1e0` (lr +0x1c8), return address ->
+  `_sleh_synchronous_sp1 + 0x0`. Disassembly at fffffe00075349dc is `ldr x8, [x21, #0x110]`
+  then fffffe00075349e0 `ldr w9, [x8]` with no NULL check: the thread state pointer is NULL, so
+  our own `thread_getstatus(ARM_THREAD_STATE64)` dereference faults (far=0). `cmp w8,#0x44` seen
+  nearby is ARM_THREAD_STATE64_COUNT (0x44=68), not an exception flavor.
+- 推断: walking every process reaches threads that are mid-teardown / crash-looping (the TTS
+  appexes and locationd die every few seconds), whose task/thread has no valid arm state; a kernel
+  read of another task's thread state is not safe for those. This route is closed.
+- Consequence: the scan code was removed; sweet_sample.c and exception.c are back to af3d654.
+  rev252m and rev252n (the budgeted-scan rebuild) must not be flashed. rev252l
+  (x9/out/x9-rev252l/boot.img, commit af3d654) is the last image that boots to SpringBoard and is
+  the one to flash to get the desktop back.
+
+## Voice-appex crash chain, symbolized (36.txt/35.txt slides) (2026-11-04)
+
+- 实测 35.txt: SiriTTSSynthesizer[264] at 26.523, MacinTalkAUSP[262] at 26.121,
+  KonaSynthesizer[263] at 26.370, all sig 6, reason ns 2 code 0x6; slide 0x43d0c000.
+  pc 0x206323198, lr 0x2158b25f8, far 0x222b7ee28. bt `0x1d19684b8 0x2157eaf54 0x2157dba4c
+  0x1c3ddeafc 0x2157ea424 0x2157ecda0 0x2157ecd60 0x1c3dd9d58 0x1cabdf704 0x1eec45d5c`.
+- 符号化 (runtime - slide, mapped through the extracted 20H392 dyld cache at .local/x9/work/dsc-20H392):
+  pc libsystem_kernel `___pthread_kill + 0x8`; lr libsystem_pthread `_pthread_kill + 0xd0`;
+  then libsystem_c `_abort + 0x7c`; libc++abi `demangling_terminate_handler + 0x12c` and
+  `__ZSt11__terminatePFvvE + 0xc`; libobjc `_objc_terminate + 0x7c`; libobjc
+  `_objc_exception_throw + 0x168`; CoreFoundation `___CFDictionaryCreateGeneric + 0x0`; then a
+  PlugInKit frame (symbols sparse there, function identity uncertain).
+- 推断: the voice plugins die of an uncaught ObjC exception raised inside a CoreFoundation call
+  made from PlugInKit during plugin load - not from the assistantd XPC. Disabling assistantd/
+  sirittsd (rev252k) therefore cannot stop this churn, which matches 34.txt/35.txt exactly.
+  The next step is offline: why the PlugInKit load of these appexes throws on this root image
+  (extension-point Info.plist, NSExtension attributes, dyld-cache/dylib mismatch), not another
+  device probe.
 
 ## 34.txt: rev252k patch applied and verified, but the keyboard still stalls (2026-11-04)
 
