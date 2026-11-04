@@ -41,7 +41,7 @@ def fdt(nodes):
     return hdr + rsv + struct_ + strings
 
 
-def adt(placeholder=8192):
+def adt(placeholder=16384):
     def prop(k, v):
         return k.encode().ljust(32, b'\0') + struct.pack('<I', len(v)) + v + b'\0' * (-len(v) % 4)
     chosen = struct.pack('<II', 2 if placeholder else 1, 0) + prop('name', b'chosen\0')
@@ -67,7 +67,7 @@ class ShimWifiDumpTests(unittest.TestCase):
                 ('pcie@16910000', [('compatible', b'mediatek,mt6993-pcie\0'), ('status', b'okay\0'),
                                    ('reg', u64s(0x16910000, 0x4000))], []),
                 ('i2c@1d840000', [('status', b'okay\0')], []),
-                ('wifi', [('emi-addr', struct.pack('>I', 0xa0000000))], []),
+                ('wifi', [('emi-addr', struct.pack('>I', 0xa0000000)), ('co-clock', struct.pack('>I', 0))], []),
             ]),
         ])
         c = r'''
@@ -95,11 +95,11 @@ int main(int c,char **v){(void)c;size_t fn,an;unsigned char *f=rd(v[1],&fn),*a=r
             lines = out.splitlines()
             self.assertEqual(lines[0], '0')
             self.assertIn('R consys-reserve-memory reg=00000000.f8000000.00000000.01900000', lines)
-            self.assertIn('R consys-reserve-memory no-map', lines)
             self.assertIn('R wifi-reserve-memory size=00000000.05400000', lines)
             self.assertIn('N /soc/pcie@16910000 compatible="mediatek,mt6993-pcie"', lines)
             self.assertIn('N /soc/pcie@16910000 status="okay"', lines)
             self.assertIn('N /soc/wifi emi-addr=a0000000', lines)
+            self.assertIn('N /soc/wifi co-clock=00000000', lines)
             self.assertFalse(any('i2c' in l for l in lines))
             out0 = subprocess.run([str(d / 't'), str(d / 'fdt.bin'), str(d / 'adt0.bin')],
                                   capture_output=True, text=True, check=True).stdout

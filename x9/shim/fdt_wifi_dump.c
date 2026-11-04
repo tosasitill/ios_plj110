@@ -15,7 +15,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define DUMP_SIZE 8192u
+#define DUMP_SIZE 16384u
 #define VALUE_MAX 48u
 
 static uint32_t be(const uint8_t *p) {return (uint32_t)p[0]<<24|(uint32_t)p[1]<<16|(uint32_t)p[2]<<8|p[3];}
@@ -35,7 +35,7 @@ static void puthex(struct out *o, const uint8_t *v, size_t n) {
  if (m < n) put(o, '+');
 }
 static int printable(const uint8_t *v, size_t n) {
- if (!n || v[n-1]) return 0;
+ if (!n || v[n-1] || !v[0]) return 0;   /* zero words are values, not empty strings */
  for (size_t i = 0; i + 1 < n; i++) if (v[i] && (v[i] < 32 || v[i] > 126)) return 0;
  return 1;
 }
@@ -88,8 +88,6 @@ static int walk(uintptr_t address, struct out *o) {
     putz(o,"R "); putz(o,name[d]); putz(o," reg="); puthex(o,b+at,n); put(o,'\n');
    } else if (reserved[d] && prefix(key,"size") && !key[4]) {
     putz(o,"R "); putz(o,name[d]); putz(o," size="); puthex(o,b+at,n); put(o,'\n');
-   } else if (reserved[d] && prefix(key,"no-map") && !key[6]) {
-    putz(o,"R "); putz(o,name[d]); putz(o," no-map\n");
    } else if (dump[d]) {
     putz(o,"N "); puts_(o,path,sizeof(path)); put(o,' '); putz(o,key); put(o,'=');
     putval(o,b+at,n); put(o,'\n');
@@ -135,6 +133,6 @@ int fdt_wifi_dump_adt(uintptr_t dtb, void *adt, size_t size) {
  if (o.full) { o.used = o.used > 2 ? o.used - 2 : 0; p[8 + o.used++] = '+'; p[8 + o.used++] = '\n'; }
  p[8 + o.used] = 0;
  p[0]='X';p[1]='9';p[2]='D';p[3]='T';
- p[4]=(uint8_t)o.used;p[5]=(uint8_t)(o.used>>8);p[6]=0;p[7]=0;
+ p[4]=(uint8_t)o.used;p[5]=(uint8_t)(o.used>>8);p[6]=(uint8_t)(o.used>>16);p[7]=0;
  return 0;
 }

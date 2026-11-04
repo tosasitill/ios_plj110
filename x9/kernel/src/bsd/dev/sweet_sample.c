@@ -104,7 +104,7 @@ extern task_t proc_task(proc_t);
 extern void x9_sample_task(const char *, int, task_t);
 static int sample_proc(proc_t p, __unused void *arg) {
  char name[32]; proc_name(proc_pid(p), name, sizeof(name));
- if (!strcmp(name,"SpringBoard") || !strcmp(name,"backboardd") || !strcmp(name,"lsd") || !strcmp(name,"com.apple.datami") || !strcmp(name,"com.apple.migrat")) {
+ if (!strcmp(name,"SpringBoard") || !strcmp(name,"backboardd") || !strcmp(name,"wifid") || !strcmp(name,"lsd") || !strcmp(name,"com.apple.datami") || !strcmp(name,"com.apple.migrat")) {
   task_t task=proc_task(p); if(task != TASK_NULL) x9_sample_task(name,proc_pid(p),task);
  }
  return PROC_RETURNED;
@@ -115,7 +115,7 @@ static int sample_proc(proc_t p, __unused void *arg) {
 static unsigned sample_delay=60, sample_interval=120, sample_count=4;
 static void sample_thread(__unused void *arg, __unused wait_result_t wr) {
  static int chan;
- printf("X9 SAMPLE: enabled delay=%u interval=%u count=%u targets=SpringBoard,lsd,backboardd,datamigrator,migrationplugin\n",
+ printf("X9 SAMPLE: enabled delay=%u interval=%u count=%u targets=SpringBoard,backboardd,wifid,lsd,datamigrator,migrationplugin\n",
   sample_delay,sample_interval,sample_count);
  (void)tsleep(&chan,PZERO,"x9sample",(int)(sample_delay*hz));
  for(unsigned i=0;i<sample_count;i++) {

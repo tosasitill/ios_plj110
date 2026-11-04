@@ -28,6 +28,7 @@
 #include <sys/socket.h>
 #include <sys/sockio.h>
 #include <sys/systm.h>
+#include <sys/proc.h>
 #include <sys/mbuf.h>
 #include <net/ethernet.h>
 #include <net/if.h>
@@ -435,7 +436,11 @@ errno_t if_ioctl(ifnet_t, unsigned long cmd, void *data) {
     gRequests++; if (e == EOPNOTSUPP) gRefused++;
     static unsigned shown; const int type = rq->req_type; const bool first = type >= 0 && type < 256 && !(gLogged[type / 32] & (1u << (type % 32)));
     if (type >= 0 && type < 256) gLogged[type / 32] |= 1u << (type % 32);
-    if (shown < 300 || first) { ++shown; IOLog("X9 WIFI REQ: %u type %d %s len %u val %d -> %d (len %u val %d)\n", shown, type, cmd == X9_SIOCSA80211 ? "set" : "get", len, val, e, rq->req_len, rq->req_val); }
+    if (shown < 300 || first) {
+      ++shown; char who[24] = "?"; proc_selfname(who, sizeof who);
+      IOLog("X9 WIFI REQ: %u %s[%d] type %d %s len %u val %d -> %d (len %u val %d)\n", shown, who, proc_selfpid(), type,
+            cmd == X9_SIOCSA80211 ? "set" : "get", len, val, e, rq->req_len, rq->req_val);
+    }
     return e;
   }
   case SIOCGIFMEDIA: {
@@ -445,8 +450,16 @@ errno_t if_ioctl(ifnet_t, unsigned long cmd, void *data) {
     m->ifm_active = IFM_IEEE80211 | IFM_AUTO; m->ifm_count = 1;
     return 0;
   }
+  case SIOCGIFDEVMTU: {   /* current, min, max */
+    struct ifreq *r = static_cast<struct ifreq *>(data);
+    r->ifr_devmtu.ifdm_current = 1500; r->ifr_devmtu.ifdm_min = 1280; r->ifr_devmtu.ifdm_max = 1500;
+    return 0;
+  }
   case SIOCSIFFLAGS: case SIOCSIFMTU: case SIOCADDMULTI: case SIOCDELMULTI: case SIOCSIFADDR: case SIOCSIFMEDIA: return 0;
-  default: { static unsigned said; if (said++ < 16) log("interface request %lx not handled", cmd); return EOPNOTSUPP; }
+  default: {
+    static unsigned said;
+    if (said++ < 16) { char who[24] = "?"; proc_selfname(who, sizeof who); log("interface request %lx from %s not handled", cmd, who); }
+    return EOPNOTSUPP; }
   }
 }
 
@@ -462,7 +475,9 @@ class IO80211Interface : public IONetworkInterface {
   OSDeclareDefaultStructors(IO80211Interface);
  public:
   IOReturn newUserClient(task_t, void *, UInt32 type, OSDictionary *, IOUserClient **) APPLE_KEXT_OVERRIDE {
-    static unsigned said; if (said++ < 4) x9wifi::log("a user client of type %u was asked for: none offered (ioctl path)", static_cast<unsigned>(type));
+    static unsigned said;
+    if (said++ < 8) { char who[24] = "?"; proc_selfname(who, sizeof who);
+      x9wifi::log("%s asked for a user client of type %u: none offered (IO80211 falls back to the ioctl bind)", who, static_cast<unsigned>(type)); }
     return kIOReturnUnsupported;
   }
 };
@@ -569,7 +584,7 @@ x9_wifi_print_lk_dt(void)
         OSSafeReleaseNULL(chosen);
         return;
     }
-    unsigned used = p[4] | (unsigned)p[5] << 8, lines = 0;
+    unsigned used = p[4] | (unsigned)p[5] << 8 | (unsigned)p[6] << 16, lines = 0;
     if (used > len - 9) {
         used = len - 9;
     }
