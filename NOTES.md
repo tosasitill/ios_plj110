@@ -16,6 +16,37 @@
   four named apps), so this boot still has no stack of the stalling process. Sampling by name keeps
   missing it; the next build identifies it by thread state instead (rev252m).
 
+## UniXNU upstream check: no dictation patch, but a job-pruning mechanism for the XPC wait cycle (2026-11-04)
+
+- 实测 (checked UniXNU, UniXNU-20261030, UniXNU-gpu/UniXNU-sheng and UniXNU-gpu-parity-793d6b
+  checkouts): there is no patch about dictation, assistantd, Siri, PlugInKit or the keyboard.
+  `git log --grep` and the docs trees have no hit.
+- 实测 the related mechanism is `sheng-lite=1` / `sheng-disable-jobs=<label>,...`, implemented in
+  UniXNU-sheng/package/BootWatchdogPolicy.c (`sheng_boot_watchdog_policy`) and called from
+  `load_init_program()` right after the Data mount, before the launchd exec (the call is added by
+  UniXNU-gpu-parity-793d6b/patches/xnu/zzz-boot-progress.patch:215). It writes
+  `/private/var/db/com.apple.xpc.launchd/disabled.plist` (and an empty `disabled.migrated`) with
+  `<key>label</key><true/>` for every job to disable, then fchown 0:0, chmod 0644, fsync and
+  fstat-verify. The file comment states (引 upstream text): "hardware stacks show identityservicesd,
+  contextstored and locationd in a cycle of synchronous XPC waits. A disabled job makes its Mach
+  service lookups fail instead of hang." The lite list starts with identityservicesd, locationd,
+  CommCenter, bluetoothd; docs/devices/asteroids.md:58 says "the lite list holds the XPC wait
+  cycle". This is the same failure shape as our 33.txt (sync XPC waits), and it disables jobs by
+  launchd label in a data file instead of editing Apple bytes.
+- 实测 this mechanism is live on our root: the pan172 image already has
+  /private/var/db/com.apple.xpc.launchd/disabled.plist (dhcp6d=true, bootpd=true,
+  ftp-proxy-embedded=false) plus disabled.migrated. Our kernel never touches it.
+- 实测 another related upstream patch, `native-work-interval-soft-fail`: its comment says "UIKit
+  aborts on a refused CA_CLIENT interval; soft-fail it as macOS does". Our tree has only 0064
+  (PRIV_WORK_INTERVAL); osfmk/kern/work_interval.c:1068 still returns KERN_FAILURE when a second
+  CA_CLIENT interval is created, i.e. the soft-fail is missing. That would be an app abort, not the
+  keyboard stall, but it is the same port family problem.
+- 推断 our 32-byte launchd.plist patch only removed assistantd/sirittsd, while the churn kept
+  running (34.txt/35.txt), because the cycle has other members - locationd crashes every ~3.3 s in
+  every log. Porting the disabled.plist seed (boot-arg `x9_disable_jobs=`, optional `x9_lite=`)
+  gives one mechanism to disable any label, and can splice the keys into the existing file (backup
+  first) so dhcp6d/bootpd entries survive. No code written yet.
+
 ## 36.txt: the all-process stall finder panicked the kernel on its first pass (2026-11-04)
 
 - 实测 rev252m was flashed (`x9_stall_scan=1` in 36.txt:859, `[36.txt:119] X9 SAMPLE: enabled
