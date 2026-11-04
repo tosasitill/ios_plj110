@@ -47,6 +47,7 @@ extern "C" {
 
 /* the header declares it without C linkage; the symbol is the C one */
 extern "C" int x9_kev_post(struct kev_msg *) __asm__("_kev_post_msg");
+extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 
 #define X9_SIOCSA80211 0x802869c8UL   /* _IOW('i', 200, struct apple80211req) */
 #define X9_SIOCGA80211 0xc02869c9UL   /* _IOWR('i', 201, struct apple80211req) */
@@ -568,6 +569,62 @@ x9_wifi_maybe_start(void)
     }
     if (x9wifi::gStartCall) {
         thread_call_enter(x9wifi::gStartCall);   /* never inside configd's open */
+    }
+}
+
+/*
+ * B1/B2 round 1 (x9_wifi_probe=1): READ-ONLY state of the MT6653 power pins and
+ * of PCIe0, from MT6993 sources (mt6993.dts, pinctrl-mt6993.c, clk-mt6993-peri.c,
+ * clk-mt6993-pd.c, conninfra connv3/platform/mt6993):
+ *   GPIO block 0x1002d000: DIR 0x0/0x10..., DO 0x100+, DI 0x200+ (1 bit/pin,
+ *   32 pins per word), MODE 0x300 + (pin/4)*0x10, 8-bit stride, 5-bit field.
+ *   Pins: 65 PMIC faultb, 243/244 combo UART, 248 POR reset, 250 WF_RST,
+ *   251 PMIC_EN (MT6376 enable; connsys PMIC on when high).
+ *   pextp0cfg_ao 0x169b0000: CG status +0x14 (1 = gated): MAC0_TL 0, MAC0_REF 1,
+ *   PHY0_MCU_BUS 6, PHY0_REF 7, MAC0_AXI_250 12, MAC0_AHB_APB 13; reset +0x8.
+ *   ap_pd 0x1c040000 +0x12900 (1 = powered): PEXTP_MAC0 bit 16, PEXTP_PHY0 bit 17.
+ * The PCIe0 MAC itself (0x16910000: RST_CTRL 0x148, LTSSM 0x150, LINK 0x154,
+ * per pcie-mediatek-gen3.c) is read only when its power domain and all MAC
+ * clocks are on: an unclocked MediaTek block can hang the bus. Nothing written.
+ */
+static void
+x9_wifi_probe_hw(void)
+{
+    if (sweet_x9_arg("x9_wifi_probe", 0) != 1) {
+        return;
+    }
+    volatile uint32_t *gpio = (volatile uint32_t *)ml_io_map(0x1002d000, 0x1000);
+    volatile uint32_t *cg = (volatile uint32_t *)ml_io_map(0x169b0000, 0x1000);
+    volatile uint32_t *pd = (volatile uint32_t *)ml_io_map(0x1c052000, 0x1000);   /* 0x1c040000 + 0x12900 page */
+    if (!gpio || !cg || !pd) {
+        IOLog("X9 WIFI PROBE: map failed gpio=%p cg=%p pd=%p\n", gpio, cg, pd);
+        return;
+    }
+    static const struct { unsigned pin; const char *what; } pins[] = {
+        { 65, "PMIC faultb" }, { 243, "combo UTXD" }, { 244, "combo URXD" },
+        { 248, "POR reset" }, { 250, "WF_RST" }, { 251, "PMIC_EN" },
+    };
+    for (unsigned i = 0; i < sizeof(pins) / sizeof(pins[0]); i++) {
+        unsigned pin = pins[i].pin, word = (pin / 32) * 0x10, bit = pin % 32;
+        uint32_t dir = gpio[word / 4], dout = gpio[(0x100 + word) / 4], din = gpio[(0x200 + word) / 4];
+        uint32_t mode = (gpio[(0x300 + (pin / 4) * 0x10) / 4] >> ((pin % 4) * 8)) & 0x1f;
+        IOLog("X9 WIFI PROBE: GPIO%u %-12s mode=%u dir=%s out=%u in=%u\n", pin, pins[i].what, mode,
+            (dir >> bit) & 1 ? "out" : "in", (dout >> bit) & 1, (din >> bit) & 1);
+    }
+    uint32_t cgsta = cg[0x14 / 4], rst = cg[0x8 / 4], pdsta = pd[0x900 / 4];
+    bool macPower = (pdsta >> 16) & 1, phyPower = (pdsta >> 17) & 1;
+    const uint32_t macClocks = (1u << 0) | (1u << 1) | (1u << 12) | (1u << 13);
+    IOLog("X9 WIFI PROBE: pextp0 cg_sta=%08x (gated: tl=%u ref=%u phy_bus=%u phy_ref=%u axi=%u ahb=%u) rst=%08x pd=%08x mac_power=%d phy_power=%d\n",
+        cgsta, cgsta & 1, (cgsta >> 1) & 1, (cgsta >> 6) & 1, (cgsta >> 7) & 1, (cgsta >> 12) & 1, (cgsta >> 13) & 1,
+        rst, pdsta, macPower, phyPower);
+    if (macPower && !(cgsta & macClocks)) {
+        volatile uint32_t *mac = (volatile uint32_t *)ml_io_map(0x16910000, 0x1000);
+        if (mac) {
+            IOLog("X9 WIFI PROBE: pcie0 MAC rst_ctrl=%08x ltssm=%08x link=%08x (link up = bit 8)\n",
+                mac[0x148 / 4], mac[0x150 / 4], mac[0x154 / 4]);
+        }
+    } else {
+        IOLog("X9 WIFI PROBE: pcie0 MAC not read (power domain or clocks off)\n");
     }
 }
 

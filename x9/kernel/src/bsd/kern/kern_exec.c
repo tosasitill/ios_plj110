@@ -7086,6 +7086,45 @@ sweet_x9_seed_uikit_statusbar(proc_t p, user_addr_t scratch, user_addr_t end)
  return error;
 }
 
+/* x9_dictation_off (default 1): 30.txt showed every keyboard freezing the app's
+ * main thread in a dictation-availability loop (AFDictationConnection
+ * forcedOfflineDictationIsAvailableForLanguage:synchronous: ->
+ * dictationConnnectionDidChangeAvailability: -> UIKeyboardDictationAvailability
+ * notification -> UISystemKeyboardDockController updateDockItemsVisibility ->
+ * availability query again), 10 of 12 samples running. Siri/dictation services
+ * do not work on this port, so turn both off in AFPreferences' domain
+ * (AssistantServices 20H392: com.apple.assistant.support, keys "Dictation
+ * Enabled" / "Assistant Enabled"). Original file backed up once; non-fatal. */
+static int
+sweet_x9_seed_assistant_dictation(proc_t p, user_addr_t scratch, user_addr_t end)
+{
+ static const char target[]="/private/var/mobile/Library/Preferences/com.apple.assistant.support.plist";
+ static const char backup[]="/private/var/mobile/Library/Preferences/com.apple.assistant.support.x9-before-seed.plist";
+ static const char temp[]="/private/var/mobile/Library/Preferences/com.apple.assistant.support.x9-seed.tmp";
+ static const char body[]="<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>Assistant Enabled</key>\n\t<false/>\n\t<key>Dictation Enabled</key>\n\t<false/>\n</dict>\n</plist>\n";
+ int enabled=0,error,fd; int32_t rv=0; user_ssize_t written=0; vnode_t vp=NULLVP;
+ extern boolean_t sweet_x9_ufs_root_writable(void);
+ if((enabled=sweet_x9_arg("x9_dictation_off",1))!=1)return 0;
+ if(!sweet_x9_ufs_root_writable())return EROFS;
+ if(!proc_is64bit(p)||scratch>end||sizeof(target)+sizeof(backup)+sizeof(temp)+sizeof(body)>end-scratch)return E2BIG;
+ user_addr_t t=scratch,b=t+sizeof(target),tmp=b+sizeof(backup),data=tmp+sizeof(temp);
+ if((error=copyout(target,t,sizeof(target)))||(error=copyout(backup,b,sizeof(backup)))||(error=copyout(temp,tmp,sizeof(temp)))||(error=copyout(body,data,sizeof(body))))return error;
+ error=vnode_lookup(target,VNODE_LOOKUP_NOFOLLOW,&vp,vfs_context_kernel());
+ if(!error){
+  if(!vnode_isreg(vp)){vnode_put(vp);return EINVAL;} vnode_put(vp);
+  struct link_args l={.path=t,.link=b};error=link(p,&l,&rv);if(error&&error!=EEXIST)return error;
+ }else if(error!=ENOENT)return error;
+ struct open_args o={.path=tmp,.flags=O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW,.mode=0600};
+ error=open(p,&o,&rv);if(error)return error;fd=rv;
+ struct fchown_args ch={.fd=fd,.uid=501,.gid=501};error=fchown(p,&ch,&rv);
+ if(!error){struct write_args w={.fd=fd,.cbuf=data,.nbyte=sizeof(body)-1};error=write(p,&w,&written);if(!error&&written!=(user_ssize_t)(sizeof(body)-1))error=EIO;}
+ struct close_args c={.fd=fd};int ce=sys_close(p,&c,&rv);if(!error)error=ce;
+ if(!error){struct rename_args r={.from=tmp,.to=t};error=rename(p,&r,&rv);}
+ if(error){struct unlink_args u={.path=tmp};(void)unlink(p,&u,&rv);}
+ printf("X9 DICTATION: Siri and dictation turned off in com.apple.assistant.support errno=%d; original backed up if present\n",error);
+ return error;
+}
+
 /* Reference: UniXNU ae687009348296e97e49ce6e925795044f363ce6,
  * scripts/seed-data-skip-setup.py (21H461). Preference-only adaptation for
  * 20H392 / MT6993 / 16 KiB; actual Setup decision remains original userland.
@@ -7322,6 +7361,8 @@ load_init_program_at_path(proc_t p, user_addr_t scratch_addr, const char* path)
 	{
 	 int statusbar_error=sweet_x9_seed_uikit_statusbar(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	 if(statusbar_error)printf("X9 STATUSBAR: preference not installed errno=%d; continuing boot\n",statusbar_error);
+	 int dictation_error=sweet_x9_seed_assistant_dictation(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
+	 if(dictation_error)printf("X9 DICTATION: preference not installed errno=%d; continuing boot\n",dictation_error);
 	}
 	error=sweet_x9_seed_frontboard(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	if(error)return error;
