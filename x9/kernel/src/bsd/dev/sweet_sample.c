@@ -133,7 +133,10 @@ static void
 x9_prefdump(const char *path, int dump_bytes) {
  vnode_t vp=NULLVP;
  vfs_context_t ctx=vfs_context_kernel();
- static char buf[1024];
+ /* rev252v seeds 26 language spellings into DictationLanguagesEnabled, which
+  * makes our own XML about 1 KB; the old 1024-byte window cut the tail off, i.e.
+  * exactly the KeyboardsCurrentAndNext entry we need to watch. */
+ static char buf[2048];
  struct vnode_attr va;
  errno_t error=vnode_lookup(path,VNODE_LOOKUP_NOFOLLOW,&vp,ctx);
  if(error) { printf("X9 PREF: %s lookup errno=%d\n",path,error); return; }

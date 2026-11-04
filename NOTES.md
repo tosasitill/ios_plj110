@@ -1,3 +1,108 @@
+## 43.txt: rev252u never seeded (gate left at 0); the miss is only part of the cost (2026-11-04)
+
+- 实测 43.txt (723,496 B) is the rev252u boot, same boot args, sampler on
+  (`X9 SAMPLE: enabled delay=30 interval=10 count=12 targets=SpringBoard,Spotlight,kbd,Preferences`
+  at 43.txt:118) and the typing lag is unchanged (user: 「还是卡」).
+- 实测 **there is not one `X9 KBD DICT` line in the whole log**: the rev252u seed gate had been
+  left at `sweet_x9_arg("x9_kbd_dictation",0)` while its comment claimed default 1. So 43.txt
+  measured the *unseeded* state and rev252u was diagnostics-only.
+- 实测 live `com.apple.keyboard.preferences.plist` is a 487-byte bplist00, mtime 155, unchanged on
+  every pass 30 s → 130 s (43.txt:4322, 4750, 4906, 5201 …). Its top-level keys are
+  `KeyboardLastUsedForLanguage`, `DidShowContinuousPathIntroduction`, `KeyboardsCurrentAndNext`,
+  `DictationLanguagesLastUsed`, `DictationLanguagesEnabled`, `KeyboardLastUsed` and the byte dump
+  (43.txt:4326 `X9 PREF +288:`) shows **no language string inside either dictation dict** — both
+  are stored empty — while `KeyboardsCurrentAndNext` holds `en_US@sw=QWERTY;hw=Automatic` and
+  `zh_Hant-Zhuyin@sw=Zhuyin;hw=Automatic`.
+- 实测 regression from rev252t: our seeded Pinyin entry is gone from the live file and has become
+  **Zhuyin**; the 767-byte `.x9-before-seed` backup (43.txt:4329, mtime 994) still contains
+  `zh_Hans-Pinyin@sw=Pinyin-Simplified;hw=Automatic`, `zh_Hans`, the `KeyboardAutocorrection*`
+  keys. So the whole-file replacement left the user with the wrong keyboard layout — rev252v seeds
+  `KeyboardsCurrentAndNext` back with QWERTY + Pinyin, plus `KeyboardLastUsed` and
+  `KeyboardLastUsedForLanguage`.
+- 实测 assistant.support is still seeded and its backup is 153 B (43.txt:4319).
+- 实测 Spotlight[274] t0, slide 0x113e4000, 11 passes (30 s … 130 s); 7 of 11 touch the dictation
+  machinery, and the two expensive branches are *different*:
+  - t=30 the typing path (`-[UIKeyboardTaskQueue continueExecutionOnMainThread]` →
+    `updateForChangedSelectionWithExecutionContext:` → `completeUpdateForChangedSelection:`).
+  - t=40 the recompute: `-[UIKeyboardInputMode dictationLanguage]+808` →
+    `-[UIKeyboardInputModeController isDictationLanguageEnabled:]+144` →
+    `updateEnabledDictationLanguages:]+120` →
+    `updateEnabledDictationAndSLSLanguagesWithCompletionBlock:]+268` →
+    `activeDictationSupportedInputModeIdentifiers]+244` → `supportsInputMode:error:]+56` →
+    `supportsDictationLanguage:error:]+32` → `+[UIDictationConnection
+    dictationIsSupportedForLanguageCode:error:]+136` → `+[AFDictationConnection
+    dictationIsSupportedForLanguageCode:error:]+100` → `+[NSError errorWithDomain:code:userInfo:]+32`
+    → `nanov2_allocate_outlined`.
+  - t=90 and t=120 the same recompute entered from `activeDictationLanguages]+92` and from
+    `suggestedDictationLanguagesForDeviceLanguage]+116` → `TIGetSuggestedDictationLanguagesFor
+    DeviceLanguage` → libicucore `ualoc_localizationsToUse`.
+  - t=100, t=110, t=130 the availability branch: `-[UISystemKeyboardDockController
+    updateDockItemsVisibility]+1044` → `+[UIDictationController dictationIsFunctional]+284` →
+    `-[UIDictationConnection dictationIsAvailableForLanguage:]+96` → `-[AFDictationConnection
+    dictationIsAvailableForLanguage:synchronous:]+696` → `forcedOfflineDictationIsAvailable…+52/56`
+    (+ at t=130 `dictationConnnectionDidChangeAvailability:` →
+    `postUIKeyboardDictationAvailabilityDidChangeNotification` → `-[SPUISearchHeader
+    updateDictationButtonEnabledStatus]`, i.e. the answer re-enters the same path).
+  - t=50 a CFPreferences read (`CFPrefsSearchListSource alreadylocked_copyValueForKey:`) and t=80
+    `-[TIPreferencesController valueForPreferenceKey:]+108` from
+    `updateDockItemsVisibility]+112` → `globeKeyDisplaysAsEmojiKey` → `enabledInputModeIdentifiers:`.
+- 实测 (host disassembly of 20H392 UIKitCore/AssistantServices, not the device) the control flow
+  that makes a stored false only a partial win:
+  - `-[UIKeyboardInputModeController isDictationLanguageEnabled:]` (0x1890eb5b0): reads
+    `DictationLanguagesEnabled` through `valueForPreferenceKey:`, `[dict allKeys]
+    containsObject:lang`; **absent → `updateEnabledDictationLanguages:` (0x1890eb63c)**; present →
+    `boolValue`, false returns NO at 0x1890eb6a4 (cheapest), true calls
+    `[[[dictationController sharedInstance] dictationConnection]
+    dictationIsAvailableForLanguage:]` at 0x1890eb690.
+  - `-[UIKeyboardInputMode dictationLanguage]` (0x1890eb180): `x19 = defaultDictationLanguages:
+    ([self languageWithRegion])`; `x26 = valueForPreferenceKey:@"DictationLanguagesLastUsed"` and
+    the fallback at 0x1d5c42408 = **`LastUsedDictationLangauge`** (Apple's typo). If
+    `[x19 count]==0` it jumps straight to 0x1890eb488 with x24 = `languageWithRegion`. Otherwise
+    `x23 = x26[languageWithRegion]`; if x23 is non-nil **and** enabled → early return at
+    0x1890eb2bc. Anything else falls to 0x1890eb2c0 = the `suggestedDictationLanguages
+    ForDeviceLanguage` scan, then 0x1890eb488 re-checks x24, then 0x1890eb4b4 tries the
+    `LastUsedDictationLangauge` value, and **when nothing answers YES it lands at 0x1890eb4fc →
+    `-[UIKeyboardInputModeController enabledDictationLanguages]` (0x18915f4e8)**, which walks
+    `activeDictationLanguages` (0x18915f610) → `activeDictationSupportedInputModeIdentifiers`
+    (0x18915f794), and that getter has **no cache at all**: it rebuilds an array from
+    `activeInputModes` and runs one `supportsInputMode:error:` (0x18915f884) per mode, i.e. one
+    AF capability query + one NSError allocation per keystroke.
+  - `-[UISystemKeyboardDockController updateDockItemsVisibility]` (0x1890eab7c) calls
+    `+[UIDictationController dictationIsFunctional]` at 0x1890eaf8c on **both** sides of the
+    `shouldShowDictationKey` branch (0x1890eaf34 only gates the `enabledDictationLanguages`
+    shortcut, and that selector is `+[UIDictationController
+    fetchCurrentInputModeSupportsDictation]`, not a preference). So the dock probe cannot be
+    turned off by any keyboard preference.
+  - `-[UIDictationConnection dictationIsAvailableForLanguage:]` (0x1890ebab8) rewrites `_` to `-`
+    (`componentsSeparatedByString:`/`componentsJoinedByString:`) before asking AssistantServices,
+    while the preference dict is keyed by the underscored `languageWithRegion`.
+- 推断 (from the two disassembly facts above, not measured on device): no preference value can make
+  `dictationLanguage` cheap on this port, because the only early exit needs a stored **true** whose
+  `dictationIsAvailableForLanguage:` also answers yes, and `_AFDictationCapable()` is false here
+  (that is why every `dictationIsSupportedForLanguageCode:` frame ends in NSError code 400/401).
+  The seed therefore removes only the `updateEnabledDictationLanguages:` recompute and its
+  cfprefsd write-back — which is exactly the 42.txt 540→224-byte rewrite and 43.txt's empty dicts,
+  i.e. the loop where an empty computed dict makes the next lookup miss again. rev252v is the
+  single-variable test of that: gate back to 1, 26 spellings covering all four query sources
+  (underscore `en_US`/`zh_Hans`/`zh_Hant` forms included, the two full input-mode identifiers),
+  `LastUsedDictationLangauge` seeded, Pinyin restored, `sweet_sample.c` buffer 1024 → 2048 so the
+  ~1 KB seed dumps whole. Read the next log for: (1) `X9 KBD DICT` present and the live file
+  still ours at 30/40/50 s; (2) whether `updateEnabledDictationLanguages:` disappears from the
+  Spotlight t0 passes while the availability/supported-modes frames stay; (3) whether the user
+  still perceives lag. If (1) holds and the lag is unchanged, the fix has to move from the
+  preference to the capability itself (make the AF service/prefix check succeed so UIKit's own
+  recompute converges to a non-empty enabled dict) — which would light up the mic key and then
+  fail when tapped, and must be disclosed before doing it.
+- Output x9/out/x9-rev252v-kbdseed/boot.img: kernel.development.sweet 18,065,544 B, Image
+  18,821,120 B, boot.img 9,469,952 B, sha256
+  f15c4b8b53783ae8adc62ca1d98622b2ee6b87522755919c39db14780ca6d8f8. Built on the host, EXIT=0,
+  zero `error:` lines (only the pre-existing kern_exec.c warnings); **not flashed, not
+  hardware-verified** — the user flashes. Boot args unchanged: boot.json plus
+  `x9_wifi_fake=1 x9_wifi_probe=1 x9_siri_off=1 x9_lite=1 x9_sandbox_ops=1
+  x9_sample_procs=SpringBoard,Spotlight,kbd,Preferences`.
+- 实测 kbd[162] and the other sampled targets: Spotlight t0 was the only thread showing this chain;
+  kbd's main thread stayed in CFRunLoopRun (as in 42.txt).
+
 ## 42.txt: rev252t seed landed, lag unchanged; dictationLanguage always scans (2026-11-04)
 
 - 实测 42.txt is the rev252t boot (same boot args as 40/41.txt, log ends 119.914 s) and the typing

@@ -7158,7 +7158,76 @@ sweet_x9_seed_assistant_dictation(proc_t p, user_addr_t scratch, user_addr_t end
  * layout), so rev252u seeds that array back with the two identifiers 42.txt's
  * backup shows and sweet_sample.c now dumps the live file on every pass: the
  * 224-byte rewrite is then readable and carries the key spelling UIKit actually
- * stored. */
+ * stored.
+ * 43.txt: rev252u never seeded at all - the gate below had been left at
+ * sweet_x9_arg(...,0) while the comment claimed default 1, so there is no
+ * X9 KBD DICT line in that log and the 487-byte live plist is only the residue
+ * of rev252t's session. Two things came out of reading it anyway: the seeded
+ * KeyboardsCurrentAndNext survived as zh_Hant-Zhuyin@sw=Zhuyin;hw=Automatic
+ * (UIKit rebuilt the list from the remaining single entry, so the user lost
+ * Pinyin), and DictationLanguagesEnabled/LastUsed are present but carry no
+ * language strings at all, i.e. some writer stored empty dicts over them.
+ * The 20H392 disassembly says what the miss costs and which spellings matter:
+ * -[UIKeyboardInputModeController isDictationLanguageEnabled:] (0x1890eb5b0)
+ * reads DictationLanguagesEnabled, takes [dict allKeys] and only runs
+ * updateEnabledDictationLanguages: when the requested code is absent (0x1890eb63c);
+ * a stored false returns NO at 0x1890eb6a4 without touching the availability
+ * query, whereas a stored true calls dictationIsAvailableForLanguage: (XPC).
+ * -[UIKeyboardInputMode dictationLanguage] (0x1890eb180) asks in turn for
+ * DictationLanguagesLastUsed[mode languageWithRegion], for every element of
+ * suggestedDictationLanguagesForDeviceLanguage that is also in
+ * defaultDictationLanguages:, for LastUsed[@"LastUsedDictationLangauge"] (the
+ * misspelled key at 0x1d5c42408) and finally for self.languageWithRegion itself
+ * (0x1890eb4a4, the +808 frame 43.txt shows). self.languageWithRegion is the
+ * underscored keyboard spelling (en_US, zh_Hans, zh_Hant), which is what rev252t
+ * failed to cover. rev252v therefore turns the default back on, seeds every
+ * spelling those four sources can produce, keeps the user's Pinyin entry in
+ * KeyboardsCurrentAndNext and stores every value false.
+ * Reading the rest of 0x1890eb180 says that seed is a partial win and not the
+ * fix: dictationLanguage always leaves through the expensive tail at
+ * 0x1890eb4fc (enabledDictationLanguages -> activeDictationLanguages ->
+ * activeDictationSupportedInputModeIdentifiers, which rebuilds from
+ * activeInputModes on every call, one supportsInputMode:error: per mode) unless
+ * one of those isDictationLanguageEnabled: answers YES - a stored true plus a
+ * yes from dictationIsAvailableForLanguage: (0x1890eb66c) - and nothing on this
+ * port makes dictation available, so no preference value reaches the early exit
+ * at 0x1890eb2bc. What the seed does remove is updateEnabledDictationLanguages:
+ * (the full recompute and the cfprefsd rewrite 42.txt showed at 50 s) and the
+ * per-candidate misses. 43.txt is consistent: with the stored dicts empty the
+ * recompute appeared in 3 of 11 Spotlight t0 passes (t=40/90/120) and the
+ * availability or supported-modes scan in 3 more (t=100/110/130), so the second
+ * group is what rev252v cannot touch and what the next lever has to address. */
+#define X9_KBD_DICT_KEYS \
+ "\t\t<key>en</key>\n\t\t<false/>\n" \
+ "\t\t<key>en-US</key>\n\t\t<false/>\n" \
+ "\t\t<key>en_US</key>\n\t\t<false/>\n" \
+ "\t\t<key>en-GB</key>\n\t\t<false/>\n" \
+ "\t\t<key>en_GB</key>\n\t\t<false/>\n" \
+ "\t\t<key>zh</key>\n\t\t<false/>\n" \
+ "\t\t<key>zh-CN</key>\n\t\t<false/>\n" \
+ "\t\t<key>zh_CN</key>\n\t\t<false/>\n" \
+ "\t\t<key>zh-Hans</key>\n\t\t<false/>\n" \
+ "\t\t<key>zh_Hans</key>\n\t\t<false/>\n" \
+ "\t\t<key>zh-Hans-CN</key>\n\t\t<false/>\n" \
+ "\t\t<key>zh_Hans_CN</key>\n\t\t<false/>\n" \
+ "\t\t<key>zh-Hant</key>\n\t\t<false/>\n" \
+ "\t\t<key>zh_Hant</key>\n\t\t<false/>\n" \
+ "\t\t<key>zh-TW</key>\n\t\t<false/>\n" \
+ "\t\t<key>zh_TW</key>\n\t\t<false/>\n" \
+ "\t\t<key>zh-Hant-TW</key>\n\t\t<false/>\n" \
+ "\t\t<key>zh_Hant_TW</key>\n\t\t<false/>\n" \
+ "\t\t<key>zh-HK</key>\n\t\t<false/>\n" \
+ "\t\t<key>zh_HK</key>\n\t\t<false/>\n" \
+ "\t\t<key>yue</key>\n\t\t<false/>\n" \
+ "\t\t<key>yue-Hant</key>\n\t\t<false/>\n" \
+ "\t\t<key>yue_Hant</key>\n\t\t<false/>\n" \
+ "\t\t<key>en_US@sw=QWERTY;hw=Automatic</key>\n\t\t<false/>\n" \
+ "\t\t<key>zh_Hans-Pinyin@sw=Pinyin-Simplified;hw=Automatic</key>\n\t\t<false/>\n" \
+ "\t\t<key>zh_Hant-Zhuyin@sw=Zhuyin;hw=Automatic</key>\n\t\t<false/>\n"
+#define X9_KBD_DICT_OPEN "\t<key>DictationLanguagesEnabled</key>\n\t<dict>\n"
+#define X9_KBD_DICT_CLOSE "\t</dict>\n"
+#define X9_KBD_LAST_USED "\t<key>DictationLanguagesLastUsed</key>\n\t<dict>\n\t\t<key>LastUsedDictationLangauge</key>\n\t\t<string>en_US</string>\n\t</dict>\n"
+#define X9_KBD_LAYOUTS "\t<key>KeyboardsCurrentAndNext</key>\n\t<array>\n\t\t<string>en_US@sw=QWERTY;hw=Automatic</string>\n\t\t<string>zh_Hans-Pinyin@sw=Pinyin-Simplified;hw=Automatic</string>\n\t</array>\n\t<key>KeyboardLastUsed</key>\n\t<string>en_US@sw=QWERTY;hw=Automatic</string>\n\t<key>KeyboardLastUsedForLanguage</key>\n\t<string>en_US</string>\n"
 #define X9_KBD_PREFS_MAX 8192
 static int
 sweet_x9_seed_kbd_dictation(proc_t p, user_addr_t scratch, user_addr_t end)
@@ -7166,12 +7235,12 @@ sweet_x9_seed_kbd_dictation(proc_t p, user_addr_t scratch, user_addr_t end)
  static const char target[]="/private/var/mobile/Library/Preferences/com.apple.keyboard.preferences.plist";
  static const char backup[]="/private/var/mobile/Library/Preferences/com.apple.keyboard.preferences.x9-before-seed.plist";
  static const char temp[]="/private/var/mobile/Library/Preferences/com.apple.keyboard.preferences.x9-seed.tmp";
- static const char frag[]="\t<key>DictationLanguagesEnabled</key>\n\t<dict>\n\t\t<key>en</key>\n\t\t<false/>\n\t\t<key>en-US</key>\n\t\t<false/>\n\t\t<key>en_US</key>\n\t\t<false/>\n\t\t<key>zh-CN</key>\n\t\t<false/>\n\t\t<key>zh_CN</key>\n\t\t<false/>\n\t\t<key>zh-Hans</key>\n\t\t<false/>\n\t\t<key>zh-Hans-CN</key>\n\t\t<false/>\n\t\t<key>zh_Hans_CN</key>\n\t\t<false/>\n\t\t<key>zh_Hans</key>\n\t\t<false/>\n\t\t<key>en_US@sw=QWERTY;hw=Automatic</key>\n\t\t<false/>\n\t\t<key>zh_Hans-Pinyin@sw=Pinyin-Simplified;hw=Automatic</key>\n\t\t<false/>\n\t</dict>\n\t<key>DictationLanguagesLastUsed</key>\n\t<dict/>\n";
- static const char fresh[]="<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>DictationLanguagesEnabled</key>\n\t<dict>\n\t\t<key>en</key>\n\t\t<false/>\n\t\t<key>en-US</key>\n\t\t<false/>\n\t\t<key>en_US</key>\n\t\t<false/>\n\t\t<key>zh-CN</key>\n\t\t<false/>\n\t\t<key>zh_CN</key>\n\t\t<false/>\n\t\t<key>zh-Hans</key>\n\t\t<false/>\n\t\t<key>zh-Hans-CN</key>\n\t\t<false/>\n\t\t<key>zh_Hans_CN</key>\n\t\t<false/>\n\t\t<key>zh_Hans</key>\n\t\t<false/>\n\t\t<key>en_US@sw=QWERTY;hw=Automatic</key>\n\t\t<false/>\n\t\t<key>zh_Hans-Pinyin@sw=Pinyin-Simplified;hw=Automatic</key>\n\t\t<false/>\n\t</dict>\n\t<key>DictationLanguagesLastUsed</key>\n\t<dict/>\n\t<key>KeyboardsCurrentAndNext</key>\n\t<array>\n\t\t<string>en_US@sw=QWERTY;hw=Automatic</string>\n\t\t<string>zh_Hans-Pinyin@sw=Pinyin-Simplified;hw=Automatic</string>\n\t</array>\n</dict>\n</plist>\n";
+ static const char frag[]=X9_KBD_DICT_OPEN X9_KBD_DICT_KEYS X9_KBD_DICT_CLOSE X9_KBD_LAST_USED;
+ static const char fresh[]="<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n" X9_KBD_DICT_OPEN X9_KBD_DICT_KEYS X9_KBD_DICT_CLOSE X9_KBD_LAST_USED X9_KBD_LAYOUTS "</dict>\n</plist>\n";
  int enabled=0,error,fd; int32_t rv=0; user_ssize_t written=0; vnode_t vp=NULLVP;
  char *src=NULL; size_t srclen=0,ins=0,got=0,bodylen=0; int replaced=0;
  extern boolean_t sweet_x9_ufs_root_writable(void);
- if((enabled=sweet_x9_arg("x9_kbd_dictation",0))!=1)return 0;
+ if((enabled=sweet_x9_arg("x9_kbd_dictation",1))!=1)return 0;
  if(!sweet_x9_ufs_root_writable())return EROFS;
  if(!proc_is64bit(p)||scratch>end)return E2BIG;
  error=vnode_lookup(target,VNODE_LOOKUP_NOFOLLOW,&vp,vfs_context_kernel());
