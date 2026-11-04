@@ -109,20 +109,29 @@ static int sample_proc(proc_t p, __unused void *arg) {
  }
  return PROC_RETURNED;
 }
+/* x9_thread_sample=1: 60 s, then every 120 s, 4 samples. Bare token x9bl
+ * (brightness-service diagnostic, AppleCLCD publishes AppleARMBacklight):
+ * 40 s, then every 15 s, 6 samples, to catch backboardd while it stalls. */
+static unsigned sample_delay=60, sample_interval=120, sample_count=4;
 static void sample_thread(__unused void *arg, __unused wait_result_t wr) {
  static int chan;
- printf("X9 SAMPLE: enabled delay=60 interval=120 count=4 targets=SpringBoard,lsd,backboardd,datamigrator,migrationplugin\n");
- (void)tsleep(&chan,PZERO,"x9sample",60*hz);
- for(unsigned i=0;i<4;i++) {
+ printf("X9 SAMPLE: enabled delay=%u interval=%u count=%u targets=SpringBoard,lsd,backboardd,datamigrator,migrationplugin\n",
+  sample_delay,sample_interval,sample_count);
+ (void)tsleep(&chan,PZERO,"x9sample",(int)(sample_delay*hz));
+ for(unsigned i=0;i<sample_count;i++) {
   printf("X9 SAMPLE: begin %u\n",i+1);
   proc_iterate(PROC_ALLPROCLIST,sample_proc,NULL,NULL,NULL);
   printf("X9 SAMPLE: end %u\n",i+1);
-  if(i<3)(void)tsleep(&chan,PZERO,"x9sample",120*hz);
+  if(i+1<sample_count)(void)tsleep(&chan,PZERO,"x9sample",(int)(sample_interval*hz));
  }
 }
 void x9_sample_start(void) {
- int enabled=0; thread_t thread;
- if(!PE_parse_boot_argn("x9_thread_sample",&enabled,sizeof(enabled)) || enabled!=1)return;
+ int enabled=0, bl=0; thread_t thread;
+ bool on=PE_parse_boot_argn("x9_thread_sample",&enabled,sizeof(enabled)) && enabled==1;
+ if(PE_parse_boot_argn("x9bl",&bl,sizeof(bl)) && bl!=0) {
+  on=true; sample_delay=40; sample_interval=15; sample_count=6;
+ }
+ if(!on)return;
  if(kernel_thread_start(sample_thread,NULL,&thread)==KERN_SUCCESS)thread_deallocate(thread);
  else printf("X9 SAMPLE: failed to start\n");
 }

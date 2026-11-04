@@ -624,6 +624,13 @@ AppleCLCD::start(IOService *provider)
 		 */
 		uint32_t blOn = 0;
 		(void)PE_parse_boot_argn("sweetbl", &blOn, sizeof(blOn));
+		/* bare x9bl (fits the boot-arg budget in place of x9lo): publish it
+		 * for the stall diagnostic; the X9 thread sampler runs too. */
+		int x9bl = 0;
+		if (fX9Bl && PE_parse_boot_argn("x9bl", &x9bl, sizeof(x9bl)) && x9bl != 0) {
+			blOn = 1;
+			IOLog("X9 BL: x9bl - AppleARMBacklight published for the stall diagnostic\n");
+		}
 		AppleARMBacklight *bl = blOn ? OSTypeAlloc(AppleARMBacklight) : NULL;
 		if (fDsi != NULL || bl != NULL) {
 			setProperty("IOMFBBrightnessLevel", (unsigned long long)(200u << 16), 32);
