@@ -14,7 +14,6 @@
 #include <mach/vm_param.h>
 #include <pexpert/arm64/boot.h>
 #include <pexpert/device_tree.h>
-#include <pexpert/pexpert.h>
 
 _Static_assert(__builtin_offsetof(boot_args, Video) == 40, "start.s boot video offset");
 
@@ -186,21 +185,6 @@ int
 sweet_early_is_x9(void)
 {
 	return board_x9;
-}
-
-/*
- * X9 feature switches that are proven on the device are on by default:
- * absent -> def on X9 (0 on every other board), "name=N" -> N, so each one
- * can still be turned off with name=0. Keeps the 607-byte boot line free.
- */
-int
-sweet_x9_arg(const char *name, int def)
-{
-	int v = 0;
-	if (PE_parse_boot_argn(name, &v, sizeof(v))) {
-		return v;
-	}
-	return board_x9 ? def : 0;
 }
 
 uint64_t

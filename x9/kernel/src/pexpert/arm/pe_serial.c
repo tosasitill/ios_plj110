@@ -730,6 +730,24 @@ static uint8_t fbcon_char_grid[FBCON_GRID_MAX_ROWS][FBCON_GRID_MAX_COLS];
 
 #include "x9_lk_console.h"
 
+/*
+ * X9 feature switches that are proven on the device are on by default:
+ * absent -> def on X9 (0 on every other board), "name=N" -> N, so each one
+ * can still be turned off with name=0. Keeps the 607-byte boot line free.
+ * Lives here, not in sweet_early.c: that object is prebuilt (kernel/README).
+ */
+extern int sweet_early_is_x9(void);
+int sweet_x9_arg(const char *name, int def);
+int
+sweet_x9_arg(const char *name, int def)
+{
+	int v = 0;
+	if (PE_parse_boot_argn(name, &v, sizeof(v))) {
+		return v;
+	}
+	return sweet_early_is_x9() ? def : 0;
+}
+
 /* Used only after X9 GUI composition has published the boot framebuffer. */
 int x9_lk_gui_present(void) { return x9_lk_gui_step(); }
 int x9_lk_gui_cancel(void) { return x9_lk_gui_disarm(); }
