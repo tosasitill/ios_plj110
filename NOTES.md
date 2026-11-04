@@ -7,7 +7,8 @@
   marconi-wifi]; launchd 20H392 per-name check 0x10003d1f0 = IOKit MIG 2887
   io_device_tree_entry_exists_with_name. Our ADT had no node named wlan.
 - LK DT copy complete (16 KiB, 272 lines): pcie0 @0x16910000 status "okay", SPI 0x171 (369); pcie1
-  "disabled"; phy@16900000 "okay"; wifi node emi-addr 0xe1000000 emi-size 0x1900000; wifi-tx-cma
+  "disabled"; phy@16900000 "okay"; wifi node emi-addr still 0 (address only via reserved-memory
+  mblock-52-consys_wifi_emi 0xe1000000), emi-size 0x1900000; wifi-tx-cma
   emi-size 0x5400000; wifi-misc 0x100000.
 - Commit 150dfdb: mkadt.py adds /arm-io/wlan (device_type wlan, compatible wlan-pcie,mt6653, fake MAC)
   when the boot line has x9_wifi_fake=1. Built x9/out/x9-rev252f-wifi/boot.img (x9_wifi_fake=1 x9bl
