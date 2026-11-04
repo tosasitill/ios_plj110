@@ -64,6 +64,7 @@ IONetworkStack::start(IOService *provider)
         sweet_x9_arg("x9_wifi_fake", 0) == 1 ? "Wi-Fi FAKE radio armed (x9_wifi_fake=1)" : "naming only");
     x9_wifi_print_lk_dt();
     x9_wifi_probe_hw();
+    x9_wifi_power_test();
     return true;
 }
 

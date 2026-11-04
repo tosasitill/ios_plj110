@@ -43,6 +43,7 @@ extern "C" {
 #include <netinet/in.h>
 #include <kern/thread_call.h>
 #include <kern/clock.h>
+#include <mach/mach_time.h>
 #include <stdarg.h>
 
 /* the header declares it without C linkage; the symbol is the C one */
@@ -625,6 +626,99 @@ x9_wifi_probe_hw(void)
         }
     } else {
         IOLog("X9 WIFI PROBE: pcie0 MAC not read (power domain or clocks off)\n");
+    }
+}
+
+/*
+ * B1 round 1 (x9_wifi_power=1): the FIRST hardware write of the Wi-Fi bring-up,
+ * user-approved 2026-11-04. Only GPIO250 (WF_RST) and GPIO251 (PMIC_EN) are
+ * changed, by read-modify-write of their own mode/dir/out bits, in the
+ * connv3/gen4m order (connv3_core.c opfunc_power_on_internal):
+ *   PRE_PWR_ON: wf_rst_on (GPIO250 out high; gen4m plat_priv.c, >= 200 ms
+ *   since a previous toggle) -> connv3_hw_pwr_on: mdelay(30), pmic-en-set
+ *   (GPIO251 out high), mdelay(20) -> gen4m connsys_power_on: mdelay(10).
+ * Faultb (GPIO65) pull-up and the combo-UART pull-ups are NOT programmed this
+ * round. Then about 3 s of observation (GPIO65 level, PCIe0 LTSSM/link; PCIe0
+ * is powered and clocked per the 31.txt probe) and power-off in reverse
+ * (connv3: mdelay(20) before pmic_en low; wf_rst_off), back to LK's state.
+ * Runs once from a thread 20 s after IONetworkStack starts.
+ */
+static volatile uint32_t *x9_gpio;
+static void
+x9_gpio_rmw(unsigned off, uint32_t mask, uint32_t value)
+{
+    uint32_t v = x9_gpio[off / 4];
+    x9_gpio[off / 4] = (v & ~mask) | (value & mask);
+    __asm__ volatile ("dsb sy" ::: "memory");
+}
+static void
+x9_gpio_out(unsigned pin, unsigned level)
+{
+    unsigned word = (pin / 32) * 0x10, bit = 1u << (pin % 32);
+    unsigned mode = 0x300 + (pin / 4) * 0x10, shift = (pin % 4) * 8;
+    x9_gpio_rmw(mode, 0x1fu << shift, 0);              /* function 0 = GPIO */
+    x9_gpio_rmw(0x100 + word, bit, level ? bit : 0);   /* DO first, then DIR: no glitch */
+    x9_gpio_rmw(word, bit, bit);                       /* DIR = out */
+}
+static unsigned
+x9_gpio_in(unsigned pin)
+{
+    return (x9_gpio[(0x200 + (pin / 32) * 0x10) / 4] >> (pin % 32)) & 1;
+}
+static void
+x9_wifi_power_thread(void *, wait_result_t)
+{
+    IOSleep(20000);
+    x9_gpio = (volatile uint32_t *)ml_io_map(0x1002d000, 0x1000);
+    volatile uint32_t *mac = (volatile uint32_t *)ml_io_map(0x16910000, 0x1000);
+    volatile uint32_t *cg = (volatile uint32_t *)ml_io_map(0x169b0000, 0x1000);
+    volatile uint32_t *pd = (volatile uint32_t *)ml_io_map(0x1c052000, 0x1000);
+    if (!x9_gpio || !mac || !cg || !pd) {
+        IOLog("X9 WIFI POWER: map failed; nothing written\n");
+        thread_terminate(current_thread());
+        return;
+    }
+    uint32_t pdsta = pd[0x900 / 4], cgsta = cg[0x14 / 4];
+    bool pcieReadable = ((pdsta >> 16) & 1) && !(cgsta & 0x3003u);
+    IOLog("X9 WIFI POWER: before: PMIC_EN in=%u WF_RST in=%u faultb in=%u pcie0 readable=%d\n",
+        x9_gpio_in(251), x9_gpio_in(250), x9_gpio_in(65), pcieReadable);
+    uint64_t t0 = mach_absolute_time();
+    x9_gpio_out(250, 1);                               /* wf_rst_on */
+    IOLog("X9 WIFI POWER: WF_RST high (GPIO250 in=%u)\n", x9_gpio_in(250));
+    IOSleep(30);
+    x9_gpio_out(251, 1);                               /* connsys-pin-pmic-en-set */
+    IOLog("X9 WIFI POWER: PMIC_EN high (GPIO251 in=%u)\n", x9_gpio_in(251));
+    IOSleep(20);
+    IOSleep(10);
+    uint32_t lastL = ~0u, lastK = ~0u, lastF = ~0u;
+    for (unsigned i = 0; i < 60; i++) {                /* 3 s, every 50 ms; log changes only */
+        uint32_t f = x9_gpio_in(65), l = pcieReadable ? mac[0x150 / 4] : 0, k = pcieReadable ? mac[0x154 / 4] : 0;
+        if (f != lastF || l != lastL || k != lastK || i == 59) {
+            uint64_t ns; absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
+            IOLog("X9 WIFI POWER: t=%llu ms faultb=%u ltssm=%08x link=%08x rst_ctrl=%08x\n",
+                ns / 1000000, f, l, k, pcieReadable ? mac[0x148 / 4] : 0);
+            lastF = f; lastL = l; lastK = k;
+        }
+        IOSleep(50);
+    }
+    IOSleep(20);
+    x9_gpio_out(251, 0);                               /* connsys-pin-pmic-en-clr */
+    IOSleep(200);                                      /* gen4m RST_PIN_MIN_WAIT_TIME */
+    x9_gpio_out(250, 0);                               /* wf_rst_off */
+    IOLog("X9 WIFI POWER: off again: PMIC_EN in=%u WF_RST in=%u faultb in=%u\n",
+        x9_gpio_in(251), x9_gpio_in(250), x9_gpio_in(65));
+    thread_terminate(current_thread());
+}
+static void
+x9_wifi_power_test(void)
+{
+    if (sweet_x9_arg("x9_wifi_power", 0) != 1) {
+        return;
+    }
+    thread_t t = NULL;
+    if (kernel_thread_start(x9_wifi_power_thread, NULL, &t) == KERN_SUCCESS) {
+        thread_deallocate(t);
+        IOLog("X9 WIFI POWER: armed: GPIO power-on test in 20 s\n");
     }
 }
 
