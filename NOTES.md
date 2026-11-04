@@ -1,3 +1,24 @@
+## Wi-Fi B1 round 1 (GPIO power-on test) built (2026-11-04)
+
+- USER: keyboard/language settings normal (English keyboard) -> keyboard parked; USER approved the Wi-Fi
+  power-on (first hardware write).
+- SOURCE order (connv3_core.c opfunc_power_on_internal, connv3_hw.c, mt6993_pmic.c, gen4m
+  cmm_asic_connac3x.c/plat_priv.c): PRE_PWR_ON -> wlan_pre_pwr_on -> wf_rst_on (GPIO250 high,
+  RST_PIN_MIN_WAIT_TIME 200 ms) -> connv3_hw_pwr_on: vsel no-op, mdelay(30), pmic-en-set (GPIO251 high),
+  mdelay(20), faultb pull-up (GPIO65), combo UART pre-on pull-ups -> gen4m connsys_power_on mdelay(10)
+  "pcie phy ready" -> halMawdPwrOn -> PTA_UART_ON. Off: mdelay(20), pmic-en-clr, wf_rst_off.
+- Commit ed0466f: x9_wifi_power=1 thread (20 s after IONetworkStack start) does wf_rst_on, 30 ms, PMIC_EN
+  high, 30 ms, logs GPIO65 + PCIe0 LTSSM/link/rst_ctrl changes for 3 s (50 ms poll), then off in reverse.
+  Only GPIO250/251 mode/dir/out bits written (RMW). No pulls, PMIC registers or PCIe RC writes.
+- Built in a SEPARATE worktree because ~/ios_plj110 on the Mac carries another session's unpushed work
+  (6 commits rev252i..m keyboard investigation + uncommitted sweet_sample.c/exception.c): worktree
+  ~/ios_plj110-wt-wifi (detached ed0466f, .local and x9/build/local.json symlinked). Artifact:
+  ~/ios_plj110-wt-wifi/x9/out/x9-wifipwr-ed0466f/boot.img (x9_wifi_fake=1 x9_wifi_probe=1
+  x9_wifi_power=1), allowlist 252, 9,457,664 B, sha256 2b3d9f02... Not device-tested.
+- Expect: `X9 WIFI POWER: armed`, at ~20 s `WF_RST high`, `PMIC_EN high`, t=... lines (faultb rising to 1
+  = PMIC up without fault is the hoped-for sign; LTSSM likely stays 0 because the RC is not started),
+  then `off again`.
+
 ## 32.txt (rev252h-nowifi): keyboard freeze is NOT Wi-Fi related (2026-11-04)
 
 - USER: still freezes with no fake radio (0 X9 WIFI lines, no wifid/en0). Preferences[277] t0 again in
