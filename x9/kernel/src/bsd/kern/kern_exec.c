@@ -7125,6 +7125,244 @@ sweet_x9_seed_assistant_dictation(proc_t p, user_addr_t scratch, user_addr_t end
  return error;
 }
 
+/* x9_siri_off (default 1): route B for the keyboard stall. 33.txt: the app's
+ * main thread recomputes dictation availability whenever a Siri voice plugin
+ * aborts (SiriTTSSynthesizer/MacinTalkAUSP/KonaSynthesizer sig 6, ~10 s) and
+ * that recompute ends in -[AFDictationConnection
+ * dictationIsAvailableForLanguage:synchronous:] ->
+ * xpc_connection_send_message_with_reply_sync to com.apple.assistant.dictation
+ * while assistantd itself sits in a sync XPC call. Take the assistantd and
+ * sirittsd jobs out of action with same-length in-place edits in
+ * /System/Library/xpc/launchd.plist: flip the first byte of each daemon's
+ * executable basename so launchd's spawn can never succeed, and the first byte
+ * of every MachServices key so clients get bootstrap unknown-service at once
+ * instead of queueing a message for a job that cannot spawn. Offsets were
+ * taken from the file the phone reads (796447 bytes, bplist00, numObjects
+ * 22269; 33.txt X9 XPC needle offsets match). Every edit is guarded by the
+ * exact bplist string object, so a different image is left alone. The
+ * detached .sig is already bypassed on this port (launchd_unsecure_cache=1).
+ * x9_siri_off=0 writes the original bytes back; no other state is needed. */
+#define X9_SIRI_PLIST_SIZE 796447
+struct x9_siri_edit {
+	uint32_t stroff;   /* bplist string object used as the guard */
+	uint32_t edito;    /* byte inside that string to rewrite */
+	uint8_t orig;
+	uint8_t patched;
+	uint8_t len;
+	const char *str;
+};
+static const struct x9_siri_edit x9_siri_edits[] = {
+	{ 304527, 304527, 0x63, 0x7a, 29, "com.apple.aps.assistantd.fmip" },
+	{ 304814, 304814, 0x63, 0x7a, 29, "com.apple.assistant.analytics" },
+	{ 304676, 304676, 0x63, 0x7a, 41, "com.apple.assistant.analytics-observation" },
+	{ 304559, 304559, 0x63, 0x7a, 46, "com.apple.assistant.announcement_state.service" },
+	{ 304846, 304846, 0x63, 0x7a, 43, "com.apple.assistant.audio-session-assertion" },
+	{ 304205, 304205, 0x63, 0x7a, 26, "com.apple.assistant.client" },
+	{ 304639, 304639, 0x63, 0x7a, 34, "com.apple.assistant.device-context" },
+	{ 303930, 303930, 0x63, 0x7a, 29, "com.apple.assistant.dictation" },
+	{ 304234, 304234, 0x63, 0x7a, 32, "com.apple.assistant.flow_service" },
+	{ 304162, 304162, 0x63, 0x7a, 40, "com.apple.assistant.notification_service" },
+	{ 304608, 304608, 0x63, 0x7a, 28, "com.apple.assistant.security" },
+	{ 304269, 304269, 0x63, 0x7a, 28, "com.apple.assistant.settings" },
+	{ 303802, 303802, 0x63, 0x7a, 24, "com.apple.assistant.sync" },
+	{ 304100, 304100, 0x63, 0x7a, 24, "com.apple.assistantd.aps" },
+	{ 303962, 303962, 0x63, 0x7a, 35, "com.apple.assistantd.managedstorage" },
+	{ 304892, 304892, 0x63, 0x7a, 43, "com.apple.private.alloy.siri.device-idswake" },
+	{ 304393, 304393, 0x63, 0x7a, 43, "com.apple.private.alloy.siri.icloud-idswake" },
+	{ 304300, 304300, 0x63, 0x7a, 45, "com.apple.private.alloy.siri.location-idswake" },
+	{ 304348, 304348, 0x63, 0x7a, 42, "com.apple.private.alloy.siri.proxy-idswake" },
+	{ 304034, 304034, 0x63, 0x7a, 26, "com.apple.siri.CacheDelete" },
+	{ 304063, 304063, 0x63, 0x7a, 34, "com.apple.siri.analytics.assistant" },
+	{ 304498, 304498, 0x63, 0x7a, 26, "com.apple.siri.client_lite" },
+	{ 304439, 304439, 0x63, 0x7a, 32, "com.apple.siri.device_resolution" },
+	{ 304000, 304000, 0x63, 0x7a, 31, "com.apple.siri.external_request" },
+	{ 303902, 303902, 0x63, 0x7a, 25, "com.apple.siri.pairedsync" },
+	{ 304474, 304474, 0x63, 0x7a, 21, "com.apple.siri.tether" },
+	{ 304127, 304127, 0x63, 0x7a, 32, "com.apple.siri.vocabularyupdates" },
+	{ 304720, 304720, 0x63, 0x7a, 91, "com.apple.usernotifications.delegate.com.apple.crossdevicearbitration.feedback.notification" },
+	{ 303829, 303829, 0x63, 0x7a, 70, "com.apple.usernotifications.delegate.com.apple.siri.NotificationSource" },
+	{ 344781, 344781, 0x63, 0x7a, 18, "com.apple.sirittsd" },
+	{ 304941, 305003, 0x61, 0x7a, 72, "/System/Library/PrivateFrameworks/AssistantServices.framework/assistantd" },
+	{ 344805, 344864, 0x73, 0x7a, 67, "/System/Library/PrivateFrameworks/SiriTTSService.framework/sirittsd" },
+};
+
+static int
+x9_siri_read(vnode_t vp, off_t off, void *buf, size_t len, vfs_context_t ctx)
+{
+	uio_t auio = uio_create(1, off, UIO_SYSSPACE, UIO_READ);
+	int error;
+	if (auio == NULL) {
+		return ENOMEM;
+	}
+	error = uio_addiov(auio, CAST_USER_ADDR_T((char *)buf), len);
+	if (error == 0) {
+		error = VNOP_READ(vp, auio, 0, ctx);
+	}
+	uio_free(auio);
+	return error;
+}
+
+static int
+x9_siri_write(vnode_t vp, off_t off, uint8_t value, vfs_context_t ctx)
+{
+	uio_t auio = uio_create(1, off, UIO_SYSSPACE, UIO_WRITE);
+	int error;
+	if (auio == NULL) {
+		return ENOMEM;
+	}
+	error = uio_addiov(auio, CAST_USER_ADDR_T(&value), 1);
+	if (error == 0) {
+		error = VNOP_WRITE(vp, auio, 0, ctx);
+	}
+	uio_free(auio);
+	return error;
+}
+
+static int
+sweet_x9_siri_off(proc_t p, user_addr_t scratch, user_addr_t end)
+{
+	static const char target[] = "/System/Library/xpc/launchd.plist";
+	static const char record[] = "/System/Library/xpc/launchd.x9-siri-orig.txt";
+	const int count = (int)(sizeof(x9_siri_edits) / sizeof(x9_siri_edits[0]));
+	extern boolean_t sweet_x9_ufs_root_writable(void);
+	vfs_context_t ctx = vfs_context_kernel();
+	struct vnode_attr va;
+	vnode_t vp = NULLVP;
+	char buf[128];
+	int enabled, error, i, done = 0, total = 0;
+
+	enabled = sweet_x9_arg("x9_siri_off", 1);
+	if (!sweet_x9_ufs_root_writable()) {
+		return 0;
+	}
+	error = vnode_lookup(target, VNODE_LOOKUP_NOFOLLOW, &vp, ctx);
+	if (error) {
+		printf("X9 SIRI: %s lookup errno=%d\n", target, error);
+		return error;
+	}
+	if (!vnode_isreg(vp)) {
+		vnode_put(vp);
+		printf("X9 SIRI: %s is not a regular file\n", target);
+		return EINVAL;
+	}
+	VATTR_INIT(&va);
+	VATTR_WANTED(&va, va_data_size);
+	error = vnode_getattr(vp, &va, ctx);
+	if (error) {
+		printf("X9 SIRI: %s getattr errno=%d; not touched\n", target, error);
+		vnode_put(vp);
+		return error;
+	}
+	if (va.va_data_size != (off_t)X9_SIRI_PLIST_SIZE) {
+		printf("X9 SIRI: %s size=%lld expected=%d; not touched\n",
+		    target, (long long)va.va_data_size, X9_SIRI_PLIST_SIZE);
+		vnode_put(vp);
+		return EINVAL;
+	}
+	error = x9_siri_read(vp, 0, buf, 8, ctx);
+	if (error || memcmp(buf, "bplist00", 8) != 0) {
+		printf("X9 SIRI: %s magic mismatch errno=%d; not touched\n", target, error);
+		vnode_put(vp);
+		return EINVAL;
+	}
+	/* Classify every target first so a mismatch never half-patches the file. */
+	for (i = 0; i < count; i++) {
+		const struct x9_siri_edit *e = &x9_siri_edits[i];
+		uint32_t pos = e->edito - e->stroff;
+		uint8_t byte;
+
+		error = x9_siri_read(vp, (off_t)e->stroff - 3, buf, (size_t)e->len + 4, ctx);
+		if (error || (uint8_t)buf[0] != 0x5f || (uint8_t)buf[1] != 0x10 ||
+		    (uint8_t)buf[2] != e->len || memcmp(buf + 3, e->str, pos) ||
+		    memcmp(buf + 4 + pos, e->str + pos + 1, (size_t)e->len - pos - 1)) {
+			printf("X9 SIRI: guard failed at %u errno=%d; not touched\n",
+			    e->stroff, error);
+			vnode_put(vp);
+			return EINVAL;
+		}
+		byte = (uint8_t)buf[3 + pos];
+		if (byte == e->patched) {
+			total++;
+		} else if (byte != e->orig) {
+			printf("X9 SIRI: unexpected 0x%02x at %u; not touched\n", byte, e->edito);
+			vnode_put(vp);
+			return EINVAL;
+		}
+	}
+	/* Record the on-device original bytes before the first write. */
+	if (enabled && total < count && proc_is64bit(p) && scratch <= end) {
+		char rec[768];
+		int n = snprintf(rec, sizeof(rec), "size=%d magic=bplist00\n", X9_SIRI_PLIST_SIZE);
+		if (n > 0 && n < (int)sizeof(rec)) {
+			for (i = 0; i < count && n < (int)sizeof(rec); i++) {
+				n += snprintf(rec + n, sizeof(rec) - (size_t)n, "%u %02x\n",
+				    x9_siri_edits[i].edito, x9_siri_edits[i].orig);
+			}
+		}
+		if (n > 0 && n < (int)sizeof(rec) &&
+		    sizeof(record) + (size_t)n <= end - scratch) {
+			user_addr_t path = scratch, data = scratch + sizeof(record);
+			int berr;
+
+			if (copyout(record, path, sizeof(record)) == 0 &&
+			    copyout(rec, data, (size_t)n) == 0) {
+				struct open_args o = {.path = path,
+				    .flags = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, .mode = 0600};
+				int32_t rv = 0;
+				berr = open(p, &o, &rv);
+				if (berr == 0) {
+					struct write_args w = {.fd = rv, .cbuf = data,
+					    .nbyte = (user_size_t)n};
+					struct close_args c = {.fd = rv};
+					user_ssize_t written = 0;
+					berr = write(p, &w, &written);
+					(void)sys_close(p, &c, &rv);
+				}
+				printf("X9 SIRI: original bytes in %s errno=%d\n", record, berr);
+			}
+		}
+	}
+	for (i = 0; i < count; i++) {
+		const struct x9_siri_edit *e = &x9_siri_edits[i];
+		uint8_t want = enabled ? e->patched : e->orig;
+
+		error = x9_siri_read(vp, (off_t)e->edito, buf, 1, ctx);
+		if (error) {
+			break;
+		}
+		if ((uint8_t)buf[0] == want) {
+			continue;
+		}
+		error = x9_siri_write(vp, (off_t)e->edito, want, ctx);
+		if (error) {
+			break;
+		}
+		done++;
+		if (enabled) {
+			printf("X9 SIRI: off=%u 0x%02x->0x%02x %s\n",
+			    e->edito, e->orig, e->patched, e->str);
+		}
+	}
+	if (!error) {
+		error = VNOP_FSYNC(vp, MNT_WAIT, ctx);
+	}
+	printf("X9 SIRI: %s size=%d magic=bplist00 entries=%d already=%d changed=%d errno=%d\n",
+	    enabled ? "disable" : "restore", X9_SIRI_PLIST_SIZE, count, total, done, error);
+	if (!error) {
+		int bad = 0;
+		for (i = 0; i < count; i++) {
+			uint8_t want = enabled ? x9_siri_edits[i].patched : x9_siri_edits[i].orig;
+			if (x9_siri_read(vp, (off_t)x9_siri_edits[i].edito, buf, 1, ctx) ||
+			    (uint8_t)buf[0] != want) {
+				bad++;
+			}
+		}
+		printf("X9 SIRI: readback mismatches=%d\n", bad);
+	}
+	vnode_put(vp);
+	return error;
+}
+
 /* Reference: UniXNU ae687009348296e97e49ce6e925795044f363ce6,
  * scripts/seed-data-skip-setup.py (21H461). Preference-only adaptation for
  * 20H392 / MT6993 / 16 KiB; actual Setup decision remains original userland.
@@ -7363,6 +7601,8 @@ load_init_program_at_path(proc_t p, user_addr_t scratch_addr, const char* path)
 	 if(statusbar_error)printf("X9 STATUSBAR: preference not installed errno=%d; continuing boot\n",statusbar_error);
 	 int dictation_error=sweet_x9_seed_assistant_dictation(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	 if(dictation_error)printf("X9 DICTATION: preference not installed errno=%d; continuing boot\n",dictation_error);
+	 int siri_error=sweet_x9_siri_off(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
+	 if(siri_error)printf("X9 SIRI: launchd.plist not changed errno=%d; continuing boot\n",siri_error);
 	}
 	error=sweet_x9_seed_frontboard(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	if(error)return error;

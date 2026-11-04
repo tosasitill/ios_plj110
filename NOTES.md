@@ -1,3 +1,57 @@
+## rev252k: route B delivered as a same-length launchd.plist patch (built 2026-11-04, not flashed)
+
+- Why: 33.txt (实测) keeps the app main thread in the dictation/input-mode recompute in 11/11
+  sampled passes while assistantd[30] t0 is parked in
+  xpc_connection_send_message_with_reply_sync; the Siri TTS voice plugins still abort every ~10 s
+  (SiriTTSSynthesizer/MacinTalkAUSP/KonaSynthesizer sig 6, 11 each) and locationd every 3.3 s.
+  User chose route B (make assistantd + Siri TTS unreachable) and delivery by boot.img, as a
+  same-length in-place edit of `/System/Library/xpc/launchd.plist` (no root reflash; the only local
+  root image is pan172-era).
+- Layout (实测): the local pan172 `edited-root.hfs` copy of `/System/Library/xpc/launchd.plist` is
+  byte-identical in the probed region to the phone - size=796447, `bplist00`, numObjects=22269, and
+  the 33.txt:5135-5146 needle offsets (221907 / 303962 / 304100 / 308486) match. assistantd job:
+  `ProgramArguments[0]` path string object at 304941 (this exact path occurs once in the file), 30
+  `MachServices` key string objects in 303802..304935; sirittsd job: path string at 344805, its one
+  service key at 344781. Each of those 32 strings is referenced exactly once in the plist (plistlib
+  walk over all 533 jobs), so renaming them cannot touch another job.
+- Code (x9/kernel/src/bsd/kern/kern_exec.c, `sweet_x9_siri_off()`, called in the pre-launchd seed
+  block right after the dictation seed; boot-arg `x9_siri_off`, default 1):
+  - guards: file size 796447 + `bplist00` magic, then for every target the exact bplist string
+    object (`0x5F 0x10 len` header + full string) at its recorded offset. All 32 are classified
+    before any write, so a different image is left untouched (prints the failing offset); it also
+    refuses if the edited byte is neither the original nor the patched value.
+  - edit: service keys `com.apple.*` -> `zom.apple.*` (first byte), daemon paths basename
+    `assistantd` -> `zssistantd`, `sirittsd` -> `zirittsd` (first byte). Client lookups of the old
+    MachService names then fail with bootstrap unknown-service instead of queueing a message for a
+    job that cannot spawn, and launchd's own spawn of the daemons fails with ENOENT.
+  - safety: on the first patch the on-device original bytes are written to
+    `/System/Library/xpc/launchd.x9-siri-orig.txt`; the file is fsynced and read back, printing
+    `X9 SIRI: readback mismatches=N`. `x9_siri_off=0` restores the recorded original bytes and
+    needs no other state (the patch itself persists on the root until then).
+  - 推断: the jobs stay in the plist (structural removal is impossible with a same-length edit);
+    launchd's LaunchEvents may still try to start them, but each attempt is a cheap ENOENT spawn
+    failure and launchd throttles failing jobs. The detached `.sig` is already bypassed on this
+    port (`launchd_unsecure_cache=1` in every image since 0039u).
+- Build: `.local/build-venv/bin/python3 -I x9/build/build.py all --name x9-rev252k --boot-arg
+  x9_wifi_fake=1 --boot-arg x9_wifi_probe=1 --boot-arg x9_sample_procs=Preferences,kbd,assistantd
+  --boot-arg sweetiolog=assistantd --boot-arg x9_siri_off=1` with `/opt/homebrew/opt/llvm/bin` on
+  PATH. Output x9/out/x9-rev252k/boot.img: image 18804736 / boot 9461760 bytes, allowlist 252, no
+  restaging, boot.img sha256
+  307db489f3f06f616a820e05bf34ec9e0e23a7481d4180c2666f386282de70e9, kernel sha256
+  25d5d3c1803c68d3f30bb772cde519d20631234c7c00cb8b88d0dd6fab03e523, payload sha256
+  f1f7b68b38e94dcd9c78852f3727e3b94d389fa473bb6891fa78d91ea3af49bc. Host-built only.
+- Test: flash x9-rev252k with `fastboot boot`, keep the keyboard up past ~130 s (12 passes). Expect
+  `X9 SIRI: disable size=796447 magic=bplist00 entries=32 already=0 changed=32 errno=0`, 32
+  `X9 SIRI: off=<n> 0x63->0x7a ...` / four `0x61|0x73->0x7a` path lines, then
+  `X9 SIRI: readback mismatches=0`; assistantd absent from `X9 SAMPLE:` and from the AKS lines;
+  the TTS sig-6 churn gone. Read: does the Preferences main thread go idle (run=0) and does the
+  keyboard stop stalling? If it still stalls with these two jobs unreachable, the remaining trigger
+  is not assistantd/sirittsd (locationd's sig 5 loop is independent) and needs the UIKit-side gate.
+- Restore: build a candidate with `--boot-arg x9_siri_off=0` and boot it once; it writes the
+  original bytes back and prints `X9 SIRI: restore ... errno=0` / `readback mismatches=0`.
+- Unfinished: no device run yet; if the patch is kept, the root copy of launchd.plist stays patched
+  across later boot.img revs.
+
 ## rev252j: read-only launchd.plist layout probe for route B (built 2026-11-04, not flashed)
 
 - Why: route B (make the assistantd/Siri TTS launchd jobs disappear) must be delivered as a
@@ -106,6 +160,7 @@
   drop the assistantd + Siri TTS jobs from /System/Library/xpc/launchd.plist the way
   tools/sweet-root-tweaks.py drops CommCenter, so the sync availability query fails fast and stays
   "unavailable" (also kills the TTS crash churn). locationd's sig 5 loop is a separate bug.
+  -> DONE without a reflash, as the same-length boot.img patch in rev252k (section above).
 
 ## 30.txt keyboard freeze root-caused; Wi-Fi B1/B2 read-only probe; rev252h built (2026-11-04)
 
