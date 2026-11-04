@@ -52,7 +52,7 @@ def node(name, props=(), children=()):
     return n
 
 
-def build(seed=None, timebase=TIMEBASE, console_base=0, console_size=0, ram_window="legacy512"):
+def build(seed=None, timebase=TIMEBASE, console_base=0, console_size=0, ram_window="legacy512", wlan=False):
     if ram_window not in RAM_WINDOWS:
         raise ValueError("unknown captured X9 RAM window")
     phys_base, mem_size = RAM_WINDOWS[ram_window]
@@ -127,7 +127,14 @@ def build(seed=None, timebase=TIMEBASE, console_base=0, console_size=0, ram_wind
         node('wdt', [ph(), ('no-pmu', u32(1))]),
         node('disp0', [ph(), ('device_type', cstr('display-subsystem')),
             ('compatible', cstr('sweet,display')),
-            ('canvas-width', u32(FB_W)), ('canvas-height', u32(FB_H))])])
+            ('canvas-width', u32(FB_W)), ('canvas-height', u32(FB_H))])] + ([
+        # launchd loads wifid only if io_device_tree_entry_exists_with_name("wlan")
+        # (com.apple.wifid.plist _LimitLoadToDeviceTree = [wlan, marconi-wifi]).
+        # Shape of the iPhone X /arm-io/uart4/wlan node; MAC = the fake radio's.
+        node('wlan', [ph(), ('device_type', cstr('wlan')),
+            ('compatible', cstr('wlan-pcie,mt6653') + cstr('wlan-pcie')),
+            ('module-instance', cstr('x9')),
+            ('local-mac-address', bytes([0x02, 0x58, 0x39, 0x57, 0x46, 0x01]))])] if wlan else []))
     fb = node('sweet-fbcon', [ph(), ('reg', u64(FB, FB_SIZE)),
         ('width', u32(FB_W)), ('height', u32(FB_H)), ('stride', u32(FB_STRIDE))])
     product = node('product', [ph()] + product_properties())
