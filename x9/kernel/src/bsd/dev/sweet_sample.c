@@ -102,9 +102,21 @@ sweet_sample_start(void)
 extern int hz;
 extern task_t proc_task(proc_t);
 extern void x9_sample_task(const char *, int, task_t);
+/* x9_sample_procs=a,b,c replaces the built-in target list (names as proc_name gives them). */
+static char sample_names[160];
+static int sample_listed(const char *name) {
+ size_t n=strlen(name);
+ for(const char *t=sample_names;*t;) {
+  const char *end=strchr(t,',');size_t tl=end?(size_t)(end-t):strlen(t);
+  if(tl==n&&n&&!strncmp(t,name,n))return 1;
+  if(!end)break;t=end+1;
+ }
+ return 0;
+}
 static int sample_proc(proc_t p, __unused void *arg) {
  char name[32]; proc_name(proc_pid(p), name, sizeof(name));
- if (!strcmp(name,"SpringBoard") || !strcmp(name,"backboardd") || !strcmp(name,"wifid") || !strcmp(name,"lsd") || !strcmp(name,"com.apple.datami") || !strcmp(name,"com.apple.migrat")) {
+ if (sample_names[0] ? sample_listed(name) :
+     (!strcmp(name,"SpringBoard") || !strcmp(name,"backboardd") || !strcmp(name,"wifid") || !strcmp(name,"lsd") || !strcmp(name,"com.apple.datami") || !strcmp(name,"com.apple.migrat"))) {
   task_t task=proc_task(p); if(task != TASK_NULL) x9_sample_task(name,proc_pid(p),task);
  }
  return PROC_RETURNED;
@@ -115,8 +127,8 @@ static int sample_proc(proc_t p, __unused void *arg) {
 static unsigned sample_delay=60, sample_interval=120, sample_count=4;
 static void sample_thread(__unused void *arg, __unused wait_result_t wr) {
  static int chan;
- printf("X9 SAMPLE: enabled delay=%u interval=%u count=%u targets=SpringBoard,backboardd,wifid,lsd,datamigrator,migrationplugin\n",
-  sample_delay,sample_interval,sample_count);
+ printf("X9 SAMPLE: enabled delay=%u interval=%u count=%u targets=%s\n",
+  sample_delay,sample_interval,sample_count,sample_names[0]?sample_names:"SpringBoard,backboardd,wifid,lsd,datamigrator,migrationplugin");
  (void)tsleep(&chan,PZERO,"x9sample",(int)(sample_delay*hz));
  for(unsigned i=0;i<sample_count;i++) {
   printf("X9 SAMPLE: begin %u\n",i+1);
@@ -131,6 +143,9 @@ void x9_sample_start(void) {
  if(PE_parse_boot_argn("x9bl",&bl,sizeof(bl)) && bl!=0) {
   on=true; sample_delay=40; sample_interval=15; sample_count=6;
  }
+ if(PE_parse_boot_argn("x9_sample_procs",sample_names,sizeof(sample_names)) && sample_names[0]) {
+  on=true; sample_delay=30; sample_interval=10; sample_count=12;
+ } else sample_names[0]=0;
  if(!on)return;
  if(kernel_thread_start(sample_thread,NULL,&thread)==KERN_SUCCESS)thread_deallocate(thread);
  else printf("X9 SAMPLE: failed to start\n");
