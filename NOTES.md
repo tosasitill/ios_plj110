@@ -1,3 +1,25 @@
+## Wi-Fi track A (fake radio) + B0 (LK DT copy) built, not device-tested (2026-11-04)
+
+- Commits 948e1f1 + 5a9cd4e. Built x9/out/x9-rev252d-wifi/boot.img (boot line + x9_wifi_fake=1,
+  allowlist 252 -> no mailbox restaging), 9,453,568 B, sha256 796e11b6...; host test
+  x9/tools/test_shim_wifi_dump.py OK.
+- A: iokit/Kernel/X9WifiNet.inc (ported from UniXNU-sheng WifiNet.cpp @516a780, BSD-2-Clause-Patent,
+  attributed) included by SweetX9NetworkStack.cpp. x9_wifi_fake=1: configd's first IONetworkStack
+  open -> thread call -> ifnet en0 (02:58:39:57:46:01, NX_NOAUTO, bpf), IO80211Controller
+  "X9WLANController" + IO80211Interface "X9WLAN" under the platform expert, SIOCGA80211/SIOCSA80211
+  answered, KEV class 6 events; fake radio = "X9-FAKE-OPEN" 2437 MHz open + "X9-FAKE-WPA2" 5180 MHz
+  RSN/PSK, scan done after 800 ms, join after 300 ms (WPA2 needs >= 8-char key), TX swallowed.
+  Naming requests accepted once en0 exists. Logs: `X9 WIFI REQ: n type t set/get len val -> err`
+  (first 300 + first of each type), `X9 WIFI: ...`, `X9 WIFI STATS` every 10 s.
+- B0: shim/fdt_wifi_dump.c -> ADT /chosen/x9-lk-wifi-dt (8 KiB, mkadt.py) -> kernel prints
+  `X9 LK DT: R <reserved child> reg=/size=/no-map` and `X9 LK DT: N <path> <key>=<value>` for
+  pcie@169*/phy@169*/connv3*/wifi*/connsys-emi* nodes at IONetworkStack start (also in builds
+  without x9_wifi_fake). Never fatal; shim prints its result only on the (unlogged) shim console.
+- Expected on device: `X9 LK DT:` block early (~0.1 s); after configd opens IONetworkStack:
+  `X9 WIFI: en0 is up (FAKE radio)`, then `X9 WIFI REQ` lines if wifid talks to en0 (the key A4
+  question); Settings > Wi-Fi shows the two fake networks if the request layouts match iOS 16.
+  If no REQ lines appear: wifid not started / not finding the interface -> next step investigate.
+
 ## Brightness DONE (default-on); Wi-Fi plan written (2026-11-04)
 
 - USER-verified rev252b-bl: slider + fade work, no stall. Commit cad84a1 publishes AppleARMBacklight
