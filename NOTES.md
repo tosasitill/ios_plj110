@@ -1,3 +1,50 @@
+## 39.txt: rev252q fixed the appex storm; syncdefaultsd regressed; lag still unexplained (2026-11-04)
+
+- 实测 39.txt is the rev252q boot (boot args 39.txt:742: x9_wifi_fake/probe=1 x9_siri_off=1 x9_lite=1;
+  `SWEET Sandbox: launchd op 4 container path` 39.txt:737; JOBS `already disable=7 lite=1 size=601`
+  39.txt:661; SIRI `entries=32 already=32 changed=0` 39.txt:659-660). Log ends at 146.516 s.
+- 实测 the appex crash storm is GONE: zero SiriTTSSynthesizer/MacinTalkAUSP/KonaSynthesizer/
+  IntentsExtension/assetsd/widget crashes in the whole log (38.txt had 12-12 each). Only
+  WirelessRadioMan 14 (fake radio, sig 5 code 0x5, every 10 s 10.5..137.2), syncdefaultsd 13,
+  driverkitd 1 (also 1 in 38.txt). The op-4 container answer (PKService bootstrap) worked.
+- 实测 NEW regression in rev252q: syncdefaultsd aborts sig 6 (52 CRASH lines / 4 = 13 crashes) at
+  11.0, 12.4, 12.9, then every ~10 s to 114.1 (launchd throttle), 0 occurrences in 34..38.txt.
+  Same innermost chain as the appex aborts: pc 0x1ea5a3198 slide 0x27f8c000 -> unslid
+  0x1c2617198 = libsystem_kernel `___pthread_kill+0x8` (identical unslid pc in 35/38), then
+  libc++abi terminate + libobjc `_objc_exception_throw`, but the outer frames are libdispatch
+  workers (unslid 0x18db98848/0x18db6b65c/0x18db735d4/0x18db6c1f8), not PlugInKit. The only
+  userland-visible change from rev252p is the sandbox answer: op 5/6/0x43 went from ENOENT to 0.
+- 推断 (not proven): returning success for extension issue (5) without a token, or consume (6)
+  without a handle, is what syncdefaultsd trips over. rev252r restores ENOENT for 5/6/0x43 and
+  keeps rev252q's op-4 container path (x9_sandbox_ext_ok=1 restores 0 without a rebuild).
+- 实测 the lag is not kernel input and not the GPU: every `SWEET HID: touch ... down/up` has its
+  `X9 TOUCH ... HID dispatched` line in the same millisecond; cadence every 2 s has missed=0,
+  TE timeouts 0, ticks 120/121, copy_avg ~1.6 ms; render jobs 20-21/2 s, max_job_us 10-20 ms,
+  GPU util 2-29%. Largest timestamp gap in the log is 0.92 s (console stitch, not a freeze).
+- 实测 the GUI presents at 10 Hz: swap_id 485 at 60.272, 585 at 70.272, 685 at 80.272 (exactly
+  100/10 s), copies=submits=19-21 per 2 s window. Two typing bursts in the keyboard area
+  (touch y 2060-2260 of 2760): 61.874-~65 (two-finger typing from 63.7) and 80.865-90.98; the
+  present rate did not rise during either (no frame per keystroke). Only when Spotlight/searchd
+  work starts at 84.5-90.6 s does it rise 7 -> 21 -> 26 -> 32 per window. searchd AKS burst
+  86.9-87.6 and 116.99-117.02; corespeechd/siriactionsd/voiced/siriinferenced are alive,
+  assistantd/sirittsd absent.
+- 推断 the keystrokes produce no frames because the process hosting the text input is stalled on
+  its main thread - the same shape as 30/32.txt (dictation-availability recompute), but this boot
+  typed in Spotlight, so that is a guess until sampled. Nothing in this log shows the blocking
+  call itself.
+- rev252r (built, not flashed): x9_sandbox_ops=1 adds a bounded (24-line) once-per-(process,op)
+  line `SWEET Sandbox op: name[pid] op N ret= len=` for ops 4/5/6/0x43, so the next log names
+  every extension-op caller (and says whether syncdefaultsd still crashes); boot args add
+  x9_sample_procs=SpringBoard,Spotlight,kbd,Preferences (30 s, every 10 s, 12 passes, named
+  targets only - not the all-process scan that panicked in rev252m/n). Commit 9bdeb94.
+  Output x9/out/x9-rev252r-lagprobe/boot.img: image 18804736 / boot.img 9469952 bytes,
+  sha256 7a3225e5567d2de1ca04521888d8541bc5b4f8c32cae82c8818a55e77dec5a9e. Host-built only.
+- Test: flash rev252r, open the place you type in (Spotlight / Settings / Notes), keep the
+  keyboard up and type between ~35 s and ~140 s so all 12 samples land, then pull the log.
+  Read: (1) `X9 SAMPLE` stacks of the app main thread during typing - is it in the dictation/
+  input-mode chain or another blocking call; (2) `SWEET Sandbox op:` lines for ops 5/6/0x43 and
+  whether syncdefaultsd disappears from CRASH; (3) swap_id should still advance 100/10 s at idle.
+
 ## 35.txt: the launchd patch persisted, but every sampled target was idle (2026-11-04)
 
 - 实测 the root copy of launchd.plist stayed patched across the reboot: 35.txt:763
