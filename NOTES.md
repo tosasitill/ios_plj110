@@ -1,3 +1,18 @@
+## 29.txt: Wi-Fi iOS side WORKS with the fake radio; keyboard freeze found; rev252g-kbd built (2026-11-04)
+
+- USER: Settings Wi-Fi toggle works, both fake networks listed. 实测: wifid[43] up (ADT /arm-io/wlan
+  fix confirmed), 359 requests by 96 s (top types: 103 current network x143, 19 power x23, 11 scan
+  result, 383 set x16 [unknown, refused], 254, 10 scan), refused=46, fake join of X9-FAKE-OPEN at
+  42.1 s -> state UP, en0 169.254.53.56 (no DHCP answer, expected), tx 36 frames.
+- USER: keyboard / input method nearly freezes the UI wherever it appears (so the WPA2 password
+  could not be typed). Not Wi-Fi specific; never recorded before in NOTES (keyboard likely never
+  exercised). Frames keep flowing (swap_id 3 -> 1382); SpringBoard main thread idle in all samples.
+- Commit 8323a09: x9_sample_procs=a,b,c (sampler from 30 s, every 10 s, 12x). Built
+  x9/out/x9-rev252g-kbd/boot.img: x9_wifi_fake=1 x9_sample_procs=Preferences,kbd,SpringBoard,backboardd
+  sweetiolog=Preferences,kbd. Test: open Settings > Wi-Fi > X9-FAKE-WPA2 and keep the keyboard up
+  from ~30 s to ~150 s. Next: symbolicate Preferences/kbd threads (slide from the sample header).
+- Open Wi-Fi follow-ups: type 383 set (16x refused) unknown; fake radio has no DHCP.
+
 ## 28.txt: wifid never ran -> missing DT node "wlan"; rev252f-wifi built (2026-11-04)
 
 - 实测 28.txt (rev252e-wifi): all 4 Apple80211 requests were configd[36] (IPConfiguration via
