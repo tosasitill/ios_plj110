@@ -1,3 +1,25 @@
+## rev252b-bl: IODisplayParameters fix for the backlight-service stall (2026-11-04)
+
+- Root cause (SOURCE CONFIRMED, CoreBrightness 20H392): the display setup reads IODisplayParameters
+  from the backlight service (IORegistryEntryCreateCFProperty, no recursion) and on NULL jumps to
+  the failure exit (0x1af0d87b0 -> 0x1af0ddb18): no CB display, no libEDR server
+  (CBEDRServerStartServer/AddMainDisplay), no brightness ever sent. QuartzCore meanwhile waits on
+  libEDR every vsync (25.txt t5). UniXNU sheng recorded the identical failure (int-236) in
+  package/AppleARMBacklight.cpp @516a780: CB needs backlight-control + IOObjectConformsTo
+  "AppleARMBacklight" (ours is that class) + IODisplayParameters{brightness{min,max,value}}, and
+  drives it with setProperties {brightness, FadePeriod 16.16 s}. Their page /zh/porting/display
+  has no EDR detail; acceptance there = min/mid/max readback + visible, fade completes, timeout
+  counter stable; controller writes and system UI verified separately.
+- Commit 677a50d: AppleARMBacklight publishes IODisplayParameters {min 0, max 3515, value = DBV},
+  setProperties takes brightness (+FadePeriod <= 5 s) -> x9BacklightRequest (never waits, latest
+  wins, fade stepped every 16 ms on fBlCall, value republished); IOMFBBrightnessLevel stops moving
+  the panel once brightness arrived. Log: `X9 BL STATS: requests= level= fade_ms= sent= fail=`.
+- Built: x9/out/x9-rev252b-bl/boot.img (kernel+boot only, allowlist still 252 -> the staged
+  X9GeneralMetal252 mailbox payload is reused, NO restaging), boot line + x9bl (service +
+  sampler). boot.img sha256 6a2dba33..., 9,433,088 B. Not device-tested.
+- Expect: no stall (swap_id like 24.txt), `SWEET BL: backlight set brightness/FadePeriod`,
+  `X9 BL STATS`, slider moves the panel. If it still stalls, the X9 SAMPLE stacks show where.
+
 ## rev252-x9bl (25.txt): backlight-service stall root-caused to CoreAnimation's libEDR client (2026-11-04)
 
 - 实测: rev252-x9bl boots (install errno=0, X9GeneralMetal252), LK banner blanked with NO token
