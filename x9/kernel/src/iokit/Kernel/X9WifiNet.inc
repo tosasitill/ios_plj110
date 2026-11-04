@@ -19,6 +19,8 @@
  * Nothing here touches a device register.
  */
 #include <IOKit/IORegistryEntry.h>
+#include <IOKit/IOPlatformExpert.h>
+#include <IOKit/IODeviceTreeSupport.h>
 #include <libkern/c++/OSData.h>
 #include <libkern/c++/OSNumber.h>
 #include <libkern/c++/OSSerialize.h>
@@ -48,7 +50,7 @@ extern "C" int x9_kev_post(struct kev_msg *) __asm__("_kev_post_msg");
 #define X9_SIOCSA80211 0x802869c8UL   /* _IOW('i', 200, struct apple80211req) */
 #define X9_SIOCGA80211 0xc02869c9UL   /* _IOWR('i', 201, struct apple80211req) */
 
-namespace x9wifi {
+namespace x9wifi { namespace {
 
 void log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void log(const char *fmt, ...) {
@@ -153,7 +155,10 @@ int sta_scan(const uint8_t *, size_t) {
 int sta_bss_count(void) { IOLockLock(fake::lock); int n = (int)fake::bss_count; IOLockUnlock(fake::lock); return n; }
 int sta_bss_get(int i, bss_info *out) {
   using namespace fake;
-  IOLockLock(lock); int r = (i >= 0 && (unsigned)i < bss_count) ? (memcpy(out, &bss[i], sizeof *out), 0) : -1; IOLockUnlock(lock);
+  int r = -1;
+  IOLockLock(lock);
+  if (i >= 0 && (unsigned)i < bss_count) { memcpy(out, &bss[i], sizeof *out); r = 0; }
+  IOLockUnlock(lock);
   return r;
 }
 int sta_connect(const uint8_t *ssid, size_t len, const uint8_t *bssid, const char *pass, size_t plen) {
@@ -445,6 +450,7 @@ errno_t if_ioctl(ifnet_t, unsigned long cmd, void *data) {
   }
 }
 
+}  // namespace
 }  // namespace x9wifi
 
 /* ---- registry entries: wifid/configd tell a wireless interface by these class names ---- */
@@ -462,7 +468,7 @@ class IO80211Interface : public IONetworkInterface {
 };
 OSDefineMetaClassAndStructors(IO80211Interface, IONetworkInterface);
 
-namespace x9wifi {
+namespace x9wifi { namespace {
 
 IOService *publish(IOService *service, IOService *provider, const char *name) {
   if (!service || !service->attach(provider)) { OSSafeReleaseNULL(service); return nullptr; }
@@ -532,6 +538,7 @@ void start(void) {
 thread_call_t gStartCall;
 void start_fired(thread_call_param_t, thread_call_param_t) { start(); }
 
+}  // namespace
 }  // namespace x9wifi
 
 /* Called when configd first opens IONetworkStack: BSD networking is up by then. */
