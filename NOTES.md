@@ -16,7 +16,7 @@
   four named apps), so this boot still has no stack of the stalling process. Sampling by name keeps
   missing it; the next build identifies it by thread state instead (rev252m).
 
-## rev252o: launchd disabled.plist policy ported from UniXNU-sheng (built 2026-11-04, not flashed)
+## rev252p: launchd disabled.plist policy, on-device jobs only (built 2026-11-04, not flashed)
 
 - Code: `sweet_x9_seed_disabled_jobs()` in x9/kernel/src/bsd/kern/kern_exec.c, called from
   `load_init_program_at_path()` right after the siri_off seed. Boot args: `x9_disable_jobs=<label>,...`
@@ -28,22 +28,24 @@
   `readback mismatches=`. `disabled.migrated` is created if missing. A label already present in the
   base is not added twice; when every label is already there the file is not rewritten
   (`X9 JOBS: already ...`).
-- Lite list = sheng's list in UniXNU-sheng/package/BootWatchdogPolicy.c, checked against this
-  image's 531 LaunchDaemons labels: dropped `com.apple.findmy.findmybeaconingd` and
-  `com.apple.eyereliefd` (no such label on 20H392), changed `fairplayd.A2` to `fairplayd.H2` (the
-  label present here), and appended assistantd + sirittsd so this policy alone can replace the
-  32-byte launchd.plist patch later. 22 labels total.
-- Build: `.local/build-venv/bin/python3 -I x9/build/build.py all --name x9-rev252o --boot-arg
+- Lite list is deliberately on-device only (7 labels): locationd, photoanalysisd, mediaanalysisd,
+  coreduetd, mobile.obliteration, assistantd, sirittsd. sheng's radio/network members of the cycle
+  (identityservicesd, CommCenter, bluetoothd) and the other network jobs are NOT in lite because
+  Wi-Fi is under bring-up on this board (user constraint, 2026-11-04); a test that wants the full
+  sheng cycle passes them through `x9_disable_jobs=` explicitly. locationd stays because it is the
+  daemon that traps every ~3.3 s in our logs. rev252o was built with the 22-label list (sheng's,
+  incl. the radio jobs) first; it was not flashed and is withdrawn in favour of rev252p.
+- Build: `.local/build-venv/bin/python3 -I x9/build/build.py all --name x9-rev252p --boot-arg
   x9_wifi_fake=1 --boot-arg x9_wifi_probe=1 --boot-arg x9_siri_off=1 --boot-arg x9_lite=1` with
-  `/opt/homebrew/opt/llvm/bin` on PATH. Output x9/out/x9-rev252o/boot.img: image 18804736 / boot
+  `/opt/homebrew/opt/llvm/bin` on PATH. Output x9/out/x9-rev252p/boot.img: image 18804736 / boot
   9465856 bytes. Host-built only.
-- Test: flash rev252o, boot to the desktop, keep the keyboard up past ~130 s, pull the log. Expect
-  one `X9 JOBS: disable=22 lite=1 added=22 kept=0 size=... errno=0` + `readback mismatches=0`
-  (later boots print `already disable=22`), and assistantd/sirittsd/locationd gone from the boot.
-  If the churn stops and the keyboard does not stall, this is the fix; if churn stops but the
-  keyboard still stalls, the loop is not fed by the daemons and the next lead is elsewhere. If some
-  labels affect Wi-Fi/iCloud UI, narrow the test with `x9_disable_jobs=com.apple.locationd,...`
-  instead of lite.
+- Test: flash rev252p, boot to the desktop, keep the keyboard up past ~130 s, pull the log. Expect
+  one `X9 JOBS: disable=7 lite=1 added=7 kept=0 size=... errno=0` + `readback mismatches=0`
+  (later boots print `already disable=7`), locationd gone from the boot, and Wi-Fi untouched. If the
+  churn stops and the keyboard does not stall, this is the fix; if churn stops but the keyboard
+  still stalls, the loop is not fed by these daemons. If the stall survives, the next test can add
+  the radio members explicitly: `x9_disable_jobs=com.apple.identityservicesd,com.apple.CommCenter,com.apple.bluetoothd`
+  on top of lite (both are merged).
 
 ## UniXNU upstream check: no dictation patch, but a job-pruning mechanism for the XPC wait cycle (2026-11-04)
 

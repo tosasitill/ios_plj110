@@ -7523,10 +7523,12 @@ x9_jobs_write(proc_t p, user_addr_t path, user_addr_t data, const char *src,
  * the closing </dict> so the entries launchd already keeps there survive. The
  * pristine file is copied once to disabled.x9-orig.plist and every rewrite
  * starts from it, so a changed label list never accumulates keys. The empty
- * disabled.migrated marker says the database needs no migration. Labels were
- * checked against 20H392's LaunchDaemons: sheng's fairplayd.A2 is H2 here and
- * its findmybeaconingd/eyereliefd labels do not exist, so they are dropped.
- * Boot-arg gated, non-fatal. */
+ * disabled.migrated marker says the database needs no migration. The lite
+ * list keeps only on-device jobs: sheng's radio/network members of the cycle
+ * (identityservicesd, CommCenter, bluetoothd) are left alone because Wi-Fi is
+ * under bring-up here, and so are the other jobs that reach for the network;
+ * a test that wants the full sheng cycle passes them through
+ * x9_disable_jobs= explicitly. Boot-arg gated, non-fatal. */
 static int
 sweet_x9_seed_disabled_jobs(proc_t p, user_addr_t scratch, user_addr_t end)
 {
@@ -7541,11 +7543,8 @@ sweet_x9_seed_disabled_jobs(proc_t p, user_addr_t scratch, user_addr_t end)
 	    "<plist version=\"1.0\">\n<dict>\n";
 	static const char tail[] = "</dict>\n</plist>\n";
 	static const char lite[] =
-	    "com.apple.identityservicesd,com.apple.locationd,com.apple.CommCenter,com.apple.bluetoothd,"
-	    "com.apple.photoanalysisd,com.apple.mediaanalysisd,com.apple.mediastream.mstreamd,com.apple.icloud.searchpartyd,"
-	    "com.apple.familycircled,com.apple.financed,com.apple.softwareupdateservicesd,com.apple.ndoagent,com.apple.biomesyncd,"
-	    "com.apple.email.maild,com.apple.amsengagementd,com.apple.adid,com.apple.fairplayd.H2,com.apple.passd,"
-	    "com.apple.mobile.obliteration,com.apple.coreduetd,com.apple.assistantd,com.apple.sirittsd";
+	    "com.apple.locationd,com.apple.photoanalysisd,com.apple.mediaanalysisd,com.apple.coreduetd,"
+	    "com.apple.mobile.obliteration,com.apple.assistantd,com.apple.sirittsd";
 	static char base[4096], body[10240], list[512], jobs[512];
 	char label[128], tag[160];
 	extern boolean_t sweet_x9_ufs_root_writable(void);
