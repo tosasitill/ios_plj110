@@ -1,3 +1,19 @@
+## 31.txt (rev252h): dictation seed not enough; B1/B2 probe result; A/B build (2026-11-04)
+
+- 实测 B1/B2 probe (read-only): GPIO251 PMIC_EN in/0 (MT6653 OFF: LK never powers it), GPIO248 POR
+  out/0, GPIO250/65/243/244 in/0 mode 0; pextp0 cg_sta 0 (all PCIe0 clocks ON), rst 0, pd 0x3ce7f
+  (MAC0 + PHY0 powered); pcie0 MAC rst_ctrl/ltssm/link = 0 (idle, no link). => LK leaves PCIe0 powered
+  and clocked; only the Wi-Fi chip is off. Next B step = first WRITE: GPIO power-on (PMIC_EN high etc.,
+  connv3 order) + LTSSM watch -> needs explicit user confirmation.
+- Keyboard: `X9 DICTATION ... errno=0` but USER: still freezes. Preferences t0 still in the same loop
+  (dictation languages / dock visibility / AFPreferences / NSXPC to keyboard prefs). AssistantServices:
+  -[AFDictationConnection _availabilityChanged] -> _tellSpeechDelegateAvailabilityChanged, fed by
+  AFNetworkAvailability (Darwin notify token; AFNetworkAvailabilityDidChangeNotification). 推断: network
+  availability changes (fake radio / en0 / wifid) may drive the loop; 31.txt Wi-Fi churn is low though
+  (no join, ~4 wifid req/10 s after 37 s). assistantd is running.
+- A/B build: x9/out/x9-rev252h-nowifi/boot.img = rev252h kernel, no x9_wifi_fake (no wlan node, no
+  wifid, no en0), x9_sample_procs=Preferences,kbd. Test keyboard in Settings' search field.
+
 ## 30.txt keyboard freeze root-caused; Wi-Fi B1/B2 read-only probe; rev252h built (2026-11-04)
 
 - 实测 30.txt (rev252g-kbd, keyboard held up): Preferences[276] t0 run=1 in samples 3-12, all in a
