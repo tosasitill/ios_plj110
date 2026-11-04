@@ -1,3 +1,29 @@
+## 30.txt keyboard freeze root-caused; Wi-Fi B1/B2 read-only probe; rev252h built (2026-11-04)
+
+- 实测 30.txt (rev252g-kbd, keyboard held up): Preferences[276] t0 run=1 in samples 3-12, all in a
+  dictation-availability loop: AFDictationConnection forcedOfflineDictationIsAvailableForLanguage:
+  synchronous: -> UIDictationConnection dictationConnnectionDidChangeAvailability: -> UIDictationController
+  postUIKeyboardDictationAvailabilityDidChangeNotification -> UISystemKeyboardDockController
+  updateDockItemsVisibility -> UIKeyboardInputModeController activeDictationLanguages -> ... (sample 2 =
+  password prompt, WFNetworkListController -> SFPasswordSharingService passwordSharingAvailability).
+  Speech daemons crash-loop (SiriTTSSynthesizer/MacinTalkAUSP/KonaSynthesizer x12 sig 6).
+- Fix (commit 33b90c0): kern_exec seed sweet_x9_seed_assistant_dictation writes
+  /private/var/mobile/Library/Preferences/com.apple.assistant.support.plist {Assistant Enabled=false,
+  Dictation Enabled=false} each boot (x9_dictation_off=0 disables; backup ...x9-before-seed.plist).
+  Key/domain from AssistantServices 20H392 (AFPreferences dictationIsEnabled). 推断: may not be enough
+  if UIKit queries availability even with dictation disabled -> rev252h samples Preferences/kbd again.
+- Wi-Fi B1/B2 facts from MTK source (SOURCE): connv3 MT6993 power-on = vsel no-op, pinctrl
+  pmic-en-set (GPIO251 high; co-clock 0 => MT6688 UDS_EN regmap skipped), faultb (GPIO65) pull-up,
+  combo UART GPIO243/244 pre-on pull-up then CONSYS UART function, POR reset GPIO248 30 ms pulse,
+  WF_RST GPIO250 (wf_rst_on high). GPIO base 0x1002d000 (DIR/DO/DI +0/+0x100/+0x200 per 32 pins, MODE
+  0x300+(pin/4)*0x10, 8-bit stride, 5 bits). pextp0cfg_ao 0x169b0000 CG sta +0x14 (1=gated) MAC0_TL 0
+  REF 1 PHY0_MCU_BUS 6 PHY0_REF 7 AXI_250 12 AHB_APB 13; reset +0x8/+0xc (MAC bit0, PHY bit1).
+  ap_pd 0x1c040000+0x12900 (1=on) PEXTP_MAC0 bit16 PHY0 bit17.
+- x9_wifi_probe=1 reads all of the above (no writes); PCIe0 MAC (0x148/0x150/0x154) only if MAC0 power
+  bit set and MAC clocks ungated.
+- Built x9/out/x9-rev252h/boot.img: x9_wifi_fake=1 x9_wifi_probe=1 x9_sample_procs=Preferences,kbd,
+  allowlist 252 (no restaging), sha256 44827af1...
+
 ## 29.txt: Wi-Fi iOS side WORKS with the fake radio; keyboard freeze found; rev252g-kbd built (2026-11-04)
 
 - USER: Settings Wi-Fi toggle works, both fake networks listed. 实测: wifid[43] up (ADT /arm-io/wlan
