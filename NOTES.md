@@ -1,3 +1,57 @@
+## 41.txt: rev252s seed declined on the binary plist; rev252t replaces it (2026-11-04)
+
+- 实测 41.txt is the rev252s boot (same boot args as 40.txt; log ends 136.296 s) and the typing lag
+  is unchanged.
+- 实测 41.txt:688 `X9 KBD DICT: com.apple.keyboard.preferences is a binary plist (767 bytes);
+  left alone`: the rev252s seed never applied. 41.txt:4389-4392 `X9 PREF: ...keyboard.preferences
+  .plist size=767 mtime=994 mode=0100600 uid=501` with a bplist00 header; 41.txt:4393 the backup
+  lookup ended errno=2, so no .x9-before-seed existed yet.
+- 实测 the assistant.support seed still survives: 41.txt:4385-4387 dumps the XML body with
+  Assistant Enabled=false and Dictation Enabled=false.
+- 实测 the rev252s op-4 budget change worked: 41.txt:792-879 names 8 op-4 callers (launchd, mount,
+  mount_hfs, seputil, mobile_obliterat, mount, MSUEarlyBootTask, cc_fips_test) and ops 5/6/0x43
+  stay unanswered; the 19 op-5 lines 41.txt:1767-5514 are all ret=2, and no op 6/0x43 reached the
+  table. syncdefaultsd still aborts 14 times (56 CRASH lines), so the ENOENT answer did not fix it.
+- 实测 sampling: 41.txt:119 `X9 SAMPLE: enabled delay=30 interval=10 count=12
+  targets=SpringBoard,Spotlight,kbd,Preferences`; 12 passes 30.137..130.173 s. kbd[153] main
+  thread sits in CFRunLoopRun in every pass (the keyboard process is idle), while Spotlight[267]
+  t0 is inside the dock/dictation chain in 12/12.
+- 实测 the 12 Spotlight t0 stacks rotate through the recompute path: t=30 updateEnabledDictation-
+  Languages -> supportsDictationLanguage XPC; t=40 AFPreferences dealloc/stringWithFormat; t=50
+  CFPrefs copyAppValue; t=60 dock image/traits; t=70/80 TIGetSuggestedDictationLanguagesForDevice
+  Language + NSBundle; t=90 globeKey/enabledInputModeIdentifiers array compare; t=100
+  MKBGetDeviceLockState IOKit; t=110 NSXPCConnection send; t=120 availability -> forcedOffline ->
+  kevent. Host symbolication of the 20H392 cache, slide 0x2a178000.
+- 推断 (corrected): 40.txt's missing-en_US diagnosis was not tested by rev252s; 41.txt is
+  consistent with it, because the seed was refused before any write.
+- 实测 host disassembly of 20H392 UIKitCore (not device): -[UIKeyboardInputModeController
+  isDictationLanguageEnabled:] (0x1890eb5b0) reads TIPreferencesController
+  valueForPreferenceKey:@"DictationLanguagesEnabled" (CFString object 0x1d5c43ee8, next table slot
+  0x1d5c43f08 is DictationLanguagesLastUsed), then allKeys/containsObject: language. When the key
+  is present it does objectForKey:/boolValue and returns that bool (stored false -> return NO at
+  0x1890eb6a4) without updateEnabledDictationLanguages: or dictationIsAvailableForLanguage:.
+  updateEnabledDictationLanguages: keys the dictionary with -[UIKeyboardInputMode
+  languageWithRegion] (en_US form).
+- rev252t (built, not flashed): the kbd seeder replaces a bplist00 file with the XML seed (hardlink
+  backup .x9-before-seed first; temp 0600 501:501 + rename), seeds DictationLanguagesEnabled=false
+  for en, en-US, en_US, zh-CN, zh_CN, zh-Hans, zh-Hans-CN, zh_Hans_CN and an empty
+  DictationLanguagesLastUsed, and skips when the `zh_Hans_CN` marker is already present. XML files
+  still merge before the last </dict>. x9_prefdump now has a 1024-byte buffer and the first pass
+  also dumps the .x9-before-seed backups, so the next log carries the original 767-byte binary
+  contents (key names and stored values).
+- Output x9/out/x9-rev252t-kbdseed/boot.img: image 18821120 / boot.img 9469952 bytes, sha256
+  6778b2f47b8027807ef8f1995ed887c0677d716c4a29259722f0ccb0ec2d69ee. Host-built only, not
+  hardware-verified. (build.py `all` stopped because x9_metal_render=1 is already in boot.json;
+  the kernel had linked, so only `build.py boot` was rerun with the six extra args.)
+- Test: flash rev252t, type in Spotlight between ~35 s and ~140 s, pull the log. Read:
+  (1) `X9 KBD DICT: ... binary plist (767 bytes); replaced with XML seed` and
+  `... replaced binary plist with XML seed ... errno=0 bytes=...`; (2) `X9 PREF:` for the live
+  keyboard prefs (XML, not bplist00) and the full .x9-before-seed dump (the keys UIKit had);
+  (3) whether the 12 Spotlight t0 stacks leave updateEnabledDictationLanguages/TIGetSuggested/
+  NSBundle and shrink to a CFPrefs lookup; (4) whether the typing lag changes. Known risk: the
+  live file loses its other keys (KeyboardsCurrentAndNext, autocorrection stats); the original
+  stays in the backup hardlink.
+
 ## 40.txt: the stall is a per-frame dictation recompute; rev252s seeds the keyboard pref (2026-11-04)
 
 - 实测 40.txt is the rev252r boot: 40.txt:1069 boot args `x9_metal_render=1

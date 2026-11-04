@@ -7137,11 +7137,16 @@ sweet_x9_seed_assistant_dictation(proc_t p, user_addr_t scratch, user_addr_t end
  * AFPreferences init + Darwin observers + CFPreferences read of
  * com.apple.assistant.support (sync cfprefsd XPC) -> availability callback ->
  * UIKeyboardDictationAvailabilityDidChange -> dock update again.
- * UIKit takes the cheap path only when the current language is already present
- * in the preferences, so seed en_US (MKBUserSessionLanguage) as disabled in
- * com.apple.keyboard.preferences. An existing plist is merged, never replaced:
- * the key pair is inserted before the last </dict> and a binary plist or an
- * unexpectedly large file is left alone. x9_kbd_dictation=0 disables. */
+ * UIKit takes the cheap path only when the current language is already a key in
+ * DictationLanguagesEnabled: isDictationLanguageEnabled: returns the stored
+ * bool without running updateEnabledDictationLanguages: or the availability
+ * query when the key is present (20H392 UIKitCore 0x1890eb5b0; a stored false
+ * returns NO at 0x1890eb6a4). 41.txt showed the file is a 767-byte bplist00, so
+ * merging XML was declined and nothing changed. rev252t replaces a binary
+ * plist with the XML seed (hard-linked backup first) and seeds every plausible
+ * spelling of the session language, since UIKit keys the dict by
+ * -[UIKeyboardInputMode languageWithRegion] (en_US form) while other Assistant
+ * paths use en-US. x9_kbd_dictation=0 disables. */
 #define X9_KBD_PREFS_MAX 8192
 static int
 sweet_x9_seed_kbd_dictation(proc_t p, user_addr_t scratch, user_addr_t end)
@@ -7149,10 +7154,10 @@ sweet_x9_seed_kbd_dictation(proc_t p, user_addr_t scratch, user_addr_t end)
  static const char target[]="/private/var/mobile/Library/Preferences/com.apple.keyboard.preferences.plist";
  static const char backup[]="/private/var/mobile/Library/Preferences/com.apple.keyboard.preferences.x9-before-seed.plist";
  static const char temp[]="/private/var/mobile/Library/Preferences/com.apple.keyboard.preferences.x9-seed.tmp";
- static const char frag[]="\t<key>DictationLanguagesEnabled</key>\n\t<dict>\n\t\t<key>en_US</key>\n\t\t<false/>\n\t</dict>\n\t<key>DictationLanguagesLastUsed</key>\n\t<dict/>\n";
- static const char fresh[]="<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>DictationLanguagesEnabled</key>\n\t<dict>\n\t\t<key>en_US</key>\n\t\t<false/>\n\t</dict>\n\t<key>DictationLanguagesLastUsed</key>\n\t<dict/>\n</dict>\n</plist>\n";
+ static const char frag[]="\t<key>DictationLanguagesEnabled</key>\n\t<dict>\n\t\t<key>en</key>\n\t\t<false/>\n\t\t<key>en-US</key>\n\t\t<false/>\n\t\t<key>en_US</key>\n\t\t<false/>\n\t\t<key>zh-CN</key>\n\t\t<false/>\n\t\t<key>zh_CN</key>\n\t\t<false/>\n\t\t<key>zh-Hans</key>\n\t\t<false/>\n\t\t<key>zh-Hans-CN</key>\n\t\t<false/>\n\t\t<key>zh_Hans_CN</key>\n\t\t<false/>\n\t</dict>\n\t<key>DictationLanguagesLastUsed</key>\n\t<dict/>\n";
+ static const char fresh[]="<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>DictationLanguagesEnabled</key>\n\t<dict>\n\t\t<key>en</key>\n\t\t<false/>\n\t\t<key>en-US</key>\n\t\t<false/>\n\t\t<key>en_US</key>\n\t\t<false/>\n\t\t<key>zh-CN</key>\n\t\t<false/>\n\t\t<key>zh_CN</key>\n\t\t<false/>\n\t\t<key>zh-Hans</key>\n\t\t<false/>\n\t\t<key>zh-Hans-CN</key>\n\t\t<false/>\n\t\t<key>zh_Hans_CN</key>\n\t\t<false/>\n\t</dict>\n\t<key>DictationLanguagesLastUsed</key>\n\t<dict/>\n</dict>\n</plist>\n";
  int enabled=0,error,fd; int32_t rv=0; user_ssize_t written=0; vnode_t vp=NULLVP;
- char *src=NULL; size_t srclen=0,ins=0,got=0,bodylen=0;
+ char *src=NULL; size_t srclen=0,ins=0,got=0,bodylen=0; int replaced=0;
  extern boolean_t sweet_x9_ufs_root_writable(void);
  if((enabled=sweet_x9_arg("x9_kbd_dictation",1))!=1)return 0;
  if(!sweet_x9_ufs_root_writable())return EROFS;
@@ -7180,8 +7185,24 @@ sweet_x9_seed_kbd_dictation(proc_t p, user_addr_t scratch, user_addr_t end)
   vnode_put(vp);
   if(error){kfree_data(src,srclen);return error;}
   if(srclen>=8&&!memcmp(src,"bplist00",8)){
-   printf("X9 KBD DICT: com.apple.keyboard.preferences is a binary plist (%zu bytes); left alone\n",srclen);
-   kfree_data(src,srclen);return 0;
+   /* 41.txt: this is the file the XML merge kept refusing, so the per-frame
+    * recompute never stopped. Fall through with src==NULL: the common path
+    * hard-links the original to .x9-before-seed and renames the XML seed over
+    * it. The other keyboard keys are dropped from the live copy but stay in
+    * the backup; UIKit regenerates them from defaults. */
+   printf("X9 KBD DICT: com.apple.keyboard.preferences is a binary plist (%zu bytes); replaced with XML seed\n",srclen);
+   kfree_data(src,srclen);src=NULL;srclen=0;got=0;replaced=1;
+  }
+  else{
+  /* rev252t writes the same XML every boot; if it is already there, leave the
+   * file alone instead of appending a second copy of the keys each boot. */
+  static const char marker[]="<key>zh_Hans_CN</key>";
+  if(srclen>=sizeof(marker)-1){
+   for(size_t i=0;i+sizeof(marker)-1<=srclen;i++)
+    if(!memcmp(src+i,marker,sizeof(marker)-1)){
+     printf("X9 KBD DICT: XML seed already present; left alone\n");
+     kfree_data(src,srclen);return 0;
+    }
   }
   /* insert before the last </dict> so the rest of the preferences survive */
   for(size_t i=srclen>=7?srclen-7:0;;i--){
@@ -7193,6 +7214,7 @@ sweet_x9_seed_kbd_dictation(proc_t p, user_addr_t scratch, user_addr_t end)
    kfree_data(src,srclen);return 0;
   }
   bodylen=ins+sizeof(frag)-1+(srclen-ins);
+  }
  } 
  if(src==NULL)bodylen=sizeof(fresh)-1;
  if(bodylen==0)bodylen=sizeof(fresh)-1;
@@ -7222,7 +7244,8 @@ sweet_x9_seed_kbd_dictation(proc_t p, user_addr_t scratch, user_addr_t end)
   {struct close_args c={.fd=fd};int ce=sys_close(p,&c,&rv);if(!error)error=ce;}
   if(!error){struct rename_args r={.from=tmp,.to=t};error=rename(p,&r,&rv);}
   if(error){struct unlink_args u={.path=tmp};(void)unlink(p,&u,&rv);}
-  printf("X9 KBD DICT: com.apple.keyboard.preferences merged (%s) errno=%d bytes=%d; original backed up if present\n",
+  printf("X9 KBD DICT: com.apple.keyboard.preferences %s (%s) errno=%d bytes=%d; original backed up if present\n",
+      replaced?"replaced binary plist with XML seed":"merged",
       src==NULL?"new file":"existing plist",error,(int)bodylen);
  }
 out:

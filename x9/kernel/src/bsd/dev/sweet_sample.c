@@ -134,7 +134,7 @@ static void
 x9_prefdump(const char *path, int dump_bytes) {
  vnode_t vp=NULLVP;
  vfs_context_t ctx=vfs_context_kernel();
- static char buf[256];
+ static char buf[1024];
  struct vnode_attr va;
  errno_t error=vnode_lookup(path,VNODE_LOOKUP_NOFOLLOW,&vp,ctx);
  if(error) { printf("X9 PREF: %s lookup errno=%d\n",path,error); return; }
@@ -175,13 +175,15 @@ x9_prefcheck(int dump_bytes) {
  (void)PE_parse_boot_argn("x9_prefcheck",&enabled,sizeof(enabled));
  if(!enabled) return;
  x9_prefdump("/private/var/mobile/Library/Preferences/com.apple.assistant.support.plist",dump_bytes);
- x9_prefdump("/private/var/mobile/Library/Preferences/com.apple.assistant.support.x9-before-seed.plist",0);
- /* 40.txt: the app main thread re-reads DictationLanguagesEnabled every frame
-  * through TIPreferencesController (domain com.apple.keyboard.preferences). The
-  * seed can only merge XML, so report the on-disk format/size here: bplist00
-  * means the seed declined, and a size/mtime change means cfprefsd rewrote it. */
+ x9_prefdump("/private/var/mobile/Library/Preferences/com.apple.assistant.support.x9-before-seed.plist",dump_bytes);
+ /* 41.txt: the keyboard preference file is a 767-byte bplist00, so rev252s
+  * declined to seed it and the app main thread kept recomputing
+  * DictationLanguagesEnabled every frame. rev252t replaces that file (hard-linked
+  * backup first), so dump both: the live copy proves the XML seed survived and
+  * the .x9-before-seed copy carries the original binary contents for reading the
+  * keys UIKit had stored. */
  x9_prefdump("/private/var/mobile/Library/Preferences/com.apple.keyboard.preferences.plist",dump_bytes);
- x9_prefdump("/private/var/mobile/Library/Preferences/com.apple.keyboard.preferences.x9-before-seed.plist",0);
+ x9_prefdump("/private/var/mobile/Library/Preferences/com.apple.keyboard.preferences.x9-before-seed.plist",dump_bytes);
 }
 /* Route B needs the live launchd.plist byte layout before anything may rewrite
  * it in place (recovery has no hfsplus, so no dd by name; the recorded v5
