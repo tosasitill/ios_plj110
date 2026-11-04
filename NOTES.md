@@ -1,3 +1,23 @@
+## 27.txt (rev252d-wifi) analysed; rev252e-wifi diagnostic built (2026-11-04)
+
+- 实测 27.txt: LK DT copy works (160 lines, cut at pcie@16910000 by the 8 KiB limit). Wi-Fi EMI from
+  LK, all no-map: consys_wifi_emi 0xe1000000/12 MiB, consys_emi 0xe1c00000/10 MiB, wifi-misc pool
+  0xe2600000/1 MiB, wifi-reserve (WFDMA) pool 0xe2700000/25 MiB. connv3 co-clock 0, radio-off-mode 0,
+  drdi-detect 1, oplus,pcb_map <8 1>.
+- en0 up at 5.556 s; 7.788 SIOCGIFDEVMTU (unhandled), 7.793 IO80211Interface user client type 0
+  refused, 7.795 REQ type 12 (card caps) get -> 0, 7.798 type 1 (SSID) get -> ENOENT; nothing after.
+  USER: Settings Wi-Fi grey. No wifid crash.
+- SOURCE (20H392 RE on the Mac): wifid matches {IOPropertyMatch:{IO80211InterfaceRole:Infrastructure}}
+  (objc dict literal 0x100238c38; the "IO80211SkywalkInterface" text is only in a log string) ->
+  ours matches. IO80211.framework Apple80211BindToInterface: __Apple80211FindService (by
+  IOInterfaceName) -> Apple80211BindToInterfaceWithService -> IOServiceOpen fails -> falls back to
+  Apple80211BindToInterfaceWithIOCTL (0x1d3ed54f4) -> RawGet type 12 len 13 = our REQ #1. So the
+  bind succeeds; the stall is after it. Unknown which process bound (no names logged).
+- Commit 73a185b: process names on REQ/ioctl/user-client logs, SIOCGIFDEVMTU answered, wifid added to
+  the X9 sampler, LK DT copy 16 KiB without no-map lines. Built x9/out/x9-rev252e-wifi/boot.img with
+  x9_wifi_fake=1 x9bl sweetiolog=wifid,configd (allowlist 252, no restaging). Next: symbolicate
+  wifid's sampled threads (wifid binary: /tmp/os20H392/usr/sbin/wifid on the Mac).
+
 ## Wi-Fi track A (fake radio) + B0 (LK DT copy) built, not device-tested (2026-11-04)
 
 - Commits 948e1f1 + 5a9cd4e. Built x9/out/x9-rev252d-wifi/boot.img (boot line + x9_wifi_fake=1,
