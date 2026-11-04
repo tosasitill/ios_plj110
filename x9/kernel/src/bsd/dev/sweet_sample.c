@@ -105,8 +105,12 @@ sweet_sample_start(void)
 extern int hz;
 extern task_t proc_task(proc_t);
 extern void x9_sample_task(const char *, int, task_t);
+extern void x9_scan_task(const char *, int, task_t);
 /* x9_sample_procs=a,b,c replaces the built-in target list (names as proc_name gives them). */
 static char sample_names[160];
+/* x9_stall_scan=1 ignores the name list and walks every process: main thread
+ * plus any running/uninterruptible thread, so an unnamed frozen app is found. */
+static int stall_scan;
 static int sample_listed(const char *name) {
  size_t n=strlen(name);
  for(const char *t=sample_names;*t;) {
@@ -118,6 +122,11 @@ static int sample_listed(const char *name) {
 }
 static int sample_proc(proc_t p, __unused void *arg) {
  char name[32]; proc_name(proc_pid(p), name, sizeof(name));
+ if (stall_scan) {
+  task_t task=proc_task(p);
+  if(task != TASK_NULL) x9_scan_task(name,proc_pid(p),task);
+  return PROC_RETURNED;
+ }
  if (sample_names[0] ? sample_listed(name) :
      (!strcmp(name,"SpringBoard") || !strcmp(name,"backboardd") || !strcmp(name,"wifid") || !strcmp(name,"lsd") || !strcmp(name,"com.apple.datami") || !strcmp(name,"com.apple.migrat"))) {
   task_t task=proc_task(p); if(task != TASK_NULL) x9_sample_task(name,proc_pid(p),task);
@@ -303,8 +312,8 @@ x9_xpcscan(void)
 static unsigned sample_delay=60, sample_interval=120, sample_count=4;
 static void sample_thread(__unused void *arg, __unused wait_result_t wr) {
  static int chan;
- printf("X9 SAMPLE: enabled delay=%u interval=%u count=%u targets=%s\n",
-  sample_delay,sample_interval,sample_count,sample_names[0]?sample_names:"SpringBoard,backboardd,wifid,lsd,datamigrator,migrationplugin");
+ printf("X9 SAMPLE: enabled delay=%u interval=%u count=%u scan=%d targets=%s\n",
+  sample_delay,sample_interval,sample_count,stall_scan,sample_names[0]?sample_names:"SpringBoard,backboardd,wifid,lsd,datamigrator,migrationplugin");
  (void)tsleep(&chan,PZERO,"x9sample",(int)(sample_delay*hz));
  for(unsigned i=0;i<sample_count;i++) {
   x9_prefcheck(i==0);
@@ -316,10 +325,13 @@ static void sample_thread(__unused void *arg, __unused wait_result_t wr) {
  }
 }
 void x9_sample_start(void) {
- int enabled=0, bl=0; thread_t thread;
+ int enabled=0, bl=0, scan=0; thread_t thread;
  bool on=PE_parse_boot_argn("x9_thread_sample",&enabled,sizeof(enabled)) && enabled==1;
  if(PE_parse_boot_argn("x9bl",&bl,sizeof(bl)) && bl!=0) {
   on=true; sample_delay=40; sample_interval=15; sample_count=6;
+ }
+ if(PE_parse_boot_argn("x9_stall_scan",&scan,sizeof(scan)) && scan!=0) {
+  stall_scan=1; on=true; sample_delay=20; sample_interval=10; sample_count=12;
  }
  if(PE_parse_boot_argn("x9_sample_procs",sample_names,sizeof(sample_names)) && sample_names[0]) {
   on=true; sample_delay=30; sample_interval=10; sample_count=12;

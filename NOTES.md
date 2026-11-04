@@ -1,3 +1,39 @@
+## 35.txt: the launchd patch persisted, but every sampled target was idle (2026-11-04)
+
+- 实测 the root copy of launchd.plist stayed patched across the reboot: 35.txt:763
+  `X9 SIRI: disable size=796447 magic=bplist00 entries=32 already=32 changed=0 errno=0`
+  and 35.txt:776 `readback mismatches=0`. assistantd/sirittsd again never appear in the boot.
+- 实测 the churn is unchanged: by 143.8 s SiriTTSSynthesizer/MacinTalkAUSP/KonaSynthesizer have
+  12 sig-6 crashes each (34.txt had 6 each by 79.5 s - same ~10-12 s rate) and locationd has 42
+  sig-5. So disabling assistantd/sirittsd did not stop the crash source, as in 34.txt.
+- 实测 sampler `[35.txt:371] ... targets=SpringBoard,Preferences,MobileSafari,MobileNotes,kbd`,
+  12 passes from 30 to 140 s (35.txt:4340..5865). Only SpringBoard[26] and kbd[155] were ever
+  found: there is no `Preferences[`, `MobileSafari[` or `MobileNotes[` line in the entire log.
+  SpringBoard t0 and kbd t0 are both `run=3` (TH_STATE_WAITING) in mach_msg in all 12 passes, with
+  unchanging pc/lr/bt (SpringBoard 35.txt:4354..5855, kbd 35.txt:4342..5852). The log ends at
+  147.9 s.
+- 推断 the app the user types in was neither SpringBoard nor kbd (it was probably not any of the
+  four named apps), so this boot still has no stack of the stalling process. Sampling by name keeps
+  missing it; the next build identifies it by thread state instead (rev252m).
+
+## rev252m: stall finder walks every process (built 2026-11-04, not flashed)
+
+- Code: `x9_scan_task()` in x9/kernel/src/osfmk/kern/exception.c (same capture as x9_sample_task)
+  prints one `X9 SCAN:` line per process for the main thread (t0) plus any other thread with
+  `run_state` TH_STATE_RUNNING (1) or TH_STATE_UNINTERRUPTIBLE (4), each with slide, thread count,
+  run/flags/sleep, pc/lr/sp/fp and a 12-frame fp backtrace. Waiting t1+ threads are skipped to keep
+  the log small; t0 is always printed so a main thread blocked in a sync XPC reply is still seen.
+  `x9_stall_scan=1` in x9/kernel/src/bsd/dev/sweet_sample.c turns it on, ignores `x9_sample_procs`
+  and uses 20 s delay / 10 s interval / 12 passes.
+- Build: same command as rev252k with `--name x9-rev252m --boot-arg x9_stall_scan=1` (plus
+  x9_wifi_fake=1 x9_wifi_probe=1 x9_siri_off=1). Build printed Image 18804736 bytes, shim-boot.img
+  9465856 bytes, candidate x9/out/x9-rev252m/boot.img. Host-built only, not flashed.
+- Test: boot, open the app where typing stalls (any app; it no longer has to be named), type with
+  the keyboard up through ~140 s so all 12 passes land, then pull the log. Read: the `X9 SCAN:`
+  block of the foreground app. A frozen main thread should be t0 `run=3` waiting in mach_msg with
+  the UIKit/dictation frames in bt (or `run=1` if it spins). The process name in that line is the
+  app we have been missing.
+
 ## 34.txt: rev252k patch applied and verified, but the keyboard still stalls (2026-11-04)
 
 - 实测 the patch ran on the phone exactly as designed (34.txt:667-701): the on-device original
@@ -23,7 +59,7 @@
 - Consequence: sampling only named daemons is too narrow. The next build widens the target list
   (SpringBoard,Preferences,MobileSafari,MobileNotes,kbd) instead of guessing the app.
 
-## rev252l: same launchd patch, wider sampler (built 2026-11-04, not flashed)
+## rev252l: same launchd patch, wider sampler (built 2026-11-04, flashed, results in the 35.txt section)
 
 - Kernel code unchanged from rev252k. Only the boot args differ:
   `x9_sample_procs=SpringBoard,Preferences,MobileSafari,MobileNotes,kbd` (30 s delay, 10 s
