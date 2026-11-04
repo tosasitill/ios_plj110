@@ -7146,7 +7146,19 @@ sweet_x9_seed_assistant_dictation(proc_t p, user_addr_t scratch, user_addr_t end
  * plist with the XML seed (hard-linked backup first) and seeds every plausible
  * spelling of the session language, since UIKit keys the dict by
  * -[UIKeyboardInputMode languageWithRegion] (en_US form) while other Assistant
- * paths use en-US. x9_kbd_dictation=0 disables. */
+ * paths use en-US.
+ * 42.txt: that seed was on disk and byte-identical to our XML at 30 s and 40 s,
+ * yet the Spotlight main thread still sat in isDictationLanguageEnabled:+144 ->
+ * updateEnabledDictationLanguages: -> TIGetSuggestedDictationLanguagesForDevice
+ * Language -> CFBundle/_CFBundleCopyPreferredLanguagesInList -> libicucore, and
+ * cfprefsd rewrote the file to 224 bytes at 50 s. So either the queried key is a
+ * spelling we did not seed, or TIPreferencesController never saw our dict. The
+ * whole-file replacement also dropped KeyboardsCurrentAndNext, which is what
+ * feeds activeDictationSupportedInputModeIdentifiers (and the user's Pinyin
+ * layout), so rev252u seeds that array back with the two identifiers 42.txt's
+ * backup shows and sweet_sample.c now dumps the live file on every pass: the
+ * 224-byte rewrite is then readable and carries the key spelling UIKit actually
+ * stored. */
 #define X9_KBD_PREFS_MAX 8192
 static int
 sweet_x9_seed_kbd_dictation(proc_t p, user_addr_t scratch, user_addr_t end)
@@ -7154,12 +7166,12 @@ sweet_x9_seed_kbd_dictation(proc_t p, user_addr_t scratch, user_addr_t end)
  static const char target[]="/private/var/mobile/Library/Preferences/com.apple.keyboard.preferences.plist";
  static const char backup[]="/private/var/mobile/Library/Preferences/com.apple.keyboard.preferences.x9-before-seed.plist";
  static const char temp[]="/private/var/mobile/Library/Preferences/com.apple.keyboard.preferences.x9-seed.tmp";
- static const char frag[]="\t<key>DictationLanguagesEnabled</key>\n\t<dict>\n\t\t<key>en</key>\n\t\t<false/>\n\t\t<key>en-US</key>\n\t\t<false/>\n\t\t<key>en_US</key>\n\t\t<false/>\n\t\t<key>zh-CN</key>\n\t\t<false/>\n\t\t<key>zh_CN</key>\n\t\t<false/>\n\t\t<key>zh-Hans</key>\n\t\t<false/>\n\t\t<key>zh-Hans-CN</key>\n\t\t<false/>\n\t\t<key>zh_Hans_CN</key>\n\t\t<false/>\n\t</dict>\n\t<key>DictationLanguagesLastUsed</key>\n\t<dict/>\n";
- static const char fresh[]="<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>DictationLanguagesEnabled</key>\n\t<dict>\n\t\t<key>en</key>\n\t\t<false/>\n\t\t<key>en-US</key>\n\t\t<false/>\n\t\t<key>en_US</key>\n\t\t<false/>\n\t\t<key>zh-CN</key>\n\t\t<false/>\n\t\t<key>zh_CN</key>\n\t\t<false/>\n\t\t<key>zh-Hans</key>\n\t\t<false/>\n\t\t<key>zh-Hans-CN</key>\n\t\t<false/>\n\t\t<key>zh_Hans_CN</key>\n\t\t<false/>\n\t</dict>\n\t<key>DictationLanguagesLastUsed</key>\n\t<dict/>\n</dict>\n</plist>\n";
+ static const char frag[]="\t<key>DictationLanguagesEnabled</key>\n\t<dict>\n\t\t<key>en</key>\n\t\t<false/>\n\t\t<key>en-US</key>\n\t\t<false/>\n\t\t<key>en_US</key>\n\t\t<false/>\n\t\t<key>zh-CN</key>\n\t\t<false/>\n\t\t<key>zh_CN</key>\n\t\t<false/>\n\t\t<key>zh-Hans</key>\n\t\t<false/>\n\t\t<key>zh-Hans-CN</key>\n\t\t<false/>\n\t\t<key>zh_Hans_CN</key>\n\t\t<false/>\n\t\t<key>zh_Hans</key>\n\t\t<false/>\n\t\t<key>en_US@sw=QWERTY;hw=Automatic</key>\n\t\t<false/>\n\t\t<key>zh_Hans-Pinyin@sw=Pinyin-Simplified;hw=Automatic</key>\n\t\t<false/>\n\t</dict>\n\t<key>DictationLanguagesLastUsed</key>\n\t<dict/>\n";
+ static const char fresh[]="<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>DictationLanguagesEnabled</key>\n\t<dict>\n\t\t<key>en</key>\n\t\t<false/>\n\t\t<key>en-US</key>\n\t\t<false/>\n\t\t<key>en_US</key>\n\t\t<false/>\n\t\t<key>zh-CN</key>\n\t\t<false/>\n\t\t<key>zh_CN</key>\n\t\t<false/>\n\t\t<key>zh-Hans</key>\n\t\t<false/>\n\t\t<key>zh-Hans-CN</key>\n\t\t<false/>\n\t\t<key>zh_Hans_CN</key>\n\t\t<false/>\n\t\t<key>zh_Hans</key>\n\t\t<false/>\n\t\t<key>en_US@sw=QWERTY;hw=Automatic</key>\n\t\t<false/>\n\t\t<key>zh_Hans-Pinyin@sw=Pinyin-Simplified;hw=Automatic</key>\n\t\t<false/>\n\t</dict>\n\t<key>DictationLanguagesLastUsed</key>\n\t<dict/>\n\t<key>KeyboardsCurrentAndNext</key>\n\t<array>\n\t\t<string>en_US@sw=QWERTY;hw=Automatic</string>\n\t\t<string>zh_Hans-Pinyin@sw=Pinyin-Simplified;hw=Automatic</string>\n\t</array>\n</dict>\n</plist>\n";
  int enabled=0,error,fd; int32_t rv=0; user_ssize_t written=0; vnode_t vp=NULLVP;
  char *src=NULL; size_t srclen=0,ins=0,got=0,bodylen=0; int replaced=0;
  extern boolean_t sweet_x9_ufs_root_writable(void);
- if((enabled=sweet_x9_arg("x9_kbd_dictation",1))!=1)return 0;
+ if((enabled=sweet_x9_arg("x9_kbd_dictation",0))!=1)return 0;
  if(!sweet_x9_ufs_root_writable())return EROFS;
  if(!proc_is64bit(p)||scratch>end)return E2BIG;
  error=vnode_lookup(target,VNODE_LOOKUP_NOFOLLOW,&vp,vfs_context_kernel());

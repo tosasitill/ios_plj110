@@ -128,8 +128,7 @@ static int sample_proc(proc_t p, __unused void *arg) {
  * main thread stays in the dictation-availability loop. Ask the filesystem
  * again from this thread: if cfprefsd replaced our XML plist (size/mtime
  * change or a bplist00 header) the preference was ignored downstream rather
- * than lost, and the fix has to move to the services. x9_prefcheck=0 disables;
- * the byte dump happens only on the first pass. */
+ * than lost, and the fix has to move to the services. x9_prefcheck=0 disables. */
 static void
 x9_prefdump(const char *path, int dump_bytes) {
  vnode_t vp=NULLVP;
@@ -174,7 +173,11 @@ x9_prefcheck(int dump_bytes) {
  int enabled=1;
  (void)PE_parse_boot_argn("x9_prefcheck",&enabled,sizeof(enabled));
  if(!enabled) return;
- x9_prefdump("/private/var/mobile/Library/Preferences/com.apple.assistant.support.plist",dump_bytes);
+ /* 42.txt: the live keyboard preferences went from our 540-byte XML seed to a
+  * 224-byte file at 50 s and only the first pass was byte-dumped, so what
+  * cfprefsd actually kept is still unknown. Dump the live files on every pass
+  * (each is under 1 KB) and the backups only once. */
+ x9_prefdump("/private/var/mobile/Library/Preferences/com.apple.assistant.support.plist",1);
  x9_prefdump("/private/var/mobile/Library/Preferences/com.apple.assistant.support.x9-before-seed.plist",dump_bytes);
  /* 41.txt: the keyboard preference file is a 767-byte bplist00, so rev252s
   * declined to seed it and the app main thread kept recomputing
@@ -182,7 +185,7 @@ x9_prefcheck(int dump_bytes) {
   * backup first), so dump both: the live copy proves the XML seed survived and
   * the .x9-before-seed copy carries the original binary contents for reading the
   * keys UIKit had stored. */
- x9_prefdump("/private/var/mobile/Library/Preferences/com.apple.keyboard.preferences.plist",dump_bytes);
+ x9_prefdump("/private/var/mobile/Library/Preferences/com.apple.keyboard.preferences.plist",1);
  x9_prefdump("/private/var/mobile/Library/Preferences/com.apple.keyboard.preferences.x9-before-seed.plist",dump_bytes);
 }
 /* Route B needs the live launchd.plist byte layout before anything may rewrite

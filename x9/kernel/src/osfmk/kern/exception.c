@@ -1304,8 +1304,11 @@ void x9_sample_task(const char *name, int pid, task_t task)
   kern_return_t k=thread_getstatus(refs[i],ARM_THREAD_STATE64,(thread_state_t)&state,&count);
   if(k==KERN_SUCCESS) {
    uint64_t fp=state.fp;
-   char line[512]; int used=snprintf(line,sizeof(line),"X9 SAMPLE: %s[%d] t%u info=%d run=%d flags=0x%x sleep=%d pc=0x%llx lr=0x%llx sp=0x%llx fp=0x%llx bt",name,pid,i,ik,info.run_state,info.flags,info.sleep_time,(uint64_t)state.pc,(uint64_t)state.lr,(uint64_t)state.sp,fp);
-   for(unsigned j=0;j<12&&fp&&(fp&7)==0&&used<(int)sizeof(line)-25;j++) {
+   char line[1024]; int used=snprintf(line,sizeof(line),"X9 SAMPLE: %s[%d] t%u info=%d run=%d flags=0x%x sleep=%d pc=0x%llx lr=0x%llx sp=0x%llx fp=0x%llx bt",name,pid,i,ik,info.run_state,info.flags,info.sleep_time,(uint64_t)state.pc,(uint64_t)state.lr,(uint64_t)state.sp,fp);
+   /* 42.txt: twelve frames ended exactly at -[UIKeyboardInputModeController
+    * isDictationLanguageEnabled:], so whoever asks about dictation every frame
+    * stayed invisible. The line buffer is 1 KB, which holds ~30 return addrs. */
+   for(unsigned j=0;j<28&&fp&&(fp&7)==0&&used<(int)sizeof(line)-25;j++) {
     uint64_t frame[2]; if(vm_map_read_user(map,fp,frame,sizeof(frame))!=KERN_SUCCESS)break;
     used+=snprintf(line+used,sizeof(line)-used," 0x%llx",frame[1]);
     if(frame[0]<=fp || frame[0]-fp>0x100000)break;fp=frame[0];
