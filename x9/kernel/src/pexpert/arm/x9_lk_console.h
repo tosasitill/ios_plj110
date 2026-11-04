@@ -172,6 +172,91 @@ out:
  __atomic_store_n(&x9_lk_submit_lock,0u,__ATOMIC_RELEASE);
  return result;
 }
+/* Panel DCS long write (brightness, DCS 0x51) between frames.
+ * Stock mtk_dsi_host_send_cmd: wait idle, write CMDQ0.. + CMDQ_SIZE|SIZE_SEL,
+ * DSI_START 0->1->0, wait idle. Stock re-writes CMDQ0=0x002c3909/SIZE=1 before
+ * every frame trigger (mtk_dsi.c cmd-mode trigger); x9_lk_start does not, it
+ * reuses LK's values, so CMDQ0/1, CMDQ_CON (+0x44) and RX_CON (+0xa0) are
+ * restored before the submit lock is released. LP only (config LONG, no
+ * HSTX): pan36 lit the glass this way, pan35's HS variant got SoT errors.
+ * Readback (optional) is the shim's verified V2 DCS read of 0x52 and 0x0A.
+ * Returns 1 sent, 0 busy (frame in flight or lock held; retry), -1 unavailable,
+ * -2 sent but BUSY never cleared. rd = raw 0x52 read word, raw 0x0A read
+ * word ([7:0] DI, [15:8] data0, [23:16] data1), saved CMDQ0, saved CMDQ_CON. */
+#ifndef X9_LK_DELAY_US
+#define X9_LK_DELAY_US(us) delay(us)
+#endif
+static int x9_lk_wait_idle(unsigned us) {
+ for (unsigned t = 0; t < us / 50; t++) {
+  if (!(X9_LK_READ(x9_lk_dsi, 0x0c) & 0x80000000u)) return 1;
+  X9_LK_DELAY_US(50);
+ }
+ return !(X9_LK_READ(x9_lk_dsi, 0x0c) & 0x80000000u);
+}
+static void x9_lk_kick(uint32_t size) {
+ X9_LK_WRITE(x9_lk_dsi, 0x44, (X9_LK_READ(x9_lk_dsi, 0x44) & ~(0x3ffu | 0x8000u)) | size | 0x8000u);
+ X9_LK_FENCE();
+ X9_LK_WRITE(x9_lk_dsi, 0x00, 0);
+ X9_LK_WRITE(x9_lk_dsi, 0x00, 1);
+ X9_LK_FENCE();
+ X9_LK_WRITE(x9_lk_dsi, 0x00, 0);
+}
+static uint32_t x9_lk_dcs_read(uint8_t cmd, uint8_t ret) {
+ X9_LK_WRITE(x9_lk_dsi, 0x0c, ~1u);                       /* clear LPRX_RD_RDY only */
+ X9_LK_WRITE(x9_lk_dsi, 0xa0, X9_LK_READ(x9_lk_dsi, 0xa0) | 1u); /* RX_DATA_SRAM_MODE */
+ X9_LK_WRITE(x9_lk_dsi, 0x400, ((uint32_t)ret << 16) | (0x37u << 8));
+ X9_LK_WRITE(x9_lk_dsi, 0x404, ((uint32_t)cmd << 16) | (0x06u << 8) | 0x4u);
+ x9_lk_kick(2);
+ for (unsigned t = 0; t < 200 && !(X9_LK_READ(x9_lk_dsi, 0x0c) & 1u); t++) X9_LK_DELAY_US(100);
+ X9_LK_WRITE(x9_lk_dsi, 0x0c, ~1u);
+ X9_LK_WRITE(x9_lk_dsi, 0x44, (X9_LK_READ(x9_lk_dsi, 0x44) & ~0x70000u) | 0x30000u);
+ uint32_t w = X9_LK_READ(x9_lk_dsi, 0x5fc);
+ X9_LK_WRITE(x9_lk_dsi, 0x44, X9_LK_READ(x9_lk_dsi, 0x44) & ~0x70000u);
+ X9_LK_WRITE(x9_lk_dsi, 0xb4, X9_LK_READ(x9_lk_dsi, 0xb4) | 1u); /* RACK */
+ (void)x9_lk_wait_idle(20000);
+ return w;                 /* [7:0] response DI, [15:8] data0, [23:16] data1 */
+}
+static int x9_lk_dcs_long(const uint8_t *data, unsigned len, int readback, uint32_t rd[4]) {
+ if (!x9_lk_active || len < 3 || len > 8) return -1;
+ if (__atomic_exchange_n(&x9_lk_submit_lock, 1u, __ATOMIC_ACQUIRE)) return 0;
+ int result = 0;
+ uint32_t status = X9_LK_READ(x9_lk_dsi, 0x0c);
+ if (status == 0xffffffffu) { result = -1; goto out; }
+ if (status & 0x80000000u) goto out;      /* frame in flight */
+ {
+  uint32_t q0 = X9_LK_READ(x9_lk_dsi, 0x400), q1 = X9_LK_READ(x9_lk_dsi, 0x404);
+  uint32_t q2 = X9_LK_READ(x9_lk_dsi, 0x408), con = X9_LK_READ(x9_lk_dsi, 0x44);
+  uint32_t rx = X9_LK_READ(x9_lk_dsi, 0xa0);
+  uint32_t words = (len + 3) / 4;
+  X9_LK_WRITE(x9_lk_dsi, 0x400, 0);
+  for (unsigned w = 0; w < words; w++) {
+   uint32_t v = 0;
+   for (unsigned b = 0; b < 4 && w * 4 + b < len; b++) v |= (uint32_t)data[w * 4 + b] << (b * 8);
+   X9_LK_WRITE(x9_lk_dsi, 0x404 + w * 4, v);
+  }
+  X9_LK_WRITE(x9_lk_dsi, 0x400, ((uint32_t)len << 16) | (0x39u << 8) | 0x2u);
+  x9_lk_kick(1 + words);
+  result = x9_lk_wait_idle(20000) ? 1 : -2;
+  X9_LK_WRITE(x9_lk_dsi, 0x0c, ~2u);     /* ack CMD_DONE only; TE_RDY untouched */
+  if (rd) {
+   rd[0] = rd[1] = 0; rd[2] = q0; rd[3] = con;
+   if (readback && result == 1) {
+    rd[0] = x9_lk_dcs_read(0x52, 2);
+    rd[1] = x9_lk_dcs_read(0x0a, 1);
+    X9_LK_WRITE(x9_lk_dsi, 0x0c, ~2u);
+   }
+  }
+  X9_LK_WRITE(x9_lk_dsi, 0x400, q0);
+  X9_LK_WRITE(x9_lk_dsi, 0x404, q1);
+  X9_LK_WRITE(x9_lk_dsi, 0x408, q2);
+  X9_LK_WRITE(x9_lk_dsi, 0xa0, rx);
+  X9_LK_WRITE(x9_lk_dsi, 0x44, con);
+  X9_LK_FENCE();
+ }
+out:
+ __atomic_store_n(&x9_lk_submit_lock, 0u, __ATOMIC_RELEASE);
+ return result;
+}
 static int x9_lk_gui_disarm(void) {
  if(__atomic_exchange_n(&x9_lk_submit_lock,1u,__ATOMIC_ACQUIRE))return 0;
  x9_lk_gui_armed=0;

@@ -74,6 +74,7 @@ extern "C" void x9_lk_gui_probe(void);
 extern "C" int x9_lk_overlay(unsigned index, uint64_t *address, uint64_t *bytes,
     unsigned *engine, uint32_t *pitch, uint32_t *height);
 extern "C" int x9_lk_overlay_level(void);
+extern "C" int x9_lk_panel_dcs(const uint8_t *data, unsigned len, int readback, uint32_t rd[4]);
 extern "C" void sweet_watchdog_pet(void);   /* osfmk/arm64/sweet_early.c */
 extern "C" int sweet_x9_render_display_try_enter(void);
 extern "C" void sweet_x9_render_owner_leave(void);
@@ -184,6 +185,12 @@ enum {
 #define SWEET_FB_LAYERS                 4
 #define SWEET_FB_FADE_STEPS             30      /* ~0.5 s at 60 Hz */
 #define SWEET_FB_MAX_NITS               500     /* IOMFBBrightnessLevel at panel DBV 0x7ff */
+/* X9 ac287 (oplus DT): DBV 1..4094, normal max 3515 (above = HBM), default
+ * 35%. oplus_panel_set_backlight_cmdq writes level>>8, level&0xff into the
+ * 51 00 00 template and drops level 1, so the floor is 2. */
+#define X9_BL_DBV_MIN                   2
+#define X9_BL_DBV_MAX                   3515
+#define X9_BL_DBV_DEFAULT               1433
 #define SWEET_FB_NOTIFY_TYPES           8
 #define SWEET_FB_NOTIFY_VSYNC           5
 #define SWEET_FB_VSYNC_US               16667
@@ -300,6 +307,9 @@ public:
 	bool          dsiSend(const uint8_t hdr[4], const uint8_t *payload, uint32_t len);
 	void          setPanelOn(bool on);
 	void          setPanelLevel(uint32_t level);
+	bool          fX9Bl;          /* X9: DCS 0x51 through the inherited LK DSI */
+	uint32_t      fX9BlSent, fX9BlBusy, fX9BlFail;
+	bool          blReady(void) const { return fDsi != NULL || fX9Bl; }
 	void addClient(IOMobileFramebufferUserClient *client);
 	void removeClient(IOMobileFramebufferUserClient *client);
 	void swap(const uint8_t *rec);
@@ -589,15 +599,28 @@ AppleCLCD::start(IOService *provider)
 	fBlLevel = 0x133;                       /* panel init level (stock DT) */
 	fBlSent = ~0u;
 	fBlCall = thread_call_allocate(&AppleCLCD::blWork, this);
-	if (fDsi != NULL) {
-		IOLog("SWEET FB: DSI0 ctrl %#x, brightness via DCS 0x51\n", *(volatile uint32_t *)(fDsi + 0x004));
+	fX9Bl = sweet_board_x9() && x9_lk_gui_busy() >= 0;
+	fX9BlSent = fX9BlBusy = fX9BlFail = 0;
+	if (fX9Bl) {
+		fBlLevel = X9_BL_DBV_DEFAULT;
+		IOLog("X9 BL: DCS 0x51 via inherited LK DSI0 (0x3e730000), LP long write, DBV %u..%u\n",
+		    X9_BL_DBV_MIN, X9_BL_DBV_MAX);
+	} else if (sweet_board_x9()) {
+		IOLog("X9 BL: LK DSI path not active; no backlight service\n");
+	}
+	if (blReady()) {
+		if (fDsi != NULL) {
+			IOLog("SWEET FB: DSI0 ctrl %#x, brightness via DCS 0x51\n", *(volatile uint32_t *)(fDsi + 0x004));
+		}
 		setProperty("IOMFBBrightnessLevel", (unsigned long long)(200u << 16), 32);
 		/*
 		 * Off unless sweetbl=1: with a backlight service CoreBrightness also
 		 * runs digital dimming, a colour filter over every frame, which the
 		 * CPU renderer cannot afford (the UI dropped to under 1 fps).
+		 * X9 defaults on (Metal renders; the boot-arg budget is full),
+		 * sweetbl=0 turns it off.
 		 */
-		uint32_t blOn = 0;
+		uint32_t blOn = fX9Bl ? 1 : 0;
 		(void)PE_parse_boot_argn("sweetbl", &blOn, sizeof(blOn));
 		AppleARMBacklight *bl = blOn ? OSTypeAlloc(AppleARMBacklight) : NULL;
 		if (bl != NULL && bl->init()) {
@@ -1455,6 +1478,40 @@ void
 AppleCLCD::setPanelLevel(uint32_t level)
 {
 	uint8_t cmd[3] = { 0x51, (uint8_t)(level >> 8), (uint8_t)level };   /* MSB first */
+	if (fX9Bl) {
+		/*
+		 * Only between frames: x9_lk_panel_dcs returns 0 while a frame is in
+		 * flight or the submit lock is held. Runs on fBlCall, so sleeping is
+		 * fine. The first two sends read back 0x52 (DBV) and 0x0A (0x9C =
+		 * healthy per the panel's ESD config).
+		 */
+		uint32_t rd[4] = {};
+		int r = 0;
+		unsigned tries = 0;
+		IOLockLock(fBlLock);
+		bool readback = fX9BlSent < 2;
+		while (tries < 100 && (r = x9_lk_panel_dcs(cmd, sizeof(cmd), readback, rd)) == 0) {
+			tries++;
+			IOSleep(1);
+		}
+		if (r == 1) {
+			fX9BlSent++;
+		} else {
+			fX9BlFail++;
+		}
+		fX9BlBusy += tries;
+		uint32_t sent = fX9BlSent, fail = fX9BlFail, busy = fX9BlBusy;
+		IOLockUnlock(fBlLock);
+		if (sent <= 8 || r != 1 || (sent % 32) == 0) {
+			IOLog("X9 BL: DBV %u (0x%03x) r=%d retries=%u sent=%u fail=%u busy_total=%u cmdq0=%08x con=%08x\n",
+			    level, level, r, tries, sent, fail, busy, rd[2], rd[3]);
+		}
+		if (readback && r == 1) {
+			IOLog("X9 BL: readback 0x52 di=%02x dbv=%02x%02x, 0x0A di=%02x mode=%02x (0x9c healthy)\n",
+			    rd[0] & 0xff, (rd[0] >> 8) & 0xff, (rd[0] >> 16) & 0xff, rd[1] & 0xff, (rd[1] >> 8) & 0xff);
+		}
+		return;
+	}
 	IOLockLock(fBlLock);
 	bool done = dsiDcsLong(cmd, sizeof(cmd));
 	IOLockUnlock(fBlLock);
@@ -1475,18 +1532,27 @@ AppleCLCD::setProperties(OSObject *properties)
 	OSDictionary *d = OSDynamicCast(OSDictionary, properties);
 	sweet_bl_log("iomfb", d);
 	OSNumber *n = d ? OSDynamicCast(OSNumber, d->getObject("IOMFBBrightnessLevel")) : NULL;
-	if (n == NULL || fDsi == NULL) {
+	if (n == NULL || !blReady()) {
 		return kIOReturnUnsupported;
 	}
 	uint64_t v = n->unsigned64BitValue();
 	setProperty("IOMFBBrightnessLevel", v, 32);
-	/* 0..SWEET_FB_MAX_NITS nits -> DBV 1..0x7ff */
-	uint64_t level = (v * 0x7ffull) / ((uint64_t)SWEET_FB_MAX_NITS << 16);
-	if (level > 0x7ff) {
-		level = 0x7ff;
-	}
-	if (level < 1) {
-		level = 1;
+	uint64_t level;
+	if (fX9Bl) {
+		/* 0..SWEET_FB_MAX_NITS nits -> DBV 2..3515 (linear; no HBM) */
+		level = X9_BL_DBV_MIN + (v * (X9_BL_DBV_MAX - X9_BL_DBV_MIN)) / ((uint64_t)SWEET_FB_MAX_NITS << 16);
+		if (level > X9_BL_DBV_MAX) {
+			level = X9_BL_DBV_MAX;
+		}
+	} else {
+		/* 0..SWEET_FB_MAX_NITS nits -> DBV 1..0x7ff */
+		level = (v * 0x7ffull) / ((uint64_t)SWEET_FB_MAX_NITS << 16);
+		if (level > 0x7ff) {
+			level = 0x7ff;
+		}
+		if (level < 1) {
+			level = 1;
+		}
 	}
 	IOLockLock(fLock);
 	fBlLevel = (uint32_t)level;

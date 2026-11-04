@@ -733,6 +733,10 @@ static uint8_t fbcon_char_grid[FBCON_GRID_MAX_ROWS][FBCON_GRID_MAX_COLS];
 /* Used only after X9 GUI composition has published the boot framebuffer. */
 int x9_lk_gui_present(void) { return x9_lk_gui_step(); }
 int x9_lk_gui_cancel(void) { return x9_lk_gui_disarm(); }
+/* Panel DCS long write between frames (AppleCLCD brightness). See x9_lk_dcs_long. */
+int x9_lk_panel_dcs(const uint8_t *data, unsigned len, int readback, uint32_t rd[4]) {
+ return x9_lk_dcs_long(data, len, readback, rd);
+}
 int x9_lk_gui_busy(void) {
  return x9_lk_active ? !!(x9_lk_gui_armed || (X9_LK_READ(x9_lk_dsi,0x0c)&0x80000000u)) : -1;
 }
