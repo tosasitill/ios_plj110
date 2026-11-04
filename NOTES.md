@@ -738,6 +738,59 @@
   tools/sweet-root-tweaks.py drops CommCenter, so the sync availability query fails fast and stays
   "unavailable" (also kills the TTS crash churn). locationd's sig 5 loop is a separate bug.
   -> DONE without a reflash, as the same-length boot.img patch in rev252k (section above).
+## Wi-Fi B1 round 1 (GPIO power-on test) built (2026-11-04)
+
+- USER: keyboard/language settings normal (English keyboard) -> keyboard parked; USER approved the Wi-Fi
+  power-on (first hardware write).
+- SOURCE order (connv3_core.c opfunc_power_on_internal, connv3_hw.c, mt6993_pmic.c, gen4m
+  cmm_asic_connac3x.c/plat_priv.c): PRE_PWR_ON -> wlan_pre_pwr_on -> wf_rst_on (GPIO250 high,
+  RST_PIN_MIN_WAIT_TIME 200 ms) -> connv3_hw_pwr_on: vsel no-op, mdelay(30), pmic-en-set (GPIO251 high),
+  mdelay(20), faultb pull-up (GPIO65), combo UART pre-on pull-ups -> gen4m connsys_power_on mdelay(10)
+  "pcie phy ready" -> halMawdPwrOn -> PTA_UART_ON. Off: mdelay(20), pmic-en-clr, wf_rst_off.
+- Commit ed0466f: x9_wifi_power=1 thread (20 s after IONetworkStack start) does wf_rst_on, 30 ms, PMIC_EN
+  high, 30 ms, logs GPIO65 + PCIe0 LTSSM/link/rst_ctrl changes for 3 s (50 ms poll), then off in reverse.
+  Only GPIO250/251 mode/dir/out bits written (RMW). No pulls, PMIC registers or PCIe RC writes.
+- Built in a SEPARATE worktree because ~/ios_plj110 on the Mac carries another session's unpushed work
+  (6 commits rev252i..m keyboard investigation + uncommitted sweet_sample.c/exception.c): worktree
+  ~/ios_plj110-wt-wifi (detached ed0466f, .local and x9/build/local.json symlinked). Artifact:
+  ~/ios_plj110-wt-wifi/x9/out/x9-wifipwr-ed0466f/boot.img (x9_wifi_fake=1 x9_wifi_probe=1
+  x9_wifi_power=1), allowlist 252, 9,457,664 B, sha256 2b3d9f02... Not device-tested.
+- Expect: `X9 WIFI POWER: armed`, at ~20 s `WF_RST high`, `PMIC_EN high`, t=... lines (faultb rising to 1
+  = PMIC up without fault is the hoped-for sign; LTSSM likely stays 0 because the RC is not started),
+  then `off again`.
+
+## 32.txt (rev252h-nowifi): keyboard freeze is NOT Wi-Fi related (2026-11-04)
+
+- USER: still freezes with no fake radio (0 X9 WIFI lines, no wifid/en0). Preferences[277] t0 again in
+  the dictation loop (UIDictationConnection dictationIsAvailableForLanguage -> UISystemKeyboardDockController
+  updateDockItemsVisibility -> UIKeyboardInputModeController activeDictationLanguages /
+  suggestedDictationLanguagesForDeviceLanguage / CFPrefs reads -> NSNotification ...).
+- SOURCE (UIKitCore/AssistantServices 20H392): UIDictationConnection only forwards to AFDictationConnection;
+  -[AFDictationConnection dictationIsAvailableForLanguage:synchronous:] keeps a per-language dict
+  (CheckLanguageAvailable, LanguageAvailableOverNetwork, HQ/LQAssetsAvailable), consults
+  AFNetworkAvailability isAvailable and forcedOfflineDictationIsAvailableForLanguage:synchronous:.
+  AFNetworkAvailability addObserver path calls _startObservingAvailability then _availabilityChanged
+  (0x19bf085bc) -> every new observer gets an immediate change callback.
+- 推断 (unverified), two candidates: (1) the dock creates a fresh dictation connection per update, each
+  new observer gets "changed" -> next update (self-sustaining); (2) keyboard/language preferences never
+  set (Setup skipped by x9_skip_setup) -> enabledInputModeIdentifiers recomputed/written each pass ->
+  prefs change notification -> recompute. User check requested: Settings > General > Keyboard > Keyboards.
+
+## 31.txt (rev252h): dictation seed not enough; B1/B2 probe result; A/B build (2026-11-04)
+
+- 实测 B1/B2 probe (read-only): GPIO251 PMIC_EN in/0 (MT6653 OFF: LK never powers it), GPIO248 POR
+  out/0, GPIO250/65/243/244 in/0 mode 0; pextp0 cg_sta 0 (all PCIe0 clocks ON), rst 0, pd 0x3ce7f
+  (MAC0 + PHY0 powered); pcie0 MAC rst_ctrl/ltssm/link = 0 (idle, no link). => LK leaves PCIe0 powered
+  and clocked; only the Wi-Fi chip is off. Next B step = first WRITE: GPIO power-on (PMIC_EN high etc.,
+  connv3 order) + LTSSM watch -> needs explicit user confirmation.
+- Keyboard: `X9 DICTATION ... errno=0` but USER: still freezes. Preferences t0 still in the same loop
+  (dictation languages / dock visibility / AFPreferences / NSXPC to keyboard prefs). AssistantServices:
+  -[AFDictationConnection _availabilityChanged] -> _tellSpeechDelegateAvailabilityChanged, fed by
+  AFNetworkAvailability (Darwin notify token; AFNetworkAvailabilityDidChangeNotification). 推断: network
+  availability changes (fake radio / en0 / wifid) may drive the loop; 31.txt Wi-Fi churn is low though
+  (no join, ~4 wifid req/10 s after 37 s). assistantd is running.
+- A/B build: x9/out/x9-rev252h-nowifi/boot.img = rev252h kernel, no x9_wifi_fake (no wlan node, no
+  wifid, no en0), x9_sample_procs=Preferences,kbd. Test keyboard in Settings' search field.
 
 ## 30.txt keyboard freeze root-caused; Wi-Fi B1/B2 read-only probe; rev252h built (2026-11-04)
 
