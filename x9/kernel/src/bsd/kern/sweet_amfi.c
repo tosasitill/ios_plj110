@@ -29,6 +29,7 @@
 #include <libkern/amfi/amfi.h>
 #include <mach/kern_return.h>
 #include <mach/vm_param.h>
+#include <pexpert/pexpert.h>
 #include <sys/codesign.h>
 #include <sys/mount.h>
 #include <sys/priv.h>
@@ -310,11 +311,66 @@ sweet_amfi_vnode_check_signature(struct vnode *vp, __unused struct label *label,
  * variable has no container and gets success with the buffer untouched.
  * Ported from hackios-xnu-kernel bsd/kern/kern_minimac.c
  * (minisandbox_container_path, c84b4634277a70beac73921029b1fb6afc2530af).
+ *
+ * The extension operations (5 issue, 6 consume, 0x43 container expected)
+ * keep rev252p's ENOENT. rev252q let them succeed like the reference does;
+ * syncdefaultsd then began aborting on launch (sig 6, every 10 s, absent
+ * from 34..38.txt) - a successful answer without the token/handle the
+ * caller asked for is worse than a clean failure. x9_sandbox_ext_ok=1
+ * restores the success answer for one boot if an extension ever needs it.
  */
 static uint64_t sweet_sandbox_seen;
 
 #define SWEET_SANDBOX_CONTAINER_PATH    4
 #define SWEET_SANDBOX_CONTAINER_VAR     "CFFIXED_USER_HOME="
+#define SWEET_SANDBOX_LOG_MAX           24
+
+/* x9_sandbox_ops=1: one line per (process, operation) for ops 4/5/6/0x43,
+ * and the container answer's errno/length. Bounded so the console stays
+ * readable; the first-seen line above still covers every other op. */
+static struct {
+	int pid;
+	int call;
+} sweet_sandbox_logged[SWEET_SANDBOX_LOG_MAX];
+static unsigned int sweet_sandbox_logged_count;
+static int sweet_sandbox_ops_on = -1;
+static int sweet_sandbox_ext_ok_on = -1;
+static size_t sweet_sandbox_container_len;
+
+static int
+sweet_sandbox_boot_arg(const char *name)
+{
+	int on = 0;
+	return PE_parse_boot_argn(name, &on, sizeof(on)) && on != 0;
+}
+
+static void
+sweet_sandbox_op_log(struct proc *p, int call, int ret)
+{
+	int pid = proc_pid(p);
+	unsigned int i;
+	char name[32];
+
+	if (sweet_sandbox_ops_on < 0) {
+		sweet_sandbox_ops_on = sweet_sandbox_boot_arg("x9_sandbox_ops");
+	}
+	if (!sweet_sandbox_ops_on ||
+	    sweet_sandbox_logged_count >= SWEET_SANDBOX_LOG_MAX) {
+		return;
+	}
+	for (i = 0; i < sweet_sandbox_logged_count; i++) {
+		if (sweet_sandbox_logged[i].pid == pid &&
+		    sweet_sandbox_logged[i].call == call) {
+			return;
+		}
+	}
+	sweet_sandbox_logged[i].pid = pid;
+	sweet_sandbox_logged[i].call = call;
+	sweet_sandbox_logged_count++;
+	proc_name(pid, name, sizeof(name));
+	printf("SWEET Sandbox op: %s[%d] op %d ret=%d len=%lu\n", name, pid,
+	    call, ret, (unsigned long)sweet_sandbox_container_len);
+}
 
 static int
 sweet_sandbox_container_path(user_addr_t arg)
@@ -392,6 +448,7 @@ sweet_sandbox_container_path(user_addr_t arg)
 		    strncmp(s, SWEET_SANDBOX_CONTAINER_VAR, prefix_len) == 0) {
 			s += prefix_len;
 			len -= prefix_len;
+			sweet_sandbox_container_len = len;
 			error = len < args.size ?
 			    copyout(s, args.buffer, len + 1) : ENAMETOOLONG;
 			break;
@@ -404,6 +461,8 @@ sweet_sandbox_container_path(user_addr_t arg)
 static int
 sweet_sandbox_syscall(struct proc *p, int call, user_addr_t arg)
 {
+	int ret;
+
 	if (call >= 0 && call < 64 && !(sweet_sandbox_seen & (1ULL << call))) {
 		sweet_sandbox_seen |= 1ULL << call;
 		char name[32];
@@ -414,10 +473,28 @@ sweet_sandbox_syscall(struct proc *p, int call, user_addr_t arg)
 			printf("SWEET Sandbox: %s op %d\n", name, call);
 		}
 	}
+	sweet_sandbox_container_len = 0;
 	if (call == SWEET_SANDBOX_CONTAINER_PATH) {
-		return sweet_sandbox_container_path(arg);
+		ret = sweet_sandbox_container_path(arg);
+		sweet_sandbox_op_log(p, call, ret);
+		return ret;
 	}
-	return 0;
+	switch (call) {
+	case 5:         /* extension issue: no token can be minted here */
+	case 6:         /* extension consume */
+	case 0x43:      /* container expected */
+		if (sweet_sandbox_ext_ok_on < 0) {
+			sweet_sandbox_ext_ok_on =
+			    sweet_sandbox_boot_arg("x9_sandbox_ext_ok");
+		}
+		ret = sweet_sandbox_ext_ok_on ? 0 : ENOENT;
+		sweet_sandbox_op_log(p, call, ret);
+		break;
+	default:
+		ret = 0;
+		break;
+	}
+	return ret;
 }
 
 /* hackios reports the actual no-enforcement state via policy AMFI 0x60.
