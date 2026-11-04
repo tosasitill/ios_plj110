@@ -7121,7 +7121,7 @@ sweet_x9_seed_assistant_dictation(proc_t p, user_addr_t scratch, user_addr_t end
  struct close_args c={.fd=fd};int ce=sys_close(p,&c,&rv);if(!error)error=ce;
  if(!error){struct rename_args r={.from=tmp,.to=t};error=rename(p,&r,&rv);}
  if(error){struct unlink_args u={.path=tmp};(void)unlink(p,&u,&rv);}
- printf("X9 DICTATION: Siri and dictation turned off in com.apple.assistant.support errno=%d; original backed up if present\n",error);
+ printf("X9 DICTATION: Siri and dictation turned off in com.apple.assistant.support errno=%d bytes=%d; original backed up if present\n",error,(int)sizeof(body)-1);
  return error;
 }
 

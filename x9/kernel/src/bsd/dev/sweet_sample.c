@@ -96,6 +96,8 @@ sweet_sample_start(void)
 #include <sys/systm.h>
 #include <sys/proc.h>
 #include <sys/proc_internal.h>
+#include <sys/uio.h>
+#include <sys/vnode.h>
 #include <kern/task.h>
 #include <kern/thread.h>
 #include <pexpert/pexpert.h>
@@ -121,6 +123,59 @@ static int sample_proc(proc_t p, __unused void *arg) {
  }
  return PROC_RETURNED;
 }
+/* 31/32.txt: the assistant.support seed printed errno=0 at 2.7 s, yet the app
+ * main thread stays in the dictation-availability loop. Ask the filesystem
+ * again from this thread: if cfprefsd replaced our XML plist (size/mtime
+ * change or a bplist00 header) the preference was ignored downstream rather
+ * than lost, and the fix has to move to the services. x9_prefcheck=0 disables;
+ * the byte dump happens only on the first pass. */
+static void
+x9_prefdump(const char *path, int dump_bytes) {
+ vnode_t vp=NULLVP;
+ vfs_context_t ctx=vfs_context_kernel();
+ static char buf[256];
+ struct vnode_attr va;
+ errno_t error=vnode_lookup(path,VNODE_LOOKUP_NOFOLLOW,&vp,ctx);
+ if(error) { printf("X9 PREF: %s lookup errno=%d\n",path,error); return; }
+ VATTR_INIT(&va);
+ VATTR_WANTED(&va, va_data_size); VATTR_WANTED(&va, va_modify_time);
+ VATTR_WANTED(&va, va_mode); VATTR_WANTED(&va, va_uid);
+	if(vnode_getattr(vp,&va,ctx)==0)
+	 printf("X9 PREF: %s size=%llu mtime=%lld mode=0%o uid=%d\n",path,
+	  (unsigned long long)va.va_data_size,(long long)va.va_modify_time.tv_sec,
+	  (unsigned int)va.va_mode,(int)va.va_uid);
+	else printf("X9 PREF: %s getattr failed\n",path);
+	if(dump_bytes) {
+	 uio_t auio=uio_create(1,0,UIO_SYSSPACE,UIO_READ);
+	 size_t got=sizeof(buf);
+	 if(auio==NULL) printf("X9 PREF: uio_create failed\n");
+	 else {
+	  if(uio_addiov(auio,CAST_USER_ADDR_T(buf),sizeof(buf))!=0 ||
+	      VNOP_READ(vp,auio,0,ctx)!=0) printf("X9 PREF: read failed\n");
+	  else {
+	   user_ssize_t left=uio_resid(auio);
+	   got=left<0?0:sizeof(buf)-(size_t)left;
+	  }
+	  uio_free(auio);
+	  for(size_t start=0;start<got;start+=96) {
+	   char line[100]; size_t n=0;
+	   for(size_t i=start;i<got&&i<start+96;i++)
+	    line[n++]=(buf[i]>=0x20&&buf[i]<0x7f)?buf[i]:'.';
+	   line[n]=0;
+	   printf("X9 PREF +%lu: %s\n",(unsigned long)start,line);
+	  }
+	 }
+	}
+ vnode_put(vp);
+}
+static void
+x9_prefcheck(int dump_bytes) {
+ int enabled=1;
+ (void)PE_parse_boot_argn("x9_prefcheck",&enabled,sizeof(enabled));
+ if(!enabled) return;
+ x9_prefdump("/private/var/mobile/Library/Preferences/com.apple.assistant.support.plist",dump_bytes);
+ x9_prefdump("/private/var/mobile/Library/Preferences/com.apple.assistant.support.x9-before-seed.plist",0);
+}
 /* x9_thread_sample=1: 60 s, then every 120 s, 4 samples. Bare token x9bl
  * (short sampler for diagnostics; AppleARMBacklight is default-on now):
  * 40 s, then every 15 s, 6 samples, to catch backboardd while it stalls. */
@@ -131,6 +186,7 @@ static void sample_thread(__unused void *arg, __unused wait_result_t wr) {
   sample_delay,sample_interval,sample_count,sample_names[0]?sample_names:"SpringBoard,backboardd,wifid,lsd,datamigrator,migrationplugin");
  (void)tsleep(&chan,PZERO,"x9sample",(int)(sample_delay*hz));
  for(unsigned i=0;i<sample_count;i++) {
+  x9_prefcheck(i==0);
   printf("X9 SAMPLE: begin %u\n",i+1);
   proc_iterate(PROC_ALLPROCLIST,sample_proc,NULL,NULL,NULL);
   printf("X9 SAMPLE: end %u\n",i+1);
