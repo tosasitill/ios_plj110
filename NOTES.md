@@ -1,3 +1,29 @@
+## Active: brightness (DCS 0x51) code committed, NOT BUILT, NOT TESTED (2026-11-04)
+
+- Commit 9b63862 on feat/G1Ultra (origin/main's docs fast-forwarded in first, incl.
+  docs/brightness/porting-difficulty.md). Mac ssh (localhost:2222) was refused all session, so
+  there is no kernel build yet; only the new host test ran:
+  `python3 -I x9/tools/test_kernel_lk_dcs.py` -> OK.
+- Source confirmed this session (/home/ubuntu/android_kernel_modules_and_devicetree_oppo_mt6993):
+  oplus_display_dsi_primary.c:448 oplus_panel_set_backlight_cmdq writes `level>>8, level&0xff`
+  into the `51 00 00` template, clamps to hw_max (4094) and DROPS level 1 -> pass-through is no
+  longer an inference. mtk_dsi.c:8576 rewrites CMDQ0=0x002c3909 + SIZE=1 before every cmd-mode
+  frame trigger; mtk_dsi_host_send_cmd (11354) = wait idle, CMDQ, START 0->1->0, wait idle.
+- Code: x9_lk_console.h `x9_lk_dcs_long()` (under x9_lk_submit_lock, refuses while BUSY,
+  LP long write, restores CMDQ0/1/2, +0x44, +0xa0, acks only CMD_DONE). AppleCLCD: fX9Bl set when
+  the LK path is active; AppleARMBacklight published on X9 by default (sweetbl=0 disables);
+  nits 0..500 -> DBV 2..3515 linear; sent from fBlCall with up to 100 x 1 ms busy retries.
+- Expected log: `X9 BL: DCS 0x51 via inherited LK DSI0 ...` at start; backboardd matching
+  `backlight-control` -> found; `SWEET BL: backlight set brightness-nits`; `X9 BL: DBV n r=1`
+  and for the first two sends `X9 BL: readback 0x52 di=.. dbv=.... 0x0A ... mode=9c`.
+- Risks to watch: (R3) CoreBrightness digital dimming may slow composition now that a service
+  exists - compare copies/s and swap_id against 22.txt; (R1) frames stop or garbage after the
+  first DBV line = CMDQ restore not enough -> rollback to x9-rev249-lo.
+- Next: on the Mac `git pull`, `build.py all --revision 250 --name x9-rev250-bl --boot-arg x9lo`
+  (same env workaround as rev248/249), then BEFORE fastboot boot stage the payload:
+  `X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/x9-rev250-bl`.
+  Test: slider min/mid/max visibly changes brightness, panel stays alive.
+
 ## Brightness (backlight) porting assessed: difficulty 中低, lowest open subsystem; doc landed (2026-11-03)
 
 - Read-only assessment written to `docs/brightness/porting-difficulty.md`; no production code
