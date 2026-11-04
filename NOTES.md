@@ -1,3 +1,48 @@
+## 34.txt: rev252k patch applied and verified, but the keyboard still stalls (2026-11-04)
+
+- 实测 the patch ran on the phone exactly as designed (34.txt:667-701): the on-device original
+  bytes were saved errno=0, all 32 single-byte edits printed (`off=303802..304527 0x63->0x7a` for
+  the 30 assistantd MachServices keys and com.apple.sirittsd, `off=305003 0x61->0x7a`,
+  `off=344864 0x73->0x7a` for the two daemon paths), then
+  `X9 SIRI: disable size=796447 magic=bplist00 entries=32 already=0 changed=32 errno=0` and
+  `readback mismatches=0`. assistantd and sirittsd then never appear in the whole boot: no
+  `SWEET AKS: assistantd`, no sample for the assistantd target, no sirittsd line of any kind. So
+  launchd read the patched plist and neither job was spawned.
+- 实测 the churn did not stop: SiriTTSSynthesizer/MacinTalkAUSP/KonaSynthesizer still abort at the
+  same rate (6 each by 79.5 s, one every ~10-13 s; 33.txt had 11 each by ~130 s) and locationd
+  sig 5 22 times by 79.5 s (33.txt: 38). 推断: those .appex processes are not launched by
+  assistantd/sirittsd, and their crashes do not re-post the availability notification through
+  those daemons. The user reports the keyboard still stalls.
+- 实测 34.txt has no `Preferences[...]` line and no `SWEET AKS: Preferences` line at all - this
+  boot was not tested in the Settings app (targets were Preferences,kbd,assistantd; only kbd was
+  ever found, 5 passes / 25 lines from 30 to 70 s). The log stops at 79.5 s with the last
+  `X9 DISPLAY cadence ... missed=0` at 78.573, i.e. it was pulled a few seconds later and the
+  display path was healthy up to the cut. The frozen process was therefore something else
+  (Spotlight search runs inside SpringBoard, which was not sampled) and we have no app-side stack
+  for this stall.
+- Consequence: sampling only named daemons is too narrow. The next build widens the target list
+  (SpringBoard,Preferences,MobileSafari,MobileNotes,kbd) instead of guessing the app.
+
+## rev252l: same launchd patch, wider sampler (built 2026-11-04, not flashed)
+
+- Kernel code unchanged from rev252k. Only the boot args differ:
+  `x9_sample_procs=SpringBoard,Preferences,MobileSafari,MobileNotes,kbd` (30 s delay, 10 s
+  interval, 12 passes), `x9_siri_off=1` (the plist is already patched, so the seed should print
+  `already=32 changed=0` + `readback mismatches=0`), `x9_wifi_fake=1 x9_wifi_probe=1`.
+- Build: same two commands. Output x9/out/x9-rev252l/boot.img: image 18804736 / boot 9461760
+  bytes, allowlist 252, no restaging, boot.img sha256
+  fb0cd5bd0b2ba9480830c2b890cdf52128b4d318a63ebf37bf66b381031ce94d, kernel sha256
+  25d5d3c1803c68d3f30bb772cde519d20631234c7c00cb8b88d0dd6fab03e523 (unchanged), payload sha256
+  dd256ccbe5268b295a3a8f4e163009f1d7009a3c1d3e026b82341d6579136ba8. Host-built only.
+- Test: reproduce in the same app as 34.txt (if that is not Spotlight/main-screen search, say
+  which app it was), keep the keyboard up past ~130 s so all 12 passes land, then pull the log.
+  Read: the SpringBoard/app main-thread stacks. If it is still the
+  UIDictationController/UIDictationConnection recompute chain even though the XPC now fails fast,
+  the loop is self-sustaining and the fix has to move to the UIKit side (or to whatever still
+  triggers the notification). If the stack is a different chain, that chain is the new lead.
+- The root copy of launchd.plist stays patched across boots; a `--boot-arg x9_siri_off=0` build
+  restores the original 32 bytes (and prints `restore ... readback mismatches=0`).
+
 ## rev252k: route B delivered as a same-length launchd.plist patch (built 2026-11-04, not flashed)
 
 - Why: 33.txt (实测) keeps the app main thread in the dictation/input-mode recompute in 11/11
