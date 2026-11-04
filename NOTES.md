@@ -1,3 +1,35 @@
+## Brightness: DCS path verified on device; slider route = CoreBrightness RE (2026-11-04)
+
+- 实测 rev251 (24.txt): `[40.794] X9 BL: DBV 1433 (0x599) r=1 retries=0 sent=1 fail=0
+  cmdq0=002c3909 con=00008001`, `readback 0x52 di=22 dbv=0598, 0x0A di=21 mode=9c`; swap_id
+  176 -> 403 -> 567 after the write; USER: no problem. So the LP 0x51 write between frames,
+  with CMDQ restore, works and the panel reports the DBV back.
+- RE material (Mac, gitignored): dyld cache extracted with Xcode dsc_extractor.bundle to
+  `.local/x9/work/dsc-20H392/` (tool .local/x9/work/dsc-tool/ex.c; SystemOS.dmg mounted ro at
+  /tmp/sysos20H392). iPhone X ADT: `.local/x9/work/adt-d22/` (DeviceTree.d22ap.im4p, LZFSE
+  payload; decode with `compression_tool -decode -a lzfse`). Analysis scripts used this session
+  (macho.py/xref.py/ann.py/adtdump.py) were in the session scratchpad only.
+- SOURCE CONFIRMED (CoreBrightness 20H392 disassembly, display setup ~0x1af0d8600-0x1af0da740):
+  reads from the backlight service (IORegistryEntryCreateCFProperty, options 3 = recursive
+  parents): IODisplayParameters/brightness{value,min,max}, new-backlight-architecture,
+  backlight-calibration-parameters{current-for-max/mid-backlight, hardware-max-current-limit,
+  lMax/Mid/MinProduct, lMax/Mid/MinPanel, milliAmps2NitsScaleFactor} (absent -> 5/140/400 nits
+  then slider curve), digital-dimming-min-nits (default = hw min), user-accessible-max-nits
+  (default = hw max), backlight-marketing-table. DigitalDimmingSupported = hwMin > digMin,
+  ExtrabrightEDRSupported = hwMax > userMax -> BOTH OFF with our minimal service. `max-nits` is
+  never read (our invention). Setter: __DisplaySetBLDriverProperty("brightness-nits") ->
+  SetIOMFBBrightness -> SetWiggledDigitalDimmingScalar; 23.txt never reached it.
+- Real iPhone X /device-tree/backlight: DBVMin 0x8b, DBVMax 0x7ff, max-nit-value 750,
+  backlight-update-policy 4, use-AAB-architecture, use-AAP, use-Nits2DACTable, LmaxProduct...,
+  backlight-marketing-table (404 B), no digital-dimming key.
+- 23.txt new backboardd lines only with the service: NightModeControl / SunriseSunsetProvider /
+  "Night mode init". Stall = ~1 swap per 5 s, GPU idle. Cause still unknown (digital dimming
+  ruled out); hypothesis: a CA display colour/EDR transform composited off the GPU path.
+- Commit d2fba88: bare boot token `x9bl` (5 bytes, use INSTEAD of x9lo - banner returns) publishes
+  AppleARMBacklight and starts the X9 thread sampler (40 s, then 6 x 15 s; "X9 SAMPLE: name[pid]
+  slide= mh= ... bt"). NOT BUILT (Mac ssh dropped). Next: build rev252 with --boot-arg x9bl,
+  stage mailbox, boot, symbolicate backboardd threads against dsc-20H392.
+
 ## rev250-bl device result: purple + near-frozen UI from publishing AppleARMBacklight; service off again (2026-11-04)
 
 - 实测 (23.txt, 4977 lines to 100 s): `X9 BL: DCS 0x51 via inherited LK DSI0` and
