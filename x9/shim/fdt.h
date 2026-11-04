@@ -18,3 +18,6 @@ int fdt_ram_live_tuple(unsigned,uint64_t *,uint64_t *);
 int fdt_ram_patch_adt(void *,size_t);
 
 int fdt_gpu_patch_adt(uintptr_t,void *,size_t);
+
+/* Read-only Wi-Fi DT facts into /chosen/x9-lk-wifi-dt: 0 written, 1 no placeholder, -1 FDT unusable. */
+int fdt_wifi_dump_adt(uintptr_t,void *,size_t);

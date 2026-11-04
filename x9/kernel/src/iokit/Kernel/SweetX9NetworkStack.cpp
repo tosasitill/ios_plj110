@@ -5,9 +5,11 @@
  * Current target: XNU 8796.141.3 / iOS 16.7.16, 16 KiB pages.
  *
  * InterfaceNamer opens IONetworkStack before publishing Plugin:InterfaceNamer
- * completion. SCNetworkInterfaceCopyAll waits for that publication. X9 has
- * no native IONetworkInterface producer yet, so naming requests remain
- * unsupported. This service does not create an interface or a MAC address.
+ * completion. SCNetworkInterfaceCopyAll waits for that publication.
+ * Without x9_wifi_fake=1 this service creates no interface and naming
+ * requests stay unsupported. With it, configd's first open starts the Wi-Fi
+ * iOS side (X9WifiNet.inc: en0 + IO80211Interface over a fake radio) and
+ * naming requests are accepted, en0 being named when it is made.
  */
 #include <IOKit/IOLib.h>
 #include <IOKit/IOKitKeys.h>
@@ -19,6 +21,8 @@
 #if defined(ARM64_BOARD_CONFIG_SWEET)
 extern "C" int sweet_early_is_x9(void);
 extern "C" int sweet_x9_arg(const char *name, int def);
+
+#include "X9WifiNet.inc"
 
 class IONetworkStack : public IOService
 {
@@ -56,7 +60,9 @@ IONetworkStack::start(IOService *provider)
     }
     setName("IONetworkStack");
     registerService();
-    IOLog("X9 NETWORK: IONetworkStack registered under IOResources; naming only\n");
+    IOLog("X9 NETWORK: IONetworkStack registered under IOResources; %s\n",
+        sweet_x9_arg("x9_wifi_fake", 0) == 1 ? "Wi-Fi FAKE radio armed (x9_wifi_fake=1)" : "naming only");
+    x9_wifi_print_lk_dt();
     return true;
 }
 
@@ -85,6 +91,7 @@ IONetworkStackUserClient::start(IOService *provider)
     } else {
         IOLog("X9 NETWORK: IONetworkStack opened by %s; service root unavailable\n", who);
     }
+    x9_wifi_maybe_start();
     return true;
 }
 
@@ -100,8 +107,22 @@ IONetworkStackUserClient::clientClose(void)
 IOReturn
 IONetworkStackUserClient::setProperties(OSObject *properties)
 {
-    (void)properties;
     static unsigned logged;
+    if (x9wifi::gIf != NULL) {
+        if (logged++ < 16) {
+            char text[200] = "?";
+            OSSerialize *s = OSSerialize::withCapacity(512);
+            if (s != NULL) {
+                if (properties != NULL && properties->serialize(s)) {
+                    strlcpy(text, s->text(), sizeof(text));
+                }
+                s->release();
+            }
+            IOLog("X9 NETWORK: naming command accepted (en0 named at creation): %s\n", text);
+        }
+        return kIOReturnSuccess;
+    }
+    (void)properties;
     if (logged++ < 4) {
         IOLog("X9 NETWORK: interface naming request unsupported; no native interface\n");
     }
