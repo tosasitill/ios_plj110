@@ -1,3 +1,83 @@
+## rev252i: plist read-back from the sampler + assistantd sampled (built 2026-11-04, not flashed)
+
+- 实测 correction to the section below: the "SWEET AKS" lines are the AppleKeyStore IOKit
+  user-client trace, not assistant-services output. assistantd appears there twice per boot
+  (32.txt:1846-47 at 11.74 s, 31.txt:1852-53 at 13.11 s, sel 0 then sel 7 -> 0x0) and has no CRASH
+  line in either log, i.e. it starts, opens AppleKeyStore, and then stays quiet in the log while the
+  app keeps re-asking. Crash churn counts confirmed by header lines: SiriTTSSynthesiz/MacinTalkAUSP/
+  KonaSynthesizer 10 each (sig 6), locationd 40 (sig 5).
+- New kernel code (boot.img only, no root change, 实测 compile+link clean):
+  - x9/kernel/src/bsd/dev/sweet_sample.c: `x9_prefcheck()`/`x9_prefdump()` run at the start of every
+    sampler pass. vnode_getattr on com.apple.assistant.support.plist prints
+    `X9 PREF: <path> size=... mtime=... mode=... uid=...`; on pass 1 (t=30 s) it also dumps the
+    first 256 bytes as escaped ASCII (`X9 PREF +0: ...`), and the `.x9-before-seed.plist` backup is
+    size-only. `x9_prefcheck=0` disables. If the seed survived: size=268 with an `<?xml` header and
+    both `<key>...Enabled</key> <false/>` pairs inside the dump (they end near byte 253; the last
+    ~15 bytes are outside the 256-byte window). If cfprefsd rewrote it: size != 268 and/or a
+    `bplist00` header. XNU field name is `va_modify_time`, not `va_mtime` (first compile failed).
+  - x9/kernel/src/bsd/kern/kern_exec.c: the seed line now prints `bytes=%d` (268) so write size and
+    read-back size are comparable inside one log.
+- Build: `.local/build-venv/bin/python3 -I x9/build/build.py all --name x9-rev252i --boot-arg
+  x9_wifi_fake=1 --boot-arg x9_wifi_probe=1 --boot-arg x9_sample_procs=Preferences,kbd,assistantd
+  --boot-arg sweetiolog=assistantd`. The boot/packaging step needs `/opt/homebrew/opt/llvm/bin` on
+  PATH or boot-xnu.py dies with "llvm-objcopy missing: install LLVM or ziglang" (the kernel step
+  itself is unaffected). Output x9/out/x9-rev252i/boot.img: image 18804736 / boot 9457664 bytes
+  (same as rev252h), allowlist 252, no restaging, boot.img sha256 dca68511a98afc46a23bc91c4cb4ca4b9f6915dc97d7611ebdda72cf80e1f49c,
+  kernel sha256 b2f121f3ae46d68c28ccc7e25973937fe55ad49487d9967c1bebe444692bbc7b. Host-built
+  candidate only - no device write, no boot result.
+- Test: flash x9/out/x9-rev252i/boot.img with `fastboot boot` (user does this), bring the keyboard
+  up and keep it up past ~130 s so all 12 passes run. Read: (1) X9 PREF at pass 1 vs pass 12 - a
+  size/header change mid-run means cfprefsd rewrote it; (2) if size stays 268 and the XML is intact
+  while Preferences' main thread is still run=1 in the dictation chain, the preference is ignored
+  rather than lost -> the fix has to be route B (drop the assistantd/Siri TTS jobs in the root, like
+  tools/sweet-root-tweaks.py does for CommCenter) or a UIKit-side gate; (3) assistantd's sampled
+  stacks show whether it answers the synchronous availability query or is parked.
+- New tool: tools/x9-sample-report.py renders `X9 SAMPLE:` records into symbolicated stacks (takes
+  the same symbol table file as tools/sweet-crash.py style runs); it splits records the console
+  truncated mid-line. Reports for the two rev252h boots: /tmp/report32.txt, /tmp/report31.txt.
+
+## 31/32.txt: dictation-off seed did NOT stop the keyboard stall; cause is availability churn (2026-11-04)
+
+- 实测 31.txt and 32.txt are two rev252h boots and both reproduce it. The seed ran
+  (32.txt:744 "X9 DICTATION: ... errno=0"), yet Preferences' main thread is run=1 in 9 of
+  its 10 sampled passes (32.txt:4547,4717,4951,5062,5167,5284,5423,5547,5663) and in 10 of
+  12 in 31.txt, and every one of those stacks is the same dictation/input-mode recompute.
+  kbd[149] t0 sits in __CFRunLoopServiceMachPort/mach_msg in all passes except 32.txt:5290,
+  so the keyboard daemon is idle; X9 DISPLAY cadence keeps missed=0. The stall is in the app
+  process main thread, not kbd, not the GPU/display.
+- 实测 chain (symbol table /tmp/symb32.out, stacks rendered by the new tools/x9-sample-report.py;
+  reports /tmp/report32.txt, /tmp/report31.txt):
+  -[UIDictationController postUIKeyboardDictationAvailabilityDidChangeNotification] ->
+  _CFXNotificationPost -> -[UISystemKeyboardDockController updateDockItemsVisibility] ->
+  +[UIDictationController dictationIsFunctional] -> -[UIKeyboardInputMode dictationLanguage]
+  -> UIKeyboardInputModeController enabledDictationLanguages / activeDictationLanguages /
+  activeDictationSupportedInputModeIdentifiers / activeInputModes / enabledInputModeIdentifiers:
+  -> two expensive sinks: (a) TextInput TIGetSuggestedDictationLanguagesForDeviceLanguage ->
+  +[NSBundle preferredLocalizationsFromArray:forPreferences:] -> CFBundle localization math ->
+  ICU ualoc_localizationsToUse/uloc_minimizeSubtags (passes 5,7) and
+  CFPrefsSearchListSource copies (pass 8); (b) -[UIDictationConnection
+  dictationIsAvailableForLanguage:] -> -[AFDictationConnection
+  dictationIsAvailableForLanguage:synchronous:] (pass 4) -> xpc_connection_send_message_with_reply_sync
+  -> _dispatch_mach_send_and_wait_for_reply (pass 3 shows the send side, _dispatch_mach_msg_send).
+  So each availability flip = full input-mode/locale re-enumeration on the main thread plus a
+  blocking XPC round trip. Pass 9 (32.txt:5423) frames 0x1b34/0x1b35/0x1b36/0x1b37e6e94 are
+  unsymbolicated (same UIKit keyboard range, 推断 same path).
+- 实测 churn is still there: SiriTTSSynthesizer/MacinTalkAUSP/KonaSynthesizer sig 6 x10 each
+  (first 32.txt:2517, ~every 10 s) and locationd sig 5 x40, every 3.3 s from 11.2 s on; assistantd
+  itself runs (SWEET AKS lines 32.txt:1846). 推断: those daemon state changes are what re-post
+  the notification. "Dictation Enabled"/"Assistant Enabled" in com.apple.assistant.support is read
+  by assistantd, not by UIKit, so UIKit still asks -> 30.txt's guessed follow-up is now confirmed.
+- Local RE inputs: research/dsc/ is gone and `ipsw` is not installed any more, but the shared
+  cache copy is at /tmp/sysos20H392/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64
+  (+ .01/.02/.03). Reinstall ipsw to disassemble +[UIDictationController dictationIsFunctional]
+  and find the UIKit-side gate.
+- Next options: (A) boot.img only - kernel re-reads the seeded plist after ~20 s to prove cfprefsd
+  kept it, and add assistantd to x9_sample_procs/sweetiolog -> DONE, built as rev252i (section
+  above); (B) root reflash -
+  drop the assistantd + Siri TTS jobs from /System/Library/xpc/launchd.plist the way
+  tools/sweet-root-tweaks.py drops CommCenter, so the sync availability query fails fast and stays
+  "unavailable" (also kills the TTS crash churn). locationd's sig 5 loop is a separate bug.
+
 ## 30.txt keyboard freeze root-caused; Wi-Fi B1/B2 read-only probe; rev252h built (2026-11-04)
 
 - 实测 30.txt (rev252g-kbd, keyboard held up): Preferences[276] t0 run=1 in samples 3-12, all in a
