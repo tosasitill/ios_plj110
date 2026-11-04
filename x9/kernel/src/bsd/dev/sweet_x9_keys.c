@@ -11,6 +11,7 @@
 #include <pexpert/pexpert.h>
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 extern int sweet_early_is_x9(void);
+extern int sweet_x9_arg(const char *name, int def);
 extern void sweet_hid_key(int, int);
 extern kern_return_t thread_terminate(thread_t);
 static vm_offset_t key_pmif;
@@ -98,7 +99,7 @@ static void worker(void *arg,wait_result_t result) {
 void sweet_x9_keys_init(void) {
  static int started;
  int enabled=0;
- if(!sweet_early_is_x9()||started||!PE_parse_boot_argn("x9_pmic_keys",&enabled,sizeof(enabled))||enabled!=1)return;
+ if(!sweet_early_is_x9()||started||(enabled=sweet_x9_arg("x9_pmic_keys",1))!=1)return;
  started=1;thread_t t;
  if(kernel_thread_start(worker,NULL,&t)==KERN_SUCCESS)thread_deallocate(t);
  else printf("X9 KEYS: worker creation failed\n");

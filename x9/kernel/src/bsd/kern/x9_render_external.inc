@@ -3,6 +3,7 @@
 #include "x9_render_external_manifest.h"
 extern int sweet_x9_render_payload_ready;
 extern int sweet_early_is_x9(void);
+extern int sweet_x9_arg(const char *name, int def);
 static char x9_render_active_plugin[64];
 /* Published with payload_ready, and derived from the same verified allowlist. */
 const char *sweet_x9_render_plugin_name(void) {
@@ -26,7 +27,7 @@ static int x9_render_external_check(const struct X9ExternalFile *file) {
  vnode_put(vp);return error;
 }
 static int sweet_x9_render_external_ready(void) {
- int mode=0;if(!sweet_early_is_x9()||!PE_parse_boot_argn("x9_metal_render",&mode,sizeof(mode))||mode!=1)return 0;
+ int mode=0;if(!sweet_early_is_x9()||(mode=sweet_x9_arg("x9_metal_render",1))!=1)return 0;
  for(unsigned i=0;i<sizeof(x9_external_files)/sizeof(x9_external_files[0]);i++) {
   int error=x9_render_external_check(&x9_external_files[i]);
   if(error){printf("X9 RENDER EXTERNAL: missing/mismatched path=%s errno=%d; discovery disabled\n",x9_external_files[i].path,error);return error;}

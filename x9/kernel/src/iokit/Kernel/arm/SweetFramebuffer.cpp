@@ -74,6 +74,7 @@ extern "C" void x9_lk_gui_probe(void);
 extern "C" int x9_lk_overlay(unsigned index, uint64_t *address, uint64_t *bytes,
     unsigned *engine, uint32_t *pitch, uint32_t *height);
 extern "C" int x9_lk_overlay_level(void);
+extern "C" int sweet_x9_arg(const char *name, int def);
 extern "C" int x9_lk_panel_dcs(const uint8_t *data, unsigned len, int readback, uint32_t rd[4]);
 extern "C" void sweet_watchdog_pet(void);   /* osfmk/arm64/sweet_early.c */
 extern "C" int sweet_x9_render_display_try_enter(void);
@@ -542,8 +543,7 @@ AppleCLCD::start(IOService *provider)
 	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
 	fPixels = fSurface != NULL ? fSurface->kernelAddress() : 0;
 	int x9_render = 0;
-	if (sweet_board_x9() && PE_parse_boot_argn("x9_metal_render", &x9_render, sizeof(x9_render)) &&
-	    x9_render == 1 && fSurface != NULL && fPixels != 0) {
+	if (sweet_board_x9() && (x9_render = sweet_x9_arg("x9_metal_render", 1)) == 1 && fSurface != NULL && fPixels != 0) {
 		SweetSurface *target = sweet_surface_create_buffer(fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
 		uintptr_t targetPixels = target != NULL ? target->kernelAddress() : 0;
 		if (targetPixels != 0) {
@@ -2354,7 +2354,7 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 			 * while there are no buttons or touch to wake the panel again.
 			 */
 			int stayon = 0;
-			if (off && PE_parse_boot_argn("sweetfb_stayon", &stayon, sizeof(stayon)) && stayon) {
+			if (off && (stayon = sweet_x9_arg("sweetfb_stayon", 1)) != 0) {
 				IOLog("SWEET FB: display off ignored (sweetfb_stayon)\n");
 				break;
 			}

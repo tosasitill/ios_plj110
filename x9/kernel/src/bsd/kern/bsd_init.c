@@ -651,9 +651,10 @@ bsd_init(void)
 #if defined(ARM64_BOARD_CONFIG_SWEET)
 	if (sweet_early_is_x9()) {
 		extern void x9_sample_start(void);
+		extern int sweet_x9_arg(const char *name, int def);
 		x9_sample_start();
 		int usb_log = 0;
-		if (PE_parse_boot_argn("x9_usb_log", &usb_log, sizeof(usb_log)) && usb_log == 1) {
+		if ((usb_log = sweet_x9_arg("x9_usb_log", 1)) == 1) {
 			extern void x9_usb_log_start(void);
 			x9_usb_log_start();
 		}

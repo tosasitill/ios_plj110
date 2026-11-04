@@ -775,12 +775,14 @@ static int x9_lk_overlay_mode;
 static void x9_lk_scan_overlays(void) {
  static int done;if(done)return;done=1;
  int v=0;
- if(PE_parse_boot_argn("x9lo",&v,sizeof(v))&&v!=0)
-  x9_lk_overlay_mode=(v<0||v==1)?1:2;   /* bare "x9lo" parses as -1 */
+ /* Default: blank the LK orange-state layer (device-verified harmless,
+  * 22.txt/24.txt). x9lo=0 keeps it, x9lo=2 or bare x9ob only observes. */
+ if(PE_parse_boot_argn("x9lo",&v,sizeof(v)))
+  x9_lk_overlay_mode=v==0?0:(v<0||v==1)?1:2;   /* bare "x9lo" parses as -1 */
  else if(PE_parse_boot_argn("x9ob",&v,sizeof(v)))
-  x9_lk_overlay_mode=2;                /* separate token: the 607-byte boot-arg
-                                        * budget has room for " x9ob" but not
-                                        * for " x9lo=2" */
+  x9_lk_overlay_mode=2;
+ else
+  x9_lk_overlay_mode=1;
  if(!x9_lk_overlay_mode)return;
  for(unsigned i=0;i<13&&x9_lk_overlays<4;i++) {
   volatile uint32_t *p=x9_lk_engines[i];if(!p)continue;

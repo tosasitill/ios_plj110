@@ -18,6 +18,7 @@ extern void sweet_x9_render_bootstrap(void);
 #include "gpu_shared_prefix.h"
 extern vm_offset_t ml_io_map(vm_offset_t,vm_size_t);
 extern int sweet_early_is_x9(void);
+extern int sweet_x9_arg(const char *name, int def);
 extern kern_return_t thread_terminate(thread_t);
 extern void sweet_x9_csf_prepare(void);
 extern int sweet_x9_csf_boot(vm_offset_t);
@@ -312,7 +313,7 @@ static void observe_memory_prerequisites(vm_offset_t gpu) {
 }
 static void run(void) {
  int enabled=0;
- if(!PE_parse_boot_argn("x9_gpu_power_probe",&enabled,sizeof(enabled))||enabled!=1)return;
+ if((enabled=sweet_x9_arg("x9_gpu_power_probe",1))!=1)return;
  printf("X9 GPU: pan165 system compute startup INIT -> POWER_ON -> ID -> POWER_OFF\n");
  if(!handoff()){printf("X9 GPU: live FDT handoff absent/mismatched; all writes refused\n");return;}
  spm=ml_io_map(0x1c004000,0x1000);
@@ -401,7 +402,7 @@ cleanup:
  printf("X9 GPU: one-shot finished ID_valid=%d; power reference released, shared carveout retained\n",id_ok);
  if(id_ok) {
   int render=0;
-  if(PE_parse_boot_argn("x9_metal_render",&render,sizeof(render))&&render==1)sweet_x9_render_bootstrap();
+  if((render=sweet_x9_arg("x9_metal_render",1))==1)sweet_x9_render_bootstrap();
   else sweet_x9_compute_publish();
  }
 }
@@ -411,7 +412,7 @@ static void worker(void *arg,wait_result_t result) {
 /* Replaces the pan143 observer entry point, preserving its UFS startup hook. */
 void sweet_x9_gpu_dependencies(void) {
  int enabled=0;static int started;
- if(!sweet_early_is_x9()||started||!PE_parse_boot_argn("x9_gpu_power_probe",&enabled,sizeof(enabled))||enabled!=1)return;
+ if(!sweet_early_is_x9()||started||(enabled=sweet_x9_arg("x9_gpu_power_probe",1))!=1)return;
  started=1;thread_t t;
  if(kernel_thread_start(worker,NULL,&t)==KERN_SUCCESS)thread_deallocate(t);
  else printf("X9 GPU: worker creation failed\n");

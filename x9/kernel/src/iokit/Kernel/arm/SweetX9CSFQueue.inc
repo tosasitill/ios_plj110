@@ -73,17 +73,17 @@ static bool desktop_validate(QueueProbe &);
 #include "SweetX9CSFCompute.inc"
 static bool queue_prepare(Plan &firmware,QueueProbe &q,vm_offset_t gpu,unsigned pa_bits) {
  int enabled=0;
- q.requested=PE_parse_boot_argn("x9_csf_queue_probe",&enabled,sizeof(enabled))&&enabled==1;
+ q.requested=sweet_x9_arg("x9_csf_queue_probe",1)==1;
  q.user=active_metal_job!=NULL||active_desktop_job!=NULL;
  if(!q.requested)return true;
  enabled=0;
  q.dynamic=PE_parse_boot_argn("x9_csf_dynamic_ring",&enabled,sizeof(enabled))&&enabled==1;
  enabled=0;
- q.indirect=PE_parse_boot_argn("x9_csf_indirect",&enabled,sizeof(enabled))&&enabled==1;
+ q.indirect=sweet_x9_arg("x9_csf_indirect",1)==1;
  enabled=0;
  q.reuse=PE_parse_boot_argn("x9_csf_reuse",&enabled,sizeof(enabled))&&enabled==1;
  enabled=0;
- q.compute=PE_parse_boot_argn("x9_cs_compute",&enabled,sizeof(enabled))&&enabled==1;
+ q.compute=sweet_x9_arg("x9_cs_compute",1)==1;
  if(q.compute&&(!q.indirect||q.reuse||q.dynamic)) {
   IOLog("X9 SHADER: compute requires immutable CALL dispatch packets\n");return false;
  }

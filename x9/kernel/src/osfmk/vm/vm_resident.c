@@ -1548,7 +1548,8 @@ pmap_startup(
 #endif
 
 #if defined(__arm64__)
-	int x9_ram_mode=0;
+	extern bool x9_ram_is_segmented(void);
+	int x9_ram_mode=x9_ram_is_segmented();   /* pmap's decision, same default */
 	PE_parse_boot_argn("x9_ram_8g",&x9_ram_mode,sizeof(x9_ram_mode));
 	x9_segmented_ram_vm=x9_ram_mode!=0;
 	/* All descriptors, including hole placeholders, are initialized now. */

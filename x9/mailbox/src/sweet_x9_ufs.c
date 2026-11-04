@@ -16,6 +16,7 @@
 #include <miscfs/devfs/devfs.h>
 #include <kern/locks.h>
 #include <kern/clock.h>
+extern int sweet_x9_arg(const char *name, int def);
 #include <kern/thread.h>
 #include <sys/kernel.h>
 #include <machine/machine_routines.h>
@@ -360,7 +361,7 @@ static int initialize(void)
  int result=x9u_open(&xu.host,&io,(void *)xu.dma,xu.dma_pa,1);
  if(result){printf("X9 UFS: native attach failed %d\n",result);return ENXIO;}
  int require_hs=0;
- if(PE_parse_boot_argn("x9_ufs_hs",&require_hs,sizeof(require_hs))&&require_hs==1){
+ if((require_hs=sweet_x9_arg("x9_ufs_hs",1))==1){
   struct x9u_hs_state hs={0};uint32_t pa[6]={0};
   int mode_error=x9u_hs_read(&io,&hs,pa);
   printf("X9 UFS LINK: status=%d mode=0x%x TX_G%u RX_G%u TX_lanes=%u RX_lanes=%u series=%u\n",

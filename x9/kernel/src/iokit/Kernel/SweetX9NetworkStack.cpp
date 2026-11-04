@@ -18,6 +18,7 @@
 
 #if defined(ARM64_BOARD_CONFIG_SWEET)
 extern "C" int sweet_early_is_x9(void);
+extern "C" int sweet_x9_arg(const char *name, int def);
 
 class IONetworkStack : public IOService
 {
@@ -35,7 +36,7 @@ IONetworkStack::probe(IOService *provider, SInt32 *score)
     if (!sweet_early_is_x9()) {
         return NULL;
     }
-    (void)PE_parse_boot_argn("x9_network_stack", &enabled, sizeof(enabled));
+    enabled = sweet_x9_arg("x9_network_stack", 1);
     if (enabled != 1) {
         IOLog("X9 NETWORK: naming compatibility service disabled\n");
         return NULL;

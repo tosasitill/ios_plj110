@@ -30,6 +30,7 @@
 #include <kern/sched_prim.h>
 #include <kern/kalloc.h>
 #include <kern/assert.h>
+extern int sweet_x9_arg(const char *name, int def);
 #include <kern/debug.h>
 #include <kern/locks.h>
 #include <kern/task.h>
@@ -189,7 +190,7 @@ x9_render_memory_floor(proc_t p)
 #if defined(ARM64_BOARD_CONFIG_SWEET)
  int mode = 0;
  if (sweet_early_is_x9() && !strcmp(p->p_name, "SBRendererService") &&
-     PE_parse_boot_argn("x9_metal_render", &mode, sizeof(mode)) && mode == 1) {
+     (mode = sweet_x9_arg("x9_metal_render", 1)) == 1) {
   int mb = 128;
   PE_parse_boot_argn("x9_sbrender_mb", &mb, sizeof(mb));
   if (mb == 0) return 0; /* Exact baseline policy for a manual comparison. */

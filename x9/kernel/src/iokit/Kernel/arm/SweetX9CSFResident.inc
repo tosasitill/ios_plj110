@@ -111,7 +111,7 @@ static bool resident_trace_setup(Plan &p) {
 static int resident_begin(vm_offset_t gpu) {
  int enabled=0;
  if(!metal_startup_verified||resident||!gpu||active_metal_job||active_desktop_job||resident_epoch_counter==UINT64_MAX||
-    !PE_parse_boot_argn("x9_metal_render",&enabled,sizeof(enabled))||enabled!=1)return 0;
+    (enabled=sweet_x9_arg("x9_metal_render",1))!=1)return 0;
  const char *stage="initial-state";
  auto *s=new ResidentSession;if(!s)return 0;resident=s;s->gpu=gpu;s->epoch=++resident_epoch_counter;
  s->smmu=ml_io_map(0x48600000,0x1000);s->doorbell=ml_io_map(0x48080000,0x1000);
@@ -149,7 +149,7 @@ static int resident_begin(vm_offset_t gpu) {
   static constexpr bool gpu_side_coherency_programmed=false;
   uint32_t groups=gr(gpu,0x300),group_type=gr(gpu,0x308)&3;
   int coherent_arg=0;
-  bool want=PE_parse_boot_argn("x9_gpu_coherent",&coherent_arg,sizeof(coherent_arg))&&coherent_arg==1;
+  bool want=(coherent_arg=sweet_x9_arg("x9_gpu_coherent",1))==1;
   bool capable=groups&&groups<=64&&(group_type==1||group_type==2);
   s->coherent=want&&capable&&gpu_side_coherency_programmed;
   IOLog("X9 RENDER coherency: groups=%u group0_type=%u requested=%d capable=%u gpu_side=%u active=%u;CIVAC kept unless GPU snoop is programmed\n",

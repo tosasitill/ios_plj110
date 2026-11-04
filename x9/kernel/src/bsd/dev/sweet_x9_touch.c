@@ -15,6 +15,7 @@
 #include <libkern/libkern.h>
 extern vm_offset_t ml_io_map(vm_offset_t,vm_size_t);
 extern int sweet_early_is_x9(void);
+extern int sweet_x9_arg(const char *name, int def);
 extern void sweet_hid_touch(int,int,int,int);
 extern kern_return_t thread_terminate(thread_t);
 static volatile uint32_t *tp;
@@ -419,7 +420,7 @@ void sweet_x9_touch_init(void)
  sweet_x9_keys_init();
  sweet_x9_gpu_dependencies();
  if(!sweet_early_is_x9())return;
- int enabled=0;if(!PE_parse_boot_argn("x9_touch_lbp",&enabled,sizeof(enabled))||enabled!=1)return;
+ int enabled=0;if((enabled=sweet_x9_arg("x9_touch_lbp",1))!=1)return;
  thread_t thread;printf("X9 TOUCH: S3910 pan138: bounded TCM transactions, power/reset, LBP/HID\n");
  if(kernel_thread_start(touch_thread,NULL,&thread)==KERN_SUCCESS)thread_deallocate(thread);
  else printf("X9 TOUCH: worker creation failed\n");

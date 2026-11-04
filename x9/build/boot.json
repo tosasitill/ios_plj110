@@ -12,31 +12,10 @@
   "--pstore-mirror"
  ],
  "boot_args": [
-  "x9_statusbar_provider=2",
-  "x9_pmic_keys=1",
-  "x9_gpu_dependencies=1",
-  "x9_gpu_power_probe=1",
-  "x9_csf_prepare=1",
-  "x9_csf_boot=1",
-  "x9_csf_queue_probe=1",
-  "x9_csf_indirect=1",
-  "x9_cs_compute=1",
-  "x9_network_stack=1",
-  "x9_touch_lbp=1",
-  "x9_ram_8g=1",
-  "x9_skip_setup=1",
-  "x9_watchdog_prefs=1",
-  "sweetfb_stayon=1",
-  "x9_migration_seed=1",
   "x9_metal_render=1",
-  "x9_usb_log=1",
-  "x9_cryptex_aliases=1",
-  "x9_ufs_hs=1",
   "launchd_unsecure_cache=1",
   "-apfs_shared_datavolume",
   "ignition_level=1",
-  "x9_init_cache=1",
-  "x9_bootstrap_dirs=1",
   "debug=0xc",
   "serial=3",
   "cpus=8",
@@ -47,7 +26,7 @@
   "rootrw=1",
   "ufsrw=1",
   "launchdsuffix=release",
-  "-nobsdmgroot",
-  "x9_gpu_coherent=1"
- ]
+  "-nobsdmgroot"
+ ],
+ "_comment_defaults": "X9 kernel feature switches proven on the device are default-on in the kernel (sweet_x9_arg, osfmk/arm64/sweet_early.c; LK banner blank in pe_serial.c); pass name=0 to turn one off. x9_metal_render=1 stays because the X9GeneralMetal plugin reads it from kern.bootargs."
 }

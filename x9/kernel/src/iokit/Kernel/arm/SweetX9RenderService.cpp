@@ -4,6 +4,7 @@
 #include <IOKit/IOService.h>
 #include <IOKit/IOLib.h>
 #include <kern/task.h>
+extern "C" int sweet_x9_arg(const char *name, int def);
 #include <kern/clock.h>
 #include <mach/mach_vm.h>
 #include <mach/vm_region.h>
@@ -89,7 +90,7 @@ static void render_import_regions(task_t owner,uint64_t address,uint64_t bytes,u
 extern "C" bool sweet_x9_render_discovery_ready(void) {
  int mode=0;
  if(!__atomic_load_n(&sweet_x9_render_payload_ready,__ATOMIC_ACQUIRE)||
-    !PE_parse_boot_argn("x9_metal_render",&mode,sizeof(mode))||mode!=1)return false;
+    (mode=sweet_x9_arg("x9_metal_render",1))!=1)return false;
  for(unsigned ms=0;ms<10000;ms++) {
   if(__atomic_load_n(&render_published,__ATOMIC_ACQUIRE))return true;
   IOSleep(1);

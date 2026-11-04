@@ -59,8 +59,8 @@ def main():
     if a.ram_window == 'segmented8g':
         if a.stub or a.ufs_root_manifest or a.ramdisk or a.sparse_ramdisk:
             ap.error('segmented8g requires a real kernel and no RAM root')
-        if 'x9_ram_8g=1' not in a.boot_args.split():
-            ap.error('segmented8g requires x9_ram_8g=1')
+        if 'x9_ram_8g=0' in a.boot_args.split():
+            ap.error('segmented8g conflicts with x9_ram_8g=0 (the kernel defaults it on for this span)')
         if b'X9 RAM: missing live map' not in a.kernel.read_bytes():
             ap.error('segmented8g requires the kernel RAM allocator patch')
     if a.ufs_native_manifest and a.ufs_root_manifest:

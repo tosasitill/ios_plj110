@@ -18,6 +18,7 @@
 #include "X9CSFResident.h"
 #include "X9RenderMemory.h"
 extern "C" int sweet_early_is_x9(void);
+extern "C" int sweet_x9_arg(const char *name, int def);
 extern "C" void sweet_x9_csf_prepare(void);
 extern "C" int sweet_x9_csf_boot(vm_offset_t gpu);
 extern "C" vm_offset_t ml_io_map(vm_offset_t,vm_size_t);
@@ -576,9 +577,9 @@ retain:
 }
 extern "C" void sweet_x9_csf_prepare(void) {
  int enabled=0;
- if(!sweet_early_is_x9()||!PE_parse_boot_argn("x9_csf_prepare",&enabled,sizeof(enabled))||enabled!=1)return;
+ if(!sweet_early_is_x9()||(enabled=sweet_x9_arg("x9_csf_prepare",1))!=1)return;
  int boot_enabled=0;
- if(PE_parse_boot_argn("x9_csf_boot",&boot_enabled,sizeof(boot_enabled))&&boot_enabled==1) {
+ if((boot_enabled=sweet_x9_arg("x9_csf_boot",1))==1) {
   IOLog("X9 CSF: image preparation deferred into powered MCU startup path\n");return;
  }
  Plan p;
@@ -598,7 +599,7 @@ extern "C" void sweet_x9_csf_prepare(void) {
 
 extern "C" int sweet_x9_csf_boot(vm_offset_t gpu) {
  int enabled=0;
- if(!sweet_early_is_x9()||!PE_parse_boot_argn("x9_csf_boot",&enabled,sizeof(enabled))||enabled!=1)return 0;
+ if(!sweet_early_is_x9()||(enabled=sweet_x9_arg("x9_csf_boot",1))!=1)return 0;
  /* Caller has validated live FDT contract, power counts, MFG1/MFG37 ACK
   * and a stable ID; it retains its active/power references until we return. */
  vm_offset_t smmu=ml_io_map(0x48600000,0x1000),doorbell=ml_io_map(0x48080000,0x1000);
@@ -673,7 +674,7 @@ extern "C" int sweet_x9_render_display_try_enter(void) {
 }
 extern "C" void sweet_x9_render_bootstrap(void) {
  int opt=0;
- if(!PE_parse_boot_argn("x9_metal_render",&opt,sizeof(opt))||opt!=1||render_engine_installed)return;
+ if((opt=sweet_x9_arg("x9_metal_render",1))!=1||render_engine_installed)return;
  /* The render flag replaces the legacy compute flag. Bootstrap cannot
   * depend on compute publication to allocate the shared owner lock. This is
   * the sole startup worker; no service is published before allocation. */

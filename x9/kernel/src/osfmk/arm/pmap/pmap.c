@@ -2567,6 +2567,8 @@ pmap_virtual_region(
 
 #include "x9_ram_ranges.h"
 static bool x9_ram_segmented;
+bool x9_ram_is_segmented(void);
+bool x9_ram_is_segmented(void) { return x9_ram_segmented; }
 static uint64_t x9_ram_live[128][2],x9_ram_live_bytes;
 static unsigned x9_ram_live_count;
 static void x9_ram_import(void) {
@@ -2638,7 +2640,9 @@ initialize_ram_ranges(void)
 	assert(first == (first & ~PAGE_MASK));
 	assert(end == (end & ~PAGE_MASK));
 	avail_page_count = atop(end - first);
-	int requested=0;
+	/* Default: follow the span the packager built (--ram-window segmented8g);
+	 * x9_ram_8g=0/1 still overrides. */
+	int requested=(gPhysBase==X9_RAM_LO && end==X9_RAM_HI);
 	PE_parse_boot_argn("x9_ram_8g",&requested,sizeof(requested));
 	if(gPhysBase==X9_RAM_LO && end==X9_RAM_HI && !requested)
 	 panic("X9 RAM: segmented span requires x9_ram_8g=1");

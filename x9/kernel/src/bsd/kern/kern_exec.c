@@ -6799,6 +6799,7 @@ create_unix_stack(vm_map_t map, load_result_t* load_result,
 }
 
 #include <sys/reboot.h>
+extern int sweet_x9_arg(const char *name, int def);
 
 /*
  * load_init_program_at_path
@@ -6840,7 +6841,7 @@ sweet_x9_prepare_keybags(proc_t p,user_addr_t scratch,user_addr_t end)
  static const char directory[]="/private/var/keybags";
  int enabled=0;
  extern boolean_t sweet_x9_ufs_root_writable(void);
- if(!PE_parse_boot_argn("x9_bootstrap_dirs",&enabled,sizeof(enabled))||enabled!=1)return 0;
+ if((enabled=sweet_x9_arg("x9_bootstrap_dirs",1))!=1)return 0;
  if(!sweet_x9_ufs_root_writable())return EROFS;
  if(!proc_is64bit(p)||scratch>end||sizeof(directory)>end-scratch)return E2BIG;
  int error=copyout(directory,scratch,sizeof(directory));if(error)return error;
@@ -6864,7 +6865,7 @@ sweet_x9_prepare_objc_trampolines(proc_t p,user_addr_t scratch,user_addr_t end)
  static const char alias[]="/usr/lib/libobjc-trampolines.dylib";
  int enabled=0,error;vnode_t entry=NULLVP,source=NULLVP,resolved=NULLVP;
  extern boolean_t sweet_x9_ufs_root_writable(void);
- if(!PE_parse_boot_argn("x9_cryptex_aliases",&enabled,sizeof(enabled))||enabled!=1)return 0;
+ if((enabled=sweet_x9_arg("x9_cryptex_aliases",1))!=1)return 0;
  if(!sweet_x9_ufs_root_writable())return EROFS;
  if(!proc_is64bit(p)||scratch>end||sizeof(target)+sizeof(alias)>end-scratch)return E2BIG;
  error=vnode_lookup(alias,VNODE_LOOKUP_NOFOLLOW,&entry,vfs_context_kernel());
@@ -6908,7 +6909,7 @@ sweet_x9_prepare_wallpaper_collections(proc_t p,user_addr_t scratch,user_addr_t 
  static const char alias[]="/Library/Wallpaper/Collections/Collections.plist";
  int enabled=0,error;vnode_t entry=NULLVP,source=NULLVP,resolved=NULLVP;
  extern boolean_t sweet_x9_ufs_root_writable(void);
- if(!PE_parse_boot_argn("x9_cryptex_aliases",&enabled,sizeof(enabled))||enabled!=1)return 0;
+ if((enabled=sweet_x9_arg("x9_cryptex_aliases",1))!=1)return 0;
  if(!sweet_x9_ufs_root_writable())return EROFS;
  if(!proc_is64bit(p)||scratch>end||sizeof(target)+sizeof(alias)>end-scratch)return E2BIG;
  error=vnode_lookup(alias,VNODE_LOOKUP_NOFOLLOW,&entry,vfs_context_kernel());
@@ -6951,7 +6952,7 @@ sweet_x9_seed_migration(proc_t p, user_addr_t scratch, user_addr_t end)
  static const char body[]="<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>LastSystemVersion</key><string>20H392</string><key>DMLastMigrationResults</key><dict><key>success</key><true/><key>buildVersion</key><string>20H392</string></dict></dict></plist>\n";
  int enabled=0,error,fd; int32_t rv=0; user_ssize_t written=0; vnode_t vp=NULLVP;
  extern boolean_t sweet_x9_ufs_root_writable(void);
- if(!PE_parse_boot_argn("x9_migration_seed",&enabled,sizeof(enabled))||enabled!=1)return 0;
+ if((enabled=sweet_x9_arg("x9_migration_seed",1))!=1)return 0;
  if(!sweet_x9_ufs_root_writable())return EROFS;
  if(!proc_is64bit(p)||scratch>end||sizeof(target)+sizeof(backup)+sizeof(temp)+sizeof(body)>end-scratch)return E2BIG;
  user_addr_t t=scratch,b=t+sizeof(target),tmp=b+sizeof(backup),data=tmp+sizeof(temp);
@@ -6989,7 +6990,7 @@ sweet_x9_seed_springboard(proc_t p, user_addr_t scratch, user_addr_t end)
  static const char body[]="<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>BKNoWatchdogs</key>\n\t<true/>\n\t<key>FBLaunchWatchdogScale</key>\n\t<real>20.0</real>\n\t<key>MCForceShowCloudConfigurationUI</key>\n\t<false/>\n\t<key>SBDisableAutoDim</key>\n\t<true/>\n\t<key>SBDontDimOrLockOnAC</key>\n\t<true/>\n\t<key>SBDisableIdleSleep</key>\n\t<true/>\n</dict>\n</plist>\n";
  int enabled=0,error,fd; int32_t rv=0; user_ssize_t written=0; vnode_t vp=NULLVP;
  extern boolean_t sweet_x9_ufs_root_writable(void);
- if(!PE_parse_boot_argn("x9_watchdog_prefs",&enabled,sizeof(enabled))||enabled!=1)return 0;
+ if((enabled=sweet_x9_arg("x9_watchdog_prefs",1))!=1)return 0;
  if(!sweet_x9_ufs_root_writable())return EROFS;
  if(!proc_is64bit(p)||scratch>end||sizeof(target)+sizeof(backup)+sizeof(temp)+sizeof(body)>end-scratch)return E2BIG;
  user_addr_t t=scratch,b=t+sizeof(target),tmp=b+sizeof(backup),data=tmp+sizeof(temp);
@@ -7019,7 +7020,7 @@ sweet_x9_seed_frontboard(proc_t p, user_addr_t scratch, user_addr_t end)
  static const char body[]="<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>FBLaunchWatchdogScale</key>\n\t<real>20.0</real>\n</dict>\n</plist>\n";
  int enabled=0,error,fd; int32_t rv=0; user_ssize_t written=0; vnode_t vp=NULLVP;
  extern boolean_t sweet_x9_ufs_root_writable(void);
- if(!PE_parse_boot_argn("x9_watchdog_prefs",&enabled,sizeof(enabled))||enabled!=1)return 0;
+ if((enabled=sweet_x9_arg("x9_watchdog_prefs",1))!=1)return 0;
  if(!sweet_x9_ufs_root_writable())return EROFS;
  if(!proc_is64bit(p)||scratch>end||sizeof(target)+sizeof(backup)+sizeof(temp)+sizeof(body)>end-scratch)return E2BIG;
  user_addr_t t=scratch,b=t+sizeof(target),tmp=b+sizeof(backup),data=tmp+sizeof(temp);
@@ -7062,7 +7063,7 @@ sweet_x9_seed_uikit_statusbar(proc_t p, user_addr_t scratch, user_addr_t end)
  const char *body=body1;size_t body_size=sizeof(body1);
  int enabled=0,error,fd; int32_t rv=0; user_ssize_t written=0; vnode_t vp=NULLVP;
  extern boolean_t sweet_x9_ufs_root_writable(void);
- if(!PE_parse_boot_argn("x9_statusbar_provider",&enabled,sizeof(enabled))||enabled<1||enabled>3)return 0;
+ if((enabled=sweet_x9_arg("x9_statusbar_provider",2))<1||enabled>3)return 0;
  if(enabled==2){body=body2;body_size=sizeof(body2);}else if(enabled==3){body=body3;body_size=sizeof(body3);}
  if(!sweet_x9_ufs_root_writable())return EROFS;
  if(!proc_is64bit(p)||scratch>end||sizeof(target)+sizeof(backup)+sizeof(temp)+body_size>end-scratch)return E2BIG;
@@ -7098,7 +7099,7 @@ sweet_x9_seed_purplebuddy(proc_t p, user_addr_t scratch, user_addr_t end)
  static const char body[]="<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>SetupDone</key>\n\t<true/>\n\t<key>SetupFinishedAllSteps</key>\n\t<true/>\n\t<key>SetupVersion</key>\n\t<integer>11</integer>\n\t<key>daemonizeNeedsToRun</key>\n\t<false/>\n</dict>\n</plist>\n";
  int enabled=0,error,fd; int32_t rv=0; user_ssize_t written=0; vnode_t vp=NULLVP;
  extern boolean_t sweet_x9_ufs_root_writable(void);
- if(!PE_parse_boot_argn("x9_skip_setup",&enabled,sizeof(enabled))||enabled!=1)return 0;
+ if((enabled=sweet_x9_arg("x9_skip_setup",1))!=1)return 0;
  if(!sweet_x9_ufs_root_writable())return EROFS;
  if(!proc_is64bit(p)||scratch>end||sizeof(target)+sizeof(backup)+sizeof(temp)+sizeof(body)>end-scratch)return E2BIG;
  user_addr_t t=scratch,b=t+sizeof(target),tmp=b+sizeof(backup),data=tmp+sizeof(temp);
@@ -7128,7 +7129,7 @@ sweet_x9_seed_purplebuddy_notbackedup(proc_t p, user_addr_t scratch, user_addr_t
  static const char body[]="<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>ShouldRunDiagnosticsMiniBuddy</key>\n\t<false/>\n\t<key>ShouldRunHSA2MiniBuddy</key>\n\t<false/>\n\t<key>ShouldRunKeychainSyncMiniBuddy</key>\n\t<false/>\n\t<key>ShouldRunMesaMiniBuddy</key>\n\t<false/>\n\t<key>ShouldRunPaymentMiniBuddy</key>\n\t<false/>\n\t<key>ShouldRunStandardMiniBuddy</key>\n\t<false/>\n\t<key>SilentICDPUpgrade</key>\n\t<false/>\n</dict>\n</plist>\n";
  int enabled=0,error,fd; int32_t rv=0; user_ssize_t written=0; vnode_t vp=NULLVP;
  extern boolean_t sweet_x9_ufs_root_writable(void);
- if(!PE_parse_boot_argn("x9_skip_setup",&enabled,sizeof(enabled))||enabled!=1)return 0;
+ if((enabled=sweet_x9_arg("x9_skip_setup",1))!=1)return 0;
  if(!sweet_x9_ufs_root_writable())return EROFS;
  if(!proc_is64bit(p)||scratch>end||sizeof(target)+sizeof(backup)+sizeof(temp)+sizeof(body)>end-scratch)return E2BIG;
  user_addr_t t=scratch,b=t+sizeof(target),tmp=b+sizeof(backup),data=tmp+sizeof(temp);
@@ -7158,7 +7159,7 @@ sweet_x9_seed_managedconfiguration_notbackedup(proc_t p, user_addr_t scratch, us
  static const char body[]="<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>LockdownActivationIndicatesCloudConfigurationAvailable</key>\n\t<false/>\n</dict>\n</plist>\n";
  int enabled=0,error,fd; int32_t rv=0; user_ssize_t written=0; vnode_t vp=NULLVP;
  extern boolean_t sweet_x9_ufs_root_writable(void);
- if(!PE_parse_boot_argn("x9_skip_setup",&enabled,sizeof(enabled))||enabled!=1)return 0;
+ if((enabled=sweet_x9_arg("x9_skip_setup",1))!=1)return 0;
  if(!sweet_x9_ufs_root_writable())return EROFS;
  if(!proc_is64bit(p)||scratch>end||sizeof(target)+sizeof(backup)+sizeof(temp)+sizeof(body)>end-scratch)return E2BIG;
  user_addr_t t=scratch,b=t+sizeof(target),tmp=b+sizeof(backup),data=tmp+sizeof(temp);
@@ -7192,7 +7193,7 @@ sweet_x9_init_cache_env(proc_t p, user_addr_t cursor, user_addr_t end,
 
 	*envp = USER_ADDR_NULL;
 	if (!proc_is64bit(p) || !sweet_x9_ufs_root_active() ||
-	    !PE_parse_boot_argn("x9_init_cache", &enabled, sizeof(enabled)) || enabled != 1) {
+	    (enabled = sweet_x9_arg("x9_init_cache", 1)) != 1) {
 		return 0;
 	}
 	if (cursor > end || sizeof(cache_env) > end - cursor) {
