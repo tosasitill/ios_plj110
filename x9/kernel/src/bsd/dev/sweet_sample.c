@@ -110,7 +110,7 @@ static int sample_proc(proc_t p, __unused void *arg) {
  return PROC_RETURNED;
 }
 /* x9_thread_sample=1: 60 s, then every 120 s, 4 samples. Bare token x9bl
- * (brightness-service diagnostic, AppleCLCD publishes AppleARMBacklight):
+ * (short sampler for diagnostics; AppleARMBacklight is default-on now):
  * 40 s, then every 15 s, 6 samples, to catch backboardd while it stalls. */
 static unsigned sample_delay=60, sample_interval=120, sample_count=4;
 static void sample_thread(__unused void *arg, __unused wait_result_t wr) {

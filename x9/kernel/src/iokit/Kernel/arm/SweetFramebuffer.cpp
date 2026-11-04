@@ -631,24 +631,14 @@ AppleCLCD::start(IOService *provider)
 			IOLog("SWEET FB: DSI0 ctrl %#x, brightness via DCS 0x51\n", *(volatile uint32_t *)(fDsi + 0x004));
 		}
 		/*
-		 * Off unless sweetbl=1: with a backlight service CoreBrightness also
-		 * runs digital dimming, a colour filter over every frame, which the
-		 * CPU renderer cannot afford (the UI dropped to under 1 fps).
-		 * X9 too: rev250 (23.txt) published it by default and got a purple,
-		 * near-frozen UI (swap_id 13 at 100 s vs ~1000, extra full-screen
-		 * offscreen surfaces, AegirPoster/GradientPoster abort loops) while
-		 * CoreBrightness never sent a single level. X9 keeps the DCS 0x51
-		 * transport and sends one default DBV from the heartbeat instead.
+		 * topaz: off unless sweetbl=1 (CoreBrightness digital dimming was too
+		 * costly for the CPU renderer). X9: on by default since rev252b
+		 * (user-verified 2026-11-04: slider and fade work): the rev250/252-x9bl stall was the missing
+		 * IODisplayParameters, see AppleARMBacklight. sweetbl=0 turns it off;
+		 * bare x9bl now only starts the thread sampler.
 		 */
-		uint32_t blOn = 0;
+		uint32_t blOn = fX9Bl ? 1 : 0;
 		(void)PE_parse_boot_argn("sweetbl", &blOn, sizeof(blOn));
-		/* bare x9bl (fits the boot-arg budget in place of x9lo): publish it
-		 * for the stall diagnostic; the X9 thread sampler runs too. */
-		int x9bl = 0;
-		if (fX9Bl && PE_parse_boot_argn("x9bl", &x9bl, sizeof(x9bl)) && x9bl != 0) {
-			blOn = 1;
-			IOLog("X9 BL: x9bl - AppleARMBacklight published for the stall diagnostic\n");
-		}
 		AppleARMBacklight *bl = blOn ? OSTypeAlloc(AppleARMBacklight) : NULL;
 		if (fDsi != NULL || bl != NULL) {
 			setProperty("IOMFBBrightnessLevel", (unsigned long long)(200u << 16), 32);
