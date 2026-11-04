@@ -64,7 +64,7 @@
   x9-rev252q-sandbox-container --boot-arg x9_wifi_fake=1 --boot-arg x9_wifi_probe=1 --boot-arg
   x9_siri_off=1 --boot-arg x9_lite=1`, PATH with /opt/homebrew/opt/llvm/bin. Output
   x9/out/x9-rev252q-sandbox-container/boot.img: image 18804736 / boot.img 9469952 bytes.
-  Host-built only, not hardware-verified.
+  Host-built only, not hardware-verified. Commit b022e56.
 - Test: flash rev252q, boot to the desktop, type past ~150 s, pull the log. Expect the TTS triplet
   storm and the 18.6 s IntentsExtension/assetsd/widget sig-6 crashes to disappear from `CRASH`;
   `SWEET Sandbox: ... op 4 container path` should be logged for the first process that asks. If
