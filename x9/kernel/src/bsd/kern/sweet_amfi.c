@@ -25,16 +25,21 @@
 #if defined(ARM64_BOARD_CONFIG_SWEET)
 #include <kern/debug.h>
 #include <kern/startup.h>
+#include <kern/task.h>
 #include <libkern/amfi/amfi.h>
 #include <mach/kern_return.h>
+#include <mach/vm_param.h>
 #include <sys/codesign.h>
 #include <sys/mount.h>
 #include <sys/priv.h>
 #include <sys/proc.h>
+#include <sys/proc_internal.h>
 #include <sys/systm.h>
 #include <sys/ubc_internal.h>
 #include <sys/vnode.h>
 #include <security/mac_policy.h>
+#include <vm/vm_kern.h>
+#include <vm/vm_map.h>
 #include <arm64/sweet_early.h>
 
 /* iokit/Kernel/arm/SweetEntitlements.cpp */
@@ -290,30 +295,129 @@ sweet_amfi_vnode_check_signature(struct vnode *vp, __unused struct label *label,
  * launchd reports mach lookups as "error = 159: Sandbox restriction"
  * (backboardd cannot reach mobilegestalt or iohideventsystem; tccd:
  * "profile not found"). SWEET runs without a sandbox: operations succeed
- * (checks allow, profile init is accepted); the few that must return
- * data (container paths, extension tokens) fail with ENOENT. The first
- * use of each operation number is logged.
+ * (checks allow, profile init is accepted). The first use of each operation
+ * number is logged.
+ *
+ * Request 4 is the one that needs an answer: sandbox_container_path_for_pid()
+ * and sandbox_container_path_for_audit_token() ask which container a process
+ * is in, and an application extension hosted by PlugInKit does not start
+ * without one -[PKService checkEnvironment:] pre-fills the buffer with "?"
+ * and raises "plugin has invalid sandbox or container" unless a longer path
+ * comes back. The launcher that started the process (RunningBoard for an
+ * app, pkd for an extension) got the path from containermanagerd and passed
+ * it on in CFFIXED_USER_HOME, which stays among the strings exec placed at
+ * the top of the process stack; answer with that. A process without the
+ * variable has no container and gets success with the buffer untouched.
+ * Ported from hackios-xnu-kernel bsd/kern/kern_minimac.c
+ * (minisandbox_container_path, c84b4634277a70beac73921029b1fb6afc2530af).
  */
 static uint64_t sweet_sandbox_seen;
 
+#define SWEET_SANDBOX_CONTAINER_PATH    4
+#define SWEET_SANDBOX_CONTAINER_VAR     "CFFIXED_USER_HOME="
+
 static int
-sweet_sandbox_syscall(struct proc *p, int call, __unused user_addr_t arg)
+sweet_sandbox_container_path(user_addr_t arg)
+{
+	struct {
+		int64_t     pid;
+		uint64_t    pidversion;
+		user_addr_t buffer;
+		user_size_t size;
+		uint64_t    check_pidversion;
+	} args;
+	const size_t prefix_len = sizeof(SWEET_SANDBOX_CONTAINER_VAR) - 1;
+	proc_t p;
+	task_t task;
+	vm_map_t map;
+	vm_map_copy_t copy = NULL;
+	vm_offset_t strings = 0;
+	vm_size_t strings_size;
+	user_addr_t user_stack;
+	size_t argslen, len;
+	const char *s, *end;
+	int error;
+
+	error = copyin(arg, &args, sizeof(args));
+	if (error) {
+		return error;
+	}
+	p = proc_find((int)args.pid);
+	if (p == PROC_NULL) {
+		return ESRCH;
+	}
+	if (args.check_pidversion && (uint64_t)proc_pidversion(p) != args.pidversion) {
+		proc_rele(p);
+		return ESRCH;
+	}
+	user_stack = p->user_stack;
+	argslen = p->p_argslen;
+	task = proc_task(p);
+	if (user_stack == 0 || argslen == 0 || task == TASK_NULL) {
+		proc_rele(p);
+		return 0;
+	}
+	/* sysctl_procargsx() order: the task keeps the map alive after proc_rele */
+	task_reference(task);
+	proc_rele(p);
+	map = get_task_map_reference(task);
+	task_deallocate(task);
+	if (map == VM_MAP_NULL) {
+		return 0;
+	}
+	strings_size = vm_map_round_page((vm_map_offset_t)argslen,
+	    vm_map_page_mask(map));
+	if (kmem_alloc(kernel_map, &strings, strings_size,
+	    KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_BSD) != KERN_SUCCESS) {
+		vm_map_deallocate(map);
+		return ENOMEM;
+	}
+	if (vm_map_copyin(map, (vm_map_address_t)(user_stack - strings_size),
+	    strings_size, FALSE, &copy) != KERN_SUCCESS) {
+		copy = NULL;
+	}
+	vm_map_deallocate(map);
+	if (copy == NULL || vm_map_copy_overwrite(kernel_map, strings, copy,
+	    strings_size, FALSE) != KERN_SUCCESS) {
+		if (copy != NULL) {
+			vm_map_copy_discard(copy);
+		}
+		kmem_free(kernel_map, strings, strings_size);
+		return 0;               /* process exiting or stack unmapped */
+	}
+	end = (const char *)(strings + strings_size);
+	for (s = end - argslen; s < end; s += len + 1) {
+		len = strnlen(s, (size_t)(end - s));
+		if (len > prefix_len && s + len < end &&
+		    strncmp(s, SWEET_SANDBOX_CONTAINER_VAR, prefix_len) == 0) {
+			s += prefix_len;
+			len -= prefix_len;
+			error = len < args.size ?
+			    copyout(s, args.buffer, len + 1) : ENAMETOOLONG;
+			break;
+		}
+	}
+	kmem_free(kernel_map, strings, strings_size);
+	return error;
+}
+
+static int
+sweet_sandbox_syscall(struct proc *p, int call, user_addr_t arg)
 {
 	if (call >= 0 && call < 64 && !(sweet_sandbox_seen & (1ULL << call))) {
 		sweet_sandbox_seen |= 1ULL << call;
 		char name[32];
 		proc_name(proc_pid(p), name, sizeof(name));
-		printf("SWEET Sandbox: %s op %d\n", name, call);
+		if (call == SWEET_SANDBOX_CONTAINER_PATH) {
+			printf("SWEET Sandbox: %s op %d container path\n", name, call);
+		} else {
+			printf("SWEET Sandbox: %s op %d\n", name, call);
+		}
 	}
-	switch (call) {
-	case 4:         /* container path (audit token / pid) */
-	case 5:         /* extension issue */
-	case 6:         /* extension consume */
-	case 0x43:      /* container expected */
-		return ENOENT;
-	default:
-		return 0;
+	if (call == SWEET_SANDBOX_CONTAINER_PATH) {
+		return sweet_sandbox_container_path(arg);
 	}
+	return 0;
 }
 
 /* hackios reports the actual no-enforcement state via policy AMFI 0x60.

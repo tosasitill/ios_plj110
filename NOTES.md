@@ -16,6 +16,64 @@
   four named apps), so this boot still has no stack of the stalling process. Sampling by name keeps
   missing it; the next build identifies it by thread state instead (rev252m).
 
+## rev252q: the appex crash storm is our sandbox shim's container-path answer (built 2026-11-04, not flashed)
+
+- 实测 38.txt (rev252p) the policy ran: 38.txt:675-676 `X9 SIRI: disable size=796447
+  magic=bplist00 entries=32 already=32 changed=0 errno=0` + `readback mismatches=0`; 38.txt:677-679
+  `X9 JOBS: original kept as disabled.x9-orig.plist errno=0`, `disable=7 lite=1 added=7 kept=0
+  size=601 errno=0`, `readback mismatches=0`. Boot args at 38.txt:1081 include `x9_lite=1`.
+- 实测 locationd is gone (0 occurrences in the whole log) and Wi-Fi is untouched (wifid 301 lines,
+  fake scans at 143.521/144.329). The stall the user still saw ("还是卡") is therefore not fed by
+  locationd and not by the pruned jobs.
+- 实测 crash census up to 209.186 s: SiriTTSSynthesiz/MacinTalkAUSP/KonaSynthesizer 12 each, in
+  triplets about every 5 s from 26.364 to 143.795 and none afterwards; assetsd 3;
+  IntentsExtension/WeatherIntents/StocksDetailInte/ScreenTimeWidget/MobileTimerInten 1 each at
+  18.6-19.7 s; MusicWidgets 3 (sig 11, separate); WirelessRadioMan 21x sig 5 code 0x5, exactly one
+  every 10.0 s from 13.457 to 208.210. The TTS churn stopping at ~144 s does not mean the boot
+  became healthy.
+- 实测 every sig-6 appex and assetsd die with the same pc/lr/far and a 10-frame backtrace:
+  pc 0x20a097198 lr 0x2196265f8 far 0x2268f2e28. With slide 0x47a80000: libsystem_kernel
+  `___pthread_kill+0x8`, libsystem_pthread `_pthread_kill+0xd0`, libsystem_c `abort+0x7c`,
+  libc++abi terminate frames, libobjc `_objc_exception_throw+0x168`, CoreFoundation+0xeb704,
+  PlugInKit+0x18d5c. 35.txt (slide 0x43d0c000) resolves to the same unslid addresses, so the
+  chain is boot-stable.
+- 实测 disassembly: 0x186ed3698 is `+[NSException raise:format:]` (it formats with
+  `_CFStringCreateWithFormatAndArguments`, calls `exceptionWithName:reason:userInfo:` then
+  raises), so 0x186ed3704 is its return address; the raiser is PlugInKit itself. PlugInKit
+  0x1aaf39d58 calls the objc_msgSend stub 0x1aaf53880 with x0 = NSException (classref 0x1dda93f68,
+  CoreFoundation `__objc_data`), x2 = an imported NSString constant, x3 = CFSTR("%@"), and builds
+  the reason from the CFString at 0x1d8339d00 = "plugin has invalid sandbox or container: error %d
+  path %s". Nearby strings: "Bootstrapping; failed to get my own sandbox container", "Failed to
+  start plugin; could not consume sandbox service extensions; %@", NSExtensionSandboxProfile,
+  com.apple.private.pluginkit.sandbox-override. That is `-[PKService checkEnvironment:]`.
+- 实测 the cause is our own shim: sweet_sandbox_syscall returned ENOENT for op 4 (container path
+  of a pid/audit token), 5/6 (sandbox extension issue/consume) and 0x43. launchd is the only op-4
+  caller visible (38.txt:1077) because the shim logs only the first use of each op number.
+- 实测 reference: .local/x9/work/references/hackios-xnu-kernel/xnu/files/bsd/kern/kern_minimac.c
+  (c84b463) implements request 4 for exactly this failure: PlugInKit pre-fills the buffer with "?"
+  and wants a longer path back, else it raises "plugin has invalid sandbox or container"; the path
+  is CFFIXED_USER_HOME, which the launcher (RunningBoard for an app, pkd for an extension) got from
+  containermanagerd and left among the strings exec placed at the top of the process stack. A
+  process without the variable gets success and an untouched buffer.
+- rev252q ports that: `sweet_sandbox_container_path()` in x9/kernel/src/bsd/kern/sweet_amfi.c
+  (proc_find + pidversion check, copy the p_argslen bytes above p->user_stack the way
+  sysctl_procargsx does, task_reference before proc_rele, scan for `CFFIXED_USER_HOME=`, bounded
+  copyout). Non-container ops now return 0 as in the reference instead of ENOENT; that also
+  changes op 5/6 from rev252p and is the one judgement call in this patch.
+- Build: `.local/build-venv/bin/python3 -I x9/build/build.py all --name
+  x9-rev252q-sandbox-container --boot-arg x9_wifi_fake=1 --boot-arg x9_wifi_probe=1 --boot-arg
+  x9_siri_off=1 --boot-arg x9_lite=1`, PATH with /opt/homebrew/opt/llvm/bin. Output
+  x9/out/x9-rev252q-sandbox-container/boot.img: image 18804736 / boot.img 9469952 bytes.
+  Host-built only, not hardware-verified.
+- Test: flash rev252q, boot to the desktop, type past ~150 s, pull the log. Expect the TTS triplet
+  storm and the 18.6 s IntentsExtension/assetsd/widget sig-6 crashes to disappear from `CRASH`;
+  `SWEET Sandbox: ... op 4 container path` should be logged for the first process that asks. If
+  the sig-6 storm persists, the appex environment has no CFFIXED_USER_HOME and the buffer still
+  answers "?" - the next step is a boot-arg-gated log of the op-4 result (length/errno/pid), not
+  more job pruning. 推断 only: the keyboard/IME appex launch path goes through the same PKService
+  bootstrap, so this churn is the best candidate for the input lag seen so far; that stays a
+  guess until the crash count drops and typing is retested on the device.
+
 ## rev252p: launchd disabled.plist policy, on-device jobs only (built 2026-11-04, not flashed)
 
 - Code: `sweet_x9_seed_disabled_jobs()` in x9/kernel/src/bsd/kern/kern_exec.c, called from
