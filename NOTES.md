@@ -1,3 +1,23 @@
+## Boot line freed: X9 feature switches default-on in the kernel (2026-11-04)
+
+- Commit 2bf1891. `sweet_x9_arg(name, def)` (osfmk/arm64/sweet_early.c): absent -> def on X9,
+  0 on other boards; `name=N` overrides, so `name=0` turns any of them off.
+  Default-on now: x9_statusbar_provider(=2) x9_pmic_keys x9_gpu_power_probe x9_csf_prepare
+  x9_csf_boot x9_csf_queue_probe x9_csf_indirect x9_cs_compute x9_network_stack x9_touch_lbp
+  x9_skip_setup x9_watchdog_prefs sweetfb_stayon x9_migration_seed x9_usb_log x9_cryptex_aliases
+  x9_ufs_hs x9_init_cache x9_bootstrap_dirs x9_gpu_coherent. x9_ram_8g defaults to the packaged
+  segmented span (pmap; vm_resident follows pmap via x9_ram_is_segmented()); boot-xnu.py now only
+  rejects an explicit x9_ram_8g=0. LK orange-state blank default-on (x9lo=0 keeps the banner,
+  x9lo=2 / x9ob observe). x9_gpu_dependencies was parsed nowhere -> dropped.
+- Kept in boot.json: x9_metal_render=1 (X9GeneralMetalFactory.mm reads kern.bootargs for that
+  literal token) and all upstream/userspace args. boot.json boot line 602 -> 215 bytes.
+- NOT BUILT yet (Mac ssh dropped right after the push). Expected device result for the default
+  build: identical to 24.txt (banner blanked without any token). Build plan:
+  `build.py all --revision 252 --name x9-rev252`, then
+  `build.py boot --kernel <x9-rev252 kernel> --name x9-rev252-x9bl --boot-arg x9bl` and copy
+  x9-rev252/plugin-package into x9-rev252-x9bl so both share one mailbox payload. Stage with
+  mailbox/update.py before fastboot boot.
+
 ## Brightness: DCS path verified on device; slider route = CoreBrightness RE (2026-11-04)
 
 - 实测 rev251 (24.txt): `[40.794] X9 BL: DBV 1433 (0x599) r=1 retries=0 sent=1 fail=0
