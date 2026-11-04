@@ -310,6 +310,12 @@ public:
 	void          setPanelLevel(uint32_t level);
 	bool          fX9Bl;          /* X9: DCS 0x51 through the inherited LK DSI */
 	uint32_t      fX9BlSent, fX9BlBusy, fX9BlFail;
+	/* X9 CoreBrightness path (AppleARMBacklight {brightness, FadePeriod}) */
+	bool          fX9BlDirect;    /* CoreBrightness drives "brightness"; nits path no longer moves the panel */
+	uint32_t      fX9BlFadeMs;    /* fade length of the newest request */
+	uint32_t      fX9BlGen;       /* bumped per request: a running fade restarts on the newest */
+	uint32_t      fX9BlRequests;
+	void          x9BacklightRequest(uint32_t level, uint32_t fadeMs);
 	bool          blReady(void) const { return fDsi != NULL || fX9Bl; }
 	void addClient(IOMobileFramebufferUserClient *client);
 	void removeClient(IOMobileFramebufferUserClient *client);
@@ -329,6 +335,16 @@ class AppleARMBacklight : public IOService {
 public:
 	AppleCLCD *fFB;
 	IOReturn setProperties(OSObject *properties) APPLE_KEXT_OVERRIDE;
+	/*
+	 * CoreBrightness's display setup reads IODisplayParameters {brightness:
+	 * {min,max,value}} from this service and gives up on the display without
+	 * it (CoreBrightness 20H392 0x1af0d87b0 -> failure exit): no display module,
+	 * no libEDR server, while QuartzCore (CADeviceHasBacklight from
+	 * backlight-control) waits on that server every vsync - the rev250/252-x9bl
+	 * stall (25.txt: CA render thread in CA::EDRClient::client()). Same finding
+	 * as UniXNU sheng int-236 (package/AppleARMBacklight.cpp).
+	 */
+	void publishLevel(uint32_t value, uint32_t min, uint32_t max);
 };
 
 OSDefineMetaClassAndStructors(AppleARMBacklight, IOService);
@@ -601,6 +617,8 @@ AppleCLCD::start(IOService *provider)
 	fBlCall = thread_call_allocate(&AppleCLCD::blWork, this);
 	fX9Bl = sweet_board_x9() && x9_lk_gui_busy() >= 0;
 	fX9BlSent = fX9BlBusy = fX9BlFail = 0;
+	fX9BlDirect = false;
+	fX9BlFadeMs = fX9BlGen = fX9BlRequests = 0;
 	if (fX9Bl) {
 		fBlLevel = X9_BL_DBV_DEFAULT;
 		IOLog("X9 BL: DCS 0x51 via inherited LK DSI0 (0x3e730000), LP long write, DBV %u..%u\n",
@@ -640,6 +658,12 @@ AppleCLCD::start(IOService *provider)
 			bl->setProperty("backlight-control", true);
 			bl->setProperty("brightness-nits", (unsigned long long)200, 32);
 			bl->setProperty("max-nits", (unsigned long long)SWEET_FB_MAX_NITS, 32);
+			if (fX9Bl) {
+				/* CoreBrightness level == panel DBV (0x51); 3515 = DT normal max */
+				bl->publishLevel(fBlLevel, 0, X9_BL_DBV_MAX);
+			} else {
+				bl->publishLevel(fBlLevel, 0, 0x7ff);
+			}
 			if (bl->attach(this)) {
 				bl->registerService();
 				IOLog("SWEET FB: AppleARMBacklight published\n");
@@ -1573,8 +1597,13 @@ AppleCLCD::setProperties(OSObject *properties)
 			level = 1;
 		}
 	}
+	if (fX9Bl && fX9BlDirect) {
+		return kIOReturnSuccess;   /* recorded above; AppleARMBacklight "brightness" owns the level */
+	}
 	IOLockLock(fLock);
 	fBlLevel = (uint32_t)level;
+	fX9BlFadeMs = 0;
+	fX9BlGen++;
 	IOLockUnlock(fLock);
 	/*
 	 * CoreBrightness runs inside backboardd and ramps the level in many small
@@ -1591,13 +1620,65 @@ void
 AppleCLCD::blWork(thread_call_param_t p0, __unused thread_call_param_t p1)
 {
 	AppleCLCD *fb = (AppleCLCD *)p0;
-	IOLockLock(fb->fLock);
-	uint32_t level = fb->fBlLevel;
-	bool off = fb->fPowerOff;
-	IOLockUnlock(fb->fLock);
-	if (!off && level != fb->fBlSent) {
-		fb->fBlSent = level;
-		fb->setPanelLevel(level);
+	/*
+	 * Latest wins. A FadePeriod request is stepped every 16 ms from the level
+	 * last sent; a newer request (fX9BlGen) restarts from wherever the fade is.
+	 */
+	for (;;) {
+		IOLockLock(fb->fLock);
+		uint32_t level = fb->fBlLevel, fadeMs = fb->fX9BlFadeMs, gen = fb->fX9BlGen;
+		bool off = fb->fPowerOff;
+		IOLockUnlock(fb->fLock);
+		if (off || level == fb->fBlSent) {
+			return;
+		}
+		uint32_t from = fb->fBlSent == ~0u ? level : fb->fBlSent;
+		uint32_t steps = fb->fX9Bl && fadeMs >= 32 ? fadeMs / 16 : 1;
+		bool restarted = false;
+		for (uint32_t i = 1; i <= steps; i++) {
+			uint32_t v = (uint32_t)((int64_t)from + ((int64_t)level - (int64_t)from) * (int64_t)i / (int64_t)steps);
+			if (v != fb->fBlSent) {
+				fb->fBlSent = v;
+				fb->setPanelLevel(v);
+			}
+			if (i < steps) {
+				IOSleep(16);
+				IOLockLock(fb->fLock);
+				restarted = gen != fb->fX9BlGen || fb->fPowerOff;
+				IOLockUnlock(fb->fLock);
+				if (restarted) {
+					break;
+				}
+			}
+		}
+		if (!restarted) {
+			return;
+		}
+	}
+}
+
+void
+AppleCLCD::x9BacklightRequest(uint32_t level, uint32_t fadeMs)
+{
+	if (level < X9_BL_DBV_MIN) {
+		level = X9_BL_DBV_MIN;          /* oplus drops level 1; 0 would blank the panel */
+	}
+	if (level > X9_BL_DBV_MAX) {
+		level = X9_BL_DBV_MAX;
+	}
+	IOLockLock(fLock);
+	fX9BlDirect = true;
+	fBlLevel = level;
+	fX9BlFadeMs = fadeMs;
+	fX9BlGen++;
+	uint32_t n = ++fX9BlRequests;
+	IOLockUnlock(fLock);
+	if (n <= 8 || (n % 64) == 0) {
+		IOLog("X9 BL STATS: requests=%u level=%u fade_ms=%u sent=%u fail=%u busy_total=%u last_written=%u\n",
+		    n, level, fadeMs, fX9BlSent, fX9BlFail, fX9BlBusy, fBlSent);
+	}
+	if (fBlCall != NULL) {
+		thread_call_enter(fBlCall);     /* never wait here: backboardd's brightness thread */
 	}
 }
 
@@ -1626,6 +1707,20 @@ AppleARMBacklight::setProperties(OSObject *properties)
 {
 	OSDictionary *d = OSDynamicCast(OSDictionary, properties);
 	sweet_bl_log("backlight", d);
+	/* CoreBrightness: {brightness (IODisplayParameters units), FadePeriod (16.16 s)} */
+	OSNumber *b = d ? OSDynamicCast(OSNumber, d->getObject("brightness")) : NULL;
+	if (b != NULL && fFB != NULL && fFB->fX9Bl) {
+		int64_t req = (int32_t)b->unsigned32BitValue();
+		uint32_t level = req < 0 ? 0 : req > X9_BL_DBV_MAX ? X9_BL_DBV_MAX : (uint32_t)req;
+		OSNumber *f = OSDynamicCast(OSNumber, d->getObject("FadePeriod"));
+		uint64_t ms = f ? ((uint64_t)f->unsigned32BitValue() * 1000) >> 16 : 0;
+		if (ms > 5000) {
+			ms = 5000;
+		}
+		fFB->x9BacklightRequest(level, (uint32_t)ms);
+		publishLevel(level, 0, X9_BL_DBV_MAX);
+		return kIOReturnSuccess;
+	}
 	OSNumber *n = d ? OSDynamicCast(OSNumber, d->getObject("brightness-nits")) : NULL;
 	if (n != NULL && fFB != NULL) {
 		OSDictionary *m = OSDictionary::withCapacity(1);
@@ -1642,6 +1737,24 @@ AppleARMBacklight::setProperties(OSObject *properties)
 		setProperty("brightness-nits", n);
 	}
 	return kIOReturnSuccess;
+}
+
+void
+AppleARMBacklight::publishLevel(uint32_t value, uint32_t min, uint32_t max)
+{
+	OSDictionary *brightness = OSDictionary::withCapacity(3), *parameters = OSDictionary::withCapacity(1);
+	OSNumber *nmin = OSNumber::withNumber((unsigned long long)min, 32);
+	OSNumber *nmax = OSNumber::withNumber((unsigned long long)max, 32);
+	OSNumber *cur = OSNumber::withNumber((unsigned long long)(value > max ? max : value), 32);
+	if (brightness && parameters && nmin && nmax && cur) {
+		brightness->setObject("min", nmin);
+		brightness->setObject("max", nmax);
+		brightness->setObject("value", cur);
+		parameters->setObject("brightness", brightness);
+		setProperty("IODisplayParameters", parameters);
+	}
+	OSSafeReleaseNULL(nmin); OSSafeReleaseNULL(nmax); OSSafeReleaseNULL(cur);
+	OSSafeReleaseNULL(brightness); OSSafeReleaseNULL(parameters);
 }
 
 /* panic: show the console frame (MMIO only, no locks) */
