@@ -11,7 +11,20 @@
   x9lo=2 / x9ob observe). x9_gpu_dependencies was parsed nowhere -> dropped.
 - Kept in boot.json: x9_metal_render=1 (X9GeneralMetalFactory.mm reads kern.bootargs for that
   literal token) and all upstream/userspace args. boot.json boot line 602 -> 215 bytes.
-- NOT BUILT yet (Mac ssh dropped right after the push). Expected device result for the default
+- BUILT on the Mac (commit c638056 + allowlist 28030e5): `x9/out/x9-rev252/boot.img` (default) and
+  `x9/out/x9-rev252-x9bl/boot.img` (boot line + ` x9bl`), same kernel sha256 d35c24d9..., both
+  9,433,088 B; plugin-package X9GeneralMetal252/X9PanVK252 copied into both dirs (one mailbox
+  payload). First link failed: `_sweet_x9_arg` undefined because sweet_early.o is PREBUILT
+  (x9/kernel/README: six objects have no compile command, editing their sources does nothing) ->
+  helper now in pexpert/arm/pe_serial.c.
+- Mac build env that worked: `build.py all` (plugins + kernel) with system python3 -I, then the boot
+  step separately with `X9_OBJCOPY/X9_NM=/opt/homebrew/opt/llvm@22/bin/llvm-{objcopy,nm}` and the
+  interpreter `.local/build-venv/bin/python3 -I x9/build/build.py boot --kernel ... --name ...`
+  (system python lacks lz4). Mac checkout sits at c638056 with the generated allowlist modified;
+  its content is byte-identical to 28030e5 (hash 5b6e63eb), so a pull only needs that file reset.
+- Device test order: x9-rev252 first (expect 24.txt behaviour with no orange banner and no token),
+  then x9-rev252-x9bl (purple/stall reproduced on purpose; X9 SAMPLE lines at 40 s + 6 x 15 s).
+- Older note kept for history: the first build attempt was blocked by Mac ssh. Expected device result for the default
   build: identical to 24.txt (banner blanked without any token). Build plan:
   `build.py all --revision 252 --name x9-rev252`, then
   `build.py boot --kernel <x9-rev252 kernel> --name x9-rev252-x9bl --boot-arg x9bl` and copy
