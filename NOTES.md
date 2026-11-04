@@ -1,3 +1,36 @@
+## rev252-x9bl (25.txt): backlight-service stall root-caused to CoreAnimation's libEDR client (2026-11-04)
+
+- 实测: rev252-x9bl boots (install errno=0, X9GeneralMetal252), LK banner blanked with NO token
+  (`X9 LK overlay ... queued (clear)` / `zeroed in 4896 us`) -> default-on switches work.
+  Stall reproduced: swap_id 0,0,2,4,5,6,8,...,24 at 10 s steps (~2 swaps / 10 s). USER: still laggy.
+- Sampler (6 samples, 40-115 s), symbolicated against .local/x9/work/dsc-20H392 (slide 0x3f884000,
+  backboardd mh 0x100d1c000; tooling: per-image __TEXT range table + `atos -o <dylib> -l <vmaddr>`).
+  ALL backboardd threads are WAITING (run=3), none running -> not a CPU/GPU-cost problem.
+  Persistent in samples 2,3,4,6:
+  `t5 CA render: vsync_callback -> Server::render_for_time -> IOMFBServer::set_enabled ->
+   IOMFBServer::register_libedr_callbacks -> CA::EDRClient::client() -> pthread_mutex_lock (wait)`;
+  `t4 CA server_thread: render_display_context_list / set_next_update -> mutex wait` (behind t5).
+- QuartzCore RE (20H392): IOMFBServer::edr_client() exists only if display flags (halfword at
+  display+0x251) bit 0x200 is set; the ONLY writer is `CA::WindowServer::Server::set_sdr_nits(float)`.
+  So once CoreBrightness pushes SDR nits to CA (CBBrightnessProxyCA path, enabled by having a
+  backlight service), CA creates a libEDR client every vsync. EDRClient::client(): lock, mark
+  creating, unlock, call libEDR (EDRCreateClient...WithCallback); the completion block takes the lock
+  and calls a libEDR getter (blr via 0x1dcdf8d98) WHILE HOLDING it -> render thread waits behind it.
+  No backboardd thread shows the libEDR server side.
+- CoreBrightness side: libEDR server = CBEDRServerStartServer (0x1af095398, called from 0x1af0964ec
+  and 0x1af0e0ff8) + CBEDRServerAddMainDisplay(display->[0x3088]) at 0x1af0dd848, gated by
+  __DisplayCheckEDRSupport (0x1af0e0e2c): false only for DeviceClassNumber 6/7 or
+  (display[0x129]&1 && display[0x3088]==0) -> logs "Not supporting LibEDR, uses CBEDR instead".
+  CB os_log is not in our console, so which branch ran is NOT observed.
+- Red herrings: t1 dispatch_group_wait = BKButtonHapticsController waiting for "_BRController ready"
+  (no haptics HW); t14 = PLClientLogger sync XPC to PowerLog stuck in every sample (powerlogd
+  state unknown; not on the render path).
+- 推断 / next: either CB never registers an EDR display, or CA's client asks for a different display
+  ID than CB registers. Next RE: libEDR EDRCreateClientForDisplay* rendezvous (server lookup, display
+  id, timeout) vs EDRServerAddMainDisplay; check com.apple.libEDR naming. Possible levers: make the
+  rendezvous succeed (official), or keep CB off the CA SDR-nits path (ignore-IOMFB sets CB
+  display[0x88]=0 - meaning unverified).
+
 ## Boot line freed: X9 feature switches default-on in the kernel (2026-11-04)
 
 - Commit 2bf1891. `sweet_x9_arg(name, def)` (osfmk/arm64/sweet_early.c): absent -> def on X9,
