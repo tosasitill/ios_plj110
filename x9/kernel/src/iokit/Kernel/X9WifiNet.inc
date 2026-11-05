@@ -776,6 +776,24 @@ extern "C" void flush_dcache64(addr64_t addr, unsigned count, int phys);
 #define X9_B_FW 0x2000u                      /* firmware data buffer */
 #define X9_B_RX 0x8000u                      /* RX buffers, 16 x 2 KiB */
 #define X9_BUF 0x800u
+/* RC (pcie0 MAC) and pextp0cfg_ao maps, set by x9_wifi_pcie_try for the DMA diagnostics */
+static volatile uint32_t *x9_rc_mac, *x9_rc_pextp;
+static void
+x9_wifi_rc_diag(const char *when)
+{
+    volatile uint32_t *m = x9_rc_mac, *p = x9_rc_pextp;
+    if (!m || !p) {
+        return;
+    }
+    IOLog("X9 WIFI RC %s: pextp clk_con=%08x res_req=%08x pwrctl0=%08x pwrctl6=%08x pwrctl8=%08x req_ctrl=%08x slpprot_rdy=%08x\n",
+        when, p[0x20 / 4], p[0x34 / 4], p[0x40 / 4], p[0x58 / 4], p[0x74 / 4], p[0x7c / 4], p[0x264 / 4]);
+    IOLog("X9 WIFI RC %s: int_sta=%08x axi_if=%08x misc=%08x res_sta=%08x res_ctrl=%08x axi0_err_addr=%08x axi0_err_info=%08x wcpl=%08x spc2=%08x ltssm=%08x link=%08x\n",
+        when, m[0x184 / 4], m[0x1a8 / 4], m[0x348 / 4], m[0xd28 / 4], m[0xd2c / 4], m[0xe00 / 4], m[0xe08 / 4],
+        m[0x340 / 4], m[0xd8 / 4], m[0x150 / 4], m[0x154 / 4]);
+    IOLog("X9 WIFI RC %s: rc cmd/sta=%08x sec_sta=%08x ep cmd/sta=%08x ep devctl/sta=%08x\n", when,
+        x9_pcie_cfg_rd(m, 0, 0, 0x04), x9_pcie_cfg_rd(m, 0, 0, 0x1c), x9_pcie_cfg_rd(m, 1, 0, 0x04),
+        x9_pcie_cfg_rd(m, 1, 0, 0x80 + 0x08));
+}
 struct x9_wdma {
     volatile uint32_t *bar;
     uint8_t *va;
@@ -835,6 +853,7 @@ x9_wd_tx(x9_wdma *d, unsigned ring, unsigned boff, unsigned len)
             IOLog("X9 WIFI DMA: TX%u stuck cidx=%u didx=%u ctrl0=%08x ctrl1=%08x glo=%08x int_sta=%08x\n",
                 ring, *cidx, didx, x9_wd_rd(d, 0x300 + ring * 0x10), x9_wd_rd(d, 0x304 + ring * 0x10),
                 x9_wd_rd(d, 0x208), x9_wd_rd(d, 0x200));
+            x9_wifi_rc_diag("stuck");
             return false;
         }
         IODelay(5);
@@ -856,6 +875,7 @@ x9_wd_rx(x9_wdma *d, unsigned ms, uint8_t *out, unsigned cap)
         if (x9_ms_since(t0) > ms) {
             IOLog("X9 WIFI DMA: no event on RX7[%u] after %u ms: cidx=%u didx=%u glo=%08x int_sta=%08x\n",
                 i, ms, x9_wd_rd(d, 0x578), x9_wd_rd(d, 0x57c), x9_wd_rd(d, 0x208), x9_wd_rd(d, 0x200));
+            x9_wifi_rc_diag("no event");
             return -1;
         }
         IODelay(20);
@@ -967,6 +987,7 @@ x9_wifi_stage6(volatile uint32_t *bar)
     IOLog("X9 WIFI DMA: buffer pa=%llx va=%p glo_cfg=%08x int_sta=%08x tx15 ctrl=%08x/%08x/%08x/%08x rx7 ctrl=%08x/%08x/%08x/%08x\n",
         d.pa, d.va, glo0, x9_wd_rd(&d, 0x200), x9_wd_rd(&d, 0x3f0), x9_wd_rd(&d, 0x3f4), x9_wd_rd(&d, 0x3f8),
         x9_wd_rd(&d, 0x3fc), x9_wd_rd(&d, 0x570), x9_wd_rd(&d, 0x574), x9_wd_rd(&d, 0x578), x9_wd_rd(&d, 0x57c));
+    x9_wifi_rc_diag("before DMA");
     /* halWpdmaInitRing order: DMA off, rings, prefetch + index reset, DMA on */
     const uint32_t gloOff = 0x5030b850u | (1u << 26);
     x9_wd_wr(&d, 0x208, gloOff);
@@ -1290,6 +1311,38 @@ x9_wifi_pcie_try(volatile uint32_t *mac, volatile uint32_t *cg, uint64_t t0, uns
             phy[0x3064 / 4], phy[0x5030 / 4], phy[0x4c / 4], mac[0x348 / 4]);
     }
     uint32_t req0 = cg[0x7c / 4];
+    const uint32_t req_orig = req0;
+    x9_rc_mac = mac;
+    x9_rc_pextp = cg;
+    /*
+     * Stage 6b (50.txt: TX15 stuck with TX_DMA_BUSY, i.e. the EP's first read of host
+     * memory never completed): do what Linux does before link start on mt6993
+     * (pcie-mediatek-gen3.c mtk_pcie_pre_init_6993) and hold the SW votes that keep
+     * the RC out of HW low-power mode (control_vote_v2: PEXTP_PWRCTL_6 = RC driver,
+     * PWRCTL_8 = Wi-Fi driver, HWMODE_EN bit 0 = 0), then wait for PEXTP_SLPPROT_RDY
+     * bits 2|3 (port 0 MAC/PHY sleep protection) to clear. All restored below.
+     */
+    uint32_t sv_res = mac[0xd2c / 4], sv_wcpl = mac[0x340 / 4], sv_spc2 = mac[0xd8 / 4];
+    uint32_t sv_pw0 = cg[0x40 / 4], sv_pw6 = cg[0x58 / 4], sv_pw8 = cg[0x74 / 4];
+    if (stage >= 6) {
+        x9_wifi_rc_diag("as LK left it");
+        mac[0xd2c / 4] = (sv_res & ~0xffu) | (1u << 10) | 0xau;   /* APSRC_ACK, SYS_CLK_RDY 10 us */
+        mac[0x340 / 4] = 0x4u;                                    /* write completion timeout 4 ms */
+        mac[0xd8 / 4] = sv_spc2 | 1u;                             /* record cplto cfg address */
+        req0 |= 1u << 12;                                         /* RG_PEXTP_DDREN_ACK_SEL (kept below) */
+        cg[0x40 / 4] = sv_pw0 | 0xff00u;                          /* PEXTP_TIMER_SET max */
+        cg[0x58 / 4] = sv_pw6 & ~1u;                              /* RC vote: HW mode off */
+        cg[0x74 / 4] = sv_pw8 & ~1u;                              /* Wi-Fi vote: HW mode off */
+        __asm__ volatile ("dsb sy" ::: "memory");
+        IODelay(500);
+        uint64_t tv = mach_absolute_time();
+        while ((cg[0x264 / 4] & 0xcu) && x9_ms_since(tv) < 10) {
+            IODelay(10);
+        }
+        IOLog("X9 WIFI RC: votes held: pwrctl6=%08x pwrctl8=%08x slpprot_rdy=%08x (%s after %llu ms)\n",
+            cg[0x58 / 4], cg[0x74 / 4], cg[0x264 / 4], (cg[0x264 / 4] & 0xcu) ? "STILL PROTECTED" : "released",
+            x9_ms_since(tv));
+    }
     IOLog("X9 WIFI PCIE: before setting=%08x cfgctrl=%08x rst=%08x ltssm=%08x link=%08x req_ctrl=%08x base_conf=%08x\n",
         mac[0x80 / 4], mac[0x84 / 4], mac[0x148 / 4], mac[0x150 / 4], mac[0x154 / 4], req0, mac[0x14 / 4]);
     mac[0x80 / 4] = mac[0x80 / 4] | 1u;                    /* RC mode */
@@ -1347,6 +1400,15 @@ x9_wifi_pcie_try(volatile uint32_t *mac, volatile uint32_t *cg, uint64_t t0, uns
         IOLog("X9 WIFI PCIE: after 1 s ltssm=%08x link=%08x\n", mac[0x150 / 4], mac[0x154 / 4]);
     }
     mac[0x148 / 4] = mac[0x148 / 4] | 0x8u;                /* PERST# asserted again */
+    if (stage >= 6) {
+        req0 = req_orig;
+        mac[0xd2c / 4] = sv_res;
+        mac[0x340 / 4] = sv_wcpl;
+        mac[0xd8 / 4] = sv_spc2;
+        cg[0x40 / 4] = sv_pw0;
+        cg[0x58 / 4] = sv_pw6;
+        cg[0x74 / 4] = sv_pw8;
+    }
     cg[0x7c / 4] = req0;
     __asm__ volatile ("dsb sy" ::: "memory");
     IOLog("X9 WIFI PCIE: PERST asserted, req_ctrl restored=%08x rst=%08x\n", cg[0x7c / 4], mac[0x148 / 4]);
