@@ -1,3 +1,22 @@
+## 64.txt = x9-rev252au-probe (plugin 254): ACE-Lite breaks GPU data even WITH full CIVAC -> ACE-Lite shelved (2026-11-05)
+
+- 实测 /tmp/64.txt (6,186,997 B): plugin 254 staged (X9 UPDATE errno=0, active X9GeneralMetal254), boot-args
+  x9_gpu_acelite=1 x9_gpu_coherent=0. Snoop probe coherent=483 stale=0. At 35.255 s (user interaction, same
+  moment as 62.txt 34.7 s): AS1status=00c202c2 AS1addr=0x40 (translation fault, read, zero pointer + 0x40) ->
+  submission uncertain -> `X9 PANVK FAILED: line=50 errno=5 detail=native operation: IOKit=0xe00002ca` (the
+  submit's kIOReturnIOError) + `X9 PANVK SYNC FAILED: line=394` -> backboardd and SpringBoard device lost ->
+  frozen lock screen.
+- Conclusion: the 0x40 fault happens with complete CPU cache maintenance, so it is NOT stale CPU-written data
+  from the CIVAC skip. Making GPU traffic shareable (SMMU SHCFG=incoming + AMBA ACE-Lite + outer-shareable
+  leaves) itself corrupts what the GPU reads under load (GPU->GPU data via the ACP path, 推断). Missing platform
+  setup candidates (unverified, done by closed pKVM/GPUEB/SLBC on Android): DVM_MI <-> MCUSYS SYSCO connect,
+  L3 ACP partition (slbc mtk_l3c_set_acp_part), ACP QoS/ostd. 63.txt's silent poisoning was most likely the
+  same fault with the log line lost.
+- Decision: keep x9_gpu_acelite OFF. Code stays opt-in (SMMU SHCFG switch, AMBA, outer-shareable leaves, snoop
+  probe) for later research.
+- Next images (kernel only, allowlist = plugin 254 already staged): x9-rev252av = x9_wifi_power=6
+  x9_gpu_park=1 x9_submit_async=1; x9-rev252av-safe = x9_wifi_power=6.
+
 ## Wi-Fi: DMA stall FIXED by LK's Wi-Fi pool (EMI MPU); PATCH_START status 14 = our 68-byte header; rev252av (2026-11-05)
 
 - 实测 61/62/63.txt (rev252am+ kernels, x9_wifi_rsvmem default 1): `X9 WIFI DMA: using LK wifi-reserve-memory
