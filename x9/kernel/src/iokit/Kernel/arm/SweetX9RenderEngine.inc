@@ -54,6 +54,9 @@ static bool render_ready() {
  * cannot change while parked (map/unmap retire first), so the root is reused.
  * All calls hold the render owner lock.
  */
+/* ACE-Lite GPU->CPU snoop probe: [0] plain cached load already saw the GPU's
+ * fence write (snoop works), [1] only the invalidated load saw it (no snoop). */
+static uint64_t render_snoop_probe[2];
 struct RenderParked { X9RenderContext *c; RenderKernelGroup *g; uint64_t root; };
 static RenderParked render_parked;
 static uint64_t render_park_hits,render_park_retires,render_park_cold;
@@ -335,6 +338,7 @@ static IOReturn render_submit(X9RenderContext *c,const X9RenderSubmission *reque
  uint64_t reach_saved[2]={0,0},import_bytes[2]={0,0},full_import_bytes[2]={0,0};
  uint64_t coherent_skip[2]={0,0};
  uint64_t wc_skip[2]={0,0};
+ unsigned snoop_seen=0;
  RenderOwner owner;if(!owner.locked||!render_ready()||!c||!request||!reply)return kIOReturnNotReady;
  times[1]=mach_absolute_time();
  auto *g=render_group(c,request->group);if(!g||c->disabled)return kIOReturnBadArgument;
@@ -525,7 +529,15 @@ static IOReturn render_submit(X9RenderContext *c,const X9RenderSubmission *reque
    done=true;
    for(unsigned i=0;i<3;i++)if(active&(1u<<i)) {
     auto *fence=(uint8_t *)((IOBufferMemoryDescriptor *)g->storage[i].memory)->getBytesNoCopy()+0x8000;
+    /* ACE-Lite snoop probe (log only): the GPU's SYNC_SET64 to this
+     * outer-shareable private page was flushed by render_page_sync above. A
+     * plain cached load sees it only if that write-back snooped/invalidated
+     * the CPU's line; the invalidated load always sees it. */
+    uint64_t plain=0;if(x9_gpu_acelite_active){__asm__ volatile("dmb ish":::"memory");plain=*(volatile uint64_t *)fence;}
     invalidate_cpu(fence,64);uint64_t actual=0;memcpy(&actual,fence,8);
+    if(x9_gpu_acelite_active&&actual==request->submission_id&&!(snoop_seen&(1u<<i))) {
+     snoop_seen|=1u<<i;if(plain==actual)render_snoop_probe[0]++;else render_snoop_probe[1]++;
+    }
     uint32_t sync_error=0;memcpy(&sync_error,fence+8,sizeof(sync_error));
     if(sync_error)goto uncertain;
     for(unsigned j=16;j<64;j++)if(fence[j]!=0xa5)goto uncertain;
@@ -621,6 +633,9 @@ static IOReturn render_submit(X9RenderContext *c,const X9RenderSubmission *reque
     count,span_total[0]/count,span_total[1]/count,hole_total[0]/count,hole_total[1]/count);
    IOLog("X9 RENDER PARK: hits=%llu cold=%llu retires=%llu;hit = no AS install/CSG start/suspend/AS remove\n",
     render_park_hits,render_park_cold,render_park_retires);
+   if(x9_gpu_acelite_active)
+    IOLog("X9 RENDER SNOOP: GPU->CPU fence probe coherent=%llu stale=%llu;stale>0 means GPU writes do not invalidate CPU lines\n",
+     render_snoop_probe[0],render_snoop_probe[1]);
    IOLog("X9 RENDER cache-plan: builds=%llu reuses=%llu;mapping mutation invalidates,shared cache ops still per submission\n",plan_rebuilds,plan_reuses);
    plan_rebuilds=plan_reuses=0;
    for(unsigned i=0;i<2;i++)hole_total[i]=span_total[i]=0;
