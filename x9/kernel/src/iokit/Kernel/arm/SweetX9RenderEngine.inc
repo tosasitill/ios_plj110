@@ -840,6 +840,8 @@ static void render_drain(X9RenderContext *c) {
  if(!busy)return;
  IOLockUnlock(c->lock);render_async_drain_unlocked(p);IOLockLock(c->lock);
 }
+/* osfmk/kern/thread.c; its prototype is XNU_KERNEL_PRIVATE in a header iokit does not see. */
+extern "C" kern_return_t kernel_thread_start_priority(thread_continue_t,void *,integer_t,thread_t *);
 static bool render_async_start() {
  if(render_async_running)return true;
  if(sweet_x9_arg("x9_submit_async",0)!=1)return false;
