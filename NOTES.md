@@ -1,3 +1,21 @@
+## 59.txt + PLDA decode; rev252al = does the read reach the RC? (2026-11-05)
+
+- 实测 59.txt (389,652 B, /tmp/59.txt) = rev252ak. pend_adt 00010000 (R=1) at the first BAR access, after driver
+  own, after WFSYS reset, right after and 1 ms after bus master on, before DMA and at the stall: static, does
+  not count our read -> not a stuck read. a_adt_slv0 0 -> 00000008 only at the stall; p_adt_win0 00000008
+  from the first access. Same stall otherwise.
+- Both bridges are PLDA XpressRICH (Linux drivers/pci/controller/plda/pcie-plda.h, same ATR layout 0x600 inbound
+  / 0x800 outbound, 32-byte entries; MTK gen3 RC uses the same offsets 0x184 ISTATUS_LOCAL, 0x1d4 PENDING_ADT,
+  0x800 trans tables). PLDA ATR event nibble: b0 POST_ERR, b1 FETCH_ERR, b2 DISCARD_ERR, b3 DOORBELL -> the 8s are
+  DOORBELL/hit, not errors: our read passed the chip's outbound ATR (t0 identity 2^64, TRSL_PARAM 0 =
+  PCIE_TX_RX_INTERFACE as Linux plda_pcie_setup_window uses). Linux MTK gen3 never programs the RC's inbound
+  ATR_PCIE_WIN tables (HW default).
+- rev252al (commit 16e2a90, read-only): `X9 WIFI RCIN <when>:` RC istat_local 0x184, pend_adt, p_adt_win0/1
+  0x1d8/0x1dc, a_adt_slv0, err_addr 0xe44:0xe40, err_info 0xe48, tx_credit 0xd30/0xd34, EP istat_local (chip MAC
+  0x184), EP DEVCAP2/DEVCTL2 (cap 0x80+0x24/0x28); plus one line per enabled RC inbound ATR entry (win0/1 t0-t7)
+  or "no enabled RC inbound ATR entry". Built: ~/ios_plj110/x9/out/x9-rev252al/boot.img 9,875,456 B sha256
+  b6eecf1e39a84f592f9c50dedb52a12dfc9d0501b5be151d99e6d200fbaf13e9, 0 errors, x9_wifi_power=6, no mailbox.
+
 ## rev252ak: trace of the pending outbound read (built 2026-11-05, not device-tested)
 
 - Commit 060ae16, read-only additions: `X9 WIFI PEND <when>: pend_adt (R= W=) a_adt_slv0 p_adt_win0 dma_pend
