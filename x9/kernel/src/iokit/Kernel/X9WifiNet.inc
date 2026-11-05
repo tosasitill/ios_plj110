@@ -1028,6 +1028,18 @@ x9_wifi_stage6(volatile uint32_t *bar)
         x9_wd_rd(&d, 0x3fc), x9_wd_rd(&d, 0x570), x9_wd_rd(&d, 0x574), x9_wd_rd(&d, 0x578), x9_wd_rd(&d, 0x57c));
     x9_wifi_rc_diag("before DMA");
     x9_wd_state(&d, "before DMA");
+    /*
+     * 54.txt follow-up: DMADONE stayed 0 with no PCIe error, consistent with WFDMA reading the TXD and
+     * then waiting for DMASHDL pages. Bypass test, as gen4m does when DMASHDL is disabled
+     * (cmm_asic_connac3x.c asicConnac3xWfdmaInitForUSB): GLO_CFG_EXT0 bit 6 TX_DMASHDL_EN off and
+     * DMASHDL SW_CONTROL (0x20026004) bit 28 DMASHDL_BYPASS on. Both restored in the teardown.
+     */
+    uint32_t ext0Orig = x9_wd_rd(&d, 0x2b0), shdlOrig = bar[0xd6004 / 4];
+    x9_wd_wr(&d, 0x2b0, ext0Orig & ~(1u << 6));
+    bar[0xd6004 / 4] = shdlOrig | (1u << 28);
+    __asm__ volatile ("dsb sy" ::: "memory");
+    IOLog("X9 WIFI DMASHDL: bypass test: ext0 %08x -> %08x, sw_ctrl %08x -> %08x\n",
+        ext0Orig, x9_wd_rd(&d, 0x2b0), shdlOrig, bar[0xd6004 / 4]);
     /* 52.txt follow-up: if the WFDMA wrapper's AXI sleep protection is enabled, release it */
     uint32_t axislp0 = bar[0xd7050 / 4];
     if (axislp0 & 0x00010001u) {
@@ -1159,6 +1171,9 @@ x9_wifi_stage6(volatile uint32_t *bar)
     x9_wd_wr(&d, 0x570, 0);
     x9_wd_wr(&d, 0x574, 0);
     x9_wd_wr(&d, 0x208, glo0 & ~0x5u);
+    x9_wd_wr(&d, 0x2b0, ext0Orig);
+    bar[0xd6004 / 4] = shdlOrig;
+    __asm__ volatile ("dsb sy" ::: "memory");
     if (axislp0 & 0x00010001u) {
         bar[0xd7050 / 4] = axislp0;
         __asm__ volatile ("dsb sy" ::: "memory");
