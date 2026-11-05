@@ -765,6 +765,20 @@ x9_pcie_cfg_wr(volatile uint32_t *mac, unsigned bus, unsigned devfn, unsigned wh
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include "../../../generated/x9_wifi_firmware.inc"
 extern "C" void flush_dcache64(addr64_t addr, unsigned count, int phys);
+extern "C" vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
+/*
+ * 60.txt follow-up: the TX15 descriptor read reaches the RC AXI master and never completes. Android does not
+ * DMA from ordinary kernel memory on mt6993: gen4m (CFG_SUPPORT_WIFI_RSV_MEM, hif_mem.c halAllocHifMem)
+ * places every TX/RX descriptor ring, command and FWDL buffer in the "wifi" node's memory-region, which LK
+ * carves out as mblock-55 shared-dma-pool_wifi-reserve-memory_dma = 0xe2700000 + 0x1900000 ("MPU-in-lk":
+ * mt6993.dts connsys-emi-config emi-mpu-region <6 11 47> covers layout idx 11 "WFDMA1"; plat_priv.c
+ * kalSetDrvEmiMpuProtection opens such regions only to DOMAIN_AP + DOMAIN_CONN). Same address in 50..60.txt.
+ * Upstream thread with the same idea for mediatek-gen3 (no IOMMU, firmware MPU limits PCIe DMA to a carve-out):
+ * patchew 20260508063633.3894348-1-wenst@chromium.org. XNU RAM starts at 0x140000000, so this pool is not
+ * XNU memory; it is mapped write-combine (Normal NC) and needs no cache maintenance.
+ */
+#define X9_WIFI_RSV_PA 0xe2700000ULL
+#define X9_WIFI_RSV_SIZE 0x1900000ULL
 
 #define X9_WFDMA 0xd4000u                    /* WFDMA host DMA0 (chip 0x20024000) in BAR0 */
 #define X9_DMA_SIZE 0x10000u
@@ -907,6 +921,7 @@ struct x9_wdma {
     volatile uint32_t *bar;
     uint8_t *va;
     uint64_t pa;
+    bool nc;                                 /* LK Wi-Fi pool mapped Normal non-cacheable: no cache maintenance */
     unsigned c15, c16, r7;                   /* next TX CPU index; next RX index to read */
     uint8_t seq;
     unsigned events;
@@ -926,8 +941,10 @@ static void
 x9_wd_sync(x9_wdma *d, unsigned off, unsigned len)
 {
     __asm__ volatile ("dsb sy" ::: "memory");
-    flush_dcache64((addr64_t)(d->pa + off), len, 1);
-    __asm__ volatile ("dsb sy" ::: "memory");
+    if (!d->nc) {
+        flush_dcache64((addr64_t)(d->pa + off), len, 1);
+        __asm__ volatile ("dsb sy" ::: "memory");
+    }
 }
 /* 53.txt follow-up (read-only): CONN_HIF_RST and DMASHDL (chip 0x20026000 -> bar 0xd6000) state */
 static void
@@ -1090,17 +1107,27 @@ x9_wifi_stage6(volatile uint32_t *bar)
     IOLog("X9 WIFI FW: patch %s %u B sha256 %.16s..., ram %u B %.16s..., phy %u B %.16s...\n",
         x9_wifi_patch_name, x9_wifi_patch_len, x9_wifi_patch_sha256, x9_wifi_ram_len, x9_wifi_ram_sha256,
         x9_wifi_phy_len, x9_wifi_phy_sha256);
-    IOBufferMemoryDescriptor *md = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
-        kIODirectionInOut | kIOMemoryPhysicallyContiguous, X9_DMA_SIZE, 0xfffffffffULL & ~0xfffULL);
-    if (!md) {
-        IOLog("X9 WIFI DMA: buffer allocation failed\n");
-        return;
-    }
     IOByteCount seglen = 0;
     x9_wdma d = {};
     d.bar = bar;
-    d.va = (uint8_t *)md->getBytesNoCopy();
-    d.pa = md->getPhysicalSegment(0, &seglen, kIOMemoryMapperNone);
+    if (sweet_x9_arg("x9_wifi_rsvmem", 1) == 1) {
+        static_assert(X9_DMA_SIZE <= X9_WIFI_RSV_SIZE, "DMA area must fit the LK Wi-Fi pool");
+        d.va = (uint8_t *)ml_io_map_wcomb((vm_offset_t)X9_WIFI_RSV_PA, X9_DMA_SIZE);
+        d.pa = X9_WIFI_RSV_PA;
+        d.nc = true;
+        seglen = X9_DMA_SIZE;
+        IOLog("X9 WIFI DMA: using LK wifi-reserve-memory pool pa=%llx size=%llx (x9_wifi_rsvmem=1, Normal NC map va=%p)\n",
+            X9_WIFI_RSV_PA, X9_WIFI_RSV_SIZE, d.va);
+    } else {
+        IOBufferMemoryDescriptor *md = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
+            kIODirectionInOut | kIOMemoryPhysicallyContiguous, X9_DMA_SIZE, 0xfffffffffULL & ~0xfffULL);
+        if (!md) {
+            IOLog("X9 WIFI DMA: buffer allocation failed\n");
+            return;
+        }
+        d.va = (uint8_t *)md->getBytesNoCopy();
+        d.pa = md->getPhysicalSegment(0, &seglen, kIOMemoryMapperNone);
+    }
     if (!d.va || !d.pa || seglen < X9_DMA_SIZE) {
         IOLog("X9 WIFI DMA: buffer va=%p pa=%llx seg=%llx unusable\n", d.va, d.pa, (uint64_t)seglen);
         return;                              /* leaked on purpose */
