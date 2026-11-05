@@ -674,6 +674,11 @@ extern "C" void sweet_x9_render_owner_leave(void) {IOLockUnlock(metal_service_lo
 /* Caller holds the owner lock. True while a render group is parked on AS1:
  * GPU desktop staging must not run then (it needs AS1 and CSG slots). */
 extern "C" bool sweet_x9_render_parked(void) {return render_parked.g!=nullptr;}
+/* Lock-free present fence for the display (async submission only): a frame
+ * swapped after enqueue sequence S is complete once completed >= S. */
+extern "C" bool sweet_x9_render_async_on(void) {return render_async_running;}
+extern "C" uint64_t sweet_x9_render_async_enqueued(void) {return __atomic_load_n(&render_async_enqueued,__ATOMIC_ACQUIRE);}
+extern "C" uint64_t sweet_x9_render_async_completed(void) {return __atomic_load_n(&render_async_completed,__ATOMIC_ACQUIRE);}
 // Nonblocking display-side ownership. Never wait for GPU work on the timer
 // workloop. Positive means the caller must leave(); zero is no native engine;
 // negative means keep the pending frame, including on uncertain DMA ownership.
@@ -699,6 +704,7 @@ extern "C" void sweet_x9_render_bootstrap(void) {
  if(result==2)render_engine_installed=true;
  sweet_x9_render_owner_leave();
  if(result==2) {
+  render_async_start();   /* x9_submit_async=1 only; caps advertise it */
   sweet_x9_render_install(&resident_engine);sweet_x9_render_publish();
   X9RenderCaps caps={};
   if(render_caps(&caps))IOLog("X9 RENDER CAPS: abi=%u capabilities=0x%x streams=%u cache-atom=%u;no legacy compute publication\n",

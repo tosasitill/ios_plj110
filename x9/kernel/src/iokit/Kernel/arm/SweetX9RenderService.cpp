@@ -183,6 +183,11 @@ class SweetX9RenderUserClient : public IOUserClient {
   return false;
  }
  IOReturn operation(uint32_t selector,IOExternalMethodArguments *a) {
+  /* Async submission: queued jobs of this context still need their page-table
+   * mappings, groups and resources, and a v1 submit must not overtake them.
+   * drain() drops/retakes context->lock while it waits. */
+  if(render_engine->drain&&(selector==X9RenderUnmap||selector==X9RenderRelease||
+     selector==X9RenderDestroyGroup||selector==X9RenderSubmit))render_engine->drain(context);
   if(selector==X9RenderGetCaps) {
    X9RenderCaps caps;
    if(a->structureInputSize||a->structureOutputSize!=sizeof(caps))return kIOReturnBadArgument;
@@ -390,6 +395,22 @@ class SweetX9RenderUserClient : public IOUserClient {
    if(context->exposed)context->disabled=true; /* DMA lifetime unresolved: no retry. */
    return kr;
   }
+  if(selector==X9RenderSubmitAsync) {
+   if(!render_engine->submit_async)return kIOReturnUnsupported;
+   if(a->structureInputSize!=sizeof(X9RenderSubmission)||a->structureOutputSize!=sizeof(X9RenderCompletion))return kIOReturnBadArgument;
+   X9RenderSubmission request;memcpy(&request,a->structureInput,sizeof(request));
+   if(request.abi!=X9_RENDER_ABI||!request.group||!request.stream_count||request.stream_count>3||request.flags||
+      !request.submission_id||context->next_submission==UINT64_MAX||request.submission_id!=context->next_submission+1)return kIOReturnBadArgument;
+   unsigned seen=0;
+   for(unsigned i=0;i<request.stream_count;i++) {
+    if(!stream_mapped(request.streams[i])||(seen&(1u<<request.streams[i].index)))return kIOReturnBadArgument;
+    seen|=1u<<request.streams[i].index;
+   }
+   context->next_submission=request.submission_id;
+   IOReturn kr=render_engine->submit_async(context,&request,(X9RenderCompletion *)a->structureOutput);
+   if(kr!=kIOReturnSuccess)IOLog("X9 RENDER SUBMIT ASYNC: refused pid=%d group=%u id=%llu kr=%x\n",proc_selfpid(),request.group,request.submission_id,kr);
+   return kr;
+  }
   if(selector==X9RenderWait) {
    if(a->structureInputSize!=sizeof(X9RenderWaitRequest)||a->structureOutputSize!=sizeof(X9RenderCompletion))return kIOReturnBadArgument;
    const auto &request=*(const X9RenderWaitRequest *)a->structureInput;
@@ -467,8 +488,22 @@ public:
   if(args->structureInputSize>sizeof(X9RenderSubmission)||args->structureOutputSize>sizeof(X9RenderCaps)||
      args->scalarInputCount||args->scalarOutputCount||args->structureInputDescriptor||args->structureOutputDescriptor||
      (args->structureInputSize&&!args->structureInput)||(args->structureOutputSize&&!args->structureOutput))return kIOReturnBadArgument;
-  IOLockLock(context->lock);
   if(args->structureOutputSize)bzero(args->structureOutput,args->structureOutputSize);
+  if(selector==X9RenderFenceWait) {
+   /* Never hold the context lock while waiting: the worker needs it to run
+    * this context's queued jobs, and the submitting thread keeps submitting. */
+   if(!render_engine->fence_wait)return kIOReturnUnsupported;
+   if(args->structureInputSize!=sizeof(X9RenderWaitRequest)||args->structureOutputSize!=sizeof(X9RenderCompletion))return kIOReturnBadArgument;
+   X9RenderWaitRequest request;memcpy(&request,args->structureInput,sizeof(request));
+   IOLockLock(context->lock);
+   bool ok=request.abi==X9_RENDER_ABI&&request.group&&request.submission_id&&
+    request.submission_id<=context->next_submission&&request.timeout_ns<=10000000000ULL&&!context->disabled;
+   bool disabled=context->disabled;
+   IOLockUnlock(context->lock);
+   if(!ok)return disabled?kIOReturnNotReady:kIOReturnBadArgument;
+   return render_engine->fence_wait(context,&request,(X9RenderCompletion *)args->structureOutput);
+  }
+  IOLockLock(context->lock);
   IOReturn kr=operation(selector,args);IOLockUnlock(context->lock);return kr;
  }
 };

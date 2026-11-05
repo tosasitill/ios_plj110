@@ -76,6 +76,13 @@ struct X9RenderEngine {
  IOReturn (*cache)(X9RenderContext *,X9RenderResource *,const X9RenderCacheRequest *);
  IOReturn (*timestamp)(uint64_t *);
  bool (*quiesce)(X9RenderContext *);
+ /* Asynchronous submission (X9RenderAsyncSubmit). submit_async and drain are
+  * called with c->lock held and may drop/retake it while waiting; fence_wait
+  * is called WITHOUT c->lock. drain returns once no queued/running async work
+  * of c remains. NULL when async submission is unavailable. */
+ IOReturn (*submit_async)(X9RenderContext *,const X9RenderSubmission *,X9RenderCompletion *);
+ IOReturn (*fence_wait)(X9RenderContext *,const X9RenderWaitRequest *,X9RenderCompletion *);
+ void (*drain)(X9RenderContext *);
 };
 extern "C" void sweet_x9_render_install(const X9RenderEngine *);
 extern "C" void sweet_x9_render_publish(void);

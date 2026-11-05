@@ -6,6 +6,8 @@
 #include <errno.h>
 #include "util/log.h"
 #include <string.h>
+#include <stdlib.h>
+void x9_sync_drain(struct util_sync_provider *);   /* X9PanVKSync.c */
 #define X9_BO_FLAGS (PAN_KMOD_BO_FLAG_EXECUTABLE|PAN_KMOD_BO_FLAG_NO_MMAP|PAN_KMOD_BO_FLAG_WB_MMAP)
 /* Native mappings this device may hold. The caps still report the ABI's 1024
  * (X9_RENDER_MAX_MAPPINGS) for older plugins; kernels from 2026-11-01 accept
@@ -25,6 +27,11 @@ struct x9_dev {
  uint64_t last_submission;
  uint64_t cache_ops,cache_range_bytes,cache_bo_bytes,cache_merged;
  bool failed;
+ /* Kernel X9RenderAsyncSubmit (boot-arg x9_submit_async=1) and not disabled
+  * by X9_SUBMIT_SYNC=1: submits return after enqueue; completion is observed
+  * with X9RenderFenceWait (X9PanVKSync.c completion thread). */
+ bool async;
+ uint64_t async_completed;   /* highest id seen complete, atomic */
 };
 struct x9_bo {struct pan_kmod_bo base;uint32_t memory_type,native_flags;void *imported_host;};
 static struct x9_dev *device(struct pan_kmod_dev *dev){return container_of(dev,struct x9_dev,base);}
@@ -43,6 +50,7 @@ static int call(struct x9_dev *d,uint32_t op,const void *in,size_t ilen,void *ou
 }
 static void destroy(struct pan_kmod_dev *dev) {
  struct x9_dev *d=device(dev);
+ if(d->async)x9_sync_drain(dev->sync_ops);   /* completion thread stops using the transport */
  /* Common cleanup may flush pending cache operations; keep transport alive. */
  pan_kmod_dev_cleanup(dev);x9_render_close(d->connection);
  simple_mtx_destroy(&d->lock);pan_kmod_dev_free(dev,d);
@@ -174,7 +182,7 @@ static bool wait_bo(struct pan_kmod_bo *bo,int64_t timeout,bool read_only) {
   uint64_t ns=timeout<0?10000000000ULL:MIN2((uint64_t)timeout,10000000000ULL);
   struct X9RenderWaitRequest req={X9_RENDER_ABI,d->last_group,d->last_submission,ns};
   struct X9RenderCompletion reply={0};
-  if(!call(d,X9RenderWait,&req,sizeof(req),&reply,sizeof(reply))) {
+  if(!call(d,d->async?X9RenderFenceWait:X9RenderWait,&req,sizeof(req),&reply,sizeof(reply))) {
    ready=reply.abi==X9_RENDER_ABI&&reply.group==req.group&&reply.submission_id==req.submission_id&&
     reply.completed_id==req.submission_id&&!reply.status&&!reply.fault_status&&!reply.exception_type&&!reply.fault_address&&!reply.reserved;
    if(!ready){d->failed=true;errno=EPROTO;}
@@ -271,6 +279,8 @@ struct pan_kmod_dev *x9_pan_kmod_create(const struct pan_kmod_allocator *allocat
   x9_render_close(d->connection);pan_kmod_free(allocator,d);return NULL;
  }
  simple_mtx_init(&d->lock,mtx_plain);
+ d->async=(c->capabilities&X9RenderAsyncSubmit)&&!getenv("X9_SUBMIT_SYNC");
+ x9_panvk_log("X9 PANVK SUBMIT: mode=%s (kernel caps 0x%x)",d->async?"async":"sync",c->capabilities);
  d->base.props=(struct pan_kmod_dev_props){.gpu_id=c->gpu_id,.gpu_variant=c->core_features&255,.gpu_features=c->gpu_features,
   .shader_present=c->shader_present,.tiler_features=c->tiler_features,.mem_features=c->mem_features,.mmu_features=c->mmu_features,
   .l2_features=c->l2_features,.max_threads_per_core=c->max_threads,.max_threads_per_wg=c->max_workgroup_threads,
@@ -339,6 +349,62 @@ int x9_pan_kmod_submit(struct pan_kmod_dev *dev,uint32_t group,const struct X9Re
 done:simple_mtx_unlock(&d->lock);return ret;
 }
 
+bool x9_pan_kmod_async(struct pan_kmod_dev *dev) {
+ return dev&&dev->ops==&ops&&device(dev)->async;
+}
+uint64_t x9_pan_kmod_async_completed(struct pan_kmod_dev *dev) {
+ return dev&&dev->ops==&ops?__atomic_load_n(&device(dev)->async_completed,__ATOMIC_ACQUIRE):0;
+}
+uint64_t x9_pan_kmod_last_submission(struct pan_kmod_dev *dev,uint32_t *group) {
+ if(!dev||dev->ops!=&ops)return 0;
+ struct x9_dev *d=device(dev);simple_mtx_lock(&d->lock);
+ uint64_t id=d->last_submission;if(group)*group=d->last_group;
+ simple_mtx_unlock(&d->lock);return id;
+}
+/* Enqueue only. The id is returned for x9_pan_kmod_fence_wait. */
+int x9_pan_kmod_submit_async(struct pan_kmod_dev *dev,uint32_t group,const struct X9RenderStream *streams,uint32_t count,uint64_t *id) {
+ if(!dev||dev->ops!=&ops||!streams||!id||!count||count>X9_RENDER_MAX_STREAMS)return error(EINVAL);
+ struct x9_dev *d=device(dev);
+ if(!d->async)return error(ENOTSUP);
+ pan_kmod_flush_bo_map_syncs(dev);
+ simple_mtx_lock(&d->lock);int ret=-1;
+ if(d->failed){errno=EIO;goto done;}
+ unsigned i=0;while(i<d->group_count&&d->groups[i]!=group)i++;
+ if(i==d->group_count||d->last_submission==UINT64_MAX){errno=EINVAL;goto done;}
+ struct X9RenderSubmission request={.abi=X9_RENDER_ABI,.group=group,.stream_count=count,.submission_id=d->last_submission+1};
+ memcpy(request.streams,streams,count*sizeof(*streams));
+ struct X9RenderCompletion actual={0};
+ ret=call(d,X9RenderSubmitAsync,&request,sizeof(request),&actual,sizeof(actual));
+ if(!ret) {
+  if(actual.abi!=X9_RENDER_ABI||actual.group!=group||actual.submission_id!=request.submission_id||
+     actual.completed_id||actual.status||actual.reserved||actual.fault_status||actual.exception_type||actual.fault_address) {
+   d->failed=true;ret=error(EPROTO);
+  }else {d->last_submission=request.submission_id;d->last_group=group;*id=request.submission_id;}
+ }
+done:simple_mtx_unlock(&d->lock);return ret;
+}
+/* Blocking wait WITHOUT the device lock (the kernel also drops its context
+ * lock), so the submitting thread keeps going. ETIMEDOUT does not poison. */
+int x9_pan_kmod_fence_wait(struct pan_kmod_dev *dev,uint32_t group,uint64_t id,uint64_t timeout_ns,struct X9RenderCompletion *reply) {
+ if(!dev||dev->ops!=&ops||!group||!id||!reply)return error(EINVAL);
+ struct x9_dev *d=device(dev);
+ if(__atomic_load_n(&d->failed,__ATOMIC_ACQUIRE))return error(EIO);
+ struct X9RenderWaitRequest req={X9_RENDER_ABI,group,id,timeout_ns>10000000000ULL?10000000000ULL:timeout_ns};
+ memset(reply,0,sizeof(*reply));
+ int ret=x9_render_call(d->connection,X9RenderFenceWait,&req,sizeof(req),reply,sizeof(*reply));
+ if(ret){
+  if(errno==ETIMEDOUT)return -1;
+  int saved=errno;x9_panvk_log("X9 PANVK FENCE: group=%u id=%llu errno=%d detail=%s",group,(unsigned long long)id,saved,x9_render_last_error());
+  __atomic_store_n(&d->failed,true,__ATOMIC_RELEASE);errno=saved;return -1;
+ }
+ if(reply->abi!=X9_RENDER_ABI||reply->group!=group||reply->submission_id!=id||reply->completed_id!=id||reply->status||
+    reply->reserved||reply->fault_status||reply->exception_type||reply->fault_address) {
+  __atomic_store_n(&d->failed,true,__ATOMIC_RELEASE);return error(EPROTO);
+ }
+ uint64_t old=__atomic_load_n(&d->async_completed,__ATOMIC_ACQUIRE);
+ while(old<id&&!__atomic_compare_exchange_n(&d->async_completed,&old,id,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE));
+ return 0;
+}
 int x9_pan_kmod_unmap_cpu(struct pan_kmod_bo *bo,void *address) {
  if(!bo||bo->dev->ops!=&ops||!address)return error(EINVAL);
  struct x9_dev *d=device(bo->dev);struct x9_bo *b=container_of(bo,struct x9_bo,base);
@@ -368,16 +434,17 @@ int x9_pan_kmod_group_check(struct pan_kmod_dev *dev,uint32_t group) {
  if(d->failed)ret=error(EIO);
  else if(i==d->group_count)ret=error(EINVAL);
  else if(d->last_group==group&&d->last_submission) {
-  struct X9RenderWaitRequest req={X9_RENDER_ABI,group,d->last_submission,0};
+  struct X9RenderWaitRequest req={X9_RENDER_ABI,group,d->last_submission,d->async?10000000000ULL:0};
   struct X9RenderCompletion reply={0};
-  ret=call(d,X9RenderWait,&req,sizeof(req),&reply,sizeof(reply));
+  ret=call(d,d->async?X9RenderFenceWait:X9RenderWait,&req,sizeof(req),&reply,sizeof(reply));
   if(!ret&&(reply.abi!=X9_RENDER_ABI||reply.group!=group||reply.submission_id!=d->last_submission||
      reply.completed_id!=d->last_submission||reply.status||reply.reserved||reply.fault_status||reply.exception_type||reply.fault_address)) {
    d->failed=true;ret=error(EPROTO);
   }
  }
- /* Older groups have no pending jobs: this backend submits synchronously
-  * under the device lock and has validated every intervening completion. */
+ /* Older groups have no pending jobs: sync mode submits synchronously under
+  * the device lock and validated every intervening completion; async mode
+  * waits for the newest id above, and the kernel FIFO completes in order. */
  simple_mtx_unlock(&d->lock);return ret;
 }
 

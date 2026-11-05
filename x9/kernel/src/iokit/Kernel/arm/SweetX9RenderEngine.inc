@@ -20,8 +20,15 @@ struct RenderKernelContext {
  X9RenderCompletion history[render_history];
  unsigned next_history;
  uint32_t next_group;
+ /* Async submission state, under render_async_lock only (see below). */
+ struct AsyncDone { uint32_t group; IOReturn kr; X9RenderCompletion reply; } async_done[render_history];
+ unsigned async_next,async_pending;
+ uint64_t async_done_id;
+ bool async_failed;
 };
 static bool render_engine_installed;
+static bool render_async_enabled();                          /* async section below */
+static void render_async_drain_unlocked(RenderKernelContext *);
 struct RenderOwner {
  bool locked;
  RenderOwner():locked(sweet_x9_render_owner_enter()){}
@@ -129,6 +136,7 @@ static bool render_caps(X9RenderCaps *caps) {
  if(line>X9_RENDER_CACHE_ATOM||X9_RENDER_CACHE_ATOM%line)return false;
  *caps=resident->caps;
  caps->capabilities=X9RenderBufferObjects|X9RenderHostImport|X9RenderCSFSubmit|X9RenderTiler|X9RenderFragment|X9RenderSubmissionCacheOwnership;
+ if(render_async_enabled())caps->capabilities|=X9RenderAsyncSubmit;
  return true;
 }
 static IOReturn render_context_open(X9RenderContext *c) {
@@ -338,7 +346,8 @@ static IOReturn render_submit(X9RenderContext *c,const X9RenderSubmission *reque
      gr64(resident->gpu,0x2440)==render_parked.root) resume=true;
   else if(!render_retire_parked(render_parked.c==c?"other group":"other context"))return kIOReturnIOError;
  }
- if(c->exposed&&!resume)return kIOReturnNotReady;
+ /* A parked context is NOT exposed (GPU has no work; see park below). */
+ if(c->exposed)return kIOReturnNotReady;
  const uint64_t parked_root=resume?render_parked.root:0;
  render_parked={};   /* re-established only after this submit completes */
  /* Early returns before any hardware step must leave the still-running idle
@@ -468,6 +477,7 @@ static IOReturn render_submit(X9RenderContext *c,const X9RenderSubmission *reque
  if(!active)return kIOReturnBadArgument;
  uint64_t root=resume?parked_root:x9_render_memory_publish(c);if(!root)return kIOReturnNotReady;
  park_restore.armed=false;   /* hardware phase: failures are uncertain, success re-parks */
+ if(resume)c->exposed=true;  /* cold path: x9_render_memory_publish set it */
  for(unsigned i=0;i<3;i++)if((active&(1u<<i))&&!render_range_sync(g->storage[i]))goto uncertain;
  times[3]=mach_absolute_time();
  phase=resume?"gpu-flush(parked AS1)":"gpu-flush-and-as-install";
@@ -540,8 +550,12 @@ static IOReturn render_submit(X9RenderContext *c,const X9RenderSubmission *reque
    if(!flush_gpu(gpu)||!remove_as(gpu,resident->policy.saved_attr,resident->policy.saved_cfg,1))goto uncertain;
   }
  }
- if(park)render_parked={c,g,root};
- else x9_render_memory_detached(c);
+ if(park) {
+  /* GPU idle with AS1 still bound: CPU-side operations (cache ops, CPU views,
+   * releases of unmapped resources) are safe, so the context is not exposed.
+   * Page-table changes still retire first (vm stays attached). */
+  render_parked={c,g,root};c->exposed=false;
+ }else x9_render_memory_detached(c);
  times[6]=mach_absolute_time();
  for(unsigned i=0;i<3;i++)if(active&(1u<<i))g->producer[i]=expected[i];
  for(auto &r:c->resources)if(r.memory&&(r.flags&X9RenderGPUWrite)) {
@@ -685,6 +699,7 @@ static IOReturn render_wait(X9RenderContext *c,const X9RenderWaitRequest *reques
  return kIOReturnNotFound;
 }
 static bool render_close(X9RenderContext *c) {
+ if(c)render_async_drain_unlocked((RenderKernelContext *)c->engine_private);   /* before the owner lock */
  RenderOwner owner;if(!owner.locked||!c||!render_ready())return false;
  if(!render_park_release_for(c,"close"))return false;
  if(c->exposed)return false;
@@ -702,5 +717,141 @@ static bool render_quiesce(X9RenderContext *c) {
  if(!render_park_release_for(c,"quiesce"))return false;
  return !c->exposed;
 }
+/*
+ * Asynchronous submission, opt-in x9_submit_async=1 (rev252aq; design:
+ * docs/graphics/submission-decoupling-design.md, decisions 1/2 accepted).
+ * One global FIFO and one kernel worker: the hardware runs one render job at a
+ * time anyway, and global order makes cross-process producer->consumer order
+ * (client renders a surface, then backboardd composites it) follow enqueue
+ * order. The worker runs the unchanged render_submit under the context lock
+ * and the owner lock, exactly as the synchronous selector did, so every cache,
+ * AS, CSG and fence rule is unchanged; a completion means CPU-visible results.
+ * Callers return right after enqueue. Global sequence numbers give the display
+ * a lock-free present fence (sweet_x9_render_async_*). Lock order: c->lock ->
+ * owner lock (worker, as before); render_async_lock is a leaf held without
+ * either, never across render_submit.
+ */
+struct RenderAsyncJob { X9RenderContext *c; X9RenderSubmission req; uint64_t seq; };
+static constexpr unsigned render_async_depth=16;
+static IOLock *render_async_lock;
+static RenderAsyncJob render_async_jobs[render_async_depth];
+static unsigned render_async_head,render_async_count;
+static uint64_t render_async_enqueued,render_async_completed;
+static bool render_async_running;
+static uint64_t render_async_stats[4];   /* jobs, failures, queue-full waits, drains that waited */
+static bool render_async_enabled() {return render_async_running;}
+static void render_async_worker(void *,wait_result_t) {
+ for(;;) {
+  IOLockLock(render_async_lock);
+  while(!render_async_count)IOLockSleep(render_async_lock,&render_async_count,THREAD_UNINT);
+  RenderAsyncJob job=render_async_jobs[render_async_head];
+  render_async_head=(render_async_head+1)%render_async_depth;render_async_count--;
+  IOLockWakeup(render_async_lock,&render_async_head,false);
+  IOLockUnlock(render_async_lock);
+  X9RenderContext *c=job.c;auto *p=(RenderKernelContext *)c->engine_private;
+  X9RenderCompletion reply={};IOReturn kr;
+  IOLockLock(c->lock);
+  bool failed;
+  IOLockLock(render_async_lock);failed=p->async_failed;IOLockUnlock(render_async_lock);
+  if(c->disabled||failed)kr=kIOReturnNotReady;
+  else {
+   kr=render_submit(c,&job.req,&reply);
+   if(kr!=kIOReturnSuccess) {
+    IOLog("X9 RENDER ASYNC: submission failed group=%u id=%llu kr=%x exposed=%u\n",job.req.group,job.req.submission_id,kr,c->exposed);
+    if(c->exposed)c->disabled=true;   /* DMA lifetime unresolved: no retry, as the sync selector */
+   }
+  }
+  IOLockUnlock(c->lock);
+  IOLockLock(render_async_lock);
+  auto &d=p->async_done[p->async_next++%render_history];
+  d.group=job.req.group;d.kr=kr;d.reply=reply;
+  if(kr==kIOReturnSuccess)p->async_done_id=job.req.submission_id;else{p->async_failed=true;render_async_stats[1]++;}
+  p->async_pending--;render_async_stats[0]++;
+  __atomic_store_n(&render_async_completed,job.seq,__ATOMIC_RELEASE);
+  IOLockWakeup(render_async_lock,&render_async_completed,false);
+  IOLockUnlock(render_async_lock);
+  if(render_async_stats[0]<=4||render_async_stats[0]%600==0)
+   IOLog("X9 RENDER ASYNC: jobs=%llu failed=%llu queue_full_waits=%llu drain_waits=%llu enqueued=%llu completed=%llu\n",
+    render_async_stats[0],render_async_stats[1],render_async_stats[2],render_async_stats[3],
+    render_async_enqueued,job.seq);
+ }
+}
+static IOReturn render_submit_async(X9RenderContext *c,const X9RenderSubmission *request,X9RenderCompletion *reply) {
+ if(!render_async_enabled()||!c||!c->engine_private||!request||!reply)return kIOReturnUnsupported;
+ auto *p=(RenderKernelContext *)c->engine_private;
+ if(c->disabled)return kIOReturnNotReady;
+ RenderAsyncJob job={c,*request,0};
+ IOReturn kr=kIOReturnSuccess;
+ IOLockUnlock(c->lock);   /* the worker may need c->lock to make room */
+ IOLockLock(render_async_lock);
+ if(render_async_count==render_async_depth)render_async_stats[2]++;
+ while(render_async_count==render_async_depth&&!p->async_failed)IOLockSleep(render_async_lock,&render_async_head,THREAD_UNINT);
+ if(p->async_failed)kr=kIOReturnNotReady;
+ else {
+  job.seq=__atomic_add_fetch(&render_async_enqueued,1,__ATOMIC_ACQ_REL);
+  render_async_jobs[(render_async_head+render_async_count)%render_async_depth]=job;
+  render_async_count++;p->async_pending++;
+  IOLockWakeup(render_async_lock,&render_async_count,false);
+ }
+ IOLockUnlock(render_async_lock);
+ IOLockLock(c->lock);
+ if(kr==kIOReturnSuccess)*reply={X9_RENDER_ABI,0,request->group,0,request->submission_id,0,0,0,0};
+ return kr;
+}
+static IOReturn render_fence_wait(X9RenderContext *c,const X9RenderWaitRequest *request,X9RenderCompletion *reply) {
+ if(!render_async_enabled()||!c||!c->engine_private||!request||!reply)return kIOReturnUnsupported;
+ auto *p=(RenderKernelContext *)c->engine_private;
+ uint64_t deadline=0;
+ if(request->timeout_ns)clock_interval_to_deadline((uint32_t)(request->timeout_ns/1000),NSEC_PER_USEC,&deadline);
+ IOReturn kr=kIOReturnTimeout;
+ IOLockLock(render_async_lock);
+ for(;;) {
+  bool found=false;
+  for(const auto &d:p->async_done)if(d.group==request->group&&d.reply.submission_id==request->submission_id&&d.reply.abi) {
+   *reply=d.reply;kr=d.kr;found=true;break;
+  }
+  if(found)break;
+  if(p->async_failed){kr=kIOReturnIOError;break;}
+  if(request->submission_id<=p->async_done_id||
+     (!p->async_pending&&request->submission_id<=__atomic_load_n(&c->completed_submission,__ATOMIC_ACQUIRE))) {
+   *reply={X9_RENDER_ABI,0,request->group,0,request->submission_id,request->submission_id,0,0,0};
+   kr=kIOReturnSuccess;break;
+  }
+  if(!p->async_pending){kr=kIOReturnNotFound;break;}
+  if(!request->timeout_ns){kr=kIOReturnTimeout;break;}
+  wait_result_t w=IOLockSleepDeadline(render_async_lock,&render_async_completed,deadline,THREAD_ABORTSAFE);
+  if(w==THREAD_TIMED_OUT){kr=kIOReturnTimeout;break;}
+  if(w!=THREAD_AWAKENED){kr=kIOReturnAborted;break;}
+ }
+ IOLockUnlock(render_async_lock);
+ return kr;
+}
+static void render_async_drain_unlocked(RenderKernelContext *p) {
+ if(!render_async_enabled()||!p)return;
+ IOLockLock(render_async_lock);
+ if(p->async_pending)render_async_stats[3]++;
+ while(p->async_pending)IOLockSleep(render_async_lock,&render_async_completed,THREAD_UNINT);
+ IOLockUnlock(render_async_lock);
+}
+static void render_drain(X9RenderContext *c) {
+ if(!render_async_enabled()||!c||!c->engine_private)return;
+ auto *p=(RenderKernelContext *)c->engine_private;
+ IOLockLock(render_async_lock);bool busy=p->async_pending!=0;IOLockUnlock(render_async_lock);
+ if(!busy)return;
+ IOLockUnlock(c->lock);render_async_drain_unlocked(p);IOLockLock(c->lock);
+}
+static bool render_async_start() {
+ if(render_async_running)return true;
+ if(sweet_x9_arg("x9_submit_async",0)!=1)return false;
+ render_async_lock=IOLockAlloc();if(!render_async_lock)return false;
+ thread_t thread;
+ if(kernel_thread_start_priority(render_async_worker,nullptr,BASEPRI_PREEMPT,&thread)!=KERN_SUCCESS) {
+  IOLockFree(render_async_lock);render_async_lock=nullptr;return false;
+ }
+ thread_deallocate(thread);render_async_running=true;
+ IOLog("X9 RENDER ASYNC: worker started depth=%u;global FIFO,unchanged per-job sequence\n",render_async_depth);
+ return true;
+}
 static const X9RenderEngine resident_engine={render_caps,render_context_open,render_close,render_map,render_unmap,
- render_create_group,render_destroy_group,render_submit,render_wait,render_cache,render_timestamp,render_quiesce};
+ render_create_group,render_destroy_group,render_submit,render_wait,render_cache,render_timestamp,render_quiesce,
+ render_submit_async,render_fence_wait,render_drain};

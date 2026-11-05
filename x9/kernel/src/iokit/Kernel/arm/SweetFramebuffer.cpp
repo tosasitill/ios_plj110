@@ -83,6 +83,9 @@ extern "C" void sweet_watchdog_pet(void);   /* osfmk/arm64/sweet_early.c */
 extern "C" int sweet_x9_render_display_try_enter(void);
 extern "C" void sweet_x9_render_owner_leave(void);
 extern "C" bool sweet_x9_render_parked(void);
+extern "C" bool sweet_x9_render_async_on(void);
+extern "C" uint64_t sweet_x9_render_async_enqueued(void);
+extern "C" uint64_t sweet_x9_render_async_completed(void);
 extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
 extern "C" void sweet_console_retarget(vm_offset_t va);   /* osfmk/console/video_console.c */
 extern "C" void (*sweet_console_show_hook)(void);
@@ -284,6 +287,7 @@ public:
 	uint8_t       fPending[SWEET_FB_SWAP_REC_SIZE];     /* latest swap, not yet shown */
 	bool          fDirty;
 	bool          fX9OwnerHeld;   /* display tick holds the GPU owner lock for this present */
+	uint64_t      fPendSeq;       /* async present fence: GPU enqueue sequence at swap time */
  bool          fX9SubmitPending, fX9ObservePending;
  unsigned      fX9RetryTicks, fX9BusyTicks;
 	/* topaz direct MDP scanout (VIG0 / CTL0 from TopazGpuW disp.c) */
@@ -1304,10 +1308,15 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 		 * only runs for the first frames), so do not compete with GPU submits
 		 * for metal_service_lock. rev245 x9q1: gpu_defer rose 2.9 -> 10.1/s. */
 		static int lockFree=-1;
-		if(lockFree<0){int v=0;lockFree=PE_parse_boot_argn("x9qd",&v,sizeof(v))?1:0;
-			IOLog("X9 DISPLAY: present %s the GPU owner lock (x9qd)\n",lockFree?"without":"with");}
-		displayOwner=lockFree?0:sweet_x9_render_display_try_enter();
-		if(displayOwner<0) {fb->fCadenceGpuBusy++;flush=false;}
+		if(lockFree<0){int v=0;lockFree=PE_parse_boot_argn("x9qd",&v,sizeof(v))||sweet_x9_render_async_on()?1:0;
+			IOLog("X9 DISPLAY: present %s the GPU owner lock (x9qd / async submission %s)\n",lockFree?"without":"with",
+			 sweet_x9_render_async_on()?"on: present fence = GPU enqueue sequence at swap":"off");}
+		/* Async submission: the owner lock no longer tells whether the frame is
+		 * rendered; the present fence does (rev246 x9qd lacked it and showed
+		 * incomplete surfaces). Not-yet-complete frames stay pending. */
+		bool fenced=sweet_x9_render_async_on()&&fb->fPendSeq>sweet_x9_render_async_completed();
+		displayOwner=(lockFree||fenced)?0:sweet_x9_render_display_try_enter();
+		if(fenced||displayOwner<0) {fb->fCadenceGpuBusy++;flush=false;}
 		else if(fb->fX9SubmitPending || x9_lk_gui_busy()==1) {fb->fCadenceDisplayBusy++;flush=false;}
 	}
 	uint8_t *rec = NULL;
@@ -1467,6 +1476,9 @@ AppleCLCD::swap(const uint8_t *rec)
 	IOLockLock(fLock);
 	memcpy(fPending, rec, SWEET_FB_SWAP_REC_SIZE);
 	fDirty = true;
+	/* Async submission: everything this frame's producers queued is already in
+	 * the global FIFO (they enqueue before committing to CoreAnimation). */
+	fPendSeq = sweet_x9_render_async_on() ? sweet_x9_render_async_enqueued() : 0;
 	SweetSurface *dropped[4];
 	memcpy(dropped, fPendHold, sizeof(dropped));      /* replaced before shown */
 	memcpy(fPendHold, held, sizeof(held));

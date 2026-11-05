@@ -15,11 +15,17 @@ enum X9RenderOperation {
  X9RenderGetCaps=0, X9RenderAllocate=1, X9RenderImportHost=2,
  X9RenderRelease=3, X9RenderMap=4, X9RenderUnmap=5,
  X9RenderCache=6, X9RenderCreateGroup=7, X9RenderSubmit=8,
- X9RenderWait=9, X9RenderDestroyGroup=10, X9RenderTimestamp=11
+ X9RenderWait=9, X9RenderDestroyGroup=10, X9RenderTimestamp=11,
+ /* Capability X9RenderAsyncSubmit only. SubmitAsync: X9RenderSubmission in,
+  * X9RenderCompletion out (accepted: status 0, completed_id 0); the submission
+  * runs later on the kernel worker in global FIFO order. FenceWait:
+  * X9RenderWaitRequest in (timeout_ns 0 = poll, max 10 s), X9RenderCompletion
+  * out once that submission completed (CPU-visible), kIOReturnTimeout before. */
+ X9RenderSubmitAsync=12, X9RenderFenceWait=13
 };
 enum X9RenderBufferFlags { X9RenderGPURead=1u, X9RenderGPUWrite=2u, X9RenderGPUExecute=4u };
 enum X9RenderCacheOperation { X9RenderClean=1u, X9RenderInvalidate=2u };
-enum X9RenderCapabilities { X9RenderBufferObjects=1u, X9RenderHostImport=2u, X9RenderCSFSubmit=4u, X9RenderTiler=8u, X9RenderFragment=16u, X9RenderSubmissionCacheOwnership=32u };
+enum X9RenderCapabilities { X9RenderBufferObjects=1u, X9RenderHostImport=2u, X9RenderCSFSubmit=4u, X9RenderTiler=8u, X9RenderFragment=16u, X9RenderSubmissionCacheOwnership=32u, X9RenderAsyncSubmit=64u };
 #define X9_RENDER_CACHE_ATOM 256u
 struct X9RenderCaps {
  uint32_t abi,bytes,capabilities,host_page_bytes;

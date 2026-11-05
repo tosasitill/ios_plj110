@@ -10,7 +10,8 @@ struct X9RenderConnection { io_connect_t port; struct X9RenderCaps caps; };
 static _Thread_local char x9_render_error[192];
 static int failure(const char *operation,kern_return_t result) {
  snprintf(x9_render_error,sizeof(x9_render_error),"%s: IOKit=0x%08x",operation,result);
- errno=result==kIOReturnNotPrivileged?EACCES:result==kIOReturnNoMemory?ENOMEM:result==kIOReturnUnsupported?ENOTSUP:EIO;
+ errno=result==kIOReturnNotPrivileged?EACCES:result==kIOReturnNoMemory?ENOMEM:result==kIOReturnUnsupported?ENOTSUP:
+  result==kIOReturnTimeout?ETIMEDOUT:EIO;
  return -1;
 }
 const char *x9_render_last_error(void) {return x9_render_error;}
@@ -47,7 +48,7 @@ void x9_render_close(struct X9RenderConnection *connection) {
  IOServiceClose(connection->port);free(connection);
 }
 int x9_render_call(struct X9RenderConnection *connection,uint32_t operation,const void *input,size_t input_bytes,void *output,size_t output_bytes) {
- if(!connection||operation>X9RenderTimestamp||(input_bytes&&!input)||(output_bytes&&!output)) {errno=EINVAL;return -1;}
+ if(!connection||operation>X9RenderFenceWait||(input_bytes&&!input)||(output_bytes&&!output)) {errno=EINVAL;return -1;}
  size_t actual=output_bytes;
  kern_return_t result=IOConnectCallStructMethod(connection->port,operation,input,input_bytes,output,&actual);
  if(result!=KERN_SUCCESS) {

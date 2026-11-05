@@ -30,6 +30,12 @@ struct pan_kmod_dev *x9_pan_kmod_create(const struct pan_kmod_allocator *,struct
 int x9_pan_kmod_group_create(struct pan_kmod_dev *,const struct X9RenderGroup *,struct X9RenderGroup *);
 int x9_pan_kmod_group_destroy(struct pan_kmod_dev *,uint32_t);
 int x9_pan_kmod_submit(struct pan_kmod_dev *,uint32_t,const struct X9RenderStream *,uint32_t,struct X9RenderCompletion *);
+/* Async submission (kernel X9RenderAsyncSubmit). */
+bool x9_pan_kmod_async(struct pan_kmod_dev *);
+uint64_t x9_pan_kmod_async_completed(struct pan_kmod_dev *);
+uint64_t x9_pan_kmod_last_submission(struct pan_kmod_dev *,uint32_t *group);
+int x9_pan_kmod_submit_async(struct pan_kmod_dev *,uint32_t,const struct X9RenderStream *,uint32_t,uint64_t *id);
+int x9_pan_kmod_fence_wait(struct pan_kmod_dev *,uint32_t,uint64_t,uint64_t,struct X9RenderCompletion *);
 
 int x9_pan_kmod_unmap_cpu(struct pan_kmod_bo *,void *);
 
