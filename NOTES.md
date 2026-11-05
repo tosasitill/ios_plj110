@@ -1,3 +1,33 @@
+## GPU step 2: asynchronous submission (x9_submit_async=1) + rev252ap fix; rev252aq (2026-11-05, build pending)
+
+- rev252ap BUG (found while doing step 2, do NOT flash x9-rev252ap): a parked context kept c->exposed=true;
+  x9_render_memory_cache(_spans) refuse exposed contexts (Busy), so the very next same-group submit failed in
+  pre-maintenance -> PanVK marks the device failed. Also clientMemoryForType/Map/Release/Cache refuse exposed.
+  Fix (06f152b): parked => exposed=false (GPU has no work, AS1 still bound, vm stays attached so page-table
+  changes still retire first); resume sets exposed=true right before the hardware phase.
+- Kernel async (06f152b), opt-in boot-arg x9_submit_async=1 -> caps bit X9RenderAsyncSubmit=64:
+  selector 12 SubmitAsync (X9RenderSubmission in, accepted reply status 0/completed_id 0), selector 13
+  FenceWait (X9RenderWaitRequest, timeout_ns 0 = poll, <= 10 s). One global FIFO (depth 16, backpressure)
+  + one kernel worker (BASEPRI_PREEMPT) running the unchanged render_submit under c->lock + owner lock.
+  Per-context completion ring (64) + async_done_id under render_async_lock (leaf lock). FenceWait never
+  holds c->lock. Unmap/Release/DestroyGroup/v1 Submit drain the context first (drain drops/retakes c->lock);
+  render_close drains before the owner lock. Display: swap stores fPendSeq = global enqueue seq; tick presents
+  only when completed >= fPendSeq, without the owner lock (counts as gpu_defer while waiting). Logs:
+  `X9 RENDER ASYNC: worker started`, `X9 RENDER ASYNC: jobs= failed= queue_full_waits= drain_waits=`,
+  `X9 DISPLAY: present without the GPU owner lock (... async submission on: present fence ...)`.
+- PanVK plugin 253 (same commit): async iff kernel advertises it and no X9_SUBMIT_SYNC env. Sync.c: submit
+  enqueues, pending signal fences go to a per-provider completion thread (FenceWait in order, 10 s x3, then
+  done); Fence.queued/ordered: a submit's wait list accepts dependencies already in the kernel FIFO; sync-only
+  marker waits for the newest enqueued id; x9_sync_drain before transport close. Memory.c: submit_async,
+  fence_wait (no device lock, ETIMEDOUT not fatal), wait_bo/group_check use FenceWait. Queue.c: CALL buffers
+  retired until async_completed >= id, released on a later submit (pool not touched by completion thread).
+  Transport: ops up to FenceWait, kIOReturnTimeout -> ETIMEDOUT. Both X9RenderABI.h copies identical.
+- Known limits (推断): global FIFO means one slow client delays all; display fence is global (conservative);
+  CPU readers of another process's GPU output outside the display are no longer implicitly synchronized.
+- Build pending (tunnel refused): `python3 -I x9/build/build.py all --revision 253 --name x9-rev252aq
+  --boot-arg x9_wifi_power=6 --boot-arg x9_panel_hz=120 --boot-arg x9_gpu_acelite=1 --boot-arg x9_gpu_park=1
+  --boot-arg x9_submit_async=1`. NEW PLUGIN PACKAGE -> stage with x9/mailbox/update.py before booting.
+
 ## GPU step 1: resident (parked) render group, opt-in x9_gpu_park=1; rev252ap (2026-11-05, built, not device-tested)
 
 - Per submit before (SweetX9RenderEngine.inc render_submit): flush_gpu + install_as(AS1, 2 idle_as polls) + CSG
