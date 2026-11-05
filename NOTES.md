@@ -1,3 +1,23 @@
+## 62.txt = x9-rev252as-acelite: reached lock screen, then GPU read VA 0x40 -> stuck; snoop probe rev252at (2026-11-05)
+
+- 实测 /tmp/62.txt (2,388,946 B): `GPU SMMU CR0=0 GBPA 00000000 -> 00001000 (SHCFG 0 -> 1) ok`; ACP line:
+  mfg_acp_slpprot=000000d4 gals_rx=0f gals_tx=07 emi_acp chi0-3=1c/1c/1c/1c mfg_dvm_prot=05 tcu_efp=09
+  dvm_si=0001e001 pctrl con0=00005190 (b4 ACP_SWITCH_LOCK_EN=1) con2=0000f0f0 (b11 SSYS3 mask=0) -> pKVM's
+  pctrl_enable condition would be true. AMBA 1f -> 00, acelite=1 civac_skip=1.
+- ~170 jobs ran (lock screen visible), then at 34.696 s backboardd job id=117 (3 streams): AS1status=018202c2
+  AS1addr=0x40 (translation fault, read, VA 0x40 = zero pointer + 0x40), extract 3664 of 3680 -> submission
+  uncertain -> frozen lock screen. None of 54-60.txt (no ACE-Lite) has any AS1 fault.
+- Reading (推断): page tables were CPU-cleaned in this build, so the stale read is CLIENT DATA whose CIVAC was
+  skipped -> GPU reads of CPU-dirty lines are not (reliably) snooped. Possibly on MT6993 only the GPU SMMU TCU
+  uses the ACP path (devapc name MFG_S_TCU_ACP_SNOC), not GPU data. Unproven.
+- rev252at (commit 2529073): GPU->CPU probe on the outer-shareable render fence page (plain cached load vs
+  invalidated load after render_page_sync) -> `X9 RENDER SNOOP: GPU->CPU fence probe coherent= stale=` every
+  2 s. Image x9-rev252at-probe = x9_wifi_power=6 x9_gpu_acelite=1 x9_gpu_coherent=0 (CIVAC kept -> rendering
+  should stay correct; also shows whether shareable traffic alone hurts or slows anything). Kernel only.
+- Decision rule: stale>0 -> GPU writes do not snoop either -> ACE-Lite unusable on this boot path without the
+  missing platform setup (keep x9_gpu_acelite off). coherent only -> GPU->CPU works; CPU->GPU (what 62 broke)
+  still needs its own test.
+
 ## ACE-Lite root cause found: GPU SMMU bypass forces non-shareable (GBPA.SHCFG=0); rev252as (2026-11-05)
 
 - 实测 (every log): `X9 CSF HW: SMMU_CR0=0 CR0ACK=0 GBPA=00000000` is the GPU SMMU 0x48600000 (CSF code maps
