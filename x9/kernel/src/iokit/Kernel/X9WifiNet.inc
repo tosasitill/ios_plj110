@@ -805,7 +805,7 @@ x9_wd_sync(x9_wdma *d, unsigned off, unsigned len)
 static void
 x9_wd_rx_desc(x9_wdma *d, unsigned i)
 {
-    volatile uint32_t *r = (volatile uint32_t *)(d->va + X9_D_RX7 + i * 16);
+    volatile uint32_t *r = (volatile uint32_t *)(void *)(d->va + X9_D_RX7 + i * 16);
     uint64_t b = d->pa + X9_B_RX + i * X9_BUF;
     r[0] = (uint32_t)b;
     r[1] = X9_BUF << 16;                     /* SDLen0 = buffer, DMADONE = 0 */
@@ -818,7 +818,7 @@ x9_wd_tx(x9_wdma *d, unsigned ring, unsigned boff, unsigned len)
 {
     unsigned *cidx = ring == 15 ? &d->c15 : &d->c16;
     unsigned doff = (ring == 15 ? X9_D_TX15 : X9_D_TX16) + *cidx * 16;
-    volatile uint32_t *t = (volatile uint32_t *)(d->va + doff);
+    volatile uint32_t *t = (volatile uint32_t *)(void *)(d->va + doff);
     uint64_t b = d->pa + boff;
     t[0] = (uint32_t)b;
     t[1] = ((len & 0x3fffu) << 16) | (1u << 30);  /* SDLen0, LastSec0, DMADONE = 0 */
@@ -846,7 +846,7 @@ static int
 x9_wd_rx(x9_wdma *d, unsigned ms, uint8_t *out, unsigned cap)
 {
     unsigned i = d->r7;
-    volatile uint32_t *r = (volatile uint32_t *)(d->va + X9_D_RX7 + i * 16);
+    volatile uint32_t *r = (volatile uint32_t *)(void *)(d->va + X9_D_RX7 + i * 16);
     uint64_t t0 = mach_absolute_time();
     for (;;) {
         x9_wd_sync(d, X9_D_RX7 + (i & ~3u) * 16, 64);
