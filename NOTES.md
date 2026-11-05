@@ -1,4 +1,4 @@
-## GPU step 2: asynchronous submission (x9_submit_async=1) + rev252ap fix; rev252aq (2026-11-05, build pending)
+## GPU step 2: asynchronous submission (x9_submit_async=1) + rev252ap fix; rev252aq (2026-11-05, built, not device-tested)
 
 - rev252ap BUG (found while doing step 2, do NOT flash x9-rev252ap): a parked context kept c->exposed=true;
   x9_render_memory_cache(_spans) refuse exposed contexts (Busy), so the very next same-group submit failed in
@@ -24,9 +24,14 @@
   Transport: ops up to FenceWait, kIOReturnTimeout -> ETIMEDOUT. Both X9RenderABI.h copies identical.
 - Known limits (推断): global FIFO means one slow client delays all; display fence is global (conservative);
   CPU readers of another process's GPU output outside the display are no longer implicitly synchronized.
-- Build pending (tunnel refused): `python3 -I x9/build/build.py all --revision 253 --name x9-rev252aq
-  --boot-arg x9_wifi_power=6 --boot-arg x9_panel_hz=120 --boot-arg x9_gpu_acelite=1 --boot-arg x9_gpu_park=1
-  --boot-arg x9_submit_async=1`. NEW PLUGIN PACKAGE -> stage with x9/mailbox/update.py before booting.
+- Built (source 9adf5b3; two compile fixes: literal priority 92, extern kernel_thread_start_priority):
+  `build.py all --revision 253 --name x9-rev252aq` + boot-args x9_wifi_power=6 x9_panel_hz=120
+  x9_gpu_acelite=1 x9_gpu_park=1 x9_submit_async=1 -> x9/out/x9-rev252aq/boot.img 9,883,648 B sha256
+  4b9f4386dad2761408ea96da163857b4fe5f00de732e32a9172801fe9e7b27c0; plugin-package X9GeneralMetal253 /
+  X9PanVK253 (X9PanVK sha256 c4df6194...). NEW PLUGIN PACKAGE: stage before booting:
+  `X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/x9-rev252aq`.
+- Fallbacks without restaging (same image, edit boot-args): drop x9_submit_async (sync, plugin 253 then
+  behaves as before), drop x9_gpu_park, drop x9_gpu_acelite.
 
 ## GPU step 1: resident (parked) render group, opt-in x9_gpu_park=1; rev252ap (2026-11-05, built, not device-tested)
 
