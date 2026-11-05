@@ -1,3 +1,29 @@
+## HANDOFF 2026-11-05 (2): SMMU ruled out; Android DMAs only from LK's Wi-Fi pool -> rev252am (not built yet)
+
+- SMMU (item 1 below) effectively ruled out: mt6993.dts pcie0/pcie1 have no `iommus`; the only SMMU on that
+  side is soc_smmu @0x14900000 (UFS SID 0x63/0x77), and every log shows `X9 CSF HW: SMMU_CR0=0 CR0ACK=0 GBPA=0`
+  = SMMU disabled, global bypass, no abort. Not read at the stall (nothing suggests it matters).
+- **New lead (SOURCE, gen4m + dts + LK DT):** gen4m on mt6993 never DMAs from ordinary kernel memory.
+  hif_mem.c halAllocHifMem -> halInitHifMem(WIFI_RSV_MEM_WFDMA) dma_alloc_coherent from the wifi node's
+  memory-region; ALL TX/RX descriptor rings, TxCmdBuf, TxFwdlBuf come from it. LK carves it out as
+  mblock-55 shared-dma-pool_wifi-reserve-memory_dma = 0xe2700000 size 0x1900000 (same in 50..60.txt), misc pool
+  mblock-54 0xe2600000/1 MiB. dts connsys-emi-config: layout idx 11 "WFDMA1" 0x1900000, emi-mpu-region
+  <6 11 47>, i.e. LK sets EMI MPU region 47 for it ("MPU-in-lk" path in hif_mem.c). plat/mt6993/plat_priv.c
+  kalSetDrvEmiMpuProtection opens such regions only for DOMAIN_AP + DOMAIN_CONN -> the PCIe/Wi-Fi master is
+  probably a non-AP EMI domain and may be refused on normal DRAM (0x1_45aa0000). 推断: refused access = our
+  silent stall (MTK EMI MPU can bypass/clear violations without a report). mt6653 u4DmaMask 34 (non-WMT).
+- Upstream match: LKML "dt-bindings: PCI: mediatek-gen3: Allow memory-region for restricted DMA buffer"
+  (wenst@chromium.org, 2026-05, patchew 20260508063633.3894348-1-wenst@chromium.org): "On some SoCs without an
+  IOMMU behind the PCIe controller, the PCIe controller memory access could be limited to a small region by
+  the firmware configuring a memory protection unit." (rtw88 there; conclusion memory-region, not dma-ranges.)
+- rev252am (commit abac34b): boot-arg `x9_wifi_rsvmem` (default 1) maps 0xe2700000 + 64 KiB with
+  ml_io_map_wcomb (Normal NC; XNU RAM starts at 0x140000000 so the pool is not XNU memory) and uses it for the
+  whole WFDMA area (d.pa = 0xe2700000, no cache maintenance); log line `X9 WIFI DMA: using LK wifi-reserve-memory
+  pool ...`. `x9_wifi_rsvmem=0` = old IOBufferMemoryDescriptor path. NOT BUILT: Mac tunnel (ssh -p 2222)
+  refused the connection. Build: `python3 -I x9/build/build.py --name x9-rev252am --boot-arg x9_wifi_power=6`.
+- Expect on device: descriptor DMADONE=1 / TX15 didx moves / RX7 event if this was the block. If it still
+  stalls: next are EMI MPU violation registers (find EMI MPU base in dts emi-mpu node) and the rev252ac ack bits.
+
 ## HANDOFF 2026-11-05 (user out of quota): 60.txt = the EP read reaches the RC and dies on the SoC side
 
 - 实测 60.txt (400,738 B, /tmp/60.txt) = rev252al. RC inbound ATR (as LK left it, unchanged): win0 t0 and win1 t0
