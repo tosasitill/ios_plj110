@@ -15,8 +15,9 @@
   after that. Logs `X9 RENDER coherency: GPU SMMU CR0= GBPA a -> b (SHCFG 0 -> 1)` and a read-only
   `X9 RENDER ACP:` line. Render page tables are CPU-cleaned again even with ACE-Lite (a broken path now shows
   as stale pixels, not a stopped boot); the CIVAC skip on CPU-exposed client data stays the ACE-Lite win.
-- Images (kernel only, plugin 253 already staged): x9-rev252as-acelite = x9_wifi_power=6 x9_gpu_acelite=1
-  (sync, no park: isolates ACE-Lite); x9-rev252as = + x9_gpu_park=1 x9_submit_async=1. Also built earlier:
+- Images (kernel only, plugin 253 already staged; source 4c1d543): x9-rev252as-acelite = x9_wifi_power=6
+  x9_gpu_acelite=1 (sync, no park: isolates ACE-Lite) sha256 72c9b1469020f806b10d0fd36417b11f51f704a3840c9abbcc6ebd258a4886cd;
+  x9-rev252as = + x9_gpu_park=1 x9_submit_async=1 sha256 4a2586f4d5ccc27ea3ae6a08125a98581f28b343a084bf1809c5cb09b85edb63. Also built earlier:
   x9-rev252ar (park+async, no acelite) sha256 e6f4e589..., x9-rev252ar-safe (baseline) sha256 b5c116c1....
 - Possible remaining failure (推断): once transactions really are shareable they go via the ACP path; if that
   path is not open on our boot (no pKVM pctrl/DVM setup), GPU accesses could stall -> completion timeout ->
