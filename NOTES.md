@@ -14,8 +14,11 @@
   same fault with the log line lost.
 - Decision: keep x9_gpu_acelite OFF. Code stays opt-in (SMMU SHCFG switch, AMBA, outer-shareable leaves, snoop
   probe) for later research.
-- Next images (kernel only, allowlist = plugin 254 already staged): x9-rev252av = x9_wifi_power=6
-  x9_gpu_park=1 x9_submit_async=1; x9-rev252av-safe = x9_wifi_power=6.
+- Next images (kernel only, allowlist = plugin 254 already staged; both kernels contain "X9GeneralMetal254"):
+  x9-rev252av = x9_wifi_power=6 x9_gpu_park=1 x9_submit_async=1, boot.img sha256
+  20cb8392c4da39704755d5f3510df7de35388a1e737529f6b51abb1e88f614de; x9-rev252av-safe = x9_wifi_power=6, sha256
+  55f7b6791ce999beca8de3a7ea590508b64e61fc952ab0a1b599f1fc8160166e. Neither park nor async has been exercised
+  past a first job on hardware yet (61.txt died on the ACE-Lite fault first).
 
 ## Wi-Fi: DMA stall FIXED by LK's Wi-Fi pool (EMI MPU); PATCH_START status 14 = our 68-byte header; rev252av (2026-11-05)
 
