@@ -1,3 +1,26 @@
+## GPU step 1: resident (parked) render group, opt-in x9_gpu_park=1; rev252ap (2026-11-05, NOT built yet)
+
+- Per submit before (SweetX9RenderEngine.inc render_submit): flush_gpu + install_as(AS1, 2 idle_as polls) + CSG
+  START/RESUME (notify + 2 wait_ack, 100 us sleep quanta) ... doorbell, poll fence ... CSG SUSPEND (firmware
+  saves CSG state) + flush_gpu + remove_as(AS1). Stock kbase keeps groups resident with AS bound.
+- rev252ap (commit 55d000f): with x9_gpu_park=1 a finished submit flushes GPU caches only and parks
+  {context, group, root}: group stays RUNNING idle on its slot, AS1 stays installed, c->exposed stays true.
+  Next submit on the same context+group (and AS1 TRANSTAB == parked root): skips publish/install_as/START,
+  checks x9_csf_group_health, publishes the packet, rings the doorbell. Everything else retires first via the
+  unchanged SUSPEND -> flush -> remove_as -> detached (render_retire_parked): submit on another group/context,
+  map/unmap/create/destroy/close/quiesce on that context, resident_end. sweet_x9_render_display_try_enter
+  treats a parked AS1 as idle; GPU desktop staging skipped while parked (sweet_x9_render_parked());
+  sweet_x9_csf_user/desktop return busy while parked. ParkRestore guard re-tracks the parked group if a submit
+  returns before the first hardware step. Kept every submit: flush_gpu before work and after completion.
+- Logs: `X9 RENDER PARK: resident group between submits ON`, every 2 s `X9 RENDER PARK: hits= cold= retires=`,
+  first 8 retires with reason and duration. Expect start_us/retire_us in X9 RENDER timing to drop on hits.
+  Hit rate depends on how often backboardd/SpringBoard alternate contexts or map between submits (unknown).
+- Risks (推断): firmware behaviour with a long-idle running CSG (idle notifications are not checked by
+  group_health); a CS that did not return to idle would make the next doorbell behave unexpectedly -> symptom
+  would be a completion-wait timeout -> `submission uncertain` (no reset). Boot without x9_gpu_park to compare.
+- Build pending (tunnel refused): `python3 -I x9/build/build.py --name x9-rev252ap --boot-arg x9_wifi_power=6
+  --boot-arg x9_panel_hz=120 --boot-arg x9_gpu_acelite=1 --boot-arg x9_gpu_park=1`.
+
 ## Display refresh: panel rate measured + 120 Hz switch; rev252ao / rev252ao-acelite (2026-11-05, built, not device-tested)
 
 - Facts (SOURCE + logs): panel ac287 is a COMMAND-mode panel (oplus panel-ac287-p-7-a0020-dsi-cmd.dtsi): it
