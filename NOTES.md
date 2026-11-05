@@ -1,3 +1,21 @@
+## 63.txt = x9-rev252at-probe: GPU->CPU snoop mostly works; backboardd device poisoned silently at 41.4 s; plugin 254 (2026-11-05)
+
+- 实测 /tmp/63.txt (4,238,619 B), boot-args x9_gpu_acelite=1 x9_gpu_coherent=0 (CIVAC kept). SMMU SHCFG 0->1
+  ok, AMBA ACE-Lite enabled, civac_skip=0.
+- `X9 RENDER SNOOP: GPU->CPU fence probe coherent=1003 stale=2` (first stale between 32.6 and 34.6 s): GPU
+  write-backs of outer-shareable lines DO invalidate CPU lines almost always; 2 stale reads are unexplained
+  (race of flush completion vs snoop, or real misses) -> not proven reliable.
+- No AS1 fault and no submission uncertain this time. At 41.404 s backboardd's PanVK allocations failed with
+  used_failed=1 (device already poisoned) -> Metal DeviceLost flood (the "lots of logs"). Nothing logged
+  between the last good call (41.397) and 41.404: PanVK has silent poisoning paths (reply validation).
+  backboardd native bytes were 603 MB at that moment (kernel budget 1024 MiB, no budget refusal logged).
+- Memory bursts of full-screen BOs (13.9/12.8/16 MiB) during interaction also occur without ACE-Lite
+  (57.txt peak 562 MB, then released) -> not an ACE-Lite effect by itself.
+- Plugin 254 (commit 92e35fb): X9_FAIL macro logs the first poisoning per device with source line, errno and
+  last kernel error (`X9 PANVK FAILED: line=`), sync layer `X9 PANVK SYNC FAILED: line=`. Image
+  x9-rev252au-probe = all --revision 254, boot-args x9_wifi_power=6 x9_gpu_acelite=1 x9_gpu_coherent=0
+  (same as 63) -> NEW PLUGIN: stage with mailbox/update.py before booting. Build pending at time of writing.
+
 ## 62.txt = x9-rev252as-acelite: reached lock screen, then GPU read VA 0x40 -> stuck; snoop probe rev252at (2026-11-05)
 
 - 实测 /tmp/62.txt (2,388,946 B): `GPU SMMU CR0=0 GBPA 00000000 -> 00001000 (SHCFG 0 -> 1) ok`; ACP line:
