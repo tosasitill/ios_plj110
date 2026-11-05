@@ -863,6 +863,16 @@ x9_wifi_rc_diag(const char *when)
         x9_pcie_cfg_rd(m, 0, 0, 0x04), x9_pcie_cfg_rd(m, 0, 0, 0x1c), x9_pcie_cfg_rd(m, 1, 0, 0x04),
         x9_pcie_cfg_rd(m, 1, 0, 0x80 + 0x08));
 }
+/* 58.txt follow-up (read-only): when does the chip PCIe MAC's pending outbound read (PENDING_ADT R b27:16) appear? */
+static void
+x9_wifi_pend(volatile uint32_t *b, volatile uint32_t *mac, const char *when)
+{
+    volatile uint32_t *pm = b + 0x1d0000 / 4;
+    uint32_t pend = pm[0x1d4 / 4];
+    IOLog("X9 WIFI PEND %s: pend_adt=%08x (R=%u W=%u) a_adt_slv0=%08x p_adt_win0=%08x dma_pend=%08x r2a_rd_probe=%08x r2a_sts=%08x ep cmd/sta=%08x devsta=%04x rc int_sta=%08x\n",
+        when, pend, (pend >> 16) & 0xfff, pend & 0xfff, pm[0x1e0 / 4], pm[0x1d8 / 4], pm[0x1d0 / 4], b[0xd7514 / 4],
+        b[0xd750c / 4], x9_pcie_cfg_rd(mac, 1, 0, 0x04), x9_pcie_cfg_rd(mac, 1, 0, 0x80 + 0x08) >> 16, mac[0x184 / 4]);
+}
 struct x9_wdma {
     volatile uint32_t *bar;
     uint8_t *va;
@@ -1337,6 +1347,9 @@ x9_wifi_pcie_stage4(volatile uint32_t *mac, unsigned stage)
             tt[0], tt[1], tt[2], tt[3], tt[4], tt0[0], x9_pcie_cfg_rd(mac, 1, 0, 0x10), x9_pcie_cfg_rd(mac, 1, 0, 0x04));
         volatile uint32_t *bar = (volatile uint32_t *)ml_io_map(0x50000000, 0x200000);
         if (bar) {
+            if (stage >= 6) {
+                x9_wifi_pend(bar, mac, "first BAR access (EP cmd MEM only)");
+            }
             static const struct { uint32_t off; const char *what; } r[] = {
                 { 0x1e0000, "CB_TOP 0x70000000" }, { 0x1e0004, "CB_TOP 0x70000004" },
                 { 0x1c0200, "CB_INFRA1 0x70010200" }, { 0x1c0204, "CB_INFRA1 0x70010204" },
@@ -1375,6 +1388,9 @@ x9_wifi_pcie_stage4(volatile uint32_t *mac, unsigned stage)
                     (lp & (1u << 2)) ? "NOT taken" : "TAKEN", x9_ms_since(td), lp, bar[0xe0014 / 4]);
                 IOLog("X9 WIFI MCU: owned: rom_sram=%08x romcode_index=%08x wfdma0 glo_cfg=%08x conn_on_misc=%08x hcr=%08x\n",
                     bar[0x1ab160 / 4], bar[0xc1604 / 4], bar[0xd4208 / 4], bar[0xe00f0 / 4], bar[0x140000 / 4]);
+                if (stage >= 6) {
+                    x9_wifi_pend(bar, mac, "after driver own");
+                }
                 if (stage >= 6 && !(lp & (1u << 2))) {
                     /*
                      * 51.txt: host side clean (no AXI error, sleep protect released, resources
@@ -1426,6 +1442,7 @@ x9_wifi_pcie_stage4(volatile uint32_t *mac, unsigned stage)
                     IOLog("X9 WIFI WFSYS: reset %s after %llu ms romcode=%08x rgu_wf_rst=%08x emi_ctl0=%08x mcu_own=%08x lpctl=%08x\n",
                         wfOk ? "DONE, ROM idle" : "TIMEOUT", x9_ms_since(tw), rc, bar[0x1f8600 / 4], bar[0x101100 / 4],
                         bar[0x1f5030 / 4], bar[0xe0010 / 4]);
+                    x9_wifi_pend(bar, mac, "after WFSYS reset");
                     if (wfOk && (bar[0xe0010 / 4] & (1u << 2))) {   /* lost driver own in the reset: take it again */
                         bar[0xe0010 / 4] = 1u << 1;
                         __asm__ volatile ("dsb sy" ::: "memory");
@@ -1438,6 +1455,9 @@ x9_wifi_pcie_stage4(volatile uint32_t *mac, unsigned stage)
                     }
                     x9_pcie_cfg_wr(mac, 1, 0, 0x04, (epcmd & 0xfff8u) | 0x6u);   /* MEM | BUS MASTER */
                     IOLog("X9 WIFI EP: bus master on cmd/sta=%08x\n", x9_pcie_cfg_rd(mac, 1, 0, 0x04));
+                    x9_wifi_pend(bar, mac, "right after bus master on");
+                    IODelay(1000);
+                    x9_wifi_pend(bar, mac, "1 ms after bus master on");
                     if (wfOk && !(bar[0xe0010 / 4] & (1u << 2))) {
                         x9_wifi_stage6(bar);
                     } else {
