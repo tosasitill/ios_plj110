@@ -16,6 +16,8 @@ Inputs:
   x9/kernel/prebuilt         objects whose compile command is not known yet
   x9/build/boot.json         packaging options and boot-args
   x9/build/local.json        machine paths (copy config.example.json)
+  .local/x9/wifi-fw          MT6653 vendor firmware, embedded via x9/tools/wifi_firmware.py
+                             ("wifi_firmware" in local.json overrides; absent = stub)
 
 Outputs go to x9/out/<name>/ (default name: x9-<git short hash>[-dirty]),
 with everything printed also written to x9/out/<name>/build.log.
@@ -156,6 +158,10 @@ class Builder:
     def compile(self):
         if not self.dry_run:
             self.objdir.mkdir(parents=True, exist_ok=True)
+        # MT6653 firmware -> generated/x9_wifi_firmware.inc (gitignored; stub when absent)
+        fw = Path(self.cfg.get('wifi_firmware') or ROOT / '.local/x9/wifi-fw').expanduser()
+        self.run_or_exit([sys.executable, '-I', str(X9 / 'tools/wifi_firmware.py'), '--src', str(fw)], ROOT,
+                         label='wifi_firmware.py')
         todo = [e for e in self.recipe['objects'] if 'prebuilt' not in e]
         with concurrent.futures.ThreadPoolExecutor(self.jobs) as pool:
             results = list(pool.map(self.compile_one, todo))

@@ -735,6 +735,363 @@ x9_pcie_cfg_wr(volatile uint32_t *mac, unsigned bus, unsigned devfn, unsigned wh
     __asm__ volatile ("dsb sy" ::: "memory");
 }
 /*
+ * Stage 6 (49.txt follow-up: ROM idle 0x1D1E, driver own taken in 5 ms): the
+ * first DMA. Downloads the ROM patch through WFDMA host DMA0, polled, no MSI.
+ * Firmware: x9/tools/wifi_firmware.py embeds the vendor files from
+ * .local/x9/wifi-fw at build time (generated/x9_wifi_firmware.inc, not in git).
+ * Sources (gen4m): chips/mt6653/mt6653.c (rings, mt6653WfdmaManualPrefetch,
+ * mt6653WfdmaControl, ...ConfigExt1/2), chips/common/cmm_asic_connac3x.c
+ * (asicConnac3xFillInitCmdTxdInfo, u2TxInitCmdPort = TX_RING_CMD = HW ring 15,
+ * u2TxFwDlPort = TX_RING_FWDL = HW ring 16), hal_pdma.c (descriptors), wlan_oid.c
+ * (wlanSendInitSetQueryCmdImpl/wlanWaitInitEvt: event = 32-byte RXD + INIT_WIFI_EVENT
+ * on RX_RING_EVT = HW ring 7), chips/common/fw_dl.c (wlanGetPatchInfoAndDownloadV2).
+ * Kbuild.main sets CFG_ROM_PATCH_NO_SEM_CTRL=1 for MT6653 with WMT, so the
+ * Android driver sends no PATCH_SEMAPHORE_CONTROL; neither do we.
+ *  - DMA memory: one 64 KiB physically contiguous, cacheable buffer (DRAM starts
+ *    at 0x140000000, so 36-bit addressing: GLO_CFG ADDR_EXT_EN, ring CTRL1 bits
+ *    16-19, TX desc word 3, RX desc word 2); flush_dcache64 by PA around every
+ *    device access (the PCIe RC is not dma-coherent in mt6993.dts).
+ *  - Rings: TX15 (commands), TX16 (firmware data), RX7 (events), 16 entries.
+ *  - Command = 32-byte CONNAC3X TXD (DW0 length | PKT_FT_CMD << 23, DW1 HF=command
+ *    << 14) + INIT_HIF_TX_HEADER (u16 length-32, u16 PQ 0, CID, 0xA0, 0, seq, 28
+ *    reserved bytes) + payload. Firmware data on TX16 is raw, 2048 B per packet.
+ *  - Patch (V2, 2 sections, sec_info 0x01000000 = AES key 0): per section
+ *    PATCH_START (CID 5, {addr, len, mode}, mode = ACK|ENC|RESET = 0x80000009)
+ *    -> CMD_RESULT (EID 1) status 0 -> data -> after all sections PATCH_FINISH
+ *    (CID 7, {0}) -> CMD_RESULT status 0.
+ *  - Afterwards WFDMA is stopped and the rings cleared; the caller hands the
+ *    MCU back and powers the chip off as before. The buffer is never freed.
+ */
+#include <IOKit/IOBufferMemoryDescriptor.h>
+#include "../../../generated/x9_wifi_firmware.inc"
+extern "C" void flush_dcache64(addr64_t addr, unsigned count, int phys);
+
+#define X9_WFDMA 0xd4000u                    /* WFDMA host DMA0 (chip 0x20024000) in BAR0 */
+#define X9_DMA_SIZE 0x10000u
+#define X9_RING_N 16u
+#define X9_D_TX15 0x0000u                    /* descriptor rings, 16 x 16 B */
+#define X9_D_TX16 0x0100u
+#define X9_D_RX7 0x0200u
+#define X9_B_CMD 0x1000u                     /* command buffer */
+#define X9_B_FW 0x2000u                      /* firmware data buffer */
+#define X9_B_RX 0x8000u                      /* RX buffers, 16 x 2 KiB */
+#define X9_BUF 0x800u
+struct x9_wdma {
+    volatile uint32_t *bar;
+    uint8_t *va;
+    uint64_t pa;
+    unsigned c15, c16, r7;                   /* next TX CPU index; next RX index to read */
+    uint8_t seq;
+    unsigned events;
+};
+static void
+x9_wd_wr(x9_wdma *d, unsigned off, uint32_t v)
+{
+    d->bar[(X9_WFDMA + off) / 4] = v;
+    __asm__ volatile ("dsb sy" ::: "memory");
+}
+static uint32_t
+x9_wd_rd(x9_wdma *d, unsigned off)
+{
+    return d->bar[(X9_WFDMA + off) / 4];
+}
+static void
+x9_wd_sync(x9_wdma *d, unsigned off, unsigned len)
+{
+    __asm__ volatile ("dsb sy" ::: "memory");
+    flush_dcache64((addr64_t)(d->pa + off), len, 1);
+    __asm__ volatile ("dsb sy" ::: "memory");
+}
+static void
+x9_wd_rx_desc(x9_wdma *d, unsigned i)
+{
+    volatile uint32_t *r = (volatile uint32_t *)(d->va + X9_D_RX7 + i * 16);
+    uint64_t b = d->pa + X9_B_RX + i * X9_BUF;
+    r[0] = (uint32_t)b;
+    r[1] = X9_BUF << 16;                     /* SDLen0 = buffer, DMADONE = 0 */
+    r[2] = (uint32_t)(b >> 32) & 0xf;        /* RX: SDPtr1 carries address bits 32..35 */
+    r[3] = 0;
+}
+/* Queue one buffer on TX ring 15 or 16 and wait until DIDX passes it. */
+static bool
+x9_wd_tx(x9_wdma *d, unsigned ring, unsigned boff, unsigned len)
+{
+    unsigned *cidx = ring == 15 ? &d->c15 : &d->c16;
+    unsigned doff = (ring == 15 ? X9_D_TX15 : X9_D_TX16) + *cidx * 16;
+    volatile uint32_t *t = (volatile uint32_t *)(d->va + doff);
+    uint64_t b = d->pa + boff;
+    t[0] = (uint32_t)b;
+    t[1] = ((len & 0x3fffu) << 16) | (1u << 30);  /* SDLen0, LastSec0, DMADONE = 0 */
+    t[2] = 0;
+    t[3] = (uint32_t)(b >> 32) & 0xf;             /* SDPtr0Ext */
+    x9_wd_sync(d, boff, len);
+    x9_wd_sync(d, doff, 16);
+    *cidx = (*cidx + 1) % X9_RING_N;
+    x9_wd_wr(d, 0x308 + ring * 0x10, *cidx);
+    uint64_t t0 = mach_absolute_time();
+    uint32_t didx;
+    while ((didx = x9_wd_rd(d, 0x30c + ring * 0x10)) != *cidx) {
+        if (x9_ms_since(t0) > 200) {
+            IOLog("X9 WIFI DMA: TX%u stuck cidx=%u didx=%u ctrl0=%08x ctrl1=%08x glo=%08x int_sta=%08x\n",
+                ring, *cidx, didx, x9_wd_rd(d, 0x300 + ring * 0x10), x9_wd_rd(d, 0x304 + ring * 0x10),
+                x9_wd_rd(d, 0x208), x9_wd_rd(d, 0x200));
+            return false;
+        }
+        IODelay(5);
+    }
+    return true;
+}
+/* Wait for the next RX7 event; copies up to cap bytes, returns the length or -1. */
+static int
+x9_wd_rx(x9_wdma *d, unsigned ms, uint8_t *out, unsigned cap)
+{
+    unsigned i = d->r7;
+    volatile uint32_t *r = (volatile uint32_t *)(d->va + X9_D_RX7 + i * 16);
+    uint64_t t0 = mach_absolute_time();
+    for (;;) {
+        x9_wd_sync(d, X9_D_RX7 + (i & ~3u) * 16, 64);
+        if (r[1] & (1u << 31)) {
+            break;
+        }
+        if (x9_ms_since(t0) > ms) {
+            IOLog("X9 WIFI DMA: no event on RX7[%u] after %u ms: cidx=%u didx=%u glo=%08x int_sta=%08x\n",
+                i, ms, x9_wd_rd(d, 0x578), x9_wd_rd(d, 0x57c), x9_wd_rd(d, 0x208), x9_wd_rd(d, 0x200));
+            return -1;
+        }
+        IODelay(20);
+    }
+    unsigned len = (r[1] >> 16) & 0x3fff;
+    x9_wd_sync(d, X9_B_RX + i * X9_BUF, X9_BUF);
+    const uint8_t *p = d->va + X9_B_RX + i * X9_BUF;
+    memcpy(out, p, len < cap ? len : cap);
+    d->events++;
+    d->r7 = (i + 1) % X9_RING_N;
+    if ((i & 3) == 3) {                      /* hand back a whole cache line of descriptors */
+        for (unsigned k = i - 3; k <= i; k++) {
+            x9_wd_rx_desc(d, k);
+        }
+        x9_wd_sync(d, X9_D_RX7 + (i - 3) * 16, 64);
+        x9_wd_wr(d, 0x578, i);
+    }
+    return (int)len;
+}
+/*
+ * Send init command cid with payload; when evt != 0 wait for that event and copy
+ * its payload (after INIT_WIFI_EVENT's 8 bytes) to res. Returns false on any failure.
+ */
+static bool
+x9_wd_cmd(x9_wdma *d, uint8_t cid, const void *payload, unsigned plen, uint8_t evt, uint8_t *res, unsigned rcap)
+{
+    uint8_t *c = d->va + X9_B_CMD;
+    unsigned len = 68 + plen;
+    memset(c, 0, 68);
+    uint32_t dw0 = (len & 0xffffu) | (2u << 23), dw1 = 1u << 14;
+    memcpy(c + 0, &dw0, 4);
+    memcpy(c + 4, &dw1, 4);
+    uint16_t hl = (uint16_t)(len - 32);
+    memcpy(c + 32, &hl, 2);
+    uint8_t seq = ++d->seq;
+    c[36] = cid;
+    c[37] = 0xa0;
+    c[39] = seq;
+    memcpy(c + 68, payload, plen);
+    if (!x9_wd_tx(d, 15, X9_B_CMD, len)) {
+        IOLog("X9 WIFI CMD: cid 0x%02x seq %u not consumed\n", cid, seq);
+        return false;
+    }
+    if (!evt) {
+        return true;
+    }
+    uint8_t ev[96];
+    int n = x9_wd_rx(d, 1000, ev, sizeof ev);
+    if (n < 0) {
+        IOLog("X9 WIFI CMD: cid 0x%02x seq %u: no event\n", cid, seq);
+        return false;
+    }
+    uint16_t rbc, ptype;
+    memcpy(&rbc, ev + 32, 2);
+    memcpy(&ptype, ev + 34, 2);
+    uint8_t eid = ev[36], eseq = ev[37];
+    uint32_t rxd0, rxd1;
+    memcpy(&rxd0, ev, 4);
+    memcpy(&rxd1, ev + 4, 4);
+    IOLog("X9 WIFI CMD: cid 0x%02x seq %u -> event len=%d rxd0=%08x rxd1=%08x bytes=%u type=%04x eid=%u seq=%u data=%02x %02x %02x %02x\n",
+        cid, seq, n, rxd0, rxd1, rbc, ptype, eid, eseq,
+        ev[40], ev[41], ev[42], ev[43]);
+    if (eid != evt || eseq != seq) {
+        IOLog("X9 WIFI CMD: expected eid %u seq %u\n", evt, seq);
+        return false;
+    }
+    if (res && rcap) {
+        memcpy(res, ev + 40, rcap < sizeof ev - 40 ? rcap : sizeof ev - 40);
+    }
+    return true;
+}
+static uint32_t
+x9_be32(const uint8_t *p)
+{
+    return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
+}
+static void
+x9_wifi_stage6(volatile uint32_t *bar)
+{
+    if (!X9_WIFI_FW_PRESENT || x9_wifi_patch_len < 96) {
+        IOLog("X9 WIFI FW: no firmware embedded (build without .local/x9/wifi-fw); skipping DMA\n");
+        return;
+    }
+    IOLog("X9 WIFI FW: patch %s %u B sha256 %.16s..., ram %u B %.16s..., phy %u B %.16s...\n",
+        x9_wifi_patch_name, x9_wifi_patch_len, x9_wifi_patch_sha256, x9_wifi_ram_len, x9_wifi_ram_sha256,
+        x9_wifi_phy_len, x9_wifi_phy_sha256);
+    IOBufferMemoryDescriptor *md = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
+        kIODirectionInOut | kIOMemoryPhysicallyContiguous, X9_DMA_SIZE, 0xfffffffffULL & ~0xfffULL);
+    if (!md) {
+        IOLog("X9 WIFI DMA: buffer allocation failed\n");
+        return;
+    }
+    IOByteCount seglen = 0;
+    x9_wdma d = {};
+    d.bar = bar;
+    d.va = (uint8_t *)md->getBytesNoCopy();
+    d.pa = md->getPhysicalSegment(0, &seglen, kIOMemoryMapperNone);
+    if (!d.va || !d.pa || seglen < X9_DMA_SIZE) {
+        IOLog("X9 WIFI DMA: buffer va=%p pa=%llx seg=%llx unusable\n", d.va, d.pa, (uint64_t)seglen);
+        return;                              /* leaked on purpose */
+    }
+    memset(d.va, 0, X9_DMA_SIZE);
+    for (unsigned i = 0; i < X9_RING_N; i++) {
+        x9_wd_rx_desc(&d, i);
+    }
+    x9_wd_sync(&d, 0, X9_DMA_SIZE);
+    uint32_t glo0 = x9_wd_rd(&d, 0x208);
+    uint32_t hi = (uint32_t)(d.pa >> 32) & 0xf;
+    IOLog("X9 WIFI DMA: buffer pa=%llx va=%p glo_cfg=%08x int_sta=%08x tx15 ctrl=%08x/%08x/%08x/%08x rx7 ctrl=%08x/%08x/%08x/%08x\n",
+        d.pa, d.va, glo0, x9_wd_rd(&d, 0x200), x9_wd_rd(&d, 0x3f0), x9_wd_rd(&d, 0x3f4), x9_wd_rd(&d, 0x3f8),
+        x9_wd_rd(&d, 0x3fc), x9_wd_rd(&d, 0x570), x9_wd_rd(&d, 0x574), x9_wd_rd(&d, 0x578), x9_wd_rd(&d, 0x57c));
+    /* halWpdmaInitRing order: DMA off, rings, prefetch + index reset, DMA on */
+    const uint32_t gloOff = 0x5030b850u | (1u << 26);
+    x9_wd_wr(&d, 0x208, gloOff);
+    static const unsigned txr[2] = { 15, 16 };
+    for (unsigned k = 0; k < 2; k++) {
+        unsigned n = txr[k];
+        uint64_t base = d.pa + (n == 15 ? X9_D_TX15 : X9_D_TX16);
+        x9_wd_wr(&d, 0x300 + n * 0x10, (uint32_t)base);
+        x9_wd_wr(&d, 0x308 + n * 0x10, 0);
+        x9_wd_wr(&d, 0x304 + n * 0x10, X9_RING_N | hi << 16);
+    }
+    x9_wd_wr(&d, 0x570, (uint32_t)(d.pa + X9_D_RX7));
+    x9_wd_wr(&d, 0x574, X9_RING_N | hi << 16);
+    x9_wd_wr(&d, 0x578, X9_RING_N - 1);
+    static const struct { uint16_t off; uint32_t v; } pf[] = {      /* mt6653WfdmaManualPrefetch, no MDDP */
+        { 0x690, 0x00000008 }, { 0x694, 0x00800008 }, { 0x698, 0x01000008 },     /* RX4..6 */
+        { 0x69c, 0x01800004 }, { 0x6a0, 0x01c00004 },                            /* RX7, RX8 */
+        { 0x640, 0x02000004 },                                                   /* TX16 */
+        { 0x600, 0x02000010 }, { 0x604, 0x03000010 }, { 0x608, 0x04000010 }, { 0x60c, 0x05000010 },
+        { 0x610, 0x06000004 }, { 0x614, 0x06400004 },                            /* TX4, TX5 */
+        { 0x63c, 0x06800004 },                                                   /* TX15 */
+    };
+    for (unsigned k = 0; k < sizeof(pf) / sizeof(pf[0]); k++) {
+        x9_wd_wr(&d, pf[k].off, pf[k].v);
+    }
+    x9_wd_wr(&d, 0x20c, 0xffffffffu);        /* RST_DTX_PTR */
+    x9_wd_wr(&d, 0x280, 0xffffffffu);        /* RST_DRX_PTR */
+    x9_wd_wr(&d, 0x3f8, 0);
+    x9_wd_wr(&d, 0x408, 0);
+    x9_wd_wr(&d, 0x578, X9_RING_N - 1);
+    x9_wd_wr(&d, 0x208, gloOff | (1u << 0) | (1u << 2));          /* TX_DMA_EN | RX_DMA_EN */
+    x9_wd_wr(&d, 0x2b4, 0x8c800404u | 0x10000000u);               /* EXT1 + TX_FCTRL_MODE */
+    x9_wd_wr(&d, 0x2b8, 0x00001404u);                             /* EXT2 */
+    IOLog("X9 WIFI DMA: rings up glo=%08x ext1=%08x ext2=%08x tx15=%08x/%08x/%u/%u tx16=%08x/%08x/%u/%u rx7=%08x/%08x/%u/%u int_sta=%08x\n",
+        x9_wd_rd(&d, 0x208), x9_wd_rd(&d, 0x2b4), x9_wd_rd(&d, 0x2b8),
+        x9_wd_rd(&d, 0x3f0), x9_wd_rd(&d, 0x3f4), x9_wd_rd(&d, 0x3f8), x9_wd_rd(&d, 0x3fc),
+        x9_wd_rd(&d, 0x400), x9_wd_rd(&d, 0x404), x9_wd_rd(&d, 0x408), x9_wd_rd(&d, 0x40c),
+        x9_wd_rd(&d, 0x570), x9_wd_rd(&d, 0x574), x9_wd_rd(&d, 0x578), x9_wd_rd(&d, 0x57c), x9_wd_rd(&d, 0x200));
+
+    /* ROM patch, PATCH_FORMAT_V2 */
+    const uint8_t *fw = x9_wifi_patch;
+    unsigned nsec = x9_be32(fw + 32 + 12);
+    char date[17];
+    memcpy(date, fw, 16);
+    date[16] = 0;
+    for (unsigned k = 0; k < 16; k++) {
+        if (date[k] < 0x20 || date[k] > 0x7e) date[k] = '.';
+    }
+    uint32_t swhw;
+    memcpy(&swhw, fw + 20, 4);
+    IOLog("X9 WIFI PATCH: date %s platform %.4s swhw %08x sections %u\n", date, (const char *)(fw + 16), swhw, nsec);
+    bool ok = nsec >= 1 && nsec <= 8 && 96 + 64 * nsec <= x9_wifi_patch_len;
+    unsigned sent = 0;
+    uint64_t tp = mach_absolute_time();
+    for (unsigned s = 0; ok && s < nsec; s++) {
+        const uint8_t *m = fw + 96 + 64 * s;
+        uint32_t type = x9_be32(m), off = x9_be32(m + 4), addr = x9_be32(m + 12), len = x9_be32(m + 16);
+        uint32_t info = x9_be32(m + 20);
+        if ((type & 0xffff) != 2) {
+            IOLog("X9 WIFI PATCH: section %u type %08x not binary, skipped\n", s, type);
+            continue;
+        }
+        if (off > x9_wifi_patch_len || len > x9_wifi_patch_len - off) {
+            IOLog("X9 WIFI PATCH: section %u outside the file\n", s);
+            ok = false;
+            break;
+        }
+        uint32_t mode = 1u << 31;                                 /* DOWNLOAD_CONFIG_ACK_OPTION */
+        if (info != 0xffffffffu) {
+            unsigned enc = info >> 24;
+            if (enc == 1) mode |= 1u | ((info & 0xffu) << 1 & 0x6u) | (1u << 3);
+            else if (enc == 2) mode |= 1u | (1u << 6) | (1u << 3);
+        }
+        uint32_t cfg[3] = { addr, len, mode };
+        uint8_t res[4] = {};
+        bool c = x9_wd_cmd(&d, 0x05, cfg, sizeof cfg, 1, res, sizeof res);
+        IOLog("X9 WIFI PATCH: section %u addr=%08x len=%u info=%08x mode=%08x PATCH_START %s status=%u cid=%02x\n",
+            s, addr, len, info, mode, c ? "answered" : "FAILED", res[0], res[1]);
+        if (!c || res[0] != 0) {
+            ok = false;
+            break;
+        }
+        for (uint32_t at = 0; at < len; at += 2048) {
+            unsigned chunk = len - at < 2048 ? len - at : 2048;
+            memcpy(d.va + X9_B_FW, fw + off + at, chunk);
+            if (!x9_wd_tx(&d, 16, X9_B_FW, chunk)) {
+                IOLog("X9 WIFI PATCH: section %u data stuck at %u/%u\n", s, at, len);
+                ok = false;
+                break;
+            }
+            sent += chunk;
+        }
+        if (ok) {
+            IOLog("X9 WIFI PATCH: section %u data sent (%u B) t=%llu ms int_sta=%08x\n", s, len, x9_ms_since(tp),
+                x9_wd_rd(&d, 0x200));
+        }
+    }
+    if (ok) {
+        uint8_t fin[4] = { 0, 0, 0, 0 }, res[4] = {};
+        bool c = x9_wd_cmd(&d, 0x07, fin, sizeof fin, 1, res, sizeof res);
+        IOLog("X9 WIFI PATCH: PATCH_FINISH %s status=%u cid=%02x; %u B in %llu ms -> %s\n",
+            c ? "answered" : "FAILED", res[0], res[1], sent, x9_ms_since(tp),
+            (c && res[0] == 0) ? "ROM PATCH DOWNLOADED" : "patch download failed");
+    }
+    IOLog("X9 WIFI MCU: after patch rom_sram=%08x romcode_index=%08x conn_on_misc=%08x events=%u\n",
+        bar[0x1ab160 / 4], bar[0xc1604 / 4], bar[0xe00f0 / 4], d.events);
+    /* teardown: DMA off, wait idle, indexes reset, ring registers cleared */
+    x9_wd_wr(&d, 0x208, gloOff);
+    uint64_t ti = mach_absolute_time();
+    while ((x9_wd_rd(&d, 0x208) & 0xau) && x9_ms_since(ti) < 100) {
+        IODelay(50);
+    }
+    x9_wd_wr(&d, 0x20c, 0xffffffffu);
+    x9_wd_wr(&d, 0x280, 0xffffffffu);
+    for (unsigned k = 0; k < 2; k++) {
+        x9_wd_wr(&d, 0x300 + txr[k] * 0x10, 0);
+        x9_wd_wr(&d, 0x304 + txr[k] * 0x10, 0);
+    }
+    x9_wd_wr(&d, 0x570, 0);
+    x9_wd_wr(&d, 0x574, 0);
+    x9_wd_wr(&d, 0x208, glo0 & ~0x5u);
+    IOLog("X9 WIFI DMA: stopped glo=%08x int_sta=%08x (buffer kept)\n", x9_wd_rd(&d, 0x208), x9_wd_rd(&d, 0x200));
+}
+
+/*
  * Stage 4 (47.txt follow-up): stage 3 released the MAC/PHY resets, base_conf
  * became 14110f01 and the link trained to L0 (LTSSM 0x10) 16 ms after PERST,
  * but the bus-1 config read returned ffffffff: the root port (bus 0 devfn 0,
@@ -867,6 +1224,14 @@ x9_wifi_pcie_stage4(volatile uint32_t *mac, unsigned stage)
                     (lp & (1u << 2)) ? "NOT taken" : "TAKEN", x9_ms_since(td), lp, bar[0xe0014 / 4]);
                 IOLog("X9 WIFI MCU: owned: rom_sram=%08x romcode_index=%08x wfdma0 glo_cfg=%08x conn_on_misc=%08x hcr=%08x\n",
                     bar[0x1ab160 / 4], bar[0xc1604 / 4], bar[0xd4208 / 4], bar[0xe00f0 / 4], bar[0x140000 / 4]);
+                if (stage >= 6 && !(lp & (1u << 2))) {
+                    x9_pcie_cfg_wr(mac, 1, 0, 0x04, (epcmd & 0xfff8u) | 0x6u);   /* MEM | BUS MASTER */
+                    IOLog("X9 WIFI EP: bus master on cmd/sta=%08x\n", x9_pcie_cfg_rd(mac, 1, 0, 0x04));
+                    x9_wifi_stage6(bar);
+                    x9_pcie_cfg_wr(mac, 1, 0, 0x04, (epcmd & 0xfff8u) | 0x2u);   /* MEM only again */
+                    IOLog("X9 WIFI EP: bus master off cmd/sta=%08x ltssm=%08x link=%08x\n",
+                        x9_pcie_cfg_rd(mac, 1, 0, 0x04), mac[0x150 / 4], mac[0x154 / 4]);
+                }
                 bar[0xe0010 / 4] = 1u << 0;                         /* HOST_SET_OWN: back to FW */
                 __asm__ volatile ("dsb sy" ::: "memory");
                 IODelay(1000);
@@ -1057,7 +1422,7 @@ static void
 x9_wifi_power_test(void)
 {
     int stage = sweet_x9_arg("x9_wifi_power", 0);
-    if (stage < 1 || stage > 5) {
+    if (stage < 1 || stage > 6) {
         return;
     }
     thread_t t = NULL;

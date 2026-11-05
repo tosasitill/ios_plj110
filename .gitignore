@@ -17,6 +17,8 @@ work/**/*.log
 !x9/kernel/prebuilt/*.o
 # machine-local build paths
 x9/build/local.json
+# vendor Wi-Fi firmware embedded at build time (x9/tools/wifi_firmware.py)
+x9/kernel/generated/x9_wifi_firmware.inc
 
 # Local dependency snapshots, Apple inputs and private device state
 .local/
