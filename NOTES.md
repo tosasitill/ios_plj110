@@ -1,3 +1,43 @@
+## 49.txt: MT6653 ROM idle and driver own works; stage 6 (first WFDMA round trip) designed, not written (2026-11-05)
+
+- 实测 49.txt (558,743 B) = rev252aa stage 5. Link L0, EP 665314c3 again (49.txt:2687-2690).
+  `rom_sram=00001d1e romcode_index=00001d1e` (MCU_IDLE) lpctl=00000004 before; **driver own TAKEN
+  after 5 ms** lpctl=00000000 irq_stat=00000001; while owned WFDMA0 GLO_CFG=1010b850,
+  CONN_ON_MISC=00000001, HCR=03040001; SET_OWN gives lpctl=00000004 back (49.txt:2706-2709).
+  Clean power-off at 24.787 s.
+- Firmware found by the user in the Mac's ~/output/firmware (vendor image dump); copied to
+  ~/ios_plj110/.local/x9/wifi-fw/ (gitignored, verified): WIFI_MT6653_PATCH_MCU_dx5_2g2a_1_hdr.bin
+  (386,464 B), WIFI_RAM_CODE_MT6653_dx5_2g2a_1.bin (1,625,428 B),
+  WIFI_MT6653_PHY_RAM_CODE_dx5_2g2a_1.bin (147,332 B), TESTMODE variants, conninfra.cfg.
+  This device is the `dx5_2g2a` variant.
+- Stage 6 design (SOURCE: gen4m mt6653.c, hal_pdma.c, cmm_asic_connac3x.c, wlan_oid.c,
+  wf_wfdma_host_dma0.h), to be implemented by the next session; the code-writing attempt in this
+  session was interrupted twice and nothing was written (tree clean):
+  - Rings: init commands on HW TX ring 16 (u2TxInitCmdPort = TX_RING_FWDL); events on RX_RING_EVT =
+    HW RX ring 7, each preceded by a 32-byte RXD. WFDMA0 host base 0x20024000 = BAR0 + 0xd4000:
+    TX ring n CTRL0..3 = +0x300+n*0x10, RX ring n = +0x500+n*0x10, TX EXT_CTRL +0x600+4n, RX EXT_CTRL
+    +0x680+4n, INT_STA +0x200, GLO_CFG +0x208, RST_DTX_PTR +0x20c, RST_DRX_PTR +0x280, EXT0/1/2
+    +0x2b0/+0x2b4/+0x2b8.
+  - Order (halWpdmaInitRing + mt6653): GLO_CFG = 0x5030b850 | bit26 (ADDR_EXT) without EN; per ring
+    CTRL0 = base[31:0], CTRL2 = cidx (TX 0, RX count-1), CTRL1 = count | base[35:32]<<16, EXT_CTRL 4;
+    then mt6653WfdmaManualPrefetch EXT_CTRL values: RX4/5/6 = 00000008/00800008/01000008, RX7/8 =
+    01800004/01c00004, TX16 = 02000004, TX0..3 = 02000010/03000010/04000010/05000010, TX4/5 =
+    06000004/06400004, TX15 = 06800004; RST_DTX_PTR = RST_DRX_PTR = ffffffff; GLO_CFG |= bit0|bit2;
+    EXT1 = 0x9C800404; EXT2 = 0x1404. EP config cmd |= bus master (bit 2) for the duration.
+  - Descriptor (TXD_STRUCT/RXD_STRUCT, 16 B): w0 SDPtr0, w1 SDLen0 bits 16-29 | LastSec0 bit 30 |
+    DMADONE bit 31, w2 SDPtr1, w3 SDPtr0Ext (TX) / RXINFO (RX).
+  - Command (asicConnac3xFillInitCmdTxdInfo + wlanSendInitSetQueryCmdImpl): 32-byte TXD (DW0 =
+    total | 2<<23 PKT_FT_CMD | queue 0; DW1 = 1<<14 HEADER_FORMAT_COMMAND), INIT_HIF_TX_HEADER 32 B
+    (u16 total-32, u16 PQ 0x8000, CID, 0xA0, rsv, seq, then 24 reserved bytes), payload.
+    PATCH_SEMAPHORE_CONTROL = CID 0x10 payload {1,0,0,0}; reply EID 4, payload[0] status
+    (0 no sema, 1 already patched, 2 got sema need patch, 3 released). Release = payload {0,...}.
+  - DMA memory: contiguous, below 4 GiB, cacheable with DC CIVAC around device access
+    (render_wc_scrub pattern in SweetX9RenderService.cpp).
+  - After that: patch download = PATCH_START (CID 5, {addr,len,mode} from the _hdr.bin header,
+    load 0x00900000), data on ring 16 with CID 0 (PKT_FT_PDA_FWDL 3, no init header), PATCH_FINISH
+    (CID 7), release sema; then RAM code regions (DOWNLOAD_CONFIG CID 1 per region, WIFI_START CID 2).
+    Firmware delivery to the kernel is still open (embed at build time from .local, or mailbox/root).
+
 ## 48.txt: MT6653 enumerated (14c3:6653, Gen4 x1, BAR0 2 MiB), chip registers readable; rev252aa (2026-11-05)
 
 - 实测 48.txt (539,796 B) = rev252z stage 4, 48.txt:3016-3923. Link L0 in 15 ms again. RC id
