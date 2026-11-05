@@ -1,3 +1,25 @@
+## Handoff 2026-11-05: test order rev252w -> rev252w-wifipwr
+
+- Git: origin/main had the user's merge b2b3fd0 (NOTES conflict already resolved, no markers left);
+  the Mac session's uncommitted 44.txt notes committed from the Mac as 91b3373. Server and Mac both
+  at that commit before this note.
+- Re-checked the 44.txt diagnosis from the server: 43.txt:668-669 `RENDER EXTERNAL: active ... native
+  discovery armed` vs 44.txt:621/623 `missing/mismatched ... discovery disabled`; rev252v boot.img
+  holds the restaged digest 235f5a9c, rev252w holds 17ed5f20; Mac
+  x9/kernel/generated/ is clean. rev252w sha256 462402ba... re-confirmed on the Mac.
+- Wi-Fi B1 round 1 was never device-tested (the ed0466f worktree image predates the keyboard work).
+  Built a variant reusing the rev252w kernel, `build.py boot` only (no `--revision`, no recompile):
+  ~/ios_plj110/x9/out/x9-rev252w-wifipwr/boot.img, 9,474,048 B, sha256
+  095e0349c624ad4a7de116500bc37a24a2e7349a066055edd901ed5728493f70, EXIT=0, boot args = rev252w +
+  `x9_wifi_power=1` (verified in build.log and payload.bin). Not flashed, not hardware-verified.
+  Non-interactive ssh needs `export PATH=/opt/homebrew/opt/llvm/bin:$PATH` or boot-xnu.py fails
+  with "llvm-objcopy missing".
+- Order: (1) rev252w-kbdseed: logo must clear (`RENDER EXTERNAL: active`), then type in Spotlight
+  ~60 s -> keyboard seed verdict. (2) only then rev252w-wifipwr: first Wi-Fi hardware write
+  (GPIO250/251 high ~3 s, then off), user already approved it on 2026-11-04. Read
+  `X9 WIFI POWER:` lines: faultb (GPIO65) going to 1 = PMIC up without fault; LTSSM likely stays 0.
+- Before each fastboot boot: run mailbox/update.py staging (the payload is unchanged, allowlist 252).
+
 ## 44.txt: rev252v stuck the phone at the Apple logo because my build restaged the Metal allowlist (2026-11-04)
 
 - 实测 USER: 「一直卡 logo」 with 44.txt (406,799 B, log ends 137.5 s). Kernel and root come up
