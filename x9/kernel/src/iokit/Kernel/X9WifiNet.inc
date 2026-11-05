@@ -810,6 +810,21 @@ x9_wifi_rc_diag(const char *when)
     IOLog("X9 WIFI RC %s: int_sta=%08x axi_if=%08x misc=%08x res_sta=%08x res_ctrl=%08x axi0_err_addr=%08x axi0_err_info=%08x wcpl=%08x spc2=%08x ltssm=%08x link=%08x\n",
         when, m[0x184 / 4], m[0x1a8 / 4], m[0x348 / 4], m[0xd28 / 4], m[0xd2c / 4], m[0xe00 / 4], m[0xe08 / 4],
         m[0x340 / 4], m[0xd8 / 4], m[0x150 / 4], m[0x154 / 4]);
+    {
+        unsigned ec = 0x100, aer = 0;
+        for (unsigned n = 0; ec >= 0x100 && ec < 0x1000 && n < 32; n++) {
+            uint32_t h = x9_pcie_cfg_rd(m, 1, 0, ec);
+            if (h == 0 || h == 0xffffffffu) break;
+            if ((h & 0xffff) == 0x0001) { aer = ec; break; }
+            ec = (h >> 20) & 0xffc;
+        }
+        IOLog("X9 WIFI AER %s: rc unc_sta=%08x cor_sta=%08x rp_sts=%08x pref=%08x/%08x/%08x | ep aer@%03x unc_sta=%08x unc_mask=%08x cor_sta=%08x hdr=%08x %08x %08x %08x\n",
+            when, m[0x204 / 4], m[0x210 / 4], m[0x230 / 4], x9_pcie_cfg_rd(m, 0, 0, 0x24), x9_pcie_cfg_rd(m, 0, 0, 0x28),
+            x9_pcie_cfg_rd(m, 0, 0, 0x2c), aer, aer ? x9_pcie_cfg_rd(m, 1, 0, aer + 0x04) : 0,
+            aer ? x9_pcie_cfg_rd(m, 1, 0, aer + 0x08) : 0, aer ? x9_pcie_cfg_rd(m, 1, 0, aer + 0x10) : 0,
+            aer ? x9_pcie_cfg_rd(m, 1, 0, aer + 0x1c) : 0, aer ? x9_pcie_cfg_rd(m, 1, 0, aer + 0x20) : 0,
+            aer ? x9_pcie_cfg_rd(m, 1, 0, aer + 0x24) : 0, aer ? x9_pcie_cfg_rd(m, 1, 0, aer + 0x28) : 0);
+    }
     IOLog("X9 WIFI RC %s: rc cmd/sta=%08x sec_sta=%08x ep cmd/sta=%08x ep devctl/sta=%08x\n", when,
         x9_pcie_cfg_rd(m, 0, 0, 0x04), x9_pcie_cfg_rd(m, 0, 0, 0x1c), x9_pcie_cfg_rd(m, 1, 0, 0x04),
         x9_pcie_cfg_rd(m, 1, 0, 0x80 + 0x08));
@@ -1213,10 +1228,22 @@ x9_wifi_pcie_stage4(volatile uint32_t *mac, unsigned stage)
     uint32_t rcid = x9_pcie_cfg_rd(mac, 0, 0, 0x00), rccls = x9_pcie_cfg_rd(mac, 0, 0, 0x08);
     uint32_t rccmd = x9_pcie_cfg_rd(mac, 0, 0, 0x04), rcbus = x9_pcie_cfg_rd(mac, 0, 0, 0x18);
     uint32_t rcmem = x9_pcie_cfg_rd(mac, 0, 0, 0x20);
+    /* 55.txt follow-up: prefetchable window (never programmed by us). Linux pci_setup_bridge disables it
+     * when nothing behind the bridge is prefetchable: base 0xfff0 / limit 0 in 0x24, upper 32 bits 0. */
+    uint32_t rcio = x9_pcie_cfg_rd(mac, 0, 0, 0x1c), rcpf = x9_pcie_cfg_rd(mac, 0, 0, 0x24);
+    uint32_t rcpfbu = x9_pcie_cfg_rd(mac, 0, 0, 0x28), rcpflu = x9_pcie_cfg_rd(mac, 0, 0, 0x2c);
     IOLog("X9 WIFI EP: RC id=%08x class=%08x cmd=%08x bus=%08x mem=%08x axi_if=%08x->%08x\n",
         rcid, rccls, rccmd, rcbus, rcmem, axi0, mac[0x1a8 / 4]);
     x9_pcie_cfg_wr(mac, 0, 0, 0x18, (rcbus & 0xff000000u) | 0x00010100u);
     x9_pcie_cfg_wr(mac, 0, 0, 0x20, 0x57f05000u);
+    if (stage >= 6) {
+        x9_pcie_cfg_wr(mac, 0, 0, 0x24, 0x0000fff0u);
+        x9_pcie_cfg_wr(mac, 0, 0, 0x28, 0);
+        x9_pcie_cfg_wr(mac, 0, 0, 0x2c, 0);
+        IOLog("X9 WIFI EP: RC windows: io/sec %08x, pref %08x/%08x/%08x -> %08x/%08x/%08x (disabled as Linux)\n",
+            rcio, rcpf, rcpfbu, rcpflu, x9_pcie_cfg_rd(mac, 0, 0, 0x24), x9_pcie_cfg_rd(mac, 0, 0, 0x28),
+            x9_pcie_cfg_rd(mac, 0, 0, 0x2c));
+    }
     x9_pcie_cfg_wr(mac, 0, 0, 0x04, (rccmd & 0xffffu) | 0x6u);
     IOLog("X9 WIFI EP: RC bus=%08x mem=%08x cmd=%08x int_sta=%08x\n",
         x9_pcie_cfg_rd(mac, 0, 0, 0x18), x9_pcie_cfg_rd(mac, 0, 0, 0x20), x9_pcie_cfg_rd(mac, 0, 0, 0x04), mac[0x184 / 4]);
@@ -1364,6 +1391,11 @@ undo_rc:
     x9_pcie_cfg_wr(mac, 0, 0, 0x04, rccmd & 0xffffu);
     x9_pcie_cfg_wr(mac, 0, 0, 0x20, rcmem);
     x9_pcie_cfg_wr(mac, 0, 0, 0x18, rcbus);
+    if (stage >= 6) {
+        x9_pcie_cfg_wr(mac, 0, 0, 0x2c, rcpflu);
+        x9_pcie_cfg_wr(mac, 0, 0, 0x28, rcpfbu);
+        x9_pcie_cfg_wr(mac, 0, 0, 0x24, rcpf);
+    }
     mac[0x140 / 4] = (1u << 20) | (0xfu << 16);
     mac[0x1a8 / 4] = axi0;
     __asm__ volatile ("dsb sy" ::: "memory");
