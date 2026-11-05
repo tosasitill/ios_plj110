@@ -1,3 +1,13 @@
+## rev252aj: read-only dump of the MT6653 PCIe MAC ATR/ADT state (built 2026-11-05, not device-tested)
+
+- Commit eec2e12, `x9_wifi_power=6` (WFSYS reset of rev252ai still in). Every diag point ("as ROM left it",
+  "before DMA", "stuck") also logs `X9 WIFI EPMAC <when>: slv_conf x4 mst_conf x2 pend_adt p_adt_win x2 a_adt_slv x4
+  istat_dma_pend if_ctrl basic_sta` (bar 0x1d0000 + 0x34/3c/44/4c, 0x30/38, 0x1d4, 0x1d8/1dc, 0x1e0-1ec, 0x1d0,
+  0x1a8, 0x18) and one `X9 WIFI ATR <when>: slvS tT src= size=2^n impl= trsl= param= (trsf= id=) mask=` line per
+  non-empty ATR_AXI_SLV entry (0x800 + 0x100*S + 0x20*T, S 0-3, T 0-7), or "all ... entries are zero".
+- Built: ~/ios_plj110/x9/out/x9-rev252aj/boot.img 9,875,456 B sha256
+  82c22e7236615bbfd8d8ec29e753586aa55f4883f9e43b9b80fc711cd4732c40, 0 errors, no mailbox staging.
+
 ## 57.txt: the WFDMA read IS issued and hangs inside the MT6653; chip PCIe MAC has outbound ATR tables (2026-11-05)
 
 - 实测 57.txt (444,746 B, /tmp/57.txt) = rev252ai. WFSYS: before emi_ctl0 18100004, rgu_wf_rst 00010340,
