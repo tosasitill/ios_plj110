@@ -758,7 +758,7 @@ x9_pcie_cfg_wr(volatile uint32_t *mac, unsigned bus, unsigned devfn, unsigned wh
  *    restored, AXI_IF_CTRL restored.
  */
 static void
-x9_wifi_pcie_stage4(volatile uint32_t *mac)
+x9_wifi_pcie_stage4(volatile uint32_t *mac, unsigned stage)
 {
     uint32_t axi0 = mac[0x1a8 / 4];
     mac[0x1a8 / 4] = axi0 | (1u << 12) | (1u << 28);
@@ -839,6 +839,38 @@ x9_wifi_pcie_stage4(volatile uint32_t *mac)
             for (unsigned i = 0; i < sizeof(r) / sizeof(r[0]); i++) {
                 uint32_t v = bar[r[i].off / 4];
                 IOLog("X9 WIFI MMIO: %-26s bar+0x%06x = %08x int_sta=%08x\n", r[i].what, r[i].off, v, mac[0x184 / 4]);
+            }
+            if (stage >= 5) {
+                /*
+                 * Stage 5 (48.txt follow-up: EP 14c3:6653 Gen4 x1, BAR0 2 MiB, CB_INFRA1
+                 * HCR 0x6653, conn_infra/WF IP version 0x03040001). gen4m mt6653.c
+                 * mt6653_mcu_check_idle polls the ROM state at sram 0x7c05b160 (bar
+                 * 0x1ab160) and WF_TOP_CFG_ON_ROMCODE_INDEX 0x81021604 (bar 0xc1604) for
+                 * MCU_IDLE 0x1D1E; the driver-own handshake is CONN_HOST_CSR_TOP
+                 * WF_BAND0_LPCTL 0x20060010 (bar 0xe0010): write PCIE_LPCR_HOST_CLR_OWN
+                 * (bit1), owned when OWNER_STATE_SYNC (bit2) reads 0
+                 * (mt6653LowPowerOwnClear); SET_OWN (bit0) hands it back (bit2 = 1).
+                 * Also read WFDMA host DMA0 GLO_CFG 0x20024208 (bar 0xd4208).
+                 */
+                uint32_t rom = bar[0x1ab160 / 4], romidx = bar[0xc1604 / 4], lp0 = bar[0xe0010 / 4];
+                IOLog("X9 WIFI MCU: rom_sram=%08x romcode_index=%08x (idle=00001d1e) lpctl=%08x irq_stat=%08x wakeup_top=%08x\n",
+                    rom, romidx, lp0, bar[0xe0014 / 4], bar[0xe01a0 / 4]);
+                bar[0xe0010 / 4] = 1u << 1;                         /* HOST_CLR_OWN: driver own */
+                __asm__ volatile ("dsb sy" ::: "memory");
+                uint64_t td = mach_absolute_time();
+                uint32_t lp = bar[0xe0010 / 4];
+                while ((lp & (1u << 2)) && x9_ms_since(td) < 200) {
+                    IODelay(100);
+                    lp = bar[0xe0010 / 4];
+                }
+                IOLog("X9 WIFI MCU: driver own %s after %llu ms lpctl=%08x irq_stat=%08x\n",
+                    (lp & (1u << 2)) ? "NOT taken" : "TAKEN", x9_ms_since(td), lp, bar[0xe0014 / 4]);
+                IOLog("X9 WIFI MCU: owned: rom_sram=%08x romcode_index=%08x wfdma0 glo_cfg=%08x conn_on_misc=%08x hcr=%08x\n",
+                    bar[0x1ab160 / 4], bar[0xc1604 / 4], bar[0xd4208 / 4], bar[0xe00f0 / 4], bar[0x140000 / 4]);
+                bar[0xe0010 / 4] = 1u << 0;                         /* HOST_SET_OWN: back to FW */
+                __asm__ volatile ("dsb sy" ::: "memory");
+                IODelay(1000);
+                IOLog("X9 WIFI MCU: fw own requested lpctl=%08x\n", bar[0xe0010 / 4]);
             }
         } else {
             IOLog("X9 WIFI MMIO: ml_io_map(0x50000000) failed\n");
@@ -932,7 +964,7 @@ x9_wifi_pcie_try(volatile uint32_t *mac, volatile uint32_t *cg, uint64_t t0, uns
     IOLog("X9 WIFI PCIE: %s after %llu ms polls=%u ltssm=%08x link=%08x\n",
         (link & (1u << 8)) ? "LINK UP" : "link down", x9_ms_since(tp), polls, mac[0x150 / 4], link);
     if ((link & (1u << 8)) && stage >= 4) {
-        x9_wifi_pcie_stage4(mac);
+        x9_wifi_pcie_stage4(mac, stage);
         IOSleep(200);
         IOLog("X9 WIFI PCIE: after stage 4 ltssm=%08x link=%08x\n", mac[0x150 / 4], mac[0x154 / 4]);
     } else if (link & (1u << 8)) {
@@ -1025,7 +1057,7 @@ static void
 x9_wifi_power_test(void)
 {
     int stage = sweet_x9_arg("x9_wifi_power", 0);
-    if (stage < 1 || stage > 4) {
+    if (stage < 1 || stage > 5) {
         return;
     }
     thread_t t = NULL;
