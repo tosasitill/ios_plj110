@@ -1,3 +1,24 @@
+## 61.txt = rev252aq: stuck at logo; ACE-Lite page-walk snooping does NOT work as configured; rev252ar (2026-11-05)
+
+- 实测 /home/ubuntu/61.txt (323,740 B), user staged mailbox (X9 UPDATE errno=0, active plugin
+  X9GeneralMetal253), boot-args incl. x9_panel_hz=120 x9_gpu_acelite=1 x9_gpu_park=1 x9_submit_async=1.
+- Panel: `X9 PANEL as LK left it: TE periods us=8297/8297/8297/8299 (~120.5 Hz) frame push DSI busy 7816 us
+  (fits one refresh)`; after the switch identical. **LK already runs the panel at 120 Hz**; the lag was never
+  the panel. (One push 7.8 ms at 120 Hz: little headroom.)
+- ACE-Lite enabled (AMBA_ENABLE 1f -> 00, L2 off). Async worker started; PanVK mode=async (caps 0x7f).
+  **First render job (backboardd group 1 id 1, cold path) faulted:** AS1 UPDATE cfg=62000006, MMU fault
+  AS1status=401002c0 AS1addr=10000000 = translation fault level 0, read, at the group's ring VA. Marks all 0,
+  insert=32 extract=0 -> `submission uncertain` -> device refused -> SpringBoard crash loop -> logo forever.
+- Cause (推断, strong): with x9_gpu_acelite the render page tables were not CPU-cleaned (PTW_SH outer);
+  the GPU walked stale DRAM. So on this boot path GPU shareable reads are NOT snooping CPU caches, despite
+  AMBA_FEATURES ACE-Lite and the dts. Missing piece unknown: MTK ACP/DSU path enable (kbase options
+  CONFIG_MALI_MTK_ACP_DSU_REQ / ACP_SVP_WA exist; GPUEB/MFG side not researched). Until a snoop self-test
+  exists, x9_gpu_acelite must stay OFF (it also makes the CIVAC skip unsafe).
+- Park/async were not exercised beyond this first job.
+- rev252ar (kernel only, plugin 253 stays staged): x9-rev252ar = x9_wifi_power=6 x9_gpu_park=1
+  x9_submit_async=1 (no acelite, no panel switch); x9-rev252ar-safe = x9_wifi_power=6 only (sync, no park;
+  plugin 253 runs sync without the cap).
+
 ## GPU step 2: asynchronous submission (x9_submit_async=1) + rev252ap fix; rev252aq (2026-11-05, built, not device-tested)
 
 - rev252ap BUG (found while doing step 2, do NOT flash x9-rev252ap): a parked context kept c->exposed=true;
