@@ -777,13 +777,18 @@ extern "C" void flush_dcache64(addr64_t addr, unsigned count, int phys);
 #define X9_B_RX 0x8000u                      /* RX buffers, 16 x 2 KiB */
 #define X9_BUF 0x800u
 /* RC (pcie0 MAC) and pextp0cfg_ao maps, set by x9_wifi_pcie_try for the DMA diagnostics */
-static volatile uint32_t *x9_rc_mac, *x9_rc_pextp;
+static volatile uint32_t *x9_rc_mac, *x9_rc_pextp, *x9_ep_bar;
 static void
 x9_wifi_rc_diag(const char *when)
 {
-    volatile uint32_t *m = x9_rc_mac, *p = x9_rc_pextp;
+    volatile uint32_t *m = x9_rc_mac, *p = x9_rc_pextp, *b = x9_ep_bar;
     if (!m || !p) {
         return;
+    }
+    if (b) {
+        IOLog("X9 WIFI CHIP %s: cb slp_prot hw=%08x sw=%08x slp_status=%08x pcie_slp_cfg0=%08x cfg1=%08x access_detect=%08x ep_axi_if=%08x lpctl=%08x conn_on_misc=%08x\n",
+            when, b[0x1f5210 / 4], b[0x1f5214 / 4], b[0x1f500c / 4], b[0x1f5014 / 4], b[0x1f5018 / 4],
+            b[0xe0128 / 4], b[0x1d01a8 / 4], b[0xe0010 / 4], b[0xe00f0 / 4]);
     }
     IOLog("X9 WIFI RC %s: pextp clk_con=%08x res_req=%08x pwrctl0=%08x pwrctl6=%08x pwrctl8=%08x req_ctrl=%08x slpprot_rdy=%08x\n",
         when, p[0x20 / 4], p[0x34 / 4], p[0x40 / 4], p[0x58 / 4], p[0x74 / 4], p[0x7c / 4], p[0x264 / 4]);
@@ -1246,10 +1251,33 @@ x9_wifi_pcie_stage4(volatile uint32_t *mac, unsigned stage)
                 IOLog("X9 WIFI MCU: owned: rom_sram=%08x romcode_index=%08x wfdma0 glo_cfg=%08x conn_on_misc=%08x hcr=%08x\n",
                     bar[0x1ab160 / 4], bar[0xc1604 / 4], bar[0xd4208 / 4], bar[0xe00f0 / 4], bar[0x140000 / 4]);
                 if (stage >= 6 && !(lp & (1u << 2))) {
+                    /*
+                     * 51.txt: host side clean (no AXI error, sleep protect released, resources
+                     * acked) yet TX15 never fetched -> the chip never issued the read. Do the two
+                     * writes mt6653_mcu_init makes before anything else (WMT build skips mcu_reset):
+                     * CB_INFRA_SLP_PROT_SW_CTRL 0x70025214 = 0 (static window bar 0x1f5214, the same
+                     * path gen4m's HAL_MCR_WR takes) and CONN_HOST_CSR_TOP AP2CONN_ACCESS_DETECT_EN
+                     * 0x20060128 (bar 0xe0128) = 0. Both restored afterwards.
+                     */
+                    x9_ep_bar = bar;
+                    uint32_t slp0 = bar[0x1f5214 / 4], det0 = bar[0xe0128 / 4];
+                    x9_wifi_rc_diag("as ROM left it");
+                    IOLog("X9 WIFI CHIP: cb remap_wf=%08x (def 74037001)\n", bar[0x1f6554 / 4]);
+                    bar[0x1f5214 / 4] = 0;
+                    __asm__ volatile ("dsb sy" ::: "memory");
+                    bar[0xe0128 / 4] = 0;
+                    __asm__ volatile ("dsb sy" ::: "memory");
+                    IODelay(100);
+                    IOLog("X9 WIFI CHIP: slp_prot_sw %08x -> %08x, access_detect %08x -> %08x\n",
+                        slp0, bar[0x1f5214 / 4], det0, bar[0xe0128 / 4]);
                     x9_pcie_cfg_wr(mac, 1, 0, 0x04, (epcmd & 0xfff8u) | 0x6u);   /* MEM | BUS MASTER */
                     IOLog("X9 WIFI EP: bus master on cmd/sta=%08x\n", x9_pcie_cfg_rd(mac, 1, 0, 0x04));
                     x9_wifi_stage6(bar);
                     x9_pcie_cfg_wr(mac, 1, 0, 0x04, (epcmd & 0xfff8u) | 0x2u);   /* MEM only again */
+                    bar[0xe0128 / 4] = det0;
+                    bar[0x1f5214 / 4] = slp0;
+                    __asm__ volatile ("dsb sy" ::: "memory");
+                    x9_ep_bar = NULL;
                     IOLog("X9 WIFI EP: bus master off cmd/sta=%08x ltssm=%08x link=%08x\n",
                         x9_pcie_cfg_rd(mac, 1, 0, 0x04), mac[0x150 / 4], mac[0x154 / 4]);
                 }
