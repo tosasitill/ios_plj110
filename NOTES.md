@@ -1,3 +1,27 @@
+## Display refresh: panel rate measured + 120 Hz switch; rev252ao / rev252ao-acelite (2026-11-05, built, not device-tested)
+
+- Facts (SOURCE + logs): panel ac287 is a COMMAND-mode panel (oplus panel-ac287-p-7-a0020-dsi-cmd.dtsi): it
+  refreshes from its GRAM at the LK-chosen rate; we push content with mutex+DSI_START after a fresh TE
+  (x9_lk_gui_step). Timings in the dtsi: sa_fhd_120 (pll 553), sa_fhd_90 (pll 414), sa_fhd_60 (pll 414);
+  stock switch = oplus,dsi-timing-switch-command: 39 FF 5A A5 00, 15 60 xx, 15 7D yy (120: 00/00, 90: 03/01,
+  60: 04/01). LK's rate was never measured before this build.
+- 实测 (58-60.txt): our vsync/submit cadence is the software 60 Hz tick (sweetfb_hz=120 existed, opt-in);
+  real pushes peak at 21-26/s (copies=42-52 per 2 s, copy 1.6-1.9 ms, TE wait avg 3.9-4.6 ms, 0 TE
+  timeouts). So the ~10-25 fps feel is the GPU submit chain (~13 ms/job, ~2.3 jobs/frame), not LK; 120 Hz
+  panel + cadence removes the display side as a cap but will not by itself raise content fps.
+- rev252ao (commit 6f12536): AppleCLCD start logs `X9 PANEL as LK left it: TE periods us=... median=...
+  (~N Hz) frame push DSI busy X us`; x9_panel_hz=120|90|60 sends the stock switch (LP, between frames,
+  CMDQ0-2/CON/RX restored; new x9_lk_send_raw/x9_lk_panel_rate/x9_lk_panel_measure in x9_lk_console.h),
+  re-measures (`after switch`), reverts to the rate nearest the original if one push >= one refresh
+  (`reverted`). Without sweetfb_hz the cadence becomes 120 when the panel measures < 9.1 ms. PLL/PHY/DSC
+  untouched (stock uses pll 553 for 120; if the push at 414 does not fit, the revert path triggers).
+- Built: x9/out/x9-rev252ao/boot.img sha256 1ad40f9d635ce4e8765edef9e03b0eb105265f1ad1410b875c974d53afec3bf0
+  (x9_wifi_power=6 x9_panel_hz=120) and x9/out/x9-rev252ao-acelite/boot.img sha256
+  519d796d4291b4e7795f9915c294dbbc0562bda72953ada4e57cac506af4b294 (+ x9_gpu_acelite=1), 9,879,552 B each,
+  kernel only, no mailbox staging.
+- Device check: the three X9 PANEL lines; `X9 DISPLAY cadence: target=120`; TE wait avg should drop toward
+  ~4 ms at 120 Hz with no TE timeouts; any tearing/garbage = PLL too low -> boot without x9_panel_hz.
+
 ## GPU cache maintenance: ACE-Lite IO coherency per stock kbase; rev252an / rev252an-acelite (2026-11-05, built, not device-tested)
 
 - Cost being attacked (15.txt/18.txt, rev246-248): per job ~66-82 MB CIVAC-cleaned + 31-47 MB invalidated, all
