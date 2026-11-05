@@ -1,3 +1,22 @@
+## 54.txt: TX15 packet correct but never completed; rev252ag = DMASHDL bypass test (2026-11-05)
+
+- 实测 54.txt (378,260 B, /home/ubuntu/54.txt, not /tmp) = rev252af. hif_rst 00000030 (logic + DMASHDL out of
+  reset). DMASHDL before/stuck identical: sw_ctrl 0 (no bypass), opt 700c8fff, page 003f1000, refill fffe0000,
+  ctrl_sig 00151000, pkt_max 00180010, grp0/grp1 01ff0010 (max 0x1ff, min 0x10), qmap0-3 0, dbg0/1 0.
+  TX15 desc[0] after stall = 45aa9000 40500000 00000000 00000001 (addr 0x1_45aa9000, len 80, LastSec0, DMADONE=0);
+  buf 01000050 00004000 ... | 00000030 0100a005 ... 00900000 (TXD, INIT header len 48 / CID 5 / A0 / seq 1,
+  payload addr 0x900000): exactly as intended. GLO_CFG bit 6 = TX_WB_DDONE (confirmed in header) is on, so
+  WFDMA never finished the packet. EP devsta 0 (no completion timeout / UR / CA seen).
+- gen4m DMASHDL config (hal_dmashdl_mt6653.h): groups 0-5 max 0x490 min 0x10 refill on, group 15 max 0x30, queue
+  map AC*3 -> group 4, ALTX -> 5, PLE max page 1 / PSE 0x18, HIF_ACK_CNT_TH 5, GUP_ACT_MAP 0x800F. Group 15
+  quota register (0x2002605c) never dumped.
+- rev252ag (commit d551ece): before the rings, GLO_CFG_EXT0 (0x200242b0) bit 6 TX_DMASHDL_EN off and DMASHDL
+  SW_CONTROL (0x20026004) bit 28 bypass on, log `X9 WIFI DMASHDL: bypass test: ext0 A -> B, sw_ctrl C -> D`,
+  restored in the teardown. Built: ~/ios_plj110/x9/out/x9-rev252ag/boot.img 9,871,360 B sha256
+  82e116dca6a80867e9fa1c072f1181ac4d8af56221a7a74dd26e54f442523802, 0 errors, x9_wifi_power=6, no mailbox.
+  If the patch downloads -> port mt6653DmashdlInit properly; if still stuck -> DMASHDL ruled out, next is the
+  RC bridge prefetch window (0x24-0x2c) and AER on both sides.
+
 ## 53.txt + source trace: WFDMA AXI slpprot off; connv3 has nothing DMA-relevant; rev252af read-only probe (2026-11-05)
 
 - 实测 53.txt (461,293 B, /tmp/53.txt) = rev252ae. WFDMA wrapper: axi_slpprot 00000004 (only AXI0 IDLE, EN=0;
