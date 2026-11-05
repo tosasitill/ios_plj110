@@ -1,3 +1,18 @@
+## 58.txt: outbound ATR is identity 2^64 on all four AXI slaves; slave 0 flags our read; a read was already pending (2026-11-05)
+
+- 实测 58.txt (383,903 B, /tmp/58.txt) = rev252aj. Chip PCIe MAC (bar 0x1d0000) as ROM left it / before DMA:
+  slv_conf 55554343/55054353/55054363/55054373, mst_conf 00333346/00333356, **pend_adt 00010000** (PENDING_ADT_R
+  field b27:16 = 1, W = 0), p_adt_win 00000008/0, a_adt_slv 0/0/0/0, istat_dma_pend 0, if_ctrl 02040000,
+  basic_sta 20000401. ATR_AXI_SLV0-3 t0 on every slave: src 0, size 2^64, IMPL=1, trsl 0, param 0 (id 0) ->
+  identity pass-through of the whole address space; t1-t7 IMPL=0 (mask ffffffff/fffff000). ATR unchanged at the
+  stall. **At the stall a_adt_slv0 = 00000008** (was 0); pend_adt still 00010000; R2A dmard_probe 24000000 again.
+- 推断 (not confirmed, bit meanings undocumented): (1) the outbound ATR covers 0x1_45aa0000, so translation
+  is not the block; (2) slave 0 recorded an event (bit 3) for our read; p_adt_win0 also shows bit 3 for the
+  inbound BAR path that works, so bit 3 may be a "transaction seen" flag rather than an error; (3) a read was
+  already pending in the MAC before we started any DMA (pend_adt R=1 "as ROM left it"), which could block later
+  reads if the outbound read path is in order. When it appears (before/after link-up, before/after EP bus
+  master) is not known yet.
+
 ## rev252aj: read-only dump of the MT6653 PCIe MAC ATR/ADT state (built 2026-11-05, not device-tested)
 
 - Commit eec2e12, `x9_wifi_power=6` (WFSYS reset of rev252ai still in). Every diag point ("as ROM left it",
