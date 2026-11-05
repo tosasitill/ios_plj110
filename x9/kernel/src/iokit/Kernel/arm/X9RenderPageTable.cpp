@@ -78,8 +78,15 @@ static bool physical(const X9RenderVMEntry *m,uint64_t offset,uint64_t *pa) {
   !(*pa<0xfc910000ULL+5120u*2760u&&*pa+4096>0xfc910000ULL);
 }
 static uint64_t attrs(uint32_t flags) {
- /* Cached index0, software cache maintenance, RO/RW and execute-never. */
- return 0x403ULL|((flags&2)?(1ULL<<6):(3ULL<<6))|((flags&4)?0:(1ULL<<54));
+ /* Cached index0 (0x88 implementation-defined write-back), RO/RW and
+  * execute-never. With ACE-Lite active the leaf is outer shareable (kbase
+  * SHARE_BOTH_BITS 2<<8): GPU L2 misses become snooping reads and L2
+  * write-backs snoop-invalidate CPU lines, so per-submit CPU CIVAC is not
+  * needed; the GPU L2 itself is still flushed/invalidated around every job.
+  * x9_gpu_acelite_active never changes while a VM exists (set before the
+  * first VM, never cleared), so unmap's exact PTE comparison stays valid. */
+ return 0x403ULL|((flags&2)?(1ULL<<6):(3ULL<<6))|((flags&4)?0:(1ULL<<54))|
+  (x9_gpu_acelite_active?(2ULL<<8):0);
 }
 X9RenderPageTable *x9_render_vm_create() {
  auto *vm=(X9RenderPageTable *)IOMallocZero(sizeof(X9RenderPageTable));
@@ -122,7 +129,9 @@ uint64_t x9_render_vm_publish(X9RenderPageTable *vm) {
   * Translation installation/invalidation and GPU detach are unchanged. */
  uint64_t cleaned=0,unchanged=0;
  for(unsigned i=0;i<vm->count;i++)if(vm->tables[i].memory) {
-  if(vm->tables[i].dirty){x9_gpu_clean(vm->tables[i].pa,4096,1);cleaned+=4096;}
+  /* ACE-Lite: TRANSCFG.PTW_SH is outer shareable, page walks snoop the CPU
+   * caches (stock kbase_mmu_sync_pgd_cpu skips its clean unless NONE). */
+  if(vm->tables[i].dirty&&!x9_gpu_acelite_active){x9_gpu_clean(vm->tables[i].pa,4096,1);cleaned+=4096;}
   else unchanged+=4096;
  }
  __asm__ volatile("dsb sy":::"memory");

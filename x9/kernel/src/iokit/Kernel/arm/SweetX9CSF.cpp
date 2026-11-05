@@ -24,6 +24,7 @@ extern "C" int sweet_x9_csf_boot(vm_offset_t gpu);
 extern "C" vm_offset_t ml_io_map(vm_offset_t,vm_size_t);
 extern "C" volatile uint64_t sweet_x9_gpu_busy_ns;
 #include "X9GPUCache.h"
+bool x9_gpu_acelite_active;
 
 namespace {
 static X9MetalJob *active_metal_job;
@@ -347,9 +348,18 @@ static bool power_l2(vm_offset_t gpu,uint64_t cores,bool enable) {
  * impl=88, force=8f, write-alloc=8d, outer-impl=88,
  * outer-WA=8d, noncache=4c, shared=08. */
 static constexpr uint64_t memattr=0x00084c8d888d8f88ULL;
-static constexpr uint64_t transcfg=0x42000006ULL;
+/* MODE=AArch64 4K, PTW_MEMATTR=write-back (b25:24=2), R_ALLOCATE (b30). With
+ * ACE-Lite active also PTW_SH=outer shareable (b29:28=2), as stock
+ * kbase_mmu_hw_configure does whenever system_coherency != COHERENCY_NONE. */
+static uint64_t as_transcfg() { return 0x42000006ULL|(x9_gpu_acelite_active?0x20000000ULL:0); }
 static bool install_as(vm_offset_t gpu,uint64_t root,unsigned as=0) {
  unsigned base=as*0x40;
+ const uint64_t transcfg=as_transcfg();
+ /* AMBA_ENABLE only resets with the GPU power domain; if that ever happened
+  * behind our back the shareable PTEs would silently stop being snooped. */
+ if(x9_gpu_acelite_active&&(gr(gpu,0x304)&0x1fu)!=0) {
+  IOLog("X9 CSF BOOT: AS%u refused: AMBA_ENABLE=%08x lost ACE-Lite\n",as,gr(gpu,0x304));return false;
+ }
  if(!idle_as(gpu,1000,as))return false;
  gw64(gpu,0x2430+base,transcfg);gw64(gpu,0x2400+base,root);gw64(gpu,0x2408+base,memattr);
  gw(gpu,0x2418+base,1);
@@ -364,6 +374,7 @@ static bool install_as(vm_offset_t gpu,uint64_t root,unsigned as=0) {
 }
 static bool remove_as(vm_offset_t gpu,uint64_t saved_attr,uint64_t saved_cfg,unsigned as=0) {
  unsigned base=as*0x40;
+ const uint64_t transcfg=as_transcfg();
  if(!idle_as(gpu,1000,as))return false;
  /* Stock mmu_disable_as: AArch64 page-table attributes with MODE_UNMAPPED. */
  gw64(gpu,0x2430+base,(transcfg&~15ULL)|1);gw64(gpu,0x2400+base,0);gw(gpu,0x2418+base,1);
@@ -496,7 +507,7 @@ static int boot(Plan &p,vm_offset_t gpu,vm_offset_t smmu,vm_offset_t doorbell) {
  if(!install_as(gpu,p.tables[0].pa)) {
   IOLog("X9 CSF BOOT: AS0 install failed\n");goto cleanup;
  }
- IOLog("X9 CSF BOOT: AS0 root=%llx MEMATTR=%llx TRANSCFG=%llx installed\n",p.tables[0].pa,memattr,transcfg);
+ IOLog("X9 CSF BOOT: AS0 root=%llx MEMATTR=%llx TRANSCFG=%llx installed\n",p.tables[0].pa,memattr,as_transcfg());
  /* AUTO follows original boot_csf_firmware. Compute remains separately gated. */
  gw(gpu,0x700,2);mcu_started=true;
  {

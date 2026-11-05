@@ -5,6 +5,14 @@
 extern "C" vm_offset_t phystokv(uint64_t);
 extern "C" void clean_dcache64(uint64_t,unsigned,int);
 
+/* Set once by the resident GPU init (SweetX9CSFResident.inc) after AMBA_ENABLE
+ * reads back COHERENCY_PROTOCOL=ACE-Lite, before any render VM exists; never
+ * cleared afterwards. When set: AS TRANSCFG.PTW_SH = outer shareable (stock
+ * kbase_mmu_hw_configure for system_coherency != NONE) and render-VM leaf PTEs
+ * outer shareable (kbase SHARE_BOTH_BITS, 2<<8), so GPU page walks and client
+ * accesses are snooped and the CPU-side clean/invalidate can be skipped. */
+extern bool x9_gpu_acelite_active;
+
 /* Only held, wired driver allocations: never user VAs or arbitrary MMIO.
  * The frozen Apple-coherent cache API may be a DSB-only implementation.
  * Publish the actual CPU lines to PoC before noncoherent GPU DMA. Keep each

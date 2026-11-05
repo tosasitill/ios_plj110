@@ -137,23 +137,39 @@ static int resident_begin(vm_offset_t gpu) {
   s->policy.shader_mask=shaders;
   IOLog("X9 RENDER shader-policy: present=%llx requested=%llx cores=%u;pending firmware delegation/config ACK\n",
    shaders,s->policy.shader_mask,(unsigned)__builtin_popcountll(shaders));
-  // COHERENCY_NUM_GROUPS (0x300) and COHERENCY_GROUP_0 (0x308) are the GPU's own
-  // report: type 0 = none, 1 = ACE-Lite, 2 = ACE. A non-zero type is a register
-  // capability, not proof that this interconnect snoops CPU caches for client
-  // addresses; the boot-arg is the operator's explicit claim and both are needed.
-  // Skipping CPU CIVAC is only valid once the GPU side issues snooping
-  // transactions too: COHERENCY_ENABLE (0x304) written, AS MEMATTR with a
-  // coherent index and outer-shareable PTEs. attributes()/install_as() program
-  // none of that (SH=0, MEMATTR index0=0x88, 0x304 only read), so the request
-  // is logged and refused; per-submit CIVAC stays on.
-  static constexpr bool gpu_side_coherency_programmed=false;
-  uint32_t groups=gr(gpu,0x300),group_type=gr(gpu,0x308)&3;
-  int coherent_arg=0;
-  bool want=(coherent_arg=sweet_x9_arg("x9_gpu_coherent",1))==1;
-  bool capable=groups&&groups<=64&&(group_type==1||group_type==2);
-  s->coherent=want&&capable&&gpu_side_coherency_programmed;
-  IOLog("X9 RENDER coherency: groups=%u group0_type=%u requested=%d capable=%u gpu_side=%u active=%u;CIVAC kept unless GPU snoop is programmed\n",
-   groups,group_type,coherent_arg,capable?1:0,gpu_side_coherency_programmed?1:0,s->coherent?1:0);
+  // GPU-side IO coherency, as stock a16w kbase does on MT6993 (dts mali
+  // system-coherency = <0> = COHERENCY_ACE_LITE): for arch >= 12.0.1
+  // kbase_cache_set_coherency_mode writes AMBA_ENABLE (0x304) bits4:0 = 0
+  // (ACE-Lite) after reset, before L2 power-up (panthor_gpu_coherency_set does
+  // the same with GPU_COHERENCY_PROTOCOL). On this arch 0x300 is AMBA_FEATURES
+  // (b0 ACE-Lite, b1 ACE, b5 shareable cache), not COHERENCY_NUM_GROUPS, and
+  // 0x308 is not a group type: the old groups/group0_type gate read the wrong
+  // registers (measured AMBA_FEATURES=00000001, AMBA_ENABLE=0000001f from LK).
+  // Opt-in x9_gpu_acelite=1. With it: AMBA protocol ACE-Lite, TRANSCFG PTW_SH
+  // outer (install_as), render-VM leaves outer shareable (X9RenderPageTable),
+  // no CPU clean of render page tables, and (unless x9_gpu_coherent=0) no
+  // per-submit CIVAC of CPU-exposed client bytes. CSF-private queue/firmware
+  // memory keeps its explicit maintenance (its PTEs stay non-shareable).
+  {
+   uint32_t amba_features=gr(gpu,0x300),amba_before=gr(gpu,0x304),amba_after=amba_before;
+   uint64_t l2_ready=gr64(gpu,0x908)|gr64(gpu,0x910);
+   int acelite_arg=sweet_x9_arg("x9_gpu_acelite",0),coherent_arg=sweet_x9_arg("x9_gpu_coherent",1);
+   bool capable=(amba_features&1u)&&amba_features!=~0u;
+   const char *why="not requested";
+   if(acelite_arg==1&&!x9_gpu_acelite_active) {
+    if(!capable)why="AMBA_FEATURES lacks ACE-Lite";
+    else if(l2_ready)why="L2 already powered/transitioning";
+    else {
+     gw(gpu,0x304,amba_before&~0x1fu);__asm__ volatile("dsb sy":::"memory");
+     amba_after=gr(gpu,0x304);
+     if((amba_after&0x1fu)==0){x9_gpu_acelite_active=true;why="enabled";}
+     else {gw(gpu,0x304,amba_before);why="AMBA_ENABLE readback mismatch, restored";}
+    }
+   }else if(x9_gpu_acelite_active)why="already enabled";
+   s->coherent=x9_gpu_acelite_active&&coherent_arg==1;
+   IOLog("X9 RENDER coherency: AMBA_FEATURES=%08x AMBA_ENABLE %08x -> %08x L2=%llx x9_gpu_acelite=%d x9_gpu_coherent=%d acelite=%u (%s) civac_skip=%u\n",
+    amba_features,amba_before,amba_after,l2_ready,acelite_arg,coherent_arg,x9_gpu_acelite_active?1:0,why,s->coherent?1:0);
+  }
   for(unsigned i=0;i<8;i++) {
    uint32_t va=0x04400000u+i*0x200000u;
    if(!add_shared(s->image,va,0x10000)||!add_shared(s->image,va+0x10000,0x100000))goto clean_failure;
