@@ -840,6 +840,15 @@ x9_wd_sync(x9_wdma *d, unsigned off, unsigned len)
     flush_dcache64((addr64_t)(d->pa + off), len, 1);
     __asm__ volatile ("dsb sy" ::: "memory");
 }
+/* 53.txt follow-up (read-only): CONN_HIF_RST and DMASHDL (chip 0x20026000 -> bar 0xd6000) state */
+static void
+x9_wd_state(x9_wdma *d, const char *when)
+{
+    volatile uint32_t *s = d->bar + 0xd6000 / 4;
+    IOLog("X9 WIFI DMASHDL %s: hif_rst=%08x sw_ctrl=%08x opt=%08x page=%08x refill=%08x ctrl_sig=%08x pkt_max=%08x grp0=%08x grp1=%08x qmap0=%08x qmap1=%08x qmap2=%08x qmap3=%08x dbg0=%08x dbg1=%08x rd02=%08x\n",
+        when, x9_wd_rd(d, 0x100), s[0x04 / 4], s[0x08 / 4], s[0x0c / 4], s[0x10 / 4], s[0x18 / 4], s[0x1c / 4],
+        s[0x20 / 4], s[0x24 / 4], s[0x60 / 4], s[0x64 / 4], s[0x68 / 4], s[0x6c / 4], s[0xc0 / 4], s[0xc4 / 4], s[0xc8 / 4]);
+}
 static void
 x9_wd_rx_desc(x9_wdma *d, unsigned i)
 {
@@ -874,6 +883,16 @@ x9_wd_tx(x9_wdma *d, unsigned ring, unsigned boff, unsigned len)
                 ring, *cidx, didx, x9_wd_rd(d, 0x300 + ring * 0x10), x9_wd_rd(d, 0x304 + ring * 0x10),
                 x9_wd_rd(d, 0x208), x9_wd_rd(d, 0x200));
             x9_wifi_rc_diag("stuck");
+            x9_wd_state(d, "stuck");
+            unsigned prev = (*cidx + X9_RING_N - 1) % X9_RING_N;
+            unsigned poff = (ring == 15 ? X9_D_TX15 : X9_D_TX16) + prev * 16;
+            x9_wd_sync(d, poff & ~63u, 64);
+            volatile uint32_t *pd = (volatile uint32_t *)(void *)(d->va + poff);
+            x9_wd_sync(d, boff, 64);
+            const uint32_t *pb = (const uint32_t *)(const void *)(d->va + boff);
+            IOLog("X9 WIFI DMA: TX%u desc[%u] after stall = %08x %08x %08x %08x (DMADONE=%u len=%u last=%u) buf %08x %08x %08x %08x | %08x %08x %08x %08x %08x\n",
+                ring, prev, pd[0], pd[1], pd[2], pd[3], pd[1] >> 31, (pd[1] >> 16) & 0x3fff, (pd[1] >> 30) & 1,
+                pb[0], pb[1], pb[2], pb[3], pb[8], pb[9], pb[10], pb[11], pb[17]);
             return false;
         }
         IODelay(5);
@@ -1008,6 +1027,7 @@ x9_wifi_stage6(volatile uint32_t *bar)
         d.pa, d.va, glo0, x9_wd_rd(&d, 0x200), x9_wd_rd(&d, 0x3f0), x9_wd_rd(&d, 0x3f4), x9_wd_rd(&d, 0x3f8),
         x9_wd_rd(&d, 0x3fc), x9_wd_rd(&d, 0x570), x9_wd_rd(&d, 0x574), x9_wd_rd(&d, 0x578), x9_wd_rd(&d, 0x57c));
     x9_wifi_rc_diag("before DMA");
+    x9_wd_state(&d, "before DMA");
     /* 52.txt follow-up: if the WFDMA wrapper's AXI sleep protection is enabled, release it */
     uint32_t axislp0 = bar[0xd7050 / 4];
     if (axislp0 & 0x00010001u) {
