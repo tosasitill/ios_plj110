@@ -789,6 +789,21 @@ x9_wifi_rc_diag(const char *when)
         IOLog("X9 WIFI CHIP %s: cb slp_prot hw=%08x sw=%08x slp_status=%08x pcie_slp_cfg0=%08x cfg1=%08x access_detect=%08x ep_axi_if=%08x lpctl=%08x conn_on_misc=%08x\n",
             when, b[0x1f5210 / 4], b[0x1f5214 / 4], b[0x1f500c / 4], b[0x1f5014 / 4], b[0x1f5018 / 4],
             b[0xe0128 / 4], b[0x1d01a8 / 4], b[0xe0010 / 4], b[0xe00f0 / 4]);
+        /* WFDMA wrapper (0x20027000 -> bar 0xd7000) and host DMA0 debug probe, as
+         * dbg_mt6653.c mt6653_show_wfdma_wrapper_info / _dbg_probe_info read them */
+        IOLog("X9 WIFI WFDMA %s: hif_misc=%08x axi_slpprot=%08x slpprot0=%08x slpprot1=%08x msi_cfg=%08x\n",
+            when, b[0xd7044 / 4], b[0xd7050 / 4], b[0xd7078 / 4], b[0xd707c / 4], b[0xd702c / 4]);
+        static const uint8_t dbg[] = { 0x0, 0x1, 0x2, 0x3, 0x30, 0x5, 0x7, 0xa, 0xb, 0xc, 0x62 };
+        uint32_t pr[sizeof dbg];
+        uint32_t idx0 = b[0xd4124 / 4];
+        for (unsigned k = 0; k < sizeof dbg; k++) {
+            b[0xd4124 / 4] = 0x100u + dbg[k];
+            __asm__ volatile ("dsb sy" ::: "memory");
+            pr[k] = b[0xd4128 / 4];
+        }
+        b[0xd4124 / 4] = idx0;
+        IOLog("X9 WIFI WFDMA %s: probe 00=%08x 01=%08x 02=%08x 03=%08x 30=%08x 05=%08x 07=%08x 0a=%08x 0b=%08x 0c=%08x 62=%08x\n",
+            when, pr[0], pr[1], pr[2], pr[3], pr[4], pr[5], pr[6], pr[7], pr[8], pr[9], pr[10]);
     }
     IOLog("X9 WIFI RC %s: pextp clk_con=%08x res_req=%08x pwrctl0=%08x pwrctl6=%08x pwrctl8=%08x req_ctrl=%08x slpprot_rdy=%08x\n",
         when, p[0x20 / 4], p[0x34 / 4], p[0x40 / 4], p[0x58 / 4], p[0x74 / 4], p[0x7c / 4], p[0x264 / 4]);
@@ -993,6 +1008,16 @@ x9_wifi_stage6(volatile uint32_t *bar)
         d.pa, d.va, glo0, x9_wd_rd(&d, 0x200), x9_wd_rd(&d, 0x3f0), x9_wd_rd(&d, 0x3f4), x9_wd_rd(&d, 0x3f8),
         x9_wd_rd(&d, 0x3fc), x9_wd_rd(&d, 0x570), x9_wd_rd(&d, 0x574), x9_wd_rd(&d, 0x578), x9_wd_rd(&d, 0x57c));
     x9_wifi_rc_diag("before DMA");
+    /* 52.txt follow-up: if the WFDMA wrapper's AXI sleep protection is enabled, release it */
+    uint32_t axislp0 = bar[0xd7050 / 4];
+    if (axislp0 & 0x00010001u) {
+        bar[0xd7050 / 4] = axislp0 & ~0x00010001u;
+        __asm__ volatile ("dsb sy" ::: "memory");
+        IODelay(10);
+        IOLog("X9 WIFI WFDMA: AXI sleep protection was ENABLED (%08x); cleared -> %08x\n", axislp0, bar[0xd7050 / 4]);
+    } else {
+        IOLog("X9 WIFI WFDMA: AXI sleep protection off (%08x)\n", axislp0);
+    }
     /* halWpdmaInitRing order: DMA off, rings, prefetch + index reset, DMA on */
     const uint32_t gloOff = 0x5030b850u | (1u << 26);
     x9_wd_wr(&d, 0x208, gloOff);
@@ -1114,6 +1139,10 @@ x9_wifi_stage6(volatile uint32_t *bar)
     x9_wd_wr(&d, 0x570, 0);
     x9_wd_wr(&d, 0x574, 0);
     x9_wd_wr(&d, 0x208, glo0 & ~0x5u);
+    if (axislp0 & 0x00010001u) {
+        bar[0xd7050 / 4] = axislp0;
+        __asm__ volatile ("dsb sy" ::: "memory");
+    }
     IOLog("X9 WIFI DMA: stopped glo=%08x int_sta=%08x (buffer kept)\n", x9_wd_rd(&d, 0x208), x9_wd_rd(&d, 0x200));
 }
 
