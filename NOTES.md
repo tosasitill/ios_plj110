@@ -7,6 +7,9 @@
 - Unknown (guess): ROM may have stopped/slept after the data (b28/b5), or data of the AES section 1 was not
   accepted. rev252az (source only, NOT built; commit follows): dumps x9_wifi_rc_diag right after each section's
   data ("after data s0/s1") to see whether b28/b5/dmawr_probe flip during the data phase or only on FINISH.
+- BUILT 2026-11-05 via ssh (Mac ~/ios_plj110 at 54c8184): x9/out/x9-rev252az/boot.img sha256
+  dd2c3c9106442059990d8f1a729d3211b3a752850fe24162f39ac369b031247e, boot args x9_wifi_power=6 x9_gpu_khz=1716000
+  x9_gpu_floor_khz=1100000 (my reconstruction of rev252ay's args), kernel only, plugin 255.
 - Build on the Mac: `python3 -I x9/build/build.py --name x9-rev252az --boot-arg x9_wifi_power=6 ...` (same
   boot args as rev252ay; kernel only, plugin 255 already staged, no mailbox needed).
 - Next candidates if the flip happens in the data phase: try PATCH_SEM_CONTROL (mt76 does), smaller/larger
