@@ -755,6 +755,10 @@ int x9_lk_gui_cancel(void) { return x9_lk_gui_disarm(); }
 int x9_lk_panel_dcs(const uint8_t *data, unsigned len, int readback, uint32_t rd[4]) {
  return x9_lk_dcs_long(data, len, readback, rd);
 }
+int x9_lk_panel_set_rate(unsigned hz) { return x9_lk_panel_rate(hz); }
+int x9_lk_panel_probe(uint64_t timeout, uint64_t te[5], uint64_t xfer[2]) {
+ return x9_lk_panel_measure(timeout, te, xfer);
+}
 int x9_lk_gui_busy(void) {
  return x9_lk_active ? !!(x9_lk_gui_armed || (X9_LK_READ(x9_lk_dsi,0x0c)&0x80000000u)) : -1;
 }

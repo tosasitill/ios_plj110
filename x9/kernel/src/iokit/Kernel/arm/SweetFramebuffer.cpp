@@ -76,6 +76,9 @@ extern "C" int x9_lk_overlay(unsigned index, uint64_t *address, uint64_t *bytes,
 extern "C" int x9_lk_overlay_level(void);
 extern "C" int sweet_x9_arg(const char *name, int def);
 extern "C" int x9_lk_panel_dcs(const uint8_t *data, unsigned len, int readback, uint32_t rd[4]);
+extern "C" int x9_lk_panel_set_rate(unsigned hz);
+extern "C" int x9_lk_panel_probe(uint64_t timeout, uint64_t te[5], uint64_t xfer[2]);
+
 extern "C" void sweet_watchdog_pet(void);   /* osfmk/arm64/sweet_early.c */
 extern "C" int sweet_x9_render_display_try_enter(void);
 extern "C" void sweet_x9_render_owner_leave(void);
@@ -168,6 +171,35 @@ mtk_dsi_push_hw(void)
 #include <pexpert/pexpert.h>
 #include <kern/clock.h>
 #include <sys/proc.h>
+
+/* Measure the panel's real TE period and one frame's DSI transfer time (see
+ * x9_lk_panel_measure). Returns the median TE period in us, 0 on failure. */
+static unsigned
+x9_panel_probe_log(const char *when, unsigned *xfer_us_out)
+{
+	uint64_t timeout, te[5] = {}, xfer[2] = {};
+	nanoseconds_to_absolutetime(50000000ULL, &timeout);
+	int r = 0;
+	for (unsigned tries = 0; tries < 200 && (r = x9_lk_panel_probe(timeout, te, xfer)) == 0; tries++) IOSleep(1);
+	if (r != 1) {
+		IOLog("X9 PANEL %s: probe failed r=%d (0 busy, -1 unavailable, -2 no TE in 50 ms, -3 DSI busy > 50 ms)\n", when, r);
+		return 0;
+	}
+	unsigned p[4];
+	for (unsigned i = 0; i < 4; i++) {
+		uint64_t ns = 0; absolutetime_to_nanoseconds(te[i + 1] - te[i], &ns); p[i] = (unsigned)(ns / 1000);
+	}
+	unsigned sorted[4]; memcpy(sorted, p, sizeof(sorted));
+	for (unsigned i = 0; i < 4; i++) for (unsigned j = i + 1; j < 4; j++) if (sorted[j] < sorted[i]) { unsigned t = sorted[i]; sorted[i] = sorted[j]; sorted[j] = t; }
+	unsigned median = (sorted[1] + sorted[2]) / 2;
+	uint64_t xns = 0; absolutetime_to_nanoseconds(xfer[1] - xfer[0], &xns);
+	unsigned xus = (unsigned)(xns / 1000);
+	if (xfer_us_out) *xfer_us_out = xus;
+	IOLog("X9 PANEL %s: TE periods us=%u/%u/%u/%u median=%u (~%u.%u Hz) frame push DSI busy %u us (%s)\n",
+	    when, p[0], p[1], p[2], p[3], median, median ? 1000000 / median : 0, median ? (10000000 / median) % 10 : 0, xus,
+	    median && xus < median ? "fits one refresh" : "LONGER than one refresh: tearing risk");
+	return median;
+}
 
 enum {
 	kSweetFBGetLayerDefaultSurface  = 3,
@@ -938,8 +970,33 @@ AppleCLCD::start(IOService *provider)
 		}
 	}
 	uint32_t hz = sweet_board_x9() ? 60 : 10;
-	PE_parse_boot_argn("sweetfb_hz", &hz, sizeof(hz));
+	bool hz_explicit = PE_parse_boot_argn("sweetfb_hz", &hz, sizeof(hz));
 	if (sweet_board_x9()) {
+		/*
+		 * 2026-11-05: measure what LK actually left (never measured before) and,
+		 * with x9_panel_hz=120|90|60, switch the panel with the stock oplus
+		 * timing-switch DCS. Without sweetfb_hz the vsync/LK-submit cadence then
+		 * follows the measured panel rate (120 if the panel measures >= ~110 Hz).
+		 * If one frame push no longer fits the new refresh period, the panel is
+		 * switched back to the rate nearest the original measurement.
+		 */
+		unsigned xfer0 = 0, xfer1 = 0, before = x9_panel_probe_log("as LK left it", &xfer0), after = before;
+		int want = sweet_x9_arg("x9_panel_hz", 0);
+		if (want == 120 || want == 90 || want == 60) {
+			int r = 0;
+			for (unsigned tries = 0; tries < 200 && (r = x9_lk_panel_set_rate((unsigned)want)) == 0; tries++) IOSleep(1);
+			IOLog("X9 PANEL: switch to %d Hz via oplus timing-switch DCS (FF 5A A5 00; 60/7D) r=%d\n", want, r);
+			IOSleep(50);
+			if (r == 1) after = x9_panel_probe_log("after switch", &xfer1);
+			if (r == 1 && after && xfer1 >= after && before) {
+				unsigned back = before < 9500 ? 120 : before < 13000 ? 90 : 60;
+				int rb = x9_lk_panel_set_rate(back);
+				IOLog("X9 PANEL: frame push %u us >= refresh %u us; reverted to %u Hz r=%d\n", xfer1, after, back, rb);
+				IOSleep(50);
+				after = x9_panel_probe_log("after revert", NULL);
+			}
+		}
+		if (!hz_explicit && after && after < 9100) hz = 120;
 		// This paces notifications and LK submissions, not panel PHY timings.
 		// Keep the default >=60; 120 must be requested explicitly by boot arg.
 		fTickHz = hz == 120 ? 120 : 60;

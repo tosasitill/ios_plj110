@@ -257,6 +257,104 @@ out:
  __atomic_store_n(&x9_lk_submit_lock, 0u, __ATOMIC_RELEASE);
  return result;
 }
+/*
+ * Panel refresh measurement and switch (2026-11-05). The panel is a command-
+ * mode AMOLED (ac287, oplus panel-ac287-p-7-a0020-dsi-cmd.dtsi): it refreshes
+ * from its own GRAM at the rate LK selected and raises TE once per refresh;
+ * content only changes when we push a frame after TE. Nothing here touches
+ * PHY/PLL/DSC/route; the switch is the stock oplus "dsi-timing-switch-command"
+ * DCS sequence (FF 5A A5 00 long, then short 60 xx and 7D xx), sent LP like
+ * the verified brightness path, between frames, CMDQ/CON/RX restored after.
+ */
+#ifndef X9_LK_NOW
+#define X9_LK_NOW() mach_absolute_time()
+#endif
+static int x9_lk_send_raw(uint32_t header, const uint8_t *payload, unsigned len) {
+ unsigned words = (len + 3) / 4;
+ X9_LK_WRITE(x9_lk_dsi, 0x400, 0);
+ for (unsigned w = 0; w < words; w++) {
+  uint32_t v = 0;
+  for (unsigned b = 0; b < 4 && w * 4 + b < len; b++) v |= (uint32_t)payload[w * 4 + b] << (b * 8);
+  X9_LK_WRITE(x9_lk_dsi, 0x404 + w * 4, v);
+ }
+ X9_LK_WRITE(x9_lk_dsi, 0x400, header);
+ x9_lk_kick(1 + words);
+ int ok = x9_lk_wait_idle(20000);
+ X9_LK_WRITE(x9_lk_dsi, 0x0c, ~2u);      /* ack CMD_DONE only; TE_RDY untouched */
+ return ok;
+}
+/* hz 120/90/60 -> 1 sent, 0 busy (retry), -1 unavailable/bad rate, -2 a packet never went idle. */
+static int x9_lk_panel_rate(unsigned hz) {
+ uint8_t c60, c7d;
+ if (hz == 120) { c60 = 0x00; c7d = 0x00; }
+ else if (hz == 90) { c60 = 0x03; c7d = 0x01; }
+ else if (hz == 60) { c60 = 0x04; c7d = 0x01; }
+ else return -1;
+ if (!x9_lk_active) return -1;
+ if (__atomic_exchange_n(&x9_lk_submit_lock, 1u, __ATOMIC_ACQUIRE)) return 0;
+ int result = 0;
+ uint32_t status = X9_LK_READ(x9_lk_dsi, 0x0c);
+ if (status == 0xffffffffu) { result = -1; goto out; }
+ if ((status & 0x80000000u) || x9_lk_gui_armed) goto out;
+ {
+  uint32_t q0 = X9_LK_READ(x9_lk_dsi, 0x400), q1 = X9_LK_READ(x9_lk_dsi, 0x404);
+  uint32_t q2 = X9_LK_READ(x9_lk_dsi, 0x408), con = X9_LK_READ(x9_lk_dsi, 0x44);
+  uint32_t rx = X9_LK_READ(x9_lk_dsi, 0xa0);
+  static const uint8_t unlock[4] = {0xff, 0x5a, 0xa5, 0x00};
+  result = 1;
+  if (!x9_lk_send_raw((4u << 16) | (0x39u << 8) | 0x2u, unlock, 4)) result = -2;
+  /* DCS short write, 1 parameter: type0 word = param<<24 | cmd<<16 | DT 0x15<<8. */
+  if (result == 1 && !x9_lk_send_raw(((uint32_t)c60 << 24) | (0x60u << 16) | (0x15u << 8), 0, 0)) result = -2;
+  if (result == 1 && !x9_lk_send_raw(((uint32_t)c7d << 24) | (0x7du << 16) | (0x15u << 8), 0, 0)) result = -2;
+  X9_LK_WRITE(x9_lk_dsi, 0x400, q0);
+  X9_LK_WRITE(x9_lk_dsi, 0x404, q1);
+  X9_LK_WRITE(x9_lk_dsi, 0x408, q2);
+  X9_LK_WRITE(x9_lk_dsi, 0xa0, rx);
+  X9_LK_WRITE(x9_lk_dsi, 0x44, con);
+  X9_LK_FENCE();
+ }
+out:
+ __atomic_store_n(&x9_lk_submit_lock, 0u, __ATOMIC_RELEASE);
+ return result;
+}
+/* Ground truth for the panel rate: timestamps of 5 consecutive fresh TE_RDY
+ * events (te[0..4]) and of one real frame push (DSI_START right after te[4]
+ * until DSI busy clears, xfer[0..1]). Re-pushes the current canonical frame.
+ * timeout = absolute-time ticks allowed per wait. 1 ok, 0 busy, -1 unavailable,
+ * -2 TE timeout, -3 transfer timeout. Spins (bounded) with the submit lock. */
+static int x9_lk_panel_measure(uint64_t timeout, uint64_t te[5], uint64_t xfer[2]) {
+ if (!x9_lk_active) return -1;
+ if (__atomic_exchange_n(&x9_lk_submit_lock, 1u, __ATOMIC_ACQUIRE)) return 0;
+ int result = 0;
+ uint32_t status = X9_LK_READ(x9_lk_dsi, 0x0c);
+ if (status == 0xffffffffu) { result = -1; goto out; }
+ if ((status & 0x80000000u) || x9_lk_gui_armed) goto out;
+ x9_lk_mirror();
+ X9_LK_WRITE(x9_lk_dsi, 0x0c, ~(1u << 2));
+ X9_LK_FENCE();
+ result = 1;
+ for (unsigned i = 0; i < 5 && result == 1; i++) {
+  uint64_t begin = X9_LK_NOW();
+  while (!(X9_LK_READ(x9_lk_dsi, 0x0c) & (1u << 2))) {
+   if (X9_LK_NOW() - begin > timeout) { result = -2; break; }
+  }
+  te[i] = X9_LK_NOW();
+  X9_LK_WRITE(x9_lk_dsi, 0x0c, ~(1u << 2));
+  X9_LK_FENCE();
+  X9_LK_PET();
+ }
+ if (result == 1) {
+  xfer[0] = X9_LK_NOW();
+  x9_lk_start();
+  while (X9_LK_READ(x9_lk_dsi, 0x0c) & 0x80000000u) {
+   if (X9_LK_NOW() - xfer[0] > timeout) { result = -3; break; }
+  }
+  xfer[1] = X9_LK_NOW();
+ }
+out:
+ __atomic_store_n(&x9_lk_submit_lock, 0u, __ATOMIC_RELEASE);
+ return result;
+}
 static int x9_lk_gui_disarm(void) {
  if(__atomic_exchange_n(&x9_lk_submit_lock,1u,__ATOMIC_ACQUIRE))return 0;
  x9_lk_gui_armed=0;
