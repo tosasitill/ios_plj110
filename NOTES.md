@@ -19,7 +19,9 @@
   of it after PERST. `X9 WIFI RC before DMA:` / `stuck:` / `no event:` dump pextp 0x20/0x34/0x40/0x58/0x74/
   0x7c/0x264, RC int_sta/axi_if/misc/res_sta 0xd28/res_ctrl/AXI0_ERR_ADDR 0xe00/ERR_INFO 0xe08/wcpl/spc2,
   RC cmd/sta + secondary status, EP cmd/sta, EP devctl/sta.
-- Build pending (Mac tunnel dropped again right after the push).
+- BUILT on the Mac: ~/ios_plj110/x9/out/x9-rev252ac/boot.img 9,871,360 B sha256
+  dae30dbcc1e8bbc7db7175ef40aaf463c4febc4b5b38538fd3772bf47f2da27e, EXIT=0, 0 errors, 0 X9WifiNet.inc warnings,
+  x9_wifi_power=6, no plugin-package/ -> no mailbox staging. Not device-tested.
 
 ## rev252ab: firmware embedded in the kernel; stage 6 = ROM patch download over WFDMA (2026-11-05)
 
