@@ -1,3 +1,26 @@
+## 51.txt: host PCIe side clean, DMA still stalls -> chip side; rev252ad = mcu_init writes (2026-11-05)
+
+- 实测 51.txt (368,569 B, /tmp/51.txt) = rev252ac. LK state (51.txt:2388-2390): pextp pwrctl6/8 = 0 (HW mode
+  already off), slpprot_rdy = 0, res_req 00055455, req_ctrl c4; RC res_sta ef (all acks), res_ctrl 3, wcpl 0x80,
+  no AXI error. Votes "released after 0 ms". Before DMA / at stall (2431-2442): res_ctrl 40a, req_ctrl 10d5,
+  int_sta 0, axi0_err 0/0, RC cmd/sta 00100006, secondary status 0 (no master/target abort), EP cmd/sta
+  00100006 (no error bits), EP devctl/sta 00002910. Same stall: `TX15 stuck cidx=1 didx=0 glo=5430b857`.
+- 推断: the RC never saw a request -> the MT6653 never issued the descriptor read. The RC pre_init/votes did
+  not matter (left in place; harmless). Suspect chip-internal gating.
+- mt6653_mcu_init (WMT build) first writes CB_INFRA_SLP_PROT_SW_CTRL 0x70025214 = 0 and
+  CONN_HOST_CSR_TOP_CSR_AP2CONN_ACCESS_DETECT_EN 0x20060128 = 0, then checks ROM idle. gen4m's HAL_MCR_WR to
+  0x70025214 goes through the STATIC table entry 0x70020000 -> bar 0x1f0000 (labelled "(RO)" but used for
+  writes); the earlier assumption "static window RO, skip" was wrong. L1 remap alternative (not used):
+  CB_INFRA_MISC0_CBTOP_PCIE_REMAP_WF 0x70026554 (bar 0x1f6554, def 0x74037001, low 16 = target >> 16) ->
+  window bar 0x1c0000.
+- rev252ad (commit ad6042b): inside the driver-own window, before bus master: logs `X9 WIFI CHIP as ROM left it:`
+  (cb slp_prot hw 0x1f5210 / sw 0x1f5214, slp_status 0x1f500c, pcie_slp_cfg0/1 0x1f5014/8, access_detect
+  0xe0128, EP-side AXI_PCIE_IF_CTRL 0x1d01a8, lpctl, conn_on_misc) and remap_wf, writes both to 0, logs
+  `slp_prot_sw X -> Y, access_detect X -> Y`, restores after stage 6; `X9 WIFI CHIP stuck:` on a stall.
+  Built: ~/ios_plj110/x9/out/x9-rev252ad/boot.img 9,871,360 B sha256
+  3735c737c1666c3987474a76ef108348e2763852a2bd1b7ff9a839eafdca02c8, 0 errors, x9_wifi_power=6, no mailbox.
+  Not device-tested.
+
 ## 50.txt: stage 6 DMA stalls on the first descriptor fetch; rev252ac adds Linux RC pre_init + votes (2026-11-05)
 
 - 实测 50.txt (405,545 B, /tmp/50.txt on the server) = rev252ab. Link L0 in 15 ms, EP 665314c3, ROM idle,
