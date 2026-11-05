@@ -7094,14 +7094,29 @@ sweet_x9_seed_uikit_statusbar(proc_t p, user_addr_t scratch, user_addr_t end)
  * availability query again), 10 of 12 samples running. Siri/dictation services
  * do not work on this port, so turn both off in AFPreferences' domain
  * (AssistantServices 20H392: com.apple.assistant.support, keys "Dictation
- * Enabled" / "Assistant Enabled"). Original file backed up once; non-fatal. */
+ * Enabled" / "Assistant Enabled"). Original file backed up once; non-fatal.
+ * 45.txt (rev252w): with the keyboard seed holding, the remaining Spotlight t0
+ * loop is postUIKeyboardDictationAvailabilityDidChangeNotification ->
+ * updateDockItemsVisibility -> dictationIsFunctional ->
+ * -[AFDictationConnection dictationIsAvailableForLanguage:synchronous:] ->
+ * forcedOfflineDictationIsAvailableForLanguage:synchronous: (+AFPreferences
+ * init/dealloc). 20H392 AssistantServices 0x19bf007a4: that method caches
+ * [[AFPreferences offlineDictationStatus] keysOfEntriesPassingTest:] in ivar
+ * +0x18 and, every time the cache is nil, dispatch_asyncs block_invoke_2
+ * (0x19bf7d0ec) -> _availabilityChanged -> _tellSpeechDelegateAvailabilityChanged
+ * -> UIDictationConnection dictationConnnectionDidChangeAvailability: ->
+ * the notification again. offlineDictationStatus (0x19beff910) returns
+ * "Offline Dictation Status" from com.apple.assistant.support only when it is
+ * an NSDictionary, else nil -> the cache stays nil -> the loop never ends.
+ * Seeding an empty dict makes the set non-nil (empty), so the availability
+ * change fires once and dictation stays unavailable. */
 static int
 sweet_x9_seed_assistant_dictation(proc_t p, user_addr_t scratch, user_addr_t end)
 {
  static const char target[]="/private/var/mobile/Library/Preferences/com.apple.assistant.support.plist";
  static const char backup[]="/private/var/mobile/Library/Preferences/com.apple.assistant.support.x9-before-seed.plist";
  static const char temp[]="/private/var/mobile/Library/Preferences/com.apple.assistant.support.x9-seed.tmp";
- static const char body[]="<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>Assistant Enabled</key>\n\t<false/>\n\t<key>Dictation Enabled</key>\n\t<false/>\n</dict>\n</plist>\n";
+ static const char body[]="<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>Assistant Enabled</key>\n\t<false/>\n\t<key>Dictation Enabled</key>\n\t<false/>\n\t<key>Offline Dictation Status</key>\n\t<dict/>\n</dict>\n</plist>\n";
  int enabled=0,error,fd; int32_t rv=0; user_ssize_t written=0; vnode_t vp=NULLVP;
  extern boolean_t sweet_x9_ufs_root_writable(void);
  if((enabled=sweet_x9_arg("x9_dictation_off",1))!=1)return 0;

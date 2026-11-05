@@ -665,23 +665,144 @@ x9_gpio_in(unsigned pin)
 {
     return (x9_gpio[(0x200 + (pin / 32) * 0x10) / 4] >> (pin % 32)) & 1;
 }
+/*
+ * B1/B2 round 2 (x9_wifi_power=2), 45.txt follow-up. Round 1 proved the two
+ * GPIO writes land (GPIO250/251 read back 1) but faultb stayed 0 for 3 s and
+ * LTSSM/link stayed 0. faultb was never pulled up, and connv3 does that itself
+ * right after pmic-en-set (mt6993_pmic.c connv3_plt_pmic_common_power_ctrl_mt6993
+ * -> "connsys-pin-pmic-faultb-enable" = GPIO65 GPIO mode, input-enable,
+ * bias-pull-up R1R0_10; mt6993.dts), so round 1's 0 says nothing. Round 2 adds,
+ * in the Linux order:
+ *  1. faultb-enable: iocfg_lm0 0x13020000 (pio reg index 11) IES +0x50, PUPD
+ *     +0x90 (0 = pull-up), R0 +0xb0 = 0, R1 +0xc0 = 1, all bit 1
+ *     (pinctrl-mt6993.c, pinctrl-mtk-common-v2.c bias_set_pupd_r1_r0).
+ *  2. 10 ms "pcie phy ready" (cmm_asic_connac3x.c), then the PCIe0 RC start of
+ *     pcie-mediatek-gen3.c mtk_pcie_startup_port for mt6993 port 0, reduced to
+ *     the link-relevant steps: RC mode (0x80 bit0), 26M request force-on and
+ *     the BBCK1 PMRC bypass (pextp0cfg 0x169b0000 +0x7c bits 0/4, clkbuf
+ *     force_26m + pre_init_6993), LTSSM-disable bit (0x84 bit2) cleared if
+ *     set, assert MAC/PHY/BRG/PE resets (0x148), 50 ms, release MAC/PHY/BRG,
+ *     50 ms, release PERST, then poll link (0x154 bit 8) for 500 ms logging
+ *     every LTSSM (0x150 bits 28:24) change.
+ *  3. Only when the link is up: type-0 config read of bus 1 dev 0 through
+ *     CFGNUM 0x140 + window 0x1000 (vendor/device, class, BAR0). No config
+ *     access while the link is down (completion timeouts could raise SError).
+ *  4. Undo: PERST asserted again, 0x7c restored, faultb back to its default
+ *     pull-down state, PMIC_EN low, 200 ms, WF_RST low.
+ * No PMIC register, clock-buffer (MT6687) or PHY calibration write; the PHY
+ * registers post_init_6993 touches (0x16900000 +0x3064/+0x5030/+0x4c) are only
+ * read and logged.
+ */
+#define X9_IOCFG_LM0 0x13020000u
 static void
-x9_wifi_power_thread(void *, wait_result_t)
+x9_iocfg_bit(volatile uint32_t *io, unsigned off, unsigned bit, unsigned v)
 {
+    uint32_t r = io[off / 4];
+    io[off / 4] = v ? (r | (1u << bit)) : (r & ~(1u << bit));
+    __asm__ volatile ("dsb sy" ::: "memory");
+}
+static void
+x9_faultb_bias(volatile uint32_t *io, bool pullup)
+{
+    /* GPIO65: iocfg_lm0 bit 1 in IES/PUPD/R0/R1; R1R0 = 10 in both DT states */
+    x9_iocfg_bit(io, 0x50, 1, 1);
+    x9_iocfg_bit(io, 0x90, 1, pullup ? 0 : 1);
+    x9_iocfg_bit(io, 0xb0, 1, 0);
+    x9_iocfg_bit(io, 0xc0, 1, 1);
+}
+static uint64_t
+x9_ms_since(uint64_t t0)
+{
+    uint64_t ns;
+    absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
+    return ns / 1000000;
+}
+static void
+x9_wifi_pcie_try(volatile uint32_t *mac, volatile uint32_t *cg, uint64_t t0)
+{
+    volatile uint32_t *phy = (volatile uint32_t *)ml_io_map(0x16900000, 0x10000);
+    if (phy) {
+        IOLog("X9 WIFI PCIE: phy trx_64=%08x rx_30=%08x glb_4c=%08x misc=%08x\n",
+            phy[0x3064 / 4], phy[0x5030 / 4], phy[0x4c / 4], mac[0x348 / 4]);
+    }
+    uint32_t req0 = cg[0x7c / 4];
+    IOLog("X9 WIFI PCIE: before setting=%08x cfgctrl=%08x rst=%08x ltssm=%08x link=%08x req_ctrl=%08x base_conf=%08x\n",
+        mac[0x80 / 4], mac[0x84 / 4], mac[0x148 / 4], mac[0x150 / 4], mac[0x154 / 4], req0, mac[0x14 / 4]);
+    mac[0x80 / 4] = mac[0x80 / 4] | 1u;                    /* RC mode */
+    cg[0x7c / 4] = req0 | (1u << 0) | (1u << 4);           /* 26M force on, BBCK1 bypass */
+    if (mac[0x84 / 4] & (1u << 2)) {
+        mac[0x84 / 4] = mac[0x84 / 4] & ~(1u << 2);        /* LTSSM enable */
+    }
+    __asm__ volatile ("dsb sy" ::: "memory");
+    uint32_t rst = mac[0x148 / 4] | 0xfu;
+    mac[0x148 / 4] = rst;                                  /* assert MAC/PHY/BRG/PE */
+    __asm__ volatile ("dsb sy" ::: "memory");
+    IOSleep(50);
+    rst &= ~0x7u;
+    mac[0x148 / 4] = rst;                                  /* release MAC/PHY/BRG */
+    __asm__ volatile ("dsb sy" ::: "memory");
+    IOSleep(50);
+    rst &= ~0x8u;
+    mac[0x148 / 4] = rst;                                  /* release PERST# */
+    __asm__ volatile ("dsb sy" ::: "memory");
+    uint64_t tp = mach_absolute_time();
+    IOLog("X9 WIFI PCIE: t=%llu ms PERST released rst=%08x\n", x9_ms_since(t0), mac[0x148 / 4]);
+    uint32_t lastS = ~0u, link = 0, polls = 0;
+    while (x9_ms_since(tp) < 500) {
+        uint32_t l = mac[0x150 / 4];
+        uint32_t st = (l >> 24) & 0x1f;
+        link = mac[0x154 / 4];
+        if (st != lastS) {
+            IOLog("X9 WIFI PCIE: +%llu ms ltssm_state=0x%02x reg=%08x link=%08x\n", x9_ms_since(tp), st, l, link);
+            lastS = st;
+        }
+        if (link & (1u << 8)) {
+            break;
+        }
+        polls++;
+        IODelay(20);
+    }
+    IOLog("X9 WIFI PCIE: %s after %llu ms polls=%u ltssm=%08x link=%08x\n",
+        (link & (1u << 8)) ? "LINK UP" : "link down", x9_ms_since(tp), polls, mac[0x150 / 4], link);
+    if (link & (1u << 8)) {
+        uint32_t id[5];
+        static const unsigned where[5] = { 0x00, 0x08, 0x10, 0x14, 0x2c };
+        for (unsigned i = 0; i < 5; i++) {
+            mac[0x140 / 4] = (1u << 20) | (0xfu << 16) | (1u << 8);   /* force BE, BE=f, bus 1 devfn 0 */
+            __asm__ volatile ("dsb sy" ::: "memory");
+            id[i] = mac[(0x1000 + where[i]) / 4];
+        }
+        mac[0x140 / 4] = (1u << 20) | (0xfu << 16);           /* back to RC config */
+        IOLog("X9 WIFI PCIE: EP id=%08x class/rev=%08x bar0=%08x bar1=%08x subsys=%08x (want 665314c3)\n",
+            id[0], id[1], id[2], id[3], id[4]);
+        IOSleep(1000);
+        IOLog("X9 WIFI PCIE: after 1 s ltssm=%08x link=%08x\n", mac[0x150 / 4], mac[0x154 / 4]);
+    }
+    mac[0x148 / 4] = mac[0x148 / 4] | 0x8u;                /* PERST# asserted again */
+    cg[0x7c / 4] = req0;
+    __asm__ volatile ("dsb sy" ::: "memory");
+    IOLog("X9 WIFI PCIE: PERST asserted, req_ctrl restored=%08x rst=%08x\n", cg[0x7c / 4], mac[0x148 / 4]);
+}
+static void
+x9_wifi_power_thread(void *arg, wait_result_t)
+{
+    unsigned stage = (unsigned)(uintptr_t)arg;
     IOSleep(20000);
     x9_gpio = (volatile uint32_t *)ml_io_map(0x1002d000, 0x1000);
-    volatile uint32_t *mac = (volatile uint32_t *)ml_io_map(0x16910000, 0x1000);
+    volatile uint32_t *mac = (volatile uint32_t *)ml_io_map(0x16910000, 0x2000);
     volatile uint32_t *cg = (volatile uint32_t *)ml_io_map(0x169b0000, 0x1000);
     volatile uint32_t *pd = (volatile uint32_t *)ml_io_map(0x1c052000, 0x1000);
-    if (!x9_gpio || !mac || !cg || !pd) {
+    volatile uint32_t *io = (volatile uint32_t *)ml_io_map(X9_IOCFG_LM0, 0x1000);
+    if (!x9_gpio || !mac || !cg || !pd || !io) {
         IOLog("X9 WIFI POWER: map failed; nothing written\n");
         thread_terminate(current_thread());
         return;
     }
     uint32_t pdsta = pd[0x900 / 4], cgsta = cg[0x14 / 4];
     bool pcieReadable = ((pdsta >> 16) & 1) && !(cgsta & 0x3003u);
-    IOLog("X9 WIFI POWER: before: PMIC_EN in=%u WF_RST in=%u faultb in=%u pcie0 readable=%d\n",
-        x9_gpio_in(251), x9_gpio_in(250), x9_gpio_in(65), pcieReadable);
+    IOLog("X9 WIFI POWER: stage %u before: PMIC_EN in=%u WF_RST in=%u faultb in=%u pcie0 readable=%d iocfg ies=%08x pupd=%08x r0=%08x r1=%08x\n",
+        stage, x9_gpio_in(251), x9_gpio_in(250), x9_gpio_in(65), pcieReadable,
+        io[0x50 / 4], io[0x90 / 4], io[0xb0 / 4], io[0xc0 / 4]);
     uint64_t t0 = mach_absolute_time();
     x9_gpio_out(250, 1);                               /* wf_rst_on */
     IOLog("X9 WIFI POWER: WF_RST high (GPIO250 in=%u)\n", x9_gpio_in(250));
@@ -689,17 +810,32 @@ x9_wifi_power_thread(void *, wait_result_t)
     x9_gpio_out(251, 1);                               /* connsys-pin-pmic-en-set */
     IOLog("X9 WIFI POWER: PMIC_EN high (GPIO251 in=%u)\n", x9_gpio_in(251));
     IOSleep(20);
+    if (stage >= 2) {
+        x9_gpio_rmw(0x300 + (65 / 4) * 0x10, 0x1fu << ((65 % 4) * 8), 0);   /* GPIO65 function 0 */
+        x9_gpio_rmw((65 / 32) * 0x10, 1u << (65 % 32), 0);                   /* input */
+        x9_faultb_bias(io, true);                      /* connsys-pin-pmic-faultb-enable */
+        IOSleep(1);
+        IOLog("X9 WIFI POWER: faultb pull-up on: faultb in=%u pupd=%08x r0=%08x r1=%08x\n",
+            x9_gpio_in(65), io[0x90 / 4], io[0xb0 / 4], io[0xc0 / 4]);
+    }
     IOSleep(10);
+    if (stage >= 2 && pcieReadable) {
+        x9_wifi_pcie_try(mac, cg, t0);
+    } else if (stage >= 2) {
+        IOLog("X9 WIFI PCIE: skipped, PCIe0 MAC not powered/clocked (pd=%08x cg=%08x)\n", pdsta, cgsta);
+    }
     uint32_t lastL = ~0u, lastK = ~0u, lastF = ~0u;
     for (unsigned i = 0; i < 60; i++) {                /* 3 s, every 50 ms; log changes only */
         uint32_t f = x9_gpio_in(65), l = pcieReadable ? mac[0x150 / 4] : 0, k = pcieReadable ? mac[0x154 / 4] : 0;
         if (f != lastF || l != lastL || k != lastK || i == 59) {
-            uint64_t ns; absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
             IOLog("X9 WIFI POWER: t=%llu ms faultb=%u ltssm=%08x link=%08x rst_ctrl=%08x\n",
-                ns / 1000000, f, l, k, pcieReadable ? mac[0x148 / 4] : 0);
+                x9_ms_since(t0), f, l, k, pcieReadable ? mac[0x148 / 4] : 0);
             lastF = f; lastL = l; lastK = k;
         }
         IOSleep(50);
+    }
+    if (stage >= 2) {
+        x9_faultb_bias(io, false);                     /* connsys-pin-pmic-faultb-default */
     }
     IOSleep(20);
     x9_gpio_out(251, 0);                               /* connsys-pin-pmic-en-clr */
@@ -712,13 +848,14 @@ x9_wifi_power_thread(void *, wait_result_t)
 static void
 x9_wifi_power_test(void)
 {
-    if (sweet_x9_arg("x9_wifi_power", 0) != 1) {
+    int stage = sweet_x9_arg("x9_wifi_power", 0);
+    if (stage != 1 && stage != 2) {
         return;
     }
     thread_t t = NULL;
-    if (kernel_thread_start(x9_wifi_power_thread, NULL, &t) == KERN_SUCCESS) {
+    if (kernel_thread_start(x9_wifi_power_thread, (void *)(uintptr_t)stage, &t) == KERN_SUCCESS) {
         thread_deallocate(t);
-        IOLog("X9 WIFI POWER: armed: GPIO power-on test in 20 s\n");
+        IOLog("X9 WIFI POWER: armed: stage %d power-on test in 20 s\n", stage);
     }
 }
 
