@@ -1,3 +1,40 @@
+## GPU cache maintenance: ACE-Lite IO coherency per stock kbase; rev252an / rev252an-acelite (2026-11-05, built, not device-tested)
+
+- Cost being attacked (15.txt/18.txt, rev246-248): per job ~66-82 MB CIVAC-cleaned + 31-47 MB invalidated, all
+  backboardd imports (cacheable, so rev247's WC skip matched 0); ~6.7 ms of ~13 ms/job.
+- SOURCE (oppo a16w kbase r54p1 + mt6993.dts): mali node `system-coherency = <0>` = COHERENCY_ACE_LITE, no
+  `dma-coherent`. For arch >= 12.0.1 kbase_pm_init_hw -> kbase_cache_set_coherency_mode writes AMBA_ENABLE
+  (0x304) b4:0 = 0 (ACE-Lite) after reset, before L2 up; kbase_mmu_hw_configure sets TRANSCFG.PTW_SH = outer
+  (b29:28 = 2) when coherency != NONE; kbase_mmu_sync_pgd_cpu skips the page-table clean unless NONE; userio
+  pages are CPU-cached + GPU SHARE_BOTH (PTE 2<<8) + MEMATTR idx6 (0x08 SHARED). Upstream panthor
+  (panthor_gpu_coherency_set, 2024-10 "Explicitly set the coherency mode") also writes the protocol before L2
+  power-up; ACE_LITE=0, ACE=1, NONE=31.
+- CORRECTION to the 2026-11-03 headroom note: CONFIG_MALI_MTK_COHERENT_DMA_BUF only acts when
+  kbase_device_is_cpu_coherent() (system_coherency == ACE, full) and for a special coherent heap with memory
+  group 1; on MT6993 (ACE-Lite) it is inactive. The vendor does NOT make ordinary user/import memory coherent;
+  it relies on ACE-Lite snooping only for page walks, userio and MCU-shared regions, and keeps dma_sync for user
+  BOs (most Android Mali BOs are CPU-uncached anyway).
+- 实测 (logs): AMBA_FEATURES=00000001 (ACE-Lite only, no shareable-cache bit), AMBA_ENABLE=0000001f (= none,
+  as LK leaves it). Our old gate read 0x300/0x308 as COHERENCY_NUM_GROUPS/GROUP_0 (pre-arch-12 layout), so it
+  logged groups=1 type=0 and could never enable.
+- rev252an (commit 467a4a0, on top of rev252am Wi-Fi pool): opt-in `x9_gpu_acelite=1`: AMBA_ENABLE -> ACE-Lite
+  (only if AMBA_FEATURES b0 and L2 off; readback-checked, restored on mismatch), as_transcfg() adds PTW_SH outer
+  (0x62000006), render-VM leaves outer shareable (2<<8, MEMATTR idx0 0x88 kept so GPU L2 still caches; GPU L2
+  is flushed/invalidated around every job), no CPU clean of render page tables, existing coherent path skips the
+  per-submit CIVAC of CPU-exposed client bytes (x9_gpu_coherent=0 keeps CIVAC while ACE-Lite stays on).
+  install_as refuses if AMBA_ENABLE loses ACE-Lite. CSF-private memory unchanged (non-shareable + explicit
+  cleans). 推断/risk: leaf SH=outer for user/import memory goes beyond what the vendor does (they keep dma_sync);
+  it is the panthor model for dma-coherent ACE-Lite parts. If the interconnect does not snoop GPU shareable
+  traffic, expect stale/mosaic surfaces -> boot without the token.
+- Built (Mac): x9/out/x9-rev252an/boot.img sha256 96171f861e0b9d21f88597e8db45e0fc936a45d4507c7081c21320e0453e4cc6
+  (behaviour = rev252am) and x9/out/x9-rev252an-acelite/boot.img sha256
+  8b85ed8d6aafc020ca2a4f65332c91cc4bd65388e34674e7c5a6d80e20a6447c (+x9_gpu_acelite=1), both 9,875,456 B,
+  x9_wifi_power=6, kernel only, no mailbox staging.
+- Device check for -acelite: `X9 RENDER coherency: ... AMBA_ENABLE 0000001f -> 00000000 ... acelite=1 (enabled)
+  civac_skip=1`; `X9 RENDER cache-coherent: ... pre_skip_avg/post_skip_avg` large; `table-cache cleaned_avg=0`;
+  per-job pre_cache/post_cache near 0 in X9 RENDER timing; no mosaic/stale content when swiping (compare with
+  the plain rev252an image).
+
 ## HANDOFF 2026-11-05 (2): SMMU ruled out; Android DMAs only from LK's Wi-Fi pool -> rev252am built, not device-tested
 
 - SMMU (item 1 below) effectively ruled out: mt6993.dts pcie0/pcie1 have no `iommus`; the only SMMU on that
