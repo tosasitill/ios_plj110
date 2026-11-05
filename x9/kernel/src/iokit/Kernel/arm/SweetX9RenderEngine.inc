@@ -845,7 +845,7 @@ static bool render_async_start() {
  if(sweet_x9_arg("x9_submit_async",0)!=1)return false;
  render_async_lock=IOLockAlloc();if(!render_async_lock)return false;
  thread_t thread;
- if(kernel_thread_start_priority(render_async_worker,nullptr,BASEPRI_PREEMPT,&thread)!=KERN_SUCCESS) {
+ if(kernel_thread_start_priority(render_async_worker,nullptr,92 /* BASEPRI_PREEMPT (kern/sched.h, not exported to iokit) */,&thread)!=KERN_SUCCESS) {
   IOLockFree(render_async_lock);render_async_lock=nullptr;return false;
  }
  thread_deallocate(thread);render_async_running=true;
