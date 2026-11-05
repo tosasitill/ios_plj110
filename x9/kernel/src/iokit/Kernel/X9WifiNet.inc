@@ -791,6 +791,36 @@ x9_wifi_rc_diag(const char *when)
             b[0xe0128 / 4], b[0x1d01a8 / 4], b[0xe0010 / 4], b[0xe00f0 / 4]);
         /* WFDMA wrapper (0x20027000 -> bar 0xd7000) and host DMA0 debug probe, as
          * dbg_mt6653.c mt6653_show_wfdma_wrapper_info / _dbg_probe_info read them */
+        /*
+         * 57.txt follow-up (read-only): the MT6653's own PCIe MAC (PCIE_MAC_IREG chip 0x74030000 = bar 0x1d0000).
+         * AXI slave port config/status and the outbound ATR tables ATR_AXI_SLV0-3 (0x800 + 0x100*slave, 8 x 0x20):
+         * +0 SRC_ADDR_LSB[31:12]|ATR_SIZE[6:1]|IMPL[0], +4 SRC_MSB, +8 TRSL_LSB, +c TRSL_MSB, +10 TRSL_PARAM
+         * (TRSF_PARAM[27:16] TRSL_ID[3:0]), +18/+1c TRSL_MASK. Only non-empty entries are printed.
+         */
+        {
+            volatile uint32_t *pm = b + 0x1d0000 / 4;
+            IOLog("X9 WIFI EPMAC %s: slv_conf=%08x/%08x/%08x/%08x mst_conf=%08x/%08x pend_adt=%08x p_adt_win=%08x/%08x a_adt_slv=%08x/%08x/%08x/%08x istat_dma_pend=%08x if_ctrl=%08x basic_sta=%08x\n",
+                when, pm[0x34 / 4], pm[0x3c / 4], pm[0x44 / 4], pm[0x4c / 4], pm[0x30 / 4], pm[0x38 / 4], pm[0x1d4 / 4],
+                pm[0x1d8 / 4], pm[0x1dc / 4], pm[0x1e0 / 4], pm[0x1e4 / 4], pm[0x1e8 / 4], pm[0x1ec / 4], pm[0x1d0 / 4],
+                pm[0x1a8 / 4], pm[0x18 / 4]);
+            unsigned shown = 0;
+            for (unsigned sl = 0; sl < 4; sl++) {
+                for (unsigned t = 0; t < 8; t++) {
+                    volatile uint32_t *e = pm + (0x800 + sl * 0x100 + t * 0x20) / 4;
+                    uint32_t w0 = e[0], w1 = e[1], w2 = e[2], w3 = e[3], w4 = e[4], w6 = e[6], w7 = e[7];
+                    if (!(w0 | w1 | w2 | w3 | w4 | w6 | w7)) {
+                        continue;
+                    }
+                    shown++;
+                    uint64_t src = ((uint64_t)w1 << 32) | (w0 & 0xfffff000u), trsl = ((uint64_t)w3 << 32) | (w2 & 0xfffff000u);
+                    IOLog("X9 WIFI ATR %s: slv%u t%u src=%llx size=2^%u impl=%u trsl=%llx param=%08x (trsf=%03x id=%u) mask=%08x/%08x\n",
+                        when, sl, t, src, ((w0 >> 1) & 0x3f) + 1, w0 & 1, trsl, w4, (w4 >> 16) & 0xfff, w4 & 0xf, w7, w6);
+                }
+            }
+            if (!shown) {
+                IOLog("X9 WIFI ATR %s: all ATR_AXI_SLV0-3 entries are zero\n", when);
+            }
+        }
         /* AXI0 R2A bridge (wrapper 0x500-0x51c): STS b11 RRESP_ERR, b10:3 RRESP_ERR_STS, b0 RD_AXI_ERR_DET_INT */
         IOLog("X9 WIFI R2A %s: ctrl0=%08x ctrl1=%08x ctrl2=%08x sts=%08x dmawr_probe=%08x dmard_probe=%08x wr_dbg0=%08x wr_dbg1=%08x txfifo_dbg0=%08x txfifo_dbg1=%08x\n",
             when, b[0xd7500 / 4], b[0xd7504 / 4], b[0xd7508 / 4], b[0xd750c / 4], b[0xd7510 / 4], b[0xd7514 / 4],
