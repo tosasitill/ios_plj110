@@ -1,3 +1,22 @@
+## 66.txt = x9-rev252aw (park+async, plugin 255): stable, GPU side faster, display slower; rev252ax (2026-11-05)
+
+- 实测 /tmp/66.txt (718,749 B): 0 FAILED/uncertain; `X9 RENDER ASYNC: jobs=1200 failed=0 queue_full_waits=0
+  drain_waits=0`; park hits=411 cold=775 retires=774 (retire reasons: map mostly -> backboardd maps new BOs
+  between most submits). Same boot window 30-40 s vs 60.txt (sync): jobs/2 s 74-84 vs 56-75, retire_us 19 vs
+  213-312, start_us 134-269 vs 207-481, but display copies/2 s 28-39 vs 46-51 with gpu_defer 71-179 vs 3-14.
+  Interactive 56-72 s: copies 20-42 /2 s (10-21 fps), per job pre_cache ~5.5 ms, wait 9-14 ms, post ~3 ms;
+  import cache traffic 66 MB pre + 43 MB post per job; governor 858-1300 MHz at util 15-39%, 40-42 C.
+- Cause of the display drop: the global present fence waited for the newest swap; with work always queued,
+  each new swap moved the target, so complete frames were dropped unseen.
+- rev252ax (commit 65bcb05): ready-frame fallback (superseded swap whose fence passed is kept and shown while
+  the newest still renders; `ready_shown=` in X9 DISPLAY cadence). New boot-arg x9_gpu_floor_khz (governor
+  floor; OPPs 390..1716 MHz). Image x9-rev252ax = x9_wifi_power=6 x9_gpu_park=1 x9_submit_async=1
+  x9_gpu_khz=1716000 x9_gpu_floor_khz=1100000, sha256 2dd0b62515d15fa9d14fe96e50b47a7ff451f73e31a3323431cae3d0c4f237af,
+  kernel only (allowlist 255 = staged).
+- Remaining big costs (per job): GPU wait ~12 ms, CPU cache maintenance ~8.5 ms (imports 66+43 MB), per-frame
+  full-screen BO churn (maps -> park retires, memory bursts). Next candidates: exact resource sets (design
+  decision 3/4) to cut import maintenance; BO reuse in the frontend; map-without-retire (AS UPDATE only).
+
 ## 65.txt = x9-rev252av (park+async, plugin 254): kernel side works; PanVK sync-only bug; plugin 255 (2026-11-05)
 
 - 实测 /tmp/65.txt (349,361 B): async worker started, PanVK mode=async, kernel async jobs completed in order
