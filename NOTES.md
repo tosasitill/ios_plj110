@@ -1,3 +1,51 @@
+## 45.txt: rev252w-wifipwr boots; dictation loop root-caused to a nil offline-status cache; rev252x (2026-11-05)
+
+- 实测 45.txt (822,821 B) = rev252w-wifipwr (user flashed it directly, not rev252w-kbdseed).
+  `RENDER EXTERNAL: active ... native discovery armed` (45.txt:653-654), 0 SpringBoard crashes,
+  desktop reached; user: 「键盘还是卡」.
+- 实测 keyboard seed held: `X9 KBD DICT: XML seed already present; left alone` (45.txt:740), live
+  file 1578 B mtime 34 in every pass. Spotlight[301] t0 (6 passes 70-120 s, slide 0x1b2ec000,
+  symbolized on the Mac with dsc-20H392 + scratch symb.py; report not in git) shows **no
+  updateEnabledDictationLanguages:** any more. All 6 are the availability loop:
+  postUIKeyboardDictationAvailabilityDidChangeNotification -> updateDockItemsVisibility (+712/+792/
+  +1044) -> dictationIsFunctional+284 -> -[UIDictationConnection dictationIsAvailableForLanguage:]
+  -> -[AFDictationConnection dictationIsAvailableForLanguage:synchronous:]+696 ->
+  forcedOfflineDictationIsAvailableForLanguage:synchronous:+56 -> AFPreferences init/dealloc. The
+  truncated caller frame 0x1a44af… = UIDictationConnection dictationConnnectionDidChangeAvailability:
+  (0x1891c3140+slide).
+- SOURCE (host disassembly, 20H392 AssistantServices, not device):
+  forcedOfflineDictationIsAvailableForLanguage:synchronous: (0x19bf007a4) caches
+  `[[AFPreferences sharedPreferencesWithInstanceContext:] offlineDictationStatus]
+  keysOfEntriesPassingTest:` in ivar +0x18; whenever that ivar is nil it recomputes and
+  dispatch_asyncs block_invoke_2 (0x19bf7d0ec) = `_availabilityChanged` ->
+  `_tellSpeechDelegateAvailabilityChanged` -> UIKit notification -> dock -> query again.
+  `-[AFPreferences offlineDictationStatus]` (0x19beff910) = `_AFPreferencesValueForKeyWithContext(
+  "Offline Dictation Status", "com.apple.assistant.support")`, returned only if it isKindOf
+  NSDictionary, else nil (CFStrings 0x1d71f28d8 / 0x1d71f1f18 read from the dylib). The key is
+  absent on this device -> nil -> empty cache forever -> self-sustaining loop. Only other
+  `_availabilityChanged` caller is networkAvailability:isAvailable: (rare).
+- Fix (rev252x, commit 5b4db56): sweet_x9_seed_assistant_dictation also writes
+  `Offline Dictation Status = <dict/>` (expect `X9 DICTATION ... bytes=` ~316). 推断: ivar becomes an
+  empty NSSet (non-nil), the change fires once, dictation stays unavailable, mic key hidden.
+- 实测 Wi-Fi round 1 (45.txt:3553-3923): GPIO250/251 read back 1, faultb 0 for the whole 3 s,
+  LTSSM/link/rst_ctrl 0, clean power-off. faultb had no pull-up (connv3 selects
+  `connsys-pin-pmic-faultb-enable` = GPIO65 input + bias-pull-up R1R0_10 right after pmic-en-set),
+  so the 0 is not evidence either way.
+- rev252x Wi-Fi stage 2 (`x9_wifi_power=2`, same commit): faultb pull-up via iocfg_lm0 0x13020000
+  (IES +0x50, PUPD +0x90 = 0, R0 +0xb0 = 0, R1 +0xc0 = 1, bit 1; pinctrl-mt6993.c, mt6993.dts reg
+  index 11), then PCIe0 RC start per pcie-mediatek-gen3.c mtk_pcie_startup_port/mt6993: RC mode,
+  pextp0cfg +0x7c bit0 (26M force-on) + bit4 (BBCK1 PMRC bypass), clear 0x84 bit2 if set, assert
+  0x148 bits 0-3, 50 ms, release 0-2, 50 ms, release PERST, poll 0x154 bit 8 for 500 ms logging
+  each LTSSM state change; EP config read (bus 1, `X9 WIFI PCIE: EP id=`) only on link up; then
+  PERST re-asserted, 0x7c restored, faultb back to pull-down, power off as round 1. PHY regs only
+  read. Not built yet (Mac tunnel dropped), not device-tested.
+- Next: build rev252x on the Mac (`build.py all --name x9-rev252x --boot-arg ... x9_wifi_power=2`,
+  **no --revision**, no mailbox staging), flash, type in Spotlight ~60 s. Read: `X9 DICTATION`
+  bytes, Spotlight t0 passes free of the dictation chain, `X9 WIFI POWER: faultb pull-up on:
+  faultb in=` (1 = PMIC up, no fault), `X9 WIFI PCIE:` LTSSM trail / LINK UP / EP id.
+  If link stays in Detect (0x00/0x01): refclk BBCK1 (MT6687 clkbuf, SPMI) or MT6376 PMIC writes are
+  the next suspects.
+
 ## Handoff 2026-11-05: test order rev252w -> rev252w-wifipwr
 
 - Git: origin/main had the user's merge b2b3fd0 (NOTES conflict already resolved, no markers left);
