@@ -1,3 +1,26 @@
+## 50.txt: stage 6 DMA stalls on the first descriptor fetch; rev252ac adds Linux RC pre_init + votes (2026-11-05)
+
+- 实测 50.txt (405,545 B, /tmp/50.txt on the server) = rev252ab. Link L0 in 15 ms, EP 665314c3, ROM idle,
+  driver own in 5 ms, bus master on (EP cmd 00100006), firmware present (sha prefixes match). DMA buffer
+  pa=0x145aa4000. Rings programmed as intended: tx15=45aa4000/00010010 (count 16, addr bits 32-35 = 1),
+  GLO_CFG 5430b85d (TX/RX EN, ADDR_EXT). After CIDX=1: `TX15 stuck cidx=1 didx=0 glo=5430b857` (50.txt:2528):
+  TX_DMA_BUSY set, DIDX never moved, 0 events. Teardown, SET_OWN, undo and power-off all clean; link stayed L0.
+- 推断: the EP's read of host memory (descriptor fetch) never completed -> host inbound path (RC master side),
+  not the descriptor/command format. Not yet checked: RC AXI error registers, sleep protection, SPM resource acks.
+- Linux (pcie-mediatek-gen3.c) on mt6993 does before link start: mtk_pcie_pre_init_6993 (RESOURCE_CTRL 0xd2c
+  APSRC_ACK bit10 + SYS_CLK_RDY 0xa, WCPL_TIMEOUT 0x340 = 4, PEX_SPC2 0xd8 bit0, PEXTP_REQ_CTRL bit12
+  DDREN_ACK_SEL, PEXTP_PWRCTL_0 |= 0xff00, MAC_CTR1 0x74 bit28, PEXTP_CLOCK_CON low-power clock sel, AXI_IF bits
+  we already set), clkbuf 26M force (bit0, already), and control_vote_v2: HWMODE_EN (bit0) of PEXTP_PWRCTL_6
+  (RC, who=0) / PWRCTL_8 (Wi-Fi, who=1; gen4m pcie.c votes it off while busy), then waits for PEXTP_SLPPROT_RDY
+  0x264 bits 2|3 (port0 MAC/PHY sleep protect) to read 0.
+- rev252ac (commit 3146171, `x9_wifi_power=6`): with stage >= 6, before link start logs `X9 WIFI RC as LK left
+  it:`, applies the pre_init writes above (not MAC_CTR1/CLOCK_CON), clears HWMODE_EN in PWRCTL_6/8, waits up
+  to 10 ms for SLPPROT_RDY & 0xc == 0 (`X9 WIFI RC: votes held ... released|STILL PROTECTED`); restores all
+  of it after PERST. `X9 WIFI RC before DMA:` / `stuck:` / `no event:` dump pextp 0x20/0x34/0x40/0x58/0x74/
+  0x7c/0x264, RC int_sta/axi_if/misc/res_sta 0xd28/res_ctrl/AXI0_ERR_ADDR 0xe00/ERR_INFO 0xe08/wcpl/spc2,
+  RC cmd/sta + secondary status, EP cmd/sta, EP devctl/sta.
+- Build pending (Mac tunnel dropped again right after the push).
+
 ## rev252ab: firmware embedded in the kernel; stage 6 = ROM patch download over WFDMA (2026-11-05)
 
 - USER (this session): "boot 分区够不够放 够的话就放不够就走 mailbox". Answer: **boot**. boot.json of rev252aa:
