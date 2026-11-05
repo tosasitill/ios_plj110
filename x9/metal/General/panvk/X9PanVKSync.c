@@ -372,6 +372,7 @@ static int submit_sync_common(struct pan_kmod_dev *dev,uint32_t group,const stru
   /* Enqueue (or, sync-only, depend on the newest enqueued id) and hand the
    * pending signal fences to the completion thread. */
   uint64_t id=0;uint32_t id_group=group;
+  ret=0;   /* 65.txt: sync-only left ret=-1 from the declaration -> every sync-only op poisoned the device */
   if(sync_only)id=x9_pan_kmod_last_submission(dev,&id_group);
   else {
    ret=x9_pan_kmod_submit_async(dev,group,streams,stream_count,&id);
