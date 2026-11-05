@@ -1,3 +1,12 @@
+## HANDOFF 2026-11-05 (6): 70.txt: sem works (status 2) but ROM silent after the data; rev252bb probes
+
+- 实测 /tmp/70.txt (rev252ba): PATCH_SEM_CONTROL get answered eid 4 status 2 (so cid 0x10 is understood), both
+  PATCH_START ok, data sent, PATCH_FINISH no event 10 s, and the sem RELEASE afterwards also no event 3 s =>
+  ROM stops answering anything after the section data (alive after section 0 data: it answered section 1 START).
+- rev252bb: (a) probe sem-get right after the last data chunk (ROM alive?), (b) boot-arg x9_wifi_nsec=N sends only the
+  first N sections. Images: x9-rev252bb (all sections) and x9-rev252bb-s0 (x9_wifi_nsec=1: section 0 only then
+  PATCH_FINISH - does FINISH answer when section 1's 315 KB at e0010000 is not sent?).
+
 ## HANDOFF 2026-11-05 (5): 69.txt; rev252ba = PATCH_SEM_CONTROL (x9_wifi_sem=1 default)
 
 - 实测 /tmp/69.txt (rev252az): sleep bits (slpprot0 b28, CB slp_status 2b) are ALREADY set right after section 0's

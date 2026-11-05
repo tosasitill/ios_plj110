@@ -1244,7 +1244,8 @@ x9_wifi_stage6(volatile uint32_t *bar)
         semheld = sc && sres[0] == 2;
     }
     uint64_t tp = mach_absolute_time();
-    for (unsigned s = 0; ok && s < nsec; s++) {
+    unsigned maxsec = (unsigned)sweet_x9_arg("x9_wifi_nsec", 8);   /* experiment: send only the first N sections */
+    for (unsigned s = 0; ok && s < nsec && s < maxsec; s++) {
         const uint8_t *m = fw + 96 + 64 * s;
         uint32_t type = x9_be32(m), off = x9_be32(m + 4), addr = x9_be32(m + 12), len = x9_be32(m + 16);
         uint32_t info = x9_be32(m + 20);
@@ -1289,6 +1290,13 @@ x9_wifi_stage6(volatile uint32_t *bar)
              * timeout; dump right after the data to see whether they already flip during the data phase. */
             x9_wifi_rc_diag(s == 0 ? "after data s0" : "after data s1");
         }
+    }
+    if (ok) {
+        /* 70.txt: the semaphore get is answered (status 2) but PATCH_FINISH and the later release get nothing, so the
+         * ROM stops answering after the data. Probe: is it still alive right after the last data chunk? */
+        uint8_t pq[4] = { 1, 0, 0, 0 }, pres[4] = {};
+        bool pc = x9_wd_cmd(&d, 0x10, pq, sizeof pq, 4, pres, sizeof pres);
+        IOLog("X9 WIFI PATCH: probe after data (sem get) %s status=%u\n", pc ? "ANSWERED = ROM alive" : "NO EVENT = ROM silent", pres[0]);
     }
     if (ok) {
         uint8_t fin[4] = { 0, 0, 0, 0 }, res[4] = {};
