@@ -1,3 +1,35 @@
+## 48.txt: MT6653 enumerated (14c3:6653, Gen4 x1, BAR0 2 MiB), chip registers readable; rev252aa (2026-11-05)
+
+- 实测 48.txt (539,796 B) = rev252z stage 4, 48.txt:3016-3923. Link L0 in 15 ms again. RC id
+  68a014c3 class 0604 (bridge). After bus numbers 00/01/01: **EP id=665314c3** class/rev=02800000
+  (network controller, other) subsys 665314c3, cap list 0x80 PCIe v2 endpoint, linkcap 0141dc14,
+  **negotiated Gen4 x1**, devcap 10008fe2; caps 0xe0 MSI (id 05), 0xf8 PM (id 01). BAR0 64-bit
+  prefetch-less mem, sizing ffe00004/ffffffff = **2 MiB**. tt0 = 50000035/0/50000000/0/0,
+  BAR0 = 50000004, EP cmd MEM. BAR0 reads: CB_TOP 0x70000000/4 = 0, **CB_INFRA1 0x70010200 =
+  00006653**, 0x70010204/8 = 00008a00, **CONN_CFG IP version 0x7c011000 = 03040001**, WF_TOP_CFG IP
+  version 0x80020010 = 03040001, 0x88000000 = 03040001, 0x88000004 = 00008a00, CONN_ON_MISC
+  0x200600f0 = 0. int_sta 0 throughout, link still L0 after the MMIO, clean undo + power-off.
+  03040001 = MT6653_CONNINFRA_VERSION_ID / MT6653_WF_VERSION_ID (gen4m include/chips/mt6653.h).
+- rev252aa stage 5 (`x9_wifi_power=5`, commit 4925ad5), after the stage-4 MMIO and before the undo:
+  ROM state sram 0x7c05b160 (bar 0x1ab160) + WF_TOP_CFG_ON_ROMCODE_INDEX 0x81021604 (bar 0xc1604)
+  (mt6653_mcu_check_idle wants 0x1D1E), CONN_HOST_CSR_TOP LPCTL 0x20060010 (bar 0xe0010) /
+  IRQ_STAT 0xe0014 / WAKEPU_TOP 0xe01a0; driver own = write bit1 (HOST_CLR_OWN), poll bit2 to 0 for
+  200 ms; then ROM state, WFDMA host DMA0 GLO_CFG 0x20024208 (bar 0xd4208), CONN_ON_MISC, HCR again;
+  SET_OWN (bit0) back. Not done (Android WMT path skips them or they need the CB dynamic remap):
+  CB_INFRA_SLP_PROT_SW_CTRL 0x70025214 = 0 (CB infra2 static window is RO), mcu_reset, ext 32k.
+- Built: ~/ios_plj110/x9/out/x9-rev252aa/boot.img 9,478,144 B sha256
+  a62b23573260c0d9b1cbd6c6ab80835c2ea05da8128f724b57a94ebdff76f96c, no `--revision` (no
+  mailbox staging), EXIT=0, 0 errors, 0 X9WifiNet.inc warnings. Boot args as rev252z with
+  x9_wifi_power=5. Not device-tested.
+- Firmware needed for the next step (not on the server or the Mac; only on the phone's vendor
+  partition): gen4m mt6653.c:1469-1637 names mt6653_wifi.bin / WIFI_RAM_CODE_MT6653_*.bin /
+  WIFI_RAM_CODE_6653.bin, WIFI_MT6653_PATCH_MCU_*_hdr.bin / mt6653_patch_e1_hdr.bin (load
+  0x00900000), WIFI_MT6653_PHY_RAM_CODE_*.bin, *_idxlog.bin, plus TxPwr/NVRAM. Asked the user to pull
+  /vendor/firmware from Android into .local/x9/wifi-fw/ (gitignored, never commit).
+- Next after stage 5: firmware download needs WFDMA TX ring 16/FWDL ring + RX event ring in DMA
+  memory (IOBufferMemoryDescriptor, 36-bit), bus master on, polling (MSI later), patch semaphore,
+  PATCH_START_REQ / FW_SCATTER / PATCH_FINISH, then RAM code (gen4m nic/fw_dl.c + connac3x).
+
 ## 47.txt: globe key fixed; PCIe0 LINK UP to L0; EP config read ffffffff (no RC bus numbers); rev252z (2026-11-05)
 
 - 实测 47.txt (608,088 B) = rev252y. USER: globe key works now. `X9 KBD DICT: ... binary plist (449
