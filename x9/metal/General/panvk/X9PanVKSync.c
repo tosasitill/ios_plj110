@@ -308,7 +308,7 @@ static void *completion_main(void *arg) {
   }
   pthread_mutex_lock(&s->lock);
   s->queue_head=c->next;if(!s->queue_head)s->queue_tail=NULL;
-  if(ret)s->failed=true;
+  if(ret)(s->failed||(x9_panvk_log("X9 PANVK SYNC FAILED: line=%d errno=%d",__LINE__,errno),1)),s->failed=true;
   else for(unsigned i=0;i<c->count;i++)c->fences[i]->pending=false;
   for(unsigned i=0;i<c->count;i++)drop(s,c->fences[i]);
   free(c);
@@ -378,12 +378,12 @@ static int submit_sync_common(struct pan_kmod_dev *dev,uint32_t group,const stru
    if(!ret&&reply){memset(reply,0,sizeof(*reply));reply->abi=X9_RENDER_ABI;reply->group=group;reply->submission_id=id;}
   }
   int saved=errno;pthread_mutex_lock(&s->lock);
-  if(ret)s->failed=true;
+  if(ret)(s->failed||(x9_panvk_log("X9 PANVK SYNC FAILED: line=%d errno=%d",__LINE__,errno),1)),s->failed=true;
   if(s->failed){if(!ret)saved=EIO;ret=-1;}
   else if(sync_only&&(!id||id<=x9_pan_kmod_async_completed(dev))) {
    for(unsigned i=0;i<signal_count;i++)fences[i]->pending=false;s->async_waits_skipped++;
   }else if(signal_count||!sync_only) {
-   if(enqueue_completion(s,dev,id_group,id,fences,signal_count)){saved=errno;s->failed=true;ret=-1;}
+   if(enqueue_completion(s,dev,id_group,id,fences,signal_count)){saved=errno;(s->failed||(x9_panvk_log("X9 PANVK SYNC FAILED: line=%d errno=%d",__LINE__,errno),1)),s->failed=true;ret=-1;}
   }
   progress(s);
   for(unsigned i=0;i<signal_count;i++)drop(s,fences[i]);   /* NULL once handed over */
@@ -391,7 +391,7 @@ static int submit_sync_common(struct pan_kmod_dev *dev,uint32_t group,const stru
  }
  ret=sync_only?x9_pan_kmod_group_check(dev,group):x9_pan_kmod_submit(dev,group,streams,stream_count,reply);
  int saved=errno;pthread_mutex_lock(&s->lock);
- if(ret)s->failed=true;
+ if(ret)(s->failed||(x9_panvk_log("X9 PANVK SYNC FAILED: line=%d errno=%d",__LINE__,errno),1)),s->failed=true;
  if(s->failed){if(!ret)saved=EIO;ret=-1;}
  else for(unsigned i=0;i<signal_count;i++)fences[i]->pending=false;
  progress(s);

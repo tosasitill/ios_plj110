@@ -35,6 +35,10 @@ struct x9_dev {
 };
 struct x9_bo {struct pan_kmod_bo base;uint32_t memory_type,native_flags;void *imported_host;};
 static struct x9_dev *device(struct pan_kmod_dev *dev){return container_of(dev,struct x9_dev,base);}
+/* Every device poisoning logs once with its source line (63.txt: the device
+ * was marked failed between two logged calls with no trace). */
+#define X9_FAIL(dev) do{ if(!(dev)->failed) x9_panvk_log("X9 PANVK FAILED: line=%d errno=%d detail=%s",__LINE__,errno,x9_render_last_error()); \
+ __atomic_store_n(&(dev)->failed,true,__ATOMIC_RELEASE); }while(0)
 static int error(int e){errno=e;return -1;}
 static int call(struct x9_dev *d,uint32_t op,const void *in,size_t ilen,void *out,size_t olen) {
  if(d->failed)return error(EIO);
@@ -43,7 +47,7 @@ static int call(struct x9_dev *d,uint32_t op,const void *in,size_t ilen,void *ou
   int saved_errno=errno;
   bool recoverable=(op==X9RenderAllocate||op==X9RenderImportHost)&&(saved_errno==ENOMEM||saved_errno==ENOSPC);
   x9_panvk_log("X9 PANVK CALL: op=%u ret=%d errno=%d recoverable=%d detail=%s",op,ret,saved_errno,recoverable,x9_render_last_error());
-  if(!recoverable)d->failed=true;
+  if(!recoverable)X9_FAIL(d);
   errno=saved_errno;
  }
  return ret;
@@ -73,7 +77,7 @@ static struct pan_kmod_bo *allocate(struct pan_kmod_dev *dev,struct pan_kmod_vm 
  simple_mtx_lock(&d->lock);
  int ret=call(d,X9RenderAllocate,&request,sizeof(request),&reply,sizeof(reply));
  if(!ret&&(reply.abi!=X9_RENDER_ABI||!reply.handle||!reply.memory_type||reply.bytes!=bytes||reply.flags!=permissions)) {
-  d->failed=true;ret=error(EPROTO);
+  X9_FAIL(d);ret=error(EPROTO);
  }
  simple_mtx_unlock(&d->lock);
  if(ret) {
@@ -90,7 +94,7 @@ static void free_bo(struct pan_kmod_bo *bo) {
  pan_kmod_bo_cleanup(bo);simple_mtx_lock(&d->lock);
  /* Retain kernel backing until connection teardown if the caller drops a BO
   * still mapped or the GPU's ownership cannot be established. */
- for(unsigned i=0;i<d->count;i++)if(d->mappings[i].handle==bo->handle)d->failed=true;
+ for(unsigned i=0;i<d->count;i++)if(d->mappings[i].handle==bo->handle)X9_FAIL(d);
  struct X9RenderHandle request={X9_RENDER_ABI,bo->handle};
  if(!d->failed)call(d,X9RenderRelease,&request,sizeof(request),NULL,0);
  simple_mtx_unlock(&d->lock);pan_kmod_dev_free(bo->dev,b);
@@ -108,7 +112,7 @@ static void *map_cpu(struct pan_kmod_bo *bo,int prot,int flags,void *hint) {
  }
  simple_mtx_lock(&d->lock);uint64_t bytes=0;
  void *ptr=d->failed?NULL:x9_render_map_buffer(d->connection,b->memory_type,&bytes);
- if(ptr&&bytes!=bo->size){x9_render_unmap_buffer(d->connection,b->memory_type,ptr);ptr=NULL;d->failed=true;errno=EPROTO;}
+ if(ptr&&bytes!=bo->size){x9_render_unmap_buffer(d->connection,b->memory_type,ptr);ptr=NULL;X9_FAIL(d);errno=EPROTO;}
  simple_mtx_unlock(&d->lock);return ptr?ptr:MAP_FAILED;
 }
 /* Offset/size are BO-relative, not virtual addresses. Round outward only
@@ -150,14 +154,14 @@ static int flush_maps(struct pan_kmod_dev *dev) {
  struct x9_dev *d=device(dev);int result=0;simple_mtx_lock(&d->lock);
  struct pan_kmod_bo *pending_bo=NULL;struct X9RenderCacheRequest pending={0};
  util_dynarray_foreach(&dev->pending_bo_syncs.array,struct pan_kmod_deferred_bo_sync,sync) {
-  if(!sync->bo||sync->bo->dev!=dev||sync->start>sync->bo->size||sync->size>sync->bo->size-sync->start){result=error(EINVAL);d->failed=true;break;}
+  if(!sync->bo||sync->bo->dev!=dev||sync->start>sync->bo->size||sync->size>sync->bo->size-sync->start){result=error(EINVAL);X9_FAIL(d);break;}
   if(!sync->size)continue;
   /* Deferred uploads (imports included) already carry exact ranges. Merge
    * consecutive overlapping/adjacent operations only for the SAME BO and
    * operation. Never reorder an invalidate past a clean or across another BO
    * which could be an alias. No merging across submits or immediate calls. */
   struct X9RenderCacheRequest req;
-  if(cache_request(sync->bo,sync->start,sync->size,sync->type,&req)){result=-1;d->failed=true;break;}
+  if(cache_request(sync->bo,sync->start,sync->size,sync->type,&req)){result=-1;X9_FAIL(d);break;}
   if(pending_bo==sync->bo&&pending.operation==req.operation&&
      req.offset<=pending.offset+pending.bytes&&pending.offset<=req.offset+req.bytes) {
    uint64_t start=MIN2(pending.offset,req.offset),end=MAX2(pending.offset+pending.bytes,req.offset+req.bytes);
@@ -185,7 +189,7 @@ static bool wait_bo(struct pan_kmod_bo *bo,int64_t timeout,bool read_only) {
   if(!call(d,d->async?X9RenderFenceWait:X9RenderWait,&req,sizeof(req),&reply,sizeof(reply))) {
    ready=reply.abi==X9_RENDER_ABI&&reply.group==req.group&&reply.submission_id==req.submission_id&&
     reply.completed_id==req.submission_id&&!reply.status&&!reply.fault_status&&!reply.exception_type&&!reply.fault_address&&!reply.reserved;
-   if(!ready){d->failed=true;errno=EPROTO;}
+   if(!ready){X9_FAIL(d);errno=EPROTO;}
   }
  }
  simple_mtx_unlock(&d->lock);return ready;
@@ -205,7 +209,7 @@ static int unmap_slot(struct x9_dev *d,unsigned i) {
 }
 static void destroy_vm(struct pan_kmod_vm *vm) {
  struct x9_dev *d=device(vm->dev);simple_mtx_lock(&d->lock);
- if(d->group_count)d->failed=true; /* groups must be destroyed before their VM */
+ if(d->group_count)X9_FAIL(d); /* groups must be destroyed before their VM */
  while(d->count&&!d->failed)if(unmap_slot(d,d->count-1))break;
  d->vm=NULL;simple_mtx_unlock(&d->lock);
  pan_kmod_vm_cleanup(vm);pan_kmod_dev_free(vm->dev,vm);
@@ -250,7 +254,7 @@ static int bind_vm(struct pan_kmod_vm *vm,enum pan_kmod_vm_op_mode mode,struct p
  }
  /* A multi-op request can partially succeed. Fail the VM instead of retrying
   * or presenting the remaining operations as an atomic rollback. */
- if(result)d->failed=true;
+ if(result)X9_FAIL(d);
 done:simple_mtx_unlock(&d->lock);return result;
 }
 static enum pan_kmod_vm_state vm_state(struct pan_kmod_vm *vm) {
@@ -308,7 +312,7 @@ int x9_pan_kmod_group_create(struct pan_kmod_dev *dev,const struct X9RenderGroup
      actual.priority!=request->priority||actual.max_compute!=request->max_compute||actual.max_fragment!=request->max_fragment||
      actual.max_tiler!=request->max_tiler||actual.tiler_heap_bytes!=request->tiler_heap_bytes)ret=error(EPROTO);
   for(unsigned i=0;!ret&&i<d->group_count;i++)if(d->groups[i]==actual.handle)ret=error(EPROTO);
-  if(ret)d->failed=true;else {d->groups[d->group_count++]=actual.handle;*reply=actual;}
+  if(ret)X9_FAIL(d);else {d->groups[d->group_count++]=actual.handle;*reply=actual;}
  }
 done:simple_mtx_unlock(&d->lock);return ret;
 }
@@ -343,7 +347,7 @@ int x9_pan_kmod_submit(struct pan_kmod_dev *dev,uint32_t group,const struct X9Re
    * queued/pending acknowledgment is not accepted as rendering success. */
   if(actual.abi!=X9_RENDER_ABI||actual.group!=group||actual.submission_id!=request.submission_id||
      actual.completed_id!=request.submission_id||actual.status||actual.reserved||actual.fault_status||actual.exception_type||actual.fault_address) {
-   d->failed=true;ret=error(EPROTO);
+   X9_FAIL(d);ret=error(EPROTO);
   }else {d->last_submission=request.submission_id;d->last_group=group;*reply=actual;}
  }
 done:simple_mtx_unlock(&d->lock);return ret;
@@ -378,7 +382,7 @@ int x9_pan_kmod_submit_async(struct pan_kmod_dev *dev,uint32_t group,const struc
  if(!ret) {
   if(actual.abi!=X9_RENDER_ABI||actual.group!=group||actual.submission_id!=request.submission_id||
      actual.completed_id||actual.status||actual.reserved||actual.fault_status||actual.exception_type||actual.fault_address) {
-   d->failed=true;ret=error(EPROTO);
+   X9_FAIL(d);ret=error(EPROTO);
   }else {d->last_submission=request.submission_id;d->last_group=group;*id=request.submission_id;}
  }
 done:simple_mtx_unlock(&d->lock);return ret;
@@ -395,11 +399,11 @@ int x9_pan_kmod_fence_wait(struct pan_kmod_dev *dev,uint32_t group,uint64_t id,u
  if(ret){
   if(errno==ETIMEDOUT)return -1;
   int saved=errno;x9_panvk_log("X9 PANVK FENCE: group=%u id=%llu errno=%d detail=%s",group,(unsigned long long)id,saved,x9_render_last_error());
-  __atomic_store_n(&d->failed,true,__ATOMIC_RELEASE);errno=saved;return -1;
+  X9_FAIL(d);errno=saved;return -1;
  }
  if(reply->abi!=X9_RENDER_ABI||reply->group!=group||reply->submission_id!=id||reply->completed_id!=id||reply->status||
     reply->reserved||reply->fault_status||reply->exception_type||reply->fault_address) {
-  __atomic_store_n(&d->failed,true,__ATOMIC_RELEASE);return error(EPROTO);
+  X9_FAIL(d);return error(EPROTO);
  }
  uint64_t old=__atomic_load_n(&d->async_completed,__ATOMIC_ACQUIRE);
  while(old<id&&!__atomic_compare_exchange_n(&d->async_completed,&old,id,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE));
@@ -411,7 +415,7 @@ int x9_pan_kmod_unmap_cpu(struct pan_kmod_bo *bo,void *address) {
  simple_mtx_lock(&d->lock);
  int ret=b->imported_host?(address==b->imported_host?0:error(EINVAL)):
   x9_render_unmap_buffer(d->connection,b->memory_type,address);
- if(ret)d->failed=true;
+ if(ret)X9_FAIL(d);
  simple_mtx_unlock(&d->lock);return ret;
 }
 
@@ -439,7 +443,7 @@ int x9_pan_kmod_group_check(struct pan_kmod_dev *dev,uint32_t group) {
   ret=call(d,d->async?X9RenderFenceWait:X9RenderWait,&req,sizeof(req),&reply,sizeof(reply));
   if(!ret&&(reply.abi!=X9_RENDER_ABI||reply.group!=group||reply.submission_id!=d->last_submission||
      reply.completed_id!=d->last_submission||reply.status||reply.reserved||reply.fault_status||reply.exception_type||reply.fault_address)) {
-   d->failed=true;ret=error(EPROTO);
+   X9_FAIL(d);ret=error(EPROTO);
   }
  }
  /* Older groups have no pending jobs: sync mode submits synchronously under
@@ -473,12 +477,12 @@ struct pan_kmod_bo *x9_pan_kmod_import_host(struct pan_kmod_dev *dev,struct pan_
     (unsigned long long)req.host_address,(unsigned long long)bytes,req.flags,saved_errno,x9_render_last_error());
    /* The service explicitly guarantees that this refusal publishes no handle.
     * Protocol, mapping, cache and submission uncertainty still poison the VM. */
-   if(saved_errno!=EACCES&&saved_errno!=ENOMEM&&saved_errno!=ENOSPC)d->failed=true;
+   if(saved_errno!=EACCES&&saved_errno!=ENOMEM&&saved_errno!=ENOSPC)X9_FAIL(d);
    errno=saved_errno;
   }
  }
  if(!ret&&(reply.abi!=X9_RENDER_ABI||!reply.handle||!reply.memory_type||reply.flags!=req.flags||reply.bytes!=bytes)) {
-  d->failed=true;ret=error(EPROTO);
+  X9_FAIL(d);ret=error(EPROTO);
  }
  simple_mtx_unlock(&d->lock);
  if(ret){pan_kmod_dev_free(dev,bo);return NULL;}
