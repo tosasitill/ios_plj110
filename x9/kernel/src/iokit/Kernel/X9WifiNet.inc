@@ -859,6 +859,36 @@ x9_wifi_rc_diag(const char *when)
             aer ? x9_pcie_cfg_rd(m, 1, 0, aer + 0x1c) : 0, aer ? x9_pcie_cfg_rd(m, 1, 0, aer + 0x20) : 0,
             aer ? x9_pcie_cfg_rd(m, 1, 0, aer + 0x24) : 0, aer ? x9_pcie_cfg_rd(m, 1, 0, aer + 0x28) : 0);
     }
+    /*
+     * 59.txt follow-up (read-only): both bridges are PLDA. Did the EP's read reach the RC? RC inbound ATR
+     * (ATR_PCIE_WIN0/1 at 0x600/0x700, 8 x 0x20; HW default, Linux never writes them), RC ISTATUS_LOCAL 0x184
+     * (P_ATR b23:20, A_ATR b19:16: bit order POST/FETCH/DISCARD/DOORBELL), PENDING_ADT 0x1d4, P_ADT_WIN0/1
+     * 0x1d8/0x1dc, A_ADT_SLV0 0x1e0, ERR_ADDR_L/H/INFO 0xe40-0xe48, TX credits 0xd30/0xd34. EP: ISTATUS_LOCAL
+     * (chip MAC 0x184), DEVCAP2/DEVCTL2 (PCIe cap 0x80 + 0x24/0x28: completion timeout ranges / disable b4).
+     */
+    {
+        IOLog("X9 WIFI RCIN %s: istat_local=%08x pend_adt=%08x p_adt_win=%08x/%08x a_adt_slv0=%08x err_addr=%08x%08x err_info=%08x tx_credit=%08x/%08x ep istat_local=%08x devcap2=%08x devctl2/sta2=%08x\n",
+            when, m[0x184 / 4], m[0x1d4 / 4], m[0x1d8 / 4], m[0x1dc / 4], m[0x1e0 / 4], m[0xe44 / 4], m[0xe40 / 4],
+            m[0xe48 / 4], m[0xd30 / 4], m[0xd34 / 4], x9_ep_bar ? x9_ep_bar[0x1d0184 / 4] : 0,
+            x9_pcie_cfg_rd(m, 1, 0, 0x80 + 0x24), x9_pcie_cfg_rd(m, 1, 0, 0x80 + 0x28));
+        unsigned shown = 0;
+        for (unsigned w = 0; w < 2; w++) {
+            for (unsigned t = 0; t < 8; t++) {
+                volatile uint32_t *e = m + (0x600 + w * 0x100 + t * 0x20) / 4;
+                uint32_t w0 = e[0], w1 = e[1], w2 = e[2], w3 = e[3], w4 = e[4];
+                if (!(w0 & 1) && !(w2 | w3 | w4)) {
+                    continue;
+                }
+                shown++;
+                IOLog("X9 WIFI RCIN %s: win%u t%u src=%llx size=2^%u impl=%u trsl=%llx param=%08x (id=%u)\n", when, w, t,
+                    ((uint64_t)w1 << 32) | (w0 & 0xfffff000u), ((w0 >> 1) & 0x3f) + 1, w0 & 1,
+                    ((uint64_t)w3 << 32) | (w2 & 0xfffff000u), w4, w4 & 0xf);
+            }
+        }
+        if (!shown) {
+            IOLog("X9 WIFI RCIN %s: no enabled RC inbound ATR entry (win0/1 t0-t7 all IMPL=0)\n", when);
+        }
+    }
     IOLog("X9 WIFI RC %s: rc cmd/sta=%08x sec_sta=%08x ep cmd/sta=%08x ep devctl/sta=%08x\n", when,
         x9_pcie_cfg_rd(m, 0, 0, 0x04), x9_pcie_cfg_rd(m, 0, 0, 0x1c), x9_pcie_cfg_rd(m, 1, 0, 0x04),
         x9_pcie_cfg_rd(m, 1, 0, 0x80 + 0x08));
