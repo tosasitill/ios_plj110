@@ -9,7 +9,10 @@
   device repeatedly -> logo. My bug from rev252aq.
 - Fix plugin 255 (commit 1efb451): ret=0 before the async branch. Images: x9-rev252aw = all --revision 255 +
   x9_wifi_power=6 x9_gpu_park=1 x9_submit_async=1; x9-rev252aw-safe = kernel only, x9_wifi_power=6 (allowlist
-  255). NEW PLUGIN -> stage x9/out/x9-rev252aw with mailbox/update.py before booting either.
+  255). NEW PLUGIN -> stage x9/out/x9-rev252aw with mailbox/update.py before booting either. Built (source
+  ea767dd): x9-rev252aw boot.img sha256 28c33dfe697fdf367c6744660da1ebd7017d53b4ba4804b826cb9f4d0aca3679,
+  x9-rev252aw-safe sha256 b5397556257dff7612d439429a4f54c1462c4767e09689639c27460a197e0d7d (both 9,883,648 B,
+  both kernels contain X9GeneralMetal255).
 
 ## 64.txt = x9-rev252au-probe (plugin 254): ACE-Lite breaks GPU data even WITH full CIVAC -> ACE-Lite shelved (2026-11-05)
 
