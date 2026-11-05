@@ -791,6 +791,10 @@ x9_wifi_rc_diag(const char *when)
             b[0xe0128 / 4], b[0x1d01a8 / 4], b[0xe0010 / 4], b[0xe00f0 / 4]);
         /* WFDMA wrapper (0x20027000 -> bar 0xd7000) and host DMA0 debug probe, as
          * dbg_mt6653.c mt6653_show_wfdma_wrapper_info / _dbg_probe_info read them */
+        /* AXI0 R2A bridge (wrapper 0x500-0x51c): STS b11 RRESP_ERR, b10:3 RRESP_ERR_STS, b0 RD_AXI_ERR_DET_INT */
+        IOLog("X9 WIFI R2A %s: ctrl0=%08x ctrl1=%08x ctrl2=%08x sts=%08x dmawr_probe=%08x dmard_probe=%08x wr_dbg0=%08x wr_dbg1=%08x txfifo_dbg0=%08x txfifo_dbg1=%08x\n",
+            when, b[0xd7500 / 4], b[0xd7504 / 4], b[0xd7508 / 4], b[0xd750c / 4], b[0xd7510 / 4], b[0xd7514 / 4],
+            b[0xd7518 / 4], b[0xd751c / 4], b[0xd706c / 4], b[0xd7070 / 4]);
         IOLog("X9 WIFI WFDMA %s: hif_misc=%08x axi_slpprot=%08x slpprot0=%08x slpprot1=%08x msi_cfg=%08x\n",
             when, b[0xd7044 / 4], b[0xd7050 / 4], b[0xd7078 / 4], b[0xd707c / 4], b[0xd702c / 4]);
         static const uint8_t dbg[] = { 0x0, 0x1, 0x2, 0x3, 0x30, 0x5, 0x7, 0xa, 0xb, 0xc, 0x62 };
@@ -1361,9 +1365,57 @@ x9_wifi_pcie_stage4(volatile uint32_t *mac, unsigned stage)
                     IODelay(100);
                     IOLog("X9 WIFI CHIP: slp_prot_sw %08x -> %08x, access_detect %08x -> %08x\n",
                         slp0, bar[0x1f5214 / 4], det0, bar[0xe0128 / 4]);
+                    /*
+                     * 56.txt + mt76 comparison: mt76 cold-starts MT7927 (same BAR layout as MT6653) with
+                     * mt7927_wfsys_reset before any DMA (mt7925/pci.c probe, mt792x_dma.c): CONN_CFG_EMI_CTL_0
+                     * 0x7c011100 (bar 0x101100) bit1 SLPPROT_EN = 1; CB_INFRA_RGU WF reset (bar 0x1f8600) bit4
+                     * set, 1-2 ms, clear, 5-10 ms; CB crypto-top MCU_OWN_SET (bar 0x1f5034) = 1; poll
+                     * ROMCODE_INDEX (bar 0xc1604) & 0xffff == 0x1d1e for 200 ms. gen4m's equivalent
+                     * mt6653_mcu_reset is compiled out of WMT builds.
+                     */
+                    uint32_t emi0 = bar[0x101100 / 4], rgu0 = bar[0x1f8600 / 4];
+                    IOLog("X9 WIFI WFSYS: before reset emi_ctl0=%08x rgu_wf_rst=%08x mcu_own=%08x romcode=%08x lpctl=%08x\n",
+                        emi0, rgu0, bar[0x1f5030 / 4], bar[0xc1604 / 4], bar[0xe0010 / 4]);
+                    bar[0x101100 / 4] = emi0 | (1u << 1);
+                    __asm__ volatile ("dsb sy" ::: "memory");
+                    bar[0x1f8600 / 4] = bar[0x1f8600 / 4] | (1u << 4);
+                    __asm__ volatile ("dsb sy" ::: "memory");
+                    IODelay(1500);
+                    bar[0x1f8600 / 4] = bar[0x1f8600 / 4] & ~(1u << 4);
+                    __asm__ volatile ("dsb sy" ::: "memory");
+                    IOSleep(8);
+                    bar[0x1f5034 / 4] = 1u;
+                    __asm__ volatile ("dsb sy" ::: "memory");
+                    uint64_t tw = mach_absolute_time();
+                    uint32_t rc = bar[0xc1604 / 4];
+                    while ((rc & 0xffffu) != 0x1d1eu && x9_ms_since(tw) < 200) {
+                        IODelay(500);
+                        rc = bar[0xc1604 / 4];
+                    }
+                    bool wfOk = (rc & 0xffffu) == 0x1d1eu;
+                    IOLog("X9 WIFI WFSYS: reset %s after %llu ms romcode=%08x rgu_wf_rst=%08x emi_ctl0=%08x mcu_own=%08x lpctl=%08x\n",
+                        wfOk ? "DONE, ROM idle" : "TIMEOUT", x9_ms_since(tw), rc, bar[0x1f8600 / 4], bar[0x101100 / 4],
+                        bar[0x1f5030 / 4], bar[0xe0010 / 4]);
+                    if (wfOk && (bar[0xe0010 / 4] & (1u << 2))) {   /* lost driver own in the reset: take it again */
+                        bar[0xe0010 / 4] = 1u << 1;
+                        __asm__ volatile ("dsb sy" ::: "memory");
+                        uint64_t to = mach_absolute_time();
+                        while ((bar[0xe0010 / 4] & (1u << 2)) && x9_ms_since(to) < 200) {
+                            IODelay(100);
+                        }
+                        IOLog("X9 WIFI WFSYS: driver own again %s lpctl=%08x\n",
+                            (bar[0xe0010 / 4] & (1u << 2)) ? "NOT taken" : "taken", bar[0xe0010 / 4]);
+                    }
                     x9_pcie_cfg_wr(mac, 1, 0, 0x04, (epcmd & 0xfff8u) | 0x6u);   /* MEM | BUS MASTER */
                     IOLog("X9 WIFI EP: bus master on cmd/sta=%08x\n", x9_pcie_cfg_rd(mac, 1, 0, 0x04));
-                    x9_wifi_stage6(bar);
+                    if (wfOk && !(bar[0xe0010 / 4] & (1u << 2))) {
+                        x9_wifi_stage6(bar);
+                    } else {
+                        x9_wifi_rc_diag("after failed WFSYS reset");
+                        IOLog("X9 WIFI WFSYS: DMA skipped (ROM not idle or no driver own)\n");
+                    }
+                    bar[0x101100 / 4] = emi0;
+                    __asm__ volatile ("dsb sy" ::: "memory");
                     x9_pcie_cfg_wr(mac, 1, 0, 0x04, (epcmd & 0xfff8u) | 0x2u);   /* MEM only again */
                     bar[0xe0128 / 4] = det0;
                     bar[0x1f5214 / 4] = slp0;
