@@ -1,3 +1,26 @@
+## HANDOFF 2026-11-05 (3): Wi-Fi DMA WORKS with the LK pool; PATCH_FINISH timeout; rev252ay
+
+- 实测 /tmp/67.txt (x9-rev252ax, includes rev252am x9_wifi_rsvmem=1): `X9 WIFI DMA: using LK
+  wifi-reserve-memory pool pa=e2700000`; rings TX15 e2700000 TX16 e2700100 RX7 e2700200. **First command
+  answered** (cid 0x05 seq 1 -> event eid 1 seq 1 status 0), section 0 (addr 00900000 len 70976 mode 80000009)
+  and section 1 (addr e0010000 len 315264) PATCH_START answered status 0, all 386240 B of data consumed on
+  TX16 (6 ms). => The 50-60.txt stall was the DMA target memory: the PCIe/Wi-Fi master may only access LK's
+  MPU-opened wifi pool (rev252am hypothesis confirmed).
+- Then PATCH_FINISH (cid 7 seq 3, 4 zero bytes) got no event in 1000 ms: RX7 didx stayed 2, rom_sram and
+  romcode_index still 1d1e, R2A dmawr_probe=10080000 dmard_probe=00000400, WFDMA slpprot0 0041f004 ->
+  1041f004 (b28), CB slp_status 0b -> 2b (b5). gen4m flow on connv3 is identical (CFG_ROM_PATCH_NO_SEM_CTRL=1,
+  no dyn mem map, V2 sections with one data mode, CID-0 raw data on the FWDL port, PATCH_FINISH
+  {ucCheckCrc=0,rsv[3]}) but waits CFG_DEFAULT_RX_RESPONSE_TIMEOUT = 3000-10000 ms.
+- rev252ay (commit 0bf180d): init-command event wait 3 s, PATCH_FINISH 10 s, logs `event after N ms` and on
+  timeout rom_sram/romcode_index. Image x9/out/x9-rev252ay/boot.img sha256
+  360248d1471ac71cbff454441a984cd7ad6636e449f4a1f0d6848433bee8361b = x9_wifi_power=6 x9_gpu_khz=1716000
+  x9_gpu_floor_khz=1100000 (no park/async: stable GPU), kernel only, allowlist 255 (staged).
+- If PATCH_FINISH still gets nothing in 10 s: look at the b28/b5 sleep-protect bits (did the ROM put WFDMA
+  AXI into sleep protect after the patch?) and the outstanding R2A write (event write to e2709000 stuck?).
+- GPU side status (separate): 67.txt park+async+ready-frame+1716 MHz: copies 52-65 /2 s early (best so far),
+  then 63.95 s `X9 PANVK FAILED: line=418 ... unmap native resource: IOKit=0xe00002c2` (IOConnectUnmapMemory64
+  refused in x9_pan_kmod_unmap_cpu) -> device lost -> flicker/freeze. Not investigated yet.
+
 ## 66.txt = x9-rev252aw (park+async, plugin 255): stable, GPU side faster, display slower; rev252ax (2026-11-05)
 
 - 实测 /tmp/66.txt (718,749 B): 0 FAILED/uncertain; `X9 RENDER ASYNC: jobs=1200 failed=0 queue_full_waits=0
