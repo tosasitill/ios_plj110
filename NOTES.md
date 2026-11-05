@@ -1,4 +1,4 @@
-## HANDOFF 2026-11-05 (2): SMMU ruled out; Android DMAs only from LK's Wi-Fi pool -> rev252am (not built yet)
+## HANDOFF 2026-11-05 (2): SMMU ruled out; Android DMAs only from LK's Wi-Fi pool -> rev252am built, not device-tested
 
 - SMMU (item 1 below) effectively ruled out: mt6993.dts pcie0/pcie1 have no `iommus`; the only SMMU on that
   side is soc_smmu @0x14900000 (UFS SID 0x63/0x77), and every log shows `X9 CSF HW: SMMU_CR0=0 CR0ACK=0 GBPA=0`
@@ -19,8 +19,9 @@
 - rev252am (commit abac34b): boot-arg `x9_wifi_rsvmem` (default 1) maps 0xe2700000 + 64 KiB with
   ml_io_map_wcomb (Normal NC; XNU RAM starts at 0x140000000 so the pool is not XNU memory) and uses it for the
   whole WFDMA area (d.pa = 0xe2700000, no cache maintenance); log line `X9 WIFI DMA: using LK wifi-reserve-memory
-  pool ...`. `x9_wifi_rsvmem=0` = old IOBufferMemoryDescriptor path. NOT BUILT: Mac tunnel (ssh -p 2222)
-  refused the connection. Build: `python3 -I x9/build/build.py --name x9-rev252am --boot-arg x9_wifi_power=6`.
+  pool ...`. `x9_wifi_rsvmem=0` = old IOBufferMemoryDescriptor path. Built (source d5ca54a):
+  ~/ios_plj110/x9/out/x9-rev252am/boot.img 9,875,456 B sha256
+  5118b8360af345f2673707cabec92915fd3348e749daee567933edcff7022e01, 0 errors, x9_wifi_power=6, no mailbox.
 - Expect on device: descriptor DMADONE=1 / TX15 didx moves / RX7 event if this was the block. If it still
   stalls: next are EMI MPU violation registers (find EMI MPU base in dts emi-mpu node) and the rev252ac ack bits.
 
