@@ -6,6 +6,9 @@
 - rev252bb: (a) probe sem-get right after the last data chunk (ROM alive?), (b) boot-arg x9_wifi_nsec=N sends only the
   first N sections. Images: x9-rev252bb (all sections) and x9-rev252bb-s0 (x9_wifi_nsec=1: section 0 only then
   PATCH_FINISH - does FINISH answer when section 1's 315 KB at e0010000 is not sent?).
+- BUILT via ssh (source 9cd92fa, args x9_wifi_power=6 x9_gpu_khz=1716000 x9_gpu_floor_khz=1100000, plugin 255):
+  x9-rev252bb sha256 640d5f7c3d469f0c5e6ea8acc04ccdcf2478cbf7c374a0eaf29d6ac0c2a31496;
+  x9-rev252bb-s0 sha256 61f6de46b84fed8344e930896769360b7b98934896eaec6bc566fa585be33f50.
 
 ## HANDOFF 2026-11-05 (5): 69.txt; rev252ba = PATCH_SEM_CONTROL (x9_wifi_sem=1 default)
 
