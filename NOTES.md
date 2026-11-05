@@ -1,3 +1,16 @@
+## 65.txt = x9-rev252av (park+async, plugin 254): kernel side works; PanVK sync-only bug; plugin 255 (2026-11-05)
+
+- 实测 /tmp/65.txt (349,361 B): async worker started, PanVK mode=async, kernel async jobs completed in order
+  (jobs=4 failed=0), parking works: `retired group=1 (map) in 332 us`, `(unmap) in 185 us`, hits=2 by the
+  4th job; CSG close path (resume empty -> STOP/TERMINATE -> AS1 detached) fine. No GPU fault.
+- Failure: `X9 PANVK SYNC FAILED: line=381 errno=17` right after the 4th job = the async branch of
+  submit_sync_common for a SYNC-ONLY op: ret kept its -1 initialiser (errno 17 stale) -> device poisoned ->
+  `X9 PANVK FAILED: line=97` (free_bo of a still-mapped BO during teardown) -> backboardd/SpringBoard lose the
+  device repeatedly -> logo. My bug from rev252aq.
+- Fix plugin 255 (commit 1efb451): ret=0 before the async branch. Images: x9-rev252aw = all --revision 255 +
+  x9_wifi_power=6 x9_gpu_park=1 x9_submit_async=1; x9-rev252aw-safe = kernel only, x9_wifi_power=6 (allowlist
+  255). NEW PLUGIN -> stage x9/out/x9-rev252aw with mailbox/update.py before booting either.
+
 ## 64.txt = x9-rev252au-probe (plugin 254): ACE-Lite breaks GPU data even WITH full CIVAC -> ACE-Lite shelved (2026-11-05)
 
 - 实测 /tmp/64.txt (6,186,997 B): plugin 254 staged (X9 UPDATE errno=0, active X9GeneralMetal254), boot-args
