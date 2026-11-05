@@ -38,9 +38,14 @@
   0x148 bits 0-3, 50 ms, release 0-2, 50 ms, release PERST, poll 0x154 bit 8 for 500 ms logging
   each LTSSM state change; EP config read (bus 1, `X9 WIFI PCIE: EP id=`) only on link up; then
   PERST re-asserted, 0x7c restored, faultb back to pull-down, power off as round 1. PHY regs only
-  read. Not built yet (Mac tunnel dropped), not device-tested.
-- Next: build rev252x on the Mac (`build.py all --name x9-rev252x --boot-arg ... x9_wifi_power=2`,
-  **no --revision**, no mailbox staging), flash, type in Spotlight ~60 s. Read: `X9 DICTATION`
+  read. Not device-tested.
+- Built on the Mac: ~/ios_plj110/x9/out/x9-rev252x/boot.img, 9,474,048 B, sha256
+  938af3b6e2b2a32651ed9d1465d5cc7e6778f68edd746b1b64eae4038457ca54, `build.py all` without
+  `--revision` (no plugin-package/, kernel still carries allowlist digest 17ed5f20 -> **no mailbox
+  staging**), EXIT=0, 0 `error:`, only the pre-existing kern_exec.c:1036/1099/1105 warnings.
+  Boot args: boot.json + x9_wifi_fake=1 x9_wifi_probe=1 x9_wifi_power=2 x9_siri_off=1 x9_lite=1
+  x9_sandbox_ops=1 x9_sample_procs=SpringBoard,Spotlight,kbd,Preferences.
+- Next: flash rev252x, type in Spotlight ~60 s. Read: `X9 DICTATION`
   bytes, Spotlight t0 passes free of the dictation chain, `X9 WIFI POWER: faultb pull-up on:
   faultb in=` (1 = PMIC up, no fault), `X9 WIFI PCIE:` LTSSM trail / LINK UP / EP id.
   If link stays in Detect (0x00/0x01): refclk BBCK1 (MT6687 clkbuf, SPMI) or MT6376 PMIC writes are
