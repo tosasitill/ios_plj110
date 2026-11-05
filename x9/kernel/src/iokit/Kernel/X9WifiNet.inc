@@ -1232,6 +1232,17 @@ x9_wifi_stage6(volatile uint32_t *bar)
     IOLog("X9 WIFI PATCH: date %s platform %.4s swhw %08x sections %u\n", date, (const char *)(fw + 16), swhw, nsec);
     bool ok = nsec >= 1 && nsec <= 8 && 96 + 64 * nsec <= x9_wifi_patch_len;
     unsigned sent = 0;
+    /* 69.txt: ROM answers PATCH_START but never PATCH_FINISH. mt76 (connac2/3 load_patch) takes the patch
+     * semaphore first (cid 0x10, payload {1,0,0,0}; event status 0 none, 1 already patched, 2 got it, 3 released)
+     * and releases it at the end; gen4m's CFG_ROM_PATCH_NO_SEM_CTRL skips it. Boot-arg x9_wifi_sem=1 (default). */
+    bool semheld = false;
+    if (ok && sweet_x9_arg("x9_wifi_sem", 1) == 1) {
+        uint8_t sg[4] = { 1, 0, 0, 0 }, sres[4] = {};
+        bool sc = x9_wd_cmd(&d, 0x10, sg, sizeof sg, 4, sres, sizeof sres);
+        IOLog("X9 WIFI PATCH: PATCH_SEM_CONTROL get %s status=%u (0 none,1 already patched,2 got sem,3 released)\n",
+            sc ? "answered" : "no event", sres[0]);
+        semheld = sc && sres[0] == 2;
+    }
     uint64_t tp = mach_absolute_time();
     for (unsigned s = 0; ok && s < nsec; s++) {
         const uint8_t *m = fw + 96 + 64 * s;
@@ -1285,6 +1296,11 @@ x9_wifi_stage6(volatile uint32_t *bar)
         IOLog("X9 WIFI PATCH: PATCH_FINISH %s status=%u cid=%02x; %u B in %llu ms -> %s\n",
             c ? "answered" : "FAILED", res[0], res[1], sent, x9_ms_since(tp),
             (c && res[0] == 0) ? "ROM PATCH DOWNLOADED" : "patch download failed");
+    }
+    if (semheld) {
+        uint8_t sr[4] = { 0, 0, 0, 0 }, sres[4] = {};
+        bool sc = x9_wd_cmd(&d, 0x10, sr, sizeof sr, 4, sres, sizeof sres);
+        IOLog("X9 WIFI PATCH: PATCH_SEM_CONTROL release %s status=%u\n", sc ? "answered" : "no event", sres[0]);
     }
     IOLog("X9 WIFI MCU: after patch rom_sram=%08x romcode_index=%08x conn_on_misc=%08x events=%u\n",
         bar[0x1ab160 / 4], bar[0xc1604 / 4], bar[0xe00f0 / 4], d.events);

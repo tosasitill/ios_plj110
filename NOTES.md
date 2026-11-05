@@ -1,3 +1,17 @@
+## HANDOFF 2026-11-05 (5): 69.txt; rev252ba = PATCH_SEM_CONTROL (x9_wifi_sem=1 default)
+
+- 实测 /tmp/69.txt (rev252az): sleep bits (slpprot0 b28, CB slp_status 2b) are ALREADY set right after section 0's
+  data and the ROM still answers section 1's PATCH_START => benign idle state, not the cause. PATCH_FINISH still
+  no event in 10 s; PCIe/AER/ATR clean; dmawr_probe varies (10480000, 10700000, 10080000).
+- Checked mt76 (connac2_load_patch / get_data_mode): for info=01000000 mt76 computes mode = NEED_RSP|ENCRYPT|
+  RESET_SEC_IV|KEY_IDX(0) = 80000009 = ours => candidate 2 (mode bits) is NOT the difference. mt76 also uses
+  PATCH_START (0x05) only for addr 0x900000 / (7925,7927: 0xe0002800); other addrs use TARGET_ADDRESS_LEN_REQ
+  (0x01) - ours e0010000 is not in mt76's list (guess: gen4m uses PATCH_START for all; ROM answered it).
+  mt76 CB patch (cid 0x30/0x32) is mt7928 only - not applicable (no CB patch file for MT6653 here).
+- rev252ba: PATCH_SEM_CONTROL get (cid 0x10 {1,0,0,0}, expect event eid 4 status 2) before the patch, release
+  after; boot-arg x9_wifi_sem=0 disables. Look for `PATCH_SEM_CONTROL get answered status=N`.
+- If sem changes nothing: try cid 0x01 (TARGET_ADDRESS_LEN_REQ) for section 1, chunk size.
+
 ## HANDOFF 2026-11-05 (4): 68.txt = rev252ay: PATCH_FINISH STILL no event in 10 s; rev252az diag (not built)
 
 - 实测 /tmp/68.txt (x9-rev252ay): identical to 67: cid5 seq1/2 answered in 1 ms each, section data 2 ms / 6 ms
