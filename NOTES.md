@@ -1,3 +1,21 @@
+## 52.txt: CB sleep protect not the cause; rev252ae dumps WFDMA wrapper + debug probe (2026-11-05)
+
+- 实测 52.txt (549,248 B, /tmp/52.txt) = rev252ad. `CHIP as ROM left it` (52.txt:2421): cb slp_prot hw=fffbffff
+  **sw=00000000 already**, slp_status 0000000b, pcie_slp_cfg0 4000002d, cfg1 ffffffff, access_detect 1,
+  EP-side AXI_PCIE_IF_CTRL 02040000 (gen4m "HW default" 0x2040004; bit2 = flr_mode_sel, irrelevant), remap_wf
+  74037001 (= def). access_detect 1 -> 0 took effect. Same stall `TX15 stuck cidx=1 didx=0 glo=5430b857`;
+  `CHIP stuck` slp_status 0000000b -> 0000002b (bit5 set during the stall; meaning unknown).
+- So neither the host RC (51.txt) nor CB-infra sleep protection is the block. gen4m never writes
+  WFDMA_AXI_SLPPROT_CTRL for mt6653 (only dbg_mt6653.c reads it).
+- rev252ae (commit 891aaf6): before DMA and on a stall logs `X9 WIFI WFDMA <when>: hif_misc (0x20027044, bit0
+  HIF_BUSY) axi_slpprot (0x20027050: AXI0 EN b0 RDY b1 IDLE b2 ERR b3 VIO_RD b4 VIO_WR b5; AXI1 same at b16..)
+  slpprot0/1 (0x20027078/7c) msi_cfg (0x2002702c)` and `probe` = DBG_IDX 0x20024124 <- 0x100+{0,1,2,3,30,5,7,a,b,
+  c,62}, DBG_PROBE 0x20024128 (bar = chip - 0x20020000 + 0xd0000). If AXI0/AXI1 SLPPROT_EN is set it clears
+  them (`AXI sleep protection was ENABLED ... cleared`) and restores after. Built:
+  ~/ios_plj110/x9/out/x9-rev252ae/boot.img 9,871,360 B sha256
+  2807fd91ab65b4526db999d94a92a0cad0059e1e048c5f000d048ba24884930e, 0 errors, x9_wifi_power=6, no mailbox.
+  Not device-tested.
+
 ## 51.txt: host PCIe side clean, DMA still stalls -> chip side; rev252ad = mcu_init writes (2026-11-05)
 
 - 实测 51.txt (368,569 B, /tmp/51.txt) = rev252ac. LK state (51.txt:2388-2390): pextp pwrctl6/8 = 0 (HW mode
