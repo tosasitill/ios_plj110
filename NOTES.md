@@ -30,8 +30,8 @@
   4b9f4386dad2761408ea96da163857b4fe5f00de732e32a9172801fe9e7b27c0; plugin-package X9GeneralMetal253 /
   X9PanVK253 (X9PanVK sha256 c4df6194...). NEW PLUGIN PACKAGE: stage before booting:
   `X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/x9-rev252aq`.
-- Fallbacks without restaging (same image, edit boot-args): drop x9_submit_async (sync, plugin 253 then
-  behaves as before), drop x9_gpu_park, drop x9_gpu_acelite.
+- Fallbacks without restaging: rebuild boot.img (kernel only, no --revision) without x9_submit_async (plugin
+  253 sees no X9RenderAsyncSubmit cap and runs sync as before), then without x9_gpu_park / x9_gpu_acelite.
 
 ## GPU step 1: resident (parked) render group, opt-in x9_gpu_park=1; rev252ap (2026-11-05, built, not device-tested)
 
