@@ -717,6 +717,149 @@ x9_ms_since(uint64_t t0)
     absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
     return ns / 1000000;
 }
+/* Config access through the gen3 window (pcie-mediatek-gen3.c mtk_pcie_config_tlp_header
+ * + mtk_pcie_map_bus): CFGNUM 0x140 = force-BE | BE | bus<<8 | devfn, data at 0x1000+where. */
+static uint32_t
+x9_pcie_cfg_rd(volatile uint32_t *mac, unsigned bus, unsigned devfn, unsigned where)
+{
+    mac[0x140 / 4] = (1u << 20) | (0xfu << 16) | (bus << 8) | devfn;
+    __asm__ volatile ("dsb sy" ::: "memory");
+    return mac[(0x1000 + (where & ~3u)) / 4];
+}
+static void
+x9_pcie_cfg_wr(volatile uint32_t *mac, unsigned bus, unsigned devfn, unsigned where, uint32_t v)
+{
+    mac[0x140 / 4] = (1u << 20) | (0xfu << 16) | (bus << 8) | devfn;
+    __asm__ volatile ("dsb sy" ::: "memory");
+    mac[(0x1000 + (where & ~3u)) / 4] = v;
+    __asm__ volatile ("dsb sy" ::: "memory");
+}
+/*
+ * Stage 4 (47.txt follow-up): stage 3 released the MAC/PHY resets, base_conf
+ * became 14110f01 and the link trained to L0 (LTSSM 0x10) 16 ms after PERST,
+ * but the bus-1 config read returned ffffffff: the root port (bus 0 devfn 0,
+ * a type-1 bridge) still had secondary/subordinate bus 0, so nothing was
+ * forwarded. Stage 4, all inside the link-up window:
+ *  - pre_init_6993 safety bits first: AXI_IF_CTRL 0x1a8 |= AXI0_SLV_RESP_MASK
+ *    (bit 12) | SW_CPLTO_DATA_SEL (bit 28) so a completion timeout answers
+ *    zeros instead of an AXI slave error (SError).
+ *  - RC: id, bus numbers 0x18 = 00 01 01, memory window 0x20 = 0x5000..0x57f0,
+ *    command |= MEM | MASTER.
+ *  - EP bus 1 devfn 0: id/class/header, capability walk (PCIe cap link status),
+ *    BAR0 (and BAR1 if 64-bit) sizing with restore.
+ *  - Translation table 0 (0x800, mtk_pcie_set_trans_table): cpu 0x50000000 ->
+ *    pci 0x50000000, 128 MiB (pcie0 ranges in mt6993.dts), MEM type; BAR0 =
+ *    0x50000000; EP command = MEM only (no bus master, no DMA).
+ *  - Read-only MMIO through BAR0 via mt6653_bus2chip_cr_mapping: CB TOP
+ *    0x70000000 (bus 0x1e0000), CB infra1 0x70010200..208 (0x1c0200), conn_infra
+ *    cfg 0x7c011000 (0x101000, IP version, expect 0x03040001), WF_TOP_CFG
+ *    0x80020010 (0xb0010), TOP_HCR 0x88000000 (0x140000, expect 6653 in it).
+ *  - Undo: EP command 0, BAR0 back, table 0 disabled, RC command/bus/window
+ *    restored, AXI_IF_CTRL restored.
+ */
+static void
+x9_wifi_pcie_stage4(volatile uint32_t *mac)
+{
+    uint32_t axi0 = mac[0x1a8 / 4];
+    mac[0x1a8 / 4] = axi0 | (1u << 12) | (1u << 28);
+    __asm__ volatile ("dsb sy" ::: "memory");
+    uint32_t rcid = x9_pcie_cfg_rd(mac, 0, 0, 0x00), rccls = x9_pcie_cfg_rd(mac, 0, 0, 0x08);
+    uint32_t rccmd = x9_pcie_cfg_rd(mac, 0, 0, 0x04), rcbus = x9_pcie_cfg_rd(mac, 0, 0, 0x18);
+    uint32_t rcmem = x9_pcie_cfg_rd(mac, 0, 0, 0x20);
+    IOLog("X9 WIFI EP: RC id=%08x class=%08x cmd=%08x bus=%08x mem=%08x axi_if=%08x->%08x\n",
+        rcid, rccls, rccmd, rcbus, rcmem, axi0, mac[0x1a8 / 4]);
+    x9_pcie_cfg_wr(mac, 0, 0, 0x18, (rcbus & 0xff000000u) | 0x00010100u);
+    x9_pcie_cfg_wr(mac, 0, 0, 0x20, 0x57f05000u);
+    x9_pcie_cfg_wr(mac, 0, 0, 0x04, (rccmd & 0xffffu) | 0x6u);
+    IOLog("X9 WIFI EP: RC bus=%08x mem=%08x cmd=%08x int_sta=%08x\n",
+        x9_pcie_cfg_rd(mac, 0, 0, 0x18), x9_pcie_cfg_rd(mac, 0, 0, 0x20), x9_pcie_cfg_rd(mac, 0, 0, 0x04), mac[0x184 / 4]);
+    uint32_t id = x9_pcie_cfg_rd(mac, 1, 0, 0x00);
+    IOLog("X9 WIFI EP: id=%08x cmd/sta=%08x class/rev=%08x hdr=%08x subsys=%08x cap=%02x int=%08x int_sta=%08x\n",
+        id, x9_pcie_cfg_rd(mac, 1, 0, 0x04), x9_pcie_cfg_rd(mac, 1, 0, 0x08), x9_pcie_cfg_rd(mac, 1, 0, 0x0c),
+        x9_pcie_cfg_rd(mac, 1, 0, 0x2c), x9_pcie_cfg_rd(mac, 1, 0, 0x34) & 0xff, x9_pcie_cfg_rd(mac, 1, 0, 0x3c), mac[0x184 / 4]);
+    if (id == 0xffffffffu || id == 0) {
+        IOLog("X9 WIFI EP: no endpoint answer; stopping before BAR/MMIO\n");
+        goto undo_rc;
+    }
+    {
+        unsigned capp = x9_pcie_cfg_rd(mac, 1, 0, 0x34) & 0xfc;
+        for (unsigned n = 0; capp >= 0x40 && n < 16; n++) {
+            uint32_t h = x9_pcie_cfg_rd(mac, 1, 0, capp);
+            if ((h & 0xff) == 0x10) {
+                uint32_t lcap = x9_pcie_cfg_rd(mac, 1, 0, capp + 0x0c), lsta = x9_pcie_cfg_rd(mac, 1, 0, capp + 0x10) >> 16;
+                IOLog("X9 WIFI EP: cap 0x%02x PCIe ver=%u type=%u linkcap=%08x link speed=Gen%u width=x%u devcap=%08x\n",
+                    capp, (h >> 16) & 0xf, (h >> 20) & 0xf, lcap, lsta & 0xf, (lsta >> 4) & 0x3f, x9_pcie_cfg_rd(mac, 1, 0, capp + 4));
+            } else {
+                IOLog("X9 WIFI EP: cap 0x%02x id=0x%02x hdr=%08x\n", capp, h & 0xff, h);
+            }
+            capp = (h >> 8) & 0xfc;
+        }
+    }
+    {
+        uint32_t bar0 = x9_pcie_cfg_rd(mac, 1, 0, 0x10), bar1 = x9_pcie_cfg_rd(mac, 1, 0, 0x14);
+        bool is64 = ((bar0 >> 1) & 3) == 2;
+        x9_pcie_cfg_wr(mac, 1, 0, 0x10, 0xffffffffu);
+        uint32_t sz0 = x9_pcie_cfg_rd(mac, 1, 0, 0x10);
+        uint32_t sz1 = 0xffffffffu;
+        if (is64) {
+            x9_pcie_cfg_wr(mac, 1, 0, 0x14, 0xffffffffu);
+            sz1 = x9_pcie_cfg_rd(mac, 1, 0, 0x14);
+        }
+        uint64_t mask = ((uint64_t)(is64 ? sz1 : 0xffffffffu) << 32) | (sz0 & ~0xfu);
+        uint64_t size = mask ? (~mask + 1) : 0;
+        IOLog("X9 WIFI EP: BAR0 orig=%08x/%08x sizing=%08x/%08x %s size=0x%llx\n",
+            bar0, bar1, sz0, sz1, is64 ? "64-bit" : "32-bit", size);
+        if (size < 0x200000 || size > 0x8000000) {
+            IOLog("X9 WIFI EP: BAR0 size outside 2..128 MiB; not mapping\n");
+            x9_pcie_cfg_wr(mac, 1, 0, 0x10, bar0);
+            if (is64) x9_pcie_cfg_wr(mac, 1, 0, 0x14, bar1);
+            goto undo_rc;
+        }
+        /* translation table 0: cpu 0x50000000 -> pci 0x50000000, 128 MiB, MEM */
+        volatile uint32_t *tt = mac + 0x800 / 4;
+        uint32_t tt0[5] = { tt[0], tt[1], tt[2], tt[3], tt[4] };
+        tt[0] = 0x50000000u | ((((27u - 1u) << 1) & 0x7eu) | 1u);
+        tt[1] = 0; tt[2] = 0x50000000u; tt[3] = 0; tt[4] = 0;
+        __asm__ volatile ("dsb sy" ::: "memory");
+        x9_pcie_cfg_wr(mac, 1, 0, 0x10, 0x50000000u | (bar0 & 0xfu));
+        if (is64) x9_pcie_cfg_wr(mac, 1, 0, 0x14, 0);
+        uint32_t epcmd = x9_pcie_cfg_rd(mac, 1, 0, 0x04);
+        x9_pcie_cfg_wr(mac, 1, 0, 0x04, (epcmd & 0xfff8u) | 0x2u);       /* MEM only */
+        IOLog("X9 WIFI EP: tt0=%08x/%08x/%08x/%08x/%08x (was %08x) BAR0=%08x cmd=%08x\n",
+            tt[0], tt[1], tt[2], tt[3], tt[4], tt0[0], x9_pcie_cfg_rd(mac, 1, 0, 0x10), x9_pcie_cfg_rd(mac, 1, 0, 0x04));
+        volatile uint32_t *bar = (volatile uint32_t *)ml_io_map(0x50000000, 0x200000);
+        if (bar) {
+            static const struct { uint32_t off; const char *what; } r[] = {
+                { 0x1e0000, "CB_TOP 0x70000000" }, { 0x1e0004, "CB_TOP 0x70000004" },
+                { 0x1c0200, "CB_INFRA1 0x70010200" }, { 0x1c0204, "CB_INFRA1 0x70010204" },
+                { 0x1c0208, "CB_INFRA1 0x70010208" }, { 0x101000, "CONN_CFG IPVER 0x7c011000" },
+                { 0xb0010, "WF_TOP_CFG IPVER 0x80020010" }, { 0x140000, "TOP_HCR 0x88000000" },
+                { 0x140004, "TOP_FVR 0x88000004" }, { 0xe00f0, "CONN_ON_MISC 0x200600f0" },
+            };
+            for (unsigned i = 0; i < sizeof(r) / sizeof(r[0]); i++) {
+                uint32_t v = bar[r[i].off / 4];
+                IOLog("X9 WIFI MMIO: %-26s bar+0x%06x = %08x int_sta=%08x\n", r[i].what, r[i].off, v, mac[0x184 / 4]);
+            }
+        } else {
+            IOLog("X9 WIFI MMIO: ml_io_map(0x50000000) failed\n");
+        }
+        IOLog("X9 WIFI EP: after MMIO ltssm=%08x link=%08x cmd/sta=%08x\n", mac[0x150 / 4], mac[0x154 / 4], x9_pcie_cfg_rd(mac, 1, 0, 0x04));
+        x9_pcie_cfg_wr(mac, 1, 0, 0x04, epcmd & 0xfff8u);
+        x9_pcie_cfg_wr(mac, 1, 0, 0x10, bar0);
+        if (is64) x9_pcie_cfg_wr(mac, 1, 0, 0x14, bar1);
+        tt[0] = tt0[0]; tt[1] = tt0[1]; tt[2] = tt0[2]; tt[3] = tt0[3]; tt[4] = tt0[4];
+        __asm__ volatile ("dsb sy" ::: "memory");
+    }
+undo_rc:
+    x9_pcie_cfg_wr(mac, 0, 0, 0x04, rccmd & 0xffffu);
+    x9_pcie_cfg_wr(mac, 0, 0, 0x20, rcmem);
+    x9_pcie_cfg_wr(mac, 0, 0, 0x18, rcbus);
+    mac[0x140 / 4] = (1u << 20) | (0xfu << 16);
+    mac[0x1a8 / 4] = axi0;
+    __asm__ volatile ("dsb sy" ::: "memory");
+    IOLog("X9 WIFI EP: undone (RC cmd/bus/mem, EP cmd/BAR, tt0, axi_if)\n");
+}
+
 /*
  * Stage 3 (46.txt follow-up): stage 2 showed faultb=1 after the pull-up (MT6653
  * PMIC up, no fault) but every PCIe0 MAC and PHY register read 0 and the RC
@@ -788,7 +931,11 @@ x9_wifi_pcie_try(volatile uint32_t *mac, volatile uint32_t *cg, uint64_t t0, uns
     }
     IOLog("X9 WIFI PCIE: %s after %llu ms polls=%u ltssm=%08x link=%08x\n",
         (link & (1u << 8)) ? "LINK UP" : "link down", x9_ms_since(tp), polls, mac[0x150 / 4], link);
-    if (link & (1u << 8)) {
+    if ((link & (1u << 8)) && stage >= 4) {
+        x9_wifi_pcie_stage4(mac);
+        IOSleep(200);
+        IOLog("X9 WIFI PCIE: after stage 4 ltssm=%08x link=%08x\n", mac[0x150 / 4], mac[0x154 / 4]);
+    } else if (link & (1u << 8)) {
         uint32_t id[5];
         static const unsigned where[5] = { 0x00, 0x08, 0x10, 0x14, 0x2c };
         for (unsigned i = 0; i < 5; i++) {
@@ -878,7 +1025,7 @@ static void
 x9_wifi_power_test(void)
 {
     int stage = sweet_x9_arg("x9_wifi_power", 0);
-    if (stage < 1 || stage > 3) {
+    if (stage < 1 || stage > 4) {
         return;
     }
     thread_t t = NULL;
