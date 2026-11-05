@@ -1047,9 +1047,15 @@ x9_wd_rx(x9_wdma *d, unsigned ms, uint8_t *out, unsigned cap)
 static bool
 x9_wd_cmd(x9_wdma *d, uint8_t cid, const void *payload, unsigned plen, uint8_t evt, uint8_t *res, unsigned rcap)
 {
+    /* 32-byte connac3 TXD + 32-byte INIT_HIF_TX_HEADER (u2TxByteCount, u2PQ_ID,
+     * INIT_WIFI_CMD {CID, PktTypeID 0xA0, rsv, SeqNum, u4Reserved,
+     * au4D3toD7Rev[5]}) -> payload at 64 (gen4m wlanSendInitSetQueryCmdImpl:
+     * cmd + sizeof(INIT_HIF_TX_HEADER) + sizeof(..._PENDING_FOR_HW_32BYTES);
+     * mt76 mt76_connac2_mcu_txd is 64 bytes too). 63.txt: with 68 the ROM read
+     * PATCH_START {addr,len,mode} 4 bytes late and answered status 14, CID 0. */
     uint8_t *c = d->va + X9_B_CMD;
-    unsigned len = 68 + plen;
-    memset(c, 0, 68);
+    unsigned len = 64 + plen;
+    memset(c, 0, 64);
     uint32_t dw0 = (len & 0xffffu) | (2u << 23), dw1 = 1u << 14;
     memcpy(c + 0, &dw0, 4);
     memcpy(c + 4, &dw1, 4);
@@ -1059,7 +1065,7 @@ x9_wd_cmd(x9_wdma *d, uint8_t cid, const void *payload, unsigned plen, uint8_t e
     c[36] = cid;
     c[37] = 0xa0;
     c[39] = seq;
-    memcpy(c + 68, payload, plen);
+    memcpy(c + 64, payload, plen);
     if (!x9_wd_tx(d, 15, X9_B_CMD, len)) {
         IOLog("X9 WIFI CMD: cid 0x%02x seq %u not consumed\n", cid, seq);
         return false;
