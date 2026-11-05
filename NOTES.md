@@ -16,8 +16,9 @@
   x9-rev252au-probe = all --revision 254, boot-args x9_wifi_power=6 x9_gpu_acelite=1 x9_gpu_coherent=0
   (same as 63) -> NEW PLUGIN: stage with mailbox/update.py before booting. Built (source a7177cc):
   x9/out/x9-rev252au-probe/boot.img 9,887,744 B sha256 b16284a2db46f2be4ed410b112c4b53666e6c44182906641fa247b5706abe54c,
-  plugin-package X9GeneralMetal254/X9PanVK254. Earlier kernel-only images (rev252ar*, rev252as*) expect plugin 253;
-  with 254 staged they still work (no ABI change), only the extra logging differs.
+  plugin-package X9GeneralMetal254/X9PanVK254. CAUTION: each kernel embeds the plugin allowlist it was built with,
+  so rev252aq/ar/as/at kernels accept only plugin 253; after staging 254 use rev252au-probe (or rebuild others
+  with `all --revision 254`).
 
 ## 62.txt = x9-rev252as-acelite: reached lock screen, then GPU read VA 0x40 -> stuck; snoop probe rev252at (2026-11-05)
 
