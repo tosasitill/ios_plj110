@@ -1,4 +1,4 @@
-## GPU step 1: resident (parked) render group, opt-in x9_gpu_park=1; rev252ap (2026-11-05, NOT built yet)
+## GPU step 1: resident (parked) render group, opt-in x9_gpu_park=1; rev252ap (2026-11-05, built, not device-tested)
 
 - Per submit before (SweetX9RenderEngine.inc render_submit): flush_gpu + install_as(AS1, 2 idle_as polls) + CSG
   START/RESUME (notify + 2 wait_ack, 100 us sleep quanta) ... doorbell, poll fence ... CSG SUSPEND (firmware
@@ -18,8 +18,9 @@
 - Risks (推断): firmware behaviour with a long-idle running CSG (idle notifications are not checked by
   group_health); a CS that did not return to idle would make the next doorbell behave unexpectedly -> symptom
   would be a completion-wait timeout -> `submission uncertain` (no reset). Boot without x9_gpu_park to compare.
-- Build pending (tunnel refused): `python3 -I x9/build/build.py --name x9-rev252ap --boot-arg x9_wifi_power=6
-  --boot-arg x9_panel_hz=120 --boot-arg x9_gpu_acelite=1 --boot-arg x9_gpu_park=1`.
+- Built (source e5562ac): x9/out/x9-rev252ap/boot.img 9,879,552 B sha256
+  619c711dcc4b01d66977814ce351a10fd2ee8bd29424fbf989c33e4ec56d740d, boot-args + x9_wifi_power=6 x9_panel_hz=120
+  x9_gpu_acelite=1 x9_gpu_park=1, kernel only, no mailbox staging. Control: x9-rev252ao-acelite (no park).
 
 ## Display refresh: panel rate measured + 120 Hz switch; rev252ao / rev252ao-acelite (2026-11-05, built, not device-tested)
 
