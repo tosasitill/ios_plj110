@@ -238,7 +238,9 @@ static void gpu_select_performance(void) {
  static int done;
  if(done)return;
  done=1;
- const uint32_t cap=X9_GOV_FLOOR_KHZ;   // floor; x9_gpu_khz is the governor ceiling
+ /* floor; x9_gpu_khz is the governor ceiling. x9_gpu_floor_khz overrides the
+  * floor (66.txt: GPU wait 11-13 ms/job at 858-1300 MHz, 40-42 C). */
+ uint32_t cap=X9_GOV_FLOOR_KHZ;PE_parse_boot_argn("x9_gpu_floor_khz",&cap,sizeof(cap));
  struct gpu_shared_prefix s;status(&s);
  if(!valid_status(&s)||s.opp_num_stack!=s.opp_num_gpu){printf("X9 GPU DVFS: unexpected OPP tables gpu=%d stack=%d\n",s.opp_num_gpu,s.opp_num_stack);return;}
  int best=-1;uint32_t best_khz=0,max_khz=0,min_khz=0xffffffffu;

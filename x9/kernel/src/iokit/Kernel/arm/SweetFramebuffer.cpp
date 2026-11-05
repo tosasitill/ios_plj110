@@ -288,6 +288,13 @@ public:
 	bool          fDirty;
 	bool          fX9OwnerHeld;   /* display tick holds the GPU owner lock for this present */
 	uint64_t      fPendSeq;       /* async present fence: GPU enqueue sequence at swap time */
+	/* Async: newest swapped frame already known complete but superseded by a
+	 * newer, still-rendering swap. Shown instead of waiting (66.txt: waiting
+	 * for the newest frame starved the display). */
+	uint8_t       fReady[SWEET_FB_SWAP_REC_SIZE];
+	bool          fReadyValid;
+	SweetSurface *fReadyHold[4];
+	uint64_t      fCadenceReady;
  bool          fX9SubmitPending, fX9ObservePending;
  unsigned      fX9RetryTicks, fX9BusyTicks;
 	/* topaz direct MDP scanout (VIG0 / CTL0 from TopazGpuW disp.c) */
@@ -1041,10 +1048,11 @@ AppleCLCD::scheduleVsync(IOTimerEventSource *sender)
 	}
 	absolutetime_to_nanoseconds(now - fCadenceStart, &elapsedNs);
 	if (elapsedNs >= 2000000000ULL) {
-		IOLog("X9 DISPLAY cadence: target=%u elapsed_ms=%llu ticks=%llu copies=%llu submits=%llu missed=%llu gpu_defer=%llu lk_defer=%llu copy_avg_us=%llu copy_max_us=%llu late_max_us=%llu;software counters,not panel fps\n",
+		IOLog("X9 DISPLAY cadence: target=%u elapsed_ms=%llu ticks=%llu copies=%llu submits=%llu missed=%llu gpu_defer=%llu lk_defer=%llu ready_shown=%llu copy_avg_us=%llu copy_max_us=%llu late_max_us=%llu;software counters,not panel fps\n",
 		 fTickHz,elapsedNs/1000000,fCadenceTicks,fCadenceCopies,fCadenceSubmits,fCadenceMissed,
-		 fCadenceGpuBusy,fCadenceDisplayBusy,fCadenceCopies?fCadenceCopyNs/fCadenceCopies/1000:0,
+		 fCadenceGpuBusy,fCadenceDisplayBusy,fCadenceReady,fCadenceCopies?fCadenceCopyNs/fCadenceCopies/1000:0,
 		 fCadenceMaxCopyNs/1000,fCadenceMaxLateNs/1000);
+		fCadenceReady=0;
 		IOLog("X9 DISPLAY TE: frames=%llu timeouts=%llu wait_avg_us=%llu poll_gap_max_us=%llu;fresh TE observed,not scanout completion\n",
 		 fCadenceTEFrames,fCadenceTETimeouts,fCadenceTEFrames?fCadenceTEWaitNs/fCadenceTEFrames/1000:0,fCadenceTEGapNs/1000);
 		fCadenceTEFrames=fCadenceTETimeouts=fCadenceTEWaitNs=fCadenceTEGapNs=0;
@@ -1299,6 +1307,8 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 	}
 	bool flush = fb->fDirty && (count % fb->fFlushTicks) == 0;
 	int displayOwner=0;
+	bool fenced=false,useReady=false;
+	SweetSurface *staleReady[4] = {};
 	if(flush && sweet_board_x9()) {
 		// fLock -> GPU owner is TRY-only; never wait in the inverse order.
 		// Hold native GPU ownership from before taking the pending frame through
@@ -1314,20 +1324,33 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 		/* Async submission: the owner lock no longer tells whether the frame is
 		 * rendered; the present fence does (rev246 x9qd lacked it and showed
 		 * incomplete surfaces). Not-yet-complete frames stay pending. */
-		bool fenced=sweet_x9_render_async_on()&&fb->fPendSeq>sweet_x9_render_async_completed();
+		fenced=sweet_x9_render_async_on()&&fb->fPendSeq>sweet_x9_render_async_completed();
+		useReady=fenced&&fb->fReadyValid;
 		displayOwner=(lockFree||fenced)?0:sweet_x9_render_display_try_enter();
-		if(fenced||displayOwner<0) {fb->fCadenceGpuBusy++;flush=false;}
+		if((fenced&&!useReady)||displayOwner<0) {fb->fCadenceGpuBusy++;flush=false;useReady=false;}
 		else if(fb->fX9SubmitPending || x9_lk_gui_busy()==1) {fb->fCadenceDisplayBusy++;flush=false;}
 	}
 	uint8_t *rec = NULL;
 	SweetSurface *taken[4] = {};
 	if (flush) {
 		rec = (uint8_t *)IOMallocData(SWEET_FB_SWAP_REC_SIZE);
-		if (rec != NULL) {
+		if (rec != NULL && useReady) {
+			/* Newest swap still rendering: show the newest complete one. The
+			 * pending frame stays dirty and is shown once its fence passes. */
+			memcpy(rec, fb->fReady, SWEET_FB_SWAP_REC_SIZE);
+			memcpy(taken, fb->fReadyHold, sizeof(taken));
+			bzero(fb->fReadyHold, sizeof(fb->fReadyHold));
+			fb->fReadyValid = false;fb->fCadenceReady++;
+		} else if (rec != NULL) {
 			memcpy(rec, fb->fPending, SWEET_FB_SWAP_REC_SIZE);
 			fb->fDirty = false;
 			memcpy(taken, fb->fPendHold, sizeof(taken));
 			bzero(fb->fPendHold, sizeof(fb->fPendHold));
+			if (fb->fReadyValid) {   /* older than what we show now */
+				memcpy(staleReady, fb->fReadyHold, sizeof(staleReady));
+				bzero(fb->fReadyHold, sizeof(fb->fReadyHold));
+				fb->fReadyValid = false;
+			}
 		}
 	}
 	if(displayOwner>0 && rec==NULL) {sweet_x9_render_owner_leave();displayOwner=0;}
@@ -1337,6 +1360,7 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 	bzero(fb->fRetireHold, sizeof(fb->fRetireHold));
 	IOLockUnlock(fb->fLock);
 	sweet_hold_set(retire, false);
+	sweet_hold_set(staleReady, false);
 	if (fb->fConsShown && sweet_console_copy_dirty(fb->backBuffer())) {
 		fb->flipBack();
 	}
@@ -1474,13 +1498,22 @@ AppleCLCD::swap(const uint8_t *rec)
 		}
 	}
 	IOLockLock(fLock);
+	SweetSurface *dropped[4];
+	if (fDirty && sweet_x9_render_async_on() && fPendSeq <= sweet_x9_render_async_completed()) {
+		/* The frame being replaced already finished rendering but was never
+		 * shown: keep it as the ready fallback instead of dropping it. */
+		memcpy(dropped, fReadyHold, sizeof(dropped));
+		memcpy(fReady, fPending, SWEET_FB_SWAP_REC_SIZE);
+		memcpy(fReadyHold, fPendHold, sizeof(fReadyHold));
+		fReadyValid = true;
+	} else {
+		memcpy(dropped, fPendHold, sizeof(dropped));      /* replaced before shown */
+	}
 	memcpy(fPending, rec, SWEET_FB_SWAP_REC_SIZE);
 	fDirty = true;
 	/* Async submission: everything this frame's producers queued is already in
 	 * the global FIFO (they enqueue before committing to CoreAnimation). */
 	fPendSeq = sweet_x9_render_async_on() ? sweet_x9_render_async_enqueued() : 0;
-	SweetSurface *dropped[4];
-	memcpy(dropped, fPendHold, sizeof(dropped));      /* replaced before shown */
 	memcpy(fPendHold, held, sizeof(held));
 	IOLockUnlock(fLock);
 	sweet_hold_set(dropped, false);
