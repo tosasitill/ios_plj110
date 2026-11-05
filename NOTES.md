@@ -1,3 +1,35 @@
+## HANDOFF 2026-11-05 (user out of quota): 60.txt = the EP read reaches the RC and dies on the SoC side
+
+- 实测 60.txt (400,738 B, /tmp/60.txt) = rev252al. RC inbound ATR (as LK left it, unchanged): win0 t0 and win1 t0
+  src 0 size 2^64 IMPL=1 trsl 0 param 00000004 (TRSL_ID 4 = AXI4 master 0, Linux pcie-plda.h), t1-t7 off.
+  **At the stall RC p_adt_win0/1 = 00000008/00000008 (were 0 before DMA) = DOORBELL/hit: the MT6653's TX15
+  descriptor read crossed the link and passed the RC's inbound ATR to the RC AXI master.** RC istat_local 0,
+  pend_adt 0, err_addr/err_info 0, tx_credit 00010309/00000049 (same before/after), RC AXI0 err 0 (earlier logs).
+  EP: istat_local 88000000 as ROM left it then 0; DEVCAP2 0011081f, DEVCTL2 0 (completion timeout enabled,
+  default range) yet EP AER stayed clean in 56.txt (unexplained). Descriptor still DMADONE=0.
+- Path status for the first WFDMA read (all verified on device): WFDMA issues AXI read (R2A dmard_probe) ->
+  chip PCIe MAC outbound ATR hit (a_adt_slv0 doorbell) -> link -> RC inbound ATR hit (p_adt_win doorbell) ->
+  **RC AXI master -> SoC interconnect / EMI: the read never completes, no error anywhere.**
+- Next (not started), in order of my suspicion (推断):
+  1. An SMMU / IOMMU in front of the PCIe0 AXI master left by LK in stall (not abort) mode, or translating.
+     x9 UFS code already checks an SMMU "DMA bypass" for UFS (bsd/dev/sweet_x9_ufs.c: cr0 +0x20, ack +0x24, gbpa
+     +0x44). Find the SMMU instance that covers pextp/PCIe0 on mt6993 (dts smmu nodes, mtk-smmu / iommu
+     drivers in the oppo kernel tree, LK) and read its CR0/GBPA/fault registers at the stall.
+  2. EMI MPU / bus protection rejecting PCIe-master access to the kernel region 0x1_45aa0000 (MTK EMI MPU
+     domains; Android's gen4m allocates normal kernel DMA memory, so a default policy should allow it).
+  3. The DDREN/APSRC "wait ack" bits rev252ac set before link-up (RESOURCE_CTRL 0xd2c bit10, PEXTP_REQ_CTRL
+     bit12): if SPM never acks for this master the AXI access would wait forever. The stall predates rev252ac
+     (50.txt), but test once with those two bits left at LK values.
+- Current build tree: x9_wifi_power=6 path = stage 5 + RC pre_init/votes + pref window disabled + mcu_init writes
+  + mt76 WFSYS reset + DMASHDL bypass + diag dumps (RC/CHIP/WFDMA/R2A/EPMAC/ATR/PEND/RCIN). Last image
+  x9-rev252al (commit 16e2a90). Each experiment is undone at power-off; the phone has rebooted cleanly every time.
+- Practical: logs arrive at /tmp/NN.txt on the server (54.txt was /home/ubuntu/54.txt). Server pushes to GitHub
+  over SSH (origin git@github.com:tosasitill/ios_plj110.git). Mac build: ssh -p 2222 tosasitill@localhost,
+  `export PATH=/Library/Frameworks/Python.framework/Versions/Current/bin:/opt/homebrew/opt/llvm/bin:$PATH`, then
+  `python3 -I x9/build/build.py --name x9-revNNN --boot-arg x9_wifi_power=6` (tunnel drops often; poll it).
+  mt76 reference clone lives only in the session scratchpad (re-clone openwrt/mt76 if needed: mt7925/pci.c,
+  mt792x_dma.c, MT7927 = PCI id 0x6639, same BAR layout as MT6653).
+
 ## 59.txt + PLDA decode; rev252al = does the read reach the RC? (2026-11-05)
 
 - 实测 59.txt (389,652 B, /tmp/59.txt) = rev252ak. pend_adt 00010000 (R=1) at the first BAR access, after driver
