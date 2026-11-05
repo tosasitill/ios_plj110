@@ -1,3 +1,28 @@
+## 53.txt + source trace: WFDMA AXI slpprot off; connv3 has nothing DMA-relevant; rev252af read-only probe (2026-11-05)
+
+- 实测 53.txt (461,293 B, /tmp/53.txt) = rev252ae. WFDMA wrapper: axi_slpprot 00000004 (only AXI0 IDLE, EN=0;
+  nothing cleared), slpprot0 0041f004, slpprot1 0, msi_cfg 40000000, hif_misc 001c2000 -> 001c2001 at the stall
+  (HIF_BUSY). DBG_PROBE before -> stall: 01 00445420->034440a0, 02 00550010->00550050, 05 00000080->100000a4,
+  0a 0020fc00->0020f80f, 0c 0->16 (others unchanged). Same `TX15 stuck cidx=1 didx=0`.
+- Source trace (USER asked to trace before more builds):
+  - connv3 power-on on mt6993 (connv3_core opfunc_power_on_internal -> connv3_hw_pwr_on): vsel no-op;
+    common_power_ctrl = pmic-en-set + 20 ms + (co-clock only) MT6688 UDS_EN regmap writes (0x0609/0x0629 04->05,
+    0x0301 30->10, clock-buffer sleep control) + faultb pull-up; pinctrl setup_pre/done = combo UART + DFD pins;
+    connv3_ext_32k_on is a no-op (mt6993 pinctrl ops have no pinctrl_ext_32k_ctrl). Nothing DMA-relevant missing.
+  - gen4m: mtk_pci_probe = pci_set_master, MSI, dma mask 36. halHifSwInfoInit before FW DL: mt6653DmashdlInit
+    (hal_dmashdl_mt6653.c: PLE/PSE max page, group refill + min/max quota, 32 queue->group maps, priority,
+    slot arbiter, optional control, ERROR_FLAG_CTRL 0xEFF), HOST_CSR bus timeout, setupMcuEmiAddr. hifRst
+    (CONN_HIF_RST 0x20024100: 0 then 0x30) is only reached via connac1 pdmaConfig, not for mt6653.
+  - Correction: "RC saw no error" does not prove the EP never read; DIDX only advances after the packet is done.
+- rev252af (commit 20cd366, read-only additions): `X9 WIFI DMASHDL before DMA|stuck:` hif_rst (0x20024100),
+  DMASHDL 0x20026000 (bar 0xd6000) sw_ctrl/opt/page/refill/ctrl_sig/pkt_max/grp0/grp1/qmap0-3/dbg0/dbg1/rd02;
+  on a stall `X9 WIFI DMA: TX15 desc[0] after stall = w0 w1 w2 w3 (DMADONE= len= last=) buf ...` re-read from
+  memory (GLO_CFG bit 6 TX_WB_DDONE set, so DMADONE=1 = WFDMA finished reading the packet). Built:
+  ~/ios_plj110/x9/out/x9-rev252af/boot.img 9,871,360 B sha256
+  0c001fdad41a302ed81a9d6874de2b99e15cc44817ef77377027f6046e9853f8, 0 errors, x9_wifi_power=6, no mailbox.
+  Not device-tested. Next if DMADONE=1: data reached WFDMA, look at the MCU side / DMASHDL (port mt6653DmashdlInit);
+  if DMADONE=0: the fetch itself is stuck (inbound path).
+
 ## 52.txt: CB sleep protect not the cause; rev252ae dumps WFDMA wrapper + debug probe (2026-11-05)
 
 - 实测 52.txt (549,248 B, /tmp/52.txt) = rev252ad. `CHIP as ROM left it` (52.txt:2421): cb slp_prot hw=fffbffff
