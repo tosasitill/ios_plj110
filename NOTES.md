@@ -10,6 +10,8 @@
   mt76 CB patch (cid 0x30/0x32) is mt7928 only - not applicable (no CB patch file for MT6653 here).
 - rev252ba: PATCH_SEM_CONTROL get (cid 0x10 {1,0,0,0}, expect event eid 4 status 2) before the patch, release
   after; boot-arg x9_wifi_sem=0 disables. Look for `PATCH_SEM_CONTROL get answered status=N`.
+- BUILT via ssh (source e935585): Mac x9/out/x9-rev252ba/boot.img sha256 92db29e8f0a202117cb6f895d7a11ba985d5e97717031ebeb5115866d6a16102,
+  args x9_wifi_power=6 x9_gpu_khz=1716000 x9_gpu_floor_khz=1100000, kernel only, plugin 255.
 - If sem changes nothing: try cid 0x01 (TARGET_ADDRESS_LEN_REQ) for section 1, chunk size.
 
 ## HANDOFF 2026-11-05 (4): 68.txt = rev252ay: PATCH_FINISH STILL no event in 10 s; rev252az diag (not built)
