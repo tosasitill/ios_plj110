@@ -14,6 +14,8 @@
   invalidated load after render_page_sync) -> `X9 RENDER SNOOP: GPU->CPU fence probe coherent= stale=` every
   2 s. Image x9-rev252at-probe = x9_wifi_power=6 x9_gpu_acelite=1 x9_gpu_coherent=0 (CIVAC kept -> rendering
   should stay correct; also shows whether shareable traffic alone hurts or slows anything). Kernel only.
+  Built: x9/out/x9-rev252at-probe/boot.img 9,887,744 B sha256
+  730bc8651215bf2bf4126bb6327253240f6d1bf6f9c49d7140670bb80894a1f2.
 - Decision rule: stale>0 -> GPU writes do not snoop either -> ACE-Lite unusable on this boot path without the
   missing platform setup (keep x9_gpu_acelite off). coherent only -> GPU->CPU works; CPU->GPU (what 62 broke)
   still needs its own test.
