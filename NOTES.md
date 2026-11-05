@@ -1,3 +1,40 @@
+## rev252ab: firmware embedded in the kernel; stage 6 = ROM patch download over WFDMA (2026-11-05)
+
+- USER (this session): "boot 分区够不够放 够的话就放不够就走 mailbox". Answer: **boot**. boot.json of rev252aa:
+  `boot_partition_size` 67108864 (64 MiB), boot.img 9,478,144 B (lz4 kernel), `max_image_size` 129,499,136;
+  firmware patch 386,464 + RAM 1,625,428 + PHY 147,332 = 2,159,224 B. No mailbox staging for Wi-Fi firmware.
+- Delivery: `x9/tools/wifi_firmware.py` writes `x9/kernel/generated/x9_wifi_firmware.inc` (gitignored, ~7.8 MB
+  decimal text) from `.local/x9/wifi-fw/` (local.json `wifi_firmware` overrides); build.py runs it before every
+  compile; content-compare so the object only rebuilds when firmware changes; stub (X9_WIFI_FW_PRESENT 0) when absent.
+  Included by X9WifiNet.inc via `../../../generated/` (iokit-cxx-1 has no -I{GEN}). Server copy of the three
+  dx5_2g2a files now also in ~/ios_plj110/.local/x9/wifi-fw (sha256 patch aef1eb67..., ram b88ecead..., phy b7599c6c...).
+- Patch file facts (parsed): PATCH_FORMAT_V2 (ver ffffffff), date `20260722133306a`, platform ALPS, swhw 108a108a,
+  2 sections: sec0 off 0xe0 len 0x11540 -> 0x00900000, sec1 off 0x11620 len 0x4cf80 -> 0xe0010000, both
+  sec_info 0x01000000 (AES, key 0) -> datamode 0x80000009.
+- CORRECTIONS to the 49.txt stage-6 design (from gen4m source this session): init commands go on **TX ring 15**
+  (connac3x asicConnac3xCapInit: u2TxInitCmdPort = TX_RING_CMD, mt6653 tx_ring_cmd_idx 15), firmware data on
+  TX ring 16 (raw bytes, no TXD, 2048 B per packet). Command header: TXD DW0 = len | 2<<23, DW1 = 1<<14, then
+  u16 len-32, **u16 PQ 0** (connac3x leaves it 0), CID, 0xA0, 0, seq, 28 zero bytes, payload (68 B overhead).
+  **No PATCH_SEMAPHORE_CONTROL**: Kbuild.main sets CFG_ROM_PATCH_NO_SEM_CTRL=1 for MT6653+WMT. PATCH_FINISH
+  payload {0,0,0,0} (CFG_SUPPORT_WIFI_DL_BT_PATCH off for 6653). Events: RX ring 7, 32-byte RXD + INIT_WIFI_EVENT
+  (u16 bytes, u16 type, EID, seq, 2 rsv, payload); EID 1 = CMD_RESULT, payload[0] status.
+- Stage 6 code (`x9_wifi_power=6`, commit 1b63934, X9WifiNet.inc x9_wifi_stage6): runs inside the stage-5
+  driver-own window; EP cmd MEM|MASTER; 64 KiB IOBufferMemoryDescriptor (contiguous, 36-bit mask, cacheable,
+  flush_dcache64 by PA); GLO_CFG 0x5030b850|ADDR_EXT, rings TX15/TX16/RX7 (16 entries), manual prefetch table,
+  RST_DTX/DRX, EN, EXT1 0x9c800404, EXT2 0x1404; PATCH_START per section, data, PATCH_FINISH; then DMA off,
+  rings cleared, GLO_CFG back, bus master off, SET_OWN, power-off as before. RX descriptors recycled per 64-byte
+  line. Log prefixes: `X9 WIFI FW:`, `X9 WIFI DMA:`, `X9 WIFI CMD:`, `X9 WIFI PATCH:`; success line
+  `PATCH_FINISH answered status=0 ... -> ROM PATCH DOWNLOADED`.
+- NOT BUILT yet: server cannot push (no GitHub credentials, no gh) and the Mac tunnel (localhost:2222) dropped
+  mid-session. Server main is 2 commits ahead of origin (e686a22 notes + 1b63934). To sync when the tunnel is
+  up: `git bundle create - origin/main..main | ssh -p 2222 tosasitill@localhost 'cd ~/ios_plj110 && cat >
+  /tmp/x9.bundle && git pull --ff-only /tmp/x9.bundle main'`, then on the Mac
+  `export PATH=/opt/homebrew/opt/llvm/bin:$PATH; python3 -I x9/build/build.py --name x9-rev252ab
+  --boot-arg x9_wifi_power=6` (no `--revision` -> no mailbox staging). Expect build.log line
+  `wifi firmware: embedded from ...` and payload ~2.2 MB larger than rev252aa.
+- Not done / next: RAM code (wlanConnacFormatDownload: tailer, DOWNLOAD_CONFIG CID 1 per region, WIFI_START
+  CID 2), PHY RAM code path, connv3_ext_32k_on, MSI.
+
 ## 49.txt: MT6653 ROM idle and driver own works; stage 6 (first WFDMA round trip) designed, not written (2026-11-05)
 
 - 实测 49.txt (558,743 B) = rev252aa stage 5. Link L0, EP 665314c3 again (49.txt:2687-2690).
