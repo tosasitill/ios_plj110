@@ -1,3 +1,20 @@
+## 57.txt: the WFDMA read IS issued and hangs inside the MT6653; chip PCIe MAC has outbound ATR tables (2026-11-05)
+
+- 实测 57.txt (444,746 B, /tmp/57.txt) = rev252ai. WFSYS: before emi_ctl0 18100004, rgu_wf_rst 00010340,
+  mcu_own 00000007, romcode 1d1e, lpctl 0; after the pulse "DONE, ROM idle after 0 ms", rgu 00010340, emi_ctl0
+  18100006, lpctl 00000004 (driver own lost) -> "driver own again taken". Probably not a full WF reset (ROM never
+  left 1d1e). Same stall. R2A (wrapper 0x500..) ctrl0 ffff0c54 ctrl1 5ffe7ff8 ctrl2 8effff1f, sts 0 throughout,
+  **dmard_probe 00000000 -> 24000000 at the stall** (outstanding AXI read), dmawr_probe 0, wr_dbg0 02aa0000,
+  txfifo_dbg0/1 0f0f0f0f/0f0f0fff.
+- 推断: WFDMA issued the AXI read; no RRESP error; EP AER clean (56.txt) -> the read is lost between WFDMA's AXI
+  master and the PCIe link, i.e. in the MT6653's own PCIe MAC (PCIE_MAC_IREG, chip 0x74030000 = bar 0x1d0000).
+- pcie_mac_ireg.h (gen4m coda mt6653) shows a PLDA-XpressRICH-like bridge: AXI_MST0-3_CONF 0x30.., AXI_SLV0-3_CONF
+  0x34.., ROUTING_RULES 0x200.., ISTATUS_PENDING_ADT 0x1d4 (R b27:16, W b11:0), ISTATUS_P_ADT_WIN0/1 0x1d8/0x1dc,
+  **ISTATUS_A_ADT_SLV0-3 0x1e0-0x1ec**, inbound ATR_PCIE_WIN0/1 0x600.. and **outbound ATR_AXI_SLV0-3 at 0x800,
+  0x900, 0xa00, 0xb00 (8? entries x 0x20)**: +0x00 SRC_ADDR_LSB[31:12] | ATR_SIZE[6:1] (2^(n+1)) | IMPL[0],
+  +0x04 SRC_ADDR_MSB, +0x08 TRSL_ADDR_LSB[31:12], +0x0c TRSL_ADDR_MSB, +0x10 TRSL_PARAM (TRSF_PARAM[27:16],
+  TRSL_ID[3:0]), +0x18/+0x1c TRSL_MASK. gen4m never writes these (ROM/HW default). Not yet dumped.
+
 ## rev252ai: mt76 MT7927 WFSYS reset before DMA + R2A bridge dump (built 2026-11-05, not device-tested)
 
 - Commit 9156ca9, `x9_wifi_power=6`. Inside the driver-own window, before bus master + stage 6:
