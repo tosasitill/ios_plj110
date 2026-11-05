@@ -1,3 +1,18 @@
+## 55.txt: DMASHDL ruled out; rev252ah = RC prefetchable window disabled + AER (2026-11-05)
+
+- 实测 55.txt (493,031 B, /tmp/55.txt) = rev252ag. Bypass took effect: `ext0 28c004df -> 28c0049f, sw_ctrl
+  00000000 -> 10000000`; DMASHDL stuck dump shows sw_ctrl 10000000. Same stall: TX15 cidx=1 didx=0, desc
+  45aa1000 40500000 0 1 DMADONE=0, packet correct, 0 events. **DMASHDL is not the block.**
+- Ruled out so far: RC pre_init/votes/sleep protect/res acks (51), CB slp_prot + access_detect (52), WFDMA AXI
+  slpprot (53), CONN_HIF_RST + descriptor/command format (54), DMASHDL (55).
+- rev252ah (commit d867c1c): RC type-1 prefetchable window 0x24/0x28/0x2c (never programmed before) read and set
+  to Linux's "disabled" 0x0000fff0/0/0 at link-up (`X9 WIFI EP: RC windows: io/sec X, pref A/B/C -> ...`),
+  restored in undo; `X9 WIFI AER before DMA|stuck:` = RC MAC 0x204 unc_sta, 0x210 cor_sta, 0x230 rp_sts, pref
+  window, EP AER capability (ext-cap walk from 0x100) unc_sta/unc_mask/cor_sta/header log. Built:
+  ~/ios_plj110/x9/out/x9-rev252ah/boot.img 9,871,360 B sha256
+  dbd1553c96ce3229df34a817ef20071c948fdf82ca998e1b0082abf10245ec50, 0 errors, x9_wifi_power=6, no mailbox.
+  Not device-tested.
+
 ## 54.txt: TX15 packet correct but never completed; rev252ag = DMASHDL bypass test (2026-11-05)
 
 - 实测 54.txt (378,260 B, /home/ubuntu/54.txt, not /tmp) = rev252af. hif_rst 00000030 (logic + DMASHDL out of
