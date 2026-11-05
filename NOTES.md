@@ -1,3 +1,27 @@
+## ACE-Lite root cause found: GPU SMMU bypass forces non-shareable (GBPA.SHCFG=0); rev252as (2026-11-05)
+
+- 实测 (every log): `X9 CSF HW: SMMU_CR0=0 CR0ACK=0 GBPA=00000000` is the GPU SMMU 0x48600000 (CSF code maps
+  it, SweetX9CSF.cpp sweet_x9_csf_boot). SMMUv3 GBPA.SHCFG b13:12 = 0b00 = force Non-shareable in bypass, so
+  every GPU transaction left the GPU non-shareable: the outer-shareable PTW/leaf accesses of x9_gpu_acelite
+  could never snoop -> 61.txt translation fault on stale page tables.
+- SOURCE: Android runs this SMMU (dts gpu_smmu "mediatek,mt6993-gpu-smmu") under pKVM: hyp/arm_smmuv3.c
+  builds stage-2 STEs (CFG 0b110, S2SH0 inner) -> effective shareability keeps the incoming one. Also found
+  (not touched): EMI PCTRL 0x1102c000 (CON0 b4 ACP_SWITCH_LOCK_EN, CON2 b11 SSYS3_SWITCH_MASK, read by
+  pkvm_smmu_host.c pctrl_enable for TCU DVM), DVM_MI 0x1102a000 (MCUSYS SYSCO connect for DVM), MFG ACP path
+  regs (gpufreq_reg_mt6993.h: MFG_TOP 0x48500834 ACP slpprot idle bits, ACP GALS 0x4b420320/364, EMI ACP CHI
+  0x1102b174..198, RSI 0x11037080..). gpufreq only reads them.
+- rev252as (commit 955f6e0): x9_gpu_acelite first sets GPU SMMU GBPA.SHCFG=0b01 (UPDATE protocol, only with
+  SMMUEN=0, verified; restored if mismatched), then AMBA_ENABLE=ACE-Lite. bypass() accepts exactly 0x1000
+  after that. Logs `X9 RENDER coherency: GPU SMMU CR0= GBPA a -> b (SHCFG 0 -> 1)` and a read-only
+  `X9 RENDER ACP:` line. Render page tables are CPU-cleaned again even with ACE-Lite (a broken path now shows
+  as stale pixels, not a stopped boot); the CIVAC skip on CPU-exposed client data stays the ACE-Lite win.
+- Images (kernel only, plugin 253 already staged): x9-rev252as-acelite = x9_wifi_power=6 x9_gpu_acelite=1
+  (sync, no park: isolates ACE-Lite); x9-rev252as = + x9_gpu_park=1 x9_submit_async=1. Also built earlier:
+  x9-rev252ar (park+async, no acelite) sha256 e6f4e589..., x9-rev252ar-safe (baseline) sha256 b5c116c1....
+- Possible remaining failure (推断): once transactions really are shareable they go via the ACP path; if that
+  path is not open on our boot (no pKVM pctrl/DVM setup), GPU accesses could stall -> completion timeout ->
+  `submission uncertain`. The ACP line gives the state to compare.
+
 ## 61.txt = rev252aq: stuck at logo; ACE-Lite page-walk snooping does NOT work as configured; rev252ar (2026-11-05)
 
 - 实测 /home/ubuntu/61.txt (323,740 B), user staged mailbox (X9 UPDATE errno=0, active plugin
