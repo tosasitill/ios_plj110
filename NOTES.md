@@ -1,3 +1,13 @@
+## rev252ak: trace of the pending outbound read (built 2026-11-05, not device-tested)
+
+- Commit 060ae16, read-only additions: `X9 WIFI PEND <when>: pend_adt (R= W=) a_adt_slv0 p_adt_win0 dma_pend
+  r2a_rd_probe r2a_sts ep cmd/sta devsta rc int_sta` at "first BAR access (EP cmd MEM only)", "after driver own",
+  "after WFSYS reset", "right after bus master on", "1 ms after bus master on" (plus the existing EPMAC lines
+  before DMA / at the stall). Earliest possible point is the first BAR access (the chip MAC is only reachable
+  through BAR0).
+- Built: ~/ios_plj110/x9/out/x9-rev252ak/boot.img 9,875,456 B sha256
+  ee47ccff3b5ac96d6995622210fa0d0b33661f9ec14598568e82528ea7c60e72, 0 errors, x9_wifi_power=6, no mailbox.
+
 ## 58.txt: outbound ATR is identity 2^64 on all four AXI slaves; slave 0 flags our read; a read was already pending (2026-11-05)
 
 - 实测 58.txt (383,903 B, /tmp/58.txt) = rev252aj. Chip PCIe MAC (bar 0x1d0000) as ROM left it / before DMA:
