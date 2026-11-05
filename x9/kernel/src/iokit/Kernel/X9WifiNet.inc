@@ -717,10 +717,34 @@ x9_ms_since(uint64_t t0)
     absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
     return ns / 1000000;
 }
+/*
+ * Stage 3 (46.txt follow-up): stage 2 showed faultb=1 after the pull-up (MT6653
+ * PMIC up, no fault) but every PCIe0 MAC and PHY register read 0 and the RC
+ * writes (setting/rst) did not stick. The MAC/PHY resets are a ti,syscon-reset
+ * in pextp0cfg_ao (mt6993.dts: assert = write 1 to +0x8, deassert = write 1 to
+ * +0xc, MAC bit 0, PHY bit 1, STATUS_NONE), so the 0 we read at +0x8 never
+ * meant "released". mtk_pcie_power_up does reset_control_deassert(mac) before
+ * the MAC is touched and deassert(phy) before phy_init. The MTCMOS status (ap_pd
+ * 0x1c052900 bits 16/17, clk-mt6993-pd.c PD_AP_HWV_0 sta 0x12900) and the
+ * pextp0 clock gates (cg_sta 0) were already on in 45/46.txt. No PHY efuse
+ * calibration yet (nvmem pcie0_calibration), so a link, if any, is uncalibrated.
+ */
 static void
-x9_wifi_pcie_try(volatile uint32_t *mac, volatile uint32_t *cg, uint64_t t0)
+x9_wifi_pcie_try(volatile uint32_t *mac, volatile uint32_t *cg, uint64_t t0, unsigned stage)
 {
     volatile uint32_t *phy = (volatile uint32_t *)ml_io_map(0x16900000, 0x10000);
+    if (stage >= 3) {
+        IOLog("X9 WIFI PCIE: stage 3 before reset release: base_conf=%08x setting=%08x phy glb_4c=%08x\n",
+            mac[0x14 / 4], mac[0x80 / 4], phy ? phy[0x4c / 4] : 0);
+        cg[0xc / 4] = 1u << 0;                             /* deassert PCIe0 MAC reset */
+        __asm__ volatile ("dsb sy" ::: "memory");
+        IODelay(100);
+        IOLog("X9 WIFI PCIE: MAC reset released: base_conf=%08x setting=%08x rst=%08x ltssm=%08x\n",
+            mac[0x14 / 4], mac[0x80 / 4], mac[0x148 / 4], mac[0x150 / 4]);
+        cg[0xc / 4] = 1u << 1;                             /* deassert PCIe0 PHY reset */
+        __asm__ volatile ("dsb sy" ::: "memory");
+        IODelay(100);
+    }
     if (phy) {
         IOLog("X9 WIFI PCIE: phy trx_64=%08x rx_30=%08x glb_4c=%08x misc=%08x\n",
             phy[0x3064 / 4], phy[0x5030 / 4], phy[0x4c / 4], mac[0x348 / 4]);
@@ -782,6 +806,11 @@ x9_wifi_pcie_try(volatile uint32_t *mac, volatile uint32_t *cg, uint64_t t0)
     cg[0x7c / 4] = req0;
     __asm__ volatile ("dsb sy" ::: "memory");
     IOLog("X9 WIFI PCIE: PERST asserted, req_ctrl restored=%08x rst=%08x\n", cg[0x7c / 4], mac[0x148 / 4]);
+    if (stage >= 3) {
+        cg[0x8 / 4] = (1u << 0) | (1u << 1);               /* MAC + PHY reset asserted again (LK state) */
+        __asm__ volatile ("dsb sy" ::: "memory");
+        IOLog("X9 WIFI PCIE: MAC/PHY reset asserted again: base_conf=%08x\n", mac[0x14 / 4]);
+    }
 }
 static void
 x9_wifi_power_thread(void *arg, wait_result_t)
@@ -820,7 +849,7 @@ x9_wifi_power_thread(void *arg, wait_result_t)
     }
     IOSleep(10);
     if (stage >= 2 && pcieReadable) {
-        x9_wifi_pcie_try(mac, cg, t0);
+        x9_wifi_pcie_try(mac, cg, t0, stage);
     } else if (stage >= 2) {
         IOLog("X9 WIFI PCIE: skipped, PCIe0 MAC not powered/clocked (pd=%08x cg=%08x)\n", pdsta, cgsta);
     }
@@ -849,7 +878,7 @@ static void
 x9_wifi_power_test(void)
 {
     int stage = sweet_x9_arg("x9_wifi_power", 0);
-    if (stage != 1 && stage != 2) {
+    if (stage < 1 || stage > 3) {
         return;
     }
     thread_t t = NULL;

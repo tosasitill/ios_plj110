@@ -7242,7 +7242,7 @@ sweet_x9_seed_assistant_dictation(proc_t p, user_addr_t scratch, user_addr_t end
 #define X9_KBD_DICT_OPEN "\t<key>DictationLanguagesEnabled</key>\n\t<dict>\n"
 #define X9_KBD_DICT_CLOSE "\t</dict>\n"
 #define X9_KBD_LAST_USED "\t<key>DictationLanguagesLastUsed</key>\n\t<dict>\n\t\t<key>LastUsedDictationLangauge</key>\n\t\t<string>en_US</string>\n\t</dict>\n"
-#define X9_KBD_LAYOUTS "\t<key>KeyboardsCurrentAndNext</key>\n\t<array>\n\t\t<string>en_US@sw=QWERTY;hw=Automatic</string>\n\t\t<string>zh_Hans-Pinyin@sw=Pinyin-Simplified;hw=Automatic</string>\n\t</array>\n\t<key>KeyboardLastUsed</key>\n\t<string>en_US@sw=QWERTY;hw=Automatic</string>\n\t<key>KeyboardLastUsedForLanguage</key>\n\t<string>en_US</string>\n"
+#define X9_KBD_LAYOUTS "\t<key>KeyboardsCurrentAndNext</key>\n\t<array>\n\t\t<string>en_US@sw=QWERTY;hw=Automatic</string>\n\t\t<string>zh_Hans-Pinyin@sw=Pinyin-Simplified;hw=Automatic</string>\n\t</array>\n\t<key>KeyboardLastUsed</key>\n\t<string>en_US@sw=QWERTY;hw=Automatic</string>\n\t<key>KeyboardLastUsedForLanguage</key>\n\t<dict>\n\t\t<key>en_US</key>\n\t\t<string>en_US@sw=QWERTY;hw=Automatic</string>\n\t\t<key>zh_Hans</key>\n\t\t<string>zh_Hans-Pinyin@sw=Pinyin-Simplified;hw=Automatic</string>\n\t</dict>\n"
 #define X9_KBD_PREFS_MAX 8192
 static int
 sweet_x9_seed_kbd_dictation(proc_t p, user_addr_t scratch, user_addr_t end)
@@ -7292,14 +7292,31 @@ sweet_x9_seed_kbd_dictation(proc_t p, user_addr_t scratch, user_addr_t end)
   else{
   /* rev252t writes the same XML every boot; if it is already there, leave the
    * file alone instead of appending a second copy of the keys each boot. */
-  static const char marker[]="<key>zh_Hans_CN</key>";
-  if(srclen>=sizeof(marker)-1){
-   for(size_t i=0;i+sizeof(marker)-1<=srclen;i++)
-    if(!memcmp(src+i,marker,sizeof(marker)-1)){
-     printf("X9 KBD DICT: XML seed already present; left alone\n");
-     kfree_data(src,srclen);return 0;
-    }
+  /* 46.txt: rev252v-x stored KeyboardLastUsedForLanguage as a string, but
+   * -[UIKeyboardPreferencesController setLanguageAwareInputModeLastUsed:]
+   * (20H392 UIKitCore 0x1897572ac) sends it objectForKey: (0x18975766c) and
+   * then mutableCopy/setObject:forKey: before updateLastUsedKeyboards:, so
+   * the globe key threw an uncaught NSInvalidArgumentException (Preferences
+   * sig 6 at 43.678 s, objc_exception_rethrow from CFRunLoopRunSpecific).
+   * The marker is now the dict form; an older XML seed without it is
+   * replaced whole (like the bplist case) instead of merged. */
+  static const char marker[]="<key>zh_Hans</key>\n\t\t<string>zh_Hans-Pinyin";
+  static const char oldseed[]="<key>zh_Hans_CN</key>";
+  int found=0,old=0;
+  for(size_t i=0;i+sizeof(marker)-1<=srclen;i++)
+   if(!memcmp(src+i,marker,sizeof(marker)-1)){found=1;break;}
+  for(size_t i=0;!found&&i+sizeof(oldseed)-1<=srclen;i++)
+   if(!memcmp(src+i,oldseed,sizeof(oldseed)-1)){old=1;break;}
+  if(found){
+   printf("X9 KBD DICT: XML seed already present; left alone\n");
+   kfree_data(src,srclen);return 0;
   }
+  if(old){
+   printf("X9 KBD DICT: older XML seed (string KeyboardLastUsedForLanguage); replaced\n");
+   kfree_data(src,srclen);src=NULL;srclen=0;got=0;replaced=1;
+  }
+  }
+  if(src!=NULL){
   /* insert before the last </dict> so the rest of the preferences survive */
   for(size_t i=srclen>=7?srclen-7:0;;i--){
    if(!memcmp(src+i,"</dict>",7)){ins=i;break;}
