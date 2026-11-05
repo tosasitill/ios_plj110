@@ -1,3 +1,56 @@
+## 46.txt: typing fixed; globe-key crash = my string KeyboardLastUsedForLanguage; Wi-Fi faultb=1; rev252y (2026-11-05)
+
+- 实测 46.txt (1,093,670 B, ends 55.6 s) = rev252x. USER: typing is fine now (Offline Dictation
+  Status seed worked: `X9 DICTATION ... bytes=314`, 46.txt:660), but tapping the globe key to switch
+  language makes the input method "crash".
+- 实测 crash: `CRASH Preferences[285] sig 6` at 43.678 s (46.txt:6037-6040), slide 0x51cc4000, bt
+  symbolized: __pthread_kill <- abort <- libc++abi demangling_terminate_handler <- std::__terminate
+  <- __cxa_rethrow <- _objc_terminate <- objc_exception_rethrow <- CFRunLoopRunSpecific+780 <-
+  GSEventRunModal <- -[UIApplication _run] = uncaught ObjC exception. No exception text in the log
+  (Preferences is not in sweetnull/sweetscan). Live keyboard prefs were rewritten by UIKit to a 751-B
+  bplist between 30 s and 40 s (46.txt:5802).
+- SOURCE (20H392 UIKitCore/TextInput disassembly, not device):
+  -[UIKeyboardPreferencesController setLanguageAwareInputModeLastUsed:] (0x1897572ac) reads a
+  preference via valueForPreferenceKey: (0x189757620), sends it objectForKey: (0x18975766c), later
+  mutableCopy + setObject:forKey: and passes it to -[TIPreferencesController updateLastUsedKeyboards:]
+  (0x18fa44d08), which is setValue:forPreferenceKey:@"KeyboardLastUsedForLanguage" (CFString
+  0x1d64e4ab0 in TextInput). rev252v-x seeded that key as the **string** `en_US` -> objectForKey: on
+  an NSString -> NSInvalidArgumentException exactly when the input mode changes. 推断 (strong, the
+  exception text itself was not captured): this is the globe crash, introduced by my rev252v seed.
+- Fix (rev252y, commit 176091d): KeyboardLastUsedForLanguage = dict {en_US:
+  en_US@sw=QWERTY;hw=Automatic, zh_Hans: zh_Hans-Pinyin@sw=Pinyin-Simplified;hw=Automatic} (same shape
+  as the 767-B original); the "already present" marker is now that dict entry, and an older XML seed
+  (has `<key>zh_Hans_CN</key>` but not the marker) is replaced whole instead of merged
+  (`X9 KBD DICT: older XML seed ...; replaced`). The live file is currently a bplist, so the bplist
+  replace path runs on the next boot anyway. Boot arg `sweetscan=backboardd,SpringBoard,Preferences,
+  Spotlight` added so the next abort in those apps prints heap `STR` lines incl. the exception reason.
+- 实测 Wi-Fi stage 2 (46.txt:3418-4162): with the GPIO65 pull-up programmed (pupd 6fdf->6fdd, r1
+  0->2) **faultb reads 1** right after PMIC_EN (46.txt:3434) and stays 1 for the whole 3.6 s =
+  MT6653's MT6376 PMIC up without fault. PCIe0: every MAC register reads 0 before and after our
+  writes (setting/cfgctrl/rst/ltssm/link/base_conf = 0, writes do not stick), PHY trx_64/rx_30/
+  glb_4c = 0; req_ctrl 0xc4 (writes there did stick and were restored). Link down after 500 ms.
+- SOURCE: pextp0ao_rst is ti,syscon-reset (mt6993.dts:1306): assert = write 1 to pextp0cfg +0x8,
+  deassert = write 1 to +0xc, MAC bit0 / PHY bit1, STATUS_NONE -> the "rst=0" we read at +0x8 never
+  meant released. mtk_pcie_power_up: reset_control_deassert(mac) -> pm_runtime (MTCMOS, already on:
+  ap_pd sta 0x1c052900 bit16/17, clk-mt6993-pd.c) -> clocks (already ungated) ->
+  deassert(phy) -> phy_init (efuse calibration from nvmem, not done by us).
+- rev252y Wi-Fi stage 3 (`x9_wifi_power=3`): stage 2 plus, before the RC start, write 1<<0 then
+  1<<1 to pextp0cfg +0xc (MAC then PHY reset release) with base_conf/setting/PHY readback, and
+  re-assert both via +0x8 at the end. Still no PHY efuse calibration, no PMIC/clkbuf writes.
+- Built on the Mac: ~/ios_plj110/x9/out/x9-rev252y/boot.img, 9,474,048 B, sha256
+  76949c9b8110ac70c5a3b85440cdbd1e0cddcdd881abb40f2147055e44146c34, `build.py all` without
+  `--revision` (no plugin-package/, allowlist 17ed5f20 present -> no mailbox staging), EXIT=0,
+  0 `error:`, no new warnings (X9WifiNet.inc 0; kern_exec.c 7351/7353 are the pre-existing
+  declaration-after-statement ones shifted). Boot args: boot.json + x9_wifi_fake=1 x9_wifi_probe=1
+  x9_wifi_power=3 x9_siri_off=1 x9_lite=1 x9_sandbox_ops=1
+  x9_sample_procs=SpringBoard,Spotlight,kbd,Preferences sweetscan=backboardd,SpringBoard,Preferences,
+  Spotlight. Not device-tested.
+- Next: flash rev252y, switch input modes with the globe key a few times, pull the log. Read:
+  `X9 KBD DICT` line (replaced), no Preferences/Spotlight sig 6 (else the `STR` lines), and
+  `X9 WIFI PCIE: MAC reset released: base_conf=` (non-zero = MAC alive) then the LTSSM trail.
+  If the MAC is alive but LTSSM stays in Detect: PHY efuse calibration (nvmem pcie0_calibration) and
+  the BBCK1 refclk (MT6687 clkbuf) are next.
+
 ## 45.txt: rev252w-wifipwr boots; dictation loop root-caused to a nil offline-status cache; rev252x (2026-11-05)
 
 - 实测 45.txt (822,821 B) = rev252w-wifipwr (user flashed it directly, not rev252w-kbdseed).
