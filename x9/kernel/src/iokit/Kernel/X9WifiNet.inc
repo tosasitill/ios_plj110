@@ -1074,11 +1074,18 @@ x9_wd_cmd(x9_wdma *d, uint8_t cid, const void *payload, unsigned plen, uint8_t e
         return true;
     }
     uint8_t ev[96];
-    int n = x9_wd_rx(d, 1000, ev, sizeof ev);
+    /* gen4m wlanSendInitSetQueryCmd waits CFG_DEFAULT_RX_RESPONSE_TIMEOUT (3-10 s).
+     * 67.txt: PATCH_FINISH got no event within our former 1 s while the ROM
+     * applies the patch; give it 10 s, every other init command 3 s. */
+    unsigned wait_ms = cid == 0x07 ? 10000 : 3000;
+    uint64_t tw = mach_absolute_time();
+    int n = x9_wd_rx(d, wait_ms, ev, sizeof ev);
     if (n < 0) {
-        IOLog("X9 WIFI CMD: cid 0x%02x seq %u: no event\n", cid, seq);
+        IOLog("X9 WIFI CMD: cid 0x%02x seq %u: no event in %u ms (rom_sram=%08x romcode_index=%08x)\n", cid, seq, wait_ms,
+            d->bar[0x1ab160 / 4], d->bar[0xc1604 / 4]);
         return false;
     }
+    IOLog("X9 WIFI CMD: cid 0x%02x seq %u event after %llu ms\n", cid, seq, x9_ms_since(tw));
     uint16_t rbc, ptype;
     memcpy(&rbc, ev + 32, 2);
     memcpy(&ptype, ev + 34, 2);
