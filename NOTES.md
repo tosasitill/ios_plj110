@@ -25,13 +25,21 @@
   rings cleared, GLO_CFG back, bus master off, SET_OWN, power-off as before. RX descriptors recycled per 64-byte
   line. Log prefixes: `X9 WIFI FW:`, `X9 WIFI DMA:`, `X9 WIFI CMD:`, `X9 WIFI PATCH:`; success line
   `PATCH_FINISH answered status=0 ... -> ROM PATCH DOWNLOADED`.
-- NOT BUILT yet: server cannot push (no GitHub credentials, no gh) and the Mac tunnel (localhost:2222) dropped
-  mid-session. Server main is 2 commits ahead of origin (e686a22 notes + 1b63934). To sync when the tunnel is
-  up: `git bundle create - origin/main..main | ssh -p 2222 tosasitill@localhost 'cd ~/ios_plj110 && cat >
-  /tmp/x9.bundle && git pull --ff-only /tmp/x9.bundle main'`, then on the Mac
-  `export PATH=/opt/homebrew/opt/llvm/bin:$PATH; python3 -I x9/build/build.py --name x9-rev252ab
-  --boot-arg x9_wifi_power=6` (no `--revision` -> no mailbox staging). Expect build.log line
-  `wifi firmware: embedded from ...` and payload ~2.2 MB larger than rev252aa.
+- BUILT on the Mac (commit c9635d8, cast-align warnings fixed): ~/ios_plj110/x9/out/x9-rev252ab/boot.img
+  9,871,360 B sha256 5de64a48f6e3a457e745aba5d6077394288964499e9fa6e226431d0bad8c36b6, kernel 18,475,576 B
+  (+~0.4 MB stripped vs rev252aa after lz4: boot.img only +393 KB), payload 18,599,792 B. 0 `error:`,
+  0 X9WifiNet.inc warnings, payload has x9_wifi_power=6, no plugin-package/ -> **no mailbox staging**.
+  Not device-tested. Boot args = rev252aa + x9_wifi_power=6 (replaces 5).
+- Git sync fixed: server origin is now `git@github.com:tosasitill/ios_plj110.git` (the server's GitHub SSH key
+  works; https had no credentials). Pushed through c9635d8.
+- Mac build gotchas: build.py must run under the python that has `lz4` with `-I`: the Framework python
+  `/Library/Frameworks/Python.framework/Versions/Current/bin/python3` (homebrew 3.15 only has lz4 in the user
+  site, which -I hides). Non-interactive ssh: `export PATH=/Library/Frameworks/Python.framework/Versions/Current/bin:/opt/homebrew/opt/llvm/bin:$PATH`.
+- Expected log (after the stage-5 lines): `X9 WIFI FW: patch ... 386464 B`, `X9 WIFI EP: bus master on`,
+  `X9 WIFI DMA: buffer pa=...`, `rings up ...`, per section `PATCH_START answered status=0` and `data sent`,
+  then `PATCH_FINISH answered status=0 ... -> ROM PATCH DOWNLOADED`. Failure points to read: `TX15/TX16 stuck`
+  (DMA not fetching: bus master/36-bit/inbound path), `no event on RX7` (ROM not answering or event ring wrong),
+  status != 0 (2 = CRC, 3 = decrypt).
 - Not done / next: RAM code (wlanConnacFormatDownload: tailer, DOWNLOAD_CONFIG CID 1 per region, WIFI_START
   CID 2), PHY RAM code path, connv3_ext_32k_on, MSI.
 
