@@ -160,10 +160,45 @@ static int resident_begin(vm_offset_t gpu) {
     if(!capable)why="AMBA_FEATURES lacks ACE-Lite";
     else if(l2_ready)why="L2 already powered/transitioning";
     else {
-     gw(gpu,0x304,amba_before&~0x1fu);__asm__ volatile("dsb sy":::"memory");
-     amba_after=gr(gpu,0x304);
-     if((amba_after&0x1fu)==0){x9_gpu_acelite_active=true;why="enabled";}
-     else {gw(gpu,0x304,amba_before);why="AMBA_ENABLE readback mismatch, restored";}
+     /* 1) GPU SMMU bypass must pass the GPU's shareability through (see
+      * bypass() in SweetX9CSF.cpp). SMMUv3 GBPA update protocol: write with
+      * UPDATE (b31), poll UPDATE clear. Only while SMMUEN=0. */
+     vm_offset_t sm=s->smmu;
+     uint32_t gbpa_before=gr(sm,0x44),gbpa_after=gbpa_before;
+     bool smmu_ok=false;
+     if(!(gr(sm,0x20)&1)&&!(gr(sm,0x24)&1)&&!(gbpa_before&(1u<<20))) {
+      if(((gbpa_before>>12)&3)!=1) {
+       gw(sm,0x44,(gbpa_before&~(3u<<12))|(1u<<12)|(1u<<31));
+       uint64_t until=deadline_ms(5);
+       while((gr(sm,0x44)&(1u<<31))&&mach_absolute_time()<until){}
+      }
+      gbpa_after=gr(sm,0x44);
+      smmu_ok=!(gbpa_after&(1u<<31))&&((gbpa_after>>12)&3)==1&&(gbpa_after&~(3u<<12))==(gbpa_before&~(3u<<12)&~(1u<<31));
+      if(smmu_ok)x9_gpu_smmu_incoming=true;
+      else if(gbpa_after!=gbpa_before){gw(sm,0x44,(gbpa_before&~(1u<<31))|(1u<<31));}
+     }
+     IOLog("X9 RENDER coherency: GPU SMMU CR0=%08x GBPA %08x -> %08x (SHCFG %u -> %u;0=force non-shareable,1=use incoming) %s\n",
+      gr(sm,0x20),gbpa_before,gbpa_after,(gbpa_before>>12)&3,(gbpa_after>>12)&3,smmu_ok?"ok":"REFUSED");
+     /* Read-only view of the MFG->EMI ACP path (gpufreq_reg_mt6993.h). */
+     {
+      static vm_offset_t mfg_top,acp_gals,emi_bcrm,emi_pctrl;
+      if(!mfg_top)mfg_top=ml_io_map(0x48500000,0x1000);
+      if(!acp_gals)acp_gals=ml_io_map(0x4b420000,0x1000);
+      if(!emi_bcrm)emi_bcrm=ml_io_map(0x1102b000,0x1000);
+      if(!emi_pctrl)emi_pctrl=ml_io_map(0x1102c000,0x1000);
+      if(mfg_top&&acp_gals&&emi_bcrm&&emi_pctrl)
+       IOLog("X9 RENDER ACP: mfg_acp_slpprot=%08x (b2 MFG1 idle,b4 MFG0 idle) gals_rx=%08x gals_tx=%08x emi_acp chi0-3=%08x/%08x/%08x/%08x mfg_dvm_prot=%08x tcu_efp=%08x dvm_si=%08x pctrl con0=%08x con2=%08x\n",
+        gr(mfg_top,0x834),gr(acp_gals,0x320),gr(acp_gals,0x364),gr(emi_bcrm,0x174),gr(emi_bcrm,0x180),gr(emi_bcrm,0x18c),
+        gr(emi_bcrm,0x198),gr(emi_bcrm,0x160),gr(emi_bcrm,0x1a8),gr(emi_bcrm,0x1b0),gr(emi_pctrl,0),gr(emi_pctrl,8));
+     }
+     /* 2) GPU-side protocol, as stock kbase_cache_set_coherency_mode. */
+     if(!smmu_ok)why="GPU SMMU bypass still forces non-shareable";
+     else {
+      gw(gpu,0x304,amba_before&~0x1fu);__asm__ volatile("dsb sy":::"memory");
+      amba_after=gr(gpu,0x304);
+      if((amba_after&0x1fu)==0){x9_gpu_acelite_active=true;why="enabled";}
+      else {gw(gpu,0x304,amba_before);why="AMBA_ENABLE readback mismatch, restored";}
+     }
     }
    }else if(x9_gpu_acelite_active)why="already enabled";
    s->coherent=x9_gpu_acelite_active&&coherent_arg==1;

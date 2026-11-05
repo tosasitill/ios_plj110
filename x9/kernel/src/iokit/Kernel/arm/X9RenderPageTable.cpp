@@ -129,9 +129,10 @@ uint64_t x9_render_vm_publish(X9RenderPageTable *vm) {
   * Translation installation/invalidation and GPU detach are unchanged. */
  uint64_t cleaned=0,unchanged=0;
  for(unsigned i=0;i<vm->count;i++)if(vm->tables[i].memory) {
-  /* ACE-Lite: TRANSCFG.PTW_SH is outer shareable, page walks snoop the CPU
-   * caches (stock kbase_mmu_sync_pgd_cpu skips its clean unless NONE). */
-  if(vm->tables[i].dirty&&!x9_gpu_acelite_active){x9_gpu_clean(vm->tables[i].pa,4096,1);cleaned+=4096;}
+  /* Kept even with ACE-Lite (stock kbase skips it): only dirty tables, and
+   * 61.txt showed a broken snoop path turns a skipped clean into a translation
+   * fault on the first job, which stops the boot at the logo. */
+  if(vm->tables[i].dirty){x9_gpu_clean(vm->tables[i].pa,4096,1);cleaned+=4096;}
   else unchanged+=4096;
  }
  __asm__ volatile("dsb sy":::"memory");

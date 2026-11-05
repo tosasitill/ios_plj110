@@ -233,8 +233,15 @@ static void invalidate_cpu(void *base,size_t length) {
  for(uintptr_t at=start;at<end;at+=line)__asm__ volatile("dc ivac, %0" :: "r"(at) : "memory");
  __asm__ volatile("dsb sy" ::: "memory");
 }
+/* GPU SMMU (0x48600000) bypass. LK leaves GBPA=0: SHCFG (b13:12) = 0b00 forces
+ * every GPU transaction NON-SHAREABLE, which defeats ACE-Lite snooping (61.txt:
+ * page walks read stale DRAM). x9_gpu_acelite switches SHCFG to 0b01 "use
+ * incoming" (Android's pKVM stage-2 STEs keep the incoming shareability too);
+ * that exact value is the only other accepted bypass state. */
+static bool x9_gpu_smmu_incoming;
 static bool bypass(vm_offset_t smmu) {
- return gr(smmu,0x20)==0&&gr(smmu,0x24)==0&&gr(smmu,0x44)==0;
+ uint32_t gbpa=gr(smmu,0x44);
+ return gr(smmu,0x20)==0&&gr(smmu,0x24)==0&&(gbpa==0||(x9_gpu_smmu_incoming&&gbpa==0x1000u));
 }
 static bool idle_as(vm_offset_t gpu,unsigned ms=1000,unsigned as=0) {
  uint64_t end=deadline_ms(ms);unsigned polls=0;
