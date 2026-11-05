@@ -30,6 +30,55 @@ struct RenderOwner {
 static bool render_ready() {
  return render_engine_installed&&resident&&resident->ready&&!resident->uncertain&&no_faults(resident->gpu);
 }
+/*
+ * Resident ("parked") render group, opt-in x9_gpu_park=1 (rev252ap).
+ * Before: every submit did flush+install_as(AS1)+CSG START/RESUME, then CSG
+ * SUSPEND+flush+remove_as(AS1). Stock kbase keeps a group resident on its CSG
+ * slot with its AS bound and only rings the doorbell for new ring work. Here
+ * a completed submit leaves its group RUNNING (idle, extract==insert) on its
+ * slot and AS1 pointing at the context's page table; only the GPU caches are
+ * flushed so the CPU sees results. A following submit on the SAME context and
+ * group publishes the new ring packet and rings the doorbell directly. Any
+ * other use retires the parked group first through the unchanged proven
+ * SUSPEND -> flush -> remove_as -> detached sequence: a submit on another
+ * group/context, map/unmap/create/destroy/close/quiesce on that context,
+ * resident end. The display tick treats a parked AS1 as idle (no GPU work
+ * outstanding) but never stages through the GPU while parked. Page tables
+ * cannot change while parked (map/unmap retire first), so the root is reused.
+ * All calls hold the render owner lock.
+ */
+struct RenderParked { X9RenderContext *c; RenderKernelGroup *g; uint64_t root; };
+static RenderParked render_parked;
+static uint64_t render_park_hits,render_park_retires,render_park_cold;
+static bool render_park_enabled() {
+ static int mode=-1;
+ if(mode<0){mode=sweet_x9_arg("x9_gpu_park",0)==1?1:0;IOLog("X9 RENDER PARK: resident group between submits %s (x9_gpu_park)\n",mode?"ON":"off");}
+ return mode==1;
+}
+static bool render_retire_parked(const char *why) {
+ if(!render_parked.g)return true;
+ if(!resident||resident->uncertain){render_parked={};return false;}
+ X9RenderContext *c=render_parked.c;RenderKernelGroup *g=render_parked.g;
+ render_parked={};
+ vm_offset_t gpu=resident->gpu;
+ X9CSFQueueIO io=x9_csf_queue_access_io(&resident->slots[g->slot].access);
+ uint64_t began=mach_absolute_time(),ns=0;
+ if(x9_csf_group_halt(&io,&g->control,resident->epoch,true,1000000000ULL)!=kIOReturnSuccess||
+    !flush_gpu(gpu)||!remove_as(gpu,resident->policy.saved_attr,resident->policy.saved_cfg,1)) {
+  c->disabled=true;resident->uncertain=true;
+  IOLog("X9 RENDER PARK: retire (%s) group=%u uncertain;AS/MCU/DMA refs retained,no reset\n",why,g->request.handle);
+  return false;
+ }
+ x9_render_memory_detached(c);
+ absolutetime_to_nanoseconds(mach_absolute_time()-began,&ns);
+ if(++render_park_retires<=8||render_park_retires%256==0)
+  IOLog("X9 RENDER PARK: retired group=%u (%s) in %llu us;hits=%llu retires=%llu cold=%llu\n",
+   g->request.handle,why,ns/1000,render_park_hits,render_park_retires,render_park_cold);
+ return true;
+}
+static bool render_park_release_for(X9RenderContext *c,const char *why) {
+ return !render_parked.g||render_parked.c!=c||render_retire_parked(why);
+}
 static RenderKernelGroup *render_group(X9RenderContext *c,uint32_t id) {
  auto *p=(RenderKernelContext *)c->engine_private;
  if(p)for(auto *g:p->groups)if(g&&g->request.handle==id)return g;
@@ -97,6 +146,7 @@ static IOReturn render_map(X9RenderContext *c,const X9RenderVMEntry *entry) {
    resident?gr(resident->gpu,0x20):0,resident?gr(resident->gpu,0x2000):0);
   return kIOReturnNotReady;
  }
+ if(!render_park_release_for(c,"map"))return kIOReturnIOError;
  /* Invalidate before a mutation attempt, including failed transactions and
   * rollback. The service updates its mapping registry before releasing the
   * context lock; the next submit rebuilds from that completed state. */
@@ -107,6 +157,7 @@ static IOReturn render_map(X9RenderContext *c,const X9RenderVMEntry *entry) {
 }
 static IOReturn render_unmap(X9RenderContext *c,const X9RenderVMEntry *entry) {
  RenderOwner owner;if(!owner.locked||!render_ready())return kIOReturnNotReady;
+ if(!render_park_release_for(c,"unmap"))return kIOReturnIOError;
  if(c&&c->engine_private)((RenderKernelContext *)c->engine_private)->cache_plan_valid=false;
  return x9_render_memory_unmap(c,entry);
 }
@@ -128,7 +179,9 @@ static bool render_drop_storage(X9RenderContext *c,RenderKernelGroup *g) {
  return true;
 }
 static IOReturn render_create_group(X9RenderContext *c,const X9RenderGroup *request,X9RenderGroup *reply) {
- RenderOwner owner;if(!owner.locked||!render_ready()||!c||!request||!reply||!c->engine_private||c->exposed)return kIOReturnNotReady;
+ RenderOwner owner;if(!owner.locked||!render_ready())return kIOReturnNotReady;
+ if(c&&!render_park_release_for(c,"create group"))return kIOReturnIOError;
+ if(!c||!request||!reply||!c->engine_private||c->exposed)return kIOReturnNotReady;
  auto *p=(RenderKernelContext *)c->engine_private;
  if(p->next_group==UINT32_MAX)return kIOReturnNoResources;
  unsigned entry=0;while(entry<8&&p->groups[entry])entry++;
@@ -237,6 +290,7 @@ static IOReturn render_destroy_locked(X9RenderContext *c,RenderKernelGroup *g) {
 }
 static IOReturn render_destroy_group(X9RenderContext *c,uint32_t id) {
  RenderOwner owner;if(!owner.locked||!c)return kIOReturnNotReady;
+ if(!render_park_release_for(c,"destroy group"))return kIOReturnIOError;
  auto *g=render_group(c,id);return g?render_destroy_locked(c,g):kIOReturnBadArgument;
 }
 /* The page table is the authority for reachability, including argument-buffer
@@ -273,9 +327,27 @@ static IOReturn render_submit(X9RenderContext *c,const X9RenderSubmission *reque
  uint64_t reach_saved[2]={0,0},import_bytes[2]={0,0},full_import_bytes[2]={0,0};
  uint64_t coherent_skip[2]={0,0};
  uint64_t wc_skip[2]={0,0};
- RenderOwner owner;if(!owner.locked||!render_ready()||!c||!request||!reply||c->exposed)return kIOReturnNotReady;
+ RenderOwner owner;if(!owner.locked||!render_ready()||!c||!request||!reply)return kIOReturnNotReady;
  times[1]=mach_absolute_time();
  auto *g=render_group(c,request->group);if(!g||c->disabled)return kIOReturnBadArgument;
+ /* Parked fast path: same context and group, still running, AS1 still ours. */
+ const bool park=render_park_enabled();
+ bool resume=false;
+ if(render_parked.g) {
+  if(park&&render_parked.c==c&&render_parked.g==g&&g->control.running&&!g->control.uncertain&&
+     gr64(resident->gpu,0x2440)==render_parked.root) resume=true;
+  else if(!render_retire_parked(render_parked.c==c?"other group":"other context"))return kIOReturnIOError;
+ }
+ if(c->exposed&&!resume)return kIOReturnNotReady;
+ const uint64_t parked_root=resume?render_parked.root:0;
+ render_parked={};   /* re-established only after this submit completes */
+ /* Early returns before any hardware step must leave the still-running idle
+  * group tracked, or AS1 would stay installed with no owner. */
+ struct ParkRestore {
+  bool armed;RenderParked saved;
+  ~ParkRestore(){if(armed&&!render_parked.g)render_parked=saved;}
+ } park_restore{resume,{c,g,parked_root}};
+ if(resume)render_park_hits++;else render_park_cold++;
  vm_offset_t gpu=resident->gpu;
  const bool coherent=resident->coherent;
  int wc_check=0;PE_parse_boot_argn("x9_wc_check",&wc_check,sizeof(wc_check));
@@ -293,8 +365,9 @@ static IOReturn render_submit(X9RenderContext *c,const X9RenderSubmission *reque
   if(kr!=kIOReturnSuccess)return kr;
  }
  const char *phase="storage-sync";
- if(gr64(gpu,0x2440))return kIOReturnBusy;
+ if(!resume&&gr64(gpu,0x2440))return kIOReturnBusy;
  for(unsigned i=0;i<resident->slot_count;i++) {
+  if(resume&&i==g->slot)continue;   /* our own idle running group */
   unsigned state=output_word(resident->image,resident->slots[i].access.interface.group_output)&7;
   if(state==1||state==3)return kIOReturnBusy;
  }
@@ -393,11 +466,12 @@ static IOReturn render_submit(X9RenderContext *c,const X9RenderSubmission *reque
   bzero(base+0x8200,8);bzero(base+0x8280,8);render_storage_clean(g->storage[i]);
  }
  if(!active)return kIOReturnBadArgument;
- uint64_t root=x9_render_memory_publish(c);if(!root)return kIOReturnNotReady;
+ uint64_t root=resume?parked_root:x9_render_memory_publish(c);if(!root)return kIOReturnNotReady;
+ park_restore.armed=false;   /* hardware phase: failures are uncertain, success re-parks */
  for(unsigned i=0;i<3;i++)if((active&(1u<<i))&&!render_range_sync(g->storage[i]))goto uncertain;
  times[3]=mach_absolute_time();
- phase="gpu-flush-and-as-install";
- if(!flush_gpu(gpu)||!install_as(gpu,root,1))goto uncertain;
+ phase=resume?"gpu-flush(parked AS1)":"gpu-flush-and-as-install";
+ if(!flush_gpu(gpu)||(!resume&&!install_as(gpu,root,1)))goto uncertain;
  {
   auto &slot=resident->slots[g->slot];X9CSFQueueIO io=x9_csf_queue_access_io(&slot.access);
   phase="user-io-prepare";
@@ -406,8 +480,9 @@ static IOReturn render_submit(X9RenderContext *c,const X9RenderSubmission *reque
    if(output_qword(resident->image,va+gpu_page)!=g->producer[i]||output_qword(resident->image,va)!=g->producer[i]||
       !put_qword(resident->image,va+8,g->producer[i])||!clean_page(resident->image,va))goto uncertain;
   }
-  phase="group-start";
-  if(x9_csf_group_start(&io,&g->control,resident->epoch,1000000000ULL)!=kIOReturnSuccess)goto uncertain;
+  phase=resume?"group-health(parked)":"group-start";
+  if(resume?x9_csf_group_health(&io,&g->control,resident->epoch)!=kIOReturnSuccess:
+     x9_csf_group_start(&io,&g->control,resident->epoch,1000000000ULL)!=kIOReturnSuccess)goto uncertain;
   phase="stream-publish";
   for(unsigned i=0;i<3;i++)if(active&(1u<<i)) {
    uint32_t va=slot.user_io+i*host_page;
@@ -454,12 +529,19 @@ static IOReturn render_submit(X9RenderContext *c,const X9RenderSubmission *reque
    uint64_t busy_ns=0;absolutetime_to_nanoseconds(times[5]-times[4],&busy_ns);
    __atomic_fetch_add(&sweet_x9_gpu_busy_ns,busy_ns,__ATOMIC_RELAXED);
   }
-  phase="group-suspend";
-  if(x9_csf_group_halt(&io,&g->control,resident->epoch,true,1000000000ULL)!=kIOReturnSuccess)goto uncertain;
-  phase="final-flush-and-as-detach";
-  if(!flush_gpu(gpu)||!remove_as(gpu,resident->policy.saved_attr,resident->policy.saved_cfg,1))goto uncertain;
+  if(park) {
+   /* Leave the idle group running and AS1 bound; flush so the CPU sees results. */
+   phase="final-flush(parking)";
+   if(!flush_gpu(gpu))goto uncertain;
+  }else {
+   phase="group-suspend";
+   if(x9_csf_group_halt(&io,&g->control,resident->epoch,true,1000000000ULL)!=kIOReturnSuccess)goto uncertain;
+   phase="final-flush-and-as-detach";
+   if(!flush_gpu(gpu)||!remove_as(gpu,resident->policy.saved_attr,resident->policy.saved_cfg,1))goto uncertain;
+  }
  }
- x9_render_memory_detached(c);
+ if(park)render_parked={c,g,root};
+ else x9_render_memory_detached(c);
  times[6]=mach_absolute_time();
  for(unsigned i=0;i<3;i++)if(active&(1u<<i))g->producer[i]=expected[i];
  for(auto &r:c->resources)if(r.memory&&(r.flags&X9RenderGPUWrite)) {
@@ -523,6 +605,8 @@ static IOReturn render_submit(X9RenderContext *c,const X9RenderSubmission *reque
     count,coherent?1:0,coherent_total[0]/count,coherent_total[1]/count);
    IOLog("X9 RENDER cache-manifest: jobs=%llu pre_mapped_spans_avg=%llu post_mapped_spans_avg=%llu pre_holes_saved_avg=%llu post_holes_saved_avg=%llu;all mapped indirect targets included,shared aliases retained\n",
     count,span_total[0]/count,span_total[1]/count,hole_total[0]/count,hole_total[1]/count);
+   IOLog("X9 RENDER PARK: hits=%llu cold=%llu retires=%llu;hit = no AS install/CSG start/suspend/AS remove\n",
+    render_park_hits,render_park_cold,render_park_retires);
    IOLog("X9 RENDER cache-plan: builds=%llu reuses=%llu;mapping mutation invalidates,shared cache ops still per submission\n",plan_rebuilds,plan_reuses);
    plan_rebuilds=plan_reuses=0;
    for(unsigned i=0;i<2;i++)hole_total[i]=span_total[i]=0;
@@ -601,7 +685,9 @@ static IOReturn render_wait(X9RenderContext *c,const X9RenderWaitRequest *reques
  return kIOReturnNotFound;
 }
 static bool render_close(X9RenderContext *c) {
- RenderOwner owner;if(!owner.locked||!c||c->exposed||!render_ready())return false;
+ RenderOwner owner;if(!owner.locked||!c||!render_ready())return false;
+ if(!render_park_release_for(c,"close"))return false;
+ if(c->exposed)return false;
  auto *p=(RenderKernelContext *)c->engine_private;if(!p)return x9_render_memory_close(c);
  for(auto *g:p->groups)if(g&&render_destroy_locked(c,g)!=kIOReturnSuccess)return false;
  if(!x9_render_memory_close(c))return false;
@@ -612,7 +698,9 @@ static IOReturn render_timestamp(uint64_t *value) {
  *value=gr64(resident->gpu,0x98);return kIOReturnSuccess;
 }
 static bool render_quiesce(X9RenderContext *c) {
- RenderOwner owner;return owner.locked&&render_ready()&&c&&!c->exposed;
+ RenderOwner owner;if(!owner.locked||!render_ready()||!c)return false;
+ if(!render_park_release_for(c,"quiesce"))return false;
+ return !c->exposed;
 }
 static const X9RenderEngine resident_engine={render_caps,render_context_open,render_close,render_map,render_unmap,
  render_create_group,render_destroy_group,render_submit,render_wait,render_cache,render_timestamp,render_quiesce};

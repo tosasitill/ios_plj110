@@ -212,8 +212,10 @@ clean_failure:
  IOLog("X9 RENDER SESSION: startup unavailable stage=%s; no reset\n",stage);
  delete s;resident=nullptr;return 0;
 }
+static bool render_retire_parked(const char *why); /* SweetX9RenderEngine.inc */
 static int resident_end() {
  if(!resident||!resident->ready||resident->uncertain)return -1;
+ if(!render_retire_parked("resident end"))return -1;
  if(!resident_cleanup(*resident)){resident->uncertain=true;return -1;}
  delete resident;resident=nullptr;return 0;
 }

@@ -624,7 +624,7 @@ extern "C" int sweet_x9_csf_boot(vm_offset_t gpu) {
 }
 
 extern "C" int sweet_x9_csf_user(vm_offset_t gpu,void *job) {
- if(!metal_startup_verified||active_metal_job||active_desktop_job||!job)return 0;
+ if(!metal_startup_verified||active_metal_job||active_desktop_job||!job||render_parked.g)return 0;
  active_metal_job=(X9MetalJob *)job;
  int result=sweet_x9_csf_boot(gpu);
  bool passed=active_metal_job->computed&&active_metal_job->cleaned;
@@ -632,7 +632,7 @@ extern "C" int sweet_x9_csf_user(vm_offset_t gpu,void *job) {
  return result<0?-1:(result==1&&passed?1:0);
 }
 extern "C" int sweet_x9_csf_desktop(vm_offset_t gpu,void *job) {
- if(!metal_startup_verified||active_metal_job||active_desktop_job||!job)return 0;
+ if(!metal_startup_verified||active_metal_job||active_desktop_job||!job||render_parked.g)return 0;
  active_desktop_job=(X9DesktopJob *)job;
  int result=sweet_x9_csf_boot(gpu);
  bool passed=active_desktop_job->computed&&active_desktop_job->cleaned;
@@ -671,14 +671,18 @@ extern "C" bool sweet_x9_render_owner_enter(void) {
  if(!metal_service_lock)return false;IOLockLock(metal_service_lock);return true;
 }
 extern "C" void sweet_x9_render_owner_leave(void) {IOLockUnlock(metal_service_lock);}
+/* Caller holds the owner lock. True while a render group is parked on AS1:
+ * GPU desktop staging must not run then (it needs AS1 and CSG slots). */
+extern "C" bool sweet_x9_render_parked(void) {return render_parked.g!=nullptr;}
 // Nonblocking display-side ownership. Never wait for GPU work on the timer
 // workloop. Positive means the caller must leave(); zero is no native engine;
 // negative means keep the pending frame, including on uncertain DMA ownership.
 extern "C" int sweet_x9_render_display_try_enter(void) {
  if(!metal_service_lock)return 0;
  if(!IOLockTryLock(metal_service_lock))return -1;
+ /* A parked render group (x9_gpu_park) owns AS1 but has no work outstanding. */
  if((resident&&resident->uncertain)||
-    (render_engine_installed&&(!render_ready()||gr64(resident->gpu,0x2440)))) {
+    (render_engine_installed&&(!render_ready()||(gr64(resident->gpu,0x2440)&&!render_parked.g)))) {
   IOLockUnlock(metal_service_lock);return -2;
  }
  return 1;

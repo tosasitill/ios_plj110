@@ -82,6 +82,7 @@ extern "C" int x9_lk_panel_probe(uint64_t timeout, uint64_t te[5], uint64_t xfer
 extern "C" void sweet_watchdog_pet(void);   /* osfmk/arm64/sweet_early.c */
 extern "C" int sweet_x9_render_display_try_enter(void);
 extern "C" void sweet_x9_render_owner_leave(void);
+extern "C" bool sweet_x9_render_parked(void);
 extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
 extern "C" void sweet_console_retarget(vm_offset_t va);   /* osfmk/console/video_console.c */
 extern "C" void (*sweet_console_show_hook)(void);
@@ -2049,7 +2050,7 @@ AppleCLCD::present(const uint8_t *rec)
 		if(get32(rec,0x54+4*layer)==fSurface->id)x9_default_surface=true;
 	/* In-place userspace drawing into the default panel surface cannot be
 	 * protected by this driver's swap-generation counter. Keep it on CPU. */
-	if (sweet_board_x9() && fX9OwnerHeld && !x9_default_surface && fConsolePaused && !fPowerOff && dst==(uint8_t *)fPixels && x9_lk_gui_busy()==0) {
+	if (sweet_board_x9() && fX9OwnerHeld && !sweet_x9_render_parked() && !x9_default_surface && fConsolePaused && !fPowerOff && dst==(uint8_t *)fPixels && x9_lk_gui_busy()==0) {
 		uint8_t *stage=sweet_x9_desktop_frame_begin(dst,fRowBytes,fWidth,fHeight,x9_fb_present_seq);
 		if(stage) {dst=stage;x9_staged=true;}
 	}
