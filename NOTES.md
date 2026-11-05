@@ -18,7 +18,11 @@
   ~60 s -> keyboard seed verdict. (2) only then rev252w-wifipwr: first Wi-Fi hardware write
   (GPIO250/251 high ~3 s, then off), user already approved it on 2026-11-04. Read
   `X9 WIFI POWER:` lines: faultb (GPIO65) going to 1 = PMIC up without fault; LTSSM likely stays 0.
-- Before each fastboot boot: run mailbox/update.py staging (the payload is unchanged, allowlist 252).
+- Mailbox: **no staging needed** for rev252w / rev252w-wifipwr. kern_exec.c:8212 calls
+  x9_update_install (the mailbox) only when x9_render_external verification of the bundles already
+  on the root volume fails; both images carry the committed 252 allowlist (17ed5f20) that matched
+  in 43.txt:668-669 with no X9 UPDATE line. Neither dir has plugin-package/, so update.py would
+  refuse anyway. Do NOT stage x9-rev252v-kbdseed/plugin-package (the restaged 235f5a9c payload).
 
 ## 44.txt: rev252v stuck the phone at the Apple logo because my build restaged the Metal allowlist (2026-11-04)
 
