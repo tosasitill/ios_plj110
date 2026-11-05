@@ -1,3 +1,25 @@
+## 56.txt + mt76 comparison (2026-11-05)
+
+- 实测 56.txt (382,528 B, /tmp/56.txt) = rev252ah. RC pref window as LK left it 00010001/0/0 (64-bit, base 0,
+  limit 0 -> first 1 MB only; never covered 0x1_45...); set to 0001fff1/0/0 (low nibbles RO). EP AER cap @0x200:
+  unc_sta 0, unc_mask 00400000 (only internal error masked), cor_sta 0, header log 0 as ROM left it, before DMA
+  and at the stall. RC MAC 0x204/0x210/0x230 = f5/ffff00f1/f5 constant from LK on. Same stall, DMADONE=0.
+  -> EP saw no completion timeout/UR/CA: the read either never left the MT6653 or the stall is after a good read.
+- mt76 (openwrt/mt76 0936617, shallow clone in the session scratchpad, read only) mt7925/pci.c + mt792x_dma.c:
+  - MT7927 (PCI ids 0x6639/0x7927/0x0738) register map = our MT6653 BAR layout: WFDMA0 0xd4000, EXT_CSR 0xd7000,
+    ROMCODE_INDEX 0xc1604 (idle 0x1d1e), CB crypto-top MCU_OWN_SET 0x1f5034, CB RGU WF reset 0x1f8600 bit4.
+  - Descriptor high bits identical to ours (TX w3 bits 3:0, RX w2 bits 3:0). mt76 uses a 32-bit DMA mask for
+    MT7927 (34-bit only for MT7928); our DRAM is all above 4 GiB, so ADDR_EXT is mandatory for us.
+  - MT7927 probe before DMA: fw_own -> drv_own, CONN_CFG_EMI_CTL_0 (0x7c011100, bar 0x101100) bit1 SLPPROT_EN
+    = 1, mt7927_wfsys_reset (RGU 0x1f8600 |= bit4, 1-2 ms, clear, 5-10 ms, MCU_OWN_SET 0x1f5034 = 1, poll
+    ROMCODE_INDEX == 0x1d1e <= 200 ms) = gen4m mt6653_mcu_reset (skipped in WMT builds), irq mask, rings,
+    "prefetch" (0xd7030 rewrite, 0xd70f0-fc = 660077/1100/30004f/542200: on MT6653 these are HOST_CONFIG and
+    MSI_INT_CFG0-3, i.e. MSI routing), GLO_CFG |= ADDR_EXT | FW_DWLD_BYPASS_DMASHDL, clear LBK_RX_Q_SEL_EN,
+    EXT1 bit28, INT_RX_PRI |= 0xf00, INT_TX_PRI |= 0x7f00. MCU events on RX ring 6 for MT7927 (gen4m mt6653: 7).
+  - Not seen before: WFDMA wrapper AXI0 "R2A" bridge 0x20027500-0x2002751c (bar 0xd7500..): CTRL_0..2,
+    STS (RRESP_ERR b11, RRESP_ERR_STS b10:3, RD_AXI_ERR_DET_INT b0, BRESP b20/b19:12), DMAWR/DMARD probes,
+    WR_DBG_AXIM_OUT0/1. gen4m never writes it; its STS would show an AXI read error inside the chip.
+
 ## 55.txt: DMASHDL ruled out; rev252ah = RC prefetchable window disabled + AER (2026-11-05)
 
 - 实测 55.txt (493,031 B, /tmp/55.txt) = rev252ag. Bypass took effect: `ext0 28c004df -> 28c0049f, sw_ctrl
