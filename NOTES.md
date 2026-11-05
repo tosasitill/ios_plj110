@@ -1,3 +1,35 @@
+## 47.txt: globe key fixed; PCIe0 LINK UP to L0; EP config read ffffffff (no RC bus numbers); rev252z (2026-11-05)
+
+- 实测 47.txt (608,088 B) = rev252y. USER: globe key works now. `X9 KBD DICT: ... binary plist (449
+  bytes); replaced ... bytes=1727` (47.txt:672-673). No Preferences/Spotlight crash.
+- 实测 Wi-Fi stage 3 (47.txt:3012-4161): faultb=1 again. Before the reset release every MAC reg read
+  0; after `pextp0cfg +0xc = bit0` **base_conf=14110f01 setting=00007081 rst=00088708**
+  (47.txt:3020), PHY rx_30=00800432 glb_4c=010f0207 misc=18000002 -> the MAC/PHY were held in reset
+  by LK, as inferred. After the RC start: LTSSM 0x00 -> 0x01 -> 0x02 -> 0x0e -> 0x0c -> **0x10 (L0)**,
+  `LINK UP after 16 ms` link=00001901 (47.txt:3109), still up after 1 s. EP config read at bus 1 =
+  ffffffff for all dwords (47.txt:3110). Clean undo, power-off.
+- 推断: ffffffff because the root port (bus 0 devfn 0, type-1) had secondary/subordinate bus 0,
+  so the type-1 request for bus 1 was never forwarded (Linux enumeration programs 0x18 first).
+- rev252z Wi-Fi stage 4 (`x9_wifi_power=4`, commit 0257af8), inside the link-up window:
+  AXI_IF_CTRL 0x1a8 |= bit12 (AXI0_SLV_RESP_MASK) | bit28 (SW_CPLTO_DATA_SEL) first (pre_init_6993:
+  completion timeout returns zeros, no slave error); RC id/class, bus 0x18 = 00/01/01, mem window
+  0x20 = 0x5000-0x57f0, cmd |= MEM|MASTER; EP id/class/header/subsys/cap walk (PCIe cap: Gen/width);
+  BAR0(/1) sizing; if 2..128 MiB: translation table 0 (0x800: cpu 0x50000000 -> pci 0x50000000,
+  128 MiB, MEM), BAR0 = 0x50000000, EP cmd = MEM only (no bus master); read-only BAR0 MMIO per
+  mt6653_bus2chip_cr_mapping: CB_TOP 0x70000000/4 (bar+0x1e0000), CB_INFRA1 0x70010200/4/8
+  (0x1c0200), CONN_CFG IP version 0x7c011000 (0x101000, expect 0x03040001), WF_TOP_CFG IP version
+  0x80020010 (0xb0010), TOP_HCR/FVR 0x88000000/4 (0x140000), CONN_ON_MISC 0x200600f0 (0xe00f0).
+  Everything is undone (EP cmd/BAR, tt0, RC cmd/bus/window, AXI_IF_CTRL), then PERST and MAC/PHY
+  resets re-asserted and power-off as before. No conn_infra wakeup, no DMA, no firmware.
+- Built on the Mac: ~/ios_plj110/x9/out/x9-rev252z/boot.img, 9,478,144 B, sha256
+  6bb75cc85a9a8dc225c6612fa3b96f27d84536b6c90cc5aba12720355dcdc56b, no `--revision` (allowlist
+  17ed5f20, no plugin-package/ -> no mailbox staging), EXIT=0, 0 `error:`, 0 X9WifiNet.inc warnings.
+  Boot args as rev252y but x9_wifi_power=4. Not device-tested.
+- Next: flash rev252z; read `X9 WIFI EP:` (want id 665314c3 or 0x6653 in it, BAR0 size >= 2 MiB)
+  and `X9 WIFI MMIO:` (non-zero CB_TOP/IP version = chip registers reachable). Then: conn_infra
+  wakeup + driver-own handshake, firmware download (mt6653 patch/RAM from Android /vendor/firmware),
+  WFDMA rings, MSI -> SPI 369.
+
 ## 46.txt: typing fixed; globe-key crash = my string KeyboardLastUsedForLanguage; Wi-Fi faultb=1; rev252y (2026-11-05)
 
 - 实测 46.txt (1,093,670 B, ends 55.6 s) = rev252x. USER: typing is fine now (Offline Dictation
