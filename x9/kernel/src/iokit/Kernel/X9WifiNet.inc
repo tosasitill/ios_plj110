@@ -1274,6 +1274,9 @@ x9_wifi_stage6(volatile uint32_t *bar)
         if (ok) {
             IOLog("X9 WIFI PATCH: section %u data sent (%u B) t=%llu ms int_sta=%08x\n", s, len, x9_ms_since(tp),
                 x9_wd_rd(&d, 0x200));
+            /* 68.txt: slpprot0 b28 / CB slp_status b5 / R2A dmawr_probe were only seen after the PATCH_FINISH
+             * timeout; dump right after the data to see whether they already flip during the data phase. */
+            x9_wifi_rc_diag(s == 0 ? "after data s0" : "after data s1");
         }
     }
     if (ok) {

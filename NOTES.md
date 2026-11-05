@@ -1,3 +1,17 @@
+## HANDOFF 2026-11-05 (4): 68.txt = rev252ay: PATCH_FINISH STILL no event in 10 s; rev252az diag (not built)
+
+- 实测 /tmp/68.txt (x9-rev252ay): identical to 67: cid5 seq1/2 answered in 1 ms each, section data 2 ms / 6 ms
+  (all chunks consumed on TX16), PATCH_FINISH (cid 7 seq 3) `no event in 10000 ms`, rom_sram/romcode_index
+  still 1d1e, RX7 cidx=15 didx=2, slpprot0 1041f004 (b28), CB slp_status 2b (b5), R2A dmawr_probe=10080000.
+  => it is NOT a too-short wait. ROM never answers FINISH.
+- Unknown (guess): ROM may have stopped/slept after the data (b28/b5), or data of the AES section 1 was not
+  accepted. rev252az (source only, NOT built; commit follows): dumps x9_wifi_rc_diag right after each section's
+  data ("after data s0/s1") to see whether b28/b5/dmawr_probe flip during the data phase or only on FINISH.
+- Build on the Mac: `python3 -I x9/build/build.py --name x9-rev252az --boot-arg x9_wifi_power=6 ...` (same
+  boot args as rev252ay; kernel only, plugin 255 already staged, no mailbox needed).
+- Next candidates if the flip happens in the data phase: try PATCH_SEM_CONTROL (mt76 does), smaller/larger
+  chunks, key-index/mode bits for the AES section.
+
 ## HANDOFF 2026-11-05 (3): Wi-Fi DMA WORKS with the LK pool; PATCH_FINISH timeout; rev252ay
 
 - 实测 /tmp/67.txt (x9-rev252ax, includes rev252am x9_wifi_rsvmem=1): `X9 WIFI DMA: using LK
