@@ -1,3 +1,23 @@
+## Wi-Fi: DMA stall FIXED by LK's Wi-Fi pool (EMI MPU); PATCH_START status 14 = our 68-byte header; rev252av (2026-11-05)
+
+- 实测 61/62/63.txt (rev252am+ kernels, x9_wifi_rsvmem default 1): `X9 WIFI DMA: using LK wifi-reserve-memory
+  pool pa=e2700000`, then `X9 WIFI CMD: cid 0x05 seq 1 -> event len=44 rxd0=3800002c ... type=0007 eid=1 seq=1
+  data=0e 00 00 00`. **First ever completed host<->MT6653 command round trip**: TX15 consumed, RX7 event. So the
+  58-60 stall was the EMI MPU (PCIe/CONN master only allowed into LK's MPU region 47 carve-out), as predicted.
+- Then `PATCH: section 0 addr=00900000 len=70976 info=01000000 mode=80000009 PATCH_START answered status=14
+  cid=00` -> stage stops, rings stopped, fw own, power off (clean).
+- SOURCE: event layout ok (RXD 32 = MT6653_RX_INIT_DESC_LENGTH, INIT_WIFI_EVENT 8 bytes, CMD_RESULT
+  {ucStatus, ucCID}); status codes 0..6 only (nic_init_cmd_event.h); connv3 builds use CFG_ROM_PATCH_NO_SEM_CTRL=1
+  (no PATCH_SEM, our flow right), CFG_DOWNLOAD_DYN_MEMORY_MAP=0, patch via wlanImageSectionConfig PATCH_START.
+  **Bug: gen4m wlanSendInitSetQueryCmdImpl sizes commands as cmd + sizeof(INIT_HIF_TX_HEADER) 32 +
+  sizeof(INIT_HIF_TX_HEADER_PENDING_FOR_HW_32BYTES) 32 -> payload at 64** (INIT_WIFI_CMD = CID, 0xA0, rsv, seq,
+  u4Reserved, au4D3toD7Rev[5]); mt76 connac2 MCU TXD is 64 too. Ours used 68 -> ROM read {addr,len,mode} 4
+  bytes late (status 14, CID echoed 0). FW data chunks (cid 0, ring 16) are raw: unchanged.
+- rev252av (commit 4c9d281): payload at 64, len 64+plen. Image x9-rev252av = all --revision 254 (plugin 254
+  failure logging) + x9_wifi_power=6 x9_gpu_acelite=1 x9_gpu_coherent=0. NEW PLUGIN: stage before booting.
+  Expect PATCH_START status 0, then patch data chunks on ring 16, PATCH_FINISH (CID 7) status 0, then the RAM
+  firmware stage (not implemented yet beyond what stage 6 does).
+
 ## 63.txt = x9-rev252at-probe: GPU->CPU snoop mostly works; backboardd device poisoned silently at 41.4 s; plugin 254 (2026-11-05)
 
 - 实测 /tmp/63.txt (4,238,619 B), boot-args x9_gpu_acelite=1 x9_gpu_coherent=0 (CIVAC kept). SMMU SHCFG 0->1
