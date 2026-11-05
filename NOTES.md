@@ -1,3 +1,57 @@
+## 44.txt: rev252v stuck the phone at the Apple logo because my build restaged the Metal allowlist (2026-11-04)
+
+- 实测 USER: 「一直卡 logo」 with 44.txt (406,799 B, log ends 137.5 s). Kernel and root come up
+  normally; the visible failure is SpringBoard crash-looping: 22 `CRASH SpringBoard reason ns 2
+  code 0xb` lines, one every ~5.8 s from 14.4 s (44.txt:2173 …), and the display counters never
+  copy a frame (`X9 DISPLAY cadence ... copies=0 submits=0` all the way to 136.9 s).
+- 实测 cause, first lines that differ from 43.txt: 44.txt:621 `X9 RENDER EXTERNAL:
+  missing/mismatched path=/System/Library/Extensions/X9GeneralMetal252.bundle/X9GeneralMetal
+  errno=22; discovery disabled` and 44.txt:623 `X9 RENDER EXTERNAL: not armed errno=22`, where
+  43.txt:668-669 said `active plugin=X9GeneralMetal252 from verified allowlist` / `exact signed
+  Metal/PanVK files verified on root volume; native discovery armed`. With no accelerator the
+  sampled SpringBoard dies in the CoreImage software path (slide 0x266e0000, sig 11, **pc=0x0**):
+  `-[UIImage _imageWithStylePresets:tintColor:traitCollection:]` (UIKitCore 0x1896ead5c) ->
+  `+[CUIShapeEffectStack sharedCIContext]` (CoreUI, dispatch_once) -> `+[CIContext
+  contextWithOptions:]` -> `-[CIContext initWithOptions:]` -> `+[CIContext(Internal)
+  internalContextWithEAGLContext:options:]` -> `CI::GLContext::GLContext` -> `CI::GLContext::init()
+  +204` calling NULL. So "stuck at logo" = no GPU plugin -> CoreImage GL path -> jump to NULL ->
+  SpringBoard relaunch loop; it is not the keyboard seed.
+- 实测 why the allowlist moved (my mistake, build invocation): x9/build/build.py:279 runs the
+  **plugins** step whenever `--revision` is passed together with step `all`, and rev252v was built
+  with `all --revision 252`. 44's build.log:35-36 shows `package-plugins.py --revision 252` ran and
+  printed "kernel allowlist x9/kernel/generated/x9_render_external_manifest.h updated" (rev252u's
+  build.log has no such line and no plugin-package dir). It rehashed the bundle payload: X9GeneralMetal
+  sha256 17ed5f20... -> 235f5a9c..., and x9_render_external.inc:13-27 verifies size + full sha256 of
+  the files **already installed on the root volume**, so the kernel no longer matched the device copy
+  and disabled discovery. Byte-checked in the artifacts: rev252v kernel/boot.img contain the 235f5a9c
+  digest, rev252w contain 17ed5f20.
+- 实测 the rev252v keyboard seed itself worked and is worth keeping: 44.txt:626-627 `X9 KBD DICT:
+  com.apple.keyboard.preferences is a binary plist (693 bytes); replaced with XML seed` + `errno=0
+  bytes=1578`, and the live file stayed `size=1578 mtime=34` in **all 11** preference passes up to
+  130 s - cfprefsd did not rewrite it, unlike 42.txt where the seed was replaced by a 224-byte file
+  at 50 s. The 767-byte `.x9-before-seed` backup is still the untouched original.
+- 实测 the lag experiment could not run this boot: only SpringBoard (4 sample events, because the
+  process kept dying) and kbd were sampled; Spotlight and Preferences never came up, so there is no
+  t0 evidence about `updateEnabledDictationLanguages:` yet.
+- rev252w (built, not flashed): same kernel source as rev252v, allowlist restored with
+  `git checkout -- x9/kernel/generated/x9_render_external_manifest.h` so it again matches the bundles
+  installed on the device; the restaged package and header copy are kept aside in
+  x9/out/x9-rev252v-kbdseed/ (plugin-package/, x9_render_external_manifest.h.restaged-252) in case we
+  ever want to install the new payload - installing it means deleting the existing bundles on the
+  root volume, a device write that needs the user's explicit OK. Built with
+  `build.py all --name x9-rev252w-kbdseed --boot-arg ...` **without** `--revision`, EXIT=0, no
+  `error:` lines; boot.img 9,474,048 B, sha256
+  462402bad7264783633b02b8323ac0567e00e1819a4ae555c69d8b25d502a1a7, host-built, not
+  hardware-verified. Boot args unchanged from rev252v.
+- Test: flash rev252w and read the first lines for `X9 RENDER EXTERNAL: active plugin=
+  X9GeneralMetal252 from verified allowlist` + `native discovery armed`; the logo should clear and
+  SpringBoard should stop crashing. Only then type in Spotlight for ~60 s and pull the log, which is
+  what gives the rev252v/w seed verdict (`X9 PREF` still 1578 bytes and no
+  `updateEnabledDictationLanguages:` frame in the Spotlight t0 passes).
+- 教训 for the next session: **never pass `--revision` with step `all`** unless the plugin payload is
+  going to be reinstalled on the root volume; `all` without `--revision` keeps the committed
+  allowlist (this is the "no restaging" note in project memory).
+
 ## 43.txt: rev252u never seeded (gate left at 0); the miss is only part of the cost (2026-11-04)
 
 - 实测 43.txt (723,496 B) is the rev252u boot, same boot args, sampler on
