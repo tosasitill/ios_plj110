@@ -1,3 +1,15 @@
+## rev252ai: mt76 MT7927 WFSYS reset before DMA + R2A bridge dump (built 2026-11-05, not device-tested)
+
+- Commit 9156ca9, `x9_wifi_power=6`. Inside the driver-own window, before bus master + stage 6:
+  `X9 WIFI WFSYS: before reset emi_ctl0 rgu_wf_rst mcu_own romcode lpctl`, then CONN_CFG_EMI_CTL_0 (bar 0x101100)
+  |= bit1, CB_INFRA_RGU (bar 0x1f8600) bit4 set 1.5 ms / clear / 8 ms, CB crypto MCU_OWN_SET (bar 0x1f5034) = 1,
+  poll ROMCODE_INDEX == 0x1d1e <= 200 ms -> `X9 WIFI WFSYS: reset DONE, ROM idle|TIMEOUT ...`; re-takes driver own
+  if lpctl bit2 came back (`driver own again`); DMA skipped if ROM not idle or no driver own; EMI_CTL_0 restored
+  at the end. Every diag dump now also logs `X9 WIFI R2A <when>: ctrl0-2 sts dmawr/dmard probe wr_dbg0/1
+  txfifo_dbg0/1` (R2A STS: b11 RRESP_ERR, b10:3 RRESP_ERR_STS, b0 RD_AXI_ERR_DET_INT).
+- Built: ~/ios_plj110/x9/out/x9-rev252ai/boot.img 9,871,360 B sha256
+  701ca03719327564c329a190f46aec81b309b4bd979f94c428216ce314362f38, 0 errors, no mailbox staging.
+
 ## 56.txt + mt76 comparison (2026-11-05)
 
 - 实测 56.txt (382,528 B, /tmp/56.txt) = rev252ah. RC pref window as LK left it 00010001/0/0 (64-bit, base 0,
