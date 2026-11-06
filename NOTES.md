@@ -1,3 +1,23 @@
+## HANDOFF 2026-11-06 (7): Android pull -> PHY firmware goes BEFORE the N9 RAM code; rev252bi
+
+- Android pull (user connected adb to the Mac; on the server in .local/x9/android-pull-20261106-132120/, gitignored:
+  CONNXO 29 B (calibrated XO NVRAM, differs from the vendor default), WIFI 11266 B, WIFI_CUSTOM, dmesg.txt (+
+  dmesg.clean), logcat-all.txt). Pull script: zsh on the Mac does not word-split, run it with bash.
+- 实测 Android dmesg (gen4m at DEBUG, 2nd probe at 12.63 s): wlanAccessCalibrationEMI Offset 0x1610000 Size 0x6c1dc
+  backup(1); **WIFI_MT6653_PHY_RAM_CODE_dx5_2g2a_1.bin: 4 regions, TX CMD ID 0x01 x4, ID 0x02 -> "FW_START EVT
+  success" (8 ms)**; then WIFI_RAM_CODE: 6 regions ID 0x01 x6, ID 0x02 -> FW_START success after 154 ms;
+  "Ready bit asserted" immediately; fw log EMI headers WF_MCU 0x1b4000 / WF_WM 0x1a8040; SwSync EMI offset 0x1c8000
+  (matches the 10ff8a55 seen in 74.txt); NIC capability query etc. No PHY_ACTION (ID 0x08) TX line visible in that
+  probe. So my "PHY_FWDL off for MT6653" reading of Kbuild was wrong.
+- PHY image tailer: 4 regions 86400000 59216, 86600000 23504, 86800000 43472, 86a00000 20816, all feat 01, no entry.
+  gen4m wlanDownloadPhyFw: mode = wlanGetDataMode(PHY) = 80000009 | WORKING_PDA_OPTION b4 = 80000019; WIFI_START
+  {override START_CRC_CHECK b3 (| b0 if entry), addr 0}.
+- rev252bi (commit after 9fa16d6): x9_wifi_dl_image() shared region downloader; PHY image + WIFI_START(8, 0)
+  (boot-arg x9_wifi_phyfw=1) before the N9 RAM + WIFI_START; XO NVRAM words overridable via boot-args
+  x9_wifi_xo0..x9_wifi_xo6 (build with the calibrated CONNXO words, generated from the .local pull - values not in
+  git). NOT BUILT (tunnel refused). Build: `python3 -I x9/build/build.py --name x9-rev252bi --boot-arg
+  x9_wifi_power=6 --boot-arg x9_gpu_khz=1716000 --boot-arg x9_gpu_floor_khz=1100000` + the 7 x9_wifi_xo args.
+
 ## HANDOFF 2026-11-06 (6): 76.txt = rev252bg: RAM code accepted, WIFI_START unanswered, N9_DONE only; rev252bh diag
 
 - 实测 /tmp/76.txt (x9-rev252bg): patch downloaded again (161 ms). RAM: all 6 regions DOWNLOAD_CONFIG status 0, data
