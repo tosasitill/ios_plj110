@@ -1,0 +1,89 @@
+--- a/crates/metal2vulkan-runtime/src/command_buffer/mod.rs
++++ b/crates/metal2vulkan-runtime/src/command_buffer/mod.rs
+@@ -273,6 +273,8 @@
+     /// ([`CommandBufferShared::answer`]), its raw value with release ordering, and a read loads
+     /// it with acquire ordering and takes no lock. Metal's reads wait for no submission.
+     status: AtomicU8,
++    /// X9 metrics: when the command buffer was committed (`x9_timing`), 0 if never.
++    commit_ns: AtomicU64,
+     /// Its error as `error` answers it: set once, by the completion that fails it, before that
+     /// stores the `Error` status, so a read that loads `Error` finds it. A commit takes nothing
+     /// here: no lock is taken first at a commit (on Apple's hosts a mutex allocates at its first
+@@ -1899,6 +1901,7 @@
+             raws_ended: AtomicU64::new(0),
+             kernel: KernelTimes::default(),
+             status: AtomicU8::new(status_word(CommandBufferStatus::NotEnqueued)),
++            commit_ns: AtomicU64::new(0),
+             error: OnceLock::new(),
+             group_hold: AtomicU8::new(0),
+         }))
+@@ -2456,6 +2459,7 @@
+     /// [`commit`](Self::commit) for `call`, or, with `failure`,
+     /// [`commit_failed`](Self::commit_failed).
+     fn commit_as(&self, call: &'static str, failure: Option<CommitFailure>) -> Result<(), Error> {
++        self.0.commit_ns.store(crate::x9_timing::now_ns(), Ordering::Release);
+         // Left to wait for the last render encoder's end, where its call left it to the device's
+         // lowering thread and the thread has not lowered it, or for the commits left so.
+         if failure.is_none() && self.queue_commit(call)? {
+--- a/crates/metal2vulkan-runtime/src/command_buffer/group.rs
++++ b/crates/metal2vulkan-runtime/src/command_buffer/group.rs
+@@ -501,6 +501,10 @@
+                 raw.queue_submit(vk_queue, submits, fence.unwrap_or(vk::Fence::null()))
+             });
+         exit_guard::called(Call::QueueSubmit);
++        // X9 metrics: commit -> this vkQueueSubmit returned (kernel enqueue), per command buffer.
++        for member in self.members.iter() {
++            crate::x9_timing::record(member.submission.buffer().commit_ns.load(std::sync::atomic::Ordering::Acquire));
++        }
+         self.events.clear();
+         let several = count + usize::from(!alone) > 1;
+         let outcome = match submitted {
+--- a/crates/metal2vulkan-runtime/src/lib.rs
++++ b/crates/metal2vulkan-runtime/src/lib.rs
+@@ -23,6 +23,7 @@
+ // warnings-denied gates.
+ #![warn(missing_docs)]
+ 
++pub mod x9_timing;
+ mod address;
+ mod address_map;
+ mod address_pool;
+--- /dev/null
++++ b/crates/metal2vulkan-runtime/src/x9_timing.rs
+@@ -0,0 +1,36 @@
++//! X9 metrics (logging only): commit -> kernel-visible submit, measured where a group's
++//! `vkQueueSubmit` returns. Not used by any submission decision.
++use std::sync::OnceLock;
++use std::sync::atomic::{AtomicU64, Ordering};
++use std::time::Instant;
++
++static EPOCH: OnceLock<Instant> = OnceLock::new();
++static COUNT: AtomicU64 = AtomicU64::new(0);
++static SUM_NS: AtomicU64 = AtomicU64::new(0);
++static MAX_NS: AtomicU64 = AtomicU64::new(0);
++
++/// Monotonic nanoseconds since the first call, never 0 (0 means "not committed").
++pub fn now_ns() -> u64 {
++    let epoch = EPOCH.get_or_init(Instant::now);
++    (epoch.elapsed().as_nanos() as u64).saturating_add(1)
++}
++
++/// One command buffer's commit time -> now. Ignores 0.
++pub fn record(commit_ns: u64) {
++    if commit_ns == 0 {
++        return;
++    }
++    let delta = now_ns().saturating_sub(commit_ns);
++    COUNT.fetch_add(1, Ordering::Relaxed);
++    SUM_NS.fetch_add(delta, Ordering::Relaxed);
++    MAX_NS.fetch_max(delta, Ordering::Relaxed);
++}
++
++/// Snapshot and reset: (command buffers, sum of deltas ns, max delta ns).
++pub fn take() -> (u64, u64, u64) {
++    (
++        COUNT.swap(0, Ordering::Relaxed),
++        SUM_NS.swap(0, Ordering::Relaxed),
++        MAX_NS.swap(0, Ordering::Relaxed),
++    )
++}

@@ -19,7 +19,8 @@ source=opts.runtime_source.resolve() if opts.runtime_source else w/'metal2vulkan
 patch_dir=Path(__file__).resolve().parents[1]/'third_party/metal2vulkan-pan205'
 subprocess.run([sys.executable,'-I',str(Path(__file__).with_name('apply-source-patches.py')),
  '--source',str(source),str(patch_dir/'0023-quality-of-service-on-ios.patch'),
- str(patch_dir/'0025-host-pointer-linear-textures.patch')],check=True)
+ str(patch_dir/'0025-host-pointer-linear-textures.patch'),
+ str(patch_dir/'0026-x9-commit-submit-timing.patch')],check=True)
 bridge=root/'MaliMetal/X9/General'
 bridge.mkdir(parents=True,exist_ok=True)
 reference=root/'work/legacy-import/xnu_x9/drivers/NativeMetal'

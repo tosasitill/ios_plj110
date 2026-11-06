@@ -1,3 +1,17 @@
+## HANDOFF 2026-11-06 (19): rev252bq BUILT = plugin 256 with commit->vkQueueSubmit timing + park/async
+
+- BUILT (Mac, via ssh): `build.py all --revision 256 --name x9-rev252bq` with rev252bp args (x9_gpu_park=1 x9_submit_async=1).
+  Output x9/out/x9-rev252bq (boot.img, plugin-package). Not device-tested. boot_sha256 in x9/out/x9-rev252bq/boot.json.
+- NEW PLUGIN PACKAGE: stage before booting, serial from the user: `X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/x9-rev252bq`.
+  Not run yet (device write, needs the user's go-ahead).
+- Runtime change: metal2vulkan-runtime patch x9/build/third_party/metal2vulkan-pan205/0026-x9-commit-submit-timing.patch
+  (added to build-general-metal.py list). It adds commit_ns to CommandBufferShared (set at commit_as), crate module x9_timing
+  (now_ns/record/take), and records commit -> vkQueueSubmit return at the group submit sites (group.rs queue_submit).
+  Forward-applies to pristine, reverse-applies to the patched tree. Coverage: group submissions only; submit_alone is not timed.
+- Frontend: NativeBridgeMetalFrontend.mm logs `X9 FRONTEND commit->submit: window_s=2 command_buffers= avg_us= max_us=` every 2 s
+  via nmb_x9_submit_timing (NativeMetalObjects.rs/.h).
+- Wi-Fi RUC-Web failed (user). Still no disk/console log of that attempt. Needed before any Wi-Fi diagnosis.
+
 ## HANDOFF 2026-11-06 (18): metal2vulkan source found on the Mac (not in the server checkout)
 
 - Location (Mac): .local/x9/work/references/metal2vulkan-219f01365dc4c8eb346816c405b5b17403793764/crates/metal2vulkan-runtime

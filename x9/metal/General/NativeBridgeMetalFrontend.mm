@@ -1343,6 +1343,19 @@ static char kUserDictionaryKey;
  dispatch_queue_t queue=_queue.completionQueue;
  if(queue)dispatch_async(queue,run);else run();
 }
+/* X9 metrics (rev252bp): every 2 s, log how long command buffers took from commit to the runtime's
+   vkQueueSubmit return (the kernel enqueue point). Group submissions only. */
+static void x9SubmitTimingLog(void) {
+ static uint64_t last=0;
+ const uint64_t now=nowUs();
+ if(last==0){last=now;return;}
+ if(now-last<2000000)return;
+ last=now;
+ uint64_t cbs=0,sum=0,max=0;
+ if(!nmb_x9_submit_timing(&cbs,&sum,&max))return;
+ NBLOG(@"X9 FRONTEND commit->submit: window_s=2 command_buffers=%llu avg_us=%llu max_us=%llu;commit to vkQueueSubmit return, group submissions only",
+  (unsigned long long)cbs,(unsigned long long)(cbs?sum/cbs/1000:0),(unsigned long long)(max/1000));
+}
 - (void)commit {
  if(self.committed){NBLOG(@"native-metal: commit twice");return;}
  if(self.traceFrameReplays.count)x9FrameReplay(self);
@@ -1381,7 +1394,7 @@ static char kUserDictionaryKey;
   const bool submitted=nmb_command_buffer_on_completed(_handle,completed,context) &&
      nmb_command_buffer_on_scheduled(_handle,scheduled,context) && nmb_command_buffer_commit(_handle);
   gTimeSubmit.add(submitBegan);
-  if(submitted)return;
+  if(submitted){x9SubmitTimingLog();return;}
   (void)CFBridgingRelease(context);   // refused registration/commit cannot call the registered handlers
   [self refuse:[@"commit: " stringByAppendingString:lastError()]];
  }

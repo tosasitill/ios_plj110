@@ -2401,5 +2401,21 @@ pub extern "C" fn nmb_blit_generate_mipmaps(encoder: *mut NmbEncoder, texture: *
     })
 }
 
+/// X9 metrics (rev252bp): snapshot and reset of commit -> vkQueueSubmit timing (logging only).
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_x9_submit_timing(command_buffers: *mut u64, sum_ns: *mut u64, max_ns: *mut u64) -> bool {
+    if command_buffers.is_null() || sum_ns.is_null() || max_ns.is_null() {
+        return false;
+    }
+    let (count, sum, max) = metal2vulkan_runtime::x9_timing::take();
+    // SAFETY: the caller passes three valid, writable u64 pointers (checked above).
+    unsafe {
+        *command_buffers = count;
+        *sum_ns = sum;
+        *max_ns = max;
+    }
+    true
+}
+
 #[path = "NativeMetalExtras.rs"]
 mod extras;
