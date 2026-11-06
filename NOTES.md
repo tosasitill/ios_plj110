@@ -1,3 +1,20 @@
+## HANDOFF 2026-11-06 (8): **Wi-Fi FIRMWARE RUNNING, READY BIT SET** (77.txt = rev252bi)
+
+- 实测 /tmp/77.txt (x9-rev252bi, calibrated XO via x9_wifi_xo0..6): PLATCFG XO reads back ca9f0019 000095bf 0
+  80800000 00008080, custom 00158000. Patch downloaded (161 ms). PHY image: 4 regions mode 80000019 status 0
+  (147008 B in 6 ms), **WIFI_START override 8 -> status 0 "PHY STARTED"** (8 ms, same as Android). RAM: 6 regions
+  status 0 (21 ms), **WIFI_START {1, 0091c000} answered status 0 after 1.73 s -> "RAM CODE STARTED"**, then
+  **ep cfg 0x48c = 30cfbc2e (sync 3), conn_on_misc = 3 -> FW READY after 0 ms**. RX7 didx 1 at that point.
+- EMI after start (11 blocks changed, no assert text): +1a8000 = fw log header (00000040 0000bf80 0000c000 00003f80;
+  Android: WF_WM base 0x1a8040 len 0xbf80, WF_MCU 0x1b4000 len 0x3f80), +1b0000.. fw log data, +1c0000..+210000 new
+  data, sw-sync +1c8000 area.
+- Root causes, in order: (1) MCU EMI base/size, (2) conninfra sysram plat cfg (XO NVRAM + connv3 option) -> patch;
+  (3) PHY RAM code + WIFI_START(CRC_CHECK) before N9 RAM code -> RAM init completes.
+- Next: talk to the running firmware (RAM-mode commands: connac3 WIFI_CMD / UNI_CMD on TX15, events RX7): first
+  NIC capability query (MAC, caps) as gen4m wlanQueryNicCapabilityV2, then keep the chip up instead of powering
+  it off at the end of stage 6, then a real driver (interrupts, scan, data path; hakios-mt6768 redwood_mtkwifi.c is a
+  CONNAC1 reference for that layer).
+
 ## HANDOFF 2026-11-06 (7): Android pull -> PHY firmware goes BEFORE the N9 RAM code; rev252bi
 
 - Android pull (user connected adb to the Mac; on the server in .local/x9/android-pull-20261106-132120/, gitignored:
