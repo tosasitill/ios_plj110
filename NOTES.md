@@ -1,3 +1,17 @@
+## HANDOFF 2026-11-06 (14): rev252bo BUILT = P3 metrics (logging only); commit f93f7b0
+
+- Added X9 METRICS to the 2 s display cadence block (SweetFramebuffer.cpp, commit f93f7b0): per window swaps,
+  presents, presented_fps, dropped (replaced before shown), swap->present latency histogram (<8/<17/<34/<50/<100/>=100 ms),
+  avg/max, stutter_ge50, and the GPU fence seq of the last shown frame joined with async enqueued/completed.
+  Latency is measured per shown frame from swap arrival, so idle desktop does not inflate it.
+- BUILT (on Mac, via ssh): x9/out/x9-rev252bo/boot.img 11,685,888 B, boot_sha256
+  48742b6a0bda2d1bbb654d59f8d354c13f75a77957eeab9c57331403d947abfc. Same args as rev252bn. Kernel only, no mailbox.
+  Not device-tested. Build used the SweetFramebuffer.cpp copied via scp (commit f93f7b0 is NOT pushed to origin).
+- NOT done from P3: GPU-timestamp -> stage join (no GPU timestamp source wired), per-interaction A/B markers,
+  static-desktop vs lock-screen rows (need a user-driven marker), cache-build-id/warmup progress (no shader priming
+  exists, P1-C), RX event retention/dropped count (Wi-Fi side, not measured here).
+- Next: device run of rev252bo; read `X9 METRICS` lines in the disk log to get the first real frame/stutter numbers.
+
 ## HANDOFF 2026-11-06 (13): rev252bn BUILT via ssh (Mac eac9383); GPU optimization list
 
 - Mac tunnel was blocked by a stale sshd session (pid 750636) holding 127.0.0.1:2222 on the server; killed it,
