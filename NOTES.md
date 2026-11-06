@@ -17,7 +17,9 @@
   tags SCAN_REQ/BSSID/CHANNEL/MISC; collects RX4 packets (beacon/probe-resp found by searching for the mgmt
   header, RCPI not decoded: signal fixed -55), waits for UNI_EVENT_ID_SCAN_DONE 0x0e (8 s cap), fills rbss[32],
   calls scan_done -> wifid reads results. Logs `X9 WIFI RADIO: ...` incl. every network found. EMI text scan now
-  opt-in (x9_wifi_emitext=1). NOT BUILT (tunnel refused). Build: usual args + `--boot-arg x9_wifi_real=1` + XO args.
+  opt-in (x9_wifi_emitext=1). BUILT via ssh (source abae90a): Mac x9/out/x9-rev252bk/boot.img sha256
+  8265dfeeb0ce7ff6daae8ff28a6af348fdafcf24bafeddc3a2ed91d55bc41638 (usual args + x9_wifi_real=1 + XO args; ADT has the
+  wlan-pcie,mt6653 node), kernel only, no mailbox.
 - Unknowns/risks: whether FW delivers scan frames on HW RX4 (else look at RX5/6/8 or RX7 pkt type), whether
   DEVINFO/BSSINFO need more tags, whether SET_DOMAIN_INFO is needed before 5 GHz active scan.
 
