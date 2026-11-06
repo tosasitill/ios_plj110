@@ -1,3 +1,19 @@
+## HANDOFF 2026-11-06 (6): 76.txt = rev252bg: RAM code accepted, WIFI_START unanswered, N9_DONE only; rev252bh diag
+
+- 实测 /tmp/76.txt (x9-rev252bg): patch downloaded again (161 ms). RAM: all 6 regions DOWNLOAD_CONFIG status 0, data
+  1624992 B in 22 ms. WIFI_START (cid 2 {1, 0091c000}) **no event in 10 s** (RX7 cidx=7 didx=11: 12 free
+  descriptors, nothing written; events stay on HW RX7 in RAM mode per mt6653RxRingSwIdx2HwIdx). Afterwards
+  conn_on_misc 1 -> 2, EP cfg 0x48c = 20cfbc2e (b29:28 = 2), i.e. WIFI_FUNC_N9_DONE (b1) set, WIFI_FUNC_INIT_DONE
+  (b0) missing (ready = BITS(0,1) = 3). EMI +0 header: after patch 00000008 0 0 0 0 00001ad0 00000007 "_ROM" ->
+  after start 0000000a 00000002 0 0 00002726 00001ad0 00000007 "_ROM". rom_sram dead1234.
+- 推断: RAM code runs (N9 up) but its init does not complete / does not send the START result. Skipped gen4m
+  pre-RAM steps: time sync (MT6653 = CCIF notify, not an init cmd), asicConnac3xQueryPmicInfo, wlanPhyAction
+  (PHY_ACTION TLV with NVRAM ePA/eLNA + connfem data, then CAL FORCE/BACKUP) - phyAction is the main suspect.
+- rev252bh (commit after 90510a3): after WIFI_START polls for x9_wifi_ready_ms (default 20000) ep cfg 0x48c
+  (sync b30:28, own b14), conn_on_misc, EMI +0 words 0-7 and WFDMA RX didx 0-13 (0x50c + n*0x10), logs every change
+  (`X9 WIFI RAM: +N ms ...`); then scans the whole EMI for ASSERT/assert/xception/panic/FATAL/fail text
+  (`X9 WIFI EMI after WIFI_START: text ...`). NOT BUILT (tunnel refused).
+
 ## HANDOFF 2026-11-06 (5): **ROM PATCH DOWNLOADED** (75.txt = rev252bf); next = RAM code
 
 - 实测 /tmp/75.txt (x9-rev252bf): PLATCFG before = 16 zero words; XO NVRAM default written (reads f8980019
