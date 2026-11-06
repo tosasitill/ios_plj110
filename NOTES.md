@@ -1,3 +1,13 @@
+## HANDOFF 2026-11-06 (12): **SETTINGS SHOWS REAL NETWORKS** (81.txt = rev252bm); join not implemented
+
+- USER: Settings Wi-Fi scans and lists the real networks; joining fails (expected: sta_connect returns
+  RES_UNSUPPORTED in real mode). 实测 81.txt: 13 scans; scan 1: 3 frames, 3 beacons, 3 networks:
+  RUC-Mobile (caps 0431, privacy), RUC-Web (caps 0421, OPEN), eduroam (0431) - all 2437 MHz.
+- RX7 scan frame layout (hex dumps): 802.11 header at packet offset 0x58; RXD groups before it; RCPI bytes at
+  0x44 (e.g. 69 54 ff ff, i.e. header - 20): dBm = (rcpi - 220) / 2 (not yet used; signal fixed -55).
+- Next: open-network join (RUC-Web) = channel privilege, BSSINFO/STAREC updates, host Auth/Assoc mgmt frames,
+  then the data path (TX ring + RX data) and DHCP; WPA2 after that.
+
 ## HANDOFF 2026-11-06 (11): 80.txt = rev252bl: frames still classified as events; rev252bm
 
 - 实测 /tmp/80.txt (rev252bl): radio up 23.9 s, scans done in ~600-680 ms, fw beacons 3-10 per scan, but the
