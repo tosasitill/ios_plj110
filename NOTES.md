@@ -1,4 +1,4 @@
-## HANDOFF 2026-11-06 (2): rev252bc = tell the MCU its EMI (mt6653SetupMcuEmiAddr) before the patch; NOT BUILT
+## HANDOFF 2026-11-06 (2): rev252bc = tell the MCU its EMI (mt6653SetupMcuEmiAddr) before the patch; built
 
 - Source finding (gen4m, this session): host-side patch flow matches ours exactly (wlanDownloadPatch ->
   wlanGetPatchInfoAndDownloadV2 per region PATCH_START+data, then wlanPatchSendComplete {0,0,0,0}; BT/ZB patch
@@ -16,7 +16,8 @@
   `X9 WIFI EMI: before ... / set ...`, maps the 12 MiB EMI (Normal NC) and checksums it per 64 KiB, and after
   PATCH_FINISH logs `X9 WIFI EMI after PATCH_FINISH: block +xxxxxx changed ...` (= did the chip write host EMI).
   The post-data sem probe is now opt-in (x9_wifi_probe=1). Build: Mac tunnel (ssh -p 2222) was refused this
-  session -> NOT BUILT. Build with the usual args: `python3 -I x9/build/build.py --name x9-rev252bc --boot-arg
+  session at first; then BUILT via ssh (source 1b2db7b): Mac x9/out/x9-rev252bc/boot.img 9,887,744 B sha256
+  9561e812b05a81a8c7716f113801e37118c1ccc6671683656fbccf20a918ef8a. Built with the usual args: `python3 -I x9/build/build.py --name x9-rev252bc --boot-arg
   x9_wifi_power=6 --boot-arg x9_gpu_khz=1716000 --boot-arg x9_gpu_floor_khz=1100000` (kernel only, plugin 255
   already staged, no mailbox).
 - If FINISH still hangs: next gen4m pre-download inits to compare: sw_wfdma init, SW EMI ring init
