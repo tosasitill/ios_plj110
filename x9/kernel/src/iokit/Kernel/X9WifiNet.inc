@@ -804,7 +804,7 @@ x9_emi_walk(const char *when, bool report)
     unsigned nz = 0, changed = 0, mapped = 0;
     for (unsigned c = 0; c < (unsigned)(X9_WIFI_EMI_SIZE / X9_EMI_WIN); c++) {
         volatile uint32_t *va = (volatile uint32_t *)ml_io_map_unmappable(
-            (vm_offset_t)(X9_WIFI_EMI_PA + (uint64_t)c * X9_EMI_WIN), X9_EMI_WIN, VM_WIMG_WCOMB);
+            (vm_offset_t)(X9_WIFI_EMI_PA + (uint64_t)c * X9_EMI_WIN), X9_EMI_WIN, 0x6u /* VM_WIMG_WCOMB, arm memory_types.h */);
         if (!va) continue;
         mapped++;
         for (unsigned j = 0; j < X9_EMI_WIN / X9_EMI_BLK; j++) {
