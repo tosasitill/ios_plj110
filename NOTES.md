@@ -12,7 +12,8 @@
 - rev252bh (commit after 90510a3): after WIFI_START polls for x9_wifi_ready_ms (default 20000) ep cfg 0x48c
   (sync b30:28, own b14), conn_on_misc, EMI +0 words 0-7 and WFDMA RX didx 0-13 (0x50c + n*0x10), logs every change
   (`X9 WIFI RAM: +N ms ...`); then scans the whole EMI for ASSERT/assert/xception/panic/FATAL/fail text
-  (`X9 WIFI EMI after WIFI_START: text ...`). NOT BUILT (tunnel refused).
+  (`X9 WIFI EMI after WIFI_START: text ...`). BUILT via ssh (source 325c123): Mac x9/out/x9-rev252bh/boot.img
+  sha256 9d4e2a79f14b50cd34e352eeeef5887ecaec16b93777a3cf953ea07402467882, same args, kernel only, no mailbox.
 
 ## HANDOFF 2026-11-06 (5): **ROM PATCH DOWNLOADED** (75.txt = rev252bf); next = RAM code
 
