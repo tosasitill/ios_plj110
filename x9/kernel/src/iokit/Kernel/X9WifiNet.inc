@@ -1296,6 +1296,27 @@ x9_wifi_stage6(volatile uint32_t *bar)
             X9_WIFI_EMI_SIZE, X9_WIFI_MISC_PA);
         x9_emi_walk("setup", false);
     }
+    /* 74.txt: with the EMI set, the chip writes host EMI after PATCH_FINISH (7 blocks changed, +1c8000 = 10ff8a55
+     * MT6653_WIFI_OFF_MAGIC_NUM) but still never answers. gen4m wlanCopyPlatCfgToSysram ("should be called before
+     * patch download", CFG_SUPPORT_XONVRAM=y in configs/MT6653/mobile/defconfig) fills conninfra sysram
+     * CONNAC3X_PLAT_CFG_ADDR 0x7c05b28c (64 B, bar 0x1ab28c): XO NVRAM from offset 0 (Android userspace blob, length
+     * unknown here -> not written), connv3_get_plat_config() in the LAST 4 bytes (0x7c05b2c8): u16 ext_32K_ticks
+     * (connv3 DT ext-32k-ticks 0x8000), byte2 = 1 (1.2 V 32K) | co_clock<<1 (DT co-clock 0) | uvlo(1)<<2 |
+     * rising_uvlo(1)<<4 = 0x15, byte3 0 -> LE word 0x00158000. Boot-args x9_wifi_platcfg=1 (default),
+     * x9_wifi_platcfg_val=<word>. */
+    {
+        IOLog("X9 WIFI PLATCFG before: %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x\n",
+            bar[0x1ab28c / 4], bar[0x1ab290 / 4], bar[0x1ab294 / 4], bar[0x1ab298 / 4], bar[0x1ab29c / 4],
+            bar[0x1ab2a0 / 4], bar[0x1ab2a4 / 4], bar[0x1ab2a8 / 4], bar[0x1ab2ac / 4], bar[0x1ab2b0 / 4],
+            bar[0x1ab2b4 / 4], bar[0x1ab2b8 / 4], bar[0x1ab2bc / 4], bar[0x1ab2c0 / 4], bar[0x1ab2c4 / 4],
+            bar[0x1ab2c8 / 4]);
+        if (sweet_x9_arg("x9_wifi_platcfg", 1) == 1) {
+            uint32_t pv = (uint32_t)sweet_x9_arg("x9_wifi_platcfg_val", 0x00158000);
+            bar[0x1ab2c8 / 4] = pv;
+            __asm__ volatile ("dsb sy" ::: "memory");
+            IOLog("X9 WIFI PLATCFG: custom option word 0x7c05b2c8 <- %08x, reads %08x\n", pv, bar[0x1ab2c8 / 4]);
+        }
+    }
 
     /* ROM patch, PATCH_FORMAT_V2 */
     const uint8_t *fw = x9_wifi_patch;
@@ -1370,7 +1391,7 @@ x9_wifi_stage6(volatile uint32_t *bar)
             x9_wifi_rc_diag(s == 0 ? "after data s0" : "after data s1");
         }
     }
-    if (ok && sweet_x9_arg("x9_wifi_probe", 0) == 1) {
+    if (ok && sweet_x9_arg("x9_wifi_aliveprobe", 0) == 1) {
         /* 70.txt: the semaphore get is answered (status 2) but PATCH_FINISH and the later release get nothing, so the
          * ROM stops answering after the data. Probe: is it still alive right after the last data chunk? */
         uint8_t pq[4] = { 1, 0, 0, 0 }, pres[4] = {};
