@@ -1,3 +1,24 @@
+## HANDOFF 2026-11-06 (13): rev252bn BUILT via ssh (Mac eac9383); GPU optimization list
+
+- Mac tunnel was blocked by a stale sshd session (pid 750636) holding 127.0.0.1:2222 on the server; killed it,
+  then autossh reconnected (user, 2026-11-06).
+- Mac repo fast-forwarded 752ac58 -> eac9383 (x9_render_external_manifest.h left locally modified, untouched).
+- BUILT: x9/out/x9-rev252bn/boot.img sha256 bf0e1c17c403edcc506286d058f02a05d5faed021e4271068477cf9335795600
+  (11,685,888 B), kernel only, no mailbox. Args: x9_wifi_power=6 x9_wifi_real=1 x9_gpu_khz=1716000
+  x9_gpu_floor_khz=1100000 + x9_wifi_xo0..6 as in rev252bm (x9_metal_render=1 is already in boot.json, do not pass it).
+  Not device-tested.
+- GPU optimization headroom (docs/graphics/gpu-optimization-headroom.md section 4), ranked:
+  P0-A decouple submit from completion (wait ~51%: IRQ/event fence instead of polling, 2 jobs in flight; -3..5 ms/job, high risk);
+  P0-B cache maintenance by proof (~38%: coherency probe, then drop CIVAC/reach walks; -2..4 ms/job, top correctness risk);
+  P0-C stop per-job AS teardown (ranged FLUSH_PT/FLUSH_MEM, keep AS bound; high risk, needs PT correctness test);
+  P1-A BO pool with aging (no per-alloc full-buffer scrub; also removes the 1,024-mapping / 512 MiB ceilings);
+  P1-B batch bind, 2 MiB pages, O(1) handles; P1-C shader pre-warm (stutter, not throughput);
+  P2-A transient/memoryless attachments; P2-B damage-aware present / direct scanout (one 13.9 MB copy per frame);
+  P2-C worker priority, shorter CSG suspend waits, DVFS from real utilisation; P3 metrics first.
+- Device state from earlier notes: ACE-Lite shelved (x9_gpu_acelite off); park+async are the stable GPU path.
+  Known open GPU issue: 67.txt IOConnectUnmapMemory64 refused (0xe00002c2) -> device lost at 63.95 s, not investigated.
+- Next: device test of rev252bn (open-network join, see handoff 12); GPU work only after P3 metrics exist.
+
 ## HANDOFF 2026-11-06 (12): **SETTINGS SHOWS REAL NETWORKS** (81.txt = rev252bm); join not implemented
 
 - USER: Settings Wi-Fi scans and lists the real networks; joining fails (expected: sta_connect returns
