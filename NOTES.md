@@ -3,7 +3,9 @@
 - 实测 /tmp/80.txt (rev252bl): radio up 23.9 s, scans done in ~600-680 ms, fw beacons 3-10 per scan, but the
   252-371 B RX7 packets still went down the event path ("scan event eid=0x00"): they have RXD type 7 like events.
 - rev252bm: every RX7 packet during a scan except eid 0x0e (SCAN_DONE) / 0x01 (CMD_RESULT) goes to x9_scan_take
-  (which validates the 802.11 mgmt header itself); first 3 dumped. NOT BUILT (tunnel refused).
+  (which validates the 802.11 mgmt header itself); first 3 dumped. BUILT via ssh (source 752ac58): Mac
+  x9/out/x9-rev252bm/boot.img sha256 e5c44bc02cbdf6b73e212f0b7de19ec6c8885fce1d1b70256bf6b334bd071887 (usual args +
+  x9_wifi_real=1 + XO args, wlan ADT node), kernel only, no mailbox.
 
 ## HANDOFF 2026-11-06 (10): 79.txt = rev252bk: scans complete; frames come on RX7; rev252bl
 
