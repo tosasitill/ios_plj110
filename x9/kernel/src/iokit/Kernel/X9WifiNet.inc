@@ -841,6 +841,44 @@ x9_emi_walk(const char *when, bool report)
     }
 }
 
+/* 76.txt: after WIFI_START the RAM code sets N9_DONE (conn_on_misc 2, ep cfg 0x48c b29:28 = 2) but never INIT_DONE
+ * and never answers. Look for firmware assert/exception text in the EMI (coredump/log areas). */
+static void
+x9_emi_find_text(const char *when)
+{
+    static const char *const pat[] = { "ASSERT", "assert", "xception", "Exception", "panic", "FATAL", "fail" };
+    unsigned hits = 0;
+    for (unsigned c = 0; c < (unsigned)(X9_WIFI_EMI_SIZE / X9_EMI_WIN) && hits < 16; c++) {
+        const volatile uint8_t *va = (const volatile uint8_t *)ml_io_map_unmappable(
+            (vm_offset_t)(X9_WIFI_EMI_PA + (uint64_t)c * X9_EMI_WIN), X9_EMI_WIN, 0x6u);
+        if (!va) continue;
+        for (uint32_t o = 0; o + 8 < X9_EMI_WIN && hits < 16; o++) {
+            uint8_t b0 = va[o];
+            for (unsigned k = 0; k < sizeof pat / sizeof pat[0]; k++) {
+                const char *q = pat[k];
+                if (b0 != (uint8_t)q[0]) continue;
+                unsigned j = 1;
+                while (q[j] && o + j < X9_EMI_WIN && va[o + j] == (uint8_t)q[j]) j++;
+                if (q[j]) continue;
+                char line[121];
+                uint32_t st = o >= 40 ? o - 40 : 0;
+                unsigned n = 0;
+                for (uint32_t z = st; z < X9_EMI_WIN && n < 120; z++, n++) {
+                    uint8_t ch = va[z];
+                    line[n] = (ch >= 0x20 && ch < 0x7f) ? (char)ch : '.';
+                }
+                line[n] = 0;
+                IOLog("X9 WIFI EMI %s: text '%s' at +%06x: %s\n", when, q, c * X9_EMI_WIN + o, line);
+                hits++;
+                o += 80;
+                break;
+            }
+        }
+        ml_io_unmap((vm_offset_t)va, X9_EMI_WIN);
+    }
+    IOLog("X9 WIFI EMI %s: %u text hits\n", when, hits);
+}
+
 #define X9_WFDMA 0xd4000u                    /* WFDMA host DMA0 (chip 0x20024000) in BAR0 */
 #define X9_DMA_SIZE 0x10000u
 #define X9_RING_N 16u
@@ -1504,21 +1542,44 @@ x9_wifi_stage6(volatile uint32_t *bar)
             IOLog("X9 WIFI RAM: WIFI_START %s status=%u -> %s\n", c ? "answered" : "FAILED", res[0],
                 (c && res[0] == 0) ? "RAM CODE STARTED" : "start failed");
             volatile uint32_t *m = x9_rc_mac;
+            volatile uint32_t *e0 = (volatile uint32_t *)ml_io_map_unmappable((vm_offset_t)X9_WIFI_EMI_PA, 0x4000, 0x6u);
             uint64_t tw = mach_absolute_time();
-            uint32_t last = 0xffffffffu;
-            while (m && x9_ms_since(tw) < 5000) {
-                uint32_t v = x9_pcie_cfg_rd(m, 1, 0, 0x48c);
-                if (v != last) {
-                    IOLog("X9 WIFI RAM: +%llu ms ep cfg 0x48c=%08x (fw status sync b29:28=%u) conn_on_misc=%08x rom_sram=%08x\n",
-                        x9_ms_since(tw), v, (v >> 28) & 3, bar[0xe00f0 / 4], bar[0x1ab160 / 4]);
+            uint32_t last = 0xffffffffu, lastmisc = 0xffffffffu, laste[8] = {}, lastrx[14] = {};
+            bool first = true;
+            unsigned wait = (unsigned)sweet_x9_arg("x9_wifi_ready_ms", 20000);
+            while (m && x9_ms_since(tw) < wait) {
+                uint32_t v = x9_pcie_cfg_rd(m, 1, 0, 0x48c), misc = bar[0xe00f0 / 4];
+                bool ch = first || v != last || misc != lastmisc;
+                uint32_t ew[8] = {}, rx[14];
+                for (unsigned k = 0; e0 && k < 8; k++) {
+                    ew[k] = e0[k];
+                    ch |= ew[k] != laste[k];
+                }
+                for (unsigned k = 0; k < 14; k++) {
+                    rx[k] = x9_wd_rd(&d, 0x50c + k * 0x10);
+                    ch |= rx[k] != lastrx[k];
+                }
+                if (ch) {
+                    IOLog("X9 WIFI RAM: +%llu ms ep cfg 0x48c=%08x (sync=%u own=%u) conn_on_misc=%08x rom_sram=%08x emi0=%08x %08x %08x %08x %08x %08x %08x %08x\n",
+                        x9_ms_since(tw), v, (v >> 28) & 7, (v >> 14) & 1, misc, bar[0x1ab160 / 4], ew[0], ew[1], ew[2],
+                        ew[3], ew[4], ew[5], ew[6], ew[7]);
+                    IOLog("X9 WIFI RAM: +%llu ms rx didx 0-13: %u %u %u %u %u %u %u %u %u %u %u %u %u %u int_sta=%08x\n",
+                        x9_ms_since(tw), rx[0], rx[1], rx[2], rx[3], rx[4], rx[5], rx[6], rx[7], rx[8], rx[9], rx[10],
+                        rx[11], rx[12], rx[13], x9_wd_rd(&d, 0x200));
                     last = v;
+                    lastmisc = misc;
+                    memcpy(laste, ew, sizeof laste);
+                    memcpy(lastrx, rx, sizeof lastrx);
+                    first = false;
                 }
                 if (((v >> 28) & 3) == 3) {
                     IOLog("X9 WIFI RAM: FW READY after %llu ms\n", x9_ms_since(tw));
                     break;
                 }
-                IOSleep(10);
+                IOSleep(20);
             }
+            if (e0) ml_io_unmap((vm_offset_t)e0, 0x4000);
+            if (sweet_x9_arg("x9_wifi_emi", 1) == 1) x9_emi_find_text("after WIFI_START");
             if (sweet_x9_arg("x9_wifi_emi", 1) == 1) x9_emi_walk("after WIFI_START", true);
         }
         IOLog("X9 WIFI MCU: after RAM rom_sram=%08x romcode_index=%08x conn_on_misc=%08x events=%u\n",
