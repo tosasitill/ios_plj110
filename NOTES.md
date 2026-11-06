@@ -9,6 +9,15 @@
 - So the missing pieces were (rev252bd/bf): MCU EMI base/size (mt6653SetupMcuEmiAddr) + conninfra sysram plat cfg
   (wlanCopyPlatCfgToSysram: CONNXO XO NVRAM + connv3 custom option). Which of XO/custom was essential is not
   isolated (x9_wifi_xonv=0 / x9_wifi_platcfg=0 would tell).
+- rev252bg (commit after b9db309, X9WifiNet.inc): after a successful patch (and sem release) downloads the RAM code:
+  tailer of WIFI_RAM_CODE_MT6653_dx5_2g2a_1.bin = chip 0x19, fmt 2 flag 1, 6 regions: 0091c000 15760 feat 21
+  (VALID_RAM_ENTRY|ENC), 02212800 352208, 0040c500 47824, e005d800 384976, e00bc800 666576, e0161800 157648 (all
+  feat 01 = AES key0 -> mode 80000009), data back to back from 0, 160 B release-info after. Per region cid 0x01
+  DOWNLOAD_CONFIG {addr,len,mode} + data on TX16; then cid 0x02 WIFI_START {1, 0x0091c000} (10 s wait); polls EP
+  cfg 0x48c b29:28 == 3 (MT6653 CFG_MTK_WIFI_ON_READ_BY_CFG_SPACE) up to 5 s; EMI walk "after WIFI_START".
+  Boot-arg x9_wifi_ram=1. gen4m also does kalSyncTimeToFW, queryPmicInfo and phyAction (PHY_ACTION cal) before the
+  RAM code - skipped for now. PHY firmware: CFG_MTK_WIFI_SUPPORT_PHY_FWDL unset for MT6653 -> 0 (not downloaded by
+  gen4m). NOT BUILT yet (Mac tunnel refused).
 - Next: RAM code (WIFI_RAM_CODE, 1625428 B) = gen4m wlanConnacFormatDownload (tailer regions, DL_TO_EMI regions via
   wlanDownloadEMISectionViaDma) + wlanConfigWifiFunc (WIFI_START), then the PHY firmware.
 
