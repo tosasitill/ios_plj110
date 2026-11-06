@@ -1,3 +1,25 @@
+## HANDOFF 2026-11-06 (4): 74.txt = rev252bd: EMI set -> chip writes host EMI after FINISH, still no event; rev252be
+
+- 实测 /tmp/74.txt (x9-rev252bd, no panic): EMI regs set (before emi_addr=4000), 167/192 EMI blocks nonzero as LK
+  left them (Android leftovers). sem get 2, both PATCH_START ok, data sent, PATCH_FINISH no event in 10 s
+  (RX7 cidx=15 didx=3, rom_sram/romcode_index 1d1e, R2A dmawr_probe 100c0000, PCIe/AER/AXI clean), sem release no
+  event. **After FINISH 7 of 192 EMI blocks changed**: +000000, +010000, +1a0000, +1b0000 became all zero;
+  +1c0000 (first nonzero now +1c8000 = 10ff8a55 = MT6653_WIFI_OFF_MAGIC_NUM ...), +230000 (+230004 = 0x24),
+  +250000 (+255c00 ...). Nothing on the AP owns that memory -> 推断: the chip (patch code) now runs after FINISH
+  and touches its EMI, but then does not send the FINISH event. (Unknown whether changes happened in the data
+  phase or after FINISH; snapshot is only before/after.)
+- Source: gen4m wlanAdapterStart calls wlanCopyPlatCfgToSysram right before patch download ("should be called before
+  patch download"); CFG_SUPPORT_XONVRAM=y for MT6653 (configs/MT6653/mobile/defconfig). It writes conninfra sysram
+  0x7c05b28c (64 B, bar 0x1ab28c): XO NVRAM blob from offset 0 (Android userspace writes it via wlanXonvBufHandler;
+  content/length unknown to us), and connv3_get_plat_config() (4 B) at the end = 0x7c05b2c8: u16 ext_32K_ticks
+  (connv3 DT 0x8000), byte2 = 1 | co_clock<<1 (DT 0) | uvlo 1<<2 | rising uvlo 1<<4 = 0x15 -> word 0x00158000.
+  (OPLUS_FEATURE_CUSTOMER_CLK may change co_clock detection - unverified.)
+- rev252be (commit 946a7bb): logs `X9 WIFI PLATCFG before:` (16 words) and writes 0x00158000 to 0x7c05b2c8
+  (boot-args x9_wifi_platcfg=1 default, x9_wifi_platcfg_val=<word>). Post-data alive probe renamed to
+  x9_wifi_aliveprobe (x9_wifi_probe already meant x9_wifi_probe_hw). NOT BUILT: Mac tunnel refused.
+- TODO: get the XO NVRAM blob from Android (dmesg "Copy N bytes from xo nvram", the HAL's source file under
+  /mnt/vendor/nvdata) and write it at 0x7c05b28c too; diff EMI per word between data phase and FINISH.
+
 ## HANDOFF 2026-11-06 (3): rev252bc PANICKED (my mapping bug); rev252bd built
 
 - 实测 rev252bc (user booted it; USB log incomplete). Disk ring pulled on the Mac with
