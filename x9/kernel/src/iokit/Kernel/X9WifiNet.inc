@@ -1557,6 +1557,9 @@ x9_wifi_radio_loop(x9_wdma *d)
         int pn;
         while ((pn = x9_r4_try(d, &pk)) >= 0) { x9_scan_take(pk, (unsigned)pn); x9_r4_done(d); }
         while ((pn = x9_wd_rx7_try(d, ev, sizeof ev)) >= 0) {
+            uint32_t rxd0;
+            memcpy(&rxd0, ev, 4);
+            if ((rxd0 >> 27) != 7) continue;         /* stray frame between scans */
             if (idle_logs < 40) {
                 idle_logs++;
                 IOLog("X9 WIFI RADIO: idle event eid=0x%02x opt=%02x len=%d\n", ev[36], ev[38], pn);
@@ -1576,6 +1579,23 @@ x9_wifi_radio_loop(x9_wdma *d)
             while ((pn = x9_r4_try(d, &pk)) >= 0) { any = true; x9_scan_take(pk, (unsigned)pn); x9_r4_done(d); }
             while ((pn = x9_wd_rx7_try(d, ev, sizeof ev)) >= 0) {
                 any = true;
+                uint32_t rxd0;
+                memcpy(&rxd0, ev, 4);
+                if ((rxd0 >> 27) != 7) {             /* 79.txt: scan frames come on RX7 as RX packets, not events */
+                    if (x9_scan_frames < 3) {
+                        IOLog("X9 WIFI RADIO: rx7 frame type %u len %d: %08x %08x %08x %08x %08x %08x %08x %08x\n",
+                            rxd0 >> 27, pn, ((uint32_t *)ev)[0], ((uint32_t *)ev)[1], ((uint32_t *)ev)[2],
+                            ((uint32_t *)ev)[3], ((uint32_t *)ev)[4], ((uint32_t *)ev)[5], ((uint32_t *)ev)[6],
+                            ((uint32_t *)ev)[7]);
+                        for (unsigned o = 32; o < 128 && o + 16 <= (unsigned)pn; o += 16) {
+                            IOLog("X9 WIFI RADIO:   +%02x: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                                o, ev[o], ev[o + 1], ev[o + 2], ev[o + 3], ev[o + 4], ev[o + 5], ev[o + 6], ev[o + 7],
+                                ev[o + 8], ev[o + 9], ev[o + 10], ev[o + 11], ev[o + 12], ev[o + 13], ev[o + 14], ev[o + 15]);
+                        }
+                    }
+                    x9_scan_take(ev, (unsigned)(pn < (int)sizeof ev ? pn : (int)sizeof ev));
+                    continue;
+                }
                 uint8_t eid = ev[36];
                 if (eid == 0x0e) {
                     uint8_t cc = pn >= 52 ? ev[52] : 0;
