@@ -1,3 +1,27 @@
+## HANDOFF 2026-11-06 (2): rev252bc = tell the MCU its EMI (mt6653SetupMcuEmiAddr) before the patch; NOT BUILT
+
+- Source finding (gen4m, this session): host-side patch flow matches ours exactly (wlanDownloadPatch ->
+  wlanGetPatchInfoAndDownloadV2 per region PATCH_START+data, then wlanPatchSendComplete {0,0,0,0}; BT/ZB patch
+  options are only on for MT7961/MT7902, so ucType stays 0; mt6653 asicEnableFWDownload = NULL; no dyn mem map).
+  BUT before any download gen4m halHifSwInfoInit calls mt6653SetupMcuEmiAddr: CONN_ON_EMI_ADDR 0x20060d1c
+  (bar 0xe0d1c) = EMI pa >> 16, MT6653_EMI_SIZE 0x7c05b2e0 (bar 0x1ab2e0) = size, EMI2 0x7c05b2ec/0x7c05b2e4
+  (bar 0x1ab2ec/0x1ab2e4) = misc pool pa >> 16 / sum of mt6653_wifi_misc_rsv_mem_info (0x9a100). mt6653
+  rEmiInfo.type = EMI_ALLOC_TYPE_LK = wifi node conninfra-emi-addr/size (mt6993.dts: addr 0 filled by LK, size
+  0xc00000) = LK mblock-52 consys_wifi_emi 0xe1000000/0xc00000 (connsys-emi-config layout region 0 = 0xc00000,
+  MPU region 0x3e). EMI2 = mblock-54 wifi-misc 0xe2600000. We never wrote any of these.
+- Hypothesis (guess): FINISH with both sections makes the ROM start the patch, which uses the EMI at base 0 ->
+  hang; section-0-only fails verification first (0x11). Tag-ctrl (CFG_PCIE_TAG_ID_SUPPORT) is not in the 6653
+  block -> skipped.
+- rev252bc (X9WifiNet.inc): boot-arg x9_wifi_emi (default 1) writes the four CRs after rings up, logs
+  `X9 WIFI EMI: before ... / set ...`, maps the 12 MiB EMI (Normal NC) and checksums it per 64 KiB, and after
+  PATCH_FINISH logs `X9 WIFI EMI after PATCH_FINISH: block +xxxxxx changed ...` (= did the chip write host EMI).
+  The post-data sem probe is now opt-in (x9_wifi_probe=1). Build: Mac tunnel (ssh -p 2222) was refused this
+  session -> NOT BUILT. Build with the usual args: `python3 -I x9/build/build.py --name x9-rev252bc --boot-arg
+  x9_wifi_power=6 --boot-arg x9_gpu_khz=1716000 --boot-arg x9_gpu_floor_khz=1100000` (kernel only, plugin 255
+  already staged, no mailbox).
+- If FINISH still hangs: next gen4m pre-download inits to compare: sw_wfdma init, SW EMI ring init
+  (CFG_MTK_WIFI_SW_EMI_RING), wifi_coredump/EMI clearing, CCIF; also poll RX rings other than 7 after FINISH.
+
 ## HANDOFF 2026-11-06 (1): 71/72.txt = rev252bb / rev252bb-s0: section 1 is what blocks PATCH_FINISH; hakios review
 
 - 实测 /tmp/71.txt (x9-rev252bb, all sections): sem get status 2, both PATCH_START ok, all data sent (2 + 8 ms),

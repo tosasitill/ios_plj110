@@ -779,6 +779,55 @@ extern "C" vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
  */
 #define X9_WIFI_RSV_PA 0xe2700000ULL
 #define X9_WIFI_RSV_SIZE 0x1900000ULL
+/* LK mblock-52 consys_wifi_emi = the wifi node's conninfra-emi-addr/size (mt6993.dts size 0xc00000, LK fills the
+ * address) = gen4m mt6653 rEmiInfo (EMI_ALLOC_TYPE_LK); mblock-54 wifi-misc-reserve-memory = EMI2. */
+#define X9_WIFI_EMI_PA 0xe1000000ULL
+#define X9_WIFI_EMI_SIZE 0xc00000ULL
+#define X9_WIFI_MISC_PA 0xe2600000ULL
+#define X9_WIFI_MISC_EMI2_SIZE 0x9a100u          /* sum of mt6653_wifi_misc_rsv_mem_info sizes */
+#define X9_EMI_BLK 0x10000u
+#define X9_EMI_NBLK ((unsigned)(X9_WIFI_EMI_SIZE / X9_EMI_BLK))
+static volatile uint32_t *x9_emi_va;
+static uint32_t x9_emi_sum_before[X9_EMI_NBLK];
+static void
+x9_emi_sums(uint32_t *out, unsigned *nonzero_blocks)
+{
+    unsigned nz = 0;
+    for (unsigned b = 0; b < X9_EMI_NBLK; b++) {
+        const volatile uint32_t *w = x9_emi_va + (size_t)b * (X9_EMI_BLK / 4);
+        uint32_t h = 0x811c9dc5u, any = 0;
+        for (unsigned k = 0; k < X9_EMI_BLK / 4; k++) {
+            uint32_t v = w[k];
+            any |= v;
+            h = (h ^ v) * 0x01000193u;
+        }
+        out[b] = h;
+        nz += any != 0;
+    }
+    if (nonzero_blocks) *nonzero_blocks = nz;
+}
+static void
+x9_emi_report(const char *when)
+{
+    if (!x9_emi_va) return;
+    static uint32_t now[X9_EMI_NBLK];
+    unsigned nz = 0, changed = 0;
+    x9_emi_sums(now, &nz);
+    for (unsigned b = 0; b < X9_EMI_NBLK; b++) {
+        if (now[b] == x9_emi_sum_before[b]) continue;
+        changed++;
+        if (changed <= 12) {
+            const volatile uint32_t *w = x9_emi_va + (size_t)b * (X9_EMI_BLK / 4);
+            unsigned first = 0;
+            while (first < X9_EMI_BLK / 4 && w[first] == 0) first++;
+            if (first > X9_EMI_BLK / 4 - 8) first = X9_EMI_BLK / 4 - 8;
+            IOLog("X9 WIFI EMI %s: block +%06x changed; first nonzero +%06x: %08x %08x %08x %08x %08x %08x %08x %08x\n",
+                when, b * X9_EMI_BLK, b * X9_EMI_BLK + first * 4, w[first], w[first + 1], w[first + 2], w[first + 3],
+                w[first + 4], w[first + 5], w[first + 6], w[first + 7]);
+        }
+    }
+    IOLog("X9 WIFI EMI %s: %u of %u 64K blocks changed since setup, %u nonzero\n", when, changed, X9_EMI_NBLK, nz);
+}
 
 #define X9_WFDMA 0xd4000u                    /* WFDMA host DMA0 (chip 0x20024000) in BAR0 */
 #define X9_DMA_SIZE 0x10000u
@@ -1218,6 +1267,32 @@ x9_wifi_stage6(volatile uint32_t *bar)
         x9_wd_rd(&d, 0x400), x9_wd_rd(&d, 0x404), x9_wd_rd(&d, 0x408), x9_wd_rd(&d, 0x40c),
         x9_wd_rd(&d, 0x570), x9_wd_rd(&d, 0x574), x9_wd_rd(&d, 0x578), x9_wd_rd(&d, 0x57c), x9_wd_rd(&d, 0x200));
 
+    /* gen4m halHifSwInfoInit -> mt6653SetupMcuEmiAddr runs before any firmware download: CONN_ON_EMI_ADDR
+     * 0x20060d1c = EMI base >> 16, MCU_SW_CR 0x7c05b2e0 = EMI size, 0x7c05b2ec/0x7c05b2e4 = EMI2 (misc pool)
+     * base >> 16 / size. 71/72.txt: FINISH answers 0x11 at once with section 0 only but hangs once section 1 is
+     * in -> guess: the patch starts and uses the EMI we never told it about. Boot-arg x9_wifi_emi=1 (default). */
+    if (sweet_x9_arg("x9_wifi_emi", 1) == 1) {
+        IOLog("X9 WIFI EMI: before emi_addr=%08x emi_size=%08x emi2_addr=%08x emi2_size=%08x\n",
+            bar[0xe0d1c / 4], bar[0x1ab2e0 / 4], bar[0x1ab2ec / 4], bar[0x1ab2e4 / 4]);
+        bar[0xe0d1c / 4] = (uint32_t)(X9_WIFI_EMI_PA >> 16);
+        bar[0x1ab2e0 / 4] = (uint32_t)X9_WIFI_EMI_SIZE;
+        bar[0x1ab2ec / 4] = (uint32_t)(X9_WIFI_MISC_PA >> 16);
+        bar[0x1ab2e4 / 4] = X9_WIFI_MISC_EMI2_SIZE;
+        __asm__ volatile ("dsb sy" ::: "memory");
+        IOLog("X9 WIFI EMI: set emi_addr=%08x emi_size=%08x emi2_addr=%08x emi2_size=%08x (pa %llx size %llx, emi2 %llx)\n",
+            bar[0xe0d1c / 4], bar[0x1ab2e0 / 4], bar[0x1ab2ec / 4], bar[0x1ab2e4 / 4], X9_WIFI_EMI_PA,
+            X9_WIFI_EMI_SIZE, X9_WIFI_MISC_PA);
+        if (!x9_emi_va) {
+            x9_emi_va = (volatile uint32_t *)ml_io_map_wcomb((vm_offset_t)X9_WIFI_EMI_PA, X9_WIFI_EMI_SIZE);
+        }
+        if (x9_emi_va) {
+            unsigned nz = 0;
+            x9_emi_sums(x9_emi_sum_before, &nz);
+            IOLog("X9 WIFI EMI: mapped va=%p, %u of %u 64K blocks nonzero as LK left it; first words %08x %08x %08x %08x\n",
+                (void *)x9_emi_va, nz, X9_EMI_NBLK, x9_emi_va[0], x9_emi_va[1], x9_emi_va[2], x9_emi_va[3]);
+        }
+    }
+
     /* ROM patch, PATCH_FORMAT_V2 */
     const uint8_t *fw = x9_wifi_patch;
     unsigned nsec = x9_be32(fw + 32 + 12);
@@ -1291,7 +1366,7 @@ x9_wifi_stage6(volatile uint32_t *bar)
             x9_wifi_rc_diag(s == 0 ? "after data s0" : "after data s1");
         }
     }
-    if (ok) {
+    if (ok && sweet_x9_arg("x9_wifi_probe", 0) == 1) {
         /* 70.txt: the semaphore get is answered (status 2) but PATCH_FINISH and the later release get nothing, so the
          * ROM stops answering after the data. Probe: is it still alive right after the last data chunk? */
         uint8_t pq[4] = { 1, 0, 0, 0 }, pres[4] = {};
@@ -1304,6 +1379,7 @@ x9_wifi_stage6(volatile uint32_t *bar)
         IOLog("X9 WIFI PATCH: PATCH_FINISH %s status=%u cid=%02x; %u B in %llu ms -> %s\n",
             c ? "answered" : "FAILED", res[0], res[1], sent, x9_ms_since(tp),
             (c && res[0] == 0) ? "ROM PATCH DOWNLOADED" : "patch download failed");
+        x9_emi_report("after PATCH_FINISH");
     }
     if (semheld) {
         uint8_t sr[4] = { 0, 0, 0, 0 }, sres[4] = {};
