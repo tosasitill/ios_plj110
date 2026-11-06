@@ -1,3 +1,36 @@
+## HANDOFF 2026-11-06 (1): 71/72.txt = rev252bb / rev252bb-s0: section 1 is what blocks PATCH_FINISH; hakios review
+
+- 实测 /tmp/71.txt (x9-rev252bb, all sections): sem get status 2, both PATCH_START ok, all data sent (2 + 8 ms),
+  probe sem-get right after the last data chunk ANSWERED (eid 4 status 0) => ROM alive after the data. Then
+  PATCH_FINISH (cid 7 seq 5) no event in 10000 ms again (rom_sram/romcode_index 1d1e; at timeout slpprot0 back to
+  0041f004, R2A dmawr_probe 00100000).
+- 实测 /tmp/72.txt (x9-rev252bb-s0, x9_wifi_nsec=1, section 0 only): probe answered, **PATCH_FINISH answered in 1 ms
+  with status 0x11 (17)**, sem RELEASE answered status 3. => FINISH handler works; sending section 1 (e0010000,
+  315264 B, AES) is what turns FINISH into a hang. Guess (unverified): with both sections the ROM verifies/
+  decrypts section 1 and jumps into the patch, and the patch hangs or answers somewhere we do not listen
+  (other RX ring / needs something host-side). Status 0x11 meaning not looked up yet (gen4m/ROM code table).
+- Next candidates: look up 0x11 in gen4m; nsec=2 but skip/replace section 1 data with zeros (does FINISH then give
+  a status != 0x11?); after FINISH poll all RX rings (not only RX7) and romcode_index / CONN MCU PC for ~10 s;
+  compare mt7925 (e0002800 section, same PATCH_START flow) post-FINISH expectations.
+- hakios review (github.com/oosexgang/hakios-xnu-kernel @2631f5d, + oosexgang/hakios-mt6768; clones only in my
+  scratchpad, not in git). Observations:
+  * GPU: main tree is Adreno-only (PM4/a6xx own Metal driver "hakios-metal" 100-118 fps; UniXNU metal2vulkan+Turnip
+    50-57 fps). Not portable to our Mali CSF. Ideas that transfer: `fbscale=2` render at 750x1624 and scale to panel;
+    `metal_defer` (record CBs on own thread ~ our async); `wallpaper_freeze`/`ui_lite` cheats; userptr ioctl 0x7d
+    (wired task pages, CPU cache pushed by PA per submit - same cost model as ours, no trick there);
+    tools/ca-metallib.py (QuartzCore variants by pipeline label). mt6768 = Mali-G52 (JM, panfrost GL + AIR->NIR
+    Metal); their async path had "reuse while GPU reads" corruption, fully sync mode was clean (docs/metal-x6826b-plan.md).
+  * Wi-Fi: POCO runs Linux ath11k unmodified on FreeBSD LinuxKPI + their wifi/lx glue (mk-ath11k.sh) - a path to run
+    gen4m/mt76 code later. Darwin side reusable for us: drivers/wifi/hakios.apple80211.c (SIOCGA80211/SIOCSA80211
+    ioctls for wifid, events class 6), hakios.wlan.cpp (IO80211Controller registry + IO80211InterfaceRole +
+    device-tree wlan local-mac-address so MobileGestalt/lsd do not wait 5 s each), hakios.sta.c (scan/join thread),
+    wifi/lx/src/lx_wpa.c (own WPA2 4-way, MIT). mt6768 (CONNAC1 AXI, gen4m) reached WPA2+DHCP+HTTPS+Safari:
+    kernel/bsd/dev/redwood_mtkwifi.c + docs/wifi-x6826b.md (lessons: mgmt frames on cmd ring TX15 with TXD; EAPOL as
+    security frame at lowest basic rate; BMC WTBL for broadcast; POWER_SAVE_MODE CAM after join; WIFID=1 needs
+    configd, mDNSResponder, trustd, securityd, nsurlsessiond, CFNetworkAgent). Their RAM code regions with
+    FW_FEATURE_DL_TO_EMI (bit 7) are memcpy'd into EMI, not DMA'd - applies to RAM code, NOT our ROM patch
+    (our e0010000 matches mt7925's e0002800 style chip address).
+
 ## HANDOFF 2026-11-05 (6): 70.txt: sem works (status 2) but ROM silent after the data; rev252bb probes
 
 - 实测 /tmp/70.txt (rev252ba): PATCH_SEM_CONTROL get answered eid 4 status 2 (so cid 0x10 is understood), both
