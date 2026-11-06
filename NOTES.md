@@ -5,6 +5,14 @@
   RUC-Mobile (caps 0431, privacy), RUC-Web (caps 0421, OPEN), eduroam (0431) - all 2437 MHz.
 - RX7 scan frame layout (hex dumps): 802.11 header at packet offset 0x58; RXD groups before it; RCPI bytes at
   0x44 (e.g. 69 54 ff ff, i.e. header - 20): dBm = (rcpi - 220) / 2 (not yet used; signal fixed -55).
+- Join source reading (gen4m): management frames (Auth/Assoc) are sent on the COMMAND ring as TXD + 802.11 frame
+  (nic_tx.c COMMAND_TYPE_MANAGEMENT_FRAME -> HAL_WRITE_TX_CMD, TXD long/short per nic_txd_long_format_op); join =
+  aisFsmStateInit_JOIN (bssCreateStaRecFromBssDesc, cnmStaRecChangeState STA_STATE_1, auth type) after a CNM
+  channel-privilege grant (aisFsmRunEventChGrant), then saa_fsm Auth/Assoc. Android debug knobs (adb root):
+  `echo 0xFF:0x13F > /proc/net/wlan/dbgLevel` (all modules, ERROR..INFO + DEBUG, no LOUD) and
+  `echo "set_cfg DataTxDone 3" > /proc/net/wlan/driver` (connac3x_dump_tmac_info of every mgmt TXD).
+  Capture script: x9/tools/android_wifi_connect_capture.sh OUTDIR (run on the Mac with bash; streams /proc/kmsg
+  while `cmd wifi connect-network RUC-Web open`).
 - Next: open-network join (RUC-Web) = channel privilege, BSSINFO/STAREC updates, host Auth/Assoc mgmt frames,
   then the data path (TX ring + RX data) and DHCP; WPA2 after that.
 
