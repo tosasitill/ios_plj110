@@ -746,7 +746,7 @@ static bool render_quiesce(X9RenderContext *c) {
  * owner lock (worker, as before); render_async_lock is a leaf held without
  * either, never across render_submit.
  */
-struct RenderAsyncJob { X9RenderContext *c; X9RenderSubmission req; uint64_t seq; };
+struct RenderAsyncJob { X9RenderContext *c; X9RenderSubmission req; uint64_t seq; uint64_t t_enq, t_run; };
 static constexpr unsigned render_async_depth=16;
 static IOLock *render_async_lock;
 static RenderAsyncJob render_async_jobs[render_async_depth];
@@ -763,6 +763,7 @@ static void render_async_worker(void *,wait_result_t) {
   render_async_head=(render_async_head+1)%render_async_depth;render_async_count--;
   IOLockWakeup(render_async_lock,&render_async_head,false);
   IOLockUnlock(render_async_lock);
+  job.t_run=mach_absolute_time();   /* rev252bo: queue wait ends here */
   X9RenderContext *c=job.c;auto *p=(RenderKernelContext *)c->engine_private;
   X9RenderCompletion reply={};IOReturn kr;
   IOLockLock(c->lock);
@@ -777,6 +778,25 @@ static void render_async_worker(void *,wait_result_t) {
    }
   }
   IOLockUnlock(c->lock);
+  {
+   /* rev252bo metrics: single worker thread, so these need no lock.
+    * queue = enqueue -> worker pop, run = pop -> render_submit return,
+    * total = enqueue -> done. Logged every 2 s with the job count. */
+   static uint64_t w_start,w_jobs,w_fail,w_queue_ns,w_run_ns,w_total_max_ns;
+   uint64_t now=mach_absolute_time(),q=0,r=0,t=0;
+   absolutetime_to_nanoseconds(job.t_run-job.t_enq,&q);
+   absolutetime_to_nanoseconds(now-job.t_run,&r);
+   absolutetime_to_nanoseconds(now-job.t_enq,&t);
+   if(!w_start)w_start=now;
+   w_jobs++;w_queue_ns+=q;w_run_ns+=r;if(t>w_total_max_ns)w_total_max_ns=t;
+   if(kr!=kIOReturnSuccess)w_fail++;
+   uint64_t el=0;absolutetime_to_nanoseconds(now-w_start,&el);
+   if(el>=2000000000ULL){
+    IOLog("X9 RENDER ASYNC window: ms=%llu jobs=%llu failed=%llu queue_avg_us=%llu run_avg_us=%llu enqueue_to_done_max_us=%llu;per job, kernel FIFO only, not commit time\n",
+     el/1000000ULL,w_jobs,w_fail,w_jobs?w_queue_ns/w_jobs/1000:0,w_jobs?w_run_ns/w_jobs/1000:0,w_total_max_ns/1000);
+    w_jobs=w_fail=w_queue_ns=w_run_ns=w_total_max_ns=0;w_start=now;
+   }
+  }
   IOLockLock(render_async_lock);
   auto &d=p->async_done[p->async_next++%render_history];
   d.group=job.req.group;d.kr=kr;d.reply=reply;
@@ -795,7 +815,7 @@ static IOReturn render_submit_async(X9RenderContext *c,const X9RenderSubmission 
  if(!render_async_enabled()||!c||!c->engine_private||!request||!reply)return kIOReturnUnsupported;
  auto *p=(RenderKernelContext *)c->engine_private;
  if(c->disabled)return kIOReturnNotReady;
- RenderAsyncJob job={c,*request,0};
+ RenderAsyncJob job={c,*request,0,0,0};
  IOReturn kr=kIOReturnSuccess;
  IOLockUnlock(c->lock);   /* the worker may need c->lock to make room */
  IOLockLock(render_async_lock);
@@ -804,6 +824,7 @@ static IOReturn render_submit_async(X9RenderContext *c,const X9RenderSubmission 
  if(p->async_failed)kr=kIOReturnNotReady;
  else {
   job.seq=__atomic_add_fetch(&render_async_enqueued,1,__ATOMIC_ACQ_REL);
+  job.t_enq=mach_absolute_time();
   render_async_jobs[(render_async_head+render_async_count)%render_async_depth]=job;
   render_async_count++;p->async_pending++;
   IOLockWakeup(render_async_lock,&render_async_count,false);
