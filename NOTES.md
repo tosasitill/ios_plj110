@@ -1,3 +1,13 @@
+## HANDOFF 2026-11-06 (17): frontend commit->enqueue timing BLOCKED on source; Wi-Fi RUC-Web failed (no log yet)
+
+- Frontend commit path: NativeBridgeMetalFrontend.mm commit -> nmb_command_buffer_commit (NativeMetalObjects.rs:1733)
+  -> metal2vulkan_runtime `commit()`. That crate is NOT in this repo (no Cargo.toml path, no source under x9/ or .local/),
+  so backend commit -> PanVK queue -> x9_pan_kmod_submit_async (X9PanVKSync.c:378) cannot be instrumented here.
+- Only the synchronous handoff (time inside nmb_command_buffer_commit) could be timed in the .mm now. That is not commit->enqueue.
+  A plugin change also needs a new plugin revision (kernel allowlist) and a mailbox stage on the device.
+- Wi-Fi: user says joining RUC-Web (open) failed on the rev252bn-era build. No new log in /tmp or .local/x9/logs.
+  Need: disk sidecar + console pulled after that attempt, and which build was on the device.
+
 ## HANDOFF 2026-11-06 (16): rev252bp BUILT = park+async + kernel FIFO timing; commit 1f6f03c
 
 - BUILT (Mac via ssh): x9/out/x9-rev252bp/boot.img, boot_sha256 a875f20b41a023d2f104b35d8bf4e367454fbc1d149ee9d79d2457233d25d9e8.
