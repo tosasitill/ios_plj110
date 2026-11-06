@@ -88,6 +88,11 @@ bss_info bss[2];
 unsigned bss_count;
 thread_call_t scanCall, joinCall;
 int joinResult;
+/* real MT6653 backend (x9_wifi_real=1): the radio thread in stage 6 fills rbss and calls scan_done */
+bool realWanted, realUp;
+volatile bool scanReq;
+bss_info rbss[32];
+unsigned rcount;
 
 unsigned ie_put(uint8_t *p, unsigned at, uint8_t id, const uint8_t *v, uint8_t n) {
   p[at] = id; p[at + 1] = n; memcpy(p + at + 2, v, n); return at + 2u + n;
@@ -115,10 +120,10 @@ void make(bss_info &b, const char *ssid, uint8_t last, uint32_t mhz, int8_t dbm,
 void scan_fired(thread_call_param_t, thread_call_param_t) {
   IOLockLock(lock);
   if (status.state == STA_SCANNING) status.state = STA_IDLE;
-  bss_count = 2; stats.scans++;
+  bss_count = realWanted ? 0 : 2; stats.scans++;
   const sta_events *ev = events;
   IOLockUnlock(lock);
-  log("fake radio: scan done, %u networks", 2u);
+  log("fake radio: scan done, %u networks", realWanted ? 0u : 2u);
   if (ev && ev->scan_done) ev->scan_done();
 }
 void join_fired(thread_call_param_t, thread_call_param_t) {
@@ -143,6 +148,7 @@ int sta_start(const uint8_t mac[6]) {
   joinCall = thread_call_allocate(join_fired, nullptr);
   if (!lock || !scanCall || !joinCall) return -1;
   memset(&status, 0, sizeof status); memcpy(status.mac, mac, 6); status.state = STA_IDLE;
+  realWanted = sweet_x9_arg("x9_wifi_real", 0) == 1;
   make(bss[0], "X9-FAKE-OPEN", 1, 2437, -48, false);
   make(bss[1], "X9-FAKE-WPA2", 2, 5180, -61, true);
   bss_count = 0; stats.stage = 1;
@@ -151,16 +157,23 @@ int sta_start(const uint8_t mac[6]) {
 void sta_set_events(const sta_events *ev) { IOLockLock(fake::lock); fake::events = ev; IOLockUnlock(fake::lock); }
 int sta_scan(const uint8_t *, size_t) {
   using namespace fake;
-  IOLockLock(lock); if (status.state == STA_IDLE) status.state = STA_SCANNING; IOLockUnlock(lock);
-  after(scanCall, 800);
+  IOLockLock(lock);
+  if (status.state == STA_IDLE) status.state = STA_SCANNING;
+  bool up = realUp;
+  if (up) { scanReq = true; IOLockWakeup(lock, (event_t)&scanReq, false); }
+  IOLockUnlock(lock);
+  if (!up) after(scanCall, 800);     /* fake radio, or the real one is not up yet: 0 networks */
   return 0;
 }
-int sta_bss_count(void) { IOLockLock(fake::lock); int n = (int)fake::bss_count; IOLockUnlock(fake::lock); return n; }
+int sta_bss_count(void) {
+  IOLockLock(fake::lock); int n = (int)(fake::realUp ? fake::rcount : fake::bss_count); IOLockUnlock(fake::lock); return n;
+}
 int sta_bss_get(int i, bss_info *out) {
   using namespace fake;
   int r = -1;
   IOLockLock(lock);
-  if (i >= 0 && (unsigned)i < bss_count) { memcpy(out, &bss[i], sizeof *out); r = 0; }
+  if (realUp) { if (i >= 0 && (unsigned)i < rcount) { memcpy(out, &rbss[i], sizeof *out); r = 0; } }
+  else if (i >= 0 && (unsigned)i < bss_count) { memcpy(out, &bss[i], sizeof *out); r = 0; }
   IOLockUnlock(lock);
   return r;
 }
@@ -168,6 +181,12 @@ int sta_connect(const uint8_t *ssid, size_t len, const uint8_t *bssid, const cha
   using namespace fake;
   int found = -1;
   IOLockLock(lock);
+  if (realWanted) {
+    joinResult = RES_UNSUPPORTED; status.state = STA_AUTH; IOLockUnlock(lock);
+    log("real radio: join not implemented yet");
+    after(joinCall, 300);
+    return 0;
+  }
   for (unsigned i = 0; i < 2; i++)
     if ((bssid && !memcmp(bssid, bss[i].bssid, 6)) || (len == bss[i].ssid_len && !memcmp(ssid, bss[i].ssid, len))) { found = (int)i; break; }
   if (found < 0) joinResult = RES_NOT_FOUND;
@@ -550,7 +569,7 @@ void start(void) {
   sta_set_events(&gEvents);
   publish_registry("en0");
   thread_t t = nullptr; if (kernel_thread_start(stats_thread, nullptr, &t) == KERN_SUCCESS) thread_deallocate(t);
-  log("en0 is up (FAKE radio), hardware address %02x:%02x:%02x:%02x:%02x:%02x", gMac[0], gMac[1], gMac[2], gMac[3], gMac[4], gMac[5]);
+  log("en0 is up (%s radio), hardware address %02x:%02x:%02x:%02x:%02x:%02x", fake::realWanted ? "MT6653" : "FAKE", gMac[0], gMac[1], gMac[2], gMac[3], gMac[4], gMac[5]);
 }
 thread_call_t gStartCall;
 void start_fired(thread_call_param_t, thread_call_param_t) { start(); }
@@ -562,7 +581,7 @@ void start_fired(thread_call_param_t, thread_call_param_t) { start(); }
 static void
 x9_wifi_maybe_start(void)
 {
-    if (sweet_x9_arg("x9_wifi_fake", 0) != 1) {
+    if (sweet_x9_arg("x9_wifi_fake", 0) != 1 && sweet_x9_arg("x9_wifi_real", 0) != 1) {
         return;
     }
     if (!x9wifi::gStartCall) {
@@ -1239,6 +1258,9 @@ x9_wd_unicmd(x9_wdma *d, uint16_t cid, uint8_t opt, const void *payload, unsigne
         IOLog("X9 WIFI UNI: cid 0x%04x seq %u not consumed\n", cid, seq);
         return -1;
     }
+    if (!want) {
+        return 0;                            /* send only */
+    }
     uint64_t tw = mach_absolute_time();
     for (unsigned k = 0; k < 32; k++) {
         unsigned left = x9_ms_since(tw) >= wait_ms ? 0 : wait_ms - (unsigned)x9_ms_since(tw);
@@ -1304,6 +1326,285 @@ x9_wifi_nic_cap(x9_wdma *d)
         shown++;
     }
     return true;
+}
+
+/* ---------------- real radio (x9_wifi_real=1): keeps the MT6653 up and serves scans ----------------
+ * RX7 without waiting (no "no event" diagnostics). */
+static int
+x9_wd_rx7_try(x9_wdma *d, uint8_t *out, unsigned cap)
+{
+    unsigned i = d->r7;
+    volatile uint32_t *r = (volatile uint32_t *)(void *)(d->va + X9_D_RX7 + i * 16);
+    x9_wd_sync(d, X9_D_RX7 + (i & ~3u) * 16, 64);
+    if (!(r[1] & (1u << 31))) {
+        return -1;
+    }
+    return x9_wd_rx(d, 1, out, cap);
+}
+
+/* HW RX ring 4 (= gen4m RX_RING_DATA0, mt6653RxRingSwIdx2HwIdx): 32 x 2 KiB in the LK wifi pool after the first
+ * 64 KiB. Ring regs WFDMA 0x500 + 4*0x10: base, cnt | addr[35:32] << 16, cidx, didx. */
+#define X9_R4_N 32u
+#define X9_R4_PA (X9_WIFI_RSV_PA + 0x10000ULL)
+#define X9_R4_SIZE 0x11000u
+static uint8_t *x9_r4_va;
+static unsigned x9_r4_i;
+static void
+x9_r4_desc(unsigned i)
+{
+    volatile uint32_t *r = (volatile uint32_t *)(void *)(x9_r4_va + i * 16);
+    uint64_t b = X9_R4_PA + 0x1000 + i * X9_BUF;
+    r[0] = (uint32_t)b;
+    r[1] = X9_BUF << 16;
+    r[2] = (uint32_t)(b >> 32) & 0xf;
+    r[3] = 0;
+}
+static bool
+x9_r4_setup(x9_wdma *d)
+{
+    if (!x9_r4_va) {
+        x9_r4_va = (uint8_t *)ml_io_map_wcomb((vm_offset_t)X9_R4_PA, X9_R4_SIZE);
+    }
+    if (!x9_r4_va) {
+        IOLog("X9 WIFI RADIO: RX4 map failed\n");
+        return false;
+    }
+    memset(x9_r4_va, 0, 0x1000);
+    for (unsigned i = 0; i < X9_R4_N; i++) x9_r4_desc(i);
+    __asm__ volatile ("dsb sy" ::: "memory");
+    x9_wd_wr(d, 0x280, 1u << 4);                                  /* RST_DRX_PTR ring 4 */
+    x9_wd_wr(d, 0x540, (uint32_t)X9_R4_PA);
+    x9_wd_wr(d, 0x544, X9_R4_N | (uint32_t)((X9_R4_PA >> 32) & 0xf) << 16);
+    x9_wd_wr(d, 0x548, X9_R4_N - 1);
+    x9_r4_i = 0;
+    IOLog("X9 WIFI RADIO: RX4 ring %08x/%08x cidx=%u didx=%u\n", x9_wd_rd(d, 0x540), x9_wd_rd(d, 0x544),
+        x9_wd_rd(d, 0x548), x9_wd_rd(d, 0x54c));
+    return true;
+}
+/* Next RX4 packet or -1. */
+static int
+x9_r4_try(x9_wdma *d, const uint8_t **pkt)
+{
+    unsigned i = x9_r4_i;
+    volatile uint32_t *r = (volatile uint32_t *)(void *)(x9_r4_va + i * 16);
+    __asm__ volatile ("dsb sy" ::: "memory");
+    if (!(r[1] & (1u << 31))) return -1;
+    unsigned len = (r[1] >> 16) & 0x3fff;
+    *pkt = x9_r4_va + 0x1000 + i * X9_BUF;
+    return (int)(len > X9_BUF ? X9_BUF : len);
+}
+static void
+x9_r4_done(x9_wdma *d)
+{
+    unsigned i = x9_r4_i;
+    x9_r4_desc(i);
+    __asm__ volatile ("dsb sy" ::: "memory");
+    x9_wd_wr(d, 0x548, i);
+    x9_r4_i = (i + 1) % X9_R4_N;
+}
+
+/* Find an 802.11 beacon / probe response inside an RX packet (RXD length varies with the RXD groups, so search
+ * the first 160 bytes for a mgmt header whose fixed fields and SSID element are consistent) and add it. */
+static unsigned x9_scan_frames, x9_scan_bcn;
+static void
+x9_scan_take(const uint8_t *p, unsigned n)
+{
+    x9_scan_frames++;
+    for (unsigned o = 16; o + 24 + 12 + 2 <= n && o <= 160; o += 2) {
+        uint8_t fc = p[o];
+        if ((fc != 0x80 && fc != 0x50) || p[o + 1] != 0) continue;
+        const uint8_t *body = p + o + 24;
+        unsigned blen = n - o - 24;
+        if (body[12] != 0 || body[13] > 32 || 14u + body[13] > blen) continue;   /* SSID element first */
+        uint16_t bint, caps;
+        memcpy(&bint, body + 8, 2);
+        memcpy(&caps, body + 10, 2);
+        if (bint == 0 || bint > 10000) continue;
+        x9_scan_bcn++;
+        const uint8_t *bssid = p + o + 16;
+        unsigned ielen = blen - 12;
+        uint8_t ch = 0;
+        for (unsigned q = 0; q + 2 <= ielen; ) {
+            uint8_t id = body[12 + q], l = body[12 + q + 1];
+            if (q + 2u + l > ielen) break;
+            if (id == 3 && l >= 1) ch = body[12 + q + 2];
+            q += 2u + l;
+        }
+        using namespace x9wifi::fake;
+        IOLockLock(lock);
+        unsigned k = 0;
+        while (k < rcount && memcmp(rbss[k].bssid, bssid, 6)) k++;
+        if (k == rcount && rcount < 32) rcount++;
+        if (k < rcount) {
+            x9wifi::bss_info &b = rbss[k];
+            memset(&b, 0, sizeof b);
+            memcpy(b.bssid, bssid, 6);
+            b.ssid_len = body[13];
+            memcpy(b.ssid, body + 14, b.ssid_len);
+            b.freq_mhz = ch == 0 ? 0 : ch <= 14 ? (ch == 14 ? 2484u : 2407u + 5u * ch) : 5000u + 5u * ch;
+            b.signal_dbm = -55;          /* RCPI not decoded yet */
+            b.caps = caps;
+            b.beacon_int = bint;
+            b.ie_len = (uint16_t)(ielen < sizeof b.ie ? ielen : sizeof b.ie);
+            memcpy(b.ie, body + 12, b.ie_len);
+        }
+        IOLockUnlock(lock);
+        return;
+    }
+}
+
+/* gen4m nicUniCmdBssActivateCtrl for wlan0 as Android logs it: DevInfo[OMAC=0, DBDC=255], BssInfo0[DBDC=255,
+ * OMAC=0, WMM=3, ConnType=65537, ConnState=1, BcIdx=0, PhyMode=0, DTIM=0] + MLD tag (OwnMldId 32, link 0). */
+static void
+x9_radio_activate(x9_wdma *d, const uint8_t mac[6])
+{
+    static uint8_t ev[2048];
+    uint8_t dev[16] = { 0, 0xff, 0, 0,  0, 0, 12, 0,  1, 0 };
+    memcpy(dev + 10, mac, 6);
+    int n = x9_wd_unicmd(d, 0x01, 0x07, dev, sizeof dev, 0x01, ev, sizeof ev, 1000);
+    IOLog("X9 WIFI RADIO: DEVINFO active -> %s\n", n > 0 ? "answered" : "no CMD_RESULT");
+    uint8_t bss[4 + 32 + 20] = {};
+    uint8_t *b = bss + 4;                                          /* BASIC tag */
+    b[0] = 0; b[2] = 32;
+    b[4] = 1; b[5] = 0; b[6] = 0; b[7] = 0xff;                     /* active, omac, hw bss, dbdc auto */
+    uint32_t ct = 65537;
+    memcpy(b + 8, &ct, 4);
+    b[12] = 1; b[13] = 3;                                          /* conn state, wmm */
+    uint16_t sta = 0xfe;
+    memcpy(b + 26, &sta, 2);                                       /* u2StaRecIdxOfAP (24 dtim, 25 phymode) */
+    uint8_t *m = bss + 36;                                         /* MLD tag 0x1a */
+    m[0] = 0x1a; m[2] = 20;
+    m[4] = 0xff; m[5] = 32;
+    memcpy(m + 6, mac, 6);
+    m[12] = 0xff; m[13] = 0xff;
+    n = x9_wd_unicmd(d, 0x02, 0x07, bss, sizeof bss, 0x01, ev, sizeof ev, 1000);
+    IOLog("X9 WIFI RADIO: BSSINFO basic+mld -> %s\n", n > 0 ? "answered" : "no CMD_RESULT");
+}
+
+/* gen4m nicUniCmdScanReqV2 with Android's values: active, SSID type 1 (wildcard, no list), channel type 4 with
+ * 1-13, 36-64, 149-165, func mask 0x11, source 1, zero BSSID, random MAC in MISC. */
+static void
+x9_radio_scan_req(x9_wdma *d, uint8_t seq, const uint8_t mac[6])
+{
+    static const uint8_t chs[] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 36, 40, 44, 48, 52, 56, 60, 64, 149, 153,
+        157, 161, 165 };
+    uint8_t pl[4 + 20 + 16 + 8 + 64 + 16] = {};
+    unsigned at = 0;
+    pl[0] = seq; pl[1] = 0;                                        /* seq, bss 0 */
+    at = 4;
+    uint8_t *t = pl + at;                                          /* SCAN_REQ tag 1, 20 B */
+    t[0] = 1; t[2] = 20;
+    t[4] = 1; t[5] = 0; t[6] = 0x11; t[7] = 1;
+    at += 20;
+    t = pl + at;                                                   /* BSSID tag 11, 16 B */
+    t[0] = 11; t[2] = 16;
+    t[11] = 10; t[13] = 10;                                        /* match ssid / short ssid ind = OOB max */
+    at += 16;
+    t = pl + at;                                                   /* CHANNEL tag 12 */
+    unsigned nch = sizeof chs;
+    unsigned clen = 8 + ((nch * 2 + 3) & ~3u);
+    t[0] = 12; t[2] = (uint8_t)clen;
+    t[4] = 4; t[5] = (uint8_t)nch;
+    for (unsigned k = 0; k < nch; k++) {
+        t[8 + 2 * k] = chs[k] <= 14 ? 1 : 2;                       /* BAND_2G4 1, BAND_5G 2 */
+        t[8 + 2 * k + 1] = chs[k];
+    }
+    at += clen;
+    t = pl + at;                                                   /* MISC tag 14, 16 B */
+    t[0] = 14; t[2] = 16;
+    memcpy(t + 4, mac, 6);
+    at += 16;
+    uint8_t ev[64];
+    x9_wd_unicmd(d, 0x16, 0x06, pl, at, 0, ev, sizeof ev, 0);
+}
+
+static void
+x9_wifi_radio_loop(x9_wdma *d)
+{
+    using namespace x9wifi::fake;
+    static uint8_t ev[2048];
+    uint8_t mac[6] = { 0x02, 0x58, 0x39, 0x57, 0x46, 0x01 };
+    if (lock) memcpy(mac, status.mac, 6);
+    if (!lock) {
+        IOLog("X9 WIFI RADIO: en0/station not started (configd not up yet?); waiting\n");
+        for (unsigned k = 0; k < 600 && !lock; k++) IOSleep(100);
+        if (!lock) { IOLog("X9 WIFI RADIO: no station; giving up\n"); return; }
+        memcpy(mac, status.mac, 6);
+    }
+    if (!x9_r4_setup(d)) return;
+    x9_radio_activate(d, mac);
+    IOLockLock(lock);
+    rcount = 0;
+    realUp = true;
+    IOLockUnlock(lock);
+    IOLog("X9 WIFI RADIO: up; MAC %02x:%02x:%02x:%02x:%02x:%02x, serving scans\n", mac[0], mac[1], mac[2], mac[3],
+        mac[4], mac[5]);
+    uint8_t seq = 0;
+    unsigned idle_logs = 0;
+    for (;;) {
+        IOLockLock(lock);
+        if (!scanReq) {
+            uint64_t dl;
+            clock_interval_to_deadline(200, kMillisecondScale, &dl);
+            IOLockSleepDeadline(lock, (event_t)&scanReq, dl, THREAD_UNINT);
+        }
+        bool go = scanReq;
+        scanReq = false;
+        IOLockUnlock(lock);
+        /* keep the rings moving between scans */
+        const uint8_t *pk;
+        int pn;
+        while ((pn = x9_r4_try(d, &pk)) >= 0) { x9_scan_take(pk, (unsigned)pn); x9_r4_done(d); }
+        while ((pn = x9_wd_rx7_try(d, ev, sizeof ev)) >= 0) {
+            if (idle_logs < 40) {
+                idle_logs++;
+                IOLog("X9 WIFI RADIO: idle event eid=0x%02x opt=%02x len=%d\n", ev[36], ev[38], pn);
+            }
+        }
+        if (!go) continue;
+        seq = (uint8_t)(seq + 1 ? seq + 1 : 1);
+        IOLockLock(lock);
+        rcount = 0;
+        IOLockUnlock(lock);
+        x9_scan_frames = x9_scan_bcn = 0;
+        uint64_t ts = mach_absolute_time();
+        x9_radio_scan_req(d, seq, mac);
+        bool done = false;
+        while (!done && x9_ms_since(ts) < 8000) {
+            bool any = false;
+            while ((pn = x9_r4_try(d, &pk)) >= 0) { any = true; x9_scan_take(pk, (unsigned)pn); x9_r4_done(d); }
+            while ((pn = x9_wd_rx7_try(d, ev, sizeof ev)) >= 0) {
+                any = true;
+                uint8_t eid = ev[36];
+                if (eid == 0x0e) {
+                    uint8_t cc = pn >= 52 ? ev[52] : 0;
+                    uint32_t bc = 0;
+                    if (pn >= 60) memcpy(&bc, ev + 56, 4);
+                    IOLog("X9 WIFI RADIO: SCAN_DONE seq %u after %llu ms: channels %u, fw beacons %u\n", ev[44],
+                        x9_ms_since(ts), cc, bc);
+                    done = true;
+                } else if (eid != 0x01) {
+                    IOLog("X9 WIFI RADIO: scan event eid=0x%02x opt=%02x len=%d %02x %02x %02x %02x\n", eid, ev[38], pn,
+                        ev[44], ev[45], ev[46], ev[47]);
+                }
+            }
+            if (!any) IOSleep(5);
+        }
+        IOLockLock(lock);
+        unsigned nfound = rcount;
+        if (status.state == x9wifi::STA_SCANNING) status.state = x9wifi::STA_IDLE;
+        stats.scans++;
+        const x9wifi::sta_events *e = events;
+        IOLockUnlock(lock);
+        IOLog("X9 WIFI RADIO: scan %u %s in %llu ms: rx4 frames %u, beacons %u, networks %u\n", seq,
+            done ? "done" : "TIMED OUT", x9_ms_since(ts), x9_scan_frames, x9_scan_bcn, nfound);
+        for (unsigned k = 0; k < nfound && k < 32; k++) {
+            IOLog("X9 WIFI RADIO:   %02x:%02x:%02x:%02x:%02x:%02x %4u MHz caps %04x '%.*s'\n", rbss[k].bssid[0],
+                rbss[k].bssid[1], rbss[k].bssid[2], rbss[k].bssid[3], rbss[k].bssid[4], rbss[k].bssid[5],
+                rbss[k].freq_mhz, rbss[k].caps, rbss[k].ssid_len, (const char *)rbss[k].ssid);
+        }
+        if (e && e->scan_done) e->scan_done();
+    }
 }
 
 /* gen4m wlanImageSectionDownloadStage for a connac tailer image (RAM N9 or PHY): tailer = 36 B common (ucRegionNum at
@@ -1712,7 +2013,10 @@ x9_wifi_stage6(volatile uint32_t *bar)
             if (fwready && sweet_x9_arg("x9_wifi_cap", 1) == 1) {
                 x9_wifi_nic_cap(&d);
             }
-            if (sweet_x9_arg("x9_wifi_emi", 1) == 1) x9_emi_find_text("after WIFI_START");
+            if (fwready && sweet_x9_arg("x9_wifi_real", 0) == 1) {
+                x9_wifi_radio_loop(&d);              /* does not return while the radio is up */
+            }
+            if (sweet_x9_arg("x9_wifi_emitext", 0) == 1) x9_emi_find_text("after WIFI_START");
             if (sweet_x9_arg("x9_wifi_emi", 1) == 1) x9_emi_walk("after WIFI_START", true);
         }
         IOLog("X9 WIFI MCU: after RAM rom_sram=%08x romcode_index=%08x conn_on_misc=%08x events=%u\n",
