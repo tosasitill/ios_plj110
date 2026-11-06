@@ -787,46 +787,58 @@ extern "C" vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
 #define X9_WIFI_MISC_EMI2_SIZE 0x9a100u          /* sum of mt6653_wifi_misc_rsv_mem_info sizes */
 #define X9_EMI_BLK 0x10000u
 #define X9_EMI_NBLK ((unsigned)(X9_WIFI_EMI_SIZE / X9_EMI_BLK))
-static volatile uint32_t *x9_emi_va;
+/* rev252bc panicked: one 12 MiB ml_io_map_wcomb does not fit io_map's 8 MiB permanent submap (kmem_alloc failed 3,
+ * same as rev247-lo), and io_submap mappings are KMA_PERMANENT (cannot be unmapped). ml_io_map_unmappable maps in
+ * kernel_map (KMA_DATA) and ml_io_unmap frees it there. Walk the EMI through 1 MiB windows, unmapped after use. */
+#define X9_EMI_WIN 0x100000u
+extern "C" vm_offset_t ml_io_map_unmappable(vm_offset_t phys_addr, vm_size_t size, unsigned int flags);
+extern "C" void ml_io_unmap(vm_offset_t addr, vm_size_t sz);
+static bool x9_emi_have_before;
 static uint32_t x9_emi_sum_before[X9_EMI_NBLK];
+/* report=false: fill out[]; report=true: compare with x9_emi_sum_before and log changed blocks. */
 static void
-x9_emi_sums(uint32_t *out, unsigned *nonzero_blocks)
+x9_emi_walk(const char *when, bool report)
 {
-    unsigned nz = 0;
-    for (unsigned b = 0; b < X9_EMI_NBLK; b++) {
-        const volatile uint32_t *w = x9_emi_va + (size_t)b * (X9_EMI_BLK / 4);
-        uint32_t h = 0x811c9dc5u, any = 0;
-        for (unsigned k = 0; k < X9_EMI_BLK / 4; k++) {
-            uint32_t v = w[k];
-            any |= v;
-            h = (h ^ v) * 0x01000193u;
-        }
-        out[b] = h;
-        nz += any != 0;
-    }
-    if (nonzero_blocks) *nonzero_blocks = nz;
-}
-static void
-x9_emi_report(const char *when)
-{
-    if (!x9_emi_va) return;
     static uint32_t now[X9_EMI_NBLK];
-    unsigned nz = 0, changed = 0;
-    x9_emi_sums(now, &nz);
-    for (unsigned b = 0; b < X9_EMI_NBLK; b++) {
-        if (now[b] == x9_emi_sum_before[b]) continue;
-        changed++;
-        if (changed <= 12) {
-            const volatile uint32_t *w = x9_emi_va + (size_t)b * (X9_EMI_BLK / 4);
-            unsigned first = 0;
-            while (first < X9_EMI_BLK / 4 && w[first] == 0) first++;
-            if (first > X9_EMI_BLK / 4 - 8) first = X9_EMI_BLK / 4 - 8;
-            IOLog("X9 WIFI EMI %s: block +%06x changed; first nonzero +%06x: %08x %08x %08x %08x %08x %08x %08x %08x\n",
-                when, b * X9_EMI_BLK, b * X9_EMI_BLK + first * 4, w[first], w[first + 1], w[first + 2], w[first + 3],
-                w[first + 4], w[first + 5], w[first + 6], w[first + 7]);
+    uint32_t *out = report ? now : x9_emi_sum_before;
+    unsigned nz = 0, changed = 0, mapped = 0;
+    for (unsigned c = 0; c < (unsigned)(X9_WIFI_EMI_SIZE / X9_EMI_WIN); c++) {
+        volatile uint32_t *va = (volatile uint32_t *)ml_io_map_unmappable(
+            (vm_offset_t)(X9_WIFI_EMI_PA + (uint64_t)c * X9_EMI_WIN), X9_EMI_WIN, VM_WIMG_WCOMB);
+        if (!va) continue;
+        mapped++;
+        for (unsigned j = 0; j < X9_EMI_WIN / X9_EMI_BLK; j++) {
+            unsigned b = c * (X9_EMI_WIN / X9_EMI_BLK) + j;
+            const volatile uint32_t *w = va + (size_t)j * (X9_EMI_BLK / 4);
+            uint32_t h = 0x811c9dc5u, any = 0;
+            for (unsigned k = 0; k < X9_EMI_BLK / 4; k++) {
+                uint32_t v = w[k];
+                any |= v;
+                h = (h ^ v) * 0x01000193u;
+            }
+            out[b] = h;
+            nz += any != 0;
+            if (report && x9_emi_have_before && h != x9_emi_sum_before[b] && ++changed <= 12) {
+                unsigned first = 0;
+                while (first < X9_EMI_BLK / 4 && w[first] == 0) first++;
+                if (first > X9_EMI_BLK / 4 - 8) first = X9_EMI_BLK / 4 - 8;
+                IOLog("X9 WIFI EMI %s: block +%06x changed; first nonzero +%06x: %08x %08x %08x %08x %08x %08x %08x %08x\n",
+                    when, b * X9_EMI_BLK, b * X9_EMI_BLK + first * 4, w[first], w[first + 1], w[first + 2], w[first + 3],
+                    w[first + 4], w[first + 5], w[first + 6], w[first + 7]);
+            }
+            if (!report && b == 0) {
+                IOLog("X9 WIFI EMI: first words %08x %08x %08x %08x\n", w[0], w[1], w[2], w[3]);
+            }
         }
+        ml_io_unmap((vm_offset_t)va, X9_EMI_WIN);
     }
-    IOLog("X9 WIFI EMI %s: %u of %u 64K blocks changed since setup, %u nonzero\n", when, changed, X9_EMI_NBLK, nz);
+    if (report) {
+        IOLog("X9 WIFI EMI %s: %u of %u 64K blocks changed since setup, %u nonzero, %u/12 windows mapped\n", when,
+            changed, X9_EMI_NBLK, nz, mapped);
+    } else {
+        x9_emi_have_before = mapped == X9_WIFI_EMI_SIZE / X9_EMI_WIN;
+        IOLog("X9 WIFI EMI: %u of %u 64K blocks nonzero as LK left it, %u/12 windows mapped\n", nz, X9_EMI_NBLK, mapped);
+    }
 }
 
 #define X9_WFDMA 0xd4000u                    /* WFDMA host DMA0 (chip 0x20024000) in BAR0 */
@@ -1282,15 +1294,7 @@ x9_wifi_stage6(volatile uint32_t *bar)
         IOLog("X9 WIFI EMI: set emi_addr=%08x emi_size=%08x emi2_addr=%08x emi2_size=%08x (pa %llx size %llx, emi2 %llx)\n",
             bar[0xe0d1c / 4], bar[0x1ab2e0 / 4], bar[0x1ab2ec / 4], bar[0x1ab2e4 / 4], X9_WIFI_EMI_PA,
             X9_WIFI_EMI_SIZE, X9_WIFI_MISC_PA);
-        if (!x9_emi_va) {
-            x9_emi_va = (volatile uint32_t *)ml_io_map_wcomb((vm_offset_t)X9_WIFI_EMI_PA, X9_WIFI_EMI_SIZE);
-        }
-        if (x9_emi_va) {
-            unsigned nz = 0;
-            x9_emi_sums(x9_emi_sum_before, &nz);
-            IOLog("X9 WIFI EMI: mapped va=%p, %u of %u 64K blocks nonzero as LK left it; first words %08x %08x %08x %08x\n",
-                (void *)x9_emi_va, nz, X9_EMI_NBLK, x9_emi_va[0], x9_emi_va[1], x9_emi_va[2], x9_emi_va[3]);
-        }
+        x9_emi_walk("setup", false);
     }
 
     /* ROM patch, PATCH_FORMAT_V2 */
@@ -1379,7 +1383,7 @@ x9_wifi_stage6(volatile uint32_t *bar)
         IOLog("X9 WIFI PATCH: PATCH_FINISH %s status=%u cid=%02x; %u B in %llu ms -> %s\n",
             c ? "answered" : "FAILED", res[0], res[1], sent, x9_ms_since(tp),
             (c && res[0] == 0) ? "ROM PATCH DOWNLOADED" : "patch download failed");
-        x9_emi_report("after PATCH_FINISH");
+        if (sweet_x9_arg("x9_wifi_emi", 1) == 1) x9_emi_walk("after PATCH_FINISH", true);
     }
     if (semheld) {
         uint8_t sr[4] = { 0, 0, 0, 0 }, sres[4] = {};
