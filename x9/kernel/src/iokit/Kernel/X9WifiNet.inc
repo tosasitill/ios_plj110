@@ -1592,12 +1592,16 @@ x9_wait_mgmt(x9_wdma *d, uint8_t subtype, const uint8_t mac[6], uint8_t *out, un
 {
     static uint8_t ev[2048];
     uint64_t t0 = mach_absolute_time();
+    /* rev252br: what arrived while waiting, logged on timeout (diagnostic only) */
+    unsigned n4 = 0, n7 = 0, ne = 0;
+    uint8_t lastEid = 0;
     while (x9_ms_since(t0) < ms) {
         const uint8_t *pk;
         int pn;
         bool any = false;
         while ((pn = x9_r4_try(d, &pk)) >= 0) {
             any = true;
+            n4++;
             unsigned o = x9_find_mgmt(pk, (unsigned)pn, subtype, mac);
             if (o) { unsigned l = (unsigned)pn - o; if (l > cap) l = cap; memcpy(out, pk + o, l); x9_r4_done(d); return (int)l; }
             x9_r4_done(d);
@@ -1606,12 +1610,15 @@ x9_wait_mgmt(x9_wdma *d, uint8_t subtype, const uint8_t mac[6], uint8_t *out, un
             any = true;
             uint32_t rxd0;
             memcpy(&rxd0, ev, 4);
-            if ((rxd0 >> 27) == 7 && (ev[36] == 0x01 || ev[36] == 0x0e)) continue;  /* event, not a frame */
+            if ((rxd0 >> 27) == 7 && (ev[36] == 0x01 || ev[36] == 0x0e)) { ne++; lastEid = ev[36]; continue; }  /* event, not a frame */
+            n7++;
             unsigned o = x9_find_mgmt(ev, (unsigned)pn, subtype, mac);
             if (o) { unsigned l = (unsigned)pn - o; if (l > cap) l = cap; memcpy(out, ev + o, l); return (int)l; }
         }
         if (!any) IOSleep(5);
     }
+    IOLog("X9 WIFI WAIT: subtype %u timed out after %u ms: rx4 packets %u, rx7 frames %u, rx7 events %u (last eid 0x%02x)\n",
+          subtype, ms, n4, n7, ne, lastEid);
     return -1;
 }
 
@@ -1702,6 +1709,7 @@ x9_radio_join(x9_wdma *d, const uint8_t mac[6], const x9wifi::bss_info *b)
     /* u2SeqCtrl at 22 = 0 (HW fills); body at 24: algo(0), seq(1), status(0) */
     unsigned fl = 24 + 6;
     if (!x9_tx_mgmt(d, 0xb, fr, fl)) { IOLog("X9 WIFI JOIN: auth TX stuck\n"); return false; }
+    IOLog("X9 WIFI JOIN: auth queued on TX15 (DMA consumed the descriptor; air transmission not confirmed)\n");
     int n = x9_wait_mgmt(d, 0xb, mac, rx, sizeof rx, 1500);
     if (n < 30) { IOLog("X9 WIFI JOIN: no auth response\n"); return false; }
     uint16_t astatus;
@@ -1778,6 +1786,7 @@ x9_wifi_radio_loop(x9_wdma *d)
         IOLockUnlock(lock);
         if (dojoin) {
             bool ok = x9_radio_join(d, mac, &jt);
+            if (!ok) IOLog("X9 WIFI JOIN: failed; CH privilege token 3 is not aborted (no abort UniCmd implemented)\n");
             IOLockLock(lock);
             joinResult = ok ? x9wifi::RES_OK : x9wifi::RES_FAILED;
             status.state = ok ? x9wifi::STA_UP : x9wifi::STA_IDLE;
@@ -1843,7 +1852,7 @@ x9_wifi_radio_loop(x9_wdma *d)
                     IOLog("X9 WIFI RADIO: SCAN_DONE seq %u after %llu ms: channels %u, fw beacons %u\n", ev[44],
                         x9_ms_since(ts), cc, bc);
                     done = true;
-                } else if (eid != 0x01) {
+                } else {
                     IOLog("X9 WIFI RADIO: scan event eid=0x%02x opt=%02x len=%d %02x %02x %02x %02x\n", eid, ev[38], pn,
                         ev[44], ev[45], ev[46], ev[47]);
                 }

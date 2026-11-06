@@ -38,6 +38,19 @@
          self.events.clear();
          let several = count + usize::from(!alone) > 1;
          let outcome = match submitted {
+--- a/crates/metal2vulkan-runtime/src/command_buffer/submit.rs
++++ b/crates/metal2vulkan-runtime/src/command_buffer/submit.rs
+@@ -972,6 +972,10 @@
+                 scheduler
+                     .group
+                     .submit(device, &mut scheduler.waited[queue], Some(after));
++            if submitted.is_ok() {
++                // X9 metrics: this command buffer's own vkQueueSubmit returned (alone, or after group members).
++                crate::x9_timing::record(self.commit_ns.load(std::sync::atomic::Ordering::Acquire));
++            }
+             if let Err(error) = submitted {
+                 if let Some(fence) = fence {
+                     // SAFETY: the failed submission is not pending; inside the section.
 --- a/crates/metal2vulkan-runtime/src/lib.rs
 +++ b/crates/metal2vulkan-runtime/src/lib.rs
 @@ -23,6 +23,7 @@
