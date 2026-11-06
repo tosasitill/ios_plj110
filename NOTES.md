@@ -1,3 +1,21 @@
+## HANDOFF 2026-11-06 (21): rev252br BUILT = plugin 257 (submit-site timing) + Wi-Fi diagnostics; commit 1df4281
+
+- BUILT (Mac, via ssh): `build.py all --revision 257 --name x9-rev252br` (args as bq + park/async). Output x9/out/x9-rev252br.
+  NEW PLUGIN PACKAGE: stage before booting, serial from the user: `X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/x9-rev252br`.
+  Not run (device write). Not device-tested.
+- (a) Frontend timing now also covers the submit-alone path: runtime patch 0026 hooks submit.rs (own vkQueueSubmit return,
+  after group.submit). Patch regenerated; forward-applies to pristine, reverse-applies to the patched tree. Mac runtime tree
+  is patched by build-general-metal.py (0026 wired in; script copied to the Mac this time).
+- (b) X9WifiNet.inc: `X9 WIFI WAIT: subtype N timed out ...` (rx4 packets, rx7 frames, rx7 events, last eid) on mgmt wait
+  timeout; `X9 WIFI JOIN: auth queued on TX15 (DMA consumed the descriptor; air transmission not confirmed)`;
+  scan CMD_RESULT (eid 0x01) now logged like other scan events.
+- (c) Found: join never releases its channel privilege. Android (android-join-1/dmesg.txt:12046-12047) on join timeout runs
+  aisFsmReleaseCh -> cnmChMngrAbortPrivilege -> nicUniCmdChAbortPrivilege. The abort UniCmd bytes are not in the capture and no
+  local source has them, so NOT implemented (guessing a firmware command could wedge the radio). Logged as
+  `X9 WIFI JOIN: failed; CH privilege token 3 is not aborted`. Next: recover the abort encoding (gen4m source) or confirm
+  with the user before trying one on the device.
+- Wi-Fi 83.txt follow-up still needed: next RUC-Web run should show the WAIT summary and the auth-queued line.
+
 ## HANDOFF 2026-11-06 (20): 83.txt = rev252bq device run; RUC-Web join reaches Auth, no response; park/async A/B
 
 - Log: /tmp/83.txt (plugin X9GeneralMetal256, park+async on). Copy to .local/x9/logs/x9-rev252bq-83.txt before cleanup.
