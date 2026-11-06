@@ -1138,7 +1138,7 @@ x9_wd_cmd(x9_wdma *d, uint8_t cid, const void *payload, unsigned plen, uint8_t e
     /* gen4m wlanSendInitSetQueryCmd waits CFG_DEFAULT_RX_RESPONSE_TIMEOUT (3-10 s).
      * 67.txt: PATCH_FINISH got no event within our former 1 s while the ROM
      * applies the patch; give it 10 s, every other init command 3 s. */
-    unsigned wait_ms = cid == 0x07 ? 10000 : 3000;
+    unsigned wait_ms = (cid == 0x07 || cid == 0x02) ? 10000 : 3000;
     uint64_t tw = mach_absolute_time();
     int n = x9_wd_rx(d, wait_ms, ev, sizeof ev);
     if (n < 0) {
@@ -1348,7 +1348,7 @@ x9_wifi_stage6(volatile uint32_t *bar)
     /* 69.txt: ROM answers PATCH_START but never PATCH_FINISH. mt76 (connac2/3 load_patch) takes the patch
      * semaphore first (cid 0x10, payload {1,0,0,0}; event status 0 none, 1 already patched, 2 got it, 3 released)
      * and releases it at the end; gen4m's CFG_ROM_PATCH_NO_SEM_CTRL skips it. Boot-arg x9_wifi_sem=1 (default). */
-    bool semheld = false;
+    bool semheld = false, patched = false;
     if (ok && sweet_x9_arg("x9_wifi_sem", 1) == 1) {
         uint8_t sg[4] = { 1, 0, 0, 0 }, sres[4] = {};
         bool sc = x9_wd_cmd(&d, 0x10, sg, sizeof sg, 4, sres, sizeof sres);
@@ -1418,6 +1418,7 @@ x9_wifi_stage6(volatile uint32_t *bar)
             c ? "answered" : "FAILED", res[0], res[1], sent, x9_ms_since(tp),
             (c && res[0] == 0) ? "ROM PATCH DOWNLOADED" : "patch download failed");
         if (sweet_x9_arg("x9_wifi_emi", 1) == 1) x9_emi_walk("after PATCH_FINISH", true);
+        patched = c && res[0] == 0;
     }
     if (semheld) {
         uint8_t sr[4] = { 0, 0, 0, 0 }, sres[4] = {};
@@ -1426,6 +1427,103 @@ x9_wifi_stage6(volatile uint32_t *bar)
     }
     IOLog("X9 WIFI MCU: after patch rom_sram=%08x romcode_index=%08x conn_on_misc=%08x events=%u\n",
         bar[0x1ab160 / 4], bar[0xc1604 / 4], bar[0xe00f0 / 4], d.events);
+    /* RAM code (75.txt: ROM patch downloaded). gen4m wlanConnacFormatDownload(N9): tailer = 36 B common
+     * (ucRegionNum at [2]) + 40 B per region before it {crc, realsize, blocksize, rsv, addr, len, feature, type};
+     * region data back to back from offset 0. Per region (not FW_FEATURE_NOT_DOWNLOAD b6; DL_TO_EMI b7 not handled):
+     * INIT_CMD_ID_DOWNLOAD_CONFIG 0x01 {addr, len, wlanGetDataMode(feature)} + raw data on TX16, then
+     * wlanConfigWifiFunc: INIT_CMD_ID_WIFI_START 0x02 {override = START_OVERRIDE_START_ADDRESS if a region has
+     * DOWNLOAD_CONFIG_VALID_RAM_ENTRY b5, addr = that region's addr}. Ready (CFG_MTK_WIFI_ON_READ_BY_CFG_SPACE):
+     * EP cfg 0x48c bits 29:28 == 3. Skipped vs gen4m: kalSyncTimeToFW, queryPmicInfo, phyAction (cal), XO/connfem.
+     * Boot-arg x9_wifi_ram=1 (default). */
+    if (patched && sweet_x9_arg("x9_wifi_ram", 1) == 1) {
+        const uint8_t *rf = x9_wifi_ram;
+        uint32_t rlen = x9_wifi_ram_len;
+        unsigned nreg = rlen >= 36 ? rf[rlen - 36 + 2] : 0;
+        bool rok = nreg >= 1 && nreg <= 16 && rlen >= 36 + 40 * nreg;
+        uint32_t entry = 0, at = 0, rsent = 0;
+        uint64_t tr = mach_absolute_time();
+        if (rok) {
+            IOLog("X9 WIFI RAM: %u B, %u regions, version %.10s date %.15s\n", rlen, nreg,
+                (const char *)(rf + rlen - 36 + 7), (const char *)(rf + rlen - 36 + 17));
+        } else {
+            IOLog("X9 WIFI RAM: bad tailer (regions %u)\n", nreg);
+        }
+        for (unsigned r = 0; rok && r < nreg; r++) {
+            const uint8_t *t = rf + rlen - 36 - 40 * (nreg - r);
+            uint32_t addr, len;
+            memcpy(&addr, t + 16, 4);
+            memcpy(&len, t + 20, 4);
+            uint8_t feat = t[24];
+            if (feat & 0x20) entry = addr;
+            if ((feat & 0x40) || len == 0) {
+                IOLog("X9 WIFI RAM: region %u addr=%08x len=%u feat=%02x not downloaded\n", r, addr, len, feat);
+                at += len;
+                continue;
+            }
+            if (at > rlen - 36 - 40 * nreg || len > rlen - 36 - 40 * nreg - at) {
+                IOLog("X9 WIFI RAM: region %u runs past the data\n", r);
+                rok = false;
+                break;
+            }
+            if (feat & 0x80) {
+                IOLog("X9 WIFI RAM: region %u addr=%08x feat=%02x is DL_TO_EMI (not implemented)\n", r, addr, feat);
+                rok = false;
+                break;
+            }
+            uint32_t mode = 1u << 31;                             /* ACK */
+            if (feat & 0x01) {
+                mode |= (1u << 3) | (feat & 0x06u) | 1u;          /* RESET | key | ENCRYPTION */
+                if (feat & 0x10) mode |= 1u << 6;                 /* ENCRY_MODE_SEL */
+            }
+            uint32_t cfg[3] = { addr, len, mode };
+            uint8_t res[4] = {};
+            bool c = x9_wd_cmd(&d, 0x01, cfg, sizeof cfg, 1, res, sizeof res);
+            IOLog("X9 WIFI RAM: region %u addr=%08x len=%u feat=%02x mode=%08x DOWNLOAD_CONFIG %s status=%u\n",
+                r, addr, len, feat, mode, c ? "answered" : "FAILED", res[0]);
+            if (!c || res[0] != 0) {
+                rok = false;
+                break;
+            }
+            for (uint32_t o = 0; o < len; o += 2048) {
+                unsigned chunk = len - o < 2048 ? len - o : 2048;
+                memcpy(d.va + X9_B_FW, rf + at + o, chunk);
+                if (!x9_wd_tx(&d, 16, X9_B_FW, chunk)) {
+                    IOLog("X9 WIFI RAM: region %u data stuck at %u/%u\n", r, o, len);
+                    rok = false;
+                    break;
+                }
+                rsent += chunk;
+            }
+            at += len;
+        }
+        if (rok) {
+            uint32_t st[2] = { entry ? 1u : 0u, entry };
+            uint8_t res[4] = {};
+            IOLog("X9 WIFI RAM: %u B in %llu ms; WIFI_START override=%u addr=%08x\n", rsent, x9_ms_since(tr), st[0], entry);
+            bool c = x9_wd_cmd(&d, 0x02, st, sizeof st, 1, res, sizeof res);
+            IOLog("X9 WIFI RAM: WIFI_START %s status=%u -> %s\n", c ? "answered" : "FAILED", res[0],
+                (c && res[0] == 0) ? "RAM CODE STARTED" : "start failed");
+            volatile uint32_t *m = x9_rc_mac;
+            uint64_t tw = mach_absolute_time();
+            uint32_t last = 0xffffffffu;
+            while (m && x9_ms_since(tw) < 5000) {
+                uint32_t v = x9_pcie_cfg_rd(m, 1, 0, 0x48c);
+                if (v != last) {
+                    IOLog("X9 WIFI RAM: +%llu ms ep cfg 0x48c=%08x (fw status sync b29:28=%u) conn_on_misc=%08x rom_sram=%08x\n",
+                        x9_ms_since(tw), v, (v >> 28) & 3, bar[0xe00f0 / 4], bar[0x1ab160 / 4]);
+                    last = v;
+                }
+                if (((v >> 28) & 3) == 3) {
+                    IOLog("X9 WIFI RAM: FW READY after %llu ms\n", x9_ms_since(tw));
+                    break;
+                }
+                IOSleep(10);
+            }
+            if (sweet_x9_arg("x9_wifi_emi", 1) == 1) x9_emi_walk("after WIFI_START", true);
+        }
+        IOLog("X9 WIFI MCU: after RAM rom_sram=%08x romcode_index=%08x conn_on_misc=%08x events=%u\n",
+            bar[0x1ab160 / 4], bar[0xc1604 / 4], bar[0xe00f0 / 4], d.events);
+    }
     /* teardown: DMA off, wait idle, indexes reset, ring registers cleared */
     x9_wd_wr(&d, 0x208, gloOff);
     uint64_t ti = mach_absolute_time();
