@@ -1,3 +1,21 @@
+## HANDOFF 2026-11-06 (20): 83.txt = rev252bq device run; RUC-Web join reaches Auth, no response; park/async A/B
+
+- Log: /tmp/83.txt (plugin X9GeneralMetal256, park+async on). Copy to .local/x9/logs/x9-rev252bq-83.txt before cleanup.
+- Wi-Fi join RUC-Web (open) at 36.316 s: CH grant status=0 ch=0 (36.605), STAREC answered (36.613), Auth sent via
+  x9_tx_mgmt (no 'auth TX stuck' log), no auth response in 1.5 s -> 'no auth response', station result 6 (38.117).
+  STATS `tx=0/0` is fake::stats (fake radio counter), NOT the real radio: it does not prove the Auth never left.
+  Open: did the Auth TX complete, and what did firmware events eid 0x76/0x89/0x27 (36.604) mean.
+- Scans before the join: 1-9 OK (beacons 1-6, RUC-Web/RUC-Mobile/eduroam-like SSIDs). After the join: scan 10 (52.6 s) 4 frames 0
+  beacons, scans 12 and 13 0 frames (timeouts). Radio likely wedged after the failed join (unproven).
+- FRONTEND commit->submit: command_buffers=0 in every window, so the group submit path was never hit. The rev252bq
+  timing covers nothing; submit_alone (and any other submit path) must be timed too.
+- Park+async vs sync (82 vs 83, 2 s windows): presented fps 19.0 -> 23.0, dropped 31 -> 11, stutter 1 -> 0,
+  but avg swap->present latency 9.6 -> 20.5 ms (frames queue behind the fence), max 99 -> 49 ms.
+  Busy windows us/job: pre_cache 3411 -> 3714, wait 6594 -> 7695 (sync-style measure), post_cache 1813 -> 1744.
+  Async worker: queue_avg 16-24 us, run_avg 0.7-13.6 ms per job.
+- Next (not done): (a) time submit_alone path; (b) log auth TX completion and the firmware events after STAREC;
+  (c) check radio state after a failed join.
+
 ## HANDOFF 2026-11-06 (19): rev252bq BUILT = plugin 256 with commit->vkQueueSubmit timing + park/async
 
 - BUILT (Mac, via ssh): `build.py all --revision 256 --name x9-rev252bq` with rev252bp args (x9_gpu_park=1 x9_submit_async=1).
