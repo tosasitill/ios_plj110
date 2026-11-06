@@ -6,7 +6,9 @@
   wifid re-scans every ~0.6 s. But rx4 frames 0: the scan results arrive on **RX7** as packets of 252-362 B that
   the loop logged as "scan event eid=0x00 opt=00" (i.e. not RXD type 7 events; frames).
 - rev252bl (commit after 1bca7b9): RX7 packets with (rxd0 >> 27) != 7 go to x9_scan_take(); first 3 dumped
-  (`X9 WIFI RADIO: rx7 frame type ...` + hex rows). Between scans such frames are dropped. NOT BUILT yet (tunnel).
+  (`X9 WIFI RADIO: rx7 frame type ...` + hex rows). Between scans such frames are dropped. BUILT via ssh (source
+  3fc4296): Mac x9/out/x9-rev252bl/boot.img sha256 2a446118d25847f865a497379d78de828dce22475e780db933d4b9587c98aa98
+  (usual args + x9_wifi_real=1 + XO args, wlan ADT node present), kernel only, no mailbox.
 
 ## HANDOFF 2026-11-06 (9): 78.txt = RAM-mode commands work; rev252bk = real radio for Settings (goal: real SSIDs)
 
