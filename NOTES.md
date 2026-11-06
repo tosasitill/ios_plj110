@@ -16,7 +16,9 @@
   (OPLUS_FEATURE_CUSTOMER_CLK may change co_clock detection - unverified.)
 - rev252be (commit 946a7bb): logs `X9 WIFI PLATCFG before:` (16 words) and writes 0x00158000 to 0x7c05b2c8
   (boot-args x9_wifi_platcfg=1 default, x9_wifi_platcfg_val=<word>). Post-data alive probe renamed to
-  x9_wifi_aliveprobe (x9_wifi_probe already meant x9_wifi_probe_hw). NOT BUILT: Mac tunnel refused.
+  x9_wifi_aliveprobe (x9_wifi_probe already meant x9_wifi_probe_hw). BUILT via ssh (source 1a97156): Mac
+  x9/out/x9-rev252be/boot.img sha256 3552e789b9171721921069dd955d9f7ed091ec187be94b7c3e469c30bdb5f634, args
+  x9_wifi_power=6 x9_gpu_khz=1716000 x9_gpu_floor_khz=1100000, kernel only, no mailbox.
 - TODO: get the XO NVRAM blob from Android (dmesg "Copy N bytes from xo nvram", the HAL's source file under
   /mnt/vendor/nvdata) and write it at 0x7c05b28c too; diff EMI per word between data phase and FINISH.
 
