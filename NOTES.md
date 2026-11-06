@@ -1,3 +1,16 @@
+## HANDOFF 2026-11-06 (16): rev252bp BUILT = park+async + kernel FIFO timing; commit 1f6f03c
+
+- BUILT (Mac via ssh): x9/out/x9-rev252bp/boot.img, boot_sha256 a875f20b41a023d2f104b35d8bf4e367454fbc1d149ee9d79d2457233d25d9e8.
+  Args: rev252bo set + x9_gpu_park=1 x9_submit_async=1. Plugin on device was X9GeneralMetal255 in 82.txt (async-capable).
+  Not device-tested.
+- Added `X9 RENDER ASYNC window:` every 2 s (SweetX9RenderEngine.inc): queue_avg_us (enqueue -> worker pop), run_avg_us
+  (pop -> render_submit return), enqueue_to_done_max_us, jobs, failed. Kernel FIFO only.
+- NOT done: frontend commit -> enqueue timing lives in the plugin (NativeBridgeMetalFrontend.mm ctc, status line only,
+  not logged). Needs a plugin change and a new plugin package to stage. Swap -> present timing is already in X9 METRICS.
+- Wi-Fi: user reports still cannot connect on rev252bn-era build. No new log yet (only 82.txt in /tmp). rev252bn implements
+  open-network join only (RUC-Web); WPA2 networks (RUC-Mobile, eduroam) are not implemented, so those fail by design.
+  Need the disk sidecar and console from that attempt before any diagnosis.
+
 ## HANDOFF 2026-11-06 (15): 82.txt = rev252bo device log: metrics work; sync GPU path (park/async OFF)
 
 - Log copy: .local/x9/logs/x9-rev252bo-82.txt (gitignored). 65 s boot, no kernel panic, boot-args from launchd: no x9_gpu_park,
