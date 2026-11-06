@@ -1,3 +1,21 @@
+## HANDOFF 2026-11-06 (3): rev252bc PANICKED (my mapping bug); rev252bd built
+
+- 实测 rev252bc (user booted it; USB log incomplete). Disk ring pulled on the Mac with
+  `python3 -I x9/tools/pull_disk_log.py --manifest x9/out/x9-rev252bc/shim/ufs-root-manifest.json --serial <adb
+  serial> --out .local/x9/work/x9-disk-log/x9-rev252bc-20261106-121242` (adb in /opt/homebrew/bin); it stops at
+  21.264 s (logger lag). Android pstore (`adb exec-out su -c cat /sys/fs/pstore/console-ramoops-0`, saved on the
+  Mac in .local/x9/work/x9-disk-log/pstore-20261106-121302/) has the end:
+  `X9 WIFI EMI: before emi_addr=00004000 emi_size=0 emi2_addr=0 emi2_size=0`, `set emi_addr=0000e100
+  emi_size=00c00000 emi2_addr=0000e260 emi2_size=0009a100` (writes stick), then
+  `panic: kmem_alloc(..., 12582912, 0x100021): failed with 3` = my 12 MiB ml_io_map_wcomb (io_submap is 8 MiB
+  and KMA_PERMANENT; same class as rev247-lo). The patch was never sent in that boot.
+- rev252bd (commits 1b184be, cee0134): EMI checksum walk through 1 MiB windows with ml_io_map_unmappable(pa, 1 MiB,
+  0x6 = VM_WIMG_WCOMB) (kernel_map, KMA_DATA) + ml_io_unmap. BUILT via ssh: Mac x9/out/x9-rev252bd/boot.img
+  9,887,744 B sha256 b0e4e35e5a088bec6e94158af0638a2e515559d2a78de7a1bad13b9fae81f791, same args
+  (x9_wifi_power=6 x9_gpu_khz=1716000 x9_gpu_floor_khz=1100000), kernel only, no mailbox.
+- RULE: never ml_io_map/ml_io_map_wcomb anything big or temporary (permanent 8 MiB io_submap); use
+  ml_io_map_unmappable + ml_io_unmap.
+
 ## HANDOFF 2026-11-06 (2): rev252bc = tell the MCU its EMI (mt6653SetupMcuEmiAddr) before the patch; built
 
 - Source finding (gen4m, this session): host-side patch flow matches ours exactly (wlanDownloadPatch ->
