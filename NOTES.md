@@ -19,6 +19,12 @@
   x9_wifi_aliveprobe (x9_wifi_probe already meant x9_wifi_probe_hw). BUILT via ssh (source 1a97156): Mac
   x9/out/x9-rev252be/boot.img sha256 3552e789b9171721921069dd955d9f7ed091ec187be94b7c3e469c30bdb5f634, args
   x9_wifi_power=6 x9_gpu_khz=1716000 x9_gpu_floor_khz=1100000, kernel only, no mailbox.
+- rev252bf (commit 6a01e7d): also writes the XO NVRAM = CONNXO NVRAM record at 0x7c05b28c (boot-arg x9_wifi_xonv=1
+  default). Source: Mac ~/output = extracted vendor partition (user, 2026-11-06): lib64/libwifinvram.so sends it as
+  "WR-BUF:XONV" via /dev/wmtWifi (-> gen4m wlanXonvBufHandler); lib64/libcustom_nvram.so stConnxoCfgDefault
+  (27 B @ file 0x6e758) = 19 00 98 f8 c1 a8 + zeros, iFileCONNXOLID = 0x53. Default used (phone's calibrated
+  /mnt/vendor/nvdata/APCFG/APRDEB/CONNXO not read yet). BUILT via ssh: Mac x9/out/x9-rev252bf/boot.img sha256
+  42c267fac80d8a568ff2396c5a8286f187234063508edcd799a01846f51c3a44 (same args; boot this instead of be).
 - TODO: get the XO NVRAM blob from Android (dmesg "Copy N bytes from xo nvram", the HAL's source file under
   /mnt/vendor/nvdata) and write it at 0x7c05b28c too; diff EMI per word between data phase and FINISH.
 
