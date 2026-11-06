@@ -1,3 +1,26 @@
+## HANDOFF 2026-11-06 (9): 78.txt = RAM-mode commands work; rev252bk = real radio for Settings (goal: real SSIDs)
+
+- 实测 /tmp/78.txt (rev252bj): UNI_CMD_ID_CHIP_CONFIG NIC_CAPABILITY answered in 1 ms (UNI_EVENT 0x43, 588 B,
+  29 TLVs). MAC tag = 00:00:00:00:00:00 (eFuse empty; Android takes the MAC from NVRAM WIFI); tag 0x14 a-die
+  8a016653; tag 0x25 sw-sync EMI 0x1c8000 and tag 0x1f host-suspend 0x200607c4/c8 match Android's dmesg.
+- Android dmesg also shows the pre-PHY init: QUERY_INFO 0x22 (PMIC), PHY_ACTION 0x08 x2 (682 B COM_FEM, 880 B CAL
+  with EMI cal backup) - we skip those (likely why our RAM WIFI_START takes 1.7 s vs Android 154 ms).
+- Android scan (dmesg SCANLOG): BSS0 activate DevInfo[OMAC=0,DBDC=255] BssInfo0[WMM=3, ConnType=65537,
+  ConnState=1, BcIdx=0, PhyMode=0]; ScanReqV2 ScanType=1, SSIDType=1 Num=0, ChannelType=4 Num=26 (1-13,
+  36-64, 149-165), Func=0x11, random MAC, BSSID 0 -> SCAN_DONE ~0.6 s, 22 BSS.
+- iOS side already works with the fake radio (29.txt: Settings toggle + list). rev252bk (commits a few after
+  cc886de, last d3d6c50): boot-arg x9_wifi_real=1 = real backend behind the same station interface:
+  en0 + wlan ADT node also for x9_wifi_real=1 (boot-xnu.py); sta_scan -> radio thread when realUp (else 0 networks
+  via the fake timer); join -> RES_UNSUPPORTED for now. Stage 6 after FW READY + NIC cap calls
+  x9_wifi_radio_loop() and never tears down: HW RX ring 4 (32 x 2 KiB at LK pool +0x10000, WFDMA 0x540..),
+  DEVINFO (cid 1) + BSSINFO BASIC/MLD (cid 2) with ACK, then per scan request UNI_CMD_ID_SCAN_REQ 0x16 (opt 0x06)
+  tags SCAN_REQ/BSSID/CHANNEL/MISC; collects RX4 packets (beacon/probe-resp found by searching for the mgmt
+  header, RCPI not decoded: signal fixed -55), waits for UNI_EVENT_ID_SCAN_DONE 0x0e (8 s cap), fills rbss[32],
+  calls scan_done -> wifid reads results. Logs `X9 WIFI RADIO: ...` incl. every network found. EMI text scan now
+  opt-in (x9_wifi_emitext=1). NOT BUILT (tunnel refused). Build: usual args + `--boot-arg x9_wifi_real=1` + XO args.
+- Unknowns/risks: whether FW delivers scan frames on HW RX4 (else look at RX5/6/8 or RX7 pkt type), whether
+  DEVINFO/BSSINFO need more tags, whether SET_DOMAIN_INFO is needed before 5 GHz active scan.
+
 ## HANDOFF 2026-11-06 (8): **Wi-Fi FIRMWARE RUNNING, READY BIT SET** (77.txt = rev252bi)
 
 - 实测 /tmp/77.txt (x9-rev252bi, calibrated XO via x9_wifi_xo0..6): PLATCFG XO reads back ca9f0019 000095bf 0
