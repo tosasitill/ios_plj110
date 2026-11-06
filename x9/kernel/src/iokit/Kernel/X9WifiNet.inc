@@ -91,6 +91,8 @@ int joinResult;
 /* real MT6653 backend (x9_wifi_real=1): the radio thread in stage 6 fills rbss and calls scan_done */
 bool realWanted, realUp;
 volatile bool scanReq;
+volatile bool joinReq;
+bss_info joinTarget;
 bss_info rbss[32];
 unsigned rcount;
 
@@ -182,9 +184,30 @@ int sta_connect(const uint8_t *ssid, size_t len, const uint8_t *bssid, const cha
   int found = -1;
   IOLockLock(lock);
   if (realWanted) {
-    joinResult = RES_UNSUPPORTED; status.state = STA_AUTH; IOLockUnlock(lock);
-    log("real radio: join not implemented yet");
-    after(joinCall, 300);
+    int ti = -1;
+    for (unsigned i = 0; i < rcount; i++)
+      if ((bssid && !memcmp(bssid, rbss[i].bssid, 6)) ||
+          (len && len == rbss[i].ssid_len && !memcmp(ssid, rbss[i].ssid, len))) { ti = (int)i; break; }
+    if (ti < 0) {
+      joinResult = RES_NOT_FOUND; status.state = STA_AUTH; IOLockUnlock(lock);
+      log("real radio: join target not found");
+      after(joinCall, 50);
+      return 0;
+    }
+    if (rbss[ti].caps & 0x0010) {              /* Privacy bit: encrypted (WPA/enterprise) not supported yet */
+      joinResult = RES_UNSUPPORTED; status.state = STA_AUTH; IOLockUnlock(lock);
+      log("real radio: '%.*s' is encrypted; only open networks supported for now",
+          rbss[ti].ssid_len, (const char *)rbss[ti].ssid);
+      after(joinCall, 50);
+      return 0;
+    }
+    memcpy(&joinTarget, &rbss[ti], sizeof joinTarget);
+    memcpy(status.bssid, rbss[ti].bssid, 6); status.ssid_len = rbss[ti].ssid_len;
+    memcpy(status.ssid, rbss[ti].ssid, 32); status.freq_mhz = rbss[ti].freq_mhz;
+    status.signal_dbm = rbss[ti].signal_dbm; status.state = STA_AUTH;
+    joinReq = true; IOLockWakeup(lock, (event_t)&scanReq, false);
+    IOLockUnlock(lock);
+    log("real radio: join '%.*s' requested (open)", rbss[ti].ssid_len, (const char *)rbss[ti].ssid);
     return 0;
   }
   for (unsigned i = 0; i < 2; i++)
@@ -1519,6 +1542,203 @@ x9_radio_scan_req(x9_wdma *d, uint8_t seq, const uint8_t mac[6])
     x9_wd_unicmd(d, 0x16, 0x06, pl, at, 0, ev, sizeof ev, 0);
 }
 
+/* ---------------- open-network join (RUC-Web): CH privilege -> STAREC -> Auth -> Assoc -> connected ----------------
+ * All mgmt frames go on the command ring (TX15) as a 32-byte connac3 TXD + the 802.11 frame, packet format COMMAND,
+ * header format 802.11 normal. Bit layout from include/nic/nic_connac3x_tx.h (DS_VER 3600). widx/own-mac from BSS0. */
+#define X9_JOIN_WIDX 1u
+#define X9_JOIN_OMAC 0u
+
+static unsigned
+x9_txd_mgmt(uint8_t *buf, unsigned framelen, unsigned machdr, uint8_t subtype)
+{
+    uint32_t dw[8] = {};
+    unsigned total = 32 + framelen;
+    unsigned etoff = (16 + machdr) >> 1;                       /* pse(16)+machdr, in words */
+    dw[0] = (total & 0xffff) | ((etoff & 0x7f) << 16) | (2u << 23) | (17u << 25);  /* COMMAND, MCU_Q1|ALTX */
+    dw[1] = (X9_JOIN_WIDX & 0xfff) | (2u << 14) | (((machdr >> 1) & 0x1f) << 16) | (0u << 21) | (X9_JOIN_OMAC << 25);
+    dw[2] = (subtype & 0xf) | (0u << 4) | (0x7fu << 16);       /* subtype, type MGMT 0, life-time max */
+    dw[3] = (15u << 11);                                       /* remaining tx count 15, HW assigns SN */
+    dw[6] = (1u << 10) | (1u << 2) | (1u << 28);               /* msdu_count 1, DA_SRC_SEL, VALID_TXD_ARRIVAL */
+    memcpy(buf, dw, 32);
+    return total;
+}
+
+/* Send a prebuilt 802.11 mgmt frame (at X9_B_FW+32 already, with TXD space at X9_B_FW) on TX15. */
+static bool
+x9_tx_mgmt(x9_wdma *d, uint8_t subtype, const uint8_t *frame, unsigned framelen)
+{
+    uint8_t *b = d->va + X9_B_FW;
+    unsigned total = x9_txd_mgmt(b, framelen, 24, subtype);
+    memcpy(b + 32, frame, framelen);
+    return x9_wd_tx(d, 15, X9_B_FW, total);
+}
+
+/* Locate an 802.11 mgmt frame of a given subtype addressed to us inside an RX7/RX4 packet. Returns body offset or 0. */
+static unsigned
+x9_find_mgmt(const uint8_t *p, unsigned n, uint8_t subtype, const uint8_t mac[6])
+{
+    uint8_t fc0 = (uint8_t)(subtype << 4);                     /* type mgmt (00), subtype in high nibble */
+    for (unsigned o = 16; o + 24 <= n && o <= 196; o += 2) {
+        if (p[o] != fc0 || (p[o + 1] & 0x0c)) continue;
+        if (memcmp(p + o + 4, mac, 6) != 0) continue;          /* DA = us */
+        return o;
+    }
+    return 0;
+}
+
+/* Wait up to ms for a mgmt frame of subtype from the AP on RX7 (events ignored) or RX4; copies body to out. */
+static int
+x9_wait_mgmt(x9_wdma *d, uint8_t subtype, const uint8_t mac[6], uint8_t *out, unsigned cap, unsigned ms)
+{
+    static uint8_t ev[2048];
+    uint64_t t0 = mach_absolute_time();
+    while (x9_ms_since(t0) < ms) {
+        const uint8_t *pk;
+        int pn;
+        bool any = false;
+        while ((pn = x9_r4_try(d, &pk)) >= 0) {
+            any = true;
+            unsigned o = x9_find_mgmt(pk, (unsigned)pn, subtype, mac);
+            if (o) { unsigned l = (unsigned)pn - o; if (l > cap) l = cap; memcpy(out, pk + o, l); x9_r4_done(d); return (int)l; }
+            x9_r4_done(d);
+        }
+        while ((pn = x9_wd_rx7_try(d, ev, sizeof ev)) >= 0) {
+            any = true;
+            uint32_t rxd0;
+            memcpy(&rxd0, ev, 4);
+            if ((rxd0 >> 27) == 7 && (ev[36] == 0x01 || ev[36] == 0x0e)) continue;  /* event, not a frame */
+            unsigned o = x9_find_mgmt(ev, (unsigned)pn, subtype, mac);
+            if (o) { unsigned l = (unsigned)pn - o; if (l > cap) l = cap; memcpy(out, ev + o, l); return (int)l; }
+        }
+        if (!any) IOSleep(5);
+    }
+    return -1;
+}
+
+static bool
+x9_radio_ch_privilege(x9_wdma *d, const x9wifi::bss_info *b, uint8_t token)
+{
+    static uint8_t ev[512];
+    uint8_t ch = b->freq_mhz >= 4900 ? (uint8_t)((b->freq_mhz - 5000) / 5) : (uint8_t)((b->freq_mhz - 2407) / 5);
+    uint8_t band = b->freq_mhz >= 4900 ? 2 : 1;                /* eRfBand: 1=2.4G, 2=5G (ChReq b=1 for 2.4 in Android) */
+    uint8_t pl[4 + 24] = {};
+    uint8_t *t = pl + 4;
+    t[0] = 0; t[2] = 24;                                       /* tag CH_PRIVILEGE_REQ, len 24 */
+    t[4] = 0;                                                  /* ucBssIndex 0 */
+    t[5] = token;
+    t[6] = ch;                                                /* ucPrimaryChannel */
+    t[7] = 0;                                                  /* ucRfSco */
+    t[8] = band;                                              /* ucRfBand */
+    t[9] = 0;                                                  /* ucRfChannelWidth 20 MHz */
+    t[10] = ch;                                               /* seg1 */
+    t[11] = 0;                                                /* seg2 */
+    t[12] = 0; t[13] = ch; t[14] = 0;                         /* fromAP width/seg1/seg2 */
+    t[15] = 0;                                                /* ucReqType CH_REQ_TYPE_JOIN */
+    uint32_t iv = 4000;
+    memcpy(t + 16, &iv, 4);                                   /* u4MaxInterval */
+    t[20] = 0xff;                                             /* ucDBDCBand = AUTO */
+    int n = x9_wd_unicmd(d, 0x27, 0x06, pl, sizeof pl, 0x27, ev, sizeof ev, 2000);
+    if (n < 48) { IOLog("X9 WIFI JOIN: no CH grant\n"); return false; }
+    uint8_t st = ev[46];                                      /* UNI_EVENT_CNM{4 pad}+tag{4 hdr}+bss+token+status */
+    IOLog("X9 WIFI JOIN: CH grant status=%u ch=%u\n", st, ev[47]);
+    return true;
+}
+
+static bool
+x9_radio_starec(x9_wdma *d, const x9wifi::bss_info *b, uint8_t staState)
+{
+    static uint8_t ev[512];
+    uint8_t rcpi = (uint8_t)((b->signal_dbm + 110) * 2);
+    uint8_t pl[8 + 20 + 12 + 16 + 16] = {};
+    pl[0] = 0;                                                /* ucBssInfoIdx 0 */
+    pl[1] = X9_JOIN_WIDX;                                     /* ucWlanIdxL */
+    unsigned at = 8;
+    uint8_t *t = pl + at;                                     /* STAREC_BASIC tag 0 */
+    t[0] = 0; t[2] = 20;
+    uint32_t ct = 0x10002;                                    /* CONNECTION_INFRA_AP = STA_TYPE_AP|NETWORK_INFRA */
+    memcpy(t + 4, &ct, 4);
+    t[8] = 1;                                                 /* ucConnectionState STATE_CONNECTED */
+    memcpy(t + 12, b->bssid, 6);                              /* aucPeerMacAddr */
+    uint16_t ei = 3;                                          /* V2 | NEWSTAREC */
+    memcpy(t + 18, &ei, 2);
+    at += 20;
+    t = pl + at;                                              /* STAREC_PHY_INFO tag 0x15 */
+    t[0] = 0x15; t[2] = 12;
+    uint16_t brs = 0x00ff;
+    memcpy(t + 4, &brs, 2);                                   /* u2BSSBasicRateSet */
+    t[6] = 0x07;                                              /* ucDesiredPhyTypeSet: HR_DSSS|ERP|OFDM */
+    t[9] = rcpi;                                              /* ucRCPI */
+    at += 12;
+    t = pl + at;                                              /* STAREC_RA tag 1 */
+    t[0] = 1; t[2] = 16;
+    uint16_t nhr = 0x0fff;
+    memcpy(t + 4, &nhr, 2);                                   /* u2DesiredNonHTRateSet */
+    at += 16;
+    t = pl + at;                                              /* STAREC_STATE tag 7 */
+    t[0] = 7; t[2] = 16;
+    t[4] = staState;                                          /* ucStaState */
+    int n = x9_wd_unicmd(d, 0x03, 0x07, pl, at, 0x01, ev, sizeof ev, 1000);
+    IOLog("X9 WIFI JOIN: STAREC state %u -> %s\n", staState, n > 0 ? "answered" : "no CMD_RESULT");
+    return true;
+}
+
+static bool
+x9_radio_join(x9_wdma *d, const uint8_t mac[6], const x9wifi::bss_info *b)
+{
+    static uint8_t rx[512];
+    const uint8_t *ap = b->bssid;
+    IOLog("X9 WIFI JOIN: '%.*s' %02x:%02x:%02x:%02x:%02x:%02x %u MHz\n", b->ssid_len, (const char *)b->ssid,
+        ap[0], ap[1], ap[2], ap[3], ap[4], ap[5], b->freq_mhz);
+    if (!x9_radio_ch_privilege(d, b, 3)) return false;
+    x9_radio_starec(d, b, 0);                                 /* STA_STATE_1 */
+
+    /* Auth frame, open system, transaction 1 */
+    uint8_t fr[128];
+    memset(fr, 0, sizeof fr);
+    fr[0] = 0xb0;                                             /* FC: mgmt auth */
+    memcpy(fr + 4, ap, 6);                                    /* DA */
+    memcpy(fr + 10, mac, 6);                                  /* SA */
+    memcpy(fr + 16, ap, 6);                                   /* BSSID */
+    /* u2SeqCtrl at 22 = 0 (HW fills); body at 24: algo(0), seq(1), status(0) */
+    unsigned fl = 24 + 6;
+    if (!x9_tx_mgmt(d, 0xb, fr, fl)) { IOLog("X9 WIFI JOIN: auth TX stuck\n"); return false; }
+    int n = x9_wait_mgmt(d, 0xb, mac, rx, sizeof rx, 1500);
+    if (n < 30) { IOLog("X9 WIFI JOIN: no auth response\n"); return false; }
+    uint16_t astatus;
+    memcpy(&astatus, rx + 24 + 4, 2);
+    IOLog("X9 WIFI JOIN: auth resp seq=%u status=%u\n", rx[24 + 2], astatus);
+    if (astatus != 0) return false;
+
+    /* Assoc request: cap, listen interval, SSID, rates */
+    memset(fr, 0, sizeof fr);
+    fr[0] = 0x00;                                             /* FC: mgmt assoc req */
+    memcpy(fr + 4, ap, 6);
+    memcpy(fr + 10, mac, 6);
+    memcpy(fr + 16, ap, 6);
+    unsigned o = 24;
+    uint16_t cap = 0x0021;                                    /* ESS | short preamble */
+    memcpy(fr + o, &cap, 2); o += 2;
+    uint16_t li = 3;
+    memcpy(fr + o, &li, 2); o += 2;
+    fr[o++] = 0; fr[o++] = b->ssid_len; memcpy(fr + o, b->ssid, b->ssid_len); o += b->ssid_len;   /* SSID */
+    static const uint8_t rates[8] = { 0x82, 0x84, 0x8b, 0x96, 0x0c, 0x12, 0x18, 0x24 };
+    fr[o++] = 1; fr[o++] = 8; memcpy(fr + o, rates, 8); o += 8;                                    /* supported rates */
+    static const uint8_t erates[4] = { 0x30, 0x48, 0x60, 0x6c };
+    fr[o++] = 50; fr[o++] = 4; memcpy(fr + o, erates, 4); o += 4;                                  /* ext rates */
+    if (!x9_tx_mgmt(d, 0x0, fr, o)) { IOLog("X9 WIFI JOIN: assoc TX stuck\n"); return false; }
+    n = x9_wait_mgmt(d, 0x1, mac, rx, sizeof rx, 1500);       /* assoc response subtype 1 */
+    if (n < 6) { IOLog("X9 WIFI JOIN: no assoc response\n"); return false; }
+    uint16_t sstatus, aid;
+    memcpy(&sstatus, rx + 24 + 2, 2);
+    memcpy(&aid, rx + 24 + 4, 2);
+    IOLog("X9 WIFI JOIN: assoc resp status=%u aid=%u\n", sstatus, aid & 0x3fff);
+    if (sstatus != 0) return false;
+
+    x9_radio_starec(d, b, 2);                                 /* STA_STATE_3 = connected */
+    IOLog("X9 WIFI JOIN: '%.*s' CONNECTED\n", b->ssid_len, (const char *)b->ssid);
+    return true;
+}
+
 static void
 x9_wifi_radio_loop(x9_wdma *d)
 {
@@ -1550,8 +1770,26 @@ x9_wifi_radio_loop(x9_wdma *d)
             IOLockSleepDeadline(lock, (event_t)&scanReq, dl, THREAD_UNINT);
         }
         bool go = scanReq;
+        bool dojoin = joinReq;
         scanReq = false;
+        joinReq = false;
+        x9wifi::bss_info jt;
+        if (dojoin) memcpy(&jt, &joinTarget, sizeof jt);
         IOLockUnlock(lock);
+        if (dojoin) {
+            bool ok = x9_radio_join(d, mac, &jt);
+            IOLockLock(lock);
+            joinResult = ok ? x9wifi::RES_OK : x9wifi::RES_FAILED;
+            status.state = ok ? x9wifi::STA_UP : x9wifi::STA_IDLE;
+            if (ok) {
+                memcpy(status.bssid, jt.bssid, 6); status.ssid_len = jt.ssid_len;
+                memcpy(status.ssid, jt.ssid, 32); status.freq_mhz = jt.freq_mhz;
+            }
+            const x9wifi::sta_events *e = events;
+            IOLockUnlock(lock);
+            if (e && e->connect_done) e->connect_done(ok ? x9wifi::RES_OK : x9wifi::RES_FAILED);
+            continue;
+        }
         /* keep the rings moving between scans */
         const uint8_t *pk;
         int pn;
