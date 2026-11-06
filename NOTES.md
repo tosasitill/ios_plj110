@@ -1,3 +1,10 @@
+## HANDOFF 2026-11-06 (11): 80.txt = rev252bl: frames still classified as events; rev252bm
+
+- 实测 /tmp/80.txt (rev252bl): radio up 23.9 s, scans done in ~600-680 ms, fw beacons 3-10 per scan, but the
+  252-371 B RX7 packets still went down the event path ("scan event eid=0x00"): they have RXD type 7 like events.
+- rev252bm: every RX7 packet during a scan except eid 0x0e (SCAN_DONE) / 0x01 (CMD_RESULT) goes to x9_scan_take
+  (which validates the 802.11 mgmt header itself); first 3 dumped. NOT BUILT (tunnel refused).
+
 ## HANDOFF 2026-11-06 (10): 79.txt = rev252bk: scans complete; frames come on RX7; rev252bl
 
 - 实测 /tmp/79.txt (rev252bk): en0 up at 6.3 s (MT6653 radio label), wifid scans answered with 0 networks until
