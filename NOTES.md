@@ -15,7 +15,9 @@
 - rev252bi (commit after 9fa16d6): x9_wifi_dl_image() shared region downloader; PHY image + WIFI_START(8, 0)
   (boot-arg x9_wifi_phyfw=1) before the N9 RAM + WIFI_START; XO NVRAM words overridable via boot-args
   x9_wifi_xo0..x9_wifi_xo6 (build with the calibrated CONNXO words, generated from the .local pull - values not in
-  git). NOT BUILT (tunnel refused). Build: `python3 -I x9/build/build.py --name x9-rev252bi --boot-arg
+  git). BUILT via ssh (source 9c08d40) with the calibrated XO args (confirmed in shim/embedded-payload.bin
+  boot-args): Mac x9/out/x9-rev252bi/boot.img sha256 bd1fd63967899c0e77efb7dee37de84edc7ea703e587c59bbf9e494d7cc560e3,
+  kernel only, no mailbox. Build: `python3 -I x9/build/build.py --name x9-rev252bi --boot-arg
   x9_wifi_power=6 --boot-arg x9_gpu_khz=1716000 --boot-arg x9_gpu_floor_khz=1100000` + the 7 x9_wifi_xo args.
 
 ## HANDOFF 2026-11-06 (6): 76.txt = rev252bg: RAM code accepted, WIFI_START unanswered, N9_DONE only; rev252bh diag
