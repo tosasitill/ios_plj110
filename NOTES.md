@@ -1,3 +1,13 @@
+## HANDOFF 2026-11-06 (10): 79.txt = rev252bk: scans complete; frames come on RX7; rev252bl
+
+- 实测 /tmp/79.txt (rev252bk): en0 up at 6.3 s (MT6653 radio label), wifid scans answered with 0 networks until
+  the radio is up; FW READY 23.9 s, NIC cap ok, RX4 ring e2710000/32, **DEVINFO + BSSINFO answered (CMD_RESULT)**,
+  radio up 23.95 s. Scans: **SCAN_DONE after ~590-670 ms, channels 26** (Android 0.6 s), fw beacon counter 2-7,
+  wifid re-scans every ~0.6 s. But rx4 frames 0: the scan results arrive on **RX7** as packets of 252-362 B that
+  the loop logged as "scan event eid=0x00 opt=00" (i.e. not RXD type 7 events; frames).
+- rev252bl (commit after 1bca7b9): RX7 packets with (rxd0 >> 27) != 7 go to x9_scan_take(); first 3 dumped
+  (`X9 WIFI RADIO: rx7 frame type ...` + hex rows). Between scans such frames are dropped. NOT BUILT yet (tunnel).
+
 ## HANDOFF 2026-11-06 (9): 78.txt = RAM-mode commands work; rev252bk = real radio for Settings (goal: real SSIDs)
 
 - 实测 /tmp/78.txt (rev252bj): UNI_CMD_ID_CHIP_CONFIG NIC_CAPABILITY answered in 1 ms (UNI_EVENT 0x43, 588 B,
