@@ -1310,6 +1310,19 @@ x9_wifi_stage6(volatile uint32_t *bar)
             bar[0x1ab2a0 / 4], bar[0x1ab2a4 / 4], bar[0x1ab2a8 / 4], bar[0x1ab2ac / 4], bar[0x1ab2b0 / 4],
             bar[0x1ab2b4 / 4], bar[0x1ab2b8 / 4], bar[0x1ab2bc / 4], bar[0x1ab2c0 / 4], bar[0x1ab2c4 / 4],
             bar[0x1ab2c8 / 4]);
+        /* XO NVRAM = the CONNXO NVRAM record (vendor libwifinvram "WR-BUF:XONV" via /dev/wmtWifi -> gen4m
+         * wlanXonvBufHandler -> sysram 0x7c05b28c). The phone's calibrated /mnt/vendor/nvdata/APCFG/APRDEB/CONNXO is
+         * not in hand; libcustom_nvram.so stConnxoCfgDefault (27 B) = 19 00 98 f8 c1 a8 + 21 zero bytes.
+         * Boot-arg x9_wifi_xonv=1 (default) writes that default (padded to 28 B). */
+        if (sweet_x9_arg("x9_wifi_xonv", 1) == 1) {
+            static const uint32_t xonv[7] = { 0xf8980019u, 0x0000a8c1u, 0, 0, 0, 0, 0 };
+            for (unsigned k = 0; k < 7; k++) {
+                bar[0x1ab28c / 4 + k] = xonv[k];
+            }
+            __asm__ volatile ("dsb sy" ::: "memory");
+            IOLog("X9 WIFI PLATCFG: XO NVRAM default (CONNXO 27 B) written, reads %08x %08x %08x\n",
+                bar[0x1ab28c / 4], bar[0x1ab290 / 4], bar[0x1ab294 / 4]);
+        }
         if (sweet_x9_arg("x9_wifi_platcfg", 1) == 1) {
             uint32_t pv = (uint32_t)sweet_x9_arg("x9_wifi_platcfg_val", 0x00158000);
             bar[0x1ab2c8 / 4] = pv;
