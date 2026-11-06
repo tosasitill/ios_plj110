@@ -1,3 +1,17 @@
+## HANDOFF 2026-11-06 (5): **ROM PATCH DOWNLOADED** (75.txt = rev252bf); next = RAM code
+
+- 实测 /tmp/75.txt (x9-rev252bf): PLATCFG before = 16 zero words; XO NVRAM default written (reads f8980019
+  0000a8c1 0), custom option 0x7c05b2c8 = 00158000. sem get 2, both sections, then **`PATCH_FINISH answered
+  status=0 ... 386240 B in 161 ms -> ROM PATCH DOWNLOADED`**, sem release status 3, `after patch
+  rom_sram=dead1234 romcode_index=dead1234`. EMI after FINISH: only 2 blocks changed: +000000 = 00000008 0 0 0 0
+  00001ad0 00000007 4d4f525f ("_ROM") and +010000 = 7c000000 00000008 7c000010 00000008 ... (table of chip
+  addresses).
+- So the missing pieces were (rev252bd/bf): MCU EMI base/size (mt6653SetupMcuEmiAddr) + conninfra sysram plat cfg
+  (wlanCopyPlatCfgToSysram: CONNXO XO NVRAM + connv3 custom option). Which of XO/custom was essential is not
+  isolated (x9_wifi_xonv=0 / x9_wifi_platcfg=0 would tell).
+- Next: RAM code (WIFI_RAM_CODE, 1625428 B) = gen4m wlanConnacFormatDownload (tailer regions, DL_TO_EMI regions via
+  wlanDownloadEMISectionViaDma) + wlanConfigWifiFunc (WIFI_START), then the PHY firmware.
+
 ## HANDOFF 2026-11-06 (4): 74.txt = rev252bd: EMI set -> chip writes host EMI after FINISH, still no event; rev252be
 
 - 实测 /tmp/74.txt (x9-rev252bd, no panic): EMI regs set (before emi_addr=4000), 167/192 EMI blocks nonzero as LK
