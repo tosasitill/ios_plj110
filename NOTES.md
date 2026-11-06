@@ -10,6 +10,12 @@
   data, sw-sync +1c8000 area.
 - Root causes, in order: (1) MCU EMI base/size, (2) conninfra sysram plat cfg (XO NVRAM + connv3 option) -> patch;
   (3) PHY RAM code + WIFI_START(CRC_CHECK) before N9 RAM code -> RAM init completes.
+- rev252bj (commit ad70f2a): x9_wd_unicmd() = connac3 UNI command (TXD 32 + 16-byte UNI header {u2Length=total-32,
+  u2CID, 0xA0, seq, option b1 UNI/b2 SET/b0 ACK}, payload at 48; events: RXD 32 + WIFI_UNI_EVENT 12, data at 44,
+  skips unrelated events up to 32) and x9_wifi_nic_cap(): UNI_CMD_ID_CHIP_CONFIG 0x0E opt 0x02 payload {4 rsv, tag 3
+  len 4} -> UNI_EVENT_ID_CHIP_CAPABILITY 0x43, logs every TLV (`X9 WIFI CAP:`; tag 7 = MAC). Boot-arg x9_wifi_cap=1.
+  BUILT via ssh: Mac x9/out/x9-rev252bj/boot.img sha256 bd15a62d1ae75fbd331404bdc8ec4658865a5041e633bcff98ce218ef41824cb
+  (same args incl. calibrated x9_wifi_xo0..6).
 - Next: talk to the running firmware (RAM-mode commands: connac3 WIFI_CMD / UNI_CMD on TX15, events RX7): first
   NIC capability query (MAC, caps) as gen4m wlanQueryNicCapabilityV2, then keep the chip up instead of powering
   it off at the end of stage 6, then a real driver (interrupts, scan, data path; hakios-mt6768 redwood_mtkwifi.c is a
