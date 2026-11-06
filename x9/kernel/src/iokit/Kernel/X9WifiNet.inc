@@ -1209,6 +1209,103 @@ x9_be32(const uint8_t *p)
 {
     return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
 }
+/* RAM-mode unified command (gen4m asicConnac3xFillUniCmdTxdInfo, struct CONNAC3X_WIFI_UNI_CMD): 32-byte TXD (same
+ * DW0/DW1 as init commands: len | PKT_FT CMD 2 << 23, HF COMMAND 1 << 14), then u16 u2Length (= total - 32), u16
+ * u2CID, rsv, ucPktTypeID 0xA0, ucFragNum, ucSeqNum, u16 checksum, ucS2DIndex 0, ucOption (b1 UNI_CMD, b2 SET,
+ * b0 ACK), 4 rsv -> payload at 48. Events (RX7): 32-byte RXD + WIFI_UNI_EVENT {u16 len incl. this 12-byte header,
+ * u16 type, EID, seq, option (b1 UNI_EVENT, b2 unsolicited), rsv, ext EID, rsv2[2], s2d} -> data at 44.
+ * Waits for an event with eid == want (and the command's seq unless it is unsolicited), logging and skipping others.
+ * Returns the event length (bytes in out) or -1. */
+static int
+x9_wd_unicmd(x9_wdma *d, uint16_t cid, uint8_t opt, const void *payload, unsigned plen, uint8_t want, uint8_t *out,
+    unsigned cap, unsigned wait_ms)
+{
+    uint8_t *c = d->va + X9_B_CMD;
+    unsigned len = 48 + plen;
+    if (len > 0x1000) return -1;
+    memset(c, 0, 48);
+    uint32_t dw0 = (len & 0xffffu) | (2u << 23), dw1 = 1u << 14;
+    memcpy(c + 0, &dw0, 4);
+    memcpy(c + 4, &dw1, 4);
+    uint16_t l2 = (uint16_t)(len - 32);
+    memcpy(c + 32, &l2, 2);
+    memcpy(c + 34, &cid, 2);
+    c[37] = 0xa0;
+    uint8_t seq = ++d->seq;
+    c[39] = seq;
+    c[43] = opt;
+    memcpy(c + 48, payload, plen);
+    if (!x9_wd_tx(d, 15, X9_B_CMD, len)) {
+        IOLog("X9 WIFI UNI: cid 0x%04x seq %u not consumed\n", cid, seq);
+        return -1;
+    }
+    uint64_t tw = mach_absolute_time();
+    for (unsigned k = 0; k < 32; k++) {
+        unsigned left = x9_ms_since(tw) >= wait_ms ? 0 : wait_ms - (unsigned)x9_ms_since(tw);
+        int n = x9_wd_rx(d, left ? left : 1, out, cap);
+        if (n < 0) {
+            IOLog("X9 WIFI UNI: cid 0x%04x seq %u: no eid 0x%02x in %u ms\n", cid, seq, want, wait_ms);
+            return -1;
+        }
+        uint16_t elen = 0, etype = 0;
+        memcpy(&elen, out + 32, 2);
+        memcpy(&etype, out + 34, 2);
+        uint8_t eid = out[36], eseq = out[37], eopt = out[38];
+        IOLog("X9 WIFI UNI: cid 0x%04x seq %u -> rx len=%d evt len=%u type=%04x eid=0x%02x seq=%u opt=%02x ext=%02x after %llu ms data=%02x %02x %02x %02x %02x %02x %02x %02x\n",
+            cid, seq, n, elen, etype, eid, eseq, eopt, out[40], x9_ms_since(tw), out[44], out[45], out[46], out[47],
+            out[48], out[49], out[50], out[51]);
+        if (eid == want && (eseq == seq || (eopt & 4))) {
+            return n;
+        }
+    }
+    return -1;
+}
+
+/* gen4m nicUniCmdNicCapability / wlanQueryNicCapabilityV2: UNI_CMD_ID_CHIP_CONFIG 0x0E, query (opt UNI_CMD b1),
+ * payload {4 rsv, TLV tag UNI_CMD_CHIP_CONFIG_TAG_NIC_CAPABILITY 3, len 4}; answer UNI_EVENT_ID_CHIP_CAPABILITY 0x43:
+ * {u16 u2TotalElementNum, 2 pad} + TLVs {u16 tag, u16 len incl. 4-byte header} (TAG_CAP_*: 0 TX_RESOURCE,
+ * 1 EFUSE ADDR, 5 HW_VERSION, 6 SW_VERSION, 7 MAC_ADDR, 8 PHY_CAP, 9 MAC_CAP, 0x14 ADIE_VERSION, ...). */
+static bool
+x9_wifi_nic_cap(x9_wdma *d)
+{
+    static uint8_t ev[2048];
+    uint8_t pl[8] = { 0, 0, 0, 0, 3, 0, 4, 0 };
+    int n = x9_wd_unicmd(d, 0x0e, 0x02, pl, sizeof pl, 0x43, ev, sizeof ev, 3000);
+    if (n < 48) {
+        IOLog("X9 WIFI CAP: NIC capability query FAILED\n");
+        return false;
+    }
+    uint16_t elen, num;
+    memcpy(&elen, ev + 32, 2);
+    memcpy(&num, ev + 44, 2);
+    unsigned end = 32 + (unsigned)elen;
+    if (end > (unsigned)n) end = (unsigned)n;
+    IOLog("X9 WIFI CAP: NIC capability event %u B, %u elements\n", elen, num);
+    unsigned off = 48, shown = 0;
+    while (off + 4 <= end && shown < 48) {
+        uint16_t tag, tl;
+        memcpy(&tag, ev + off, 2);
+        memcpy(&tl, ev + off + 2, 2);
+        if (tl < 4 || off + tl > end) {
+            IOLog("X9 WIFI CAP: bad TLV tag %u len %u at %u\n", tag, tl, off);
+            break;
+        }
+        const uint8_t *v = ev + off + 4;
+        unsigned vl = tl - 4u;
+        if (tag == 7 && vl >= 6) {
+            IOLog("X9 WIFI CAP: tag 7 MAC_ADDR %02x:%02x:%02x:%02x:%02x:%02x\n", v[0], v[1], v[2], v[3], v[4], v[5]);
+        } else {
+            uint32_t w[6] = {};
+            memcpy(w, v, vl < sizeof w ? vl : sizeof w);
+            IOLog("X9 WIFI CAP: tag 0x%02x len %u: %08x %08x %08x %08x %08x %08x\n", tag, vl, w[0], w[1], w[2], w[3],
+                w[4], w[5]);
+        }
+        off += tl;
+        shown++;
+    }
+    return true;
+}
+
 /* gen4m wlanImageSectionDownloadStage for a connac tailer image (RAM N9 or PHY): tailer = 36 B common (ucRegionNum at
  * [2]) + 40 B per region {crc, realsize, blocksize, rsv, addr, len, feature, type}; region data back to back from 0.
  * Per region: INIT_CMD_ID_DOWNLOAD_CONFIG 0x01 {addr, len, wlanGetDataMode} + raw data on TX16. wlanGetDataMode:
@@ -1577,7 +1674,7 @@ x9_wifi_stage6(volatile uint32_t *bar)
             volatile uint32_t *e0 = (volatile uint32_t *)ml_io_map_unmappable((vm_offset_t)X9_WIFI_EMI_PA, 0x4000, 0x6u);
             uint64_t tw = mach_absolute_time();
             uint32_t last = 0xffffffffu, lastmisc = 0xffffffffu, laste[8] = {}, lastrx[14] = {};
-            bool first = true;
+            bool first = true, fwready = false;
             unsigned wait = (unsigned)sweet_x9_arg("x9_wifi_ready_ms", 20000);
             while (m && x9_ms_since(tw) < wait) {
                 uint32_t v = x9_pcie_cfg_rd(m, 1, 0, 0x48c), misc = bar[0xe00f0 / 4];
@@ -1606,11 +1703,15 @@ x9_wifi_stage6(volatile uint32_t *bar)
                 }
                 if (((v >> 28) & 3) == 3) {
                     IOLog("X9 WIFI RAM: FW READY after %llu ms\n", x9_ms_since(tw));
+                    fwready = true;
                     break;
                 }
                 IOSleep(20);
             }
             if (e0) ml_io_unmap((vm_offset_t)e0, 0x4000);
+            if (fwready && sweet_x9_arg("x9_wifi_cap", 1) == 1) {
+                x9_wifi_nic_cap(&d);
+            }
             if (sweet_x9_arg("x9_wifi_emi", 1) == 1) x9_emi_find_text("after WIFI_START");
             if (sweet_x9_arg("x9_wifi_emi", 1) == 1) x9_emi_walk("after WIFI_START", true);
         }
