@@ -1581,7 +1581,8 @@ x9_wifi_radio_loop(x9_wdma *d)
                 any = true;
                 uint32_t rxd0;
                 memcpy(&rxd0, ev, 4);
-                if ((rxd0 >> 27) != 7) {             /* 79.txt: scan frames come on RX7 as RX packets, not events */
+                /* 79/80.txt: the scan frames come on RX7 with RXD type 7 too and "eid" 0; let the parser decide */
+                if ((rxd0 >> 27) != 7 || (ev[36] != 0x0e && ev[36] != 0x01)) {
                     if (x9_scan_frames < 3) {
                         IOLog("X9 WIFI RADIO: rx7 frame type %u len %d: %08x %08x %08x %08x %08x %08x %08x %08x\n",
                             rxd0 >> 27, pn, ((uint32_t *)ev)[0], ((uint32_t *)ev)[1], ((uint32_t *)ev)[2],
