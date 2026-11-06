@@ -1385,6 +1385,7 @@ x9_r4_setup(x9_wdma *d)
 static int
 x9_r4_try(x9_wdma *d, const uint8_t **pkt)
 {
+    (void)d;
     unsigned i = x9_r4_i;
     volatile uint32_t *r = (volatile uint32_t *)(void *)(x9_r4_va + i * 16);
     __asm__ volatile ("dsb sy" ::: "memory");
