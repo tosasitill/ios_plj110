@@ -17,7 +17,8 @@
   cfg 0x48c b29:28 == 3 (MT6653 CFG_MTK_WIFI_ON_READ_BY_CFG_SPACE) up to 5 s; EMI walk "after WIFI_START".
   Boot-arg x9_wifi_ram=1. gen4m also does kalSyncTimeToFW, queryPmicInfo and phyAction (PHY_ACTION cal) before the
   RAM code - skipped for now. PHY firmware: CFG_MTK_WIFI_SUPPORT_PHY_FWDL unset for MT6653 -> 0 (not downloaded by
-  gen4m). NOT BUILT yet (Mac tunnel refused).
+  gen4m). BUILT via ssh (source 90510a3): Mac x9/out/x9-rev252bg/boot.img sha256
+  11ac4f532b29f0de672f0dce2691816095a11237701eb03c52344a5cb4589ada, same args, kernel only, no mailbox.
 - Next: RAM code (WIFI_RAM_CODE, 1625428 B) = gen4m wlanConnacFormatDownload (tailer regions, DL_TO_EMI regions via
   wlanDownloadEMISectionViaDma) + wlanConfigWifiFunc (WIFI_START), then the PHY firmware.
 
