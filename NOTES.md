@@ -1,3 +1,15 @@
+## HANDOFF 2026-11-06 (18): metal2vulkan source found on the Mac (not in the server checkout)
+
+- Location (Mac): .local/x9/work/references/metal2vulkan-219f01365dc4c8eb346816c405b5b17403793764/crates/metal2vulkan-runtime
+  (pinned ref 219f0136...). Also a patched copy in .local/x9/work/ios_plj110-gpu-integration/x9/build/third_party
+  (01-metal2vulkan-x9.patch) and x9-metal-render/pan194-original-local-diffs.
+- Commit path: NativeMetalObjects.rs:1733 nmb_command_buffer_commit -> runtime src/command_buffer/mod.rs:2424 commit()
+  -> commit_as (returns after queuing; actual submit deferred to the scheduler group) -> submit.rs:340 submit_batch
+  -> VkQueue submit in PanVK -> X9PanVKSync.c:378 x9_pan_kmod_submit_async (kernel enqueue).
+- Commit->enqueue timing needs: a commit timestamp carried on the command buffer (commit_as), and a log at submit_batch
+  or at the PanVK submit. That edit goes into the vendored runtime and therefore the 01-metal2vulkan-x9.patch, plus a
+  new plugin revision and mailbox staging. Not done yet; awaiting decision.
+
 ## HANDOFF 2026-11-06 (17): frontend commit->enqueue timing BLOCKED on source; Wi-Fi RUC-Web failed (no log yet)
 
 - Frontend commit path: NativeBridgeMetalFrontend.mm commit -> nmb_command_buffer_commit (NativeMetalObjects.rs:1733)
