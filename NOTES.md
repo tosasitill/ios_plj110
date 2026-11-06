@@ -1,3 +1,19 @@
+## HANDOFF 2026-11-06 (15): 82.txt = rev252bo device log: metrics work; sync GPU path (park/async OFF)
+
+- Log copy: .local/x9/logs/x9-rev252bo-82.txt (gitignored). 65 s boot, no kernel panic, boot-args from launchd: no x9_gpu_park,
+  no x9_submit_async (logs: "resident group ... off (x9_gpu_park)", "async submission off").
+- Display, steady state 24-64 s (presents on a 120 Hz target, software counters): presented 15-28 fps (avg ~20);
+  swap->present avg 6-10 ms, max 41 ms; 0 frames >= 50 ms; dropped 0-13 per 2 s (13 at 52 s). Presented tracks swaps,
+  so the rate is set by the client's swap rate, not by the display path.
+- First presents at 16 s: 2 frames, avg 56 ms, max 99 ms (first-use cost). Before UI: tick lateness up to 234 ms (4.4 s), 85 ms (8.4 s).
+- GPU per job, sync path: pre_cache 3.4-4.5 ms (largest), wait 2.5-11.5 ms (rises with load), post_cache 1.6-2.3 ms,
+  start 0.21 ms, retire 0.2 ms; max job 9-36 ms. Cache maintenance (pre+post) is about 5-6.5 ms per job.
+- Join fields gpu_enqueued/completed/shown_gpu_seq are all 0 here because async is off, so the join is untested.
+- Crashes (24 CRASH lines): syncdefaultsd sig6 x8, WirelessRadioMan sig5 x7, assetsd sig6 x4, MusicWidgets sig11 x3,
+  driverkitd sig9 x1, PosterBoard sig10 x1. No SpringBoard crash in this log. IONVRAM serializeVariables ret 0xe00002d8 at 18.2 s.
+- Metrics gaps seen: no interaction marker (one touch at 65.158 s), so idle and static screens look the same.
+- Next (not done): A/B with x9_gpu_park=1 x9_submit_async=1 to populate the join and compare pre/post cache costs.
+
 ## HANDOFF 2026-11-06 (14): rev252bo BUILT = P3 metrics (logging only); commit f93f7b0
 
 - Added X9 METRICS to the 2 s display cadence block (SweetFramebuffer.cpp, commit f93f7b0): per window swaps,
