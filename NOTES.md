@@ -1,3 +1,54 @@
+## HANDOFF 2026-11-08 (50): rev252cn = GPU 帧管线两优化 BUILT (x9dc 脏区间 CIVAC + x9if 双帧在飞), plugin 268; 3 images; 未上机
+
+- 背景: 97.txt 审计(会话前半)结论——显示通路/GPU 频率都不是瓶颈;帧管线完全串行(1 job/present,join 行
+  shown==enqueued==completed 全程成立),卡顿 = 复杂场景下 GPU job 执行(wait_us)5→20+ ms 与用户态翻译同涨。
+  串行根因: 每帧 `vkQueueSubmit` 先 `pan_kmod_flush_bo_map_syncs` → `X9RenderCache` 选择器要拿 context+owner 锁,
+  而异步 worker 在整个 fence poll 期间持有它们。实施优化 2(脏区间)+优化 4(双帧在飞),commit 12af59f。
+- **x9dc**(boot-arg, 默认关): 插件纯 CPU→GPU clean(`PAN_KMOD_BO_SYNC_CPU_CACHE_FLUSH`)改发
+  `X9RenderClean|X9RenderDefer`(caps bit 128)记录到 per-context 列表(`X9PanVKMemory.c` cache_call,记录路径
+  不持 context/owner 锁——这是客户端不再串行的关键); 下一次 submit 的 publish 阶段精确维护这些范围并对覆盖的
+  资源跳过全量映射并集 fallback。submit 入队时在 c->lock 下把列表搬进按 submission id 奇偶的 pending 槽
+  (render_dirty_stage),所以 publish(S) 不可能吃到 S+1 的记录;溢出(>64 条)/句柄失效只损失优化、不损正确性。
+  只 defer 纯 clean;invalidate(GPU→CPU 读回)仍内联。遥测: 新 `X9 RENDER cache-dirty` 行(entries/bytes/
+  skipped_res)。预期 pre_cache 1-2 ms → <0.5 ms。
+- **x9if**(boot-arg, 需 x9_gpu_park=1 + x9_submit_async=1): render_submit 在 doorbell 处拆成
+  render_submit_publish/reap(状态进 RenderJobState,两份静态实例,worker 独占);worker 把 FIFO 里下一个
+  同 context+group 的 job 配成一对——先 publish job1,再经 parked-resume 路径 publish job2(不做 AS/CSG 编程;
+  worker 先 `render_parked={c,g,root1}` 触发检测),然后按 FIFO 顺序 reap1、reap2。每流第二 fence 槽在 storage
+  +0x8300(marker 区 0x8080-0x8288 之后、render_page_sync 的 16 KB 页内),publish 只 bzero 自己的槽,所以 job1
+  的 fence 值活到 reap;depth=1 地址恒 +0x8000,与今天逐字节一致。producer 改为 publish 时提交(原来 reap 时;
+  否则 job2 的 expected 会与 job1 撞包),reap 不再提交。user-io insert 检查在 pipeline 下放宽为 >=(在流内顺序
+  消费下与 == 等价)。c->lock+owner 锁跨整对持有: map/unmap/v1 选择器照旧"绝不在 job 中途",x9dc 记录路径是
+  唯一在 job 期间保持无锁的客户端调用。**设备验证点**: reap1 的 flush_gpu 与 post-cache IVAC 在 job2 运行中执行
+  (clean-only 写回与 IVAC 丢弃不会盖掉 GPU 写,但 FLUSH_CACHES 中途语义未在 Mali 上验证过);新遥测 ASYNC window
+  加 inflight_max(期望到 2)。同步路径/depth-1 行为逐字节不变(fence 槽 0 = 今天的 +0x8000)。
+- ABI(两份头同步已 diff 验证): `X9RenderDefer=0x100u`(修饰位,旧 immediate 路径 `operation&~3u` 会拒绝它)
+  + `X9RenderDeferredCache=128u`。plugin 268(`X9PanVKMemory.c`): caps 有位且 `X9_DEFER_CACHE=1` 未设时 defer;
+  `X9 PANVK SUBMIT` 行加 `cache=deferred clean (x9dc)`;`X9 PANVK CACHE RANGE` 行尾改注 deferred。allowlist 头
+  重生成为 268 并随 12af59f 提交。
+- **BUILT 3 images(全参数集,cm4 的完整 --boot-arg 组)**: x9-rev252cn boot
+  0ef2948b2e219a7c30a7ab0934774d116e049269b5e69e47ca2a54f65fb9d6cf(基线,两特性关,验无回归)/ x9-rev252cn-dc
+  08e933b5475853964a05edffed2bc2fd6acc29571382181ba24032f51de1d707(x9dc=1)/ x9-rev252cn-dc-if
+  fdccad7d3eeaa2e84e502c08c360eae283f5f5d674a2ca5638dff6994da8762f(x9dc=1 x9if=1)。kernel sha256: cn
+  a8847bd1...、cn-dc 32ce3feb...、cn-dc-if cd577716...。plugin package: x9/out/x9-rev252cn/plugin-package
+  (mailbox.json 70ed6964...)——`X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/x9-rev252cn` 一次,
+  之后三个镜像都能用(plugin 268 对基线内核自动回退内联 flush)。
+- **本机 .local/dxb/xnu 树的机器本地改动**(不在 git,重建环境需重做): (1) EXTERNAL_HEADERS/corecrypto/ccmd5.h
+  从 .local/x9/work/legacy-import/xnu_x9/refer/corecrypto-2023/ 恢复——cm6 会话曾复制过它,后来的树刷新把
+  untracked 文件洗掉了,导致 SweetX9NetworkStack 从头编译报 corecrypto/ccmd5.h not found(cm2-cm4 的日志能编
+  是因为当时文件还在;cm5 之后全靠 prebuilt 对象掩盖); (2) libkern/crypto/sweet_aes.c 加了
+  sweet_aes_ecb_decrypt(ccmode_ecb,BearSSL 无 ECB 入口,用 CBC-dec 零 IV 逐块实现)+ ccaes_ecb_decrypt_mode()
+  访问器——cm6 最终代码改用了 CBC-as-ECB 内联(handoff 49),该 ECB 目前无引用,留着无害。
+- 注意: cm6 的 x9/out/x9-rev252cm6/boot.img(23:54:45)与本会话的渲染编辑共享同一个工作区/对象树,可能夹带
+  rev252cn 中间态;干净的 GPU 验证镜像以这三支 rev252cn 为准。
+- Test 顺序(由用户执行): (1) 基线 cn 上机,跑 97.txt 同款操作,确认 X9 RENDER/METRICS 量级不变、无 DeviceLost
+  (plugin 268 + 内联 flush ≈ 267 行为); (2) cn-dc: 看 cache-dirty 行 entries/bytes ≈ 原 pre_bytes、
+  `X9 RENDER timing` 的 pre_cache_us 降幅、像素正确性(控制中心/图标网格/滚屏); (3) cn-dc-if: ASYNC window
+  inflight_max≥2、重场景 presented_fps 与 latency 改善、`X9 RENDER GPU ... uncertain`/WC CHECK/MARK 行有无;
+  任何 uncertain 都先退回单令牌 A/B。观测重点: 控制中心与 app 过场帧率(97.txt 里 12-26 fps 的窗口)。
+- 下一步(未做): x9dc 的 GPU 侧验证若通过,再评估把 post-cache(渲染目标 IVAC)纳入脏区间(当前渲染目标全帧
+  写、收益小); x9if 稳定后 P1-A BO pool(消灭每帧 map/unmap→retire,97.txt 里 cold≈40-70% job)。
+
 ## HANDOFF 2026-11-07 (49): rev252cm6 = **WPA2 stage 2 BUILT**: in-driver 4-way handshake (PRF/MIC/GTK unwrap), INSTALL_KEY_V3, protected TX/RX; sources + Android 1X capture in hand
 
 - Evidence base: gen4m source `~/HelioDarwin/oppo-source/modules/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m`
