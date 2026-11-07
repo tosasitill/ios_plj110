@@ -1,3 +1,18 @@
+## HANDOFF 2026-11-07 (34): UniXNU 642c4fe (metal2vulkan -> 963f0e64) assessed; not merged yet (scope decision pending)
+
+- UniXNU commit 642c4fef is a pin bump: steelbrain/metal2vulkan development 963f0e64 (Nov 5) + AdrenoMetal ce637016
+  with its translator patches ported (30 -> 25 entries: dropped 0001, 0008, 0010, 0012, 0028; 0027 renamed
+  bounded-image-reuse). AdrenoMetal's own bridge change for the bump was small (NativeMetalObjects.rs +97 lines,
+  6416a76..ce63701: lowering thread, commit submission, warm pass).
+- Our runtime: .local/x9/work/x9-metal-render/metal2vulkan-pan205-source = metal2vulkan 219f0136 (master, Oct 29) +
+  AdrenoMetal 0001-0004 (.applied markers) + our pan194-pan205 local runtime/translator changes + repo patches 0023,
+  0025, 0026. Diff vs pristine 219f0136 (Mac reference copy): crates/metal2vulkan 44 files / ~1.5k changed lines,
+  metal2vulkan-runtime 57 files / ~2.7k lines, metal2vulkan-air 5 files (validation crates also differ, not built).
+  219f0136..963f0e64 = 763 commits (624bab39..963f0e64 = 805); runtime crate alone +74k/-7k lines upstream.
+- Merging means rebasing all of the above onto 963f0e64 and re-qualifying on the device (PanVK, not Turnip): the
+  AdrenoMetal-origin patches come ported, our Mali-specific local changes must be separated from them and re-ported by
+  hand. Waiting for the user's choice (full migration vs. selected patches) before starting.
+
 ## HANDOFF 2026-11-07 (33): rev252cb BUILT = Wi-Fi domain + GPU scope for no-copy buffers (plugin 262); commit c72e4fa
 
 - Wi-Fi (on top of rev252ca PHY_ACTION): x9_radio_domain() before the NVRAM fragments, as gen4m rlmDomainSendCmd
