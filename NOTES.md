@@ -1,3 +1,21 @@
+## HANDOFF 2026-11-07 (33): rev252cb BUILT = Wi-Fi domain + GPU scope for no-copy buffers (plugin 262); commit c72e4fa
+
+- Wi-Fi (on top of rev252ca PHY_ACTION): x9_radio_domain() before the NVRAM fragments, as gen4m rlmDomainSendCmd
+  (non single-SKU): UNI 0x15 passive-scan table (arSupportedRegDomains_Passive default: 52-64, 100-144 passive), then
+  domain (NVRAM map 0 = by country, country 0 -> default group: 1-13, 36-48, 52-64 DFS, 100-144 DFS, 149-177; no 6 GHz),
+  bw2g CONFIG_BW_20M, bw5g 20/40, ACK requested (`X9 WIFI DOMAIN:`). Boot-arg x9_wifi_domain=0 skips.
+  Deliberately not sent: ANT power (Android "ANT Config #0" = empty table), country power limit (EMI type; limits only
+  lower power; Android ucCountryPwrLimitCtrl 0), cnmPowerControl, kalSyncTimeToFW (CCIF). Later Android sets country CN.
+- GPU: 88 skipped only 14-16 of ~63 MB because most of the ~140 imports are not IOSurfaces. Frontend now registers
+  newBufferWithBytesNoCopy imports (page-rounded base/bytes, unregistered in NBBuffer dealloc) and acquires textures
+  over a registered buffer even without a surface (rev252bx/by skipped those textures: they were never acquired, but
+  they were also never registered, so nothing was wrongly skipped). Kernel `X9 RENDER cache-uncovered:` counts imported
+  CPU-exposed BOs no registered range covers (imports_avg, bytes_avg, largest).
+- BUILT (Mac): `build.py all --revision 262 --name x9-rev252cb` + base args + x9_cache_scope=1. boot_sha256
+  98bcc55fc84cfe151d9e2c168bd10746328e646ab53fb6e8448d6b5c450ac00e. NEW PLUGIN (262): stage
+  `X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/x9-rev252cb`. Not device-tested; rev252ca (kernel-only, 261)
+  is superseded unless the user wants the Wi-Fi PHY change alone.
+
 ## HANDOFF 2026-11-07 (32): 89.txt = rev252bz (NVRAM accepted, RX changed); external FEMs found; rev252ca BUILT
 
 - 89.txt (rev252bz, copy .local/x9/logs/x9-89.txt): NVRAM 37/37 fragments answered (CMD_RESULT 2e .. 03 01 / 00).
