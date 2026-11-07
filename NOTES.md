@@ -1,3 +1,23 @@
+## HANDOFF 2026-11-07 (38): 92.txt = rev252cf: device lost again at 57 s = tiler heap OOM; Auth: RTS/CTS ok, MPDU unACKed; rev252cg BUILT
+
+- Log copy .local/x9/logs/x9-92.txt. backboardd memory now 531-618 MiB (spare cap works) but 56.998 s
+  `X9 RENDER ASYNC: submission failed id=990 kr=e00002bd` again -> DeviceLost x7886. So NoMemory was not the budget.
+  Source found: X9CSFRenderQueue.cpp x9_csf_group_health returns kIOReturnNoMemory on a CS OOM event (REQ^ACK bit 26) =
+  tiler heap exhausted; we have no heap-grow handler (kbase adds chunks). Heap: X9 TILER HEAP log shows every process
+  with Mesa's fixed 5 x 2 MiB = 10 MiB (the 128/32 MiB variant needed boot token x9tb/x9vt; boot-args near the 608 B cap).
+  The 963f runtime (lowering worker, batching) evidently bins more per pass. 91's failure was most likely the same.
+- rev252cg (plugin 266): X9PanVKQueueBridge.inc big heap BY DEFAULT (backboardd 64 chunks = 128 MiB, others 16 = 32 MiB;
+  exact token x9ts restores 5); kernel logs `X9 CSF TILER OOM: slot stream REQ ACK` (first 8). boot_sha256
+  ea8a82ce42d6c9e360aa743ba81ae7b310220f1931e8c851452f7c9c669917ed. Stage `X9_SERIAL=<serial> python3
+  x9/mailbox/update.py x9/out/x9-rev252cg`. Budget: backboardd +118 MiB on ~600 MiB, under 1 GiB.
+- Wi-Fi 92 (queue 16 + FORCE_RTS): still TX_DONE status 3 MPDU_ERROR x15 on 5180 MHz ch 36, but attempt 1 shows
+  rsp_rate=14: a response (CTS to our RTS) was received, i.e. the AP hears us and we receive it; only the Auth MPDU gets
+  no ACK. RTS RA comes from the WTBL (STAREC peer), the MPDU header from our buffer. Re-audited vs gen4m: TXD long 32 B,
+  padding 0, PSE header 16, MAC_TX_RESERVED_FIELD 0, header format / length / TID-mgmt / OMAC / TGID / subtype / type /
+  lifetime / tx count / PID+TXS / DW6 (msdu 1, DA_SRC_SEL, fixed rate idx 1, FR_BW 8) / DW7 RTS all match. No
+  difference left found by reading. Next: capture Android's real Auth TXD (`set_cfg DataTxDone 3`,
+  x9/tools/android_wifi_connect_capture.sh) if Android still boots, and dump our TXD+frame bytes as sent.
+
 ## HANDOFF 2026-11-07 (37): 91.txt = rev252cd: desktop up, device lost at 70 s (spares); Auth unACKed; rev252ce/cf BUILT
 
 - Log copy .local/x9/logs/x9-91.txt (169 s, no panic, plugin 264).
