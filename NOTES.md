@@ -1,3 +1,38 @@
+## HANDOFF 2026-11-07 (35): metal2vulkan upgraded to 963f0e64 (UniXNU 642c4fef series); rev252cc BUILT (plugin 263); commit b16f334
+
+- User chose the full upgrade. New runtime tree: .local/x9/work/x9-metal-render/metal2vulkan-963f-source (git; branches:
+  x9-963f = 963f0e64 -> 4209371f AdrenoMetal ce63701 0002..0030 (25, all applied clean) -> 2d6d9ac9 our changes ->
+  2c59fa14 merge fixes; am-old-219f / pan205-local / x9-only kept for reference). pan205 tree untouched (fallback).
+- How our changes were isolated: pan205 = 219f0136 + AdrenoMetal 4599584 0001-0004 (the version that applies clean to
+  219f) + ours. x9-only = pan205 crates (metal2vulkan, -runtime, -air) over 219f+AM0001-0004: 103 files +3529/-600
+  (vertex capture, sample-position replay, raw linear shadows, native split depth/stencil, depth/stencil resolve +
+  scratch, counter samples, sampled-source copies, memoryless resolve backing, submission cache atom, x9_timing, ...).
+  Cherry-picked onto 4209371f: 23 files / 50 hunks resolved by hand (scratchpad resolve.py logic):
+  * taken from upstream/AM where they supersede ours: canon prune_entry (our entry_refusal dropped), mtlb Core Image
+    libraries, growing memory blocks + spare image blocks + free thread, import_host as module fn, in_place/policy docs.
+  * kept ours on top: submission_cache_atom (DeviceOptions, Debug, equality), allocation alignment to the cache atom,
+    native release_kept reclaims every pool and every spare, commit_ns/x9_timing (commit_as + submit), raw shadow
+    access in shadow uses + upstream clear early-return, raw_texel checks in texture views, vertex_capture /
+    sample_replay_safe fields (codec, pipeline, interface; rebound.rs Command gets vertex_capture: None), vertex
+    capture ordering check before upstream's reaching/prefix note, sample loop around upstream's recording (+ settled:
+    None, through_record), A1BGR5Unorm write mask applied to upstream's write_mask, SamplePositionReplayDraw error.
+  * cache versions: SEMANTICS 3001973, ARTIFACT 3000489, RUNTIME 3001775 (old device shader caches invalid).
+- Repo: x9/build/third_party/metal2vulkan-963f/{adrenometal-ce63701/ (25 patches, SERIES, MIT LICENSE),
+  0100-x9-local-changes.patch (git diff 4209371f..2c59fa14, 99 files)}; verified: pristine 963f0e64 + SERIES + 0100
+  == the tree (diff -r clean). build-general-metal.py: default --runtime-source is the 963f tree; for it, applies the
+  series once and keeps DIR/.x9-patches-applied (sha256 per patch); pan205 still builds with --runtime-source.
+  x9/build/scripts/prepare-metal2vulkan-963f.py clones pristine 963f0e64 for a fresh machine.
+- Bridge (NativeMetalObjects.rs, cfg x9_runtime_latest which the build always sets): as AdrenoMetal ce63701 -
+  options.policy.render_lowering = Worker, PipelineRecords file (pipeline-records-<program>.bin in the shader cache dir)
+  + device.warm(earlier, MAX), nmb_command_buffer_commit -> commit_and_submit. Compiles with 0 warnings (1.98.0).
+- BUILT (Mac): `build.py all --revision 263 --name x9-rev252cc` + base args + x9_cache_scope=1 (kernel = rev252cb:
+  Wi-Fi PHY_ACTION/domain/NVRAM, GPU scope). boot_sha256 64a02a25f3cfa61e9d9c3e62c935dd26ee33aec447b33597743b9a3245fc4f1e.
+  Plugin bundle 34.7 MB (262: 32.9 MB). NEW PLUGIN (263): `X9_SERIAL=<serial> python3 x9/mailbox/update.py
+  x9/out/x9-rev252cc`. Not device-tested. Fallback: rev252cb (plugin 262, pan205 runtime), same kernel features.
+- Risks to watch: first boot recompiles every shader (cache versions changed: slower first UI), render lowering on a
+  worker changes error timing, commit_and_submit changes submit thread; any rendering regression -> compare with
+  rev252cb.
+
 ## HANDOFF 2026-11-07 (34): UniXNU 642c4fe (metal2vulkan -> 963f0e64) assessed; not merged yet (scope decision pending)
 
 - UniXNU commit 642c4fef is a pin bump: steelbrain/metal2vulkan development 963f0e64 (Nov 5) + AdrenoMetal ce637016
