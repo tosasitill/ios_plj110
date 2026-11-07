@@ -43,6 +43,29 @@ struct X9RenderConnection *x9_render_open(struct X9RenderCaps *caps) {
  connection->port=port;connection->caps=actual;
  if(caps)*caps=actual;return connection;
 }
+/* Frontend cache scope (rev252bx): one type-1 connection per process, opened on
+ * first use. A kernel without the scope client refuses the open; the frontend
+ * then stops calling (maintenance stays full). Returns false when unavailable. */
+#include <pthread.h>
+static pthread_mutex_t x9_scope_lock=PTHREAD_MUTEX_INITIALIZER;
+static io_connect_t x9_scope_port=IO_OBJECT_NULL;
+static int x9_scope_state;   /* 0 untried, 1 open, -1 unavailable */
+bool x9_render_scope(uint32_t operation,uint64_t address,uint64_t bytes) {
+ pthread_mutex_lock(&x9_scope_lock);
+ if(!x9_scope_state) {
+  io_service_t service=IOServiceGetMatchingService(kIOMainPortDefault,IOServiceMatching(X9_RENDER_SERVICE));
+  kern_return_t r=service?IOServiceOpen(service,mach_task_self(),X9_RENDER_SCOPE_CLIENT,&x9_scope_port):KERN_FAILURE;
+  if(service)IOObjectRelease(service);
+  x9_scope_state=r==KERN_SUCCESS?1:-1;
+ }
+ bool ok=false;
+ if(x9_scope_state==1) {
+  struct X9RenderScopeRequest q={X9_RENDER_ABI,operation,address,bytes};
+  ok=IOConnectCallStructMethod(x9_scope_port,X9RenderScope,&q,sizeof(q),NULL,NULL)==KERN_SUCCESS;
+ }
+ pthread_mutex_unlock(&x9_scope_lock);
+ return ok;
+}
 void x9_render_close(struct X9RenderConnection *connection) {
  if(!connection)return;
  IOServiceClose(connection->port);free(connection);

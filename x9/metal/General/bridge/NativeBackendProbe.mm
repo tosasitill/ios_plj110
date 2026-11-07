@@ -42,3 +42,9 @@ extern "C" id nmb_backend_open(const char *cache,unsigned accelerator_port,
  if(IORegistryEntryGetRegistryEntryID(accelerator_port,&registry)!=KERN_SUCCESS)return nil;
  return native_bridge_metal_open(X9_PANVK_BUNDLE_PATH,cache,registry,missing);
 }
+
+// Frontend cache scope seam (rev252bx): the frontend names its surfaces' imported
+// host ranges and their command-buffer use; the transport carries them.
+extern "C" bool nmb_cache_scope(uint32_t operation,uint64_t address,uint64_t bytes) {
+ return x9_render_scope(operation,address,bytes);
+}

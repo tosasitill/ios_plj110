@@ -422,8 +422,28 @@ static IOReturn render_submit(X9RenderContext *c,const X9RenderSubmission *reque
   * snoops CPU caches, so exposed client bytes need no CIVAC here. Command and
   * fence storage keep their explicit syncs regardless, and flush_gpu, group
   * start/halt and every uncertainty check stay unchanged. */
+ /* Frontend cache scope (x9_cache_scope=1, rev252bx): one snapshot of this
+  * task's ranges serves pre and post. A range acquired at commit stays
+  * acquired until the command buffer completed, which is after this job's
+  * post maintenance, so every BO this job references is maintained. */
+ static X9RenderScopeView scope_view[X9_RENDER_SCOPE_VIEW];
+ bool scope_hold=true;unsigned scope_count=0;
+ const bool scope_on=x9_render_scope_enabled();
+ if(scope_on)scope_count=x9_render_scope_snapshot(c->owner,scope_view,X9_RENDER_SCOPE_VIEW,&scope_hold);
+ auto scope_skips=[&](const X9RenderResource &r)->bool {
+  if(!scope_on||scope_hold||!r.imported||!r.host_address||r.host_address+r.bytes<r.host_address)return false;
+  const uint64_t begin=r.host_address,end=r.host_address+r.bytes;bool covered=false;
+  for(unsigned k=0;k<scope_count;k++) {
+   const auto &v=scope_view[k];
+   if(v.begin<end&&begin<v.end&&v.refs)return false;   /* referenced by a pending command buffer */
+   if(v.begin<=begin&&end<=v.end)covered=true;
+  }
+  return covered;
+ };
+ uint64_t scope_skip[2]={0,0};
  for(auto &r:c->resources)if(r.memory) {
   if(r.write_combined){wc_skip[0]+=r.bytes;continue;}   // never cached, see X9RenderResource
+  if(r.cpu_exposed&&scope_skips(r)){scope_skip[0]+=r.bytes;continue;}
   if(coherent&&r.cpu_exposed) {
    coherent_skip[0]+=r.cache_end>r.cache_begin?r.cache_end-r.cache_begin:0;continue;
   }
@@ -575,6 +595,7 @@ static IOReturn render_submit(X9RenderContext *c,const X9RenderSubmission *reque
   if(coherent&&r.cpu_exposed) {
    coherent_skip[1]+=r.write_end>r.write_begin?r.write_end-r.write_begin:0;continue;
   }
+  if(r.cpu_exposed&&scope_skips(r)){scope_skip[1]+=r.bytes;continue;}
   // No CPU consumer exists for a never-exposed allocation. Keep GPU flush,
   // CSG suspend and AS detach above; a fence alone does not return ownership.
   if(!r.cpu_exposed){private_skip[1]+=r.bytes;continue;}
@@ -603,6 +624,8 @@ static IOReturn render_submit(X9RenderContext *c,const X9RenderSubmission *reque
   static uint64_t reach_total[2]={0,0},import_total[2]={0,0},full_import_total[2]={0,0};
   static uint64_t coherent_total[2]={0,0};
   static uint64_t wc_total[2]={0,0};
+  static uint64_t scope_total[2]={0,0},scope_entries=0,scope_holds=0;
+  scope_total[0]+=scope_skip[0];scope_total[1]+=scope_skip[1];scope_entries+=scope_count;if(scope_on&&scope_hold)scope_holds++;
   static uint64_t hole_total[2]={0,0},span_total[2]={0,0};
   static uint64_t plan_rebuilds=0,plan_reuses=0;
   if(!began)began=times[0];
@@ -641,6 +664,9 @@ static IOReturn render_submit(X9RenderContext *c,const X9RenderSubmission *reque
    for(unsigned i=0;i<2;i++)hole_total[i]=span_total[i]=0;
    IOLog("X9 RENDER cache-wc: jobs=%llu pre_skip_avg=%llu post_skip_avg=%llu;write-combined BOs need no CPU maintenance\n",
     count,wc_total[0]/count,wc_total[1]/count);
+   IOLog("X9 RENDER cache-frontend-scope: jobs=%llu active=%u pre_skip_avg=%llu post_skip_avg=%llu ranges_avg=%llu hold_jobs=%llu;imported BOs no pending command buffer references (x9_cache_scope)\n",
+    count,scope_on?1:0,scope_total[0]/count,scope_total[1]/count,scope_entries/count,scope_holds);
+   scope_total[0]=scope_total[1]=scope_entries=scope_holds=0;
    for(unsigned i=0;i<2;i++)reach_total[i]=import_total[i]=full_import_total[i]=coherent_total[i]=wc_total[i]=0;
    cache_total[0]=cache_total[1]=ready_mask=0;
    skipped_total[0]=skipped_total[1]=initial_total=fallback_total=0;

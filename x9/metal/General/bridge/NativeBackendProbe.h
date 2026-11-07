@@ -27,5 +27,8 @@ const char *nmb_backend_loader_path(void);
  * port's registry entry, as the runtime's device identity requires. */
 id nmb_backend_open(const char *cache, unsigned accelerator_port,
                     void (*missing)(const char *, const char *));
+/* Cache scope: X9ScopeRegister/Unregister/Acquire/Release/HoldAll/ReleaseAll
+ * (X9RenderABI.h values 1..6). False when the kernel has no scope client. */
+bool nmb_cache_scope(uint32_t operation, uint64_t address, uint64_t bytes);
 }
 #endif

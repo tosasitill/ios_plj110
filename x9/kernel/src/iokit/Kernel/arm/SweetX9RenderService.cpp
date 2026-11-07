@@ -44,6 +44,86 @@ static bool render_wc_scrub(IOMemoryDescriptor *m,uint64_t bytes) {
 static const X9RenderEngine *render_engine;
 static bool render_published;
 extern "C" { int sweet_x9_render_payload_ready=0; }
+/* Frontend cache scope (rev252bx, X9RenderScope). Ranges per task: a registered
+ * range (refs counted from Acquire/Release) or a HoldAll record (address 0).
+ * The table only ever widens maintenance when in doubt: a full table refuses
+ * new registrations (those imports keep full maintenance), and a snapshot that
+ * does not fit reports hold. Entries of a task go when its scope client closes. */
+namespace {
+struct RenderScopeEntry { task_t task; uint64_t address,bytes; uint32_t refs; bool used; };
+constexpr unsigned render_scope_capacity=1024;
+RenderScopeEntry render_scope[render_scope_capacity];
+IOLock *render_scope_lock;
+uint64_t render_scope_stats[4];   /* registers, refused (full), acquires without a range, holds */
+IOLock *render_scope_lock_get() {
+ if(!render_scope_lock) {
+  IOLock *l=IOLockAlloc();
+  if(l&&!OSCompareAndSwapPtr(nullptr,l,(void * volatile *)&render_scope_lock))IOLockFree(l);
+ }
+ return render_scope_lock;
+}
+IOReturn render_scope_op(task_t task,const X9RenderScopeRequest &q) {
+ IOLock *l=render_scope_lock_get();if(!l)return kIOReturnNoMemory;
+ if(q.abi!=X9_RENDER_ABI)return kIOReturnBadArgument;
+ const bool hold=q.operation==X9ScopeHoldAll||q.operation==X9ScopeReleaseAll;
+ if(!hold&&(!q.address||!q.bytes||q.address+q.bytes<q.address))return kIOReturnBadArgument;
+ const uint64_t address=hold?0:q.address,bytes=hold?0:q.bytes;
+ IOReturn kr=kIOReturnSuccess;
+ IOLockLock(l);
+ RenderScopeEntry *found=nullptr,*empty=nullptr;
+ for(auto &e:render_scope) {
+  if(e.used&&e.task==task&&e.address==address&&(hold||e.bytes==bytes)){found=&e;break;}
+  if(!e.used&&!empty)empty=&e;
+ }
+ switch(q.operation) {
+ case X9ScopeRegister:
+  render_scope_stats[0]++;
+  if(found)break;
+  if(!empty){render_scope_stats[1]++;kr=kIOReturnNoResources;break;}
+  *empty={task,address,bytes,0,true};break;
+ case X9ScopeUnregister:
+  if(found)*found={};
+  break;
+ case X9ScopeAcquire: case X9ScopeHoldAll:
+  if(hold)render_scope_stats[3]++;
+  if(!found&&hold&&empty){*empty={task,0,0,0,true};found=empty;}
+  if(!found){render_scope_stats[2]++;break;}   /* unregistered: never skipped anyway */
+  if(found->refs!=UINT32_MAX)found->refs++;
+  break;
+ case X9ScopeRelease: case X9ScopeReleaseAll:
+  if(found&&found->refs)found->refs--;
+  break;
+ default:kr=kIOReturnBadArgument;
+ }
+ IOLockUnlock(l);
+ return kr;
+}
+void render_scope_task_gone(task_t task) {
+ IOLock *l=render_scope_lock_get();if(!l)return;
+ IOLockLock(l);
+ for(auto &e:render_scope)if(e.used&&e.task==task)e={};
+ IOLockUnlock(l);
+}
+}
+bool x9_render_scope_enabled(void) {
+ static int on=-1;
+ if(on<0){int v=0;on=PE_parse_boot_argn("x9_cache_scope",&v,sizeof(v))&&v?1:0;}
+ return on==1;
+}
+unsigned x9_render_scope_snapshot(task_t task,X9RenderScopeView *out,unsigned cap,bool *hold) {
+ *hold=false;
+ IOLock *l=render_scope_lock_get();if(!l){*hold=true;return 0;}
+ unsigned n=0;
+ IOLockLock(l);
+ for(auto &e:render_scope) {
+  if(!e.used||e.task!=task)continue;
+  if(!e.address){if(e.refs)*hold=true;continue;}
+  if(n==cap){*hold=true;break;}
+  out[n++]={e.address,e.address+((e.bytes+16383)&~16383ULL),e.refs};
+ }
+ IOLockUnlock(l);
+ return n;
+}
 /* Observations only: each lookup locks the map independently, so this is not
  * an atomic snapshot and must never be used to authorize an import. Inspect
  * every bounded submap level because each parent's protection also matters. */
@@ -183,6 +263,13 @@ class SweetX9RenderUserClient : public IOUserClient {
   return false;
  }
  IOReturn operation(uint32_t selector,IOExternalMethodArguments *a) {
+  /* A scope client has no engine context: decide before drain() or any lookup. */
+  if(context->scope_only||selector==X9RenderScope) {
+   if(!context->scope_only||selector!=X9RenderScope)return kIOReturnUnsupported;
+   if(a->structureInputSize!=sizeof(X9RenderScopeRequest)||a->structureOutputSize)return kIOReturnBadArgument;
+   X9RenderScopeRequest q;memcpy(&q,a->structureInput,sizeof(q));
+   return render_scope_op(context->owner,q);
+  }
   /* Async submission: queued jobs of this context still need their page-table
    * mappings, groups and resources, and a v1 submit must not overtake them.
    * drain() drops/retakes context->lock while it waits. */
@@ -298,6 +385,7 @@ class SweetX9RenderUserClient : public IOUserClient {
    context->resources[slot].write_combined=wc||import_wc;
    context->resources[slot].initial_cache_clean=wc||import_wc;
    context->resources[slot].created=mach_absolute_time();
+   context->resources[slot].host_address=selector==X9RenderImportHost?request.host_address:0;
    context->allocated_bytes+=request.bytes;
    context->window_allocs++;context->window_alloc_bytes+=request.bytes;
    live_report("periodic",false);
@@ -425,11 +513,20 @@ class SweetX9RenderUserClient : public IOUserClient {
  }
 public:
  bool initWithTask(task_t task,void *security,UInt32 type,OSDictionary *props) APPLE_KEXT_OVERRIDE {
-  if(type||clientHasPrivilege(task,kIOClientPrivilegeForeground)!=kIOReturnSuccess)return false;
+  if(type>X9_RENDER_SCOPE_CLIENT||clientHasPrivilege(task,kIOClientPrivilegeForeground)!=kIOReturnSuccess)return false;
   if(!IOUserClient::initWithTask(task,security,type,props))return false;
   context=(X9RenderContext *)IOMallocZero(sizeof(X9RenderContext));if(!context)return false;
   context->lock=IOLockAlloc();if(!context->lock)return false;
   context->owner=task;task_reference(task);
+  if(type==X9_RENDER_SCOPE_CLIENT) {
+   /* No GPU context, no memory limit, no resources: only X9RenderScope. */
+   if(!render_scope_lock_get())return false;
+   context->scope_only=true;
+   char caller[32]={0};proc_selfname(caller,sizeof(caller));
+   IOLog("X9 RENDER CLIENT: opened caller=%s pid=%d cache-scope client (x9_cache_scope=%d)\n",caller,proc_selfpid(),
+    x9_render_scope_enabled()?1:0);
+   return true;
+  }
   X9RenderCaps caps;if(!render_caps_ready(&caps))return false;
   if(sweet_x9_render_memlimit(task)!=0)return false;
   if(render_engine->context_open(context)!=kIOReturnSuccess)return false;
@@ -439,6 +536,11 @@ public:
  }
  IOReturn clientClose(void) APPLE_KEXT_OVERRIDE {if(!isInactive())terminate();return kIOReturnSuccess;}
  void free(void) APPLE_KEXT_OVERRIDE {
+  if(context&&context->scope_only) {
+   render_scope_task_gone(context->owner);
+   if(context->owner)task_deallocate(context->owner);if(context->lock)IOLockFree(context->lock);
+   IOFree(context,sizeof(*context));context=nullptr;
+  }
   if(context) {
    footprint("close");
    if(context->engine_open&&!render_engine->context_close(context)) {

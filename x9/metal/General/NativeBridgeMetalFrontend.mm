@@ -220,6 +220,7 @@ static void waitForResource(id resource);
 @property(nonatomic) void *wrapped;
 @property(nonatomic,strong) id<MTLHeap> parentHeap;   // the heap that made the buffer, nil otherwise
 @property(nonatomic) NSUInteger heapOffset;
+@property(nonatomic) uint64_t scopeBase,scopeBytes;   // IOSurface import range registered for the cache scope, else 0
 @end
 @interface NBTexture : NBObject
 @property(nonatomic) uint64_t traceID;
@@ -275,7 +276,25 @@ static void x9_release_no_copy_block(void *context,void *pointer,uint64_t length
  void (^block)(void *,NSUInteger)=(__bridge_transfer void (^)(void *,NSUInteger))context;
  if(block)block(pointer,(NSUInteger)length);
 }
-static void x9_release_import_surface(void *context,void *,uint64_t) {CFRelease((IOSurfaceRef)context);}
+/* Frontend cache scope (rev252bx). The kernel skips per-job CPU maintenance of a
+   registered IOSurface import only while no pending command buffer acquired it
+   (and only with boot-arg x9_cache_scope=1). Values match X9RenderScopeOperation. */
+extern "C" bool nmb_cache_scope(uint32_t operation,uint64_t address,uint64_t bytes);
+enum {NBScopeRegister=1,NBScopeUnregister=2,NBScopeAcquire=3,NBScopeRelease=4,NBScopeHoldAll=5,NBScopeReleaseAll=6};
+static std::atomic<bool> gScopeOff{false};
+static bool scopeCall(uint32_t op,uint64_t address,uint64_t bytes) {
+ if(gScopeOff.load(std::memory_order_relaxed))return false;
+ const bool ok=nmb_cache_scope(op,address,bytes);
+ // Only an unavailable scope client turns the feature off; a full kernel table
+ // just leaves that import unregistered (full maintenance).
+ // Probe with an Unregister of a range that is never registered (not page aligned).
+ if(!ok&&op==NBScopeRegister&&!nmb_cache_scope(NBScopeUnregister,1,1))gScopeOff.store(true);
+ return ok;
+}
+static void x9_release_import_surface(void *context,void *pointer,uint64_t length) {
+ scopeCall(NBScopeUnregister,(uint64_t)(uintptr_t)pointer,length);   // before the range can be reused
+ CFRelease((IOSurfaceRef)context);
+}
 @implementation NBBuffer
 - (void)dealloc {if(_handle)x9_buffer_unregister(bufferKey(_handle));nmb_buffer_release(_handle);}
 - (NSUInteger)length {return nmb_buffer_length(_handle);}
@@ -319,6 +338,7 @@ static NBBuffer *surfaceBuffer(IOSurfaceRef surface,void *base,size_t bytes) {
  // The surface stays owned by its creator; the import (and this metadata) is
  // the runtime's reference. Size is the pinned page-rounded allocation.
  registerRootBuffer(handle,X9BufferKindIOSurface,X9BufferOwnershipImported,bytes,IOSurfaceGetID(surface));
+ if(scopeCall(NBScopeRegister,(uint64_t)(uintptr_t)base,bytes)){buffer.scopeBase=(uint64_t)(uintptr_t)base;buffer.scopeBytes=bytes;}
  if(key) {
   // Bound metadata without retaining old frames. Evicting an association is
   // harmless: its owners still retain the actual import until their own end.
@@ -726,6 +746,8 @@ static void notified(void *context,uint64_t value) {
 @property(nonatomic) uint64_t tracePixelBytes;
 @property(nonatomic,strong) NSMutableArray *scheduledHandlers,*completedHandlers;
 @property(nonatomic,strong) NSMutableSet *surfaces;
+@property(nonatomic,strong) NSMutableData *scopeRanges;   // {base,bytes} pairs acquired at commit
+@property(nonatomic) BOOL scopeHoldAll;
 // Runtime handles retain storage and no-copy release contexts. Also keep the
 // Objective-C texture/heap ancestry through success, and quarantine it on GPU errors.
 @property(nonatomic,strong) NSMutableSet *resourceOwners;
@@ -1127,6 +1149,8 @@ struct NBCommandCallbackScope {
  explicit NBCommandCallbackScope(void *command):previous(gActiveCommandCallback){gActiveCommandCallback=command;}
  ~NBCommandCallbackScope(){gActiveCommandCallback=previous;}
 };
+static void x9ScopeAcquire(NBCommandBuffer *cb,NSSet *owners);
+static void x9ScopeRelease(NBCommandBuffer *cb);
 @implementation NBCommandBuffer
 // MPSCommandBufferImageCache requires persistent per-command-buffer state.
 // This is not GPU storage and must not be shared between command buffers.
@@ -1326,6 +1350,7 @@ static char kUserDictionaryKey;
  const bool safeRelease=self.failedLocally || nmb_command_buffer_status(_handle)==MTLCommandBufferStatusCompleted ||
   nmb_command_buffer_unsubmitted_oom(_handle);
  if(safeRelease){
+  x9ScopeRelease(self);   // after completion: the kernel's post maintenance of this job is done
   [_surfaces removeAllObjects];[_resourceOwners removeAllObjects];
   @synchronized(gInFlight){[gInFlight removeObject:self];}
  }else NBLOG(@"native-metal: failed GPU command retained with its IOSurfaces;ownership uncertain");
@@ -1348,6 +1373,36 @@ static char kUserDictionaryKey;
    cleans every imported BO mapped in the process on every job). Surfaces come from _resourceOwners: textures on an
    IOSurface and buffers whose Buffer Manager record names a surface. heap_cbs counts command buffers with useHeap
    (their heap members are not enumerated here, so for those the list may be incomplete). */
+/* Cache scope per command buffer: acquire every registered import it references;
+   pin everything (HoldAll) when it references a surface whose import is not
+   registered here or a heap whose members are not enumerated. */
+static void x9ScopeAcquire(NBCommandBuffer *cb,NSSet *owners) {
+ if(gScopeOff.load(std::memory_order_relaxed))return;
+ static Class heapClass=objc_getClass("NBHeap");
+ std::vector<std::pair<uint64_t,uint64_t>> ranges;bool holdAll=false;
+ auto add=[&](NBBuffer *b){if(b.scopeBytes)ranges.emplace_back(b.scopeBase,b.scopeBytes);};
+ for(id r in owners) {
+  if([r isKindOfClass:[NBBuffer class]]) {
+   NBBuffer *b=(NBBuffer *)r;
+   if(b.scopeBytes)add(b);else if(bufferSurfaceID(b.handle))holdAll=true;
+  }else if([r isKindOfClass:[NBTexture class]]) {
+   NBTexture *x=(NBTexture *)r;
+   if(!x.surface)continue;
+   if(x.buffer.scopeBytes)add(x.buffer);else holdAll=true;
+  }else if(heapClass&&[r isKindOfClass:heapClass])holdAll=true;
+ }
+ std::sort(ranges.begin(),ranges.end());ranges.erase(std::unique(ranges.begin(),ranges.end()),ranges.end());
+ NSMutableData *held=[NSMutableData data];
+ for(auto &v:ranges)if(scopeCall(NBScopeAcquire,v.first,v.second)){uint64_t pair[2]={v.first,v.second};[held appendBytes:pair length:sizeof(pair)];}
+ cb.scopeRanges=held;
+ cb.scopeHoldAll=holdAll&&scopeCall(NBScopeHoldAll,0,0);
+}
+static void x9ScopeRelease(NBCommandBuffer *cb) {
+ NSData *held=cb.scopeRanges;cb.scopeRanges=nil;
+ const uint64_t *pairs=(const uint64_t *)held.bytes;
+ for(NSUInteger i=0;i+1<held.length/sizeof(uint64_t);i+=2)nmb_cache_scope(NBScopeRelease,pairs[i],pairs[i+1]);
+ if(cb.scopeHoldAll){cb.scopeHoldAll=NO;nmb_cache_scope(NBScopeReleaseAll,0,0);}
+}
 static std::mutex gSurfaceUseLock;
 static struct {
  uint64_t cbs,cbsWithSurfaces,surfaces,surfacesMax,bytes,bytesMax,textureRefs,bufferRefs,heapCbs;
@@ -1429,6 +1484,7 @@ static void x9SubmitTimingLog(void) {
   }
   // Before submission: after it, completion may clear _resourceOwners on another thread.
   x9SurfaceUseNote(_resourceOwners);
+  x9ScopeAcquire(self,_resourceOwners);
  }
  {
   std::lock_guard<std::mutex> lock(gCommitLock);

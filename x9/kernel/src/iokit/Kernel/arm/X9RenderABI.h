@@ -21,8 +21,20 @@ enum X9RenderOperation {
   * runs later on the kernel worker in global FIFO order. FenceWait:
   * X9RenderWaitRequest in (timeout_ns 0 = poll, max 10 s), X9RenderCompletion
   * out once that submission completed (CPU-visible), kIOReturnTimeout before. */
- X9RenderSubmitAsync=12, X9RenderFenceWait=13
+ X9RenderSubmitAsync=12, X9RenderFenceWait=13,
+ /* Frontend cache scope (rev252bx). Only on a type-1 scope connection (no GPU
+  * context): X9RenderScopeRequest in, nothing out. Register/Unregister mark an
+  * imported host range the frontend tracks; Acquire/Release count command
+  * buffers that reference it (commit .. completion); HoldAll/ReleaseAll pin
+  * every range of the task (a command buffer whose surfaces are not all known).
+  * With boot-arg x9_cache_scope=1, submission maintenance skips an imported BO
+  * only when a registered range of the same task covers it, no overlapping
+  * range is acquired and nothing is held. Anything else keeps full maintenance. */
+ X9RenderScope=14
 };
+enum X9RenderScopeOperation { X9ScopeRegister=1u, X9ScopeUnregister=2u, X9ScopeAcquire=3u, X9ScopeRelease=4u,
+ X9ScopeHoldAll=5u, X9ScopeReleaseAll=6u };
+#define X9_RENDER_SCOPE_CLIENT 1u
 enum X9RenderBufferFlags { X9RenderGPURead=1u, X9RenderGPUWrite=2u, X9RenderGPUExecute=4u };
 enum X9RenderCacheOperation { X9RenderClean=1u, X9RenderInvalidate=2u };
 enum X9RenderCapabilities { X9RenderBufferObjects=1u, X9RenderHostImport=2u, X9RenderCSFSubmit=4u, X9RenderTiler=8u, X9RenderFragment=16u, X9RenderSubmissionCacheOwnership=32u, X9RenderAsyncSubmit=64u };
@@ -74,6 +86,10 @@ struct X9RenderCompletion {
  uint32_t fault_status,exception_type;
  uint64_t fault_address;
 };
+struct X9RenderScopeRequest {
+ uint32_t abi,operation;
+ uint64_t address,bytes;
+};
 struct X9RenderWaitRequest {
  uint32_t abi,group;
  uint64_t submission_id,timeout_ns;
@@ -81,4 +97,5 @@ struct X9RenderWaitRequest {
 #if defined(__cplusplus)
 static_assert(sizeof(struct X9RenderMapping)==40,"mapping ABI");
 static_assert(sizeof(struct X9RenderSubmission)==96,"submission ABI");
+static_assert(sizeof(struct X9RenderScopeRequest)==24,"scope ABI");
 #endif
