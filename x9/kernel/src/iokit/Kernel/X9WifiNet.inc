@@ -1643,7 +1643,10 @@ x9_txd_mgmt(uint8_t *buf, unsigned framelen, unsigned machdr, uint8_t subtype)
     uint32_t dw[8] = {};
     unsigned total = 32 + framelen;
     unsigned etoff = (16 + machdr) >> 1;                       /* pse(16)+machdr, in words */
-    dw[0] = (total & 0xffff) | ((etoff & 0x7f) << 16) | (2u << 23) | (17u << 25);  /* COMMAND, MCU_Q1|ALTX */
+    /* rev252cf: queue MCU_Q0 | MAC_TXQ_ALTX_0 = 16, as gen4m authComposeAuthFrameHeaderAndFF sets FORCE_TX |
+     * MGNT_2_CMD_QUE (nic_txd_v5.c nicConnac3TxGetTxDestQueue); rev252bt..ce used 17 (MCU_Q1 | ALTX), and 91.txt
+     * still had every Auth unACKed on 5 GHz while firmware probe requests were answered. */
+    dw[0] = (total & 0xffff) | ((etoff & 0x7f) << 16) | (2u << 23) | (16u << 25);  /* COMMAND, MCU_Q0|ALTX */
     dw[1] = (X9_JOIN_WIDX & 0xfff) | (2u << 14) | (((machdr >> 1) & 0x1f) << 16) | (0u << 21) | (X9_JOIN_OMAC << 25)
         | (1u << 31);                                          /* FIXED_RATE (Android: Rate mode 1 = MANUAL_DESC) */
     dw[2] = (subtype & 0xf) | (0u << 4) | (0x7fu << 16);       /* subtype, type MGMT 0, life-time max */
@@ -1652,6 +1655,9 @@ x9_txd_mgmt(uint8_t *buf, unsigned framelen, unsigned machdr, uint8_t subtype)
     /* DW6: msdu_count 1, DA_SRC_SEL, fixed-rate index 1 = FIXED_RATE_INDEX_OFDM_6M (Android RateIdx=1), FR_BW 8.
      * VALID_TXD_ARRIVAL_TIME (b28) left clear: MT6653 builds CFG_WIFI_TX_FIXED_RATE_NO_VTA=1. */
     dw[6] = (1u << 10) | (1u << 2) | (1u << 16) | (8u << 22);
+    /* DW7: TXD_LENGTH 1 page (0); FORCE_RTS_CTS b13 (CFG_CONNAC3X_DS_VER >= 3500), as gen4m nicTxSetForceRts for Auth
+     * (an AP that never answers then shows TX_DONE status 2 RTS_ERROR instead of 3 MPDU_ERROR). */
+    dw[7] = (1u << 13);
     memcpy(buf, dw, 32);
     return total;
 }
