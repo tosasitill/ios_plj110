@@ -629,6 +629,19 @@ public:
    if(!ok)return disabled?kIOReturnNotReady:kIOReturnBadArgument;
    return render_engine->fence_wait(context,&request,(X9RenderCompletion *)args->structureOutput);
   }
+  if(selector==X9RenderCache) {
+   /* rev252cn (x9dc): a deferred clean record takes no context lock either -
+    * it only appends to the engine's per-context list, and the submitting
+    * thread must never wait behind the worker's in-flight job. Everything
+    * else (inline maintenance) keeps the locked path below. */
+   if(args->structureInputSize==sizeof(X9RenderCacheRequest)&&!args->structureOutputSize) {
+    const auto &request=*(const X9RenderCacheRequest *)args->structureInput;
+    if(request.abi==X9_RENDER_ABI&&request.operation==(X9RenderClean|X9RenderDefer)) {
+     if(!render_engine->cache_defer)return kIOReturnUnsupported;
+     return render_engine->cache_defer(context,&request);
+    }
+   }
+  }
   IOLockLock(context->lock);
   IOReturn kr=operation(selector,args);IOLockUnlock(context->lock);return kr;
  }

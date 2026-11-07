@@ -23,6 +23,11 @@ struct X9RenderResource {
   * allocation that has NEVER been exposed may skip repeated CPU maintenance.
   * Private command/fence storage has its separate explicit sync path. */
  bool cpu_exposed,initial_cache_clean,imported;
+ /* rev252cn (x9dc): this resource's CPU-written ranges were already maintained
+  * from the submission's deferred dirty list at publish time, so the fallback
+  * walk skips it. Reset on every submit, set only after the deferred clean
+  * for the CURRENT submission succeeded. */
+ bool dirty_maintained;
  /* Rebuilt under the context + GPU owner locks from EVERY live GPU mapping,
   * not from a draw's resource list or dirty notifications. Bounding intervals
   * deliberately include holes between mappings and all indirect accesses.
@@ -85,6 +90,11 @@ struct X9RenderEngine {
  IOReturn (*submit)(X9RenderContext *,const X9RenderSubmission *,X9RenderCompletion *);
  IOReturn (*wait)(X9RenderContext *,const X9RenderWaitRequest *,X9RenderCompletion *);
  IOReturn (*cache)(X9RenderContext *,X9RenderResource *,const X9RenderCacheRequest *);
+ /* Deferred clean record (X9RenderClean|X9RenderDefer, boot-arg x9dc). Called
+  * WITHOUT c->lock, like fence_wait: the submitting thread must never block on
+  * the worker's locks. Only appends to the engine's per-context list; the range
+  * is validated and maintained at the next submit's publish phase. */
+ IOReturn (*cache_defer)(X9RenderContext *,const X9RenderCacheRequest *);
  IOReturn (*timestamp)(uint64_t *);
  bool (*quiesce)(X9RenderContext *);
  /* Asynchronous submission (X9RenderAsyncSubmit). submit_async and drain are

@@ -32,6 +32,13 @@ struct x9_dev {
   * with X9RenderFenceWait (X9PanVKSync.c completion thread). */
  bool async;
  uint64_t async_completed;   /* highest id seen complete, atomic */
+ /* Kernel X9RenderDeferredCache (boot-arg x9dc=1) and not disabled by
+  * X9_DEFER_CACHE=1: pure CPU->GPU cleans (PAN_KMOD_BO_SYNC_CPU_CACHE_FLUSH)
+  * are recorded in the kernel and maintained in the next submit's publish
+  * phase instead of blocking on the worker's locks inline. Invalidate syncs
+  * (GPU->CPU readback) always stay inline. */
+ bool defer;
+ uint64_t cache_deferred;   /* deferred clean calls (telemetry only) */
 };
 /* cpu/cpu_maps (rev252ch): IOKit's IOMemoryDescriptor::createMappingInTask reuses a compatible mapping of
  * the same memory in the same task (no kIOMapUnique), so a second IOConnectMapMemory64 of a BO returns the
@@ -139,15 +146,24 @@ static int cache_request(struct pan_kmod_bo *bo,uint64_t offset,uint64_t bytes,
  return 0;
 }
 /* Caller holds d->lock. Byte counts describe completed cache calls, not GPU
- * work, a complete dirty set or bytes saved inside render_submit. */
+ * work, a complete dirty set or bytes saved inside render_submit. With the
+ * kernel's deferred-cache capability (x9dc) a pure clean is recorded in the
+ * kernel and maintained at the next submit's publish phase; the call returns
+ * without taking the worker's locks. Invalidate-bearing syncs stay inline. */
 static int cache_call(struct x9_dev *d,struct pan_kmod_bo *bo,const struct X9RenderCacheRequest *req) {
- int ret=call(d,X9RenderCache,req,sizeof(*req),NULL,0);
+ struct X9RenderCacheRequest send=*req;
+ if(d->defer&&send.operation==X9RenderClean) {
+  send.operation=X9RenderClean|X9RenderDefer;
+  d->cache_deferred++;
+ }
+ int ret=call(d,X9RenderCache,&send,sizeof(send),NULL,0);
  if(!ret) {
-  d->cache_ops++;d->cache_range_bytes+=req->bytes;d->cache_bo_bytes+=bo->size;
+  d->cache_ops++;d->cache_range_bytes+=send.bytes;d->cache_bo_bytes+=bo->size;
   if(d->cache_ops<=4||d->cache_ops%128==0)
-   x9_panvk_log("X9 PANVK CACHE RANGE: calls=%llu range_bytes_avg=%llu bo_bytes_avg=%llu merged=%llu;explicit ops only,submission fallback retained",
+   x9_panvk_log("X9 PANVK CACHE RANGE: calls=%llu range_bytes_avg=%llu bo_bytes_avg=%llu merged=%llu deferred=%llu;explicit ops,deferred maintained at next submit (x9dc)",
     (unsigned long long)d->cache_ops,(unsigned long long)(d->cache_range_bytes/d->cache_ops),
-    (unsigned long long)(d->cache_bo_bytes/d->cache_ops),(unsigned long long)d->cache_merged);
+    (unsigned long long)(d->cache_bo_bytes/d->cache_ops),(unsigned long long)d->cache_merged,
+    (unsigned long long)d->cache_deferred);
  }
  return ret;
 }
@@ -292,7 +308,9 @@ struct pan_kmod_dev *x9_pan_kmod_create(const struct pan_kmod_allocator *allocat
  }
  simple_mtx_init(&d->lock,mtx_plain);
  d->async=(c->capabilities&X9RenderAsyncSubmit)&&!getenv("X9_SUBMIT_SYNC");
- x9_panvk_log("X9 PANVK SUBMIT: mode=%s (kernel caps 0x%x)",d->async?"async":"sync",c->capabilities);
+ d->defer=(c->capabilities&X9RenderDeferredCache)&&!getenv("X9_DEFER_CACHE");
+ x9_panvk_log("X9 PANVK SUBMIT: mode=%s (kernel caps 0x%x) cache=%s",d->async?"async":"sync",c->capabilities,
+  d->defer?"deferred clean (x9dc)":"inline");
  d->base.props=(struct pan_kmod_dev_props){.gpu_id=c->gpu_id,.gpu_variant=c->core_features&255,.gpu_features=c->gpu_features,
   .shader_present=c->shader_present,.tiler_features=c->tiler_features,.mem_features=c->mem_features,.mmu_features=c->mmu_features,
   .l2_features=c->l2_features,.max_threads_per_core=c->max_threads,.max_threads_per_wg=c->max_workgroup_threads,
