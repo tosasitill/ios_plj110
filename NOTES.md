@@ -1,3 +1,16 @@
+## HANDOFF 2026-11-07 (25): 85.txt = rev252bt run; rev252bu BUILT (TX_DONE decode, 3 auth tries); commit 6a39d0c
+
+- Log copy .local/x9/logs/x9-85.txt. 43 s, no panic, park+async on.
+- Join RUC-Web a4:be:2b:7d:1c:41 2432 MHz (33.72 s): BSSINFO pre-join answered (rates 3fcf, basic 0003, dtim 1);
+  CH grant (real parse now) tag 0 status 0 ch 5 band 1 width 0 dbdc 0 interval 4000 = as asked; STAREC answered;
+  Auth queued; 17 ms later rx7 eid 0x2d (UNI_EVENT_ID_STATUS_TO_HOST = TX_DONE for our PID) len 80, payload not logged.
+  No auth response in 1.5 s (rx4 packets 0). CH abort sent. Scans 8-10 after the join (41-42 s) still return 6-9 beacons:
+  radio no longer looks wedged after a failed join (83 had 0-frame scans).
+- rev252bu: decodes the TX_DONE tag (`X9 WIFI TXDONE: status=N (SUCCESS / MPDU_ERROR(no ACK) / ...)`, tx_count, rate,
+  delay) and sends Auth up to 3 times (600 ms each). Kernel only (plugin 258 unchanged, no staging).
+  boot_sha256 0b66f3807b587866304a339be8967a69a234259887db1963a0808cd541c66982. Not device-tested.
+  Reading: SUCCESS + no response -> our RX path drops the Auth reply; MPDU_ERROR -> AP never ACKed (TX side).
+
 ## HANDOFF 2026-11-07 (24): rev252bt BUILT = Wi-Fi join commands aligned with gen4m/android-join-1; commit 3acdb30
 
 - gen4m source IS local: /home/ubuntu/android_kernel_modules_and_devicetree_oppo_mt6993/vendor/mediatek/kernel_modules/
