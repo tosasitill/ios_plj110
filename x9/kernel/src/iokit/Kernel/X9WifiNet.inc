@@ -1430,6 +1430,10 @@ x9_r4_done(x9_wdma *d)
 /* Find an 802.11 beacon / probe response inside an RX packet (RXD length varies with the RXD groups, so search
  * the first 160 bytes for a mgmt header whose fixed fields and SSID element are consistent) and add it. */
 static unsigned x9_scan_frames, x9_scan_bcn;
+/* rev252bw: probe responses (fc 0x50) apart from beacons. A probe response answers the firmware's probe request, so
+ * any at all proves our radio transmits on air (86.txt: Auth got MPDU_ERROR, no ACK, 15 tries). */
+static unsigned x9_scan_presp;
+static uint8_t x9_scan_presp_da[6];
 static void
 x9_scan_take(const uint8_t *p, unsigned n)
 {
@@ -1445,6 +1449,7 @@ x9_scan_take(const uint8_t *p, unsigned n)
         memcpy(&caps, body + 10, 2);
         if (bint == 0 || bint > 10000) continue;
         x9_scan_bcn++;
+        if (fc == 0x50) { if (!x9_scan_presp) memcpy(x9_scan_presp_da, p + o + 4, 6); x9_scan_presp++; }
         const uint8_t *bssid = p + o + 16;
         unsigned ielen = blen - 12;
         uint8_t ch = 0;
@@ -1865,8 +1870,9 @@ static bool
 x9_radio_join(x9_wdma *d, const uint8_t mac[6], const x9wifi::bss_info *b)
 {
     const uint8_t *ap = b->bssid;
-    IOLog("X9 WIFI JOIN: '%.*s' %02x:%02x:%02x:%02x:%02x:%02x %u MHz\n", b->ssid_len, (const char *)b->ssid,
-        ap[0], ap[1], ap[2], ap[3], ap[4], ap[5], b->freq_mhz);
+    IOLog("X9 WIFI JOIN: '%.*s' %02x:%02x:%02x:%02x:%02x:%02x %u MHz, own (SA/TA, DEVINFO) %02x:%02x:%02x:%02x:%02x:%02x\n",
+        b->ssid_len, (const char *)b->ssid, ap[0], ap[1], ap[2], ap[3], ap[4], ap[5], b->freq_mhz,
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     x9_radio_bssinfo(d, mac, b, false);                       /* Android: nicUpdateBssEx before the CH request */
     if (!x9_radio_ch_privilege(d, b, 3)) { x9_radio_ch_abort(d, 3); return false; }
     bool ok = x9_radio_join_granted(d, mac, b);
@@ -2003,7 +2009,7 @@ x9_wifi_radio_loop(x9_wdma *d)
         IOLockLock(lock);
         rcount = 0;
         IOLockUnlock(lock);
-        x9_scan_frames = x9_scan_bcn = 0;
+        x9_scan_frames = x9_scan_bcn = x9_scan_presp = 0;
         uint64_t ts = mach_absolute_time();
         x9_radio_scan_req(d, seq, mac);
         bool done = false;
@@ -2051,8 +2057,10 @@ x9_wifi_radio_loop(x9_wdma *d)
         stats.scans++;
         const x9wifi::sta_events *e = events;
         IOLockUnlock(lock);
-        IOLog("X9 WIFI RADIO: scan %u %s in %llu ms: rx4 frames %u, beacons %u, networks %u\n", seq,
-            done ? "done" : "TIMED OUT", x9_ms_since(ts), x9_scan_frames, x9_scan_bcn, nfound);
+        IOLog("X9 WIFI RADIO: scan %u %s in %llu ms: rx4 frames %u, beacons %u (probe responses %u, first DA "
+            "%02x:%02x:%02x:%02x:%02x:%02x), networks %u\n", seq, done ? "done" : "TIMED OUT", x9_ms_since(ts),
+            x9_scan_frames, x9_scan_bcn, x9_scan_presp, x9_scan_presp_da[0], x9_scan_presp_da[1], x9_scan_presp_da[2],
+            x9_scan_presp_da[3], x9_scan_presp_da[4], x9_scan_presp_da[5], nfound);
         for (unsigned k = 0; k < nfound && k < 32; k++) {
             IOLog("X9 WIFI RADIO:   %02x:%02x:%02x:%02x:%02x:%02x %4u MHz caps %04x '%.*s'\n", rbss[k].bssid[0],
                 rbss[k].bssid[1], rbss[k].bssid[2], rbss[k].bssid[3], rbss[k].bssid[4], rbss[k].bssid[5],
