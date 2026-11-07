@@ -1,3 +1,29 @@
+## HANDOFF 2026-11-07 (24): rev252bt BUILT = Wi-Fi join commands aligned with gen4m/android-join-1; commit 3acdb30
+
+- gen4m source IS local: /home/ubuntu/android_kernel_modules_and_devicetree_oppo_mt6993/vendor/mediatek/kernel_modules/
+  connectivity/wlan/core/gen4m (handoff 21's "no local source has the abort encoding" was wrong).
+- Found by comparing with android-join-1/dmesg.txt 11890-12104 + gen4m:
+  (1) our CH grant parse read UNI_EVENT_CNM padding (ev[46]/ev[47]); 83/84 "CH grant status=0 ch=0" meant nothing.
+      Grant tag is at ev[48] (Android got ChGrant ch=6 for ch 6).
+  (2) Android's Auth TXD uses a fixed rate (Rate mode 1 = MANUAL_DESC, RateIdx 1 = FIXED_RATE_INDEX_OFDM_6M, FR_BW 8)
+      and PID 32 + TXS_TO_MCU (-> EVENT_TX_DONE, seen 50 ms later status=0). Ours had neither, so the frame used the
+      WTBL rate of widx 1 that our partial STAREC set (guess: possibly never transmitted / bad rate).
+  (3) STAREC rates were wrong: basic 0x00ff and desired 0x0fff set PBCC 22M/33M bits; phy type 0x07 had 5G OFDM on 2.4G.
+  (4) Android sends a full BSSINFO (nicUpdateBssEx: BASIC, RLM+PROTECT+IFS, RATE, SEC, QBSS, MLD...) before the CH request
+      and after the association (BSSID, ConnState 0, StaRecIdxOfAP); we sent none. Android releases the channel
+      (CH_PRIVILEGE_ABORT) after every join, success included.
+- rev252bt changes (X9WifiNet.inc): TXD DW1 b31 fixed rate, DW5 PID 0x20 | b9 TXS_TO_MCU, DW6 rate idx 1 + FR_BW 8, b28
+  cleared (MT6653 CFG_WIFI_TX_FIXED_RATE_NO_VTA=1); full grant log + "NOT as asked" warning (join continues, for data);
+  x9_radio_ch_abort (cid 0x27 tag 1 len 12 bss 0 token 3 dbdc 0xff, send-only) after every attempt; x9_radio_bssinfo
+  pre-join (disconnected, BSSID 0) and post-assoc (connected); STAREC rates/basic/DTIM from AP IEs, PHY 11BG, AID,
+  + BA_OFFLOAD and UAPSD tags; WAIT logs the first 6 rx7 packets (len, pkt type, eid) so EVENT_TX_DONE (0x0f) shows.
+  Not yet sent (Android does): EDCA/WMM params, MLR_INFO tag, re-activation per join, HT tags.
+- BUILT (Mac): `build.py all --name x9-rev252bt` (kernel+boot only, no --revision; manifest stays plugin 258) with the
+  rev252bs boot args. boot_sha256 3b9ca23342a602238e13248e4da82e602952f1f9c0ab6e07646e947ba819c459.
+  NO new plugin package: device already has 258 from rev252bs. Not device-tested.
+- What to read in the next log: `X9 WIFI JOIN: BSSINFO pre-join`, `CH grant tag=.. status=.. ch=..`, `STAREC state 0 ...`,
+  `X9 WIFI WAIT: rx7 ... eid=0x0f` (TX done -> Auth left the radio) and whether rx4 packets > 0 after the grant.
+
 ## HANDOFF 2026-11-07 (23): 84.txt = rev252bs device run (plugin X9GeneralMetal258, park+async on)
 
 - Log copy: .local/x9/logs/x9-84.txt (gitignored). 50.6 s, no panic, no device lost. Boot args match rev252bs.
