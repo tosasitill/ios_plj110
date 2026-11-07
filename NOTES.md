@@ -1,3 +1,20 @@
+## HANDOFF 2026-11-07 (46): 97.txt = rev252cm2: **DHCP OK** (10.46.12.100) on RUC-Web, then deauth + FW hang; rev252cm3 BUILT
+
+- Log copy .local/x9/logs/x9-97.txt. Join as before; `first packet on RX5`, rx 16 in 10 s (bad 0), rings 0/16/0, en0
+  10.46.12.100 at 47.8 s. So the RX5 fix works: the data path is up in both directions.
+- 49.08 s: deauth/disassoc reason 3 detected from the BSSID (frame not dumped; genuine or not is unknown). Our
+  teardown: STAREC state 0 answered, BSSINFO (disconnected, BSSID 0, StaRecIdxOfAP 0xfe) -> event 0x77
+  (UNI_EVENT_ID_UPDATE_LP, harmless TX-delay tag) then no CMD_RESULT and no RX7 traffic ever again; every later scan
+  empty, iOS rejoin at 66 s failed (not found). 96.txt had the same hang on a rejoin's pre-join BSSINFO. The portal sheet
+  never had time to appear (IP at 47.8 s, link gone at 49 s).
+- Android disconnect (android-join-2 kmsg 54.29): deauth, remove keys, BSSINFO ConnState 1 with BSSID = AP and
+  u2StaRecIdxOfAP = AP widx, then cnmStaFreeAllStaByNetwork (STAREC remove), then nicDeactivateNetwork.
+- rev252cm3: x9_radio_bssinfo(mode 0 pre-join / 1 connected / 2 disconnecting: BSSID + widx kept);
+  x9_radio_leave = deauth, BSSINFO mode 2, STAREC REMOVE (tag 0x25, action 0); a leftover STAREC (failed join) is
+  removed before the next pre-join BSSINFO; deauth/disassoc frames are logged in full (A1/A2/seq/reason).
+- BUILT kernel only (plugin 267): boot_sha256 7220e0a2c4ac84d57683a1c7b1be1604122786b43887f84abe2c694ec8c14740.
+- WPA2 stage 2 (4-way handshake, key install) still not implemented (handoff 45).
+
 ## HANDOFF 2026-11-07 (45): 96.txt = rev252cm: **ASSOCIATED** (RUC-Web 5180), TX ok, RX 0; rev252cm2 BUILT
 
 - Log copy .local/x9/logs/x9-96.txt. Auth resp seq 2 status 0, assoc resp status 0 aid 2, `'RUC-Web' CONNECTED`.
