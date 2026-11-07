@@ -1618,6 +1618,27 @@ x9_wait_mgmt(x9_wdma *d, uint8_t subtype, const uint8_t mac[6], uint8_t *out, un
             if (n7 + ne < 6)                                   /* rev252bt: what each rx7 packet is (TX_DONE eid 0x0f?) */
                 IOLog("X9 WIFI WAIT: rx7 len=%d pkt_type=%u eid=0x%02x opt=%02x bytes36=%02x %02x %02x %02x %02x %02x %02x %02x\n",
                       pn, rxd0 >> 27, ev[36], ev[38], ev[36], ev[37], ev[38], ev[39], ev[40], ev[41], ev[42], ev[43]);
+            if ((rxd0 >> 27) == 7 && ev[36] == 0x2d && pn >= 80) {
+                /* rev252bu: UNI_EVENT_ID_STATUS_TO_HOST {4 pad} + UNI_EVENT_TX_DONE tag at 48 (gen4m nic_uni_cmd_event.h).
+                 * status = TX_RESULT_*: 0 success (ACKed), 1 life timeout, 2 RTS error, 3 MPDU error (no ACK),
+                 * 4 aging timeout, 5 flushed, 7 unspecified, 33 dropped in FW, 35 inactive BSS. */
+                static const char *const res[] = { "SUCCESS", "LIFE_TIMEOUT", "RTS_ERROR", "MPDU_ERROR(no ACK)",
+                    "AGING_TIMEOUT", "FLUSHED", "BIP_ERROR", "UNSPECIFIED" };
+                const uint8_t *g = ev + 48;
+                uint16_t gtag, sn, rate;
+                uint32_t delay, ts;
+                memcpy(&gtag, g, 2);
+                memcpy(&sn, g + 6, 2);
+                memcpy(&rate, g + 10, 2);
+                memcpy(&delay, g + 20, 4);
+                memcpy(&ts, g + 24, 4);
+                IOLog("X9 WIFI TXDONE: tag=%u pid=0x%02x status=%u (%s) sn=%u widx=%u tx_count=%u rate=0x%04x flag=%02x "
+                      "rsp_rate=%u rate_idx=%u bw=%u txpwr=%u flush=%u delay_us=%u tsf=%u\n", gtag, g[4], g[5],
+                      g[5] < 8 ? res[g[5]] : (g[5] == 33 ? "DROPPED_IN_FW" : (g[5] == 35 ? "INACTIVE_BSS" : "other")),
+                      sn, g[8], g[9], rate, g[12], g[14], g[15], g[16], g[17], g[18], delay * 32, ts);
+                ne++; lastEid = ev[36];
+                continue;
+            }
             if ((rxd0 >> 27) == 7 && (ev[36] == 0x01 || ev[36] == 0x0e || ev[36] == 0x0f)) { ne++; lastEid = ev[36]; continue; }  /* event, not a frame */
             n7++;
             unsigned o = x9_find_mgmt(ev, (unsigned)pn, subtype, mac);
@@ -1869,9 +1890,12 @@ x9_radio_join_granted(x9_wdma *d, const uint8_t mac[6], const x9wifi::bss_info *
     memcpy(fr + 16, ap, 6);                                   /* BSSID */
     /* u2SeqCtrl at 22 = 0 (HW fills); body at 24: algo(0), seq(1), status(0) */
     unsigned fl = 24 + 6;
-    if (!x9_tx_mgmt(d, 0xb, fr, fl)) { IOLog("X9 WIFI JOIN: auth TX stuck\n"); return false; }
-    IOLog("X9 WIFI JOIN: auth queued on TX15 (DMA consumed the descriptor; air transmission not confirmed)\n");
-    int n = x9_wait_mgmt(d, 0xb, mac, rx, sizeof rx, 1500);
+    int n = -1;
+    for (unsigned attempt = 1; attempt <= 3 && n < 30; attempt++) {   /* rev252bu: 3 tries -> 3 TX_DONE results */
+        if (!x9_tx_mgmt(d, 0xb, fr, fl)) { IOLog("X9 WIFI JOIN: auth TX stuck\n"); return false; }
+        IOLog("X9 WIFI JOIN: auth attempt %u queued on TX15 (see X9 WIFI TXDONE for the air result)\n", attempt);
+        n = x9_wait_mgmt(d, 0xb, mac, rx, sizeof rx, 600);
+    }
     if (n < 30) { IOLog("X9 WIFI JOIN: no auth response\n"); return false; }
     uint16_t astatus;
     memcpy(&astatus, rx + 24 + 4, 2);
