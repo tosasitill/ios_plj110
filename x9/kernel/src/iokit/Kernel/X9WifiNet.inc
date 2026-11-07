@@ -1958,8 +1958,13 @@ x9_ap_rates(const x9wifi::bss_info *b, uint16_t *op, uint16_t *basic, uint8_t *d
  * BSS: BASIC, RLM + PROTECT + IFS_TIME, RATE, SEC, QBSS, MLD. Android sends it before the channel request
  * (ConnState 1, BSSID 0, eBand 1) and after the association (ConnState 0, BSSID = AP, StaRecIdxOfAP = AP widx). */
 static void
-x9_radio_bssinfo(x9_wdma *d, const uint8_t mac[6], const x9wifi::bss_info *b, bool connected)
+x9_radio_bssinfo(x9_wdma *d, const uint8_t mac[6], const x9wifi::bss_info *b, int mode)
 {
+    /* mode 0 pre-join, 1 connected, 2 disconnecting. rev252cm3: Android's disconnect BSSINFO (android-join-2 kmsg
+     * 54.2949 nicUpdateBssEx ConnState[1] BSSID[AP], u2StaRecIdxOfAP = the AP's widx) keeps BSSID and StaRecIdxOfAP;
+     * the STAREC is removed only after it. 96/97.txt: ours cleared both with the STAREC still present and the
+     * firmware never answered again. */
+    bool connected = mode != 0;
     static uint8_t ev[512];
     uint8_t ch = b->freq_mhz >= 4900 ? (uint8_t)((b->freq_mhz - 5000) / 5) : (uint8_t)((b->freq_mhz - 2407) / 5);
     bool g24 = b->freq_mhz < 4900;
@@ -1973,7 +1978,7 @@ x9_radio_bssinfo(x9_wdma *d, const uint8_t mac[6], const x9wifi::bss_info *b, bo
     t[4] = 1; t[5] = X9_JOIN_OMAC; t[6] = X9_JOIN_OMAC; t[7] = 0xff;   /* active, omac, hw bss, dbdc auto */
     uint32_t ct = 65537;                                       /* CONNECTION_INFRA_STA */
     memcpy(t + 8, &ct, 4);
-    t[12] = connected ? 0 : 1;                                 /* MEDIA_STATE_CONNECTED 0 / DISCONNECTED 1 */
+    t[12] = mode == 1 ? 0 : 1;                                 /* MEDIA_STATE_CONNECTED 0 / DISCONNECTED 1 */
     t[13] = 3;                                                 /* WMM set as at activation */
     if (connected) memcpy(t + 14, b->bssid, 6);
     uint16_t bcmc = 0, bint = b->beacon_int ? b->beacon_int : 100, sta = connected ? X9_JOIN_WIDX : 0xfe;
@@ -2021,14 +2026,17 @@ x9_radio_bssinfo(x9_wdma *d, const uint8_t mac[6], const x9wifi::bss_info *b, bo
     at += 20;
     int n = x9_wd_unicmd(d, 0x02, 0x07, pl, at, 0x01, ev, sizeof ev, 1000);
     IOLog("X9 WIFI JOIN: BSSINFO %s ch=%u op_rates=%04x basic=%04x dtim=%u bcn=%u slot=%u -> %s\n",
-          connected ? "connected" : "pre-join", ch, op, basic, dtim, bint, slot, n > 0 ? "answered" : "no CMD_RESULT");
+          mode == 1 ? "connected" : mode == 2 ? "disconnecting" : "pre-join", ch, op, basic, dtim, bint, slot, n > 0 ? "answered" : "no CMD_RESULT");
 }
 
 /* gen4m nicUniCmdUpdateStaRec (UNI_CMD_ID_STAREC_INFO 0x03) tags for a legacy AP: BASIC, STATE, PHY_INFO, RA,
  * BA_OFFLOAD, UAPSD (HT/VHT/HE skipped: no HT tags sent, the peer is used as 11b/g). */
+static bool x9_starec_live;                                    /* rev252cm3: a STAREC for widx 1 exists in FW */
+static void x9_radio_starec_remove(x9_wdma *d);
 static bool
 x9_radio_starec(x9_wdma *d, const x9wifi::bss_info *b, uint8_t staState, uint16_t aid)
 {
+    x9_starec_live = true;
     static uint8_t ev[512];
     uint8_t rcpi = (uint8_t)((b->signal_dbm + 110) * 2);
     uint16_t op, basic;
@@ -2108,7 +2116,8 @@ x9_radio_join(x9_wdma *d, const uint8_t mac[6], const x9wifi::bss_info *b)
         b->ssid_len, (const char *)b->ssid, ap[0], ap[1], ap[2], ap[3], ap[4], ap[5], b->freq_mhz,
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     x9_radio_dbdc(d);
-    x9_radio_bssinfo(d, mac, b, false);                       /* Android: nicUpdateBssEx before the CH request */
+    if (x9_starec_live) x9_radio_starec_remove(d);            /* Android pre-join STAREC len 16 (free old) */
+    x9_radio_bssinfo(d, mac, b, 0);                           /* Android: nicUpdateBssEx before the CH request */
     if (!x9_radio_ch_privilege(d, b, 3)) { x9_radio_ch_abort(d, 3); return false; }
     bool ok = x9_radio_join_granted(d, mac, b);
     x9_radio_ch_abort(d, 3);                                  /* Android releases it after success too */
@@ -2195,7 +2204,7 @@ x9_radio_join_granted(x9_wdma *d, const uint8_t mac[6], const x9wifi::bss_info *
     IOLog("X9 WIFI JOIN: assoc resp status=%u aid=%u\n", sstatus, aid & 0x3fff);
     if (sstatus != 0) return false;
 
-    x9_radio_bssinfo(d, mac, b, true);                        /* Android aisUpdateBssInfoForJOIN -> nicUpdateBssEx */
+    x9_radio_bssinfo(d, mac, b, 1);                           /* Android aisUpdateBssInfoForJOIN -> nicUpdateBssEx */
     x9_radio_starec(d, b, 2, (uint16_t)(aid & 0x3fff));       /* STA_STATE_3 = connected */
     IOLog("X9 WIFI JOIN: '%.*s' CONNECTED\n", b->ssid_len, (const char *)b->ssid);
     return true;
@@ -2341,9 +2350,31 @@ x9_rx_kick(const uint8_t *p, unsigned n, const uint8_t mac[6], const uint8_t bss
     static const uint8_t st[2] = { 0x0c, 0x0a };
     for (unsigned k = 0; k < 2; k++) {
         unsigned o = x9_find_mgmt(p, n, st[k], mac);
-        if (o && o + 26 <= n && !memcmp(p + o + 10, bssid, 6)) return p[o + 24] | p[o + 25] << 8;
+        if (o && o + 26 <= n && !memcmp(p + o + 10, bssid, 6)) {
+            uint32_t rd0; memcpy(&rd0, p, 4);
+            IOLog("X9 WIFI DATA: %s at +%u (rxd0 %08x len %u): fc %02x%02x A1 %02x:%02x:%02x:%02x:%02x:%02x A2 "
+                "%02x:%02x:%02x:%02x:%02x:%02x seq %02x%02x reason %u\n", k ? "disassoc" : "deauth", o, rd0, n, p[o],
+                p[o + 1], p[o + 4], p[o + 5], p[o + 6], p[o + 7], p[o + 8], p[o + 9], p[o + 10], p[o + 11], p[o + 12],
+                p[o + 13], p[o + 14], p[o + 15], p[o + 23], p[o + 22], p[o + 24] | p[o + 25] << 8);
+            return p[o + 24] | p[o + 25] << 8;
+        }
     }
     return -1;
+}
+
+/* rev252cm3: gen4m nicUniCmdRemoveStaRec: STAREC {bss 0, widx} + tag REMOVE 0x25 {len 8, ucActionType 0 = STA}. */
+static void
+x9_radio_starec_remove(x9_wdma *d)
+{
+    static uint8_t ev[256];
+    uint8_t pl[8 + 8] = {};
+    pl[0] = 0;
+    pl[1] = X9_JOIN_WIDX;
+    pl[8] = 0x25; pl[10] = 8;
+    pl[12] = 0;
+    int n = x9_wd_unicmd(d, 0x03, 0x07, pl, sizeof pl, 0x01, ev, sizeof ev, 1000);
+    x9_starec_live = false;
+    IOLog("X9 WIFI LEAVE: STAREC remove widx %u -> %s\n", X9_JOIN_WIDX, n > 0 ? "answered" : "NO CMD_RESULT");
 }
 
 /* rev252cm2: tear down an association (Android aisFsmDisconnect: deauth to the AP, STAREC back to state 1, BSSINFO
@@ -2369,8 +2400,8 @@ x9_radio_leave(x9_wdma *d, const uint8_t mac[6], bool send_deauth, const char *w
             b->bssid[3], b->bssid[4], b->bssid[5], ok ? "queued" : "FAILED");
         IOSleep(20);
     }
-    x9_radio_starec(d, b, 0, 0);
-    x9_radio_bssinfo(d, mac, b, false);
+    x9_radio_bssinfo(d, mac, b, 2);                            /* ConnState 1, BSSID + AP widx kept */
+    x9_radio_starec_remove(d);                                 /* Android cnmStaFreeAllStaByNetwork */
     IOLog("X9 WIFI LEAVE: '%.*s' torn down (%s)\n", b->ssid_len, (const char *)b->ssid, why);
 }
 
