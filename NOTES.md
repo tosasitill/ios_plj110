@@ -1,3 +1,24 @@
+## HANDOFF 2026-11-07 (23): 84.txt = rev252bs device run (plugin X9GeneralMetal258, park+async on)
+
+- Log copy: .local/x9/logs/x9-84.txt (gitignored). 50.6 s, no panic, no device lost. Boot args match rev252bs.
+- FRONTEND commit->submit now populated (fix confirmed). backboardd steady state (2 s windows, 27-48 s):
+  41-82 command buffers, avg 0.7-6.1 ms, max 1.3-33 ms. Highest when the GPU is busiest (27-35 s: avg 3-6 ms, max ~29 ms,
+  same windows as RENDER wait_us 14-16 ms); lowest when idle (42 s: avg 0.67 ms, max 1.25 ms). SpringBoard: few CBs,
+  avg 1-7 ms. Cause of the multi-ms commit->submit (scheduler waits on earlier work vs. vkQueueSubmit cost) NOT known.
+- Display busy windows (28-34 s): 31-41 fps presented, 0 dropped, swap->present avg 24-30 ms, max 44 ms, stutter 0.
+  Lighter windows (40-46 s): 20-28 fps, avg 12-20 ms.
+- GPU per job (async run_avg 8-20 ms): wait 2.4-16 ms (largest under load), pre_cache 1.4-4.0 ms, post_cache 1.0-1.8 ms,
+  start ~0.15 ms; FIFO queue_avg 16-20 us; max job 16-39 ms. pre_cache rose 1.4 -> 3.8 ms after 35 s at similar job counts.
+- MESA "WSI pitch not properly aligned" x123 (also x190 in 83.txt; pre-existing, not investigated).
+- Wi-Fi join RUC-Web a4:be:2b:b1:df:a1 2432 MHz at 39.27 s: CH grant status=0 ch=0 (39.560, after eid 0x76/0x89/0x27),
+  STAREC answered (39.569), auth queued on TX15 (DMA consumed). WAIT subtype 11 timed out 1500 ms: rx4 packets 0,
+  rx7 frames 1, rx7 events 0. Scans 7-10 just before got 8-11 beacons/scan on rx4, so after the grant NOTHING arrives on rx4,
+  not even beacons. Guess (unproven): the radio is not receiving on the BSS channel after the grant (grant reports ch=0),
+  or a BSS activate / BSS info update UniCmd that gen4m sends before STAREC is missing. No scan after the join in this log.
+- Crashes: syncdefaultsd x6, assetsd x2, driverkitd, WirelessRadioMan (as before).
+- Next: Wi-Fi - compare our join command sequence with android-join-1 (BSS_ACTIVATE / BSS_INFO / channel fields) before
+  STAREC; GPU - find where commit->submit waits (split commit->scheduler pick vs. vkQueueSubmit duration).
+
 ## HANDOFF 2026-11-07 (22): rev252bs BUILT = plugin 258, commit->submit timing audited and fixed
 
 - Audit of the rev252bq/br frontend timing (runtime patch 0026) against the Mac runtime source found:
