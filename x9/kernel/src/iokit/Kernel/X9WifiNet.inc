@@ -2012,7 +2012,9 @@ x9_radio_join_granted(x9_wdma *d, const uint8_t mac[6], const x9wifi::bss_info *
     memcpy(fr + 4, ap, 6);                                    /* DA */
     memcpy(fr + 10, mac, 6);                                  /* SA */
     memcpy(fr + 16, ap, 6);                                   /* BSSID */
-    /* u2SeqCtrl at 22 = 0 (HW fills); body at 24: algo(0), seq(1), status(0) */
+    /* u2SeqCtrl at 22 = 0 (HW fills); body at 24: algo(0), seq(1), status(0). rev252cl: actually write the
+     * transaction sequence number 1 (it was left 0; 95.txt: first ACKed Auth answered status 14, out-of-sequence). */
+    fr[26] = 1;
     unsigned fl = 24 + 6;
     int n = -1;
     for (unsigned attempt = 1; attempt <= 3 && n < 30; attempt++) {   /* rev252bu: 3 tries -> 3 TX_DONE results */
