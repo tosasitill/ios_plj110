@@ -1,3 +1,20 @@
+## HANDOFF 2026-11-07 (27): 86.txt = rev252bv run (plugin 259); Auth never ACKed; GPU scope measured; rev252bw BUILT
+
+- Log copy .local/x9/logs/x9-86.txt. 46 s, no panic.
+- GPU measurement (backboardd, 2 s windows 27-44 s): per CB 1-7 IOSurfaces (avg 1-2 after 31 s), per_cb_kib_avg
+  13.6-14.2 MB (one full-screen surface ~13.8 MB + small ones), window union 2-10 surfaces / 27-42 MB,
+  heap_cbs=0 and buf_refs=0 in every window (list looks complete: no heaps, no surface-backed buffers).
+  Same windows kernel: import_pre_avg 63 MB (pre_cache 3.5-3.9 ms), import_post_avg 31 MB (post 1.6-1.8 ms);
+  kernel jobs/2 s (35-84) ~= backboardd CBs (39-77). So ~4.5x more pre bytes and ~2.2x more post bytes than referenced.
+  Estimate (proportional, unproven): scoped maintenance -> pre ~0.8 ms, post ~0.8 ms, saving ~3.5-4 ms/job.
+- Wi-Fi: grant ok (ch 5), STAREC answered, 3 Auth attempts: every TX_DONE status=3 MPDU_ERROR (no ACK), tx_count=15,
+  rate 0x004b (OFDM 6M), txpwr 20, delay 87-156 ms. So the frame is attempted 15 times and the AP never ACKs (or our
+  receiver never sees the ACK). DEVINFO own-MAC layout checked against gen4m: matches. rx4 still 0 during waits.
+- rev252bw (kernel only, plugin 259 unchanged): scan line also counts probe responses (fc 0x50) and their first DA;
+  join line logs our own MAC. Probe responses with DA = our MAC => radio TX works on air and the Auth problem is
+  specific; none => TX path not on air (calibration/FEM/channel) suspect.
+  boot_sha256 eee78494bd1d0681fe7577358cf4728a382612f23c15fc02786a07c6a3daa402. No staging (259 already on device).
+
 ## HANDOFF 2026-11-07 (26): rev252bv BUILT = plugin 259 (IOSurface reference measurement) + rev252bu kernel; commit 95d26ee
 
 - GPU cache maintenance is the biggest CPU cost per job (84/85, backboardd busy windows): pre_cache 3.5-4.0 ms on ~63 MB,
