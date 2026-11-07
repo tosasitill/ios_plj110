@@ -33,7 +33,12 @@ struct x9_dev {
  bool async;
  uint64_t async_completed;   /* highest id seen complete, atomic */
 };
-struct x9_bo {struct pan_kmod_bo base;uint32_t memory_type,native_flags;void *imported_host;};
+/* cpu/cpu_maps (rev252ch): IOKit's IOMemoryDescriptor::createMappingInTask reuses a compatible mapping of
+ * the same memory in the same task (no kIOMapUnique), so a second IOConnectMapMemory64 of a BO returns the
+ * same address while the user client's mapping set holds it once: the first unmap removes it and the second
+ * fails kIOReturnBadArgument (0xe00002c2), which poisoned the device (67.txt, 93.txt at 96.4 s). Count the
+ * CPU maps per BO and unmap in the kernel only at the last. Guarded by the device lock. */
+struct x9_bo {struct pan_kmod_bo base;uint32_t memory_type,native_flags;void *imported_host;void *cpu;uint32_t cpu_maps;};
 static struct x9_dev *device(struct pan_kmod_dev *dev){return container_of(dev,struct x9_dev,base);}
 /* Every device poisoning logs once with its source line (63.txt: the device
  * was marked failed between two logged calls with no trace). */
@@ -72,6 +77,7 @@ static struct pan_kmod_bo *allocate(struct pan_kmod_dev *dev,struct pan_kmod_vm 
  }
  uint64_t bytes=(size+16383)&~16383ULL;
  struct x9_bo *b=pan_kmod_dev_alloc(dev,sizeof(*b));if(!b)return NULL;
+ b->cpu=NULL;b->cpu_maps=0;
  uint32_t permissions=X9RenderGPURead|((flags&PAN_KMOD_BO_FLAG_EXECUTABLE)?X9RenderGPUExecute:X9RenderGPUWrite);
  struct X9RenderAllocation request={X9_RENDER_ABI,permissions,bytes,0};struct X9RenderBuffer reply={0};
  simple_mtx_lock(&d->lock);
@@ -111,8 +117,10 @@ static void *map_cpu(struct pan_kmod_bo *bo,int prot,int flags,void *hint) {
   return b->imported_host;
  }
  simple_mtx_lock(&d->lock);uint64_t bytes=0;
+ if(b->cpu&&!d->failed&&b->cpu_maps<UINT32_MAX){b->cpu_maps++;void *again=b->cpu;simple_mtx_unlock(&d->lock);return again;}
  void *ptr=d->failed?NULL:x9_render_map_buffer(d->connection,b->memory_type,&bytes);
  if(ptr&&bytes!=bo->size){x9_render_unmap_buffer(d->connection,b->memory_type,ptr);ptr=NULL;X9_FAIL(d);errno=EPROTO;}
+ if(ptr){b->cpu=ptr;b->cpu_maps=1;}
  simple_mtx_unlock(&d->lock);return ptr?ptr:MAP_FAILED;
 }
 /* Offset/size are BO-relative, not virtual addresses. Round outward only
@@ -413,8 +421,13 @@ int x9_pan_kmod_unmap_cpu(struct pan_kmod_bo *bo,void *address) {
  if(!bo||bo->dev->ops!=&ops||!address)return error(EINVAL);
  struct x9_dev *d=device(bo->dev);struct x9_bo *b=container_of(bo,struct x9_bo,base);
  simple_mtx_lock(&d->lock);
- int ret=b->imported_host?(address==b->imported_host?0:error(EINVAL)):
-  x9_render_unmap_buffer(d->connection,b->memory_type,address);
+ int ret;
+ if(b->imported_host)ret=address==b->imported_host?0:error(EINVAL);
+ else if(address==b->cpu&&b->cpu_maps>1){b->cpu_maps--;ret=0;}
+ else {
+  ret=x9_render_unmap_buffer(d->connection,b->memory_type,address);
+  if(address==b->cpu){b->cpu=NULL;b->cpu_maps=0;}
+ }
  if(ret)X9_FAIL(d);
  simple_mtx_unlock(&d->lock);return ret;
 }
@@ -456,6 +469,7 @@ struct pan_kmod_bo *x9_pan_kmod_import_host(struct pan_kmod_dev *dev,struct pan_
  if(!dev||dev->ops!=&ops||!vm||vm->dev!=dev||!host||((uintptr_t)host&16383)||!bytes||(bytes&16383)||
     bytes>X9_RENDER_BUFFER_LIMIT||bytes>UINTPTR_MAX-(uintptr_t)host){errno=EINVAL;return NULL;}
  struct x9_dev *d=device(dev);struct x9_bo *bo=pan_kmod_dev_alloc(dev,sizeof(*bo));if(!bo)return NULL;
+ bo->cpu=NULL;bo->cpu_maps=0;
  struct X9RenderAllocation req={X9_RENDER_ABI,X9RenderGPURead|X9RenderGPUWrite,bytes,(uint64_t)(uintptr_t)host};
  struct X9RenderBuffer reply={0};simple_mtx_lock(&d->lock);
  int ret;
