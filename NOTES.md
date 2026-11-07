@@ -10,8 +10,9 @@
   `X9 FRONTEND commit->submit: window_ms=<real> command_buffers= avg_us= max_us=` (per process; atomic CAS window).
   Other GPU timing lines (X9 METRICS frames/latency/join, X9 RENDER timing, X9 RENDER ASYNC window) checked in
   83.txt and look correct; unchanged.
-- Mac runtime tree: old 0026 reverse-applied, new 0026 applied by the build. Mac working files synced by scp (still at
-  eac9383 + local copies; local main is not pushed).
+- Mac runtime tree: old 0026 reverse-applied, new 0026 applied by the build. Pushed origin main (f1f8766); Mac repo
+  fast-forwarded eac9383 -> f1f8766 (scp copies were identical to HEAD; backup /tmp/ios_sync_backup_20261107/files.tar on
+  the Mac). Mac keeps its local edit of x9/kernel/generated/x9_render_external_manifest.h (generated, untouched).
 - BUILT (Mac): `build.py all --revision 258 --name x9-rev252bs` + rev252br boot args (park/async on); the boot step
   failed first on a python without lz4, re-run with /Library/Frameworks/.../3.13/bin/python3 `build.py boot`.
   boot_sha256 575cf2c5dfeefaa540281fa48255dab6035c825274bb0c95ce7012e54c5e2a10. Kernel identical in function to rev252br
