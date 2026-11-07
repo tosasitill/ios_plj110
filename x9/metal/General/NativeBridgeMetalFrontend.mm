@@ -1343,6 +1343,60 @@ static char kUserDictionaryKey;
  dispatch_queue_t queue=_queue.completionQueue;
  if(queue)dispatch_async(queue,run);else run();
 }
+/* X9 metrics (rev252bv, logging only): which IOSurfaces each committed command buffer references, to size a
+   per-job cache-maintenance scope against the kernel's full fallback (X9 RENDER cache-reach import_pre_avg, which
+   cleans every imported BO mapped in the process on every job). Surfaces come from _resourceOwners: textures on an
+   IOSurface and buffers whose Buffer Manager record names a surface. heap_cbs counts command buffers with useHeap
+   (their heap members are not enumerated here, so for those the list may be incomplete). */
+static std::mutex gSurfaceUseLock;
+static struct {
+ uint64_t cbs,cbsWithSurfaces,surfaces,surfacesMax,bytes,bytesMax,textureRefs,bufferRefs,heapCbs;
+ std::unordered_map<uint32_t,uint64_t> unionBytes;
+} gSurfaceUse;
+static void x9SurfaceUseNote(NSSet *owners) {
+ static Class heapClass=objc_getClass("NBHeap");
+ std::unordered_map<uint32_t,uint64_t> mine;
+ uint64_t textureRefs=0,bufferRefs=0;bool heap=false;
+ for(id r in owners) {
+  if([r isKindOfClass:[NBTexture class]]) {
+   IOSurfaceRef s=[(NBTexture *)r surface];
+   if(s){textureRefs++;mine[IOSurfaceGetID(s)]=IOSurfaceGetAllocSize(s);}
+  }else if([r isKindOfClass:[NBBuffer class]]) {
+   const uint64_t id_=bufferSurfaceID([(NBBuffer *)r handle]);
+   if(id_){bufferRefs++;mine[(uint32_t)id_]=[(NBBuffer *)r length];}
+  }else if(heapClass&&[r isKindOfClass:heapClass])heap=true;
+ }
+ uint64_t bytes=0;for(auto &kv:mine)bytes+=kv.second;
+ std::lock_guard<std::mutex> lock(gSurfaceUseLock);
+ auto &u=gSurfaceUse;
+ u.cbs++;if(!mine.empty())u.cbsWithSurfaces++;
+ u.surfaces+=mine.size();u.surfacesMax=std::max<uint64_t>(u.surfacesMax,mine.size());
+ u.bytes+=bytes;u.bytesMax=std::max(u.bytesMax,bytes);
+ u.textureRefs+=textureRefs;u.bufferRefs+=bufferRefs;if(heap)u.heapCbs++;
+ for(auto &kv:mine)u.unionBytes[kv.first]=kv.second;
+}
+static void x9SurfaceUseLog(uint64_t windowMs) {
+ uint64_t liveImports=0,liveBytes=0;
+ {
+  std::lock_guard<std::mutex> lock(gSurfaceImportLock);
+  for(NSValue *key in gSurfaceImports.keyEnumerator.allObjects) {
+   if(![gSurfaceImports objectForKey:key])continue;
+   struct {uint64_t identity,address,bytes;} k;[key getValue:&k];
+   liveImports++;liveBytes+=k.bytes;
+  }
+ }
+ std::lock_guard<std::mutex> lock(gSurfaceUseLock);
+ auto &u=gSurfaceUse;
+ uint64_t unionAll=0;for(auto &kv:u.unionBytes)unionAll+=kv.second;
+ NBLOG(@"X9 FRONTEND surfaces: window_ms=%llu command_buffers=%llu with_surfaces=%llu per_cb_avg=%llu per_cb_max=%llu per_cb_kib_avg=%llu per_cb_kib_max=%llu window_union=%zu window_union_kib=%llu tex_refs=%llu buf_refs=%llu heap_cbs=%llu live_imports=%llu live_import_kib=%llu;referenced IOSurfaces per command buffer vs process imports (cache view)",
+  (unsigned long long)windowMs,(unsigned long long)u.cbs,(unsigned long long)u.cbsWithSurfaces,
+  (unsigned long long)(u.cbs?u.surfaces/u.cbs:0),(unsigned long long)u.surfacesMax,
+  (unsigned long long)(u.cbs?u.bytes/u.cbs/1024:0),(unsigned long long)(u.bytesMax/1024),
+  u.unionBytes.size(),(unsigned long long)(unionAll/1024),(unsigned long long)u.textureRefs,(unsigned long long)u.bufferRefs,
+  (unsigned long long)u.heapCbs,(unsigned long long)liveImports,(unsigned long long)(liveBytes/1024));
+ u.cbs=u.cbsWithSurfaces=u.surfaces=u.surfacesMax=u.bytes=u.bytesMax=u.textureRefs=u.bufferRefs=u.heapCbs=0;
+ u.unionBytes.clear();
+}
 /* X9 metrics: about every 2 s (checked at a successful commit), log how long command buffers took
    from commit to the runtime's vkQueueSubmit return (the kernel enqueue point) for the batch that
    ends each one, group or alone, once per command buffer (runtime patch 0026). The window is the
@@ -1356,6 +1410,7 @@ static void x9SubmitTimingLog(void) {
  if(!last.compare_exchange_strong(prev,now))return;
  uint64_t cbs=0,sum=0,max=0;
  if(!nmb_x9_submit_timing(&cbs,&sum,&max))return;
+ x9SurfaceUseLog((now-prev)/1000);
  NBLOG(@"X9 FRONTEND commit->submit: window_ms=%llu command_buffers=%llu avg_us=%llu max_us=%llu;commit to vkQueueSubmit return of the batch ending each command buffer, per process",
   (unsigned long long)((now-prev)/1000),(unsigned long long)cbs,(unsigned long long)(cbs?sum/cbs/1000:0),(unsigned long long)(max/1000));
 }
@@ -1372,6 +1427,8 @@ static void x9SubmitTimingLog(void) {
    if([r isKindOfClass:[NBBuffer class]])self.bufferRefsHeld|=x9_buffer_gpu_acquire(bufferKey([(NBBuffer *)r handle]));
    else if([r isKindOfClass:[NBTexture class]])self.bufferRefsHeld|=x9_buffer_gpu_acquire(bufferKey([(NBTexture *)r handle]));
   }
+  // Before submission: after it, completion may clear _resourceOwners on another thread.
+  x9SurfaceUseNote(_resourceOwners);
  }
  {
   std::lock_guard<std::mutex> lock(gCommitLock);
