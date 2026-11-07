@@ -1,3 +1,20 @@
+## HANDOFF 2026-11-07 (26): rev252bv BUILT = plugin 259 (IOSurface reference measurement) + rev252bu kernel; commit 95d26ee
+
+- GPU cache maintenance is the biggest CPU cost per job (84/85, backboardd busy windows): pre_cache 3.5-4.0 ms on ~63 MB,
+  post_cache 1.6-1.8 ms on ~31 MB, every job; cache-reach shows import_pre_avg == import_pre_full_avg (no reduction):
+  every imported IOSurface mapped in the process (~140, 60 MiB live) is CIVAC'd per job. ACE-Lite is shelved (64.txt),
+  so maintenance stays; the lever is a narrower per-job scope. Not changed yet.
+- Measurement (frontend, logging only): at commit (before submission) each CB's _resourceOwners are scanned for
+  IOSurface textures and surface-backed buffers. Every ~2 s with the commit->submit line:
+  `X9 FRONTEND surfaces: window_ms command_buffers with_surfaces per_cb_avg per_cb_max per_cb_kib_avg per_cb_kib_max
+  window_union window_union_kib tex_refs buf_refs heap_cbs live_imports live_import_kib` (per process).
+  Compare per_cb_kib_avg with kernel `X9 RENDER cache-reach import_pre_avg` (~63 MB). heap_cbs > 0 = list may be
+  incomplete for those CBs (heap members not enumerated).
+- BUILT (Mac): `build.py all --revision 259 --name x9-rev252bv` + rev252bs boot args (park/async). Kernel includes
+  rev252bu (TX_DONE decode, 3 auth tries). boot_sha256 3d3f36c306d3e064db38cbc2ec89bfa130f3bd8ceb241d2cdf7af70c122aeb35.
+  NEW PLUGIN PACKAGE: `X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/x9-rev252bv` before booting (not run).
+  rev252bu (kernel-only) is superseded by this. Not device-tested.
+
 ## HANDOFF 2026-11-07 (25): 85.txt = rev252bt run; rev252bu BUILT (TX_DONE decode, 3 auth tries); commit 6a39d0c
 
 - Log copy .local/x9/logs/x9-85.txt. 43 s, no panic, park+async on.
