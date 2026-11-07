@@ -1,3 +1,28 @@
+## HANDOFF 2026-11-07 (32): 89.txt = rev252bz (NVRAM accepted, RX changed); external FEMs found; rev252ca BUILT
+
+- 89.txt (rev252bz, copy .local/x9/logs/x9-89.txt): NVRAM 37/37 fragments answered (CMD_RESULT 2e .. 03 01 / 00).
+  After it rx4 frames per scan 4-7 -> 36-49 but beacons 0, and the FIRMWARE's own SCAN_DONE "fw beacons" 0 (was 5-7):
+  RX genuinely changed, not our parser. No join possible (no networks listed).
+- Root-cause candidate (strong, from data): the device has EXTERNAL FEMs. Live DT (Mac .local/x9/work/x9-battery/
+  captured.dts line 23039, copy in .local/x9/wifi-nvram/connfem.dts, gitignored): connfem node, production node `sku`
+  (connfem reads `sku-mtk` only when connfem_is_internal()) = hw-0 "qm42655_qm45655_was": QM42655 (2.4 GHz, pins 3 2 4 14),
+  QM45655 (5 GHz, pins 10 11 12 1), 4 layouts (g-wf0/wf1 qm42655, a-wf0/wf1 qm45655), no spdt, fe-ant-cnt 0x85.
+  The firmware only drives them after PHY_ACTION COM_FEM, which we never sent.
+- Android pre-RAM sequence (android-pull dmesg 14.539-14.590, after the patch): kalSyncTimeToFW (MT6653 = CCIF, skipped),
+  TX CMD 0x22 LEN 72 (QUERY_INFO PMIC), 0x08 LEN 682 (PHY_ACTION COM_FEM, wlanSendPhyActionV2), 0x08 LEN 880
+  (PHY_ACTION CAL, wlanSendPhyAction V1 with CONNFEM: TLVs CAL, NVRAM ePA/eLNA, COM_FEM v1 zero, LAA zero).
+  Verified our encodings reproduce those lengths: ePA/eLNA = NVRAM tags 7,8,9,21,0x81 = 632 B -> CAL 816+64;
+  connfem SKU tag (gen4m _AddConnfemSkuTag, 2 FEMs x 4 layouts) = 606 B -> COM_FEM 618+64.
+- rev252ca (commit 9a17da5): x9_wifi_pre_phy() after the patch, before PHY RAM code: PMIC query, COM_FEM V2, CAL V1
+  FORCE_CAL (0x01; Android may have used USE_BACKUP 0x02 with its EMI cal backup). Event 5 decoded (`X9 WIFI PHYACT:`
+  ... status, emi, temp). Boot-arg x9_wifi_phyact=0 skips. x9_wd_cmd waits 10 s for cid 0x08. RX4: first 2 frames of
+  the first 3 scans dumped (`X9 WIFI RX4:`). Data: x9/tools/wifi_connfem.py (DTS -> tag) used by wifi_nvram.py, output in
+  gitignored generated/x9_wifi_nvram.inc. NVRAM fragments (rev252bz) still sent after RAM start.
+- BUILT (Mac): `build.py all --name x9-rev252ca` (kernel only, plugin 261) + base args + x9_cache_scope=1.
+  boot_sha256 076552cfcf865748ab3f4b29b3aa38f10fa2e16ada08c8c270472491def1c648. Not device-tested.
+- Still NOT done from Android's flow: SET_DOMAIN_INFO (passive scan info + domain V2 active channel list, UNI 0x15),
+  power limit (EMI type) + ANT power setting, cnmPowerControl, set_country_code. Next if TX still dead.
+
 ## HANDOFF 2026-11-07 (31): 88.txt = rev252by by mistake (user flashed the wrong image); rev252bz still untested
 
 - Log copy .local/x9/logs/x9-88.txt. No `X9 WIFI NVRAM` line at all (rev252bz always logs one) -> rev252by kernel;
