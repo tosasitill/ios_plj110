@@ -1,3 +1,21 @@
+--- a/crates/metal2vulkan-runtime/src/command_buffer/group.rs
++++ b/crates/metal2vulkan-runtime/src/command_buffer/group.rs
+@@ -501,6 +501,15 @@
+                 raw.queue_submit(vk_queue, submits, fence.unwrap_or(vk::Fence::null()))
+             });
+         exit_guard::called(Call::QueueSubmit);
++        // X9 metrics: commit -> this vkQueueSubmit returned (kernel enqueue), once per command
++        // buffer, at the submission of the batch that ends it; failed submissions are not counted.
++        if submitted.is_ok() {
++            for member in self.members.iter() {
++                if member.submission.ends_buffer() {
++                    crate::x9_timing::record(member.submission.buffer().commit_ns.swap(0, std::sync::atomic::Ordering::AcqRel));
++                }
++            }
++        }
+         self.events.clear();
+         let several = count + usize::from(!alone) > 1;
+         let outcome = match submitted {
 --- a/crates/metal2vulkan-runtime/src/command_buffer/mod.rs
 +++ b/crates/metal2vulkan-runtime/src/command_buffer/mod.rs
 @@ -273,6 +273,8 @@
@@ -25,28 +43,28 @@
          // Left to wait for the last render encoder's end, where its call left it to the device's
          // lowering thread and the thread has not lowered it, or for the commits left so.
          if failure.is_none() && self.queue_commit(call)? {
---- a/crates/metal2vulkan-runtime/src/command_buffer/group.rs
-+++ b/crates/metal2vulkan-runtime/src/command_buffer/group.rs
-@@ -501,6 +501,10 @@
-                 raw.queue_submit(vk_queue, submits, fence.unwrap_or(vk::Fence::null()))
-             });
-         exit_guard::called(Call::QueueSubmit);
-+        // X9 metrics: commit -> this vkQueueSubmit returned (kernel enqueue), per command buffer.
-+        for member in self.members.iter() {
-+            crate::x9_timing::record(member.submission.buffer().commit_ns.load(std::sync::atomic::Ordering::Acquire));
-+        }
-         self.events.clear();
-         let several = count + usize::from(!alone) > 1;
-         let outcome = match submitted {
 --- a/crates/metal2vulkan-runtime/src/command_buffer/submit.rs
 +++ b/crates/metal2vulkan-runtime/src/command_buffer/submit.rs
-@@ -972,6 +972,10 @@
+@@ -280,6 +280,11 @@
+         &self.batch.buffer
+     }
+ 
++    /// X9 metrics: whether this batch ends its command buffer (`Submitted::last`).
++    pub(super) fn ends_buffer(&self) -> bool {
++        self.batch.last
++    }
++
+     /// Each event's semaphore it signals, with the signal's index.
+     pub(super) fn event_signals(&self) -> impl Iterator<Item = (vk::Semaphore, u64)> + '_ {
+         (self.batch.signals.iter()).map(|(event, index)| (event.semaphore(), *index))
+@@ -972,6 +977,11 @@
                  scheduler
                      .group
                      .submit(device, &mut scheduler.waited[queue], Some(after));
-+            if submitted.is_ok() {
-+                // X9 metrics: this command buffer's own vkQueueSubmit returned (alone, or after group members).
-+                crate::x9_timing::record(self.commit_ns.load(std::sync::atomic::Ordering::Acquire));
++            if submitted.is_ok() && last {
++                // X9 metrics: the vkQueueSubmit of the batch that ends this command buffer returned
++                // (alone, or after group members); once per command buffer.
++                crate::x9_timing::record(self.commit_ns.swap(0, std::sync::atomic::Ordering::AcqRel));
 +            }
              if let Err(error) = submitted {
                  if let Some(fence) = fence {
@@ -61,11 +79,12 @@
  mod address;
  mod address_map;
  mod address_pool;
---- /dev/null
+--- a/crates/metal2vulkan-runtime/src/x9_timing.rs
 +++ b/crates/metal2vulkan-runtime/src/x9_timing.rs
-@@ -0,0 +1,36 @@
-+//! X9 metrics (logging only): commit -> kernel-visible submit, measured where a group's
-+//! `vkQueueSubmit` returns. Not used by any submission decision.
+@@ -0,0 +1,37 @@
++//! X9 metrics (logging only): commit -> kernel-visible submit, measured where the
++//! `vkQueueSubmit` of the batch that ends a command buffer returns (group or alone; once per
++//! command buffer). Not used by any submission decision.
 +use std::sync::OnceLock;
 +use std::sync::atomic::{AtomicU64, Ordering};
 +use std::time::Instant;

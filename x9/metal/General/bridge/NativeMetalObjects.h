@@ -195,7 +195,7 @@ bool nmb_command_buffer_on_completed(NmbCommandBuffer *, void (*handler)(void *c
  * The caller keeps context alive until completion (or a refused commit). */
 bool nmb_command_buffer_on_scheduled(NmbCommandBuffer *, void (*handler)(void *context), void *context);
 bool nmb_command_buffer_commit(NmbCommandBuffer *);
-/* X9 metrics (rev252bp): command buffers and sum/max of commit -> vkQueueSubmit return, since the last call. */
+/* X9 metrics: command buffers and sum/max of commit -> vkQueueSubmit return of the batch ending each, since the last call. */
 bool nmb_x9_submit_timing(uint64_t *command_buffers, uint64_t *sum_ns, uint64_t *max_ns);
 /* Wait for scheduling and scheduled handlers only; false on a refused wait. */
 bool nmb_command_buffer_wait_scheduled(NmbCommandBuffer *);

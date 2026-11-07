@@ -1,3 +1,24 @@
+## HANDOFF 2026-11-07 (22): rev252bs BUILT = plugin 258, commit->submit timing audited and fixed
+
+- Audit of the rev252bq/br frontend timing (runtime patch 0026) against the Mac runtime source found:
+  (1) a command buffer split into several batches was recorded once per batch (group.rs members loop and
+  submit.rs both fired per batch), so counts were inflated and avg pulled down by early batches;
+  (2) group.rs recorded even when vkQueueSubmit failed; (3) frontend label still said "group submissions only",
+  window was printed as a fixed 2 s, and the static window timestamp was raced by several committing threads.
+- Fix: record only for the batch that ends the command buffer (`Submitted::last`; new `Submission::ends_buffer()`),
+  only on Ok, with `commit_ns.swap(0)` so each buffer counts at most once. Frontend line is now
+  `X9 FRONTEND commit->submit: window_ms=<real> command_buffers= avg_us= max_us=` (per process; atomic CAS window).
+  Other GPU timing lines (X9 METRICS frames/latency/join, X9 RENDER timing, X9 RENDER ASYNC window) checked in
+  83.txt and look correct; unchanged.
+- Mac runtime tree: old 0026 reverse-applied, new 0026 applied by the build. Mac working files synced by scp (still at
+  eac9383 + local copies; local main is not pushed).
+- BUILT (Mac): `build.py all --revision 258 --name x9-rev252bs` + rev252br boot args (park/async on); the boot step
+  failed first on a python without lz4, re-run with /Library/Frameworks/.../3.13/bin/python3 `build.py boot`.
+  boot_sha256 575cf2c5dfeefaa540281fa48255dab6035c825274bb0c95ce7012e54c5e2a10. Kernel identical in function to rev252br
+  (Wi-Fi diagnostics included). Note rev252br's build.log shows a first failed attempt (E0433 x9_timing) then a good rerun.
+  NEW PLUGIN PACKAGE: `X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/x9-rev252bs` (not run; device write).
+  Not device-tested. rev252br is superseded (never staged).
+
 ## HANDOFF 2026-11-06 (21): rev252br BUILT = plugin 257 (submit-site timing) + Wi-Fi diagnostics; commit 1df4281
 
 - BUILT (Mac, via ssh): `build.py all --revision 257 --name x9-rev252br` (args as bq + park/async). Output x9/out/x9-rev252br.

@@ -1343,18 +1343,21 @@ static char kUserDictionaryKey;
  dispatch_queue_t queue=_queue.completionQueue;
  if(queue)dispatch_async(queue,run);else run();
 }
-/* X9 metrics (rev252bp): every 2 s, log how long command buffers took from commit to the runtime's
-   vkQueueSubmit return (the kernel enqueue point). Group submissions only. */
+/* X9 metrics: about every 2 s (checked at a successful commit), log how long command buffers took
+   from commit to the runtime's vkQueueSubmit return (the kernel enqueue point) for the batch that
+   ends each one, group or alone, once per command buffer (runtime patch 0026). The window is the
+   real time since the last line; commits run on several threads, so one thread claims it. */
 static void x9SubmitTimingLog(void) {
- static uint64_t last=0;
+ static std::atomic<uint64_t> last{0};
  const uint64_t now=nowUs();
- if(last==0){last=now;return;}
- if(now-last<2000000)return;
- last=now;
+ uint64_t prev=last.load(std::memory_order_relaxed);
+ if(prev==0){last.compare_exchange_strong(prev,now);return;}
+ if(now-prev<2000000)return;
+ if(!last.compare_exchange_strong(prev,now))return;
  uint64_t cbs=0,sum=0,max=0;
  if(!nmb_x9_submit_timing(&cbs,&sum,&max))return;
- NBLOG(@"X9 FRONTEND commit->submit: window_s=2 command_buffers=%llu avg_us=%llu max_us=%llu;commit to vkQueueSubmit return, group submissions only",
-  (unsigned long long)cbs,(unsigned long long)(cbs?sum/cbs/1000:0),(unsigned long long)(max/1000));
+ NBLOG(@"X9 FRONTEND commit->submit: window_ms=%llu command_buffers=%llu avg_us=%llu max_us=%llu;commit to vkQueueSubmit return of the batch ending each command buffer, per process",
+  (unsigned long long)((now-prev)/1000),(unsigned long long)cbs,(unsigned long long)(cbs?sum/cbs/1000:0),(unsigned long long)(max/1000));
 }
 - (void)commit {
  if(self.committed){NBLOG(@"native-metal: commit twice");return;}
