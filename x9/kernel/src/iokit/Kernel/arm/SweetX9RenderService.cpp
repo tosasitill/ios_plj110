@@ -572,8 +572,7 @@ public:
   IOUserClient::free();
  }
  IOReturn clientMemoryForType(UInt32 type,IOOptionBits *options,IOMemoryDescriptor **memory) APPLE_KEXT_OVERRIDE {
-  if(!context||!options||!memory||!type||
-     current_task()!=context->owner||clientHasPrivilege(current_task(),kIOClientPrivilegeForeground)!=kIOReturnSuccess)return kIOReturnBadArgument;
+  if(!context||!options||!memory||!type||current_task()!=context->owner)return kIOReturnBadArgument;   /* rev252ck: no per-call foreground check */
   IOLockLock(context->lock);auto *r=resource(type);
   if(!r||context->disabled||context->exposed){IOLockUnlock(context->lock);return kIOReturnBadArgument;}
   if(!r->cpu_exposed) {
@@ -603,8 +602,15 @@ public:
   IOLockUnlock(context->lock);return kIOReturnSuccess;
  }
  IOReturn externalMethod(uint32_t selector,IOExternalMethodArguments *args,IOExternalMethodDispatch *,OSObject *,void *) APPLE_KEXT_OVERRIDE {
-  if(!context||!args||!context->lock||current_task()!=context->owner||
-     clientHasPrivilege(current_task(),kIOClientPrivilegeForeground)!=kIOReturnSuccess)return kIOReturnNotPrivileged;
+  /* rev252ck: foreground privilege is checked when the client opens (initWithTask), not on every call: a process
+   * that left the foreground had its next call (94.txt: op 5 Unmap) refused kIOReturnNotPrivileged, which poisons
+   * PanVK's device. The caller must still be the owning task. Logged (first 8) to name such processes. */
+  if(!context||!args||!context->lock||current_task()!=context->owner)return kIOReturnNotPrivileged;
+  if(clientHasPrivilege(current_task(),kIOClientPrivilegeForeground)!=kIOReturnSuccess) {
+   static unsigned logged;
+   if(logged<8){logged++;char caller[32]={0};proc_selfname(caller,sizeof(caller));
+    IOLog("X9 RENDER CLIENT: %s pid=%d op=%u without foreground privilege;allowed (owner task)\n",caller,proc_selfpid(),selector);}
+  }
   if(args->structureInputSize>sizeof(X9RenderSubmission)||args->structureOutputSize>sizeof(X9RenderCaps)||
      args->scalarInputCount||args->scalarOutputCount||args->structureInputDescriptor||args->structureOutputDescriptor||
      (args->structureInputSize&&!args->structureInput)||(args->structureOutputSize&&!args->structureOutput))return kIOReturnBadArgument;

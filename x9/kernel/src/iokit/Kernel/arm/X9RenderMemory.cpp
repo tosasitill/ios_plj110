@@ -54,6 +54,37 @@ IOReturn x9_render_memory_unmap(X9RenderContext *c,const X9RenderVMEntry *entry)
  if(c->exposed)return kIOReturnBusy;
  return x9_render_vm_unmap(c->page_table,entry);
 }
+extern "C" vm_map_address_t phystokv(uint64_t pa);
+/* rev252ck: maintain [begin, end) of a prepared (wired) descriptor through the kernel's physical aperture, one
+ * physical segment at a time, 64 KiB per preemption-off run. Used when a host import's kernel alias cannot be made
+ * (94.txt: createMappingInTask failed in a submission -> kIOReturnNoMemory -> PanVK device lost). The pages are
+ * ordinary RAM wired by prepare(); data-cache maintenance by VA on the aperture alias reaches the same lines. */
+static IOReturn x9_render_cache_physical(X9RenderResource *r,uint64_t begin,uint64_t end,uint32_t operation) {
+ uint64_t ctr;__asm__ volatile("mrs %0, ctr_el0":"=r"(ctr));
+ const uint64_t line=4ULL<<((ctr>>16)&15);
+ for(uint64_t at=begin;at<end;) {
+  IOByteCount seg=0;uint64_t pa=r->memory->getPhysicalSegment(at,&seg,kIOMemoryMapperNone);
+  if(!pa||!seg)return kIOReturnBadArgument;
+  uint64_t bytes=end-at;if(bytes>seg)bytes=seg;
+  for(uint64_t done=0;done<bytes;) {
+   uint64_t chunk=bytes-done;if(chunk>(64u<<10))chunk=64u<<10;
+   uint64_t va=phystokv(pa+done);if(!va)return kIOReturnBadArgument;
+   uint64_t a=va&~(line-1),e=va+chunk;
+   disable_preemption();
+   __asm__ volatile("dsb sy":::"memory");
+   for(;a<e;a+=line) {
+    if(operation==(X9RenderClean|X9RenderInvalidate))__asm__ volatile("dc civac, %0"::"r"(a):"memory");
+    else if(operation==X9RenderClean)__asm__ volatile("dc cvac, %0"::"r"(a):"memory");
+    else __asm__ volatile("dc ivac, %0"::"r"(a):"memory");
+   }
+   __asm__ volatile("dsb sy":::"memory");
+   enable_preemption();
+   done+=chunk;
+  }
+  at+=bytes;
+ }
+ return kIOReturnSuccess;
+}
 IOReturn x9_render_memory_cache_spans(X9RenderContext *c,X9RenderResource *r,
  const X9RenderCacheSpan *spans,unsigned count,uint32_t operation,uint64_t *completed_bytes) {
  if(!c||!r||!r->memory||!r->prepared||!completed_bytes||count>X9_RENDER_KERNEL_MAPPINGS||
@@ -89,7 +120,16 @@ IOReturn x9_render_memory_cache_spans(X9RenderContext *c,X9RenderResource *r,
   mapping=r->cache_mapping;
   if(!mapping) {
    mapping=r->memory->createMappingInTask(kernel_task,0,options);
-   if(!mapping)return kIOReturnNoMemory;
+   if(!mapping) {
+    static unsigned logged;
+    if(logged<16){logged++;IOLog("X9 RENDER CACHE: kernel alias of import handle=%u bytes=%llu failed;physical-aperture maintenance\n",
+     r->handle,(unsigned long long)r->bytes);}
+    for(unsigned i=0;i<count;i++) {
+     IOReturn kr=x9_render_cache_physical(r,spans[i].begin,spans[i].end,operation);
+     if(kr!=kIOReturnSuccess)return kr;
+    }
+    *completed_bytes=total;return kIOReturnSuccess;
+   }
    r->cache_mapping=mapping;
   }
   address=mapping->getAddress();length=mapping->getLength();

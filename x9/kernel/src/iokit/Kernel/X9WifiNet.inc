@@ -1962,6 +1962,27 @@ x9_radio_starec(x9_wdma *d, const x9wifi::bss_info *b, uint8_t staState, uint16_
 
 static bool x9_radio_join_granted(x9_wdma *d, const uint8_t mac[6], const x9wifi::bss_info *b);
 
+/* rev252ck: DBDC on before a join, as Android is when it joins (android-join-2: cnmUpdateDbdcSetting Enable, 5 GHz
+ * grants then name band 1 and the Auth TXD carries TGID 1). gen4m nicUniCmdSetMbmc: UNI_CMD_ID_MBMC 0x28 {4 pad,
+ * tag SETTING 0 len 8, ucMbmcEn 1, ucAAModeEn 0, ucRfBand 0 (unused), ucReason 0}. Ours granted 5 GHz on band 0
+ * (91-94.txt) with every Auth unACKed. Once per radio bring-up. Boot-arg x9_wifi_dbdc=0 skips. */
+static void
+x9_radio_dbdc(x9_wdma *d)
+{
+    static bool done;
+    if (done || sweet_x9_arg("x9_wifi_dbdc", 1) != 1) return;
+    done = true;
+    static uint8_t ev[256];
+    uint8_t pl[4 + 8] = {};
+    pl[4] = 0; pl[6] = 8;                                     /* tag 0, len 8 */
+    pl[8] = 1;                                                /* ucMbmcEn */
+    int n = x9_wd_unicmd(d, 0x28, 0x07, pl, sizeof pl, 0x01, ev, sizeof ev, 1000);
+    IOLog("X9 WIFI DBDC: enable -> %s (result %02x %02x %02x %02x %02x %02x %02x %02x)\n", n > 0 ? "answered" : "NO CMD_RESULT",
+          n > 0 ? ev[44] : 0, n > 0 ? ev[45] : 0, n > 0 ? ev[46] : 0, n > 0 ? ev[47] : 0, n > 0 ? ev[48] : 0,
+          n > 0 ? ev[49] : 0, n > 0 ? ev[50] : 0, n > 0 ? ev[51] : 0);
+    IOSleep(20);                                              /* Android waits for the HW switch-done event */
+}
+
 static bool
 x9_radio_join(x9_wdma *d, const uint8_t mac[6], const x9wifi::bss_info *b)
 {
@@ -1969,6 +1990,7 @@ x9_radio_join(x9_wdma *d, const uint8_t mac[6], const x9wifi::bss_info *b)
     IOLog("X9 WIFI JOIN: '%.*s' %02x:%02x:%02x:%02x:%02x:%02x %u MHz, own (SA/TA, DEVINFO) %02x:%02x:%02x:%02x:%02x:%02x\n",
         b->ssid_len, (const char *)b->ssid, ap[0], ap[1], ap[2], ap[3], ap[4], ap[5], b->freq_mhz,
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    x9_radio_dbdc(d);
     x9_radio_bssinfo(d, mac, b, false);                       /* Android: nicUpdateBssEx before the CH request */
     if (!x9_radio_ch_privilege(d, b, 3)) { x9_radio_ch_abort(d, 3); return false; }
     bool ok = x9_radio_join_granted(d, mac, b);
@@ -2088,11 +2110,25 @@ x9_wifi_radio_loop(x9_wdma *d)
         scanReq = false;
         joinReq = false;
         x9wifi::bss_info jt;
-        if (dojoin) memcpy(&jt, &joinTarget, sizeof jt);
+        static x9wifi::bss_info alt;                          /* rev252ck: same SSID on the other band, open */
+        bool have_alt = false;
+        if (dojoin) {
+            memcpy(&jt, &joinTarget, sizeof jt);
+            for (unsigned k = 0; k < rcount; k++) {
+                const x9wifi::bss_info &c = rbss[k];
+                if (c.ssid_len == jt.ssid_len && !memcmp(c.ssid, jt.ssid, jt.ssid_len) && !(c.caps & 0x0010) &&
+                    ((c.freq_mhz >= 4900) != (jt.freq_mhz >= 4900))) { memcpy(&alt, &c, sizeof alt); have_alt = true; break; }
+            }
+        }
         IOLockUnlock(lock);
         if (dojoin) {
             bool ok = x9_radio_join(d, mac, &jt);
             if (!ok) IOLog("X9 WIFI JOIN: failed\n");
+            if (!ok && have_alt) {                            /* one try on the other band: splits band vs frame */
+                IOLog("X9 WIFI JOIN: retry on the other band %u MHz\n", alt.freq_mhz);
+                ok = x9_radio_join(d, mac, &alt);
+                if (ok) memcpy(&jt, &alt, sizeof jt); else IOLog("X9 WIFI JOIN: other band failed too\n");
+            }
             IOLockLock(lock);
             joinResult = ok ? x9wifi::RES_OK : x9wifi::RES_FAILED;
             status.state = ok ? x9wifi::STA_UP : x9wifi::STA_IDLE;
