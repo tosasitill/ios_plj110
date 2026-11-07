@@ -1,3 +1,15 @@
+## HANDOFF 2026-11-07 (43): 95.txt = rev252ck: **AUTH ACKed** (DBDC on); AP answered status 14 = our seq 0; rev252cl BUILT
+
+- Log copy .local/x9/logs/x9-95.txt (52 s, no panic, DeviceLost 0).
+- `X9 WIFI DBDC: enable -> answered` (UNI 0x28). 5 GHz grant now dbdc=1. Auth on RUC-Web 5180: TX_DONE status 0
+  SUCCESS tx_count 1 delay 9 ms; AP answered `auth resp seq=1 status=14`. Retry on 2432 MHz (grant dbdc 0): three Auths
+  all SUCCESS (tx_count 6/1/4), answer again seq 1 status 14. So DBDC was the missing piece for 5 GHz TX acceptance
+  (2.4 GHz band-0 TX also ACKed now). Status 14 = transaction sequence out of expected sequence: our Auth body never set
+  the transaction sequence number (left 0; the comment claimed 1), and the AP replied with 0+1.
+- rev252cl: fr[26] = 1 in the Auth body. Kernel only (plugin 267). boot_sha256
+  86358dcc1af3785da08db9ada1b0edbede799aee322fe316f197c8aedf3f4827. Expect Auth resp seq 2 status 0, then Assoc.
+- Still no data path after association (see handoff 41).
+
 ## HANDOFF 2026-11-07 (42): 94.txt = rev252cj: GPU poisoned by foreground check + alias NoMemory; Auth still unACKed; rev252ck BUILT
 
 - Log copy .local/x9/logs/x9-94.txt (166 s, plugin 267). DeviceLost x26591.
