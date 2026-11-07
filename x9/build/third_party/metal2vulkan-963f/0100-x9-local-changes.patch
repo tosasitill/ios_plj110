@@ -1894,7 +1894,7 @@ index 1851084a..3fc17af8 100644
  mod shadow_standing;
  mod shadow_stencil;
 diff --git a/crates/metal2vulkan-runtime/src/memory.rs b/crates/metal2vulkan-runtime/src/memory.rs
-index 64940570..35dbee3c 100644
+index 64940570..d122dda0 100644
 --- a/crates/metal2vulkan-runtime/src/memory.rs
 +++ b/crates/metal2vulkan-runtime/src/memory.rs
 @@ -48,6 +48,14 @@
@@ -2039,7 +2039,18 @@ index 64940570..35dbee3c 100644
              // The descriptor the driver takes, which it owns once the import succeeds and may
              // close even when it fails (the doc above): never `fd`, and never closed here.
              let handed = match fd.try_clone() {
-@@ -2564,7 +2609,9 @@ fn place(
+@@ -2344,7 +2389,9 @@ pub(super) unsafe fn import_host(
+     let (types, device_address) = {
+         let memory = lock(memory);
+         (
+-            candidates(&memory.types, allowed, class, memory.unified),
++            // X9: with negotiated submission cache ownership, noncoherent host-visible types qualify
++            // (PanVK on Mali has no coherent host-importable type; 90.txt: every IOSurface refused).
++            memory.candidates(allowed, class),
+             memory.device_address,
+         )
+     };
+@@ -2564,12 +2611,15 @@ fn place(
      fit: Fit,
  ) -> Result<Placement, Error> {
      let size = requirements.size.max(1);
@@ -2050,6 +2061,13 @@ index 64940570..35dbee3c 100644
      let (candidates, overflow, maker) = {
          let memory = lock(memory);
          let bits = requirements.memory_type_bits;
+         (
+-            candidates(&memory.types, bits, class, memory.unified),
++            // X9: ownership-aware, as Memory::candidates (noncoherent host-visible types qualify).
++            memory.candidates(bits, class),
+             overflow_candidates(&memory.types, bits, class),
+             memory.maker(),
+         )
 diff --git a/crates/metal2vulkan-runtime/src/owned_kernel.rs b/crates/metal2vulkan-runtime/src/owned_kernel.rs
 index 844ad438..e41c728f 100644
 --- a/crates/metal2vulkan-runtime/src/owned_kernel.rs
