@@ -1,3 +1,24 @@
+## HANDOFF 2026-11-07 (36): 90.txt = rev252cc: **Wi-Fi TX WORKS** (probe responses to our MAC); no desktop (runtime merge bug, fixed in rev252cd)
+
+- Log copy .local/x9/logs/x9-90.txt (116 s, no panic, plugin 263 = metal2vulkan 963f0e64).
+- Wi-Fi (kernel = rev252cb features): PMIC query answered (pmic_id 18e8); COM_FEM (618 B) answered status 0 in 4 ms;
+  CAL FORCE (816 B) answered event 0x81 status 0 in 1299 ms, EMI result f9610000/442844; PHY + RAM start ok; DOMAIN
+  passive + domain answered; NVRAM 37/37. Scans 1-3: fw beacons 34/22/48, our parser beacons 28/23/40, **probe
+  responses 19/11/26 with DA = our MAC 02:58:39:57:46:01**, networks 17/14/26 (was 4-7). So the radio now transmits on
+  air: the missing piece was PHY_ACTION COM_FEM (external FEM QM42655/QM45655) + CAL. 19 scans; no join attempted (no
+  desktop, so no Settings). RX4 dump: 291-byte packets, rxd0 38010123.
+- No desktop: backboardd "surface import refused: no-copy buffer: Unsupported(HostMemory, NotRepresentable)" x2618 and
+  "buffer refused: OutOfMemory(Device)" x285; SpringBoard crashed x15 (sig 11). Cause: my merge (handoff 35) used
+  upstream's free memory::candidates() in upstream's new module-level import_host and in place(), which do not pass
+  the negotiated submission-cache-ownership flag, so only HOST_COHERENT types qualified; PanVK on Mali has none for host
+  imports. Our Memory::candidates (ownership-aware, x9) was bypassed there. Both now call memory.candidates(...);
+  other x9 submission_cache_atom uses are all present (same per-file counts as pan205).
+- rev252cd (commit after c804e84): 963f tree 2a844520, 0100 patch regenerated, stamp updated; `build.py all --revision
+  264 --name x9-rev252cd` + base args + x9_cache_scope=1. boot_sha256
+  1f0c8b49247a073604e3a5bc960f6eca1ba08ef05256a41e515e2419d2bf72f3. NEW PLUGIN (264):
+  `X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/x9-rev252cd`. Fallback with a known-good runtime: rev252cb
+  (plugin 262, same kernel features incl. the Wi-Fi fix).
+
 ## HANDOFF 2026-11-07 (35): metal2vulkan upgraded to 963f0e64 (UniXNU 642c4fef series); rev252cc BUILT (plugin 263); commit b16f334
 
 - User chose the full upgrade. New runtime tree: .local/x9/work/x9-metal-render/metal2vulkan-963f-source (git; branches:
