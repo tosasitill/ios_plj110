@@ -2302,8 +2302,7 @@ x9_wifi_radio_loop(x9_wdma *d)
                             uint32_t w[12] = {};
                             memcpy(w, dp, (unsigned)dn < sizeof w ? (unsigned)dn : sizeof w);
                             IOLog("X9 WIFI DATA: rx4 other len %d: %08x %08x %08x %08x %08x %08x %08x %08x | %08x %08x "
-                                "%08x %08x
-", dn, w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8], w[9], w[10], w[11]);
+                                "%08x %08x\n", dn, w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8], w[9], w[10], w[11]);
                         }
                     }
                     x9_scan_take(dp, (unsigned)dn);                /* beacons keep the scan list fresh */
