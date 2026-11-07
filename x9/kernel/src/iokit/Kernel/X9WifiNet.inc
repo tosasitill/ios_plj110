@@ -95,6 +95,13 @@ volatile bool joinReq;
 bss_info joinTarget;
 bss_info rbss[32];
 unsigned rcount;
+/* rev252cm data path: if_output -> sta_tx queues Ethernet frames here, the radio thread (sole owner of the WFDMA
+ * rings) converts and sends them. One slot stays empty: head == tail means empty. */
+enum : unsigned { TXQ_N = 64, TXQ_MAX = 1600 };
+uint8_t txq[TXQ_N][TXQ_MAX];
+uint16_t txq_len[TXQ_N];
+unsigned txq_head, txq_tail;
+uint32_t txq_drop;
 
 unsigned ie_put(uint8_t *p, unsigned at, uint8_t id, const uint8_t *v, uint8_t n) {
   p[at] = id; p[at + 1] = n; memcpy(p + at + 2, v, n); return at + 2u + n;
@@ -226,9 +233,21 @@ int sta_connect(const uint8_t *ssid, size_t len, const uint8_t *bssid, const cha
   return 0;
 }
 void sta_disconnect(void) { IOLockLock(fake::lock); if (fake::status.state > STA_IDLE) fake::status.state = STA_IDLE; IOLockUnlock(fake::lock); }
-int sta_tx(const uint8_t *, size_t len) {
-  IOLockLock(fake::lock); fake::stats.tx_frames++; fake::stats.tx_bytes += (uint32_t)len; IOLockUnlock(fake::lock);
-  return 0;   /* the fake radio swallows frames */
+int sta_tx(const uint8_t *frame, size_t len) {
+  using namespace fake;
+  int r = 0;
+  IOLockLock(lock);
+  if (realUp) {                 /* real radio: queue for the radio thread while associated, else drop */
+    unsigned next = (txq_head + 1) % TXQ_N;
+    if (status.state != STA_UP || len < 14 || len > TXQ_MAX || next == txq_tail) { txq_drop++; r = -1; }
+    else {
+      memcpy(txq[txq_head], frame, len); txq_len[txq_head] = (uint16_t)len; txq_head = next;
+      IOLockWakeup(lock, (event_t)&scanReq, false);
+    }
+  }
+  if (!r) { stats.tx_frames++; stats.tx_bytes += (uint32_t)len; }
+  IOLockUnlock(lock);
+  return r;     /* the fake radio swallows frames */
 }
 void sta_status_get(sta_status *st) { IOLockLock(fake::lock); *st = fake::status; IOLockUnlock(fake::lock); }
 
@@ -2075,6 +2094,139 @@ x9_radio_join_granted(x9_wdma *d, const uint8_t mac[6], const x9wifi::bss_info *
     return true;
 }
 
+/* ---------------- rev252cm: data path (open network, no keys) ----------------
+ * TX: Ethernet II -> 802.11 data (ToDS, A1 BSSID, A2 us, A3 DA) + LLC/SNAP, same TXD and command ring (TX15,
+ * MCU_Q0|ALTX, fixed OFDM 6M, DIS_MAT) as the Auth/Assoc frames that the AP ACKed; type DATA, no TX status.
+ * RX: connac3 RXD (nic_rxd_v3.c): 32 B fixed, then groups 4,1,2,3 (16 B each) and 5 (96 B) per GROUP_VLD
+ * (DW1 b16-20), + HEADER_OFFSET (DW2 b13-15, x2). DW2 b7 HEADER_TRAN: payload already Ethernet II. Otherwise an
+ * 802.11 data frame (FromDS) whose LLC/SNAP is stripped here. Packets of another RXD type are searched for a
+ * FromDS data header from our BSSID (as the scan path searches for beacons). */
+static unsigned x9_dtx, x9_dtx_fail, x9_drx, x9_drx_bad, x9_drx_prot, x9_drx_other, x9_drx_dumps, x9_drx_odumps;
+static uint8_t x9_drx_eth[2048];
+
+static bool
+x9_tx_data(x9_wdma *d, const uint8_t mac[6], const uint8_t bssid[6], const uint8_t *eth, unsigned len)
+{
+    if (len < 14) return false;
+    uint8_t *b = d->va + X9_B_FW;
+    uint8_t *f = b + 32;
+    unsigned pl = len - 14;
+    static const uint8_t snap[6] = { 0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00 };
+    f[0] = 0x08; f[1] = 0x01; f[2] = 0; f[3] = 0;              /* data, ToDS, duration by HW */
+    memcpy(f + 4, bssid, 6);
+    memcpy(f + 10, mac, 6);
+    memcpy(f + 16, eth, 6);                                    /* A3 = DA */
+    f[22] = 0; f[23] = 0;                                      /* sequence: HW SN */
+    memcpy(f + 24, snap, 6);
+    memcpy(f + 30, eth + 12, 2);
+    memcpy(f + 32, eth + 14, pl);
+    unsigned flen = 32 + pl;
+    unsigned total = 32 + flen;
+    uint32_t dw[8] = {};
+    dw[0] = (total & 0xffff) | ((((16u + 24u + 6u) >> 1) & 0x7f) << 16) | (2u << 23) | (16u << 25);
+    dw[1] = (X9_JOIN_WIDX & 0xfff) | ((uint32_t)(x9_join_tgid & 3) << 12) | (2u << 14) | ((24u >> 1) << 16)
+        | (0u << 21) | (X9_JOIN_OMAC << 25) | (1u << 31);      /* TID 0, fixed rate */
+    dw[2] = 0u | (2u << 4) | (0x7fu << 16);                    /* subtype 0, type DATA, life-time max */
+    dw[3] = (15u << 11);
+    dw[5] = 0;                                                 /* no TX status for data */
+    dw[6] = (1u << 10) | (1u << 2) | (1u << 3) | (1u << 16) | (8u << 22);
+    memcpy(b, dw, 32);
+    bool ok = x9_wd_tx(d, 15, X9_B_FW, total);
+    if (ok) x9_dtx++; else x9_dtx_fail++;
+    if (x9_dtx + x9_dtx_fail <= 6) {
+        IOLog("X9 WIFI DATA: TX %s len %u to %02x:%02x:%02x:%02x:%02x:%02x type %02x%02x\n", ok ? "ok" : "FAILED", len,
+            eth[0], eth[1], eth[2], eth[3], eth[4], eth[5], eth[12], eth[13]);
+    }
+    return ok;
+}
+
+/* 802.11 data frame at h (len bytes) -> Ethernet in x9_drx_eth; returns its length, 0 if nothing to deliver. */
+static unsigned
+x9_rx_80211(const uint8_t *h, unsigned len, const uint8_t mac[6])
+{
+    if (len < 24) { x9_drx_bad++; return 0; }
+    uint8_t fc0 = h[0], fc1 = h[1];
+    if ((fc0 & 0x0c) != 0x08) { x9_drx_other++; return 0; }
+    if (fc0 & 0x40) return 0;                                  /* null / QoS null */
+    if ((fc1 & 3) != 2) { x9_drx_other++; return 0; }          /* not FromDS */
+    if (fc1 & 0x40) { x9_drx_prot++; return 0; }               /* protected: no keys */
+    const uint8_t *da = h + 4, *sa = h + 16;
+    if (memcmp(da, mac, 6) && !(da[0] & 1)) { x9_drx_other++; return 0; }
+    if (!memcmp(sa, mac, 6)) return 0;                         /* our own broadcast echoed by the AP */
+    unsigned hl = 24;
+    if (fc0 & 0x80) {
+        if (len >= 26 && (h[24] & 0x80)) { x9_drx_bad++; return 0; }   /* A-MSDU: not negotiated */
+        hl += 2;
+        if (fc1 & 0x80) hl += 4;                               /* +HTC */
+    }
+    if (len < hl + 8) { x9_drx_bad++; return 0; }
+    const uint8_t *l = h + hl;
+    if (l[0] != 0xaa || l[1] != 0xaa || l[2] != 0x03 || l[3] || l[4] || (l[5] && l[5] != 0xf8)) { x9_drx_bad++; return 0; }
+    unsigned pl = len - hl - 8;
+    if (14 + pl > sizeof x9_drx_eth) { x9_drx_bad++; return 0; }
+    memcpy(x9_drx_eth, da, 6);
+    memcpy(x9_drx_eth + 6, sa, 6);
+    memcpy(x9_drx_eth + 12, l + 6, 2);
+    memcpy(x9_drx_eth + 14, l + 8, pl);
+    return 14 + pl;
+}
+
+/* One RX packet (any ring) while associated. Returns Ethernet length in x9_drx_eth, 0 if none. */
+static unsigned
+x9_rx_data(const uint8_t *p, unsigned n, const uint8_t mac[6], const uint8_t bssid[6])
+{
+    if (n < 32) return 0;
+    uint32_t dw0, dw1, dw2;
+    memcpy(&dw0, p, 4); memcpy(&dw1, p + 4, 4); memcpy(&dw2, p + 8, 4);
+    unsigned cnt = dw0 & 0xffff;
+    if (cnt < 32 || cnt > n) cnt = n;
+    unsigned r = 0;
+    bool structured = (dw0 >> 27) == 2;                        /* RX_PKT_TYPE_RX_DATA */
+    if (structured) {
+        unsigned g = (dw1 >> 16) & 0x1f, off = 32;
+        off += (g & 8 ? 16 : 0) + (g & 1 ? 16 : 0) + (g & 2 ? 16 : 0) + (g & 4 ? 16 : 0) + (g & 16 ? 96 : 0);
+        off += ((dw2 >> 13) & 7) << 1;
+        if (off + 14 > cnt) x9_drx_bad++;
+        else if (dw2 & (1u << 7)) {                            /* HEADER_TRAN: Ethernet II already */
+            unsigned el = cnt - off;
+            if (el > sizeof x9_drx_eth) x9_drx_bad++;
+            else if (memcmp(p + off, mac, 6) && !(p[off] & 1)) x9_drx_other++;
+            else { memcpy(x9_drx_eth, p + off, el); r = el; }
+        } else r = x9_rx_80211(p + off, cnt - off, mac);
+    } else {
+        for (unsigned o = 16; o + 32 <= n && o <= 196; o += 2) {
+            if ((p[o] & 0x0c) != 0x08 || (p[o + 1] & 3) != 2) continue;
+            if (memcmp(p + o + 10, bssid, 6)) continue;        /* A2 = BSSID */
+            if (memcmp(p + o + 4, mac, 6) && !(p[o + 4] & 1)) continue;
+            r = x9_rx_80211(p + o, n - o, mac);
+            structured = true;
+            break;
+        }
+    }
+    if (structured && x9_drx_dumps < 6) {
+        x9_drx_dumps++;
+        uint32_t w[16] = {};
+        memcpy(w, p, n < sizeof w ? n : sizeof w);
+        IOLog("X9 WIFI DATA: RX len %u -> eth %u: %08x %08x %08x %08x %08x %08x %08x %08x | %08x %08x %08x %08x "
+              "%08x %08x %08x %08x\n", n, r, w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8], w[9], w[10], w[11],
+              w[12], w[13], w[14], w[15]);
+    }
+    if (r) x9_drx++;
+    return r;
+}
+
+/* Deauthentication (12) / disassociation (10) from our AP: reason code, or -1. */
+static int
+x9_rx_kick(const uint8_t *p, unsigned n, const uint8_t mac[6], const uint8_t bssid[6])
+{
+    static const uint8_t st[2] = { 0x0c, 0x0a };
+    for (unsigned k = 0; k < 2; k++) {
+        unsigned o = x9_find_mgmt(p, n, st[k], mac);
+        if (o && o + 26 <= n && !memcmp(p + o + 10, bssid, 6)) return p[o + 24] | p[o + 25] << 8;
+    }
+    return -1;
+}
+
 static void
 x9_wifi_radio_loop(x9_wdma *d)
 {
@@ -2100,13 +2252,98 @@ x9_wifi_radio_loop(x9_wdma *d)
         mac[4], mac[5]);
     uint8_t seq = 0;
     unsigned idle_logs = 0;
+    static uint8_t txf[x9wifi::fake::TXQ_MAX];
+    uint64_t dstat_t = mach_absolute_time();
+    unsigned dstat_last = 0;
     for (;;) {
         IOLockLock(lock);
-        if (!scanReq) {
-            uint64_t dl;
-            clock_interval_to_deadline(200, kMillisecondScale, &dl);
+        bool conn = status.state == x9wifi::STA_UP;
+        if (!scanReq && !joinReq && txq_head == txq_tail) {
+            uint64_t dl;                                       /* associated: poll the RX rings every 4 ms */
+            clock_interval_to_deadline(conn ? 4 : 200, kMillisecondScale, &dl);
             IOLockSleepDeadline(lock, (event_t)&scanReq, dl, THREAD_UNINT);
         }
+        conn = status.state == x9wifi::STA_UP;
+        uint8_t cbssid[6];
+        memcpy(cbssid, status.bssid, 6);
+        const x9wifi::sta_events *dev = events;
+        IOLockUnlock(lock);
+        if (conn) {
+            /* rev252cm: send what if_output queued, then deliver what the rings hold */
+            for (unsigned k = 0; k < 32; k++) {
+                IOLockLock(lock);
+                unsigned fl = 0;
+                if (txq_head != txq_tail) {
+                    fl = txq_len[txq_tail];
+                    memcpy(txf, txq[txq_tail], fl);
+                    txq_tail = (txq_tail + 1) % x9wifi::fake::TXQ_N;
+                }
+                IOLockUnlock(lock);
+                if (!fl) break;
+                x9_tx_data(d, mac, cbssid, txf, fl);
+            }
+            int kick = -1;
+            const uint8_t *dp;
+            int dn;
+            for (unsigned k = 0; k < 64 && (dn = x9_r4_try(d, &dp)) >= 0; k++) {
+                unsigned el = x9_rx_data(dp, (unsigned)dn, mac, cbssid);
+                if (el) { if (dev && dev->rx) dev->rx(x9_drx_eth, el); }
+                else {
+                    int kr = x9_rx_kick(dp, (unsigned)dn, mac, cbssid);
+                    if (kr >= 0) kick = kr;
+                    else if (x9_drx_odumps < 8) {
+                        uint32_t rd0;
+                        memcpy(&rd0, dp, 4);
+                        bool bcn = false;
+                        for (unsigned o = 16; o <= 160 && o + 2 <= (unsigned)dn; o += 2)
+                            if ((dp[o] == 0x80 || dp[o] == 0x50) && !dp[o + 1]) { bcn = true; break; }
+                        if (!bcn) {
+                            x9_drx_odumps++;
+                            uint32_t w[12] = {};
+                            memcpy(w, dp, (unsigned)dn < sizeof w ? (unsigned)dn : sizeof w);
+                            IOLog("X9 WIFI DATA: rx4 other len %d: %08x %08x %08x %08x %08x %08x %08x %08x | %08x %08x "
+                                "%08x %08x
+", dn, w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8], w[9], w[10], w[11]);
+                        }
+                    }
+                    x9_scan_take(dp, (unsigned)dn);                /* beacons keep the scan list fresh */
+                }
+                x9_r4_done(d);
+            }
+            while ((dn = x9_wd_rx7_try(d, ev, sizeof ev)) >= 0) {
+                uint32_t rxd0;
+                memcpy(&rxd0, ev, 4);
+                unsigned cap = (unsigned)(dn < (int)sizeof ev ? dn : (int)sizeof ev);
+                if ((rxd0 >> 27) != 7 || (ev[36] != 0x2d && ev[36] != 0x01)) {
+                    unsigned el = x9_rx_data(ev, cap, mac, cbssid);
+                    if (el) { if (dev && dev->rx) dev->rx(x9_drx_eth, el); continue; }
+                    int kr = x9_rx_kick(ev, cap, mac, cbssid);
+                    if (kr >= 0) { kick = kr; continue; }
+                }
+                if (idle_logs < 40) {
+                    idle_logs++;
+                    IOLog("X9 WIFI RADIO: connected event eid=0x%02x opt=%02x len=%d\n", ev[36], ev[38], dn);
+                }
+            }
+            if (x9_ms_since(dstat_t) >= 5000) {
+                unsigned tot = x9_dtx + x9_dtx_fail + x9_drx + x9_drx_bad + x9_drx_prot + x9_drx_other;
+                if (tot != dstat_last) {
+                    IOLog("X9 WIFI DATA: tx %u (fail %u, queue drops %u) rx %u (bad %u, protected %u, other %u)\n",
+                        x9_dtx, x9_dtx_fail, txq_drop, x9_drx, x9_drx_bad, x9_drx_prot, x9_drx_other);
+                    dstat_last = tot;
+                }
+                dstat_t = mach_absolute_time();
+            }
+            if (kick >= 0) {
+                IOLog("X9 WIFI DATA: AP sent deauth/disassoc, reason %d; link down\n", kick);
+                IOLockLock(lock);
+                status.state = x9wifi::STA_IDLE;
+                txq_head = txq_tail = 0;
+                IOLockUnlock(lock);
+                if (dev && dev->link_lost) dev->link_lost(kick);
+            }
+        }
+        IOLockLock(lock);
         bool go = scanReq;
         bool dojoin = joinReq;
         scanReq = false;
@@ -2143,11 +2380,11 @@ x9_wifi_radio_loop(x9_wdma *d)
             if (e && e->connect_done) e->connect_done(ok ? x9wifi::RES_OK : x9wifi::RES_FAILED);
             continue;
         }
-        /* keep the rings moving between scans */
+        /* keep the rings moving between scans (associated: the data path above drains them) */
         const uint8_t *pk;
         int pn;
-        while ((pn = x9_r4_try(d, &pk)) >= 0) { x9_scan_take(pk, (unsigned)pn); x9_r4_done(d); }
-        while ((pn = x9_wd_rx7_try(d, ev, sizeof ev)) >= 0) {
+        while (!conn && (pn = x9_r4_try(d, &pk)) >= 0) { x9_scan_take(pk, (unsigned)pn); x9_r4_done(d); }
+        while (!conn && (pn = x9_wd_rx7_try(d, ev, sizeof ev)) >= 0) {
             uint32_t rxd0;
             memcpy(&rxd0, ev, 4);
             if ((rxd0 >> 27) != 7) continue;         /* stray frame between scans */
