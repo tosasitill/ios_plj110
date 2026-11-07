@@ -1220,7 +1220,7 @@ x9_wd_cmd(x9_wdma *d, uint8_t cid, const void *payload, unsigned plen, uint8_t e
     /* gen4m wlanSendInitSetQueryCmd waits CFG_DEFAULT_RX_RESPONSE_TIMEOUT (3-10 s).
      * 67.txt: PATCH_FINISH got no event within our former 1 s while the ROM
      * applies the patch; give it 10 s, every other init command 3 s. */
-    unsigned wait_ms = (cid == 0x07 || cid == 0x02) ? 10000 : 3000;
+    unsigned wait_ms = (cid == 0x07 || cid == 0x02 || cid == 0x08) ? 10000 : 3000;
     uint64_t tw = mach_absolute_time();
     int n = x9_wd_rx(d, wait_ms, ev, sizeof ev);
     if (n < 0) {
@@ -1436,10 +1436,20 @@ static unsigned x9_scan_frames, x9_scan_bcn;
  * any at all proves our radio transmits on air (86.txt: Auth got MPDU_ERROR, no ACK, 15 tries). */
 static unsigned x9_scan_presp;
 static uint8_t x9_scan_presp_da[6];
+static unsigned x9_scan_dumps;
 static void
 x9_scan_take(const uint8_t *p, unsigned n)
 {
     x9_scan_frames++;
+    if (x9_scan_frames <= 2 && x9_scan_dumps < 6) {         /* rev252ca: what rx4 carries (89: 40 frames, 0 beacons) */
+        x9_scan_dumps++;
+        uint32_t w[24] = {};
+        memcpy(w, p, n < sizeof w ? n : sizeof w);
+        IOLog("X9 WIFI RX4: len %u: %08x %08x %08x %08x %08x %08x %08x %08x | %08x %08x %08x %08x %08x %08x %08x %08x\n"
+              "X9 WIFI RX4:   +64 %08x %08x %08x %08x %08x %08x %08x %08x\n", n, w[0], w[1], w[2], w[3], w[4], w[5],
+              w[6], w[7], w[8], w[9], w[10], w[11], w[12], w[13], w[14], w[15], w[16], w[17], w[18], w[19], w[20],
+              w[21], w[22], w[23]);
+    }
     for (unsigned o = 16; o + 24 + 12 + 2 <= n && o <= 160; o += 2) {
         uint8_t fc = p[o];
         if ((fc != 0x80 && fc != 0x50) || p[o + 1] != 0) continue;
@@ -2116,6 +2126,78 @@ x9_wifi_radio_loop(x9_wdma *d)
  * Per region: INIT_CMD_ID_DOWNLOAD_CONFIG 0x01 {addr, len, wlanGetDataMode} + raw data on TX16. wlanGetDataMode:
  * feature b0 ENCRY -> RESET b3 | key b1-2 | ENCRYPTION b0 (+ b6 if feature b4); IMG_DL_IDX_PHY_FW adds
  * WORKING_PDA_OPTION b4; ACK b31. *entry = addr of the region with DOWNLOAD_CONFIG_VALID_RAM_ENTRY (feature b5). */
+/* rev252ca: gen4m fw_dl.c steps between the ROM patch and the PHY/N9 RAM code that we skipped:
+ * kalSyncTimeToFW (MT6653: CCIF to the modem, not a Wi-Fi command; skipped), asicConnac3xQueryPmicInfo
+ * (INIT_CMD_ID_QUERY_INFO 0x22 {BIT(PMIC), 4 rsv} -> event 9) and wlanPhyAction (pre_cal.c): COM_FEM via
+ * wlanSendPhyActionV2 (connfem SKU available) then CAL via wlanSendPhyAction (V1, CONNFEM build: 4 tags).
+ * Android (android-pull dmesg 14.539-14.590): TX CMD 0x22 LEN 72, 0x08 LEN 682, 0x08 LEN 880; ours are the
+ * same lengths (64-byte header + 8 / 618 / 816). INIT_CMD_ID_PHY_ACTION 0x08 -> INIT_EVENT_ID_PHY_ACTION 5:
+ * {HAL_PHY_ACTION_TLV_HEADER magic 0x556789AA, tags, version 1, len}{TLV tag, len}{ucEvent, ucStatus, ...}.
+ * The device has external FEMs (QM42655 2.4 GHz, QM45655 5 GHz, live DT connfem `sku`), which the firmware
+ * only drives after COM_FEM: 86-89 had TX never heard (no ACK, no probe responses). CAL uses
+ * FORCE_CAL_REQ 0x01 (no EMI backup here; Android may have used its backup). Boot-arg x9_wifi_phyact=0 skips. */
+static void
+x9_wifi_pre_phy(x9_wdma *d)
+{
+    if (sweet_x9_arg("x9_wifi_phyact", 1) != 1) { IOLog("X9 WIFI PHYACT: skipped (x9_wifi_phyact=0)\n"); return; }
+    uint8_t res[32];
+    {
+        uint8_t q[8] = { 1, 0, 0, 0, 0, 0, 0, 0 };              /* u4QueryBitmap = BIT(PMIC_INFO) */
+        memset(res, 0, sizeof res);
+        bool c = x9_wd_cmd(d, 0x22, q, sizeof q, 9, res, sizeof res);
+        IOLog("X9 WIFI PHYACT: QUERY_INFO PMIC %s: elements %u len %u tag %u pmic_id %02x%02x%02x%02x len %u\n",
+              c ? "answered" : "FAILED", res[0] | res[1] << 8, res[2] | res[3] << 8, res[4] | res[5] << 8,
+              res[11], res[10], res[9], res[8], res[12] | res[13] << 8);
+    }
+#if X9_WIFI_NVRAM_PRESENT && X9_WIFI_CONNFEM_PRESENT
+    static uint8_t b[8 + 4 + 4 + 4 + X9_WIFI_EPAELNA_LEN + 4 + 116 + 4 + 40 + X9_WIFI_CONNFEM_LEN];
+    const uint32_t magic = 0x556789AAu;
+    auto rsp = [&](const char *what, bool c) {
+        /* res: TLV header (8) + TLV (4) + INIT_EVENT_PHY_ACTION_RSP {ucEvent, ucStatus, rsv2, emi addr, len, temp} */
+        uint32_t m, ea, el, tp;
+        memcpy(&m, res, 4); memcpy(&ea, res + 16, 4); memcpy(&el, res + 20, 4); memcpy(&tp, res + 24, 4);
+        IOLog("X9 WIFI PHYACT: %s %s: magic %08x tags %u ver %u tlv tag %u len %u event %02x status %u emi %08x/%u temp %u\n",
+              what, c ? "answered" : "FAILED", m, res[4], res[5], res[8] | res[9] << 8, res[10] | res[11] << 8,
+              res[12], res[13], ea, el, tp);
+    };
+    {   /* COM_FEM, V2: header + one TLV {COM_FEM 2, PALIGN_4(len)} + connfem SKU tag */
+        unsigned n = 0;
+        memset(b, 0, sizeof b);
+        memcpy(b, &magic, 4); b[4] = 1; b[5] = 1;
+        uint16_t bl = 4 + X9_WIFI_CONNFEM_LEN; memcpy(b + 6, &bl, 2);
+        n = 8;
+        uint16_t tg = 2, tl = (X9_WIFI_CONNFEM_LEN + 3) & ~3u;
+        memcpy(b + n, &tg, 2); memcpy(b + n + 2, &tl, 2); n += 4;
+        memcpy(b + n, x9_wifi_connfem_sku, X9_WIFI_CONNFEM_LEN); n += X9_WIFI_CONNFEM_LEN;
+        memset(res, 0, sizeof res);
+        uint64_t t0 = mach_absolute_time();
+        bool c = x9_wd_cmd(d, 0x08, b, n, 5, res, sizeof res);
+        IOLog("X9 WIFI PHYACT: COM_FEM payload %u B (Android 618) in %llu ms\n", n, x9_ms_since(t0));
+        rsp("COM_FEM", c);
+    }
+    {   /* CAL, V1 with CONNFEM: TLVs CAL{cmd FORCE_CAL 1, save 1, skip 0}, NVRAM{ePA/eLNA}, COM_FEM{116 B zero:
+         * connfem v1 API "Not support"}, LAA{40 B zero} */
+        unsigned n = 0;
+        memset(b, 0, sizeof b);
+        memcpy(b, &magic, 4); b[4] = 4; b[5] = 1;
+        uint16_t bl = 4 + 4 + 4 + X9_WIFI_EPAELNA_LEN + 4 + 116 + 4 + 40; memcpy(b + 6, &bl, 2);
+        n = 8;
+        auto tlv = [&](uint16_t tag, uint16_t len) { memcpy(b + n, &tag, 2); memcpy(b + n + 2, &len, 2); n += 4; };
+        tlv(1, 4); b[n] = 0x01; b[n + 1] = 1; b[n + 2] = 0; n += 4;
+        tlv(0, X9_WIFI_EPAELNA_LEN); memcpy(b + n, x9_wifi_epaelna, X9_WIFI_EPAELNA_LEN); n += X9_WIFI_EPAELNA_LEN;
+        tlv(2, 116); n += 116;
+        tlv(3, 40); n += 40;
+        memset(res, 0, sizeof res);
+        uint64_t t0 = mach_absolute_time();
+        bool c = x9_wd_cmd(d, 0x08, b, n, 5, res, sizeof res);
+        IOLog("X9 WIFI PHYACT: CAL payload %u B (Android 816) in %llu ms\n", n, x9_ms_since(t0));
+        rsp("CAL FORCE", c);
+    }
+#else
+    IOLog("X9 WIFI PHYACT: no NVRAM/connfem embedded; COM_FEM/CAL not sent\n");
+#endif
+}
+
 static bool
 x9_wifi_dl_image(x9_wdma *d, const char *tag, const uint8_t *rf, uint32_t rlen, bool phy, uint32_t *entry)
 {
@@ -2453,6 +2535,7 @@ x9_wifi_stage6(volatile uint32_t *bar)
          * START_CRC_CHECK b3 (| START_OVERRIDE b0 if an entry region exists), address 0. Boot-arg x9_wifi_phyfw=1. */
         bool rok = true;
         uint32_t entry = 0;
+        x9_wifi_pre_phy(&d);                             /* rev252ca: PMIC query + PHY_ACTION COM_FEM/CAL */
         if (sweet_x9_arg("x9_wifi_phyfw", 1) == 1) {
             uint32_t pentry = 0;
             rok = x9_wifi_dl_image(&d, "PHY", x9_wifi_phy, x9_wifi_phy_len, true, &pentry);
