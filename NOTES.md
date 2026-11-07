@@ -1,3 +1,23 @@
+## HANDOFF 2026-11-07 (48): 100.txt = my rev252cm5 boot **WITHOUT the Wi-Fi boot args** (toggle grey, en0 never created); fixed image x9/out/x9-rev252cm5
+
+- 实测 100.txt (my first cm5 packaging): zero `X9 WIFI` lines at all - configd opened IONetworkStack at 7.857 s but
+  `x9_wifi_maybe_start()` (X9WifiNet.inc) returned because it requires `x9_wifi_fake=1` OR `x9_wifi_real=1`, and the
+  boot.json base args carry neither. No en0 -> iOS shows a greyed Wi-Fi switch. Everything else (GPU, touch, UFS,
+  SpringBoard) booted normally.
+- Cause: `build.py boot` uses x9/build/boot.json as the base, and the Wi-Fi experiment args were always passed as
+  `--boot-arg` extras per boot; I packaged with no extras. My first image (x9/out/x9-79d6e0d-dirty/boot.img, sha256
+  e88f7adc9c843ac16bd2e8e647d71c3d4ad89de7828626ea951ee0d4ddbd17af) also OVERWROTE the cm4 image that lived at that
+  path (same out-dir naming rule) - do not boot it.
+- Fix: the full cm4 command line is recoverable from x9/out/x9-rev252cm4/shim/embedded-payload.bin (`strings | grep
+  '^x9_metal_render'`; the x9_wifi_xo0..6 calibration words are deliberately not in git). Rebuilt as
+  **x9/out/x9-rev252cm5/boot.img, sha256 aa2629548123b72a7a1eb3de6edc690eec3b1aad88db41e141222d908585dbc5** =
+  cm5 kernel (x9/out/x9-79d6e0d-dirty/kernel.development.sweet, sha256
+  dba60756c92182226c88d0d2e395012a257c2238d3e64b62b91fe891ead6f902) + the full cm4 arg set
+  (x9_wifi_power=6 x9_wifi_real=1 + GPU clocks/park/submit_async + 7 XO words + x9_cache_scope=1; the exact tokens are
+  in the embedded payload of both cm4 and cm5, verify with strings before booting).
+- Rule going forward: a Wi-Fi test boot must pass the full --boot-arg set (recover per above) - boot.json alone boots
+  a no-radio system. Verified cm5's embedded payload carries x9_wifi_real=1 and the XO words.
+
 ## HANDOFF 2026-11-07 (47): 99.txt = rev252cm4: link up, DHCP + DNS + hijacked HTTP all work, **but the captive probe never runs**; keyboard stuck on letters = assetsd crash loop suspected; rev252cm5 (probe/exception instrumentation) BUILT
 
 - Log /Users/tosasitill/99.txt (19540 lines, 284 s). Timeline: joined RUC-Web 66.1 s, DHCP -> 10.46.12.100;
