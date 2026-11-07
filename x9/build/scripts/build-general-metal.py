@@ -9,7 +9,7 @@ _local = _Path(__file__).resolve().parents[1] / 'local.json'
 _cfg = _json.loads(_local.read_text()) if _local.is_file() else {}
 DEV = _os.environ.get('DEVELOPER_DIR') or _cfg.get('developer_dir') or '/Applications/Xcode.app/Contents/Developer'
 BREW = _os.environ.get('X9_HOMEBREW') or _cfg.get('homebrew') or '/opt/homebrew'
-ap=argparse.ArgumentParser();ap.add_argument("--revision",type=int,default=170);ap.add_argument("--runtime-source",type=Path,default=Path(__file__).resolve().parents[3] / ".local/x9/work/x9-metal-render/metal2vulkan-pan205-source");opts=ap.parse_args()
+ap=argparse.ArgumentParser();ap.add_argument("--revision",type=int,default=170);ap.add_argument("--runtime-source",type=Path,default=Path(__file__).resolve().parents[3] / ".local/x9/work/x9-metal-render/metal2vulkan-963f-source");opts=ap.parse_args()
 if not 170<=opts.revision<=9999:ap.error("revision must be170..9999")
 w=Path(__file__).resolve().parents[3] / '.local/x9/work/x9-metal-render'
 root=w.parents[1]
@@ -17,10 +17,27 @@ source=opts.runtime_source.resolve() if opts.runtime_source else w/'metal2vulkan
 # Keep portable runtime fixes in the maintained tree, including for a restored
 # local source snapshot. Accept an already-applied patch; refuse other drift.
 patch_dir=Path(__file__).resolve().parents[1]/'third_party/metal2vulkan-pan205'
-subprocess.run([sys.executable,'-I',str(Path(__file__).with_name('apply-source-patches.py')),
- '--source',str(source),str(patch_dir/'0023-quality-of-service-on-ios.patch'),
- str(patch_dir/'0025-host-pointer-linear-textures.patch'),
- str(patch_dir/'0026-x9-commit-submit-timing.patch')],check=True)
+series963=Path(__file__).resolve().parents[1]/'third_party/metal2vulkan-963f'
+if (source/'crates/metal2vulkan-runtime/src/stage_trace.rs').exists():
+ # metal2vulkan 963f0e64 (x9/build/scripts/prepare-metal2vulkan-963f.py): AdrenoMetal ce63701's 25 patches in
+ # their order, then ours. Later patches change earlier ones' context, so a per-patch reverse check cannot tell
+ # an applied series; a stamp of the applied patches' SHA-256 does. A stamp mismatch with a non-pristine tree stops.
+ import hashlib
+ patches=[series963/'adrenometal-ce63701'/(n+'.patch') for n in (series963/'adrenometal-ce63701'/'SERIES').read_text().split()]
+ patches.append(series963/'0100-x9-local-changes.patch')
+ want=''.join(hashlib.sha256(q.read_bytes()).hexdigest()+' '+q.name+'\n' for q in patches)
+ stamp=source/'.x9-patches-applied'
+ if not stamp.is_file() or stamp.read_text()!=want:
+  if stamp.is_file():raise SystemExit(f'{source} carries another patch series; re-prepare it (prepare-metal2vulkan-963f.py)')
+  for q in patches:
+   subprocess.run(['/usr/bin/patch','--batch','--fuzz=0','--forward','-p1','-i',str(q)],cwd=source,check=True)
+  stamp.write_text(want)
+ print('metal2vulkan 963f0e64 series:',len(patches),'patches (stamp ok)',flush=True)
+else:
+ subprocess.run([sys.executable,'-I',str(Path(__file__).with_name('apply-source-patches.py')),
+  '--source',str(source),str(patch_dir/'0023-quality-of-service-on-ios.patch'),
+  str(patch_dir/'0025-host-pointer-linear-textures.patch'),
+  str(patch_dir/'0026-x9-commit-submit-timing.patch')],check=True)
 bridge=root/'MaliMetal/X9/General'
 bridge.mkdir(parents=True,exist_ok=True)
 reference=root/'work/legacy-import/xnu_x9/drivers/NativeMetal'
