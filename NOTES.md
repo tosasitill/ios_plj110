@@ -1,3 +1,23 @@
+## HANDOFF 2026-11-07 (41): Android join command sequence mapped; Assoc rates fixed; rev252cj BUILT
+
+- From android-join-2 (RUC-Web join at kmsg.clean 37700-38600), Android's UNI commands in order:
+  pre-join: 0x02 BSSINFO len 8, 0x02 BSSINFO full len 260, 0x03 STAREC len 16 (free old), 0x01 DEVINFO activate, 0x02
+  BSSINFO activate (PhyMode 0x39 = A|GN|AN|AC), 0x27 CH request; after grant: 0x03 STAREC len 112 (BA offload ampdu 1/1,
+  amsdu 1/1 3328, ba 64/64; Bfee; MLR); Auth; Assoc (cap 0x1101 RUC-Web / 0x1111 RUC-Mobile, listen 2); after success:
+  0x21 SMART_GEAR, 0x02 BSSINFO full (connected), 0x04 EDCA_SET len 52, 0x03 STAREC state 2 with response, 0x11
+  RRM_11K, 0x0C ROAMING, 0x27 CH abort, 0x02 len 12, 0x0E CHIP_CONFIG len 336, 0x63, 0x0C, 0x02 len 48, 0x2C
+  POWER_LIMIT, 0x23 GET_STATISTICS. Payload bytes are not in the capture (lengths only).
+- Of those, only the join path matters for Auth/Assoc; ours covers BSSINFO pre/post, CH request/abort, STAREC 0/2.
+  Not sent (power/QoS/roaming/stats, or HT/VHT): SMART_GEAR, EDCA_SET (we associate legacy, no WMM IE, isQBSS 0),
+  RRM, ROAMING, CHIP_CONFIG, POWER_LIMIT, GET_STATISTICS, per-join re-activation with PhyMode 0x39, StaRec Bfee/MLR/
+  HT/VHT tags.
+- Bug fixed: our Assoc request carried a fixed 2.4 GHz rate set with CCK 1/2/5.5/11 as basic, invalid on 5 GHz. rev252cj:
+  cap = ESS | (AP short preamble / short slot), listen 2, Supported/Extended Rates copied from the AP's beacon (OFDM
+  default on 5 GHz if none kept); logs `X9 WIFI JOIN: assoc request cap .. rates from ..`.
+  Kernel only (plugin 267). boot_sha256 ec084245726187b62dbc2b7f84400e7700bd5f19926a5585766c8365eab7e12e.
+- After a successful association there is still NO data path (TX data ring/TXP, RX data frames, 802.11<->802.3 into en0,
+  DHCP). That is the next large piece; join success alone will not give an IP address.
+
 ## HANDOFF 2026-11-07 (40): Android TXD capture (android-join-2); Auth TXD differences found; rev252ci BUILT
 
 - Capture: Android booted, adb on the Mac. x9/tools/android_wifi_manual_capture.sh (new; gen4m dbgLevel 0xFF:0x13F +
