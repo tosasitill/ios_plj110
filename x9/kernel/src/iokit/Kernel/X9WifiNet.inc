@@ -92,6 +92,15 @@ int joinResult;
 bool realWanted, realUp;
 volatile bool scanReq;
 volatile bool joinReq;
+volatile bool leaveReq;
+/* rev252cm2 WPA2 stage 1: RSN association + EAPOL passthrough. joinRsn = the RSN element iOS put in its associate
+ * request (else built from the AP's), pmk = PSK PMK from the associate request or the 802.1X PMK eapolclient sets
+ * through APPLE80211_IOC_CIPHER_KEY (cipher 6). Keys are not derived / installed yet (stage 2: 4-way handshake). */
+uint8_t joinRsn[64];
+uint8_t joinRsnLen;
+bool joinSecure;
+uint8_t pmk[32];
+bool pmkSet;     /* rev252cm2: sta_disconnect while associated -> radio thread tears the link down */
 bss_info joinTarget;
 bss_info rbss[32];
 unsigned rcount;
@@ -201,12 +210,19 @@ int sta_connect(const uint8_t *ssid, size_t len, const uint8_t *bssid, const cha
       after(joinCall, 50);
       return 0;
     }
-    if (rbss[ti].caps & 0x0010) {              /* Privacy bit: encrypted (WPA/enterprise) not supported yet */
-      joinResult = RES_UNSUPPORTED; status.state = STA_AUTH; IOLockUnlock(lock);
-      log("real radio: '%.*s' is encrypted; only open networks supported for now",
-          rbss[ti].ssid_len, (const char *)rbss[ti].ssid);
-      after(joinCall, 50);
-      return 0;
+    joinSecure = false;
+    if (rbss[ti].caps & 0x0010) {              /* Privacy bit: RSN (WPA2) only; WEP / WPA1 refused */
+      bool apRsn = false;
+      for (unsigned q = 0; q + 2 <= rbss[ti].ie_len; q += 2u + rbss[ti].ie[q + 1])
+        if (rbss[ti].ie[q] == 48) { apRsn = true; break; }
+      if (!apRsn) {
+        joinResult = RES_UNSUPPORTED; status.state = STA_AUTH; IOLockUnlock(lock);
+        log("real radio: '%.*s' is encrypted without RSN (WEP/WPA1); not supported",
+            rbss[ti].ssid_len, (const char *)rbss[ti].ssid);
+        after(joinCall, 50);
+        return 0;
+      }
+      joinSecure = true;
     }
     memcpy(&joinTarget, &rbss[ti], sizeof joinTarget);
     memcpy(status.bssid, rbss[ti].bssid, 6); status.ssid_len = rbss[ti].ssid_len;
@@ -214,7 +230,8 @@ int sta_connect(const uint8_t *ssid, size_t len, const uint8_t *bssid, const cha
     status.signal_dbm = rbss[ti].signal_dbm; status.state = STA_AUTH;
     joinReq = true; IOLockWakeup(lock, (event_t)&scanReq, false);
     IOLockUnlock(lock);
-    log("real radio: join '%.*s' requested (open)", rbss[ti].ssid_len, (const char *)rbss[ti].ssid);
+    log("real radio: join '%.*s' requested (%s, iOS RSN element %u B, PMK %s)", rbss[ti].ssid_len,
+        (const char *)rbss[ti].ssid, joinSecure ? "RSN" : "open", joinRsnLen, pmkSet ? "given" : "not yet");
     return 0;
   }
   for (unsigned i = 0; i < 2; i++)
@@ -232,7 +249,14 @@ int sta_connect(const uint8_t *ssid, size_t len, const uint8_t *bssid, const cha
   after(joinCall, 300);
   return 0;
 }
-void sta_disconnect(void) { IOLockLock(fake::lock); if (fake::status.state > STA_IDLE) fake::status.state = STA_IDLE; IOLockUnlock(fake::lock); }
+void sta_disconnect(void) {
+  using namespace fake;
+  IOLockLock(lock);
+  if (realUp && status.state == STA_UP) { leaveReq = true; IOLockWakeup(lock, (event_t)&scanReq, false); }
+  if (status.state > STA_IDLE) status.state = STA_IDLE;
+  txq_head = txq_tail = 0;
+  IOLockUnlock(lock);
+}
 int sta_tx(const uint8_t *frame, size_t len) {
   using namespace fake;
   int r = 0;
@@ -439,11 +463,37 @@ int apple80211(bool set, apple80211req &rq) {
       if (hasKey && a.key_cipher == 6 && a.key_length == 32) { static const char hex[] = "0123456789abcdef"; for (int i = 0; i < 32; i++) { pass[2 * i] = hex[a.key[i] >> 4]; pass[2 * i + 1] = hex[a.key[i] & 15]; } keyLength = 64; }
       gAssocResult = kAssocFailed;
       log("join: ssid length %u, bssid given %d, key length %u cipher %u", a.ssid_length, hasBssid, a.key_length, a.key_cipher);
+      {   /* rev252cm2: RSN element and PMK for WPA2 (layout of the rest learned from the log) */
+        using namespace fake;
+        const uint8_t *ab = reinterpret_cast<const uint8_t *>(&a);
+        joinRsnLen = 0; pmkSet = false;
+        for (unsigned o = 0x88; o + 4 <= sizeof a; o++)
+          if (ab[o] == 48 && ab[o + 1] >= 18 && ab[o + 1] <= sizeof joinRsn - 2 && o + 2u + ab[o + 1] <= sizeof a &&
+              ab[o + 2] == 1 && ab[o + 3] == 0 && ab[o + 4] == 0x00 && ab[o + 5] == 0x0f && ab[o + 6] == 0xac) {
+            joinRsnLen = (uint8_t)(2 + ab[o + 1]); memcpy(joinRsn, ab + o, joinRsnLen);
+            log("join: RSN element at +0x%x, %u B, auth lower %u upper 0x%x mode %u", o, joinRsnLen, a.auth_lower,
+                a.auth_upper, a.mode);
+            break;
+          }
+        if (!joinRsnLen) log("join: no RSN element in the request; auth lower %u upper 0x%x mode %u", a.auth_lower, a.auth_upper, a.mode);
+        if (hasKey && a.key_cipher == 6 && a.key_length == 32) { memcpy(pmk, a.key, 32); pmkSet = true; log("join: PSK PMK given (32 B)"); }
+      }
       gKeyed = hasKey; int r = sta_connect(a.ssid, a.ssid_length, hasBssid ? a.bssid : nullptr, hasKey ? pass : nullptr, hasKey ? keyLength : 0);
       memset(pass, 0, sizeof pass); memset(&a, 0, sizeof a);
       return r ? EINVAL : 0; }
     case kDisassociate: case kDeauth: log("leave"); sta_disconnect(); post_link(false); return 0;
-    case kScanCacheClear: case kLocale: case kCountryCode: case kPowerSave: case kAuthType: case kCipherKey: return 0;
+    case kCipherKey: {   /* rev252cm2: apple80211_key {version, key_len, cipher, u16 flags, u16 index, key[64], ...} */
+      uint8_t kb[0x60]; if (copy_in(rq, kb, sizeof kb)) return EFAULT;
+      uint32_t kv, kl, kc; uint16_t kf, ki;
+      memcpy(&kv, kb, 4); memcpy(&kl, kb + 4, 4); memcpy(&kc, kb + 8, 4); memcpy(&kf, kb + 12, 2); memcpy(&ki, kb + 14, 2);
+      log("cipher key set: req len %u version %u key len %u cipher %u flags 0x%x index %u", rq.req_len, kv, kl, kc, kf, ki);
+      if (kc == 6 && (kl == 32 || kl == 64)) {
+        IOLockLock(fake::lock); memcpy(fake::pmk, kb + 16, 32); fake::pmkSet = true; IOLockUnlock(fake::lock);
+        log("cipher key set: PMK received (802.1X done; 4-way handshake not implemented yet)");
+      }
+      memset(kb, 0, sizeof kb);
+      return 0; }
+    case kScanCacheClear: case kLocale: case kCountryCode: case kPowerSave: case kAuthType: return 0;
     default: return EOPNOTSUPP;
     }
   }
@@ -1386,18 +1436,25 @@ x9_wd_rx7_try(x9_wdma *d, uint8_t *out, unsigned cap)
     return x9_wd_rx(d, 1, out, cap);
 }
 
-/* HW RX ring 4 (= gen4m RX_RING_DATA0, mt6653RxRingSwIdx2HwIdx): 32 x 2 KiB in the LK wifi pool after the first
- * 64 KiB. Ring regs WFDMA 0x500 + 4*0x10: base, cnt | addr[35:32] << 16, cidx, didx. */
+/* HW RX rings 4..6 (= gen4m RX_RING_DATA0..2, mt6653RxRingSwIdx2HwIdx: band 0 / band 1 / band 2 RX data): each
+ * 32 x 2 KiB in the LK wifi pool after the first 64 KiB (0x11000 per ring). Ring regs WFDMA 0x500 + n*0x10: base,
+ * cnt | addr[35:32] << 16, cidx, didx. rev252cm2: rings 5 and 6 too (96.txt: associated on 5 GHz with DBDC on =
+ * band 1, every TX ok, rx 0: band-1 data goes to ring 5, which had no descriptors; after leave/rejoin RX7 stalled).
+ * x9_r4_try/x9_r4_done serve the three rings round robin; done() completes the ring try() returned from. */
 #define X9_R4_N 32u
+#define X9_RXD_RINGS 3u
 #define X9_R4_PA (X9_WIFI_RSV_PA + 0x10000ULL)
 #define X9_R4_SIZE 0x11000u
-static uint8_t *x9_r4_va;
-static unsigned x9_r4_i;
+static uint8_t *x9_rxr_va[X9_RXD_RINGS];
+static unsigned x9_rxr_i[X9_RXD_RINGS];
+static unsigned x9_rxr_cur, x9_rxr_next;
+static unsigned x9_rxr_count[X9_RXD_RINGS];
+static inline uint64_t x9_rxr_pa(unsigned k) { return X9_R4_PA + (uint64_t)k * X9_R4_SIZE; }
 static void
-x9_r4_desc(unsigned i)
+x9_rxr_desc(unsigned k, unsigned i)
 {
-    volatile uint32_t *r = (volatile uint32_t *)(void *)(x9_r4_va + i * 16);
-    uint64_t b = X9_R4_PA + 0x1000 + i * X9_BUF;
+    volatile uint32_t *r = (volatile uint32_t *)(void *)(x9_rxr_va[k] + i * 16);
+    uint64_t b = x9_rxr_pa(k) + 0x1000 + i * X9_BUF;
     r[0] = (uint32_t)b;
     r[1] = X9_BUF << 16;
     r[2] = (uint32_t)(b >> 32) & 0xf;
@@ -1406,46 +1463,59 @@ x9_r4_desc(unsigned i)
 static bool
 x9_r4_setup(x9_wdma *d)
 {
-    if (!x9_r4_va) {
-        x9_r4_va = (uint8_t *)ml_io_map_wcomb((vm_offset_t)X9_R4_PA, X9_R4_SIZE);
+    for (unsigned k = 0; k < X9_RXD_RINGS; k++) {
+        if (!x9_rxr_va[k]) x9_rxr_va[k] = (uint8_t *)ml_io_map_wcomb((vm_offset_t)x9_rxr_pa(k), X9_R4_SIZE);
+        if (!x9_rxr_va[k]) {
+            IOLog("X9 WIFI RADIO: RX%u map failed\n", 4 + k);
+            return false;
+        }
+        memset(x9_rxr_va[k], 0, 0x1000);
+        for (unsigned i = 0; i < X9_R4_N; i++) x9_rxr_desc(k, i);
     }
-    if (!x9_r4_va) {
-        IOLog("X9 WIFI RADIO: RX4 map failed\n");
-        return false;
-    }
-    memset(x9_r4_va, 0, 0x1000);
-    for (unsigned i = 0; i < X9_R4_N; i++) x9_r4_desc(i);
     __asm__ volatile ("dsb sy" ::: "memory");
-    x9_wd_wr(d, 0x280, 1u << 4);                                  /* RST_DRX_PTR ring 4 */
-    x9_wd_wr(d, 0x540, (uint32_t)X9_R4_PA);
-    x9_wd_wr(d, 0x544, X9_R4_N | (uint32_t)((X9_R4_PA >> 32) & 0xf) << 16);
-    x9_wd_wr(d, 0x548, X9_R4_N - 1);
-    x9_r4_i = 0;
-    IOLog("X9 WIFI RADIO: RX4 ring %08x/%08x cidx=%u didx=%u\n", x9_wd_rd(d, 0x540), x9_wd_rd(d, 0x544),
-        x9_wd_rd(d, 0x548), x9_wd_rd(d, 0x54c));
+    for (unsigned k = 0; k < X9_RXD_RINGS; k++) {
+        unsigned ring = 4 + k, rb = 0x500 + ring * 0x10;
+        uint64_t pa = x9_rxr_pa(k);
+        x9_wd_wr(d, 0x280, 1u << ring);                           /* RST_DRX_PTR */
+        x9_wd_wr(d, rb, (uint32_t)pa);
+        x9_wd_wr(d, rb + 4, X9_R4_N | (uint32_t)((pa >> 32) & 0xf) << 16);
+        x9_wd_wr(d, rb + 8, X9_R4_N - 1);
+        x9_rxr_i[k] = 0;
+        IOLog("X9 WIFI RADIO: RX%u ring %08x/%08x cidx=%u didx=%u\n", ring, x9_wd_rd(d, rb), x9_wd_rd(d, rb + 4),
+            x9_wd_rd(d, rb + 8), x9_wd_rd(d, rb + 12));
+    }
+    x9_rxr_cur = x9_rxr_next = 0;
     return true;
 }
-/* Next RX4 packet or -1. */
+/* Next packet from RX4..6 (round robin) or -1. */
 static int
 x9_r4_try(x9_wdma *d, const uint8_t **pkt)
 {
     (void)d;
-    unsigned i = x9_r4_i;
-    volatile uint32_t *r = (volatile uint32_t *)(void *)(x9_r4_va + i * 16);
     __asm__ volatile ("dsb sy" ::: "memory");
-    if (!(r[1] & (1u << 31))) return -1;
-    unsigned len = (r[1] >> 16) & 0x3fff;
-    *pkt = x9_r4_va + 0x1000 + i * X9_BUF;
-    return (int)(len > X9_BUF ? X9_BUF : len);
+    for (unsigned j = 0; j < X9_RXD_RINGS; j++) {
+        unsigned k = (x9_rxr_next + j) % X9_RXD_RINGS;
+        unsigned i = x9_rxr_i[k];
+        volatile uint32_t *r = (volatile uint32_t *)(void *)(x9_rxr_va[k] + i * 16);
+        if (!(r[1] & (1u << 31))) continue;
+        unsigned len = (r[1] >> 16) & 0x3fff;
+        *pkt = x9_rxr_va[k] + 0x1000 + i * X9_BUF;
+        x9_rxr_cur = k;
+        if (x9_rxr_count[k]++ == 0) IOLog("X9 WIFI RADIO: first packet on RX%u (len %u)\n", 4 + k, len);
+        return (int)(len > X9_BUF ? X9_BUF : len);
+    }
+    return -1;
 }
 static void
 x9_r4_done(x9_wdma *d)
 {
-    unsigned i = x9_r4_i;
-    x9_r4_desc(i);
+    unsigned k = x9_rxr_cur;
+    unsigned i = x9_rxr_i[k];
+    x9_rxr_desc(k, i);
     __asm__ volatile ("dsb sy" ::: "memory");
-    x9_wd_wr(d, 0x548, i);
-    x9_r4_i = (i + 1) % X9_R4_N;
+    x9_wd_wr(d, 0x500 + (4 + k) * 0x10 + 8, i);
+    x9_rxr_i[k] = (i + 1) % X9_R4_N;
+    x9_rxr_next = (k + 1) % X9_RXD_RINGS;
 }
 
 /* Find an 802.11 beacon / probe response inside an RX packet (RXD length varies with the RXD groups, so search
@@ -1657,6 +1727,34 @@ x9_radio_scan_req(x9_wdma *d, uint8_t seq, const uint8_t mac[6])
 #define X9_JOIN_PID 0x20u
 /* rev252ci: TXD TGID = the HW band the channel grant names (UNI_EVENT_CNM_CH_PRIVILEGE_GRANT ucDBDCBand 0/1). */
 static uint8_t x9_join_tgid;                                       /* mgmt PID as Android's first one (PID[32]) */
+
+/* rev252cm2: our RSN element: iOS's if it gave one, else version 1, the AP's group cipher, pairwise CCMP, the AP's
+ * first AKM (00-0F-AC:1 802.1X for RUC-Mobile, :2 PSK), capabilities 0. */
+static unsigned
+x9_join_rsn(const x9wifi::bss_info *b, uint8_t *out)
+{
+    using namespace x9wifi::fake;
+    if (joinRsnLen) { memcpy(out, joinRsn, joinRsnLen); return joinRsnLen; }
+    uint8_t group[4] = { 0x00, 0x0f, 0xac, 0x04 }, akm[4] = { 0x00, 0x0f, 0xac, 0x01 };
+    for (unsigned q = 0; q + 2 <= b->ie_len; q += 2u + b->ie[q + 1]) {
+        const uint8_t *e = b->ie + q;
+        unsigned l = e[1];
+        if (e[0] != 48 || q + 2 + l > b->ie_len || l < 8) continue;
+        memcpy(group, e + 4, 4);
+        unsigned pc = e[8] | e[9] << 8, ao = 10 + 4 * pc;
+        if (l >= ao + 4 - 2 + 2 && (e[ao] | e[ao + 1] << 8) >= 1) memcpy(akm, e + ao + 2, 4);
+        break;
+    }
+    static const uint8_t ccmp[4] = { 0x00, 0x0f, 0xac, 0x04 };
+    unsigned o = 0;
+    out[o++] = 48; out[o++] = 20;
+    out[o++] = 1; out[o++] = 0;
+    memcpy(out + o, group, 4); o += 4;
+    out[o++] = 1; out[o++] = 0; memcpy(out + o, ccmp, 4); o += 4;
+    out[o++] = 1; out[o++] = 0; memcpy(out + o, akm, 4); o += 4;
+    out[o++] = 0; out[o++] = 0;
+    return o;
+}
 
 static unsigned
 x9_txd_mgmt(uint8_t *buf, unsigned framelen, unsigned machdr, uint8_t subtype)
@@ -2057,7 +2155,8 @@ x9_radio_join_granted(x9_wdma *d, const uint8_t mac[6], const x9wifi::bss_info *
     /* rev252cj: capability and rates from the AP's own beacon. rev252bn..ci sent a fixed 2.4 GHz set with CCK
      * 1/2/5.5/11 Mbps marked basic, which a 5 GHz AP cannot accept (it would answer status 18, rates). ESS, plus
      * short preamble / short slot only where the AP advertises them; listen interval 2 (Android's). */
-    uint16_t cap = (uint16_t)(0x0001 | (b->caps & (0x0020 | 0x0400)));
+    bool sec = x9wifi::fake::joinSecure;
+    uint16_t cap = (uint16_t)(0x0001 | (b->caps & (0x0020 | 0x0400)) | (sec ? 0x0010 : 0));
     memcpy(fr + o, &cap, 2); o += 2;
     uint16_t li = 2;
     memcpy(fr + o, &li, 2); o += 2;
@@ -2076,6 +2175,14 @@ x9_radio_join_granted(x9_wdma *d, const uint8_t mac[6], const x9wifi::bss_info *
         static const uint8_t a_rates[8] = { 0x8c, 0x12, 0x98, 0x24, 0xb0, 0x48, 0x60, 0x6c };
         static const uint8_t g_rates[8] = { 0x82, 0x84, 0x8b, 0x96, 0x0c, 0x12, 0x18, 0x24 };
         fr[o++] = 1; fr[o++] = 8; memcpy(fr + o, b->freq_mhz >= 4900 ? a_rates : g_rates, 8); o += 8;
+    }
+    if (sec) {                                                  /* rev252cm2: RSN element */
+        uint8_t rsn[64];
+        unsigned rl = x9_join_rsn(b, rsn);
+        if (rl && o + rl <= sizeof fr) { memcpy(fr + o, rsn, rl); o += rl; }
+        IOLog("X9 WIFI JOIN: RSN element %u B (%s): AKM %02x-%02x-%02x:%u\n", rl,
+            x9wifi::fake::joinRsnLen ? "from iOS" : "built", rl >= 22 ? rsn[rl - 6] : 0, rl >= 22 ? rsn[rl - 5] : 0,
+            rl >= 22 ? rsn[rl - 4] : 0, rl >= 22 ? rsn[rl - 3] : 0);
     }
     IOLog("X9 WIFI JOIN: assoc request cap %04x listen %u rates from %s, %u B\n", cap, li,
           have_rates ? "beacon" : "default", o);
@@ -2101,6 +2208,7 @@ x9_radio_join_granted(x9_wdma *d, const uint8_t mac[6], const x9wifi::bss_info *
  * (DW1 b16-20), + HEADER_OFFSET (DW2 b13-15, x2). DW2 b7 HEADER_TRAN: payload already Ethernet II. Otherwise an
  * 802.11 data frame (FromDS) whose LLC/SNAP is stripped here. Packets of another RXD type are searched for a
  * FromDS data header from our BSSID (as the scan path searches for beacons). */
+static unsigned x9_dtx_unkeyed;
 static unsigned x9_dtx, x9_dtx_fail, x9_drx, x9_drx_bad, x9_drx_prot, x9_drx_other, x9_drx_dumps, x9_drx_odumps;
 static uint8_t x9_drx_eth[2048];
 
@@ -2108,6 +2216,9 @@ static bool
 x9_tx_data(x9_wdma *d, const uint8_t mac[6], const uint8_t bssid[6], const uint8_t *eth, unsigned len)
 {
     if (len < 14) return false;
+    bool eapol = eth[12] == 0x88 && eth[13] == 0x8e;
+    if (x9wifi::fake::joinSecure && !eapol) { x9_dtx_unkeyed++; return false; }   /* no keys yet: EAPOL only */
+    if (eapol && len >= 19) IOLog("X9 WIFI EAPOL: TX type %u len %u%s\n", eth[15], len, eth[15] == 3 ? " (key)" : "");
     uint8_t *b = d->va + X9_B_FW;
     uint8_t *f = b + 32;
     unsigned pl = len - 14;
@@ -2211,7 +2322,15 @@ x9_rx_data(const uint8_t *p, unsigned n, const uint8_t mac[6], const uint8_t bss
               "%08x %08x %08x %08x\n", n, r, w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8], w[9], w[10], w[11],
               w[12], w[13], w[14], w[15]);
     }
-    if (r) x9_drx++;
+    if (r) {
+        x9_drx++;
+        if (r >= 19 && x9_drx_eth[12] == 0x88 && x9_drx_eth[13] == 0x8e) {
+            if (x9_drx_eth[15] == 3 && r >= 14 + 4 + 3)
+                IOLog("X9 WIFI EAPOL: RX key frame len %u descriptor %u key info %02x%02x\n", r, x9_drx_eth[18],
+                    x9_drx_eth[19], x9_drx_eth[20]);
+            else IOLog("X9 WIFI EAPOL: RX type %u len %u (EAP code %u)\n", x9_drx_eth[15], r, r > 18 ? x9_drx_eth[18] : 0);
+        }
+    }
     return r;
 }
 
@@ -2225,6 +2344,34 @@ x9_rx_kick(const uint8_t *p, unsigned n, const uint8_t mac[6], const uint8_t bss
         if (o && o + 26 <= n && !memcmp(p + o + 10, bssid, 6)) return p[o + 24] | p[o + 25] << 8;
     }
     return -1;
+}
+
+/* rev252cm2: tear down an association (Android aisFsmDisconnect: deauth to the AP, STAREC back to state 1, BSSINFO
+ * not connected). 96.txt: iOS left and rejoined RUC-Web with none of this; the rejoin's first BSSINFO got no
+ * CMD_RESULT and RX7 never delivered again. */
+static x9wifi::bss_info x9_cur_bss;
+static bool x9_assoc;
+static void
+x9_radio_leave(x9_wdma *d, const uint8_t mac[6], bool send_deauth, const char *why)
+{
+    if (!x9_assoc) return;
+    x9_assoc = false;
+    const x9wifi::bss_info *b = &x9_cur_bss;
+    if (send_deauth) {
+        uint8_t fr[26] = {};
+        fr[0] = 0xc0;                                          /* deauthentication */
+        memcpy(fr + 4, b->bssid, 6);
+        memcpy(fr + 10, mac, 6);
+        memcpy(fr + 16, b->bssid, 6);
+        fr[24] = 3;                                            /* reason 3: STA leaving */
+        bool ok = x9_tx_mgmt(d, 0x0c, fr, sizeof fr);
+        IOLog("X9 WIFI LEAVE: deauth to %02x:%02x:%02x:%02x:%02x:%02x %s\n", b->bssid[0], b->bssid[1], b->bssid[2],
+            b->bssid[3], b->bssid[4], b->bssid[5], ok ? "queued" : "FAILED");
+        IOSleep(20);
+    }
+    x9_radio_starec(d, b, 0, 0);
+    x9_radio_bssinfo(d, mac, b, false);
+    IOLog("X9 WIFI LEAVE: '%.*s' torn down (%s)\n", b->ssid_len, (const char *)b->ssid, why);
 }
 
 static void
@@ -2327,8 +2474,9 @@ x9_wifi_radio_loop(x9_wdma *d)
             if (x9_ms_since(dstat_t) >= 5000) {
                 unsigned tot = x9_dtx + x9_dtx_fail + x9_drx + x9_drx_bad + x9_drx_prot + x9_drx_other;
                 if (tot != dstat_last) {
-                    IOLog("X9 WIFI DATA: tx %u (fail %u, queue drops %u) rx %u (bad %u, protected %u, other %u)\n",
-                        x9_dtx, x9_dtx_fail, txq_drop, x9_drx, x9_drx_bad, x9_drx_prot, x9_drx_other);
+                    IOLog("X9 WIFI DATA: tx %u (fail %u, queue drops %u, unkeyed drops %u) rx %u (bad %u, protected %u, "
+                        "other %u) rx rings %u/%u/%u\n", x9_dtx, x9_dtx_fail, txq_drop, x9_dtx_unkeyed, x9_drx, x9_drx_bad,
+                        x9_drx_prot, x9_drx_other, x9_rxr_count[0], x9_rxr_count[1], x9_rxr_count[2]);
                     dstat_last = tot;
                 }
                 dstat_t = mach_absolute_time();
@@ -2339,14 +2487,17 @@ x9_wifi_radio_loop(x9_wdma *d)
                 status.state = x9wifi::STA_IDLE;
                 txq_head = txq_tail = 0;
                 IOLockUnlock(lock);
+                x9_radio_leave(d, mac, false, "AP deauth");
                 if (dev && dev->link_lost) dev->link_lost(kick);
             }
         }
         IOLockLock(lock);
         bool go = scanReq;
         bool dojoin = joinReq;
+        bool doleave = leaveReq;
         scanReq = false;
         joinReq = false;
+        leaveReq = false;
         x9wifi::bss_info jt;
         static x9wifi::bss_info alt;                          /* rev252ck: same SSID on the other band, open */
         bool have_alt = false;
@@ -2359,6 +2510,7 @@ x9_wifi_radio_loop(x9_wdma *d)
             }
         }
         IOLockUnlock(lock);
+        if (doleave || dojoin) x9_radio_leave(d, mac, true, dojoin ? "rejoin" : "iOS disconnect");
         if (dojoin) {
             bool ok = x9_radio_join(d, mac, &jt);
             if (!ok) IOLog("X9 WIFI JOIN: failed\n");
@@ -2371,6 +2523,8 @@ x9_wifi_radio_loop(x9_wdma *d)
             joinResult = ok ? x9wifi::RES_OK : x9wifi::RES_FAILED;
             status.state = ok ? x9wifi::STA_UP : x9wifi::STA_IDLE;
             if (ok) {
+                memcpy(&x9_cur_bss, &jt, sizeof jt);
+                x9_assoc = true;
                 memcpy(status.bssid, jt.bssid, 6); status.ssid_len = jt.ssid_len;
                 memcpy(status.ssid, jt.ssid, 32); status.freq_mhz = jt.freq_mhz;
             }
