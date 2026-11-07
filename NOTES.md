@@ -1,3 +1,23 @@
+## HANDOFF 2026-11-07 (44): rev252cm BUILT = rev252cl + first Wi-Fi data path (untested)
+
+- Not yet run on the device: rev252cl (Auth seq 1) itself is still unverified; rev252cm contains it.
+- TX: if_output -> sta_tx queues Ethernet frames (64 x 1600 B ring under fake::lock, only while STA_UP). The radio thread
+  (sole owner of the WFDMA rings) converts each to 802.11 data (FC 08 01 ToDS, A1 BSSID, A2 our MAC, A3 DA, HW SN,
+  LLC/SNAP + ethertype) with the same TXD / ring as the ACKed Auth (TX15, MCU_Q0|ALTX, COMMAND, HF 802.11, fixed OFDM
+  6M, DIS_MAT, WIDX 1, TGID from the grant), type DATA, no TX status. First 6 logged `X9 WIFI DATA: TX ok|FAILED ...`.
+- RX: while STA_UP the loop polls every 4 ms (200 ms otherwise). RX4 and non-event RX7 packets go through x9_rx_data:
+  RXD type 2 parsed per nic_rxd_v3.c (32 B + groups 4,1,2,3 = 16 B, 5 = 96 B, + HEADER_OFFSET x2); DW2 b7 HEADER_TRAN
+  -> Ethernet as is, else 802.11 FromDS data (QoS/HTC handled, A-MSDU / protected dropped, LLC/SNAP stripped). Other RXD
+  types are searched for a FromDS data header with A2 = BSSID. Result -> events->rx -> on_rx -> ifnet_input. First 6
+  RX logged `X9 WIFI DATA: RX len ... -> eth N: <RXD words>`; non-beacon unknown rx4 packets `rx4 other` (first 8).
+- Deauth/disassoc from the BSSID -> STA_IDLE + link_lost. Counters every 5 s when changed:
+  `X9 WIFI DATA: tx N (fail, queue drops) rx N (bad, protected, other)`.
+- Not done (Android does after association): EDCA_SET 0x04, RX_HDR_TRAN, SMART_GEAR, power-save config. Data rides the
+  command ring at 6 Mb/s fixed rate: a first working path, not the HIF data rings.
+- BUILT kernel only (plugin 267 unchanged): boot_sha256 82eb9e42389128365539d951f44e5c2221e1a9ea976f3227466b24729212a736.
+- Test: join RUC-Web; check Auth resp seq 2 status 0 -> Assoc -> CONNECTED, then the DATA lines and whether DHCP gives
+  an IP (Settings, or `X9 WIFI DATA: rx` > 0 with type 0800/0806 traffic).
+
 ## HANDOFF 2026-11-07 (43): 95.txt = rev252ck: **AUTH ACKed** (DBDC on); AP answered status 14 = our seq 0; rev252cl BUILT
 
 - Log copy .local/x9/logs/x9-95.txt (52 s, no panic, DeviceLost 0).
