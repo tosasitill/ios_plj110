@@ -1,3 +1,38 @@
+## HANDOFF 2026-11-07 (49): rev252cm6 = **WPA2 stage 2 BUILT**: in-driver 4-way handshake (PRF/MIC/GTK unwrap), INSTALL_KEY_V3, protected TX/RX; sources + Android 1X capture in hand
+
+- Evidence base: gen4m source `~/HelioDarwin/oppo-source/modules/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m`
+  (wlan_oid.c wlanSetAddKeyImpl, nic_uni_cmd_event.c nicUniCmdInstallKey, privacy.c secPrivacySeekForBcEntry,
+  nic_txd_v3.c protection, nic.c BSSINFO SEC) and **android-join-2 is a RUC-Mobile 802.1X capture** (logcat: Security
+  type 3, Supplicant COMPLETED, IP 10.47.253.191): M1 0x008a -> M2 0x010a -> M3 0x13ca -> M4 0x030a, GTK M1 0x1382 ->
+  GTK M2 0x0302, all MIC version 2 (HMAC-SHA1-128); add_key pairwise cipher fac04 keylen 16 -> wlanIdx = the AP's
+  staIdx; group key -> "Add key to wlanIdx 0" + ucBMCWlanIndexS=0 (BC WTBL entry); qmCheckRxEAPOLM3 holds M4 until
+  the PTK is in.
+- Formats locked from gen4m + the kmsg: UNI_CMD_STAREC_INSTALL_KEY3 = STAREC (0x03) header {bss, widxL} + TLV tag
+  **0x27 len 68** {AddRemove, TxKey, KeyType(1 pairwise/0 group), IsAuth, peer[6], BssIdx, AlgorithmId=4
+  (CIPHER_SUITE_CCMP), KeyId, KeyLen(16 = TK only, not the PTK), WlanIndex, MgmtProtection, KeyMaterial[32],
+  KeyRsc[16]}; TXD DW3 b1 = PROTECTED_FRAME (EAPOL never protected), b4 = BMC + b0 = NO_ACK for multicast, DW1 widx
+  = AP STAREC (ours 1) unicast / 0 (BSSINFO u2BcMcWlanidx, already 0 in our builder) for multicast; BSSINFO SEC
+  AuthMode 6 = WPA2 / 7 = WPA2-PSK, EncStatus 6 = CCMP (Android kmsg 55.25 pre-join + 55.31 connected), 0/1 open;
+  GTK KDE 00-0F-AC-01 info byte bits0-1 KeyID bit2 Tx (gen4m wpa_supp/src/rsn_supp/wpa.c gd.keyidx/gd.tx).
+- rev252cm6 implementation (all in X9WifiNet.inc): crypto = corecrypto HMAC-SHA1 (PRF-512 "Pairwise key expansion",
+  MIC v2); **this corecrypto has no MD5 and links CBC only** -> MIC version 1 logged unsupported, AES-ECB primitive =
+  one CBC block with a zero IV (P = D(C) xor IV), used by the RFC 3394 GTK unwrap; corecrypto headers carry no C++
+  guards -> wrapped in extern "C". M1 -> store + SNonce(read_random) + PTK(KCK/KEK/TK) + M2; M3 -> MIC verify ->
+  INSTALL_KEY pairwise (AP widx, TK) -> M4 -> GTK KDE unwrap (KEK) -> INSTALL_KEY group (BC widx 0, keyid, RSC);
+  GTK M1 rekey -> install + GTK M2. kCipherKey: 32 B = PMK -> arm the handshake (whKick; a stored M1 runs it on the
+  radio thread); 64 B = full PTK -> ext mode: install only, M1/M3 forwarded to userspace (it answers). TXD protection
+  per gen4m; unkeyed drops are per-direction (unicast waits PTK, multicast waits GTK); protected RX no longer dropped
+  (HEADER_TRAN = FW-decrypted Ethernet; raw path strips CCMP hdr 8 + MIC 8); EAPOL-Key frames intercepted (not for
+  the stack), EAP (type 0) still delivered to userspace; leave/join clear the key state; BSSINFO SEC set from the
+  AP's RSN AKM (parsed before the pre-join BSSINFO now).
+- BUILT kernel + boot: x9/out/x9-rev252cm6/boot.img sha256 45278d7c4ef61b277b190cc6dffecc0faca2183d8effffdfe9b72c5bc2cad81e
+  (kernel 40f3f93964ef5b3137108e011a591abb83412df53e584aaa6e263b70c1d3d28b), FULL arg set embedded (cm4's, verified).
+- Test: (1) PSK network first - the PMK comes with the associate request, no EAP needed: expect "X9 WIFI KEY: M1 ->
+  PTK", "M3 ok", "install PTK", "M4", "GTK ... installed", then traffic. (2) RUC-Mobile: iOS runs EAP (watch "EAPOL:
+  RX type 0 -> userspace" and any new X9 WIFI REQ types from wifid/eapolclient - the EAPOL delivery ioctl may still
+  need mapping, that is the open unknown); after EAP success the kCipherKey PMK arrives -> "PMK arrived after M1,
+  starting the 4-way handshake". (3) Report an "install ... NO CMD_RESULT" if the firmware rejects tag 0x27.
+
 ## HANDOFF 2026-11-07 (48): 100.txt = my rev252cm5 boot **WITHOUT the Wi-Fi boot args** (toggle grey, en0 never created); fixed image x9/out/x9-rev252cm5
 
 - 实测 100.txt (my first cm5 packaging): zero `X9 WIFI` lines at all - configd opened IONetworkStack at 7.857 s but

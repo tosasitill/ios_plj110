@@ -53,6 +53,17 @@ extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 #define X9_SIOCSA80211 0x802869c8UL   /* _IOW('i', 200, struct apple80211req) */
 #define X9_SIOCGA80211 0xc02869c9UL   /* _IOWR('i', 201, struct apple80211req) */
 
+/* rev252cm6 WPA2 stage 2 state (file scope: written by the join + kCipherKey, used by the radio thread's 4-way
+ * handshake and the TXD builder). Armed by x9_join_rsn (AKM suite) and kCipherKey (PSK PMK / the 1X PMK after
+ * EAP success); x9_radio_leave/x9_radio_join clear it. */
+static bool x9_ptk_ready, x9_gtk_ready, x9_kck_ok, x9_ext_ptk;
+static uint8_t x9_kck[16], x9_kek[16], x9_tk[16], x9_gtk[32];
+static unsigned x9_gtk_len;
+static uint8_t x9_gtk_keyid, x9_akm_suite;
+static uint8_t x9_anonce[32], x9_snonce[32];
+static uint8_t x9_m1[1600];
+static unsigned x9_m1_len;
+
 namespace x9wifi { namespace {
 
 void log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
@@ -93,6 +104,7 @@ bool realWanted, realUp;
 volatile bool scanReq;
 volatile bool joinReq;
 volatile bool leaveReq;
+volatile bool whKick;   /* rev252cm6: kCipherKey set the PMK while an M1 was stored; radio thread starts the 4WH */
 /* rev252cm2 WPA2 stage 1: RSN association + EAPOL passthrough. joinRsn = the RSN element iOS put in its associate
  * request (else built from the AP's), pmk = PSK PMK from the associate request or the 802.1X PMK eapolclient sets
  * through APPLE80211_IOC_CIPHER_KEY (cipher 6). Keys are not derived / installed yet (stage 2: 4-way handshake). */
@@ -487,9 +499,16 @@ int apple80211(bool set, apple80211req &rq) {
       uint32_t kv, kl, kc; uint16_t kf, ki;
       memcpy(&kv, kb, 4); memcpy(&kl, kb + 4, 4); memcpy(&kc, kb + 8, 4); memcpy(&kf, kb + 12, 2); memcpy(&ki, kb + 14, 2);
       log("cipher key set: req len %u version %u key len %u cipher %u flags 0x%x index %u", rq.req_len, kv, kl, kc, kf, ki);
-      if (kc == 6 && (kl == 32 || kl == 64)) {
-        IOLockLock(fake::lock); memcpy(fake::pmk, kb + 16, 32); fake::pmkSet = true; IOLockUnlock(fake::lock);
-        log("cipher key set: PMK received (802.1X done; 4-way handshake not implemented yet)");
+      if (kc == 6 && kl == 32) {     /* rev252cm6: the 1X/PSK PMK; kick the in-driver 4-way handshake */
+        IOLockLock(fake::lock); memcpy(fake::pmk, kb + 16, 32); fake::pmkSet = true; fake::whKick = true;
+        IOLockWakeup(fake::lock, (event_t)&fake::scanReq, false); IOLockUnlock(fake::lock);
+        log("cipher key set: PMK received (32 B); 4-way handshake armed");
+      } else if (kc == 6 && kl == 64) {   /* a full PTK from userspace: it runs the handshake, we only install */
+        IOLockLock(fake::lock);
+        memcpy(x9_kck, kb + 16, 16); memcpy(x9_kek, kb + 32, 16); memcpy(x9_tk, kb + 48, 16);
+        x9_ext_ptk = true; x9_kck_ok = true;
+        IOLockUnlock(fake::lock);
+        log("cipher key set: full PTK received (64 B); userspace drives the handshake");
       }
       memset(kb, 0, sizeof kb);
       return 0; }
@@ -1743,6 +1762,7 @@ x9_join_rsn(const x9wifi::bss_info *b, uint8_t *out)
         memcpy(group, e + 4, 4);
         unsigned pc = e[8] | e[9] << 8, ao = 10 + 4 * pc;
         if (l >= ao + 4 - 2 + 2 && (e[ao] | e[ao + 1] << 8) >= 1) memcpy(akm, e + ao + 2, 4);
+        x9_akm_suite = akm[3];                                 /* 1 = 802.1X, 2 = PSK (BSSINFO SEC auth mode) */
         break;
     }
     static const uint8_t ccmp[4] = { 0x00, 0x0f, 0xac, 0x04 };
@@ -2011,9 +2031,12 @@ x9_radio_bssinfo(x9_wdma *d, const uint8_t mac[6], const x9wifi::bss_info *b, in
     memcpy(t + 4, &op, 2);
     memcpy(t + 6, &basic, 2);
     at += 16;
-    t = pl + at;                                               /* SEC tag 0x10, len 8: open, EncStatus 1 (Android) */
+    t = pl + at;                                               /* SEC tag 0x10, len 8 */
     t[0] = 0x10; t[2] = 8;
-    t[4] = 0; t[5] = 1;
+    /* rev252cm6: Android's RUC-Mobile 802.1X BSSINFO (android-join-2 55.25 pre-join, 55.31 connected) carries
+     * AuthMode 6 = WPA2 (7 = WPA2-PSK), EncStatus 6 = ENUM_ENCRYPTION3_ENABLED (CCMP); disconnecting -> 0/1. */
+    if (mode != 2 && x9wifi::fake::joinSecure) { t[4] = x9_akm_suite == 2 ? 7 : 6; t[5] = 6; }
+    else { t[4] = 0; t[5] = 1; }
     at += 8;
     t = pl + at;                                               /* QBSS tag 0x0f, len 8: no WMM (assoc has no WMM IE) */
     t[0] = 0x0f; t[2] = 8;
@@ -2115,6 +2138,18 @@ x9_radio_join(x9_wdma *d, const uint8_t mac[6], const x9wifi::bss_info *b)
     IOLog("X9 WIFI JOIN: '%.*s' %02x:%02x:%02x:%02x:%02x:%02x %u MHz, own (SA/TA, DEVINFO) %02x:%02x:%02x:%02x:%02x:%02x\n",
         b->ssid_len, (const char *)b->ssid, ap[0], ap[1], ap[2], ap[3], ap[4], ap[5], b->freq_mhz,
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    /* rev252cm6: a fresh join starts without stage 2 keys (PSK PMK or the 1X PMK re-arms them). */
+    x9_ptk_ready = x9_gtk_ready = x9_kck_ok = x9_ext_ptk = false;
+    x9_m1_len = 0; x9_gtk_len = 0; x9_gtk_keyid = 0;
+    x9_akm_suite = 0;
+    /* The pre-join BSSINFO carries the security mode (Android sends AuthMode 6/7 + EncStatus 6 there), so pick the
+     * AKM suite from the AP's RSN IE before it. x9_join_rsn does the same later for the assoc request. */
+    for (unsigned q = 0; q + 2 <= b->ie_len; q += 2u + b->ie[q + 1])
+        if (b->ie[q] == 48 && b->ie[q + 1] >= 14 && q + 2u + b->ie[q + 1] <= b->ie_len) {
+            unsigned pc = b->ie[q + 8] | b->ie[q + 9] << 8, ao = q + 10 + 4 * pc;
+            if (ao + 6 <= q + 2u + b->ie[q + 1] && (b->ie[ao] | b->ie[ao + 1] << 8) >= 1) x9_akm_suite = b->ie[ao + 5];
+            break;
+        }
     x9_radio_dbdc(d);
     if (x9_starec_live) x9_radio_starec_remove(d);            /* Android pre-join STAREC len 16 (free old) */
     x9_radio_bssinfo(d, mac, b, 0);                           /* Android: nicUpdateBssEx before the CH request */
@@ -2302,7 +2337,10 @@ x9_tx_data(x9_wdma *d, const uint8_t mac[6], const uint8_t bssid[6], const uint8
     x9_pkt_log(0, eth, len);
     if (len < 14) return false;
     bool eapol = eth[12] == 0x88 && eth[13] == 0x8e;
-    if (x9wifi::fake::joinSecure && !eapol) { x9_dtx_unkeyed++; return false; }   /* no keys yet: EAPOL only */
+    bool mc = (eth[0] & 1) != 0;                               /* multicast/broadcast: GTK, BC WTBL entry */
+    /* rev252cm6: before the keys only EAPOL leaves; after PTK/GTK everything does (gen4m fgTransmitKeyExist). */
+    if (x9wifi::fake::joinSecure && !eapol && !(mc ? x9_gtk_ready : x9_ptk_ready)) { x9_dtx_unkeyed++; return false; }
+    bool prot = !eapol && (mc ? x9_gtk_ready : x9_ptk_ready);  /* PF bit; EAPOL never encrypted */
     if (eapol && len >= 19) IOLog("X9 WIFI EAPOL: TX type %u len %u%s\n", eth[15], len, eth[15] == 3 ? " (key)" : "");
     uint8_t *b = d->va + X9_B_FW;
     uint8_t *f = b + 32;
@@ -2320,10 +2358,13 @@ x9_tx_data(x9_wdma *d, const uint8_t mac[6], const uint8_t bssid[6], const uint8
     unsigned total = 32 + flen;
     uint32_t dw[8] = {};
     dw[0] = (total & 0xffff) | ((((16u + 24u + 6u) >> 1) & 0x7f) << 16) | (2u << 23) | (16u << 25);
-    dw[1] = (X9_JOIN_WIDX & 0xfff) | ((uint32_t)(x9_join_tgid & 3) << 12) | (2u << 14) | ((24u >> 1) << 16)
-        | (0u << 21) | (X9_JOIN_OMAC << 25) | (1u << 31);      /* TID 0, fixed rate */
+    dw[1] = ((mc ? 0u : X9_JOIN_WIDX) & 0xfff) | ((uint32_t)(x9_join_tgid & 3) << 12) | (2u << 14) | ((24u >> 1) << 16)
+        | (0u << 21) | (X9_JOIN_OMAC << 25) | (1u << 31);      /* TID 0, fixed rate; BC widx for multicast */
     dw[2] = 0u | (2u << 4) | (0x7fu << 16);                    /* subtype 0, type DATA, life-time max */
-    dw[3] = (15u << 11);
+    /* DW3: rev252cm6 PROTECTED_FRAME b1 (nic_connac3x_tx.h CONNAC3X_TX_DESC_PROTECTED_FRAME, gen4m sets it from
+     * MSDU_OPT_PROTECTED_FRAME when the peer key exists), BMC b4 + NO_ACK b0 for multicast
+     * (nic_txd_v3.c: STA_REC_INDEX_BMCAST -> SET_BMC + SET_NO_ACK). */
+    dw[3] = (15u << 11) | (prot ? (1u << 1) : 0u) | (mc ? ((1u << 4) | 1u) : 0u);
     dw[5] = 0;                                                 /* no TX status for data */
     dw[6] = (1u << 10) | (1u << 2) | (1u << 3) | (1u << 16) | (8u << 22);
     memcpy(b, dw, 32);
@@ -2336,6 +2377,356 @@ x9_tx_data(x9_wdma *d, const uint8_t mac[6], const uint8_t bssid[6], const uint8
     return ok;
 }
 
+/* ======================= rev252cm6: WPA2 stage 2, 4-way handshake + keys ======================= *
+ * gen4m order (android-join-2 kmsg 55.93, RUC-Mobile 802.1X): M1 (KeyInfo 0x008a) -> M2 (0x010a) -> M3 (0x13ca)
+ * -> PTK install (STAREC INSTALL_KEY_V3, wlanIdx = the AP's, pairwise CCMP-128 TK 16 B) -> M4 (0x030a) -> GTK
+ * install (BC WTBL entry 0, keyid from the GTK KDE). iOS keeps KCK/KEK/TK in firmware too: userspace only sets the
+ * PMK (APPLE80211_IOC_CIPHER_KEY, cipher 6, 32 B), so the handshake runs here like stage 1 assumed.
+ * PTK = PRF-512(PMK, "Pairwise key expansion", minmax(AA,SPA) || minmax(ANonce,SNonce)) (802.11i H.4), KCK 16,
+ * KEK 16, TK 16. MIC version 2 = HMAC-SHA1-128(KCK, EAPOL-Key body, MIC field zeroed), version 1 = HMAC-MD5-128
+ * (wpa_supplicant wpa_eapol_key_mic). GTK KDE 00-0F-AC-01: info byte bits0-1 KeyID, bit2 Tx (wpa.c gd.keyidx/gd.tx);
+ * AES Key Wrap (RFC 3394) unwrapped with the KEK when the Secure bit is set. Key install mirrors gen4m
+ * wlanSetAddKeyImpl -> nicUniCmdInstallKey (UNI_CMD_STAREC_INSTALL_KEY3 tag 0x27, 68 B): pairwise widx = the AP
+ * STAREC (X9_JOIN_WIDX), group widx = 0 = the BSSINFO u2BcMcWlanidx BC entry. */
+/* These headers have no __cplusplus guards: without extern "C" the C++ TU
+ * mangles the references and the link fails against the C-built corecrypto
+ * objects (ccrypto.o / cchmac.o). */
+extern "C" {
+#include <corecrypto/ccdigest.h>
+#include <corecrypto/cchmac.h>
+#include <corecrypto/ccsha1.h>
+#include <corecrypto/ccaes.h>
+}
+#include <sys/random.h>                                        /* read_random: the SNonce */
+
+/* PRF with HMAC-SHA1 (802.11i H.4): R_i = HMAC(key, label || 0 || data || i), concatenated then truncated. */
+static void
+x9_prf512(const uint8_t key[32], const char *label, const uint8_t *data, unsigned dlen, uint8_t out[64])
+{
+    unsigned ll = strlen(label);
+    uint8_t buf[64 + 128];
+    if (ll + 2 + dlen > sizeof buf - 1) { memset(out, 0, 64); return; }
+    memcpy(buf, label, ll);
+    buf[ll] = 0;
+    memcpy(buf + ll + 1, data, dlen);
+    const struct ccdigest_info *di = ccsha1_di();
+    for (unsigned i = 0; i < 4; i++) {
+        buf[ll + 1 + dlen] = (uint8_t)i;
+        cchmac(di, 32, key, ll + 2 + dlen, buf, out + 20 * i);
+    }
+}
+
+/* EAPOL-Key MIC: version 1 = HMAC-MD5-128 (corecrypto here has no MD5: logged unsupported), version 2+ =
+ * HMAC-SHA1-128 (first 16 bytes). RUC-Mobile uses version 2 (android-join-2 KeyInfo 0x...8a/0x...0a/0x...ca). */
+static void
+x9_eapol_mic(const uint8_t *kck, unsigned klen, unsigned ver, const uint8_t *body, unsigned blen, uint8_t mic[16])
+{
+    uint8_t hash[64];
+    const struct ccdigest_info *di = ccsha1_di();
+    cchmac(di, klen, kck, blen, body, hash);
+    memcpy(mic, hash, 16);
+}
+
+/* RFC 3394 AES Key Wrap unwrap with a 128-bit KEK; returns the plain length or 0.
+ * The kernel's corecrypto links CBC only (ccrypto.o: ccaes_cbc_*), no ECB: one ECB block = one CBC block with a
+ * zero IV (P = D(C) xor IV). */
+static bool
+x9_aes_dec_block(const uint8_t kek[16], const uint8_t in[16], uint8_t out[16])
+{
+    const ccmode_cbc *dec = ccaes_cbc_decrypt_mode();
+    cccbc_ctx_decl(dec->size, ctx);
+    cccbc_iv iv;                                                /* cccbc_iv = a 16 B aligned struct */
+    memset(&iv, 0, sizeof iv);
+    cccbc_init(dec, ctx, 16, kek);
+    bool ok = cccbc_update(dec, ctx, &iv, 1, in, out) == 0;
+    cccbc_ctx_clear(dec->size, ctx);
+    return ok;
+}
+static unsigned
+x9_key_unwrap(const uint8_t kek[16], const uint8_t *in, unsigned inlen, uint8_t *out)
+{
+    if (inlen < 24 || inlen % 8 || inlen > 40) return 0;       /* 16, 24 or 32 B key */
+    unsigned n = inlen / 8 - 1;
+    uint8_t a[16], r[4][8];
+    memcpy(a, in, 8);
+    for (unsigned i = 0; i < n; i++) memcpy(r[i], in + 8 + 8 * i, 8);
+    for (int j = 5; j >= 0; j--) {
+        for (unsigned i = n; i >= 1; i--) {
+            uint64_t t = (uint64_t)(6u * (unsigned)j + i);
+            uint8_t b[16];
+            for (unsigned k = 0; k < 8; k++) b[k] = a[k] ^ (uint8_t)(t >> (56 - 8 * k));
+            memcpy(b + 8, r[i - 1], 8);
+            if (!x9_aes_dec_block(kek, b, b)) return 0;
+            memcpy(a, b, 8);
+            memcpy(r[i - 1], b + 8, 8);
+        }
+    }
+    static const uint8_t iv[8] = { 0xa6, 0xa6, 0xa6, 0xa6, 0xa6, 0xa6, 0xa6, 0xa6 };
+    if (memcmp(a, iv, 8)) return 0;
+    for (unsigned i = 0; i < n; i++) memcpy(out + 8 * i, r[i], 8);
+    return 8 * n;
+}
+
+/* gen4m nicUniCmdInstallKey: UNI_CMD_STAREC {bss 0, widxL} + tag 0x27 (68 B). */
+static bool
+x9_radio_install_key(x9_wdma *d, bool pairwise, const uint8_t *peer, uint8_t widx, uint8_t keyid, const uint8_t *key,
+    unsigned keylen, const uint8_t *rsc)
+{
+    static uint8_t ev[256];
+    uint8_t pl[8 + 68] = {};
+    pl[0] = 0;
+    pl[1] = widx;
+    uint8_t *t = pl + 8;
+    uint16_t tl = 68;
+    t[0] = 0x27; t[1] = 0;                                     /* u2Tag first, then u2Length (our other TLVs) */
+    memcpy(t + 2, &tl, 2);
+    t[4] = 1;                                                  /* ucAddRemove 1 = add */
+    t[5] = pairwise ? 1 : 0;                                   /* ucTxKey */
+    t[6] = pairwise ? 1 : 0;                                   /* ucKeyType 1 = unicast */
+    t[7] = 0;                                                  /* ucIsAuthenticator */
+    memcpy(t + 8, peer, 6);
+    t[14] = 0;                                                 /* ucBssIdx */
+    t[15] = 4;                                                 /* ucAlgorithmId CIPHER_SUITE_CCMP */
+    t[16] = keyid;
+    t[17] = (uint8_t)keylen;
+    t[18] = widx;
+    t[19] = 0;                                                 /* ucMgmtProtection */
+    memcpy(t + 20, key, keylen > 32 ? 32 : keylen);
+    if (rsc) memcpy(t + 52, rsc, 8);
+    int n = x9_wd_unicmd(d, 0x03, 0x07, pl, sizeof pl, 0x01, ev, sizeof ev, 1000);
+    IOLog("X9 WIFI KEY: install %s widx %u keyid %u len %u -> %s\n", pairwise ? "PTK" : "GTK", widx, keyid, keylen,
+        n > 0 ? "answered" : "NO CMD_RESULT");
+    return n > 0;
+}
+
+/* Build an EAPOL-Key body: descriptor 2, KeyInfo, lengths, replay, nonce, RSC, zero MIC, key data. */
+static unsigned
+x9_eapol_key_body(uint8_t *body, uint16_t keyinfo, uint16_t keylen16, const uint8_t *replay, const uint8_t *nonce,
+    const uint8_t *rsc, const uint8_t *keydata, unsigned kdlen)
+{
+    memset(body, 0, 95 + kdlen);
+    body[0] = 2;                                               /* descriptor type RSN */
+    memcpy(body + 1, &keyinfo, 2);
+    memcpy(body + 3, &keylen16, 2);
+    if (replay) memcpy(body + 5, replay, 8);
+    if (nonce) memcpy(body + 13, nonce, 32);
+    if (rsc) memcpy(body + 61, rsc, 8);
+    memcpy(body + 93, &kdlen, 2);
+    if (kdlen) memcpy(body + 95, keydata, kdlen);
+    return 95 + kdlen;
+}
+
+static bool
+x9_tx_eapol(x9_wdma *d, const uint8_t mac[6], const uint8_t bssid[6], uint8_t eapover, const uint8_t *body, unsigned blen)
+{
+    uint8_t eth[128];
+    if (blen > sizeof eth - 18) return false;
+    memcpy(eth, bssid, 6);                                     /* DA = AP */
+    memcpy(eth + 6, mac, 6);
+    eth[12] = 0x88; eth[13] = 0x8e;
+    eth[14] = eapover; eth[15] = 3;                            /* EAPOL-Key */
+    memcpy(eth + 16, &blen, 2);
+    memcpy(eth + 18, body, blen);
+    return x9_tx_data(d, mac, bssid, eth, 18u + blen);
+}
+
+/* PTK from the PMK; KCK/KEK/TK split (CCMP-128). */
+static void
+x9_derive_ptk(const uint8_t mac[6], const uint8_t bssid[6])
+{
+    using namespace x9wifi::fake;
+    uint8_t data[6 + 6 + 32 + 32], *o = data;
+    if (memcmp(bssid, mac, 6) < 0) { memcpy(o, bssid, 6); memcpy(o + 6, mac, 6); }
+    else { memcpy(o, mac, 6); memcpy(o + 6, bssid, 6); }
+    o += 12;
+    if (memcmp(x9_anonce, x9_snonce, 32) < 0) { memcpy(o, x9_anonce, 32); memcpy(o + 32, x9_snonce, 32); }
+    else { memcpy(o, x9_snonce, 32); memcpy(o + 32, x9_anonce, 32); }
+    uint8_t ptk[64];
+    x9_prf512(pmk, "Pairwise key expansion", data, sizeof data, ptk);
+    memcpy(x9_kck, ptk, 16);
+    memcpy(x9_kek, ptk + 16, 16);
+    memcpy(x9_tk, ptk + 32, 16);
+    x9_kck_ok = true;
+}
+
+/* EAPOL-Key frame fields inside an Ethernet frame. */
+struct x9_keyframe {
+    uint16_t keyinfo, keylen16, kdlen;
+    const uint8_t *replay, *nonce, *rsc, *mic, *keydata;
+    uint8_t *body;                                             /* points into the Ethernet frame */
+    unsigned blen;
+    uint8_t ver;                                               /* EAPOL proto version from the header */
+};
+
+static bool
+x9_key_parse(const uint8_t *eth, unsigned len, x9_keyframe *kf)
+{
+    memset(kf, 0, sizeof *kf);
+    if (len < 18 + 95) return false;
+    uint16_t blen;
+    memcpy(&blen, eth + 16, 2);
+    if (18u + blen > len || blen < 95) return false;
+    kf->ver = eth[14];
+    kf->body = __DECONST(uint8_t *, eth + 18);
+    kf->blen = blen;
+    const uint8_t *b = eth + 18;
+    memcpy(&kf->keyinfo, b + 1, 2);
+    memcpy(&kf->keylen16, b + 3, 2);
+    memcpy(&kf->kdlen, b + 93, 2);
+    if (95u + kf->kdlen != blen) return false;
+    kf->replay = b + 5;
+    kf->nonce = b + 13;
+    kf->rsc = b + 61;
+    kf->mic = b + 77;
+    kf->keydata = b + 95;
+    return true;
+}
+
+/* Verify the MIC of a received key frame (kck required). */
+static bool
+x9_key_mic_ok(x9_keyframe *kf, const uint8_t *kck)
+{
+    uint8_t zero[16], mic[16];
+    memcpy(zero, kf->mic, 16);
+    memset(kf->body + 77, 0, 16);
+    x9_eapol_mic(kck, 16, kf->keyinfo & 3, kf->body, kf->blen, mic);
+    memcpy(kf->body + 77, zero, 16);
+    return !memcmp(mic, kf->mic, 16);
+}
+
+/* Parse the GTK KDE (00-0F-AC-01) out of the key data; unwraps when secure. Returns the GTK length or 0. */
+static unsigned
+x9_parse_gtk(const x9_keyframe *kf, bool secure, uint8_t *gtk, unsigned cap, uint8_t *keyid)
+{
+    if (!kf->kdlen) return 0;
+    const uint8_t *kd = kf->keydata;
+    unsigned o = 0;
+    while (o + 2 <= kf->kdlen) {
+        uint8_t t = kd[o], l = kd[o + 1];
+        if (l < 4 || o + 2u + l > kf->kdlen) break;
+        if (t == 0xdd && !memcmp(kd + o + 2, "\x00\x0f\xac\x01", 4) && l >= 6) {
+            const uint8_t *g = kd + o + 6;                     /* info byte then data */
+            unsigned gl = l - 5;
+            *keyid = g[0] & 0x3;
+            if (secure && gl >= 24 && gl <= 40) {
+                unsigned n = x9_key_unwrap(x9_kek, g + 1, gl, gtk);
+                if (!n || n > cap) { IOLog("X9 WIFI KEY: GTK unwrap FAILED (wrapped %u)\n", gl); return 0; }
+                return n;
+            }
+            if (gl <= cap) { memcpy(gtk, g + 1, gl); return gl; }
+            return 0;
+        }
+        o += 2u + l;
+    }
+    return 0;
+}
+
+/* M1 -> SNonce + PTK + M2. */
+static void
+x9_4wh_m2(x9_wdma *d, const uint8_t mac[6], const uint8_t bssid[6])
+{
+    using namespace x9wifi::fake;
+    x9_keyframe kf;
+    if (!x9_key_parse(x9_m1, x9_m1_len, &kf)) { x9_m1_len = 0; return; }
+    if (!pmkSet) { IOLog("X9 WIFI KEY: M1 held, PMK not set yet (1X EAP pending)\n"); return; }
+    memcpy(x9_anonce, kf.nonce, 32);
+    read_random(x9_snonce, sizeof x9_snonce);
+    x9_derive_ptk(mac, bssid);
+    uint16_t ki = (uint16_t)((kf.keyinfo & 3) | 0x100 | 0x08); /* version | MIC | pairwise */
+    uint8_t body[96];
+    unsigned bl = x9_eapol_key_body(body, ki, 0, kf.replay, x9_snonce, NULL, NULL, 0);
+    x9_eapol_mic(x9_kck, 16, kf.keyinfo & 3, body, bl, body + 77);
+    bool ok = x9_tx_eapol(d, mac, bssid, kf.ver, body, bl);
+    IOLog("X9 WIFI KEY: M1 -> PTK (KCK/KEK/TK 16/16/16), M2 keyinfo %04x -> %s\n", ki, ok ? "sent" : "SEND FAILED");
+}
+
+/* M3 -> verify, install PTK + GTK, M4. */
+static void
+x9_4wh_m3(x9_wdma *d, const uint8_t mac[6], const uint8_t bssid[6], const uint8_t *eth, unsigned len)
+{
+    using namespace x9wifi::fake;
+    x9_keyframe kf;
+    if (!x9_key_parse(eth, len, &kf)) return;
+    if (!x9_key_mic_ok(&kf, x9_kck)) { IOLog("X9 WIFI KEY: M3 MIC BAD\n"); return; }
+    IOLog("X9 WIFI KEY: M3 ok (keyinfo %04x, %u B key data)\n", kf.keyinfo, kf.kdlen);
+    if (!x9_radio_install_key(d, true, bssid, X9_JOIN_WIDX, 0, x9_tk, 16, NULL)) return;
+    x9_ptk_ready = true;
+    if (!x9_ext_ptk) {                                         /* ext PTK: userspace sends its own M4 */
+        uint16_t ki = (uint16_t)((kf.keyinfo & 3) | 0x100 | 0x08 | 0x200);   /* + Secure, like Android M4 0x030a */
+        uint8_t body[96];
+        unsigned bl = x9_eapol_key_body(body, ki, 0, kf.replay, NULL, NULL, NULL, 0);
+        x9_eapol_mic(x9_kck, 16, kf.keyinfo & 3, body, bl, body + 77);
+        bool ok = x9_tx_eapol(d, mac, bssid, kf.ver, body, bl);
+        IOLog("X9 WIFI KEY: M4 keyinfo %04x -> %s; unicast data %s\n", ki, ok ? "sent" : "SEND FAILED",
+            x9_ptk_ready ? "PROTECTED" : "open");
+    } else IOLog("X9 WIFI KEY: PTK installed (userspace PTK); unicast data PROTECTED\n");
+    if (kf.kdlen) {                                            /* GTK from M3 (Secure set) */
+        uint8_t kid = 0;
+        unsigned gl = x9_parse_gtk(&kf, (kf.keyinfo & 0x200) != 0, x9_gtk, sizeof x9_gtk, &kid);
+        if (gl) {
+            x9_gtk_len = gl; x9_gtk_keyid = kid;
+            if (x9_radio_install_key(d, false, bssid, 0, kid, x9_gtk, gl, kf.rsc)) {
+                x9_gtk_ready = true;
+                IOLog("X9 WIFI KEY: GTK %u B keyid %u installed (BC entry), broadcasts protected\n", gl, kid);
+            }
+        }
+    }
+}
+
+/* GTK rekey M1 -> install + GTK M2. */
+static void
+x9_gtk_m1(x9_wdma *d, const uint8_t mac[6], const uint8_t bssid[6], const uint8_t *eth, unsigned len)
+{
+    x9_keyframe kf;
+    if (!x9_key_parse(eth, len, &kf)) return;
+    if (!x9_key_mic_ok(&kf, x9_kck)) { IOLog("X9 WIFI KEY: GTK M1 MIC BAD\n"); return; }
+    uint8_t kid = 0;
+    unsigned gl = x9_parse_gtk(&kf, (kf.keyinfo & 0x200) != 0, x9_gtk, sizeof x9_gtk, &kid);
+    if (!gl) { IOLog("X9 WIFI KEY: GTK M1 without a usable GTK KDE\n"); return; }
+    x9_gtk_len = gl; x9_gtk_keyid = kid;
+    if (!x9_radio_install_key(d, false, bssid, 0, kid, x9_gtk, gl, kf.rsc)) return;
+    x9_gtk_ready = true;
+    if (x9_ext_ptk) { IOLog("X9 WIFI KEY: rekey GTK installed (userspace PTK)\n"); return; }
+    uint16_t ki = (uint16_t)((kf.keyinfo & 3) | 0x100 | 0x200);          /* Android GTK M2 0x0302 */
+    uint8_t body[96];
+    unsigned bl = x9_eapol_key_body(body, ki, 0, kf.replay, NULL, NULL, NULL, 0);
+    x9_eapol_mic(x9_kck, 16, kf.keyinfo & 3, body, bl, body + 77);
+    bool ok = x9_tx_eapol(d, mac, bssid, kf.ver, body, bl);
+    IOLog("X9 WIFI KEY: rekey GTK %u B keyid %u, GTK M2 keyinfo %04x -> %s\n", gl, kid, ki, ok ? "sent" : "SEND FAILED");
+}
+
+/* EAPOL-Key frames from the AP, intercepted in the radio thread (RX4/RX7). Returns true when consumed here;
+ * false = hand the frame to the network stack (ext-PTK mode: userspace runs the handshake). */
+static bool
+x9_rx_eapol_key(x9_wdma *d, const uint8_t mac[6], const uint8_t bssid[6], const uint8_t *eth, unsigned len)
+{
+    using namespace x9wifi::fake;
+    if (len < 20) return true;
+    uint16_t keyinfo;
+    memcpy(&keyinfo, eth + 18 + 1, 2);
+    if ((keyinfo & 3) == 1) IOLog("X9 WIFI KEY: AP uses MIC version 1 (HMAC-MD5); this build only does SHA1\n");
+    bool ack = keyinfo & 0x80, pair = keyinfo & 0x08, mic = keyinfo & 0x100, secure = keyinfo & 0x200;
+    if (ack && pair && !mic && !secure) {                      /* M1 */
+        if (len > sizeof x9_m1) return true;
+        memcpy(x9_m1, eth, len); x9_m1_len = len;
+        if (x9_ext_ptk) return false;                          /* userspace drives the handshake: forward M1 */
+        if (status.state == x9wifi::STA_UP) x9_4wh_m2(d, mac, bssid);
+        else IOLog("X9 WIFI KEY: M1 stored (%u B), not associated yet\n", len);
+        return true;
+    }
+    if (ack && !pair && mic) {                                 /* GTK M1 */
+        if (x9_ptk_ready || x9_ext_ptk) x9_gtk_m1(d, mac, bssid, eth, len);
+        return true;
+    }
+    if (!ack && pair && mic) {                                 /* M3 (Install bit varies) */
+        if (x9_kck_ok) x9_4wh_m3(d, mac, bssid, eth, len);
+        else IOLog("X9 WIFI KEY: M3 without a derived KCK (PMK missing at M1?)\n");
+        return true;
+    }
+    IOLog("X9 WIFI KEY: RX keyinfo %04x ignored\n", keyinfo);
+    return true;
+}
+
 /* 802.11 data frame at h (len bytes) -> Ethernet in x9_drx_eth; returns its length, 0 if nothing to deliver. */
 static unsigned
 x9_rx_80211(const uint8_t *h, unsigned len, const uint8_t mac[6])
@@ -2345,7 +2736,8 @@ x9_rx_80211(const uint8_t *h, unsigned len, const uint8_t mac[6])
     if ((fc0 & 0x0c) != 0x08) { x9_drx_other++; return 0; }
     if (fc0 & 0x40) return 0;                                  /* null / QoS null */
     if ((fc1 & 3) != 2) { x9_drx_other++; return 0; }          /* not FromDS */
-    if (fc1 & 0x40) { x9_drx_prot++; return 0; }               /* protected: no keys */
+    bool prot = (fc1 & 0x40) != 0;                             /* rev252cm6: keys may exist now */
+    if (prot && !x9_ptk_ready && !x9_gtk_ready) { x9_drx_prot++; return 0; }
     const uint8_t *da = h + 4, *sa = h + 16;
     if (memcmp(da, mac, 6) && !(da[0] & 1)) { x9_drx_other++; return 0; }
     if (!memcmp(sa, mac, 6)) return 0;                         /* our own broadcast echoed by the AP */
@@ -2355,10 +2747,12 @@ x9_rx_80211(const uint8_t *h, unsigned len, const uint8_t mac[6])
         hl += 2;
         if (fc1 & 0x80) hl += 4;                               /* +HTC */
     }
-    if (len < hl + 8) { x9_drx_bad++; return 0; }
+    if (prot) hl += 8;                                         /* CCMP header (PN + KeyID), FW decrypted */
+    unsigned ccmp_tail = prot ? 8 : 0;                         /* CCMP MIC after the payload */
+    if (len < hl + 8 + ccmp_tail) { x9_drx_bad++; return 0; }
     const uint8_t *l = h + hl;
     if (l[0] != 0xaa || l[1] != 0xaa || l[2] != 0x03 || l[3] || l[4] || (l[5] && l[5] != 0xf8)) { x9_drx_bad++; return 0; }
-    unsigned pl = len - hl - 8;
+    unsigned pl = len - hl - 8 - ccmp_tail;
     if (14 + pl > sizeof x9_drx_eth) { x9_drx_bad++; return 0; }
     memcpy(x9_drx_eth, da, 6);
     memcpy(x9_drx_eth + 6, sa, 6);
@@ -2369,7 +2763,7 @@ x9_rx_80211(const uint8_t *h, unsigned len, const uint8_t mac[6])
 
 /* One RX packet (any ring) while associated. Returns Ethernet length in x9_drx_eth, 0 if none. */
 static unsigned
-x9_rx_data(const uint8_t *p, unsigned n, const uint8_t mac[6], const uint8_t bssid[6])
+x9_rx_data(x9_wdma *d, const uint8_t *p, unsigned n, const uint8_t mac[6], const uint8_t bssid[6])
 {
     if (n < 32) return 0;
     uint32_t dw0, dw1, dw2;
@@ -2383,7 +2777,7 @@ x9_rx_data(const uint8_t *p, unsigned n, const uint8_t mac[6], const uint8_t bss
         off += (g & 8 ? 16 : 0) + (g & 1 ? 16 : 0) + (g & 2 ? 16 : 0) + (g & 4 ? 16 : 0) + (g & 16 ? 96 : 0);
         off += ((dw2 >> 13) & 7) << 1;
         if (off + 14 > cnt) x9_drx_bad++;
-        else if (dw2 & (1u << 7)) {                            /* HEADER_TRAN: Ethernet II already */
+        else if (dw2 & (1u << 7)) {                            /* HEADER_TRAN: Ethernet II already (FW decrypted) */
             unsigned el = cnt - off;
             if (el > sizeof x9_drx_eth) x9_drx_bad++;
             else if (memcmp(p + off, mac, 6) && !(p[off] & 1)) x9_drx_other++;
@@ -2410,11 +2804,13 @@ x9_rx_data(const uint8_t *p, unsigned n, const uint8_t mac[6], const uint8_t bss
     if (r) {
         x9_drx++;
         x9_pkt_log(1, x9_drx_eth, r);
-        if (r >= 19 && x9_drx_eth[12] == 0x88 && x9_drx_eth[13] == 0x8e) {
-            if (x9_drx_eth[15] == 3 && r >= 14 + 4 + 3)
-                IOLog("X9 WIFI EAPOL: RX key frame len %u descriptor %u key info %02x%02x\n", r, x9_drx_eth[18],
-                    x9_drx_eth[19], x9_drx_eth[20]);
-            else IOLog("X9 WIFI EAPOL: RX type %u len %u (EAP code %u)\n", x9_drx_eth[15], r, r > 18 ? x9_drx_eth[18] : 0);
+        if (r >= 20 && x9_drx_eth[12] == 0x88 && x9_drx_eth[13] == 0x8e) {
+            if (x9_drx_eth[15] == 3) {                         /* rev252cm6: key frames run the 4WH in here */
+                if (x9_rx_eapol_key(d, mac, bssid, x9_drx_eth, r)) return 0;   /* consumed, not for the stack */
+                return r;                                      /* ext-PTK mode: userspace answers M1/M3 */
+            }
+            IOLog("X9 WIFI EAPOL: RX type %u len %u (EAP code %u) -> userspace\n", x9_drx_eth[15], r,
+                r > 18 ? x9_drx_eth[18] : 0);
         }
     }
     return r;
@@ -2464,6 +2860,11 @@ x9_radio_leave(x9_wdma *d, const uint8_t mac[6], bool send_deauth, const char *w
 {
     if (!x9_assoc) return;
     x9_assoc = false;
+    /* rev252cm6: drop the stage 2 key state; the firmware STAREC remove invalidates its WTBL keys. */
+    x9_ptk_ready = x9_gtk_ready = x9_kck_ok = x9_ext_ptk = false;
+    x9_m1_len = 0; x9_gtk_len = 0; x9_gtk_keyid = 0;
+    memset(x9_kck, 0, sizeof x9_kck); memset(x9_kek, 0, sizeof x9_kek);
+    memset(x9_tk, 0, sizeof x9_tk); memset(x9_gtk, 0, sizeof x9_gtk);
     const x9wifi::bss_info *b = &x9_cur_bss;
     if (send_deauth) {
         uint8_t fr[26] = {};
@@ -2537,11 +2938,20 @@ x9_wifi_radio_loop(x9_wdma *d)
                 if (!fl) break;
                 x9_tx_data(d, mac, cbssid, txf, fl);
             }
+            if (whKick) {          /* rev252cm6: the 1X PMK arrived while an M1 was stored: start the handshake */
+                IOLockLock(lock);
+                whKick = false;
+                IOLockUnlock(lock);
+                if (x9_m1_len && !x9_ptk_ready) {
+                    IOLog("X9 WIFI KEY: PMK arrived after M1, starting the 4-way handshake\n");
+                    x9_4wh_m2(d, mac, cbssid);
+                }
+            }
             int kick = -1;
             const uint8_t *dp;
             int dn;
             for (unsigned k = 0; k < 64 && (dn = x9_r4_try(d, &dp)) >= 0; k++) {
-                unsigned el = x9_rx_data(dp, (unsigned)dn, mac, cbssid);
+                unsigned el = x9_rx_data(d, dp, (unsigned)dn, mac, cbssid);
                 if (el) { if (dev && dev->rx) dev->rx(x9_drx_eth, el); }
                 else {
                     int kr = x9_rx_kick(dp, (unsigned)dn, mac, cbssid);
@@ -2569,7 +2979,7 @@ x9_wifi_radio_loop(x9_wdma *d)
                 memcpy(&rxd0, ev, 4);
                 unsigned cap = (unsigned)(dn < (int)sizeof ev ? dn : (int)sizeof ev);
                 if ((rxd0 >> 27) != 7 || (ev[36] != 0x2d && ev[36] != 0x01)) {
-                    unsigned el = x9_rx_data(ev, cap, mac, cbssid);
+                    unsigned el = x9_rx_data(d, ev, cap, mac, cbssid);   /* data on RX7 too (M1 can arrive here) */
                     if (el) { if (dev && dev->rx) dev->rx(x9_drx_eth, el); continue; }
                     int kr = x9_rx_kick(ev, cap, mac, cbssid);
                     if (kr >= 0) { kick = kr; continue; }
