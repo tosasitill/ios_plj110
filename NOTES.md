@@ -1,3 +1,25 @@
+## HANDOFF 2026-11-07 (29): 87.txt = rev252bx (scope ON) - no effect: HoldAll on ~every job; rev252by BUILT (fix)
+
+- Log copy .local/x9/logs/x9-87.txt (user flashed only the ON image; "no difference" by feel). Scope clients opened
+  (backboardd 17.3 s, SpringBoard, mediaserverd). cache-frontend-scope: 22.7 s skip 24 MB pre/post with hold 8/69;
+  from 26.8 s hold_jobs ~= jobs (62/82, then 80/87 .. 85/85) and pre/post skip 0. So nothing was skipped.
+  Cause (inferred from code, not logged): HoldAll was set by commits whose surface had scopeBytes==0 (registration
+  failed). Registrations fail once the 1024-entry table is full; rev252bx matched Unregister/Acquire by address AND
+  bytes, so any length mismatch leaked entries (and a leaked entry could even cover a later unregistered import).
+- Same log: pre_cache 4.4-4.8 ms, post 1.9-2.5 ms, wait 11.6-15.3 ms per job (40-58 jobs/2 s); presented 19-23.5 fps.
+  wait is now the largest item.
+- Wi-Fi 87: every scan has probe responses 0 (beacons 4-7 only). With 86's Auth MPDU_ERROR x15 this points at the
+  radio not transmitting on air at all (or the firmware scan being passive). TX path (PA/FEM/TX calibration/power) is the
+  next Wi-Fi suspect; not investigated yet.
+- rev252by (commit e8811c4): kernel table matches (task, address) only, regs/refs counted separately, Acquire of an
+  unknown address creates a placeholder (regs 0) so Release balances, only regs>0 ranges can justify a skip, any refusal
+  (table full) disables skipping for the boot; log adds table used/registers/refused/unreg_miss/placeholders/holds.
+  Frontend acquires each referenced surface by its own base address (IOSurfaceGetBaseAddress + page-rounded alloc)
+  even if its registration failed; HoldAll only for heaps, unmatched surface buffers, or a failed acquire.
+  BUILT `build.py all --revision 261 --name x9-rev252by` (+x9_cache_scope=1), boot_sha256
+  0b4931c1052d6283a179b19bf4a4fb445bd9f724213ade0862795702b1a6904b. NEW PLUGIN (261): stage
+  `X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/x9-rev252by`. Not device-tested.
+
 ## HANDOFF 2026-11-07 (28): rev252bx BUILT = frontend cache scope (plugin 260); A/B images; commit 4f26005
 
 - Goal: 60 fps (16.7 ms/frame). 84-86 busy windows: ~1 backboardd CB per frame, kernel FIFO serial, run_avg 10-19 ms/job
