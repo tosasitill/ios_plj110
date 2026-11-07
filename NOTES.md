@@ -1,3 +1,18 @@
+## HANDOFF 2026-11-07 (47): 98.txt = rev252cm3: Wi-Fi stable (leave/rejoin OK), IP OK, still no portal sheet; rev252cm4 BUILT
+
+- Log copy .local/x9/logs/x9-98.txt. RUC-Web 5180 joined, IP 10.46.12.100, rx all on RX5 (HW header translation:
+  RXD DW2 b7 set, group 4 present), ~1 rx/s, 0 bad. iOS disconnected at 93.5 s: our leave (deauth, BSSINFO
+  disconnecting, STAREC remove) all answered; rejoin to another AP on 5180 got no auth response, the other-band retry on
+  2432 joined (RX4 then), IP again. No firmware hang any more.
+- No portal sheet. Only lead: `SWEET Sandbox: com.apple.WebKit.Ne privilege 10001 denied` at 69.69 s (and translationd,
+  cloudd). 10001 = PRIV_NET_PRIVILEGED_SOCKET_DELEGATE; the sandbox stand-in (sweet_amfi.c) denied every privilege but
+  PRIV_WORK_INTERVAL, so WebKit's networking process cannot delegate sockets (portal sheet / Safari page loads).
+- rev252cm4: grants PRIV_NET_* 10000-10008 and PRIV_NETINET 11000/11001 (first 16 logged `privilege N granted
+  (network)`); per-packet log `X9 WIFI PKT TX|RX:` (ARP, UDP/TCP ports, TCP flags; first 160 each way).
+- BUILT kernel only (plugin 267): boot_sha256 765c4f56bcb51f930e4e46daf7d20082bfb969dcec4356e3464af6ff19dac3c3.
+- If still no sheet: open Safari to an http:// URL by hand; the PKT lines show whether DNS (UDP 53) answers and
+  whether TCP 80 SYNs get SYN-ACKs.
+
 ## HANDOFF 2026-11-07 (46): 97.txt = rev252cm2: **DHCP OK** (10.46.12.100) on RUC-Web, then deauth + FW hang; rev252cm3 BUILT
 
 - Log copy .local/x9/logs/x9-97.txt. Join as before; `first packet on RX5`, rx 16 in 10 s (bad 0), rings 0/16/0, en0
