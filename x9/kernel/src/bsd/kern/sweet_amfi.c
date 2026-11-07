@@ -560,6 +560,21 @@ sweet_sandbox_priv_grant(kauth_cred_t cred __unused, int priv)
 	if (priv == PRIV_WORK_INTERVAL) {
 		return 0;
 	}
+	/*
+	 * rev252cm4: networking privileges (PRIV_NET_* 10000-10008, PRIV_NETINET_* 11000-11001) that iOS grants
+	 * through entitlements. 98.txt: com.apple.WebKit.Networking was denied PRIV_NET_PRIVILEGED_SOCKET_DELEGATE
+	 * (10001), so its delegated sockets (Safari, the captive-portal sheet) fail; cloudd/translationd too.
+	 */
+	if ((priv >= 10000 && priv <= 10008) || priv == 11000 || priv == 11001) {
+		static int sweet_net_priv_logged;
+		if (sweet_net_priv_logged < 16) {
+			char n2[20];
+			proc_selfname(n2, sizeof(n2));
+			sweet_net_priv_logged++;
+			printf("SWEET Sandbox: %s privilege %d granted (network)\n", n2, priv);
+		}
+		return 0;
+	}
 	char name[20];
 	proc_selfname(name, sizeof(name));
 	for (int i = 0; i < sweet_priv_logged_count; i++) {

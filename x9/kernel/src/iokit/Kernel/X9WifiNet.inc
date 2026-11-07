@@ -2221,9 +2221,38 @@ static unsigned x9_dtx_unkeyed;
 static unsigned x9_dtx, x9_dtx_fail, x9_drx, x9_drx_bad, x9_drx_prot, x9_drx_other, x9_drx_dumps, x9_drx_odumps;
 static uint8_t x9_drx_eth[2048];
 
+/* rev252cm4: one line per IPv4/ARP packet (first 160 each way): DNS, DHCP, TCP flags, ICMP. Diagnoses where the
+ * captive-portal probe stops (98.txt: IP fine, no sheet). */
+static unsigned x9_plog[2];
+static void
+x9_pkt_log(int rx, const uint8_t *e, unsigned len)
+{
+    if (x9_plog[rx] >= 160 || len < 14) return;
+    unsigned et = e[12] << 8 | e[13];
+    const uint8_t *ip = e + 14;
+    if (et == 0x0806 && len >= 42) {
+        x9_plog[rx]++;
+        IOLog("X9 WIFI PKT %s: ARP op %u %u.%u.%u.%u -> %u.%u.%u.%u\n", rx ? "RX" : "TX", ip[7], ip[14], ip[15], ip[16],
+            ip[17], ip[24], ip[25], ip[26], ip[27]);
+        return;
+    }
+    if (et != 0x0800 || len < 34) return;
+    unsigned ihl = (ip[0] & 15) * 4, pr = ip[9];
+    const uint8_t *l4 = ip + ihl;
+    unsigned sp = 0, dp = 0;
+    if ((pr == 6 || pr == 17) && 14 + ihl + 4 <= len) { sp = l4[0] << 8 | l4[1]; dp = l4[2] << 8 | l4[3]; }
+    x9_plog[rx]++;
+    IOLog("X9 WIFI PKT %s: %s %u.%u.%u.%u:%u -> %u.%u.%u.%u:%u len %u%s%s%s%s\n", rx ? "RX" : "TX",
+        pr == 6 ? "TCP" : pr == 17 ? "UDP" : pr == 1 ? "ICMP" : "IP", ip[12], ip[13], ip[14], ip[15], sp, ip[16], ip[17],
+        ip[18], ip[19], dp, len,
+        pr == 6 && 14 + ihl + 14 <= len && (l4[13] & 2) ? " SYN" : "", pr == 6 && 14 + ihl + 14 <= len && (l4[13] & 16) ? " ACK" : "",
+        pr == 6 && 14 + ihl + 14 <= len && (l4[13] & 4) ? " RST" : "", pr == 6 && 14 + ihl + 14 <= len && (l4[13] & 1) ? " FIN" : "");
+}
+
 static bool
 x9_tx_data(x9_wdma *d, const uint8_t mac[6], const uint8_t bssid[6], const uint8_t *eth, unsigned len)
 {
+    x9_pkt_log(0, eth, len);
     if (len < 14) return false;
     bool eapol = eth[12] == 0x88 && eth[13] == 0x8e;
     if (x9wifi::fake::joinSecure && !eapol) { x9_dtx_unkeyed++; return false; }   /* no keys yet: EAPOL only */
@@ -2333,6 +2362,7 @@ x9_rx_data(const uint8_t *p, unsigned n, const uint8_t mac[6], const uint8_t bss
     }
     if (r) {
         x9_drx++;
+        x9_pkt_log(1, x9_drx_eth, r);
         if (r >= 19 && x9_drx_eth[12] == 0x88 && x9_drx_eth[13] == 0x8e) {
             if (x9_drx_eth[15] == 3 && r >= 14 + 4 + 3)
                 IOLog("X9 WIFI EAPOL: RX key frame len %u descriptor %u key info %02x%02x\n", r, x9_drx_eth[18],
