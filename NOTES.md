@@ -1,3 +1,26 @@
+## HANDOFF 2026-11-07 (37): 91.txt = rev252cd: desktop up, device lost at 70 s (spares); Auth unACKed; rev252ce/cf BUILT
+
+- Log copy .local/x9/logs/x9-91.txt (169 s, no panic, plugin 264).
+- Desktop rendered 26-78 s (up to 73 presents / 2 s); import refusals 2 (was 2618), SpringBoard no longer crashing.
+  GPU scope now skips 83-93 MB pre / 35-45 MB post per job (ranges ~231 with no-copy registration; hold 0, refused 0).
+- 70.329 s: `X9 RENDER ASYNC: submission failed group=1 id=1253 kr=e00002bd` (kIOReturnNoMemory) -> PanVK errno 5
+  -> backboardd DeviceLost on every command buffer / import after it (2040 lines), presents 0 after 78 s. The only
+  NoMemory in the submit path is the import cache alias (createMappingInTask in x9_render_memory_cache). backboardd
+  native bytes grew to 892 MB (RENDER LIVE 850 MiB, old30s 381 MiB) vs ~430-660 MiB on the pan205 runtime: the new
+  runtime's spare image blocks have no byte limit and go only on age (checked lazily) or memory pressure (never
+  delivered here). Kernel NoMemory path itself not instrumented yet.
+- rev252ce (plugin 265, 963f tree c29b31aa, 0100 regenerated): native devices age spares on every keep and keep at
+  most NATIVE_SPARE_BYTES 64 MiB (oldest freed first). boot_sha256 4c11214241fe0f55384c72aa4d14be093557a694baa382e7d8fa16b23ad04206.
+- Wi-Fi 91: scans keep working with 5 GHz networks (RUC-Web/RUC-Mobile on 5180-5825 MHz, 23 networks). Join RUC-Web
+  a4:be:2b:b1:df:b1 5180 MHz: BSSINFO (ch 36, rates 3fc0, basic 0540) answered, CH grant ch 36 band 2 status 0, STAREC
+  answered, 3 Auth: TX_DONE status 3 MPDU_ERROR tx_count 15 rate 6M txpwr 44. Firmware probe requests ARE answered, so
+  RF works; our Auth TXD is the suspect. Audit vs gen4m nic_txd_v3_compose / auth.c: all fields match except queue
+  (gen4m Auth sets FORCE_TX | MGNT_2_CMD_QUE -> MCU_Q0 | ALTX = 16; we used 17 = MCU_Q1 | ALTX) and FORCE_RTS
+  (nicTxSetForceRts -> DW7 b13 for DS_VER >= 3500; we had none). TGID 0 (grant dbdc 0), TXD_LEN 1 page 0 match.
+- rev252cf (commit after these notes' parent): queue 16 + DW7 FORCE_RTS_CTS. Kernel only, plugin 265 (rev252ce's).
+  boot_sha256 c355d073953b736b374fa3cd4138bdd264aeb9d35b9da293cb0d553f846356a4. Stage rev252ce's package
+  (`X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/x9-rev252ce`), then boot x9/out/x9-rev252cf/boot.img.
+
 ## HANDOFF 2026-11-07 (36): 90.txt = rev252cc: **Wi-Fi TX WORKS** (probe responses to our MAC); no desktop (runtime merge bug, fixed in rev252cd)
 
 - Log copy .local/x9/logs/x9-90.txt (116 s, no panic, plugin 263 = metal2vulkan 963f0e64).
