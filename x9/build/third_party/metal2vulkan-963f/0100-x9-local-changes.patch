@@ -1894,7 +1894,7 @@ index 1851084a..3fc17af8 100644
  mod shadow_standing;
  mod shadow_stencil;
 diff --git a/crates/metal2vulkan-runtime/src/memory.rs b/crates/metal2vulkan-runtime/src/memory.rs
-index 64940570..d122dda0 100644
+index 64940570..0d56096b 100644
 --- a/crates/metal2vulkan-runtime/src/memory.rs
 +++ b/crates/metal2vulkan-runtime/src/memory.rs
 @@ -48,6 +48,14 @@
@@ -1912,7 +1912,17 @@ index 64940570..d122dda0 100644
  
  use super::buffer::usage;
  use super::device::lock;
-@@ -330,6 +338,13 @@ pub(super) fn candidates(
+@@ -108,6 +116,9 @@ pub(super) const FIRST_BLOCK_BYTES: u64 = 4 << 20;
+ /// ([`Memory::release_spare`]).
+ pub(super) const SPARE_FOR: Duration = Duration::from_secs(10);
+ 
++/// X9: the most bytes of spare image blocks a native (cache-ownership) device keeps (`Memory::keep_spare`).
++const NATIVE_SPARE_BYTES: u64 = 64 << 20;
++
+ /// Memory operations below this size are not traced.
+ const TRACE_MIN_BYTES: u64 = 256 << 10;
+ 
+@@ -330,6 +341,13 @@ pub(super) fn candidates(
      allowed: u32,
      class: MemoryClass,
      unified: bool,
@@ -1926,7 +1936,7 @@ index 64940570..d122dda0 100644
  ) -> Vec<u32> {
      use vk::MemoryPropertyFlags as P;
      let usable = |index: usize| allowed & (1 << index) != 0;
-@@ -358,6 +373,7 @@ pub(super) fn candidates(
+@@ -358,6 +376,7 @@ pub(super) fn candidates(
              P::empty(),
          ),
      };
@@ -1934,7 +1944,7 @@ index 64940570..d122dda0 100644
      let lacks = |flags: P, wanted: P| u8::from(!wanted.is_empty() && !flags.contains(wanted));
      let mut ranked: Vec<((u8, u8), u32)> = types
          .iter()
-@@ -1202,6 +1218,7 @@ impl Placement {
+@@ -1202,6 +1221,7 @@ impl Placement {
  /// The device's memory: one [`Pool`] per memory type for buffers, and one for images.
  pub(super) struct Memory {
      types: Vec<vk::MemoryType>,
@@ -1942,7 +1952,7 @@ index 64940570..d122dda0 100644
      /// The buffers' pools by memory type, then the images' ([`Memory::pool`]).
      pools: Vec<Pool<Block>>,
      block_bytes: u64,
-@@ -1276,6 +1293,7 @@ impl Memory {
+@@ -1276,6 +1296,7 @@ impl Memory {
                  .map(|_| Pool::default())
                  .collect(),
              types,
@@ -1950,7 +1960,7 @@ index 64940570..d122dda0 100644
              block_bytes: BLOCK_BYTES.min(max_allocation.max(1)),
              device_address,
              address_types: None,
-@@ -1445,6 +1463,26 @@ impl Memory {
+@@ -1445,6 +1466,26 @@ impl Memory {
          self.parking = Some(parking);
      }
  
@@ -1977,7 +1987,7 @@ index 64940570..d122dda0 100644
      /// The bytes of `VkDeviceMemory` allocated so far for blocks of the runtime's own memory,
      /// pooled or dedicated, whether freed since or not: host memory imported counts in none.
      pub(super) fn allocated(&self) -> u64 {
-@@ -1492,7 +1530,7 @@ impl Memory {
+@@ -1492,7 +1533,7 @@ impl Memory {
  
      /// The memory types of `class` among those `allowed` names, as bits.
      pub(super) fn class_types(&self, allowed: u32, class: MemoryClass) -> u32 {
@@ -1986,7 +1996,7 @@ index 64940570..d122dda0 100644
              .into_iter()
              .fold(0, |bits, index| bits | 1 << index)
      }
-@@ -1620,7 +1658,7 @@ impl Memory {
+@@ -1620,7 +1661,7 @@ impl Memory {
          let buffers = buffer_types(device, usage(false), sharing)? & addresses;
          let images = color_image_types(device, sharing)?;
          let best = |bits: u32, class: MemoryClass| {
@@ -1995,7 +2005,7 @@ index 64940570..d122dda0 100644
                  .first()
                  .copied()
          };
-@@ -1763,13 +1801,20 @@ impl Memory {
+@@ -1763,13 +1804,20 @@ impl Memory {
      /// Release every kept empty pooled block of memory type `type_index`, of buffers and of
      /// images, as a block of that type fails to be made ([`place`]): how many went.
      fn release_kept(&mut self, device: &ash::Device, type_index: u32) -> usize {
@@ -2021,7 +2031,41 @@ index 64940570..d122dda0 100644
                  .map(|spare| spare.block),
          );
          let count = blocks.len();
-@@ -2005,7 +2050,7 @@ impl Memory {
+@@ -1787,12 +1835,32 @@ impl Memory {
+     fn keep_spare(&mut self, device: &ash::Device, pool: (Holds, u32), block: Block, now: Instant) {
+         let id = trace_memory(pool, block.size, 0, 3);
+         trace_handle(id, block.memory);
+-        let _ = device;
+         self.spare.push(Spare {
+             pool,
+             block,
+             since: now,
+         });
++        // X9: the native client budget (1 GiB per process, PanVK storage and host imports included) has
++        // no memory-pressure signal reaching the runtime, so spares are bounded there: stale ones go at
++        // once and the oldest go past NATIVE_SPARE_BYTES (91.txt: backboardd reached 892 MB, a submission
++        // failed kIOReturnNoMemory, device lost, no desktop).
++        if self.submission_cache_atom != 0 {
++            self.age_spare(device, now);
++            loop {
++                let held = self.spare.iter().map(|spare| spare.block.size).sum::<u64>();
++                if held <= NATIVE_SPARE_BYTES {
++                    break;
++                }
++                let Some((oldest, _)) =
++                    (self.spare.iter().enumerate()).min_by_key(|(_, spare)| spare.since)
++                else {
++                    break;
++                };
++                let spare = self.spare.swap_remove(oldest);
++                // SAFETY: nothing is placed in a spare block, and no command reads it.
++                drop(unsafe { self.let_go(device, spare.block, FreeCause::KeptStale, None) });
++            }
++        }
+         let bytes = self.spare.iter().map(|spare| spare.block.size).sum::<u64>();
+         if id != 0 {
+             crate::stage_trace::mark(
+@@ -2005,7 +2073,7 @@ impl Memory {
  
      /// The best memory type of `class` among `allowed`, where it has one.
      pub(super) fn best_type(&self, allowed: u32, class: MemoryClass) -> Option<u32> {
@@ -2030,7 +2074,7 @@ index 64940570..d122dda0 100644
              .first()
              .copied()
      }
-@@ -2050,7 +2095,7 @@ impl Memory {
+@@ -2050,7 +2118,7 @@ impl Memory {
      ) -> Result<(vk::DeviceMemory, u32), ImportFailure> {
          use std::os::fd::{AsRawFd, IntoRawFd};
          let mut failure = ImportFailure::NoMemoryType;
@@ -2039,7 +2083,7 @@ index 64940570..d122dda0 100644
              // The descriptor the driver takes, which it owns once the import succeeds and may
              // close even when it fails (the doc above): never `fd`, and never closed here.
              let handed = match fd.try_clone() {
-@@ -2344,7 +2389,9 @@ pub(super) unsafe fn import_host(
+@@ -2344,7 +2412,9 @@ pub(super) unsafe fn import_host(
      let (types, device_address) = {
          let memory = lock(memory);
          (
@@ -2050,7 +2094,7 @@ index 64940570..d122dda0 100644
              memory.device_address,
          )
      };
-@@ -2564,12 +2611,15 @@ fn place(
+@@ -2564,12 +2634,15 @@ fn place(
      fit: Fit,
  ) -> Result<Placement, Error> {
      let size = requirements.size.max(1);
