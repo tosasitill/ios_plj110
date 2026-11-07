@@ -1547,6 +1547,7 @@ x9_radio_scan_req(x9_wdma *d, uint8_t seq, const uint8_t mac[6])
  * header format 802.11 normal. Bit layout from include/nic/nic_connac3x_tx.h (DS_VER 3600). widx/own-mac from BSS0. */
 #define X9_JOIN_WIDX 1u
 #define X9_JOIN_OMAC 0u
+#define X9_JOIN_PID 0x20u                                       /* mgmt PID as Android's first one (PID[32]) */
 
 static unsigned
 x9_txd_mgmt(uint8_t *buf, unsigned framelen, unsigned machdr, uint8_t subtype)
@@ -1555,10 +1556,14 @@ x9_txd_mgmt(uint8_t *buf, unsigned framelen, unsigned machdr, uint8_t subtype)
     unsigned total = 32 + framelen;
     unsigned etoff = (16 + machdr) >> 1;                       /* pse(16)+machdr, in words */
     dw[0] = (total & 0xffff) | ((etoff & 0x7f) << 16) | (2u << 23) | (17u << 25);  /* COMMAND, MCU_Q1|ALTX */
-    dw[1] = (X9_JOIN_WIDX & 0xfff) | (2u << 14) | (((machdr >> 1) & 0x1f) << 16) | (0u << 21) | (X9_JOIN_OMAC << 25);
+    dw[1] = (X9_JOIN_WIDX & 0xfff) | (2u << 14) | (((machdr >> 1) & 0x1f) << 16) | (0u << 21) | (X9_JOIN_OMAC << 25)
+        | (1u << 31);                                          /* FIXED_RATE (Android: Rate mode 1 = MANUAL_DESC) */
     dw[2] = (subtype & 0xf) | (0u << 4) | (0x7fu << 16);       /* subtype, type MGMT 0, life-time max */
     dw[3] = (15u << 11);                                       /* remaining tx count 15, HW assigns SN */
-    dw[6] = (1u << 10) | (1u << 2) | (1u << 28);               /* msdu_count 1, DA_SRC_SEL, VALID_TXD_ARRIVAL */
+    dw[5] = X9_JOIN_PID | (1u << 9);                           /* u2DW5_0: PID, TX_STATUS_TO_MCU (-> EVENT_TX_DONE) */
+    /* DW6: msdu_count 1, DA_SRC_SEL, fixed-rate index 1 = FIXED_RATE_INDEX_OFDM_6M (Android RateIdx=1), FR_BW 8.
+     * VALID_TXD_ARRIVAL_TIME (b28) left clear: MT6653 builds CFG_WIFI_TX_FIXED_RATE_NO_VTA=1. */
+    dw[6] = (1u << 10) | (1u << 2) | (1u << 16) | (8u << 22);
     memcpy(buf, dw, 32);
     return total;
 }
@@ -1610,7 +1615,10 @@ x9_wait_mgmt(x9_wdma *d, uint8_t subtype, const uint8_t mac[6], uint8_t *out, un
             any = true;
             uint32_t rxd0;
             memcpy(&rxd0, ev, 4);
-            if ((rxd0 >> 27) == 7 && (ev[36] == 0x01 || ev[36] == 0x0e)) { ne++; lastEid = ev[36]; continue; }  /* event, not a frame */
+            if (n7 + ne < 6)                                   /* rev252bt: what each rx7 packet is (TX_DONE eid 0x0f?) */
+                IOLog("X9 WIFI WAIT: rx7 len=%d pkt_type=%u eid=0x%02x opt=%02x bytes36=%02x %02x %02x %02x %02x %02x %02x %02x\n",
+                      pn, rxd0 >> 27, ev[36], ev[38], ev[36], ev[37], ev[38], ev[39], ev[40], ev[41], ev[42], ev[43]);
+            if ((rxd0 >> 27) == 7 && (ev[36] == 0x01 || ev[36] == 0x0e || ev[36] == 0x0f)) { ne++; lastEid = ev[36]; continue; }  /* event, not a frame */
             n7++;
             unsigned o = x9_find_mgmt(ev, (unsigned)pn, subtype, mac);
             if (o) { unsigned l = (unsigned)pn - o; if (l > cap) l = cap; memcpy(out, ev + o, l); return (int)l; }
@@ -1645,59 +1653,212 @@ x9_radio_ch_privilege(x9_wdma *d, const x9wifi::bss_info *b, uint8_t token)
     memcpy(t + 16, &iv, 4);                                   /* u4MaxInterval */
     t[20] = 0xff;                                             /* ucDBDCBand = AUTO */
     int n = x9_wd_unicmd(d, 0x27, 0x06, pl, sizeof pl, 0x27, ev, sizeof ev, 2000);
-    if (n < 48) { IOLog("X9 WIFI JOIN: no CH grant\n"); return false; }
-    uint8_t st = ev[46];                                      /* UNI_EVENT_CNM{4 pad}+tag{4 hdr}+bss+token+status */
-    IOLog("X9 WIFI JOIN: CH grant status=%u ch=%u\n", st, ev[47]);
+    if (n < 68) { IOLog("X9 WIFI JOIN: no CH grant (event len %d)\n", n); return false; }
+    /* Event data at 44 = UNI_EVENT_CNM {4 pad}; tag at 48 = UNI_EVENT_CNM_CH_PRIVILEGE_GRANT {u16 tag, u16 len, bss,
+     * token, status, primary ch, sco, band, width, seg1, seg2, req type, dbdc, rsv, u32 interval}. rev252bs and
+     * earlier read the padding (ev[46]/ev[47]), so their "status=0 ch=0" said nothing about the grant. */
+    const uint8_t *g = ev + 48;
+    uint16_t gtag, glen;
+    memcpy(&gtag, g, 2);
+    memcpy(&glen, g + 2, 2);
+    uint32_t giv;
+    memcpy(&giv, g + 16, 4);
+    IOLog("X9 WIFI JOIN: CH grant tag=%u len=%u bss=%u token=%u status=%u ch=%u sco=%u band=%u width=%u s1=%u s2=%u "
+          "req=%u dbdc=%u interval=%u ms (asked ch=%u band=%u)\n", gtag, glen, g[4], g[5], g[6], g[7], g[8], g[9], g[10],
+          g[11], g[12], g[13], g[14], giv, ch, band);
+    if (gtag != 0 || g[6] != 0 || g[7] != ch)                 /* warn only for now: keep the Auth attempt for data */
+        IOLog("X9 WIFI JOIN: CH grant NOT as asked (status/channel/tag); continuing anyway\n");
     return true;
 }
 
+/* Release the channel privilege, as Android after every join attempt (aisFsmReleaseCh -> nicUniCmdChAbortPrivilege:
+ * "bss=2,token=3,dbdc=255"). No event is expected. */
+static void
+x9_radio_ch_abort(x9_wdma *d, uint8_t token)
+{
+    uint8_t pl[4 + 12] = {};
+    uint8_t *t = pl + 4;
+    t[0] = 1; t[2] = 12;                                      /* tag CH_PRIVILEGE_ABORT, len 12 */
+    t[4] = 0;                                                 /* ucBssIndex 0 */
+    t[5] = token;
+    t[6] = 0xff;                                              /* ucDBDCBand AUTO */
+    int n = x9_wd_unicmd(d, 0x27, 0x06, pl, sizeof pl, 0, nullptr, 0, 0);
+    IOLog("X9 WIFI JOIN: CH privilege token %u abort %s\n", token, n == 0 ? "sent" : "not consumed");
+}
+
+/* AP rate sets from its beacon IEs (Supported Rates 1, Extended 50) as gen4m RATE_SET bits: 1M b0, 2M b1, 5.5M b2,
+ * 11M b3, (22M b4, 33M b5 unused), 6M b6 .. 54M b13; basic = rates with the high bit. rev252bs sent basic 0x00ff and
+ * desired 0x0fff, which set the PBCC 22M/33M bits and claimed 9M as basic. */
+static void
+x9_ap_rates(const x9wifi::bss_info *b, uint16_t *op, uint16_t *basic, uint8_t *dtim)
+{
+    static const uint8_t unit[14] = { 2, 4, 11, 22, 44, 66, 12, 18, 24, 36, 48, 72, 96, 108 };
+    *op = 0; *basic = 0; *dtim = 1;
+    for (unsigned o = 0; o + 2 <= b->ie_len;) {
+        uint8_t id = b->ie[o], l = b->ie[o + 1];
+        if (o + 2u + l > b->ie_len) break;
+        if (id == 1 || id == 50) {
+            for (unsigned k = 0; k < l; k++) {
+                uint8_t r = b->ie[o + 2 + k];
+                for (unsigned s = 0; s < 14; s++) {
+                    if (s == 4 || s == 5 || unit[s] != (r & 0x7f)) continue;
+                    *op |= (uint16_t)(1u << s);
+                    if (r & 0x80) *basic |= (uint16_t)(1u << s);
+                }
+            }
+        } else if (id == 5 && l >= 2 && b->ie[o + 3]) {
+            *dtim = b->ie[o + 3];                              /* TIM: DTIM count, DTIM period */
+        }
+        o += 2u + l;
+    }
+    if (!*op) { *op = 0x3fcf; *basic = 0x000f; }               /* no IEs kept: 11b/g set, 11b basic */
+    if (!*basic) *basic = *op & 0x000f ? (uint16_t)(*op & 0x000f) : (uint16_t)(*op & 0x0040);
+}
+
+/* gen4m nicUpdateBssEx -> nicUniCmdSetBssInfo (UNI_CMD_ID_BSSINFO 0x02) with the tags it always sends for an AIS
+ * BSS: BASIC, RLM + PROTECT + IFS_TIME, RATE, SEC, QBSS, MLD. Android sends it before the channel request
+ * (ConnState 1, BSSID 0, eBand 1) and after the association (ConnState 0, BSSID = AP, StaRecIdxOfAP = AP widx). */
+static void
+x9_radio_bssinfo(x9_wdma *d, const uint8_t mac[6], const x9wifi::bss_info *b, bool connected)
+{
+    static uint8_t ev[512];
+    uint8_t ch = b->freq_mhz >= 4900 ? (uint8_t)((b->freq_mhz - 5000) / 5) : (uint8_t)((b->freq_mhz - 2407) / 5);
+    bool g24 = b->freq_mhz < 4900;
+    uint16_t op, basic;
+    uint8_t dtim;
+    x9_ap_rates(b, &op, &basic, &dtim);
+    uint8_t pl[4 + 32 + 16 + 8 + 20 + 16 + 8 + 8 + 20] = {};
+    unsigned at = 4;                                           /* ucBssInfoIdx 0 + 3 pad */
+    uint8_t *t = pl + at;                                      /* BASIC tag 0, len 32 */
+    t[0] = 0; t[2] = 32;
+    t[4] = 1; t[5] = X9_JOIN_OMAC; t[6] = X9_JOIN_OMAC; t[7] = 0xff;   /* active, omac, hw bss, dbdc auto */
+    uint32_t ct = 65537;                                       /* CONNECTION_INFRA_STA */
+    memcpy(t + 8, &ct, 4);
+    t[12] = connected ? 0 : 1;                                 /* MEDIA_STATE_CONNECTED 0 / DISCONNECTED 1 */
+    t[13] = 3;                                                 /* WMM set as at activation */
+    if (connected) memcpy(t + 14, b->bssid, 6);
+    uint16_t bcmc = 0, bint = b->beacon_int ? b->beacon_int : 100, sta = connected ? X9_JOIN_WIDX : 0xfe;
+    memcpy(t + 20, &bcmc, 2);
+    memcpy(t + 22, &bint, 2);
+    t[24] = dtim;
+    t[25] = g24 ? (uint8_t)((1u << 1) | (1u << 2)) : (uint8_t)(1u << 0);   /* WMODE_B|WMODE_G, or WMODE_A */
+    memcpy(t + 26, &sta, 2);                                   /* u2StaRecIdxOfAP (a WLAN index) */
+    uint16_t nonht = g24 ? 1 : 2;                              /* PHY_TYPE_ERP_INDEX / PHY_TYPE_OFDM_INDEX */
+    memcpy(t + 28, &nonht, 2);
+    at += 32;
+    t = pl + at;                                               /* RLM tag 2, len 16 */
+    t[0] = 2; t[2] = 16;
+    t[4] = ch; t[5] = ch; t[6] = 0; t[7] = 0;                  /* primary, seg0, seg1, BW_20 */
+    t[8] = 1; t[9] = 1;                                        /* tx/rx streams (legacy) */
+    t[10] = 0; t[11] = 0;                                      /* HT op info1, SCO none */
+    t[12] = g24 ? 1 : 2;                                       /* BAND_2G4 1 / BAND_5G 2 */
+    at += 16;
+    t = pl + at;                                               /* PROTECT tag 3, len 8: none */
+    t[0] = 3; t[2] = 8;
+    at += 8;
+    t = pl + at;                                               /* IFS_TIME tag 0x17, len 20 */
+    t[0] = 0x17; t[2] = 20;
+    t[4] = 1;                                                  /* fgSlotValid */
+    uint16_t slot = (b->caps & (1u << 10)) ? 9 : 20;           /* short slot time capability */
+    memcpy(t + 8, &slot, 2);
+    at += 20;
+    t = pl + at;                                               /* RATE tag 0x0b, len 16 */
+    t[0] = 0x0b; t[2] = 16;
+    memcpy(t + 4, &op, 2);
+    memcpy(t + 6, &basic, 2);
+    at += 16;
+    t = pl + at;                                               /* SEC tag 0x10, len 8: open, EncStatus 1 (Android) */
+    t[0] = 0x10; t[2] = 8;
+    t[4] = 0; t[5] = 1;
+    at += 8;
+    t = pl + at;                                               /* QBSS tag 0x0f, len 8: no WMM (assoc has no WMM IE) */
+    t[0] = 0x0f; t[2] = 8;
+    at += 8;
+    t = pl + at;                                               /* MLD tag 0x1a, len 20 as at activation */
+    t[0] = 0x1a; t[2] = 20;
+    t[4] = 0xff; t[5] = 32;
+    memcpy(t + 6, mac, 6);
+    t[12] = 0xff; t[13] = 0xff;
+    at += 20;
+    int n = x9_wd_unicmd(d, 0x02, 0x07, pl, at, 0x01, ev, sizeof ev, 1000);
+    IOLog("X9 WIFI JOIN: BSSINFO %s ch=%u op_rates=%04x basic=%04x dtim=%u bcn=%u slot=%u -> %s\n",
+          connected ? "connected" : "pre-join", ch, op, basic, dtim, bint, slot, n > 0 ? "answered" : "no CMD_RESULT");
+}
+
+/* gen4m nicUniCmdUpdateStaRec (UNI_CMD_ID_STAREC_INFO 0x03) tags for a legacy AP: BASIC, STATE, PHY_INFO, RA,
+ * BA_OFFLOAD, UAPSD (HT/VHT/HE skipped: no HT tags sent, the peer is used as 11b/g). */
 static bool
-x9_radio_starec(x9_wdma *d, const x9wifi::bss_info *b, uint8_t staState)
+x9_radio_starec(x9_wdma *d, const x9wifi::bss_info *b, uint8_t staState, uint16_t aid)
 {
     static uint8_t ev[512];
     uint8_t rcpi = (uint8_t)((b->signal_dbm + 110) * 2);
-    uint8_t pl[8 + 20 + 12 + 16 + 16] = {};
+    uint16_t op, basic;
+    uint8_t dtim;
+    x9_ap_rates(b, &op, &basic, &dtim);
+    bool g24 = b->freq_mhz < 4900;
+    uint8_t pl[8 + 20 + 16 + 12 + 16 + 16 + 8] = {};
     pl[0] = 0;                                                /* ucBssInfoIdx 0 */
-    pl[1] = X9_JOIN_WIDX;                                     /* ucWlanIdxL */
+    pl[1] = X9_JOIN_WIDX;                                     /* ucWlanIdxL (HnVer at 6 = 0) */
     unsigned at = 8;
     uint8_t *t = pl + at;                                     /* STAREC_BASIC tag 0 */
     t[0] = 0; t[2] = 20;
     uint32_t ct = 0x10002;                                    /* CONNECTION_INFRA_AP = STA_TYPE_AP|NETWORK_INFRA */
     memcpy(t + 4, &ct, 4);
-    t[8] = 1;                                                 /* ucConnectionState STATE_CONNECTED */
+    t[8] = 1;                                                 /* ucConnectionState STATE_CONNECTED (gen4m always) */
+    t[9] = 0;                                                 /* ucIsQBSS */
+    memcpy(t + 10, &aid, 2);                                  /* u2AID */
     memcpy(t + 12, b->bssid, 6);                              /* aucPeerMacAddr */
     uint16_t ei = 3;                                          /* V2 | NEWSTAREC */
     memcpy(t + 18, &ei, 2);
     at += 20;
+    t = pl + at;                                              /* STAREC_STATE tag 7 */
+    t[0] = 7; t[2] = 16;
+    t[4] = staState;                                          /* ucStaState */
+    t[13] = 0;                                                /* ucActionType STA_REC_CMD_ACTION_STA */
+    at += 16;
     t = pl + at;                                              /* STAREC_PHY_INFO tag 0x15 */
     t[0] = 0x15; t[2] = 12;
-    uint16_t brs = 0x00ff;
-    memcpy(t + 4, &brs, 2);                                   /* u2BSSBasicRateSet */
-    t[6] = 0x07;                                              /* ucDesiredPhyTypeSet: HR_DSSS|ERP|OFDM */
+    memcpy(t + 4, &basic, 2);                                 /* u2BSSBasicRateSet */
+    t[6] = g24 ? 0x03 : 0x04;                                 /* PHY_TYPE_SET_802_11BG / 11A */
     t[9] = rcpi;                                              /* ucRCPI */
     at += 12;
     t = pl + at;                                              /* STAREC_RA tag 1 */
     t[0] = 1; t[2] = 16;
-    uint16_t nhr = 0x0fff;
-    memcpy(t + 4, &nhr, 2);                                   /* u2DesiredNonHTRateSet */
+    memcpy(t + 4, &op, 2);                                    /* u2DesiredNonHTRateSet */
     at += 16;
-    t = pl + at;                                              /* STAREC_STATE tag 7 */
-    t[0] = 7; t[2] = 16;
-    t[4] = staState;                                          /* ucStaState */
+    t = pl + at;                                              /* STAREC_BA_OFFLOAD tag 0x16: no aggregation */
+    t[0] = 0x16; t[2] = 16;
+    at += 16;
+    t = pl + at;                                              /* STAREC_UAPSD tag 0x24: none */
+    t[0] = 0x24; t[2] = 8;
+    at += 8;
     int n = x9_wd_unicmd(d, 0x03, 0x07, pl, at, 0x01, ev, sizeof ev, 1000);
-    IOLog("X9 WIFI JOIN: STAREC state %u -> %s\n", staState, n > 0 ? "answered" : "no CMD_RESULT");
+    IOLog("X9 WIFI JOIN: STAREC state %u aid %u rates %04x basic %04x rcpi %u -> %s\n", staState, aid, op, basic, rcpi,
+          n > 0 ? "answered" : "no CMD_RESULT");
     return true;
 }
+
+static bool x9_radio_join_granted(x9_wdma *d, const uint8_t mac[6], const x9wifi::bss_info *b);
 
 static bool
 x9_radio_join(x9_wdma *d, const uint8_t mac[6], const x9wifi::bss_info *b)
 {
-    static uint8_t rx[512];
     const uint8_t *ap = b->bssid;
     IOLog("X9 WIFI JOIN: '%.*s' %02x:%02x:%02x:%02x:%02x:%02x %u MHz\n", b->ssid_len, (const char *)b->ssid,
         ap[0], ap[1], ap[2], ap[3], ap[4], ap[5], b->freq_mhz);
-    if (!x9_radio_ch_privilege(d, b, 3)) return false;
-    x9_radio_starec(d, b, 0);                                 /* STA_STATE_1 */
+    x9_radio_bssinfo(d, mac, b, false);                       /* Android: nicUpdateBssEx before the CH request */
+    if (!x9_radio_ch_privilege(d, b, 3)) { x9_radio_ch_abort(d, 3); return false; }
+    bool ok = x9_radio_join_granted(d, mac, b);
+    x9_radio_ch_abort(d, 3);                                  /* Android releases it after success too */
+    return ok;
+}
+
+static bool
+x9_radio_join_granted(x9_wdma *d, const uint8_t mac[6], const x9wifi::bss_info *b)
+{
+    static uint8_t rx[512];
+    const uint8_t *ap = b->bssid;
+    x9_radio_starec(d, b, 0, 0);                              /* STA_STATE_1 */
 
     /* Auth frame, open system, transaction 1 */
     uint8_t fr[128];
@@ -1742,7 +1903,8 @@ x9_radio_join(x9_wdma *d, const uint8_t mac[6], const x9wifi::bss_info *b)
     IOLog("X9 WIFI JOIN: assoc resp status=%u aid=%u\n", sstatus, aid & 0x3fff);
     if (sstatus != 0) return false;
 
-    x9_radio_starec(d, b, 2);                                 /* STA_STATE_3 = connected */
+    x9_radio_bssinfo(d, mac, b, true);                        /* Android aisUpdateBssInfoForJOIN -> nicUpdateBssEx */
+    x9_radio_starec(d, b, 2, (uint16_t)(aid & 0x3fff));       /* STA_STATE_3 = connected */
     IOLog("X9 WIFI JOIN: '%.*s' CONNECTED\n", b->ssid_len, (const char *)b->ssid);
     return true;
 }
@@ -1786,7 +1948,7 @@ x9_wifi_radio_loop(x9_wdma *d)
         IOLockUnlock(lock);
         if (dojoin) {
             bool ok = x9_radio_join(d, mac, &jt);
-            if (!ok) IOLog("X9 WIFI JOIN: failed; CH privilege token 3 is not aborted (no abort UniCmd implemented)\n");
+            if (!ok) IOLog("X9 WIFI JOIN: failed\n");
             IOLockLock(lock);
             joinResult = ok ? x9wifi::RES_OK : x9wifi::RES_FAILED;
             status.state = ok ? x9wifi::STA_UP : x9wifi::STA_IDLE;
