@@ -1,3 +1,23 @@
+## HANDOFF 2026-11-07 (42): 94.txt = rev252cj: GPU poisoned by foreground check + alias NoMemory; Auth still unACKed; rev252ck BUILT
+
+- Log copy .local/x9/logs/x9-94.txt (166 s, plugin 267). DeviceLost x26591.
+- 38.285 s `X9 PANVK CALL: op=5 (Unmap) errno=13 IOKit=0xe00002c1` -> X9_FAIL line 55. 0xe00002c1 = kIOReturnNotPrivileged
+  from externalMethod, which required kIOClientPrivilegeForeground on EVERY call (process not identified in the log).
+  59.846 s `submission failed kr=e00002bd` with no `X9 CSF TILER OOM` line -> the other NoMemory in submit:
+  x9_render_memory_cache createMappingInTask(kernel_task) of an import failed.
+- rev252ck GPU: externalMethod / clientMemoryForType check only the owner task per call (foreground still at
+  initWithTask); a non-foreground caller is logged (`X9 RENDER CLIENT: <proc> pid op without foreground privilege;
+  allowed`, first 8). Import alias failure now logs `X9 RENDER CACHE: kernel alias of import handle bytes failed` and
+  maintains through phystokv per physical segment (getPhysicalSegment, wired by prepare), 64 KiB preemption-off runs.
+- Wi-Fi 94: DIS_MAT + TGID (grant dbdc 0 -> TGID 0) + tx 30: still MPDU_ERROR (tx_count 23/29/15), CTS again on try 3
+  (rsp_rate 11). All joins since the FEM fix were 5 GHz (iOS gets all -55 dBm and picks 5180). Android joins with DBDC
+  enabled (cnmUpdateDbdcSetting Enable, grant band 1, TGID 1); ours never enables DBDC.
+- rev252ck Wi-Fi: x9_radio_dbdc() before a join (once per bring-up): UNI_CMD_ID_MBMC 0x28 {4 pad, tag 0 len 8, en 1,
+  aa 0, rfband 0, reason 0}, ACK, 20 ms wait; log `X9 WIFI DBDC: enable -> ...`; boot-arg x9_wifi_dbdc=0 skips. If the
+  join fails, one retry on an open BSS of the same SSID on the other band (`X9 WIFI JOIN: retry on the other band`):
+  separates band/DBDC problems from frame problems in one run.
+- BUILT kernel only (plugin 267): boot_sha256 9b8ae411a3552d5763d5f6828162b1092acef4902bd5ecafd7957e00a35cde75.
+
 ## HANDOFF 2026-11-07 (41): Android join command sequence mapped; Assoc rates fixed; rev252cj BUILT
 
 - From android-join-2 (RUC-Web join at kmsg.clean 37700-38600), Android's UNI commands in order:
