@@ -1,3 +1,30 @@
+## HANDOFF 2026-11-07 (28): rev252bx BUILT = frontend cache scope (plugin 260); A/B images; commit 4f26005
+
+- Goal: 60 fps (16.7 ms/frame). 84-86 busy windows: ~1 backboardd CB per frame, kernel FIFO serial, run_avg 10-19 ms/job
+  of which cache maintenance 5.3-5.7 ms (pre 3.5-3.9 on 63 MB + post 1.6-1.8 on 31 MB). 86 measured each CB references
+  ~13.9 MB of IOSurfaces (heap_cbs=0). Cutting maintenance to the referenced surfaces is the largest single lever.
+- Mechanism (no change to PanVK/runtime):
+  * Kernel: X9RenderResource.host_address (ImportHost). Type-1 user client = scope-only (no engine context, no memlimit),
+    op X9RenderScope=14 {abi, op, address, bytes}: Register/Unregister/Acquire/Release/HoldAll/ReleaseAll in a
+    1024-entry table keyed by task (SweetX9RenderService.cpp); entries of a task go when its scope client closes.
+    Submit takes one snapshot per job; pre and post loops skip an imported cpu-exposed BO only if x9_cache_scope=1, no
+    hold, a registered range covers it and no overlapping range has refs. Log `X9 RENDER cache-frontend-scope:
+    active pre_skip_avg post_skip_avg ranges_avg hold_jobs`.
+  * Frontend: surfaceBuffer registers (base, page-rounded alloc); import release unregisters; commit (before submission)
+    acquires every registered import referenced (textures via .buffer, views share it); HoldAll if a referenced
+    surface/buffer has no registered range or a heap is referenced; finish releases only on safeRelease (completed /
+    failed locally); uncertain ownership keeps them held (more maintenance, never less). Seam: nmb_cache_scope in
+    bridge/NativeBackendProbe.mm -> x9_render_scope in X9RenderTransport.c (boundary check clean).
+  * Not covered (risk): runtime-internal submissions that touch an IOSurface outside a frontend CB (none known).
+    Wrong skip would show as stale/partial layer content, not a crash.
+- BUILT (Mac): `build.py all --revision 260 --name x9-rev252bx` (base args + x9_cache_scope=1), boot_sha256
+  f1d80801f29ce9611f02c363935b0ba56545bee1ff7b35d45c67388714885f22; and `build.py boot --name x9-rev252bx-off` (same
+  kernel, no x9_cache_scope), boot_sha256 4d3215fdad6be0fc987ec5ebaa173395ba9fd640f04f9e8e45a1897c459bb310.
+  Kernel includes rev252bw Wi-Fi diagnostics. NEW PLUGIN PACKAGE (260):
+  `X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/x9-rev252bx` before booting either image. Not device-tested.
+- What to read: cache-frontend-scope pre/post skip (expect ~45-50 MB pre, ~17 MB post skipped), RENDER timing pre/post
+  (expect ~1 ms each), METRICS fps/latency vs the -off image, any stale UI content (user visual check).
+
 ## HANDOFF 2026-11-07 (27): 86.txt = rev252bv run (plugin 259); Auth never ACKed; GPU scope measured; rev252bw BUILT
 
 - Log copy .local/x9/logs/x9-86.txt. 46 s, no panic.
