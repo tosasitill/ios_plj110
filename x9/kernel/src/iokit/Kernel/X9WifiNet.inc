@@ -2011,15 +2011,31 @@ x9_radio_join_granted(x9_wdma *d, const uint8_t mac[6], const x9wifi::bss_info *
     memcpy(fr + 10, mac, 6);
     memcpy(fr + 16, ap, 6);
     unsigned o = 24;
-    uint16_t cap = 0x0021;                                    /* ESS | short preamble */
+    /* rev252cj: capability and rates from the AP's own beacon. rev252bn..ci sent a fixed 2.4 GHz set with CCK
+     * 1/2/5.5/11 Mbps marked basic, which a 5 GHz AP cannot accept (it would answer status 18, rates). ESS, plus
+     * short preamble / short slot only where the AP advertises them; listen interval 2 (Android's). */
+    uint16_t cap = (uint16_t)(0x0001 | (b->caps & (0x0020 | 0x0400)));
     memcpy(fr + o, &cap, 2); o += 2;
-    uint16_t li = 3;
+    uint16_t li = 2;
     memcpy(fr + o, &li, 2); o += 2;
     fr[o++] = 0; fr[o++] = b->ssid_len; memcpy(fr + o, b->ssid, b->ssid_len); o += b->ssid_len;   /* SSID */
-    static const uint8_t rates[8] = { 0x82, 0x84, 0x8b, 0x96, 0x0c, 0x12, 0x18, 0x24 };
-    fr[o++] = 1; fr[o++] = 8; memcpy(fr + o, rates, 8); o += 8;                                    /* supported rates */
-    static const uint8_t erates[4] = { 0x30, 0x48, 0x60, 0x6c };
-    fr[o++] = 50; fr[o++] = 4; memcpy(fr + o, erates, 4); o += 4;                                  /* ext rates */
+    bool have_rates = false;
+    for (unsigned q = 0; q + 2 <= b->ie_len;) {                  /* Supported Rates (1), Extended Rates (50) */
+        uint8_t id = b->ie[q], l = b->ie[q + 1];
+        if (q + 2u + l > b->ie_len) break;
+        if ((id == 1 || id == 50) && l && o + 2u + l <= sizeof fr) {
+            memcpy(fr + o, b->ie + q, 2u + l); o += 2u + l;
+            if (id == 1) have_rates = true;
+        }
+        q += 2u + l;
+    }
+    if (!have_rates) {                                          /* no IEs kept: OFDM on 5 GHz, b/g on 2.4 GHz */
+        static const uint8_t a_rates[8] = { 0x8c, 0x12, 0x98, 0x24, 0xb0, 0x48, 0x60, 0x6c };
+        static const uint8_t g_rates[8] = { 0x82, 0x84, 0x8b, 0x96, 0x0c, 0x12, 0x18, 0x24 };
+        fr[o++] = 1; fr[o++] = 8; memcpy(fr + o, b->freq_mhz >= 4900 ? a_rates : g_rates, 8); o += 8;
+    }
+    IOLog("X9 WIFI JOIN: assoc request cap %04x listen %u rates from %s, %u B\n", cap, li,
+          have_rates ? "beacon" : "default", o);
     if (!x9_tx_mgmt(d, 0x0, fr, o)) { IOLog("X9 WIFI JOIN: assoc TX stuck\n"); return false; }
     n = x9_wait_mgmt(d, 0x1, mac, rx, sizeof rx, 1500);       /* assoc response subtype 1 */
     if (n < 6) { IOLog("X9 WIFI JOIN: no assoc response\n"); return false; }
