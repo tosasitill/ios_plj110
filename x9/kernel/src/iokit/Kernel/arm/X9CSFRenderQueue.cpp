@@ -86,7 +86,14 @@ IOReturn x9_csf_group_health(const X9CSFQueueIO *io,const X9CSFRenderGroup *g,ui
   if((req^ack)&faults)return kIOReturnIOError;
   /* Do not fake an OOM acknowledgment or reset a faulting group. The owner
    * must handle the heap event or retain resources on failed quiescence. */
-  if((req^ack)&oom)return kIOReturnNoMemory;
+  if((req^ack)&oom) {
+   /* rev252cg: name it. A CS tiler-heap OOM event: the stream wants more heap chunks than the fixed
+    * pre-linked heap has (no heap-grow handling here; 91/92.txt: submit kIOReturnNoMemory -> device lost). */
+   static unsigned logged;
+   if(logged<8){logged++;IOLog("X9 CSF TILER OOM: slot=%u stream=%u REQ=%08x ACK=%08x;heap exhausted, no grow handler\n",
+    g->interface.group_index,i,req,ack);}
+   return kIOReturnNoMemory;
+  }
  }
  return kIOReturnSuccess;
 }

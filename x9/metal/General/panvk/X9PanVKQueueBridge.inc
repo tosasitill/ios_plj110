@@ -82,19 +82,22 @@ x9_panvk_group_create(struct pan_kmod_dev *dev,struct drm_panthor_group_create *
  * which composites Control Center, gets 64 (128 MiB = upstream Mesa's
  * max_chunks and the per-BO limit), every other process 16 (32 MiB).
  * rev239 with 32 MiB everywhere made replays deterministic and reduced the
- * visible flicker. Default unchanged. */
+ * visible flicker. rev252cg: DEFAULT ON (91/92.txt on metal2vulkan 963f0e64:
+ * the 10 MiB heap ran out, CS tiler OOM, submit kIOReturnNoMemory, device
+ * lost); the exact token x9ts restores Mesa's 5 chunks. */
 static uint32_t
 x9_panvk_tiler_chunks(uint32_t requested)
 {
  static int big=-1;
  if(big<0) {
-  int m=0;char args[4096]={0};size_t bytes=sizeof(args)-1;
+  int m=1;char args[4096]={0};size_t bytes=sizeof(args)-1;
   if(!sysctlbyname("kern.bootargs",args,&bytes,NULL,0)) {
    args[sizeof(args)-1]=0;
    for(const char *p=args;*p;) {
     while(*p&&(unsigned char)*p<=32)p++;
     const char *end=p;while(*end&&(unsigned char)*end>32)end++;
     if(end-p==4&&(!memcmp(p,"x9tb",4)||!memcmp(p,"x9vt",4)))m=1;
+    if(end-p==4&&!memcmp(p,"x9ts",4))m=0;
     p=end;
    }
   }
@@ -110,7 +113,7 @@ x9_panvk_tiler_create(struct panvk_device *dev,struct panvk_tiler_heap *heap,str
  if(request->vm_id||!request->initial_chunk_count||request->initial_chunk_count>request->max_chunks){errno=EINVAL;return -1;}
  {
   const uint32_t chunks=x9_panvk_tiler_chunks(request->max_chunks);
-  x9_panvk_log("X9 TILER HEAP: proc=%s chunk=%u requested=%u linked=%u bytes=%llu;x9tb/x9vt A/B: backboardd 128MiB, others 32MiB",
+  x9_panvk_log("X9 TILER HEAP: proc=%s chunk=%u requested=%u linked=%u bytes=%llu;default (x9ts: Mesa 5 chunks): backboardd 128MiB, others 32MiB",
    getprogname(),request->chunk_size,request->max_chunks,chunks,(unsigned long long)chunks*request->chunk_size);
   request->max_chunks=chunks;
  }
