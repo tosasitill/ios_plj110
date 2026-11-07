@@ -1,3 +1,45 @@
+## HANDOFF 2026-11-07 (47): 99.txt = rev252cm4: link up, DHCP + DNS + hijacked HTTP all work, **but the captive probe never runs**; keyboard stuck on letters = assetsd crash loop suspected; rev252cm5 (probe/exception instrumentation) BUILT
+
+- Log /Users/tosasitill/99.txt (19540 lines, 284 s). Timeline: joined RUC-Web 66.1 s, DHCP -> 10.46.12.100;
+  **AP deauthed us at 121.9 s (reason 3, genuine: A1=us A2=a4:be:2b:b1:df:b1)**; iOS rejoined 146.6 s, user/app
+  disconnect 162.4 s, rejoined 169.0 s, no kick until log end. So the link flaps early but came back on its own.
+- **The captive-portal sheet never appeared and the probe never ran**: during 66-121 s and 169-224 s (all of it inside
+  the packet-log budget) there is ZERO DNS or TCP traffic, only 1 Hz gateway ARP + DHCP + mDNS. The only web traffic of
+  the whole session is one burst at 232-233 s right after the user touched the screen: 4 DNS answers from 10.3.6.6,
+  TCP 124.238.121.40:80 -> SYN ACK, 297 B, FIN (classic hijacked-HTTP 302), then TLS to 10.21.8.35:443 (4x1434+738 B,
+  FIN from the portal server). That shape is a manual/WebKit page load (Safari), not the CNS probe (which is
+  HTTP-only, no redirect follow). rev252cm4's network grant works: no "WebKit.Ne privilege 10001 denied" line, and the
+  TLS load actually moved data.
+- Sheet-absence proof: the only WebKit process all run is com.apple.WebKit.GPU pid=349 (spawned 90.1 s right after
+  MobileSafari AKS lines at 89.3 s). A SpringBoard-hosted portal sheet would spawn its own WebKit children
+  (new pid) - none. (Observation, mechanism of the CNS trigger still a guess: configd's CaptiveNetworkSupport plugin
+  exists in the system image, but we cannot see configd logs; the probe may be gated on SC state we don't provide.)
+- **Key instrumentation bug found**: x9_pkt_log had ONE 160-line budget per direction; the 1 Hz gateway ARP ate the TX
+  budget by 224 s, hiding every later TX (that is why 99.txt shows DNS answers but no DNS queries). RX cap hit during
+  the 233 s burst, so anything after 233.5 s is invisible too.
+- **Keyboard (cannot switch to the number plane)**: assetsd crashed 4x (17.3/17.4/45.9/105.7 s, sig 6) and
+  syncdefaultsd 16x, both uncaught-exception aborts (host symbolication of 99.txt vs dsc-20H392: thrower frames are
+  below dispatch_async_redirect_invoke, only the abort path is in the 10-frame dump). assetsd hosts the keyboard
+  layout/input-mode service, so its death while the keyboard is up is the prime suspect for the dead "123" key
+  (letters plane works, a plane LOAD would need the service). WirelessRadioMan 28x is QMI XPC misuse
+  (qmi::sFixupServerConnection) - no modem on this port, background noise.
+- rev252cm5 (this build, kernel+boot only): (1) x9_pkt_log: ARP gets its own 40-line/direction budget, IPv4 budget
+  400/direction; UDP:53 questions log the QNAME (`X9 WIFI DNS TX: captive.apple.com ...`); TCP:80 payloads that look
+  like HTTP log the first 160 B (`X9 WIFI HTTP RX: HTTP/1.1 302|Location: ...` style, \n as |). (2) sweetscan default
+  list is now "backboardd,SpringBoard,assetsd,syncdefaultsd,com.apple.Safari" and each scanned name is heap-scanned on
+  its FIRST crash only (crash loops no longer flood USB) - the assetsd scan should print the NSException reason.
+- BUILT kernel + boot.img locally: x9/out/x9-79d6e0d-dirty/, boot.img sha256
+  e88f7adc9c843ac16bd2e8e647d71c3d4ad89de7828626ea951ee0d4ddbd17af (kernel
+  dba60756c92182226c88d0d2e395012a257c2238d3e64b62b91fe891ead6f902). Committed the plugin-267
+  x9_render_external_manifest.h the previous session left uncommitted.
+- Test: fastboot boot the image, join RUC-Web, stay on it 3 min, save the console log. Read in order: (a) is there a
+  `X9 WIFI DNS TX: captive.apple.com` within ~30 s of the join? YES -> the probe ran and SpringBoard-side presentation
+  is the problem; NO -> configd/CNS never probes (SC-state suspect). (b) `X9 WIFI HTTP RX` shows the hijack 302 target
+  (http vs https, portal IP). (c) STR scan of assetsd's first crash gives the keyboard exception. Then drive the fix;
+  if the probe is confirmed missing, next lever is giving configd a proper primary-service/SC state rather than more
+  packet logs.
+- WPA2 stage 2 (4-way handshake, key install) still not implemented (handoff 45).
+
 ## HANDOFF 2026-11-07 (46): 97.txt = rev252cm2: **DHCP OK** (10.46.12.100) on RUC-Web, then deauth + FW hang; rev252cm3 BUILT
 
 - Log copy .local/x9/logs/x9-97.txt. Join as before; `first packet on RX5`, rx 16 in 10 s (bad 0), rings 0/16/0, en0

@@ -2222,31 +2222,78 @@ static unsigned x9_dtx, x9_dtx_fail, x9_drx, x9_drx_bad, x9_drx_prot, x9_drx_oth
 static uint8_t x9_drx_eth[2048];
 
 /* rev252cm4: one line per IPv4/ARP packet (first 160 each way): DNS, DHCP, TCP flags, ICMP. Diagnoses where the
- * captive-portal probe stops (98.txt: IP fine, no sheet). */
-static unsigned x9_plog[2];
+ * captive-portal probe stops (98.txt: IP fine, no sheet).
+ * rev252cm5: 99.txt drowned the 160-line TX budget in the 1 Hz gateway ARP keepalive, so the probe's own DNS/TCP TX
+ * never appeared (last TX line 224 s, probe traffic 232 s). ARP now has its own 40-line budget per direction and the
+ * IPv4 budget is 400. DNS questions get their QNAME decoded and TCP:80 payloads that start like HTTP get their first
+ * bytes printed, so the next run shows whether captive.apple.com is ever asked for and what the hijacked 302 says. */
+static unsigned x9_plog[2], x9_plog_arp[2];
+#define X9_PLOG_IP_MAX   400
+#define X9_PLOG_ARP_MAX  40
 static void
 x9_pkt_log(int rx, const uint8_t *e, unsigned len)
 {
-    if (x9_plog[rx] >= 160 || len < 14) return;
+    if (len < 14) return;
     unsigned et = e[12] << 8 | e[13];
     const uint8_t *ip = e + 14;
     if (et == 0x0806 && len >= 42) {
-        x9_plog[rx]++;
+        if (x9_plog_arp[rx] >= X9_PLOG_ARP_MAX) return;
+        x9_plog_arp[rx]++;
         IOLog("X9 WIFI PKT %s: ARP op %u %u.%u.%u.%u -> %u.%u.%u.%u\n", rx ? "RX" : "TX", ip[7], ip[14], ip[15], ip[16],
             ip[17], ip[24], ip[25], ip[26], ip[27]);
         return;
     }
     if (et != 0x0800 || len < 34) return;
+    if (x9_plog[rx] >= X9_PLOG_IP_MAX) return;
+    x9_plog[rx]++;
     unsigned ihl = (ip[0] & 15) * 4, pr = ip[9];
     const uint8_t *l4 = ip + ihl;
     unsigned sp = 0, dp = 0;
     if ((pr == 6 || pr == 17) && 14 + ihl + 4 <= len) { sp = l4[0] << 8 | l4[1]; dp = l4[2] << 8 | l4[3]; }
-    x9_plog[rx]++;
     IOLog("X9 WIFI PKT %s: %s %u.%u.%u.%u:%u -> %u.%u.%u.%u:%u len %u%s%s%s%s\n", rx ? "RX" : "TX",
         pr == 6 ? "TCP" : pr == 17 ? "UDP" : pr == 1 ? "ICMP" : "IP", ip[12], ip[13], ip[14], ip[15], sp, ip[16], ip[17],
         ip[18], ip[19], dp, len,
         pr == 6 && 14 + ihl + 14 <= len && (l4[13] & 2) ? " SYN" : "", pr == 6 && 14 + ihl + 14 <= len && (l4[13] & 16) ? " ACK" : "",
         pr == 6 && 14 + ihl + 14 <= len && (l4[13] & 4) ? " RST" : "", pr == 6 && 14 + ihl + 14 <= len && (l4[13] & 1) ? " FIN" : "");
+    /* DNS: decode the first question's QNAME (UDP 53). */
+    if (pr == 17 && (sp == 53 || dp == 53) && 14 + ihl + 12 + 8 <= len) {
+        const uint8_t *dns = l4 + 8;
+        unsigned avail = len - 14 - ihl - 8;
+        unsigned qd = dns[6] << 8 | dns[7];
+        if (qd >= 1) {
+            char name[80]; unsigned o = 0, p = 12;
+            while (p < avail && dns[p] && o < sizeof name - 1) {
+                unsigned lbl = dns[p++];
+                if (p + lbl > avail) break;
+                if (o && o < sizeof name - 1) name[o++] = '.';
+                for (unsigned k = 0; k < lbl && o < sizeof name - 1; k++) name[o++] = (char)dns[p + k];
+                p += lbl;
+            }
+            name[o] = 0;
+            if (o) IOLog("X9 WIFI DNS %s: %s (%u.%u.%u.%u:%u -> %u.%u.%u.%u:%u)\n", rx ? "RX" : "TX", name, ip[12], ip[13],
+                ip[14], ip[15], sp, ip[16], ip[17], ip[18], ip[19], dp);
+        }
+    }
+    /* HTTP: print the first bytes of a TCP:80 payload that looks like a request or response. */
+    if (pr == 6 && (sp == 80 || dp == 80) && 14 + ihl + 20 <= len) {
+        unsigned thl = (l4[12] >> 4) * 4;
+        if (thl >= 20 && 14 + ihl + thl < len) {
+            const uint8_t *pl = l4 + thl;
+            unsigned plen = len - 14 - ihl - thl;
+            unsigned head = plen < 160 ? plen : 160;
+            if (head >= 4 && (!memcmp(pl, "GET ", 4) || !memcmp(pl, "POST", 4) || !memcmp(pl, "HEAD", 4) ||
+                    !memcmp(pl, "HTTP", 4) || !memcmp(pl, "PUT ", 4))) {
+                char text[168]; unsigned o = 0;
+                for (unsigned k = 0; k < head && o < sizeof text - 1; k++) {
+                    unsigned char c = pl[k];
+                    if (c == '\r') continue;
+                    text[o++] = (c == '\n') ? '|' : (c >= 0x20 && c < 0x7f) ? (char)c : '.';
+                }
+                text[o] = 0;
+                IOLog("X9 WIFI HTTP %s: %s\n", rx ? "RX" : "TX", text);
+            }
+        }
+    }
 }
 
 static bool
