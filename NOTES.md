@@ -1,3 +1,28 @@
+## HANDOFF 2026-11-07 (30): Wi-Fi TX not on air -> missing NVRAM; rev252bz BUILT (NVRAM + rev252by scope fix); commit 0caf603
+
+- Evidence TX never reaches the air: 86 Auth TX_DONE MPDU_ERROR tx_count 15 (x3), 87 probe responses 0 in every scan
+  while beacons arrive. Our own MAC 02:58:39:57:46:01 (locally administered, valid).
+- Android init steps we never did (android-pull-20261106-132120/dmesg.txt, grep -a; the file has binary bytes):
+  cnmPowerControl, rlmDomainGetDomainInfo/oplus{Passive,Active}DomainInfo ("no matched country code, default
+  domain"), wlanLoadManufactureData ("TLV is Null, last index = 37" = 37 NVRAM fragments), kalSyncTimeToFW,
+  rlmDomainSendPwrLimitCmd (EMI type) + rlmDomainSendAntPowerSetting, later set_country_code CN. Earlier notes also list
+  PHY_ACTION 0x08 (COM_FEM 682 B, CAL 880 B) and QUERY_INFO 0x22 (PMIC) as skipped.
+- First experiment = NVRAM (calibration/TX power, most likely to gate TX). gen4m (common/wlan_lib.c
+  wlanLoadManufactureData, MT6653 is_support_nvram_fragment=TRUE): fragment 0 = file offset 0 .. end of first TLV
+  (ucTypeID0 at 256), then one TLV {id, u16 le len, data} per fragment until a zero tag; each sent as
+  UNI_CMD_ID_NVRAM_SETTINGS 0x2E {4 pad, tag 0 len 1504, 1500 B buffer}. Our split of the 11266 B record gives exactly
+  37 fragments (max 719 B), matching Android.
+- Data handling: x9/tools/wifi_nvram.py (committed, no data) writes x9/kernel/generated/x9_wifi_nvram.inc (gitignored)
+  from .local/x9/wifi-nvram/WIFI (copied from the Android pull; also on the Mac, gitignored); stub when absent;
+  build.py runs it next to wifi_firmware.py ("wifi_nvram" in local.json overrides the path).
+- Kernel: x9_radio_nvram() before x9_radio_activate (after RX4 setup), ACK requested per fragment, logs first 2 /
+  last / failures + `X9 WIFI NVRAM: N/37 fragments answered`. Boot-arg x9_wifi_nvram=0 skips.
+- BUILT (Mac): `build.py all --name x9-rev252bz` (kernel+boot; plugin 261 from rev252by) with base args +
+  x9_cache_scope=1. boot_sha256 5893c01bf609ca2a76d80da8df185a9554632e97cc082f36786e2b7cd327d4ee.
+  Needs plugin 261 on the device (stage rev252by's package if not done). Not device-tested.
+- If NVRAM alone does not bring probe responses / Auth ACK: next are SET_DOMAIN_INFO (UNI 0x15, V2 active channel list),
+  power limit (EMI) + ANT power setting, then PHY_ACTION COM_FEM/CAL.
+
 ## HANDOFF 2026-11-07 (29): 87.txt = rev252bx (scope ON) - no effect: HoldAll on ~every job; rev252by BUILT (fix)
 
 - Log copy .local/x9/logs/x9-87.txt (user flashed only the ON image; "no difference" by feel). Scope clients opened
