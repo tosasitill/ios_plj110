@@ -1,3 +1,28 @@
+## HANDOFF 2026-11-07 (45): 96.txt = rev252cm: **ASSOCIATED** (RUC-Web 5180), TX ok, RX 0; rev252cm2 BUILT
+
+- Log copy .local/x9/logs/x9-96.txt. Auth resp seq 2 status 0, assoc resp status 0 aid 2, `'RUC-Web' CONNECTED`.
+  Data TX: 47 frames all ok (IPv6 ND, DHCP DISCOVER 342 B ...), rx 0 for 160 s -> en0 169.254.x (no DHCP), so the
+  captive portal never appeared: no network, not a rendering problem. Beacons (every ~100 ms) still arrive on RX7 as
+  RXD type 7 (`connected event eid=0x00 len=297`, frame at +0x58).
+- Cause (from gen4m mt6653RxRingSwIdx2HwIdx): RX4 = band 0 data, RX5 = band 1, RX6 = band 2. With DBDC on, 5 GHz is
+  band 1, so the data went to RX5, which we never gave descriptors.
+- After iOS left (191 s) and rejoined (197.6 s) with no teardown, the first BSSINFO got an eid 0x77 event then no
+  CMD_RESULT, and RX7 delivered nothing ever again (every later scan timed out). Possibly RX5 filling up blocked the RX
+  DMA, possibly the missing leave.
+- rev252cm2: (1) RX4/5/6 all set up (0x11000 each from pool +0x10000), polled round robin by x9_r4_try/done; log
+  `first packet on RXn`, ring counts in the DATA line. (2) x9_radio_leave before a rejoin, on iOS disassociate and on an
+  AP deauth: deauth frame (reason 3), STAREC state 0, BSSINFO not connected. (3) WPA2 stage 1: an RSN BSS (privacy +
+  IE 48) is joinable; the Assoc gets privacy cap + RSN IE (iOS's from the associate request if found after +0x88, else
+  built: AP group, CCMP, AP's first AKM); TX only EAPOL (0x888e) until keys exist (`unkeyed drops`); EAPOL TX/RX logged
+  (`X9 WIFI EAPOL:`); PSK PMK from the associate request (cipher 6, 32 B) and the 802.1X PMK from kCipherKey (cipher 6)
+  are stored and logged (lengths only).
+- WPA2 stage 2 not done: 4-way handshake in the driver (PRF-SHA1 PTK, MIC, AES key unwrap GTK), key install through
+  STAREC tag 0x27 INSTALL_KEY_V3 (pairwise widx 1; group key needs a BC WTBL entry, gen4m secPrivacySeekForBcEntry),
+  protected TX/RX.
+- BUILT kernel only (plugin 267): boot_sha256 ed29b242413d48337027a2707e81fe6f46ed0a17a134eb7eb018f93ac4c1a085.
+- Test: RUC-Web first (expect `first packet on RX5`, rx > 0, DHCP, portal). Then RUC-Mobile with the campus account:
+  see whether EAP frames flow (`X9 WIFI EAPOL: RX type 0`) and whether `PMK received` appears.
+
 ## HANDOFF 2026-11-07 (44): rev252cm BUILT = rev252cl + first Wi-Fi data path (untested)
 
 - Not yet run on the device: rev252cl (Auth seq 1) itself is still unverified; rev252cm contains it.
