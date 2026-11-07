@@ -1635,7 +1635,9 @@ x9_radio_scan_req(x9_wdma *d, uint8_t seq, const uint8_t mac[6])
  * header format 802.11 normal. Bit layout from include/nic/nic_connac3x_tx.h (DS_VER 3600). widx/own-mac from BSS0. */
 #define X9_JOIN_WIDX 1u
 #define X9_JOIN_OMAC 0u
-#define X9_JOIN_PID 0x20u                                       /* mgmt PID as Android's first one (PID[32]) */
+#define X9_JOIN_PID 0x20u
+/* rev252ci: TXD TGID = the HW band the channel grant names (UNI_EVENT_CNM_CH_PRIVILEGE_GRANT ucDBDCBand 0/1). */
+static uint8_t x9_join_tgid;                                       /* mgmt PID as Android's first one (PID[32]) */
 
 static unsigned
 x9_txd_mgmt(uint8_t *buf, unsigned framelen, unsigned machdr, uint8_t subtype)
@@ -1647,14 +1649,18 @@ x9_txd_mgmt(uint8_t *buf, unsigned framelen, unsigned machdr, uint8_t subtype)
      * MGNT_2_CMD_QUE (nic_txd_v5.c nicConnac3TxGetTxDestQueue); rev252bt..ce used 17 (MCU_Q1 | ALTX), and 91.txt
      * still had every Auth unACKed on 5 GHz while firmware probe requests were answered. */
     dw[0] = (total & 0xffff) | ((etoff & 0x7f) << 16) | (2u << 23) | (16u << 25);  /* COMMAND, MCU_Q0|ALTX */
-    dw[1] = (X9_JOIN_WIDX & 0xfff) | (2u << 14) | (((machdr >> 1) & 0x1f) << 16) | (0u << 21) | (X9_JOIN_OMAC << 25)
+    dw[1] = (X9_JOIN_WIDX & 0xfff) | ((uint32_t)(x9_join_tgid & 3) << 12) | (2u << 14) | (((machdr >> 1) & 0x1f) << 16)
+        | (0u << 21) | (X9_JOIN_OMAC << 25)
         | (1u << 31);                                          /* FIXED_RATE (Android: Rate mode 1 = MANUAL_DESC) */
     dw[2] = (subtype & 0xf) | (0u << 4) | (0x7fu << 16);       /* subtype, type MGMT 0, life-time max */
-    dw[3] = (15u << 11);                                       /* remaining tx count 15, HW assigns SN */
+    dw[3] = (30u << 11);                                       /* remaining tx count 30 (Android's Auth TXD), HW SN */
     dw[5] = X9_JOIN_PID | (1u << 9);                           /* u2DW5_0: PID, TX_STATUS_TO_MCU (-> EVENT_TX_DONE) */
     /* DW6: msdu_count 1, DA_SRC_SEL, fixed-rate index 1 = FIXED_RATE_INDEX_OFDM_6M (Android RateIdx=1), FR_BW 8.
      * VALID_TXD_ARRIVAL_TIME (b28) left clear: MT6653 builds CFG_WIFI_TX_FIXED_RATE_NO_VTA=1. */
-    dw[6] = (1u << 10) | (1u << 2) | (1u << 16) | (8u << 22);
+    /* rev252ci: + DIS_MAT b3. Android's real Auth TXD (android-join-2 kmsg, connac3x_dump_tmac_info) has DIS_MAT=1:
+     * gen4m sets it for MSDU_CONTROL_FLAG_FORCE_TX. Without it the MAC applies MLD-to-link address translation to
+     * the 802.11 header; 92.txt got a CTS to the RTS (RA from the WTBL) but never an ACK to the Auth MPDU. */
+    dw[6] = (1u << 10) | (1u << 2) | (1u << 3) | (1u << 16) | (8u << 22);
     /* DW7: TXD_LENGTH 1 page (0); FORCE_RTS_CTS b13 (CFG_CONNAC3X_DS_VER >= 3500), as gen4m nicTxSetForceRts for Auth
      * (an AP that never answers then shows TX_DONE status 2 RTS_ERROR instead of 3 MPDU_ERROR). */
     dw[7] = (1u << 13);
@@ -1781,6 +1787,7 @@ x9_radio_ch_privilege(x9_wdma *d, const x9wifi::bss_info *b, uint8_t token)
     IOLog("X9 WIFI JOIN: CH grant tag=%u len=%u bss=%u token=%u status=%u ch=%u sco=%u band=%u width=%u s1=%u s2=%u "
           "req=%u dbdc=%u interval=%u ms (asked ch=%u band=%u)\n", gtag, glen, g[4], g[5], g[6], g[7], g[8], g[9], g[10],
           g[11], g[12], g[13], g[14], giv, ch, band);
+    x9_join_tgid = g[14] <= 1 ? g[14] : 0;                  /* Android 5 GHz grant: band 1, TXD TGID 1 */
     if (gtag != 0 || g[6] != 0 || g[7] != ch)                 /* warn only for now: keep the Auth attempt for data */
         IOLog("X9 WIFI JOIN: CH grant NOT as asked (status/channel/tag); continuing anyway\n");
     return true;
