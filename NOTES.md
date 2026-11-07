@@ -1,3 +1,15 @@
+## HANDOFF 2026-11-07 (31): 88.txt = rev252by by mistake (user flashed the wrong image); rev252bz still untested
+
+- Log copy .local/x9/logs/x9-88.txt. No `X9 WIFI NVRAM` line at all (rev252bz always logs one) -> rev252by kernel;
+  user confirmed the wrong image. Wi-Fi unchanged: probe responses 0, Auth TX_DONE MPDU_ERROR x15 (x3).
+- GPU, scope fix WORKS: hold_jobs=0, table used=9 registers=51 refused=0 unreg_miss=0; pre/post skip 14-16 MB per job.
+  pre_cache 3.8 -> 3.2-3.3 ms, post 1.7 -> 1.0 ms; wait 3.2-6.8 ms (87: 11.6-15.3); presented 36 fps in busy windows
+  (87: 19-23.5). Only 14-16 MB of ~63 MB skipped: the rest are imports the frontend does not register (not IOSurface
+  textures of this process: next to identify which BOs they are).
+- Next: user boots rev252bz (NVRAM). Full Android init (domain V2, power limit EMI, ANT power, PHY_ACTION COM_FEM/CAL,
+  PMIC query, time sync, cnmPowerControl) still to do; gen4m entry points: common/wlan_lib.c wlanAdapterStart (1375,
+  ready bit at 1566), os/linux/gl_init.c 5141 (wlanLoadManufactureData), wlanOnPostAdapterStart (8405).
+
 ## HANDOFF 2026-11-07 (30): Wi-Fi TX not on air -> missing NVRAM; rev252bz BUILT (NVRAM + rev252by scope fix); commit 0caf603
 
 - Evidence TX never reaches the air: 86 Auth TX_DONE MPDU_ERROR tx_count 15 (x3), 87 probe responses 0 in every scan
