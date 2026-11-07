@@ -1,3 +1,25 @@
+## HANDOFF 2026-11-07 (40): Android TXD capture (android-join-2); Auth TXD differences found; rev252ci BUILT
+
+- Capture: Android booted, adb on the Mac. x9/tools/android_wifi_manual_capture.sh (new; gen4m dbgLevel 0xFF:0x13F +
+  `set_cfg DataTxDone 3`, 240 s kmsg) while the user joined RUC-Mobile then RUC-Web by hand. The script stalled after
+  kmsg when the ssh session ended; remaining steps (debug restore, status, logcat) done by hand. Files (gitignored):
+  .local/x9/android-join-2/{kmsg.txt,kmsg.clean,logcat-wifi.txt,status-*.txt} on both machines. Four joins, all
+  5240 MHz: RUC-Mobile x2, RUC-Web x2, Auth -> Assoc -> CONN_SUCCESS; final state connected to RUC-Web 11ac.
+- Android join on bss 0 / OMAC 0 / AP WTBL #3 (BMC #0 own mac). ChReq dbdc=255 -> ChGrant band=1 (DBDC on: scan uevent
+  "DBDC:ENABLE"). BSS activate PhyMode 0x39 (ours 0). StaRec update has BA offload, Bfee, MLR, HdrTrans(skip) tags.
+- Android's Auth TXD (kmsg.clean ~38000, connac3x_dump_tmac_info): TxByteCnt 62, EtherTypeOffset 20, pkt_ft 2, QueID
+  0x10, MLDID 3, TGID 1, HdrFmt 2, HdrLen 12, TID-mgmt 0, own_mac 0, FixedRate 1, subtype 11, RTS 1, life 30,
+  remain_tx_cnt 30, sn_vld 1, pid 44, tx_status_2_mcu 1, DA_source_selection 1, **DIS_MAT 1**, MSDU_count 1,
+  Timestamp_offset_index 1, Fixed_rate_index 1, Bandwidth 8, Valid_TXD_arrival_time 0, txd len 0.
+- Differences vs ours: DIS_MAT (DW6 b3) missing (gen4m sets it with MSDU_CONTROL_FLAG_FORCE_TX: no MLD-to-link address
+  translation of the 802.11 header; fits 92.txt: CTS to our RTS (RA from WTBL) but no ACK to the Auth MPDU), TGID 0 vs 1,
+  remain_tx 15 vs 30. (DS_VER 3600: our RTS in DW7 b13 is right; the dump just lists it under TXD_2.)
+- rev252ci (kernel only, plugin 267 = rev252ch): DW6 |= DIS_MAT, TGID = grant ucDBDCBand (g[14], 0/1), remain tx 30.
+  boot_sha256 0bf7f624b0b3345188e9075a74e75e774ee36f11e4bff2dbc721ee47225d85d0. Stage rev252ch's package if not done
+  (`X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/x9-rev252ch`), boot x9/out/x9-rev252ci/boot.img.
+- Not done (Android does): DBDC enable at init, BSS activate PhyMode 0x39, StaRec BA/Bfee/MLR tags, Assoc cap/IEs as
+  Android (cap 0x1101 RUC-Web, listen 2, HT/VHT IEs).
+
 ## HANDOFF 2026-11-07 (39): 93.txt = rev252cg: no tiler OOM; device lost at 96.4 s = unmap 0xe00002c2; rev252ch BUILT (plugin 267)
 
 - Log copy .local/x9/logs/x9-93.txt. Big tiler heap active (backboardd 64 chunks / 128 MiB, others 16); no `X9 CSF TILER
