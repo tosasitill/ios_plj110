@@ -221,6 +221,7 @@ static void waitForResource(id resource);
 @property(nonatomic,strong) id<MTLHeap> parentHeap;   // the heap that made the buffer, nil otherwise
 @property(nonatomic) NSUInteger heapOffset;
 @property(nonatomic) uint64_t scopeBase,scopeBytes;   // IOSurface import range registered for the cache scope, else 0
+@property(nonatomic) BOOL scopeNoCopy;                 // registered as a no-copy import: unregistered at dealloc
 @end
 @interface NBTexture : NBObject
 @property(nonatomic) uint64_t traceID;
@@ -296,7 +297,12 @@ static void x9_release_import_surface(void *context,void *pointer,uint64_t lengt
  CFRelease((IOSurfaceRef)context);
 }
 @implementation NBBuffer
-- (void)dealloc {if(_handle)x9_buffer_unregister(bufferKey(_handle));nmb_buffer_release(_handle);}
+- (void)dealloc {
+ // rev252cb: a no-copy import leaves the cache scope when its Metal object goes (a command buffer that used it held it
+ // until completion). Unregistered imports are never skipped, so an import that outlives this keeps full maintenance.
+ if(_scopeNoCopy&&_scopeBytes)nmb_cache_scope(NBScopeUnregister,_scopeBase,_scopeBytes);
+ if(_handle)x9_buffer_unregister(bufferKey(_handle));nmb_buffer_release(_handle);
+}
 - (NSUInteger)length {return nmb_buffer_length(_handle);}
 - (void *)contents {return nmb_buffer_contents(_handle);}
 - (uint64_t)gpuAddress {return nmb_buffer_gpu_address(_handle);}
@@ -1387,6 +1393,7 @@ static void x9ScopeAcquire(NBCommandBuffer *cb,NSSet *owners) {
    if(b.scopeBytes)add(b);else if(bufferSurfaceID(b.handle))holdAll=true;
   }else if([r isKindOfClass:[NBTexture class]]) {
    NBTexture *x=(NBTexture *)r;
+   if(x.buffer.scopeBytes&&!x.surface){add(x.buffer);continue;}   // texture over a registered no-copy buffer
    if(!x.surface)continue;
    // rev252by: acquire by the surface's own import address whether or not its
    // registration succeeded (the kernel matches by address and keeps a
@@ -1877,6 +1884,11 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
  NBBuffer *buffer=[NBBuffer new];buffer.handle=handle;buffer.options=options;
  buffer.wrapped=pointer;
  registerRootBuffer(handle,X9BufferKindHostLinear,X9BufferOwnershipImported,length,0);
+ {  // rev252cb: no-copy host memory joins the cache scope like IOSurfaces (page-rounded, as the kernel imports it)
+  const uint64_t page=(uint64_t)getpagesize(),p0=(uint64_t)(uintptr_t)pointer;
+  const uint64_t base=p0&~(page-1),bytes=((p0+length+page-1)&~(page-1))-base;
+  if(length&&scopeCall(NBScopeRegister,base,bytes)){buffer.scopeBase=base;buffer.scopeBytes=bytes;buffer.scopeNoCopy=YES;}
+ }
  return (id<MTLBuffer>)buffer;
 }
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d {

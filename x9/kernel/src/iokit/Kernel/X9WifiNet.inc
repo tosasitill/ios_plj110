@@ -1494,6 +1494,39 @@ x9_scan_take(const uint8_t *p, unsigned n)
     }
 }
 
+/* rev252cb: gen4m rlmDomainSendCmd (non single-SKU path, as Android's log shows rlmDomainGetDomainInfo and the
+ * passive-scan hook): first the passive-scan table (arSupportedRegDomains_Passive default entry: 52-64 and 100-144
+ * passive), then the domain (NVRAM ucRegChannelListMap 0 = by country code, country 0 -> the default group:
+ * 2.4 GHz 1-13, 36-48, 52-64 DFS, 100-144 DFS, 149-177; 6 GHz sub-bands skipped). Each is
+ * UNI_CMD_ID_SET_DOMAIN_INFO 0x15 {u32 country, bw2g CONFIG_BW_20M 1, bw5g CONFIG_BW_20_40M 0, bw6g, reg cat}
+ * + tag SUBBAND 1 {u2Length 72, u2IsSetPassiveScan, rsv, num 8} + 8 x {class, band, span, first, num, dfs, rsv2}.
+ * Spans: CHNL_SPAN_5 1, CHNL_SPAN_20 4; bands 1 = 2.4, 2 = 5 GHz. ACK requested to see the CMD_RESULT. */
+static void
+x9_radio_domain(x9_wdma *d)
+{
+    static const uint8_t passive[8][6] = {
+        { 81, 1, 1, 1, 0, 0 }, { 82, 1, 1, 14, 0, 0 }, { 115, 2, 4, 36, 0, 0 }, { 118, 2, 4, 52, 4, 1 },
+        { 121, 2, 4, 100, 12, 1 }, { 125, 2, 4, 149, 0, 0 }, {}, {} };
+    static const uint8_t domain[8][6] = {
+        { 81, 1, 1, 1, 13, 0 }, { 115, 2, 4, 36, 4, 0 }, { 118, 2, 4, 52, 4, 1 }, { 121, 2, 4, 100, 12, 1 },
+        { 125, 2, 4, 149, 8, 0 }, {}, {}, {} };
+    static uint8_t ev[256];
+    for (int pass = 1; pass >= 0; pass--) {
+        uint8_t pl[8 + 8 + 64] = {};
+        pl[4] = 1; pl[5] = 0; pl[6] = 0; pl[7] = 0;            /* country 0, bw2g 20M, bw5g 20/40, bw6g, cat NULL */
+        uint8_t *t = pl + 8;
+        t[0] = 1; t[2] = 72;                                    /* tag SUBBAND, length incl. header */
+        t[4] = (uint8_t)pass; t[7] = 8;                         /* u2IsSetPassiveScan, ucSubBandNum */
+        const uint8_t (*tab)[6] = pass ? passive : domain;
+        for (int i = 0; i < 8; i++) memcpy(t + 8 + i * 8, tab[i], 6);
+        int n = x9_wd_unicmd(d, 0x15, 0x07, pl, sizeof pl, 0x01, ev, sizeof ev, 1000);
+        IOLog("X9 WIFI DOMAIN: %s table -> %s (result %02x %02x %02x %02x %02x %02x %02x %02x)\n",
+              pass ? "passive-scan" : "domain", n > 0 ? "answered" : "NO CMD_RESULT", n > 0 ? ev[44] : 0,
+              n > 0 ? ev[45] : 0, n > 0 ? ev[46] : 0, n > 0 ? ev[47] : 0, n > 0 ? ev[48] : 0, n > 0 ? ev[49] : 0,
+              n > 0 ? ev[50] : 0, n > 0 ? ev[51] : 0);
+    }
+}
+
 /* rev252bz: the device NVRAM (TX power / calibration / front-end settings) as gen4m wlanLoadManufactureData sends
  * it on MT6653 (is_support_nvram_fragment): 37 fragments (generated table), each UNI_CMD_ID_NVRAM_SETTINGS 0x2E
  * {4 pad, tag FRAGMENT 0 len 1504, CMD_NVRAM_FRAGMENT 1500 B = fragment bytes then zeros}. We never sent it before:
@@ -2003,6 +2036,7 @@ x9_wifi_radio_loop(x9_wdma *d)
         memcpy(mac, status.mac, 6);
     }
     if (!x9_r4_setup(d)) return;
+    if (sweet_x9_arg("x9_wifi_domain", 1) == 1) x9_radio_domain(d);   /* Android: rlmDomainSendCmd, then NVRAM */
     x9_radio_nvram(d);                                   /* Android: wlanLoadManufactureData before networks */
     x9_radio_activate(d, mac);
     IOLockLock(lock);

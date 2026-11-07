@@ -441,9 +441,20 @@ static IOReturn render_submit(X9RenderContext *c,const X9RenderSubmission *reque
   return covered;
  };
  uint64_t scope_skip[2]={0,0};
+ /* rev252cb: imported CPU-exposed BOs that no registered range covers (what the frontend does not name yet). */
+ uint64_t scope_uncovered=0,scope_uncovered_bytes=0,scope_uncovered_max=0;
+ auto scope_covered=[&](const X9RenderResource &r)->bool {
+  if(!r.host_address)return false;
+  const uint64_t begin=r.host_address,end=r.host_address+r.bytes;
+  for(unsigned k=0;k<scope_count;k++)if(scope_view[k].regs&&scope_view[k].begin<=begin&&end<=scope_view[k].end)return true;
+  return false;
+ };
  for(auto &r:c->resources)if(r.memory) {
   if(r.write_combined){wc_skip[0]+=r.bytes;continue;}   // never cached, see X9RenderResource
   if(r.cpu_exposed&&scope_skips(r)){scope_skip[0]+=r.bytes;continue;}
+  if(scope_on&&r.imported&&r.cpu_exposed&&!scope_covered(r)) {
+   scope_uncovered++;scope_uncovered_bytes+=r.bytes;if(r.bytes>scope_uncovered_max)scope_uncovered_max=r.bytes;
+  }
   if(coherent&&r.cpu_exposed) {
    coherent_skip[0]+=r.cache_end>r.cache_begin?r.cache_end-r.cache_begin:0;continue;
   }
@@ -625,6 +636,8 @@ static IOReturn render_submit(X9RenderContext *c,const X9RenderSubmission *reque
   static uint64_t coherent_total[2]={0,0};
   static uint64_t wc_total[2]={0,0};
   static uint64_t scope_total[2]={0,0},scope_entries=0,scope_holds=0;
+  static uint64_t unc_n=0,unc_bytes=0,unc_max=0;
+  unc_n+=scope_uncovered;unc_bytes+=scope_uncovered_bytes;if(scope_uncovered_max>unc_max)unc_max=scope_uncovered_max;
   scope_total[0]+=scope_skip[0];scope_total[1]+=scope_skip[1];scope_entries+=scope_count;if(scope_on&&scope_hold)scope_holds++;
   static uint64_t hole_total[2]={0,0},span_total[2]={0,0};
   static uint64_t plan_rebuilds=0,plan_reuses=0;
@@ -667,6 +680,9 @@ static IOReturn render_submit(X9RenderContext *c,const X9RenderSubmission *reque
    uint64_t ss[6];x9_render_scope_stats(ss);
    IOLog("X9 RENDER cache-frontend-scope: jobs=%llu active=%u pre_skip_avg=%llu post_skip_avg=%llu ranges_avg=%llu hold_jobs=%llu table: used=%llu registers=%llu refused=%llu unreg_miss=%llu placeholders=%llu holds=%llu;imported BOs no pending command buffer references (x9_cache_scope)\n",
     count,scope_on?1:0,scope_total[0]/count,scope_total[1]/count,scope_entries/count,scope_holds,ss[5],ss[0],ss[1],ss[2],ss[3],ss[4]);
+   IOLog("X9 RENDER cache-uncovered: jobs=%llu imports_avg=%llu bytes_avg=%llu largest=%llu;imported CPU-exposed BOs no registered frontend range covers\n",
+    count,unc_n/count,unc_bytes/count,unc_max);
+   unc_n=unc_bytes=unc_max=0;
    scope_total[0]=scope_total[1]=scope_entries=scope_holds=0;
    for(unsigned i=0;i<2;i++)reach_total[i]=import_total[i]=full_import_total[i]=coherent_total[i]=wc_total[i]=0;
    cache_total[0]=cache_total[1]=ready_mask=0;
