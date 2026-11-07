@@ -1388,12 +1388,21 @@ static void x9ScopeAcquire(NBCommandBuffer *cb,NSSet *owners) {
   }else if([r isKindOfClass:[NBTexture class]]) {
    NBTexture *x=(NBTexture *)r;
    if(!x.surface)continue;
-   if(x.buffer.scopeBytes)add(x.buffer);else holdAll=true;
+   // rev252by: acquire by the surface's own import address whether or not its
+   // registration succeeded (the kernel matches by address and keeps a
+   // placeholder), so no registered range can cover a referenced surface.
+   if(x.buffer.scopeBytes){add(x.buffer);continue;}
+   const uint64_t base=(uint64_t)(uintptr_t)IOSurfaceGetBaseAddress(x.surface),page=(uint64_t)getpagesize();
+   const uint64_t bytes=((uint64_t)IOSurfaceGetAllocSize(x.surface)+page-1)&~(page-1);
+   if(base&&bytes)ranges.emplace_back(base,bytes);else holdAll=true;
   }else if(heapClass&&[r isKindOfClass:heapClass])holdAll=true;
  }
  std::sort(ranges.begin(),ranges.end());ranges.erase(std::unique(ranges.begin(),ranges.end()),ranges.end());
  NSMutableData *held=[NSMutableData data];
- for(auto &v:ranges)if(scopeCall(NBScopeAcquire,v.first,v.second)){uint64_t pair[2]={v.first,v.second};[held appendBytes:pair length:sizeof(pair)];}
+ for(auto &v:ranges) {
+  if(scopeCall(NBScopeAcquire,v.first,v.second)){uint64_t pair[2]={v.first,v.second};[held appendBytes:pair length:sizeof(pair)];}
+  else holdAll=true;   // table full or no client: never leave a referenced range unacquired
+ }
  cb.scopeRanges=held;
  cb.scopeHoldAll=holdAll&&scopeCall(NBScopeHoldAll,0,0);
 }

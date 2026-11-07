@@ -62,10 +62,12 @@ struct X9RenderContext {
 /* Frontend cache scope (SweetX9RenderService.cpp). A snapshot of one task's ranges,
  * taken once per submission; hold=true when anything pins all ranges or the
  * snapshot overflowed (then nothing may be skipped). */
-struct X9RenderScopeView { uint64_t begin,end; uint32_t refs; };
+struct X9RenderScopeView { uint64_t begin,end; uint32_t refs,regs; };
 #define X9_RENDER_SCOPE_VIEW 256u
 unsigned x9_render_scope_snapshot(task_t task,X9RenderScopeView *out,unsigned cap,bool *hold);
 bool x9_render_scope_enabled(void);
+/* registers, refused, unregister misses, placeholders, holds, entries in use */
+void x9_render_scope_stats(uint64_t out[6]);
 /* The engine installs this interface only after taking ownership of actual
  * hardware caps and resource/stream/heap support. NULL methods stay refused. */
 struct X9RenderEngine {

@@ -44,17 +44,21 @@ static bool render_wc_scrub(IOMemoryDescriptor *m,uint64_t bytes) {
 static const X9RenderEngine *render_engine;
 static bool render_published;
 extern "C" { int sweet_x9_render_payload_ready=0; }
-/* Frontend cache scope (rev252bx, X9RenderScope). Ranges per task: a registered
- * range (refs counted from Acquire/Release) or a HoldAll record (address 0).
- * The table only ever widens maintenance when in doubt: a full table refuses
- * new registrations (those imports keep full maintenance), and a snapshot that
- * does not fit reports hold. Entries of a task go when its scope client closes. */
+/* Frontend cache scope (rev252bx/by, X9RenderScope). One entry per (task,
+ * host address): regs counts registrations (the import is frontend-tracked),
+ * refs counts pending command buffers (Acquire) or HoldAll (address 0).
+ * Every operation matches by address only (rev252bx matched bytes too, so a
+ * length mismatch leaked entries until the table filled; 87.txt). An Acquire of
+ * an unknown address creates a placeholder (regs 0) so its Release finds it.
+ * Only regs>0 entries may justify a skip; any refs>0 overlap forbids one. A full
+ * table refuses (frontend then holds all). Entries go at regs==refs==0 or when
+ * the task's scope client closes. */
 namespace {
-struct RenderScopeEntry { task_t task; uint64_t address,bytes; uint32_t refs; bool used; };
+struct RenderScopeEntry { task_t task; uint64_t address,bytes; uint32_t regs,refs; bool used; };
 constexpr unsigned render_scope_capacity=1024;
 RenderScopeEntry render_scope[render_scope_capacity];
 IOLock *render_scope_lock;
-uint64_t render_scope_stats[4];   /* registers, refused (full), acquires without a range, holds */
+uint64_t render_scope_stats[6];   /* registers, refused, unregister misses, placeholders, holds, used now */
 IOLock *render_scope_lock_get() {
  if(!render_scope_lock) {
   IOLock *l=IOLockAlloc();
@@ -72,26 +76,32 @@ IOReturn render_scope_op(task_t task,const X9RenderScopeRequest &q) {
  IOLockLock(l);
  RenderScopeEntry *found=nullptr,*empty=nullptr;
  for(auto &e:render_scope) {
-  if(e.used&&e.task==task&&e.address==address&&(hold||e.bytes==bytes)){found=&e;break;}
+  if(e.used&&e.task==task&&e.address==address){found=&e;break;}
   if(!e.used&&!empty)empty=&e;
  }
+ auto create=[&](uint32_t regs,uint32_t refs)->bool {
+  if(!empty){render_scope_stats[1]++;return false;}
+  *empty={task,address,bytes,regs,refs,true};found=empty;render_scope_stats[5]++;return true;
+ };
+ auto drop=[&]() {if(found&&!found->regs&&!found->refs){*found={};render_scope_stats[5]--;}};
  switch(q.operation) {
  case X9ScopeRegister:
   render_scope_stats[0]++;
-  if(found)break;
-  if(!empty){render_scope_stats[1]++;kr=kIOReturnNoResources;break;}
-  *empty={task,address,bytes,0,true};break;
- case X9ScopeUnregister:
-  if(found)*found={};
+  if(!found){if(!create(1,0))kr=kIOReturnNoResources;break;}
+  if(found->regs!=UINT32_MAX)found->regs++;
+  if(bytes>found->bytes)found->bytes=bytes;
   break;
+ case X9ScopeUnregister:
+  if(!found||!found->regs){render_scope_stats[2]++;break;}
+  found->regs--;drop();break;
  case X9ScopeAcquire: case X9ScopeHoldAll:
-  if(hold)render_scope_stats[3]++;
-  if(!found&&hold&&empty){*empty={task,0,0,0,true};found=empty;}
-  if(!found){render_scope_stats[2]++;break;}   /* unregistered: never skipped anyway */
+  if(hold)render_scope_stats[4]++;
+  if(!found){if(!hold)render_scope_stats[3]++;if(!create(0,1))kr=kIOReturnNoResources;break;}
   if(found->refs!=UINT32_MAX)found->refs++;
+  if(bytes>found->bytes)found->bytes=bytes;
   break;
  case X9ScopeRelease: case X9ScopeReleaseAll:
-  if(found&&found->refs)found->refs--;
+  if(found&&found->refs){found->refs--;drop();}
   break;
  default:kr=kIOReturnBadArgument;
  }
@@ -101,7 +111,7 @@ IOReturn render_scope_op(task_t task,const X9RenderScopeRequest &q) {
 void render_scope_task_gone(task_t task) {
  IOLock *l=render_scope_lock_get();if(!l)return;
  IOLockLock(l);
- for(auto &e:render_scope)if(e.used&&e.task==task)e={};
+ for(auto &e:render_scope)if(e.used&&e.task==task){e={};render_scope_stats[5]--;}
  IOLockUnlock(l);
 }
 }
@@ -110,20 +120,28 @@ bool x9_render_scope_enabled(void) {
  if(on<0){int v=0;on=PE_parse_boot_argn("x9_cache_scope",&v,sizeof(v))&&v?1:0;}
  return on==1;
 }
+void x9_render_scope_stats(uint64_t out[6]) {
+ IOLock *l=render_scope_lock_get();if(!l){bzero(out,6*sizeof(uint64_t));return;}
+ IOLockLock(l);memcpy(out,render_scope_stats,sizeof(render_scope_stats));IOLockUnlock(l);
+}
 unsigned x9_render_scope_snapshot(task_t task,X9RenderScopeView *out,unsigned cap,bool *hold) {
  *hold=false;
  IOLock *l=render_scope_lock_get();if(!l){*hold=true;return 0;}
  unsigned n=0;
  IOLockLock(l);
+ /* Once any request was refused (table full), an acquire or HoldAll may have
+  * been lost: never skip again this boot. */
+ if(render_scope_stats[1])*hold=true;
  for(auto &e:render_scope) {
   if(!e.used||e.task!=task)continue;
   if(!e.address){if(e.refs)*hold=true;continue;}
   if(n==cap){*hold=true;break;}
-  out[n++]={e.address,e.address+((e.bytes+16383)&~16383ULL),e.refs};
+  out[n++]={e.address,e.address+((e.bytes+16383)&~16383ULL),e.refs,e.regs};
  }
  IOLockUnlock(l);
  return n;
 }
+
 /* Observations only: each lookup locks the map independently, so this is not
  * an atomic snapshot and must never be used to authorize an import. Inspect
  * every bounded submap level because each parent's protection also matters. */

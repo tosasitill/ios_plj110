@@ -436,7 +436,7 @@ static IOReturn render_submit(X9RenderContext *c,const X9RenderSubmission *reque
   for(unsigned k=0;k<scope_count;k++) {
    const auto &v=scope_view[k];
    if(v.begin<end&&begin<v.end&&v.refs)return false;   /* referenced by a pending command buffer */
-   if(v.begin<=begin&&end<=v.end)covered=true;
+   if(v.regs&&v.begin<=begin&&end<=v.end)covered=true;
   }
   return covered;
  };
@@ -664,8 +664,9 @@ static IOReturn render_submit(X9RenderContext *c,const X9RenderSubmission *reque
    for(unsigned i=0;i<2;i++)hole_total[i]=span_total[i]=0;
    IOLog("X9 RENDER cache-wc: jobs=%llu pre_skip_avg=%llu post_skip_avg=%llu;write-combined BOs need no CPU maintenance\n",
     count,wc_total[0]/count,wc_total[1]/count);
-   IOLog("X9 RENDER cache-frontend-scope: jobs=%llu active=%u pre_skip_avg=%llu post_skip_avg=%llu ranges_avg=%llu hold_jobs=%llu;imported BOs no pending command buffer references (x9_cache_scope)\n",
-    count,scope_on?1:0,scope_total[0]/count,scope_total[1]/count,scope_entries/count,scope_holds);
+   uint64_t ss[6];x9_render_scope_stats(ss);
+   IOLog("X9 RENDER cache-frontend-scope: jobs=%llu active=%u pre_skip_avg=%llu post_skip_avg=%llu ranges_avg=%llu hold_jobs=%llu table: used=%llu registers=%llu refused=%llu unreg_miss=%llu placeholders=%llu holds=%llu;imported BOs no pending command buffer references (x9_cache_scope)\n",
+    count,scope_on?1:0,scope_total[0]/count,scope_total[1]/count,scope_entries/count,scope_holds,ss[5],ss[0],ss[1],ss[2],ss[3],ss[4]);
    scope_total[0]=scope_total[1]=scope_entries=scope_holds=0;
    for(unsigned i=0;i<2;i++)reach_total[i]=import_total[i]=full_import_total[i]=coherent_total[i]=wc_total[i]=0;
    cache_total[0]=cache_total[1]=ready_mask=0;
