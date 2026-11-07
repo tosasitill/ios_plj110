@@ -1,3 +1,21 @@
+## HANDOFF 2026-11-07 (39): 93.txt = rev252cg: no tiler OOM; device lost at 96.4 s = unmap 0xe00002c2; rev252ch BUILT (plugin 267)
+
+- Log copy .local/x9/logs/x9-93.txt. Big tiler heap active (backboardd 64 chunks / 128 MiB, others 16); no `X9 CSF TILER
+  OOM`, no submission failure. backboardd ~500-540 MiB. Desktop rendered (up to 32 fps windows).
+- 96.439 s `X9 PANVK FAILED: line=418 errno=5 detail=unmap native resource: IOKit=0xe00002c2` (x9_pan_kmod_unmap_cpu),
+  then every alloc refused and DeviceLost x1376. Preceded by a burst of 14.6 MB allocations every ~7 ms. Same signature
+  as the open 67.txt issue. Cause (XNU IOKit behaviour, inferred, not traced on device): IOUserClient::mapClientMemory64 ->
+  IOMemoryDescriptor::createMappingInTask without kIOMapUnique reuses a compatible existing mapping in the same task, so a
+  second map of a BO returns the same address while the client's mapping OSSet holds it once; the first unmap removes it
+  and the second unmap finds nothing -> kIOReturnBadArgument. The 963f runtime (free thread, more map/unmap) hits it
+  more often.
+- rev252ch (plugin 267): X9PanVKMemory.c x9_bo gains cpu/cpu_maps (zeroed at alloc and host import); map_cpu returns
+  the existing pointer with cpu_maps++; x9_pan_kmod_unmap_cpu decrements and calls IOConnectUnmapMemory64 only at the
+  last map. boot_sha256 fa0acfcef65b9dcc070a85c0eeb99df372b3c83a76def1612ec11e044db2c3f6. Kernel = rev252cg (tiler OOM
+  log, Wi-Fi queue 16 + RTS). Stage `X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/x9-rev252ch`.
+- Wi-Fi 93: same as 92 (Auth MPDU_ERROR x15, rsp_rate 0 this time, delay 267-319 ms). Android TXD capture still the next
+  step (needs Android booting) plus dumping our TXD+frame bytes.
+
 ## HANDOFF 2026-11-07 (38): 92.txt = rev252cf: device lost again at 57 s = tiler heap OOM; Auth: RTS/CTS ok, MPDU unACKed; rev252cg BUILT
 
 - Log copy .local/x9/logs/x9-92.txt. backboardd memory now 531-618 MiB (spare cap works) but 56.998 s
