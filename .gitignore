@@ -19,6 +19,8 @@ work/**/*.log
 x9/build/local.json
 # vendor Wi-Fi firmware embedded at build time (x9/tools/wifi_firmware.py)
 x9/kernel/generated/x9_wifi_firmware.inc
+# device Wi-Fi NVRAM (MAC + calibration) embedded at build time (x9/tools/wifi_nvram.py)
+x9/kernel/generated/x9_wifi_nvram.inc
 
 # Local dependency snapshots, Apple inputs and private device state
 .local/

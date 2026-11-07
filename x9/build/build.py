@@ -17,6 +17,7 @@ Inputs:
   x9/build/boot.json         packaging options and boot-args
   x9/build/local.json        machine paths (copy config.example.json)
   .local/x9/wifi-fw          MT6653 vendor firmware, embedded via x9/tools/wifi_firmware.py
+  .local/x9/wifi-nvram/WIFI  device Wi-Fi NVRAM (nvdata), embedded via x9/tools/wifi_nvram.py
                              ("wifi_firmware" in local.json overrides; absent = stub)
 
 Outputs go to x9/out/<name>/ (default name: x9-<git short hash>[-dirty]),
@@ -162,6 +163,10 @@ class Builder:
         fw = Path(self.cfg.get('wifi_firmware') or ROOT / '.local/x9/wifi-fw').expanduser()
         self.run_or_exit([sys.executable, '-I', str(X9 / 'tools/wifi_firmware.py'), '--src', str(fw)], ROOT,
                          label='wifi_firmware.py')
+        # Device Wi-Fi NVRAM -> generated/x9_wifi_nvram.inc (gitignored; stub when absent)
+        nv = Path(self.cfg.get('wifi_nvram') or ROOT / '.local/x9/wifi-nvram/WIFI').expanduser()
+        self.run_or_exit([sys.executable, '-I', str(X9 / 'tools/wifi_nvram.py'), '--src', str(nv)], ROOT,
+                         label='wifi_nvram.py')
         todo = [e for e in self.recipe['objects'] if 'prebuilt' not in e]
         with concurrent.futures.ThreadPoolExecutor(self.jobs) as pool:
             results = list(pool.map(self.compile_one, todo))

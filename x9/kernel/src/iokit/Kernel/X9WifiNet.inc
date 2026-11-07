@@ -806,6 +806,8 @@ x9_pcie_cfg_wr(volatile uint32_t *mac, unsigned bus, unsigned devfn, unsigned wh
  */
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include "../../../generated/x9_wifi_firmware.inc"
+/* Device NVRAM (rev252bz): generated/x9_wifi_nvram.inc from .local/x9/wifi-nvram/WIFI, stub when absent. */
+#include "../../../generated/x9_wifi_nvram.inc"
 extern "C" void flush_dcache64(addr64_t addr, unsigned count, int phys);
 extern "C" vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
 /*
@@ -1482,6 +1484,44 @@ x9_scan_take(const uint8_t *p, unsigned n)
     }
 }
 
+/* rev252bz: the device NVRAM (TX power / calibration / front-end settings) as gen4m wlanLoadManufactureData sends
+ * it on MT6653 (is_support_nvram_fragment): 37 fragments (generated table), each UNI_CMD_ID_NVRAM_SETTINGS 0x2E
+ * {4 pad, tag FRAGMENT 0 len 1504, CMD_NVRAM_FRAGMENT 1500 B = fragment bytes then zeros}. We never sent it before:
+ * 86/87 showed TX attempted (TX_DONE MPDU_ERROR x15) but never heard (no ACK, no probe responses). ACK requested
+ * so each fragment's CMD_RESULT is visible. Boot-arg x9_wifi_nvram=0 skips it. */
+static void
+x9_radio_nvram(x9_wdma *d)
+{
+#if X9_WIFI_NVRAM_PRESENT
+    int on = 1;
+    PE_parse_boot_argn("x9_wifi_nvram", &on, sizeof(on));
+    if (!on) { IOLog("X9 WIFI NVRAM: skipped (x9_wifi_nvram=0)\n"); return; }
+    static uint8_t pl[4 + 4 + 1500];
+    static uint8_t ev[512];
+    const unsigned count = sizeof x9_wifi_nvram_frag / sizeof x9_wifi_nvram_frag[0];
+    unsigned answered = 0, bad = 0;
+    for (unsigned i = 0; i < count; i++) {
+        const unsigned off = x9_wifi_nvram_frag[i][0], len = x9_wifi_nvram_frag[i][1];
+        if (off + len > sizeof x9_wifi_nvram || len > 1500) { bad++; continue; }
+        memset(pl, 0, sizeof pl);
+        pl[4] = 0; pl[6] = (uint8_t)((4 + 1500) & 0xff); pl[7] = (uint8_t)((4 + 1500) >> 8);   /* tag 0, len 1504 */
+        memcpy(pl + 8, x9_wifi_nvram + off, len);
+        int n = x9_wd_unicmd(d, 0x2e, 0x07, pl, sizeof pl, 0x01, ev, sizeof ev, 1000);
+        if (n > 0) answered++;
+        if (n <= 0 || i < 2 || i + 1 == count)
+            IOLog("X9 WIFI NVRAM: fragment %u/%u off %u len %u id %u -> %s (result %02x %02x %02x %02x %02x %02x %02x %02x)\n",
+                  i + 1, count, off, len, x9_wifi_nvram_frag[i][2], n > 0 ? "answered" : "NO CMD_RESULT",
+                  n > 0 ? ev[44] : 0, n > 0 ? ev[45] : 0, n > 0 ? ev[46] : 0, n > 0 ? ev[47] : 0,
+                  n > 0 ? ev[48] : 0, n > 0 ? ev[49] : 0, n > 0 ? ev[50] : 0, n > 0 ? ev[51] : 0);
+    }
+    IOLog("X9 WIFI NVRAM: %u/%u fragments answered, %u bad, %u B, sha256 %.16s\n", answered, count, bad,
+          (unsigned)sizeof x9_wifi_nvram, X9_WIFI_NVRAM_SHA256);
+#else
+    (void)d;
+    IOLog("X9 WIFI NVRAM: not embedded (no .local/x9/wifi-nvram/WIFI at build time)\n");
+#endif
+}
+
 /* gen4m nicUniCmdBssActivateCtrl for wlan0 as Android logs it: DevInfo[OMAC=0, DBDC=255], BssInfo0[DBDC=255,
  * OMAC=0, WMM=3, ConnType=65537, ConnState=1, BcIdx=0, PhyMode=0, DTIM=0] + MLD tag (OwnMldId 32, link 0). */
 static void
@@ -1953,6 +1993,7 @@ x9_wifi_radio_loop(x9_wdma *d)
         memcpy(mac, status.mac, 6);
     }
     if (!x9_r4_setup(d)) return;
+    x9_radio_nvram(d);                                   /* Android: wlanLoadManufactureData before networks */
     x9_radio_activate(d, mac);
     IOLockLock(lock);
     rcount = 0;
