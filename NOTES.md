@@ -1,3 +1,34 @@
+## HANDOFF 2026-11-08 (53): rev252cp 统一镜像 BUILT = 相册+机型+时间三修复同内核; 未上机; 既有镜像缺口核验
+
+- 任务: 用户要"最新最全"(三修复齐备)的镜像并 push 仓库。
+- **既有镜像缺口核验(观察; 内核 strings + boot.json 哈希逐项对过)**: 没有任何一个现成镜像三修复齐备。
+  - `x9-rev252cn-mgwipe/boot.img` (9f0c6278..., 打包内核 = `x9-a6fbe37-dirty` 03490aa9..., boot.json
+    kernel_sha256 相符): 有 `X9 RTC:`×5 + `X9 MGWIPE:`×3, 但**缺相册修复**——无 `issued extension`/
+    `SWEET Sandbox` 串, 即 46e1d4c 不在其构建源码里(该内核构建先于 sandbox 提交落地)。
+  - `x9-rev252co/boot.img` (40ae2357..., 内核 d3959493...): 三修复代码全在(三串全命中), 但嵌入参数集只有
+    x9dc=1 x9if=1(dc-if 组), **没有 x9_mgwipe=1** → MG 缓存清理不会触发, iPod 缓存照旧。
+  - `x9-rev252cn-rtc/`: 只有时间。名字带 a6fbe37-dirty 的构建目录命名与实际源码内容不符, 判镜像以
+    strings+哈希为准。
+- **rev252cp 构建(本次, 从 HEAD 6edb086 全量)**: `python3 -I x9/build/build.py all --revision 269 --name
+  x9-rev252cp` + 14 个 Wi-Fi/GPU token(x9_wifi_power=6 x9_wifi_real=1 x9_gpu_khz=1716000
+  x9_gpu_floor_khz=1100000 x9_gpu_park=1 x9_submit_async=1 x9_wifi_xo0..6 x9_cache_scope=1) +
+  `x9dc=1 x9if=1 x9_mgwipe=1`。流程 plugins 269 重建 → kernel(51/51 overlay objects, ccache)→ boot。
+  - **三修复验证(观察, 内核 strings)**: `X9 RTC:`×5 / `X9 MGWIPE:`×3 / `issued extension`×1 全命中。
+  - **嵌入参数(payload strings)**= cn 基线 29 token 逐字节一致 + `x9dc=1 x9if=1 x9_mgwipe=1`。
+  - 哈希: boot.img **48e7c81155d4037f099071e4d8f18e1ca6606b461e9cdd60762b2216b7478cb4** (11730944 B);
+    kernel **5c75c3c61b670f27f7e3ffc480714fde1bd6b691bfab968289b9fcea8603578b**;
+    payload **0286d71c90d22a6e2bd5cdb00dbf3515d64d5006ded86fb115a198cbbc713c65**。
+  - allowlist: plugins 重建非确定性按预期只动了 X9GeneralMetal 哈希 → identity 13a7b368... →
+    **64a12d08170fff48ed097d24944276e65f308fa147db2360096b3afb1bf04a01**,头已随本条提交;新内核只与本镜像
+    payload 配对。**mailbox 必须先重写**: `X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/x9-rev252cp`,
+    然后 `fastboot boot x9/out/x9-rev252cp/boot.img`。
+- 上机判读(52 三线合一): (1) 早期 `X9 RTC: 2026-11-08 HH:MM:SS UTC = N s`,1970 窗口消失;失败形态
+  `map failed`/`PMIF transfer failed`/`implausible ...` 原样报。 (2) `X9 MGWIPE: cache errno=0`(errno=2 =
+  缓存本就不在, 另找 iPod 来源)且 UI 机型不再显示 iPod。 (3) assetsd 不再崩(16 次/122s → 0)+ 搜
+  `issued extension` 行 + 键盘 123 + 点相册看 MobileSlideShow exec 走多远(仍无 exec → 拒绝在
+  SpringBoard 内部, 下一轮 x9_sample_procs=SpringBoard)。 (4) 三项验证后 reboot 不带 x9_mgwipe(缓存重建
+  一次即可, 勿每 boot 清);本镜像带 x9dc/x9if(101.txt 第四轮已证 armed+stable)。
+
 ## HANDOFF 2026-11-08 (52): 相册打不开 → 查到 hackios 生态的 assetsd TCC 修复并移植 (ops 5/6 真 token), rev252co BUILT 未上机
 
 - **任务**: 用户报相册(Photos/MobileSlideShow)打不开,并指路查 UniXNU 和 hackios 的相关修复。
