@@ -30,6 +30,36 @@
 - 下一步: 需要一次包含开/关 app 时刻的完整日志; 之后按时间抓该帧的 draw(x9vf 机制只按固定 uptime 触发,
   参数上限 607 B, 需要改成按 transition 触发或放宽)。
 
+## HANDOFF 2026-11-08 (59): 104.txt = 123 切过去又被同一调用内的嵌套 setKeyplaneName 切回; 接缝不是 CA tile;
+## GPU 时间分解; rev252cu + rev252cu-nocache BUILT(plugin 274, 都 x9_gpu_floor_khz=1716000)未上机
+
+- 实测 104.txt(rev252ct, Mac ~/104.txt — 用户以后日志都放 Mac 家目录, ssh 读):
+  - 键盘: keyboard='iPhone-PortraitTruffle-QWERTY'(dynamicLayout=0, 非动态), 5 个面含
+    `429_..._Numbers-And-Punctuation`; 本面 more-alt-sd=nil, more-alt='numbers-and-punctuation', axLowercase=1;
+    alt 子树 present。每次 123: 外层 setKeyplaneName('numbers-and-punctuation') **确实切到数字面**, 但同一调用里
+    嵌套 `setKeyplaneName('small-letters-small-display') before='numbers-and-punctuation'` 立刻切回(日志里内层先打)。
+    → 用户"数字面不存在"不成立, 是被切回。反汇编排除: refreshForDictationAvailablityDidChange(只设听写键状态)。
+    setShift: 会切到 shiftAlternateKeyplaneName(数字面的 shift-alternate 不该是字母面), 未定。rev252cu 探针打
+    嵌套调用的 UIKitCore 去 slide 回溯(f60102a)。
+  - 接缝: TILEPROBE 504 行, 250..270 宽纹理全是渲染目标(usage 0x5, fmt 80)和 256x1 linear LUT, **没有任何
+    256 宽 tile 的 CPU/blit 上传** → CA tiled-image 假说证伪。重新量: 缝 ≈ 层原点 77 + 256·k = 每行 **1024 B**
+    边界(32bpp)—— 指向某个 IOSurface/渲染目标每行每 1 KiB 处像素坏(缓存/内存类), 而不是绘制拆分。内核
+    cache 代码无 1 KiB 单位(panvk cache granularity 是 256 B)。A/B: rev252cu-nocache 去掉 x9_cache_scope/x9dc/x9if
+    (三者默认 0, 已确认)。
+  - GPU: 平均 11.5 fps(57 窗口, max 36); 每 job 17-21 ms = pre_cache 2.6 + **GPU wait 11-17** + post_cache 1.1-1.4;
+    25 job/s ≈ 2.2 job/帧, 串行(inflight_max=0)。GOV util 12-39%, idx 在 0(1716/1716 MHz)和 38(gpu 1092 / **stack
+    728 MHz**)间摆; PARK cold 1342 vs hit 739(**64% 冷启动**, retire_map 648/unmap 576); backboardd 一帧 42 pass/
+    37M 像素(~10x 屏幕, 模糊为主); latency avg 25-29 ms。
+- BUILT(Mac, 同一内核/插件 274, mailbox 一次即可, `X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/x9-rev252cu`):
+  - x9/out/x9-rev252cu boot_sha256 **f2a382bc1aee04737fc7a5aac2648b2c2258bd11079270beac178f3deb51437f**
+    (rev252ct 参数, floor 1100000→1716000)
+  - x9/out/x9-rev252cu-nocache boot_sha256 **9e7fb73f05bcefac797e845f04c8c7cc1a680b9ac1e8e025945ce7217d8ae327**
+    (同上, 去 x9_cache_scope/x9dc/x9if)
+  - allowlist 3dadd78。
+- GPU 优化候选(按代价): (1) 锁最高频(本轮已带); (2) 用户侧"减弱透明度"量化模糊占比; (3) PARK 冷启动: map/unmap
+  不再强制 retire —— CSG 驻留时直接改 GPU 页表 + MMU flush, 或 PanVK/插件 BO 池复用; (4) 4 ms/job 的 CPU 缓存维护
+  (~21 MB/job): GPU 共享面改 WC/不缓存映射; (5) 双 job 在飞(x9if)配不上对: 前端提交被串行化, 需查 CA/前端等待点。
+
 ## HANDOFF 2026-11-08 (58): rev252ct BUILT(plugin 273)= 键盘探针 + 接缝探针一起, 未上机; 取代 rev252cs
 
 - 接缝探针(96f77f8, x9/metal/General/X9TileProbe.inc, 由 NativeBridgeMetalFrontend.mm include; 令牌 x9tile=1):
