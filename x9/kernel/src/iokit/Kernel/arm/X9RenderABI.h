@@ -37,7 +37,14 @@ enum X9RenderScopeOperation { X9ScopeRegister=1u, X9ScopeUnregister=2u, X9ScopeA
 #define X9_RENDER_SCOPE_CLIENT 1u
 enum X9RenderBufferFlags { X9RenderGPURead=1u, X9RenderGPUWrite=2u, X9RenderGPUExecute=4u };
 enum X9RenderCacheOperation { X9RenderClean=1u, X9RenderInvalidate=2u };
-enum X9RenderCapabilities { X9RenderBufferObjects=1u, X9RenderHostImport=2u, X9RenderCSFSubmit=4u, X9RenderTiler=8u, X9RenderFragment=16u, X9RenderSubmissionCacheOwnership=32u, X9RenderAsyncSubmit=64u };
+/* rev252cn (x9dc): deferred clean. The client sends operation=X9RenderClean|X9RenderDefer
+ * through X9RenderCache for the CPU->GPU flushes it would otherwise run inline; the
+ * kernel records the range and maintains it in the next submission's publish phase,
+ * right before the same doorbell the inline clean preceded. Only pure cleans defer:
+ * an invalidate (GPU->CPU readback) must stay inline. Capability-gated so an older
+ * kernel refuses the op and the client keeps its inline path. */
+#define X9RenderDefer 0x100u
+enum X9RenderCapabilities { X9RenderBufferObjects=1u, X9RenderHostImport=2u, X9RenderCSFSubmit=4u, X9RenderTiler=8u, X9RenderFragment=16u, X9RenderSubmissionCacheOwnership=32u, X9RenderAsyncSubmit=64u, X9RenderDeferredCache=128u };
 #define X9_RENDER_CACHE_ATOM 256u
 struct X9RenderCaps {
  uint32_t abi,bytes,capabilities,host_page_bytes;

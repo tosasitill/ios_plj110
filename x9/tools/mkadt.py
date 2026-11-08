@@ -30,6 +30,14 @@ GICD, GICD_SIZE = 0x06800000, 0x40000
 GICR, GICR_SIZE = 0x06880000, 0x200000
 FB, FB_SIZE = 0xfc910000, 0x3660000
 FB_W, FB_H, FB_STRIDE = 1256, 2760, 5120
+# Display presented to iOS (IOMobileFramebuffer reads disp0 canvas-*): a real iPhone
+# size, 414x896 pt @3x (iPhone XS Max / 11 Pro Max), centred on the 1256x2760 panel.
+# 1256 px = 418.67 pt matched no iPhone keyboard layout: the keyboard frame (414)
+# and its planes (418.67) disagreed, so every 123 switch reloaded the keyboard.
+# 109.txt/USER: the 36 px top/bottom bars were ugly; the keyboard bug was the width
+# (414 pt layout vs 418.67 pt screen), so keep 414 pt and use the full panel height
+# (414x920 pt). 7 px stay black left/right.
+CANVAS_W, CANVAS_H = 1242, 2760
 TIMEBASE = 1000000000  # captured arm,armv8-timer clock-frequency; override if needed
 
 
@@ -127,7 +135,7 @@ def build(seed=None, timebase=TIMEBASE, console_base=0, console_size=0, ram_wind
         node('wdt', [ph(), ('no-pmu', u32(1))]),
         node('disp0', [ph(), ('device_type', cstr('display-subsystem')),
             ('compatible', cstr('sweet,display')),
-            ('canvas-width', u32(FB_W)), ('canvas-height', u32(FB_H))])] + ([
+            ('canvas-width', u32(CANVAS_W)), ('canvas-height', u32(CANVAS_H))])] + ([
         # launchd loads wifid only if io_device_tree_entry_exists_with_name("wlan")
         # (com.apple.wifid.plist _LimitLoadToDeviceTree = [wlan, marconi-wifi]).
         # Shape of the iPhone X /arm-io/uart4/wlan node; MAC = the fake radio's.

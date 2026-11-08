@@ -234,6 +234,7 @@ static void waitForResource(id resource);
 @property(nonatomic,strong) id<MTLHeap> parentHeap;
 @property(nonatomic) NSUInteger heapOffset;
 @end
+#include "X9TileProbe.inc"
 // Buffer Manager metadata. Registration and reference calls are advisory: a
 // metadata miss never refuses a Metal resource, and the kernel backend still
 // owns allocation, mapping and cache maintenance.
@@ -414,7 +415,9 @@ NB_RESOURCE_SPI
 - (void)replaceRegion:(MTLRegion)r mipmapLevel:(NSUInteger)level slice:(NSUInteger)slice withBytes:(const void *)bytes bytesPerRow:(NSUInteger)row bytesPerImage:(NSUInteger)image {
  const uint64_t region[6]={r.origin.x,r.origin.y,r.origin.z,r.size.width,r.size.height,r.size.depth};
  const uint64_t length=(r.size.depth>1?image*(r.size.depth-1):0)+row*r.size.height;
- if(!nmb_texture_replace(_handle,region,level,slice,bytes,row,image,length))NBLOG(@"native-metal: replaceRegion refused: %@",lastError());
+ const bool replaced=nmb_texture_replace(_handle,region,level,slice,bytes,row,image,length);
+ if(!replaced)NBLOG(@"native-metal: replaceRegion refused: %@",lastError());
+ {NmbTextureDescriptor td=_descriptor;x9tp_upload("replaceRegion",&td,_handle,r.origin.x,r.origin.y,r.size.width,r.size.height,row,0,replaced);}
 }
 - (void)replaceRegion:(MTLRegion)r mipmapLevel:(NSUInteger)level withBytes:(const void *)bytes bytesPerRow:(NSUInteger)row {
  [self replaceRegion:r mipmapLevel:level slice:0 withBytes:bytes bytesPerRow:row bytesPerImage:row*r.size.height];
@@ -432,6 +435,7 @@ NB_RESOURCE_SPI
 static NBTexture *textureOnBuffer(NBBuffer *buffer,MTLTextureDescriptor *d,NSUInteger offset,NSUInteger row,bool surface) {
  NmbTextureDescriptor descriptor;if(!buffer || !textureDescriptor(d,&descriptor))return nil;
  NmbTexture *handle=nmb_texture_new_on_buffer(buffer.handle,&descriptor,offset,row,surface);
+ x9tp_texture(surface?"on-iosurface":"on-buffer",&descriptor,handle,offset,row);
  if(!handle){NBLOG(@"native-metal: texture over buffer refused: %@",lastError());return nil;}
  NBTexture *texture=[NBTexture new];texture.handle=handle;nmb_texture_describe(handle,&descriptor);texture.descriptor=descriptor;
  texture.buffer=buffer;texture.offset=offset;texture.rowBytes=row;
@@ -450,6 +454,7 @@ static NBTexture *textureOnBuffer(NBBuffer *buffer,MTLTextureDescriptor *d,NSUIn
 - (id<MTLTexture>)newLinearTextureWithDescriptor:(MTLTextureDescriptor *)d offset:(NSUInteger)offset bytesPerRow:(NSUInteger)row bytesPerImage:(NSUInteger)image {
  NmbTextureDescriptor descriptor;if(!textureDescriptor(d,&descriptor))return nil;
  NmbTexture *handle=nmb_texture_new_linear(self.handle,&descriptor,offset,row,image);
+ x9tp_texture("linear",&descriptor,handle,offset,row);
  if(!handle){NBLOG(@"native-metal: linear texture refused: %@",lastError());return nil;}
  NBTexture *texture=[NBTexture new];texture.handle=handle;nmb_texture_describe(handle,&descriptor);texture.descriptor=descriptor;
  texture.buffer=self;texture.offset=offset;texture.rowBytes=row;return (id<MTLTexture>)texture;
@@ -1108,7 +1113,9 @@ static std::atomic<uint64_t> gPadDone{0},gPadSkipped{0};
               toTexture:(id<MTLTexture>)d destinationSlice:(NSUInteger)ds destinationLevel:(NSUInteger)dl destinationOrigin:(MTLOrigin)dO {
  if(![self textures:NB_OBJECTS(s,d) count:2])return;
  const uint64_t a[3]={so.x,so.y,so.z},size[3]={z.width,z.height,z.depth},b[3]={dO.x,dO.y,dO.z};
- [self check:nmb_blit_copy_texture(self.handle,[(NBTexture *)s handle],ss,sl,a,size,[(NBTexture *)d handle],ds,dl,b) what:"copyFromTexture:toTexture:"];
+ const bool copied=[self check:nmb_blit_copy_texture(self.handle,[(NBTexture *)s handle],ss,sl,a,size,[(NBTexture *)d handle],ds,dl,b) what:"copyFromTexture:toTexture:"];
+ {NmbTextureDescriptor td=[(NBTexture *)d descriptor];x9tp_upload("blit-texture-to-texture(dst)",&td,[(NBTexture *)d handle],dO.x,dO.y,z.width,z.height,0,0,copied);
+  NmbTextureDescriptor ts=[(NBTexture *)s descriptor];x9tp_upload("blit-texture-to-texture(src)",&ts,[(NBTexture *)s handle],so.x,so.y,z.width,z.height,0,0,copied);}
 }
 - (void)copyFromTexture:(id<MTLTexture>)s toTexture:(id<MTLTexture>)d {
  if(![self textures:NB_OBJECTS(s,d) count:2])return;
@@ -1124,7 +1131,8 @@ static std::atomic<uint64_t> gPadDone{0},gPadSkipped{0};
      destinationOrigin:(MTLOrigin)dO {
  if(![self buffers:NB_OBJECTS(s) count:1] || ![self textures:NB_OBJECTS(d) count:1])return;
  const uint64_t size[3]={z.width,z.height,z.depth},b[3]={dO.x,dO.y,dO.z};
- [self check:nmb_blit_buffer_to_texture(self.handle,[(NBBuffer *)s handle],o,row,image,size,[(NBTexture *)d handle],slice,level,b) what:"copyFromBuffer:toTexture:"];
+ const bool copied=[self check:nmb_blit_buffer_to_texture(self.handle,[(NBBuffer *)s handle],o,row,image,size,[(NBTexture *)d handle],slice,level,b) what:"copyFromBuffer:toTexture:"];
+ {NmbTextureDescriptor td=[(NBTexture *)d descriptor];x9tp_upload("blit-buffer-to-texture",&td,[(NBTexture *)d handle],dO.x,dO.y,z.width,z.height,row,o,copied);}
 }
 - (void)copyFromTexture:(id<MTLTexture>)s sourceSlice:(NSUInteger)slice sourceLevel:(NSUInteger)level sourceOrigin:(MTLOrigin)so sourceSize:(MTLSize)z
                toBuffer:(id<MTLBuffer>)d destinationOffset:(NSUInteger)o destinationBytesPerRow:(NSUInteger)row destinationBytesPerImage:(NSUInteger)image {
@@ -1508,8 +1516,18 @@ static void x9SubmitTimingLog(void) {
   const uint32_t index=(uint32_t)(gCommits.fetch_add(1)+1);self.commitIndex=index;
   if(self.traceGraphUsed)NBLOG(@"X9 GRAPH COMMIT: cb=%llu commit=%u",(unsigned long long)self.traceID,index);
   if(self.traceGeometryUsed)NSLog(@"X9 GEOM COMMIT: cb=%llu commit=%u uptime_us=%llu",(unsigned long long)self.traceID,index,(unsigned long long)self.committedUs);
-  CommitRecord &r=gCommitRing[index%32];
-  r={};r.index=index;r.committedUs=self.committedUs;r.ageUs=self.committedUs-createdUs;r.work=encodedWork;
+ CommitRecord &r=gCommitRing[index%32];
+ r={};r.index=index;r.committedUs=self.committedUs;r.ageUs=self.committedUs-createdUs;r.work=encodedWork;
+ /* rev252cn diagnostics: per-commit draw/pass counts, correlated offline with
+  * the kernel's X9 RENDER timing wait_us to size the per-draw GPU cost. */
+ {
+  static std::atomic<uint64_t> gCommitWorkLogged;
+  const uint64_t logged=gCommitWorkLogged.fetch_add(1)+1;
+  if(logged<=24||!(logged&511))
+   NSLog(@"X9 COMMIT WORK: commit=%u draws=%u passes=%u pixels=%llu dispatches=%u blits=%u",
+    index,encodedWork.draws,encodedWork.passes,(unsigned long long)encodedWork.pixels,
+    encodedWork.dispatches,encodedWork.blits);
+ }
  }
  dispatch_group_enter(_handlers);
  dispatch_group_enter(_schedulingHandlers);
@@ -1693,6 +1711,7 @@ static bool renderDescriptor(MTLRenderPipelineDescriptor *d,NBRenderDescriptor *
 - (id<MTLTexture>)textureWithDescriptor:(MTLTextureDescriptor *)d offset:(uint64_t)offset {
  NmbTextureDescriptor descriptor;if(!textureDescriptor(d,&descriptor))return nil;
  NmbTexture *handle=nmb_heap_new_texture(_handle,&descriptor,offset);
+ x9tp_texture("heap",&descriptor,handle,offset==UINT64_MAX?0:offset,0);
  if(!handle){NBLOG(@"native-metal: heap texture refused: %@",lastError());return nil;}
  NBTexture *texture=[NBTexture new];texture.handle=handle;nmb_texture_describe(handle,&descriptor);texture.descriptor=descriptor;
  texture.parentHeap=(id<MTLHeap>)self;texture.heapOffset=offset==UINT64_MAX?0:offset;
@@ -1894,6 +1913,7 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d {
  NmbTextureDescriptor descriptor;if(!textureDescriptor(d,&descriptor))return nil;
  NmbTexture *handle=nmb_texture_new(gDevice,&descriptor);noteFormat((uint32_t)descriptor.format,handle!=nullptr);
+ x9tp_texture("device",&descriptor,handle,0,0);
  if(!handle){NBLOG(@"native-metal: texture refused: %@",lastError());return nil;}
  NBTexture *texture=[NBTexture new];texture.handle=handle;nmb_texture_describe(handle,&descriptor);texture.descriptor=descriptor;
  registerBufferView(handle,0,X9BufferKindGPUOwned,X9BufferOwnershipDriver,bufferUsageFromMetal(d.usage),
@@ -2081,6 +2101,7 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
  NmbSamplerDescriptor s={(uint64_t)d.minFilter,(uint64_t)d.magFilter,(uint64_t)d.mipFilter,(uint64_t)d.sAddressMode,(uint64_t)d.tAddressMode,(uint64_t)d.rAddressMode,
      (uint64_t)d.borderColor,(uint64_t)d.normalizedCoordinates,d.maxAnisotropy,(uint64_t)d.compareFunction,(uint64_t)d.lodAverage,d.lodMinClamp,d.lodMaxClamp,(uint64_t)d.supportArgumentBuffers};
  NmbSampler *handle=nmb_sampler_new(gDevice,&s);
+ x9tp_sampler(s.min_filter,s.mag_filter,s.mip_filter,s.s_address,s.t_address,s.normalized,handle!=nullptr);
  if(!handle){NBLOG(@"native-metal: sampler refused: %@",lastError());return nil;}
  NBSampler *sampler=[NBSampler new];sampler.handle=handle;
  if(captureOptions().inputs)sampler.traceState=[NSString stringWithFormat:@"min%llu/mag%llu/mip%llu/address%llu,%llu,%llu/norm%llu/lod%g,%g",s.min_filter,s.mag_filter,s.mip_filter,s.s_address,s.t_address,s.r_address,s.normalized,s.lod_min,s.lod_max];

@@ -312,12 +312,29 @@ sweet_amfi_vnode_check_signature(struct vnode *vp, __unused struct label *label,
  * Ported from hackios-xnu-kernel bsd/kern/kern_minimac.c
  * (minisandbox_container_path, c84b4634277a70beac73921029b1fb6afc2530af).
  *
- * The extension operations (5 issue, 6 consume, 0x43 container expected)
- * keep rev252p's ENOENT. rev252q let them succeed like the reference does;
- * syncdefaultsd then began aborting on launch (sig 6, every 10 s, absent
- * from 34..38.txt) - a successful answer without the token/handle the
- * caller asked for is worse than a clean failure. x9_sandbox_ext_ok=1
- * restores the success answer for one boot if an extension ever needs it.
+ * The extension operations (5 issue, 6 consume): tccd issues a sandbox
+ * extension with every grant (sandbox_extension_issue_generic(
+ * "com.apple.tcc.kTCCServicePhotos")); with the old ENOENT answer it
+ * replied "server error: Failed to issue Sandbox Extension" (kTCCErrorDomain
+ * 6) and assetsd aborted with "assetsd requires TCCPhotosService access" -
+ * the crash loop behind the keyboard number plane and, on the reference
+ * ports, behind Photos. rev252q let 5/6 succeed without writing a token or
+ * handle; rev252r went back to ENOENT; syncdefaultsd aborted in both (40.txt
+ * falsified the rev252q inference), so its abort is independent. The real
+ * answers are ported from ios-asteroids xnu 0116 (commit 5f7ff1e "sandbox
+ * extensions issue/consume succeed (fixes Photos/assetsd)", hardware
+ * verified there) and ios-b0s 0313, which also document the argument
+ * layout: libsystem_sandbox __sandbox_extension_issue passes seven 64-bit
+ * words, [0] class or path (C string), [1] extension type, [2] target pid
+ * or path, [3] flags, [4] output buffer (2048 bytes) for the token string,
+ * [5] and [6] unused; sandbox_extension_consume passes {token string,
+ * length incl. NUL, int64_t *handle out}. Issue writes an opaque token,
+ * consume a non-zero handle: without a sandbox an extension grants nothing,
+ * and no consumer validates the format (libsystem_sandbox's consume only
+ * rejects a leading "invalid"; nothing in tccd/libTCC parses it).
+ * 0x43 container expected keeps ENOENT: iOS 16.7's caller tolerates the
+ * error (asteroids 0136 returns 0 with zeroed outputs for the iOS 18
+ * libSystem initializer, which aborts on the error).
  */
 static uint64_t sweet_sandbox_seen;
 
@@ -340,7 +357,6 @@ static unsigned int sweet_sandbox_logged_total;
 static unsigned int sweet_sandbox_logged_count;
 static unsigned int sweet_sandbox_container_logged;
 static int sweet_sandbox_ops_on = -1;
-static int sweet_sandbox_ext_ok_on = -1;
 static size_t sweet_sandbox_container_len;
 
 static int
@@ -481,6 +497,58 @@ sweet_sandbox_container_path(user_addr_t arg)
 }
 
 static int
+sweet_sandbox_extension_issue(struct proc *p, user_addr_t arg)
+{
+	uint64_t a[7];
+	int error = copyin(arg, a, sizeof(a));
+	if (error != 0) {
+		return error;
+	}
+	if (a[4] == 0) {
+		return EINVAL;
+	}
+	char name[96] = "";
+	size_t done = 0;
+	if (a[0] != 0) {
+		/* a longer class is cut: the token only carries a prefix */
+		(void)copyinstr((user_addr_t)a[0], name, sizeof(name), &done);
+		name[sizeof(name) - 1] = '\0';
+	}
+	static uint64_t sweet_sandbox_ext_serial;
+	static int sweet_sandbox_ext_logged;
+	uint64_t serial = os_atomic_inc_orig(&sweet_sandbox_ext_serial, relaxed) + 1;
+	char token[160];
+	snprintf(token, sizeof(token), "SWEET-%llu;%llu;%s",
+	    (unsigned long long)serial, (unsigned long long)a[1], name);
+	if (os_atomic_load(&sweet_sandbox_ext_logged, relaxed) < 8 &&
+	    os_atomic_inc_orig(&sweet_sandbox_ext_logged, relaxed) < 8) {
+		char pname[32];
+		proc_name(proc_pid(p), pname, sizeof(pname));
+		printf("SWEET Sandbox: %s issued extension type %llu '%s'\n", pname,
+		    (unsigned long long)a[1], name);
+	}
+	return copyout(token, (user_addr_t)a[4], strlen(token) + 1);
+}
+
+/* Consume: { token string, length incl. NUL, int64_t *handle }. Handles are
+ * never 0 or -1; a race would only hand out a reused meaningless number. */
+static int
+sweet_sandbox_extension_consume(user_addr_t arg)
+{
+	uint64_t a[3];
+	int error = copyin(arg, a, sizeof(a));
+	if (error != 0) {
+		return error;
+	}
+	if (a[0] == 0 || a[2] == 0) {
+		return EINVAL;
+	}
+	static uint64_t sweet_sandbox_ext_handle;
+	uint64_t handle = os_atomic_inc_orig(&sweet_sandbox_ext_handle, relaxed) + 1;
+	return copyout(&handle, (user_addr_t)a[2], sizeof(handle));
+}
+
+static int
 sweet_sandbox_syscall(struct proc *p, int call, user_addr_t arg)
 {
 	int ret;
@@ -502,14 +570,33 @@ sweet_sandbox_syscall(struct proc *p, int call, user_addr_t arg)
 		return ret;
 	}
 	switch (call) {
-	case 5:         /* extension issue: no token can be minted here */
-	case 6:         /* extension consume */
-	case 0x43:      /* container expected */
-		if (sweet_sandbox_ext_ok_on < 0) {
-			sweet_sandbox_ext_ok_on =
-			    sweet_sandbox_boot_arg("x9_sandbox_ext_ok");
+	case 5:         /* extension issue (asteroids 0116 / b0s 0313) */
+		/* rev252cn diagnostics: with x9_sandbox_ops=1, dump the first 64
+		 * bytes of the op-5 argument once per boot to confirm the layout
+		 * on this userland matches what 0116/0313 documented. */
+		if (sweet_sandbox_ops_on == 1 &&
+		    !(sweet_sandbox_seen & (1ULL << 62))) {
+			sweet_sandbox_seen |= 1ULL << 62;
+			uint32_t w[16];
+			if (copyin(arg, w, sizeof(w)) == KERN_SUCCESS) {
+				printf("SWEET Sandbox op5 arg: "
+				    "%08x %08x %08x %08x %08x %08x %08x %08x "
+				    "%08x %08x %08x %08x %08x %08x %08x %08x\n",
+				    w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7],
+				    w[8], w[9], w[10], w[11], w[12], w[13], w[14], w[15]);
+			} else {
+				printf("SWEET Sandbox op5 arg: copyin failed\n");
+			}
 		}
-		ret = sweet_sandbox_ext_ok_on ? 0 : ENOENT;
+		ret = sweet_sandbox_extension_issue(p, arg);
+		sweet_sandbox_op_log(p, call, ret);
+		break;
+	case 6:         /* extension consume (asteroids 0116 / b0s 0313) */
+		ret = sweet_sandbox_extension_consume(arg);
+		sweet_sandbox_op_log(p, call, ret);
+		break;
+	case 0x43:      /* container expected: iOS 16.7 tolerates the error */
+		ret = ENOENT;
 		sweet_sandbox_op_log(p, call, ret);
 		break;
 	default:

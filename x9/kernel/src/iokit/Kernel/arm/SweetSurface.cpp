@@ -201,6 +201,120 @@ sweet_surface_seed(SweetSurface *s)
 }
 
 /*
+ * x9lc pixel-mapping table: {task, user range, surface id} for every client
+ * mapping of a non-wrapped, cacheable surface, so the render service can tell
+ * that an ImportHost range is exactly an IOSurface's pixels. Under
+ * sweet_surface_lock. A full table only means no linkage (full maintenance).
+ */
+struct SweetSurfaceMapping { task_t task; IOMemoryMap *map; uint64_t base, length; uint32_t id; };
+static SweetSurfaceMapping sweet_surface_maps[1024];
+static unsigned sweet_surface_map_count;
+static void
+sweet_surface_map_add(task_t task, IOMemoryMap *map, SweetSurface *s)
+{
+	if (task == NULL || map == NULL || s == NULL || s->wrapped || s->scanoutPhys || s->mapCache != kIOMapDefaultCache) {
+		return;
+	}
+	IOLockLock(sweet_surface_lock);
+	if (sweet_surface_map_count < sizeof(sweet_surface_maps) / sizeof(sweet_surface_maps[0])) {
+		sweet_surface_maps[sweet_surface_map_count++] = { task, map, map->getAddress(), map->getLength(), s->id };
+	}
+	IOLockUnlock(sweet_surface_lock);
+}
+static void
+sweet_surface_map_remove(IOMemoryMap *map)
+{
+	if (map == NULL || sweet_surface_lock == NULL) {
+		return;
+	}
+	IOLockLock(sweet_surface_lock);
+	for (unsigned i = 0; i < sweet_surface_map_count; i++) {
+		if (sweet_surface_maps[i].map == map) {
+			sweet_surface_maps[i] = sweet_surface_maps[--sweet_surface_map_count];
+			break;
+		}
+	}
+	IOLockUnlock(sweet_surface_lock);
+}
+uint32_t
+sweet_surface_mapping_id(task_t task, uint64_t addr, uint64_t bytes)
+{
+	uint32_t id = 0;
+	if (task == NULL || !bytes || addr + bytes < addr || sweet_surface_lock == NULL) {
+		return 0;
+	}
+	IOLockLock(sweet_surface_lock);
+	for (unsigned i = 0; i < sweet_surface_map_count; i++) {
+		const SweetSurfaceMapping &m = sweet_surface_maps[i];
+		if (m.task == task && addr >= m.base && addr + bytes <= m.base + m.length) {
+			id = m.id;
+			break;
+		}
+	}
+	IOLockUnlock(sweet_surface_lock);
+	return id;
+}
+bool
+sweet_surface_gpu_needs_clean(uint32_t id, uint32_t *seed)
+{
+	SweetSurface *s = sweet_surface_copy(id);
+	if (s == NULL) {
+		return true;
+	}
+	const uint32_t now = __atomic_load_n(sweet_surface_seed(s), __ATOMIC_ACQUIRE);
+	if (seed) {
+		*seed = now;
+	}
+	const bool needs = !s->gpuCleanValid || s->gpuCleanSeed != now;
+	s->release();
+	return needs;
+}
+void
+sweet_surface_gpu_cleaned(uint32_t id, uint32_t seed)
+{
+	SweetSurface *s = sweet_surface_copy(id);
+	if (s == NULL) {
+		return;
+	}
+	s->gpuCleanSeed = seed;
+	__atomic_store_n(&s->gpuCleanValid, true, __ATOMIC_RELEASE);
+	s->release();
+}
+void
+sweet_surface_gpu_wrote(uint32_t id)
+{
+	SweetSurface *s = sweet_surface_copy(id);
+	if (s == NULL) {
+		return;
+	}
+	__atomic_store_n(&s->gpuDirty, true, __ATOMIC_RELEASE);
+	s->release();
+}
+void
+sweet_surface_cpu_acquire(SweetSurface *s)
+{
+	if (s == NULL || !__atomic_load_n(&s->gpuDirty, __ATOMIC_ACQUIRE)) {
+		return;
+	}
+	__atomic_store_n(&s->gpuDirty, false, __ATOMIC_RELEASE);
+	const uintptr_t va = s->kernelAddress();
+	const uint64_t length = s->memory != NULL ? s->memory->getLength() : 0;
+	if (va == 0 || length == 0) {
+		return;
+	}
+	/* Clean+invalidate (PIPT: every alias): drops the CPU's stale copies of
+	 * lines the GPU wrote, including speculative fills since the job. */
+	uint64_t ctr;
+	__asm__ volatile ("mrs %0, ctr_el0" : "=r"(ctr));
+	const uint64_t line = 4ULL << ((ctr >> 16) & 15);
+	__asm__ volatile ("dsb sy" ::: "memory");
+	for (uintptr_t a = va & ~(line - 1); a < va + length; a += line) {
+		__asm__ volatile ("dc civac, %0" :: "r"(a) : "memory");
+	}
+	__asm__ volatile ("dsb sy" ::: "memory");
+}
+
+/*
  * Give the surface an id and a table slot; the table holds one retain and a
  * user count (creators, client mappings, kernel holders). Lock held.
  */
@@ -502,6 +616,7 @@ OSDefineMetaClassAndStructors(SweetSurfaceRef, OSObject);
 void
 SweetSurfaceRef::free()
 {
+	sweet_surface_map_remove(data);
 	OSSafeReleaseNULL(data);
 	OSSafeReleaseNULL(state);
 	if (surface != NULL) {
@@ -692,6 +807,7 @@ IOSurfaceRootUserClient::addRef(SweetSurface *s, SweetSurfaceRef **refOut, bool 
 	}
 	fRefs->setObject(ref);
 	IOLockUnlock(fLock);
+	sweet_surface_map_add(fTask, ref->data, s);
 	ref->release();         /* fRefs holds it */
 	*refOut = ref;
 	return kIOReturnSuccess;
@@ -1443,6 +1559,7 @@ IOSurfaceRootUserClient::trapLock(void *id, __unused void *options, void *seedOu
 	if (s == NULL) {
 		return kIOReturnNotFound;
 	}
+	sweet_surface_cpu_acquire(s);   /* x9lc: GPU writes become CPU-visible here */
 	IOReturn ret = sweet_surface_seed_out(s, seedOut, false);
 	s->release();
 	return ret;
@@ -1499,6 +1616,7 @@ IOSurfaceRootUserClient::trapRelease(void *id, void *, void *, void *, void *, v
 		 * backboardd in IOSurfaceClientGetSeed. The last 256 released views keep
 		 * their page (16 KB each), the oldest goes first.
 		 */
+		sweet_surface_map_remove(ref->data);
 		OSSafeReleaseNULL(ref->data);
 		sweet_surface_put(ref->surface);
 		ref->released = true;

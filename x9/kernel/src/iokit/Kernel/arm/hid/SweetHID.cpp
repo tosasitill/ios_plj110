@@ -442,8 +442,11 @@ SweetHIDTouch::start(IOService *provider)
 	fOffY = (fLogicalH - 2400) / 2;
  fPanelW=1080;fPanelH=2400;
  if(sweet_early_is_x9()) {
-  fPanelW=fLogicalW=1256;fPanelH=fLogicalH=2760;fOffX=fOffY=0;
-  IOLog("X9 HID: geometry=1256x2760; hardware touch/buttons producer still absent\n");
+  /* Panel 1256x2760 -> presented 1242x2688 centred, as SweetFramebuffer.cpp:
+   * offsets ((1242-1256)/2)&~3 = -8 and (2688-2760)/2 = -36. */
+  fPanelW=1256;fPanelH=2760;fLogicalW=1242;fLogicalH=2760;
+  fOffX=((fLogicalW-fPanelW)/2)&~3;fOffY=(fLogicalH-fPanelH)/2;
+  IOLog("X9 HID: panel 1256x2760 -> display %dx%d offset %d,%d\n",fLogicalW,fLogicalH,fOffX,fOffY);
  }
 	/* The digitizer covers the main display (backboardd maps it 1:1). */
 	setProperty("DisplayIntegrated", kOSBooleanTrue);
@@ -473,6 +476,9 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
 	/* Panel pixels -> the presented 1125x2436 display (SweetFramebuffer.cpp). */
 	IOFixed nx = (IOFixed)(((int64_t)(x + fOffX) << 16) / fLogicalW);
 	IOFixed ny = (IOFixed)(((int64_t)(y + fOffY) << 16) / fLogicalH);
+	/* X9: panel border outside the presented display maps to its edge. */
+	if (nx < 0) nx = 0; else if (nx > 0xffff) nx = 0xffff;
+	if (ny < 0) ny = 0; else if (ny > 0xffff) ny = 0xffff;
 	bool moved = down && (nx != fX[finger] || ny != fY[finger]);
 	if (was == down && !moved) {
 		IOLockUnlock(fLock);

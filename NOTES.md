@@ -13,6 +13,685 @@
 - If still no sheet: open Safari to an http:// URL by hand; the PKT lines show whether DNS (UDP 53) answers and
   whether TCP 80 SYNs get SYN-ACKs.
 
+## FINDING 2026-11-08: 开/关 app 动画时 4 条竖向"透明马赛克线"(照片 /tmp/IMG_1729.HEIC, 不入 git)
+
+- USER: 每次退出/打开 app 时渲染出错, 从上到下贯穿的 4 条马赛克透明线。
+- 实测(照片几何, 屏幕左右边按 1256 px 换算): 黑色 app 圆角框(缩放动画中, 左缘≈屏幕 x 77)上 4 条竖缝在
+  x≈329/585/841/1097, **间距正好 256 px**, 从该层左缘起每 256 px 一条; 缝里透出背景蓝色, 边缘锯齿状。
+- 排除: 旧的 swipe 马赛克(353ae1c InPlaceWrites)本镜像未启用(103.txt backboardd/SpringBoard `X9 HOST
+  TEXTURES: policy=InPlace`)。103.txt 只到 78.6 s, 照片在其后, **本事件无对应日志**。
+- 推断(未验证): 该层在屏幕空间被拆成 256 px 宽的条带绘制(CA 侧拆分或我们的 metal2vulkan/PanVK 侧),
+  相邻条带接缝丢像素(光栅化接缝/采样越界)。缝随层原点而不是屏幕 256 倍数对齐, 更像 draw 级而不是显示
+  拷贝级; 与 x9dc/x9if 缓存一致性关系不大(那类错误不会形成规则 256 px 竖缝), 但未 A/B 证伪。
+- USER: 一直都有(不是新回归), 要求先静态分析。
+- 实测(反汇编 dsc-20H392 QuartzCore, Mac ~/x9-kbd-dis/q.dis):
+  - `CA::Render::Image::get_tiled_texture_size` 0x1884aed14: 宽 >255 的图切成 **256 px 宽**的 tile → 与竖缝间距
+    256 px 吻合。CA 用 `TiledImageGeometry::draw_tiles`/`bind_image` 逐 tile 画。
+  - tile 绑定 `Context::bind_image(..., TextureEdgeMode 0, ...)`; `MetalContext::draw` 0x1882cb1d4 把 edge mode
+    0/1/2 映射成 MTLSamplerAddressMode 0(ClampToEdge)/2(Repeat)/4(ClampToZero) → tile 用 **ClampToEdge**(正确)。
+    所以接缝透明只能是 tile 边缘 texel 本身是垃圾/透明, 或相邻 quad 之间有光栅化缝 —— 都在我们的栈里。
+  - `MetalContext::should_tile_image` 0x188339e58: 宽或高 > ctx+2600(`[device maxTextureWidth2D]`), 或 type 24 且
+    +152 > ctx+2608 = max(IOSurfaceGetPropertyMaximum(kIOSurfaceBytesPerRow), maxTextureWidth2D*16) 才切。
+    metal2vulkan `private_properties.rs` maxTextureWidth2D = `limit(TextureSize2D, largest_side)`, 该行不在日志的
+    waived 列表里 → 推断为 Exact=16384, 所以快照多半不是被这条触发; 真正触发路径(TileCache/lanczos 缩小缓存
+    或其它)未定。
+  - metal2vulkan 线性纹理(buffer 背的纹理)在本设备是 `Gap(Textures)`, 对 CA 报 16 B 行对齐(LINEAR_ALIGNMENT),
+    backboardd 在 103.txt 有 418 次 `MESA: WSI pitch not properly aligned`(pan_mod.c: 导入的行距不满足 Mali 对齐
+    → 导入失败)。raw_shadow 计算拷贝 dispatch 用 div_ceil, 不会漏列(该候选排除)。
+- 推断(未验证)候选: (a) tile 纹理的 border 列(CA 每 tile 的边)上传失败/未写 —— 例如窄区域或 16B 对齐行距在
+  PanVK 导入被拒后的回退路径不完整; (b) Mali 上相邻 tile quad 的接缝光栅化; (c) 插值精度。
+- 下一步建议: 在插件前端(backboardd 内就是我们的 MTLDevice)给宽 256..260 的纹理记录创建参数、每次
+  replaceRegion/blit 上传的 region+bytesPerRow+结果、以及绑定时的 sampler, 一次上机就能区分 (a)/(b)。
+- 下一步: 需要一次包含开/关 app 时刻的完整日志; 之后按时间抓该帧的 draw(x9vf 机制只按固定 uptime 触发,
+  参数上限 607 B, 需要改成按 transition 触发或放宽)。
+
+## HANDOFF 2026-11-08 (66): 110.txt(rev252db)= DVFSRC 从未启动, DRAM 请求无效; rev252dc BUILT(TF-A INIT); CSG 槽耗尽(AegirPoster)
+
+- 实测 110(rev252db, Mac ~/110.txt): `X9 DDR: DVFSRC basic=00000008 opp_count=1 level=0 gear=0`, 写 SW_REQ=0x9000 后
+  gear 仍 0, 全程 GOV ddr_gear=0 vcore=0 → DVFSRC 没被初始化, 投票被忽略。presented fps 有帧窗口 avg 22.5
+  (55 窗口, max 35.8; 109 为 21.5); 60 s 后稳定 24.0 fps(48 jobs/2s, wait 2.1 ms, copy_avg 2.4 ms)= 某个 24 Hz
+  动画, 不是 GPU 受限。忙段(27-55 s)wait_us 4-14 ms/job。GPU 1716 MHz 全程, restores=1。
+- 根因(静态, OPPO kernel_device_modules-6.12): Linux mtk_dvfsrc_probe 发 SMC MTK_SIP_VCOREFS_CONTROL
+  (0xC2000506)cmd MTK_SIP_DVFSRC_INIT=0(DT 无 dvfsrc-flag/vmode → 0,0; a0=0 成功, a1=dram_type), 注释说
+  INIT 阶段"lock high opp", late-init 的 mtk-dvfsrc-start.c 发 START=1 后自由运行。我们从未发这两个 SMC。
+- 2a9a3a6: x9_dvfsrc=1 只发 INIT(期望 DRAM 锁高 OPP), =2 INIT+START(之后 x9_ddr_level 投票生效);
+  打印 `X9 DDR: SMC VCOREFS INIT -> a0=.. dram_type=..` 与 after-init/after-start 寄存器。未上机, SMC 可能挂。
+- **新发现: CSG 槽耗尽**。110 中前 8 个 GPU 进程(pid 57/29/26/252/234/232/109/259)各占 1 个硬件 CSG 槽
+  (resident slot_count=8), 槽在 group 创建时绑定、直到进程关设备才放; 第 9 个客户端 AegirPoster(pid 390)
+  每 ~2.5 s 重开设备, 分配 32 MiB tiler heap, X9RenderCreateGroup(op 7) 返回 kIOReturnNoResources
+  0xe00002be → PANVK FAILED line=62, 共 43 次(墙纸渲染失败 + CPU/内存抖动)。
+  - 修复思路(未实现): 槽只在 job 期间真正需要(同一时刻只有一个 group 在跑, 其余都 SUSPENDED + AS1 卸下),
+    可在冷提交时从最久未用的、挂起的其它上下文 group 抢槽(复用已上机验证的 resume-empty + STOP/TERMINATE
+    关闭路径, 102-107 多次成功), 被抢者下次提交时重新 configure。**障碍**: PanVK init_subqueue 的初始化 CS
+    设置的寄存器状态(subqueue ctx 寄存器、scoreboard、cs_heap_set)以及 progress seqno 寄存器跨 submit 保持,
+    TERMINATE 后丢失 → 需要内核保存/重放 init CS 并在每 job 末 STORE_MULTIPLE / 重绑时 LOAD_MULTIPLE 全部 CS
+    寄存器; render_va 需改用 group entry 而不是 slot; 抢槽需 TryLock 受害上下文 lock(锁序 c->lock -> owner)。
+- BUILT(内核-only, 插件 275 不变, 无需 mailbox):
+  - x9/out/x9-rev252dc **041d267fc297dd0830bd50407b85579679f0ace28ad2ba94a7c825e3bd0fd80c**(rev252db 参数 + x9_dvfsrc=1)
+- 下一步: 上机 rev252dc 看 INIT a0 / gear 是否变化、wait_us 与 fps; 若 INIT 成功但 gear 仍 0 → 试 x9_dvfsrc=2。
+
+## HANDOFF 2026-11-08 (65): 109.txt x9lc 生效; 呈现改 1242x2760(rev252da); DVFSRC DRAM 请求(rev252db); 均未上机
+
+- 实测 109(rev252cz): cache-lc pre/post 各跳过 ~13-14 MB/job, seed_clean_avg=0; pre_cache 0.4-0.9 ms(之前 1.2-5),
+  post_cache 60-85 µs(之前 0.8-2 ms)。GPU wait 6-15 ms/job 成为全部开销; backboardd 一帧 15-35 pass /
+  14-33M 像素(全屏离屏为主)→ 判断显存带宽受限。USER: 更流畅; 上下黑边太丑。
+- USER 问"竖向放大会不会再坏 123": 123 的根因是宽度(414 vs 418.67), 面尺寸跟屏宽走 → 改 1242x2760
+  (414x920 pt, b108506: mkadt CANVAS_H、SweetFramebuffer fLogicalH、SweetHID fLogicalH = 2760), 左右各 7 px 黑。
+- USER 问"全局传 14 Pro": 现状 = iPhone X 身份(iPhone10,3)+ X 的 20H392 系统 + 状态栏强制 DynamicSplitMedium。
+  不建议改身份: 根盘是 X 的 IPSW(资源按设备裁剪), 14 Pro 是 arm64e 的另一套 dyld cache; 14 Pro 屏 1179x2556
+  黑边更大, 14 Pro Max 1290x2796 比面板大。
+- DVFSRC(e3beec2): 寄存器来自 OPPO kernel_device_modules-6.12 mtk-dvfsrc.c mt6993_regs; DT 10 个 DRAM OPP。
+  governor 启动打印 `X9 DDR: DVFSRC basic/opp_count/sw_req/level/gear`; 有 x9_ddr_level=N / x9_emi_level=N
+  时写 SW_REQ[15:12]/[3:0](同 mt6993_set_dram_level/emi_level), 20 ms 后读回 gear; 每条 GOV 行加 ddr_gear/vcore。
+- BUILT(内核-only, 插件 275):
+  - x9/out/x9-rev252da a0433a16d6f6e2d69e99933ecaafb07fb5317eee8e9fa6cac6b4778f2d2d0e4b(rev252cz + 1242x2760)
+  - x9/out/x9-rev252db **34366320d87231bdf0afd908357cd255408d64d69ea656cbe976970dd8b5864e**(rev252da + DVFSRC 探针 +
+    x9_ddr_level=9)
+
+## HANDOFF 2026-11-08 (64): USER 确认 108.txt(rev252cy)123 修好、控制中心不卡; GPU 优化 #4 = x9lc BUILT(rev252cz)未上机
+
+- 实测 108(rev252cy): fps avg 17.6(63 窗口, max 38.5); 每 job 维护 pre 16.7 MB / post 14.3 MB, 全是导入
+  IOSurface 整面(import_pre_full_avg = import_pre_avg), pre 1.2-5 ms + post 0.8-2 ms; wait_us 6-12 ms。
+  ACE-Lite 仍搁置(64.txt: 开了即使全维护也坏数据)。
+- x9lc 设计(476ef43, 令牌 x9lc=1): 用 IOSurface 锁协议决定 CPU 缓存维护, 而不是每个 job 都整面 CIVAC。
+  - SweetSurface: 每个非 wrapped、cacheable 的像素映射登记 {task, 用户地址/长度, surface id}(释放时删, 表 1024
+    满则不链接); 新字段 gpuCleanSeed/gpuCleanValid/gpuDirty。trapLock(任意模式)与帧缓冲 present 拷贝/直接
+    扫描读取前调用 sweet_surface_cpu_acquire: gpuDirty 时对整面 DC CIVAC 后清标志。写解锁本来就推进 seed。
+  - 服务: ImportHost(非 WC 导入)时若区间恰在某 IOSurface 映射内则 r.surface_id=该 id。
+  - 引擎 pre: 链接的导入只有 seed 自上次清理后变了(CPU 写过)才 CIVAC, 成功后记 seed; post: 链接的可写导入
+    不再 invalidate, 只标 gpuDirty。其余导入(no-copy 主机缓冲等)维持原全量维护。
+  - 新统计行 `X9 RENDER cache-lc: pre_skip_avg post_skip_avg seed_clean_avg`。
+  - 风险: 不经 IOSurfaceLock 的 CPU 读写(例如前端 getBytes 走主机指针)可能看到旧数据/马赛克 → A/B 对比
+    rev252cy。
+- BUILT(内核-only, 插件 275 不变): x9/out/x9-rev252cz boot_sha256 **fea9ecb5de0ab47a50473c424defccc2e6cdb0bf10687da55bd6c5d3f22a8167**
+  (= rev252cy 参数 + x9lc=1)。
+
+## HANDOFF 2026-11-08 (63): rev252cy BUILT = 呈现真机屏幕 1242x2688(414x896 pt @3x)修 123; 未上机
+
+- USER 选择"真机屏幕尺寸"方案(而非插件内补丁)。
+- 实现(da04330): mkadt.py 新增 CANVAS_W/H=1242x2688 写入 /arm-io/disp0 canvas-width/height
+  (IOMobileFramebuffer 读它; sweet-fbcon 物理帧缓冲仍 1256x2760/5120); SweetFramebuffer X9 fLogicalW/H=1242x2688,
+  fOffX=((1242-1256)/2)&~3=-8, fOffY=-36(负偏移, 拷贝路径 dx-=fOffX 已支持; 直接扫描路径对小于面板的面
+  RejectTooSmall → 走拷贝), 每帧把逻辑区外的边框条(上下 36 行, 左 8 px 右 6 px)清黑; SweetHID 面板坐标 →
+  1242x2688 同偏移, 归一化值钳到 [0,0xffff]。插件不变(275), 沿用 rev252cx mailbox。
+- BUILT: x9/out/x9-rev252cy boot_sha256 **50d7b6e631a9ca89a1dc075b228ff331ba6be2741e79c2de85a5f9f555c1e0f2**
+  (参数同 rev252cx: x9_cache_scope x9kbdhook x9pl x9sl, 最高频)。
+- 判读: `SWEET FB: AppleCLCD 1256x2760 ... presented as 1242x2688`、`X9 HID: panel 1256x2760 -> display 1242x2688
+  offset -8,-36`; KBDHOOK plane sizes 宽应 414; 123 不再出现 nested setKeyplaneName 回退; 触摸是否对位; 边框黑。
+  风险: 开机若黑屏/错位, 回退 rev252cx。
+
+## HANDOFF 2026-11-08 (62): 107.txt(rev252cx)= 时钟修好, fps 11.5→16.8, 瓶颈移到 CPU 缓存维护; 123 根因 = 非标屏宽
+
+- 实测 107(参数 x9_cache_scope x9kbdhook x9pl x9sl, 无 x9if; 跑满 182 s 无卡死 → 106 卡死嫌疑仍在 x9if 配对):
+  - GOV: 启动后 4.891 s 固件把 OPP 降到 56/56(390/260 MHz)一次, governor restore 后全程 actual=1716000/1716000,
+    restores=1 —— 105/106 的 260 MHz 只是启动后那一下没被纠正。
+  - 帧率 avg 16.8(91 窗口, max 57.5), 之前 11.5。后段 RENDER timing: wait_us 1.0-1.9 ms/job(之前 15-24),
+    pre_cache 1.3-2.8 + post_cache 1.2-2.6 ms → **CPU 缓存维护已是每 job 最大开销**(GPU 优化 #4 候选)。
+  - PARK hits 3043 / cold 186, live_map 5512 / live_unmap 2540; inflight_max 1 出现 11 次(无 x9if 也能排队)。
+- 123: plane sizes 探针 —— Pinyin `20060_..._Uncased-Keyboard_Letters` 418.67x271 → numbers 418.67x226;
+  英文 small-letters-small-display 418.67x226, 但布局 bounds 414x260 / 414x288。反汇编: setKeyplaneName: 尾部
+  总是 `keyplaneChangeContextWithSize:[self bounds]`(setSize: 即置 sizeDidChange=YES), UIKeyboard
+  _didChangeKeyplaneWithContext: → setFrame:(新尺寸)→ 与当前帧不同 → activate → updateLayout →
+  showKeyboard...reload: → 回首面。根因: UIKeyboard 帧宽 414(Truffle 布局标称宽)≠ 面宽 418.67(实际屏宽
+  1256 px @3x), 加上部分键盘面高不一。真机屏宽 = 布局宽, 不会触发。
+- 方向(待用户决定): 把呈现给 iOS 的屏幕改成真机尺寸, 如 1242x2688(414x896 @3x, iPhone XS Max/11 Pro Max),
+  面板 1256x2760 居中留 7 px/36 px 黑边, 触摸映射/帧缓冲/ADT 画布同步改; 或只在加载插件的进程里打补丁(不全面)。
+
+## HANDOFF 2026-11-08 (61): 106.txt(rev252cw)结果; GPU stack 被固件降到 260 MHz(真·卡顿主因之一); 123 回退链已符号化; rev252cx 构建中
+
+- 105.txt = 用户误刷 rev252cu(参数无 x9pl/x9sl); 106.txt = rev252cw(x9if x9kbdhook x9tile x9pl x9sl)。
+- 实测 106: x9pl 生效 —— PARK cold 109 vs hit 886(64%→11%), retire_map/unmap=0, live_map≈3300 live_unmap≈800,
+  无 fault。但 RENDER timing wait_us 仍 15-24 ms/job, fps 10-31 → 冷启动只占小头。inflight_max 仍 0。
+  73 s 起 RENDER timing 停止, 74.45 s `gpu_enqueued=1011 gpu_completed=1008`(3 个排队不完成), gpu_defer=198,
+  日志 75.9 s 截止(< 内核 10 s 超时) → 卡死点在 job 执行/回收, 首次出现排队 = x9sl 之后 x9if 配对路径
+  首次可能真正运行(此前从未在硬件上配对过)。推断, 未证实; rev252cx 关 x9if 隔离。
+- **实测 GPU stack 时钟**: 104(浮动调频)GOV stack 728/1716/260 混合; 105/106(x9_gpu_floor_khz=1716000,
+  floor=ceiling)启动 commit 读回 gpu=stack=1716 MHz, 之后**每一行 stack=260000(最低)**, commits=0 ——
+  GPUEB 自己把 OPP 降下来, 而钉死频率时 governor 永不再 commit → 整场 260 MHz。GOV 行的 gpu= 是我们请求值
+  不是读数。修复(f3f94aa): governor 每 50 ms 比对 cur_oppidx_gpu/stack 与 gov_index, 不同就重 commit,
+  GOV 行加 actual=/oppidx=/restores=, 前 6 次 drift 打印。
+- **123 回退链(105/106 nested bt 符号化, 20H392)**: setKeyplaneName('numbers-and-punctuation') →
+  UIKeyboardLayoutStar _didChangeKeyplaneWithContext → UIKeyboardImpl → UIKeyboard _didChangeKeyplaneWithContext:
+  (`[context sizeDidChange]` 为真 → setFrame:)→ UIKeyboard setFrame: → activate → UIKeyboardImpl setFrame:
+  → updateLayoutIfNecessary → updateLayout → finishLayoutChangeWithArguments: →
+  **showKeyboardWithInputMode:renderConfig:inputTraits:screenTraits:splitTraits:reload:** → 重建, 回首面。
+  即: 数字面与字母面尺寸不同 → 被当布局变化重载。真机各面同高。推断: 418.7 pt 非标宽 + Truffle 布局 +
+  "显示小写键"(small-display 面)导致尺寸差; rev252cx 探针打两面 sizeForKeyplane:。用户可先试关"显示小写键"。
+- 实测 backboardd(pid 57)GPU 内存: 104/105 中 resources 1 → ~1900, MiB 700-900, old30s 到 ~1750 个/~690 MiB,
+  预算 1024 MiB(长期存活分配持续累积, 后续查是否泄漏/池化不回收)。
+- rev252cx(构建中): rev252cw 去 x9if/x9tile/x9dc, 加 governor 修复与面尺寸探针, plugin 275(需 mailbox)。
+
+## HANDOFF 2026-11-08 (60): GPU 优化 #3(x9pl 驻留上下文活体 map/unmap)+ #5(x9sl 无锁 SubmitAsync)BUILT, 未上机
+
+- #3 根因(104.txt): PARK cold 1342 vs hit 739, retire_map 648 / retire_unmap 576 —— 驻留 group 遇 map/unmap 必须
+  retire(page table attached 时 map/unmap/publish 都拒绝)。实现(bc6fcf0, 令牌 x9pl=1, 需 x9_gpu_park):
+  驻留且同 context 时直接改 attached 页表(X9RenderPageTable *_live 变体, 不 prune), publish_live 清脏表页,
+  然后按 Linux panthor `mmu_hw_do_operation_locked`(CSF): AS1 LOCKADDR(自然对齐 2 幂区间, log2-1 编码, 最小
+  32 KiB)+ COMMAND LOCK → FLUSH_CACHES(flush_gpu 0x23304)→ 显式 COMMAND UNLOCK, 每步等 AS idle, 再 no_faults;
+  任一步失败按 retire 失败处理(uncertain)。其余情况走旧 retire。安全前提: worker 从 publish 到 reap 持 c->lock,
+  map/unmap 也要 c->lock, 所以活体改表时本 context 没有在跑的 job。PARK 行新增 live_map/live_unmap 计数。
+- #5 根因: 不是客户端串行, 是内核锁 —— SubmitAsync 进 externalMethod 先拿 context->lock, 而 async worker 整个
+  publish→GPU→reap(17-21 ms)都持 c->lock, 同一进程的下一个提交在内核里睡到上一个 job 结束 → FIFO 永远只有
+  一个 job(inflight_max=0), x9if 永远配不上对。实现(5c7c45c, 令牌 x9sl=1, 需 x9_submit_async, x9dc 开时自动
+  关闭——dirty staging 依赖 c->lock): 每 context 新 submit_lock(叶锁, 顺序 c->lock→submit_lock)保护
+  next_submission 与 mappings 注册表; SubmitAsync 只拿 submit_lock 校验+入队(engine submit_async_try, 满则
+  NoSpace), FIFO 满时释放 submit_lock 再 async_wait_room 睡眠后重试(避免 map 线程持 c->lock 等 submit_lock、
+  worker 等 c->lock 的死锁)。剩余串行点: map/unmap 仍需 c->lock, 会等正在跑的 job。
+- 另外的 #5 观察: retire_other 只有 1 → 绝大多数 job 同属 backboardd; 跨进程并发(多 CSG/多 AS)是更大的后续项。
+- BUILT(Mac, 内核-only, 插件仍 274 → 沿用 rev252cu 的 mailbox):
+  - x9/out/x9-rev252cv boot_sha256 4e23ab5c3695e5e2dbe582c534d05bb05e984dbe0b9c69baeaccd034e1671323(rev252cu + x9pl=1)
+  - x9/out/x9-rev252cw boot_sha256 **1fe878ba1afafd3bc09a94a63bca4bce71b081520bf86ef511b03aac16253cda**
+    (rev252cu 参数去 x9dc, 加 x9pl=1 x9sl=1; 保留 x9if/x9_cache_scope/最高频/两个探针)
+- 判读: `X9 RENDER PARK: ... live_map= live_unmap=`(cold 应大降)、`X9 RENDER ASYNC window ... inflight_max`(应 ≥1)、
+  RENDER timing wait_us、METRICS presented_fps; 失败形态 `live map ... uncertain` / `refused (lock-free)` 原样报。
+
+## HANDOFF 2026-11-08 (59): 104.txt = 123 切过去又被同一调用内的嵌套 setKeyplaneName 切回; 接缝不是 CA tile;
+## GPU 时间分解; rev252cu + rev252cu-nocache BUILT(plugin 274, 都 x9_gpu_floor_khz=1716000)未上机
+
+- 实测 104.txt(rev252ct, Mac ~/104.txt — 用户以后日志都放 Mac 家目录, ssh 读):
+  - 键盘: keyboard='iPhone-PortraitTruffle-QWERTY'(dynamicLayout=0, 非动态), 5 个面含
+    `429_..._Numbers-And-Punctuation`; 本面 more-alt-sd=nil, more-alt='numbers-and-punctuation', axLowercase=1;
+    alt 子树 present。每次 123: 外层 setKeyplaneName('numbers-and-punctuation') **确实切到数字面**, 但同一调用里
+    嵌套 `setKeyplaneName('small-letters-small-display') before='numbers-and-punctuation'` 立刻切回(日志里内层先打)。
+    → 用户"数字面不存在"不成立, 是被切回。反汇编排除: refreshForDictationAvailablityDidChange(只设听写键状态)。
+    setShift: 会切到 shiftAlternateKeyplaneName(数字面的 shift-alternate 不该是字母面), 未定。rev252cu 探针打
+    嵌套调用的 UIKitCore 去 slide 回溯(f60102a)。
+  - 接缝: TILEPROBE 504 行, 250..270 宽纹理全是渲染目标(usage 0x5, fmt 80)和 256x1 linear LUT, **没有任何
+    256 宽 tile 的 CPU/blit 上传** → CA tiled-image 假说证伪。重新量: 缝 ≈ 层原点 77 + 256·k = 每行 **1024 B**
+    边界(32bpp)—— 指向某个 IOSurface/渲染目标每行每 1 KiB 处像素坏(缓存/内存类), 而不是绘制拆分。内核
+    cache 代码无 1 KiB 单位(panvk cache granularity 是 256 B)。A/B: rev252cu-nocache 去掉 x9_cache_scope/x9dc/x9if
+    (三者默认 0, 已确认)。
+  - GPU: 平均 11.5 fps(57 窗口, max 36); 每 job 17-21 ms = pre_cache 2.6 + **GPU wait 11-17** + post_cache 1.1-1.4;
+    25 job/s ≈ 2.2 job/帧, 串行(inflight_max=0)。GOV util 12-39%, idx 在 0(1716/1716 MHz)和 38(gpu 1092 / **stack
+    728 MHz**)间摆; PARK cold 1342 vs hit 739(**64% 冷启动**, retire_map 648/unmap 576); backboardd 一帧 42 pass/
+    37M 像素(~10x 屏幕, 模糊为主); latency avg 25-29 ms。
+- BUILT(Mac, 同一内核/插件 274, mailbox 一次即可, `X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/x9-rev252cu`):
+  - x9/out/x9-rev252cu boot_sha256 **f2a382bc1aee04737fc7a5aac2648b2c2258bd11079270beac178f3deb51437f**
+    (rev252ct 参数, floor 1100000→1716000)
+  - x9/out/x9-rev252cu-nocache boot_sha256 **9e7fb73f05bcefac797e845f04c8c7cc1a680b9ac1e8e025945ce7217d8ae327**
+    (同上, 去 x9_cache_scope/x9dc/x9if)
+  - allowlist 3dadd78。
+- GPU 优化候选(按代价): (1) 锁最高频(本轮已带); (2) 用户侧"减弱透明度"量化模糊占比; (3) PARK 冷启动: map/unmap
+  不再强制 retire —— CSG 驻留时直接改 GPU 页表 + MMU flush, 或 PanVK/插件 BO 池复用; (4) 4 ms/job 的 CPU 缓存维护
+  (~21 MB/job): GPU 共享面改 WC/不缓存映射; (5) 双 job 在飞(x9if)配不上对: 前端提交被串行化, 需查 CA/前端等待点。
+
+## HANDOFF 2026-11-08 (58): rev252ct BUILT(plugin 273)= 键盘探针 + 接缝探针一起, 未上机; 取代 rev252cs
+
+- 接缝探针(96f77f8, x9/metal/General/X9TileProbe.inc, 由 NativeBridgeMetalFrontend.mm include; 令牌 x9tile=1):
+  只针对宽或高 250..270 px 的纹理, `X9 TILEPROBE <proc>[pid]:` 记录创建(device/heap/on-buffer/on-iosurface/
+  linear: 尺寸/格式/类型/usage/options/offset/row/REFUSED)、每次 replaceRegion 与 blit buffer→texture、
+  texture→texture 上传(region/行距/源偏移/结果), 以及每种不同的 sampler(min/mag/mip/s/t/normalized)。直写
+  /dev/console, 600 行上限; 行为不变。判读: 若 CA tile 纹理是 258 宽(带 border)且边缘列的上传 REFUSED/缺失 →
+  (a) 边缘 texel 坏; 若上传都 ok 且 sampler s/t=0(ClampToEdge)→ 查 (b) quad 接缝/光栅化。
+- 键盘探针同 rev252cs(09674f5)。
+- BUILT(Mac): x9/out/x9-rev252ct boot_sha256 **c5b902cb28d674191d72c4769ebf35afd1eaf8b992da855ae2b9021fd6519572**,
+  参数 = rev252cs + x9tile=1; allowlist fdb87fd。mailbox: `X9_SERIAL=<serial> python3 x9/mailbox/update.py
+  x9/out/x9-rev252ct`。
+- 测试: Spotlight 打几个字母 → 点 123 ×3-5 → 开关任意 app ×3-5 → 拉日志。
+
+## HANDOFF 2026-11-08 (57): 123 根因链收窄到"当前键盘面没有 more-alternate 属性"; rev252cs(plugin 272)BUILT 未上机
+
+- USER: 怀疑数字面在键盘数据里不存在, 新加简体中文也切不过去, 认为与听写处理有关。
+- 实测(反汇编 20H392): `-[UIKBTree alternateKeyplaneName]` 0x189789834 = 若 `+[UIKeyboardLayout
+  _showSmallDisplayKeyplane]` 取 `more-alternate-small-display`, 否则/取不到则 `more-alternate`, **都没有就返回
+  本面自己的名字** → setKeyplaneName: 同名无变化 = 103.txt 现象。`_showSmallDisplayKeyplane` = libAccessibility
+  `_AXSLowercaseKeyboardDisplayEnabled() != 0`(dsc stub 0x18dbd4170 → 0x191979c74;"显示小写键", 默认开),
+  它也解释了面名后缀 `-small-display`。
+- 实测: 全 UIKitCore 只有 `_stringForAttributeName` 和 `alternateKeyplaneName` 引用 MoreAlternate(-SmallDisplay)
+  属性名(adrp 0x1d5bdc000 +2232/+2240), 没有任何代码写/删它 → 属性只来自 TextInputUI 加载的布局数据
+  (os20H392 TextInputUI.framework/KBLayouts_iPhone.dat / KBLayouts_Dynamic.dat, 编码过, strings 看不到面名)。
+  所以 UIKit 里的听写代码不会直接抹掉它; 听写只有在影响"选哪个键盘布局名"时才可能相关(待 kbname 证实)。
+- 推断(未验证): 屏幕 418.7x920 pt 不是任何真 iPhone 尺寸, 表情面名 `17613_PortraitTruffle_...` 说明选了
+  Plus 家族; 可能走了 dynamic layout(setKeyplaneName: 开头的 `[_keyboard dynamicLayout]`), 生成的面缺少
+  more-alternate。
+- rev252cs 探针(09674f5)在 rev252cr 基础上, More 分支前 3 次另打: 本面 more-alt-sd/more-alt/shift-alt-sd/
+  shift-alt 属性、`[_keyboard dynamicLayout]`、axLowercase、`_keyboard` 全部子树(面)名。
+- BUILT(Mac): x9/out/x9-rev252cs boot_sha256 **360875d65c7604df3706e65af9967879062e0d49da1df43842fda8fd018abec9**,
+  allowlist 1da90ff。rev252cr 作废(被 cs 取代)。mailbox: `X9_SERIAL=<serial> python3 x9/mailbox/update.py
+  x9/out/x9-rev252cs`。
+- 可选对照(不需构建): 设置 > 辅助功能 > 键盘 > 关闭"显示小写键", 再试 123。
+
+## HANDOFF 2026-11-08 (56): 103.txt(rev252cq 探针)= 123 命中正确、动作正确, 但 setKeyplaneName 后键盘面不变; rev252cr(探针第二轮, plugin 271)构建中
+
+- 实测 103.txt: KBDHOOK 在 Spotlight[274] 36.5 s 装好(其余含 UIKeyboardLayoutStar 的进程也装上, 无副作用)。
+  Spotlight 键盘布局 418.7x243 pt, 面 `small-letters-small-display`, More-Key `it=11 dt=18 visible=1 state=2
+  frame=2.0,175.0 51.7x49.0`。所有 16 次 123 按压: `hit 'More-Key'`、`downActionFlags=0x24`、`sendDown
+  actions=0x24 infos=1` —— 命中/可见/状态/计数全部满足, 但 `after sendDown plane='small-letters-small-display'`
+  不变。表情键切 `17613_PortraitTruffle_iPhone-Emoji-Keyboard_Letters` 正常, 地球键 0x1085 正常。
+  → 104 之前的推断(命中失败/不可见/禁用/计数)全部**证伪**; 问题在 More 分支内部或 setKeyplaneName: 自身。
+- 实测(反汇编 setKeyplaneName: 0x188ff97c0): 第一道门 `_isTrackpadMode`(BOOL, ivar 偏移指针 0x1e1d8e9cc)非零
+  → 直接返回。trackpad 由 setTrackpadMode:animated: 写, 调用者: willBegin/didEndIndirectSelectionGesture:
+  (来自 _UIKeyboardTextSelectionInteraction panningGesture:/oneFingerForcePress:/oneFingerForcePan:)、
+  will/didEndTrackpadModeForServerSideDictation(UIDictationController clearKeyboardTrackpadModeIfNeeded /
+  UIDictationView finishReturnToKeyboard 调 didEnd)、didRotate。推断(未验证): trackpad 卡在 YES 会让切面静默
+  失败; 但 performHitTestForTouchInfo 也读这个标志而命中正常, 所以也可能是 More 分支里 alternateKeyplaneName/
+  subtreeWithName/ShiftRendering==31→showGestureKeyboardIntroductionIfNeeded 这几步。
+- rev252cr 探针(commit 8e198db): More 分支打印 trackpad/rebuilding/isShiftKeyPlaneChooser/keyboard 名/alt 名/
+  alt 子树是否存在; 每次 setKeyplaneName: 打印参数与前后值; setTrackpadMode:animated: 打印参数与 UIKitCore
+  去 slide 返回地址(可用 ~/x9-kbd-dis/dis.py 符号化)。字母键不再打 downActionFlags; 行数上限 800。
+- 构建: Mac `/tmp/x9-rev252cr.sh`(bash 数组 + Framework python + homebrew llvm PATH), `build.py all --revision 271
+  --name x9-rev252cr`, 参数同 rev252cq。plugin 变了 → 先 mailbox 重写再 boot。
+- **BUILT(Mac, 未上机)**: x9/out/x9-rev252cr boot_sha256 **31cc737ff3694bb211d36f594f11c2ec3256bcf99cca6849bca75fa3805d340b**,
+  payload b924f3cb99e30a79...; allowlist(plugin 271)已提交。
+
+## HANDOFF 2026-11-08 (55): 123 键诊断探针 x9kbdhook=1 (plugin 270) → rev252cq 构建中
+
+- USER(102.txt 后): 按住 123 **不变暗/不高亮**; 123 键不是灰的; 地球键能切、删除能删、旁边表情键能点;
+  **所有语言的数字面都打不开**。
+- 推断: 不高亮 = touch-down 时 UIKit 没把这次按压当作 More 键的动作: 要么命中测试没落在 More 键
+  (邻近表情键正常, 不像整体坐标偏), 要么 More 键 visible=NO / state==1 → downActionFlags=0。反汇编排除:
+  stateForKeyplaneSwitchKey: 只返回 2/4; shouldMergeKey: 只管 interactionType 38/9/5(More=11);
+  _shouldSwapGlobeAndMore 需两键都 visible; setKeyplaneName: 的 setVisible 循环只置 visible=1。静态到此为止。
+- 新探针(commit 7dce1e5, x9/metal/General/X9KeyboardProbe.inc, 由 X9GeneralMetalFactory.mm include): bundle
+  constructor 在含 UIKeyboardLayoutStar 的进程里(boot-arg 令牌 x9kbdhook=1)换 3 个 IMP, 先调原实现、结果不改:
+  `X9 KBDHOOK <proc>[pid]: touchDown at x,y (layout WxH) plane=... infos=N hit '<key>' it= dt= visible= state= frame=`,
+  `  More-Key ...`, `downActionFlags=0x.. key ...`, `sendDown actions=0x.. infos=N key ...`, `after sendDown plane=...`。
+  直接写 /dev/console, 400 行上限。注意: bundle 是首次 Metal 使用时才加载(102.txt Spotlight 59.6 s), 之前的触摸
+  不会被记录 → 测试时先在 Spotlight 里打几个字母、等几秒再点 123。
+- 构建(Mac, 后台): `build.py all --revision 270 --name x9-rev252cq` + rev252cp 的 16 个令牌(去掉 x9_mgwipe)+
+  x9kbdhook=1。plugin 版本变了 → **必须先 mailbox 重写**: `X9_SERIAL=<serial> python3 x9/mailbox/update.py
+  x9/out/x9-rev252cq`, 再 `fastboot boot x9/out/x9-rev252cq/boot.img`。
+- **BUILT(Mac, 未上机)**: x9/out/x9-rev252cq — boot.img **64a73e39a64c12692efc3b313f424eeac1ceda62ba9892ab4b547cd81551c93a**,
+  kernel f97394422348d619..., payload b5c461a6ef18b8f9...; 嵌入参数核对 = 上述 16 令牌 + x9kbdhook=1; X9GeneralMetal270
+  内含 `X9 KBDHOOK` 串。allowlist 头随 b334009 提交。构建坑: zsh 不拆 `$A`(用 bash 数组脚本 /tmp/x9-rev252cq.sh);
+  boot 步需 `PATH=/Library/Frameworks/Python.framework/Versions/Current/bin:/opt/homebrew/opt/llvm/bin:$PATH`
+  (all 步因缺 llvm-objcopy 停在 boot, 用 `build.py boot --kernel x9/out/x9-rev252cq/kernel.development.sweet` 补)。
+
+## HANDOFF 2026-11-08 (54): 101.txt(rev252cp) 相册/时间/机型 USER 确认修好; 键盘 123 仍打不开 → UIKit 门控已定位(静态), assetsd 假说证伪
+
+- 实测 101.txt(rev252cp): `X9 RTC: 2026-11-08 05:37:56 UTC`、`X9 MGWIPE: cache errno=0`、`tccd issued extension`
+  均出现; CRASH 只剩 mediaserverd/AegirPoster ×104 行、syncdefaultsd 64、CommCenter 44、driverkitd 4,**assetsd 0**。
+  USER: 相册、时间等修好, 键盘 123 仍打不开 → handoff 47/51 的 "123 = assetsd 崩溃循环" 推断**证伪**。
+- 实测 101.txt 键盘段(Spotlight, 77.8 s 下拉): 81.4–97 s 在 (80-100, 2440-2496) 连点 123 十余次, HID down/up
+  全部成对(99/99, 只有 finger 0), 无 Spotlight/kbd 崩溃, 帧持续 ~10 fps。另见 hfs `set LowDisk` (freeblks≈262k,
+  低于 warninglimit 262144, 约 1 GiB 空闲), 尚未处理。**/tmp/101.txt 已随服务器卡死重启丢失**, 需用户重新放。
+- 实测(Mac 反汇编 dsc-20H392 UIKitCore, 工具 ~/x9-kbd-dis/{dis.py,callers.sh,ivars.py}, 不在 git):
+  123(More 键)在 **touch-down** 切键盘面: `-[UIKeyboardLayoutStar completeSendStringActionForTouchDownWithKey:
+  withActions:executionContext:]` 0x1897ebabc: action bit 5 → **`[_extendedTouchInfoMap count] == 1` 才**
+  `setKeyplaneName:[keyplane alternateKeyplaneName]`, 否则静默跳过(ivar 偏移指针 0x1e1d8e950 = UIKeyboardLayoutStar
+  `_extendedTouchInfoMap` NSMutableDictionary)。字母键(touch-up 出字)和 shift(bit 4/34 路径)不查这个计数——
+  正好解释"字母能打, 123 没反应"。条目在 generateInfoForTouch:(touchDown) 加入, 在 clearInfoForTouch:forResting:
+  删除(调用者: completeRetestForTouchUp ×2, completeHitTestForTouchDown, continueFromInternational…, pinchDidConsumeTouch,
+  touchCancelled:forResting:)。
+- 推断(未验证): 计数≠1 = 有触摸条目泄漏(某次触摸的 up/cancel 没走到 clear), 或键盘任务队列滞后(主线程被
+  dictation 链拖慢, 见 30-42.txt)使 down/up 处理错序。我们的 x9_kbd_dictation 种子(每次开机把 cfprefsd 写回的
+  bplist 换成 XML, 原键丢弃, 备份 .x9-before-seed.plist)与 x9_siri_off(launchd.plist 32 处 Mach 服务改名)
+  都不直接碰这条路径, 但种子会抹掉用户键盘设置(含 QuickPath 等), 列为待排除项。
+- **102.txt(USER: 键盘弹出后第一下点 123 也打不开)**: 实测 Spotlight 30.4 s exec, 34-36 s 点搜索条, 39.9 s 首次点
+  (71,2442) 无效, 之后 45-73 s 在 (50-135, 2395-2463) 连点 ~35 次; HID 依旧单指成对。→ "先前触摸条目泄漏" 排除。
+- 实测(反汇编 `-[UIKeyboardLayoutStar downActionFlagsForKey:]` 0x1897f3c10): More 键 = interactionType **11** → 固定
+  flags 0x24(含 bit 5 切面)。唯一例外在函数开头: `[key visible]==NO` 或 `stateForKey:==1`(disabled)→ flags 0。
+  所以 123 无效的剩余可能: (a) 命中测试没落到 More 键; (b) 该键 visible=NO / state=disabled; (c) 按下时
+  `_extendedTouchInfoMap` 计数≠1(非泄漏型, 如 down/up 同批处理)。下一问 USER: 按 123 时键是否变暗高亮(高亮=命中且
+  未禁用 → 查 c), 地球键/删除键是否有效。
+- 下一步(无需构建的设备判别): (1) 键盘弹出后**先不碰任何键**, 第一下就点 123 —— 能开 → 泄漏型; 不能 → 别的门。
+  (2) 按住 123 不放 ~1 s 看是否在按住时切到数字面。 (3) 换 App(备忘录/设置搜索)试。 结果决定: 泄漏型 → 查
+  哪类触摸没被 clear(候选: 键盘出现动画期间按下的触摸、系统手势取消); 否则抓 Spotlight 主线程样本
+  (x9_sample_procs=Spotlight)。
+
+## HANDOFF 2026-11-08 (53): rev252cp 统一镜像 BUILT = 相册+机型+时间三修复同内核; 未上机; 既有镜像缺口核验
+
+- 任务: 用户要"最新最全"(三修复齐备)的镜像并 push 仓库。
+- **既有镜像缺口核验(观察; 内核 strings + boot.json 哈希逐项对过)**: 没有任何一个现成镜像三修复齐备。
+  - `x9-rev252cn-mgwipe/boot.img` (9f0c6278..., 打包内核 = `x9-a6fbe37-dirty` 03490aa9..., boot.json
+    kernel_sha256 相符): 有 `X9 RTC:`×5 + `X9 MGWIPE:`×3, 但**缺相册修复**——无 `issued extension`/
+    `SWEET Sandbox` 串, 即 46e1d4c 不在其构建源码里(该内核构建先于 sandbox 提交落地)。
+  - `x9-rev252co/boot.img` (40ae2357..., 内核 d3959493...): 三修复代码全在(三串全命中), 但嵌入参数集只有
+    x9dc=1 x9if=1(dc-if 组), **没有 x9_mgwipe=1** → MG 缓存清理不会触发, iPod 缓存照旧。
+  - `x9-rev252cn-rtc/`: 只有时间。名字带 a6fbe37-dirty 的构建目录命名与实际源码内容不符, 判镜像以
+    strings+哈希为准。
+- **rev252cp 构建(本次, 从 HEAD 6edb086 全量)**: `python3 -I x9/build/build.py all --revision 269 --name
+  x9-rev252cp` + 14 个 Wi-Fi/GPU token(x9_wifi_power=6 x9_wifi_real=1 x9_gpu_khz=1716000
+  x9_gpu_floor_khz=1100000 x9_gpu_park=1 x9_submit_async=1 x9_wifi_xo0..6 x9_cache_scope=1) +
+  `x9dc=1 x9if=1 x9_mgwipe=1`。流程 plugins 269 重建 → kernel(51/51 overlay objects, ccache)→ boot。
+  - **三修复验证(观察, 内核 strings)**: `X9 RTC:`×5 / `X9 MGWIPE:`×3 / `issued extension`×1 全命中。
+  - **嵌入参数(payload strings)**= cn 基线 29 token 逐字节一致 + `x9dc=1 x9if=1 x9_mgwipe=1`。
+  - 哈希: boot.img **48e7c81155d4037f099071e4d8f18e1ca6606b461e9cdd60762b2216b7478cb4** (11730944 B);
+    kernel **5c75c3c61b670f27f7e3ffc480714fde1bd6b691bfab968289b9fcea8603578b**;
+    payload **0286d71c90d22a6e2bd5cdb00dbf3515d64d5006ded86fb115a198cbbc713c65**。
+  - allowlist: plugins 重建非确定性按预期只动了 X9GeneralMetal 哈希 → identity 13a7b368... →
+    **64a12d08170fff48ed097d24944276e65f308fa147db2360096b3afb1bf04a01**,头已随本条提交;新内核只与本镜像
+    payload 配对。**mailbox 必须先重写**: `X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/x9-rev252cp`,
+    然后 `fastboot boot x9/out/x9-rev252cp/boot.img`。
+- 上机判读(52 三线合一): (1) 早期 `X9 RTC: 2026-11-08 HH:MM:SS UTC = N s`,1970 窗口消失;失败形态
+  `map failed`/`PMIF transfer failed`/`implausible ...` 原样报。 (2) `X9 MGWIPE: cache errno=0`(errno=2 =
+  缓存本就不在, 另找 iPod 来源)且 UI 机型不再显示 iPod。 (3) assetsd 不再崩(16 次/122s → 0)+ 搜
+  `issued extension` 行 + 键盘 123 + 点相册看 MobileSlideShow exec 走多远(仍无 exec → 拒绝在
+  SpringBoard 内部, 下一轮 x9_sample_procs=SpringBoard)。 (4) 三项验证后 reboot 不带 x9_mgwipe(缓存重建
+  一次即可, 勿每 boot 清);本镜像带 x9dc/x9if(101.txt 第四轮已证 armed+stable)。
+
+## HANDOFF 2026-11-08 (52): 相册打不开 → 查到 hackios 生态的 assetsd TCC 修复并移植 (ops 5/6 真 token), rev252co BUILT 未上机
+
+- **任务**: 用户报相册(Photos/MobileSlideShow)打不开,并指路查 UniXNU 和 hackios 的相关修复。
+- **101.txt 证据链(观察)**: 全部近期日志(95-101)中 MobileSlideShow 一次都没 exec 过——无 `SWEET AKS:
+  MobileSlideShow`(exec 校验)、无 CRASH;对照: Safari 在 98.txt exec 后崩(异常路径与 assetsd 同款)。
+  101.txt 117.768s 有一次 tap(555,1138):有 21 帧 UI 响应(动画)、**SpringBoard 没发 AKS sel 26/27
+  (assertion)、没有任何 exec**——若这是相册 tap,拒绝发生在 SpringBoard 内部、launchd 之前;但也可能
+  没点在相册上(87 次 tap 大多在日历内交互;日历 74.2s 被点开并渲染 74-86s,说明点图标启动 app 本身是通的)。
+  内核侧排除项: 本轮无 x9_lite/sweetnoexec,trust-cache 失败会有 CS_KILLED CRASH 行,均不成立。
+- **UniXNU 上游: 无相册/TCC 相关修复**(四个 checkout 的 git log --grep 和 docs 全空)。
+- **hackios 生态: 找到已上机验证的修复**。同根因 `assetsd requires TCCPhotosService access` 在三个移植
+  都被同一个内核补丁修掉:
+  - **ios-asteroids 0116** (nothing-sm7635-devs/ios-asteroids, commit 5f7ff1e "sandbox extensions
+    issue/consume succeed (fixes Photos/assetsd)";后续 commit bffdfb3 "**Photos works (0116)**"):
+    tccd 每次 TCC 授权都要 `sandbox_extension_issue_generic("com.apple.tcc.kTCCServicePhotos")`;
+    op 5 返回 ENOENT 时 tccd 报 kTCCErrorDomain 6 "Failed to issue Sandbox Extension",assetsd 崩。
+    修复 = op 5 写回真 token、op 6 回写非零 handle。docs/CSOPS.md 有完整诊断+上机验证步骤
+    (`SWEET Sandbox: tccd issued extension type 3 'com.apple.tcc.kTCCServicePhotos'` 为通过标志)。
+  - **ios-b0s 0313** (JeyKul/ios-b0s): 同修复,token 伪成 Apple 序列化格式(40hex;00;…;class;01;…;path),
+    并记录了参数布局。**ios-popsicle 0329**: 同修复(顺带修 appex 容器路径)。beyond2lte-ios: 记录了同
+    崩溃,未修。
+  - 0116/0313 恰好回答了 handoff 51 里 op-5 dump 要探的问题: `__sandbox_extension_issue` 7×u64 =
+    [0] class/path 串指针, [1] extension type, [2] 目标 pid 或 path, [3] flags, **[4] 2048B token
+    输出缓冲**, [5]/[6] 未用; consume = {token 串, 含 NUL 长度, int64 *handle_out}。无沙箱时扩展本就
+    不授予任何东西,消费者不校验格式(libsystem_sandbox 的 consume 只拒绝 "invalid" 前缀)。
+- **已移植(commit 46e1d4c, x9/kernel/src/bsd/kern/sweet_amfi.c)**: op 5 写 opaque token
+  `SWEET-<serial>;<type>;<class>`,op 6 回写非零 handle;0x43 保持 ENOENT(iOS 16.7 容忍;
+  asteroids 0136 是 iOS 18 版语义);删 x9_sandbox_ext_ok(token-less 路径已被 40.txt 证伪——
+  syncdefaultsd 在 ENOENT 和 token-less 成功下都崩,与其无关);op-5 64B dump 保留(x9_sandbox_ops=1,
+  验证我们 16.7.16 用户态的布局)。仅内核改动,插件不变,allowlist identity 不变,mailbox 载荷不受影响。
+- **BUILT(仅本机, 未上机)**: x9/out/x9-rev252co —— kernel d39594930c161fab...,boot.img
+  40ae235719baed25...(11730944 B, 参数集 x9dc=1 x9if=1,同 101.txt 第四轮)。
+- **上机判读**: (1) assetsd 不再崩(16 次/122s → 0),搜 `issued extension` 行;
+  (2) 键盘 123 是否修好(assetsd 活了数字盘才装得上); (3) 点相册:若 exec 出现 → 看它跑多远;
+  若仍无 exec/AKS sel 26 → 拒绝在 SpringBoard 内部,与 assetsd 无关,下一轮加
+  x9_sample_procs=SpringBoard 在 tap 时刻抓栈; (4) 顺带回收 handoff 51 的诊断包
+  (COMMIT WORK/GOV stack/op-5 结构/scope-hold/PARK retire)。**mailbox 要按 51 的提醒先重写**
+  (plugin 269 载荷与设备邮箱不配对):`X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/x9-rev252cn-dc-if`,
+  然后直接 boot rev252co 的 boot.img。
+
+## FINDING 2026-11-08: MobileGestalt 机型读取链已反汇编核验(20H392 实机 dylib); 内核/ADT 供给全对; "还是 iPod" 首要嫌疑 = MG 磁盘缓存陈旧答案
+
+- 对象: `.local/x9/work/dsc-20H392/usr/lib/libMobileGestalt.dylib`(设备实跑的 iOS 16.7.16 拷贝, 有符号)。
+  读取链: **ProductType ← sysctl `hw.product`**(copy_productType 0x19c58b0cc → hash key `h9jDsbgj7xIVeIQ8S3/X3Q`;
+  native 0x19c571680 直接把 hw.product C 串转 CFString); **DeviceClassNumber ← hw.product 前缀匹配**
+  (0x19c55f5c8: iPhone→1, iPod→2, iPad→3, AppleTV→4, iFPGA→5, Watch→6, AudioAccessory→7, iBridge→8,
+  AppleDisplay→0xa, ComputeModule→0xc; **前缀不匹配或 hw.product=NULL → 默认 2 = iPod**, 结果缓存在
+  [0x1e1d7c740]); HWModelStr ← sysctl `hw.target`; 其余读 `IODeviceTree:/product`(product-id/product-name/
+  artwork-device-idiom/subtype/scale-factor/gamut/display-corner-radius/side-button-location)、
+  `/buttons home-button-type`、`/chosen display-scale`。MG 二进制内**没有**内置机型表(全库只有 "iPhone" 等
+  前缀字符串)→ 答案完全由 DT/sysctl 决定。
+- 缓存(为什么 iPod 不死): MobileGestaltCache.c → `/private/var/containers/Shared/SystemGroup/
+  systemgroup.com.apple.mobilegestaltcache/Library/Caches/com.apple.MobileGestalt.plist`, 校验只有
+  OS build("cache %@ doesn't match OS %@")+ build UUID("cache UUID %@ doesn't match build UUID %@")。
+  命中即返回, native 只在 miss 时调("MGCache: Invoking %@")。我们 build 恒 20H392 + unique-chip-id
+  合成 0x5839000000000001 恒定 → **改 ADT/内核永不失效**; 与老 sweet 项目 6854 的失效模式相同。
+- X9 供给已核验全对: staged `x9/out/x9-rev252cn-dc-if/x9.adt` root `model=iPhone10,3`、compatible
+  `D22AP|iPhone10,3|...`、`/product` 完整(product-id fd079b...=真 D22AP 值, artwork phone/2436/3x/sRGB)、
+  `/buttons home-button-type 2`、serial/model-number=PLJ110; 101.txt:79 `X9 IDENTITY: product=iPhone10,3
+  board=D22AP; description=iPhone20 model=PLJ110`(kernel: hw.product=IODT getMachineName←ADT root model,
+  hw.target=第一个 compatible, SweetPlatformExpert.cpp:130 注释; kern_mib.c HW_PRODUCT→PEGetProductName,
+  SWEET 已解 kludge)。→ 若 UI 仍显示 iPod, 首选删上面的缓存 plist(boot 时 MG 重建走 native)再验证;
+  x9_update_install 目前只能 publish 文件不能删 var 下的文件, 删除需 boot-arg 门控 PID1 unlink
+  (仿 08b386d 模式)或重刷根。删完仍 iPod 再查 UIKit 侧(status-bar device-name item 的具体 key)。
+- **x9_mgwipe 已实现(commit 6613ddb, kern_exec.c sweet_x9_wipe_gestalt_cache)**: PID1 exec 路径
+  (update-install 块后)在 `x9_mgwipe=1` 时对两个路径各 unlink 一次——systemgroup 缓存 plist 与 legacy
+  `/var/mobile/Library/Caches/com.apple.MobileGestalt.plist`;ENOENT 算成功,其它错误只记录不拦 boot
+  ("X9 MGWIPE: cache/legacy errno=N")。**BUILT**: 内核 `x9/out/x9-a6fbe37-dirty`(269 allowlist identity
+  13a7b368... 已在内核,与 handoff 51/52 的 269 staging 规则一致),boot 镜像
+  `x9/out/x9-rev252cn-mgwipe/boot.img` sha256 9f0c6278bd2c70e959875d1cd9bb8da906def102734d8efffd9b0955cd852a67,
+  embedded args = rev252cn 基线逐字节一致 + `x9_mgwipe=1`(已 diff 核对);payload(邮箱用)
+  sha256 ae1bc3aab684f14b75243728351d036a115c911bea0063ce6295009fc5c3a2fb。**269 plugin-package 已拷入
+  candidate**(boot 步骤带 --kernel 不产 plugin-package;来源 x9-de3702b-dirty 的诊断包,identity
+  13a7b368...,10 个文件大小+SHA256 与内核 allowlist 逐一核对全等,插件二进制非确定性所以不能重跑 plugins,
+  必须用与 committed 头同批的那份)。上机: 若设备邮箱还是旧载荷,
+  先 `X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/x9-rev252cn-mgwipe`,再
+  `fastboot boot x9/out/x9-rev252cn-mgwipe/boot.img`;日志看 `X9 MGWIPE: cache errno=0`(errno=2=文件本就不在,
+  说明缓存此前不存在,需另找 iPod 来源)。验证后去掉该 boot-arg 恢复正常缓存(每次 boot 都删会每次重建,
+  不损坏但浪费一次 rebuild)。
+
+## HANDOFF 2026-11-08 (52): 开机 1970 修复 = PMIF/SPMI 读 MT6687 RTC (getGMTTimeOfDay), BUILT x9-rev252cn-rtc; 未上机
+
+- 实现(commit 0b74af5, `SweetPlatformExpert.cpp`): X9 的 PE 覆写 `getGMTTimeOfDay`——经 PMIF/SPMI 只读
+  MT6687 PMIC RTC。协议逐寄存器对照 Android 树移植:
+  - PMIF(`spmi-mtk-pmif-core.c` mt6993_pmif_arb): MMIO **0x1c01a000**(DTS "pmif", path 0), SW 通道
+    soc_chan=2 → SWINF_2(ACC 0x0880/WDATA 0x0884/RDATA 0x0894/VLDCLR 0x08A4/STA 0x08A8); 传输 = 等 IDLE
+    (顺带排空陈旧 WFVLDCLR)→(写 WDATA)→ ACC = cmd<<30|sid<<24|bc<<16|addr → 等 WFVLDCLR → 读 RDATA →
+    写 1 到 VLDCLR, err 位 (v>>18)&1; 16 位 PMIC 地址用 EXT_REG_LONG(cmd=3); 每次传 2 字节(bc=1)。
+  - MT6687 = **USID 9、path 0**(mt6687.dtsi `reg=<0x9 SPMI_USID>`; spmi-dev-mask 0x55a8 bit9=0)。
+  - RTC(rtc-mt6685.c 的 MT6685 布局, base 0x580): PDN_CLR 0x516←0x30 上电 MCLK+32k → IOSleep 1ms →
+    读 BBPU 0x588 → 写回 |KEY 0x4300|RELOAD 0x20 → WRTGR 0x5C2←1 → 轮询 BBPU.CBUSY(bit6)清零 →
+    读 7 个 u16: TC_SEC 0x592 起每 +2(SEC MIN HOU DOM DOW MTH YEA), 掩码 3f/3f/1f/1f/7/f/7f,
+    年=raw+1968、月 1-based → 带进位防护(sec2>=sec 才接受, 最多 8 轮)→ PDN_SET 0x515←0x30 断电。
+  - 防御: 年 2024-2099/月日时分秒范围校验, 不合理或 PMIF 传输失败 → 记 `X9 RTC:` 行并返回 0(=今天
+    的 epoch 行为, mobiletimerd 恢复路径与 NTP 纠正不受影响)。锁 = IORecursiveLock(开机 1 次 +
+    IOPM 睡眠路径调用)。`setGMTTimeOfDay` 只打一次日志(clock.c:826 每次 settimeofday 都会调它,
+    写路径留给上机验证后的下一轮)。
+- 挂接链确认: bsd_init:688 `IOKitInitializeTime` → IORTC 资源(PE start 发布, 无 30s 等待)→
+  `clock_initialize_calendar` → PEGetUTCTimeOfDay → 我们的读。uptime 大于 RTC 值时内核会把日历钳到
+  uptime(clock.c 的 sys>secs 分支)——RTC 失败回 0 时即今天的告警路径, 无新行为。
+- **BUILT `x9/out/x9-rev252cn-rtc/`(kernel+boot 一起构建, 基线 cn 完整 29-token 参数集已验证嵌入)**:
+  boot.img sha256 **59ada17e79deb90a606903539f30f4ca97f6ca068e8352dccc117f2e3e783d8d**,
+  kernel.development.sweet sha256 **b3903226d26c918c7a75a2041e8892d14f91b93cde1577aeaad8356e74389848**。
+- ⚠️ 归因注意: 构建时工作区里有一个并发会话未提交的 `kern_exec.c` 改动(x9_mgwipe=1 时 PID1 清
+  MobileGestalt 缓存), 已被编进这个内核但**完全惰性**(镜像参数集没有 x9_mgwipe, 函数首行即 return 0)。
+  该改动落地后如需纯净镜像可重跑 `python3 -I x9/build/build.py --name <n> <14 个 Wi-Fi/GPU extra token>`。
+- 测试(用户执行): mailbox **不用重写**(allowlist identity f4b2aa27 在本内核与已装 268 bundle 配对),
+  直接 `fastboot boot` x9/out/x9-rev252cn-rtc/boot.img。看日志: 期望早期出现
+  `X9 RTC: 2026-11-08 HH:MM:SS UTC = N s` 且之后 launchd/daemon 时间戳开机即真实日期(1970 窗口消失);
+  失败形态三种各有行号: `map failed` / `PMIF transfer failed` / `implausible ...`——任一失败都原样报告,
+  并同时看 `X9 MGWIPE:`(并发会话的惰性门, 应无输出)。成功后下一轮: 写路径(setGMTTimeOfDay → BBPU
+  解锁+TC 写+WRTGR, 参考 mtk_rtc_set_time)使 NTP 校时写回 RTC。
+
+## HANDOFF 2026-11-08 (51): 开机 1970 根因查清(未改代码)= 内核从无 RTC 读取路径, 日历恒从 epoch 0 起步; 修复 = pwrap 读 MT6687 RTC
+
+- 用户报告: 每次开机时间跳回 1970。结论(代码证据, 全部可复查): XNU 日历初始化链
+  `clock_initialize_calendar()` (.local/dxb/xnu/osfmk/kern/clock.c:1032) → `PEGetUTCTimeOfDay()`
+  (iokit/Kernel/IOPlatformExpert.cpp:1363) → `IOPlatformExpert::getGMTTimeOfDay()` **基类默认 return 0**
+  (IOPlatformExpert.cpp:393)。X9 的 SweetPlatformExpert 没有覆写它; 271 个补丁谱系 + kernel/src overlay
+  中 grep `getGMTTimeOfDay|getUTCTimeOfDay|setUTCTimeOfDay` 0 处实现——开机时间自移植第一天起就是
+  1970-01-01 00:00:00 UTC + uptime。bsd 侧 `inittodr(0)` (kern_time.c:243) 只做负值校验, 从不设时。
+- SweetPlatformExpert.cpp:40 的 `publishResource("IORTC",this)`(dali0210)只是 readiness:
+  IOStartIOKit.cpp:70 `IOKitInitializeTime` 会等 IORTC 资源最长 30 s, 发布它只是消掉等待; 它不是 RTC 驱动。
+- 101.txt 实测时间线(观察, 非猜测): uptime 7 s launchd 打 `1970-01-01 08:00:39`(=0+uptime, +8 时区本身
+  是对的); ~99.4 s 被设为 2026-01-01 08:00:00(mobiletimerd 下限值); ~101.8 s → 2026-11-07 08:00:00
+  (mobiletimerd 从盘上恢复的上次已知时间; 猜测——未反汇编 mobiletimerd); ~103.8 s → 2026-11-08 08:00:01
+  (联网纠正)。即"跳回 1970"= 每次开机前 ~100 s 的窗口 + 无网时停在恢复值。
+- 硬件事实: 真 RTC 在 PMIC **MT6687** 里(mt6993.dts:23925 `&mt6687_rtc`; mt6687.dtsi:60
+  `base = <0x580>`, compatible "mediatek,mt6687-rtc"), Android 侧由 drivers/rtc/rtc-mt6397.c 经
+  pwrap 持续维护(树在 ~/HelioDarwin/oppo-source/modules/kernel/kernel_device_modules-6.12)。RTC 自走且
+  Android 一直校准, 所以**只需要"读"**: iOS 开机读一次即可拿到正确时间; 写回仅校漂移, 非必需。
+- 修复方向(下一步, 未实施): SweetPlatformExpert 覆写 getGMTTimeOfDay/setGMTTimeOfDay(或独立 SweetX9RTC),
+  pwrap 读 MT6687 RTC_TC_SEC/MIN/HOU/DOM/MTH/YEA(参考 rtc-mt6397.c 语义+写触发 WACS; 年份基
+  RTC_MIN_YEAR=1968)。前提待验证: LK/ABL 交棒 shim 后 pwrap/PMIC wrapper 的 MMIO 状态(Android 每次开机
+  读 RTC、LK 也读, 大概率已初始化)。备选: shim 阶段读好把 epoch 放 DTB chosen, 内核 PE 读 DTB——同样要
+  pwrap 读路径, 不省事。注意 mobiletimerd 的恢复路径与 IORTC 用户态探测如何交互, 实施时先只做读、观察
+  boot log 时间戳是否开机即正确。
+
+## HANDOFF 2026-11-08 (51): rev252cn 诊断包 (plugin 269) - 四项推进的结果与下一步
+
+- **#1 per-draw 诊断(已落地,待上机)**: GOV 行加 stack=%u kHz(MCU 频域跟随 stack 还是固定,一次上机见分晓);
+  前端 commit 时节流输出 `X9 COMMIT WORK: commit=%u draws=%u passes=%u pixels=%llu dispatches=%u blits=%u`
+  (encodedWork 本来就有,只是没打日志)——与内核 `X9 RENDER timing` 的 wait_us 按时间离线相关,直接量出
+  per-draw GPU 成本。
+- **#4 assetsd(键盘 123)根因已钉死**: 堆扫描抓到完整异常 `NSInternalInconsistencyException: 'assetsd
+  requires TCCPhotosService access'`,下层 `auth_error_string="Failed to issue Sandbox Extension for
+  kTCCServicePhotos"`——tccd 活着也响应了,死在**签发沙箱扩展**。我们的 stand-in 把 op 5(issue)/6(consume)
+  保持 ENOENT(rev252q 让它们无 token 成功过,syncdefaultsd 10 秒一崩所以回退)。已加 op-5 参数 dump
+  (x9_sandbox_ops=1 时打一次 64 B hex):下一次设备跑拿到结构后,就能写回真 token 让 tccd 的 Photos 授权走通。
+  这才是键盘 123 的修复路径,和 GPU 无关。
+- **#2 scope 真相(推翻了早前的判断)**: cache-uncovered 只有 ~30 KB——前端 scope 其实覆盖了 imports
+  (pre_skip 57-63 MB);真正维持的 13-18 MB 是**"范围已注册但被 pending command buffer 引用(refs>0)"**
+  的部分——scope 设计上对被引用范围保守维护(防 CPU 写),而前端 acquire 不区分 GPU 读/写。新遥测
+  `X9 RENDER cache-scope-hold: pre_avg/post_avg` 量化它。真正的修复 = acquire 区分读写用途(渲染目标标记
+  GPU-write-only,pre-cache 可安全跳过),是前端+内核的设计决策,不是 bug。
+- **#3 P1-A 未动,但有了计数**: PARK 行加 retire_map/retire_unmap/retire_other(101.txt 第四轮 cold 仍占
+  ~55%,map/unmap churn 是主因)。BO pool(Mesa 侧 + 插件)仍是正解,工作量另估。
+- BUILT: plugin 269(`X9 COMMIT WORK` 日志)+ 三支内核逐字节一致(35a7d364...)+ boot: cn 087fa246... /
+  cn-dc 919c78d1... / cn-dc-if c63a1384...。**mailbox 必须重写**(插件二进制变了):`X9_SERIAL=<serial>
+  python3 x9/mailbox/update.py x9/out/x9-rev252cn-dc-if`。
+- 下一轮上机建议:dc-if 镜像 + `x9_sandbox_ops=1`,一次拿齐:COMMIT WORK vs RENDER timing 相关性、GOV stack
+  频率、op-5 参数结构、scope-hold 体量、PARK retire 分类。全是诊断,无行为改动风险。
+
+## HANDOFF 2026-11-08 (50): rev252cn = GPU 帧管线两优化 BUILT (x9dc 脏区间 CIVAC + x9if 双帧在飞), plugin 268; 3 images; 未上机
+
+- 背景: 97.txt 审计(会话前半)结论——显示通路/GPU 频率都不是瓶颈;帧管线完全串行(1 job/present,join 行
+  shown==enqueued==completed 全程成立),卡顿 = 复杂场景下 GPU job 执行(wait_us)5→20+ ms 与用户态翻译同涨。
+  串行根因: 每帧 `vkQueueSubmit` 先 `pan_kmod_flush_bo_map_syncs` → `X9RenderCache` 选择器要拿 context+owner 锁,
+  而异步 worker 在整个 fence poll 期间持有它们。实施优化 2(脏区间)+优化 4(双帧在飞),commit 12af59f。
+- **x9dc**(boot-arg, 默认关): 插件纯 CPU→GPU clean(`PAN_KMOD_BO_SYNC_CPU_CACHE_FLUSH`)改发
+  `X9RenderClean|X9RenderDefer`(caps bit 128)记录到 per-context 列表(`X9PanVKMemory.c` cache_call,记录路径
+  不持 context/owner 锁——这是客户端不再串行的关键); 下一次 submit 的 publish 阶段精确维护这些范围并对覆盖的
+  资源跳过全量映射并集 fallback。submit 入队时在 c->lock 下把列表搬进按 submission id 奇偶的 pending 槽
+  (render_dirty_stage),所以 publish(S) 不可能吃到 S+1 的记录;溢出(>64 条)/句柄失效只损失优化、不损正确性。
+  只 defer 纯 clean;invalidate(GPU→CPU 读回)仍内联。遥测: 新 `X9 RENDER cache-dirty` 行(entries/bytes/
+  skipped_res)。预期 pre_cache 1-2 ms → <0.5 ms。
+- **x9if**(boot-arg, 需 x9_gpu_park=1 + x9_submit_async=1): render_submit 在 doorbell 处拆成
+  render_submit_publish/reap(状态进 RenderJobState,两份静态实例,worker 独占);worker 把 FIFO 里下一个
+  同 context+group 的 job 配成一对——先 publish job1,再经 parked-resume 路径 publish job2(不做 AS/CSG 编程;
+  worker 先 `render_parked={c,g,root1}` 触发检测),然后按 FIFO 顺序 reap1、reap2。每流第二 fence 槽在 storage
+  +0x8300(marker 区 0x8080-0x8288 之后、render_page_sync 的 16 KB 页内),publish 只 bzero 自己的槽,所以 job1
+  的 fence 值活到 reap;depth=1 地址恒 +0x8000,与今天逐字节一致。producer 改为 publish 时提交(原来 reap 时;
+  否则 job2 的 expected 会与 job1 撞包),reap 不再提交。user-io insert 检查在 pipeline 下放宽为 >=(在流内顺序
+  消费下与 == 等价)。c->lock+owner 锁跨整对持有: map/unmap/v1 选择器照旧"绝不在 job 中途",x9dc 记录路径是
+  唯一在 job 期间保持无锁的客户端调用。**设备验证点**: reap1 的 flush_gpu 与 post-cache IVAC 在 job2 运行中执行
+  (clean-only 写回与 IVAC 丢弃不会盖掉 GPU 写,但 FLUSH_CACHES 中途语义未在 Mali 上验证过);新遥测 ASYNC window
+  加 inflight_max(期望到 2)。同步路径/depth-1 行为逐字节不变(fence 槽 0 = 今天的 +0x8000)。
+- ABI(两份头同步已 diff 验证): `X9RenderDefer=0x100u`(修饰位,旧 immediate 路径 `operation&~3u` 会拒绝它)
+  + `X9RenderDeferredCache=128u`。plugin 268(`X9PanVKMemory.c`): caps 有位且 `X9_DEFER_CACHE=1` 未设时 defer;
+  `X9 PANVK SUBMIT` 行加 `cache=deferred clean (x9dc)`;`X9 PANVK CACHE RANGE` 行尾改注 deferred。allowlist 头
+  重生成为 268 并随 12af59f 提交。
+- **BUILT 3 images(全参数集,cm4 的完整 --boot-arg 组;最终轮,内核三支逐字节一致 c912d585...)**:
+  x9-rev252cn boot bcc37a7b66f064b8...(基线,两特性关,验无回归)/ x9-rev252cn-dc bf57d99c7ef2ce578...(x9dc=1)/
+  x9-rev252cn-dc-if cdb2f5665500ae7c...(x9dc=1 x9if=1)。**plugin 构建非确定性**(Rust,每跑一次 plugins 二进制
+  哈希就变),而 allowlist 编译进内核——最终统一:三支内核都按同一份 allowlist(identity f4b2aa27,commit 在树)
+  重编,所以**只需一次 staging**:`X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/x9-rev252cn-dc-if`
+  (设备邮箱现在还是第一轮的 d735c1b3 载荷,与新镜像不配对,必须重写),然后三支镜像随便 boot。往后再出镜像:
+  只跑 `plugins` 一次 + 三次 `kernel`/`boot`(带 --panvk skip),别每支都 `all`。101.txt 第一次卡 logo 是没写
+  mailbox;第二次写好了但内核换轮了——装机 `install result errno=0`、`active plugin=X9GeneralMetal268`、
+  discovery armed 那次都是配对的。
+- **101.txt 修复(commit dcec9a1)**: 第二次上机首个 GPU job(submission 1)在 `user-io-prepare` uncertain
+  ——我把 `g->producer` 提交放在了 user-io 校验之前,而该校验比较的是"user-io producer 字 == g->producer
+  (本 packet 替换前的旧值)",0≠32 必失配。修正:producer 提交挪到 `stream-publish`(与 user-io 写入同一步),
+  reap 不提交;parked-resume depth-1 流程已人工核对自洽(va 与 producer 都等于上一个 job 的 expected)。这影响
+  全部三支镜像(split 无条件),所以三支都重建了,哈希以上面为准。
+- **本机 .local/dxb/xnu 树的机器本地改动**(不在 git,重建环境需重做): (1) EXTERNAL_HEADERS/corecrypto/ccmd5.h
+  从 .local/x9/work/legacy-import/xnu_x9/refer/corecrypto-2023/ 恢复——cm6 会话曾复制过它,后来的树刷新把
+  untracked 文件洗掉了,导致 SweetX9NetworkStack 从头编译报 corecrypto/ccmd5.h not found(cm2-cm4 的日志能编
+  是因为当时文件还在;cm5 之后全靠 prebuilt 对象掩盖); (2) libkern/crypto/sweet_aes.c 加了
+  sweet_aes_ecb_decrypt(ccmode_ecb,BearSSL 无 ECB 入口,用 CBC-dec 零 IV 逐块实现)+ ccaes_ecb_decrypt_mode()
+  访问器——cm6 最终代码改用了 CBC-as-ECB 内联(handoff 49),该 ECB 目前无引用,留着无害。
+- **101.txt 第四轮(桌面起来了,x9dc/x9if 全程 armed,0 uncertain/0 DeviceLost),但流畅度没变,数据说明**:
+  (1) cache-dirty 每帧只覆盖 ~200-285 KB,而 fallback 真实体量 pre_bytes_avg=77.6 MB(重窗口)——deferred
+  clean 只盖插件自己的 BO 同步,CIVAC 大头是 IOSurface imports(客户端进程写,插件不知道脏区间)。x9dc 要真
+  省就得让前端 scope 覆盖 IOSurface(老审计里 cache-uncovered ~41 MB 就是这缺口); (2) inflight_max 61 个窗口
+  里只出现过一次 2——客户端(Metal runtime/CA)仍是一帧一等,FIFO 里没第二个 job 可配对;内核深度没问题
+  (证明能到 2)。x9if 要生效必须改 metal2vulkan runtime 的逐批等待(.local 里的 963f checkout);
+  (3) dirty 记录列表爆发期超 64 条(cap 已提到 256); (4) 键盘 123 按不开 = assetsd 崩溃循环(本日志 x4,
+  sig 6,与渲染无关,handoff 47 就有;cm5 的 STR 堆扫描已抓到现场,单独查)。结论:rev252cn 的两项工程上是
+  对的且已稳定落地,但按 97.txt 审计的瓶颈排序,真正的大头还是 #5 per-draw GPU 成本(MCU 时钟核实+per-draw
+  计数,一直没做)和客户端侧流水线,这两个才是 fps 的主乘数。
+- **101.txt 第三轮: install error file=5 errno=17 (EEXIST)** — rootfs 上已有第一轮装的 268 bundle(哈希旧),
+  新载荷 identity 校验通过但装不进去:x9_update_install 从不替换已存在文件。已修(x9_update_install.inc):
+  先对已发布文件做哈希比对——一致则跳过(幂等重装),不一致则 unlink 重发布;PID1 时序与"装后全面验证"不变。
+  三支内核重编为逐字节一致 d6f4d031...,boot: cn 222f417a... / cn-dc 54f89bbe... / cn-dc-if f0255876...。
+  **mailbox 不用重写**(identity f4b2aa27 已在设备、与内核配对,第三次日志的 install error 前置校验已过)——
+  直接 boot 新的 x9/out/x9-rev252cn-dc-if/boot.img,boot 自身会替换旧 bundle。cm6 的旧 boot.img 仍作废。
+- Test 顺序(由用户执行): (1) 基线 cn 上机,跑 97.txt 同款操作,确认 X9 RENDER/METRICS 量级不变、无 DeviceLost
+  (plugin 268 + 内联 flush ≈ 267 行为); (2) cn-dc: 看 cache-dirty 行 entries/bytes ≈ 原 pre_bytes、
+  `X9 RENDER timing` 的 pre_cache_us 降幅、像素正确性(控制中心/图标网格/滚屏); (3) cn-dc-if: ASYNC window
+  inflight_max≥2、重场景 presented_fps 与 latency 改善、`X9 RENDER GPU ... uncertain`/WC CHECK/MARK 行有无;
+  任何 uncertain 都先退回单令牌 A/B。观测重点: 控制中心与 app 过场帧率(97.txt 里 12-26 fps 的窗口)。
+- 下一步(未做): x9dc 的 GPU 侧验证若通过,再评估把 post-cache(渲染目标 IVAC)纳入脏区间(当前渲染目标全帧
+  写、收益小); x9if 稳定后 P1-A BO pool(消灭每帧 map/unmap→retire,97.txt 里 cold≈40-70% job)。
+
+## HANDOFF 2026-11-07 (49): rev252cm6 = **WPA2 stage 2 BUILT**: in-driver 4-way handshake (PRF/MIC/GTK unwrap), INSTALL_KEY_V3, protected TX/RX; sources + Android 1X capture in hand
+
+- Evidence base: gen4m source `~/HelioDarwin/oppo-source/modules/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m`
+  (wlan_oid.c wlanSetAddKeyImpl, nic_uni_cmd_event.c nicUniCmdInstallKey, privacy.c secPrivacySeekForBcEntry,
+  nic_txd_v3.c protection, nic.c BSSINFO SEC) and **android-join-2 is a RUC-Mobile 802.1X capture** (logcat: Security
+  type 3, Supplicant COMPLETED, IP 10.47.253.191): M1 0x008a -> M2 0x010a -> M3 0x13ca -> M4 0x030a, GTK M1 0x1382 ->
+  GTK M2 0x0302, all MIC version 2 (HMAC-SHA1-128); add_key pairwise cipher fac04 keylen 16 -> wlanIdx = the AP's
+  staIdx; group key -> "Add key to wlanIdx 0" + ucBMCWlanIndexS=0 (BC WTBL entry); qmCheckRxEAPOLM3 holds M4 until
+  the PTK is in.
+- Formats locked from gen4m + the kmsg: UNI_CMD_STAREC_INSTALL_KEY3 = STAREC (0x03) header {bss, widxL} + TLV tag
+  **0x27 len 68** {AddRemove, TxKey, KeyType(1 pairwise/0 group), IsAuth, peer[6], BssIdx, AlgorithmId=4
+  (CIPHER_SUITE_CCMP), KeyId, KeyLen(16 = TK only, not the PTK), WlanIndex, MgmtProtection, KeyMaterial[32],
+  KeyRsc[16]}; TXD DW3 b1 = PROTECTED_FRAME (EAPOL never protected), b4 = BMC + b0 = NO_ACK for multicast, DW1 widx
+  = AP STAREC (ours 1) unicast / 0 (BSSINFO u2BcMcWlanidx, already 0 in our builder) for multicast; BSSINFO SEC
+  AuthMode 6 = WPA2 / 7 = WPA2-PSK, EncStatus 6 = CCMP (Android kmsg 55.25 pre-join + 55.31 connected), 0/1 open;
+  GTK KDE 00-0F-AC-01 info byte bits0-1 KeyID bit2 Tx (gen4m wpa_supp/src/rsn_supp/wpa.c gd.keyidx/gd.tx).
+- rev252cm6 implementation (all in X9WifiNet.inc): crypto = corecrypto HMAC-SHA1 (PRF-512 "Pairwise key expansion",
+  MIC v2); **this corecrypto has no MD5 and links CBC only** -> MIC version 1 logged unsupported, AES-ECB primitive =
+  one CBC block with a zero IV (P = D(C) xor IV), used by the RFC 3394 GTK unwrap; corecrypto headers carry no C++
+  guards -> wrapped in extern "C". M1 -> store + SNonce(read_random) + PTK(KCK/KEK/TK) + M2; M3 -> MIC verify ->
+  INSTALL_KEY pairwise (AP widx, TK) -> M4 -> GTK KDE unwrap (KEK) -> INSTALL_KEY group (BC widx 0, keyid, RSC);
+  GTK M1 rekey -> install + GTK M2. kCipherKey: 32 B = PMK -> arm the handshake (whKick; a stored M1 runs it on the
+  radio thread); 64 B = full PTK -> ext mode: install only, M1/M3 forwarded to userspace (it answers). TXD protection
+  per gen4m; unkeyed drops are per-direction (unicast waits PTK, multicast waits GTK); protected RX no longer dropped
+  (HEADER_TRAN = FW-decrypted Ethernet; raw path strips CCMP hdr 8 + MIC 8); EAPOL-Key frames intercepted (not for
+  the stack), EAP (type 0) still delivered to userspace; leave/join clear the key state; BSSINFO SEC set from the
+  AP's RSN AKM (parsed before the pre-join BSSINFO now).
+- BUILT kernel + boot: x9/out/x9-rev252cm6/boot.img sha256 45278d7c4ef61b277b190cc6dffecc0faca2183d8effffdfe9b72c5bc2cad81e
+  (kernel 40f3f93964ef5b3137108e011a591abb83412df53e584aaa6e263b70c1d3d28b), FULL arg set embedded (cm4's, verified).
+- Test: (1) PSK network first - the PMK comes with the associate request, no EAP needed: expect "X9 WIFI KEY: M1 ->
+  PTK", "M3 ok", "install PTK", "M4", "GTK ... installed", then traffic. (2) RUC-Mobile: iOS runs EAP (watch "EAPOL:
+  RX type 0 -> userspace" and any new X9 WIFI REQ types from wifid/eapolclient - the EAPOL delivery ioctl may still
+  need mapping, that is the open unknown); after EAP success the kCipherKey PMK arrives -> "PMK arrived after M1,
+  starting the 4-way handshake". (3) Report an "install ... NO CMD_RESULT" if the firmware rejects tag 0x27.
+
+## HANDOFF 2026-11-07 (48): 100.txt = my rev252cm5 boot **WITHOUT the Wi-Fi boot args** (toggle grey, en0 never created); fixed image x9/out/x9-rev252cm5
+
+- 实测 100.txt (my first cm5 packaging): zero `X9 WIFI` lines at all - configd opened IONetworkStack at 7.857 s but
+  `x9_wifi_maybe_start()` (X9WifiNet.inc) returned because it requires `x9_wifi_fake=1` OR `x9_wifi_real=1`, and the
+  boot.json base args carry neither. No en0 -> iOS shows a greyed Wi-Fi switch. Everything else (GPU, touch, UFS,
+  SpringBoard) booted normally.
+- Cause: `build.py boot` uses x9/build/boot.json as the base, and the Wi-Fi experiment args were always passed as
+  `--boot-arg` extras per boot; I packaged with no extras. My first image (x9/out/x9-79d6e0d-dirty/boot.img, sha256
+  e88f7adc9c843ac16bd2e8e647d71c3d4ad89de7828626ea951ee0d4ddbd17af) also OVERWROTE the cm4 image that lived at that
+  path (same out-dir naming rule) - do not boot it.
+- Fix: the full cm4 command line is recoverable from x9/out/x9-rev252cm4/shim/embedded-payload.bin (`strings | grep
+  '^x9_metal_render'`; the x9_wifi_xo0..6 calibration words are deliberately not in git). Rebuilt as
+  **x9/out/x9-rev252cm5/boot.img, sha256 aa2629548123b72a7a1eb3de6edc690eec3b1aad88db41e141222d908585dbc5** =
+  cm5 kernel (x9/out/x9-79d6e0d-dirty/kernel.development.sweet, sha256
+  dba60756c92182226c88d0d2e395012a257c2238d3e64b62b91fe891ead6f902) + the full cm4 arg set
+  (x9_wifi_power=6 x9_wifi_real=1 + GPU clocks/park/submit_async + 7 XO words + x9_cache_scope=1; the exact tokens are
+  in the embedded payload of both cm4 and cm5, verify with strings before booting).
+- Rule going forward: a Wi-Fi test boot must pass the full --boot-arg set (recover per above) - boot.json alone boots
+  a no-radio system. Verified cm5's embedded payload carries x9_wifi_real=1 and the XO words.
+
+## HANDOFF 2026-11-07 (47): 99.txt = rev252cm4: link up, DHCP + DNS + hijacked HTTP all work, **but the captive probe never runs**; keyboard stuck on letters = assetsd crash loop suspected; rev252cm5 (probe/exception instrumentation) BUILT
+
+- Log /Users/tosasitill/99.txt (19540 lines, 284 s). Timeline: joined RUC-Web 66.1 s, DHCP -> 10.46.12.100;
+  **AP deauthed us at 121.9 s (reason 3, genuine: A1=us A2=a4:be:2b:b1:df:b1)**; iOS rejoined 146.6 s, user/app
+  disconnect 162.4 s, rejoined 169.0 s, no kick until log end. So the link flaps early but came back on its own.
+- **The captive-portal sheet never appeared and the probe never ran**: during 66-121 s and 169-224 s (all of it inside
+  the packet-log budget) there is ZERO DNS or TCP traffic, only 1 Hz gateway ARP + DHCP + mDNS. The only web traffic of
+  the whole session is one burst at 232-233 s right after the user touched the screen: 4 DNS answers from 10.3.6.6,
+  TCP 124.238.121.40:80 -> SYN ACK, 297 B, FIN (classic hijacked-HTTP 302), then TLS to 10.21.8.35:443 (4x1434+738 B,
+  FIN from the portal server). That shape is a manual/WebKit page load (Safari), not the CNS probe (which is
+  HTTP-only, no redirect follow). rev252cm4's network grant works: no "WebKit.Ne privilege 10001 denied" line, and the
+  TLS load actually moved data.
+- Sheet-absence proof: the only WebKit process all run is com.apple.WebKit.GPU pid=349 (spawned 90.1 s right after
+  MobileSafari AKS lines at 89.3 s). A SpringBoard-hosted portal sheet would spawn its own WebKit children
+  (new pid) - none. (Observation, mechanism of the CNS trigger still a guess: configd's CaptiveNetworkSupport plugin
+  exists in the system image, but we cannot see configd logs; the probe may be gated on SC state we don't provide.)
+- **Key instrumentation bug found**: x9_pkt_log had ONE 160-line budget per direction; the 1 Hz gateway ARP ate the TX
+  budget by 224 s, hiding every later TX (that is why 99.txt shows DNS answers but no DNS queries). RX cap hit during
+  the 233 s burst, so anything after 233.5 s is invisible too.
+- **Keyboard (cannot switch to the number plane)**: assetsd crashed 4x (17.3/17.4/45.9/105.7 s, sig 6) and
+  syncdefaultsd 16x, both uncaught-exception aborts (host symbolication of 99.txt vs dsc-20H392: thrower frames are
+  below dispatch_async_redirect_invoke, only the abort path is in the 10-frame dump). assetsd hosts the keyboard
+  layout/input-mode service, so its death while the keyboard is up is the prime suspect for the dead "123" key
+  (letters plane works, a plane LOAD would need the service). WirelessRadioMan 28x is QMI XPC misuse
+  (qmi::sFixupServerConnection) - no modem on this port, background noise.
+- rev252cm5 (this build, kernel+boot only): (1) x9_pkt_log: ARP gets its own 40-line/direction budget, IPv4 budget
+  400/direction; UDP:53 questions log the QNAME (`X9 WIFI DNS TX: captive.apple.com ...`); TCP:80 payloads that look
+  like HTTP log the first 160 B (`X9 WIFI HTTP RX: HTTP/1.1 302|Location: ...` style, \n as |). (2) sweetscan default
+  list is now "backboardd,SpringBoard,assetsd,syncdefaultsd,com.apple.Safari" and each scanned name is heap-scanned on
+  its FIRST crash only (crash loops no longer flood USB) - the assetsd scan should print the NSException reason.
+- BUILT kernel + boot.img locally: x9/out/x9-79d6e0d-dirty/, boot.img sha256
+  e88f7adc9c843ac16bd2e8e647d71c3d4ad89de7828626ea951ee0d4ddbd17af (kernel
+  dba60756c92182226c88d0d2e395012a257c2238d3e64b62b91fe891ead6f902). Committed the plugin-267
+  x9_render_external_manifest.h the previous session left uncommitted.
+- Test: fastboot boot the image, join RUC-Web, stay on it 3 min, save the console log. Read in order: (a) is there a
+  `X9 WIFI DNS TX: captive.apple.com` within ~30 s of the join? YES -> the probe ran and SpringBoard-side presentation
+  is the problem; NO -> configd/CNS never probes (SC-state suspect). (b) `X9 WIFI HTTP RX` shows the hijack 302 target
+  (http vs https, portal IP). (c) STR scan of assetsd's first crash gives the keyboard exception. Then drive the fix;
+  if the probe is confirmed missing, next lever is giving configd a proper primary-service/SC state rather than more
+  packet logs.
+- WPA2 stage 2 (4-way handshake, key install) still not implemented (handoff 45).
+
 ## HANDOFF 2026-11-07 (46): 97.txt = rev252cm2: **DHCP OK** (10.46.12.100) on RUC-Web, then deauth + FW hang; rev252cm3 BUILT
 
 - Log copy .local/x9/logs/x9-97.txt. Join as before; `first packet on RX5`, rx 16 in 10 s (bad 0), rings 0/16/0, en0

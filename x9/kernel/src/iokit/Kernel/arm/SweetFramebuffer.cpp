@@ -601,6 +601,17 @@ AppleCLCD::start(IOService *provider)
 		fLogicalW = SWEET_FB_LOGICAL_W;
 		fLogicalH = SWEET_FB_LOGICAL_H;
 	}
+	/* X9: present a real iPhone size (414x896 pt @3x) centred on the 1256x2760
+	 * panel; must equal the ADT disp0 canvas (x9/tools/mkadt.py CANVAS_*) and
+	 * SweetHID's mapping. 107.txt: at 1256 px (418.67 pt) the keyboard frame was
+	 * 414 pt but its planes 418.67 pt, so switching to the number plane looked
+	 * like a resize and UIKit reloaded the keyboard back to letters. Offsets
+	 * are negative here (logical smaller than the panel): the border strips are
+	 * blanked every frame in present(). */
+	if (sweet_board_x9()) {
+		fLogicalW = 1242;   /* 414 pt: the keyboard layout width (the 123 fix) */
+		fLogicalH = 2760;   /* full panel height (414x920 pt); no top/bottom bars */
+	}
 	/* x rounded down to 4 pixels: the panel window must start 16-byte aligned (MDP fetch) */
 	fOffX = ((int32_t)(fLogicalW - fWidth) / 2) & ~3;
 	fOffY = (int32_t)(fLogicalH - fHeight) / 2;
@@ -2018,6 +2029,7 @@ AppleCLCD::directPresent(const uint8_t *rec)
 	if (x9_display::validate(surface, true, fWidth, fHeight, fLogicalW, fLogicalH,
 	    fOffX, fOffY, &scanout, NULL)) {
 		const uintptr_t va = s->kernelAddress();
+		sweet_surface_cpu_acquire(s);   /* x9lc: GPU output becomes CPU-visible */
 		if (va != 0) {
 			x9_display::mapped_addresses(surface, va, &scanout);
 			/*
@@ -2276,6 +2288,22 @@ AppleCLCD::present(const uint8_t *rec)
 		if(x9_staged)for(unsigned y=0;y<fHeight;y++)bzero(dst+(uint64_t)y*fRowBytes,fWidth*4);
 		else bzero(dst, (size_t)fRowBytes * fHeight);
 	}
+	/* Logical display smaller than the panel: nothing composes outside it, so
+	 * keep the frame around it black (boot logo / console / stale staging). */
+	if (sweet_board_x9() && dst != NULL && (fOffX < 0 || fOffY < 0)) {
+		const uint32_t left = fOffX < 0 ? (uint32_t)-fOffX : 0, top = fOffY < 0 ? (uint32_t)-fOffY : 0;
+		const uint32_t right = left + fLogicalW < fWidth ? left + fLogicalW : fWidth;
+		const uint32_t bottom = top + fLogicalH < fHeight ? top + fLogicalH : fHeight;
+		for (uint32_t y = 0; y < fHeight; y++) {
+			uint8_t *row = dst + (uint64_t)y * fRowBytes;
+			if (y < top || y >= bottom) {
+				bzero(row, (size_t)fWidth * 4);
+				continue;
+			}
+			if (left) bzero(row, (size_t)left * 4);
+			if (right < fWidth) bzero(row + (uint64_t)right * 4, (size_t)(fWidth - right) * 4);
+		}
+	}
 	if (sweet_board_x9()) {
 		static unsigned records;
 		if (x9_probe) {
@@ -2315,6 +2343,7 @@ AppleCLCD::present(const uint8_t *rec)
 			continue;
 		}
 		uintptr_t src = s->kernelAddress();
+		sweet_surface_cpu_acquire(s);   /* x9lc: GPU output becomes CPU-visible */
 		uint32_t bpe = s->bytesPerElement ? s->bytesPerElement : 4;
 		int x9_format = X9_FMT_BGRA;
 		bool x9_blend = false;

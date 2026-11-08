@@ -92,15 +92,20 @@ X9RenderPageTable *x9_render_vm_create() {
  auto *vm=(X9RenderPageTable *)IOMallocZero(sizeof(X9RenderPageTable));
  if(vm&&allocate_table(vm)<0){IOFree(vm,sizeof(*vm));return nullptr;}return vm;
 }
-static IOReturn map(X9RenderPageTable *vm,const X9RenderVMEntry *m,bool internal) {
+/* live: the address space stays attached (parked group, idle, AS1 bound; the
+ * engine invalidates the GPU TLB for the range afterwards). Intermediate tables
+ * are never pruned while attached: the GPU walk cache may still name them;
+ * empty ones are reclaimed by the next detached map/unmap. */
+static void prune_detached(X9RenderPageTable *vm,bool live){if(!live)prune(vm,0,0);}
+static IOReturn map(X9RenderPageTable *vm,const X9RenderVMEntry *m,bool internal,bool live=false) {
  if(!vm||!valid(m,internal))return kIOReturnBadArgument;
- if(vm->attached)return kIOReturnBusy;
+ if(vm->attached!=live)return kIOReturnBusy;
  /* Preflight all destinations and allocate intermediate tables before writing
   * leaves. Failure prunes empty intermediate tables before returning. */
  for(uint64_t off=0;off<m->bytes;off+=4096) {
-  uint64_t pa;if(!physical(m,off,&pa)){prune(vm,0,0);return kIOReturnBadArgument;}
-  auto *pte=leaf(vm,m->address+off,true);if(!pte){prune(vm,0,0);return kIOReturnNoMemory;}
-  if(*pte){prune(vm,0,0);return kIOReturnExclusiveAccess;}
+  uint64_t pa;if(!physical(m,off,&pa)){prune_detached(vm,live);return kIOReturnBadArgument;}
+  auto *pte=leaf(vm,m->address+off,true);if(!pte){prune_detached(vm,live);return kIOReturnNoMemory;}
+  if(*pte){prune_detached(vm,live);return kIOReturnExclusiveAccess;}
  }
  uint64_t off=0;
  for(;off<m->bytes;off+=4096) {
@@ -108,21 +113,29 @@ static IOReturn map(X9RenderPageTable *vm,const X9RenderVMEntry *m,bool internal
   *leaf(vm,m->address+off,false)=pa|attrs(m->flags);
  }
  if(off==m->bytes)return kIOReturnSuccess;
- while(off){off-=4096;*leaf(vm,m->address+off,false)=0;}prune(vm,0,0);return kIOReturnBadArgument;
+ while(off){off-=4096;*leaf(vm,m->address+off,false)=0;}prune_detached(vm,live);return kIOReturnBadArgument;
 }
-static IOReturn unmap(X9RenderPageTable *vm,const X9RenderVMEntry *m,bool internal) {
+static IOReturn unmap(X9RenderPageTable *vm,const X9RenderVMEntry *m,bool internal,bool live=false) {
  if(!vm||!valid(m,internal))return kIOReturnBadArgument;
- if(vm->attached)return kIOReturnBusy;
+ if(vm->attached!=live)return kIOReturnBusy;
  for(uint64_t off=0;off<m->bytes;off+=4096) {
   uint64_t pa;auto *pte=leaf(vm,m->address+off,false);
   if(!physical(m,off,&pa)||!pte||*pte!=(pa|attrs(m->flags)))return kIOReturnBadArgument;
  }
  for(uint64_t off=0;off<m->bytes;off+=4096)*leaf(vm,m->address+off,false)=0;
- prune(vm,0,0);
+ prune_detached(vm,live);
  return kIOReturnSuccess;
 }
-uint64_t x9_render_vm_publish(X9RenderPageTable *vm) {
- if(!vm||vm->attached)return 0;
+static uint64_t publish(X9RenderPageTable *vm,bool live);
+uint64_t x9_render_vm_publish(X9RenderPageTable *vm){return publish(vm,false);}
+/* Live (attached) variants for the parked fast path: same checks and leaf
+ * writes, no pruning; publish_live cleans the dirty tables and returns the
+ * unchanged root without re-marking attachment. */
+IOReturn x9_render_vm_map_live(X9RenderPageTable *vm,const X9RenderVMEntry *entry){return map(vm,entry,false,true);}
+IOReturn x9_render_vm_unmap_live(X9RenderPageTable *vm,const X9RenderVMEntry *entry){return unmap(vm,entry,false,true);}
+uint64_t x9_render_vm_publish_live(X9RenderPageTable *vm){return publish(vm,true);}
+static uint64_t publish(X9RenderPageTable *vm,bool live) {
+ if(!vm||vm->attached!=live)return 0;
  /* No cache-attribute/coherency assumption: skip only CPU-private page
   * tables which have not changed since their last completed clean. Parent
   * links, leaf writes, removals and rollbacks all retain dirty tracking.

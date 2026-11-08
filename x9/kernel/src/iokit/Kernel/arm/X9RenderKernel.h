@@ -23,6 +23,11 @@ struct X9RenderResource {
   * allocation that has NEVER been exposed may skip repeated CPU maintenance.
   * Private command/fence storage has its separate explicit sync path. */
  bool cpu_exposed,initial_cache_clean,imported;
+ /* rev252cn (x9dc): this resource's CPU-written ranges were already maintained
+  * from the submission's deferred dirty list at publish time, so the fallback
+  * walk skips it. Reset on every submit, set only after the deferred clean
+  * for the CURRENT submission succeeded. */
+ bool dirty_maintained;
  /* Rebuilt under the context + GPU owner locks from EVERY live GPU mapping,
   * not from a draw's resource list or dirty notifications. Bounding intervals
   * deliberately include holes between mappings and all indirect accesses.
@@ -37,6 +42,11 @@ struct X9RenderResource {
  bool write_combined;
  uint64_t created;   /* mach_absolute_time() at allocation/import */
  uint64_t host_address;   /* ImportHost: the caller's address (frontend cache scope key), else 0 */
+ /* x9lc: the IOSurface whose pixel mapping this import is exactly inside, else 0.
+  * Such imports follow the IOSurface lock protocol: cleaned only when the
+  * surface seed moved (a CPU write unlock) and invalidated lazily at the next
+  * CPU acquire instead of after every job (SweetSurface.h). */
+ uint32_t surface_id;
 };
 struct X9RenderVMEntry {
  X9RenderResource *resource;
@@ -46,6 +56,9 @@ struct X9RenderVMEntry {
 struct X9RenderPageTable;
 struct X9RenderContext {
  IOLock *lock;
+ /* x9sl: guards next_submission and the mappings registry against the
+  * lock-free SubmitAsync path. Leaf lock; order c->lock -> submit_lock. */
+ IOLock *submit_lock;
  task_t owner;
  X9RenderResource resources[X9_RENDER_KERNEL_MAPPINGS];
  X9RenderVMEntry mappings[X9_RENDER_KERNEL_MAPPINGS];
@@ -85,6 +98,11 @@ struct X9RenderEngine {
  IOReturn (*submit)(X9RenderContext *,const X9RenderSubmission *,X9RenderCompletion *);
  IOReturn (*wait)(X9RenderContext *,const X9RenderWaitRequest *,X9RenderCompletion *);
  IOReturn (*cache)(X9RenderContext *,X9RenderResource *,const X9RenderCacheRequest *);
+ /* Deferred clean record (X9RenderClean|X9RenderDefer, boot-arg x9dc). Called
+  * WITHOUT c->lock, like fence_wait: the submitting thread must never block on
+  * the worker's locks. Only appends to the engine's per-context list; the range
+  * is validated and maintained at the next submit's publish phase. */
+ IOReturn (*cache_defer)(X9RenderContext *,const X9RenderCacheRequest *);
  IOReturn (*timestamp)(uint64_t *);
  bool (*quiesce)(X9RenderContext *);
  /* Asynchronous submission (X9RenderAsyncSubmit). submit_async and drain are
@@ -94,6 +112,16 @@ struct X9RenderEngine {
  IOReturn (*submit_async)(X9RenderContext *,const X9RenderSubmission *,X9RenderCompletion *);
  IOReturn (*fence_wait)(X9RenderContext *,const X9RenderWaitRequest *,X9RenderCompletion *);
  void (*drain)(X9RenderContext *);
+ /* x9sl=1: SubmitAsync without c->lock (the worker holds c->lock for a whole
+  * publish->reap, so a locked enqueue waited out every running job of its
+  * own context: 104.txt inflight_max=0, x9if never paired). async_lockfree
+  * says whether the path applies (async on, x9dc off: dirty staging needs
+  * c->lock). submit_async_try enqueues or answers kIOReturnNoSpace without
+  * sleeping; async_wait_room sleeps until the FIFO has room. Both are called
+  * WITHOUT c->lock (the service holds only submit_lock around try). */
+ bool (*async_lockfree)(void);
+ IOReturn (*submit_async_try)(X9RenderContext *,const X9RenderSubmission *);
+ void (*async_wait_room)(X9RenderContext *);
 };
 extern "C" void sweet_x9_render_install(const X9RenderEngine *);
 extern "C" void sweet_x9_render_publish(void);

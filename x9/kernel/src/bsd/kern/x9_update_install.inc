@@ -18,14 +18,53 @@ static int x9_update_directory(proc_t p,user_addr_t scratch,user_addr_t end,cons
  vnode_t vp=NULLVP;e=vnode_lookup(path,VNODE_LOOKUP_NOFOLLOW,&vp,vfs_context_kernel());
  if(e)return e;bool valid=vnode_isdir(vp);vnode_put(vp);return valid?0:ENOTDIR;
 }
+/* Hash an already-published file and compare it with the manifest entry:
+ * 0 = identical (keep it), EINVAL = differs or unreadable (replace it).
+ * Reads go through the syscall path with the same scratch layout as the
+ * writer below (path at scratch, 4 KiB I/O buffer at scratch+n). */
+static int x9_update_file_hash(proc_t p,user_addr_t scratch,user_size_t n,
+ user_addr_t end,const struct X9ExternalFile *f) {
+ (void)end;
+ SHA256_CTX h;uint8_t b[4096],sum[32];SHA256_Init(&h);
+ int32_t rv=0;
+ struct open_args o={.path=scratch,.flags=O_RDONLY|O_NOFOLLOW,.mode=0};
+ int e=open(p,&o,&rv);if(e)return EINVAL;
+ int fd=rv;
+ for(uint64_t off=0;off<f->bytes;) {
+  size_t count=f->bytes-off<sizeof(b)?(size_t)(f->bytes-off):sizeof(b);
+  struct read_args rd={.fd=fd,.cbuf=scratch+n,.nbyte=count};
+  user_ssize_t got=0;e=read(p,&rd,&got);
+  if(!e&&got!=(user_ssize_t)count)e=EINVAL;   /* short file: replace */
+  if(!e)e=copyin(scratch+n,b,count);
+  if(e){struct close_args c={.fd=fd};sys_close(p,&c,&rv);return EINVAL;}
+  SHA256_Update(&h,b,count);off+=count;
+ }
+ struct close_args c={.fd=fd};int ce=sys_close(p,&c,&rv);(void)ce;
+ SHA256_Final(sum,&h);return memcmp(sum,f->sha256,32)?EINVAL:0;
+}
 static int x9_update_file(proc_t p,user_addr_t scratch,user_addr_t end,const struct X9ExternalFile *f) {
+ vnode_t v=NULLVP;
+ char tmp[512];
+ int32_t rv=0;
+ int e,len;
+ size_t n,destlen;
  if(!x9_render_external_check(f))return 0;
- vnode_t v=NULLVP;int e=vnode_lookup(f->path,VNODE_LOOKUP_NOFOLLOW,&v,vfs_context_kernel());
- if(!e){vnode_put(v);return EEXIST;}if(e!=ENOENT)return e;
- char tmp[512];int len=snprintf(tmp,sizeof(tmp),"%s.x9-update-tmp",f->path);
- if(len<0||(size_t)len>=sizeof(tmp))return E2BIG;
- size_t n=(size_t)len+1;if(scratch>end||n+4096>end-scratch)return E2BIG;
- e=copyout(tmp,scratch,n);if(e)return e;int32_t rv=0;
+ len=snprintf(tmp,sizeof(tmp),"%s.x9-update-tmp",f->path);
+ if(len<0||(size_t)len>=(size_t)sizeof(tmp))return E2BIG;
+ n=(size_t)len+1;if(scratch>end||n+4096>end-scratch)return E2BIG;
+ e=copyout(f->path,scratch,n);if(e)return e;
+ /* rev252cn: a published file whose bytes already match the manifest is
+  * kept (idempotent reinstall); one that differs is replaced. This runs at
+  * PID1, before any plugin process exists, and the caller re-verifies every
+  * published file before discovery, so replacement cannot disturb anyone. */
+ e=vnode_lookup(f->path,VNODE_LOOKUP_NOFOLLOW,&v,vfs_context_kernel());
+ if(!e) {
+  vnode_put(v);
+  int he=x9_update_file_hash(p,scratch,n,end,f);
+  if(he==0)return 0;
+  if(he!=EINVAL)return he;
+ }else if(e!=ENOENT)return e;
+ e=copyout(tmp,scratch,n);if(e)return e;
  e=vnode_lookup(tmp,VNODE_LOOKUP_NOFOLLOW,&v,vfs_context_kernel());
  if(!e){bool regular=vnode_isreg(v);vnode_put(v);if(!regular)return EEXIST;
   struct unlink_args u={.path=scratch};e=unlink(p,&u,&rv);if(e)return e;
@@ -44,10 +83,15 @@ static int x9_update_file(proc_t p,user_addr_t scratch,user_addr_t end,const str
  if(!e){struct fsync_args sync_request={.fd=fd};e=fsync(p,&sync_request,&rv);}
  struct close_args close_request={.fd=fd};int close_error=sys_close(p,&close_request,&rv);if(!e)e=close_error;
  if(e)return e;
- /* Do not replace an existing target. PID1 runs before any plugin process. */
- e=vnode_lookup(f->path,VNODE_LOOKUP_NOFOLLOW,&v,vfs_context_kernel());
- if(!e){vnode_put(v);return EEXIST;}if(e!=ENOENT)return e;
- size_t destlen=strlen(f->path)+1;if(scratch>end||n+destlen>end-scratch)return E2BIG;
+ /* A stale target whose bytes differed was decided above: unlink it here so
+  * the hard link below can publish the fresh copy. PID1 ordering unchanged. */
+ if(vnode_lookup(f->path,VNODE_LOOKUP_NOFOLLOW,&v,vfs_context_kernel())==0) {
+  vnode_put(v);
+  destlen=strlen(f->path)+1;if(scratch>end||n+destlen>end-scratch)return E2BIG;
+  e=copyout(f->path,scratch+n,destlen);if(e)return e;
+  struct unlink_args u2={.path=scratch+n};e=unlink(p,&u2,&rv);if(e)return e;
+ }
+ destlen=strlen(f->path)+1;if(scratch>end||n+destlen>end-scratch)return E2BIG;
  e=copyout(f->path,scratch+n,destlen);if(e)return e;
  struct link_args link_request={.path=scratch,.link=scratch+n};e=link(p,&link_request,&rv);if(e)return e;
  struct unlink_args unlink_request={.path=scratch};e=unlink(p,&unlink_request,&rv);if(e)return e;

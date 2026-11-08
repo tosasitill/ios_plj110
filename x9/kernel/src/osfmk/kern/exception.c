@@ -900,11 +900,17 @@ sweet_crash_log(const char *name, int pid, int sig, uint64_t code, uint64_t subc
 
 /*
  * SWEET: for a process named in boot-arg sweetscan (comma separated,
- * default "backboardd,SpringBoard"; "-" = off) that dies with SIGABRT or
- * SIGTRAP (BSAssert / NSAssert style failures) print the printable text runs
- * (>= 24 characters, at least 2 spaces) found in its malloc heap as
- * "STR text", at most 700 lines. An uncaught NSException's reason string
- * is among them: the abort message only carries the exception's type.
+ * default "backboardd,SpringBoard,assetsd,syncdefaultsd,com.apple.Safari";
+ * "-" = off) that dies with SIGABRT or SIGTRAP (BSAssert / NSAssert style
+ * failures) print the printable text runs (>= 24 characters, at least 2
+ * spaces) found in its malloc heap as "STR text", at most 700 lines. An
+ * uncaught NSException's reason string is among them: the abort message only
+ * carries the exception's type.
+ * rev252cm5: assetsd and syncdefaultsd crash-loop with uncaught exceptions
+ * (99.txt: assetsd 4x, syncdefaultsd 16x; assetsd serves the keyboard layout
+ * service, so its death is the number-one suspect for the keyboard not
+ * switching to the number plane). Each name is scanned on its first crash
+ * only, so a crash loop cannot flood USB with repeated heap dumps.
  */
 static int
 sweet_text_contains(const char *text, const char *needle)
@@ -933,7 +939,7 @@ sweet_crash_strings(const char *name)
 	if (wallpaper_bit && (__sync_fetch_and_or(&wallpaper_scanned, wallpaper_bit) & wallpaper_bit)) return;
 
 	if (!PE_parse_boot_argn("sweetscan", names, sizeof(names))) {
-		strlcpy(names, "backboardd,SpringBoard", sizeof(names));
+		strlcpy(names, "backboardd,SpringBoard,assetsd,syncdefaultsd,com.apple.Safari", sizeof(names));
 	}
 	size_t n = strlen(name), found = 0;
 	for (const char *t = names; *t;) {
@@ -950,6 +956,20 @@ sweet_crash_strings(const char *name)
 	}
 	if (!found && !wallpaper_bit) {
 		return;
+	}
+	/* rev252cm5: first crash per scanned name only (assetsd/syncdefaultsd loop). */
+	static struct {
+		char name[20];
+	} sweet_scanned[8];
+	static int sweet_scanned_count;
+	for (int i = 0; i < sweet_scanned_count; i++) {
+		if (!strncmp(sweet_scanned[i].name, name, sizeof sweet_scanned[i].name)) {
+			return;
+		}
+	}
+	if (sweet_scanned_count < 8) {
+		strlcpy(sweet_scanned[sweet_scanned_count].name, name, sizeof sweet_scanned[0].name);
+		sweet_scanned_count++;
 	}
 	buf = kalloc_data(65536, Z_WAITOK);
 	if (buf == NULL) {

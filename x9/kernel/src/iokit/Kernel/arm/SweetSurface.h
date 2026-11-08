@@ -45,8 +45,13 @@ public:
 	uint32_t                  purgeable;    /* IOSurfaceSetPurgeable state */
 	uint32_t                  wrapDelta;    /* wrapped client memory: where it starts in its first page */
 	bool                      wrapped;      /* memory is a prepared range of a task (IOSurfaceWrapClient*) */
+	/* x9lc GPU coherency by IOSurface lock protocol (see SweetSurface.cpp). */
+	uint32_t                  gpuCleanSeed; /* surface seed at the last GPU-side CPU clean */
+	bool                      gpuCleanValid;
+	bool                      gpuDirty;     /* GPU may have written since the last CPU acquire */
 
-	bool init() APPLE_KEXT_OVERRIDE { scanoutPhys = 0; scanoutSlot = -1; values = NULL; purgeable = 0; wrapDelta = 0; wrapped = false; return OSObject::init(); }
+	bool init() APPLE_KEXT_OVERRIDE { scanoutPhys = 0; scanoutSlot = -1; values = NULL; purgeable = 0; wrapDelta = 0; wrapped = false;
+		gpuCleanSeed = 0; gpuCleanValid = false; gpuDirty = false; return OSObject::init(); }
 	void free() APPLE_KEXT_OVERRIDE;
 
 	/* Kernel address of the pixels (mapped on first use), or 0. */
@@ -55,6 +60,21 @@ public:
 
 /* Retained surface for an id, or NULL. */
 SweetSurface *sweet_surface_copy(uint32_t id);
+
+/*
+ * x9lc: CPU cache maintenance of GPU-imported IOSurfaces by the IOSurface lock
+ * protocol instead of on every GPU job. sweet_surface_mapping_id: the surface
+ * whose (non-wrapped, cacheable) pixel mapping in task contains [addr, addr+bytes),
+ * or 0. gpu_needs_clean: whether the CPU may have written since the last GPU-side
+ * clean (seed changed on a write unlock, or never cleaned); the seed to record.
+ * gpu_wrote: the GPU may have written; the next CPU acquire (IOSurfaceLock or a
+ * kernel read such as the framebuffer present copy) cleans+invalidates first.
+ */
+uint32_t sweet_surface_mapping_id(task_t task, uint64_t addr, uint64_t bytes);
+bool sweet_surface_gpu_needs_clean(uint32_t id, uint32_t *seed);
+void sweet_surface_gpu_cleaned(uint32_t id, uint32_t seed);
+void sweet_surface_gpu_wrote(uint32_t id);
+void sweet_surface_cpu_acquire(SweetSurface *s);
 
 /*
  * Publish physical memory (the panel framebuffer) as a surface. Returns a

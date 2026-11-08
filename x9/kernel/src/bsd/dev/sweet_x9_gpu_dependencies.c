@@ -197,13 +197,83 @@ static int gov_commit(int index) {
  if(!r)gov_index=index;
  return r;
 }
+/* DRAM bandwidth (DVFSRC, MT6993). 109.txt: with clock and cache fixed, a
+ * backboardd frame is 15-35 full-screen passes (14-33M pixels) and each job
+ * still waits 6-15 ms at 1716 MHz - memory-bound. Nothing in this OS votes
+ * DRAM up (Android's mtk_gpu_qos/dvfsrc do). Register map: OPPO MT6993
+ * kernel_device_modules-6.12 drivers/soc/mediatek/mtk-dvfsrc.c mt6993_regs:
+ * BASIC_CONTROL 0x0 (OPP count-1 in [26:20]), SW_REQ 0x18 (DRAM level [15:12],
+ * EMI level [3:0]; mt6993_set_dram_level/set_emi_level), LEVEL 0x5F0,
+ * CUR_TAR_GEAR 0x6AC (DRAM gear [3:0], vcore [10:8]). DT: 10 DRAM OPPs
+ * (opp0 fastest), so request levels 0..9, higher = faster. Read-only unless
+ * x9_ddr_level=N / x9_emi_level=N (1..15) asks for a level. */
+static vm_offset_t dvfsrc;
+/* 110.txt (rev252db): basic=00000008 opp_count=1 level=0 gear=0 and the
+ * SW_REQ write changed nothing - DVFSRC was never started. Linux brings it up
+ * through TF-A: mtk_dvfsrc_probe SMC MTK_SIP_VCOREFS_CONTROL (0xC2000506,
+ * SMC64 fast SiP 0x506) cmd MTK_SIP_DVFSRC_INIT=0 with dvfsrc-flag/dvfsrc-vmode
+ * (absent in the captured DT -> 0,0; a0=0 ok, a1=dram_type). Per
+ * mtk-dvfsrc-start.c the INIT stage "locks high opp" until late-init sends
+ * MTK_SIP_DVFSRC_START=1, after which DVFSRC free-runs on the votes.
+ * x9_dvfsrc=1: INIT only (DRAM held at the high OPP). x9_dvfsrc=2: INIT +
+ * START (then x9_ddr_level/x9_emi_level votes apply). */
+static uint64_t dvfsrc_smc(uint64_t cmd,uint64_t a2,uint64_t a3,uint64_t *a1_out) {
+ register uint64_t x0 __asm__("x0")=0xc2000506;
+ register uint64_t x1 __asm__("x1")=cmd;
+ register uint64_t x2 __asm__("x2")=a2;
+ register uint64_t x3 __asm__("x3")=a3;
+ register uint64_t x4 __asm__("x4")=0;
+ register uint64_t x5 __asm__("x5")=0;
+ register uint64_t x6 __asm__("x6")=0;
+ register uint64_t x7 __asm__("x7")=0;
+ __asm__ volatile("smc #0":"+r"(x0),"+r"(x1),"+r"(x2),"+r"(x3),"+r"(x4),"+r"(x5),"+r"(x6),"+r"(x7)::"memory");
+ if(a1_out)*a1_out=x1;
+ return x0;
+}
+static void dvfsrc_dump(const char *when) {
+ uint32_t basic=rd(dvfsrc,0x0),req=rd(dvfsrc,0x18),level=rd(dvfsrc,0x5f0),gear=rd(dvfsrc,0x6ac);
+ printf("X9 DDR: DVFSRC %s basic=%08x opp_count=%u sw_req=%08x (dram %u emi %u) level=%08x gear=%08x (dram %u vcore %u)\n",
+  when,basic,((basic>>20)&0x7f)+1,req,(req>>12)&0xf,req&0xf,level,gear,gear&0xf,(gear>>8)&7);
+}
+static void dvfsrc_setup(void) {
+ dvfsrc=ml_io_map(0x1c100000,0x1000);
+ if(!dvfsrc){printf("X9 DDR: DVFSRC map failed\n");return;}
+ dvfsrc_dump("boot");
+ uint32_t mode=0;PE_parse_boot_argn("x9_dvfsrc",&mode,sizeof(mode));
+ if(mode==1||mode==2) {
+  uint64_t a1=0,r=dvfsrc_smc(0,0,0,&a1);
+  for(int i=0;i<20;i++)pause_ms();
+  printf("X9 DDR: SMC VCOREFS INIT -> a0=%lld dram_type=%llu\n",(long long)r,a1);
+  dvfsrc_dump("after-init");
+  if(mode==2&&!r) {
+   r=dvfsrc_smc(1,0,0,NULL);
+   for(int i=0;i<20;i++)pause_ms();
+   printf("X9 DDR: SMC VCOREFS START -> a0=%lld\n",(long long)r);
+   dvfsrc_dump("after-start");
+  }
+ }
+ uint32_t req=rd(dvfsrc,0x18),gear;
+ uint32_t ddr=0,emi=0;
+ PE_parse_boot_argn("x9_ddr_level",&ddr,sizeof(ddr));PE_parse_boot_argn("x9_emi_level",&emi,sizeof(emi));
+ if((ddr&&ddr<=15)||(emi&&emi<=15)) {
+  uint32_t v=req;
+  if(ddr&&ddr<=15)v=(v&~(0xfu<<12))|(ddr<<12);
+  if(emi&&emi<=15)v=(v&~0xfu)|emi;
+  wr(dvfsrc,0x18,v);
+  for(int i=0;i<20;i++)pause_ms();
+  gear=rd(dvfsrc,0x6ac);
+  printf("X9 DDR: SW_REQ %08x -> %08x (x9_ddr_level=%u x9_emi_level=%u) gear now %08x (dram %u vcore %u)\n",
+   req,rd(dvfsrc,0x18),ddr,emi,gear,gear&0xf,(gear>>8)&7);
+ }
+}
 static void gov_thread(void *arg,wait_result_t result) {
  (void)arg;(void)result;
  const uint64_t period_ns=50ull*1000*1000;
- uint64_t last_busy=sweet_x9_gpu_busy_ns,last_log=mach_absolute_time(),commits=0,busy_acc=0,ticks=0;
+ uint64_t last_busy=sweet_x9_gpu_busy_ns,last_log=mach_absolute_time(),commits=0,busy_acc=0,ticks=0,restores=0;
  int last_temp=0;
  printf("X9 GPU GOV: start floor=%d(%u kHz) ceiling=%d(%u kHz) slowest=%d period=50ms up>=20%% down<5%%\n",
   gov_floor,opp_khz[gov_floor],gov_ceiling,opp_khz[gov_ceiling],gov_slowest);
+ dvfsrc_setup();
  for(;;) {
   gov_sleep_ms(50);
   if(channel_uncertain){printf("X9 GPU GOV: mailbox uncertain; governor stops\n");break;}
@@ -224,11 +294,24 @@ static void gov_thread(void *arg,wait_result_t result) {
   const int slowest_allowed=fastest>gov_floor?fastest:gov_floor;
   if(target>slowest_allowed)target=slowest_allowed;
   if(target!=gov_index){if(gov_commit(target)){printf("X9 GPU GOV: commit %d failed; governor stops\n",target);break;}commits++;}
+  /* 105/106.txt: with the floor pinned at the ceiling (x9_gpu_floor_khz=1716000)
+   * the boot commit read back gpu=stack=1716 MHz, but every later status showed
+   * stack=260 MHz (its slowest) and the governor never committed again, so the
+   * shader stack ran at 260 MHz for the whole session. GPUEB lowers the OPP on
+   * its own; re-commit whenever its current indices differ from ours. */
+  else if(gov_index>=0&&(st.cur_oppidx_gpu!=gov_index||st.cur_oppidx_stack!=gov_index)) {
+   if(++restores<=6||restores%200==0)
+    printf("X9 GPU GOV: firmware OPP drifted to %d/%d (%u/%u kHz), restoring %d (restore #%llu)\n",
+     st.cur_oppidx_gpu,st.cur_oppidx_stack,st.cur_fgpu,st.cur_fstack,gov_index,restores);
+   if(gov_commit(gov_index)){printf("X9 GPU GOV: restore commit %d failed; governor stops\n",gov_index);break;}
+  }
   busy_acc+=util;ticks++;
   uint64_t now=mach_absolute_time(),ns=0;absolutetime_to_nanoseconds(now-last_log,&ns);
   if(ns>=2000000000ull) {
-   printf("X9 GPU GOV: util_avg=%llu%% temp=%d idx=%d gpu=%u kHz commits=%llu limiter=%u/%u ceiling=%u floor=%u\n",
-    ticks?busy_acc/ticks:0,last_temp,gov_index,gov_index>=0?opp_khz[gov_index]:0,commits,st.cur_c_limiter,st.cur_f_limiter,st.cur_ceiling,st.cur_floor);
+   const uint32_t gear=dvfsrc?rd(dvfsrc,0x6ac):0;
+   printf("X9 GPU GOV: util_avg=%llu%% temp=%d idx=%d gpu=%u kHz stack=%u kHz commits=%llu limiter=%u/%u ceiling=%u floor=%u actual=%u/%u kHz oppidx=%d/%d restores=%llu ddr_gear=%u vcore=%u\n",
+    ticks?busy_acc/ticks:0,last_temp,gov_index,gov_index>=0?opp_khz[gov_index]:0,st.cur_fstack,commits,st.cur_c_limiter,st.cur_f_limiter,st.cur_ceiling,st.cur_floor,
+    st.cur_fgpu,st.cur_fstack,st.cur_oppidx_gpu,st.cur_oppidx_stack,restores,gear&0xf,(gear>>8)&7);
    last_log=now;busy_acc=ticks=0;
   }
  }
