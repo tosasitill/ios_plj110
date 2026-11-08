@@ -8013,6 +8013,73 @@ sweet_x9_seed_disabled_jobs(proc_t p, user_addr_t scratch, user_addr_t end)
 	return 0;
 }
 
+/*
+ * The MobileGestalt disk cache validates its answers only against the OS
+ * build and the build UUID (MobileGestaltCache.c: "cache UUID %@ doesn't
+ * match build UUID %@"), and on X9 both are constants (build 20H392, the
+ * synthetic unique-chip-id), so answers captured while the ADT identity was
+ * wrong survive every later kernel/ADT fix: an unrecognized hw.product made
+ * DeviceClassNumber default to 2 (iPod), and a cache hit returns that stale
+ * value without invoking the native answer, which the current ADT already
+ * supplies correctly (hw.product=iPhone10,3). x9_mgwipe=1 unlinks both cache
+ * plists at PID1, in front of every daemon, so this boot rebuilds them from
+ * the native answers; MobileGestaltCache.c treats a missing cache file as
+ * "Cache file did not exist. Rebuilding.", and the legacy mobile path is
+ * included because MG deletes it opportunistically at best. One-shot opt-in,
+ * non-fatal. */
+static int
+sweet_x9_wipe_gestalt_cache(proc_t p, user_addr_t scratch, user_addr_t end)
+{
+	static const char target[] =
+	    "/private/var/containers/Shared/SystemGroup/"
+	    "systemgroup.com.apple.mobilegestaltcache/Library/Caches/"
+	    "com.apple.MobileGestalt.plist";
+	static const char legacy[] =
+	    "/var/mobile/Library/Caches/com.apple.MobileGestalt.plist";
+	extern boolean_t sweet_x9_ufs_root_writable(void);
+	struct unlink_args u = { .path = scratch };
+	size_t len;
+	int32_t rv = 0;
+	int error;
+
+	if (sweet_x9_arg("x9_mgwipe", 0) != 1) {
+		return 0;
+	}
+	if (!sweet_x9_ufs_root_writable()) {
+		return EROFS;
+	}
+	if (!proc_is64bit(p) || scratch > end) {
+		return E2BIG;
+	}
+	len = sizeof(target);
+	if (len > end - scratch) {
+		return E2BIG;
+	}
+	error = copyout(target, scratch, len);
+	if (error) {
+		return error;
+	}
+	error = unlink(p, &u, &rv);
+	printf("X9 MGWIPE: cache errno=%d\n", error);
+	if (error != 0 && error != ENOENT) {
+		return error;
+	}
+	len = sizeof(legacy);
+	if (len > end - scratch) {
+		return E2BIG;
+	}
+	error = copyout(legacy, scratch, len);
+	if (error) {
+		return error;
+	}
+	error = unlink(p, &u, &rv);
+	printf("X9 MGWIPE: legacy errno=%d\n", error);
+	if (error != 0 && error != ENOENT) {
+		return error;
+	}
+	return 0;
+}
+
 /* Reference: UniXNU ae687009348296e97e49ce6e925795044f363ce6,
  * scripts/seed-data-skip-setup.py (21H461). Preference-only adaptation for
  * 20H392 / MT6993 / 16 KiB; actual Setup decision remains original userland.
@@ -8245,6 +8312,10 @@ load_init_program_at_path(proc_t p, user_addr_t scratch_addr, const char* path)
 	  printf("X9 UPDATE: install result errno=%d\n",update_error);
 	  if(!update_error)external_error=sweet_x9_render_external_ready(); }
 	 if(external_error)printf("X9 RENDER EXTERNAL: not armed errno=%d\n",external_error);
+	}
+	{
+	 int mgwipe_error=sweet_x9_wipe_gestalt_cache(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
+	 if(mgwipe_error)printf("X9 MGWIPE: cache not removed errno=%d; continuing boot\n",mgwipe_error);
 	}
 	{
 	 int statusbar_error=sweet_x9_seed_uikit_statusbar(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
