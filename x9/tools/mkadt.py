@@ -34,7 +34,10 @@ FB_W, FB_H, FB_STRIDE = 1256, 2760, 5120
 # size, 414x896 pt @3x (iPhone XS Max / 11 Pro Max), centred on the 1256x2760 panel.
 # 1256 px = 418.67 pt matched no iPhone keyboard layout: the keyboard frame (414)
 # and its planes (418.67) disagreed, so every 123 switch reloaded the keyboard.
-CANVAS_W, CANVAS_H = 1242, 2688
+# 109.txt/USER: the 36 px top/bottom bars were ugly; the keyboard bug was the width
+# (414 pt layout vs 418.67 pt screen), so keep 414 pt and use the full panel height
+# (414x920 pt). 7 px stay black left/right.
+CANVAS_W, CANVAS_H = 1242, 2760
 TIMEBASE = 1000000000  # captured arm,armv8-timer clock-frequency; override if needed
 
 

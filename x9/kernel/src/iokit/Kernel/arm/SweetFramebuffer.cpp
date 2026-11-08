@@ -609,8 +609,8 @@ AppleCLCD::start(IOService *provider)
 	 * are negative here (logical smaller than the panel): the border strips are
 	 * blanked every frame in present(). */
 	if (sweet_board_x9()) {
-		fLogicalW = 1242;
-		fLogicalH = 2688;
+		fLogicalW = 1242;   /* 414 pt: the keyboard layout width (the 123 fix) */
+		fLogicalH = 2760;   /* full panel height (414x920 pt); no top/bottom bars */
 	}
 	/* x rounded down to 4 pixels: the panel window must start 16-byte aligned (MDP fetch) */
 	fOffX = ((int32_t)(fLogicalW - fWidth) / 2) & ~3;

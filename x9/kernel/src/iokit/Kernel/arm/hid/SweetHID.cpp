@@ -444,7 +444,7 @@ SweetHIDTouch::start(IOService *provider)
  if(sweet_early_is_x9()) {
   /* Panel 1256x2760 -> presented 1242x2688 centred, as SweetFramebuffer.cpp:
    * offsets ((1242-1256)/2)&~3 = -8 and (2688-2760)/2 = -36. */
-  fPanelW=1256;fPanelH=2760;fLogicalW=1242;fLogicalH=2688;
+  fPanelW=1256;fPanelH=2760;fLogicalW=1242;fLogicalH=2760;
   fOffX=((fLogicalW-fPanelW)/2)&~3;fOffY=(fLogicalH-fPanelH)/2;
   IOLog("X9 HID: panel 1256x2760 -> display %dx%d offset %d,%d\n",fLogicalW,fLogicalH,fOffX,fOffY);
  }
