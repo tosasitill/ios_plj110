@@ -46,6 +46,16 @@
   是因为当时文件还在;cm5 之后全靠 prebuilt 对象掩盖); (2) libkern/crypto/sweet_aes.c 加了
   sweet_aes_ecb_decrypt(ccmode_ecb,BearSSL 无 ECB 入口,用 CBC-dec 零 IV 逐块实现)+ ccaes_ecb_decrypt_mode()
   访问器——cm6 最终代码改用了 CBC-as-ECB 内联(handoff 49),该 ECB 目前无引用,留着无害。
+- **101.txt 第四轮(桌面起来了,x9dc/x9if 全程 armed,0 uncertain/0 DeviceLost),但流畅度没变,数据说明**:
+  (1) cache-dirty 每帧只覆盖 ~200-285 KB,而 fallback 真实体量 pre_bytes_avg=77.6 MB(重窗口)——deferred
+  clean 只盖插件自己的 BO 同步,CIVAC 大头是 IOSurface imports(客户端进程写,插件不知道脏区间)。x9dc 要真
+  省就得让前端 scope 覆盖 IOSurface(老审计里 cache-uncovered ~41 MB 就是这缺口); (2) inflight_max 61 个窗口
+  里只出现过一次 2——客户端(Metal runtime/CA)仍是一帧一等,FIFO 里没第二个 job 可配对;内核深度没问题
+  (证明能到 2)。x9if 要生效必须改 metal2vulkan runtime 的逐批等待(.local 里的 963f checkout);
+  (3) dirty 记录列表爆发期超 64 条(cap 已提到 256); (4) 键盘 123 按不开 = assetsd 崩溃循环(本日志 x4,
+  sig 6,与渲染无关,handoff 47 就有;cm5 的 STR 堆扫描已抓到现场,单独查)。结论:rev252cn 的两项工程上是
+  对的且已稳定落地,但按 97.txt 审计的瓶颈排序,真正的大头还是 #5 per-draw GPU 成本(MCU 时钟核实+per-draw
+  计数,一直没做)和客户端侧流水线,这两个才是 fps 的主乘数。
 - **101.txt 第三轮: install error file=5 errno=17 (EEXIST)** — rootfs 上已有第一轮装的 268 bundle(哈希旧),
   新载荷 identity 校验通过但装不进去:x9_update_install 从不替换已存在文件。已修(x9_update_install.inc):
   先对已发布文件做哈希比对——一致则跳过(幂等重装),不一致则 unlink 重发布;PID1 时序与"装后全面验证"不变。
