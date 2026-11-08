@@ -436,7 +436,8 @@ class SweetX9RenderUserClient : public IOUserClient {
      if(m.resource==r&&m.offset==request.buffer_offset&&m.address==request.gpu_address&&m.bytes==request.bytes&&m.flags==request.flags) {
       IOReturn kr=render_engine->unmap(context,&m);
       if(kr!=kIOReturnSuccess)return kr;
-      m=context->mappings[--context->mapping_count];return kIOReturnSuccess;
+      IOLockLock(context->submit_lock);m=context->mappings[--context->mapping_count];IOLockUnlock(context->submit_lock);
+      return kIOReturnSuccess;
      }
     }
     return kIOReturnBadArgument;
@@ -454,7 +455,7 @@ class SweetX9RenderUserClient : public IOUserClient {
    X9RenderVMEntry entry={r,request.buffer_offset,request.gpu_address,request.bytes,request.flags};
    IOReturn kr=render_engine->map(context,&entry);
    if(kr!=kIOReturnSuccess)return kr;
-   context->mappings[context->mapping_count++]=entry;
+   IOLockLock(context->submit_lock);context->mappings[context->mapping_count++]=entry;IOLockUnlock(context->submit_lock);
    return kIOReturnSuccess;
   }
   if(selector==X9RenderCache) {
@@ -535,6 +536,7 @@ public:
   if(!IOUserClient::initWithTask(task,security,type,props))return false;
   context=(X9RenderContext *)IOMallocZero(sizeof(X9RenderContext));if(!context)return false;
   context->lock=IOLockAlloc();if(!context->lock)return false;
+  context->submit_lock=IOLockAlloc();if(!context->submit_lock)return false;
   context->owner=task;task_reference(task);
   if(type==X9_RENDER_SCOPE_CLIENT) {
    /* No GPU context, no memory limit, no resources: only X9RenderScope. */
@@ -557,6 +559,7 @@ public:
   if(context&&context->scope_only) {
    render_scope_task_gone(context->owner);
    if(context->owner)task_deallocate(context->owner);if(context->lock)IOLockFree(context->lock);
+   if(context->submit_lock)IOLockFree(context->submit_lock);
    IOFree(context,sizeof(*context));context=nullptr;
   }
   if(context) {
@@ -566,6 +569,7 @@ public:
    }else {
     for(auto &r:context->resources)if(r.memory){if(r.cache_mapping){r.cache_mapping->release();r.cache_mapping=nullptr;}if(r.prepared)r.memory->complete(r.memory->getDirection());r.memory->release();}
     if(context->owner)task_deallocate(context->owner);if(context->lock)IOLockFree(context->lock);
+    if(context->submit_lock)IOLockFree(context->submit_lock);
     IOFree(context,sizeof(*context));context=nullptr;
    }
   }
@@ -628,6 +632,36 @@ public:
    IOLockUnlock(context->lock);
    if(!ok)return disabled?kIOReturnNotReady:kIOReturnBadArgument;
    return render_engine->fence_wait(context,&request,(X9RenderCompletion *)args->structureOutput);
+  }
+  if(selector==X9RenderSubmitAsync&&!context->scope_only&&context->submit_lock&&render_engine->submit_async_try&&
+     render_engine->async_wait_room&&render_engine->async_lockfree&&render_engine->async_lockfree()) {
+   /* x9sl: same validation as the locked path, under submit_lock only (it
+    * also guards next_submission and the mappings registry). Never sleep
+    * holding submit_lock: a map/unmap thread may hold c->lock and want it
+    * while the worker needs c->lock to make FIFO room. */
+   if(args->structureInputSize!=sizeof(X9RenderSubmission)||args->structureOutputSize!=sizeof(X9RenderCompletion))return kIOReturnBadArgument;
+   X9RenderSubmission request;memcpy(&request,args->structureInput,sizeof(request));
+   for(;;) {
+    IOLockLock(context->submit_lock);
+    bool ok=request.abi==X9_RENDER_ABI&&request.group&&request.stream_count&&request.stream_count<=3&&!request.flags&&
+     request.submission_id&&context->next_submission!=UINT64_MAX&&request.submission_id==context->next_submission+1;
+    unsigned seen=0;
+    for(unsigned i=0;ok&&i<request.stream_count;i++) {
+     if(!stream_mapped(request.streams[i])||(seen&(1u<<request.streams[i].index)))ok=false;
+     else seen|=1u<<request.streams[i].index;
+    }
+    if(!ok){IOLockUnlock(context->submit_lock);return kIOReturnBadArgument;}
+    if(context->disabled){IOLockUnlock(context->submit_lock);return kIOReturnNotReady;}
+    IOReturn kr=render_engine->submit_async_try(context,&request);
+    if(kr==kIOReturnNoSpace){IOLockUnlock(context->submit_lock);render_engine->async_wait_room(context);continue;}
+    if(kr==kIOReturnSuccess) {
+     context->next_submission=request.submission_id;
+     *(X9RenderCompletion *)args->structureOutput={X9_RENDER_ABI,0,request.group,0,request.submission_id,0,0,0,0};
+    }
+    IOLockUnlock(context->submit_lock);
+    if(kr!=kIOReturnSuccess)IOLog("X9 RENDER SUBMIT ASYNC: refused (lock-free) pid=%d group=%u id=%llu kr=%x\n",proc_selfpid(),request.group,request.submission_id,kr);
+    return kr;
+   }
   }
   if(selector==X9RenderCache) {
    /* rev252cn (x9dc): a deferred clean record takes no context lock either -

@@ -51,6 +51,9 @@ struct X9RenderVMEntry {
 struct X9RenderPageTable;
 struct X9RenderContext {
  IOLock *lock;
+ /* x9sl: guards next_submission and the mappings registry against the
+  * lock-free SubmitAsync path. Leaf lock; order c->lock -> submit_lock. */
+ IOLock *submit_lock;
  task_t owner;
  X9RenderResource resources[X9_RENDER_KERNEL_MAPPINGS];
  X9RenderVMEntry mappings[X9_RENDER_KERNEL_MAPPINGS];
@@ -104,6 +107,16 @@ struct X9RenderEngine {
  IOReturn (*submit_async)(X9RenderContext *,const X9RenderSubmission *,X9RenderCompletion *);
  IOReturn (*fence_wait)(X9RenderContext *,const X9RenderWaitRequest *,X9RenderCompletion *);
  void (*drain)(X9RenderContext *);
+ /* x9sl=1: SubmitAsync without c->lock (the worker holds c->lock for a whole
+  * publish->reap, so a locked enqueue waited out every running job of its
+  * own context: 104.txt inflight_max=0, x9if never paired). async_lockfree
+  * says whether the path applies (async on, x9dc off: dirty staging needs
+  * c->lock). submit_async_try enqueues or answers kIOReturnNoSpace without
+  * sleeping; async_wait_room sleeps until the FIFO has room. Both are called
+  * WITHOUT c->lock (the service holds only submit_lock around try). */
+ bool (*async_lockfree)(void);
+ IOReturn (*submit_async_try)(X9RenderContext *,const X9RenderSubmission *);
+ void (*async_wait_room)(X9RenderContext *);
 };
 extern "C" void sweet_x9_render_install(const X9RenderEngine *);
 extern "C" void sweet_x9_render_publish(void);

@@ -1242,6 +1242,37 @@ static IOReturn render_submit_async(X9RenderContext *c,const X9RenderSubmission 
  if(kr==kIOReturnSuccess)*reply={X9_RENDER_ABI,0,request->group,0,request->submission_id,0,0,0,0};
  return kr;
 }
+static bool render_async_lockfree() {
+ static int mode=-1;
+ if(mode<0){mode=sweet_x9_arg("x9sl",0)==1?1:0;
+  IOLog("X9 RENDER ASYNC: lock-free SubmitAsync %s (x9sl; needs x9_submit_async, off with x9dc)\n",mode?"ON":"off");}
+ return mode==1&&render_async_enabled()&&!render_dirty_enabled();
+}
+static IOReturn render_submit_async_try(X9RenderContext *c,const X9RenderSubmission *request) {
+ if(!render_async_enabled()||!c||!c->engine_private||!request)return kIOReturnUnsupported;
+ auto *p=(RenderKernelContext *)c->engine_private;
+ IOReturn kr=kIOReturnSuccess;
+ IOLockLock(render_async_lock);
+ if(p->async_failed)kr=kIOReturnNotReady;
+ else if(render_async_count==render_async_depth){render_async_stats[2]++;kr=kIOReturnNoSpace;}
+ else {
+  RenderAsyncJob job={c,*request,0,0,0};
+  job.seq=__atomic_add_fetch(&render_async_enqueued,1,__ATOMIC_ACQ_REL);
+  job.t_enq=mach_absolute_time();
+  render_async_jobs[(render_async_head+render_async_count)%render_async_depth]=job;
+  render_async_count++;p->async_pending++;
+  IOLockWakeup(render_async_lock,&render_async_count,false);
+ }
+ IOLockUnlock(render_async_lock);
+ return kr;
+}
+static void render_async_wait_room(X9RenderContext *c) {
+ if(!render_async_enabled()||!c||!c->engine_private)return;
+ auto *p=(RenderKernelContext *)c->engine_private;
+ IOLockLock(render_async_lock);
+ while(render_async_count==render_async_depth&&!p->async_failed)IOLockSleep(render_async_lock,&render_async_head,THREAD_UNINT);
+ IOLockUnlock(render_async_lock);
+}
 static IOReturn render_fence_wait(X9RenderContext *c,const X9RenderWaitRequest *request,X9RenderCompletion *reply) {
  if(!render_async_enabled()||!c||!c->engine_private||!request||!reply)return kIOReturnUnsupported;
  auto *p=(RenderKernelContext *)c->engine_private;
@@ -1300,4 +1331,5 @@ static bool render_async_start() {
 }
 static const X9RenderEngine resident_engine={render_caps,render_context_open,render_close,render_map,render_unmap,
  render_create_group,render_destroy_group,render_submit,render_wait,render_cache,render_cache_defer,render_timestamp,render_quiesce,
- render_submit_async,render_fence_wait,render_drain};
+ render_submit_async,render_fence_wait,render_drain,
+ render_async_lockfree,render_submit_async_try,render_async_wait_room};
