@@ -48,3 +48,5 @@ static void missing_selector(const char *object,const char *selector) {
  return device;
 }
 @end
+
+#include "X9KeyboardProbe.inc"
