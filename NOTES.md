@@ -30,6 +30,24 @@
 - 下一步: 需要一次包含开/关 app 时刻的完整日志; 之后按时间抓该帧的 draw(x9vf 机制只按固定 uptime 触发,
   参数上限 607 B, 需要改成按 transition 触发或放宽)。
 
+## HANDOFF 2026-11-08 (65): 109.txt x9lc 生效; 呈现改 1242x2760(rev252da); DVFSRC DRAM 请求(rev252db); 均未上机
+
+- 实测 109(rev252cz): cache-lc pre/post 各跳过 ~13-14 MB/job, seed_clean_avg=0; pre_cache 0.4-0.9 ms(之前 1.2-5),
+  post_cache 60-85 µs(之前 0.8-2 ms)。GPU wait 6-15 ms/job 成为全部开销; backboardd 一帧 15-35 pass /
+  14-33M 像素(全屏离屏为主)→ 判断显存带宽受限。USER: 更流畅; 上下黑边太丑。
+- USER 问"竖向放大会不会再坏 123": 123 的根因是宽度(414 vs 418.67), 面尺寸跟屏宽走 → 改 1242x2760
+  (414x920 pt, b108506: mkadt CANVAS_H、SweetFramebuffer fLogicalH、SweetHID fLogicalH = 2760), 左右各 7 px 黑。
+- USER 问"全局传 14 Pro": 现状 = iPhone X 身份(iPhone10,3)+ X 的 20H392 系统 + 状态栏强制 DynamicSplitMedium。
+  不建议改身份: 根盘是 X 的 IPSW(资源按设备裁剪), 14 Pro 是 arm64e 的另一套 dyld cache; 14 Pro 屏 1179x2556
+  黑边更大, 14 Pro Max 1290x2796 比面板大。
+- DVFSRC(e3beec2): 寄存器来自 OPPO kernel_device_modules-6.12 mtk-dvfsrc.c mt6993_regs; DT 10 个 DRAM OPP。
+  governor 启动打印 `X9 DDR: DVFSRC basic/opp_count/sw_req/level/gear`; 有 x9_ddr_level=N / x9_emi_level=N
+  时写 SW_REQ[15:12]/[3:0](同 mt6993_set_dram_level/emi_level), 20 ms 后读回 gear; 每条 GOV 行加 ddr_gear/vcore。
+- BUILT(内核-only, 插件 275):
+  - x9/out/x9-rev252da a0433a16d6f6e2d69e99933ecaafb07fb5317eee8e9fa6cac6b4778f2d2d0e4b(rev252cz + 1242x2760)
+  - x9/out/x9-rev252db **34366320d87231bdf0afd908357cd255408d64d69ea656cbe976970dd8b5864e**(rev252da + DVFSRC 探针 +
+    x9_ddr_level=9)
+
 ## HANDOFF 2026-11-08 (64): USER 确认 108.txt(rev252cy)123 修好、控制中心不卡; GPU 优化 #4 = x9lc BUILT(rev252cz)未上机
 
 - 实测 108(rev252cy): fps avg 17.6(63 窗口, max 38.5); 每 job 维护 pre 16.7 MB / post 14.3 MB, 全是导入
