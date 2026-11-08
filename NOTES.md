@@ -1,3 +1,28 @@
+## FINDING 2026-11-08: MobileGestalt 机型读取链已反汇编核验(20H392 实机 dylib); 内核/ADT 供给全对; "还是 iPod" 首要嫌疑 = MG 磁盘缓存陈旧答案
+
+- 对象: `.local/x9/work/dsc-20H392/usr/lib/libMobileGestalt.dylib`(设备实跑的 iOS 16.7.16 拷贝, 有符号)。
+  读取链: **ProductType ← sysctl `hw.product`**(copy_productType 0x19c58b0cc → hash key `h9jDsbgj7xIVeIQ8S3/X3Q`;
+  native 0x19c571680 直接把 hw.product C 串转 CFString); **DeviceClassNumber ← hw.product 前缀匹配**
+  (0x19c55f5c8: iPhone→1, iPod→2, iPad→3, AppleTV→4, iFPGA→5, Watch→6, AudioAccessory→7, iBridge→8,
+  AppleDisplay→0xa, ComputeModule→0xc; **前缀不匹配或 hw.product=NULL → 默认 2 = iPod**, 结果缓存在
+  [0x1e1d7c740]); HWModelStr ← sysctl `hw.target`; 其余读 `IODeviceTree:/product`(product-id/product-name/
+  artwork-device-idiom/subtype/scale-factor/gamut/display-corner-radius/side-button-location)、
+  `/buttons home-button-type`、`/chosen display-scale`。MG 二进制内**没有**内置机型表(全库只有 "iPhone" 等
+  前缀字符串)→ 答案完全由 DT/sysctl 决定。
+- 缓存(为什么 iPod 不死): MobileGestaltCache.c → `/private/var/containers/Shared/SystemGroup/
+  systemgroup.com.apple.mobilegestaltcache/Library/Caches/com.apple.MobileGestalt.plist`, 校验只有
+  OS build("cache %@ doesn't match OS %@")+ build UUID("cache UUID %@ doesn't match build UUID %@")。
+  命中即返回, native 只在 miss 时调("MGCache: Invoking %@")。我们 build 恒 20H392 + unique-chip-id
+  合成 0x5839000000000001 恒定 → **改 ADT/内核永不失效**; 与老 sweet 项目 6854 的失效模式相同。
+- X9 供给已核验全对: staged `x9/out/x9-rev252cn-dc-if/x9.adt` root `model=iPhone10,3`、compatible
+  `D22AP|iPhone10,3|...`、`/product` 完整(product-id fd079b...=真 D22AP 值, artwork phone/2436/3x/sRGB)、
+  `/buttons home-button-type 2`、serial/model-number=PLJ110; 101.txt:79 `X9 IDENTITY: product=iPhone10,3
+  board=D22AP; description=iPhone20 model=PLJ110`(kernel: hw.product=IODT getMachineName←ADT root model,
+  hw.target=第一个 compatible, SweetPlatformExpert.cpp:130 注释; kern_mib.c HW_PRODUCT→PEGetProductName,
+  SWEET 已解 kludge)。→ 若 UI 仍显示 iPod, 首选删上面的缓存 plist(boot 时 MG 重建走 native)再验证;
+  x9_update_install 目前只能 publish 文件不能删 var 下的文件, 删除需 boot-arg 门控 PID1 unlink
+  (仿 08b386d 模式)或重刷根。删完仍 iPod 再查 UIKit 侧(status-bar device-name item 的具体 key)。
+
 ## HANDOFF 2026-11-08 (51): 开机 1970 根因查清(未改代码)= 内核从无 RTC 读取路径, 日历恒从 epoch 0 起步; 修复 = pwrap 读 MT6687 RTC
 
 - 用户报告: 每次开机时间跳回 1970。结论(代码证据, 全部可复查): XNU 日历初始化链
