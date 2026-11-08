@@ -1,3 +1,28 @@
+## HANDOFF 2026-11-08 (54): 101.txt(rev252cp) 相册/时间/机型 USER 确认修好; 键盘 123 仍打不开 → UIKit 门控已定位(静态), assetsd 假说证伪
+
+- 实测 101.txt(rev252cp): `X9 RTC: 2026-11-08 05:37:56 UTC`、`X9 MGWIPE: cache errno=0`、`tccd issued extension`
+  均出现; CRASH 只剩 mediaserverd/AegirPoster ×104 行、syncdefaultsd 64、CommCenter 44、driverkitd 4,**assetsd 0**。
+  USER: 相册、时间等修好, 键盘 123 仍打不开 → handoff 47/51 的 "123 = assetsd 崩溃循环" 推断**证伪**。
+- 实测 101.txt 键盘段(Spotlight, 77.8 s 下拉): 81.4–97 s 在 (80-100, 2440-2496) 连点 123 十余次, HID down/up
+  全部成对(99/99, 只有 finger 0), 无 Spotlight/kbd 崩溃, 帧持续 ~10 fps。另见 hfs `set LowDisk` (freeblks≈262k,
+  低于 warninglimit 262144, 约 1 GiB 空闲), 尚未处理。**/tmp/101.txt 已随服务器卡死重启丢失**, 需用户重新放。
+- 实测(Mac 反汇编 dsc-20H392 UIKitCore, 工具 ~/x9-kbd-dis/{dis.py,callers.sh,ivars.py}, 不在 git):
+  123(More 键)在 **touch-down** 切键盘面: `-[UIKeyboardLayoutStar completeSendStringActionForTouchDownWithKey:
+  withActions:executionContext:]` 0x1897ebabc: action bit 5 → **`[_extendedTouchInfoMap count] == 1` 才**
+  `setKeyplaneName:[keyplane alternateKeyplaneName]`, 否则静默跳过(ivar 偏移指针 0x1e1d8e950 = UIKeyboardLayoutStar
+  `_extendedTouchInfoMap` NSMutableDictionary)。字母键(touch-up 出字)和 shift(bit 4/34 路径)不查这个计数——
+  正好解释"字母能打, 123 没反应"。条目在 generateInfoForTouch:(touchDown) 加入, 在 clearInfoForTouch:forResting:
+  删除(调用者: completeRetestForTouchUp ×2, completeHitTestForTouchDown, continueFromInternational…, pinchDidConsumeTouch,
+  touchCancelled:forResting:)。
+- 推断(未验证): 计数≠1 = 有触摸条目泄漏(某次触摸的 up/cancel 没走到 clear), 或键盘任务队列滞后(主线程被
+  dictation 链拖慢, 见 30-42.txt)使 down/up 处理错序。我们的 x9_kbd_dictation 种子(每次开机把 cfprefsd 写回的
+  bplist 换成 XML, 原键丢弃, 备份 .x9-before-seed.plist)与 x9_siri_off(launchd.plist 32 处 Mach 服务改名)
+  都不直接碰这条路径, 但种子会抹掉用户键盘设置(含 QuickPath 等), 列为待排除项。
+- 下一步(无需构建的设备判别): (1) 键盘弹出后**先不碰任何键**, 第一下就点 123 —— 能开 → 泄漏型; 不能 → 别的门。
+  (2) 按住 123 不放 ~1 s 看是否在按住时切到数字面。 (3) 换 App(备忘录/设置搜索)试。 结果决定: 泄漏型 → 查
+  哪类触摸没被 clear(候选: 键盘出现动画期间按下的触摸、系统手势取消); 否则抓 Spotlight 主线程样本
+  (x9_sample_procs=Spotlight)。
+
 ## HANDOFF 2026-11-08 (53): rev252cp 统一镜像 BUILT = 相册+机型+时间三修复同内核; 未上机; 既有镜像缺口核验
 
 - 任务: 用户要"最新最全"(三修复齐备)的镜像并 push 仓库。
