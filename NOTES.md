@@ -23,6 +23,39 @@
   x9_update_install 目前只能 publish 文件不能删 var 下的文件, 删除需 boot-arg 门控 PID1 unlink
   (仿 08b386d 模式)或重刷根。删完仍 iPod 再查 UIKit 侧(status-bar device-name item 的具体 key)。
 
+## HANDOFF 2026-11-08 (52): 开机 1970 修复 = PMIF/SPMI 读 MT6687 RTC (getGMTTimeOfDay), BUILT x9-rev252cn-rtc; 未上机
+
+- 实现(commit 0b74af5, `SweetPlatformExpert.cpp`): X9 的 PE 覆写 `getGMTTimeOfDay`——经 PMIF/SPMI 只读
+  MT6687 PMIC RTC。协议逐寄存器对照 Android 树移植:
+  - PMIF(`spmi-mtk-pmif-core.c` mt6993_pmif_arb): MMIO **0x1c01a000**(DTS "pmif", path 0), SW 通道
+    soc_chan=2 → SWINF_2(ACC 0x0880/WDATA 0x0884/RDATA 0x0894/VLDCLR 0x08A4/STA 0x08A8); 传输 = 等 IDLE
+    (顺带排空陈旧 WFVLDCLR)→(写 WDATA)→ ACC = cmd<<30|sid<<24|bc<<16|addr → 等 WFVLDCLR → 读 RDATA →
+    写 1 到 VLDCLR, err 位 (v>>18)&1; 16 位 PMIC 地址用 EXT_REG_LONG(cmd=3); 每次传 2 字节(bc=1)。
+  - MT6687 = **USID 9、path 0**(mt6687.dtsi `reg=<0x9 SPMI_USID>`; spmi-dev-mask 0x55a8 bit9=0)。
+  - RTC(rtc-mt6685.c 的 MT6685 布局, base 0x580): PDN_CLR 0x516←0x30 上电 MCLK+32k → IOSleep 1ms →
+    读 BBPU 0x588 → 写回 |KEY 0x4300|RELOAD 0x20 → WRTGR 0x5C2←1 → 轮询 BBPU.CBUSY(bit6)清零 →
+    读 7 个 u16: TC_SEC 0x592 起每 +2(SEC MIN HOU DOM DOW MTH YEA), 掩码 3f/3f/1f/1f/7/f/7f,
+    年=raw+1968、月 1-based → 带进位防护(sec2>=sec 才接受, 最多 8 轮)→ PDN_SET 0x515←0x30 断电。
+  - 防御: 年 2024-2099/月日时分秒范围校验, 不合理或 PMIF 传输失败 → 记 `X9 RTC:` 行并返回 0(=今天
+    的 epoch 行为, mobiletimerd 恢复路径与 NTP 纠正不受影响)。锁 = IORecursiveLock(开机 1 次 +
+    IOPM 睡眠路径调用)。`setGMTTimeOfDay` 只打一次日志(clock.c:826 每次 settimeofday 都会调它,
+    写路径留给上机验证后的下一轮)。
+- 挂接链确认: bsd_init:688 `IOKitInitializeTime` → IORTC 资源(PE start 发布, 无 30s 等待)→
+  `clock_initialize_calendar` → PEGetUTCTimeOfDay → 我们的读。uptime 大于 RTC 值时内核会把日历钳到
+  uptime(clock.c 的 sys>secs 分支)——RTC 失败回 0 时即今天的告警路径, 无新行为。
+- **BUILT `x9/out/x9-rev252cn-rtc/`(kernel+boot 一起构建, 基线 cn 完整 29-token 参数集已验证嵌入)**:
+  boot.img sha256 **59ada17e79deb90a606903539f30f4ca97f6ca068e8352dccc117f2e3e783d8d**,
+  kernel.development.sweet sha256 **b3903226d26c918c7a75a2041e8892d14f91b93cde1577aeaad8356e74389848**。
+- ⚠️ 归因注意: 构建时工作区里有一个并发会话未提交的 `kern_exec.c` 改动(x9_mgwipe=1 时 PID1 清
+  MobileGestalt 缓存), 已被编进这个内核但**完全惰性**(镜像参数集没有 x9_mgwipe, 函数首行即 return 0)。
+  该改动落地后如需纯净镜像可重跑 `python3 -I x9/build/build.py --name <n> <14 个 Wi-Fi/GPU extra token>`。
+- 测试(用户执行): mailbox **不用重写**(allowlist identity f4b2aa27 在本内核与已装 268 bundle 配对),
+  直接 `fastboot boot` x9/out/x9-rev252cn-rtc/boot.img。看日志: 期望早期出现
+  `X9 RTC: 2026-11-08 HH:MM:SS UTC = N s` 且之后 launchd/daemon 时间戳开机即真实日期(1970 窗口消失);
+  失败形态三种各有行号: `map failed` / `PMIF transfer failed` / `implausible ...`——任一失败都原样报告,
+  并同时看 `X9 MGWIPE:`(并发会话的惰性门, 应无输出)。成功后下一轮: 写路径(setGMTTimeOfDay → BBPU
+  解锁+TC 写+WRTGR, 参考 mtk_rtc_set_time)使 NTP 校时写回 RTC。
+
 ## HANDOFF 2026-11-08 (51): 开机 1970 根因查清(未改代码)= 内核从无 RTC 读取路径, 日历恒从 epoch 0 起步; 修复 = pwrap 读 MT6687 RTC
 
 - 用户报告: 每次开机时间跳回 1970。结论(代码证据, 全部可复查): XNU 日历初始化链
