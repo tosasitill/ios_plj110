@@ -30,6 +30,20 @@
 - 下一步: 需要一次包含开/关 app 时刻的完整日志; 之后按时间抓该帧的 draw(x9vf 机制只按固定 uptime 触发,
   参数上限 607 B, 需要改成按 transition 触发或放宽)。
 
+## HANDOFF 2026-11-08 (63): rev252cy BUILT = 呈现真机屏幕 1242x2688(414x896 pt @3x)修 123; 未上机
+
+- USER 选择"真机屏幕尺寸"方案(而非插件内补丁)。
+- 实现(da04330): mkadt.py 新增 CANVAS_W/H=1242x2688 写入 /arm-io/disp0 canvas-width/height
+  (IOMobileFramebuffer 读它; sweet-fbcon 物理帧缓冲仍 1256x2760/5120); SweetFramebuffer X9 fLogicalW/H=1242x2688,
+  fOffX=((1242-1256)/2)&~3=-8, fOffY=-36(负偏移, 拷贝路径 dx-=fOffX 已支持; 直接扫描路径对小于面板的面
+  RejectTooSmall → 走拷贝), 每帧把逻辑区外的边框条(上下 36 行, 左 8 px 右 6 px)清黑; SweetHID 面板坐标 →
+  1242x2688 同偏移, 归一化值钳到 [0,0xffff]。插件不变(275), 沿用 rev252cx mailbox。
+- BUILT: x9/out/x9-rev252cy boot_sha256 **50d7b6e631a9ca89a1dc075b228ff331ba6be2741e79c2de85a5f9f555c1e0f2**
+  (参数同 rev252cx: x9_cache_scope x9kbdhook x9pl x9sl, 最高频)。
+- 判读: `SWEET FB: AppleCLCD 1256x2760 ... presented as 1242x2688`、`X9 HID: panel 1256x2760 -> display 1242x2688
+  offset -8,-36`; KBDHOOK plane sizes 宽应 414; 123 不再出现 nested setKeyplaneName 回退; 触摸是否对位; 边框黑。
+  风险: 开机若黑屏/错位, 回退 rev252cx。
+
 ## HANDOFF 2026-11-08 (62): 107.txt(rev252cx)= 时钟修好, fps 11.5→16.8, 瓶颈移到 CPU 缓存维护; 123 根因 = 非标屏宽
 
 - 实测 107(参数 x9_cache_scope x9kbdhook x9pl x9sl, 无 x9if; 跑满 182 s 无卡死 → 106 卡死嫌疑仍在 x9if 配对):
