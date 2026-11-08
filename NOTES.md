@@ -1,3 +1,21 @@
+## HANDOFF 2026-11-08 (55): 123 键诊断探针 x9kbdhook=1 (plugin 270) → rev252cq 构建中
+
+- USER(102.txt 后): 按住 123 **不变暗/不高亮**; 123 键不是灰的; 地球键能切、删除能删、旁边表情键能点;
+  **所有语言的数字面都打不开**。
+- 推断: 不高亮 = touch-down 时 UIKit 没把这次按压当作 More 键的动作: 要么命中测试没落在 More 键
+  (邻近表情键正常, 不像整体坐标偏), 要么 More 键 visible=NO / state==1 → downActionFlags=0。反汇编排除:
+  stateForKeyplaneSwitchKey: 只返回 2/4; shouldMergeKey: 只管 interactionType 38/9/5(More=11);
+  _shouldSwapGlobeAndMore 需两键都 visible; setKeyplaneName: 的 setVisible 循环只置 visible=1。静态到此为止。
+- 新探针(commit 7dce1e5, x9/metal/General/X9KeyboardProbe.inc, 由 X9GeneralMetalFactory.mm include): bundle
+  constructor 在含 UIKeyboardLayoutStar 的进程里(boot-arg 令牌 x9kbdhook=1)换 3 个 IMP, 先调原实现、结果不改:
+  `X9 KBDHOOK <proc>[pid]: touchDown at x,y (layout WxH) plane=... infos=N hit '<key>' it= dt= visible= state= frame=`,
+  `  More-Key ...`, `downActionFlags=0x.. key ...`, `sendDown actions=0x.. infos=N key ...`, `after sendDown plane=...`。
+  直接写 /dev/console, 400 行上限。注意: bundle 是首次 Metal 使用时才加载(102.txt Spotlight 59.6 s), 之前的触摸
+  不会被记录 → 测试时先在 Spotlight 里打几个字母、等几秒再点 123。
+- 构建(Mac, 后台): `build.py all --revision 270 --name x9-rev252cq` + rev252cp 的 16 个令牌(去掉 x9_mgwipe)+
+  x9kbdhook=1。plugin 版本变了 → **必须先 mailbox 重写**: `X9_SERIAL=<serial> python3 x9/mailbox/update.py
+  x9/out/x9-rev252cq`, 再 `fastboot boot x9/out/x9-rev252cq/boot.img`。结果/哈希待补。
+
 ## HANDOFF 2026-11-08 (54): 101.txt(rev252cp) 相册/时间/机型 USER 确认修好; 键盘 123 仍打不开 → UIKit 门控已定位(静态), assetsd 假说证伪
 
 - 实测 101.txt(rev252cp): `X9 RTC: 2026-11-08 05:37:56 UTC`、`X9 MGWIPE: cache errno=0`、`tccd issued extension`
