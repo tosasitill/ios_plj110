@@ -142,11 +142,31 @@ static void x9kbd_send(id self, SEL _cmd, id key, unsigned long long actions, id
  x9kbd_log("  after sendDown plane='%s'", x9kbd_str(x9kbd_ivar(self, "_keyplaneName")));
 }
 
+static int x9kbd_depth;
+static void x9kbd_bt(char *bt, size_t n) {
+ NSArray<NSNumber *> *rets = [NSThread callStackReturnAddresses];
+ intptr_t slide = 0;
+ for (uint32_t i = 0; i < _dyld_image_count(); i++) {
+  const char *nm = _dyld_get_image_name(i);
+  if (nm && strstr(nm, "/UIKitCore")) { slide = _dyld_get_image_vmaddr_slide(i); break; }
+ }
+ size_t o = 0; bt[0] = 0;
+ for (NSUInteger i = 2; i < rets.count && i < 16 && o + 20 < n; i++)
+  o += (size_t)snprintf(bt + o, n - o, " %llx", (unsigned long long)(rets[i].unsignedLongLongValue - (unsigned long long)slide));
+}
 static void x9kbd_setplane(id self, SEL _cmd, id name) {
  const char *before = x9kbd_str(x9kbd_ivar(self, "_keyplaneName"));
  char b[128]; snprintf(b, sizeof(b), "%s", before);
  int tp = x9kbd_bool(self, "_isTrackpadMode");
+ // 104.txt: More -> setKeyplaneName('numbers-and-punctuation') sets the plane, then a nested
+ // setKeyplaneName('small-letters-small-display') inside the same call reverts it. Log who.
+ if (x9kbd_depth > 0) {
+  char bt[400]; x9kbd_bt(bt, sizeof(bt));
+  x9kbd_log("nested setKeyplaneName '%s' depth=%d current='%s' unslid-bt%s", x9kbd_str(name), x9kbd_depth, b, bt);
+ }
+ x9kbd_depth++;
  ((void (*)(id, SEL, id))x9kbd_orig_setplane)(self, _cmd, name);
+ x9kbd_depth--;
  x9kbd_log("setKeyplaneName '%s' trackpad=%d before='%s' after='%s'", x9kbd_str(name), tp, b,
      x9kbd_str(x9kbd_ivar(self, "_keyplaneName")));
 }
