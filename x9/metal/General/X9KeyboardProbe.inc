@@ -50,7 +50,7 @@ static void x9kbd_key(char *out, size_t n, id layout, id key) {
  int dt = [key respondsToSelector:sDT] ? ((int (*)(id, SEL))objc_msgSend)(key, sDT) : -1;
  int vis = [key respondsToSelector:sVis] ? ((BOOL (*)(id, SEL))objc_msgSend)(key, sVis) : -1;
  int st = [layout respondsToSelector:sState] ? ((int (*)(id, SEL, id))objc_msgSend)(layout, sState, key) : -1;
- CGRect f = [key respondsToSelector:sFrame] ? ((CGRect (*)(id, SEL))objc_msgSend)(key, sFrame) : CGRectZero;
+ CGRect f = [key respondsToSelector:sFrame] ? ((CGRect (*)(id, SEL))objc_msgSend)(key, sFrame) : CGRectMake(0, 0, 0, 0);
  snprintf(out, n, "'%s' it=%d dt=%d visible=%d state=%d frame=%.1f,%.1f %.1fx%.1f",
      x9kbd_str(name), it, dt, vis, st, f.origin.x, f.origin.y, f.size.width, f.size.height);
 }
@@ -76,7 +76,7 @@ static void x9kbd_down(id self, SEL _cmd, id touch, id ctx) {
  x9kbd_key(h, sizeof(h), self, hit);
  x9kbd_key(m, sizeof(m), self, more);
  CGRect b = [self isKindOfClass:NSClassFromString(@"UIView")] ?
-     ((CGRect (*)(id, SEL))objc_msgSend)(self, sel_registerName("bounds")) : CGRectZero;
+     ((CGRect (*)(id, SEL))objc_msgSend)(self, sel_registerName("bounds")) : CGRectMake(0, 0, 0, 0);
  x9kbd_log("touchDown at %.1f,%.1f (layout %.1fx%.1f) plane='%s' infos=%lu hit %s",
      p.x, p.y, b.size.width, b.size.height, x9kbd_str(x9kbd_ivar(self, "_keyplaneName")),
      (unsigned long)[(NSDictionary *)map count], h);
