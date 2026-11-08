@@ -197,6 +197,36 @@ static int gov_commit(int index) {
  if(!r)gov_index=index;
  return r;
 }
+/* DRAM bandwidth (DVFSRC, MT6993). 109.txt: with clock and cache fixed, a
+ * backboardd frame is 15-35 full-screen passes (14-33M pixels) and each job
+ * still waits 6-15 ms at 1716 MHz - memory-bound. Nothing in this OS votes
+ * DRAM up (Android's mtk_gpu_qos/dvfsrc do). Register map: OPPO MT6993
+ * kernel_device_modules-6.12 drivers/soc/mediatek/mtk-dvfsrc.c mt6993_regs:
+ * BASIC_CONTROL 0x0 (OPP count-1 in [26:20]), SW_REQ 0x18 (DRAM level [15:12],
+ * EMI level [3:0]; mt6993_set_dram_level/set_emi_level), LEVEL 0x5F0,
+ * CUR_TAR_GEAR 0x6AC (DRAM gear [3:0], vcore [10:8]). DT: 10 DRAM OPPs
+ * (opp0 fastest), so request levels 0..9, higher = faster. Read-only unless
+ * x9_ddr_level=N / x9_emi_level=N (1..15) asks for a level. */
+static vm_offset_t dvfsrc;
+static void dvfsrc_setup(void) {
+ dvfsrc=ml_io_map(0x1c100000,0x1000);
+ if(!dvfsrc){printf("X9 DDR: DVFSRC map failed\n");return;}
+ uint32_t basic=rd(dvfsrc,0x0),req=rd(dvfsrc,0x18),level=rd(dvfsrc,0x5f0),gear=rd(dvfsrc,0x6ac);
+ printf("X9 DDR: DVFSRC basic=%08x opp_count=%u sw_req=%08x (dram %u emi %u) level=%08x gear=%08x (dram %u vcore %u)\n",
+  basic,((basic>>20)&0x7f)+1,req,(req>>12)&0xf,req&0xf,level,gear,gear&0xf,(gear>>8)&7);
+ uint32_t ddr=0,emi=0;
+ PE_parse_boot_argn("x9_ddr_level",&ddr,sizeof(ddr));PE_parse_boot_argn("x9_emi_level",&emi,sizeof(emi));
+ if((ddr&&ddr<=15)||(emi&&emi<=15)) {
+  uint32_t v=req;
+  if(ddr&&ddr<=15)v=(v&~(0xfu<<12))|(ddr<<12);
+  if(emi&&emi<=15)v=(v&~0xfu)|emi;
+  wr(dvfsrc,0x18,v);
+  for(int i=0;i<20;i++)pause_ms();
+  gear=rd(dvfsrc,0x6ac);
+  printf("X9 DDR: SW_REQ %08x -> %08x (x9_ddr_level=%u x9_emi_level=%u) gear now %08x (dram %u vcore %u)\n",
+   req,rd(dvfsrc,0x18),ddr,emi,gear,gear&0xf,(gear>>8)&7);
+ }
+}
 static void gov_thread(void *arg,wait_result_t result) {
  (void)arg;(void)result;
  const uint64_t period_ns=50ull*1000*1000;
@@ -204,6 +234,7 @@ static void gov_thread(void *arg,wait_result_t result) {
  int last_temp=0;
  printf("X9 GPU GOV: start floor=%d(%u kHz) ceiling=%d(%u kHz) slowest=%d period=50ms up>=20%% down<5%%\n",
   gov_floor,opp_khz[gov_floor],gov_ceiling,opp_khz[gov_ceiling],gov_slowest);
+ dvfsrc_setup();
  for(;;) {
   gov_sleep_ms(50);
   if(channel_uncertain){printf("X9 GPU GOV: mailbox uncertain; governor stops\n");break;}
@@ -238,9 +269,10 @@ static void gov_thread(void *arg,wait_result_t result) {
   busy_acc+=util;ticks++;
   uint64_t now=mach_absolute_time(),ns=0;absolutetime_to_nanoseconds(now-last_log,&ns);
   if(ns>=2000000000ull) {
-   printf("X9 GPU GOV: util_avg=%llu%% temp=%d idx=%d gpu=%u kHz stack=%u kHz commits=%llu limiter=%u/%u ceiling=%u floor=%u actual=%u/%u kHz oppidx=%d/%d restores=%llu\n",
+   const uint32_t gear=dvfsrc?rd(dvfsrc,0x6ac):0;
+   printf("X9 GPU GOV: util_avg=%llu%% temp=%d idx=%d gpu=%u kHz stack=%u kHz commits=%llu limiter=%u/%u ceiling=%u floor=%u actual=%u/%u kHz oppidx=%d/%d restores=%llu ddr_gear=%u vcore=%u\n",
     ticks?busy_acc/ticks:0,last_temp,gov_index,gov_index>=0?opp_khz[gov_index]:0,st.cur_fstack,commits,st.cur_c_limiter,st.cur_f_limiter,st.cur_ceiling,st.cur_floor,
-    st.cur_fgpu,st.cur_fstack,st.cur_oppidx_gpu,st.cur_oppidx_stack,restores);
+    st.cur_fgpu,st.cur_fstack,st.cur_oppidx_gpu,st.cur_oppidx_stack,restores,gear&0xf,(gear>>8)&7);
    last_log=now;busy_acc=ticks=0;
   }
  }
