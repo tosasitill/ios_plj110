@@ -26,13 +26,17 @@
   + `X9RenderDeferredCache=128u`。plugin 268(`X9PanVKMemory.c`): caps 有位且 `X9_DEFER_CACHE=1` 未设时 defer;
   `X9 PANVK SUBMIT` 行加 `cache=deferred clean (x9dc)`;`X9 PANVK CACHE RANGE` 行尾改注 deferred。allowlist 头
   重生成为 268 并随 12af59f 提交。
-- **BUILT 3 images(全参数集,cm4 的完整 --boot-arg 组)**: x9-rev252cn boot
-  0ef2948b2e219a7c30a7ab0934774d116e049269b5e69e47ca2a54f65fb9d6cf(基线,两特性关,验无回归)/ x9-rev252cn-dc
-  08e933b5475853964a05edffed2bc2fd6acc29571382181ba24032f51de1d707(x9dc=1)/ x9-rev252cn-dc-if
-  fdccad7d3eeaa2e84e502c08c360eae283f5f5d674a2ca5638dff6994da8762f(x9dc=1 x9if=1)。kernel sha256: cn
-  a8847bd1...、cn-dc 32ce3feb...、cn-dc-if cd577716...。plugin package: x9/out/x9-rev252cn/plugin-package
-  (mailbox.json 70ed6964...)——`X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/x9-rev252cn` 一次,
-  之后三个镜像都能用(plugin 268 对基线内核自动回退内联 flush)。
+- **BUILT 3 images(全参数集,cm4 的完整 --boot-arg 组;101.txt 后重建,见下)**: x9-rev252cn boot
+  3418349337d4e616392bb07a...(基线,两特性关,验无回归)/ x9-rev252cn-dc 4ec27a781ce93231...(x9dc=1)/
+  x9-rev252cn-dc-if cdb2f5665500ae7c...(x9dc=1 x9if=1)。plugin package: x9/out/x9-rev252cn/plugin-package
+  ——`X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/x9-rev252cn` 写一次,之后三个镜像都能用
+  (plugin 268 对基线内核自动回退内联 flush;101.txt 第一次卡 logo 就是没写 mailbox,第二次写好了,装包
+  `install result errno=0`、`active plugin=X9GeneralMetal268`、discovery armed 都正常)。
+- **101.txt 修复(commit dcec9a1)**: 第二次上机首个 GPU job(submission 1)在 `user-io-prepare` uncertain
+  ——我把 `g->producer` 提交放在了 user-io 校验之前,而该校验比较的是"user-io producer 字 == g->producer
+  (本 packet 替换前的旧值)",0≠32 必失配。修正:producer 提交挪到 `stream-publish`(与 user-io 写入同一步),
+  reap 不提交;parked-resume depth-1 流程已人工核对自洽(va 与 producer 都等于上一个 job 的 expected)。这影响
+  全部三支镜像(split 无条件),所以三支都重建了,哈希以上面为准。
 - **本机 .local/dxb/xnu 树的机器本地改动**(不在 git,重建环境需重做): (1) EXTERNAL_HEADERS/corecrypto/ccmd5.h
   从 .local/x9/work/legacy-import/xnu_x9/refer/corecrypto-2023/ 恢复——cm6 会话曾复制过它,后来的树刷新把
   untracked 文件洗掉了,导致 SweetX9NetworkStack 从头编译报 corecrypto/ccmd5.h not found(cm2-cm4 的日志能编
