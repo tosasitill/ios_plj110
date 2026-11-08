@@ -18,6 +18,13 @@
   dictation 链拖慢, 见 30-42.txt)使 down/up 处理错序。我们的 x9_kbd_dictation 种子(每次开机把 cfprefsd 写回的
   bplist 换成 XML, 原键丢弃, 备份 .x9-before-seed.plist)与 x9_siri_off(launchd.plist 32 处 Mach 服务改名)
   都不直接碰这条路径, 但种子会抹掉用户键盘设置(含 QuickPath 等), 列为待排除项。
+- **102.txt(USER: 键盘弹出后第一下点 123 也打不开)**: 实测 Spotlight 30.4 s exec, 34-36 s 点搜索条, 39.9 s 首次点
+  (71,2442) 无效, 之后 45-73 s 在 (50-135, 2395-2463) 连点 ~35 次; HID 依旧单指成对。→ "先前触摸条目泄漏" 排除。
+- 实测(反汇编 `-[UIKeyboardLayoutStar downActionFlagsForKey:]` 0x1897f3c10): More 键 = interactionType **11** → 固定
+  flags 0x24(含 bit 5 切面)。唯一例外在函数开头: `[key visible]==NO` 或 `stateForKey:==1`(disabled)→ flags 0。
+  所以 123 无效的剩余可能: (a) 命中测试没落到 More 键; (b) 该键 visible=NO / state=disabled; (c) 按下时
+  `_extendedTouchInfoMap` 计数≠1(非泄漏型, 如 down/up 同批处理)。下一问 USER: 按 123 时键是否变暗高亮(高亮=命中且
+  未禁用 → 查 c), 地球键/删除键是否有效。
 - 下一步(无需构建的设备判别): (1) 键盘弹出后**先不碰任何键**, 第一下就点 123 —— 能开 → 泄漏型; 不能 → 别的门。
   (2) 按住 123 不放 ~1 s 看是否在按住时切到数字面。 (3) 换 App(备忘录/设置搜索)试。 结果决定: 泄漏型 → 查
   哪类触摸没被 clear(候选: 键盘出现动画期间按下的触摸、系统手势取消); 否则抓 Spotlight 主线程样本
