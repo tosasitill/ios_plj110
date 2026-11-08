@@ -30,6 +30,20 @@
 - 下一步: 需要一次包含开/关 app 时刻的完整日志; 之后按时间抓该帧的 draw(x9vf 机制只按固定 uptime 触发,
   参数上限 607 B, 需要改成按 transition 触发或放宽)。
 
+## HANDOFF 2026-11-08 (58): rev252ct BUILT(plugin 273)= 键盘探针 + 接缝探针一起, 未上机; 取代 rev252cs
+
+- 接缝探针(96f77f8, x9/metal/General/X9TileProbe.inc, 由 NativeBridgeMetalFrontend.mm include; 令牌 x9tile=1):
+  只针对宽或高 250..270 px 的纹理, `X9 TILEPROBE <proc>[pid]:` 记录创建(device/heap/on-buffer/on-iosurface/
+  linear: 尺寸/格式/类型/usage/options/offset/row/REFUSED)、每次 replaceRegion 与 blit buffer→texture、
+  texture→texture 上传(region/行距/源偏移/结果), 以及每种不同的 sampler(min/mag/mip/s/t/normalized)。直写
+  /dev/console, 600 行上限; 行为不变。判读: 若 CA tile 纹理是 258 宽(带 border)且边缘列的上传 REFUSED/缺失 →
+  (a) 边缘 texel 坏; 若上传都 ok 且 sampler s/t=0(ClampToEdge)→ 查 (b) quad 接缝/光栅化。
+- 键盘探针同 rev252cs(09674f5)。
+- BUILT(Mac): x9/out/x9-rev252ct boot_sha256 **c5b902cb28d674191d72c4769ebf35afd1eaf8b992da855ae2b9021fd6519572**,
+  参数 = rev252cs + x9tile=1; allowlist fdb87fd。mailbox: `X9_SERIAL=<serial> python3 x9/mailbox/update.py
+  x9/out/x9-rev252ct`。
+- 测试: Spotlight 打几个字母 → 点 123 ×3-5 → 开关任意 app ×3-5 → 拉日志。
+
 ## HANDOFF 2026-11-08 (57): 123 根因链收窄到"当前键盘面没有 more-alternate 属性"; rev252cs(plugin 272)BUILT 未上机
 
 - USER: 怀疑数字面在键盘数据里不存在, 新加简体中文也切不过去, 认为与听写处理有关。
