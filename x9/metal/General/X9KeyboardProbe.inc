@@ -16,6 +16,7 @@
 #include <objc/message.h>
 #include <stdarg.h>
 #include <mach-o/dyld.h>
+#include <dlfcn.h>
 #include <CoreGraphics/CoreGraphics.h>
 
 static int x9kbd_lines;
@@ -110,6 +111,32 @@ static void x9kbd_send(id self, SEL _cmd, id key, unsigned long long actions, id
   x9kbd_log("  more-branch trackpad=%d rebuilding=%d chooser=%d keyboard='%s' kbname='%s' alt='%s' altTree=%s",
       x9kbd_bool(self, "_isTrackpadMode"), x9kbd_bool(self, "_isRebuilding"), chooser,
       x9kbd_str(bname), x9kbd_str(x9kbd_ivar(self, "_keyboardName")), x9kbd_str(alt), sub ? "present" : "nil");
+  // -[UIKBTree alternateKeyplaneName] (20H392): more-alternate-small-display when
+  // +[UIKeyboardLayout _showSmallDisplayKeyplane] (= _AXSLowercaseKeyboardDisplayEnabled),
+  // then more-alternate, else the plane's OWN name -> setKeyplaneName: is a no-op.
+  static int done;
+  if (done++ < 3) {
+   SEL sStr = sel_registerName("stringForProperty:"), sDyn = sel_registerName("dynamicLayout"),
+       sSubs = sel_registerName("subtrees"), sName = sel_registerName("name");
+   id mas = [plane respondsToSelector:sStr] ? ((id (*)(id, SEL, id))objc_msgSend)(plane, sStr, @"more-alternate-small-display") : nil;
+   id ma = [plane respondsToSelector:sStr] ? ((id (*)(id, SEL, id))objc_msgSend)(plane, sStr, @"more-alternate") : nil;
+   id sas = [plane respondsToSelector:sStr] ? ((id (*)(id, SEL, id))objc_msgSend)(plane, sStr, @"shift-alternate-small-display") : nil;
+   id sa = [plane respondsToSelector:sStr] ? ((id (*)(id, SEL, id))objc_msgSend)(plane, sStr, @"shift-alternate") : nil;
+   int dyn = [board respondsToSelector:sDyn] ? ((BOOL (*)(id, SEL))objc_msgSend)(board, sDyn) : -1;
+   int (*lower)(void) = (int (*)(void))dlsym(RTLD_DEFAULT, "_AXSLowercaseKeyboardDisplayEnabled");
+   x9kbd_log("  plane props more-alt-sd='%s' more-alt='%s' shift-alt-sd='%s' shift-alt='%s' dynamicLayout=%d axLowercase=%d",
+       x9kbd_str(mas), x9kbd_str(ma), x9kbd_str(sas), x9kbd_str(sa), dyn, lower ? lower() : -1);
+   NSArray *subs = [board respondsToSelector:sSubs] ? ((NSArray *(*)(id, SEL))objc_msgSend)(board, sSubs) : nil;
+   char line[400] = {0}; size_t o = 0;
+   for (id t in subs) {
+    id n = [t respondsToSelector:sName] ? ((id (*)(id, SEL))objc_msgSend)(t, sName) : nil;
+    int w = snprintf(line + o, sizeof(line) - o, " '%s'", x9kbd_str(n));
+    if (w < 0 || o + (size_t)w >= sizeof(line) - 1) { x9kbd_log("  keyboard subtrees:%s", line); o = 0; line[0] = 0;
+     w = snprintf(line, sizeof(line), " '%s'", x9kbd_str(n)); }
+    o += (size_t)(w > 0 ? w : 0);
+   }
+   x9kbd_log("  keyboard subtrees(%lu):%s", (unsigned long)subs.count, line);
+  }
  }
  ((void (*)(id, SEL, id, unsigned long long, id))x9kbd_orig_send)(self, _cmd, key, actions, ctx);
  x9kbd_log("  after sendDown plane='%s'", x9kbd_str(x9kbd_ivar(self, "_keyplaneName")));
