@@ -1,3 +1,25 @@
+## HANDOFF 2026-11-08 (57): 123 根因链收窄到"当前键盘面没有 more-alternate 属性"; rev252cs(plugin 272)BUILT 未上机
+
+- USER: 怀疑数字面在键盘数据里不存在, 新加简体中文也切不过去, 认为与听写处理有关。
+- 实测(反汇编 20H392): `-[UIKBTree alternateKeyplaneName]` 0x189789834 = 若 `+[UIKeyboardLayout
+  _showSmallDisplayKeyplane]` 取 `more-alternate-small-display`, 否则/取不到则 `more-alternate`, **都没有就返回
+  本面自己的名字** → setKeyplaneName: 同名无变化 = 103.txt 现象。`_showSmallDisplayKeyplane` = libAccessibility
+  `_AXSLowercaseKeyboardDisplayEnabled() != 0`(dsc stub 0x18dbd4170 → 0x191979c74;"显示小写键", 默认开),
+  它也解释了面名后缀 `-small-display`。
+- 实测: 全 UIKitCore 只有 `_stringForAttributeName` 和 `alternateKeyplaneName` 引用 MoreAlternate(-SmallDisplay)
+  属性名(adrp 0x1d5bdc000 +2232/+2240), 没有任何代码写/删它 → 属性只来自 TextInputUI 加载的布局数据
+  (os20H392 TextInputUI.framework/KBLayouts_iPhone.dat / KBLayouts_Dynamic.dat, 编码过, strings 看不到面名)。
+  所以 UIKit 里的听写代码不会直接抹掉它; 听写只有在影响"选哪个键盘布局名"时才可能相关(待 kbname 证实)。
+- 推断(未验证): 屏幕 418.7x920 pt 不是任何真 iPhone 尺寸, 表情面名 `17613_PortraitTruffle_...` 说明选了
+  Plus 家族; 可能走了 dynamic layout(setKeyplaneName: 开头的 `[_keyboard dynamicLayout]`), 生成的面缺少
+  more-alternate。
+- rev252cs 探针(09674f5)在 rev252cr 基础上, More 分支前 3 次另打: 本面 more-alt-sd/more-alt/shift-alt-sd/
+  shift-alt 属性、`[_keyboard dynamicLayout]`、axLowercase、`_keyboard` 全部子树(面)名。
+- BUILT(Mac): x9/out/x9-rev252cs boot_sha256 **360875d65c7604df3706e65af9967879062e0d49da1df43842fda8fd018abec9**,
+  allowlist 1da90ff。rev252cr 作废(被 cs 取代)。mailbox: `X9_SERIAL=<serial> python3 x9/mailbox/update.py
+  x9/out/x9-rev252cs`。
+- 可选对照(不需构建): 设置 > 辅助功能 > 键盘 > 关闭"显示小写键", 再试 123。
+
 ## HANDOFF 2026-11-08 (56): 103.txt(rev252cq 探针)= 123 命中正确、动作正确, 但 setKeyplaneName 后键盘面不变; rev252cr(探针第二轮, plugin 271)构建中
 
 - 实测 103.txt: KBDHOOK 在 Spotlight[274] 36.5 s 装好(其余含 UIKeyboardLayoutStar 的进程也装上, 无副作用)。
