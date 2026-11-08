@@ -26,12 +26,15 @@
   + `X9RenderDeferredCache=128u`。plugin 268(`X9PanVKMemory.c`): caps 有位且 `X9_DEFER_CACHE=1` 未设时 defer;
   `X9 PANVK SUBMIT` 行加 `cache=deferred clean (x9dc)`;`X9 PANVK CACHE RANGE` 行尾改注 deferred。allowlist 头
   重生成为 268 并随 12af59f 提交。
-- **BUILT 3 images(全参数集,cm4 的完整 --boot-arg 组;101.txt 后重建,见下)**: x9-rev252cn boot
-  3418349337d4e616392bb07a...(基线,两特性关,验无回归)/ x9-rev252cn-dc 4ec27a781ce93231...(x9dc=1)/
-  x9-rev252cn-dc-if cdb2f5665500ae7c...(x9dc=1 x9if=1)。plugin package: x9/out/x9-rev252cn/plugin-package
-  ——`X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/x9-rev252cn` 写一次,之后三个镜像都能用
-  (plugin 268 对基线内核自动回退内联 flush;101.txt 第一次卡 logo 就是没写 mailbox,第二次写好了,装包
-  `install result errno=0`、`active plugin=X9GeneralMetal268`、discovery armed 都正常)。
+- **BUILT 3 images(全参数集,cm4 的完整 --boot-arg 组;最终轮,内核三支逐字节一致 c912d585...)**:
+  x9-rev252cn boot bcc37a7b66f064b8...(基线,两特性关,验无回归)/ x9-rev252cn-dc bf57d99c7ef2ce578...(x9dc=1)/
+  x9-rev252cn-dc-if cdb2f5665500ae7c...(x9dc=1 x9if=1)。**plugin 构建非确定性**(Rust,每跑一次 plugins 二进制
+  哈希就变),而 allowlist 编译进内核——最终统一:三支内核都按同一份 allowlist(identity f4b2aa27,commit 在树)
+  重编,所以**只需一次 staging**:`X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/x9-rev252cn-dc-if`
+  (设备邮箱现在还是第一轮的 d735c1b3 载荷,与新镜像不配对,必须重写),然后三支镜像随便 boot。往后再出镜像:
+  只跑 `plugins` 一次 + 三次 `kernel`/`boot`(带 --panvk skip),别每支都 `all`。101.txt 第一次卡 logo 是没写
+  mailbox;第二次写好了但内核换轮了——装机 `install result errno=0`、`active plugin=X9GeneralMetal268`、
+  discovery armed 那次都是配对的。
 - **101.txt 修复(commit dcec9a1)**: 第二次上机首个 GPU job(submission 1)在 `user-io-prepare` uncertain
   ——我把 `g->producer` 提交放在了 user-io 校验之前,而该校验比较的是"user-io producer 字 == g->producer
   (本 packet 替换前的旧值)",0≠32 必失配。修正:producer 提交挪到 `stream-publish`(与 user-io 写入同一步),
