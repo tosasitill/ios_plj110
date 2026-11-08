@@ -208,12 +208,51 @@ static int gov_commit(int index) {
  * (opp0 fastest), so request levels 0..9, higher = faster. Read-only unless
  * x9_ddr_level=N / x9_emi_level=N (1..15) asks for a level. */
 static vm_offset_t dvfsrc;
+/* 110.txt (rev252db): basic=00000008 opp_count=1 level=0 gear=0 and the
+ * SW_REQ write changed nothing - DVFSRC was never started. Linux brings it up
+ * through TF-A: mtk_dvfsrc_probe SMC MTK_SIP_VCOREFS_CONTROL (0xC2000506,
+ * SMC64 fast SiP 0x506) cmd MTK_SIP_DVFSRC_INIT=0 with dvfsrc-flag/dvfsrc-vmode
+ * (absent in the captured DT -> 0,0; a0=0 ok, a1=dram_type). Per
+ * mtk-dvfsrc-start.c the INIT stage "locks high opp" until late-init sends
+ * MTK_SIP_DVFSRC_START=1, after which DVFSRC free-runs on the votes.
+ * x9_dvfsrc=1: INIT only (DRAM held at the high OPP). x9_dvfsrc=2: INIT +
+ * START (then x9_ddr_level/x9_emi_level votes apply). */
+static uint64_t dvfsrc_smc(uint64_t cmd,uint64_t a2,uint64_t a3,uint64_t *a1_out) {
+ register uint64_t x0 __asm__("x0")=0xc2000506;
+ register uint64_t x1 __asm__("x1")=cmd;
+ register uint64_t x2 __asm__("x2")=a2;
+ register uint64_t x3 __asm__("x3")=a3;
+ register uint64_t x4 __asm__("x4")=0;
+ register uint64_t x5 __asm__("x5")=0;
+ register uint64_t x6 __asm__("x6")=0;
+ register uint64_t x7 __asm__("x7")=0;
+ __asm__ volatile("smc #0":"+r"(x0),"+r"(x1),"+r"(x2),"+r"(x3),"+r"(x4),"+r"(x5),"+r"(x6),"+r"(x7)::"memory");
+ if(a1_out)*a1_out=x1;
+ return x0;
+}
+static void dvfsrc_dump(const char *when) {
+ uint32_t basic=rd(dvfsrc,0x0),req=rd(dvfsrc,0x18),level=rd(dvfsrc,0x5f0),gear=rd(dvfsrc,0x6ac);
+ printf("X9 DDR: DVFSRC %s basic=%08x opp_count=%u sw_req=%08x (dram %u emi %u) level=%08x gear=%08x (dram %u vcore %u)\n",
+  when,basic,((basic>>20)&0x7f)+1,req,(req>>12)&0xf,req&0xf,level,gear,gear&0xf,(gear>>8)&7);
+}
 static void dvfsrc_setup(void) {
  dvfsrc=ml_io_map(0x1c100000,0x1000);
  if(!dvfsrc){printf("X9 DDR: DVFSRC map failed\n");return;}
- uint32_t basic=rd(dvfsrc,0x0),req=rd(dvfsrc,0x18),level=rd(dvfsrc,0x5f0),gear=rd(dvfsrc,0x6ac);
- printf("X9 DDR: DVFSRC basic=%08x opp_count=%u sw_req=%08x (dram %u emi %u) level=%08x gear=%08x (dram %u vcore %u)\n",
-  basic,((basic>>20)&0x7f)+1,req,(req>>12)&0xf,req&0xf,level,gear,gear&0xf,(gear>>8)&7);
+ dvfsrc_dump("boot");
+ uint32_t mode=0;PE_parse_boot_argn("x9_dvfsrc",&mode,sizeof(mode));
+ if(mode==1||mode==2) {
+  uint64_t a1=0,r=dvfsrc_smc(0,0,0,&a1);
+  for(int i=0;i<20;i++)pause_ms();
+  printf("X9 DDR: SMC VCOREFS INIT -> a0=%lld dram_type=%llu\n",(long long)r,a1);
+  dvfsrc_dump("after-init");
+  if(mode==2&&!r) {
+   r=dvfsrc_smc(1,0,0,NULL);
+   for(int i=0;i<20;i++)pause_ms();
+   printf("X9 DDR: SMC VCOREFS START -> a0=%lld\n",(long long)r);
+   dvfsrc_dump("after-start");
+  }
+ }
+ uint32_t req=rd(dvfsrc,0x18),gear;
  uint32_t ddr=0,emi=0;
  PE_parse_boot_argn("x9_ddr_level",&ddr,sizeof(ddr));PE_parse_boot_argn("x9_emi_level",&emi,sizeof(emi));
  if((ddr&&ddr<=15)||(emi&&emi<=15)) {
