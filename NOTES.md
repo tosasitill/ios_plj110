@@ -30,6 +30,30 @@
 - 下一步: 需要一次包含开/关 app 时刻的完整日志; 之后按时间抓该帧的 draw(x9vf 机制只按固定 uptime 触发,
   参数上限 607 B, 需要改成按 transition 触发或放宽)。
 
+## HANDOFF 2026-11-08 (61): 106.txt(rev252cw)结果; GPU stack 被固件降到 260 MHz(真·卡顿主因之一); 123 回退链已符号化; rev252cx 构建中
+
+- 105.txt = 用户误刷 rev252cu(参数无 x9pl/x9sl); 106.txt = rev252cw(x9if x9kbdhook x9tile x9pl x9sl)。
+- 实测 106: x9pl 生效 —— PARK cold 109 vs hit 886(64%→11%), retire_map/unmap=0, live_map≈3300 live_unmap≈800,
+  无 fault。但 RENDER timing wait_us 仍 15-24 ms/job, fps 10-31 → 冷启动只占小头。inflight_max 仍 0。
+  73 s 起 RENDER timing 停止, 74.45 s `gpu_enqueued=1011 gpu_completed=1008`(3 个排队不完成), gpu_defer=198,
+  日志 75.9 s 截止(< 内核 10 s 超时) → 卡死点在 job 执行/回收, 首次出现排队 = x9sl 之后 x9if 配对路径
+  首次可能真正运行(此前从未在硬件上配对过)。推断, 未证实; rev252cx 关 x9if 隔离。
+- **实测 GPU stack 时钟**: 104(浮动调频)GOV stack 728/1716/260 混合; 105/106(x9_gpu_floor_khz=1716000,
+  floor=ceiling)启动 commit 读回 gpu=stack=1716 MHz, 之后**每一行 stack=260000(最低)**, commits=0 ——
+  GPUEB 自己把 OPP 降下来, 而钉死频率时 governor 永不再 commit → 整场 260 MHz。GOV 行的 gpu= 是我们请求值
+  不是读数。修复(f3f94aa): governor 每 50 ms 比对 cur_oppidx_gpu/stack 与 gov_index, 不同就重 commit,
+  GOV 行加 actual=/oppidx=/restores=, 前 6 次 drift 打印。
+- **123 回退链(105/106 nested bt 符号化, 20H392)**: setKeyplaneName('numbers-and-punctuation') →
+  UIKeyboardLayoutStar _didChangeKeyplaneWithContext → UIKeyboardImpl → UIKeyboard _didChangeKeyplaneWithContext:
+  (`[context sizeDidChange]` 为真 → setFrame:)→ UIKeyboard setFrame: → activate → UIKeyboardImpl setFrame:
+  → updateLayoutIfNecessary → updateLayout → finishLayoutChangeWithArguments: →
+  **showKeyboardWithInputMode:renderConfig:inputTraits:screenTraits:splitTraits:reload:** → 重建, 回首面。
+  即: 数字面与字母面尺寸不同 → 被当布局变化重载。真机各面同高。推断: 418.7 pt 非标宽 + Truffle 布局 +
+  "显示小写键"(small-display 面)导致尺寸差; rev252cx 探针打两面 sizeForKeyplane:。用户可先试关"显示小写键"。
+- 实测 backboardd(pid 57)GPU 内存: 104/105 中 resources 1 → ~1900, MiB 700-900, old30s 到 ~1750 个/~690 MiB,
+  预算 1024 MiB(长期存活分配持续累积, 后续查是否泄漏/池化不回收)。
+- rev252cx(构建中): rev252cw 去 x9if/x9tile/x9dc, 加 governor 修复与面尺寸探针, plugin 275(需 mailbox)。
+
 ## HANDOFF 2026-11-08 (60): GPU 优化 #3(x9pl 驻留上下文活体 map/unmap)+ #5(x9sl 无锁 SubmitAsync)BUILT, 未上机
 
 - #3 根因(104.txt): PARK cold 1342 vs hit 739, retire_map 648 / retire_unmap 576 —— 驻留 group 遇 map/unmap 必须
