@@ -76,6 +76,15 @@ static uint64_t render_snoop_probe[2];
 struct RenderParked { X9RenderContext *c; RenderKernelGroup *g; uint64_t root; };
 static RenderParked render_parked;
 static uint64_t render_park_hits,render_park_retires,render_park_cold;
+/* rev252cn diagnostics: retire reasons (101.txt: cold ~55% of submits, the
+ * per-frame map/unmap churn of P1-A). Counted by the why string of
+ * render_park_release_for; everything else lumps into "other". */
+static uint64_t render_park_retire_map,render_park_retire_unmap,render_park_retire_other;
+static void render_park_retire_note(const char *why) {
+ if(why&&!strcmp(why,"map"))render_park_retire_map++;
+ else if(why&&!strcmp(why,"unmap"))render_park_retire_unmap++;
+ else render_park_retire_other++;
+}
 static bool render_park_enabled() {
  static int mode=-1;
  if(mode<0){mode=sweet_x9_arg("x9_gpu_park",0)==1?1:0;IOLog("X9 RENDER PARK: resident group between submits %s (x9_gpu_park)\n",mode?"ON":"off");}
@@ -103,6 +112,7 @@ static bool render_retire_parked(const char *why) {
  return true;
 }
 static bool render_park_release_for(X9RenderContext *c,const char *why) {
+ if(render_parked.g&&render_parked.c==c)render_park_retire_note(why);
  return !render_parked.g||render_parked.c!=c||render_retire_parked(why);
 }
 static RenderKernelGroup *render_group(X9RenderContext *c,uint32_t id) {
@@ -426,6 +436,7 @@ struct RenderJobState {
  uint64_t reach_saved[2],import_bytes[2],full_import_bytes[2];
  uint64_t coherent_skip[2],wc_skip[2],holes_saved[2],scope_skip[2];
  uint64_t scope_uncovered,scope_uncovered_bytes,scope_uncovered_max;
+ uint64_t scope_hold_bytes[2];
  uint64_t dirty_entries,dirty_bytes,dirty_skip_res;
  bool dirty_overflow;
  uint64_t end,next_sync;
@@ -603,9 +614,11 @@ static IOReturn render_submit_publish(RenderJobState *st) {
  for(auto &r:c->resources)if(r.memory) {
   if(r.write_combined){st->wc_skip[0]+=r.bytes;continue;}   // never cached, see X9RenderResource
   if(r.cpu_exposed&&render_scope_skips(st,r)){st->scope_skip[0]+=r.bytes;continue;}
-  if(scope_on&&r.imported&&r.cpu_exposed&&!render_scope_covered(st,r)) {
-   /* rev252cb: imported CPU-exposed BOs that no registered range covers (what the frontend does not name yet). */
-   st->scope_uncovered++;st->scope_uncovered_bytes+=r.bytes;if(r.bytes>st->scope_uncovered_max)st->scope_uncovered_max=r.bytes;
+  if(scope_on&&r.imported&&r.cpu_exposed) {
+   if(!render_scope_covered(st,r)) {
+    /* rev252cb: imported CPU-exposed BOs that no registered range covers (what the frontend does not name yet). */
+    st->scope_uncovered++;st->scope_uncovered_bytes+=r.bytes;if(r.bytes>st->scope_uncovered_max)st->scope_uncovered_max=r.bytes;
+   }else st->scope_hold_bytes[0]+=r.bytes;   /* covered, held by a pending command buffer: maintained anyway */
   }
   if(coherent&&r.cpu_exposed) {
    st->coherent_skip[0]+=r.cache_end>r.cache_begin?r.cache_end-r.cache_begin:0;continue;
@@ -796,6 +809,7 @@ static IOReturn render_submit_reap(RenderJobState *st) {
    st->coherent_skip[1]+=r.write_end>r.write_begin?r.write_end-r.write_begin:0;continue;
   }
   if(r.cpu_exposed&&render_scope_skips(st,r)){st->scope_skip[1]+=r.bytes;continue;}
+  if(st->scope_on&&r.imported&&r.cpu_exposed&&render_scope_covered(st,r))st->scope_hold_bytes[1]+=r.bytes;
   // No CPU consumer exists for a never-exposed allocation. Keep GPU flush,
   // CSG suspend and AS detach above; a fence alone does not return ownership.
   if(!r.cpu_exposed){st->private_skip[1]+=r.bytes;continue;}
@@ -860,8 +874,8 @@ static IOReturn render_submit_reap(RenderJobState *st) {
     count,st->coherent?1:0,coherent_total[0]/count,coherent_total[1]/count);
    IOLog("X9 RENDER cache-manifest: jobs=%llu pre_mapped_spans_avg=%llu post_mapped_spans_avg=%llu pre_holes_saved_avg=%llu post_holes_saved_avg=%llu;all mapped indirect targets included,shared aliases retained\n",
     count,span_total[0]/count,span_total[1]/count,hole_total[0]/count,hole_total[1]/count);
-   IOLog("X9 RENDER PARK: hits=%llu cold=%llu retires=%llu;hit = no AS install/CSG start/suspend/AS remove\n",
-    render_park_hits,render_park_cold,render_park_retires);
+   IOLog("X9 RENDER PARK: hits=%llu cold=%llu retires=%llu retire_map=%llu retire_unmap=%llu retire_other=%llu;hit = no AS install/CSG start/suspend/AS remove\n",
+    render_park_hits,render_park_cold,render_park_retires,render_park_retire_map,render_park_retire_unmap,render_park_retire_other);
    if(x9_gpu_acelite_active)
     IOLog("X9 RENDER SNOOP: GPU->CPU fence probe coherent=%llu stale=%llu;stale>0 means GPU writes do not invalidate CPU lines\n",
      render_snoop_probe[0],render_snoop_probe[1]);
@@ -870,6 +884,11 @@ static IOReturn render_submit_reap(RenderJobState *st) {
    for(unsigned i=0;i<2;i++)hole_total[i]=span_total[i]=0;
    IOLog("X9 RENDER cache-wc: jobs=%llu pre_skip_avg=%llu post_skip_avg=%llu;write-combined BOs need no CPU maintenance\n",
     count,wc_total[0]/count,wc_total[1]/count);
+   static uint64_t hold_total[2]={0,0};
+   hold_total[0]+=st->scope_hold_bytes[0];hold_total[1]+=st->scope_hold_bytes[1];
+   IOLog("X9 RENDER cache-scope-hold: jobs=%llu pre_avg=%llu post_avg=%llu;covered ranges held by pending command buffers, maintained anyway\n",
+    count,count?hold_total[0]/count:0,count?hold_total[1]/count:0);
+   hold_total[0]=hold_total[1]=0;
    uint64_t ss[6];x9_render_scope_stats(ss);
    IOLog("X9 RENDER cache-frontend-scope: jobs=%llu active=%u pre_skip_avg=%llu post_skip_avg=%llu ranges_avg=%llu hold_jobs=%llu table: used=%llu registers=%llu refused=%llu unreg_miss=%llu placeholders=%llu holds=%llu;imported BOs no pending command buffer references (x9_cache_scope)\n",
     count,st->scope_on?1:0,scope_total[0]/count,scope_total[1]/count,scope_entries/count,scope_holds,ss[5],ss[0],ss[1],ss[2],ss[3],ss[4]);

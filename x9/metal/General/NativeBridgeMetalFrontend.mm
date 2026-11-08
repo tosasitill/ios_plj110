@@ -1508,8 +1508,18 @@ static void x9SubmitTimingLog(void) {
   const uint32_t index=(uint32_t)(gCommits.fetch_add(1)+1);self.commitIndex=index;
   if(self.traceGraphUsed)NBLOG(@"X9 GRAPH COMMIT: cb=%llu commit=%u",(unsigned long long)self.traceID,index);
   if(self.traceGeometryUsed)NSLog(@"X9 GEOM COMMIT: cb=%llu commit=%u uptime_us=%llu",(unsigned long long)self.traceID,index,(unsigned long long)self.committedUs);
-  CommitRecord &r=gCommitRing[index%32];
-  r={};r.index=index;r.committedUs=self.committedUs;r.ageUs=self.committedUs-createdUs;r.work=encodedWork;
+ CommitRecord &r=gCommitRing[index%32];
+ r={};r.index=index;r.committedUs=self.committedUs;r.ageUs=self.committedUs-createdUs;r.work=encodedWork;
+ /* rev252cn diagnostics: per-commit draw/pass counts, correlated offline with
+  * the kernel's X9 RENDER timing wait_us to size the per-draw GPU cost. */
+ {
+  static std::atomic<uint64_t> gCommitWorkLogged;
+  const uint64_t logged=gCommitWorkLogged.fetch_add(1)+1;
+  if(logged<=24||!(logged&511))
+   NSLog(@"X9 COMMIT WORK: commit=%u draws=%u passes=%u pixels=%llu dispatches=%u blits=%u",
+    index,encodedWork.draws,encodedWork.passes,(unsigned long long)encodedWork.pixels,
+    encodedWork.dispatches,encodedWork.blits);
+ }
  }
  dispatch_group_enter(_handlers);
  dispatch_group_enter(_schedulingHandlers);

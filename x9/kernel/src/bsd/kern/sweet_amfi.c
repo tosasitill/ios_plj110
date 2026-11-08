@@ -509,6 +509,25 @@ sweet_sandbox_syscall(struct proc *p, int call, user_addr_t arg)
 			sweet_sandbox_ext_ok_on =
 			    sweet_sandbox_boot_arg("x9_sandbox_ext_ok");
 		}
+		/* rev252cn diagnostics: with x9_sandbox_ops=1, dump the first 64
+		 * bytes of the op-5 argument once per boot. The token structure
+		 * libsystem_sandbox passes is unknown here; this dump reveals the
+		 * layout (pointers, lengths) so a real token can be written back
+		 * and tccd's kTCCServicePhotos grant can complete for assetsd. */
+		if (call == 5 && sweet_sandbox_ops_on == 1 &&
+		    !(sweet_sandbox_seen & (1ULL << 62))) {
+			sweet_sandbox_seen |= 1ULL << 62;
+			uint32_t w[16];
+			if (copyin(arg, w, sizeof(w)) == KERN_SUCCESS) {
+				printf("SWEET Sandbox op5 arg: "
+				    "%08x %08x %08x %08x %08x %08x %08x %08x "
+				    "%08x %08x %08x %08x %08x %08x %08x %08x\n",
+				    w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7],
+				    w[8], w[9], w[10], w[11], w[12], w[13], w[14], w[15]);
+			} else {
+				printf("SWEET Sandbox op5 arg: copyin failed\n");
+			}
+		}
 		ret = sweet_sandbox_ext_ok_on ? 0 : ENOENT;
 		sweet_sandbox_op_log(p, call, ret);
 		break;

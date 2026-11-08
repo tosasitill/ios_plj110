@@ -227,8 +227,8 @@ static void gov_thread(void *arg,wait_result_t result) {
   busy_acc+=util;ticks++;
   uint64_t now=mach_absolute_time(),ns=0;absolutetime_to_nanoseconds(now-last_log,&ns);
   if(ns>=2000000000ull) {
-   printf("X9 GPU GOV: util_avg=%llu%% temp=%d idx=%d gpu=%u kHz commits=%llu limiter=%u/%u ceiling=%u floor=%u\n",
-    ticks?busy_acc/ticks:0,last_temp,gov_index,gov_index>=0?opp_khz[gov_index]:0,commits,st.cur_c_limiter,st.cur_f_limiter,st.cur_ceiling,st.cur_floor);
+   printf("X9 GPU GOV: util_avg=%llu%% temp=%d idx=%d gpu=%u kHz stack=%u kHz commits=%llu limiter=%u/%u ceiling=%u floor=%u\n",
+    ticks?busy_acc/ticks:0,last_temp,gov_index,gov_index>=0?opp_khz[gov_index]:0,st.cur_fstack,commits,st.cur_c_limiter,st.cur_f_limiter,st.cur_ceiling,st.cur_floor);
    last_log=now;busy_acc=ticks=0;
   }
  }
