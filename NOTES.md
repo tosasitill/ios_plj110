@@ -8,6 +8,25 @@
 - 推断(未验证): 该层在屏幕空间被拆成 256 px 宽的条带绘制(CA 侧拆分或我们的 metal2vulkan/PanVK 侧),
   相邻条带接缝丢像素(光栅化接缝/采样越界)。缝随层原点而不是屏幕 256 倍数对齐, 更像 draw 级而不是显示
   拷贝级; 与 x9dc/x9if 缓存一致性关系不大(那类错误不会形成规则 256 px 竖缝), 但未 A/B 证伪。
+- USER: 一直都有(不是新回归), 要求先静态分析。
+- 实测(反汇编 dsc-20H392 QuartzCore, Mac ~/x9-kbd-dis/q.dis):
+  - `CA::Render::Image::get_tiled_texture_size` 0x1884aed14: 宽 >255 的图切成 **256 px 宽**的 tile → 与竖缝间距
+    256 px 吻合。CA 用 `TiledImageGeometry::draw_tiles`/`bind_image` 逐 tile 画。
+  - tile 绑定 `Context::bind_image(..., TextureEdgeMode 0, ...)`; `MetalContext::draw` 0x1882cb1d4 把 edge mode
+    0/1/2 映射成 MTLSamplerAddressMode 0(ClampToEdge)/2(Repeat)/4(ClampToZero) → tile 用 **ClampToEdge**(正确)。
+    所以接缝透明只能是 tile 边缘 texel 本身是垃圾/透明, 或相邻 quad 之间有光栅化缝 —— 都在我们的栈里。
+  - `MetalContext::should_tile_image` 0x188339e58: 宽或高 > ctx+2600(`[device maxTextureWidth2D]`), 或 type 24 且
+    +152 > ctx+2608 = max(IOSurfaceGetPropertyMaximum(kIOSurfaceBytesPerRow), maxTextureWidth2D*16) 才切。
+    metal2vulkan `private_properties.rs` maxTextureWidth2D = `limit(TextureSize2D, largest_side)`, 该行不在日志的
+    waived 列表里 → 推断为 Exact=16384, 所以快照多半不是被这条触发; 真正触发路径(TileCache/lanczos 缩小缓存
+    或其它)未定。
+  - metal2vulkan 线性纹理(buffer 背的纹理)在本设备是 `Gap(Textures)`, 对 CA 报 16 B 行对齐(LINEAR_ALIGNMENT),
+    backboardd 在 103.txt 有 418 次 `MESA: WSI pitch not properly aligned`(pan_mod.c: 导入的行距不满足 Mali 对齐
+    → 导入失败)。raw_shadow 计算拷贝 dispatch 用 div_ceil, 不会漏列(该候选排除)。
+- 推断(未验证)候选: (a) tile 纹理的 border 列(CA 每 tile 的边)上传失败/未写 —— 例如窄区域或 16B 对齐行距在
+  PanVK 导入被拒后的回退路径不完整; (b) Mali 上相邻 tile quad 的接缝光栅化; (c) 插值精度。
+- 下一步建议: 在插件前端(backboardd 内就是我们的 MTLDevice)给宽 256..260 的纹理记录创建参数、每次
+  replaceRegion/blit 上传的 region+bytesPerRow+结果、以及绑定时的 sampler, 一次上机就能区分 (a)/(b)。
 - 下一步: 需要一次包含开/关 app 时刻的完整日志; 之后按时间抓该帧的 draw(x9vf 机制只按固定 uptime 触发,
   参数上限 607 B, 需要改成按 transition 触发或放宽)。
 
