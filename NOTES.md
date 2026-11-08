@@ -30,6 +30,24 @@
 - 下一步: 需要一次包含开/关 app 时刻的完整日志; 之后按时间抓该帧的 draw(x9vf 机制只按固定 uptime 触发,
   参数上限 607 B, 需要改成按 transition 触发或放宽)。
 
+## HANDOFF 2026-11-08 (64): USER 确认 108.txt(rev252cy)123 修好、控制中心不卡; GPU 优化 #4 = x9lc BUILT(rev252cz)未上机
+
+- 实测 108(rev252cy): fps avg 17.6(63 窗口, max 38.5); 每 job 维护 pre 16.7 MB / post 14.3 MB, 全是导入
+  IOSurface 整面(import_pre_full_avg = import_pre_avg), pre 1.2-5 ms + post 0.8-2 ms; wait_us 6-12 ms。
+  ACE-Lite 仍搁置(64.txt: 开了即使全维护也坏数据)。
+- x9lc 设计(476ef43, 令牌 x9lc=1): 用 IOSurface 锁协议决定 CPU 缓存维护, 而不是每个 job 都整面 CIVAC。
+  - SweetSurface: 每个非 wrapped、cacheable 的像素映射登记 {task, 用户地址/长度, surface id}(释放时删, 表 1024
+    满则不链接); 新字段 gpuCleanSeed/gpuCleanValid/gpuDirty。trapLock(任意模式)与帧缓冲 present 拷贝/直接
+    扫描读取前调用 sweet_surface_cpu_acquire: gpuDirty 时对整面 DC CIVAC 后清标志。写解锁本来就推进 seed。
+  - 服务: ImportHost(非 WC 导入)时若区间恰在某 IOSurface 映射内则 r.surface_id=该 id。
+  - 引擎 pre: 链接的导入只有 seed 自上次清理后变了(CPU 写过)才 CIVAC, 成功后记 seed; post: 链接的可写导入
+    不再 invalidate, 只标 gpuDirty。其余导入(no-copy 主机缓冲等)维持原全量维护。
+  - 新统计行 `X9 RENDER cache-lc: pre_skip_avg post_skip_avg seed_clean_avg`。
+  - 风险: 不经 IOSurfaceLock 的 CPU 读写(例如前端 getBytes 走主机指针)可能看到旧数据/马赛克 → A/B 对比
+    rev252cy。
+- BUILT(内核-only, 插件 275 不变): x9/out/x9-rev252cz boot_sha256 **fea9ecb5de0ab47a50473c424defccc2e6cdb0bf10687da55bd6c5d3f22a8167**
+  (= rev252cy 参数 + x9lc=1)。
+
 ## HANDOFF 2026-11-08 (63): rev252cy BUILT = 呈现真机屏幕 1242x2688(414x896 pt @3x)修 123; 未上机
 
 - USER 选择"真机屏幕尺寸"方案(而非插件内补丁)。
