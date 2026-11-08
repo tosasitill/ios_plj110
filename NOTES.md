@@ -1,3 +1,24 @@
+## HANDOFF 2026-11-08 (56): 103.txt(rev252cq 探针)= 123 命中正确、动作正确, 但 setKeyplaneName 后键盘面不变; rev252cr(探针第二轮, plugin 271)构建中
+
+- 实测 103.txt: KBDHOOK 在 Spotlight[274] 36.5 s 装好(其余含 UIKeyboardLayoutStar 的进程也装上, 无副作用)。
+  Spotlight 键盘布局 418.7x243 pt, 面 `small-letters-small-display`, More-Key `it=11 dt=18 visible=1 state=2
+  frame=2.0,175.0 51.7x49.0`。所有 16 次 123 按压: `hit 'More-Key'`、`downActionFlags=0x24`、`sendDown
+  actions=0x24 infos=1` —— 命中/可见/状态/计数全部满足, 但 `after sendDown plane='small-letters-small-display'`
+  不变。表情键切 `17613_PortraitTruffle_iPhone-Emoji-Keyboard_Letters` 正常, 地球键 0x1085 正常。
+  → 104 之前的推断(命中失败/不可见/禁用/计数)全部**证伪**; 问题在 More 分支内部或 setKeyplaneName: 自身。
+- 实测(反汇编 setKeyplaneName: 0x188ff97c0): 第一道门 `_isTrackpadMode`(BOOL, ivar 偏移指针 0x1e1d8e9cc)非零
+  → 直接返回。trackpad 由 setTrackpadMode:animated: 写, 调用者: willBegin/didEndIndirectSelectionGesture:
+  (来自 _UIKeyboardTextSelectionInteraction panningGesture:/oneFingerForcePress:/oneFingerForcePan:)、
+  will/didEndTrackpadModeForServerSideDictation(UIDictationController clearKeyboardTrackpadModeIfNeeded /
+  UIDictationView finishReturnToKeyboard 调 didEnd)、didRotate。推断(未验证): trackpad 卡在 YES 会让切面静默
+  失败; 但 performHitTestForTouchInfo 也读这个标志而命中正常, 所以也可能是 More 分支里 alternateKeyplaneName/
+  subtreeWithName/ShiftRendering==31→showGestureKeyboardIntroductionIfNeeded 这几步。
+- rev252cr 探针(commit 8e198db): More 分支打印 trackpad/rebuilding/isShiftKeyPlaneChooser/keyboard 名/alt 名/
+  alt 子树是否存在; 每次 setKeyplaneName: 打印参数与前后值; setTrackpadMode:animated: 打印参数与 UIKitCore
+  去 slide 返回地址(可用 ~/x9-kbd-dis/dis.py 符号化)。字母键不再打 downActionFlags; 行数上限 800。
+- 构建: Mac `/tmp/x9-rev252cr.sh`(bash 数组 + Framework python + homebrew llvm PATH), `build.py all --revision 271
+  --name x9-rev252cr`, 参数同 rev252cq。plugin 变了 → 先 mailbox 重写再 boot。
+
 ## HANDOFF 2026-11-08 (55): 123 键诊断探针 x9kbdhook=1 (plugin 270) → rev252cq 构建中
 
 - USER(102.txt 后): 按住 123 **不变暗/不高亮**; 123 键不是灰的; 地球键能切、删除能删、旁边表情键能点;
