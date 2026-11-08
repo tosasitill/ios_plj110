@@ -1,16 +1,24 @@
 # X9 native GPU backend
 
-The MT6993 backend uses real CSF shader execution, separately from the older
-G57 job-slot and CPU rasterizer code in the parent directory. The current
-hardware baseline for system Metal plus the private tile is pan166.
-Pan167 verifies full-frame copies but publishes none; pan168 is the next build
-candidate for workgroup batching. Pan164 hung without a logo in the owner attempt.
-Pan165 restores the validated display path: the owner confirms normal desktop,
-and the capture shows continuing frames. Its plugin rejected boot mode2, so
-no user compute or offscreen copy ran. Pan166 fixes the plugin mode parser.
-Its owner capture confirms normal
-desktop, eight root/UID501 Metal submissions and a successful private desktop
-tile copy, including all2048 pixels, all guards and complete GPU power cleanup.
+**Current state (see `../../NOTES.md` for the live handoff).** The desktop is
+rendered by the GPU. Path: backboardd -> Apple Metal API -> the
+`X9GeneralMetal<rev>` plugin (metal2vulkan runtime + AIR frontend) -> PanVK
+(`X9PanVK<rev>`, Mesa with `x9/metal/General/panvk/*.c`) -> the kernel's
+`X9Render*` IOKit user client -> a resident CSF render engine on the MT6993
+Mali (persistent MCU session, 8 CSG slots, parked render group, async
+submission, live map/unmap, IOSurface-lock-driven CPU cache maintenance).
+Plugins ship through the mailbox (`../mailbox/README.md`); current revision 275.
+Typical figures: 17-22 fps, GPU stack pinned at 1716 MHz, per-job wait
+6-15 ms (memory-bandwidth bound; DVFSRC bring-up in progress).
+
+Known gaps: CSG slots are bound per process until the device closes (the 9th
+client fails), a 256 px-period vertical seam artefact during app open/close,
+no hardware vsync.
+
+The sections below are the **historical pan166-pan171 bring-up** of the
+compute/private-tile path and the first general-renderer design. They are kept
+for the ABI and cache-ownership reasoning; pan numbers and "candidate" wording
+are obsolete (the project now uses `rev252xx` names).
 
 ## Verified system compute
 

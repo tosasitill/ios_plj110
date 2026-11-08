@@ -1,45 +1,44 @@
-# X9 Metal update mailbox
+# X9 plugin mailbox
 
-The mailbox is a device-specific reserved area composed of the safe slices in
-`mailbox-manifest.json`. Both Android files remain pinned and immutable. Only
-listed slices may be used; the other parts overlap historical reservations.
-The manifest and both files are necessary inputs for all later updates.
+The Metal/PanVK plugin bundles are not in the boot image. They are delivered
+through a device-specific reserved area (the safe slices listed in
+`mailbox-manifest.json`) backed by two pinned, immutable Android files. Only
+listed slices are ever written; the manifest and both files are inputs for every
+later update.
 
-A candidate includes its immutable extent map, the corresponding protected
-reservations, and an exact file/length/SHA-256 allowlist. The payload is not in
-the boot image. On XNU startup, before original launchd, the kernel verifies
-all mailbox file contents against that allowlist, installs absent versioned
-plugin files through HFS, then checks the installed files before enabling Metal
-discovery. Existing conflicting files are preserved. Temporary files with the
-reserved `.x9-update-tmp` suffix may be removed on a retry. A failed update
-leaves discovery disabled. Booting a candidate that already has exact files
-installed does not require the mailbox.
+## Contract
 
-With Android running and the device connected, stage a candidate built with
-this mailbox format:
+A candidate carries its extent map, the protected reservations and an exact
+path/length/SHA-256 allowlist (`x9/kernel/generated/x9_render_external_manifest.h`,
+matching `plugin-package/mailbox.json`). At XNU startup, before the original
+launchd, the kernel verifies the mailbox contents against that allowlist,
+installs absent versioned plugin files through HFS, then re-checks the installed
+files before enabling Metal discovery. Existing conflicting files are kept;
+leftover `.x9-update-tmp` files may be removed on retry. A failed update leaves
+discovery disabled. A candidate whose plugin files are already installed
+exactly does not need the mailbox.
 
+## When to stage
+
+Only when a build produced a **new plugin package** (a new `--revision` or
+changed plugin hashes; plugin rebuilds are not byte-reproducible). A kernel-only
+rebuild with an unchanged allowlist header needs no staging. A kernel is paired
+with exactly one plugin payload: booting it against a mailbox holding another
+payload disables Metal (black or stuck-at-logo screen).
+
+## Staging (Android running, device attached)
+
+```bash
+X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>
 ```
-python3 x9/mailbox/update.py <candidate-dir> --serial "$X9_SERIAL"   # root preflight: tools/check_plaintext_root.py + local.json root_manifest
-```
 
-The updater verifies root and mailbox identity, pin and immutable status and
-full mappings; invalidates the commit marker; writes only mapped mailbox
-slices with old-content checks and raw readback; then publishes the marker.
-It does not scan the iOS root volume or write a boot partition. A candidate's
-built-in allowlist must match its `plugin-package/mailbox.json`; future plugin
-bytes require a new candidate with its new hashes. Manual boot flashing and
-actual XNU execution remain required. Keep the current log and root backups.
+The root preflight is never skipped: by default it runs
+`x9/tools/check_plaintext_root.py` against `root_manifest` from
+`x9/build/local.json` (serial, pin+immutable, inode, FIEMAP, userdata geometry,
+dm route, live HFS UUID/geometry). `--root-manifest` or `--root-check <script>`
+override it. The updater verifies mailbox identity, invalidates the commit
+marker, writes only mapped slices with old-content checks and raw readback, then
+publishes the marker. It never scans the iOS root volume or writes a boot
+partition. The owner then boots the candidate's `boot.img` by hand.
 
-The current payload is the pan184 plugin set. A hardware run of pan183 already
-proved the install-and-verify path on device (marker published, files
-installed, hashes re-checked, discovery armed) and completed four GPU
-submissions, but device creation still failed; no desktop frame has been
-produced by the GPU yet.
-
-Root preflight: the old generated `check-root.sh` was not present in the
-supplied directories. `update.py` now runs `x9/tools/check_plaintext_root.py`
-against the private root manifest (`--root-manifest`, default `root_manifest`
-in `x9/build/local.json`) and derives the device's `pinfile` from it;
-`--root-check <script>` substitutes another verified preflight. The check is
-never skipped. `x9/build/build.py all --revision N` produces a candidate
-directory this updater accepts.
+Current plugin revision: **275** (`X9GeneralMetal275`, `X9PanVK275`).

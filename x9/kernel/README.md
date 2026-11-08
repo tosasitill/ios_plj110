@@ -39,3 +39,9 @@ object moves into `recipe.json` with a template.
 
 `x9/xnu-patches/` remains as history of how these sources evolved; it is not
 an input to the build.
+
+## Where things are now
+
+Live status, the current image and its boot arguments are in `../../NOTES.md`.
+Plugin allowlist header (`generated/x9_render_external_manifest.h`) is rewritten
+by `build.py plugins|all`; see `../BUILD.md` and `../mailbox/README.md`.
