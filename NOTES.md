@@ -46,8 +46,12 @@
   是因为当时文件还在;cm5 之后全靠 prebuilt 对象掩盖); (2) libkern/crypto/sweet_aes.c 加了
   sweet_aes_ecb_decrypt(ccmode_ecb,BearSSL 无 ECB 入口,用 CBC-dec 零 IV 逐块实现)+ ccaes_ecb_decrypt_mode()
   访问器——cm6 最终代码改用了 CBC-as-ECB 内联(handoff 49),该 ECB 目前无引用,留着无害。
-- 注意: cm6 的 x9/out/x9-rev252cm6/boot.img(23:54:45)与本会话的渲染编辑共享同一个工作区/对象树,可能夹带
-  rev252cn 中间态;干净的 GPU 验证镜像以这三支 rev252cn 为准。
+- **101.txt 第三轮: install error file=5 errno=17 (EEXIST)** — rootfs 上已有第一轮装的 268 bundle(哈希旧),
+  新载荷 identity 校验通过但装不进去:x9_update_install 从不替换已存在文件。已修(x9_update_install.inc):
+  先对已发布文件做哈希比对——一致则跳过(幂等重装),不一致则 unlink 重发布;PID1 时序与"装后全面验证"不变。
+  三支内核重编为逐字节一致 d6f4d031...,boot: cn 222f417a... / cn-dc 54f89bbe... / cn-dc-if f0255876...。
+  **mailbox 不用重写**(identity f4b2aa27 已在设备、与内核配对,第三次日志的 install error 前置校验已过)——
+  直接 boot 新的 x9/out/x9-rev252cn-dc-if/boot.img,boot 自身会替换旧 bundle。cm6 的旧 boot.img 仍作废。
 - Test 顺序(由用户执行): (1) 基线 cn 上机,跑 97.txt 同款操作,确认 X9 RENDER/METRICS 量级不变、无 DeviceLost
   (plugin 268 + 内联 flush ≈ 267 行为); (2) cn-dc: 看 cache-dirty 行 entries/bytes ≈ 原 pre_bytes、
   `X9 RENDER timing` 的 pre_cache_us 降幅、像素正确性(控制中心/图标网格/滚屏); (3) cn-dc-if: ASYNC window
