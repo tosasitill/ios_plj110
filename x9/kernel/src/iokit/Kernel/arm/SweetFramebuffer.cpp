@@ -2029,6 +2029,7 @@ AppleCLCD::directPresent(const uint8_t *rec)
 	if (x9_display::validate(surface, true, fWidth, fHeight, fLogicalW, fLogicalH,
 	    fOffX, fOffY, &scanout, NULL)) {
 		const uintptr_t va = s->kernelAddress();
+		sweet_surface_cpu_acquire(s);   /* x9lc: GPU output becomes CPU-visible */
 		if (va != 0) {
 			x9_display::mapped_addresses(surface, va, &scanout);
 			/*
@@ -2342,6 +2343,7 @@ AppleCLCD::present(const uint8_t *rec)
 			continue;
 		}
 		uintptr_t src = s->kernelAddress();
+		sweet_surface_cpu_acquire(s);   /* x9lc: GPU output becomes CPU-visible */
 		uint32_t bpe = s->bytesPerElement ? s->bytesPerElement : 4;
 		int x9_format = X9_FMT_BGRA;
 		bool x9_blend = false;

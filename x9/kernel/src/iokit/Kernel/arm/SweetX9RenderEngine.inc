@@ -500,7 +500,7 @@ struct RenderJobState {
  uint64_t cache_bytes[2],shader_ready_seen;
  uint64_t private_skip[2],initial_bytes,fallback_bytes;
  uint64_t reach_saved[2],import_bytes[2],full_import_bytes[2];
- uint64_t coherent_skip[2],wc_skip[2],holes_saved[2],scope_skip[2];
+ uint64_t coherent_skip[2],wc_skip[2],holes_saved[2],scope_skip[2],lc_skip[2],lc_bytes[2];
  uint64_t scope_uncovered,scope_uncovered_bytes,scope_uncovered_max;
  uint64_t scope_hold_bytes[2];
  uint64_t dirty_entries,dirty_bytes,dirty_skip_res;
@@ -691,6 +691,10 @@ static IOReturn render_submit_publish(RenderJobState *st) {
   }
   if(!r.cpu_exposed&&r.initial_cache_clean){st->private_skip[0]+=r.bytes;continue;}
   if(r.cpu_exposed&&r.dirty_maintained){st->dirty_skip_res++;continue;}   /* x9dc: maintained above */
+  /* x9lc: an IOSurface import needs a clean only when the CPU may have written
+   * it since the last one (write unlock moved the seed). */
+  uint32_t lc_seed=0;const bool lc_linked=r.imported&&r.cpu_exposed&&r.surface_id;
+  if(lc_linked&&!sweet_surface_gpu_needs_clean(r.surface_id,&lc_seed)){st->lc_skip[0]+=r.bytes;continue;}
   uint64_t bytes=0;
   IOReturn kr;
   if(r.cpu_exposed) {
@@ -701,6 +705,7 @@ static IOReturn render_submit_publish(RenderJobState *st) {
    if(bytes>bound)return kIOReturnBadArgument;
    st->holes_saved[0]+=bound-bytes;
    if(r.imported){st->import_bytes[0]+=bytes;st->full_import_bytes[0]+=r.bytes;}
+   if(lc_linked){sweet_surface_gpu_cleaned(r.surface_id,lc_seed);st->lc_bytes[0]+=bytes;}
   }else {
    bytes=r.bytes;st->initial_bytes+=bytes;
    if(!bytes)continue;
@@ -876,6 +881,8 @@ static IOReturn render_submit_reap(RenderJobState *st) {
   }
   if(r.cpu_exposed&&render_scope_skips(st,r)){st->scope_skip[1]+=r.bytes;continue;}
   if(st->scope_on&&r.imported&&r.cpu_exposed&&render_scope_covered(st,r))st->scope_hold_bytes[1]+=r.bytes;
+  /* x9lc: no invalidate now; the next CPU acquire of the surface does it. */
+  if(r.imported&&r.cpu_exposed&&r.surface_id){sweet_surface_gpu_wrote(r.surface_id);st->lc_skip[1]+=r.bytes;continue;}
   // No CPU consumer exists for a never-exposed allocation. Keep GPU flush,
   // CSG suspend and AS detach above; a fence alone does not return ownership.
   if(!r.cpu_exposed){st->private_skip[1]+=r.bytes;continue;}
@@ -903,6 +910,7 @@ static IOReturn render_submit_reap(RenderJobState *st) {
   static uint64_t skipped_total[2]={0,0},initial_total=0,fallback_total=0;
   static uint64_t reach_total[2]={0,0},import_total[2]={0,0},full_import_total[2]={0,0};
   static uint64_t coherent_total[2]={0,0};
+  static uint64_t lc_total[2]={0,0},lc_clean_total=0;
   static uint64_t wc_total[2]={0,0};
   static uint64_t dirty_total_entries=0,dirty_total_bytes=0,dirty_total_skip=0;
   static uint64_t scope_total[2]={0,0},scope_entries=0,scope_holds=0;
@@ -923,7 +931,8 @@ static IOReturn render_submit_reap(RenderJobState *st) {
   cache_total[0]+=st->cache_bytes[0];cache_total[1]+=st->cache_bytes[1];ready_mask|=st->shader_ready_seen;
   skipped_total[0]+=st->private_skip[0];skipped_total[1]+=st->private_skip[1];
   initial_total+=st->initial_bytes;fallback_total+=st->fallback_bytes;
-  for(unsigned i=0;i<2;i++){reach_total[i]+=st->reach_saved[i];import_total[i]+=st->import_bytes[i];full_import_total[i]+=st->full_import_bytes[i];coherent_total[i]+=st->coherent_skip[i];wc_total[i]+=st->wc_skip[i];}
+  for(unsigned i=0;i<2;i++){reach_total[i]+=st->reach_saved[i];import_total[i]+=st->import_bytes[i];full_import_total[i]+=st->full_import_bytes[i];coherent_total[i]+=st->coherent_skip[i];wc_total[i]+=st->wc_skip[i];lc_total[i]+=st->lc_skip[i];}
+  lc_clean_total+=st->lc_bytes[0];
   if(elapsed>=2000000000ULL) {
    IOLog("X9 RENDER timing: elapsed_ms=%llu jobs=%llu owner_us=%llu pre_cache_us=%llu storage_us=%llu start_us=%llu wait_us=%llu retire_us=%llu post_cache_us=%llu max_job_us=%llu;averages,not shader time\n",
     elapsed/1000000,count,total[0]/count/1000,total[1]/count/1000,total[2]/count/1000,total[3]/count/1000,
@@ -938,6 +947,8 @@ static IOReturn render_submit_reap(RenderJobState *st) {
     count,reach_total[0]/count,reach_total[1]/count,import_total[0]/count,full_import_total[0]/count,import_total[1]/count,full_import_total[1]/count);
    IOLog("X9 RENDER cache-coherent: jobs=%llu active=%u pre_skip_avg=%llu post_skip_avg=%llu;opt-in skips CIVAC on exposed client bytes,assumes GPU snoop\n",
     count,st->coherent?1:0,coherent_total[0]/count,coherent_total[1]/count);
+   IOLog("X9 RENDER cache-lc: jobs=%llu pre_skip_avg=%llu post_skip_avg=%llu seed_clean_avg=%llu;IOSurface imports kept by the lock protocol (x9lc)\n",
+    count,lc_total[0]/count,lc_total[1]/count,lc_clean_total/count);
    IOLog("X9 RENDER cache-manifest: jobs=%llu pre_mapped_spans_avg=%llu post_mapped_spans_avg=%llu pre_holes_saved_avg=%llu post_holes_saved_avg=%llu;all mapped indirect targets included,shared aliases retained\n",
     count,span_total[0]/count,span_total[1]/count,hole_total[0]/count,hole_total[1]/count);
    IOLog("X9 RENDER PARK: hits=%llu cold=%llu retires=%llu retire_map=%llu retire_unmap=%llu retire_other=%llu live_map=%llu live_unmap=%llu;hit = no AS install/CSG start/suspend/AS remove\n",
@@ -964,7 +975,8 @@ static IOReturn render_submit_reap(RenderJobState *st) {
    unc_n=unc_bytes=unc_max=0;
    scope_total[0]=scope_total[1]=scope_entries=scope_holds=0;
    dirty_total_entries=dirty_total_bytes=dirty_total_skip=0;
-   for(unsigned i=0;i<2;i++)reach_total[i]=import_total[i]=full_import_total[i]=coherent_total[i]=wc_total[i]=0;
+   for(unsigned i=0;i<2;i++)reach_total[i]=import_total[i]=full_import_total[i]=coherent_total[i]=wc_total[i]=lc_total[i]=0;
+   lc_clean_total=0;
    cache_total[0]=cache_total[1]=ready_mask=0;
    skipped_total[0]=skipped_total[1]=initial_total=fallback_total=0;
    began=st->times[7];count=0;bzero(total,sizeof(total));max_ns=0;

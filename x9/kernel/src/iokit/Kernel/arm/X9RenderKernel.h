@@ -42,6 +42,11 @@ struct X9RenderResource {
  bool write_combined;
  uint64_t created;   /* mach_absolute_time() at allocation/import */
  uint64_t host_address;   /* ImportHost: the caller's address (frontend cache scope key), else 0 */
+ /* x9lc: the IOSurface whose pixel mapping this import is exactly inside, else 0.
+  * Such imports follow the IOSurface lock protocol: cleaned only when the
+  * surface seed moved (a CPU write unlock) and invalidated lazily at the next
+  * CPU acquire instead of after every job (SweetSurface.h). */
+ uint32_t surface_id;
 };
 struct X9RenderVMEntry {
  X9RenderResource *resource;

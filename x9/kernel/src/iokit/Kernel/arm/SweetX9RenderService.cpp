@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include "X9RenderKernel.h"
+#include "SweetSurface.h"
 #include <IOKit/IOUserClient.h>
 #include <IOKit/IOService.h>
 #include <IOKit/IOLib.h>
@@ -404,6 +405,13 @@ class SweetX9RenderUserClient : public IOUserClient {
    context->resources[slot].initial_cache_clean=wc||import_wc;
    context->resources[slot].created=mach_absolute_time();
    context->resources[slot].host_address=selector==X9RenderImportHost?request.host_address:0;
+   context->resources[slot].surface_id=0;
+   if(selector==X9RenderImportHost&&!import_wc) {
+    static int lc=-1;
+    if(lc<0){int v=0;lc=PE_parse_boot_argn("x9lc",&v,sizeof(v))&&v==1?1:0;
+     IOLog("X9 RENDER LC: IOSurface lock-protocol cache maintenance %s (x9lc)\n",lc?"ON":"off");}
+    if(lc)context->resources[slot].surface_id=sweet_surface_mapping_id(context->owner,request.host_address,request.bytes);
+   }
    context->allocated_bytes+=request.bytes;
    context->window_allocs++;context->window_alloc_bytes+=request.bytes;
    live_report("periodic",false);

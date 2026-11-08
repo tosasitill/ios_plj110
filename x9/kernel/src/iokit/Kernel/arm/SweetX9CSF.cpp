@@ -17,6 +17,7 @@
 #include "X9Desktop.h"
 #include "X9CSFResident.h"
 #include "X9RenderMemory.h"
+#include "SweetSurface.h"
 extern "C" int sweet_early_is_x9(void);
 extern "C" int sweet_x9_arg(const char *name, int def);
 extern "C" void sweet_x9_csf_prepare(void);
