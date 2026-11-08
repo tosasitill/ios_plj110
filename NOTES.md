@@ -1,3 +1,28 @@
+## HANDOFF 2026-11-08 (51): 开机 1970 根因查清(未改代码)= 内核从无 RTC 读取路径, 日历恒从 epoch 0 起步; 修复 = pwrap 读 MT6687 RTC
+
+- 用户报告: 每次开机时间跳回 1970。结论(代码证据, 全部可复查): XNU 日历初始化链
+  `clock_initialize_calendar()` (.local/dxb/xnu/osfmk/kern/clock.c:1032) → `PEGetUTCTimeOfDay()`
+  (iokit/Kernel/IOPlatformExpert.cpp:1363) → `IOPlatformExpert::getGMTTimeOfDay()` **基类默认 return 0**
+  (IOPlatformExpert.cpp:393)。X9 的 SweetPlatformExpert 没有覆写它; 271 个补丁谱系 + kernel/src overlay
+  中 grep `getGMTTimeOfDay|getUTCTimeOfDay|setUTCTimeOfDay` 0 处实现——开机时间自移植第一天起就是
+  1970-01-01 00:00:00 UTC + uptime。bsd 侧 `inittodr(0)` (kern_time.c:243) 只做负值校验, 从不设时。
+- SweetPlatformExpert.cpp:40 的 `publishResource("IORTC",this)`(dali0210)只是 readiness:
+  IOStartIOKit.cpp:70 `IOKitInitializeTime` 会等 IORTC 资源最长 30 s, 发布它只是消掉等待; 它不是 RTC 驱动。
+- 101.txt 实测时间线(观察, 非猜测): uptime 7 s launchd 打 `1970-01-01 08:00:39`(=0+uptime, +8 时区本身
+  是对的); ~99.4 s 被设为 2026-01-01 08:00:00(mobiletimerd 下限值); ~101.8 s → 2026-11-07 08:00:00
+  (mobiletimerd 从盘上恢复的上次已知时间; 猜测——未反汇编 mobiletimerd); ~103.8 s → 2026-11-08 08:00:01
+  (联网纠正)。即"跳回 1970"= 每次开机前 ~100 s 的窗口 + 无网时停在恢复值。
+- 硬件事实: 真 RTC 在 PMIC **MT6687** 里(mt6993.dts:23925 `&mt6687_rtc`; mt6687.dtsi:60
+  `base = <0x580>`, compatible "mediatek,mt6687-rtc"), Android 侧由 drivers/rtc/rtc-mt6397.c 经
+  pwrap 持续维护(树在 ~/HelioDarwin/oppo-source/modules/kernel/kernel_device_modules-6.12)。RTC 自走且
+  Android 一直校准, 所以**只需要"读"**: iOS 开机读一次即可拿到正确时间; 写回仅校漂移, 非必需。
+- 修复方向(下一步, 未实施): SweetPlatformExpert 覆写 getGMTTimeOfDay/setGMTTimeOfDay(或独立 SweetX9RTC),
+  pwrap 读 MT6687 RTC_TC_SEC/MIN/HOU/DOM/MTH/YEA(参考 rtc-mt6397.c 语义+写触发 WACS; 年份基
+  RTC_MIN_YEAR=1968)。前提待验证: LK/ABL 交棒 shim 后 pwrap/PMIC wrapper 的 MMIO 状态(Android 每次开机
+  读 RTC、LK 也读, 大概率已初始化)。备选: shim 阶段读好把 epoch 放 DTB chosen, 内核 PE 读 DTB——同样要
+  pwrap 读路径, 不省事。注意 mobiletimerd 的恢复路径与 IORTC 用户态探测如何交互, 实施时先只做读、观察
+  boot log 时间戳是否开机即正确。
+
 ## HANDOFF 2026-11-08 (50): rev252cn = GPU 帧管线两优化 BUILT (x9dc 脏区间 CIVAC + x9if 双帧在飞), plugin 268; 3 images; 未上机
 
 - 背景: 97.txt 审计(会话前半)结论——显示通路/GPU 频率都不是瓶颈;帧管线完全串行(1 job/present,join 行
