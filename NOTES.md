@@ -18,6 +18,8 @@
   去 slide 返回地址(可用 ~/x9-kbd-dis/dis.py 符号化)。字母键不再打 downActionFlags; 行数上限 800。
 - 构建: Mac `/tmp/x9-rev252cr.sh`(bash 数组 + Framework python + homebrew llvm PATH), `build.py all --revision 271
   --name x9-rev252cr`, 参数同 rev252cq。plugin 变了 → 先 mailbox 重写再 boot。
+- **BUILT(Mac, 未上机)**: x9/out/x9-rev252cr boot_sha256 **31cc737ff3694bb211d36f594f11c2ec3256bcf99cca6849bca75fa3805d340b**,
+  payload b924f3cb99e30a79...; allowlist(plugin 271)已提交。
 
 ## HANDOFF 2026-11-08 (55): 123 键诊断探针 x9kbdhook=1 (plugin 270) → rev252cq 构建中
 
