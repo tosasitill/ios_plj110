@@ -30,6 +30,23 @@
 - 下一步: 需要一次包含开/关 app 时刻的完整日志; 之后按时间抓该帧的 draw(x9vf 机制只按固定 uptime 触发,
   参数上限 607 B, 需要改成按 transition 触发或放宽)。
 
+## HANDOFF 2026-11-08 (62): 107.txt(rev252cx)= 时钟修好, fps 11.5→16.8, 瓶颈移到 CPU 缓存维护; 123 根因 = 非标屏宽
+
+- 实测 107(参数 x9_cache_scope x9kbdhook x9pl x9sl, 无 x9if; 跑满 182 s 无卡死 → 106 卡死嫌疑仍在 x9if 配对):
+  - GOV: 启动后 4.891 s 固件把 OPP 降到 56/56(390/260 MHz)一次, governor restore 后全程 actual=1716000/1716000,
+    restores=1 —— 105/106 的 260 MHz 只是启动后那一下没被纠正。
+  - 帧率 avg 16.8(91 窗口, max 57.5), 之前 11.5。后段 RENDER timing: wait_us 1.0-1.9 ms/job(之前 15-24),
+    pre_cache 1.3-2.8 + post_cache 1.2-2.6 ms → **CPU 缓存维护已是每 job 最大开销**(GPU 优化 #4 候选)。
+  - PARK hits 3043 / cold 186, live_map 5512 / live_unmap 2540; inflight_max 1 出现 11 次(无 x9if 也能排队)。
+- 123: plane sizes 探针 —— Pinyin `20060_..._Uncased-Keyboard_Letters` 418.67x271 → numbers 418.67x226;
+  英文 small-letters-small-display 418.67x226, 但布局 bounds 414x260 / 414x288。反汇编: setKeyplaneName: 尾部
+  总是 `keyplaneChangeContextWithSize:[self bounds]`(setSize: 即置 sizeDidChange=YES), UIKeyboard
+  _didChangeKeyplaneWithContext: → setFrame:(新尺寸)→ 与当前帧不同 → activate → updateLayout →
+  showKeyboard...reload: → 回首面。根因: UIKeyboard 帧宽 414(Truffle 布局标称宽)≠ 面宽 418.67(实际屏宽
+  1256 px @3x), 加上部分键盘面高不一。真机屏宽 = 布局宽, 不会触发。
+- 方向(待用户决定): 把呈现给 iOS 的屏幕改成真机尺寸, 如 1242x2688(414x896 @3x, iPhone XS Max/11 Pro Max),
+  面板 1256x2760 居中留 7 px/36 px 黑边, 触摸映射/帧缓冲/ADT 画布同步改; 或只在加载插件的进程里打补丁(不全面)。
+
 ## HANDOFF 2026-11-08 (61): 106.txt(rev252cw)结果; GPU stack 被固件降到 260 MHz(真·卡顿主因之一); 123 回退链已符号化; rev252cx 构建中
 
 - 105.txt = 用户误刷 rev252cu(参数无 x9pl/x9sl); 106.txt = rev252cw(x9if x9kbdhook x9tile x9pl x9sl)。
