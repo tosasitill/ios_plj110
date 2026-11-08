@@ -200,7 +200,7 @@ static int gov_commit(int index) {
 static void gov_thread(void *arg,wait_result_t result) {
  (void)arg;(void)result;
  const uint64_t period_ns=50ull*1000*1000;
- uint64_t last_busy=sweet_x9_gpu_busy_ns,last_log=mach_absolute_time(),commits=0,busy_acc=0,ticks=0;
+ uint64_t last_busy=sweet_x9_gpu_busy_ns,last_log=mach_absolute_time(),commits=0,busy_acc=0,ticks=0,restores=0;
  int last_temp=0;
  printf("X9 GPU GOV: start floor=%d(%u kHz) ceiling=%d(%u kHz) slowest=%d period=50ms up>=20%% down<5%%\n",
   gov_floor,opp_khz[gov_floor],gov_ceiling,opp_khz[gov_ceiling],gov_slowest);
@@ -224,11 +224,23 @@ static void gov_thread(void *arg,wait_result_t result) {
   const int slowest_allowed=fastest>gov_floor?fastest:gov_floor;
   if(target>slowest_allowed)target=slowest_allowed;
   if(target!=gov_index){if(gov_commit(target)){printf("X9 GPU GOV: commit %d failed; governor stops\n",target);break;}commits++;}
+  /* 105/106.txt: with the floor pinned at the ceiling (x9_gpu_floor_khz=1716000)
+   * the boot commit read back gpu=stack=1716 MHz, but every later status showed
+   * stack=260 MHz (its slowest) and the governor never committed again, so the
+   * shader stack ran at 260 MHz for the whole session. GPUEB lowers the OPP on
+   * its own; re-commit whenever its current indices differ from ours. */
+  else if(gov_index>=0&&(st.cur_oppidx_gpu!=gov_index||st.cur_oppidx_stack!=gov_index)) {
+   if(++restores<=6||restores%200==0)
+    printf("X9 GPU GOV: firmware OPP drifted to %d/%d (%u/%u kHz), restoring %d (restore #%llu)\n",
+     st.cur_oppidx_gpu,st.cur_oppidx_stack,st.cur_fgpu,st.cur_fstack,gov_index,restores);
+   if(gov_commit(gov_index)){printf("X9 GPU GOV: restore commit %d failed; governor stops\n",gov_index);break;}
+  }
   busy_acc+=util;ticks++;
   uint64_t now=mach_absolute_time(),ns=0;absolutetime_to_nanoseconds(now-last_log,&ns);
   if(ns>=2000000000ull) {
-   printf("X9 GPU GOV: util_avg=%llu%% temp=%d idx=%d gpu=%u kHz stack=%u kHz commits=%llu limiter=%u/%u ceiling=%u floor=%u\n",
-    ticks?busy_acc/ticks:0,last_temp,gov_index,gov_index>=0?opp_khz[gov_index]:0,st.cur_fstack,commits,st.cur_c_limiter,st.cur_f_limiter,st.cur_ceiling,st.cur_floor);
+   printf("X9 GPU GOV: util_avg=%llu%% temp=%d idx=%d gpu=%u kHz stack=%u kHz commits=%llu limiter=%u/%u ceiling=%u floor=%u actual=%u/%u kHz oppidx=%d/%d restores=%llu\n",
+    ticks?busy_acc/ticks:0,last_temp,gov_index,gov_index>=0?opp_khz[gov_index]:0,st.cur_fstack,commits,st.cur_c_limiter,st.cur_f_limiter,st.cur_ceiling,st.cur_floor,
+    st.cur_fgpu,st.cur_fstack,st.cur_oppidx_gpu,st.cur_oppidx_stack,restores);
    last_log=now;busy_acc=ticks=0;
   }
  }

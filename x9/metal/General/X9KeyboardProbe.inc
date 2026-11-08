@@ -164,6 +164,21 @@ static void x9kbd_setplane(id self, SEL _cmd, id name) {
   char bt[400]; x9kbd_bt(bt, sizeof(bt));
   x9kbd_log("nested setKeyplaneName '%s' depth=%d current='%s' unslid-bt%s", x9kbd_str(name), x9kbd_depth, b, bt);
  }
+ /* 105/106.txt: the revert is -[UIKeyboard _didChangeKeyplaneWithContext:] ->
+  * [context sizeDidChange] -> setFrame: -> ... -> showKeyboardWithInputMode:reload:.
+  * Log both planes' sizes (sizeForKeyplane:) and the layout bounds. */
+ if (x9kbd_depth == 0) {
+  SEL sSize = sel_registerName("sizeForKeyplane:"), sSub = sel_registerName("subtreeWithName:");
+  id board = x9kbd_ivar(self, "_keyboard"), cur = x9kbd_ivar(self, "_keyplane");
+  id to = (board && [board respondsToSelector:sSub] && name) ? ((id (*)(id, SEL, id))objc_msgSend)(board, sSub, name) : nil;
+  if ([self respondsToSelector:sSize]) {
+   CGSize a = cur ? ((CGSize (*)(id, SEL, id))objc_msgSend)(self, sSize, cur) : CGSizeMake(-1, -1);
+   CGSize z = to ? ((CGSize (*)(id, SEL, id))objc_msgSend)(self, sSize, to) : CGSizeMake(-1, -1);
+   CGRect bd = ((CGRect (*)(id, SEL))objc_msgSend)(self, sel_registerName("bounds"));
+   x9kbd_log("plane sizes from '%s' %.2fx%.2f to '%s' %.2fx%.2f bounds %.2fx%.2f", b, a.width, a.height,
+       x9kbd_str(name), z.width, z.height, bd.size.width, bd.size.height);
+  }
+ }
  x9kbd_depth++;
  ((void (*)(id, SEL, id))x9kbd_orig_setplane)(self, _cmd, name);
  x9kbd_depth--;
