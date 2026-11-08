@@ -115,6 +115,69 @@ static bool render_park_release_for(X9RenderContext *c,const char *why) {
  if(render_parked.g&&render_parked.c==c)render_park_retire_note(why);
  return !render_parked.g||render_parked.c!=c||render_retire_parked(why);
 }
+/*
+ * x9pl=1 (needs x9_gpu_park=1): map/unmap on the parked context without
+ * retiring it. 104.txt: PARK cold 1342 vs hits 739, retire_map 648 and
+ * retire_unmap 576 - per-frame BO churn turned ~64% of submits into the full
+ * SUSPEND/flush/remove_as + AS install/CSG start sequence. The parked group is
+ * idle (the worker holds c->lock from publish to reap and map/unmap need it,
+ * so no job of this context can be running) and AS1 still holds the
+ * context's root, so the page table is edited in place exactly as Linux
+ * panthor updates a live VM (mmu_hw_do_operation_locked, CSF GPUs): write the
+ * PTEs, clean the dirty table pages to PoC, AS_LOCKADDR a naturally aligned
+ * power-of-two region covering the range (log2-1 encoding, >= 32 KiB) and
+ * AS_COMMAND LOCK, FLUSH_CACHES (L2/LSC clean+invalidate), then an explicit
+ * AS_COMMAND UNLOCK (the GPU_CONTROL flush does not unlock, unlike
+ * FLUSH_PT/FLUSH_MEM), waiting for AS idle after each command. No table page
+ * is freed while attached (pruning waits for the next real detach). A
+ * hardware step that does not complete marks the session uncertain like a
+ * failed retire. Any other parked state falls back to the old retire.
+ */
+static uint64_t render_park_live_map,render_park_live_unmap;
+static bool render_park_live_enabled() {
+ static int mode=-1;
+ if(mode<0){mode=sweet_x9_arg("x9pl",0)==1?1:0;IOLog("X9 RENDER PARK: live map/unmap on the parked context %s (x9pl)\n",mode?"ON":"off");}
+ return mode==1&&render_park_enabled();
+}
+static bool render_as_lock_region(vm_offset_t gpu,unsigned as,uint64_t start,uint64_t bytes) {
+ const unsigned base=as*0x40;
+ if(!bytes||start+bytes<start)return false;
+ const uint64_t diff=start^(start+bytes-1);
+ unsigned width=diff?64u-(unsigned)__builtin_clzll(diff):0u;
+ if(width<15)width=15;                    /* AS_LOCK_REGION_MIN_SIZE 32 KiB */
+ width-=1;
+ const uint64_t region=(start&~((1ULL<<width)-1))|width;
+ if(!idle_as(gpu,1000,as))return false;
+ gw64(gpu,0x2410+base,region);gw(gpu,0x2418+base,2);   /* LOCKADDR, COMMAND LOCK */
+ return idle_as(gpu,1000,as);
+}
+static bool render_as_unlock(vm_offset_t gpu,unsigned as) {
+ const unsigned base=as*0x40;
+ if(!idle_as(gpu,1000,as))return false;
+ gw(gpu,0x2418+base,3);                   /* COMMAND UNLOCK */
+ return idle_as(gpu,1000,as);
+}
+/* kIOReturnUnsupported: not applicable, caller takes the retire path. */
+static IOReturn render_park_live_update(X9RenderContext *c,const X9RenderVMEntry *entry,bool map) {
+ if(!render_park_live_enabled()||!render_parked.g||render_parked.c!=c||!c||!c->page_table||c->disabled||c->exposed||
+    !entry||!resident||resident->uncertain)return kIOReturnUnsupported;
+ RenderKernelGroup *g=render_parked.g;
+ vm_offset_t gpu=resident->gpu;
+ if(!g->control.running||g->control.uncertain||gr64(gpu,0x2440)!=render_parked.root)return kIOReturnUnsupported;
+ IOReturn kr=map?x9_render_vm_map_live(c->page_table,entry):x9_render_vm_unmap_live(c->page_table,entry);
+ if(kr!=kIOReturnSuccess)return kr;      /* leaves rolled back; nothing reached the GPU */
+ if(x9_render_vm_publish_live(c->page_table)!=render_parked.root||
+    !render_as_lock_region(gpu,1,entry->address,entry->bytes)||!flush_gpu(gpu)||!render_as_unlock(gpu,1)||!no_faults(gpu)) {
+  c->disabled=true;resident->uncertain=true;
+  IOLog("X9 RENDER PARK: live %s va=%llx bytes=%llu uncertain;AS/MCU/DMA refs retained,no reset\n",
+   map?"map":"unmap",entry->address,entry->bytes);
+  return kIOReturnIOError;
+ }
+ const uint64_t n=map?++render_park_live_map:++render_park_live_unmap;
+ if(n<=4||n%1024==0)IOLog("X9 RENDER PARK: live %s #%llu va=%llx bytes=%llu group=%u kept parked\n",
+  map?"map":"unmap",n,entry->address,entry->bytes,g->request.handle);
+ return kIOReturnSuccess;
+}
 static RenderKernelGroup *render_group(X9RenderContext *c,uint32_t id) {
  auto *p=(RenderKernelContext *)c->engine_private;
  if(p)for(auto *g:p->groups)if(g&&g->request.handle==id)return g;
@@ -187,6 +250,8 @@ static IOReturn render_map(X9RenderContext *c,const X9RenderVMEntry *entry) {
    resident?gr(resident->gpu,0x20):0,resident?gr(resident->gpu,0x2000):0);
   return kIOReturnNotReady;
  }
+ if(c&&c->engine_private)((RenderKernelContext *)c->engine_private)->cache_plan_valid=false;
+ {IOReturn live=render_park_live_update(c,entry,true);if(live!=kIOReturnUnsupported)return live;}
  if(!render_park_release_for(c,"map"))return kIOReturnIOError;
  /* Invalidate before a mutation attempt, including failed transactions and
   * rollback. The service updates its mapping registry before releasing the
@@ -198,8 +263,9 @@ static IOReturn render_map(X9RenderContext *c,const X9RenderVMEntry *entry) {
 }
 static IOReturn render_unmap(X9RenderContext *c,const X9RenderVMEntry *entry) {
  RenderOwner owner;if(!owner.locked||!render_ready())return kIOReturnNotReady;
- if(!render_park_release_for(c,"unmap"))return kIOReturnIOError;
  if(c&&c->engine_private)((RenderKernelContext *)c->engine_private)->cache_plan_valid=false;
+ {IOReturn live=render_park_live_update(c,entry,false);if(live!=kIOReturnUnsupported)return live;}
+ if(!render_park_release_for(c,"unmap"))return kIOReturnIOError;
  return x9_render_memory_unmap(c,entry);
 }
 static IOReturn render_cache(X9RenderContext *c,X9RenderResource *r,const X9RenderCacheRequest *request) {
@@ -874,8 +940,9 @@ static IOReturn render_submit_reap(RenderJobState *st) {
     count,st->coherent?1:0,coherent_total[0]/count,coherent_total[1]/count);
    IOLog("X9 RENDER cache-manifest: jobs=%llu pre_mapped_spans_avg=%llu post_mapped_spans_avg=%llu pre_holes_saved_avg=%llu post_holes_saved_avg=%llu;all mapped indirect targets included,shared aliases retained\n",
     count,span_total[0]/count,span_total[1]/count,hole_total[0]/count,hole_total[1]/count);
-   IOLog("X9 RENDER PARK: hits=%llu cold=%llu retires=%llu retire_map=%llu retire_unmap=%llu retire_other=%llu;hit = no AS install/CSG start/suspend/AS remove\n",
-    render_park_hits,render_park_cold,render_park_retires,render_park_retire_map,render_park_retire_unmap,render_park_retire_other);
+   IOLog("X9 RENDER PARK: hits=%llu cold=%llu retires=%llu retire_map=%llu retire_unmap=%llu retire_other=%llu live_map=%llu live_unmap=%llu;hit = no AS install/CSG start/suspend/AS remove\n",
+    render_park_hits,render_park_cold,render_park_retires,render_park_retire_map,render_park_retire_unmap,render_park_retire_other,
+    render_park_live_map,render_park_live_unmap);
    if(x9_gpu_acelite_active)
     IOLog("X9 RENDER SNOOP: GPU->CPU fence probe coherent=%llu stale=%llu;stale>0 means GPU writes do not invalidate CPU lines\n",
      render_snoop_probe[0],render_snoop_probe[1]);
