@@ -15,14 +15,15 @@
 // returns its result unchanged. Off unless the boot-arg token is present.
 #include <objc/message.h>
 #include <stdarg.h>
+#include <mach-o/dyld.h>
 #include <CoreGraphics/CoreGraphics.h>
 
 static int x9kbd_lines;
-static IMP x9kbd_orig_flags, x9kbd_orig_down, x9kbd_orig_send;
+static IMP x9kbd_orig_flags, x9kbd_orig_down, x9kbd_orig_send, x9kbd_orig_setplane, x9kbd_orig_trackpad;
 
 static void x9kbd_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void x9kbd_log(const char *fmt, ...) {
- if (x9kbd_lines >= 400) return;
+ if (x9kbd_lines >= 800) return;
  x9kbd_lines++;
  char line[512];
  va_list ap; va_start(ap, fmt); vsnprintf(line, sizeof(line), fmt, ap); va_end(ap);
@@ -33,6 +34,12 @@ static void x9kbd_log(const char *fmt, ...) {
 static id x9kbd_ivar(id obj, const char *name) {
  Ivar iv = class_getInstanceVariable(object_getClass(obj), name);
  return iv ? object_getIvar(obj, iv) : nil;
+}
+
+// BOOL ivars (object_getIvar only handles object ivars).
+static int x9kbd_bool(id obj, const char *name) {
+ Ivar iv = class_getInstanceVariable(object_getClass(obj), name);
+ return iv ? (int)*((const unsigned char *)(__bridge const void *)obj + ivar_getOffset(iv)) : -1;
 }
 
 static const char *x9kbd_str(id s) {
@@ -57,6 +64,7 @@ static void x9kbd_key(char *out, size_t n, id layout, id key) {
 
 static unsigned long long x9kbd_flags(id self, SEL _cmd, id key) {
  unsigned long long r = ((unsigned long long (*)(id, SEL, id))x9kbd_orig_flags)(self, _cmd, key);
+ if (!(r & 0x20)) return r; // 103.txt: letters repeat this 4x per touch; keep the More key only
  char k[256]; x9kbd_key(k, sizeof(k), self, key);
  x9kbd_log("downActionFlags=0x%llx key %s", r, k);
  return r;
@@ -88,8 +96,48 @@ static void x9kbd_send(id self, SEL _cmd, id key, unsigned long long actions, id
  id map = x9kbd_ivar(self, "_extendedTouchInfoMap");
  char k[256]; x9kbd_key(k, sizeof(k), self, key);
  x9kbd_log("sendDown actions=0x%llx infos=%lu key %s", actions, (unsigned long)[(NSDictionary *)map count], k);
+ if (actions & 0x20) {
+  // 103.txt: More hit, flags 0x24, infos=1, yet the plane stays. Show what
+  // the More branch hands to setKeyplaneName: and the gates in front of it.
+  SEL sAlt = sel_registerName("alternateKeyplaneName"), sSub = sel_registerName("subtreeWithName:"),
+      sChooser = sel_registerName("isShiftKeyPlaneChooser");
+  id plane = x9kbd_ivar(self, "_keyplane"), board = x9kbd_ivar(self, "_keyboard");
+  id alt = (plane && [plane respondsToSelector:sAlt]) ? ((id (*)(id, SEL))objc_msgSend)(plane, sAlt) : nil;
+  id sub = (board && alt && [board respondsToSelector:sSub]) ? ((id (*)(id, SEL, id))objc_msgSend)(board, sSub, alt) : nil;
+  int chooser = (plane && [plane respondsToSelector:sChooser]) ? ((BOOL (*)(id, SEL))objc_msgSend)(plane, sChooser) : -1;
+  id bname = (board && [board respondsToSelector:sel_registerName("name")]) ?
+      ((id (*)(id, SEL))objc_msgSend)(board, sel_registerName("name")) : nil;
+  x9kbd_log("  more-branch trackpad=%d rebuilding=%d chooser=%d keyboard='%s' kbname='%s' alt='%s' altTree=%s",
+      x9kbd_bool(self, "_isTrackpadMode"), x9kbd_bool(self, "_isRebuilding"), chooser,
+      x9kbd_str(bname), x9kbd_str(x9kbd_ivar(self, "_keyboardName")), x9kbd_str(alt), sub ? "present" : "nil");
+ }
  ((void (*)(id, SEL, id, unsigned long long, id))x9kbd_orig_send)(self, _cmd, key, actions, ctx);
  x9kbd_log("  after sendDown plane='%s'", x9kbd_str(x9kbd_ivar(self, "_keyplaneName")));
+}
+
+static void x9kbd_setplane(id self, SEL _cmd, id name) {
+ const char *before = x9kbd_str(x9kbd_ivar(self, "_keyplaneName"));
+ char b[128]; snprintf(b, sizeof(b), "%s", before);
+ int tp = x9kbd_bool(self, "_isTrackpadMode");
+ ((void (*)(id, SEL, id))x9kbd_orig_setplane)(self, _cmd, name);
+ x9kbd_log("setKeyplaneName '%s' trackpad=%d before='%s' after='%s'", x9kbd_str(name), tp, b,
+     x9kbd_str(x9kbd_ivar(self, "_keyplaneName")));
+}
+
+// Return addresses with the UIKitCore slide, for host symbolication (dsc-20H392).
+static void x9kbd_trackpad(id self, SEL _cmd, BOOL on, BOOL animated) {
+ NSArray<NSNumber *> *rets = [NSThread callStackReturnAddresses];
+ intptr_t slide = 0;
+ for (uint32_t i = 0; i < _dyld_image_count(); i++) {
+  const char *n = _dyld_get_image_name(i);
+  if (n && strstr(n, "/UIKitCore")) { slide = _dyld_get_image_vmaddr_slide(i); break; }
+ }
+ char bt[256] = {0}; size_t o = 0;
+ for (NSUInteger i = 1; i < rets.count && i < 9 && o + 20 < sizeof(bt); i++)
+  o += (size_t)snprintf(bt + o, sizeof(bt) - o, " %llx", (unsigned long long)(rets[i].unsignedLongLongValue - (unsigned long long)slide));
+ x9kbd_log("setTrackpadMode:%d animated:%d was=%d slide=0x%lx unslid-bt%s", on, animated,
+     x9kbd_bool(self, "_isTrackpadMode"), (long)slide, bt);
+ ((void (*)(id, SEL, BOOL, BOOL))x9kbd_orig_trackpad)(self, _cmd, on, animated);
 }
 
 static IMP x9kbd_swap(Class c, const char *sel, IMP imp) {
@@ -110,5 +158,8 @@ __attribute__((constructor)) static void x9kbd_install(void) {
  x9kbd_orig_flags = x9kbd_swap(c, "downActionFlagsForKey:", (IMP)x9kbd_flags);
  x9kbd_orig_down = x9kbd_swap(c, "touchDown:executionContext:", (IMP)x9kbd_down);
  x9kbd_orig_send = x9kbd_swap(c, "completeSendStringActionForTouchDownWithKey:withActions:executionContext:", (IMP)x9kbd_send);
- x9kbd_log("installed flags=%d down=%d send=%d", x9kbd_orig_flags != NULL, x9kbd_orig_down != NULL, x9kbd_orig_send != NULL);
+ x9kbd_orig_setplane = x9kbd_swap(c, "setKeyplaneName:", (IMP)x9kbd_setplane);
+ x9kbd_orig_trackpad = x9kbd_swap(c, "setTrackpadMode:animated:", (IMP)x9kbd_trackpad);
+ x9kbd_log("installed flags=%d down=%d send=%d setplane=%d trackpad=%d", x9kbd_orig_flags != NULL,
+     x9kbd_orig_down != NULL, x9kbd_orig_send != NULL, x9kbd_orig_setplane != NULL, x9kbd_orig_trackpad != NULL);
 }
