@@ -23,6 +23,31 @@
   pwrap 读路径, 不省事。注意 mobiletimerd 的恢复路径与 IORTC 用户态探测如何交互, 实施时先只做读、观察
   boot log 时间戳是否开机即正确。
 
+## HANDOFF 2026-11-08 (51): rev252cn 诊断包 (plugin 269) - 四项推进的结果与下一步
+
+- **#1 per-draw 诊断(已落地,待上机)**: GOV 行加 stack=%u kHz(MCU 频域跟随 stack 还是固定,一次上机见分晓);
+  前端 commit 时节流输出 `X9 COMMIT WORK: commit=%u draws=%u passes=%u pixels=%llu dispatches=%u blits=%u`
+  (encodedWork 本来就有,只是没打日志)——与内核 `X9 RENDER timing` 的 wait_us 按时间离线相关,直接量出
+  per-draw GPU 成本。
+- **#4 assetsd(键盘 123)根因已钉死**: 堆扫描抓到完整异常 `NSInternalInconsistencyException: 'assetsd
+  requires TCCPhotosService access'`,下层 `auth_error_string="Failed to issue Sandbox Extension for
+  kTCCServicePhotos"`——tccd 活着也响应了,死在**签发沙箱扩展**。我们的 stand-in 把 op 5(issue)/6(consume)
+  保持 ENOENT(rev252q 让它们无 token 成功过,syncdefaultsd 10 秒一崩所以回退)。已加 op-5 参数 dump
+  (x9_sandbox_ops=1 时打一次 64 B hex):下一次设备跑拿到结构后,就能写回真 token 让 tccd 的 Photos 授权走通。
+  这才是键盘 123 的修复路径,和 GPU 无关。
+- **#2 scope 真相(推翻了早前的判断)**: cache-uncovered 只有 ~30 KB——前端 scope 其实覆盖了 imports
+  (pre_skip 57-63 MB);真正维持的 13-18 MB 是**"范围已注册但被 pending command buffer 引用(refs>0)"**
+  的部分——scope 设计上对被引用范围保守维护(防 CPU 写),而前端 acquire 不区分 GPU 读/写。新遥测
+  `X9 RENDER cache-scope-hold: pre_avg/post_avg` 量化它。真正的修复 = acquire 区分读写用途(渲染目标标记
+  GPU-write-only,pre-cache 可安全跳过),是前端+内核的设计决策,不是 bug。
+- **#3 P1-A 未动,但有了计数**: PARK 行加 retire_map/retire_unmap/retire_other(101.txt 第四轮 cold 仍占
+  ~55%,map/unmap churn 是主因)。BO pool(Mesa 侧 + 插件)仍是正解,工作量另估。
+- BUILT: plugin 269(`X9 COMMIT WORK` 日志)+ 三支内核逐字节一致(35a7d364...)+ boot: cn 087fa246... /
+  cn-dc 919c78d1... / cn-dc-if c63a1384...。**mailbox 必须重写**(插件二进制变了):`X9_SERIAL=<serial>
+  python3 x9/mailbox/update.py x9/out/x9-rev252cn-dc-if`。
+- 下一轮上机建议:dc-if 镜像 + `x9_sandbox_ops=1`,一次拿齐:COMMIT WORK vs RENDER timing 相关性、GOV stack
+  频率、op-5 参数结构、scope-hold 体量、PARK retire 分类。全是诊断,无行为改动风险。
+
 ## HANDOFF 2026-11-08 (50): rev252cn = GPU 帧管线两优化 BUILT (x9dc 脏区间 CIVAC + x9if 双帧在飞), plugin 268; 3 images; 未上机
 
 - 背景: 97.txt 审计(会话前半)结论——显示通路/GPU 频率都不是瓶颈;帧管线完全串行(1 job/present,join 行
