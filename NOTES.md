@@ -1,3 +1,43 @@
+## HANDOFF 2026-11-08 (52): 相册打不开 → 查到 hackios 生态的 assetsd TCC 修复并移植 (ops 5/6 真 token), rev252co BUILT 未上机
+
+- **任务**: 用户报相册(Photos/MobileSlideShow)打不开,并指路查 UniXNU 和 hackios 的相关修复。
+- **101.txt 证据链(观察)**: 全部近期日志(95-101)中 MobileSlideShow 一次都没 exec 过——无 `SWEET AKS:
+  MobileSlideShow`(exec 校验)、无 CRASH;对照: Safari 在 98.txt exec 后崩(异常路径与 assetsd 同款)。
+  101.txt 117.768s 有一次 tap(555,1138):有 21 帧 UI 响应(动画)、**SpringBoard 没发 AKS sel 26/27
+  (assertion)、没有任何 exec**——若这是相册 tap,拒绝发生在 SpringBoard 内部、launchd 之前;但也可能
+  没点在相册上(87 次 tap 大多在日历内交互;日历 74.2s 被点开并渲染 74-86s,说明点图标启动 app 本身是通的)。
+  内核侧排除项: 本轮无 x9_lite/sweetnoexec,trust-cache 失败会有 CS_KILLED CRASH 行,均不成立。
+- **UniXNU 上游: 无相册/TCC 相关修复**(四个 checkout 的 git log --grep 和 docs 全空)。
+- **hackios 生态: 找到已上机验证的修复**。同根因 `assetsd requires TCCPhotosService access` 在三个移植
+  都被同一个内核补丁修掉:
+  - **ios-asteroids 0116** (nothing-sm7635-devs/ios-asteroids, commit 5f7ff1e "sandbox extensions
+    issue/consume succeed (fixes Photos/assetsd)";后续 commit bffdfb3 "**Photos works (0116)**"):
+    tccd 每次 TCC 授权都要 `sandbox_extension_issue_generic("com.apple.tcc.kTCCServicePhotos")`;
+    op 5 返回 ENOENT 时 tccd 报 kTCCErrorDomain 6 "Failed to issue Sandbox Extension",assetsd 崩。
+    修复 = op 5 写回真 token、op 6 回写非零 handle。docs/CSOPS.md 有完整诊断+上机验证步骤
+    (`SWEET Sandbox: tccd issued extension type 3 'com.apple.tcc.kTCCServicePhotos'` 为通过标志)。
+  - **ios-b0s 0313** (JeyKul/ios-b0s): 同修复,token 伪成 Apple 序列化格式(40hex;00;…;class;01;…;path),
+    并记录了参数布局。**ios-popsicle 0329**: 同修复(顺带修 appex 容器路径)。beyond2lte-ios: 记录了同
+    崩溃,未修。
+  - 0116/0313 恰好回答了 handoff 51 里 op-5 dump 要探的问题: `__sandbox_extension_issue` 7×u64 =
+    [0] class/path 串指针, [1] extension type, [2] 目标 pid 或 path, [3] flags, **[4] 2048B token
+    输出缓冲**, [5]/[6] 未用; consume = {token 串, 含 NUL 长度, int64 *handle_out}。无沙箱时扩展本就
+    不授予任何东西,消费者不校验格式(libsystem_sandbox 的 consume 只拒绝 "invalid" 前缀)。
+- **已移植(commit 46e1d4c, x9/kernel/src/bsd/kern/sweet_amfi.c)**: op 5 写 opaque token
+  `SWEET-<serial>;<type>;<class>`,op 6 回写非零 handle;0x43 保持 ENOENT(iOS 16.7 容忍;
+  asteroids 0136 是 iOS 18 版语义);删 x9_sandbox_ext_ok(token-less 路径已被 40.txt 证伪——
+  syncdefaultsd 在 ENOENT 和 token-less 成功下都崩,与其无关);op-5 64B dump 保留(x9_sandbox_ops=1,
+  验证我们 16.7.16 用户态的布局)。仅内核改动,插件不变,allowlist identity 不变,mailbox 载荷不受影响。
+- **BUILT(仅本机, 未上机)**: x9/out/x9-rev252co —— kernel d39594930c161fab...,boot.img
+  40ae235719baed25...(11730944 B, 参数集 x9dc=1 x9if=1,同 101.txt 第四轮)。
+- **上机判读**: (1) assetsd 不再崩(16 次/122s → 0),搜 `issued extension` 行;
+  (2) 键盘 123 是否修好(assetsd 活了数字盘才装得上); (3) 点相册:若 exec 出现 → 看它跑多远;
+  若仍无 exec/AKS sel 26 → 拒绝在 SpringBoard 内部,与 assetsd 无关,下一轮加
+  x9_sample_procs=SpringBoard 在 tap 时刻抓栈; (4) 顺带回收 handoff 51 的诊断包
+  (COMMIT WORK/GOV stack/op-5 结构/scope-hold/PARK retire)。**mailbox 要按 51 的提醒先重写**
+  (plugin 269 载荷与设备邮箱不配对):`X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/x9-rev252cn-dc-if`,
+  然后直接 boot rev252co 的 boot.img。
+
 ## FINDING 2026-11-08: MobileGestalt 机型读取链已反汇编核验(20H392 实机 dylib); 内核/ADT 供给全对; "还是 iPod" 首要嫌疑 = MG 磁盘缓存陈旧答案
 
 - 对象: `.local/x9/work/dsc-20H392/usr/lib/libMobileGestalt.dylib`(设备实跑的 iOS 16.7.16 拷贝, 有符号)。
