@@ -30,6 +30,31 @@
 - 下一步: 需要一次包含开/关 app 时刻的完整日志; 之后按时间抓该帧的 draw(x9vf 机制只按固定 uptime 触发,
   参数上限 607 B, 需要改成按 transition 触发或放宽)。
 
+## HANDOFF 2026-11-08 (66): 110.txt(rev252db)= DVFSRC 从未启动, DRAM 请求无效; rev252dc BUILT(TF-A INIT); CSG 槽耗尽(AegirPoster)
+
+- 实测 110(rev252db, Mac ~/110.txt): `X9 DDR: DVFSRC basic=00000008 opp_count=1 level=0 gear=0`, 写 SW_REQ=0x9000 后
+  gear 仍 0, 全程 GOV ddr_gear=0 vcore=0 → DVFSRC 没被初始化, 投票被忽略。presented fps 有帧窗口 avg 22.5
+  (55 窗口, max 35.8; 109 为 21.5); 60 s 后稳定 24.0 fps(48 jobs/2s, wait 2.1 ms, copy_avg 2.4 ms)= 某个 24 Hz
+  动画, 不是 GPU 受限。忙段(27-55 s)wait_us 4-14 ms/job。GPU 1716 MHz 全程, restores=1。
+- 根因(静态, OPPO kernel_device_modules-6.12): Linux mtk_dvfsrc_probe 发 SMC MTK_SIP_VCOREFS_CONTROL
+  (0xC2000506)cmd MTK_SIP_DVFSRC_INIT=0(DT 无 dvfsrc-flag/vmode → 0,0; a0=0 成功, a1=dram_type), 注释说
+  INIT 阶段"lock high opp", late-init 的 mtk-dvfsrc-start.c 发 START=1 后自由运行。我们从未发这两个 SMC。
+- 2a9a3a6: x9_dvfsrc=1 只发 INIT(期望 DRAM 锁高 OPP), =2 INIT+START(之后 x9_ddr_level 投票生效);
+  打印 `X9 DDR: SMC VCOREFS INIT -> a0=.. dram_type=..` 与 after-init/after-start 寄存器。未上机, SMC 可能挂。
+- **新发现: CSG 槽耗尽**。110 中前 8 个 GPU 进程(pid 57/29/26/252/234/232/109/259)各占 1 个硬件 CSG 槽
+  (resident slot_count=8), 槽在 group 创建时绑定、直到进程关设备才放; 第 9 个客户端 AegirPoster(pid 390)
+  每 ~2.5 s 重开设备, 分配 32 MiB tiler heap, X9RenderCreateGroup(op 7) 返回 kIOReturnNoResources
+  0xe00002be → PANVK FAILED line=62, 共 43 次(墙纸渲染失败 + CPU/内存抖动)。
+  - 修复思路(未实现): 槽只在 job 期间真正需要(同一时刻只有一个 group 在跑, 其余都 SUSPENDED + AS1 卸下),
+    可在冷提交时从最久未用的、挂起的其它上下文 group 抢槽(复用已上机验证的 resume-empty + STOP/TERMINATE
+    关闭路径, 102-107 多次成功), 被抢者下次提交时重新 configure。**障碍**: PanVK init_subqueue 的初始化 CS
+    设置的寄存器状态(subqueue ctx 寄存器、scoreboard、cs_heap_set)以及 progress seqno 寄存器跨 submit 保持,
+    TERMINATE 后丢失 → 需要内核保存/重放 init CS 并在每 job 末 STORE_MULTIPLE / 重绑时 LOAD_MULTIPLE 全部 CS
+    寄存器; render_va 需改用 group entry 而不是 slot; 抢槽需 TryLock 受害上下文 lock(锁序 c->lock -> owner)。
+- BUILT(内核-only, 插件 275 不变, 无需 mailbox):
+  - x9/out/x9-rev252dc **041d267fc297dd0830bd50407b85579679f0ace28ad2ba94a7c825e3bd0fd80c**(rev252db 参数 + x9_dvfsrc=1)
+- 下一步: 上机 rev252dc 看 INIT a0 / gear 是否变化、wait_us 与 fps; 若 INIT 成功但 gear 仍 0 → 试 x9_dvfsrc=2。
+
 ## HANDOFF 2026-11-08 (65): 109.txt x9lc 生效; 呈现改 1242x2760(rev252da); DVFSRC DRAM 请求(rev252db); 均未上机
 
 - 实测 109(rev252cz): cache-lc pre/post 各跳过 ~13-14 MB/job, seed_clean_avg=0; pre_cache 0.4-0.9 ms(之前 1.2-5),
