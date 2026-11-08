@@ -14,7 +14,12 @@
   不会被记录 → 测试时先在 Spotlight 里打几个字母、等几秒再点 123。
 - 构建(Mac, 后台): `build.py all --revision 270 --name x9-rev252cq` + rev252cp 的 16 个令牌(去掉 x9_mgwipe)+
   x9kbdhook=1。plugin 版本变了 → **必须先 mailbox 重写**: `X9_SERIAL=<serial> python3 x9/mailbox/update.py
-  x9/out/x9-rev252cq`, 再 `fastboot boot x9/out/x9-rev252cq/boot.img`。结果/哈希待补。
+  x9/out/x9-rev252cq`, 再 `fastboot boot x9/out/x9-rev252cq/boot.img`。
+- **BUILT(Mac, 未上机)**: x9/out/x9-rev252cq — boot.img **64a73e39a64c12692efc3b313f424eeac1ceda62ba9892ab4b547cd81551c93a**,
+  kernel f97394422348d619..., payload b5c461a6ef18b8f9...; 嵌入参数核对 = 上述 16 令牌 + x9kbdhook=1; X9GeneralMetal270
+  内含 `X9 KBDHOOK` 串。allowlist 头随 b334009 提交。构建坑: zsh 不拆 `$A`(用 bash 数组脚本 /tmp/x9-rev252cq.sh);
+  boot 步需 `PATH=/Library/Frameworks/Python.framework/Versions/Current/bin:/opt/homebrew/opt/llvm/bin:$PATH`
+  (all 步因缺 llvm-objcopy 停在 boot, 用 `build.py boot --kernel x9/out/x9-rev252cq/kernel.development.sweet` 补)。
 
 ## HANDOFF 2026-11-08 (54): 101.txt(rev252cp) 相册/时间/机型 USER 确认修好; 键盘 123 仍打不开 → UIKit 门控已定位(静态), assetsd 假说证伪
 
