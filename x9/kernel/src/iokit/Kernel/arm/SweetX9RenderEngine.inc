@@ -665,11 +665,6 @@ static IOReturn render_submit_publish(RenderJobState *st) {
   bzero(base+0x8200,8);bzero(base+0x8280,8);render_storage_clean(g->storage[i]);
  }
  if(!st->active)return kIOReturnBadArgument;
- /* rev252cn: the producer commits at publish so the pipeline's second publish
-  * computes its expected values past this job's packet (reap no longer
-  * commits). A failure before this point leaves the producer untouched and
-  * the next submit recomputes the same expected values. */
- for(unsigned i=0;i<3;i++)if((st->active)&(1u<<i))g->producer[i]=st->expected[i];
  uint64_t root=resume?parked_root:x9_render_memory_publish(c);if(!root)return kIOReturnNotReady;
  st->root=root;
  park_restore.armed=false;   /* hardware phase: failures are uncertain, success re-parks */
@@ -683,8 +678,11 @@ static IOReturn render_submit_publish(RenderJobState *st) {
   st->phase="user-io-prepare";
   for(unsigned i=0;i<3;i++) {
    uint32_t va=slot.user_io+i*host_page;
-   /* Pipeline: the GPU is still consuming job 1's packet, so its insert lags
-    * the producer; only the CPU-side producer word must match here. */
+   /* The producer word check compares against the value this packet is
+    * replacing, so the kernel-side producer commits only at stream-publish
+    * below (rev252cn: publish, not reap, so the pipeline's second publish
+    * sees expected values past job 1's packet). A failure before that leaves
+    * the producer untouched and the next submit recomputes the same values. */
    if(output_qword(resident->image,va)!=g->producer[i]||
       (!st->pipeline&&output_qword(resident->image,va+gpu_page)!=g->producer[i])||
       !put_qword(resident->image,va+8,g->producer[i])||!clean_page(resident->image,va))return render_submit_uncertain(st);
@@ -696,6 +694,10 @@ static IOReturn render_submit_publish(RenderJobState *st) {
   for(unsigned i=0;i<3;i++)if((st->active)&(1u<<i)) {
    uint32_t va=slot.user_io+i*host_page;
    if(!put_qword(resident->image,va,st->expected[i])||!clean_page(resident->image,va))return render_submit_uncertain(st);
+   /* rev252cn: the kernel-side producer commits exactly here, together with
+    * the user-io word it mirrors, so the pipeline's second publish sees
+    * expected values past job 1's packet (reap no longer commits). */
+   g->producer[i]=st->expected[i];
   }
   /* ml_io_map() takes permanent VA from the fixed 8 MiB io_submap and is
    * never released: mapping per submit exhausted it after ~400 jobs and
