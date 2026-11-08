@@ -69,7 +69,10 @@
   13a7b368... 已在内核,与 handoff 51/52 的 269 staging 规则一致),boot 镜像
   `x9/out/x9-rev252cn-mgwipe/boot.img` sha256 9f0c6278bd2c70e959875d1cd9bb8da906def102734d8efffd9b0955cd852a67,
   embedded args = rev252cn 基线逐字节一致 + `x9_mgwipe=1`(已 diff 核对);payload(邮箱用)
-  sha256 ae1bc3aab684f14b75243728351d036a115c911bea0063ce6295009fc5c3a2fb。上机: 若设备邮箱还是旧载荷,
+  sha256 ae1bc3aab684f14b75243728351d036a115c911bea0063ce6295009fc5c3a2fb。**269 plugin-package 已拷入
+  candidate**(boot 步骤带 --kernel 不产 plugin-package;来源 x9-de3702b-dirty 的诊断包,identity
+  13a7b368...,10 个文件大小+SHA256 与内核 allowlist 逐一核对全等,插件二进制非确定性所以不能重跑 plugins,
+  必须用与 committed 头同批的那份)。上机: 若设备邮箱还是旧载荷,
   先 `X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/x9-rev252cn-mgwipe`,再
   `fastboot boot x9/out/x9-rev252cn-mgwipe/boot.img`;日志看 `X9 MGWIPE: cache errno=0`(errno=2=文件本就不在,
   说明缓存此前不存在,需另找 iPod 来源)。验证后去掉该 boot-arg 恢复正常缓存(每次 boot 都删会每次重建,
