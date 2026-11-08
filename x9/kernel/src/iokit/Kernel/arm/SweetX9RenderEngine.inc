@@ -13,7 +13,7 @@ struct RenderKernelGroup {
 };
 #include "X9RenderCachePlan.inc"
 /* rev252cn (x9dc): deferred client clean ranges (see render_dirty_stage below). */
-#define X9_RENDER_DIRTY_MAX 64u
+#define X9_RENDER_DIRTY_MAX 256u
 struct RenderDirtyEntry { uint32_t handle; uint64_t offset,bytes; };
 #define X9_RENDER_DIRTY_SLOTS 2u
 static bool render_dirty_enabled();
