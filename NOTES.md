@@ -62,6 +62,18 @@
   SWEET 已解 kludge)。→ 若 UI 仍显示 iPod, 首选删上面的缓存 plist(boot 时 MG 重建走 native)再验证;
   x9_update_install 目前只能 publish 文件不能删 var 下的文件, 删除需 boot-arg 门控 PID1 unlink
   (仿 08b386d 模式)或重刷根。删完仍 iPod 再查 UIKit 侧(status-bar device-name item 的具体 key)。
+- **x9_mgwipe 已实现(commit 6613ddb, kern_exec.c sweet_x9_wipe_gestalt_cache)**: PID1 exec 路径
+  (update-install 块后)在 `x9_mgwipe=1` 时对两个路径各 unlink 一次——systemgroup 缓存 plist 与 legacy
+  `/var/mobile/Library/Caches/com.apple.MobileGestalt.plist`;ENOENT 算成功,其它错误只记录不拦 boot
+  ("X9 MGWIPE: cache/legacy errno=N")。**BUILT**: 内核 `x9/out/x9-a6fbe37-dirty`(269 allowlist identity
+  13a7b368... 已在内核,与 handoff 51/52 的 269 staging 规则一致),boot 镜像
+  `x9/out/x9-rev252cn-mgwipe/boot.img` sha256 9f0c6278bd2c70e959875d1cd9bb8da906def102734d8efffd9b0955cd852a67,
+  embedded args = rev252cn 基线逐字节一致 + `x9_mgwipe=1`(已 diff 核对);payload(邮箱用)
+  sha256 ae1bc3aab684f14b75243728351d036a115c911bea0063ce6295009fc5c3a2fb。上机: 若设备邮箱还是旧载荷,
+  先 `X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/x9-rev252cn-mgwipe`,再
+  `fastboot boot x9/out/x9-rev252cn-mgwipe/boot.img`;日志看 `X9 MGWIPE: cache errno=0`(errno=2=文件本就不在,
+  说明缓存此前不存在,需另找 iPod 来源)。验证后去掉该 boot-arg 恢复正常缓存(每次 boot 都删会每次重建,
+  不损坏但浪费一次 rebuild)。
 
 ## HANDOFF 2026-11-08 (52): 开机 1970 修复 = PMIF/SPMI 读 MT6687 RTC (getGMTTimeOfDay), BUILT x9-rev252cn-rtc; 未上机
 
