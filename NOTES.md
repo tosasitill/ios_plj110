@@ -30,6 +30,30 @@
 - 下一步: 需要一次包含开/关 app 时刻的完整日志; 之后按时间抓该帧的 draw(x9vf 机制只按固定 uptime 触发,
   参数上限 607 B, 需要改成按 transition 触发或放宽)。
 
+## HANDOFF 2026-11-08 (60): GPU 优化 #3(x9pl 驻留上下文活体 map/unmap)+ #5(x9sl 无锁 SubmitAsync)BUILT, 未上机
+
+- #3 根因(104.txt): PARK cold 1342 vs hit 739, retire_map 648 / retire_unmap 576 —— 驻留 group 遇 map/unmap 必须
+  retire(page table attached 时 map/unmap/publish 都拒绝)。实现(bc6fcf0, 令牌 x9pl=1, 需 x9_gpu_park):
+  驻留且同 context 时直接改 attached 页表(X9RenderPageTable *_live 变体, 不 prune), publish_live 清脏表页,
+  然后按 Linux panthor `mmu_hw_do_operation_locked`(CSF): AS1 LOCKADDR(自然对齐 2 幂区间, log2-1 编码, 最小
+  32 KiB)+ COMMAND LOCK → FLUSH_CACHES(flush_gpu 0x23304)→ 显式 COMMAND UNLOCK, 每步等 AS idle, 再 no_faults;
+  任一步失败按 retire 失败处理(uncertain)。其余情况走旧 retire。安全前提: worker 从 publish 到 reap 持 c->lock,
+  map/unmap 也要 c->lock, 所以活体改表时本 context 没有在跑的 job。PARK 行新增 live_map/live_unmap 计数。
+- #5 根因: 不是客户端串行, 是内核锁 —— SubmitAsync 进 externalMethod 先拿 context->lock, 而 async worker 整个
+  publish→GPU→reap(17-21 ms)都持 c->lock, 同一进程的下一个提交在内核里睡到上一个 job 结束 → FIFO 永远只有
+  一个 job(inflight_max=0), x9if 永远配不上对。实现(5c7c45c, 令牌 x9sl=1, 需 x9_submit_async, x9dc 开时自动
+  关闭——dirty staging 依赖 c->lock): 每 context 新 submit_lock(叶锁, 顺序 c->lock→submit_lock)保护
+  next_submission 与 mappings 注册表; SubmitAsync 只拿 submit_lock 校验+入队(engine submit_async_try, 满则
+  NoSpace), FIFO 满时释放 submit_lock 再 async_wait_room 睡眠后重试(避免 map 线程持 c->lock 等 submit_lock、
+  worker 等 c->lock 的死锁)。剩余串行点: map/unmap 仍需 c->lock, 会等正在跑的 job。
+- 另外的 #5 观察: retire_other 只有 1 → 绝大多数 job 同属 backboardd; 跨进程并发(多 CSG/多 AS)是更大的后续项。
+- BUILT(Mac, 内核-only, 插件仍 274 → 沿用 rev252cu 的 mailbox):
+  - x9/out/x9-rev252cv boot_sha256 4e23ab5c3695e5e2dbe582c534d05bb05e984dbe0b9c69baeaccd034e1671323(rev252cu + x9pl=1)
+  - x9/out/x9-rev252cw boot_sha256 **1fe878ba1afafd3bc09a94a63bca4bce71b081520bf86ef511b03aac16253cda**
+    (rev252cu 参数去 x9dc, 加 x9pl=1 x9sl=1; 保留 x9if/x9_cache_scope/最高频/两个探针)
+- 判读: `X9 RENDER PARK: ... live_map= live_unmap=`(cold 应大降)、`X9 RENDER ASYNC window ... inflight_max`(应 ≥1)、
+  RENDER timing wait_us、METRICS presented_fps; 失败形态 `live map ... uncertain` / `refused (lock-free)` 原样报。
+
 ## HANDOFF 2026-11-08 (59): 104.txt = 123 切过去又被同一调用内的嵌套 setKeyplaneName 切回; 接缝不是 CA tile;
 ## GPU 时间分解; rev252cu + rev252cu-nocache BUILT(plugin 274, 都 x9_gpu_floor_khz=1716000)未上机
 
