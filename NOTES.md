@@ -1,3 +1,26 @@
+## HANDOFF 2026-11-09 (67): 141.txt 确认 el 生效；新卡点是 CCIF 门铃同步等待；rev252em-md BUILT 未上机
+
+- USER「好了」，`~/141.txt` 已存在；实测 1.261 s `build=rev252el-md fs128-bb-v1 mode=4 bb=1`，
+  3.033 s 128 MiB pool，preload 使用 0/134217728。没有原来的 grow/CMPT_Write -5 或 lid_error_handle.c 断言。
+- 实测仍未 HS2/READY；X9 BB 未启动（代码只在 HS2 后调用，不能归因桥接/QMI）。
+  14.981/23.293/27.627/31.996/36.348/40.678 s `TX q4 doorbell still busy after 4 s`；
+  40.681 s MCU `mcu/driver/ccismcore/src/ccismcore_ccci.c:1873` p=4/092a7ec0/1，之后 ready=0 packets=1908。
+  139 也有一次 q4 busy 长等待但最终 READY，因此这里是已证实实现差异/强候选，不声称硬件因果已验证。
+- 源码契约已确认：OPPO modules/devicetree `4d505a4292dab3176a45fec66dc85debc362e24c`，
+  `kernel/kernel_device_modules-6.12/drivers/misc/mediatek/eccci/hif/ccci_hif_ccif.c:897-913` md_ccif_send，
+  包先提交 ring，BUSY 时不等待不重踢、直接返回 0。md_ccif_op_send_skb:1020-1041 也是此顺序。
+  本地参考 `.local/x9/modem/source/ccci_hif_ccif.c`（经 gh API，未入 git）。
+- em 单变量修复：x9md_tx 去掉门铃 BUSY 的同步4秒循环，按 Android 契约合并通知并返回成功；
+  不改 FS/环形帧布局、128 MiB pool、AT/bridge 参数。仍保留真实 ring-full 有界等待（本次未出现 full）。
+  新统计 packets/kicks/busy_nowait + q4 TX/RX read/write/length，在 READY/exception/5秒 listen 时记录；
+  READY 时记录 FS pool/node/handle 用量。标记 `build=rev252em-md fs128-bb-txnowait-v1 mode=4 bb=1`。
+- 构建：Mac 正常 kernel+boot，输入复用 `.local/x9/modem/boot-rev252el-md.json`，输出 `x9/out/x9-rev252em-md`，
+  stdout `/tmp/x9-rev252em-md-build.log`；无 CI/插件重建/额外测试/二次产物检查，未写设备。
+- BUILT：正常构建退出0，boot.img 12861440 B，内置 metadata sha256 `9a7c1ab871b969755840ad783d832bef8c9c8484dd9d346212711fc3abfdc984`。
+  COMMIT `a7a9cd2`；未做额外测试/产物检查，尚无 em 实机结果。
+- 下一步：用户手动启动 em，收 `~/142.txt`（建议到60秒）；先确认标记，再看 HS2、AT、TX stats 和 X9 BB 请求。
+  若仍断言，按 q4 TX/RX 指针区分 MD 消费停住还是 AP backlog，返回最早异常而非追 CommCenter。
+
 ## HANDOFF 2026-11-09 (66): 140.txt 回到旧 FSD 失败形态；139.txt 已 READY/注册；rev252el-md BUILT 未上机
 
 - 用户要求看 `~/140.txt` 继续基带修复。此前基带工作未写进本文件，代码仍是未提交工作区。
