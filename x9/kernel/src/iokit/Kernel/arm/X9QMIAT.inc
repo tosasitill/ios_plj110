@@ -238,6 +238,30 @@ static void x9q_nas(x9q_job &j){
    p.tlv(0x12,plmn,sizeof(plmn));plmn[4]=(uint8_t)(j.mnc_digits==3);p.tlv(0x27,plmn,sizeof(plmn));}
  }else{ /* Validity-free service status only: no invented LTE/NR cell/RSRP. */
   if(j.reg[1]>=0){uint8_t lte[3]={(uint8_t)(x9q_registered(j.reg[1])?2:0),(uint8_t)(x9q_registered(j.reg[1])?2:0),0};p.tlv(0x14,lte,3);}
+  /* 165.txt + 163 logd: CommCenter kept cellularRegistrationStatus=unknown /
+   * kNotRegistered with status-only SysInfo, so it never started data. LTE System
+   * Info (0x19, libqmi layout, 29 bytes): service domain from real CGATT/CREG,
+   * roaming from CEREG stat 5, PLMN from COPS numeric. LAC/cell id/TAC and reject
+   * info are marked invalid, not invented. Sent only when CEREG is registered. */
+  if(x9q_registered(j.reg[1])){
+   uint8_t li[29]={};unsigned w=0;
+   uint8_t domain=(uint8_t)(j.attached==1?(x9q_registered(j.reg[0])?3:2):(x9q_registered(j.reg[0])?1:0));
+   li[w++]=1;li[w++]=domain;li[w++]=1;li[w++]=domain;          /* domain, capability */
+   li[w++]=1;li[w++]=(uint8_t)(j.reg[1]==5);                    /* roaming */
+   li[w++]=1;li[w++]=0;                                         /* not forbidden */
+   li[w++]=0;w+=2;li[w++]=0;w+=4;                               /* lac, cell id invalid */
+   li[w++]=0;w+=2;                                              /* no reject info */
+   if(j.mnc_digits){li[w++]=1;
+    li[w++]=(uint8_t)('0'+j.mcc/100);li[w++]=(uint8_t)('0'+j.mcc/10%10);li[w++]=(uint8_t)('0'+j.mcc%10);
+    if(j.mnc_digits==3){li[w++]=(uint8_t)('0'+j.mnc/100);li[w++]=(uint8_t)('0'+j.mnc/10%10);li[w++]=(uint8_t)('0'+j.mnc%10);}
+    else{li[w++]=(uint8_t)('0'+j.mnc/10);li[w++]=(uint8_t)('0'+j.mnc%10);li[w++]=0xff;}
+   }else{li[w++]=0;w+=6;}
+   li[w++]=0;w+=2;                                              /* tac invalid */
+   p.tlv(0x19,li,w);
+   static unsigned logged;
+   if(logged<4){logged++;printf("X9 QMI AT: NAS SysInfo LTE registered domain %u roam %u plmn %s (lac/cell/tac not reported)\n",
+     domain,(unsigned)(j.reg[1]==5),j.mnc_digits?"from COPS":"unknown");}
+  }
   if(j.reg[2]>=0){uint8_t nr[3]={(uint8_t)(x9q_registered(j.reg[2])?2:0),(uint8_t)(x9q_registered(j.reg[2])?2:0),0};p.tlv(0x4a,nr,3);}
  }
  x9q_finish(j,p,j.id==0x4d?0x4e:0x24);
