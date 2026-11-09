@@ -146,7 +146,9 @@ static void x9q_command(x9q_job &j,const char *s,unsigned stage){
 }
 static void x9q_sim_command(x9q_job &j,unsigned op,unsigned file,unsigned p1,unsigned p2,unsigned p3,const char *path,unsigned stage){
  /* path is constructed from validated QMI uint16-LE pairs, never AT text. */
- snprintf(j.command,sizeof(j.command),"AT+CRSM=%u,%u,%u,%u,%u,\"\",\"%s\"\r",op,file,p1,p2,p3,path);j.stage=stage;
+ /* 159.txt: the "" data field got +CME ERROR 0 for every read. MTK's own RIL
+  * leaves it empty (AT+ECRLA=...,%d,,"%s" in libmtk-ril), as 27.007 allows. */
+ snprintf(j.command,sizeof(j.command),"AT+CRSM=%u,%u,%u,%u,%u,,\"%s\"\r",op,file,p1,p2,p3,path);j.stage=stage;
 }
 static bool x9q_read_args(x9q_job &j){
  x9q_view session=x9q_tlv(j.req,j.len,1),file=x9q_tlv(j.req,j.len,2),read=x9q_tlv(j.req,j.len,3);

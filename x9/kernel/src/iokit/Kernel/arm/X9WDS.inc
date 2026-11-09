@@ -48,7 +48,11 @@ struct x9w_frame {
  uint64_t submit(){p[14]=(uint8_t)(n-16);p[15]=(uint8_t)((n-16)>>8);return good?x9_md_mipc_submit(p,n):0;}
 };
 static bool x9w_wire(const uint8_t *p,unsigned n,unsigned mask=1){
- if(n<16||n>X9_MIPC_FRAME_MAX||x9q_u32(p)!=0x24541984||p[8]!=mask||p[9]||x9q_u16(p+14)!=n-16)return false;
+ /* 159.txt: OPEN_CNF arrives with flag byte 9 = 0x02. The device's libmipc
+  * RX path ignores byte 9 and the SIM mask of CNFs (mipc_init+0x4c0); INDs are
+  * already filtered to SIM bit 0 by the transport. */
+ (void)mask;
+ if(n<16||n>X9_MIPC_FRAME_MAX||x9q_u32(p)!=0x24541984||x9q_u16(p+14)!=n-16)return false;
  unsigned at=16;
  while(at<n){
   if(n-at<4)return false;
@@ -89,6 +93,15 @@ static void x9w_init_poll(uint8_t *response,unsigned room){
    x9q_view r=good?x9w_tlv(response,n,0):x9q_view{nullptr,0};
    good=good&&x9w_word(response,n,0x100,version)&&version==2&&(!r.p||(r.n==4&&x9q_u32(r.p)==0));
   }else good=good&&x9w_word(response,n,0,result)&&result==0;
+  if(!good){
+   /* Handshake CNFs carry only version/result/timeout words: log tags and
+    * 4-byte values so a version mismatch is visible. */
+   char t[160];unsigned w=0;t[0]=0;
+   for(unsigned at=16;at+4<=n&&w+24<sizeof(t);){unsigned tag=x9q_u16(response+at),k=x9q_u16(response+at+2);
+    w+=(unsigned)snprintf(t+w,sizeof(t)-w,k==4&&at+8<=n?" %04x=%u":" %04x/%u",tag,k==4&&at+8<=n?x9q_u32(response+at+4):k);
+    at+=k?((k+11)&~7u):16;}
+   printf("X9 MIPC: handshake stage %u reply id 0x%04x len %u tlvs%s\n",x9w_init_stage,n>=12?x9q_u16(response+10):0,n,w?t:" none");
+  }
   bzero(response,room);
   if(!good){x9w_init_hold=true;printf("X9 MIPC: handshake stage %u rejected/malformed; no dial\n",x9w_init_stage);return;}
   printf("X9 MIPC: handshake stage %u confirmed\n",x9w_init_stage);

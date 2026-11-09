@@ -24,7 +24,7 @@ MEM_SIZE = 0x20000000
 RAM_WINDOWS = {"legacy512": (PHYS_BASE, MEM_SIZE),
                "large4g": (0x200000000, 0x100000000),
                "large5g": (0x200000000, 0x13e000000),
-               "segmented8g": (0x140000000, 0x22f000000)}
+               "segmented8g": (0x100000000, 0x27fa00000)}
 SOC_BASE = 0x00400000
 GICD, GICD_SIZE = 0x06800000, 0x40000
 GICR, GICR_SIZE = 0x06880000, 0x200000

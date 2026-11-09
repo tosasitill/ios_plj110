@@ -128,7 +128,7 @@ def main():
                    'ram_window': a.ram_window, 'dram_base': hex(mkadt.RAM_WINDOWS[a.ram_window][0]),
                    'dram_size': hex(mkadt.RAM_WINDOWS[a.ram_window][1]),
                    'dram_usable_source': 'live LK FDT -> chosen/x9-ram-map' if a.ram_window=='segmented8g' else 'fixed window',
-                   'dram_usable_upper_bound_bytes': 9161670656 if a.ram_window=='segmented8g' else mkadt.RAM_WINDOWS[a.ram_window][1],
+                   'dram_usable_upper_bound_bytes': 10459807744 if a.ram_window=='segmented8g' else mkadt.RAM_WINDOWS[a.ram_window][1],
                    'boot_partition_size': a.boot_partition_size,
                    'max_image_size': a.max_image_size,
                    'ramdisk_transport': 'native-ufs-extent-root' if a.ufs_native_manifest else 'ufs-plaintext-to-ram' if a.ufs_root_manifest else info.get('ramdisk_transport', 'dense-v1'),

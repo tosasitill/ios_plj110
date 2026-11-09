@@ -73,8 +73,8 @@ X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>      # 之后再�
 
 ## 3. 当前基线镜像与参数
 
-最新实测:**x9-rev252hs-md**(158,见HANDOFF91;MIPC/DPMAIF在prepare/OPEN即隔离,UIM卡状态被拒);前一实测 **x9-rev252hl-md**(代码提交 **`20c64f2`**,构建交接 `0f9d983`),boot.img **12877824 B=12.28125MiB**,路径 `x9/out/x9-rev252hl-md/boot.img`。**157确认完整11文件安装成功、qdsp可读、Sahara finished并进入QMUX/QMI,握手摘要reset=0;真实iOS蜂窝尚未打通**,见HANDOFF87。独立34MiB固件与插件275不需再stage。
-当前未上机候选:**x9-rev252ht-md**(HANDOFF91修复);更早候选 **x9-rev252hq-md**(代码`ccbad81`),boot.img12906496B;沿用hn AT→QMI,新增DPMAIF只读/分配探针和WDS前置状态查询,见HANDOFF89。hq默认`x9_dpmaif=1`,不初始化硬件或激活PDP;hn保留。最新实测仍hl;不要把候选当作SIM/蜂窝已验证。
+最新实测:**x9-rev252ht-md**(159,见HANDOFF92);再前 **x9-rev252hs-md**(158,见HANDOFF91;MIPC/DPMAIF在prepare/OPEN即隔离,UIM卡状态被拒);前一实测 **x9-rev252hl-md**(代码提交 **`20c64f2`**,构建交接 `0f9d983`),boot.img **12877824 B=12.28125MiB**,路径 `x9/out/x9-rev252hl-md/boot.img`。**157确认完整11文件安装成功、qdsp可读、Sahara finished并进入QMUX/QMI,握手摘要reset=0;真实iOS蜂窝尚未打通**,见HANDOFF87。独立34MiB固件与插件275不需再stage。
+当前未上机候选:**x9-rev252hu-md**(HANDOFF92:RAM 9.74G allowlist+MIPC/CRSM);回退 **x9-rev252ht-md**;更早候选 **x9-rev252hq-md**(代码`ccbad81`),boot.img12906496B;沿用hn AT→QMI,新增DPMAIF只读/分配探针和WDS前置状态查询,见HANDOFF89。hq默认`x9_dpmaif=1`,不初始化硬件或激活PDP;hn保留。最新实测仍hl;不要把候选当作SIM/蜂窝已验证。
 回退:**x9-rev252hk-md**(修复提交 `d1f8515` + 当时未提交的渲染改动,现已入库),boot.img **15278080 B**;156确认reserve生效、efs1.bin已有1MiB,当时15次reset及零传输见HANDOFF84。
 本机回退镜像:`x9/out/x9-rev252hk-md/boot.img`;hl/hk配置沿用 `.local/x9/modem/boot-rev252hi-md.json`。
 157已越过缺qdsp的前置阻塞,**当前阻塞在X9的QMI→MTK适配**:UIM/NAS/DMS/WDS/WDA/DPM请求实际到达后返回0x5e,数据端口配置失败,四个PDP接口仍blocked/tx=rx=0。Sahara是兼容桥交互,不向物理MTK下载Apple固件;PCIControl methods仍0x0,不能说PCIControl已通。以下GPU专用基线与参数为 **2026-11-08 历史记录**,不要当作hk/hl参数直接复用。
@@ -152,7 +152,17 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
 
-## 7. 当前交接(HANDOFF 91,2026-11-09): 158(hs)读完;MIPC/DPMAIF/UIM三处本地错误已修,ht已构建待上机
+## 7. 当前交接(HANDOFF 92,2026-11-09): 159(ht)读完;RAM扩到9.74GiB allowlist + MIPC/CRSM修复,hu已构建待上机
+
+- **159.txt**(Mac `~/159.txt`,1326389B/13172行,末77.8s,无panic)。`build=rev252ht-md`;14.2s HS2→READY;Sahara finished;摘要`resets 1, PCIControl 0x0`不变。
+- **MIPC(观察)**:OPEN的回复头为`84195424 00000000 mask 0xff flag 0x02 id 0x0302 txn 1 len 24`。可见hs是被byte9=0x02隔离的,ht的transport修复生效。但WDS侧`x9w_wire`仍要求`p[9]==0`且mask完全相等,所以`handshake stage 1 rejected/malformed`。hu修复:去掉这两项检查(同libmipc);拒绝时打印TLV tag和4字节值。
+- **DPMAIF(观察+根因)**:`DMA alloc of 16384 bytes returned no descriptor`。**真正根因**:shim交给XNU的RAM从`X9_RAM_LO=0x140000000`开始,XNU根本不管理4GiB以下的页。hs是page_grab只能拿到>4GiB的页;ht的contig≤4GiB无页可给。HANDOFF91中"KMA_LOMEM导致"只说对了路径,没说到原因。hu仍然≤4GiB无页,DPMAIF会继续在prepare失败(预期)。另外Wi-Fi注释记录了EMI MPU只允许PCIe DMA到LK carve-out,DPMAIF可能同样受限(推断,未证实)。
+- **UIM(观察)**:CPIN已过(进入stage 2/3),但`AT+CRSM`对EF_ICCID/EF_DIR都返回`AT result 1 cme 0`。0x2f的TLV 0x10值为0,已被接受。DMS 0x23(CGMR)现在成功(real AT)。108条reject日志里主要是NAS 0x03/0x33/0x34/0x45/0x4f/0x73、DMS 0x01/0x24/0x45/0x4b/0x53/0x54/0x5557、WDS 0x01/0x03/0x30/0x3e/0xc8/0xcd/0x5564,均为94未实现。hu:CRSM改用MTK RIL的空data字段格式`,,"path"`(libmtk-ril只有`AT+ECRLA=...,,"%s"`,不用CRSM;若hu仍CME 0,下一步改用ECRLA或`AT+ICCID?`)。
+- **RAM(用户要求约10G)**:159的`vm_page_bootstrap`为550867空闲+21549 wired页,约8.7GiB。segmented表改为base **0x100000000**(新增0x100000000–0x13CC00000,DT中该段无mblock)、top **0x37FA00000**(到mblock-22 me_gpu_reserved),allowlist合计 **0x26F740000=9.74GiB**(原8.53)。**不再往下扩**:XNU的physmap把整个span(含空洞)按cacheable映射,4GiB以下的空洞含TEE/GZ/pvmfw等secure carve-out,推测会触发投机访问的MPU违规。要真正到10G+并拿到<4GiB页(DPMAIF),需要先在arm_vm_init里不映射空洞。shim启动时仍会扣掉live mblock;若FDT memory节点不覆盖新增段,shim会拒绝启动,并在USB日志开头打印`X9 RAM rejected`和memory tuples,此时回退ht。改动:两份`x9_ram_ranges.h`、`mkadt.py` segmented8g→(0x100000000,0x27fa00000)、`boot-xnu.py`上界。
+- **hu构建成功**(未上机):`python3 -I x9/build/build.py all --name x9-rev252hu-md --boot-config .local/x9/modem/boot-rev252hi-md.json --boot-arg x9_dpmaif=2 --boot-arg x9_mipc=1`,boot.img 12918784B,产物元数据dram_base 0x100000000/size 0x27fa00000。插件275不变,**无需mailbox staging**。回退:ht(8.5G表)。
+- **下一步由用户手动**:`fastboot boot x9/out/x9-rev252hu-md/boot.img`,日志放`~/160.txt`。先看开头shim段有没有`X9 RAM rejected`,再看`vm_page_bootstrap`的free页数(预期约+75k页);然后`rg -n 'build=rev252hu|X9 MIPC|X9 QMI AT: (service|response)|X9 DPMAIF' ~/160.txt`,预期出现MIPC `handshake stage 1 confirmed`→stage 3,UIM 0x2f/0x47有`(real AT)`或新的CME号。
+
+### 前次交接(HANDOFF 91,2026-11-09): 158(hs)读完;MIPC/DPMAIF/UIM三处本地错误已修,ht已构建待上机
 
 - **git**:本机main原与origin分叉(本地70个旧提交=远端`ae882f6`已squash的内容),已建`backup/local-main-e0e5178`后`reset --hard origin/main`(2409f8b)。Mac仓库同一提交。
 - **158.txt**(Mac `~/158.txt`,1016713B/10200行,末uptime 39.645s;私有副本 `.local/x9/logs/158-20261109-2211/158.raw.txt`(Mac),SHA256 `cd534b3a…c56e`)。446行`build=rev252hs-md`;11文件`same 22 external 1 complete 1 errno=0`;11.904s HS2→READY;19.57s Sahara finished;handshake 10/20s摘要`queries 190 accepted 20, resets 1, PCIControl 0x0`。无panic。
