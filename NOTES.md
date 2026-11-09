@@ -73,7 +73,7 @@ X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>      # 之后再�
 
 ## 3. 当前基线镜像与参数
 
-最新实测:**x9-rev252ib-md**(167,见HANDOFF101;54s LTE注册,CommCenter随即按已注册行事);再前 **x9-rev252ia-md**(166,见HANDOFF100);再前 **x9-rev252hz-md**(165,见HANDOFF99);再前 **x9-rev252hy-md**(164,见HANDOFF98);再前 **x9-rev252hx-md**(163,见HANDOFF96);再前 **x9-rev252hw-md**(162,见HANDOFF95);再前 **x9-rev252hv-md**(161,见HANDOFF94;MIPC就绪、UIM读通);再前 **x9-rev252hu-md**(160,见HANDOFF93;RAM 10.0GiB生效);再前 **x9-rev252ht-md**(159,见HANDOFF92);再前 **x9-rev252hs-md**(158,见HANDOFF91;MIPC/DPMAIF在prepare/OPEN即隔离,UIM卡状态被拒);前一实测 **x9-rev252hl-md**(代码提交 **`20c64f2`**,构建交接 `0f9d983`),boot.img **12877824 B=12.28125MiB**,路径 `x9/out/x9-rev252hl-md/boot.img`。**157确认完整11文件安装成功、qdsp可读、Sahara finished并进入QMUX/QMI,握手摘要reset=0;真实iOS蜂窝尚未打通**,见HANDOFF87。独立34MiB固件与插件275不需再stage。
+最新实测:**x9-rev252ic-md**(168,见HANDOFF102;LTE-only注册稳定,仍不拨号);再前 **x9-rev252ib-md**(167,见HANDOFF101);再前 **x9-rev252ia-md**(166,见HANDOFF100);再前 **x9-rev252hz-md**(165,见HANDOFF99);再前 **x9-rev252hy-md**(164,见HANDOFF98);再前 **x9-rev252hx-md**(163,见HANDOFF96);再前 **x9-rev252hw-md**(162,见HANDOFF95);再前 **x9-rev252hv-md**(161,见HANDOFF94;MIPC就绪、UIM读通);再前 **x9-rev252hu-md**(160,见HANDOFF93;RAM 10.0GiB生效);再前 **x9-rev252ht-md**(159,见HANDOFF92);再前 **x9-rev252hs-md**(158,见HANDOFF91;MIPC/DPMAIF在prepare/OPEN即隔离,UIM卡状态被拒);前一实测 **x9-rev252hl-md**(代码提交 **`20c64f2`**,构建交接 `0f9d983`),boot.img **12877824 B=12.28125MiB**,路径 `x9/out/x9-rev252hl-md/boot.img`。**157确认完整11文件安装成功、qdsp可读、Sahara finished并进入QMUX/QMI,握手摘要reset=0;真实iOS蜂窝尚未打通**,见HANDOFF87。独立34MiB固件与插件275不需再stage。
 当前未上机候选:**x9-rev252ic-md**(HANDOFF101:LTE-only ERAT);回退 **x9-rev252ib-md**;更早候选 **x9-rev252hq-md**(代码`ccbad81`),boot.img12906496B;沿用hn AT→QMI,新增DPMAIF只读/分配探针和WDS前置状态查询,见HANDOFF89。hq默认`x9_dpmaif=1`,不初始化硬件或激活PDP;hn保留。最新实测仍hl;不要把候选当作SIM/蜂窝已验证。
 回退:**x9-rev252hk-md**(修复提交 `d1f8515` + 当时未提交的渲染改动,现已入库),boot.img **15278080 B**;156确认reserve生效、efs1.bin已有1MiB,当时15次reset及零传输见HANDOFF84。
 本机回退镜像:`x9/out/x9-rev252hk-md/boot.img`;hl/hk配置沿用 `.local/x9/modem/boot-rev252hi-md.json`。
@@ -152,7 +152,15 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
 
-## 7. 当前交接(HANDOFF 101,2026-11-09): 167(ib)证实先NR SA后LTE;LTE SysInfo发出后CommCenter立刻按已注册行事;ic强制LTE-only
+## 7. 当前交接(HANDOFF 102,2026-11-09): 168(ic)LTE-only生效、注册稳定,但CommCenter仍不发数据请求;需再取logd
+
+- **168.txt**(Mac `~/168.txt`,1946100B,末114.57s,无panic,无board重置)。`build=rev252ic-md`;17.29s `LTE-only AT+ERAT=3 -> OK after 40 ms`;21.45s MIPC ready;23.66s SetOperatingMode 0;24.25s注册全0;**33.42s `CEREG 1 CGATT 1 COPS-AcT 7`**,之后到114s不再变化;LTE SysInfo每10s一次(33.4/43.4/53.4/63.4s…)。
+- **观察**:LTE注册后CommCenter只做周期查询:NAS 0x5556×9(Apple私有,拒)、UIM 0x2a×8(ACK)、DMS 0x2f×6(GetTime,拒)、NAS 0x4f×3(拒)、NAS 0x6c×1(ACK)、WDS 0x30×1(拒)。**没有0xc8推送、没有WDS 0x20 Start**,MIPC拨号未触发。
+- **推断**:注册这一环已经过了;现在不拨号是CommCenter数据侧的决定,候选:APN/运营商配置(PLMN 46015,iOS 16.7是否带该运营商bundle未知;163 logd里attach APN为空)、蜂窝数据开关/DataOff、或Apple私有NAS 0x5556。需要logd确认,不再盲改。
+- **关于换iPhone 14 Pro身份**(用户问):唯一收益是CommCenter认识5G,而这个问题已用ERAT解决。代价:14 Pro是arm64e(内核与dyld cache都要PAC版本)、根盘要用新IPSW重建、基带走另一套ABM/BBFW路径(Mav17这套全部重做)、屏幕/键盘适配重来;§6已记录不要换身份。结论:现阶段不换。
+- 无新代码、无新镜像。下一步:用户进Android接ADB,按HANDOFF97流程取logd(`pull_ios_logs.py --recent-hours 2`;uuidtext已有,可只拉diagnostics),grep `FSM:|DataMode|Activat|APN|DataOff|0x5556|NOT_SUPPORTED`。
+
+### 前次交接(HANDOFF 101,2026-11-09): 167(ib)证实先NR SA后LTE;LTE SysInfo发出后CommCenter立刻按已注册行事;ic强制LTE-only
 
 - **167.txt**(Mac `~/167.txt`,1376123B/13346行,末61.95s,无panic)。`build=rev252ib-md`;22.16s MIPC ready;23.28s SetOperatingMode 0。
 - **观察**:24.50s `NAS registration CREG 0 CEREG 0 C5GREG 1 CGATT 1 COPS-AcT 11`(**5G SA**);54.51s `CREG 0 CEREG 1 C5GREG 0 CGATT 1 COPS-AcT 7`(**LTE**),同一时刻`NAS SysInfo LTE registered domain 2 roam 0`,0x4e indication变为len 51。15ms内CommCenter发NAS 0x6c(Config Signal Info v2,16个阈值TLV)、NAS 0x4f GetSigInfo×2、WDS 0x30,表现得像已注册;采集在7s后结束,看不到之后是否有0xc8推送或WDS Start。
