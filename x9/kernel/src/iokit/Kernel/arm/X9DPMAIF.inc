@@ -198,9 +198,10 @@ static void x9d_prepare() {
         }
         x9d.bat_wr[kind] = X9D_BAT - 1;
         x9d_sync(x9d.bat[kind], 0, X9D_BAT * 8);
-        // Sequence poison: hardware sequence starts at zero, not prefilled zero.
+        // Each slot must differ from ITS expected first-lap sequence, including
+        // slots 255/511/etc. A fixed 0xff poison would match those descriptors.
         uint32_t *pit = reinterpret_cast<uint32_t *>(x9d.pit[kind].va);
-        for (unsigned i = 0; i < X9D_PIT; i++) pit[i * 4 + 3] = 255;
+        for (unsigned i = 0; i < X9D_PIT; i++) pit[i * 4 + 3] = (i ^ 128u) & 255u;
         x9d_sync(x9d.pit[kind], 0, X9D_PIT * 16);
     }
     printf("X9 DPMAIF: private DMA allocated below 4GiB, TX 2048/BAT 1024/PIT 2048x2; %s\n",
@@ -309,7 +310,7 @@ static bool x9d_rx_item(unsigned q, const uint32_t *d) {
 static bool x9d_rx_poll(unsigned q) {
     x9d_rx &r = x9d.rx[q]; unsigned wr = x9d_rd(x9d.pd + 0xc00, q ? 0xc4 : 0xa4) & 0x3ffff;
     if (wr >= X9D_PIT) { x9d_fail("RX hardware write index"); return false; }
-    unsigned consumed = 0;
+    unsigned consumed = 0, released = 0;
     while (r.rd != wr && consumed < X9D_BUDGET) {
         x9d_sync(x9d.pit[q], r.rd * 16, 16);
         uint32_t item[4]; memcpy(item, x9d.pit[q].va + r.rd * 16, sizeof(item));
@@ -323,10 +324,22 @@ static bool x9d_rx_poll(unsigned q) {
         r.seq_wait = 0;
         if (!x9d_rx_item(q, item)) return false;
         r.rd = (r.rd + 1) % X9D_PIT; r.seq++; consumed++;
+        if (!(r.rd & 3)) {
+            // Eight-bit sequence wraps eight times in a 2048-entry PIT ring:
+            // after a whole lap the old sequence could equal the new one.
+            // Poison each fully consumed cache line BEFORE returning credits.
+            // Never dirty a line containing a neighboring in-flight DMA PIT.
+            // Up to three consumed entries stay reserved across poll calls.
+            unsigned first = (r.rd + X9D_PIT - 4) % X9D_PIT;
+            uint32_t *line = reinterpret_cast<uint32_t *>(x9d.pit[q].va + first * 16);
+            for (unsigned i = 0; i < 4; i++) line[i * 4 + 3] ^= 128;
+            x9d_sync(x9d.pit[q], first * 16, 64); released += 4;
+        }
     }
     if (x9d.failed) return false;
-    // Return only consumed PIT slots; serialized shared command register.
-    return !consumed || x9d_command(x9d.pd + 0x900, 0x10, X9D_BUSY_BIT | (q << 20) | consumed);
+    // Return only fully consumed/poisoned cache-line groups; serialized shared
+    // command register. The 1..3 remaining entries have not been credited yet.
+    return !released || x9d_command(x9d.pd + 0x900, 0x10, X9D_BUSY_BIT | (q << 20) | released);
 }
 static bool x9d_replenish(unsigned kind) {
     const uintptr_t dls = x9d.pd + 0xc00;
