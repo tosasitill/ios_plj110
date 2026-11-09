@@ -279,11 +279,16 @@ static void x9q_result(x9q_job &j,const char *r,int result){
    else{uint8_t absent[11]={1,1,0,0,0,1,0,0,0,1,0};p.tlv(0x10,absent,sizeof(absent));}
    x9q_finish(j,p,j.id==0x2f?0x32:0x48);return;
   }
+  {char line2[80];const char *v2=line2;unsigned cme2=0;
+   bool has=x9q_line(r,"+CME ERROR:",line2,sizeof(line2))&&x9q_number(v2,cme2)&&!*v2;
+   printf("X9 QMI AT: service 0x%x msg 0x%04x stage %u AT result %d cme %d\n",service,j.id,j.stage,result,has?(int)cme2:-1);}
   x9q_error(j,X9Q_NOT_READY);return;
  }
- if(j.stage==1){char state[80];if(!x9q_line(r,"+CPIN:",state,sizeof(state))){x9q_error(j,X9Q_INTERNAL);return;}
+ if(j.stage==1){char state[80];if(!x9q_line(r,"+CPIN:",state,sizeof(state))){
+   printf("X9 QMI AT: service 0x%x msg 0x%04x CPIN reply without +CPIN line\n",service,j.id);x9q_error(j,X9Q_INTERNAL);return;}
   j.sim=!strcmp(state,"READY")?1:!strcmp(state,"SIM PIN")?2:!strcmp(state,"SIM PUK")?3:0;
-  if(j.sim!=1){x9q_error(j,X9Q_NOT_READY);return;}
+  if(j.sim!=1){printf("X9 QMI AT: service 0x%x msg 0x%04x CPIN class %d (1 READY 2 PIN 3 PUK 0 other)\n",service,j.id,j.sim);
+   x9q_error(j,X9Q_NOT_READY);return;}
   if(service==2||j.id==0x47)x9q_sim_command(j,176,0x2fe2,0,0,10,"3F00",2);
   else if(j.id==0x2f)x9q_sim_command(j,192,0x2f00,0,0,0,"3F00",3);
   else x9q_sim_command(j,192,j.file,0,0,0,j.path,5);
@@ -331,7 +336,15 @@ static void x9q_result(x9q_job &j,const char *r,int result){
    /* CFUN 0/4 is minimum/RF-disabled, not QMI RESET or persistent NV. */
    uint8_t qmi=(uint8_t)(mode==1?0:1);p.tlv(1,&qmi,1);
   }else{
-   if(!x9q_plain(r,text,sizeof(text),j.id==0x25||j.id==0x43)){x9q_error(j,X9Q_INTERNAL);return;}
+   const char *tag=j.id==0x21?"+CGMI:":j.id==0x22?"+CGMM:":j.id==0x23?"+CGMR:":nullptr;
+   bool got=tag&&x9q_line(r,tag,text,sizeof(text));
+   if(got){unsigned n=(unsigned)strlen(text);
+    if(n>=2&&text[0]=='"'&&text[n-1]=='"'){memmove(text,text+1,n-2);text[n-2]=0;}
+    for(const char *c=text;*c&&got;c++)if((unsigned char)*c<32||(unsigned char)*c>126)got=false;
+    if(!text[0])got=false;}
+   if(!got&&!x9q_plain(r,text,sizeof(text),j.id==0x25||j.id==0x43)){
+    printf("X9 QMI AT: DMS 0x%04x identity text not parsed (neither %s line nor single plain line)\n",j.id,tag?tag:"tagged");
+    x9q_error(j,X9Q_INTERNAL);return;}
    unsigned n=(unsigned)strlen(text);
    if((j.id==0x25&&n!=15)||(j.id==0x43&&(n<5||n>15))){x9q_error(j,X9Q_INTERNAL);return;}
    p.tlv(j.id==0x25?0x11:1,text,n);
@@ -354,37 +367,54 @@ static bool x9q_enqueue(uint32_t local,uint32_t port,const uint8_t *req,unsigned
  }return false;
 }
 #include "X9WDS.inc"
+/* Requests answered without an AT job used to be silent (158.txt: 178 requests,
+ * 14 logged answers). Log tags/lengths only; values only for 1-byte flags. */
+static void x9q_reject(uint32_t local,uint32_t port,const uint8_t *req,unsigned len,uint16_t err){
+ static unsigned logged;
+ if(logged<256&&len>=7){logged++;char t[96];unsigned w=0;t[0]=0;
+  for(unsigned i=7;i+3<=len&&w+16<sizeof(t);){unsigned k=x9q_u16(req+i+1);if(k>len-i-3)break;
+   w+=(unsigned)snprintf(t+w,sizeof(t)-w,k==1?" %02x/1=%02x":" %02x/%u",req[i],k==1?req[i+3]:k);i+=3+k;}
+  printf("X9 QMI AT: reject service 0x%x msg 0x%04x txn %u error %u tlvs%s\n",
+   port-X9BB_PORT_BASE,x9q_u16(req+3),x9q_u16(req+1),err,w?t:" none");}
+ x9bb_reply_error(local,port,req,len,err);
+}
 static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *req,unsigned len){
  if(len<7)return;
  unsigned service=port-X9BB_PORT_BASE,slot=local-CBQ_PORT_BASE,id=x9q_u16(req+3);
  if(node!=X9BB_NODE||local<CBQ_PORT_BASE||slot>=CBQ_MAX_CLIENTS||len>X9Q_REQ||!x9q_valid(req,len)){
-  x9bb_reply_error(local,port,req,len,X9Q_BAD);return;
+  x9q_reject(local,port,req,len,X9Q_BAD);return;
  }
  x9q_client &c=x9q_clients[slot];
  if(service==1&&x9w_request(local,port,req,len))return;
  if(service==0x0b&&id==0x2e){
   x9q_view m=x9q_tlv(req,len,1);
-  if(!m.p||m.n!=4||len!=14||x9q_u32(m.p)&~0x11u){x9bb_reply_error(local,port,req,len,X9Q_UNSUPPORTED);return;}
+  if(!m.p||m.n!=4||len!=14||x9q_u32(m.p)&~0x11u){x9q_reject(local,port,req,len,X9Q_UNSUPPORTED);return;}
   c.uim_mask=x9q_u32(m.p);c.next=0;x9q_packet p(req);p.tlv(0x10,m.p,4);p.send(local,port);return;
  }
  if(service==3&&id==3){
   bool serving=c.serving,system=c.system;
   for(unsigned i=7;i<len;i+=3+x9q_u16(req+i+1)){
    unsigned k=x9q_u16(req+i+1);uint8_t tag=req[i];
-   if(k!=1||req[i+3]>1||(tag!=0x13&&tag!=0x18&&req[i+3])){x9bb_reply_error(local,port,req,len,X9Q_UNSUPPORTED);return;}
+   if(k!=1||req[i+3]>1||(tag!=0x13&&tag!=0x18&&req[i+3])){x9q_reject(local,port,req,len,X9Q_UNSUPPORTED);return;}
    if(tag==0x13)serving=req[i+3]!=0;else if(tag==0x18)system=req[i+3]!=0;
   }
   c.serving=serving;c.system=system;c.next=0;x9q_packet p(req);p.send(local,port);return;
  }
  /* WDA/DPM must not open a fabricated IPA endpoint. Unsupported WDS operations
   * must not promote CGATT to an IP route. */
- if(!x9q_supported(service,id)){x9bb_reply_error(local,port,req,len,X9Q_UNSUPPORTED);return;}
+ if(!x9q_supported(service,id)){x9q_reject(local,port,req,len,X9Q_UNSUPPORTED);return;}
  if(service==3&&id==0x20&&len!=7){
   x9q_view mask=x9q_tlv(req,len,0x10);
-  if(!mask.p||mask.n!=2||len!=12||x9q_u16(mask.p)){x9bb_reply_error(local,port,req,len,X9Q_UNSUPPORTED);return;}
+  if(!mask.p||mask.n!=2||len!=12||x9q_u16(mask.p)){x9q_reject(local,port,req,len,X9Q_UNSUPPORTED);return;}
  }
- if(!((service==0x0b&&(id==0x20||id==0x21))||(service==3&&id==0x20))&&len!=7){x9bb_reply_error(local,port,req,len,X9Q_ARG);return;}
- if(!x9q_enqueue(local,port,req,len))x9bb_reply_error(local,port,req,len,X9Q_BUSY);
+ /* UIM GetCardStatus: CommCenter sends one optional 1-byte TLV 0x10 (158.txt,
+  * len 11). It was rejected with 48; answered with the legacy 0x10 card status. */
+ bool card_status_flag=false;
+ if(service==0x0b&&id==0x2f&&len==11){x9q_view f=x9q_tlv(req,len,0x10);
+  if(f.p&&f.n==1){card_status_flag=true;static unsigned once;
+   if(!once++)printf("X9 QMI AT: UIM 0x2f optional TLV 0x10 value %u accepted, legacy status TLV 0x10 answered\n",f.p[0]);}}
+ if(!((service==0x0b&&(id==0x20||id==0x21))||(service==3&&id==0x20))&&len!=7&&!card_status_flag){x9q_reject(local,port,req,len,X9Q_ARG);return;}
+ if(!x9q_enqueue(local,port,req,len))x9q_reject(local,port,req,len,X9Q_BUSY);
 }
 static void x9q_del(uint32_t local){
  unsigned slot=local-CBQ_PORT_BASE;if(local<CBQ_PORT_BASE||slot>=CBQ_MAX_CLIENTS)return;

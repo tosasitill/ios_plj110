@@ -1130,7 +1130,7 @@ static void x9md_s3_rx(unsigned qi,unsigned chn,const uint8_t *pkt,uint32_t len)
  else if(chn==X9MD_CH_SYS_RX)x9md_sys_rx(pkt,len);
  else if(chn==X9MD_CH_AT_RX)x9md_at_rx(pkt,len);
  else if(chn==216){
-  if(qi!=5||len<16||len>X9MD_PKT_MAX)x9mi_online(0);
+  if(qi!=5||len<16||len>X9MD_PKT_MAX){printf("X9 MIPC: ch216 packet q%u len %u unexpected, transport quarantined\n",qi,len);x9mi_online(0);}
   else x9mi_rx(pkt+16,len-16);
  }
 }

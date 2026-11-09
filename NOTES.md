@@ -73,8 +73,8 @@ X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>      # 之后再�
 
 ## 3. 当前基线镜像与参数
 
-最新实测:**x9-rev252hl-md**(代码提交 **`20c64f2`**,构建交接 `0f9d983`),boot.img **12877824 B=12.28125MiB**,路径 `x9/out/x9-rev252hl-md/boot.img`。**157确认完整11文件安装成功、qdsp可读、Sahara finished并进入QMUX/QMI,握手摘要reset=0;真实iOS蜂窝尚未打通**,见HANDOFF87。独立34MiB固件与插件275不需再stage。
-当前未上机候选:**x9-rev252hq-md**(代码`ccbad81`),boot.img12906496B;沿用hn AT→QMI,新增DPMAIF只读/分配探针和WDS前置状态查询,见HANDOFF89。hq默认`x9_dpmaif=1`,不初始化硬件或激活PDP;hn保留。最新实测仍hl;不要把候选当作SIM/蜂窝已验证。
+最新实测:**x9-rev252hs-md**(158,见HANDOFF91;MIPC/DPMAIF在prepare/OPEN即隔离,UIM卡状态被拒);前一实测 **x9-rev252hl-md**(代码提交 **`20c64f2`**,构建交接 `0f9d983`),boot.img **12877824 B=12.28125MiB**,路径 `x9/out/x9-rev252hl-md/boot.img`。**157确认完整11文件安装成功、qdsp可读、Sahara finished并进入QMUX/QMI,握手摘要reset=0;真实iOS蜂窝尚未打通**,见HANDOFF87。独立34MiB固件与插件275不需再stage。
+当前未上机候选:**x9-rev252ht-md**(HANDOFF91修复);更早候选 **x9-rev252hq-md**(代码`ccbad81`),boot.img12906496B;沿用hn AT→QMI,新增DPMAIF只读/分配探针和WDS前置状态查询,见HANDOFF89。hq默认`x9_dpmaif=1`,不初始化硬件或激活PDP;hn保留。最新实测仍hl;不要把候选当作SIM/蜂窝已验证。
 回退:**x9-rev252hk-md**(修复提交 `d1f8515` + 当时未提交的渲染改动,现已入库),boot.img **15278080 B**;156确认reserve生效、efs1.bin已有1MiB,当时15次reset及零传输见HANDOFF84。
 本机回退镜像:`x9/out/x9-rev252hk-md/boot.img`;hl/hk配置沿用 `.local/x9/modem/boot-rev252hi-md.json`。
 157已越过缺qdsp的前置阻塞,**当前阻塞在X9的QMI→MTK适配**:UIM/NAS/DMS/WDS/WDA/DPM请求实际到达后返回0x5e,数据端口配置失败,四个PDP接口仍blocked/tx=rx=0。Sahara是兼容桥交互,不向物理MTK下载Apple固件;PCIControl methods仍0x0,不能说PCIControl已通。以下GPU专用基线与参数为 **2026-11-08 历史记录**,不要当作hk/hl参数直接复用。
@@ -152,7 +152,18 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
 
-## 7. 当前交接(HANDOFF 90,2026-11-09): hs的MIPC IPv4 WDS/DPMAIF已编译;真实PDP激活/收发待上机
+## 7. 当前交接(HANDOFF 91,2026-11-09): 158(hs)读完;MIPC/DPMAIF/UIM三处本地错误已修,ht已构建待上机
+
+- **git**:本机main原与origin分叉(本地70个旧提交=远端`ae882f6`已squash的内容),已建`backup/local-main-e0e5178`后`reset --hard origin/main`(2409f8b)。Mac仓库同一提交。
+- **158.txt**(Mac `~/158.txt`,1016713B/10200行,末uptime 39.645s;私有副本 `.local/x9/logs/158-20261109-2211/158.raw.txt`(Mac),SHA256 `cd534b3a…c56e`)。446行`build=rev252hs-md`;11文件`same 22 external 1 complete 1 errno=0`;11.904s HS2→READY;19.57s Sahara finished;handshake 10/20s摘要`queries 190 accepted 20, resets 1, PCIControl 0x0`。无panic。
+- **观察1 DPMAIF**:11.995s clocks未门控、CODA 0x20171111,随即`quarantined (private TX DMA allocation/range), phase prepare`,其后10/20s摘要ready0。**根因(读XNU源码确认,推断该次落在>4GiB)**:mask`0xffffc000`下16KiB(=page_size)的DRB不算contiguous,`IOKernelAllocateWithPhysicalRestrict`走`KMA_LOMEM`→`vm_page_grablo()`,arm64上`vm_lopage_needed=FALSE`直接`vm_page_grab()`,不受4GiB限制。修复:mask改`0xffff8000`(alignment 32KiB>page,强制`kmem_alloc_contig(max_pnum)`),失败时打印pa/segment。
+- **观察2 MIPC**:19.321s TX OPEN 0x0301 txn1,2ms后`framing/event overflow, transport quarantined`;RX统计ch216=1,即MD确实回了一帧,被我们的解析拒绝。反汇编设备libmipc `mipc_init`RX循环(0x13480):READCOM(16)→READCOM(len@0xe),**不检查magic、byte9(flag)、CNF的SIM mask**,按`id>>14`分发(0 CNF按txid,1 IND按mask每位,2 MD命令)。hs要求byte9==0且mask bit0,比参考严格。修复:照libmipc分发;CNF只按txid+id匹配;IND 4202/4302需mask bit0;仅超长帧/事件溢出才隔离并打印原因+16B头;前64帧打印头(不含payload)。**具体是哪一项触发未知**(158没有头日志)。
+- **观察3 QMI AT**:178个QMI请求只14条有日志。UIM 0x2f GetCardStatus两次都带1字节TLV(len 11),被`len!=7`静默回48(ARG),CommCenter始终拿不到卡状态。UIM 0x47每5s一次全部error16(NOT_READY),CPIN实际状态不可见(AT脚本日志被X9MD_LOG预算耗尽)。DMS 0x23(CGMR)error3,推断MTK回`+CGMR:`前缀行被`x9q_plain`跳过。DMS 0x25 IMEI、0x2d CFUN成功(real AT)。
+  修复:0x2f接受单个TLV 0x10 len1(仍回legacy 0x10状态,**扩展状态格式是猜测**,首次打印该值);所有不进AT队列的拒绝打印`reject ... tlvs`(tag/len,1字节值);CGMI/CGMM/CGMR先认`+CGMx:`行再退回纯文本;AT失败打印stage/result/CME号,CPIN非READY打印分类(不打印AT正文)。
+- **ht构建成功**(未上机):`python3 -I x9/build/build.py all --name x9-rev252ht-md --boot-config .local/x9/modem/boot-rev252hi-md.json --boot-arg x9_dpmaif=2 --boot-arg x9_mipc=1`,Image 28766208B,boot.img **12918784B**;日志`.local/x9/work/pdp-activation/build-ht.stdout.log`(Mac)。只有既有C99风格warning。插件275不变,**无需mailbox staging/固件重放**。无CI run。
+- **下一步由用户手动**:`fastboot boot x9/out/x9-rev252ht-md/boot.img`,日志放`~/159.txt`。先看`build=rev252ht-md`;`rg -n 'build=rev252ht|X9 DPMAIF|X9 MIPC|X9 QMI AT|X9 WDS|COACHZ pdp: .*s unit' ~/159.txt`。判断:DPMAIF应出现`initialized`或具体`out of range pa`;MIPC应出现`RX hdr ... id 0x0302`及后续307/308;UIM 0x2f应有`(real AT)`响应或CPIN分类/CME号说明为何NOT_READY。
+
+### 前次交接(HANDOFF 90,2026-11-09): hs的MIPC IPv4 WDS/DPMAIF已编译;真实PDP激活/收发待上机
 
 - 本轮代码/README/构建交接提交 **`0f3aff8`**,交接补记 **`e45ef66`**,均已push `origin/main`(push范围95eb409..e45ef66,含上轮f1048cc);本机main。该提交 `gh run list --commit` 返回 `[]`(证据 `.local/x9/work/pdp-activation/ci-0f3aff8.json`),没有CI run ID,采用上述直接本地构建。最终ADB枚举仍无device(原始私有 `adb-final-devices.private`);未做新设备写入/上机验证。本次push没有覆盖远端额外提交,设备验证仍未完成。
 - 已完成提交 **`f1048cc`** (主动DPMAIF分阶段读回/失败保留DMA与WDS能力发现); `x9-rev252hr-md` 直接构建成功:53/53 overlay+6 prebuilt、link/strip/boot成功,Image28745728B、boot.img12910592B。命令 `python3 -I x9/build/build.py all --name x9-rev252hr-md --boot-config .local/x9/modem/boot-rev252hi-md.json --boot-arg x9_dpmaif=2`;日志 `x9/out/x9-rev252hr-md/build.log`、`.local/x9/work/dpmaif-active-157/build-hr.stdout.log`。未上机;最新实测仍hl/157。CI查询为空(本轮证据 `ci-f1048cc.json`),本轮fetch确认origin/main当时比HEAD少这一提交,现已随hs提交push。

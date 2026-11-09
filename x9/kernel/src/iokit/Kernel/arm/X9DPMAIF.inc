@@ -66,16 +66,25 @@ static void x9d_sync(const x9d_dma &m, unsigned off, unsigned size) {
 }
 static bool x9d_alloc(x9d_dma &m, unsigned bytes) {
     m.size = (bytes + 16383u) & ~16383u;
+    // 32 KiB alignment on purpose (158.txt): with 0xffffc000 a single 16 KiB page
+    // is not "contiguous" in IOKernelAllocateWithPhysicalRestrict, so it falls to
+    // KMA_LOMEM -> vm_page_grablo(), which on arm64 (vm_lopage_needed=FALSE) is a
+    // plain vm_page_grab() anywhere in the 12 GiB and ignores the 4 GiB limit.
+    // alignment > page_size forces kmem_alloc_contig(), which honours max_pnum.
     m.md = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
-        kIODirectionInOut | kIOMemoryPhysicallyContiguous, m.size, 0xffffc000ULL);
-    if (!m.md) return false;
+        kIODirectionInOut | kIOMemoryPhysicallyContiguous, m.size, 0xffff8000ULL);
+    if (!m.md) { printf("X9 DPMAIF: DMA alloc of %u bytes returned no descriptor\n", m.size); return false; }
     IOByteCount segment = 0;
     m.va = static_cast<uint8_t *>(m.md->getBytesNoCopy());
     m.pa = m.md->getPhysicalSegment(0, &segment, kIOMemoryMapperNone);
     // Restrict allocations to the live DT alloc-range's low-32-bit subset.
     // The pool is independent; do NOT claim these are Linux's reserved nodes.
     if (!m.va || segment < m.size || m.pa < 0x40000000ULL ||
-        m.pa >= 0x100000000ULL || m.size > 0x100000000ULL - m.pa || (m.pa & 16383)) return false;
+        m.pa >= 0x100000000ULL || m.size > 0x100000000ULL - m.pa || (m.pa & 16383)) {
+        printf("X9 DPMAIF: DMA alloc of %u bytes out of range: pa 0x%llx segment 0x%llx va %d\n",
+            m.size, (unsigned long long)m.pa, (unsigned long long)segment, m.va != nullptr);
+        return false;
+    }
     memset(m.va, 0, m.size); x9d_sync(m, 0, m.size); return true;
 }
 static void x9d_snapshot(const char *label) {
