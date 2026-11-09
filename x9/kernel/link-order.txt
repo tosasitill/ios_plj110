@@ -765,7 +765,7 @@ xnu:bsd/DEVELOPMENT/null_subr.o
 xnu:bsd/DEVELOPMENT/null_vfsops.o
 xnu:bsd/DEVELOPMENT/null_vnops.o
 xnu:bsd/DEVELOPMENT/bind_subr.o
-xnu:bsd/DEVELOPMENT/bind_vfsops.o
+x9:bind_vfsops.o
 xnu:bsd/DEVELOPMENT/bind_vnops.o
 xnu:bsd/DEVELOPMENT/bsd_tests.o
 xnu:bsd/DEVELOPMENT/copyio_tests.o
@@ -1056,6 +1056,7 @@ xnu:iokit/DEVELOPMENT/TopazModem.cpo
 xnu:iokit/DEVELOPMENT/SweetBusy.cpo
 xnu:iokit/DEVELOPMENT/SweetEntitlements.cpo
 x9:SweetKeyStore.o
+x9:X9Baseband.cpp.o
 x9:SweetWatchdog.cpo
 x9:SweetSurface.o
 x9:SweetFramebuffer.o

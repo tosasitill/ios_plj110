@@ -1,7 +1,8 @@
-# ios-sweet / X9 工作笔记(精简版,2026-11-08 整理)
+# ios-sweet / X9 工作笔记(精简版,2026-11-09 合并更新)
 
 > 旧的完整流水账(7784 行,含 sweet/SM7150 时代、rev2xx 全部 handoff)在 git 历史里:
 > `git show a8f1955:NOTES.md`。需要翻某个 revision 的细节时 `git log -S'<关键字>' -- NOTES.md` 再 show。
+> 截至 2026-11-09 的完整 cn 交接在 `git show 636edc2:NOTES.md`;当前以 §7 的 HANDOFF (82) 为准。
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
@@ -54,7 +55,11 @@ X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>      # 之后再�
 
 ## 3. 当前基线镜像与参数
 
-最新:**x9-rev252dc**(内核-only,插件 275 不变,沿用 rev252cx 之后的 mailbox)boot_sha256 `041d267fc297dd0830bd50407b85579679f0ace28ad2ba94a7c825e3bd0fd80c`,**未上机**。
+最新:**x9-rev252hk-md**(HANDOFF 82,`d1f8515` + 本机既有未提交渲染改动),boot.img **15278080 B**,**未上机**。
+本机镜像:`x9/out/x9-rev252hk-md/boot.img`;配置沿用 `.local/x9/modem/boot-rev252hi-md.json`。
+当前基带阻塞是根卷保留空间导致 BBUpdater EFS scratch 的 ENOSPC,详情/下一步见 §7。以下 GPU 专用基线与参数为 **2026-11-08 历史记录**,不要当作 hk 参数直接复用。
+
+历史 GPU 基线:**x9-rev252dc**(内核-only,插件 275 不变,沿用 rev252cx 之后的 mailbox)boot_sha256 `041d267fc297dd0830bd50407b85579679f0ace28ad2ba94a7c825e3bd0fd80c`,**未上机**。
 已用户确认好的最后一版:**rev252cy**(123 修好、控制中心不卡);之后 cz(x9lc)、da(1242x2760)、db(DVFSRC 探针)均未上机验证。
 
 完整启动参数(rev252dc;`x9_wifi_xo0..6` 是射频校准字,值不进 git,从 Android 拉取/旧镜像 payload 恢复):
@@ -85,7 +90,9 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 | Wi-Fi | 固件起来;真实 SSID 列表;Open 网 RUC-Web(5180)可关联、DHCP(10.46.12.100)、DNS、HTTP 劫持页能收;离开/重加入 OK |
 | 网络特权 | 沙箱 stand-in 授 PRIV_NET_* 10000-10008、11000/11001(WebKit.Networking 套接字委托)|
 
-## 5. 未解决问题(按优先级)
+## 5. 未解决问题
+
+当前主线是 **BBUpdater 的 EFS scratch ENOSPC**(§7);下列为保留的 GPU/Wi-Fi 待办,不是新的硬件验证结论。
 
 1. **GPU 带宽/帧率**:avg ~17-22 fps,稳态 24 fps;job 内 GPU wait 6-15 ms。判断显存带宽受限。**DVFSRC 从未初始化**(110.txt:`basic=8 opp_count=1 gear=0`,SW_REQ 被忽略)。
    rev252dc 加 TF-A SMC INIT:`MTK_SIP_VCOREFS_CONTROL = 0xC2000506`,cmd INIT=0(a0=0 成功,a1=dram_type)锁高 OPP,START=1(`x9_dvfsrc=2`)后自由运行。**待上机**,SMC 可能挂。
@@ -96,7 +103,7 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 4. **Wi-Fi**:WPA2 阶段 2(4-way、INSTALL_KEY_V3、受保护收发)**rev252cm6 已构建、从未上机**;captive portal 弹窗不出现(探测 `captive.apple.com` 从未发出,疑 configd/CNS 的 SC 状态缺失);
    RUC-Mobile(802.1X)EAP 投递 ioctl 待映射;DBDC 重加入偶有无响应。
 5. 硬件 vsync/帧节奏、背光控制(无 `backlight-control` 服务)、modem/WirelessRadioMan 噪声、部分 daemon 反复崩(locationd/speech、mediaserverd/AegirPoster、syncdefaultsd、CommCenter)、
-   AKS selector(securityd 无真 keychain 保护)、hfs `LowDisk`(约 1 GiB 空闲)。
+   AKS selector(securityd 无真 keychain 保护)、hfs `LowDisk`(11-09 根盘空闲约 167 MiB,原 1% 保留下非 root 仅约 3.3 MiB 可用;见 §7)。
 6. 设备 GPU 内存:backboardd 长期累积(resources→~1900,~700-900 MiB,预算 1024 MiB),泄漏/池化不回收待查。
 
 ## 6. 关键结论与坑(别重新踩)
@@ -125,7 +132,31 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
 
-## 7. 当前交接(handoff 66,2026-11-08)
+## 7. 当前交接(HANDOFF 82,2026-11-09): BBUpdater 真实失败原因 = 根卷 HFS 1% 保留空间让 _wireless 只剩 ~3 MiB,efs1.bin ftruncate ENOSPC;hk 下调保留(未上机)
+
+- 只读拉取:adb + `pinfile rawread/rawreadat` 拉整个 16 GiB 根盘到 `.local/x9/work/x9-rootpull/root-20261109.hfs`(断一次,rawreadat 1 GiB 续传,大小 17179869184)。
+  卷带日志未回放,只读挂不上;**7z 直读会把回放前的新文件读成 0 字节**(此前据此得出"logd 配置 0 字节"是错的,已作废)。
+  正确做法:`cp -c` APFS 克隆 `root-20261109.clone.hfs`,`hdiutil attach -imagekey diskimage-class=CRawDiskImage -nobrowse -owners off -mountpoint /tmp/x9root` 读写挂克隆(回放日志只改克隆)。
+- 观察:三份 logging plist(CommCenter/telephony.abm/telephony.bb)213 字节、15:18 已正确写入 Enable-Private-Data。
+- **观察(关键)**:`/private/var/wireless/Library/Logs/log-bb-live-stats.txt` 直接记录每次 reset 原因,不需要解码 tracev3。
+  14:09-15:58 = `Baseband Firmware Path Not Found`(固件门,已解决)。16:10/16:23/16:35/16:43 四次启动交替:
+  `BBUpdater error 104 - Failed to create scratch /private/var/wireless/baseband_data/bbfs/efs1.bin (11|15) kBBUReturnFileError@BBUEUR10UpdateSource.cpp:312`
+  和 `BBUpdater error 2 - Assertion failure ( fPhases.size() ) @BBUConsoleFeedback.cpp:93`。盘上 `bbfs/efs1.bin` 存在、0 字节。
+- 静态(libBBUpdaterDynamic 20H392):BBUScratchFile::createWithFile(0x1ee217de0)= 删旧文件失败→11;open(0x601,0600) 失败→15;
+  ftruncate(fd,size) 失败→11("cannot truncate file");getpwnam("_wireless")/fchown 失败→11;前面失败后 close 失败→15。/etc/passwd 有 _wireless(25)。
+- **根因**:sweet_hfs root mount 设 reserveBlocks = 1% totalBlocks(≤250 MiB)= 41943 块(164 MiB);非 root 的 truncate/write 带 kEFReserveMask
+  (hfs_readwrite.c:3761/472/4388),只能用 free-reserve。拉取时 free 42777 块(167 MiB)→ _wireless 只剩 ~834 块(3.3 MiB),EFS 扩展 ENOSPC。
+  (Mac 上 df 显示 167 MiB 可用是因为非 root mount 不设保留。)根盘占用大户:db/diagnostics 1.1 GB、db/biome 0.58 GB、db/uuidtext 0.47 GB、mobile/Library/Caches 0.25 GB。
+- hk(x9-rev252hk-md,boot.img 15278080 B,配置沿用 `.local/x9/modem/boot-rev252hi-md.json`,= hi + 本改动;hi/hk 都含 11-08 未提交的渲染改动):
+  hfs_readwrite.c 新增 `x9_hfs_lower_reserve()`(只降不升,hfs_lock_mount 下改 reserveBlocks);x9_baseband_firmware.inc 在 x9_bb=1、可写根、PID1 时
+  调用,boot-arg `x9_hfs_reserve_mb`(默认 16)。上机看 "X9 BBFW: root HFS reserve ... non-root usable ... KiB",然后看 log-bb-live-stats.txt 是否不再有 efs1.bin 错误。
+  未上机。未验证 fPhases 断言是否是 scratch 失败的连带结果(推断是重试路径)。长期:根盘 16 GiB 会继续被日志填满,需要清理或换更大根盘。
+- logd 解码工具:mandiant/macos-UnifiedLogs 在 `/tmp/ul-src/src`(rustup stable 编译;Homebrew rust 1.97 与 llvm 23 不匹配起不来);
+  Apple `log show --archive` 对这个手拼归档崩溃。新归档 `x9b.logarchive`(来自克隆挂载,完整)尚未解析。
+
+## 8. 历史 GPU 交接(handoff 66,2026-11-08)
+
+> 保留远端整理的旧交接,不作为当前基线/下一步;当前看 §7。
 
 - 分支状态:`rev252cn` 已合并进 `main` 并删除(合并提交 a8f1955);代码最新提交 2a9a3a6(DVFSRC SMC)+ notes 2406f8d。
 - 上一次实测(110.txt = rev252db):DVFSRC 未初始化;presented fps avg 22.5(55 窗口,max 35.8),60 s 后稳定 24.0 fps = 某个 24 Hz 动画,不是 GPU 受限;GPU 1716 MHz 全程。
@@ -136,3 +167,40 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   3. 根据 DRAM 结果决定做 CSG 抢槽(§5.2)还是继续带宽方向。
   4. 竖线马赛克:拿一份含开关 app 的完整日志再做 §5.3 的前端纹理上传探针。
   5. Wi-Fi:上机 cm6 系列验证 WPA2-PSK 4-way(期望日志 `M1 -> PTK / M3 ok / install PTK / M4 / GTK installed`),再看 captive 探测。
+
+## 9. 本地清理(2026-11-09): 清理过时镜像/解码日志/增量缓存;实际释放 33.67 GiB
+
+- 用户要求清理项目 `.local` 和 `~/Heliodarwin` 的过时产物。本次无设备操作、无挂载变更、无构建/CI/启动;设备工作继续以 HANDOFF (82) 为准。
+- 删除 9 项:未完成的 `.local/x9/work/x9-root-pull/root-20261109.hfs` (9.49 GiB)、旧 pan85 的 `root-after-pan85.partial.raw` (0.51 GiB);
+  `.local/x9/work/x9-rootpull/` 中回放日志前的 `x9-unified.jsonl` (11.42 GiB)、`logd-20261109/` 和 `x9.logarchive/`;
+  `x9-metal-render/general-target/{aarch64-apple-ios/release,release}/incremental/` 两处 Rust 增量缓存;
+  `~/Heliodarwin` 顶层两个 iOS 16.7.16 IPSW (完整但已解包的 5.75 GiB 安装包 + 无有效 ZIP 目录的 70 MiB 残缺下载)。
+- 删除完整 IPSW 前记录 SHA256/ZIP 文件索引并保存 BuildManifest.plist、Restore.plist;保留的 OS/SystemOS/AppOS 三份 DMG 与 Mav17 固件均逐一通过原 ZIP 条目的大小/CRC32 检查。
+  `sources.json` 中 ipsw 字段现在是历史来源路径,不再存在;当前 `build_full_ios_root.py` 使用的三个 `.local/heliodarwin/.../*.dmg` 均保留。
+- 保留:最新完整 16 GiB `x9-rootpull/root-20261109.hfs`、已回放的 `.clone.hfs`、正确的新 `x9b.logarchive` 和筛选后的诊断摘要;
+  pan172 回滚根盘、所有挂载中的镜像、分区/基带备份、源码/补丁、冻结 dxb 输入、所有插件包、Rust release 库/deps/fingerprints、`~/.local` 开发工具。
+  仅删 Rust 增量缓存,后续需要重编的 crate 会重建缓存;没有删掉当前 `libx9_general_metal_bridge.a`。
+- 验证:`python3 -I x9/build/prepare-local.py --check` 清理前后均通过;受保护文件 inode/大小核对通过;两个仓库原有 tracked 修改的 SHA256/删除状态完全一致。
+  原内核提交仍为 `d1f8515`;hk 镜像保留,`x9/out/x9-rev252hk-md/boot.img` = 15278080 B,
+  SHA256 `136cd18d3fd25c3fa66e416117cf6488c0ea4c731d6ba32694ce0787628325a4`。本次未对镜像作新构建或设备验证。
+- 实测文件系统可用空间 `31466758144 -> 67624251392` B (29.31 -> 62.98 GiB),释放 `36157493248` B (33.67 GiB)。APFS 共享块/硬链接使逐项大小之和不等于实际释放量。
+- 私有完整清单/前后状态/校验依据/执行脚本:`.local/cleanup/20261109-1907/` (`plan.json`, `removed-files-manifest.jsonl`, `ipsw-provenance.json`, `result.json`, `prepare-local-after.log`);均不入 git。
+  历史交接中指向上述已删除产物的路径不能再直接复用。清理记录提交为 `636edc2`,未夹带原 `.gitignore` 和三份渲染内核修改。
+
+## 10. 开发工具交接(2026-11-09): cc-remote 配置完成;ss.key + sudo -i;已验证远端 Claude 读取本机文件
+
+- 本次仅配置开发工具,未构建/启动设备,未修改内核代码;设备工作以 §7 的 HANDOFF (82) 为准。
+- 安装:Bun 1.4.4、cc-remote 0.1.0 (claude-agent-acp 0.99.1)、acpc 0.1.0;三个命令均可从已有 PATH 的 `~/.local/bin` 使用,未改 shell 配置。
+- cc-remote 源码:`~/.local/share/cc-remote/source`,上游提交 `063f81524e84b7ad40a203d4c7da6f92fcfd2e41`;按锁文件执行 `bun install --frozen-lockfile`,再 `bun run compile` 和 `bun link`。
+- 主机文件:`~/.config/cc-remote/host` = `cc-remote-server`;对应 SSH 别名位于 `~/.ssh/config`。首次密钥被服务端拒绝;用户随后提供 `Downloads/ss.key`,该密钥已复制到 `~/.ssh/cc-remote-ss.key` (600),SSH 登录成功。旧密钥副本和 SSH 配置备份保留。地址和私钥仅存本机,不入 git。
+- acpc 配置实际路径(macOS):`~/Library/Application Support/acpc/config.toml`;已注册 `Claude (remote)` / slug `cc-remote`,设为默认 agent,启动命令为 `cc-remote`。
+- 用户确认 Claude 装在 root 下,应使用 `sudo -i`。运行时已验证 root 的 `/root/.local/bin/claude` = 2.1.319,`auth status` = loggedIn true / claude.ai / pro。不需要重新登录或安装 root Claude。此前启动的 ubuntu 用户安装进程已精确停止,其下载/部分安装文件保留,未清理已有 root 安装。
+- 转接:`~/.config/cc-remote/ssh-sudo` 保留 SSH 参数和 stdin/stdout,将整个远端命令包装成 `sudo -n -i -- /bin/sh -c <quoted-command>`,带 SSH 连接复用和 keepalive。`~/.local/bin/cc-remote` 现为启动包装器,设置 `CC_REMOTE_SSH` 后执行原编译二进制;原 symlink 备份为 `cc-remote.without-sudo-*`。上游源码/依赖未改动。
+- 已确认的兼容性问题:本机 ACP adapter 非 root,默认把 allow-dangerously-skip-permissions flag 传给远端,root Claude 因此在 session/new 退出。使用独立 `~/.config/cc-remote/claude-config/settings.json` (从现有本机 settings 复制,仅加 `permissions.disableBypassPermissionsMode="disable"`)解决;包装器设置本机 `CLAUDE_CONFIG_DIR`,远端 spawner 不转发该变量,继续使用 root 原登录。原全局 Claude 设置未修改;后续全局 settings 修改不会自动同步到此副本。
+- 本机会话镜像现在存于 `~/.config/cc-remote/claude-config/projects/`,不是默认 `~/.claude/projects/`。可用模式已验证为 default / acceptEdits / plan / auto,不含 bypassPermissions。
+- 验证(本机):编译成功;`bun test` = 30 pass / 0 fail / 76 expect;已编译二进制的 ACP `initialize` 返回 protocolVersion 1、agent version 0.99.1,无错误。
+- 验证(端到端):`cc-remote doctor` = remote claude 2.1.319 / ok;新 ACP session `114ed4e7-a45d-4faf-b2c4-de4191a5e603` 成功调用 `Read File`,准确返回随机临时文件内容,end_turn。额外从 root SSH 检查映射远端目录中该文件不存在,证明读取发生在本机。测试不批准任何权限请求,未修改项目文件。
+- 复验:`cc-remote doctor`;`python3 ~/.local/share/cc-remote/verify-local-read.py` (每次生成全新临时目录/随机内容);实际使用在项目目录运行 `acpc` 或 `acpc -a cc-remote`。SSH/sudo 均免交互,不需要手动 sudo -i。
+- 证据:`~/.local/share/cc-remote/setup-logs/{doctor-root.log,auth-status-root.json,acp-local-read.jsonl,acp-local-read.stderr.log,acp-local-read-result.json}`;日志文件权限 600,包含账户元数据的日志不入 git。安装/测试日志同目录。
+- 初始交接提交 `07c6e99`;成功结果记录于独立文档提交 `fb333b9`;推送状态以本次分支交接为准;既有内核未提交修改保持原样。
+

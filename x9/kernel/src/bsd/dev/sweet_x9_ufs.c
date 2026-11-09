@@ -460,3 +460,79 @@ int sweet_x9_update_read(uint64_t offset, void *data, size_t length)
  lck_mtx_unlock(&x9ufs_lock);
  return error?EIO:0;
 }
+
+/* Read-only access to a named GPT partition on LUN2 (modem DRDI image for the
+ * baseband bring-up). Waits are the caller's job: returns ENXIO until the native
+ * root controller is up. Only SCSI READ is issued. */
+static const struct x9u_partition *part_find_locked(const char *name,int *error)
+{
+ static struct {struct x9u_partition p;char name[24];} cache[8];
+ unsigned slot=0;
+ for(;slot<8 && cache[slot].name[0];slot++)if(!strcmp(cache[slot].name,name))break;
+ if(slot==8)slot=7;   /* cache full: reuse the last slot */
+ if(strcmp(cache[slot].name,name)) {
+  struct x9u_partition p;
+  if(xu.host.block_size[2]!=4096 || x9u_gpt_find(&xu.host,2,name,&p)){*error=ENOENT;return NULL;}
+  cache[slot].p=p;strlcpy(cache[slot].name,name,sizeof(cache[slot].name));
+ }
+ return &cache[slot].p;
+}
+int sweet_x9_ufs_read_part(const char *name, uint64_t offset, void *data, size_t length)
+{
+ static uint8_t bounce[X9U_DATA_SIZE];
+ if(!xu.ready || xu.failed || !name || !data || strlen(name)>=24)return ENXIO;
+ lck_mtx_lock(&x9ufs_lock);
+ int error=0;
+ pet();
+ const struct x9u_partition *part=part_find_locked(name,&error);
+ if(!error && (offset>part->count*4096ULL || length>part->count*4096ULL-offset))error=EINVAL;
+ uint8_t *out=data;
+ while(!error && length) {
+  uint64_t blk=offset/4096;uint32_t skip=(uint32_t)(offset%4096);
+  uint32_t nblk=(uint32_t)((skip+length+4095)/4096);if(nblk>X9U_DATA_SIZE/4096)nblk=X9U_DATA_SIZE/4096;
+  pet();
+  if(x9u_read(&xu.host,2,part->first+blk,nblk,bounce)){error=EIO;break;}
+  size_t n=(size_t)nblk*4096-skip;if(n>length)n=length;
+  memcpy(out,bounce+skip,n);out+=n;offset+=n;length-=n;
+ }
+ if(xu.host.poisoned)xu.failed=true;
+ lck_mtx_unlock(&x9ufs_lock);
+ return error;
+}
+
+/* Whole-partition read-only copy in kernel memory (modem NV partitions are <= 96 MiB), so the
+ * modem FSD answers from RAM instead of queueing behind the root disk (126.txt: a 75 ms stall
+ * on the first protect2 access made the MD assert). Returns NULL until the controller is up. */
+const void *sweet_x9_ufs_load_part(const char *name, uint64_t *bytes)
+{
+ static struct {char name[24];void *mem;uint64_t bytes;} loaded[8];
+ if(!xu.ready || xu.failed || !name || strlen(name)>=24)return NULL;
+ for(unsigned i=0;i<8;i++)if(loaded[i].mem&&!strcmp(loaded[i].name,name)){if(bytes)*bytes=loaded[i].bytes;return loaded[i].mem;}
+ unsigned slot=8;
+ for(unsigned i=0;i<8;i++)if(!loaded[i].mem){slot=i;break;}
+ if(slot==8)return NULL;
+ int error=0;uint64_t size=0;
+ lck_mtx_lock(&x9ufs_lock);
+ const struct x9u_partition *part=part_find_locked(name,&error);
+ if(part)size=part->count*4096ULL;
+ lck_mtx_unlock(&x9ufs_lock);
+ if(!size || size>(256ULL<<20))return NULL;
+ vm_offset_t mem=0;
+ if(kmem_alloc(kernel_map,&mem,(vm_size_t)size,KMA_DATA|KMA_ZERO,VM_KERN_MEMORY_IOKIT)!=KERN_SUCCESS)return NULL;
+ for(uint64_t off=0;off<size;off+=X9U_DATA_SIZE){
+  size_t n=size-off>X9U_DATA_SIZE?X9U_DATA_SIZE:(size_t)(size-off);
+  if(sweet_x9_ufs_read_part(name,off,(void *)(mem+off),n)){kmem_free(kernel_map,mem,(vm_size_t)size);return NULL;}
+ }
+ strlcpy(loaded[slot].name,name,sizeof(loaded[slot].name));loaded[slot].mem=(void *)mem;loaded[slot].bytes=size;
+ printf("X9 UFS: loaded partition %s (%llu KiB) into kernel memory\n",name,size>>10);
+ if(bytes)*bytes=size;
+ return (void *)mem;
+}
+
+/* Zeroed kernel memory for the modem file service's write overlay. NULL on failure. */
+void *sweet_x9_big_alloc(size_t bytes)
+{
+ vm_offset_t mem=0;
+ if(kmem_alloc(kernel_map,&mem,(vm_size_t)bytes,KMA_DATA|KMA_ZERO,VM_KERN_MEMORY_IOKIT)!=KERN_SUCCESS)return NULL;
+ return (void *)mem;
+}

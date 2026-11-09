@@ -5979,3 +5979,38 @@ exit:
 
 	return ret;
 }
+
+/*
+ * X9 rev252hk: lower the free-block reserve of an HFS mount (never raise it).
+ * hfs_mount gives the root mount HFS_MINFREE (1%) of its blocks, at most HFS_MAXRESERVE:
+ * 41943 blocks (164 MiB) on the 16 GiB X9 root. Allocations made with a non-root
+ * credential carry kEFReserveMask and cannot use it. With 167 MiB free on the root
+ * (pulled 2026-11-09), _wireless had ~3 MiB, and BBUpdater's ftruncate of
+ * /private/var/wireless/baseband_data/bbfs/efs1.bin (BBUScratchFile::createWithFile)
+ * failed: "Failed to create scratch ... (11)" in log-bb-live-stats.txt.
+ */
+int x9_hfs_lower_reserve(mount_t mp, u_int64_t bytes, u_int64_t *before, u_int64_t *after, u_int64_t *free_bytes);
+int
+x9_hfs_lower_reserve(mount_t mp, u_int64_t bytes, u_int64_t *before, u_int64_t *after, u_int64_t *free_bytes)
+{
+	struct hfsmount *hfsmp;
+	u_int64_t blocks;
+
+	if (mp == NULL || strncmp(vfs_statfs(mp)->f_fstypename, "hfs", MFSNAMELEN) != 0) {
+		return EINVAL;
+	}
+	hfsmp = VFSTOHFS(mp);
+	if (hfsmp == NULL || hfsmp->blockSize == 0) {
+		return EINVAL;
+	}
+	hfs_lock_mount(hfsmp);
+	*before = (u_int64_t)hfsmp->reserveBlocks * hfsmp->blockSize;
+	blocks = bytes / hfsmp->blockSize;
+	if (blocks < hfsmp->reserveBlocks) {
+		hfsmp->reserveBlocks = (u_int32_t)blocks;
+	}
+	*after = (u_int64_t)hfsmp->reserveBlocks * hfsmp->blockSize;
+	*free_bytes = (u_int64_t)hfsmp->freeBlocks * hfsmp->blockSize;
+	hfs_unlock_mount(hfsmp);
+	return 0;
+}

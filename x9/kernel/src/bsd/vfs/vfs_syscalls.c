@@ -4850,13 +4850,36 @@ sweet_text_contains(const char *text, const char *needle)
 
 /* Observe the actual WallpaperKit path and open result, before namei frees
  * its pathname. No path rewriting, file writes, or permission overrides. */
+#if defined(ARM64_BOARD_CONFIG_SWEET)
+/* rev252hh: CommCenter file access trace (ABM/BBUpdater): every failure, plus any path that looks baseband related. */
+static int
+x9_cc_path_interesting(const char *p)
+{
+	static const char *const keys[] = { "baseband", "wireless", "ticket", "firmware", "standalone", "preboot", "bbfw", ".mbn", ".der" };
+	for (unsigned k = 0; k < sizeof(keys) / sizeof(keys[0]); k++) {
+		size_t n = strlen(keys[k]);
+		for (const char *t = p; *t; t++) {
+			size_t i = 0;
+			while (i < n && t[i] && (t[i] | 0x20) == keys[k][i]) {
+				i++;
+			}
+			if (i == n) {
+				return 1;
+			}
+		}
+	}
+	return 0;
+}
+static unsigned x9_cc_fail_lines;
+#endif
 int
 open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
     struct vnode_attr *vap, fp_initfn_t fp_init, void *initarg, int32_t *retval, int authfd)
 {
 #if defined(ARM64_BOARD_CONFIG_SWEET)
-	static unsigned observations;
+	static unsigned observations, cc_observations;
 	char path[256] = "";
+	int cc_observe = 0;
 	proc_t p = vfs_context_proc(ctx);
 	int observe = 0;
 	extern int sweet_early_is_x9(void);
@@ -4870,8 +4893,20 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 		}
 	}
 #endif
+	/* rev252gg: which firmware/baseband files does CommCenter (ABM, BBUpdater) try to open? */
+	if (!observe && sweet_early_is_x9() && cc_observations < 200 && !strcmp(p->p_comm, "CommCenter") &&
+	    UIO_SEG_IS_USER_SPACE(ndp->ni_segflg)) {
+		size_t copied = 0;
+		if (!copyinstr(ndp->ni_dirp, path, sizeof(path), &copied)) {
+			cc_observe = 2;   /* decide after the call: failures and baseband-looking paths */
+		}
+	}
 	int error = sweet_open1_impl(ctx, ndp, uflags, vap, fp_init, initarg, retval, authfd);
 #if defined(ARM64_BOARD_CONFIG_SWEET)
+	if (cc_observe && ((error && __sync_fetch_and_add(&x9_cc_fail_lines, 1) < 150) ||
+	    (x9_cc_path_interesting(path) && __sync_fetch_and_add(&cc_observations, 1) < 200))) {
+		printf("X9 CC OPEN: path=%s flags=%x errno=%d\n", path, uflags, error);
+	}
 	if (observe) printf("X9 WALLPAPER OPEN: caller=%s path=%s flags=%x errno=%d fd=%d\n",
 	    p->p_comm, path, uflags, error, error ? -1 : *retval);
 #endif
@@ -6956,8 +6991,36 @@ faccessat(__unused proc_t p, struct faccessat_args *uap,
  *	namei:???
  *	vn_stat:???
  */
+static int fstatat_internal_impl(vfs_context_t ctx, user_addr_t path, user_addr_t ub,
+    user_addr_t xsecurity, user_addr_t xsecurity_size, int isstat64,
+    enum uio_seg segflg, int fd, int flag);
 static int
 fstatat_internal(vfs_context_t ctx, user_addr_t path, user_addr_t ub,
+    user_addr_t xsecurity, user_addr_t xsecurity_size, int isstat64,
+    enum uio_seg segflg, int fd, int flag)
+{
+#if defined(ARM64_BOARD_CONFIG_SWEET)
+	extern int sweet_early_is_x9(void);
+	static unsigned cc_stat_lines;
+	proc_t cp = vfs_context_proc(ctx);
+	char spath[256] = "";
+	int sobserve = 0;
+	if (sweet_early_is_x9() && cp && !strcmp(cp->p_comm, "CommCenter") && UIO_SEG_IS_USER_SPACE(segflg)) {
+		size_t copied = 0;
+		sobserve = !copyinstr(path, spath, sizeof(spath), &copied);
+	}
+	int serror = fstatat_internal_impl(ctx, path, ub, xsecurity, xsecurity_size, isstat64, segflg, fd, flag);
+	if (sobserve && ((serror && __sync_fetch_and_add(&x9_cc_fail_lines, 1) < 150) ||
+	    (x9_cc_path_interesting(spath) && __sync_fetch_and_add(&cc_stat_lines, 1) < 200))) {
+		printf("X9 CC STAT: path=%s errno=%d\n", spath, serror);
+	}
+	return serror;
+#else
+	return fstatat_internal_impl(ctx, path, ub, xsecurity, xsecurity_size, isstat64, segflg, fd, flag);
+#endif
+}
+static int
+fstatat_internal_impl(vfs_context_t ctx, user_addr_t path, user_addr_t ub,
     user_addr_t xsecurity, user_addr_t xsecurity_size, int isstat64,
     enum uio_seg segflg, int fd, int flag)
 {

@@ -60,7 +60,8 @@ def node(name, props=(), children=()):
     return n
 
 
-def build(seed=None, timebase=TIMEBASE, console_base=0, console_size=0, ram_window="legacy512", wlan=False):
+def build(seed=None, timebase=TIMEBASE, console_base=0, console_size=0, ram_window="legacy512", wlan=False,
+          baseband=False):
     if ram_window not in RAM_WINDOWS:
         raise ValueError("unknown captured X9 RAM window")
     phys_base, mem_size = RAM_WINDOWS[ram_window]
@@ -146,7 +147,7 @@ def build(seed=None, timebase=TIMEBASE, console_base=0, console_size=0, ram_wind
     fb = node('sweet-fbcon', [ph(), ('reg', u64(FB, FB_SIZE)),
         ('width', u32(FB_W)), ('height', u32(FB_H)), ('stride', u32(FB_STRIDE))])
     product = node('product', [ph()] + product_properties())
-    return node('device-tree', [ph(),
+    root = node('device-tree', [ph(),
         ('compatible', cstr(COMPATIBILITY_BOARD) + cstr(COMPATIBILITY_PRODUCT) +
          cstr('mediatek,MT6993') + cstr('oppo,x9') + cstr('xiaomi,sweet') + cstr('AppleARM')),
         ('model', cstr(COMPATIBILITY_PRODUCT)), ('target-type', cstr('D22')),
@@ -157,6 +158,16 @@ def build(seed=None, timebase=TIMEBASE, console_base=0, console_size=0, ram_wind
         [chosen, node('defaults', [ph(), ('no-effaceable-storage', u32(1))]),
          node('options', [ph()]),
          node('buttons', [ph(), ('home-button-type', u32(2))]), cpus, io, fb, product])
+    if baseband:
+        # Cellular discovery metadata from the original 20H392 D22AP tree.
+        # MobileGestalt reads /baseband/class; the Coachz reference supplies
+        # the same node but its J121AP/mav16/eUICC profile is not ours.
+        # No Apple GPIO, SPMI, interrupt or MMIO descriptions: the X9 bridge
+        # publishes its own services, and the physical MD still boots via CCCI.
+        root.children.append(node('baseband', [ph(), ('class', u32(3)),
+            ('compatible', cstr('baseband,n41')), ('device_type', cstr('baseband'))]))
+        product.props.append(('baseband-chipset', 0, cstr('mav17')))
+    return root
 
 
 def main():
@@ -166,9 +177,11 @@ def main():
     ap.add_argument('--console-base', type=lambda s: int(s, 0), default=0)
     ap.add_argument('--console-size', type=lambda s: int(s, 0), default=0)
     ap.add_argument('--ram-window', choices=RAM_WINDOWS, default='legacy512')
+    ap.add_argument('--baseband', action='store_true', help='include D22AP cellular discovery metadata (no hardware driver)')
     ap.add_argument('--dump', action='store_true')
     a = ap.parse_args()
-    root = build(timebase=a.timebase, console_base=a.console_base, console_size=a.console_size, ram_window=a.ram_window)
+    root = build(timebase=a.timebase, console_base=a.console_base, console_size=a.console_size, ram_window=a.ram_window,
+                 baseband=a.baseband)
     a.out.parent.mkdir(parents=True, exist_ok=True)
     blob = adt.serialize(root)
     a.out.write_bytes(blob)
