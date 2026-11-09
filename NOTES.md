@@ -1,4 +1,4 @@
-## HANDOFF 2026-11-09 (70): 144验证早发布/无CommCenter崩溃；下一版补D22AP基带发现元数据
+## HANDOFF 2026-11-09 (70): 144验证早发布/无CommCenter崩溃；D22AP发现元数据 rev252ep-md BUILT 未上机
 
 - USER要求读`~/144.txt`继续修复。读取时文件仍增长；固定快照`/tmp/x9-144-snapshot-20261109-143433.txt`到95.040 s，
   原文件未改。1.263 s PDP helpers prepared 2/2、pre-launchd result0；1.266 s eo标记；15.574 s HS2 READY，
@@ -21,7 +21,15 @@
   原有phandle/根compatible/iPhone10,3身份保持，未带Apple GPIO/SPMI/中断/MMIO；不从J121搬euicc-chip-id2。
   pre-launchd增加一次有界实际IORegistry元数据匹配日志，marker `build=rev252ep-md fs128-bb-d22dt-v1`。
   保留eo早helpers、FS128/CCIF nowait、所有QMI返回和DPMAIF未实现状态；固件路径及ABM启动gate留下一轮。
-- 代码/构建结果待补；未操作设备，不运行额外测试，GPU原有工作树不混入基带提交。
+- COMMIT `0c77622`；Mac正常构建退出0：
+  `python3 -I x9/build/build.py all --name x9-rev252ep-md --boot-config .local/x9/modem/boot-rev252el-md.json`。
+  输出`x9/out/x9-rev252ep-md/boot.img`；stdout `/tmp/x9-rev252ep-md-build.log`；内置boot.json 12865536 B、boot_sha256
+  `99fbb5e9ceabed64923efbf6c2b121db96993e9b1685aea26805622245a108d9`。没有CI/额外测试/产物二次检查，未操作设备。
+  GPU原有工作树不混入基带提交，正常候选构建继承当前工作区。
+- 下一步用户手动启动ep，收`~/145.txt`，建议90秒以上。先确认`discovery metadata class 3 compatible-n41 1 chipset-mav17 1`、
+  helpers2/2/pre-launchd result0与ep marker，再确认MD HS2/READY。观察board state后是否出现protocol matching、PCI通道selector0、
+  SAHARA或CommCenter真实QMI请求；成功标准不是内部UIM0x47。若元数据齐但仍无PCI，再查原版iOS16固件路径与启动gate，
+  不重复改已实测通过的CCIF/FS或同时叠加不适用21H461补丁。QMI仍全回error94、DPMAIF未实现，未证明iOS蜂窝可用。
 
 ## HANDOFF 2026-11-09 (69): 查完整参考与143；PDPHelper早发布候选 rev252eo-md BUILT 未上机
 
