@@ -73,8 +73,8 @@ X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>      # 之后再�
 
 ## 3. 当前基线镜像与参数
 
-最新实测:**x9-rev252hx-md**(163,见HANDOFF96;CommCenter读SIM后反复重置基带);再前 **x9-rev252hw-md**(162,见HANDOFF95);再前 **x9-rev252hv-md**(161,见HANDOFF94;MIPC就绪、UIM读通);再前 **x9-rev252hu-md**(160,见HANDOFF93;RAM 10.0GiB生效);再前 **x9-rev252ht-md**(159,见HANDOFF92);再前 **x9-rev252hs-md**(158,见HANDOFF91;MIPC/DPMAIF在prepare/OPEN即隔离,UIM卡状态被拒);前一实测 **x9-rev252hl-md**(代码提交 **`20c64f2`**,构建交接 `0f9d983`),boot.img **12877824 B=12.28125MiB**,路径 `x9/out/x9-rev252hl-md/boot.img`。**157确认完整11文件安装成功、qdsp可读、Sahara finished并进入QMUX/QMI,握手摘要reset=0;真实iOS蜂窝尚未打通**,见HANDOFF87。独立34MiB固件与插件275不需再stage。
-当前未上机候选:**x9-rev252hy-md**(HANDOFF97:attach APN推送ACK);回退 **x9-rev252hx-md**;更早候选 **x9-rev252hq-md**(代码`ccbad81`),boot.img12906496B;沿用hn AT→QMI,新增DPMAIF只读/分配探针和WDS前置状态查询,见HANDOFF89。hq默认`x9_dpmaif=1`,不初始化硬件或激活PDP;hn保留。最新实测仍hl;不要把候选当作SIM/蜂窝已验证。
+最新实测:**x9-rev252hy-md**(164,见HANDOFF98;重置1次后基带不再起来);再前 **x9-rev252hx-md**(163,见HANDOFF96);再前 **x9-rev252hw-md**(162,见HANDOFF95);再前 **x9-rev252hv-md**(161,见HANDOFF94;MIPC就绪、UIM读通);再前 **x9-rev252hu-md**(160,见HANDOFF93;RAM 10.0GiB生效);再前 **x9-rev252ht-md**(159,见HANDOFF92);再前 **x9-rev252hs-md**(158,见HANDOFF91;MIPC/DPMAIF在prepare/OPEN即隔离,UIM卡状态被拒);前一实测 **x9-rev252hl-md**(代码提交 **`20c64f2`**,构建交接 `0f9d983`),boot.img **12877824 B=12.28125MiB**,路径 `x9/out/x9-rev252hl-md/boot.img`。**157确认完整11文件安装成功、qdsp可读、Sahara finished并进入QMUX/QMI,握手摘要reset=0;真实iOS蜂窝尚未打通**,见HANDOFF87。独立34MiB固件与插件275不需再stage。
+当前未上机候选:**x9-rev252hz-md**(HANDOFF98:DMS SetOperatingMode);回退 **x9-rev252hy-md**;更早候选 **x9-rev252hq-md**(代码`ccbad81`),boot.img12906496B;沿用hn AT→QMI,新增DPMAIF只读/分配探针和WDS前置状态查询,见HANDOFF89。hq默认`x9_dpmaif=1`,不初始化硬件或激活PDP;hn保留。最新实测仍hl;不要把候选当作SIM/蜂窝已验证。
 回退:**x9-rev252hk-md**(修复提交 `d1f8515` + 当时未提交的渲染改动,现已入库),boot.img **15278080 B**;156确认reserve生效、efs1.bin已有1MiB,当时15次reset及零传输见HANDOFF84。
 本机回退镜像:`x9/out/x9-rev252hk-md/boot.img`;hl/hk配置沿用 `.local/x9/modem/boot-rev252hi-md.json`。
 157已越过缺qdsp的前置阻塞,**当前阻塞在X9的QMI→MTK适配**:UIM/NAS/DMS/WDS/WDA/DPM请求实际到达后返回0x5e,数据端口配置失败,四个PDP接口仍blocked/tx=rx=0。Sahara是兼容桥交互,不向物理MTK下载Apple固件;PCIControl methods仍0x0,不能说PCIControl已通。以下GPU专用基线与参数为 **2026-11-08 历史记录**,不要当作hk/hl参数直接复用。
@@ -152,7 +152,16 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
 
-## 7. 当前交接(HANDOFF 97,2026-11-09): 从根盘取出163的logd,找到基带重置原因(attach APN推送被拒);hy已构建
+## 7. 当前交接(HANDOFF 98,2026-11-09): 164(hy)读完;重置减为1次,但之后基带不再起来;hz实现DMS SetOperatingMode
+
+- **164.txt**(Mac `~/164.txt`,1035051B/10265行,末31.96s,无panic)。`build=rev252hy-md`;23.13s MIPC dialler ready;24.30s `WDS 0x00c8 ... empty APN acknowledged`(2次)。
+- **观察**:只剩一次board重置(25.49s,selector 0),但之后ABM每约1.04s做一次selector 1(上电)→selector 6(power cycle),resets 4→8,**不再打开pbl/Sahara/qmux**(163里每次重置后都马上重开)。桥对reset/power只重置Sahara状态,pbl通道一直在,所以不开pbl是ABM自己的决定,原因不明,需要logd。
+- **线索(观察)**:重置前的DMS序列为:24.229 GetOperatingMode(0x2d,real AT)→**24.272 SetOperatingMode(0x2e) mode 0=ONLINE,被拒94**→24.465 SetOperatingMode mode 4=RESET,被拒→25.49 board重置。161–164每个boot都有1次mode 0和若干次mode 4,mode 4的次数等于当次的重置次数(3/4/4/1)。**推断**:ONLINE被拒是这条失败链的起点;mode 4只是CommCenter的重置手段。
+- **hz修改**:DMS 0x2e实现真实AT:mode 0→`AT+CFUN=1`,mode 1/6→`AT+CFUN=4`;mode 3/4/5等仍unsupported(没有诚实的实现方式)。该AT超时放宽到60s(10s超时会把ttyC0隔离到下次boot)。会打印`DMS 0x002e set operating mode N`。
+- **hz构建成功**(未上机):同参数,`--name x9-rev252hz-md`,boot.img 12922880B,日志`.local/x9/work/pdp-activation/build-hz.stdout.log`(Mac)。无新warning,插件275不变,无需mailbox staging。回退:hy。
+- **下一步由用户手动**:`fastboot boot x9/out/x9-rev252hz-md/boot.img`,日志放`~/165.txt`。看`set operating mode 0`→`response service 0x2 msg 0x002e ... (real AT)`,之后是否还有mode 4/board重置、是否出现WDS 0x20 Start。如果仍重置,进Android取logd(HANDOFF97流程)看FSM原因,以及ABM为什么不重开pbl。
+
+### 前次交接(HANDOFF 97,2026-11-09): 从根盘取出163的logd,找到基带重置原因(attach APN推送被拒);hy已构建
 
 - **取日志(只读)**:用户启动Android并接ADB(KernelSU root)。先跑`check_plaintext_root.py --manifest`(manifest见local.json),preflight全部通过。新工具 **`x9/tools/pull_ios_logs.py`**:只通过pinfile `rawreadat`读HFSX根盘,内存中重放dirty journal(本次17个transaction、381个block,jhdr_size 512),遍历catalog B-tree(855042条记录,256MiB),支持extents overflow和硬链接。拉取`private/var/db/diagnostics`(`--recent-hours 2`,36MB)和`uuidtext`(全量478MB,约1.5分钟)到Mac `.local/x9/logs/163-logd/raw`(不入git)。timesync里有163的boot UUID `a3b0a780…`(wall 1794235535)。
 - **解码**:macOS 27的`log show`对这份手工组装的iOS 16 logarchive、甚至单个tracev3都报"corrupt or incomplete",读不出任何条目。构建Mandiant macos-UnifiedLogs被权限分类器拦截(外部代码),没有绕过。改用新工具 **`x9/tools/tracev3_strings.py`**:解开tracev3里的LZ4 chunkset(`bv41`),导出可打印字符串。只有内联参数,没有格式串;够用来搜原因。输出在Mac `.local/x9/logs/163-logd/strings-163.txt`。

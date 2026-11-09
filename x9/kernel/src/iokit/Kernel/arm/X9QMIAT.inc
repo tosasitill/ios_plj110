@@ -250,6 +250,16 @@ static void x9q_start(x9q_job &j){
   x9q_command(j,"AT+CPIN?\r",1);
  }else if(service==3){
   for(int &r:j.reg)r=-1;j.attached=j.act=j.csq=-1;x9q_command(j,"AT+CREG?\r",30);
+ }else if(service==2&&j.id==0x2e){
+  /* DMS Set Operating Mode. 164.txt: CommCenter sends ONLINE (0) right before the
+   * attach-APN push; it was rejected, then it asked RESET (4) and power-cycled
+   * the board, in every boot since 161. ONLINE / LOW_POWER / PERSISTENT_LOW_POWER
+   * map to real CFUN=1 / CFUN=4. RESET, OFFLINE, SHUTDOWN, FTM stay unsupported. */
+  x9q_view m=x9q_tlv(j.req,j.len,1);unsigned mode=m.p&&m.n==1?m.p[0]:255;
+  printf("X9 QMI AT: DMS 0x002e set operating mode %u\n",mode);
+  if(mode==0)x9q_command(j,"AT+CFUN=1\r",21);
+  else if(mode==1||mode==6)x9q_command(j,"AT+CFUN=4\r",21);
+  else x9q_error(j,X9Q_UNSUPPORTED);
  }else if(service==2){
   const char *cmd=j.id==0x21?"AT+CGMI\r":j.id==0x22?"AT+CGMM\r":j.id==0x23?"AT+CGMR\r":
    j.id==0x25?"AT+CGSN\r":j.id==0x2d?"AT+CFUN?\r":"AT+CIMI\r";
@@ -374,6 +384,7 @@ static void x9q_result(x9q_job &j,const char *r,int result){
   x9q_packet p(j.req);uint8_t sw[]={a,b},bytes[514];bytes[0]=(uint8_t)n;bytes[1]=(uint8_t)(n>>8);memcpy(bytes+2,data,n);
   p.tlv(0x10,sw,2);p.tlv(0x11,bytes,n+2);x9q_finish(j,p);return;
  }
+ if(j.stage==21){x9q_packet p(j.req);x9q_finish(j,p);return;} /* CFUN final OK (errors returned above) */
  if(j.stage==20){x9q_packet p(j.req);char text[256];
   if(j.id==0x2d){const char *v=text;unsigned mode;
    if(!x9q_line(r,"+CFUN:",text,sizeof(text))||!x9q_number(v,mode)||*v||(mode!=0&&mode!=1&&mode!=4)){x9q_error(j,X9Q_NOT_READY);return;}
@@ -399,7 +410,7 @@ static void x9q_result(x9q_job &j,const char *r,int result){
 }
 static bool x9q_supported(unsigned service,unsigned id){
  return (service==0x0b&&(id==0x20||id==0x21||id==0x24||id==0x2f||id==0x47))||
-  (service==2&&(id==0x21||id==0x22||id==0x23||id==0x25||id==0x2d||id==0x3c||id==0x43))||
+  (service==2&&(id==0x21||id==0x22||id==0x23||id==0x25||id==0x2d||id==0x2e||id==0x3c||id==0x43))||
   (service==3&&(id==0x20||id==0x24||id==0x4d));
 }
 static bool x9q_enqueue(uint32_t local,uint32_t port,const uint8_t *req,unsigned len,bool background=false){
@@ -493,7 +504,8 @@ static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *r
  if(service==0x0b&&id==0x2f&&len==11){x9q_view f=x9q_tlv(req,len,0x10);
   if(f.p&&f.n==1){card_status_flag=true;static unsigned once;
    if(!once++)printf("X9 QMI AT: UIM 0x2f optional TLV 0x10 value %u accepted, legacy status TLV 0x10 answered\n",f.p[0]);}}
- if(!((service==0x0b&&(id==0x20||id==0x21||id==0x24))||(service==3&&id==0x20))&&len!=7&&!card_status_flag){x9q_reject(local,port,req,len,X9Q_ARG);return;}
+ bool opmode=service==2&&id==0x2e&&len==11&&x9q_tlv(req,len,1).n==1;
+ if(!((service==0x0b&&(id==0x20||id==0x21||id==0x24))||(service==3&&id==0x20))&&len!=7&&!card_status_flag&&!opmode){x9q_reject(local,port,req,len,X9Q_ARG);return;}
  if(!x9q_enqueue(local,port,req,len))x9q_reject(local,port,req,len,X9Q_BUSY);
 }
 static void x9q_del(uint32_t local){
@@ -526,7 +538,9 @@ static void x9q_poll(){
   x9q_result(j,response,result);bzero(response,sizeof(response));return;
  }
  if(!x9_md_at_online()){x9q_error(j,X9Q_NOT_READY);return;}
- j.token=x9_md_at_submit(j.command,10000);
+ /* CFUN mode changes (stage 21) get the init script's 60 s; a timeout would
+  * quarantine ttyC0 until boot. */
+ j.token=x9_md_at_submit(j.command,j.stage==21?60000:10000);
  if(!j.token)x9q_error(j,X9Q_BUSY);
 }
 static void x9q_subscriptions(){
