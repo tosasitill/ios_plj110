@@ -1,3 +1,26 @@
+## HANDOFF 2026-11-09 (74): fa(x9_sample_procs=CommCenter)采样 147.txt:ABM 空闲在事件循环,门不是内核可见的阻塞
+
+- 构建:x9-rev252fa-md = er 内核 + boot-arg x9_sample_procs=CommCenter(boot 配置 .local/x9/modem/boot-rev252fa-md.json,把三个值为 0 的
+  x9_wifi_xo* 写成 =0 腾出 boot-args 空间,607 字节上限)。上机 147.txt,采样 30 s 起每 10 s 一次共 12 次(实际抓到 9 轮)。
+- 工具:x9/tools/sample_symbolicate.py <log> <进程名> <dsc 提取目录> [轮次] [帧数];用 .local/x9/work/dsc-20H392 的提取镜像按
+  (pc-slide) 对符号。slide 用日志里 "slide=" 值(缓存与主程序同一 slide)。
+- 观察(147):COACHZ 板级调用共 15 次,最后一次 16.362 s 是 selector 3(GET_RESET)=ResetDetection::start 的 poll,之后再无调用。
+  CommCenter 17 线程:主线程、ATCS、manager、libBasebandManager sServerRunLoopMain 等都在 CFRunLoop 的 mach_msg 空闲;
+  没有线程阻塞在 IOKit/内核调用。30-40 s 有一个线程在 ServiceManager::initializeDynamicServices 的 dispatch_group_wait,50 s 后消失。
+  几个线程同步等 AudioSession 的 XPC 回复(与基带无关)。
+- 观察(libTelephonyBasebandDynamic 20H392 反汇编):TelephonyBasebandRegisterForReset 对 AppleBaseband 服务做
+  IOServiceAddInterestNotification(kIOGeneralInterest);回调 _TelephonyBasebandResetCallback 内部处理 0xe3ff8007(wake-asserted)
+  和 0xe3ff800d(coredump ready),其余消息转给 ABM 的 ResetDetection::sResetDetectCallback;后者 0xe3ff8000="reset detected"
+  (state=1,通知 reset 块),0xe3ff8001="alive detected"(state=0,通知 alive 块)。GetReset=selector 3,
+  结果=(调用失败)||(scalar!=0)。我们的桥现在不发这些消息。
+- 观察(ABM 反汇编):BootModule::start 的 lambda 创建并 start ResetDetection(poll 即上面那次 selector 3),之后用 BootModule 虚函数
+  +0x50 得到对象、再 +0x18 创建 "com.apple.AppleBasebandManager.RadioNotReady.Bootup"(180 s)并取得一个 dispatch group,
+  对它 dispatch_group_notify_f → 回调(0x1b7f538b4)里 state==0 才调 boot_sync。ResetDetection::add 的 5 个调用点都不在 start 路径
+  (它们在 fake boot / soft reset / poweroff / released / crash recovery 里)。所以 start 本身不等 reset 消息。
+- 推断(未验证):boot_sync 被一个 dispatch group 挡着;该 group 与 Manager 的 RadioNotReady 断言有关,谁释放它(Manager 的电源状态?
+  CommCenter 的开关?)还没查出。不是已证明的运行时阻塞位置。
+- 下一步候选:(a) 解出 BootModule 虚函数 +0x50/+0x18 的真实目标和 group 释放点;(b) 取 ABM 自己的日志(logd Persist 的 tracev3 需要
+  uuidtext/dsc 格式串,或让 CommCenter 的 os_log 走 stderr 再由内核 tee)。QMI/DPMAIF 仍未做;短信/数据未通。
 ## HANDOFF 2026-11-09 (73): eq 黑屏/坏内存 = 47 MB boot.img;er(固件为空)跑通,基带表现同 ep;固件改为 opt-in
 
 - 观察:eq(boot.img 47120384 B, Image 62.8 MB, 内嵌 34 MB Mav17 pack)上机黑屏、**无任何 disk-log/pstore 痕迹**,且之后每个镜像
