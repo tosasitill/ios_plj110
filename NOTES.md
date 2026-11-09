@@ -1,3 +1,15 @@
+## HANDOFF 2026-11-09 (80): 154(hh)给出 BBUpdater 一轮的完整文件序列;qdsp6sw 缺失被容忍;失败发生在文件初始化之后的 ~0.9 s 等待里;hi = + sweetiolog
+
+- 观察(154.txt):"X9 BBFW: … written 0 same 20 result errno=0"(第二次启动文件已在盘上)。X9 CC STAT/OPEN 给出一轮的完整序列(16.28-16.71 s):
+  stat <FW>/Mav17 → /private/var/wireless/baseband_data/bbfs/{,backup/} → 依次 stat+open restoresbl1/sbl1/rpm/apps/mba,stat qdsp6sw.mbn **errno=2(被容忍,流程继续)**,
+  tz;stat dsp3/wdt 2;open bbfs/efs1.bin(先读,flags=601 重建,再读)、efs2/efs3 2;stat bbfs/act.der 2;acdb、bbcfg;stat apdp/devcfg/hyp/aop、bbfs/mdmddr、multi_image(_qti)、
+  xbl_cfg.elf、uefi.elf、xbl_support.elf 全 2;stat+open Options.plist;建 Logs/abm.workspace/uncompressed/<时间>/。**没有 bbticket.der、act.der 之外的票据访问。**
+  文件阶段之后约 0.9-1.3 s 无任何文件访问,然后 open CrashReporter/Baseband/ → 板级 selector 6(POWERCYCLE)→15→15→1(POWER on)→ 下一轮文件序列。
+  即:文件初始化成功,失败/超时发生在其后的等待里(此时 PCI 传输还没创建:PCIControl 未被打开)。
+- 观察(sweetnull=CommCenter):CommCenter stderr 有 "PPM Error:No matching driver found"、STK 等,没有 BBUpdater 的失败原因。
+- 推断(未验证):等待的是 power-on 之后基带在 PCIe 上出现(TelephonyBasebandPCITransportCreate 之前的某个 IOKit 匹配/服务),但具体服务名未知。
+- hi(x9-rev252hi-md,boot.img 15278080 B,hh 内核):boot-arg sweetnull=CommCenter + sweetiolog=CommCenter(去掉 x9kbdhook=1 腾出长度,配置 .local/x9/modem/boot-rev252hi-md.json),
+  目的:看 BBUpdater 每轮在 power-on 之后查找/等待哪些 IOKit 服务(最多 400 行)。
 ## HANDOFF 2026-11-09 (79): 153(gg):固件文件写入成功,BBUpdater 每轮成功打开 9 个文件后无声失败;hh = 放宽 CommCenter 文件访问追踪 + stderr tee
 
 - 观察(153.txt, gg):"X9 BBFW: original 20H392 Mav17 files 10 in 2 paths written 20 same 0 result errno=0"。X9 CC OPEN 显示每一轮(约 1.1 s 一轮,
