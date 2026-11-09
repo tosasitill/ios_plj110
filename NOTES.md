@@ -2,7 +2,7 @@
 
 > 旧的完整流水账(7784 行,含 sweet/SM7150 时代、rev2xx 全部 handoff)在 git 历史里:
 > `git show a8f1955:NOTES.md`。需要翻某个 revision 的细节时 `git log -S'<关键字>' -- NOTES.md` 再 show。
-> 截至 2026-11-09 的完整 cn 交接在 `git show 636edc2:NOTES.md`;当前以 §7 的 HANDOFF (86) 为准。
+> 截至 2026-11-09 的完整 cn 交接在 `git show 636edc2:NOTES.md`;当前以 §7 的 HANDOFF (87) 为准。
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
@@ -73,10 +73,10 @@ X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>      # 之后再�
 
 ## 3. 当前基线镜像与参数
 
-最新已构建、待用户测试:**x9-rev252hl-md**(代码提交 **`20c64f2`**),boot.img **12877824 B=12.28125MiB**,路径 `x9/out/x9-rev252hl-md/boot.img`。独立34MiB完整BBFW已stage,插件275不变,不需再stage插件/固件,**尚未上机验证**,见HANDOFF86。
-最后实测:**x9-rev252hk-md**(修复提交 `d1f8515` + 当时未提交的渲染改动,现已入库),boot.img **15278080 B**;**156 与本次 ADB 定点取证确认 reserve 调整生效、efs1.bin 已分配 1 MiB,但 iOS 基带握手未推进**(HANDOFF 84)。
-本机镜像:`x9/out/x9-rev252hk-md/boot.img`;配置沿用 `.local/x9/modem/boot-rev252hi-md.json`。
-本次 BBUpdater 日志的15条 reset 原因全部为 **error 2 / `fPhases.size()` 断言**,不再出现之前的 scratch error 104;efs1.bin 零字节问题已消失,不能再把该断言仅归因于 scratch 失败。现已定位必需 `qdsp6sw.mbn` 缺失导致的启动校验失败分支,外置完整固件＋单份硬链接代码已编入hl;**设备独立34MiB暂存已完成并通过全包rawhash,小boot已构建,尚待用户实测**,详情见 §7。以下 GPU 专用基线与参数为 **2026-11-08 历史记录**,不要当作 hk/hl 参数直接复用。
+最新实测:**x9-rev252hl-md**(代码提交 **`20c64f2`**,构建交接 `0f9d983`),boot.img **12877824 B=12.28125MiB**,路径 `x9/out/x9-rev252hl-md/boot.img`。**157确认完整11文件安装成功、qdsp可读、Sahara finished并进入QMUX/QMI,握手摘要reset=0;真实iOS蜂窝尚未打通**,见HANDOFF87。独立34MiB固件与插件275不需再stage。
+回退:**x9-rev252hk-md**(修复提交 `d1f8515` + 当时未提交的渲染改动,现已入库),boot.img **15278080 B**;156确认reserve生效、efs1.bin已有1MiB,当时15次reset及零传输见HANDOFF84。
+本机回退镜像:`x9/out/x9-rev252hk-md/boot.img`;hl/hk配置沿用 `.local/x9/modem/boot-rev252hi-md.json`。
+157已越过缺qdsp的前置阻塞,**当前阻塞在X9的QMI→MTK适配**:UIM/NAS/DMS/WDS/WDA/DPM请求实际到达后返回0x5e,数据端口配置失败,四个PDP接口仍blocked/tx=rx=0。Sahara是兼容桥交互,不向物理MTK下载Apple固件;PCIControl methods仍0x0,不能说PCIControl已通。以下GPU专用基线与参数为 **2026-11-08 历史记录**,不要当作hk/hl参数直接复用。
 
 历史 GPU 基线:**x9-rev252dc**(内核-only,插件 275 不变,沿用 rev252cx 之后的 mailbox)boot_sha256 `041d267fc297dd0830bd50407b85579679f0ace28ad2ba94a7c825e3bd0fd80c`,**未上机**。
 已用户确认好的最后一版:**rev252cy**(123 修好、控制中心不卡);之后 cz(x9lc)、da(1242x2760)、db(DVFSRC 探针)均未上机验证。
@@ -111,7 +111,7 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 
 ## 5. 未解决问题
 
-当前主线是 **补齐 BBUpdater 启动必需的 qdsp6sw.mbn,通过独立暂存文件交付完整固件,再验证是否越过 fPhases/PCI/Sahara 前置阻塞**(§7);用户已确认,设备独立暂存已完成并通过完整rawhash,小boot候选构建/实测见当前交接。下列为保留的 GPU/Wi-Fi 待办,不是新的硬件验证结论。
+当前主线是 **QMI→MediaTek AT/CCCI适配**(§7):157已确认完整固件/qdsp及Sahara→QMUX前置链能推进,但UIM/NAS等实际请求返回不支持,数据面未通。下一步先闭环一个真实SIM状态请求,不要继续重stage完整固件或绕过断言。下列为保留的GPU/Wi-Fi待办,不是新的硬件验证结论。
 
 1. **GPU 带宽/帧率**:avg ~17-22 fps,稳态 24 fps;job 内 GPU wait 6-15 ms。判断显存带宽受限。**DVFSRC 从未初始化**(110.txt:`basic=8 opp_count=1 gear=0`,SW_REQ 被忽略)。
    rev252dc 加 TF-A SMC INIT:`MTK_SIP_VCOREFS_CONTROL = 0xC2000506`,cmd INIT=0(a0=0 成功,a1=dram_type)锁高 OPP,START=1(`x9_dvfsrc=2`)后自由运行。**待上机**,SMC 可能挂。
@@ -151,7 +151,19 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
 
-## 7. 当前交接(HANDOFF 86,2026-11-09): 用户批准的34MiB独立BBFW已暂存并回读校验;hl小boot 12877824 B BUILT,待用户测试
+## 7. 当前交接(HANDOFF 87,2026-11-09): 157确认完整BBFW/qdsp和Sahara→QMUX推进;新阻塞为QMI不支持,真实PDP仍未通
+
+- 用户手动启动后要求读`~/157.txt`。本轮仅读取日志及源码/本地参考,未ADB操作、flash/reboot/挂载/设备写入,未构建/CI/额外测试,未二次检查镜像。代码仍`20c64f2`,前轮文档`0f9d983`;仅更新本交接,原始日志不入git。
+- **日志仍在追加,固定证据前缀而非假称整场结束**:20:30:36.842+0800捕获 **1361492 B / 13639行**,最后uptime **82.378 s**,完整末行。私有目录`.local/x9/logs/157-20261109-203036/`保存`157.raw.txt`、`capture.json`、带原行号`events.txt`、`qmi-events.json`;SHA256=`f9c004665c35a6854eeeab10fc1b971cf26473ca661e4a2b33945df54bedfc60`。下述行号均指此固定raw副本;后来新增内容不能冒充本次已分析的前缀。
+- **完整固件落地已实测**:157:446/1.284s标记`build=rev252hl-md`;2713/10.344s=`files 11 in 2 paths written 1 linked 1 same 20 external 1 complete 1 result errno=0`。4683–4684/19.946–19.953s实际stat/open `qdsp6sw.mbn`均errno=0,不再是156的ENOENT。没有另行挂载固件,不用重stage固件或插件275。866/3.247s保留空间降到16MiB,当时free **131116KiB**,是安装qdsp之前的读数,不要当作启动末尾空闲空间。
+- **决定性推进链**:20.108s匹配pbl;20.146s兼容桥接收并丢弃238208B的SendImage;21.046s Sahara HELLO;5011–5012/21.075–21.079s=`image 1 of 1 id0x15,10 requests,226532 bytes`并`finished/status0`。21.108/21.135s打开qmux1/qmux2。10–50s五次摘要均`protocol queries 95 accepted 10,user clients16 failed0,resets0,Sahara state6(CBS_FINISHED)`;156为queries0/requests0/reset最终15。**证明越过缺文件的启动前置门,不是Apple固件刷进MTK**;`PCIControl methods0x0`未变,不称PCIControl已有调用。
+- **新窄闭环证明适配层错误**:5050–5052/21.196–21.204s内部DPM(0x2f)msg0x20 txn1发出→`X9 BB: QMI request to DPM`→同txn/id响应error0x5e;WDA(0x1a)msg0x20 txn2/3同样失败。5059/21.232s明确`DPM open error0x5e; WDA set data format error0x5e,link/uplink/downlink=-1`。NAS/UIM/DMS/WDS也实际请求/回复0x5e。当前`X9Baseband.cpp:59–71`的注册send回调确实无条件调用`x9bb_reply_error(...,94)`;94=0x5e,是本地X9适配stub返回,**不是原生MD报不支持QMI**。私有Apple QMI不支持另由shared bridge处理,不可混为同一个根因。
+- **中间成功不能当数据面成功**:`data port step3`是`CBD_DONE`(尝试结束,含失败),`1 activations`是桥本地回答activation register,且ICCID/IMSI均`not read yet`。10–50s各PDP unit0..3摘要全`families0 blocked1 tx0 rx0`;qmux1到20s报告已收431帧41195B/发432帧8612B,qmux2收14帧228B/发14帧266B,其后到50s未再推进。QMUX流量和本地UDP计数不是蜂窝IP数据。
+- **原生MD仍可用,但iOS未接到这些真实状态**:13.553s HS2→READY;19.797/27.699s CPIN READY;34.524s C5GREG=2,1而CEREG=2,0;52.458s CEREG=2,1而52.687s C5GREG=2,0;52.915s CGATT=1。仅是先后注册/packet attach观察,不证明iOS拿到地址/路由或可通话。该前缀没有`fPhases`/`BBUpdater error`文本且摘要reset一直0;**未读取157之后的落盘BBUpdater日志**,不要声称逐条复核了最终reset原因或所有error已消失。
+- **下一步建议只做一个真实状态闭环**:先核对UIM slot/card status实际TLV与现有串行AT/CCCI读取,将真实CPIN/SIM状态传给CommCenter(必要时最小SIM文件只读,标识不打印/入git),再逐步NAS注册/信号和DMS;WDA/DPM/WDS需真实数据面契约,不能统一伪造成功。已先检索本地`.local/x9/work/references/{UniXNU,hackios-xnu-kernel}`相关baseband/modem文件,没有匹配的MTK QMI→AT现成实现。未修改适配stub,未生成新候选。根盘空间风险仍在;157有assetsd persistent-store open error及其他daemon崩溃,未证明与本次qdsp写入有因果关系,不因此自动删除根盘日志。
+- 最小只读复核(仓库根):`rg -n 'X9 BBFW|qdsp6|handshake .*s:|sahara (image read|finished)|data port:|COACHZ pdp: .*s unit|QMI request to' .local/x9/logs/157-20261109-203036/157.raw.txt`。新的设备取证必须独立157目录/identity,不得复用156缓存。
+
+### 前次交接(HANDOFF 86,代码20c64f2/构建交接0f9d983): 用户批准的34MiB独立BBFW已暂存并回读校验;hl小boot BUILT
 
 - 用户回复“好”,明确批准前轮询问的专用文件创建和file-only extent写入。本轮只新建 `/data/local/tmp/x9-ios-pan92-20261027-1215/baseband-Mav17-20H392.pack`(**34MiB**,12个extent),F2FS pinned且immutable;未解除任何旧文件保护,未flash/reboot/挂载,未向原根盘/插件/磁盘日志写raw数据。
 - 新增受控工具 `x9/tools/stage_baseband_firmware.py`:必须 `--create --yes` 或用准确捕获状态 `--resume --yes`,默认拒绝复用旧文件;每次raw写入前复核inode/保护/FIEMAP,范围最多256KiB,先读旧hash→pinfile比较后写→同范围读回hash,无效首块→payload→最后发布首块。完成后验证全包rawhash,原root/plugin/log文件inode/map及root首64KiB hash不变,再发布新私有manifest。操作用法及失败恢复约束见 `x9/BUILD.md`。
