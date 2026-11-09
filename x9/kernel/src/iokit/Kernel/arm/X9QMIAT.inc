@@ -515,7 +515,9 @@ static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *r
   x9q_reject(local,port,req,len,X9Q_UNSUPPORTED);return;
  }
  /* UIM Refresh Register (0x2a): acknowledged; this bridge never sends refresh events. */
- if((service==1&&(id==1||id==3))||(service==2&&id==1)||(service==0x0b&&id==0x2a)){
+ /* NAS 0x6c Config Signal Info v2 (167.txt, right after LTE SysInfo): thresholds
+  * only; acknowledged, no signal indications are generated. */
+ if((service==1&&(id==1||id==3))||(service==2&&id==1)||(service==0x0b&&id==0x2a)||(service==3&&id==0x6c)){
   static unsigned logged;
   if(logged<8){logged++;printf("X9 QMI AT: service 0x%x msg 0x%04x registration acknowledged, no indications generated\n",service,id);}
   x9q_packet p(req);p.send(local,port);return;

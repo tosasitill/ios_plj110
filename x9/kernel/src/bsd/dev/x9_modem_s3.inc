@@ -1072,7 +1072,15 @@ struct x9at_step{const char *cmd;unsigned wait_ms;unsigned timeout_ms;};
 /* level 3 = what a minimal RIL does to take the SIM stack up and register: echo off, verbose errors, SIM state in flight
  * mode, registration URCs on, radio on, then poll state. Every step waits for OK/ERROR (or its own timeout). */
 static const struct x9at_step x9at_script[]={
- {"ATE0\r",0,5000},{"AT+CMEE=1\r",0,5000},{"AT+CFUN=4\r",300,30000},{"AT+ESIMS?\r",1000,5000},{"AT+CPIN?\r",300,10000},
+ {"ATE0\r",0,5000},{"AT+CMEE=1\r",0,5000},{"AT+CFUN=4\r",300,30000},
+ /* 167.txt: the MD registers on NR SA first (C5GREG 1, AcT 11) and only reaches
+  * LTE ~30 s later; the iPhone X CommCenter has no 5G and treats NR-only as not
+  * registered. ERAT rat 3 = LTE|LTE_CA only, from libmtk-ril
+  * RmcRatSwitchHandler::requestSetPreferredNetworkType (table at 0x190018:
+  * index = ERAT rat, [3]=0x84000). Sent in CFUN=4. NV writes stay in our RAM
+  * overlay, so Android's setting is untouched. x9_md_lte=0 skips it. */
+ {"AT+ERAT=3\r",0,10000},
+ {"AT+ESIMS?\r",1000,5000},{"AT+CPIN?\r",300,10000},
  {"AT+EUSIM?\r",300,5000},{"AT+CREG=2\r",0,5000},{"AT+CEREG=2\r",0,5000},{"AT+C5GREG=2\r",0,5000},
  {"AT+CFUN=1\r",500,60000},{"AT+CPIN?\r",5000,10000},{"AT+CFUN?\r",0,5000},{"AT+COPS?\r",5000,10000},{"AT+CREG?\r",0,5000},
  {"AT+CEREG?\r",0,5000},{"AT+C5GREG?\r",0,5000},{"AT+CSQ\r",0,5000},{"AT+COPS?\r",15000,10000},{"AT+CREG?\r",0,5000},
@@ -1081,10 +1089,13 @@ static const struct x9at_step x9at_script[]={
 static void x9at_engine(unsigned ms){
  static unsigned idx,sent_ms,free_ms,started;
  if(!started){started=1;free_ms=ms;}
- if(x9at_bridge_tick(ms,idx>=10))return;
+ /* Bridge jobs start after CFUN=1 (index 10 since the ERAT step was added). */
+ if(x9at_bridge_tick(ms,idx>=11))return;
  if(x9at_pending){
   if(x9at_done){
    X9MD_LOG("X9 MODEM: AT step %u '%.20s' -> %s after %u ms\n",idx,x9at_script[idx].cmd,x9at_done>0?"OK":"ERROR",ms-sent_ms);
+   if(!strncmp(x9at_script[idx].cmd,"AT+ERAT=",8))
+    printf("X9 MODEM: LTE-only AT+ERAT=3 -> %s after %u ms\n",x9at_done>0?"OK":"ERROR",ms-sent_ms);
    x9at_pending=0;x9at_done=0;idx++;free_ms=ms;
   }else if(ms-sent_ms>x9at_script[idx].timeout_ms){
    X9MD_LOG("X9 MODEM: AT step %u '%.20s' TIMEOUT\n",idx,x9at_script[idx].cmd);
@@ -1098,6 +1109,8 @@ static void x9at_engine(unsigned ms){
   return;
  }
  if(ms-free_ms<x9at_script[idx].wait_ms+200)return;
+ if(!strncmp(x9at_script[idx].cmd,"AT+ERAT=",8)&&!sweet_x9_arg("x9_md_lte",1)){
+  printf("X9 MODEM: x9_md_lte=0, RAT left as the MD default\n");idx++;free_ms=ms;return;}
  x9at_reset();x9at_pending=1;sent_ms=ms;
  if(x9md_at_send(x9at_script[idx].cmd)<0){x9at_pending=0;if(x9_at_enabled())x9at_bridge_poison();}
 }
