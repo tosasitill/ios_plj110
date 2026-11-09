@@ -2,13 +2,20 @@
  * The host's mux/family binding is logical intent, NOT proof of a MediaTek
  * CID/ccmni route. No CGATT -> connected shortcut, guessed CID-1 channel,
  * fabricated packet handle, IP address, DNS, gateway or MTU.
- * Start currently performs real CGACT discovery then fails at the first
- * missing gate; it never activates a context without a proven bearer route.
+ * Start performs real CGACT/CGDCONT discovery and once-per-boot read-only
+ * CGDATA/CGCONTRDP capability queries. It never activates a context without
+ * a proven bearer route. Capability acceptance alone is NOT that proof.
  */
 struct x9w_client {
     uint8_t mux, family; bool starting;
 };
 static x9w_client x9w_clients[CBQ_MAX_CLIENTS];
+struct x9w_discovery {
+    uint32_t present, active, defined; // bit CID-1 is a bitmap, NEVER a ccmni index
+    unsigned ipv4, ipv6, dual, other;
+    bool caps_attempted, caps_complete, cgdata, contrdp;
+};
+static x9w_discovery x9w;
 static bool x9w_supported(unsigned id) {
     return id == 0x20 || id == 0x21 || id == 0x22 || id == 0x2d || id == 0x4d || id == 0xa2;
 }
@@ -103,8 +110,9 @@ static bool x9w_request(uint32_t local, uint32_t port, const uint8_t *req, unsig
     printf("X9 WDS: logical %s accepted, no physical bearer implied\n", id == 0xa2 ? "mux bind" : "family");
     return true;
 }
-static bool x9w_cgact(const char *s, unsigned &contexts, unsigned &active) {
-    bool seen[17] = {}; contexts = active = 0;
+static void x9w_start(x9q_job &j) { x9q_command(j, "AT+CGACT?\r", 90); }
+static bool x9w_cgact(const char *s, uint32_t &present, uint32_t &active) {
+    present = active = 0;
     while (*s) {
         const char *end = s; while (*end && *end != '\r' && *end != '\n') end++;
         if (end - s >= 7 && !memcmp(s, "+CGACT:", 7)) {
@@ -113,26 +121,99 @@ static bool x9w_cgact(const char *s, unsigned &contexts, unsigned &active) {
             memcpy(line, s + 7, size); line[size] = 0;
             const char *p = line; unsigned cid, state;
             if (!x9q_number(p, cid) || *p++ != ',' || !x9q_number(p, state) || *p ||
-                !cid || cid > 16 || state > 1 || seen[cid]) return false;
-            seen[cid] = true; contexts++; active += state;
+                !cid || cid > 16 || state > 1 || (present & (1u << (cid - 1)))) return false;
+            present |= 1u << (cid - 1); if (state) active |= 1u << (cid - 1);
         }
         s = end; while (*s == '\r' || *s == '\n') s++;
     }
     // Empty successful response is a valid zero-context discovery.
     return true;
 }
+static unsigned x9w_count(uint32_t bits) {
+    unsigned n = 0; while (bits) { bits &= bits - 1; n++; } return n;
+}
+// A bounded quoted field; strings stay in the response buffer and are wiped by
+// the AT owner. APNs/addresses are neither logged nor persisted by discovery.
+static bool x9w_quoted(const char *&p, const char *&text, unsigned &n) {
+    while (*p == ' ') p++; if (*p != '"') return false;
+    text = ++p; n = 0;
+    while (*p && *p != '"') {
+        if ((unsigned char)*p < 32 || (unsigned char)*p > 126 || *p == '\\' || ++n > 255) return false;
+        p++;
+    }
+    if (*p != '"') return false; p++; while (*p == ' ') p++; return true;
+}
+static bool x9w_cgdcont(const char *s) {
+    uint32_t defined = 0; unsigned ipv4 = 0, ipv6 = 0, dual = 0, other = 0;
+    while (*s) {
+        const char *end = s; while (*end && *end != '\r' && *end != '\n') end++;
+        if (end - s >= 9 && !memcmp(s, "+CGDCONT:", 9)) {
+            char line[512]; unsigned size = (unsigned)(end - s - 9);
+            if (size >= sizeof(line)) return false;
+            memcpy(line, s + 9, size); line[size] = 0;
+            const char *p = line, *type, *apn; unsigned cid, tn, an;
+            if (!x9q_number(p, cid) || !cid || cid > 16 || (defined & (1u << (cid - 1))) ||
+                *p++ != ',' || !x9w_quoted(p, type, tn) || *p++ != ',' || !x9w_quoted(p, apn, an)) {
+                bzero(line, sizeof(line)); return false;
+            }
+            // Address and optional vendor fields are skipped only as complete
+            // quoted strings or decimal fields; reject malformed/truncated CSV.
+            bool valid = true;
+            while (*p && valid) {
+                if (*p++ != ',') { valid = false; break; }
+                while (*p == ' ') p++;
+                if (*p == '"') { const char *v; unsigned k; valid = x9w_quoted(p, v, k); }
+                else if (*p && *p != ',') { unsigned value; valid = x9q_number(p, value); }
+            }
+            if (!valid) { bzero(line, sizeof(line)); return false; }
+            defined |= 1u << (cid - 1);
+            if (tn == 2 && !memcmp(type, "IP", 2)) ipv4++;
+            else if (tn == 4 && !memcmp(type, "IPV6", 4)) ipv6++;
+            else if (tn == 6 && !memcmp(type, "IPV4V6", 6)) dual++;
+            else other++;
+            bzero(line, sizeof(line));
+        }
+        s = end; while (*s == '\r' || *s == '\n') s++;
+    }
+    x9w.defined = defined; x9w.ipv4 = ipv4; x9w.ipv6 = ipv6; x9w.dual = dual; x9w.other = other;
+    return true;
+}
+static void x9w_start_blocked(x9q_job &j) {
+    printf("X9 WDS: Start discovery contexts %u active %u defined %u families %u/%u/%u other %u, capability tests %u/%u complete %u, DPMAIF ready %u; blocked at %s (no activation)\n",
+        x9w_count(x9w.present), x9w_count(x9w.active), x9w_count(x9w.defined), x9w.ipv4, x9w.ipv6, x9w.dual, x9w.other,
+        x9w.cgdata, x9w.contrdp, x9w.caps_complete, x9d_ready(),
+        x9d_ready() ? "unproven CID/ccmni binding" : "DPMAIF readiness");
+    x9q_error(j, x9d_ready() ? X9Q_UNSUPPORTED : X9Q_NOT_READY);
+}
 static void x9w_result(x9q_job &j, const char *response, int result) {
-    unsigned contexts, active;
+    if (j.stage == 92 || j.stage == 93) {
+        // MODEM_ERROR is a completed negative capability response, not a
+        // reason to retry or to send the execution form of the command.
+        if (result != X9_AT_OK && result != X9_AT_MODEM_ERROR) { x9q_error(j, X9Q_NOT_READY); return; }
+        if (j.stage == 92) {
+            x9w.cgdata = result == X9_AT_OK;
+            x9q_command(j, "AT+CGCONTRDP=?\r", 93); return;
+        }
+        x9w.contrdp = result == X9_AT_OK; x9w.caps_complete = true;
+        x9w_start_blocked(j); return;
+    }
     if (result != X9_AT_OK) { x9q_error(j, X9Q_NOT_READY); return; }
-    if (!x9w_cgact(response, contexts, active)) { x9q_error(j, X9Q_INTERNAL); return; }
+    if (j.stage == 91) {
+        if (!x9w_cgdcont(response)) { x9q_error(j, X9Q_INTERNAL); return; }
+        if (!x9w.caps_attempted) {
+            x9w.caps_attempted = true; x9q_command(j, "AT+CGDATA=?\r", 92); return;
+        }
+        x9w_start_blocked(j); return;
+    }
+    uint32_t contexts, active;
+    if (j.stage != 90 || !x9w_cgact(response, contexts, active)) { x9q_error(j, X9Q_INTERNAL); return; }
     if (j.id == 0x22) {
         // Per-client packet status, not global CGATT/CGACT. This version has
         // created no bearer handles; an already-active MD context is unowned.
         x9q_packet p(j.req); uint8_t disconnected = 1; p.tlv(1, &disconnected, 1);
-        printf("X9 WDS: CGACT discovery contexts %u active %u; client owns no routed bearer\n", contexts, active);
+        printf("X9 WDS: CGACT discovery contexts %u active %u; client owns no routed bearer\n", x9w_count(contexts), x9w_count(active));
         x9q_finish(j, p); return;
     }
-    printf("X9 WDS: Start preflight CGACT contexts %u active %u, DPMAIF ready %u; blocked at %s (no activation)\n",
-        contexts, active, x9d_ready(), x9d_ready() ? "unproven CID/ccmni binding" : "DPMAIF readiness");
-    x9q_error(j, x9d_ready() ? X9Q_UNSUPPORTED : X9Q_NOT_READY);
+    x9w.present = contexts; x9w.active = active;
+    x9q_command(j, "AT+CGDCONT?\r", 91);
 }

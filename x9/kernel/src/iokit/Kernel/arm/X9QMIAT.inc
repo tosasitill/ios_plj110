@@ -60,6 +60,7 @@ struct x9q_job {
 static x9q_job x9q_jobs[X9Q_JOBS];static int x9q_active=-1;static uint64_t x9q_order;
 static void x9w_release_job(x9q_job &);
 static void x9w_result(x9q_job &,const char *,int);
+static void x9w_start(x9q_job &);
 /* Exact complete AT lines only; prefix comparisons never cross into another line. */
 static bool x9q_line(const char *s,const char *prefix,char *out,unsigned cap){
  unsigned pl=(unsigned)strlen(prefix);bool found=false;
@@ -223,7 +224,7 @@ static void x9q_nas(x9q_job &j){
 }
 static void x9q_start(x9q_job &j){
  unsigned service=j.port-X9BB_PORT_BASE;
- if(service==1){x9q_command(j,"AT+CGACT?\r",90);
+ if(service==1){x9w_start(j);
  }else if(service==0x0b||(service==2&&j.id==0x3c)){
   if(service==0x0b&&(j.id==0x20||j.id==0x21)&&!x9q_read_args(j)){x9q_error(j,X9Q_ARG);return;}
   x9q_command(j,"AT+CPIN?\r",1);

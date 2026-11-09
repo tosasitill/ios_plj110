@@ -4,7 +4,7 @@
  * threads only copy into a bounded mailbox. No fixed/reserved DMA addresses.
  * x9_dpmaif=0: off; 1: clock/status probe + private allocation (NO HW writes);
  * 2: experimental SRAM/queue initialization, polled with both IRQs masked.
- * Mode 2 is not selected by the diagnostic candidate. A fatal error retains
+ * Mode 2 requires an explicitly selected active candidate. A fatal error retains
  * all DMA memory until reboot; no reset, modem assertion or recovery loop.
  */
 namespace {
@@ -12,6 +12,12 @@ constexpr unsigned X9D_DRB = 2048, X9D_BAT = 1024, X9D_PIT = 2048;
 constexpr unsigned X9D_TX_SIZE = 3072, X9D_PKT_SIZE = 1664, X9D_FRG_SIZE = 1920;
 constexpr unsigned X9D_MAIL = 64, X9D_BUDGET = 128;
 constexpr uint32_t X9D_BUSY_BIT = 0x80000000u;
+constexpr uint32_t X9D_UL_FLOW = (31u << 5) | (31u << 10) | (31u << 15);
+constexpr uint32_t X9D_UL_ERROR = 31u << 20;
+// v3 LRO IRQ STATUS positions, NOT mask-register positions (8/9 -> 13/14).
+constexpr uint32_t X9D_DL_DONE = (1u << 13) | (1u << 14);
+constexpr uint32_t X9D_DL_EMPTY = 3u << 4;
+constexpr uint32_t X9D_DL_ERROR = (7u << 1) | (1u << 6) | (7u << 8);
 struct x9d_dma {
     IOBufferMemoryDescriptor *md;
     uint8_t *va;
@@ -32,8 +38,11 @@ struct x9d_state {
     bool posted[2][X9D_BAT];
     unsigned bat_wr[2], tx_wr, tx_rd, head, count;
     x9d_tx mail[X9D_MAIL]; x9d_route route[CBP_INTERFACES]; x9d_rx rx[2];
-    unsigned mode; bool prepared, ready, failed, published, hw_attempted;
-    uint64_t tx_packets, tx_done, rx_packets, rx_dropped, rejected;
+    unsigned mode; bool prepared, ready, failed, published, hw_attempted, clocks_live;
+    unsigned irq_reports;
+    const char *phase;
+    uint32_t last_ul, last_dl;
+    uint64_t tx_packets, tx_done, rx_packets, rx_dropped, rejected, flow_events;
     void (*receiver)(uint32_t, const uint8_t *, uint32_t, uint32_t);
 };
 static x9d_state x9d;
@@ -68,21 +77,52 @@ static bool x9d_alloc(x9d_dma &m, unsigned bytes) {
         m.pa >= 0x100000000ULL || m.size > 0x100000000ULL - m.pa || (m.pa & 16383)) return false;
     memset(m.va, 0, m.size); x9d_sync(m, 0, m.size); return true;
 }
+static void x9d_snapshot(const char *label) {
+    if (!x9d.clocks_live) return; // never touch gated windows, including on failure
+    uint32_t gate = x9d_rd(x9d.infra, 0xd20) & 12;
+    if (gate) { printf("X9 DPMAIF: %s gated 0x%x, DPMAIF snapshot skipped\n", label, gate); return; }
+    const uintptr_t misc = x9d.pd + 0x400, dls = x9d.pd + 0xc00, uls = x9d.pd + 0xd00;
+    printf("X9 DPMAIF: %s phase %s gate 0x%x P2 0x%x CODA 0x%x arb 0x%x masks 0x%x/0x%x IRQ 0x%x/0x%x DMAerr 0x%x bus 0x%x\n",
+        label, x9d.phase ? x9d.phase : "prepare", gate,
+        x9d_rd(x9d.md_misc, 0x400), x9d_rd(misc, 0x6c), x9d_rd(x9d.ao, 0x1c),
+        x9d_rd(x9d.ao, 0x80), x9d_rd(x9d.ao, 0x90), x9d_rd(misc, 0), x9d_rd(misc, 0x50),
+        x9d_rd(misc, 0x40), x9d_rd(misc, 0x30));
+    printf("X9 DPMAIF: %s TXQ0 config 0x%x/0x%x/0x%x indices 0x%x BAT indices 0x%x/0x%x FRG indices 0x%x/0x%x\n",
+        label, x9d_rd(uls, 0x10), x9d_rd(uls, 0x14), x9d_rd(uls, 0x18), x9d_rd(uls, 0xe0),
+        x9d_rd(dls, 0xd8), x9d_rd(dls, 0xdc), x9d_rd(dls, 0x78), x9d_rd(dls, 0x7c));
+    // Keep undocumented latched fields RAW; do not claim guessed base/size semantics.
+    for (unsigned q = 0; q < 2; q++) {
+        unsigned o = q ? 0xb0 : 0x90;
+        printf("X9 DPMAIF: %s PIT%u SRAM raw 0x%x/0x%x/0x%x/0x%x/0x%x/0x%x/0x%x\n",
+            label, q, x9d_rd(dls, o), x9d_rd(dls, o + 4), x9d_rd(dls, o + 8),
+            x9d_rd(dls, o + 12), x9d_rd(dls, o + 16), x9d_rd(dls, o + 20), x9d_rd(dls, o + 24));
+    }
+}
+static void x9d_phase(const char *phase) {
+    x9d.phase = phase; printf("X9 DPMAIF: init phase %s\n", phase);
+}
 static void x9d_fail(const char *reason) {
     if (x9d.failed) return;
     IOLockLock(x9d.lock); x9d.failed = true; x9d.ready = false;
     for (x9d_route &r : x9d.route) { r.bound = false; r.families = 0; r.epoch++; }
     x9d.count = 0; IOLockUnlock(x9d.lock);
-    printf("X9 DPMAIF: quarantined (%s); DMA retained, no reset/retry\n", reason);
+    printf("X9 DPMAIF: quarantined (%s), phase %s; DMA retained, no reset/retry\n",
+        reason, x9d.phase ? x9d.phase : "prepare");
+    x9d_snapshot("failure");
 }
-static bool x9d_wait(uintptr_t base, unsigned off, uint32_t mask) {
+static bool x9d_expect(uintptr_t base, unsigned off, uint32_t mask, uint32_t expected) {
     uint64_t deadline = x9d_ms() + 20;
     unsigned spins = 0;
-    while (x9d_rd(base, off) & mask) {
-        if (++spins >= 200000 || x9d_ms() >= deadline) { x9d_fail("MMIO deadline"); return false; }
+    uint32_t value;
+    while (((value = x9d_rd(base, off)) & mask) != expected) {
+        if (++spins >= 200000 || x9d_ms() >= deadline) {
+            printf("X9 DPMAIF: readback offset 0x%x value 0x%x mask 0x%x expected 0x%x\n", off, value, mask, expected);
+            x9d_fail("MMIO readback/deadline"); return false;
+        }
     }
     return true;
 }
+static bool x9d_wait(uintptr_t base, unsigned off, uint32_t mask) { return x9d_expect(base, off, mask, 0); }
 static bool x9d_command(uintptr_t base, unsigned off, uint32_t value) {
     if (!x9d_wait(base, off, X9D_BUSY_BIT)) return false;
     x9d_wr(base, off, value); return x9d_wait(base, off, X9D_BUSY_BIT);
@@ -98,14 +138,18 @@ static void x9d_bat_entry(unsigned kind, unsigned bid) {
     d[0] = (uint32_t)pa; d[1] = (uint32_t)(pa >> 32) & 255;
 }
 static bool x9d_hw_init() {
-    // Exposure starts at the first queue INIT, not only at final INIT_DONE.
-    x9d.published = true;
     // Parent mux selection is preserved, not reprogrammed. No vendor reset.
+    x9d_phase("clock/P2");
     x9d_wr(x9d.infra, 0xd28, 12); // ifrao main bit2, 26MHz bit3
     if (!x9d_wait(x9d.infra, 0xd20, 12)) return false;
-    x9d_wr(x9d.infra, 0xc24, 1u << 30); (void)x9d_rd(x9d.infra, 0xc20);
+    x9d.clocks_live = true;
+    x9d_snapshot("before");
+    x9d_wr(x9d.infra, 0xc24, 1u << 30);
+    if (!x9d_expect(x9d.infra, 0xc20, 1u << 30, 1u << 30)) return false;
     uint32_t mode = x9d_rd(x9d.md_misc, 0x400);
     x9d_wr(x9d.md_misc, 0x400, (mode & ~1u) | 4);
+    if (!x9d_expect(x9d.md_misc, 0x400, 5, 4)) return false;
+    x9d_phase("SRAM-clear");
     const uint32_t sram[][2] = {
         {0xffff0100, 0x8033f000}, {0xffff0200, 0x801df000},
         {0xffff0400, 0x805ff000}, {0xffff1000, 0x8033f000},
@@ -114,14 +158,22 @@ static bool x9d_hw_init() {
     for (const auto &row : sram) {
         x9d_wr(x9d.pd + 0x400, 0xc4, row[0]);
         if (!x9d_command(x9d.pd + 0x400, 0xc0, row[1])) return false;
+        printf("X9 DPMAIF: SRAM group 0x%x cleared\n", row[0] & 65535);
     }
     const uintptr_t misc = x9d.pd + 0x400, dl = x9d.pd + 0x100;
     const uintptr_t dls = x9d.pd + 0xc00, uls = x9d.pd + 0xd00, lro = x9d.pd + 0x900;
     x9d_wr(misc, 0x68, 0x7f);
+    x9d_phase("IRQ-mask/config");
     // MT6993 bus remap belongs to MD. Do not write the older AP remap.
     x9d_wr(x9d.ao, 0x8c, (1u << 9) | (1u << 10) | (1u << 15) | (1u << 16) | (1u << 24));
     // Polled bring-up: do not register or unmask SPI 846/847 (GIC 878/879).
     x9d_wr(x9d.ao, 0x88, ~0u); x9d_wr(x9d.ao, 0x98, ~0u);
+    if (!x9d_expect(x9d.ao, 0x80, 15 | X9D_UL_FLOW | X9D_UL_ERROR, 15 | X9D_UL_FLOW | X9D_UL_ERROR) ||
+        !x9d_expect(x9d.ao, 0x90, 0x1fff, 0x1fff)) return false;
+    // Clear inherited dummy status before our queues exist; later fatal status
+    // is preserved. IP-busy IRQ remains masked for the polled-only candidate.
+    x9d_wr(misc, 0, ~0u); x9d_wr(misc, 0x50, ~0u);
+    x9d_wr(x9d.ao, 0x9c, ~0u); x9d_wr(misc, 0x60, ~0u);
     x9d_wr(misc, 0x6c, 0xff);
     x9d_wr(dls, 0x00, 64 | (4u << 8) | (1u << 16)); // 64B remain / 1 packet per BAT
     x9d_wr(dls, 0x04, 3080);
@@ -130,7 +182,9 @@ static bool x9d_hw_init() {
     cfg = (cfg & ~((3u << 22) | (63u << 16) | (1u << 31))) | (1u << 23) | (1u << 13) | (62u << 16);
     x9d_wr(dls, 0x0c, cfg);
     x9d_wr(dls, 0x10, (1u << 28) | (15u << 8) | 62); // fragment BAT, 1920B
-    // Preserve dual PIT paths but explicitly disable all 16 aggregation bits.
+    // Initialize both PIT rings, preserving native HPC path mode2 (RX0 only).
+    // Capability 2RXQ does not itself prove traffic is steered to both queues.
+    // Explicitly disable all 16 aggregation bits.
     // Multiple normal buffers in one packet are an unexpected-LRO fault below,
     // never silently concatenated or reported as a successful received packet.
     x9d_wr(dls, 0x38, 2 | (13u << 4) | (16u << 8));
@@ -141,20 +195,36 @@ static bool x9d_hw_init() {
     }
     x9d_wr(x9d.ao + 0x400, 0x28, 0); x9d_wr(x9d.ao + 0x400, 0x34, 10);
     x9d_wr(x9d.sram1, 0x04, x9d_rd(x9d.sram1, 0x04) & ~65535u);
+    if (!x9d_expect(x9d.sram1, 0x04, 65535, 0) ||
+        !x9d_expect(dls, 0x04, ~0u, 3080)) return false;
+    x9d_phase("PIT-init");
     for (unsigned q = 0; q < 2; q++) {
         x9d_wr(lro, 0x14, (uint32_t)x9d.pit[q].pa);
         x9d_wr(lro, 0x18, X9D_PIT); // low32 DMA; address extension is zero
+        x9d_wr(lro, 0x1c, 0); // reset INIT_CON2; do not inherit queue state
         x9d_wr(lro, 0x20, 1u << 20);
+        x9d_wr(lro, 0x24, 0); // INIT_CON4 address extension is zero for low32 DMA
         uint32_t seq = x9d_rd(dls, 0x40), shift = q ? 20 : 8;
         x9d_wr(dls, 0x40, (seq & ~(255u << shift)) | (255u << shift));
+        if (!x9d_expect(lro, 0x14, ~0u, (uint32_t)x9d.pit[q].pa) ||
+            !x9d_expect(lro, 0x18, 0xff03ffff, X9D_PIT) ||
+            !x9d_expect(lro, 0x20, 1u << 20, 1u << 20)) return false;
+        x9d.published = true; // first queue INIT can expose our DMA; never free it
         if (!x9d_command(lro, 0, X9D_BUSY_BIT | 1 | (q << 16))) return false;
+        printf("X9 DPMAIF: PIT%u INIT command complete (DMA reachability not yet proven)\n", q);
     }
+    x9d_phase("BAT-init/credit");
     for (unsigned kind = 0; kind < 2; kind++) {
         x9d_wr(dl, 0x08, (uint32_t)x9d.bat[kind].pa); x9d_wr(dl, 0x50, 0);
         x9d_wr(dl, 0x0c, X9D_BAT | (1u << 16) | (1u << 22));
+        x9d_wr(dl, 0x10, 0); // INIT_CON2: initial indices
+        if (!x9d_expect(dl, 0x08, ~0u, (uint32_t)x9d.bat[kind].pa) ||
+            !x9d_expect(dl, 0x50, ~0u, 0) ||
+            !x9d_expect(dl, 0x0c, 0x0041ffff, X9D_BAT | (1u << 16) | (1u << 22))) return false;
         if (!x9d_command(dl, 0, X9D_BUSY_BIT | 1 | (kind << 16))) return false;
         if (!x9d_command(dl, 4, X9D_BUSY_BIT | (X9D_BAT - 1) | (kind << 16))) return false;
     }
+    x9d_phase("TXQ0/SRAM-sync");
     // One TX queue initially, others explicitly disabled. DRB size is WORDS.
     x9d_wr(x9d.ao, 0x1c, 0);
     x9d_wr(uls, 0x10, (uint32_t)x9d.drb.pa); x9d_wr(uls, 0x14, X9D_DRB * 2); x9d_wr(uls, 0x18, 0);
@@ -163,9 +233,25 @@ static bool x9d_hw_init() {
     x9d.published = true;
     x9d_wr(misc, 0x90, x9d_rd(misc, 0x90) | 1);
     if (!x9d_wait(misc, 0x90, 1)) return false;
+    // Verify documented initial indices BEFORE enabling DMA. Raw latched
+    // base/size fields are captured, not validated against an invented layout.
+    x9d_phase("initial-readback");
+    x9d_snapshot("latched");
+    if (!x9d_expect(uls, 0x10, ~0u, (uint32_t)x9d.drb.pa) ||
+        !x9d_expect(uls, 0x14, 65535, X9D_DRB * 2) ||
+        !x9d_expect(uls, 0x18, ~0u, 0) ||
+        !x9d_expect(x9d.ao, 0x1c, 0x1f1f, 0x101) ||
+        !x9d_expect(uls, 0xe0, ~0u, 0) ||
+        !x9d_expect(dls, 0xa4, 0x3ffff, 0) || !x9d_expect(dls, 0xc4, 0x3ffff, 0) ||
+        !x9d_expect(dls, 0xd8, 65535, 0) || !x9d_expect(dls, 0x78, 65535, 0) ||
+        !x9d_expect(dls, 0xdc, 65535, X9D_BAT - 1) ||
+        !x9d_expect(x9d.sram1, 0x04, 65535, 0)) return false;
+    x9d_phase("INIT_DONE");
     x9d_wr(x9d.ao, 0, 1); x9d_wr(x9d.ao + 0x400, 0, 1);
+    x9d_snapshot("enabled");
     IOLockLock(x9d.lock); x9d.ready = true; IOLockUnlock(x9d.lock);
-    printf("X9 DPMAIF: initialized, TXQ0 dual-PIT polled, aggregation off; bearer route NOT proven\n");
+    x9d.phase = "poll";
+    printf("X9 DPMAIF: initialized, TXQ0 dual-PIT polled/native-path2, aggregation off; bearer route NOT proven\n");
     return true;
 }
 static void x9d_prepare() {
@@ -363,9 +449,21 @@ static void x9d_poll() {
     }
     if (!x9d_ready()) return;
     if (!x9_md_at_online()) { x9d_fail("MD/AT offline"); return; }
+    if (x9d_rd(x9d.infra, 0xd20) & 12) { x9d_fail("clock gated while active"); return; }
     uint32_t ul = x9d_rd(x9d.pd + 0x400, 0), dl = x9d_rd(x9d.pd + 0x400, 0x50);
-    // Only QDONE is benign in first polled mode; retain errors rather than ACK.
-    if ((ul & ~15u) || (dl & ~((1u << 13) | (1u << 14)))) { x9d_fail("hardware interrupt error/status"); return; }
+    // EMPTY / MD-not-ready / power-not-ready are flow control, not DMA length
+    // faults (native drv3_isr masks PWR_NOTRDY until subsequent TX_DONE).
+    // Do not ACK unknown/error bits or reset the modem to hide the evidence.
+    if ((ul & (X9D_UL_ERROR | ~(15u | X9D_UL_FLOW | X9D_UL_ERROR))) ||
+        (dl & (X9D_DL_ERROR | ~(X9D_DL_DONE | X9D_DL_EMPTY | X9D_DL_ERROR)))) {
+        x9d_fail("hardware interrupt error/unknown status"); return;
+    }
+    if ((ul & X9D_UL_FLOW) || (dl & X9D_DL_EMPTY)) x9d.flow_events++;
+    if ((ul != x9d.last_ul || dl != x9d.last_dl) && (ul || dl) && x9d.irq_reports < 8) {
+        x9d.irq_reports++;
+        printf("X9 DPMAIF: polled IRQ 0x%x/0x%x, flow 0x%x/0x%x\n", ul, dl, ul & X9D_UL_FLOW, dl & X9D_DL_EMPTY);
+    }
+    x9d.last_ul = ul; x9d.last_dl = dl;
     if (!x9d_tx_poll() || !x9d_rx_poll(0) || !x9d_rx_poll(1) || !x9d_replenish(0) || !x9d_replenish(1)) return;
     if (ul) x9d_wr(x9d.pd + 0x400, 0, ul);
     if (dl) x9d_wr(x9d.pd + 0x400, 0x50, dl);
@@ -373,8 +471,9 @@ static void x9d_poll() {
 static void x9d_report(unsigned second) {
     if (!x9d.lock || !x9d.mode) return;
     IOLockLock(x9d.lock); uint64_t rejected = x9d.rejected; unsigned queued = x9d.count; IOLockUnlock(x9d.lock);
-    printf("X9 DPMAIF: %u s mode %u ready %u quarantined %u published %u TX submitted %llu completed %llu RX delivered %llu dropped %llu queued %u rejected %llu\n",
-        second, x9d.mode, x9d.ready, x9d.failed, x9d.published, x9d.tx_packets, x9d.tx_done, x9d.rx_packets, x9d.rx_dropped, queued, rejected);
+    printf("X9 DPMAIF: %u s mode %u ready %u quarantined %u published %u TX submitted %llu completed %llu RX delivered %llu dropped %llu queued %u rejected %llu flow %llu phase %s\n",
+        second, x9d.mode, x9d.ready, x9d.failed, x9d.published, x9d.tx_packets, x9d.tx_done, x9d.rx_packets, x9d.rx_dropped, queued, rejected, x9d.flow_events,
+        x9d.phase ? x9d.phase : "prepare");
 }
 } // namespace
 extern "C" int coachz_modem_data_send(uint32_t mux, const uint8_t *ip, uint32_t n) { return x9d_send(mux, ip, n); }
