@@ -2,7 +2,7 @@
 
 > 旧的完整流水账(7784 行,含 sweet/SM7150 时代、rev2xx 全部 handoff)在 git 历史里:
 > `git show a8f1955:NOTES.md`。需要翻某个 revision 的细节时 `git log -S'<关键字>' -- NOTES.md` 再 show。
-> 截至 2026-11-09 的完整 cn 交接在 `git show 636edc2:NOTES.md`;当前以 §7 的 HANDOFF (83) 为准。
+> 截至 2026-11-09 的完整 cn 交接在 `git show 636edc2:NOTES.md`;当前以 §7 的 HANDOFF (84) 为准。
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
@@ -73,9 +73,9 @@ X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>      # 之后再�
 
 ## 3. 当前基线镜像与参数
 
-最新:**x9-rev252hk-md**(修复提交 `d1f8515` + 当时未提交的渲染改动,现已入库),boot.img **15278080 B**;**156.txt 已观察到 hk 的 HFS reserve 调整生效,但 iOS 基带握手未推进**(HANDOFF 83)。
+最新:**x9-rev252hk-md**(修复提交 `d1f8515` + 当时未提交的渲染改动,现已入库),boot.img **15278080 B**;**156 与本次 ADB 定点取证确认 reserve 调整生效、efs1.bin 已分配 1 MiB,但 iOS 基带握手未推进**(HANDOFF 84)。
 本机镜像:`x9/out/x9-rev252hk-md/boot.img`;配置沿用 `.local/x9/modem/boot-rev252hi-md.json`。
-此前定位到 BBUpdater EFS scratch 创建失败,并推断 HFS 保留空间导致 ENOSPC;156 已确认非 root 可用空间增大,**尚未取得本次 BBUpdater 的实际失败原因,不能宣称 scratch 已修好**。详情/下一步见 §7。以下 GPU 专用基线与参数为 **2026-11-08 历史记录**,不要当作 hk 参数直接复用。
+本次 BBUpdater 日志的15条 reset 原因全部为 **error 2 / `fPhases.size()` 断言**,不再出现之前的 scratch error 104;efs1.bin 零字节问题已消失,不能再把该断言仅归因于 scratch 失败。断言的上游原因及最终 iOS 蜂窝功能仍未解决,详情/下一步见 §7。以下 GPU 专用基线与参数为 **2026-11-08 历史记录**,不要当作 hk 参数直接复用。
 
 历史 GPU 基线:**x9-rev252dc**(内核-only,插件 275 不变,沿用 rev252cx 之后的 mailbox)boot_sha256 `041d267fc297dd0830bd50407b85579679f0ace28ad2ba94a7c825e3bd0fd80c`,**未上机**。
 已用户确认好的最后一版:**rev252cy**(123 修好、控制中心不卡);之后 cz(x9lc)、da(1242x2760)、db(DVFSRC 探针)均未上机验证。
@@ -110,7 +110,7 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 
 ## 5. 未解决问题
 
-当前主线是 **HFS reserve 调整后,确认 BBUpdater 为何仍在 PCI/Sahara 传输之前重试**(§7);下列为保留的 GPU/Wi-Fi 待办,不是新的硬件验证结论。
+当前主线是 **efs1.bin 已分配后,定位 BBUpdater 的 `fPhases.size()` 断言为何仍在 PCI/Sahara 传输前触发**(§7);下列为保留的 GPU/Wi-Fi 待办,不是新的硬件验证结论。
 
 1. **GPU 带宽/帧率**:avg ~17-22 fps,稳态 24 fps;job 内 GPU wait 6-15 ms。判断显存带宽受限。**DVFSRC 从未初始化**(110.txt:`basic=8 opp_count=1 gear=0`,SW_REQ 被忽略)。
    rev252dc 加 TF-A SMC INIT:`MTK_SIP_VCOREFS_CONTROL = 0xC2000506`,cmd INIT=0(a0=0 成功,a1=dram_type)锁高 OPP,START=1(`x9_dvfsrc=2`)后自由运行。**待上机**,SMC 可能挂。
@@ -150,7 +150,18 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
 
-## 7. 当前交接(HANDOFF 83,2026-11-09): 156 确认 hk 降低 HFS reserve 生效,原生 MD 注册成功;iOS 仍未进入 PCI/Sahara,需本次 BBUpdater 落盘错误
+## 7. 当前交接(HANDOFF 84,2026-11-09): ADB 定点取证仅保存 8.15 MiB;efs1.bin 已为 1 MiB,本次15条 reset 全为 fPhases 断言
+
+- 用户告知 ADB 已连接,询问是否需要全读。**没有再次拉16 GiB根盘**;先运行现有只读 mutable-root preflight,设备身份、pin+immutable、inode/FIEMAP、分区映射、HFS UUID/容量均通过。随后仅用设备现有 `pinfile rawreadat` 读专用根盘 extent;不解除 pin、不写分区、不 flash/reboot、不挂载设备或本地根盘,不改变旧快照。
+- **新证据位置**:`.local/x9/work/x9-rootpull-156/`。`ranges/` 保存原始读取块,共 **8544256 B = 8.1484375 MiB**(另有少量预检/稳定性复读);`ranges.jsonl` 记录时间、偏移、大小、SHA256和脱敏命令。`identity.json`/`stability.json` 记录来源及采集前后 volume/journal header 不变,完成时间 **2026-11-09 19:43:24 +0800**。这些是156之后的新采集,不是旧根盘副本。
+- **正确处理未回放 journal**:读取8 MiB journal,校验 header、17个 committed block-list及启用校验的非零 data checksum;有效列表共5185536 B,按顺序在**本机内存**覆盖2760个512 B扇区,没有写回源。末尾不存在原生 replayer 可继续接受的 extra transaction。随后按 HFSX B-tree 逐级查两个目标,没有全扫文件/目录,没有用未回放的旧 catalog 得出文件大小。
+- **决定性观察**:`/private/var/wireless/baseband_data/bbfs/efs1.bin` 当前 **1048576 B**,已分配 **256 × 4096 B**,owner/group **25:25**,mode **0600**,create/modify 时间均 **19:32:08 +0800**。只取 catalog 元数据,未读取 EFS 内容。此前的零字节文件问题已消失。
+- **本次真正记录的失败**:`log-bb-live-stats.txt` 为 **19823 B**,mtime **19:32:08 +0800**,导出为同目录同名文件。19:31:52–19:32:08 的 **15条 reset 日志全部**是 `BBUpdater error 2 - Assertion failure ( fPhases.size() ) kBBUReturnBadArgument@BBUConsoleFeedback.cpp:93`;本次条目中 **error 104 = 0**。文件历史段仍有旧104,必须按时间区分。SHA256=`794e75387c034984c851b84623f9b05bc88def7be1e6f63ce2e4ba3cafc3d091`。
+- **结论边界/下一步**:hk 的 reserve 调整有实际改善,efs1.bin 已正常获得1 MiB分配,但 `fPhases.size()` 断言仍在,不能沿用“只是 scratch 失败的连带结果”的旧推断。下一步回到实际20H392 BBUpdater 的 phase/feedback 调用顺序,确认空 phase 集合是在何处、因何前置错误产生;需要更多日志时继续定点取证。不能用“忽略断言/返回成功”代替打通传输。原生 MD READY/注册与 iOS PCI/Sahara 零传输的区别仍见下方156记录。
+- **复放**(仓库根):`python3 .local/x9/work/x9-rootpull-156/extract.py --offline` 已从保存的原始块重现相同日志SHA和EFS元数据,不访问设备。脚本也保留在线采集模式,但**未来新启动必须用新采集目录和新 identity,不得复用156缓存拼接成新快照**。`journal.json`、`result.json` 保存解析结果;当前卷空闲 **132276224 B ≈126.15 MiB**,长期日志填满风险仍在。
+- 本次代码仍为 `3b947a1`,前一交接提交 `b1d025c`;仅更新 NOTES,无新内核/插件修改、无构建/CI/测试套件、无需 mailbox。采集脚本/原始块/日志留在 gitignored `.local`,不入库。
+
+### 前次交接(HANDOFF 83,提交 b1d025c): 仅156 USB日志能确认 reserve 改动,尚未取得落盘错误(现由84补齐)
 
 - 本次仅只读分析用户提供的 `~/156.txt`(1306935 B,mtime 2026-11-09 19:32:34,记录到 uptime 58.897 s),对比 `~/155.txt` 和现有源码;未操作设备、未构建/CI/运行测试套件、未重新检查镜像。代码基线 `3b947a1` 已推送 main;本次只更新交接,原始日志不入 git。
 - **已验证 reserve 改动,不是完整修复**:156:1031 / 4.082 s=`root HFS reserve 167772 -> 16384 KiB, free 170584 KiB, non-root usable 154200 KiB errno=0`。非 root 可用约 **150.6 MiB**,不再是旧快照的约 3.3 MiB。156:446 的 `build=rev252hj-md` 是 `x9_modem.inc:879` 沿用的硬编码字符串;hk 提交未改它,不能据此说用户启动了旧镜像。
