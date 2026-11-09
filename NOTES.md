@@ -74,7 +74,7 @@ X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>      # 之后再�
 ## 3. 当前基线镜像与参数
 
 最新实测:**x9-rev252hx-md**(163,见HANDOFF96;CommCenter读SIM后反复重置基带);再前 **x9-rev252hw-md**(162,见HANDOFF95);再前 **x9-rev252hv-md**(161,见HANDOFF94;MIPC就绪、UIM读通);再前 **x9-rev252hu-md**(160,见HANDOFF93;RAM 10.0GiB生效);再前 **x9-rev252ht-md**(159,见HANDOFF92);再前 **x9-rev252hs-md**(158,见HANDOFF91;MIPC/DPMAIF在prepare/OPEN即隔离,UIM卡状态被拒);前一实测 **x9-rev252hl-md**(代码提交 **`20c64f2`**,构建交接 `0f9d983`),boot.img **12877824 B=12.28125MiB**,路径 `x9/out/x9-rev252hl-md/boot.img`。**157确认完整11文件安装成功、qdsp可读、Sahara finished并进入QMUX/QMI,握手摘要reset=0;真实iOS蜂窝尚未打通**,见HANDOFF87。独立34MiB固件与插件275不需再stage。
-当前未上机候选:**x9-rev252hx-md**(HANDOFF95:UIM GetFileAttributes/RefreshRegister);回退 **x9-rev252hw-md**;更早候选 **x9-rev252hq-md**(代码`ccbad81`),boot.img12906496B;沿用hn AT→QMI,新增DPMAIF只读/分配探针和WDS前置状态查询,见HANDOFF89。hq默认`x9_dpmaif=1`,不初始化硬件或激活PDP;hn保留。最新实测仍hl;不要把候选当作SIM/蜂窝已验证。
+当前未上机候选:**x9-rev252hy-md**(HANDOFF97:attach APN推送ACK);回退 **x9-rev252hx-md**;更早候选 **x9-rev252hq-md**(代码`ccbad81`),boot.img12906496B;沿用hn AT→QMI,新增DPMAIF只读/分配探针和WDS前置状态查询,见HANDOFF89。hq默认`x9_dpmaif=1`,不初始化硬件或激活PDP;hn保留。最新实测仍hl;不要把候选当作SIM/蜂窝已验证。
 回退:**x9-rev252hk-md**(修复提交 `d1f8515` + 当时未提交的渲染改动,现已入库),boot.img **15278080 B**;156确认reserve生效、efs1.bin已有1MiB,当时15次reset及零传输见HANDOFF84。
 本机回退镜像:`x9/out/x9-rev252hk-md/boot.img`;hl/hk配置沿用 `.local/x9/modem/boot-rev252hi-md.json`。
 157已越过缺qdsp的前置阻塞,**当前阻塞在X9的QMI→MTK适配**:UIM/NAS/DMS/WDS/WDA/DPM请求实际到达后返回0x5e,数据端口配置失败,四个PDP接口仍blocked/tx=rx=0。Sahara是兼容桥交互,不向物理MTK下载Apple固件;PCIControl methods仍0x0,不能说PCIControl已通。以下GPU专用基线与参数为 **2026-11-08 历史记录**,不要当作hk/hl参数直接复用。
@@ -152,7 +152,16 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
 
-## 7. 当前交接(HANDOFF 96,2026-11-09): 163(hx)读完;CommCenter读完SIM后反复重置基带,原因只在它的os_log里;未出新镜像
+## 7. 当前交接(HANDOFF 97,2026-11-09): 从根盘取出163的logd,找到基带重置原因(attach APN推送被拒);hy已构建
+
+- **取日志(只读)**:用户启动Android并接ADB(KernelSU root)。先跑`check_plaintext_root.py --manifest`(manifest见local.json),preflight全部通过。新工具 **`x9/tools/pull_ios_logs.py`**:只通过pinfile `rawreadat`读HFSX根盘,内存中重放dirty journal(本次17个transaction、381个block,jhdr_size 512),遍历catalog B-tree(855042条记录,256MiB),支持extents overflow和硬链接。拉取`private/var/db/diagnostics`(`--recent-hours 2`,36MB)和`uuidtext`(全量478MB,约1.5分钟)到Mac `.local/x9/logs/163-logd/raw`(不入git)。timesync里有163的boot UUID `a3b0a780…`(wall 1794235535)。
+- **解码**:macOS 27的`log show`对这份手工组装的iOS 16 logarchive、甚至单个tracev3都报"corrupt or incomplete",读不出任何条目。构建Mandiant macos-UnifiedLogs被权限分类器拦截(外部代码),没有绕过。改用新工具 **`x9/tools/tracev3_strings.py`**:解开tracev3里的LZ4 chunkset(`bv41`),导出可打印字符串。只有内联参数,没有格式串;够用来搜原因。输出在Mac `.local/x9/logs/163-logd/strings-163.txt`。
+- **根因(观察)**:CommCenter数据设置FSM进入`Pushing`,日志"trying to push 3GPP attach APN {apn:"", AllowedProtocolMask 1, TypeMask 1}",收到`QMI_ERR_NOT_SUPPORTED`,接着"FSM: handling Failure",随后`ResetInfo{Type=SoftReset/HardReset SubType=OtherErrors Reason='Resetting baseband after Failure to Push'}`。该字符串共4次,与163的4次board重置一致。时间上对应的是**WDS 0x00c8**(TLV `11/1=00 14/0 1f/1=00 90/1=00 91/4`,0x14为空APN),被我们回94。
+- **hy修改**:WDS 0x00c8在APN为空时ACK成功(空APN=网络缺省,MD本来就是不配attach APN自动附着的,CGATT=1),不发AT命令;APN非空仍回NOT_SUPPORTED,只记录长度(真实MTK attach-APN命令尚未核实)。另外放开DF_TELECOM(`3F007F10`)下4Fxx/6Fxx的只读访问(每轮都读EF 6FE5)。
+- **hy构建成功**(未上机):同参数,`--name x9-rev252hy-md`,boot.img 12922880B,日志`.local/x9/work/pdp-activation/build-hy.stdout.log`(Mac)。无新warning,插件275不变,无需mailbox staging。回退:hx。设备目前在Android,无设备写入。
+- **下一步由用户手动**:`fastboot boot x9/out/x9-rev252hy-md/boot.img`,日志放`~/164.txt`。看`board #.. selector 0`是否不再循环、`WDS 0x00c8 ... acknowledged`、是否出现WDS 0x20 Start和MIPC 0x219/0x201。若还有新的FSM失败,同样方法取logd:`pull_ios_logs.py --recent-hours 2 --out ...`,再`tracev3_strings.py`,grep "FSM:|Reset|NOT_SUPPORTED"。
+
+### 前次交接(HANDOFF 96,2026-11-09): 163(hx)读完;CommCenter读完SIM后反复重置基带,原因只在它的os_log里;未出新镜像
 
 - **163.txt**(Mac `~/163.txt`,1236286B/12412行,末43.1s,无panic)。`build=rev252hx-md`;22.08s MIPC dialler ready;UIM 0x24 GetFileAttributes多数`(real AT)`,0x21 record读成功。仍无WDS Start。
 - **新发现(观察)**:CommCenter每1.2~5s对AppleBaseband做一次`board selector 0`(=重新上电),随后pbl→Sahara→qmux1/2重开→UIM读一轮,如此循环:163在24.68/25.88/28.07/32.91s,共4次。**这个循环161(5次)、162(4次)已经存在**,我在HANDOFF94/95分析时只搜了X9/WDS关键字,漏掉了。161是UIM读首次成功的那次;157/158摘要reset≤1。复位前没有固定的失败回复(有时正在连续成功读record),桥这边也没有原因可记。**推断**:CommCenter读完SIM后的某个阶段失败或超时,随即重置基带;具体原因只在CommCenter os_log里。

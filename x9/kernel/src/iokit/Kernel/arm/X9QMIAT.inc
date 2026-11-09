@@ -175,7 +175,9 @@ static const char *x9q_read_check(x9q_job &j){
  /* 161.txt: CommCenter also reads EFs in USIM sub-DFs (3F007FFF7F665F30/4F34).
   * Read-only CRSM on the current USIM; still no slot-2 or arbitrary-AID routing. */
  bool usim=st==0&&!strncmp(j.path,"3F007FFF",8)&&((j.file>=0x6f00&&j.file<=0x6fff)||(j.file>=0x4f00&&j.file<=0x4fff));
- if(!mf&&!usim)return "path/file outside MF ICCID/DIR and USIM 4Fxx/6Fxx";
+ /* 163.txt: EF 6FE5 under DF_TELECOM (3F007F10) is read every cycle. Read-only. */
+ bool telecom=(st==0||st==6)&&!strcmp(j.path,"3F007F10")&&((j.file>=0x6f00&&j.file<=0x6fff)||(j.file>=0x4f00&&j.file<=0x4fff));
+ if(!mf&&!usim&&!telecom)return "path/file outside MF ICCID/DIR, DF_TELECOM and USIM 4Fxx/6Fxx";
  if(j.id==0x21&&(!j.offset||j.offset>255))return "record number";
  /* Reject indication tokens, encryption, multi-record reads and unknown TLVs. */
  for(unsigned i=7;i<j.len;i+=3+x9q_u16(j.req+i+1))if(j.req[i]<1||j.req[i]>3)return "extra TLV";
@@ -454,6 +456,24 @@ static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *r
  }
  /* WDS Set Event Report (0x01) / Indication Register (0x03) and DMS Set Event
   * Report (0x01): acknowledged, no indication is generated (no event source). */
+ /* WDS 0x00c8 = CommCenter's attach-APN push (AttachAPN; 163 logd: "trying to
+  * push 3GPP attach APN {apn:"",AllowedProtocolMask 1}" -> QMI_ERR_NOT_SUPPORTED
+  * -> "Resetting baseband after Failure to Push", a HardReset every 1-5 s).
+  * Request seen: 11/1 PDP type, 14/0 APN, 1f/1, 90/1, 91/4. An EMPTY APN means
+  * "network default", which is what the MD already uses (it attaches with no
+  * configured attach APN), so that push is acknowledged without an AT command.
+  * A non-empty attach APN needs a real MTK attach-APN command (not verified):
+  * it stays NOT_SUPPORTED and is logged with its length only. */
+ if(service==1&&id==0xc8){
+  x9q_view apn=x9q_tlv(req,len,0x14);
+  static unsigned logged;
+  if(apn.p&&apn.n==0){
+   if(logged<8){logged++;printf("X9 QMI AT: WDS 0x00c8 attach APN push with empty APN acknowledged (MD uses the network default)\n");}
+   x9q_packet p(req);p.send(local,port);return;
+  }
+  if(logged<8){logged++;printf("X9 QMI AT: WDS 0x00c8 attach APN push with APN length %d not supported\n",apn.p?(int)apn.n:-1);}
+  x9q_reject(local,port,req,len,X9Q_UNSUPPORTED);return;
+ }
  /* UIM Refresh Register (0x2a): acknowledged; this bridge never sends refresh events. */
  if((service==1&&(id==1||id==3))||(service==2&&id==1)||(service==0x0b&&id==0x2a)){
   static unsigned logged;
