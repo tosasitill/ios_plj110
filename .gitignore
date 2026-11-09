@@ -28,3 +28,23 @@ x9/kernel/generated/x9_baseband_firmware.inc
 # Local dependency snapshots, Apple inputs and private device state
 .local/
 .DS_Store
+
+# Local tooling / credentials: never commit (cc-remote, acpc, ssh, agent state)
+.zcode/
+.claude/
+.cc-remote/
+.acpc/
+acpc/
+cc-remote/
+*.key
+*.pem
+*.ppk
+id_rsa*
+id_ed25519*
+id_ecdsa*
+.env
+.env.*
+*.log.json
+ssh.debug.log
+auth-status*.json
+acp-*.jsonl
