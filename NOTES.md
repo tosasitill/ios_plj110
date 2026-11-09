@@ -154,6 +154,7 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 
 ## 7. 当前交接(HANDOFF 90,2026-11-09): hs的MIPC IPv4 WDS/DPMAIF已编译;真实PDP激活/收发待上机
 
+- 本轮代码/README/构建交接提交 **`0f3aff8`**;本机main。该提交 `gh run list --commit` 返回 `[]`(证据 `.local/x9/work/pdp-activation/ci-0f3aff8.json`),没有CI run ID,采用上述直接本地构建。最终ADB枚举仍无device(原始私有 `adb-final-devices.private`);未做新设备写入/上机验证。接下来的推送包含上轮尚未push的f1048cc和本轮代码/交接。
 - 已完成提交 **`f1048cc`** (主动DPMAIF分阶段读回/失败保留DMA与WDS能力发现); `x9-rev252hr-md` 直接构建成功:53/53 overlay+6 prebuilt、link/strip/boot成功,Image28745728B、boot.img12910592B。命令 `python3 -I x9/build/build.py all --name x9-rev252hr-md --boot-config .local/x9/modem/boot-rev252hi-md.json --boot-arg x9_dpmaif=2`;日志 `x9/out/x9-rev252hr-md/build.log`、`.local/x9/work/dpmaif-active-157/build-hr.stdout.log`。未上机;最新实测仍hl/157。CI查询为空(本轮证据 `ci-f1048cc.json`),本轮fetch确认origin/main比HEAD少这一提交,稍后随hs提交一并push。
 - 用户刚接上ADB。本轮/前轮只读定点取证实际vendor RIL库、进程maps/fd/config;证据留在 `.local/x9/work/pdp-activation/`,不进git。运行时 `ro.vendor.mtk_mipc_support=1`, `mtkfusionrild`实际加载libmtkmipc-ril.so/libmipc.so/librilfusion.so,fd打开 **ttyCMIPC1**。不能拿未加载的AT版libmtk-ril或libmipc默认MIPC0代替。源契约MIPC1 queue5/RX216/TX217;DPMAIF channel=ccmni_idx,不是CID-1。
 - 本轮实现:独立8槽MIPC mailbox/8槽event/4096B stream,非复用txn、队列5异常/oversized/framing隔离,不打印APN/SIM/IP正文。实际 `libmipc::mipc_init` 0x13324证明先OPEN301(maskff,VERSION100=2,NAME101,USIR102=1),CNF302读VERSION100;原生register API 0x14228证明REGISTER_IND307(mask1,MSG_ID100 uint16)/308(result0)。hs先完成OPEN与DEACT4202/EIF4302两订阅才放行拨号,不是直接发ACT。
