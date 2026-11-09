@@ -98,7 +98,7 @@ IOReturn x9_csf_group_health(const X9CSFQueueIO *io,const X9CSFRenderGroup *g,ui
  return kIOReturnSuccess;
 }
 IOReturn x9_csf_group_configure(const X9CSFQueueIO *io,X9CSFRenderGroup *g,const X9CSFGroupInterface *f,
- const X9RenderGroup *request,const X9CSFStreamBinding bindings[3],uint64_t suspend_va,uint64_t epoch) {
+ const X9RenderGroup *request,const X9CSFStreamBinding bindings[3],uint64_t suspend_va,uint64_t epoch,bool reuse) {
  if(!valid(io)||!g||!f||!request||!bindings||!epoch||g->touched||g->uncertain||
     f->group_index>=16||f->stream_count!=3||request->stream_count!=3||
     request->abi!=X9_RENDER_ABI||!request->compute_mask||!request->fragment_mask||request->tiler_mask!=1||
@@ -108,7 +108,8 @@ IOReturn x9_csf_group_configure(const X9CSFQueueIO *io,X9CSFRenderGroup *g,const
     suspend_va>UINT32_MAX-f->suspend_bytes)return kIOReturnBadArgument;
  if(!io->healthy(io->cookie))return kIOReturnNotReady;
  uint32_t req,ack;
- if(!read(io,f->group_input,&req)||!read(io,f->group_output,&ack)||((req|ack)&state_mask))return kIOReturnBusy;
+ if(!read(io,f->group_input,&req)||!read(io,f->group_output,&ack))return kIOReturnBusy;
+ if(reuse?(((req^ack)&state_mask)||((req&state_mask)!=0&&(req&state_mask)!=csg_suspend)):((req|ack)&state_mask)!=0)return kIOReturnBusy;
  for(unsigned i=0;i<3;i++) {
   const auto &b=bindings[i];
   if(!b.ring||(b.ring&4095)||b.ring_bytes<4096||b.ring_bytes>(1u<<20)||
@@ -116,8 +117,9 @@ IOReturn x9_csf_group_configure(const X9CSFQueueIO *io,X9CSFRenderGroup *g,const
      !b.user_input||!b.user_output||((b.user_input|b.user_output)&4095)||
      b.user_input>UINT32_MAX-4096u||b.user_output>UINT32_MAX-4096u||
      (b.user_input<b.user_output+4096&&b.user_output<b.user_input+4096))return kIOReturnBadArgument;
-  if(!read(io,f->streams[i].input,&req)||!read(io,f->streams[i].output,&ack)||
-     ((req|ack)&state_mask)||((req^ack)&(faults|oom)))return kIOReturnBusy;
+  if(!read(io,f->streams[i].input,&req)||!read(io,f->streams[i].output,&ack)||((req^ack)&(faults|oom)))return kIOReturnBusy;
+  /* A suspended group's streams keep REQ/ACK=START; kbase's program_cs rewrites them. */
+  if(reuse?((req&state_mask)>cs_start||(ack&state_mask)>cs_start):((req|ack)&state_mask)!=0)return kIOReturnBusy;
  }
  /* Mark device exposure before the first host input write. Even failure before
   * ringing must go through owner-controlled STOP/TERMINATE and AS cleanup. */

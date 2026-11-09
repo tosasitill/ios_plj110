@@ -11,9 +11,18 @@
 - 按用户要求,已推送 cn 的末端 `636edc2`,再以合并提交 **`190878a`** 合入并推送 `main`;两个父提交为远端文档整理 `6379df4` 和 cn 的 `636edc2`,没有覆盖远端历史。
 - 本地与远端 `rev252cn` 已删除,旧 `origin/rev252cn` 跟踪引用也已移除;当前工作区为 **`main`**,跟踪 **`origin/main`**。另一份 Wi-Fi detached worktree 未操作。
 - 唯一冲突是 NOTES:保留 main 的精简结构/README 等文档整理,补入 HANDOFF 82、清理和 cc-remote 交接;其余合并树条目已逐一核对,均与相应父提交完全一致。
-- 原 `.gitignore`、`SweetX9RenderEngine.inc`、`X9CSFRenderQueue.cpp/.h` 四份未提交修改已在 main 原样恢复,SHA256 与操作前一致,**没有夹带提交/推送**。临时 stash 已清掉,之前已有的 stash 保留。
+- 合并时,原 `.gitignore`、`SweetX9RenderEngine.inc`、`X9CSFRenderQueue.cpp/.h` 四份未提交修改在 main 原样恢复,SHA256 与操作前一致,没有夹带进合并提交;后续用户明确要求入库,见下一节。临时 stash 已清掉,之前已有的 stash 保留。
 - 构建输入路径检查通过;`gh run list --commit 190878a` 返回空列表,无此次合并的 CI run。本次无构建、无设备启动/写入,不产生新的镜像验证结论。当前硬件任务仍为 §7,不是 §8 的历史 GPU 计划。
 - 私有备份与合并校验:`.local/git-integration/20261109-cn-to-main/`(原始四文件、binary diff、分支/stash 状态、NOTES 两侧副本和合并验证);均不入 git。
+
+## 四份本地修改入库(2026-11-09)
+
+- 用户要求说明四份未提交修改,无冲突则提交推送。四文件 SHA256 与合并前保存的副本一致,本次没有重写这些代码。
+- `.gitignore` 独立提交 **`f5380e6`**:忽略本地 agent/cc-remote/acpc 状态、密钥、环境变量文件及认证/ACP 日志,没有添加这些敏感文件本身。
+- `SweetX9RenderEngine.inc`:可选 **`x9cs=1`** 在 8 个硬件 CSG 槽耗尽时选择空闲的旧 group,保存挂起状态并复用其槽位;原 group 再提交时绑定槽位并恢复。group 使用独立 VA 索引,避免换槽破坏 CALL 地址。
+  同文件的 **`x9gt=1`** 写入/读取 GPU 时间戳,区分 doorbell→CALL 的固件接单、CALL→wait-all 的 GPU 执行、完成→CPU 观察到 fence 三段耗时。
+- `X9CSFRenderQueue.cpp/.h`:配置接口增加 `bool reuse=false`,复用时接受 REQ/ACK 一致的空闲/SUSPEND 槽状态,与上述保存/重绑流程配套。**x9cs/x9gt 均默认关闭**,不能把入库视为功能验证通过。
+- 检查:提交前 fetch 后 `HEAD...origin/main = 0/0`,无未解决合并冲突,`git diff --check` 通过。本次只整理提交并推送 main,未重新构建、运行测试套件或上机;当前硬件结论仍以 §7 为准。
 
 ## 1. 目标与硬件
 
@@ -64,7 +73,7 @@ X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>      # 之后再�
 
 ## 3. 当前基线镜像与参数
 
-最新:**x9-rev252hk-md**(HANDOFF 82,`d1f8515` + 本机既有未提交渲染改动),boot.img **15278080 B**,**未上机**。
+最新:**x9-rev252hk-md**(HANDOFF 82,`d1f8515` + 当时未提交的渲染改动,现已入库),boot.img **15278080 B**,**未上机**。
 本机镜像:`x9/out/x9-rev252hk-md/boot.img`;配置沿用 `.local/x9/modem/boot-rev252hi-md.json`。
 当前基带阻塞是根卷保留空间导致 BBUpdater EFS scratch 的 ENOSPC,详情/下一步见 §7。以下 GPU 专用基线与参数为 **2026-11-08 历史记录**,不要当作 hk 参数直接复用。
 
@@ -106,7 +115,7 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 1. **GPU 带宽/帧率**:avg ~17-22 fps,稳态 24 fps;job 内 GPU wait 6-15 ms。判断显存带宽受限。**DVFSRC 从未初始化**(110.txt:`basic=8 opp_count=1 gear=0`,SW_REQ 被忽略)。
    rev252dc 加 TF-A SMC INIT:`MTK_SIP_VCOREFS_CONTROL = 0xC2000506`,cmd INIT=0(a0=0 成功,a1=dram_type)锁高 OPP,START=1(`x9_dvfsrc=2`)后自由运行。**待上机**,SMC 可能挂。
 2. **CSG 槽耗尽**:前 8 个 GPU 进程各占一个硬件 CSG 槽(group 创建时绑定,关设备才放);第 9 个客户端(AegirPoster)`X9RenderCreateGroup` 返回 0xe00002be,43 次失败。
-   思路(未实现):冷提交时从最久未用的挂起 group 抢槽;障碍是 PanVK 初始化 CS 状态(subqueue ctx 寄存器、scoreboard、cs_heap_set、progress seqno)TERMINATE 后丢失,需内核保存/重放。
+   可选实现现已入库(`x9cs=1`,默认关):复用最久未用的挂起 group 槽位,保存/恢复其 suspend buffer,不经 TERMINATE 丢失 PanVK 初始化 CS 状态。入库不等于当前实机验证,仍需带明确开关的对应日志确认。
 3. **开/关 app 动画出现 4 条竖向透明马赛克线**(间距 256 px,**一直都有**,非新回归)。已证伪:CA 256 宽 tile 上传缺失(TILEPROBE 无 256 宽 CPU 上传)、swipe 旧马赛克(InPlaceWrites 未启用)。
    现线索:缝位置 ≈ 层原点 + 256·k,即每行 **1024 B 边界**,指向某个渲染目标/IOSurface 每 1 KiB 处像素坏(缓存/内存类),不是绘制拆分。需要一份含开关 app 时刻的完整日志;x9vf 帧抓取只按固定 uptime 触发(参数上限 607 B),需改成按 transition 触发。
 4. **Wi-Fi**:WPA2 阶段 2(4-way、INSTALL_KEY_V3、受保护收发)**rev252cm6 已构建、从未上机**;captive portal 弹窗不出现(探测 `captive.apple.com` 从未发出,疑 configd/CNS 的 SC 状态缺失);
@@ -156,7 +165,7 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **根因**:sweet_hfs root mount 设 reserveBlocks = 1% totalBlocks(≤250 MiB)= 41943 块(164 MiB);非 root 的 truncate/write 带 kEFReserveMask
   (hfs_readwrite.c:3761/472/4388),只能用 free-reserve。拉取时 free 42777 块(167 MiB)→ _wireless 只剩 ~834 块(3.3 MiB),EFS 扩展 ENOSPC。
   (Mac 上 df 显示 167 MiB 可用是因为非 root mount 不设保留。)根盘占用大户:db/diagnostics 1.1 GB、db/biome 0.58 GB、db/uuidtext 0.47 GB、mobile/Library/Caches 0.25 GB。
-- hk(x9-rev252hk-md,boot.img 15278080 B,配置沿用 `.local/x9/modem/boot-rev252hi-md.json`,= hi + 本改动;hi/hk 都含 11-08 未提交的渲染改动):
+- hk(x9-rev252hk-md,boot.img 15278080 B,配置沿用 `.local/x9/modem/boot-rev252hi-md.json`,= hi + 本改动;hi/hk 都含 11-08 当时未提交、现已入库的渲染改动):
   hfs_readwrite.c 新增 `x9_hfs_lower_reserve()`(只降不升,hfs_lock_mount 下改 reserveBlocks);x9_baseband_firmware.inc 在 x9_bb=1、可写根、PID1 时
   调用,boot-arg `x9_hfs_reserve_mb`(默认 16)。上机看 "X9 BBFW: root HFS reserve ... non-root usable ... KiB",然后看 log-bb-live-stats.txt 是否不再有 efs1.bin 错误。
   未上机。未验证 fPhases 断言是否是 scratch 失败的连带结果(推断是重试路径)。长期:根盘 16 GiB 会继续被日志填满,需要清理或换更大根盘。

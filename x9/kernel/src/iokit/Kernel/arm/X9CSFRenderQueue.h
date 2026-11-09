@@ -23,8 +23,11 @@ struct X9CSFRenderGroup {
  uint32_t streams_touched;
  bool touched,running,suspended,uncertain;
 };
+/* reuse=true (x9cs slot steal): the slot's previous group was SUSPENDed (CSG
+ * REQ=ACK=SUSPEND, its state saved elsewhere); program it like kbase's
+ * program_csg_slot does, without TERMINATE (a suspended CSG never acks it). */
 IOReturn x9_csf_group_configure(const X9CSFQueueIO *,X9CSFRenderGroup *,const X9CSFGroupInterface *,
- const X9RenderGroup *,const X9CSFStreamBinding [3],uint64_t suspend_va,uint64_t epoch);
+ const X9RenderGroup *,const X9CSFStreamBinding [3],uint64_t suspend_va,uint64_t epoch,bool reuse=false);
 IOReturn x9_csf_group_start(const X9CSFQueueIO *,X9CSFRenderGroup *,uint64_t epoch,uint64_t timeout_ns);
 IOReturn x9_csf_group_halt(const X9CSFQueueIO *,X9CSFRenderGroup *,uint64_t epoch,bool suspend,uint64_t timeout_ns);
 /* Checks firmware faults and tiler OOM, not rendering correctness or DMA idle. */

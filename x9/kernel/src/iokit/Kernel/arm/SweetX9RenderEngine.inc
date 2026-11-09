@@ -10,6 +10,16 @@ struct RenderKernelGroup {
  bool mapped[3];
  uint64_t producer[3];
  unsigned slot;
+ /* x9cs (CSG slot steal): GPU VA index of the private storage (the slot
+  * index without x9cs, a per-context entry index with it, so the ring's
+  * absolute CALL addresses survive a move to another slot). bound=false: the
+  * group holds no hardware slot; its CSG state (if it was ever started) is in
+  * saved[] and comes back through RESUME on whatever slot it gets next. */
+ unsigned va_index;
+ bool bound,saved_valid;
+ X9RenderContext *ctx;
+ uint64_t last_use;
+ uint8_t *saved;uint32_t saved_bytes;
 };
 #include "X9RenderCachePlan.inc"
 /* rev252cn (x9dc): deferred client clean ranges (see render_dirty_stage below). */
@@ -184,7 +194,124 @@ static RenderKernelGroup *render_group(X9RenderContext *c,uint32_t id) {
  return nullptr;
 }
 static uint64_t render_va(const RenderKernelGroup *g,unsigned stream) {
- return 0x10000000ULL+(uint64_t)g->slot*0x100000+stream*render_storage_bytes;
+ return 0x10000000ULL+(uint64_t)g->va_index*0x100000+stream*render_storage_bytes;
+}
+/*
+ * x9cs=1: CSG slot steal (rev252dd). 111.txt: the first eight GPU processes
+ * each keep one of the eight hardware CSG slots from group create until
+ * device close; the ninth (AegirPoster) got kIOReturnNoResources 32 times.
+ * Every group that is not executing sits SUSPENDed on its slot (non-parked
+ * submits end in CSG SUSPEND; a park retire suspends too), so its complete CS
+ * register state (PanVK's subqueue context, scoreboard, heap state) is in that
+ * slot's suspend buffer. Stealing follows kbase's scheduler: copy the
+ * victim's suspend buffer out (after an L2 clean so the MCU's writes reached
+ * RAM), and reprogram the slot for the new group without TERMINATE. The
+ * victim's next submit takes a slot the same way, copies its saved state into
+ * that slot's suspend buffer and starts with CSG RESUME. A configured but
+ * never started victim has nothing to save and starts with START later.
+ * Victims: least recently used bound group that is not running, not
+ * uncertain, not parked, whose context lock we can take without waiting (it
+ * holds every publish..reap pair, so no job of that context is in flight).
+ * All slot bookkeeping is under the render owner lock.
+ */
+static RenderKernelGroup *render_slot_groups[8];
+/* Free (not borrowed) slot whose CSG still reads SUSPEND from a stolen-from
+ * group: the next configure needs reuse mode. */
+static bool render_slot_dirty[8];
+static void render_slot_giveback(unsigned s,bool reuse) {
+ resident->slots[s].borrowed=false;if(reuse)render_slot_dirty[s]=true;
+}
+static uint64_t render_steals,render_rebinds,render_steal_fail;
+static bool render_steal_enabled() {
+ static int mode=-1;
+ if(mode<0){mode=sweet_x9_arg("x9cs",0)==1?1:0;IOLog("X9 RENDER SLOT: CSG slot steal %s (x9cs)\n",mode?"ON":"off");}
+ return mode==1;
+}
+static bool render_group_save(RenderKernelGroup *v) {
+ auto &slot=resident->slots[v->slot];
+ const uint32_t bytes=slot.access.interface.suspend_bytes;
+ if(v->control.suspended) {
+  if(!bytes||bytes>0x100000u)return false;
+  if(!v->saved||v->saved_bytes!=bytes) {
+   if(v->saved)IOFree(v->saved,v->saved_bytes);
+   v->saved=(uint8_t *)IOMalloc(bytes);v->saved_bytes=v->saved?bytes:0;
+   if(!v->saved)return false;
+  }
+  unsigned char *src=cpu_address(resident->image,slot.suspend,bytes);
+  if(!src||!flush_gpu(resident->gpu))return false;
+  invalidate_cpu(src,bytes);memcpy(v->saved,src,bytes);
+  v->saved_valid=true;
+ }else v->saved_valid=false;   /* configured, never started: START later */
+ render_slot_groups[v->slot]=nullptr;v->bound=false;
+ return true;
+}
+/* Owner lock held; c->lock held by the caller for c. Returns the slot index
+ * (borrowed, no group bound), sets *reuse when it was taken from a victim. */
+static int render_slot_acquire(X9RenderContext *c,bool *reuse) {
+ *reuse=false;
+ for(unsigned i=0;i<resident->slot_count;i++)if(!resident->slots[i].borrowed) {
+  resident->slots[i].borrowed=true;*reuse=render_slot_dirty[i];render_slot_dirty[i]=false;return (int)i;
+ }
+ if(!render_steal_enabled())return -1;
+ bool tried[8]={};
+ for(;;) {
+  RenderKernelGroup *v=nullptr;
+  for(unsigned i=0;i<resident->slot_count;i++) {
+   auto *g=render_slot_groups[i];
+   if(!g||tried[i]||!g->bound||g->control.running||g->control.uncertain||!g->control.touched||render_parked.g==g)continue;
+   if(!v||g->last_use<v->last_use)v=g;
+  }
+  if(!v){render_steal_fail++;return -1;}
+  tried[v->slot]=true;
+  X9RenderContext *vc=v->ctx;
+  const bool own=vc==c;
+  if(!own&&!IOLockTryLock(vc->lock))continue;
+  /* Re-check under the victim's lock (its worker may have just finished). */
+  bool ok=v->bound&&!v->control.running&&!v->control.uncertain&&render_parked.g!=v;
+  const unsigned s=v->slot;const bool was_suspended=v->control.suspended;
+  if(ok)ok=render_group_save(v);
+  if(!own)IOLockUnlock(vc->lock);
+  if(!ok){IOLog("X9 RENDER SLOT: save of group=%u slot=%u failed;not stolen\n",v->request.handle,s);continue;}
+  render_steals++;
+  if(render_steals<=16||render_steals%256==0)
+   IOLog("X9 RENDER SLOT: steal #%llu slot=%u from group=%u (%s,%s);rebinds=%llu\n",
+    render_steals,s,v->request.handle,was_suspended?"suspended,state saved":"never started",own?"same context":"other context",render_rebinds);
+  *reuse=true;return (int)s;
+ }
+}
+/* Program slot s (borrowed by render_slot_acquire) for g: fresh user I/O with
+ * insert=extract=producer (every stream is drained when a group is not
+ * running), stream/group inputs, and the saved suspend image for RESUME. */
+static IOReturn render_group_bind(X9RenderContext *c,RenderKernelGroup *g,unsigned s,bool reuse) {
+ auto &slot=resident->slots[s];
+ unsigned char *io=cpu_address(resident->image,slot.user_io,0x10000);
+ if(!io)return kIOReturnNoMemory;
+ bzero(io,0x10000);
+ for(unsigned i=0;i<3;i++) {
+  const uint32_t va=slot.user_io+i*host_page;
+  if(!put_qword(resident->image,va,g->producer[i])||!put_qword(resident->image,va+8,g->producer[i])||
+     !put_qword(resident->image,va+gpu_page,g->producer[i]))return kIOReturnNoMemory;
+ }
+ for(unsigned off=0;off<0x10000;off+=gpu_page)if(!clean_page(resident->image,slot.user_io+off))return kIOReturnIOError;
+ const bool resume=g->saved_valid;
+ X9CSFStreamBinding bindings[3];
+ for(unsigned i=0;i<3;i++)bindings[i]={render_va(g,i),slot.user_io+i*host_page,slot.user_io+i*host_page+gpu_page,render_ring_bytes};
+ X9CSFQueueIO qio=x9_csf_queue_access_io(&slot.access);
+ g->control={};
+ IOReturn kr=x9_csf_group_configure(&qio,&g->control,&slot.access.interface,&g->request,bindings,slot.suspend,resident->epoch,reuse);
+ if(kr!=kIOReturnSuccess)return kr;
+ if(resume) {
+  const uint32_t bytes=slot.access.interface.suspend_bytes;
+  unsigned char *dst=cpu_address(resident->image,slot.suspend,bytes);
+  if(!dst||bytes!=g->saved_bytes){g->control.uncertain=true;return kIOReturnIOError;}
+  memcpy(dst,g->saved,bytes);
+  for(uint32_t off=0;off<bytes;off+=gpu_page)if(!clean_page(resident->image,slot.suspend+off)){g->control.uncertain=true;return kIOReturnIOError;}
+  /* The L2 may still hold the previous owner's lines of this buffer. */
+  if(!flush_gpu(resident->gpu)){g->control.uncertain=true;return kIOReturnIOError;}
+  g->control.suspended=true;   /* x9_csf_group_start issues RESUME */
+ }
+ g->slot=s;g->bound=true;g->ctx=c;render_slot_groups[s]=g;
+ return kIOReturnSuccess;
 }
 static bool render_span_sync(X9RenderResource &r,uint64_t off,uint64_t bytes) {
  vm_offset_t gpu=resident->gpu;
@@ -312,11 +439,21 @@ static IOReturn render_create_group(X9RenderContext *c,const X9RenderGroup *requ
  auto *p=(RenderKernelContext *)c->engine_private;
  if(p->next_group==UINT32_MAX)return kIOReturnNoResources;
  unsigned entry=0;while(entry<8&&p->groups[entry])entry++;
- unsigned slot=0;while(slot<resident->slot_count&&resident->slots[slot].borrowed)slot++;
- if(entry==8||slot==resident->slot_count)return kIOReturnNoResources;
- auto *g=(RenderKernelGroup *)IOMallocZero(sizeof(RenderKernelGroup));if(!g)return kIOReturnNoMemory;
- g->slot=slot;g->request=*request;g->request.handle=++p->next_group;
- resident->slots[slot].borrowed=true;p->groups[entry]=g;
+ if(entry==8)return kIOReturnNoResources;
+ bool reuse=false;
+ const int acquired=render_slot_acquire(c,&reuse);
+ if(acquired<0) {
+  static unsigned told;
+  if(++told<=8||told%64==0)IOLog("X9 RENDER SLOT: no CSG slot for a new group (steals=%llu steal_fail=%llu x9cs=%u)\n",
+   render_steals,render_steal_fail,render_steal_enabled());
+  return kIOReturnNoResources;
+ }
+ const unsigned slot=(unsigned)acquired;
+ auto *g=(RenderKernelGroup *)IOMallocZero(sizeof(RenderKernelGroup));
+ if(!g){render_slot_giveback(slot,reuse);return kIOReturnNoMemory;}
+ g->slot=slot;g->request=*request;g->request.handle=++p->next_group;g->ctx=c;g->last_use=mach_absolute_time();
+ g->va_index=render_steal_enabled()?entry:slot;
+ p->groups[entry]=g;
  for(unsigned i=0;i<3;i++) {
   auto *m=IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,kIODirectionInOut,render_storage_bytes,host_page);
   if(!m)goto allocation_failure;
@@ -337,13 +474,9 @@ static IOReturn render_create_group(X9RenderContext *c,const X9RenderGroup *requ
   g->mapped[i]=true;render_storage_clean(r);
  }
  {
-  X9CSFStreamBinding bindings[3];
-  for(unsigned i=0;i<3;i++)bindings[i]={render_va(g,i),resident->slots[slot].user_io+i*host_page,
-   resident->slots[slot].user_io+i*host_page+gpu_page,render_ring_bytes};
-  X9CSFQueueIO io=x9_csf_queue_access_io(&resident->slots[slot].access);
-  IOReturn kr=x9_csf_group_configure(&io,&g->control,&resident->slots[slot].access.interface,
-   request,bindings,resident->slots[slot].suspend,resident->epoch);
+  IOReturn kr=render_group_bind(c,g,slot,reuse);
   if(kr!=kIOReturnSuccess) {
+   IOLog("X9 RENDER SLOT: bind group=%u slot=%u reuse=%u kr=%x uncertain=%u\n",g->request.handle,slot,reuse,kr,g->control.uncertain);
    if(g->control.uncertain){resident->uncertain=true;c->disabled=true;return kr;}
    goto allocation_failure;
   }
@@ -351,10 +484,23 @@ static IOReturn render_create_group(X9RenderContext *c,const X9RenderGroup *requ
  *reply=g->request;return kIOReturnSuccess;
 allocation_failure:
  if(!render_drop_storage(c,g)){c->disabled=true;return kIOReturnIOError;}
- resident->slots[slot].borrowed=false;p->groups[entry]=nullptr;IOFree(g,sizeof(*g));return kIOReturnNoMemory;
+ render_slot_giveback(slot,reuse);
+ p->groups[entry]=nullptr;IOFree(g,sizeof(*g));return kIOReturnNoMemory;
+}
+static void render_group_free(RenderKernelContext *p,RenderKernelGroup *g) {
+ for(auto &entry:p->groups)if(entry==g){entry=nullptr;break;}
+ for(auto &owner:render_slot_groups)if(owner==g)owner=nullptr;
+ if(g->saved)IOFree(g->saved,g->saved_bytes);
+ IOFree(g,sizeof(*g));
 }
 static IOReturn render_destroy_locked(X9RenderContext *c,RenderKernelGroup *g) {
  if(!render_ready()||c->exposed)return kIOReturnNotReady;
+ if(!g->bound&&render_steal_enabled()) {
+  /* Stolen earlier: no slot, no firmware state; only the private storage. */
+  if(!render_drop_storage(c,g)){c->disabled=true;return kIOReturnIOError;}
+  IOLog("X9 RENDER CLOSE: group=%u released without a slot (stolen earlier,saved=%u)\n",g->request.handle,g->saved_valid);
+  render_group_free((RenderKernelContext *)c->engine_private,g);return kIOReturnSuccess;
+ }
  auto &slot=resident->slots[g->slot];X9CSFQueueIO io=x9_csf_queue_access_io(&slot.access);
  /* A suspended CSG does not acknowledge a direct TERMINATE on this firmware
   * (pan192: global DB ACK matched; CSG REQ=0,ACK=0x30000002). Restore its
@@ -411,9 +557,8 @@ static IOReturn render_destroy_locked(X9RenderContext *c,RenderKernelGroup *g) {
    g->request.handle,g->slot,resident->uncertain);
   c->disabled=true;return kIOReturnIOError;
  }
- auto *p=(RenderKernelContext *)c->engine_private;
- for(auto &entry:p->groups)if(entry==g){entry=nullptr;break;}
- IOFree(g,sizeof(*g));return kIOReturnSuccess;
+ render_slot_dirty[g->slot]=false;
+ render_group_free((RenderKernelContext *)c->engine_private,g);return kIOReturnSuccess;
 }
 static IOReturn render_destroy_group(X9RenderContext *c,uint32_t id) {
  RenderOwner owner;if(!owner.locked||!c)return kIOReturnNotReady;
@@ -506,9 +651,54 @@ struct RenderJobState {
  uint64_t dirty_entries,dirty_bytes,dirty_skip_res;
  bool dirty_overflow;
  uint64_t end,next_sync;
+ uint64_t gts_ring,gts_seen;   /* x9gt: GPU TIMESTAMP after the doorbell / when the fence was seen */
 };
 static IOReturn render_submit_publish(RenderJobState *st);
 static IOReturn render_submit_reap(RenderJobState *st);
+/*
+ * x9gt=1: split the per-job fence wait (111.txt: wait_us ~5 ms/job at DDR
+ * gear 9) into firmware pickup (doorbell -> GPU timestamp before the client
+ * CALL), GPU execution (-> timestamp after the wait-all) and kernel notice
+ * (-> fence seen by the poll loop). STORE_STATE TIMESTAMP and the GPU
+ * TIMESTAMP register (0x98) read the same counter. Stored in the private fence
+ * page at 0x8380 (+0x10 for fence slot 1): clear of the fences, the markers
+ * and the 0xa5 guard bytes 0x8010..0x803f.
+ */
+static bool render_gpu_ts_enabled() {
+ static int mode=-1;
+ if(mode<0){mode=sweet_x9_arg("x9gt",0)==1?1:0;IOLog("X9 RENDER GPUTS: per-job GPU timestamps %s (x9gt)\n",mode?"ON":"off");}
+ return mode==1;
+}
+static uint64_t render_gpu_ts_offset(unsigned fence_slot){return 0x8380u+(uint64_t)fence_slot*0x10u;}
+static inline uint64_t render_cs_store_timestamp(uint64_t reg,uint64_t offset) {
+ return (40ULL<<56)|(reg<<40)|(0ULL<<32)|(offset&0xffffu);   /* STORE_STATE, state Timestamp, slot 0, immediate */
+}
+static void render_gpu_ts_account(RenderJobState *st) {
+ static uint64_t n,bad,pickup,exec,notice,exec_max,pickup_max,notice_max,win_gts,win_abs;
+ uint64_t start=~0ULL,stop=0;bool ok=true;
+ for(unsigned i=0;i<3;i++)if(st->active&(1u<<i)) {
+  auto *b=(uint8_t *)((IOBufferMemoryDescriptor *)st->g->storage[i].memory)->getBytesNoCopy()+render_gpu_ts_offset(st->fence_slot);
+  invalidate_cpu(b,16);uint64_t t0,t1;memcpy(&t0,b,8);memcpy(&t1,b+8,8);
+  if(!t0||!t1||t1<t0){ok=false;break;}
+  if(t0<start)start=t0;if(t1>stop)stop=t1;
+ }
+ if(!ok||start<st->gts_ring||st->gts_seen<stop)bad++;
+ else {
+  n++;const uint64_t a=start-st->gts_ring,e=stop-start,c=st->gts_seen-stop;
+  pickup+=a;exec+=e;notice+=c;
+  if(e>exec_max)exec_max=e;if(a>pickup_max)pickup_max=a;if(c>notice_max)notice_max=c;
+ }
+ const uint64_t now_abs=mach_absolute_time(),now_gts=st->gts_seen;
+ if(!win_abs){win_abs=now_abs;win_gts=now_gts;return;}
+ uint64_t ns=0;absolutetime_to_nanoseconds(now_abs-win_abs,&ns);
+ if(ns<2000000000ULL)return;
+ /* Ticks -> us with the measured counter rate of this window. */
+ const uint64_t ticks=now_gts-win_gts,khz=ns?ticks*1000000ULL/ns:0;
+ auto us=[&](uint64_t t)->uint64_t{return khz?t*1000ULL/khz:0;};
+ IOLog("X9 RENDER GPUTS: jobs=%llu bad=%llu counter_khz=%llu pickup_us=%llu exec_us=%llu notice_us=%llu max pickup/exec/notice_us=%llu/%llu/%llu;doorbell->CALL,CALL->wait-all,->fence seen\n",
+  n,bad,khz,n?us(pickup/n):0,n?us(exec/n):0,n?us(notice/n):0,us(pickup_max),us(exec_max),us(notice_max));
+ n=bad=pickup=exec=notice=exec_max=pickup_max=notice_max=0;win_abs=now_abs;win_gts=now_gts;
+}
 static IOReturn render_submit_uncertain(RenderJobState *st);
 /* One snapshot buffer serves the whole engine: the worker is the only caller
  * and its phases run sequentially (publish1, publish2, reap1, reap2). */
@@ -587,6 +777,26 @@ static IOReturn render_submit_publish(RenderJobState *st) {
   if(park&&render_parked.c==c&&render_parked.g==g&&g->control.running&&!g->control.uncertain&&
      gr64(resident->gpu,0x2440)==render_parked.root) resume=true;
   else if(!render_retire_parked(render_parked.c==c?"other group":"other context"))return kIOReturnIOError;
+ }
+ g->last_use=mach_absolute_time();
+ if(!g->bound) {
+  /* x9cs: this group's slot was stolen; take one back (maybe stealing). */
+  bool reuse=false;const int s=render_slot_acquire(c,&reuse);
+  if(s<0) {
+   static unsigned told;
+   if(++told<=8||told%64==0)IOLog("X9 RENDER SLOT: no slot to rebind group=%u (steal_fail=%llu)\n",g->request.handle,render_steal_fail);
+   return kIOReturnBusy;
+  }
+  IOReturn kr=render_group_bind(c,g,(unsigned)s,reuse);
+  if(kr!=kIOReturnSuccess) {
+   IOLog("X9 RENDER SLOT: rebind group=%u slot=%d reuse=%u resume=%u kr=%x uncertain=%u\n",g->request.handle,s,reuse,g->saved_valid,kr,g->control.uncertain);
+   if(g->control.uncertain){resident->uncertain=true;c->disabled=true;return kIOReturnIOError;}
+   render_slot_giveback((unsigned)s,reuse);return kr;
+  }
+  render_rebinds++;
+  if(render_rebinds<=16||render_rebinds%256==0)
+   IOLog("X9 RENDER SLOT: rebind #%llu group=%u slot=%d reuse=%u %s;steals=%llu\n",render_rebinds,g->request.handle,s,reuse,
+    g->control.suspended?"RESUME from saved state":"fresh START",render_steals);
  }
  /* A parked context is NOT exposed (GPU has no work; see park below). The
   * pipeline's second publish runs with exposed still set from job 1: the
@@ -731,6 +941,24 @@ static IOReturn render_submit_publish(RenderJobState *st) {
    body[at+2]=(0x26ULL<<56)|((uint64_t)address<<40)|((uint64_t)data<<32);
    body[at+3]=x9_cs_wait(1);
   };
+  if(render_gpu_ts_enabled()) {
+   /* x9gt: same sequence without the three NOPs, plus a GPU timestamp
+    * (STORE_STATE, state 0) right before the client CALL and right after
+    * the wait-all, relative to the marker address still in the register. */
+   const uint64_t ts=render_gpu_ts_offset(st->fence_slot);
+   marker(0,0x8080,0x58490101);
+   body[4]=render_cs_store_timestamp(address,ts-0x8080);
+   body[5]=x9_cs_move48(address,stream.gpu_address);body[6]=x9_cs_move32(data,stream.bytes);body[7]=x9_cs_call(address,data);
+   marker(8,0x8100,0x58490102);
+   body[12]=x9_cs_wait(0xffff);body[13]=render_cs_store_timestamp(address,ts+8-0x8100);
+   marker(14,0x8200,0x58490104);
+   marker(18,0x8280,0x58490105);
+   body[22]=x9_cs_move48(address,render_va(g,i)+0x8000);body[23]=x9_cs_move32(data,(uint32_t)request->submission_id);
+   body[24]=x9_cs_move32(data+1,(uint32_t)(request->submission_id>>32));body[25]=x9_cs_sync_set64(address,data);body[26]=x9_cs_wait(1);
+   marker(27,0x8180,0x58490103);
+   body[31]=0;
+   bzero(base+ts,16);
+  }else {
   marker(0,0x8080,0x58490101);
   body[4]=x9_cs_move48(address,stream.gpu_address);body[5]=x9_cs_move32(data,stream.bytes);body[6]=x9_cs_call(address,data);
   marker(7,0x8100,0x58490102);
@@ -743,6 +971,7 @@ static IOReturn render_submit_publish(RenderJobState *st) {
   body[23]=x9_cs_move48(address,render_va(g,i)+0x8000);body[24]=x9_cs_move32(data,(uint32_t)request->submission_id);
   body[25]=x9_cs_move32(data+1,(uint32_t)(request->submission_id>>32));body[26]=x9_cs_sync_set64(address,data);body[27]=x9_cs_wait(1);
   marker(28,0x8180,0x58490103);
+  }
   /* Clear only this job's fence slot: with two jobs in flight (x9if) the
    * other slot holds the previous job's still-unreaped fence value. */
   bzero(base+render_fence_offset(st->fence_slot),16);bzero(base+0x8080,8);bzero(base+0x8100,8);bzero(base+0x8180,8);
@@ -791,6 +1020,7 @@ static IOReturn render_submit_publish(RenderJobState *st) {
   if(!user_doorbell)user_doorbell=ml_io_map(0x48090000,0x1000);
   vm_offset_t db=user_doorbell;if(!db)return render_submit_uncertain(st);
   gw(db,0,1);
+  st->gts_ring=render_gpu_ts_enabled()?gr64(gpu,0x98):0;
  }
  st->times[4]=mach_absolute_time();
  return kIOReturnSuccess;
@@ -839,10 +1069,12 @@ static IOReturn render_submit_reap(RenderJobState *st) {
    if(actual!=request->submission_id||
       (st->pipeline?insert<st->expected[i]:insert!=st->expected[i]))st->done=false;
   }
-  if(st->done)break;poll_pause(&st->polls);
+  if(st->done){if(st->gts_ring)st->gts_seen=gr64(st->gpu,0x98);break;}
+  poll_pause(&st->polls);
  }while(mach_absolute_time()<st->end);
  if(!st->done)return render_submit_uncertain(st);
  st->times[5]=mach_absolute_time();
+ if(st->gts_ring)render_gpu_ts_account(st);
  { // GPU busy time for the DVFS governor (sweet_x9_gpu_dependencies.c).
   uint64_t busy_ns=0;absolutetime_to_nanoseconds(st->times[5]-st->times[4],&busy_ns);
   __atomic_fetch_add(&sweet_x9_gpu_busy_ns,busy_ns,__ATOMIC_RELAXED);
