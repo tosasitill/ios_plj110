@@ -61,6 +61,32 @@ def validate(data, native=False):
                     raise ValueError('disk log self-overlap')
             position+=n
         if position!=length//4096:raise ValueError('disk log map size mismatch')
+    firmware=data.get('firmware_policy')
+    if firmware is not None:
+        if (not native or not policy or firmware.get('version')!=1 or
+            firmware.get('kind')!='dedicated-readonly-bbfw' or
+            firmware.get('pinned') is not True or firmware.get('immutable') is not True or
+            firmware.get('initial_content_verified') is not True):
+            raise ValueError('invalid external baseband firmware contract')
+        length=firmware.get('bytes',0);payload=firmware.get('payload_bytes',0)
+        if (type(length)!=int or not 4096<=length<=96*1024**2 or length%4096 or
+            type(payload)!=int or not 16<=payload<=length or
+            len(bytes.fromhex(firmware.get('sha256','')))!=32):
+            raise ValueError('invalid external firmware size/hash')
+        fwruns=firmware.get('extents',[]);position=0
+        if not 1<=len(fwruns)<=256:raise ValueError('invalid external firmware extent count')
+        reserved=runs+policy['protected_extents']+data.get('log_policy',{}).get('extents',[])
+        for i,a in enumerate(fwruns):
+            f,p,n=(a[k] for k in ['file_block','partition_block','blocks'])
+            if any(type(x)!=int for x in [f,p,n]) or f!=position or p<0 or n<=0 or p>=count or n>count-p:
+                raise ValueError('invalid external firmware extent')
+            for b in reserved+fwruns[:i]:
+                if p<b['partition_block']+b['blocks'] and b['partition_block']<p+n:
+                    raise ValueError('external firmware overlaps root/plugin/log/reserved extent')
+            position+=n
+        if position!=length//4096:raise ValueError('external firmware map size mismatch')
+    if policy and len(policy['protected_extents'])+len(data.get('log_policy',{}).get('extents',[]))+len(data.get('firmware_policy',{}).get('extents',[]))>32768:
+        raise ValueError('combined protected extent count exceeds kernel limit')
     return data
 
 
@@ -101,11 +127,16 @@ def add_native_adt(tree,manifest):
            ('x9-ufs-root-extents',b''.join(struct.pack('<3Q',e['file_block'],e['partition_block'],e['blocks']) for e in data['extents']))]
     if data.get('write_policy'):
         props += [('x9-ufs-root-write-contract',struct.pack('<2Q',1,data['bytes'])),
-                  ('x9-ufs-protected-extents',b''.join(struct.pack('<2Q',e['partition_block'],e['blocks']) for e in data['write_policy']['protected_extents']+data.get('log_policy',{}).get('extents',[])))]
+                  ('x9-ufs-protected-extents',b''.join(struct.pack('<2Q',e['partition_block'],e['blocks']) for e in data['write_policy']['protected_extents']+data.get('log_policy',{}).get('extents',[])+data.get('firmware_policy',{}).get('extents',[])))]
     if data.get('log_policy'):
         log=data['log_policy']
         props += [('x9-ufs-log-bytes',struct.pack('<Q',log['bytes'])),
                   ('x9-ufs-log-extents',b''.join(struct.pack('<3Q',e['file_block'],e['partition_block'],e['blocks']) for e in log['extents']))]
+    if data.get('firmware_policy'):
+        firmware=data['firmware_policy']
+        props += [('x9-ufs-bbfw-bytes',struct.pack('<Q',firmware['bytes'])),
+                  ('x9-ufs-bbfw-payload-bytes',struct.pack('<Q',firmware['payload_bytes'])),
+                  ('x9-ufs-bbfw-extents',b''.join(struct.pack('<3Q',e['file_block'],e['partition_block'],e['blocks']) for e in firmware['extents']))]
     for name,value in props:chosen.props.append((name,0,value))
     return tree
 

@@ -3,8 +3,8 @@
  * patches/coachz-prelink-baseband.patch and UniXNU ae687009 zzy-native-gpu-addon-mount.
  * X9: original D22AP/20H392 Mav17 assets, native writable HFS, 16 KiB pages.
  * No Apple code replacement, firmware personalization or physical MD download.
- * Keep original/existing files, publish missing files atomically, mount only
- * the two firmware leaf directories (never overlay the Cryptex/cache parents).
+ * Keep original/existing files, publish missing files atomically and hardlink
+ * the second firmware path. No mount or overlay of the Cryptex/cache parents.
  */
 #include <libkern/zlib.h>
 #include <pexpert/device_tree.h>
@@ -123,6 +123,52 @@ static int x9_bbfw_logging(proc_t p,user_addr_t scratch,user_addr_t end)
 }
 
 #if X9_BBFW_PRESENT
+/* External bytes come only from a separately reserved pinned file, not the
+ * plugin mailbox. The built-in manifest still controls names, sizes and hashes. */
+#if X9_BBFW_EXTERNAL
+extern int sweet_x9_bbfw_read(uint64_t,void *,size_t);
+#endif
+static int x9_bbfw_alias(proc_t p,user_addr_t scratch,user_addr_t end,
+ const char *source,const char *path,const struct x9_bbfw_file *file,int *created)
+{
+ *created=0;int error=x9_bbfw_equal(path,file->sha256,file->bytes);
+ if(!error)return 0;if(error!=ENOENT)return error;
+ error=x9_bbfw_equal(source,file->sha256,file->bytes);if(error)return error;
+ size_t sn=strlen(source)+1,pn=strlen(path)+1;
+ if(scratch>end||sn+pn>end-scratch)return E2BIG;
+ if((error=copyout(source,scratch,sn))||(error=copyout(path,scratch+sn,pn)))return error;
+ int32_t rv=0;struct link_args request={.path=scratch,.link=scratch+sn};error=link(p,&request,&rv);
+ if(!error)*created=1;
+ else if(error!=EEXIST)return error;
+ /* No duplicate-copy fallback on EXDEV or other errors: qdsp is ~57 MiB. */
+ return x9_bbfw_equal(path,file->sha256,file->bytes);
+}
+
+static int x9_bbfw_load(const uint8_t **pack)
+{
+ *pack=NULL;const uint8_t *bytes=NULL;
+#if X9_BBFW_EXTERNAL
+ uint8_t *data=kalloc_data(X9_BBFW_PACK_BYTES,Z_WAITOK);if(!data)return ENOMEM;
+ for(uint32_t off=0;off<X9_BBFW_PACK_BYTES;){
+  size_t n=X9_BBFW_PACK_BYTES-off;if(n>256u*1024u)n=256u*1024u;
+  int error=sweet_x9_bbfw_read(off,data+off,n);
+  if(error){kfree_data(data,X9_BBFW_PACK_BYTES);return error;}off+=(uint32_t)n;
+ }
+ bytes=data;
+#else
+ if((uint64_t)(x9_bbfw_pack_end-x9_bbfw_pack)!=X9_BBFW_PACK_BYTES)return EINVAL;
+ bytes=x9_bbfw_pack;
+#endif
+ SHA256_CTX hash;uint8_t digest[32];SHA256_Init(&hash);SHA256_Update(&hash,bytes,X9_BBFW_PACK_BYTES);SHA256_Final(digest,&hash);
+ if(memcmp(bytes,"X9BBF001",8)||memcmp(digest,x9_bbfw_pack_sha256,32)){
+#if X9_BBFW_EXTERNAL
+  kfree_data(data,X9_BBFW_PACK_BYTES);
+#endif
+  return EINVAL;
+ }
+ *pack=bytes;return 0;
+}
+
 static voidpf x9_bbfw_zalloc(voidpf opaque __unused,uInt items,uInt size)
 {
  if(size&&items>(SIZE_MAX-16)/size)return Z_NULL;
@@ -134,7 +180,7 @@ static void x9_bbfw_zfree(voidpf opaque __unused,voidpf address)
  if(!address)return;uint8_t *block=(uint8_t *)address-16;size_t bytes=0;
  memcpy(&bytes,block,sizeof(bytes));kfree_data(block,bytes);
 }
-static int x9_bbfw_decode(const struct x9_bbfw_file *file,uint8_t **out)
+static int x9_bbfw_decode(const uint8_t *pack,const struct x9_bbfw_file *file,uint8_t **out)
 {
  *out=NULL;
  if(file->offset<16||file->offset>X9_BBFW_PACK_BYTES||!file->packed||
@@ -142,7 +188,7 @@ static int x9_bbfw_decode(const struct x9_bbfw_file *file,uint8_t **out)
  size_t allocated=file->bytes?file->bytes:1;
  uint8_t *data=kalloc_data(allocated,Z_WAITOK);if(!data)return ENOMEM;
  z_stream stream={0};stream.zalloc=x9_bbfw_zalloc;stream.zfree=x9_bbfw_zfree;
- stream.next_in=(Bytef *)(uintptr_t)(x9_bbfw_pack+file->offset);stream.avail_in=file->packed;
+ stream.next_in=(Bytef *)(uintptr_t)(pack+file->offset);stream.avail_in=file->packed;
  stream.next_out=data;stream.avail_out=(uInt)allocated;
  int error=inflateInit(&stream)==Z_OK?0:ENOMEM;
  if(!error){int result=inflate(&stream,Z_FINISH);
@@ -217,16 +263,15 @@ static int sweet_x9_prepare_baseband_firmware(proc_t p,user_addr_t scratch,user_
  }
  return 0;
 #else
- if((uint64_t)(x9_bbfw_pack_end-x9_bbfw_pack)!=X9_BBFW_PACK_BYTES||memcmp(x9_bbfw_pack,"X9BBF001",8))return EINVAL;
- SHA256_CTX hash;uint8_t digest[32];SHA256_Init(&hash);SHA256_Update(&hash,x9_bbfw_pack,X9_BBFW_PACK_BYTES);SHA256_Final(digest,&hash);
- if(memcmp(digest,x9_bbfw_pack_sha256,32))return EINVAL;
- unsigned count=sizeof(x9_bbfw_files)/sizeof(x9_bbfw_files[0]),written=0,same=0;int error=0;
+ const uint8_t *pack=NULL;int error=x9_bbfw_load(&pack);
+ if(error){printf("X9 BBFW: pack load/verify external=%u errno=%d; firmware not installed\n",X9_BBFW_EXTERNAL,error);return error;}
+ unsigned count=sizeof(x9_bbfw_files)/sizeof(x9_bbfw_files[0]),written=0,same=0,linked=0;int result=0;
  /* Validate every member before any file is installed. */
- for(unsigned i=0;i<count;i++){uint8_t *data=NULL;error=x9_bbfw_decode(&x9_bbfw_files[i],&data);
-  if(error)return error;kfree_data(data,x9_bbfw_files[i].bytes?x9_bbfw_files[i].bytes:1);}
+ for(unsigned i=0;i<count;i++){uint8_t *data=NULL;error=x9_bbfw_decode(pack,&x9_bbfw_files[i],&data);
+  if(error){result=error;goto release_pack;}kfree_data(data,x9_bbfw_files[i].bytes?x9_bbfw_files[i].bytes:1);}
  /* rev252gg: write the files straight into the two paths ABM looks at (no bindfs): ABM 20H392
   * BootControllerLegacy::prepare stats capabilities::bb::radio::getPersonalizedFirmwarePath(),
-  * BBUpdater then reads info.plist/Options.plist/*.mbn from it. */
+  * BBUpdater then reads info.plist, Options.plist and MBN files from it. */
  char points[2][256];unsigned npoints=0;
  snprintf(points[npoints++],sizeof(points[0]),"/usr/standalone/firmware/Baseband/Mav17");
  {DTEntry chosen=NULL;const void *value=NULL;unsigned value_size=0;
@@ -236,23 +281,43 @@ static int sweet_x9_prepare_baseband_firmware(proc_t p,user_addr_t scratch,user_
    for(unsigned i=0;i<value_size;i++)snprintf(name+2*i,3,"%02X",((const uint8_t *)value)[i]);
    snprintf(points[npoints++],sizeof(points[0]),"/private/preboot/%s/usr/local/standalone/firmware/Baseband/Mav17",name);
   }}
- int result=0;
+ int directories[2]={0};
  for(unsigned k=0;k<npoints;k++){
-  int derr=x9_bbfw_directory(p,scratch,end,points[k]);
-  if(derr){printf("X9 BBFW: directory %s errno=%d\n",points[k],derr);if(!result)result=derr;continue;}
-  for(unsigned i=0;i<count;i++){
-   const struct x9_bbfw_file *file=&x9_bbfw_files[i];char path[320];
-   snprintf(path,sizeof(path),"%s/%s",points[k],file->name);
-   error=x9_bbfw_equal(path,file->sha256,file->bytes);
-   if(!error){same++;continue;}if(error!=ENOENT){printf("X9 BBFW: %s errno=%d (kept)\n",path,error);if(!result)result=error;continue;}
-   uint8_t *data=NULL;error=x9_bbfw_decode(file,&data);if(error){if(!result)result=error;continue;}
-   int made=0;error=x9_bbfw_write(p,scratch,end,path,data,file->bytes,file->sha256,&made);
+  directories[k]=x9_bbfw_directory(p,scratch,end,points[k]);
+  if(directories[k]){printf("X9 BBFW: directory %s errno=%d\n",points[k],directories[k]);if(!result)result=directories[k];}
+ }
+ /* Prefer either existing verified copy. Never replace it just to deduplicate
+  * old installs. Missing files get exactly one data copy, then hardlink aliases. */
+ for(unsigned i=0;i<count;i++){
+  const struct x9_bbfw_file *file=&x9_bbfw_files[i];char paths[2][320];int state[2],source=-1,missing=-1;
+  bool conflict=false;
+  for(unsigned k=0;k<npoints;k++){
+   int n=snprintf(paths[k],sizeof(paths[k]),"%s/%s",points[k],file->name);
+   state[k]=directories[k]?directories[k]:(n<0||(size_t)n>=sizeof(paths[k]))?E2BIG:x9_bbfw_equal(paths[k],file->sha256,file->bytes);
+   if(!state[k]){source=(int)k;same++;}
+   else if(state[k]==ENOENT){if(missing<0)missing=(int)k;}
+   else{printf("X9 BBFW: %s errno=%d (kept)\n",paths[k],state[k]);if(!result)result=state[k];conflict=true;}
+  }
+  if(conflict||missing<0)continue;
+  if(source<0){
+   uint8_t *data=NULL;error=x9_bbfw_decode(pack,file,&data);if(error){if(!result)result=error;continue;}
+   int made=0;error=x9_bbfw_write(p,scratch,end,paths[missing],data,file->bytes,file->sha256,&made);
    kfree_data(data,file->bytes?file->bytes:1);
-   if(error){printf("X9 BBFW: write %s errno=%d\n",path,error);if(!result)result=error;continue;}
-   written+=(unsigned)made;
+   if(!error)error=x9_bbfw_equal(paths[missing],file->sha256,file->bytes);
+   if(error){printf("X9 BBFW: write %s errno=%d\n",paths[missing],error);if(!result)result=error;continue;}
+   written+=(unsigned)made;source=missing;state[source]=0;
+  }
+  for(unsigned k=0;k<npoints;k++)if(state[k]==ENOENT){
+   int made=0;error=x9_bbfw_alias(p,scratch,end,paths[source],paths[k],file,&made);
+   if(error){printf("X9 BBFW: link %s errno=%d\n",paths[k],error);if(!result)result=error;continue;}
+   linked+=(unsigned)made;
   }
  }
- printf("X9 BBFW: original 20H392 Mav17 files %u in %u paths written %u same %u result errno=%d (direct write, no ticket/MD download)\n",count,npoints,written,same,result);
+ printf("X9 BBFW: original 20H392 Mav17 files %u in %u paths written %u linked %u same %u external %u complete %u result errno=%d (direct write, no ticket/MD download)\n",count,npoints,written,linked,same,X9_BBFW_EXTERNAL,X9_BBFW_COMPLETE,result);
+release_pack:
+#if X9_BBFW_EXTERNAL
+ {uint8_t *owned=(uint8_t *)(uintptr_t)pack;kfree_data(owned,X9_BBFW_PACK_BYTES);}
+#endif
  return result;
 #endif
 }

@@ -172,13 +172,20 @@ class Builder:
         # Vendor MD OTA tree (T: drive of the modem FSD) -> generated/x9_mdota.inc (gitignored; stub when absent)
         self.run_or_exit([sys.executable, '-I', str(X9 / 'tools/md_ota_pack.py')], ROOT, label='md_ota_pack.py')
         # Original Apple Mav17 files are for ABM/BBUpdater only, never MTK MD firmware.
-        bb = [sys.executable, '-I', str(X9 / 'tools/baseband_firmware.py')]
-        # Opt-in only: embedding the 34 MB pack made boot.img 47 MB and corrupted DRAM on
-        # device (rev252eq, 2026-11-09). Without baseband_firmware in local.json: empty stub.
+        bb = [sys.executable, '-I', str(X9 / 'tools/baseband_firmware.py'),
+              '--metadata', str(self.out / 'baseband-firmware.json')]
+        # Opt-in only: rev252eq's 47 MB boot persistently black-screened the device.
+        # Full firmware belongs in its own reserved file, not the boot payload.
         if self.cfg.get('baseband_firmware'):
             bb += ['--src', str(Path(self.cfg['baseband_firmware']).expanduser())]
+            storage = self.cfg.get('baseband_firmware_storage', 'embedded')
+            bb += ['--storage', storage]
+            if storage == 'external':
+                bb += ['--out', str(ROOT / '.local/x9/baseband/Mav17-external.pack')]
             if self.cfg.get('baseband_firmware_exclude'):
                 bb += ['--exclude', self.cfg['baseband_firmware_exclude']]
+            if self.cfg.get('baseband_firmware_allow_incomplete') is True:
+                bb += ['--allow-incomplete']
         else:
             bb += ['--none']
         self.run_or_exit(bb, ROOT, label='baseband_firmware.py')
@@ -259,6 +266,20 @@ class Builder:
         manifest = self.cfg.get('root_manifest')
         if not manifest:
             sys.exit('local.json: root_manifest is required to package boot.img')
+        if not self.dry_run:
+            # Bind the kernel's expected payload to the separate reserved file.
+            # No adb or writes here; live pin/map/hash checking is a preflight.
+            meta = kernel.parent / 'baseband-firmware.json'
+            firmware = json.loads(Path(manifest).read_text()).get('firmware_policy')
+            if meta.is_file():
+                expected = json.loads(meta.read_text())
+                if expected.get('storage') == 'external' and (
+                    not expected.get('complete') or not firmware or
+                    firmware.get('payload_bytes') != expected['pack_bytes'] or
+                    firmware.get('sha256') != expected['pack_sha256']):
+                    sys.exit('external BBFW needs a matching provisioned firmware_policy in root_manifest; do not fabricate an extent map')
+            elif self.cfg.get('baseband_firmware_storage') == 'external' or firmware:
+                sys.exit('external BBFW boot packaging requires baseband-firmware.json beside the compiled kernel')
         dev = self.vars['{DEVELOPER_DIR}']
         tools = self.out / 'build-tools'
         wrapper = tools / 'x9-clang'

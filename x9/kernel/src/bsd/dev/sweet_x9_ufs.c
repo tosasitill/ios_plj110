@@ -461,6 +461,64 @@ int sweet_x9_update_read(uint64_t offset, void *data, size_t length)
  return error?EIO:0;
 }
 
+/* Optional independent BBFW reservation. Its map is in the same frozen ADT as
+ * the root map, is excluded from root/log/plugin writes, and has NO write API.
+ * File names and content hashes are a separate built-in consumer manifest. */
+#define X9_BBFW_EXT_MAX 256U
+static struct {
+ struct x9u_extent extents[X9_BBFW_EXT_MAX];
+ unsigned count;
+ uint64_t bytes,payload;
+ bool ready;
+} xbf;
+static int bbfw_map_prepare(void)
+{
+ DTEntry chosen;const void *raw=NULL,*reserved=NULL;unsigned bytes=0,reserved_bytes=0;
+ if(SecureDTLookupEntry(NULL,"/chosen",&chosen)!=kSuccess||
+    prop(chosen,"x9-ufs-bbfw-bytes",&xbf.bytes,8)||
+    prop(chosen,"x9-ufs-bbfw-payload-bytes",&xbf.payload,8))return ENOENT;
+ if(xbf.bytes<4096||xbf.bytes>(96ULL<<20)||(xbf.bytes&4095)||xbf.payload<16||xbf.payload>xbf.bytes||
+    SecureDTGetProperty(chosen,"x9-ufs-bbfw-extents",&raw,&bytes)!=kSuccess||!bytes||
+    bytes%sizeof(struct x9u_extent)||bytes/sizeof(struct x9u_extent)>X9_BBFW_EXT_MAX||
+    SecureDTGetProperty(chosen,"x9-ufs-protected-extents",&reserved,&reserved_bytes)!=kSuccess||
+    !reserved_bytes||reserved_bytes%16||reserved_bytes/16>32768)return EINVAL;
+ xbf.count=bytes/sizeof(struct x9u_extent);memcpy(xbf.extents,raw,bytes);
+ if(x9u_extent_validate(xbf.extents,xbf.count,xbf.bytes/4096,xu.partition.count))return EINVAL;
+ for(unsigned i=0;i<xbf.count;i++){
+  const struct x9u_extent *a=&xbf.extents[i];bool found=false;
+  for(unsigned j=0;j<xu.extent_count;j++){
+   const struct x9u_extent *b=&xu.extents[j];
+   if(a->part<b->part+b->count&&b->part<a->part+a->count)return EPERM;
+  }
+  for(unsigned j=0;j<sizeof(x9_update_extents)/sizeof(x9_update_extents[0]);j++){
+   const struct x9u_extent *b=&x9_update_extents[j];
+   if(a->part<b->part+b->count&&b->part<a->part+a->count)return EPERM;
+  }
+  for(unsigned j=0;j<xl.extent_count;j++){
+   const struct x9u_extent *b=&xl.extents[j];
+   if(a->part<b->part+b->count&&b->part<a->part+a->count)return EPERM;
+  }
+  for(unsigned j=0;j<reserved_bytes/16;j++){
+   uint64_t p,n;memcpy(&p,(const uint8_t *)reserved+j*16,8);memcpy(&n,(const uint8_t *)reserved+j*16+8,8);
+   if(!n||p>=xu.partition.count||n>xu.partition.count-p)return EINVAL;
+   if(p==a->part&&n==a->count){found=true;continue;}
+   if(a->part<p+n&&p<a->part+a->count)return EPERM;
+  }
+  if(!found)return EPERM;
+ }
+ xbf.ready=true;return 0;
+}
+int sweet_x9_bbfw_read(uint64_t offset,void *data,size_t length)
+{
+ if(!xu.ready||xu.failed||!data||length>256u*1024u)return EINVAL;
+ lck_mtx_lock(&x9ufs_lock);
+ int error=xbf.ready?0:bbfw_map_prepare();
+ if(!error&&(offset>xbf.payload||length>xbf.payload-offset))error=EINVAL;
+ if(!error){pet();if(x9u_image_read_mapped(&xu.host,2,&xu.partition,xbf.extents,xbf.count,xbf.bytes/4096,offset,data,length))error=EIO;}
+ if(xu.host.poisoned)xu.failed=true;
+ lck_mtx_unlock(&x9ufs_lock);return error;
+}
+
 /* Read-only access to a named GPT partition on LUN2 (modem DRDI image for the
  * baseband bring-up). Waits are the caller's job: returns ENXIO until the native
  * root controller is up. Only SCSI READ is issued. */

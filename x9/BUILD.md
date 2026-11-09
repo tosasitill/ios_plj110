@@ -79,6 +79,58 @@ documents how the X9 sources evolved; the build does not apply it.
 `build/scripts/collect-build-inputs.py` gathers a candidate directory's real
 build inputs from the build Mac; it produced the current `kernel/` import.
 
+## Original Mav17 firmware (ABM/BBUpdater)
+
+**Do not embed the complete firmware in boot.img.** The historical 47 MB
+rev252eq image left the device black-screened until a full restart. The packer
+now limits embedded BBFW to 4 MiB; the existing 20 MiB boot-image guard remains.
+`qdsp6sw.mbn` is required by the 20H392 `validateBootupItems()` method even
+though `UpdateSource::init()` can skip a missing file. An excluded subset is
+not a complete boot firmware input.
+
+Prepare a complete **local-only** package without replacing the active build
+header (no device access):
+
+```bash
+python3 -I x9/tools/baseband_firmware.py --storage external \
+  --out .local/x9/baseband/external-156/Mav17.pack \
+  --header .local/x9/baseband/external-156/x9_baseband_firmware.inc \
+  --metadata .local/x9/baseband/external-156/source.json
+```
+
+External delivery uses a **separate** pinned+immutable Android file, never
+free space in the plugin mailbox. Provisioning needs explicit user approval,
+the existing root preflight, live inode/FIEMAP capture, extent-overlap checks,
+compare-before-write/readback and a full raw payload hash. Do not invent a map
+or normally overwrite an existing pinned file. Provisioning is not performed
+by the build command.
+
+After provisioning, use a private copy of `root-manifest.json` with
+`firmware_policy`: version `1`, kind `dedicated-readonly-bbfw`, `pinned`,
+`immutable`, `initial_content_verified`, `device_file`, `inode`, `bytes`,
+`payload_bytes`, `sha256`, `android_extents` and `extents`. Its extents must be
+disjoint from the root, plugin reservations and disk log. The shim adds them
+to root-write exclusions and emits the BBFW read-only map. The preflight
+checks live protection, mapping and the entire compressed payload hash.
+
+Set `baseband_firmware_storage` to `external` in `build/local.json`, keep the
+original `baseband_firmware` input and remove `baseband_firmware_exclude`.
+The builder emits `.local/x9/baseband/Mav17-external.pack` and a
+`baseband-firmware.json` beside the kernel; boot packaging requires that
+descriptor to match the provisioned manifest. Keep it beside an existing
+kernel when using `build.py boot --kernel`.
+
+At PID1, the kernel reads the pack into RAM, verifies its built-in hash and
+every uncompressed member, then publishes only missing files. It reuses an
+existing verified copy or writes one copy and hardlinks the other ABM path;
+different files/symlinks remain untouched. A failed hardlink does **not** fall
+back to a second large copy. No bind mount, Apple binary patch, personalization
+or physical MTK modem firmware download is involved. Plugin revision is unchanged.
+
+For historical diagnostic builds only, `--exclude` also requires
+`--allow-incomplete` (`baseband_firmware_allow_incomplete: true` in local build
+configuration). External mode rejects exclusions even with that flag.
+
 ## Metal/PanVK plugins
 
 One command builds both plugins, packages them for the mailbox and points the

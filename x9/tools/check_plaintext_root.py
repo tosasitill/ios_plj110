@@ -54,6 +54,22 @@ def main():
             raise ValueError('sidecar log no longer pinned+immutable')
         if json.loads(read(quote(logtool)+' extents '+quote(logpath)+' --json'))!=log['android_extents']:
             raise ValueError('sidecar log map changed')
+    if m.get('firmware_policy'):
+        fw=m['firmware_policy'];fwpath=fw['device_file']
+        if list(map(int,read('stat -c "%i %s" '+quote(fwpath)).split()))!=[fw['inode'],fw['bytes']]:
+            raise ValueError('external firmware inode/size changed')
+        if 'i' not in read('lsattr '+quote(fwpath)).split()[0] or ': pinned (GC move failures 0)' not in read(quote(tool)+' status '+quote(fwpath)):
+            raise ValueError('external firmware no longer pinned+immutable')
+        live=json.loads(read(quote(tool)+' extents '+quote(fwpath)+' --json'))
+        if live!=fw['android_extents']:
+            raise ValueError('external firmware FIEMAP changed')
+        from ufs_manifest import extents
+        if extents(live,m['partition_blocks'])['extents']!=fw['extents']:
+            raise ValueError('external firmware raw map does not match FIEMAP')
+        report=read(quote(tool)+' rawhash '+quote(fwpath)+' /dev/block/sdc100 '+str(fw['payload_bytes']),120)
+        if not any(line.startswith(fw['sha256']+'  ') and line.endswith('first '+str(fw['payload_bytes'])+' bytes') for line in report.splitlines()):
+            raise ValueError('external firmware raw payload hash mismatch')
+        print('EXTERNAL BBFW PREFLIGHT VERIFIED: separate pinned+immutable file, live FIEMAP and full payload SHA256; read-only.')
     if m.get('write_policy'):
         # A writable HFS header changes at mount/sync; never compare against
         # the original full-image SHA after legitimate filesystem writes.
