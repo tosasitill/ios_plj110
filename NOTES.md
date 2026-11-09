@@ -1,3 +1,16 @@
+## ENV HANDOFF 2026-11-09: cc-remote 本机配置完成;远端 SSH 认证未通过
+
+- 本次仅配置开发工具,未构建/启动设备,未修改内核代码;设备工作仍以紧接其后的 HANDOFF (81) 为准。
+- 安装:Bun 1.4.4、cc-remote 0.1.0 (claude-agent-acp 0.99.1)、acpc 0.1.0;三个命令均可从已有 PATH 的 `~/.local/bin` 使用,未改 shell 配置。
+- cc-remote 源码:`~/.local/share/cc-remote/source`,上游提交 `063f81524e84b7ad40a203d4c7da6f92fcfd2e41`;按锁文件执行 `bun install --frozen-lockfile`,再 `bun run compile` 和 `bun link`。
+- 主机文件:`~/.config/cc-remote/host` = `cc-remote-server`;对应 SSH 别名位于 `~/.ssh/config`。用户提供的密钥已复制到 `~/.ssh/cc-remote-2026-10-08.key` (600),原文件权限也从 644 收紧到 600。地址和私钥仅存本机,不入 git。
+- acpc 配置实际路径(macOS):`~/Library/Application Support/acpc/config.toml`;已注册 `Claude (remote)` / slug `cc-remote`,设为默认 agent,启动命令为 `cc-remote`。
+- 验证(本机):编译成功;`bun test` = 30 pass / 0 fail / 76 expect;已编译二进制的 ACP `initialize` 返回 protocolVersion 1、agent version 0.99.1,无错误。
+- 验证(SSH):目标 TCP/22 可连接;权限修复后密钥签名使用 rsa-sha2-512,但服务端仍返回 `Permission denied (publickey)` / exit 255。尚未进入远端 shell,故远端 Claude 安装、版本、登录状态及完整对话/本地工具调用均未验证。不是 cc-remote 安装失败,也不能据此认定密钥或用户名哪个错误。
+- 日志:`~/.local/share/cc-remote/setup-logs/{install.log,compile.log,tests.log,ssh.debug.log,acp-initialize.json}`。
+- 下一步:用户确认/修正该远端账户的密钥授权后,先 `ssh cc-remote-server`,再 `cc-remote doctor` 检查远端 Claude (README 要求 >= 2.1.248);如需登录,执行 `cc-remote --cli auth login`;最后在项目目录运行 `acpc` (或 `acpc -a cc-remote`),验证一轮对话及本地只读工具调用。认证未修正前不重复连接尝试。
+- 此环境交接以独立文档提交记录,未推送;既有内核未提交修改保持原样。
+
 ## HANDOFF 2026-11-09 (81): 155(hi)+154 + 参考 QcomBaseband 的结论;停止出探针镜像,下一步是解码设备 logd(参考作者同样靠它调试 ABM/BBUpdater)
 
 - 观察(155 sweetiolog=CommCenter):BBUpdater 每轮 power-on(selector 1)之后的 IOKit 活动只有 `IODeviceTree:/chosen/asmb` 和 `/chosen` 的路径查找
