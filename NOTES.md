@@ -1,4 +1,4 @@
-## HANDOFF 2026-11-09 (68): 142.txt 验证 CCIF nowait/READY；下一卡点为 iOS 通道启动，正在定位
+## HANDOFF 2026-11-09 (68): 142.txt 验证 CCIF nowait/READY；iOS 握手诊断 rev252en-md BUILT 未上机
 
 - USER「好了」，最新日志 `~/142.txt`，标记 `rev252em-md fs128-bb-txnowait-v1 mode=4 bb=1`。
   15.060 s HS2 -> READY（9525 ms），19.665 s SIM READY，23.105 s C5GREG=1；本段没有前两版的 MCU 断言。
@@ -14,8 +14,18 @@
   manager22/23、baseband26/27、property28/29等已实现selector与iOS16相同；libIOABP仍匹配
   AppleBasebandPCIInterface、IOServiceOpen type0，再调用selector0。不盲改iOS17映射。
   原版输入的反汇编只作源码定位，`/tmp/x9-tbb16-disasm.txt`、`/tmp/x9-ioabp16-disasm.txt`；Apple文件未改。
-- 下一版 en 仅增加有界 board调用结果/state、matching和user-client启动诊断，保留FS128/CCIF nowait/AT路径。
-  构建与实机结果待补；未操作设备，原有GPU工作树不混入基带提交。
+- en 仅增加有界 board调用结果/state（前64次）、matching和user-client启动诊断（前32次）；
+  新增10秒汇总：protocol queries/accepted、user clients/failed、board badargs/manager/baseband/power/reset，
+  user client已创建但opens=0的通道也记录。无用户buffer/地址/属性值日志；不改返回值/握手协议。
+  保留FS128/CCIF nowait/AT路径，标记 `build=rev252en-md fs128-bb-handshake-v1 mode=4 bb=1`。
+- COMMIT `6298641`；Mac 正常构建退出0：
+  `python3 -I x9/build/build.py all --name x9-rev252en-md --boot-config .local/x9/modem/boot-rev252el-md.json`。
+  输出 `x9/out/x9-rev252en-md/boot.img`，stdout `/tmp/x9-rev252en-md-build.log`。
+  内置boot.json：12865536 B，sha256 `0143e759dc4b5af36225acad3b177ae12224d63dd7a5db0fe6894518075b7c7d`。
+  未运行额外测试/二次产物检查/CI，未操作设备，原有GPU工作树不混入基带提交。
+- 下一步用户手动启动en，尽量持续90秒以上，收 `~/143.txt`。按 board #/handshake/match/user client/
+  channel selector 的先后顺序定位最早未完成阶段；只有进入用户态QMUX之后才按真实请求实现QMI。
+  尚未证明 iOS 蜂窝链路完成，DPMAIF数据面仍未实现，不将物理MD注册成功等同于iOS可用。
 
 ## HANDOFF 2026-11-09 (67): 141.txt 确认 el 生效；新卡点是 CCIF 门铃同步等待；rev252em-md BUILT 未上机
 
