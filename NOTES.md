@@ -1,4 +1,4 @@
-## HANDOFF 2026-11-09 (69): 查完整 QcomBaseband 参考后分析143；发现 PDPHelper 首次初始化早于服务发布
+## HANDOFF 2026-11-09 (69): 查完整参考与143；PDPHelper早发布候选 rev252eo-md BUILT 未上机
 
 - USER要求先查参考实现再看143。已拉取当前UniXNU子模块 QcomBaseband `dd0199cf3300764ed52b23f4a47761f91fab21a2`，
   本地 `.local/x9/work/references/QcomBaseband-20261109`；当前UniXNU main `d3de950a23a54d454d6ac21d8deceaa3f4ad0e73`引用同一版本。
@@ -21,7 +21,19 @@
   board calls15/badargs0/unsupported0、manager1/baseband0、last selector3、PCIControl0；无PCI channel请求，QMI仅内部UIM0x47。
 - 下一版先单变量修复最早竞态：在root初始化/launchd前同步发布PDP helper服务，完整bridge/QMI仍等HS2。
   保留CCIF nowait/FS128/DT/firmware/返回协议，后续再验证缺失DT/firmware与postponement-ticket路径。
-  未操作设备，构建结果待补；GPU原有工作树不混入提交。
+  helper使用kIOServiceSynchronous注册，先分配/reuse traffic-gate锁；HS2后的configure复用两个服务，不重复发布。
+  没有提前创建网络接口或宣告QMI READY。调用链为native UFS root初始化→touch_init→gpu_dependencies→modem_start，位于launchd前。
+- COMMIT `1c1e6ba`；Mac正常构建退出0：
+  `python3 -I x9/build/build.py all --name x9-rev252eo-md --boot-config .local/x9/modem/boot-rev252el-md.json`。
+  输入保留`x9_modem=4 x9_md_at=3 x9_md_poll=1 x9_bb=1`及FS128/CCIF nowait；输出`x9/out/x9-rev252eo-md/boot.img`。
+  stdout `/tmp/x9-rev252eo-md-build.log`；内置boot.json：12865536 B，boot_sha256
+  `9cf693c8bf555e666d032c5a55a65a5499f7e9e841a775653abbbe203780e77f`。
+  无额外测试/二次产物检查/CI，未操作设备；GPU原有工作树不混入基带提交，正常候选构建继承当前工作区。
+- 下一步用户手动启动eo，尽量持续90秒以上，收`~/144.txt`。应在launchd前看到
+  `PDP helpers prepared 2/2`与`pre-launchd PDP helper preparation result 0`，随后eo标记、HS2/READY和完整桥服务发布。
+  验证第一次CommCenter是否仍出现143的ApplePDPHelper空对象栈，再看protocol queries/PCI channel请求是否开始。
+  若首次崩溃消失但仍无PCI，按D22AP/mav17设备树→固件路径→原版iOS16启动gate继续，不同变量分版验证。
+  QMI仍全回error94、DPMAIF未实现；本候选未上机，不能称iOS蜂窝已修好。
 
 ## HANDOFF 2026-11-09 (68): 142.txt 验证 CCIF nowait/READY；iOS 握手诊断 rev252en-md BUILT 未上机
 
