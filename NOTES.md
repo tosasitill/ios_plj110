@@ -2,7 +2,7 @@
 
 > 旧的完整流水账(7784 行,含 sweet/SM7150 时代、rev2xx 全部 handoff)在 git 历史里:
 > `git show a8f1955:NOTES.md`。需要翻某个 revision 的细节时 `git log -S'<关键字>' -- NOTES.md` 再 show。
-> 截至 2026-11-09 的完整 cn 交接在 `git show 636edc2:NOTES.md`;当前以 §7 的 HANDOFF (84) 为准。
+> 截至 2026-11-09 的完整 cn 交接在 `git show 636edc2:NOTES.md`;当前以 §7 的 HANDOFF (85) 为准。
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
@@ -75,7 +75,7 @@ X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>      # 之后再�
 
 最新:**x9-rev252hk-md**(修复提交 `d1f8515` + 当时未提交的渲染改动,现已入库),boot.img **15278080 B**;**156 与本次 ADB 定点取证确认 reserve 调整生效、efs1.bin 已分配 1 MiB,但 iOS 基带握手未推进**(HANDOFF 84)。
 本机镜像:`x9/out/x9-rev252hk-md/boot.img`;配置沿用 `.local/x9/modem/boot-rev252hi-md.json`。
-本次 BBUpdater 日志的15条 reset 原因全部为 **error 2 / `fPhases.size()` 断言**,不再出现之前的 scratch error 104;efs1.bin 零字节问题已消失,不能再把该断言仅归因于 scratch 失败。断言的上游原因及最终 iOS 蜂窝功能仍未解决,详情/下一步见 §7。以下 GPU 专用基线与参数为 **2026-11-08 历史记录**,不要当作 hk 参数直接复用。
+本次 BBUpdater 日志的15条 reset 原因全部为 **error 2 / `fPhases.size()` 断言**,不再出现之前的 scratch error 104;efs1.bin 零字节问题已消失,不能再把该断言仅归因于 scratch 失败。现已定位必需 `qdsp6sw.mbn` 缺失导致的启动校验失败分支,外置完整固件＋单份硬链接代码已做单文件交叉编译;**尚未分配设备暂存文件、未生成新 boot、未上机验证**,详情见 §7。以下 GPU 专用基线与参数为 **2026-11-08 历史记录**,不要当作 hk 参数直接复用。
 
 历史 GPU 基线:**x9-rev252dc**(内核-only,插件 275 不变,沿用 rev252cx 之后的 mailbox)boot_sha256 `041d267fc297dd0830bd50407b85579679f0ace28ad2ba94a7c825e3bd0fd80c`,**未上机**。
 已用户确认好的最后一版:**rev252cy**(123 修好、控制中心不卡);之后 cz(x9lc)、da(1242x2760)、db(DVFSRC 探针)均未上机验证。
@@ -110,7 +110,7 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 
 ## 5. 未解决问题
 
-当前主线是 **efs1.bin 已分配后,定位 BBUpdater 的 `fPhases.size()` 断言为何仍在 PCI/Sahara 传输前触发**(§7);下列为保留的 GPU/Wi-Fi 待办,不是新的硬件验证结论。
+当前主线是 **补齐 BBUpdater 启动必需的 qdsp6sw.mbn,通过独立暂存文件交付完整固件,再验证是否越过 fPhases/PCI/Sahara 前置阻塞**(§7);设备暂存区分配/写入待用户明确确认。下列为保留的 GPU/Wi-Fi 待办,不是新的硬件验证结论。
 
 1. **GPU 带宽/帧率**:avg ~17-22 fps,稳态 24 fps;job 内 GPU wait 6-15 ms。判断显存带宽受限。**DVFSRC 从未初始化**(110.txt:`basic=8 opp_count=1 gear=0`,SW_REQ 被忽略)。
    rev252dc 加 TF-A SMC INIT:`MTK_SIP_VCOREFS_CONTROL = 0xC2000506`,cmd INIT=0(a0=0 成功,a1=dram_type)锁高 OPP,START=1(`x9_dvfsrc=2`)后自由运行。**待上机**,SMC 可能挂。
@@ -150,7 +150,39 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
 
-## 7. 当前交接(HANDOFF 84,2026-11-09): ADB 定点取证仅保存 8.15 MiB;efs1.bin 已为 1 MiB,本次15条 reset 全为 fPhases 断言
+## 7. 当前交接(HANDOFF 85,2026-11-09): qdsp 是启动必需项;外置完整固件＋单份硬链接代码已交叉编译,设备暂存待确认
+
+### 证据与修复方向
+
+- 实机输入仍以156和84的定点采集为准:原10文件包缺 `qdsp6sw.mbn`(155/156 stat ENOENT);efs1.bin 已有1 MiB,本次15条reset全为 `fPhases.size()`。**纠正旧推断:加载阶段允许跳过,不等于启动阶段可省略。** 本地参考 UniXNU/hackios/QcomBaseband 没有可直接移植的 phase 修复;QcomBaseband 的完整 Apple 固件是独立输入,不能把其 iOS17/Mav16 分支补丁套到20H392。
+- 当前 `libBBUpdaterDynamic.dylib` 的确定分支链(静态):
+  1. `BBUEUR10UpdateSource` 目录构造函数 `0x1ee1ebcfc`:向量零寄存器由 `0x1ee1ebd4c` 设置,`0x1ee1ebda0` 清零 `this+0x108` 等字段。
+  2. `init()`=`0x1ee1ec160`:字符串 `0x1ee2416f3` 是 `qdsp6sw.mbn`;`0x1ee1ecb10` containsFile,缺失在 `0x1ee1ecb20` 跳过,仅存在时在 `0x1ee1ecbb0` 填充 `this+0x108`。
+  3. `validateBootupItems()`=`0x1ee1f1aac`:在 `0x1ee1f1af4/af8` 检查该字段,为0则返回 **35/0x23**;字符串 `0x1ee24162c`=`Baseband FW isn't complete. You are missing some images!`。EUR10/EUR13的vtable slot+0x50均指向此校验(提取dyld指针须去链元数据,不能直接用原始数值)。
+  4. `bootupInternal()`=`0x1ee1731dc`:校验调用在 `0x1ee173210`,失败从 `0x1ee173218` 分支到错误事件,**早于** `handleBeginPhase`(`0x1ee173228`)和 first-stage query(`0x1ee173234`)。错误路径仍到 `0x1ee173294..2a4` 调反馈 endPhase;`handleError` 也有无条件 endPhase。
+  5. `BBUConsoleFeedback::handleEndPhase()`=`0x1ee19e2a8`:空 phase 在 `0x1ee19e2d4/2d8` 转异常,行号93(`0x1ee19e594`),字符串=`Assertion failure ( fPhases.size() )`。
+- **证据边界**:没有运行日志直接打印原始 error35/“missing images”;这是运行中缺文件＋当前二进制的必失败分支推导,与零PCI/Sahara及最终断言吻合。补齐文件后能否继续握手仍须新启动确认;不绕过断言、不替换Apple二进制、不声称蜂窝已可用。
+- 汇编/脚本在 `.local/x9/work/bbu-phase-156/`(`update-source-ctor.s`, `update-source-init.s`, `validate-boot-items.s`, `bootup-internal.s`, `handle-error.s`等)。前轮补读 CrashReporter/Baseband、abm.workspace/pending 为空,本次启动的uncompressed子目录不存在;不要重复探这些空目录。补读增加32 KiB后,156的 `ranges/` 合计 **8577024 B**,仍未全盘读取,原有块未覆盖。
+
+### 已完成的本地代码与编译
+
+- `baseband_firmware.py`:新增 `--storage external` 和独立 `--header/--metadata`;完整11文件压缩包不进入 `.incbin`。内嵌包上限 **4 MiB**,排除文件必须显式 `--allow-incomplete`,外置模式禁止排除。保留原20MiB boot guard,**不能重试47MB的rev252eq黑屏路径**。
+- 原始完整包已本地生成: **34130291 B**,11文件原始合计64543521 B;路径 `.local/x9/baseband/external-156/{Mav17.pack,x9_baseband_firmware.inc,source.json}`。按现有pinfile只接受偶数MiB,需独立 **34 MiB=35651584 B** 文件。原bbfw、旧10文件包和hk镜像保留。
+- `sweet_x9_ufs.c` 新增只读 `sweet_x9_bbfw_read`:使用独立ADT extent表,核对容量/边界、自重叠及root/plugin/log/保护区冲突;不复用插件mailbox,无固件区写API。`ufs_root_manifest.py` 新增 `firmware_policy` 验证和ADT属性,固件extent自动加入root写入排除区。`check_plaintext_root.py` 对该可选区域核对live inode、pin+immutable、FIEMAP→raw map和整个payload SHA256。
+- `x9_baseband_firmware.inc`:整包读取到RAM,先验证整包及所有解压文件hash;两处固件路径中优先复用已有正确文件,缺失时只写一份,第二路径hardlink并验证。不同现有文件/符号链接保留,link失败不复制第二份。**不挂载固件目录。** 目前空闲126.15MiB,qdsp一份59326752 B;仅按数据大小推算剩约69.57MiB(未计其他启动写入),而两份会只剩约13MiB,低于16MiB reserve。
+- `build.py`:每个新内核旁保存 `baseband-firmware.json`,外置模式打包boot时必须与私有root manifest的payload大小/hash匹配;未真实分配的extent不能编造。用法见 `x9/BUILD.md`。
+- **交叉编译结果**:external模式 `kern_exec.o`、`sweet_x9_ufs.o` 成功;embedded诊断模式 `kern_exec.o` 成功。首次编译发现 `kfree_data` 宏要求lvalue,已改为局部指针后重编成功;仍有XNU现存/风格警告,不是无警告构建。Python四文件语法编译成功,未运行额外测试套件、未完整link/打包、无CI run。
+- 重放本地编译:`python3 -I .local/x9/work/bbu-phase-156/compile-prep.py`。日志 `compile-prep.log`(首次失败)、`compile-prep-2.log`(成功)、`compile-{external,embedded}/build.log`、`compile-results.json`。脚本结束恢复新版格式的旧10文件generated header;**设备manifest和local.json未改**,当前local.json仍排除qdsp,新的正常build会要求显式诊断开关或切到完整外置配置,不要默默加开关继续测缺文件包。
+
+### 下一步(需用户确认后才操作设备)
+
+1. 本轮从基线 `8c211b4` 开始;代码/构建说明提交 **`6f5c194`**。没有新的设备写入/flash/reboot/挂载,**没有可上机的新boot**。插件仍275,不重建/覆盖Metal mailbox。
+2. 待用户确认:只新建 `/data/local/tmp/x9-ios-pan92-20261027-1215/baseband-Mav17-20H392.pack` 这一 **34MiB** 专用文件,保留root、插件mailbox、磁盘日志及所有分区备份。先现有root preflight;`pinfile create` 必须O_EXCL新建,随后设immutable并采集真实inode/FIEMAP,不解除任何旧文件保护。
+3. **尚未编写/运行设备staging脚本**。下一代理需沿用 `pinfile rawreadat/rawwriteat` 的旧hash比较、分块回读流程,远端rawreadat带 `2>/dev/null`;只写新文件extent,先无效头→payload→最后发布首块。完整payload rawhash成功后,在**新的私有manifest副本**加入firmware_policy,旧root manifest保留。不能对Android普通文件写入来替代raw plaintext staging。
+4. 新manifest通过root+固件preflight后,local.json改 `baseband_firmware_storage: external`,去掉exclude,用新manifest;保留hi/hk的完整boot配置、插件275,编内核/小boot。设备仍由用户手动启动,不自动reboot/flash。此阶段无新插件包,**不需插件mailbox staging,但需上述独立BBFW staging**。
+5. 新日志需看到完整11文件、`external 1 complete 1 result errno=0`、qdsp实际可读及本次落盘reset原因;再看 `fPhases` 是否消失、PCIControl/protocol query/Sahara是否开始推进。全流程未验证前不说基带修好。新启动的定点采集必须新目录,不得拼接156缓存。
+
+### 前次交接(HANDOFF 84,提交8c211b4): ADB 定点取证仅保存8.15 MiB;efs1.bin已有1 MiB
 
 - 用户告知 ADB 已连接,询问是否需要全读。**没有再次拉16 GiB根盘**;先运行现有只读 mutable-root preflight,设备身份、pin+immutable、inode/FIEMAP、分区映射、HFS UUID/容量均通过。随后仅用设备现有 `pinfile rawreadat` 读专用根盘 extent;不解除 pin、不写分区、不 flash/reboot、不挂载设备或本地根盘,不改变旧快照。
 - **新证据位置**:`.local/x9/work/x9-rootpull-156/`。`ranges/` 保存原始读取块,共 **8544256 B = 8.1484375 MiB**(另有少量预检/稳定性复读);`ranges.jsonl` 记录时间、偏移、大小、SHA256和脱敏命令。`identity.json`/`stability.json` 记录来源及采集前后 volume/journal header 不变,完成时间 **2026-11-09 19:43:24 +0800**。这些是156之后的新采集,不是旧根盘副本。
