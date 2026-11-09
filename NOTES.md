@@ -15,6 +15,28 @@
 - 证据:`~/.local/share/cc-remote/setup-logs/{doctor-root.log,auth-status-root.json,acp-local-read.jsonl,acp-local-read.stderr.log,acp-local-read-result.json}`;日志文件权限 600,包含账户元数据的日志不入 git。安装/测试日志同目录。
 - 初始交接提交 `07c6e99`;本次成功结果继续以独立文档提交记录,未推送;既有内核未提交修改保持原样。
 
+## HANDOFF 2026-11-09 (82): BBUpdater 真实失败原因 = 根卷 HFS 1% 保留空间让 _wireless 只剩 ~3 MiB,efs1.bin ftruncate ENOSPC;hk 下调保留(未上机)
+
+- 只读拉取:adb + `pinfile rawread/rawreadat` 拉整个 16 GiB 根盘到 `.local/x9/work/x9-rootpull/root-20261109.hfs`(断一次,rawreadat 1 GiB 续传,大小 17179869184)。
+  卷带日志未回放,只读挂不上;**7z 直读会把回放前的新文件读成 0 字节**(此前据此得出"logd 配置 0 字节"是错的,已作废)。
+  正确做法:`cp -c` APFS 克隆 `root-20261109.clone.hfs`,`hdiutil attach -imagekey diskimage-class=CRawDiskImage -nobrowse -owners off -mountpoint /tmp/x9root` 读写挂克隆(回放日志只改克隆)。
+- 观察:三份 logging plist(CommCenter/telephony.abm/telephony.bb)213 字节、15:18 已正确写入 Enable-Private-Data。
+- **观察(关键)**:`/private/var/wireless/Library/Logs/log-bb-live-stats.txt` 直接记录每次 reset 原因,不需要解码 tracev3。
+  14:09-15:58 = `Baseband Firmware Path Not Found`(固件门,已解决)。16:10/16:23/16:35/16:43 四次启动交替:
+  `BBUpdater error 104 - Failed to create scratch /private/var/wireless/baseband_data/bbfs/efs1.bin (11|15) kBBUReturnFileError@BBUEUR10UpdateSource.cpp:312`
+  和 `BBUpdater error 2 - Assertion failure ( fPhases.size() ) @BBUConsoleFeedback.cpp:93`。盘上 `bbfs/efs1.bin` 存在、0 字节。
+- 静态(libBBUpdaterDynamic 20H392):BBUScratchFile::createWithFile(0x1ee217de0)= 删旧文件失败→11;open(0x601,0600) 失败→15;
+  ftruncate(fd,size) 失败→11("cannot truncate file");getpwnam("_wireless")/fchown 失败→11;前面失败后 close 失败→15。/etc/passwd 有 _wireless(25)。
+- **根因**:sweet_hfs root mount 设 reserveBlocks = 1% totalBlocks(≤250 MiB)= 41943 块(164 MiB);非 root 的 truncate/write 带 kEFReserveMask
+  (hfs_readwrite.c:3761/472/4388),只能用 free-reserve。拉取时 free 42777 块(167 MiB)→ _wireless 只剩 ~834 块(3.3 MiB),EFS 扩展 ENOSPC。
+  (Mac 上 df 显示 167 MiB 可用是因为非 root mount 不设保留。)根盘占用大户:db/diagnostics 1.1 GB、db/biome 0.58 GB、db/uuidtext 0.47 GB、mobile/Library/Caches 0.25 GB。
+- hk(x9-rev252hk-md,boot.img 15278080 B,配置沿用 `.local/x9/modem/boot-rev252hi-md.json`,= hi + 本改动;hi/hk 都含 11-08 未提交的渲染改动):
+  hfs_readwrite.c 新增 `x9_hfs_lower_reserve()`(只降不升,hfs_lock_mount 下改 reserveBlocks);x9_baseband_firmware.inc 在 x9_bb=1、可写根、PID1 时
+  调用,boot-arg `x9_hfs_reserve_mb`(默认 16)。上机看 "X9 BBFW: root HFS reserve ... non-root usable ... KiB",然后看 log-bb-live-stats.txt 是否不再有 efs1.bin 错误。
+  未上机。未验证 fPhases 断言是否是 scratch 失败的连带结果(推断是重试路径)。长期:根盘 16 GiB 会继续被日志填满,需要清理或换更大根盘。
+- logd 解码工具:mandiant/macos-UnifiedLogs 在 `/tmp/ul-src/src`(rustup stable 编译;Homebrew rust 1.97 与 llvm 23 不匹配起不来);
+  Apple `log show --archive` 对这个手拼归档崩溃。新归档 `x9b.logarchive`(来自克隆挂载,完整)尚未解析。
+
 ## HANDOFF 2026-11-09 (81): 155(hi)+154 + 参考 QcomBaseband 的结论;停止出探针镜像,下一步是解码设备 logd(参考作者同样靠它调试 ABM/BBUpdater)
 
 - 观察(155 sweetiolog=CommCenter):BBUpdater 每轮 power-on(selector 1)之后的 IOKit 活动只有 `IODeviceTree:/chosen/asmb` 和 `/chosen` 的路径查找

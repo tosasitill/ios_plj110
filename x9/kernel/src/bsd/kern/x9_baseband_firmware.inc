@@ -182,6 +182,21 @@ static int sweet_x9_prepare_baseband_firmware(proc_t p,user_addr_t scratch,user_
 {
  if(sweet_x9_arg("x9_bb",0)!=1||!sweet_x9_ufs_root_active())return 0;
  if(!sweet_x9_ufs_root_writable()||!proc_is64bit(p)||proc_getpid(p)!=1)return EROFS;
+ /* rev252hk: BBUpdater (as _wireless) extends bbfs/efs1.bin with ftruncate; the root mount's 1% HFS
+  * reserve (164 MiB of 16 GiB) left non-root ~3 MiB of the 167 MiB free -> ENOSPC -> "Failed to create
+  * scratch ... (11)". Lower it (only lowers); x9_hfs_reserve_mb=<MiB>, default 16. */
+ {
+  extern int x9_hfs_lower_reserve(mount_t,uint64_t,uint64_t *,uint64_t *,uint64_t *);
+  int mb=sweet_x9_arg("x9_hfs_reserve_mb",16);
+  uint64_t before=0,after=0,free_bytes=0;int rerr=EINVAL;
+  vnode_t root=vfs_rootvnode();
+  if(root!=NULLVP){
+   if(mb>=0)rerr=x9_hfs_lower_reserve(vnode_mount(root),(uint64_t)mb<<20,&before,&after,&free_bytes);
+   vnode_put(root);
+  }
+  printf("X9 BBFW: root HFS reserve %llu -> %llu KiB, free %llu KiB, non-root usable %llu KiB errno=%d\n",
+   before>>10,after>>10,free_bytes>>10,free_bytes>after?(free_bytes-after)>>10:0,rerr);
+ }
  int logging=x9_bbfw_logging(p,scratch,end);
  if(logging)printf("X9 BBFW: logging setup errno=%d; existing settings preserved\n",logging);
  if(sweet_x9_arg("x9_bb_firmware",1)!=1)return 0;
