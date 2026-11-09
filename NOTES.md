@@ -1,3 +1,19 @@
+## HANDOFF 2026-11-09 (79): 153(gg):固件文件写入成功,BBUpdater 每轮成功打开 9 个文件后无声失败;hh = 放宽 CommCenter 文件访问追踪 + stderr tee
+
+- 观察(153.txt, gg):"X9 BBFW: original 20H392 Mav17 files 10 in 2 paths written 20 same 0 result errno=0"。X9 CC OPEN 显示每一轮(约 1.1 s 一轮,
+  从 17.6 s 起共约 15 轮)BBUpdater 按固定顺序打开 /private/preboot/<hash>/usr/local/standalone/firmware/Baseband/Mav17/ 下
+  restoresbl1.mbn、sbl1.mbn、rpm.mbn、apps.mbn、mba.mbn、tz.mbn、acdb.mbn、bbcfg.mbn、Options.plist,**全部 errno=0**;没有 qdsp6sw.mbn / info.plist /
+  bbticket.der 的打开记录(观察器只匹配含 Baseband/standalone/preboot 的路径,且只记 open,不含 stat)。每轮开头还打开 /var/wireless/Library/Logs/CrashReporter/Baseband/。
+  握手计数仍 resets 15、PCIControl methods 0x0、SAHARA 0,与 152 一致。
+- 观察(静态,libBBUpdaterDynamic):文件序列来自 BBUEUR10UpdateSource::init(0x1ee1ec160):对每个名字先 containsFile 再 createDataSource;
+  qdsp6sw.mbn 由 containsFile 决定(我们没放它,所以被跳过,不是已证明的失败);Options.plist 读出后调用 BBUUpdateSource::loadOptions(CFData),
+  该函数对空/非字典数据静默返回(不抛异常)。BBUEURUpdateSource::getManifestFilename()="bbticket.der"。_BBULog 经 ctu::OsLogLogger / os_log,
+  另有 fprintf(stderr)。ABM 的 "Failed on booting!: Reason" 的原因串只在 os_log 里,Mac 上看不到。
+- 推断(未验证):9 个文件之后 BBUpdater 失败的原因可能是 (a) 缺 qdsp6sw.mbn(manifest 校验)、(b) 缺 bbticket.der(无 Apple 票据;README 已说明参考项目的
+  补丁 CommCenter 未导入)、(c) 其它检查。三者目前都没有证据。
+- hh(x9-rev252hh-md,boot.img 15278080 B,同 gg 内容):open 观察器放宽为"所有失败(最多 150 行)+ 路径含 baseband/wireless/ticket/firmware/standalone/preboot/bbfw/.mbn/.der";
+  新增 stat 观察器 "X9 CC STAT: path=… errno=…"(fstatat_internal 包装);boot-arg sweetnull=CommCenter(CommCenter 写 /dev/null 的内容会以 "|CommCenter| …" 打出)。
+  目的:看 BBUpdater 在 9 个文件之后访问/查找什么(含 bbticket.der、qdsp6sw.mbn)以及有没有 stderr 日志。
 ## HANDOFF 2026-11-09 (78): 152(ff)证实固件路径存在性是第一道门;现在卡在 BBUpdater 读固件文件;gg = 小固件文件 + CommCenter 开文件追踪
 
 - 观察(152.txt, ff = 空目录):"X9 BBFW: Mav17 input absent; empty directories only … standalone errno=0 personalized errno=0"。握手计数从此变化:
