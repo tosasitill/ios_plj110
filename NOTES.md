@@ -1,3 +1,22 @@
+## HANDOFF 2026-11-09 (68): 142.txt 验证 CCIF nowait/READY；下一卡点为 iOS 通道启动，正在定位
+
+- USER「好了」，最新日志 `~/142.txt`，标记 `rev252em-md fs128-bb-txnowait-v1 mode=4 bb=1`。
+  15.060 s HS2 -> READY（9525 ms），19.665 s SIM READY，23.105 s C5GREG=1；本段没有前两版的 MCU 断言。
+  READY TX packets=2408/kicks=1713/busy_nowait=695，q4 TX f90/f90、RX f68/f68 均追平。
+  FS pool 9701568/134217728、nodes146/1024、handles1/128。CCIF 修复已实机通过启动阶段。
+- 15.154 s 发布22/22服务，15.158 s 宣告6个QMI服务。25.357 s board calls14/unsupported0，
+  channel opens全0、sahara state0/executes0/requests0、data port step0。仅有内部 UIM0x47探测/error94，
+  不能当作 CommCenter 正常QMI。日志只到26.018 s，未见CommCenter crash不等于长时稳定。
+- 参考实际路径 `.local/x9/work/references/UniXNU` ae687009348296e97e49ce6e925795044f363ce6、
+  `hackios-xnu-kernel` c84b4634277a70beac73921029b1fb6afc2530af；未找到同类 iOS16 PCI握手修复。
+  hackios `xnu/files/bsd/dev/hakios.cell.c` 是 IPv4 en1/DHCP 路线，不是 AppleBaseband 通道实现。
+- 已读取本地20H392原版 libTelephonyBasebandDynamic/libIOABP（`.local/x9/work/dsc-20H392/usr/lib`）。
+  manager22/23、baseband26/27、property28/29等已实现selector与iOS16相同；libIOABP仍匹配
+  AppleBasebandPCIInterface、IOServiceOpen type0，再调用selector0。不盲改iOS17映射。
+  原版输入的反汇编只作源码定位，`/tmp/x9-tbb16-disasm.txt`、`/tmp/x9-ioabp16-disasm.txt`；Apple文件未改。
+- 下一版 en 仅增加有界 board调用结果/state、matching和user-client启动诊断，保留FS128/CCIF nowait/AT路径。
+  构建与实机结果待补；未操作设备，原有GPU工作树不混入基带提交。
+
 ## HANDOFF 2026-11-09 (67): 141.txt 确认 el 生效；新卡点是 CCIF 门铃同步等待；rev252em-md BUILT 未上机
 
 - USER「好了」，`~/141.txt` 已存在；实测 1.261 s `build=rev252el-md fs128-bb-v1 mode=4 bb=1`，

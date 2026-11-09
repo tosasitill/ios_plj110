@@ -3,6 +3,7 @@
  * The channels and user-client methods of Apple's PCIe baseband interface as iPadOS 21H461 uses them (libIOABP, libPCITransport).
  * ABM finds a channel with IOServiceMatching("AppleBasebandPCIInterface") plus ABPInterfaceProtocol = <name> (an ASCII CFString),
  * opens it with IOServiceOpen type 0 and calls method 0 with one scalar 0. Portable; no kernel code.
+ * X9 checked that the original 20H392 libIOABP uses the same interface class, open type and method 0.
  */
 #ifndef COACHZ_BB_CHANNELS_H
 #define COACHZ_BB_CHANNELS_H

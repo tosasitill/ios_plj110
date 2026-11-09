@@ -49,6 +49,7 @@ struct bb_channel {
   uint32_t reads_waiting;
   void *owner;
   uint32_t opens, frames_in, frames_out, frames_dropped, bytes_in, bytes_out;
+  uint32_t userclient_requests, method_seen;
 };
 struct bb_tx { uint32_t local_port, node, port, len; uint8_t *data; };
 }
@@ -65,6 +66,10 @@ static void (*bb_send)(uint32_t local_port, uint32_t node, uint32_t port, const 
 static void (*bb_del_client)(uint32_t local_port);
 static int bb_published;
 static uint32_t bb_private_seen[64], bb_private_count, bb_ctl_logged;
+// Bounded bring-up diagnostics. Do not log user buffers, addresses or property values.
+static uint32_t bb_match_queries, bb_match_accepted, bb_match_seen, bb_match_missed, bb_match_other;
+static uint32_t bb_userclient_requests, bb_userclient_failures, bb_userclient_logs;
+static uint32_t bb_board_last_selector, bb_board_badargs, bb_pci_control_seen;
 static uint8_t bb_out[BB_FRAME_MAX];     // answers built under the lock
 static struct cbp_client bb_pdp_clients[CBQ_MAX_CLIENTS];
 static uint32_t bb_pdp_owners[CBQ_MAX_CLIENTS];
@@ -669,6 +674,21 @@ static void bb_reply(IOExternalMethodArguments *args, IOReturn result, uint32_t 
   CoachzBasebandAsync::send(reference, result, values, count);
 }
 
+static bool bb_client_begin(const char *name, UInt32 type)
+{
+  __atomic_fetch_add(&bb_userclient_requests, 1u, __ATOMIC_RELAXED);
+  const bool trace = __atomic_fetch_add(&bb_userclient_logs, 1u, __ATOMIC_RELAXED) < 32u;
+  if (trace) printf("COACHZ baseband: user client %s type %u begin\n", name, type);
+  return trace;
+}
+
+static IOReturn bb_client_end(const char *name, UInt32 type, bool trace, const char *stage, IOReturn result)
+{
+  if (result != kIOReturnSuccess) __atomic_fetch_add(&bb_userclient_failures, 1u, __ATOMIC_RELAXED);
+  if (trace) printf("COACHZ baseband: user client %s type %u %s -> 0x%x\n", name, type, stage, result);
+  return result;
+}
+
 // ------------------------------------------------------------------ AppleBasebandPCIInterface
 class AppleBasebandPCIUserClient : public IOUserClient {
   OSDeclareDefaultStructors(AppleBasebandPCIUserClient)
@@ -835,6 +855,11 @@ IOReturn AppleBasebandPCIUserClient::externalMethod(uint32_t selector, IOExterna
                                                     OSObject *, void *)
 {
   if (!args) return kIOReturnBadArgument;
+  if (selector < 32 && !(__atomic_fetch_or(&bb_ch[fChannel].method_seen, 1u << selector, __ATOMIC_RELAXED) & (1u << selector)))
+    printf("COACHZ baseband: channel %s selector %u scalar-in %u scalar-out %u struct-in %llu struct-out %llu async %u\n",
+           cbh_published[fChannel], selector, args->scalarInputCount, args->scalarOutputCount,
+           static_cast<unsigned long long>(args->structureInputSize), static_cast<unsigned long long>(args->structureOutputSize),
+           static_cast<unsigned>(bb_async(args)));
   switch (selector) {
   case 0: {   // open
     IOLockLock(bb_lock);
@@ -907,29 +932,46 @@ public:
   bool matchProtocol(OSDictionary *table) const
   {
     OSString *wanted = OSDynamicCast(OSString, table->getObject(CBH_PROTOCOL_KEY));
-    return !wanted || wanted->isEqualTo(cbh_published[fChannel]);
+    const bool matches = !wanted || wanted->isEqualTo(cbh_published[fChannel]);
+    __atomic_fetch_add(&bb_match_queries, 1u, __ATOMIC_RELAXED);
+    if (matches) {
+      __atomic_fetch_add(&bb_match_accepted, 1u, __ATOMIC_RELAXED);
+      if (!(__atomic_fetch_or(&bb_match_seen, 1u << fChannel, __ATOMIC_RELAXED) & (1u << fChannel)))
+        printf("COACHZ baseband: match %s accepted protocol-key %s\n", cbh_published[fChannel], wanted ? "string" : "absent-or-nonstring");
+    } else {
+      const int id = cbh_channel_id(wanted->getCStringNoCopy());
+      if (id >= 0 && id < 32) {
+        if (!(__atomic_fetch_or(&bb_match_missed, 1u << id, __ATOMIC_RELAXED) & (1u << id)))
+          printf("COACHZ baseband: match requested %s rejected by %s (other channels may match)\n", wanted->getCStringNoCopy(), cbh_published[fChannel]);
+      } else if (__atomic_fetch_add(&bb_match_other, 1u, __ATOMIC_RELAXED) < 8u) {
+        printf("COACHZ baseband: match unknown protocol length %u rejected by %s\n", wanted->getLength(), cbh_published[fChannel]);
+      }
+    }
+    return matches;
   }
   IOReturn newUserClient(task_t task, void *security, UInt32 type, OSDictionary *properties, IOUserClient **out) override
   {
     if (!out) return kIOReturnBadArgument;
     *out = nullptr;
+    __atomic_fetch_add(&bb_ch[fChannel].userclient_requests, 1u, __ATOMIC_RELAXED);
+    const bool trace = bb_client_begin(cbh_published[fChannel], type);
     static uint32_t seen;
     if (!(__atomic_fetch_or(&seen, 1u << fChannel, __ATOMIC_RELAXED) & (1u << fChannel)))
       printf("COACHZ baseband: first user client on %s\n", cbh_published[fChannel]);
     AppleBasebandPCIUserClient *client = OSTypeAlloc(AppleBasebandPCIUserClient);
-    if (!client) return kIOReturnNoMemory;
+    if (!client) return bb_client_end(cbh_published[fChannel], type, trace, "alloc", kIOReturnNoMemory);
     client->setChannel(fChannel);
     if (!client->initWithTask(task, security, type, properties) || !client->attach(this)) {
       client->release();
-      return kIOReturnError;
+      return bb_client_end(cbh_published[fChannel], type, trace, "init/attach", kIOReturnError);
     }
     if (!client->start(this)) {
       client->detach(this);
       client->release();
-      return kIOReturnError;
+      return bb_client_end(cbh_published[fChannel], type, trace, "start", kIOReturnError);
     }
     *out = client;
-    return kIOReturnSuccess;
+    return bb_client_end(cbh_published[fChannel], type, trace, "ready", kIOReturnSuccess);
   }
   IOReturn newUserClient(task_t task, void *security, UInt32 type, IOUserClient **out) override
   {
@@ -960,6 +1002,11 @@ public:
   IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args, IOExternalMethodDispatch *, OSObject *, void *) override
   {
     if (!args) return kIOReturnBadArgument;
+    if (selector < 32 && !(__atomic_fetch_or(&bb_pci_control_seen, 1u << selector, __ATOMIC_RELAXED) & (1u << selector)))
+      printf("COACHZ baseband: PCIControl selector %u scalar-in %u scalar-out %u struct-in %llu struct-out %llu async %u\n",
+             selector, args->scalarInputCount, args->scalarOutputCount,
+             static_cast<unsigned long long>(args->structureInputSize), static_cast<unsigned long long>(args->structureOutputSize),
+             static_cast<unsigned>(bb_async(args)));
     switch (selector) {
     case 0:   // open
     case 3:   // logger tune
@@ -986,19 +1033,21 @@ static IOReturn bb_open(IOService *service, task_t task, void *security, UInt32 
 {
   if (!out) return kIOReturnBadArgument;
   *out = nullptr;
+  const char *name = service->getMetaClass()->getClassName();
+  const bool trace = bb_client_begin(name, type);
   Client *client = OSTypeAlloc(Client);
-  if (!client) return kIOReturnNoMemory;
+  if (!client) return bb_client_end(name, type, trace, "alloc", kIOReturnNoMemory);
   if (!client->initWithTask(task, security, type, properties) || !client->attach(service)) {
     client->release();
-    return kIOReturnError;
+    return bb_client_end(name, type, trace, "init/attach", kIOReturnError);
   }
   if (!client->start(service)) {
     client->detach(service);
     client->release();
-    return kIOReturnError;
+    return bb_client_end(name, type, trace, "start", kIOReturnError);
   }
   *out = client;
-  return kIOReturnSuccess;
+  return bb_client_end(name, type, trace, "ready", kIOReturnSuccess);
 }
 
 class AppleBasebandPCIControl : public IOService {
@@ -1028,14 +1077,30 @@ public:
     if (!args) return kIOReturnBadArgument;
     uint64_t out[4] = { 0 };
     uint32_t nout = args->scalarOutputCount < 4 ? args->scalarOutputCount : 4;
+    const uint32_t room = args->scalarOutputCount;
     IOLockLock(bb_lock);
     const int result = cbc_call(&bb_control, selector, args->scalarInput, args->scalarInputCount, out, &nout);
+    bb_board_last_selector = selector;
+    if (result == CBC_BAD_ARGUMENT) bb_board_badargs++;
+    const uint32_t call = bb_control.calls;
+    const uint64_t manager = bb_control.manager_state, baseband = bb_control.baseband_state;
+    const uint32_t powered = bb_control.powered, resets = bb_control.resets;
+    // Only these inputs are boolean pins or ABM state enums, not property payloads or identities.
+    const bool state_input = selector == CBC_RESET_MODEM || selector == CBC_POWER || selector == CBC_MUX ||
+                             selector == CBC_VBUS || selector == CBC_SET_MANAGER_STATE || selector == CBC_SET_BASEBAND_STATE;
+    const uint64_t value = state_input && args->scalarInputCount ? args->scalarInput[0] : 0;
     // A reset or power-on goes back to before SendImage: nothing greets until the next one.
     if (!result && (selector == CBC_RESET_MODEM || selector == CBC_POWERCYCLE || (selector == CBC_POWER && args->scalarInputCount && args->scalarInput[0]))) {
       bb_boot_image_sent = false;
       bb_flush(CBH_SAHARA);
     }
     IOLockUnlock(bb_lock);
+    if (call <= 64u)
+      printf("COACHZ baseband: board #%u selector %u scalar-in %u scalar-out %u/%u struct-in %llu struct-out %llu -> 0x%x state-input %u value %llu manager %llu baseband %llu power %u resets %u\n",
+             call, selector, args->scalarInputCount, nout, room,
+             static_cast<unsigned long long>(args->structureInputSize), static_cast<unsigned long long>(args->structureOutputSize),
+             result, static_cast<unsigned>(state_input), static_cast<unsigned long long>(value),
+             static_cast<unsigned long long>(manager), static_cast<unsigned long long>(baseband), powered, resets);
     if (result == CBC_UNSUPPORTED) printf("COACHZ baseband: AppleBaseband selector %u unsupported\n", selector);
     for (uint32_t i = 0; i < nout; i++) args->scalarOutput[i] = out[i];
     args->scalarOutputCount = nout;
@@ -1254,11 +1319,19 @@ extern "C" void coachz_baseband_report(unsigned second)
          second, servers, clients, bb_qmux.dropped, bb_tx_dropped, bb_sahara.state, bb_sahara.executes, bb_sahara.requests, bb_control.calls, bb_control.unsupported,
          bb_data.step, bb_endpoint_fixes, bb_activations);
   printf("COACHZ qmi: %u s: %u trace lines, %u held back by the budget\n", second, bb_trace_lines, bb_trace_held);
+  printf("COACHZ baseband: handshake %u s: protocol queries %u accepted %u; user clients %u failed %u; board last %u badargs %u manager %llu baseband %llu power %u resets %u; PCIControl methods 0x%x\n",
+         second, __atomic_load_n(&bb_match_queries, __ATOMIC_RELAXED), __atomic_load_n(&bb_match_accepted, __ATOMIC_RELAXED),
+         __atomic_load_n(&bb_userclient_requests, __ATOMIC_RELAXED), __atomic_load_n(&bb_userclient_failures, __ATOMIC_RELAXED),
+         bb_board_last_selector, bb_board_badargs, static_cast<unsigned long long>(bb_control.manager_state),
+         static_cast<unsigned long long>(bb_control.baseband_state), bb_control.powered, bb_control.resets,
+         __atomic_load_n(&bb_pci_control_seen, __ATOMIC_RELAXED));
   for (uint32_t c = 0; c < CBH_PUBLISHED; c++) {
     const bb_channel *ch = &bb_ch[c];
-    if (ch->opens)
-      printf("COACHZ baseband: %s: opens %u, in %u frames %u bytes, out %u frames %u bytes, dropped %u, queued %u, reads waiting %u\n",
-             cbh_published[c], ch->opens, ch->frames_in, ch->bytes_in, ch->frames_out, ch->bytes_out, ch->frames_dropped, ch->count,
+    const uint32_t requested = __atomic_load_n(&ch->userclient_requests, __ATOMIC_RELAXED);
+    if (ch->opens || requested)
+      printf("COACHZ baseband: %s: user clients %u methods 0x%x opens %u, in %u frames %u bytes, out %u frames %u bytes, dropped %u, queued %u, reads waiting %u\n",
+             cbh_published[c], requested, __atomic_load_n(&ch->method_seen, __ATOMIC_RELAXED), ch->opens,
+             ch->frames_in, ch->bytes_in, ch->frames_out, ch->bytes_out, ch->frames_dropped, ch->count,
              ch->reads_waiting);
   }
   IOLockUnlock(bb_lock);

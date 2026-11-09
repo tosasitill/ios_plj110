@@ -3,6 +3,8 @@
  * The methods of the AppleBaseband user client (AppleBasebandN71's, which libTelephonyBaseband finds by the service name AppleBaseband)
  * as the bridge answers them. Selectors and scalar counts are read from __TelephonyBasebandControllerCallMethod's call sites in
  * libTelephonyBasebandDynamic (21H461). Portable and host-tested; no kernel code.
+ * X9 also checked the overlapping GPIO/state/property selectors in the original 20H392 library;
+ * this does not imply its remaining iOS 16 boot sequence is implemented or hardware-verified.
  *
  * On Apple's boards these drive GPIOs and PMU lines of a separate modem chip. Here the modem lives in the SoC and is started by our
  * MBA/PIL code before iPadOS runs, so power, reset, mux and VBUS requests are accepted and recorded but do not touch the modem; the
