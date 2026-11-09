@@ -73,9 +73,10 @@ X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>      # 之后再�
 
 ## 3. 当前基线镜像与参数
 
-最新:**x9-rev252hk-md**(修复提交 `d1f8515` + 当时未提交的渲染改动,现已入库),boot.img **15278080 B**;**156 与本次 ADB 定点取证确认 reserve 调整生效、efs1.bin 已分配 1 MiB,但 iOS 基带握手未推进**(HANDOFF 84)。
+最新已构建、待用户测试:**x9-rev252hl-md**(代码提交 **`20c64f2`**),boot.img **12877824 B=12.28125MiB**,路径 `x9/out/x9-rev252hl-md/boot.img`。独立34MiB完整BBFW已stage,插件275不变,不需再stage插件/固件,**尚未上机验证**,见HANDOFF86。
+最后实测:**x9-rev252hk-md**(修复提交 `d1f8515` + 当时未提交的渲染改动,现已入库),boot.img **15278080 B**;**156 与本次 ADB 定点取证确认 reserve 调整生效、efs1.bin 已分配 1 MiB,但 iOS 基带握手未推进**(HANDOFF 84)。
 本机镜像:`x9/out/x9-rev252hk-md/boot.img`;配置沿用 `.local/x9/modem/boot-rev252hi-md.json`。
-本次 BBUpdater 日志的15条 reset 原因全部为 **error 2 / `fPhases.size()` 断言**,不再出现之前的 scratch error 104;efs1.bin 零字节问题已消失,不能再把该断言仅归因于 scratch 失败。现已定位必需 `qdsp6sw.mbn` 缺失导致的启动校验失败分支,外置完整固件＋单份硬链接代码已做单文件交叉编译;**设备独立34MiB暂存已完成并通过全包rawhash,小boot候选尚待构建/实测**,详情见 §7。以下 GPU 专用基线与参数为 **2026-11-08 历史记录**,不要当作 hk 参数直接复用。
+本次 BBUpdater 日志的15条 reset 原因全部为 **error 2 / `fPhases.size()` 断言**,不再出现之前的 scratch error 104;efs1.bin 零字节问题已消失,不能再把该断言仅归因于 scratch 失败。现已定位必需 `qdsp6sw.mbn` 缺失导致的启动校验失败分支,外置完整固件＋单份硬链接代码已编入hl;**设备独立34MiB暂存已完成并通过全包rawhash,小boot已构建,尚待用户实测**,详情见 §7。以下 GPU 专用基线与参数为 **2026-11-08 历史记录**,不要当作 hk/hl 参数直接复用。
 
 历史 GPU 基线:**x9-rev252dc**(内核-only,插件 275 不变,沿用 rev252cx 之后的 mailbox)boot_sha256 `041d267fc297dd0830bd50407b85579679f0ace28ad2ba94a7c825e3bd0fd80c`,**未上机**。
 已用户确认好的最后一版:**rev252cy**(123 修好、控制中心不卡);之后 cz(x9lc)、da(1242x2760)、db(DVFSRC 探针)均未上机验证。
@@ -150,7 +151,7 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
 
-## 7. 当前交接(HANDOFF 86,2026-11-09): 用户批准的34MiB独立BBFW已暂存并回读校验;准备小boot候选
+## 7. 当前交接(HANDOFF 86,2026-11-09): 用户批准的34MiB独立BBFW已暂存并回读校验;hl小boot 12877824 B BUILT,待用户测试
 
 - 用户回复“好”,明确批准前轮询问的专用文件创建和file-only extent写入。本轮只新建 `/data/local/tmp/x9-ios-pan92-20261027-1215/baseband-Mav17-20H392.pack`(**34MiB**,12个extent),F2FS pinned且immutable;未解除任何旧文件保护,未flash/reboot/挂载,未向原根盘/插件/磁盘日志写raw数据。
 - 新增受控工具 `x9/tools/stage_baseband_firmware.py`:必须 `--create --yes` 或用准确捕获状态 `--resume --yes`,默认拒绝复用旧文件;每次raw写入前复核inode/保护/FIEMAP,范围最多256KiB,先读旧hash→pinfile比较后写→同范围读回hash,无效首块→payload→最后发布首块。完成后验证全包rawhash,原root/plugin/log文件inode/map及root首64KiB hash不变,再发布新私有manifest。操作用法及失败恢复约束见 `x9/BUILD.md`。
@@ -160,7 +161,9 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - 私有状态/证据: `.local/x9/baseband/staging-20261109-rev252hl/` 的 `provisioning.json`、`operations.jsonl`、`existing-files-{before,after}.json`、`allocation-android-extents.json`、`retired-source-path-status.txt`、`reservation-reclassification.json`、`payload-rawhash.txt`、`preflight-{before,after}.log`及只读恢复脚本;含设备标识,均不入git。新权威manifest为同目录 **`root-manifest.json`**,旧pan220 manifest保留。
 - `x9/build/local.json` 已切换 `root_manifest` 到该新manifest、`baseband_firmware_storage: external`,去除exclude/incomplete/large-boot开关。修改前后副本为同目录 `local-{before,after}.json`。仍使用原始Mav17 bbfw,插件allowlist **275未改**,**无需插件mailbox staging**,但本次独立BBFW staging已完成。
 - 同步修正 `x9_modem.inc` 的硬编码build日志标记为 `rev252hl-md`(仅标签,没有改MD协议逻辑),避免像156那样把遗留hj标签误认为启动错镜像。
-- 下一步:用 `.local/x9/modem/boot-rev252hi-md.json` 原完整配置构建 **`x9-rev252hl-md`** 内核/小boot(不传插件revision、不重建插件)。构建成功后不二次检查镜像;由用户手动启动。新日志需验证11文件/`external 1 complete 1 result errno=0`、qdsp可读、本次落盘reset原因以及PCI/protocol/Sahara是否推进;不得用暂存成功代替基带功能成功。新启动采集必须新目录,不复用156缓存。
+- **构建成功,代码提交20c64f2**: `python3 -I x9/build/build.py all --name x9-rev252hl-md --boot-config .local/x9/modem/boot-rev252hi-md.json`。没有传revision,没有运行插件构建;本机ccache交叉编译 **53/53 overlay对象(另6 prebuilt)**、link/strip及boot打包均成功。原38个boot-arg和options沿用hi/hk,固件描述与已stage manifest的payload大小/hash内置匹配检查通过。构建自己的输出=`Image 28708864 bytes; shim-boot.img 12877824 bytes; entry 0x1000; PSTORE MIRROR`,20MiB boot guard未放宽。未二次解包/重算hash/反汇编镜像,未运行额外测试套件,未手动触发CI。
+- 构建日志:`x9/out/x9-rev252hl-md/build.log`及私有staging目录 `kernel-boot-build.stdout.log`;内核旁 `baseband-firmware.json` 是完整external描述,搬内核时必须一起保留。插件allowlist与git保持一致,没有重新打包/写mailbox。hk回退镜像保留。
+- **下一步由用户手动**:`fastboot boot x9/out/x9-rev252hl-md/boot.img`。固件已stage,用户不用再放文件或挂载;候选PID1才会把缺少的qdsp写进HFS并为另一固件路径建硬链接,**当前Android状态不声称根盘qdsp已安装**。新日志需验证11文件/`external 1 complete 1 result errno=0`、qdsp可读、本次落盘reset原因以及PCI/protocol/Sahara是否推进;不得用暂存/构建成功代替基带功能成功。新启动采集必须新目录,不复用156缓存。
 
 ### 前次交接(HANDOFF 85,代码6f5c194/交接872dba5): qdsp 是启动必需项;外置完整固件代码已交叉编译
 
