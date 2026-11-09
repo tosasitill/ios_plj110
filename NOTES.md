@@ -1,15 +1,19 @@
-## ENV HANDOFF 2026-11-09: cc-remote 本机配置完成;远端 SSH 认证未通过
+## ENV HANDOFF 2026-11-09: cc-remote 配置完成;ss.key + sudo -i;已验证远端 Claude 读取本机文件
 
 - 本次仅配置开发工具,未构建/启动设备,未修改内核代码;设备工作仍以紧接其后的 HANDOFF (81) 为准。
 - 安装:Bun 1.4.4、cc-remote 0.1.0 (claude-agent-acp 0.99.1)、acpc 0.1.0;三个命令均可从已有 PATH 的 `~/.local/bin` 使用,未改 shell 配置。
 - cc-remote 源码:`~/.local/share/cc-remote/source`,上游提交 `063f81524e84b7ad40a203d4c7da6f92fcfd2e41`;按锁文件执行 `bun install --frozen-lockfile`,再 `bun run compile` 和 `bun link`。
-- 主机文件:`~/.config/cc-remote/host` = `cc-remote-server`;对应 SSH 别名位于 `~/.ssh/config`。用户提供的密钥已复制到 `~/.ssh/cc-remote-2026-10-08.key` (600),原文件权限也从 644 收紧到 600。地址和私钥仅存本机,不入 git。
+- 主机文件:`~/.config/cc-remote/host` = `cc-remote-server`;对应 SSH 别名位于 `~/.ssh/config`。首次密钥被服务端拒绝;用户随后提供 `Downloads/ss.key`,该密钥已复制到 `~/.ssh/cc-remote-ss.key` (600),SSH 登录成功。旧密钥副本和 SSH 配置备份保留。地址和私钥仅存本机,不入 git。
 - acpc 配置实际路径(macOS):`~/Library/Application Support/acpc/config.toml`;已注册 `Claude (remote)` / slug `cc-remote`,设为默认 agent,启动命令为 `cc-remote`。
+- 用户确认 Claude 装在 root 下,应使用 `sudo -i`。运行时已验证 root 的 `/root/.local/bin/claude` = 2.1.319,`auth status` = loggedIn true / claude.ai / pro。不需要重新登录或安装 root Claude。此前启动的 ubuntu 用户安装进程已精确停止,其下载/部分安装文件保留,未清理已有 root 安装。
+- 转接:`~/.config/cc-remote/ssh-sudo` 保留 SSH 参数和 stdin/stdout,将整个远端命令包装成 `sudo -n -i -- /bin/sh -c <quoted-command>`,带 SSH 连接复用和 keepalive。`~/.local/bin/cc-remote` 现为启动包装器,设置 `CC_REMOTE_SSH` 后执行原编译二进制;原 symlink 备份为 `cc-remote.without-sudo-*`。上游源码/依赖未改动。
+- 已确认的兼容性问题:本机 ACP adapter 非 root,默认把 allow-dangerously-skip-permissions flag 传给远端,root Claude 因此在 session/new 退出。使用独立 `~/.config/cc-remote/claude-config/settings.json` (从现有本机 settings 复制,仅加 `permissions.disableBypassPermissionsMode="disable"`)解决;包装器设置本机 `CLAUDE_CONFIG_DIR`,远端 spawner 不转发该变量,继续使用 root 原登录。原全局 Claude 设置未修改;后续全局 settings 修改不会自动同步到此副本。
+- 本机会话镜像现在存于 `~/.config/cc-remote/claude-config/projects/`,不是默认 `~/.claude/projects/`。可用模式已验证为 default / acceptEdits / plan / auto,不含 bypassPermissions。
 - 验证(本机):编译成功;`bun test` = 30 pass / 0 fail / 76 expect;已编译二进制的 ACP `initialize` 返回 protocolVersion 1、agent version 0.99.1,无错误。
-- 验证(SSH):目标 TCP/22 可连接;权限修复后密钥签名使用 rsa-sha2-512,但服务端仍返回 `Permission denied (publickey)` / exit 255。尚未进入远端 shell,故远端 Claude 安装、版本、登录状态及完整对话/本地工具调用均未验证。不是 cc-remote 安装失败,也不能据此认定密钥或用户名哪个错误。
-- 日志:`~/.local/share/cc-remote/setup-logs/{install.log,compile.log,tests.log,ssh.debug.log,acp-initialize.json}`。
-- 下一步:用户确认/修正该远端账户的密钥授权后,先 `ssh cc-remote-server`,再 `cc-remote doctor` 检查远端 Claude (README 要求 >= 2.1.248);如需登录,执行 `cc-remote --cli auth login`;最后在项目目录运行 `acpc` (或 `acpc -a cc-remote`),验证一轮对话及本地只读工具调用。认证未修正前不重复连接尝试。
-- 此环境交接以独立文档提交记录,未推送;既有内核未提交修改保持原样。
+- 验证(端到端):`cc-remote doctor` = remote claude 2.1.319 / ok;新 ACP session `114ed4e7-a45d-4faf-b2c4-de4191a5e603` 成功调用 `Read File`,准确返回随机临时文件内容,end_turn。额外从 root SSH 检查映射远端目录中该文件不存在,证明读取发生在本机。测试不批准任何权限请求,未修改项目文件。
+- 复验:`cc-remote doctor`;`python3 ~/.local/share/cc-remote/verify-local-read.py` (每次生成全新临时目录/随机内容);实际使用在项目目录运行 `acpc` 或 `acpc -a cc-remote`。SSH/sudo 均免交互,不需要手动 sudo -i。
+- 证据:`~/.local/share/cc-remote/setup-logs/{doctor-root.log,auth-status-root.json,acp-local-read.jsonl,acp-local-read.stderr.log,acp-local-read-result.json}`;日志文件权限 600,包含账户元数据的日志不入 git。安装/测试日志同目录。
+- 初始交接提交 `07c6e99`;本次成功结果继续以独立文档提交记录,未推送;既有内核未提交修改保持原样。
 
 ## HANDOFF 2026-11-09 (81): 155(hi)+154 + 参考 QcomBaseband 的结论;停止出探针镜像,下一步是解码设备 logd(参考作者同样靠它调试 ABM/BBUpdater)
 
