@@ -1,5 +1,7 @@
 ## HANDOFF 2026-11-09 (72): 对照完整参考补原版Mav17固件视图/日志；rev252eq-md BUILT 未上机
 
+- PUSH：用户追问后已执行`git push -u origin rev252cn`成功，创建远端同名分支并设置upstream；
+  代码`55e6df9`与构建交接`f11d690`已推送。boot.img/Apple固件和未提交GPU工作树不在推送内容中。
 - USER在读145后要求“把参考实现有的我们缺失的都实现”。对照QcomBaseband `dd0199cf3300764ed52b23f4a47761f91fab21a2`
   的全部`baseband/*`与`platform/coachz/patches/coachz-prelink-baseband.patch`：本地portable bridge没有缺失功能delta，
   QMUX/CTL/SAHARA/PRI-GRI/BSP/activation/PDP/WDS-QOS/DPM-WDA/eSIM均已导入，本地多出早helper和有界诊断。
