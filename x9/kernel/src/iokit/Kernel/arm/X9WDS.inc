@@ -89,9 +89,13 @@ static void x9w_init_poll(uint8_t *response,unsigned room){
   x9w_init_token=0;unsigned result=2,version=0,mask=x9w_init_stage==1?0xff:1;
   bool good=x9w_wire(response,n,mask)&&x9q_u16(response+10)==(x9w_init_stage==1?0x302:0x308);
   if(x9w_init_stage==1){
-   // libmipc mipc_init reads VERSION100/TIMEOUT101, not a fabricated result.
+   // libmipc mipc_init (0x133a0) only LOGS VERSION100 (default -1) and
+   // TIMEOUT101 (default 300000) and succeeds once the CNF arrives. 160.txt:
+   // this MD answers result 0, VERSION 0, TIMEOUT 300000. Keep a non-zero
+   // result as a failure; the version is recorded, not enforced.
    x9q_view r=good?x9w_tlv(response,n,0):x9q_view{nullptr,0};
-   good=good&&x9w_word(response,n,0x100,version)&&version==2&&(!r.p||(r.n==4&&x9q_u32(r.p)==0));
+   if(good&&x9w_word(response,n,0x100,version))printf("X9 MIPC: OPEN_CNF version %u (libmipc does not check it)\n",version);
+   good=good&&(!r.p||(r.n==4&&x9q_u32(r.p)==0));
   }else good=good&&x9w_word(response,n,0,result)&&result==0;
   if(!good){
    /* Handshake CNFs carry only version/result/timeout words: log tags and

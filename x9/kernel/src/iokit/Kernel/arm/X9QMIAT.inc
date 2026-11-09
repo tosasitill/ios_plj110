@@ -150,27 +150,42 @@ static void x9q_sim_command(x9q_job &j,unsigned op,unsigned file,unsigned p1,uns
   * leaves it empty (AT+ECRLA=...,%d,,"%s" in libmtk-ril), as 27.007 allows. */
  snprintf(j.command,sizeof(j.command),"AT+CRSM=%u,%u,%u,%u,%u,,\"%s\"\r",op,file,p1,p2,p3,path);j.stage=stage;
 }
-static bool x9q_read_args(x9q_job &j){
+/* 160.txt: every CommCenter ReadTransparent (UIM 0x20) failed here with 48 and
+ * no reason. Return the failing check; the caller logs it with the file id. */
+static const char *x9q_read_check(x9q_job &j){
  x9q_view session=x9q_tlv(j.req,j.len,1),file=x9q_tlv(j.req,j.len,2),read=x9q_tlv(j.req,j.len,3);
- if(!session.p||session.n!=2||session.p[1]!=0||!file.p||file.n<3||file.n!=3u+file.p[2]||
-    file.p[2]>16||(file.p[2]&1)||!read.p||read.n!=4)return false;
+ if(!session.p||session.n!=2)return "session TLV";
+ if(session.p[1]!=0)return "non-empty AID";
+ if(!file.p||file.n<3||file.n!=3u+file.p[2]||file.p[2]>16||(file.p[2]&1))return "file TLV";
+ if(!read.p||read.n!=4)return "read TLV";
  j.file=x9q_u16(file.p);j.offset=x9q_u16(read.p);j.amount=x9q_u16(read.p+2);
- if(!j.amount||j.amount>255)return false;
+ /* QMI length 0 = whole file / whole record; resolved from the FCP. */
+ if(j.amount>255)return "length over one CRSM read";
  unsigned st=session.p[0];
  /* CRSM has no proven arbitrary-AID/slot routing on this MD. Only primary GW
   * (empty AID, current USIM) or card-1 MF files; never map slot-2 to slot-1. */
- if(st!=0&&st!=6)return false;
+ if(st!=0&&st!=6)return "session type";
  const char hex[]="0123456789ABCDEF";
  for(unsigned i=0;i<file.p[2];i+=2){uint16_t f=x9q_u16(file.p+3+i);unsigned o=i*2;
   j.path[o]=hex[f>>12];j.path[o+1]=hex[(f>>8)&15];j.path[o+2]=hex[(f>>4)&15];j.path[o+3]=hex[f&15];}
  j.path[file.p[2]*2]=0;
  bool mf=!strcmp(j.path,"3F00")&&(j.file==0x2fe2||j.file==0x2f00);
  bool usim=st==0&&!strcmp(j.path,"3F007FFF")&&j.file>=0x6f00&&j.file<=0x6fff;
- if(!mf&&!usim)return false;
- if(j.id==0x21&&(!j.offset||j.offset>255))return false;
+ if(!mf&&!usim)return "path/file outside MF ICCID/DIR and USIM 6Fxx";
+ if(j.id==0x21&&(!j.offset||j.offset>255))return "record number";
  /* Reject indication tokens, encryption, multi-record reads and unknown TLVs. */
- for(unsigned i=7;i<j.len;i+=3+x9q_u16(j.req+i+1))if(j.req[i]<1||j.req[i]>3)return false;
- return true;
+ for(unsigned i=7;i<j.len;i+=3+x9q_u16(j.req+i+1))if(j.req[i]<1||j.req[i]>3)return "extra TLV";
+ return nullptr;
+}
+static bool x9q_read_args(x9q_job &j){
+ const char *why=x9q_read_check(j);if(!why)return true;
+ static unsigned logged;
+ if(logged<64){logged++;x9q_view se=x9q_tlv(j.req,j.len,1);char t[64];unsigned w=0;t[0]=0;
+  for(unsigned i=7;i+3<=j.len&&w+12<sizeof(t);){unsigned k=x9q_u16(j.req+i+1);if(k>j.len-i-3)break;
+   w+=(unsigned)snprintf(t+w,sizeof(t)-w," %02x/%u",j.req[i],k);i+=3+k;}
+  printf("X9 QMI AT: UIM 0x%04x read rejected (%s): session %d aid %d file 0x%04x path %s offset %u length %u tlvs%s\n",
+   j.id,why,se.p&&se.n>=1?se.p[0]:-1,se.p&&se.n>=2?se.p[1]:-1,j.file,j.path[0]?j.path:"-",j.offset,j.amount,t);}
+ return false;
 }
 static void x9q_card(x9q_job &j){
  uint8_t s[256];unsigned n=0;memset(s,0xff,8);n=8;s[n++]=1;
@@ -322,9 +337,16 @@ static void x9q_result(x9q_job &j,const char *r,int result){
   }
   if(j.stage==5){
    if(!x9q_fcp(j,data,n,j.file)){x9q_error(j,X9Q_UNSUPPORTED);return;}
-   if(j.id==0x20){if(j.structure!=1||j.offset>j.raw_len||j.amount>j.raw_len-j.offset){x9q_error(j,X9Q_ARG);return;}
+   if(j.id==0x20){
+    if(j.structure==1&&!j.amount&&j.offset<j.raw_len)j.amount=(uint16_t)(j.raw_len-j.offset); /* FCP size is 2 bytes */
+    if(j.structure!=1||!j.amount||j.amount>255||j.offset>j.raw_len||j.amount>j.raw_len-j.offset){
+     printf("X9 QMI AT: UIM read 0x%04x FCP mismatch: structure %u size %u offset %u length %u\n",j.file,j.structure,j.raw_len,j.offset,j.amount);
+     x9q_error(j,X9Q_ARG);return;}
     x9q_sim_command(j,176,j.file,j.offset>>8,j.offset&255,j.amount,j.path,6);
-   }else{if((j.structure!=2&&j.structure!=6)||j.offset>j.record_count||j.amount!=j.record_size){x9q_error(j,X9Q_ARG);return;}
+   }else{if(!j.amount)j.amount=j.record_size;
+    if((j.structure!=2&&j.structure!=6)||j.offset>j.record_count||j.amount!=j.record_size){
+     printf("X9 QMI AT: UIM record 0x%04x FCP mismatch: structure %u records %u size %u record %u length %u\n",j.file,j.structure,j.record_count,j.record_size,j.offset,j.amount);
+     x9q_error(j,X9Q_ARG);return;}
     x9q_sim_command(j,178,j.file,j.offset,4,j.amount,j.path,6);}
    return;
   }

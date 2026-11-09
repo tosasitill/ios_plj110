@@ -73,8 +73,8 @@ X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>      # 之后再�
 
 ## 3. 当前基线镜像与参数
 
-最新实测:**x9-rev252ht-md**(159,见HANDOFF92);再前 **x9-rev252hs-md**(158,见HANDOFF91;MIPC/DPMAIF在prepare/OPEN即隔离,UIM卡状态被拒);前一实测 **x9-rev252hl-md**(代码提交 **`20c64f2`**,构建交接 `0f9d983`),boot.img **12877824 B=12.28125MiB**,路径 `x9/out/x9-rev252hl-md/boot.img`。**157确认完整11文件安装成功、qdsp可读、Sahara finished并进入QMUX/QMI,握手摘要reset=0;真实iOS蜂窝尚未打通**,见HANDOFF87。独立34MiB固件与插件275不需再stage。
-当前未上机候选:**x9-rev252hu-md**(HANDOFF92:RAM 9.74G allowlist+MIPC/CRSM);回退 **x9-rev252ht-md**;更早候选 **x9-rev252hq-md**(代码`ccbad81`),boot.img12906496B;沿用hn AT→QMI,新增DPMAIF只读/分配探针和WDS前置状态查询,见HANDOFF89。hq默认`x9_dpmaif=1`,不初始化硬件或激活PDP;hn保留。最新实测仍hl;不要把候选当作SIM/蜂窝已验证。
+最新实测:**x9-rev252hu-md**(160,见HANDOFF93;RAM 10.0GiB生效);再前 **x9-rev252ht-md**(159,见HANDOFF92);再前 **x9-rev252hs-md**(158,见HANDOFF91;MIPC/DPMAIF在prepare/OPEN即隔离,UIM卡状态被拒);前一实测 **x9-rev252hl-md**(代码提交 **`20c64f2`**,构建交接 `0f9d983`),boot.img **12877824 B=12.28125MiB**,路径 `x9/out/x9-rev252hl-md/boot.img`。**157确认完整11文件安装成功、qdsp可读、Sahara finished并进入QMUX/QMI,握手摘要reset=0;真实iOS蜂窝尚未打通**,见HANDOFF87。独立34MiB固件与插件275不需再stage。
+当前未上机候选:**x9-rev252hv-md**(HANDOFF93:MIPC版本/UIM读文件);回退 **x9-rev252hu-md**;更早候选 **x9-rev252hq-md**(代码`ccbad81`),boot.img12906496B;沿用hn AT→QMI,新增DPMAIF只读/分配探针和WDS前置状态查询,见HANDOFF89。hq默认`x9_dpmaif=1`,不初始化硬件或激活PDP;hn保留。最新实测仍hl;不要把候选当作SIM/蜂窝已验证。
 回退:**x9-rev252hk-md**(修复提交 `d1f8515` + 当时未提交的渲染改动,现已入库),boot.img **15278080 B**;156确认reserve生效、efs1.bin已有1MiB,当时15次reset及零传输见HANDOFF84。
 本机回退镜像:`x9/out/x9-rev252hk-md/boot.img`;hl/hk配置沿用 `.local/x9/modem/boot-rev252hi-md.json`。
 157已越过缺qdsp的前置阻塞,**当前阻塞在X9的QMI→MTK适配**:UIM/NAS/DMS/WDS/WDA/DPM请求实际到达后返回0x5e,数据端口配置失败,四个PDP接口仍blocked/tx=rx=0。Sahara是兼容桥交互,不向物理MTK下载Apple固件;PCIControl methods仍0x0,不能说PCIControl已通。以下GPU专用基线与参数为 **2026-11-08 历史记录**,不要当作hk/hl参数直接复用。
@@ -152,7 +152,17 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
 
-## 7. 当前交接(HANDOFF 92,2026-11-09): 159(ht)读完;RAM扩到9.74GiB allowlist + MIPC/CRSM修复,hu已构建待上机
+## 7. 当前交接(HANDOFF 93,2026-11-09): 160(hu)读完;RAM 10.0GiB已生效、UIM卡状态通;hv修MIPC版本检查与UIM读文件
+
+- **160.txt**(Mac `~/160.txt`,1257059B/12417行,末49.9s,无panic,shim未报`X9 RAM rejected`)。`build=rev252hu-md`;13.3s HS2→READY。
+- **RAM(观察)**:`vm_page_bootstrap: 630787 free pages, 24189 wired`,(630787+24189)×16KiB≈**10.0GiB**(159为8.7GiB)。新segmented表(base 0x100000000/top 0x37FA00000)通过live FDT核对,本次启动正常进入SpringBoard阶段。
+- **UIM(观察)**:CRSM改为空data字段后,0x47 SlotStatus与0x2f CardStatus均`result 0 error 0 (real AT)`。CommCenter随即连续发UIM 0x20 ReadTransparent(约30次),全部在`x9q_read_args`被拒(48),当时没有原因日志。**推断**多为length 0(QMI表示整个文件)。hv:允许length 0,由FCP文件大小补全(仍限单次CRSM≤255B);record读length 0取record大小;拒绝时打印原因、session/aid长度、EF id、path、offset、length和TLV tag(不打印内容)。
+- **MIPC(观察)**:OPEN_CNF的TLV为`0000=0 0100=0 0101=300000`(result 0、VERSION 0、TIMEOUT 300000)。被我们自己的`version==2`要求拒绝。反汇编libmipc `mipc_init` 0x133a0:VERSION/TIMEOUT只写日志(缺省-1/300000),CNF到达就返回0。hv:只要求result为0;version只打印不检查。
+- DPMAIF仍在prepare失败(`no descriptor`),原因同HANDOFF92:XNU没有4GiB以下的页。DMS 0x23/0x25/0x2d成功。
+- **hv构建成功**(未上机):同hu参数,`--name x9-rev252hv-md`,boot.img **12922880B**;日志`.local/x9/work/pdp-activation/build-hv.stdout.log`(Mac)。新增代码无新warning。插件275不变,无需mailbox staging。回退:hu。
+- **下一步由用户手动**:`fastboot boot x9/out/x9-rev252hv-md/boot.img`,日志放`~/161.txt`。看`rg -n 'build=rev252hv|X9 MIPC|X9 QMI AT: (UIM|response service 0xb)|X9 WDS' ~/161.txt`,预期MIPC `stage 1 confirmed`→stage 3 `IPv4 dialler ready`,UIM 0x20出现`(real AT)`或带原因的拒绝。
+
+### 前次交接(HANDOFF 92,2026-11-09): 159(ht)读完;RAM扩到9.74GiB allowlist + MIPC/CRSM修复,hu已构建待上机
 
 - **159.txt**(Mac `~/159.txt`,1326389B/13172行,末77.8s,无panic)。`build=rev252ht-md`;14.2s HS2→READY;Sahara finished;摘要`resets 1, PCIControl 0x0`不变。
 - **MIPC(观察)**:OPEN的回复头为`84195424 00000000 mask 0xff flag 0x02 id 0x0302 txn 1 len 24`。可见hs是被byte9=0x02隔离的,ht的transport修复生效。但WDS侧`x9w_wire`仍要求`p[9]==0`且mask完全相等,所以`handshake stage 1 rejected/malformed`。hu修复:去掉这两项检查(同libmipc);拒绝时打印TLV tag和4字节值。
