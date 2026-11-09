@@ -337,6 +337,11 @@ void x9_sample_start(void) {
  }
  if(PE_parse_boot_argn("x9_sample_procs",sample_names,sizeof(sample_names)) && sample_names[0]) {
   on=true; sample_delay=30; sample_interval=10; sample_count=12;
+  /* rev252hj: x9sd / x9si (seconds) / x9sn override the defaults. */
+  int v=0;
+  if(PE_parse_boot_argn("x9sd",&v,sizeof(v)) && v>=1 && v<=600)sample_delay=v;
+  if(PE_parse_boot_argn("x9si",&v,sizeof(v)) && v>=1 && v<=600)sample_interval=v;
+  if(PE_parse_boot_argn("x9sn",&v,sizeof(v)) && v>=1 && v<=60)sample_count=v;
  } else sample_names[0]=0;
  if(!on)return;
  if(kernel_thread_start(sample_thread,NULL,&thread)==KERN_SUCCESS)thread_deallocate(thread);

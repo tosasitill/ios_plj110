@@ -1,3 +1,17 @@
+## HANDOFF 2026-11-09 (81): 155(hi)+154 + 参考 QcomBaseband 的结论;停止出探针镜像,下一步是解码设备 logd(参考作者同样靠它调试 ABM/BBUpdater)
+
+- 观察(155 sweetiolog=CommCenter):BBUpdater 每轮 power-on(selector 1)之后的 IOKit 活动只有 `IODeviceTree:/chosen/asmb` 和 `/chosen` 的路径查找
+  (libimg4 arm_secure_boot_chip 读 lp-smb0/lp-smb1,缺失时按 1 处理,不是失败点),**没有任何 PCI 相关 IOKit 匹配**(没有 AppleBasebandPCIInterface/
+  AppleBasebandPCIControl 的 IOServiceMatching),随后约 1-1.5 s 无活动,再进入下一轮 selector 6。
+- 观察(静态,libBBUpdaterDynamic):BBUpdaterController::queryInfoFirstStageInternal(0x1ee16f05c)先 BBULoader::create 再 createTransportNoEvents;
+  创建失败走 process_event<eventRetry>(重试)/eventError — 与"约 15 轮后放弃"一致。BBUEUR13Communication::createTransport(0x1ee1c24a8)有三处抛 _BBUException:
+  已有传输(this+0x58 非空,行 76)、interface>1(行 116)、stage>15(行 110);超时 2000/5000 ms 随接口。PCITransportCreate 之前没有 IOKit 活动,所以失败发生在
+  createTransport 的这些前置判断或 th::create/bh::create 的非 IOKit 步骤;具体哪一个未确定(需要运行时值)。
+- 观察(参考 QcomBaseband-20261109,iPadOS17/Mav16):ABM 经 IOServiceMatching("AppleBasebandPCIInterface")+ABPInterfaceProtocol=<name> 找 pbl/sahara 等 18 个通道,
+  BBUEUR13Loader 在 pbl 上 SendImage、关闭、再开 sahara 等 40 s 的 HELLO;其 README 明确说 ABM/BBUpdater 的失败原因"只在 %s 消息里",靠开启 logd 私有数据后读设备 logd 调试;
+  固件目录用 Info.plist 作挂载校验;根 compatible 设为 J121AP 以匹配 Mav16 分支(X9 用 D22AP 元数据 class3/n41/mav17)。
+- 结论:BBUpdater 的失败原因只存在于运行时 os_log 的 %s 里,静态读代码无法得到该串。下一步是把设备 logd 的 tracev3(/private/var/db/diagnostics/Persist)+uuidtext 从 iOS 根盘取出并解码;
+  iOS 根的 /private/var/db/uuidtext 为空,dsc 格式串需要从 dsc 提取的 dylib 重建。hj(x9-rev252hj-md,x9_sample_procs + x9sd/x9si/x9sn 可调采样)已构建但**不上机**。
 ## HANDOFF 2026-11-09 (80): 154(hh)给出 BBUpdater 一轮的完整文件序列;qdsp6sw 缺失被容忍;失败发生在文件初始化之后的 ~0.9 s 等待里;hi = + sweetiolog
 
 - 观察(154.txt):"X9 BBFW: … written 0 same 20 result errno=0"(第二次启动文件已在盘上)。X9 CC STAT/OPEN 给出一轮的完整序列(16.28-16.71 s):
