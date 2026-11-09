@@ -59,7 +59,7 @@
 static inline int cbq_private_service(uint32_t service) { return service >= 0xe1u && service <= 0xeau; }
 
 struct cbq_server { uint32_t service, version, instance, node, port; uint8_t present; };
-struct cbq_client { uint8_t used, channel, service, cid, private_service, release_pending; };
+struct cbq_client { uint8_t used, channel, service, cid, private_service, release_pending; uint64_t generation; };
 struct cbq_bridge {
     struct cbq_server server[CBQ_MAX_SERVERS];
     struct cbq_client client[CBQ_MAX_CLIENTS];
@@ -133,7 +133,8 @@ static inline int cbq_client_alloc(struct cbq_bridge *b, uint32_t channel, uint3
         cid = cid % 254u + 1u;
         if (cbq_client_find(b, channel, service, cid) < 0) {
             b->last_cid[channel][service] = (uint8_t)cid;
-            b->client[slot] = (struct cbq_client){ 1, (uint8_t)channel, (uint8_t)service, (uint8_t)cid, (uint8_t)cbq_private_service(service), 0 };
+            uint64_t generation = b->client[slot].generation + 1;
+            b->client[slot] = (struct cbq_client){ 1, (uint8_t)channel, (uint8_t)service, (uint8_t)cid, (uint8_t)cbq_private_service(service), 0, generation };
             return slot;
         }
     }
@@ -146,11 +147,12 @@ static inline void cbq_client_free(struct cbq_bridge *b, unsigned slot)
     c->release_pending = !c->private_service;
     c->used = 0;
 }
-/* the next port that needs a QRTR DEL_CLIENT, or 0; call until 0 after any CTL answer */
+/* Mark delivery in progress (2). The owner must clear it AFTER DEL_CLIENT,
+ * under the bridge lock; never reuse the port while callbacks still reference it. */
 static inline uint32_t cbq_next_release(struct cbq_bridge *b)
 {
     for (unsigned i = 0; i < CBQ_MAX_CLIENTS; i++)
-        if (b->client[i].release_pending) { b->client[i].release_pending = 0; return CBQ_PORT_BASE + i; }
+        if (b->client[i].release_pending == 1) { b->client[i].release_pending = 2; return CBQ_PORT_BASE + i; }
     return 0;
 }
 

@@ -2,11 +2,14 @@
 //
 // The bridge expects a Qualcomm modem behind QRTR. Ours is a MediaTek MD that speaks AT over CCCI (x9_modem*.inc), so this file is
 // the "QRTR node" the bridge talks to: it announces QMI services, receives the QMI requests CommCenter/ABM make and answers them.
-// Iteration 1 (this file): publish the AppleBaseband services, announce DMS/NAS/UIM/WDS/WDA/DPM, answer every request with
-// QMI_ERR_NOT_SUPPORTED and LOG what was asked, so the first iOS run shows exactly which messages the emulation must implement.
+// Control plane: bounded asynchronous QMI -> real serial AT. Data plane remains
+// fail-closed until MT6993 DPMAIF DMA/TX/RX is implemented and verified.
 //
 // One kernel thread owns configure/poll/QRTR delivery, as the bridge requires.
 #include <kern/thread.h>
+#include <kern/clock.h>
+#include <mach/mach_time.h>
+#include "../../../bsd/dev/x9_modem_bridge.h"
 #include <kern/sched_prim.h>
 #include <mach/mach_types.h>
 #include "../../../../../baseband/qcom/baseband/coachz_baseband.cpp"
@@ -56,6 +59,8 @@ void x9bb_reply_error(uint32_t local_port, uint32_t port, const uint8_t *req, ui
   coachz_baseband_qrtr(local_port, X9BB_NODE, port, r, sizeof r);
 }
 
+#include "X9QMIAT.inc"
+
 // Runs on the bridge thread (called from coachz_baseband_poll with the bridge lock released).
 void x9bb_modem_send(uint32_t local_port, uint32_t node, uint32_t port, const void *message, uint32_t length)
 {
@@ -68,10 +73,10 @@ void x9bb_modem_send(uint32_t local_port, uint32_t node, uint32_t port, const vo
     else
       printf("X9 BB: short QMI message to node %u port 0x%x (%u bytes)\n", node, port, length);
   }
-  x9bb_reply_error(local_port, port, m, length, 94);   // QMI_ERR_NOT_SUPPORTED
+  x9q_send(local_port, node, port, m, length);
 }
 
-void x9bb_del_client(uint32_t local_port) { printf("X9 BB: DEL_CLIENT port 0x%x\n", local_port); }
+void x9bb_del_client(uint32_t local_port) { x9q_del(local_port); printf("X9 BB: DEL_CLIENT port 0x%x\n", local_port); }
 
 void x9bb_thread(void *, wait_result_t)
 {
@@ -84,6 +89,8 @@ void x9bb_thread(void *, wait_result_t)
   for (unsigned second = 0;; ) {
     for (unsigned i = 0; i < 1000; i++) {
       coachz_baseband_poll();
+      x9q_poll();
+      x9q_subscriptions();
       delay_for_interval(1, 1000 * NSEC_PER_USEC);
     }
     second++;

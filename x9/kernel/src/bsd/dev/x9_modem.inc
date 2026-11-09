@@ -802,11 +802,16 @@ extern void x9_baseband_prepare(void);
 static void x9md_listen(unsigned ms_total,int serve){
  uint64_t t0=mach_absolute_time();
  int ready=0,exp=0;unsigned pk=0,ready_ms=0;uint32_t hi_seen=0;
+ unsigned report_ms=0;
  static uint8_t pkt[X9MD_PKT_MAX];
- for(unsigned ms=0;ms<ms_total;ms+=2){
+ for(;;){
+  uint64_t elapsed_ns;absolutetime_to_nanoseconds(mach_absolute_time()-t0,&elapsed_ns);
+  if(ms_total&&elapsed_ns/1000000>=ms_total)break;
+  unsigned ms=(unsigned)(elapsed_ns/1000000);
   uint32_t ch=x9md_rd(x9md_ap,X9MD_RCHNUM);
   if(ch)x9md_wr(x9md_ap,X9MD_ACK,ch);
   if(ch>>16){
+   if(serve)x9at_bridge_online(0);
    uint64_t ens;absolutetime_to_nanoseconds(mach_absolute_time()-t0,&ens);
    printf("X9 MODEM: S2 exception RCHNUM %08x at %u ms\n",ch,(unsigned)(ens/1000000));
    x9md_tx_report("exception");
@@ -830,13 +835,14 @@ static void x9md_listen(unsigned ms_total,int serve){
     uint32_t *h=(uint32_t *)pkt;
     unsigned chn=h[2]&0xffff,seq=(h[2]>>16)&0x7fff;
     pk++;
-    if(pk<=400&&(pk<=60||(chn!=14&&chn!=32))||(chn!=14&&chn!=32&&pk<=3000))
+    if(chn!=10&&(pk<=400&&(pk<=60||(chn!=14&&chn!=32))||(chn!=14&&chn!=32&&pk<=3000)))
      printf("X9 MODEM: PKT %u ms %sq%u len %u ch %u seq %u d0=%08x d1=%08x rsv=%08x | %08x %08x %08x %08x\n",
       (unsigned)(ns/1000000),exp?"exp ":"",qi,len,chn,seq,h[0],h[1],h[3],
       len>16?h[4]:0,len>20?h[5]:0,len>24?h[6]:0,len>28?h[7]:0);
     if(serve&&!exp)x9md_s3_rx(qi,chn,pkt,len);
     if(!ready&&chn==0&&h[1]==0&&h[3]!=X9MD_CHK_ID){
      ready=1;x9md_assert_bit=0;ready_ms=ms;
+     if(serve)x9at_bridge_online(1);
      x9md_smc(X9MD_CCIF_CLK_RELEASE,0,0,NULL);printf("X9 MODEM: CCIF_CLK_RELEASE after READY\n");x9md_clk_released=1;
      x9_baseband_start();   /* iOS-side bridge (X9Baseband.cpp), boot-arg x9_bb=1 */
      printf("X9 MODEM: HS2 -> READY at %u ms (q%u, reserved=%08x)\n",(unsigned)(ns/1000000),qi,h[3]);
@@ -846,8 +852,9 @@ static void x9md_listen(unsigned ms_total,int serve){
     }
    }
   }
-  if(ready&&serve)x9md_ready_tick(ms-ready_ms);
-  if(ms%5000==0&&ms){
+  if(ready&&serve&&!hi_seen)x9md_ready_tick(ms-ready_ms);
+  if(ms-report_ms>=5000){
+   report_ms=ms;
    printf("X9 MODEM: S2 listen %u ms ready=%d packets=%u rch=%08x\n",ms,ready,pk,x9md_rd(x9md_ap,X9MD_RCHNUM));
    x9md_status("listen");
    x9md_tx_report("listen");
@@ -855,6 +862,7 @@ static void x9md_listen(unsigned ms_total,int serve){
   x9md_sleep_ms(2);
  }
  printf("X9 MODEM: S2 listen end ready=%d packets=%u exception_bits=%x\n",ready,pk,hi_seen);
+ if(serve)x9at_bridge_online(0);
  if(hi_seen)x9md_ee_decode("end");
  if(!ready){x9md_ccif_dump("no-hs2");x9md_sram_dump(x9md_ap,"AP",0x80);}
 }
@@ -870,13 +878,14 @@ static void x9md_stage2(void){
  int bad=x9md_prepare_runtime(md_ft);
  if(bad<0)return;
  x9md_send_runtime();
- x9md_listen(x9md_serve?240000:30000,x9md_serve);
+ /* Cellular is a persistent service, not a four-minute diagnostic capture. */
+ x9md_listen(x9md_serve&&sweet_x9_arg("x9_bb",0)?0:x9md_serve?240000:30000,x9md_serve);
 }
 
 static void x9md_thread(void *arg,wait_result_t wr) {
  (void)wr;
  int mode=(int)(uintptr_t)arg;
- printf("X9 MODEM: build=rev252hl-md fs128-bb-fwtrace-v1 mode=%d bb=%d\n",mode,sweet_x9_arg("x9_bb",0));
+ printf("X9 MODEM: build=rev252hn-md fs128-qmi-at-v1 mode=%d bb=%d\n",mode,sweet_x9_arg("x9_bb",0));
  printf("X9 MODEM: stage-1 bring-up mode=%d\n",mode);
  x9md_pmif_m=ml_io_map(0x1c01a000,0x1000);
  x9md_pmif_p=ml_io_map(0x1c018000,0x1000);

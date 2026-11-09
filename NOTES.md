@@ -2,7 +2,7 @@
 
 > 旧的完整流水账(7784 行,含 sweet/SM7150 时代、rev2xx 全部 handoff)在 git 历史里:
 > `git show a8f1955:NOTES.md`。需要翻某个 revision 的细节时 `git log -S'<关键字>' -- NOTES.md` 再 show。
-> 截至 2026-11-09 的完整 cn 交接在 `git show 636edc2:NOTES.md`;当前以 §7 的 HANDOFF (87) 为准。
+> 截至 2026-11-09 的完整 cn 交接在 `git show 636edc2:NOTES.md`;当前以 §7 的 HANDOFF (88) 为准。
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
@@ -74,6 +74,7 @@ X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>      # 之后再�
 ## 3. 当前基线镜像与参数
 
 最新实测:**x9-rev252hl-md**(代码提交 **`20c64f2`**,构建交接 `0f9d983`),boot.img **12877824 B=12.28125MiB**,路径 `x9/out/x9-rev252hl-md/boot.img`。**157确认完整11文件安装成功、qdsp可读、Sahara finished并进入QMUX/QMI,握手摘要reset=0;真实iOS蜂窝尚未打通**,见HANDOFF87。独立34MiB固件与插件275不需再stage。
+当前未上机候选:**x9-rev252hn-md**,boot.img12898304B;AT→QMI控制面已编译,DPMAIF未实现,见HANDOFF88。最新实测仍hl;不要把候选当作SIM/蜂窝已验证。
 回退:**x9-rev252hk-md**(修复提交 `d1f8515` + 当时未提交的渲染改动,现已入库),boot.img **15278080 B**;156确认reserve生效、efs1.bin已有1MiB,当时15次reset及零传输见HANDOFF84。
 本机回退镜像:`x9/out/x9-rev252hk-md/boot.img`;hl/hk配置沿用 `.local/x9/modem/boot-rev252hi-md.json`。
 157已越过缺qdsp的前置阻塞,**当前阻塞在X9的QMI→MTK适配**:UIM/NAS/DMS/WDS/WDA/DPM请求实际到达后返回0x5e,数据端口配置失败,四个PDP接口仍blocked/tx=rx=0。Sahara是兼容桥交互,不向物理MTK下载Apple固件;PCIControl methods仍0x0,不能说PCIControl已通。以下GPU专用基线与参数为 **2026-11-08 历史记录**,不要当作hk/hl参数直接复用。
@@ -111,7 +112,7 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 
 ## 5. 未解决问题
 
-当前主线是 **QMI→MediaTek AT/CCCI适配**(§7):157已确认完整固件/qdsp及Sahara→QMUX前置链能推进,但UIM/NAS等实际请求返回不支持,数据面未通。下一步先闭环一个真实SIM状态请求,不要继续重stage完整固件或绕过断言。下列为保留的GPU/Wi-Fi待办,不是新的硬件验证结论。
+当前主线是 **QMI→MediaTek AT/CCCI适配**(§7):157已确认完整固件/qdsp及Sahara→QMUX前置链能推进,当时UIM/NAS等返回不支持;hn已编译真实控制面但未上机,数据面未实现。下一步实测闭环一个真实SIM状态请求,不要继续重stage完整固件或绕过断言。下列为保留的GPU/Wi-Fi待办,不是新的硬件验证结论。
 
 1. **GPU 带宽/帧率**:avg ~17-22 fps,稳态 24 fps;job 内 GPU wait 6-15 ms。判断显存带宽受限。**DVFSRC 从未初始化**(110.txt:`basic=8 opp_count=1 gear=0`,SW_REQ 被忽略)。
    rev252dc 加 TF-A SMC INIT:`MTK_SIP_VCOREFS_CONTROL = 0xC2000506`,cmd INIT=0(a0=0 成功,a1=dram_type)锁高 OPP,START=1(`x9_dvfsrc=2`)后自由运行。**待上机**,SMC 可能挂。
@@ -151,7 +152,19 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
 
-## 7. 当前交接(HANDOFF 87,2026-11-09): 157确认完整BBFW/qdsp和Sahara→QMUX推进;新阻塞为QMI不支持,真实PDP仍未通
+## 7. 当前交接(HANDOFF 88,2026-11-09): AT→QMI控制面候选hn已编译;尚未上机,DPMAIF/语音未实现
+
+- 用户要求“把后续的流程全写完”,本轮将原error94 stub扩展为有界异步**真实AT控制面**并补齐后续流程说明。**不是全部蜂窝已完成**;DPMAIF、WDS数据会话、语音/IMS尚缺,没有伪造WDA/DPM成功。实测基线仍hl/157。
+- 新增`x9_modem_bridge.h`/`x9_at_bridge.inc`和`X9QMIAT.inc`:单MD owner收发ttyC0,16槽AT邮箱,32槽QMI job(请求最多1024B,总deadline180s,单AT10s)。完整终止行才完成,2048B溢出继续排空至final后报错;缺final或TX失败隔离到下一次boot,不让迟到OK配错新请求。CCIF TX在邮箱mutex外;取消已发请求只标记,仍排空final。exception/offline清active,不重用stale slot。`x9_bb=1`持续监听,计时改为mach absolute elapsed;桥开启时统一串行level3初始化,CFUN1之后才接收job,AT正文及ch10包内容不进USB/pstore。
+- **已编码、未实测**:UIM CardStatus(0x2f)用CPIN READY→CRSM GET RESPONSE真实EF_DIR/FCP→逐record解析真实AID;SlotStatus(0x47)读真实EF_ICCID。ReadTransparent/ReadRecord(0x20/21)先核对session/file/path/offset/length→真实FCP→CRSM读取→真实SW1/SW2+数据。仅empty-AID primaryGW/current USIM或card1 MF路径,不冒充slot2、不支持任意AID选择/非provisioning路由。未知PIN状态为not-initialized,固定retry字段为不可用而非宣称某个真实重试预算;未知personalization也不宣称READY。显式CME10可报告卡不存在。其余锁卡/未知错误不猜状态。
+- NAS ServingSystem(0x24)/SystemInfo(0x4d)串行查询CREG/CEREG/C5GREG/CGATT/COPS;SignalStrength(0x20)另读CSQ,仅已知RSSI,不伪造RSRP/SNR/小区/PLMN。DMS manufacturer/model/revision/IMEI/CFUN/ICCID/IMSI来自真实CGMI/CGMM/CGMR/CGSN/CFUN/CRSM/CIMI。CPIN/CRSM/这些扩展AT命令的组合**尚未实机证明**,解析不匹配/不支持明确失败,不是拿157的旧CPIN观察替代新QMI成功。
+- UIM event mask仅card/slot(bit0/4),NAS subscriptions仅serving/system;串行后台快照周期至少10s,前台队列忙时延迟。没有ACK不存在的signal/refresh/eSIM订阅。QMI TLV长度、重复tag及未知读参数被拒绝;SIM写/PIN/PUK/APDU/文件ACL属性、DMS mode-set、NAS网络选择、WDS/WDA/DPM仍不支持。原桥本地activation成功仍非真实激活/联网。
+- QRTR client复用修复:`coachz_bb_qmux.h`为每次allocation保留64位generation;`bb_tx`/held UIM复制generation并丢弃过期job;DEL_CLIENT callback完成前release_pending维持2、不释放port。X9 owner取消该port全部job和subscription后才可复用,避免旧事务/迟到回复进入新client。
+- **直接交叉编译成功**:首次hm通过后源码审查发现CFUN4误映射QMI RESET及后台失败indication问题,已修正;hm仅保留为开发产物,**不要上机**。最终**`x9-rev252hn-md`**: `python3 -I x9/build/build.py all --name x9-rev252hn-md --boot-config .local/x9/modem/boot-rev252hi-md.json`,53/53 overlay+6 prebuilt、link/strip/boot均成功;构建输出 **Image28745728B,boot.img12898304B=12.30078125MiB**,20MiB guard未改。构建日志`x9/out/x9-rev252hn-md/build.log`及`.local/x9/work/qmi-at-157/build-hn.stdout.log`;仍有XNU/风格及一处已界定为<=999的MNC整数窄化warning,不宣称无警告。无CI run、无额外测试套件、无镜像二次解包/hash/反汇编,无设备写入/ADB/启动。
+- 完整11固件已独立34MiB stage,沿用原manifest/插件275;**无需放/挂载固件,无需mailbox staging**,没有传revision重建插件。hn沿用hi/hk/hl全参数。用户手动`fastboot boot x9/out/x9-rev252hn-md/boot.img`,回退hl路径不变。
+- **下一步验证顺序**:新日志独立目录固定前缀,先确认hn marker/11文件/qdsp/Sahara/QMUX,再看UIM0x2f/0x47/0x20的`X9 QMI AT: response ... result 0 error 0 (real AT)`、真实AID/文件结果是否被CommCenter接受,再NAS/DMS。失败回到最早stage解析/MD响应,不自动反复尝试PIN/APDU。不以构建成功宣布SIM或蜂窝实测成功。后续DPMAIF必须按MT6993 v3真实DT/reserved-memory/DMA契约实现TX/RX/中断与回收,之后才允许WDA/DPM/WDS会话及iOS IP/路由/收发验证;语音还需IMS/音频链路。
+
+### 前次交接(HANDOFF 87,2026-11-09): 157确认完整BBFW/qdsp和Sahara→QMUX推进;新阻塞为QMI不支持,真实PDP仍未通
 
 - 用户手动启动后要求读`~/157.txt`。本轮仅读取日志及源码/本地参考,未ADB操作、flash/reboot/挂载/设备写入,未构建/CI/额外测试,未二次检查镜像。代码仍`20c64f2`,前轮文档`0f9d983`;仅更新本交接,原始日志不入git。
 - **日志仍在追加,固定证据前缀而非假称整场结束**:20:30:36.842+0800捕获 **1361492 B / 13639行**,最后uptime **82.378 s**,完整末行。私有目录`.local/x9/logs/157-20261109-203036/`保存`157.raw.txt`、`capture.json`、带原行号`events.txt`、`qmi-events.json`;SHA256=`f9c004665c35a6854eeeab10fc1b971cf26473ca661e4a2b33945df54bedfc60`。下述行号均指此固定raw副本;后来新增内容不能冒充本次已分析的前缀。

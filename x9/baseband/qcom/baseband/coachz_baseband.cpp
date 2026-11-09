@@ -51,7 +51,7 @@ struct bb_channel {
   uint32_t opens, frames_in, frames_out, frames_dropped, bytes_in, bytes_out;
   uint32_t userclient_requests, method_seen;
 };
-struct bb_tx { uint32_t local_port, node, port, len; uint8_t *data; };
+struct bb_tx { uint32_t local_port, node, port, len; uint8_t *data; uint64_t generation; };
 }
 
 static IOLock *bb_lock;
@@ -234,7 +234,8 @@ static void bb_queue_tx(uint32_t local_port, uint32_t node, uint32_t port, const
     return;
   }
   memcpy(copy, data, len);
-  bb_txq[(bb_tx_head + bb_tx_count++) % BB_TX] = { local_port, node, port, len, copy };
+  bb_txq[(bb_tx_head + bb_tx_count++) % BB_TX] = { local_port, node, port, len, copy,
+    local_port >= CBQ_PORT_BASE && local_port - CBQ_PORT_BASE < CBQ_MAX_CLIENTS ? bb_qmux.client[local_port - CBQ_PORT_BASE].generation : 0 };
   const uint32_t slot = local_port - CBQ_PORT_BASE;
   if (slot < CBQ_MAX_CLIENTS && bb_qmux.client[slot].used && bb_qmux.client[slot].channel == CBQ_INTERNAL)
     bb_trace("int-tx", 0, bb_qmux.client[slot].service, bb_qmux.client[slot].cid, data, len);
@@ -342,7 +343,7 @@ static void bb_to_modem(const struct cbq_result &r, const uint8_t *sdu)
     if (copy) {
       memcpy(copy, sdu, r.len);
       const uint32_t slot = (bb_uim_head + bb_uim_count++) % BB_TX;
-      bb_uim_held[slot] = { r.local_port, r.node, r.port, r.len, copy };
+      bb_uim_held[slot] = { r.local_port, r.node, r.port, r.len, copy, bb_qmux.client[r.local_port - CBQ_PORT_BASE].generation };
       bb_uim_cid[slot] = r.cid;
     } else {
       const uint32_t n = cbq_private_answer(sdu, r.service, r.cid, CBE_ERR_DEVICE_IN_USE, nullptr, 0, bb_out, sizeof bb_out);
@@ -376,7 +377,7 @@ static void bb_esim_step(void)
     bb_tx &held = bb_uim_held[bb_uim_head];
     const uint32_t index = held.local_port - CBQ_PORT_BASE;
     if (index < CBQ_MAX_CLIENTS && bb_qmux.client[index].used && bb_qmux.client[index].service == CBE_SVC_UIM &&
-        bb_qmux.client[index].cid == bb_uim_cid[bb_uim_head]) {
+        bb_qmux.client[index].cid == bb_uim_cid[bb_uim_head] && bb_qmux.client[index].generation == held.generation) {
       bb_txq[(bb_tx_head + bb_tx_count++) % BB_TX] = held;
     } else IOFreeData(held.data, held.len);
     bb_uim_head = (bb_uim_head + 1) % BB_TX; bb_uim_count--;
@@ -1313,7 +1314,11 @@ extern "C" void coachz_baseband_poll(void)
   IOLockLock(bb_lock);
   bb_esim_step();
   while (bb_tx_count && n < 16) {
-    batch[n++] = bb_txq[bb_tx_head];
+    bb_tx &queued = bb_txq[bb_tx_head];
+    const uint32_t slot = queued.local_port - CBQ_PORT_BASE;
+    if (slot < CBQ_MAX_CLIENTS && bb_qmux.client[slot].used &&
+        bb_qmux.client[slot].generation == queued.generation) batch[n++] = queued;
+    else IOFreeData(queued.data, queued.len);
     bb_tx_head = (bb_tx_head + 1) % BB_TX;
     bb_tx_count--;
   }
@@ -1325,6 +1330,13 @@ extern "C" void coachz_baseband_poll(void)
   }
   for (uint32_t i = 0; i < r; i++)
     if (bb_del_client) bb_del_client(released[i]);
+  IOLockLock(bb_lock);
+  for (uint32_t i = 0; i < r; i++) {
+    const uint32_t slot = released[i] - CBQ_PORT_BASE;
+    if (slot < CBQ_MAX_CLIENTS && bb_qmux.client[slot].release_pending == 2)
+      bb_qmux.client[slot].release_pending = 0;
+  }
+  IOLockUnlock(bb_lock);
   bb_pdp_poll();
 }
 

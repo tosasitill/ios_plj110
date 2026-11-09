@@ -959,21 +959,42 @@ static void x9md_sim_pinmux(void){
 #define X9MD_CH_AT_TX 12
 #define X9MD_Q_AT 5
 /* ---- stage 5 AT engine: one command at a time, advance on a final result code ---- */
-static char x9at_buf[2048];static unsigned x9at_len;
-static int x9at_has(const char *needle){size_t nl=strlen(needle);for(unsigned i=0;i+nl<=x9at_len;i++)if(!memcmp(x9at_buf+i,needle,nl))return 1;return 0;}
-static int x9at_pending;            /* command in flight */
-static int x9at_done;               /* last result: 1 OK, -1 ERROR */
+static char x9at_buf[2048],x9at_line[256];
+static unsigned x9at_len,x9at_line_len;
+static int x9at_pending,x9at_done,x9at_overflow,x9at_line_overflow;
+static void x9at_reset(void){
+ x9at_len=x9at_line_len=0;x9at_done=x9at_overflow=x9at_line_overflow=0;
+ bzero(x9at_buf,sizeof(x9at_buf));bzero(x9at_line,sizeof(x9at_line));
+}
+static int x9md_at_send(const char *cmd);
+#include "x9_at_bridge.inc"
 static void x9at_feed(const uint8_t *pkt,uint32_t len){
- for(uint32_t i=16;i<len&&x9at_len+1<sizeof(x9at_buf);i++)x9at_buf[x9at_len++]=(char)pkt[i];
+ if(!x9at_pending||x9at_done)return;
+ for(uint32_t i=16;i<len;i++){
+  char c=(char)pkt[i];
+  if(x9at_len+1<sizeof(x9at_buf))x9at_buf[x9at_len++]=c;
+  else x9at_overflow=1;
+  if(c=='\n'){
+   if(x9at_line_len&&x9at_line[x9at_line_len-1]=='\r')x9at_line_len--;
+   x9at_line[x9at_line_len]=0;
+   if(!x9at_line_overflow){
+    if(!strcmp(x9at_line,"OK"))x9at_done=1;
+    else if(!strcmp(x9at_line,"ERROR")||!strcmp(x9at_line,"NO CARRIER")||
+      !strncmp(x9at_line,"+CME ERROR:",11)||!strncmp(x9at_line,"+CMS ERROR:",11))x9at_done=-1;
+   }
+   x9at_line_len=0;x9at_line_overflow=0;
+   if(x9at_done)break;
+  }else if(x9at_line_len+1<sizeof(x9at_line))x9at_line[x9at_line_len++]=c;
+  else x9at_line_overflow=1;
+ }
  x9at_buf[x9at_len]=0;
- if(!x9at_pending)return;
- /* final result codes */
- if(x9at_has("\r\nOK\r\n"))x9at_done=1;
- else if(x9at_has("\r\nERROR\r\n")||x9at_has("+CME ERROR")||x9at_has("+CMS ERROR")||x9at_has("NO CARRIER"))x9at_done=-1;
 }
 static void x9md_at_rx(const uint8_t *pkt,uint32_t len){
  char t[200];unsigned n=0;
  x9at_feed(pkt,len);
+ /* SIM files, IMSI/IMEI/APN and authentication material must not enter USB/pstore.
+  * Redact all ttyC0 bodies while the bridge is enabled, including echo and URCs. */
+ if(x9_at_enabled())return;
  for(uint32_t i=16;i<len&&n+4<sizeof(t);i++){
   uint8_t c=pkt[i];
   if(c=='\r'){t[n++]='\\';t[n++]='r';}
@@ -987,7 +1008,7 @@ static void x9md_at_rx(const uint8_t *pkt,uint32_t len){
 static int x9md_at_send(const char *cmd){
  uint32_t n=(uint32_t)strlen(cmd);
  int rc=x9md_tx(X9MD_Q_AT,X9MD_CH_AT_TX,0,16+n,0,(const uint8_t *)cmd,n);
- printf("X9 MODEM: AT TX '%.40s' rc=%d\n",cmd,rc);
+ if(!x9_at_enabled())printf("X9 MODEM: AT TX '%.40s' rc=%d\n",cmd,rc);
  return rc;
 }
 /* read-only probe sequence, one command per second after READY (x9_md_at=1) */
@@ -1059,6 +1080,7 @@ static const struct x9at_step x9at_script[]={
 static void x9at_engine(unsigned ms){
  static unsigned idx,sent_ms,free_ms,started;
  if(!started){started=1;free_ms=ms;}
+ if(x9at_bridge_tick(ms,idx>=10))return;
  if(x9at_pending){
   if(x9at_done){
    X9MD_LOG("X9 MODEM: AT step %u '%.20s' -> %s after %u ms\n",idx,x9at_script[idx].cmd,x9at_done>0?"OK":"ERROR",ms-sent_ms);
@@ -1066,6 +1088,7 @@ static void x9at_engine(unsigned ms){
   }else if(ms-sent_ms>x9at_script[idx].timeout_ms){
    X9MD_LOG("X9 MODEM: AT step %u '%.20s' TIMEOUT\n",idx,x9at_script[idx].cmd);
    x9at_pending=0;idx++;free_ms=ms;
+   if(x9_at_enabled())x9at_bridge_poison();
   }
   return;
  }
@@ -1074,8 +1097,8 @@ static void x9at_engine(unsigned ms){
   return;
  }
  if(ms-free_ms<x9at_script[idx].wait_ms+200)return;
- x9at_len=0;x9at_buf[0]=0;x9at_done=0;x9at_pending=1;sent_ms=ms;
- x9md_at_send(x9at_script[idx].cmd);
+ x9at_reset();x9at_pending=1;sent_ms=ms;
+ if(x9md_at_send(x9at_script[idx].cmd)<0){x9at_pending=0;if(x9_at_enabled())x9at_bridge_poison();}
 }
 static void x9md_ready_tick(unsigned ms_since_ready){
  static unsigned next,ctime_next,init_done,pins_done;
@@ -1085,6 +1108,8 @@ static void x9md_ready_tick(unsigned ms_since_ready){
  if(!init_done&&ms_since_ready>=300){init_done=1;x9md_send_ccism_init();}
  if(ms_since_ready>=1000&&ms_since_ready/30000>=ctime_next){ctime_next=ms_since_ready/30000+1;x9md_send_time();}
  int lvl=sweet_x9_arg("x9_md_at",0);
+ /* The bridge requires echo-off/verbose finals and the serial radio bring-up. */
+ if(x9_at_enabled())lvl=3;
  if(!lvl)return;
  if(ms_since_ready<2000)return;
  if(lvl>=3){x9at_engine(ms_since_ready);return;}
