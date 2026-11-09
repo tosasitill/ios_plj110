@@ -1,3 +1,26 @@
+## HANDOFF 2026-11-09 (66): 140.txt 回到旧 FSD 失败形态；139.txt 已 READY/注册；rev252el-md BUILT 未上机
+
+- 用户要求看 `~/140.txt` 继续基带修复。此前基带工作未写进本文件，代码仍是未提交工作区。
+- 实测 140：`FD27_003` 的 CMPT_Write #315/#331 返回 -5；MCU `lid_error_handle.c:259`
+  参数 0x228b/0xd12/0x2240，随后 ready=0/packets=562。没有 `FS RAM pool 128 MiB` 行，bootargs 没有 `x9_bb=1`。
+- 实测对照 139：3.646 s 分配 128 MiB RAM overlay；19.336 s HS2 -> READY；CPIN READY；C5GREG 注册状态 1，
+  COPS 显示运营商/RAT 11；后续 LTE CEREG 状态 1；持续到 218 s ready=1。CommCenter 仍多次崩溃，不能算 iOS 蜂窝成功。
+- 推断 140 启动旧镜像：失败请求序列与 138 相同；最新 `x9/out/x9-rev252ek-md` 构建参数包含 x9_bb=1。
+  未从设备镜像 hash 确认，不能断言具体刷错了哪个版本。
+- 本次只加观测：编译标记 `build=rev252el-md fs128-bb-v1 mode=4 bb=1`；preload 文件池/node/handle 用量；
+  grow 拒绝参数及 CMPT_Write 失败 mask/handle/用量。128 MiB overlay 和协议行为不改，不为旧日志重新改 NVRAM 协议。
+- 构建输入 `.local/x9/modem/boot-rev252el-md.json` = ek 的参数（含 x9_bb=1）；正常 Mac 本地 kernel+boot 构建，
+  没有插件重建/CI/设备操作。输出 `x9/out/x9-rev252el-md`；完整 stdout `/tmp/x9-rev252el-md-build.log`。
+- 工作区已有基带基础：`x9_modem.inc`/`x9_modem_s3.inc`，read-only ext4 + NV分区 RAM缓存、T: mdota；
+  `X9Baseband.cpp` 接 UniXNU/QcomBaseband 的 AppleBaseband 服务，HS2 后启动，当前 QMI 只返回 unsupported、DPMAIF未实现。
+  来源 Trogdor-ipadOS 58b5bc8bfc04482014ff403078435e581e58a5b0 / BSD-2，Coachz/iOS17 成功不算 X9/iOS16 验证。
+- 其它已有 GPU/SweetX9RenderEngine/CSF 修改未动，候选继承当前工作区；mdota generated inc 已加入 gitignore，不提交厂商数据。
+- COMMIT `ae882f6`：提交此前未落盘的 modem/FSD/UFS 读取与 Qcom bridge 基础、el 诊断；其它 GPU 修改保持未提交。
+- BUILT（退出码 0）：boot.img 12861440 B；构建内置 metadata boot_sha256 `bda692f54944edac119015006b0fbac962a8cf2e6e79497ba8c74daae371d146`。
+  按 x9/AGENTS.md 不做额外解包/hash/测试；未上机，未写设备。
+- 下一步：用户手动启动 el 候选，先确认编译标记和 pool 128 MiB，再看 HS2/AT 和 X9 BB 请求。
+  缺标记先处理镜像选择；有标记而 -5 再按 pool/node/handle 计数定位；READY 后才针对真实 QMI 请求实现桥接。
+
 ## FINDING 2026-11-08: 开/关 app 动画时 4 条竖向"透明马赛克线"(照片 /tmp/IMG_1729.HEIC, 不入 git)
 
 - USER: 每次退出/打开 app 时渲染出错, 从上到下贯穿的 4 条马赛克透明线。
