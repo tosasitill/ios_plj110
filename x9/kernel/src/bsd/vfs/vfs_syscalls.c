@@ -4855,8 +4855,9 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
     struct vnode_attr *vap, fp_initfn_t fp_init, void *initarg, int32_t *retval, int authfd)
 {
 #if defined(ARM64_BOARD_CONFIG_SWEET)
-	static unsigned observations;
+	static unsigned observations, cc_observations;
 	char path[256] = "";
+	int cc_observe = 0;
 	proc_t p = vfs_context_proc(ctx);
 	int observe = 0;
 	extern int sweet_early_is_x9(void);
@@ -4870,8 +4871,18 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 		}
 	}
 #endif
+	/* rev252gg: which firmware/baseband files does CommCenter (ABM, BBUpdater) try to open? */
+	if (!observe && sweet_early_is_x9() && cc_observations < 200 && !strcmp(p->p_comm, "CommCenter") &&
+	    UIO_SEG_IS_USER_SPACE(ndp->ni_segflg)) {
+		size_t copied = 0;
+		if (!copyinstr(ndp->ni_dirp, path, sizeof(path), &copied) &&
+		    (sweet_text_contains(path, "Baseband") || sweet_text_contains(path, "standalone") || sweet_text_contains(path, "preboot"))) {
+			cc_observe = __sync_fetch_and_add(&cc_observations, 1) < 200;
+		}
+	}
 	int error = sweet_open1_impl(ctx, ndp, uflags, vap, fp_init, initarg, retval, authfd);
 #if defined(ARM64_BOARD_CONFIG_SWEET)
+	if (cc_observe) printf("X9 CC OPEN: path=%s flags=%x errno=%d\n", path, uflags, error);
 	if (observe) printf("X9 WALLPAPER OPEN: caller=%s path=%s flags=%x errno=%d fd=%d\n",
 	    p->p_comm, path, uflags, error, error ? -1 : *retval);
 #endif

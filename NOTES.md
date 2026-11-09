@@ -1,3 +1,23 @@
+## HANDOFF 2026-11-09 (78): 152(ff)证实固件路径存在性是第一道门;现在卡在 BBUpdater 读固件文件;gg = 小固件文件 + CommCenter 开文件追踪
+
+- 观察(152.txt, ff = 空目录):"X9 BBFW: Mav17 input absent; empty directories only … standalone errno=0 personalized errno=0"。握手计数从此变化:
+  resets 0→7(10 s)→15(40 s 后停住),user clients 10→42,板级调用 15→76,最后一次 selector 1(POWER)。板级调用重复周期约 1.05 s:
+  selector 6(POWERCYCLE)→15→15(两个新 TelephonyBaseband 客户端)→1(POWER on,值 1);共约 15 轮后停止。PCIControl methods 仍 0x0、SAHARA 0。
+  mediaserverd 零崩溃(restore 生效)。
+- 观察(静态,ABM 20H392):BootModule 构造函数(0x1b7f3f920-0x1b7f3f9c4)把 BootControllerLegacy 的 vtable 装进 +0x1b0 → 控制器**确定是 Legacy**。
+  真实启动块(0x1b7f4fc94):controller->vfunc6(prepare, 0x1b7f332d0)失败记 "Failed on preparation for booting!";成功后 vfunc7(bootModem)。
+  Legacy::prepare = stat(capabilities::bb::radio::getPersonalizedFirmwarePath())(ABM 导入的是 Personalized 版本);该函数在 libBasebandCapabilities
+  0x1ae1d7168,路径表为 "/usr/local/standalone/firmware/Baseband/Mav17"(Mav16/IBIS18/ICE17… 同表),前缀由 boot-manifest-hash 组成
+  (preboot/<UPPERCASE hash>/usr/local/standalone/firmware/Baseband/Mav17,与 launchd bindfs 日志里的 /private/preboot/<hash>/ 一致)。
+  shouldBoot() 常量返回 1(不走 fake boot)。
+- 观察(静态,BBUpdater):libBBUpdaterDynamic 的 Initializer/DataSource 读取 info.plist、Options.plist、acdb/apps/bbcfg/mba/rpm/sbl1/tz/qdsp6sw 等 *.mbn,
+  串 "Missing firmwareMac in info.plist -- firmware too old"、"Hash missing in BBFW: %s"、"Failed to open file %s";PCI 传输由
+  TelephonyBasebandPCITransportCreate(libPCITransport 0x1e9f6df80,经 AppleBasebandPCIControl)创建,它还没被走到(PCIControl 未被打开)。
+- 推断(未验证):现在每轮 BBUpdater 在读固件文件时失败(目录是空的),所以 power cycle→power on→失败→重试 15 次后放弃。
+- gg(x9-rev252gg-md,boot.img 15273984 B):固件改为**显式 opt-in 且排除 qdsp6sw.mbn(59 MB,打包 31.7 MB)**,其余 10 个文件打包 2395177 B;
+  内核把它们**直接写进**上述两个目录(不再用 bindfs 挂载),日志 "X9 BBFW: original 20H392 Mav17 files … written … result errno=…";
+  另加 open1 观察:CommCenter 打开路径含 Baseband/standalone/preboot 时打印 "X9 CC OPEN: path=… errno=…"(最多 200 行),
+  直接显示 BBUpdater 下一个要读的文件。local.json(未入库)设 baseband_firmware 与 baseband_firmware_exclude=qdsp6sw.mbn。
 ## HANDOFF 2026-11-09 (77): 150/151 排除 powerd/mediaserverd/IOKit 缺服务;新线索 BootControllerLegacy::prepare = stat(固件路径);ff 建空目录
 
 - 观察(149/150,fc=er 内核+x9_disable_jobs=com.apple.mediaserverd):mediaserverd 零崩溃、powerd 无线程阻塞,握手计数仍全程

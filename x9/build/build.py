@@ -177,6 +177,8 @@ class Builder:
         # device (rev252eq, 2026-11-09). Without baseband_firmware in local.json: empty stub.
         if self.cfg.get('baseband_firmware'):
             bb += ['--src', str(Path(self.cfg['baseband_firmware']).expanduser())]
+            if self.cfg.get('baseband_firmware_exclude'):
+                bb += ['--exclude', self.cfg['baseband_firmware_exclude']]
         else:
             bb += ['--none']
         self.run_or_exit(bb, ROOT, label='baseband_firmware.py')

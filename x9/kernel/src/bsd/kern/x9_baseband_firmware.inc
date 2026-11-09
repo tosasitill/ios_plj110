@@ -206,34 +206,38 @@ static int sweet_x9_prepare_baseband_firmware(proc_t p,user_addr_t scratch,user_
  SHA256_CTX hash;uint8_t digest[32];SHA256_Init(&hash);SHA256_Update(&hash,x9_bbfw_pack,X9_BBFW_PACK_BYTES);SHA256_Final(digest,&hash);
  if(memcmp(digest,x9_bbfw_pack_sha256,32))return EINVAL;
  unsigned count=sizeof(x9_bbfw_files)/sizeof(x9_bbfw_files[0]),written=0,same=0;int error=0;
- /* Validate every uncompressed member before any firmware file is installed. */
+ /* Validate every member before any file is installed. */
  for(unsigned i=0;i<count;i++){uint8_t *data=NULL;error=x9_bbfw_decode(&x9_bbfw_files[i],&data);
   if(error)return error;kfree_data(data,x9_bbfw_files[i].bytes?x9_bbfw_files[i].bytes:1);}
- error=x9_bbfw_directory(p,scratch,end,"/private/var/x9/baseband/Mav17");if(error)return error;
- for(unsigned i=0;i<count;i++){
-  const struct x9_bbfw_file *file=&x9_bbfw_files[i];char path[256];
-  snprintf(path,sizeof(path),"/private/var/x9/baseband/Mav17/%s",file->name);
-  error=x9_bbfw_equal(path,file->sha256,file->bytes);
-  if(!error){same++;continue;}if(error!=ENOENT)return error;
-  uint8_t *data=NULL;error=x9_bbfw_decode(file,&data);if(error)return error;
-  int made=0;error=x9_bbfw_write(p,scratch,end,path,data,file->bytes,file->sha256,&made);
-  kfree_data(data,file->bytes?file->bytes:1);
-  if(error){printf("X9 BBFW: install file %u errno=%d; old files preserved\n",i,error);return error;}
-  written+=(unsigned)made;
+ /* rev252gg: write the files straight into the two paths ABM looks at (no bindfs): ABM 20H392
+  * BootControllerLegacy::prepare stats capabilities::bb::radio::getPersonalizedFirmwarePath(),
+  * BBUpdater then reads info.plist/Options.plist/*.mbn from it. */
+ char points[2][256];unsigned npoints=0;
+ snprintf(points[npoints++],sizeof(points[0]),"/usr/standalone/firmware/Baseband/Mav17");
+ {DTEntry chosen=NULL;const void *value=NULL;unsigned value_size=0;
+  if(SecureDTLookupEntry(NULL,"/chosen",&chosen)==kSuccess&&
+   SecureDTGetProperty(chosen,"boot-manifest-hash",&value,&value_size)==kSuccess&&value_size&&value_size<=48){
+   char name[97]={0};
+   for(unsigned i=0;i<value_size;i++)snprintf(name+2*i,3,"%02X",((const uint8_t *)value)[i]);
+   snprintf(points[npoints++],sizeof(points[0]),"/private/preboot/%s/usr/local/standalone/firmware/Baseband/Mav17",name);
+  }}
+ int result=0;
+ for(unsigned k=0;k<npoints;k++){
+  int derr=x9_bbfw_directory(p,scratch,end,points[k]);
+  if(derr){printf("X9 BBFW: directory %s errno=%d\n",points[k],derr);if(!result)result=derr;continue;}
+  for(unsigned i=0;i<count;i++){
+   const struct x9_bbfw_file *file=&x9_bbfw_files[i];char path[320];
+   snprintf(path,sizeof(path),"%s/%s",points[k],file->name);
+   error=x9_bbfw_equal(path,file->sha256,file->bytes);
+   if(!error){same++;continue;}if(error!=ENOENT){printf("X9 BBFW: %s errno=%d (kept)\n",path,error);if(!result)result=error;continue;}
+   uint8_t *data=NULL;error=x9_bbfw_decode(file,&data);if(error){if(!result)result=error;continue;}
+   int made=0;error=x9_bbfw_write(p,scratch,end,path,data,file->bytes,file->sha256,&made);
+   kfree_data(data,file->bytes?file->bytes:1);
+   if(error){printf("X9 BBFW: write %s errno=%d\n",path,error);if(!result)result=error;continue;}
+   written+=(unsigned)made;
+  }
  }
- /* D22AP/iOS16 standalone and MSU personalized lookup paths, same assets.
-  * A manifest hash names the view only; it is NOT a BBTicket or signature. */
- int standalone=x9_bbfw_mount(p,scratch,end,"/usr/standalone/firmware/Baseband/Mav17");
- int preboot=ENOENT;DTEntry chosen=NULL;const void *value=NULL;unsigned value_size=0;
- if(SecureDTLookupEntry(NULL,"/chosen",&chosen)==kSuccess&&
-  SecureDTGetProperty(chosen,"boot-manifest-hash",&value,&value_size)==kSuccess&&value_size&&value_size<=48){
-  char name[97]={0},point[256];
-  for(unsigned i=0;i<value_size;i++)snprintf(name+2*i,3,"%02X",((const uint8_t *)value)[i]);
-  snprintf(point,sizeof(point),"/private/preboot/%s/usr/local/standalone/firmware/Baseband/Mav17",name);
-  preboot=x9_bbfw_mount(p,scratch,end,point);
- }
- printf("X9 BBFW: original 20H392 Mav17 files %u written %u same %u standalone errno=%d personalized errno=%d (no ticket/MD download)\n",
-  count,written,same,standalone,preboot);
- return standalone?standalone:preboot;
+ printf("X9 BBFW: original 20H392 Mav17 files %u in %u paths written %u same %u result errno=%d (direct write, no ticket/MD download)\n",count,npoints,written,same,result);
+ return result;
 #endif
 }
