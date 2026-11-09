@@ -1,3 +1,18 @@
+## HANDOFF 2026-11-09 (76): 148 采样:powerd 主线程卡在 mediaserverd 的同步 XPC;mediaserverd 崩溃循环;fc = 禁用 mediaserverd 的验证镜像
+
+- 观察(148.txt, fb = er 内核 + x9_sample_procs=powerd,CommCenter):powerd 只有 3 个线程,主线程在第 2-8 轮(40-100 s)
+  持续阻塞于 -[AVSystemController init] → FigSystemControllerRemoteCreate → FigXPCConnectionSendSyncMessageCreatingReply
+  → xpc_connection_send_message_with_reply_sync(即同步等 mediaserverd);另一个线程在 sigsuspend,其余为空闲 workqueue。
+- 观察:mediaserverd 在 32.0 s 起崩溃循环:第一次 sig 6(日志 "X9 GENERAL METAL: missing class=NBFunction selector=returnType"),
+  49 s 起每约 5 s 一次 sig 11 pc 0。崩溃次数随运行时长增加:145=3、146=5、147=17(~150 s)。第一次崩溃前 mediaserverd[29] 存活 ~21 s。
+- 推断(未验证):CommCenter 的 PowerManager::createPowerAssertion 需要 powerd 的 IOPMAssertion 服务;powerd 主线程被
+  AVSystemController 初始化占住 → 断言不被授予 → handoff 75 的 dispatch group 不放 → BootModule::boot_sync 不运行 → ABM 不开 PCI 通道。
+  采样只从 30 s 开始,没有直接看到 CommCenter 在等断言;时间上与 ABM 在 16.36 s 之后无动作一致,但不是证明。
+- 验证镜像 x9-rev252fc-md(er 内核 + boot-arg x9_disable_jobs=com.apple.mediaserverd,debug=0xc 写成 debug=12 腾空间,boot.img 12869632 B,
+  配置 .local/x9/modem/boot-rev252fc-md.json):launchd 的 disabled.plist 会写入该 label,使 powerd 对 mediaserverd 的查找立刻失败而不是挂起。
+  副作用:disabled.plist 持久在根盘上,之后不带参数启动**不会**恢复;恢复办法是下次带 x9_disable_jobs=<无关 label> 重写(从 disabled.x9-orig.plist 起)。
+  预期:若链路成立,握手计数里 PCIControl methods / protocol queries 会从 0 变化。
+- 要修的根因仍是 mediaserverd 崩溃(X9GeneralMetal 缺 NBFunction 的 returnType,以及 sig 11 pc=0),属于 Metal 前端工作。
 ## HANDOFF 2026-11-09 (75): boot_sync 的 group 来自 PowerManager::createPowerAssertion("…RadioNotReady.Bootup", 180 s×系数)
 
 - 观察(静态,ABM 20H392):BootModule::start 的 lambda 在 ResetDetection start 之后调用 BootModule 虚函数 +0x50 取得对象,
