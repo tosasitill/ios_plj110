@@ -2,7 +2,7 @@
 
 > 旧的完整流水账(7784 行,含 sweet/SM7150 时代、rev2xx 全部 handoff)在 git 历史里:
 > `git show a8f1955:NOTES.md`。需要翻某个 revision 的细节时 `git log -S'<关键字>' -- NOTES.md` 再 show。
-> 截至 2026-11-09 的完整 cn 交接在 `git show 636edc2:NOTES.md`;当前以 §7 的 HANDOFF (88) 为准。
+> 截至 2026-11-09 的完整 cn 交接在 `git show 636edc2:NOTES.md`;当前以 §7 的 HANDOFF (89) 为准。
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
@@ -74,7 +74,7 @@ X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>      # 之后再�
 ## 3. 当前基线镜像与参数
 
 最新实测:**x9-rev252hl-md**(代码提交 **`20c64f2`**,构建交接 `0f9d983`),boot.img **12877824 B=12.28125MiB**,路径 `x9/out/x9-rev252hl-md/boot.img`。**157确认完整11文件安装成功、qdsp可读、Sahara finished并进入QMUX/QMI,握手摘要reset=0;真实iOS蜂窝尚未打通**,见HANDOFF87。独立34MiB固件与插件275不需再stage。
-当前未上机候选:**x9-rev252hn-md**(代码`91c897e`),boot.img12898304B;AT→QMI控制面已编译,DPMAIF未实现,见HANDOFF88。最新实测仍hl;不要把候选当作SIM/蜂窝已验证。
+当前未上机候选:**x9-rev252ho-md**,boot.img12906496B;沿用hn AT→QMI,新增DPMAIF只读/分配探针和WDS前置状态查询,见HANDOFF89。ho默认`x9_dpmaif=1`,不初始化硬件或激活PDP;hn保留。最新实测仍hl;不要把候选当作SIM/蜂窝已验证。
 回退:**x9-rev252hk-md**(修复提交 `d1f8515` + 当时未提交的渲染改动,现已入库),boot.img **15278080 B**;156确认reserve生效、efs1.bin已有1MiB,当时15次reset及零传输见HANDOFF84。
 本机回退镜像:`x9/out/x9-rev252hk-md/boot.img`;hl/hk配置沿用 `.local/x9/modem/boot-rev252hi-md.json`。
 157已越过缺qdsp的前置阻塞,**当前阻塞在X9的QMI→MTK适配**:UIM/NAS/DMS/WDS/WDA/DPM请求实际到达后返回0x5e,数据端口配置失败,四个PDP接口仍blocked/tx=rx=0。Sahara是兼容桥交互,不向物理MTK下载Apple固件;PCIControl methods仍0x0,不能说PCIControl已通。以下GPU专用基线与参数为 **2026-11-08 历史记录**,不要当作hk/hl参数直接复用。
@@ -112,7 +112,7 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 
 ## 5. 未解决问题
 
-当前主线是 **QMI→MediaTek AT/CCCI适配**(§7):157已确认完整固件/qdsp及Sahara→QMUX前置链能推进,当时UIM/NAS等返回不支持;hn已编译真实控制面但未上机,数据面未实现。下一步实测闭环一个真实SIM状态请求,不要继续重stage完整固件或绕过断言。下列为保留的GPU/Wi-Fi待办,不是新的硬件验证结论。
+当前主线是 **QMI→MediaTek AT/CCCI适配**(§7):157已确认完整固件/qdsp及Sahara→QMUX前置链能推进,当时UIM/NAS等返回不支持;ho已编译控制面与DPMAIF探针/WDS前置查询但未上机,真实PDP激活/收发仍未打通。下一步实测真实SIM状态和DPMAIF只读/真实DMA分配,不要继续重stage完整固件或绕过断言。下列为保留的GPU/Wi-Fi待办,不是新的硬件验证结论。
 
 1. **GPU 带宽/帧率**:avg ~17-22 fps,稳态 24 fps;job 内 GPU wait 6-15 ms。判断显存带宽受限。**DVFSRC 从未初始化**(110.txt:`basic=8 opp_count=1 gear=0`,SW_REQ 被忽略)。
    rev252dc 加 TF-A SMC INIT:`MTK_SIP_VCOREFS_CONTROL = 0xC2000506`,cmd INIT=0(a0=0 成功,a1=dram_type)锁高 OPP,START=1(`x9_dvfsrc=2`)后自由运行。**待上机**,SMC 可能挂。
@@ -152,7 +152,20 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
 
-## 7. 当前交接(HANDOFF 88,2026-11-09): AT→QMI控制面候选hn已编译;尚未上机,DPMAIF/语音未实现
+## 7. 当前交接(HANDOFF 89,2026-11-09): DPMAIF实验后端/WDS前置路径已编译;ho仅探针,无真实会话成功
+
+- 用户要求继续DPMAIF收发与WDS数据会话。本轮从`3ef5398`/干净main继续,没有ADB、flash/reboot、设备读写/挂载,没有新实机结论。最新实测仍hl/157;hn保留。**本轮不是WDS/PDP或蜂窝网络已打通**,不能将编译成功或逻辑Bind成功视为数据面成功。
+- 补全上一轮只读契约核对:原生`mtk_ccci_common.h:349–350`的LRO=bit4、2RXQ=bit5,故live cap0x7a确有两者;`clk-mt6993-ifrao.c`匹配live的`mediatek,mt6993-apifrbus_ao_mem_reg`,0x14126000的gate status/clear=0xd20/0xd28,main bit2、26MHz bit3。真实DPMAIF bases按`dpmaif_init_register`和`ccci_dpmaif_drv3_init`派生,MT6993 TX高地址写独立CON2、rdidx用UL SRAM0xe0高16bit/2。channel仍是ccmni索引,**现有源码/所存50KiB mtkfusionrild程序没有给出CID→ccmni/会话契约**,不得猜CID-1。参考根路径`~/HelioDarwin/oppo-source/modules/kernel/kernel_device_modules-6.12/`。
+- 新`X9DPMAIF.inc`接替send=-1 stub:网络线程仅向64槽/3072B mailbox复制,单bridge owner作MMIO、DMA发布/完成。独立`IOBufferMemoryDescriptor`物理连续分配,mapper-none物理segment长度/16KiB对齐/0x40000000..0xffffffff范围验证;不使用Wi-Fi保留池或编造Linux动态reserved节点地址。独立DRB2048、TX pool、BAT1024x2/PIT2048x2、1664/1920B缓冲;cache-line维护+barrier。
+- **收发代码仅编码/编译,未硬件验证**:TXQ0 msg+payload DRB、word-count doorbell、高地址CON2、read-index/已发布范围回收及route epoch隔离;RX v3 sequence、h_bid、channel、header_offset×4、normal/fragment重组、地址/MTU检查、最终cbit0才回调。BAT共用、顺序补充同时要求硬件消耗+两路RX释放,不按每个PIT盲目重发。异常/超时/索引或所有权错误隔离保留全部DMA,不reset/force-assert/free可能在飞buffer。RX只支持关闭聚合后的单normal+fragments;若收到多个normal/LRO聚合就保留故障并隔离,**没有完整LRO/GRO实现**。
+- `x9_dpmaif=0`默认关闭;**ho显式=1**,仅读时钟gate,门开才读DPMAIF状态,分配私有DMA,不写任何硬件寄存器/doorbell/SRAM、不publish描述符、ready保持0。=2代码为**未验证实验初始化**:等真实AT owner online后使能时钟、6993 P2/SRAM_INIT_v1 bounded wait、双PIT/BAT/TXQ0配置、关闭16路aggregation、INIT_DONE;不写旧AP bus-remap,两IRQ保持mask并poll。**本轮没有启用=2;后续启用SRAM/queue初始化需先用户确认,不能直接把ho改成active上机。** parent mux/MD-side DMA remap、队列读回/实际IRQ及非聚合双RX行为仍待实机验证。
+- X9编译定义`COACHZ_NATIVE_DPMAIF`仅作用于此board:shared bridge不再创建内部IPA DPM/WDA配置client,不把Apple endpoint3/interface4改写成embedded4/interface1,不要求QMAP;原Qualcomm默认路径不变。host WDA/DPM仍明确不支持,没有伪造open-port或format成功;native的CBD_IDLE不是初始化成功。
+- 新`X9WDS.inc`:支持WDS0xa2逻辑mux绑定(仅mux-only或shim的PCIe3/interface4)、0x4d family4/6;这是host意图,不会调用物理route bind。0x22串行真实`AT+CGACT?`、逐行CID/状态去重/范围解析,返回该client无自有bearer的disconnected,即使MD有active context也不冒充它。0x20 Start校验APN字符/长度、family、拒绝未实现profile/auth/凭据/autoconnect转换,真实CGACT preflight后在DPMAIF-ready或CID/ccmni未证明门失败,**不执行CGDCONT/CGACT/CGDATA激活、不生成handle或IP/DNS/MTU**。0x21未知handle返回9,0x2d无自有call返回15;starting锁、总deadline/取消/DEL_CLIENT generation与上一轮迟到final排空屏障保留,删除不对unowned MD context做CGACT=0。
+- **直接构建成功,未额外测试/二次校验镜像**: `python3 -I x9/build/build.py all --name x9-rev252ho-md --boot-config .local/x9/modem/boot-rev252hi-md.json --boot-arg x9_dpmaif=1`。53/53 overlay+6 prebuilt、link/strip/boot均成功;构建输出Image **28745728B**,boot.img **12906496B=12.30859375MiB**,20MiB guard不变。日志`x9/out/x9-rev252ho-md/build.log`及`.local/x9/work/dpmaif-wds-157/build-ho.stdout.log`。有XNU/原控制面风格警告及`x9d_bind`未使用警告(正是本版没有可信物理route producer),不声称无warning。没有手动触发CI run。插件275、完整11文件外置34MiB manifest保持不变,没有传revision或重建/stage插件,**不用再放/挂载固件或mailbox staging**。
+- **下一步由用户手动**:`fastboot boot x9/out/x9-rev252ho-md/boot.img`。新日志先看`build=rev252ho-md`、11文件/Sahara/QMUX/UIM/NAS;再`X9 DPMAIF:`的gate、私有DMA分配/范围通过与mode1/ready0/published0;`X9 WDS:`/`X9 QMI AT:`的0x22真实CGACT解析及Start失败门。TX/RX0是探针模式预期,不是成功。最小检索`rg -n 'build=rev252ho|X9 DPMAIF:|X9 WDS:|X9 QMI AT:|COACHZ pdp:' ~/N.txt`。不用重复156/157缓存取证。
+- **剩余实现明确**:先取得真实MTK RIL/MIPC的PDP创建/绑定(CID、ccmni)、CGDATA/CGCONTRDP错误与地址/DNS/MTU语义证据;不能拿所存launcher替代实际RIL库。证明数据硬件INIT/内存地址可达后才扩展Start/Stop回滚、客户端删除/late-OK清理、自有handle、settings/断线indication和物理route producer,再放行iOS接口地址/路由/实际包收发。语音/IMS不在本版。
+
+### 前次交接(HANDOFF 88,2026-11-09): AT→QMI控制面候选hn已编译;尚未上机,当时DPMAIF/语音未实现
 
 - 代码与完整后续流程说明提交 **`91c897e`**,当前`main`。`x9/baseband/README.md`已替换过时eq/12文件/bindfs说明,记录hn能力边界及SIM→DPMAIF→WDA/DPM/WDS→iOS IP/路由/收发→语音/IMS的逐步成功门。
 - 用户要求“把后续的流程全写完”,本轮将原error94 stub扩展为有界异步**真实AT控制面**并补齐后续流程说明。**不是全部蜂窝已完成**;DPMAIF、WDS数据会话、语音/IMS尚缺,没有伪造WDA/DPM成功。实测基线仍hl/157。

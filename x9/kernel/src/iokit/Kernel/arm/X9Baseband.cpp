@@ -2,8 +2,8 @@
 //
 // The bridge expects a Qualcomm modem behind QRTR. Ours is a MediaTek MD that speaks AT over CCCI (x9_modem*.inc), so this file is
 // the "QRTR node" the bridge talks to: it announces QMI services, receives the QMI requests CommCenter/ABM make and answers them.
-// Control plane: bounded asynchronous QMI -> real serial AT. Data plane remains
-// fail-closed until MT6993 DPMAIF DMA/TX/RX is implemented and verified.
+// Control plane: bounded asynchronous QMI -> real serial AT. Experimental
+// DPMAIF is separate from IPA; WDS activation remains gated on proven routing.
 //
 // One kernel thread owns configure/poll/QRTR delivery, as the bridge requires.
 #include <kern/thread.h>
@@ -12,19 +12,12 @@
 #include "../../../bsd/dev/x9_modem_bridge.h"
 #include <kern/sched_prim.h>
 #include <mach/mach_types.h>
+#include <IOKit/IOBufferMemoryDescriptor.h>
+#include <pexpert/pexpert.h>
+#define COACHZ_NATIVE_DPMAIF 1
 #include "../../../../../baseband/qcom/baseband/coachz_baseband.cpp"
-
-// Data plane hooks the bridge expects from the board (stage 6: DPMAIF). Until then packets are dropped.
-static void (*x9bb_rx)(uint32_t mux, const uint8_t *ip, uint32_t length, uint32_t ip_version);
-extern "C" int coachz_modem_data_send(uint32_t mux, const uint8_t *ip, uint32_t length)
-{
-  (void)mux; (void)ip; (void)length;
-  return -1;
-}
-extern "C" void coachz_modem_data_receiver(void (*receiver)(uint32_t mux, const uint8_t *ip, uint32_t length, uint32_t ip_version))
-{
-  x9bb_rx = receiver;
-}
+extern "C" vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+#include "X9DPMAIF.inc"
 
 extern "C" void delay_for_interval(uint32_t interval, uint32_t scale_factor);
 
@@ -83,18 +76,20 @@ void x9bb_thread(void *, wait_result_t)
   // Wait for IOKit's resource service (the bridge publishes under it).
   for (unsigned i = 0; i < 600 && !IOService::getResourceService(); i++) delay_for_interval(100, 1000 * NSEC_PER_USEC);
   coachz_baseband_configure(x9bb_modem_send, x9bb_del_client);
+  x9d_prepare();
   for (const x9bb_service &s : x9bb_services)
     coachz_baseband_new_server(s.id, 1, X9BB_NODE, X9BB_PORT_BASE + s.id);
   printf("X9 BB: bridge configured, %u QMI services announced on node %u\n", (unsigned)(sizeof x9bb_services / sizeof x9bb_services[0]), X9BB_NODE);
   for (unsigned second = 0;; ) {
     for (unsigned i = 0; i < 1000; i++) {
       coachz_baseband_poll();
+      x9d_poll();
       x9q_poll();
       x9q_subscriptions();
       delay_for_interval(1, 1000 * NSEC_PER_USEC);
     }
     second++;
-    if (second % 10 == 0) coachz_baseband_report(second);
+    if (second % 10 == 0) { coachz_baseband_report(second); x9d_report(second); }
   }
 }
 }

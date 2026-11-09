@@ -1,7 +1,8 @@
 /* QMI SDU <-> real CCCI AT. Included inside X9Baseband.cpp's owner namespace.
  * Wire layouts: libqmi UIM/NAS/DMS message dictionaries; no packed host structs.
  * All requests, subscriptions and SIM reads belong to this single QMI owner.
- * No APDU writes, PIN guesses, synthetic AID/IMEI, IPA endpoints or PDP success. */
+ * No APDU writes, PIN guesses, synthetic AID/IMEI or IPA endpoints.
+ * Native WDS preflight is separate; no PDP success without a proven route. */
 constexpr unsigned X9Q_JOBS = 32, X9Q_REQ = 1024;
 constexpr uint16_t X9Q_BAD = 1, X9Q_INTERNAL = 3, X9Q_BUSY = 2,
                    X9Q_NOT_READY = 16, X9Q_ARG = 48, X9Q_UNSUPPORTED = 94;
@@ -57,6 +58,8 @@ struct x9q_job {
  int reg[3],attached,act,csq;uint16_t mcc,mnc;unsigned mnc_digits;
 };
 static x9q_job x9q_jobs[X9Q_JOBS];static int x9q_active=-1;static uint64_t x9q_order;
+static void x9w_release_job(x9q_job &);
+static void x9w_result(x9q_job &,const char *,int);
 /* Exact complete AT lines only; prefix comparisons never cross into another line. */
 static bool x9q_line(const char *s,const char *prefix,char *out,unsigned cap){
  unsigned pl=(unsigned)strlen(prefix);bool found=false;
@@ -132,13 +135,13 @@ static bool x9q_dir(x9q_job &j,const uint8_t *p,unsigned n){
 static void x9q_error(x9q_job &j,uint16_t err){
  if(!j.background){x9q_packet p(j.req,err);p.send(j.local,j.port);
   printf("X9 QMI AT: response service 0x%x msg 0x%04x txn %u error %u\n",j.port-X9BB_PORT_BASE,j.id,x9q_u16(j.req+1),err);}
- if(j.token)x9_md_at_cancel(j.token);bzero(&j,sizeof(j));x9q_active=-1;
+ if(j.token)x9_md_at_cancel(j.token);x9w_release_job(j);bzero(&j,sizeof(j));x9q_active=-1;
 }
 static void x9q_finish(x9q_job &j,x9q_packet &p,uint16_t ind=0){
  if(!j.background||!x9q_u16(p.p+10))p.send(j.local,j.port,j.background,ind);
  if(!j.background)printf("X9 QMI AT: response service 0x%x msg 0x%04x txn %u result %u error %u (real AT)\n",
    j.port-X9BB_PORT_BASE,j.id,x9q_u16(j.req+1),x9q_u16(p.p+10),x9q_u16(p.p+12));
- bzero(&j,sizeof(j));x9q_active=-1;
+ x9w_release_job(j);bzero(&j,sizeof(j));x9q_active=-1;
 }
 static void x9q_command(x9q_job &j,const char *s,unsigned stage){
  strlcpy(j.command,s,sizeof(j.command));j.stage=stage;
@@ -220,7 +223,8 @@ static void x9q_nas(x9q_job &j){
 }
 static void x9q_start(x9q_job &j){
  unsigned service=j.port-X9BB_PORT_BASE;
- if(service==0x0b||(service==2&&j.id==0x3c)){
+ if(service==1){x9q_command(j,"AT+CGACT?\r",90);
+ }else if(service==0x0b||(service==2&&j.id==0x3c)){
   if(service==0x0b&&(j.id==0x20||j.id==0x21)&&!x9q_read_args(j)){x9q_error(j,X9Q_ARG);return;}
   x9q_command(j,"AT+CPIN?\r",1);
  }else if(service==3){
@@ -244,6 +248,7 @@ static void x9q_result(x9q_job &j,const char *r,int result){
  unsigned service=j.port-X9BB_PORT_BASE;bool ok=result==X9_AT_OK;
  if(result==X9_AT_TIMEOUT||result==X9_AT_OFFLINE){x9q_error(j,X9Q_NOT_READY);return;}
  if(result==X9_AT_OVERFLOW){x9q_error(j,X9Q_INTERNAL);return;}
+ if(service==1){x9w_result(j,r,result);return;}
  if(j.stage>=30&&j.stage<=35){
   if(j.stage<33){const char *tags[]={"+CREG:","+CEREG:","+C5GREG:"};if(ok)j.reg[j.stage-30]=x9q_registration(r,tags[j.stage-30]);}
   else if(j.stage==33&&ok){char line[80];const char *p=line;unsigned n;
@@ -350,6 +355,7 @@ static bool x9q_enqueue(uint32_t local,uint32_t port,const uint8_t *req,unsigned
   memcpy(j.req,req,len);j.id=x9q_u16(req+3);return true;
  }return false;
 }
+#include "X9WDS.inc"
 static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *req,unsigned len){
  if(len<7)return;
  unsigned service=port-X9BB_PORT_BASE,slot=local-CBQ_PORT_BASE,id=x9q_u16(req+3);
@@ -357,6 +363,7 @@ static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *r
   x9bb_reply_error(local,port,req,len,X9Q_BAD);return;
  }
  x9q_client &c=x9q_clients[slot];
+ if(service==1&&x9w_request(local,port,req,len))return;
  if(service==0x0b&&id==0x2e){
   x9q_view m=x9q_tlv(req,len,1);
   if(!m.p||m.n!=4||len!=14||x9q_u32(m.p)&~0x11u){x9bb_reply_error(local,port,req,len,X9Q_UNSUPPORTED);return;}
@@ -371,8 +378,8 @@ static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *r
   }
   c.serving=serving;c.system=system;c.next=0;x9q_packet p(req);p.send(local,port);return;
  }
- /* WDA/DPM must not open a fabricated IPA endpoint. WDS status/settings must
-  * not promote CGATT to an IP route. All data-plane operations fail closed. */
+ /* WDA/DPM must not open a fabricated IPA endpoint. Unsupported WDS operations
+  * must not promote CGATT to an IP route. */
  if(!x9q_supported(service,id)){x9bb_reply_error(local,port,req,len,X9Q_UNSUPPORTED);return;}
  if(service==3&&id==0x20&&len!=7){
   x9q_view mask=x9q_tlv(req,len,0x10);
@@ -383,6 +390,7 @@ static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *r
 }
 static void x9q_del(uint32_t local){
  unsigned slot=local-CBQ_PORT_BASE;if(local<CBQ_PORT_BASE||slot>=CBQ_MAX_CLIENTS)return;
+ x9w_del(slot);
  uint64_t generation=x9q_clients[slot].generation+1;bzero(&x9q_clients[slot],sizeof(x9q_clients[slot]));x9q_clients[slot].generation=generation;
  for(unsigned i=0;i<X9Q_JOBS;i++)if(x9q_jobs[i].used&&x9q_jobs[i].local==local){
   if(x9q_jobs[i].token)x9_md_at_cancel(x9q_jobs[i].token);

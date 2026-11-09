@@ -289,10 +289,22 @@ static void bb_data_step(void)
 
 static void bb_data_start(void)
 {
+#if defined(COACHZ_NATIVE_DPMAIF)
+  // X9 has no IPA endpoints or QMAP aggregation hardware. Do not manufacture
+  // internal DPM/WDA IPA clients; keep host requests intact for the board's
+  // native control adapter. CBD_IDLE is NOT successful data-port setup.
+  static bool native_noted;
+  if (!native_noted) {
+    native_noted = true;
+    printf("COACHZ baseband: native DPMAIF, internal IPA/QMAP setup disabled; WDS owns bearer readiness\n");
+  }
+  return;
+#else
   if (bb_data.step != CBD_IDLE) return;
   bb_data.has_dpm = cbq_server_find(&bb_qmux, CBD_SVC_DPM) != nullptr;
   bb_data.has_wda = cbq_server_find(&bb_qmux, CBD_SVC_WDA) != nullptr;
   bb_data_step();
+#endif
 }
 
 // WDS is still entirely owned by CommCenter. Observe only wire lifecycle facts, never credentials or addresses.
@@ -351,6 +363,10 @@ static void bb_to_modem(const struct cbq_result &r, const uint8_t *sdu)
     }
     return;
   }
+#if defined(COACHZ_NATIVE_DPMAIF)
+  // Preserve Apple's original logical endpoint; DPMAIF is not embedded IPA.
+  bb_queue_tx(r.local_port, r.node, r.port, sdu, r.len);
+#else
   const struct cbd_fix f = cbd_endpoint_fix(r.service, sdu, r.len, bb_fix, sizeof bb_fix);
   if (!f.len) {
     bb_queue_tx(r.local_port, r.node, r.port, sdu, r.len);
@@ -360,6 +376,7 @@ static void bb_to_modem(const struct cbq_result &r, const uint8_t *sdu)
     printf("COACHZ baseband: data port: service %u message 0x%x endpoint %u/%u %s %u/%u\n", r.service, (uint32_t)(sdu[3] | sdu[4] << 8),
            f.before_type, f.before_interface, f.inserted ? "added as" : "now", CBD_EP_EMBEDDED, CBD_EP_INTERFACE);
   bb_queue_tx(r.local_port, r.node, r.port, bb_fix, f.len);
+#endif
 }
 
 // eSIM control runs on the same QRTR owner as the other QMI traffic (bb_lock held).
