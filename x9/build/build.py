@@ -173,8 +173,12 @@ class Builder:
         self.run_or_exit([sys.executable, '-I', str(X9 / 'tools/md_ota_pack.py')], ROOT, label='md_ota_pack.py')
         # Original Apple Mav17 files are for ABM/BBUpdater only, never MTK MD firmware.
         bb = [sys.executable, '-I', str(X9 / 'tools/baseband_firmware.py')]
+        # Opt-in only: embedding the 34 MB pack made boot.img 47 MB and corrupted DRAM on
+        # device (rev252eq, 2026-11-09). Without baseband_firmware in local.json: empty stub.
         if self.cfg.get('baseband_firmware'):
             bb += ['--src', str(Path(self.cfg['baseband_firmware']).expanduser())]
+        else:
+            bb += ['--none']
         self.run_or_exit(bb, ROOT, label='baseband_firmware.py')
         todo = [e for e in self.recipe['objects'] if 'prebuilt' not in e]
         with concurrent.futures.ThreadPoolExecutor(self.jobs) as pool:
@@ -271,6 +275,10 @@ class Builder:
         cmd = [sys.executable, '-I', str(X9 / 'tools/boot-xnu.py'), '--kernel', str(kernel), '--out', str(self.out),
                '--ufs-native-manifest', manifest, '--boot-args', ' '.join(opts['boot_args'])] + opts['options']
         self.run_or_exit(cmd, ROOT, env, label='boot-xnu.py')
+        img = self.out / 'boot.img'
+        if not self.dry_run and img.is_file() and img.stat().st_size > 20 * 1024 * 1024 and not self.cfg.get('allow_large_boot'):
+            sys.exit(f'{img} is {img.stat().st_size} bytes; images above 20 MiB corrupted DRAM on device (rev252eq). '
+                     'Keep big data out of the payload or set allow_large_boot in local.json.')
 
 
 def main():
