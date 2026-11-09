@@ -1,3 +1,23 @@
+## HANDOFF 2026-11-09 (77): 150/151 排除 powerd/mediaserverd/IOKit 缺服务;新线索 BootControllerLegacy::prepare = stat(固件路径);ff 建空目录
+
+- 观察(149/150,fc=er 内核+x9_disable_jobs=com.apple.mediaserverd):mediaserverd 零崩溃、powerd 无线程阻塞,握手计数仍全程
+  protocol queries 0 / PCIControl methods 0x0 / board 15 次。→ powerd/mediaserverd/电源断言不是 ABM 的门。CommCenter 线程这次改卡
+  CLClientIsLocationServicesEnabled(同步等 locationd);换了依赖但 ABM 仍不动,所以也不是门。
+- 观察(151,fd=er 内核+sweetiolog=CommCenter):CommCenter 的 IOKit 查找只有 46 行:AppleBaseband 通知 13.58 s 无→14.18 s 匹配、
+  open AppleBaseband/AppleIPAppender/IOPMrootDomain/AppleKeyStore 均 0x0;ApplePPM 无(ABM 里只是天线遥测,非门)。
+  从未查找 AppleBasebandPCIControl(PCI 通道还没走到)。launchd 的 bindfs 挂载 /usr/standalone/firmware 失败:源
+  /private/preboot/<hash>/usr/standalone/firmware lookup error 2(6.09 s)。
+- 观察(静态,ABM 20H392):BootControllerLegacy::prepare(0x1b7f332d0)= stat(getFirmwarePath()),失败则日志 "Baseband Firmware Path Not Found"/
+  "Failed to find the firmware in \"%s\"" 并 prepare 返回失败;只检查存在性。BootModule 的 start 会话 group 一直持有直到 "transport ready"
+  (ServiceManager::initializeDynamicServices 的 dispatch_group_wait 在 147/150 采样 30-40 s 存在、约 45 s 消失,像 30 s 超时)。
+- 推断(未验证):boot_sync 其实可能已运行,Legacy 控制器 prepare 因固件路径不存在而失败,之后 ABM 静默空闲 → 与"无 PCI/SAHARA、无线程阻塞"一致。
+  是否选用 Legacy 控制器未证实。
+- 验证镜像 x9-rev252ff-md(完整重编,boot.img 12869632 B,固件仍是空 stub):固件缺失时只创建两个**空目录**
+  /usr/standalone/firmware/Baseband/Mav17 与 /private/preboot/<BOOT_MANIFEST_HASH>/usr/local/standalone/firmware/Baseband/Mav17(不放文件、不挂载),
+  日志 "X9 BBFW: Mav17 input absent; empty directories only ... standalone errno=… personalized errno=…";另带 x9_disable_jobs=x 把根盘上禁用的
+  mediaserverd 恢复(从 disabled.x9-orig.plist 重写,仅多一个无关 key "x")。
+- 预期:若路径存在性是门,握手计数里 PCIControl methods / protocol queries 变化,或出现 SAHARA/请求;否则门另有其处。
+- 实际路径(Mav17 目录 vs .bbfw 文件、standalone vs preboot)未从 libBasebandCapabilities 解出,故两处都建目录;若仍不动再解 getFirmwarePath。
 ## HANDOFF 2026-11-09 (76): 148 采样:powerd 主线程卡在 mediaserverd 的同步 XPC;mediaserverd 崩溃循环;fc = 禁用 mediaserverd 的验证镜像
 
 - 观察(148.txt, fb = er 内核 + x9_sample_procs=powerd,CommCenter):powerd 只有 3 个线程,主线程在第 2-8 轮(40-100 s)

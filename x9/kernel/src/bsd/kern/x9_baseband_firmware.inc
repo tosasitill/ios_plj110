@@ -186,7 +186,21 @@ static int sweet_x9_prepare_baseband_firmware(proc_t p,user_addr_t scratch,user_
  if(logging)printf("X9 BBFW: logging setup errno=%d; existing settings preserved\n",logging);
  if(sweet_x9_arg("x9_bb_firmware",1)!=1)return 0;
 #if !X9_BBFW_PRESENT
- printf("X9 BBFW: original Mav17 input absent; no firmware view mounted\n");return ENOENT;
+ /* rev252ff: BootControllerLegacy::prepare is only stat(firmwarePath) (ABM 20H392 0x1b7f332d0).
+  * Create the two empty firmware directories so that existence check can pass; no files, no mount. */
+ {
+  int standalone=x9_bbfw_directory(p,scratch,end,"/usr/standalone/firmware/Baseband/Mav17");
+  int preboot=ENOENT;DTEntry chosen=NULL;const void *value=NULL;unsigned value_size=0;
+  if(SecureDTLookupEntry(NULL,"/chosen",&chosen)==kSuccess&&
+   SecureDTGetProperty(chosen,"boot-manifest-hash",&value,&value_size)==kSuccess&&value_size&&value_size<=48){
+   char name[97]={0},point[256];
+   for(unsigned i=0;i<value_size;i++)snprintf(name+2*i,3,"%02X",((const uint8_t *)value)[i]);
+   snprintf(point,sizeof(point),"/private/preboot/%s/usr/local/standalone/firmware/Baseband/Mav17",name);
+   preboot=x9_bbfw_directory(p,scratch,end,point);
+  }
+  printf("X9 BBFW: Mav17 input absent; empty directories only (existence check) standalone errno=%d personalized errno=%d\n",standalone,preboot);
+ }
+ return 0;
 #else
  if((uint64_t)(x9_bbfw_pack_end-x9_bbfw_pack)!=X9_BBFW_PACK_BYTES||memcmp(x9_bbfw_pack,"X9BBF001",8))return EINVAL;
  SHA256_CTX hash;uint8_t digest[32];SHA256_Init(&hash);SHA256_Update(&hash,x9_bbfw_pack,X9_BBFW_PACK_BYTES);SHA256_Final(digest,&hash);
