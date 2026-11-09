@@ -220,6 +220,11 @@ static uint8_t x9q_radio(int act){
         act==7||act==9?8:act==11||act==12||act==13?12:0;
 }
 static void x9q_nas(x9q_job &j){
+ /* 166.txt: SysInfo never carried LTE info; log the real registration inputs
+  * whenever they change (stat values / CGATT / COPS AcT only, no identities). */
+ {static int last[5]={-9,-9,-9,-9,-9};int now[5]={j.reg[0],j.reg[1],j.reg[2],j.attached,j.act};
+  if(memcmp(last,now,sizeof(now))){memcpy(last,now,sizeof(now));
+   printf("X9 QMI AT: NAS registration CREG %d CEREG %d C5GREG %d CGATT %d COPS-AcT %d\n",now[0],now[1],now[2],now[3],now[4]);}}
  if(j.reg[0]<0&&j.reg[1]<0&&j.reg[2]<0){x9q_error(j,X9Q_NOT_READY);return;}
  int best=x9q_registered(j.reg[2])?j.reg[2]:x9q_registered(j.reg[1])?j.reg[1]:j.reg[0]>=0?j.reg[0]:j.reg[1];
  uint8_t radio=x9q_radio(j.act);

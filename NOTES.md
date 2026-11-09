@@ -73,8 +73,8 @@ X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>      # 之后再�
 
 ## 3. 当前基线镜像与参数
 
-最新实测:**x9-rev252hz-md**(165,见HANDOFF99;重置循环消失,未注册);再前 **x9-rev252hy-md**(164,见HANDOFF98);再前 **x9-rev252hx-md**(163,见HANDOFF96);再前 **x9-rev252hw-md**(162,见HANDOFF95);再前 **x9-rev252hv-md**(161,见HANDOFF94;MIPC就绪、UIM读通);再前 **x9-rev252hu-md**(160,见HANDOFF93;RAM 10.0GiB生效);再前 **x9-rev252ht-md**(159,见HANDOFF92);再前 **x9-rev252hs-md**(158,见HANDOFF91;MIPC/DPMAIF在prepare/OPEN即隔离,UIM卡状态被拒);前一实测 **x9-rev252hl-md**(代码提交 **`20c64f2`**,构建交接 `0f9d983`),boot.img **12877824 B=12.28125MiB**,路径 `x9/out/x9-rev252hl-md/boot.img`。**157确认完整11文件安装成功、qdsp可读、Sahara finished并进入QMUX/QMI,握手摘要reset=0;真实iOS蜂窝尚未打通**,见HANDOFF87。独立34MiB固件与插件275不需再stage。
-当前未上机候选:**x9-rev252ia-md**(HANDOFF99:LTE SysInfo);回退 **x9-rev252hz-md**;更早候选 **x9-rev252hq-md**(代码`ccbad81`),boot.img12906496B;沿用hn AT→QMI,新增DPMAIF只读/分配探针和WDS前置状态查询,见HANDOFF89。hq默认`x9_dpmaif=1`,不初始化硬件或激活PDP;hn保留。最新实测仍hl;不要把候选当作SIM/蜂窝已验证。
+最新实测:**x9-rev252ia-md**(166,见HANDOFF100;47s内LTE未注册);再前 **x9-rev252hz-md**(165,见HANDOFF99);再前 **x9-rev252hy-md**(164,见HANDOFF98);再前 **x9-rev252hx-md**(163,见HANDOFF96);再前 **x9-rev252hw-md**(162,见HANDOFF95);再前 **x9-rev252hv-md**(161,见HANDOFF94;MIPC就绪、UIM读通);再前 **x9-rev252hu-md**(160,见HANDOFF93;RAM 10.0GiB生效);再前 **x9-rev252ht-md**(159,见HANDOFF92);再前 **x9-rev252hs-md**(158,见HANDOFF91;MIPC/DPMAIF在prepare/OPEN即隔离,UIM卡状态被拒);前一实测 **x9-rev252hl-md**(代码提交 **`20c64f2`**,构建交接 `0f9d983`),boot.img **12877824 B=12.28125MiB**,路径 `x9/out/x9-rev252hl-md/boot.img`。**157确认完整11文件安装成功、qdsp可读、Sahara finished并进入QMUX/QMI,握手摘要reset=0;真实iOS蜂窝尚未打通**,见HANDOFF87。独立34MiB固件与插件275不需再stage。
+当前未上机候选:**x9-rev252ib-md**(HANDOFF100:LTE SysInfo+注册日志);回退 **x9-rev252hz-md**;更早候选 **x9-rev252hq-md**(代码`ccbad81`),boot.img12906496B;沿用hn AT→QMI,新增DPMAIF只读/分配探针和WDS前置状态查询,见HANDOFF89。hq默认`x9_dpmaif=1`,不初始化硬件或激活PDP;hn保留。最新实测仍hl;不要把候选当作SIM/蜂窝已验证。
 回退:**x9-rev252hk-md**(修复提交 `d1f8515` + 当时未提交的渲染改动,现已入库),boot.img **15278080 B**;156确认reserve生效、efs1.bin已有1MiB,当时15次reset及零传输见HANDOFF84。
 本机回退镜像:`x9/out/x9-rev252hk-md/boot.img`;hl/hk配置沿用 `.local/x9/modem/boot-rev252hi-md.json`。
 157已越过缺qdsp的前置阻塞,**当前阻塞在X9的QMI→MTK适配**:UIM/NAS/DMS/WDS/WDA/DPM请求实际到达后返回0x5e,数据端口配置失败,四个PDP接口仍blocked/tx=rx=0。Sahara是兼容桥交互,不向物理MTK下载Apple固件;PCIControl methods仍0x0,不能说PCIControl已通。以下GPU专用基线与参数为 **2026-11-08 历史记录**,不要当作hk/hl参数直接复用。
@@ -152,7 +152,15 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
 
-## 7. 当前交接(HANDOFF 99,2026-11-09): 165(hz)读完;基带重置循环消失;CommCenter认为未注册,ia补LTE SysInfo
+## 7. 当前交接(HANDOFF 100,2026-11-09): 166(ia)读完;LTE SysInfo未触发(采集只到47s,LTE尚未注册);ib加注册状态日志
+
+- **166.txt**(Mac `~/166.txt`,1199596B/11816行,末47.17s,无panic)。`build=rev252ia-md`;21.63s MIPC dialler ready;21.67s SetOperatingMode 0 `(real AT)`;`resets 0`。NAS 0x4d两次`(real AT)`;0x4e indication在21.7/31.7/41.7s发出,全是len 19(只有service status),**没有出现`NAS SysInfo LTE registered`**,即这些时刻CEREG不是1/5。仍无0xc8/WDS Start。
+- **推断**:157(唯一一次91s长采集)里先是C5GREG=2,1(34.5s,CEREG=2,0,**5G SA**),52.4s才CEREG=2,1。160–166的采集都只有32–60s,可能还没等到LTE注册。另一个风险:跑的是iPhone X(D22)的iOS,CommCenter没有5G概念,**NR SA注册它大概率不认**。若LTE迟迟不注册,下一步用真实AT让MD注册到LTE:MTK RIL使用`AT+ERAT=%d,%d`(RAT模式)和`AT+E5GOPT=%d`(NSA/SA开关),**取值语义尚未核实**,需要先从libmtk-ril反汇编出映射表,不要猜。
+- **ib修改**:SysInfo每次计算时,若注册输入有变化,打印`NAS registration CREG x CEREG y C5GREG z CGATT a COPS-AcT b`(只有数字)。
+- **ib构建成功**(未上机):同参数,`--name x9-rev252ib-md`,boot.img 12922880B,日志`.local/x9/work/pdp-activation/build-ib.stdout.log`(Mac)。无新warning,插件275不变,无需mailbox staging。回退:ia/hz。
+- **下一步由用户手动**:`fastboot boot x9/out/x9-rev252ib-md/boot.img`,**采集至少120s**再停,日志放`~/167.txt`。看`NAS registration`的变化过程、`NAS SysInfo LTE registered`、之后有无0xc8/WDS Start。
+
+### 前次交接(HANDOFF 99,2026-11-09): 165(hz)读完;基带重置循环消失;CommCenter认为未注册,ia补LTE SysInfo
 
 - **165.txt**(Mac `~/165.txt`,1080224B/10833行,末42.9s,无panic)。`build=rev252hz-md`;22.00s MIPC dialler ready;22.22s `DMS 0x002e set operating mode 0`→22.26s `(real AT)`成功。
 - **观察**:10s/20s摘要`resets 0`,全程没有board重置;pbl/Sahara各只打开一次。**重置循环解决。**这次CommCenter没有发attach APN推送(0xc8),也没有WDS Start。23s之后基本空闲,只有每10s一次NAS 0x5556(Apple私有,拒)和UIM 0x2a(ACK)。
