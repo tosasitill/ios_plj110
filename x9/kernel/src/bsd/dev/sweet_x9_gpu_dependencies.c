@@ -495,8 +495,10 @@ static void worker(void *arg,wait_result_t result) {
  (void)arg;(void)result;sweet_x9_csf_prepare();run();(void)thread_terminate(current_thread());
 }
 /* Replaces the pan143 observer entry point, preserving its UFS startup hook. */
+#include "x9_modem.inc"
 void sweet_x9_gpu_dependencies(void) {
  int enabled=0;static int started;
+ if(sweet_early_is_x9())x9_modem_start();
  if(!sweet_early_is_x9()||started||(enabled=sweet_x9_arg("x9_gpu_power_probe",1))!=1)return;
  started=1;thread_t t;
  if(kernel_thread_start(worker,NULL,&t)==KERN_SUCCESS)thread_deallocate(t);

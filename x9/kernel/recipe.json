@@ -6418,6 +6418,11 @@
    "name": "SweetX9Battery.cpp.o",
    "source": "iokit/Kernel/arm/SweetX9Battery.cpp",
    "template": "iokit-cxx-3"
+  },
+  {
+   "name": "X9Baseband.cpp.o",
+   "source": "iokit/Kernel/arm/X9Baseband.cpp",
+   "template": "iokit-cxx-3"
   }
  ],
  "link": {

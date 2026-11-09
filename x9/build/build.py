@@ -167,6 +167,8 @@ class Builder:
         nv = Path(self.cfg.get('wifi_nvram') or ROOT / '.local/x9/wifi-nvram/WIFI').expanduser()
         self.run_or_exit([sys.executable, '-I', str(X9 / 'tools/wifi_nvram.py'), '--src', str(nv)], ROOT,
                          label='wifi_nvram.py')
+        # Vendor MD OTA tree (T: drive of the modem FSD) -> generated/x9_mdota.inc (gitignored; stub when absent)
+        self.run_or_exit([sys.executable, '-I', str(X9 / 'tools/md_ota_pack.py')], ROOT, label='md_ota_pack.py')
         todo = [e for e in self.recipe['objects'] if 'prebuilt' not in e]
         with concurrent.futures.ThreadPoolExecutor(self.jobs) as pool:
             results = list(pool.map(self.compile_one, todo))
