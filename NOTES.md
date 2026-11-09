@@ -1,3 +1,17 @@
+## HANDOFF 2026-11-09 (75): boot_sync 的 group 来自 PowerManager::createPowerAssertion("…RadioNotReady.Bootup", 180 s×系数)
+
+- 观察(静态,ABM 20H392):BootModule::start 的 lambda 在 ResetDetection start 之后调用 BootModule 虚函数 +0x50 取得对象,
+  再对其 +0x68 成员的虚函数 +0x18 传入名字 "com.apple.AppleBasebandManager.RadioNotReady.Bootup" 与 180000 ms ×
+  capabilities::bb::abm::resetAssertionTimeoutScalingFactor(),得到一个 dispatch group,然后 dispatch_group_notify_f
+  → 回调 0x1b7f538b4,state==0 才 boot_sync。符号表里对应的是 PowerManager::createPowerAssertion(string, ms)
+  (0x1b7ed8f8c;State 版 0x1b7fcce88,在 PowerManager::State 的串行队列里异步执行,用 ctu::power::assertion::HandleRaw)。
+- 观察(libTelephonyIOKitDynamic):HandleRaw::init 走 IOPMAssertionDeclareSystemActivity / IOPMAssertionSetProperty
+  (导入符号);这些需要 powerd。147 里 powerd 有 AKS 选择器调用(10.79 s),说明进程在,但没有证据显示断言是否被授予。
+- 推断(未验证):group 的释放 = 断言创建完成(或失败)。若 IOPMAssertion* 在我们的系统里同步卡住/失败而不释放 group,boot_sync 就不会跑,
+  与 "采样里没有线程卡在基带调用、CommCenter 全空闲" 一致。147 采样没有线程停在 IOPM 的 mach_msg 里,所以也可能是别的 group。
+- 没有证实:虚函数 +0x50/+0x18 的真实目标(提取的 dylib 数据段是链式重定位,看不到 vtable 内容)。
+- 下一步:取 ABM 自己的日志最直接(CommCenter os_log→stderr→内核 tee,或从 iOS 根盘 logd 解码);或用 x9_sample_procs=powerd
+  看 powerd 是否在处理 IOPMAssertion 请求。
 ## HANDOFF 2026-11-09 (74): fa(x9_sample_procs=CommCenter)采样 147.txt:ABM 空闲在事件循环,门不是内核可见的阻塞
 
 - 构建:x9-rev252fa-md = er 内核 + boot-arg x9_sample_procs=CommCenter(boot 配置 .local/x9/modem/boot-rev252fa-md.json,把三个值为 0 的
