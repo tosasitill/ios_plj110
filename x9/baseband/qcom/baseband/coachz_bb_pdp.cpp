@@ -119,11 +119,18 @@ static void bb_pdp_receive(uint32_t mux, const uint8_t *ip, uint32_t n, uint32_t
   if (error) mbuf_freem(m);
   else p->rx++;
 }
+// The helper can be opened before modem READY. Prepare only its traffic-gate
+// lock here; do not attach interfaces or announce a usable data transport.
+// The board serializes this before starting the bridge worker.
+static bool bb_pdp_prepare_helper()
+{
+  if (!bb_pdp_lock) bb_pdp_lock = IOLockAlloc();
+  return bb_pdp_lock != nullptr;
+}
 static void bb_pdp_init()
 {
   if (bb_pdp_initialized) return;
-  bb_pdp_lock = IOLockAlloc();
-  if (!bb_pdp_lock) return;
+  if (!bb_pdp_prepare_helper()) return;
   const errno_t ipv4 = proto_register_plumber(PF_INET, IFNET_FAMILY_CELLULAR, bb_pdp_plumb, nullptr);
   const errno_t ipv6 = proto_register_plumber(PF_INET6, IFNET_FAMILY_CELLULAR, bb_pdp_plumb, nullptr);
   printf("COACHZ pdp: protocol plumbers IPv4 %d IPv6 %d\n", ipv4, ipv6);

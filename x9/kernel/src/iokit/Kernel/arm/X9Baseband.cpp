@@ -100,3 +100,13 @@ extern "C" void x9_baseband_start(void)
   thread_t t;
   if (kernel_thread_start(x9bb_thread, nullptr, &t) == KERN_SUCCESS) thread_deallocate(t);
 }
+
+// Native UFS root initialization calls this before launchd and before starting
+// the slow MD worker. Only the PDP helper services/lock are prepared; the QMI
+// transport, interfaces and polling thread still start after physical HS2.
+extern "C" void x9_baseband_prepare(void)
+{
+  if (!coachz_baseband_enabled()) return;
+  const int result = coachz_baseband_prepare_helpers();
+  printf("X9 BB: pre-launchd PDP helper preparation result %d; transport waits for MD HS2\n", result);
+}

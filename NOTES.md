@@ -1,3 +1,28 @@
+## HANDOFF 2026-11-09 (69): 查完整 QcomBaseband 参考后分析143；发现 PDPHelper 首次初始化早于服务发布
+
+- USER要求先查参考实现再看143。已拉取当前UniXNU子模块 QcomBaseband `dd0199cf3300764ed52b23f4a47761f91fab21a2`，
+  本地 `.local/x9/work/references/QcomBaseband-20261109`；当前UniXNU main `d3de950a23a54d454d6ac21d8deceaa3f4ad0e73`引用同一版本。
+  读取 `platform/coachz/README.md`、`patches/coachz-prelink-baseband.patch`、`tools/coachz_cellular_compat.py`及原桥。
+  它不仅导入桥：还提供/baseband、product/baseband-chipset、Mav16 firmware挂载与CommCenter postponement-ticket兼容副本。
+  兼容工具改21H461 Apple可执行字节，不适用于本项目原版20H392字节约束，未运行/未移植。
+- 参考Trogdor `58b5bc8bfc04482014ff403078435e581e58a5b0` 的tools/xnu_screen.py已只读下载，
+  `.local/x9/modem/source/trogdor-xnu_screen-58b5bc8.py`；其baseband_tree为J121AP/mav16，不直接换X9身份。
+  当前x9/tools/mkadt.py未提供/baseband或baseband-chipset，是确认的集成缺项，不等同于已证明143最终等待根因。
+  原版D22AP IM4P静态解码：/baseband compatible=baseband,n41、device_type=baseband、class=3；product/baseband-chipset=mav17。
+  无euicc-chip-id，不能照搬J121的2。输入`.local/x9/work/adt-d22/Firmware/all_flash/DeviceTree.d22ap.im4p`，解码`/tmp/x9-d22-original.adt`。
+- `~/143.txt`确认en标记；16.343 s HS2 READY，22.363 s CPIN READY，25.929 s 5G注册。
+  q4后续TX/RX追平，至73.914 s still listening；无新MCU断言。原日志到75.869 s。
+- 最早新故障：16.235 s CommCenter[88] SIGSEGV FAR0，发生在16.419 s桥22服务发布之前。
+  20H392原版符号/指令：PC-slide=0x1d1b9a7a4 pthread_mutex_lock+8，LR-slide=0x1947121b0 std::mutex::lock+12，
+  下一帧0x1f2efdf1c=ApplePDPHelperInterface::callStructMethod+0x3c。getInstance的dispatch_once初始化找不到AppleIPAppender
+  就删除对象、缓存nullptr；callStructMethod未判空先锁this，因此本次是服务发布竞态，不是CCIF失效。
+  定位文件`/tmp/x9-pdp16-disasm.txt`、`/tmp/x9-pthread16-symbols.txt`、`/tmp/x9-cxx16-symbols.txt`；未改Apple文件。
+- 重启后的CommCenter[203]18.56 s可开AppleIPAppender/AppleBaseband。至73.189 s protocol queries0、user clients11/failed0、
+  board calls15/badargs0/unsupported0、manager1/baseband0、last selector3、PCIControl0；无PCI channel请求，QMI仅内部UIM0x47。
+- 下一版先单变量修复最早竞态：在root初始化/launchd前同步发布PDP helper服务，完整bridge/QMI仍等HS2。
+  保留CCIF nowait/FS128/DT/firmware/返回协议，后续再验证缺失DT/firmware与postponement-ticket路径。
+  未操作设备，构建结果待补；GPU原有工作树不混入提交。
+
 ## HANDOFF 2026-11-09 (68): 142.txt 验证 CCIF nowait/READY；iOS 握手诊断 rev252en-md BUILT 未上机
 
 - USER「好了」，最新日志 `~/142.txt`，标记 `rev252em-md fs128-bb-txnowait-v1 mode=4 bb=1`。

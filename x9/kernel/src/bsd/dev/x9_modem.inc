@@ -794,6 +794,7 @@ static void x9md_send_ch(unsigned ch){
 
 static int x9md_serve,x9md_clk_released;
 extern void x9_baseband_start(void);
+extern void x9_baseband_prepare(void);
 #include "x9_modem_s3.inc"
 
 /* Poll RCHNUM, drain rings, log every packet; HS2 -> READY, then keep
@@ -875,7 +876,7 @@ static void x9md_stage2(void){
 static void x9md_thread(void *arg,wait_result_t wr) {
  (void)wr;
  int mode=(int)(uintptr_t)arg;
- printf("X9 MODEM: build=rev252en-md fs128-bb-handshake-v1 mode=%d bb=%d\n",mode,sweet_x9_arg("x9_bb",0));
+ printf("X9 MODEM: build=rev252eo-md fs128-bb-earlyhelper-v1 mode=%d bb=%d\n",mode,sweet_x9_arg("x9_bb",0));
  printf("X9 MODEM: stage-1 bring-up mode=%d\n",mode);
  x9md_pmif_m=ml_io_map(0x1c01a000,0x1000);
  x9md_pmif_p=ml_io_map(0x1c018000,0x1000);
@@ -906,6 +907,7 @@ static void x9_modem_start(void) {
  int mode=sweet_x9_arg("x9_modem",0);
  if(started||mode<=0)return;
  started=1;
+ if(mode>=4)x9_baseband_prepare();
  thread_t t;
  if(kernel_thread_start(x9md_thread,(void *)(uintptr_t)mode,&t)==KERN_SUCCESS)thread_deallocate(t);
 }

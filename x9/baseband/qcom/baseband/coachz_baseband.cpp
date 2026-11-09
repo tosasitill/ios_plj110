@@ -65,6 +65,7 @@ static uint32_t bb_tx_head, bb_tx_count, bb_tx_dropped;
 static void (*bb_send)(uint32_t local_port, uint32_t node, uint32_t port, const void *message, uint32_t length);
 static void (*bb_del_client)(uint32_t local_port);
 static int bb_published;
+static IOService *bb_helper_manager, *bb_helper_appender;
 static uint32_t bb_private_seen[64], bb_private_count, bb_ctl_logged;
 // Bounded bring-up diagnostics. Do not log user buffers, addresses or property values.
 static uint32_t bb_match_queries, bb_match_accepted, bb_match_seen, bb_match_missed, bb_match_other;
@@ -1191,7 +1192,7 @@ OSDefineMetaClassAndStructors(AppleBasebandPCIMAVPDPManager, AppleBasebandPCIPDP
 
 // ------------------------------------------------------------------ publication and the Wi-Fi thread's entry points
 template <class Service>
-static Service *bb_publish(IOService *provider, uint32_t channel = ~0u)
+static Service *bb_publish(IOService *provider, uint32_t channel = ~0u, IOOptionBits options = 0)
 {
   Service *service = OSTypeAlloc(Service);
   bool ok = service && service->init();
@@ -1208,8 +1209,27 @@ static Service *bb_publish(IOService *provider, uint32_t channel = ~0u)
     OSSafeReleaseNULL(service);
     return nullptr;
   }
-  service->registerService();
+  service->registerService(options);
   return service;
+}
+
+// X9 local extension: ApplePDPHelper caches a failed first lookup as nullptr
+// (20H392 getInstance/init), and its callers then lock a null this pointer.
+// Publish the two helper services synchronously before launchd, independently
+// of slow physical MD boot. This is not modem READY and announces no QMI server.
+// Called by the board before its MD worker; configure is the serialized fallback.
+extern "C" int coachz_baseband_prepare_helpers(void)
+{
+  if (!coachz_baseband_enabled()) return 0;
+  IOService *provider = IOService::getResourceService();
+  if (!provider || !bb_pdp_prepare_helper()) return -1;
+  if (!bb_helper_manager)
+    bb_helper_manager = bb_publish<AppleBasebandPCIMAVPDPManager>(provider, ~0u, kIOServiceSynchronous);
+  if (!bb_helper_appender)
+    bb_helper_appender = bb_publish<AppleIPAppender>(provider, ~0u, kIOServiceSynchronous);
+  const unsigned made = (bb_helper_manager != nullptr) + (bb_helper_appender != nullptr);
+  printf("COACHZ baseband: PDP helpers prepared %u/2 (no transport readiness implied)\n", made);
+  return made == 2 ? 0 : -1;
 }
 
 // The modem's QRTR is up (GLINK started): publish the services ABM looks for. `send` and `del_client` run on the Wi-Fi thread only.
@@ -1225,8 +1245,9 @@ extern "C" void coachz_baseband_configure(void (*send)(uint32_t, uint32_t, uint3
   made += provider && bb_publish<AppleBaseband>(provider);
   made += provider && bb_publish<AppleBasebandPCIControl>(provider);
   for (uint32_t c = 0; c < CBH_PUBLISHED; c++) made += provider && bb_publish<AppleBasebandPCIInterface>(provider, c);
-  made += provider && bb_publish<AppleBasebandPCIMAVPDPManager>(provider);
-  made += provider && bb_publish<AppleIPAppender>(provider);
+  coachz_baseband_prepare_helpers();
+  made += bb_helper_manager != nullptr;
+  made += bb_helper_appender != nullptr;
   bb_published = 1;
   printf("COACHZ baseband: %d of %u services published (AppleBaseband, AppleBasebandPCIControl, %u channels, the PDP manager, AppleIPAppender)\n", made, 4u + CBH_PUBLISHED, CBH_PUBLISHED);
 }
