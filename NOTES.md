@@ -1,3 +1,21 @@
+## HANDOFF 2026-11-09 (73): eq 黑屏/坏内存 = 47 MB boot.img;er(固件为空)跑通,基带表现同 ep;固件改为 opt-in
+
+- 观察:eq(boot.img 47120384 B, Image 62.8 MB, 内嵌 34 MB Mav17 pack)上机黑屏、**无任何 disk-log/pstore 痕迹**,且之后每个镜像
+  (连内核与 ep 逐字节相同的 es)都黑,必须整机重启才恢复。判断为 eq 踩坏低端 DRAM(LK 放镜像/解压处);不是 bindfs overlay 或
+  launchd 前固件准备调用(et=只留 overlay、eu=只留调用,当时同样黑,原因同上)。er(同代码、固件为空 stub, boot.img 12869632 B)上机正常。
+  具体踩坏哪里**未确认**(推断);内核目标区 0x140000000 起约 99 MB 与设备树保留区无冲突(观察)。
+- 观察:146.txt(er,26 s):"X9 BBFW: original Mav17 input absent"、logd 配置 kept 3;MD HS2 READY 12572 ms,C5GREG 注册,
+  handshake: protocol queries 0, PCIControl methods 0x0, last selector 3,与 145(ep)完全一致;driverkitd/syncdefaultsd 崩溃同 145(预先存在)。
+- 改动(提交 ac07447, Mac 分支 rev252cn, 未推送):baseband_firmware.py 加 --none;build.py 默认**不**嵌入固件(只有 local.json
+  设 baseband_firmware 才嵌),boot.img 超过 20 MiB 构建失败(local.json 的 allow_large_boot 可放行)。mailbox 只剩约 14.5 MB
+  (插件占 50.6 MB/65 MB),放不下 34 MB 固件。ABM 是否真会读这些固件文件**未证明**,先不挂载。
+- 门(静态,未验证):ABM 的 board 调用止于 #10 selector 3(GET_RESET 返回 0;日志只打前 64 次调用)。ResetDetection::start 经
+  libTelephonyBaseband 注册 reset-detect(串 "failed registering for reset detect" / "failed to poll for reset detect"),
+  尚未确认注册走哪个 IOKit 通道、期望的 reset 极性。
+- 下一步:反汇编 ABM→libTelephonyBaseband 的 reset-detect 注册/轮询与 BootController::prepare 选型,确定 ABM 等的事件
+  (IOKit 通知或 selector 3 极性);还没做:QMI 后端(DMS/NAS/UIM/WDS)与 DPMAIF 收发。短信/数据未通。
+- 流程教训:黑屏且无日志时先整机重启,用已知好镜像(ep)验证,再二分代码。
+
 ## HANDOFF 2026-11-09 (72): 对照完整参考补原版Mav17固件视图/日志；rev252eq-md BUILT 未上机
 
 - PUSH：用户追问后已执行`git push -u origin rev252cn`成功，创建远端同名分支并设置upstream；
