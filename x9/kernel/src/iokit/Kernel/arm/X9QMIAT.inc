@@ -170,8 +170,10 @@ static const char *x9q_read_check(x9q_job &j){
   j.path[o]=hex[f>>12];j.path[o+1]=hex[(f>>8)&15];j.path[o+2]=hex[(f>>4)&15];j.path[o+3]=hex[f&15];}
  j.path[file.p[2]*2]=0;
  bool mf=!strcmp(j.path,"3F00")&&(j.file==0x2fe2||j.file==0x2f00);
- bool usim=st==0&&!strcmp(j.path,"3F007FFF")&&j.file>=0x6f00&&j.file<=0x6fff;
- if(!mf&&!usim)return "path/file outside MF ICCID/DIR and USIM 6Fxx";
+ /* 161.txt: CommCenter also reads EFs in USIM sub-DFs (3F007FFF7F665F30/4F34).
+  * Read-only CRSM on the current USIM; still no slot-2 or arbitrary-AID routing. */
+ bool usim=st==0&&!strncmp(j.path,"3F007FFF",8)&&((j.file>=0x6f00&&j.file<=0x6fff)||(j.file>=0x4f00&&j.file<=0x4fff));
+ if(!mf&&!usim)return "path/file outside MF ICCID/DIR and USIM 4Fxx/6Fxx";
  if(j.id==0x21&&(!j.offset||j.offset>255))return "record number";
  /* Reject indication tokens, encryption, multi-record reads and unknown TLVs. */
  for(unsigned i=7;i<j.len;i+=3+x9q_u16(j.req+i+1))if(j.req[i]<1||j.req[i]>3)return "extra TLV";
@@ -415,14 +417,31 @@ static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *r
   if(!m.p||m.n!=4||len!=14||x9q_u32(m.p)&~0x11u){x9q_reject(local,port,req,len,X9Q_UNSUPPORTED);return;}
   c.uim_mask=x9q_u32(m.p);c.next=0;x9q_packet p(req);p.tlv(0x10,m.p,4);p.send(local,port);return;
  }
+ /* NAS Indication Register. 161.txt: CommCenter always asks for many tags
+  * (0x10 0x17 0x19 0x1e 0x23 0x25 0x26 0x29 0x2b 0xa0 0xc0 0xd0 0xd1 ...); rejecting
+  * the whole request meant it never got ServingSystem/SysInfo indications and
+  * never polled 0x24 itself, so it never learned the registration state. Now
+  * 0x13/0x18 are served from real AT snapshots; the rest are accepted, and logged
+  * once, but no indication is ever sent for them. */
  if(service==3&&id==3){
-  bool serving=c.serving,system=c.system;
+  bool serving=c.serving,system=c.system;char unserved[96];unsigned w=0;unserved[0]=0;
   for(unsigned i=7;i<len;i+=3+x9q_u16(req+i+1)){
    unsigned k=x9q_u16(req+i+1);uint8_t tag=req[i];
-   if(k!=1||req[i+3]>1||(tag!=0x13&&tag!=0x18&&req[i+3])){x9q_reject(local,port,req,len,X9Q_UNSUPPORTED);return;}
-   if(tag==0x13)serving=req[i+3]!=0;else if(tag==0x18)system=req[i+3]!=0;
+   if(tag==0x13||tag==0x18){
+    if(k!=1||req[i+3]>1){x9q_reject(local,port,req,len,X9Q_ARG);return;}
+    if(tag==0x13)serving=req[i+3]!=0;else system=req[i+3]!=0;
+   }else if(w+8<sizeof(unserved))w+=(unsigned)snprintf(unserved+w,sizeof(unserved)-w," %02x",tag);
   }
+  static unsigned logged;
+  if(w&&logged<8){logged++;printf("X9 QMI AT: NAS 0x0003 accepted; serving %d system %d; never indicated:%s\n",serving,system,unserved);}
   c.serving=serving;c.system=system;c.next=0;x9q_packet p(req);p.send(local,port);return;
+ }
+ /* WDS Set Event Report (0x01) / Indication Register (0x03) and DMS Set Event
+  * Report (0x01): acknowledged, no indication is generated (no event source). */
+ if((service==1&&(id==1||id==3))||(service==2&&id==1)){
+  static unsigned logged;
+  if(logged<8){logged++;printf("X9 QMI AT: service 0x%x msg 0x%04x registration acknowledged, no indications generated\n",service,id);}
+  x9q_packet p(req);p.send(local,port);return;
  }
  /* WDA/DPM must not open a fabricated IPA endpoint. Unsupported WDS operations
   * must not promote CGATT to an IP route. */

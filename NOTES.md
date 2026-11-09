@@ -73,8 +73,8 @@ X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>      # 之后再�
 
 ## 3. 当前基线镜像与参数
 
-最新实测:**x9-rev252hu-md**(160,见HANDOFF93;RAM 10.0GiB生效);再前 **x9-rev252ht-md**(159,见HANDOFF92);再前 **x9-rev252hs-md**(158,见HANDOFF91;MIPC/DPMAIF在prepare/OPEN即隔离,UIM卡状态被拒);前一实测 **x9-rev252hl-md**(代码提交 **`20c64f2`**,构建交接 `0f9d983`),boot.img **12877824 B=12.28125MiB**,路径 `x9/out/x9-rev252hl-md/boot.img`。**157确认完整11文件安装成功、qdsp可读、Sahara finished并进入QMUX/QMI,握手摘要reset=0;真实iOS蜂窝尚未打通**,见HANDOFF87。独立34MiB固件与插件275不需再stage。
-当前未上机候选:**x9-rev252hv-md**(HANDOFF93:MIPC版本/UIM读文件);回退 **x9-rev252hu-md**;更早候选 **x9-rev252hq-md**(代码`ccbad81`),boot.img12906496B;沿用hn AT→QMI,新增DPMAIF只读/分配探针和WDS前置状态查询,见HANDOFF89。hq默认`x9_dpmaif=1`,不初始化硬件或激活PDP;hn保留。最新实测仍hl;不要把候选当作SIM/蜂窝已验证。
+最新实测:**x9-rev252hv-md**(161,见HANDOFF94;MIPC就绪、UIM读通);再前 **x9-rev252hu-md**(160,见HANDOFF93;RAM 10.0GiB生效);再前 **x9-rev252ht-md**(159,见HANDOFF92);再前 **x9-rev252hs-md**(158,见HANDOFF91;MIPC/DPMAIF在prepare/OPEN即隔离,UIM卡状态被拒);前一实测 **x9-rev252hl-md**(代码提交 **`20c64f2`**,构建交接 `0f9d983`),boot.img **12877824 B=12.28125MiB**,路径 `x9/out/x9-rev252hl-md/boot.img`。**157确认完整11文件安装成功、qdsp可读、Sahara finished并进入QMUX/QMI,握手摘要reset=0;真实iOS蜂窝尚未打通**,见HANDOFF87。独立34MiB固件与插件275不需再stage。
+当前未上机候选:**x9-rev252hw-md**(HANDOFF94:NAS/WDS/DMS指示注册);回退 **x9-rev252hv-md**;更早候选 **x9-rev252hq-md**(代码`ccbad81`),boot.img12906496B;沿用hn AT→QMI,新增DPMAIF只读/分配探针和WDS前置状态查询,见HANDOFF89。hq默认`x9_dpmaif=1`,不初始化硬件或激活PDP;hn保留。最新实测仍hl;不要把候选当作SIM/蜂窝已验证。
 回退:**x9-rev252hk-md**(修复提交 `d1f8515` + 当时未提交的渲染改动,现已入库),boot.img **15278080 B**;156确认reserve生效、efs1.bin已有1MiB,当时15次reset及零传输见HANDOFF84。
 本机回退镜像:`x9/out/x9-rev252hk-md/boot.img`;hl/hk配置沿用 `.local/x9/modem/boot-rev252hi-md.json`。
 157已越过缺qdsp的前置阻塞,**当前阻塞在X9的QMI→MTK适配**:UIM/NAS/DMS/WDS/WDA/DPM请求实际到达后返回0x5e,数据端口配置失败,四个PDP接口仍blocked/tx=rx=0。Sahara是兼容桥交互,不向物理MTK下载Apple固件;PCIControl methods仍0x0,不能说PCIControl已通。以下GPU专用基线与参数为 **2026-11-08 历史记录**,不要当作hk/hl参数直接复用。
@@ -152,7 +152,17 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
 
-## 7. 当前交接(HANDOFF 93,2026-11-09): 160(hu)读完;RAM 10.0GiB已生效、UIM卡状态通;hv修MIPC版本检查与UIM读文件
+## 7. 当前交接(HANDOFF 94,2026-11-09): 161(hv)读完;MIPC握手完成、UIM读文件通;hw接受NAS/WDS/DMS指示注册
+
+- **161.txt**(Mac `~/161.txt`,1158066B/11657行,末33.8s,无panic)。`build=rev252hv-md`;RAM 631247 free+23729 wired页(约10.0GiB);13.8s HS2→READY。
+- **MIPC(观察)**:21.68s OPEN→21.96s `OPEN_CNF version 0`→stage 1 confirmed;0x307→0x308两次(mask 0x01,flag 0x02)→22.86s `v2 OPEN + DEACT/EIF subscriptions confirmed, IPv4 dialler ready`。**MIPC控制面首次就绪。**
+- **UIM(观察)**:0x47、0x2f、多数0x20 ReadTransparent均`(real AT)`;txn 23得到SW失败(result 1 error 16,真实SW)。EF 4F34/4F36(path `3F007FFF7F665F30`)被路径白名单拒。hw:允许`3F007FFF`下子DF的4Fxx/6Fxx只读。
+- **为什么不拨号(观察+推断)**:全程**没有WDS Start(0x20)**。CommCenter从不轮询NAS 0x24,只发NAS 0x03 Indication Register(36次,全被拒,因为带了很多0x13/0x18以外的tag:10 17 19 1e 23 25 26 29 2b a0 c0 d0 d1),NAS 0x4d只问了一次。推断CommCenter因此没有注册状态,不会发起数据呼叫。其余94拒绝:WDS 0x03(44)/0x01(8)、DMS 0x5557(24)/0x01(13)/0x24、UIM 0x24(18)/0x2a(6)、NAS 0x33(16,SET系统选择)/0x5566(15)/0x45/0x4f/0x73/0x34/0x2c/0x3b等。
+- **hw修改**:NAS 0x03接受全部tag,0x13/0x18按请求开启,由真实AT快照每10s发indication 0x24/0x4e;其他tag接受但永远不发indication(打印一次)。WDS 0x01/0x03、DMS 0x01直接ACK,不产生indication(打印一次)。**这是放宽了此前"不ACK不存在的订阅"的原则**,理由同上;若因此出现错误行为,可单独回退这一块。
+- **hw构建成功**(未上机):同hu参数,`--name x9-rev252hw-md`,boot.img 12922880B,日志`.local/x9/work/pdp-activation/build-hw.stdout.log`(Mac)。无新warning,插件275不变,无需mailbox staging。回退:hv。
+- **下一步由用户手动**:`fastboot boot x9/out/x9-rev252hw-md/boot.img`,日志放`~/162.txt`。看`rg -n 'build=rev252hw|NAS 0x0003 accepted|registration acknowledged|response service 0x3|X9 WDS|X9 MIPC: TX msg 0x0(219|201)|PDP activated' ~/162.txt`。期望:NAS 0x24/0x4e indication开始周期性发送;CommCenter随后发WDS 0x20 Start(会进入X9WDS的MIPC拨号:219→201→205+4302)。拨号即使成功,也会因DPMAIF无<4GiB内存而停在bind前;下一个工程项是physmap不映射空洞,以便拿到<4GiB内存,或改用LK carve-out。
+
+### 前次交接(HANDOFF 93,2026-11-09): 160(hu)读完;RAM 10.0GiB已生效、UIM卡状态通;hv修MIPC版本检查与UIM读文件
 
 - **160.txt**(Mac `~/160.txt`,1257059B/12417行,末49.9s,无panic,shim未报`X9 RAM rejected`)。`build=rev252hu-md`;13.3s HS2→READY。
 - **RAM(观察)**:`vm_page_bootstrap: 630787 free pages, 24189 wired`,(630787+24189)×16KiB≈**10.0GiB**(159为8.7GiB)。新segmented表(base 0x100000000/top 0x37FA00000)通过live FDT核对,本次启动正常进入SpringBoard阶段。
