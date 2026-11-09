@@ -21,6 +21,7 @@
 
 static int x9md_assert_bit=1;           /* RPC/FS assert_bit only while waiting for HS2 */
 static uint16_t x9md_txseq[64];
+static unsigned x9md_tx_packets,x9md_tx_kicks,x9md_tx_busy;
 static unsigned x9md_log_budget=1500;
 #define X9MD_LOG(...) do{if(x9md_log_budget){x9md_log_budget--;printf(__VA_ARGS__);}}while(0)
 
@@ -56,14 +57,29 @@ static int x9md_tx(unsigned qi,unsigned ch,uint32_t d0,uint32_t d1,uint32_t rsv,
  __asm__ volatile("dmb sy":::"memory");
  x9md_w32(q->ctl+16,(wr+ccif)%len);
  __asm__ volatile("dmb sy":::"memory");
- /* The MD may still be busy with the previous kick (137.txt: ~370 ms while it loaded a 1.4 MB MCF file). The packet is
-  * already in the ring, so wait a long time and, if it never acks, keep going: a half-sent fragment train is worse. */
- for(unsigned t=0;t<4000;t++){
-  if(!(x9md_rd(x9md_ap,X9MD_BUSY)&(1u<<qi))){x9md_wr(x9md_ap,X9MD_BUSY,1u<<qi);x9md_wr(x9md_ap,X9MD_TCHNUM,qi);return 0;}
-  if(t<200)delay(50);else x9md_sleep_ms(1);
+ /* OPPO MT6993 md_ccif_send / md_ccif_op_send_skb: the packet is committed before
+  * notification. BUSY means the previous doorbell is pending: return success without
+  * waiting or ringing again. Our single RX owner must remain able to drain other
+  * queues (141.txt: repeated ~4 s waits precede ccismcore_ccci.c:1873, before HS2).
+  * Source: kernel_device_modules-6.12/drivers/misc/mediatek/eccci/hif/ccci_hif_ccif.c,
+  * oppo-source modules/devicetree commit 4d505a4292dab3176a45fec66dc85debc362e24c. */
+ uint32_t busy=x9md_rd(x9md_ap,X9MD_BUSY);
+ x9md_tx_packets++;
+ if(busy&(1u<<qi)){
+  x9md_tx_busy++;
+  if(x9md_tx_busy<=4)printf("X9 MODEM: TX q%u busy %08x, packet queued without wait (ch%u rd=%x wr=%x)\n",
+   qi,busy,ch,rd,(wr+ccif)%len);
+ }else{
+  x9md_wr(x9md_ap,X9MD_BUSY,1u<<qi);x9md_wr(x9md_ap,X9MD_TCHNUM,qi);x9md_tx_kicks++;
  }
- printf("X9 MODEM: TX q%u doorbell still busy after 4 s %08x (data queued)\n",qi,x9md_rd(x9md_ap,X9MD_BUSY));
  return 0;
+}
+
+static void x9md_tx_report(const char *when){
+ struct x9md_q *q=&x9md_q[4];
+ printf("X9 MODEM: TX stats %s packets=%u kicks=%u busy_nowait=%u busy=%08x q4_tx=%x/%x/%x q4_rx=%x/%x/%x\n",
+  when,x9md_tx_packets,x9md_tx_kicks,x9md_tx_busy,x9md_rd(x9md_ap,X9MD_BUSY),
+  x9md_m32(q->ctl+12),x9md_m32(q->ctl+16),q->tx,x9md_m32(q->ctl),x9md_m32(q->ctl+4),q->rx);
 }
 
 /* ---- little-endian helpers over unaligned byte buffers ---- */

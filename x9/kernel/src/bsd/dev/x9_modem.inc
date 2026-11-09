@@ -808,6 +808,7 @@ static void x9md_listen(unsigned ms_total,int serve){
   if(ch>>16){
    uint64_t ens;absolutetime_to_nanoseconds(mach_absolute_time()-t0,&ens);
    printf("X9 MODEM: S2 exception RCHNUM %08x at %u ms\n",ch,(unsigned)(ens/1000000));
+   x9md_tx_report("exception");
    hi_seen|=ch>>16;
    /* ccci_fsm_ee.c md_cd_exception */
    if(ch&(1u<<16)){x9md_ee_decode("EX_INIT");x9md_send_ch(16);printf("X9 MODEM: EE -> H2D_EXCEPTION_ACK\n");}
@@ -839,6 +840,8 @@ static void x9md_listen(unsigned ms_total,int serve){
      x9_baseband_start();   /* iOS-side bridge (X9Baseband.cpp), boot-arg x9_bb=1 */
      printf("X9 MODEM: HS2 -> READY at %u ms (q%u, reserved=%08x)\n",(unsigned)(ns/1000000),qi,h[3]);
      x9md_status("READY");
+     x9md_tx_report("READY");
+     x9fs_usage("READY");
     }
    }
   }
@@ -846,6 +849,7 @@ static void x9md_listen(unsigned ms_total,int serve){
   if(ms%5000==0&&ms){
    printf("X9 MODEM: S2 listen %u ms ready=%d packets=%u rch=%08x\n",ms,ready,pk,x9md_rd(x9md_ap,X9MD_RCHNUM));
    x9md_status("listen");
+   x9md_tx_report("listen");
   }
   x9md_sleep_ms(2);
  }
@@ -871,7 +875,7 @@ static void x9md_stage2(void){
 static void x9md_thread(void *arg,wait_result_t wr) {
  (void)wr;
  int mode=(int)(uintptr_t)arg;
- printf("X9 MODEM: build=rev252el-md fs128-bb-v1 mode=%d bb=%d\n",mode,sweet_x9_arg("x9_bb",0));
+ printf("X9 MODEM: build=rev252em-md fs128-bb-txnowait-v1 mode=%d bb=%d\n",mode,sweet_x9_arg("x9_bb",0));
  printf("X9 MODEM: stage-1 bring-up mode=%d\n",mode);
  x9md_pmif_m=ml_io_map(0x1c01a000,0x1000);
  x9md_pmif_p=ml_io_map(0x1c018000,0x1000);
