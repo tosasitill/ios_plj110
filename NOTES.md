@@ -2,7 +2,7 @@
 
 > 旧的完整流水账(7784 行,含 sweet/SM7150 时代、rev2xx 全部 handoff)在 git 历史里:
 > `git show a8f1955:NOTES.md`。需要翻某个 revision 的细节时 `git log -S'<关键字>' -- NOTES.md` 再 show。
-> 截至 2026-11-09 的完整 cn 交接在 `git show 636edc2:NOTES.md`;当前以 §7 的 HANDOFF (82) 为准。
+> 截至 2026-11-09 的完整 cn 交接在 `git show 636edc2:NOTES.md`;当前以 §7 的 HANDOFF (83) 为准。
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
@@ -73,9 +73,9 @@ X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>      # 之后再�
 
 ## 3. 当前基线镜像与参数
 
-最新:**x9-rev252hk-md**(HANDOFF 82,`d1f8515` + 当时未提交的渲染改动,现已入库),boot.img **15278080 B**,**未上机**。
+最新:**x9-rev252hk-md**(修复提交 `d1f8515` + 当时未提交的渲染改动,现已入库),boot.img **15278080 B**;**156.txt 已观察到 hk 的 HFS reserve 调整生效,但 iOS 基带握手未推进**(HANDOFF 83)。
 本机镜像:`x9/out/x9-rev252hk-md/boot.img`;配置沿用 `.local/x9/modem/boot-rev252hi-md.json`。
-当前基带阻塞是根卷保留空间导致 BBUpdater EFS scratch 的 ENOSPC,详情/下一步见 §7。以下 GPU 专用基线与参数为 **2026-11-08 历史记录**,不要当作 hk 参数直接复用。
+此前定位到 BBUpdater EFS scratch 创建失败,并推断 HFS 保留空间导致 ENOSPC;156 已确认非 root 可用空间增大,**尚未取得本次 BBUpdater 的实际失败原因,不能宣称 scratch 已修好**。详情/下一步见 §7。以下 GPU 专用基线与参数为 **2026-11-08 历史记录**,不要当作 hk 参数直接复用。
 
 历史 GPU 基线:**x9-rev252dc**(内核-only,插件 275 不变,沿用 rev252cx 之后的 mailbox)boot_sha256 `041d267fc297dd0830bd50407b85579679f0ace28ad2ba94a7c825e3bd0fd80c`,**未上机**。
 已用户确认好的最后一版:**rev252cy**(123 修好、控制中心不卡);之后 cz(x9lc)、da(1242x2760)、db(DVFSRC 探针)均未上机验证。
@@ -110,7 +110,7 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 
 ## 5. 未解决问题
 
-当前主线是 **BBUpdater 的 EFS scratch ENOSPC**(§7);下列为保留的 GPU/Wi-Fi 待办,不是新的硬件验证结论。
+当前主线是 **HFS reserve 调整后,确认 BBUpdater 为何仍在 PCI/Sahara 传输之前重试**(§7);下列为保留的 GPU/Wi-Fi 待办,不是新的硬件验证结论。
 
 1. **GPU 带宽/帧率**:avg ~17-22 fps,稳态 24 fps;job 内 GPU wait 6-15 ms。判断显存带宽受限。**DVFSRC 从未初始化**(110.txt:`basic=8 opp_count=1 gear=0`,SW_REQ 被忽略)。
    rev252dc 加 TF-A SMC INIT:`MTK_SIP_VCOREFS_CONTROL = 0xC2000506`,cmd INIT=0(a0=0 成功,a1=dram_type)锁高 OPP,START=1(`x9_dvfsrc=2`)后自由运行。**待上机**,SMC 可能挂。
@@ -150,7 +150,19 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
 
-## 7. 当前交接(HANDOFF 82,2026-11-09): BBUpdater 真实失败原因 = 根卷 HFS 1% 保留空间让 _wireless 只剩 ~3 MiB,efs1.bin ftruncate ENOSPC;hk 下调保留(未上机)
+## 7. 当前交接(HANDOFF 83,2026-11-09): 156 确认 hk 降低 HFS reserve 生效,原生 MD 注册成功;iOS 仍未进入 PCI/Sahara,需本次 BBUpdater 落盘错误
+
+- 本次仅只读分析用户提供的 `~/156.txt`(1306935 B,mtime 2026-11-09 19:32:34,记录到 uptime 58.897 s),对比 `~/155.txt` 和现有源码;未操作设备、未构建/CI/运行测试套件、未重新检查镜像。代码基线 `3b947a1` 已推送 main;本次只更新交接,原始日志不入 git。
+- **已验证 reserve 改动,不是完整修复**:156:1031 / 4.082 s=`root HFS reserve 167772 -> 16384 KiB, free 170584 KiB, non-root usable 154200 KiB errno=0`。非 root 可用约 **150.6 MiB**,不再是旧快照的约 3.3 MiB。156:446 的 `build=rev252hj-md` 是 `x9_modem.inc:879` 沿用的硬编码字符串;hk 提交未改它,不能据此说用户启动了旧镜像。
+- **当前配置的固件文件已就位**:156:1176 / 4.638 s=`files 10 in 2 paths written 0 same 20 ... errno=0 (direct write, no ticket/MD download)`。两处各 10 文件已存在且 hash 一致,仍需要这些文件,但不需要另行挂载。`qdsp6sw.mbn` 是当前配置明确排除的文件,155/156 都报其 stat ENOENT,不是本次新增回归;不能把这 10 文件校验称为完整 bbfw 校验。
+- **原生 MD/SIM/注册正常,不等同 iOS 蜂窝可用**:15.936 s HS2→READY;16.034 s 发布 22/22 服务;21.643 s 和 29.621 s `CPIN: READY`。25.317 s `C5GREG: 1`、36.452 s 查询 `C5GREG: 2,1`(5G 已注册);49.244 s `CEREG: 1`、54.398 s 查询 `CEREG: 2,1`(LTE 已注册),54.627 s 的 5G 查询已为 `2,0`。是先后观察,不声称两者同时注册或蜂窝数据已通。56.248 s 原生 MD 仍 `ready=1`。
+- **iOS 侧没有突破**:156:8030 / 27.344 s reset 请求计数 8;156:10450 / 38.785 s 到 15;156:11912 / 50.190 s 仍 15。三次摘要均 `protocol queries 0 accepted 0 / PCIControl methods 0x0`;Sahara `state 0, 0 executes, 0 requests`,data port `step 0, 0 endpoints named, 0 activations`。与155最终的15次重试/零传输相同;这里是 iOS 兼容层 reset 计数,不代表原生 MD 实际掉线15次。
+- **本次具体失败仍缺证据**:16.824 s 起能打开固件;17.017–17.028 s 能 stat/open `efs1.bin`,17.466 s 打开 `log-bb-live-stats.txt` 追加,18.432 s 首次 reset,随后重复。155 也有 `efs1.bin flags=601 errno=0`,因此 open 成功不能证明 ftruncate 成功。156 没有 scratch 目标大小、ftruncate 返回值或 `BBUpdater error` 正文;现有 CC open/stat 跟踪有输出上限,不能因后面没有文件记录就断言不再访问。
+- **下一步**:优先只读取得**156 这次启动之后**的 `/private/var/wireless/Library/Logs/log-bb-live-stats.txt`,对齐本次约 19:31 的条目,并核对 `/private/var/wireless/baseband_data/bbfs/efs1.bin` 实际大小。先判断 error 104/`fPhases.size()` 是否仍存在或已换新错误,再决定修复方向;不盲目继续改探针镜像,不默认再拉整个16 GiB根盘。现存 `root-20261109.hfs`、`.clone.hfs`、`/tmp/x9root` 和 `x9b.logarchive` 都是156之前的快照,**不能拿它们验证本次错误/文件大小**。
+- 次要观察:58.716 s mediaserverd 的 Metal device 创建失败(`IOKit=0xe00002be`),58.782 s `pc=0` 崩溃;日志末尾仍有触摸活动,无实际 kernel panic 证据。此前已用禁用 mediaserverd 排除它作为 BBUpdater 前置阻塞,本次不重开这条旧猜测。
+- 最小复核(本机,只读):`rg -n 'root HFS reserve|original 20H392|HS2 -> READY|CPIN:|C5GREG|CEREG|handshake [0-9]+ s|sahara state|efs1.bin|log-bb-live-stats.txt' ~/156.txt`。需要复现的未完成目标仍是 BBUpdater 进入真实传输/最终 iOS 蜂窝状态,不是服务发布或原生 AT 注册。
+
+### 背景(HANDOFF 82): 旧快照确认 scratch 创建错误;ENOSPC 是结合 HFS 保留空间和静态调用链的推断
 
 - 只读拉取:adb + `pinfile rawread/rawreadat` 拉整个 16 GiB 根盘到 `.local/x9/work/x9-rootpull/root-20261109.hfs`(断一次,rawreadat 1 GiB 续传,大小 17179869184)。
   卷带日志未回放,只读挂不上;**7z 直读会把回放前的新文件读成 0 字节**(此前据此得出"logd 配置 0 字节"是错的,已作废)。
@@ -162,13 +174,13 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   和 `BBUpdater error 2 - Assertion failure ( fPhases.size() ) @BBUConsoleFeedback.cpp:93`。盘上 `bbfs/efs1.bin` 存在、0 字节。
 - 静态(libBBUpdaterDynamic 20H392):BBUScratchFile::createWithFile(0x1ee217de0)= 删旧文件失败→11;open(0x601,0600) 失败→15;
   ftruncate(fd,size) 失败→11("cannot truncate file");getpwnam("_wireless")/fchown 失败→11;前面失败后 close 失败→15。/etc/passwd 有 _wireless(25)。
-- **根因**:sweet_hfs root mount 设 reserveBlocks = 1% totalBlocks(≤250 MiB)= 41943 块(164 MiB);非 root 的 truncate/write 带 kEFReserveMask
+- **此前 ENOSPC 推断依据(没有现场 ftruncate errno)**:sweet_hfs root mount 设 reserveBlocks = 1% totalBlocks(≤250 MiB)= 41943 块(164 MiB);非 root 的 truncate/write 带 kEFReserveMask
   (hfs_readwrite.c:3761/472/4388),只能用 free-reserve。拉取时 free 42777 块(167 MiB)→ _wireless 只剩 ~834 块(3.3 MiB),EFS 扩展 ENOSPC。
   (Mac 上 df 显示 167 MiB 可用是因为非 root mount 不设保留。)根盘占用大户:db/diagnostics 1.1 GB、db/biome 0.58 GB、db/uuidtext 0.47 GB、mobile/Library/Caches 0.25 GB。
 - hk(x9-rev252hk-md,boot.img 15278080 B,配置沿用 `.local/x9/modem/boot-rev252hi-md.json`,= hi + 本改动;hi/hk 都含 11-08 当时未提交、现已入库的渲染改动):
   hfs_readwrite.c 新增 `x9_hfs_lower_reserve()`(只降不升,hfs_lock_mount 下改 reserveBlocks);x9_baseband_firmware.inc 在 x9_bb=1、可写根、PID1 时
   调用,boot-arg `x9_hfs_reserve_mb`(默认 16)。上机看 "X9 BBFW: root HFS reserve ... non-root usable ... KiB",然后看 log-bb-live-stats.txt 是否不再有 efs1.bin 错误。
-  未上机。未验证 fPhases 断言是否是 scratch 失败的连带结果(推断是重试路径)。长期:根盘 16 GiB 会继续被日志填满,需要清理或换更大根盘。
+  当时未上机,现已由156确认 reserve 调整生效(见上文),scratch 是否成功仍未验证。未验证 fPhases 断言是否是 scratch 失败的连带结果(推断是重试路径)。长期:根盘 16 GiB 会继续被日志填满,需要清理或换更大根盘。
 - logd 解码工具:mandiant/macos-UnifiedLogs 在 `/tmp/ul-src/src`(rustup stable 编译;Homebrew rust 1.97 与 llvm 23 不匹配起不来);
   Apple `log show --archive` 对这个手拼归档崩溃。新归档 `x9b.logarchive`(来自克隆挂载,完整)尚未解析。
 
