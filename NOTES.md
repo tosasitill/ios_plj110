@@ -74,7 +74,7 @@ X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>      # 之后再�
 ## 3. 当前基线镜像与参数
 
 最新实测:**x9-rev252ic-md**(168,见HANDOFF102;LTE-only注册稳定,仍不拨号);再前 **x9-rev252ib-md**(167,见HANDOFF101);再前 **x9-rev252ia-md**(166,见HANDOFF100);再前 **x9-rev252hz-md**(165,见HANDOFF99);再前 **x9-rev252hy-md**(164,见HANDOFF98);再前 **x9-rev252hx-md**(163,见HANDOFF96);再前 **x9-rev252hw-md**(162,见HANDOFF95);再前 **x9-rev252hv-md**(161,见HANDOFF94;MIPC就绪、UIM读通);再前 **x9-rev252hu-md**(160,见HANDOFF93;RAM 10.0GiB生效);再前 **x9-rev252ht-md**(159,见HANDOFF92);再前 **x9-rev252hs-md**(158,见HANDOFF91;MIPC/DPMAIF在prepare/OPEN即隔离,UIM卡状态被拒);前一实测 **x9-rev252hl-md**(代码提交 **`20c64f2`**,构建交接 `0f9d983`),boot.img **12877824 B=12.28125MiB**,路径 `x9/out/x9-rev252hl-md/boot.img`。**157确认完整11文件安装成功、qdsp可读、Sahara finished并进入QMUX/QMI,握手摘要reset=0;真实iOS蜂窝尚未打通**,见HANDOFF87。独立34MiB固件与插件275不需再stage。
-当前未上机候选:**x9-rev252ic-md**(HANDOFF101:LTE-only ERAT);回退 **x9-rev252ib-md**;更早候选 **x9-rev252hq-md**(代码`ccbad81`),boot.img12906496B;沿用hn AT→QMI,新增DPMAIF只读/分配探针和WDS前置状态查询,见HANDOFF89。hq默认`x9_dpmaif=1`,不初始化硬件或激活PDP;hn保留。最新实测仍hl;不要把候选当作SIM/蜂窝已验证。
+当前未上机候选:**x9-rev252ic-mg**(ic + 一次性x9_mgwipe=1,见HANDOFF102补充);之后常用 **x9-rev252ic-md**;更早候选 **x9-rev252hq-md**(代码`ccbad81`),boot.img12906496B;沿用hn AT→QMI,新增DPMAIF只读/分配探针和WDS前置状态查询,见HANDOFF89。hq默认`x9_dpmaif=1`,不初始化硬件或激活PDP;hn保留。最新实测仍hl;不要把候选当作SIM/蜂窝已验证。
 回退:**x9-rev252hk-md**(修复提交 `d1f8515` + 当时未提交的渲染改动,现已入库),boot.img **15278080 B**;156确认reserve生效、efs1.bin已有1MiB,当时15次reset及零传输见HANDOFF84。
 本机回退镜像:`x9/out/x9-rev252hk-md/boot.img`;hl/hk配置沿用 `.local/x9/modem/boot-rev252hi-md.json`。
 157已越过缺qdsp的前置阻塞,**当前阻塞在X9的QMI→MTK适配**:UIM/NAS/DMS/WDS/WDA/DPM请求实际到达后返回0x5e,数据端口配置失败,四个PDP接口仍blocked/tx=rx=0。Sahara是兼容桥交互,不向物理MTK下载Apple固件;PCIControl methods仍0x0,不能说PCIControl已通。以下GPU专用基线与参数为 **2026-11-08 历史记录**,不要当作hk/hl参数直接复用。
@@ -159,6 +159,10 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **推断**:注册这一环已经过了;现在不拨号是CommCenter数据侧的决定,候选:APN/运营商配置(PLMN 46015,iOS 16.7是否带该运营商bundle未知;163 logd里attach APN为空)、蜂窝数据开关/DataOff、或Apple私有NAS 0x5556。需要logd确认,不再盲改。
 - **关于换iPhone 14 Pro身份**(用户问):唯一收益是CommCenter认识5G,而这个问题已用ERAT解决。代价:14 Pro是arm64e(内核与dyld cache都要PAC版本)、根盘要用新IPSW重建、基带走另一套ABM/BBFW路径(Mav17这套全部重做)、屏幕/键盘适配重来;§6已记录不要换身份。结论:现阶段不换。
 - 无新代码、无新镜像。下一步:用户进Android接ADB,按HANDOFF97流程取logd(`pull_ios_logs.py --recent-hours 2`;uuidtext已有,可只拉diagnostics),grep `FSM:|DataMode|Activat|APN|DataOff|0x5556|NOT_SUPPORTED`。
+
+- **补充(用户观察,同日)**:设置里**完全没有"蜂窝数据"选项**。推断:MobileGestalt缓存过期。MG磁盘缓存只按OS build和build UUID校验,在X9上两者都是常量;最后一次清缓存是2026-11-08的`rev252cn-mgwipe`,而ADT的`/baseband`节点(class 3,mkadt在`x9_bb=1`时添加)是2026-11-09 `0c77622`才加的。所以缓存里蜂窝/基带能力很可能还是旧的"无",设置因此隐藏蜂窝面板,CommCenter也可能据此不启动数据。这和当初iPod问题同一机制(kern_exec.c `sweet_x9_wipe_gestalt_cache`注释)。
+- **x9-rev252ic-mg**:内核与ic完全相同,只用`build.py boot --kernel`重新打包,多一个`x9_mgwipe=1`(内嵌参数41→42,其余一致)。`x9/out/x9-rev252ic-mg/boot.img`,日志`.local/x9/work/pdp-activation/build-ic-mg.stdout.log`(Mac)。**只启动这一次**;启动后MG按当前ADT重建缓存,之后回到`x9-rev252ic-md`(mgwipe不要常开)。
+- 下一步由用户手动:`fastboot boot x9/out/x9-rev252ic-mg/boot.img`,日志`~/169.txt`(采集≥120s),看`X9 MGWIPE: cache errno=0`、设置里是否出现"蜂窝网络/蜂窝数据"、之后有无0xc8/WDS Start。
 
 ### 前次交接(HANDOFF 101,2026-11-09): 167(ib)证实先NR SA后LTE;LTE SysInfo发出后CommCenter立刻按已注册行事;ic强制LTE-only
 
