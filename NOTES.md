@@ -1,3 +1,63 @@
+## HANDOFF 2026-11-09 (72): 对照完整参考补原版Mav17固件视图/日志；rev252eq-md BUILT 未上机
+
+- USER在读145后要求“把参考实现有的我们缺失的都实现”。对照QcomBaseband `dd0199cf3300764ed52b23f4a47761f91fab21a2`
+  的全部`baseband/*`与`platform/coachz/patches/coachz-prelink-baseband.patch`：本地portable bridge没有缺失功能delta，
+  QMUX/CTL/SAHARA/PRI-GRI/BSP/activation/PDP/WDS-QOS/DPM-WDA/eSIM均已导入，本地多出早helper和有界诊断。
+  不是再次导入同样代码；`x9/baseband/README.md`现逐项记录覆盖与未完成部分，UPSTREAM.json区分upstream全manifest和实际vendored scope。
+- 确认集成缺项为原版Apple固件pack/install/ABM查询路径与private logd配置。用本机原版
+  `/Users/tosasitill/HelioDarwin/iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw`的BuildManifest选择d22ap
+  `Firmware/Mav17-9.00.02.Release.bbfw`，不是参考Mav16；12文件64543521 original bytes（Options.plist原本0字节，保留），
+  packed34130291 bytes。原版输入/manifest/pack/来源metadata位于`.local/x9/baseband/`，生成inc已gitignored，Apple字节未改。
+  原版libBasebandCapabilities getFirmwarePath/getFirmwarePathSuffix为radio-type表选择，含Mav17路径；
+  原输入反汇编`/tmp/x9-bbc16-disasm.txt`、symbols`/tmp/x9-bbc16-symbols.txt`，不等于已证明145执行该分支。
+- `x9/tools/baseband_firmware.py`：仅接受flat mbn/plist、拒绝链接/重复/越界/加密ZIP/不匹配Mav17版本，normal packaging内检查ZIP CRC，
+  每成员zlib+raw SHA与pack SHA；build.py自动打包默认`.local/x9/baseband/Mav17-9.00.02.Release.bbfw`，
+  local.json可用`baseband_firmware`显式选择；显式缺输入build失败、默认缺输入生成空stub防stale。无Apple可执行兼容副本/trust cache。
+- `x9_baseband_firmware.inc`在exec launchd前、x9_bb=1/64bit PID1/active writable native root下运行：
+  全pack及全员解压校验后，将缺失0644 root:wheel资产原样写`/private/var/x9/baseband/Mav17`；已有相同保留，
+  不同文件或symlink拒绝不覆盖；临时文件fsync+hardlink原子发布，最多约57MiB瞬时解压分配。只创建缺失目录。
+  只读bindfs叶目录暴露`/usr/standalone/firmware/Baseband/Mav17`及
+  `/private/preboot/<UPPERCASE_BOOT_MANIFEST_HASH>/usr/local/standalone/firmware/Baseband/Mav17`，每个挂载后校验全部12可见文件。
+  X9原生HFS可写，因此不搬参考/private/preboot或/usr/standalone/firmware父级union overlay，避免盖住Cryptex/dyld cache。
+- bind_vfsops原源码升为overlay（复用BSD compile template、替换同名frozen object），参考UniXNU `ae687009`的
+  `zzy-native-gpu-addon-mount.patch`的pre-exec entitlement exception，但不用宽泛global bool：只允许当前实际mount线程、PID1、
+  active writable X9 root、x9_bb=1和固定已验证private Mav17 source；其它mount保留原entitlement，bindfs vnode ABI/所有权规则未改。
+  `x9_bb_firmware=0`关闭固件集成，`x9_bb_logging=0`关闭缺失logd配置创建。ABM/BB/CommCenter三份配置已有则保留，私有日志留本机。
+  失败非致命且不宣告ABM ready。boot-manifest-hash只是路径名字，不是BBTicket、签名或个性化。
+- COMMIT **`55e6df9`**。normal Mac构建最初kern_exec的kfree_data宏if/else报编译错误，补braces后成功；随后补已有文件mode/owner校验并
+  最终正常重编译打包退出0：`python3 -I x9/build/build.py all --name x9-rev252eq-md --boot-config .local/x9/modem/boot-rev252el-md.json`。
+  最终stdout `/tmp/x9-rev252eq-md-build3.log`（前两次日志build.log/build2.log不是最终metadata），输出
+  **`x9/out/x9-rev252eq-md/boot.img`**。仅读内置boot.json：boot47120384 B、Image62836736 B，boot分区上限67108864、Image上限129499136；
+  boot_sha256 `3decf50ad09bda7385fdcb795c1d5471ba726636f85d6a551e0a424a63b3ecee`，hardware_tested=false/device_written=false。
+  无额外测试脚本/套件/CI/构建后二次解包hash反汇编；未操作设备，保留原有GPU工作树，不混入基带提交。候选编译继承当前GPU工作树。
+- 下一具体动作：用户手动启动eq，收`~/146.txt`建议90秒以上，确认eq `fs128-bb-mav17fw-v1` marker和
+  `X9 BBFW: original 20H392 Mav17 files 12 ... standalone errno=0 personalized errno=0`，再按physical READY→protocol/PCI→SAHARA→真实QMUX请求验证。
+  若挂载成功仍PCI0，回原版iOS16 BootModule/start group及controller选择定位最早gate，不重复DT/FS/CCIF，不造QMI成功。
+  **用户要求的全部蜂窝功能尚未完成**：真实AT/CCCI→DMS/NAS/UIM/WDS/QOS/VOICE后端与DPMAIF TX/RX/DMA ownership仍缺。
+  Qualcomm IPA/GSI固定寄存器/DMA不能当作MT6993实现；21H461 CommCenter text补丁违反原字节约束且版本不同，未搬。
+  挂载资产不会替物理MD下载Apple固件，不生成有效Apple票据；eq未上机，不能称iOS蜂窝已修好。
+
+## HANDOFF 2026-11-09 (71): 145确认D22AP元数据生效；iOS仍未进入PCI，未新增候选
+
+- USER要求读`~/145.txt`。固定快照`/tmp/x9-145-snapshot-20261109-143742.txt`到41.094 s，原文件未改；
+  提取`/tmp/x9-145-baseband-focus.log`。1.277 s实际IORegistry元数据class3/n41=1/mav17=1，1.280 s helpers2/2、
+  pre-launchd result0；1.285 s ep marker。不能再归因本版没包含DT或早helper未执行。
+- 15.557 s HS2 READY、15.629 s桥22/22服务；22.065 s CPIN READY、25.546 s C5GREG=1，36.903 s C5GREG=2,1仍注册。
+  39.615 s MD ready=1，q4 TX2f18/2f18、RX1cf8/1cf8追平。捕获内无CommCenter CRASH或新MD MCU断言；
+  只有41秒，不声称长时稳定。
+- 38.384 s handshake20s仍queries0/accepted0、userclients10/failed0、board14/unsupported0、manager1/baseband0/power1/resets0、
+  last selector3、PCIControl0；SAHARA state0/executes0/requests0。没有真实PCI通道用户请求，QMI仍是内部UIM0x47/error94。
+  DT缺项已修，但本轮未改变最早等待阶段，不是该阶段唯一根因；不重复DT/CCIF/FS或盲改QMI回复。
+- 开始定位原版20H392 libABM启动链，输入保持原字节，沿`BootModule::start`、dispatch group notify、ResetDetection、BootController读取，
+  focused `/tmp/x9-abm16-boot-focus.txt`，原符号`/tmp/x9-abm16-symbols.txt`。已确认现代`BootController::prepare`0x1b7f60624
+  直接返回true，而`BootControllerLegacy::prepare`0x1b7f332d0检查固件路径；目前尚未确认本次选用哪一种控制器。
+  `BootModule::start`group notify0x1b7f538b4在state0时才调用boot_sync0x1b7f4ba2c；这是静态待追链，不是已证明的运行时阻塞位置。
+- 下一具体动作：区分BootModule启动group是否完成、控制器实际选择和BBUpdater真实固件路径访问，再决定补固件还是启动事件契约。
+  优先当前QcomBaseband platform/coachz/prelink参考，但其Mav16/21H461地址与CommCenter机器码补丁不能移植为20H392修复。
+  不仅凭早期bindfs ENOENT就宣称ABM固件失败；无新可确认行为修复，因此本轮不重复构建、不新增候选，不操作设备。
+  当前候选仍`x9/out/x9-rev252ep-md/boot.img`，代码`0c77622`、构建交接`74618d4`。GPU原有工作树未改。
+  QMI/DPMAIF仍未实现，iOS蜂窝目标未完成。
+
 ## HANDOFF 2026-11-09 (70): 144验证早发布/无CommCenter崩溃；D22AP发现元数据 rev252ep-md BUILT 未上机
 
 - USER要求读`~/144.txt`继续修复。读取时文件仍增长；固定快照`/tmp/x9-144-snapshot-20261109-143433.txt`到95.040 s，
