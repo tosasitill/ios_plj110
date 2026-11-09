@@ -6941,6 +6941,7 @@ sweet_x9_prepare_wallpaper_collections(proc_t p,user_addr_t scratch,user_addr_t 
 }
 
 #include "x9_render_external.inc"
+#include "x9_baseband_firmware.inc"
 /* Explicit opt-in: seed migration preferences before original launchd starts.
  * Preserve any previous preference through a same-directory hard-link backup. */
 static int
@@ -8328,6 +8329,10 @@ load_init_program_at_path(proc_t p, user_addr_t scratch_addr, const char* path)
 	 if(siri_error)printf("X9 SIRI: launchd.plist not changed errno=%d; continuing boot\n",siri_error);
 	 int jobs_error=sweet_x9_seed_disabled_jobs(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	 if(jobs_error)printf("X9 JOBS: disabled.plist not written errno=%d; continuing boot\n",jobs_error);
+	}
+	{
+	 int baseband_error=sweet_x9_prepare_baseband_firmware(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
+	 if(baseband_error)printf("X9 BBFW: firmware integration errno=%d; continuing boot without declaring ABM ready\n",baseband_error);
 	}
 	error=sweet_x9_seed_frontboard(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	if(error)return error;

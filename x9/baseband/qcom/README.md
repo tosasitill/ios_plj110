@@ -1,5 +1,11 @@
 # QcomBaseband
 
+**X9 vendor-tree scope:** only `baseband/` and its license/provenance are copied here.
+The descriptions and build commands below describe the upstream Coachz project, not
+an X9 build or hardware result. X9 integration, original Mav17 firmware packaging,
+coverage and remaining MTK backend/DPMAIF work are documented in [../README.md](../README.md).
+`UPSTREAM.json` retains the upstream full manifest and separately records the actual vendored scope.
+
 Qualcomm baseband bridge for XNU and iOS, with the SC7180 IPA v4.2 data path.
 
 The implementation is by **HoshinoYumeka ([@chiba233](https://github.com/chiba233))**. It is extracted from [Trogdor-ipadOS](https://github.com/chiba233/Trogdor-ipadOS) at `58b5bc8bfc04482014ff403078435e581e58a5b0`. Original commits, authors and the BSD-2-Clause license are retained. [UPSTREAM.json](UPSTREAM.json) records source paths, original hashes and local compatibility patches.

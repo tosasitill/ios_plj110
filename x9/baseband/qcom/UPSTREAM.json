@@ -190,5 +190,42 @@
       ],
       "description": "Use the public mbuf KPI header for the C++ PDP interface."
     }
-  ]
+  ],
+  "x9_vendored_scope": {
+    "directories": [
+      "baseband"
+    ],
+    "additional_files": [
+      "LICENSE",
+      "README.md",
+      "UPSTREAM.json",
+      "pdp-mbuf-kpi.patch"
+    ],
+    "note": "The files list above is the upstream source manifest, not a claim that ipa/platform/tests were copied or linked on MT6993."
+  },
+  "x9_reference_comparison": {
+    "repository": "https://github.com/UniXNU/QcomBaseband",
+    "revision": "dd0199cf3300764ed52b23f4a47761f91fab21a2",
+    "portable_functional_gaps": [],
+    "local_bridge_changes": [
+      "x9_bb opt-in",
+      "bounded iOS16 handshake diagnostics",
+      "pre-launchd PDP helper publication and reusable traffic-gate lock",
+      "public mbuf KPI header"
+    ],
+    "board_integration": {
+      "source": "platform/coachz/patches/coachz-prelink-baseband.patch",
+      "adapted_as": [
+        "x9/tools/baseband_firmware.py",
+        "x9/kernel/src/bsd/kern/x9_baseband_firmware.inc",
+        "x9/kernel/src/bsd/miscfs/bindfs/bind_vfsops.c"
+      ],
+      "constraints": [
+        "D22AP/Mav17/20H392, not J121AP/Mav16/21H461",
+        "original Apple executable bytes unchanged",
+        "MTK CCCI transport, no Qualcomm IPA/GSI import",
+        "DPMAIF and genuine AT-to-QMI backend still missing"
+      ]
+    }
+  }
 }

@@ -19,6 +19,8 @@ Inputs:
   .local/x9/wifi-fw          MT6653 vendor firmware, embedded via x9/tools/wifi_firmware.py
   .local/x9/wifi-nvram/WIFI  device Wi-Fi NVRAM (nvdata), embedded via x9/tools/wifi_nvram.py
                              ("wifi_firmware" in local.json overrides; absent = stub)
+  .local/x9/baseband/Mav17-9.00.02.Release.bbfw  original Apple ABM assets, not physical MTK firmware
+                             ("baseband_firmware" in local.json overrides; absent = explicit stub)
 
 Outputs go to x9/out/<name>/ (default name: x9-<git short hash>[-dirty]),
 with everything printed also written to x9/out/<name>/build.log.
@@ -169,6 +171,11 @@ class Builder:
                          label='wifi_nvram.py')
         # Vendor MD OTA tree (T: drive of the modem FSD) -> generated/x9_mdota.inc (gitignored; stub when absent)
         self.run_or_exit([sys.executable, '-I', str(X9 / 'tools/md_ota_pack.py')], ROOT, label='md_ota_pack.py')
+        # Original Apple Mav17 files are for ABM/BBUpdater only, never MTK MD firmware.
+        bb = [sys.executable, '-I', str(X9 / 'tools/baseband_firmware.py')]
+        if self.cfg.get('baseband_firmware'):
+            bb += ['--src', str(Path(self.cfg['baseband_firmware']).expanduser())]
+        self.run_or_exit(bb, ROOT, label='baseband_firmware.py')
         todo = [e for e in self.recipe['objects'] if 'prebuilt' not in e]
         with concurrent.futures.ThreadPoolExecutor(self.jobs) as pool:
             results = list(pool.map(self.compile_one, todo))

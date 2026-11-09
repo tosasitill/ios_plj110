@@ -765,7 +765,7 @@ xnu:bsd/DEVELOPMENT/null_subr.o
 xnu:bsd/DEVELOPMENT/null_vfsops.o
 xnu:bsd/DEVELOPMENT/null_vnops.o
 xnu:bsd/DEVELOPMENT/bind_subr.o
-xnu:bsd/DEVELOPMENT/bind_vfsops.o
+x9:bind_vfsops.o
 xnu:bsd/DEVELOPMENT/bind_vnops.o
 xnu:bsd/DEVELOPMENT/bsd_tests.o
 xnu:bsd/DEVELOPMENT/copyio_tests.o

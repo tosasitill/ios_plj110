@@ -1,0 +1,11 @@
+# Original Apple / vendor inputs stay outside git; this file records delivery only.
+# Apple build 20H392, iPhone10,3 / D22AP (manifest-selected, NOT Coachz/Mav16/21H461).
+IPSW:Firmware/Mav17-9.00.02.Release.bbfw -> .local/x9/baseband/Mav17-9.00.02.Release.bbfw
+IPSW:BuildManifest.plist -> .local/x9/baseband/BuildManifest.plist
+Mav17.bbfw:*.mbn,Info.plist,Options.plist -> /private/var/x9/baseband/Mav17/
+/private/var/x9/baseband/Mav17/ -> bindfs:/usr/standalone/firmware/Baseband/Mav17/
+/private/var/x9/baseband/Mav17/ -> bindfs:/private/preboot/<BOOT_MANIFEST_HASH>/usr/local/standalone/firmware/Baseband/Mav17/
+# Physical MediaTek MD firmware/NV are separate inputs, never these Apple files.
+Android:/vendor/etc/mdota/ -> .local/x9/modem/mdota/ -> FSD:T: (read-only)
+Android:modem/NV partitions -> existing read-only UFS source; FSD mutations in volatile RAM only
+# No compat/CommCenter, ad-hoc Apple binary or replacement trust cache is delivered.

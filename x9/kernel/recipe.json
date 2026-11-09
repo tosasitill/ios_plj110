@@ -6423,6 +6423,11 @@
    "name": "X9Baseband.cpp.o",
    "source": "iokit/Kernel/arm/X9Baseband.cpp",
    "template": "iokit-cxx-3"
+  },
+  {
+   "name": "bind_vfsops.o",
+   "source": "bsd/miscfs/bindfs/bind_vfsops.c",
+   "template": "bsd-c-9"
   }
  ],
  "link": {
