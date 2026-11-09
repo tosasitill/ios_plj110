@@ -74,7 +74,7 @@ X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>      # 之后再�
 ## 3. 当前基线镜像与参数
 
 最新实测:**x9-rev252hl-md**(代码提交 **`20c64f2`**,构建交接 `0f9d983`),boot.img **12877824 B=12.28125MiB**,路径 `x9/out/x9-rev252hl-md/boot.img`。**157确认完整11文件安装成功、qdsp可读、Sahara finished并进入QMUX/QMI,握手摘要reset=0;真实iOS蜂窝尚未打通**,见HANDOFF87。独立34MiB固件与插件275不需再stage。
-当前未上机候选:**x9-rev252ho-md**,boot.img12906496B;沿用hn AT→QMI,新增DPMAIF只读/分配探针和WDS前置状态查询,见HANDOFF89。ho默认`x9_dpmaif=1`,不初始化硬件或激活PDP;hn保留。最新实测仍hl;不要把候选当作SIM/蜂窝已验证。
+当前未上机候选:**x9-rev252ho-md**(代码`bb3903b`),boot.img12906496B;沿用hn AT→QMI,新增DPMAIF只读/分配探针和WDS前置状态查询,见HANDOFF89。ho默认`x9_dpmaif=1`,不初始化硬件或激活PDP;hn保留。最新实测仍hl;不要把候选当作SIM/蜂窝已验证。
 回退:**x9-rev252hk-md**(修复提交 `d1f8515` + 当时未提交的渲染改动,现已入库),boot.img **15278080 B**;156确认reserve生效、efs1.bin已有1MiB,当时15次reset及零传输见HANDOFF84。
 本机回退镜像:`x9/out/x9-rev252hk-md/boot.img`;hl/hk配置沿用 `.local/x9/modem/boot-rev252hi-md.json`。
 157已越过缺qdsp的前置阻塞,**当前阻塞在X9的QMI→MTK适配**:UIM/NAS/DMS/WDS/WDA/DPM请求实际到达后返回0x5e,数据端口配置失败,四个PDP接口仍blocked/tx=rx=0。Sahara是兼容桥交互,不向物理MTK下载Apple固件;PCIControl methods仍0x0,不能说PCIControl已通。以下GPU专用基线与参数为 **2026-11-08 历史记录**,不要当作hk/hl参数直接复用。
@@ -154,7 +154,7 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 
 ## 7. 当前交接(HANDOFF 89,2026-11-09): DPMAIF实验后端/WDS前置路径已编译;ho仅探针,无真实会话成功
 
-- 用户要求继续DPMAIF收发与WDS数据会话。本轮从`3ef5398`/干净main继续,没有ADB、flash/reboot、设备读写/挂载,没有新实机结论。最新实测仍hl/157;hn保留。**本轮不是WDS/PDP或蜂窝网络已打通**,不能将编译成功或逻辑Bind成功视为数据面成功。
+- 代码/构建交接提交 **`bb3903b`**,已push `origin/main`;`gh run list --commit bb3903b`返回`[]`,本次无CI run(证据`.local/x9/work/dpmaif-wds-157/ci-bb3903b.json`)。用户要求继续DPMAIF收发与WDS数据会话。本轮从`3ef5398`/干净main继续,没有ADB、flash/reboot、设备读写/挂载,没有新实机结论。最新实测仍hl/157;hn保留。**本轮不是WDS/PDP或蜂窝网络已打通**,不能将编译成功或逻辑Bind成功视为数据面成功。
 - 补全上一轮只读契约核对:原生`mtk_ccci_common.h:349–350`的LRO=bit4、2RXQ=bit5,故live cap0x7a确有两者;`clk-mt6993-ifrao.c`匹配live的`mediatek,mt6993-apifrbus_ao_mem_reg`,0x14126000的gate status/clear=0xd20/0xd28,main bit2、26MHz bit3。真实DPMAIF bases按`dpmaif_init_register`和`ccci_dpmaif_drv3_init`派生,MT6993 TX高地址写独立CON2、rdidx用UL SRAM0xe0高16bit/2。channel仍是ccmni索引,**现有源码/所存50KiB mtkfusionrild程序没有给出CID→ccmni/会话契约**,不得猜CID-1。参考根路径`~/HelioDarwin/oppo-source/modules/kernel/kernel_device_modules-6.12/`。
 - 新`X9DPMAIF.inc`接替send=-1 stub:网络线程仅向64槽/3072B mailbox复制,单bridge owner作MMIO、DMA发布/完成。独立`IOBufferMemoryDescriptor`物理连续分配,mapper-none物理segment长度/16KiB对齐/0x40000000..0xffffffff范围验证;不使用Wi-Fi保留池或编造Linux动态reserved节点地址。独立DRB2048、TX pool、BAT1024x2/PIT2048x2、1664/1920B缓冲;cache-line维护+barrier。
 - **收发代码仅编码/编译,未硬件验证**:TXQ0 msg+payload DRB、word-count doorbell、高地址CON2、read-index/已发布范围回收及route epoch隔离;RX v3 sequence、h_bid、channel、header_offset×4、normal/fragment重组、地址/MTU检查、最终cbit0才回调。BAT共用、顺序补充同时要求硬件消耗+两路RX释放,不按每个PIT盲目重发。异常/超时/索引或所有权错误隔离保留全部DMA,不reset/force-assert/free可能在飞buffer。RX只支持关闭聚合后的单normal+fragments;若收到多个normal/LRO聚合就保留故障并隔离,**没有完整LRO/GRO实现**。
