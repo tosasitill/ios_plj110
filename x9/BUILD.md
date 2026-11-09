@@ -105,6 +105,44 @@ compare-before-write/readback and a full raw payload hash. Do not invent a map
 or normally overwrite an existing pinned file. Provisioning is not performed
 by the build command.
 
+After the user approves this exact 34 MiB file-only operation, provision it
+with the dedicated stager (Android running):
+
+```bash
+python3 -I x9/tools/stage_baseband_firmware.py --create --yes \
+  --root-manifest .local/x9/x9/out/pan220-batched-cache-ranges/root-manifest.json \
+  --pack .local/x9/baseband/external-156/Mav17.pack \
+  --metadata .local/x9/baseband/external-156/source.json \
+  --state-dir .local/x9/baseband/staging-20261109-rev252hl
+```
+
+Create mode refuses existing state directories and device files. It creates
+only `baseband-Mav17-20H392.pack` beside the existing root image, sets immutable,
+captures the inode/map, checks root/plugin/log overlap, and rechecks protection
+and mapping before each bounded raw write. The first block is invalidated and
+published last. Each changed chunk is compared against its previous hash and
+read back by pinfile. The final complete payload hash, unchanged existing
+file identities/maps and unchanged root header are checked before publishing
+the new private `root-manifest.json`. Neither local.json nor the old manifest
+is changed by the stager.
+
+If interrupted after allocation was captured, use the same arguments and
+`--resume --yes` instead of `--create --yes`; it requires the exact saved
+root/package/device/inode/map identity. A completed operation refuses restaging;
+use `check_plaintext_root.py` with the published manifest for read-only checks.
+State, commands, range digests and readback results remain private under `.local`.
+
+An overlap with a **historical** reservation also stops staging before payload
+writes. Only after tracing it to an old root manifest and proving that source
+path absent may `--retired-reservation-manifest <old-manifest>` be supplied.
+The source must match the active device/partition; every intersecting byte
+must be attributable to its captured old map. Live root/plugin/log overlap
+is never accepted. The stager keeps residual old protected ranges and moves
+only the overlapping portion into the new firmware reservation. An internal
+coverage check requires the complete original exclusion union to remain
+protected. The old manifest stays unchanged; provenance is recorded privately
+in `reservation-reclassification.json`. Resume repeats all these checks.
+
 After provisioning, use a private copy of `root-manifest.json` with
 `firmware_policy`: version `1`, kind `dedicated-readonly-bbfw`, `pinned`,
 `immutable`, `initial_content_verified`, `device_file`, `inode`, `bytes`,

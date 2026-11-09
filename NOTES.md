@@ -2,7 +2,7 @@
 
 > 旧的完整流水账(7784 行,含 sweet/SM7150 时代、rev2xx 全部 handoff)在 git 历史里:
 > `git show a8f1955:NOTES.md`。需要翻某个 revision 的细节时 `git log -S'<关键字>' -- NOTES.md` 再 show。
-> 截至 2026-11-09 的完整 cn 交接在 `git show 636edc2:NOTES.md`;当前以 §7 的 HANDOFF (85) 为准。
+> 截至 2026-11-09 的完整 cn 交接在 `git show 636edc2:NOTES.md`;当前以 §7 的 HANDOFF (86) 为准。
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
@@ -75,7 +75,7 @@ X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>      # 之后再�
 
 最新:**x9-rev252hk-md**(修复提交 `d1f8515` + 当时未提交的渲染改动,现已入库),boot.img **15278080 B**;**156 与本次 ADB 定点取证确认 reserve 调整生效、efs1.bin 已分配 1 MiB,但 iOS 基带握手未推进**(HANDOFF 84)。
 本机镜像:`x9/out/x9-rev252hk-md/boot.img`;配置沿用 `.local/x9/modem/boot-rev252hi-md.json`。
-本次 BBUpdater 日志的15条 reset 原因全部为 **error 2 / `fPhases.size()` 断言**,不再出现之前的 scratch error 104;efs1.bin 零字节问题已消失,不能再把该断言仅归因于 scratch 失败。现已定位必需 `qdsp6sw.mbn` 缺失导致的启动校验失败分支,外置完整固件＋单份硬链接代码已做单文件交叉编译;**尚未分配设备暂存文件、未生成新 boot、未上机验证**,详情见 §7。以下 GPU 专用基线与参数为 **2026-11-08 历史记录**,不要当作 hk 参数直接复用。
+本次 BBUpdater 日志的15条 reset 原因全部为 **error 2 / `fPhases.size()` 断言**,不再出现之前的 scratch error 104;efs1.bin 零字节问题已消失,不能再把该断言仅归因于 scratch 失败。现已定位必需 `qdsp6sw.mbn` 缺失导致的启动校验失败分支,外置完整固件＋单份硬链接代码已做单文件交叉编译;**设备独立34MiB暂存已完成并通过全包rawhash,小boot候选尚待构建/实测**,详情见 §7。以下 GPU 专用基线与参数为 **2026-11-08 历史记录**,不要当作 hk 参数直接复用。
 
 历史 GPU 基线:**x9-rev252dc**(内核-only,插件 275 不变,沿用 rev252cx 之后的 mailbox)boot_sha256 `041d267fc297dd0830bd50407b85579679f0ace28ad2ba94a7c825e3bd0fd80c`,**未上机**。
 已用户确认好的最后一版:**rev252cy**(123 修好、控制中心不卡);之后 cz(x9lc)、da(1242x2760)、db(DVFSRC 探针)均未上机验证。
@@ -110,7 +110,7 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 
 ## 5. 未解决问题
 
-当前主线是 **补齐 BBUpdater 启动必需的 qdsp6sw.mbn,通过独立暂存文件交付完整固件,再验证是否越过 fPhases/PCI/Sahara 前置阻塞**(§7);设备暂存区分配/写入待用户明确确认。下列为保留的 GPU/Wi-Fi 待办,不是新的硬件验证结论。
+当前主线是 **补齐 BBUpdater 启动必需的 qdsp6sw.mbn,通过独立暂存文件交付完整固件,再验证是否越过 fPhases/PCI/Sahara 前置阻塞**(§7);用户已确认,设备独立暂存已完成并通过完整rawhash,小boot候选构建/实测见当前交接。下列为保留的 GPU/Wi-Fi 待办,不是新的硬件验证结论。
 
 1. **GPU 带宽/帧率**:avg ~17-22 fps,稳态 24 fps;job 内 GPU wait 6-15 ms。判断显存带宽受限。**DVFSRC 从未初始化**(110.txt:`basic=8 opp_count=1 gear=0`,SW_REQ 被忽略)。
    rev252dc 加 TF-A SMC INIT:`MTK_SIP_VCOREFS_CONTROL = 0xC2000506`,cmd INIT=0(a0=0 成功,a1=dram_type)锁高 OPP,START=1(`x9_dvfsrc=2`)后自由运行。**待上机**,SMC 可能挂。
@@ -150,7 +150,19 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
 
-## 7. 当前交接(HANDOFF 85,2026-11-09): qdsp 是启动必需项;外置完整固件＋单份硬链接代码已交叉编译,设备暂存待确认
+## 7. 当前交接(HANDOFF 86,2026-11-09): 用户批准的34MiB独立BBFW已暂存并回读校验;准备小boot候选
+
+- 用户回复“好”,明确批准前轮询问的专用文件创建和file-only extent写入。本轮只新建 `/data/local/tmp/x9-ios-pan92-20261027-1215/baseband-Mav17-20H392.pack`(**34MiB**,12个extent),F2FS pinned且immutable;未解除任何旧文件保护,未flash/reboot/挂载,未向原根盘/插件/磁盘日志写raw数据。
+- 新增受控工具 `x9/tools/stage_baseband_firmware.py`:必须 `--create --yes` 或用准确捕获状态 `--resume --yes`,默认拒绝复用旧文件;每次raw写入前复核inode/保护/FIEMAP,范围最多256KiB,先读旧hash→pinfile比较后写→同范围读回hash,无效首块→payload→最后发布首块。完成后验证全包rawhash,原root/plugin/log文件inode/map及root首64KiB hash不变,再发布新私有manifest。操作用法及失败恢复约束见 `x9/BUILD.md`。
+- **遇到的实际保护冲突及解决证据**:首次create已成功,在payload写入前发现4条旧protected记录重叠而停止。它们来自 `.local/x9/work/x9-full-root/20261026-222518/native-root-manifest.json` 对应的历史 `/data/local/tmp/x9-ios-full-20261026-222518/iosroot-full.hfs`;只读检查确认原路径不存在,历史manifest的device/partition身份一致。实时FW map与当前root/plugin/log map均无交集。用显式 `--retired-reservation-manifest` 将重叠 **2560×4096B=10MiB** 改归新firmware reservation,未重叠部分保留;旧protected从4265条变4262条,新FW另有12条。**覆盖检查证明所有原排除字节仍由残余protected或FW map保护,没有缩小旧排除区;原manifest文件未修改。** 不可把这个特例当作忽略未知/live重叠的许可。
+- 首次失败前未持久化已分配inode的工具缺陷也已修正:现在先保存allocation identity再做overlap判定,resume同样重做全部ownership检查。本次失败分配通过只读捕获恢复,FIEMAP与首次冲突捕获完全相同,保存首次provisioning副本和恢复步骤,然后resume同一个新文件;没有重新分配/删除文件。
+- **成功时间20:17:51+0800**:完整payload **34130291 B**,block padding后 **34131968 B**;raw SHA256=`d8a6a591b763f84d421123e78606d07c04e9dd566c5b5130b4d6013e421211b6`,与打包元数据相同。整包rawhash及新root+FW preflight通过。`initial_content_verified=true`,只是固件暂存成功,尚无新iOS运行结果。
+- 私有状态/证据: `.local/x9/baseband/staging-20261109-rev252hl/` 的 `provisioning.json`、`operations.jsonl`、`existing-files-{before,after}.json`、`allocation-android-extents.json`、`retired-source-path-status.txt`、`reservation-reclassification.json`、`payload-rawhash.txt`、`preflight-{before,after}.log`及只读恢复脚本;含设备标识,均不入git。新权威manifest为同目录 **`root-manifest.json`**,旧pan220 manifest保留。
+- `x9/build/local.json` 已切换 `root_manifest` 到该新manifest、`baseband_firmware_storage: external`,去除exclude/incomplete/large-boot开关。修改前后副本为同目录 `local-{before,after}.json`。仍使用原始Mav17 bbfw,插件allowlist **275未改**,**无需插件mailbox staging**,但本次独立BBFW staging已完成。
+- 同步修正 `x9_modem.inc` 的硬编码build日志标记为 `rev252hl-md`(仅标签,没有改MD协议逻辑),避免像156那样把遗留hj标签误认为启动错镜像。
+- 下一步:用 `.local/x9/modem/boot-rev252hi-md.json` 原完整配置构建 **`x9-rev252hl-md`** 内核/小boot(不传插件revision、不重建插件)。构建成功后不二次检查镜像;由用户手动启动。新日志需验证11文件/`external 1 complete 1 result errno=0`、qdsp可读、本次落盘reset原因以及PCI/protocol/Sahara是否推进;不得用暂存成功代替基带功能成功。新启动采集必须新目录,不复用156缓存。
+
+### 前次交接(HANDOFF 85,代码6f5c194/交接872dba5): qdsp 是启动必需项;外置完整固件代码已交叉编译
 
 ### 证据与修复方向
 
