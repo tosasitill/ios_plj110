@@ -6,6 +6,15 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 分支交接(2026-11-09)
+
+- 按用户要求,已推送 cn 的末端 `636edc2`,再以合并提交 **`190878a`** 合入并推送 `main`;两个父提交为远端文档整理 `6379df4` 和 cn 的 `636edc2`,没有覆盖远端历史。
+- 本地与远端 `rev252cn` 已删除,旧 `origin/rev252cn` 跟踪引用也已移除;当前工作区为 **`main`**,跟踪 **`origin/main`**。另一份 Wi-Fi detached worktree 未操作。
+- 唯一冲突是 NOTES:保留 main 的精简结构/README 等文档整理,补入 HANDOFF 82、清理和 cc-remote 交接;其余合并树条目已逐一核对,均与相应父提交完全一致。
+- 原 `.gitignore`、`SweetX9RenderEngine.inc`、`X9CSFRenderQueue.cpp/.h` 四份未提交修改已在 main 原样恢复,SHA256 与操作前一致,**没有夹带提交/推送**。临时 stash 已清掉,之前已有的 stash 保留。
+- 构建输入路径检查通过;`gh run list --commit 190878a` 返回空列表,无此次合并的 CI run。本次无构建、无设备启动/写入,不产生新的镜像验证结论。当前硬件任务仍为 §7,不是 §8 的历史 GPU 计划。
+- 私有备份与合并校验:`.local/git-integration/20261109-cn-to-main/`(原始四文件、binary diff、分支/stash 状态、NOTES 两侧副本和合并验证);均不入 git。
+
 ## 1. 目标与硬件
 
 - 目标:在 **OPPO Find X9(PLJ110 / OP5E17L1,MT6993,12 GiB RAM,面板 1256x2760)** 上直接从 MediaTek LK 启动自编译 XNU
@@ -203,4 +212,3 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - 复验:`cc-remote doctor`;`python3 ~/.local/share/cc-remote/verify-local-read.py` (每次生成全新临时目录/随机内容);实际使用在项目目录运行 `acpc` 或 `acpc -a cc-remote`。SSH/sudo 均免交互,不需要手动 sudo -i。
 - 证据:`~/.local/share/cc-remote/setup-logs/{doctor-root.log,auth-status-root.json,acp-local-read.jsonl,acp-local-read.stderr.log,acp-local-read-result.json}`;日志文件权限 600,包含账户元数据的日志不入 git。安装/测试日志同目录。
 - 初始交接提交 `07c6e99`;成功结果记录于独立文档提交 `fb333b9`;推送状态以本次分支交接为准;既有内核未提交修改保持原样。
-
