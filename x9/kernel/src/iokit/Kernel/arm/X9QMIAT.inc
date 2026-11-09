@@ -157,8 +157,10 @@ static const char *x9q_read_check(x9q_job &j){
  if(!session.p||session.n!=2)return "session TLV";
  if(session.p[1]!=0)return "non-empty AID";
  if(!file.p||file.n<3||file.n!=3u+file.p[2]||file.p[2]>16||(file.p[2]&1))return "file TLV";
- if(!read.p||read.n!=4)return "read TLV";
- j.file=x9q_u16(file.p);j.offset=x9q_u16(read.p);j.amount=x9q_u16(read.p+2);
+ /* 0x24 GetFileAttributes carries session+file only (162.txt: 01/2 02/7). */
+ if(j.id==0x24){if(read.p)return "read TLV on GetFileAttributes";j.file=x9q_u16(file.p);j.offset=j.amount=0;}
+ else{if(!read.p||read.n!=4)return "read TLV";
+ j.file=x9q_u16(file.p);j.offset=x9q_u16(read.p);j.amount=x9q_u16(read.p+2);}
  /* QMI length 0 = whole file / whole record; resolved from the FCP. */
  if(j.amount>255)return "length over one CRSM read";
  unsigned st=session.p[0];
@@ -242,7 +244,7 @@ static void x9q_start(x9q_job &j){
  unsigned service=j.port-X9BB_PORT_BASE;
  if(service==1){x9q_error(j,X9Q_UNSUPPORTED);
  }else if(service==0x0b||(service==2&&j.id==0x3c)){
-  if(service==0x0b&&(j.id==0x20||j.id==0x21)&&!x9q_read_args(j)){x9q_error(j,X9Q_ARG);return;}
+  if(service==0x0b&&(j.id==0x20||j.id==0x21||j.id==0x24)&&!x9q_read_args(j)){x9q_error(j,X9Q_ARG);return;}
   x9q_command(j,"AT+CPIN?\r",1);
  }else if(service==3){
   for(int &r:j.reg)r=-1;j.attached=j.act=j.csq=-1;x9q_command(j,"AT+CREG?\r",30);
@@ -339,6 +341,20 @@ static void x9q_result(x9q_job &j,const char *r,int result){
   }
   if(j.stage==5){
    if(!x9q_fcp(j,data,n,j.file)){x9q_error(j,X9Q_UNSUPPORTED);return;}
+   if(j.id==0x24){
+    /* File Attributes (libqmi order): size, id, type (0 transparent, 1 cyclic,
+     * 2 linear fixed), record size, record count, then read/write/increase/
+     * deactivate/activate as {logic u8, mask u16}, then raw FCP. Security is what
+     * this bridge permits, not the card's ACL: read ALWAYS(0), others NEVER(1). */
+    uint8_t at[16+512];unsigned w=0;
+    auto u16=[&](unsigned v){at[w++]=(uint8_t)v;at[w++]=(uint8_t)(v>>8);};
+    u16(j.raw_len);u16(j.file);at[w++]=(uint8_t)(j.structure==1?0:j.structure==6?1:2);
+    u16(j.record_size);u16(j.record_count);
+    for(unsigned k=0;k<5;k++){at[w++]=(uint8_t)(k?1:0);u16(0);}
+    if(n>sizeof(at)-w-2){x9q_error(j,X9Q_INTERNAL);return;}
+    u16(n);memcpy(at+w,data,n);w+=n;
+    x9q_packet p(j.req);uint8_t sw[]={a,b};p.tlv(0x10,sw,2);p.tlv(0x11,at,w);x9q_finish(j,p);return;
+   }
    if(j.id==0x20){
     if(j.structure==1&&!j.amount&&j.offset<j.raw_len)j.amount=(uint16_t)(j.raw_len-j.offset); /* FCP size is 2 bytes */
     if(j.structure!=1||!j.amount||j.amount>255||j.offset>j.raw_len||j.amount>j.raw_len-j.offset){
@@ -380,7 +396,7 @@ static void x9q_result(x9q_job &j,const char *r,int result){
  x9q_error(j,X9Q_UNSUPPORTED);
 }
 static bool x9q_supported(unsigned service,unsigned id){
- return (service==0x0b&&(id==0x20||id==0x21||id==0x2f||id==0x47))||
+ return (service==0x0b&&(id==0x20||id==0x21||id==0x24||id==0x2f||id==0x47))||
   (service==2&&(id==0x21||id==0x22||id==0x23||id==0x25||id==0x2d||id==0x3c||id==0x43))||
   (service==3&&(id==0x20||id==0x24||id==0x4d));
 }
@@ -438,7 +454,8 @@ static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *r
  }
  /* WDS Set Event Report (0x01) / Indication Register (0x03) and DMS Set Event
   * Report (0x01): acknowledged, no indication is generated (no event source). */
- if((service==1&&(id==1||id==3))||(service==2&&id==1)){
+ /* UIM Refresh Register (0x2a): acknowledged; this bridge never sends refresh events. */
+ if((service==1&&(id==1||id==3))||(service==2&&id==1)||(service==0x0b&&id==0x2a)){
   static unsigned logged;
   if(logged<8){logged++;printf("X9 QMI AT: service 0x%x msg 0x%04x registration acknowledged, no indications generated\n",service,id);}
   x9q_packet p(req);p.send(local,port);return;
@@ -456,7 +473,7 @@ static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *r
  if(service==0x0b&&id==0x2f&&len==11){x9q_view f=x9q_tlv(req,len,0x10);
   if(f.p&&f.n==1){card_status_flag=true;static unsigned once;
    if(!once++)printf("X9 QMI AT: UIM 0x2f optional TLV 0x10 value %u accepted, legacy status TLV 0x10 answered\n",f.p[0]);}}
- if(!((service==0x0b&&(id==0x20||id==0x21))||(service==3&&id==0x20))&&len!=7&&!card_status_flag){x9q_reject(local,port,req,len,X9Q_ARG);return;}
+ if(!((service==0x0b&&(id==0x20||id==0x21||id==0x24))||(service==3&&id==0x20))&&len!=7&&!card_status_flag){x9q_reject(local,port,req,len,X9Q_ARG);return;}
  if(!x9q_enqueue(local,port,req,len))x9q_reject(local,port,req,len,X9Q_BUSY);
 }
 static void x9q_del(uint32_t local){
