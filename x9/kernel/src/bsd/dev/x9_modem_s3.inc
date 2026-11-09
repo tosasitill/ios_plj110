@@ -20,7 +20,7 @@
 #define X9MD_PKT_MAX 0x1000
 
 static int x9md_assert_bit=1;           /* RPC/FS assert_bit only while waiting for HS2 */
-static uint16_t x9md_txseq[64];
+static uint16_t x9md_txseq[256];
 static unsigned x9md_tx_packets,x9md_tx_kicks,x9md_tx_busy;
 static unsigned x9md_log_budget=1500;
 #define X9MD_LOG(...) do{if(x9md_log_budget){x9md_log_budget--;printf(__VA_ARGS__);}}while(0)
@@ -46,7 +46,7 @@ static int x9md_tx(unsigned qi,unsigned ch,uint32_t d0,uint32_t d1,uint32_t rsv,
  }
  uint32_t hdr[4];
  hdr[0]=d0;hdr[1]=d1;
- hdr[2]=(ch&0xffffu)|((uint32_t)(x9md_txseq[ch&63]++&0x7fff)<<16)|((x9md_assert_bit&&(ch==X9MD_CH_RPC_TX||ch==X9MD_CH_FS_TX))?0x80000000u:0);
+ hdr[2]=(ch&0xffffu)|((uint32_t)(x9md_txseq[ch&255]++&0x7fff)<<16)|((x9md_assert_bit&&(ch==X9MD_CH_RPC_TX||ch==X9MD_CH_FS_TX))?0x80000000u:0);
  hdr[3]=rsv;
  uint32_t magic[2]={0xaabbaabbu,pkg},foot[2]={0xccddeeffu,0xccddeeffu};
  uint32_t p=wr;
@@ -968,6 +968,7 @@ static void x9at_reset(void){
 }
 static int x9md_at_send(const char *cmd);
 #include "x9_at_bridge.inc"
+#include "x9_mipc_bridge.inc"
 static void x9at_feed(const uint8_t *pkt,uint32_t len){
  if(!x9at_pending||x9at_done)return;
  for(uint32_t i=16;i<len;i++){
@@ -1101,6 +1102,7 @@ static void x9at_engine(unsigned ms){
  if(x9md_at_send(x9at_script[idx].cmd)<0){x9at_pending=0;if(x9_at_enabled())x9at_bridge_poison();}
 }
 static void x9md_ready_tick(unsigned ms_since_ready){
+ x9mi_tick();
  static unsigned next,ctime_next,init_done,pins_done;
  if(!pins_done){pins_done=1;x9md_sim_pin_dump();}
  x9md_poll_tick(ms_since_ready);
@@ -1127,4 +1129,8 @@ static void x9md_s3_rx(unsigned qi,unsigned chn,const uint8_t *pkt,uint32_t len)
  else if(chn==X9MD_CH_FS_RX)x9fs_rx(pkt,len);
  else if(chn==X9MD_CH_SYS_RX)x9md_sys_rx(pkt,len);
  else if(chn==X9MD_CH_AT_RX)x9md_at_rx(pkt,len);
+ else if(chn==216){
+  if(qi!=5||len<16||len>X9MD_PKT_MAX)x9mi_online(0);
+  else x9mi_rx(pkt+16,len-16);
+ }
 }

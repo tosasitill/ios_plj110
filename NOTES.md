@@ -112,7 +112,7 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 
 ## 5. 未解决问题
 
-当前主线是 **QMI→MediaTek AT/CCCI适配**(§7):157已确认完整固件/qdsp及Sahara→QMUX前置链能推进,当时UIM/NAS等返回不支持;hq已编译控制面与DPMAIF探针/WDS前置查询但未上机,真实PDP激活/收发仍未打通。下一步实测真实SIM状态和DPMAIF只读/真实DMA分配,不要继续重stage完整固件或绕过断言。下列为保留的GPU/Wi-Fi待办,不是新的硬件验证结论。
+当前主线是 **QMI→MediaTek AT控制查询 + MIPC1/WDS + DPMAIF**(§7):157已确认完整固件/qdsp及Sahara→QMUX前置链能推进;hs已编译主动DPMAIF和真实MIPC IPv4拨号代码,尚未上机,真实PDP激活/收发仍未验证。下一步用户手动启动hs验证真实SIM、DPMAIF分阶段读回和OPEN/订阅→ACT/GET/EIF→最终iOS收发;不要继续重stage完整固件或绕过断言。下列为保留的GPU/Wi-Fi待办,不是新的硬件验证结论。
 
 1. **GPU 带宽/帧率**:avg ~17-22 fps,稳态 24 fps;job 内 GPU wait 6-15 ms。判断显存带宽受限。**DVFSRC 从未初始化**(110.txt:`basic=8 opp_count=1 gear=0`,SW_REQ 被忽略)。
    rev252dc 加 TF-A SMC INIT:`MTK_SIP_VCOREFS_CONTROL = 0xC2000506`,cmd INIT=0(a0=0 成功,a1=dram_type)锁高 OPP,START=1(`x9_dvfsrc=2`)后自由运行。**待上机**,SMC 可能挂。
@@ -152,7 +152,18 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
 
-## 7. 当前交接(HANDOFF 89,2026-11-09): DPMAIF实验后端/WDS前置路径已编译;hq仅探针,无真实会话成功
+## 7. 当前交接(HANDOFF 90,2026-11-09): hs的MIPC IPv4 WDS/DPMAIF已编译;真实PDP激活/收发待上机
+
+- 已完成提交 **`f1048cc`** (主动DPMAIF分阶段读回/失败保留DMA与WDS能力发现); `x9-rev252hr-md` 直接构建成功:53/53 overlay+6 prebuilt、link/strip/boot成功,Image28745728B、boot.img12910592B。命令 `python3 -I x9/build/build.py all --name x9-rev252hr-md --boot-config .local/x9/modem/boot-rev252hi-md.json --boot-arg x9_dpmaif=2`;日志 `x9/out/x9-rev252hr-md/build.log`、`.local/x9/work/dpmaif-active-157/build-hr.stdout.log`。未上机;最新实测仍hl/157。CI查询为空(本轮证据 `ci-f1048cc.json`),本轮fetch确认origin/main比HEAD少这一提交,稍后随hs提交一并push。
+- 用户刚接上ADB。本轮/前轮只读定点取证实际vendor RIL库、进程maps/fd/config;证据留在 `.local/x9/work/pdp-activation/`,不进git。运行时 `ro.vendor.mtk_mipc_support=1`, `mtkfusionrild`实际加载libmtkmipc-ril.so/libmipc.so/librilfusion.so,fd打开 **ttyCMIPC1**。不能拿未加载的AT版libmtk-ril或libmipc默认MIPC0代替。源契约MIPC1 queue5/RX216/TX217;DPMAIF channel=ccmni_idx,不是CID-1。
+- 本轮实现:独立8槽MIPC mailbox/8槽event/4096B stream,非复用txn、队列5异常/oversized/framing隔离,不打印APN/SIM/IP正文。实际 `libmipc::mipc_init` 0x13324证明先OPEN301(maskff,VERSION100=2,NAME101,USIR102=1),CNF302读VERSION100;原生register API 0x14228证明REGISTER_IND307(mask1,MSG_ID100 uint16)/308(result0)。hs先完成OPEN与DEACT4202/EIF4302两订阅才放行拨号,不是直接发ACT。
+- WDS链:GET_PDP_CID219→ACT201(IPv4、显式APN/no-auth、NOT_REUSE2、fallback0)→GET_CALL205 + 本次ACT后真实EIF4302/IFUP→DPMAIF bind。真实ID100 uint8独立于interface125 uint32;ACT12a transIntfId经当前decoder 0x2bd5ec确认,必须trans%100与interface一致,不使用CID-1或旧头netmask。EIF当前回调0x3ad8b0读trans100/cmd101/v4count104/fulladdr8105/v6count106,copy0x3ae170读fulladdr+4地址/+0 MTU;只接受单IPv4/no-v6。IFST/IFUP native configure0x39a4a0路径为本地netdev/ioctl/address/回调;没有凭EIPPORT名字造MD命令。缺匹配EIF/IFUP时不发布hostsuccess,30s后清理已owned call。Settings只给真实IPv4/DNS/MTU/family/APN,未知gateway/netmask/IPv6prefix省略。
+- 生命周期:Stop先unbind,真实DEACT203/204确认;后台GET在飞先排空再deact。DEL_CLIENT/超时保留mutation token,lateACT只清理不迟到hostsuccess;原生partial-cause150202/150203/150204有call副作用,本IPv4版解码owned ID后清理。其他失败若含合法ID则隔离不盲deact可能外部context。DEACT IND/EIF接口变化立即关route;周期10s GET读回。malformed/framing/不明deact保留资源直到boot。DPMAIF双向按真实MTU挡包、partial RX route epoch复核,**每boot同channel只bind一次**,旧channel被MD复用时拒绝/清理,不是可任意反复拨号的完整实现。
+- **hs直接构建成功**: `python3 -I x9/build/build.py all --name x9-rev252hs-md --boot-config .local/x9/modem/boot-rev252hi-md.json --boot-arg x9_dpmaif=2 --boot-arg x9_mipc=1`。首次52/53因hex token `0x810e+i`词法错误失败,已加空格;首次日志保留 `build-hs-attempt1.{stdout,build}.log`。最终53/53 overlay+6 prebuilt、link/strip/boot成功,Image **28749824B**、boot.img **12918784B**;最终日志 `x9/out/x9-rev252hs-md/build.log`、`.local/x9/work/pdp-activation/build-hs.stdout.log`。仍有XNU/控制面风格及既有窄化warning,不宣称无warning。未额外测试套件或二次解包/hash/反汇编镜像;没有CI build run。
+- 本轮新连接检查ADB未列设备(保存 `adb-connected-devices.private`),所以没有新Android写入或新实机PDP证据;此前运行时maps/fd/config的MIPC1证据有效,不把当前离线当作旧候选没启动。插件275和完整11文件外置34MiB固件保持不变,**无需重新放/挂载固件或mailbox staging**。不发Android激活/断开命令、不改既有data session、不flash/reboot/写分区。
+- **下一步由用户手动**: `fastboot boot x9/out/x9-rev252hs-md/boot.img`。新 `~/N.txt` 先确认 `build=rev252hs-md`、11文件/Sahara/QMUX/UIM/NAS,再DPMAIF各stage读回ready、MIPC301/302→307/308两次→219/21a→201/202→205/206+4302/IFUP→`PDP activated ... DPMAIF bound`。最后权威iOS地址/路由/DNS和实际TX完成/RX包,**不把中间CNF、逻辑bind、编译成功当联网成功**。最小检索 `rg -n 'build=rev252hs|X9 DPMAIF:|X9 MIPC:|X9 WDS:|X9 QMI AT:|COACHZ pdp:' ~/N.txt`。未实现IPv6/SLAAC/profile/auth/autoconnect/默认APN发现/语音IMS;Apple若不传显式APN或带额外未支持TLV将明确失败,不得硬编码SIM/APN。README已同步能力/验证门。
+
+### 前次交接(HANDOFF 89,2026-11-09): DPMAIF实验后端/WDS前置路径已编译;hq仅探针,无真实会话成功
 
 - 初版代码/构建交接提交 **`bb3903b`**,hq PIT修复提交 **`ccbad81`**,均已push `origin/main`;两次`gh run list --commit`均返回`[]`,本次无CI run(证据`.local/x9/work/dpmaif-wds-157/ci-{bb3903b,ccbad81}.json`)。用户要求继续DPMAIF收发与WDS数据会话。本轮从`3ef5398`/干净main继续,没有ADB、flash/reboot、设备读写/挂载,没有新实机结论。最新实测仍hl/157;hn保留。**本轮不是WDS/PDP或蜂窝网络已打通**,不能将编译成功或逻辑Bind成功视为数据面成功。
 - 补全上一轮只读契约核对:原生`mtk_ccci_common.h:349–350`的LRO=bit4、2RXQ=bit5,故live cap0x7a确有两者;`clk-mt6993-ifrao.c`匹配live的`mediatek,mt6993-apifrbus_ao_mem_reg`,0x14126000的gate status/clear=0xd20/0xd28,main bit2、26MHz bit3。真实DPMAIF bases按`dpmaif_init_register`和`ccci_dpmaif_drv3_init`派生,MT6993 TX高地址写独立CON2、rdidx用UL SRAM0xe0高16bit/2。channel仍是ccmni索引,**现有源码/所存50KiB mtkfusionrild程序没有给出CID→ccmni/会话契约**,不得猜CID-1。参考根路径`~/HelioDarwin/oppo-source/modules/kernel/kernel_device_modules-6.12/`。

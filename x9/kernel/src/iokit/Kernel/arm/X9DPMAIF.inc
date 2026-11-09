@@ -24,11 +24,11 @@ struct x9d_dma {
     uint64_t pa;
     unsigned size;
 };
-struct x9d_route { uint64_t epoch; uint8_t channel, families; bool bound; };
+struct x9d_route { uint64_t epoch; unsigned mtu; uint8_t channel, families; bool bound; };
 struct x9d_tx { uint64_t epoch; uint16_t size; uint8_t mux; uint8_t ip[X9D_TX_SIZE]; };
 struct x9d_rx {
     unsigned rd, bytes; uint8_t seq, channel; bool message, normal, drop;
-    uint64_t seq_wait;
+    uint64_t seq_wait, epoch; unsigned mux;
     uint8_t ip[X9D_TX_SIZE];
 };
 struct x9d_state {
@@ -36,6 +36,7 @@ struct x9d_state {
     uintptr_t ao, pd, md_misc, infra, sram1;
     x9d_dma drb, txpool, pit[2], bat[2], pool[2];
     bool posted[2][X9D_BAT];
+    bool used_channel[20]; // no ambiguous delayed old-bearer RX after channel reuse
     unsigned bat_wr[2], tx_wr, tx_rd, head, count;
     x9d_tx mail[X9D_MAIL]; x9d_route route[CBP_INTERFACES]; x9d_rx rx[2];
     unsigned mode; bool prepared, ready, failed, published, hw_attempted, clocks_live;
@@ -296,15 +297,17 @@ static void x9d_prepare() {
     // Active initialization is deferred until the MD owner is actually online.
 }
 static bool x9d_ready() { return x9d.ready && !x9d.failed; } // owner only
-// Called only AFTER a future control backend has proved CID -> ccmni binding.
+// Called only AFTER native MIPC has proved call ID -> interface/ccmni binding.
 // Neither mux nor QMI client id is a physical ccmni channel.
-static bool x9d_bind(unsigned mux, unsigned channel, unsigned families) {
-    if (!x9d_ready() || !cbp_mux_ok(mux) || channel > 255 || !families || (families & ~3u)) return false;
+static bool x9d_bind(unsigned mux, unsigned channel, unsigned families, unsigned mtu) {
+    if (!x9d_ready() || !cbp_mux_ok(mux) || channel >= 20 || !families || (families & ~3u) || mtu < 68 || mtu > X9D_TX_SIZE) return false;
     IOLockLock(x9d.lock);
+    if (x9d.used_channel[channel]) { IOLockUnlock(x9d.lock); return false; }
     for (unsigned i = 0; i < CBP_INTERFACES; i++) if (i != mux - 1 && x9d.route[i].bound && x9d.route[i].channel == channel) {
         IOLockUnlock(x9d.lock); return false;
     }
-    x9d_route &r = x9d.route[mux - 1]; r.epoch++; r.channel = (uint8_t)channel; r.families = (uint8_t)families; r.bound = true;
+    x9d_route &r = x9d.route[mux - 1]; r.epoch++; r.channel = (uint8_t)channel; r.families = (uint8_t)families; r.mtu = mtu; r.bound = true;
+    x9d.used_channel[channel] = true;
     IOLockUnlock(x9d.lock); return true;
 }
 static void x9d_unbind(unsigned mux) {
@@ -314,7 +317,7 @@ static void x9d_unbind(unsigned mux) {
 static int x9d_send(unsigned mux, const uint8_t *ip, unsigned n) {
     if (!x9d.lock || !cbp_mux_ok(mux) || !x9d_ip(ip, n)) return -1;
     IOLockLock(x9d.lock); const x9d_route &r = x9d.route[mux - 1];
-    if (!x9d.ready || x9d.failed || !r.bound || !(r.families & cbp_family_bit(ip[0] >> 4)) || x9d.count == X9D_MAIL) {
+    if (!x9d.ready || x9d.failed || !r.bound || n > r.mtu || !(r.families & cbp_family_bit(ip[0] >> 4)) || x9d.count == X9D_MAIL) {
         x9d.rejected++; IOLockUnlock(x9d.lock); return -1;
     }
     x9d_tx &t = x9d.mail[(x9d.head + x9d.count) % X9D_MAIL];
@@ -360,6 +363,12 @@ static bool x9d_rx_item(unsigned q, const uint32_t *d) {
         if (r.message) { x9d_fail("interleaved RX message"); return false; }
         if (!(a & 2)) { x9d_fail("message PIT without continuation"); return false; }
         r.message = true; r.normal = false; r.bytes = 0; r.channel = (uint8_t)(a >> 16);
+        r.mux = 0; r.epoch = 0;
+        IOLockLock(x9d.lock);
+        for (unsigned i = 0; i < CBP_INTERFACES; i++) if (x9d.route[i].bound && x9d.route[i].channel == r.channel) {
+            r.mux = i + 1; r.epoch = x9d.route[i].epoch;
+        }
+        IOLockUnlock(x9d.lock);
         r.drop = (a & (1u << 31)) || (a & (1u << 4)); return true;
     }
     if (!r.message) { x9d_fail("RX payload without message"); return false; }
@@ -385,6 +394,7 @@ static bool x9d_rx_item(unsigned q, const uint32_t *d) {
         unsigned mux = 0; void (*receiver)(uint32_t, const uint8_t *, uint32_t, uint32_t);
         IOLockLock(x9d.lock);
         for (unsigned i = 0; i < CBP_INTERFACES; i++) if (x9d.route[i].bound && x9d.route[i].channel == r.channel &&
+            i + 1 == r.mux && x9d.route[i].epoch == r.epoch && r.bytes <= x9d.route[i].mtu &&
             (x9d.route[i].families & cbp_family_bit(r.ip[0] >> 4))) mux = i + 1;
         receiver = x9d.receiver; IOLockUnlock(x9d.lock);
         if (!r.drop && mux && receiver && x9d_ip(r.ip, r.bytes)) { receiver(mux, r.ip, r.bytes, r.ip[0] >> 4); x9d.rx_packets++; }

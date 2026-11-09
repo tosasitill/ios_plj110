@@ -2,7 +2,7 @@
  * Wire layouts: libqmi UIM/NAS/DMS message dictionaries; no packed host structs.
  * All requests, subscriptions and SIM reads belong to this single QMI owner.
  * No APDU writes, PIN guesses, synthetic AID/IMEI or IPA endpoints.
- * Native WDS preflight is separate; no PDP success without a proven route. */
+ * Native WDS uses a persistent MIPC owner for activation/cleanup. */
 constexpr unsigned X9Q_JOBS = 32, X9Q_REQ = 1024;
 constexpr uint16_t X9Q_BAD = 1, X9Q_INTERNAL = 3, X9Q_BUSY = 2,
                    X9Q_NOT_READY = 16, X9Q_ARG = 48, X9Q_UNSUPPORTED = 94;
@@ -58,9 +58,6 @@ struct x9q_job {
  int reg[3],attached,act,csq;uint16_t mcc,mnc;unsigned mnc_digits;
 };
 static x9q_job x9q_jobs[X9Q_JOBS];static int x9q_active=-1;static uint64_t x9q_order;
-static void x9w_release_job(x9q_job &);
-static void x9w_result(x9q_job &,const char *,int);
-static void x9w_start(x9q_job &);
 /* Exact complete AT lines only; prefix comparisons never cross into another line. */
 static bool x9q_line(const char *s,const char *prefix,char *out,unsigned cap){
  unsigned pl=(unsigned)strlen(prefix);bool found=false;
@@ -136,13 +133,13 @@ static bool x9q_dir(x9q_job &j,const uint8_t *p,unsigned n){
 static void x9q_error(x9q_job &j,uint16_t err){
  if(!j.background){x9q_packet p(j.req,err);p.send(j.local,j.port);
   printf("X9 QMI AT: response service 0x%x msg 0x%04x txn %u error %u\n",j.port-X9BB_PORT_BASE,j.id,x9q_u16(j.req+1),err);}
- if(j.token)x9_md_at_cancel(j.token);x9w_release_job(j);bzero(&j,sizeof(j));x9q_active=-1;
+ if(j.token)x9_md_at_cancel(j.token);bzero(&j,sizeof(j));x9q_active=-1;
 }
 static void x9q_finish(x9q_job &j,x9q_packet &p,uint16_t ind=0){
  if(!j.background||!x9q_u16(p.p+10))p.send(j.local,j.port,j.background,ind);
  if(!j.background)printf("X9 QMI AT: response service 0x%x msg 0x%04x txn %u result %u error %u (real AT)\n",
    j.port-X9BB_PORT_BASE,j.id,x9q_u16(j.req+1),x9q_u16(p.p+10),x9q_u16(p.p+12));
- x9w_release_job(j);bzero(&j,sizeof(j));x9q_active=-1;
+ bzero(&j,sizeof(j));x9q_active=-1;
 }
 static void x9q_command(x9q_job &j,const char *s,unsigned stage){
  strlcpy(j.command,s,sizeof(j.command));j.stage=stage;
@@ -224,7 +221,7 @@ static void x9q_nas(x9q_job &j){
 }
 static void x9q_start(x9q_job &j){
  unsigned service=j.port-X9BB_PORT_BASE;
- if(service==1){x9w_start(j);
+ if(service==1){x9q_error(j,X9Q_UNSUPPORTED);
  }else if(service==0x0b||(service==2&&j.id==0x3c)){
   if(service==0x0b&&(j.id==0x20||j.id==0x21)&&!x9q_read_args(j)){x9q_error(j,X9Q_ARG);return;}
   x9q_command(j,"AT+CPIN?\r",1);
@@ -249,7 +246,7 @@ static void x9q_result(x9q_job &j,const char *r,int result){
  unsigned service=j.port-X9BB_PORT_BASE;bool ok=result==X9_AT_OK;
  if(result==X9_AT_TIMEOUT||result==X9_AT_OFFLINE){x9q_error(j,X9Q_NOT_READY);return;}
  if(result==X9_AT_OVERFLOW){x9q_error(j,X9Q_INTERNAL);return;}
- if(service==1){x9w_result(j,r,result);return;}
+ if(service==1){x9q_error(j,X9Q_UNSUPPORTED);return;}
  if(j.stage>=30&&j.stage<=35){
   if(j.stage<33){const char *tags[]={"+CREG:","+CEREG:","+C5GREG:"};if(ok)j.reg[j.stage-30]=x9q_registration(r,tags[j.stage-30]);}
   else if(j.stage==33&&ok){char line[80];const char *p=line;unsigned n;
@@ -399,6 +396,7 @@ static void x9q_del(uint32_t local){
  }
 }
 static void x9q_poll(){
+ x9w_poll();
  uint64_t now=x9q_ms();
  for(unsigned i=0;i<X9Q_JOBS;i++)if(x9q_jobs[i].used&&now>=x9q_jobs[i].deadline){
   int active=x9q_active;x9q_error(x9q_jobs[i],X9Q_NOT_READY);if(active!=(int)i)x9q_active=active;

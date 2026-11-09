@@ -1,8 +1,9 @@
-# X9 基带桥：固件前置链与真实 AT 控制面
+# X9 基带桥：AT 控制面、MIPC IPv4 WDS 与 DPMAIF
 
-**当前实测是 rev252hl-md / 157；rev252hn-md 仅编译成功，尚未上机。**
+**当前实测仍是 rev252hl-md / 157；最新候选 rev252hs-md 已编译，尚未上机。**
 11 个完整 Apple 固件文件已可读，Sahara finished、QMUX 开启；这不等于 iOS 蜂窝可用。
-hn 实现第一版 QMI→真实 MT6993 AT 控制面。**DPMAIF 包收发、WDS 数据会话及语音/IMS 仍未实现。**
+控制查询走真实 AT；hs 的 IPv4 WDS 走实际 RIL 使用的 MIPC1，含 DPMAIF 主动初始化/收发代码。
+**PDP 激活、DPMAIF DMA 可达与实际包收发仍未实机验证；语音/IMS 未实现。**
 当前候选与交接以仓库根 `NOTES.md` §7 为准。
 
 `qcom/` 引入 UniXNU/QcomBaseband（BSD-2-Clause，HoshinoYumeka / chiba233；上游提交见
@@ -15,25 +16,26 @@ Sahara 兼容桥、PDP helper 与 VINYL Tape。Qualcomm IPA/GSI 不适用于 MT6
 在仓库根，由用户手动执行：
 
 ```sh
-fastboot boot x9/out/x9-rev252hn-md/boot.img
+fastboot boot x9/out/x9-rev252hs-md/boot.img
 ```
 
 - **不用再放固件或挂载目录**：独立 34 MiB pinned+immutable 固件文件已 stage；不重新 create/resume。
 - 插件 **275** 未改，不需 mailbox staging，也不传 `--revision` 重建插件。
 - 不 flash、不改 GPT、不删除 Android，不解除 root/插件/日志/固件专用文件的保护。
-- 回退镜像：`x9/out/x9-rev252hl-md/boot.img`。开发中间产物 hm 不作为上机候选。
-- 新日志另存为新的 `~/N.txt`；不要把 156/157 的缓存拼接成 hn 的运行证据。
+- 回退镜像：`x9/out/x9-rev252hl-md/boot.img`。hn/hr 为历史未上机候选；hm 不作为上机候选。
+- 新日志另存为新的 `~/N.txt`；不要把 156/157 的缓存拼接成 hs 的运行证据。
 
 直接重编（本机私有配置、固件/根盘 manifest 已准备时）：
 
 ```sh
-python3 -I x9/build/build.py all --name x9-rev252hn-md \
-  --boot-config .local/x9/modem/boot-rev252hi-md.json
+python3 -I x9/build/build.py all --name x9-rev252hs-md \
+  --boot-config .local/x9/modem/boot-rev252hi-md.json \
+  --boot-arg x9_dpmaif=2 --boot-arg x9_mipc=1
 ```
 
-同名目录会覆盖：后续代码变更使用新的候选名。保留内置 20 MiB boot guard、原 38 个启动参数及 options。
-构建完成不额外解包/hash/反汇编镜像、不运行额外测试套件。hn 构建输出 boot.img **12898304 B**，
-日志 `x9/out/x9-rev252hn-md/build.log`；大小/编译成功不是设备启动结论。
+同名目录会覆盖：后续代码变更使用新的候选名。保留内置 20 MiB boot guard、原启动配置及 options。
+构建完成不额外解包/hash/反汇编镜像、不运行额外测试套件。hs 构建输出 boot.img **12918784 B**，
+日志 `x9/out/x9-rev252hs-md/build.log`；大小/编译成功不是设备启动结论。
 
 ## 链路和所有权
 
@@ -81,7 +83,8 @@ AT 正文、SIM 标识、APN、APDU 和 ch10 包正文不写 USB/pstore；仅记
 | NAS SignalStrength `0x20` | 注册/制式查询 + CSQ → RSSI | 仅默认或零 mask；未知 99 / 额外指标请求失败 |
 | NAS RegisterIndications `0x03` | 仅 serving/system 的后台快照 | SignalInfo、网络选择、band/reject/time 等未支持 |
 | DMS `0x21/22/23/25/2d/3c/43` | CGMI/CGMM/CGMR/CGSN/CFUN/CRSM ICCID/CIMI | 无伪造 IMEI/IMSI；CFUN0/4 映射 LOW_POWER，不是 RESET |
-| WDS/WDA/DPM | 明确 NOT_SUPPORTED | 不创建虚假 PDP handle、不返回虚假地址、不打开假 IPA endpoint |
+| WDS `0xa2/4d/20/21/22/2d` | mux/family 意图；MIPC OPEN/订阅 → CID 范围 → ACT → GET + EIF/IFUP → DPMAIF bind | 只支持显式 APN/IPv4/no-auth；失败不生成 handle，不借用外部 context |
+| WDA/DPM | 明确 NOT_SUPPORTED；X9 native backend 不创建内部 IPA 配置 client | 不打开假 IPA endpoint，不套 Qualcomm QMAP 映射 |
 
 UIM 读请求仅接受 empty-AID primaryGW 的 current USIM（`3F007FFF`），或 card1 的 MF
 `3F00` 下 EF_ICCID/EF_DIR。QMI 路径里的 uint16-LE 文件 ID 转为大写 hex，不能把任意输入插进 AT 字符串。
@@ -140,34 +143,49 @@ slot 映射、文件安全属性和 PIN 状态/重试预算。需要相应的真
 锁卡/PIN/PUK 写入单独确认后再实现/验证；SIM2 不能转到 SIM1。
 卡插拔/失效时清身份、应用/文件缓存及旧订阅状态，通知不带旧卡数据。
 
-### 3. MT6993 DPMAIF v3 原生 packet backend（尚未实现）
+### 3. MT6993 DPMAIF v3 原生 packet backend（已编码/编译，未硬件验证）
 
-以真实 MT6993 DT 和 OPPO `eccci/hif/ccci_dpmaif_drv_v3.c` 为准，不能套 IPA/GSI/t7xx 的地址和端点。
-依次实现：
+`X9DPMAIF.inc` 使用实际 MT6993 DT/OPPO v3 契约，不使用 IPA/GSI/t7xx 的地址和端点。
+`x9_dpmaif=0` 默认关，`=1` 只读探针/私有 DMA 分配，hs 显式 `=2` 主动初始化。
+等真实 MD/AT owner online 后使能时钟、执行 bounded SRAM init，配置 TX DRB/BAT/fragment/双 PIT，
+关闭 aggregation；每阶段读回通过才 ready。失败隔离并保留全部可能在飞 DMA，不 reset/assert/free。
+私有物理连续 DMA 实际分配并验证范围/对齐，不能拿 DT 的动态 reservation 编造地址。
 
-1. 确定时钟/电源、MMIO、中断、reserved-memory 及 DMA 可达范围；读取当前硬件状态。
-2. 从实际分配的内存创建 BAT/fragment/PIT/TX DRB，明确 CPU/MD 所有权、cache/barrier。
-3. 初始化真实 ring/queue、验证寄存器读回；不能编造 DMA 地址或无证据清 SRAM/reset。
-4. RX 按 PIT 解码、回收 BAT、重填并避免双重释放；TX 生成 DRB，完成后回收。
-5. 验证 CCCI data channel 与 mux/CID 的映射和真实 IPv4/IPv6 frame；exception/offline 关闭 gate。
+TX/RX 在单 bridge owner 内处理 MMIO、cache/barrier、描述符发布/回收；网络线程只复制到 mailbox。
+TX 接 DRB 完成索引，RX 按 PIT sequence/h_bid/channel/header_offset 重组并归还 BAT credit；
+完整 cache line 消费后毒化并返 PIT credit，避免 8-bit sequence 回绕读到上一圈。
+仅支持单 normal+fragments 的非聚合 RX；不声称完整 LRO/GRO 或 RX1 已成功收发。
 
-真实 DT 参考（私有）：`.local/x9/modem/live.dts` 的 version3 / cap0x7a / plat6993；
-MMIO `0x14117000/0x1410d000/0x1410c000/0x1410e000/0x14100000/0x14101000`，各 0x1000。
-reserved-memory 的 cache0x210000 / nocache0x50000 是分配约束，**不是已分配 DMA 地址**。
-移植参考路径以 NOTES 为准；任何设备写入/破坏性操作须逐步确认。
+运行成功门依次为：阶段读回通过 → ready → WDS 真实 ccmni/MTU bind → 实际 TX 完成/RX 包。
+逻辑 bind 或编译通过都不是 DMA 可达/收发证据。route epoch 和 MTU 双向检查；
+**同 boot 每个 channel 只 bind 一次**，停拨后 MD 复用旧 channel 会被拒绝并清理，防止迟到旧 RX 跨 bearer。
 
-### 4. WDA/DPM + WDS 真实会话（被第3步阻塞）
+### 4. MIPC IPv4 WDS 真实会话（已编码/编译，未拨号验证）
 
-先定义并验证 DPMAIF raw-IP、mux/CID、MTU、buffer ownership，再翻译 endpoint/format，
-不能 ACK Qualcomm `embedded4/interface1/QMAP` 假契约。
-WDS Start 校验 APN、IP family、profile/auth 后创建真实 MD context，只有真实连接及 backend ready
-才发布 handle/connected；失败回滚 context，Stop 幂等回收；Settings 返回 MD 的真实 IP/DNS/MTU。
-需要实际 MD 会话命令与错误语义证据；`CGATT=1` 不提供上述数据。
-连接/断线 indication 与最终 session/gate 保持一致，不能仅返回 provider 中间成功。
+定点只读取证证明 Android 的 `mtkfusionrild` 实际加载 `libmtkmipc-ril.so`/`libmipc.so`，
+并打开 **ttyCMIPC1**：queue5、CCCI RX216/TX217。不能用未加载的 AT RIL 后端或 MIPC0 默认名替代。
+MIPC 使用 16 B header、8 B padded TLV；实际库的部分 tag 已不同于旧头文件。
+
+1. `OPEN301`（SIM mask ff，version2/USIR）→实际 `302` version 回读。
+2. `REGISTER_IND307` 分别订阅 DEACT4202 和 EIF4302，等待各自真实 `308` result0；之前不拨号。
+3. Start 校验显式 APN、IPv4、no-auth、DPMAIF ready；`GET_PDP_CID219/21a` 获取真实 CID 范围。
+4. `ACT201/202` 明确 `NOT_REUSE=2`、fallback0；ID100 是 call ID，IF125 是独立 ccmni 索引，
+   ACT12a 是 transIntfId，**不是 netmask，也不使用 CID-1 映射**。
+5. `GET_CALL205/206` 再核对同 CID/interface/IPv4/MTU；同时等待本次 ACT 后真实 `EIF4302/IFUP` 的
+   transIntfId/IPv4/MTU 一致。只有这些通过且 `x9d_bind` 成功才生成自有 handle/connected。
+6. Settings 只返回实际 IPv4、DNS、MTU、family/APN；未知 gateway/netmask/IPv6prefix 不制造。
+7. Stop 只接受该 client/generation 的自有 handle，先关 route，再 `DEACT203/204` 等真实确认；
+   后台 GET 在飞时先排空再 deact。MD DEACT IND 和接口变化关闭 route；每 10 s 后台 GET 回读。
+
+`NetAgentService::configureNetworkInterface` 的 IFUP 路径是本地 netdev/ioctl/address/回调，
+EIPPORT 命令用于其他资源，未凭名字添加未知 MD 通知。当前仅接实际 EIF/IFUP 并建立本地 raw-IP route。
+超时/DEL_CLIENT 不丢已发 token；迟到 ACT 成功只做 owned-call 清理，不迟到回复 host success。
+partial-success/fallback cause 也清理，不冒充完整 IPv4；不明 framing/CNF 保留所有权隔离到下次 boot。
+IPv6/SLAAC、profile/auth、默认 APN 发现、autoconnect、语音/IMS 未实现；额外参数明确失败。
 
 ### 5. iOS 网络最终验证
 
-接 `coachz_modem_data_send` 和 receiver，绑定 PDP unit/family，最后开 traffic gate。
+hs 已接 raw-IP send/receiver 和经 WDS 证据门控制的 route；仍需实机验证 Apple traffic gate 与 PDP unit/family。
 确认 iOS 接口有实际地址、路由/DNS，TX/RX 不再为零；通过该蜂窝路径验证收发、断线重连、IPv4/IPv6。
 四个 PDP helper 接口存在或 `data port step3` 只是初始化尝试结束，不是通网证据。
 
@@ -182,8 +200,8 @@ WDS Start 校验 APN、IP family、profile/auth 后创建真实 MD context，只
 最小日志检索（把 N 换成新运行）：
 
 ```sh
-rg -n 'build=rev252hn|X9 BBFW|qdsp6|sahara|QMI request to|X9 QMI AT:|COACHZ pdp:' ~/N.txt
+rg -n 'build=rev252hs|X9 BBFW|qdsp6|sahara|X9 QMI AT:|X9 DPMAIF:|X9 MIPC:|X9 WDS:|COACHZ pdp:' ~/N.txt
 ```
 
 失败先回到最早不确定分支：AT offline/timeout、final、CRSM/FCP/session、QMI TLV、CommCenter 消费，
-不要反复重stage已成功的固件、绕过断言或将所有 unsupported 改为 success。
+MIPC OPEN/订阅、ACT/GET/EIF 与 DPMAIF ready/bind 也要按顺序核对；不要反复重stage已成功的固件、绕过断言或将所有 unsupported 改为 success。
