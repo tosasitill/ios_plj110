@@ -74,7 +74,7 @@ X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>      # 之后再�
 ## 3. 当前基线镜像与参数
 
 最新实测:**x9-rev252hl-md**(代码提交 **`20c64f2`**,构建交接 `0f9d983`),boot.img **12877824 B=12.28125MiB**,路径 `x9/out/x9-rev252hl-md/boot.img`。**157确认完整11文件安装成功、qdsp可读、Sahara finished并进入QMUX/QMI,握手摘要reset=0;真实iOS蜂窝尚未打通**,见HANDOFF87。独立34MiB固件与插件275不需再stage。
-当前未上机候选:**x9-rev252hn-md**,boot.img12898304B;AT→QMI控制面已编译,DPMAIF未实现,见HANDOFF88。最新实测仍hl;不要把候选当作SIM/蜂窝已验证。
+当前未上机候选:**x9-rev252hn-md**(代码`91c897e`),boot.img12898304B;AT→QMI控制面已编译,DPMAIF未实现,见HANDOFF88。最新实测仍hl;不要把候选当作SIM/蜂窝已验证。
 回退:**x9-rev252hk-md**(修复提交 `d1f8515` + 当时未提交的渲染改动,现已入库),boot.img **15278080 B**;156确认reserve生效、efs1.bin已有1MiB,当时15次reset及零传输见HANDOFF84。
 本机回退镜像:`x9/out/x9-rev252hk-md/boot.img`;hl/hk配置沿用 `.local/x9/modem/boot-rev252hi-md.json`。
 157已越过缺qdsp的前置阻塞,**当前阻塞在X9的QMI→MTK适配**:UIM/NAS/DMS/WDS/WDA/DPM请求实际到达后返回0x5e,数据端口配置失败,四个PDP接口仍blocked/tx=rx=0。Sahara是兼容桥交互,不向物理MTK下载Apple固件;PCIControl methods仍0x0,不能说PCIControl已通。以下GPU专用基线与参数为 **2026-11-08 历史记录**,不要当作hk/hl参数直接复用。
@@ -154,6 +154,7 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 
 ## 7. 当前交接(HANDOFF 88,2026-11-09): AT→QMI控制面候选hn已编译;尚未上机,DPMAIF/语音未实现
 
+- 代码与完整后续流程说明提交 **`91c897e`**,当前`main`。`x9/baseband/README.md`已替换过时eq/12文件/bindfs说明,记录hn能力边界及SIM→DPMAIF→WDA/DPM/WDS→iOS IP/路由/收发→语音/IMS的逐步成功门。
 - 用户要求“把后续的流程全写完”,本轮将原error94 stub扩展为有界异步**真实AT控制面**并补齐后续流程说明。**不是全部蜂窝已完成**;DPMAIF、WDS数据会话、语音/IMS尚缺,没有伪造WDA/DPM成功。实测基线仍hl/157。
 - 新增`x9_modem_bridge.h`/`x9_at_bridge.inc`和`X9QMIAT.inc`:单MD owner收发ttyC0,16槽AT邮箱,32槽QMI job(请求最多1024B,总deadline180s,单AT10s)。完整终止行才完成,2048B溢出继续排空至final后报错;缺final或TX失败隔离到下一次boot,不让迟到OK配错新请求。CCIF TX在邮箱mutex外;取消已发请求只标记,仍排空final。exception/offline清active,不重用stale slot。`x9_bb=1`持续监听,计时改为mach absolute elapsed;桥开启时统一串行level3初始化,CFUN1之后才接收job,AT正文及ch10包内容不进USB/pstore。
 - **已编码、未实测**:UIM CardStatus(0x2f)用CPIN READY→CRSM GET RESPONSE真实EF_DIR/FCP→逐record解析真实AID;SlotStatus(0x47)读真实EF_ICCID。ReadTransparent/ReadRecord(0x20/21)先核对session/file/path/offset/length→真实FCP→CRSM读取→真实SW1/SW2+数据。仅empty-AID primaryGW/current USIM或card1 MF路径,不冒充slot2、不支持任意AID选择/非provisioning路由。未知PIN状态为not-initialized,固定retry字段为不可用而非宣称某个真实重试预算;未知personalization也不宣称READY。显式CME10可报告卡不存在。其余锁卡/未知错误不猜状态。
