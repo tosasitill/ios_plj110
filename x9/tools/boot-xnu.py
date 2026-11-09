@@ -86,7 +86,8 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     bctl = bootctl.prepare(a.boot_control.read_bytes(), a.slot) if a.boot_control else None
     tree = mkadt.build(timebase=a.timebase, console_base=a.console_base, console_size=a.console_size, ram_window=a.ram_window,
-                       wlan=any(x in a.boot_args.split() for x in ('x9_wifi_fake=1', 'x9_wifi_real=1')))
+                       wlan=any(x in a.boot_args.split() for x in ('x9_wifi_fake=1', 'x9_wifi_real=1')),
+                       baseband='x9_bb=1' in a.boot_args.split())
     if a.usb_receiver or a.ufs_root_manifest:
         chosen = next(n for n in tree.children if n.prop('name') == b'chosen\0')
         mmap = next(n for n in chosen.children if n.prop('name') == b'memory-map\0')

@@ -15,10 +15,13 @@ This is a discovery build, not working iOS cellular support. The PDP/DPMAIF data
 
 Local changes to the imported bridge: public mbuf KPI include (see `qcom/pdp-mbuf-kpi.patch`), X9 `x9_bb` enable switch,
 bounded handshake diagnostics, and pre-launchd helper publication with a reusable traffic-gate lock.
-The upstream README describes Coachz/iOS 17, not X9/iOS 16 results. Its integration also supplies baseband DT metadata,
-Apple firmware mounts and a patched postponement-ticket compatibility executable; these are not included here.
-The latter cannot be copied under this project's original-Apple-byte constraint. X9's D22AP profile needs mav17,
-not the reference J121AP/mav16 profile. Missing metadata/firmware and the remaining ABM startup gate are still pending.
+The upstream README describes Coachz/iOS 17, not X9/iOS 16 results. With the explicit `x9_bb=1` boot token,
+the boot packager includes the original D22AP discovery metadata: `/baseband` class 3, compatible `baseband,n41`,
+device type `baseband`, and `/product/baseband-chipset` `mav17`. This does not describe Apple GPIO/MMIO or change
+the X9 hardware and iPhone10,3 compatibility identities. Unlike J121AP, the original D22AP node has no eUICC chip ID.
+The reference integration also supplies Apple firmware mounts and a patched postponement-ticket compatibility
+executable; these are not included here. The latter cannot be copied under this project's original-Apple-byte
+constraint. Firmware integration and the remaining ABM startup gate are still pending.
 
 `~/140.txt` lacks both the 128 MiB pool startup line and `x9_bb=1`; it repeats `~/138.txt`'s `FD27_003` write failure and
 `lid_error_handle.c:259` assertion. It cannot validate the new bridge. `rev252el-md` adds a compiled startup marker plus

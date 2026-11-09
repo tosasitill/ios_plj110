@@ -107,6 +107,22 @@ extern "C" void x9_baseband_start(void)
 extern "C" void x9_baseband_prepare(void)
 {
   if (!coachz_baseband_enabled()) return;
+  // Public compatibility metadata only; never print modem identities or NV.
+  OSData *class_data = bb_chosen("/baseband", "class");
+  OSData *compatible = bb_chosen("/baseband", "compatible");
+  OSData *chipset = bb_chosen("/product", "baseband-chipset");
+  uint32_t bb_class = ~0u;
+  if (class_data && class_data->getLength() == sizeof bb_class)
+    memcpy(&bb_class, class_data->getBytesNoCopy(), sizeof bb_class);
+  const bool n41 = compatible && compatible->getLength() == sizeof "baseband,n41" &&
+                   !memcmp(compatible->getBytesNoCopy(), "baseband,n41", sizeof "baseband,n41");
+  const bool mav17 = chipset && chipset->getLength() == sizeof "mav17" &&
+                     !memcmp(chipset->getBytesNoCopy(), "mav17", sizeof "mav17");
+  printf("X9 BB: discovery metadata class %u compatible-n41 %u chipset-mav17 %u (no physical transport readiness implied)\n",
+         bb_class, static_cast<unsigned>(n41), static_cast<unsigned>(mav17));
+  OSSafeReleaseNULL(class_data);
+  OSSafeReleaseNULL(compatible);
+  OSSafeReleaseNULL(chipset);
   const int result = coachz_baseband_prepare_helpers();
   printf("X9 BB: pre-launchd PDP helper preparation result %d; transport waits for MD HS2\n", result);
 }

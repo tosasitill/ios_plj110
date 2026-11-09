@@ -1,3 +1,28 @@
+## HANDOFF 2026-11-09 (70): 144验证早发布/无CommCenter崩溃；下一版补D22AP基带发现元数据
+
+- USER要求读`~/144.txt`继续修复。读取时文件仍增长；固定快照`/tmp/x9-144-snapshot-20261109-143433.txt`到95.040 s，
+  原文件未改。1.263 s PDP helpers prepared 2/2、pre-launchd result0；1.266 s eo标记；15.574 s HS2 READY，
+  15.662 s桥22/22服务。15.771 s AppleIPAppender user client成功，selector17/11可调用。捕获内无CommCenter CRASH，
+  143空对象竞态本轮未再出现，不等于全部iOS蜂窝可用或永久稳定。
+- SIM21.259 s READY；24.694 s C5GREG=1。54.211 s 5G状态变为2/0，53.982/64.642 s LTE CEREG=1；
+  不能写全程5G注册。89.813 s MD仍ready=1，q4 TX3578/3578、RX3828/3828追平，无新MCU断言。
+- 83.745 s handshake60s汇总仍protocol queries0、accepted0、user clients10/failed0、board14/unsupported0、
+  manager1/baseband0/power1/resets0、last selector3、PCIControl0；无真实PCI channel请求，QMI仍仅内部UIM0x47/error94。
+  快照中另有MobilePhone/mediaserverd等PC0崩溃，不冒充CommCenter空对象复现；本轮未处理其它子系统。
+- 先复核当前参考：QcomBaseband `dd0199cf3300764ed52b23f4a47761f91fab21a2` platform/coachz/README及prelink patch、
+  Trogdor `58b5bc8bfc04482014ff403078435e581e58a5b0` baseband_tree。先补同一集成层的DT，不同时搬固件挂载或21H461补丁。
+  原版D22AP `/tmp/x9-d22-original.adt`确认class3、compatible baseband,n41、device_type baseband、product chipset mav17；无eUICC chip ID。
+- 新静态消费证据：原版20H392 libMobileGestalt `0x19c569150`读取IODeviceTree:/baseband，CFString key
+  `50/CmBTX6jhkb8Z61hzwhQ`=base64(MD5("MGCopyAnswerclass"))，经`0x19c55b154`将属性CFData转CFNumber；
+  缺属性分支返回null。`0x19c565a74`另读euicc-chip-id。原版libTelephonyUtil GestaltIos::hasBaseband `0x1938028ec`
+  查询MG布尔值，不是仅靠注册AppleBaseband同名服务。定位`/tmp/x9-mg16-disasm.txt`、`/tmp/x9-mg16-baseband-properties.txt`；
+  工具仅反汇编/读取原版输入，没有Apple字节改动或构建产物二次检查。DT缺项有原版消费者证据，尚未证明是当前唯一等待根因。
+- ep单变量方案：mkadt.build新增默认关闭baseband参数；boot-xnu仅在明确`x9_bb=1`时加入上述D22AP四项元数据。
+  原有phandle/根compatible/iPhone10,3身份保持，未带Apple GPIO/SPMI/中断/MMIO；不从J121搬euicc-chip-id2。
+  pre-launchd增加一次有界实际IORegistry元数据匹配日志，marker `build=rev252ep-md fs128-bb-d22dt-v1`。
+  保留eo早helpers、FS128/CCIF nowait、所有QMI返回和DPMAIF未实现状态；固件路径及ABM启动gate留下一轮。
+- 代码/构建结果待补；未操作设备，不运行额外测试，GPU原有工作树不混入基带提交。
+
 ## HANDOFF 2026-11-09 (69): 查完整参考与143；PDPHelper早发布候选 rev252eo-md BUILT 未上机
 
 - USER要求先查参考实现再看143。已拉取当前UniXNU子模块 QcomBaseband `dd0199cf3300764ed52b23f4a47761f91fab21a2`，
