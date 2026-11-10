@@ -58,8 +58,8 @@ int x9_mic_mt6681_digital_stop(struct x9_mic_mt6681 *c)
     if(!e)e=digital_codec_snapshot(c,false);
     if(!e && ((s->codec_after_src&1) || (s->codec_after_tx[0]&1) ||
        (s->codec_after_tx[1]&1) || (s->codec_after_pad&9)))e=EIO;
-    if(e){s->restore_errno=e;s->flags|=X9_MIC_DIGITAL_RETAINED;c->poisoned=true;
-        c->status.restore_errno=e;c->status.flags|=X9_MIC_HW_RESTORE_FAILED;}
+    if(e){s->restore_errno=e;s->flags|=X9_MIC_DIGITAL_RETAINED;
+        (void)restore_failure(c,e,X9_MIC_HW_RESTORE_DIGITAL);}
     else c->digital_owned=false;
     return e;
 }

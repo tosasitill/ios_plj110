@@ -36,14 +36,31 @@ enum x9_mic_hardware_stage {
     X9_MIC_HW_INIT, X9_MIC_HW_CALIBRATION, X9_MIC_HW_ADC,
     X9_MIC_HW_DMA, X9_MIC_HW_STOPPED
 };
+/* First failed codec unwind operation, not proof of DMA/bus quiescence.
+ * NONE also covers older kernels which left these reserved words zero. */
+enum x9_mic_hardware_restore_stage {
+    X9_MIC_HW_RESTORE_NONE, X9_MIC_HW_RESTORE_TEST,
+    X9_MIC_HW_RESTORE_LOOPBACK, X9_MIC_HW_RESTORE_TX,
+    X9_MIC_HW_RESTORE_AFE_PADS, X9_MIC_HW_RESTORE_CODEC_PADS,
+    X9_MIC_HW_RESTORE_CLOCKS, X9_MIC_HW_RESTORE_VAUD18,
+    X9_MIC_HW_RESTORE_KEYS, X9_MIC_HW_RESTORE_ANALOG,
+    X9_MIC_HW_RESTORE_DIGITAL
+};
 struct x9_mic_hardware_status {
     uint32_t version, stage, flags, last_errno, restore_errno;
     uint32_t swcid, internal_ready, scanned_phases;
     int32_t chosen_phase[2], cycle[2];
     uint32_t monitor, last_register;
     uint64_t calibration_ns;
-    uint32_t vaud18_monitor, reserved[3];
+    /* Former reserved words; size, version and ioctl number stay unchanged.
+     * restore_register uses bit31 for AFE offsets, otherwise codec address. */
+    uint32_t vaud18_monitor, restore_register, restore_stage, reserved;
 };
+#ifdef __cplusplus
+static_assert(sizeof(struct x9_mic_hardware_status)==80,"hardware ABI size");
+#else
+_Static_assert(sizeof(struct x9_mic_hardware_status)==80,"hardware ABI size");
+#endif
 #define X9_MIC_GET_HARDWARE _IOR('M', 0x93, struct x9_mic_hardware_status)
 /* Explicit root-only cold power diagnostic. Never starts ADC, calibration
  * loopback or DMA; no READY/source publication. One attempt per boot.

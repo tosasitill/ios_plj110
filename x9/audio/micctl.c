@@ -19,10 +19,11 @@ static int hardware_status(int fd)
 {
     struct x9_mic_hardware_status h={0};
     if(ioctl(fd,X9_MIC_GET_HARDWARE,&h)==0) {
-        printf("hardware v%u stage=%u flags=%#x errno=%u restore_errno=%u swcid=%#x ready=%#x phases=%u chosen=%d/%d cycles=%d/%d monitor=%#x reg=%#x calibration_ns=%llu vaud18=%#x\n",
+        printf("hardware v%u stage=%u flags=%#x errno=%u restore_errno=%u swcid=%#x ready=%#x phases=%u chosen=%d/%d cycles=%d/%d monitor=%#x reg=%#x calibration_ns=%llu vaud18=%#x restore_stage=%u restore_reg=%#x\n",
             h.version,h.stage,h.flags,h.last_errno,h.restore_errno,h.swcid,h.internal_ready,
             h.scanned_phases,h.chosen_phase[0],h.chosen_phase[1],h.cycle[0],h.cycle[1],
-            h.monitor,h.last_register,h.calibration_ns,h.vaud18_monitor);
+            h.monitor,h.last_register,h.calibration_ns,h.vaud18_monitor,
+            h.restore_stage,h.restore_register);
     } else if(errno!=ENOTTY){perror("hardware status");return 1;}
     struct x9_mic_board_status b={0};
     if(ioctl(fd,X9_MIC_GET_BOARD,&b)==0) {

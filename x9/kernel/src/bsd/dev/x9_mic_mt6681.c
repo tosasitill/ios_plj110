@@ -63,10 +63,12 @@ static const uint16_t audio_regs[] = {
 _Static_assert(sizeof(audio_regs)/sizeof(audio_regs[0])==11,"snapshot size");
 static uint32_t afe_read(struct x9_mic_mt6681 *c,uint32_t r)
 {
+    c->status.last_register=0x80000000u|r;
     uint32_t v=c->afe[r/4];__asm__ volatile("dmb oshld":::"memory");return v;
 }
 static int afe_write(struct x9_mic_mt6681 *c,uint32_t r,uint32_t v)
 {
+    c->status.last_register=0x80000000u|r;
     c->afe[r/4]=v;__asm__ volatile("dsb oshst":::"memory");
     return afe_read(c,r)==v?0:EIO;
 }
@@ -94,30 +96,58 @@ static int settings(struct x9_mic_mt6681 *c,const struct setting *s,unsigned n)
 }
 #define SETTINGS(c,a) settings((c),(a),sizeof(a)/sizeof((a)[0]))
 static void first_error(int *e,int next){if(!*e && next)*e=next;}
+static int restore_failure(struct x9_mic_mt6681 *c,int e,uint32_t stage)
+{
+    if(!e)return 0;
+    /* Keep the first unwind failure independently of the input failure.
+     * Once poisoned no caller may retry or release parent dependencies. */
+    if(!c->status.restore_stage) {
+        c->status.restore_register=c->status.last_register;
+        c->status.restore_stage=stage;
+    }
+    if(!c->status.restore_errno)c->status.restore_errno=e;
+    c->poisoned=true;c->status.flags|=X9_MIC_HW_RESTORE_FAILED;
+    return e;
+}
 #include "x9_mic_mt6681_analog.inc"
 #include "x9_mic_mt6681_digital.inc"
 static int restore_audio(struct x9_mic_mt6681 *c)
 {
+    if(c->poisoned)return c->status.restore_errno?c->status.restore_errno:EIO;
     int e=0;
     if(c->afe_snapshot) {
-        /* Test pulse off before clocks/pads/TX are changed. */
-        first_error(&e,afe_write(c,TEST_CFG,afe_read(c,TEST_CFG)&~1u));
-        first_error(&e,afe_write(c,PAD_CFG,c->old_pad));
-        first_error(&e,afe_write(c,TEST_CFG,c->old_test));
+        /* A failed off/readback is a barrier, not best-effort cleanup. */
+        e=afe_write(c,TEST_CFG,afe_read(c,TEST_CFG)&~1u);
+        if(e)return restore_failure(c,e,X9_MIC_HW_RESTORE_TEST);
     }
     if(c->audio_snapshot) {
-        /* Stop TX and loopback even after partial phase programming failed. */
-        first_error(&e,update8(c,MT6681_AUDIO_DIG_CFG,0x80,0));
-        first_error(&e,update8(c,MT6681_AUDIO_DIG_CFG_H,0x80,0));
-        first_error(&e,update8(c,MT6681_AUDIO_DIG_CFG1,0x80,0));
-        first_error(&e,write8(c,MT6681_AFE_AUD_PAD_TOP,0x30));
-        first_error(&e,write8(c,MT6681_AFE_ADDA_MTKAIFV4_TX_CFG0,0));
-        first_error(&e,write8(c,MT6681_AFE_ADDA6_MTKAIFV4_TX_CFG0,0));
+        /* Stop every loopback/TX before changing either end's pad clock.
+         * Full-byte TX off writes now require ordinary RW readback too. */
+        e=update8(c,MT6681_AUDIO_DIG_CFG,0x80,0);
+        if(!e)e=update8(c,MT6681_AUDIO_DIG_CFG_H,0x80,0);
+        if(!e)e=update8(c,MT6681_AUDIO_DIG_CFG1,0x80,0);
+        if(e)return restore_failure(c,e,X9_MIC_HW_RESTORE_LOOPBACK);
+        e=update8(c,MT6681_AFE_ADDA_MTKAIFV4_TX_CFG0,0xff,0);
+        if(!e)e=update8(c,MT6681_AFE_ADDA6_MTKAIFV4_TX_CFG0,0xff,0);
+        if(e)return restore_failure(c,e,X9_MIC_HW_RESTORE_TX);
+        e=update8(c,MT6681_AFE_AUD_PAD_TOP,0xff,0x30);
+        if(e)return restore_failure(c,e,X9_MIC_HW_RESTORE_CODEC_PADS);
+    }
+    if(c->afe_snapshot) {
+        e=afe_write(c,PAD_CFG,c->old_pad);
+        if(e)return restore_failure(c,e,X9_MIC_HW_RESTORE_AFE_PADS);
+        e=afe_write(c,TEST_CFG,c->old_test);
+        if(e)return restore_failure(c,e,X9_MIC_HW_RESTORE_TEST);
+    }
+    if(c->audio_snapshot) {
         /* Reverse power dependencies, not merely register address order. */
         const unsigned order[]={9,7,8,6,5,4,3,2,1,0,10};
         for(unsigned i=0;i<sizeof(order)/sizeof(order[0]);i++) {
             unsigned j=order[i];
-            first_error(&e,update8(c,audio_regs[j],0xff,c->audio_saved[j]));
+            e=update8(c,audio_regs[j],0xff,c->audio_saved[j]);
+            if(e)return restore_failure(c,e,j==10?X9_MIC_HW_RESTORE_VAUD18:
+                j>=7?X9_MIC_HW_RESTORE_CLOCKS:j>=5?X9_MIC_HW_RESTORE_TX:
+                X9_MIC_HW_RESTORE_CODEC_PADS);
         }
     }
     return e;
@@ -127,24 +157,19 @@ int x9_mic_mt6681_unprepare(struct x9_mic_mt6681 *c)
     if(c->poisoned)return c->status.restore_errno?c->status.restore_errno:EIO;
     if(!c->touched)return c->poisoned?EIO:0;
     int e=x9_mic_mt6681_digital_stop(c);
-    if(!e)e=analog_restore(c);
+    if(e)return restore_failure(c,e,X9_MIC_HW_RESTORE_DIGITAL);
+    e=analog_restore(c);
+    if(e)return restore_failure(c,e,X9_MIC_HW_RESTORE_ANALOG);
     /* Do not cut transport/clocks after an uncertain analog shutdown. */
-    if(!e)e=restore_audio(c);
-    if(e) {
-        c->poisoned=true;c->status.restore_errno=e;
-        c->status.flags|=X9_MIC_HW_RESTORE_FAILED;return e;
-    }
+    e=restore_audio(c);if(e)return e;
     /* Actual protection keys, NOT vendor's misleading keylock_set name. */
-    for(unsigned i=0;i<sizeof(keys)/sizeof(keys[0]);i++)
-        first_error(&e,write8(c,keys[i].reg,0));
-    if(e) {
-        c->poisoned=true;c->status.restore_errno=e;
-        c->status.flags|=X9_MIC_HW_RESTORE_FAILED;
-    } else {
-        c->touched=c->audio_snapshot=c->afe_snapshot=false;
-        c->status.flags&=~X9_MIC_HW_POWERED;
+    for(unsigned i=0;i<sizeof(keys)/sizeof(keys[0]);i++) {
+        e=write8(c,keys[i].reg,0);
+        if(e)return restore_failure(c,e,X9_MIC_HW_RESTORE_KEYS);
     }
-    return e;
+    c->touched=c->audio_snapshot=c->afe_snapshot=false;
+    c->status.flags&=~X9_MIC_HW_POWERED;
+    return 0;
 }
 static int set_phases(struct x9_mic_mt6681 *c,int p0,int p1)
 {
@@ -187,7 +212,8 @@ int x9_mic_mt6681_verify_capture(struct x9_mic_mt6681 *c)
 static int run_phase(struct x9_mic_mt6681 *c,int cycle[2],uint64_t deadline)
 {
     uint32_t off=afe_read(c,TEST_CFG)&~1u;
-    int e=afe_write(c,TEST_CFG,off);if(e)return e;
+    int e=afe_write(c,TEST_CFG,off);
+    if(e)return restore_failure(c,e,X9_MIC_HW_RESTORE_TEST);
     /* Never accept leftover DONE from the previous test. Hardware must retire
      * it after TEST_ON=0. A platform with different semantics needs evidence,
      * not a success fallback. Both iteration and wall-time bounds apply. */
@@ -209,7 +235,11 @@ static int run_phase(struct x9_mic_mt6681 *c,int cycle[2],uint64_t deadline)
         delay(2);
     }
     if(i==2500)e=ETIMEDOUT;
-    int stop=afe_write(c,TEST_CFG,off);return e?e:stop;
+    uint32_t failed_register=c->status.last_register;
+    int stop=afe_write(c,TEST_CFG,off);
+    if(stop)(void)restore_failure(c,stop,X9_MIC_HW_RESTORE_TEST);
+    if(e)c->status.last_register=failed_register;
+    return e?e:stop;
 }
 static int calibrate(struct x9_mic_mt6681 *c)
 {
@@ -255,12 +285,9 @@ static int calibrate(struct x9_mic_mt6681 *c)
         if(!e)e=run_phase(c,cycle,deadline);
         if(!e && (cycle[0]!=c->status.cycle[0] || cycle[1]!=c->status.cycle[1]))e=EIO;
     }
+    int input_error=e;
     uint32_t failed_register=c->status.last_register;
     int off=restore_audio(c);
-    if(off) {
-        c->poisoned=true;c->status.restore_errno=off;
-        c->status.flags|=X9_MIC_HW_RESTORE_FAILED;
-    }
     if(!e)e=off;
     if(!e) {
         e=set_phases(c,c->status.chosen_phase[0],c->status.chosen_phase[1]);
@@ -268,7 +295,9 @@ static int calibrate(struct x9_mic_mt6681 *c)
         if(!e)e=enable_vaud18(c);
     }
     if(!e)c->status.flags|=X9_MIC_HW_CALIBRATED;
-    if(e)c->status.last_register=failed_register;
+    /* Only an input/scan failure predating restore owns failed_register.
+     * An unwind or post-restore phase/VAUD18 error must keep its own address. */
+    if(e && input_error)c->status.last_register=failed_register;
     absolutetime_to_nanoseconds(mach_absolute_time()-start,&c->status.calibration_ns);
     return e;
 }

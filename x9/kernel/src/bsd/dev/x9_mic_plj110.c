@@ -384,6 +384,14 @@ static int board_finish(struct power_journal *j,int e)
     if(!e)s->stage=X9_MIC_BOARD_RESTORE;
     if(digital && !e)digital->stage=X9_MIC_DIGITAL_RESTORE;
     int off=restore(j);
+    /* h is a published copy, not codec.status: carry the first codec unwind
+     * location out even when the board retains its original input error. */
+    if(j->codec.status.restore_stage) {
+        h->restore_register=j->codec.status.restore_register;
+        h->restore_stage=j->codec.status.restore_stage;
+    }
+    if(!e && off && j->codec.status.restore_errno)
+        codec_reg=j->codec.status.last_register;
     /* All physical snapshots stay inside the single AP transition lease. */
     if(j->cal)afe_ao_snapshot(j->cal);
     if(j->gpio)s->gpio9_after=pin_state(j,9);
@@ -439,9 +447,10 @@ static int board_finish(struct power_journal *j,int e)
         s->flags|=X9_MIC_BOARD_RESTORED;h->flags&=~X9_MIC_HW_POWERED;
         if(!e){s->stage=X9_MIC_BOARD_OFF;h->stage=X9_MIC_HW_STOPPED;}
     }
-    printf("X9 MIC %s: stage=%u flags=%x errno=%u restore=%u id=%x ready=%x vaud18=%x gpio9=%x/%x bus=%x (board pipeline only)\n",
+    printf("X9 MIC %s: stage=%u flags=%x errno=%u restore=%u id=%x ready=%x vaud18=%x gpio9=%x/%x bus=%x codec_reg=%x restore_stage=%u restore_reg=%x (board pipeline only)\n",
         j->session?"CAPTURE-STOP":digital?"DIGITAL-L":analog?"ANALOG-L":a?"CALIBRATE":"POWER",s->stage,s->flags,s->last_errno,s->restore_errno,h->swcid,h->internal_ready,
-        h->vaud18_monitor,s->gpio9_before,s->gpio9_after,s->bus_status);
+        h->vaud18_monitor,s->gpio9_before,s->gpio9_after,s->bus_status,
+        h->last_register,h->restore_stage,h->restore_register);
     if(j->cal)printf("X9 MIC AFE: stage=%u flags=%x errno=%u restore=%u AP=%x/%x ACK=%x/%x VLP=%x/%x phases=%d/%d cycles=%d/%d scanned=%u\n",
         a->stage,a->flags,a->last_errno,a->restore_errno,a->ap_vote_before,a->ap_vote_after,
         a->ack_before,a->ack_after,a->vlp_before,a->vlp_after,h->chosen_phase[0],h->chosen_phase[1],
