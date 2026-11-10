@@ -635,6 +635,7 @@ static bool x9q_enqueue(uint32_t local,uint32_t port,const uint8_t *req,unsigned
 #include "X9Messages.inc"
 static void x9q_reject(uint32_t,uint32_t,const uint8_t *,unsigned,uint16_t);
 #include "X9DSDS.inc"
+#include "X9GPSPDS.inc"
 /* Requests answered without an AT job used to be silent (158.txt: 178 requests,
  * 14 logged answers). Log tags/lengths only; values only for 1-byte flags. */
 static void x9q_reject(uint32_t local,uint32_t port,const uint8_t *req,unsigned len,uint16_t err){
@@ -653,6 +654,7 @@ static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *r
   x9q_reject(local,port,req,len,X9Q_BAD);return;
  }
  x9q_client &c=x9q_clients[slot];
+ if(x9g_send(local,port,req,len))return;
  if(x9m_request(local,port,req,len))return;
  if(service==1&&x9w_request(local,port,req,len))return;
  /* Per-client NAS/DMS/DSD binding, not a default-data mutation.
@@ -743,6 +745,7 @@ static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *r
 }
 static void x9q_del(uint32_t local){
  unsigned slot=local-CBQ_PORT_BASE;if(local<CBQ_PORT_BASE||slot>=CBQ_MAX_CLIENTS)return;
+ x9g_del(slot);
  x9w_del(slot);
  x9m_del(slot);
  x9ds_del(slot);
@@ -753,6 +756,7 @@ static void x9q_del(uint32_t local){
  }
 }
 static void x9q_poll(){
+ x9g_poll();
  x9w_poll();
  x9m_poll();
  x9ds_poll();

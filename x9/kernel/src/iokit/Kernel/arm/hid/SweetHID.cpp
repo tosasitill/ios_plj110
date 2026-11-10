@@ -575,3 +575,4 @@ sweet_hid_touch(int finger, int down, int x, int y)
 }
 
 #include "X9AmbientLight.inc"
+#include "X9Barometer.inc"

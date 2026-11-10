@@ -1,0 +1,140 @@
+/* Native locationd QMI PDS, not CLLocation simulation/injection.
+ * 20H392 CLQmiPdsManager::sendSetGpsServiceState builds message0x21 at
+ * 0x1004dd638; request state@TLV1 and optional uint64 mask@TLV0x10.
+ * Standard PDS NMEA layouts: libqmi qmi-service-pds.json. Parsed fixes,
+ * assistance, SUPL and proprietary engine messages remain unsupported.
+ * All client state is owned by X9Baseband's sole QRTR worker. */
+#include "../../../bsd/dev/x9_gps.h"
+struct x9g_client {
+ bool initialized, enabled, automatic, nmea, extended;
+ uint8_t timeout;
+ uint32_t interval, accuracy;
+ uint64_t cursor;
+};
+static x9g_client x9g_clients[CBQ_MAX_CLIENTS];
+static bool x9g_enabled;
+static x9g_client &x9g_client_for(unsigned slot) {
+ x9g_client &c = x9g_clients[slot];
+ if (!c.initialized) {
+  c.initialized = true; c.automatic = true;
+  c.timeout = 30; c.interval = 1; c.accuracy = 50;
+  x9_gps_status s; x9_gps_copy_status(&s); c.cursor = s.sequence;
+ }
+ return c;
+}
+static uint16_t x9g_error(int error) {
+ return error == ENXIO || error == EAGAIN ? X9Q_NOT_READY :
+        error == EBUSY ? X9Q_BUSY : error == EINVAL ? X9Q_ARG : X9Q_INTERNAL;
+}
+/* Transactional union of all clients. A client cannot stop another's lease
+ * or make the shared engine claim success when physical activation failed. */
+static int x9g_apply(unsigned slot, const x9g_client &proposal) {
+ bool enabled = false, tracking = false; uint32_t interval = 3600;
+ for (unsigned i = 0; i < CBQ_MAX_CLIENTS; i++) {
+  const x9g_client &c = i == slot ? proposal : x9g_clients[i];
+  if (!c.initialized || !c.enabled) continue;
+  enabled = true;
+  if (c.automatic) { tracking = true; if (c.interval < interval) interval = c.interval; }
+ }
+ return x9_gps_set_state(enabled, tracking, tracking ? interval*1000 : 1000);
+}
+static bool x9g_send(uint32_t local, uint32_t port, const uint8_t *req, unsigned len) {
+ if (port != X9BB_PORT_BASE + 6) return false;
+ unsigned slot = local-CBQ_PORT_BASE;
+ if (!x9g_enabled || slot >= CBQ_MAX_CLIENTS) {
+  x9q_packet p(req, X9Q_UNSUPPORTED); p.send(local, port); return true;
+ }
+ x9g_client &c = x9g_client_for(slot), next = c;
+ uint16_t id = x9q_u16(req+3), error = 0; bool mutation = false;
+ x9q_view v = x9q_tlv(req, len, 1);
+ switch (id) {
+ case 0: /* Reset this client's settings/lease only. */
+  if (len != 7) { error = X9Q_ARG; break; }
+  next.enabled = next.nmea = next.extended = false;
+  next.automatic = true; next.interval = 1; next.timeout = 30; next.accuracy = 50;
+  mutation = true; break;
+ case 1: /* Set Event Report; do not promise unavailable parsed-position data. */
+  for (unsigned i = 7; i < len; i += 3+x9q_u16(req+i+1)) {
+   uint8_t tag = req[i]; unsigned n = x9q_u16(req+i+1);
+   if (n != 1 || req[i+3] > 1) { error = X9Q_ARG; break; }
+   if (tag == 0x10) next.nmea = req[i+3];
+   else if (tag == 0x11) next.extended = req[i+3];
+   else if (tag < 0x12 || tag > 0x23 || req[i+3]) { error = X9Q_UNSUPPORTED; break; }
+  }
+  if (!error) { x9_gps_status s; x9_gps_copy_status(&s); next.cursor = s.sequence; c = next; }
+  break;
+ case 0x20: /* Get GPS service state */
+  if (len != 7) error = X9Q_ARG;
+  else {
+   x9_gps_status s; x9_gps_copy_status(&s);
+   uint8_t state[2] = { (uint8_t)(c.enabled && s.enabled && s.ready),
+       (uint8_t)(c.enabled && c.automatic && s.tracking ? 2 : 1) };
+   x9q_packet p(req); p.tlv(1, state, sizeof(state)); p.send(local, port); return true;
+  } break;
+ case 0x21: /* iOS may supply an 8-byte reason/enable mask. */
+  if (!v.p || v.n != 1 || v.p[0] > 1) { error = X9Q_ARG; break; }
+  for (unsigned i = 7; i < len; i += 3+x9q_u16(req+i+1))
+   if (req[i] != 1 && (req[i] != 0x10 || x9q_u16(req+i+1) != 8)) error = X9Q_UNSUPPORTED;
+  next.enabled = v.p[0]; mutation = !error; break;
+ case 0x29: { /* Standalone default tracking configuration. */
+  if (len != 7) { error = X9Q_ARG; break; }
+  uint8_t info[10] = {0, c.timeout};
+  for (unsigned i = 0; i < 4; i++) {
+   info[2+i] = (uint8_t)(c.interval >> (8*i));
+   info[6+i] = (uint8_t)(c.accuracy >> (8*i));
+  }
+  x9q_packet p(req); p.tlv(1, info, sizeof(info)); p.send(local, port); return true;
+ }
+ case 0x2a:
+  if (len != 20 || !v.p || v.n != 10 || !v.p[1] || !x9q_u32(v.p+2) ||
+      x9q_u32(v.p+2) > 3600 || !x9q_u32(v.p+6)) { error = X9Q_ARG; break; }
+  if (v.p[0]) { error = X9Q_UNSUPPORTED; break; } /* no claimed MS-based assistance */
+  next.timeout = v.p[1]; next.interval = x9q_u32(v.p+2); next.accuracy = x9q_u32(v.p+6);
+  mutation = true; break;
+ case 0x30: { /* Get Auto Tracking State */
+  if (len != 7) { error = X9Q_ARG; break; }
+  uint8_t automatic = c.automatic;
+  x9q_packet p(req); p.tlv(1, &automatic, 1); p.send(local, port); return true;
+ }
+ case 0x31:
+  if (len != 11 || !v.p || v.n != 1 || v.p[0] > 1) error = X9Q_ARG;
+  else { next.automatic = v.p[0]; mutation = true; } break;
+ default: error = X9Q_UNSUPPORTED; break;
+ }
+ if (mutation) {
+  int e = x9g_apply(slot, next);
+  if (e) error = x9g_error(e);
+  else { x9_gps_status s; x9_gps_copy_status(&s); next.cursor = s.sequence; c = next; }
+ }
+ x9q_packet p(req, error); p.send(local, port);
+ printf("X9 GPS PDS: msg 0x%04x txn %u error %u (no coordinates logged)\n", id, x9q_u16(req+1), error);
+ return true;
+}
+static void x9g_del(unsigned slot) {
+ if (!x9g_enabled || slot >= CBQ_MAX_CLIENTS || !x9g_clients[slot].initialized) return;
+ x9g_client empty = {};
+ int e = x9g_apply(slot, empty);
+ x9g_clients[slot] = empty;
+ if (e) { x9_gps_status s; x9_gps_copy_status(&s); x9_gps_fault(s.generation, e); }
+}
+static void x9g_poll(void) {
+ if (!x9g_enabled) return;
+ for (unsigned slot = 0; slot < CBQ_MAX_CLIENTS; slot++) {
+  x9g_client &c = x9g_clients[slot];
+  if (!c.enabled || !c.automatic || (!c.nmea && !c.extended)) continue;
+  /* Bound work per bridge iteration; no starvation of WDS/CCCI/SIM. */
+  for (unsigned i = 0; i < 4; i++) {
+   x9_gps_nmea n;
+   if (x9_gps_next_nmea(&c.cursor, &n)) break;
+   uint8_t req[7] = {}; x9q_packet p(req);
+   if (c.nmea) p.tlv(0x10, n.data, n.length);
+   if (c.extended) {
+    uint8_t data[3+X9_GPS_NMEA_MAX] = {0, (uint8_t)n.length, (uint8_t)(n.length>>8)};
+    memcpy(data+3, n.data, n.length); p.tlv(0x11, data, n.length+3);
+   }
+   /* Never derive a FIX/connected status from receipt of NMEA: RMC V/GGA 0
+    * are legitimate no-fix sentences, and must stay no-fix at the consumer. */
+   p.send(CBQ_PORT_BASE+slot, X9BB_PORT_BASE+6, true, 1);
+  }
+ }
+}

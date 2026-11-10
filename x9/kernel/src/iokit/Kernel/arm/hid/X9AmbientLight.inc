@@ -36,7 +36,10 @@ OSDefineMetaClassAndStructors(X9AmbientLight, IOHIDEventService);
 bool
 X9AmbientLight::start(IOService *provider)
 {
-	int enabled = 0;
+	/* Compact sensor mask: bit0 ALS, bit1 pressure, bit2 GPS. Explicit
+	 * per-device arguments override it (including diagnostic mode). */
+	int sensors = 0; PE_parse_boot_argn("x9s", &sensors, sizeof(sensors));
+	int enabled = (sensors&1) ? 1 : 0;
 	PE_parse_boot_argn("x9_als", &enabled, sizeof(enabled));
 	if (!sweet_early_is_x9() || (enabled != 1 && enabled != 2)) return false;
 	/* One token fits the existing 607-byte boot line: 1=MTK, 2=diagnostic. */

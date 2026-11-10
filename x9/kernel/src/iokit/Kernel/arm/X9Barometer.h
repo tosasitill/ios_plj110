@@ -1,0 +1,38 @@
+/* X9 barometer: MTK sensor/2.0 to native iOS atmospheric-pressure HID. */
+#ifndef X9_BARO_H
+#define X9_BARO_H
+
+#include <stdint.h>
+
+#define X9_BARO_MTK_INFO_BYTES 40u
+#define X9_BARO_MTK_DATA_BYTES 36u
+#define X9_BARO_MIN_PA 30000u
+#define X9_BARO_MAX_PA 120000u
+#define X9_BARO_MAX_AGE_NS 5000000000ULL
+
+struct x9_baro_sample {
+	uint64_t sequence;
+	uint64_t host_time;       /* mach_absolute_time at receipt, NOT SCP ns */
+	uint64_t scp_time_ns;
+	uint32_t pressure_kpa_q16;             /* 16.16 kPa, as consumed by CLPressure */
+	uint32_t diagnostic;
+};
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+int x9_baro_init(int diagnostic);
+void x9_baro_shutdown(void);
+int x9_baro_copy_sample(struct x9_baro_sample *sample);
+
+/* sensor/2.0 worker context only (never hard IRQ). PRESSURE=6, DATA=0.
+ * gain is raw units/hPa from the real sensor list; do not assume gain=100.
+ * On SCP reset invalidate BEFORE reconnect/list/configure.
+ * SCP transport/firmware and enable/batch remain to be supplied. */
+int x9_baro_configure_mtk(const void *info, unsigned int length);
+int x9_baro_receive_mtk(const void *record, unsigned int length);
+void x9_baro_invalidate_mtk(void);
+#ifdef __cplusplus
+}
+#endif
+#endif

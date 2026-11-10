@@ -36,6 +36,7 @@ const char *x9bb_name(uint32_t port)
 {
   for (const x9bb_service &s : x9bb_services)
     if (X9BB_PORT_BASE + s.id == port) return s.name;
+  if (port == X9BB_PORT_BASE+6) return "PDS";
   return "?";
 }
 
@@ -79,6 +80,10 @@ void x9bb_thread(void *, wait_result_t)
   for (unsigned i = 0; i < 600 && !IOService::getResourceService(); i++) delay_for_interval(100, 1000 * NSEC_PER_USEC);
   coachz_baseband_configure(x9bb_modem_send, x9bb_del_client);
   x9d_prepare();
+  int gb = 0; PE_parse_boot_argn("x9s", &gb, sizeof(gb));
+  int gps = (gb&4) ? 1 : 0; PE_parse_boot_argn("x9_gps", &gps, sizeof(gps));
+  x9g_enabled = gps == 1; x9_gps_init();
+  if (x9g_enabled) coachz_baseband_new_server(6, 1, X9BB_NODE, X9BB_PORT_BASE+6);
   for (const x9bb_service &s : x9bb_services)
     coachz_baseband_new_server(s.id, 1, X9BB_NODE, X9BB_PORT_BASE + s.id);
   printf("X9 BB: bridge configured, %u QMI services announced on node %u\n", (unsigned)(sizeof x9bb_services / sizeof x9bb_services[0]), X9BB_NODE);
