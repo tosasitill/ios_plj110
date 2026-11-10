@@ -39,6 +39,7 @@ static int named_reg(uintptr_t dt,const char *path,const char *name,uint32_t *ba
     return (size_t)i*16==rb&&found==1;
 }
 #include "adsp_i2s4.inc"
+#include "adsp_pa_reset.inc"
 static int qualify(uintptr_t dt,struct x9_adsp_handoff *h)
 {
     const char *sys="/soc/adspsys@1a000000";
@@ -102,6 +103,7 @@ static int qualify(uintptr_t dt,struct x9_adsp_handoff *h)
         h->flags|=X9_ADSP_I2S4_VERIFIED;
         h->i2s4_pins=X9_ADSP_I2S4_PINS;h->i2s4_modes=X9_ADSP_I2S4_MODES;
     }
+    if(qualify_pa_reset(dt))h->flags|=X9_ADSP_PA_RESET_VERIFIED;
     return x9_adsp_handoff_valid(h);
 }
 struct walk {uint8_t *p;size_t size,at,found;unsigned nodes,matches;};
@@ -136,5 +138,6 @@ int fdt_adsp_patch_adt(uintptr_t dt,void *adt,size_t bytes)
     for(unsigned i=0;i<X9_ADSP_HANDOFF_BYTES;i++)dst[i]=src[i];
     plog_str("X9 ADSP FDT: common pool and mailbox layout qualified; EMI/firmware not yet ready\n");
     if(h.flags&X9_ADSP_I2S4_VERIFIED)plog_str("X9 ADSP FDT: I2SIN4/OUT4 pinctrl metadata qualified; pads not owned\n");
+    if(h.flags&X9_ADSP_PA_RESET_VERIFIED)plog_str("X9 ADSP FDT: SID3 dual active-low PA reset topology; no rail/reset lease\n");
     return 1;
 }

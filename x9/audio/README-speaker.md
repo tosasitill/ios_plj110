@@ -453,6 +453,7 @@ lease空间不是CSR，ticket细节另读resource-status；lease-error0时guard�
 | `x9_dsp_pcm.{c,h}` | 96B PCM descriptor与32B shared-DRAM record字节codec；真实transport上的INIT／share／OPEN／HWPARAM／AFE PCM配置／PREPARE／DLCOPY／START／STOP／HWFREE／CLOSE；generation-bound消费消息、双快照DTOA与输入环容量检查 | unified AP lease下实际共享DRAM/MPU/cache、task/core绑定与生产调用者；DSP消费不能代替AFE物理played |
 | `x9_speaker_afe.{c,h}` | DL24/OUT4 逐字段写入/不确定/恢复 journal、32-bit I2S slots/S16、48k、CONN116/117 DL24 route；AP transition ticket、platform v4 部分失败 ownership＋fresh lease/config guard、combined ticket和producer halt；prefill 后 DMA start、period copy/cache、稳定 CUR、高低地址/半环歧义检查；独立低水位 watcher、mute/disable/quiesce/restore | AUDIO/VLP APLL2、pad/物理共享资源 lease、DMA bus/EMI/cache、双 PA mute、权威 DMA quiesce与DSP producer adapter |
 | `x9_tfa_plj110.{c,h}` | root 显式只读 reg03；PMIF-P SID3 reset/SID5 左供电快照，已开启 I²C6/共享 DMA clock 与 pads 校验、2 CSR bank/1 DMA idle、FIFO WRRD 1+2 BE、逐字段总线恢复 | 不具备双侧供电/reset/write lease；右 rail、真实 binding/profile/校准仍待确认 |
+| `x9_pa_reset.{c,h}` | 本次FDT SID3双active-low reset拓扑、生产clock PA子租约、低1ms→高1ms/物理DI读回与fresh epoch、PMIF pending no-replay、halt/drain后重新assert low；I2C6下游子租约屏障 | 实际双侧rail/reset物理独占supplier仍无注册者，不提供PA寄存器写／profile／校准／unmute |
 | `x9_tfa98xx.{c,h}` | PM container total-size/CRC、双 I2C 类型（container bus=0）的地址、明确名字的两侧 profile、descriptor 边界；真实 reg03 revision 比对、AMPE=0 且读回；双侧预检白名单 register/bitfield prefix | 实际完整 revision、immutable container、per-revision 白名单、I2C6/reset/rails 互斥；Probus DSP file/patch/校准/boost 未执行 |
 
 AFE start 必须预填至少960帧后才使能 DMA；PA 始终由外部 board 维持 muted。
@@ -646,7 +647,8 @@ leaf只允许pinmux、Schmitt、bias-disable和可选phandle，拒绝额外/重�
 没有跳过完整END/reserve验证，旧lookup/checked的absent契约不变。
 
 `x9_adsp_handoff`仍为256B，尾部原8B保留区用于pins/modes向量，
-`X9_ADSP_I2S4_VERIFIED`仅表示本次拓扑。flags严格只接受layout-only 1或layout+I2S4 3，
+`X9_ADSP_I2S4_VERIFIED`仅表示本次拓扑；另有下面的PA reset拓扑可选mask0x4。
+flags严格只接受layout-only 1或带可选拓扑的3/5/7，不接受unknown bits，
 无I2S4 flag时尾部必须仍为零；复制端重新完整校验，不把旧capture当本次grant。
 
 | 入口／字段 | 行为与边界 |
@@ -664,9 +666,44 @@ leaf只允许pinmux、Schmitt、bias-disable和可选phandle，拒绝额外/重�
 drop失败重试fresh saved/parent验证，不二次restore；没有任何pad写动作时可在真mute/halt/drain
 后退休untouched child，不强求未建立的pad映射。永久CSR映射首次创建后复用。
 
-锁顺序AFE→pads→clock→board/transport→AP leaf；policy回调禁止重入AFE/pads/clock。
+锁顺序AFE→pads→PA reset→clock→board/transport→AP leaf；policy回调禁止重入AFE/pads
+和clock生命周期。真实PA mute回调可调用read-only PA reset/clock物理资格，
+但不能从持clock mutex的回调反向调用它们。
 本阶段仅直接编译内核新pads及受影响对象、shim walker与iOS header/ABI对象；没有HAL
 bundle重编、测试套件/模拟provider、CI联合kernel/boot、设备操作或播放证据。
+
+### 双PA active-low reset 与 I2C6 父资源屏障
+
+**OPPO `tfa98xx_parse_dt/ext_reset` 明确 `reset-polarity=0` 为低1ms→高1ms。
+捕获pinctrl的`output-low`是asserted reset，不是解除复位；旧只读探针的DO/DI低准入已纠正为高。
+这是源码与配置纠正，未执行设备reset或读取本次物理电平。**
+
+shim `adsp_pa_reset.inc`本次验证PMIF-P/`spmi-dev-mask`、SID3 PMIC/controller phandle、
+GPIO10/11、两侧TFA0x34/35与default pinctrl/active-low配置。group/leaf schema严格拒绝
+额外/重复输出pinconf及children，不硬编码捕获phandle。`X9_ADSP_PA_RESET_VERIFIED`是
+handoff可选 **mask0x4（bit2）** 的拓扑bit，256B布局不变；它不授予供电、reset epoch或I2C写资格。
+`X9_ADSP_LOADER=0`仍关闭，当前没有该live grant或combined caller。
+
+`x9_pa_reset_acquire(policy,&epoch)`必须同真实Online/no-error generation、native clock PA
+子租约及本次拓扑，另需**实际已pin的双侧rail/reset独占物理supplier**，覆盖整个reset/I2C
+生命周期，不能仅提供一瞬电压/DO快照。右侧没有DT supply，不能把左供电、dummy regulator、
+I2C ACK或可控boolean替代它；当前该mandatory supplier没有实现/注册者，故不会开始reset。
+
+| 动作／入口 | 实际行为 |
+|---|---|
+| cold reset 准入 | SID3 mode0、DIR output、AD_SW_SWITCH/AD_SWITCH数字SW、DO/物理DI均低；拒绝继承high/alternate，不把已解除reset当fresh epoch |
+| reset pulse | 在真实PMIF mutex下低态至少1ms→仅DO0xa3 bits2/3 RMW到高→至少1ms→fresh DO/DI高及外层供电/Online复查才mint epoch；不写DIR/MODE/drive/解锁key/rails |
+| PMIF 写入／journal | GPIO属于MT6661 `FLAG_MT66XX` 的regmap_update_bits，不使用AP GPIO SET/CLR；保存最后写前prior，只改GPIO10/11、保留邻bit，uncertain在命令前置位；失败不重播reset pulse |
+| `pa_reset_validate(ticket,epoch)` | fresh parent/双侧物理lease、PMIF CPU→PA首尾、reset image与DO/DI；允许同代际历史流fault后的物理mute，但不是新流Online/profile/校准授权 |
+| `pa_reset_resolve_pmif` | 真halt/drain后显式解决本owner pending；Read只有实际late VALID才能读弃并CLR，不把idle当“未来不会有响应”；timeout write/CLEAR不重放，不清未知error或别人的VALID |
+| `pa_reset_bus_hold/validate/drop` | I2C6下游单调token。hold须真实Online/noerror/fresh epoch，drop由native controller在真实bus/FIFO/DMA idle及CSR恢复后调用，再检PA parent和board halt/DL24 drain；现无I2C6生产caller |
+| `pa_reset_release` | 下游bus尚held立即EBUSY，不assert reset/污染flow；真board halt＋独立DL24 drain后撤configured、resolve pending、重新assert low至少1ms且DO/DI确认，再drop PA clock child；失败保留父资源，drop重试不重播高脉冲 |
+
+clock的pads/PA两个子租约使用**同一全局单调leaf serial**，token不跨类型复用；任一held时
+clock_release在restore/vote之前EBUSY。已pin物理rail/reset supplier的生命周期必须长于PA
+child；成功清理顺序是mute/AFE停流/drain/producer halt→恢复I2S4 pads→I2C6 close/restore→
+assert PA reset/drop child→clock restore→物理rail父资源退休，AP ticket最后释放。
+新流需新的真实DSP generation，不允许用替换status/context消除reset/PMIF不确定性。
 
 ### AUDIO-12：启动／运行配置资格与缓存故障位置
 
@@ -779,8 +816,9 @@ audioctl amp-probe
 audioctl amp-status
 ```
 
-`amp-probe` 要求 SID3 GPIO10/11 已为数字 SW 控制、mode0/output/DO及DI低；
-不把低电平说成冷 PA。左 LNC0_8 已为SW 1.8V/on/non-LP/no-HW-vote；保留完整 DA
+`amp-probe` 要求 SID3 GPIO10/11 已为数字 SW 控制、mode0/output/DO及DI**高**；
+按OPPO active-low reset时序纠正旧低准入，探针本身不解除reset、不证明fresh reset。
+左 LNC0_8 已为SW 1.8V/on/non-LP/no-HW-vote；保留完整 DA
 原值，不将 `regulator.c` 的 `da_en_mask=3/da_lp_mask=7` 简化成完整 ready。
 右节点无VDD supply属性，**右供电仍未知**；即使双 ACK，也不发布两侧 rail ready。
 完整 PMIF mutex 跨两次快照、FIFO访问和恢复，但不是远端硬件所有权保证。

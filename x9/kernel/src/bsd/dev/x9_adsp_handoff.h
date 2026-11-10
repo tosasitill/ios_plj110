@@ -9,6 +9,7 @@
 #define X9_ADSP_HANDOFF_BYTES 256u
 #define X9_ADSP_LAYOUT_VERIFIED 1u
 #define X9_ADSP_I2S4_VERIFIED 2u
+#define X9_ADSP_PA_RESET_VERIFIED 4u /* SID3 GPIO10/11, active-low, metadata ONLY */
 #define X9_ADSP_I2S4_PINS 0x6f6e6d6cu
 #define X9_ADSP_I2S4_MODES 0x05050505u
 #define X9_ADSP_MEM_COUNT 15u
@@ -36,8 +37,8 @@ static inline int x9_adsp_handoff_valid(const struct x9_adsp_handoff *h)
     const uint32_t sizes[X9_ADSP_MEM_COUNT]={0x80000,0x80000,0x180000,0x400,
         0x400,0x80000,0x80000,0x100000,0x400,0,0x40000,0,0,0x80000,0x852000};
     if(!h)return 0;
-    if(h->version!=1 || (h->flags!=X9_ADSP_LAYOUT_VERIFIED &&
-       h->flags!=(X9_ADSP_LAYOUT_VERIFIED|X9_ADSP_I2S4_VERIFIED)) || h->cores!=2 ||
+    if(h->version!=1 || !(h->flags&X9_ADSP_LAYOUT_VERIFIED) ||
+       (h->flags&~(X9_ADSP_LAYOUT_VERIFIED|X9_ADSP_I2S4_VERIFIED|X9_ADSP_PA_RESET_VERIFIED)) || h->cores!=2 ||
        ((h->flags&X9_ADSP_I2S4_VERIFIED)?
         (h->i2s4_pins!=X9_ADSP_I2S4_PINS || h->i2s4_modes!=X9_ADSP_I2S4_MODES):
         (h->i2s4_pins || h->i2s4_modes)) || h->reserve_base<0x100000000ULL ||

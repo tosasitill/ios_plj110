@@ -1149,5 +1149,6 @@ x9:x9_speaker_mt6993.o
 x9:x9_speaker_pads.o
 x9:x9_speaker_afe.o
 x9:x9_tfa_plj110.o
+x9:x9_pa_reset.o
 x9:x9_tfa98xx.o
 x9:SweetX9Audio.o

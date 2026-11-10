@@ -70,6 +70,12 @@ int x9_speaker_mt6993_clock_held(uint64_t ticket); /* cached only */
 int x9_speaker_mt6993_clock_pad_hold(uint64_t ticket,uint64_t *lease);
 int x9_speaker_mt6993_clock_pad_validate(uint64_t ticket,uint64_t lease);
 int x9_speaker_mt6993_clock_pad_drop(uint64_t ticket,uint64_t lease);
+/* Independent PA reset/power child; may coexist with I2S4 pads. Same
+ * Online/no-error admission, physical cleanup and halt-before-drop rules.
+ * Neither child may be outstanding when clock_release starts restoring. */
+int x9_speaker_mt6993_clock_pa_hold(uint64_t ticket,uint64_t *lease);
+int x9_speaker_mt6993_clock_pa_validate(uint64_t ticket,uint64_t lease);
+int x9_speaker_mt6993_clock_pa_drop(uint64_t ticket,uint64_t lease);
 #ifdef __cplusplus
 }
 #endif

@@ -24,7 +24,9 @@ struct x9_speaker_pads_policy {
  * Does not release the Speaker ticket, restart DSP or enable OUT4/PA/DMA.
  * validate proves physical pad image, not permission to start a PCM stream.
  * Backend serializes lifecycle; AFE -> pads -> clock -> board/AP leaf.
- * Policy callbacks MUST NOT re-enter AFE, pads or clock modules. */
+ * Policy callbacks MUST NOT re-enter AFE/pads or clock lifecycle. The PA
+ * mute provider MAY use read-only PA reset/clock physical validation
+ * (pads -> PA -> clock); never invoke it from a clock-held callback. */
 int x9_speaker_pads_acquire(const struct x9_speaker_pads_policy *);
 int x9_speaker_pads_validate(uint64_t ticket);
 int x9_speaker_pads_release(uint64_t ticket);

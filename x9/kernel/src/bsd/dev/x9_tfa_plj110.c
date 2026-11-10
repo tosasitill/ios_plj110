@@ -79,9 +79,11 @@ static int pmic_snapshot(uint32_t *reset,uint32_t *supply)
 }
 static int pmic_admit(void)
 {
-    /* MT6661-3 GPIO10/11: digital SW ownership, output low (deasserted),
-     * mode0, physical DI low. DO low alone does not prove a cold PA. */
-    if((s.reset[0]&12)!=12 || (s.reset[1]&12) || (s.reset[2]&12) ||
+    /* OPPO tfa98xx_ext_reset: reset-polarity=0 pulses LOW then HIGH.
+     * MT6661-3 GPIO10/11 must be digital SW outputs, deasserted HIGH
+     * with physical DI HIGH. The captured output-low pinctrl is asserted
+     * reset, not PA readiness; this probe never deasserts it itself. */
+    if((s.reset[0]&12)!=12 || (s.reset[1]&12)!=12 || (s.reset[2]&12)!=12 ||
        (s.reset[3]&63) || (s.reset[4]&12)!=12 || (s.reset[5]&12)!=12)return EBUSY;
     /* Only the LEFT supply is described by DT. Require stable explicit SW
      * 1.8V/on/non-LP/no-HW votes; keep full DA byte as evidence, not a guessed
