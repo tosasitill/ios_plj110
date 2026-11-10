@@ -89,10 +89,13 @@ static int pos_topology(uintptr_t dt,unsigned rf)
   * and 2/7 for WT_SLP/AFE. Address tuples never grant ownership. */
  const uint32_t tuple[][3]={{0,0x40000000,0x480},{4,0x40011000,0x138},
      {9,0x4004b000,0x414},{11,0x40050000,0x2000},
-     {2,0x40003000,0x204},{7,0x40041000,0x128}};
+     {2,0x40003000,0x204},{7,0x40041000,0x128},
+     {1,0x40001000,0x658},{3,0x4000e000,0x124},
+     {5,0x40012000,0xbc},{10,0x4004d000,0x41c},
+     {12,0x40060000,0xbf8},{16,0x1c011000,0x918}};
  if(!enabled(dt,"/soc/consys@40000000")||
     !fdt_property(dt,"/soc/consys@40000000","reg",&r,&n)||n!=17*16)return 0;
- for(unsigned i=0;i<(rf ? 6u : 4u);i++) {
+ for(unsigned i=0;i<(rf==2 ? 12u : rf ? 6u : 4u);i++) {
   const uint8_t *p=r+tuple[i][0]*16;
   if(be(p)||be(p+4)!=tuple[i][1]||be(p+8)||be(p+12)!=tuple[i][2])return 0;
  }
@@ -150,6 +153,7 @@ static int qualify(uintptr_t dt,struct x9_gps_handoff *h)
  if(power_topology(dt))h->flags|=X9_GPS_POWER_LAYOUT_VERIFIED;
  if(pos_topology(dt,0))h->flags|=X9_GPS_POS_LAYOUT_VERIFIED;
  if(pos_topology(dt,1))h->flags|=X9_GPS_RF_LAYOUT_VERIFIED;
+ if(pos_topology(dt,2))h->flags|=X9_GPS_LP_LAYOUT_VERIFIED;
  return 1;
 }
 struct walk {uint8_t *p;size_t size,at,found;unsigned nodes,matches;};
@@ -187,5 +191,7 @@ int fdt_gps_patch_adt(uintptr_t dt,void *adt,size_t size)
   plog_str("X9 GPS FDT: D-die CFG/bus/SYSRAM tuples qualified; not SRAM/DMA ownership\n");
  if(h.flags&X9_GPS_RF_LAYOUT_VERIFIED)
   plog_str("X9 GPS FDT: WT_SLP/AFE tuples qualified; not RF/clock ownership\n");
+ if(h.flags&X9_GPS_LP_LAYOUT_VERIFIED)
+  plog_str("X9 GPS FDT: low-power/RC tuples qualified; not a TOP wake or exclusive lease\n");
  return 1;
 }

@@ -1,16 +1,27 @@
 /* Native MT6993 cold D-die phase, actual conninfra.ko 547a0 -> 55960 /
  * 55a28 / 55a6c. Not a connv2 supplier or a runtime power probe. Only a
- * version-2/3 supplier may expose the exclusive cold SRAM/DMA boundary.
+ * version-2..4 supplier may expose the exclusive cold SRAM/DMA boundary.
  * No caller/default supplier is fabricated here; v1 never enters this.
  * Do not move the 8KiB clear before acquire or after pos_finalize/HIF. */
 static int gps_pos_guard(void)
 {
- if((gps_rt.ops.version!=2 && gps_rt.ops.version!=3) || !gps_rt.ops.pos_validate ||
+ if(gps_rt.ops.version<2 || gps_rt.ops.version>4 || !gps_rt.ops.pos_validate ||
     !(gps_rt.layout.flags&X9_GPS_POS_LAYOUT_VERIFIED))return ENXIO;
  int e=gps_mcu_guard();if(e)return e;
  e=gps_rt.ops.pos_validate(gps_rt.ops.context,&gps_rt.layout,
      gps_rt.generation,gps_rt.lease);
  if(e)return e;
+ if(gps_rt.ops.version==4) {
+  /* CMDBT engine is not covered by merely holding the GPS MCU reset.
+   * Keep TOP wake and cold HW-control disabled throughout SRAM writes.
+   * Phase1 journals the one potentially accepted final HW-control write;
+   * phase2 then requires its readback for all remaining POS accesses. */
+  e=gps_mcu_raw_expect(0x400601a0,1,1);if(e)return e;
+  if(gps_rt.pos_lp_hw_phase!=1) {
+   e=gps_mcu_raw_expect(0x40001200,1,gps_rt.pos_lp_hw_phase==2 ? 1 : 0);
+   if(e)return e;
+  }
+ }
  /* Recheck the cold MCU boundary for every word, not only before clear. */
  e=gps_mcu_expect(F_reset,0);if(e)return e;
  return gps_mcu_expect(F_function,0);
@@ -70,7 +81,7 @@ static int gps_pos_d_die(void)
  * NOT an RF transaction, PLL-lock ACK, ROM qualification or GPS fix. */
 static int gps_pos_rf_guard(void)
 {
- if(gps_rt.ops.version!=3 || !gps_rt.ops.pos_afe ||
+ if((gps_rt.ops.version!=3 && gps_rt.ops.version!=4) || !gps_rt.ops.pos_afe ||
     !(gps_rt.layout.flags&X9_GPS_RF_LAYOUT_VERIFIED))return ENXIO;
  return gps_pos_guard();
 }

@@ -7,6 +7,7 @@
 #include <kern/thread.h>
 #include <kern/sched_prim.h>
 #include <mach/mach_types.h>
+#include "x9_ufs/sha256.h" /* existing linked SHA256, no duplicate crypto */
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 extern kern_return_t thread_terminate(thread_t);
 static LCK_MTX_DECLARE(gps_runtime_lock, &gps_group);
@@ -14,6 +15,9 @@ _Static_assert(__builtin_offsetof(struct x9_gps_connv2_ops,pos_clock_schematic)=
     "connv2 version-1 descriptor prefix");
 _Static_assert(__builtin_offsetof(struct x9_gps_connv2_ops,pos_afe)==88,
     "connv2 version-2 descriptor prefix");
+_Static_assert(__builtin_offsetof(struct x9_gps_connv2_ops,pos_radio)==96,
+    "connv2 version-3 descriptor prefix");
+_Static_assert(sizeof(struct x9_gps_connv2_ops)==120,"connv2 version-4 descriptor");
 _Static_assert(sizeof(struct x9_gps_handoff)==X9_GPS_HANDOFF_BYTES,
     "GPS LK handoff remains 64B");
 struct gps_mcu_field { uint32_t physical, mask, shift; };
@@ -99,12 +103,15 @@ struct gps_mcu_bank { uint32_t physical; volatile uint32_t *p; };
 static const uint32_t gps_mcu_bases[]={0x40000000,0x40001000,0x40011000,
     0x40060000,0x40068000,0x40c00000,0x40c12000,0x40c16000,0x40c21000};
 enum { GPS_MCU_BANK_COUNT=sizeof(gps_mcu_bases)/sizeof(gps_mcu_bases[0]) };
-/* Mapped only for a topology-qualified version-2/3 cold POS supplier. */
+/* Mapped only for a topology-qualified version-2..4 cold POS supplier. */
 static const uint32_t gps_pos_bases[]={0x4004b000,0x40050000,0x40051000};
 enum { GPS_POS_BANK_COUNT=sizeof(gps_pos_bases)/sizeof(gps_pos_bases[0]) };
 /* WT_SLP and AFE are NEVER mapped for the old v1/v2 suppliers. */
 static const uint32_t gps_rf_bases[]={0x40003000,0x40041000};
 enum { GPS_RF_BANK_COUNT=sizeof(gps_rf_bases)/sizeof(gps_rf_bases[0]) };
+/* Only v4 maps these; the RC bank is read-only in the native POS path. */
+static const uint32_t gps_lp_bases[]={0x4000e000,0x40012000,0x4004d000,0x1c011000};
+enum { GPS_LP_BANK_COUNT=sizeof(gps_lp_bases)/sizeof(gps_lp_bases[0]) };
 #define GPS_MCU_MT6993_VERSION 0x02050800u
 struct gps_runtime_packet { uint64_t time; unsigned length; uint8_t bytes[4096]; };
 static struct {
@@ -113,6 +120,7 @@ static struct {
  struct gps_mcu_bank banks[GPS_MCU_BANK_COUNT];
  struct gps_mcu_bank pos_banks[GPS_POS_BANK_COUNT];
  struct gps_mcu_bank rf_banks[GPS_RF_BANK_COUNT];
+ struct gps_mcu_bank lp_banks[GPS_LP_BANK_COUNT];
  struct x9_gps_hif hif; /* ~70KiB, never on a kernel/QRTR stack */
  volatile uint8_t *ap, *mcu, *ccif;
  uint64_t generation, lease;
@@ -120,6 +128,9 @@ static struct {
  unsigned pos_started, pos_complete;
  unsigned pos_d_die_complete, pos_spi_started, pos_spi_complete;
  unsigned pos_afe_started, pos_afe_complete, pos_pll_started, pos_pll_complete;
+ unsigned pos_radio_started, pos_radio_complete, pos_lp_started, pos_lp_complete;
+ unsigned pos_rc_valid, pos_rc_mode, pos_cmdbt_valid, pos_lp_hw_phase;
+ uint8_t cmdbt[4096]; /* immutable registered snapshot, never on stack */
  thread_t worker;
  unsigned in_callback, out_head[2], out_count[2];
  struct gps_runtime_packet outbox[2][2];
@@ -158,11 +169,16 @@ static volatile uint32_t *gps_mcu_pointer(uint32_t physical)
      physical-gps_rt.pos_banks[i].physical<0x1000 && !(physical&3))
    return gps_rt.pos_banks[i].p ?
        gps_rt.pos_banks[i].p+(physical-gps_rt.pos_banks[i].physical)/4 : NULL;
- if(gps_rt.ops.version==3)for(unsigned i=0;i<GPS_RF_BANK_COUNT;i++)
+ if(gps_rt.ops.version>=3)for(unsigned i=0;i<GPS_RF_BANK_COUNT;i++)
   if(physical>=gps_rt.rf_banks[i].physical &&
      physical-gps_rt.rf_banks[i].physical<0x1000 && !(physical&3))
    return gps_rt.rf_banks[i].p ?
        gps_rt.rf_banks[i].p+(physical-gps_rt.rf_banks[i].physical)/4 : NULL;
+ if(gps_rt.ops.version==4)for(unsigned i=0;i<GPS_LP_BANK_COUNT;i++)
+  if(physical>=gps_rt.lp_banks[i].physical &&
+     physical-gps_rt.lp_banks[i].physical<0x1000 && !(physical&3))
+   return gps_rt.lp_banks[i].p ?
+       gps_rt.lp_banks[i].p+(physical-gps_rt.lp_banks[i].physical)/4 : NULL;
  return NULL;
 }
 static int gps_mcu_read(uint32_t physical, uint32_t *out)
@@ -225,13 +241,22 @@ static int gps_mcu_map(void)
    if(!gps_rt.pos_banks[i].p)return ENOMEM;
   }
  }
- if(gps_rt.ops.version==3) {
+ if(gps_rt.ops.version>=3) {
   if(!(gps_rt.layout.flags&X9_GPS_RF_LAYOUT_VERIFIED))return ENXIO;
   for(unsigned i=0;i<GPS_RF_BANK_COUNT;i++) {
    e=gps_mcu_guard();if(e)return e;
    gps_rt.rf_banks[i].physical=gps_rf_bases[i];
    gps_rt.rf_banks[i].p=(volatile uint32_t *)ml_io_map(gps_rf_bases[i],0x1000);
    if(!gps_rt.rf_banks[i].p)return ENOMEM;
+  }
+ }
+ if(gps_rt.ops.version==4) {
+  if(!(gps_rt.layout.flags&X9_GPS_LP_LAYOUT_VERIFIED))return ENXIO;
+  for(unsigned i=0;i<GPS_LP_BANK_COUNT;i++) {
+   e=gps_mcu_guard();if(e)return e;
+   gps_rt.lp_banks[i].physical=gps_lp_bases[i];
+   gps_rt.lp_banks[i].p=(volatile uint32_t *)ml_io_map(gps_lp_bases[i],0x1000);
+   if(!gps_rt.lp_banks[i].p)return ENOMEM;
   }
  }
  /* Device attributes throughout; no cached aliases of shared HIF RAM.
@@ -246,6 +271,7 @@ static int gps_mcu_map(void)
 }
 #define MCU_TRY(call) do { int e_=(call); if(e_)return e_; } while(0)
 #include "x9_gps_pos.inc"
+#include "x9_gps_low_power.inc"
 static int gps_mcu_wake(void)
 {
  MCU_TRY(gps_mcu_set(F_wake,1));
@@ -432,7 +458,7 @@ static int gps_runtime_bringup(void)
  if(gps_rt.ops.version>=2) {
   gps_runtime_stage(X9_GPS_PHYSICAL_D_DIE,0);
   MCU_TRY(gps_pos_d_die());
-  if(gps_rt.ops.version==3) {
+  if(gps_rt.ops.version>=3) {
    gps_runtime_stage(X9_GPS_PHYSICAL_POS_SPI,0);
    MCU_TRY(gps_pos_spi());
    gps_runtime_stage(X9_GPS_PHYSICAL_POS_AFE,0);
@@ -440,10 +466,17 @@ static int gps_runtime_bringup(void)
    gps_runtime_stage(X9_GPS_PHYSICAL_POS_PLL,0);
    MCU_TRY(gps_pos_pll());
   }
+  if(gps_rt.ops.version==4) {
+   gps_runtime_stage(X9_GPS_PHYSICAL_POS_RADIO,0);
+   MCU_TRY(gps_pos_radio());
+   gps_runtime_stage(X9_GPS_PHYSICAL_POS_LOW_POWER,0);
+   MCU_TRY(gps_pos_low_power());
+  }
   gps_runtime_stage(X9_GPS_PHYSICAL_POS_FINALIZE,0);
   MCU_TRY(gps_rt.ops.pos_finalize(gps_rt.ops.context,&gps_rt.layout,
       gps_rt.generation,gps_rt.lease));
   MCU_TRY(gps_pos_guard());
+  if(gps_rt.ops.version==4)MCU_TRY(gps_pos_lp_guard());
   MCU_TRY(gps_mcu_expect(F_reset,0));MCU_TRY(gps_mcu_expect(F_function,0));
   gps_rt.pos_complete=1;
  }
@@ -507,26 +540,40 @@ static void gps_runtime_start(void)
 }
 int x9_gps_register_connv2(const struct x9_gps_connv2_ops *ops)
 {
- if (!ops || ops->version<1 || ops->version>3 || !ops->acquire || !ops->validate ||
+ if (!ops || ops->version<1 || ops->version>4 || !ops->acquire || !ops->validate ||
      !ops->provision || !ops->control || !ops->mnl || !ops->other_ccif) return EINVAL;
  if(ops->version>=2) {
   if(ops->pos_clock_schematic>3 || !ops->pos_validate || !ops->pos_finalize)return EINVAL;
   struct x9_gps_handoff layout;int e=x9_gps_copy_handoff(&layout);if(e)return e;
   unsigned flags=X9_GPS_POWER_LAYOUT_VERIFIED|X9_GPS_POS_LAYOUT_VERIFIED;
-  if(ops->version==3) {
+  if(ops->version>=3) {
    if(!ops->pos_afe)return EINVAL;
    flags|=X9_GPS_RF_LAYOUT_VERIFIED;
+  }
+  if(ops->version==4) {
+   if(!ops->pos_radio || !ops->pos_cmdbt || ops->pos_cmdbt_bytes!=4096)return EINVAL;
+   flags|=X9_GPS_LP_LAYOUT_VERIFIED;
   }
   if((layout.flags&flags)!=flags)return ENXIO;
  }
  lck_mtx_lock(&gps_runtime_lock);
  int e=gps_rt.provider.version ? EBUSY : 0;
+ if(!e && ops->version==4) {
+  /* Snapshot under the registration lock, BEFORE arming the worker.
+   * Caller bytes are never read from the physical MMIO loop. */
+  memcpy(gps_rt.cmdbt,ops->pos_cmdbt,sizeof(gps_rt.cmdbt));
+  e=gps_pos_cmdbt_identity();
+  if(!e)gps_rt.pos_cmdbt_valid=1;
+ }
  if (!e) {
-  /* Read ONLY the declared descriptor prefix: v1=64B, v2=88B, v3=96B. */
-  size_t n=ops->version==3 ? sizeof(*ops) : ops->version==2 ?
+  /* Read ONLY declared prefixes: v1=64B, v2=88B, v3=96B, v4=120B. */
+  size_t n=ops->version==4 ? sizeof(*ops) : ops->version==3 ?
+      __builtin_offsetof(struct x9_gps_connv2_ops,pos_radio) : ops->version==2 ?
       __builtin_offsetof(struct x9_gps_connv2_ops,pos_afe) :
       __builtin_offsetof(struct x9_gps_connv2_ops,pos_clock_schematic);
-  memcpy(&gps_rt.provider,ops,n);wakeup((event_t)&gps_rt.provider.version);
+  memcpy(&gps_rt.provider,ops,n);
+  if(ops->version==4)gps_rt.provider.pos_cmdbt=gps_rt.cmdbt;
+  wakeup((event_t)&gps_rt.provider.version);
  }
  lck_mtx_unlock(&gps_runtime_lock); return e;
 }
