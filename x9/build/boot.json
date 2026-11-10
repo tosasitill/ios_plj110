@@ -28,5 +28,5 @@
   "launchdsuffix=release",
   "-nobsdmgroot"
  ],
- "_comment_defaults": "X9 kernel feature switches proven on the device are default-on in the kernel (sweet_x9_arg, osfmk/arm64/sweet_early.c; LK banner blank in pe_serial.c); pass name=0 to turn one off. x9_metal_render=1 stays because the X9GeneralMetal plugin reads it from kern.bootargs."
+ "_comment_defaults": "X9 kernel feature switches proven on the device are default-on in the kernel (sweet_x9_arg in pe_serial.c); pass name=0 to turn one off. UFS defaults to the device-qualified G5 ceiling (ug=5), with DVFSRC INIT-only by default while ug=4/5 is enabled; ug=0 disables late scaling, and explicit x9_dvfsrc/dv settings override the dependency default. No ug/dv tokens are needed here. x9_metal_render=1 stays because the X9GeneralMetal plugin reads it from kern.bootargs."
 }

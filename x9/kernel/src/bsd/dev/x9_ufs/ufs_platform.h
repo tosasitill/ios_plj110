@@ -1,5 +1,8 @@
 #pragma once
 #include <stdint.h>
+/* Log180 qualified G5/FAST/RateB/2 lanes. X9 defaults to that ceiling;
+ * sweet_x9_arg still honors ug=0 (off), ug=4 and ug=5 explicitly. */
+#define X9U_DEFAULT_HIGH_GEAR 5
 /* Lock order: native UFS mutex -> DVFSRC mutex. Setup releases the DVFSRC
  * mutex before entering UFS. The UFS vote is monotonic for the whole boot;
  * no release/downscale API while the link could still run at G4/G5. */

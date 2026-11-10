@@ -163,7 +163,7 @@ static int high_sample(uint8_t digest[32])
 }
 void sweet_x9_ufs_late_high(void)
 {
- int requested=sweet_x9_arg("ug",0);
+ int requested=sweet_x9_arg("ug",X9U_DEFAULT_HIGH_GEAR);
  if(requested!=4&&requested!=5)return;
  struct x9u_hs_state hs={0};uint32_t qualified[2][6]={{0}};
  unsigned checked=0;int e=X9U_NOT_READY;uint8_t before[32],after[32];

@@ -1,6 +1,6 @@
 /* X9 native extent-backed UFS root. Media-read-only first implementation.
  * Direct-LK shim initializes MT6993; kernel only attaches to a ready, idle,
- * coherent host with existing SMMU bypass. Optional late scaling never resets
+ * coherent host with existing SMMU bypass. Default-on late scaling never resets
  * the controller/PHY and retains its shared VCORE/high-clock prerequisites.
  * Source transport is shared with tested X9 shim, isolated from sweet_ufs.c.
  */
@@ -437,7 +437,7 @@ static int initialize(void)
  devfs_make_node(xu.device,DEVFS_BLOCK,UID_ROOT,GID_OPERATOR,xu.writable?0640:0440,"ufsroot0");
  devfs_make_node(makedev(xu.cmajor,0),DEVFS_CHAR,UID_ROOT,GID_OPERATOR,xu.writable?0640:0440,"rufsroot0");
  printf("X9 UFS NATIVE ROOT: LUN2, %llu MiB, %u extents, 512-byte sectors, %s; DMA=0x%llx\n",xu.bytes>>20,xu.extent_count,xu.writable?"read-write (dedicated extent copy)":"read-only",xu.dma_pa);
- int high=sweet_x9_arg("ug",0);
+ int high=sweet_x9_arg("ug",X9U_DEFAULT_HIGH_GEAR);
  if(high==4||high==5)printf("X9 UFS HIGH: requested G%d, pending late DVFSRC setup (shim remains G3)\n",high);
  else if(high)printf("X9 UFS HIGH: invalid ug=%d; high scaling disabled\n",high);
  /* The legacy sweet_ufs_init path exits early on X9. Start input here,

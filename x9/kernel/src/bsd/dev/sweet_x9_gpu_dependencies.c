@@ -265,7 +265,9 @@ done:
  * mtk-dvfsrc-start.c the INIT stage "locks high opp" until late-init sends
  * MTK_SIP_DVFSRC_START=1, after which DVFSRC free-runs on the votes.
  * x9_dvfsrc=1: INIT only (DRAM held at the high OPP). x9_dvfsrc=2: INIT +
- * START (then x9_ddr_level/x9_emi_level votes apply). */
+ * START (then x9_ddr_level/x9_emi_level votes apply). With no explicit
+ * x9_dvfsrc/dv argument, ug=4/5 defaults to INIT-only as qualified in log180;
+ * ug=0 keeps the previous no-INIT default. Explicit DVFSRC settings win. */
 static uint64_t dvfsrc_smc(uint64_t cmd,uint64_t a2,uint64_t a3,uint64_t *a1_out) {
  register uint64_t x0 __asm__("x0")=0xc2000506;
  register uint64_t x1 __asm__("x1")=cmd;
@@ -289,8 +291,9 @@ static void dvfsrc_setup(void) {
  dvfsrc=ml_io_map(0x1c100000,0x1000);
  if(!dvfsrc){lck_mtx_unlock(&x9_dvfsrc_lock);printf("X9 DDR: DVFSRC map failed\n");return;}
  dvfsrc_dump("boot");
- uint32_t mode=0;
- /* Short alias frees boot-payload space for ug=5; legacy name takes priority. */
+ int high=sweet_x9_arg("ug",X9U_DEFAULT_HIGH_GEAR);
+ uint32_t mode=(high==4||high==5)?1:0;
+ /* Legacy name takes priority over the alias, including an explicit zero. */
  if(!PE_parse_boot_argn("x9_dvfsrc",&mode,sizeof(mode)))PE_parse_boot_argn("dv",&mode,sizeof(mode));
  if(mode==1||mode==2) {
   uint64_t a1=0,r=dvfsrc_smc(0,0,0,&a1);
