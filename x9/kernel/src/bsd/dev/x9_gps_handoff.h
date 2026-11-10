@@ -14,6 +14,8 @@
 #define X9_GPS_RF_LAYOUT_VERIFIED 8u
 /* Optional native low-power/RC bank topology, never a live power lease. */
 #define X9_GPS_LP_LAYOUT_VERIFIED 16u
+/* Optional CKSYS_TOP selector/HWV topology; not PLL or clock ownership. */
+#define X9_GPS_CLOCK_LAYOUT_VERIFIED 32u
 struct x9_gps_handoff {
  uint32_t version, flags, reserve_base, reserve_size;
  uint32_t layout_size, legacy_offset, legacy_size, ap2mcu_offset;

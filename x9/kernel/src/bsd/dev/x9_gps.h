@@ -34,6 +34,12 @@ struct x9_gps_status {
  uint64_t pvt_received, pvt_no_fix, pvt_rejected, pvt_delivered;
  uint32_t pvt_valid_mask;
  int32_t pvt_errno;
+ /* Native clock transaction under a supplier lease, not a GPS FIX.
+  * set_started remains latched even if confirmation fails. No auto-unvote. */
+ uint32_t clock_started, clock_set_started, clock_complete, clock_borrowed;
+ uint32_t clock_prior, clock_selector, clock_ap, clock_global;
+ uint32_t clock_busy, clock_done, clock_ack;
+ int32_t clock_errno;
 };
 struct x9_gps_nmea {
  uint64_t sequence, generation, host_time;

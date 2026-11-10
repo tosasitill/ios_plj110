@@ -133,6 +133,11 @@ static struct {
  unsigned pos_radio_started, pos_radio_complete, pos_lp_started, pos_lp_complete;
  unsigned pos_rc_valid, pos_rc_mode, pos_cmdbt_valid, pos_lp_hw_phase;
  struct x9_gps_afe_smc_result afe_result; /* raw returns, NOT qualification */
+ struct {
+  volatile uint32_t *top, *hwv;
+  unsigned started, set_started, complete, borrowed;
+  uint32_t prior, selector, ap, global, busy, done, ack;
+ } clock;
  uint8_t cmdbt[4096]; /* immutable registered snapshot, never on stack */
  thread_t worker;
  unsigned in_callback, out_head[2], out_count[2];
@@ -152,13 +157,21 @@ static void gps_runtime_stage(unsigned stage, int error)
  lck_mtx_unlock(&gps_lock);
  printf("X9 GPS physical: stage=%u errno=%d\n",stage,error);
 }
-static int gps_mcu_guard(void)
+static int gps_mcu_supplier_guard(void)
 {
  struct x9_gps_status status; x9_gps_copy_status(&status);
  if (!gps_rt.lease || !gps_rt.ops.validate) return ENXIO;
  if (status.generation!=gps_rt.generation || status.fault) return ESTALE;
  return gps_rt.ops.validate(gps_rt.ops.context,&gps_rt.layout,
      gps_rt.generation,gps_rt.lease);
+}
+#include "x9_gps_clock.inc"
+static int gps_mcu_guard(void)
+{
+ int e=gps_mcu_supplier_guard();if(e)return e;
+ /* After the native selector transaction, every MCU/POS/HIF access also
+  * needs its live clock effect. Never repair a lost vote or selector. */
+ return gps_rt.clock.complete ? gps_clock_check() : 0;
 }
 static volatile uint32_t *gps_mcu_pointer(uint32_t physical)
 {
@@ -493,6 +506,11 @@ static int gps_runtime_bringup(void)
      gps_rt.generation,&gps_rt.lease));
  MCU_TRY(gps_mcu_map());
  if(gps_rt.ops.version>=2) {
+  if(gps_rt.layout.flags&X9_GPS_CLOCK_LAYOUT_VERIFIED) {
+   gps_runtime_stage(X9_GPS_PHYSICAL_POS_CLOCK,0);
+   MCU_TRY(gps_mcu_expect(F_reset,0));MCU_TRY(gps_mcu_expect(F_function,0));
+   MCU_TRY(gps_clock_take());
+  }
   gps_runtime_stage(X9_GPS_PHYSICAL_D_DIE,0);
   MCU_TRY(gps_pos_d_die());
   if(gps_rt.ops.version>=3) {

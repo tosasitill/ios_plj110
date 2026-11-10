@@ -124,6 +124,11 @@ static bool x9g_send(uint32_t local, uint32_t port, const uint8_t *req, unsigned
     printf("X9 GPS PDS: native PVT reports %llu no-fix %llu rejected %llu delivered %llu mask %x errno %d (not a readiness lease)\n",
         s.pvt_received,s.pvt_no_fix,s.pvt_rejected,s.pvt_delivered,
         s.pvt_valid_mask,s.pvt_errno);
+   if(s.clock_started)
+    printf("X9 GPS PDS: clock started %u set %u complete %u borrowed %u selector %x ap %x global %x busy %x done %x ack %x errno %d (not receiver readiness)\n",
+        s.clock_started,s.clock_set_started,s.clock_complete,s.clock_borrowed,
+        s.clock_selector,s.clock_ap,s.clock_global,s.clock_busy,s.clock_done,
+        s.clock_ack,s.clock_errno);
    /* A supply readback is a timestamped observation, not permission to
     * activate receiver services or infer availability from Android. */
    if(s.afe_smc_started)

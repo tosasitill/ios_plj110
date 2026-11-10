@@ -12,7 +12,7 @@ enum x9_gps_physical_stage {
  X9_GPS_PHYSICAL_D_DIE, X9_GPS_PHYSICAL_POS_FINALIZE,
  X9_GPS_PHYSICAL_POS_SPI, X9_GPS_PHYSICAL_POS_AFE,
  X9_GPS_PHYSICAL_POS_PLL, X9_GPS_PHYSICAL_POS_RADIO,
- X9_GPS_PHYSICAL_POS_LOW_POWER
+ X9_GPS_PHYSICAL_POS_LOW_POWER, X9_GPS_PHYSICAL_POS_CLOCK
 };
 struct x9_gps_afe_smc_result { uint64_t a[4]; };
 struct x9_gps_connv2_ops {
@@ -56,6 +56,11 @@ struct x9_gps_connv2_ops {
   * function disabled. No D-die/SPI/AFE/ADie/radio initialization yet.
   * The worker then executes native D-die before pos_finalize. Never
   * register v2..5 merely because a register snapshot or SMC returned zero. */
+ /* With CLOCK_LAYOUT_VERIFIED the worker additionally takes/retains the
+  * measured CKSYS_TOP mainPLL selector before D-die. The supplier must
+  * hold its real upstream PLL and exclusive selector ownership throughout;
+  * the selector bit alone is not a running-PLL or a CONN power lease.
+  * Old handoffs without this optional topology keep supplier-only clocks. */
  uint32_t pos_clock_schematic; /* measured vendor enum 0..3, not Hz/guess */
  /* Every native POS read/write revalidates exclusive SRAM/DMA ownership
   * in addition to validate's power/bus lease. Must be bounded, live and

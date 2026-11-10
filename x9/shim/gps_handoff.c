@@ -101,6 +101,18 @@ static int pos_topology(uintptr_t dt,unsigned rf)
  }
  return 1;
 }
+static int clock_topology(uintptr_t dt)
+{
+ const char *top="/clock-controller@1c210000",*hwv="/syscon@1c040000";
+ uint32_t base,size,hp;
+ /* Native KO 60490 maps this exact bank. Resolve the served provider
+  * edge; a CKSYS name on a different bank is not permission to map it. */
+ return power_topology(dt)&&enabled(dt,top)&&
+     str(dt,top,"compatible","mediatek,mt6993-cksys_top")&&
+     range(dt,top,&base,&size)&&base==0x1c210000&&size==0x1000&&
+     value(dt,top,"#clock-cells",1)&&word(dt,hwv,"phandle",&hp)&&hp&&
+     value(dt,top,"hw-voter-regmap",hp);
+}
 static int qualify(uintptr_t dt,struct x9_gps_handoff *h)
 {
  const char *cfg="/connsys-emi-config",*consys="/soc/consys@40000000";
@@ -154,6 +166,7 @@ static int qualify(uintptr_t dt,struct x9_gps_handoff *h)
  if(pos_topology(dt,0))h->flags|=X9_GPS_POS_LAYOUT_VERIFIED;
  if(pos_topology(dt,1))h->flags|=X9_GPS_RF_LAYOUT_VERIFIED;
  if(pos_topology(dt,2))h->flags|=X9_GPS_LP_LAYOUT_VERIFIED;
+ if(clock_topology(dt))h->flags|=X9_GPS_CLOCK_LAYOUT_VERIFIED;
  return 1;
 }
 struct walk {uint8_t *p;size_t size,at,found;unsigned nodes,matches;};
@@ -193,5 +206,7 @@ int fdt_gps_patch_adt(uintptr_t dt,void *adt,size_t size)
   plog_str("X9 GPS FDT: WT_SLP/AFE tuples qualified; not RF/clock ownership\n");
  if(h.flags&X9_GPS_LP_LAYOUT_VERIFIED)
   plog_str("X9 GPS FDT: low-power/RC tuples qualified; not a TOP wake or exclusive lease\n");
+ if(h.flags&X9_GPS_CLOCK_LAYOUT_VERIFIED)
+  plog_str("X9 GPS FDT: CKSYS_TOP/HWV clock topology qualified; not a PLL or clock lease\n");
  return 1;
 }
