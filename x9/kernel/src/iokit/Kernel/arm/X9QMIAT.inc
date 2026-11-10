@@ -285,13 +285,18 @@ static bool x9q_int(const char *&p,int &v){
  * 0x7fff = invalid. LTE TLV 0x14 (libqmi): rssi i8 dBm, rsrq i8 dB, rsrp i16
  * dBm, snr i16 0.1 dB. Anything not LTE or not measured stays NOT_READY. */
 static void x9q_siginfo(x9q_job &j,const char *r){
- char line[160];int v[13];unsigned n=0;
+ /* 170.txt: "fields 0" for every reply (AT OK) - no single parseable +ECSQ
+  * line. Parse the first 24 numeric fields, ignore anything after them, and
+  * log the raw reply (numbers/commas only; no identities in +ECSQ). */
+ char line[256];int v[24];unsigned n=0;
  if(x9q_line(r,"+ECSQ:",line,sizeof(line))){const char *p=line;
-  while(n<13&&x9q_int(p,v[n])){n++;if(*p!=',')break;p++;}
-  if(*p)n=0;}
+  while(n<24&&x9q_int(p,v[n])){n++;while(*p==' ')p++;if(*p!=',')break;p++;}}
  static unsigned logged;
- if(logged<6){logged++;printf("X9 QMI AT: ECSQ fields %u act 0x%x sig1 %d sig2 %d rssi_q %d rsrq_q %d rsrp_q %d sig3 %d\n",
-   n,n>7?v[7]:-1,n?v[0]:-1,n>1?v[1]:-1,n>2?v[2]:-1,n>5?v[5]:-1,n>6?v[6]:-1,n>8?v[8]:-1);}
+ if(logged<6){logged++;char raw[200];unsigned w=0;
+  for(const char *q=r;*q&&w+2<sizeof(raw);q++)raw[w++]=*q=='\r'?'|':*q=='\n'?'/':((unsigned char)*q<32||(unsigned char)*q>126)?'?':*q;
+  raw[w]=0;
+  printf("X9 QMI AT: ECSQ fields %u act 0x%x sig1 %d sig2 %d rssi_q %d rsrq_q %d rsrp_q %d sig3 %d raw \"%s\"\n",
+   n,n>7?v[7]:-1,n?v[0]:-1,n>1?v[1]:-1,n>2?v[2]:-1,n>5?v[5]:-1,n>6?v[6]:-1,n>8?v[8]:-1,raw);}
  if(n<10||(v[7]!=0x1000&&v[7]!=0x2000)||v[0]<0||v[0]>34||v[1]<0||v[1]>=98||
     v[6]<-140*4||v[6]>-44*4||v[5]<-34*4||v[5]>3*4||v[2]<-128*4||v[2]>0||v[8]==0x7fff){
   x9q_error(j,X9Q_NOT_READY);return;}

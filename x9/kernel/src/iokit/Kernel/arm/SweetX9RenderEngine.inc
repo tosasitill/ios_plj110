@@ -494,7 +494,8 @@ static void render_group_free(RenderKernelContext *p,RenderKernelGroup *g) {
  IOFree(g,sizeof(*g));
 }
 static IOReturn render_destroy_locked(X9RenderContext *c,RenderKernelGroup *g) {
- if(!render_ready()||c->exposed)return kIOReturnNotReady;
+ if(!render_ready()||c->exposed) {
+  IOLog("X9 RENDER CLOSE: group=%u refused ready=%u exposed=%u\n",g->request.handle,render_ready(),c->exposed);return kIOReturnNotReady;}
  if(!g->bound&&render_steal_enabled()) {
   /* Stolen earlier: no slot, no firmware state; only the private storage. */
   if(!render_drop_storage(c,g)){c->disabled=true;return kIOReturnIOError;}
@@ -507,13 +508,26 @@ static IOReturn render_destroy_locked(X9RenderContext *c,RenderKernelGroup *g) {
   * already-drained context before composing the existing RESUME and
   * CS STOP -> CSG TERMINATE handshakes. Never resume a faulted or partially executed job. */
  const bool resume_empty=g->control.suspended;
- if(g->control.uncertain||g->control.running)return kIOReturnNotReady;
+ if(g->control.uncertain||g->control.running) {
+  IOLog("X9 RENDER CLOSE: group=%u slot=%u uncertain=%u running=%u;retain\n",g->request.handle,g->slot,g->control.uncertain,g->control.running);
+  return kIOReturnNotReady;}
  if(resume_empty) {
   vm_offset_t gpu=resident->gpu;
-  if(!no_faults(gpu)||gr64(gpu,0x2440))return kIOReturnNotReady;
+  /* 170.txt: with x9_gpu_park another context's group (backboardd) is almost
+   * always parked RUNNING on its slot, so this check refused the close of every
+   * crashed client whose group was suspended ("unresolved client teardown" x6);
+   * its CSG slot was never released, and once all 8 leaked, a restarted
+   * SpringBoard got no slot (VK -3) and crash-looped. Retire the other parked
+   * group first, as render_submit does for "other context" (owner lock held). */
+  if(render_parked.g&&render_parked.g!=g&&!render_retire_parked("close of another context")) {
+   IOLog("X9 RENDER CLOSE: group=%u slot=%u parked group retire failed;retain\n",g->request.handle,g->slot);return kIOReturnIOError;}
+  if(!no_faults(gpu)||gr64(gpu,0x2440)) {
+   IOLog("X9 RENDER CLOSE: group=%u slot=%u faults or AS1 busy (%llx);retain\n",g->request.handle,g->slot,gr64(gpu,0x2440));return kIOReturnNotReady;}
   for(unsigned i=0;i<resident->slot_count;i++) {
    unsigned state=output_word(resident->image,resident->slots[i].access.interface.group_output)&7;
-   if(state==1||state==3)return kIOReturnBusy;
+   if(state==1||state==3) {
+    IOLog("X9 RENDER CLOSE: group=%u slot=%u CSG slot %u state %u still active;retain\n",g->request.handle,g->slot,i,state);
+    return kIOReturnBusy;}
   }
   for(unsigned i=0;i<3;i++) {
    uint32_t user=slot.user_io+i*host_page;
@@ -1297,8 +1311,8 @@ static IOReturn render_wait(X9RenderContext *c,const X9RenderWaitRequest *reques
 static bool render_close(X9RenderContext *c) {
  if(c)render_async_drain_unlocked((RenderKernelContext *)c->engine_private);   /* before the owner lock */
  RenderOwner owner;if(!owner.locked||!c||!render_ready())return false;
- if(!render_park_release_for(c,"close"))return false;
- if(c->exposed)return false;
+ if(!render_park_release_for(c,"close")){IOLog("X9 RENDER CLOSE: own parked group retire failed\n");return false;}
+ if(c->exposed){IOLog("X9 RENDER CLOSE: context still exposed;retain\n");return false;}
  auto *p=(RenderKernelContext *)c->engine_private;if(!p)return x9_render_memory_close(c);
  for(auto *g:p->groups)if(g&&render_destroy_locked(c,g)!=kIOReturnSuccess)return false;
  if(!x9_render_memory_close(c))return false;

@@ -74,7 +74,7 @@ X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>      # 之后再�
 ## 3. 当前基线镜像与参数
 
 最新实测:**x9-rev252ic-md**(168,见HANDOFF102;LTE-only注册稳定,仍不拨号);再前 **x9-rev252ib-md**(167,见HANDOFF101);再前 **x9-rev252ia-md**(166,见HANDOFF100);再前 **x9-rev252hz-md**(165,见HANDOFF99);再前 **x9-rev252hy-md**(164,见HANDOFF98);再前 **x9-rev252hx-md**(163,见HANDOFF96);再前 **x9-rev252hw-md**(162,见HANDOFF95);再前 **x9-rev252hv-md**(161,见HANDOFF94;MIPC就绪、UIM读通);再前 **x9-rev252hu-md**(160,见HANDOFF93;RAM 10.0GiB生效);再前 **x9-rev252ht-md**(159,见HANDOFF92);再前 **x9-rev252hs-md**(158,见HANDOFF91;MIPC/DPMAIF在prepare/OPEN即隔离,UIM卡状态被拒);前一实测 **x9-rev252hl-md**(代码提交 **`20c64f2`**,构建交接 `0f9d983`),boot.img **12877824 B=12.28125MiB**,路径 `x9/out/x9-rev252hl-md/boot.img`。**157确认完整11文件安装成功、qdsp可读、Sahara finished并进入QMUX/QMI,握手摘要reset=0;真实iOS蜂窝尚未打通**,见HANDOFF87。独立34MiB固件与插件275不需再stage。
-最新实测:**x9-rev252ic-mg**(169,见HANDOFF103;单卡信号出现,信号条空)。当前未上机候选:**x9-rev252id-md**(NAS 0x4f/0x51←AT+ECSQ,见HANDOFF103);更早候选 **x9-rev252hq-md**(代码`ccbad81`),boot.img12906496B;沿用hn AT→QMI,新增DPMAIF只读/分配探针和WDS前置状态查询,见HANDOFF89。hq默认`x9_dpmaif=1`,不初始化硬件或激活PDP;hn保留。最新实测仍hl;不要把候选当作SIM/蜂窝已验证。
+最新实测:**x9-rev252id-md**(170,见HANDOFF104;ECSQ解析为0,CSG槽泄漏导致SpringBoard循环)。当前未上机候选:**x9-rev252ie-md**(ECSQ解析修复+关闭时retire其他parked group,见HANDOFF104);更早候选 **x9-rev252hq-md**(代码`ccbad81`),boot.img12906496B;沿用hn AT→QMI,新增DPMAIF只读/分配探针和WDS前置状态查询,见HANDOFF89。hq默认`x9_dpmaif=1`,不初始化硬件或激活PDP;hn保留。最新实测仍hl;不要把候选当作SIM/蜂窝已验证。
 回退:**x9-rev252hk-md**(修复提交 `d1f8515` + 当时未提交的渲染改动,现已入库),boot.img **15278080 B**;156确认reserve生效、efs1.bin已有1MiB,当时15次reset及零传输见HANDOFF84。
 本机回退镜像:`x9/out/x9-rev252hk-md/boot.img`;hl/hk配置沿用 `.local/x9/modem/boot-rev252hi-md.json`。
 157已越过缺qdsp的前置阻塞,**当前阻塞在X9的QMI→MTK适配**:UIM/NAS/DMS/WDS/WDA/DPM请求实际到达后返回0x5e,数据端口配置失败,四个PDP接口仍blocked/tx=rx=0。Sahara是兼容桥交互,不向物理MTK下载Apple固件;PCIControl methods仍0x0,不能说PCIControl已通。以下GPU专用基线与参数为 **2026-11-08 历史记录**,不要当作hk/hl参数直接复用。
@@ -152,7 +152,17 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
 
-## 7. 当前交接(HANDOFF 103,2026-11-10): 169(ic-mg)出现单卡信号;信号条空=NAS 0x4f被拒,id用真实AT+ECSQ回答;双卡不可行
+## 7. 当前交接(HANDOFF 104,2026-11-10): 170(id)ECSQ解析为0;"注销"=GPU CSG槽泄漏后SpringBoard崩溃循环;ie修两处
+
+- **170.txt**(Mac `~/170.txt`,1840702B,末166.6s,无panic)。用户:仍无信号格,设置里**出现了蜂窝**;这几版会不定时"注销"(黑屏转圈)。
+- **ECSQ(观察)**:`AT+ECSQ`每次AT OK,但`ECSQ fields 0`,0x4f回16。id没记录原始回复,不知道是多于13个字段(旧代码遇到就清零)、URC重复行还是别的格式。**ie**:最多解析24个字段,不因尾部内容清零,前6次打印原始回复(`raw "..."`,`|`=CR,`/`=LF)。
+- **注销(观察)**:SpringBoard pid 26→344(约82–87s)→401/409/419/425/429/435(140s起每~5s一次)。140s后的每次都是`X9 RENDER SLOT: no CSG slot for a new group` → PanVK 0xe00002be → `native-metal: device refused VK -3` → SpringBoard sig 11 pc 0(拿到nil device)。8个CSG槽被占满的原因是关闭时泄漏:`X9 RENDER: unresolved client teardown`×6(mediaserverd 294/349/356/371/373和SpringBoard 344),这些进程的group从未CLOSE。mediaserverd本身每~5s崩一次(`X9 GENERAL METAL: missing class=NBFunction selector=returnType`后abort,或nil device sig 11;170里108次,169里40次,165–168约12–28次),每次新建一个group。
+- **根因(静态推断,和日志吻合)**:`render_destroy_locked`关闭已SUSPEND的group时先检查其他槽状态,有state 1/3就返回Busy且不重试;x9_gpu_park下backboardd的group几乎总是parked RUNNING,所以崩溃进程的关闭基本都失败,槽永久泄漏。成功关闭的几次(29/240/302/365/26)应是当时没有别的context parked。82s那次SpringBoard 26退出没有CRASH行,原因未查明(它的槽正常释放了)。
+- **ie修复**:关闭前若另一个context有parked group,先`render_retire_parked("close of another context")`(与render_submit处理"other context"相同,持owner lock);每个拒绝关闭的分支都加了`X9 RENDER CLOSE: ... retain`日志,下次能看到具体原因。mediaserverd的NBFunction崩溃没修(插件/Metal侧问题)。
+- **x9-rev252ie-md**:Mac构建成功,命令同ic/id(`--name x9-rev252ie-md`),boot.img 12922880B,参数与ic一致,warning 1412(未增加),插件275不变,**无需mailbox staging**。`X9 MODEM: build=rev252ie-md ...-ecsq-csgclose`。日志`.local/x9/work/pdp-activation/build-ie.stdout.log`。
+- 下一步由用户手动:`fastboot boot x9/out/x9-rev252ie-md/boot.img`,日志`~/171.txt`,**尽量采集≥3分钟**。看:`unresolved client teardown`是否消失、`X9 RENDER CLOSE`里"parked"/"retain"行、140s后SpringBoard是否还循环;`ECSQ ... raw`原始回复。
+
+### 前次交接(HANDOFF 103,2026-11-10): 169(ic-mg)出现单卡信号;信号条空=NAS 0x4f被拒,id用真实AT+ECSQ回答;双卡不可行
 
 - **169.txt**(Mac `~/169.txt`,2219165B,末150.8s,无panic)。`X9 MGWIPE: cache errno=0`(3.155s)生效。用户观察:状态栏出现**一张卡**的运营商/信号,但**信号条是空的**,也没有双卡。30.26s `CEREG 1 CGATT 1 COPS-AcT 7`。清缓存后CommCenter的请求明显变多(NAS 0x33/0x44/0x45/0x5562/0x5566/0x5567等,全94拒),仍无0xc8/WDS Start。
 - **信号条(观察+修复)**:CommCenter在30.24–30.29s发NAS 0x4f Get Sig Info ×6,全部94拒;之后只每10s发0x5556(Apple私有)。0x20 Get Signal Strength它根本没发。**id**:0x4f改为真实`AT+ECSQ`。字段布局取自反汇编libmtk-ril `getMdSignalStrengthByAT`(0x39cf90)与`updateSignalStrength`(0x39d1a0)LTE路径:sig1,sig2,rssi_qdbm,rscp,ecn0,rsrq_qdbm,rsrp_qdbm,Act,sig3,band;LTE=Act 0x1000/0x2000,有效条件sig1≤34且sig2<98;rsrp/rsrq/rssi=qdbm/4,**SNR(0.1dB)=sig3*5/2**,sig3=0x7fff无效。回LTE TLV 0x14(rssi i8,rsrq i8,rsrp i16,snr i16)。收到0x6c的client每10s另收一次0x51 Sig Info indication(同一AT来源)。非LTE或无效值仍NOT_READY,不编造。日志`X9 QMI AT: ECSQ fields ...`前6次打印原始数值。
