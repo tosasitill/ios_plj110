@@ -369,6 +369,9 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 
 - **本轮精确main整合**：固定AFE恢复源码 **a3ae083141bc756092a0ca63f1bf64964e4176fb**，五个路径按冻结base逐项确认一致才整合；四对象compile units1.exit0、iOS HAL/micctl hal1.exit0、gh固定commit exit0=[]，无CI run ID。用独立index+commit-tree+CAS更新main，保留并发working/index/NOTES。仍无full-drain supplier/native bootstrap/all/最终boot/设备录音结果。
 
+- **AFE恢复最终交接定位**：独立代码 **a3ae083141bc756092a0ca63f1bf64964e4176fb**、独立首份交接 **de26b63**；main五源码与交接精准整合 **675f2d6d2f73a723c8c7c5ae199ed71084c1468f**，合前后状态／binary与index／NOTES保存于`afe-restore/`，selected源码均等于固定source，未覆盖并发其它模块。`units1.exit0 / hal1.exit0 / ci.exit0=[]`，无CI run ID、all/boot/设备/安装/录音结果；新状态仍platform v6/native DMA v2、用户态GET_DIGITAL v1/192B，原完整605B/mode2/32GiB/276输入不变，goal active。
+- **新下一动作／SSPM定位**：`sspm_a.img`不是ARM/ELF；内部magic0x58901690的id0数据offset0x218、bytes0x38424，id1代码offset0x38654、bytes0x29f66。代码确为RV32IMC＋vendor扩展，入口vector RVA0→0x90，gp建立0x2e800；`_v1_ap_hwccf_voter_ctrl`字符串DM offset0x14cb，code0x8164/816c LUI+ADDI构造VA0x2b4cb，确立DM base0x2a000。`trace-sspm.py`保存parts／aligned asm／字符串refs；未知32bit指令必须按low2=3消耗4B，不能沿Capstone默认2B skip后错位流；Capstone RISC-V branch immediate是PC相对位移，不是绝对target。现AP HWCCF字符串xref0x816c、MM FSM xrefs0x80ac/80e0/85da/860c、PBUS xrefs0x13ee6/1414a/1414e；**尚未识别vendor扩展完整语义或AUDIO全写链保护mapping**，不可据名称返回quiesce0。下一轮从SSPM aligned code的AP voter/fsm与PBUS domain mapping继续，不重复已排除op11/MM_PROC/SPU_ISE/局部MON。原始固件未改，未执行固件／设备操作。
+
 ## 麦克风活动交接(MIC-16,2026-11-10): 数字codec逐字段恢复冲突门/未写项跳过与iOS首错位置;整包已编译,真实DMA仍缺
 
 - **隔离/源码缺口**:独立`.local/x9/worktrees/microphone-rollback16` / `work/x9-microphone-rollback16`,冻结main **5ad10df86c49c79e8a4742728f89f68eb04e12ee**,不夹带working/以后main。原`digital-l→board restore→digital_stop`在partial clock初始化失败且尚未写SRC/TX时仍无条件发四项off,随后数字journal逐项盲写old;MIC12最终RW验证只在prepare,不能独自排除晚到的codec mux/clock改动。这是源码可达恢复缺口,**不是已观察PLJ110恢复冲突/声学故障**。对照OPPO mt6681.c ordinary AIFTX/UL SRC disable与本地UniXNU-sheng/HakiOS生命周期;不迁高通DSP地址/时钟或假provider,不改厂商上电/phase/DCC/RC序列。
