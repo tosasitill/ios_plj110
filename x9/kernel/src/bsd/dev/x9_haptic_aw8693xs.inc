@@ -264,6 +264,14 @@ static int hconfigure(void)
         hs.chip_id,hs.f0_millihz);
     return 0;
 }
+static int hinit_fail(int e,unsigned stage)
+{
+    /* Only already-mapped GPIO/clock AO state, never an off I2C/DMA bank.
+     * errno alone cannot distinguish a foreign pin, parent or transaction. */
+    printf("X9 HAPTIC: init rejected stage=%u errno=%d modes=%u/%u/%u east=%08x gate=%08x; no READY\n",
+        stage,e,hmode(30),hmode(178),hmode(179),hrr(hb.top,0x110),hrr(hb.gate,0xe00));
+    return e;
+}
 static int hboard_init(void)
 {
     if(hb.mapped)return EALREADY;
@@ -275,54 +283,67 @@ static int hboard_init(void)
     hb.univpll=ml_io_map(0x1c213100,0x1000);
     if(!hb.bus || !hb.dma || !hb.gpio || !hb.pads || !hb.gate || !hb.perao ||
        !hb.top || !hb.mainpll || !hb.univpll)return ENOMEM;
-    /* Accept only GPIO/native-I2C pad modes, not a live alternate owner. */
-    if(hmode(30) || hmode(178)>1 || hmode(179)>1)return EBUSY;
+    /* Captured LK gpio-init-default leaves GPIO30 in JTDO_SEL1 (mode7).
+     * OPPO devm_gpio_request_one(GPIOF_OUT_INIT_LOW) selects GPIO mode0
+     * before hw_reset. This dedicated DT reset must not require LK to have
+     * done the Linux GPIO request for us. Refuse modem BPI/JTAG6/other modes. */
+    uint32_t reset_mode=hmode(30);
+    if((reset_mode!=0 && reset_mode!=7) || hmode(178)>1 || hmode(179)>1)
+        return hinit_fail(EBUSY,1);
     uint32_t cfg=(hrr(hb.top,0x110)>>16)&255;
-    if((hrr(hb.top,0x338)&(1u<<27)) || cfg&0x7c)return EBUSY;
+    if((hrr(hb.top,0x338)&(1u<<27)) || cfg&0x7c)return hinit_fail(EBUSY,2);
     if(cfg&128) {
         /* All east leaves must be gated and the parent fenced off before
          * changing an unused parent to 26M. No PLL wake/programming is
          * needed for the FIFO transport; future east consumers can decode
          * this actual source just like the vendor clock framework does. */
-        if((hrr(hb.gate,0xe00)&63)!=63 || (hrr(hb.top,0x278)&(1u<<29)))return EBUSY;
+        if((hrr(hb.gate,0xe00)&63)!=63 || (hrr(hb.top,0x278)&(1u<<29)))return hinit_fail(EBUSY,3);
         if(cfg&3) {
             hwr(hb.top,0x118,3u<<16);hwr(hb.top,0xc,1u<<4);
-            int e=hwait(hb.top,0x338,1u<<27,0,1000);if(e)return e;
+            int e=hwait(hb.top,0x338,1u<<27,0,1000);if(e)return hinit_fail(e,4);
             if(((hrr(hb.top,0x110)>>16)&255)!=(cfg&~3u) ||
-               (hrr(hb.gate,0xe00)&63)!=63 || (hrr(hb.top,0x278)&(1u<<29)))return EBUSY;
+               (hrr(hb.gate,0xe00)&63)!=63 || (hrr(hb.top,0x278)&(1u<<29)))return hinit_fail(EBUSY,4);
             cfg&=~3u;
         }
     }
     hb.parent=cfg&3;
     if(hb.parent) {
         vm_offset_t pll=hb.parent==2?hb.mainpll:hb.univpll;
-        if(!(hrr(pll,0x34)&16))return ENXIO;hb.con1=hrr(pll,12);
+        if(!(hrr(pll,0x34)&16))return hinit_fail(ENXIO,5);hb.con1=hrr(pll,12);
     }
     if(cfg&128) {
-        if((hrr(hb.gate,0xe00)&63)!=63 || (hrr(hb.top,0x278)&(1u<<29)))return EBUSY;
+        if((hrr(hb.gate,0xe00)&63)!=63 || (hrr(hb.top,0x278)&(1u<<29)))return hinit_fail(EBUSY,6);
         hwr(hb.top,0x118,1u<<23); /* only east parent's PDN */
-        int e=hwait(hb.top,0x278,1u<<29,1u<<29,1000);if(e)return e;
+        int e=hwait(hb.top,0x278,1u<<29,1u<<29,1000);if(e)return hinit_fail(e,6);
         cfg&=127;
     }
     hb.parent_byte=cfg;
-    hwr(hb.gate,0xe04,1);int e=hwait(hb.gate,0xe00,1,0,1000);if(e)return e;
+    hwr(hb.gate,0xe04,1);int e=hwait(hb.gate,0xe00,1,0,1000);if(e)return hinit_fail(e,7);
     /* GPIO30 is the dedicated DT haptic reset, including a warm LK entry.
      * Like OPPO hw_reset, reset it low 5ms then high; no bus reset. DOUT low
-     * BEFORE DIR output; claim only after MODE0/DOUT0/DIR1 readback. */
+     * BEFORE DIR output and MODE0; expose a known-low latch when moving
+     * only the dedicated reset from captured LK JTDO7 to GPIO0. */
+    if(hmode(30)!=reset_mode)return hinit_fail(EBUSY,8);
     hwr(hb.gpio,8,1u<<30);hwr(hb.gpio,0x108,1u<<30);hwr(hb.gpio,4,1u<<30);
-    if(hmode(30) || !(hrr(hb.gpio,0)&(1u<<30)) || (hrr(hb.gpio,0x100)&(1u<<30)))return EIO;
+    if(hmode(30)!=reset_mode || !(hrr(hb.gpio,0)&(1u<<30)) ||
+       (hrr(hb.gpio,0x100)&(1u<<30)))return hinit_fail(EIO,8);
+    if(reset_mode && (e=hmode_route(30,0)))return hinit_fail(e,8);
+    if(hmode(30))return hinit_fail(EIO,8);
     hb.reset_owned=true;
+    printf("X9 HAPTIC: dedicated reset GPIO30 mode=%u->0 low latch verified; IRQ29 untouched\n",reset_mode);
     /* DT pull207 = MTK RSEL 7. Preserve every unrelated pad field. */
     uint32_t mask=3u<<17;
     hwr(hb.pads,0x98,mask);hwr(hb.pads,0xa4,mask);hwr(hb.pads,0x64,mask);
     hb.pad_rsel=63u<<18;hwr(hb.pads,0xc4,hb.pad_rsel);
-    if((e=hmode_route(178,1)) || (e=hmode_route(179,1)))return e;
-    uint64_t hz;if((e=hbus_clock(&hz)))return e;
-    if((e=hwait(hb.gpio,0x250,3u<<18,3u<<18,1000)))return e; /* DI178/179 */
-    if((e=hidle(false)))return e;
+    if((e=hmode_route(178,1)) || (e=hmode_route(179,1)))return hinit_fail(e,9);
+    uint64_t hz;if((e=hbus_clock(&hz)))return hinit_fail(e,10);
+    if((e=hwait(hb.gpio,0x250,3u<<18,3u<<18,1000)))return hinit_fail(e,11); /* DI178/179 */
+    if((e=hidle(false)))return hinit_fail(e,12);
     for(unsigned i=0;i<14;i++)hb.expected[i]=hrr(hb.bus,h_regs[i]);hb.controls=true;
-    if((e=htiming(hz)))return e;
-    delay(5000);if((e=hreset(true)))return e;delay(2500);
+    if((e=htiming(hz)))return hinit_fail(e,13);
+    /* OPPO hw_reset waits 8000..8500us after releasing the reset, not the
+     * previous 2500us. Do not probe the chip before its documented settle. */
+    delay(5000);if((e=hreset(true)))return hinit_fail(e,14);delay(8500);
     e=hconfigure();if(e){if(hreset(false))hs.flags|=X9_HAPTIC_OFF_FAILED;hb.configured=false;}
-    return e;
+    return e?hinit_fail(e,15):0;
 }

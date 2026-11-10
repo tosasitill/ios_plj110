@@ -5,6 +5,7 @@
  * only this image's version, so old versions do not add duplicate Codec UIDs.
  */
 #include <sys/dirent.h>
+#include "x9_native_hal_view.inc"
 #include "../../../generated/x9_microphone_hal.inc"
 extern int sweet_x9_microphone_mode(void);
 static thread_t x9_microphone_mount_owner;
@@ -79,12 +80,9 @@ static int x9_microphone_install(proc_t p,user_addr_t scratch,user_addr_t end)
     if(!sweet_early_is_x9() || proc_getpid(p)!=1 || sweet_x9_microphone_mode()!=2)return 0;
     if(x9_microphone_hal_mounted)return 0;
     if(!proc_is64bit(p) || !sweet_x9_ufs_root_active() || !sweet_x9_ufs_root_writable())return EROFS;
-    /* Keep the actual existing BuiltinAudioPlugin vnode across publication.
-     * Seeing our plist alone is insufficient: the lower HAL must survive. */
-    static const char lower_path[]=X9_MIC_HAL_POINT "/BuiltinAudioPlugin.driver";
-    vnode_t lower=NULLVP;vfs_context_t ctx=vfs_context_kernel();
-    int e=vnode_lookup(lower_path,0,&lower,ctx);if(e)return e;
-    if(!vnode_isdir(lower)){vnode_put(lower);return ENOTDIR;}
+    struct x9_native_hal_view *lower=NULL;vfs_context_t ctx=vfs_context_kernel();
+    int e=x9_native_hal_capture(X9_MIC_HAL_POINT,&lower);
+    if(e){printf("X9 MIC HAL: native view capture errno=%d\n",e);return e;}
     char path[256];
     int n=snprintf(path,sizeof(path),"%s/X9Microphone.driver",X9_MIC_HAL_POINT);
     vnode_t conflict=NULLVP;
@@ -132,10 +130,7 @@ static int x9_microphone_install(proc_t p,user_addr_t scratch,user_addr_t end)
     }
     /* Authoritative native discovery view, not a source-only check. */
     e=x9_microphone_bundle_equal(X9_MIC_HAL_POINT);
-    if(!e) {
-        vnode_t visible=NULLVP;e=vnode_lookup(lower_path,0,&visible,ctx);
-        if(!e){if(visible!=lower)e=EIO;vnode_put(visible);}
-    }
+    if(!e)e=x9_native_hal_verify(X9_MIC_HAL_POINT,lower);
     if(e) {
         /* Do not leave a failed/partly verified view covering the native HAL. */
         int ce=copyout(X9_MIC_HAL_POINT,scratch,sizeof(X9_MIC_HAL_POINT));
@@ -143,8 +138,8 @@ static int x9_microphone_install(proc_t p,user_addr_t scratch,user_addr_t end)
         printf("X9 MIC HAL: union verification errno=%d rollback=%d\n",e,ce);
     } else {
         x9_microphone_hal_mounted=true;
-        printf("X9 MIC HAL: signed bundle native union visible created=%u lower-preserved=1; DMA readiness separate\n",created);
+        printf("X9 MIC HAL: signed bundle native union visible created=%u lower-preserved=1 native-entries=%u; DMA readiness separate\n",created,lower->count);
     }
 out:
-    vnode_put(lower);return e;
+    x9_native_hal_release(lower);return e;
 }
