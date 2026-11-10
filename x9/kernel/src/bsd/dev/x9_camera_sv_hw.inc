@@ -1,18 +1,27 @@
 /* MT6993 CAMSV A/id0: central 3a600000, DMA +1000, SCQ +2000;
  * inner views +8000. Reference: ISP8s mtk_cam-sv-regs.h and the actual
  * mtk_cam_sv_toggle_db / slave_sv_dev_config register writers. The slave
- * stress source, DMA/CMOS/IRQ enables and reset are NOT ported. A separate
- * armed normal request may publish ONLY its actual S1 IOVA and FH_SPARE.
+ * stress source, DMA/CMOS/IRQ enables and reset are NOT ported. The normal
+ * libccd sv_pipe_composer writes FBC0=8000 (50640..50af4: central+40,
+ * tag*40+500) and later 8080 (5325c..535bc). Only the former, NO RCNT,
+ * is ported after actual S1 IOVA/FH consumption and an empty counter sample.
  * camera_control_lock held. Named ordinary configuration only: no DONE,
- * SOF, ERR, COMMON, CHANNEL, FBC1, VF_ST, FIFO_STAT or CQ IRQ_STATUS reads.
+ * SOF, ERR, COMMON, CHANNEL, VF_ST, FIFO_STAT or CQ IRQ_STATUS reads.
+ * Tag0 FBC1 is sampled separately, as in the normal upstream FBC readers;
+ * no counter/reset command, implicit credit or AXI retirement is inferred.
  */
 #include "x9_camera_sv_hw.h"
 enum { CAM_SV_MAX_REGS=352, CAM_SV_FIELDS=X9_CAM_SV_HW_FIELDS,
     CAM_SV_CONFIG_FIELDS=X9_CAM_SV_HW_CONFIG_FIELDS,
-    CAM_SV_ADDR_LO=CAM_SV_CONFIG_FIELDS, CAM_SV_ADDR_HI, CAM_SV_FH,
+    CAM_SV_ADDR_LO=CAM_SV_CONFIG_FIELDS, CAM_SV_ADDR_HI, CAM_SV_FH, CAM_SV_FBC,
     CAM_SV_DB_IDLE=0, CAM_SV_DB_DOWN, CAM_SV_DB_UP, CAM_SV_DB_POLICY };
 #define CAM_SV_DB_EN (1u<<30)
 #define CAM_SV_FBC_BUSY ((1u<<7)|(1u<<8)|(1u<<12)|(1u<<14)|(1u<<15))
+#define CAM_SV_FBC_EN (1u<<15)
+/* Named writable FBC0 fields only; reserved bits remain at captured prior.
+ * RCNT/RESET are command bits and must NEVER be emitted by this journal. */
+#define CAM_SV_FBC_MASK 0xffffd180u
+#define CAM_SV_FBC_COUNT_MASK 0x000f0000u
 /* Absolute offsets within each three-bank view. In particular global
  * DMA SLC_CTRL is +102c, not the per-tag +123c. No holes/debug/status sweep. */
 static const unsigned cam_sv_fixed[]={
@@ -46,9 +55,10 @@ static const struct cam_sv_field cam_sv_fields[CAM_SV_FIELDS]={
     /* WDMA address words, not burst/stride or a CPU-PA alias. The vendor
      * writer stores full low/high words; FH_SPARE is a 32-bit request cookie
      * read by the normal SOF/hybrid handlers, never capture_id truncation. */
-    {0x1200,UINT32_MAX},{0x1204,UINT32_MAX},{0x57c,UINT32_MAX}
+    {0x1200,UINT32_MAX},{0x1204,UINT32_MAX},{0x57c,UINT32_MAX},
+    {0x540,CAM_SV_FBC_MASK}
 };
-_Static_assert(CAM_SV_FH+1==CAM_SV_FIELDS,"CAMSV request fields");
+_Static_assert(CAM_SV_FBC+1==CAM_SV_FIELDS,"CAMSV request fields");
 _Static_assert(CAM_SV_FIELDS<32,"CAMSV dirty bitmap");
 static struct {
     vm_offset_t view[2];
@@ -59,6 +69,8 @@ static struct {
     uint64_t epoch, sequence, command, completed;
     bool held, close_attempted, terminal, pending_seen, commit_pending, db_issued;
     bool request_held, request_ready;
+    bool fbc_sampled, fbc_ready;
+    uint32_t fbc_before[2];
     struct x9_camera_camsv_slot *request_slot;
     struct x9_camera_camsv_request request;
     struct x9_camera_camsv_dma request_dma;
@@ -88,6 +100,8 @@ static void cam_sv_status(void)
     else s->flags&=~X9_CAM_SV_HW_RETAINED;
     if(cam_sv.request_ready)s->flags|=X9_CAM_SV_HW_REQUEST;
     else s->flags&=~X9_CAM_SV_HW_REQUEST;
+    if(cam_sv.fbc_ready)s->flags|=X9_CAM_SV_HW_FBC_EMPTY;
+    else s->flags&=~X9_CAM_SV_HW_FBC_EMPTY;
     if(cam_sv.request_held) {
         s->request_generation=cam_sv.request.frame.generation;
         s->request_capture_id=cam_sv.request.frame.capture_id;
@@ -105,7 +119,9 @@ static int cam_sv_fault(int e)
     if(!cam_sv.error)cam_sv.error=e;
     if(cam_sv.request_held) {
         cam_sv.request_ready=false;
+        cam_sv.fbc_ready=false;
         if(!cam_sv.status.request_errno)cam_sv.status.request_errno=e;
+        if(cam_sv.fbc_sampled && !cam_sv.status.fbc_errno)cam_sv.status.fbc_errno=e;
     }
     if(e==ESTALE || e==EACCES || e==EBUSY || e==EOVERFLOW)cam_sv.terminal=true;
     cam_sv_status();return e;
@@ -133,7 +149,36 @@ static int cam_sv_inactive(const uint32_t *v)
     if(v[cam_sv_find(0x1024)]&0x11)return EBUSY; /* no pseudo/FPGA DMA */
     if(v[cam_sv_find(0x2140)]&1)return EBUSY; /* CQ SUB_THR0 enable */
     if((v[cam_sv_find(0x2100)]|v[cam_sv_find(0x2130)])&(1u<<16))return EBUSY; /* both CQ resets */
-    for(unsigned tag=0;tag<8;tag++)if(v[cam_sv_find(0x540+tag*0x40)]&CAM_SV_FBC_BUSY)return EBUSY;
+    for(unsigned tag=0;tag<8;tag++) {
+        uint32_t mask=CAM_SV_FBC_BUSY;
+        /* Sole exception: THIS immutable S1 request's no-credit FBC_EN.
+         * Exact prior/posted/accepted values are still checked below. This
+         * never permits foreign tag enables or RCNT/RESET/LOCK/SUB_EN. */
+        if(!tag && cam_sv.held && cam_sv.request_held && cam_sv.fbc_sampled)
+            mask&=~CAM_SV_FBC_EN;
+        if(v[cam_sv_find(0x540+tag*0x40)]&mask)return EBUSY;
+    }
+    return 0;
+}
+/* Receiver's cold admission remains strict. Its LIVE busy check can ignore
+ * only tag0 EN after this engine has checked the exact journal and counters.
+ * Not an ownership grant derived from expected/zero registers. */
+static uint32_t cam_sv_no_credit_mask(void)
+{
+    return cam_sv.held && cam_sv.request_held && cam_sv.fbc_sampled &&
+        !cam_sv.terminal?CAM_SV_FBC_EN:0;
+}
+static int cam_sv_fbc_counters_guard(void)
+{
+    uint32_t value;
+    int e;
+    if(!cam_sv.fbc_sampled)return 0;
+    for(unsigned bank=0;bank<2;bank++) {
+        e=cam_sv_power_guard();if(e)return e;
+        value=cam_rr(cam_sv.view[bank],0x544);
+        cam_sv.status.fbc_after[bank]=value;
+        if(value!=cam_sv.fbc_before[bank])return ESTALE;
+    }
     return 0;
 }
 static void cam_sv_observed(unsigned bank,const uint32_t *v)
@@ -187,6 +232,7 @@ static int cam_sv_guard_impl(void)
             cam_sv.pending_seen=true;
         if(bank)memcpy(cam_sv.expected[1],v,cam_sv.count*sizeof(v[0]));
     }
+    e=cam_sv_fbc_counters_guard();if(e)return e;
     cam_sv_publish();return cam_sv_power_guard();
 }
 static int cam_sv_guard(void)
@@ -369,6 +415,8 @@ static int cam_sv_open_locked(uint64_t epoch)
     cam_sv.status.flags=X9_CAM_SV_HW_ATTEMPTED;
     cam_sv.error=0;cam_sv.terminal=false;cam_sv.dirty=0;cam_sv.command=cam_sv.completed=0;
     cam_sv.request_held=cam_sv.request_ready=false;cam_sv.request_slot=NULL;
+    cam_sv.fbc_sampled=cam_sv.fbc_ready=false;
+    memset(cam_sv.fbc_before,0,sizeof(cam_sv.fbc_before));
     memset(&cam_sv.request,0,sizeof(cam_sv.request));
     memset(&cam_sv.request_dma,0,sizeof(cam_sv.request_dma));
     cam_sv.commit_pending=cam_sv.pending_seen=cam_sv.db_issued=false;cam_sv.db_phase=CAM_SV_DB_IDLE;
@@ -395,7 +443,7 @@ static int cam_sv_open_locked(uint64_t epoch)
     cam_sv.target[4]=1;cam_sv.target[5]=cam_sv.target[6]=cam_sv.target[7]=0;
     cam_sv.target[8]=cam_sv.target[9]=1;
     /* Initial geometry setup never publishes a buffer/cookie. Keep the
-     * three request fields exactly at this cold epoch's captured priors. */
+     * address/FH/FBC fields exactly at this cold epoch's captured priors. */
     for(unsigned slot=CAM_SV_CONFIG_FIELDS;slot<CAM_SV_FIELDS;slot++)
         cam_sv.target[slot]=cam_sv.before[0][cam_sv.field[slot]];
     for(unsigned slot=0;slot<CAM_SV_FIELDS;slot++) {
@@ -412,10 +460,52 @@ static int cam_sv_open_locked(uint64_t epoch)
     if(e)cam_sv_fault(e);
     cam_sv_status();return e;
 }
+/* Normal composer FBC_EN initialization, AFTER the exact address/FH target
+ * has reached both banks. Never submit the later 8080 RCNT descriptor.
+ * The owner callback must independently retire prior producer/history;
+ * count0 here only selects an EMPTY no-credit programming baseline. It is
+ * neither a DMA completion nor authority to release mapping/power/RAW.
+ * Actual repeated rearm keeps this original counter evidence, no rebasing. */
+static int cam_sv_fbc_prepare_locked(void)
+{
+    uint32_t observed[2],first,target;
+    bool changed;
+    int e=cam_sv_environment();if(e)return e;
+    if(!cam_sv.fbc_sampled) {
+        for(unsigned bank=0;bank<2;bank++) {
+            e=cam_sv_environment();if(e)return e;
+            first=cam_rr(cam_sv.view[bank],0x544);
+            cam_sv.status.fbc_before[bank]=first;
+            delay(1);e=cam_sv_environment();if(e)return e;
+            observed[bank]=cam_rr(cam_sv.view[bank],0x544);
+            cam_sv.status.fbc_sampled|=1u<<bank;
+            cam_sv.status.fbc_after[bank]=observed[bank];
+            if(first!=observed[bank])return cam_sv_fault(ESTALE);
+            if(observed[bank]&CAM_SV_FBC_COUNT_MASK)return cam_sv_fault(EBUSY);
+        }
+        if(observed[0]!=observed[1])return cam_sv_fault(ESTALE);
+        for(unsigned bank=0;bank<2;bank++)
+            cam_sv.status.fbc_before[bank]=cam_sv.fbc_before[bank]=observed[bank];
+        cam_sv.fbc_sampled=true;
+    }
+    /* Even reserved bits are immutable; write() masks only named fields.
+     * All command bits are zero in the value actually emitted. */
+    target=(cam_sv.before[0][cam_sv.field[CAM_SV_FBC]]&~CAM_SV_FBC_MASK)|CAM_SV_FBC_EN;
+    changed=cam_sv.expected[0][cam_sv.field[CAM_SV_FBC]]!=target;
+    cam_sv.target[CAM_SV_FBC]=cam_sv.status.target[CAM_SV_FBC]=target;
+    e=cam_sv_field_write(CAM_SV_FBC,target);
+    if(!e)e=changed?cam_sv_commit():cam_sv_target_observe();
+    if(!e)e=cam_sv_environment();
+    if(!e)for(unsigned bank=0;bank<2;bank++)
+        if(cam_sv.expected[bank][cam_sv.field[CAM_SV_FBC]]!=target)e=ESTALE;
+    if(e)return cam_sv_fault(e);
+    cam_sv.fbc_ready=true;return 0;
+}
 /* Called only after this invocation's actual x9_camera_camsv_arm has bound
  * the slot and performed per-page CIVAC. camera_control_lock/IRQ mutex held;
  * the IRQ worker is idle and all three GIC lines disabled. No producer is
- * enabled here, and no inactive/zero register is treated as a native grant.
+ * enabled here. FBC_EN is initialized without RCNT/credit only AFTER the
+ * actual addresses/cookie. No inactive/zero register is a native grant.
  * A later rearm has already changed the S1 request, so never run the OLD
  * request's owner callback after arm. Validate the new immutable binding
  * first; begin checked the old authority/environment BEFORE that arm. */
@@ -449,11 +539,12 @@ static int cam_sv_request_prepare_locked(uint64_t epoch,struct x9_camera_camsv_s
      * effect keeps this request's lease/backing and cannot be reset/retried. */
     cam_sv.request=r;cam_sv.request_dma=d;cam_sv.request_slot=slot;
     cam_sv.request_held=true;cam_sv.request_ready=false;
+    cam_sv.fbc_ready=false;
     cam_sv.target[CAM_SV_ADDR_LO]=(uint32_t)r.iova;
     cam_sv.target[CAM_SV_ADDR_HI]=(uint32_t)(r.iova>>32);
     cam_sv.target[CAM_SV_FH]=r.inner_sequence;
     e=cam_sv_environment();
-    for(unsigned field=CAM_SV_CONFIG_FIELDS;field<CAM_SV_FIELDS && !e;field++) {
+    for(unsigned field=CAM_SV_CONFIG_FIELDS;field<=CAM_SV_FH && !e;field++) {
         uint32_t target=cam_sv.target[field];
         cam_sv.status.target[field]=target;
         if(cam_sv.expected[0][cam_sv.field[field]]!=target)changed=true;
@@ -465,23 +556,28 @@ static int cam_sv_request_prepare_locked(uint64_t epoch,struct x9_camera_camsv_s
     if(!e)e=cam_sv_environment();
     if(!e) {
         for(unsigned bank=0;bank<2;bank++)
-            for(unsigned field=CAM_SV_CONFIG_FIELDS;field<CAM_SV_FIELDS;field++)
+            for(unsigned field=CAM_SV_CONFIG_FIELDS;field<=CAM_SV_FH;field++)
                 if(cam_sv.expected[bank][cam_sv.field[field]]!=cam_sv.target[field])e=ESTALE;
+    }
+    if(!e) {
+        e=cam_sv_fbc_prepare_locked();
+        if(e && !cam_sv.status.fbc_errno)cam_sv.status.fbc_errno=e;
     }
     if(e)cam_sv_fault(e);
     else cam_sv.request_ready=true;
     cam_sv_status();
     printf("X9 CAMERA REQUEST: sensor=%u epoch=%llu generation=%llu capture_id=%llu "
         "inner=%x ready=%u errno=%d dirty=%x command=%llu/%llu "
-        "(actual inactive S1 address/FH consumption, no FBC/source/DMA)\n",
+        "fbc_empty=%u counters=%x/%x (actual S1 address/FH/FBC_EN, no RCNT/source/DMA)\n",
         cam_sv.status.sensor,epoch,r.frame.generation,r.frame.capture_id,r.inner_sequence,
-        cam_sv.request_ready,e,cam_sv.dirty,cam_sv.command,cam_sv.completed);
+        cam_sv.request_ready,e,cam_sv.dirty,cam_sv.command,cam_sv.completed,
+        cam_sv.fbc_ready,cam_sv.status.fbc_after[0],cam_sv.status.fbc_after[1]);
     return e;
 }
 static int cam_sv_request_guard_locked(uint64_t epoch,const struct x9_camera_camsv_slot *slot)
 {
     int e;
-    if(!cam_sv.request_held || !cam_sv.request_ready || epoch!=cam_sv.epoch ||
+    if(!cam_sv.request_held || !cam_sv.request_ready || !cam_sv.fbc_ready || epoch!=cam_sv.epoch ||
        slot!=cam_sv.request_slot)return ESTALE;
     lck_mtx_lock(&camera_camsv_lock);
     e=(slot->state!=X9_CAMSV_ARMED && slot->state!=X9_CAMSV_RETIRED) ||
@@ -496,7 +592,8 @@ static int cam_sv_request_guard_locked(uint64_t epoch,const struct x9_camera_cam
         const uint32_t *v=cam_sv.expected[bank];
         if(v[cam_sv.field[CAM_SV_ADDR_LO]]!=(uint32_t)cam_sv.request.iova ||
            v[cam_sv.field[CAM_SV_ADDR_HI]]!=(uint32_t)(cam_sv.request.iova>>32) ||
-           v[cam_sv.field[CAM_SV_FH]]!=cam_sv.request.inner_sequence)e=ESTALE;
+           v[cam_sv.field[CAM_SV_FH]]!=cam_sv.request.inner_sequence ||
+           v[cam_sv.field[CAM_SV_FBC]]!=cam_sv.target[CAM_SV_FBC])e=ESTALE;
     }
     return e?cam_sv_fault(e):0;
 }
@@ -508,6 +605,7 @@ static int cam_sv_close_locked(uint64_t epoch)
     if(!cam_sv.held)return 0;
     if(cam_sv.epoch!=epoch || cam_sv.close_attempted)return ESTALE;
     cam_sv.close_attempted=true;
+    cam_sv.request_ready=cam_sv.fbc_ready=false;
     nanoseconds_to_absolutetime(10000000,&span);deadline=mach_absolute_time()+span;
     e=cam_sv_environment();
     if(!e)e=cam_sv.commit_pending?cam_sv_commit():cam_sv_pending_wait(deadline);
@@ -516,12 +614,25 @@ static int cam_sv_close_locked(uint64_t epoch)
      * those fields to prior; never pretend an earlier posted effect was
      * cancelled merely because inner still contains the original value. */
     if(!e && cam_sv.dirty && !cam_sv.command)e=cam_sv_commit();
-    for(unsigned i=CAM_SV_FIELDS;i && !e;i--) {
+    /* Consume FBC's original control in BOTH banks before changing any
+     * address/cookie, not merely post its outer disable before those writes.
+     * Source/DMA/CMOS/VF are still off; this is not a producer-drain path. */
+    if(!e && (cam_sv.dirty&(1u<<CAM_SV_FBC))) {
+        uint32_t prior=cam_sv.before[0][cam_sv.field[CAM_SV_FBC]];
+        e=cam_sv_field_write(CAM_SV_FBC,prior);
+        if(!e)e=cam_sv_commit();
+        if(!e)for(unsigned bank=0;bank<2;bank++)
+            if(cam_sv.expected[bank][cam_sv.field[CAM_SV_FBC]]!=prior)e=cam_sv_fault(ESTALE);
+    }
+    for(unsigned i=CAM_SV_FBC;i && !e;i--) {
         unsigned slot=i-1;
         if(cam_sv.dirty&(1u<<slot))e=cam_sv_field_write(slot,cam_sv.before[0][cam_sv.field[slot]]);
     }
     if(!e)e=cam_sv.dirty?cam_sv_commit():cam_sv_target_observe();
-    /* Return policy only AFTER complete original geometry/address/controls
+    /* FBC is the last field and is restored FIRST, before FH/address and
+     * geometry; the original no-credit counter evidence stays pinned through
+     * both-bank restore and final policy. Never invoke RCNT or RESET cleanup.
+     * Return policy only AFTER complete original geometry/address/controls
      * are actually back in both banks. This inactive journal does not stop
      * a producer; IRQ/RAW retirement must precede it in receiver close. */
     if(!e) {
@@ -539,12 +650,13 @@ static int cam_sv_close_locked(uint64_t epoch)
     if(!e) {
         cam_sv.held=false;cam_sv.dirty=0;cam_sv.db_phase=CAM_SV_DB_IDLE;cam_sv.db_issued=false;
         cam_sv.request_ready=cam_sv.request_held=false;cam_sv.request_slot=NULL;
+        cam_sv.fbc_sampled=cam_sv.fbc_ready=false;
         cam_sv.status.flags|=X9_CAM_SV_HW_RESTORED;
     } else cam_sv_fault(e);
     cam_sv.status.restore_errno=e;cam_sv_status();
     printf("X9 CAMERA CAMSV CLOSE: sensor=%u epoch=%llu flags=%x errno=%u restore=%d "
         "dirty=%x pending=%u commit=%u dbphase=%u sequence=%llu/%llu terminal=%u "
-        "DB=%x/%x (inactive RAW10 geometry/address/FH restore, NOT AXI/map drain)\n",
+        "DB=%x/%x (no-credit FBC/RAW10 geometry/address/FH restore, NOT AXI/map drain)\n",
         cam_sv.status.sensor,epoch,cam_sv.status.flags,cam_sv.status.last_errno,e,cam_sv.status.dirty,
         cam_sv.status.pending,cam_sv.status.commit_pending,cam_sv.status.db_phase,cam_sv.status.command,
         cam_sv.status.completed,cam_sv.status.terminal,cam_sv.status.db_after[0],cam_sv.status.db_after[1]);

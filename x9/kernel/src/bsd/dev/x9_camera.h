@@ -349,8 +349,9 @@ struct x9_camera_camsv_dma {
      * check never reads RAW or mutates hardware, and proves immutable
      * backing while this worker owns the slot, including after PASS1_DONE.
      * When used with the native GIC worker, also proves sole CAMSV0 AP IRQ
-     * (not CCU/other owner) policy and prior source/request-history retirement
-     * before GIC/source publication. Masked/zero registers are not this grant.
+     * AND tag0 FBC policy (not CCU/other owner) and prior source/request-history
+     * retirement before no-credit FBC initialization/GIC/source publication.
+     * Masked/zero registers or FBC_CNT0 are not this grant.
      * Callbacks cannot re-enter camera/CAMSV APIs. */
     int (*check)(void *, uint64_t lease, const struct x9_camera_camsv_request *);
 };
@@ -380,8 +381,10 @@ int x9_camera_camsv_finish(struct x9_camera_camsv_slot *, const struct x9_camera
  * In-TU platform callbacks already holding that lock use the locked helper.
  * Requires the prepared live-topology/receiver epoch and a REAL DMA lease.
  * begin arms one tag0/group0 request, publishes its actual S1 IOVA and
- * 32-bit FH metadata with both-bank DB consumption, THEN arms GIC lines.
- * It does not write source IRQ enables, FBC/CQ/CMOS/VF or start the sensor.
+ * 32-bit FH metadata with both-bank DB consumption, initializes only tag0
+ * FBC_EN with unchanged empty FBC1 counters, THEN arms GIC lines.
+ * It does not write RCNT/credit, source IRQ enables, CQ/CMOS/VF/DMA or start
+ * the sensor. EMPTY is not a source/AXI/map drain or native ownership grant.
  * Address/metadata failure retains this slot and the dependent cold epoch;
  * GIC/CPU retirement alone does not permit revoking its backing/lease.
  * Keep that controller/request/RAW immutable until state says RETIRED; no

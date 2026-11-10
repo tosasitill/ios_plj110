@@ -56,10 +56,11 @@
  * On success CAMSV also prepares this boot's GIC4 topology and a dormant
  * IRQ worker. That alone never claims/enables GIC or consumes IRQ history.
  * The normal controller's exact mapping/AP-IRQ lease is required before
- * arming a request. Normal begin consumes only that actually armed S1 request's A0
- * address and tag0 FH_SPARE in both banks before GIC publication; the cold
- * configure_outmux path still never writes an address or cookie. Any
- * partial address/DB publication keeps the slot and sensor epoch retained.
+ * arming a request. Normal begin consumes that actually armed S1 request's A0
+ * address and tag0 FH_SPARE, then tag0 FBC_EN with unchanged empty counters
+ * in both banks before GIC publication. It does not issue RCNT/credit or
+ * source/DMA enable; cold configure_outmux still never writes an address,
+ * cookie or FBC. Partial address/FBC/DB publication retains the cold epoch.
  * Sensor close retires GIC and queued/running worker pins BEFORE restoring
  * CAMSV/OUTMUX/PHY/MM. An unfinished RAW slot retains all
  * dependencies; this worker retirement is not full AXI/SMMU/map drain.

@@ -1,8 +1,9 @@
 /* Sole CAMSV0 GIC1NS IAR -> one-shot bank sample -> pinned thread worker.
  * The inactive prepare path creates only a dormant worker. begin still needs
  * the real controller's exact S1/domain/route/request lease, and enables NO
- * CAMSV source/DMA/CMOS/VF/FBC/CQ. After RAW arm it now publishes the actual
- * S1 IOVA/tag0 FH metadata with inactive DB consumption, before GIC changes.
+ * CAMSV source/DMA/CMOS/VF/CQ or FBC credit. After RAW arm it publishes the
+ * actual S1 IOVA/tag0 FH metadata, then no-credit FBC_EN with unchanged empty
+ * counters and both-bank DB consumption, before GIC changes.
  * It is not a capture provider registration.
  * Lock order: camera_control_lock -> camera_irq_lock -> camera_camsv_lock.
  * Worker NEVER acquires camera_control_lock; close can drain its pin there.
@@ -446,7 +447,8 @@ static int cam_irq_begin_locked(uint64_t epoch,const struct x9_camera_camsv_requ
     }
     /* Do not make a hardware source observable with stale address/cookie.
      * Both banks must consume ONLY this already-armed request's S1 IOVA
-     * and FH_SPARE. No SOURCE/FBC/DMA/CQ/CMOS/VF enable follows here. */
+     * and FH_SPARE, then no-credit FBC_EN. No RCNT/SOURCE/DMA/CQ/CMOS/VF
+     * enable follows here; a counter change is retained, never re-credited. */
     if(!e)e=cam_sv_request_prepare_locked(epoch,cam_irq.slot);
     if(!e&&!owns) {
         /* Capture all priors before any route/priority write. Never change
