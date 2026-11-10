@@ -655,6 +655,46 @@ static void gps_runtime_config_le(uint8_t *p,unsigned bytes,uint32_t value)
 {
  for(unsigned i=0;i<bytes;i++)p[i]=(uint8_t)(value>>(8*i));
 }
+static int gps_runtime_mnl_init_defaults(uint64_t generation,uint8_t *p)
+{
+ struct x9_gps_mnl_clock clock;
+ int error=gps_runtime_mnl_clock(generation,&clock);
+ if(error)return error;
+ /* Native cold factory configuration, NOT an imported calibration object.
+  * AP mnld6e3b8..6e3d4 explicitly zeros init+8..87 and6e3f4 stores
+  * the eight-byte literal 0100000000000000. Use those decoded stores as
+  * the baseline, never infer memset from the MCU's unknown vendor ISA.
+  * MCU ebe46..ebef0 supplies the explicit136B factory fields below;
+  * ebe c8..d4 explicitly zeros all four MD words at+3c..48. These zero
+  * defaults do not prove valid calibration, NV authority or MD aiding.
+  * There is no Android pointer, file path or engineering property here. */
+ bzero(p,X9_MNL_INIT_CONFIG_BYTES);
+ gps_runtime_config_le(p,4,1u);
+ gps_runtime_config_le(p+0x10,2,100u);
+ gps_runtime_config_le(p+0x14,2,2000u);
+ gps_runtime_config_le(p+0x1c,4,115200u);
+ gps_runtime_config_le(p+0x20,4,1000u);
+ gps_runtime_config_le(p+0x28,4,0x340u);
+ gps_runtime_config_le(p+0x2c,4,0x340u);
+ gps_runtime_config_le(p+0x30,4,0xffff6985u);
+ gps_runtime_config_le(p+0x34,4,0xffff6985u);
+ gps_runtime_config_le(p+0x38,4,10u);
+ gps_runtime_config_le(p+0x4c,4,1u);
+ gps_runtime_config_le(p+0x54,4,0x5fu);
+ gps_runtime_config_le(p+0x58,4,0x010000ffu);
+ gps_runtime_config_le(p+0x70,4,0x00640101u);
+ gps_runtime_config_le(p+0x7c,2,0x0101u);
+ /* AP6e4e0..6e4fc has an explicit no-import fallback26M/ff/2000/0.
+  * This is permitted ONLY when creating this private factory object.
+  * Existing caller configurations never pass through this producer and
+  * keep their possibly non-nominal calibrated frequency/MD coefficients.
+  * +68=1 selects the proved MCU offload wire path (AP6e7ac), not READY.
+  * Apply the same original post-NV clock precedence as the caller path. */
+ p[0x13]=0xff;
+ gps_runtime_config_le(p+0x18,4,26000000u);
+ gps_runtime_config_le(p+0x68,4,1u);
+ return gps_runtime_mnl_init_clock(generation,p,X9_MNL_INIT_CONFIG_BYTES);
+}
 static int gps_runtime_mnl_driver_defaults(uint64_t generation,uint8_t *p)
 {
  int error;
@@ -751,6 +791,12 @@ int x9_gps_runtime_mnl_command(uint64_t generation,uint8_t slot_seq,
   * bytes. Do not let QRTR/set_state/IRQ feed the physical outbox directly. */
  if(current_thread()!=gps_rt.worker || !gps_rt.in_callback)return EPERM;
  if(!generation || generation!=gps_rt.generation || gps_rt.hif.fault)return ESTALE;
+ if(command==X9_GPS_MNL_INIT_CONFIG && !payload) {
+  if(length)return EINVAL;
+  error=gps_runtime_mnl_init_defaults(generation,init);
+  if(error)return error;
+  payload=init;length=sizeof(init);
+ }
  if(command==X9_GPS_MNL_DRIVER_CONFIG && !payload) {
   if(length)return EINVAL;
   /* Native default production runs on the same actual command path,
@@ -768,7 +814,7 @@ int x9_gps_runtime_mnl_command(uint64_t generation,uint8_t slot_seq,
   if(error)return error;
   payload=host_time;
  }
- if(command==X9_GPS_MNL_INIT_CONFIG && gps_rt.ops.version>=2) {
+ if(command==X9_GPS_MNL_INIT_CONFIG && gps_rt.ops.version>=2 && payload!=init) {
   error=x9_gps_mnl_command_validate(command,payload,length);
   if(error)return error;
   /* Operate on a private snapshot, never the caller's board/NV object.

@@ -205,7 +205,13 @@ int x9_gps_runtime_queue(uint64_t generation, unsigned channel,
  * validated as calibration here. +0x14/+0x24/+0x3c..4b and all other
  * fields stay unchanged. Schematic3 is ENOTSUP, not mislabeled26M.
  * v1 has no such POS contract and retains its caller-owned configuration.
- * No empty INIT builder, guessed drift or NV authority.
+ * INIT NULL/0 on v2..v4 builds the original native136B cold factory
+ * baseline, including the AP's explicit no-import26M fallback, then
+ * applies that same post-NV source/52M override. MD words stay at their
+ * explicit original zero defaults, NOT qualified calibration or NV
+ * authority. Existing caller configurations never use this fallback.
+ * Factory fields are not proof of measured board tuning or aiding.
+ * v1 NULL/0 is rejected; v5/v6 remain disabled. No guessed drift.
  * The caller's payload is never modified, including on enqueue failure.
  * DRIVER3 may instead use NULL/0 on v2..v4: the worker produces the
  * 216B baseline from the original AP zero-fill and MCU explicit default
