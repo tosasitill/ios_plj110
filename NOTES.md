@@ -1287,6 +1287,14 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 
 ## 7. 当前交接(GPS-BARO-27,2026-11-10): 已补MNL配置长度/原metadata校验与worker命令入队;真实板级producer/应用确认及完整生产链仍缺,代码齐后才出唯一最终镜像
 
+### GPS-BARO-32 生产代码里程碑(2026-11-10): native bootstrap顺序与真实HIF TX退休；slot supplier/pump尚缺
+
+- **固定源码/整合**：独立 `.local/x9/worktrees/gps-mnl-bootstrap32` / `gps-mnl-bootstrap32-20261110`，base **b44b1cf**，三文件110insertions/2deletions源码 **60ef9b6**，精准cherry-pick为main **0532052**；main三源码与源提交无diff，保留并发CAMSV修改。恢复main0532052且干净，GPS32原先尚未交接，本段补齐；goal active/progress，代码齐后才唯一最终镜像。
+- **实际行为**：仅成功native INIT2 NULL/0开启cold bootstrap，完整caller INIT及standalone DRIVER不opt-in。按原 `libmnl53e4b8..4dc` 顺序 **INIT2→DRIVER3→HOST_TIME7→BOOT_TIME15**；不匹配下一命令EAGAIN、重复INIT EBUSY、serializer/producer/ENOBUFS不推进queued。每条仍要求caller真实slot/credit admission与reserved slot_seq，**没有自动造ID/pump或新增未安装supplier**。outbox标bootstrap_step；queued（本地快照）、posted（hif_send实际成功POST并记录NORMAL id[2]）、completed（hif.poll验证MCU descriptor后pending[2]清零且tx_time[NORMAL]==0）分开，检查hardware generation/ID/顺序。四条实际TX退休前OPEN0/STOP1 EAGAIN；不是application ACK/READY。terminal worker仅记录首错、保留资源，不重试/reset/refund。105B位置wire、handoff和CONNV2 descriptor未变。
+- **原件边界**：libmnl53f55c..568的command0与watchdog启动不证明OPEN应用确认；705664..6b4仅接受event0的2B signed notification并调generic callback，mnld6aa04..6abac notification0有RTC/offload分支，不能直接当OPEN ACK。STOP5412c8..54133c先清level event10再command1、等待参数6，event128经705cc0→51b990唤醒；仍未证明wire transaction/freshness匹配。
+- **正常对象/CI**：`.local/x9/work/gps-mnl-bootstrap32-20261110/objects-source32`，固定60ef9b6，sweet_x9_gps.o/SweetHID.cpo/X9Baseband.cpp.o全部True、**units-source32.exit=0**，warnings119/15/32，session30238已exit0。`gh run list --commit 60ef9b6 --json databaseId,status,conclusion,url` **[]/exit0，无CI run ID/主动push**。无成功对象重编/镜像重检、测试套件、fullkernel/iOS整包/shim/boot.img或设备操作，276/bootargs/root manifest保持。
+- **材料/下一步**：私有该目录保留inputs/config/compile-selected.py/log/exit、source/main-code.commit、main-source-diff.patch（空）、CI查询与native/bootstrap/notification/STOP定点dis。下一步补真正native slot/credit admission与已有worker callback/pump的实际接线，再证明OPEN/STOP application session/RX freshness/QRTR请求匹配。仍无实际CONNV2/backend注册caller，整体**WAIT_CONNV2**；完整secure-policy/selected ATF provenance、power/upstream/BGF/SYSRAM/AP+BGF/AFE/ROM supplier、NVauthority/持久producer/POST_ON与剩余PVT资格未齐。真实PRESSURE6/gain/SCP producer缺，CoreLocation/CMAltimeter未物理闭环，不交等待态中间包。
+
 ### GPS-BARO-31 生产代码里程碑(2026-11-10): 原生INIT136 factory实际接入runtime，caller校准不覆盖
 
 - **代码/整合**：独立 `.local/x9/worktrees/gps-mnl-init31` / `gps-mnl-init31-20261110` 固定base **3f56125**，两文件**54insertions/2deletions**提交 **3347016**，无冲突精准cherry-pick为main **b011b71**；保留另一窗口DSP/相机并发提交，main两源码与3347016无diff。先行原件交接main **37d9c60**保留。目标active/progress，全部GPS生产链齐才唯一最终联合镜像。
