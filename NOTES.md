@@ -236,6 +236,15 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **失败尝试/重建**:第一次`x9-microphone-phase1-final`误在共享main目录执行,撞到另一窗口正在编辑的USB`bsd_init`引用 **`_x9_usb_start`未定义**,link exit1;没有boot成功结论,不是麦克风ABI错误。随后改为上述干净固定worktree、唯一新名字`phase1-fixed`构建成功,失败目录不交付。精确重建:在固定worktree运行`/Library/Frameworks/Python.framework/Versions/3.13/bin/python3 -I x9/build/build.py all --name <新的唯一名字> --config /Users/tosasitill/ios_plj110/.local/x9/work/microphone-20261110/local-config.json --boot-config /Users/tosasitill/ios_plj110/.local/x9/work/microphone-20261110/boot-config.json -j 8`。配置/输入/原始日志均在同一私有目录,不入git。
 - **共享树隔离/下一步**:麦克风只提交自己的文件和recipe/link-order/build/ufs改动;另一窗口扬声器9900f6b恰在提交前先入main,所以作为已提交祖先纳入固定构建,不是夹带其未提交代码。后续保持完整参数集,不为凑607B删`cpus=8`(SWEET缺该参数会退单核);当前无需激活mic诊断或连续刷探针。板级按codec读回/资源还原→DCC/MTKAIF→DMA推进/真实声学PCM→HAL/AVAudioSession录音依次验收,不能把状态节点/插件出现当成麦克风可用。
 
+## 相机活动交接(CAMERA-5,2026-11-10): 共享接收电源生命周期已实现;MM-SMMUv3映射/实帧仍未完成
+
+- **代码/隔离**:从ce9b3d1创建独立`.local/x9/worktrees/camera-mm5` / `work/x9-camera-mm5`,完成提交 **fddd4ed**,已cherry-pick到main为 **2eac681**(父df9d356)。保留其他窗口已提交的UFS/MIC/双卡交接祖先,未夹带USB未提交文件。无设备操作/根盘/mailbox写入、push或测试套件。
+- **真正provider而非source-plan**:新`x9_camera_resources.inc`实现TF-A **0xc2000514/a1=0x803/0x804**的MM_SMMU secure PM_GET/PUT引用与CSI_BS_RX MM HWCCF **bank1 bit11**申请/恢复。GET成功才记引用;先验证MM_INFRA_AO/infra0的PM_ACK bits31/29、STA0,再读MMUP GPR11 dummy并请求CSI。XPU0 SET/CLR/EN为2070c/20710/20714;MM v1实际判据是**STA清零/FSM idle**,DONE仅留证据,不能套AP CAMTG的DONE判据。只撤新增AP单bit,继承vote只借且验证不变,不脉冲共享CG47或重编全局/autolink。
+- **恢复/失败**:CSI CLR→AP EN0→100us→STA0,最后global EN消失时再等PM_ACK0;完成CSI恢复后才PM_PUT。撤票失败保留secure依赖,PUT失败保留引用/journal;任何失败锁存,禁止本boot继续sensor/resource probe。成功资源请求最多一次,再次EALREADY无MMIO/SMC。未调用sensor stream-on、PHY、route或DMA,不注册platform/不置READY。
+- **SMMU证据边界**:secure引用内才读MM-SMMUv3 **30800000**的IDR0/1/3/5、CR0/ACK、CR1/2、GBPA、STRTAB/CMDQ/EVTQ/GERROR/N;EVTQ prod/cons为page1 **+100a8/+100ac**,IDR2/4保留不读。配置两次稳定、stage1/SID80/SSID/16KiB能力是必要条件,不是mapping成功。NS空配置+GBPA.ABORT也只标QUIESCENT/**不证明独占**;上游MT6993启用SEC/HYP,显示共享实例,故NEED_SMMU_OWNER/NEED_DMA_MAP始终保留。不SEC_INIT/reset、不写CR0/GBPA/wrapper/表/CMDQ,不解引用继承表、不复用GPU bypass、不把CPU PA当IOVA。
+- **接口/编译**:独立224B `GET_RESOURCES(0x94)/PROBE_RESOURCES(0x95)`,旧status/probe/pipeline ABI不改;root显式`cameractl resources`,普通`status`只读缓存。iOS工具/117040B桥编译签名exit0;最终内核单对象exit0(52 warnings,既有头/C99风格),没有测试套件。文档已更新`x9/camera/README.md`;私有配置/单对象/user日志在`.local/x9/work/camera-mm5-20261110/`,不入git。gh(fddd4ed)列表[],无CI run。
+- **当前未完成/下一步**:这是CSI/secure-SMMU的窄电源provider,**不是CAM_MAIN/CAM_MRAW/VMM/完整MM clock provider**,pipeline MM_POWER blocker不清。冷LK共同provider仍可能未ready,无本轮运行SMC/PM_ACK/ID/CSI包/真实DMA帧证据。必须继续完成共享VMM/MM clocks→可靠SMMUv3 SID80/SSID/table/CMDQ所有权与map/unmap→PHY/eFuse/settle/实际rate→async/outmux→CAMSV RAW10/SW_PASS1_DONE+cache/timeout/drain→iOS前后切换/预览/落盘。不能将资源probe返回0、双ID或构建通过称为拍摄完成。完整固定构建结果稍后补入,旧cold4b镜像不包含本轮代码。
+
 ## 相机活动交接(CAMERA-4,2026-11-10): 冷供电/AP timing代码完成;SENINF/CAMSV仅接收计划,未实采
 
 - **范围/隔离**:按用户明确续做共享供电冷启动/AP timing/SENINF/RAW DMA,在原 `.local/x9/worktrees/camera-clock` / `work/x9-camera-clock` 继续,祖先43fc181/747d8ce。主目录其他窗口有USB/audio/UFS等修改,未夹带。没有设备操作、根盘/分区/mailbox写入、push或测试套件;只读当前OPPO源/DT与UniXNU/hakios参考。
