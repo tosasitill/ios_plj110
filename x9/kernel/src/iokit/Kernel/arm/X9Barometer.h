@@ -3,6 +3,7 @@
 #define X9_BARO_H
 
 #include <stdint.h>
+#include "../../../bsd/dev/x9_scp_handoff.h"
 
 #define X9_BARO_MTK_INFO_BYTES 40u
 #define X9_BARO_MTK_DATA_BYTES 36u
@@ -24,6 +25,12 @@ extern "C" {
 int x9_baro_init(int diagnostic);
 void x9_baro_shutdown(void);
 int x9_baro_copy_sample(struct x9_baro_sample *sample);
+/* Layout qualification is not a power/firmware/transport readiness signal. */
+int x9_baro_copy_scp_handoff(struct x9_scp_handoff *layout);
+uint32_t x9_baro_get_report_interval_us(void);
+/* Physical rate changes are unsupported without the actual IPI sender.
+ * Only a matching real ENABLE ACK commits its batch rate. */
+int x9_baro_set_report_interval_us(uint32_t interval_us);
 
 /* sensor/2.0 worker context only (never hard IRQ). PRESSURE=6, DATA=0.
  * gain is raw units/hPa from the real sensor list; do not assume gain=100.

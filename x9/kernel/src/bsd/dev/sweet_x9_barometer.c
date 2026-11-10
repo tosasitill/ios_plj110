@@ -7,6 +7,7 @@
 #include <kern/clock.h>
 #include <kern/locks.h>
 #include <libkern/libkern.h>
+#include <pexpert/device_tree.h>
 #include "../../iokit/Kernel/arm/X9Barometer.h"
 
 static LCK_GRP_DECLARE(x9_baro_group, "x9_baro");
@@ -15,9 +16,87 @@ static struct x9_baro_sample latest;
 static uint32_t mtk_gain;
 static uint64_t last_scp_time;
 static uint64_t scp_request_time;
+static uint64_t scp_request_interval_ns;
+static uint32_t report_interval_us = 200000;
+static struct x9_scp_handoff scp_layout;
+static int scp_layout_valid;
 static int active, test_mode, valid;
 static int scp_pending, scp_enabled;
 static uint8_t scp_sequence;
+
+/* Read only the shim's qualified copy, never stale SRAM or an assumed EMI
+ * pointer. FDT facts are necessary but insufficient for hardware ownership. */
+static void
+copy_scp_layout(void)
+{
+ DTEntry chosen; const void *p; unsigned size;
+ struct x9_scp_handoff h;
+ scp_layout_valid = 0; bzero(&scp_layout, sizeof(scp_layout));
+ if (SecureDTLookupEntry(NULL, "/chosen", &chosen) != kSuccess ||
+     SecureDTGetProperty(chosen, "x9-scp-handoff", &p, &size) != kSuccess ||
+     size != sizeof(h)) return;
+ memcpy(&h, p, sizeof(h));
+ if (h.version != 1 || h.flags != X9_SCP_LAYOUT_VERIFIED ||
+     h.reserve_base != 0xe8000000 || h.reserve_size != 0x18c0000 ||
+     !h.dump_size || h.memory[0].size != h.dump_size ||
+     h.allocated_size > h.reserve_size ||
+     h.mbox_base != 0x1dfb0000 || h.mbox_set != 0x1dfb0100 ||
+     h.mbox_clear != 0x1dfb010c || h.mbox_init != 0x1df2a024 ||
+     h.sram_base != 0x1d000000 || h.sram_size != 0x400000 || h.region_info_op != 10) return;
+ uint32_t end = 0;
+ for (unsigned i = 0; i < X9_SCP_MEM_COUNT; i++) {
+  uint32_t start = h.memory[i].offset, bytes = h.memory[i].size;
+  if (start < end || start > h.allocated_size || bytes > h.allocated_size-start) return;
+  end = start+bytes;
+ }
+ if (end != h.allocated_size || h.memory[2].size != 0x100000 ||
+     h.memory[8].size != 0x10000 || h.memory[9].size != 0x2000 || h.memory[10].size != 0x2000) return;
+ const unsigned channels[] = {29,30,31,32}, lengths[] = {64,8,28,28};
+ for (unsigned i = 0; i < 4; i++) {
+  const struct x9_scp_pin *pin = &h.sensor_pin[i];
+  if (pin->channel != channels[i] || pin->message_bytes != lengths[i] ||
+      pin->pin_index >= 32 || pin->offset_bytes != pin->pin_index*8 ||
+      pin->offset_bytes > 256-pin->message_bytes) return;
+  for (unsigned j = 0; j < i; j++) {
+   const struct x9_scp_pin *other = &h.sensor_pin[j];
+   unsigned endj = other->offset_bytes+((other->message_bytes+7)&~7u);
+   unsigned endi = pin->offset_bytes+((pin->message_bytes+7)&~7u);
+   if (pin->offset_bytes < endj && other->offset_bytes < endi) return;
+  }
+ }
+ for (unsigned i = 0; i < 7; i++) if (h.reserved[i]) return;
+ scp_layout = h; scp_layout_valid = 1;
+}
+
+int
+x9_baro_copy_scp_handoff(struct x9_scp_handoff *out)
+{
+ if (!out) return EINVAL;
+ lck_mtx_lock(&x9_baro_lock);
+ int error = !active ? ENXIO : !scp_layout_valid ? EAGAIN : 0;
+ if (!error) *out = scp_layout;
+ lck_mtx_unlock(&x9_baro_lock); return error;
+}
+
+uint32_t
+x9_baro_get_report_interval_us(void)
+{
+ lck_mtx_lock(&x9_baro_lock); uint32_t us = report_interval_us;
+ lck_mtx_unlock(&x9_baro_lock); return us;
+}
+
+int
+x9_baro_set_report_interval_us(uint32_t us)
+{
+ if (us < 20000 || us > 1000000) return EINVAL;
+ lck_mtx_lock(&x9_baro_lock);
+ /* Until a real IPI sender owns cadence changes, do not report a host-poll
+  * change as a hardware batch update. Diagnostics are explicitly host-only. */
+ int error = !active ? ENXIO : scp_pending ? EBUSY :
+     !test_mode && us != report_interval_us ? ENOTSUP : 0;
+ if (!error) report_interval_us = us;
+ lck_mtx_unlock(&x9_baro_lock); return error;
+}
 
 static uint32_t
 le32(const uint8_t *p)
@@ -82,6 +161,9 @@ x9_baro_init(int diagnostic)
 	last_scp_time = 0;
 	scp_pending = scp_enabled = 0;
 	scp_request_time = 0;
+	scp_request_interval_ns = 0;
+	report_interval_us = 200000;
+	copy_scp_layout();
 	lck_mtx_unlock(&x9_baro_lock);
 	return 0;
 }
@@ -95,6 +177,8 @@ x9_baro_shutdown(void)
 	last_scp_time = 0;
 	scp_pending = scp_enabled = 0;
 	scp_request_time = 0;
+	scp_request_interval_ns = 0;
+	scp_layout_valid = 0;
 	lck_mtx_unlock(&x9_baro_lock);
 }
 
@@ -131,6 +215,7 @@ x9_baro_configure_mtk(const void *info, unsigned int length)
 		valid = 0;
 		scp_pending = scp_enabled = 0;
 		scp_request_time = 0;
+		scp_request_interval_ns = 0;
 	}
 	lck_mtx_unlock(&x9_baro_lock);
 	if (!error) printf("X9 BARO: MTK PRESSURE configured gain=%u; awaiting DATA (not a hardware enable)\n", gain);
@@ -165,6 +250,7 @@ x9_baro_invalidate_mtk(void)
 		last_scp_time = 0;
 		scp_pending = scp_enabled = 0;
 		scp_request_time = 0;
+		scp_request_interval_ns = 0;
 	}
 	lck_mtx_unlock(&x9_baro_lock);
 }

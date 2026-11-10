@@ -75,6 +75,7 @@ int x9_baro_scp_make_enable(void *request, unsigned capacity,
    * ENABLE carries the batch itself; there is no separate fake batch ACK. */
   for (unsigned i = 0; i < 8; i++) p[8+i] = (uint8_t)(interval_ns >> (8*i));
   scp_sequence = sequence; scp_pending = 1; scp_request_time = mach_absolute_time();
+  scp_request_interval_ns = interval_ns;
   scp_enabled = valid = 0;
  }
  lck_mtx_unlock(&x9_baro_lock); return error;
@@ -93,10 +94,14 @@ int x9_baro_scp_accept_enable(const void *ack, unsigned length)
  if (!error && (p[0] != scp_sequence || p[1] != 6 || p[2] != 1 ||
      p[4] != baro_crc8(p, 4))) error = EBADMSG;
  if (!error && (int8_t)p[3] < 0) error = EIO;
- if (!error) { scp_pending = 0; scp_enabled = 1; scp_request_time = 0; }
+ if (!error) {
+  report_interval_us = (uint32_t)((scp_request_interval_ns+999)/1000);
+  scp_pending = 0; scp_enabled = 1; scp_request_time = scp_request_interval_ns = 0;
+ }
  else if (error == ETIMEDOUT || error == EIO) {
   scp_pending = scp_enabled = valid = 0; mtk_gain = 0; last_scp_time = 0;
   scp_request_time = 0;
+  scp_request_interval_ns = 0;
  }
  /* Duplicate ACKs, unrelated transactions and malformed packets do not
   * revoke an established stream or consume an outstanding ENABLE. The

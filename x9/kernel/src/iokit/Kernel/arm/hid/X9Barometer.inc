@@ -4,6 +4,7 @@
  * Do NOT publish availability until a real PRESSURE DATA record arrives,
  * except explicitly labelled x9_baro=2 diagnostics. */
 #include "../X9Barometer.h"
+#include <sys/errno.h>
 #include "IOHIDEventServiceKeys_Private.h"
 
 class X9Barometer : public IOHIDEventService {
@@ -15,7 +16,7 @@ public:
 	UInt32 getPrimaryUsagePage() APPLE_KEXT_OVERRIDE { return kHIDPage_Sensor; }
 	UInt32 getPrimaryUsage() APPLE_KEXT_OVERRIDE { return kHIDUsage_Snsr_Environmental_AtmosphericPressure; }
 	UInt32 getProductID() APPLE_KEXT_OVERRIDE { return 0x6996; }
-	UInt32 getReportInterval() APPLE_KEXT_OVERRIDE { return 200000; }
+	UInt32 getReportInterval() APPLE_KEXT_OVERRIDE { return x9_baro_get_report_interval_us(); }
 	IOHIDEvent *copyEvent(IOHIDEventType type, IOHIDEvent *matching,
 	    IOOptionBits options) APPLE_KEXT_OVERRIDE;
 	IOHIDEvent *copyMatchingEvent(OSDictionary *matching) APPLE_KEXT_OVERRIDE;
@@ -45,6 +46,7 @@ X9Barometer::start(IOService *provider)
 	fIntervalUs = getReportInterval();
 	if (!IOHIDEventService::start(provider)) return false;
 	if (x9_baro_init(diagnostic == 1)) return false;
+	fIntervalUs = getReportInterval();
 	fIngressActive = true;
 	fTimer = IOTimerEventSource::timerEventSource(this, &X9Barometer::poll);
 	if (!fTimer || _hidWorkLoop->addEventSource(fTimer) != kIOReturnSuccess) {
@@ -57,6 +59,13 @@ X9Barometer::start(IOService *provider)
 	setProperty("X9BaroDataValid", kOSBooleanFalse);
 	setProperty("X9BaroDiagnostic", diagnostic == 1 ? kOSBooleanTrue : kOSBooleanFalse);
 	setProperty("X9BaroPhysicalTransportReady", kOSBooleanFalse);
+	struct x9_scp_handoff layout;
+	bool qualified = x9_baro_copy_scp_handoff(&layout) == 0;
+	setProperty("X9SCPLiveLayoutQualified", qualified ? kOSBooleanTrue : kOSBooleanFalse);
+	if (qualified) {
+		setProperty("X9SCPDumpBytes", layout.dump_size, 32);
+		setProperty("X9SCPRegionInfoSource", "TF-A GET_REGION_INFO; not SRAM+4");
+	}
 	if (diagnostic) { registerService(); fPublished = true; }
 	fTimer->setTimeoutUS(fIntervalUs);
 	IOLog("X9 BARO: HID initialized usage=0x20/0x31 interval=%u us mode=%s; waiting for SCP PRESSURE DATA (no physical enable)\n",
@@ -118,6 +127,11 @@ void
 X9Barometer::poll(OSObject *owner, IOTimerEventSource *sender)
 {
 	X9Barometer *self = (X9Barometer *)owner;
+	UInt32 appliedUs = self->getReportInterval();
+	if (appliedUs != self->fIntervalUs) {
+		self->fIntervalUs = appliedUs;
+		self->setProperty(kIOHIDReportIntervalKey, appliedUs, 32);
+	}
 	struct x9_baro_sample sample;
 	bool fresh = x9_baro_copy_sample(&sample) == 0;
 	if (fresh && !self->fPublished) {
@@ -162,8 +176,11 @@ X9Barometer::configure(OSObject *owner, void *arg0, void *, void *, void *)
 		OSNumber *number = OSDynamicCast(OSNumber, interval);
 		if (!number) return kIOReturnBadArgument;
 		uint64_t us = number->unsigned64BitValue();
-		/* Limit HID delivery polling, not the as-yet-unimplemented SCP batch. */
 		if (us < 20000 || us > 1000000) return kIOReturnBadArgument;
+		int error = x9_baro_set_report_interval_us((UInt32)us);
+		if (error == ENOTSUP) return kIOReturnUnsupported;
+		if (error == EBUSY) return kIOReturnBusy;
+		if (error) return kIOReturnNotReady;
 		self->fIntervalUs = (UInt32)us;
 		self->setProperty(kIOHIDReportIntervalKey, self->fIntervalUs, 32);
 		if (self->fTimer) self->fTimer->setTimeoutUS(self->fIntervalUs);

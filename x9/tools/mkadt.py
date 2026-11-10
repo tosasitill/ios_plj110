@@ -89,6 +89,7 @@ def build(seed=None, timebase=TIMEBASE, console_base=0, console_size=0, ram_wind
         ('dram-base', u64(phys_base)), ('dram-size', u64(mem_size)),
         ('x9-ram-map', bytes(2064)),
         ('x9-gpu-handoff', bytes(64)),  # populated only after live LK FDT verification
+        ('x9-scp-handoff', bytes(384)),  # layout only; never a firmware READY declaration
         ('x9-lk-wifi-dt', bytes(16384)),  # shim fdt_wifi_dump.c: read-only Wi-Fi DT facts as text
         ('random-seed', seed), ('debug-enabled', u32(1)),
         ('firmware-version', cstr('x9-direct-shim')),

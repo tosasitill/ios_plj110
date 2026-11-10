@@ -64,7 +64,7 @@ mcudl_nmea(struct x9_gps_mcudl_stream *s, const uint8_t *p, unsigned n,
 /* Returns only control-handler failures, not a checksum error that has been
  * resynchronized. A false frame must invalidate any half NMEA it straddles. */
 static int
-mcudl_parse(struct x9_gps_mcudl_stream *s, uint64_t host_time, int tracking)
+mcudl_parse(struct x9_gps_mcudl_stream *s, uint64_t host_time)
 {
  while (s->used) {
   if (s->frame[0] != 0xa5) {
@@ -81,9 +81,16 @@ mcudl_parse(struct x9_gps_mcudl_stream *s, uint64_t host_time, int tracking)
   if (s->frame[frame_bytes-1] != 0xa3) {
    s->bad_frames++; s->sentence_used = 0; mcudl_discard(s, 1); continue;
   }
+  /* A control ACK may start tracking, or fault/reset the generation, within
+   * this same coalesced receive. Never reuse receive-entry state for the
+   * next frame or deliver old-generation control commands after that reset. */
+  struct x9_gps_status status; x9_gps_copy_status(&status);
+  if (status.generation != s->generation || status.fault) {
+   mcudl_clear_partial(s); return status.fault ? ENXIO : ESTALE;
+  }
   s->frames++;
   if (s->frame[2] == X9_MCUDL_NMEA) {
-   if (tracking) {
+   if (status.ready && status.tracking) {
     int error = mcudl_nmea(s, s->frame+6, payload, host_time);
     if (error) { mcudl_clear_partial(s); return error; }
    } else {
@@ -96,6 +103,10 @@ mcudl_parse(struct x9_gps_mcudl_stream *s, uint64_t host_time, int tracking)
    if (!s->control) { mcudl_clear_partial(s); return ENOTSUP; }
    int error = s->control(s->context, s->frame[2], s->frame+6, payload, host_time);
    if (error) { mcudl_clear_partial(s); return error; }
+   x9_gps_copy_status(&status);
+   if (status.generation != s->generation || status.fault) {
+    mcudl_clear_partial(s); return status.fault ? ENXIO : ESTALE;
+   }
   }
   mcudl_discard(s, frame_bytes);
  }
@@ -134,7 +145,7 @@ x9_gps_mcudl_receive(struct x9_gps_mcudl_stream *s, const void *bytes,
   if (!s->used) s->fragment_time = host_time;
   if (s->used >= sizeof(s->frame)) { mcudl_clear_partial(s); return EOVERFLOW; }
   s->frame[s->used++] = p[i]; s->received_bytes++;
-  int error = mcudl_parse(s, s->fragment_time, status.ready && status.tracking);
+  int error = mcudl_parse(s, s->fragment_time);
   if (error) return error;
  }
  if (!s->used) s->fragment_time = 0;
