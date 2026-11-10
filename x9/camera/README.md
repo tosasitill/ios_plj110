@@ -21,6 +21,7 @@
 | MAC/async 包配置 | verified standby/receiver 后，真实配置前 DPHY／后 CPHY 包格式、正常 RAW10 DT、unsplit async/CAM_MAIN AFIFO，并仅追加选定 async CG；逐控制 journal/guard/逆序恢复，保留其它端口及原 IRQ policy。**已局部编译，未运行；不启用 PHY mux/MAC lane，不是完整 PHY 或采集后端** |
 | OUTMUX 配置引擎 | 同一已持有会话可显式配置 inactive OUTMUX0 的固定 image tag0，真实 masked shadow 写入；CFG_DONE 需 fresh masked STATUSX 事件和完整实际 inner target，再单 bit W1C 退休。WCLR policy 独立 journal/恢复，不启 AP/CCU IRQ 或 DL/DMA。**已局部编译，未运行；无 GIC/PHY/rate/SMI/SID80 grant/native capture caller** |
 | CAMSV GIC/worker | 本次 LK FDT 的四 cell GIC 拓扑→SWEET Group1 分发→单次 SOF/hybrid/debug 采样→有界队列→既有逐页 cache/RAW10 finish；未启采集的配置路径只准备 dormant worker，close 先退休 GIC/worker。**已局部编译，未运行；begin 仍必须真实 normal domain/route/AP-IRQ/IMG0A lease，没有 native capture caller；已接后文 receive/TG consumer arm，仍不启 PHY/source 或置 READY** |
+| normal SID80 映射引擎 | 自有 IAS34/16K RAW/CD/PTE；新增已启用normal NS控制器上的STE80 BBM/CFGI/CD/TLBI/SYNC安装、原STE80恢复与live check，保留实际STRTable/CMDQ/其它STEs。**接口需实际host跨firmware独占权限及power/cache/backing/drain证明；无注册者/运行结果，不能用private模板替换共享控制器或据此发DMA** |
 | 采集后端 | **缺失**：完整 DVFS/rate/SMI ownership、PHY 校准/速率、SENINF 路由提交、MM-SMMUv3 映射、RAW DMA 完成/排空队列 |
 
 原始 X9 DT 与 Android 启动日志确定：主摄为 i2c4/7-bit `0x1a`，ID 寄存器 `0x16/0x17` 返回 `0x9186`；前摄 i2c2/`0x10`，返回 `0x0615`。
@@ -779,3 +780,17 @@ controls完成后才标 `X9 CAMERA STREAM CONTROLS` 的stopped并进入下一节
 ACK后要求实际held的同epoch L19/P0 mapping、SMI/A0、原native request/power/config；读取普通`mtk-smi.c` external `+280`、internal `+780` monitor pair，两次0及最后fresh pair0，保存raw/sample masks。每store/poll仍核同一actual source/TG/receive/PHY/MAC/OUTMUX/FBC/S1。首错/回退/timeout保留请求和依赖；不重复request、不写release0、clear/reset或补RCNT。`X9 CAMERA DMA STOP`输出issued/DCM/ACK/sample/OSTD/errno。
 
 **DMA ACK和port zeros只是必要观察，不是full downstream AXI/SMMU/EMI/map退休。** 不取消原issued credit，不释放DCM/request/S1/supplier，不允许repeat；仍必须实现完整退休、normal NS controller/prior-preserving SID80 attach、持续rate/MMQoS、actual native provider和iOS前后实帧链。只有全链完成后才构建唯一最终镜像。
+
+### 保留共享 normal NS 控制器的 SID80 安装/退休
+
+`x9_camera_smmu_attach.inc` 新增 `x9_camera_smmu_attach`、`x9_camera_smmu_attached_check` 和 `x9_camera_smmu_detach`。不是把已有private whole-table模板写进共享控制器；**当前没有实际host/capture注册者，没有SID80实际attach或拍摄结果**。本路径使用当前已启用的NS SMMU，只初步支持linear LOG2SIZE8 STRTAB、LOG2SIZE2..8 CMDQ；能力不符返回错误，不reset/bootstrap、换表/队列或回退到Android转储。
+
+host的enter/guard/leave必须真实取得跨所有CPU/firmware producers的STE/queue序列化，并独立证明正常NS权限、SID80/SSID0/ASID1独占、actual power/cache及私有RAW/CD/PTE backing。传入的是常驻、当前coherent的真实表/队列CPU映射；逐16K页用pmap核实际PA对应，拒绝alias私有RAW/PTE/CD/queue和EVTQ。INSTALL要求原endpoint/DMA/history已退休；CHECK允许本stream运行；RETIRE另须完整source/AXI/IRQ/worker退休，不能以47/48 controls、ACK/port zeros或CPU IDLE代替。callback不能回调camera API，leave只退出serialization，不释放依赖。`export.map`描述真实自有RAW/CD；export里private STRTAB/CMDQ/EVTQ地址在此路径从不安装。
+
+先保存全部256个原STE及实际CR0/ACK、CR1/2、GBPA、IRQ/error/event和三个base/config，核原CMDQ producer=consumer、无未消费event/global error。STE80只接受全零invalid或canonical ABORT（word0=1、其余0），不接管已有bypass/live translation。display90/protected89/其它STE完整raw保持原状；每guard重核所有非目标STE、原控制器配置、actual queue单向消费及原backing，不改其它stream的CD/PTE。
+
+实际安装：atomic64清V→PoC clean→targeted CFGI80/SYNC消费；只写STE80的私有CD描述→valid-last→CFGI80/CD80/SYNC→TLBI NH/ASID1/SYNC，最后fresh guard。全部命令直接写当前真实CMDQ的已消费空slot并clean，issued/pending先于唯一actual PROD store；原producer/wrap不归零，两个actual目标CONS及最后fresh record/config/lease/deadline核对才消费该batch。不写CONS/GERRORN/EVTQ/IRQ、global TLBI/CR0/GBPA/STRTable/queue bases，不whole-table copy、cancel/retry。一个100ms总deadline包含所有BBM/store/cache/batch/最后观察，unknown/第三值/foreign producer/error/timeout终结并保留暴露资源。
+
+实际退休：只有host RETIRE证明和原RAW cache PRIVATE/IDLE等必要条件成立后，invalid-first→targeted CFGI/CD/TLBI/SYNC→只还原原STE80→最后CFGI/SYNC；不释放已export的RAW/CD/PTE或共享supplier。`x9_camera_smmu_check`在shared attempt后走保留host的真实live check，原private own-base CFGI/TLBI/SYNC入口拒绝，防止往未安装的private队列写入。日志`X9 CAMERA SID80`记录operation/phase/batches/pending/actual PROD/CONS/samples/errno；这些观察不是READY或完整capture-off成功。
+
+下一仍要提供实际normal host权限/当前映射来源、完整DMA→SMI/SMMU退休与credit/repeat、持续rate/MMQoS及native power/I2C/config/capture注册，最后接iOS前后实帧预览/照片。此安装算法不能冒充provider，不构建中间供测镜像。

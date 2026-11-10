@@ -31,9 +31,10 @@ struct x9_camera_smmu {
     uint64_t commands,syncs;
     struct cam_smmu_cmd batch[3];
     uint32_t batch_start,batch_count,close_samples,close_errno;
-    bool exported,pending,close_attempted,timedout_retired;
+    bool exported,pending,close_attempted,timedout_retired,shared_attempted;
 };
 static struct x9_camera_smmu *cam_smmu_namespace;
+static int cam_smmu_shared_check_locked(struct x9_camera_smmu *);
 
 static bool cam_smmu_capable(uint32_t idr0,uint32_t idr1,uint32_t idr5)
 {
@@ -270,7 +271,7 @@ int x9_camera_smmu_check(struct x9_camera_smmu *m)
     lck_mtx_lock(&camera_smmu_lock);
     e=cam_smmu_identity(m);
     if(!e)e=cam_smmu_storage(m);
-    if(!e)e=cam_smmu_live(m);
+    if(!e)e=m->shared_attempted?cam_smmu_shared_check_locked(m):cam_smmu_live(m);
     if(e && m==cam_smmu_namespace && m && m->exported)cam_smmu_latch(m,e);
     lck_mtx_unlock(&camera_smmu_lock);return e;
 }
@@ -393,6 +394,9 @@ static int cam_smmu_commands(struct x9_camera_smmu *m,unsigned operation)
     lck_mtx_lock(&camera_smmu_lock);
     e=cam_smmu_identity(m);
     if(!e && !m->exported)e=ENXIO;
+    /* Shared attachment owns its inherited queue through the retained host,
+     * never the private own-base command path or an unleased CFGI/TLBI. */
+    if(!e && m->shared_attempted)e=ENOTSUP;
     if(!e) {
         if(operation==1) {
             cmd[0]=(struct cam_smmu_cmd){{CAM_SMMU_CFGI_STE|((uint64_t)CAM_SMMU_SID<<32),1}};
@@ -410,3 +414,4 @@ static int cam_smmu_commands(struct x9_camera_smmu *m,unsigned operation)
 int x9_camera_smmu_cfgi(struct x9_camera_smmu *m){return cam_smmu_commands(m,1);}
 int x9_camera_smmu_tlbi(struct x9_camera_smmu *m){return cam_smmu_commands(m,2);}
 int x9_camera_smmu_sync(struct x9_camera_smmu *m){return cam_smmu_commands(m,0);}
+#include "x9_camera_smmu_attach.inc"

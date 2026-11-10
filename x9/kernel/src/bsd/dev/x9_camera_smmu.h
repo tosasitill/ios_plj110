@@ -46,5 +46,56 @@ int x9_camera_smmu_check(struct x9_camera_smmu *);
 int x9_camera_smmu_cfgi(struct x9_camera_smmu *); /* STE80 + CD80/SSID0 + SYNC */
 int x9_camera_smmu_tlbi(struct x9_camera_smmu *); /* NH/VMID0/ASID1 + SYNC */
 int x9_camera_smmu_sync(struct x9_camera_smmu *);
+
+/* Prior-preserving live NS attachment. This path NEVER installs the private
+ * whole-controller template or changes STRTAB/CMDQ/EVTQ/CR0/GBPA registers.
+ * Only linear LOG2SIZE8 tables and CMDQ LOG2SIZE2..8 are supported initially.
+ * Mappings are provider-pinned, current coherent normal CPU mappings of the
+ * ACTUAL installed storage, not old cached snapshots; page PA correspondence
+ * is independently checked, not a PA cast. Whole cache lines touched by PoC
+ * clean must have no adjacent CPU writer outside the acquired serialization.
+ * enter obtains exclusive table/queue serialization across all producers,
+ * including firmware, and proves NS permission, leased SID80/SSID0/ASID1,
+ * unreferenced private backing/CD and exact cache policy. No other stream
+ * may reference this ASID/CD/tree. INSTALL requires stopped endpoints and
+ * retired prior DMA/history; RETIRE additionally proves full source/AXI/IRQ/
+ * worker retirement. CHECK permits this stream's live DMA but no competing
+ * table/queue writer. guard revalidates these facts before every mutation
+ * and completion. Neither equal readbacks nor idle registers are a grant.
+ * Callbacks are mandatory, bounded, positive-errno returning, never reenter
+ * camera APIs, and keep their context/backing stable across the entire call.
+ * enter unwinds itself on error; leave releases serialization only, NEVER
+ * backing, mappings, supplier power or the lease. No userland PA interface.
+ */
+enum x9_camera_smmu_host_op {
+    X9_CAM_SMMU_INSTALL=1, X9_CAM_SMMU_CHECK, X9_CAM_SMMU_RETIRE
+};
+struct x9_camera_smmu_host_region {
+    uintptr_t va;
+    uint64_t pa;
+    uint32_t bytes, reserved; /* 16K aligned, at most32K, physically contiguous */
+};
+struct x9_camera_smmu_host {
+    void *context;
+    uint64_t lease;
+    struct x9_camera_smmu_host_region strtab,cmdq;
+    int (*enter)(void *,uint64_t,unsigned,const struct x9_camera_smmu_export *);
+    int (*guard)(void *,uint64_t,unsigned,const struct x9_camera_smmu_export *);
+    void (*leave)(void *,uint64_t,unsigned);
+};
+/* Once-only attach accepts ONLY zero-invalid or canonical ABORT STE80.
+ * It snapshots/preserves every other STE, including display90/protected89,
+ * and all live controller registers, then uses atomic64 BBM/PoC clean and
+ * exact inherited-queue CFGI80/CD80/TLBI-ASID1/SYNC consumption. One 100ms
+ * total deadline, no reset/retry/whole-table copy or stale-dump fallback.
+ * Shared checking uses the retained host, never the private own-base engine.
+ * Retire restores only original STE80 after exclusive owner-proven drain
+ * and targeted invalidation/SYNC; it does not free exported allocations.
+ * Any uncertain exposed-path failure is terminal, retaining all dependencies.
+ * There is intentionally no boolean 'drained' or success-as-ACK callback.
+ */
+int x9_camera_smmu_attach(struct x9_camera_smmu *,const struct x9_camera_smmu_host *);
+int x9_camera_smmu_attached_check(struct x9_camera_smmu *);
+int x9_camera_smmu_detach(struct x9_camera_smmu *);
 #endif
 #endif
