@@ -117,6 +117,59 @@ int x9_tfa_select_profile(const void *data,uint32_t size,const char *name,struct
     }
     *out=result;return 0;
 }
+static int patch(const struct image *c,uint32_t d,uint8_t *reg,uint16_t *mask,uint16_t *value)
+{
+    uint32_t off=d&0xffffffu;
+    if((d>>24)==2){*reg=c->p[off];*value=le16(c->p+off+1);*mask=le16(c->p+off+3);}
+    else {
+        uint16_t f=le16(c->p+off+2);unsigned width=(f&15)+1,pos=(f>>4)&15;
+        *reg=(uint8_t)(f>>8);*mask=(uint16_t)(((1u<<width)-1u)<<pos);
+        *value=(uint16_t)(le16(c->p+off)<<pos);
+    }
+    *value&=*mask;
+    /* Shared conservative exclusions for 72/73/74. This is NOT a positive
+     * per-revision whitelist: allow_patch still must reject every unknown
+     * CSR/action, even if it is outside these known side-effect regions. */
+    if(!*mask || *reg==3 || (*reg==0 && (*mask&0x181bu)) ||
+       (*reg==1 && (*mask&0xc000u)) || (*reg==5 && (*mask&0x1c00u)) ||
+       (*reg==0x50 && (*mask&0x2000u)) ||
+       (*reg==0xb1 && (*mask&0x0200u)) || (*reg==0xc0 && (*mask&6u)) ||
+       (*reg>=0x10 && *reg<=0x1f) || (*reg>=0x40 && *reg<=0x47) ||
+       (*reg>=0x70 && *reg<=0x7f) || (*reg>=0xa0 && *reg<=0xaf) ||
+       *reg>=0xf0)return EPERM;
+    return 0;
+}
+static int check_prefix_image(const struct image *c,const struct x9_tfa_profile *p,
+                              struct x9_tfa_prefix_check *s)
+{
+    for(unsigned i=0;i<2;i++)for(unsigned profile=0;profile<2;profile++) {
+        uint32_t off=profile?p->profile_offset[i]:p->device_offset[i];
+        unsigned n=c->p[off]-(profile?1u:0u),head=profile?8u:12u;
+        for(unsigned k=0;k<n;k++) {
+            uint32_t d=le32(c->p+off+head+k*4);
+            if((d>>24)!=2 && (d>>24)!=16)break;
+            uint8_t reg;uint16_t mask,value;int e=patch(c,d,&reg,&mask,&value);
+            if(e) {
+                s->device=i;s->profile=profile;s->descriptor=k;
+                s->reg=reg;s->mask=mask;s->value=value;s->error=(uint32_t)e;
+                return e;
+            }
+            s->checked[i]++;
+        }
+    }
+    return 0;
+}
+int x9_tfa_check_register_prefix(const void *data,uint32_t bytes,const char *name,
+                                struct x9_tfa_prefix_check *s)
+{
+    if(!s)return EINVAL;memset(s,0,sizeof(*s));s->version=1;
+    s->device=s->profile=s->descriptor=s->reg=UINT32_MAX;
+    struct x9_tfa_profile p;int e=x9_tfa_select_profile(data,bytes,name,&p);
+    if(!e) {
+        struct image c={data,bytes,54};e=check_prefix_image(&c,&p,s);
+    }
+    s->error=(uint32_t)e;return e;
+}
 #if defined(KERNEL)
 static int valid_bus(const struct x9_tfa_bus *b)
 {
@@ -128,26 +181,72 @@ static int valid_bus(const struct x9_tfa_bus *b)
     }
     return 0;
 }
-static int mute_one(const struct x9_tfa_bus *b,unsigned i)
+/* These action bits are common to all three admitted families. Never RMW
+ * an observed 1, even when it lies outside the requested patch mask. */
+static uint16_t action_mask(uint8_t reg)
+{return reg==0?2u:reg==0x50?0x2000u:0;}
+static int identity(const struct x9_tfa_bus *b,unsigned i,struct x9_tfa_status *s)
 {
-    uint16_t old,check;int e=b->read16(b->context,(uint8_t)(0x34+i),0,&old);
+    uint16_t rev=0;int e=b->read16(b->context,(uint8_t)(0x34+i),3,&rev);
+    s->revision_verified&=~(1u<<i);s->muted&=~(1u<<i);
+    if(!e) {
+        s->revision[i]=rev;
+        if(rev!=b->expected_revision[i])e=ENXIO;
+        else s->revision_verified|=1u<<i;
+    }
+    return e;
+}
+static int mute_one(const struct x9_tfa_bus *b,unsigned i,struct x9_tfa_status *s)
+{
+    uint16_t old=0,check=0;int e=b->read16(b->context,(uint8_t)(0x34+i),0,&old);
     /* AMPE=0x0030 in all three confirmed family2 field tables. The
-     * set_mute_nodsp callback itself is a no-op; AMPE readback is essential. */
-    if(!e)e=b->write16(b->context,(uint8_t)(0x34+i),0,(uint16_t)(old&~8u));
+     * set_mute_nodsp callback itself is a no-op; AMPE readback is essential.
+     * I2CR=0x0010 is an auto-clear action, NOT an ordinary preserved bit. */
+    if(!e){s->sysctrl[i]=old;if(old&action_mask(0))e=EBUSY;}
+    uint16_t wanted=(uint16_t)(old&~(8u|action_mask(0)));
+    if(!e && (old&8)) {
+        s->mute_attempts[i]++; /* a failed/timed-out write may have landed */
+        s->mute_uncertain|=1u<<i;
+        e=b->write16(b->context,(uint8_t)(0x34+i),0,wanted);
+    }
     if(!e)e=b->read16(b->context,(uint8_t)(0x34+i),0,&check);
-    if(!e && (check&8))e=EIO;return e;
+    if(!e){s->sysctrl[i]=check;if(check!=wanted)e=EIO;}
+    if(!e)s->mute_uncertain&=~(1u<<i);
+    return e;
 }
 static int mute_both(const struct x9_tfa_bus *b,struct x9_tfa_status *s)
 {
     int first=0;s->muted=0;
     for(unsigned i=0;i<2;i++) {
+        /* Do not reissue a possibly landed mute write on final cleanup.
+         * Keep its uncertainty and the physical lease for real reset. */
+        if(s->mute_uncertain&(1u<<i)) {if(!first)first=EBUSY;continue;}
         /* Never write unknown silicon even on the failure cleanup path. */
         if(!(s->revision_verified&(1u<<i)) || s->revision[i]!=b->expected_revision[i]) {
             if(!first)first=ENXIO;continue;
         }
-        int e=mute_one(b,i);if(!e)s->muted|=1u<<i;else if(!first)first=e;
+        /* Revalidate previously known silicon immediately before cleanup.
+         * A failed initial identity read is NOT retried or authorized here. */
+        int e=identity(b,i,s);if(!e)e=mute_one(b,i,s);
+        if(!e)s->muted|=1u<<i;else if(!first)first=e;
     }
-    s->mute_error=(uint32_t)first;if(first)s->poisoned=1;return first;
+    if(first && !s->mute_error)s->mute_error=(uint32_t)first;
+    if(first)s->poisoned=1;return first;
+}
+static int confirm_pair(const struct x9_tfa_bus *b,struct x9_tfa_status *s)
+{
+    int first=0;
+    for(unsigned i=0;i<2;i++) {
+        uint16_t control=0;int e=identity(b,i,s);
+        if(!e)e=b->read16(b->context,(uint8_t)(0x34+i),0,&control);
+        if(!e) {
+            s->sysctrl[i]=control;
+            if(control&(8u|action_mask(0)))e=EBUSY;
+            else s->muted|=1u<<i;
+        }
+        if(e && !first)first=e;
+    }
+    if(first)s->poisoned=1;return first;
 }
 int x9_tfa_probe_and_mute(const struct x9_tfa_bus *b,struct x9_tfa_status *s)
 {
@@ -159,21 +258,8 @@ int x9_tfa_probe_and_mute(const struct x9_tfa_bus *b,struct x9_tfa_status *s)
         if(!r)s->revision_verified|=1u<<i;
         if(r && !first)first=r;
     }
-    int muted=mute_both(b,s);e=first?first:muted;s->error=(uint32_t)e;return e;
-}
-static int patch(const struct image *c,uint32_t d,uint8_t *reg,uint16_t *mask,uint16_t *value)
-{
-    uint32_t off=d&0xffffffu;
-    if((d>>24)==2){*reg=c->p[off];*value=le16(c->p+off+1);*mask=le16(c->p+off+3);}
-    else {
-        uint16_t f=le16(c->p+off+2);unsigned width=(f&15)+1,pos=(f>>4)&15;
-        *reg=(uint8_t)(f>>8);*mask=(uint16_t)(((1u<<width)-1u)<<pos);
-        *value=(uint16_t)(le16(c->p+off)<<pos);
-    }
-    /* Never let a profile enable AMPE or write chip ID/OTP/key ranges by
-     * default. Remaining registers need the revision-specific policy too. */
-    if(!*mask || *reg==3 || (*reg==0 && (*mask&8)))return EPERM;
-    return 0;
+    int muted=mute_both(b,s);e=first?first:muted;
+    if(!e)e=confirm_pair(b,s);s->error=(uint32_t)e;return e;
 }
 static int prefix(const struct x9_tfa_bus *b,const struct image *c,unsigned i,uint32_t off,
                   int profile,struct x9_tfa_status *s,int apply)
@@ -184,13 +270,21 @@ static int prefix(const struct x9_tfa_bus *b,const struct image *c,unsigned i,ui
         uint8_t reg;uint16_t mask,value;int e=patch(c,d,&reg,&mask,&value);if(e)return e;
         e=b->allow_patch(b->context,b->expected_revision[i],reg,mask,value);if(e)return e;
         if(apply) {
-            uint16_t old,check;e=b->read16(b->context,(uint8_t)(0x34+i),reg,&old);
+            /* Bounded by the two container list counts. No status/IRQ reads:
+             * those may clear sticky faults on 73/74. ID and SYSCTRL only.
+             * The immutable rail/reset/policy lease is still mandatory. */
+            e=confirm_pair(b,s);if(e)return e;
+            uint16_t old=0,check=0,wanted=0;
+            e=b->read16(b->context,(uint8_t)(0x34+i),reg,&old);
+            if(!e && ((old&action_mask(reg)) || (reg==0 && (old&8))))e=EBUSY;
             if(!e) {
+                wanted=(uint16_t)(((old&~mask)|(value&mask))&~action_mask(reg));
                 s->write_attempts[i]++; /* timed-out write may have landed */
-                e=b->write16(b->context,(uint8_t)(0x34+i),reg,(uint16_t)((old&~mask)|(value&mask)));
+                e=b->write16(b->context,(uint8_t)(0x34+i),reg,wanted);
             }
             if(!e)e=b->read16(b->context,(uint8_t)(0x34+i),reg,&check);
-            if(!e && (check&mask)!=(value&mask))e=EIO;
+            /* Do not accept an unrelated field change as our RMW result. */
+            if(!e && check!=wanted)e=EIO;
             if(e){s->poisoned=1;return e;}s->applied[i]++;
         }
     }
@@ -202,6 +296,8 @@ int x9_tfa_apply_register_prefix(const struct x9_tfa_bus *b,const void *data,uin
     if(!s)return EINVAL;memset(s,0,sizeof(*s));struct x9_tfa_profile plan;
     int e=valid_bus(b);if(!e)e=x9_tfa_select_profile(data,bytes,name,&plan);
     struct image c={data,bytes,54};
+    struct x9_tfa_prefix_check guard={0};
+    if(!e)e=check_prefix_image(&c,&plan,&guard);
     /* Preflight BOTH full prefixes before the first write. Blob and policy
      * must be immutable/leased for this serialized call; never user mappings. */
     for(unsigned i=0;!e && i<2;i++) {
@@ -214,8 +310,11 @@ int x9_tfa_apply_register_prefix(const struct x9_tfa_bus *b,const void *data,uin
         e=prefix(b,&c,i,plan.device_offset[i],0,s,1);
         if(!e)e=prefix(b,&c,i,plan.profile_offset[i],1,s,1);
     }
+    if(!e)e=confirm_pair(b,s);
+    if(e)s->poisoned=1; /* cleanup cannot erase a partial prefix/policy error */
     /* No unmute API and no rollback of trigger/MTP writes. Prefix failure
      * retains the board lease for a real hardware-reset recovery. */
-    int muted=mute_both(b,s);if(!e)e=muted;s->error=(uint32_t)e;return e;
+    int muted=mute_both(b,s);if(!e)e=muted;
+    if(!e)e=confirm_pair(b,s);s->error=(uint32_t)e;return e;
 }
 #endif

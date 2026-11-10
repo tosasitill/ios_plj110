@@ -443,6 +443,24 @@ TFA 只有 reg03 **成功读取且完整revision匹配**才设置 `revision_veri
 失败回调即便填写了相同值，也不能授权cleanup写该芯片。prefix记录write attempts与
 applied次数，失败写入/读回置poison，后续双侧mute成功不抹掉部分配置的不确定性。
 
+功放配置新增与离线工具共用的 **baseline-independent prefix exclusions**：在首次
+硬件访问前检查两侧 device/profile 的全部 leading register/bitfield prefix，拒绝
+chip-ID、status／sticky-fault／IRQ-clear、boost、key／MTP／校准区，以及已知的
+power／AMPE／reset／protection动作字段。其余CSR仍必须由真实 full-revision
+`allow_patch` 白名单授权；排除检查通过不是正向白名单，也不是完整初始化。
+opaque descriptor 仍不执行；遇到它就停止 prefix，不能据此称后续 profile 已应用。
+
+OPPO 72/73/74 字段表确认 `reg00 bit1 I2CR` 和 `reg50 bit13 rst_min_vbat`
+为 auto-clear 动作。mute／prefix RMW 写前拒绝继承的非零动作位，显式写动作位0，
+不把“mask没有包含动作位”当作安全；AMPE已0时不重复写mute。每项配置前核对
+两侧实际 reg03 与 reg00，完整16-bit RMW读回也核对未修改字段。cleanup重新核对
+之前已确认的revision，失败／变化即撤销该侧写授权；初次身份失败不会在cleanup
+重试读ID并授权写入。主错、部分配置poison与mute错误独立保存，mute成功不抹掉
+它们。mute写前记录uncertain；写入／完整读回失败后，final cleanup不重新读写该侧
+以盲重放可能已落地的mute，保留首个mute错误和资源lease，等待真实reset。
+新增私有 `mute_attempts/sysctrl/mute_uncertain` 仅为真实provider保存证据，不改变PCM／IOKit ABI。
+这些重复检查不能代替不可变的reset／rail／bus lease，也不证明远端无竞争者。
+
 ### 读取已供电功放的身份
 
 **仅在配套内核和工具已部署、`x9_audio=2` 时使用**；本轮未安装／上机，
@@ -488,7 +506,10 @@ board type2不会替换PCM页；无backend lease时关闭诊断会话不改PCM f
 audioctl amp-inspect /var/tmp/tfa98xx.cnt '<exact-profile-name>'
 ```
 
-parser 报告两个 PA 的 profile/prefix/opaque 数目。CRC通过和 prefix写完均不表示
+parser 报告两个 PA 的 profile/prefix/opaque 数目，并执行同一 prefix 排除检查；
+拒绝时显示PA、device/profile、零起始descriptor index、reg/mask/value和errno并退出1。
+检查通过仅表示 leading prefix 未命中这些已知禁写项，**不授权kernel写入**。
+CRC通过和 prefix写完均不表示
 完整初始化／校准成功。不会执行未知 opaque payload、猜默认profile、写MTP/OTP，
 没有 unmute API；真实 profile／芯片证据未齐时，不允许进入 speaker Ready。
 

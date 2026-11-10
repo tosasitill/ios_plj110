@@ -147,10 +147,21 @@ static int inspect_container(const char *path,const char *profile) {
     struct x9_tfa_profile p;int e=n==(size_t)length && !read_error?
         x9_tfa_select_profile(data,(uint32_t)length,profile,&p):1;
     if(e)fprintf(stderr,"container rejected: errno=%d (requires exact dual-I2C-kind/bus0 profile, size, CRC)\n",e);
-    else for(unsigned i=0;i<2;i++)printf("PA6-%02x %s profile=%s CRC=%08x register-prefix=%u opaque=%u\n",
-        0x34+i,p.device_name[i],p.profile_name[i],p.crc,p.prefix_items[i],p.opaque_items[i]);
+    else {
+        for(unsigned i=0;i<2;i++)printf("PA6-%02x %s profile=%s CRC=%08x register-prefix=%u opaque=%u\n",
+            0x34+i,p.device_name[i],p.profile_name[i],p.crc,p.prefix_items[i],p.opaque_items[i]);
+        struct x9_tfa_prefix_check guard;
+        e=x9_tfa_check_register_prefix(data,(uint32_t)length,profile,&guard);
+        printf("Prefix exclusions checked left=%u right=%u errno=%u\n",
+            guard.checked[0],guard.checked[1],guard.error);
+        if(e && guard.device!=UINT32_MAX)
+            fprintf(stderr,"prefix denied: PA6-%02x %s descriptor=%u reg=%02x mask=%04x value=%04x errno=%d\n",
+                0x34+guard.device,guard.profile?"profile":"device",guard.descriptor,
+                guard.reg,guard.mask,guard.value,e);
+        else if(e)fprintf(stderr,"prefix container rejected: errno=%d\n",e);
+    }
     memset(data,0,(size_t)length);free(data);
-    if(!e)puts("Local parser only; no chip revision/loaded-profile proof, no hardware writes.");
+    puts("Local parser/exclusion guard only; not a revision-specific allowlist, chip/loaded-profile or Ready proof. No hardware writes.");
     return e?1:0;
 }
 static void print_status(const X9AudioControl *s) {
