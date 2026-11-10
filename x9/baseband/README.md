@@ -1,17 +1,18 @@
 # X9 基带桥：AT 控制面、MIPC IPv4 WDS 与 DPMAIF
 
-**当前实测仍是 rev252hl-md / 157；最新候选 rev252hs-md 已编译，尚未上机。**
-11 个完整 Apple 固件文件已可读，Sahara finished、QMUX 开启；这不等于 iOS 蜂窝可用。
-控制查询走真实 AT；hs 的 IPv4 WDS 走实际 RIL 使用的 MIPC1，含 DPMAIF 主动初始化/收发代码。
-**PDP 激活、DPMAIF DMA 可达与实际包收发仍未实机验证；语音/IMS 未实现。**
-当前候选与交接以仓库根 `NOTES.md` §7 为准。
+**当前蜂窝运行基线是 CELL131 / 日志189；不是下文历史 hl/hs 候选。**
+CELL131 已进入系统，两卡信号/5G/attach 有证据，但 CreateProfile27 被94拒绝142次，
+没有 Start20、ACT201、GET205、EIF4302，PDP TX/RX=0。已提交 RAM profiles、CallType35
+及后续 ACT/队列修正尚无新蜂窝运行验收；typed transport、持续资格和退休账本仍是独立候选。
+**没有新的可交付蜂窝 boot.img；不以固件可读、5G图标、静态链或单位编译代替联网成功。**
+当前决定与产物以仓库根 `NOTES.md` 的 CELL-CHAIN-REVIEW 为准；下文旧构建命令仅供历史追溯。
 
 `qcom/` 引入 UniXNU/QcomBaseband（BSD-2-Clause，HoshinoYumeka / chiba233；上游提交见
 `qcom/UPSTREAM.json`）。只使用 portable `baseband/`：AppleBaseband IOKit、QMUX/QRTR、
 Sahara 兼容桥、PDP helper 与 VINYL Tape。Qualcomm IPA/GSI 不适用于 MT6993 的 DPMAIF。
 未导入参考项目针对 iOS17 的 CommCenter/BBTicket 机器码修改；本项目保留原始 20H392 用户态。
 
-## 用户现在怎么启动
+## 历史 hs 候选启动与构建（不是当前测试要求）
 
 在仓库根，由用户手动执行：
 
@@ -323,21 +324,35 @@ PCO已从TCM PIC追到生成与SIB/PAM输入：PIC79只贡献IPv4 DNS仲裁默�
 IDd/len0；SAT长报文分支会清PCOcount和AlwaysOnpresent。VGSM/smic EPCO生成已追到80头、
 ID大端/u8len/content及MCD25e5的present/len/content输入；global optionalIE mask还可删除。
 MCD25e5原始bytecode及IF/MAXBYTES已核到IEI7b＋大端16bit长度＋smic内容的静态格式。
-实际pack输出/ACT具体事件/PAM消费、QMI选项转换和网络接受仍未闭合，不提供Options encoder，不拿中间缓存/生成成功冒充真实下发。
+普通路径另已核到TCM1da4→PAM成功handler→同localpara/peer relay→VGSMc6c0实际handler，
+后者读取原84/count、86/entries进入同一EPCO serializer；不是仅有SAT/publicAPI调用线索。
+四张原ROM BRSC表由主agent独立重取核对。PAM/VGSM的PSI、procedure、ACL、backoff、
+emergency等门及optionalIE删除仍生效；实际pack输出、MIPC ACT到具体TCM事件、QMI选项转换
+和网络接受仍未闭合，不提供Options encoder，不拿中间生成/relay成功冒充真实下发。
 
 WDS正常状态机另冻结36条转移/11项发现：解绑前last_call快照及解绑后completion计数抑制
 仍漏最终统计，204/4202也不能代替TX quiescent或RX/channel release，DDS只查b.used不够。
 被拒owner候选未发布两个sameCID LIVE holder；已确认的无限Stop路径是另一uncertain操作
 永久挡全局mutation guard，不把它描述成两个已发布holder的实跑死锁。
-独立持续资格候选新增transport birth/card/DDS/client双门，单位编译exit0/33 warnings，
+独立持续资格候选新增transport birth/card/DDS/client双门，完整patch及源文件与单位编译产物
+对应关系已审（exit0/33 warnings）：DDS/client失格关闭数据成功但仍消费原bearer token，
+MD/card失配锁context_lost，late CNF不能恢复旧资格或触发旧203。只接受隔离门设计，
 **未合入、generic201/203仍封，claim不是lease、ACT0/owned仍未资格化**。
+握手init_poll在hold/offline时早退、不再take已超时token的旧缺口仍待独立drain-only处理；
+退休账本同时须区分TXfinal、已交付RX byte cutoff与仍可能增长的RXdrop，不能据TX排空清channel。
+新的AP账本隔离候选已审三文件patch及最终单对象编译（exit0/32 warnings）：immutable TX lifetime、
+4格独立WDS退休表及20格永久channel RX ledger保持晚完成归属，204/4202/DEL不抹已发布账。
+unbound TX拒绝只计global；TXfinish只释放AP占位，不清channel、不提供MD/RX release。
+RX bytes仅DPMAIF交void receiver计数，不能代表ifnet_input接受；本候选仍未合主线。
+IPv6另核到DataContextInterface virtual-base/thunk实际偏移及保留x1的driver+128调用，
+但ActivatorModel的实际对象producer、driver factory绑定和DAD/settings资格尚未闭合。
 当前证据/候选在 `.local/x9/work/cell-chain-review-20261111/`、
 `cell-chain-protocol-20261110/`、`cell-chain-modem-options-20261110/`、
 `cell-chain-state-review-20261110/`；最终验收仍以下节真实联网/重连/双卡为准。
 
 ### 5. iOS 网络最终验证
 
-hs 已接 raw-IP send/receiver 和经 WDS 证据门控制的 route；仍需实机验证 Apple traffic gate 与 PDP unit/family。
+源码已有 raw-IP send/receiver 和经 WDS 证据门控制的 route；仍需实机验证 Apple traffic gate 与 PDP unit/family。
 确认 iOS 接口有实际地址、路由/DNS，TX/RX 不再为零；通过该蜂窝路径验证收发、断线重连、IPv4/IPv6。
 四个 PDP helper 接口存在或 `data port step3` 只是初始化尝试结束，不是通网证据。
 
@@ -352,7 +367,7 @@ hs 已接 raw-IP send/receiver 和经 WDS 证据门控制的 route；仍需实�
 最小日志检索（把 N 换成新运行）：
 
 ```sh
-rg -n 'build=rev252hs|X9 BBFW|qdsp6|sahara|X9 QMI AT:|X9 DPMAIF:|X9 MIPC:|X9 WDS:|COACHZ pdp:' ~/N.txt
+rg -n 'X9 BBFW|qdsp6|sahara|X9 QMI AT:|X9 DPMAIF:|X9 MIPC:|X9 WDS:|COACHZ pdp:' ~/N.txt
 ```
 
 失败先回到最早不确定分支：AT offline/timeout、final、CRSM/FCP/session、QMI TLV、CommCenter 消费，
