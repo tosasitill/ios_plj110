@@ -1313,7 +1313,15 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **真实边界/下一步**:本轮没有上机,**尚不能宣告双卡设置显示/默认语音卡/DDS切换成功**。SettingsCellularUtils isUIDualSIM(1f12ccf88)还要求真实subscriptionContexts和plan总数>1;不伪造plan或强改visible。权威验收仍是两plan及默认语音/数据选项出现→选择→020e/current IND与CT回读一致→新数据卡真实WDS ACT/GET/EIF收发。相机仍无可拍摄硬件后端,蓝牙无固件ready/扫描配对,ALS无物理SCP输入;音频无READY/声学录放,torch物理点灯未验收,联合编译不能代替它们的硬件状态。
 - **精确复建/证据**:在`.local/x9/worktrees/all119-dualsim176`运行Framework Python3.13 `-I x9/build/build.py all --name <新的唯一名字> --config /Users/tosasitill/ios_plj110/.local/x9/work/dual-sim-176/build/local-config.json --boot-config /Users/tosasitill/ios_plj110/.local/x9/work/dual-sim-176/build/boot-config.json -j 8`。私有`.local/x9/work/dual-sim-176/`保存176提取、VA反汇编/cache输入及编译日志;`build/{inputs119.json,stdout119.log,exit119,speaker119.log,bt119.log,tools-exit119}`保留最终步骤和exit0。单对象首次两轮因隔离树缺生成firmware/torch头停下,补已有gitignored输入后kern_exec/X9Baseband/gpu_dependencies三个对象编译exit0;最终全构建器自行生成依赖。没有成功后解包/hash/反汇编/二次校验、测试套件、CI run/主动push/设备操作/分区写入。用户自行启动命令仅供交付:`fastboot boot x9/out/x9-all119-dualsim176-ufs-md/boot.img`,本轮不要求立即连续刷探针。
 
-## 7. 当前交接(GPS-BARO-33,2026-11-10): native slot/credit和sole-worker bootstrap pump已接入;真实注册链/应用确认及完整生产链仍缺,代码齐后才出唯一最终镜像
+## 7. 当前交接(GPS-BARO-34,2026-11-10): STOP原件候选出现跨区域call映射冲突，先证明loader;真实注册链/应用确认及完整生产链仍缺,代码齐后才出唯一最终镜像
+
+### GPS-BARO-34 原件分析接续(2026-11-10): STOP128未证实事务匹配；跨区域call映射出现冲突，先回到loader
+
+- **隔离/状态**：独立 `.local/x9/worktrees/gps-mnl-session34` / `gps-mnl-session34-20261110`，实际base **e9e14ec**（建树前观察18c1f8b，期间其他窗口提交相机交接）；本阶段只读原件，无GPS34源码修改/对象编译/CI/镜像/设备操作。GPS33源码fa88a2f及对象成功结果不变，目标active，全部GPS代码齐才唯一最终镜像。
+- **AP观察**：libmnl53f55c..568发OPEN0后启动watchdog，无已证明OPEN应用ACK；5412c8..54133c先清level event10、发STOP1、等待参数6；705cc0..ccc收到event128只经51b990唤醒，不读wire transaction ID。53f6b8后的uninit/free路径不能授权XNU释放DMA资源。generic notification0仍不是OPEN_ACK。
+- **MCU候选/纠错**：私有string-xrefs扫描23个定点references，session95027已exit0；ec98e..992候选call2f27b6分配6B/internal id0c，带mcu2scp字符串，不是已证实AP128 producer。2f1ece..1f10两段a0=80/a1=stack+0a/a2=2和sh zero可见，但前后未知vendor67指令，不能证明必经、恰好一次或2B零wire schema。标准signed AUIPC/JALR由2f1ee6/eea算到ec7c6，**落在另一函数中段**；当前flat offset→VMA、跨区域call、函数边界冲突，须先证明container/loader映射，不猜未知ISA。F0000000只是候选链接base，不是加载/selected firmware authority。
+- **材料/边界**：`.local/x9/work/gps-mnl-session34-20261110/`保留AP close/event dis、MCU stop/state/candidate dis及string-xrefs.py/json/log/exit。`mcu-ap-stop128-producer.dis`实际2f2844..2960有mcu2scp路线；`mcu-stop128-packet-producer.dis`为初次算错到2ee7c6的失败候选；`mcu-stop128-inner-send.dis`是ec7c6候选但非已证实sender。命名不作证据，原文件不覆盖。现有event128 decoder合同不因这些候选变strict、不造matched ACK/READY。
+- **下一步**：读OPPO `gps_mcudl/linux/gps_mcudl_linux_fw_loading.c`与当前firmware container证明分段/地址映射；来源 `.local/x9/work/gps-baro-vendor5-20261110/derived-firmware/connsys_gnss_b-connsys_gnss.bin` 3867028B，外层MTK512B header及cert1/cert2不是运行映射。然后接真实session/freshness/QRTR→soleworker与应用完成；完整CONNV2/backend注册、selected可达secure-policy、power/POS/NVauthority/POST_ON、PVT时间/精度资格及PRESSURE6/gain/SCP仍缺。无测试脚本/套件/成功对象重编或镜像重检；276/bootargs/root manifest不动，整体WAIT_CONNV2、GPS/气压未物理闭环。
 
 ### GPS-BARO-33 生产代码里程碑(2026-11-10): native INIT接真实slot/credit及sole-worker自动pump，不清零继承计数
 
