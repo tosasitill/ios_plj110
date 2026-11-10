@@ -74,7 +74,7 @@ X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>      # 之后再�
 ## 3. 当前基线镜像与参数
 
 最新实测:**x9-rev252ic-md**(168,见HANDOFF102;LTE-only注册稳定,仍不拨号);再前 **x9-rev252ib-md**(167,见HANDOFF101);再前 **x9-rev252ia-md**(166,见HANDOFF100);再前 **x9-rev252hz-md**(165,见HANDOFF99);再前 **x9-rev252hy-md**(164,见HANDOFF98);再前 **x9-rev252hx-md**(163,见HANDOFF96);再前 **x9-rev252hw-md**(162,见HANDOFF95);再前 **x9-rev252hv-md**(161,见HANDOFF94;MIPC就绪、UIM读通);再前 **x9-rev252hu-md**(160,见HANDOFF93;RAM 10.0GiB生效);再前 **x9-rev252ht-md**(159,见HANDOFF92);再前 **x9-rev252hs-md**(158,见HANDOFF91;MIPC/DPMAIF在prepare/OPEN即隔离,UIM卡状态被拒);前一实测 **x9-rev252hl-md**(代码提交 **`20c64f2`**,构建交接 `0f9d983`),boot.img **12877824 B=12.28125MiB**,路径 `x9/out/x9-rev252hl-md/boot.img`。**157确认完整11文件安装成功、qdsp可读、Sahara finished并进入QMUX/QMI,握手摘要reset=0;真实iOS蜂窝尚未打通**,见HANDOFF87。独立34MiB固件与插件275不需再stage。
-最新实测:**x9-rev252ie-md**(171,见HANDOFF105;槽泄漏基本解决,SpringBoard上滑后静默退出,磁盘40MiB)。当前未上机候选:**x9-rev252ih-md**(ig + 双卡uim3 + NR SA nr1合并,双卡/SA默认开,32GiB manifest,见HANDOFF107);ig/if未单独上机;更早候选 **x9-rev252hq-md**(代码`ccbad81`),boot.img12906496B;沿用hn AT→QMI,新增DPMAIF只读/分配探针和WDS前置状态查询,见HANDOFF89。hq默认`x9_dpmaif=1`,不初始化硬件或激活PDP;hn保留。最新实测仍hl;不要把候选当作SIM/蜂窝已验证。
+最新实测:**x9-rev252ie-md**(171,见HANDOFF105;槽泄漏基本解决,SpringBoard上滑后静默退出,磁盘40MiB)。当前未上机候选:**x9-rev252ij-md**(ih + 内核安装CommCenter双卡/NR能力门 + 5G信号,见HANDOFF108);ih/ig/if未单独上机;ig/if未单独上机;更早候选 **x9-rev252hq-md**(代码`ccbad81`),boot.img12906496B;沿用hn AT→QMI,新增DPMAIF只读/分配探针和WDS前置状态查询,见HANDOFF89。hq默认`x9_dpmaif=1`,不初始化硬件或激活PDP;hn保留。最新实测仍hl;不要把候选当作SIM/蜂窝已验证。
 回退:**x9-rev252hk-md**(修复提交 `d1f8515` + 当时未提交的渲染改动,现已入库),boot.img **15278080 B**;156确认reserve生效、efs1.bin已有1MiB,当时15次reset及零传输见HANDOFF84。
 本机回退镜像:`x9/out/x9-rev252hk-md/boot.img`;hl/hk配置沿用 `.local/x9/modem/boot-rev252hi-md.json`。
 157已越过缺qdsp的前置阻塞,**当前阻塞在X9的QMI→MTK适配**:UIM/NAS/DMS/WDS/WDA/DPM请求实际到达后返回0x5e,数据端口配置失败,四个PDP接口仍blocked/tx=rx=0。Sahara是兼容桥交互,不向物理MTK下载Apple固件;PCIControl methods仍0x0,不能说PCIControl已通。以下GPU专用基线与参数为 **2026-11-08 历史记录**,不要当作hk/hl参数直接复用。
@@ -152,7 +152,14 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
 
-## 7. 当前交接(HANDOFF 107,2026-11-10): 三线合并为ih——main(ig根盘扩容/if/ie)+双卡uim3+NR SA nr1;双卡与SA默认开
+## 7. 当前交接(HANDOFF 108,2026-11-10): ij = ih + 内核首启安装CommCenter双卡/NR能力门(含页哈希) + 5G信号
+
+- **能力门(用户要求"放内核里第一次启动就修复")**:`kern_exec.c sweet_x9_ccgate()`,PID1在siri_off之前运行,默认开(`x9_ccgate=0`关,`=2`恢复原字节)。目标唯一文件`/private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64.31`(103677952B,未压缩才动)。改三处:双卡门28B@57593752(VM 0x1F036CF98)、NR门8B@57594288(VM 0x1F036D1B0)——字节与`prepare_dual_sim_cache.py`/`prepare_nr_registration_cache.py`完全相同;以及CodeDirectory第3515页SHA-256槽32B@103577665。离线分析(Mac根盘快照,scratch `ccgate_plan.py`):该文件只有一个CD(SHA-256,16KiB页),两处都在页3515,**存储哈希=原页哈希**已核对;新哈希离线预计算,内核不做哈希。旧哈希覆盖整页,所以匹配即证明整页原样;全部原样才写、全部已改则no-op、混合则拒绝;写后fsync并回读。CDHash随之改变:本系统没有trust cache/AMFI校验(缓存一直以"not in trust cache"警告方式映射),预期不影响;**未上机验证**。日志`X9 CCGATE: ...`。
+- **5G信号**:`x9q_siginfo`逐行解析+ECSQ。LTE行→0x14(不变);NR行(Act 0x8000)→**0x17 {i16 rsrp dBm, i16 snr×10}**+**0x18 {i16 rsrq}**。格式与TLV号取自CommCenter:`NrSigInfo`解析器0x1f1952660、`NrSigInfoExt` 0x1f19526cc,0x4f响应0x1f1ae9b40与0x51指示0x1f1aea150都用0x14/0x17/0x18。MTK NR字段(libmtk-ril updateSignalStrength 0x8000分支):11/10/12=ss_rsrp/ss_rsrq/ss_sinr,6/5/8=第二组,均为1/4 dB,0x7fff无效;优先SS组,未测(全0)视为无效。日志`X9 QMI AT: ECSQ lte .. nr ..`(前8次,含原始回复)。
+- **x9-rev252ij-md**:独立worktree基于origin/main 405f7c5构建,参数同ih(603B,`x9_dual_sim=1 x9_md_lte=0`,rootgrow/ccgate默认开),ADT 32GiB,boot.img 12972032B,warning 1417;产物`~/ios_plj110/x9/out/x9-rev252ij-md/`,日志`.local/x9/work/pdp-activation/build-ij.stdout.log`。ii(只含ccgate)也已构建,被ij取代。插件不变,无需mailbox staging。
+- 下一步由用户手动:`fastboot boot x9/out/x9-rev252ij-md/boot.img`,`~/172.txt`(≥3分钟,两卡在机,几次底边上滑)。看`X9 ROOTGROW`、`X9 CCGATE: patched ... readback errno=0`、有无`cs_invalid_page`/CommCenter被杀、`X9 DUALSIM`、`NAS SysInfo NR SA`、`ECSQ lte/nr`、`X9 EXIT`。若CommCenter因能力门异常:下一镜像去掉`x9_md_lte=0`换成`x9_ccgate=2`即可恢复原字节(参数上限607B)。
+
+### 前次交接(HANDOFF 107,2026-11-10): 三线合并为ih——main(ig根盘扩容/if/ie)+双卡uim3+NR SA nr1;双卡与SA默认开
 
 - **背景**:用户说已合并并push双卡/5gsa;实际核对时两者只在Mac本地分支(`work/dual-sim` 71ce384/58a823b,`x9-nrsa` dde26eb/e8bb41f),各自单独成像(`x9-dualsim-uim3`、`x9-rev252nr1-md`,都用旧16GiB manifest),均未push、未互相合并;Mac main另有未push文档提交5d53837。用户选择"2"(合成一个镜像、双卡与SA都默认开)。确认两个codex CLI会话已退出、两分支均已提交后才合并。
 - **合并**(独立worktree `~/ios_plj110-wt-if`,分支`merge-dualsim-nrsa`,已push为main,`work/dual-sim`与`x9-nrsa`也已push):origin/main 0eae168 ← work/dual-sim(无冲突)← x9-nrsa(冲突仅NOTES与`x9_modem.inc`的build字符串)← Mac main 5d53837(仅NOTES)。`X9QMIAT.inc`自动合并后人工核对:NR SA SysInfo(0x4b响应/0x4d指示,需C5GREG注册且COPS AcT=11)与LTE 0x19、ECSQ两行解析、双卡路由互不覆盖。
