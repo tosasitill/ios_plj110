@@ -10,7 +10,7 @@ static int take(bool,bool);
 static int restore(void);
 static struct {
     struct x9_speaker_clock_policy policy;
-    uint64_t child,pad_child,pa_child,leaf_serial;
+    uint64_t child,pad_child,pa_child,rail_child,leaf_serial;
     uint32_t last_generation,error,dirty,uncertain,prior[3];
     bool active,configured,tuner_captured,clocks_restored;
 } native_clock;
@@ -215,6 +215,7 @@ static int native_leaf_hold(uint64_t ticket,uint64_t *lease,uint64_t *child)
     if(!lease)return EINVAL;*lease=0;
     lck_mtx_lock(&x9_speaker_clock_lock);
     int e=*child?EBUSY:native_validate_locked(ticket);
+    if(!e&&child==&native_clock.rail_child&&native_clock.pa_child)e=EBUSY;
     X9AudioDSPStatus ds={0};if(!e)e=x9_adsp_status(0,&ds);
     if(!e && (native_clock.error || ds.error || ds.state!=X9DSPOnline ||
        ds.generation!=native_clock.policy.generation))e=ESTALE;
@@ -248,6 +249,29 @@ int x9_speaker_mt6993_clock_pa_validate(uint64_t ticket,uint64_t lease)
 {return native_leaf_validate(ticket,lease,&native_clock.pa_child);}
 int x9_speaker_mt6993_clock_pa_drop(uint64_t ticket,uint64_t lease)
 {return native_leaf_drop(ticket,lease,&native_clock.pa_child);}
+int x9_speaker_mt6993_clock_rail_hold(uint64_t ticket,uint64_t *lease)
+{return native_leaf_hold(ticket,lease,&native_clock.rail_child);}
+int x9_speaker_mt6993_clock_rail_validate(uint64_t ticket,uint64_t lease)
+{return native_leaf_validate(ticket,lease,&native_clock.rail_child);}
+int x9_speaker_mt6993_clock_rail_quiesced_validate(uint64_t ticket,uint64_t lease)
+{
+    lck_mtx_lock(&x9_speaker_clock_lock);
+    int e=!lease||lease!=native_clock.rail_child?EPERM:native_validate_locked(ticket);
+    /* PA's I2C6 child pins pa_child, too. Check here, not via PA reset lock:
+     * PA validate_power is permitted to enter the independent rail mutex. */
+    if(!e&&native_clock.pa_child)e=EBUSY;
+    if(!e)e=x9_adsp_mt6993_speaker_halted_validate(ticket);
+    lck_mtx_unlock(&x9_speaker_clock_lock);return e;
+}
+int x9_speaker_mt6993_clock_rail_drop(uint64_t ticket,uint64_t lease)
+{
+    lck_mtx_lock(&x9_speaker_clock_lock);
+    int e=!lease||lease!=native_clock.rail_child?EPERM:native_validate_locked(ticket);
+    if(!e&&native_clock.pa_child)e=EBUSY;
+    if(!e)e=x9_adsp_mt6993_speaker_halted_validate(ticket);
+    if(!e)native_clock.rail_child=0;
+    lck_mtx_unlock(&x9_speaker_clock_lock);return e;
+}
 static int native_restored_ao(void)
 {
     int e=x9_adsp_mt6993_speaker_halted_validate(s.ticket);
@@ -276,7 +300,7 @@ int x9_speaker_mt6993_clock_release(uint64_t ticket)
 {
     lck_mtx_lock(&x9_speaker_clock_lock);
     int e=!native_clock.active || !ticket || s.ticket!=ticket?EPERM:0;
-    if(!e && (native_clock.pad_child || native_clock.pa_child)) {
+    if(!e && (native_clock.pad_child || native_clock.pa_child || native_clock.rail_child)) {
         /* Ordering misuse is not a hardware fault. Do not restore clocks,
          * invoke drain or poison an otherwise valid in-flight pad owner. */
         lck_mtx_unlock(&x9_speaker_clock_lock);return EBUSY;

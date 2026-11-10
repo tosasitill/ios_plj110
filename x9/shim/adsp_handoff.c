@@ -73,6 +73,7 @@ static int captured_named_reg(const struct adsp_capture *c,unsigned node,const c
 }
 #include "adsp_i2s4.inc"
 #include "adsp_pa_reset.inc"
+#include "adsp_pa_vdd.inc"
 /* Four cells per interrupt are required by THIS GIC binding. Reject an
  * alternate parent/extended/map instead of silently decoding as 3 cells. */
 static int qualify_audio_irq(uintptr_t dt,const struct adsp_capture *c,struct x9_adsp_audio_irq_layout *q)
@@ -169,15 +170,18 @@ static int qualify(uintptr_t dt,struct x9_adsp_handoff *h,struct x9_adsp_audio_i
     }
     if(!captured_get(&c,CaptureSystem,"mbox-attr",&p,&n)||n!=16)return 0;
     for(unsigned i=0;i<4;i++)if(be(p+i*4))return 0;
+    /* Finish every reader of the required capture before reusing its bounded
+     * storage for optional LEFT supply metadata. No extra capture stack. */
+    (void)qualify_audio_irq(dt,&c,q);
     h->version=1;h->flags=X9_ADSP_LAYOUT_VERIFIED;h->cores=2;
     if(qualify_i2s4(dt)) {
         h->flags|=X9_ADSP_I2S4_VERIFIED;
         h->i2s4_pins=X9_ADSP_I2S4_PINS;h->i2s4_modes=X9_ADSP_I2S4_MODES;
     }
     if(qualify_pa_reset(dt))h->flags|=X9_ADSP_PA_RESET_VERIFIED;
+    if((h->flags&X9_ADSP_PA_RESET_VERIFIED)&&qualify_left_vdd(dt,&c))
+        h->flags|=X9_ADSP_PA_LEFT_VDD_VERIFIED;
     if(!x9_adsp_handoff_valid(h))return 0;
-    /* Optional metadata has no authorization bit in the shared-pool ABI. */
-    (void)qualify_audio_irq(dt,&c,q);
     return 1;
 }
 struct walk {uint8_t *p;size_t size,at,found,irq_found;unsigned nodes,matches,irq_matches;};
@@ -222,5 +226,6 @@ int fdt_adsp_patch_adt(uintptr_t dt,void *adt,size_t bytes)
     plog_str("X9 ADSP FDT: common pool and mailbox layout qualified; EMI/firmware not yet ready\n");
     if(h.flags&X9_ADSP_I2S4_VERIFIED)plog_str("X9 ADSP FDT: I2SIN4/OUT4 pinctrl metadata qualified; pads not owned\n");
     if(h.flags&X9_ADSP_PA_RESET_VERIFIED)plog_str("X9 ADSP FDT: SID3 dual active-low PA reset topology; no rail/reset lease\n");
+    if(h.flags&X9_ADSP_PA_LEFT_VDD_VERIFIED)plog_str("X9 ADSP FDT: LEFT VDD SID5 LNC0_8 topology; RIGHT supply not inferred\n");
     return 1;
 }

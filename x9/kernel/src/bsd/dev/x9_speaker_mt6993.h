@@ -76,6 +76,13 @@ int x9_speaker_mt6993_clock_pad_drop(uint64_t ticket,uint64_t lease);
 int x9_speaker_mt6993_clock_pa_hold(uint64_t ticket,uint64_t *lease);
 int x9_speaker_mt6993_clock_pa_validate(uint64_t ticket,uint64_t lease);
 int x9_speaker_mt6993_clock_pa_drop(uint64_t ticket,uint64_t lease);
+/* Independent LEFT rail parent, acquired BEFORE PA reset, dropped AFTER
+ * the PA/I2C6 children. Quiesced proof takes no PA lock (power callback
+ * may enter the rail mutex while holding PA reset lock). No rail writes. */
+int x9_speaker_mt6993_clock_rail_hold(uint64_t ticket,uint64_t *lease);
+int x9_speaker_mt6993_clock_rail_validate(uint64_t ticket,uint64_t lease);
+int x9_speaker_mt6993_clock_rail_quiesced_validate(uint64_t ticket,uint64_t lease);
+int x9_speaker_mt6993_clock_rail_drop(uint64_t ticket,uint64_t lease);
 #ifdef __cplusplus
 }
 #endif

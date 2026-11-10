@@ -74,6 +74,7 @@ staging 必须单独确认、走项目 extent 写入流程；本构建器不安�
 | selector 9/10 | cached PA status v1 / root type2 显式双 PA reg03 probe；不写 PA 值 |
 | selector 11 | cached AP resource lease status v1／64B；没有 claim/release 用户接口 |
 | selector 12/13 | cached clock status v1／216B / root type2 显式 cold register-clock＋disabled OUT4 配置／恢复 |
+| selector 19 | cached LEFT VDD status v1／64B；只读内存，不申请电源或执行 PMIF |
 | memory 0 | 只读 kernel control，带 seqlock、generation、真实 played/queued |
 | memory 1 | 可写 producer end-frame，release 发布，kernel 检查窗口 |
 | memory 2 | 65536-frame S16LE stereo PCM 环，256 KiB |
@@ -896,6 +897,35 @@ probus保护校准和真实unmute仍须后续生产接线，不能设`x9_tfa_bus
 静音入口不需要也不假造trusted container/per-revision profile policy；原OPPO optimal
 init中的unlock、OVP bypass、boost、MTP/OTP及probus DSP保护路径均未搬入此安全入口。
 历史controller/transport fault允许独立实际物理cleanup，但不授权新播放或消除首错。
+
+### 接通 LEFT PA 的 SID5 LNC0_8 数字电源配置
+
+**本阶段只有生产源码和直接单元编译，没有实际电源操作或新的镜像。RIGHT 电源、
+长期排他 supplier 与完整播放 backend 仍未接齐，不能宣布双 PA 供电或 Ready。**
+`x9_pa_vdd_left.{c,h}` 已加入 recipe／link-order，使用独立 rail mutex；既有
+PA `validate_power` 可以调用 LEFT validate，但必须另行 pin／证明 RIGHT 和所需
+模拟供电／boost，不能直接把该函数当双侧 supplier。
+
+| 路径 | 实际代码与来源 |
+|---|---|
+| 当前 FDT | LEFT `tfa98xx@34/tfa98xx_vdd-supply` 唯一链接 SID5 `/regulators/mt6661-5-lnc0-8`；精确 regulator schema、500000..2090000 µV、200 µs ramp、allowed-modes0/2。追加 handoff flag8，必须同时有 reset flag4；旧256B ABI不变。optional capture复用既有128项存储，缺失不撤销 shared-layout grant |
+| 1.8V 配置 | OPPO `tfa98xx.c` 的 set_voltage1800000／set_load200000／enable；`mt6661-regulator.c` 的 SN-LDO 编码给 `0x24b=0xd0`，不是普通低4bit selector |
+| normal／enable | `0x2087` LP bit1清、`0x20af` HW_NORMAL_OP_EN bit1置、SW_EN bit0置；仅+1 SET／+2 CLR自身位，selector才整字节写；完整控制读回保护邻位 |
+| actual DA | 原 `mt6661-regulator.h` 明确 `0x20a2` EN bit0／LP bit2；不采用 `.c` 模糊的0x3/0x7整mask。≥200 µs后有界等待实际DA，同时复查控制；这不是模拟电压测量 |
+| cold admission | 真Online／同generation／同Speaker ticket，独立clock rail child在任何PMIF操作前pin父链；SW_EN0、DA EN/LP0、HW_OP0，SID3 GPIO10/11的MODE/DIR/SW和DO／物理DI均LOW；拒绝继承live rail，不借用未知电源 |
+| 访问／故障 | 与原PA共用PMIF mutex；逐事务fresh clock／board／pmap／PMIF INIT和FSM资格。每字段last-prior／expected／dirty／uncertain，第三值、timeout保留child／首错／nonzero cleanup token；不自动unwind或重放acquire |
+| cleanup | 真halt＋独立AFE no-outstanding supplier，clock锁内先证明PA／I2C6 child已退休（不反向拿PA mutex）；每次写前真实reset LOW。仅退休本owner late response，先撤SW_EN／HW1，再实际DA OFF，才恢复LP／VSEL；每个VSEL写再次证明OFF。最后fresh saved/reset／parent读回才drop rail child |
+
+`validate_exclusive` 必须提供整个生命周期的SID5目标寄存器／foreign reset writer
+排他与pending SWINF2 response归属保护，尤其不能让既有generic VLDCLR清掉本owner
+晚到响应。现有PMIF每事务mutex、无writer源码命中、FDT或DA快照均不能替代；本阶段
+没有默认成功supplier。GPS的同名LNC0_8是SID3，modem相关LNC0_8是SID6，不能据
+寄存器名称合并电源网；RIGHT没有supply property也不授权dummy/shared-net推断。
+
+iOS `audioctl left-vdd-status` 使用追加selector19返回64B v1缓存，包括generation、
+held/configured/teardown/restored、主／restore errno、dirty/uncertain/pending、最后
+VSEL／SW／DA／HW_OP、ticket／lease。仅复制内存，不validate／MMIO／恢复／写电源；
+PCM、现有selector编号、HAL Ready门均不变，没有自动起DSP、安装HAL或解静音。
 
 ### AUDIO-12：启动／运行配置资格与缓存故障位置
 

@@ -18,6 +18,7 @@
 #include "../../../bsd/dev/x9_speaker_afe.h"
 #include "../../../bsd/dev/x9_tfa_plj110.h"
 #include "../../../bsd/dev/x9_i2c6.h"
+#include "../../../bsd/dev/x9_pa_vdd_left.h"
 #include "../../../bsd/dev/x9_audio_resources.h"
 #include "../../../bsd/dev/x9_speaker_mt6993.h"
 #include "../../../bsd/dev/x9_speaker_pll.h"
@@ -45,6 +46,7 @@ static_assert(sizeof(X9AudioControl) == 112, "PCM ABI v1 size");
 static_assert(sizeof(X9AudioStreamStatus) == 48, "stream status v2 size");
 static_assert(sizeof(X9AudioClockStatus) == 216, "clock status v1 size");
 static_assert(sizeof(X9AudioI2C6Status) == 128, "native I2C6 cached status v1 size");
+static_assert(sizeof(X9AudioLeftVDDStatus) == 64, "LEFT VDD cached status v1 size");
 static_assert(sizeof(X9AudioPLLStatus) == 264, "PLL status v1 size");
 static_assert(sizeof(X9AudioPathStatus) == 272, "path status v1 size");
 static void beginUpdate() { __atomic_add_fetch(&control->seq, 1, __ATOMIC_SEQ_CST); }
@@ -340,6 +342,15 @@ IOReturn X9AudioUserClient::externalMethod(uint32_t sel, IOExternalMethodArgumen
 {
     (void)dispatch; (void)target; (void)reference;
     if (!a || isInactive() || !control) return kIOReturnNotReady;
+    if (sel == X9AudioLeftVDDStatusSelector) {
+        if (a->structureInputDescriptor || a->structureOutputDescriptor || a->asyncWakePort ||
+            a->scalarInputCount || a->scalarOutputCount || a->structureInputSize ||
+            !a->structureOutput || a->structureOutputSize < sizeof(X9AudioLeftVDDStatus)) return kIOReturnBadArgument;
+        X9AudioLeftVDDStatus s; int e = x9_pa_vdd_left_status(&s);
+        if (e) return result(e);
+        memcpy(a->structureOutput, &s, sizeof(s));
+        a->structureOutputSize = sizeof(s); return kIOReturnSuccess;
+    }
     if (sel == X9AudioI2C6StatusSelector) {
         if (a->structureInputDescriptor || a->structureOutputDescriptor || a->asyncWakePort ||
             a->scalarInputCount || a->scalarOutputCount || a->structureInputSize ||

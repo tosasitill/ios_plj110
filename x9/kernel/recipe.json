@@ -6559,6 +6559,11 @@
    "template": "bsd-c-11"
   },
   {
+   "name": "x9_pa_vdd_left.o",
+   "source": "bsd/dev/x9_pa_vdd_left.c",
+   "template": "bsd-c-11"
+  },
+  {
    "name": "x9_tfa98xx.o",
    "source": "bsd/dev/x9_tfa98xx.c",
    "template": "bsd-c-11"
