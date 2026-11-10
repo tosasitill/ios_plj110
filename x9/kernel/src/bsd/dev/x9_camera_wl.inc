@@ -44,7 +44,11 @@ static int cam_wl_guard(struct cam_probe_journal *j,bool cleanup,uint8_t *enable
         if(voltage!=j->board.wl_code[i])
             return cam_wl_conflict(j,reg,(uint8_t)j->board.wl_code[i],voltage);
     }
-    /* Selector reads take real AP transactions. Re-read ENABLE after them,
+    /* PMIC rails may be interleaved with these WL channels. Catch their
+     * changes BEFORE a WL disable or MCLK/reset release, not only when a
+     * later reverse-order PMIC restore happens to reach that rail. */
+    e=cam_rails_guard(j,cleanup);if(e)return e;
+    /* Selector/PMIC reads take real transactions. Re-read ENABLE after them,
      * preserving non-camera bits from this fresh byte, not the entry value. */
     e=cam_wl_read(j,3,enable);if(e)return e;
     return cam_wl_enable_check(j,*enable,cleanup);

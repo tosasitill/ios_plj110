@@ -59,7 +59,10 @@ struct cam_probe_pin {
 struct cam_probe_rail {
     unsigned sid, sel_reg, en_reg, da_reg, hw_reg, eint_reg;
     uint8_t target, selector, enable, da;
-    bool valid, voltage_owned, enable_owned;
+    uint8_t selector_expected, selector_prior, enable_expected, enable_prior;
+    uint8_t hw, eint;
+    bool valid, taken, voltage_owned, enable_owned;
+    bool selector_uncertain, enable_uncertain, conflict;
 };
 struct cam_probe_journal {
     struct cam_probe_bus sensor, ldo;
@@ -81,6 +84,7 @@ static struct cam_probe_journal cam_journal;
 static struct x9_camera_probe cam_probe_last = { .version=1 };
 static uint32_t cam_probe_done;
 static bool cam_probe_latched;
+static int cam_rails_guard(struct cam_probe_journal *, bool);
 
 static uint32_t cam_rr(vm_offset_t base, unsigned off)
 { return *(volatile uint32_t *)(base+off); }
@@ -506,113 +510,7 @@ static int cam_pmic_r(struct cam_probe_journal *j, unsigned sid, unsigned reg, u
 { return cam_pmic_xfer_locked(j,sid,reg,v,false); }
 static int cam_pmic_w(struct cam_probe_journal *j, unsigned sid, unsigned reg, uint8_t v)
 { return cam_pmic_xfer_locked(j,sid,reg,&v,true); }
-static int cam_rail_state(struct cam_probe_journal *j, struct cam_probe_rail *p,
-                          uint8_t *sel, uint8_t *en, uint8_t *da)
-{
-    int e=cam_pmic_r(j,p->sid,p->sel_reg,sel);
-    if(!e)e=cam_pmic_r(j,p->sid,p->en_reg,en);
-    if(!e)e=cam_pmic_r(j,p->sid,p->da_reg,da);
-    return e;
-}
-static int cam_rail_no_hw(struct cam_probe_journal *j, struct cam_probe_rail *p)
-{
-    uint8_t hw=0,eint=0;int e=cam_pmic_r(j,p->sid,p->hw_reg,&hw);
-    if(!e && p->eint_reg)e=cam_pmic_r(j,p->sid,p->eint_reg,&eint);
-    return e?e:(hw || eint)?EBUSY:0;
-}
-static int cam_rail_snapshot(struct cam_probe_journal *j, struct cam_probe_rail *p,
-                             uint32_t *evidence)
-{
-    int e=cam_rail_state(j,p,&p->selector,&p->enable,&p->da);
-    *evidence=p->selector|((uint32_t)p->enable<<8)|((uint32_t)p->da<<16);
-    if(e)return e;
-    if((p->enable&2) || (p->da&4))return ENOTSUP;
-    if(p->enable&1) {
-        if(p->selector!=p->target || !(p->da&1))return ENOTSUP;
-    } else {
-        if(p->da&1)return EBUSY;
-        e=cam_rail_no_hw(j,p);if(e)return e;
-    }
-    p->valid=true;return 0;
-}
-static int cam_shared_rails(struct cam_probe_journal *j, struct x9_camera_probe *r)
-{
-    /* mt6661_volt_range_ops encodes coarse in HIGH nibble and fine in LOW:
-     * LN60_7 1.8V is 0xd0, not 0x0d. LDC0_3 table selector10 is 3.0V. */
-    j->dovdd=(struct cam_probe_rail){.sid=3,.sel_reg=0x24a,.en_reg=0x2047,
-        .da_reg=0x2062,.hw_reg=0x206f,.target=0xd0};
-    j->afvdd=(struct cam_probe_rail){.sid=6,.sel_reg=0x1e61,.en_reg=0x1f07,
-        .da_reg=0x1f14,.hw_reg=0x1f20,.eint_reg=0x1f2f,.target=0x0a};
-    int e=X9PMIFAcquire()?EBUSY:0;if(e)return e;
-    e=cam_rail_snapshot(j,&j->dovdd,&r->dovdd);
-    if(!e && r->sensor==X9_CAMERA_BACK)e=cam_rail_snapshot(j,&j->afvdd,&r->afvdd);
-    X9PMIFRelease();if(e)r->blockers|=X9_CAM_BLOCK_RAIL;return e;
-}
-static int cam_rail_wait_da(struct cam_probe_journal *j, struct cam_probe_rail *p, bool on)
-{
-    for(unsigned i=0;i<20;i++) {
-        uint8_t da=0;int e=cam_pmic_r(j,p->sid,p->da_reg,&da);if(e)return e;
-        if((da&5)==(on?1:0))return 0;
-        delay(100);
-    }
-    return ETIMEDOUT;
-}
-static int cam_rail_take_locked(struct cam_probe_journal *j, struct cam_probe_rail *p)
-{
-    if(!p->valid)return EINVAL;
-    uint8_t sel=0,en=0,da=0;int e=cam_rail_state(j,p,&sel,&en,&da);if(e)return e;
-    if(sel!=p->selector || en!=p->enable || da!=p->da)return EBUSY;
-    if(en&1)return 0; /* borrowed: never change voltage/mode/enable */
-    e=cam_rail_no_hw(j,p);if(e)return e;
-    if(sel!=p->target) {
-        p->voltage_owned=true;
-        e=cam_pmic_w(j,p->sid,p->sel_reg,p->target);
-        if(!e)e=cam_pmic_r(j,p->sid,p->sel_reg,&sel);
-        if(!e && sel!=p->target)e=EIO;
-    }
-    if(!e) {
-        p->enable_owned=true; /* before possibly ambiguous SET */
-        e=cam_pmic_w(j,p->sid,p->en_reg+1,1);
-        if(!e)e=cam_pmic_r(j,p->sid,p->en_reg,&en);
-        if(!e && en!=(p->enable|1))e=EIO;
-        if(!e)e=cam_rail_wait_da(j,p,true);
-    }
-    return e;
-}
-static int cam_rail_take(struct cam_probe_journal *j, struct cam_probe_rail *p)
-{
-    if(X9PMIFAcquire())return EBUSY;
-    int e=cam_rail_take_locked(j,p);X9PMIFRelease();return e;
-}
-static int cam_rail_restore_locked(struct cam_probe_journal *j, struct cam_probe_rail *p)
-{
-    if(!p->enable_owned && !p->voltage_owned)return 0;
-    uint8_t sel=0,en=0,da=0;int e=cam_rail_state(j,p,&sel,&en,&da);
-    if(!e)e=cam_rail_no_hw(j,p);
-    if(e)return e;
-    if((en&~1)!=p->enable || (da&4) || (sel!=p->target && sel!=p->selector))return EBUSY;
-    if(p->enable_owned) {
-        e=cam_pmic_w(j,p->sid,p->en_reg+2,1);
-        if(!e)e=cam_pmic_r(j,p->sid,p->en_reg,&en);
-        if(!e && en!=p->enable)e=EIO;
-        if(!e)e=cam_rail_wait_da(j,p,false);
-        if(e)return e;
-        p->enable_owned=false;
-    } else if((en&1) || (da&1))return EBUSY;
-    if(p->voltage_owned) {
-        e=cam_pmic_w(j,p->sid,p->sel_reg,p->selector);
-        if(!e)e=cam_pmic_r(j,p->sid,p->sel_reg,&sel);
-        if(!e && sel!=p->selector)e=EIO;
-        if(!e)p->voltage_owned=false;
-    }
-    return e;
-}
-static int cam_rail_restore(struct cam_probe_journal *j, struct cam_probe_rail *p)
-{
-    if(!p->enable_owned && !p->voltage_owned)return 0;
-    if(X9PMIFAcquire())return EBUSY;
-    int e=cam_rail_restore_locked(j,p);X9PMIFRelease();return e;
-}
+#include "x9_camera_rails.inc"
 static int cam_vs_vote(struct cam_probe_journal *j, bool on)
 {
     if(!on && !j->vs_owned)return 0;
@@ -666,8 +564,8 @@ static uint32_t cam_cold_retained(const struct cam_probe_journal *j)
     if(j->sensor.owned || j->sensor.gate_owned)mask|=X9_CAM_COLD_SENSOR_BUS;
     if(j->ldo.owned || j->ldo.gate_owned)mask|=X9_CAM_COLD_WL_BUS;
     if(j->wl_owned || j->wl_enabled || j->wl_programmed)mask|=X9_CAM_COLD_WL_RAILS;
-    if(j->dovdd.enable_owned || j->dovdd.voltage_owned)mask|=X9_CAM_COLD_DOVDD;
-    if(j->afvdd.enable_owned || j->afvdd.voltage_owned)mask|=X9_CAM_COLD_AFVDD;
+    if(j->dovdd.taken || j->dovdd.enable_owned || j->dovdd.voltage_owned)mask|=X9_CAM_COLD_DOVDD;
+    if(j->afvdd.taken || j->afvdd.enable_owned || j->afvdd.voltage_owned)mask|=X9_CAM_COLD_AFVDD;
     if(j->vs_owned)mask|=X9_CAM_COLD_VS;
     if(j->wake.owned)mask|=X9_CAM_COLD_WAKE;
     for(unsigned i=0;i<4;i++)if(j->route[i].owned)mask|=X9_CAM_COLD_ROUTES;
@@ -696,6 +594,14 @@ static int cam_restore(struct cam_probe_journal *j)
     /* After releasing PMIF lock never clear a later response as ours. */
     if(j->pmif_pending || j->pmif_fault) {
         j->restore_step=X9_CAM_COLD_RESTORE_PMIF;return cam_restore_failed(j,EIO);
+    }
+    /* Validate ALL consumed PMIC rails before lowering even the first WL
+     * channel. Front DOVDD and main AFVDD occur later in reverse order. */
+    j->restore_step=X9_CAM_COLD_RESTORE_DOVDD;
+    e=cam_rails_guard(j,true);
+    if(e) {
+        if(j->afvdd.conflict && !j->dovdd.conflict)j->restore_step=X9_CAM_COLD_RESTORE_AFVDD;
+        return cam_restore_failed(j,e);
     }
     /* A changed live WL channel must be caught BEFORE interleaved DOVDD/
      * AFVDD are lowered, not only later when undoing its selector. */
@@ -891,6 +797,7 @@ static int cam_sensor_transaction(uint32_t which, struct x9_camera_probe *r,
         if(!e)e=cam_wl_guard(j,false,&v);
         if(!e)e=cam_pin_bit(j->gpio,0x100,j->board.reset,1);
         if(!e)delay(4000);
+        if(!e)e=cam_wl_guard(j,false,&v); /* after reset settle, before the first sensor request */
     }
     if(!e) {
         r->stage=X9_CAM_STAGE_ID;uint8_t hi=0,lo=0;
@@ -922,6 +829,13 @@ static int cam_sensor_transaction(uint32_t which, struct x9_camera_probe *r,
         j->sensor.timing_hz,j->ldo.timing_hz,r->dovdd,r->afvdd,j->wl_enabled,j->wl_programmed,
         j->wake.owned,j->dovdd.enable_owned||j->dovdd.voltage_owned,
         j->afvdd.enable_owned||j->afvdd.voltage_owned,j->vs_owned,j->pmif_fault);
+    printf("X9 CAMERA COLD RAIL: taken=%u/%u selector_expected=%02x/%02x "
+        "enable_expected=%02x/%02x uncertain_sel=%u/%u uncertain_en=%u/%u conflict=%u/%u "
+        "(journal, NOT live readback or lease)\n",j->dovdd.taken,j->afvdd.taken,
+        j->dovdd.selector_expected,j->afvdd.selector_expected,
+        j->dovdd.enable_expected,j->afvdd.enable_expected,
+        j->dovdd.selector_uncertain,j->afvdd.selector_uncertain,
+        j->dovdd.enable_uncertain,j->afvdd.enable_uncertain,j->dovdd.conflict,j->afvdd.conflict);
     printf("X9 CAMERA COLD CLOCK: parent seen=%u/%u entry=%02x/%02x expected=%02x/%02x retained=%u/%u conflict=%u/%u (journal, no CSI/DMA)\n",
         j->sensor.parent_seen,j->ldo.parent_seen,j->sensor.parent_entry,j->ldo.parent_entry,
         j->sensor.parent_expected,j->ldo.parent_expected,j->sensor.parent_owned,j->ldo.parent_owned,

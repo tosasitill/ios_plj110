@@ -131,6 +131,18 @@ GET_STATUS 仍为 **88B**，原 reserved 前两字现为 `cold_retained/cold_res
 
 这修正的是可见变化下的单通道 RMW 和恢复依赖顺序，仍不能消除最后一次 read 与整字节 write 之间的竞态、识别同值 ABA 或证明 SCP 硬件 lease。未上机、不 stream-on，不能据此声称共享供电实测通过或已经拍摄。
 
+### DOVDD/AFVDD 冲突须在撤任何相关供电之前发现
+
+`x9_camera_rails.inc` 替换原 cold `probe/standby` 的 PMIC rail 申请/恢复实现，不注册采集后端。selector 和 enable 分别记录当前预期值、精确写前值及未确认位；成功写入不再把入口值当作任意时候都可接受的恢复分支。借用的已启用 rail 也记录 `taken` 引用，供电期间检查目标电压、EN/DA 正常模式与入口 HW_OP_EN/EINT，退出仅退休引用，不发 CLR 或恢复电压。
+
+确定的源码反例（未执行测试、不代表实机发生）：DOVDD 入口 selector=0x80、EN/DA=0；相机已成功设 d0 并启用，随后 live selector 被改回0x80。旧恢复因为同时允许 target/entry，仍能清 enable；前摄还会先撤 WL DVDD，再检查 DOVDD。新 guard 在 live selector 不再等于 d0 时锁存 `EBUSY`，先 reset-low/MCLK-off 隔离，然后保留供电及 bus/pins/parent/CAMTG/VS 依赖，不发该 CLR、不撤更早 rail。
+
+入口 snapshot、每次申请和最终检查、恢复共享屏障均持同一个 X9PMIF 锁；WL guard 在最终 fresh ENABLE 读取之前也检查所有已使用/未恢复的 PMIC rails，覆盖 interleaved 申请、WL 启停及 MCLK/reset 放行。恢复前检查整个已消费 PMIC 集合，不等到 reverse-order 后段才检查前摄 DOVDD/主摄 AFVDD。EN_CLR 确认、DA-off 和 selector/EN/HW/EINT 再检查通过后，才退休 enable journal；selector 仅在 EN/DA-off 时回写。
+
+未确认写入仅在 cleanup 接受该字段的精确 prior/expected，第三种值或已确认字段后来变化一律保留；任何 enabled rail 必须仍为 target，不能借“未确认”允许 live prior 电压。未确认 SET 如果已证实保持原 off，不补发冗余 CLR；仍按原有有界 DA 检查退出，不延长请求预算、不做硬件重试。EN-on/DA 尚 off 仅在 cleanup 的未确认 enable 写入中作为可能 settling 状态接受；LP、EN-off/DA-on 拒绝。
+
+`X9 CAMERA RAIL CONFLICT` 给首次决定字段；`X9 CAMERA COLD RAIL` 只输出结束后的软件 journal，不补读撤电后的 PMIC。原88B状态不变，retained 的 DOVDD/AFVDD 位也包括尚未退休的 borrowed reference，**不是独占硬件 lease 或当前电压证明**。这是可见状态冲突屏障，不能消除 AP/SCP 最后读→写竞态、同值 ABA、其他用户的同值请求或保证完整长期供电所有权。未上机、READY/supported0，不能据此称共享供电或拍摄已验收。
+
 ### 非零 AP TIMING 也必须通过标准模式资格检查
 
 `probe/standby → cam_bus_take` 原来只检查非 HS、open-drain；非零 TIMING 不能证明本次 FIFO 事务的速度、high/low 或 START/STOP 设置可用。`x9_camera_i2c_timing.inc` 现在同时用于已有配置准入和零 TIMING 初始化，不增加诊断 ioctl、不修改用户态 ABI。
