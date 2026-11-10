@@ -23,7 +23,8 @@ static struct {
     uint32_t batch_start,batch_count,phase,issued,samples,operation;
     struct cam_smmu_cmd batch[3];
     uint64_t deadline;
-    bool captured,pending;
+    bool captured,pending,close_attempted,timedout_retired;
+    uint32_t close_samples,close_errno;
     int error;
 } cam_shared;
 static int cam_shared_fault(int e)
@@ -193,16 +194,64 @@ static int cam_shared_guard(struct x9_camera_smmu *m)
 static int cam_shared_batch_check(void)
 {
     uint32_t ring=1u<<cam_shared.shift,mask=2*ring-1;
-    if(!cam_shared.batch_count || cam_shared.batch_count>3 ||
+    if(!cam_shared.batch_count || cam_shared.batch_count>3 || cam_shared.batch_count>ring ||
        (cam_shared.batch_start&~mask) ||
        cam_shared.batch[cam_shared.batch_count-1].word[0]!=CAM_SMMU_CMD_SYNC ||
        cam_shared.batch[cam_shared.batch_count-1].word[1])return ESTALE;
+    if(cam_shared.pending && (cam_shared.cons!=cam_shared.batch_start ||
+       cam_shared.prod!=((cam_shared.batch_start+cam_shared.batch_count)&mask)))return ESTALE;
     for(unsigned n=0;n<cam_shared.batch_count;n++) {
         const volatile uint64_t *p=(const volatile uint64_t *)cam_shared.cmd+
             ((cam_shared.batch_start+n)&(ring-1))*2;
         if(p[0]!=cam_shared.batch[n].word[0] || p[1]!=cam_shared.batch[n].word[1])return ESTALE;
     }
     __asm__ volatile("dsb sy":::"memory");return 0;
+}
+/* The shared queue is NOT m->cmd, and the private own-base timeout helper
+ * cannot observe it. Do this at most once, BEFORE fault latching/host leave,
+ * inside the original INSTALL/RETIRE serialization. An expired batch never
+ * resumes its STE/BBM sequence, even when its own trailing SYNC really passes.
+ * No stores/cache operations/new enter or command; ordinary guard rechecks
+ * actual table/queue mappings, all prior config/foreign STEs and the native
+ * authority on every sample. A lost lease or changed record stays pending.
+ */
+static void cam_shared_retire_timeout(struct x9_camera_smmu *m)
+{
+    uint64_t span,deadline;
+    int e=0;
+    if(!cam_shared.pending || !cam_shared.captured || cam_shared.owner!=m ||
+       cam_shared.error || m->last_errno || cam_shared.close_attempted ||
+       (cam_shared.operation!=X9_CAM_SMMU_INSTALL &&
+        cam_shared.operation!=X9_CAM_SMMU_RETIRE))return;
+    cam_shared.close_attempted=true;
+    nanoseconds_to_absolutetime(10000000ull,&span);deadline=mach_absolute_time()+span;
+    for(unsigned poll=0;poll<10000;poll++) {
+        if(mach_absolute_time()>=deadline){e=ETIMEDOUT;break;}
+        e=cam_shared_batch_check();if(!e)e=cam_shared_guard(m);if(e)break;
+        cam_shared.close_samples++;
+        if(mach_absolute_time()>=deadline){e=ETIMEDOUT;break;}
+        if(cam_shared.observed_cons!=cam_shared.prod){delay(1);continue;}
+        /* guard recorded this actual CONS as wait_cons. With zero remaining,
+         * any later regression/foreign wrap fails the original forward window.
+         * A second fresh full guard follows, not two cached target comparisons. */
+        delay(1);
+        if(mach_absolute_time()>=deadline){e=ETIMEDOUT;break;}
+        e=cam_shared_batch_check();if(!e)e=cam_shared_guard(m);if(e)break;
+        cam_shared.close_samples++;
+        if(mach_absolute_time()>=deadline){e=ETIMEDOUT;break;}
+        if(cam_shared.observed_cons!=cam_shared.prod){e=ESTALE;break;}
+        cam_shared.cons=cam_shared.prod;cam_shared.pending=false;
+        cam_shared.timedout_retired=true;
+        __asm__ volatile("dsb sy":::"memory");break;
+    }
+    if(!e && !cam_shared.timedout_retired)e=ETIMEDOUT;
+    cam_shared.close_errno=(uint32_t)e;
+    printf("X9 CAMERA SID80 CLOSE: operation=%u original=%d qualify=%u pending=%u retired=%u "
+        "samples=%u batch=%x/%u actual=%x/%x target=%x "
+        "(read-only original batch; retain STE phase/map/power, NOT DMA drain)\n",
+        cam_shared.operation,ETIMEDOUT,cam_shared.close_errno,cam_shared.pending,
+        cam_shared.timedout_retired,cam_shared.close_samples,cam_shared.batch_start,
+        cam_shared.batch_count,cam_shared.observed_prod,cam_shared.observed_cons,cam_shared.prod);
 }
 static int cam_shared_submit(struct x9_camera_smmu *m,unsigned op)
 {
@@ -361,7 +410,10 @@ int x9_camera_smmu_attach(struct x9_camera_smmu *m,const struct x9_camera_smmu_h
         if(!e)e=cam_shared_guard(m);
         if(!e && mach_absolute_time()>=cam_shared.deadline)e=ETIMEDOUT;
         if(!e)cam_shared.phase=CAM_SHARED_INSTALLED;
-        else {cam_shared_fault(e);cam_smmu_latch(m,e);}
+        else {
+            if(e==ETIMEDOUT)cam_shared_retire_timeout(m);
+            cam_shared_fault(e);cam_smmu_latch(m,e);
+        }
         cam_shared_log(e);
     }
     if(entered)host->leave(host->context,host->lease,X9_CAM_SMMU_INSTALL);
@@ -423,6 +475,7 @@ int x9_camera_smmu_detach(struct x9_camera_smmu *m)
         if(!e)cam_shared.phase=CAM_SHARED_RETIRED;
     }
     if(e && m && m==cam_smmu_namespace && m->shared_attempted) {
+        if(entered && e==ETIMEDOUT)cam_shared_retire_timeout(m);
         cam_shared_fault(e);cam_smmu_latch(m,e);
     }
     if(entered)cam_shared.host.leave(cam_shared.host.context,cam_shared.host.lease,

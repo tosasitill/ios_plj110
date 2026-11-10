@@ -102,7 +102,14 @@ struct x9_camera_smmu_host {
  * display90/protected89, the full installed L1 when present and all live
  * controller registers, then uses atomic64 BBM/PoC clean and
  * exact inherited-queue CFGI80/CD80/TLBI-ASID1/SYNC consumption. One 100ms
- * total deadline, no reset/retry/whole-table copy or stale-dump fallback.
+ * total operation deadline, no reset/retry/whole-table copy or stale-dump fallback.
+ * A timed-out published batch gets at most one additional10ms read-only
+ * close observation inside the SAME acquired host serialization, before
+ * fault latching/leave. The actual original queue record, full live guard
+ * and two fresh full-target CONS samples alone may retire that batch's
+ * pending ledger. The original ETIMEDOUT remains terminal: never resume
+ * BBM, install/restore further STE words, report INSTALLED/RETIRED, detach,
+ * release mappings/backing/suppliers or infer full DMA/AXI retirement.
  * Shared checking uses the retained host, never the private own-base engine.
  * Retire restores only original STE80 after exclusive owner-proven drain
  * and targeted invalidation/SYNC; it does not free exported allocations.
