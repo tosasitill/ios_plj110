@@ -23,6 +23,16 @@ uint64_t x9_md_mipc_submit(const uint8_t *frame, uint32_t length);
 int x9_md_mipc_take(uint64_t token, uint8_t *frame, uint32_t capacity, uint32_t *length);
 int x9_md_mipc_event(uint8_t *frame, uint32_t capacity, uint32_t *length);
 int x9_md_mipc_online(void);
+/* SMS/IMS have a separate inbox: WDS must never consume their indications.
+ * MD commands retain their original wire txid until a single reply is sent by
+ * the MD owner. The nonreused local token is also the WMS ACK transaction ID.
+ * event: 1 frame, 0 empty, -1 unavailable. INDs return token 0.
+ * reply: 1 queued, 0 unavailable, -1 invalid/already replied.
+ * reply_take: 1 physical TX completed (result 0 success), 0 pending, -1 invalid.
+ * An ACK only confirms the command response transport, NOT SMS delivery. */
+int x9_md_mipc_message_event(uint8_t *frame, uint32_t capacity, uint32_t *length, uint32_t *token);
+int x9_md_mipc_message_reply(uint32_t token, unsigned success, uint8_t cause);
+int x9_md_mipc_message_reply_take(uint32_t token, int *result);
 /* x9_dual_sim=1: two fixed physical slots, indexed 0/1. Read-only AT via
  * MIPC 0003/0004 (8100 string); NEVER falls back to ttyC0 for SIM2.
  * Same nonreused wire token space as MIPC. Cancelled sent queries drain CNF. */

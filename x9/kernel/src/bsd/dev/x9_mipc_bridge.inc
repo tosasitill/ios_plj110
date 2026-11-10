@@ -22,6 +22,7 @@ static unsigned x9_mi_bytes;
 static unsigned x9mi_u16(const uint8_t *p){return p[0]|((unsigned)p[1]<<8);}
 static int x9mi_enabled(void){return x9_at_enabled()&&sweet_x9_arg("x9_mipc",1);}
 unsigned x9_md_sim_count(void){return sweet_x9_arg("x9_dual_sim",0)==1?2:1;}
+#include "x9_mipc_messages.inc"
 /* libmtk-ril RfxSender::atSendCommandFullNolockAck, 0x23dcf4..0x23dd58:
  * mipc_msg_init(3, 1<<slot), add_tlv(8100, strlen(command)+1), sync, get 8100.
  * Slot table 0x150d1c = {2,4,8}; Android slot 0 defaults to mask 1.
@@ -62,6 +63,7 @@ uint64_t x9_md_mipc_submit(const uint8_t *p,uint32_t n){
      k<3||k>X9_AT_COMMAND_MAX||n!=16+((k+11)&~7u)||p[20+k-1]||
      strnlen((const char *)p+20,k)!=k-1||!x9mi_at_read((const char *)p+20))return 0;
  }
+ else if(id==0x30b||id==0x601||id==0x605||id==0xa04){if(!x9mm_request(p,n,id))return 0;}
  else if((p[8]!=1&&(p[8]!=2||x9_md_sim_count()!=2))||
     (id!=0x201&&id!=0x203&&id!=0x205&&id!=0x219&&id!=0x307))return 0;
  uint64_t token=0;lck_mtx_lock(&x9_mi_lock);
@@ -200,12 +202,14 @@ static void x9mi_rx(const uint8_t *p,unsigned n){
    }
    if(i==X9_MI_SLOTS)printf("X9 MIPC: CNF id 0x%04x txn %u has no owner, dropped\n",id,tx);
   }else if(kind==1){
+   x9mm_rx(x9_mi_stream,need,id,tx);
    if((id==0x4202||id==0x4302)&&(x9_mi_stream[8]&((1u<<x9_md_sim_count())-1))){
     if(x9_mi_count==X9_MI_EVENTS){x9mi_poison("event queue overflow");break;}
     unsigned at=(x9_mi_head+x9_mi_count++)%X9_MI_EVENTS;
     x9_mi_events[at].len=need;memcpy(x9_mi_events[at].frame,x9_mi_stream,need);
    }
-  }else printf("X9 MIPC: MD command id 0x%04x txn %u ignored (no AP handler)\n",id,tx);
+  }else if(kind==2&&x9mm_id(id))x9mm_rx(x9_mi_stream,need,id,tx);
+  else printf("X9 MIPC: MD command id 0x%04x txn %u ignored (no AP handler)\n",id,tx);
   bzero(x9_mi_stream,sizeof(x9_mi_stream));x9_mi_bytes=0;
  }
  lck_mtx_unlock(&x9_mi_lock);
@@ -214,11 +218,18 @@ static void x9mi_tick(void){
  if(!x9_md_at_online())return;
  static uint8_t frame[X9_MIPC_FRAME_MAX];unsigned len=0,id=0,tx=0;
  lck_mtx_lock(&x9_mi_lock);
- if(x9_mi_online&&!x9_mi_poisoned)for(unsigned i=0;i<X9_MI_SLOTS;i++)if(x9_mi_slots[i].state==1){
+ uint32_t reply_token=0;
+ if(x9_mi_online&&!x9_mi_poisoned)reply_token=x9mm_tx(frame,&len);
+ if(x9_mi_online&&!x9_mi_poisoned&&!reply_token)for(unsigned i=0;i<X9_MI_SLOTS;i++)if(x9_mi_slots[i].state==1){
   struct x9_mi_slot *s=&x9_mi_slots[i];s->state=2;len=s->len;id=s->id;tx=s->txid;memcpy(frame,s->frame,len);break;
  }
  lck_mtx_unlock(&x9_mi_lock);if(!len)return;
+ if(reply_token){id=x9mi_u16(frame+10);tx=x9mi_u16(frame+12);}
  int rc=x9md_tx(5,217,0,16+len,0,frame,len);bzero(frame,sizeof(frame));
+ if(reply_token){
+  printf("X9 SMS: ACK token %u MD msg 0x%04x original txn %u transport %d\n",reply_token,id,tx,rc);
+  x9mm_tx_done(reply_token,rc);if(rc<0)x9mi_online(0);return;
+ }
  printf("X9 MIPC: TX msg 0x%04x txn %u bytes %u transport %d\n",id,tx,len,rc);
  if(rc<0)x9mi_online(0); /* possible partial side effect: retain sent owner */
 }

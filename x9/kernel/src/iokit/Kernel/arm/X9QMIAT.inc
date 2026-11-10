@@ -598,6 +598,7 @@ static bool x9q_enqueue(uint32_t local,uint32_t port,const uint8_t *req,unsigned
  }return false;
 }
 #include "X9WDS.inc"
+#include "X9Messages.inc"
 /* Requests answered without an AT job used to be silent (158.txt: 178 requests,
  * 14 logged answers). Log tags/lengths only; values only for 1-byte flags. */
 static void x9q_reject(uint32_t local,uint32_t port,const uint8_t *req,unsigned len,uint16_t err){
@@ -616,6 +617,7 @@ static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *r
   x9q_reject(local,port,req,len,X9Q_BAD);return;
  }
  x9q_client &c=x9q_clients[slot];
+ if(x9m_request(local,port,req,len))return;
  if(service==1&&x9w_request(local,port,req,len))return;
  /* NAS/DMS BindSubscription: client-local 0=primary, 1=secondary, not DDS.
   * Jobs snapshot their route; changing binding cannot retarget old replies. */
@@ -701,6 +703,7 @@ static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *r
 static void x9q_del(uint32_t local){
  unsigned slot=local-CBQ_PORT_BASE;if(local<CBQ_PORT_BASE||slot>=CBQ_MAX_CLIENTS)return;
  x9w_del(slot);
+ x9m_del(slot);
  uint64_t generation=x9q_clients[slot].generation+1;bzero(&x9q_clients[slot],sizeof(x9q_clients[slot]));x9q_clients[slot].generation=generation;
  for(unsigned i=0;i<X9Q_JOBS;i++)if(x9q_jobs[i].used&&!x9q_jobs[i].probe&&x9q_jobs[i].local==local){
   x9q_cancel(x9q_jobs[i]);
@@ -709,6 +712,7 @@ static void x9q_del(uint32_t local){
 }
 static void x9q_poll(){
  x9w_poll();
+ x9m_poll();
  /* One bounded read-only pass even when D22 never creates a SIM2 client.
   * It does not send QMI responses, change radio policy or manufacture a SIM. */
  static unsigned probed;

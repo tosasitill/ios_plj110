@@ -27,6 +27,7 @@ const uint32_t X9BB_PORT_BASE = 0x2000;
 struct x9bb_service { uint32_t id; const char *name; };
 const x9bb_service x9bb_services[] = {
   { 0x01, "WDS" }, { 0x02, "DMS" }, { 0x03, "NAS" }, { 0x0b, "UIM" }, { 0x1a, "WDA" }, { 0x2f, "DPM" },
+  { 0x05, "WMS" }, { 0x21, "IMSA" },
 };
 uint32_t x9bb_logged;
 
