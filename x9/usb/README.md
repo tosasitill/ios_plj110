@@ -284,10 +284,11 @@ python3 -I x9/usb/prepare_native.py \
 `--require-compatible` 返回 **2** 是明确的 ABI/load-readiness 门拒绝，
 不是编译错误；不提供强行绕过该门的装载参数。
 
-### 复现端点与 completion 的原始调用契约
+### 复现端点与 request 的原始调用契约
 
-`recover_contract.py` 对同一固定原始输入做有界反汇编，检查15处关键指令并输出
-`contract.json` 和七段 `.dis`。这是静态分析命令，不是测试套件或原生驱动装载器：
+`recover_contract.py` 对同一固定原始输入做有界反汇编，检查87处关键指令、request
+分配类型及具体 controller 的虚表/import，输出 `contract.json` 和28段 `.dis`。
+这是静态分析命令，不是测试套件或原生驱动装载器：
 
 ```sh
 python3 -I x9/usb/recover_contract.py \
@@ -298,7 +299,32 @@ python3 -I x9/usb/recover_contract.py \
 需要 `capstone`。输入须是原始20H392 Mach-O，输出须是新私有目录，不分析已成功
 boot候选。确认创建pipe的settings输入是**5×32-bit word**，不是wire descriptor；
 hardware endpoint创建是**slot173→187**（slot169是外层gate），销毁是slot174→188。
-completion在`flag@0x30`为0时取32-bit count，否则取64-bit；回调依次为target、
-parameter、32-bit status、count。`flag@0x31`控制回调后的buffer release/recycle。
-尚未确认count是actual还是remaining，也未恢复所有pure virtual、request生命周期、
-timeout/IRQ契约；输出保持 `runtime_loadable=false`，不生成可执行C++ ABI。
+
+**USB-5 静态里程碑：普通 count 是 actual，不是 remaining。** 原始
+`IOUSBDeviceIORequest` 是 **0x68B 的普通 typed allocation，不是 OSObject**；
+slot223 分配→retain memory descriptor→复制24B completion→gate slot225 提交。
+同一原始 cache 的 `AppleSynopsysOTGDevice` 提供了具体生产路径：普通提交先清零
+request `+0x48`，端点中断和 abort 路径累加
+`programmed chunk bytes - min(sum(descriptor residual16), programmed chunk bytes)`；
+Family completion 取该值，EP0 data-stage write completion 再直接累加到进度。
+这是原始代码的数据流证据，**不是 MTU3 DMA 的实机结果**，不复制 OTG 寄存器实现。
+完成 request 经 `+0x20` 链入 endpoint 的 `head@0x40/tail@0x48`，drain 脱链后
+调用 slot252→Family completion。**endpoint 的 `+0x48` 是队列尾，不是 request count**。
+
+| 请求种类 | request `+0x40` | request `+0x48` / 回调第4参数 |
+|---|---|---|
+| 普通 slot223，flag30=0 | requested bytes64 | accumulated actual bytes；回调只取低32位 |
+| 等时 slot224，flag30=1 | frame count32 零扩展到64位 | caller frame-array pointer64，**不是 byte count** |
+
+回调前3参数仍为 target、parameter、status32。`flag@0x31=0` 时，**回调之后**
+release descriptor、清 request `+8`，再经 slot227 free request；非零跳过两种清理。
+gated submit 非零返回时，外层直接 release/free，**不由外层再发 completion**。
+slot226/227 的默认实现是分配/释放，不应沿用“request recycle pool”的猜测。
+
+原生 error/abort 回调可能带部分 actual；自有 tracked TX 在非COMPLETE状态仍没有
+合格的部分字节计数，`actual=0` 不能证明零wire，**不可直接映射为原生失败计数**。
+原生 timeout 的到期/取消/在飞所有权、callback reentrancy、全部pure virtual、
+168→272局部ABI和IOUSBDeviceInterface/mux绑定仍未完成；输出保持
+`abi_compatible=false` / `runtime_loadable=false`，不生成可执行C++ ABI。
+本里程碑没有改运行内核、重建成功候选、安装工具或操作设备；USB-5是交接号，
+不表示新的USB协议版本。
