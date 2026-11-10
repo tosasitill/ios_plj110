@@ -11,6 +11,10 @@ struct x9u_hs_state {
   * Keep raw read-to-clear UEC registers before acknowledging the event. */
  uint32_t pmc_is,pmc_ue[5];
  unsigned pmc_line_resets;
+ /* Late entry only: IS may outlive read-to-clear UEC snapshots in shim.
+  * Preserve classification before acknowledging an empty idle UIC IRQ. */
+ uint32_t idle_is_before,idle_is_after,idle_ue[5];
+ unsigned idle_ue_read,idle_uic_ack;
 };
 int x9u_hs_read(const struct x9u_io *,struct x9u_hs_state *,uint32_t out[6]);
 int x9u_hs_valid(const uint32_t state[6]);
@@ -20,7 +24,8 @@ int x9u_hs_valid(const uint32_t state[6]);
  */
 int x9u_hs_enable(const struct x9u_io *,struct x9u_hs_state *,
                   int (*refclk)(void *,unsigned,unsigned));
-/* Kernel late scaling only. Prepare does GETs, never changes PA configuration.
+/* Kernel late scaling only. Prepare does GETs, never changes PA configuration;
+ * it may acknowledge only an isolated idle UIC IRQ with all five UECs zero.
  * Caller must hold the shared transport mutex and establish/retain the MT6993
  * VCORE floor and high UFS/FDE clocks before apply. No reset or media writes.
  * requested=4/5 is a ceiling, negotiated against both actual RX capabilities.

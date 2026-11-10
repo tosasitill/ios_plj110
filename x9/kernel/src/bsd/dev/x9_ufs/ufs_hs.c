@@ -39,6 +39,30 @@ static int get(const struct x9u_io *io,struct x9u_hs_state *s,unsigned op,unsign
 {*v=0;return cmd(io,s,op,attr,v);}
 static int set(const struct x9u_io *io,struct x9u_hs_state *s,unsigned attr,uint32_t v)
 {return cmd(io,s,2,attr,&v);}
+static int high_prepare_idle(const struct x9u_io *io,struct x9u_hs_state *s)
+{
+ uint32_t status=rd(io,0x20);s->idle_is_before=s->idle_is_after=status;
+ if(!(status&(UCCS|UPMS|LINK_ERRORS)))return 0;
+ /* 179: IS=4, HCS=0x10f, HCE=1, DB=0, all five UECs=0. IS is a
+  * sticky interrupt summary, not an error code. ufshcd_intr acknowledges
+  * IS and ufshcd_update_uic_error only schedules EH for decoded errors.
+  * The shim's link snapshots read-to-clear UECs without clearing IS.
+  * Do not consume pending UIC/power completions or any real error here. */
+ if(status!=4U||rd(io,0x24)||!(rd(io,0x60)&1)||
+    (rd(io,0x30)&0x70bU)!=0x10bU)return X9U_BUSY;
+ s->idle_ue_read=1;
+ for(unsigned i=0;i<5;i++)s->idle_ue[i]=rd(io,0x38+4*i);
+ for(unsigned i=0;i<5;i++)if(s->idle_ue[i])return X9U_RESPONSE;
+ /* Still under the shared UFS mutex, with IRQs disabled and no transfer
+  * or UIC owner. Recheck after decoding; one W1C bit, no reset or retry. */
+ if(ready(io)||rd(io,0x18)||rd(io,0x24)||!(rd(io,0x60)&1)||
+    (rd(io,0x30)&0x70bU)!=0x10bU||rd(io,0x20)!=4U)return X9U_BUSY;
+ wr(io,0x20,4U);s->idle_uic_ack=1;s->idle_is_after=rd(io,0x20);
+ if(s->idle_is_after&(UCCS|UPMS|LINK_ERRORS))return X9U_BUSY;
+ if(ready(io)||rd(io,0x18)||rd(io,0x24)||!(rd(io,0x60)&1)||
+    (rd(io,0x30)&0x70bU)!=0x10bU)return X9U_NOT_READY;
+ return 0; /* GET capabilities, baseline READs and all high gates follow. */
+}
 static int high_pmc_errors(const struct x9u_io *io,struct x9u_hs_state *s)
 {
  uint32_t status=rd(io,0x20);s->pmc_is=status;
@@ -142,10 +166,14 @@ int x9u_hs_prepare_high(const struct x9u_io *io,struct x9u_hs_state *s,unsigned 
  *s=(struct x9u_hs_state){0};s->stage=40;
  int e=ready(io);if(e)return e;
  if(rd(io,0x2240)!=0x10480000||rd(io,0x18))return X9U_UNSUPPORTED;
- /* Neither clear stale completions nor mistake a pending UIC for this request. */
- if(rd(io,0x20)&(UCCS|UPMS|LINK_ERRORS))return X9U_BUSY;
+ /* Empty idle UIC interrupt is distinct from a pending completion/error. */
+ if((e=high_prepare_idle(io,s)))return e;
  if((e=x9u_hs_read(io,s,s->before)))return e;
  for(unsigned i=0;i<6;i++)s->after[i]=s->before[i];
+ /* New errors during GETs are not the empty entry event. Check before
+  * unsupported capabilities can select the unchanged-link fallback. */
+ if(rd(io,0x20)&(UCCS|UPMS|LINK_ERRORS))return X9U_BUSY;
+ if((e=ready(io)))return e;
  if(!x9u_hs_valid(s->before)||(s->before[0]!=0x44&&s->before[0]!=0x11)||
     s->before[1]!=s->before[2]||s->before[1]<3||s->before[3]!=2||
     s->before[4]!=2||s->before[5]!=2)return X9U_UNSUPPORTED;
@@ -153,6 +181,8 @@ int x9u_hs_prepare_high(const struct x9u_io *io,struct x9u_hs_state *s,unsigned 
  if((e=get(io,s,1,0x15a9,&s->local_version))||
     (e=get(io,s,1,0x1587,&s->max_rx_gear))||
     (e=get(io,s,3,0x1587,&s->peer_max_rx_gear)))return e;
+ if(rd(io,0x20)&(UCCS|UPMS|LINK_ERRORS))return X9U_BUSY;
+ if((e=ready(io)))return e;
  /* ufs_mtk_get_controller_version: UniPro1.8 enum=5 -> hw major>=3.
   * Do not infer ADAPT support from vendor HCI version bits. */
  if(s->local_version<5||s->local_version>0xff||s->max_rx_gear<4||

@@ -172,10 +172,17 @@ void sweet_x9_ufs_late_high(void)
  xg.attempted=1;xg.stage=1;xg.result=X9U_NOT_READY;
  if(!xu.ready||xu.failed||xu.host.poisoned)goto done;
  /* Mutex drains all native root/log/mailbox/modem views. Reject external
-  * outstanding transfers or stale UICs; no forced clear/reset to proceed. */
+  * outstanding transfers/completions; only a decoded empty idle UIC IRQ
+  * may be acknowledged by prepare. No forced clear/reset to proceed. */
  e=x9u_hs_prepare_high(&xu.host.io,&hs,(unsigned)requested);
  if(e) {
-  if(e!=X9U_UNSUPPORTED||hs.uncertain)high_poison();
+  if(e!=X9U_UNSUPPORTED||hs.uncertain) {
+   high_poison();
+   /* prepare consumed read-to-clear UECs to reject a real entry error.
+    * Preserve that first evidence, not high_poison's later zero values. */
+   if(e==X9U_RESPONSE&&hs.stage==40&&hs.idle_ue_read)
+    memcpy(xg.fault.ue,hs.idle_ue,sizeof(hs.idle_ue));
+  }
   goto done;
  }
  xg.stage=2;
@@ -223,6 +230,9 @@ done:;
   xg.univ_fenc,xg.main_fenc,xg.univ_rate,xg.main_rate);
  printf("X9 UFS HIGH PMC: isolated_line_resets=%u IS=%08x UEC=%08x/%08x/%08x/%08x/%08x\n",
   hs.pmc_line_resets,hs.pmc_is,hs.pmc_ue[0],hs.pmc_ue[1],hs.pmc_ue[2],hs.pmc_ue[3],hs.pmc_ue[4]);
+ printf("X9 UFS HIGH entry: IS=%08x->%08x empty_uic_ack=%u UEC_read=%u UEC=%08x/%08x/%08x/%08x/%08x\n",
+  hs.idle_is_before,hs.idle_is_after,hs.idle_uic_ack,hs.idle_ue_read,
+  hs.idle_ue[0],hs.idle_ue[1],hs.idle_ue[2],hs.idle_ue[3],hs.idle_ue[4]);
  for(unsigned i=0;i<checked;i++) {
   uint32_t *p=qualified[i];
   printf("X9 UFS HIGH sample: mode=0x%x TX_G%u RX_G%u TX_lanes=%u RX_lanes=%u series=%u SHA256_match=1 windows=4 bytes=262144 final_status=%d\n",
@@ -240,7 +250,7 @@ void sweet_x9_ufs_boot_failure(char *out,unsigned capacity)
  lck_mtx_lock(&x9ufs_lock);
  uint32_t ue[5];memcpy(ue,xg.fault.ue,sizeof(ue));
  snprintf(out,capacity,
-  "ufs=%u/%u/%u/%u high=%u/%u/%u:%d G%u PA=%u:%x:%u:%u guard=%x IS/HCS/HCE/DB=%08x/%08x/%x/%x UEC=%08x/%08x/%08x/%08x/%08x CLK=%08x/%08x/%08x PLL=%08x/%08x/%08x/%08x DV=%08x/%08x/%08x OCS/phase=%u/%u LR=%u",
+  "ufs=%u/%u/%u/%u high=%u/%u/%u:%d G%u PA=%u:%x:%u:%u guard=%x IS/HCS/HCE/DB=%08x/%08x/%x/%x UEC=%08x/%08x/%08x/%08x/%08x CLK=%08x/%08x/%08x PLL=%08x/%08x/%08x/%08x DV=%08x/%08x/%08x OCS/phase=%u/%u LR=%u EA=%u:%08x/%08x",
   xu.ready,xu.writable,xu.failed,xu.host.poisoned,xg.attempted,xg.completed,
   xg.fault.valid?xg.fault.stage:xg.stage,xg.result,xg.hs.after[1],
   xg.hs.stage,xg.hs.last_attribute,xg.hs.uic_result,xg.hs.upmcrs,
@@ -249,6 +259,7 @@ void sweet_x9_ufs_boot_failure(char *out,unsigned capacity)
   xg.fault.cfg,xg.fault.fenc,xg.fault.cksta,
   xg.fault.pll[0],xg.fault.pll[1],xg.fault.pll[2],xg.fault.pll[3],
   xg.fault.voltage[0],xg.fault.voltage[1],xg.fault.voltage[2],
-  xu.host.last_ocs,xu.host.failure_phase,xg.hs.pmc_line_resets);
+  xu.host.last_ocs,xu.host.failure_phase,xg.hs.pmc_line_resets,
+  xg.hs.idle_uic_ack,xg.hs.idle_is_before,xg.hs.idle_is_after);
  lck_mtx_unlock(&x9ufs_lock);
 }
