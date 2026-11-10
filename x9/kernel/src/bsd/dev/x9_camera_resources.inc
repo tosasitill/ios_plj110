@@ -10,6 +10,7 @@
  * Register mappings persist, but every successful secure power reference
  * is paired, and only our newly added CSI AP bit may be removed.
  */
+#include "x9_mm_power.h"
 _Static_assert(sizeof(struct x9_camera_resources)==224,"camera resources ABI");
 enum { CAM_RES_CSI_BIT=1u<<11, CAM_RES_CSI_SET=0x2070c,
     CAM_RES_CSI_EN=0x20714, CAM_RES_CSI_GLOBAL=0x11330,
@@ -18,26 +19,17 @@ enum { CAM_RES_CSI_BIT=1u<<11, CAM_RES_CSI_SET=0x2070c,
     CAM_RES_FSM=0x10000, CAM_RES_MM_INFRA=(1u<<31)|(1u<<29) };
 struct cam_receive_power {
     vm_offset_t hwv, mmup, smmu;
+    uint64_t power_token;
     bool csi_owned, csi_borrowed, smmu_owned, active;
 };
 static struct cam_receive_power cam_receive;
 static struct x9_camera_resources cam_resources_last={.version=1};
 static bool cam_resources_attempted, cam_resources_latched;
 
-/* MTK_SIP_SMC_CMD(0x514), MM_SMMU=0, secure=1, PM_GET=3 / PM_PUT=4.
- * Nonzero a0 is NOT a power reference, and must never be balanced with PUT.
- * A failed PUT retains the reference; never retry in this boot. */
-static uint32_t cam_smmu_power_call(bool on)
-{
-    register uint64_t x0 __asm__("x0")=0xc2000514u;
-    register uint64_t x1 __asm__("x1")=0x800u+(on?3u:4u);
-    register uint64_t x2 __asm__("x2")=0,x3 __asm__("x3")=0;
-    register uint64_t x4 __asm__("x4")=0,x5 __asm__("x5")=0;
-    register uint64_t x6 __asm__("x6")=0,x7 __asm__("x7")=0;
-    __asm__ volatile("dsb sy; smc #0; dsb sy; isb"
-        :"+r"(x0),"+r"(x1),"+r"(x2),"+r"(x3),"+r"(x4),"+r"(x5),"+r"(x6),"+r"(x7)::"memory");
-    return (uint32_t)x0;
-}
+/* Camera and VCP share the native reference authority. First GET/last PUT
+ * only; a software-only shared take/drop reports smc_a0=0 too, so this field
+ * alone is not evidence that a new SMC was issued. A live VCP child prevents
+ * camera teardown from removing the physical MM reference. */
 static uint64_t cam_res_read64(vm_offset_t b,unsigned off)
 { return *(volatile uint64_t *)(b+off); }
 static void cam_csi_snapshot(struct cam_receive_power *p,uint32_t v[6])
@@ -48,6 +40,8 @@ static void cam_csi_snapshot(struct cam_receive_power *p,uint32_t v[6])
 }
 static int cam_mm_vote_idle(struct cam_receive_power *p)
 {
+    int power=x9_mm_power_validate(p->power_token,X9_MM_POWER_CAMERA);
+    if(power)return power;
     /* MM raw voter waits STA==0, not AP's DONE==bit. Dummy read is required
      * by the MT6993 MMUP bus path; never write its GPR or global FSM state. */
     (void)cam_rr(p->mmup,0x1ec);
@@ -126,6 +120,8 @@ static bool cam_smmu_config_same(const struct x9_camera_resources *a,
 static int cam_smmu_observe(struct cam_receive_power *p,struct x9_camera_resources *r)
 {
     struct x9_camera_resources again={0};
+    int power=x9_mm_power_validate(p->power_token,X9_MM_POWER_CAMERA);
+    if(power)return power;
     cam_smmu_snapshot(p,r);cam_smmu_snapshot(p,&again);
     r->flags|=X9_CAM_RES_SMMU_SNAPSHOT;
     if(!cam_smmu_config_same(r,&again) || r->cr0!=r->cr0ack || r->irq_ctrl!=r->irq_ack) {
@@ -169,15 +165,15 @@ static int cam_receive_power_restore(struct cam_receive_power *p,struct x9_camer
         p->csi_borrowed=false;
     }
     if(p->smmu_owned) {
-        r->smc_put=cam_smmu_power_call(false);
-        if(r->smc_put)return EIO;
+        int e=x9_mm_power_release(&p->power_token,X9_MM_POWER_CAMERA,&r->smc_put);
+        if(e)return e;
         p->smmu_owned=false;
     }
     p->active=false;return 0;
 }
 static int cam_receive_power_take(struct cam_receive_power *p,struct x9_camera_resources *r)
 {
-    if(p->active || p->smmu_owned || p->csi_owned || p->csi_borrowed)return EBUSY;
+    if(p->active || p->smmu_owned || p->power_token || p->csi_owned || p->csi_borrowed)return EBUSY;
     r->stage=X9_CAM_RES_STAGE_MAP;
     if(!p->hwv)p->hwv=ml_io_map(0x31c00000,0x22000);
     if(!p->mmup)p->mmup=ml_io_map(0x31a04000,0x1000);
@@ -188,12 +184,15 @@ static int cam_receive_power_take(struct cam_receive_power *p,struct x9_camera_r
     r->mm_ack_before=cam_rr(p->hwv,0x12900);
     r->mm_ack_required=CAM_RES_MM_INFRA;
     r->stage=X9_CAM_RES_STAGE_SMMU_POWER;
-    r->smc_get=cam_smmu_power_call(true);if(r->smc_get)return EIO;
+    int power=x9_mm_power_acquire(X9_MM_POWER_CAMERA,&p->power_token,&r->smc_get);
+    if(power)return power;
     p->smmu_owned=true;
     r->flags|=X9_CAM_RES_SMMU_POWER;
     r->blockers&=~X9_CAM_RES_NEED_SMMU_POWER;
     r->stage=X9_CAM_RES_STAGE_MM_INFRA;
     r->mm_ack_active=cam_rr(p->hwv,0x12900);
+    power=x9_mm_power_validate(p->power_token,X9_MM_POWER_CAMERA);
+    if(power)return power;
     /* Never read MMUP with an unpowered shared infra path. Secure PM_GET
      * must keep the already initialized AO/infra0 provider awake; do not
      * invent VMM backup/IRQ votes or initialize their firmware handlers. */
