@@ -1173,6 +1173,43 @@ CRC通过和 prefix写完均不表示
 完整初始化／校准成功。不会执行未知 opaque payload、猜默认profile、写MTP/OTP，
 没有 unmute API；真实 profile／芯片证据未齐时，不允许进入 speaker Ready。
 
+### 读取双 PA 的 factory Re25 shadow 与离线回复
+
+**尚无完整校准／保护 supplier 或 combined caller；以下代码不授予 Ready，不触发
+校准，也不自动发送参数。** OPPO v6.14.2 的 TFA9872/73/74 字段表与
+`tfa_dev_mtp_get` 对应 f0 的 OTC/EX 两个位、f5 的独立16-bit R25C；不是
+family1 的0x83或TFA9888的左右双字段。
+
+`x9_pa_native_re25_read(ticket, i2c6_lease, &snapshot)` 为 kernel-only 接点，
+使用真实 native I2C6 mutex／transfer／parent，不创建第二条总线或新的用户 selector：
+
+- 已有同ticket、实际reset epoch／READY generation、双侧full revision和AMPE-off
+  资格后，fresh读两侧ID/SYSCTRL；first f0之前锁存每epoch仅一次attempt。
+- 两侧各读f0→f5，要求OTC+EX、独立非零／非ffff值；逆序第二快照f5→f0，要求
+  两个完整word稳定，再fresh核对双侧ID/SYSCTRL、Online和controller idle。
+- 全部成功才发布48B snapshot。错误保留首错与相关side；caller的kernel输出须
+  全程可写／pin，与native状态和MMIO虚拟／物理字节不重叠，失败保持输出不变。
+- 不读status/IRQ、不写key/OTP/trigger、不poll MTP、不复制单声道或用7399补值。
+  稳定shadow**不是MTP engine无在途操作、真实板级范围、DSP通道、calibration-done
+  或完整保护profile证明**；这些仍须真实supplier独立证明后才能执行参数。
+
+kernel 与 own-code iOS 共用 `x9_tfa_re25.{c,h}`。encode接受两个独立mOhm值和
+明确范围，使用64-bit `mOhm*65536/1000`，生成family2 selector/81/05加两个Q16；
+显式command为BE24 9B／LE32 12B，canonical batch为18B／24B。不猜cold/warm、
+instance或LEFT/RIGHT→word顺序，encoder本身不发送。decode只接受两个raw reply
+word（BE24 6B／LE32 8B），先检查canonical signed24，再拒绝负／零／越界值；
+`q16*1000/65536`同样使用64-bit，避免vendor unsigned32中间乘法溢出。
+alias／长度／capacity失败均不改output/size。
+
+实际 `audioctl` 有 `amp-re25-inspect` 离线入口，在任何IOKit连接之前返回。
+语法：`audioctl amp-re25-inspect <local.bin> <be24|le32> <word0-min> <word0-max>
+<word1-min> <word1-max>`。四个范围须严格decimal、1..65534，各自min≤max，
+无默认范围；最多读9B来拒绝尾随内容。仅打印Q16与floor-mOhm：在量化Q16域
+比较边界，floor显示可能比原始下界低1mOhm。文件与本地范围均不可信，word0/1
+不代表已证明LEFT/RIGHT；工具不生成／发送SetRe25、不连接服务或访问硬件。
+`audio/build.py` 的实际audioctl源码列表和kernel recipe/link-order均已加入codec，
+但单位编译通过不等于HAL bundle/signing/router或实体扬声器验收。
+
 ### 解析真实 TFA 参数批消息
 
 `tfa98xx_{device,music,ringtone,voice}.bin` 是另一种输入，**不能交给 PM `.cnt`

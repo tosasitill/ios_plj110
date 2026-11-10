@@ -43,6 +43,7 @@ def main():
     subprocess.run(common + [str(HERE / 'audioctl.c'),
                              str(HERE.parent / 'kernel/src/bsd/dev/x9_tfa98xx.c'),
                              str(HERE.parent / 'kernel/src/bsd/dev/x9_tfa_multimsg.c'),
+                             str(HERE.parent / 'kernel/src/bsd/dev/x9_tfa_re25.c'),
                              '-o', str(tool)], check=True)
     for path in (bundle, tool):
         subprocess.run(['/usr/bin/codesign', '--force', '--sign', '-', '--timestamp=none', str(path)], check=True)

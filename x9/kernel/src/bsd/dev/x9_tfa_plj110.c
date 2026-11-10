@@ -6,8 +6,9 @@
  * mutex; the native lease excludes this probe for its whole lifetime.
  * A bus read necessarily writes its register-address byte and AP FIFO CSRs;
  * the diagnostic never writes a PA register value. The native suffix can
- * only perform validated full-revision AMPE-off through its actual I2C6
- * child, separately from this probe. Neither is x9_tfa_bus verified=7.
+ * perform validated full-revision AMPE-off and read paired factory shadows
+ * through its actual I2C6 child, separately from this probe. Neither is
+ * x9_tfa_bus verified=7 or a calibration/profile/playback grant.
  */
 #include <sys/param.h>
 #include <sys/systm.h>

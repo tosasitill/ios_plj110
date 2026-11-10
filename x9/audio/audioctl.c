@@ -10,6 +10,7 @@
 #include "../kernel/src/bsd/dev/x9_audio.h"
 #include "../kernel/src/bsd/dev/x9_tfa98xx.h"
 #include "../kernel/src/bsd/dev/x9_tfa_multimsg.h"
+#include "../kernel/src/bsd/dev/x9_tfa_re25.h"
 #include "../kernel/src/bsd/dev/x9_speaker_afe.h"
 #include "../kernel/src/bsd/dev/x9_tfa_plj110.h"
 #include "../kernel/src/bsd/dev/x9_i2c6.h"
@@ -253,6 +254,46 @@ static int inspect_multimsg(const char *path,const char *format) {
     puts("Offline framing only. No container CRC/profile, route, calibration or unmute/Ready authority; no service connection, bus or mailbox write.");
     return e?1:0;
 }
+/* Offline caller-supplied limits are numeric filters, never board authority. */
+static int re25_bound(const char *text,uint32_t *out) {
+    if(!text || !*text)return -1;
+    uint32_t value=0;
+    for(const char *p=text;*p;p++) {
+        if(*p<'0' || *p>'9' || value>6553u)return -1;
+        value=value*10u+(uint32_t)(*p-'0');
+        if(value>65534u)return -1;
+    }
+    if(!value)return -1;
+    *out=value;return 0;
+}
+static int inspect_re25(const char *path,const char *format,char **bounds) {
+    uint32_t packing=!strcmp(format,"be24")?X9TFABE24:
+                     !strcmp(format,"le32")?X9TFALE32:0;
+    struct x9_tfa_re25_limits limits={0};
+    if(!packing || re25_bound(bounds[0],&limits.minimum_mohm[0]) ||
+       re25_bound(bounds[1],&limits.maximum_mohm[0]) ||
+       re25_bound(bounds[2],&limits.minimum_mohm[1]) ||
+       re25_bound(bounds[3],&limits.maximum_mohm[1]) ||
+       limits.minimum_mohm[0]>limits.maximum_mohm[0] ||
+       limits.minimum_mohm[1]>limits.maximum_mohm[1]) {
+        fprintf(stderr,"Re25 requires be24/le32 and two ordered decimal bounds in 1..65534 mOhm\n");return 2;
+    }
+    FILE *f=fopen(path,"rb");if(!f){perror(path);return 1;}
+    uint8_t data[9]={0}; /* Read one extra byte to reject extended replies. */
+    size_t n=fread(data,1,sizeof(data),f);int read_error=ferror(f);
+    int close_error=fclose(f);
+    uint32_t expected=packing==X9TFABE24?6u:8u;
+    if(read_error || close_error || n!=expected) {
+        fprintf(stderr,"Re25 requires exactly %u raw reply bytes\n",expected);return 1;
+    }
+    struct x9_tfa_re25_pair pair;
+    int e=x9_tfa_re25_decode(data,(uint32_t)n,packing,&limits,&pair);
+    if(e)fprintf(stderr,"Re25 rejected: errno=%d\n",e);
+    else for(unsigned i=0;i<2;i++)printf("reply-word%u Q16=0x%06x floor-mOhm=%u local-bounds=%u..%u\n",
+        i,pair.q16[i],pair.mohm[i],limits.minimum_mohm[i],limits.maximum_mohm[i]);
+    puts("Offline numbers and untrusted local bounds only. Quantized Q16 bounds may print one mOhm below the source; word order is not LEFT/RIGHT proof. No response identity, calibration-done, profile, SetRe25, service connection or hardware/Ready authority.");
+    return e?1:0;
+}
 static void print_status(const X9AudioControl *s) {
     printf("X9 audio ABI=%u state=0x%x blockers=0x%x errno=%u rate=%u channels=%u\n"
            "PCM played=%llu queued=%llu underruns=%llu bad_producer=%llu generation=%u\n",
@@ -394,6 +435,7 @@ static int path_status(io_connect_t c) {
 int main(int argc, char **argv) {
     if (argc == 4 && !strcmp(argv[1], "amp-inspect")) return inspect_container(argv[2], argv[3]);
     if (argc == 4 && !strcmp(argv[1], "amp-msg-inspect")) return inspect_multimsg(argv[2], argv[3]);
+    if (argc == 8 && !strcmp(argv[1], "amp-re25-inspect")) return inspect_re25(argv[2], argv[3], &argv[4]);
     int amp = argc == 2 && !strcmp(argv[1], "amp-status");
     int i2c6 = argc == 2 && !strcmp(argv[1], "i2c6-status");
     int left_vdd = argc == 2 && !strcmp(argv[1], "left-vdd-status");
@@ -414,7 +456,7 @@ int main(int argc, char **argv) {
     int playing = argc == 3 && !strcmp(argv[1], "play");
     int dsp = argc == 2 && !strcmp(argv[1], "dsp-status");
     if (!left_vdd && !i2c6 && !amp && !probing && !playing && !dsp && !board && !afe && !resources && !clocks && !clock_probe && !pll && !pll_probe && !path && !path_probe && !stream && !stream_stop && !booting && !stopping && !(argc == 2 && !strcmp(argv[1], "status"))) {
-        fprintf(stderr, "usage: audioctl left-vdd-status | i2c6-status | amp-status | amp-probe | status | resource-status | clock-status | clock-probe | pll-status | pll-probe | path-status | path-probe | stream-status | stream-stop | afe-status | dsp-status | board-status | dsp-boot | dsp-stop |\n  play <S16LE stereo 48000Hz raw PCM> | amp-inspect <local.cnt> <exact-profile> | amp-msg-inspect <local.bin> <be24|le32>\n"); return 2;
+        fprintf(stderr, "usage: audioctl left-vdd-status | i2c6-status | amp-status | amp-probe | status | resource-status | clock-status | clock-probe | pll-status | pll-probe | path-status | path-probe | stream-status | stream-stop | afe-status | dsp-status | board-status | dsp-boot | dsp-stop |\n  play <S16LE stereo 48000Hz raw PCM> | amp-inspect <local.cnt> <exact-profile> | amp-msg-inspect <local.bin> <be24|le32> |\n  amp-re25-inspect <local.bin> <be24|le32> <word0-min> <word0-max> <word1-min> <word1-max>\n"); return 2;
     }
     FILE *f = playing ? fopen(argv[2], "rb") : NULL;
     if (playing && !f) { perror(argv[2]); return 1; }
