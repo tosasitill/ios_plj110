@@ -162,6 +162,14 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **x9-rev252ie-md**:Mac构建成功,命令同ic/id(`--name x9-rev252ie-md`),boot.img 12922880B,参数与ic一致,warning 1412(未增加),插件275不变,**无需mailbox staging**。`X9 MODEM: build=rev252ie-md ...-ecsq-csgclose`。日志`.local/x9/work/pdp-activation/build-ie.stdout.log`。
 - 下一步由用户手动:`fastboot boot x9/out/x9-rev252ie-md/boot.img`,日志`~/171.txt`,**尽量采集≥3分钟**。看:`unresolved client teardown`是否消失、`X9 RENDER CLOSE`里"parked"/"retain"行、140s后SpringBoard是否还循环;`ECSQ ... raw`原始回复。
 
+### 双卡隔离分支指针(HANDOFF 107-DS,2026-11-10): uim3已编译;未上机,不等于双卡显示/上网完成
+
+- **代码在独立分支,未合入main**:`work/dual-sim`,提交**`71ce384`**(MIPC/UIM/NAS/DMS/WDS分槽)+**`58a823b`**(BSP activation分槽/DsdsAllowed+离线D22能力门准备器)。worktree `.local/x9/worktrees/dual-sim`;完整证据、命令、未完成项见`git show 58a823b:NOTES.md`的106/107-DS。main另一会话未提交的三个代码文件保持原样,本次main只提交这段文档。
+- **撤回103的双卡绝对断言**:20H392 arm64实际有双卡链,不是必须换arm64e IPSW。`GsmRadioPersonality+0x241`为D22关闭的第一层门;继续追到`ActivationController→ActivationModel→BSP 0xe2/0xb00c TLV0x53 DsdsAllowed`为第二层。旧BSP只缓存slot-one身份且不区分UIM session,双卡读回会串卡;uim3已补分槽缓存和真实ICCID对比后上报。尚无设备验证,不能只改门就宣称网络可用。
+- **最新双卡候选**:`.local/x9/worktrees/dual-sim/x9/out/x9-dualsim-uim3/boot.img`,本地构建exit0,构建器报告12922880B;日志`.local/x9/work/dual-sim-20H392/build-uim3.stdout.log`。`x9_dual_sim=1`、`x9_dpmaif=2`、`x9_mipc=1`,插件275不变,**无需mailbox**。保留ie LTE-only/旧ECSQ,不含main尚未提交的171多行ECSQ/exitlog修复;不混NR候选。无CI run/测试套件/二次产物校验/设备操作。
+- **用户下一步**:两卡留机,手动`fastboot boot .local/x9/worktrees/dual-sim/x9/out/x9-dualsim-uim3/boot.img`,约3分钟日志另存`~/dual-uim3.txt`。看`X9 DUALSIM: uim3`、两槽CPIN/EF_DIR、`distinct 1`、`BSP DsdsAllowed 1`、两卡NAS。**仍用原D22能力门,本轮只先证明读卡链,不应期待已出现双图标/上网。**
+- **离线cache副本已准备,未安装**:脚本在该分支`x9/tools/prepare_dual_sim_cache.py`;副本`.local/x9/work/dual-sim-20H392/patched-cache/dyld_shared_cache_arm64.31`,`cache-patch.json`记录原/新28字节。只改D22(enum7)的+0x241谓词,组件偏移0x36ecf98,不改NR,不换机型。签名未重建、加载未验证。此偏移不是根盘/UFS偏移;先验证uim3读卡,再向用户单独确认可回退安装,不要自行写设备。DDS020d已追到slot→mask1/2,但getter/完成确认未证明,桥未放行真实DDS切换。最终仍需CC两卡显示/注册→切换数据卡→iOS实际收发。
+
 ### 并行交接(HANDOFF 105-SA,2026-11-10): NR注册实验已编译;D22能力门离线求值为0;8字节cache补丁仅本地准备,未安装
 
 - **隔离分支/代码提交**:`x9-nrsa` / **`dde26eb`**,worktree `.local/x9/work/ios_plj110-nrsa`。基于`c066ba2`(含`62e304e`的ie ECSQ/CSG修复),不含main另一会话后续MIPC/WDS修改。**不要覆盖main当前未提交代码**,后续按提交挑选合并。
@@ -188,7 +196,7 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 
 - **169.txt**(Mac `~/169.txt`,2219165B,末150.8s,无panic)。`X9 MGWIPE: cache errno=0`(3.155s)生效。用户观察:状态栏出现**一张卡**的运营商/信号,但**信号条是空的**,也没有双卡。30.26s `CEREG 1 CGATT 1 COPS-AcT 7`。清缓存后CommCenter的请求明显变多(NAS 0x33/0x44/0x45/0x5562/0x5566/0x5567等,全94拒),仍无0xc8/WDS Start。
 - **信号条(观察+修复)**:CommCenter在30.24–30.29s发NAS 0x4f Get Sig Info ×6,全部94拒;之后只每10s发0x5556(Apple私有)。0x20 Get Signal Strength它根本没发。**id**:0x4f改为真实`AT+ECSQ`。字段布局取自反汇编libmtk-ril `getMdSignalStrengthByAT`(0x39cf90)与`updateSignalStrength`(0x39d1a0)LTE路径:sig1,sig2,rssi_qdbm,rscp,ecn0,rsrq_qdbm,rsrp_qdbm,Act,sig3,band;LTE=Act 0x1000/0x2000,有效条件sig1≤34且sig2<98;rsrp/rsrq/rssi=qdbm/4,**SNR(0.1dB)=sig3*5/2**,sig3=0x7fff无效。回LTE TLV 0x14(rssi i8,rsrq i8,rsrp i16,snr i16)。收到0x6c的client每10s另收一次0x51 Sig Info indication(同一AT来源)。非LTE或无效值仍NOT_READY,不编造。日志`X9 QMI AT: ECSQ fields ...`前6次打印原始数值。
-- **双卡(结论,未改代码)**:不是bug,是身份限制。iPhone X(D22,A11)是单卡机型,iOS 16的双卡/DSDS只在XS/XR起(A12,**arm64e**),与§7 HANDOFF102中14 Pro同样的代价(PAC内核+dyld cache、重建根盘、基带路径重做)。桥本身也只走一个AT通道(SIM1,CRSM不做slot-2路由)。MD侧能看到SIM2 GPIO(169 6.06s RPC `GPIO_SIM2_*`)。可做的折中:把桥切到SIM2(单卡显示另一张),需另查MTK的SIM切换/第二AT通道,未做。
+- **双卡旧结论已撤回(107-DS更正)**:D22默认单卡不能推出20H392 arm64用户态没有双卡实现,也不能推出必须换arm64e IPSW。已定位双槽能力门与BSP DsdsAllowed链,分槽适配补丁在独立`work/dual-sim`分支,尚未设备验证。SIM2 GPIO日志本身仍不是双卡可用证明。
 - **x9-rev252id-md**:构建成功(Mac),命令同ic(`build.py all --name x9-rev252id-md --boot-config .local/x9/modem/boot-rev252hi-md.json --boot-arg x9_dpmaif=2 --boot-arg x9_mipc=1`),boot.img 12922880B,内嵌参数与ic逐项一致(不含mgwipe),warning数1412与ic相同,插件275不变**无需mailbox staging**。日志`.local/x9/work/pdp-activation/build-id.stdout.log`。注意:`X9 MODEM: build=`字符串仍是ic的,未改。
 - 下一步由用户手动:`fastboot boot x9/out/x9-rev252id-md/boot.img`,日志`~/170.txt`(≥120s),看`ECSQ fields`行的act/数值、0x4f是否`result 0`、状态栏信号格。若ECSQ返回ERROR或字段数<10,按原始行再调整。蜂窝数据仍未拨号(无0xc8/WDS Start),logd取证待做(见HANDOFF102)。
 
