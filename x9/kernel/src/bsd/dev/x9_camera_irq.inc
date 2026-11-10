@@ -1,7 +1,9 @@
 /* Sole CAMSV0 GIC1NS IAR -> one-shot bank sample -> pinned thread worker.
  * The inactive prepare path creates only a dormant worker. begin still needs
  * the real controller's exact S1/domain/route/request lease, and enables NO
- * CAMSV source/DMA/CMOS/VF/FBC/CQ. It is not a capture provider registration.
+ * CAMSV source/DMA/CMOS/VF/FBC/CQ. After RAW arm it now publishes the actual
+ * S1 IOVA/tag0 FH metadata with inactive DB consumption, before GIC changes.
+ * It is not a capture provider registration.
  * Lock order: camera_control_lock -> camera_irq_lock -> camera_camsv_lock.
  * Worker NEVER acquires camera_control_lock; close can drain its pin there.
  * Hard IRQ uses only spin-protected immutable binding and permanent mappings.
@@ -171,6 +173,7 @@ static int cam_irq_mutation_guard(void)
 {
     const struct x9_camera_camsv_dma *d=&cam_irq.slot->dma;
     int e=d->check(d->context,d->lease,&cam_irq.slot->request);
+    if(!e)e=cam_sv_request_guard_locked(cam_irq.epoch,cam_irq.slot);
     if(!e)e=cam_irq_power();if(!e)e=cam_irq_controller();
     if(!e)e=cam_irq_idle();if(!e)e=cam_irq_partial_config();return e;
 }
@@ -419,6 +422,7 @@ static int cam_irq_begin_locked(uint64_t epoch,const struct x9_camera_camsv_requ
 {
     struct x9_camera_camsv_request r;
     struct x9_camera_camsv_dma dma;
+    const unsigned order[]={X9_CAM_IRQ_SOF,X9_CAM_IRQ_HYBRID,X9_CAM_IRQ_DEBUG};
     int e;
     boolean_t old;
     bool owns,arm_attempted=false;
@@ -440,6 +444,10 @@ static int cam_irq_begin_locked(uint64_t epoch,const struct x9_camera_camsv_requ
         arm_attempted=true;
         e=x9_camera_camsv_arm(cam_irq.slot,&r,&dma); /* real lease + per-page CIVAC */
     }
+    /* Do not make a hardware source observable with stale address/cookie.
+     * Both banks must consume ONLY this already-armed request's S1 IOVA
+     * and FH_SPARE. No SOURCE/FBC/DMA/CQ/CMOS/VF enable follows here. */
+    if(!e)e=cam_sv_request_prepare_locked(epoch,cam_irq.slot);
     if(!e&&!owns) {
         /* Capture all priors before any route/priority write. Never change
          * Group/ICFGR/CTLR, and no distributor-global initialization. */
@@ -466,6 +474,7 @@ static int cam_irq_begin_locked(uint64_t epoch,const struct x9_camera_camsv_requ
         }
     }
     if(!e)e=dma.check(dma.context,dma.lease,&cam_irq.slot->request);
+    if(!e)e=cam_sv_request_guard_locked(epoch,cam_irq.slot);
     if(!e)e=cam_irq_config(false);if(!e)e=cam_irq_power();
     if(!e) {
         old=cam_irq_spin_take();cam_irq.request=cam_irq.slot->request;cam_irq.sof_seen=false;
@@ -473,9 +482,13 @@ static int cam_irq_begin_locked(uint64_t epoch,const struct x9_camera_camsv_requ
         cam_irq_spin_drop(old);
         /* SOF first, then hybrid, then debug. Sources remain off; the real
          * controller must preserve this preparation-to-publication boundary. */
-        e=cam_irq_unmask(X9_CAM_IRQ_SOF);
-        if(!e)e=cam_irq_unmask(X9_CAM_IRQ_HYBRID);
-        if(!e)e=cam_irq_unmask(X9_CAM_IRQ_DEBUG);
+        for(unsigned n=0;n<3&&!e;n++) {
+            /* Recheck the complete bound request and controller, not only
+             * the current byte/line, before EACH publication store. */
+            e=cam_sv_request_guard_locked(epoch,cam_irq.slot);
+            if(!e)e=cam_irq_config(false);if(!e)e=cam_irq_power();
+            if(!e)e=cam_irq_unmask(order[n]);
+        }
     }
     if(e&&arm_attempted&&cam_irq.slot->state!=X9_CAMSV_EMPTY&&cam_irq.slot->state!=X9_CAMSV_RETIRED) {
         e=cam_irq_fault(e);lck_mtx_lock(&camera_camsv_lock);

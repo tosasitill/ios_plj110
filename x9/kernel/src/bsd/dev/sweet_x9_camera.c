@@ -28,6 +28,8 @@ LCK_MTX_DECLARE(camera_lock, &camera_group);
 /* Controls serialize separately so capture(off) may drain a completion worker
  * without holding the mutex that worker needs to reject its stale frame. */
 LCK_MTX_DECLARE(camera_control_lock, &camera_group);
+/* Shared by the inactive request publisher and completion adapter. */
+LCK_MTX_DECLARE(camera_camsv_lock, &camera_group);
 static struct x9_camera_status st = { .version = 1, .sensor = X9_CAMERA_BACK };
 static struct x9_camera_platform hw;
 static bool opened;

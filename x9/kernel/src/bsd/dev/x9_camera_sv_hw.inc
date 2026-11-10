@@ -1,12 +1,15 @@
 /* MT6993 CAMSV A/id0: central 3a600000, DMA +1000, SCQ +2000;
  * inner views +8000. Reference: ISP8s mtk_cam-sv-regs.h and the actual
  * mtk_cam_sv_toggle_db / slave_sv_dev_config register writers. The slave
- * stress source, addresses, DMA/CMOS/IRQ enables and reset are NOT ported.
+ * stress source, DMA/CMOS/IRQ enables and reset are NOT ported. A separate
+ * armed normal request may publish ONLY its actual S1 IOVA and FH_SPARE.
  * camera_control_lock held. Named ordinary configuration only: no DONE,
  * SOF, ERR, COMMON, CHANNEL, FBC1, VF_ST, FIFO_STAT or CQ IRQ_STATUS reads.
  */
 #include "x9_camera_sv_hw.h"
 enum { CAM_SV_MAX_REGS=352, CAM_SV_FIELDS=X9_CAM_SV_HW_FIELDS,
+    CAM_SV_CONFIG_FIELDS=X9_CAM_SV_HW_CONFIG_FIELDS,
+    CAM_SV_ADDR_LO=CAM_SV_CONFIG_FIELDS, CAM_SV_ADDR_HI, CAM_SV_FH,
     CAM_SV_DB_IDLE=0, CAM_SV_DB_DOWN, CAM_SV_DB_UP, CAM_SV_DB_POLICY };
 #define CAM_SV_DB_EN (1u<<30)
 #define CAM_SV_FBC_BUSY ((1u<<7)|(1u<<8)|(1u<<12)|(1u<<14)|(1u<<15))
@@ -39,8 +42,14 @@ struct cam_sv_field { unsigned offset; uint32_t mask; };
 static const struct cam_sv_field cam_sv_fields[CAM_SV_FIELDS]={
     {0x548,UINT32_MAX},{0x54c,UINT32_MAX},{0x554,0xff1fefdf},
     {0x1210,0xffff001f},{0x1b8,0xff},{0x1bc,0xff},{0x1c0,0xff},
-    {0x1c4,0xff},{0x1cc,0xff},{0x1c8,0xff}
+    {0x1c4,0xff},{0x1cc,0xff},{0x1c8,0xff},
+    /* WDMA address words, not burst/stride or a CPU-PA alias. The vendor
+     * writer stores full low/high words; FH_SPARE is a 32-bit request cookie
+     * read by the normal SOF/hybrid handlers, never capture_id truncation. */
+    {0x1200,UINT32_MAX},{0x1204,UINT32_MAX},{0x57c,UINT32_MAX}
 };
+_Static_assert(CAM_SV_FH+1==CAM_SV_FIELDS,"CAMSV request fields");
+_Static_assert(CAM_SV_FIELDS<32,"CAMSV dirty bitmap");
 static struct {
     vm_offset_t view[2];
     unsigned count, offset[CAM_SV_MAX_REGS], field[CAM_SV_FIELDS], db_reg;
@@ -49,6 +58,10 @@ static struct {
     unsigned pending_slot, db_phase;
     uint64_t epoch, sequence, command, completed;
     bool held, close_attempted, terminal, pending_seen, commit_pending, db_issued;
+    bool request_held, request_ready;
+    struct x9_camera_camsv_slot *request_slot;
+    struct x9_camera_camsv_request request;
+    struct x9_camera_camsv_dma request_dma;
     int error;
     struct x9_camera_sv_hw_status status;
 } cam_sv;
@@ -73,6 +86,13 @@ static void cam_sv_status(void)
     s->db_issued=cam_sv.db_issued;s->terminal=cam_sv.terminal;
     if(cam_sv.held && cam_sv.error)s->flags|=X9_CAM_SV_HW_RETAINED;
     else s->flags&=~X9_CAM_SV_HW_RETAINED;
+    if(cam_sv.request_ready)s->flags|=X9_CAM_SV_HW_REQUEST;
+    else s->flags&=~X9_CAM_SV_HW_REQUEST;
+    if(cam_sv.request_held) {
+        s->request_generation=cam_sv.request.frame.generation;
+        s->request_capture_id=cam_sv.request.frame.capture_id;
+        s->request_sequence=cam_sv.request.inner_sequence;
+    }
 }
 static void cam_sv_status_copy(uint64_t epoch,struct x9_camera_sv_hw_status *s)
 {
@@ -83,6 +103,10 @@ static void cam_sv_status_copy(uint64_t epoch,struct x9_camera_sv_hw_status *s)
 static int cam_sv_fault(int e)
 {
     if(!cam_sv.error)cam_sv.error=e;
+    if(cam_sv.request_held) {
+        cam_sv.request_ready=false;
+        if(!cam_sv.status.request_errno)cam_sv.status.request_errno=e;
+    }
     if(e==ESTALE || e==EACCES || e==EBUSY || e==EOVERFLOW)cam_sv.terminal=true;
     cam_sv_status();return e;
 }
@@ -169,13 +193,27 @@ static int cam_sv_guard(void)
 {
     int e=cam_sv_guard_impl();return e?cam_sv_fault(e):0;
 }
+/* Thread-only controller authority, kept separate from the hardware guard.
+ * No owner callback under hardIRQ or camera_s1_lock; this callback cannot
+ * re-enter camera APIs. The immutable copy is also used during restoration,
+ * when the address words legitimately differ from the completed request.
+ * Its lifetime is NOT ended by cache-only RETIRED or GIC retirement. */
+static int cam_sv_request_authority(void)
+{
+    const struct x9_camera_camsv_dma *d=&cam_sv.request_dma;
+    if(!cam_sv.request_held)return 0;
+    if(!d->context || !d->lease || !d->backing || !d->check)return ESTALE;
+    return d->check(d->context,d->lease,&cam_sv.request);
+}
 static int cam_sv_environment(void)
 {
-    int e=cam_sv_guard();if(e)return e;
+    int e=cam_sv_request_authority();if(e)return cam_sv_fault(e);
+    e=cam_sv_guard();if(e)return e;
     e=cam_out_guard();if(e)return cam_sv_fault(e);
     e=cam_rx_session_guard();if(e)return cam_sv_fault(e);
     e=cam_mac_guard();if(e)return cam_sv_fault(e);
-    e=cam_phy_guard();return e?cam_sv_fault(e):0;
+    e=cam_phy_guard();if(e)return cam_sv_fault(e);
+    e=cam_sv_request_authority();return e?cam_sv_fault(e):0;
 }
 static int cam_sv_pending_observe(void)
 {
@@ -330,6 +368,9 @@ static int cam_sv_open_locked(uint64_t epoch)
     memset(&cam_sv.status,0,sizeof(cam_sv.status));cam_sv.status.sensor=sensor;
     cam_sv.status.flags=X9_CAM_SV_HW_ATTEMPTED;
     cam_sv.error=0;cam_sv.terminal=false;cam_sv.dirty=0;cam_sv.command=cam_sv.completed=0;
+    cam_sv.request_held=cam_sv.request_ready=false;cam_sv.request_slot=NULL;
+    memset(&cam_sv.request,0,sizeof(cam_sv.request));
+    memset(&cam_sv.request_dma,0,sizeof(cam_sv.request_dma));
     cam_sv.commit_pending=cam_sv.pending_seen=cam_sv.db_issued=false;cam_sv.db_phase=CAM_SV_DB_IDLE;
     cam_sv.pending_slot=CAM_SV_FIELDS+1;cam_sv.close_attempted=false;
     for(unsigned bank=0;bank<2;bank++) {
@@ -353,12 +394,16 @@ static int cam_sv_open_locked(uint64_t epoch)
     cam_sv.target[2]=plan.format;cam_sv.target[3]=plan.dma_basic;
     cam_sv.target[4]=1;cam_sv.target[5]=cam_sv.target[6]=cam_sv.target[7]=0;
     cam_sv.target[8]=cam_sv.target[9]=1;
+    /* Initial geometry setup never publishes a buffer/cookie. Keep the
+     * three request fields exactly at this cold epoch's captured priors. */
+    for(unsigned slot=CAM_SV_CONFIG_FIELDS;slot<CAM_SV_FIELDS;slot++)
+        cam_sv.target[slot]=cam_sv.before[0][cam_sv.field[slot]];
     for(unsigned slot=0;slot<CAM_SV_FIELDS;slot++) {
         uint32_t mask=cam_sv_fields[slot].mask;
         cam_sv.status.target[slot]=(cam_sv.before[0][cam_sv.field[slot]]&~mask)|(cam_sv.target[slot]&mask);
     }
     e=cam_sv_environment();
-    for(unsigned slot=0;slot<CAM_SV_FIELDS && !e;slot++)e=cam_sv_field_write(slot,cam_sv.target[slot]);
+    for(unsigned slot=0;slot<CAM_SV_CONFIG_FIELDS && !e;slot++)e=cam_sv_field_write(slot,cam_sv.target[slot]);
     if(!e)e=cam_sv.dirty?cam_sv_commit():cam_sv_target_observe();
     if(!e) {
         cam_sv.status.flags|=X9_CAM_SV_HW_CONFIGURED;
@@ -366,6 +411,94 @@ static int cam_sv_open_locked(uint64_t epoch)
     }
     if(e)cam_sv_fault(e);
     cam_sv_status();return e;
+}
+/* Called only after this invocation's actual x9_camera_camsv_arm has bound
+ * the slot and performed per-page CIVAC. camera_control_lock/IRQ mutex held;
+ * the IRQ worker is idle and all three GIC lines disabled. No producer is
+ * enabled here, and no inactive/zero register is treated as a native grant.
+ * A later rearm has already changed the S1 request, so never run the OLD
+ * request's owner callback after arm. Validate the new immutable binding
+ * first; begin checked the old authority/environment BEFORE that arm. */
+static int cam_sv_request_prepare_locked(uint64_t epoch,struct x9_camera_camsv_slot *slot)
+{
+    struct x9_camera_camsv_request r;
+    struct x9_camera_camsv_dma d;
+    bool changed=false;
+    int e;
+    if(!slot || !cam_sv.held || cam_sv.epoch!=epoch || cam_sv.close_attempted ||
+       !(cam_sv.status.flags&X9_CAM_SV_HW_CONFIGURED))return ESTALE;
+    if(cam_sv.error)return cam_sv.error;
+    if(cam_sv.commit_pending || cam_sv.pending_slot<=CAM_SV_FIELDS)return EBUSY;
+    /* Copy under the actual slot lock; no callback while it is held. IRQ
+     * accepting is still false, and controller serialization pins the slot. */
+    lck_mtx_lock(&camera_camsv_lock);
+    e=slot->state==X9_CAMSV_ARMED?0:ESTALE;
+    r=slot->request;d=slot->dma;
+    lck_mtx_unlock(&camera_camsv_lock);
+    if(e)return e;
+    if(r.tag || r.group || r.reserved || r.frame.sensor!=cam_sv.status.sensor ||
+       r.frame.time || !r.frame.generation || !r.frame.capture_id || !r.iova ||
+       (r.iova&0x3fffULL) || r.iova>=0x400000000ULL ||
+       r.frame.bytes>0x400000000ULL-r.iova || d.version!=X9_CAMERA_CAMSV_VERSION ||
+       d.reserved || !d.context || !d.lease || !d.backing || !d.check)return EINVAL;
+    if(cam_sv.request_held && (cam_sv.request_slot!=slot ||
+       cam_sv.request_dma.context!=d.context || cam_sv.request_dma.check!=d.check ||
+       cam_sv.request_dma.backing!=d.backing))return EBUSY;
+    e=d.check(d.context,d.lease,&r);if(e)return e;
+    /* Bind BEFORE the first possible posted store. A partial address/DB
+     * effect keeps this request's lease/backing and cannot be reset/retried. */
+    cam_sv.request=r;cam_sv.request_dma=d;cam_sv.request_slot=slot;
+    cam_sv.request_held=true;cam_sv.request_ready=false;
+    cam_sv.target[CAM_SV_ADDR_LO]=(uint32_t)r.iova;
+    cam_sv.target[CAM_SV_ADDR_HI]=(uint32_t)(r.iova>>32);
+    cam_sv.target[CAM_SV_FH]=r.inner_sequence;
+    e=cam_sv_environment();
+    for(unsigned field=CAM_SV_CONFIG_FIELDS;field<CAM_SV_FIELDS && !e;field++) {
+        uint32_t target=cam_sv.target[field];
+        cam_sv.status.target[field]=target;
+        if(cam_sv.expected[0][cam_sv.field[field]]!=target)changed=true;
+        e=cam_sv_field_write(field,target);
+    }
+    /* A repeated identical target is not a reason to emit another DB pulse.
+     * Existing geometry dirty bits describe history, not a new request. */
+    if(!e)e=changed?cam_sv_commit():cam_sv_target_observe();
+    if(!e)e=cam_sv_environment();
+    if(!e) {
+        for(unsigned bank=0;bank<2;bank++)
+            for(unsigned field=CAM_SV_CONFIG_FIELDS;field<CAM_SV_FIELDS;field++)
+                if(cam_sv.expected[bank][cam_sv.field[field]]!=cam_sv.target[field])e=ESTALE;
+    }
+    if(e)cam_sv_fault(e);
+    else cam_sv.request_ready=true;
+    cam_sv_status();
+    printf("X9 CAMERA REQUEST: sensor=%u epoch=%llu generation=%llu capture_id=%llu "
+        "inner=%x ready=%u errno=%d dirty=%x command=%llu/%llu "
+        "(actual inactive S1 address/FH consumption, no FBC/source/DMA)\n",
+        cam_sv.status.sensor,epoch,r.frame.generation,r.frame.capture_id,r.inner_sequence,
+        cam_sv.request_ready,e,cam_sv.dirty,cam_sv.command,cam_sv.completed);
+    return e;
+}
+static int cam_sv_request_guard_locked(uint64_t epoch,const struct x9_camera_camsv_slot *slot)
+{
+    int e;
+    if(!cam_sv.request_held || !cam_sv.request_ready || epoch!=cam_sv.epoch ||
+       slot!=cam_sv.request_slot)return ESTALE;
+    lck_mtx_lock(&camera_camsv_lock);
+    e=(slot->state!=X9_CAMSV_ARMED && slot->state!=X9_CAMSV_RETIRED) ||
+        memcmp(&slot->request,&cam_sv.request,sizeof(cam_sv.request)) ||
+        slot->dma.version!=cam_sv.request_dma.version || slot->dma.reserved ||
+        slot->dma.context!=cam_sv.request_dma.context || slot->dma.lease!=cam_sv.request_dma.lease ||
+        slot->dma.backing!=cam_sv.request_dma.backing || slot->dma.check!=cam_sv.request_dma.check?ESTALE:0;
+    lck_mtx_unlock(&camera_camsv_lock);
+    if(!e)e=cam_sv_environment();
+    if(!e && (cam_sv.commit_pending || cam_sv.pending_slot<=CAM_SV_FIELDS))e=EBUSY;
+    if(!e)for(unsigned bank=0;bank<2;bank++) {
+        const uint32_t *v=cam_sv.expected[bank];
+        if(v[cam_sv.field[CAM_SV_ADDR_LO]]!=(uint32_t)cam_sv.request.iova ||
+           v[cam_sv.field[CAM_SV_ADDR_HI]]!=(uint32_t)(cam_sv.request.iova>>32) ||
+           v[cam_sv.field[CAM_SV_FH]]!=cam_sv.request.inner_sequence)e=ESTALE;
+    }
+    return e?cam_sv_fault(e):0;
 }
 static int cam_sv_close_locked(uint64_t epoch)
 {
@@ -389,7 +522,8 @@ static int cam_sv_close_locked(uint64_t epoch)
     }
     if(!e)e=cam_sv.dirty?cam_sv_commit():cam_sv_target_observe();
     /* Return policy only AFTER complete original geometry/address/controls
-     * are actually back in both banks. No producer was ever enabled. */
+     * are actually back in both banks. This inactive journal does not stop
+     * a producer; IRQ/RAW retirement must precede it in receiver close. */
     if(!e) {
         db=cam_sv.before[0][cam_sv.db_reg];cam_sv.db_phase=CAM_SV_DB_POLICY;cam_sv.db_issued=false;
         deadline=mach_absolute_time()+span;
@@ -404,12 +538,13 @@ static int cam_sv_close_locked(uint64_t epoch)
     }
     if(!e) {
         cam_sv.held=false;cam_sv.dirty=0;cam_sv.db_phase=CAM_SV_DB_IDLE;cam_sv.db_issued=false;
+        cam_sv.request_ready=cam_sv.request_held=false;cam_sv.request_slot=NULL;
         cam_sv.status.flags|=X9_CAM_SV_HW_RESTORED;
     } else cam_sv_fault(e);
     cam_sv.status.restore_errno=e;cam_sv_status();
     printf("X9 CAMERA CAMSV CLOSE: sensor=%u epoch=%llu flags=%x errno=%u restore=%d "
         "dirty=%x pending=%u commit=%u dbphase=%u sequence=%llu/%llu terminal=%u "
-        "DB=%x/%x (inactive RAW10 config only, no IRQ/address/DMA/drain)\n",
+        "DB=%x/%x (inactive RAW10 geometry/address/FH restore, NOT AXI/map drain)\n",
         cam_sv.status.sensor,epoch,cam_sv.status.flags,cam_sv.status.last_errno,e,cam_sv.status.dirty,
         cam_sv.status.pending,cam_sv.status.commit_pending,cam_sv.status.db_phase,cam_sv.status.command,
         cam_sv.status.completed,cam_sv.status.terminal,cam_sv.status.db_after[0],cam_sv.status.db_after[1]);

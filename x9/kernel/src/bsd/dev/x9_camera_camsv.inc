@@ -8,7 +8,6 @@
  * IRQ registration or dummy backend. The native controller lease is mandatory.
  */
 #include "x9_camera_s1_dma.inc"
-LCK_MTX_DECLARE(camera_camsv_lock, &camera_group);
 _Static_assert(sizeof(struct x9_camera_camsv_irq)==80,"CAMSV snapshot layout");
 
 static int cam_camsv_retain(struct x9_camera_camsv_slot *slot,int e)

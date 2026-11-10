@@ -379,8 +379,11 @@ int x9_camera_camsv_finish(struct x9_camera_camsv_slot *, const struct x9_camera
 /* Thread-context standalone controller calls; acquire camera_control_lock.
  * In-TU platform callbacks already holding that lock use the locked helper.
  * Requires the prepared live-topology/receiver epoch and a REAL DMA lease.
- * begin arms one tag0/group0 request and GIC lines, but does not write source
- * IRQ enables, addresses, FH metadata, FBC/CQ/CMOS/VF or start the sensor.
+ * begin arms one tag0/group0 request, publishes its actual S1 IOVA and
+ * 32-bit FH metadata with both-bank DB consumption, THEN arms GIC lines.
+ * It does not write source IRQ enables, FBC/CQ/CMOS/VF or start the sensor.
+ * Address/metadata failure retains this slot and the dependent cold epoch;
+ * GIC/CPU retirement alone does not permit revoking its backing/lease.
  * Keep that controller/request/RAW immutable until state says RETIRED; no
  * automatic DMA reuse. State is cache-only, not source/AXI/map drain.
  * There is still no registered native capture caller. */

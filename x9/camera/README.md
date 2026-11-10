@@ -531,13 +531,31 @@ shim 的 `camera_irq_handoff.c` 从本次 LK FDT 一次完整 capture 验证 roo
 | SOF | 659 | outer SOF `+360`、CHANNEL `+370`；同时锁存 inner FIRST/LAST、四 GROUP_TAG 与对应 FH_SPARE |
 | debug | 665 | outer COMMON `+368`、TOP `+378`、DMA FIFO_STAT `+104c`；**不重复读 CHANNEL，不写 debug selector/CCU** |
 
-正常 controller 才能调用 `cam_irq_begin_locked`（同一翻译单元、已持控制锁）或独立包装 `x9_camera_camsv_irq_begin`。该调用先经真实 `.check`/export backing 与逐页 CIVAC 绑定一个 tag0/group0 request，才对这三路已 disabled/pending0/active0 的 Group1NS、level IRQ 保存/配置 route 与 priority。`.check` **还必须证明 AP 而非 CCU/他方的 IRQ policy、prior source/request 历史已实际退休**；GIC masked、拓扑正确、PM_GET 或 all-zero 不提供此授权。每笔 prior mutation 前复核整个已消费 route/priority 集合及真实 owner，允许 unresolved posted prior/target，但 accepted target 不能回退。只写该三路 route/priority/enable/mask，不改 CTLR/IGROUP/ICFGR/redistributor/timer/IPI，也不设置 CAMSV IRQ enable、FH metadata、地址、FBC、CQ、CMOS/VF 或 sensor stream-on。
+正常 controller 才能调用 `cam_irq_begin_locked`（同一翻译单元、已持控制锁）或独立包装 `x9_camera_camsv_irq_begin`。该调用先经真实 `.check`/export backing 与逐页 CIVAC 绑定一个 tag0/group0 request，再发布并确认其 inactive 地址/FH metadata（见下节），才对这三路已 disabled/pending0/active0 的 Group1NS、level IRQ 保存/配置 route 与 priority。`.check` **还必须证明 AP 而非 CCU/他方的 IRQ policy、prior source/request 历史已实际退休**；GIC masked、拓扑正确、PM_GET 或 all-zero 不提供此授权。每笔 prior mutation 前复核整个已消费 route/priority 集合及真实 owner，允许 unresolved posted prior/target，但 accepted target 不能回退。GIC 只写该三路 route/priority/enable/mask，不改 CTLR/IGROUP/ICFGR/redistributor/timer/IPI；每笔 begin unmask 前再次核对完整 request/地址/metadata/owner/power/GIC。仍不设置 CAMSV IRQ enable、FBC、CQ、CMOS/VF 或 sensor stream-on。
 
 SWEET `sleh.c` 保留 timer/IPI、ADSP filter、后备 `interrupt_handler` 和原来的唯一 EOI。camera filter 仅在已绑定的 actual IAR 下先 mask 对应 line，再从永久映射单次采样；不用 mutex、owner callback、缓存/PTE/RAW 访问。SOF 保持 masked 直到下一 request，hybrid 可以独立到达。DONE 只使用该 request **先前 SOF 锁存**的 group/last/inner sequence，缺 SOF 或迟到/歧义绑定直接保留，不能在 DONE 时晚读 group 猜 frame。四槽有界队列不能覆盖旧事件；溢出、错误/unknown/debug 或丢失 power/config 立即 mask 并保留。
 
 worker 在线程上下文调用已有 `x9_camera_camsv_finish`；CQ-only/input 事件不进入 frame copy。首个真实 DONE 若抢在 sensor stream-on ACK 后的 core flag 发布之前，最多等待500ms的实际发布事件，不伪置 STREAMING；stop 先失效 generation/唤醒该事件再 drain，所以不与控制锁形成循环等待。前后各有固定独立 slot/backing 历史，IRQ lane 仍单 request 串行。完成或明确背压/并发 stop 的 RETIRED 只 mask，不增 FBC/RCNT、不自动重写 RAW；前32笔事件及错误输出缓存日志，避免每帧持续打印。
 
 receiver close **先**停止 filter 接受新采样，再排空 queued/running worker pin（500ms界限）和实际 GIC RWP/PENDING/ACTIVE（1ms观察、两个 idle 样本），之后才恢复 CAMSV/OUTMUX/PHY/SMI/MM/sensor。每笔 route/priority 恢复仍复核 owner 和完整 prior/consumed set；不写 ICPENDR/ICACTIVER，不重发 EOI、不吞未退休 source 历史。未完成或 RETAINED RAW slot、未消失 GIC event、authority/config 变化均阻止撤电。成功只是 **GIC/worker retirement**，不是 RAW/AXI/TLBI/unmap 或全链 drain；永久 S1 export retention 不变。
+
+### 在 IRQ 发布前绑定真实 DMA 地址和帧序号
+
+**这是地址/metadata 发布实现，不是已启动的 DMA producer；没有 native capture caller 或真实帧。** 本地 UniXNU 的设备入口未提供本板 CAMSV 实现；HakiOS redwood 的地址在 SOF 切换、晚写可能覆盖同一 buffer 的规则不能当作 MT6993 的 FBC 语义。这里只沿 ISP8s 命名 WDMA 地址寄存器和正常 SOF/hybrid 的 inner `FH_SPARE` reader 接入本板 journal，不移植 QCOM 常量、stress buffer 或伪帧。
+
+`cam_irq_begin_locked` 在本次实际 `x9_camera_camsv_arm`/S1 逐页 CIVAC 成功后，调用 `cam_sv_request_prepare_locked`，只写 outer 的三个整字字段：
+
+| kernel-private field | CAMSV view offset | 来自已绑定 request 的值 |
+|---|---:|---|
+| 10: A0 BASE_ADDR | `+1200` | `(uint32_t)request.iova` |
+| 11: A0 BASE_ADDR_MSB | `+1204` | `(uint32_t)(request.iova >> 32)` |
+| 12: tag0 FH_SPARE | `+57c` | `request.inner_sequence`，不截断 capture_id、不从晚读 I2C 拼接 |
+
+前后摄均保留固定独立 slot/backing，要求 tag0/group0、同一 sensor epoch、16KiB 对齐且位于实际 DMA range 的非零 IOVA；此前 arm 还必须证明它正是 exported S1 的全部 RAW bytes。发布器保存 immutable request/lease/backing，再在每笔写前复核 owner 与完整 MM/SMI/receiver/MAC/PHY/OUTMUX/CAMSV 集合；沿原 pending/dirty/DB down→up 状态机确认两 bank 的实际目标，之后才能设置 `X9_CAM_SV_HW_REQUEST`。重复相同 target 只观察，不因已有 geometry dirty history 再发一次 DB pulse。这个 flag 只表示 inactive 地址/FH 消费，不授予 source/FBC/IRQ/DMA 资格。
+
+错 epoch、未配置、busy/pending 或不合法 slot 在地址写入前拒绝。实际 arm 后的发布、DB 或 authority 失败保留本次 slot 和全部依赖，不换 sensor、不重试、不把 late prior 当取消。下一合法 rearm 在改变 S1 request **之前**检查旧 authority，改变之后只核对新的 immutable binding，不能以旧 request callback 拒绝自己的新 frame。GIC/worker 退休后，CAMSV close 仍持有同一 request lease，先逆序恢复本次改变的 FH/high/low，再恢复 geometry 和 DB policy；全部原 snapshot 实际回归才解除本 journal 的绑定，export storage 仍永久保留。kernel-private `sv` result 扩为13字段，新增 request generation/capture_id/sequence/errno；用户态 RAW10/frame/ioctl ABI 不变。
+
+FBC 的信用限制与全链停写仍须完成：厂商 `mtk_cam_sv_check_fbc_cnt` 内的软件 `fbc_cnt++` 不是新的硬件观察，不能用它证明 RCNT 已消费或单帧写入预算；`VF_CON.SINGLE_MODE` 的字段名也不是 one-shot 停写证明。此实现不写 RCNT/FBC、不 reset/清全 tag、不用 FBC_CNT0 或 GIC idle 宣称 RAW/AXI/SMMU drain，仍不生成中间供测镜像。
 
 ### 接通采集回调
 
