@@ -48,6 +48,10 @@ def main():
         'board_prerequisites_implemented': False, 'board_capture_lifecycle_implemented': True,
         'dma_provider_registered': False, 'plj110_cold_sessions_per_boot': 1,
         'exact_recording_frames_required': True, 'kernel_stop_state_checked': True,
+        'exact_nonblocking_read_contract_required': 1,
+        'passive_status_discovery': True, 'status_discovery_interval_ms': 500,
+        'realtime_fault_notifications_deferred': True,
+        'enumeration_empty_lists_supported': True,
         'cold_power_probe_control': True,
         'power_probe_activates_recording': False, 'hardware_tested': False,
         'route_tested': False, 'autoload': False}, indent=2) + '\n')

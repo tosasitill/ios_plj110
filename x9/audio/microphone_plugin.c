@@ -9,6 +9,7 @@
 #include "../kernel/src/bsd/dev/x9_microphone.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <dispatch/dispatch.h>
 #include <math.h>
 #include <mach/mach_time.h>
 #include <pthread.h>
@@ -31,6 +32,11 @@ static AudioServerPlugInHostRef host;
 static unsigned running;
 static int mic=-1;
 static bool ready,io_fault,stop_failed;
+static bool control_dirty;
+/* Like the static driver/vtable, retained for the audio-server process.
+ * All observer work is on this private control queue, never the IO thread. */
+static dispatch_source_t control_timer;
+static void refresh_control_state(void *);
 static UInt64 capture_generation,start_host;
 static UInt64 anchor,seed=1,received,underrun;
 static bool clock_valid;
@@ -45,7 +51,7 @@ static OSStatus bad_object= '!obj', unavailable= 'nope';
  * the IO path revokes cached PCM/clock state and returns an explicit error. */
 static OSStatus stream_fault(void)
 {
-    if(!io_fault)++seed;
+    if(!io_fault){++seed;control_dirty=true;}
     io_fault=true;ready=false;cycle_valid=clock_valid=false;
     memset(cycle_pcm,0,sizeof(cycle_pcm));return unavailable;
 }
@@ -80,17 +86,30 @@ static AudioStreamBasicDescription pcm_format(void)
         .mFormatFlags=kAudioFormatFlagIsSignedInteger|kAudioFormatFlagIsPacked,
         .mBytesPerPacket=2,.mFramesPerPacket=1,.mBytesPerFrame=2,.mChannelsPerFrame=1,.mBitsPerChannel=16};
 }
-static bool probe_ready(void)
+static int cached_status(struct x9_mic_status *s)
 {
-    struct x9_mic_status s={0};int fd=open(X9_MIC_STATUS_DEVICE,O_RDONLY|O_CLOEXEC);
-    if(fd<0)return false;
+    memset(s,0,sizeof(*s));
+    int fd=open(X9_MIC_STATUS_DEVICE,O_RDONLY|O_CLOEXEC);
+    if(fd<0)return errno?errno:EIO;
+    int e=ioctl(fd,X9_MIC_GET_STATUS_NOWAIT,s)<0?(errno?errno:EIO):0;
+    if(close(fd)<0 && !e)e=errno?errno:EIO;
+    return e;
+}
+static bool backend_ready(const struct x9_mic_status *s)
+{
     /* Require the matching kernel's NOWAIT capability before spending a
      * one-shot START. Old kernels cannot supply the real-time freshness gate. */
-    bool ok=ioctl(fd,X9_MIC_GET_STATUS_NOWAIT,&s)==0 && s.version==1 && s.mode==2 &&
-        (s.flags&X9_MIC_READY) && !(s.flags&X9_MIC_FAULT) &&
-        (s.supported_sources&X9_MIC_SOURCE_INTERNAL) && s.rate==X9_MIC_RATE && s.channels==1 && s.sample_bits==16 &&
-        s.read_contract==X9_MIC_READ_EXACT_NONBLOCK && s.max_read_frames>=MAX_IO_FRAMES;
-    close(fd);return ok;
+    return s->version==1 && s->mode==2 && (s->flags&X9_MIC_READY) &&
+        !(s->flags&X9_MIC_FAULT) && !s->last_errno &&
+        s->source==X9_MIC_SOURCE_INTERNAL && (s->supported_sources&X9_MIC_SOURCE_INTERNAL) &&
+        s->rate==X9_MIC_RATE && s->channels==1 && s->sample_bits==16 &&
+        s->read_contract==X9_MIC_READ_EXACT_NONBLOCK && s->max_read_frames>=MAX_IO_FRAMES;
+}
+static bool probe_ready(void)
+{
+    struct x9_mic_status s;
+    /* Do not advertise/adopt a recording owned by a different control fd. */
+    return !cached_status(&s) && backend_ready(&s) && !(s.flags&X9_MIC_RUNNING);
 }
 static HRESULT query(void *d,REFIID uuid,LPVOID *out)
 {
@@ -103,10 +122,28 @@ static ULONG retain_driver(__unused void *d){return 1;}
 static ULONG release_driver(__unused void *d){return 1;}
 static OSStatus initialize(__unused AudioServerPlugInDriverRef d,AudioServerPlugInHostRef h)
 {
-    mach_timebase_info_data_t t;mach_timebase_info(&t);
+    if(!h || !h->PropertiesChanged)return unavailable;
+    pthread_mutex_lock(&lock);
+    if(host) {
+        OSStatus e=host==h?0:unavailable;
+        pthread_mutex_unlock(&lock);return e; /* no duplicate timer/host replacement */
+    }
+    mach_timebase_info_data_t t;
+    if(mach_timebase_info(&t)!=KERN_SUCCESS || !t.numer || !t.denom) {
+        pthread_mutex_unlock(&lock);return unavailable;
+    }
+    dispatch_queue_t queue=dispatch_queue_create("com.x9.microphone.status",NULL);
+    if(!queue){pthread_mutex_unlock(&lock);return unavailable;}
+    control_timer=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,queue);
+    if(!control_timer){dispatch_release(queue);pthread_mutex_unlock(&lock);return unavailable;}
     ticks_per_frame=1e9*t.denom/t.numer/X9_MIC_RATE;host=h;
     ready=probe_ready();
     fprintf(stderr,"X9 MIC HAL: Codec/imic hardware=%s; no fake input device\n",ready?"ready":"unavailable");
+    dispatch_source_set_event_handler_f(control_timer,refresh_control_state);
+    dispatch_source_set_timer(control_timer,dispatch_time(DISPATCH_TIME_NOW,500*NSEC_PER_MSEC),
+        500*NSEC_PER_MSEC,50*NSEC_PER_MSEC);
+    pthread_mutex_unlock(&lock);
+    dispatch_resume(control_timer);dispatch_release(queue);
     return 0;
 }
 static OSStatus create(__unused AudioServerPlugInDriverRef d,__unused CFDictionaryRef p,
@@ -169,7 +206,7 @@ static OSStatus stop_client(struct client *c)
 }
 static void notify_control_state(void)
 {
-    /* Only control callbacks, after releasing HAL lock. Host notifications
+    /* Only control callbacks/observer, after releasing HAL lock. Host notifications
      * must not block or reenter us from the real-time read/timestamp path. */
     if(!host)return;
     const AudioObjectPropertyAddress device[]={
@@ -179,9 +216,35 @@ static void notify_control_state(void)
         {kAudioPlugInPropertyDeviceList,kAudioObjectPropertyScopeGlobal,0},
         {kAudioObjectPropertyOwnedObjects,kAudioObjectPropertyScopeGlobal,0}};
     AudioObjectPropertyAddress input={kAudioStreamPropertyIsActive,kAudioObjectPropertyScopeGlobal,0};
+    /* Publish the containing list before the newly discoverable children. */
+    host->PropertiesChanged(host,PLUGIN,2,plugin);
     host->PropertiesChanged(host,CODEC,2,device);
     host->PropertiesChanged(host,INPUT,1,&input);
-    host->PropertiesChanged(host,PLUGIN,2,plugin);
+}
+static void refresh_control_state(__unused void *context)
+{
+    /* GET_STATUS_NOWAIT is a cached kernel snapshot. No POWER/CALIBRATE/
+     * DIGITAL_L/START/STOP/read, no automatic retry of any hardware action.
+     * Skip a busy HAL/PCM lock; transient contention must not withdraw a
+     * qualified device or resurrect a latched IO/STOP fault. */
+    if(pthread_mutex_trylock(&lock))return;
+    bool previous_ready=ready;
+    bool previous_running=running && !io_fault && !stop_failed;
+    if(running && mic>=0 && ready && !io_fault && !stop_failed) {
+        struct x9_mic_status s;
+        (void)stream_status(&s); /* same producer freshness/generation/drop gate as IO */
+    } else if(!running && mic<0 && !io_fault && !stop_failed) {
+        struct x9_mic_status s;int e=cached_status(&s);
+        if(e!=EAGAIN && e!=EINTR)
+            ready=!e && backend_ready(&s) && !(s.flags&X9_MIC_RUNNING);
+    }
+    bool current_running=running && !io_fault && !stop_failed;
+    bool changed=control_dirty || ready!=previous_ready || current_running!=previous_running;
+    control_dirty=false;
+    pthread_mutex_unlock(&lock);
+    /* Reentrant host property queries must never run while our lock is held.
+     * This also publishes a revocation latched by the real-time fault path. */
+    if(changed)notify_control_state();
 }
 static OSStatus remove_client(__unused AudioServerPlugInDriverRef d,AudioObjectID o,const AudioServerPlugInClientInfo *c)
 {
@@ -207,6 +270,12 @@ static struct value property(AudioObjectID o,const AudioObjectPropertyAddress *a
 #define EMPTY() do {v.exists=true;v.size=0;} while(0)
 #define STR(x) do {v.exists=v.string=true;v.size=sizeof(CFStringRef);v.data.str=(x);} while(0)
 #define NUMBER(x) do {v.exists=true;v.size=sizeof(Float64);v.data.number=(x);} while(0)
+    /* UniXNU-sheng i525 admission precedent: queried empty lists must not
+     * return unknown-property. These describe no custom properties, clock
+     * devices or taps; they neither synthesize input nor bypass READY. */
+    if(s==kAudioObjectPropertyCustomPropertyInfoList || (o==INPUT && s=='taps')) {
+        EMPTY();return v;
+    }
     if(s==kAudioObjectPropertyBaseClass){WORD(o==SOURCE?kAudioSelectorControlClassID:kAudioObjectClassID);return v;}
     if(s==kAudioObjectPropertyClass){WORD(o==PLUGIN?kAudioPlugInClassID:o==CODEC?kAudioDeviceClassID:o==INPUT?kAudioStreamClassID:kAudioDataSourceControlClassID);return v;}
     if(s==kAudioObjectPropertyOwner){WORD(o==PLUGIN?0:o==CODEC?PLUGIN:CODEC);return v;}
@@ -221,8 +290,9 @@ static struct value property(AudioObjectID o,const AudioObjectPropertyAddress *a
             if(qsize==sizeof(CFStringRef) && q && *(CFStringRef const *)q)
                 WORD(ready && CFEqual(*(CFStringRef const *)q,CFSTR("Codec"))?CODEC:0);
             break;
-        case kAudioPlugInPropertyBoxList:EMPTY();break;
+        case kAudioPlugInPropertyBoxList:case kAudioPlugInPropertyClockDeviceList:EMPTY();break;
         case kAudioPlugInPropertyTranslateUIDToBox:WORD(0);break;
+        case kAudioPlugInPropertyTranslateUIDToClockDevice:WORD(0);break;
         case kAudioPlugInPropertyResourceBundle:STR(CFSTR(""));break;
         }
     } else if(o==CODEC) {
