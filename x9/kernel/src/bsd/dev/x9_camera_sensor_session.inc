@@ -6,6 +6,12 @@
  * a session, user wait, AP FIFO operation or configuration callback.
  */
 #include "x9_camera_sensor_session.h"
+/* Defined by the actual powered receiver engine later in this TU. These
+ * helpers use the already-held control mutex; no public entrypoint reentry. */
+static int cam_rx_sensor_prepare_locked(uint64_t,struct x9_camera_receiver *);
+static int cam_rx_sensor_guard_locked(uint64_t);
+static int cam_rx_sensor_close_locked(uint64_t);
+static bool cam_rx_sensor_held_locked(uint64_t);
 enum cam_sensor_session_phase {
     CAM_SENSOR_EMPTY, CAM_SENSOR_POWERING, CAM_SENSOR_STANDBY,
     CAM_SENSOR_CONFIGURING, CAM_SENSOR_CONFIGURED, CAM_SENSOR_FAULT,
@@ -47,6 +53,7 @@ static int cam_sensor_ap_guard(struct cam_sensor_ap *ap)
     if(!e && (enable&j->board.wl_mask)!=j->board.wl_mask)e=EBUSY;
     if(!e)e=cam_clock_check(j,false,true);
     if(!e)e=cam_pins_guard(j,false);
+    if(!e)e=cam_rx_sensor_guard_locked(cam_sensor_live.epoch);
     return e;
 }
 static int cam_sensor_ap_read(void *context, uint16_t reg, uint8_t *v)
@@ -87,7 +94,7 @@ static int cam_sensor_session_open_locked(uint32_t which,uint64_t *epoch,
     memset(r,0,sizeof(*r));r->version=1;r->sensor=which;
     if(which!=X9_CAMERA_BACK && which!=X9_CAMERA_FRONT)e=EINVAL;
     else if(st.mode!=2 && st.mode!=3)e=EPERM;
-    else if(cam_sensor_live.epoch)e=EBUSY;
+    else if(cam_sensor_live.epoch || cam_mm_live.epoch)e=EBUSY;
     else if(session.capture || session.stream || session.latched)e=EBUSY;
     else if(cam_probe_latched || cam_resources_latched)e=EIO;
     else if(cam_sensor_live.serial==UINT64_MAX)e=EOVERFLOW;
@@ -163,7 +170,15 @@ static int cam_sensor_session_close_locked(uint64_t epoch,struct x9_camera_probe
     if(session.capture)return EBUSY;
     cam_sensor_live.close_attempted=true;
     cam_sensor_live.phase=CAM_SENSOR_CLOSING;
-    off=cam_restore(&cam_journal);
+    /* Do not lower MM clocks while a powered sensor can emit packets, and
+     * do not lower sensor supplies after a receiver/MM conflict. This is
+     * only retirement of an unprogrammed receive lifetime, not DMA drain. */
+    off=0;
+    if(cam_rx_sensor_held_locked(epoch)) {
+        off=cam_cold_isolate(&cam_journal);
+        if(!off)off=cam_rx_sensor_close_locked(epoch);
+    }
+    if(!off)off=cam_restore(&cam_journal);
     cam_sensor_live.close_error=off;
     cam_sensor_live.probe.restore_errno=off;
     cam_sensor_live.probe.i2c_status[0]=cam_journal.sensor.last_status;
@@ -206,6 +221,43 @@ int x9_camera_sensor_session_configure(uint64_t epoch,struct x9_camera_config *r
     if(!r)return EINVAL;
     lck_mtx_lock(&camera_control_lock);
     e=cam_sensor_session_configure_locked(epoch,r);
+    lck_mtx_unlock(&camera_control_lock);
+    return e;
+}
+int x9_camera_sensor_session_prepare_receiver(uint64_t epoch,struct x9_camera_receiver *r)
+{
+    struct cam_sensor_ap ap;
+    uint8_t byte=0;
+    int e;
+    if(!r)return EINVAL;
+    lck_mtx_lock(&camera_control_lock);
+    memset(r,0,sizeof(*r));r->version=1;r->sensor=cam_sensor_live.probe.sensor;
+    e=cam_sensor_session_match(epoch);
+    if(!e && cam_sensor_live.error)e=cam_sensor_live.error;
+    if(!e && cam_sensor_live.phase!=CAM_SENSOR_CONFIGURED)e=EBUSY;
+    if(!e && (session.capture || session.stream))e=EBUSY;
+    if(!e && cam_rx_sensor_held_locked(epoch))e=EALREADY;
+    if(!e) {
+        ap=(struct cam_sensor_ap){&cam_journal.sensor,
+            cam_sensor_live.probe.sensor==X9_CAMERA_BACK?0x1a:0x10};
+        e=cam_sensor_ap_read(&ap,0x0100,&byte);
+        if(!e && byte)e=EBUSY;
+        if(!e)e=cam_sensor_ap_read(&ap,0x0104,&byte);
+        if(!e && byte)e=EBUSY;
+        if(e)cam_sensor_session_fault(e);
+        else e=cam_rx_sensor_prepare_locked(epoch,r);
+        /* MM take can wait on several voters. Re-prove the powered sensor
+         * and consumed receiver after those waits, not only at admission. */
+        if(!e) {
+            e=cam_sensor_ap_read(&ap,0x0100,&byte);
+            if(!e && byte)e=EBUSY;
+            if(!e)e=cam_sensor_ap_read(&ap,0x0104,&byte);
+            if(!e && byte)e=EBUSY;
+            if(!e)e=cam_sensor_ap_guard(&ap);
+            if(e)cam_sensor_session_fault(e);
+        }
+    }
+    r->last_errno=e;
     lck_mtx_unlock(&camera_control_lock);
     return e;
 }

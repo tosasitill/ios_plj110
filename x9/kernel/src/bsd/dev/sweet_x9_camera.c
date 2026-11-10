@@ -76,9 +76,9 @@ static const struct x9_camera_sensor sensors[] = {
 #include "x9_camera_sensor.inc"
 #include "x9_camera_mt6993.inc"
 #include "x9_camera_resources.inc"
+#include "x9_camera_mm.inc"
 #include "x9_camera_sensor_session.inc"
 #include "x9_camera_standby.inc"
-#include "x9_camera_mm.inc"
 #include "x9_camera_receiver.inc"
 _Static_assert(sizeof(struct x9_camera_status)==88,"camera status ABI");
 static const struct x9_camera_sensor *sensor(void) { return &sensors[st.sensor-1]; }

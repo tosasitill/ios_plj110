@@ -28,7 +28,11 @@ static int cam_pipeline_plan(uint32_t which, struct x9_camera_pipeline *p)
     p->csi_port=which==X9_CAMERA_BACK?3:0;p->async=p->csi_port;
     p->cphy=s->cphy;p->lanes=s->lanes;
     p->width=s->width;p->height=s->height;p->stride=stride;p->bytes=(uint32_t)bytes;
-    p->vc=0;p->dt=0x2b;
+    /* hhmain mode0 frame_desc_prev: image VC1/RAW10/4096x3072,
+     * PDAF VC3/DT30/4096x768. hhfront mode0: image VC0/RAW10 only.
+     * Do not route the main PDAF stream as pixels or assume both sensors
+     * emit VC0. A future outmux must filter exactly this image VC/DT. */
+    p->vc=which==X9_CAMERA_BACK?1:0;p->dt=0x2b;
     p->outmux_candidate=0;p->camsv_candidate=0;
     p->dma_bits=35;p->smmu_sid=0x80;
     /* Initial route config calls _config_outmux -> SET_TAG, not SET_TAG_V2:

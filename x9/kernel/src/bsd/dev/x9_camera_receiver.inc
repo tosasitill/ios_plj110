@@ -1,4 +1,4 @@
-/* MT6993/ISP8s powered register preflight, camera_control_lock held.
+/* MT6993/ISP8s powered register lifetime, camera_control_lock held.
  * Captured DT reg-names, not old unit-test aliases:
  * outmux0 outer 3a200000 / inner 3a208000; CAMSV id0 3a600000,
  * DMA +1000 / CQ +2000 / inner +8000. CSI MAC-top is port base+4000.
@@ -20,16 +20,19 @@ static const unsigned cam_rx_sv_offsets[X9_CAM_RX_SV_WORDS]={
     0x1200,0x1204,0x1210,0x2100,0x2140
 };
 struct cam_rx_maps { vm_offset_t mac,async,out[2],sv[2]; };
+static struct cam_rx_maps cam_rx_maps[2];
+static struct {
+    uint64_t epoch, sensor_epoch;
+    bool close_attempted;
+    int error;
+    struct x9_camera_receiver status;
+} cam_rx_live;
 static int cam_rx_sample(const struct cam_rx_maps *m,struct x9_camera_receiver_sample *s)
 {
+    static const unsigned mac_offsets[4]={0,4,0x40,0x70};
     /* Re-prove power/clock effects before EACH sample. No probe on a failed
      * MM take, and no unsafe read after a changed parent or lost PM_ACK. */
-    if(!cam_mm.active)return ENXIO;
-    for(unsigned n=0;n<X9_CAM_MM_SLOTS;n++) {
-        int e=cam_mm_cfg_check(&cam_mm,n);if(e)return e;
-        e=cam_mm_effect_on(&cam_mm,n);if(e)return e;
-    }
-    static const unsigned mac_offsets[4]={0,4,0x40,0x70};
+    int e=cam_mm_guard(&cam_mm,true);if(e)return e;
     for(unsigned i=0;i<4;i++)s->mac[i]=cam_rr(m->mac,mac_offsets[i]);
     s->async_cfg=cam_rr(m->async,0);s->async_split=cam_rr(m->async,0xc);
     s->afifo=cam_rr(cam_mm.cam_cg,0x7dc);
@@ -76,25 +79,27 @@ static uint32_t cam_rx_changed(const struct x9_camera_receiver_sample *a,
 }
 static int cam_rx_inspect(void *arg)
 {
-    struct x9_camera_receiver *r=arg;struct cam_rx_maps m={0};
+    struct x9_camera_receiver *r=arg;
+    struct cam_rx_maps *m=&cam_rx_maps[r->sensor==X9_CAMERA_BACK?0:1];
+    int e;
     unsigned port=r->sensor==X9_CAMERA_BACK?3:0;
     r->stage=X9_CAM_RX_STAGE_MAP;
     r->mac_base=0x13884000ull+port*0x8000ull;
     r->out_base=0x3a200000;r->out_inner_base=0x3a208000;r->sv_base=0x3a600000;
     /* Permanent Device mappings, at most once per boot, just like the MM
      * journal mappings. ml_io_map is NOT a camera DMA allocator. */
-    m.mac=ml_io_map(r->mac_base,0x1000);
-    m.async=ml_io_map(0x3a401000,0x1000);
-    m.out[0]=ml_io_map(r->out_base,0x1000);
-    m.out[1]=ml_io_map(r->out_inner_base,0x1000);
+    if(!m->mac)m->mac=ml_io_map(r->mac_base,0x1000);
+    if(!m->async)m->async=ml_io_map(0x3a401000,0x1000);
+    if(!m->out[0])m->out[0]=ml_io_map(r->out_base,0x1000);
+    if(!m->out[1])m->out[1]=ml_io_map(r->out_inner_base,0x1000);
     /* Map only three documented banks per view, not the holes in the DT. */
-    m.sv[0]=ml_io_map(r->sv_base,0x3000);
-    m.sv[1]=ml_io_map(r->sv_base+0x8000,0x3000);
-    if(!m.mac || !m.async || !m.out[0] || !m.out[1] || !m.sv[0] || !m.sv[1])return ENOMEM;
+    if(!m->sv[0])m->sv[0]=ml_io_map(r->sv_base,0x3000);
+    if(!m->sv[1])m->sv[1]=ml_io_map(r->sv_base+0x8000,0x3000);
+    if(!m->mac || !m->async || !m->out[0] || !m->out[1] || !m->sv[0] || !m->sv[1])return ENOMEM;
     r->stage=X9_CAM_RX_STAGE_SAMPLE;
-    int e=cam_rx_sample(&m,&r->before);if(e)return e;
+    e=cam_rx_sample(m,&r->before);if(e)return e;
     delay(10);
-    e=cam_rx_sample(&m,&r->after);if(e)return e;
+    e=cam_rx_sample(m,&r->after);if(e)return e;
     r->flags|=X9_CAM_RX_SNAPSHOT;r->blockers&=~X9_CAM_RX_NEED_SNAPSHOT;
     r->stage=X9_CAM_RX_STAGE_CHECK;
     r->busy=cam_rx_busy(&r->before,port)|cam_rx_busy(&r->after,port);
@@ -105,24 +110,140 @@ static int cam_rx_inspect(void *arg)
     r->flags|=X9_CAM_RX_DISABLED;
     return 0;
 }
-static int cam_rx_probe(unsigned sensor,struct x9_camera_receiver *r)
+static void cam_rx_status_init(unsigned sensor,struct x9_camera_receiver *r)
 {
-    if(cam_sensor_session_active) {
-        memset(r,0,sizeof(*r));r->version=1;r->sensor=sensor;r->last_errno=EBUSY;
-        return EBUSY;
-    }
     memset(r,0,sizeof(*r));r->version=1;r->sensor=sensor;
     r->blockers=X9_CAM_RX_NEED_OWNER|X9_CAM_RX_NEED_RATE|X9_CAM_RX_NEED_PHY|
         X9_CAM_RX_NEED_ROUTE|X9_CAM_RX_NEED_SMI|X9_CAM_RX_NEED_DMA_MAP|
         X9_CAM_RX_NEED_DRAIN|X9_CAM_RX_NEED_SNAPSHOT;
+}
+static int cam_rx_session_fault(int e)
+{
+    if(!cam_rx_live.error)cam_rx_live.error=e;
+    cam_mm_session_fault(e);
+    cam_rx_live.status.mm=cam_mm_live.status;
+    cam_rx_live.status.flags|=X9_CAM_RX_LATCHED;
+    cam_rx_live.status.last_errno=cam_rx_live.error;
+    cam_rx_last=cam_rx_live.status;
+    return e;
+}
+/* Opens the SAME real MM engine as PROBE_MM_CLOCKS and retains it after
+ * disabled-state sampling. No receiver CSR is written by this lifetime.
+ * sensor_epoch=0 is the existing immediate-close diagnostic path only. */
+static int cam_rx_session_open(unsigned sensor,uint64_t sensor_epoch,struct x9_camera_receiver *r)
+{
+    uint64_t epoch=0;
+    int e;
+    cam_rx_status_init(sensor,r);
+    if(cam_rx_live.epoch){r->last_errno=EBUSY;return EBUSY;}
+    e=cam_mm_session_open(sensor,&epoch,&r->mm);
+    if(!epoch){r->last_errno=e;return e;}
+    cam_rx_live.epoch=epoch;cam_rx_live.sensor_epoch=sensor_epoch;
+    cam_rx_live.close_attempted=false;cam_rx_live.error=0;
+    r->flags=X9_CAM_RX_ATTEMPTED;r->stage=X9_CAM_RX_STAGE_MM;
+    if(!e)e=cam_rx_inspect(r);
+    cam_rx_live.status=*r;
+    if(e)cam_rx_session_fault(e);
+    else cam_rx_last=*r;
+    *r=cam_rx_live.status;
+    return e;
+}
+/* Check against the ORIGINAL consumed controls, not just two equally
+ * redirected current samples. Never touch read-clear DONE/IRQ/fault banks.
+ * Disabled/stable controls are only prerequisites for dropping this
+ * unprogrammed lifetime; they do not prove bus/DMA/worker drain. */
+static int cam_rx_session_guard(void)
+{
+    struct x9_camera_receiver_sample a,b;
+    struct x9_camera_receiver *r=&cam_rx_live.status;
+    const struct cam_rx_maps *m=&cam_rx_maps[r->sensor==X9_CAMERA_BACK?0:1];
+    unsigned port=r->sensor==X9_CAMERA_BACK?3:0;
+    uint32_t busy,changed;
+    int e;
+    if(!cam_rx_live.epoch || cam_rx_live.epoch!=cam_mm_live.epoch)return ESTALE;
+    if(!(r->flags&X9_CAM_RX_SNAPSHOT))return cam_rx_live.error?cam_rx_live.error:ENXIO;
+    e=cam_rx_sample(m,&a);if(e)return e;
+    delay(10);
+    e=cam_rx_sample(m,&b);if(e)return e;
+    busy=cam_rx_busy(&a,port)|cam_rx_busy(&b,port);
+    changed=cam_rx_changed(&a,&b,port)|cam_rx_changed(&r->before,&a,port)|
+        cam_rx_changed(&r->before,&b,port);
+    r->after=b;r->busy|=busy;r->changed|=changed;
+    if(changed)return ESTALE;
+    return busy?EBUSY:0;
+}
+static int cam_rx_session_close(struct x9_camera_receiver *r)
+{
+    int off,prior=cam_rx_live.error;
+    if(!cam_rx_live.epoch || cam_rx_live.close_attempted)return ESTALE;
+    if(session.capture)return EBUSY;
+    cam_rx_live.close_attempted=true;
+    /* An incomplete MM take cannot safely sample receiver registers. It
+     * has not issued any receiver writes; unwind only its consumed slots.
+     * A complete take must still match the captured disabled controls. */
+    off=cam_mm.active?cam_rx_session_guard():0;
+    if(!off)off=cam_mm_session_close(cam_rx_live.epoch,&cam_rx_live.status.mm);
+    else cam_mm_session_retain(cam_rx_live.epoch,off);
+    if(off)cam_rx_session_fault(off);
+    cam_rx_live.status.last_errno=cam_rx_live.error;
+    if(cam_rx_live.status.mm.flags&X9_CAM_MM_RESTORED)cam_rx_live.status.flags|=X9_CAM_RX_RESTORED;
+    if(!prior)cam_rx_live.status.stage=off?X9_CAM_RX_STAGE_RESTORE:X9_CAM_RX_STAGE_DONE;
+    *r=cam_rx_live.status;cam_rx_last=*r;
+    if(!off){cam_rx_live.epoch=0;cam_rx_live.sensor_epoch=0;}
+    return off;
+}
+static bool cam_rx_sensor_held_locked(uint64_t epoch)
+{ return cam_rx_live.epoch && cam_rx_live.sensor_epoch==epoch; }
+static int cam_rx_sensor_prepare_locked(uint64_t epoch,struct x9_camera_receiver *r)
+{
+    int e;
+    if(!epoch || epoch!=cam_sensor_live.epoch)return ESTALE;
+    e=cam_rx_session_open(cam_sensor_live.probe.sensor,epoch,r);
+    if(e && cam_rx_sensor_held_locked(epoch))cam_sensor_session_fault(e);
+    return e;
+}
+static int cam_rx_sensor_guard_locked(uint64_t epoch)
+{
+    int e;
+    if(!cam_rx_live.epoch)return 0;
+    if(!cam_rx_sensor_held_locked(epoch) || cam_rx_live.close_attempted)return ESTALE;
+    e=cam_mm_session_check(cam_rx_live.epoch);
+    if(!e)e=cam_rx_session_guard();
+    return e?cam_rx_session_fault(e):0;
+}
+static int cam_rx_sensor_close_locked(uint64_t epoch)
+{
+    struct x9_camera_receiver r;
+    int off;
+    if(!cam_rx_sensor_held_locked(epoch))return ESTALE;
+    off=cam_rx_session_close(&r);
+    cam_mm_log(r.sensor,&r.mm);
+    printf("X9 CAMERA RX LIFETIME: sensor=%u sensor_epoch=%llu flags=%x errno=%u restore=%u "
+        "retained=%x busy=%x changed=%x (unprogrammed receiver, NOT DMA drain)\n",
+        r.sensor,epoch,r.flags,r.last_errno,r.mm.restore_errno,r.mm.retained,r.busy,r.changed);
+    return off;
+}
+static int cam_rx_probe(unsigned sensor,struct x9_camera_receiver *r)
+{
+    int e,off=0;
+    if(cam_sensor_session_active || cam_mm_live.epoch || cam_rx_live.epoch) {
+        memset(r,0,sizeof(*r));r->version=1;r->sensor=sensor;r->last_errno=EBUSY;
+        return EBUSY;
+    }
+    cam_rx_status_init(sensor,r);
     if(cam_rx_attempted || cam_mm_attempted || cam_resources_latched || cam_probe_latched) {
         if(cam_rx_attempted)*r=cam_rx_last;
         r->last_errno=cam_resources_latched||cam_probe_latched?EIO:EALREADY;
         if(cam_resources_latched || cam_probe_latched)r->flags|=X9_CAM_RX_LATCHED;
         return r->last_errno;
     }
-    cam_rx_attempted=true;r->flags=X9_CAM_RX_ATTEMPTED;r->stage=X9_CAM_RX_STAGE_MM;
-    int e=cam_mm_transaction(sensor,&r->mm,cam_rx_inspect,r);
+    e=cam_rx_session_open(sensor,0,r);
+    if(cam_rx_live.epoch) {
+        cam_rx_attempted=cam_mm_attempted=true;
+        off=cam_rx_session_close(r);
+        cam_mm_log(sensor,&r->mm);
+    }
+    if(!e)e=off;
     r->last_errno=e;
     if(r->mm.flags&X9_CAM_MM_RESTORED)r->flags|=X9_CAM_RX_RESTORED;
     if(r->mm.flags&X9_CAM_MM_LATCHED)r->flags|=X9_CAM_RX_LATCHED;

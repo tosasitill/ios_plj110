@@ -423,7 +423,11 @@ static int cam_restore_failed(struct cam_probe_journal *j, int e)
         j->restore_step,j->restore_channel,e,cam_cold_retained(j));
     return e;
 }
-static int cam_restore(struct cam_probe_journal *j)
+/* Isolate and qualify every consumed sensor dependency WITHOUT lowering a
+ * rail, AP parent or MM power reference. Paired receiver close uses this
+ * exact prefix before releasing its own clock lifetime. Repeating the
+ * verified isolation in cam_restore is idempotent, not a fault retry. */
+static int cam_cold_isolate(struct cam_probe_journal *j)
 {
     int e;j->restore_channel=0;j->restore_step=X9_CAM_COLD_QUIESCE;
     e=cam_pins_isolate(j);if(e)return cam_restore_failed(j,e);
@@ -458,6 +462,11 @@ static int cam_restore(struct cam_probe_journal *j)
         uint8_t enable=0;j->restore_step=X9_CAM_COLD_RESTORE_WL;
         e=cam_wl_guard(j,true,&enable);if(e)return cam_restore_failed(j,e);
     }
+    return 0;
+}
+static int cam_restore(struct cam_probe_journal *j)
+{
+    int e=cam_cold_isolate(j);if(e)return e;
     /* Reverse actual board power order, including the interleaved shared
      * supplies. A failed rail/channel keeps its journal and all prerequisites. */
     if(j->board.wl_count==3) {

@@ -13,10 +13,11 @@
 | iOS | HakiOS `CMDerivedObjectCreate` 设备类 v3/流类 v2，前后 `FigCaptureStream`；输出池、PixelBufferHandler、帧 metadata；先确认真实 start 再返回成功 |
 | sensor-probe | MT6993 CAMTG voter/parent 申请与释放、AP I2C 父时钟及单控制器门控/FIFO/WRRD；WL28681C 指定通道电压/启停；reset/MCLK pinmux；真实 ID 检查与恢复日志。闲置 AP timing 初始化、禁用共享 rail 的申请/还原、GPIO203 局部唤醒。**I2C 父时钟可有条件从 off 开启；HWCCF autolink/所选 PLL 仍需已就绪，未上机验证** |
 | sensor-standby | 同一冷启动 journal 内，ID 匹配后经真实 AP I2C 写 init/preview 与镜像；前摄先做固定 fab 读端口识别，仅 B4/01 分支追加两项 init patch；读回稳定控制，然后 reset/恢复。mode3 显式命令；与未来 mode2 共用表验证/加载/读回。**不 stream-on、不做 QSC/LRC 标定；未上机** |
-| SENINF/CAMSV 计划 | 零 MMIO 查询实际 CSI 端口、VC0/RAW10、候选 outmux/CAMSV、尺寸/64B stride/WDMA 打包及 SID；**不是资源申请或采集** |
+| SENINF/CAMSV 计划 | 零 MMIO 查询实际 CSI 端口、主摄 VC1／前摄 VC0 RAW10、候选 outmux/CAMSV、尺寸/64B stride/WDMA 打包及 SID；**不是资源申请或采集** |
 | 接收电源接口 | TF-A MM-SMMU `PM_GET/PM_PUT`、CSI_BS_RX MM HWCCF 单 bit 申请/恢复；带供电前置检查的 SMMUv3 只读快照。**代码已构建，未上机；不是完整 MM power/clock provider 或 DMA mapping** |
 | MM 寄存器时钟事务 | 显式 AO/infra0/VMM BACKUP 引用、CAM_VCORE/MAIN/MRAW 域、CAM autolink FENC、CAMTM/SENINF voter、CAM/CAMSV 寄存器 CG 申请/逆序恢复。**未上机；不改共享 AVS/CVFS/PLL，不申请 SMI larb，不证明采集速率** |
 | 接收寄存器预检 | 持有完整 MM 寄存器时钟链时，读取目标 MAC、async/AFIFO、outmux0 outer/inner、CAMSV0 central/DMA/CQ 控制，双采样验证稳定及使能位关闭。**只读，不提交配置，不证明 ownership 或 DMA 排空** |
+| 持久 sensor/receiver 生命周期 | kernel-private 冷会话可在 verified standby 后持有同一 MM 时钟与 CSI/secure 电源 journal；后续请求及撤销前检查完整已消费依赖与原始接收控制，先隔离 sensor reset/MCLK，再退休 MM，最后还原 sensor 供电。**无 native capture caller，不 stream-on；不是 DMA lease/drain** |
 | 采集后端 | **缺失**：完整 DVFS/rate/SMI ownership、PHY 校准/速率、SENINF 路由提交、MM-SMMUv3 映射、RAW DMA 完成/排空队列 |
 
 原始 X9 DT 与 Android 启动日志确定：主摄为 i2c4/7-bit `0x1a`，ID 寄存器 `0x16/0x17` 返回 `0x9186`；前摄 i2c2/`0x10`，返回 `0x0615`。
@@ -287,7 +288,7 @@ B4/01 分支在 init 后、preview 前仅写 `0x574b=1`、`0x5765=0x33`，并纳
 | sensor PLL `0306/030e` | `016e / 0226` | `010e / 0438` |
 | vendor nominal pclk | 2196000000 | 864000000 |
 
-标称 pclk、sensor PLL 读回或 `VERIFIED` **不是实测 lane/trio 速率、PHY 校准或 rate lease**。主 preview 包含 PDAF/额外 VC，写表不代表接收器已过滤为纯 VC0。前摄 fab 分支已接入，但 vendor open 中的主摄 AF 激活/QSC 与 QSC/LRC 标定仍未执行，因此只称 **未标定 nominal standby**，不能称厂商完整 open 或成像质量验证。blockers `1=factory/calibration`、`2=receiver`、`4=DMA mapping`、`8=drain` 不因读回成功清除。
+标称 pclk、sensor PLL 读回或 `VERIFIED` **不是实测 lane/trio 速率、PHY 校准或 rate lease**。主 preview 的图像为 **VC1/DT2b/4096×3072**，另有 **VC3/DT30/4096×768 PDAF**；前摄图像为 **VC0/DT2b/3264×2448**。这来自两枚 sensor 的 `mode_struct[0].frame_desc_prev`，不是其它 custom mode 的推断；写表不代表接收器已过滤出图像通道。前摄 fab 分支已接入，但 vendor open 中的主摄 AF 激活/QSC 与 QSC/LRC 标定仍未执行，因此只称 **未标定 nominal standby**，不能称厂商完整 open 或成像质量验证。blockers `1=factory/calibration`、`2=receiver`、`4=DMA mapping`、`8=drain` 不因读回成功清除。
 
 成功后器件已 reset/恢复原供电，**配置不持久、READY/supported仍0、不能拍摄**。未来 mode2 的 start 共用同一 preflight/表加载/稳定读回，再交由真实 capture provider 建立 CSI/DMA，最后才 stream-on；目前无该 provider。
 
@@ -316,7 +317,7 @@ cameractl pipeline front
 | 前摄 | port0 / async0，base `0x13880000` | D-PHY 4 lane | 3264×2448 / 4096 / 10027008 |
 
 - 当前板 outmux0..5 是 CAMSV、6..8 才是 RAW、9 是 UISP；不按 sensor index 猜 CSI port。
-- tag0 的 outmux VCDT `+0x100=(0x2b<<16)|1`、首次 `_config_outmux → SET_TAG` 预期尺寸 `+0x104=((height-1)<<16)|(width/4*5-1)`。
+- tag0 的 outmux VCDT `+0x100=(0x2b<<16)|(vc<<8)|1`，主摄 `vc=1`、前摄 `vc=0`；首次 `_config_outmux → SET_TAG` 预期尺寸 `+0x104=((height-1)<<16)|(width/4*5-1)`。
   HSIZE 是 packed RAW10 **字节数减1**，不是像素数；后续 apply-v2 路径的 HSIZE 语义不同，不混用。
   候选 CAMSV0 base `0x3a600000`，DMA bank `+0x1000`：地址 low/high `+0x200/+0x204`，basic `+0x210=(stride<<16)|0x10`；不是旧 unit-test 的 TG 寄存器布局。
 - shared `mm_smmu_cam` 是 MM-SMMUv3 `0x30800000` 的 **SID0x80**、35-bit DMA mask，但 DT camera dma-range 只有16GiB。
@@ -373,11 +374,26 @@ captured DT 区分 normal camera **SID80**、protected camera **SID89**、displa
 
 ## 硬件后端接入契约
 
+### 持有冷传感器与接收时钟
+
+`kernel/src/bsd/dev/x9_camera_sensor_session.h` 的 kernel-private 调用顺序为：
+`open → configure → prepare_receiver → read8 → close`。`prepare_receiver` 可省略，原 probe/standby 不因此增加 MM 操作。
+
+- standalone 入口取得 `camera_control_lock`；同 TU 的 native 回调已经持锁，必须使用内部 `_locked` helper，不重入公开入口。
+- `open` 返回的非零 epoch（包括错误返回）代表已准入 journal，必须安排一次 close；旧 epoch、重复 prepare/close 不做 MMIO。成功 prepare 不撤销 MM votes，不设置 READY，不返回 IOVA。
+- MM 与 receiver probe 实际复用同一持久引擎，但立即 close；诊断的 once-per-boot success 与持久会话正常退休后的再次开关独立。GET 仍只读缓存，不实时访问硬件。
+- 每次后续 sensor 请求检查 held receiver/MM；close 将新采样与**最初消费的**配置比较，而非只验证两次当前读数相等。共享 async/AFIFO 只比较选定端口字段，不接管其它 AOV/SCP 端口；不读取 read-clear IRQ/DONE。
+- 一旦依赖丢失、接收控制被修改/使能、或 close 失败，保持 epoch 和尚未退休依赖，整 boot 锁存。接收检测失败不会继续撤 sensor rails；sensor 隔离失败也不会撤 MM。没有单独 receiver-drop 或外部 `drained=true` 参数。
+
+这套生命周期只持有**未编程的接收器**及寄存器时钟。尚未申请 LARB/SMI 数据通路、测定速率、编程 PHY/OUTMUX、安装 SID80 或启动 DMA；稳定 disabled 状态不是总线排空或硬件独占证明。
+
+### 接通采集回调
+
 `kernel/src/bsd/dev/x9_camera.h` 定义 `x9_camera_platform`：
 
 1. `power` 按 sensor 配置的顺序执行，并记录/恢复共享资源的原状态；失败半途也必须可恢复。
 2. `read8/write8` 是 16-bit register / 8-bit data I2C；只在上电及总线归 AP 后调用。
-3. `capture(on)` 在 stream-on 前完成 SENINF、VC0/DT0x2b、RAW10 DMA、SMMU 配置；`capture(off)` 在返回前停止并排空，即使初始化只做了一半。
+3. `capture(on)` 在 stream-on 前完成 SENINF、主摄 VC1／前摄 VC0 的 DT0x2b 图像过滤、RAW10 DMA、SMMU 配置；`capture(off)` 在返回前停止并排空，即使初始化只做了一半。
 4. 注册会分别上电读 ID 并恢复，只有两枚真实 ID 相符才发布 READY。调用发生在线程上下文；所有回调都不可重入相机 API。
 5. provider.version 必须为 `X9_CAMERA_PLATFORM_VERSION`（2）；version1 不接受。DMA worker 在真实 completion/slot/metadata 绑定及缓存同步后调用 `x9_camera_deliver(&completed)`，其中 completed 为 version2 的 `x9_camera_completed_frame`；不得在硬中断调用。generation 来自本次 `capture(on)`，time 为帧完成的 `mach_absolute_time`，capture_id 为该代已资格化 owned-request 标识。record/raw 直到返回都保持不变；EBUSY 丢帧并释放硬件 slot，不重放。记录验证不能代替 provider 的硬件、映射或控制生效证明。
 
