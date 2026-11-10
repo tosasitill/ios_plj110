@@ -170,7 +170,11 @@ static int torch_write(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 static int torch_read(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 {
     if (uio_resid(uio) != sizeof(uint32_t)) return EINVAL;
-    lck_mtx_lock(&x9_torch_lock); uint32_t level = st.level; lck_mtx_unlock(&x9_torch_lock);
+    lck_mtx_lock(&x9_torch_lock);
+    uint32_t level = st.level;
+    bool unknown = (st.flags & (X9_TORCH_OFF_FAILED | X9_TORCH_LEVEL_UNKNOWN)) != 0;
+    lck_mtx_unlock(&x9_torch_lock);
+    if (unknown) return EIO;
     return uiomove((char *)&level, sizeof(level), uio);
 }
 static int torch_ioctl(__unused dev_t dev, u_long cmd, caddr_t data, __unused int flags, __unused struct proc *p)
@@ -239,6 +243,16 @@ void sweet_x9_torch_init(void)
         st.mode, id, st.channel, current, st.enable, st.fault, e);
     if (e || (id & 0xf0) != 0x70 || (mode > 1 && ((st.enable & 0x1f) || faulted()))) {
         printf("X9 TORCH: identity/inherited-state rejected; no PMIC writes\n"); return;
+    }
+    /* A read-only probe must not claim an inherited active channel is dark.
+     * Strobe/undefined current codes cannot be represented as a torch level. */
+    if (mode == 1) {
+        if ((st.enable & 8) || current > 75) st.flags |= X9_TORCH_LEVEL_UNKNOWN;
+        else if ((st.enable & enable_mask) == enable_mask) {
+            st.current_ua = 25000 + (unsigned)current * 5000;
+            st.level = st.current_ua * 1000 / st.max_current_ua;
+            if (st.level > 1000) st.level = 1000;
+        }
     }
     if (mode > 1) {
         thread_t t; kern_return_t kr = kernel_thread_start(torch_worker, NULL, &t);
