@@ -7871,6 +7871,39 @@ sweet_x9_ccbundle_scan(void)
  return x9_ccnative_gate("CCBUNDLE", 1304, edits, target, "live carrier-directory scan");
 }
 
+/* UniXNU/QcomBaseband dd0199c coachz CellularCompat's Internet ticket gate,
+ * independently relocated from 21H461 to the original 20H392 CommCenter.
+ * DataConnectionInternet::virtual+3e8, 100e9b370:
+ * !ticket_available && activation_enabled -> assignment=-2, blocked=true.
+ * canActivate maps this to CSI -3 and activateConnection returns before WDS.
+ * At 100e9b3a0 take ONLY the original ticket-present branch 100e9b3b8.
+ * Personality/per-slot provisioning (100e9b414), iRAT/call policy, native
+ * WDS/MIPC results, addresses and all ActivationModel ticket storage remain.
+ * This does not activate the device or establish network connectivity.
+ * The complete 4KiB page hash covers the original 48B guard at 100e9b388;
+ * qualify both code and CodeDirectory slot before any lossless HFS conversion
+ * or edit. Unknown/mixed versions are not patched or repaired. Independent
+ * x9_internet_ticket=1 (default) applies; =0/2 restores with ccgate enabled;
+ * global ccgate=2 also restores. No ticket/provisioning property is forged.
+ */
+static int
+sweet_x9_ccinternet_gate(void)
+{
+ static const struct x9_ccgate_edit edits[] = {
+  {"Internet ticket eligibility branch", 15315872, 4,
+   {0xc0,0x00,0x00,0x37}, {0x06,0x00,0x00,0x14}},
+  {"native page 3739 hash", 24628116, 32,
+   {0x28,0xc2,0x9d,0xfd,0x4f,0xd8,0x0f,0x73,0x7d,0x9a,0x4a,0xb1,0x34,0x7f,0x31,0x48,
+    0x63,0x85,0x84,0x8c,0x85,0xdb,0xfa,0xfc,0x6b,0xd0,0x25,0xa2,0x36,0xd4,0x35,0x0b},
+   {0x46,0xbc,0x01,0x67,0x37,0xe9,0xd9,0x69,0x38,0xc4,0x07,0x2d,0x76,0x2c,0x90,0x2b,
+    0x20,0xd5,0x1e,0xb8,0x9e,0xf7,0xd4,0x76,0x0b,0xc3,0x6c,0x1a,0x4a,0x07,0x9c,0x72}},
+ };
+ const int mode = sweet_x9_arg("x9_internet_ticket", 1);
+ if (mode != 0 && mode != 1 && mode != 2) return 0;
+ const int target = mode == 1 && sweet_x9_arg("x9_ccgate", 1) == 1;
+ return x9_ccnative_gate("CCINTERNET", 3739, edits, target, "ticket-only compatibility; native data checks retained");
+}
+
 static int
 sweet_x9_siri_off(proc_t p, user_addr_t scratch, user_addr_t end)
 {
@@ -8767,6 +8800,8 @@ load_init_program_at_path(proc_t p, user_addr_t scratch_addr, const char* path)
 	  if(ccplan_error)printf("X9 CCPLAN: factory not changed errno=%d; continuing boot\n",ccplan_error);
 	  int ccbundle_error=sweet_x9_ccbundle_scan();
 	  if(ccbundle_error)printf("X9 CCBUNDLE: native scan not changed errno=%d; continuing boot\n",ccbundle_error);
+	  int ccinternet_error=sweet_x9_ccinternet_gate();
+	  if(ccinternet_error)printf("X9 CCINTERNET: ticket branch not changed errno=%d; continuing boot without fake activation\n",ccinternet_error);
 	 }
 	 int siri_error=sweet_x9_siri_off(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	 if(siri_error)printf("X9 SIRI: launchd.plist not changed errno=%d; continuing boot\n",siri_error);
