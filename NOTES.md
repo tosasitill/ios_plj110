@@ -2,7 +2,7 @@
 
 > 旧的完整流水账(7784 行,含 sweet/SM7150 时代、rev2xx 全部 handoff)在 git 历史里:
 > `git show a8f1955:NOTES.md`。需要翻某个 revision 的细节时 `git log -S'<关键字>' -- NOTES.md` 再 show。
-> 截至 2026-11-09 的完整 cn 交接在 `git show 636edc2:NOTES.md`;当前以 §7 的 HANDOFF (89) 为准。
+> 截至 2026-11-09 的完整 cn 交接在 `git show 636edc2:NOTES.md`;当前以 §7 的活动交接为准。
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
@@ -155,6 +155,7 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 ## 7. 当前交接(HANDOFF 113-DATA,2026-11-10): 原生蜂窝数据面/流量统计已编译打包;真实收发未验证
 
 - **本轮用户目标**:完成4G/5G蜂窝数据的内核和iOS侧数据链路。没有flash/reboot/设备分区写入/ADB操作/插件重建/测试套件。不要将以下代码完成或编译通过等同于实机联网成功。
+- **本轮代码提交**:**`be06cf1`**(main),仅四个蜂窝实现文件与本交接;未夹带其他会话改动。没有主动push/CI run。`kern_exec.c`能力门修正来自已提交的1ce5010,不是本轮新实现。
 - **实际阻塞证据**:`~/174.txt`14.160s仍是`DMA alloc of 16384 bytes returned no descriptor`,DPMAIF在prepare隔离;20.557s MIPC握手完成;25.937s真实SA注册,45.946s真实LTE注册;仍没有WDS Start。另一个确定源码阻塞:`coachz_bb_pdp.cpp`仍要求`bb_data.step==CBD_DONE`和IPA/QMAP格式,而`COACHZ_NATIVE_DPMAIF`早已禁止该初始化,所以即使原生拨号成功PDP网络栈也永远关闭。
 - **DMA实现**:`X9DPMAIF.inc`使用host-contiguous、无IOMMU的40-bit IOBuffer,保留32KiB对齐及segment/范围验证。依据MT6993厂商`ccci_dpmaif_com.c`的`DMA_BIT_MASK(40)`、普通`dma_map_single/page`和`ccci_dpmaif_drv_{v3,com}`地址写入:DRB高位在UL SRAM+0x18,BAT高位在DL+0x50;**LRO PIT高位在CON1[31:24],不是非LRO的CON4**。DT alloc-ranges只约束可选reserved-memory分配器,不是所有DMA的4GiB硬限制。不扩XNU低端RAM、不占用/改写LK或secure carve-out;硬件DMA可达性仍待证实。
 - **iOS侧PDP实现**:`coachz_bb_pdp.cpp`原生模式以`cbp_observe`的成功会话状态∩`coachz_modem_data_state`的真实MIPC/DPMAIF route为gate,不再等IPA。raw-IP默认MTU1500,使用MD协商MTU(有界3072),保留非X9的1492/QMAP路径。正确处理EBUSY背压;block或route epoch变更清掉旧mbuf队列,避免重连跨会话发送。`ifnet`成功收发计数供iOS原生网络统计使用,未硬编码地址/DNS/路由或UI联网状态。
