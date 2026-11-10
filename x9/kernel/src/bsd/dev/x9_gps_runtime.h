@@ -8,10 +8,11 @@ enum x9_gps_physical_stage {
  X9_GPS_PHYSICAL_RESET, X9_GPS_PHYSICAL_REMAP,
  X9_GPS_PHYSICAL_IMAGE, X9_GPS_PHYSICAL_PLL,
  X9_GPS_PHYSICAL_IDLE, X9_GPS_PHYSICAL_HIF,
- X9_GPS_PHYSICAL_TRANSPORT, X9_GPS_PHYSICAL_QUARANTINE
+ X9_GPS_PHYSICAL_TRANSPORT, X9_GPS_PHYSICAL_QUARANTINE,
+ X9_GPS_PHYSICAL_D_DIE, X9_GPS_PHYSICAL_POS_FINALIZE
 };
 struct x9_gps_connv2_ops {
- uint32_t version; /* 1; descriptor/context remain live until reboot. */
+ uint32_t version; /* 1 or 2; descriptor/context remain live until reboot. */
  void *context;
  /* Exclusive long-lived connv2 lease, NOT Wi-Fi connv3/MT6653 ownership.
   * Must power/qualify MT6661 VGPS18, CONNSYS domain, AP bus clocks/protect,
@@ -39,6 +40,22 @@ struct x9_gps_connv2_ops {
  int (*control)(void *, unsigned, uint8_t, const uint8_t *, unsigned, uint64_t);
  int (*mnl)(void *, const uint8_t *, unsigned, uint64_t);
  int (*other_ccif)(void *, unsigned, uint64_t);
+ /* Version-2 tail only. Version 1 remains the full vendor POS supplier.
+  * Version 2 acquire must instead stop at the cold pre-D-die boundary:
+  * real clock schematic/buffer/HWV/AP bus, secure EMI/MPU and EXCLUSIVE
+  * whole connv2 SYSRAM + all old BGF DMA quiesce; GPS reset held and
+  * function disabled. No D-die/SPI/AFE/ADie/radio initialization yet.
+  * The worker then executes native D-die before pos_finalize. Never
+  * register v2 merely because a register snapshot or SMC returned zero. */
+ uint32_t pos_clock_schematic; /* measured vendor enum 0..3, not Hz/guess */
+ /* Every native POS read/write revalidates exclusive SRAM/DMA ownership
+  * in addition to validate's power/bus lease. Must be bounded, live and
+  * non-reentrant; no constant-success implementation. */
+ int (*pos_validate)(void *, const struct x9_gps_handoff *, uint64_t, uint64_t);
+ /* Complete actual SPI/AFE/PLL/radio/low-power/MT6686 POS under the same
+  * retained lease. Must leave GPS reset held/function disabled, not
+  * reenter HIF, clear native SYSRAM, or register a ready backend. */
+ int (*pos_finalize)(void *, const struct x9_gps_handoff *, uint64_t, uint64_t);
 };
 #ifdef __cplusplus
 extern "C" {

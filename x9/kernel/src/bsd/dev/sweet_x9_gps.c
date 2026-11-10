@@ -33,7 +33,8 @@ static void gps_copy_layout(void)
      !p || size != sizeof(h)) return;
  memcpy(&h,p,sizeof(h));
  if (h.version != 1 || !(h.flags & X9_GPS_LAYOUT_VERIFIED) ||
-     (h.flags & ~(X9_GPS_LAYOUT_VERIFIED|X9_GPS_POWER_LAYOUT_VERIFIED)) || h.reserved ||
+     (h.flags & ~(X9_GPS_LAYOUT_VERIFIED|X9_GPS_POWER_LAYOUT_VERIFIED|
+         X9_GPS_POS_LAYOUT_VERIFIED)) || h.reserved ||
      h.reserve_base < 0x80000000 || h.reserve_base > 0xf0000000 ||
      (h.reserve_base & 0xffff) || h.reserve_size != 0xa00000 ||
      h.reserve_size > 0xf0000000-h.reserve_base || h.layout_size != 0x630000 ||
