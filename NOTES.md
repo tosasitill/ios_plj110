@@ -73,6 +73,8 @@ X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>      # 之后再�
 
 ## 3. 当前基线镜像与参数
 
+- **最新日志175 / 新候选**:175的启动参数与`x9-cellular-data1-md`一致(完整hi + `x9_dpmaif=2 x9_mipc=1 x9_md_lte=0`),日志确认40-bit分配、INIT_DONE和真实SA→LTE;用户观察5G可显示/可上网,但该日志截至121s仍没有WDS Start或蜂窝收发,详见§7。新整合候选 **`x9/out/x9-cellular-als175-md/boot.img`**,构建器报告**13025280 B**,包含DATA+ALS及15f597b的窄范围legacy PIT状态修正,仅追加`x9_als=1`(598B),32GiB manifest/插件275不变,无需mailbox;**未上机**。以下ic/ij等为历史基线,不再代表最新日志。
+
 最新实测:**x9-rev252ic-md**(168,见HANDOFF102;LTE-only注册稳定,仍不拨号);再前 **x9-rev252ib-md**(167,见HANDOFF101);再前 **x9-rev252ia-md**(166,见HANDOFF100);再前 **x9-rev252hz-md**(165,见HANDOFF99);再前 **x9-rev252hy-md**(164,见HANDOFF98);再前 **x9-rev252hx-md**(163,见HANDOFF96);再前 **x9-rev252hw-md**(162,见HANDOFF95);再前 **x9-rev252hv-md**(161,见HANDOFF94;MIPC就绪、UIM读通);再前 **x9-rev252hu-md**(160,见HANDOFF93;RAM 10.0GiB生效);再前 **x9-rev252ht-md**(159,见HANDOFF92);再前 **x9-rev252hs-md**(158,见HANDOFF91;MIPC/DPMAIF在prepare/OPEN即隔离,UIM卡状态被拒);前一实测 **x9-rev252hl-md**(代码提交 **`20c64f2`**,构建交接 `0f9d983`),boot.img **12877824 B=12.28125MiB**,路径 `x9/out/x9-rev252hl-md/boot.img`。**157确认完整11文件安装成功、qdsp可读、Sahara finished并进入QMUX/QMI,握手摘要reset=0;真实iOS蜂窝尚未打通**,见HANDOFF87。独立34MiB固件与插件275不需再stage。
 最新实测:**x9-rev252ij-md**(172,见HANDOFF109;根盘已扩到32GiB,能力门已装,SA注册,界面仍无信号/5G,SIM2被MD报未插卡)。旧16GiB manifest镜像已不可用;ig/if未单独上机;更早候选 **x9-rev252hq-md**(代码`ccbad81`),boot.img12906496B;沿用hn AT→QMI,新增DPMAIF只读/分配探针和WDS前置状态查询,见HANDOFF89。hq默认`x9_dpmaif=1`,不初始化硬件或激活PDP;hn保留。最新实测仍hl;不要把候选当作SIM/蜂窝已验证。
 回退:**x9-rev252hk-md**(修复提交 `d1f8515` + 当时未提交的渲染改动,现已入库),boot.img **15278080 B**;156确认reserve生效、efs1.bin已有1MiB,当时15次reset及零传输见HANDOFF84。
@@ -112,7 +114,7 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 
 ## 5. 未解决问题
 
-当前主线是 **QMI→MediaTek AT控制查询 + MIPC1/WDS + DPMAIF**(§7):157已确认完整固件/qdsp及Sahara→QMUX前置链能推进;hs已编译主动DPMAIF和真实MIPC IPv4拨号代码,尚未上机,真实PDP激活/收发仍未验证。下一步用户手动启动hs验证真实SIM、DPMAIF分阶段读回和OPEN/订阅→ACT/GET/EIF→最终iOS收发;不要继续重stage完整固件或绕过断言。下列为保留的GPU/Wi-Fi待办,不是新的硬件验证结论。
+当前主线是 **QMI→MediaTek AT控制查询 + MIPC1/WDS + DPMAIF**(§7):175确认40-bit分配与INIT_DONE、真实SA→LTE,但没有WDS Start/ACT/GET/EIF或PDP收发;41.523s因raw DL状态0x8被隔离。15f597b区分未使用legacy PIT的masked状态与真实LRO/DMA错误,已与ALS整合编译,实机效果仍未验收。下一步先追iOS为何没有Start及NR回退的真实MD/网络原因,不伪造connected、不强锁NR、不连续刷探针。下列为保留的GPU/Wi-Fi待办,不是新的硬件验证结论。
 
 1. **GPU 带宽/帧率**:avg ~17-22 fps,稳态 24 fps;job 内 GPU wait 6-15 ms。判断显存带宽受限。**DVFSRC 从未初始化**(110.txt:`basic=8 opp_count=1 gear=0`,SW_REQ 被忽略)。
    rev252dc 加 TF-A SMC INIT:`MTK_SIP_VCOREFS_CONTROL = 0xC2000506`,cmd INIT=0(a0=0 成功,a1=dram_type)锁高 OPP,START=1(`x9_dvfsrc=2`)后自由运行。**待上机**,SMC 可能挂。
@@ -152,7 +154,17 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
 
-## 7. 当前交接(HANDOFF 113-DATA,2026-11-10): 原生蜂窝数据面/流量统计已编译打包;真实收发未验证
+## 7. 当前交接(HANDOFF 114-175,2026-11-10): 175真实SA→LTE;蜂窝与ALS独立整合构建通过,收发/物理光感仍未验收
+
+- **用户观察与日志边界**:用户报告5G现在能显示、会回LTE且可以上网。只读`~/175.txt`(2067434B,末121s),3.153s能力门切为single-SIM+NR;16.011s DMA40分配通过,高位均1;22.859s INIT_DONE,22.871s MIPC OPEN/DEACT/EIF订阅完成。25.122s真实`C5GREG=1,CEREG=0,AcT=11`(SA),55.144s真实`C5GREG=0,CEREG=1,AcT=7`(LTE)。**本日志没有WDS Start(0x20)、ACT/GET/EIF、成功绑定;截至119.253s四个PDP仍families0/blocked1/tx0/rx0,DPMAIF submitted/completed/RX均0**;120.978s Wi-Fi亦joins0/tx0/rx0/en0=none。不能用这份日志验证蜂窝或Wi-Fi联网,也不能否定日志结束后用户的上网观察;需要对应实际浏览时间的记录。
+- **NR回退结论**:19.282s明确`x9_md_lte=0, RAT left as the MD default`;NAS0x33/0x34策略请求被拒,没有成功设置LTE-only的证据。回退是MD查询得到的真实注册变化,不是仅UI替换。没有PDP激活,不能说是已联网PDP切换失败。MD/网络的降级原因尚无reject/URC证据,本轮不猜运营商/信号、不发送ERAT锁NR。
+- **窄范围修正15f597b**:41.523s旧轮询因DL raw0x8隔离。厂商`ccci_dpmaif_reg_com.h:573`把bit3定义为**legacy/non-LRO PITCNT**;`drv3_isr0`先用mask→status转换过滤,该bit在LRO默认路径不参与lenerr handler,真实LRO PIT错误是status bit8/9。轮询所有IRQ masked不能简单套整张mask。只在bit3仍masked、HPC模式仍2时排除这一未使用legacy源;记一次明确日志,其他LRO/MTU/BAT/SKB/未知错误保留fatal/原始快照/DMA保留,无reset/retry。**源码及编译证明这条分支已修正,尚无新实机日志证明运行效果或联网成功**。代码在独立树提交ca4980f后cherry-pick到main成15f597b,只改X9DPMAIF.inc。
+- **ALS合入范围**:9323bcc原本已在main,没有重复cherry-pick;上一DATA镜像没包含它。本次独立树固定**9323bcc + ca4980f**,保留be06cf1蜂窝/PDP/WDS和1ce5010能力门,全量编译ALS HID/MTK ABI入口,不复用il旧蜂窝对象、不混主checkout其他会话的BT/SMS/torch(即使它们稍后已经提交)。参数仅在175对应完整DATA配置追加**`x9_als=1`**真实输入模式,不是诊断固定lux。**物理SCP/IPI producer仍未实现,不会产生物理lux;自动亮度还缺面板背光控制**,详见113-ALS,不以服务发布当作光感已修好。
+- **构建结果**:本地54/54 overlay+6prebuilt、kernel link/strip、shim/boot打包exit0;`x9-cellular-als175-md/boot.img`构建器报告**13025280 B**,原始输出在`.local/x9/worktrees/cellular-als-175/x9/out/x9-cellular-als175-md/`,已原样复制主checkout **`x9/out/x9-cellular-als175-md/`**。完整598B启动参数、32GiB manifest、插件275不变,**无需mailbox**。成功后未解包/重算hash/反汇编/二次重建;没有测试套件、CI run、主动push、ADB/flash/reboot/分区写入或新候选上机结果。
+- **精确重建/证据**:在`.local/x9/worktrees/cellular-als-175/`的ca4980f源码树运行`/Library/Frameworks/Python.framework/Versions/3.13/bin/python3 -I x9/build/build.py all --name <新的唯一名字> --boot-config /Users/tosasitill/ios_plj110/.local/x9/work/cellular-als-175/boot-config.json`。私有原始/解码输入`.local/x9/work/cellular-als-175/{boot-config.json,build.stdout.log,log175-state.txt,vendor-irq-filter.txt}`,完整关键行`.local/x9/work/cellular-data-20261110/log175-key.txt`;不入git。可复放日志查询`rg -n 'X9 DPMAIF:|X9 WDS:|X9 MIPC:|NAS SIM1 registration|COACHZ pdp:.*(blocked|active families)|X9 WIFI STATS:' ~/175.txt`。
+- **下一步/未完成**:保留当前可显示5G的single+NR基线,先反编译iOS WDS初始化到Start的决定分支(175实际仍拒绝0xcd/0x3e/0x85,不能凭unsupported先伪ACK),分别确认LTE/NR真实ACT→GET→EIF/IFUP→route→HTTP/DNS及硬件TX退休/RX。安全ccmni复用、IPv6/profile/auth仍缺;ALS要实现真实SCP生产者与光照变化/CoreBrightness消费后才可验收。不给用户连续安排探针镜像;本轮只交付其要求的独立整合候选。
+
+### 前次交接(HANDOFF 113-DATA,2026-11-10): 原生蜂窝数据面/流量统计实现与首次候选
 
 - **本轮用户目标**:完成4G/5G蜂窝数据的内核和iOS侧数据链路。没有flash/reboot/设备分区写入/ADB操作/插件重建/测试套件。不要将以下代码完成或编译通过等同于实机联网成功。
 - **本轮代码提交**:**`be06cf1`**(main),仅四个蜂窝实现文件与本交接;未夹带其他会话改动。没有主动push/CI run。`kern_exec.c`能力门修正来自已提交的1ce5010,不是本轮新实现。
