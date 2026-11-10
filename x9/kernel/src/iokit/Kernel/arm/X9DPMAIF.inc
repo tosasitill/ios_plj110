@@ -341,6 +341,20 @@ static void x9d_unbind(unsigned mux) {
     if (!x9d.lock || !cbp_mux_ok(mux)) return;
     IOLockLock(x9d.lock); x9d_route &r = x9d.route[mux - 1];
     if (r.bound) { r.bound = false; r.families = 0; r.epoch++; }
+    // An unbound mux cannot admit new packets under this same lock. Retire
+    // its unpublished mailbox entries now, even when a full DRB ring keeps
+    // tx_poll from dequeuing. Preserve every other mux's FIFO order. Never
+    // touch payloads or completions that have already been given to DMA.
+    unsigned kept = 0, old_count = x9d.count;
+    for (unsigned i = 0; i < old_count; i++) {
+        unsigned from = (x9d.head + i) % X9D_MAIL;
+        if (x9d.mail[from].mux == mux) { r.stats.tx_dropped++; continue; }
+        unsigned to = (x9d.head + kept++) % X9D_MAIL;
+        if (to != from) memcpy(&x9d.mail[to], &x9d.mail[from], sizeof(x9d_tx));
+    }
+    for (unsigned i = kept; i < old_count; i++)
+        bzero(&x9d.mail[(x9d.head + i) % X9D_MAIL], sizeof(x9d_tx));
+    x9d.count = kept;
     IOLockUnlock(x9d.lock);
 }
 static bool x9d_account(unsigned mux, x9d_stats &stats) {
