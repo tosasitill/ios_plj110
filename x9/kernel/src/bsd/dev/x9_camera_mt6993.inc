@@ -69,7 +69,9 @@ struct cam_probe_journal {
     struct cam_probe_bus sensor, ldo;
     struct cam_probe_board board;
     vm_offset_t gpio, vlp, top, hwv, pll, mainpll, pmif_p, pmif_m, pmif_pending;
-    uint32_t clk_saved, clk_expected, pll_saved;
+    uint32_t clk_saved, clk_expected, clk_prior, pll_saved;
+    bool clock_seen, clock_active, clock_conflict, mux_uncertain, mux_update_pending;
+    bool vote_expected, vote_prior, vote_uncertain;
     uint32_t drive, mode, dir, dout;
     uint8_t wl_enable, wl_voltage[3];
     uint8_t wl_programmed, wl_enabled;
@@ -127,109 +129,7 @@ static bool cam_pll_compatible(uint32_t con1)
     uint64_t divisor=(uint64_t)16384*104*(1u<<((con1>>24)&7));
     return numerator>=23999000u*divisor && numerator<=24001000u*divisor;
 }
-/* MUX parent CLR/SET -> UPDATE -> CKSTA clears. clk-mux.c explicitly polls
- * CKSTA == 0: a set bit is BUSY, not clock-present. Never write PDN.
- * Parent changes require every XPU to be unvoted and hardware FENC off.
- * PDN in CLK_CFG is not used as HWCCF's authoritative on/off state. */
-static int cam_mux_parent(struct cam_probe_journal *j, unsigned parent, bool take)
-{
-    uint32_t bit=cam_vote_bit(j), mask=15u<<j->board.clk_shift;
-    if((cam_rr(j->hwv,cam_all_off(j))&bit) ||
-       (cam_rr(j->hwv,cam_vote_off(j)+8)&bit) ||
-       (cam_rr(j->vlp,0x270)&(1u<<j->board.clk_status_bit)))return EBUSY;
-    int e=cam_wait_bits(j->hwv,cam_done_off(j),bit,bit,10000);
-    if(!e)e=cam_wait_bits(j->vlp,0x330,1u<<j->board.clk_status_bit,0,1000);
-    if(e)return e;
-    if((cam_rr(j->hwv,cam_all_off(j))&bit) ||
-       (cam_rr(j->hwv,cam_vote_off(j)+8)&bit) ||
-       (cam_rr(j->vlp,0x270)&(1u<<j->board.clk_status_bit)))return EBUSY;
-    if(take)j->mux_owned=true; /* only after preconditions, before first write */
-    cam_rw(j->vlp,j->board.clk_off+8,mask);
-    cam_rw(j->vlp,j->board.clk_off+4,parent<<j->board.clk_shift);
-    cam_rw(j->vlp,4,1u<<j->board.clk_update_bit);
-    e=cam_wait_bits(j->vlp,0x330,1u<<j->board.clk_status_bit,0,1000);
-    if(!e && (cam_clk_byte(j)&0x7f)!=((j->clk_saved&0x70)|parent))e=EIO;
-    return e;
-}
-/* _v1_ap_hwccf_voter_ctrl: DONE -> SET/CLR -> AP EN -> DONE. Each write is
- * one masked bit; other camera clocks and other XPUs are never cleared.
- * Mark ambiguous SETs owned before issuing them so restore cannot skip one. */
-static int cam_clock_vote(struct cam_probe_journal *j, bool on)
-{
-    uint32_t bit=cam_vote_bit(j);unsigned off=cam_vote_off(j);
-    int e=cam_wait_bits(j->hwv,cam_done_off(j),bit,bit,10000);
-    if(e)return e;
-    if(on && (cam_rr(j->hwv,off+8)&bit))return EBUSY; /* not our inherited vote */
-    if(on)j->vote_owned=true;
-    cam_rw(j->hwv,off+(on?0:4),bit);
-    e=cam_wait_bits(j->hwv,off+8,bit,on?bit:0,200);
-    if(!e)e=cam_wait_bits(j->hwv,cam_done_off(j),bit,bit,10000);
-    if(!e && !on)j->vote_owned=false;
-    return e;
-}
-static int cam_clock_take(struct cam_probe_journal *j, struct x9_camera_probe *r)
-{
-    uint32_t bit=cam_vote_bit(j), ap,all;int e=0;
-    r->mclk_cfg=cam_rr(j->vlp,j->board.clk_off);
-    r->mclk_status=cam_rr(j->vlp,0x330);
-    r->hwv_vote=ap=cam_rr(j->hwv,cam_vote_off(j)+8);
-    r->hwv_done=cam_rr(j->hwv,cam_done_off(j));
-    r->pll_con1=j->pll_saved=cam_rr(j->pll,0x0c);
-    r->pll_fence=cam_rr(j->pll,0x34);
-    j->clk_expected=j->clk_saved=cam_clk_byte(j);
-    if(!cam_pll_compatible(j->pll_saved))return ENOTSUP;
-    e=cam_wait_bits(j->hwv,cam_done_off(j),bit,bit,10000);
-    if(!e)e=cam_wait_bits(j->vlp,0x330,1u<<j->board.clk_status_bit,0,1000);
-    if(e)return e;
-    /* Refuse a changing baseline rather than applying a stale snapshot. */
-    if(cam_clk_byte(j)!=j->clk_saved || cam_rr(j->hwv,cam_vote_off(j)+8)!=ap)return EBUSY;
-    all=cam_rr(j->hwv,cam_all_off(j));
-    /* Inherited votes must already select the correct, FENC-on source. */
-    if((ap|all)&bit) {
-        if((j->clk_saved&15)!=7 ||
-           !(cam_rr(j->vlp,0x270)&(1u<<j->board.clk_status_bit)))return EBUSY;
-    } else {
-        if(cam_rr(j->vlp,0x270)&(1u<<j->board.clk_status_bit))return EBUSY;
-        if((j->clk_saved&15)!=7) {
-            j->clk_expected=(j->clk_saved&0xf0)|7;
-            e=cam_mux_parent(j,7,true);if(e)return e;
-        }
-    }
-    if(!(ap&bit)){e=cam_clock_vote(j,true);if(e)return e;}
-    e=cam_wait_bits(j->vlp,0x330,1u<<j->board.clk_status_bit,0,1000);
-    if(!e)e=cam_wait_bits(j->vlp,j->board.clk_off,15u<<j->board.clk_shift,
-                           7u<<j->board.clk_shift,1000);
-    if(!e)e=cam_wait_bits(j->vlp,0x270,1u<<j->board.clk_status_bit,
-                           1u<<j->board.clk_status_bit,1000);
-    /* PLL_FENC is the hardware-on acknowledgement; prepare() in Linux is
-     * software-only. Autolink must produce it; no guessed PLL enable write. */
-    if(!e)e=cam_wait_bits(j->pll,0x34,1u<<4,1u<<4,1000);
-    r->hwv_done=cam_rr(j->hwv,cam_done_off(j));
-    r->pll_fence=cam_rr(j->pll,0x34);
-    if(!e && cam_rr(j->pll,0x0c)!=j->pll_saved)e=EBUSY;
-    if(!e)r->flags|=X9_CAM_PROBE_CLOCK;
-    return e;
-}
-static int cam_clock_restore(struct cam_probe_journal *j)
-{
-    int e=0;
-    if(j->vote_owned){e=cam_clock_vote(j,false);if(e)return e;}
-    if(j->mux_owned) {
-        /* A different owner may have voted while we were probing. Do not
-         * restore a mux under that owner, even after our vote was removed. */
-        e=cam_wait_bits(j->vlp,0x270,1u<<j->board.clk_status_bit,0,1000);
-        if(e)return e;
-        uint32_t current=cam_clk_byte(j)&0x7f;
-        /* CLR succeeded but SET/UPDATE may have failed. Permit our two
-         * intermediate values (parent0/7) or the unchanged entry byte,
-         * never silently restore an unrelated parent/reserved-bit change. */
-        if(current!=(j->clk_saved&0x7f) && current!=(j->clk_expected&0x7f) &&
-           current!=(j->clk_saved&0x70))return EBUSY;
-        e=cam_mux_parent(j,j->clk_saved&15,false);
-        if(!e)j->mux_owned=false;
-    }
-    return e;
-}
+#include "x9_camera_mclk.inc"
 static uint32_t cam_pin_mode(vm_offset_t gpio, unsigned pin)
 { return (cam_rr(gpio,0x300+(pin/4)*16)>>((pin%4)*8))&31; }
 static int cam_pin_mux(vm_offset_t gpio, unsigned pin, unsigned mode)
@@ -315,7 +215,8 @@ static int cam_bus_controls(struct cam_probe_bus *b, bool restoring)
 {
     if(b->conflict)return EBUSY;
     if(!restoring && b->uncertain)return EIO;
-    int e=cam_bus_clock(b);if(e)return e;
+    int e=cam_clock_check(&cam_journal,restoring,cam_journal.clock_active);if(e)return e;
+    e=cam_bus_clock(b);if(e)return e;
     if(cam_rr(b->gate,0xe00)&b->gate_bit)return EBUSY;
     uint32_t multi=cam_rr(b->base,CAM_I2C_MULTI);
     if(multi)return cam_bus_conflict(b,CAM_I2C_MULTI,0,multi);
@@ -527,7 +428,8 @@ static uint32_t cam_cold_retained(const struct cam_probe_journal *j)
 {
     uint32_t mask=0;
     if(j->pins_owned)mask|=X9_CAM_COLD_PINS;
-    if(j->mux_owned || j->vote_owned)mask|=X9_CAM_COLD_MCLK;
+    if(j->mux_owned || j->vote_owned || j->clock_conflict || j->mux_uncertain ||
+       j->vote_uncertain || j->mux_update_pending)mask|=X9_CAM_COLD_MCLK;
     if(j->sensor.owned || j->sensor.gate_owned || cam_bus_unretired(&j->sensor))mask|=X9_CAM_COLD_SENSOR_BUS;
     if(j->ldo.owned || j->ldo.gate_owned || cam_bus_unretired(&j->ldo))mask|=X9_CAM_COLD_WL_BUS;
     if(j->wl_owned || j->wl_enabled || j->wl_programmed)mask|=X9_CAM_COLD_WL_RAILS;
@@ -562,6 +464,8 @@ static int cam_restore(struct cam_probe_journal *j)
     if(j->pmif_pending || j->pmif_fault) {
         j->restore_step=X9_CAM_COLD_RESTORE_PMIF;return cam_restore_failed(j,EIO);
     }
+    j->restore_step=X9_CAM_COLD_RESTORE_CLOCK;
+    e=cam_clock_check(j,true,j->clock_active);if(e)return cam_restore_failed(j,e);
     /* AP requests must be retired before lowering DOVDD/AFVDD/WL, not
      * first checked in cam_bus_restore after the supplies have gone away.
      * No W1C, FIFO clear, START stop, reset or polling to retire a fault. */
@@ -738,7 +642,8 @@ static int cam_sensor_transaction(uint32_t which, struct x9_camera_probe *r,
     }
     if(!e) {
         r->stage=X9_CAM_STAGE_POWER;
-        if(which==X9_CAMERA_BACK)e=cam_vs_vote(j,true);
+        e=cam_clock_check(j,false,true);
+        if(!e && which==X9_CAMERA_BACK)e=cam_vs_vote(j,true);
         if(!e)j->pins_owned=true;
         if(!e)e=cam_pin_bit(j->gpio,0x100,j->board.reset,0);
         if(!e)e=cam_pin_mux(j->gpio,j->board.reset,0);
@@ -765,10 +670,13 @@ static int cam_sensor_transaction(uint32_t which, struct x9_camera_probe *r,
             if(!e)e=cam_rail_take(j,&j->dovdd);if(!e)delay(3000);
         }
         if(!e)e=cam_wl_guard(j,false,&v);
+        if(!e)e=cam_clock_check(j,false,true);
         if(!e)e=cam_update(j->board.drive_base,0,7,1); /* DT encoded 4mA */
+        if(!e)e=cam_clock_check(j,false,true);
         if(!e)e=cam_pin_mux(j->gpio,j->board.mclk,1);
         if(!e)delay(which==X9_CAMERA_BACK?6000:1000);
         if(!e)e=cam_wl_guard(j,false,&v);
+        if(!e)e=cam_clock_check(j,false,true);
         if(!e)e=cam_pin_bit(j->gpio,0x100,j->board.reset,1);
         if(!e)delay(4000);
         if(!e)e=cam_wl_guard(j,false,&v); /* after reset settle, before the first sensor request */
@@ -822,6 +730,12 @@ static int cam_sensor_transaction(uint32_t which, struct x9_camera_probe *r,
         j->sensor.fifo_owned,j->ldo.fifo_owned,j->sensor.request_owned,j->ldo.request_owned,
         j->sensor.wedged,j->ldo.wedged,j->sensor.conflict,j->ldo.conflict,
         j->sensor.last_status,j->ldo.last_status);
+    printf("X9 CAMERA COLD MCLK: seen=%u active=%u cfg=%02x expected=%02x prior=%02x "
+        "vote=%u/%u uncertain=%u/%u update=%u conflict=%u owned=%u/%u "
+        "(journal, NOT live readback or lease)\n",
+        j->clock_seen,j->clock_active,j->clk_saved,j->clk_expected,j->clk_prior,
+        j->vote_expected,j->vote_prior,j->mux_uncertain,j->vote_uncertain,
+        j->mux_update_pending,j->clock_conflict,j->mux_owned,j->vote_owned);
     return r->last_errno;
 }
 static int cam_sensor_probe(uint32_t which, struct x9_camera_probe *r)

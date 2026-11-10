@@ -21,7 +21,7 @@ static int cam_bus_request_fault(struct cam_probe_bus *b,int e,uint32_t status,u
     if(!b->failed_status && status!=UINT32_MAX)b->last_status=status;
     b->failed_status=b->wedged=true;
     printf("X9 CAMERA AP REQUEST: gate=%x errno=%d status=%08x start=%08x "
-        "fifo=%u request=%u (retained, no W1C/FIFO/START cleanup or retry)\n",
+        "fifo=%u request=%u (retained, no further W1C/FIFO/START cleanup or retry)\n",
         b->gate_bit,e,status,start,b->fifo_owned,b->request_owned);
     return e;
 }

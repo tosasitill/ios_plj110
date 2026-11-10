@@ -219,6 +219,18 @@ slot、raw、映射和回调 context 必须由 provider pin 到同步调用返�
 
 VLP base 为 `0x1c200000`，AP HWV base 为 `0x1c040000`。共享 UNIVPLL base `0x1c213100`，CON1 `+0x0c`、FENC `+0x34 bit4`；只读。
 probe v1 仍为 80B，把末尾四个 reserved 字用于 `hwv_vote`（入口 AP EN）、`hwv_done`、`pll_con1`、`pll_fence`；请求仍须全零。旧内核返回零，旧工具仍可读取前面字段。
+
+### CAMTG 已确认配置不得回退为“模糊中间值”
+
+`x9_camera_mclk.inc` 接入实际 cold `probe/standby`，不是新 provider。parent nibble、保留 bits4–6 和目标 AP vote 各有当前预期；CLR/SET 及 AP vote 写前分别记录精确 prior/uncertain，读回确认后立即撤销 prior 例外。UPDATE 单独记录 pending，以 CKSTA-idle 和预期配置核对收尾。**bit7/PDN 由硬件 voter 控制，仅观察，不写、不还原。**
+
+旧恢复路径不区分 SET 是否已确认，始终接受 entry、parent0 和 parent7。源码反例（未运行测试/非实机状态）：parent7 已确认后，其他用户改成0，旧代码仍可能回写 entry；新路径在该变化处锁存 `EBUSY`，不撤 AP vote 或覆盖 parent。只有真正未确认的那笔 CLR/SET，cleanup 才允许其精确 prior；未确认 SET 已在 entry/AP-off 时不补冗余写。借用 AP vote 永不 CLR，aggregate vote、PLL 编程及其他 mux 字段不写。
+
+每次 AP 控制 CSR 检查（包括 FIFO/START 和完成收尾）、POWER 入口、MCLK/reset 放行前，核对 CAMTG DONE/CKSTA、预期 parent/保留位、目标 AP vote 和同一 PLL CON1；活跃使用另要求 CAMTG/PLL FENC-on。冷恢复先做本地 reset/MCLK 隔离，再在任何 supply teardown 前执行该检查；发生冲突止于原 clock step10，保留依赖。最终 unvote/parent 恢复前同样核对，不等到撤供电后才发现源已变化。
+
+`X9 CAMERA MCLK CONFLICT` 输出决定差异；`X9 CAMERA COLD MCLK` 仅为末尾 journal，`active` 是尚未退休的已资格化使用，不是 live FENC/独占 lease。原 retained 的 MCLK 位含未确认写/UPDATE/冲突，88B/ioctl/READY 不变。AP REQUEST 的“no further cleanup”表示故障后不再继续剩余清理，不否认故障前可能已执行的合格 W1C。
+
+多次寄存器读取不能排除 AP/SCP check→write 竞态、同值 ABA 或同一 AP bit 的未知同值用户；CON1/FENC 也不是测频。本轮不建立 SID80/domain/IOVA 映射、不启动 SENINF/CAMSV DMA；**未上机、没有真实 RAW10，仍不能拍摄**。
 `flags & 16` 表示 voter/CAMTG/PLL FENC 检查通过，不表示实测频率、更不表示 capture READY；`cameractl` 输出 raw 证据并明确标注标称配置。
 
 ## 冷启动配置 sensor standby，再复位恢复
