@@ -380,7 +380,7 @@ captured DT 区分 normal camera **SID80**、protected camera **SID89**、displa
 ### 持有冷传感器与接收时钟
 
 `kernel/src/bsd/dev/x9_camera_sensor_session.h` 的 kernel-private 调用顺序为：
-`open → configure → prepare_receiver → read8 → close`。`prepare_receiver` 可省略，原 probe/standby 不因此增加 MM 操作。准备 receiver 后可显式 `configure_mac → prepare_analog → configure_outmux`（均为 `x9_camera_sensor_session_*`）；analog 需要先成功配置 MAC，三个阶段均可省略，原诊断不会自动写这些配置。MAC 必须先于 OUTMUX；已持有 OUTMUX 时再配置 MAC 返回 `EBUSY`，不能改变已 posted 命令的输入环境。
+`open → configure → prepare_receiver → read8 → close`。`prepare_receiver` 可省略，原 probe/standby 不因此增加 MM 操作。准备 receiver 后可显式 `configure_mac → prepare_analog → configure_ctle → configure_outmux`（均为 `x9_camera_sensor_session_*`）；analog 需要先成功配置 MAC，CTLE 需要已校准 analog，各阶段均可省略，原诊断不会自动写这些配置。MAC/analog/CTLE 必须先于 OUTMUX；已持有 OUTMUX 时再配置返回 `EBUSY`，不能改变已 posted 命令的输入环境。后续接入的 digital/generic PHY 配置须在最终 CTLE override 之前完成。
 
 - standalone 入口取得 `camera_control_lock`；同 TU 的 native 回调已经持锁，必须使用内部 `_locked` helper，不重入公开入口。
 - `open` 返回的非零 epoch（包括错误返回）代表已准入 journal，必须安排一次 close；旧 epoch、重复 prepare/close 不做 MMIO。成功 prepare 不撤销 MM votes，不设置 READY，不返回 IOVA。
@@ -398,7 +398,11 @@ analog 服务（`x9_camera_phy.h/.inc`）使用前摄 A/B `13880000/13881000`、
 
 校准数据不是 `10160000` 的直接 MMIO。上游 `mtk-devinfo.c` 从 `/chosen`（或唯一 `/chosen@0`）的 **little-endian** `atag,devinfo` 取 `data[reg/4]`。shim 本次启动资格化 CSI0/3 的 nvmem consumer/phandle/cell（offset `1d0/1dc`），只转交两个 word 至 32B `x9-camera-calibration`；全表/设备标识不转交、不打印或写入 git。缺失/长度错误/重复/未知 cell mapping 不给数据；明确存在的 all-zero word 才使用 vendor 默认 termination16，不能把缺失当 zero。
 
-标称 front2160Mbps、main3300.004166Msps 仅用于 preview band 配置，不是测频/SMI 票或吞吐保证。CPHY 的上游 `setting0=0x322` 会覆盖早先 source setter 的 REF_CK_SEL 为0；本实现保留该已确认调用顺序，不能擅自改成32a并声称 oscillator 已持有。DPHY A 使用 upstream oscillator1/gating2。主摄 CTLE delay9/IS2/zero-DG override、digital settle/trail/deskew/ULPS/lane 启用**还未在此阶段实现**。
+标称 front2160Mbps、main3300.004166Msps 仅用于 preview band 配置，不是测频/SMI 票或吞吐保证。CPHY 的上游 `setting0=0x322` 会覆盖早先 source setter 的 REF_CK_SEL 为0；本实现保留该已确认调用顺序，不能擅自改成32a并声称 oscillator 已持有。DPHY A 使用 upstream oscillator1/gating2。digital settle/trail/deskew/ULPS/lane 启用**还未实现**；主摄的 settle57、前摄的 trail64 是 timing 输入而非原样寄存器数，须按真实 CSI clock 和 vendor 公式转换，不能直接写57/64或把标称312MHz当作测频。
+
+`configure_ctle(epoch, &phy_status)` 是单次显式最终 override，仍无 native capture caller。前摄的 `hhfront_static_ctle_param` 和后摄 preview 的 `hhmain_cdr_0x9` 都要求 EQ IS2/BW3、DG0/DG1/LATCH/SR0/SR1=0；只改 ANA5 `0xff7f`，保留非参数 IS_RDC bit7。后摄额外将两 bank 的 ANA6/7 CK_DELAY 和 ANA13 两个 SEL_CODE 设9，保留其它 CDR width。遵循上游 CPHY 共用 setter，两 bank 的三个 DPHY delay-force enable word 写 `0x301`、value word 只设 DELAY_EN；**不改 DPHY delay code、不发 DELAY_APPLY 脉冲**。force value 的 RO_DA `[25:16]` 和 EN6 的 RO_AD `[31:16]` 在写入时置零，不重放采样结果；保留 reserved bits。入口要求 force/VAL EN/APPLY 均off，任何外部 APPLY 变化由 expected guard 拒绝，通用 writer 不接受 APPLY mask。
+
+CTLE 复用 analog 的逐字段 owned/pending journal；成功只发布 `CTLE_CONFIGURED`（并给出固定 cdr_delay/eq_control），不是测频、校准新结果、收包或 READY。重复配置 `EALREADY`，未校准 `ENXIO`，不匹配 epoch `ESTALE`，已 OUTMUX `EBUSY`；已开始操作的错误锁存并要求唯一一次 sensor close，不可重试。close 在 OUTMUX 恢复之后、CAL_EN/RSTB/LPF/CORE 撤销之前，先逆 bank/lane 还原本次 owned force enables 和 value EN，要求原值明确为off且不触 APPLY；随后 analog 逆序恢复其它 EQ/CDR 控制。任何读回冲突/未确认写保留剩余依赖，`RESTORED` 仍只表示配置与电源恢复，不是 RO result/IRQ 历史或 DMA drain。
 
 每个 bank 执行 idle200us → CORE1/30us → LPF1/5us → OS_RSTB1/1us → CAL_EN → 25us → 有界状态消费。只有触发前 CPLT0、10ms/10000次内六个完成位全部1且再次保持1，才标记该 bank CALIBRATED；上游 delay 后写 `ANA9.CPLT=1` 的做法不移植。结果/code 不用作普通控制 guard；完成后 CAL_EN 仍 on 时持续检查完成位。入场已有 CPLT 历史不猜 W1C，也不清零。任何已 posted 但未确认的校准阻止全部接收/MM/rail 退休，不 reset/cancel/retry；已完成才能单次逆序关 CAL_EN/RSTB/LPF/CORE、等待200us并还原 owned 配置。RESTORED 不表示 RO 校准结果/IRQ history 已回到入口或全链 drain。
 
@@ -408,7 +412,7 @@ OUTMUX 引擎只接受选定 bank 的 TOP CG 原为 off、当前 IRQ policy 为 
 
 `RESTORED` 只描述配置与 CG。CFG_DONE 可能留下 masked IRQ status；本服务不读/ack IRQ_STATUS，也不声称 IRQ/event drain。未来 native 唯一 IRQ owner 必须在 unmask 前资格化并退休该配置命令历史，不能把它当作图像完成。
 
-这套生命周期可显式开启 inactive analog 校准，但不启用 digital PHY lanes、SENINF DL、IRQ 或 DMA。CG/VM0/稳定 disabled 条件只是配置准入，不证明独占 AP/SCP、采集速率、包接收、全写链 drain 或 IOVA 授权；共享 CG 的 masked RMW 与检查也不是跨固件的原子 lease/ABA 检测。LARB/SMI 数据通路、PHY 校准、正常 SID80 attach 与真正采集仍缺失。
+这套生命周期可显式开启 inactive analog 校准和最终 CTLE 配置，但不启用 digital PHY lanes、SENINF DL、IRQ 或 DMA。CG/VM0/稳定 disabled 条件只是配置准入，不证明独占 AP/SCP、采集速率、包接收、全写链 drain 或 IOVA 授权；共享 CG 的 masked RMW 与检查也不是跨固件的原子 lease/ABA 检测。LARB/SMI 数据通路、digital PHY、正常 SID80 attach 与真正采集仍缺失，analog 校准也尚无本机运行证据。
 
 ### 接通采集回调
 

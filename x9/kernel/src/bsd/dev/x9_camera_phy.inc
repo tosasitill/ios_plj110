@@ -1,4 +1,4 @@
-/* ISP8s PHY3.0 analog-only lifetime, under camera_control_lock.
+/* ISP8s PHY3.0 inactive analog/CTLE lifetime, under camera_control_lock.
  * Real A+B banks for unsplit DPHY4/CPHY3, not only A or MAC-top.
  * Initial controls and each confirmed mutation are journaled independently.
  * RGS/RO results are excluded from control guards; ANA9 is NEVER written,
@@ -13,6 +13,11 @@ _Static_assert(sizeof(struct x9_camera_calibration)==X9_CAM_CALIBRATION_BYTES,"c
 enum { CAM_PHY_A, CAM_PHY_B, CAM_PHY_D, CAM_PHY_C, CAM_PHY_BANKS,
     CAM_PHY_MAX_REGS=96, CAM_PHY_NO_REG=CAM_PHY_MAX_REGS };
 #define CAM_PHY_CAL_MASK 0x003f0000u
+#define CAM_PHY_DELAY_FORCE_EN 0x301u
+#define CAM_PHY_DELAY_EN 0x100u
+#define CAM_PHY_DELAY_APPLY 0x200u
+#define CAM_PHY_EQ_OVERRIDE_MASK 0xff7fu /* IS_RDC bit7 is not a CTLE parameter */
+#define CAM_PHY_EQ_OVERRIDE 0xbu        /* IS2/BW3; DG0/DG1/LATCH/SR0/SR1 all0 */
 struct cam_phy_desc { unsigned offset; uint32_t mask, idle_zero; };
 /* Named writable controls, no AD/packet/IRQ-result banks. Mixed force words
  * include only RG bits; reads of their adjacent RO fields are not guards. */
@@ -43,11 +48,11 @@ static const struct cam_phy_desc cam_phy_analog[]={
     {0x084,0x00000133,0x00000133}, /* CDPHY_RX_ANA_FORCE_MODE_EN_4 */
     {0x090,0x00000707,0x00000000}, /* CDPHY_RX_ANA_FORCE_MODE_5 */
     {0x094,0x0000f707,0x0000f707}, /* CDPHY_RX_ANA_FORCE_MODE_EN_5 */
-    {0x0b0,0x000003ff,0x00000000}, /* CDPHY_RX_ANA_FORCE_MODE_6 */
+    {0x0b0,0x000003ff,0x00000300}, /* delay EN/APPLY must be inactive */
     {0x0b4,0x00000301,0x00000301}, /* CDPHY_RX_ANA_FORCE_MODE_EN_6 */
-    {0x0c0,0x000003ff,0x00000000}, /* CDPHY_RX_ANA_FORCE_MODE_7 */
+    {0x0c0,0x000003ff,0x00000300},
     {0x0c4,0x00000301,0x00000301}, /* CDPHY_RX_ANA_FORCE_MODE_EN_7 */
-    {0x0d0,0x000003ff,0x00000000}, /* CDPHY_RX_ANA_FORCE_MODE_8 */
+    {0x0d0,0x000003ff,0x00000300},
     {0x0d4,0x00000301,0x00000301}, /* CDPHY_RX_ANA_FORCE_MODE_EN_8 */
     {0x0f0,0xff3ffffb,0xff000003}, /* CDPHY_RX_ANA_SETTING_0 */
     {0x0f4,0x7fff73ff,0x00007300}, /* CDPHY_RX_ANA_SETTING_1 */
@@ -134,6 +139,19 @@ static int cam_phy_dependencies(void)
 }
 static unsigned cam_phy_find(unsigned bank,unsigned offset)
 {for(unsigned n=0;n<cam_phy.count;n++)if(cam_phy.reg[n].bank==bank&&cam_phy.reg[n].offset==offset)return n;return CAM_PHY_NO_REG;}
+static bool cam_phy_delay_value(unsigned bank,unsigned offset)
+{return bank<=CAM_PHY_B && (offset==0xb0 || offset==0xc0 || offset==0xd0);}
+/* The force registers mix software RG controls with RO observations.
+ * Preserve reserved bits, but never carry RO_DA or RO_AD samples into a
+ * write. A CPHY delay override does not pulse DPHY DELAY_APPLY; an external
+ * asserted APPLY fails the normal expected guard instead of being replayed.
+ * This is not a generic strobe writer for future DPHY deskew work. */
+static uint32_t cam_phy_write_zero(unsigned bank,unsigned offset)
+{
+    if(cam_phy_delay_value(bank,offset))return 0x03ff0000u;
+    if(bank<=CAM_PHY_B && offset==0xb4)return 0xffff0000u;
+    return 0;
+}
 /* Only a single uncertain posted control write. For mixed words, preserve
  * reserved bits but do NOT replay read-only results or command strobes. */
 static int cam_phy_write(unsigned bank,unsigned offset,uint32_t mask,uint32_t value)
@@ -144,11 +162,12 @@ static int cam_phy_write(unsigned bank,unsigned offset,uint32_t mask,uint32_t va
     int e;
     if(n==CAM_PHY_NO_REG)return EINVAL;
     r=&cam_phy.reg[n];if(mask&~r->mask)return EINVAL;
+    if(cam_phy_delay_value(bank,offset) && (mask&CAM_PHY_DELAY_APPLY))return ENOTSUP;
     if(cam_phy.pending_reg!=CAM_PHY_NO_REG)return EBUSY;
     e=cam_phy_dependencies();if(e)return e;
     raw=cam_rr(cam_phy.bank[bank],offset);
     if((raw&r->mask)!=r->expected)return ESTALE;
-    next=(raw&~mask)|(value&mask);
+    next=(raw&~(mask|cam_phy_write_zero(bank,offset)))|(value&mask);
     if((next&r->mask)==r->expected)return 0;
     if(offset==0x20 && (mask&CAM_PHY_CAL_MASK) && (value&CAM_PHY_CAL_MASK))
         cam_phy.calibration_pending|=1u<<bank;
@@ -160,6 +179,79 @@ static int cam_phy_write(unsigned bank,unsigned offset,uint32_t mask,uint32_t va
 }
 static int cam_phy_pause(unsigned us)
 {int e=cam_phy_dependencies();if(e)return e;delay(us);return cam_phy_dependencies();}
+/* Final sensor override, following the generic PHY power/calibration and
+ * (when connected) digital configuration, not the generic EQ band table.
+ * hhfront_static_ctle_param has BW3/CDR0; hhmain preview selects
+ * hhmain_cdr_0x9, BW3/CDR9. All other CTLE parameters are zero, with the
+ * vendor IS floor2. Both unsplit profiles use both real analog banks.
+ * For CPHY the vendor common delay-enable helper still forces the three
+ * DPHY delay paths. Its CPHY code setter writes ANA6/7/13 only; there is
+ * NO DELAY_APPLY pulse and no DPHY delay-code write in this operation. */
+static int cam_phy_ctle_locked(uint64_t epoch)
+{
+    bool cphy;
+    int e;
+    if(!cam_phy.held || epoch!=cam_phy.epoch)return ESTALE;
+    if(cam_phy.error)return cam_phy.error;
+    if(cam_phy.close_attempted)return ESTALE;
+    if(cam_out.held)return EBUSY;
+    if(cam_phy.status.flags&X9_CAM_PHY_CTLE_ATTEMPTED)return EALREADY;
+    if(!(cam_phy.status.flags&X9_CAM_PHY_CALIBRATED) ||
+       cam_phy.calibration_done!=3 || cam_phy.calibration_pending)return ENXIO;
+    cphy=cam_phy.status.sensor==X9_CAMERA_BACK;
+    if(cam_phy.status.cphy!=(cphy?1u:0u))return EINVAL;
+    e=cam_phy_dependencies();if(e)return e;
+    cam_phy.status.flags|=X9_CAM_PHY_CTLE_ATTEMPTED;cam_phy.status.stage=6;
+    for(unsigned b=CAM_PHY_A;b<=CAM_PHY_B&&!e;b++) {
+        cam_phy.status.bank=b;
+        if(cphy) {
+            for(unsigned k=0;k<3&&!e;k++) {
+                unsigned offset=0xb0+0x10*k;
+                e=cam_phy_write(b,offset+4,CAM_PHY_DELAY_FORCE_EN,CAM_PHY_DELAY_FORCE_EN);
+                if(!e)e=cam_phy_write(b,offset,CAM_PHY_DELAY_EN,CAM_PHY_DELAY_EN);
+            }
+            if(!e)e=cam_phy_write(b,0x18,0x1f000000,9u<<24);
+            if(!e)e=cam_phy_write(b,0x34,0x1f,9);
+            if(!e)e=cam_phy_write(b,0x1c,0x1f000000,9u<<24);
+            if(!e)e=cam_phy_write(b,0x34,0x1f00,9u<<8);
+        }
+        if(!e)e=cam_phy_write(b,0x14,CAM_PHY_EQ_OVERRIDE_MASK,CAM_PHY_EQ_OVERRIDE);
+    }
+    if(!e)e=cam_phy_dependencies();
+    if(e)return cam_phy_fault(e);
+    cam_phy.status.cdr_delay=cphy?9:0;cam_phy.status.eq_control=CAM_PHY_EQ_OVERRIDE;
+    cam_phy.status.flags|=X9_CAM_PHY_CTLE_CONFIGURED;cam_phy.status.stage=7;
+    cam_phy_status();return 0;
+}
+/* Disable our forced delay routing before CAL_EN/RSTB/LPF/CORE go down.
+ * Admission proved all force enables and VAL EN/APPLY zero. Never write
+ * an untouched register or manufacture an APPLY transition. If a posted
+ * configuration was uncertain, close first qualifies exact old/new; this
+ * helper is restoration only, not a retry of the failed original request. */
+static int cam_phy_ctle_unforce(void)
+{
+    int e=0;
+    for(unsigned i=2;i&&!e;i--)for(unsigned k=3;k&&!e;k--) {
+        unsigned b=i-1,offset=0xb0+0x10*(k-1);
+        unsigned n=cam_phy_find(b,offset+4);
+        struct cam_phy_reg *r;
+        if(n==CAM_PHY_NO_REG)return EINVAL;
+        r=&cam_phy.reg[n];
+        if(r->owned) {
+            if(r->before&CAM_PHY_DELAY_FORCE_EN)return EBUSY;
+            e=cam_phy_write(b,offset+4,r->owned,r->before);
+            if(!e)r->owned=0;
+        }
+        n=cam_phy_find(b,offset);if(n==CAM_PHY_NO_REG)return EINVAL;
+        r=&cam_phy.reg[n];
+        if(!e && r->owned) {
+            if(r->before&(CAM_PHY_DELAY_EN|CAM_PHY_DELAY_APPLY))return EBUSY;
+            e=cam_phy_write(b,offset,r->owned,r->before);
+            if(!e)r->owned=0;
+        }
+    }
+    return e;
+}
 /* Configure only the two preview bands. Rates are sensor table-derived
  * nominal settings, NOT hardware measurements or a SENINF throughput vote.
  * Termination defaults occur only for an explicitly present all-zero LK
@@ -315,6 +407,7 @@ static int cam_phy_close_locked(uint64_t epoch)
         else {r->expected=v;cam_phy.pending_reg=CAM_PHY_NO_REG;}
     }
     if(!e)e=cam_phy_dependencies();
+    if(!e)e=cam_phy_ctle_unforce();
     /* Reverse bank power, preserving source/async clocks until config is
      * restored. Neither digital lanes nor MAC/OUTMUX DL were enabled. */
     for(unsigned i=2;i&&!e;i--) {
@@ -367,5 +460,33 @@ int x9_camera_sensor_session_prepare_analog(uint64_t epoch,struct x9_camera_phy_
         else if(e && cam_rx_live.error)cam_sensor_session_fault(e);
         if(cam_phy.held)*s=cam_phy.status;
     }
+    s->last_errno=e;lck_mtx_unlock(&camera_control_lock);return e;
+}
+int x9_camera_sensor_session_configure_ctle(uint64_t epoch,struct x9_camera_phy_status *s)
+{
+    struct cam_sensor_ap ap;
+    uint8_t byte=0;
+    int e;
+    if(!s)return EINVAL;
+    lck_mtx_lock(&camera_control_lock);memset(s,0,sizeof(*s));s->sensor_epoch=epoch;
+    e=cam_sensor_session_match(epoch);
+    if(!e && cam_sensor_live.error)e=cam_sensor_live.error;
+    if(!e && (cam_sensor_live.phase!=CAM_SENSOR_CONFIGURED || session.capture || session.stream))e=EBUSY;
+    if(!e && (!cam_phy.held || cam_phy.epoch!=epoch || cam_phy.close_attempted))e=ESTALE;
+    if(!e && cam_phy.error)e=cam_phy.error;
+    if(!e && (cam_phy.status.flags&X9_CAM_PHY_CTLE_ATTEMPTED))e=EALREADY;
+    if(!e && cam_out.held)e=EBUSY;
+    if(!e) {
+        s->sensor=cam_sensor_live.probe.sensor;
+        ap=(struct cam_sensor_ap){&cam_journal.sensor,s->sensor==X9_CAMERA_BACK?0x1a:0x10};
+        e=cam_sensor_ap_read(&ap,0x0100,&byte);if(!e && byte)e=EBUSY;
+        if(!e)e=cam_sensor_ap_read(&ap,0x0104,&byte);if(!e && byte)e=EBUSY;
+        if(!e)e=cam_phy_ctle_locked(epoch);
+        if(!e)e=cam_sensor_ap_read(&ap,0x0100,&byte);if(!e && byte)e=EBUSY;
+        if(!e)e=cam_sensor_ap_read(&ap,0x0104,&byte);if(!e && byte)e=EBUSY;
+        if(!e)e=cam_sensor_ap_guard(&ap);
+        if(e) {cam_phy_fault(e);cam_rx_session_fault(e);cam_sensor_session_fault(e);}
+    }
+    if(cam_phy.held && cam_phy.epoch==epoch)*s=cam_phy.status;
     s->last_errno=e;lck_mtx_unlock(&camera_control_lock);return e;
 }
