@@ -663,22 +663,25 @@ static int gps_runtime_mnl_driver_defaults(uint64_t generation,uint8_t *p)
  if(gps_rt.ops.version<2 || gps_rt.ops.version>4)return ENOTSUP;
  if(!gps_rt.pos_complete || !gps_rt.hif.prepared || !gps_rt.booted)return ENXIO;
  error=gps_runtime_owned(NULL,generation,0);if(error)return error;
- /* Original GNSS MCU payload: the pure default factory at
-  * ebe20..ec152 clears the1256B driver, then supplies these prefix fields.
-  * The216B receive branch ecb7c..ecba2 copies to F06BA5D8, and ec4b4
-  * applies the separate136B init. Copy only the proved216B prefix here:
+ /* Original mnld6e3a0..6e3d8 explicitly clears its1256B driver through
+  * imported memset(0). The GNSS MCU factory ebe20..ec152 supplies the
+  * explicit prefix stores below; its fill/copy helpers contain UNKNOWN
+  * vendor opcodes, so use the AP's proved clear, not guessed ISA semantics.
+  * The216B receive branch ecb7c..ecba2 selects F06BA5D8, and ec4b4
+  * applies the separate136B init. Produce only the proved216B prefix:
   * none of the Android path strings starting at driver+d8 belongs on wire.
   * This is a real config producer, not metadata pasted onto an opaque
   * zero object. It carries only original defaults, no AP/MD calibration,
   * sensor/TSX assistance, invented pointers, file descriptors or policies.
-  * Untouched defaults are zero exactly as in that original clear. */
+  * Untouched fields use the AP factory's explicit zero baseline. */
  bzero(p,X9_MNL_DRIVER_CONFIG_BYTES);
  gps_runtime_config_le(p+0x1c,4,0x03000000u);
  gps_runtime_config_le(p+0x20,4,0x20000000u);
  gps_runtime_config_le(p+0x24,4,7000u);
  gps_runtime_config_le(p+0x28,2,0x30u);
- /* The original ec066 copies seven bytes from F0319E04; byte+4d stays
-  * zero. This is the default version text, NOT a pointer into that image. */
+ /* Original ec066..ec086 passes driver+46, literal F0319E04 and size7
+  * to its helper. Use that exact seven-byte version text and explicit NUL,
+  * NOT a pointer into the image or a guess at its unsupported opcodes. */
  memcpy(p+0x46,"12_1.01",7);
  gps_runtime_config_le(p+0xd0,2,210u);
  gps_runtime_config_le(p+0xd2,2,6u);

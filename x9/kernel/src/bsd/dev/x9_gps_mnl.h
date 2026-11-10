@@ -89,7 +89,7 @@ int x9_gps_mnl_control_decode(const void *body, unsigned body_bytes,
  * A caller must supply wire bytes from a qualified native producer, NEVER
  * copy an Android process object, use metadata alone to qualify arbitrary
  * contents or send an XML file. The runtime's NULL/0 DRIVER3 producer
- * constructs the proved MCU default prefix, without host paths/logging,
+ * constructs the AP/MCU default baseline, without host paths/logging,
  * calibrated aiding or a guessed INIT136. */
 int x9_gps_mnl_command_validate(uint32_t command, const void *payload,
     unsigned payload_bytes);

@@ -208,7 +208,8 @@ int x9_gps_runtime_queue(uint64_t generation, unsigned channel,
  * No empty INIT builder, guessed drift or NV authority.
  * The caller's payload is never modified, including on enqueue failure.
  * DRIVER3 may instead use NULL/0 on v2..v4: the worker produces the
- * original MCU's216B default prefix, including its real version/footer.
+ * 216B baseline from the original AP zero-fill and MCU explicit default
+ * stores/version/footer (not inferred semantics of vendor ISA helpers).
  * It omits the1256B host tail, disables Android logfile/HW-suspend/resume
  * and optional aiding, and requires a current booted/POS/HIF owned lease.
  * This is the known baseline driver policy, NOT complete board tuning,
