@@ -9,6 +9,7 @@
 #include <kern/locks.h>
 #include <kern/thread.h>
 #include <kern/clock.h>
+#include <kern/sched_prim.h>
 #include <sys/errno.h>
 #include <sys/proc.h>
 #include "../../../bsd/dev/x9_audio.h"
@@ -29,7 +30,14 @@ static x9_audio_backend backend;
 static bool haveBackend, haveWorker;
 static bool backendHeld;
 static int stopError;
+static uint64_t physicalPlayed, physicalQueued, physicalAnchor, lastPosition, lastProgress;
+static uint32_t prefillFrames, positionRetries;
+static bool prefillCommitted;
+/* Never pass user-writable output pages as the initial DMA prefill. */
+static int16_t prefill[X9_AUDIO_PREFILL_MAX * X9_AUDIO_CHANNELS];
 static int16_t period[X9_AUDIO_PERIOD * X9_AUDIO_CHANNELS];
+static_assert(sizeof(X9AudioControl) == 112, "PCM ABI v1 size");
+static_assert(sizeof(X9AudioStreamStatus) == 48, "stream status v2 size");
 static void beginUpdate() { __atomic_add_fetch(&control->seq, 1, __ATOMIC_SEQ_CST); }
 static void endUpdate() { __atomic_add_fetch(&control->seq, 1, __ATOMIC_SEQ_CST); }
 static int stopState(X9AudioControl *s, int error)
@@ -64,36 +72,77 @@ static void stopLocked(int error)
 {
     X9AudioControl s = *control; stopState(&s, error); publish(s);
 }
+/* A transient unstable CUR is not a fatal error by itself. Never extend the
+ * budget from wall-clock "progress", nor accept EAGAIN forever. Physical PA
+ * mute/quiesce is still the backend's independent responsibility. */
+static bool positionBudgetExpired()
+{
+    if (physicalPlayed > physicalQueued) return true;
+    uint64_t pending = physicalQueued - physicalPlayed;
+    if (pending <= X9_AUDIO_PERIOD) return true;
+    /* Clamp in frames BEFORE multiplication: submitted is a lifetime cursor,
+     * not a bounded DMA-ring size. One period is the 10 ms observation cap. */
+    uint64_t safe = pending - X9_AUDIO_PERIOD;
+    if (safe > X9_AUDIO_PERIOD) safe = X9_AUDIO_PERIOD;
+    uint64_t budget = safe * 1000000000ULL / X9_AUDIO_RATE;
+    uint64_t now = mach_absolute_time(), elapsed, stalled;
+    absolutetime_to_nanoseconds(now - lastPosition, &elapsed);
+    absolutetime_to_nanoseconds(now - lastProgress, &stalled);
+    /* A successful read of an unchanged cursor does NOT renew progress. */
+    return elapsed >= budget || stalled >= budget;
+}
 static void worker(void *, wait_result_t)
 {
     for (;;) {
         lck_mtx_lock(&audioLock);
-        if (control->state & X9AudioRunning) {
-            X9AudioControl s = *control;
-            uint64_t played = 0, underruns = 0;
-            int e = backend.position(backend.context, &played, &underruns);
-            if (!e && (played < s.out_frames || played > s.out_queued ||
-                       underruns < s.underruns)) e = EIO;
-            if (!e) { s.out_frames = played; s.underruns = underruns; }
-            uint64_t written = __atomic_load_n(&producer->written, __ATOMIC_ACQUIRE);
-            if (!e && (written < s.out_queued || written - s.out_queued > X9_AUDIO_RING)) {
-                s.bad_producer++; e = EINVAL;
-            }
-            /* Queue at most eight periods per pass, without assuming that a
-             * submitted period has played. EAGAIN preserves its PCM/cursor. */
-            for (unsigned n = 0; !e && n < 8 && written - s.out_queued >= X9_AUDIO_PERIOD; n++) {
-                uint64_t start = s.out_queued;
-                for (unsigned f = 0; f < X9_AUDIO_PERIOD; f++) {
-                    unsigned slot = (unsigned)((start + f) % X9_AUDIO_RING) * X9_AUDIO_CHANNELS;
-                    period[f * 2] = output[slot]; period[f * 2 + 1] = output[slot + 1];
-                }
-                e = backend.submit(backend.context, period, X9_AUDIO_PERIOD);
-                if (e == EAGAIN) { e = 0; break; }
-                if (!e) s.out_queued += X9_AUDIO_PERIOD;
-            }
-            if (e) stopState(&s, e);
-            publish(s);
+        if (!(control->state & X9AudioRunning)) {
+            assert_wait((event_t)&haveWorker, THREAD_UNINT);
+            lck_mtx_unlock(&audioLock);
+            thread_block(THREAD_CONTINUE_NULL); continue;
         }
+        X9AudioControl s = *control;
+        uint64_t played = 0, underruns = 0;
+        uint64_t observed = mach_absolute_time();
+        int e = positionBudgetExpired() ? ETIMEDOUT : backend.position(backend.context, &played, &underruns);
+        bool retry = e == EAGAIN;
+        if (retry) {
+            if (positionRetries != UINT32_MAX) positionRetries++;
+            e = positionBudgetExpired() ? ETIMEDOUT : 0;
+        }
+        if (!e && !retry) {
+            if (!prefillCommitted || played < physicalPlayed || played > physicalQueued ||
+                underruns < s.underruns) e = EIO;
+            else if (underruns != s.underruns) { s.underruns = underruns; e = EPIPE; }
+            else if (positionBudgetExpired()) e = ETIMEDOUT; /* callback itself may have been late */
+            else {
+                if (played != physicalPlayed) lastProgress = observed;
+                physicalPlayed = played; lastPosition = observed;
+                /* Leading silence belongs to hardware, not writable PCM ABI.
+                 * Clamping before sample0 is NOT fabricated cursor progress. */
+                s.out_frames = played > prefillFrames ? played - prefillFrames : 0;
+                s.underruns = underruns;
+                if (physicalQueued - played <= X9_AUDIO_PERIOD) e = EPIPE;
+            }
+        }
+        uint64_t written = __atomic_load_n(&producer->written, __ATOMIC_ACQUIRE);
+        if (!e && (written < s.out_queued || written - s.out_queued > X9_AUDIO_RING)) {
+            s.bad_producer++; e = EINVAL;
+        }
+        /* No submissions against an uncertain physical cursor; EAGAIN may
+         * not authorize overwriting a consumed/replayed ring segment. */
+        for (unsigned n = 0; !e && !retry && n < 8 && written - s.out_queued >= X9_AUDIO_PERIOD; n++) {
+            if (s.out_queued > UINT64_MAX - prefillFrames - X9_AUDIO_PERIOD) { e = EOVERFLOW; break; }
+            uint64_t start = s.out_queued;
+            for (unsigned f = 0; f < X9_AUDIO_PERIOD; f++) {
+                unsigned slot = (unsigned)((start + f) % X9_AUDIO_RING) * X9_AUDIO_CHANNELS;
+                period[f * 2] = output[slot]; period[f * 2 + 1] = output[slot + 1];
+            }
+            e = backend.submit(backend.context, period, X9_AUDIO_PERIOD);
+            if (e == EAGAIN) { e = 0; break; }
+            if (!e) { s.out_queued += X9_AUDIO_PERIOD; physicalQueued += X9_AUDIO_PERIOD; }
+        }
+        if (e) stopState(&s, e);
+        publish(s);
         lck_mtx_unlock(&audioLock);
         delay_for_interval(2, 1000 * NSEC_PER_USEC);
     }
@@ -108,8 +157,9 @@ static int ensureWorker()
 extern "C" int x9_audio_register_backend(const x9_audio_backend *b)
 {
     if (!sweet_early_is_x9() || (sweet_x9_arg("x9_audio", 0) != 1 && sweet_x9_arg("x9_audio", 0) != 2)) return ENXIO;
-    if (!b || b->version != X9_AUDIO_VERSION || b->verified != X9_AUDIO_REQUIRED ||
-        b->lead_frames > X9_AUDIO_RING / 2 || !b->start || !b->stop || !b->submit || !b->position) return EINVAL;
+    if (!b || b->version != X9_AUDIO_BACKEND_VERSION || b->verified != X9_AUDIO_REQUIRED ||
+        b->lead_frames < X9_AUDIO_PREFILL_MIN || b->lead_frames > X9_AUDIO_PREFILL_MAX ||
+        b->lead_frames % X9_AUDIO_PERIOD || !b->start || !b->stop || !b->submit || !b->position) return EINVAL;
     lck_mtx_lock(&audioLock);
     int e = haveBackend ? EBUSY : 0;
     if (!e) {
@@ -292,7 +342,9 @@ IOReturn X9AudioUserClient::externalMethod(uint32_t sel, IOExternalMethodArgumen
             memcpy(a->structureOutput, &s, sizeof(s));
         } else {
             lck_mtx_lock(&audioLock);
-            X9AudioStreamStatus s = {1, backendHeld ? 1u : 0u, (uint32_t)stopError, 0};
+            X9AudioStreamStatus s = {X9_AUDIO_STREAM_STATUS_VERSION, backendHeld ? 1u : 0u,
+                (uint32_t)stopError, prefillFrames, physicalPlayed, physicalQueued, physicalAnchor,
+                prefillCommitted ? 1u : 0u, positionRetries};
             memcpy(a->structureOutput, &s, sizeof(s)); lck_mtx_unlock(&audioLock);
         }
         a->structureOutputSize = (uint32_t)size; return kIOReturnSuccess;
@@ -369,14 +421,26 @@ IOReturn X9AudioUserClient::externalMethod(uint32_t sel, IOExternalMethodArgumen
     else {
         bzero(output, X9_AUDIO_RING_BYTES); __atomic_store_n(&producer->written, 0, __ATOMIC_RELEASE);
         uint64_t anchor = 0;
+        prefillFrames = backend.lead_frames;
+        bzero(prefill, prefillFrames * X9_AUDIO_CHANNELS * sizeof(*prefill));
+        physicalPlayed = physicalQueued = physicalAnchor = lastPosition = lastProgress = 0;
+        prefillCommitted = false; positionRetries = 0;
         backendHeld = true; stopError = 0; /* start failure may own resources */
-        e = backend.start(backend.context, &anchor);
-        if (!e && !anchor) e = EIO;
+        e = backend.start(backend.context, prefill, prefillFrames, &anchor);
+        if (!e) { prefillCommitted = true; physicalQueued = prefillFrames; physicalAnchor = anchor; }
+        if (!e && (!anchor || anchor > mach_absolute_time())) e = EIO;
+        uint64_t leadTicks = (uint64_t)(((__uint128_t)prefillFrames * s.ticks_per_frame_q32) >> 32);
+        if (!e && anchor > UINT64_MAX - leadTicks) e = EOVERFLOW;
+        if (!e) {
+            lastPosition = lastProgress = anchor;
+            if (positionBudgetExpired()) e = ETIMEDOUT; /* slow activation already exhausted prefill */
+        }
         if (e) { stopState(&s, e); s.state = X9AudioFault; }
         else {
-            s.generation++; s.out_anchor_host = anchor;
+            s.generation++; s.out_anchor_host = anchor + leadTicks;
             s.out_frames = s.out_queued = s.underruns = 0;
             s.state = X9AudioReady | X9AudioRunning; s.starts++;
+            thread_wakeup((event_t)&haveWorker);
         }
     }
     if (sel == X9AudioStart && !(s.state & X9AudioFault)) s.error = e;

@@ -5,6 +5,10 @@
 #define X9_AUDIO_CLASS "X9Audio"
 #define X9_AUDIO_MAGIC 0x58394155u
 #define X9_AUDIO_VERSION 1u
+/* Private kernel callback contract, independent of the unchanged PCM ABI. */
+#define X9_AUDIO_BACKEND_VERSION 2u
+#define X9_AUDIO_PREFILL_MIN (X9_AUDIO_PERIOD * 2u)
+#define X9_AUDIO_PREFILL_MAX (X9_AUDIO_PERIOD * 8u)
 #define X9_AUDIO_RATE 48000u
 #define X9_AUDIO_CHANNELS 2u
 #define X9_AUDIO_PERIOD 480u
@@ -60,10 +64,13 @@ typedef struct {
     uint64_t smc_result[4], smc_calls, resets, timeouts;
     uint32_t rollback_error, reserved;
 } X9AudioBoardStatus;
-/* selector 8 preserves PCM ABI v1 while exposing failed stop ownership.
+/* selector 8 v2 preserves PCM ABI v1 while exposing physical prefill/cursor.
  * A cleared Running flag is not proof that stop released physical DMA/PA. */
+#define X9_AUDIO_STREAM_STATUS_VERSION 2u
 typedef struct {
-    uint32_t version, backend_held, stop_error, reserved;
+    uint32_t version, backend_held, stop_error, prefill_frames;
+    uint64_t physical_played, physical_queued, physical_anchor;
+    uint32_t prefill_committed, position_retries;
 } X9AudioStreamStatus;
 #if defined(KERNEL)
 #ifdef __cplusplus
@@ -72,15 +79,21 @@ extern "C" {
 /* A physical driver registers only after owning clocks, firmware/mailboxes,
  * EMI/cache policy, AFE, actual PA model+calibration and speaker routing.
  * All callbacks are serialized by the service. submit must copy a complete
- * period before returning 0; EAGAIN consumes nothing. position returns a real
- * monotonic cursor <= submitted and an absolute underrun count. start returns
- * the hardware sample-0 host anchor. No user VA/PA reaches these callbacks.
+ * period before returning 0; submit EAGAIN consumes nothing. position returns
+ * the raw physical cursor INCLUDING the hidden prefill, never subtracting it,
+ * and an absolute underrun count (reset to 0 at each start). A transient
+ * position EAGAIN is tolerated only for a bounded cursor-observation window.
+ * start must copy/sync ALL private prefill before enabling DMA, and return
+ * the physical prefill-frame-0 host anchor. It may not retain the PCM pointer.
+ * The service subtracts the prefill from raw played and offsets the logical
+ * sample-0 anchor. Producer and out_queued still start at 0, preserving PCM
+ * ABI v1; no user VA/PA reaches these callbacks.
  * stop MUST mute/quiesce DMA even when returning an error. Registration is
  * boot-lifetime; there is intentionally no untested/null backend. */
 struct x9_audio_backend {
     uint32_t version, verified, lead_frames;
     void *context;
-    int (*start)(void *, uint64_t *anchor);
+    int (*start)(void *, const int16_t *prefill, uint32_t frames, uint64_t *physical_anchor);
     int (*stop)(void *);
     int (*submit)(void *, const int16_t *, uint32_t frames);
     int (*position)(void *, uint64_t *frames, uint64_t *underruns);

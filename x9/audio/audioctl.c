@@ -79,11 +79,16 @@ static int afe_status(io_connect_t c) {
     return 0;
 }
 static int stream_status(io_connect_t c) {
+    _Static_assert(sizeof(X9AudioStreamStatus) == 48, "stream status v2 size");
     X9AudioStreamStatus s = {0}; size_t n = sizeof(s);
     kern_return_t r = IOConnectCallStructMethod(c, X9AudioStreamStatusSelector, NULL, 0, &s, &n);
-    if (r || n != sizeof(s) || s.version != 1) { fprintf(stderr,"stream status/ABI failed: 0x%x\n",r); return 1; }
+    if (r || n != sizeof(s) || s.version != X9_AUDIO_STREAM_STATUS_VERSION) { fprintf(stderr,"stream status/ABI failed: 0x%x\n",r); return 1; }
     printf("Physical backend lease=%u last-stop-errno=%u (Running=0 alone does not prove DMA/PA stopped)\n",
            s.backend_held,s.stop_error);
+    printf("  physical prefill=%u committed=%u played=%llu queued=%llu anchor=%llu cursor-retries=%u\n",
+           s.prefill_frames,s.prefill_committed,(unsigned long long)s.physical_played,
+           (unsigned long long)s.physical_queued,(unsigned long long)s.physical_anchor,s.position_retries);
+    puts("Raw cursor includes hidden prefill; PCM played/queued exclude it. Prefill is not audible-output proof.");
     return 0;
 }
 static int amp_status(io_connect_t c) {
@@ -130,7 +135,7 @@ static int inspect_container(const char *path,const char *profile) {
 }
 static void print_status(const X9AudioControl *s) {
     printf("X9 audio ABI=%u state=0x%x blockers=0x%x errno=%u rate=%u channels=%u\n"
-           "hardware played=%llu queued=%llu underruns=%llu bad_producer=%llu generation=%u\n",
+           "PCM played=%llu queued=%llu underruns=%llu bad_producer=%llu generation=%u\n",
            s->version, s->state, s->blockers, s->error, s->rate, s->channels,
            (unsigned long long)s->out_frames, (unsigned long long)s->out_queued,
            (unsigned long long)s->underruns, (unsigned long long)s->bad_producer, s->generation);
@@ -151,7 +156,8 @@ static int play(io_connect_t c, FILE *f) {
     if (r) { fprintf(stderr, "physical playback not started: 0x%x\n", r); goto done; }
     started = 1;
     X9AudioProducer *p = (void *)(uintptr_t)maps[1]; int16_t *ring = (void *)(uintptr_t)maps[2];
-    uint64_t end = 0, last_played = 0, last_progress = mach_absolute_time();
+    uint64_t end = 0, content_end = 0, tail_left = X9_AUDIO_PREFILL_MIN;
+    uint64_t last_played = 0, last_progress = mach_absolute_time();
     mach_timebase_info_data_t tb; mach_timebase_info(&tb);
     int eof = 0;
     while (!interrupted) {
@@ -161,18 +167,28 @@ static int play(io_connect_t c, FILE *f) {
         if ((mach_absolute_time() - last_progress) * tb.numer / tb.denom > 5000000000ULL) {
             fprintf(stderr, "no hardware cursor progress for 5s; stop\n"); goto done;
         }
-        if (eof && s.out_frames >= end) { print_status(&s); rc = 0; break; }
-        if (!eof && end >= s.out_queued && end - s.out_queued <= X9_AUDIO_RING - X9_AUDIO_PERIOD) {
+        /* Stop once REAL content is played, not after exhausting the DMA
+         * queue: AFE must mute at its 480-frame low-water margin. Keep two
+         * zero periods behind EOF so the last data is not cut off early. */
+        if (eof && s.out_frames >= content_end) { print_status(&s); rc = 0; break; }
+        if ((!eof || tail_left) && end >= s.out_queued && end - s.out_queued <= X9_AUDIO_RING - X9_AUDIO_PERIOD) {
             int16_t pcm[X9_AUDIO_PERIOD * X9_AUDIO_CHANNELS] = {0};
-            size_t n = fread(pcm, 1, sizeof(pcm), f);
-            if (ferror(f) || n % 4) { fprintf(stderr, "read error or partial stereo frame\n"); goto done; }
-            if (!n) { eof = 1; continue; }
+            if (!eof) {
+                size_t n = fread(pcm, 1, sizeof(pcm), f);
+                if (ferror(f) || n % 4) { fprintf(stderr, "read error or partial stereo frame\n"); goto done; }
+                if (!n) { eof = 1; continue; }
+                if (end > UINT64_MAX - X9_AUDIO_PERIOD) { fprintf(stderr, "PCM timeline overflow\n"); goto done; }
+                content_end = end + n / 4;
+                if (n < sizeof(pcm)) eof = 1;
+            } else tail_left -= X9_AUDIO_PERIOD;
+            if (end > UINT64_MAX - X9_AUDIO_PREFILL_MAX - X9_AUDIO_PERIOD) {
+                fprintf(stderr, "physical timeline overflow\n"); goto done;
+            }
             for (unsigned i = 0; i < X9_AUDIO_PERIOD; i++) {
                 unsigned slot = (unsigned)((end + i) % X9_AUDIO_RING) * 2;
                 ring[slot] = pcm[i * 2]; ring[slot + 1] = pcm[i * 2 + 1];
             }
             end += X9_AUDIO_PERIOD; __atomic_store_n(&p->written, end, __ATOMIC_RELEASE);
-            if (n < sizeof(pcm)) eof = 1;
         } else usleep(2000);
     }
 done:

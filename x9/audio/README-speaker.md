@@ -4,8 +4,9 @@
 没有 MT6993 物理 backend 注册者；`Ready=0`，`Start` 返回
 `kIOReturnNotReady`。不访问 off-domain MMIO、不自动起 DSP、不写功放／root，
 没有自动安装 HAL。麦克风是另一套接口，不在此输出设备中虚报输入流。
-PCM ABI 仍为 v1；**board-status 已升级为 v2**，需配套本轮 `audioctl`，旧工具会拒绝
-新版结构。新增 AFE/stream 状态 selector 只返回缓存，不申请硬件资源。
+PCM ABI 仍为 v1；**board-status 和 stream-status 为 v2**，需配套本轮 `audioctl`，旧工具会拒绝
+新版结构。私有 kernel backend 回调也升级为 v2（start 增加预填输入）；不能继续注册
+旧版 start 回调。AFE/stream 状态 selector 只返回缓存，不申请硬件资源。
 
 ## 构建
 
@@ -38,7 +39,10 @@ audioctl play /var/tmp/stereo-48000-s16le.pcm
 ```
 
 工具不会自动生成或播放测试音。`play` 映射 PCM 环，按实际硬件 cursor
-等待完成；5 秒无进度会停流。未实现的物理后端会立即拒绝播放。
+等待完成；文件尾提交两个静音 period，等待最后一个真实内容帧播放后 stop，
+不会等 DMA 队列耗尽才停。最后不足一个 period 的内容按 stereo frame 计数，
+残缺 stereo frame 拒绝。5 秒无进度会停流；内核独立的 10 ms 游标／低水位
+保护可能更早停流。未实现的物理后端会立即拒绝播放。
 HAL 最终位置是 `/Library/Audio/Plug-Ins/HAL/X9Audio.driver`，但首次根盘
 staging 必须单独确认、走项目 extent 写入流程；本构建器不安装、不写 root、
 不覆盖 Apple `VirtualAudio.plugin`。尚未验证 20H392 原生路由层是否选中本 HAL，
@@ -55,7 +59,7 @@ staging 必须单独确认、走项目 extent 写入流程；本构建器不安�
 | open type 1 | root／指定音频 daemon 的独占 writer |
 | open type 2 | mode2 的 root 控制会话；不能映射 PCM 或 start 播放，可完成失败后保留的 stop |
 | selector 0/1/2 | status / start / stop；拒绝 async、descriptor 和额外参数 |
-| selector 7/8 | cached AFE status v2 / stream lease status v1；只读，不做 MMIO |
+| selector 7/8 | cached AFE status v2 / stream lease + physical cursor status v2；只读，不做 MMIO |
 | selector 9/10 | cached PA status v1 / root type2 显式双 PA reg03 probe；不写 PA 值 |
 | memory 0 | 只读 kernel control，带 seqlock、generation、真实 played/queued |
 | memory 1 | 可写 producer end-frame，release 发布，kernel 检查窗口 |
@@ -74,6 +78,35 @@ DMA 并发修改。多 IO context 的混音尚未实现。时基取实际 XNU ti
 Stop 返回0只说明这次资源清理成功，历史 Fault 不自动清除，不能据此重新宣布 Ready。
 HAL 的 StopIO 保留失败状态，后续 StopIO 仍执行必要清理；活动流已经 fault 时，新的
 StartIO client 不会仅因 IO user 计数非零而获得虚假的启动成功。
+
+### 对齐启动预填和 PCM 时间线
+
+backend v2 注册要求 `lead_frames` 为 480 的整数倍、范围 **960..3840**，八项
+physical prerequisites 仍须全部确认。Start 先清零内核私有预填（不是用户可写环），
+调用 `start(context, prefill, lead_frames, &physical_anchor)`；backend 必须完整
+copy/cache-sync 后再使能 DMA，返回物理预填 frame0 的 host anchor，不保留输入指针。
+成功后仍验证 anchor 非零／不在未来、激活未超过安全预算；失败也执行真实 stop，
+stop 失败不丢 lease。
+
+| 量 | 定义 |
+|---|---|
+| physical played / queued | 包含启动静音的真实 backend 时间线，queued 只在完整复制成功后增加 |
+| PCM `written` / `out_queued` | 仍从0开始，只计用户 PCM，不把启动静音写入可写 producer |
+| PCM `out_frames` | `max(physical_played - lead_frames, 0)`，不按墙钟生成进度 |
+| PCM `out_anchor_host` | physical anchor + lead_frames 的 nominal Q32 frame ticks，HAL sample0 对齐用户 PCM |
+| stream-status v2 | 缓存预填长度／是否提交、物理 played/queued/anchor、position EAGAIN 累计次数和 stop lease |
+
+position 必须给出包含预填的单调游标，且不越 physical queued；underrun 每 Start
+归零，新增 underrun 立即 fault/stop。瞬时 EAGAIN 不推进 PCM、不提交新 period；
+读取延迟和**真实游标无进度**分别受 `min(10ms, (known pending - 480)/48k)` 预算约束。
+成功返回旧游标不更新进度期限；过期／低水位执行真实 stop，不循环续命。
+预算先按帧上限截断再换算，避免累计游标乘法溢出；HAL host-anchor 与提交时间线
+也检查溢出。空闲 worker 睡眠，Start 在锁内唤醒。
+
+HAL latency 继续发布 configured lead，safety offset 为 lead + 两个 period；这些是
+排队策略元数据，**不是测得的 PA／声学延迟**，也不保证原生 iOS 路由接受未来的
+logical sample0 anchor。时间戳来自物理游标和 nominal timebase，未验证硬件时钟
+漂移。预填、静音尾和软件调度都不能代替 DMA／PA 物理验收。
 
 ## MTK DSP ABI 与物理后端
 
@@ -119,9 +152,9 @@ PA mute／AFE DMA stop；最终 backend 必须在任何 transport 错误后执�
 现有板级提供者 `x9_adsp_mt6993.c` 接通以下显式启动入口；没有 host firmware uploader。
 
 物理驱动通过 `x9_audio_register_backend()` 注册 boot-lifetime callbacks：
-start（真实 sample-0 host anchor）、stop（必须 mute/quiesce）、submit（完整
-period 已复制才返回成功）、position（真实 DMA/DSP played cursor）。回调串行执行；
-EAGAIN 不消费 PCM。只有八项 physical prerequisites 全部确认才能注册，
+start v2（完整私有预填、物理预填 sample-0 host anchor）、stop（必须 mute/quiesce）、submit（完整
+period 已复制才返回成功）、position（包含预填的真实 DMA/DSP played cursor）。回调串行执行；
+submit EAGAIN 不消费 PCM；position EAGAIN 有独立期限。只有八项 physical prerequisites 全部确认才能注册，
 没有 null backend、模拟 DMA 或由用户设 ready 的接口。
 
 优先完成以下一个窄闭环，再启用 HAL 出声：
@@ -178,8 +211,10 @@ wake lease 验证全电源链稳定且 DPSW req/ack bit0 均为0，不把 WFI �
 | `x9_tfa98xx.{c,h}` | PM container total-size/CRC、双 I2C 类型（container bus=0）的地址、明确名字的两侧 profile、descriptor 边界；真实 reg03 revision 比对、AMPE=0 且读回；双侧预检白名单 register/bitfield prefix | 实际完整 revision、immutable container、per-revision 白名单、I2C6/reset/rails 互斥；Probus DSP file/patch/校准/boost 未执行 |
 
 AFE start 必须预填至少960帧后才使能 DMA；PA 始终由外部 board 维持 muted。
-组件**没有调用 `x9_audio_register_backend`**：最终 service/HAL 还须接预填 timeline、
-underflow 前静音和真实 host anchor，不可把启动前空环的 cursor 冒充已排队播放。
+组件**没有调用 `x9_audio_register_backend`**：service/HAL 已接私有预填／逻辑与物理 timeline
+边界，但仍缺真正的 board adapter，将 prepare/start/submit/position/stop 连接至
+已确认的资源／PA；underflow 前物理静音和 host anchor 精度仍须验收，
+不可把启动前空环的 cursor 冒充已排队播放。
 ON 清零不是全部 outstanding AXI DMA 已结束的证据，必须有真实 `quiesce` 后
 才恢复地址／释放 lease；任何失败都保留资源。没有共享 lease 提供者时不会触碰 AFE，
 也不与麦克风 VUL1/ADDA 争寄存器。captured DT 的 OUT4 是2ch/sync0/mclk0、

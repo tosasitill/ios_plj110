@@ -13,6 +13,7 @@
 #include <string.h>
 #include <stddef.h>
 #include "../kernel/src/bsd/dev/x9_audio.h"
+_Static_assert(sizeof(X9AudioControl) == 112, "PCM ABI v1 size");
 
 enum { kPlugIn = kAudioObjectPlugInObject, kDevice = 2, kOutStream = 3, kVolume = 5 };
 #define kDeviceUID "X9SpeakerDevice"
@@ -91,7 +92,8 @@ static int connectService(void) {
     if (r || n != sizeof(s) || s.magic != X9_AUDIO_MAGIC || s.version != X9_AUDIO_VERSION ||
         s.rate != X9_AUDIO_RATE || s.channels != X9_AUDIO_CHANNELS ||
         s.ring_frames != X9_AUDIO_RING || s.period_frames != X9_AUDIO_PERIOD ||
-        !s.ticks_per_frame_q32 || s.lead_frames > X9_AUDIO_RING / 2) { disconnect(); return -1; }
+        !s.ticks_per_frame_q32 || s.lead_frames < X9_AUDIO_PREFILL_MIN ||
+        s.lead_frames > X9_AUDIO_PREFILL_MAX || s.lead_frames % X9_AUDIO_PERIOD) { disconnect(); return -1; }
     gControl = (void *)(uintptr_t)gMaps[0]; gProducer = (void *)(uintptr_t)gMaps[1]; gOut = (void *)(uintptr_t)gMaps[2];
     return 0;
 }
@@ -394,9 +396,12 @@ static OSStatus GetZeroTimeStamp(AudioServerPlugInDriverRef d, AudioObjectID o, 
     OSStatus r = kAudioHardwareNotRunningError;
     if (!snapshot(&s) && (s.state & X9AudioRunning)) {
         uint64_t frame = s.out_frames / kZeroPeriod * kZeroPeriod;
-        *sample = (Float64)frame;
-        *host = s.out_anchor_host + (uint64_t)((long double)frame * s.ticks_per_frame_q32 / 4294967296.0L);
-        *seed = s.generation; r = 0;
+        __uint128_t ticks = ((__uint128_t)frame * s.ticks_per_frame_q32) >> 32;
+        if (ticks <= UINT64_MAX - s.out_anchor_host) {
+            *sample = (Float64)frame;
+            *host = s.out_anchor_host + (uint64_t)ticks;
+            *seed = s.generation; r = 0;
+        }
     }
     pthread_mutex_unlock(&gLock); return r;
 }
@@ -425,7 +430,8 @@ static OSStatus DoIOOperation(AudioServerPlugInDriverRef d, AudioObjectID o, Aud
         uint64_t start = (uint64_t)t, written = __atomic_load_n(&gProducer->written, __ATOMIC_ACQUIRE);
         /* Do not overwrite a queued slot or alias a slot in a future ring turn.
          * Explicit zeroing of gaps prevents stale PCM replay after wrap. */
-        if (start >= written && start >= s.out_queued && start - s.out_queued <= X9_AUDIO_RING &&
+        if (start <= UINT64_MAX - X9_AUDIO_PREFILL_MAX - frames &&
+            start >= written && start >= s.out_queued && start - s.out_queued <= X9_AUDIO_RING &&
             frames <= X9_AUDIO_RING - (start - s.out_queued) && written >= s.out_queued &&
             written - s.out_queued <= X9_AUDIO_RING) {
             for (uint64_t f = written; f < start; f++) {
