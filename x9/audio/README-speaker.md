@@ -1187,19 +1187,20 @@ generic register-prefix bus准入现在与native PA共用完整stepping表；低
 ### 将参数发布到真实 IPI DMA region
 
 `x9_ipi_dma` 已接实际native board／transport调用，不是模拟队列。**当前没有安装
-memory／parameter／reply／readback supplier，所以没有执行map、注册、SET或GET，
+memory／parameter／reply／readback／exchange supplier，所以没有执行map、注册、SET或GET，
 更没有校准／解静音。**
 它仅处理core-A的IPI_A carveout；AUDIO_COMMON PCM、IPI_B和AFE输出均不是此region。
 
 | 顺序／入口 | 实现与边界 |
 |---|---|
-| `x9_ipi_dma_acquire(policy)` | kernel-only policy **v2／72B**，四个真实supplier都mandatory；同Speaker ticket／fresh READY generation，验证当前firmware task count、controller／CALL_FINAL14或AUDPLAYBACK32、EMI／pool排他，再pin独立board IPI child。只map16K-aligned table/TX＋独立16KiB GET页为Normal-WB（prefix最多0x18000B），拒绝WC/Device alias，不清整个1.5MiB pool |
+| `x9_ipi_dma_acquire(policy)` | kernel-only policy **v3／80B**，五个真实supplier都mandatory，旧policy拒绝；同Speaker ticket／fresh READY generation，验证当前firmware task count、controller／CALL_FINAL14或AUDPLAYBACK32、EMI／pool排他，再pin独立board IPI child。只map16K-aligned table/TX＋独立16KiB GET页为Normal-WB（prefix最多0x18000B），拒绝WC/Device alias，不清整个1.5MiB pool |
 | Table | header128B；每task有AP→DSP和DSP→AP两个384B region，read_idx在+128、write_idx在+256。`checksum=128+task_count*2*384`只是字段offset，不是CRC／校准证明；pool_offset按其字段地址向上128B对齐，不能按sizeof误算 |
 | `x9_ipi_dma_register(ticket,generation)` | 一次DIRECT DMA_INIT `0xadd0` 携带LE64 bus/bytes，再NEED_ACK UPDATE `0xadd1` 携带task_scene。DIRECT消费不等于初始化被接受；UPDATE回复必须由实际firmware语义supplier验证 |
 | `x9_ipi_dma_set(...)` | 整包解析／转换为私有wire副本，再由真实参数supplier确认对应profile／silicon／保护状态；只写AP TX ring并补齐128B padding，不把多个消息拆成普通payload |
 | 发布与消费 | 数据先CVAC到PoC，再发布AP write_idx；发送72B inner DMA SET `0x204`（rw_idx是发布前index，data_size是真实字节数，type3），guard贯穿TX／ACK。ACK语义检查后还须IVAC独立read_idx cache line、等实际DSP消费到expected end；不清DSP拥有的index |
 | `x9_ipi_dma_get(..., output, capacity, &data_size)` | 只接受已pin的kernel可写目的页、1..16384B capacity，拒绝输出／长度／singleton别名及任何IPI_A物理别名。真实readback supplier先证明前序read-command／PA保护状态／排他路由，且transport guard每次重新验证；GET自身不携带selector |
 | GET写回与交付 | 专用WB页位于TX ring之后，整页先zero＋CVAC，然后NEED_ACK **PAYLOAD16** GET `0x205`、param2=type3：LE32 memory_size／LE32 data_size=0／LE64 WB bus。不是DMA union、不动TX索引。reply必须是16B payload、echo原memory_size／bus且data_size<=capacity；真实reply supplier还须证明写入已完成／PoC可见／无保留writer，匹配ACK或回显本身不够。IVAC整独立页→私有复制→fresh authority／目的页重新核对，最后才发布output/size；失败二者不变 |
+| `x9_ipi_dma_exchange(...)` | 同一mutex内完成可信读命令SET→实际read_idx消费→GET→实际写完→exact长度／canonical signed24检查→最终output/size发布；请求已是session wire packing，仅显式WarmWord一个命令word（BE24 3B／LE32 4B）或ColdBatch一条one-word命令（12B／16B）。响应必须正数、whole wire words、<=对应4000B／5336B codec上限；不会把raw reply交给batch parser |
 | 失败与release | 单请求、不pipelining。非法index不modulo修复；任何已发布后的EAGAIN／timeout／未知ACK保留首错、映射和parent pin，不能撤回write_idx／重新发送／free。外层先mute、AFE disable/drain并实际halt，release重新验证同generation Offline＋物理halt＋独立memory authority后才unmap/drop |
 
 Plain mailbox API仍不能发DMA；byte codec成功、DIRECT消费、UPDATE／SET ACK和read_idx
@@ -1209,8 +1210,24 @@ GET的共享16B `aud_data_t` byte codec同时供kernel与own-code iOS编译，de
 回复地址，零size可表示但不是校准成功。GET任何发送歧义（包括pre-doorbell EAGAIN）都
 保留pending／WB页／parent pin到真正halt；不会像vendor错误路径无条件free，成功也只有
 实际完成supplier证明无late writer之后才能复用。没有新增raw IOKit selector或HAL Ready。
-四个supplier均不得反向重入IPI DMA；memory／readback callback运行于transport mutex内，
+五个supplier均不得反向重入IPI DMA；memory／readback／exchange callback运行于transport mutex内，
 禁止调用transport/status或任何会反向获取本组件锁的路径。
+
+配对事务在第一条SET前检查全部input／output／size的kernel页绑定、虚拟及物理字节
+别名，包括singleton与整个IPI_A；输入由caller全程pin／immutable，内部保留独立16B
+私有命令。`validate_exchange`必须证明**当前**cold/warm模式、instance、readonly语义、
+完整PA保护状态和所有SmartPA writer的整对排他；Prepared／SetPending／Consumed／
+GetPending／Complete只是host journal，不替代firmware完成证据。即使SET已经消费，
+之后GET前置检查失败也保留pair／命令／staging token／physical pin，普通SET／GET不能
+绕开；只有真实halt＋unmap/drop才清理。安全cleanup不调用online-only exchange准入。
+独立SET有pending时同样不再清零legacy staging token。
+
+`x9_tfa_words_scan/convert`提供kernel与own-code iOS共享的独立BE24／LE32 word codec，
+完整扫描、canonical sign extension和alias检查后才写输出；不是PCM或multimessage。
+本接口不自动包装、不改instance／`spkr_select`、不猜cold/warm、不注册新的raw IOKit
+selector或Ready。OPPO的私有copy后`buffer[0] |= spkr_select`可能发生在packing转换后；
+不能盲改batch header或命令位置。当前仅支持canonical cold framing，非canonical双实例
+header仍未取得真实firmware接线证明；五个supplier／combined backend仍未注册。
 
 当前shim按BOOT-AUDIO-REMOVE继续移除旧音频walker，chosen音频placeholder为零。
 `xnu_enter`只按XNU ABI传Apple boot_args（x1..x3清零），loader的deviceTreeP指向Apple

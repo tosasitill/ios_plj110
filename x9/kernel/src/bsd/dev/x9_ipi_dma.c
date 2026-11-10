@@ -24,6 +24,7 @@ _Static_assert(X9_DSP_DMA_INFO_BYTES==56,"MTK region descriptor");
 _Static_assert(X9_IPI_DMA_REGION_BYTES==3*128,"isolated read/write cache lines");
 _Static_assert(X9_IPI_DMA_RING_BYTES>X9_TFA_MULTIMSG_LE32_MAX+128+16,"single batch fits");
 _Static_assert(X9_IPI_DMA_READBACK_BYTES==0x4000,"independent 16KiB writeback page");
+_Static_assert(sizeof(struct x9_ipi_dma_policy)==80,"mandatory exchange authority v3");
 static struct {
     struct x9_ipi_dma_policy policy;
     uint64_t bus,child;
@@ -31,7 +32,10 @@ static struct {
     uint32_t pool_bytes,map_bytes,checksum,pool_offset,ring_offset,entry,wb_offset;
     uint32_t write,read,last_generation,error;
     uint32_t get_capacity;
+    uint32_t exchange_bytes,exchange_form,exchange_response,exchange_phase;
     bool attempted,mapped,initialized,register_attempted,registered,pending,pending_get;
+    bool exchange_active,exchange_published;
+    uint8_t exchange_request[16];
     uint8_t staging[X9_TFA_MULTIMSG_LE32_MAX];
     uint8_t readback[X9_IPI_DMA_READBACK_BYTES];
 } dma;
@@ -81,7 +85,8 @@ static int physical(uint32_t stage)
     if(!e)e=cache_binding();return e;
 }
 static uint32_t stage(void)
-{return dma.pending?X9IPIDMAPublished:dma.initialized?X9IPIDMABound:X9IPIDMACold;}
+{return dma.pending || dma.exchange_published?X9IPIDMAPublished:
+    dma.initialized?X9IPIDMABound:X9IPIDMACold;}
 static int online(void)
 {
     X9AudioDSPStatus s={0};int e=x9_adsp_status(0,&s);
@@ -100,10 +105,26 @@ static int table(void)
        index_read(dma.entry+256)!=dma.write)return EPROTO;
     return 0;
 }
+/* Host phases do not establish DSP acceptance. Actual command ownership and
+ * result identity must still be freshly proven by the independent supplier. */
+static int exchange_authority(void)
+{
+    if(!dma.exchange_active)return 0;
+    return dma.policy.validate_exchange(dma.policy.context,dma.exchange_request,
+        dma.exchange_bytes,dma.policy.wire_packing,dma.exchange_form,
+        dma.exchange_response,dma.exchange_phase);
+}
+static void exchange_clear(void)
+{
+    dma.exchange_active=dma.exchange_published=false;
+    dma.exchange_bytes=dma.exchange_form=dma.exchange_response=dma.exchange_phase=0;
+    memset(dma.exchange_request,0,sizeof(dma.exchange_request));
+}
 static int admission(void)
 {
     if(dma.error)return (int)dma.error;
     int e=physical(stage());if(!e)e=online();if(!e)e=table();
+    if(!e)e=exchange_authority();
     return e?fault(e):0;
 }
 static int sync_range(uint32_t offset,uint32_t bytes,bool device)
@@ -139,6 +160,9 @@ static int guarded(void *context,const struct x9_dsp_message *m)
            m->type!=X9DSPDMA || m->ack!=X9DSPNeedAck || m->param2!=X9_IPI_TFA_TYPE ||
            get64(m->payload)!=(uint64_t)(uintptr_t)dma.staging ||
            get32(m->payload+32)!=dma.read || get32(m->payload+36)!=m->param1)e=EPERM;
+        if(!e && dma.exchange_active &&
+           (!dma.exchange_published || dma.exchange_phase!=X9IPIReadSetPending ||
+            m->param1!=dma.exchange_bytes))e=EPERM;
     } else if(!e && m->id==X9_IPI_TFA_GET) {
         if(!dma.registered || !dma.pending || !dma.pending_get ||
            m->scene!=dma.policy.task_scene || m->type!=X9DSPPayload ||
@@ -148,7 +172,11 @@ static int guarded(void *context,const struct x9_dsp_message *m)
            get32(m->payload)!=dma.get_capacity || get32(m->payload+4) ||
            get64(m->payload+8)!=dma.bus+dma.wb_offset)e=EPERM;
         if(!e)e=dma.policy.validate_readback(dma.policy.context,dma.get_capacity);
+        if(!e && dma.exchange_active &&
+           (!dma.exchange_published || dma.exchange_phase!=X9IPIReadGetPending ||
+            dma.get_capacity!=dma.exchange_response))e=EPERM;
     } else if(!e)e=EPERM;
+    if(!e)e=exchange_authority();
     return e?fault(e):0;
 }
 static int send(struct x9_dsp_message *m,struct x9_dsp_message *received)
@@ -178,7 +206,7 @@ int x9_ipi_dma_acquire(const struct x9_ipi_dma_policy *policy)
        p.controller_scene>=p.task_count || (p.task_scene!=14 && p.task_scene!=32) ||
        (p.wire_packing!=X9TFABE24 && p.wire_packing!=X9TFALE32) ||
        !p.validate_memory || !p.validate_parameters || !p.validate_reply ||
-       !p.validate_readback)return EINVAL;
+       !p.validate_readback || !p.validate_exchange)return EINVAL;
     lck_mtx_lock(&ipi_dma_lock);
     if(dma.attempted || p.generation<=dma.last_generation) {
         lck_mtx_unlock(&ipi_dma_lock);return EBUSY;
@@ -257,25 +285,12 @@ static int observed_read(uint32_t *value)
     }
     return e?fault(e):0;
 }
-int x9_ipi_dma_set(uint64_t ticket,uint32_t generation,const void *data,
-                    uint32_t bytes,uint32_t source_packing)
+/* Caller holds the one IPI mutex. Staging is already validated wire data.
+ * Shared by trusted whole-batch SET and the narrow READ exchange only. */
+static int publish_set(uint32_t n)
 {
-    if(!data || !bytes || (uintptr_t)data>UINTPTR_MAX-bytes ||
-       (source_packing!=X9TFABE24 && source_packing!=X9TFALE32))return EINVAL;
-    lck_mtx_lock(&ipi_dma_lock);int e=matches(ticket,generation);
-    if(e){lck_mtx_unlock(&ipi_dma_lock);return e;}
-    uintptr_t a=(uintptr_t)data;
-    if(!e && dma.mapped && a<dma.map+dma.map_bytes && dma.map<a+bytes)e=EINVAL;
-    if(!e && (!dma.registered || dma.pending))e=EBUSY;
-    if(!e)e=admission();
-    uint32_t n=0;
-    if(!e)e=x9_tfa_multimsg_convert(data,bytes,source_packing,dma.policy.wire_packing,
-        dma.staging,sizeof(dma.staging),&n);
-    if(!e) {
-        e=dma.policy.validate_parameters(dma.policy.context,dma.staging,n,dma.policy.wire_packing);
-        if(e)e=fault(e);
-    }
-    uint32_t r=0;if(!e)e=observed_read(&r);
+    if(!n || n>sizeof(dma.staging))return EINVAL;
+    int e=0;uint32_t r=0;if(!e)e=observed_read(&r);
     if(!e && r!=dma.write)e=fault(EBUSY); /* no inherited/parallel region consumer */
     if(!e) {
         uint32_t old=dma.write,aligned=(n+127u)&~127u;
@@ -295,6 +310,9 @@ int x9_ipi_dma_set(uint64_t ticket,uint32_t generation,const void *data,
             /* Retain ambiguity before the first index store. Never restore
              * old after a failed clean or a pre-doorbell EAGAIN. */
             dma.read=old;dma.write=end;dma.pending=true;
+            if(dma.exchange_active) {
+                dma.exchange_published=true;dma.exchange_phase=X9IPIReadSetPending;
+            }
             __asm__ volatile("dsb sy":::"memory");
             *(volatile uint32_t *)(dma.map+dma.entry+256)=end;
             e=sync_range(dma.entry+256,128,true);
@@ -314,19 +332,70 @@ int x9_ipi_dma_set(uint64_t ticket,uint32_t generation,const void *data,
         for(unsigned i=0;!e;i++) {
             e=observed_read(&r);if(e)break;
             if(i>=10000 || mach_absolute_time()>=until){e=fault(ETIMEDOUT);break;}
-            if(r==end){dma.read=end;dma.pending=false;break;}
+            if(r==end) {
+                dma.read=end;dma.pending=false;
+                if(dma.exchange_active) {
+                    dma.exchange_phase=X9IPIReadConsumed;e=admission();
+                }
+                break;
+            }
             delay(25);
         }
     }
-    if(e && dma.pending)e=fault(e);
-    memset(dma.staging,0,sizeof(dma.staging));
+    if(e && (dma.pending || dma.exchange_published))e=fault(e);
+    return e;
+}
+int x9_ipi_dma_set(uint64_t ticket,uint32_t generation,const void *data,
+                    uint32_t bytes,uint32_t source_packing)
+{
+    if(!data || !bytes || (uintptr_t)data>UINTPTR_MAX-bytes ||
+       (source_packing!=X9TFABE24 && source_packing!=X9TFALE32))return EINVAL;
+    lck_mtx_lock(&ipi_dma_lock);int e=matches(ticket,generation);
+    if(e){lck_mtx_unlock(&ipi_dma_lock);return e;}
+    uintptr_t a=(uintptr_t)data;
+    if(!e && dma.mapped && a<dma.map+dma.map_bytes && dma.map<a+bytes)e=EINVAL;
+    if(!e && (!dma.registered || dma.pending || dma.exchange_active))e=EBUSY;
+    if(!e)e=admission();
+    uint32_t n=0;
+    if(!e)e=x9_tfa_multimsg_convert(data,bytes,source_packing,dma.policy.wire_packing,
+        dma.staging,sizeof(dma.staging),&n);
+    if(!e) {
+        e=dma.policy.validate_parameters(dma.policy.context,dma.staging,n,dma.policy.wire_packing);
+        if(e)e=fault(e);
+    }
+    if(!e)e=publish_set(n);
+    /* A pending legacy token/command stays immutable until physical halt;
+     * clearing staging on an uncertain SET would destroy that lifetime. */
+    if(!dma.pending && !dma.exchange_active)memset(dma.staging,0,sizeof(dma.staging));
     lck_mtx_unlock(&ipi_dma_lock);return e;
 }
 static bool overlap(uintptr_t a,uint32_t n,uintptr_t b,uint32_t m)
 {return a<b+m && b<a+n;}
-static int output_binding(uintptr_t a,uint32_t bytes)
+/* Exact physical byte ranges, not merely distinct virtual addresses. Caller
+ * pins each range; small bounded spans can share a page if bytes are disjoint. */
+static int physical_disjoint(uintptr_t a,uint32_t an,uintptr_t b,uint32_t bn)
 {
-    /* Caller retains writable kernel pages for the whole call. Reject user
+    uintptr_t ae=a+an,be=b+bn;
+    for(uintptr_t x=a;x<ae;) {
+        ppnum_t xp=pmap_find_phys(kernel_pmap,x);if(!xp)return EFAULT;
+        uint32_t xn=(uint32_t)(PAGE_SIZE-(x&(PAGE_SIZE-1)));
+        if(xn>ae-x)xn=(uint32_t)(ae-x);
+        uint64_t xa=((uint64_t)xp<<PAGE_SHIFT)+(x&(PAGE_SIZE-1));
+        for(uintptr_t y=b;y<be;) {
+            ppnum_t yp=pmap_find_phys(kernel_pmap,y);if(!yp)return EFAULT;
+            uint32_t yn=(uint32_t)(PAGE_SIZE-(y&(PAGE_SIZE-1)));
+            if(yn>be-y)yn=(uint32_t)(be-y);
+            uint64_t ya=((uint64_t)yp<<PAGE_SHIFT)+(y&(PAGE_SIZE-1));
+            if(xa<ya+yn && ya<xa+xn)return EINVAL;
+            y+=yn;
+        }
+        x+=xn;
+    }
+    return 0;
+}
+static int caller_binding(uintptr_t a,uint32_t bytes)
+{
+    /* Caller retains pinned kernel pages for the whole call. Reject user
      * addresses/unmapped pages and EVERY physical IPI_A alias, not just the
      * native mapped VA (a physmap alias must not overwrite WB/table/TX). */
     uintptr_t end=a+bytes;
@@ -337,10 +406,9 @@ static int output_binding(uintptr_t a,uint32_t bytes)
         if(pa>=dma.bus && pa<dma.bus+dma.pool_bytes)return EINVAL;
         if(at>UINTPTR_MAX-PAGE_SIZE)break;
     }
-    return 0;
+    return physical_disjoint(a,bytes,(uintptr_t)&dma,sizeof(dma));
 }
-int x9_ipi_dma_get(uint64_t ticket,uint32_t generation,void *out,
-                    uint32_t capacity,uint32_t *data_size)
+static int output_arguments(void *out,uint32_t capacity,uint32_t *data_size)
 {
     uintptr_t a=(uintptr_t)out,b=(uintptr_t)data_size;
     if(!out || !data_size || !capacity || capacity>X9_IPI_DMA_READBACK_BYTES ||
@@ -348,14 +416,28 @@ int x9_ipi_dma_get(uint64_t ticket,uint32_t generation,void *out,
        overlap(a,capacity,b,sizeof(*data_size)) ||
        overlap(a,capacity,(uintptr_t)&dma,sizeof(dma)) ||
        overlap(b,sizeof(*data_size),(uintptr_t)&dma,sizeof(dma)))return EINVAL;
-    lck_mtx_lock(&ipi_dma_lock);int e=matches(ticket,generation);
-    if(e){lck_mtx_unlock(&ipi_dma_lock);return e;}
+    return 0;
+}
+static int output_bindings(void *out,uint32_t capacity,uint32_t *data_size)
+{
+    uintptr_t a=(uintptr_t)out,b=(uintptr_t)data_size;int e=0;
     if(dma.mapped && (overlap(a,capacity,dma.map,dma.map_bytes) ||
        overlap(b,sizeof(*data_size),dma.map,dma.map_bytes)))e=EINVAL;
-    if(!e && (!dma.registered || dma.pending))e=EBUSY;
+    if(!e)e=caller_binding(a,capacity);
+    if(!e)e=caller_binding(b,sizeof(*data_size));
+    if(!e)e=physical_disjoint(a,capacity,b,sizeof(*data_size));
+    return e;
+}
+/* ONE lock across the pair; never call a public entrypoint recursively. */
+static int get_locked(void *out,uint32_t capacity,uint32_t *data_size)
+{
+    int e=0;
+    if(!dma.registered || dma.pending)e=EBUSY;
+    if(!e && dma.exchange_active &&
+       (!dma.exchange_published || dma.exchange_phase!=X9IPIReadConsumed ||
+        capacity!=dma.exchange_response))e=EPERM;
     if(!e)e=admission();
-    if(!e)e=output_binding(a,capacity);
-    if(!e)e=output_binding(b,sizeof(*data_size));
+    if(!e)e=output_bindings(out,capacity,data_size);
     if(!e) {
         e=dma.policy.validate_readback(dma.policy.context,capacity);
         if(e)e=fault(e);
@@ -382,30 +464,102 @@ int x9_ipi_dma_get(uint64_t ticket,uint32_t generation,void *out,
         /* Mark before attempting TX: a pre-doorbell error is NOT permission
          * to reuse the address. Unknown writers retain it until real halt. */
         dma.get_capacity=capacity;dma.pending_get=true;dma.pending=true;
+        if(dma.exchange_active)dma.exchange_phase=X9IPIReadGetPending;
         e=send(&m,&reply);
     }
     uint32_t n=0;
     if(!e)e=x9_dsp_readback_decode(reply.payload,reply.param1,
         dma.bus+dma.wb_offset,capacity,&n);
+    if(!e && dma.exchange_active && n!=dma.exchange_response)e=EPROTO;
     /* send already proved exact reply fields AND actual firmware completion.
      * DSP no longer owns WB; invalidate its isolated cache lines, even for
      * zero-size reply. Never dereference an address from the reply. */
     if(!e)e=sync_range(dma.wb_offset,X9_IPI_DMA_READBACK_BYTES,false);
     if(!e)e=admission();
     if(!e && n)memcpy(dma.readback,(const void *)(dma.map+dma.wb_offset),n);
+    if(!e && dma.exchange_active) {
+        e=x9_tfa_words_scan(dma.readback,n,dma.policy.wire_packing);
+        if(!e)dma.exchange_phase=X9IPIReadComplete;
+    }
     if(!e)e=admission();
     if(!e)e=observed_read(&r);
     if(!e && r!=dma.write)e=fault(EPROTO);
-    if(!e)e=output_binding(a,capacity);
-    if(!e)e=output_binding(b,sizeof(*data_size));
+    if(!e)e=output_bindings(out,capacity,data_size);
     if(!e)e=admission();
     if(!e) {
         if(n)memcpy(out,dma.readback,n);
         *data_size=n;
         dma.pending=dma.pending_get=false;dma.get_capacity=0;
     }
-    if(e && dma.pending)e=fault(e);
+    if(e && (dma.pending || dma.exchange_published))e=fault(e);
     memset(dma.readback,0,sizeof(dma.readback));
+    return e;
+}
+int x9_ipi_dma_get(uint64_t ticket,uint32_t generation,void *out,
+                    uint32_t capacity,uint32_t *data_size)
+{
+    int e=output_arguments(out,capacity,data_size);if(e)return e;
+    lck_mtx_lock(&ipi_dma_lock);e=matches(ticket,generation);
+    if(!e && dma.exchange_active)e=EBUSY;
+    if(!e)e=get_locked(out,capacity,data_size);
+    lck_mtx_unlock(&ipi_dma_lock);return e;
+}
+int x9_ipi_dma_exchange(uint64_t ticket,uint32_t generation,const void *request,
+    uint32_t request_bytes,uint32_t form,void *out,uint32_t response_bytes,
+    uint32_t *data_size)
+{
+    uintptr_t c=(uintptr_t)request,a=(uintptr_t)out,b=(uintptr_t)data_size;
+    if(!request || !request_bytes || request_bytes>sizeof(dma.exchange_request) ||
+       c>UINTPTR_MAX-request_bytes ||
+       (form!=X9IPIReadWarmWord && form!=X9IPIReadColdBatch))return EINVAL;
+    int e=output_arguments(out,response_bytes,data_size);if(e)return e;
+    if(overlap(c,request_bytes,a,response_bytes) ||
+       overlap(c,request_bytes,b,sizeof(*data_size)) ||
+       overlap(c,request_bytes,(uintptr_t)&dma,sizeof(dma)))return EINVAL;
+    lck_mtx_lock(&ipi_dma_lock);e=matches(ticket,generation);bool started=false;
+    if(!e && (!dma.registered || dma.pending || dma.exchange_active))e=EBUSY;
+    uint32_t w=dma.policy.wire_packing==X9TFABE24?3u:4u;
+    uint32_t bound=dma.policy.wire_packing==X9TFABE24?
+        X9_TFA_MULTIMSG_BE24_MAX:X9_TFA_MULTIMSG_LE32_MAX;
+    if(!e && (request_bytes!=(form==X9IPIReadWarmWord?w:4u*w) ||
+       response_bytes%w || response_bytes>bound))e=EINVAL;
+    if(!e)e=admission();
+    /* Prove ALL destinations and input aliases BEFORE any SET publication,
+     * not only on GET after changing the firmware's command state. */
+    if(!e)e=output_bindings(out,response_bytes,data_size);
+    if(!e)e=caller_binding(c,request_bytes);
+    if(!e)e=physical_disjoint(c,request_bytes,a,response_bytes);
+    if(!e)e=physical_disjoint(c,request_bytes,b,sizeof(*data_size));
+    if(!e) {
+        memcpy(dma.exchange_request,request,request_bytes);
+        dma.exchange_bytes=request_bytes;dma.exchange_form=form;
+        dma.exchange_response=response_bytes;dma.exchange_phase=X9IPIReadPrepared;
+        dma.exchange_active=true;started=true;
+        if(form==X9IPIReadWarmWord)
+            e=x9_tfa_words_scan(dma.exchange_request,request_bytes,dma.policy.wire_packing);
+        else {
+            struct x9_tfa_multimsg_info info;
+            e=x9_tfa_multimsg_scan(dma.exchange_request,request_bytes,dma.policy.wire_packing,&info);
+            if(!e && (info.messages!=1 || info.payload_words!=1))e=EBADMSG;
+        }
+        /* No inferred ext_dsp mode, spkr_select OR, wrapping or conversion.
+         * Supplier must approve the exact private wire bytes and lifetime. */
+        if(!e)e=admission();
+        if(!e) {
+            memcpy(dma.staging,dma.exchange_request,request_bytes);
+            e=publish_set(request_bytes);
+        }
+        if(!e)e=get_locked(out,response_bytes,data_size);
+    }
+    if(started) {
+        if(e && dma.exchange_published)e=fault(e);
+        /* Once published, even GET preflight failure retains the immutable
+         * pair despite SET already consumed. Only actual halt can retire it.
+         * Rejected calls must NOT clear another pending owner's staging. */
+        if(!e || !dma.exchange_published) {
+            exchange_clear();memset(dma.staging,0,sizeof(dma.staging));
+        }
+    }
     lck_mtx_unlock(&ipi_dma_lock);return e;
 }
 int x9_ipi_dma_release(uint64_t ticket,uint32_t generation)
@@ -422,6 +576,7 @@ int x9_ipi_dma_release(uint64_t ticket,uint32_t generation)
     if(!e) {
         dma.child=0;dma.attempted=dma.initialized=dma.register_attempted=dma.registered=dma.pending=false;
         dma.pending_get=false;dma.get_capacity=0;
+        exchange_clear();
         dma.write=dma.read=dma.error=0;memset(&dma.policy,0,sizeof(dma.policy));
         memset(dma.staging,0,sizeof(dma.staging));
         memset(dma.readback,0,sizeof(dma.readback));

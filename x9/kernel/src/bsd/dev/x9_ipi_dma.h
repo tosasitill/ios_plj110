@@ -15,6 +15,9 @@
 #define X9_IPI_TFA_TYPE 3u
 #if defined(KERNEL)
 enum { X9IPIDMACold, X9IPIDMABound, X9IPIDMAPublished, X9IPIDMACleanup };
+enum { X9IPIReadWarmWord=1u, X9IPIReadColdBatch=2u };
+enum { X9IPIReadPrepared=1u, X9IPIReadSetPending, X9IPIReadConsumed,
+       X9IPIReadGetPending, X9IPIReadComplete };
 struct x9_ipi_dma_policy {
     uint32_t version,generation,task_count,controller_scene,task_scene,wire_packing;
     uint64_t ticket;
@@ -56,8 +59,22 @@ struct x9_ipi_dma_policy {
      * never call transport/status or acquire this component's lock. Not a
      * userspace/raw-read permission. Remains valid through GET completion. */
     int (*validate_readback)(void *,uint32_t capacity);
+    /* Actual trusted READ request / current cold-vs-warm mode / instance,
+     * full PA profile/protection and exclusive command->GET lifetime,
+     * including any fault. Private already-WIRE-PACKED bytes, no implicit
+     * spkr_select OR/rewrite or inferred mode. One warm command word or one
+     * canonical cold batch containing one command word. Phase is OUR
+     * journal, not evidence that firmware accepted/consumed the request.
+     * Prove real pending command at Consumed/GetPending and result identity
+     * at Complete; validate_reply separately proves actual ACK/write finish.
+     * Exclude ALL other SmartPA command writers even if outside this IPI
+     * owner. Called under transport mutex too; bounded, no mutation/reentry
+     * into transport/status/IPI/AFE/PA/clock, I2C/SMC, unmute or reset.
+     * No default implementation, filename/CRC or host-state substitute. */
+    int (*validate_exchange)(void *,const void *request,uint32_t request_bytes,
+        uint32_t wire_packing,uint32_t form,uint32_t response_bytes,uint32_t phase);
 };
-#define X9_IPI_DMA_POLICY_VERSION 2u
+#define X9_IPI_DMA_POLICY_VERSION 3u
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -83,6 +100,18 @@ int x9_ipi_dma_set(uint64_t ticket,uint32_t generation,const void *,
  * Zero-size success is not calibration/Ready/unmute evidence. */
 int x9_ipi_dma_get(uint64_t ticket,uint32_t generation,void *,uint32_t capacity,
                     uint32_t *data_size);
+/* Trusted immutable/pinned request already in this session's WIRE packing.
+ * Explicit WarmWord or ColdBatch only; no auto-wrap, route/instance edits.
+ * Hold ONE mutex over request SET/actual consumption and GET/actual write
+ * completion, including final exact-size/canonical reply checks and copy.
+ * response_bytes is exact, positive, whole wire words and <=codec limit.
+ * No public raw-word SET, no IOKit selector, calibration/Ready or unmute.
+ * Any failure after first SET index publication retains the pair/command
+ * and physical pins until actual halt/release, even if SET was consumed.
+ * Output/size unchanged on failure. All input/output/size aliases rejected. */
+int x9_ipi_dma_exchange(uint64_t ticket,uint32_t generation,const void *request,
+    uint32_t request_bytes,uint32_t form,void *output,uint32_t response_bytes,
+    uint32_t *data_size);
 /* Coordinator first mutes/drains AFE and actually halts the core. Release
  * proves same-generation physical halt again; no online-only admission or
  * historical-error gate on safe unmap/drop. No mailbox free/replay/reset.

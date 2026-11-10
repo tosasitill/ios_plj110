@@ -39,6 +39,16 @@ int x9_tfa_multimsg_get(const void *,uint32_t bytes,uint32_t packing,
 int x9_tfa_multimsg_convert(const void *,uint32_t bytes,uint32_t packing,
                            uint32_t target,void *,uint32_t capacity,
                            uint32_t *written_bytes);
+/* Independent NXP signed24 words, NOT multimessage framing or PCM.
+ * Used for warm read-command words and raw GET replies; explicit packing,
+ * complete word counts, same bounded capacities/canonical sign extension.
+ * No automatic header, instance/selector rewrite, command allowlist or I/O.
+ * Convert rejects all input/output/length aliases, validates the whole input
+ * before publication and leaves destination/length unchanged on failure. */
+int x9_tfa_words_scan(const void *,uint32_t bytes,uint32_t packing);
+int x9_tfa_words_convert(const void *,uint32_t bytes,uint32_t packing,
+                         uint32_t target,void *,uint32_t capacity,
+                         uint32_t *written_bytes);
 #ifdef __cplusplus
 }
 #endif

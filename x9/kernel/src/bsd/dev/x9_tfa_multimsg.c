@@ -24,6 +24,44 @@ static int overlap(const void *a,uint32_t an,const void *b,uint32_t bn)
     uintptr_t x=(uintptr_t)a,y=(uintptr_t)b;
     return x<=y?y-x<an:x-y<bn;
 }
+int x9_tfa_words_scan(const void *data,uint32_t bytes,uint32_t packing)
+{
+    uint32_t w=word_bytes(packing);
+    if(!w || !span(data,bytes) || bytes%w)return EINVAL;
+    if(bytes>limit(packing))return E2BIG;
+    const uint8_t *p=data;
+    if(w==4)for(uint32_t i=0;i<bytes;i+=w)
+        if(p[i+3]!=(p[i+2]&0x80u?0xffu:0u))return EBADMSG;
+    return 0;
+}
+/* Both framing and independent-word callers validate BEFORE this copy. */
+static void copy_words(const void *data,uint32_t bytes,uint32_t packing,
+                        uint32_t target,void *dest)
+{
+    const uint8_t *p=data;uint8_t *q=dest;
+    uint32_t srcw=word_bytes(packing),dstw=word_bytes(target);
+    for(uint32_t i=0;i<bytes/srcw;i++) {
+        uint32_t v=word(p+i*srcw,packing);uint8_t *d=q+i*dstw;
+        if(dstw==3){d[0]=(uint8_t)(v>>16);d[1]=(uint8_t)(v>>8);d[2]=(uint8_t)v;}
+        else {d[0]=(uint8_t)v;d[1]=(uint8_t)(v>>8);d[2]=(uint8_t)(v>>16);
+              d[3]=(v&0x800000u)?0xffu:0u;}
+    }
+}
+int x9_tfa_words_convert(const void *data,uint32_t bytes,uint32_t packing,
+                         uint32_t target,void *dest,uint32_t capacity,
+                         uint32_t *written_bytes)
+{
+    if(!word_bytes(target) || !span(dest,capacity) ||
+       !span(written_bytes,sizeof(*written_bytes)) || !span(data,bytes) ||
+       overlap(data,bytes,dest,capacity) ||
+       overlap(data,bytes,written_bytes,sizeof(*written_bytes)) ||
+       overlap(dest,capacity,written_bytes,sizeof(*written_bytes)))return EINVAL;
+    int e=x9_tfa_words_scan(data,bytes,packing);if(e)return e;
+    uint32_t n=(bytes/word_bytes(packing))*word_bytes(target);
+    if(n>limit(target))return E2BIG;
+    if(n>capacity)return ENOSPC;
+    copy_words(data,bytes,packing,target,dest);*written_bytes=n;return 0;
+}
 /* Metadata is local to the caller. Only publish after a complete pass. */
 static int scan(const void *data,uint32_t bytes,uint32_t packing,
                 struct x9_tfa_multimsg_info *info)
@@ -95,16 +133,9 @@ int x9_tfa_multimsg_convert(const void *data,uint32_t bytes,uint32_t packing,
     uint32_t n=target==X9TFABE24?s.be24_bytes:s.le32_bytes;
     if(n>limit(target))return E2BIG;
     if(n>capacity)return ENOSPC;
-    const uint8_t *p=data;uint8_t *q=dest;
-    uint32_t srcw=word_bytes(packing),dstw=word_bytes(target);
     /* Bounds and canonical extension were checked before the first write.
      * Counts/header are positive; their sign extension is necessarily zero.
      * All arithmetic is unsigned, including bit 23; no signed-shift UB. */
-    for(uint32_t i=0;i<bytes/srcw;i++) {
-        uint32_t v=word(p+i*srcw,packing);uint8_t *d=q+i*dstw;
-        if(dstw==3){d[0]=(uint8_t)(v>>16);d[1]=(uint8_t)(v>>8);d[2]=(uint8_t)v;}
-        else {d[0]=(uint8_t)v;d[1]=(uint8_t)(v>>8);d[2]=(uint8_t)(v>>16);
-              d[3]=(v&0x800000u)?0xffu:0u;}
-    }
+    copy_words(data,bytes,packing,target,dest);
     *written_bytes=n;return 0;
 }
