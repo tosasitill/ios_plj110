@@ -8,6 +8,7 @@
 #define X9_DSP_PAYLOAD_MAX 96u
 #define X9_DSP_MESSAGE_MAX 112u
 #define X9_DSP_DMA_INFO_BYTES 56u /* reserve16, hal16, rw_idx4, size4, wb16 */
+#define X9_DSP_READBACK_INFO_BYTES 16u /* LE32 capacity, LE32 size, LE64 bus */
 enum { X9DSPOnly, X9DSPPayload, X9DSPDMA };
 enum { X9DSPBypass, X9DSPNeedAck, X9DSPAckBack, X9DSPDirect };
 enum {
@@ -37,6 +38,15 @@ int x9_dsp_decode(const void *, uint32_t length, struct x9_dsp_message *);
  * that mailbox session before another identical request can be issued. */
 int x9_dsp_ack_matches(const struct x9_dsp_message *request,
                        const struct x9_dsp_message *reply);
+/* GET_BUF aud_data_t byte codec, shared by kernel and own-code iOS callers.
+ * Encode starts data_size at zero. Decode verifies the exact ORIGINAL bus
+ * and capacity before accepting bounded data_size; never dereference the
+ * reply address. Zero size is representable, not a calibration result.
+ * Exact 16B only. Failure leaves output unchanged; decode output must not
+ * alias input. This codec grants no ownership/cache/write-completion right. */
+int x9_dsp_readback_encode(uint64_t bus,uint32_t capacity,void *,uint32_t bytes);
+int x9_dsp_readback_decode(const void *,uint32_t bytes,uint64_t bus,
+                           uint32_t capacity,uint32_t *data_size);
 #ifdef __cplusplus
 }
 #endif

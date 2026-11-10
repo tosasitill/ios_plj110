@@ -468,7 +468,7 @@ lease空间不是CSR，ticket细节另读resource-status；lease-error0时guard�
 |---|---|---|
 | `x9_dsp_pcm.{c,h}` | 96B PCM descriptor与32B shared-DRAM record字节codec；真实transport上的INIT／share／OPEN／HWPARAM／AFE PCM配置／PREPARE／DLCOPY／START／STOP／HWFREE／CLOSE；generation-bound消费消息、双快照DTOA与输入环容量检查 | unified AP lease下实际共享DRAM/MPU/cache、task/core绑定与生产调用者；DSP消费不能代替AFE物理played |
 | `x9_dsp_playback.{c,h}` | singleton生产PCM生命周期：shared子租约、真实绑定／prepare／预填／IRQ bind／START、同session锁、定向IRQ quiesce及真实producer halt、IRQ引用退休后才drop shared子租约 | 仍需combined backend调用；不注册Ready、不配置双PA供电／profile、不提供output committed或AFE enable |
-| `x9_ipi_dma.{c,h}` | 从当前handoff独立IPI_A carveout取得native board child；Normal-WB header/table/TX内层映射，动态TASK_SCENE_SIZE／384B region、128B读写索引、DMA_INIT→UPDATE ACK、可信参数副本→PoC→写索引→guarded SET ACK→实际DSP read_idx；物理halt后才unmap/drop | 当前firmware/controller/runtime scene／EMI与pool长期排他、真实参数信任和reply语义supplier无默认实现；不加载参数、不做GET/校准、不注册Ready |
+| `x9_ipi_dma.{c,h}` | 从当前handoff独立IPI_A carveout取得native board child；Normal-WB table/TX及独立GET写回页，动态TASK_SCENE_SIZE／384B region、128B读写索引、DMA_INIT→UPDATE ACK、可信参数→PoC→写索引→guarded SET ACK→实际DSP read_idx；GET payload16／exact地址与容量核对→真实完成supplier→IVAC→私有复制；物理halt后才unmap/drop | 当前firmware/controller/runtime scene／EMI与pool长期排他、可信参数／读命令、reply完成语义supplier无默认实现；没有执行参数加载／GET或校准，不注册Ready |
 | `x9_speaker_afe.{c,h}` | explicit DL24=10或DL_24CH=14→OUT4逐字段journal；32-bit I2S slots/S16、48k；AP transition ticket、platform v6真实lease/config guard、combined producer halt；AP copy与DSP外部生产者start分离，DSP模式不碰输出DMA内存，watcher更新独立output committed边界／真实CUR；完全退休后新generation可rebind不同VA | AUDIO/VLP APLL2、pad/物理共享资源lease、DMA bus/EMI/cache、双PA mute、权威selected memif DMA quiesce，以及当前firmware实际output publication supplier |
 | `x9_tfa_plj110.{c,h}` | root 显式只读 reg03；PMIF-P SID3 reset/SID5 左供电快照，已开启 I²C6/共享 DMA clock 与 pads 校验、2 CSR bank/1 DMA idle、FIFO WRRD 1+2 BE、逐字段总线恢复 | 不具备双侧供电/reset/write lease；右 rail、真实 binding/profile/校准仍待确认 |
 | `x9_i2c6.h/x9_i2c6_native.inc` | 与只读probe共用controller mutex；真实PA epoch下游child、reg8/value16 BE FIFO read/write、双CSR bank/DMA资格、last-prior journal、terminal-only no-replay清理与halt/drain前后屏障；iOS缓存状态 | 必须实际pin住I2C6/APDMA clocks、mux/PLL、GPIO114/115与所有master互斥，现无真实supplier或combined调用者；不授profile/校准/unmute |
@@ -1162,24 +1162,35 @@ generic register-prefix bus准入现在与native PA共用完整stepping表；低
 ### 将参数发布到真实 IPI DMA region
 
 `x9_ipi_dma` 已接实际native board／transport调用，不是模拟队列。**当前没有安装
-memory／parameter／reply supplier，所以没有执行map、注册或SET，更没有校准／解静音。**
+memory／parameter／reply／readback supplier，所以没有执行map、注册、SET或GET，
+更没有校准／解静音。**
 它仅处理core-A的IPI_A carveout；AUDIO_COMMON PCM、IPI_B和AFE输出均不是此region。
 
 | 顺序／入口 | 实现与边界 |
 |---|---|
-| `x9_ipi_dma_acquire(policy)` | 同Speaker ticket／fresh READY generation，先验证当前firmware task count、controller和runtime CALL_FINAL14或AUDPLAYBACK32、EMI／pool排他，再pin独立board IPI child。只map16K-aligned header/table/TX prefix为Normal-WB，拒绝WC/Device alias，不清整个1.5MiB pool |
+| `x9_ipi_dma_acquire(policy)` | kernel-only policy **v2／72B**，四个真实supplier都mandatory；同Speaker ticket／fresh READY generation，验证当前firmware task count、controller／CALL_FINAL14或AUDPLAYBACK32、EMI／pool排他，再pin独立board IPI child。只map16K-aligned table/TX＋独立16KiB GET页为Normal-WB（prefix最多0x18000B），拒绝WC/Device alias，不清整个1.5MiB pool |
 | Table | header128B；每task有AP→DSP和DSP→AP两个384B region，read_idx在+128、write_idx在+256。`checksum=128+task_count*2*384`只是字段offset，不是CRC／校准证明；pool_offset按其字段地址向上128B对齐，不能按sizeof误算 |
 | `x9_ipi_dma_register(ticket,generation)` | 一次DIRECT DMA_INIT `0xadd0` 携带LE64 bus/bytes，再NEED_ACK UPDATE `0xadd1` 携带task_scene。DIRECT消费不等于初始化被接受；UPDATE回复必须由实际firmware语义supplier验证 |
 | `x9_ipi_dma_set(...)` | 整包解析／转换为私有wire副本，再由真实参数supplier确认对应profile／silicon／保护状态；只写AP TX ring并补齐128B padding，不把多个消息拆成普通payload |
 | 发布与消费 | 数据先CVAC到PoC，再发布AP write_idx；发送72B inner DMA SET `0x204`（rw_idx是发布前index，data_size是真实字节数，type3），guard贯穿TX／ACK。ACK语义检查后还须IVAC独立read_idx cache line、等实际DSP消费到expected end；不清DSP拥有的index |
+| `x9_ipi_dma_get(..., output, capacity, &data_size)` | 只接受已pin的kernel可写目的页、1..16384B capacity，拒绝输出／长度／singleton别名及任何IPI_A物理别名。真实readback supplier先证明前序read-command／PA保护状态／排他路由，且transport guard每次重新验证；GET自身不携带selector |
+| GET写回与交付 | 专用WB页位于TX ring之后，整页先zero＋CVAC，然后NEED_ACK **PAYLOAD16** GET `0x205`、param2=type3：LE32 memory_size／LE32 data_size=0／LE64 WB bus。不是DMA union、不动TX索引。reply必须是16B payload、echo原memory_size／bus且data_size<=capacity；真实reply supplier还须证明写入已完成／PoC可见／无保留writer，匹配ACK或回显本身不够。IVAC整独立页→私有复制→fresh authority／目的页重新核对，最后才发布output/size；失败二者不变 |
 | 失败与release | 单请求、不pipelining。非法index不modulo修复；任何已发布后的EAGAIN／timeout／未知ACK保留首错、映射和parent pin，不能撤回write_idx／重新发送／free。外层先mute、AFE disable/drain并实际halt，release重新验证同generation Offline＋物理halt＋独立memory authority后才unmap/drop |
 
 Plain mailbox API仍不能发DMA；byte codec成功、DIRECT消费、UPDATE／SET ACK和read_idx
 推进都不证明speaker Ready或物理出声。legacy reserve `dma_addr`严格绑定本组件的
 boot-lifetime私有staging token；不是bus地址，不接受user pointer或HAL/writeback地址形态。
-GET `0x205`属于另一种16B `aud_data_t` payload／shared回写事务，**尚未接入**，
-不会借SET成功伪造校准读数。三个supplier均不得反向重入IPI DMA；memory callback运行于
-transport mutex内，禁止调用transport/status或任何会反向获取本组件锁的路径。
+GET的共享16B `aud_data_t` byte codec同时供kernel与own-code iOS编译，decode不解引用
+回复地址，零size可表示但不是校准成功。GET任何发送歧义（包括pre-doorbell EAGAIN）都
+保留pending／WB页／parent pin到真正halt；不会像vendor错误路径无条件free，成功也只有
+实际完成supplier证明无late writer之后才能复用。没有新增raw IOKit selector或HAL Ready。
+四个supplier均不得反向重入IPI DMA；memory／readback callback运行于transport mutex内，
+禁止调用transport/status或任何会反向获取本组件锁的路径。
+
+当前shim按BOOT-AUDIO-REMOVE继续移除旧音频walker，chosen音频placeholder为零。
+`xnu_enter`只按XNU ABI传Apple boot_args（x1..x3清零），loader的deviceTreeP指向Apple
+ADT；入口暂存的LK FDT寄存器不是已发布／有生命周期的元数据。尚未有post-XNU当前
+FDT／合法长期EMI来源，不恢复旧walker、不盲扫RAM或把captured地址当grant。
 
 ## 参考与证据边界
 

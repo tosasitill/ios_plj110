@@ -57,3 +57,25 @@ int x9_dsp_ack_matches(const struct x9_dsp_message *a, const struct x9_dsp_messa
         a->scene == b->scene && a->id == b->id &&
         a->source == b->target && a->target == b->source;
 }
+int x9_dsp_readback_encode(uint64_t bus,uint32_t capacity,void *out,uint32_t bytes)
+{
+    if(!out || !bus || !capacity || bus>UINT64_MAX-capacity)return EINVAL;
+    if(bytes!=X9_DSP_READBACK_INFO_BYTES)return EMSGSIZE;
+    uint8_t *p=out;
+    put32(p,capacity);put32(p+4,0);
+    put32(p+8,(uint32_t)bus);put32(p+12,(uint32_t)(bus>>32));return 0;
+}
+int x9_dsp_readback_decode(const void *in,uint32_t bytes,uint64_t bus,
+                           uint32_t capacity,uint32_t *size)
+{
+    if(!in || !size || !bus || !capacity || bus>UINT64_MAX-capacity)return EINVAL;
+    if(bytes!=X9_DSP_READBACK_INFO_BYTES)return EMSGSIZE;
+    uintptr_t a=(uintptr_t)in,b=(uintptr_t)size;
+    if(a>UINTPTR_MAX-bytes || b>UINTPTR_MAX-sizeof(*size) ||
+       (a<b+sizeof(*size) && b<a+bytes))return EINVAL;
+    const uint8_t *p=in;
+    uint64_t address=get32(p+8)|((uint64_t)get32(p+12)<<32);
+    uint32_t n=get32(p+4);
+    if(get32(p)!=capacity || address!=bus || n>capacity)return EPROTO;
+    *size=n;return 0;
+}
