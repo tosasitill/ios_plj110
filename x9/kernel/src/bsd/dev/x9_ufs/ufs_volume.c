@@ -3,11 +3,16 @@
  * expose arbitrary disk writes, or assume an extent manifest is current.
  */
 #include "ufs_ro.h"
+#if defined(KERNEL)
+#include <libkern/libkern.h>
+#else
+#include <string.h>
+#endif
 
 static uint32_t le32(const uint8_t *p) {return p[0]|(uint32_t)p[1]<<8|(uint32_t)p[2]<<16|(uint32_t)p[3]<<24;}
 static uint64_t le64(const uint8_t *p) {return le32(p)|(uint64_t)le32(p+4)<<32;}
 static int equal(const void *a,const void *b,size_t n) {const uint8_t *p=a,*q=b;while(n--)if(*p++!=*q++)return 0;return 1;}
-static void copy(void *a,const void *b,size_t n) {uint8_t *p=a;const uint8_t *q=b;while(n--)*p++=*q++;}
+static void copy(void *a,const void *b,size_t n) {if(a!=b)memcpy(a,b,n);}
 uint32_t x9u_crc32(uint32_t crc,const void *data,size_t size)
 {
  const uint8_t *p=data;crc=~crc;
@@ -45,7 +50,7 @@ int x9u_gpt_find(struct x9u_host *h,unsigned lun,const char *name,struct x9u_par
  struct x9u_partition found={0};unsigned matches=0,used_ranges=0;uint64_t consumed=0;crc=0;
  while(consumed<bytes) {
   uint64_t remaining=bytes-consumed;
-  uint32_t take=remaining>X9U_DATA_SIZE?X9U_DATA_SIZE:(uint32_t)remaining;
+  uint32_t take=remaining>h->data_limit?h->data_limit:(uint32_t)remaining;
   uint32_t nblocks=(take+block-1)/block;
   e=x9u_read(h,lun,table+consumed/block,nblocks,buf);if(e)return e;
   crc=x9u_crc32(crc,buf,take);
@@ -100,7 +105,7 @@ int x9u_extent_validate(const struct x9u_extent *map,size_t n,uint64_t blocks,ui
 int x9u_image_read_mapped(struct x9u_host *h,unsigned lun,const struct x9u_partition *partition,
                    const struct x9u_extent *map,size_t n,uint64_t blocks,uint64_t offset,void *out,size_t length)
 {
- if(!h||lun>=3||!partition||!out||!map||!n||n>16384||!blocks||h->block_size[lun]!=4096||blocks>UINT64_MAX/4096||
+ if(!h||lun>=3||!partition||!out||!map||!n||n>16384||!blocks||h->data_limit<4096||h->data_limit>X9U_DATA_SIZE||h->block_size[lun]!=4096||blocks>UINT64_MAX/4096||
     partition->first>=h->blocks[lun]||partition->count>h->blocks[lun]-partition->first||
     offset>blocks*4096||length>blocks*4096-offset)return X9U_BOUNDS;
  int e;
@@ -114,7 +119,7 @@ int x9u_image_read_mapped(struct x9u_host *h,unsigned lun,const struct x9u_parti
      item->count>blocks-item->file||item->part>=partition->count||
      item->count>partition->count-item->part)return X9U_BOUNDS;
   uint32_t skip=(uint32_t)(offset%4096);uint64_t available=(item->count-delta)*4096-skip;
-  size_t take=length;if(take>X9U_DATA_SIZE-skip)take=X9U_DATA_SIZE-skip;if(take>available)take=(size_t)available;
+  size_t take=length;if(take>h->data_limit-skip)take=h->data_limit-skip;if(take>available)take=(size_t)available;
   uint32_t count=(uint32_t)((skip+take+4095)/4096);
   e=x9u_read(h,lun,partition->first+item->part+delta,count,h->dma+X9U_DATA_OFFSET);if(e)return e;
   copy(dst,h->dma+X9U_DATA_OFFSET+skip,take);dst+=take;offset+=take;length-=take;

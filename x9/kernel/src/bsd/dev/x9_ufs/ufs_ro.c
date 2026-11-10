@@ -3,9 +3,14 @@
  * X9 adapter must establish a real DMA aperture before x9u_open(...,1).
  */
 #include "ufs_ro.h"
+#if defined(KERNEL)
+#include <libkern/libkern.h>
+#else
+#include <string.h>
+#endif
 
-static void clear(void *p,size_t n) { uint8_t *b=p;while(n--)*b++=0; }
-static void copy(void *d,const void *s,size_t n) { uint8_t *a=d;const uint8_t *b=s;while(n--)*a++=*b++; }
+static void clear(void *p,size_t n) { memset(p,0,n); }
+static void copy(void *d,const void *s,size_t n) { if(d!=s)memcpy(d,s,n); }
 static uint32_t le32(const uint8_t *p) { return p[0]|(uint32_t)p[1]<<8|(uint32_t)p[2]<<16|(uint32_t)p[3]<<24; }
 static uint32_t be32(const uint8_t *p) { return (uint32_t)p[0]<<24|(uint32_t)p[1]<<16|(uint32_t)p[2]<<8|p[3]; }
 static uint64_t be64(const uint8_t *p) { return (uint64_t)be32(p)<<32|be32(p+4); }
@@ -24,6 +29,21 @@ static int wait_mask(struct x9u_host *h,unsigned o,uint32_t mask,uint32_t want,u
  }
  return X9U_TIMEOUT;
 }
+/* Match UniXNU's short polled fast path without taking over the IRQ yet.
+ * Long commands back off to the original 10 us interval. Both the wall-clock
+ * deadline and an iteration cap remain bounded; no timeout retry/reuse. */
+static int wait_completion(struct x9u_host *h,uint32_t timeout)
+{
+ uint64_t start=h->io.now_us(h->io.context);
+ for(uint32_t i=0;i<=timeout/2;i++) {
+  h->io_poll_count++;
+  if(!(rd(h,0x58)&1))return 0;
+  uint64_t elapsed=h->io.now_us(h->io.context)-start;
+  if(elapsed>=timeout)break;
+  h->io.delay_us(h->io.context,elapsed<128?2:10);
+ }
+ return X9U_TIMEOUT;
+}
 void x9u_snapshot(const struct x9u_io *io,struct x9u_snapshot *s)
 {
 #define R(field,offset) s->field=io->read32(io->context,offset)
@@ -38,7 +58,7 @@ int x9u_open(struct x9u_host *h,const struct x9u_io *io,void *dma,uint64_t pa,in
 {
  if(!h||!io||!io->read32||!io->write32||!io->sync||!io->now_us||!io->delay_us||
     !dma||((uintptr_t)dma&1023)||(pa&1023)||pa>UINT64_MAX-X9U_DMA_SIZE)return X9U_ARGUMENT;
- clear(h,sizeof(*h));h->io=*io;h->dma=dma;h->dma_pa=pa;
+ clear(h,sizeof(*h));h->io=*io;h->dma=dma;h->dma_pa=pa;h->data_limit=X9U_DEFAULT_DATA_SIZE;
  x9u_snapshot(io,&h->saved);
  if(!verified)return X9U_DMA_UNVERIFIED;
  if(h->saved.cap==0xffffffffU||!h->saved.version||h->saved.version==0xffffffffU||
@@ -88,10 +108,19 @@ static int write_range(struct x9u_host *h,unsigned lun,uint64_t lba,uint32_t cou
     !h->write_map||h->write_count>16384||lba<h->write_first)return X9U_BOUNDS;
  uint64_t relative=lba-h->write_first;
  if(relative>=h->write_partition_blocks||count>h->write_partition_blocks-relative)return X9U_BOUNDS;
- for(size_t i=0;i<h->write_count;i++) {
+ /* The logical write lookup supplies a hint. Recheck the physical extent
+  * here (including geometry), never trust the hint as authorization. The
+  * immutable map was fully checked at bind; keep a fallback for other callers. */
+ for(size_t pass=0;pass<=h->write_count;pass++) {
+  size_t i=pass?pass-1:h->write_hint;
+  if(i>=h->write_count)continue;
+  if(pass && i==h->write_hint)continue;
+  h->io_write_range_steps++;
   const struct x9u_extent *e=&h->write_map[i];
-  if(e->part>=h->write_partition_blocks||e->count>h->write_partition_blocks-e->part)return X9U_BOUNDS;
-  if(relative>=e->part&&relative-e->part<e->count&&count<=e->count-(relative-e->part))return 0;
+  if(e->part>=h->write_partition_blocks||!e->count||e->count>h->write_partition_blocks-e->part)return X9U_BOUNDS;
+  if(relative>=e->part&&relative-e->part<e->count&&count<=e->count-(relative-e->part)) {
+   h->write_hint=i;return 0;
+  }
  }
  return X9U_BOUNDS;
 }
@@ -100,7 +129,7 @@ static int write_range(struct x9u_host *h,unsigned lun,uint64_t lba,uint32_t cou
  * immediately before handing the command to DMA. */
 static int command(struct x9u_host *h,unsigned lun,const uint8_t cdb[16],unsigned cdb_len,uint32_t bytes)
 {
- if(!h||!h->attached||h->poisoned||lun>=3||bytes>X9U_DATA_SIZE)return X9U_ARGUMENT;
+ if(!h||!h->attached||h->poisoned||lun>=3||!h->data_limit||h->data_limit>X9U_DATA_SIZE||bytes>h->data_limit)return X9U_ARGUMENT;
  int writing=0,extra=0;
 #if defined(X9U_EXTENT_WRITES)
  if((cdb[0]==0x2a&&cdb_len==10)||(cdb[0]==0x8a&&cdb_len==16)) {
@@ -118,23 +147,31 @@ static int command(struct x9u_host *h,unsigned lun,const uint8_t cdb[16],unsigne
  h->sense_key=0;h->sense_asc=0;h->sense_ascq=0;
  if(rd(h,0x58)||rd(h,0x78))return X9U_BUSY;
  uint8_t *tr=h->dma,*cmd=h->dma+0x1000,*response=h->dma+0x1200,*prdt=h->dma+0x1400;
- clear(tr,32);clear(cmd,0x410);
- if(!writing)clear(h->dma+X9U_DATA_OFFSET,bytes);
+ clear(tr,32);clear(cmd,0x400+16*X9U_PRD_COUNT);
+ /* Full block READs must return every byte (residual/underflow rejected
+  * below), so pre-zeroing their buffer only consumes CPU/DDR bandwidth.
+  * Keep zero initialization for management, inquiry and short sense data. */
+ if(!writing&&cdb[0]!=0x28&&cdb[0]!=0x88)clear(h->dma+X9U_DATA_OFFSET,bytes);
  if(!++h->tag)++h->tag;
  cmd[0]=1;cmd[1]=bytes?(writing?0x20:0x40):0;cmd[2]=(uint8_t)lun;cmd[3]=h->tag;
  big32(cmd+12,bytes);copy(cmd+16,cdb,cdb_len);
  put32(tr,(1U<<28)|(bytes?((writing?1U:2U)<<25):0)|(1U<<24));put32(tr+8,15);
  uint64_t ucd=h->dma_pa+0x1000,data=h->dma_pa+X9U_DATA_OFFSET;
  put32(tr+16,(uint32_t)ucd);put32(tr+20,(uint32_t)(ucd>>32));
- put32(tr+24,(128U<<16)|128U);put32(tr+28,(256U<<16)|(bytes?1U:0));
- put32(prdt,(uint32_t)data);put32(prdt+4,(uint32_t)(data>>32));put32(prdt+12,bytes?bytes-1:0);
+ unsigned prds=(bytes+X9U_PRD_SIZE-1)/X9U_PRD_SIZE;
+ put32(tr+24,(128U<<16)|128U);put32(tr+28,(256U<<16)|prds);
+ for(unsigned i=0,remaining=bytes;i<prds;i++) {
+  unsigned take=remaining>X9U_PRD_SIZE?X9U_PRD_SIZE:remaining;
+  put32(prdt+i*16,(uint32_t)data);put32(prdt+i*16+4,(uint32_t)(data>>32));
+  put32(prdt+i*16+12,take-1);data+=take;remaining-=take;
+ }
  /* Only these CPU-written ranges are handed to this command. */
  h->io.sync(h->io.context,0,32,0);
- h->io.sync(h->io.context,0x1000,0x410,0);
+ h->io.sync(h->io.context,0x1000,0x400+16*X9U_PRD_COUNT,0);
  if(bytes)h->io.sync(h->io.context,X9U_DATA_OFFSET,bytes,0);
  uint64_t device_start=h->io.now_us(h->io.context);
  wr(h,0x58,1);
- if(wait_mask(h,0x58,1,0,X9U_COMMAND_TIMEOUT_US)) {
+ if(wait_completion(h,X9U_COMMAND_TIMEOUT_US)) {
   /* UTRLCLR is inverse: zero clears the chosen slot. No new command follows. */
   wr(h,0x5c,~1U);h->poisoned=1;h->failure_phase=1;
   if(wait_mask(h,0x58,1,0,10000))return X9U_DMA_PENDING;
@@ -190,7 +227,7 @@ static int management(struct x9u_host *h,unsigned opcode,unsigned *flag)
  if(!h||!h->attached||h->poisoned||(opcode!=0&&opcode!=5&&opcode!=6))return X9U_ARGUMENT;
  if(rd(h,0x58)||rd(h,0x78))return X9U_BUSY;
  uint8_t *tr=h->dma,*cmd=tr+0x1000,*response=tr+0x1200;
- clear(tr,32);clear(cmd,0x410);
+ clear(tr,32);clear(cmd,0x400+16*X9U_PRD_COUNT);
  if(!++h->tag)++h->tag;
  cmd[0]=opcode?0x16:0;cmd[3]=h->tag;
  if(opcode){cmd[5]=opcode==6?0x81:1;cmd[12]=(uint8_t)opcode;cmd[13]=1;}
@@ -198,13 +235,15 @@ static int management(struct x9u_host *h,unsigned opcode,unsigned *flag)
  uint64_t ucd=h->dma_pa+0x1000;
  put32(tr+16,(uint32_t)ucd);put32(tr+20,(uint32_t)(ucd>>32));
  put32(tr+24,(128U<<16)|128U);put32(tr+28,256U<<16);
- h->io.sync(h->io.context,0,X9U_DMA_SIZE,0);wr(h,0x58,1);
- if(wait_mask(h,0x58,1,0,X9U_COMMAND_TIMEOUT_US)) {
+ h->io.sync(h->io.context,0,32,0);
+ h->io.sync(h->io.context,0x1000,0x400+16*X9U_PRD_COUNT,0);wr(h,0x58,1);
+ if(wait_completion(h,X9U_COMMAND_TIMEOUT_US)) {
   wr(h,0x5c,~1U);h->poisoned=1;
   if(wait_mask(h,0x58,1,0,10000))return X9U_DMA_PENDING;
   return X9U_TIMEOUT;
  }
- h->io.sync(h->io.context,0,X9U_DMA_SIZE,1);
+ h->io.sync(h->io.context,0,32,1);
+ h->io.sync(h->io.context,0x1200,0x200,1);
  h->last_is=rd(h,0x20);h->last_ocs=le32(tr+8)&255;copy(h->last_response,response,sizeof(h->last_response));
  if(h->last_is&1)wr(h,0x20,1);
  if(h->last_ocs||response[0]!=(opcode?0x36:0x20)||response[2]||response[3]!=h->tag||
@@ -275,7 +314,7 @@ int x9u_read(struct x9u_host *h,unsigned lun,uint64_t lba,uint32_t count,void *o
 {
  if(!h||lun>=3||!out||!count||!h->block_size[lun]||!h->blocks[lun]||
     lba>=h->blocks[lun]||count>h->blocks[lun]-lba||
-    count>X9U_DATA_SIZE/h->block_size[lun])return X9U_BOUNDS;
+    count>h->data_limit/h->block_size[lun])return X9U_BOUNDS;
  uint8_t cdb[16]={0};unsigned length;
  if(lba<=UINT32_MAX && count<=UINT16_MAX && count-1<=UINT32_MAX-lba) {
   cdb[0]=0x28;big32(cdb+2,(uint32_t)lba);cdb[7]=(uint8_t)(count>>8);cdb[8]=(uint8_t)count;length=10;
@@ -292,12 +331,12 @@ int x9u_bind_extent_writes(struct x9u_host *h,unsigned lun,const struct x9u_part
  if(!h||!h->attached||h->poisoned||h->write_enabled||lun>=3||!p||h->block_size[lun]!=4096||
     p->first>=h->blocks[lun]||p->count>h->blocks[lun]-p->first)return X9U_BOUNDS;
  int error=x9u_extent_validate(map,n,blocks,p->count);if(error)return error;
- h->write_map=map;h->write_count=n;h->write_first=p->first;h->write_partition_blocks=p->count;
+ h->write_map=map;h->write_count=n;h->write_hint=0;h->write_first=p->first;h->write_partition_blocks=p->count;
  h->write_blocks=blocks;h->write_lun=lun;h->write_enabled=1;return 0;
 }
 static int write_blocks(struct x9u_host *h,uint64_t lba,uint32_t count)
 {
- if(!count||count>X9U_DATA_SIZE/4096||write_range(h,h->write_lun,lba,count))return X9U_BOUNDS;
+ if(!count||count>h->data_limit/4096||write_range(h,h->write_lun,lba,count))return X9U_BOUNDS;
  uint8_t cdb[16]={0};unsigned length;
  if(lba<=UINT32_MAX&&count-1<=UINT32_MAX-lba) {
   cdb[0]=0x2a;big32(cdb+2,(uint32_t)lba);cdb[7]=(uint8_t)(count>>8);cdb[8]=(uint8_t)count;length=10;
@@ -317,8 +356,9 @@ int x9u_image_write(struct x9u_host *h,uint64_t offset,const void *source,size_t
   const struct x9u_extent *item=&h->write_map[lo-1];uint64_t delta=logical-item->file;
   if(item->file>logical||item->file>=h->write_blocks||delta>=item->count||item->count>h->write_blocks-item->file)return X9U_BOUNDS;
   unsigned skip=(unsigned)(offset%4096);uint64_t available=(item->count-delta)*4096-skip;
-  size_t take=length;if(take>X9U_DATA_SIZE-skip)take=X9U_DATA_SIZE-skip;if(take>available)take=(size_t)available;
+  size_t take=length;if(take>h->data_limit-skip)take=h->data_limit-skip;if(take>available)take=(size_t)available;
   uint32_t count=(uint32_t)((skip+take+4095)/4096);uint64_t lba=h->write_first+item->part+delta;
+  h->write_hint=lo-1;
   if(write_range(h,h->write_lun,lba,count))return X9U_BOUNDS;
   uint8_t *bounce=h->dma+X9U_DATA_OFFSET;
   if(skip||take%4096) {int e=x9u_read(h,h->write_lun,lba,count,bounce);if(e)return e;}

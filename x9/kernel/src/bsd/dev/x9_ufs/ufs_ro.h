@@ -4,9 +4,15 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define X9U_DMA_SIZE 0x14000U
+/* Kernel-only bounce aperture. Each PRD is limited to 256 KiB (UFSHCI);
+ * four PRDs permit 1 MiB, while bring-up defaults to one 256 KiB PRD.
+ * The shim retains its separate, qualified 64 KiB allocation/layout. */
 #define X9U_DATA_OFFSET 0x4000U
-#define X9U_DATA_SIZE 0x10000U
+#define X9U_DATA_SIZE 0x100000U
+#define X9U_DMA_SIZE (X9U_DATA_OFFSET + X9U_DATA_SIZE)
+#define X9U_PRD_SIZE 0x40000U
+#define X9U_PRD_COUNT (X9U_DATA_SIZE / X9U_PRD_SIZE)
+#define X9U_DEFAULT_DATA_SIZE X9U_PRD_SIZE
 #define X9U_COMMAND_TIMEOUT_US 1000000U
 
 enum x9u_error {
@@ -37,14 +43,15 @@ struct x9u_host {
  uint64_t dma_pa;
  struct x9u_snapshot saved;
  uint64_t blocks[3];
- uint32_t block_size[3];
+ uint32_t block_size[3],data_limit;
  uint32_t last_ocs,last_is;
  uint64_t io_commands,io_read_bytes,io_write_bytes,io_device_us,io_total_us,io_max_device_us;
+ uint64_t io_poll_count,io_write_range_steps;
  uint8_t last_response[64],tur_response[64],tag;
  unsigned attached,poisoned;
 #if defined(X9U_EXTENT_WRITES)
  const struct x9u_extent *write_map;
- size_t write_count;
+ size_t write_count,write_hint;
  uint64_t write_first,write_partition_blocks,write_blocks;
  unsigned write_lun,write_enabled;
 #endif

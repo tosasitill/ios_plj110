@@ -47,7 +47,7 @@ static struct {
  unsigned sector;
  dev_t device;
  bool ready,failed,writable,mutable;
- uint64_t write_bytes,write_calls,lock_wait_us;
+ uint64_t write_bytes,write_calls,write_us,lock_wait_us;
  unsigned write_trace_count;
  uint64_t class_bytes[4][2], class_report_us;
 } xu;
@@ -105,6 +105,15 @@ static int bclose(dev_t dev,int flags,int type,struct proc *p)
 {(void)dev;(void)flags;(void)type;(void)p;return 0;}
 static void strategy(buf_t bp)
 {
+ /* Snapshot only while holding the transport mutex; console output must
+  * not serialize unrelated root/modem/log requests behind UART/USB. */
+ struct {
+  bool ready,classes;
+  uint64_t read_bytes,read_calls,read_us,write_bytes,write_calls,write_us;
+  uint64_t commands,rd,wr,device_us,command_us,max_us,lock_us,polls,range_steps;
+  uint64_t class_bytes[4][2];
+ } report={0};
+ unsigned failed_ocs=0,failed_phase=0;
  int error=0;caddr_t address=NULL;uint32_t count=buf_count(bp);bool trace_write=false;uint64_t traced_bytes=0;buf_setresid(bp,count);
  bool reading=buf_flags(bp)&B_READ;
  /* buf vnode is valid until biodone; VSWAP is authoritative, executor isn't.
@@ -122,36 +131,51 @@ static void strategy(buf_t bp)
  if(buf_map(bp,&address)){error=EIO;goto done;}
  uint64_t lock_start=now_us(NULL);
  lck_mtx_lock(&x9ufs_lock);xu.lock_wait_us+=now_us(NULL)-lock_start;
+ if(xu.failed){lck_mtx_unlock(&x9ufs_lock);buf_unmap(bp);error=ENXIO;goto done;}
  pet();uint64_t started=now_us(NULL);
  int result=reading?x9u_image_read_mapped(&xu.host,2,&xu.partition,xu.extents,xu.extent_count,xu.bytes/4096,offset,address,count):
                     x9u_image_write(&xu.host,offset,address,count);
  if(!result)xu.class_bytes[io_class][reading?0:1]+=count;
  if(reading){xu.read_us+=now_us(NULL)-started;xu.read_calls++;if(!result)xu.read_bytes+=count;}
- else if(!result){xu.write_calls++;xu.write_bytes+=count;
+ else if(!result){xu.write_us+=now_us(NULL)-started;xu.write_calls++;xu.write_bytes+=count;
   if(xu.write_trace_count<32 && xu.write_bytes>=((uint64_t)xu.write_trace_count+1)*(64ULL<<20)){xu.write_trace_count++;trace_write=true;traced_bytes=xu.write_bytes;}
  }
  /* One report after 4MiB, then no more than once per 64MiB. No per-read log. */
  if(xu.read_bytes>=xu.report_at) {
-  printf("X9 UFS IO: bytes=%llu calls=%llu io_us=%llu KiB/s=%llu (includes DMA/CPU, excludes console)\n",
-      xu.read_bytes,xu.read_calls,xu.read_us,xu.read_us?xu.read_bytes*1000000/xu.read_us/1024:0);
-  printf("X9 UFS detail: cmds=%llu rd=%llu wr=%llu device_us=%llu command_us=%llu max_device_us=%llu lock_us=%llu\n",
-    xu.host.io_commands,xu.host.io_read_bytes,xu.host.io_write_bytes,xu.host.io_device_us,
-    xu.host.io_total_us,xu.host.io_max_device_us,xu.lock_wait_us);
+  report.ready=true;
+  report.read_bytes=xu.read_bytes;report.read_calls=xu.read_calls;report.read_us=xu.read_us;
+  report.write_bytes=xu.write_bytes;report.write_calls=xu.write_calls;report.write_us=xu.write_us;
+  report.commands=xu.host.io_commands;report.rd=xu.host.io_read_bytes;report.wr=xu.host.io_write_bytes;
+  report.device_us=xu.host.io_device_us;report.command_us=xu.host.io_total_us;
+  report.max_us=xu.host.io_max_device_us;report.lock_us=xu.lock_wait_us;
+  report.polls=xu.host.io_poll_count;report.range_steps=xu.host.io_write_range_steps;
   xu.report_at=xu.read_bytes+(64ULL<<20);
   uint64_t report_us=now_us(NULL);
   if(report_us-xu.class_report_us>=10000000) {
-   xu.class_report_us=report_us;
-   printf("X9 IO CLASS bytes: swap=%llu/%llu page=%llu/%llu vnode=%llu/%llu unknown=%llu/%llu (read/write, root only)\n",
-    xu.class_bytes[0][0],xu.class_bytes[0][1],xu.class_bytes[1][0],xu.class_bytes[1][1],
-    xu.class_bytes[2][0],xu.class_bytes[2][1],xu.class_bytes[3][0],xu.class_bytes[3][1]);
+   xu.class_report_us=report_us;report.classes=true;
+   memcpy(report.class_bytes,xu.class_bytes,sizeof(report.class_bytes));
   }
  }
  if(result) {
-  error=EIO;
-  printf("X9 UFS %s failed status=%d offset=0x%llx count=%u OCS=%u phase=%u\n",reading?"read":"write",result,offset,count,xu.host.last_ocs,xu.host.failure_phase);
+  error=EIO;failed_ocs=xu.host.last_ocs;failed_phase=xu.host.failure_phase;
   if(xu.host.poisoned)xu.failed=true;
  }else buf_setresid(bp,0);
  lck_mtx_unlock(&x9ufs_lock);buf_unmap(bp);
+ if(result)printf("X9 UFS %s failed status=%d offset=0x%llx count=%u OCS=%u phase=%u\n",
+    reading?"read":"write",result,offset,count,failed_ocs,failed_phase);
+ if(report.ready) {
+  printf("X9 UFS IO: bytes=%llu calls=%llu io_us=%llu KiB/s=%llu (includes DMA/CPU, excludes console)\n",
+    report.read_bytes,report.read_calls,report.read_us,
+    report.read_us?report.read_bytes*1000000/report.read_us/1024:0);
+  printf("X9 UFS detail: cmds=%llu rd=%llu wr=%llu device_us=%llu command_us=%llu max_device_us=%llu lock_us=%llu\n",
+    report.commands,report.rd,report.wr,report.device_us,report.command_us,report.max_us,report.lock_us);
+  printf("X9 UFS CPU: polls=%llu write_range_steps=%llu write_calls=%llu write_bytes=%llu write_us=%llu avg_cmd_bytes=%llu\n",
+    report.polls,report.range_steps,report.write_calls,report.write_bytes,report.write_us,
+    report.commands?(report.rd+report.wr)/report.commands:0);
+  if(report.classes)printf("X9 IO CLASS bytes: swap=%llu/%llu page=%llu/%llu vnode=%llu/%llu unknown=%llu/%llu (read/write, root only)\n",
+    report.class_bytes[0][0],report.class_bytes[0][1],report.class_bytes[1][0],report.class_bytes[1][1],
+    report.class_bytes[2][0],report.class_bytes[2][1],report.class_bytes[3][0],report.class_bytes[3][1]);
+ }
  if(trace_write){
   const char *vname=io_vnode?vnode_getname(io_vnode):NULL;
   printf("X9 WRITE VNODE: class=%u flags=%08x name=%s offset=%llu count=%u\n",
@@ -183,8 +207,8 @@ static int ioctl_common(u_long command,caddr_t data,int character)
   if(xu.host.poisoned)xu.failed=true;
   lck_mtx_unlock(&x9ufs_lock);return error?EIO:0;
  }
- case DKIOCGETMAXBLOCKCOUNTREAD:*q=X9U_DATA_SIZE/xu.sector;return 0;
- case DKIOCGETMAXBLOCKCOUNTWRITE:*q=xu.writable?X9U_DATA_SIZE/xu.sector:0;return 0;
+ case DKIOCGETMAXBLOCKCOUNTREAD:*q=xu.host.data_limit/xu.sector;return 0;
+ case DKIOCGETMAXBLOCKCOUNTWRITE:*q=xu.writable?xu.host.data_limit/xu.sector:0;return 0;
  case DKIOCGETMAXSEGMENTCOUNTREAD:case DKIOCGETMAXSEGMENTCOUNTWRITE:*q=1;return 0;
  default:return ENOTTY;
  }
@@ -360,6 +384,13 @@ static int initialize(void)
  struct x9u_io io={NULL,read32,write32,sync_dma,now_us,delay_us};
  int result=x9u_open(&xu.host,&io,(void *)xu.dma,xu.dma_pa,1);
  if(result){printf("X9 UFS: native attach failed %d\n",result);return ENXIO;}
+ /* One 256 KiB PRD by default; 64 restores the previous transfer cap,
+  * 512/1024 exercise multiple PRDs. Invalid input never silently rounds up. */
+ int xfer_kb=sweet_x9_arg("x9_ufs_xfer_kb",X9U_DEFAULT_DATA_SIZE/1024);
+ if(xfer_kb<64||xfer_kb>1024||(xfer_kb&(xfer_kb-1)))return EINVAL;
+ xu.host.data_limit=(uint32_t)xfer_kb*1024;
+ printf("X9 UFS transport: max_xfer=%u KiB PRD_max=%u KiB slots=1 short_poll=2us bounce retained on timeout\n",
+    xu.host.data_limit/1024,X9U_PRD_SIZE/1024);
  int require_hs=0;
  if((require_hs=sweet_x9_arg("x9_ufs_hs",1))==1){
   struct x9u_hs_state hs={0};uint32_t pa[6]={0};
@@ -549,17 +580,18 @@ static const struct x9u_partition *part_find_locked(const char *name,int *error)
 }
 int sweet_x9_ufs_read_part(const char *name, uint64_t offset, void *data, size_t length)
 {
- static uint8_t bounce[X9U_DATA_SIZE];
  if(!xu.ready || xu.failed || !name || !data || strlen(name)>=24)return ENXIO;
  lck_mtx_lock(&x9ufs_lock);
  int error=0;
  pet();
+ uint8_t *bounce=xu.host.dma+X9U_DATA_OFFSET;
  const struct x9u_partition *part=part_find_locked(name,&error);
  if(!error && (offset>part->count*4096ULL || length>part->count*4096ULL-offset))error=EINVAL;
  uint8_t *out=data;
  while(!error && length) {
   uint64_t blk=offset/4096;uint32_t skip=(uint32_t)(offset%4096);
-  uint32_t nblk=(uint32_t)((skip+length+4095)/4096);if(nblk>X9U_DATA_SIZE/4096)nblk=X9U_DATA_SIZE/4096;
+  size_t take=length;if(take>xu.host.data_limit-skip)take=xu.host.data_limit-skip;
+  uint32_t nblk=(uint32_t)((skip+take+4095)/4096);
   pet();
   if(x9u_read(&xu.host,2,part->first+blk,nblk,bounce)){error=EIO;break;}
   size_t n=(size_t)nblk*4096-skip;if(n>length)n=length;
@@ -589,8 +621,8 @@ const void *sweet_x9_ufs_load_part(const char *name, uint64_t *bytes)
  if(!size || size>(256ULL<<20))return NULL;
  vm_offset_t mem=0;
  if(kmem_alloc(kernel_map,&mem,(vm_size_t)size,KMA_DATA|KMA_ZERO,VM_KERN_MEMORY_IOKIT)!=KERN_SUCCESS)return NULL;
- for(uint64_t off=0;off<size;off+=X9U_DATA_SIZE){
-  size_t n=size-off>X9U_DATA_SIZE?X9U_DATA_SIZE:(size_t)(size-off);
+ for(uint64_t off=0;off<size;off+=xu.host.data_limit){
+  size_t n=size-off>xu.host.data_limit?xu.host.data_limit:(size_t)(size-off);
   if(sweet_x9_ufs_read_part(name,off,(void *)(mem+off),n)){kmem_free(kernel_map,mem,(vm_size_t)size);return NULL;}
  }
  strlcpy(loaded[slot].name,name,sizeof(loaded[slot].name));loaded[slot].mem=(void *)mem;loaded[slot].bytes=size;

@@ -31,7 +31,7 @@
 - 启动链:LK → Android boot.img v4(legacy LZ4 arm64 Image)→ x9 裸机 shim → 内嵌 SWEETXNU payload → XNU。
   设备每次用临时 `fastboot boot`,**由用户手动刷/启动**;不自行 flash/reboot/写分区(x9/AGENTS.md)。
 - 根盘:`userdata` 里 pin+immutable 的专用 extent 文件(16 GiB HFSX,可写副本),内核原生 `ufsroot0` 挂载(`rd=ufsroot0 rootrw=1 ufsrw=1`);
-  Android userdata 保留。详情与路径见 `x9/AGENTS.md`、`x9/README.md`。UFS 链路 HS-G1/RateB/2 lane 已硬件验证(~130-155 MiB/s)。
+  Android userdata 保留。详情与路径见 `x9/AGENTS.md`、`x9/README.md`。UFS 最新175实测 **HS-G3/RateB/2 lane**;早期G1约130-155MiB/s不再代表当前链路。175混合根盘累计约212MiB/s,不是顺序读峰值。
 - 旧项目 sweet(Redmi Note 10 Pro / SM7150)的历史见 `README.md` 与 git 历史,当前不再工作。
 - 屏幕:ADT canvas / 帧缓冲呈现 **1242x2760**(414x920 pt @3x,左右各 7 px 黑边);宽 414 是为修键盘 123(见 §6)。
   物理面板仍 1256x2760 stride 5120,framebuffer 物理地址 0xfc910000。
@@ -106,7 +106,7 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 
 | 项 | 状态 |
 |---|---|
-| 启动/根盘 | LK→shim→XNU,原生 UFS 根盘 rw 挂载,HS-G1 双 lane;launchd/keybagd/usermanagerd 起来,Early boot complete |
+| 启动/根盘 | LK→shim→XNU,原生 UFS 根盘 rw 挂载,175为HS-G3/RateB双lane;launchd/keybagd/usermanagerd 起来,Early boot complete |
 | 桌面/GUI | SpringBoard 桌面、触摸(S3910)、电源/音量键、电池服务、状态栏、机型显示(iPhone,不再 iPod)|
 | 时间 | 读 MT6687 RTC(PMIF/SPMI)修开机 1970(`X9 RTC:` 行)|
 | 相册/TCC | 沙箱 stand-in 对 op5/op6 回真 token,tccd 签发 Photos 扩展,assetsd 不再崩 |
@@ -156,6 +156,17 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 **沙箱/用户态兼容**:`sweet_amfi.c` 的沙箱 stand-in 逐个 privilege 放行,拒绝一切未列项;缺什么在日志里搜 `SWEET Sandbox: ... denied`。
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
+
+## UFS活动交接(UFS-OPT1,2026-11-10): G3基线传输/CPU优化已编译;G4/G5前置尚未接通
+
+- **范围/隔离**:用户要求对照OPPO与UniXNU优化UFS。独立worktree `.local/x9/worktrees/ufs-opt` / `work/x9-ufs-opt`,固定基线 **bc72c12**(main含117+相机probe/共享PMIF修正)。主checkout同时有麦克风、USB日志等其他会话的未提交/暂存修改,本树未纳入或覆盖这些代码。无设备操作、flash/reboot/分区写入、mailbox更新或测试套件。
+- **纠正运行基线**:175:428=`X9 UFS LINK: status=0 mode=0x44 TX_G3 RX_G3 TX_lanes=2 RX_lanes=2 series=2`,174:440亦为G3。shim已有G1→G2→G3+四个64KiB窗口SHA比较,内核只读回链路;不能继续按笔记旧G1设计算法。175:18109累计1884964864B/8463208us≈212.4MiB/s、53523个root请求;该指标混合不同大小/读写/extent,不是设备顺序峰值。累计lock_us=24503969是多个请求等待之和,不能当作一次24.5s卡顿或全由console造成。
+- **厂商/参考证据**:实际OPPO模块 `kernel_device_modules-6.12/drivers/ufs/ufs-mediatek.c`1812的pre_pwr_change请求最多G5,1905按hw_major≥3用INITIAL_ADAPT;core `ufshcd.c`4157低于G4强制NO_ADAPT。captured live.dts10523 UFS0频率273/499.2MHz、clk-scale-up-vcore-min650000uV;厂商2918升频先请求VCORE再改ufs_sel/FDE parent,不是只写PA gear。clk-mt6993 CFG14=0xf0,UFS0 parent位8..10/pdn15,max parent4=univpll_d5;尚未证明当前LK该parent/PLL和VCORE稳定满足。既有Androiddmesg3111实测G4/FAST(1),**不是G5实测**。UniXNU文档ae68700指向ShengUfs;本轮只读拉取最新 **a901555**(文档旧pin e2b32cc),RootCommands/RootTransportLayout已实现32槽、≤256KiB每PRD/≤1MiB请求、外部buffer PRDT、2us短poll与IRQ sleep;高通GCC/SMMU常量不移植MT6993。
+- **本轮实现**:仅kernel私有x9_ufs transport改变,shim独立64KiB DMA/G3/只读sample流程不变。kernel bounce容量1MiB、最多4个PRD(每个≤256KiB),**默认活动limit256KiB**;`x9_ufs_xfer_kb=64|128|256|512|1024`同步传到SCSI、extent切块、GPT/BBFW/MD读与DKIOC maxblock,无效参数拒绝而非向上取整。大请求仍不跨一个manifest extent做WRITE,尾部4KiB RMW原语义保留。64只回退传输上限,不是撤销所有优化。
+- **CPU/安全边界**:transport/extent逐byte copy/clear改用kernel memcpy/memset;完整READ的pre-zero删除,但仍必须GOOD/OCS/tag/LUN/全量无residual后才复制给调用者,短sense/inquiry仍清零。MD read_part复用已锁住的host bounce,移除额外一次整块copy。写logical lookup提供hint,三道物理范围检查都重验hint对应extent,每次合法write由最多3×4839线性检查降到3个extent检查,坏hint仍fallback/拒绝,不是把hint当写授权。没有zero-copy caller DMA,timeout仍poison并永久保留专用bounce,不释放在飞buffer。
+- **串行/日志**:保留单槽独占mutex(不能直接解锁让多个view共享同一DMA)。root统计/错误先锁内快照,console放到unlock+unmap之后;等待锁后重验poison状态。completion前128us按2us poll,之后退回10us,保留wall deadline/iteration cap/timeout隔离。新增`X9 UFS transport`活动cap/PRD大小日志及`X9 UFS CPU`poll次数/范围检查步数/write_us/avg_cmd_bytes,旧IO/detail行保留便于对照;统计跨view本来不统一,新增计数仍不当全机总量。
+- **当前编译结果**:sweet_x9_ufs.o、ufs_ro.o、ufs_volume.o本地交叉编译 **exit0**,没有运行额外测试脚本/测试套件或设备I/O。私有`.local/x9/work/ufs-opt-20261110/{object-build.log,compile-selected.py,local-config.json,boot-config.json,inputs.json,reference-fetch.log}`;完整构建/提交/镜像结果在本节下一里程碑补齐。插件275/32GiB manifest不变,无需mailbox。不得把本地编译称为实机性能提升或G5已接通。
+- **下一步/验收**:完成联合树构建后同一场景对照175的link、cmd平均大小、root IO时间及等待;默认256KiB先确认root/BBFW/MD读正常与写持久性,512/1024多PRD单独改变limit验证。G4/G5仍需真正移植并验证VCORE/DVFSRC request→ufs_sel/FDE高parent/PLL→INITIAL_ADAPT→UPMS+PWR_LOCAL→gear/lane/rate读回→原四window同bytes校验,再允许root rw;不通过未知时钟/电压、假成功或更改Android分区推进。后续多槽需隔离UTRD cacheline(同一64B不能给相邻槽CLEAN覆盖OCS)、每槽DMA/锁和统一poison,IRQ需专门MT6993 GIC接入;本轮未宣称已做32槽/zero-copy/IRQ睡眠。
 
 ## HEIF活动交接(HEIF-1,2026-11-10): 硬解接入路线调查,未实现/未构建
 
