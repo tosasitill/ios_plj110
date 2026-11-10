@@ -7,8 +7,9 @@
  * requires the full both-bank counter/control acceptance twice. No replay,
  * no automatic rearm, no credit cancellation by EN-off/reset or CPU RETIRED.
  * It then confirms three restricted source IRQ enables and IMG0A DMA_EN;
- * then normal CMOS/FLUSH/VF. CQ/PHY/OUTMUX DL/sensor source stay off.
- * Close stops only this input-inactive TG before receive enables and GIC,
+ * then normal CMOS/FLUSH/VF. It binds FBC, then enables the actual fixed
+ * PHY/MAC/AFIFO path and commits OUTMUX DL. CQ/sensor input stay off.
+ * Close stops only this input-inactive path and TG before receive/GIC,
  * never declaring frame/RAW/AXI/map retirement.
  * Before source-on it also binds that exact accepted FBC state. The actual
  * SOF/DONE filter records ordinary FBC counters; the worker requires two
@@ -210,6 +211,7 @@ static int cam_irq_credit_guard_locked(uint64_t epoch)
     }
     return e;
 }
+#include "x9_camera_source.inc"
 #include "x9_camera_irq_fbc.inc"
 /* Under spin, after actual IAR and only while accepting. Ordinary FIRST/FH
  * reads select exactly the vendor bank. No multi-tag fallback or status sweep. */
@@ -482,6 +484,7 @@ static int cam_irq_begin_locked(uint64_t epoch,const struct x9_camera_camsv_requ
     if(!e)e=cam_irq_controller();if(!e)e=cam_irq_idle();
     if(!e&&owns)e=cam_irq_config(false);
     if(!e&&cam_irq.slot->state!=X9_CAMSV_EMPTY&&cam_irq.slot->state!=X9_CAMSV_RETIRED)e=EBUSY;
+    if(!e)e=cam_source_admission_locked(epoch);
     if(!e) {
         arm_attempted=true;
         e=x9_camera_camsv_arm(cam_irq.slot,&r,&dma); /* real lease + per-page CIVAC */
@@ -538,6 +541,7 @@ static int cam_irq_begin_locked(uint64_t epoch,const struct x9_camera_camsv_requ
     if(!e)e=cam_sv_receive_transition_locked(epoch,false);
     if(!e)e=cam_sv_gate_transition_locked(epoch,false);
     if(!e)e=cam_irq_fbc_bind_locked(epoch);
+    if(!e)e=cam_source_transition_locked(epoch,false);
     if(e&&arm_attempted&&cam_irq.slot->state!=X9_CAMSV_EMPTY&&cam_irq.slot->state!=X9_CAMSV_RETIRED) {
         e=cam_irq_fault(e);lck_mtx_lock(&camera_camsv_lock);
         cam_camsv_retain(cam_irq.slot,e);lck_mtx_unlock(&camera_camsv_lock);
@@ -578,7 +582,8 @@ static int cam_irq_close_locked(uint64_t epoch)
     /* Retire this inactive receive arm's source enables before GIC masking.
      * This does NOT revoke credit/finish RAW or authorize dropping mappings.
      * A partial/foreign/active arm is retained, never fixed by blind disables. */
-    e=cam_sv_gate_quiesce_locked(epoch);
+    e=cam_source_quiesce_locked(epoch);
+    if(!e)e=cam_sv_gate_quiesce_locked(epoch);
     if(!e)e=cam_sv_receive_quiesce_locked(epoch);
     cam_irq.close_attempted=true;
     old=cam_irq_spin_take();cam_irq.accepting=false;owns=cam_irq.owns;

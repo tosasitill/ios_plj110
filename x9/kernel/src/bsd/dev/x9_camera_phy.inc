@@ -122,7 +122,10 @@ static int cam_phy_guard(void)
     e=cam_phy_clock_guard();if(e)return e;
     for(unsigned n=0;n<cam_phy.count;n++) {
         uint32_t v=cam_phy_read(n);
-        if(v!=cam_phy.reg[n].expected && !(n==cam_phy.pending_reg && v==cam_phy.pending_next))return ESTALE;
+        bool allowed=v==cam_phy.reg[n].expected || (n==cam_phy.pending_reg && v==cam_phy.pending_next);
+        e=cam_source_observe(cam_phy.bank[cam_phy.reg[n].bank],cam_phy.reg[n].offset,v,&allowed);
+        if(e)return e;
+        if(!allowed)return ESTALE;
     }
     for(unsigned b=0;b<2;b++)if(cam_phy.calibration_done&(1u<<b)) {
         unsigned n=CAM_PHY_NO_REG;

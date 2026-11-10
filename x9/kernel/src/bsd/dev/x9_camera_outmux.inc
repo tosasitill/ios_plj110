@@ -106,12 +106,16 @@ static int cam_out_environment(void)
     if(cam_rx_changed(&base,&live,port))return ESTALE;
     return cam_rx_busy(&live,port,cam_sv_fbc_busy_exemption(),
         cam_sv_receive_busy_exemption(0x040),cam_sv_gate_busy_exemption(0x140),
-        cam_sv_gate_busy_exemption(0x148))?EBUSY:0;
+        cam_sv_gate_busy_exemption(0x148),cam_source_busy_exemption(m->mac,0x40),0)?EBUSY:0;
 }
 static int cam_out_read_bank(unsigned bank,uint32_t v[CAM_OUT_REGS])
 {
     int e=cam_out_top_guard(false);if(e)return e;
-    for(unsigned n=0;n<CAM_OUT_REGS;n++)v[n]=cam_rr(cam_out.out[bank],cam_out_offset(n));
+    for(unsigned n=0;n<CAM_OUT_REGS;n++) {
+        bool allowed=false;
+        v[n]=cam_rr(cam_out.out[bank],cam_out_offset(n));
+        e=cam_source_observe(cam_out.out[bank],cam_out_offset(n),v[n],&allowed);if(e)return e;
+    }
     return 0;
 }
 /* During an ambiguous single shadow write only exact previous/next values
@@ -123,6 +127,7 @@ static int cam_out_guard_impl(void)
     int e;
     if(!cam_out.held)return 0;
     if(cam_out.epoch!=cam_rx_live.sensor_epoch || cam_rx_live.epoch!=cam_mm_live.epoch)return ESTALE;
+    e=cam_source_commit_guard();if(e)return e;
     e=cam_sv_guard();if(e)return e;
     e=cam_out_irq_control_guard();if(e)return e;
     e=cam_out_top_guard(false);if(e)return e;

@@ -62,19 +62,24 @@
  * are published, begin issues ONE RCNT and requires two actual both-bank
  * RCNT+1/CNT1/unchanged WCNT/DROP/reserved/control-clear observations.
  * It then confirms group0 SW_DONE, SRAM/tag0 ERR, tag0 SOF and IMG0A DMA_EN
- * in both banks, then CMOS/FLUSH/VF in normal order. PHY/MAC lanes/OUTMUX DL
- * and sensor source stay off; this is an input-inactive consumer arm, not
+ * in both banks, then CMOS/FLUSH/VF in normal order. After accepted FBC bind,
+ * begin enables the fixed PHY/MAC path and front-only AFIFO FLUSH_EN,
+ * then OUTMUX DL with its own fresh normal CFG_DONE. Sensor source stays
+ * off; this is an input-inactive receive path, not
  * a complete producer or a real frame. Incompatible inherited TG profiles
  * are refused before S1 arm, never repaired or considered native authority.
  * Cold configure_outmux still never writes an address, cookie or FBC.
  * Partial address/FBC/DB/credit/receive-enable publication retains
  * the cold epoch. No command retry/DB/reset cancels an issued credit; rearm
  * and CAMSV restore remain prohibited until real producer retirement exists.
- * Close first attempts actual TG_MODE_OFF/VF-off/TG-DB-up/down/CMOS-off,
+ * Close first reverses this input-inactive DL/PHY/AFIFO/MAC path, including
+ * DL's fresh commit, then attempts TG_MODE_OFF/VF-off/TG-DB-up/down/CMOS-off,
  * then quiesces this input-inactive receive arm. Each phase's full actual
  * both-bank target must be observed; no replay, reset or unknown-up cancel.
  * STOPPED retains TG_MODE_OFF/FLUSH, not the original cold profile. It does
  * not cancel credit, change RAW ownership or claim AXI/map drain.
+ * Core marks stream attempted BEFORE 0100=1; that state forbids inactive
+ * quiesce even before the first SOF. Live source/drain is not implemented.
  * The real IRQ worker additionally binds accepted FBC at begin and requires
  * owned SOF/DONE plus actual WCNT+1/CNT0 both-bank counts before CPU read.
  * That IRQ-private count evidence does not mutate the control-locked SV

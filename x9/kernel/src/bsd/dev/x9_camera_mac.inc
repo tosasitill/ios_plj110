@@ -79,6 +79,8 @@ static int cam_mac_guard(void)
            v==cam_mac.pending_next)allowed=true;
         if(n==cam_mac.cg_reg && cam_mac.cg_uncertain &&
            (v==cam_mac.reg[n].before || v==(1u<<cam_mac.status.csi_port)))allowed=true;
+        e=cam_source_observe(cam_mac.bank[cam_mac.reg[n].bank],cam_mac.reg[n].offset,v,&allowed);
+        if(e)return e;
         if(!allowed)return ESTALE;
     }
     return 0;

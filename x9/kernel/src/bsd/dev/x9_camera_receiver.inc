@@ -38,6 +38,11 @@ static int cam_irq_prepare_locked(uint64_t);
 static int cam_irq_guard_locked(uint64_t);
 static int cam_irq_close_locked(uint64_t);
 static int cam_irq_credit_guard_locked(uint64_t);
+/* Control-lock source ledger; actual observations precede cached comparisons. */
+static int cam_source_observe(vm_offset_t,unsigned,uint32_t,bool *);
+static uint32_t cam_source_compare_word(vm_offset_t,unsigned,uint32_t);
+static uint32_t cam_source_busy_exemption(vm_offset_t,unsigned);
+static int cam_source_commit_guard(void);
 static const unsigned cam_rx_out_offsets[X9_CAM_RX_OUT_WORDS]={
     0x000,0x004,0x008,0x00c,0x010,0x014,0x018,0x020,
     0x02c,0x034,0x038,0x100,0x104,0x108
@@ -63,12 +68,19 @@ static int cam_rx_sample(const struct cam_rx_maps *m,struct x9_camera_receiver_s
      * MM take, and no unsafe read after a changed parent or lost PM_ACK. */
     int e=cam_mm_guard(&cam_mm,true);if(e)return e;
     e=cam_smi_clock_guard();if(e)return e;
-    for(unsigned i=0;i<4;i++)s->mac[i]=cam_rr(m->mac,mac_offsets[i]);
+    for(unsigned i=0;i<4;i++) {
+        bool allowed=false;
+        s->mac[i]=cam_rr(m->mac,mac_offsets[i]);
+        e=cam_source_observe(m->mac,mac_offsets[i],s->mac[i],&allowed);if(e)return e;
+    }
     s->async_cfg=cam_rr(m->async,0);s->async_split=cam_rr(m->async,0xc);
     s->afifo=cam_rr(cam_mm.cam_cg,0x7dc);
     for(unsigned bank=0;bank<2;bank++) {
-        for(unsigned i=0;i<X9_CAM_RX_OUT_WORDS;i++)
+        for(unsigned i=0;i<X9_CAM_RX_OUT_WORDS;i++) {
+            bool allowed=false;
             s->out[bank][i]=cam_rr(m->out[bank],cam_rx_out_offsets[i]);
+            e=cam_source_observe(m->out[bank],cam_rx_out_offsets[i],s->out[bank][i],&allowed);if(e)return e;
+        }
         for(unsigned i=0;i<X9_CAM_RX_SV_WORDS;i++)
             s->sv[bank][i]=cam_rr(m->sv[bank],cam_rx_sv_offsets[i]);
         /* Record actual DMA-enable observations BEFORE the next sample,
@@ -82,17 +94,17 @@ static int cam_rx_sample(const struct cam_rx_maps *m,struct x9_camera_receiver_s
     return 0;
 }
 static uint32_t cam_rx_busy(const struct x9_camera_receiver_sample *s,unsigned port,uint32_t fbc0_mask,
-    uint32_t dma0_mask,uint32_t cmos_mask,uint32_t vf_mask)
+    uint32_t dma0_mask,uint32_t cmos_mask,uint32_t vf_mask,uint32_t phy_mask,uint32_t dl_mask)
 {
     uint32_t busy=0;
     /* PHY receiver enable or packet-pattern source, not an analog power
      * assertion. Do not attempt to stop/reset an inherited receiver. */
-    if((s->mac[2]&0xf003) || (s->mac[3]&5))busy|=1;
+    if((s->mac[2]&0xf003&~phy_mask) || (s->mac[3]&5))busy|=1;
     if(s->async_cfg&(1u<<port))busy|=2; /* test-model source */
     if(s->mac[0]&1)busy|=32;
     for(unsigned bank=0;bank<2;bank++) {
         const uint32_t *out=s->out[bank],*sv=s->sv[bank];
-        if((out[7]&(1u<<12)) || (out[8]&1) || (out[10]&1))busy|=4;
+        if((out[7]&(1u<<12)&~dl_mask) || (out[8]&1) || (out[10]&1))busy|=4;
         if(out[9]&1)busy|=32;
         if((sv[0]&~dma0_mask) || sv[1] || (sv[2]&1&~cmos_mask) || (sv[3]&1&~vf_mask))busy|=8;
         for(unsigned tag=0;tag<8;tag++) {
@@ -108,13 +120,19 @@ static uint32_t cam_rx_changed(const struct x9_camera_receiver_sample *a,
     const struct x9_camera_receiver_sample *b,unsigned port)
 {
     uint32_t changed=0;
-    if(memcmp(a->mac,b->mac,sizeof(a->mac)))changed|=1;
+    const struct cam_rx_maps *m=&cam_rx_maps[port==3?0:1];
+    static const unsigned mac_offsets[4]={0,4,0x40,0x70};
+    for(unsigned word=0;word<4;word++)
+        if(cam_source_compare_word(m->mac,mac_offsets[word],a->mac[word])!=
+           cam_source_compare_word(m->mac,mac_offsets[word],b->mac[word]))changed|=1;
     /* Shared async/AFIFO masks: unrelated AOV ports are not our ownership.
      * AFIFO portA and async split fields both use two-bit slots. */
     if(((a->async_cfg^b->async_cfg)&((1u<<port)|(1u<<(24+port)))) ||
        ((a->async_split^b->async_split)&(3u<<(2*port))) ||
        ((a->afifo^b->afifo)&(3u<<(2*port))))changed|=2;
-    if(memcmp(a->out,b->out,sizeof(a->out)))changed|=4;
+    for(unsigned bank=0;bank<2;bank++)for(unsigned word=0;word<X9_CAM_RX_OUT_WORDS;word++)
+        if(cam_source_compare_word(m->out[bank],cam_rx_out_offsets[word],a->out[bank][word])!=
+           cam_source_compare_word(m->out[bank],cam_rx_out_offsets[word],b->out[bank][word]))changed|=4;
     for(unsigned bank=0;bank<2;bank++)for(unsigned word=0;word<X9_CAM_RX_SV_WORDS;word++) {
         uint32_t av=a->sv[bank][word],bv=b->sv[bank][word];
         /* FBC's command bit has its own exact, one-issued transition. Only
@@ -159,7 +177,7 @@ static int cam_rx_inspect(void *arg)
     e=cam_rx_sample(m,&r->after);if(e)return e;
     r->flags|=X9_CAM_RX_SNAPSHOT;r->blockers&=~X9_CAM_RX_NEED_SNAPSHOT;
     r->stage=X9_CAM_RX_STAGE_CHECK;
-    r->busy=cam_rx_busy(&r->before,port,0,0,0,0)|cam_rx_busy(&r->after,port,0,0,0,0);
+    r->busy=cam_rx_busy(&r->before,port,0,0,0,0,0,0)|cam_rx_busy(&r->after,port,0,0,0,0,0,0);
     r->changed=cam_rx_changed(&r->before,&r->after,port);
     if(r->changed)return ESTALE;
     r->flags|=X9_CAM_RX_STABLE;
@@ -219,7 +237,7 @@ static int cam_rx_session_guard(void)
     struct x9_camera_receiver *r=&cam_rx_live.status;
     const struct cam_rx_maps *m=&cam_rx_maps[r->sensor==X9_CAMERA_BACK?0:1];
     unsigned port=r->sensor==X9_CAMERA_BACK?3:0;
-    uint32_t busy,changed,fbc0_mask,dma0_mask,cmos_mask,vf_mask;
+    uint32_t busy,changed,fbc0_mask,dma0_mask,cmos_mask,vf_mask,phy_mask,dl_mask;
     int e;
     if(!cam_rx_live.epoch || cam_rx_live.epoch!=cam_mm_live.epoch)return ESTALE;
     if(!(r->flags&X9_CAM_RX_SNAPSHOT))return cam_rx_live.error?cam_rx_live.error:ENXIO;
@@ -232,8 +250,10 @@ static int cam_rx_session_guard(void)
     fbc0_mask=cam_sv_fbc_busy_exemption();
     dma0_mask=cam_sv_receive_busy_exemption(0x040);
     cmos_mask=cam_sv_gate_busy_exemption(0x140);vf_mask=cam_sv_gate_busy_exemption(0x148);
-    busy=cam_rx_busy(&a,port,fbc0_mask,dma0_mask,cmos_mask,vf_mask)|
-        cam_rx_busy(&b,port,fbc0_mask,dma0_mask,cmos_mask,vf_mask);
+    phy_mask=cam_source_busy_exemption(m->mac,0x40);
+    dl_mask=cam_source_busy_exemption(m->out[0],0x20);
+    busy=cam_rx_busy(&a,port,fbc0_mask,dma0_mask,cmos_mask,vf_mask,phy_mask,dl_mask)|
+        cam_rx_busy(&b,port,fbc0_mask,dma0_mask,cmos_mask,vf_mask,phy_mask,dl_mask);
     changed=cam_rx_changed(&a,&b,port)|cam_rx_changed(&cam_rx_live.expected,&a,port)|
         cam_rx_changed(&cam_rx_live.expected,&b,port);
     r->after=b;r->busy|=busy;r->changed|=changed;

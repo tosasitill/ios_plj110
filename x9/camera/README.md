@@ -692,7 +692,7 @@ private credit 状态记录 EMPTY/PENDING/ACCEPTED、issued、seen/ack、complet
 
 close 在 GIC mask 前，先完成下一节限定的实际 TG stop，再最多一次 quiesce 这个输入仍未启动的 receive arm：按 normal disable 的限定子集顺序 DONE→ERR→SOF→DMA，每项唯一0 store及两次完整两bank消费。partial/未知/活动 arm 不通过盲写 disable 修复，失败终止并保留依赖。`RECEIVE_ARMED=256` 只描述四项使能消费，`RECEIVE_QUIESCENT=512` 只描述四项实际关闭；**两者均不是 READY、帧、RAW/AXI/map drain**。quiesce 不修改 accepted credit/CNT、S1/cache/slot，不发 reset/DB/RCNT，不完成或撤销未完 RAW；目前 issued credit 仍禁止 rearm/CAMSV restore/释放映射。
 
-下一步必须实现 PHY/MAC/AFIFO/OUTMUX source 的正常启停、owned SOF/DONE 与 RCNT/WCNT/CNT 因果消费，再接完整 RAW/AXI/IRQ/worker/map 退休；同时完成正常 SID80 attach、native owner/capture caller、持续 rate/MMQoS 和 iOS 实帧链。不得把 inactive arm 的局部编译或“四 enable 关闭”替代这些工作，全部采集链接通后才交唯一镜像。
+PHY/MAC/AFIFO/OUTMUX 的 input-inactive 正常启停现接在后面的 receive-path 阶段；sensor source 的实际发布、owned SOF/DONE 与 RCNT/WCNT/CNT 因果消费及完整 RAW/AXI/IRQ/worker/map 退休仍须继续。正常 SID80 attach、native owner/capture caller、持续 rate/MMQoS 和 iOS 实帧链也未完成。不得把 inactive arm 的局部编译或“四 enable 关闭”替代这些工作，全部采集链接通后才交唯一镜像。
 
 
 ### 正常 CAMSV CMOS/VF consumer gate 与 input-inactive stop
@@ -712,7 +712,7 @@ close 在 GIC mask 前，先完成下一节限定的实际 TG stop，再最多�
 
 S1 arm 之前先拒绝不兼容的 inherited SAT/MSTREAM/sub/downsample/RGBW、VF single/fr-con/delay/mux、JPG/TG DB-disable/escape 模式；不修复 inherited profile。其它 pixel/clock/timing/polarity/reserved 位原样保留且完整核对，兼容性筛查不是 native authority。持续核同一 immutable request/lease、power/config、实际 GIC publication 与无 sampled/pending/active/SOF 输入；accepted FBC1 完整值不变。未知、回退、owner/config/输入事件或超时 terminal retain，不 reset/retry/rebase。此阶段不启 PHY/MAC lanes/OUTMUX DL/sensor source。
 
-close 在 GIC mask 前最多一次 TG stop，再 receive quiesce；仅同一完整 ARMED 且输入未开始的 consumer。失败的部分 arm/DB 不能盲写 off 修复。`GATE_ARMED=1024` 只说明这些实际 controls 接受，`GATE_STOPPED=2048` 只说明 gate 实际关闭；stop 保留 TG_MODE_OFF/FLUSH，不恢复 cold profile。**均不是 READY、帧、RAW/AXI/map drain、信用取消或映射/供电释放许可**。issued credit 与 unfinished RAW slot 继续保留，真正 producer 与完整自然计数消费/全写链退休仍必须接通后才能复用或恢复。
+close 在 GIC mask 前先关闭后述 input-inactive receive path，再最多一次 TG stop 与 receive quiesce；仅同一完整 ARMED 且输入未开始的 consumer。失败的部分 arm/DB 不能盲写 off 修复。`GATE_ARMED=1024` 只说明这些实际 controls 接受，`GATE_STOPPED=2048` 只说明 gate 实际关闭；stop 保留 TG_MODE_OFF/FLUSH，不恢复 cold profile。**均不是 READY、帧、RAW/AXI/map drain、信用取消或映射/供电释放许可**。issued credit 与 unfinished RAW slot 继续保留，真正 producer 与完整自然计数消费/全写链退休仍必须接通后才能复用或恢复。
 
 
 ### 同一真实 SOF/DONE 的 FBC 计数与 CPU 读取门
@@ -725,4 +725,27 @@ close 在 GIC mask 前最多一次 TG stop，再 receive quiesce；仅同一完�
 
 实际 IRQ worker 在 `cam_irq_core_ready` 的真实 STREAMING 发布后、`x9_camera_camsv_finish` 的 CIVAC/CPU copy **之前**，调用 `cam_irq_fbc_done_locked`。仅一次10ms、10000poll上限的 readonly 两bank观察；每次 native `.check` 在 spin 外，真实 power/GIC/config 与 counters 在安全资格内检查，要求两次完整 final targets，最后 owner check 后再实际核 final controls/counters 与 deadline。超时/unknown/回退/冲突保留同一slot/backing/映射/依赖，不重试命令、补 RCNT、reset、取消信用或使用 caller consumed boolean。原 IRQ 日志输出 raw FBC/control/sampled，`X9 CAMERA DONE FBC` 输出 actual/seen/samples/count_accepted/errno。
 
-锁序仍 control→IRQ→slot；新的 record 由 IRQ spin 保护，worker **不取得 control mutex、不修改 SV journal**，避免 stop 持control锁 drain worker 的死锁。**count_accepted 仅表示该 DONE 的计数观察，不是 RAW/AXI/map drain，不能复用或撤 backing。** control-locked SV 的原 accepted-credit strict guard 暂不放宽；实际 upstream source publication/live counter state、自然消费后 stop/full bus/map retirement 与合法 repeat 仍须接通。PHY/MAC lanes/AFIFO/OUTMUX DL/sensor source、normal NS SID80 attach/持续 rate/MMQoS/native capture caller/iOS 实帧链仍未完整，因此不出中间镜像、不声称已拍摄。
+锁序仍 control→IRQ→slot；新的 record 由 IRQ spin 保护，worker **不取得 control mutex、不修改 SV journal**，避免 stop 持control锁 drain worker 的死锁。**count_accepted 仅表示该 DONE 的计数观察，不是 RAW/AXI/map drain，不能复用或撤 backing。** control-locked SV 的原 accepted-credit strict guard 暂不放宽；实际 sensor source publication/live counter state、自然消费后 stop/full bus/map retirement 与合法 repeat 仍须接通。下述 PHY/MAC/OUTMUX input-inactive 通路不补 normal NS SID80 attach、持续 rate/MMQoS、native capture caller 或 iOS 实帧链，因此不出中间镜像、不声称已拍摄。
+
+### 实际 PHY/MAC/OUTMUX 接收通路与 input-inactive 关闭
+
+**代码已接到真实 begin/close，不是 sensor stream-on、完整采集或可拍摄结果。** `x9_camera_source.inc` 的 admission 在 S1 arm 前检查同一 epoch 的 MAC、PHY calibration/timing/digital/CTLE、OUTMUX route 消费及 SMI clocks/A0/shared 全部已配置，无 pending/error；经现有 AP engine 实读两次 sensor `0100=0/0104=0`。这些配置 flags 与 standby 只作前提，真实 DMA `.check` 仍须独立证明完整 normal domain/route/rate/PHY/AP IRQ 与 retained range，不能用空闲或 nominal pclk 授权。
+
+begin 在 accepted FBC bind 后，直接执行一次以下固定正常字段序列。依据是 ISP8s PHY3.0 `csirx_mac_top_setting/mac_csi_setting/dphy_setting/cphy_setting`，不是旧 Qualcomm PHY 或 stress/reset 路线。
+
+| 顺序 | 前摄 DPHY4/4D1C | 后摄 CPHY3 |
+|---|---|---|
+| 1 | MAC-top `+40` mux mask3 → DPHY1 | 同字段 → CPHY2 |
+| 2 | MAC-A `+0` lanes maskf → f | 同字段 → 7 |
+| 3 | DPHY_TOP `+0` LC/LD maskf03 → f01 | CPHY_TOP `+0` LP trio mask7 → 7 |
+| 4 | PHY-A `+100` FLUSH_EN mask101 → 101 | CPHY_TOP `+168` valid-pipe mask7 → 7 |
+| 5 | PHY-B `+100` FLUSH_EN mask101 → 101 | OUTMUX outer `+20` DL bit12 → 1 |
+| 6 | OUTMUX outer `+20` DL bit12 → 1 | — |
+
+前摄要求已接受的 lane map 精确为 `80403102`。后摄**不复制前摄 AFIFO enable**。AFIFO `+100` 的 FILL_0 是控制，不是 RO；FLUSH_FLAG_CLEAR bit7/15/23 永不重放，真实 RO FLUSH_FLAG 在 `+104`，本阶段不读它或冒充 AXI drain。
+
+独立 source ledger 为每项保存 immutable prior/target、issued 与每 bank seen；先留 issued，再唯一 masked ordinary RW store，保留其它 controls。每次 receiver/MAC/PHY/OUTMUX 实际采样在下一读之前记目标，目标不能退回 prior；仅当前已发字段允许 exact prior/target 的历史比较跨度，第三值与任何真实回退锁存。非 OUTMUX 字段需两次完整实际 target，DL 先确认 outer 两次，然后**复用现有 `cam_out_commit`**：独立唯一 `+1c`，fresh WCLR-qualified CFG_DONE 与全 inner target，再单 bit W1C 退休，最后两次完整 both-bank target。不写 inner DL/tag/route、不扫历史或重触发。嵌套 commit/ack 的每次 full guard 也检查同一 native request 与 actual input-inactive GIC，callback 不在 spin。10ms 总 deadline 包含嵌套 commit 和最终 guard。
+
+close 在 TG/receive/GIC 之前，限定逆序关闭同一**完整** ARMED path：DL0及其 fresh commit → PHY/AFIFO → MAC lanes → mux，再原 TG stop/receive quiesce。失败的部分 arm、未知 commit、sampled input、自然计数变化或 owner 冲突均保留原 slot/backing/映射/供电，不补 enable/off/reset/RCNT。core 的 `session.stream` 在 `0100=1` **发出前**已记录，任何该 attempt 都禁止这个 inactive close，即使尚无 SOF 服务；它不是 caller drained boolean。source ledger 不修改 PHY cold owned bits，也不授予 credit 取消、RAW/AXI/map 退休或合法 repeat。日志 `X9 CAMERA RX PATH` 记录 epoch/request/sensor/off/phase/issued/pending/errno。
+
+后续仍必须接真实 sensor source publication 与 live immutable FBC 观察（首帧计数可先于 SOF 服务），实际 CPU copy/full RAW/AXI/IRQ/worker/map 退休及 repeat、normal NS/prior-preserving SID80、持续 rate/MMQoS、native owner/capture caller 和 iOS 前后实帧预览/照片。现有对象编译不能替代这些，完整链就绪后才构建唯一最终镜像。

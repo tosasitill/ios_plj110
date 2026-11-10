@@ -391,9 +391,14 @@ int x9_camera_camsv_finish(struct x9_camera_camsv_slot *, const struct x9_camera
  * It then writes only group0 SW_DONE, SRAM/tag0 ERR, tag0 SOF source enables
  * and IMG0A DMA_EN, each once with two complete actual both-bank observations.
  * Begin then journals CMOS_EN, FLUSH_ALL_SRC_DIS and VFDATA_EN in normal
- * order, each with two complete actual both-bank targets. CQ, PHY/MAC lanes,
- * OUTMUX DL and sensor stream stay off. RECEIVE_ARMED/GATE_ARMED describe
- * accepted controls, not a started upstream producer, frame or drain.
+ * order, each with two complete actual both-bank targets. After FBC bind,
+ * begin enables fixed PHY/MAC lanes, front-only A/B AFIFO FLUSH_EN and
+ * OUTMUX DL followed by a fresh CFG_DONE via the normal commit engine.
+ * Admission precedes S1, requires configured MAC/PHY/SMI/OUTMUX and actual
+ * sensor stream/hold off twice. Every unique write has immutable targets
+ * and actual monotonic observations; DL requires both-bank consumption.
+ * CQ and sensor stream stay off. Receive-path controls are not a started
+ * sensor producer, frame, native authority or RAW/AXI/map drain.
  * After full consumer arm, begin binds the actually accepted FBC counters.
  * The sole SOF/DONE IAR owner captures ordinary tag0 FBC controls/counters;
  * before CPU/cache access its worker requires two full both-bank observations
@@ -408,12 +413,15 @@ int x9_camera_camsv_finish(struct x9_camera_camsv_slot *, const struct x9_camera
  * automatic DMA reuse. State is cache-only, not source/AXI/map drain. An
  * issued credit currently blocks rearm/restore: producer retirement is not
  * implemented and EN-off/reset is not permission to revoke that credit.
- * Close can stop this input-inactive TG first (TG_MODE_OFF, VF off, TG DB
+ * Close first stops this input-inactive path in reverse (DL/CFG_DONE,
+ * PHY/AFIFO/MAC/mux), then TG (TG_MODE_OFF, VF off, TG DB
  * bit8 up/down, CMOS off), then quiesce receive enables before masking GIC.
  * Every TG DB phase requires its own actual target; unknown up cannot be
  * canceled by down. Cold-profile compatibility is checked before S1 arm,
  * not treated as native authority. No reset, blind replay or counter rebase;
  * accepted credit and RAW/lease/dependencies stay retained even after stop.
+ * A core-issued sensor stream attempt forbids this inactive quiesce even
+ * before the first IRQ; live stream/whole-producer retirement is still separate.
  * There is still no registered native capture caller. */
 int x9_camera_camsv_irq_begin(uint64_t, const struct x9_camera_camsv_request *,
     const struct x9_camera_camsv_dma *);

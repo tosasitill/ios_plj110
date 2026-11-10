@@ -126,8 +126,14 @@ static int cam_out_irq_require_wclr(void)
     int e=cam_out_guard();if(e)return e;
     if(!cam_out_irq.captured || !cam_out_irq.mode_ready || cam_out_irq.raw_disabled ||
        cam_out_irq.mode_bank<2)return EBUSY;
-    for(unsigned b=0;b<2;b++)
-        if(!(cam_rr(cam_out.out[b],0x20)&1))return cam_out_irq_poison(ESTALE);
+    for(unsigned b=0;b<2;b++) {
+        uint32_t control=cam_rr(cam_out.out[b],0x20);
+        bool allowed=false;
+        /* DL shares this ordinary word. A policy-only read is still an
+         * actual DL observation; don't conceal a brief target regression. */
+        e=cam_source_observe(cam_out.out[b],0x20,control,&allowed);if(e)return cam_out_irq_poison(e);
+        if(!(control&1))return cam_out_irq_poison(ESTALE);
+    }
     return 0;
 }
 static int cam_out_irq_sample(uint32_t *raw)
