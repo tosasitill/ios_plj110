@@ -302,7 +302,15 @@ reuse_data_call_info在913d4ee6..4efc按该usr增加引用；不能将ACT0一概
 因此ownership候选暂不采纳，normal203不是单操作减引用，也不夸大成必然摧毁foreign PDN。
 单boot transport资格候选的两个真实单位编译通过，但generic201/203封门必须与已验收typed WDS
 原子整合，尚未合入。DPMAIF目前used_channel同boot不重用，重连/切卡返回的release/drain屏障
-仍待实现；QoS/PCO非零、AlwaysOnPdu4e及PDP-family策略仍须真实映射，不算联网完成。
+仍待实现。unbind现会在关闭admission的同一lock内退休该mux未发布DMA的TX mailbox条目，
+即使DRB环满也不等tx_poll释放；其它mux FIFO保留，已发布DMA/completion不动。
+这只解决AP队列退休，不能授予MD release/RX drain/channel复用资格。
+
+PDPType3的原生forceDual路径是明确要求modem IPv4v6，并非“dual-capable” metadata；
+各family客户端4d=4/6只选择报告family，不允许请求前降成ACT IPv4。
+ACT103/u8的RIL/MD/D2CM协议3转换静态链已追通，但dual/partial-family settings与SLAAC
+仍缺闭环；typed候选尚未主线整合，当前主线PDP3→固定ACT1仍是未解决的下发缺口。
+QoS/PCO非零、AlwaysOnPdu4e也仍须真实无线消费者和请求转换，不算联网完成。
 
 ### 5. iOS 网络最终验证
 
