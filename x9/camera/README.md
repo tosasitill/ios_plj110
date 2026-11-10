@@ -137,6 +137,18 @@ provider 必须先确认真实 PASS1_DONE/group/tag/inner sequence 与本次 own
 
 **这实现了完成记录→RAW10 header→iOS 的绑定和拒绝路径，不是 CAMSV 硬件 completion、控制延迟、SMMUv3 mapping 或真实帧的实测。** 旧用户态 RAW10/ioctl ABI 未改，也没有新增诊断 ioctl；仍需真实采集 provider，不能拍摄。
 
+### CAMSV 单 tag 的完成资格层
+
+`x9_camera_camsv_arm/finish` 为真实 provider 提供 kernel-only 的 owned-slot 完成路径，不注册后端、不改变 READY，也不读取 MMIO 或新增 ioctl。arm 保存已绑定的 metadata、64-bit capture_id、预期硬件 inner sequence、tag/group 和 IOVA；必须有合法 domain/route/slot 的 lease 检查及 CPU cache 同步回调。16KiB 对齐及 16GiB dma-range 只是边界检查，不能证明映射成立；PM_GET、CPU PA 和空成功回调均不是 lease。
+
+唯一 IRQ owner 必须提供一次**一致的原始快照**：outer DONE `+0x348`、inner ERR `+0x350`、CQ STATUS `+0x1c`、inner FIRST/LAST_TAG 与该 tag 的 FH_SPARE，group_tags 来自该帧 SOF 的有效 group 绑定。读清状态只消费一次，worker 不补读；快照的 generation/capture_id 来自实际 slot journal，不能由硬件 counter 猜出。
+
+finish 优先拒绝错误；CQ setting-done 或普通 GP_DONE 单独返回 `EAGAIN`，不是帧。只接受目标 `SW_GP_PASS1_DONE`（bit16..19）、单 tag/group 及精确 inner sequence，outer 即使超前也不当作完成凭据。通过后重新验证 lease → sync_cpu → 再验证 lease → `x9_camera_deliver`，此前不读取 RAW。成功、CPU 背压或同步期间 stop 都退休 source；重复 finish 不重放。tag/group/序号歧义或 lease/cache 失败置终态 RETAINED，不 rearm、free、unmap 或撤依赖。重用退休 slot 时 capture_id 必须前进，32-bit inner sequence 只接受小于半周期的非零向前差值，允许 wrap 到零但不自动扩展成 capture_id。
+
+返回码不能单独决定 slot 归属：`EAGAIN + ARMED` 才是继续等完成，`EBUSY + RETIRED` 才是 CPU 背压丢帧；lease/cache 回调也可能返回同样 errno，但此时是 `RETAINED`，不能重试或回收。终态保留最初失败 errno。
+
+slot、raw、映射和回调 context 必须由 provider pin 到同步调用返回，capture(off) 必须先停硬件并排空这些 worker。**本层只实现快照资格检查、cache 回调顺序和交付路径，不证明 IRQ 快照来自硬件、SOF metadata 绑定、合法映射或实际 drain。** 目前没有调用它的真实 provider；SID80/domain 委派、rate/SMI/PHY/route、IRQ owner/采集启动仍缺，不能拍摄。
+
 ### CAMTG 时钟申请和诊断
 
 按 OPPO `clk-mt6993.c` → `clk-mux.c` → `hwccf_api.c` 的 v1 AP 路径实现，不能沿用旧版的两个假设：

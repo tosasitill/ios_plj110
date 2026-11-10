@@ -218,6 +218,21 @@ int x9_camera_register_platform(const struct x9_camera_platform *p)
     }
     lck_mtx_unlock(&camera_lock);lck_mtx_unlock(&camera_control_lock);return e;
 }
+static int cam_completed_layout(const struct x9_camera_sensor *s,
+    const struct x9_camera_completed_frame *f)
+{
+    return f->version!=X9_CAMERA_PLATFORM_VERSION || f->reserved || !f->raw ||
+        f->stride!=((s->width/4*5+63)&~63u) ||
+        (uint64_t)f->stride*s->height!=f->bytes || f->bytes>X9_CAMERA_MAX_BYTES ? EINVAL:0;
+}
+static int cam_completed_controls(const struct x9_camera_sensor *s,
+    const struct x9_camera_completed_frame *f)
+{
+    return f->frame_lines<s->frame_lines || f->frame_lines>s->frame_max ||
+        f->frame_lines%s->exposure_step || f->exposure_lines<s->exposure_min ||
+        f->exposure_lines>f->frame_lines-48 || f->exposure_lines%s->exposure_step ||
+        f->gain_code>s->gain_max ? EIO:0;
+}
 int x9_camera_deliver(const struct x9_camera_completed_frame *completed)
 {
     if(!completed)return EINVAL;
@@ -226,15 +241,10 @@ int x9_camera_deliver(const struct x9_camera_completed_frame *completed)
     const struct x9_camera_completed_frame f=*completed;
     lck_mtx_lock(&camera_lock);int e=0;const struct x9_camera_sensor *s=sensor();
     if(!(st.flags&X9_CAMERA_STREAMING) || f.generation!=st.generation || f.sensor!=st.sensor)e=ESTALE;
-    else if(f.version!=X9_CAMERA_PLATFORM_VERSION || f.reserved || !f.raw ||
-            f.stride!=((s->width/4*5+63)&~63u) ||
-            (uint64_t)f.stride*s->height!=f.bytes || f.bytes>X9_CAMERA_MAX_BYTES ||
+    else if(cam_completed_layout(s,&f) ||
             !f.capture_id || !f.time || f.time>mach_absolute_time())e=EINVAL;
     else if(f.capture_id<=last_capture_id || f.time<=last_capture_time)e=ESTALE;
-    else if(f.frame_lines<s->frame_lines || f.frame_lines>s->frame_max ||
-            f.frame_lines%s->exposure_step || f.exposure_lines<s->exposure_min ||
-            f.exposure_lines>f.frame_lines-48 || f.exposure_lines%s->exposure_step ||
-            f.gain_code>s->gain_max)e=EIO;
+    else e=cam_completed_controls(s,&f);
     if(!e) {
         last_capture_id=f.capture_id;last_capture_time=f.time;
         if(frame_readers)e=EBUSY; /* retire, never overwrite/replay a pinned CPU copy */
@@ -254,6 +264,7 @@ int x9_camera_deliver(const struct x9_camera_completed_frame *completed)
     } else {st.rejected++;st.last_errno=e;}
     lck_mtx_unlock(&camera_lock);return e;
 }
+#include "x9_camera_camsv.inc"
 static int cam_open(__unused dev_t d,int f,__unused int t,struct proc *p)
 {
     if(f&FWRITE) {

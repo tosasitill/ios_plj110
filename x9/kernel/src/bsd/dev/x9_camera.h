@@ -310,6 +310,61 @@ int x9_camera_register_platform(const struct x9_camera_platform *);
  * PASS1_DONE/tag/sequence, control application, drain or a DMA lease.
  * A valid record rejected with EBUSY is retired: replay returns ESTALE. */
 int x9_camera_deliver(const struct x9_camera_completed_frame *);
+/* ISP8s single-tag completion adapter. Kernel-only; does not allocate/map,
+ * reserve a route, collect read-clear IRQ registers or program DMA. The sole
+ * IRQ/route owner supplies ONE coherent snapshot, with group_tags latched for
+ * this frame at SOF and inner_sequence read from its tag's FH_SPARE register.
+ * CQ setting-done and input EOF alone never qualify a completed RAW buffer. */
+#define X9_CAMERA_CAMSV_VERSION 1u
+struct x9_camera_camsv_irq {
+    uint32_t version, reserved;
+    uint64_t generation, capture_id, time;
+    uint32_t first_tag, last_tag, group_tags[4];
+    uint32_t inner_sequence, outer_sequence;
+    uint32_t done_status, err_status, cq_status, reserved1;
+};
+struct x9_camera_camsv_request {
+    /* Frame-bound control state, not late I2C sampling. time must be zero:
+     * finish supplies the qualified IRQ completion time. raw/metadata stay
+     * immutable until finish returns or the owner proves stop/drain. */
+    struct x9_camera_completed_frame frame;
+    uint64_t iova;
+    uint32_t inner_sequence, tag, group, reserved;
+};
+struct x9_camera_camsv_dma {
+    uint32_t version, reserved;
+    void *context;
+    uint64_t lease;
+    /* Mandatory legal domain/route/slot lease check, including exact
+     * IOVA->raw range and cache policy. NOT PM_GET or a CPU-PA identity map.
+     * check never reads RAW or mutates hardware. sync_cpu runs only after
+     * qualified PASS1_DONE and must keep this buffer CPU-owned/immutable.
+     * Callbacks cannot re-enter camera/CAMSV APIs. */
+    int (*check)(void *, uint64_t lease, const struct x9_camera_camsv_request *);
+    int (*sync_cpu)(void *, uint64_t lease, const struct x9_camera_camsv_request *);
+};
+enum x9_camera_camsv_slot_state {
+    X9_CAMSV_EMPTY, X9_CAMSV_ARMED, X9_CAMSV_RETIRED, X9_CAMSV_RETAINED
+};
+/* Zero-initialize a kernel-owned slot before its first arm. After that only
+ * these APIs mutate it. The owner serializes result consumption/rearm/stop
+ * for each slot and pins the slot/callback context/raw/map
+ * until all synchronous calls return. capture(off) stops and drains hardware
+ * AND these workers before reporting success; this adapter cannot prove drain.
+ * RETAINED is terminal in this boot: no memset/rearm/free/unmap on an error. */
+struct x9_camera_camsv_slot {
+    struct x9_camera_camsv_request request;
+    struct x9_camera_camsv_dma dma;
+    uint32_t state, last_errno;
+};
+int x9_camera_camsv_arm(struct x9_camera_camsv_slot *,
+    const struct x9_camera_camsv_request *, const struct x9_camera_camsv_dma *);
+/* Thread context. EAGAIN with ARMED: no SW_GP_PASS1_DONE, keep waiting. EBUSY
+ * with RETIRED: qualified frame dropped by CPU backpressure (do not replay).
+ * Callback failures may return the SAME errno with RETAINED; always inspect
+ * state, not errno alone. ESTALE may be an obsolete IRQ/generation. A retained
+ * slot requires the owner's fault/drain path, not retry or dependency release. */
+int x9_camera_camsv_finish(struct x9_camera_camsv_slot *, const struct x9_camera_camsv_irq *);
 void sweet_x9_camera_init(void);
 #endif
 #endif
