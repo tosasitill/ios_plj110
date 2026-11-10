@@ -6188,6 +6188,16 @@
    "template": "bsd-c-4"
   },
   {
+   "name": "sweet_x9_microphone.o",
+   "source": "bsd/dev/sweet_x9_microphone.c",
+   "template": "bsd-c-4"
+  },
+  {
+   "name": "x9_mic_mt6993.o",
+   "source": "bsd/dev/x9_mic_mt6993.c",
+   "template": "bsd-c-4"
+  },
+  {
    "name": "sweet_x9_camera.o",
    "source": "bsd/dev/sweet_x9_camera.c",
    "template": "bsd-c-4"

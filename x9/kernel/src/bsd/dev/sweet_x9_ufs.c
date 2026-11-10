@@ -407,6 +407,8 @@ static int initialize(void)
  sweet_x9_torch_init();
  extern void sweet_x9_camera_init(void);
  sweet_x9_camera_init();
+ extern void sweet_x9_microphone_init(void);
+ sweet_x9_microphone_init();
  return 0;
 }
 /* Read-only query; never initializes hardware from an exec path. */

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>com.x9.microphone</string>
+<key>CFBundleName</key><string>X9Microphone</string>
+<key>CFBundleExecutable</key><string>X9Microphone</string>
+<key>CFBundlePackageType</key><string>BNDL</string>
+<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+<key>CFBundleVersion</key><string>1</string>
+<key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array>
+<key>CFPlugInTypes</key><dict>
+<key>443ABAB8-E7B3-491A-B985-BEB9187030DB</key>
+<array><string>0A73C059-1D1F-4E57-B197-BBF8A2C84873</string></array>
+</dict>
+<key>CFPlugInFactories</key><dict>
+<key>0A73C059-1D1F-4E57-B197-BBF8A2C84873</key><string>X9Microphone_Create</string>
+</dict>
+</dict></plist>

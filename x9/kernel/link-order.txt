@@ -361,6 +361,8 @@ x9:sweet_touch.o
 x9:sweet_x9_touch.o
 x9:sweet_x9_torch.o
 x9:sweet_x9_camera.o
+x9:sweet_x9_microphone.o
+x9:x9_mic_mt6993.o
 x9:sweet_x9_als.o
 xnu:bsd/DEVELOPMENT/sweet_i2c1.o
 xnu:bsd/DEVELOPMENT/sweet_cpufreq.o
