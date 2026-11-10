@@ -24,6 +24,7 @@ x9/kernel/generated/x9_wifi_nvram.inc
 # Vendor modem OTA configs embedded at build time; never commit firmware.
 x9/kernel/generated/x9_mdota.inc
 x9/kernel/generated/x9_baseband_firmware.inc
+x9/kernel/generated/x9_torch_bridge.inc
 
 # Local dependency snapshots, Apple inputs and private device state
 .local/

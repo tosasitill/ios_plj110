@@ -61,7 +61,7 @@ def node(name, props=(), children=()):
 
 
 def build(seed=None, timebase=TIMEBASE, console_base=0, console_size=0, ram_window="legacy512", wlan=False,
-          baseband=False):
+          baseband=False, torch=False):
     if ram_window not in RAM_WINDOWS:
         raise ValueError("unknown captured X9 RAM window")
     phys_base, mem_size = RAM_WINDOWS[ram_window]
@@ -147,6 +147,10 @@ def build(seed=None, timebase=TIMEBASE, console_base=0, console_size=0, ram_wind
     fb = node('sweet-fbcon', [ph(), ('reg', u64(FB, FB_SIZE)),
         ('width', u32(FB_W)), ('height', u32(FB_H)), ('stride', u32(FB_STRIDE))])
     product = node('product', [ph()] + product_properties())
+    if torch:
+        # D22AP camera-flash discovery, as in hackios. Only advertise a flash,
+        # not a supported ISP/capture camera or any Apple MMIO/GPIO routing.
+        product.children.append(node('camera', [ph(), ('flash', u32(1))]))
     root = node('device-tree', [ph(),
         ('compatible', cstr(COMPATIBILITY_BOARD) + cstr(COMPATIBILITY_PRODUCT) +
          cstr('mediatek,MT6993') + cstr('oppo,x9') + cstr('xiaomi,sweet') + cstr('AppleARM')),
@@ -178,10 +182,11 @@ def main():
     ap.add_argument('--console-size', type=lambda s: int(s, 0), default=0)
     ap.add_argument('--ram-window', choices=RAM_WINDOWS, default='legacy512')
     ap.add_argument('--baseband', action='store_true', help='include D22AP cellular discovery metadata (no hardware driver)')
+    ap.add_argument('--torch', action='store_true', help='advertise flash capability for x9_torch=3 integration')
     ap.add_argument('--dump', action='store_true')
     a = ap.parse_args()
     root = build(timebase=a.timebase, console_base=a.console_base, console_size=a.console_size, ram_window=a.ram_window,
-                 baseband=a.baseband)
+                 baseband=a.baseband, torch=a.torch)
     a.out.parent.mkdir(parents=True, exist_ok=True)
     blob = adt.serialize(root)
     a.out.write_bytes(blob)

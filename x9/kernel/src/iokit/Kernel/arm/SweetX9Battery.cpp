@@ -8,6 +8,21 @@
 #include <IOKit/pwr_mgt/IOPMPowerSource.h>
 #include "SweetBoard.h"
 #include "X9BatterySample.h"
+#include <kern/clock.h>
+#include <kern/locks.h>
+LCK_GRP_DECLARE(x9_battery_guard_group, "x9-battery-guard");
+LCK_MTX_DECLARE(x9_battery_guard_lock, &x9_battery_guard_group);
+static uint64_t guardSampleNS;
+static int guardTemperature;
+static uint64_t batteryNowNS(void) {
+    uint64_t t, ns; clock_get_uptime(&t); absolutetime_to_nanoseconds(t, &ns); return ns;
+}
+extern "C" int X9BatteryTorchTemperature(int *centi) {
+    lck_mtx_lock(&x9_battery_guard_lock);
+    bool valid = guardSampleNS && batteryNowNS() - guardSampleNS <= 15000000000ULL;
+    if (valid) *centi = guardTemperature;
+    lck_mtx_unlock(&x9_battery_guard_lock); return valid ? 0 : -1;
+}
 class SweetX9Battery : public IOPMPowerSource {
     OSDeclareDefaultStructors(SweetX9Battery);
 public:
@@ -64,6 +79,9 @@ extern "C" int X9BatteryReport(const X9BatterySample *b, unsigned size) {
         b->remaining_mah > b->full_mah || b->cycles < 0 ||
         (b->charge_capable && !b->external) ||
         (b->status == 1 && (!b->external || !b->charge_capable))) return -1;
+    lck_mtx_lock(&x9_battery_guard_lock);
+    guardTemperature = b->temperature_centi; guardSampleNS = batteryNowNS();
+    lck_mtx_unlock(&x9_battery_guard_lock);
     if (!source) {
         IOService *provider = IOService::getPlatform();
         if (!provider) return -2;
@@ -80,6 +98,7 @@ extern "C" int X9BatteryReport(const X9BatterySample *b, unsigned size) {
     return 0;
 }
 extern "C" void X9BatteryInvalidate(void) {
+    lck_mtx_lock(&x9_battery_guard_lock); guardSampleNS = 0; lck_mtx_unlock(&x9_battery_guard_lock);
     if (!source) return;
     source->invalidate();
 }

@@ -165,6 +165,14 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **重建/日志复核**:在仅含本轮蜂窝代码与1ce5010能力门修正的源码树运行`/Library/Frameworks/Python.framework/Versions/3.13/bin/python3 -I x9/build/build.py all --name <新的唯一名字> --boot-config /Users/tosasitill/ios_plj110/.local/x9/work/cellular-data-20261110/boot-config.json`。如后续确有新设备日志,用`rg -n 'X9 DPMAIF:|X9 WDS:|X9 MIPC:|COACHZ pdp:.*(active families|tx |rx )' ~/NNN.txt`先确认DMA高位/INIT_DONE→Start→ACT/GET/EIF→真实tx/rx;不能以`initialized`或Start成功单独验收。暂不要求用户启动另一试探镜像。
 - **未完成/验收边界**:①真实DPMAIF硬件初始化与DMA可达性;②iOS发出WDS Start及APN/protocol策略(174没有Start,本轮不以ACK或图标假造突破);③真正ACT→GET→EIF/IFUP→绑定→iOS HTTP/DNS收发,分别LTE和NR;④原代码仍禁止复用旧ccmni channel,需真实DEACT/IFDOWN和DMA排空证据后设计安全复用;⑤IPv6/profile/auth尚未实现。遵守HANDOFF112的“先反编译,不连续要求刷试探镜像”;当前编译不构成完成声明。
 
+### 并行功能交接(TORCH-1,2026-11-10): 手电筒初步开发与iOS桥已单文件交叉编译,未上机
+
+- **范围/观察**:查过UniXNU `ae68700`/`f0721e9`(未发现torch后端)、hackios `c84b463`、OPPO modules `4d505a42`。本机捕获DT为MT6379 flash/SID14/PMIF-P/三路,不是hackios的PM8350C。20H392 CMCapture UUID=`45d37488-2cc7-3028-8a4d-936bce7a220b`;实跑cache抽取符号和cache指令确认FigFlashlight→BWFigCaptureDeviceVendor→TorchLevel,含写失败返回分支。私有原始定位/编译日志`.local/x9/work/torch-20261110/`。
+- **实现**:`sweet_x9_torch.c`+ABI,从原生UFS初始化入口启动;`x9_torch=0`默认关闭,`=1`只读,`=2`25mA/2s一次脉冲,`=3`iOS受限writer(启动不点灯)。仅写ITORCH选中路及FLED_EN,复用PMIF锁;默认单路100mA/15s,硬上限100mA/30s;新鲜电池温度门、100ms故障/热/使能监控、超时必须先0、失败锁存、关灯读回失败不伪报dark。
+- **iOS集成**:`x9/torch/media_bridge.m`按20H392 UUID/IMP/7个准确调用返回点适配hackios的FigFlashlight专用vendor,保留真实vendor与非flashlight调用;写错误传回FigFlashlight。仅mode3发布`/product/camera/flash=1`并在PID1安装自有内容寻址dylib,每次mediaserverd exec核对内容/权限后附加DYLD环境;不改Apple程序/plist/分区、不覆盖不同文件、不自动清MG缓存。工具`torchctl`只编译,不自动部署/运行。技术使用文档`x9/torch/README.md`。
+- **当前编译里程碑**:自有iOS16 arm64桥与工具编译/adhoc签名通过,桥72464B;`sweet_x9_torch.o`、`SweetX9Battery.cpp.o`、`kern_exec.o`单文件交叉编译通过(已有风格warnings)。没有测试套件、CI、ADB/刷机/重启/分区写入。独立内核/boot打包仍待本轮后续完成,完成后在此补确切提交/产物。其他会话同时做蜂窝/ALS/蓝牙,提交不得夹带其未提交修改。
+- **未验收/约束**:尚无实体点灯、通道选择、关灯、控制中心RPC或新镜像启动结果。panic/停调度时可靠熄灭未实现;watchdog自行熄灭还未主动同步UI通知;MG缓存可能使按钮仍不出现。下一步先mode1读回(不点灯),再确认是否进行mode2/3实机验证;不连续要求用户刷探针镜像。插件275未改,无需mailbox。
+
 ### 光感并行交接(HANDOFF 113-ALS,2026-11-10): 原生 ALS HID / MTK 数据入口已编译;物理 SCP 尚未接通
 
 - **范围/提交**:本轮用户要求光线传感器初步开发及对接;代码 **`9323bcc`**(main,7个ALS相关文件),没有主动push/CI run、设备访问/写入/flash/reboot、插件重建或测试套件。不覆盖本节蜂窝主线及其他会话的手电筒/蓝牙/电池修改。

@@ -359,6 +359,7 @@ x9:sweet_sample.o
 xnu:bsd/DEVELOPMENT/sweet_keys.o
 x9:sweet_touch.o
 x9:sweet_x9_touch.o
+x9:sweet_x9_torch.o
 x9:sweet_x9_als.o
 xnu:bsd/DEVELOPMENT/sweet_i2c1.o
 xnu:bsd/DEVELOPMENT/sweet_cpufreq.o

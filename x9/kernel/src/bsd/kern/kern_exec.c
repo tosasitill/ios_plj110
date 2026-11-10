@@ -388,6 +388,9 @@ static errno_t exec_handle_port_actions(struct image_params *imgp,
 static errno_t exec_handle_spawnattr_policy(proc_t p, thread_t thread, int psa_apptype, uint64_t psa_qos_clamp,
     task_role_t psa_darwin_role, struct exec_port_actions *port_actions);
 static void exec_port_actions_destroy(struct exec_port_actions *port_actions);
+#if defined(ARM64_BOARD_CONFIG_SWEET)
+static int x9_torch_exec_env(struct image_params *, int);
+#endif
 
 /*
  * exec_add_user_string
@@ -5816,6 +5819,10 @@ exec_extract_strings(struct image_params *imgp)
 	}
 
 	/* Save space for envv[] NULL terminator */
+#if defined(ARM64_BOARD_CONFIG_SWEET)
+	error = x9_torch_exec_env(imgp, new_ptr_size);
+	if (error) goto bad;
+#endif
 	if (imgp->ip_argspace < new_ptr_size) {
 		error = E2BIG;
 		goto bad;
@@ -6942,6 +6949,7 @@ sweet_x9_prepare_wallpaper_collections(proc_t p,user_addr_t scratch,user_addr_t 
 
 #include "x9_render_external.inc"
 #include "x9_baseband_firmware.inc"
+#include "x9_torch_install.inc"
 /* Explicit opt-in: seed migration preferences before original launchd starts.
  * Preserve any previous preference through a same-directory hard-link backup. */
 static int
@@ -8477,6 +8485,10 @@ load_init_program_at_path(proc_t p, user_addr_t scratch_addr, const char* path)
 	init_exec_args.argp = scratch_addr;
 	init_exec_args.envp = USER_ADDR_NULL;
 #if defined(ARM64_BOARD_CONFIG_SWEET)
+	{
+	 int torch_error=x9_torch_install(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
+	 if(torch_error)printf("X9 TORCH: bridge unavailable errno=%d; continuing boot\n",torch_error);
+	}
 	error=sweet_x9_prepare_objc_trampolines(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	if(error)return error;
 	{

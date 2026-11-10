@@ -403,6 +403,8 @@ static int initialize(void)
   * once the native root has completed initialization and threads are usable. */
  extern void sweet_x9_touch_init(void);
  sweet_x9_touch_init();
+ extern void sweet_x9_torch_init(void);
+ sweet_x9_torch_init();
  return 0;
 }
 /* Read-only query; never initializes hardware from an exec path. */
