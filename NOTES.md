@@ -74,7 +74,7 @@ X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>      # 之后再�
 ## 3. 当前基线镜像与参数
 
 最新实测:**x9-rev252ic-md**(168,见HANDOFF102;LTE-only注册稳定,仍不拨号);再前 **x9-rev252ib-md**(167,见HANDOFF101);再前 **x9-rev252ia-md**(166,见HANDOFF100);再前 **x9-rev252hz-md**(165,见HANDOFF99);再前 **x9-rev252hy-md**(164,见HANDOFF98);再前 **x9-rev252hx-md**(163,见HANDOFF96);再前 **x9-rev252hw-md**(162,见HANDOFF95);再前 **x9-rev252hv-md**(161,见HANDOFF94;MIPC就绪、UIM读通);再前 **x9-rev252hu-md**(160,见HANDOFF93;RAM 10.0GiB生效);再前 **x9-rev252ht-md**(159,见HANDOFF92);再前 **x9-rev252hs-md**(158,见HANDOFF91;MIPC/DPMAIF在prepare/OPEN即隔离,UIM卡状态被拒);前一实测 **x9-rev252hl-md**(代码提交 **`20c64f2`**,构建交接 `0f9d983`),boot.img **12877824 B=12.28125MiB**,路径 `x9/out/x9-rev252hl-md/boot.img`。**157确认完整11文件安装成功、qdsp可读、Sahara finished并进入QMUX/QMI,握手摘要reset=0;真实iOS蜂窝尚未打通**,见HANDOFF87。独立34MiB固件与插件275不需再stage。
-最新实测:**x9-rev252ie-md**(171,见HANDOFF105;槽泄漏基本解决,SpringBoard上滑后静默退出,磁盘40MiB)。当前未上机候选:**x9-rev252ig-md**(if + 根盘扩容x9_rootgrow=1,新manifest 32GiB,见HANDOFF106;if未单独上机);更早候选 **x9-rev252hq-md**(代码`ccbad81`),boot.img12906496B;沿用hn AT→QMI,新增DPMAIF只读/分配探针和WDS前置状态查询,见HANDOFF89。hq默认`x9_dpmaif=1`,不初始化硬件或激活PDP;hn保留。最新实测仍hl;不要把候选当作SIM/蜂窝已验证。
+最新实测:**x9-rev252ie-md**(171,见HANDOFF105;槽泄漏基本解决,SpringBoard上滑后静默退出,磁盘40MiB)。当前未上机候选:**x9-rev252ih-md**(ig + 双卡uim3 + NR SA nr1合并,双卡/SA默认开,32GiB manifest,见HANDOFF107);ig/if未单独上机;更早候选 **x9-rev252hq-md**(代码`ccbad81`),boot.img12906496B;沿用hn AT→QMI,新增DPMAIF只读/分配探针和WDS前置状态查询,见HANDOFF89。hq默认`x9_dpmaif=1`,不初始化硬件或激活PDP;hn保留。最新实测仍hl;不要把候选当作SIM/蜂窝已验证。
 回退:**x9-rev252hk-md**(修复提交 `d1f8515` + 当时未提交的渲染改动,现已入库),boot.img **15278080 B**;156确认reserve生效、efs1.bin已有1MiB,当时15次reset及零传输见HANDOFF84。
 本机回退镜像:`x9/out/x9-rev252hk-md/boot.img`;hl/hk配置沿用 `.local/x9/modem/boot-rev252hi-md.json`。
 157已越过缺qdsp的前置阻塞,**当前阻塞在X9的QMI→MTK适配**:UIM/NAS/DMS/WDS/WDA/DPM请求实际到达后返回0x5e,数据端口配置失败,四个PDP接口仍blocked/tx=rx=0。Sahara是兼容桥交互,不向物理MTK下载Apple固件;PCIControl methods仍0x0,不能说PCIControl已通。以下GPU专用基线与参数为 **2026-11-08 历史记录**,不要当作hk/hl参数直接复用。
@@ -152,7 +152,17 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
 
-## 7. 当前交接(HANDOFF 106,2026-11-10): 根盘扩容+16GiB——扩展文件已分配(无raw写),ig带x9_rootgrow=1待上机
+## 7. 当前交接(HANDOFF 107,2026-11-10): 三线合并为ih——main(ig根盘扩容/if/ie)+双卡uim3+NR SA nr1;双卡与SA默认开
+
+- **背景**:用户说已合并并push双卡/5gsa;实际核对时两者只在Mac本地分支( 71ce384/58a823b, dde26eb/e8bb41f),各自单独成像(uim3、nr1,都用旧16GiB manifest),均未push、未互相合并;Mac main另有未push文档提交5d53837。用户选择"2"(合成一个镜像、双卡与SA都默认开),两个codex CLI会话已退出、分支均已提交后才合并。
+- **合并**(独立worktree ,分支):origin/main 0eae168 ← work/dual-sim(无冲突)← x9-nrsa(冲突仅NOTES与x9_modem.inc的build字符串)← Mac main 5d53837(仅NOTES)。X9QMIAT.inc自动合并后人工核对:NR SA SysInfo(0x4b响应/0x4d指示,需C5GREG注册且COPS AcT=11)与LTE 0x19、ECSQ两行解析、双卡路由互不覆盖。
+- **boot-args 607B上限**:ig已591B,加超限。改为**x9_rootgrow默认开**(设备不大于HFS时no-op;关闭),提交2407e0b;ih参数603B。
+- **x9-rev252ih-md**:构建exit0,boot.img 12967936B,warning 1417(+5来自双卡/NR代码),ADT根盘32GiB,参数含;产物,日志。插件不变,无需mailbox staging。
+- **已知限制(未做)**:(1)双卡UI与NR在CommCenter侧各有D22能力门(GsmRadioPersonality+0x241 / +0x121),两个分支都只**离线准备**了dyld cache补丁副本,**未安装**——ih只提供内核/桥的双卡路由与NR SysInfo,设置里能否出现双卡、5G图标取决于这些门,预计仍不显示。(2)信号格:只取ECSQ的LTE行;驻留SA时NR行(Act 0x8000)不报→可能无信号格。(3)关掉LTE-only后MD可能先注册SA(167: 24s SA,54s才LTE),168/171那种稳定LTE注册不保证;回退=去掉该参数。
+- **根盘**:ih首次启动会把HFS扩到32GiB(HANDOFF106)。之后uim3/nr1/ig之前的所有旧manifest镜像都无法挂载根盘。
+- 下一步由用户手动:,日志(≥3分钟,两卡在机,做几次底边上滑)。看、/SIM2回复、/、、。
+
+### 前次交接(HANDOFF 106,2026-11-10): 根盘扩容+16GiB——扩展文件已分配(无raw写),ig带x9_rootgrow=1待上机
 
 - **用户批准**:"再扩 16g adb 已连接"(只批准扩容;**未批准**清崩溃报告,未做)。
 - **设计**:根盘文件不动。新建第二个专用pinned+immutable文件`/data/local/tmp/x9-ios-pan92-20261027-1215/iosroot-extension-1.hfs`(16GiB),manifest新增`extension_policy`;`ufs_root_manifest.device()`把root‖extension拼成一个设备导出到ADT(`x9-ufs-root-bytes`/`write-contract`=32GiB,extents 709+4130=4839,上限16384)。内核`sweet_x9_ufs.c`对可写根盘允许HFS≤设备(只读根盘仍须相等);`x9_rootgrow=1`时PID1调用`x9_hfs_grow_root`(hfs_readwrite.c)→Apple原生`hfs_extendfs`(HFSIOC_RESIZE_VOLUME同一路径,journaled,扩bitmap,写新备用卷头),设备=文件系统时no-op。日志`X9 ROOTGROW: HFS a MiB -> b MiB errno=e`,以及`X9 UFS NATIVE ROOT: HFS ... on a ... device`。
