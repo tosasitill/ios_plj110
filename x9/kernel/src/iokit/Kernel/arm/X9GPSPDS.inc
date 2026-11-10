@@ -157,6 +157,10 @@ static bool x9g_send(uint32_t local, uint32_t port, const uint8_t *req, unsigned
         s.mnl_session_stop_queued,s.mnl_session_stop_posted,s.mnl_session_stop_completed,
         s.mnl_session_stop_signal,s.mnl_session_inflight,s.mnl_session_id,
         s.mnl_session_hardware,s.mnl_session_stop_time,s.mnl_session_errno);
+   if(s.firmware_present || s.firmware_started || s.firmware_errno)
+    printf("X9 GPS PDS: retained image identity present/started/matched %u/%u/%u bytes %u checked %llu leases %llu errno %d (not selected ROM/signature/EMI/NV or receiver authority)\n",
+        s.firmware_present,s.firmware_started,s.firmware_complete,s.firmware_bytes,
+        s.firmware_checked_bytes,s.firmware_checks,s.firmware_errno);
    if(s.pvt_received)
     printf("X9 GPS PDS: native PVT reports %llu no-fix %llu rejected %llu delivered %llu retired %llu mask %x errno %d (not a readiness lease)\n",
         s.pvt_received,s.pvt_no_fix,s.pvt_rejected,s.pvt_delivered,s.pvt_retired,

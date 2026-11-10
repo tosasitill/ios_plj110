@@ -56,6 +56,16 @@ struct x9_gps_connv2_ops {
   * Provision/qualify an actual ROM boot image for this board. Android's
   * zero-length ROM-only load is NOT proof of a usable XNU boot image.
   * Must not release reset, reenter HIF, or relinquish the resource lease.
+  * With an explicit gps_firmware build input, the worker then reads ONLY
+  * CONN_RO[0,3c0000) and matches the retained/provisioned outer512-stripped
+  * payload's length/SHA256 before releasing reset. Qualify exclusive safe
+  * AP image access for this complete interval as part of this callback;
+  * no conflicting cached aliases or old BGF DMA. No native image clear,
+  * signature bypass or writable image upload is performed. The digest
+  * is identity only; this callback still owns selected ROM/image/secure
+  * EMI qualification. Native INIT NULL/0 additionally requires that real
+  * read to have succeeded; absent metadata preserves legacy caller mode
+  * but cannot opt into native defaults. No second read/reset on failure.
   * May explicitly call x9_gps_nv_prepare() (x9_gps_nv.h) with a REAL cold/
   * live NV authority verifier. Old registration/acquire contracts alone
   * do not opt into native NV clearing. No native NV/persistent producer

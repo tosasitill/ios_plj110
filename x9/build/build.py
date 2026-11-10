@@ -21,6 +21,8 @@ Inputs:
                              ("wifi_firmware" in local.json overrides; absent = stub)
   .local/x9/modem/mdota     vendor MCF configuration, embedded as the modem's T: drive
                              ("mdota_source" overrides; real-radio all builds reject stubs)
+  .local/x9/gps-fw/connsys_gnss.bin  complete MTK GNSS container; length/SHA256 only
+                             ("gps_firmware" overrides; GPS-enabled builds require it)
   .local/x9/baseband/Mav17-9.00.02.Release.bbfw  original Apple ABM assets, not physical MTK firmware
                              ("baseband_firmware" in local.json overrides; absent = explicit stub)
 
@@ -55,7 +57,7 @@ def load_config(path):
     missing = [k for k in REQUIRED if not cfg.get(k)]
     if missing:
         sys.exit(f'{path}: missing {", ".join(missing)}')
-    for key in ('dxb', 'root_manifest', 'wifi_firmware', 'bluetooth_firmware', 'wifi_nvram', 'mdota_source', 'carrier_cbn_ipcc'):
+    for key in ('dxb', 'root_manifest', 'wifi_firmware', 'bluetooth_firmware', 'gps_firmware', 'wifi_nvram', 'mdota_source', 'carrier_cbn_ipcc'):
         if cfg.get(key):
             path = Path(cfg[key]).expanduser()
             cfg[key] = str(path if path.is_absolute() else ROOT / path)
@@ -96,6 +98,40 @@ def radio_arg(args, name):
             except ValueError:
                 sys.exit(f'invalid radio boot arg: {arg!r}')
     return 0
+
+
+def gps_enabled(args):
+    # PE_parse_boot_argn_internal's non-boolean loop writes EVERY exact
+    # match: last value wins, and bare numeric flags mean 1. Explicit
+    # x9_gps still overrides x9s bit2. Reject ambiguous string/overflow
+    # selectors instead of compiling an apparently successful stub.
+    def value(name, default):
+        result = default
+        for arg in args:
+            key, sep, text = arg.partition('=')
+            if key == name:
+                if not sep:
+                    result = 1
+                    continue
+                try:
+                    sign = -1 if text.startswith('-') else 1
+                    number = text[1:] if sign < 0 else text
+                    scale = 1
+                    if number[-1:] in ('k', 'K', 'm', 'M', 'g', 'G'):
+                        scale = 1024 ** ('kmg'.index(number[-1].lower()) + 1)
+                        number = number[:-1]
+                    radix = 16 if number.startswith('0x') else 2 if number.startswith('0b') else 8 if len(number) > 1 and number.startswith('0') else 10
+                    digits = number[2:] if radix in (16, 2) else number
+                    alphabet = '0123456789abcdef'[:radix]
+                    if not digits or any(c.lower() not in alphabet for c in digits):
+                        raise ValueError
+                    result = sign * int(digits, radix) * scale
+                    if not -(1 << 31) <= result < (1 << 31):
+                        raise ValueError
+                except ValueError:
+                    sys.exit(f'invalid GPS boot arg: {arg!r}')
+        return result
+    return value('x9_gps', 1 if value('x9s', 0) & 4 else 0) == 1
 
 
 class Builder:
@@ -201,6 +237,14 @@ class Builder:
         bt = Path(self.cfg.get('bluetooth_firmware') or fw).expanduser()
         self.run_or_exit([sys.executable, '-I', str(X9 / 'tools/bluetooth_firmware.py'), '--src', str(bt)], ROOT,
                          label='bluetooth_firmware.py')
+        # Match sweet_x9_gps.c: explicit x9_gps overrides compact x9s bit4.
+        # This is a firmware identity, not an automatic download/boot lease.
+        real_gps = gps_enabled(boot_args)
+        gps_fw = Path(self.cfg.get('gps_firmware') or ROOT / '.local/x9/gps-fw/connsys_gnss.bin').expanduser()
+        self.run_or_exit([sys.executable, '-I', str(X9 / 'tools/gps_firmware.py'),
+                         '--src', str(gps_fw), '--metadata', str(self.out / 'gps-firmware.json')] +
+                        (['--required'] if real_gps or self.cfg.get('gps_firmware') else []),
+                        ROOT, label='gps_firmware.py')
         # Device Wi-Fi NVRAM -> generated/x9_wifi_nvram.inc (gitignored; stub when absent)
         nv = Path(self.cfg.get('wifi_nvram') or ROOT / '.local/x9/wifi-nvram/WIFI').expanduser()
         self.run_or_exit([sys.executable, '-I', str(X9 / 'tools/wifi_nvram.py'), '--src', str(nv)] +
@@ -388,7 +432,7 @@ def main():
     b = Builder(cfg, out, a.dry_run, a.jobs)
     # Validate source requirements against the very same argument list that
     # will be packaged, before compiling an apparently successful stub image.
-    radio_args = boot_options(a.boot_config, a.boot_arg)['boot_args'] if a.step == 'all' else ()
+    radio_args = boot_options(a.boot_config, a.boot_arg)['boot_args'] if a.step in ('all', 'kernel') else ()
     if a.step == 'plugins' and a.revision is None:
         sys.exit('plugins needs --revision N')
     if a.revision is not None and a.step in ('plugins', 'all'):

@@ -128,6 +128,12 @@ struct x9_gps_status {
  uint32_t mnl_session_id;
  uint64_t mnl_session_hardware,mnl_session_stop_time;
  int32_t mnl_session_errno;
+ /* Exact build-input payload identity in retained CONN_RO while MCU reset
+  * is held. NOT signature/selected-ROM/MPU authority, NV or receiver READY.
+  * Prefix/check counters remain visible after a partial read/lease error. */
+ uint32_t firmware_present,firmware_started,firmware_complete,firmware_bytes;
+ uint64_t firmware_checks,firmware_checked_bytes;
+ int32_t firmware_errno;
 };
 struct x9_gps_nmea {
  uint64_t sequence, generation, host_time;

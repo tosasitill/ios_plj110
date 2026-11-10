@@ -207,6 +207,14 @@ static struct {
   uint32_t id;
   int error;
  } session;
+ struct {
+  volatile uint8_t *p;
+  struct sha256 sha;
+  uint8_t scratch[1024],digest[32]; /* off-stack, never a QRTR buffer */
+  uint64_t checks,checked_bytes;
+  unsigned started,complete;
+  int error;
+ } firmware;
 } gps_rt;
 static void gps_runtime_pause(unsigned us)
 {
@@ -448,6 +456,7 @@ static int gps_mcu_remap(void)
  MCU_TRY(gps_mcu_raw_expect(0x40c16014,UINT32_MAX,0x02200000));
  gps_rt.remapped=1; return 0;
 }
+#include "x9_gps_image.inc"
 static int gps_mcu_pll(void)
 {
  MCU_TRY(gps_mcu_set(F_mon,1)); MCU_TRY(gps_mcu_set(F_system,0));
@@ -903,6 +912,10 @@ int x9_gps_runtime_mnl_command(uint64_t generation,uint8_t slot_seq,
   if(gps_rt.out_count[0] || gps_rt.out_count[1] ||
       (gps_rt.hif.pending&((1u<<2)|(1u<<4))))return EAGAIN;
   if(gps_rt.mcusys.state!=X9_GPS_MCUSYS_CONTROLLER)return EAGAIN;
+  /* Cold native defaults cannot operate on an empty/foreign ROM image.
+   * Identity was actually checked in IMAGE before reset release. It is
+   * an extra gate, never substitute ROM/NV/power/selected-boot authority. */
+  if(!gps_rt.firmware.complete)return ENXIO;
   /* There must not have been a pre-native STOP signal in this reset
    * epoch. It cannot be reclassified as a future native STOP response. */
   if(gps_rt.mnl_control.stop_done)return EPROTO;
@@ -1117,6 +1130,7 @@ static int gps_runtime_bringup(void)
  gps_rt.in_provision=0;
  if(gps_nv.error)return gps_nv.error;
  if(provision)return provision;
+ MCU_TRY(gps_image_validate());
  MCU_TRY(gps_mcu_expect(F_reset,0)); gps_rt.image=1;
  const struct x9_gps_hif_ops ops={gps_runtime_owned,gps_runtime_control,
      gps_runtime_mnl,gps_runtime_ccif,NULL};
