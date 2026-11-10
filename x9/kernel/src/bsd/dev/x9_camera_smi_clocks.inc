@@ -5,7 +5,7 @@
  * subcomm1 and 1_1 share the SAME physical R1A bit13; take it only once.
  * Upstream mtk_smi_bus_enable recursively enables suppliers first. Its
  * config_port/common QoS/routing writes are NOT implied by these clocks.
- * Never write VCP/display skip-rpm suppliers, protected/nonsec ports,
+ * Never write VCP/display skip-rpm suppliers, protected/MMU/path fields,
  * aggregate votes, physical CG_SET, AL maps, shared resets or IRQ history.
  */
 #include "x9_camera_smi_clocks.h"
@@ -27,6 +27,9 @@ static struct {
     int error;
     struct x9_camera_smi_clock_status status;
 } cam_smi;
+static int cam_smi_a0_guard(void);
+static int cam_smi_a0_open_locked(void);
+static int cam_smi_a0_close_locked(void);
 static bool cam_smi_clocks_held(void) { return cam_smi.held; }
 static void cam_smi_status(void)
 {
@@ -73,7 +76,7 @@ static void cam_smi_sample(unsigned n,uint32_t v[3])
     v[2]=cam_rr(g->cg,0)&g->mask;
     cam_smi.status.ap[n]=v[0];cam_smi.status.global[n]=v[1];cam_smi.status.gate[n]=v[2];
 }
-static int cam_smi_clock_guard(void)
+static int cam_smi_clock_only_guard(void)
 {
     int e;
     if(!cam_smi.held)return 0;
@@ -97,6 +100,11 @@ static int cam_smi_clock_guard(void)
         }
     }
     return 0;
+}
+static int cam_smi_clock_guard(void)
+{
+    int e=cam_smi_clock_only_guard();
+    return e?e:cam_smi_a0_guard();
 }
 static int cam_smi_slot_take(unsigned n)
 {
@@ -180,7 +188,11 @@ static int cam_smi_clocks_close_locked(uint64_t epoch)
     if(!cam_smi.held)return 0;
     if(epoch!=cam_smi.epoch || cam_smi.close_attempted)return ESTALE;
     cam_smi.close_attempted=true;
-    e=cam_smi_pending_retire();if(!e)e=cam_smi_clock_guard();
+    e=cam_smi_pending_retire();if(!e)e=cam_smi_clock_only_guard();
+    /* Port controls retire while BOTH supplier and consumer clocks remain
+     * held. A pending A0 write is qualified by its own sole close below. */
+    if(!e)e=cam_smi_a0_close_locked();
+    if(!e)e=cam_smi_clock_guard();
     if(!e)e=cam_rx_session_guard();
     if(!e)e=cam_smi_larb_idle();
     for(unsigned i=CAM_SMI_SLOTS;i&&!e;i--) {
@@ -207,8 +219,10 @@ static int cam_smi_clocks_close_locked(uint64_t epoch)
     else cam_smi_fault(e);
     cam_smi.status.restore_errno=e;cam_smi_status();
     printf("X9 CAMERA SMI CLOCK CLOSE: sensor=%u flags=%x errno=%u restore=%d pending=%u seen=%x "
-        "(clock restoration only; NOT SMI/AXI/worker drain)\n",cam_smi.status.sensor,
-        cam_smi.status.flags,cam_smi.status.last_errno,e,cam_smi.pending,cam_smi.seen);
+        "a0=%x/%x/%u (inactive port/clock restoration; NOT SMI/AXI/worker drain)\n",
+        cam_smi.status.sensor,cam_smi.status.flags,cam_smi.status.last_errno,e,
+        cam_smi.pending,cam_smi.seen,cam_smi.status.a0.flags,cam_smi.status.a0.owned,
+        cam_smi.status.a0.pending);
     return e;
 }
 static int cam_smi_clocks_open_locked(uint64_t epoch,unsigned sensor)
@@ -239,9 +253,12 @@ static int cam_smi_clocks_open_locked(uint64_t epoch,unsigned sensor)
     }
     if(!e)e=cam_smi_larb_idle();
     if(!e) {cam_smi.status.stage=4;cam_smi.status.flags|=X9_CAM_SMI_CLOCKS_CONFIGURED;}
+    if(!e) {cam_smi.status.stage=5;e=cam_smi_a0_open_locked();}
+    if(!e)cam_smi.status.stage=6;
     else cam_smi_fault(e);
     cam_smi_status();return e;
 }
+#include "x9_camera_smi_a0.inc"
 int x9_camera_sensor_session_prepare_smi_clocks(uint64_t epoch,struct x9_camera_smi_clock_status *s)
 {
     struct cam_sensor_ap ap;uint8_t byte=0;int e;

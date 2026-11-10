@@ -382,13 +382,31 @@ captured DT 区分 normal camera **SID80**、protected camera **SID89**、displa
 `kernel/src/bsd/dev/x9_camera_sensor_session.h` 的 kernel-private 调用顺序为：
 `open → configure → prepare_receiver → read8 → close`。`prepare_receiver` 可省略，原 probe/standby 不因此增加 MM 操作。准备 receiver 后可显式 `prepare_smi_clocks → configure_mac → prepare_analog → configure_timing → configure_ctle → configure_outmux`（均为 `x9_camera_sensor_session_*`）；SMI clocks 需要 configured standby 且必须在 MAC/PHY/OUTMUX 之前，analog 需要先成功配置 MAC，timing/CTLE 需要已校准 analog，各阶段均可省略，原诊断不会自动写这些配置。MAC/analog/timing/CTLE 必须先于 OUTMUX；已持有 OUTMUX 时再配置返回 `EBUSY`，不能改变已 posted 命令的输入环境。timing 不能在 CTLE 已尝试后追加；后续接入的 generic PHY 配置也须在最终 CTLE override 之前完成。
 
-`prepare_smi_clocks(epoch, &smi_clock_status)` 只补 **CAMSV0 的真实 SMI 时钟前置条件**，不等于 `mtk_smi_larb_enable` 的全部 port/common 配置。设备树 `camsv1@3a600000` 的实际 `camsv-id=0`，larb 顺序为 **19/14/29**：19→cam-subcomm3→disp-common0，14→cam-subcomm1→subcomm1_1→disp-common0，29→cam-subcomm2→mdp-common1。common0/1 均为 skip-rpm-cb 且没有 clocks，不触其 VCP/display 状态；subcomm1 与 1_1 共用一个物理 gate，不能重复申请或提前释放。
+`prepare_smi_clocks(epoch, &smi_clock_status)` 先补 **CAMSV0 的真实 SMI 时钟前置条件**，再配置单图像 A0 端口的默认参数，仍不等于 `mtk_smi_larb_enable` 的全部 port/common 配置。设备树 `camsv1@3a600000` 的实际 `camsv-id=0`，larb 顺序为 **19/14/29**：19→cam-subcomm3→disp-common0，14→cam-subcomm1→subcomm1_1→disp-common0，29→cam-subcomm2→mdp-common1。common0/1 均为 skip-rpm-cb 且没有 clocks，不触其 VCP/display 状态；subcomm1 与 1_1 共用一个物理 gate，不能重复申请或提前释放。
 
 实际写入为 supplier **CAM_VCORE_R1A `3c80d000` / CG35 bits13/14/15**，随后 consumer **CAM_MRAW `3a680000` / CG34 LARB14/19/29 bits1/2/5**；`3c800000` 是邻接 CCU，不能替代 R1A。只追加缺失的 AP raw HWV bit，等待真实 AP readback/global enable/STA0，按 vendor normal path 必要时 masked CG_CLR，并确认实际 CG0。完整 MM/CSI/secure power 已持有，MMINFRA AL parent 的 CFG_0+10 整 byte、CKSTA/FENC 必须稳定；不写其 AP/parent/PDN/PLL，不把 FENC 当成速率/吞吐 lease。私有 status 和实体 `x9_camera_smi_clocks.inc/.h` 不改变既有公开 ioctl ABI。
 
 每组独立保存 before/expected/owned/borrowed 与 posted SET/CG_CLR/CLR pending；拒绝 voted-but-gated 修复和 unvoted direct-clock 接管。原 borrowed AP/global/effect 必须保持，失败不能重发原请求或以 prior 控制值证明消费。pending 只有确认 target/effect 与 voter STA0 才允许唯一 close 继续；仍未知时保留所有依赖。receiver/PHY/AP 的既有 guard 现在也检查该 optional lifetime；原 MM close 在 SMI held 时拒绝卸依赖。关闭顺序 OUTMUX→PHY→MAC/async→SMI consumer→supplier→MM/sensor rails，只撤新增 AP bit，physical gate 由最后 aggregate vote 恢复，不强制 CG_SET。新 owner 保持原 gated 位时拒绝继续撤低层依赖。
 
-准入完成及撤 clock 前双采样三路 LARB 的普通 RO `STAT+0` / internal `STAT+500` 必须0；失败部分仍 gated 的 larb 不读。它仅是当前未启 producer 的必要 clock-unvote 条件，**不是完整 AXI/IRQ/cache/worker drain**。没有 IRQ/R-C 读取、port NONSEC/SID80/path/QoS/OSTD/common 配置写入、native capture caller 或实机证据；因此 **NEED_SMI/NEED_RATE/NEED_DMA_MAP/NEED_DRAIN 均不清除**，`SMI_CLOCKS_CONFIGURED` 只表示时钟控制读回，不造 READY。
+准入完成及撤 clock 前双采样三路 LARB 的普通 RO `STAT+0` / internal `STAT+500` 必须0；失败部分仍 gated 的 larb 不读。它仅是当前未启 producer 的必要 clock-unvote 条件，**不是完整 AXI/IRQ/cache/worker drain**。没有 IRQ/R-C 读取、SID80/path/MMU/common 配置写入、native capture caller 或实机证据；因此 **NEED_SMI/NEED_RATE/NEED_DMA_MAP/NEED_DRAIN 均不清除**，`SMI_CLOCKS_CONFIGURED` 只表示时钟控制读回，不造 READY。
+
+#### 准备 CAMSV A0 的默认 SMI 端口
+
+**共享 common/misc 缺少合法初始化 owner 时仍明确失败，不拿时钟引用冒充授权。** 时钟成功后，`x9_camera_smi_a0.inc` 在同一会话里检查 COMM33 `0x3c808000` 的 `L1LEN=a / PREULTRA_MASK1=4146 / DUMMY=1`，以及 L19 的 `CMD_THRT_CON=370456 / SW_FLAG=1`。这些共享字段必须已匹配，缺失返回 `EOPNOTSUPP`，不 bulk restore。所有八个 L1ARB、BUS_SEL 及五个合法 L19 端口的 NONSEC/OSTD 都按最初快照持续检查；不把 MT6993 mutable common BW 表初始全0当成覆盖其它 masters 的授权。
+
+只有 **L19/P0=`CAMSV_TOP_A0`，AXID `0x260`** 的三个字段可写：
+
+| 字段 | 写入 | 上游依据 |
+|---|---|---|
+| `OSTDL +200` | 本端口完整配置值 `1` | captured `is-default-ostdl` 和 MT6993 default_bwl |
+| `DISABLE_ULTRA +70` | 仅 bit0=`1`，保留其余端口 | probe 把可切 HRT 的端口先初始化为 SRT |
+| `NONSEC +380` | 仅 bit3=`1`，保留 MMU/bank/path 等其它位 | `mtk_smi_larb_bw_thr(..., true)` |
+
+DT 的 `larb-port-real-time-type=0` 是 `ALWAYS_HRT`，但 **不等于启动时已授予 HRT**。`mtk_smi_larb_probe` 对它仍置 `real_time_type`，实际 HRT bandwidth request 后才撤 SRT 位；这里不虚构该 request。L19/P2=`CQI_A/0x262`、B1/STG、L14/A1、L29/A2 均不写，也不写不存在于三路 captured DT 的 internal OSTD 配置。两个 force-ultra 位必须关闭，SLP_CON EN/RDY 和 A0 主/内部 outstanding monitor `+280/+780` 双采样必须0；这里只资格化当前未启 producer 的端口，不证明完整 DMA drain。
+
+每次写前检查 receiver/MM/SMI/共享快照，逐字段保存 before/expected/owned mask，并在 posted write 前记 pending。读回必须达到完整 target；失败后的唯一 close 只接受两次真实 target，不以 prior 值、重发或 reset 退休。关闭先在 supplier/consumer clocks 仍持有时按 `NONSEC → DISABLE_ULTRA → OSTD` 恢复本次改变的字段，再撤 consumer/supplier；原本已为目标值的字段不写也不恢复。任何共享字段变化、仍有 outstanding 或未消费写入都保留低层依赖。
+
+private `smi_clock_status.a0` 返回快照、owned/pending、配置与恢复结果，不改变公开 ioctl ABI。`A0_CONFIGURED` 仅表示 inactive A0 default 配置，**不是完整 common/port 初始化、MMQoS/rate lease、SID80 mapping 或 READY**。完整 cold common/misc owner、持续 bandwidth/rate、native SMMUv3、IRQ、DMA 与 iOS 采集仍须接完，原诊断不自动调用此 preparation。
 
 - standalone 入口取得 `camera_control_lock`；同 TU 的 native 回调已经持锁，必须使用内部 `_locked` helper，不重入公开入口。
 - `open` 返回的非零 epoch（包括错误返回）代表已准入 journal，必须安排一次 close；旧 epoch、重复 prepare/close 不做 MMIO。成功 prepare 不撤销 MM votes，不设置 READY，不返回 IOVA。
