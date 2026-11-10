@@ -294,6 +294,8 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 
 - **main精准整合完成**:本轮五个codec/header/board/iOS工具源码及MIC11交接合main为 **91cf60c**(父5f5a0e1),没有用冻结树覆盖并发模块;整包仍只代表固定**2e448ab**、未重建main。合入前`main-before.commit/status/patch/main-before-index.patch/NOTES-main-before`保存HEAD/working binary diff/index/NOTES,独立index构造commit并CAS更新main,未stash/夹带其它窗口修改。主working **NOTES.md及kern_exec.c/x9_carrier_cbn_install.inc/vfs_syscalls.c**的原有未提交改动保留,这三份非麦克风源码未写入本轮提交;不能把main整体称clean。麦克风路径干净、diff-check通过,不主动push/设备操作/HAL安装。候选原样复制且无成功后二次校验;仍无真实DMA provider/READY/连续声学PCM或AVAudioSession,下一步依一次digital-l新日志及owner/bus/cache/全写链drain/物理AIN0证据推进,不再把源码首错屏障当实际校准/录音成功。
 
+- **停止前并发更新观察**:只读检查时另一窗口已把上述三份蜂窝源码自行提交为 **a5f6c58**,其交接为 **964846e**;因此它们现已不再出现在working diff,并非本轮丢弃/覆盖。91cf60c实际树差分仍只有五个麦克风源码及NOTES,麦克风路径无未提交修改。原始合入前binary diff与停止前`main-after.patch/status`均保留,不把后续蜂窝提交说成固定2e448ab候选内容。
+
 ## 麦克风活动交接(MIC-10,2026-11-10): PCM溢出显式失败与HAL生产者时钟/缓存资格;仍无DMA provider/实机录音
 
 - **冻结/范围**:独立`.local/x9/worktrees/microphone-progress10` / `work/x9-microphone-progress10`,固定main **d4ec120**(MIC9、AUDIO8、GPS board7、CAMERA11及GPU276已提交祖先)。未起子代理、跑测试脚本/套件或操作设备/分区/root/mailbox/HAL安装,不新增报告Markdown。只读OPPO common/mtk-afe-fe-dai.c及mt6993-afe-pcm.c实际capture hw_params/trigger/probe:Linux SRAM软件分配或DRAM/ADSP share mem,probe设置34bit DMA mask,STOP是disable memif+IRQ,**仍未找到权威完整写链drain,不以Linux释放习惯/34bit mask代替AFE-visible映射或boot-long owner**。本地UniXNU-sheng/HakiOS HAL clock/client precedent已查,不搬高通地址/服务、不把墙钟外推当物理采样。
