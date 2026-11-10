@@ -10,6 +10,7 @@
 #include "../kernel/src/bsd/dev/x9_audio.h"
 #include "../kernel/src/bsd/dev/x9_tfa98xx.h"
 #include "../kernel/src/bsd/dev/x9_speaker_afe.h"
+#include "../kernel/src/bsd/dev/x9_tfa_plj110.h"
 static volatile sig_atomic_t interrupted;
 static void on_signal(int n) { (void)n; interrupted = 1; }
 static int status(io_connect_t c, X9AudioControl *s) {
@@ -85,6 +86,32 @@ static int stream_status(io_connect_t c) {
            s.backend_held,s.stop_error);
     return 0;
 }
+static int amp_status(io_connect_t c) {
+    X9AudioAmpStatus s = {0}; size_t n = sizeof(s);
+    kern_return_t r = IOConnectCallStructMethod(c, X9AudioAmpStatusSelector, NULL, 0, &s, &n);
+    if (r || n != sizeof(s) || s.version != X9_TFA_BOARD_STATUS_VERSION) {
+        fprintf(stderr,"PA status/ABI failed: 0x%x\n",r); return 1;
+    }
+    printf("PA cached flags=0x%x stage=%u errno=%u restore=%u dirty=0x%x\n"
+           "  reg03 left=%04x right=%04x read-mask=%x known-family-mask=%x\n"
+           "  PMIF=%x reset-before DIR/DO/DI/MODE/SW/AD=%x/%x/%x/%x/%x/%x\n"
+           "  LEFT supply-before selector/EN/DA/HW=%x/%x/%x/%x\n"
+           "  reset-after=%x/%x/%x/%x/%x/%x LEFT supply-after=%x/%x/%x/%x\n"
+           "  gate=%x DMA-gate=%x DMA-EN=%x pins=%x/%x parent=%u con1=%x nominal-Hz=%u probe-Hz=%u\n"
+           "  DMA-parent=%u con1=%x last-slave=%x request STAT/START/FIFO=%x/%x/%x\n",
+           s.flags,s.stage,s.error,s.restore_error,s.dirty_mask,
+           s.revision[0],s.revision[1],s.revision_read,s.known_family,
+           s.pmif_status,s.reset[0],s.reset[1],s.reset[2],s.reset[3],s.reset[4],s.reset[5],
+           s.supply[0],s.supply[1],s.supply[2],s.supply[3],
+           s.reset_after[0],s.reset_after[1],s.reset_after[2],s.reset_after[3],s.reset_after[4],s.reset_after[5],
+           s.supply_after[0],s.supply_after[1],s.supply_after[2],s.supply_after[3],
+           s.gate,s.dma_gate,s.dma_enable,s.pin[0],s.pin[1],s.parent,s.pll_con1,s.nominal_parent_hz,s.timing_hz,
+           s.dma_parent,s.dma_pll_con1,s.last_slave,s.request_status,s.request_start,s.request_fifo);
+    for(unsigned i=0;i<2;i++) printf("  bank%u START/MASK/STAT/FIFO=%x/%x/%x/%x\n",i,
+        s.bank_start[i],s.bank_mask[i],s.bank_status[i],s.bank_fifo[i]);
+    puts("Cached observations only; right supply unknown, no PA value writes/mute/reset/calibration or speaker-ready proof.");
+    return 0;
+}
 static int inspect_container(const char *path,const char *profile) {
     FILE *f=fopen(path,"rb");if(!f){perror(path);return 1;}
     if(fseek(f,0,SEEK_END)){fclose(f);return 1;}
@@ -158,6 +185,8 @@ done:
 }
 int main(int argc, char **argv) {
     if (argc == 4 && !strcmp(argv[1], "amp-inspect")) return inspect_container(argv[2], argv[3]);
+    int amp = argc == 2 && !strcmp(argv[1], "amp-status");
+    int probing = argc == 2 && !strcmp(argv[1], "amp-probe");
     int booting = argc == 2 && !strcmp(argv[1], "dsp-boot");
     int stopping = argc == 2 && !strcmp(argv[1], "dsp-stop");
     int board = argc == 2 && !strcmp(argv[1], "board-status");
@@ -166,19 +195,25 @@ int main(int argc, char **argv) {
     int stream_stop = argc == 2 && !strcmp(argv[1], "stream-stop");
     int playing = argc == 3 && !strcmp(argv[1], "play");
     int dsp = argc == 2 && !strcmp(argv[1], "dsp-status");
-    if (!playing && !dsp && !board && !afe && !stream && !stream_stop && !booting && !stopping && !(argc == 2 && !strcmp(argv[1], "status"))) {
-        fprintf(stderr, "usage: audioctl status | stream-status | stream-stop | afe-status | dsp-status | board-status | dsp-boot | dsp-stop |\n  play <S16LE stereo 48000Hz raw PCM> | amp-inspect <local.cnt> <exact-profile>\n"); return 2;
+    if (!amp && !probing && !playing && !dsp && !board && !afe && !stream && !stream_stop && !booting && !stopping && !(argc == 2 && !strcmp(argv[1], "status"))) {
+        fprintf(stderr, "usage: audioctl amp-status | amp-probe | status | stream-status | stream-stop | afe-status | dsp-status | board-status | dsp-boot | dsp-stop |\n  play <S16LE stereo 48000Hz raw PCM> | amp-inspect <local.cnt> <exact-profile>\n"); return 2;
     }
     FILE *f = playing ? fopen(argv[2], "rb") : NULL;
     if (playing && !f) { perror(argv[2]); return 1; }
     io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching(X9_AUDIO_CLASS));
     if (!service) { fprintf(stderr, "X9Audio absent (requires x9_audio=1 or 2)\n"); if (f) fclose(f); return 1; }
-    io_connect_t c = 0; kern_return_t r = IOServiceOpen(service, mach_task_self(), (booting || stopping || stream_stop) ? 2 : playing ? 1 : 0, &c);
+    io_connect_t c = 0; kern_return_t r = IOServiceOpen(service, mach_task_self(), (probing || booting || stopping || stream_stop) ? 2 : playing ? 1 : 0, &c);
     IOObjectRelease(service);
     if (r) { fprintf(stderr, "open failed: 0x%x\n", r); if (f) fclose(f); return 1; }
     X9AudioControl s; int rc = status(c, &s);
     if (!rc) {
         print_status(&s);
+        if (amp) rc = amp_status(c);
+        if (probing) {
+            kern_return_t op = call(c, X9AudioAmpProbeSelector);
+            if (op) fprintf(stderr,"PA read-only probe failed: 0x%x; once per boot, no retry/reset loop\n",op);
+            int ar = amp_status(c); rc = op || ar;
+        }
         if (dsp) rc = dsp_status(c);
         if (board) rc = board_status(c);
         if (afe) rc = afe_status(c);

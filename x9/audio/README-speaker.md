@@ -56,6 +56,7 @@ staging 必须单独确认、走项目 extent 写入流程；本构建器不安�
 | open type 2 | mode2 的 root 控制会话；不能映射 PCM 或 start 播放，可完成失败后保留的 stop |
 | selector 0/1/2 | status / start / stop；拒绝 async、descriptor 和额外参数 |
 | selector 7/8 | cached AFE status v2 / stream lease status v1；只读，不做 MMIO |
+| selector 9/10 | cached PA status v1 / root type2 显式双 PA reg03 probe；不写 PA 值 |
 | memory 0 | 只读 kernel control，带 seqlock、generation、真实 played/queued |
 | memory 1 | 可写 producer end-frame，release 发布，kernel 检查窗口 |
 | memory 2 | 65536-frame S16LE stereo PCM 环，256 KiB |
@@ -173,6 +174,7 @@ wake lease 验证全电源链稳定且 DPSW req/ack bit0 均为0，不把 WFI �
 | 文件／入口 | 已实现 | 仍需实际板级提供者 |
 |---|---|---|
 | `x9_speaker_afe.{c,h}` | DL24/OUT4 逐字段写入/不确定/恢复 journal、32-bit I2S slots/S16、48k、CONN116/117 DL24 route；prefill 后 DMA start、period copy/cache、稳定 CUR、高低地址/半环歧义检查；独立低水位 watcher、mute/disable/quiesce/restore | AUDIO/VLP APLL2、pad/共享资源 lease、DMA bus/EMI/cache、双 PA mute、权威 DMA quiesce |
+| `x9_tfa_plj110.{c,h}` | root 显式只读 reg03；PMIF-P SID3 reset/SID5 左供电快照，已开启 I²C6/共享 DMA clock 与 pads 校验、2 CSR bank/1 DMA idle、FIFO WRRD 1+2 BE、逐字段总线恢复 | 不具备双侧供电/reset/write lease；右 rail、真实 binding/profile/校准仍待确认 |
 | `x9_tfa98xx.{c,h}` | PM container total-size/CRC、双 I2C 类型（container bus=0）的地址、明确名字的两侧 profile、descriptor 边界；真实 reg03 revision 比对、AMPE=0 且读回；双侧预检白名单 register/bitfield prefix | 实际完整 revision、immutable container、per-revision 白名单、I2C6/reset/rails 互斥；Probus DSP file/patch/校准/boost 未执行 |
 
 AFE start 必须预填至少960帧后才使能 DMA；PA 始终由外部 board 维持 muted。
@@ -204,11 +206,50 @@ MT6661-3 SID3 reset，MT6661-5 SID5 **LNC0_8** 为左 PA 的 `tfa98xx_vdd-supply
 reset动作是高5ms→低5ms，不能套用麦克风 GPIO9 的低→高使能流程。
 AP I2C6 的 imps gate 是 `0x129d0e00` bit2（CLR +4 / SET +8），SCL/SDA为AP GPIO114/115；
 这些是源码资源定位，不是已获取共享所有权、实测电压、复位极性或芯片 revision。
-本轮没有在线采集、PA写操作或完整板级 I2C/rail/reset provider。
+没有在线采集、PA值写操作或完整板级 I2C/rail/reset write provider；新增的诊断路径见下节。
 
 TFA 只有 reg03 **成功读取且完整revision匹配**才设置 `revision_verified`；
 失败回调即便填写了相同值，也不能授权cleanup写该芯片。prefix记录write attempts与
 applied次数，失败写入/读回置poison，后续双侧mute成功不抹掉部分配置的不确定性。
+
+### 读取已供电功放的身份
+
+**仅在配套内核和工具已部署、`x9_audio=2` 时使用**；本轮未安装／上机，
+没有自动开机探测。`amp-status` 是缓存读取，未探测时 flags=0，raw 字段0不代表实际硬件值。
+
+```sh
+audioctl amp-status
+# root，显式一次，只读 PA reg03；不播放、不冷上电、不复位
+sudo audioctl amp-probe
+audioctl amp-status
+```
+
+`amp-probe` 要求 SID3 GPIO10/11 已为数字 SW 控制、mode0/output/DO及DI低；
+不把低电平说成冷 PA。左 LNC0_8 已为SW 1.8V/on/non-LP/no-HW-vote；保留完整 DA
+原值，不将 `regulator.c` 的 `da_en_mask=3/da_lp_mask=7` 简化成完整 ready。
+右节点无VDD supply属性，**右供电仍未知**；即使双 ACK，也不发布两侧 rail ready。
+完整 PMIF mutex 跨两次快照、FIFO访问和恢复，但不是远端硬件所有权保证。
+
+I²C6 的 gate 必须已开、GPIO114/115 已为function1且物理高；不改 gate/pad。
+共享 APDMA gate 是 **PERAO1 `0x16640014` bit26**；不为探测开DMA钟，off时不读其CSR。
+同时核查 WEST I²C 与 PERI_AXI 的 mux/CKSTA/FENC/所选PLL状态；
+未证实ULPOSC parent1时明确拒绝，绝不重配共享parent/PLL。
+仅在两组 `0x10000` CSR bank 的 START/IRQ/FIFO/shadow/DMA控制及一个 DMA EN
+均空闲时，journal原值后写入保守≤98kHz nominal时序，再读0x34/0x35的reg03。
+频率是PCW推导，不是频率计实测。
+
+每boot最多一次（包括缺资源/NACK），不重试、不扫描0x5c/0x5d或其他同总线器件。
+只有ACK且FIFO恰有2字节才缓存完整BE revision、设置对应 `revision_read`；
+未知低字节family拒绝，不写chip。未知/arbitration status或timeout不清IRQ/reset/cancel，
+保留dirty journal并poison；可判定完成的自身ACK/NACK仅清该次status。
+恢复只处理dirty字段并读回，已经恢复的字段不重复写；第三方变化拒绝覆盖。
+主错、主失败stage和restore_error分开缓存，`ProbeComplete`只表示本次读ID并恢复成功。
+
+I²C6还承载display/charger节点；当前XNU无其他I²C6访问路径，root入口由audio mutex串行。
+以后增加同总线consumer必须先引入共享controller arbiter，不能靠“刚好idle”并发接管。
+本探测**没有注册 `x9_tfa_bus`、AFE provider 或speaker backend**，不授予verified=7、
+fresh-reset或trusted prefix能力，不读取／执行container，也不做AMPE mute/unmute。
+board type2不会替换PCM页；无backend lease时关闭诊断会话不改PCM fault/timeline。
 
 `audioctl` 还可仅离线检查本地 container（不需要 X9Audio 服务、不加载到功放）：
 

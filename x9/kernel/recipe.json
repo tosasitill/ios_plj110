@@ -6510,6 +6510,11 @@
    "template": "bsd-c-11"
   },
   {
+   "name": "x9_tfa_plj110.o",
+   "source": "bsd/dev/x9_tfa_plj110.c",
+   "template": "bsd-c-11"
+  },
+  {
    "name": "x9_tfa98xx.o",
    "source": "bsd/dev/x9_tfa98xx.c",
    "template": "bsd-c-11"

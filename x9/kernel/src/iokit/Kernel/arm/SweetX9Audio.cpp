@@ -15,6 +15,7 @@
 #include "../../../bsd/dev/x9_adsp_transport.h"
 #include "../../../bsd/dev/x9_adsp_mt6993.h"
 #include "../../../bsd/dev/x9_speaker_afe.h"
+#include "../../../bsd/dev/x9_tfa_plj110.h"
 #if defined(ARM64_BOARD_CONFIG_SWEET)
 extern "C" int sweet_early_is_x9(void);
 extern "C" int sweet_x9_arg(const char *, int);
@@ -227,6 +228,9 @@ bool X9AudioUserClient::start(IOService *p)
             if (boardController) { lck_mtx_unlock(&audioLock); return true; }
             lck_mtx_unlock(&audioLock); p->close(this); exclusive = false; return false;
         }
+        /* Board control never maps PCM and must not replace a writer's
+         * timeline merely to read PA resources or issue a physical stop. */
+        if (boardController) { lck_mtx_unlock(&audioLock); return true; }
         /* New session gets new writable pages. Explicitly closing a connection
          * without unmapping cannot let an old writer corrupt its successor. */
         IOBufferMemoryDescriptor *newProducer = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
@@ -247,14 +251,20 @@ bool X9AudioUserClient::start(IOService *p)
 void X9AudioUserClient::stop(IOService *p)
 {
     if (exclusive) {
-        lck_mtx_lock(&audioLock); stopLocked(0); lck_mtx_unlock(&audioLock);
+        lck_mtx_lock(&audioLock);
+        if (!boardController || backendHeld) stopLocked(0);
+        lck_mtx_unlock(&audioLock);
         p->close(this); exclusive = false;
     }
     IOUserClient::stop(p);
 }
 IOReturn X9AudioUserClient::clientClose(void)
 {
-    if (exclusive) { lck_mtx_lock(&audioLock); stopLocked(0); lck_mtx_unlock(&audioLock); }
+    if (exclusive) {
+        lck_mtx_lock(&audioLock);
+        if (!boardController || backendHeld) stopLocked(0);
+        lck_mtx_unlock(&audioLock);
+    }
     terminate(); return kIOReturnSuccess;
 }
 IOReturn X9AudioUserClient::clientMemoryForType(UInt32 type, IOOptionBits *options, IOMemoryDescriptor **out)
@@ -286,6 +296,27 @@ IOReturn X9AudioUserClient::externalMethod(uint32_t sel, IOExternalMethodArgumen
             memcpy(a->structureOutput, &s, sizeof(s)); lck_mtx_unlock(&audioLock);
         }
         a->structureOutputSize = (uint32_t)size; return kIOReturnSuccess;
+    }
+    if (sel == X9AudioAmpStatusSelector) {
+        if (a->structureInputDescriptor || a->structureOutputDescriptor || a->asyncWakePort ||
+            a->scalarInputCount || a->scalarOutputCount || a->structureInputSize ||
+            !a->structureOutput || a->structureOutputSize < sizeof(X9AudioAmpStatus)) return kIOReturnBadArgument;
+        lck_mtx_lock(&audioLock);
+        X9AudioAmpStatus s; int e = x9_tfa_plj110_status(&s);
+        if (!e) memcpy(a->structureOutput, &s, sizeof(s));
+        lck_mtx_unlock(&audioLock);
+        if (e) return result(e);
+        a->structureOutputSize = sizeof(s); return kIOReturnSuccess;
+    }
+    if (sel == X9AudioAmpProbeSelector) {
+        if (a->structureInputDescriptor || a->structureOutputDescriptor || a->asyncWakePort ||
+            a->scalarInputCount || a->scalarOutputCount || a->structureInputSize ||
+            a->structureOutputSize) return kIOReturnBadArgument;
+        if (!exclusive || !administrator || !boardController) return kIOReturnNotPrivileged;
+        lck_mtx_lock(&audioLock);
+        int e = haveBackend || backendHeld || (control->state & X9AudioRunning) ? EBUSY :
+            x9_tfa_plj110_probe();
+        lck_mtx_unlock(&audioLock); return result(e);
     }
     if (sel == X9AudioBoardStatusSelector) {
         if (a->structureInputDescriptor || a->structureOutputDescriptor || a->asyncWakePort ||

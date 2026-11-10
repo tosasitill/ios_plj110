@@ -12,7 +12,8 @@
 #define X9_AUDIO_RING_BYTES (X9_AUDIO_RING * X9_AUDIO_CHANNELS * 2u)
 enum { X9AudioStatus, X9AudioStart, X9AudioStop, X9AudioDSPStatusSelector,
        X9AudioBoardStatusSelector, X9AudioDSPBootSelector, X9AudioDSPStopSelector,
-       X9AudioAFEStatusSelector, X9AudioStreamStatusSelector };
+       X9AudioAFEStatusSelector, X9AudioStreamStatusSelector,
+       X9AudioAmpStatusSelector, X9AudioAmpProbeSelector };
 enum { X9AudioControlMemory, X9AudioProducerMemory, X9AudioOutputMemory };
 enum { X9AudioReady = 1u, X9AudioRunning = 2u, X9AudioFault = 4u };
 enum {
