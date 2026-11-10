@@ -453,7 +453,7 @@ MPU设置分支；该行为不是XNU Normal-WB／AP-DSP-AFE权限证据。保存
 0415/op2为BL-only，不能用旧GPS reader充当speaker memory supplier。保存件不是当前
 selected槽位／运行secure ABI证明，RELOAD成功仍不授shared RAM或speaker Ready。
 保存件的`0x2a380`通过`0x11aa98`间接调用实际`adsp_mt_run_loader`；`0x59c8`安装
-的callback为`0x5520`（auth/map→copy `0x1a200000`／`0x20000B`→cache sync→unmap），
+的callback为`0x5520`（dynamic map→copy `0x1a200000`／`0x20000B`→cache sync→unmap），
 与CORE_START的`0x55a4`分开。即便这份旧保存件不在loader内启动核，也不凭它对当前
 RELOAD失败跳过STOP；若STOP拒绝，保留父电源／票据而不假称halted或直接退资源。
 
