@@ -219,8 +219,8 @@ applied次数，失败写入/读回置poison，后续双侧mute成功不抹掉�
 
 ```sh
 audioctl amp-status
-# root，显式一次，只读 PA reg03；不播放、不冷上电、不复位
-sudo audioctl amp-probe
+# 在设备root shell中，显式一次；只读PA reg03，不播放、不冷上电、不复位
+audioctl amp-probe
 audioctl amp-status
 ```
 
