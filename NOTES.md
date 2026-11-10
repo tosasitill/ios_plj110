@@ -154,13 +154,13 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 
 ## 7. 当前交接(HANDOFF 107,2026-11-10): 三线合并为ih——main(ig根盘扩容/if/ie)+双卡uim3+NR SA nr1;双卡与SA默认开
 
-- **背景**:用户说已合并并push双卡/5gsa;实际核对时两者只在Mac本地分支( 71ce384/58a823b, dde26eb/e8bb41f),各自单独成像(uim3、nr1,都用旧16GiB manifest),均未push、未互相合并;Mac main另有未push文档提交5d53837。用户选择"2"(合成一个镜像、双卡与SA都默认开),两个codex CLI会话已退出、分支均已提交后才合并。
-- **合并**(独立worktree ,分支):origin/main 0eae168 ← work/dual-sim(无冲突)← x9-nrsa(冲突仅NOTES与x9_modem.inc的build字符串)← Mac main 5d53837(仅NOTES)。X9QMIAT.inc自动合并后人工核对:NR SA SysInfo(0x4b响应/0x4d指示,需C5GREG注册且COPS AcT=11)与LTE 0x19、ECSQ两行解析、双卡路由互不覆盖。
-- **boot-args 607B上限**:ig已591B,加超限。改为**x9_rootgrow默认开**(设备不大于HFS时no-op;关闭),提交2407e0b;ih参数603B。
-- **x9-rev252ih-md**:构建exit0,boot.img 12967936B,warning 1417(+5来自双卡/NR代码),ADT根盘32GiB,参数含;产物,日志。插件不变,无需mailbox staging。
-- **已知限制(未做)**:(1)双卡UI与NR在CommCenter侧各有D22能力门(GsmRadioPersonality+0x241 / +0x121),两个分支都只**离线准备**了dyld cache补丁副本,**未安装**——ih只提供内核/桥的双卡路由与NR SysInfo,设置里能否出现双卡、5G图标取决于这些门,预计仍不显示。(2)信号格:只取ECSQ的LTE行;驻留SA时NR行(Act 0x8000)不报→可能无信号格。(3)关掉LTE-only后MD可能先注册SA(167: 24s SA,54s才LTE),168/171那种稳定LTE注册不保证;回退=去掉该参数。
+- **背景**:用户说已合并并push双卡/5gsa;实际核对时两者只在Mac本地分支(`work/dual-sim` 71ce384/58a823b,`x9-nrsa` dde26eb/e8bb41f),各自单独成像(`x9-dualsim-uim3`、`x9-rev252nr1-md`,都用旧16GiB manifest),均未push、未互相合并;Mac main另有未push文档提交5d53837。用户选择"2"(合成一个镜像、双卡与SA都默认开)。确认两个codex CLI会话已退出、两分支均已提交后才合并。
+- **合并**(独立worktree `~/ios_plj110-wt-if`,分支`merge-dualsim-nrsa`,已push为main,`work/dual-sim`与`x9-nrsa`也已push):origin/main 0eae168 ← work/dual-sim(无冲突)← x9-nrsa(冲突仅NOTES与`x9_modem.inc`的build字符串)← Mac main 5d53837(仅NOTES)。`X9QMIAT.inc`自动合并后人工核对:NR SA SysInfo(0x4b响应/0x4d指示,需C5GREG注册且COPS AcT=11)与LTE 0x19、ECSQ两行解析、双卡路由互不覆盖。
+- **boot-args 607B上限**:ig已591B,加`x9_dual_sim=1 x9_md_lte=0`超限。改为**`x9_rootgrow`默认开**(设备不大于HFS时no-op;`x9_rootgrow=0`关闭),提交2407e0b;ih参数603B。
+- **x9-rev252ih-md**:构建exit0,boot.img 12967936B,warning 1417(+5来自双卡/NR代码),ADT根盘32GiB,参数含`x9_dual_sim=1 x9_md_lte=0`;产物`~/ios_plj110/x9/out/x9-rev252ih-md/`,日志`.local/x9/work/pdp-activation/build-ih.stdout.log`。插件不变,无需mailbox staging。
+- **已知限制(未做)**:(1)双卡UI与NR在CommCenter侧各有D22能力门(`GsmRadioPersonality+0x241` / `+0x121`),两个分支都只**离线准备**了dyld cache补丁副本,**未安装**——ih只提供内核/桥的双卡路由与NR SysInfo,设置里能否出现双卡、5G图标取决于这些门,预计仍不显示。(2)信号格:`x9q_siginfo`只取ECSQ的LTE行;驻留SA时NR行(Act 0x8000)不报→可能无信号格。(3)`x9_md_lte=0`关掉LTE-only后MD可能先注册SA(167: 24s SA,54s才LTE),168/171那种稳定LTE注册不保证;回退=去掉该参数重新打包。
 - **根盘**:ih首次启动会把HFS扩到32GiB(HANDOFF106)。之后uim3/nr1/ig之前的所有旧manifest镜像都无法挂载根盘。
-- 下一步由用户手动:,日志(≥3分钟,两卡在机,做几次底边上滑)。看、/SIM2回复、/、、。
+- 下一步由用户手动:`fastboot boot x9/out/x9-rev252ih-md/boot.img`,日志`~/172.txt`(≥3分钟,两卡在机,做几次底边上滑)。看`X9 ROOTGROW`、`X9 DUALSIM`/SIM2回复、`NAS registration`/`NAS SysInfo NR SA`、`ECSQ`、`X9 EXIT: SpringBoard`。
 
 ### 前次交接(HANDOFF 106,2026-11-10): 根盘扩容+16GiB——扩展文件已分配(无raw写),ig带x9_rootgrow=1待上机
 
