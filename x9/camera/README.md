@@ -1,6 +1,6 @@
 # X9 前后相机初步移植
 
-**已实现控制层、RAW10 帧接口、iOS 双流桥、MT6993 冷启动 sensor-probe 与 SENINF/CAMSV 接收计划；采集后端仍缺失，不能拍摄。**
+**已实现控制层、RAW10 帧接口、iOS 双流桥、冷启动 sensor-probe、接收电源资源接口与 SENINF/CAMSV 接收计划；采集后端仍缺失，不能拍摄。**
 没有假帧、测试图案、Android 代理或 Camera.app 成功状态伪造。默认关闭。
 
 ## 实现边界
@@ -13,7 +13,8 @@
 | iOS | HakiOS `CMDerivedObjectCreate` 设备类 v3/流类 v2，前后 `FigCaptureStream`；输出池、PixelBufferHandler、帧 metadata；先确认真实 start 再返回成功 |
 | sensor-probe | MT6993 CAMTG voter/parent 申请与释放、AP I2C 单控制器门控/FIFO/WRRD；WL28681C 指定通道电压/启停；reset/MCLK pinmux；真实 ID 检查与恢复日志。闲置 AP timing 初始化、禁用共享 rail 的申请/还原、GPIO203 局部唤醒。**仍要求共享时钟/HWCCF provider 已就绪，未上机验证** |
 | SENINF/CAMSV 计划 | 零 MMIO 查询实际 CSI 端口、VC0/RAW10、候选 outmux/CAMSV、尺寸/64B stride/WDMA 打包及 SID；**不是资源申请或采集** |
-| 采集后端 | **缺失**：共享 MM power/clock ownership、PHY 校准/速率、SENINF 路由提交、MM-SMMUv3 映射、RAW DMA 完成/排空队列 |
+| 接收电源接口 | TF-A MM-SMMU `PM_GET/PM_PUT`、CSI_BS_RX MM HWCCF 单 bit 申请/恢复；带供电前置检查的 SMMUv3 只读快照。**代码已构建，未上机；不是完整 MM power/clock provider 或 DMA mapping** |
+| 采集后端 | **缺失**：CAM_MAIN/CAM_MRAW/VMM/完整 MM clock ownership、PHY 校准/速率、SENINF 路由提交、MM-SMMUv3 映射、RAW DMA 完成/排空队列 |
 
 原始 X9 DT 与 Android 启动日志确定：主摄为 i2c4/7-bit `0x1a`，ID 寄存器 `0x16/0x17` 返回 `0x9186`；前摄 i2c2/`0x10`，返回 `0x0615`。
 不把厂商宏中加了 offset 的软件 sensor ID 当成芯片读数。
@@ -54,7 +55,7 @@ python3 -I x9/camera/build.py \
 | 不传 / `x9_camera=0` | 不创建设备节点，不安装/注入桥 |
 | `x9_camera=1` | 创建设备节点，只能查询状态；不访问 MMIO/I2C、电源，不安装桥 |
 | `x9_camera=2` | 允许硬件后端注册和控制；在 iOS 根盘创建 hash-addressed 自有 dylib，并为 mediaserverd 注入；**当前仍没有硬件后端** |
-| `x9_camera=3` | probe-only，节点 root:root/0600；启动与状态查询不访问 MMIO、不上电、不安装桥；只有 root 的显式 probe ioctl 才访问硬件 |
+| `x9_camera=3` | probe-only，节点 root:root/0600；启动与状态查询不访问 MMIO、不上电、不安装桥；只有 root 的显式 sensor/resource probe ioctl 才访问硬件 |
 
 模式 2 的首次设备运行涉及根盘写入，需要先确认；本模块没有自动 staging/flash/boot。
 安装只创建 `/private/var/x9/camera/libx9-camera-<hash>.dylib`，校验内容与属性，不覆盖 Apple 文件、symlink、不同内容文件或 launchd plist。
@@ -159,3 +160,43 @@ cameractl pipeline front
 
 下一阶段不能绕过 regulator/SMMU 所有权或从 LK framebuffer carve-out 偷分配相机 DMA。
 先证明一枚芯片的上电→I2C ID→还原，再证明 SENINF 包→RAW DMA 完整帧，最后验收前后切换、预览和落盘照片。
+
+## 申请并还原共享接收电源（不启动 PHY/DMA）
+
+仅在 `x9_camera=3` 下，由 root 显式执行一次：
+
+```bash
+cameractl resources
+cameractl status       # 读取缓存的资源快照，不再访问 MMIO
+```
+
+这不是 `pipeline back|front` 的零 MMIO 计划：资源请求实际调用电源服务、申请 CSI 电源并恢复。
+两枚传感器共用这一生命周期；不重复按前后相机申请同一份资源，不改 sensor-probe 的电源顺序。
+请求 ABI 为独立 224B `X9_CAMERA_PROBE_RESOURCES`（version=1，其余全零）；`GET_RESOURCES` 只返回缓存。
+旧 status/probe/pipeline ABI 不变，工具读取旧内核的缓存 ioctl 遇到 `ENOTTY` 时仍可显示旧状态。
+
+具体顺序和成功边界：
+
+1. 只映射虚拟 MMIO 窗口，尚不读未供电的 MM-SMMU/CSI 寄存器。
+2. 调用 `0xc2000514`，`a1=0x803`（MM_SMMU/secure/PM_GET）。只有返回 0 才记录自己的引用；失败不调用 PM_PUT。
+3. 验证 HWCCF 的 MM_INFRA_AO/infra0 `PM_ACK`（bank0 bits31/29）且对应 `STA=0`，之后才读 MMUP 的 GPR11 dummy register。
+   前置不足返回 `ENXIO` 并平衡 secure 引用，不擅自触发 VMM backup IRQ 或初始化其固件处理链。
+4. CSI_BS_RX 使用 **MM HWCCF bank1 bit11**：XPU0 SET/CLR/EN 为 `+0x2070c/+0x20710/+0x20714`。
+   按 `STA=0 → FSM idle → SET → AP EN → global EN → STA=0 → PM_ACK=1` 申请新增 vote。
+   `DONE` 只作证据，**不能套 AP CAMTG 的 DONE 判据**。已继承 AP vote 仅借用；未知未投票但上电状态拒绝接管。
+5. 在 secure 引用内读取 MM-SMMUv3 的 IDR0/1/3/5、CR0/ACK、CR1/2、GBPA、STRTAB、CMDQ、EVTQ 和 GERROR/N。
+   EVTQ prod/cons 位于架构 page1 `+0x100a8/+0x100ac`；不读保留的 IDR2/4，不解引用继承的表地址。
+   配置需两次快照一致；支持 stage1、SID80、SSID、16KiB granule 仅是未来映射的必要条件。
+6. 先撤自己的 CSI vote（CLR → AP EN=0 → 100µs → STA=0；最后全局 vote 消失时再等 PM_ACK=0），继承 vote 不撤。
+   最后 `a1=0x804` PM_PUT 平衡 secure 引用。撤票失败保留 secure 依赖；PUT 失败保留未释放引用，均锁存、不重试。
+
+`RESTORED` 只表示本次新增资源已释放/借用关系已验证，不表示其他 XPU 的 CSI/整个 MM 电源必须为 off。
+`CSI_POWER/SMMU_POWER/SMMU_SNAPSHOT` 是这次操作的历史观察，不是请求返回后仍然持有的资源。
+任何失败锁存本 boot 的后续 sensor/resource probe；成功的资源请求也不重复执行，第二次返回 `EALREADY`，不会再 MMIO/SMC。
+失败阶段、原始 SMC 返回、独立 restore errno、前/中/后 PM_ACK 和保留 journal 会在工具与 `X9 CAMERA RESOURCES:` 日志中显示。
+
+MM-SMMU 的 `QUIESCENT` 只说明稳定 NS 配置为空且 GBPA.ABORT 生效，**不证明独占**；`INHERITED` 表示存在/无法排除继承配置。
+MT6993 上游启用 SEC/HYP，显示与相机共享实例，因此两种状态都保留 `NEED_SMMU_OWNER/NEED_DMA_MAP`。
+本接口不 SEC_INIT/reset，不改 CR0/GBPA、wrapper、stream/CD/page table 或 CMDQ，不将 CPU PA 用作 IOVA，也不套用 GPU bypass。
+CAM_MAIN/CAM_MRAW 时钟、VMM、PHY/eFuse/速率、async/outmux、真实 RAW DMA 完成与排空仍需实现；`pipeline` 的 MM power blocker 不会因这个窄资源请求被清除。
+**资源 probe 返回 0 也不注册 platform、不置 READY/supported、不注入 iOS 桥、不产生帧。**

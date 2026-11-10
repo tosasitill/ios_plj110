@@ -57,6 +57,7 @@ static const struct x9_camera_sensor sensors[] = {
 };
 #include "x9_camera_pipeline.inc"
 #include "x9_camera_mt6993.inc"
+#include "x9_camera_resources.inc"
 static const struct x9_camera_sensor *sensor(void) { return &sensors[st.sensor-1]; }
 static int read16(const struct x9_camera_sensor *s, uint16_t reg, uint32_t *v)
 {
@@ -222,13 +223,34 @@ static int cam_ioctl(__unused dev_t d,u_long cmd,caddr_t data,int f,__unused str
         lck_mtx_unlock(&camera_lock);
         if(!e)memcpy(data,&r,sizeof(r));return e;
     }
+    if(cmd==X9_CAMERA_GET_RESOURCES) {
+        lck_mtx_lock(&camera_control_lock);
+        memcpy(data,&cam_resources_last,sizeof(cam_resources_last));
+        lck_mtx_unlock(&camera_control_lock);return 0;
+    }
+    if(cmd==X9_CAMERA_PROBE_RESOURCES) {
+        if(st.mode!=3 || !(f&FWRITE) || kauth_cred_getuid(kauth_cred_get()))return EPERM;
+        struct x9_camera_resources r,request={.version=1};
+        memcpy(&r,data,sizeof(r));if(memcmp(&r,&request,sizeof(r)))return EINVAL;
+        lck_mtx_lock(&camera_control_lock);
+        (void)cam_resources_probe(&r);
+        lck_mtx_lock(&camera_lock);
+        st.last_errno=r.last_errno;
+        if(r.flags&X9_CAM_RES_LATCHED)st.flags|=X9_CAMERA_FAULT;
+        /* Resource power isn't sensor identity or physical DMA readiness. */
+        lck_mtx_unlock(&camera_lock);
+        memcpy(data,&r,sizeof(r));lck_mtx_unlock(&camera_control_lock);return 0;
+    }
     if(cmd!=X9_CAMERA_PROBE_SENSOR)return ENOTTY;
     if(st.mode!=3 || !(f&FWRITE) || kauth_cred_getuid(kauth_cred_get()))return EPERM;
     struct x9_camera_probe *r=(struct x9_camera_probe *)data;
     struct x9_camera_probe request={.version=1,.sensor=r->sensor};
     if((r->sensor!=1 && r->sensor!=2) || memcmp(r,&request,sizeof(request)))return EINVAL;
     lck_mtx_lock(&camera_control_lock);
-    (void)cam_sensor_probe(request.sensor,r);
+    if(cam_resources_latched) {
+        memset(r,0,sizeof(*r));r->version=1;r->sensor=request.sensor;
+        r->last_errno=EIO;r->flags=X9_CAM_PROBE_LATCHED;
+    } else (void)cam_sensor_probe(request.sensor,r);
     lck_mtx_lock(&camera_lock);
     st.probe_flags=r->flags;st.last_errno=r->last_errno;
     if((r->flags&(X9_CAM_PROBE_MATCHED|X9_CAM_PROBE_RESTORED))==

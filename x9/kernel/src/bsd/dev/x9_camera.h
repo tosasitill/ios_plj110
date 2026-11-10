@@ -67,6 +67,47 @@ struct x9_camera_pipeline {
     uint64_t csi_base, camsv_base, smmu_base, dma_limit;
 };
 #define X9_CAMERA_GET_PIPELINE _IOWR('C', 0x93, struct x9_camera_pipeline)
+/* Shared receive resources, separate 224-byte ABI. PROBE request is exactly
+ * {.version=1}; GET returns the cached result without MMIO. mode3/root only.
+ * This is CSI_BS_RX power + secure MM-SMMU power, NOT full MM camera clocks,
+ * translation ownership, PHY setup or capture readiness. */
+#define X9_CAM_RES_ATTEMPTED 1u
+#define X9_CAM_RES_CSI_POWER 2u
+#define X9_CAM_RES_SMMU_POWER 4u
+#define X9_CAM_RES_SMMU_SNAPSHOT 8u
+#define X9_CAM_RES_RESTORED 16u
+#define X9_CAM_RES_LATCHED 32u
+#define X9_CAM_RES_SMMU_INHERITED 64u
+#define X9_CAM_RES_SMMU_QUIESCENT 128u /* No NS configuration; NOT ownership. */
+#define X9_CAM_RES_SMMU_UNSUPPORTED 256u
+#define X9_CAM_RES_SMMU_CHANGED 512u
+#define X9_CAM_RES_NEED_CAM_POWER 1u
+#define X9_CAM_RES_NEED_PHY 2u
+#define X9_CAM_RES_NEED_ROUTE 4u
+#define X9_CAM_RES_NEED_DMA_MAP 8u
+#define X9_CAM_RES_NEED_DRAIN 16u
+#define X9_CAM_RES_NEED_SMMU_OWNER 32u
+#define X9_CAM_RES_NEED_SMMU_FEATURE 64u
+#define X9_CAM_RES_NEED_CSI_POWER 128u
+#define X9_CAM_RES_NEED_SMMU_POWER 256u
+#define X9_CAM_RES_NEED_MM_INFRA 512u
+enum x9_camera_resource_stage { X9_CAM_RES_STAGE_NONE, X9_CAM_RES_STAGE_MAP,
+    X9_CAM_RES_STAGE_CSI, X9_CAM_RES_STAGE_SMMU_POWER,
+    X9_CAM_RES_STAGE_SMMU_SNAPSHOT, X9_CAM_RES_STAGE_RESTORE,
+    X9_CAM_RES_STAGE_DONE, X9_CAM_RES_STAGE_MM_INFRA };
+struct x9_camera_resources {
+    uint32_t version, flags, stage, last_errno, restore_errno, blockers;
+    /* CSI bank1: AP EN, global EN, STA, DONE, PM_ACK, ALL_STA; before/after. */
+    uint32_t csi_before[6], csi_after[6], hwccf_before, hwccf_after;
+    uint32_t smc_get, smc_put, idr[6];
+    uint32_t cr0, cr0ack, cr1, cr2, gbpa, gerror, gerrorn, strtab_cfg;
+    uint32_t irq_ctrl, irq_ack, cmdq_prod, cmdq_cons, evtq_prod, evtq_cons;
+    uint64_t strtab_base, cmdq_base, evtq_base;
+    uint32_t mm_ack_before, mm_ack_active, mm_ack_after, mm_ack_required;
+    uint32_t reserved[4];
+};
+#define X9_CAMERA_GET_RESOURCES _IOR('C', 0x94, struct x9_camera_resources)
+#define X9_CAMERA_PROBE_RESOURCES _IOWR('C', 0x95, struct x9_camera_resources)
 #ifdef KERNEL
 /* Platform adapter must own/restore only its camera resources. Calls below
  * run in thread context, serialized, and must not re-enter camera APIs.

@@ -13,19 +13,42 @@ int main(int argc,char **argv)
 {
     bool probe=argc==3 && !strcmp(argv[1],"probe");
     bool pipeline=argc==3 && !strcmp(argv[1],"pipeline");
+    bool resources=argc==2 && !strcmp(argv[1],"resources");
     const char *which=(probe||pipeline)?argv[2]:argc==2?argv[1]:"status";
     unsigned sensor=!strcmp(which,"back")?1:!strcmp(which,"front")?2:0;
     if(argc>3 || (argc==3 && !probe && !pipeline) || ((probe||pipeline) && !sensor) ||
-       (argc>=2 && !sensor && strcmp(which,"status"))) {
-        fprintf(stderr,"usage: cameractl [status|back|front|probe back|probe front|pipeline back|pipeline front]\n");return 2;
+       (argc>=2 && !sensor && !resources && strcmp(which,"status"))) {
+        fprintf(stderr,"usage: cameractl [status|back|front|probe back|probe front|pipeline back|pipeline front|resources]\n");return 2;
     }
-    int fd=open(X9_CAMERA_DEVICE,(sensor && !pipeline?O_RDWR:O_RDONLY)|O_CLOEXEC);
+    int fd=open(X9_CAMERA_DEVICE,((sensor && !pipeline)||resources?O_RDWR:O_RDONLY)|O_CLOEXEC);
     if(fd<0){perror(X9_CAMERA_DEVICE);return 1;}
     struct x9_camera_status s={0};
     if(ioctl(fd,X9_CAMERA_GET_STATUS,&s)){perror("status");close(fd);return 1;}
     printf("version=%u mode=%u flags=%x supported=%x sensor=%u errno=%u frames=%llu rejected=%llu chips=%x/%x probe_mask=%x probe_flags=%x\n",
            s.version,s.mode,s.flags,s.supported_mask,s.sensor,s.last_errno,
            (unsigned long long)s.frames,(unsigned long long)s.rejected,s.chip_id[0],s.chip_id[1],s.probe_mask,s.probe_flags);
+    if(resources || !sensor) {
+        struct x9_camera_resources r={.version=1};
+        if(ioctl(fd,resources?X9_CAMERA_PROBE_RESOURCES:X9_CAMERA_GET_RESOURCES,&r)) {
+            if(resources || errno!=ENOTTY){perror("resources ioctl");close(fd);return 1;}
+        } else {
+            printf("shared receive-power flags=%x stage=%u errno=%u restore=%u blockers=%x smc_get/put=%08x/%08x (NOT capture ready)\n",
+                r.flags,r.stage,r.last_errno,r.restore_errno,r.blockers,r.smc_get,r.smc_put);
+            printf("CSI_BS_RX before/after AP=%08x/%08x global=%08x/%08x STA=%08x/%08x DONE=%08x/%08x PM_ACK=%08x/%08x ALL_STA=%08x/%08x FSM=%08x/%08x\n",
+                r.csi_before[0],r.csi_after[0],r.csi_before[1],r.csi_after[1],
+                r.csi_before[2],r.csi_after[2],r.csi_before[3],r.csi_after[3],
+                r.csi_before[4],r.csi_after[4],r.csi_before[5],r.csi_after[5],r.hwccf_before,r.hwccf_after);
+            printf("MM infra PM_ACK before/active/after=%08x/%08x/%08x required=%08x\n",
+                r.mm_ack_before,r.mm_ack_active,r.mm_ack_after,r.mm_ack_required);
+            printf("MM-SMMUv3 IDR0/1/3/5=%08x/%08x/%08x/%08x CR0/ACK=%08x/%08x CR1/2=%08x/%08x GBPA=%08x GERROR/N=%08x/%08x IRQ/ACK=%08x/%08x\n",
+                r.idr[0],r.idr[1],r.idr[3],r.idr[5],r.cr0,r.cr0ack,r.cr1,r.cr2,
+                r.gbpa,r.gerror,r.gerrorn,r.irq_ctrl,r.irq_ack);
+            printf("unclaimed STRTAB=%llx cfg=%08x CMDQ=%llx prod/cons=%08x/%08x EVTQ=%llx prod/cons=%08x/%08x (no table/queue writes, no mapping)\n",
+                (unsigned long long)r.strtab_base,r.strtab_cfg,(unsigned long long)r.cmdq_base,r.cmdq_prod,r.cmdq_cons,
+                (unsigned long long)r.evtq_base,r.evtq_prod,r.evtq_cons);
+            if(resources){close(fd);return r.last_errno?1:0;}
+        }
+    }
     if(pipeline) {
         struct x9_camera_pipeline r={.version=1,.sensor=sensor};
         if(ioctl(fd,X9_CAMERA_GET_PIPELINE,&r)){perror("pipeline ioctl");close(fd);return 1;}
