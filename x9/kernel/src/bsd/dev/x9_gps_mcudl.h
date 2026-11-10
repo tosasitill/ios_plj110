@@ -41,6 +41,9 @@ void x9_gps_mcudl_stream_init_mnl(struct x9_gps_mcudl_stream *, uint64_t,
     int (*control)(void *, uint8_t, const uint8_t *, unsigned, uint64_t),
     int (*mnl)(void *, const uint8_t *, unsigned, uint64_t), void *);
 /* Pure AP command+MCUDL serialization, not a send or a hardware ACK.
+ * Applies x9_gps_mnl_command_validate before touching the frame. Never
+ * serialize the full1256B host driver config in place of its216B prefix.
+ * Error sets frame_bytes=0; frame/payload bytes remain untouched.
  * channel0=NORMAL/MNL, channel1=URGENT/agent. slot_seq is owned by the
  * physical slot/flow-control implementation, NOT an incrementing packet ID. */
 int x9_gps_mcudl_make_mnl_control(void *, unsigned, uint8_t slot_seq,

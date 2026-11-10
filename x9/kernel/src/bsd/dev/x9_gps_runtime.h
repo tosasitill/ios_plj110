@@ -190,6 +190,19 @@ int x9_gps_register_connv2(const struct x9_gps_connv2_ops *);
  * Enqueue success is NOT TX completion or an application ACK. */
 int x9_gps_runtime_queue(uint64_t generation, unsigned channel,
     const void *, unsigned length);
+/* Callback-only AP MNL command path: validated payload -> one native inner
+ * packet -> MCUDL envelope -> existing bounded worker outbox. The serializer
+ * uses zero-based channels; this wrapper converts them to HIF NORMAL1 /
+ * URGENT2. v1..v4 callers MUST supply a slot_seq reserved under their REAL
+ * slot/flow implementation; this wrapper does not invent a packet ID or
+ * reserve/refund supplier credit. Native v5/v6 are still unregistrable.
+ * generation is the physical epoch. Caller must separately prove the
+ * application session, config/NV authority and command order; there is no
+ * request matcher here. Success is only a copied local outbox reservation,
+ * not TX completion, OPEN/STOP_DONE, receiver READY or a PDS transition.
+ * Inputs may be released after return; on error no outbox entry is added. */
+int x9_gps_runtime_mnl_command(uint64_t generation, uint8_t slot_seq,
+    uint32_t command, const void *payload, unsigned payload_bytes);
 #ifdef __cplusplus
 }
 #endif

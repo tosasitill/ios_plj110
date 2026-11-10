@@ -615,6 +615,22 @@ int x9_gps_runtime_queue(uint64_t generation,unsigned ch,const void *p,unsigned 
  packet->length=n; packet->time=mach_absolute_time(); memcpy(packet->bytes,p,n);
  gps_rt.out_count[c]++; return 0;
 }
+int x9_gps_runtime_mnl_command(uint64_t generation,uint8_t slot_seq,
+    uint32_t command,const void *payload,unsigned length)
+{
+ /* Reject calls outside the owner callback before reading configuration
+  * bytes. Do not let QRTR/set_state/IRQ feed the physical outbox directly. */
+ if(current_thread()!=gps_rt.worker || !gps_rt.in_callback)return EPERM;
+ if(!generation || generation!=gps_rt.generation || gps_rt.hif.fault)return ESTALE;
+ uint8_t frame[X9_MNL_PACKET_MAX+7];
+ unsigned bytes=0,channel=0;
+ int error=x9_gps_mcudl_make_mnl_control(frame,sizeof(frame),slot_seq,
+     command,payload,length,&bytes,&channel);
+ if(error)return error;
+ /* runtime_queue rechecks the revoked hardware epoch/fault and snapshots
+  * all bytes; no stack pointer escapes, no HIF reentry or inline send. */
+ return x9_gps_runtime_queue(generation,channel+1,frame,bytes);
+}
 static int gps_runtime_drain(void)
 {
  int ack=x9_gps_hif_management_result(&gps_rt.hif,1);

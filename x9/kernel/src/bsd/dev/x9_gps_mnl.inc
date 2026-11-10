@@ -83,16 +83,43 @@ x9_gps_mnl_receive(struct x9_gps_mnl_stream *s, const void *packet,
 }
 
 int
+x9_gps_mnl_command_validate(uint32_t command, const void *payload,
+    unsigned length)
+{
+ const uint8_t *p=payload;
+ if((length && !p) || length>X9_MNL_PACKET_MAX-12)return EINVAL;
+ /* Keep the actual sender bitmap, including its separate agent6 route. */
+ if(command>19 || (command!=X9_GPS_MNL_AGENT &&
+     !(0x000de3bfu & (1u<<command))))return ENOTSUP;
+ switch(command) {
+ case X9_GPS_MNL_OPEN:case X9_GPS_MNL_STOP:
+  return length ? EBADMSG : 0;
+ case X9_GPS_MNL_INIT_CONFIG:
+  if(length!=X9_MNL_INIT_CONFIG_BYTES)return EBADMSG;
+  /* libmnl53e4a4 only sends config2/3 when this LE32 flag equals1.
+   * Checking it cannot authorize the rest of this opaque board payload. */
+  return p[0x68]==1 && !p[0x69] && !p[0x6a] && !p[0x6b] ? 0 : EINVAL;
+ case X9_GPS_MNL_DRIVER_CONFIG:
+  if(length!=X9_MNL_DRIVER_CONFIG_BYTES)return EBADMSG;
+  /* mnld6f3b0 copies literal26690 to driver+0xd0. This is the
+   * ORIGINAL observed metadata, not a recipe for making a config valid. */
+  if(p[0xd0]!=0xd2 || p[0xd1] || p[0xd2]!=6 || p[0xd3] ||
+      p[0xd4]!=0x55 || p[0xd5]!=0xaa)return EBADMSG;
+  return p[0xd6]==2 && p[0xd7]==1 ? 0 : ENOTSUP;
+ default:return 0; /* unknown payload semantics remain the caller's job */
+ }
+}
+
+int
 x9_gps_mcudl_make_mnl_control(void *frame, unsigned capacity, uint8_t slot_seq,
     uint32_t command, const void *payload, unsigned length,
     unsigned *frame_bytes, unsigned *channel)
 {
  if (!frame_bytes || !channel) return EINVAL;
  *frame_bytes = 0;
- if (!frame || (length && !payload) || length > X9_MNL_PACKET_MAX-12) return EINVAL;
- /* The vendor command bitmap is 0x000de3bf; command6 is routed separately.
-  * Unknown commands are unsupported, not converted into a startup success. */
- if (command > 19 || (command != 6 && !(0x000de3bfu & (1u<<command)))) return ENOTSUP;
+ if (!frame) return EINVAL;
+ int error=x9_gps_mnl_command_validate(command,payload,length);
+ if(error)return error;
  unsigned inner = length ? 12+length : 8;
  if (capacity < inner+7) return EMSGSIZE;
  uint8_t *p = frame, *m = p+6;
@@ -101,9 +128,9 @@ x9_gps_mcudl_make_mnl_control(void *frame, unsigned capacity, uint8_t slot_seq,
  m[0] = (uint8_t)inner; m[1] = (uint8_t)(inner>>8); m[2] = m[3] = 1;
  for (unsigned i = 0; i < 4; i++) m[4+i] = (uint8_t)(command>>(8*i));
  if (length) for (unsigned i = 0; i < 4; i++) m[8+i] = (uint8_t)(length>>(8*i));
- p[0] = 0xa5; p[1] = slot_seq; p[2] = command == 6 ? 0xa3 : 0xa2;
+ p[0] = 0xa5; p[1] = slot_seq; p[2] = command == X9_GPS_MNL_AGENT ? 0xa3 : 0xa2;
  p[3] = (uint8_t)(inner>>8); p[4] = (uint8_t)inner;
  p[5] = (uint8_t)(p[1]+p[2]+p[3]+p[4]); p[6+inner] = 0xa3;
- *frame_bytes = inner+7; *channel = command == 6 ? 1 : 0;
+ *frame_bytes = inner+7; *channel = command == X9_GPS_MNL_AGENT ? 1 : 0;
  return 0;
 }

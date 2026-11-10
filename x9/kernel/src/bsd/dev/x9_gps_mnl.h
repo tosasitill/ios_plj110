@@ -7,6 +7,16 @@
 #include <stdint.h>
 #define X9_MNL_PACKET_MAX 1536u
 #define X9_MNL_FRAGMENT_MAX (X9_MNL_PACKET_MAX - 4u)
+/* AP sender commands, distinct from the MCU event IDs below. The original
+ * init call copies a 1256B host driver object, but sends ONLY its 216B
+ * prefix. Neither a host object nor MNL_Config.xml is an MCU wire payload. */
+enum x9_gps_mnl_command {
+ X9_GPS_MNL_OPEN=0, X9_GPS_MNL_STOP=1,
+ X9_GPS_MNL_INIT_CONFIG=2, X9_GPS_MNL_DRIVER_CONFIG=3,
+ X9_GPS_MNL_AGENT=6
+};
+#define X9_MNL_INIT_CONFIG_BYTES 136u
+#define X9_MNL_DRIVER_CONFIG_BYTES 216u
 /* The vendor dispatch rejects a negative signed16 assembled length. */
 #define X9_MNL_MESSAGE_MAX 32767u
 /* Actual MCU event IDs in libmnl's 7055a0 dispatch table. Event0 calls
@@ -56,9 +66,23 @@ int x9_gps_mnl_receive(struct x9_gps_mnl_stream *, const void *, unsigned,
  * Unknown events return ENOTSUP; every error leaves output untouched. */
 int x9_gps_mnl_control_decode(const void *body, unsigned body_bytes,
     struct x9_gps_mnl_control_message *);
+/* Validate the AP command's known wire shape before serialization/reservation.
+ * OPEN/STOP have no payload. INIT_CONFIG requires the original 136B object
+ * with offload enabled at +0x68. DRIVER_CONFIG requires the original 216B
+ * prefix and its observed +0xd0..d7 extension metadata (210/6/aa55/0102).
+ * Other supported sender commands retain their bounded opaque payloads.
+ * This does NOT validate the remaining board configuration, calibration,
+ * file descriptors, pointers, NV authority, session or receiver readiness.
+ * A caller must supply wire bytes from a qualified native producer, NEVER
+ * copy an Android process object, synthesize metadata or send an XML file. */
+int x9_gps_mnl_command_validate(uint32_t command, const void *payload,
+    unsigned payload_bytes);
 /* Strict event2 BODY -> 105B PDS partial translation, no publication/READY.
- * Only measured degree latitude/longitude are currently qualified. All
- * time/accuracy/confidence/altitude/DOP/mode validity bits remain clear.
+ * Qualified fields include degree lat/lon, independent GPS calendar,
+ * circular horizontal/vertical uncertainty, speed/speed uncertainty,
+ * non-cached course, MSL height and DOP. Vertical fields require grade3.
+ * UTC/leap authority, WGS84 height, confidence/ellipse, vertical speed and
+ * mode remain invalid; fields without their own evidence are omitted.
  * ENOENT is a valid no-fix grade0/1; ENOTSUP is another event/unknown grade.
  * Error leaves output untouched. Receiver/session/age must be qualified
  * separately before submitting to an explicitly capable backend. */
