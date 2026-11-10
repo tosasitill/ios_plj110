@@ -15,8 +15,8 @@ struct digital_afe_journal {
     struct x9_mic_digital_status *s;
     struct { uint32_t reg, mask, old, value; } saved[48];
     unsigned pending;
-    uint64_t deadline;
-    bool owned, quiesced;
+    uint64_t deadline, restore_deadline;
+    bool owned, quiesced, uncertain, poisoned;
 };
 static struct digital_afe_journal digital_afe;
 _Static_assert(sizeof(struct x9_mic_signal_status)==192,"signal ABI size");
@@ -139,8 +139,10 @@ static int digital_afe_update(struct afe_journal *a,unsigned reg,uint32_t mask,u
     d->saved[n].value=value&mask;
     d->s->afe_journal_count=d->pending;
     /* The write and unwind baseline share the same old control word. */
+    d->uncertain=true;
     wr(a->afe,reg,(old&~mask)|(value&mask));
-    return (rr(a->afe,reg)&mask)==(value&mask)?0:EIO;
+    if((rr(a->afe,reg)&mask)!=(value&mask))return EIO;
+    d->uncertain=false;return 0;
 }
 #define RX(reg,mask,value) do {e=digital_afe_update(a,(reg),(mask),(value));if(e)return e;} while(0)
 static void digital_afe_snapshot(struct afe_journal *a,bool active)
@@ -236,18 +238,85 @@ static int digital_afe_enable(struct afe_journal *a)
     s->flags|=X9_MIC_DIGITAL_READBACK;
     return 0;
 }
+static int digital_afe_restore_failure(struct afe_journal *a,int e)
+{
+    struct digital_afe_journal *d=&digital_afe;
+    if(!d->s->afe_restore_errno) {
+        d->s->afe_restore_errno=e;d->s->afe_restore_register=d->s->last_register;
+    }
+    if(!d->s->restore_errno)d->s->restore_errno=e;
+    d->s->flags|=X9_MIC_DIGITAL_RETAINED;
+    d->poisoned=true;a->stuck=true;
+    return e;
+}
+static int digital_afe_restore_read(struct afe_journal *a,unsigned reg,
+    uint32_t *got,uint32_t *mask)
+{
+    struct digital_afe_journal *d=&digital_afe;
+    uint32_t expected=0,alternate=0;*mask=0;
+    for(unsigned i=0;i<d->pending;i++) {
+        if(d->saved[i].reg!=reg)continue;
+        uint32_t m=d->saved[i].mask;
+        expected=(expected&~m)|(d->saved[i].value&m);
+        uint32_t v=d->uncertain && i+1==d->pending?d->saved[i].old:d->saved[i].value;
+        alternate=(alternate&~m)|(v&m);*mask|=m;
+    }
+    if(!*mask)return 0; /* never read or write an unissued register */
+    d->s->last_register=0x80000000u|reg;
+    if(mach_absolute_time()>=d->restore_deadline)return ETIMEDOUT;
+    int e=afe_access(a);if(e)return e;
+    *got=rr(a->afe,reg);
+    if(mach_absolute_time()>=d->restore_deadline)return ETIMEDOUT;
+    /* Only the last unconfirmed prepare write may retain its complete old
+     * masked value; arbitrary mixtures and previous transient values fail. */
+    return (*got&*mask)==(expected&*mask) || (*got&*mask)==(alternate&*mask)?0:EBUSY;
+}
+static int digital_afe_restore_check(struct afe_journal *a)
+{
+    struct digital_afe_journal *d=&digital_afe;
+    for(unsigned i=0;i<d->pending;i++) {
+        bool seen=false;
+        for(unsigned j=0;j<i;j++)if(d->saved[j].reg==d->saved[i].reg){seen=true;break;}
+        if(seen)continue;
+        uint32_t got=0,mask=0;
+        int e=digital_afe_restore_read(a,d->saved[i].reg,&got,&mask);if(e)return e;
+    }
+    if(d->pending)d->s->flags|=X9_MIC_DIGITAL_AFE_RESTORE_CHECKED;
+    return 0; /* RW conflict filter only, NOT whole DMA write-path drain */
+}
+static int digital_afe_restore_off(struct afe_journal *a,unsigned reg,uint32_t off_mask)
+{
+    struct digital_afe_journal *d=&digital_afe;
+    uint32_t got=0,mask=0;
+    int e=digital_afe_restore_read(a,reg,&got,&mask);if(e)return e;
+    off_mask&=mask;if(!off_mask)return 0;
+    uint32_t requested=got&~off_mask;
+    /* Preserve the original unwind baseline. Fold our STOP into the same
+     * issued-field expectations before its possibly effective MMIO write. */
+    for(unsigned i=0;i<d->pending;i++)if(d->saved[i].reg==reg)
+        d->saved[i].value&=~off_mask;
+    wr(a->afe,reg,requested);
+    if((rr(a->afe,reg)&mask)!=(requested&mask))return EIO;
+    return mach_absolute_time()<d->restore_deadline?0:ETIMEDOUT;
+}
 static int digital_afe_quiesce(struct afe_journal *a)
 {
     struct digital_afe_journal *d=&digital_afe;
-    if(!d->owned || d->quiesced)return 0;
-    int e=afe_access(a);if(e)return e;
-    d->s->last_register=0x80000000u|RX_UL0;e=update(a->afe,RX_UL0,1,0);
-    if(!e)delay(125); /* vendor UL post-PMD minimum before AFE off */
-    if(!e){d->s->last_register=0x80000000u|RX0;e=update(a->afe,RX0,1,0);}
-    if(!e){d->s->last_register=0x80000000u|RX1;e=update(a->afe,RX1,1,0);}
-    if(!e){d->s->last_register=0x80000000u|RX_PAD;e=update(a->afe,RX_PAD,1,0);}
-    if(!e)d->quiesced=true;
-    return e;
+    if(!d->owned)return 0;
+    if(d->poisoned)return d->s->afe_restore_errno?d->s->afe_restore_errno:EIO;
+    if(d->quiesced)return 0;
+    /* STOP has its own one-second budget, not the expired START deadline.
+     * The later restore shares this budget; it cannot restart a failed STOP. */
+    uint64_t ticks;nanoseconds_to_absolutetime(1000000000ULL,&ticks);
+    d->restore_deadline=mach_absolute_time()+ticks;
+    int e=digital_afe_restore_check(a);
+    if(!e)e=digital_afe_restore_off(a,RX_UL0,1);
+    if(!e && d->pending)delay(125); /* vendor minimum, not a drain witness */
+    if(!e)e=digital_afe_restore_off(a,RX0,1);
+    if(!e)e=digital_afe_restore_off(a,RX1,1);
+    if(!e)e=digital_afe_restore_off(a,RX_PAD,1);
+    if(e)return digital_afe_restore_failure(a,e);
+    d->quiesced=true;return 0;
 }
 static int digital_afe_restore(struct afe_journal *a)
 {
@@ -256,13 +325,18 @@ static int digital_afe_restore(struct afe_journal *a)
     int e=digital_afe_quiesce(a);
     while(!e && d->pending) {
         unsigned n=d->pending-1;
-        d->s->last_register=0x80000000u|d->saved[n].reg;
-        e=afe_access(a);
-        if(!e)e=update(a->afe,d->saved[n].reg,d->saved[n].mask,d->saved[n].old);
-        if(!e){--d->pending;++d->s->afe_journal_restored;}
+        uint32_t got=0,mask=0;
+        e=digital_afe_restore_read(a,d->saved[n].reg,&got,&mask);
+        mask=d->saved[n].mask;
+        if(!e) {
+            wr(a->afe,d->saved[n].reg,(got&~mask)|(d->saved[n].old&mask));
+            if((rr(a->afe,d->saved[n].reg)&mask)!=(d->saved[n].old&mask))e=EIO;
+        }
+        if(!e && mach_absolute_time()>=d->restore_deadline)e=ETIMEDOUT;
+        if(!e){--d->pending;d->uncertain=false;++d->s->afe_journal_restored;}
     }
     if(!e){e=afe_access(a);if(!e)digital_afe_snapshot(a,false);}
-    if(!e)d->owned=false;
-    return e;
+    if(e)return digital_afe_restore_failure(a,e);
+    d->owned=false;return 0;
 }
 #undef RX

@@ -180,6 +180,7 @@ struct x9_mic_analog_status {
 #define X9_MIC_DIGITAL_RESTORED 16u
 #define X9_MIC_DIGITAL_RETAINED 32u
 #define X9_MIC_DIGITAL_CODEC_RESTORE_CHECKED 64u
+#define X9_MIC_DIGITAL_AFE_RESTORE_CHECKED 128u
 enum x9_mic_digital_stage {
     X9_MIC_DIGITAL_UNTRIED, X9_MIC_DIGITAL_PREREQUISITES,
     X9_MIC_DIGITAL_BASELINE, X9_MIC_DIGITAL_CODEC_CLOCKS,
@@ -200,7 +201,10 @@ struct x9_mic_digital_status {
     uint32_t last_register;
     /* First digital codec rollback failure, independent of the input error.
      * Zero on older kernels/unattempted paths, not proof of restoration. */
-    uint32_t codec_restore_register, codec_restore_errno, reserved[3];
+    uint32_t codec_restore_register, codec_restore_errno;
+    /* First AFE digital rollback failure, bit31-tagged register offset.
+     * These consume reserved words; v1 remains 192 bytes / ioctl 0x9b. */
+    uint32_t afe_restore_register, afe_restore_errno, reserved[1];
     uint64_t elapsed_ns;
 };
 #define X9_MIC_GET_DIGITAL _IOR('M', 0x9b, struct x9_mic_digital_status)

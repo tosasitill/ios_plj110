@@ -698,6 +698,7 @@ int x9_mic_plj110_capture_restart_ready(void)
     if(s->last_errno || s->restore_errno || s->bus_fault_errno ||
        h->last_errno || h->restore_errno || j->analog->last_errno || j->analog->restore_errno ||
        j->digital->last_errno || j->digital->restore_errno ||
+       j->digital->codec_restore_errno || j->digital->afe_restore_errno ||
        a->s->last_errno || a->s->restore_errno || d->last_errno || d->restore_errno)
         return EIO;
     if((s->flags&(X9_MIC_BOARD_RESTORED|X9_MIC_BOARD_RETAINED))!=X9_MIC_BOARD_RESTORED ||
@@ -713,6 +714,7 @@ int x9_mic_plj110_capture_restart_ready(void)
        j->codec.touched || j->codec.audio_snapshot || j->codec.afe_snapshot || j->codec.poisoned ||
        j->codec.analog_owned || j->codec.analog_pending || j->codec.digital_owned ||
        j->codec.digital_pending || j->codec.digital_uncertain || digital_afe.owned || digital_afe.pending ||
+       digital_afe.uncertain || digital_afe.poisoned ||
        d->pending_flags || d->journal_count!=d->journal_restored)return EBUSY;
     for(unsigned i=0;i<sizeof(saved_regs)/sizeof(saved_regs[0]);i++)
         if(j->saved[i].issued)return EBUSY;

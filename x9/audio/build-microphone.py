@@ -118,6 +118,7 @@ def main():
         'realtime_fault_notifications_deferred': True,
         'enumeration_empty_lists_supported': True,
         'codec_masked_restore_guard': True, 'codec_restore_fault_location': True,
+        'afe_masked_restore_guard': True, 'afe_restore_fault_location': True,
         'cold_power_probe_control': True,
         'power_probe_activates_recording': False, 'hardware_tested': False,
         'route_tested': False, 'autoload': 'PID1 read-only union mount in microphone mode2',
