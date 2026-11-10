@@ -1,6 +1,6 @@
 # X9 前后相机初步移植
 
-**已实现控制层、RAW10 帧接口、iOS 双流桥及有条件的 MT6993 sensor-probe；采集后端仍缺失，不能拍摄。**
+**已实现控制层、RAW10 帧接口、iOS 双流桥、MT6993 冷启动 sensor-probe 与 SENINF/CAMSV 接收计划；采集后端仍缺失，不能拍摄。**
 没有假帧、测试图案、Android 代理或 Camera.app 成功状态伪造。默认关闭。
 
 ## 实现边界
@@ -11,8 +11,9 @@
 | XNU | `/dev/x9-camera` 独占控制；只读状态；16 MiB 上限 RAW10；1 s 有界等待；generation 拒绝旧 DMA 完成；关闭时停止、排空、恢复 |
 | 软件 ISP | HakiOS MIT 软件去马赛克、灰世界 AWB、AE、sRGB、NV12/BGRA；不使用高通 Chromatix；CCM 为单位矩阵，无 LSC |
 | iOS | HakiOS `CMDerivedObjectCreate` 设备类 v3/流类 v2，前后 `FigCaptureStream`；输出池、PixelBufferHandler、帧 metadata；先确认真实 start 再返回成功 |
-| sensor-probe | MT6993 CAMTG voter/parent 申请与释放、AP I2C 单控制器门控/FIFO/WRRD；WL28681C 指定通道电压/启停；reset/MCLK pinmux；真实 ID 检查与恢复日志。**仍要求已配置的 HWCCF/PLL、AP timing/引脚和共享供电，未上机验证** |
-| 采集后端 | **缺失**：完整冷启动 HWCCF/共享 regulator/AP timing ownership、SENINF C/D-PHY、VC/RAW10 接收、RAW DMA/SMMU、完成队列 |
+| sensor-probe | MT6993 CAMTG voter/parent 申请与释放、AP I2C 单控制器门控/FIFO/WRRD；WL28681C 指定通道电压/启停；reset/MCLK pinmux；真实 ID 检查与恢复日志。闲置 AP timing 初始化、禁用共享 rail 的申请/还原、GPIO203 局部唤醒。**仍要求共享时钟/HWCCF provider 已就绪，未上机验证** |
+| SENINF/CAMSV 计划 | 零 MMIO 查询实际 CSI 端口、VC0/RAW10、候选 outmux/CAMSV、尺寸/64B stride/WDMA 打包及 SID；**不是资源申请或采集** |
+| 采集后端 | **缺失**：共享 MM power/clock ownership、PHY 校准/速率、SENINF 路由提交、MM-SMMUv3 映射、RAW DMA 完成/排空队列 |
 
 原始 X9 DT 与 Android 启动日志确定：主摄为 i2c4/7-bit `0x1a`，ID 寄存器 `0x16/0x17` 返回 `0x9186`；前摄 i2c2/`0x10`，返回 `0x0615`。
 不把厂商宏中加了 offset 的软件 sensor ID 当成芯片读数。
@@ -91,16 +92,16 @@ cameractl probe front
 当前实现刻意不接管未知的共享资源，前置条件包括：
 
 - UNIVPLL 的已有 PCW/postdiv 配置在 `/104` 后为标称 24MHz（容差 ±1kHz）。不重编 PLL、不初始化 HWCCF 的全局/autolink 表；DONE 不就绪时有界退出。没有其他 XPU 投票且 CAMTG FENC 为 off 时，才允许把目标 mux 改为 parent7。已有投票则只接受正确 parent 和 FENC-on，不改 live parent。
-- i2c4/i2c2 和 **i2c12** 的共享 I2C_EAST/I2C_PERI parent 已 FENC-on/CKSTA-idle，选用 PLL 时该 PLL 已 FENC-on；不修改共同 parent。允许只 ungate 目标 IMPE/IMPC bit，退出恢复自己增加的门控。仍要求非零 timing、open-drain、非 HS，四个暴露的 channel bank 均无事务/IRQ/FIFO 残留，DMA 未运行。实际 DT 没有 `ch-offset-i2c`，使用 channel0，不能猜成 `+0x10000`。
-- AP I2C 引脚已为 mode1，尤其前摄不能仍归 SCP；WL28681C 共享 reset GPIO203 已拉高。不切换 SCP ownership，不重置 LDO 芯片或 GPIO187/202。
-- SID3 LN60_7 DOVDD 已处于精确 1.8V/normal/DA-enabled；主摄另需 SID6 LDC0_3 AFVDD 精确 3V。只读 PMIF-P/M 验证，不改共享 rail 或 VS voter。
-- 目标 sensor 的 reset 为 GPIO output-low、MCLK pinmux 为 off、它的 WL 通道均 disabled。主摄使用 WL4/7/2，前摄使用 WL3/1；其他通道保持。
+- i2c4/i2c2 和 **i2c12** 的共享 I2C_EAST/I2C_PERI parent 已 FENC-on/CKSTA-idle，选用 PLL 时该 PLL 已 FENC-on；不修改共同 parent。允许只 ungate 目标 IMPE/IMPC bit，退出恢复自己增加的门控。所有暴露 bank 必须无事务/IRQ/FIFO 残留，所有 DMA bank 均未运行；主/前各 8 个 I2C、3 个 DMA bank，WL 为 4/1。TIMING 非零时只借用 open-drain/非 HS 状态；TIMING 为零且 MULTI 为零时，可按已验证 parent PCW 推导标准模式 ≤98kHz 的 high/low sample、step、divider 和 5µs EXT，保存/恢复 14 个 CSR。不会 reset 整个控制器、改 MCU IRQ 或共享 shadow mode。实际 DT 没有 `ch-offset-i2c`，使用 channel0，不能猜成 `+0x10000`。
+- AP I2C 引脚允许已为 mode1，或 mode0/input 后仅切目标引脚的 mode1，退出恢复；mode2/SCP、GPIO output 等未知 owner 一律拒绝。GPIO203 已 output-high 时只借用；output-low 或 mode0/input 且 DIN-low 时可记录 DIR/DOUT，先低→output→高，等 1ms 后读 WL ID。退出前必须读整个 WL enable 字节为零才恢复自己拉高的203；GPIO187/202 和 UVP 控制始终不写。
+- SID3 LN60_7 DOVDD、主摄 SID6 LDC0_3 AFVDD：已启用时只借精确电压/normal/DA-enabled。禁用时还必须 DA-off/HW_OP_EN0=0，AF 另要求 EINT_EN=0，才能记录 selector，设置电压并单 bit EN_SET。DOVDD 的实际编码是 **0xd0=1.8V**（coarse 高 nibble、fine 低 nibble），AF 0x0a=3V；此前 0x0d 检查不正确。每次 snapshot→ownership→写入→readback 同持共享 X9PMIF 锁；模糊写入保留 journal。主摄仅申请 SID3 0x178a 的 VS mask4，最后撤销自己的 vote，不清其他 bit。
+- 目标 sensor 的 reset 为 GPIO output-low，或 mode0/input 且 DIN-low（保存 DIR/DOUT 后可转 output-low）；MCLK pinmux 为 off、它的 WL 通道均 disabled。主摄使用 WL4/7/2，前摄使用 WL3/1；其他通道保持。
 
 `blockers` 位：`1=clock`、`2=shared rail`、`4=AP route`、`8=I2C state`、`16=inherited active/reset state`。
 阶段编号：`1=preflight`、`2=PMIC`、`3=bus`、`4=LDO`、`5=power`、`6=ID`、`7=restore`、`8=done`，追加 `9=clock`（不改旧编号）。
-一次 AP FIFO 请求最多约 5ms，PMIF 状态等待最多约 1ms；单次 HWCCF DONE 等待最多 10ms，AP EN 最多 200µs，CKSTA/FENC 最多 1ms。未知继承状态不清 IRQ、不做总线 reset/retry。
-失败后先把 sensor reset 拉低、断开 MCLK，再关闭自身 WL 通道并恢复电压/引脚/控制寄存器/单控制器门控，最后撤销自己增加的 CAMTG vote 并在无人使用时还原 parent。继承投票和其他通道保持；恢复失败保留 journal、锁存并明确报告，不声称资源已恢复。
-**冷 LK 基线仍可能被共享 rail/WL reset/AP timing 等前置条件挡住；这不是完整的相机冷启动或采集驱动，也不是可拍摄镜像。**
+一次 AP FIFO 请求最多约 5ms，单次 PMIF 状态等待最多约 1ms，DA 另有最多20次/100µs有界采样；单次 HWCCF DONE 等待最多 10ms，AP EN 最多 200µs，CKSTA/FENC 最多 1ms。未知继承状态不清 IRQ、不做总线 reset/retry。
+失败后先把 sensor reset 拉低、断开 MCLK，再按真实反向顺序撤 DOVDD、WL DVDD、AF/AVDD（前摄 DOVDD 在 DVDD 之后），恢复仅自己改过的电压/引脚/14个控制寄存器/单控制器门控，撤销 CAMTG vote 并在无人使用时还原 parent，最后撤自己的 VS vote。共享 rail 的 EN_CLR 确认/DA-off 后才恢复原 selector；已有 live rail 不动。继承投票和其他通道保持；恢复失败保留 journal、锁存并明确报告，不声称资源已恢复。
+**这补齐了冷启动供电/AP timing 的局部 ownership，但共同 I2C clock FENC/HWCCF autolink 仍要求已就绪；未知 HW/EINT 用户或 SCP owner 会拒绝。没有本轮实机 ID，不能宣称冷 LK 已全部打通，更不是可拍摄镜像。**
 
 ### CAMTG 时钟申请和诊断
 
@@ -117,6 +118,33 @@ cameractl probe front
 VLP base 为 `0x1c200000`，AP HWV base 为 `0x1c040000`。共享 UNIVPLL base `0x1c213100`，CON1 `+0x0c`、FENC `+0x34 bit4`；只读。
 probe v1 仍为 80B，把末尾四个 reserved 字用于 `hwv_vote`（入口 AP EN）、`hwv_done`、`pll_con1`、`pll_fence`；请求仍须全零。旧内核返回零，旧工具仍可读取前面字段。
 `flags & 16` 表示 voter/CAMTG/PLL FENC 检查通过，不表示实测频率、更不表示 capture READY；`cameractl` 输出 raw 证据并明确标注标称配置。
+
+## 查询 SENINF → CAMSV RAW DMA 接收计划
+
+```bash
+cameractl pipeline back
+cameractl pipeline front
+```
+
+这两个命令以 `O_RDONLY` 打开节点，**不访问 MMIO、不上电、不写 sensor、不分配或提交 DMA**，mode1 也可用。
+新 `_IOWR('C',0x93)` 使用独立128B ABI，输入只有 version1/sensor1或2，其他字段必须全零；旧 status/probe ABI 不变。
+结果来自 captured DT/当前 ISP8s 寄存器描述，标为 source-only。候选 outmux0/CAMSV0 未被申请；缺 provider 不能 stream-on。
+
+| sensor | CSI/async | PHY | RAW10 / stride / bytes |
+|---|---|---|---|
+| 主摄 | port3 / async3，base `0x13898000` | C-PHY 3 trio | 4096×3072 / 5120 / 15728640 |
+| 前摄 | port0 / async0，base `0x13880000` | D-PHY 4 lane | 3264×2448 / 4096 / 10027008 |
+
+- 当前板 outmux0..5 是 CAMSV、6..8 才是 RAW、9 是 UISP；不按 sensor index 猜 CSI port。
+- tag0 的 outmux VCDT `+0x100=(0x2b<<16)|1`、预期尺寸 `+0x104=(height<<16)|width`。
+  候选 CAMSV0 base `0x3a600000`，DMA bank `+0x1000`：地址 low/high `+0x200/+0x204`，basic `+0x210=(stride<<16)|0x10`；不是旧 unit-test 的 TG 寄存器布局。
+- shared `mm_smmu_cam` 是 MM-SMMUv3 `0x30800000` 的 **SID0x80**、35-bit DMA mask，但 DT camera dma-range 只有16GiB。
+  分配还须 obey shared `mm_common` reservations；不能把 CPU PA 当相机 IOVA，也不能套 GPU 专用 SMMU bypass。
+- 当前 `blockers`：1=该 sensor ID 未匹配且还原，2=MM power/clock ownership，4=PHY，8=路由申请/提交，16=DMA映射，32=完成/排空。
+  只有1会在真实 probe 成功后清掉；其余 provider 尚未实现，不因计划生成成功变成 READY。
+- 当前驱动 `mtk_irq_camsv_hybrid()` 用 central `+0x348` 的 **SW_GP_PASS1_DONE [19:16]**，active group/tag 和 inner frame sequence 判断帧完成；SCQ `+0x2000` 的 setting-done 不是帧。
+  还须错误状态检查、cache同步、timeout隔离、stop/drain 后才释放 IOVA/buffer，再交给 `x9_camera_deliver()`。
+- 尚需 port 对应 eFuse/PHY settle/速率、CKSYS_MM/CAM/SENINF/CSI_BS 的共同 provider；不从 source-only 配置推出实机已收包。
 
 ## 硬件后端接入契约
 

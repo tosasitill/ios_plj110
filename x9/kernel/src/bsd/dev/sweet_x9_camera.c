@@ -55,6 +55,7 @@ static const struct x9_camera_sensor sensors[] = {
     {2,2,0x10,0x0615,3264,2448,0,4361,7642,65530,1,16,1024,1008,0,4,
      front_power, sizeof(front_power)/sizeof(front_power[0])}
 };
+#include "x9_camera_pipeline.inc"
 #include "x9_camera_mt6993.inc"
 static const struct x9_camera_sensor *sensor(void) { return &sensors[st.sensor-1]; }
 static int read16(const struct x9_camera_sensor *s, uint16_t reg, uint32_t *v)
@@ -210,6 +211,16 @@ static int cam_ioctl(__unused dev_t d,u_long cmd,caddr_t data,int f,__unused str
     if(cmd==X9_CAMERA_GET_PROBE) {
         lck_mtx_lock(&camera_control_lock);memcpy(data,&cam_probe_last,sizeof(cam_probe_last));
         lck_mtx_unlock(&camera_control_lock);return 0;
+    }
+    if(cmd==X9_CAMERA_GET_PIPELINE) {
+        struct x9_camera_pipeline r;
+        memcpy(&r,data,sizeof(r));
+        struct x9_camera_pipeline request={.version=1,.sensor=r.sensor};
+        if(memcmp(&r,&request,sizeof(request)))return EINVAL;
+        lck_mtx_lock(&camera_lock);
+        int e=cam_pipeline_plan(request.sensor,&r);
+        lck_mtx_unlock(&camera_lock);
+        if(!e)memcpy(data,&r,sizeof(r));return e;
     }
     if(cmd!=X9_CAMERA_PROBE_SENSOR)return ENOTTY;
     if(st.mode!=3 || !(f&FWRITE) || kauth_cred_getuid(kauth_cred_get()))return EPERM;

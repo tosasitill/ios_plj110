@@ -12,19 +12,34 @@
 int main(int argc,char **argv)
 {
     bool probe=argc==3 && !strcmp(argv[1],"probe");
-    const char *which=probe?argv[2]:argc==2?argv[1]:"status";
+    bool pipeline=argc==3 && !strcmp(argv[1],"pipeline");
+    const char *which=(probe||pipeline)?argv[2]:argc==2?argv[1]:"status";
     unsigned sensor=!strcmp(which,"back")?1:!strcmp(which,"front")?2:0;
-    if(argc>3 || (argc==3 && !probe) || (probe && !sensor) ||
+    if(argc>3 || (argc==3 && !probe && !pipeline) || ((probe||pipeline) && !sensor) ||
        (argc>=2 && !sensor && strcmp(which,"status"))) {
-        fprintf(stderr,"usage: cameractl [status|back|front|probe back|probe front]\n");return 2;
+        fprintf(stderr,"usage: cameractl [status|back|front|probe back|probe front|pipeline back|pipeline front]\n");return 2;
     }
-    int fd=open(X9_CAMERA_DEVICE,(sensor?O_RDWR:O_RDONLY)|O_CLOEXEC);
+    int fd=open(X9_CAMERA_DEVICE,(sensor && !pipeline?O_RDWR:O_RDONLY)|O_CLOEXEC);
     if(fd<0){perror(X9_CAMERA_DEVICE);return 1;}
     struct x9_camera_status s={0};
     if(ioctl(fd,X9_CAMERA_GET_STATUS,&s)){perror("status");close(fd);return 1;}
     printf("version=%u mode=%u flags=%x supported=%x sensor=%u errno=%u frames=%llu rejected=%llu chips=%x/%x probe_mask=%x probe_flags=%x\n",
            s.version,s.mode,s.flags,s.supported_mask,s.sensor,s.last_errno,
            (unsigned long long)s.frames,(unsigned long long)s.rejected,s.chip_id[0],s.chip_id[1],s.probe_mask,s.probe_flags);
+    if(pipeline) {
+        struct x9_camera_pipeline r={.version=1,.sensor=sensor};
+        if(ioctl(fd,X9_CAMERA_GET_PIPELINE,&r)){perror("pipeline ioctl");close(fd);return 1;}
+        printf("source-only pipeline sensor=%u flags=%x blockers=%x CSI%u %s/%u async=%u vc=%u dt=%02x %ux%u stride=%u bytes=%u\n",
+            r.sensor,r.flags,r.blockers,r.csi_port,r.cphy?"C-PHY":"D-PHY",r.lanes,r.async,
+            r.vc,r.dt,r.width,r.height,r.stride,r.bytes);
+        printf("candidate outmux=%u CAMSV=%u CSI=%llx CAMSV=%llx MM-SMMUv3=%llx sid=%x dma_bits=%u dma_limit=%llx\n",
+            r.outmux_candidate,r.camsv_candidate,(unsigned long long)r.csi_base,
+            (unsigned long long)r.camsv_base,(unsigned long long)r.smmu_base,r.smmu_sid,r.dma_bits,
+            (unsigned long long)r.dma_limit);
+        printf("planned VCDT=%08x size=%08x grab=%08x/%08x RAW10=%08x WDMA-basic=%08x (no MMIO, no reservation, NOT capture ready)\n",
+            r.vcdt,r.expected_size,r.grab_pixels,r.grab_lines,r.format,r.dma_basic);
+        close(fd);return 0;
+    }
     if(probe || !sensor) {
         struct x9_camera_probe r={.version=1,.sensor=probe?sensor:0};
         if(ioctl(fd,probe?X9_CAMERA_PROBE_SENSOR:X9_CAMERA_GET_PROBE,&r)) {

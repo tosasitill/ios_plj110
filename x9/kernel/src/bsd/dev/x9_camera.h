@@ -46,6 +46,27 @@ struct x9_camera_probe {
 };
 #define X9_CAMERA_GET_PROBE _IOR('C', 0x91, struct x9_camera_probe)
 #define X9_CAMERA_PROBE_SENSOR _IOWR('C', 0x92, struct x9_camera_probe)
+/* Source-derived, zero-MMIO receive plan, NOT a claim or hardware snapshot.
+ * Request: version=1, sensor=1/2, every other byte zero. Separate command so
+ * existing status/probe structs and ioctl sizes remain unchanged. */
+#define X9_CAM_PIPE_SOURCE_PLAN 1u
+#define X9_CAM_PIPE_SENSOR_PROBED 2u
+#define X9_CAM_PIPE_NEED_ID 1u
+#define X9_CAM_PIPE_NEED_MM_POWER 2u
+#define X9_CAM_PIPE_NEED_PHY 4u
+#define X9_CAM_PIPE_NEED_ROUTE 8u
+#define X9_CAM_PIPE_NEED_DMA_MAP 16u
+#define X9_CAM_PIPE_NEED_DRAIN 32u
+struct x9_camera_pipeline {
+    uint32_t version, sensor, flags, blockers;
+    uint32_t csi_port, cphy, lanes, async;
+    uint32_t width, height, stride, bytes;
+    uint32_t vc, dt, outmux_candidate, camsv_candidate;
+    uint32_t dma_bits, smmu_sid, vcdt, expected_size;
+    uint32_t grab_pixels, grab_lines, format, dma_basic;
+    uint64_t csi_base, camsv_base, smmu_base, dma_limit;
+};
+#define X9_CAMERA_GET_PIPELINE _IOWR('C', 0x93, struct x9_camera_pipeline)
 #ifdef KERNEL
 /* Platform adapter must own/restore only its camera resources. Calls below
  * run in thread context, serialized, and must not re-enter camera APIs.
