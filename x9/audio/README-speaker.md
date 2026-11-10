@@ -450,6 +450,7 @@ lease空间不是CSR，ticket细节另读resource-status；lease-error0时guard�
 
 | 文件／入口 | 已实现 | 仍需实际板级提供者 |
 |---|---|---|
+| `x9_dsp_pcm.{c,h}` | 96B PCM descriptor与32B shared-DRAM record字节codec；真实transport上的INIT／share／OPEN／HWPARAM／AFE PCM配置／PREPARE／DLCOPY／START／STOP／HWFREE／CLOSE；generation-bound消费消息、双快照DTOA与输入环容量检查 | unified AP lease下实际共享DRAM/MPU/cache、task/core绑定与生产调用者；DSP消费不能代替AFE物理played |
 | `x9_speaker_afe.{c,h}` | DL24/OUT4 逐字段写入/不确定/恢复 journal、32-bit I2S slots/S16、48k、CONN116/117 DL24 route；AP transition ticket、platform v3 部分失败 ownership＋fresh lease/config guard；prefill 后 DMA start、period copy/cache、稳定 CUR、高低地址/半环歧义检查；独立低水位 watcher、mute/disable/quiesce/restore | AUDIO/VLP APLL2、pad/物理共享资源 lease、DMA bus/EMI/cache、双 PA mute、权威 DMA quiesce |
 | `x9_tfa_plj110.{c,h}` | root 显式只读 reg03；PMIF-P SID3 reset/SID5 左供电快照，已开启 I²C6/共享 DMA clock 与 pads 校验、2 CSR bank/1 DMA idle、FIFO WRRD 1+2 BE、逐字段总线恢复 | 不具备双侧供电/reset/write lease；右 rail、真实 binding/profile/校准仍待确认 |
 | `x9_tfa98xx.{c,h}` | PM container total-size/CRC、双 I2C 类型（container bus=0）的地址、明确名字的两侧 profile、descriptor 边界；真实 reg03 revision 比对、AMPE=0 且读回；双侧预检白名单 register/bitfield prefix | 实际完整 revision、immutable container、per-revision 白名单、I2C6/reset/rails 互斥；Probus DSP file/patch/校准/boost 未执行 |
@@ -463,6 +464,41 @@ ON 清零不是全部 outstanding AXI DMA 已结束的证据，必须有真实 `
 才恢复地址／释放 lease；任何失败都保留资源。没有共享 lease 提供者时不会触碰 AFE，
 也不与麦克风 VUL1/ADDA 争寄存器。captured DT 的 OUT4 是2ch/sync0/mclk0、
 `etdm-vlp[4]=1`，不能把普通非VLP APLL2 回调充当已接通的板级资源。
+
+### 完整扬声器续作：DSP PCM 共享区与真实 task 调用链
+
+当前按“完成完整扬声器代码，最终只交付一个测试镜像”推进。此阶段不生成新的
+boot候选，也不把组件编译当作完整驱动完成；板级provider与最终backend接线仍在继续。
+
+`x9_dsp_pcm` 根据OPPO `audio_buf.h/mtk-dsp-platform-driver.c/mtk-dsp-mem-control.c`
+实现独立PCM task session，所有发送实际进入已有 `x9_adsp_request`，没有成功stub：
+INIT25→登记ATOD5/DTOA6→OPEN1→HWPARAM4→AFE PCM HWPARAM0x201／PREPARE0x203→
+PREPARE3→预填DLCOPY10→START15→STOP16→AFE HWFREE0x202→HWFREE9→CLOSE2。
+部分配置失败不继续后续步骤；失败保留session首错与pending frames，不重发不确定写入。
+每次内存读写／sync和消息前后核对同一binding与真实transport READY generation。
+
+| wire record | 格式 |
+|---|---|
+| PCM `audio_hw_buffer` | **96B**，bridge 6×LE64、attr 4×LE32、threshold／period 4×LE32、hardware／memif／IRQ／memory 4×u8、LE32 counter、u8 ignore_irq和7B零padding |
+| `audio_dsp_dram` 登记 | **32B**：bus／AP VA／size／AP VA各LE64；bus必须由真实provider提供，不从CPU VA猜物理地址 |
+| HWPARAM／PREPARE／DLCOPY | **8B LE64共享descriptor地址payload**，不是IPI_DMA，也不是把96B结构放到8B地址槽 |
+
+128B是本组件的共享区／cache-line对齐要求，不是descriptor长度。DSP genpool和AFE的
+`init_ring_buf_bridge`使用exclusive end=base+bytes；AFE寄存器END仍是inclusive，不能混用。
+格式使用Linux S16_LE enum2、48k／2ch／DL1；ETDM valid width15／slot31不属于该字段。
+Ring长度必须包含整数个period；provider不能直接假定128KiB可整除480帧period。
+
+单个ATOD record以NEED_ACK保护复用，即便流已经开始，TX-consume／BYPASS不能证明DSP
+已经复制descriptor。START／STOP保留源码DIRECT语义，成功只说明发送完成，**不证明AFE已
+开始、已drain或有物理anchor**；双PA mute／AFE quiesce仍必须由combined backend执行。
+消费事件只接受同generation／scene、DSP→kernel的IPI9／msg27，RESET／UNDERFLOW隔离；
+DTOA读回使用两次sync后的稳定双快照，不采用撕裂cursor。读指针、类型、容量和剩余数据
+校验通过才前进consumed；它只是DSP输入环消费，绝不能当成扬声器played。
+
+每个DSP generation只允许一次OPEN，避免同代际旧DTOA事件混入第二条流。最终board需
+在真实mute／drain后用新reset／READY generation启动下一流，不能换session对象伪造恢复。
+本组件不申请资源、不boot DSP、不unmute PA、不注册Ready；实际共享DRAM／MPU／cache、
+core通知、AFE／功放与iOS播放backend仍需完成集成。
 
 ### AUDIO-12：启动／运行配置资格与缓存故障位置
 
