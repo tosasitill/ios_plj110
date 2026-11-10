@@ -1276,6 +1276,14 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 
 ## 7. 当前交接(GPS-BARO-27,2026-11-10): 已补MNL配置长度/原metadata校验与worker命令入队;真实板级producer/应用确认及完整生产链仍缺,代码齐后才出唯一最终镜像
 
+### GPS-BARO-31 原件分析接续(2026-11-10): INIT原厂fallback与已导入校准分开;开始补实际native producer
+
+- **恢复状态**：GPS31独立树 `.local/x9/worktrees/gps-mnl-init31` / `gps-mnl-init31-20261110` 固定base **3f56125**，恢复时main **bedd034**且干净；不覆盖另一窗口DSP修改。此段记录只读分析里程碑，尚无GPS31源码改动/编译/CI/镜像或设备操作。
+- **原件新证据**：mnld **6e414/6e420**对fd70c==1选择校准分支；明确else **6e4e0..6e4fc**写init+18=**26000000**、+14=2000、+13=ff、+24=0。这是从零生成原厂fallback的producer依据，不是已测校准；GPS28对caller已有配置的26M频率不覆盖、52M仅按原post-NV precedence覆盖继续保留。MCU **ebe38..ebef0**的136B factory显式stores另有完整基线，MD块+3c..4b四个sw zero是已解码标准指令，不是未知fill helper的推测。
+- **INIT应用消费者/ISA边界**：ec4c4→**F0116A54**保存INIT到s0，再**116a8e→1155f2**；11580a..5832选择**F06D1980**并传136B给未解码copy helper，115836..5846对+14<100改为500。继续读1158a4..116128，仍有vendor未知编码；**116b18后s1已换成引擎消息指针**，后续s1+3c不能误认INIT的MD表消费者。Nuclei固定encoding header也未匹配既有四个关键opcode，不重复Andes/THead/CORE-V/Nuclei组合、安装或启动无license IDA。
+- **MD16来源澄清**：63b30仍有实际EL6N_000/ML4A_000/seek64或160→fd970/16B路线，短读/缺文件不是校准资格。63f00的准确property为 **vendor.debug.gps.capid.temp**，写**fd980**（不在16B内）；63f64写fd964是engineering路径，不应复制为XNU valid authority。其完整消费者/当前板校准资格仍未证明，不新增恒成功NV supplier。
+- **私有材料/下一步**：`.local/x9/work/gps-mnl-init31-20261110/`保存XML、mnld-init-first-half/md-valid-producer与MCU参数消费者tail/rest、engine-consumer-rest定点dis及Nuclei固定header/commit。下一步把已证实136B原厂baseline实际接入已有runtime INIT NULL/0路径，caller完整校准对象仍保留；不以fallback授予NVauthority/READY/FIX或应用ACK。仍WAIT_CONNV2、backend与完整power/NV/session未齐，GPS/CoreLocation及真实PRESSURE6/gain/SCP→CMAltimeter未闭环；goal active/progress，代码齐才唯一最终镜像。276/bootargs/root manifest保持，无ADB/SMC/flash/reboot/分区操作或测试套件。
+
 ### GPS-BARO-30 续修(2026-11-10): 原始MCU配置消费者与原生DRIVER216 baseline producer;未知ISA仍未解码
 
 - **隔离/提交**：沿用独立 `.local/x9/worktrees/gps-mnl-firmware30` / `gps-mnl-firmware30-20261110`，实际base **8fa56af**。恢复时main已到0bd8cd5，整合时到ed2ede3，保留并发PA/OUTMUX修改。生产代码 **8f0cb0d**（3文件65insertions/2deletions）精准cherry-pick为main **29efcea**；随后只修正原件依据注释 **6455a99**，main **c588705**，不改可执行逻辑、不重复成功对象构建。目标仍active/progress：全部GPS生产代码齐才冻结联合树出唯一最终镜像。
