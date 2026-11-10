@@ -5,7 +5,9 @@
  * mandatory. Diagnostic and native production use the SAME controller
  * mutex; the native lease excludes this probe for its whole lifetime.
  * A bus read necessarily writes its register-address byte and AP FIFO CSRs;
- * it never writes a PA register value. This is NOT x9_tfa_bus verified=7.
+ * the diagnostic never writes a PA register value. The native suffix can
+ * only perform validated full-revision AMPE-off through its actual I2C6
+ * child, separately from this probe. Neither is x9_tfa_bus verified=7.
  */
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -306,3 +308,4 @@ int x9_tfa_plj110_status(X9AudioAmpStatus *out)
 }
 /* Separate state: diagnostic observations never authorize native writes. */
 #include "x9_i2c6_native.inc"
+#include "x9_pa_native.inc"

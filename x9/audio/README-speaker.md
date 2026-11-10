@@ -457,6 +457,7 @@ lease空间不是CSR，ticket细节另读resource-status；lease-error0时guard�
 | `x9_i2c6.h/x9_i2c6_native.inc` | 与只读probe共用controller mutex；真实PA epoch下游child、reg8/value16 BE FIFO read/write、双CSR bank/DMA资格、last-prior journal、terminal-only no-replay清理与halt/drain前后屏障；iOS缓存状态 | 必须实际pin住I2C6/APDMA clocks、mux/PLL、GPIO114/115与所有master互斥，现无真实supplier或combined调用者；不授profile/校准/unmute |
 | `x9_pa_reset.{c,h}` | 本次FDT SID3双active-low reset拓扑、生产clock PA子租约、低1ms→高1ms/物理DI读回与fresh epoch、PMIF pending no-replay、halt/drain后重新assert low；I2C6下游子租约屏障 | 实际双侧rail/reset物理独占supplier仍无注册者，不提供PA寄存器写／profile／校准／unmute |
 | `x9_tfa98xx.{c,h}` | PM container total-size/CRC、双 I2C 类型（container bus=0）的地址、明确名字的两侧 profile、descriptor 边界；真实 reg03 revision 比对、AMPE=0 且读回；双侧预检白名单 register/bitfield prefix | 实际完整 revision、immutable container、per-revision 白名单、I2C6/reset/rails 互斥；Probus DSP file/patch/校准/boost 未执行 |
+| `x9_pa_native.{h,inc}` | 直接调用真实native I2C6 transport，在同一controller mutex内双侧完整reg03→SYSCTRL→AMPE-off→完整读回；singleton reset-epoch/first fault/unknown write保留，不构造verified=7 | 实际已pin的双侧power/controller supplier及combined调用者；仅安全静音，不授profile/校准/unmute |
 
 AFE start 必须预填至少960帧后才使能 DMA；PA 始终由外部 board 维持 muted。
 组件**没有调用 `x9_audio_register_backend`**：service/HAL 已接私有预填／逻辑与物理 timeline
@@ -827,6 +828,29 @@ held/configured/teardown、首错、dirty/uncertain/pending、名义时钟与最
 请求/完成/写尝试计数。仅复制内存，不validate、MMIO、清错或提供用户write/recovery入口。
 旧PCM/status/amp ABI不变，HAL Ready门不变；可信full revision/container/profile、
 probus保护校准和真实unmute仍须后续生产接线，不能设`x9_tfa_bus.verified=7`。
+
+### 通过原生 I2C6 完成双侧安全静音
+
+**安全静音代码已实现，但没有实际controller/双侧rail supplier或combined注册者，
+因此本轮没有执行I2C/PA操作。** `x9_pa_native.inc`实际include进入
+`x9_tfa_plj110.o`，与native I2C6共用**整个双侧事务**的controller mutex，不是
+每次read/write之间放锁；诊断probe、其他FIFO事务或release不能夹入ID→RMW→读回。
+未建第二controller实例、未把cached诊断flags装成`x9_tfa_bus.verified=7`。
+
+| 入口／步骤 | 约束与结果 |
+|---|---|
+| `pa_native_mute(ticket,lease)` | 已存在且fresh实际native I2C6 child；该child本身pin真实PA reset/power/controller parents。初次还需true Online，同一singleton记录generation/epoch/首错 |
+| 完整身份 | 原OPPO v6.14.2支持的full stepping：1a72/2a72/1b72/2b72/3b72、0a73/0b73/1a73、0a74/0b74/0c74；拒绝仅low-byte72/73/74、未知stepping及fallback。初次reg03每侧一次，任何身份读失败/变化撤销该侧写授权，不靠换status对象再probe |
+| AMPE-off | 只读reg03与SYSCTRL0；三family AMPE field0x0030即bit3，I2CR0x0010即bit1自动清动作。发现I2CR1拒绝RMW；仅清AMPE、保留其他bits，绝不AMPE-on/DCA/rail/reset/key/init/profile/calibration写入 |
+| 完整读回 | mute写前记录attempt/uncertain；ACK不当成功，重新full identity＋SYSCTRL全词wanted，再双侧复查才返回0。失败留下first fault，unknown mute不重发 |
+| 双侧错误隔离 | 一侧明确NACK仍尝试安全隔离另一已知侧；native pending/uncertain状态阻止后续全部transfer，不循环重试timeout/FIFO/START |
+| `pa_native_muted_validate` | 只读fresh身份/SYSCTRL/parent验证，不写PA值、不清历史fault/uncertain；能供以后pads/AFE安全mute接线，不把cached muted作为当前硬件证明 |
+| 新代际 | 不同binding必须由native I2C6真实parents证明更大的READY generation和PA reset epoch；不能凭不同ticket/context抹掉同epoch失败 |
+| `pa_native_status` | kernel-only64B缓存，含身份/静音/首错/不确定/attempts；没有新增用户控制selector、IOCTL或Ready位 |
+
+静音入口不需要也不假造trusted container/per-revision profile policy；原OPPO optimal
+init中的unlock、OVP bypass、boost、MTP/OTP及probus DSP保护路径均未搬入此安全入口。
+历史controller/transport fault允许独立实际物理cleanup，但不授权新播放或消除首错。
 
 ### AUDIO-12：启动／运行配置资格与缓存故障位置
 
