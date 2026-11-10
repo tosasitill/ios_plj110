@@ -50,6 +50,13 @@
  * image route and confirms real shadow/inner consumption, still DL/IRQ off.
  * Its journal restores BEFORE dropping receiver/MM; a pending trigger has
  * no cancellation proof and blocks all dependent teardown.
+ * Optional prepare_smi_clocks AFTER prepare_receiver and BEFORE MAC/PHY/
+ * OUTMUX takes only CAMSV0's deduplicated subcomm1/2/3 and larb19/14/29
+ * clocks. Supplier/consumer effects and the MMINFRA AL parent are checked
+ * before every dependent sample; no common/port/QoS/IOVA grant is implied.
+ * Close restores these clocks AFTER MAC/PHY/OUTMUX and BEFORE MM/supplies;
+ * unconsumed clock requests and new owners retain dependencies. No DMA
+ * producer is started, and zero LARB STAT/internal STAT is NOT full drain.
  * Sensor close first isolates reset/MCLK, then qualifies/retires that MM
  * lifetime, then restores sensor supplies. A receiver conflict retains both.
  * No standalone receiver-drop or caller-supplied drain assertion is exposed.

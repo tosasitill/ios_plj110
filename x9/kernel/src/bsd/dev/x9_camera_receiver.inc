@@ -18,6 +18,8 @@ static int cam_mac_close_locked(uint64_t);
 static int cam_phy_guard(void);
 static int cam_phy_retirement_guard(uint64_t);
 static int cam_phy_close_locked(uint64_t);
+static int cam_smi_clock_guard(void);
+static int cam_smi_clocks_close_locked(uint64_t);
 static const unsigned cam_rx_out_offsets[X9_CAM_RX_OUT_WORDS]={
     0x000,0x004,0x008,0x00c,0x010,0x014,0x018,0x020,
     0x02c,0x034,0x038,0x100,0x104,0x108
@@ -42,6 +44,7 @@ static int cam_rx_sample(const struct cam_rx_maps *m,struct x9_camera_receiver_s
     /* Re-prove power/clock effects before EACH sample. No probe on a failed
      * MM take, and no unsafe read after a changed parent or lost PM_ACK. */
     int e=cam_mm_guard(&cam_mm,true);if(e)return e;
+    e=cam_smi_clock_guard();if(e)return e;
     for(unsigned i=0;i<4;i++)s->mac[i]=cam_rr(m->mac,mac_offsets[i]);
     s->async_cfg=cam_rr(m->async,0);s->async_split=cam_rr(m->async,0xc);
     s->afifo=cam_rr(cam_mm.cam_cg,0x7dc);
@@ -194,11 +197,14 @@ static int cam_rx_session_close(struct x9_camera_receiver *r)
      * has not issued any receiver writes; unwind only its consumed slots.
      * A complete take first refuses unconsumed analog requests, restores
      * OUTMUX with MAC/async clocks held, restores/stops analog, then
-     * restores MAC/async. The receiver must still match the initially captured disabled controls. */
+     * restores MAC/async, then optional SMI clocks. The receiver must still
+     * match the initially captured disabled controls. Unconsumed SMI clock
+     * requests or new owners retain the MM and sensor dependencies too. */
     off=cam_phy_retirement_guard(cam_rx_live.sensor_epoch);
     if(!off)off=cam_out_close_locked(cam_rx_live.sensor_epoch);
     if(!off)off=cam_phy_close_locked(cam_rx_live.sensor_epoch);
     if(!off)off=cam_mac_close_locked(cam_rx_live.sensor_epoch);
+    if(!off)off=cam_smi_clocks_close_locked(cam_rx_live.sensor_epoch);
     if(!off)off=cam_mm.active?cam_rx_session_guard():0;
     if(!off)off=cam_mm_session_close(cam_rx_live.epoch,&cam_rx_live.status.mm);
     else cam_mm_session_retain(cam_rx_live.epoch,off);
@@ -247,6 +253,7 @@ static int cam_rx_sensor_close_locked(uint64_t epoch)
 #include "x9_camera_outmux.inc"
 #include "x9_camera_mac.inc"
 #include "x9_camera_phy.inc"
+#include "x9_camera_smi_clocks.inc"
 static int cam_rx_probe(unsigned sensor,struct x9_camera_receiver *r)
 {
     int e,off=0;

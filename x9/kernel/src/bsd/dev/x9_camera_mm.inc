@@ -44,6 +44,7 @@ struct cam_mm_journal {
     bool active;
 };
 static struct cam_mm_journal cam_mm;
+static bool cam_smi_clocks_held(void);
 static struct x9_camera_mm_status cam_mm_last={.version=1};
 static bool cam_mm_attempted;
 static struct {
@@ -403,6 +404,7 @@ static int cam_mm_session_close(uint64_t epoch,struct x9_camera_mm_status *r)
     int off,prior;
     if(!epoch || epoch!=cam_mm_live.epoch || cam_mm_live.close_attempted)return ESTALE;
     if(session.capture)return EBUSY;
+    if(cam_smi_clocks_held())return EBUSY;
     cam_mm_live.close_attempted=true;
     prior=cam_mm_live.error;
     stage=cam_mm_live.status.stage;slot=cam_mm_live.status.slot;

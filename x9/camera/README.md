@@ -380,7 +380,15 @@ captured DT 区分 normal camera **SID80**、protected camera **SID89**、displa
 ### 持有冷传感器与接收时钟
 
 `kernel/src/bsd/dev/x9_camera_sensor_session.h` 的 kernel-private 调用顺序为：
-`open → configure → prepare_receiver → read8 → close`。`prepare_receiver` 可省略，原 probe/standby 不因此增加 MM 操作。准备 receiver 后可显式 `configure_mac → prepare_analog → configure_timing → configure_ctle → configure_outmux`（均为 `x9_camera_sensor_session_*`）；analog 需要先成功配置 MAC，timing/CTLE 需要已校准 analog，各阶段均可省略，原诊断不会自动写这些配置。MAC/analog/timing/CTLE 必须先于 OUTMUX；已持有 OUTMUX 时再配置返回 `EBUSY`，不能改变已 posted 命令的输入环境。timing 不能在 CTLE 已尝试后追加；后续接入的 generic PHY 配置也须在最终 CTLE override 之前完成。
+`open → configure → prepare_receiver → read8 → close`。`prepare_receiver` 可省略，原 probe/standby 不因此增加 MM 操作。准备 receiver 后可显式 `prepare_smi_clocks → configure_mac → prepare_analog → configure_timing → configure_ctle → configure_outmux`（均为 `x9_camera_sensor_session_*`）；SMI clocks 需要 configured standby 且必须在 MAC/PHY/OUTMUX 之前，analog 需要先成功配置 MAC，timing/CTLE 需要已校准 analog，各阶段均可省略，原诊断不会自动写这些配置。MAC/analog/timing/CTLE 必须先于 OUTMUX；已持有 OUTMUX 时再配置返回 `EBUSY`，不能改变已 posted 命令的输入环境。timing 不能在 CTLE 已尝试后追加；后续接入的 generic PHY 配置也须在最终 CTLE override 之前完成。
+
+`prepare_smi_clocks(epoch, &smi_clock_status)` 只补 **CAMSV0 的真实 SMI 时钟前置条件**，不等于 `mtk_smi_larb_enable` 的全部 port/common 配置。设备树 `camsv1@3a600000` 的实际 `camsv-id=0`，larb 顺序为 **19/14/29**：19→cam-subcomm3→disp-common0，14→cam-subcomm1→subcomm1_1→disp-common0，29→cam-subcomm2→mdp-common1。common0/1 均为 skip-rpm-cb 且没有 clocks，不触其 VCP/display 状态；subcomm1 与 1_1 共用一个物理 gate，不能重复申请或提前释放。
+
+实际写入为 supplier **CAM_VCORE_R1A `3c80d000` / CG35 bits13/14/15**，随后 consumer **CAM_MRAW `3a680000` / CG34 LARB14/19/29 bits1/2/5**；`3c800000` 是邻接 CCU，不能替代 R1A。只追加缺失的 AP raw HWV bit，等待真实 AP readback/global enable/STA0，按 vendor normal path 必要时 masked CG_CLR，并确认实际 CG0。完整 MM/CSI/secure power 已持有，MMINFRA AL parent 的 CFG_0+10 整 byte、CKSTA/FENC 必须稳定；不写其 AP/parent/PDN/PLL，不把 FENC 当成速率/吞吐 lease。私有 status 和实体 `x9_camera_smi_clocks.inc/.h` 不改变既有公开 ioctl ABI。
+
+每组独立保存 before/expected/owned/borrowed 与 posted SET/CG_CLR/CLR pending；拒绝 voted-but-gated 修复和 unvoted direct-clock 接管。原 borrowed AP/global/effect 必须保持，失败不能重发原请求或以 prior 控制值证明消费。pending 只有确认 target/effect 与 voter STA0 才允许唯一 close 继续；仍未知时保留所有依赖。receiver/PHY/AP 的既有 guard 现在也检查该 optional lifetime；原 MM close 在 SMI held 时拒绝卸依赖。关闭顺序 OUTMUX→PHY→MAC/async→SMI consumer→supplier→MM/sensor rails，只撤新增 AP bit，physical gate 由最后 aggregate vote 恢复，不强制 CG_SET。新 owner 保持原 gated 位时拒绝继续撤低层依赖。
+
+准入完成及撤 clock 前双采样三路 LARB 的普通 RO `STAT+0` / internal `STAT+500` 必须0；失败部分仍 gated 的 larb 不读。它仅是当前未启 producer 的必要 clock-unvote 条件，**不是完整 AXI/IRQ/cache/worker drain**。没有 IRQ/R-C 读取、port NONSEC/SID80/path/QoS/OSTD/common 配置写入、native capture caller 或实机证据；因此 **NEED_SMI/NEED_RATE/NEED_DMA_MAP/NEED_DRAIN 均不清除**，`SMI_CLOCKS_CONFIGURED` 只表示时钟控制读回，不造 READY。
 
 - standalone 入口取得 `camera_control_lock`；同 TU 的 native 回调已经持锁，必须使用内部 `_locked` helper，不重入公开入口。
 - `open` 返回的非零 epoch（包括错误返回）代表已准入 journal，必须安排一次 close；旧 epoch、重复 prepare/close 不做 MMIO。成功 prepare 不撤销 MM votes，不设置 READY，不返回 IOVA。
@@ -424,7 +432,7 @@ OUTMUX 引擎只接受选定 bank 的 TOP CG 原为 off、当前 IRQ policy 为 
 
 `RESTORED` 只描述配置与 CG。CFG_DONE 可能留下 masked IRQ status；本服务不读/ack IRQ_STATUS，也不声称 IRQ/event drain。未来 native 唯一 IRQ owner 必须在 unmask 前资格化并退休该配置命令历史，不能把它当作图像完成。
 
-这套生命周期可显式开启 inactive analog 校准、数字HS/lane-map/deskew/protocol和最终 CTLE 配置，但不启用 digital PHY lanes、SENINF DL、IRQ 或 DMA。CG/VM0/稳定 disabled 条件只是配置准入，不证明独占 AP/SCP、采集速率、包接收、全写链 drain 或 IOVA 授权；共享 CG 的 masked RMW 与检查也不是跨固件的原子 lease/ABA 检测。LARB/SMI 数据通路、持续rate authority、PHY/AFIFO有界start-stop、正常 SID80 attach、唯一IRQ owner与真正采集仍缺失，analog/deskew配置也尚无本机运行证据。
+这套生命周期可显式开启 SMI supplier/larb clocks、inactive analog 校准、数字HS/lane-map/deskew/protocol和最终 CTLE 配置，但不启用 digital PHY lanes、SENINF DL、IRQ 或 DMA。CG/VM0/稳定 disabled 条件只是配置准入，不证明独占 AP/SCP、采集速率、包接收、全写链 drain 或 IOVA 授权；共享 CG 的 masked RMW 与检查也不是跨固件的原子 lease/ABA 检测。完整LARB/SMI port/common数据通路配置、持续rate authority、PHY/AFIFO有界start-stop、正常 SID80 attach、唯一IRQ owner与真正采集仍缺失，SMI clocks/analog/deskew配置也尚无本机运行证据。
 
 ### 接通采集回调
 
