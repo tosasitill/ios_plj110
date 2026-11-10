@@ -19,7 +19,7 @@
 | 接收寄存器预检 | 持有完整 MM 寄存器时钟链时，读取目标 MAC、async/AFIFO、outmux0 outer/inner、CAMSV0 central/DMA/CQ 控制，双采样验证稳定及使能位关闭。**只读，不提交配置，不证明 ownership 或 DMA 排空** |
 | 持久 sensor/receiver 生命周期 | kernel-private 冷会话可在 verified standby 后持有同一 MM 时钟与 CSI/secure 电源 journal；后续请求及撤销前检查完整已消费依赖与原始接收控制，先隔离 sensor reset/MCLK，再退休 MM，最后还原 sensor 供电。**无 native capture caller，不 stream-on；不是 DMA lease/drain** |
 | MAC/async 包配置 | verified standby/receiver 后，真实配置前 DPHY／后 CPHY 包格式、正常 RAW10 DT、unsplit async/CAM_MAIN AFIFO，并仅追加选定 async CG；逐控制 journal/guard/逆序恢复，保留其它端口及原 IRQ policy。**已局部编译，未运行；不启用 PHY mux/MAC lane，不是完整 PHY 或采集后端** |
-| OUTMUX 配置引擎 | 同一已持有会话可显式配置 inactive OUTMUX0 的固定 image tag0，真实 masked shadow 写入、CFG_DONE、完整 inner 消费确认及逆序恢复。保留其它 tags/端口及 IRQ policy，DL/IRQ/DMA 关闭。**已局部编译，未运行；无 PHY/rate/SMI/SID80 grant/native capture caller** |
+| OUTMUX 配置引擎 | 同一已持有会话可显式配置 inactive OUTMUX0 的固定 image tag0，真实 masked shadow 写入；CFG_DONE 需 fresh masked STATUSX 事件和完整实际 inner target，再单 bit W1C 退休。WCLR policy 独立 journal/恢复，不启 AP/CCU IRQ 或 DL/DMA。**已局部编译，未运行；无 GIC/PHY/rate/SMI/SID80 grant/native capture caller** |
 | 采集后端 | **缺失**：完整 DVFS/rate/SMI ownership、PHY 校准/速率、SENINF 路由提交、MM-SMMUv3 映射、RAW DMA 完成/排空队列 |
 
 原始 X9 DT 与 Android 启动日志确定：主摄为 i2c4/7-bit `0x1a`，ID 寄存器 `0x16/0x17` 返回 `0x9186`；前摄 i2c2/`0x10`，返回 `0x0615`。
@@ -480,11 +480,15 @@ CTLE 复用 analog 的逐字段 owned/pending journal；成功只发布 `CTLE_CO
 
 每个 bank 执行 idle200us → CORE1/30us → LPF1/5us → OS_RSTB1/1us → CAL_EN → 25us → 有界状态消费。只有触发前 CPLT0、10ms/10000次内六个完成位全部1且再次保持1，才标记该 bank CALIBRATED；上游 delay 后写 `ANA9.CPLT=1` 的做法不移植。结果/code 不用作普通控制 guard；完成后 CAL_EN 仍 on 时持续检查完成位。入场已有 CPLT 历史不猜 W1C，也不清零。任何已 posted 但未确认的校准阻止全部接收/MM/rail 退休，不 reset/cancel/retry；已完成才能单次逆序关 CAL_EN/RSTB/LPF/CORE、等待200us并还原 owned 配置。RESTORED 不表示 RO 校准结果/IRQ history 已回到入口或全链 drain。
 
-OUTMUX 引擎只接受选定 bank 的 TOP CG 原为 off、当前 IRQ policy 为 AP/VM0 且其它 VM 未选中、DL/ready/reset/IRQ 与所有 tag filters 关闭、无 crop、所有已知 shadow/inner 配置一致且双采样稳定。拒绝继承的 staged difference，不替其它 owner 发布配置，也不修改 VM routing。它保留所有 8 个 tag 的完整已知控制，只改普通 pixel mode、unsplit source、reference/last VC、tag0 VC/RAW10 format/word-count size/filter 的固定字段，并只追加 TOP outmux0 CG bit。
+OUTMUX 引擎只接受选定 bank 的 TOP CG 原为 off、当前 IRQ policy 为 AP/VM0 且其它 VM 未选中、DL/ready/reset/IRQ 与所有 tag filters 关闭、无 crop、所有已知 shadow/inner 配置一致且双采样稳定；两 bank 的 CFG_DONE command/status 和 IRQ_TRIG 必须为0。拒绝继承的 staged difference，不替其它 owner 发布配置，也不修改 VM routing。它保留所有 8 个 tag 的完整已知控制，只改普通 pixel mode、unsplit source、reference/last VC、tag0 VC/RAW10 format/word-count size/filter 的固定字段，并只追加 TOP outmux0 CG bit。
 
-`CFG_DONE` 写出前记录 pending；只有在 10 ms deadline/10000 次上限内 status idle 且**全部已知 inner 配置与 shadow 完全一致**才报告 CONSUMED，不把 posted trigger、标称时序或同值读回当帧。close 先恢复 owned shadow 字段并确认原 inner，再撤本次 CG；未提交的 shadow failure 只还原 shadow，已 posted 的失败 commit 不 reset/cancel/retry，保持全部依赖。初始 snapshot 保留，持续 receiver guard 的 expected 仅随本 journal 的真实确认更新。
+唯一 thread-only STATUSX 采样者在 `camera_control_lock` 内工作，**不注册 GIC、不启 AP/CCU IRQ**。按厂商 `INT_WCLR_EN`（CSR_CFG_CTRL `+0x20 bit0`）设置/资格化 WCLR 后才读 **outer `+0x54 IRQ_STATUSX`**；`+0x44` 是 AP status，`+0x24/+0x28` 是 debug，不作为 raw alias。已 WCLR 的 policy 只借用，未 WCLR 的两 bank 仅 journal/改变此 bit，不改其它 ready/DL controls。inner writable aperture 在上游有实际调用，但 **inner WCLR 的立即/镜像行为没有本机运行证据**：每笔只能接受完整 prior/target 控制值，显式写的 bank 必须双采样到 target，peer effect 只从实际读数记录；不能假定镜像或直接写 inner route/tag 来伪造消费。读回不能证明时保留依赖，不发 CFG_DONE 来修复 policy。
 
-`RESTORED` 只描述配置与 CG。CFG_DONE 可能留下 masked IRQ status；本服务不读/ack IRQ_STATUS，也不声称 IRQ/event drain。未来 native 唯一 IRQ owner 必须在 unmask 前资格化并退休该配置命令历史，不能把它当作图像完成。
+入口 raw 两次为0才建立 clear baseline；若稳定且**只有 CFG_DONE bit0**，它仅是 stale history，在完整 quiet/matched 控制资格下只 W1C bit0 一次，再确认两次0。任何其它/混合事件（包括 frame/tag/error）无 owned producer，记录原值并 terminal retain，**不 ack**。`CFG_DONE` 写出前以 sensor epoch 和不可复用的 command sequence 记录 pending。10ms/10000次内须同时看到 clear baseline 后的新 CFG_DONE，以及**两次全部实际 outer/inner target 匹配、command/status idle**；才允许一次单 bit W1C。W1C pending 在 posted write 前登记，只有实际两次0及仍保持 target 才报告 CONSUMED/completed sequence。先到事件可等待 target；无 W1C 却自行消失、确认 target 后回退或 ack clear 后重现都是 terminal conflict，不被后来的读数掩盖。
+
+唯一 sensor close 可资格化 consistent timeout 的晚到真实 target/event 或 W1C 清零，**不重发 SET、trigger 或 W1C，不把 prior 当退休**；初始 TOP CG SET 若未确认，也须两次实际 target=on 才可开始退休，prior/off 不能被当作已撤销 SET 而卸依赖。未知事件或已观测 control/authority 变化 terminal latch，即使恢复原值也不继续。未发 CFG_DONE 的 shadow failure 只恢复 owned shadow；已消费 route 的恢复同样需要新的 command/event 和完整 target，再退休历史、恢复 owned WCLR policy，最后确认本次 CG 实际关闭。初始 snapshot 保留，receiver expected 只随真实确认更新。WCLR 恢复后不再读可能 read-clear 的历史，也不追加 CFG_DONE。
+
+`RESTORED` 表示配置/policy/CG 恢复；嵌套 kernel-private IRQ status 的 `HISTORY_RETIRED` 才表示**本 scope 实际采样到的 masked CFG_DONE 历史**已退休。mode setup 若在首次 raw read/trigger 前失败，可只恢复已改变 policy，不能凭空设置 HISTORY_RETIRED。flags 是里程碑记录，command/completed、mode/ack pending 和 raw before/after/sample count 均为缓存，没有新增 ioctl 或 capture READY。这不是 GIC/IRQ worker/DMA/PASS1_DONE drain；未来 native capture 仍须取得实际 GIC 来源和全链 producer owner，不能把配置事件当图像完成。
 
 这套生命周期可显式开启 SMI supplier/larb clocks、inactive analog 校准、数字HS/lane-map/deskew/protocol和最终 CTLE 配置，但不启用 digital PHY lanes、SENINF DL、IRQ 或 DMA。CG/VM0/稳定 disabled 条件只是配置准入，不证明独占 AP/SCP、采集速率、包接收、全写链 drain 或 IOVA 授权；共享 CG 的 masked RMW 与检查也不是跨固件的原子 lease/ABA 检测。完整LARB/SMI port/common数据通路配置、持续rate authority、PHY/AFIFO有界start-stop、正常 SID80 attach、唯一IRQ owner与真正采集仍缺失，SMI clocks/analog/deskew配置也尚无本机运行证据。
 
