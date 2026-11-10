@@ -26,7 +26,8 @@ static x9g_client &x9g_client_for(unsigned slot) {
 }
 static uint16_t x9g_error(int error) {
  return error == ENXIO || error == EAGAIN ? X9Q_NOT_READY :
-        error == EBUSY ? X9Q_BUSY : error == EINVAL ? X9Q_ARG : X9Q_INTERNAL;
+        error == EBUSY || error == EALREADY ? X9Q_BUSY :
+        error == ENOTSUP ? X9Q_UNSUPPORTED : error == EINVAL ? X9Q_ARG : X9Q_INTERNAL;
 }
 /* Transactional union of all clients. A client cannot stop another's lease
  * or make the shared engine claim success when physical activation failed. */
@@ -77,8 +78,16 @@ static bool x9g_send(uint32_t local, uint32_t port, const uint8_t *req, unsigned
   if (len != 7) error = X9Q_ARG;
   else {
    x9_gps_status s; x9_gps_copy_status(&s);
-   uint8_t state[2] = { (uint8_t)(c.enabled && s.enabled && s.ready),
-       (uint8_t)(c.enabled && c.automatic && s.tracking ? 2 : 1) };
+   /* A cold transport STOP can inhibit output before the synchronous
+    * application changes its state. Query must not return cached enabled/
+    * tracking as success in that interval. TX done is only an extra fence;
+    * it NEVER substitutes for the real application's ready/tracking. */
+   bool native_allowed = !s.mnl_session_initialized ||
+       (s.mnl_session_open_completed && !s.mnl_session_stop_queued &&
+        !s.mnl_session_errno);
+   bool available = s.ready && !s.fault && native_allowed;
+   uint8_t state[2] = { (uint8_t)(c.enabled && s.enabled && available),
+       (uint8_t)(c.enabled && c.automatic && s.tracking && available ? 2 : 1) };
    x9q_packet p(req); p.tlv(1, state, sizeof(state)); p.send(local, port); return true;
   } break;
  case 0x21: /* iOS may supply an 8-byte reason/enable mask. */
