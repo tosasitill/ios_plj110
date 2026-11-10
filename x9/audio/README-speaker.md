@@ -1116,6 +1116,31 @@ I²C6还承载display/charger节点；当前XNU无其他I²C6访问路径，root
 fresh-reset或trusted prefix能力，不读取／执行container，也不做AMPE mute/unmute。
 board type2不会替换PCM页；无backend lease时关闭诊断会话不改PCM fault/timeline。
 
+### 生产 I2C6 的完整时序配置
+
+生产 FIFO 与上述只读 probe 使用同一 controller mutex、不同 journal；没有实际
+controller／双侧 power supplier 时仍不访问硬件。`x9_i2c6_timing.h` 是 kernel 与
+own-code iOS 共用的纯配置算术，不是 controller lease，也不授权更改共享时钟或引脚。
+
+- OPPO `mt6991_compat` 为 `speed_ver=1`，高／低相独立 sample1..8 × step1..64，
+  divider 为两个相同5-bit字段，LS period需要额外一个count；HS/SDA/MIS=0、IO=3。
+- WEST四个source为26M、UNIVPLL/20、MAINPLL/16、UNIVPLL/10。PCW与两个分频在
+  **完整分式中一次向上取整**，不再先ceil PLL再floor fixed divider而低估频率。
+- EXT使用 `ceil(source_hz*5/(divider*1000000))`，不再两次向下取整成不足5µs。
+  solver在写第一个CSR之前，核对**实际编码**的period／各相和EXT：整体period及
+  high/low各扣一个count后，tHIGH≥4µs、tLOW≥4.7µs、EXT≥5µs，并以有理不等式确认
+  ≤98kHz；可分解成sample/step但不满足上述约束的候选继续搜索，不写部分配置。
+- 配置写完完整fresh CSR／source读回后再核对；configured生命周期每次`n_guard`
+  （包括DATA／START／完成处理）复查同一expected journal的时序约束，不建第二份快照。
+  显式halted/drained cleanup先撤configured，允许恢复原始配置，不以新的播放时序要求
+  阻断历史fault后的安全恢复。首错／pending／uncertain／no-replay规则不变。
+- cached128B status布局与selector18不变；iOS `i2c6-status` 明确显示
+  `source-bound`／`scl-bound`，不是测得频率或400kHz证书，不新增执行接口。
+
+本地OPPO `cust_mt6993_{zhujiang,changjiang}_audio.dtsi` 均只在LEFT声明
+SID5 LNC0_8 VDD及SID3 vs-voter；RIGHT没有独立supply/voter property。该source观察
+没有解决实际RIGHT电源网或长期互斥，也不能把两份相似DTS当当前运行绑定或共网证明。
+
 `audioctl` 还可仅离线检查本地 container（不需要 X9Audio 服务、不加载到功放）：
 
 ```sh

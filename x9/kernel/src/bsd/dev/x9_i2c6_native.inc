@@ -2,6 +2,7 @@
  * OPPO i2c-mt65xx.c: FIFO v2 byte DATA, WRRD 1/2/2, WR 3/0/1,
  * CLK_EXT/ACKERR, auto_restart START bit14, no remaining message bit15.
  * No Linux timeout reset/retry/arbitration recovery is transplanted here. */
+#include "x9_i2c6_timing.h"
 enum { NNone,NPrepareIssued,NFilling,NStarted,NCompleted,NAckIssued,
        NAcked,NFifoIssued,NFifoEmpty,NStartClearIssued };
 struct native_field {uint32_t saved,expected,prior;};
@@ -75,13 +76,8 @@ static int n_clocks(void)
     if((parent&&!(rr(pll,0x34)&(1u<<4)))||(ap&&!(rr(ni.mainpll,0x34)&(1u<<4))))return ENXIO;
     uint32_t pcw=parent?rr(pll,0xc):0,apcw=ap?rr(ni.mainpll,0xc):0;
     if(ni.clock_saved&&(parent!=ni.parent||ap!=ni.dma_parent||pcw!=ni.pcw||apcw!=ni.dma_pcw))return EBUSY;
-    uint64_t hz=26000000;
-    if(parent) {
-        uint64_t d=(uint64_t)16384*(1u<<((pcw>>24)&7));
-        hz=((uint64_t)(pcw&0x3fffff)*26000000+d-1)/d;
-        hz/=parent==1?20:parent==2?16:10;
-    }
-    if(hz<1000000||hz>500000000)return ENOTSUP;
+    uint64_t hz=x9_i2c6_source_hz(parent,pcw);
+    if(!hz)return ENOTSUP;
     for(unsigned i=0;i<2;i++) {
         uint32_t v=n_pin(114+i);
         if((v&31)!=1||(ni.clock_saved&&v!=ni.pin[i]))return EBUSY;
@@ -93,6 +89,17 @@ static int n_clocks(void)
 static int n_access(void)
 {
     int e=n_authority();if(!e)e=n_mappings();if(!e)e=n_clocks();return e;
+}
+/* Call only AFTER fresh n_access and complete expected[] CSR validation.
+ * No sampling after clock withdrawal, no second independent journal. */
+static int n_timing_check(void)
+{
+    const struct x9_i2c6_timing p={ni.field[6].expected,ni.field[8].expected,
+        ni.field[7].expected,ni.field[11].expected,ni.field[9].expected,
+        ni.field[10].expected,ni.field[12].expected,ni.field[13].expected};
+    uint32_t rate=x9_i2c6_timing_rate(ni.hz,&p);
+    if(!rate || rate>98000)return ENOTSUP;
+    ni.timing_hz=rate;return 0;
 }
 static int n_guard(bool recovering)
 {
@@ -113,7 +120,7 @@ static int n_guard(bool recovering)
        rr(ni.bus+0x10000,MASK)||ni.bank_status[1]||
        (ni.bank_fifo[1]&31)||rr(ni.bus+0x10000,MULTI)||
        (rr(ni.dma,8)&1))return EBUSY;
-    return 0;
+    return ni.configured?n_timing_check():0;
 }
 static int n_idle(bool recovering)
 {
@@ -142,25 +149,13 @@ static int n_put(unsigned reg,uint32_t value,bool recovering)
 }
 static int n_timing(void)
 {
-    unsigned div,hs=0,ht=0,ls=0,lt=0,ext=0,total=0;bool found=false;
-    uint64_t hz=ni.hz;
-    for(div=1;div<=32&&!found;div++) {
-        ext=(unsigned)((hz/div)*5/1000000);if(ext>255)continue;
-        total=(unsigned)((hz+(uint64_t)div*98000-1)/((uint64_t)div*98000))+1;
-        if(total<4||total>1024)continue;
-        unsigned ideal=total*45/100;
-        for(unsigned delta=0;delta<=total/2&&!found;delta++)for(unsigned side=0;side<2&&!found;side++) {
-            if(side&&delta>ideal)continue;unsigned h=side?ideal-delta:ideal+delta;
-            if(h<2||h>=total-1||h*1000<total*410||h*1000>=total*490)continue;
-            found=factor(h,&hs,&ht)&&factor(total-h,&ls,&lt);
-        }
-    }
-    if(!found)return ENOTSUP;div--;
+    struct x9_i2c6_timing p;
+    if(!x9_i2c6_timing_make(ni.hz,&p))return ENOTSUP;
+    /* Complete rational rate/phase/EXT proof before FIRST write. */
     const unsigned r[]={TIMING,EXT,LTIMING,HS,SDA,DIV,IO,MIS,DELAY};
-    const uint32_t v[]={((hs-1)<<8)|(ht-1),(ext<<8)|1,((ls-1)<<6)|(lt-1),
-        0,0,((div-1)<<8)|(div-1),3,0,2};
+    const uint32_t v[]={p.timing,p.ext,p.low,p.hs,p.sda,p.div,p.io,p.mis,2};
     for(unsigned i=0;i<sizeof(r)/sizeof(r[0]);i++){int e=n_put(r[i],v[i],false);if(e)return e;}
-    ni.timing_hz=(uint32_t)(hz/(div*total));return 0;
+    int e=n_idle(false);if(!e)e=n_timing_check();return e;
 }
 /* Resume only acknowledgements of observed effects, not action replay.
  * NStarted + START0/STAT0 is deliberately UNRESOLVED: idle does not prove

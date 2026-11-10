@@ -7,7 +7,7 @@ enum { X9I2C6Held=1u,X9I2C6Captured=2u,X9I2C6Configured=4u,
 typedef struct {
     uint32_t version,flags,generation,error;
     uint32_t dirty,uncertain,pending,terminal;
-    uint32_t parent,dma_parent,nominal_hz,timing_hz;
+    uint32_t parent,dma_parent,nominal_hz,timing_hz; /* rate UPPER bounds, not measured */
     uint32_t slave,reg,reading,tx_bytes;
     uint64_t requests,completed,write_attempts;
     uint32_t bank_start[2],bank_status[2],bank_fifo[2];
@@ -34,7 +34,8 @@ struct x9_i2c6_policy {
     int (*validate_controller)(void *,uint64_t ticket,uint32_t generation);
 };
 /* Native FIFO v2, fixed slaves34/35 only, no DMA, IRQ, reset, clock/pad or
- * rail writes. Conservative <=100kHz timing; not a 400kHz qualification.
+ * rail writes. Checked <=98kHz timing, tHIGH/tLOW/EXT rational bounds and
+ * one-round-up PLL clock bound; not a 400kHz/electrical qualification.
  * Requires native PA epoch/child and current handoff controller topology.
  * Output lease is NONZERO once the child is held, INCLUDING later failure;
  * that token authorizes explicit cleanup, NOT access/Ready/profile writes.

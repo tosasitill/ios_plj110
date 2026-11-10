@@ -42,7 +42,7 @@ static int i2c6_status(io_connect_t c) {
     }
     printf("I2C6 cached: generation=%u flags=0x%x error=%u dirty=0x%x uncertain=0x%x pending=%u terminal=0x%x\n",
         s.generation,s.flags,s.error,s.dirty,s.uncertain,s.pending,s.terminal);
-    printf("parent=%u dma-parent=%u nominal=%uHz configured=%uHz last=0x%x/reg0x%x %s tx-bytes=%u requests=%llu completed=%llu writes=%llu\n",
+    printf("parent=%u dma-parent=%u source-bound=%uHz scl-bound=%uHz last=0x%x/reg0x%x %s tx-bytes=%u requests=%llu completed=%llu writes=%llu\n",
         s.parent,s.dma_parent,s.nominal_hz,s.timing_hz,s.slave,s.reg,s.reading?"read":"write",s.tx_bytes,
         (unsigned long long)s.requests,(unsigned long long)s.completed,(unsigned long long)s.write_attempts);
     for(unsigned i=0;i<2;i++)printf("bank%u last-observed: START=0x%x STAT=0x%x FIFO=0x%x\n",
