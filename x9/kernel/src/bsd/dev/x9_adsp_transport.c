@@ -15,7 +15,7 @@ enum { SET=0x100/4, CLR=0x10c/4, AUDIO_IPI=9, READY_IPI=13,
 struct transport {
     struct x9_adsp_platform hw;
     X9AudioDSPStatus status;
-    bool registered, powered;
+    bool registered, powered, halted;
     int access_error;
     uint32_t head, count;
     struct x9_adsp_event events[EVENT_COUNT];
@@ -180,8 +180,9 @@ int x9_adsp_boot(uint32_t core)
             if(!e)t->powered=true;
             else t->powered=t->hw.power_held(t->hw.context);
         }
-        if(!e)e=t->hw.stop_and_reset(t->hw.context);
+        if(!e){t->halted=false;e=t->hw.stop_and_reset(t->hw.context);}
         if(!e){reset_ok=true;e=qualify(t,X9DSPGuardBoot);}
+        if(!e)t->halted=true;
         if(!e) {
             t->status.generation++;
             t->head=t->count=t->status.event_pending=0; bzero(t->events,sizeof(t->events));
@@ -194,6 +195,7 @@ int x9_adsp_boot(uint32_t core)
         }
         if(!e) {
             t->status.state=X9DSPBooting; t->status.error=0;
+            t->halted=false; /* a failed start can still be executing */
             e=t->hw.core_start(t->hw.context);
         }
         uint64_t until=deadline(2000);
@@ -215,8 +217,9 @@ int x9_adsp_boot(uint32_t core)
              * Do NOT drop the power lease when reset failed. */
             if(t->powered && reset_ok && !t->access_error) {
                 int off=qualify(t,X9DSPGuardCleanup);
-                if(!off)off=t->hw.stop_and_reset(t->hw.context);
+                if(!off){t->halted=false;off=t->hw.stop_and_reset(t->hw.context);}
                 if(!off)off=qualify(t,X9DSPGuardCleanup);
+                if(!off)t->halted=true;
                 if(!off)off=t->hw.power_off(t->hw.context);
                 if(!off && t->hw.power_held(t->hw.context))off=EIO;
                 if(!off)t->powered=false;
@@ -226,25 +229,69 @@ int x9_adsp_boot(uint32_t core)
     }
     lck_mtx_unlock(locks[core]); return e;
 }
+static void discard_events(struct transport *t)
+{
+    t->head=t->count=t->status.event_pending=0; bzero(t->events,sizeof(t->events));
+}
+static int halt_locked(struct transport *t)
+{
+    if(!t->registered)return ENXIO;
+    if(!t->powered)return 0;
+    /* AFE's explicit quiesce and later restore may both ask to halt. Recheck
+     * the retained physical lease, but do not replay an already completed
+     * reset. A failed qualification requires the next explicit halt/reset. */
+    if(t->halted && t->status.state==X9DSPOffline && !t->access_error)
+        return qualify(t,X9DSPGuardStop);
+    begin_operation(t);t->halted=false;
+    int e=t->hw.stop_and_reset(t->hw.context);
+    if(!e)e=qualify(t,X9DSPGuardStop);
+    if(!e)t->halted=true;
+    return e;
+}
+static int release_locked(struct transport *t)
+{
+    if(!t->registered)return ENXIO;
+    if(!t->powered)return 0;
+    if(!t->halted || t->status.state==X9DSPOnline || t->status.state==X9DSPBooting)return EBUSY;
+    int e=qualify(t,X9DSPGuardCleanup);
+    if(!e)e=t->hw.power_off(t->hw.context);
+    if(!e && t->hw.power_held(t->hw.context))e=EIO;
+    if(!e)t->powered=false;
+    return e;
+}
+static void stopped(struct transport *t,int e)
+{
+    if(!t->registered)return;
+    discard_events(t);
+    if(e)poison(t,e);
+    else {t->status.state=X9DSPOffline;t->status.error=0;}
+}
+int x9_adsp_halt(uint32_t core)
+{
+    if(core>=2)return EINVAL;
+    lck_mtx_lock(locks[core]);struct transport *t=&cores[core];
+    int e=halt_locked(t);stopped(t,e);
+    lck_mtx_unlock(locks[core]);return e;
+}
+int x9_adsp_release(uint32_t core)
+{
+    if(core>=2)return EINVAL;
+    lck_mtx_lock(locks[core]);struct transport *t=&cores[core];
+    int e=release_locked(t);
+    /* Refusing premature release must not hide an online session or discard
+     * its events. Only a physically halted core can reach successful release. */
+    if(e && e!=EBUSY)poison(t,e);
+    lck_mtx_unlock(locks[core]);return e;
+}
 int x9_adsp_shutdown(uint32_t core)
 {
     if(core>=2)return EINVAL;
     lck_mtx_lock(locks[core]); struct transport *t=&cores[core]; int e=0;
     if(!t->registered)e=ENXIO;
-    else if(t->powered) {
-        begin_operation(t);
-        e=t->hw.stop_and_reset(t->hw.context);
-        if(!e)e=qualify(t,X9DSPGuardStop);
-        if(!e)e=t->hw.power_off(t->hw.context);
-        if(!e && t->hw.power_held(t->hw.context))e=EIO;
-        if(!e)t->powered=false;
-    }
-    if(t->registered) {
-        t->head=t->count=t->status.event_pending=0; bzero(t->events,sizeof(t->events));
-        /* shutdown never makes a quarantined session usable; next boot must
-         * still perform reset and observe a fresh READY. */
-        if(e)poison(t,e); else {t->status.state=X9DSPOffline; t->status.error=0;}
-    }
+    else e=halt_locked(t);
+    stopped(t,e);
+    if(!e)e=release_locked(t);
+    if(e && t->registered)poison(t,e);
     lck_mtx_unlock(locks[core]); return e;
 }
 int x9_adsp_poll(uint32_t core)

@@ -63,6 +63,13 @@ struct x9_adsp_platform {
 int x9_adsp_register_transport(const struct x9_adsp_platform *);
 int x9_adsp_boot(uint32_t core); /* fresh reset -> core_start -> READY <=2s */
 int x9_adsp_shutdown(uint32_t core);
+/* Combined DSP+AFE teardown: halt discards the core queue but retains its
+ * parent power lease; release is allowed ONLY after a successful halt.
+ * The speaker coordinator mutes/disables/drains AFE before halt, restores
+ * AFE/pads/clocks before release, and releases its AP ticket LAST.
+ * Neither call authorizes another session; boot still needs fresh READY. */
+int x9_adsp_halt(uint32_t core);
+int x9_adsp_release(uint32_t core);
 /* MSG_ONLY/PAYLOAD only; kernel->DSP, NEED_ACK/BYPASS/DIRECT. On failure
  * after doorbell, do not retry: even a late matching ACK cannot unpoison
  * this session. reply is required only for NEED_ACK; never changed on error.

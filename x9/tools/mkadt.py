@@ -91,6 +91,7 @@ def build(seed=None, timebase=TIMEBASE, console_base=0, console_size=0, ram_wind
         ('x9-gpu-handoff', bytes(64)),  # populated only after live LK FDT verification
         ('x9-scp-handoff', bytes(384)),  # layout only; never a firmware READY declaration
         ('x9-gps-handoff', bytes(64)),  # consys/HIF layout only, not MCU ownership/READY
+        ('x9-adsp-handoff', bytes(256)),  # live shared-pool layout only, not EMI/firmware READY
         ('x9-lk-wifi-dt', bytes(16384)),  # shim fdt_wifi_dump.c: read-only Wi-Fi DT facts as text
         ('random-seed', seed), ('debug-enabled', u32(1)),
         ('firmware-version', cstr('x9-direct-shim')),

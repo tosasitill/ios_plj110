@@ -23,6 +23,7 @@ static struct x9_speaker_afe_status state;
 static bool registered,leased,journaled;
 static uint64_t last_poll,last_progress;
 static uint64_t resource_ticket;
+static bool ticket_owned;
 /* Per-operation accessibility failure: fault cleanup may mute/quiesce via
  * independently qualified callbacks, but must not retry AFE/DMA access.
  * A later explicit stop starts a new qualification attempt. */
@@ -200,6 +201,28 @@ static int disable(void)
     if(!e)state.running=0;
     return e;
 }
+static int drop_ticket(void)
+{
+    X9AudioResourceStatus t;int e=x9_audio_resources_status(&t);
+    if(!e && (!resource_ticket || t.owner!=X9AudioResourceSpeaker || t.ticket!=resource_ticket))e=EPERM;
+    if(!e && ticket_owned)e=x9_audio_resources_release(X9AudioResourceSpeaker,resource_ticket);
+    if(!e){resource_ticket=0;ticket_owned=false;leased=false;state.poisoned=0;}
+    return e;
+}
+static int quiesce_locked(void)
+{
+    if(!leased)return 0;
+    state.prepared=0;
+    if(!hw.held(hw.context))return EIO; /* never touch a lost physical lease */
+    /* Mute failure still stops DMA/producer; no failed step permits restoring
+     * a mapping or dropping a dependency. Watchdog uses this same sequence. */
+    int muted=hw.mute(hw.context);state.mute_error=(uint32_t)muted;
+    int disabled=journaled?disable():0;state.disable_error=(uint32_t)disabled;
+    int quiet=journaled?hw.quiesce(hw.context):0;state.quiesce_error=(uint32_t)quiet;
+    int halted=0;
+    if(!disabled && !quiet && hw.halt_producer)halted=hw.halt_producer(hw.context);
+    return disabled?disabled:quiet?quiet:muted?muted:halted;
+}
 static int stop_locked(void)
 {
     if(!leased)return 0;
@@ -208,25 +231,18 @@ static int stop_locked(void)
         /* No off-domain mute/AFE read after successful or empty unwind.
          * Losing the physical lease BEFORE restoring our AFE journal is
          * inconsistent and must keep the transition ticket quarantined. */
-        int e=journaled?EIO:x9_audio_resources_release(X9AudioResourceSpeaker,resource_ticket);
+        int e=journaled?EIO:drop_ticket();
         state.restore_error=(uint32_t)e;
-        if(!e){resource_ticket=0;leased=false;state.poisoned=0;}
-        else {state.poisoned=1;x9_audio_resources_fault(X9AudioResourceSpeaker,resource_ticket,e);}
+        if(e){state.poisoned=1;x9_audio_resources_fault(X9AudioResourceSpeaker,resource_ticket,e);}
         return e;
     }
-    /* Still stop DMA if mute fails. A failed mute never authorizes releasing
-     * clocks/I2C/rails or declaring the PA safely off. */
-    int muted=hw.mute(hw.context);state.mute_error=(uint32_t)muted;
-    int disabled=journaled?disable():0;state.disable_error=(uint32_t)disabled;
-    int quiet=journaled?hw.quiesce(hw.context):0;state.quiesce_error=(uint32_t)quiet;
-    int e=disabled?disabled:quiet?quiet:muted;
+    int e=quiesce_locked();
     if(!e && journaled)e=restore();
     if(!e)e=hw.release(hw.context);
     if(!e && hw.held(hw.context))e=EIO; /* callback success alone is not released ownership */
-    if(!e)e=x9_audio_resources_release(X9AudioResourceSpeaker,resource_ticket);
+    if(!e)e=drop_ticket();
     state.restore_error=(uint32_t)e;
-    if(!e){resource_ticket=0;leased=false;state.poisoned=0;}
-    else {state.poisoned=1;x9_audio_resources_fault(X9AudioResourceSpeaker,resource_ticket,e);}
+    if(e){state.poisoned=1;x9_audio_resources_fault(X9AudioResourceSpeaker,resource_ticket,e);}
     return e;
 }
 int x9_speaker_afe_register(const struct x9_speaker_afe_platform *p)
@@ -250,13 +266,19 @@ int x9_speaker_afe_register(const struct x9_speaker_afe_platform *p)
     }
     lck_mtx_unlock(&speaker_afe_lock);return e;
 }
-int x9_speaker_afe_prepare(void)
+static int prepare(uint64_t borrowed)
 {
     lck_mtx_lock(&speaker_afe_lock);int e=registered?0:ENXIO;
     if(!e && (leased || state.poisoned))e=EBUSY;
+    if(!e && borrowed && !hw.halt_producer)e=ENXIO;
     if(e){lck_mtx_unlock(&speaker_afe_lock);return e;}
-    e=x9_audio_resources_claim(X9AudioResourceSpeaker,&resource_ticket);
+    if(borrowed) {
+        X9AudioResourceStatus t;e=x9_audio_resources_status(&t);
+        if(!e && (t.owner!=X9AudioResourceSpeaker || t.ticket!=borrowed))e=EPERM;
+        if(!e)resource_ticket=borrowed;
+    } else e=x9_audio_resources_claim(X9AudioResourceSpeaker,&resource_ticket);
     if(e){lck_mtx_unlock(&speaker_afe_lock);return e;}
+    ticket_owned=!borrowed;
     leased=true;state.error=state.restore_error=state.copy_pending=0;
     access_error=0;
     state.mute_error=state.disable_error=state.quiesce_error=0;
@@ -300,6 +322,9 @@ int x9_speaker_afe_prepare(void)
     if(!leased || !state.running)state.error=(uint32_t)e;
     lck_mtx_unlock(&speaker_afe_lock);return e;
 }
+int x9_speaker_afe_prepare(void){return prepare(0);}
+int x9_speaker_afe_prepare_on_ticket(uint64_t ticket)
+{return ticket?prepare(ticket):EINVAL;}
 static int copy_frames(const int16_t *pcm,uint32_t frames,unsigned stage)
 {
     if(!pcm || !frames || frames>hw.dma_bytes/4)return EINVAL;
@@ -446,6 +471,16 @@ int x9_speaker_afe_stop(void)
 {
     lck_mtx_lock(&speaker_afe_lock);access_error=0;int e=stop_locked();
     if(e && !state.error)state.error=(uint32_t)e;
+    lck_mtx_unlock(&speaker_afe_lock);return e;
+}
+int x9_speaker_afe_quiesce(void)
+{
+    lck_mtx_lock(&speaker_afe_lock);access_error=0;int e=quiesce_locked();
+    if(e && leased) {
+        if(!state.error)state.error=(uint32_t)e;
+        state.poisoned=1;state.restore_error=(uint32_t)e;
+        x9_audio_resources_fault(X9AudioResourceSpeaker,resource_ticket,e);
+    }
     lck_mtx_unlock(&speaker_afe_lock);return e;
 }
 int x9_speaker_afe_status(struct x9_speaker_afe_status *s)

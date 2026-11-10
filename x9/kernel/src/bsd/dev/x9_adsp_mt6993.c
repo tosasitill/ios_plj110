@@ -11,6 +11,7 @@
 #include <kern/clock.h>
 #include <kern/locks.h>
 #include <mach/vm_types.h>
+#include <pexpert/device_tree.h>
 #include "x9_adsp_mt6993.h"
 #include "x9_adsp_transport.h"
 #include "x9_audio_resources.h"
@@ -23,13 +24,46 @@ LCK_MTX_DECLARE(board_lock,&board_group);
 static volatile uint32_t *hwv,*cfg,*cfg2;
 static bool registered,exclusive,reset_done,started,wake;
 static uint64_t resource_ticket;
+static uint64_t borrowed_ticket;
+static uint32_t resource_owner=X9AudioResourceADSP;
 static int access_error; /* reset only by a new explicit control operation */
 static bool new_control;
 static X9AudioBoardStatus status;
+static struct x9_adsp_handoff layout;
 _Static_assert(sizeof(X9AudioBoardStatus)==160,"ADSP board status v3 size");
 enum { PD_SET=0x20700,PD_CLR=0x20704,PD_EN=0x20708,PD_DONE=0x1132c,
        PD_ALL=0x13700,PD_BUSY=0x13704,TOP=2,INFRA=4,AO=8,CHAIN=14,
        SMC_CLEAR=3,SMC_START=4,SMC_STOP=5,SMC_RELOAD=7 };
+_Static_assert(sizeof(struct x9_adsp_handoff)==X9_ADSP_HANDOFF_BYTES,"ADSP layout size");
+static uint32_t get32(const uint8_t *p)
+{return p[0]|(uint32_t)p[1]<<8|(uint32_t)p[2]<<16|(uint32_t)p[3]<<24;}
+static uint64_t get64(const uint8_t *p)
+{return (uint64_t)get32(p)|(uint64_t)get32(p+4)<<32;}
+static void copy_layout(void)
+{
+    DTEntry chosen;void *p=NULL;unsigned int bytes=0;
+    struct x9_adsp_handoff h;
+    if(SecureDTLookupEntry(NULL,"/chosen",&chosen)!=kSuccess ||
+       SecureDTGetProperty(chosen,"x9-adsp-handoff",&p,&bytes)!=kSuccess ||
+       !p || bytes!=sizeof(h))return;
+    memcpy(&h,p,sizeof(h));if(!x9_adsp_handoff_valid(&h))return;
+    if(SecureDTGetProperty(chosen,"x9-ram-map",&p,&bytes)!=kSuccess ||
+       !p || bytes!=2064)return;
+    const uint8_t *map=p;uint32_t count=get32(map+4);
+    if(get32(map)!=1 || !count || count>128)return;
+    uint64_t total=0,last=0;
+    for(unsigned i=0;i<count;i++) {
+        uint64_t lo=get64(map+16+i*16),hi=get64(map+24+i*16);
+        if(lo<0x100000000ULL || hi>0x37fa00000ULL || lo>=hi || lo<last ||
+           ((lo|hi)&0x3fff) || total>UINT64_MAX-(hi-lo) ||
+           (h.reserve_base<hi && lo<h.reserve_base+h.reserve_bytes))return;
+        last=hi;total+=hi-lo;
+    }
+    if(total<(8ULL<<30) || total!=get64(map+8))return;
+    /* The fixed-size ADT tail must be zero, not a hidden second range list. */
+    for(unsigned i=16+count*16;i<bytes;i++)if(map[i])return;
+    lck_mtx_lock(&board_lock);layout=h;lck_mtx_unlock(&board_lock);
+}
 static uint32_t rd(volatile uint32_t *base,uint32_t off)
 { uint32_t v=base[off/4];__asm__ volatile("dmb oshld":::"memory");return v; }
 static void wr(volatile uint32_t *base,uint32_t off,uint32_t v)
@@ -55,7 +89,7 @@ static void snapshot(void)
     /* The global ON aggregate alone is not proof of our AP lease. Qualify
      * only using AO HWV/arbiter before touching either domain mapping. */
     bool held=exclusive && resource_ticket && !access_error &&
-        !x9_audio_resources_status(&ticket) && ticket.owner==X9AudioResourceADSP &&
+        !x9_audio_resources_status(&ticket) && ticket.owner==resource_owner &&
         ticket.ticket==resource_ticket && (status.owned_vote&(TOP|INFRA))==(TOP|INFRA) &&
         (status.ap_vote&CHAIN)==CHAIN && (status.pd_done&CHAIN)==CHAIN &&
         (status.all_vote&CHAIN)==CHAIN && !(status.pd_busy&CHAIN);
@@ -81,8 +115,8 @@ static int qualify(void)
     snapshot();
     if(!(status.flags&X9BoardRegistersValid)) {
         X9AudioResourceStatus ticket;x9_audio_resources_status(&ticket);
-        if(!exclusive || !resource_ticket || ticket.owner!=X9AudioResourceADSP || ticket.ticket!=resource_ticket)
-            return guard_failure(X9BoardGuardLease,UINT32_MAX,X9AudioResourceADSP,ticket.owner,ENXIO);
+        if(!exclusive || !resource_ticket || ticket.owner!=resource_owner || ticket.ticket!=resource_ticket)
+            return guard_failure(X9BoardGuardLease,UINT32_MAX,resource_owner,ticket.owner,ENXIO);
         if((status.owned_vote&(TOP|INFRA))!=(TOP|INFRA))
             return guard_failure(X9BoardGuardLease,UINT32_MAX,TOP|INFRA,status.owned_vote&(TOP|INFRA),ENXIO);
         if((status.ap_vote&CHAIN)!=CHAIN)
@@ -102,7 +136,7 @@ static int qualify(void)
 static int validate(void *unused)
 {
     (void)unused;lck_mtx_lock(&board_lock);int e=qualify();
-    if(e){status.error=(uint32_t)e;x9_audio_resources_fault(X9AudioResourceADSP,resource_ticket,e);}
+    if(e){status.error=(uint32_t)e;x9_audio_resources_fault(resource_owner,resource_ticket,e);}
     lck_mtx_unlock(&board_lock);return e;
 }
 static int wait_pending_idle(void)
@@ -191,7 +225,11 @@ static int power_on(void *unused)
         status.guard_reg=UINT32_MAX;status.guard_expected=status.guard_actual=0;
         /* Claim before even observing a cold baseline; retain until all
          * owned parent transitions settle, not merely until start returns. */
-        e=x9_audio_resources_claim(X9AudioResourceADSP,&resource_ticket);
+        if(borrowed_ticket) {
+            X9AudioResourceStatus ticket;e=x9_audio_resources_status(&ticket);
+            if(!e && (ticket.owner!=X9AudioResourceSpeaker || ticket.ticket!=borrowed_ticket))e=EPERM;
+            if(!e)resource_ticket=borrowed_ticket;
+        } else e=x9_audio_resources_claim(X9AudioResourceADSP,&resource_ticket);
         if(e){status.error=(uint32_t)e;lck_mtx_unlock(&board_lock);return e;}
         snapshot();e=wait_bits(hwv,PD_DONE,CHAIN,CHAIN,10000);
         if(!e && ((rd(hwv,PD_EN)|rd(hwv,PD_ALL)|rd(hwv,PD_BUSY))&(TOP|INFRA)))e=EBUSY;
@@ -208,11 +246,11 @@ static int power_on(void *unused)
         }
         if(!e)status.flags|=X9BoardPowered;
         if(e && !exclusive && resource_ticket) {
-            int released=x9_audio_resources_release(X9AudioResourceADSP,resource_ticket);
+            int released=borrowed_ticket?0:x9_audio_resources_release(resource_owner,resource_ticket);
             if(!released)resource_ticket=0;
             else status.restore_error=(uint32_t)released;
         }
-        if(e && resource_ticket)x9_audio_resources_fault(X9AudioResourceADSP,resource_ticket,e);
+        if(e && resource_ticket)x9_audio_resources_fault(resource_owner,resource_ticket,e);
     }
     status.error=(uint32_t)e;snapshot();lck_mtx_unlock(&board_lock);return e;
 }
@@ -222,8 +260,8 @@ static int reset(void *unused)
     if(!e && access_error)e=access_error;
     if(!e) {
         X9AudioResourceStatus ticket;x9_audio_resources_status(&ticket);
-        if(!resource_ticket || ticket.owner!=X9AudioResourceADSP || ticket.ticket!=resource_ticket)
-            e=guard_failure(X9BoardGuardLease,UINT32_MAX,X9AudioResourceADSP,ticket.owner,ENXIO);
+        if(!resource_ticket || ticket.owner!=resource_owner || ticket.ticket!=resource_ticket)
+            e=guard_failure(X9BoardGuardLease,UINT32_MAX,resource_owner,ticket.owner,ENXIO);
     }
     if(!e)e=chain_on(); /* recover a partially revoked power lease first */
     if(!e)e=qualify();
@@ -258,10 +296,12 @@ static int power_off(void *unused)
         if(!e){exclusive=reset_done=false;status.flags&=~(X9BoardPowered|X9BoardExclusive);}
     }
     if(!e && !exclusive && resource_ticket) {
-        e=x9_audio_resources_release(X9AudioResourceADSP,resource_ticket);
+        /* The combined caller owns other children. Clearing our association
+         * is not permission to release its AP ticket here. */
+        e=borrowed_ticket?0:x9_audio_resources_release(resource_owner,resource_ticket);
         if(!e)resource_ticket=0;
     }
-    if(e && resource_ticket)x9_audio_resources_fault(X9AudioResourceADSP,resource_ticket,e);
+    if(e && resource_ticket)x9_audio_resources_fault(resource_owner,resource_ticket,e);
     status.error=(uint32_t)e;snapshot();lck_mtx_unlock(&board_lock);return e;
 }
 static int wake_lock(void *unused)
@@ -281,6 +321,7 @@ int x9_adsp_mt6993_init(void)
     if(!sweet_early_is_x9() || sweet_x9_arg("x9_audio",0)!=2)return ENXIO;
     lck_mtx_lock(&board_control_lock);int e=0;
     if(!registered) {
+        copy_layout(); /* metadata only; never use an old Android address */
         /* Device mappings are permanent, created once, and not dereferenced
          * until the explicit admin operation. Never map firmware as Device. */
         if(!hwv)hwv=(volatile uint32_t *)ml_io_map(0x1c040000,0x74900);
@@ -310,9 +351,46 @@ int x9_adsp_mt6993_control(uint32_t op)
     if(sweet_x9_arg("x9_audio",0)!=2)return ENXIO;
     if(op>1)return EINVAL;
     lck_mtx_lock(&board_control_lock);
-    lck_mtx_lock(&board_lock);new_control=true;lck_mtx_unlock(&board_lock);
-    int e=registered?(op?x9_adsp_shutdown(0):x9_adsp_boot(0)):ENXIO;
+    lck_mtx_lock(&board_lock);
+    int e=!registered?ENXIO:borrowed_ticket?EBUSY:0;
+    if(!e)new_control=true;
+    lck_mtx_unlock(&board_lock);
+    if(!e)e=op?x9_adsp_shutdown(0):x9_adsp_boot(0);
     lck_mtx_unlock(&board_control_lock);return e;
+}
+int x9_adsp_mt6993_speaker_control(uint32_t op,uint64_t ticket)
+{
+    if(sweet_x9_arg("x9_audio",0)!=2)return ENXIO;
+    if(op>2 || !ticket)return EINVAL;
+    lck_mtx_lock(&board_control_lock);lck_mtx_lock(&board_lock);
+    X9AudioResourceStatus t;int e=!registered?ENXIO:x9_audio_resources_status(&t);
+    if(!e && (t.owner!=X9AudioResourceSpeaker || t.ticket!=ticket))e=EPERM;
+    if(!e && !op && (borrowed_ticket || resource_ticket || exclusive))e=EBUSY;
+    if(!e && op && borrowed_ticket!=ticket)e=EPERM;
+    if(!e) {
+        if(!op){borrowed_ticket=ticket;resource_owner=X9AudioResourceSpeaker;}
+        /* Only boot/halt can clear the board's per-operation access gate,
+         * once serialized by the transport. release does not repair it. */
+        if(op!=2)new_control=true;
+    }
+    lck_mtx_unlock(&board_lock);
+    bool attempted=!e;
+    if(!e)e=!op?x9_adsp_boot(0):op==1?x9_adsp_halt(0):x9_adsp_release(0);
+    if(!e && op==2) {
+        lck_mtx_lock(&board_lock);
+        if(exclusive || resource_ticket || started || wake)e=EIO;
+        else {borrowed_ticket=0;resource_owner=X9AudioResourceADSP;}
+        lck_mtx_unlock(&board_lock);
+    }
+    if(e && attempted)x9_audio_resources_fault(X9AudioResourceSpeaker,ticket,e);
+    lck_mtx_unlock(&board_control_lock);return e;
+}
+int x9_adsp_mt6993_copy_handoff(struct x9_adsp_handoff *h)
+{
+    if(!h)return EINVAL;
+    lck_mtx_lock(&board_lock);int e=layout.flags==X9_ADSP_LAYOUT_VERIFIED?0:ENXIO;
+    if(!e)*h=layout;
+    lck_mtx_unlock(&board_lock);return e;
 }
 int x9_adsp_mt6993_status(X9AudioBoardStatus *s)
 {

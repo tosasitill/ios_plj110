@@ -451,7 +451,7 @@ lease空间不是CSR，ticket细节另读resource-status；lease-error0时guard�
 | 文件／入口 | 已实现 | 仍需实际板级提供者 |
 |---|---|---|
 | `x9_dsp_pcm.{c,h}` | 96B PCM descriptor与32B shared-DRAM record字节codec；真实transport上的INIT／share／OPEN／HWPARAM／AFE PCM配置／PREPARE／DLCOPY／START／STOP／HWFREE／CLOSE；generation-bound消费消息、双快照DTOA与输入环容量检查 | unified AP lease下实际共享DRAM/MPU/cache、task/core绑定与生产调用者；DSP消费不能代替AFE物理played |
-| `x9_speaker_afe.{c,h}` | DL24/OUT4 逐字段写入/不确定/恢复 journal、32-bit I2S slots/S16、48k、CONN116/117 DL24 route；AP transition ticket、platform v3 部分失败 ownership＋fresh lease/config guard；prefill 后 DMA start、period copy/cache、稳定 CUR、高低地址/半环歧义检查；独立低水位 watcher、mute/disable/quiesce/restore | AUDIO/VLP APLL2、pad/物理共享资源 lease、DMA bus/EMI/cache、双 PA mute、权威 DMA quiesce |
+| `x9_speaker_afe.{c,h}` | DL24/OUT4 逐字段写入/不确定/恢复 journal、32-bit I2S slots/S16、48k、CONN116/117 DL24 route；AP transition ticket、platform v4 部分失败 ownership＋fresh lease/config guard、combined ticket和producer halt；prefill 后 DMA start、period copy/cache、稳定 CUR、高低地址/半环歧义检查；独立低水位 watcher、mute/disable/quiesce/restore | AUDIO/VLP APLL2、pad/物理共享资源 lease、DMA bus/EMI/cache、双 PA mute、权威 DMA quiesce与DSP producer adapter |
 | `x9_tfa_plj110.{c,h}` | root 显式只读 reg03；PMIF-P SID3 reset/SID5 左供电快照，已开启 I²C6/共享 DMA clock 与 pads 校验、2 CSR bank/1 DMA idle、FIFO WRRD 1+2 BE、逐字段总线恢复 | 不具备双侧供电/reset/write lease；右 rail、真实 binding/profile/校准仍待确认 |
 | `x9_tfa98xx.{c,h}` | PM container total-size/CRC、双 I2C 类型（container bus=0）的地址、明确名字的两侧 profile、descriptor 边界；真实 reg03 revision 比对、AMPE=0 且读回；双侧预检白名单 register/bitfield prefix | 实际完整 revision、immutable container、per-revision 白名单、I2C6/reset/rails 互斥；Probus DSP file/patch/校准/boost 未执行 |
 
@@ -499,6 +499,49 @@ DTOA读回使用两次sync后的稳定双快照，不采用撕裂cursor。读指
 在真实mute／drain后用新reset／READY generation启动下一流，不能换session对象伪造恢复。
 本组件不申请资源、不boot DSP、不unmute PA、不注册Ready；实际共享DRAM／MPU／cache、
 core通知、AFE／功放与iOS播放backend仍需完成集成。
+
+### 接同一张票据与本次 LK 共享内存布局
+
+**这里是完整 backend 的内核接点，不是已注册的播放后端。** AFE private platform
+升级为 **v4**；PCM ABI1、AFE cached status v4/184B和iOS selectors不变。没有修改
+HAL路由或授予Ready，不需要把本轮当成用户态已接通的验收。
+
+| 入口 | 语义 |
+|---|---|
+| `x9_adsp_mt6993_speaker_control(op,ticket)` | 校验真实AP Speaker ticket，op0首次boot、op1停核并保留父资源、op2在AFE恢复后撤销DSP父资源；不递归claim、不释放caller的ticket |
+| `x9_speaker_afe_prepare_on_ticket(ticket)` | 使用同一张票据；没有`halt_producer`的CPU-only platform不能走此入口；fault/watchdog cleanup也不会提前释放borrowed ticket |
+| `x9_speaker_afe_quiesce()` | 双PA mute→DL24/OUT4 disable→权威DL24 drain→独立资格化的真实producer halt；暂不恢复journal/mapping或释放资源 |
+| `x9_adsp_halt/release` | 停核与掉电分开；release不接受未成功halt的core。已成功halt的重复请求仅fresh validate，不重放reset；失败后需新的显式halt恢复 |
+| `x9_adsp_mt6993_copy_handoff()` | 返回boot-lifetime、两端校验的256B布局；缺失/改变返回ENXIO，输出不变。不映射DRAM、不证明EMI访问权限 |
+
+完整teardown顺序是mute/disable/drain/producer halt→恢复AFE journal→恢复AFE/pads/clocks→
+DSP release→最后释放一张AP Speaker ticket。`halt_producer`也在引擎watchdog和prepare
+失败的cleanup执行，不能只在HAL主动stop时停DSP。它必须实际进入board/transport的
+halt路径；只收到PCM DIRECT STOP、cached Offline或一个空回调都不够。callback不能
+反向重入AFE，后续validate必须能检查同一租约下已停核但仍有电的DSP。
+Admin `dsp-boot/stop`在combined association存续期间返回EBUSY，不能重置播放会话。
+失败boot即便没有剩余物理votes，association也保留到caller的显式op2。
+
+shim `adsp_handoff.c`从**本次LK FDT**的adspsys `shared_memory`读取两个BE64，按OPPO
+`adsp_mem_device_probe`的enum顺序累计非零块的4KiB向上取整大小，跳过零块。
+该合同固定已捕获的PLJ110含XHCI variant，而不是猜Linux可变的AUDIO enum数字；L2
+property可缺失或为0，重复/畸形property不能当成缺失。CFG/CFG2、四对mailbox
+BASE/SET/CLR、两core system image区域和cell/ranges合同同时核对。
+`fdt_property_checked`区分absent与malformed/duplicate；既有boolean API语义保留。
+
+共享区还必须与本次有效live RAM allocator map完全不相交；小RAM/default boot模式
+不授予布局。内核再次核对chosen handoff、完整RAM-map计数/边界/总字节/零尾和交集。
+按现有捕获值推导：AUDIO_COMMON offset **0x543000**、bytes **0x852000**，所有分块
+累计 **0xd95000**，whole reserve bytes **0xda0000**；以捕获base0x160000000计算pool
+bus是0x160543000。这只是源码与旧DT的布局算术，**不是本次启动的grant或EMI证据**。
+pool并不16KiB页对齐，后续子分配/映射须保留与XHCI相邻页边界，不可清零整页。
+
+仍需完成：实际共享RAM/EMI与cache binding、daemon pool/COREMEM登记、core DTOA通知、
+完整AUDIO/APLL2 VLP/pad与双PA provider，以及将PCM session接到iOS backend。
+独立cold clock/pll/path probe仍要求TOP/INFRA baseline，不能拿它们的成功flag冒充
+combined acquire；统一电源初始化顺序必须单独实现。固件/共享RAM不能用Device映射；
+XNU `ml_io_map_wcomb`存在，但本轮尚未执行它，physmap别名/cache属性与EMI资格未齐时
+不访问pool。最终只在这些生产接线完成后冻结并构建一个镜像。
 
 ### AUDIO-12：启动／运行配置资格与缓存故障位置
 
