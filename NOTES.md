@@ -31,7 +31,7 @@
 - 启动链:LK → Android boot.img v4(legacy LZ4 arm64 Image)→ x9 裸机 shim → 内嵌 SWEETXNU payload → XNU。
   设备每次用临时 `fastboot boot`,**由用户手动刷/启动**;不自行 flash/reboot/写分区(x9/AGENTS.md)。
 - 根盘:`userdata` 里 pin+immutable 的专用 extent 文件(16 GiB HFSX,可写副本),内核原生 `ufsroot0` 挂载(`rd=ufsroot0 rootrw=1 ufsrw=1`);
-  Android userdata 保留。详情与路径见 `x9/AGENTS.md`、`x9/README.md`。UFS 最新175实测 **HS-G3/RateB/2 lane**;早期G1约130-155MiB/s不再代表当前链路。175混合根盘累计约212MiB/s,不是顺序读峰值。
+  Android userdata 保留。详情与路径见 `x9/AGENTS.md`、`x9/README.md`。UFS 最新180实测 **HS-G5/FAST/RateB/2 lane**(双方cap5、PA读回/四窗口SHA通过、PID1正常);早期LINK仍G3是shim阶段。180混合root累计约231.89MiB/s,不是顺序读峰值或设备最高吞吐。
 - 旧项目 sweet(Redmi Note 10 Pro / SM7150)的历史见 `README.md` 与 git 历史,当前不再工作。
 - 屏幕:ADT canvas / 帧缓冲呈现 **1242x2760**(414x920 pt @3x,左右各 7 px 黑边);宽 414 是为修键盘 123(见 §6)。
   物理面板仍 1256x2760 stride 5120,framebuffer 物理地址 0xfc910000。
@@ -72,6 +72,8 @@ X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>      # 之后再�
 **上机流程**:用户把手机 `fastboot boot x9/out/<name>/boot.img`,跑场景,日志放 Mac `~/N.txt`,我读。永不 `fastboot getvar`。
 
 ## 3. 当前基线镜像与参数
+
+- **UFS最新已实测G5基线(180)**:`x9/out/x9-ufs-g5-panic179-idle603/boot.img`,固定**2902928**,原整包exit0/10010624B。用户报告正常;180确认G5/FAST/RateB/双lane、SHA通过、frontboard errno0、launchd/SpringBoard及后续根盘读写,详见UFS-180。603B/ug5/dv1、32GiB manifest/插件275不变,无需mailbox;这是179最小差分包,不含后来main其他窗口的最新功能。
 
 - **最新USB2描述符联合候选(USB-3)**:`x9/out/x9-usb3-description-joint-md/boot.img`,独立完整 **c3d71f9**,**72/72 overlay+6prebuilt、iOS工具/SDK、link/strip/shim/boot全部exit0**,构建器报告 **13242368B**。原USB-2 **606B/x9_usb=2**及32GiB manifest/插件275保持,BT bootstrap关闭,**无需mailbox**。含冻结起点5ed3d75已提交main的UFS-178/GPS pressure/共享相机接收等,不额外开启它们的默认off功能。没有上机、安装或wire读回;只是USB2原生IOKit metadata子集,名称USB-3是交接号,**不是SuperSpeed支持或Finder配对完成**。
 
@@ -167,7 +169,16 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
 
-## UFS活动交接(UFS-179,2026-11-10): 已定位升档前空UIC中断误判;最小修正固定整包完成,待实机
+## UFS活动交接(UFS-180,2026-11-10): 实机G5/FAST/RateB/双lane通过,PID1与SpringBoard正常运行
+
+- **运行来源/范围**:用户测试`x9/out/x9-ufs-g5-panic179-idle603/boot.img`后报告“180正常了”。`/Users/tosasitill/180.txt`为**12137物理行/1250618B**,记录至**59.425s**;已保留原始副本及窄选行,未修改用户原文件。该包固定源码**2902928**,代码main整合**a0a04f7**,此前68/68 overlay+6prebuilt、整包exit0/10010624B/CI列表空;本轮仅读日志/更新交接,没有新代码、构建、测试套件、设备/分区操作、主动push或成功镜像二次校验。正常上机为本轮用户手动重放,不是自动reset/错误注入或长时稳定性测试。
+- **179最小修正已实机命中**:180:1604(6.373s)`IS=00000004->00000000 empty_uic_ack=1 UEC_read=1`且五层UEC全0,与179确定失败入口完全对应。没有放宽普通I/O错误保护、重置或降档;PMC isolated_line_resets=0,因此本次无需PMC LINERESET特例。原始置bit2的事件来源仍未知,但已证明空summary处理后正常继续升档,不要再把旧IS4直接当解码链路错误。
+- **真正G5端到端证据**:180:1600(6.355s) **requested=G5 negotiated=G5 localver=6 caps=5/5 status=0 stage=20 PA_stage=49 UIC=0 UPMCRS=1 changed=1 uncertain=0 poisoned=0**。1605/1606分别**mode0x11 FAST/FAST、TX/RX_G4与G5、2/2lane、series2(RateB)、四64KiB窗口SHA256_match1/final_status0**。这是设备双方真实能力上限G5及切档后读回/一致性通过,不再仅是“请求G5”或“没有panic”;早期432的LINK仍G3只是正常shim阶段。
+- **平台与用户态**:1601..1602 CFG14=03830403前后相同(本次入口host mux已在目标parent,没有改PLL)、UNIVPLL2496MHz/MAINPLL2184MHz、CKSTA0、SW_REQ9000→9020、floor_held1/current VCORE gear5。650000uV为控制器请求门,不是PMIC实测。2038(7.635s) **frontboard errno0**,2104(7.905s) **launchd Darwin Bootstrapper运行**,6533(25.148s)SpringBoard实际open SweetX9Render成功,日志尾仍SpringBoard运行;捕获内没有PID1/kernel panic。用户另明确报告正常,因此本次已越过179停写→EROFS→PID1 panic链。
+- **后续真实读写/性能边界**:11281..11283(51.229s)累计**63199 transport命令、1998295072B读(约1.861GiB)、218185728B写(约208.08MiB)**;root累计1750623232B/50576calls,io_us7199755,**237451KiB/s≈231.89MiB/s**。HIGH之后命令和读写持续增长,捕获中没有UFS poison/失败/超时。该root指标混合请求大小、读写、extent/DMA/CPU,不含console且不是wall吞吐;**不是G5顺序峰值,不能与175约212MiB/s直接宣称同场景加速比例**。仍为256KiB活动传输上限/单槽,未验收最高吞吐、持久化断电恢复或长时负载。
+- **已验证基线/下一步**:保留已正常的 **`x9-ufs-g5-panic179-idle603`**作为UFS G5回退基线,原603B完整参数 **ug=5 dv=1**、32GiB manifest/插件275,**无需mailbox**。main已经含修正,但后续联合镜像只有显式保留ug5/dv1并让DVFSRC late入口运行才会升档,ug默认off不自动改;本轮不另打包或假称其他功能镜像已测G5。重放仍用户手动`fastboot boot x9/out/x9-ufs-g5-panic179-idle603/boot.img`,用`rg -n 'X9 UFS (HIGH|IO|detail)|X9 watchdog prefs: frontboard|Darwin Bootstrapper Version' ~/180.txt`查看证据;下一步若评价速度需同场景增量/专门顺序测量,无新失败不重走旧panic路径。私有证据 **`.local/x9/work/ufs-panic179-20261110/{180-original.txt,180-ufs-selected.txt,180-runtime-evidence.json}`**,设备日志/原始用户态数据均不入git。
+
+### 前次UFS交接(UFS-179,2026-11-10): 空UIC中断修正构建记录;180已实机通过
 
 - **实机/OCR证据**:用户测试固定00dd625的`x9-ufs-g5-panic178-pmc603`后仍panic。`/Users/tosasitill/179.txt`为1864行/174575B,7.120s截断;**panic以用户OCR为准**:errno30、stage=frontboard、ufs=1/0/1/1、high=1/1/1:-3、G0、PA=40:0:0:0、guard0、IS/HCS/HCE/DB=4/10f/1/0、五层UEC全0、DV=d5c001bb/9000/559、OCS/phase0/0、LR0。179:1.272s仍G3/0x44/RateB/双lane,1.296s 32768MiB root read-write,5.679s已有3587命令/291917856B读/2949120B写;6.850s VCOREFS INIT成功,6.860s HIGH status=-3 stage1 PA_stage40 attr0 changed0 uncertain0 poisoned1。原始日志/OCR仅在私有目录,不入git。
 - **已确定窄链**:`x9u_hs_prepare_high`尚未执行任何PA GET/SET,因IS bit2非零返回X9U_BUSY=-3;late调用方high_poison撤销writable,required `sweet_x9_seed_frontboard`返回EROFS=30,PID1在真正execve之前panic。**179没有进入clock/电压floor/gear切换,不是已经发生的G5切档失败**;不能将这一确定结论倒推到丢失首错的178。modem GetAttributes -9不是此次panic直接返回值。
