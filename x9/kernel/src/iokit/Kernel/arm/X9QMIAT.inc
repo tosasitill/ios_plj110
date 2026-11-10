@@ -45,7 +45,7 @@ struct x9q_packet {
   coachz_baseband_qrtr(local,X9BB_NODE,port,p,n);
  }
 };
-struct x9q_client {uint64_t generation,next;uint32_t uim_mask;bool serving,system;};
+struct x9q_client {uint64_t generation,next;uint32_t uim_mask;bool serving,system,signal;};
 static x9q_client x9q_clients[CBQ_MAX_CLIENTS];
 struct x9q_job {
  bool used,background;uint32_t local,port,len;uint64_t generation,order,deadline,token;
@@ -271,12 +271,43 @@ static void x9q_nas(x9q_job &j){
  }
  x9q_finish(j,p,j.id==0x4d?0x4e:0x24);
 }
+static bool x9q_int(const char *&p,int &v){
+ while(*p==' ')p++;bool neg=*p=='-';if(neg)p++;unsigned n;
+ if(!x9q_number(p,n))return false;v=neg?-(int)n:(int)n;return true;
+}
+/* NAS 0x4f Get Sig Info / 0x51 indication from MTK AT+ECSQ (169.txt: CommCenter
+ * asked 0x4f right after LTE registration; rejected, signal bars stayed empty).
+ * Field layout from libmtk-ril RmcNetworkHandler::getMdSignalStrengthByAT
+ * (0x39cf90): sig1,sig2,rssi_qdbm,rscp_qdbm,ecn0_qdbm,rsrq_qdbm,rsrp_qdbm,Act,
+ * sig3,serv_band[,ss_rsrq,ss_rsrp,ss_sinr when Act 0x8000]. updateSignalStrength
+ * (0x39d1a0) LTE path (Act 0x1000/0x2000): valid only when sig1<=34 and sig2<98
+ * (CESQ-style indices); rsrp/rsrq/rssi = qdbm/4; rssnr(0.1 dB) = sig3*5/2, sig3
+ * 0x7fff = invalid. LTE TLV 0x14 (libqmi): rssi i8 dBm, rsrq i8 dB, rsrp i16
+ * dBm, snr i16 0.1 dB. Anything not LTE or not measured stays NOT_READY. */
+static void x9q_siginfo(x9q_job &j,const char *r){
+ char line[160];int v[13];unsigned n=0;
+ if(x9q_line(r,"+ECSQ:",line,sizeof(line))){const char *p=line;
+  while(n<13&&x9q_int(p,v[n])){n++;if(*p!=',')break;p++;}
+  if(*p)n=0;}
+ static unsigned logged;
+ if(logged<6){logged++;printf("X9 QMI AT: ECSQ fields %u act 0x%x sig1 %d sig2 %d rssi_q %d rsrq_q %d rsrp_q %d sig3 %d\n",
+   n,n>7?v[7]:-1,n?v[0]:-1,n>1?v[1]:-1,n>2?v[2]:-1,n>5?v[5]:-1,n>6?v[6]:-1,n>8?v[8]:-1);}
+ if(n<10||(v[7]!=0x1000&&v[7]!=0x2000)||v[0]<0||v[0]>34||v[1]<0||v[1]>=98||
+    v[6]<-140*4||v[6]>-44*4||v[5]<-34*4||v[5]>3*4||v[2]<-128*4||v[2]>0||v[8]==0x7fff){
+  x9q_error(j,X9Q_NOT_READY);return;}
+ int snr=v[8]*5/2;if(snr<-200||snr>300){x9q_error(j,X9Q_NOT_READY);return;}
+ int rsrp=v[6]/4;uint8_t lte[6]={(uint8_t)(int8_t)(v[2]/4),(uint8_t)(int8_t)(v[5]/4),
+  (uint8_t)rsrp,(uint8_t)(rsrp>>8),(uint8_t)snr,(uint8_t)(snr>>8)};
+ x9q_packet p(j.req);p.tlv(0x14,lte,sizeof(lte));x9q_finish(j,p,0x51);
+}
 static void x9q_start(x9q_job &j){
  unsigned service=j.port-X9BB_PORT_BASE;
  if(service==1){x9q_error(j,X9Q_UNSUPPORTED);
  }else if(service==0x0b||(service==2&&j.id==0x3c)){
   if(service==0x0b&&(j.id==0x20||j.id==0x21||j.id==0x24)&&!x9q_read_args(j)){x9q_error(j,X9Q_ARG);return;}
   x9q_command(j,"AT+CPIN?\r",1);
+ }else if(service==3&&j.id==0x4f){
+  x9q_command(j,"AT+ECSQ\r",40);
  }else if(service==3){
   for(int &r:j.reg)r=-1;j.attached=j.act=j.csq=-1;x9q_command(j,"AT+CREG?\r",30);
  }else if(service==2&&j.id==0x2e){
@@ -309,6 +340,7 @@ static void x9q_result(x9q_job &j,const char *r,int result){
  if(result==X9_AT_TIMEOUT||result==X9_AT_OFFLINE){x9q_error(j,X9Q_NOT_READY);return;}
  if(result==X9_AT_OVERFLOW){x9q_error(j,X9Q_INTERNAL);return;}
  if(service==1){x9q_error(j,X9Q_UNSUPPORTED);return;}
+ if(j.stage==40&&ok){x9q_siginfo(j,r);return;}
  if(j.stage>=30&&j.stage<=35){
   if(j.stage<33){const char *tags[]={"+CREG:","+CEREG:","+C5GREG:"};if(ok)j.reg[j.stage-30]=x9q_registration(r,tags[j.stage-30]);}
   else if(j.stage==33&&ok){char line[80];const char *p=line;unsigned n;
@@ -440,7 +472,7 @@ static void x9q_result(x9q_job &j,const char *r,int result){
 static bool x9q_supported(unsigned service,unsigned id){
  return (service==0x0b&&(id==0x20||id==0x21||id==0x24||id==0x2f||id==0x47))||
   (service==2&&(id==0x21||id==0x22||id==0x23||id==0x25||id==0x2d||id==0x2e||id==0x3c||id==0x43))||
-  (service==3&&(id==0x20||id==0x24||id==0x4d));
+  (service==3&&(id==0x20||id==0x24||id==0x4d||id==0x4f));
 }
 static bool x9q_enqueue(uint32_t local,uint32_t port,const uint8_t *req,unsigned len,bool background=false){
  unsigned slot=local-CBQ_PORT_BASE;if(local<CBQ_PORT_BASE||slot>=CBQ_MAX_CLIENTS)return false;
@@ -516,10 +548,12 @@ static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *r
  }
  /* UIM Refresh Register (0x2a): acknowledged; this bridge never sends refresh events. */
  /* NAS 0x6c Config Signal Info v2 (167.txt, right after LTE SysInfo): thresholds
-  * only; acknowledged, no signal indications are generated. */
+  * are not applied; the client gets a 0x51 Sig Info indication from real
+  * AT+ECSQ every subscription cycle instead. */
+ if(service==3&&id==0x6c){c.signal=true;c.next=0;}
  if((service==1&&(id==1||id==3))||(service==2&&id==1)||(service==0x0b&&id==0x2a)||(service==3&&id==0x6c)){
   static unsigned logged;
-  if(logged<8){logged++;printf("X9 QMI AT: service 0x%x msg 0x%04x registration acknowledged, no indications generated\n",service,id);}
+  if(logged<8){logged++;printf("X9 QMI AT: service 0x%x msg 0x%04x registration acknowledged, %s\n",service,id,service==3&&id==0x6c?"0x51 from AT+ECSQ every 10 s":"no indications generated");}
   x9q_packet p(req);p.send(local,port);return;
  }
  /* WDA/DPM must not open a fabricated IPA endpoint. Unsupported WDS operations
@@ -575,17 +609,18 @@ static void x9q_poll(){
  if(!j.token)x9q_error(j,X9Q_BUSY);
 }
 static void x9q_subscriptions(){
- /* At most four background reads per ten seconds per client, one active
+ /* At most five background reads per ten seconds per client, one active
   * cycle globally. Foreground jobs always precede the next background cycle. */
  for(const x9q_job &j:x9q_jobs)if(j.used)return;
  if(!x9_md_at_online())return;uint64_t now=x9q_ms();
  for(unsigned i=0;i<CBQ_MAX_CLIENTS;i++){
-  x9q_client &c=x9q_clients[i];if(now<c.next||(!c.uim_mask&&!c.serving&&!c.system))continue;
+  x9q_client &c=x9q_clients[i];if(now<c.next||(!c.uim_mask&&!c.serving&&!c.system&&!c.signal))continue;
   c.next=now+10000;uint8_t req[7]={};unsigned local=CBQ_PORT_BASE+i;
   if(c.uim_mask&1){req[3]=0x2f;x9q_enqueue(local,X9BB_PORT_BASE+0x0b,req,7,true);}
   if(c.uim_mask&16){req[3]=0x47;x9q_enqueue(local,X9BB_PORT_BASE+0x0b,req,7,true);}
   if(c.serving){req[3]=0x24;x9q_enqueue(local,X9BB_PORT_BASE+3,req,7,true);}
   if(c.system){req[3]=0x4d;x9q_enqueue(local,X9BB_PORT_BASE+3,req,7,true);}
+  if(c.signal){req[3]=0x4f;x9q_enqueue(local,X9BB_PORT_BASE+3,req,7,true);}
   break;
  }
 }

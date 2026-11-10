@@ -74,7 +74,7 @@ X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>      # 之后再�
 ## 3. 当前基线镜像与参数
 
 最新实测:**x9-rev252ic-md**(168,见HANDOFF102;LTE-only注册稳定,仍不拨号);再前 **x9-rev252ib-md**(167,见HANDOFF101);再前 **x9-rev252ia-md**(166,见HANDOFF100);再前 **x9-rev252hz-md**(165,见HANDOFF99);再前 **x9-rev252hy-md**(164,见HANDOFF98);再前 **x9-rev252hx-md**(163,见HANDOFF96);再前 **x9-rev252hw-md**(162,见HANDOFF95);再前 **x9-rev252hv-md**(161,见HANDOFF94;MIPC就绪、UIM读通);再前 **x9-rev252hu-md**(160,见HANDOFF93;RAM 10.0GiB生效);再前 **x9-rev252ht-md**(159,见HANDOFF92);再前 **x9-rev252hs-md**(158,见HANDOFF91;MIPC/DPMAIF在prepare/OPEN即隔离,UIM卡状态被拒);前一实测 **x9-rev252hl-md**(代码提交 **`20c64f2`**,构建交接 `0f9d983`),boot.img **12877824 B=12.28125MiB**,路径 `x9/out/x9-rev252hl-md/boot.img`。**157确认完整11文件安装成功、qdsp可读、Sahara finished并进入QMUX/QMI,握手摘要reset=0;真实iOS蜂窝尚未打通**,见HANDOFF87。独立34MiB固件与插件275不需再stage。
-当前未上机候选:**x9-rev252ic-mg**(ic + 一次性x9_mgwipe=1,见HANDOFF102补充);之后常用 **x9-rev252ic-md**;更早候选 **x9-rev252hq-md**(代码`ccbad81`),boot.img12906496B;沿用hn AT→QMI,新增DPMAIF只读/分配探针和WDS前置状态查询,见HANDOFF89。hq默认`x9_dpmaif=1`,不初始化硬件或激活PDP;hn保留。最新实测仍hl;不要把候选当作SIM/蜂窝已验证。
+最新实测:**x9-rev252ic-mg**(169,见HANDOFF103;单卡信号出现,信号条空)。当前未上机候选:**x9-rev252id-md**(NAS 0x4f/0x51←AT+ECSQ,见HANDOFF103);更早候选 **x9-rev252hq-md**(代码`ccbad81`),boot.img12906496B;沿用hn AT→QMI,新增DPMAIF只读/分配探针和WDS前置状态查询,见HANDOFF89。hq默认`x9_dpmaif=1`,不初始化硬件或激活PDP;hn保留。最新实测仍hl;不要把候选当作SIM/蜂窝已验证。
 回退:**x9-rev252hk-md**(修复提交 `d1f8515` + 当时未提交的渲染改动,现已入库),boot.img **15278080 B**;156确认reserve生效、efs1.bin已有1MiB,当时15次reset及零传输见HANDOFF84。
 本机回退镜像:`x9/out/x9-rev252hk-md/boot.img`;hl/hk配置沿用 `.local/x9/modem/boot-rev252hi-md.json`。
 157已越过缺qdsp的前置阻塞,**当前阻塞在X9的QMI→MTK适配**:UIM/NAS/DMS/WDS/WDA/DPM请求实际到达后返回0x5e,数据端口配置失败,四个PDP接口仍blocked/tx=rx=0。Sahara是兼容桥交互,不向物理MTK下载Apple固件;PCIControl methods仍0x0,不能说PCIControl已通。以下GPU专用基线与参数为 **2026-11-08 历史记录**,不要当作hk/hl参数直接复用。
@@ -152,7 +152,15 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
 
-## 7. 当前交接(HANDOFF 102,2026-11-09): 168(ic)LTE-only生效、注册稳定,但CommCenter仍不发数据请求;需再取logd
+## 7. 当前交接(HANDOFF 103,2026-11-10): 169(ic-mg)出现单卡信号;信号条空=NAS 0x4f被拒,id用真实AT+ECSQ回答;双卡不可行
+
+- **169.txt**(Mac `~/169.txt`,2219165B,末150.8s,无panic)。`X9 MGWIPE: cache errno=0`(3.155s)生效。用户观察:状态栏出现**一张卡**的运营商/信号,但**信号条是空的**,也没有双卡。30.26s `CEREG 1 CGATT 1 COPS-AcT 7`。清缓存后CommCenter的请求明显变多(NAS 0x33/0x44/0x45/0x5562/0x5566/0x5567等,全94拒),仍无0xc8/WDS Start。
+- **信号条(观察+修复)**:CommCenter在30.24–30.29s发NAS 0x4f Get Sig Info ×6,全部94拒;之后只每10s发0x5556(Apple私有)。0x20 Get Signal Strength它根本没发。**id**:0x4f改为真实`AT+ECSQ`。字段布局取自反汇编libmtk-ril `getMdSignalStrengthByAT`(0x39cf90)与`updateSignalStrength`(0x39d1a0)LTE路径:sig1,sig2,rssi_qdbm,rscp,ecn0,rsrq_qdbm,rsrp_qdbm,Act,sig3,band;LTE=Act 0x1000/0x2000,有效条件sig1≤34且sig2<98;rsrp/rsrq/rssi=qdbm/4,**SNR(0.1dB)=sig3*5/2**,sig3=0x7fff无效。回LTE TLV 0x14(rssi i8,rsrq i8,rsrp i16,snr i16)。收到0x6c的client每10s另收一次0x51 Sig Info indication(同一AT来源)。非LTE或无效值仍NOT_READY,不编造。日志`X9 QMI AT: ECSQ fields ...`前6次打印原始数值。
+- **双卡(结论,未改代码)**:不是bug,是身份限制。iPhone X(D22,A11)是单卡机型,iOS 16的双卡/DSDS只在XS/XR起(A12,**arm64e**),与§7 HANDOFF102中14 Pro同样的代价(PAC内核+dyld cache、重建根盘、基带路径重做)。桥本身也只走一个AT通道(SIM1,CRSM不做slot-2路由)。MD侧能看到SIM2 GPIO(169 6.06s RPC `GPIO_SIM2_*`)。可做的折中:把桥切到SIM2(单卡显示另一张),需另查MTK的SIM切换/第二AT通道,未做。
+- **x9-rev252id-md**:构建成功(Mac),命令同ic(`build.py all --name x9-rev252id-md --boot-config .local/x9/modem/boot-rev252hi-md.json --boot-arg x9_dpmaif=2 --boot-arg x9_mipc=1`),boot.img 12922880B,内嵌参数与ic逐项一致(不含mgwipe),warning数1412与ic相同,插件275不变**无需mailbox staging**。日志`.local/x9/work/pdp-activation/build-id.stdout.log`。注意:`X9 MODEM: build=`字符串仍是ic的,未改。
+- 下一步由用户手动:`fastboot boot x9/out/x9-rev252id-md/boot.img`,日志`~/170.txt`(≥120s),看`ECSQ fields`行的act/数值、0x4f是否`result 0`、状态栏信号格。若ECSQ返回ERROR或字段数<10,按原始行再调整。蜂窝数据仍未拨号(无0xc8/WDS Start),logd取证待做(见HANDOFF102)。
+
+### 前次交接(HANDOFF 102,2026-11-09): 168(ic)LTE-only生效、注册稳定,但CommCenter仍不发数据请求;需再取logd
 
 - **168.txt**(Mac `~/168.txt`,1946100B,末114.57s,无panic,无board重置)。`build=rev252ic-md`;17.29s `LTE-only AT+ERAT=3 -> OK after 40 ms`;21.45s MIPC ready;23.66s SetOperatingMode 0;24.25s注册全0;**33.42s `CEREG 1 CGATT 1 COPS-AcT 7`**,之后到114s不再变化;LTE SysInfo每10s一次(33.4/43.4/53.4/63.4s…)。
 - **观察**:LTE注册后CommCenter只做周期查询:NAS 0x5556×9(Apple私有,拒)、UIM 0x2a×8(ACK)、DMS 0x2f×6(GetTime,拒)、NAS 0x4f×3(拒)、NAS 0x6c×1(ACK)、WDS 0x30×1(拒)。**没有0xc8推送、没有WDS 0x20 Start**,MIPC拨号未触发。
