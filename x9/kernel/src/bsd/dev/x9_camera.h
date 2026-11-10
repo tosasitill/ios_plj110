@@ -286,6 +286,11 @@ struct x9_camera_platform {
     int (*capture)(const struct x9_camera_sensor *, int on, uint64_t generation);
 };
 int x9_camera_register_platform(const struct x9_camera_platform *);
+/* Thread-context, synchronous COPY from a completed, CPU/cache-visible RAW10
+ * buffer. Provider owns mapping/cache maintenance and keeps raw immutable
+ * until return. EBUSY means pinned CPU staging/backpressure: drop this frame,
+ * do not replay it or retain the hardware slot waiting on userland. This
+ * entrypoint does not establish PASS1_DONE/tag/sequence, drain or a DMA lease. */
 int x9_camera_deliver(uint32_t sensor, uint64_t generation, const void *raw,
                       uint32_t stride, uint32_t bytes, uint64_t time);
 void sweet_x9_camera_init(void);

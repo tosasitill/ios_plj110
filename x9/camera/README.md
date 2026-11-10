@@ -8,7 +8,7 @@
 | 层 | 当前实现 |
 |---|---|
 | 传感器 | Android 日志确认的 `hhmain_mipi_raw` / `hhfront_mipi_raw`；ID 检查、init/preview 表、stream-on/off、曝光/帧长、Sony 倒数增益与线性 Q10 转换 |
-| XNU | `/dev/x9-camera` 独占控制；只读状态；16 MiB 上限 RAW10；1 s 有界等待；generation 拒绝旧 DMA 完成；关闭时停止、排空、恢复 |
+| XNU | `/dev/x9-camera` 独占控制；只读状态；16 MiB 上限 RAW10；1 s 有界等待；generation 拒绝旧 DMA 完成；CPU staging 在用户复制期间 pin，关闭时停止、排空、恢复 |
 | 软件 ISP | HakiOS MIT 软件去马赛克、灰世界 AWB、AE、sRGB、NV12/BGRA；不使用高通 Chromatix；CCM 为单位矩阵，无 LSC |
 | iOS | HakiOS `CMDerivedObjectCreate` 设备类 v3/流类 v2，前后 `FigCaptureStream`；输出池、PixelBufferHandler、帧 metadata；先确认真实 start 再返回成功 |
 | sensor-probe | MT6993 CAMTG voter/parent 申请与释放、AP I2C 单控制器门控/FIFO/WRRD；WL28681C 指定通道电压/启停；reset/MCLK pinmux；真实 ID 检查与恢复日志。闲置 AP timing 初始化、禁用共享 rail 的申请/还原、GPIO203 局部唤醒。**仍要求共享时钟/HWCCF provider 已就绪，未上机验证** |
@@ -110,6 +110,22 @@ cameractl probe front
 
 GET_STATUS 仍为 **88B**，原 reserved 前两字现为 `cold_retained/cold_restore_step`；旧工具和 ioctl 尺寸兼容。它们是最后冷事务的**软件 journal 缓存，不是实际硬件状态或 lease**。保留 mask：`1=pins`、`2=MCLK mux/vote`、`4=sensor bus/gate`、`8=WL bus/gate`、`16=WL rails`、`32=DOVDD`、`64=AFVDD`、`128=VS`、`256=WL wake`、`512=AP routes`、`1024=PMIF fault/pending`。restore_step：1=quiesce、2=DOVDD、3=WL（日志另给 channel）、4=AFVDD、5=wake、6=pins、7=sensor bus、8=WL bus、9=routes、10=clock、11=VS、13=PMIF；成功时缓存 step=0。失败看 `X9 CAMERA COLD RESTORE`，不在同一 boot 重试。
 **这补齐了冷启动供电/AP timing 的局部 ownership，但共同 I2C clock FENC/HWCCF autolink 仍要求已就绪；未知 HW/EINT 用户或 SCP owner 会拒绝。没有本轮实机 ID，不能宣称冷 LK 已全部打通，更不是可拍摄镜像。**
+
+### AP timing/control 冲突时保留，而不是覆盖
+
+14 个可恢复 CSR 现在分别记录入口值、当前预期值、最后一次写前值、dirty/uncertain bit。第一次 timing/control 写之前、每次 FIFO 请求、START 之前及完成后都核对配置；每次 CSR 写再核对该项写前值。共享 MULTI 必须保持零。检测到配置变化时记录 `X9 CAMERA AP CONFLICT`，不再写配置、清 IRQ/FIFO 或发 START；已填 FIFO 或已发请求的冲突另置 wedged，保留依赖。
+
+恢复只回写实际尝试改过的 dirty CSR，不再无条件回写整个快照；没有变化的 CSR 不写。模糊写入仅在当前值等于本次预期值或精确写前值时允许单次恢复，第三种值立即止于冷恢复屏障。dirty 仅在恢复读回确认后清除。
+
+这是一道配置冲突检测/恢复屏障，**不是跨 AP/SCP 的硬件 lease，也不能消除核对与 MMIO 写之间的全部竞态**。共同 provider/未知 owner 前置要求不变；没有冷启动实测时，不宣称 bus 独占或 AP timing 已验收。旧 ioctl、结构尺寸及 per-sensor 一次事务限制不变。
+
+### RAW10 复制与关闭不占住 DMA 完成锁
+
+沿用 HakiOS `PLACE_READING/ios_readers` 的生命周期原则，但保留 X9 单份 CPU staging、原始 RAW10 ABI 和内存上限：完整 read 在锁内固定 header/raw/sequence 并 pin，随后释放相机锁执行可能 page-fault 的 `uiomove`。header peek 只复制局部快照。复制期间新 delivery 返回 `EBUSY`、丢弃该帧，不覆盖 staging，也不让 completion worker 等待用户页；提供者不得重放或占住硬件 slot 等待。
+
+stop 先失效 generation 并按原顺序 drain 硬件，再最多等 1 s 排空 CPU reader；只有排空后才能复用/释放 staging。CPU drain 超时记录 `X9 CAMERA COPY DRAIN`、锁存 FAULT/RETAINED，close/另一 sensor 不重试。复制完成只确认其快照 sequence，不误消费更新的 `st.frames`；跨 generation 的完成报告 `ESTALE`。这不保证已经复制到用户空间的字节能被撤销。
+
+**上述 pin 是 CPU 内存生命周期，不是 MM-SMMUv3 映射、CAMSV PASS1_DONE 或硬件 drain 的证明。** `x9_camera_deliver` 仍要求真实 provider 在 thread context 提交已完成、cache-visible 且调用返回前不变的 RAW10；SENINF/RAW DMA provider 仍缺失，READY/supported 仍为零，不能拍摄。
 
 ### CAMTG 时钟申请和诊断
 

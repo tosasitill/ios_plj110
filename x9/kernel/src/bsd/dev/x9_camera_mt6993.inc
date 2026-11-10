@@ -39,7 +39,9 @@ struct cam_probe_bus {
     vm_offset_t base, dma, gate, top, univpll, mainpll;
     uint32_t gate_bit, saved[CAM_I2C_SAVED_COUNT], last_status, clock_shift, clock_bit, clock_source;
     uint32_t banks, dma_banks, timing_hz, clock_con1;
-    bool owned, gate_owned, clock_saved, wedged, failed_status;
+    uint32_t expected[CAM_I2C_SAVED_COUNT], prior[CAM_I2C_SAVED_COUNT];
+    uint32_t dirty, uncertain;
+    bool owned, gate_owned, clock_saved, wedged, failed_status, conflict;
 };
 struct cam_probe_board {
     uint32_t reset, mclk, scl, sda, wl_mask, wl_count;
@@ -301,6 +303,54 @@ static int cam_bus_clock(struct cam_probe_bus *b)
     if(b->clock_saved && b->clock_con1!=con1)return EBUSY;
     b->clock_con1=con1;b->clock_source=source;b->clock_saved=true;return 0;
 }
+/* Idle/FENC is not ownership of TIMING or transfer controls. Track every
+ * writable CSR separately; never overwrite a changed borrowed configuration.
+ * The selected AP mutex serializes our callers, not SCP/other hardware users.
+ * Only an ambiguous write's exact pre-write value is also admissible during
+ * restore. No third value, IRQ clearing, reset or retry can establish a lease. */
+static int cam_bus_conflict(struct cam_probe_bus *b, unsigned reg, uint32_t expected,
+                             uint32_t observed)
+{
+    b->conflict=true;
+    printf("X9 CAMERA AP CONFLICT: gate=%x reg=%x expected=%08x observed=%08x dirty=%x uncertain=%x (retained, no overwrite)\n",
+        b->gate_bit,reg,expected,observed,b->dirty,b->uncertain);
+    return EBUSY;
+}
+static int cam_bus_controls(struct cam_probe_bus *b, bool restoring)
+{
+    if(b->conflict)return EBUSY;
+    if(!restoring && b->uncertain)return EIO;
+    if(cam_rr(b->gate,0xe00)&b->gate_bit)return EBUSY;
+    uint32_t multi=cam_rr(b->base,CAM_I2C_MULTI);
+    if(multi)return cam_bus_conflict(b,CAM_I2C_MULTI,0,multi);
+    for(unsigned i=0;i<CAM_I2C_SAVED_COUNT;i++) {
+        uint32_t v=cam_rr(b->base,cam_i2c_saved_regs[i]);
+        if(v==b->expected[i] || (restoring && (b->uncertain&(1u<<i)) && v==b->prior[i]))continue;
+        return cam_bus_conflict(b,cam_i2c_saved_regs[i],b->expected[i],v);
+    }
+    return 0;
+}
+static int cam_bus_control_write(struct cam_probe_bus *b, unsigned reg, uint32_t value,
+                                  bool restoring)
+{
+    unsigned i=0;while(i<CAM_I2C_SAVED_COUNT && cam_i2c_saved_regs[i]!=reg)i++;
+    if(i==CAM_I2C_SAVED_COUNT || !b->owned)return EINVAL;
+    int e=cam_bus_controls(b,restoring);if(e)return e;
+    uint32_t before=cam_rr(b->base,reg),bit=1u<<i;
+    if(before!=b->expected[i] && !(restoring && (b->uncertain&bit) && before==b->prior[i]))
+        return cam_bus_conflict(b,reg,b->expected[i],before);
+    if(before==value) {
+        b->expected[i]=value;b->uncertain&=~bit;
+        if(restoring)b->dirty&=~bit;
+        return 0;
+    }
+    b->prior[i]=before;b->expected[i]=value;
+    b->dirty|=bit;b->uncertain|=bit; /* BEFORE even an ambiguous write */
+    cam_rw(b->base,reg,value);
+    if(cam_rr(b->base,reg)!=value)return EIO;
+    b->uncertain&=~bit;if(restoring)b->dirty&=~bit;
+    return 0;
+}
 /* MT6991-compatible speed_ver=1: high/low products are sample(1..8) *
  * step(1..64). Solve close to 45% duty, [41%,49%), at <=98kHz. Bounded
  * arithmetic search, not a full sample/step Cartesian product. */
@@ -348,8 +398,7 @@ static int cam_bus_init_timing(struct cam_probe_bus *b)
     const uint32_t values[]={((hs-1)<<8)|(ht-1),(ext<<8)|1,
         ((ls-1)<<6)|(lt-1),0,0,((div-1)<<8)|(div-1),3,0};
     for(unsigned i=0;i<sizeof(regs)/sizeof(regs[0]);i++) {
-        cam_rw(b->base,regs[i],values[i]);
-        if(cam_rr(b->base,regs[i])!=values[i])return EIO;
+        e=cam_bus_control_write(b,regs[i],values[i],false);if(e)return e;
     }
     b->timing_hz=(uint32_t)(hz/(div*total));
     return 0;
@@ -368,6 +417,8 @@ static int cam_bus_take(struct cam_probe_bus *b)
     }
     e=cam_bus_idle(b);if(e)return e;
     for(unsigned i=0;i<CAM_I2C_SAVED_COUNT;i++)b->saved[i]=cam_rr(b->base,cam_i2c_saved_regs[i]);
+    memcpy(b->expected,b->saved,sizeof(b->saved));
+    e=cam_bus_controls(b,false);if(e)return e; /* reject an incoherent snapshot */
     /* DMA, IRQ routing and wrapper state are not inherited silently. */
     if(b->saved[1]&((1u<<2)|(1u<<7)|(1u<<8)|(1u<<9)|1u))return ENOTSUP;
     if(cam_rr(b->base,CAM_I2C_MULTI))return ENOTSUP; /* no shared shadow/DMA mode */
@@ -379,12 +430,15 @@ static int cam_bus_take(struct cam_probe_bus *b)
 static int cam_bus_restore(struct cam_probe_bus *b)
 {
     if(!b->owned && !b->gate_owned)return 0;
+    if(b->conflict)return EBUSY;
     int e=cam_bus_clock(b);if(e)return e;
     if(b->wedged || cam_bus_idle(b))return EBUSY;
     if(b->owned) {
-        for(unsigned i=0;i<CAM_I2C_SAVED_COUNT;i++) {
-            cam_rw(b->base,cam_i2c_saved_regs[i],b->saved[i]);
-            if(cam_rr(b->base,cam_i2c_saved_regs[i])!=b->saved[i])return EIO;
+        e=cam_bus_controls(b,true);if(e)return e;
+        for(unsigned n=CAM_I2C_SAVED_COUNT;n>0;n--) {
+            unsigned i=n-1;if(!(b->dirty&(1u<<i)))continue;
+            e=cam_bus_control_write(b,cam_i2c_saved_regs[i],b->saved[i],true);
+            if(e)return e;
         }
         b->owned=false;
     }
@@ -402,19 +456,23 @@ static int cam_bus_transfer(struct cam_probe_bus *b, uint8_t slave,
                             const uint8_t *tx, unsigned count, uint8_t *rx)
 {
     if(!b->owned || b->wedged || !count || count>3)return EINVAL;
-    int e=cam_bus_clock(b);if(!e)e=cam_bus_idle(b);if(e)return e;
+    int e=cam_bus_clock(b);if(!e)e=cam_bus_idle(b);
+    if(!e)e=cam_bus_controls(b,false);if(e)return e;
     uint32_t control=(b->saved[1]&~((1u<<1)|(1u<<2)|(1u<<4)|(1u<<8)|(1u<<9)))|
         (1u<<3)|(1u<<5);
     if(rx)control|=(1u<<1)|(1u<<4);
-    cam_rw(b->base,CAM_I2C_CTRL,control);
-    cam_rw(b->base,CAM_I2C_MASK,0);
-    cam_rw(b->base,CAM_I2C_ADDR,(uint32_t)slave<<1);
+    e=cam_bus_control_write(b,CAM_I2C_CTRL,control,false);
+    if(!e)e=cam_bus_control_write(b,CAM_I2C_MASK,0,false);
+    if(!e)e=cam_bus_control_write(b,CAM_I2C_ADDR,(uint32_t)slave<<1,false);
+    if(!e)e=cam_bus_control_write(b,CAM_I2C_LEN,count,false);
+    if(!e)e=cam_bus_control_write(b,CAM_I2C_AUX,rx?1:0,false);
+    if(!e)e=cam_bus_control_write(b,CAM_I2C_TRANS,rx?2:1,false);
+    if(e)return e; /* no FIFO/status/START writes after a CSR conflict */
     cam_rw(b->base,CAM_I2C_FIFO_CLR,1);
-    cam_rw(b->base,CAM_I2C_LEN,count);
-    cam_rw(b->base,CAM_I2C_AUX,rx?1:0);
-    cam_rw(b->base,CAM_I2C_TRANS,rx?2:1);
     for(unsigned i=0;i<count;i++)*(volatile uint8_t *)(b->base+CAM_I2C_DATA)=tx[i];
     __asm__ volatile("dsb sy" ::: "memory");
+    e=cam_bus_controls(b,false);
+    if(e){b->wedged=true;return e;} /* filled FIFO must remain isolated */
     cam_rw(b->base,CAM_I2C_START,(1u<<14)|1u);
     uint32_t status=0;
     for(unsigned i=0;i<1000;i++) {
@@ -426,6 +484,8 @@ static int cam_bus_transfer(struct cam_probe_bus *b, uint8_t slave,
     if(!status || (cam_rr(b->base,CAM_I2C_START)&1)) {
         b->wedged=b->failed_status=true;return ETIMEDOUT; /* retain journal, no global reset */
     }
+    e=cam_bus_controls(b,false);
+    if(e){b->wedged=b->failed_status=true;return e;} /* do not clear a new owner's IRQ/FIFO */
     if(status&~0x207u)e=EIO; /* arbitration/conferr/unknown are not ACKs */
     else if(status&0x206)e=EIO;
     else if(!(status&1))e=EIO;

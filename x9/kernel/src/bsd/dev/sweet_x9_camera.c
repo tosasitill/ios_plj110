@@ -33,6 +33,10 @@ static struct x9_camera_platform hw;
 static bool opened;
 static uint8_t *frame;
 static uint32_t frame_bytes;
+/* Pin CPU staging across faultable uiomove, as HakiOS pins PLACE_READING.
+ * This is NOT a DMA mapping/ownership counter. A busy staging buffer drops
+ * the next delivery rather than blocking a hardware completion on user VM. */
+static unsigned frame_readers;
 static uint64_t consumed;
 static struct hakios_camera_frame head;
 /* Journal attempted callbacks BEFORE invoking them: an error may follow a
@@ -89,6 +93,20 @@ static int cam_sensor_hw_read(void *s, uint16_t reg, uint8_t *v)
 { return hw.read8(s,reg,v); }
 static int cam_sensor_hw_write(void *s, uint16_t reg, uint8_t v)
 { return hw.write8(s,reg,v); }
+static int cam_drain_readers(void)
+{
+    uint64_t span;nanoseconds_to_absolutetime(1000000000,&span);
+    uint64_t deadline=mach_absolute_time()+span;
+    while(frame_readers) {
+        uint64_t now=mach_absolute_time(),ns;
+        if(now>=deadline)return ETIMEDOUT;
+        absolutetime_to_nanoseconds(deadline-now,&ns);
+        struct timespec timeout={(time_t)(ns/1000000000),(long)(ns%1000000000)};
+        int e=msleep(&frame_readers,&camera_lock,PZERO,"x9-camera-copy",&timeout);
+        if(e && frame_readers)return e==EWOULDBLOCK?ETIMEDOUT:e;
+    }
+    return 0;
+}
 static int stop(void)
 {
     int e=0,a=0,b=0;
@@ -113,6 +131,14 @@ static int stop(void)
         printf("X9 CAMERA DRAIN: sensor=%u generation=%llu stream=%d drain=%d restore=%d "
             "retained=%u/%u/%u latched=%u\n",s->sensor,session.generation,e,a,b,
             session.power,session.capture,session.stream,session.latched);
+    }
+    int copy=cam_drain_readers();
+    if(copy) {
+        session.latched=true;if(!session.last_errno)session.last_errno=copy;
+        st.flags|=X9_CAMERA_RETAINED;
+        printf("X9 CAMERA COPY DRAIN: readers=%u errno=%d (CPU staging retained, no retry)\n",
+            frame_readers,copy);
+        if(!e && !a && !b)e=copy;
     }
     if(e||a||b){st.flags|=X9_CAMERA_FAULT;st.last_errno=e?e:a?a:b;}
     return e?e:a?a:b;
@@ -195,6 +221,7 @@ int x9_camera_deliver(uint32_t which,uint64_t generation,const void *raw,
     else if(!raw || stride<s->width/4*5 || stride>s->width/4*5+4096 ||
             (uint64_t)stride*s->height!=bytes || bytes>X9_CAMERA_MAX_BYTES ||
             !time || time<=head.time || time>mach_absolute_time())e=EINVAL;
+    else if(frame_readers)e=EBUSY; /* never overwrite a pinned CPU copy */
     uint32_t exposure=0,gain=0,lines=0;
     if(!e)e=read16(s,0x0202,&exposure);
     if(!e)e=read16(s,0x0204,&gain);
@@ -390,11 +417,14 @@ static int cam_read(__unused dev_t d,struct uio *uio,__unused int flags)
 {
     if(uio_resid(uio)<sizeof(head))return EMSGSIZE;
     lck_mtx_lock(&camera_lock);int e=0;
+    bool peek=uio_resid(uio)==sizeof(head),pinned=false;
+    struct hakios_camera_frame snapshot;uint8_t *raw=NULL;uint32_t bytes=0;
+    uint64_t generation=st.generation;
     if(!(st.flags&X9_CAMERA_STREAMING))e=ENXIO;
     else {
         uint64_t interval;nanoseconds_to_absolutetime(1000000000,&interval);
-        uint64_t deadline=mach_absolute_time()+interval,generation=st.generation;
-        while(!frame_bytes || (uio_resid(uio)!=sizeof(head) && consumed==st.frames)) {
+        uint64_t deadline=mach_absolute_time()+interval;
+        while(!frame_bytes || (!peek && (consumed==st.frames || frame_readers))) {
             uint64_t now=mach_absolute_time(),ns;
             if(now>=deadline){e=EAGAIN;break;}
             absolutetime_to_nanoseconds(deadline-now,&ns);
@@ -405,12 +435,25 @@ static int cam_read(__unused dev_t d,struct uio *uio,__unused int flags)
         if(e==EWOULDBLOCK)e=EAGAIN;
         if(!e && generation!=st.generation)e=ESTALE;
         if(!e && (!(st.flags&X9_CAMERA_STREAMING)||!frame_bytes))e=ENXIO;
-        bool peek=uio_resid(uio)==sizeof(head);
         if(!e && !peek && uio_resid(uio)!=(user_ssize_t)(sizeof(head)+frame_bytes))e=EMSGSIZE;
-        if(!e)e=uiomove((char*)&head,sizeof(head),uio);
-        if(!e && !peek){e=uiomove((char*)frame,frame_bytes,uio);if(!e)consumed=st.frames;}
+        if(!e) {
+            snapshot=head;bytes=frame_bytes;raw=frame;
+            if(!peek){frame_readers++;pinned=true;}
+        }
     }
-    lck_mtx_unlock(&camera_lock);return e;
+    lck_mtx_unlock(&camera_lock);
+    /* User page faults must not hold the completion/stop mutex. Header and
+     * raw are from one pinned frame, not a live head after a newer delivery. */
+    if(!e)e=uiomove((char*)&snapshot,sizeof(snapshot),uio);
+    if(!e && pinned)e=uiomove((char*)raw,bytes,uio);
+    if(pinned) {
+        lck_mtx_lock(&camera_lock);
+        if(!e && generation!=st.generation)e=ESTALE;
+        if(!e)consumed=snapshot.sequence; /* not a later st.frames */
+        frame_readers--;wakeup(&frame_readers);wakeup(&frame_bytes);
+        lck_mtx_unlock(&camera_lock);
+    }
+    return e;
 }
 static const struct cdevsw cam_cdev={.d_open=cam_open,.d_close=cam_close,.d_read=cam_read,
     .d_write=cam_write,.d_ioctl=cam_ioctl,.d_stop=eno_stop,.d_reset=eno_reset,
