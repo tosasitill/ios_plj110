@@ -169,7 +169,15 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
 
-## UFS活动交接(UFS-180,2026-11-10): 实机G5/FAST/RateB/双lane通过,PID1与SpringBoard正常运行
+## UFS活动交接(UFS-DEFAULT,2026-11-10): 按用户要求G5默认开启,DVFSRC依赖同步默认INIT
+
+- **明确请求/已验路径**:用户在180确认正常后要求“改成默认参数”。保持180已验证的G5/FAST/RateB/双lane路径,只改变缺省参数,不新增升档时机/回滚/重试或放宽保护。共享`X9U_DEFAULT_HIGH_GEAR=5`供native root入口日志、late升档和DVFSRC setup使用;`sweet_x9_arg`只在X9缺省取5,显式参数仍优先,其他板缺省0。双方能力协商、G4→G5、旧档/每档PA+四窗口SHA、电压/clock/首错poison门全部保留。
+- **参数语义**:没有`ug`默认G5 ceiling; **`ug=0`关闭late升档,`ug=4`上限G4,`ug=5`显式G5**。没有`x9_dvfsrc`/`dv`且ug4/5启用时,DVFSRC缺省**INIT-only(1)**,不再需要`dv=1`;关闭/无效ug则保留以前no-INIT(0)缺省。显式`x9_dvfsrc=N`优先于`dv=N`并覆盖自动依赖,**包括显式0**,不强行重启其配置。DRAM/EMI和GPU/governor其它缺省不改;late仍依赖GPU governor正常运行,明确关闭governor不会伪报G5。`x9/build/boot.json`仅更新缺省说明,不塞ug/dv冗余token、不修改私有校准或旧成功候选。
+- **隔离/编译**:独立`.local/x9/worktrees/ufs-g5-default`/`work/x9-ufs-g5-default`,冻结基线**09bd5e1**,未夹带主checkout其他窗口NOTES。sweet_x9_ufs.o和sweet_x9_gpu_dependencies.o本地交叉编译**exit0**,git diff --check通过。首次GPU单元因新worktree缺少私有生成`x9_mdota.inc`而失败,复制现有本地生成输入后第二轮两对象通过,不是代码编译错误;生成内容不入git。日志/config/script在私有`.local/x9/work/ufs-default-20261110/{object-build.log,object-build.exit,object-build2.log,object-build2.exit,compile-selected.py,local-config.json,objects/}`。
+- **范围/当前动作**:本轮仅默认值源码/打包配置注释和两对象编译,**未重新整包、未上机,无CI build/主动push/测试套件/设备操作/成功镜像二次检查**。180正常的boot.img固定2902928不变,其显式ug5/dv1继续兼容;缺省启用只对今后包含此代码的新内核生效。代码已合main,以后联合构建可以不再传ug5/dv1,保留同一升档成功日志作为验收依据。用户本轮未要求重打包,不为此覆盖或重复测旧包。
+- **提交/CI/整合**:独立代码固定 **b2e33b1**,两对象编译上述第二轮exit0;`gh run list --commit b2e33b1`返回 **[]**,无CI run。五个代码/config文件按该固定提交的原始diff合main为 **7b0abf6**,NOTES单独仅插入本节并保留其他窗口未提交内容,没有夹带/覆盖别人的工作。新缺省路径仍待后续新镜像的无ug/dv上机验证,**180验证的是等价显式ug5/dv1路径,不是这次默认值新包**。
+
+### 前次UFS交接(UFS-180,2026-11-10): 实机G5/FAST/RateB/双lane通过,PID1与SpringBoard正常运行
 
 - **运行来源/范围**:用户测试`x9/out/x9-ufs-g5-panic179-idle603/boot.img`后报告“180正常了”。`/Users/tosasitill/180.txt`为**12137物理行/1250618B**,记录至**59.425s**;已保留原始副本及窄选行,未修改用户原文件。该包固定源码**2902928**,代码main整合**a0a04f7**,此前68/68 overlay+6prebuilt、整包exit0/10010624B/CI列表空;本轮仅读日志/更新交接,没有新代码、构建、测试套件、设备/分区操作、主动push或成功镜像二次校验。正常上机为本轮用户手动重放,不是自动reset/错误注入或长时稳定性测试。
 - **179最小修正已实机命中**:180:1604(6.373s)`IS=00000004->00000000 empty_uic_ack=1 UEC_read=1`且五层UEC全0,与179确定失败入口完全对应。没有放宽普通I/O错误保护、重置或降档;PMC isolated_line_resets=0,因此本次无需PMC LINERESET特例。原始置bit2的事件来源仍未知,但已证明空summary处理后正常继续升档,不要再把旧IS4直接当解码链路错误。
