@@ -40,7 +40,10 @@ def main():
     (bundle / 'Info.plist').write_bytes(plistlib.dumps(info))
     (bundle / 'LICENSE.UniXNU').write_bytes((HERE / 'LICENSE.UniXNU').read_bytes())
     tool = a.out / 'audioctl'
-    subprocess.run(common + [str(HERE / 'audioctl.c'), str(HERE.parent / 'kernel/src/bsd/dev/x9_tfa98xx.c'), '-o', str(tool)], check=True)
+    subprocess.run(common + [str(HERE / 'audioctl.c'),
+                             str(HERE.parent / 'kernel/src/bsd/dev/x9_tfa98xx.c'),
+                             str(HERE.parent / 'kernel/src/bsd/dev/x9_tfa_multimsg.c'),
+                             '-o', str(tool)], check=True)
     for path in (bundle, tool):
         subprocess.run(['/usr/bin/codesign', '--force', '--sign', '-', '--timestamp=none', str(path)], check=True)
     print(f'Built {bundle} and {tool}; not installed, physical audio not verified')

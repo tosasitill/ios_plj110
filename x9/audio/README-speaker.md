@@ -458,7 +458,8 @@ lease空间不是CSR，ticket细节另读resource-status；lease-error0时guard�
 | `x9_tfa_plj110.{c,h}` | root 显式只读 reg03；PMIF-P SID3 reset/SID5 左供电快照，已开启 I²C6/共享 DMA clock 与 pads 校验、2 CSR bank/1 DMA idle、FIFO WRRD 1+2 BE、逐字段总线恢复 | 不具备双侧供电/reset/write lease；右 rail、真实 binding/profile/校准仍待确认 |
 | `x9_i2c6.h/x9_i2c6_native.inc` | 与只读probe共用controller mutex；真实PA epoch下游child、reg8/value16 BE FIFO read/write、双CSR bank/DMA资格、last-prior journal、terminal-only no-replay清理与halt/drain前后屏障；iOS缓存状态 | 必须实际pin住I2C6/APDMA clocks、mux/PLL、GPIO114/115与所有master互斥，现无真实supplier或combined调用者；不授profile/校准/unmute |
 | `x9_pa_reset.{c,h}` | 本次FDT SID3双active-low reset拓扑、生产clock PA子租约、低1ms→高1ms/物理DI读回与fresh epoch、PMIF pending no-replay、halt/drain后重新assert low；I2C6下游子租约屏障 | 实际双侧rail/reset物理独占supplier仍无注册者，不提供PA寄存器写／profile／校准／unmute |
-| `x9_tfa98xx.{c,h}` | PM container total-size/CRC、双 I2C 类型（container bus=0）的地址、明确名字的两侧 profile、descriptor 边界；真实 reg03 revision 比对、AMPE=0 且读回；双侧预检白名单 register/bitfield prefix | 实际完整 revision、immutable container、per-revision 白名单、I2C6/reset/rails 互斥；Probus DSP file/patch/校准/boost 未执行 |
+| `x9_tfa98xx.{c,h}` | PM container total-size/CRC、双 I2C 类型（container bus=0）的地址、明确名字的两侧 profile、descriptor 边界；共享完整 OPPO stepping 准入＋真实 reg03 revision 比对、AMPE=0 且读回；双侧预检白名单 register/bitfield prefix | 实际完整 revision、immutable container、per-revision 白名单、I2C6/reset/rails 互斥；Probus DSP file/patch/校准/boost 未执行 |
+| `x9_tfa_multimsg.{c,h}` | 内核／iOS共用有界 `0x008015` 批消息解析、零起始消息offset view、完整24BE↔signed24-in-32LE转换；全包验证后才输出，无allocation或in-place写 | 只是实际参数材料的framing／word codec；command不获白名单，未证明当前firmware路由／Probus协议／可信profile／校准，未传总线／DSP |
 | `x9_pa_native.{h,inc}` | 直接调用真实native I2C6 transport，在同一controller mutex内双侧完整reg03→SYSCTRL→AMPE-off→完整读回；singleton reset-epoch/first fault/unknown write保留，不构造verified=7 | 实际已pin的双侧power/controller supplier及combined调用者；仅安全静音，不授profile/校准/unmute |
 
 AFE start 必须预填至少960帧后才使能 DMA；PA 始终由外部 board 维持 muted。
@@ -1112,6 +1113,36 @@ parser 报告两个 PA 的 profile/prefix/opaque 数目，并执行同一 prefix
 CRC通过和 prefix写完均不表示
 完整初始化／校准成功。不会执行未知 opaque payload、猜默认profile、写MTP/OTP，
 没有 unmute API；真实 profile／芯片证据未齐时，不允许进入 speaker Ready。
+
+### 解析真实 TFA 参数批消息
+
+`tfa98xx_{device,music,ringtone,voice}.bin` 是另一种输入，**不能交给 PM `.cnt`
+parser，也不能作为校准、完整固件或解静音授权**。本地提取材料的 device 为612B／10条，
+music、ringtone、voice各1512B／5条；只确认各自framing，未据相同大小推断系数相同。
+
+```sh
+audioctl amp-msg-inspect /var/tmp/tfa98xx_device.bin be24
+```
+
+此入口在连接IOKit前返回，只读文件与内存，不需要X9Audio服务，不写功放／mailbox。
+packing必须明确为 `be24` 或 `le32`；输出byte offset和opaque command，不推断用途。
+不能把本地文件名或多芯片SmartPa XML中的库表当作当前HAL选库证明。
+
+共享codec依据OPPO `tfa_tib_dsp_msgmulti` 与 `tfa_dsp_msg`：
+
+| 检查 | 行为 |
+|---|---|
+| Framing | 精确`0x008015`头、unsigned16 word-count、至少一条消息、末尾zero count恰好EOF；不接受截断、padding或缺terminal |
+| Bounds | 24BE上限4000B，32LE上限5336B；输入整word、长度乘法先验有界，转换时也检查目标上限 |
+| Signed words | 每3B BE数据word转换为4B LE，bit23扩展至最高字节；反向拒绝非canonical高字节，不静默截断 |
+| 发布 | `scan/get/convert`全包验证后才修改输出；metadata/目的buffer/返回长度禁止与输入或彼此alias，容量不足不产生部分转换 |
+| 错误 | 参数／alias为EINVAL，格式为EBADMSG，源／目标超限为E2BIG，容量不足为ENOSPC，消息index越界为ENOENT；输出不变 |
+
+调用者须在整个调用期间保留immutable且已pin输入。codec不分析或执行任何消息语义，
+不添加外层批消息、不把SetRe25 flush规则当成已获得真实校准，不注册backend／Ready。
+generic register-prefix bus准入现在与native PA共用完整stepping表；低字节family匹配
+不再允许未知高字节revision进入读写路径。完整型号匹配仍不替代实际reg03、reset epoch、
+双侧rails／I2C6长期租约或revision-specific register policy。
 
 ## 参考与证据边界
 

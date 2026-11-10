@@ -9,6 +9,7 @@
 #include <signal.h>
 #include "../kernel/src/bsd/dev/x9_audio.h"
 #include "../kernel/src/bsd/dev/x9_tfa98xx.h"
+#include "../kernel/src/bsd/dev/x9_tfa_multimsg.h"
 #include "../kernel/src/bsd/dev/x9_speaker_afe.h"
 #include "../kernel/src/bsd/dev/x9_tfa_plj110.h"
 #include "../kernel/src/bsd/dev/x9_i2c6.h"
@@ -220,6 +221,38 @@ static int inspect_container(const char *path,const char *profile) {
     puts("Local parser/exclusion guard only; not a revision-specific allowlist, chip/loaded-profile or Ready proof. No hardware writes.");
     return e?1:0;
 }
+static int inspect_multimsg(const char *path,const char *format) {
+    uint32_t packing=!strcmp(format,"be24")?X9TFABE24:
+                     !strcmp(format,"le32")?X9TFALE32:0;
+    if(!packing){fprintf(stderr,"packing must be be24 or le32\n");return 2;}
+    FILE *f=fopen(path,"rb");if(!f){perror(path);return 1;}
+    if(fseek(f,0,SEEK_END)){fclose(f);return 1;}
+    long length=ftell(f);
+    uint32_t max=packing==X9TFABE24?X9_TFA_MULTIMSG_BE24_MAX:X9_TFA_MULTIMSG_LE32_MAX;
+    if(length<=0 || length>(long)max || fseek(f,0,SEEK_SET)) {
+        fprintf(stderr,"multimessage length rejected\n");fclose(f);return 1;
+    }
+    void *data=malloc((size_t)length);if(!data){fclose(f);return 1;}
+    size_t n=fread(data,1,(size_t)length,f);int read_error=ferror(f);fclose(f);
+    struct x9_tfa_multimsg_info info;
+    int e=n==(size_t)length && !read_error?
+        x9_tfa_multimsg_scan(data,(uint32_t)length,packing,&info):1;
+    if(!e) {
+        printf("TFA %s multimessage bytes=%u messages=%u payload-words=%u max-message-words=%u be24-bytes=%u le32-bytes=%u\n",
+            format,info.bytes,info.messages,info.payload_words,info.max_message_words,
+            info.be24_bytes,info.le32_bytes);
+        for(uint32_t i=0;i<info.messages;i++) {
+            struct x9_tfa_multimsg_message m;
+            e=x9_tfa_multimsg_get(data,(uint32_t)length,packing,i,&m);if(e)break;
+            printf("  message=%u offset=%u bytes=%u words=%u opaque-command=%06x\n",
+                i,m.offset,m.bytes,m.words,m.command);
+        }
+    }
+    if(e)fprintf(stderr,"multimessage rejected: errno=%d\n",e);
+    memset(data,0,(size_t)length);free(data);
+    puts("Offline framing only. No container CRC/profile, route, calibration or unmute/Ready authority; no service connection, bus or mailbox write.");
+    return e?1:0;
+}
 static void print_status(const X9AudioControl *s) {
     printf("X9 audio ABI=%u state=0x%x blockers=0x%x errno=%u rate=%u channels=%u\n"
            "PCM played=%llu queued=%llu underruns=%llu bad_producer=%llu generation=%u\n",
@@ -360,6 +393,7 @@ static int path_status(io_connect_t c) {
 }
 int main(int argc, char **argv) {
     if (argc == 4 && !strcmp(argv[1], "amp-inspect")) return inspect_container(argv[2], argv[3]);
+    if (argc == 4 && !strcmp(argv[1], "amp-msg-inspect")) return inspect_multimsg(argv[2], argv[3]);
     int amp = argc == 2 && !strcmp(argv[1], "amp-status");
     int i2c6 = argc == 2 && !strcmp(argv[1], "i2c6-status");
     int left_vdd = argc == 2 && !strcmp(argv[1], "left-vdd-status");
@@ -380,7 +414,7 @@ int main(int argc, char **argv) {
     int playing = argc == 3 && !strcmp(argv[1], "play");
     int dsp = argc == 2 && !strcmp(argv[1], "dsp-status");
     if (!left_vdd && !i2c6 && !amp && !probing && !playing && !dsp && !board && !afe && !resources && !clocks && !clock_probe && !pll && !pll_probe && !path && !path_probe && !stream && !stream_stop && !booting && !stopping && !(argc == 2 && !strcmp(argv[1], "status"))) {
-        fprintf(stderr, "usage: audioctl left-vdd-status | i2c6-status | amp-status | amp-probe | status | resource-status | clock-status | clock-probe | pll-status | pll-probe | path-status | path-probe | stream-status | stream-stop | afe-status | dsp-status | board-status | dsp-boot | dsp-stop |\n  play <S16LE stereo 48000Hz raw PCM> | amp-inspect <local.cnt> <exact-profile>\n"); return 2;
+        fprintf(stderr, "usage: audioctl left-vdd-status | i2c6-status | amp-status | amp-probe | status | resource-status | clock-status | clock-probe | pll-status | pll-probe | path-status | path-probe | stream-status | stream-stop | afe-status | dsp-status | board-status | dsp-boot | dsp-stop |\n  play <S16LE stereo 48000Hz raw PCM> | amp-inspect <local.cnt> <exact-profile> | amp-msg-inspect <local.bin> <be24|le32>\n"); return 2;
     }
     FILE *f = playing ? fopen(argv[2], "rb") : NULL;
     if (playing && !f) { perror(argv[2]); return 1; }

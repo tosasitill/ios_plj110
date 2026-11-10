@@ -24,7 +24,8 @@ int x9_tfa_check_register_prefix(const void *,uint32_t,const char *,struct x9_tf
 #if defined(KERNEL)
 struct x9_tfa_bus {
     uint32_t version, verified;
-    uint16_t expected_revision[2]; /* actual full reg03 readback, not DT label */
+    uint16_t expected_revision[2]; /* supported full OPPO stepping + actual
+                                  * reg03 readback, never just low-byte family */
     void *context;
     /* I2C6 lease includes correct reset GPIO controller, rails, audited bus clock
      * and mutual exclusion. read/write implement reg8/value16 big-endian;

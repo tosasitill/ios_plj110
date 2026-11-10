@@ -7,6 +7,7 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/errno.h>
+#include "x9_pa_native.h"
 #else
 #include <errno.h>
 #include <string.h>
@@ -176,8 +177,7 @@ static int valid_bus(const struct x9_tfa_bus *b)
     if(!b || b->version!=1 || b->verified!=X9_TFA_BUS_REQUIRED || !b->read16 ||
        !b->write16 || !b->allow_patch)return EINVAL;
     for(unsigned i=0;i<2;i++) {
-        unsigned rev=b->expected_revision[i]&255;
-        if(rev!=0x72 && rev!=0x73 && rev!=0x74)return ENOTSUP;
+        if(!x9_pa_native_revision_supported(b->expected_revision[i]))return ENOTSUP;
     }
     return 0;
 }
