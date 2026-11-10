@@ -349,6 +349,10 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 
 - **本轮固定源码/整合**：重复冷录音及64B burst源码 **97c225804563f315c78f5c82d34e2c887822d8a3**，最终四mic对象 `repeat-burst/units2.exit0`，gh固定源码查询exit0=[]、无CI run ID。八个代码路径基线与main一致才精准整合；保存合前HEAD/working/index/NOTES，用独立index+commit-tree+CAS更新main，只加入本节、不夹带其他模块或他窗NOTES。没有重建main、最终boot/设备安装/声学录音结果，goal保持active。
 
+
+- **本阶段最终交接定位**：独立代码 **97c225804563f315c78f5c82d34e2c887822d8a3**，main精准代码整合 **dd8db8572660d55a2a153e3b4e19655db5cf0c5e**（父main e25645b），八源码入库/source match，`units2.exit0`四对象直接编译，gh exit0=[]无CI；原始合前/后HEAD/status/working/index/NOTES与整合脚本在`repeat-burst/`。final树继续同一分支，platform v6/PLJ+native DMA v2；没有本阶段最终镜像/all/link/设备/安装/录音结果，不重建之前的MIC16候选。下一步仍**真正full写链drain与实际native bootstrap**，不是要求用户刷旧探针。
+- **新排空线索边界**：OPPO `clkchk-mt6993.c:2048..2085`区分PWR_OFF_BUS_PROT(wait BUS_PROT_RDY)→SRAM→ISO/RESET→PWR_ON ACK0与MTCMOS OFF；`spm_pbus`为**0x1c00d000**，`mtk-pd-chk-mt6993.c:41`的AUDIO **+0x3c bit31**仅是power-state。尚未建立AUDIO整条写链对BUS_PROT_RDY的具体覆盖/地址/epoch，不能把HWV DONE或power0当supplier。另`chk_pm_state:4829`只读保存的reg_dump_val，while不刷新chk_val，诊断重试本身不是新硬件观察。摘录放私有目录，不按这些不完整线索新增恒成功quiesce/bootstrap。
+
 ## 麦克风活动交接(MIC-16,2026-11-10): 数字codec逐字段恢复冲突门/未写项跳过与iOS首错位置;整包已编译,真实DMA仍缺
 
 - **隔离/源码缺口**:独立`.local/x9/worktrees/microphone-rollback16` / `work/x9-microphone-rollback16`,冻结main **5ad10df86c49c79e8a4742728f89f68eb04e12ee**,不夹带working/以后main。原`digital-l→board restore→digital_stop`在partial clock初始化失败且尚未写SRC/TX时仍无条件发四项off,随后数字journal逐项盲写old;MIC12最终RW验证只在prepare,不能独自排除晚到的codec mux/clock改动。这是源码可达恢复缺口,**不是已观察PLJ110恢复冲突/声学故障**。对照OPPO mt6681.c ordinary AIFTX/UL SRC disable与本地UniXNU-sheng/HakiOS生命周期;不迁高通DSP地址/时钟或假provider,不改厂商上电/phase/DCC/RC序列。
