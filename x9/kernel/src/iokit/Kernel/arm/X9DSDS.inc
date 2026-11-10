@@ -20,6 +20,8 @@ struct x9ds_operation {
 };
 static x9ds_operation x9ds_op;
 static uint8_t x9ds_iccid[2][10];
+static bool x9ds_mapped_apps;
+static void x9ds_apps(bool ready){x9ds_mapped_apps=ready;}
 static bool x9ds_pair,x9ds_known,x9ds_requested,x9ds_boot_attempted;
 static unsigned x9ds_current;
 static uint64_t x9ds_epoch;
@@ -30,7 +32,7 @@ static bool x9ds_data_ready(unsigned slot){
 static void x9ds_cards(const uint8_t *first,const uint8_t *second,bool ready){
  bool pair=ready&&first&&second&&memcmp(first,second,10)!=0;
  if(pair==x9ds_pair&&(!pair||(!memcmp(x9ds_iccid[0],first,10)&&!memcmp(x9ds_iccid[1],second,10))))return;
- x9ds_epoch++;x9ds_known=false;x9ds_pair=pair;bzero(x9ds_iccid,sizeof(x9ds_iccid));
+ x9ds_epoch++;x9ds_mapped_apps=false;x9ds_known=false;x9ds_pair=pair;bzero(x9ds_iccid,sizeof(x9ds_iccid));
  if(pair){memcpy(x9ds_iccid[0],first,10);memcpy(x9ds_iccid[1],second,10);}
  printf("X9 DDS: real READY card pair %u epoch %llu; current subscription invalidated\n",pair,x9ds_epoch);
 }
@@ -53,9 +55,18 @@ static void x9ds_request(uint32_t local,uint32_t port,const uint8_t *req,unsigne
  unsigned slot=local-CBQ_PORT_BASE,id=x9q_u16(req+3);x9ds_client &c=x9ds_clients[slot];
  unsigned error=0;
  if(x9_md_sim_count()!=2)error=X9Q_UNSUPPORTED;
- else if(id==0x38){
-  x9q_view flag=x9q_tlv(req,n,0x18);
+ else if(id==0x25){
+  x9q_view flag=x9q_tlv(req,n,0x11);
   if(n!=11||!flag.p||flag.n!=1||flag.p[0]>1)error=X9Q_ARG;
+  else{x9q_clients[slot].dsd_system=flag.p[0]!=0;x9q_clients[slot].next=0;}
+ }else if(id==0x24){
+  if(n!=7)error=X9Q_ARG;
+  else if(x9q_enqueue(local,port,req,n))return;
+  else error=X9Q_BUSY;
+ }else if(id==0x38){
+  x9q_view flag=x9q_tlv(req,n,0x18);
+  if(!flag.p)error=X9Q_UNSUPPORTED; // e.g. 176: a2 dynamic-RRC registration, NOT DDS18
+  else if(n!=11||flag.n!=1||flag.p[0]>1)error=X9Q_ARG;
   else{c.subscribed=flag.p[0]!=0;x9ds_requested=true;x9q_packet p(req);p.send(local,port);
    if(c.subscribed&&x9ds_known&&x9ds_pair&&!x9ds_op.used)x9ds_current_ind(slot);return;}
  }else if(id==0x4f){
@@ -75,7 +86,8 @@ static void x9ds_request(uint32_t local,uint32_t port,const uint8_t *req,unsigne
    printf("X9 DDS: switch request SIM%u -> SIM%u type %u; drain owned WDS before 020d\n",x9ds_known?x9ds_current+1:0,x9ds_op.target+1,x9q_u32(type.p));return;
   }
  }else error=X9Q_UNSUPPORTED;
- x9q_packet p(req,(uint16_t)error);p.send(local,port);
+ if(error){x9q_reject(local,port,req,n,(uint16_t)error);return;}
+ x9q_packet p(req);p.send(local,port);
 }
 static bool x9ds_drain(){
  bool empty=true;
@@ -140,4 +152,18 @@ static void x9ds_poll(){
   if(ready){uint8_t sub[4]={(uint8_t)(x9ds_current+1),0,0,0};p.tlv(0x10,sub,4);}
   p.send(CBQ_PORT_BASE+i,X9BB_PORT_BASE+0x2a);c.query=false;
  }
+}
+
+/* 20H392 sendProvisioningSessionToSlots_sync: UIM6e, 10 primary/11 secondary
+ * u8 physical slot. Current UIM CardStatus already maps primary USIM -> slot1,
+ * secondary USIM -> slot2 from real EF_DIR. Accept only that existing map;
+ * no APDU, physical switching, arbitrary remap or fake provisioning success. */
+static void x9ds_map(uint32_t local,uint32_t port,const uint8_t *req,unsigned n){
+ x9q_view primary=x9q_tlv(req,n,0x10),secondary=x9q_tlv(req,n,0x11);
+ unsigned error=0;
+ if(n!=15||!primary.p||primary.n!=1||!secondary.p||secondary.n!=1)error=X9Q_ARG;
+ else if(primary.p[0]!=1||secondary.p[0]!=2)error=X9Q_UNSUPPORTED;
+ else if(x9_md_sim_count()!=2||!x9ds_pair||!x9ds_mapped_apps)error=X9Q_NOT_READY;
+ x9q_packet p(req,(uint16_t)error);p.send(local,port);
+ printf("X9 DDS: UIM6e existing physical 1/2 provisioning map result %u (no SIM mutation)\n",error);
 }

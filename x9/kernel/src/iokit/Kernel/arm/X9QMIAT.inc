@@ -45,8 +45,9 @@ struct x9q_packet {
   coachz_baseband_qrtr(local,X9BB_NODE,port,p,n);
  }
 };
-struct x9q_client {uint64_t generation,next;uint32_t uim_mask;uint8_t sim_slot;bool serving,system,signal;};
+struct x9q_client {uint64_t generation,next;uint32_t uim_mask;uint8_t sim_slot;bool serving,system,signal,dsd_system;};
 static x9q_client x9q_clients[CBQ_MAX_CLIENTS];
+static void x9ds_apps(bool ready);
 static void x9ds_cards(const uint8_t *first,const uint8_t *second,bool ready);
 static bool x9ds_data_ready(unsigned slot);
 struct x9q_job {
@@ -220,6 +221,8 @@ static void x9q_uim_next(x9q_job &j){
  }
  if(x9_md_sim_count()==2)bb_dual_card_status(j.iccid_valid[0]?j.iccid[0]:nullptr,j.iccid_valid[1]?j.iccid[1]:nullptr);
  if(x9_md_sim_count()==2)x9ds_cards(j.iccid_valid[0]?j.iccid[0]:nullptr,j.iccid_valid[1]?j.iccid[1]:nullptr,j.card_ready[0]&&j.card_ready[1]);
+ if(x9_md_sim_count()==2&&j.id==0x2f)x9ds_apps(j.card_ready[0]&&j.card_ready[1]&&
+  j.cards[0]!=0xff&&j.cards[1]==0&&j.cards[4]!=0xff&&j.cards[5]==1);
  x9q_packet p(j.req);p.tlv(0x10,j.id==0x2f?j.cards:j.slots,j.id==0x2f?j.card_bytes:j.slot_bytes);
  x9q_finish(j,p,j.id==0x2f?0x32:0x48);
 }
@@ -270,7 +273,7 @@ static void x9q_nas(x9q_job &j){
  x9q_data_radio &data=x9q_data_radios[j.sim_slot];data.sampled=x9q_ms();data.rat=0;
  if(j.attached==1){
   if(x9q_registered(j.reg[2])&&j.act==11)data.rat=1u<<10; // libqmi 3GPP_5GNR
-  else if(x9q_registered(j.reg[1])&&(j.act==7||j.act==9))data.rat=1u<<5; // LTE
+  else if(x9q_registered(j.reg[1])&&(j.act==7||j.act==9||j.act==13))data.rat=1u<<5; // LTE
  }
  /* 166.txt: SysInfo never carried LTE info; log the real registration inputs
   * whenever they change (stat values / CGATT / COPS AcT only, no identities). */
@@ -280,8 +283,22 @@ static void x9q_nas(x9q_job &j){
  if(j.reg[0]<0&&j.reg[1]<0&&j.reg[2]<0){x9q_error(j,X9Q_NOT_READY);return;}
  int best=x9q_registered(j.reg[2])?j.reg[2]:x9q_registered(j.reg[1])?j.reg[1]:j.reg[0]>=0?j.reg[0]:j.reg[1];
  uint8_t radio=x9q_radio(j.act);
- if(x9q_registered(j.reg[2]))radio=12;else if(x9q_registered(j.reg[1]))radio=8;
+ if(x9q_registered(j.reg[2])&&j.act==11)radio=12;else if(x9q_registered(j.reg[1]))radio=8;
  x9q_packet p(j.req);
+ if(j.port==X9BB_PORT_BASE+0x2a){
+  // DSD available systems, not a PDP connection or a UI/SIB2 policy claim.
+  // Apple DataSystemStatus: count u8 + {technology u32, RAT u32, SOMask u64}.
+  unsigned rat=0;uint64_t so=0;
+  if(j.attached==1){
+   if(x9q_registered(j.reg[2])&&j.act==11){rat=6;so=1ull<<44;}
+   else if(x9q_registered(j.reg[1])&&(j.act==7||j.act==9||j.act==13)){
+    rat=3;if(j.act==13)so=1ull<<43; // real E-UTRA-NR dual connectivity, not SA
+   }
+  }
+  uint8_t systems[17]={};systems[0]=(uint8_t)(rat!=0);systems[5]=(uint8_t)rat;
+  for(unsigned k=0;k<8;k++)systems[9+k]=(uint8_t)(so>>(8*k));
+  p.tlv(0x10,systems,rat?17:1);x9q_finish(j,p,0x24);return;
+ }
  if(j.id==0x20){
   if(j.csq<0||j.csq>31||!radio){x9q_error(j,X9Q_NOT_READY);return;}
   uint8_t strength[2]={(uint8_t)(int8_t)(-113+2*j.csq),radio};p.tlv(1,strength,2);
@@ -414,6 +431,14 @@ static void x9q_siginfo(x9q_job &j,const char *r){
   (uint8_t)rsrp,(uint8_t)(rsrp>>8),(uint8_t)snr,(uint8_t)(snr>>8)};p.tlv(0x14,lte,sizeof(lte));}
  if(nr_ok){uint8_t nr[4]={(uint8_t)nr_rsrp,(uint8_t)(nr_rsrp>>8),(uint8_t)nr_sinr,(uint8_t)(nr_sinr>>8)};p.tlv(0x17,nr,sizeof(nr));
   if(nr_rsrq_ok){uint8_t q[2]={(uint8_t)nr_rsrq,(uint8_t)(nr_rsrq>>8)};p.tlv(0x18,q,sizeof(q));}}
+ // Foreground ECSQ queries can keep the global AT queue busy. Publish that
+ // SAME actual sample to live registered consumers on the SAME physical slot;
+ // never wait for the entire foreground queue to empty to update their bars.
+ if(!j.probe)for(unsigned i=0;i<CBQ_MAX_CLIENTS;i++){
+  const x9q_client &c=x9q_clients[i];
+  if(!c.signal||c.sim_slot!=j.sim_slot||(j.background&&CBQ_PORT_BASE+i==j.local))continue;
+  x9q_packet ind=p;ind.send(CBQ_PORT_BASE+i,X9BB_PORT_BASE+3,true,0x51);
+ }
  x9q_finish(j,p,0x51);
 }
 static void x9q_start(x9q_job &j){
@@ -428,7 +453,7 @@ static void x9q_start(x9q_job &j){
   x9q_command(j,"AT+CPIN?\r",1);
  }else if(service==3&&j.id==0x4f){
   x9q_command(j,"AT+ECSQ\r",40);
- }else if(service==3){
+ }else if(service==3||(service==0x2a&&j.id==0x24)){
   for(int &r:j.reg)r=-1;j.attached=j.act=j.csq=-1;x9q_command(j,"AT+CREG?\r",30);
  }else if(service==2&&j.id==0x2e){
   /* DMS Set Operating Mode. 164.txt: CommCenter sends ONLINE (0) right before the
@@ -608,6 +633,7 @@ static bool x9q_enqueue(uint32_t local,uint32_t port,const uint8_t *req,unsigned
 }
 #include "X9WDS.inc"
 #include "X9Messages.inc"
+static void x9q_reject(uint32_t,uint32_t,const uint8_t *,unsigned,uint16_t);
 #include "X9DSDS.inc"
 /* Requests answered without an AT job used to be silent (158.txt: 178 requests,
  * 14 logged answers). Log tags/lengths only; values only for 1-byte flags. */
@@ -628,18 +654,22 @@ static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *r
  }
  x9q_client &c=x9q_clients[slot];
  if(x9m_request(local,port,req,len))return;
- if(service==0x2a){x9ds_request(local,port,req,len);return;}
  if(service==1&&x9w_request(local,port,req,len))return;
- /* NAS/DMS BindSubscription: client-local 0=primary, 1=secondary, not DDS.
+ /* Per-client NAS/DMS/DSD binding, not a default-data mutation.
   * Jobs snapshot their route; changing binding cannot retarget old replies. */
- if((service==3&&id==0x45)||(service==2&&id==0x54)){
-  x9q_view sub=x9q_tlv(req,len,1);
-  if(!sub.p||sub.n!=1||len!=11||sub.p[0]>=x9_md_sim_count()){
+ if((service==3&&id==0x45)||(service==2&&id==0x54)||(service==0x2a&&id==0x27)){
+  // 20H392: NAS u8 0/1, DMS/DSD u32 1/2. They are NOT one wire enum.
+  x9q_view sub=x9q_tlv(req,len,1);bool nas=service==3;
+  unsigned value=sub.p&&sub.n==(nas?1u:4u)?(nas?sub.p[0]:x9q_u32(sub.p)):0xffffffffu;
+  unsigned route=nas?value:value-1;
+  if(!sub.p||sub.n!=(nas?1u:4u)||len!=(nas?11u:14u)||route>=x9_md_sim_count()){
    x9q_reject(local,port,req,len,X9Q_ARG);return;}
-  if(c.sim_slot!=sub.p[0])for(const x9q_job &j:x9q_jobs)if(j.used&&!j.probe&&j.local==local){x9q_reject(local,port,req,len,X9Q_BUSY);return;}
-  c.sim_slot=sub.p[0];c.next=0;x9q_packet p(req);p.send(local,port);
+  if(c.sim_slot!=route)for(const x9q_job &j:x9q_jobs)if(j.used&&!j.probe&&j.local==local){x9q_reject(local,port,req,len,X9Q_BUSY);return;}
+  c.sim_slot=(uint8_t)route;c.next=0;x9q_packet p(req);p.send(local,port);
   printf("X9 DUALSIM: service %u client 0x%x bound to SIM%u (queries route, not DDS)\n",service,local,c.sim_slot+1);return;
  }
+ if(service==0x2a){x9ds_request(local,port,req,len);return;}
+ if(service==0x0b&&id==0x6e){x9ds_map(local,port,req,len);return;}
  if(service==0x0b&&id==0x2e){
   x9q_view m=x9q_tlv(req,len,1);
   if(!m.p||m.n!=4||len!=14||x9q_u32(m.p)&~0x11u){x9q_reject(local,port,req,len,X9Q_UNSUPPORTED);return;}
@@ -766,18 +796,21 @@ static void x9q_poll(){
  if(!j.token)x9q_error(j,X9Q_BUSY);
 }
 static void x9q_subscriptions(){
- /* At most five background reads per ten seconds per client, one active
+ /* At most six background reads per ten seconds per client, one active
   * cycle globally. Foreground jobs always precede the next background cycle. */
  for(const x9q_job &j:x9q_jobs)if(j.used)return;
  if(!x9_md_at_online())return;uint64_t now=x9q_ms();
- for(unsigned i=0;i<CBQ_MAX_CLIENTS;i++){
-  x9q_client &c=x9q_clients[i];if(now<c.next||(!c.uim_mask&&!c.serving&&!c.system&&!c.signal))continue;
+ static unsigned cursor;
+ for(unsigned step=0;step<CBQ_MAX_CLIENTS;step++){
+  unsigned i=(cursor+step)%CBQ_MAX_CLIENTS;
+  x9q_client &c=x9q_clients[i];if(now<c.next||(!c.uim_mask&&!c.serving&&!c.system&&!c.signal&&!c.dsd_system))continue;
   c.next=now+10000;uint8_t req[7]={};unsigned local=CBQ_PORT_BASE+i;
   if(c.uim_mask&1){req[3]=0x2f;x9q_enqueue(local,X9BB_PORT_BASE+0x0b,req,7,true);}
   if(c.uim_mask&16){req[3]=0x47;x9q_enqueue(local,X9BB_PORT_BASE+0x0b,req,7,true);}
   if(c.serving){req[3]=0x24;x9q_enqueue(local,X9BB_PORT_BASE+3,req,7,true);}
   if(c.system){req[3]=0x4d;x9q_enqueue(local,X9BB_PORT_BASE+3,req,7,true);}
   if(c.signal){req[3]=0x4f;x9q_enqueue(local,X9BB_PORT_BASE+3,req,7,true);}
-  break;
+  if(c.dsd_system){req[3]=0x24;x9q_enqueue(local,X9BB_PORT_BASE+0x2a,req,7,true);}
+  cursor=(i+1)%CBQ_MAX_CLIENTS;break;
  }
 }

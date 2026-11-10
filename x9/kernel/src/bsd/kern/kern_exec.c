@@ -7488,7 +7488,7 @@ x9_siri_write(vnode_t vp, off_t off, uint8_t value, vfs_context_t ctx)
  * x9_ccgate=0 off, 1 (default) NR plus a dual-SIM gate matching x9_dual_sim,
  * 2 restore the original bytes and hash. 174.txt proved that disabling the
  * bridge alone left the previously installed dual-SIM personality enabled.
- * Accept three complete page states, never an arbitrary mixture of edits.
+ * Accept four complete page states, never an arbitrary mixture of edits.
  */
 #define X9_CCGATE_FILE "/private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64.31"
 #define X9_CCGATE_SIZE 103677952LL
@@ -7506,6 +7506,12 @@ static const struct x9_ccgate_edit {
 	{"nr gate", 57594288, 8,
 	 {0x29,0x00,0x80,0x52,0x69,0x82,0x04,0x39},
 	 {0x29,0x20,0x80,0x52,0x69,0x42,0x02,0x79}},
+	{"DDS QMI driver gate (D22 w21=1)", 57593856, 4,
+	 {0x6a,0x92,0x04,0x39},
+	 {0x75,0x92,0x04,0x39}},
+	{"DDS controller and UIM mapping gate", 57594140, 8,
+	 {0xe0,0x03,0x1c,0xaa,0x00,0x6b,0xff,0x97},
+	 {0x20,0x00,0x80,0x52,0x60,0xe2,0x07,0x39}},
 	{"page 3515 hash", 103577665, 32,
 	 {0xe3,0x61,0x65,0x0f,0x48,0x44,0xb1,0xbd,0xd6,0x93,0x40,0xb1,0x1b,0xa8,0x36,0xca,
 	  0x79,0x07,0x45,0xe2,0xba,0x63,0xa6,0xb0,0x95,0xe7,0x5d,0xe3,0x31,0x52,0x79,0x08},
@@ -7521,16 +7527,28 @@ static const uint8_t x9_ccgate_nr_hash[32] = {
 	0xd2,0xda,0x33,0x93,0xd1,0xe5,0xda,0x0c,0x00,0xc9,0xb9,0x69,0x31,0x9d,0x73,0x47
 };
 
+static const uint8_t x9_ccgate_dds_hash[32] = {
+	0x98,0xa5,0xb3,0x35,0x97,0xb9,0xc1,0xcf,0xb9,0x02,0x07,0xe0,0x7d,0x80,0xe7,0x6c,
+	0x40,0x75,0x30,0x86,0x4a,0x49,0xc9,0x39,0x77,0xa3,0x96,0x05,0x78,0xf5,0x84,0x6a
+};
+
 static const uint8_t *
 x9_ccgate_value(int i, int state)
 {
-	/* 0 = original; 1 = NR/single-SIM; 2 = NR/dual-SIM. */
+	/* 0 original; 1 single+NR; 2 old dual+NR; 3 dual+NR+DDS.
+	 * D22 case sets callee-saved w21=1 at 0x1f036cc18, preserved through
+	 * the call at cf3c to d000. Use it ONLY for +124; +125/+126 stay intact.
+	 * +1f8 enables UIM slot mapping; +124 selects the standard QMI DDS driver;
+	 * +171 supports DataSubscriptionController. Keep old installed state2. */
 	const struct x9_ccgate_edit *e = &x9_ccgate_edits[i];
-	if (state == 0 || (state == 1 && i == 0)) {
+	if (state == 0 || (state == 1 && i == 0) || (state < 3 && (i == 2 || i == 3))) {
 		return e->orig;
 	}
-	if (state == 1 && i == 2) {
+	if (state == 1 && i == 4) {
 		return x9_ccgate_nr_hash;
+	}
+	if (state == 3 && i == 4) {
+		return x9_ccgate_dds_hash;
 	}
 	return e->patched;
 }
@@ -7560,14 +7578,14 @@ sweet_x9_ccgate(void)
 	extern boolean_t sweet_x9_ufs_root_writable(void);
 	const int count = (int)(sizeof(x9_ccgate_edits) / sizeof(x9_ccgate_edits[0]));
 	const int mode = sweet_x9_arg("x9_ccgate", 1);
-	const int target = mode == 2 ? 0 : sweet_x9_arg("x9_dual_sim", 0) == 1 ? 2 : 1;
-	static const char *const states[] = {"original", "single-sim + nr", "dual-sim + nr"};
+	const int target = mode == 2 ? 0 : sweet_x9_arg("x9_dual_sim", 0) == 1 ? 3 : 1;
+	static const char *const states[] = {"original", "single-sim + nr", "dual-sim + nr", "dual-sim + nr + dds"};
 	vfs_context_t ctx = vfs_context_kernel();
 	struct vnode_attr va;
 	vnode_t vp = NULLVP;
 	uint8_t buf[32], hdr[16];
 	int error, i, state, source = -1;
-	unsigned matches = 7;
+	unsigned matches = 15;
 
 	if (mode != 1 && mode != 2) {
 		return 0;
@@ -7605,7 +7623,7 @@ sweet_x9_ccgate(void)
 			vnode_put(vp);
 			return error;
 		}
-		for (state = 0; state < 3; state++) {
+		for (state = 0; state < 4; state++) {
 			if (memcmp(buf, x9_ccgate_value(i, state), e->len) != 0) {
 				matches &= ~(1u << state);
 			}
@@ -7616,7 +7634,7 @@ sweet_x9_ccgate(void)
 		vnode_put(vp);
 		return EINVAL;
 	}
-	for (state = 0; state < 3; state++) {
+	for (state = 0; state < 4; state++) {
 		if (matches & (1u << state)) {
 			source = state;
 		}
