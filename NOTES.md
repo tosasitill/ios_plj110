@@ -217,7 +217,7 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **ABI/iOS边界**:probe v1仍80B,末尾4个reserved字现在为入口AP EN、最后DONE、UNIVPLL CON1/FENC;请求仍要求零。追加stage9=clock,旧stage0..8不变;flag16仅表示clock voter/FENC检查通过。工具/内核打印原始clock证据,mode1启动/status零硬件、mode3显式root probe、mode2安装语义与iOS双流桥保持。supported_mask/READY仍0,未注册capture,不加载厂商preview/stream-on,**仍不能拍摄**。
 - **编译里程碑**:camera桥/工具交叉编译签名exit0(117040B);最终camera单对象编译exit0,29个既有C声明/头警告、无编译错误。初次临时编译wrapper错把Builder返回True当失败,编译器本身已成功;已修正wrapper判定并对最终源码单对象编译。没有运行测试套件。私有 `.local/x9/work/camera-clock-20261110/{clock-source.txt,user-build.log,object-build.log,object-build-final.log,object-build-final.exit,local-config.json,boot-config.json,gh-runs.json}`;gh列表为空,无CI run。
 - **未完成/下一步**:共享SID3 DOVDD/SID6 AFVDD仍只读、WL GPIO203仍需已output-high,目标reset output-low/AP route仍需已配置;冷LK仍可能在这些前置条件被挡。厂商VS voter SID3 0x178a mask4在power-on前SET+1/关电后CLR+2,还调用cam-pmic wake,需要先追provider/共享ownership而非直接照抄。之后补这些供电/AP timing provider,再用户手动一次日志确认主ID→还原、前ID→还原,最后SENINF→RAW DMA/SMMU完整帧和iOS预览/落盘。没有本轮上机ID/实帧。
-- **构建待办**:本里程碑提交后冻结本树,沿用CAMERA-2完整605B配置(x9_camera=3)/32GiB manifest/插件275做唯一名字完整构建,无需mailbox。结果与代码SHA在完成后补本节,不把主目录音频WIP冒充已包含。
+- **完整构建结果**:固定代码 **43fc181** 构建 `x9-camera-clock3-all117` exit0、58/58 overlay+6prebuilt、link/strip/shim/boot通过;构建器报告boot.img **13139968B**、camera桥117040B。沿用CAMERA-2完整605B配置(x9_camera=3)/32GiB manifest/插件275,无需mailbox;未夹带主目录音频WIP。私有build.stdout.log/build.exit/inputs.json记录原始结果,没有成功后二次解包/hash/反汇编/比较。完整输出原样复制至主checkout `x9/out/x9-camera-clock3-all117/`,未上机。用户随后明确要求继续完成共享供电/AP timing/SENINF/RAW DMA,续做在本独立树进行,不得把后续代码冒充已包含在43fc181镜像。
 
 ## 相机活动交接(CAMERA-2,2026-11-10): 有条件AP-I2C/WL28681C芯片探测;采集/冷启动资源仍缺
 
