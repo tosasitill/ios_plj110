@@ -357,6 +357,20 @@ cameractl status                 # 只读缓存，不重新触碰硬件
 
 上游 `iommu_attach_device_ssid → arm_smmu_s1_set_dev_pasid` 需要已存在的 default domain、STE/CD、命令队列及 IOVA allocator；`mm_smmu_cam` 节点没有单独的 SSID range，因此不能猜一个私有 SSID。secure `PM_GET` 只提供电源引用，`SEC_INIT`、`AID_SID_MAP`、HYP debug SMC 不提供相机 domain 租约。本地 UniXNU ArmSmmu4K 是 SMMUv2/4KiB，不能代替 MT6993 共享 v3/16KiB 后端。
 
+### 接通正常相机 DMA 要实现 stage1，不是调用 protected-memory MAP
+
+厂商正常路径是 `arm_smmu_attach_dev → arm_smmu_domain_finalise → ARM_64_LPAE_S1`，分配 ASID、建立 CD/STE 并同步命令队列；之后 `mtk_smmu_map_pages` 调用该 domain 的 `io_pgtable_ops.map_pages` 建立 IOVA→PA。仅有电源引用、可用 IOVA 范围或空闲控制寄存器，都没有提供这套主机映射服务。
+
+`pkvm_smmu_host.c::smmu_host_hvc` 注册的 secure MAP/UNMAP 是另一条链：
+
+- `mtk_tmem_interop.c::pkvm_smmu_mapping` 用固定 SMC `0xBB00FFCB/0xBB00FFCC` 查询返回在 **a1** 的动态 HVC handle，再通过 `pkvm_el2_mod_call` 调用。固定 SMC 返回不等于已经 map，也不能把源码中的注册顺序当作 HVC 编号。
+- `mtk_smmu_secure_v2` 接收 PFN 列表、属性与条目数，调用 `host_donate_hyp`，把页从 Linux VM0 隔离并让 protected VM1 访问；没有相机 IOVA/SID/ASID 输入。**它不是正常 SID80 的 stage1 映射入口，不能拿普通 RAW 缓冲区尝试这条 donation 路径。**
+- 当该 HYP 模块确实运行时，`check_ste_update_content` 将 guest S1 字段与 host S2 字段合成；`write_guest_strtab_base_reg` 对 guest STRTAB base 作 write-once 保护，并把硬件 base 指向 host 表。此时寄存器所见 base 不一定是可由 XNU直接更新的 guest 表。当前 XNU 启动日志没有证明该模块运行，不能反过来把 Android 编译配置当作当前状态。
+
+captured DT 区分 normal camera **SID80**、protected camera **SID89**、display **SID90**（其 `mtk,smmu-dma-mode="bypass"` 是配置描述，不是本轮状态），三者都引用 `mm_common`。不能用 SID89 授权替代 SID80，或只建一张 SID80 表而破坏显示与其它共享 stream。LK 的 `platform_mtksmmu_mpool` reservation 也不是相机 buffer/IOVA 分配权。
+
+下一具体工作是落实 **MM-SMMUv3 主机初始化/委派契约及正常 SID80 attach**：明确当前 NS/HYP 归属、合法的 STRTAB/CMDQ owner、CD/ASID/IOVA 分配与显示保留方式，再实现 map/unmap、TLBI/cache 和真实 CAMSV producer。当前仓库只有受供电保护的 MM-SMMUv3 快照，没有这套 mapper，也没有 `x9_camera_register_platform` 的调用者。该缺口不能由新的 completion adapter 或 diagnostic 镜像补齐。
+
 ## 硬件后端接入契约
 
 `kernel/src/bsd/dev/x9_camera.h` 定义 `x9_camera_platform`：
