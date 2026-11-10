@@ -35,6 +35,7 @@ mcudl_discard(struct x9_gps_mcudl_stream *s, unsigned n)
 static void
 mcudl_clear_partial(struct x9_gps_mcudl_stream *s)
 {
+ s->discarded_bytes += s->used;
  s->used = s->sentence_used = 0;
  s->sentence_time = s->fragment_time = 0;
  s->frame_application_generation = s->sentence_application_generation = 0;
@@ -95,20 +96,23 @@ mcudl_parse(struct x9_gps_mcudl_stream *s, uint64_t host_time)
  while (s->used) {
   if (s->frame[0] != 0xa5) {
    s->bad_frames++; s->sentence_used = 0;
-   x9_gps_mnl_discard_partial(&s->mnl); mcudl_discard(s, 1); continue;
+   x9_gps_mnl_discard_partial(&s->mnl);
+   s->discarded_bytes++; mcudl_discard(s, 1); continue;
   }
   if (s->used < 6) break;
   unsigned payload = ((unsigned)s->frame[3] << 8) | s->frame[4];
   uint8_t checksum = (uint8_t)(s->frame[1] + s->frame[2] + s->frame[3] + s->frame[4]);
   if (checksum != s->frame[5] || payload > X9_MCUDL_PAYLOAD_MAX) {
    s->bad_frames++; s->sentence_used = 0;
-   x9_gps_mnl_discard_partial(&s->mnl); mcudl_discard(s, 1); continue;
+   x9_gps_mnl_discard_partial(&s->mnl);
+   s->discarded_bytes++; mcudl_discard(s, 1); continue;
   }
   unsigned frame_bytes = 6 + payload + 1;
   if (s->used < frame_bytes) break;
   if (s->frame[frame_bytes-1] != 0xa3) {
    s->bad_frames++; s->sentence_used = 0;
-   x9_gps_mnl_discard_partial(&s->mnl); mcudl_discard(s, 1); continue;
+   x9_gps_mnl_discard_partial(&s->mnl);
+   s->discarded_bytes++; mcudl_discard(s, 1); continue;
   }
   /* Application ACKs may change tracking without changing the physical
    * owner. Hardware faults still revoke controls within this receive. */
@@ -117,11 +121,17 @@ mcudl_parse(struct x9_gps_mcudl_stream *s, uint64_t host_time)
    mcudl_clear_partial(s); return status.fault ? ENXIO : ESTALE;
   }
   s->frames++;
+  /* Actual v062 parser updates proc bytes/pkt count BEFORE dispatch. An
+   * unsupported application handler does not turn a valid envelope into
+   * parse-drop bytes; retire that frame before clearing remaining partials. */
+  s->processed_bytes += frame_bytes;
   if (s->frame[2] == X9_MCUDL_NMEA) {
    if (status.ready && status.tracking && s->frame_application_generation &&
        status.generation == s->frame_application_generation) {
     int error = mcudl_nmea(s, s->frame+6, payload, host_time);
-    if (error) { mcudl_clear_partial(s); return error; }
+    if (error) {
+     mcudl_discard(s, frame_bytes); mcudl_clear_partial(s); return error;
+    }
    } else {
     s->sentence_used = 0; s->sentence_time = 0;
     s->sentence_application_generation = 0;
@@ -145,10 +155,13 @@ mcudl_parse(struct x9_gps_mcudl_stream *s, uint64_t host_time)
    else if (s->control)
     error = s->control(s->context, s->frame[2], s->frame+6, payload, host_time);
    else error = ENOTSUP;
-   if (error) { mcudl_clear_partial(s); return error; }
+   if (error) {
+    mcudl_discard(s, frame_bytes); mcudl_clear_partial(s); return error;
+   }
    x9_gps_copy_status(&status);
    if (status.hardware_generation != s->generation || status.fault) {
-    mcudl_clear_partial(s); return status.fault ? ENXIO : ESTALE;
+    mcudl_discard(s, frame_bytes); mcudl_clear_partial(s);
+    return status.fault ? ENXIO : ESTALE;
    }
   }
   mcudl_discard(s, frame_bytes);
@@ -199,7 +212,9 @@ x9_gps_mcudl_receive_epoch(struct x9_gps_mcudl_stream *s, const void *bytes,
    s->frame_application_generation = application_generation;
   } else if(s->frame_application_generation != application_generation)
    s->frame_application_generation = 0; /* old/mixed descriptor bytes */
-  if (s->used >= sizeof(s->frame)) { mcudl_clear_partial(s); return EOVERFLOW; }
+  if (s->used >= sizeof(s->frame) || s->received_bytes==UINT64_MAX) {
+   mcudl_clear_partial(s); return EOVERFLOW;
+  }
   s->frame[s->used++] = p[i]; s->received_bytes++;
   int error = mcudl_parse(s, s->fragment_time);
   if (error) return error;

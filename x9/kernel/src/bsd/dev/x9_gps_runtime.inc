@@ -9,6 +9,7 @@
 #include <mach/mach_types.h>
 #include "x9_ufs/sha256.h" /* existing linked SHA256, no duplicate crypto */
 #include "x9_gps_native_power.h"
+#include "x9_gps_flow.h"
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 extern kern_return_t thread_terminate(thread_t);
 static LCK_MTX_DECLARE(gps_runtime_lock, &gps_group);
@@ -160,6 +161,7 @@ static struct {
  thread_t worker;
  unsigned in_callback, out_head[2], out_count[2];
  struct gps_runtime_packet outbox[2][2];
+ struct gps_native_flow flow;
 } gps_rt;
 static void gps_runtime_pause(unsigned us)
 {
@@ -455,9 +457,14 @@ static int gps_runtime_owned(void *ctx, uint64_t generation, int reset)
  if ((hif_read(gps_rt.ccif,4)|hif_read(gps_rt.ccif,0x10))&~0xffu) return EIO;
  return 0;
 }
+#include "x9_gps_flow.inc"
 static int gps_runtime_control(void *ctx,unsigned ch,uint8_t type,
     const uint8_t *p,unsigned n,uint64_t now)
 {
+ if(gps_rt.ops.version==5 && ch==X9_GPS_HIF_NORMAL &&
+     (type==0x35 || type==0x36)) {
+  int e=gps_flow_control(type,p,n);gps_flow_journal(e);return e;
+ }
  (void)ctx; gps_rt.in_callback=1;
  int e=gps_rt.ops.control(gps_rt.ops.context,ch,type,p,n,now);
  gps_rt.in_callback=0; return e;
@@ -523,6 +530,9 @@ int x9_gps_runtime_queue(uint64_t generation,unsigned ch,const void *p,unsigned 
  if (!p || !n || n>4096 || ch<1 || ch>2) return EINVAL;
  if (current_thread()!=gps_rt.worker || !gps_rt.in_callback) return EPERM;
  if (generation!=gps_rt.generation || gps_rt.hif.fault) return ESTALE;
+ if(gps_rt.ops.version==5) {
+  int e=gps_flow_queue(ch-1,p,n,0);gps_flow_journal(0);return e;
+ }
  unsigned c=ch-1; if (gps_rt.out_count[c]==2) return ENOBUFS;
  struct gps_runtime_packet *packet=&gps_rt.outbox[c][
      (gps_rt.out_head[c]+gps_rt.out_count[c])%2];
@@ -533,6 +543,9 @@ static int gps_runtime_drain(void)
 {
  int ack=x9_gps_hif_management_result(&gps_rt.hif,1);
  if (ack && ack!=EAGAIN) return ack;
+ if(gps_rt.ops.version==5) {
+  int e=gps_flow_drain(ack,mach_absolute_time());gps_flow_journal(e);return e;
+ }
  for (unsigned c=0;c<2;c++) {
   if (!gps_rt.out_count[c]) continue;
   struct gps_runtime_packet *p=&gps_rt.outbox[c][gps_rt.out_head[c]];
@@ -598,6 +611,7 @@ static int gps_runtime_bringup(void)
  /* Prepare host RAM BEFORE releasing reset. Never clear MCU-owned RAM. */
  MCU_TRY(x9_gps_hif_prepare(&gps_rt.hif,&ops,gps_rt.ap,gps_rt.mcu,
      gps_rt.ccif,gps_rt.generation));
+ if(gps_rt.ops.version==5)MCU_TRY(gps_flow_init());
  gps_runtime_stage(X9_GPS_PHYSICAL_PLL,0); MCU_TRY(gps_mcu_pll());
  gps_runtime_stage(X9_GPS_PHYSICAL_IDLE,0); MCU_TRY(gps_mcu_boot());
  gps_runtime_stage(X9_GPS_PHYSICAL_HIF,0);
@@ -627,6 +641,7 @@ static void gps_runtime_worker(void *unused, wait_result_t result)
  gps_rt.ops=gps_rt.provider;
  lck_mtx_unlock(&gps_runtime_lock);
  int e=gps_runtime_bringup();
+ if(gps_rt.ops.version==5)gps_flow_journal(e);
  /* Never auto-retry, clear descriptors, release power, or unmap uncertain
   * DMA. Even a pre-HIF partial power failure retains the supplier's lease. */
  gps_runtime_stage(X9_GPS_PHYSICAL_QUARANTINE,e);

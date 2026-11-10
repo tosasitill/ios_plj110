@@ -16,6 +16,9 @@ struct x9_gps_mcudl_stream {
  uint64_t frame_application_generation, sentence_application_generation;
  uint64_t mnl_application_generation;
  uint64_t received_bytes, frames, bad_frames, non_nmea, sentences, bad_sentences;
+ /* Raw arrival above includes partial frames. Native host status instead
+  * acknowledges only bytes actually consumed or retired by the parser. */
+ uint64_t processed_bytes, discarded_bytes;
  unsigned used, sentence_used;
  uint8_t frame[X9_MCUDL_FRAME_MAX], sentence[X9_GPS_NMEA_MAX];
  /* Control/flow-control packets must be consumed by the physical transport.

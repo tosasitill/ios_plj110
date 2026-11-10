@@ -67,6 +67,13 @@ struct x9_gps_status {
  uint32_t emi_cpu_intersections;
  uint64_t emi_cpu_checks;
  int32_t emi_cpu_errno;
+ /* Native slot/byte-flow journal, never MNL/PDS readiness. Published is
+  * successful HIF POST; host-ACK completion requires real MCU TX done. */
+ uint32_t flow_initialized, flow_ack_queued, flow_ack_inflight;
+ uint32_t flow_queued[2], flow_queued_bytes[2];
+ uint64_t flow_published, flow_remote_received, flow_processed, flow_discarded;
+ uint64_t flow_ack_total, flow_ack_completions, flow_reset_serial, flow_completed_reset;
+ int32_t flow_errno;
 };
 struct x9_gps_nmea {
  uint64_t sequence, generation, host_time;

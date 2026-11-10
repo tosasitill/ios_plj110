@@ -46,7 +46,10 @@ struct x9_gps_connv2_ops {
   * Must not release reset, reenter HIF, or relinquish the resource lease. */
  int (*provision)(void *, const struct x9_gps_handoff *, uint64_t generation,
      uint64_t lease);
- /* Complete MCUSYS NV/sync/FSM, slot/flow and MNL handlers. Stage bounded
+ /* Complete MCUSYS NV/sync/FSM and MNL handlers. v1..v4 also own slot/flow;
+  * v5's native worker consumes NORMAL35/36 and owns NORMAL host-status7e.
+  * URGENT35/36 still reach this real handler (no invented urgent ACK).
+  * Stage bounded
   * outboxes only; callbacks must not reenter HIF or release/reset resources.
   * Unknown data must return ENOTSUP, not be silently ACKed/discarded. */
  int (*control)(void *, unsigned, uint8_t, const uint8_t *, unsigned, uint64_t);
@@ -146,10 +149,15 @@ extern "C" {
  * supplier is installed: without real connv2 this remains WAIT_CONNV2. */
 int x9_gps_register_connv2(const struct x9_gps_connv2_ops *);
 /* Callback-only bounded outbox. Called on the sole physical worker, never
- * from QRTR/set_state/IRQ or a separate supplier thread. NORMAL/URGENT raw
- * MCUDL bytes must already carry a real slot/flow reservation; this is not
- * a slot allocator. Copies at most4096B, two entries/channel. Worker sends
- * only after fresh management1 ACK, retains busy entries and their lease.
+ * from QRTR/set_state/IRQ or a separate supplier thread. v1..v4 retain raw
+ * at-most4096B/two entries/channel and require supplier slot/flow admission.
+ * Native v5 instead validates/reserves ONE complete MCUDL xlink envelope,
+ * payload<=1800, seq00 NORMAL/20 URGENT (agent a3 only). Its real local
+ * slots have64 entries/10KiB per channel, byte-credit/window accounting,
+ * near-full admission and critical reserves. No provider-made7e or76.
+ * Worker sends only after fresh management1 ACK, retains busy entries and
+ * their lease. Native stats ACKs commit only at real HIF TX completion;
+ * a type36 request never resets parser/credit counters or live DMA.
  * generation is hardware_generation; application reservations/ACK epochs
  * remain the protocol handler's responsibility, not a transport rebind.
  * Enqueue success is NOT TX completion or an application ACK. */
