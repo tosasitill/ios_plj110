@@ -1,47 +1,101 @@
-/* Bounded named-node property lookup for device handoff verification. */
+/* Complete-tree lookup. An invalid tree or missing node is not absence. */
 #include "fdt.h"
-#include <stddef.h>
 
-static uint32_t be(const uint8_t *p) {return (uint32_t)p[0]<<24|(uint32_t)p[1]<<16|(uint32_t)p[2]<<8|p[3];}
-static int eq(const char *a,const char *b) {while(*a&&*a==*b){a++;b++;}return *a==*b;}
-int fdt_property_checked(uintptr_t address,const char *wanted_path,const char *wanted_key,const uint8_t **value,size_t *length)
+static uint32_t be(const uint8_t *p)
+{return (uint32_t)p[0]<<24|(uint32_t)p[1]<<16|(uint32_t)p[2]<<8|p[3];}
+static int eq(const char *a,const char *b)
+{while(*a&&*a==*b){a++;b++;}return *a==*b;}
+static int overlap(size_t a,size_t n,size_t b,size_t m)
+{return n&&m&&a<b+m&&b<a+n;}
+
+int fdt_property_lookup(uintptr_t address,const char *wanted_path,const char *wanted_key,
+                       const uint8_t **value,size_t *length)
 {
- if(!address||(address&3)||!wanted_path||!wanted_key||!value||!length)return -1;
- const uint8_t *b=(const uint8_t *)address;if(be(b)!=0xd00dfeed)return -1;
- uint32_t total=be(b+4),start=be(b+8),strings=be(b+12),ss=be(b+32),sz=be(b+36);
- if(total<40||total>0x400000||start>total||sz>total-start||strings>total||ss>total-strings)return -1;
- size_t at=start,end=(size_t)start+sz,used=0,parents[32];unsigned depth=0,matches=0;
+ if(value)*value=0;
+ if(length)*length=0;
+ if(!address||(address&7)||!wanted_path||!wanted_key||!*wanted_key||!value||!length)
+  return FDT_PROPERTY_INVALID;
+ const uint8_t *b=(const uint8_t *)address;
+ if(be(b)!=0xd00dfeed)return FDT_PROPERTY_INVALID;
+ uint32_t total=be(b+4),start=be(b+8),strings=be(b+12),reserve=be(b+16);
+ uint32_t version=be(b+20),last=be(b+24),ss=be(b+32),sz=be(b+36);
+ if(total<40||total>0x400000||version!=17||last>17||last>version||
+    start<40||(start&3)||start>total||sz>total-start||(sz&3)||
+    strings<40||strings>total||ss>total-strings||
+    reserve<40||(reserve&7)||reserve>total||overlap(start,sz,strings,ss))
+  return FDT_PROPERTY_INVALID;
+ /* The reservation block must terminate within the declared blob without
+  * reading structure/string bytes as a fake zero terminator. */
+ size_t r=reserve;
+ for(;;) {
+  if(total-r<16||overlap(r,16,start,sz)||overlap(r,16,strings,ss))return FDT_PROPERTY_INVALID;
+  unsigned nonzero=0;
+  for(unsigned i=0;i<16;i++)nonzero|=b[r+i];
+  r+=16;
+  if(!nonzero)break;
+ }
+ size_t at=start,end=(size_t)start+sz,used=0,parents[32];
+ unsigned depth=0,nodes=0,targets=0,matches=0,roots=0;
+ unsigned child[32]={0};
  char path[256]={0};const uint8_t *found=0;size_t found_size=0;
  while(end-at>=4) {
   unsigned t=be(b+at);at+=4;
   if(t==1) {
-   if(depth==32)return -1;
-   size_t first=at;while(at<end&&b[at])at++;if(at==end)return -1;
-   parents[depth]=used;
+   if(depth==32||++nodes>8192)return FDT_PROPERTY_INVALID;
+   size_t first=at;
+   while(at<end&&b[at]) {if(b[at]=='/')return FDT_PROPERTY_INVALID;at++;}
+   if(at==end)return FDT_PROPERTY_INVALID;
+   parents[depth]=used;child[depth]=0;
    if(depth) {
-    size_t n=at-first;if(used+1+n>=sizeof(path))return -1;
-    path[used++]='/';for(size_t i=0;i<n;i++)path[used++]=(char)b[first+i];path[used]=0;
-   } else if(at!=first)return -1;
+    child[depth-1]=1;
+    size_t n=at-first;
+    if(!n||used+1+n>=sizeof(path))return FDT_PROPERTY_INVALID;
+    path[used++]='/';
+    for(size_t i=0;i<n;i++)path[used++]=(char)b[first+i];
+    path[used]=0;
+   } else if(at!=first||++roots!=1)return FDT_PROPERTY_INVALID;
+   if(eq(path,wanted_path)&&++targets>1)return FDT_PROPERTY_INVALID;
    depth++;at=(at+4)&~(size_t)3;
   } else if(t==2) {
-   if(!depth)return -1;used=parents[--depth];path[used]=0;
+   if(!depth)return FDT_PROPERTY_INVALID;
+   used=parents[--depth];path[used]=0;
   } else if(t==3) {
-   if(!depth||end-at<8)return -1;
+   if(!depth||child[depth-1]||end-at<8)return FDT_PROPERTY_INVALID;
    uint32_t n=be(b+at),offset=be(b+at+4);at+=8;
-   if(n>end-at||offset>=ss)return -1;
+   if(n>end-at||offset>=ss)return FDT_PROPERTY_INVALID;
    const char *key=(const char *)b+strings+offset;
-   size_t limit=ss-offset,i=0;while(i<limit&&key[i])i++;if(i==limit)return -1;
-   if(eq(path,wanted_path)&&eq(key,wanted_key)) {found=b+at;found_size=n;matches++;}
+   size_t limit=ss-offset,i=0;
+   while(i<limit&&key[i])i++;
+   if(!i||i==limit)return FDT_PROPERTY_INVALID;
+   if(eq(path,wanted_path)&&eq(key,wanted_key)) {
+    if(++matches!=1)return FDT_PROPERTY_INVALID;
+    found=b+at;found_size=n;
+   }
    at=(at+n+3)&~(size_t)3;
   } else if(t==4)continue;
-  else if(t==9&&!depth) {
-   if(matches!=1)return matches?-1:0;*value=found;*length=found_size;return 1;
-  } else return -1;
-  if(at>end)return -1;
+  else if(t==9&&!depth&&roots==1) {
+   /* No hidden second tree/property after END. Only zero padding or NOP. */
+   while(end-at>=4) {
+    unsigned tail=be(b+at);at+=4;
+    if(tail&&tail!=4)return FDT_PROPERTY_INVALID;
+   }
+   if(at!=end)return FDT_PROPERTY_INVALID;
+   if(!targets)return FDT_PROPERTY_NODE_MISSING;
+   if(!matches)return FDT_PROPERTY_ABSENT;
+   *value=found;*length=found_size;return FDT_PROPERTY_PRESENT;
+  } else return FDT_PROPERTY_INVALID;
+  if(at>end)return FDT_PROPERTY_INVALID;
  }
- return -1;
+ return FDT_PROPERTY_INVALID;
 }
 
-/* Preserve the original boolean API for existing handoff consumers. */
+/* Preserve the concurrent ADSP consumer's checked API using the same strict
+ * parser. No second parser may accidentally treat a missing node as absence. */
+int fdt_property_checked(uintptr_t address,const char *path,const char *key,const uint8_t **value,size_t *length)
+{
+ int r=fdt_property_lookup(address,path,key,value,length);
+ return r<0?-1:r;
+}
+/* Existing positive-only callers retain their boolean contract. */
 int fdt_property(uintptr_t address,const char *path,const char *key,const uint8_t **value,size_t *length)
-{return fdt_property_checked(address,path,key,value,length)==1;}
+{return fdt_property_lookup(address,path,key,value,length)==FDT_PROPERTY_PRESENT;}

@@ -350,6 +350,7 @@ static int restore(struct power_journal *j)
     /* Detect a changed SCP controller before turning off either end or
      * releasing GPIO9/XO/AFE/transport parents. Never restore a foreign mode. */
     if(j->bus_owned){int guard=bank_idle(j);if(!guard)guard=bus_verify(j);if(guard)return guard;}
+    if(j->cal){int guard=afe_dram_guard(j->cal);if(guard)return guard;}
     /* RX/SRC off, then codec TX/SRC off while PAD_CLK is still held. Only
      * after both ends are quiescent restore digital clocks, then analog. */
     int e=x9_mic_mt6681_digital_restore_guard(&j->codec);if(e)return e;
@@ -540,7 +541,7 @@ static int board_finish(struct power_journal *j,int e)
 static int board_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_status *s,
     struct x9_mic_afe_status *a,struct x9_mic_analog_status *analog,
     struct x9_mic_digital_status *digital,struct x9_mic_dma_status *dma,
-    volatile uint32_t *mapped_afe,bool hold)
+    volatile uint32_t *mapped_afe,bool hold,uint32_t memory_type)
 {
     if(s->flags&X9_MIC_BOARD_ATTEMPTED)return EALREADY;
     uint64_t ticket=0;
@@ -615,32 +616,39 @@ static int board_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_stat
     }
     if(digital)digital->last_errno=e;
     s->last_errno=e;if(e && !h->last_errno)h->last_errno=e;
+    if(hold && !e && memory_type==X9_MIC_DMA_MEMORY_DRAM) {
+        e=afe_dram_take(j->cal);
+        if(!e)afe_reg_snapshot(j->cal);
+        if(e){s->last_errno=e;a->last_errno=e;dma->last_register=0x60;
+            dma->last_errno=e;if(!h->last_errno)h->last_errno=e;}
+    }
     if(hold && !e){j->capture_held=true;return 0;} /* caller owns real RX/TX until DMA stop/drain */
     return board_finish(j,e);
 }
 
 int x9_mic_plj110_power_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_status *s)
-{return board_probe(h,s,NULL,NULL,NULL,NULL,NULL,false);}
+{return board_probe(h,s,NULL,NULL,NULL,NULL,NULL,false,0);}
 int x9_mic_plj110_calibrate(struct x9_mic_hardware_status *h,struct x9_mic_board_status *s,
     struct x9_mic_afe_status *a)
-{return board_probe(h,s,a,NULL,NULL,NULL,NULL,false);}
+{return board_probe(h,s,a,NULL,NULL,NULL,NULL,false,0);}
 int x9_mic_plj110_analog_l(struct x9_mic_hardware_status *h,struct x9_mic_board_status *s,
     struct x9_mic_afe_status *a,struct x9_mic_analog_status *analog)
-{return board_probe(h,s,a,analog,NULL,NULL,NULL,false);}
+{return board_probe(h,s,a,analog,NULL,NULL,NULL,false,0);}
 int x9_mic_plj110_digital_l(struct x9_mic_hardware_status *h,struct x9_mic_board_status *s,
     struct x9_mic_afe_status *a,struct x9_mic_analog_status *analog,struct x9_mic_digital_status *digital,
     struct x9_mic_dma_status *dma)
-{return board_probe(h,s,a,analog,digital,dma,NULL,false);}
+{return board_probe(h,s,a,analog,digital,dma,NULL,false,0);}
 
 int x9_mic_plj110_capture_prepare(volatile uint32_t *afe,
     struct x9_mic_hardware_status *h,struct x9_mic_board_status *s,
     struct x9_mic_afe_status *a,struct x9_mic_analog_status *analog,
-    struct x9_mic_digital_status *digital,struct x9_mic_dma_status *dma)
+    struct x9_mic_digital_status *digital,struct x9_mic_dma_status *dma,uint32_t memory_type)
 {
     if(!afe || !h || !s || !a || !analog || !digital || !dma)return EINVAL;
+    if(memory_type!=X9_MIC_DMA_MEMORY_SRAM && memory_type!=X9_MIC_DMA_MEMORY_DRAM)return EINVAL;
     /* Do not adopt/close a prior diagnostic's transaction on rejection. */
     if(s->flags&X9_MIC_BOARD_ATTEMPTED)return EALREADY;
-    return board_probe(h,s,a,analog,digital,dma,afe,true);
+    return board_probe(h,s,a,analog,digital,dma,afe,true,memory_type);
 }
 int x9_mic_plj110_capture_unprepare(void)
 {

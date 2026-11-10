@@ -12,6 +12,7 @@ struct afe_journal {
     uint32_t votes, borrowed, mux_owned, pin_owned;
     uint32_t saved[5];
     bool snapshot, engine_owned, sram, stuck, pins_saved;
+    bool dram_owned, dram_uncertain;
 };
 static struct afe_journal calibration;
 static const unsigned afe_regs[]={0x10,0,0x60,0x4380,0x14};
@@ -92,6 +93,43 @@ static int afe_access(struct afe_journal *a)
         a->stuck=true;return EBUSY;
     }
     return 0;
+}
+/* OPPO mt6993_afe_dram_request/release: AFE_SPM_CONTROL_REQ APSRC bit3,
+ * DDREN_REQ bit6 and DDREN_URG bit7. These are power requests, NOT a DMA
+ * mapping, completion counter or write-path drain acknowledgement. Never
+ * borrow an inherited request; keep ours through the provider's real drain.
+ */
+#define AFE_MIC_DRAM_REQ ((1u<<3)|(1u<<6)|(1u<<7))
+static int afe_dram_guard(struct afe_journal *a)
+{
+    if(!a->dram_owned)return 0;
+    int e=afe_access(a);if(e)return e;
+    a->s->last_register=0x60;
+    uint32_t v=rr(a->afe,0x60)&AFE_MIC_DRAM_REQ;
+    return (v==AFE_MIC_DRAM_REQ || (a->dram_uncertain && !v))?0:EBUSY;
+}
+static int afe_dram_take(struct afe_journal *a)
+{
+    if(!a || !a->snapshot || a->dram_owned)return EINVAL;
+    int e=afe_access(a);if(e)return e;
+    a->s->last_register=0x60;uint32_t v=rr(a->afe,0x60);
+    if(v&AFE_MIC_DRAM_REQ)return EBUSY;
+    a->dram_owned=a->dram_uncertain=true; /* before possibly effective request */
+    wr(a->afe,0x60,v|AFE_MIC_DRAM_REQ);
+    if((rr(a->afe,0x60)&AFE_MIC_DRAM_REQ)!=AFE_MIC_DRAM_REQ)return EIO;
+    a->dram_uncertain=false;return 0;
+}
+static int afe_dram_release(struct afe_journal *a)
+{
+    if(!a->dram_owned)return 0;
+    int e=afe_dram_guard(a);if(e)return e;
+    uint32_t v=rr(a->afe,0x60),owned=v&AFE_MIC_DRAM_REQ;
+    if(owned!=AFE_MIC_DRAM_REQ && !(a->dram_uncertain && !owned))return EBUSY;
+    /* Full drain is the engine/provider's prerequisite for board unprepare.
+     * Preserve SRCCLKENA and every unrelated power request in this same read. */
+    a->dram_uncertain=true;wr(a->afe,0x60,v&~AFE_MIC_DRAM_REQ);
+    if(rr(a->afe,0x60)&AFE_MIC_DRAM_REQ)return EIO;
+    a->dram_owned=a->dram_uncertain=false;return 0;
 }
 static int afe_idle(struct afe_journal *a,bool engine_on)
 {
@@ -212,6 +250,7 @@ static int afe_restore(struct afe_journal *a)
     int e=0;
     if(a->snapshot) {
         e=afe_idle(a,a->engine_owned);if(e){a->stuck=true;return e;}
+        e=afe_dram_release(a);if(e){a->stuck=true;return e;}
         for(unsigned i=5;i>0;i--) {
             unsigned k=i-1;if(!(a->pin_owned&(1u<<k)))continue;
             unsigned n=cal_pins[k];uint32_t bit=1u<<cal_bits[k],old=a->s->pins_before[k];

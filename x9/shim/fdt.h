@@ -6,6 +6,10 @@
 int fdt_chosen_u64(uintptr_t fdt, const char *prop, uint64_t *out);
 
 int fdt_ram_available(uintptr_t, uint64_t, uint64_t);
+enum { FDT_PROPERTY_NODE_MISSING=-2, FDT_PROPERTY_INVALID=-1,
+       FDT_PROPERTY_ABSENT=0, FDT_PROPERTY_PRESENT=1 };
+/* ABSENT is returned only for a unique node in a fully valid v17 tree. */
+int fdt_property_lookup(uintptr_t,const char *,const char *,const uint8_t **,size_t *);
 /* 1 unique property, 0 absent in a valid tree, -1 malformed/duplicate. */
 int fdt_property_checked(uintptr_t,const char *,const char *,const uint8_t **,size_t *);
 int fdt_property(uintptr_t,const char *,const char *,const uint8_t **,size_t *);
@@ -24,6 +28,8 @@ int fdt_gpu_patch_adt(uintptr_t,void *,size_t);
  * All are nonfatal to boot. No hardware access or readiness implied. */
 int fdt_scp_patch_adt(uintptr_t,void *,size_t);
 int fdt_gps_patch_adt(uintptr_t,void *,size_t);
+/* DMA topology only, not buffer ownership, AIN0 or complete write drain. */
+int fdt_mic_dma_patch_adt(uintptr_t,void *,size_t);
 int fdt_adsp_patch_adt(uintptr_t,void *,size_t);
 
 /* Read-only Wi-Fi DT facts into /chosen/x9-lk-wifi-dt: 0 written, 1 no placeholder, -1 FDT unusable. */

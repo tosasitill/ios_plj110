@@ -169,7 +169,7 @@ static int afe_start(uint64_t g)
         diagnostic.cycle[0]=diagnostic.cycle[1]=-1;
         prepared=true;
         e=hw.prepare(hw.afe,&diagnostic,&board_diagnostic,&afe_diagnostic,
-            &analog_diagnostic,&digital_diagnostic,&dma_diagnostic);
+            &analog_diagnostic,&digital_diagnostic,&dma_diagnostic,hw.dma_memory_type);
         /* A board may reuse read-only eligibility snapshots. Binding is a
          * separate verified contract, never inferred from those flags. */
         dma_diagnostic.flags|=X9_MIC_DMA_BOUND;dma_diagnostic.blockers=0;
@@ -319,7 +319,8 @@ static void afe_worker(__unused void *arg,__unused wait_result_t result)
 }
 int x9_mic_mt6993_register(const struct x9_mic_mt6993_platform *p)
 {
-    if(!p || p->version!=4 || p->adc_channel>1 || !p->afe || !p->dma ||
+    if(!p || p->version!=5 || p->adc_channel>1 || !p->afe || !p->dma ||
+       (p->dma_memory_type!=X9_MIC_DMA_MEMORY_SRAM && p->dma_memory_type!=X9_MIC_DMA_MEMORY_DRAM) ||
        !p->prepare || !p->unprepare || !p->copy_frames || !p->sync_for_device || !p->dma_quiesce ||
        ((uintptr_t)p->afe&3) || ((uintptr_t)p->dma&15) || (p->dma_bus_address&15) ||
        !p->dma_bus_address || p->dma_bytes<65536 || p->dma_bytes>131072 || (p->dma_bytes&15) ||
@@ -349,13 +350,14 @@ int x9_mic_mt6993_register(const struct x9_mic_mt6993_platform *p)
 }
 int x9_mic_plj110_register_dma(const struct x9_mic_plj110_dma *p)
 {
-    if(!p || p->version!=1 || p->flags!=X9_MIC_PLJ110_DMA_REQUIRED ||
+    if(!p || p->version!=2 || p->flags!=X9_MIC_PLJ110_DMA_REQUIRED ||
        p->adc_channel!=0)return EINVAL;
     /* This supplies real PLJ110 lifecycle callbacks, not stub DMA/owner
      * callbacks. AFE SRAM SMC/idle/board XML cannot satisfy p's contract. */
     const struct x9_mic_mt6993_platform platform={
-        .version=4,.adc_channel=0,.afe=p->afe,.dma=p->ring,
+        .version=5,.adc_channel=0,.afe=p->afe,.dma=p->ring,
         .dma_bus_address=p->bus_address,.dma_bytes=p->ring_bytes,
+        .dma_memory_type=p->memory_type,
         .prepare=x9_mic_plj110_capture_prepare,
         .unprepare=x9_mic_plj110_capture_unprepare,
         .dma_quiesce=p->quiesce,.copy_frames=p->copy_frames,
@@ -420,3 +422,5 @@ void x9_mic_mt6993_get_signal(struct x9_mic_signal_status *s)
 {
     lck_mtx_lock(&afe_mic_lock);x9_mic_plj110_get_signal(s);lck_mtx_unlock(&afe_mic_lock);
 }
+
+#include "x9_mic_mt6993_memory.inc"

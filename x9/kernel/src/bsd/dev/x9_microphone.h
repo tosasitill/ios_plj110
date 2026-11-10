@@ -269,6 +269,9 @@ struct x9_mic_signal_status {
 #define X9_MIC_GET_STATUS_NOWAIT _IOR('M', 0x9e, struct x9_mic_status)
 #ifdef KERNEL
 #include <stdbool.h>
+/* Internal DMA address-space/memory contract, not a userspace PCM format. */
+#define X9_MIC_DMA_MEMORY_SRAM 1u
+#define X9_MIC_DMA_MEMORY_DRAM 2u
 /* Thread context only. start/commit/stop are serialized WITHOUT the PCM
  * lock. stop must disable/drain DMA and restore owned rails/clocks even after
  * a partially failed start/commit. start may arm DMA but MUST NOT deliver or
