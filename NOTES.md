@@ -73,7 +73,8 @@ X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>      # 之后再�
 
 ## 3. 当前基线镜像与参数
 
-- **最新整合候选(115)**:**`x9/out/x9-cellular-als-torch175-md/boot.img`**,构建exit0、**13037568 B**。上一DATA+ALS+legacy PIT修正基线继续纳入用户指定5e06897/a4c8857;固定独立源码586184f,不包含BT/SMS。启用`x9_torch=3`,不自动点灯;仅去掉诊断`-v`以容纳606B完整参数,其余Wi-Fi/GPU/蜂窝/ALS配置不变。32GiB manifest/插件275不变,无需mailbox,**未上机**;详见§7。
+- **最新整合候选(116)**:**`x9/out/x9-cellular-als-torch-bt175-md/boot.img`**,构建exit0、**13049856 B**。在115基础纳入指定c9b3e46/3535ac5,固定独立源码f1cddba,不包含SMS;新增只读`x9_bt=1`,probe/raw/discovery关闭。仅移除已被AT桥强制lvl3覆盖的冗余`x9_md_at=3`,603B完整参数;蜂窝/ALS1/torch3/Wi-Fi/GPU语义保持。32GiB manifest/插件275不变,无需mailbox,**未上机**;详见§7。
+- **上一整合候选(115)**:**`x9/out/x9-cellular-als-torch175-md/boot.img`**,构建exit0、**13037568 B**。上一DATA+ALS+legacy PIT修正基线继续纳入用户指定5e06897/a4c8857;固定独立源码586184f,不包含BT/SMS。启用`x9_torch=3`,不自动点灯;仅去掉诊断`-v`以容纳606B完整参数,其余Wi-Fi/GPU/蜂窝/ALS配置不变。32GiB manifest/插件275不变,无需mailbox,**未上机**;详见§7。
 - **175日志 / 上一DATA+ALS候选**:175的启动参数与`x9-cellular-data1-md`一致(完整hi + `x9_dpmaif=2 x9_mipc=1 x9_md_lte=0`),日志确认40-bit分配、INIT_DONE和真实SA→LTE;用户观察5G可显示/可上网,但该日志截至121s仍没有WDS Start或蜂窝收发,详见§7。上一整合候选 **`x9/out/x9-cellular-als175-md/boot.img`**,构建器报告**13025280 B**,包含DATA+ALS及15f597b的窄范围legacy PIT状态修正,仅追加`x9_als=1`(598B),32GiB manifest/插件275不变,无需mailbox;**未上机**。以下ic/ij等为历史基线,不再代表最新日志。
 
 最新实测:**x9-rev252ic-md**(168,见HANDOFF102;LTE-only注册稳定,仍不拨号);再前 **x9-rev252ib-md**(167,见HANDOFF101);再前 **x9-rev252ia-md**(166,见HANDOFF100);再前 **x9-rev252hz-md**(165,见HANDOFF99);再前 **x9-rev252hy-md**(164,见HANDOFF98);再前 **x9-rev252hx-md**(163,见HANDOFF96);再前 **x9-rev252hw-md**(162,见HANDOFF95);再前 **x9-rev252hv-md**(161,见HANDOFF94;MIPC就绪、UIM读通);再前 **x9-rev252hu-md**(160,见HANDOFF93;RAM 10.0GiB生效);再前 **x9-rev252ht-md**(159,见HANDOFF92);再前 **x9-rev252hs-md**(158,见HANDOFF91;MIPC/DPMAIF在prepare/OPEN即隔离,UIM卡状态被拒);前一实测 **x9-rev252hl-md**(代码提交 **`20c64f2`**,构建交接 `0f9d983`),boot.img **12877824 B=12.28125MiB**,路径 `x9/out/x9-rev252hl-md/boot.img`。**157确认完整11文件安装成功、qdsp可读、Sahara finished并进入QMUX/QMI,握手摘要reset=0;真实iOS蜂窝尚未打通**,见HANDOFF87。独立34MiB固件与插件275不需再stage。
@@ -155,11 +156,12 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
 
-## 7. 当前交接(HANDOFF 116-INTEGRATE-BT,2026-11-10): 继续纳入c9b3e46蓝牙代码与3535ac5交接
+## 7. 当前交接(HANDOFF 116-INTEGRATE-BT,2026-11-10): 蜂窝+ALS+torch+BT独立整合构建通过,未上机
 
 - **用户要求/源码范围**:用户指定代码c9b3e46、交接3535ac5。两者已在main历史,不重复提交代码;把它们继续纳入上一蜂窝+ALS+torch候选。新独立树`.local/x9/worktrees/cellular-als-torch-bt-175/`以586184f为基线,依次cherry-pick为**efad465**(代码)、**f1cddba**(交接),只增加12个BT实现文件及11行BT交接。代码无冲突;文档插入上下文原本含SMS段,仅抽入完整BT段并保留独立树既有文档,未夹带SMS代码或回退main活动交接。
 - **参数/边界**:保留DMA40/PDP/WDS、single-SIM+NR、ALS1、torch3及Wi-Fi/GPU配置,新增**`x9_bt=1`**只读AO/时钟门诊断;probe/raw/discovery仍关闭,不接管UART/自动发ROM查询。606B旧参数追加BT超607B;源码`x9_at_bridge.inc:17`明确`x9_bb=1`且默认`x9_qmi_at=1`启用AT桥,`x9_modem_s3.inc:1127`强制lvl3,所以仅移除冗余`x9_md_at=3`,新完整参数**603B**,AT初始化语义不变。32GiB manifest、插件275不变,无需mailbox。
-- **构建里程碑**:在固定f1cddba独立树直接编译iOS16 arm64诊断客户端和内核/boot,唯一名字`x9-cellular-als-torch-bt175-md`;目前构建进行中,尚未有最终boot结果。输入/原始日志`.local/x9/work/cellular-als-torch-bt-175/{boot-config.json,bt-client.stdout.log,build.stdout.log}`。无测试套件、CI run、push、设备操作/flash/reboot/分区写入。完成后续补结果,不以BT服务/节表存在称蓝牙可用。
+- **构建结果**:固定f1cddba独立树的iOS16 arm64 `btctl`编译/adhoc签名、torch桥/工具编译通过;BT固件**11节metadata**(不嵌入/下载字节),torch桥72464B。57/57 overlay+6prebuilt、kernel link/strip、shim/boot打包exit0。**`x9/out/x9-cellular-als-torch-bt175-md/boot.img`**构建器报告**13049856 B**;完整原始目录`.local/x9/worktrees/cellular-als-torch-bt-175/x9/out/x9-cellular-als-torch-bt175-md/`已原样复制主checkout,旧成功候选未覆盖。客户端在新产物的`bluetooth/btctl`,未自动安装/运行。成功后未解包/重算hash/反汇编/二次重建;无测试套件、CI run、push、设备操作/flash/reboot/分区写入,无需mailbox。
+- **精确复建/交接**:在上述f1cddba独立树先`/Library/Frameworks/Python.framework/Versions/3.13/bin/python3 -I x9/bluetooth/build.py --out x9/out/<新名字>/bluetooth`,再`/Library/Frameworks/Python.framework/Versions/3.13/bin/python3 -I x9/build/build.py all --name <同一个新名字> --boot-config /Users/tosasitill/ios_plj110/.local/x9/work/cellular-als-torch-bt-175/boot-config.json`。输入/原始日志`.local/x9/work/cellular-als-torch-bt-175/{boot-config.json,bt-client.stdout.log,build.stdout.log}`;main里程碑文档提交3cf79ff,本次续补最终结果。用户手动启动路径`fastboot boot x9/out/x9-cellular-als-torch-bt175-md/boot.img`;若有新日志,先查`X9 BT:`只读前置与状态,不以服务/11节表/编译当作ROM握手或蓝牙可用。**firmware_ready仍0**,完整上电/固件/校准/ownership和原始bluetoothd传输未实现,扫描/配对未验收。蜂窝真实收发、ALS物理SCP/背光、torch实体灯及MG缓存等约束不变;本轮只整合指定提交,未上机。
 
 ### 前次交接(HANDOFF 115-INTEGRATE,2026-11-10): 蜂窝+ALS+两个手电筒提交独立整合构建通过,未上机
 
