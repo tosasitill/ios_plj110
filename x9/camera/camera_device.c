@@ -58,6 +58,8 @@
 #include <sys/ioctl.h>
 #include "../kernel/src/bsd/dev/x9_camera.h"
 #include "camera_stop.h"
+_Static_assert(sizeof(struct hakios_camera_frame)==120,"RAW10 v2 wire layout");
+_Static_assert(__builtin_offsetof(struct hakios_camera_frame,sof_time_lo)==100,"RAW10 timing offset");
 
 void hakios_camera_say(const char *format, ...) __attribute__((format(printf, 1, 2)));
 
@@ -1139,16 +1141,18 @@ snapshot_current(struct stream *s, const struct output_snapshot *snapshot)
 }
 
 static bool
-snapshot_take(struct stream *s, unsigned slot, uint64_t frame_time, struct output_snapshot *snapshot)
+snapshot_take(struct stream *s, unsigned slot, uint64_t sof_time, struct output_snapshot *snapshot)
 {
 	struct output *out = &s->out[slot];
 	bool still = slot == 2;
 
+	/* SOF is an IRQ observation, not an exposure-start timestamp. Reject a
+	 * frame already observed before shutter; never estimate SOF from DONE. */
 	pthread_mutex_lock(&s->lock);
 	if (!s->running || !s->graph_running || out->config == NULL || out->handler == NULL ||
 	    !(out->enabled || (slot == 0 && !out->enabled_known)) ||
 	    (still && (s->stills_wanted == 0 || s->stills_head == NULL || s->stills_head->run_epoch != s->run_epoch ||
-	    frame_time < s->stills_head->not_before))) {
+	    sof_time < s->stills_head->not_before))) {
 		pthread_mutex_unlock(&s->lock);
 		return false;
 	}
@@ -1448,7 +1452,8 @@ deliver(struct stream *s, const struct output_snapshot *snapshot, const struct i
 	if (!s->running || !s->graph_running || s->callback_active || !snapshot_current(s, snapshot) ||
 	    (snapshot->still && (s->stills_wanted == 0 || s->stills_head == NULL ||
 	    s->stills_head->ticket != snapshot->still_ticket || s->stills_consumed + 1 != snapshot->still_ticket ||
-	    s->stills_head->run_epoch != snapshot->run_epoch || f->time < s->stills_head->not_before))) {
+	    s->stills_head->run_epoch != snapshot->run_epoch ||
+	    hakios_camera_sof_time(f) < s->stills_head->not_before))) {
 		pthread_mutex_unlock(&s->lock);
 		CVPixelBufferRelease(pb);
 		return false;
@@ -1770,6 +1775,7 @@ static bool valid_frame(const struct hakios_camera_frame *f, uint32_t sensor)
 {
     uint32_t width=sensor==1?4096:3264,height=sensor==1?3072:2448;
     uint32_t stride=(width/4*5+63)&~63u;
+    uint64_t sof_time=hakios_camera_sof_time(f);
     for (unsigned i=0;i<sizeof(f->reserved)/sizeof(f->reserved[0]);i++)
         if (f->reserved[i]) return false;
     return !memcmp(f->magic, HAKIOS_CAMERA_MAGIC, 8) && f->header_bytes == sizeof(*f) &&
@@ -1783,7 +1789,8 @@ static bool valid_frame(const struct hakios_camera_frame *f, uint32_t sensor)
         f->frame_lines_min > f->margin && f->frame_lines >= f->frame_lines_min &&
         f->frame_lines <= f->frame_lines_max && f->exposure_lines >= (sensor==1?6u:16u) &&
         (sensor!=1 || (!(f->frame_lines%2) && !(f->exposure_lines%2))) &&
-        f->exposure_lines <= f->frame_lines - f->margin && f->time &&
+        f->exposure_lines <= f->frame_lines - f->margin && f->time && sof_time &&
+        f->timing_flags==HAKIOS_CAMERA_TIMING_SOF && sof_time<=f->time &&
         f->time<=mach_absolute_time() && f->sequence && f->focus==HAKIOS_CAMERA_NO_FOCUS;
 }
 
@@ -1801,7 +1808,7 @@ worker(void *context)
 	float lux = -1, cct = -1;
 	struct af af = { 0 };
 	int device = s->camera_fd, error = 0;
-    uint64_t last_sequence=0,last_time=0;
+    uint64_t last_sequence=0,last_time=0,last_sof=0;
 
 	camera_worker_thread = true;
 	camera_worker_stream = s;
@@ -1851,10 +1858,10 @@ worker(void *context)
 		const struct hakios_camera_frame *f = (const void *)buffer;
 		if (!valid_frame(f, s->camera->sensor) ||
             bytes != sizeof(*f) + (size_t)f->stride * f->height ||
-            f->sequence<=last_sequence || f->time<=last_time) {
+            f->sequence<=last_sequence || f->time<=last_time || hakios_camera_sof_time(f)<=last_sof) {
             say("invalid/stale frame; not delivering to capture graph"); error=EPROTO; break;
         }
-        last_sequence=f->sequence;last_time=f->time;
+        last_sequence=f->sequence;last_time=f->time;last_sof=hakios_camera_sof_time(f);
         const uint8_t *raw = buffer + f->header_bytes;
 		struct hakios_camera_command c;
 
@@ -1910,7 +1917,7 @@ worker(void *context)
 		for (unsigned i = 0; s->graph_running && i < OUTPUTS; i++) {
 			struct output_snapshot snapshot = { 0 };
 
-			if (!snapshot_take(s, i, f->time, &snapshot)) continue;
+			if (!snapshot_take(s, i, hakios_camera_sof_time(f), &snapshot)) continue;
 			(void)deliver(s, &snapshot, &isp, f, raw, metadata);
 			snapshot_release(&snapshot);
 		}

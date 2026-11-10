@@ -45,8 +45,10 @@ static uint64_t consumed;
 static struct hakios_camera_frame head;
 /* Source completion order is independent of accepted userland frame count.
  * Retire even a backpressured frame so it cannot be replayed after a read. */
-static uint64_t last_capture_id, last_capture_time;
-_Static_assert(sizeof(struct x9_camera_completed_frame)==64,"kernel completion record");
+static uint64_t last_capture_id, last_capture_time, last_sof_time;
+_Static_assert(sizeof(struct x9_camera_completed_frame)==72,"kernel completion record");
+_Static_assert(sizeof(struct hakios_camera_frame)==120,"RAW10 v2 wire layout");
+_Static_assert(__builtin_offsetof(struct hakios_camera_frame,sof_time_lo)==100,"RAW10 timing offset");
 /* Journal attempted callbacks BEFORE invoking them: an error may follow a
  * partial state change. Kept after failed drain/restore; no retry on close. */
 static struct {
@@ -247,7 +249,7 @@ static int start(uint32_t which, uint32_t mode)
     if(!frame)frame=kalloc_data(X9_CAMERA_MAX_BYTES,Z_WAITOK);
     if(!frame)return ENOMEM;
     session.generation=st.generation;
-    last_capture_id=last_capture_time=0;
+    last_capture_id=last_capture_time=last_sof_time=0;
     session.power=true;
     /* Worker completions can enter camera_deliver during capture setup.
      * Keep control serialization, but never hold the worker's frame lock
@@ -332,11 +334,12 @@ int x9_camera_deliver(const struct x9_camera_completed_frame *completed)
     lck_mtx_lock(&camera_lock);int e=0;const struct x9_camera_sensor *s=sensor();
     if(!(st.flags&X9_CAMERA_STREAMING) || f.generation!=st.generation || f.sensor!=st.sensor)e=ESTALE;
     else if(cam_completed_layout(s,&f) ||
-            !f.capture_id || !f.time || f.time>mach_absolute_time())e=EINVAL;
-    else if(f.capture_id<=last_capture_id || f.time<=last_capture_time)e=ESTALE;
+            !f.capture_id || !f.time || !f.sof_time || f.sof_time>f.time ||
+            f.time>mach_absolute_time())e=EINVAL;
+    else if(f.capture_id<=last_capture_id || f.time<=last_capture_time || f.sof_time<=last_sof_time)e=ESTALE;
     else e=cam_completed_controls(s,&f);
     if(!e) {
-        last_capture_id=f.capture_id;last_capture_time=f.time;
+        last_capture_id=f.capture_id;last_capture_time=f.time;last_sof_time=f.sof_time;
         if(frame_readers)e=EBUSY; /* retire, never overwrite/replay a pinned CPU copy */
     }
     if(!e) {
@@ -344,6 +347,8 @@ int x9_camera_deliver(const struct x9_camera_completed_frame *completed)
         head.header_bytes=sizeof(head);head.width=s->width;head.height=s->height;
         head.stride=f.stride;head.format=1;head.bayer=s->bayer;head.black=64;
         head.sequence=++st.frames;head.time=f.time;head.exposure_lines=f.exposure_lines;
+        head.sof_time_lo=(uint32_t)f.sof_time;head.sof_time_hi=(uint32_t)(f.sof_time>>32);
+        head.timing_flags=HAKIOS_CAMERA_TIMING_SOF;
         /* HakiOS ISP expects linear gain. Sony registers encode reciprocal
          * gain: unity/(unity-reg), NOT reg/unity. ABI units are linear Q10. */
         head.line_ns=s->line_ns;head.gain=1024*s->gain_unity/(s->gain_unity-f.gain_code);

@@ -15,7 +15,7 @@
 #include <stdint.h>
 
 #define HAKIOS_CAMERA_DEVICE           "/dev/x9-camera"
-#define HAKIOS_CAMERA_MAGIC            "RWFRAME1"
+#define HAKIOS_CAMERA_MAGIC            "RWFRAME2"
 
 struct hakios_camera_frame {
 	char            magic[8];       /* HAKIOS_CAMERA_MAGIC */
@@ -39,8 +39,19 @@ struct hakios_camera_frame {
 	uint32_t        sensor;         /* which: 0 the macro, 1 the wide, 2 the front, 3 the ultra-wide camera */
 	uint32_t        focus;          /* the lens's position as last set, 0 (the furthest) to 1023: HAKIOS_CAMERA_NO_FOCUS where it
 	                                 * has no motor (or it does not answer) */
-	uint32_t        reserved[5];
+	/* X9 v2 uses three former reserved words, keeping the 120B wire layout.
+	 * The explicit magic rejects DONE-only v1; no stale-header fallback.
+	 * Split words avoid an unaligned uint64_t at offset100. SOF is observed
+	 * by the sole IRQ owner for this frame, NOT the physical exposure start. */
+	uint32_t        sof_time_lo, sof_time_hi, timing_flags;
+	uint32_t        reserved[2];
 };
+
+#define HAKIOS_CAMERA_TIMING_SOF 1u
+static inline uint64_t hakios_camera_sof_time(const struct hakios_camera_frame *f)
+{
+	return (uint64_t)f->sof_time_hi << 32 | f->sof_time_lo;
+}
 
 #define HAKIOS_CAMERA_NO_FOCUS 0xffffffffu
 

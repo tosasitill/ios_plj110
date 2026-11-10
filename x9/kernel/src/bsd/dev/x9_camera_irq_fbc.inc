@@ -180,7 +180,8 @@ static void cam_irq_fbc_event_locked(struct cam_irq_event *ev)
     }
     if(done && (!cam_irq.sof_seen || cam_irq_fbc.done_seen || f->last_tag!=1 ||
        (f->done_status&0x000f0000u)!=0x10000u || f->err_status || (f->cq_status&~1u) ||
-       f->time<cam_irq.sof_frame.time || f->group_tags[0]!=1 ||
+       !f->sof_time || f->sof_time!=cam_irq.sof_frame.sof_time ||
+       f->sof_time!=cam_irq.sof_frame.time || f->time<f->sof_time || f->group_tags[0]!=1 ||
        f->group_tags[1] || f->group_tags[2] || f->group_tags[3])) {
         ev->error=cam_irq_fbc_fault_locked(EIO);return;
     }

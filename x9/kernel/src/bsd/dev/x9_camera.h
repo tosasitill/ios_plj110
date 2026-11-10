@@ -294,8 +294,9 @@ struct x9_camera_sensor {
     uint32_t power_count;
 };
 struct x9_camera_platform {
-    /* Version2 requires immutable, frame-bound completion metadata below.
-     * Version1's late sensor-register sampling cannot identify frame state. */
+    /* Version3 also requires this request's actual SOF observation time.
+     * Version2's DONE-only timestamp cannot identify pre-shutter SOF;
+     * version1's late sensor sampling cannot identify frame state. */
     uint32_t version;
     /* power(true) follows sensor->power, power(false) restores ownership in
      * reverse order, including failures halfway through power(true). */
@@ -309,7 +310,7 @@ struct x9_camera_platform {
      * power(false), retry cleanup, or start another sensor in this boot. */
     int (*capture)(const struct x9_camera_sensor *, int on, uint64_t generation);
 };
-#define X9_CAMERA_PLATFORM_VERSION 2u
+#define X9_CAMERA_PLATFORM_VERSION 3u
 /* Kernel-only record, not an ioctl or the userland RAW10 header. Provider
  * binds this to one owned DMA slot/request AFTER PASS1_DONE/group/tag/inner
  * sequence, error checks and CPU cache sync. capture_id is a nonzero, strictly
@@ -319,7 +320,10 @@ struct x9_camera_platform {
  * If the binding is uncertain, do not submit the frame. reserved must be0. */
 struct x9_camera_completed_frame {
     uint32_t version, sensor, stride, bytes;
-    uint64_t generation, capture_id, time;
+    uint64_t generation, capture_id, time, sof_time;
+    /* time is qualified DONE; sof_time is the sole IRQ owner's observation
+     * of this same request's SOF, never a later worker timestamp or estimated
+     * DONE minus exposure/frame interval. Observation is NOT exposure start. */
     uint32_t exposure_lines, gain_code, frame_lines, reserved;
     const void *raw;
 };
@@ -337,18 +341,18 @@ int x9_camera_deliver(const struct x9_camera_completed_frame *);
  * IRQ/route owner supplies ONE coherent snapshot, with group_tags latched for
  * this frame at SOF and inner_sequence read from its tag's FH_SPARE register.
  * CQ setting-done and input EOF alone never qualify a completed RAW buffer. */
-#define X9_CAMERA_CAMSV_VERSION 2u
+#define X9_CAMERA_CAMSV_VERSION 3u
 struct x9_camera_s1;
 struct x9_camera_camsv_irq {
     uint32_t version, reserved;
-    uint64_t generation, capture_id, time;
+    uint64_t generation, capture_id, time, sof_time;
     uint32_t first_tag, last_tag, group_tags[4];
     uint32_t inner_sequence, outer_sequence;
     uint32_t done_status, err_status, cq_status, reserved1;
 };
 struct x9_camera_camsv_request {
-    /* Frame-bound control state, not late I2C sampling. time must be zero:
-     * finish supplies the qualified IRQ completion time. raw/metadata stay
+    /* Frame-bound control state, not late I2C sampling. time/sof_time must
+     * both be zero: finish supplies the qualified same-request IRQ times. raw/metadata stay
      * immutable until finish returns or the owner proves stop/drain. */
     struct x9_camera_completed_frame frame;
     uint64_t iova;

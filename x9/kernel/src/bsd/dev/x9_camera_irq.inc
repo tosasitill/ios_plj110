@@ -245,7 +245,7 @@ static void cam_irq_sample(unsigned role,struct cam_irq_event *ev)
         if(cam_irq.sof_seen||ev->sof!=4||ev->channel&~4u||f->first_tag!=1||f->last_tag!=1||
            f->inner_sequence!=cam_irq.request.inner_sequence||f->group_tags[0]!=1||
            f->group_tags[1]||f->group_tags[2]||f->group_tags[3])ev->error=EIO;
-        f->time=mach_absolute_time();
+        f->time=mach_absolute_time();f->sof_time=f->time;
         if(!ev->error){cam_irq.sof_frame=*f;cam_irq.sof_seen=true;}
     } else if(role==X9_CAM_IRQ_HYBRID) {
         f->err_status=cam_irq_rd(cam_irq.view[1],0x350);
@@ -254,10 +254,14 @@ static void cam_irq_sample(unsigned role,struct cam_irq_event *ev)
         f->time=mach_absolute_time();
         /* Group/last are ONLY the prior SOF binding, not late live reads. */
         if(cam_irq.sof_seen) {
+            f->sof_time=cam_irq.sof_frame.sof_time;
             f->last_tag=cam_irq.sof_frame.last_tag;
             memcpy(f->group_tags,cam_irq.sof_frame.group_tags,sizeof(f->group_tags));
             if(cam_irq.sof_frame.inner_sequence!=f->inner_sequence||
-               f->time<cam_irq.sof_frame.time)ev->error=ESTALE;
+               cam_irq.sof_frame.generation!=f->generation||
+               cam_irq.sof_frame.capture_id!=f->capture_id||
+               !f->sof_time||f->sof_time!=cam_irq.sof_frame.time||
+               f->time<f->sof_time)ev->error=ESTALE;
         } else if(f->done_status&0x000f0000u)ev->error=EIO;
     } else {
         /* Never consume CHANNEL here: SOF is its one read-clear owner. No
@@ -347,7 +351,7 @@ static int cam_irq_core_ready(const struct x9_camera_camsv_irq *f)
  * acceptance. No caller-supplied consumed/drained flag or cache callback.
  * Owner callbacks are performed separately outside spin by finish; this
  * guard does not acquire slot/S1 locks or read RAW/IRQ history again. */
-static int cam_irq_retiring_frame_guard(const struct x9_camera_camsv_slot *slot,
+static int cam_irq_completed_frame_guard(const struct x9_camera_camsv_slot *slot,
     const struct x9_camera_camsv_irq *f)
 {
     boolean_t old;
@@ -357,7 +361,9 @@ static int cam_irq_retiring_frame_guard(const struct x9_camera_camsv_slot *slot,
     e=cam_irq.error?cam_irq.error:cam_irq_fbc.error?cam_irq_fbc.error:cam_irq_fbc.source_error;
     if(!e && (!slot || slot!=cam_irq.slot || slot!=cam_sv.request_slot || !cam_irq.prepared ||
        !cam_irq.owns || !cam_irq.accepting || !cam_irq.busy || cam_irq.close_attempted ||
-       !cam_irq.sof_seen || !cam_irq_fbc.bound || !cam_irq_fbc.done_seen ||
+       !cam_irq.sof_seen || !f->sof_time || f->sof_time!=cam_irq.sof_frame.time ||
+       f->sof_time!=cam_irq.sof_frame.sof_time || f->sof_time>f->time ||
+       !cam_irq_fbc.bound || !cam_irq_fbc.done_seen ||
        !cam_irq_fbc.attempted || !cam_irq_fbc.count_accepted || cam_irq_fbc.samples!=2 ||
        cam_irq_fbc.epoch!=cam_irq.epoch || cam_sv.epoch!=cam_irq.epoch ||
        !(cam_irq_fbc.source_issued&CAM_STREAM_ON) || !(cam_irq_fbc.source_ack&CAM_STREAM_ON) ||

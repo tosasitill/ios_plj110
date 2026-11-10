@@ -3,6 +3,8 @@
 **已实现控制层、RAW10 帧接口、iOS 双流桥、冷启动 sensor-probe/standby 配置、共享接收电源与 MM 寄存器时钟事务、SENINF/CAMSV 接收计划及带供电前置的寄存器预检；采集后端仍缺失，不能拍摄。**
 没有假帧、测试图案、Android 代理或 Camera.app 成功状态伪造。默认关闭。
 
+**帧接口配套变更**：kernel-private platform/CAMSV 现为 version3；用户 RAW10 header 仍120B，但使用 `RWFRAME2` magic 与同帧 SOF 观察时间。旧 version1/2 provider 或 `RWFRAME1` 图像不能混用，不以 DONE 时间伪造缺失 SOF；ioctl/status/command 尺寸不变。此接口变更已编译，尚无实机采集结果。
+
 ## 实现边界
 
 | 层 | 当前实现 |
@@ -37,7 +39,7 @@
 
 所有 renderer 返回 `bool`，失败意味着整张 buffer 不可发布。still 的 scratch 分组全部分配成功才替换旧指针/容量，避免早项 malloc 失败但后项成功时误认为可用；完整 NV12 和 BGRA still 共用逐像素 demosaic/缩放路径，BGRA 照片不再使用 2×2-cell 预览算法。分片按行对划分，短或奇数高度 BGRA 不留缝、不重复写。
 
-`AddAttachmentsToSampleBuffer` 只接受自身 pixelbuffer 上已绑定且 port/PTS 有效的 metadata；没有“最近帧”fallback。samplebuffer 已有 metadata 的 port/原始 PTS 与自身图像冲突时返回错误，其它 graph-added keys 保留。RAW header 同时核对 NO_FOCUS 与 reserved 全零。以上为源码与真实 SDK 编译结果，**没有实际照片、前后切换或相机硬件验证；native capture 全链仍继续实现**。
+`AddAttachmentsToSampleBuffer` 只接受自身 pixelbuffer 上已绑定且 port/PTS 有效的 metadata；没有“最近帧”fallback。samplebuffer 已有 metadata 的 port/原始 PTS 与自身图像冲突时返回错误，其它 graph-added keys 保留。RAW header 同时核对 NO_FOCUS、精确 v2 timing_flags、非零 SOF≤DONE、两份剩余 reserved 全零及 SOF/DONE 单调前进。以上为源码与真实 SDK 编译结果，**没有实际照片、前后切换或相机硬件验证；native capture 全链仍继续实现**。
 
 ### Stop 与传感器切换保留真实退休错误
 
@@ -67,7 +69,23 @@ worker 不再持 output mutex 渲染或调用 `PixelBufferHandler`。每次输�
 
 已 admission 的 callback 期间，任何图像输出配置/handler/enable 替换返回 unavailable、不修改 graph context；getter、zoom、AF、shutter 等同步重入不再撞上持锁 callback。CF/Block/CV 析构和图像池调用在 output lock 外。主输出的默认启用仅用于没有显式 enable 属性时，明确 false 不再被 preview fallback 覆盖。old config/pool 与 handler 持有到实际回调完成或被丢弃，preview 的 HELD 防重用引用保留。
 
-每个 still 请求有 FIFO ticket、真实 `mach_absolute_time()` 接受时间、目标 run epoch 和不可变的已验收 options。只选择**完成时间不早于该请求**、同一 run 的 RAW 帧；预览回调中新发出的 shutter 不会消费早已完成的同一 RAW。snapshot 持有原 options 到实际回调结束或丢弃，admission/回调返回重新核对原队头 options 身份及 ticket，不消费替换请求。callback 真正调用并返回后才退休原队头/增加照片数，失败或背压保留原队头；Stop 取消与 object finalize 丢弃都不计照片完成。所有 options 析构均在 output lock 外。这里约束的是 header 的实际 DONE time，**不是已证明 SOF/exposure 在 shutter 之后、零快门延迟、拍照 settings ID 回传、相册写入或前后摄实测**。
+每个 still 请求有 FIFO ticket、真实 `mach_absolute_time()` 接受时间、目标 run epoch 和不可变的已验收 options。只选择**SOF 观察时间不早于该请求**、同一 run 的 RAW 帧；快门前已经观察到 SOF、但在快门后才 DONE 的旧帧不再满足拍照资格，预览回调中新发出的 shutter 同样不能消费此前已观察 SOF 的 RAW。snapshot 持有原 options 到实际回调结束或丢弃，admission/回调返回重新核对原队头 options 身份及 ticket，不消费替换请求。callback 真正调用并返回后才退休原队头/增加照片数，失败或背压保留原队头；Stop 取消与 object finalize 丢弃都不计照片完成。所有 options 析构均在 output lock 外。这里约束的是 header 的同帧 **SOF 软件观察时间**。IRQ 服务存在延迟，CSI SOF 与 sensor 曝光起点也不是同一事件；**仍未证明物理 SOF/exposure 晚于 shutter、零快门延迟、拍照 settings ID 回传、相册写入或前后摄实测**。不按 DONE 减曝光时长或 frame interval 来估计 SOF/exposure。
+
+### 把同帧 SOF 观察记录交给 iOS，而不是只传 DONE
+
+native IRQ 已锁存 SOF，但原 version2 completion/RWFRAME1 只传 DONE；一个快门前已经观察到 SOF、快门后才 DONE 的帧会通过原 still FIFO 的时间门。现在沿现有 IAR→原 SOF journal→owned DONE/FBC→native finish→kernel staging→iOS snapshot/admission 路径保留同请求 SOF，不读取额外 IRQ 历史、不加设备 probe 或空 callback。
+
+| v2 RAW10 header 字段 | 位置/验收 |
+|---|---|
+| magic/header_bytes | `RWFRAME2` / 120；原 v1 明确拒绝 |
+| sof_time_lo / sof_time_hi | offset100/104，两32-bit words合成原 mach time，避免unaligned uint64 |
+| timing_flags | offset108，必须精确 `HAKIOS_CAMERA_TIMING_SOF=1`，无未知bits |
+| reserved[2] | offset112/116，都必须零 |
+| time / sequence | 原字段/offset不变，time仍是DONE，Apple graph PTS仍沿原DONE值 |
+
+kernel 与 iOS 在读取像素前验收非零 SOF≤DONE≤now，独立拒绝 SOF/DONE/identity 重复或倒序；CPU 背压丢帧也消费原source identity/times，不重放。still 的snapshot和callback admission均以原SOF观察与同FIFO ticket/run/options比较，不因DONE在快门后或预览callback发新shutter而消费旧帧。没有合成 SOF、曝光起点或 Apple settings ID。
+
+源码参考HakiOS的ring time/纯still计数与OPPO ISP8s IAR `ktime_get_boottime_ns`：软件IRQ timestamp不是sensor曝光起点。**这里只拒绝已知快门前观察SOF的帧；IRQ latency、rolling-shutter曝光/实际设置生效时点仍未证明，不能宣称完整曝光时序或可拍摄。** 此次真实kernel单位编译exit0/105既有warnings、iOS camera_device/cameractl单位exit0/0warning、own桥局部dynamiclib link exit0/1既有static-initializer warning；无binary运行/设备或最终镜像。
 
 ### 拍照参数不再静默降级
 
@@ -256,23 +274,23 @@ stop 先失效 generation 并按原顺序 drain 硬件，再最多等 1 s 排空
 
 ### 完成帧的曝光 metadata 不再从后来的寄存器读数拼接
 
-内核采集接口升级为 **platform version2**，提交一个 `x9_camera_completed_frame`：sensor、generation、非零 capture_id、完成 time、raw/stride/bytes，以及该帧实际应用的 exposure_lines、Sony gain_code、frame_lines。`x9_camera_deliver` 不再执行 I2C 读；旧的“DMA 完成后读当前曝光/增益/帧长”不能证明这些值属于已完成的帧，因此不保留该降级路径。没有已注册的 MT6993 provider，升级不会移除现有可工作的硬件后端。
+内核采集接口现为 **platform version3**，提交一个72B `x9_camera_completed_frame`：sensor、generation、非零 capture_id、完成 time、同请求 SOF 观察 sof_time、raw/stride/bytes，以及该帧实际应用的 exposure_lines、Sony gain_code、frame_lines。`x9_camera_deliver` 不再执行 I2C 读；旧的“DMA 完成后读当前曝光/增益/帧长”不能证明这些值属于已完成的帧，因此不保留该降级路径。没有已注册的 MT6993 provider，升级不会移除现有可工作的硬件后端。
 
 provider 必须先确认真实 PASS1_DONE/group/tag/inner sequence 与本次 owned slot/request 对应、检查错误并完成 CPU cache 同步，按 SOF/控制生效延迟绑定该帧 metadata。无法确认绑定时不交付；不能把最新 AP 命令、晚读寄存器或未资格化 IRQ 当作完成证明。capture_id 是 generation 内严格递增的 64-bit owned-request 标识，不是直接放宽/截断硬件 32-bit counter。
 
-控制层只验证记录版本/保留字、generation、preview 精确尺寸与 64B stride、字节范围、完成时间、曝光/帧长步长和增益范围。重复或乱序 capture_id/time 返回 `ESTALE`；有效但被 CPU reader 背压丢弃的记录也退休，再提交同一记录仍为 `ESTALE`，不冒充新帧。用户 RAW10 `sequence` 保持接受帧计数，独立于 provider capture_id。iOS 在 allocation/ISP/metadata/PixelBufferHandler 前验证固定 preview header，并拒绝重复、倒序或未来时间帧。
+控制层只验证记录版本/保留字、generation、preview 精确尺寸与 64B stride、字节范围、非零 sof_time≤time≤now、曝光/帧长步长和增益范围。重复或乱序 capture_id/time/sof_time 返回 `ESTALE`；有效但被 CPU reader 背压丢弃的记录也退休，再提交同一记录仍为 `ESTALE`，不冒充新帧。用户 RAW10 `sequence` 保持接受帧计数，独立于 provider capture_id。iOS 在 allocation/ISP/metadata/PixelBufferHandler 前验证固定 preview header，并拒绝重复、倒序或未来时间帧。
 
-**这实现了完成记录→RAW10 header→iOS 的绑定和拒绝路径，不是 CAMSV 硬件 completion、控制延迟、SMMUv3 mapping 或真实帧的实测。** 旧用户态 RAW10/ioctl ABI 未改，也没有新增诊断 ioctl；仍需真实采集 provider，不能拍摄。
+**这实现了同请求 SOF/DONE 记录→RAW10 header→iOS 的绑定和拒绝路径，不是 CAMSV 硬件 completion、控制延迟、SMMUv3 mapping 或真实帧的实测。** 用户 RAW10 magic/保留字语义升级为 v2（尺寸仍120B），ioctl/status/command ABI 未改，没有新增诊断 ioctl；仍需真实采集 provider，不能拍摄。
 
 ### CAMSV 单 tag 的完成资格层
 
-`x9_camera_camsv_arm/finish` 为真实 provider 提供 kernel-only 的 owned-slot 完成路径，不注册后端、不改变 READY，也不读取 MMIO 或新增 ioctl。**kernel-private CAMSV version 已为2**：删除可被空实现冒充的 `sync_cpu` 回调，强制提供 `x9_camera_s1_export` 返回的 `backing`，由具体 S1 代码同步缓存。旧版1不能混用；用户态 RAW10/ioctl ABI 不变。arm 保存已绑定的 metadata、64-bit capture_id、预期硬件 inner sequence、tag/group 和 IOVA；合法 domain/route/slot 的 `check` 回调仍必需。16KiB 对齐、16GiB dma-range、backing 指针或 cache state 都不能证明授权映射；PM_GET、CPU PA 和空成功 check 均不是 lease。
+`x9_camera_camsv_arm/finish` 为真实 provider 提供 kernel-only 的 owned-slot 完成路径，不注册后端、不改变 READY，也不读取 MMIO 或新增 ioctl。**kernel-private CAMSV version 已为3**：沿用具体 S1 cache 路径，不恢复空 `sync_cpu` 回调，强制提供 `x9_camera_s1_export` 返回的 `backing`。旧版1/2不能混用；RAW10现为v2，ioctl ABI不变。arm 保存96B immutable request 的已绑定 metadata、64-bit capture_id、预期硬件 inner sequence、tag/group 和 IOVA；time/sof_time 输入都必须零，只由实际资格化 finish 填入；合法 domain/route/slot 的 `check` 回调仍必需。16KiB 对齐、16GiB dma-range、backing 指针或 cache state 都不能证明授权映射；PM_GET、CPU PA 和空成功 check 均不是 lease。
 
 arm 的实际路径为 **lease check → 完整 S1/PTE/wired-page 核对 → 每一16KiB RAW物理页对应VA的 `DC CIVAC` → 再核对S1和lease → ARMED**。backing 的软件状态在首笔 cache op 前绑定唯一 slot/context、lease 与完整 request；DEVICE/CPU/RETAINED 都不得重发/rebind。已退休 backing 的 generation/capture_id/inner sequence 也独立核对，不依赖 slot 被外部清零后丢失的历史。同 generation 不得换 lease；新 generation 可在同 slot/context 上取得新的真实 lease，但不能换 backing/回调/图像sensor/tag/group。
 
-唯一 IRQ owner 必须提供一次**一致的原始快照**：outer DONE `+0x348`、inner ERR `+0x350`、CQ STATUS `+0x1c`、inner FIRST/LAST_TAG 与该 tag 的 FH_SPARE，group_tags 来自该帧 SOF 的有效 group 绑定。读清状态只消费一次，worker 不补读；快照的 generation/capture_id 来自实际 slot journal，不能由硬件 counter 猜出。
+唯一 IRQ owner 必须提供88B version3、一次**一致的原始快照**：outer DONE `+0x348`、inner ERR `+0x350`、CQ STATUS `+0x1c`、inner FIRST/LAST_TAG 与该 tag 的 FH_SPARE，group_tags 和 sof_time 来自该帧 SOF 的有效原始绑定。读清状态只消费一次，worker 不补读；快照的 generation/capture_id 来自实际 slot journal，不能由硬件 counter 猜出。native SOF 分支在实际 IAR/完整该帧 snapshot 后只采一次 mach_absolute_time；hybrid DONE 仅拷贝已锁存 SOF 的时间，并核同 generation/capture_id/inner cookie。FBC IAR 和每次 native finish（包括正常与 core-STOP 取消）在 cache 前仍核原 SOF/DONE/FBC receipt 与精确时间，不用晚到 worker 时间替换。
 
-finish 优先拒绝错误；CQ setting-done 或普通 GP_DONE 单独返回 `EAGAIN`，不是帧。只接受目标 `SW_GP_PASS1_DONE`（bit16..19）、单 tag/group 及精确 inner sequence，outer 即使超前也不当作完成凭据。通过后实际执行 **lease check → S1精确request匹配 → CPU pin/逐页 `DC IVAC` → 再验证S1和lease → `x9_camera_deliver` 同步复制 → 再验证lease/S1 → CPU pin退休/slot RETIRED**，此前不读取 RAW。完成后只 invalidate，绝不 clean+invalidate 将旧CPU dirty bytes写回覆盖DMA图像。成功、CPU 背压或同步期间 stop 都退休 source；重复 finish 不重放。tag/group/序号歧义或 lease/cache 失败使slot及其已绑定backing终态 RETAINED，保存首错，不 rearm、free、unmap 或撤依赖。其他slot误用正在使用的backing仅拒绝/保留其错误尝试，不替合法worker取得或更改缓存所有权。重用退休 slot 时 capture_id 必须前进，32-bit inner sequence 只接受小于半周期的非零向前差值，允许 wrap 到零但不自动扩展成 capture_id。
+finish 优先拒绝错误；CQ setting-done 或普通 GP_DONE 单独返回 `EAGAIN`，不是帧。只接受目标 `SW_GP_PASS1_DONE`（bit16..19）、单 tag/group 及精确 inner sequence，outer 即使超前也不当作完成凭据。先核非零 SOF≤DONE≤now、native original SOF/DONE/FBC receipt，再实际执行 **lease check → S1精确request匹配 → CPU pin/逐页 `DC IVAC` → 再验证S1和lease → `x9_camera_deliver` 同步复制 → 再验证lease/S1 → CPU pin退休/slot RETIRED**，此前不读取 RAW。完成后只 invalidate，绝不 clean+invalidate 将旧CPU dirty bytes写回覆盖DMA图像。成功、CPU 背压或同步期间 stop 都退休 source；重复 finish 不重放。tag/group/序号歧义或 lease/cache 失败使slot及其已绑定backing终态 RETAINED，保存首错，不 rearm、free、unmap 或撤依赖。其他slot误用正在使用的backing仅拒绝/保留其错误尝试，不替合法worker取得或更改缓存所有权。重用退休 slot 时 capture_id 必须前进，32-bit inner sequence 只接受小于半周期的非零向前差值，允许 wrap 到零但不自动扩展成 capture_id。
 
 本地冻结 SWEET `caches.c` 的 coherent-IO 分支将通用 `clean_dcache/flush_dcache` 实现为仅屏障，`*64` assembly入口跳转到它们；不能据API名称保证NC相机硬件能看到数据。相机局部 `x9_camera_cache.inc` 直接使用 `CTR_EL0.DminLine`、`DSB SY` 和PoC指令，不依赖该分支，也不改变其它子系统的cache政策。所有range限定在一个已核对的wired物理页；RAW包括末页padding都拥有整行，只做全页invalidate，无相邻分配partial-line丢弃。S1/CD/STE/CMDQ/EVTQ首次发布与每笔CMDQ command也已接实际CVAC/CIVAC，只有成功同步并再验证storage后才返回export或提交producer；不能用第一物理页+整个非连续虚拟长度同步。RAW ownership首错单独保存在 `raw_errno`，不伪装为PTE/storage损坏来阻断未来合法owner的abort/TLBI/drain；RAW仍终态不可重用，现有代码不新增map退休/授权。
 
@@ -630,7 +648,7 @@ FBC 的信用限制与全链停写仍须完成：厂商 `mtk_cam_sv_check_fbc_cn
 2. `read8/write8` 是 16-bit register / 8-bit data I2C；只在上电及总线归 AP 后调用。
 3. `capture(on)` 在 stream-on 前完成 SENINF、主摄 VC1／前摄 VC0 的 DT0x2b 图像过滤、RAW10 DMA、SMMU 配置；`capture(off)` 在返回前停止并排空，即使初始化只做了一半。
 4. 注册会分别上电读 ID 并恢复，只有两枚真实 ID 相符才发布 READY。调用发生在线程上下文；所有回调都不可重入相机 API。
-5. provider.version 必须为 `X9_CAMERA_PLATFORM_VERSION`（2）；version1 不接受。DMA worker 在真实 completion/slot/metadata 绑定及缓存同步后调用 `x9_camera_deliver(&completed)`，其中 completed 为 version2 的 `x9_camera_completed_frame`；不得在硬中断调用。generation 来自本次 `capture(on)`，time 为帧完成的 `mach_absolute_time`，capture_id 为该代已资格化 owned-request 标识。record/raw 直到返回都保持不变；EBUSY 丢帧并释放硬件 slot，不重放。记录验证不能代替 provider 的硬件、映射或控制生效证明。
+5. provider.version 必须为 `X9_CAMERA_PLATFORM_VERSION`（3）；version1/2 不接受。DMA worker 在真实 completion/slot/metadata 绑定及缓存同步后调用 `x9_camera_deliver(&completed)`，其中 completed 为 version3 的 `x9_camera_completed_frame`；不得在硬中断调用。generation 来自本次 `capture(on)`，time 为帧完成的 `mach_absolute_time`，sof_time 为 sole IRQ owner 对同请求 SOF 的原始观察时间，capture_id 为该代已资格化 owned-request 标识。record/raw 直到返回都保持不变；EBUSY 丢帧并释放硬件 slot，不重放。记录验证不能代替 provider 的硬件、映射或控制生效证明。
 
 控制层在调用 power/capture/stream 前记录 attempted 阶段及原始 generation；半途错误只清理实际尝试过的阶段。stop 先失效 generation/唤醒读者，再退出帧锁等待 capture(off)，因此完成 worker 不会被 start/stop 持帧锁堵住。**sensor 0100-off 或 capture(off) 非零时不调用 power(false)**；0100-off 不确定时也不调用后续 capture(off)，保持映射/时钟/供电依赖并置 FAULT/RETAINED；power(false) 失败也保留 journal。后续 close 不重试硬件清理、不释放保留的 staging buffer、不切换另一 sensor。注册时的 ID 供电恢复失败同样锁存。非零返回不是已经恢复或可以重新开始，只有明确 drain 成功后才能撤依赖。
 

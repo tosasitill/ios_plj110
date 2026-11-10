@@ -746,7 +746,7 @@ static int cam_sv_request_prepare_locked(uint64_t epoch,struct x9_camera_camsv_s
     lck_mtx_unlock(&camera_camsv_lock);
     if(e)return e;
     if(r.tag || r.group || r.reserved || r.frame.sensor!=cam_sv.status.sensor ||
-       r.frame.time || !r.frame.generation || !r.frame.capture_id || !r.iova ||
+       r.frame.time || r.frame.sof_time || !r.frame.generation || !r.frame.capture_id || !r.iova ||
        (r.iova&0x3fffULL) || r.iova>=0x400000000ULL ||
        r.frame.bytes>0x400000000ULL-r.iova || d.version!=X9_CAMERA_CAMSV_VERSION ||
        d.reserved || !d.context || !d.lease || !d.backing || !d.check)return EINVAL;

@@ -4,7 +4,7 @@
  * Lock order: camera_camsv_lock -> camera_s1_lock. Never call an owner or
  * x9_camera_deliver while holding camera_s1_lock; CPU state pins the backing.
  */
-_Static_assert(sizeof(struct x9_camera_camsv_request)==88,"CAMSV request layout");
+_Static_assert(sizeof(struct x9_camera_camsv_request)==96,"CAMSV request layout");
 
 static int cam_s1_dma_latch(struct x9_camera_s1 *m,int e)
 {
@@ -55,7 +55,7 @@ static int cam_s1_dma_device(struct x9_camera_camsv_slot *slot)
     if(!e && !m->published)e=ENXIO;
     if(!e && ((vm_offset_t)r->frame.raw!=m->raw || r->iova!=m->iova ||
         r->frame.bytes!=m->bytes || !r->frame.generation ||
-        !r->frame.capture_id || r->frame.time))e=EINVAL;
+        !r->frame.capture_id || r->frame.time || r->frame.sof_time))e=EINVAL;
     if(!e && m->raw_slot && (m->raw_slot!=slot ||
         m->raw_context!=slot->dma.context || m->raw_check!=slot->dma.check))e=EBUSY;
     if(!e && m->raw_state!=CAM_RAW_PRIVATE && m->raw_state!=CAM_RAW_IDLE)e=EBUSY;

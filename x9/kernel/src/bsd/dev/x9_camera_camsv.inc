@@ -8,7 +8,7 @@
  * IRQ registration or dummy backend. The native controller lease is mandatory.
  */
 #include "x9_camera_s1_dma.inc"
-_Static_assert(sizeof(struct x9_camera_camsv_irq)==80,"CAMSV snapshot layout");
+_Static_assert(sizeof(struct x9_camera_camsv_irq)==88,"CAMSV snapshot layout");
 
 static int cam_camsv_retain(struct x9_camera_camsv_slot *slot,int e)
 {
@@ -17,7 +17,7 @@ static int cam_camsv_retain(struct x9_camera_camsv_slot *slot,int e)
     slot->state=X9_CAMSV_RETAINED;slot->last_errno=e;
     return e;
 }
-static int cam_irq_retiring_frame_guard(const struct x9_camera_camsv_slot *,
+static int cam_irq_completed_frame_guard(const struct x9_camera_camsv_slot *,
     const struct x9_camera_camsv_irq *);
 
 int x9_camera_camsv_arm(struct x9_camera_camsv_slot *slot,
@@ -32,7 +32,7 @@ int x9_camera_camsv_arm(struct x9_camera_camsv_slot *slot,
     if(!e)e=cam_completed_controls(s,&r.frame);
     /* 16KiB mapping granule and captured CAM dma-range, not just 35-bit DMA
      * register width. A legal owner must still prove EVERY mapped byte. */
-    if(!e && (r.reserved || r.tag>=8 || r.group>=4 || r.frame.time ||
+    if(!e && (r.reserved || r.tag>=8 || r.group>=4 || r.frame.time || r.frame.sof_time ||
         !r.frame.generation || !r.frame.capture_id || !r.iova || (r.iova&0x3fffull) ||
         r.iova>=0x400000000ull || r.frame.bytes>0x400000000ull-r.iova ||
         d.version!=X9_CAMERA_CAMSV_VERSION || d.reserved || !d.context ||
@@ -118,14 +118,16 @@ static int cam_camsv_finish(struct x9_camera_camsv_slot *slot,
     if(irq.inner_sequence!=slot->request.inner_sequence) {
         e=cam_camsv_retain(slot,ESTALE);goto out;
     }
-    if(!irq.time || irq.time>mach_absolute_time()) {
+    if(!irq.time || !irq.sof_time || irq.sof_time>irq.time || irq.time>mach_absolute_time()) {
         e=cam_camsv_retain(slot,EINVAL);goto out;
     }
-    /* A generation mismatch alone never grants cache/DMA retirement. Only
-     * the real native worker's original SOF/DONE/FBC receipt can use this
-     * private canceled-frame route. Standalone finish stays strictly current. */
-    if(drop) {
-        e=cam_irq_retiring_frame_guard(slot,&irq);
+    /* Every native finish must still match its original SOF/DONE/FBC receipt,
+     * including the actual SOF observation time, before owner/cache access.
+     * A generation mismatch alone never grants canceled-frame retirement.
+     * Standalone finish stays strictly current and its sole IRQ/lease owner
+     * must supply the version3 same-request SOF binding independently. */
+    if(native_worker) {
+        e=cam_irq_completed_frame_guard(slot,&irq);
         if(e){e=cam_camsv_retain(slot,e);goto out;}
     }
     /* Retain by default before external callbacks: no rearm or replay can
@@ -136,7 +138,7 @@ static int cam_camsv_finish(struct x9_camera_camsv_slot *slot,
     if(!e)e=cam_s1_dma_cpu(slot);
     if(!e)e=slot->dma.check(slot->dma.context,slot->dma.lease,&slot->request);
     if(!e) {
-        struct x9_camera_completed_frame f=slot->request.frame;f.time=irq.time;
+        struct x9_camera_completed_frame f=slot->request.frame;f.time=irq.time;f.sof_time=irq.sof_time;
         e=drop?ESTALE:x9_camera_deliver(&f); /* STOP never publishes canceled pixels */
         /* Successful completion, CPU backpressure or concurrent stop all
          * retire this source. Never replay or hold the hardware slot for VM. */
