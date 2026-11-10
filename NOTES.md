@@ -1343,6 +1343,13 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 
 ## 7. 当前交接(GPS-BARO-34,2026-11-10): native cold启停TX与iOS输出隔离已接入，旧call冲突已纠正;真实注册链/可重复应用确认及完整生产链仍缺,代码齐后才出唯一最终镜像
 
+### GPS-BARO-35 在制交接(2026-11-10): LK实际加载路径已恢复，retained-image只读身份代码待编译/提交
+
+- **恢复时状态**：独立 `.local/x9/worktrees/gps-image-loader35` / `gps-image-loader35-20261110`，base **33f82fa**；8个源码路径尚未提交、没有GPS35对象编译或活跃build session。主线已继续有其它窗口提交，恢复时观察5dbe651/2c679ae且工作区干净；不覆盖它们。本节是checkpoint，不是编译/物理修好结论。
+- **新增原件证据**：保存LK payload `.local/x9/work/gps-secure-runtime21-20261110/lk_b.bin` 的gps_post_allocation **5a03c** 经58894取EMI region1 CONN_RO，5a1ac..1bc实际调用 **b6a24 load_fw_image**，以connsys_gnss命名partition/image、region1映射PA和length为destination。b6e10..e40命中MTK58881688/name后payload offset=selected header+**512B**、length=header+4；b6cc8..cd8读取后5a1c4调用89f8 cacheline64 CIVAC/DSB。**此LK剥512B，不是备用Linux48B loader**；后续security helpers/实际selected runtime未证明，不把证书或SHA当资格。
+- **待完成源码**：完整captured 8MiB MTK container生成payload length/SHA256 identity而不嵌入4MiB数组；build输入接线；现有worker的真实provision成功后、HIF prepare/reset release前IMAGE阶段只读CONN_RO并逐16KiB核对lease/held-reset/function1/EMI/六bus停止。native INIT NULL/0新增实际identity match gate，supplier仍负责selected ROM/image/secure与完整read权限；不新注册backend或造READY/NVauthority/pressure。状态尾/PDS诊断只解释身份，不宣称应用完成。
+- **材料/下一步**：私有 `.local/x9/work/gps-image-loader35-20261110/` 有LK xrefs/loader/header/cache/security dependencies原件解码；先review源码、用captured完整container生成gitignored头/私有metadata，再固定源码、唯一objects-source35正常交叉编译GPS/HID/Baseband，成功才精准整合/更新本节。不重复成功对象编译/镜像校验，不设备/ADB/SMC/flash/reboot/root/mailbox或测试套件；276/bootargs/root manifest不动，完整目标仍active，最终代码齐才唯一boot.img。
+
 ### GPS-BARO-34 生产代码里程碑(2026-11-10): 纠正call目标算术，接入native cold OPEN/STOP独立TX与iOS输出隔离；不是可重复应用确认
 
 - **固定源码/整合**：独立 `.local/x9/worktrees/gps-mnl-session34` / `gps-mnl-session34-20261110`，实际base **e9e14ec**；原件交接a117974合main为 **a8c3968**。9文件211insertions/12deletions源码 **8040d90**，后续单一PDS查询/错误分类修改 **381d153**；精准cherry-pick至main **1f16def / eaf38fe**，无冲突，保留并发相机/SmartPA/shim提交。目标仍active，全部GPS生产代码齐才唯一最终镜像。
