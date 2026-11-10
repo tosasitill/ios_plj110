@@ -12,6 +12,7 @@
 #include <kern/sched_prim.h>
 #include "x9_speaker_afe.h"
 #include "x9_audio_resources.h"
+#include "x9_speaker_out4.h"
 extern int sweet_x9_arg(const char *,int);
 extern int sweet_early_is_x9(void);
 LCK_GRP_DECLARE(speaker_afe_group,"x9-speaker-afe");
@@ -29,11 +30,7 @@ struct patch {uint32_t off,mask,value,saved,expected;};
  * Pad/master/slave/format are AP-master I2S, synchronous sharing OFF.
  * Cowork OUT4->IN4 master choice=0 only configures the inactive selector. */
 static struct patch config[]={
-    {0x1580,1u|2u|8u|32u|(7u<<6)|(1u<<10)|(31u<<11)|(31u<<16)|(31u<<23)|(7u<<28),
-            (15u<<11)|(31u<<16)|(1u<<23)|(1u<<28),0,0},
-    {0x1584,31u|(31u<<5)|(1u<<15),5u|(6u<<5)|(1u<<15),0,0},
-    {0x1588,31u,6u,0,0},
-    {0x1590,31u|(7u<<6)|(31u<<24),5u|(1u<<6)|(10u<<24),0,0},
+    X9_SPEAKER_OUT4_DISABLED_CONFIG,
     {0x1690,15u<<8,0,0,0},
     {0x0098,(1u<<5)|(1u<<20),1u<<5,0,0},
     {0x46b0,UINT32_MAX,0,0,0},{0x46b4,UINT32_MAX,0,0,0},

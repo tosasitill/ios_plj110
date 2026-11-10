@@ -18,6 +18,7 @@
 #include "../../../bsd/dev/x9_speaker_afe.h"
 #include "../../../bsd/dev/x9_tfa_plj110.h"
 #include "../../../bsd/dev/x9_audio_resources.h"
+#include "../../../bsd/dev/x9_speaker_mt6993.h"
 #if defined(ARM64_BOARD_CONFIG_SWEET)
 extern "C" int sweet_early_is_x9(void);
 extern "C" int sweet_x9_arg(const char *, int);
@@ -39,6 +40,7 @@ static int16_t prefill[X9_AUDIO_PREFILL_MAX * X9_AUDIO_CHANNELS];
 static int16_t period[X9_AUDIO_PERIOD * X9_AUDIO_CHANNELS];
 static_assert(sizeof(X9AudioControl) == 112, "PCM ABI v1 size");
 static_assert(sizeof(X9AudioStreamStatus) == 48, "stream status v2 size");
+static_assert(sizeof(X9AudioClockStatus) == 216, "clock status v1 size");
 static void beginUpdate() { __atomic_add_fetch(&control->seq, 1, __ATOMIC_SEQ_CST); }
 static void endUpdate() { __atomic_add_fetch(&control->seq, 1, __ATOMIC_SEQ_CST); }
 static int stopState(X9AudioControl *s, int error)
@@ -332,6 +334,25 @@ IOReturn X9AudioUserClient::externalMethod(uint32_t sel, IOExternalMethodArgumen
 {
     (void)dispatch; (void)target; (void)reference;
     if (!a || isInactive() || !control) return kIOReturnNotReady;
+    if (sel == X9AudioClockStatusSelector) {
+        if (a->structureInputDescriptor || a->structureOutputDescriptor || a->asyncWakePort ||
+            a->scalarInputCount || a->scalarOutputCount || a->structureInputSize ||
+            !a->structureOutput || a->structureOutputSize < sizeof(X9AudioClockStatus)) return kIOReturnBadArgument;
+        X9AudioClockStatus s; int e = x9_speaker_mt6993_clock_status(&s);
+        if (e) return result(e);
+        memcpy(a->structureOutput, &s, sizeof(s));
+        a->structureOutputSize = sizeof(s); return kIOReturnSuccess;
+    }
+    if (sel == X9AudioClockProbeSelector) {
+        if (a->structureInputDescriptor || a->structureOutputDescriptor || a->asyncWakePort ||
+            a->scalarInputCount || a->scalarOutputCount || a->structureInputSize ||
+            a->structureOutputSize) return kIOReturnBadArgument;
+        if (!exclusive || !administrator || !boardController) return kIOReturnNotPrivileged;
+        lck_mtx_lock(&audioLock);
+        int e = haveBackend || backendHeld || (control->state & X9AudioRunning) ? EBUSY :
+            x9_speaker_mt6993_clock_probe();
+        lck_mtx_unlock(&audioLock); return result(e);
+    }
     if (sel == X9AudioResourceStatusSelector) {
         if (a->structureInputDescriptor || a->structureOutputDescriptor || a->asyncWakePort ||
             a->scalarInputCount || a->scalarOutputCount || a->structureInputSize ||

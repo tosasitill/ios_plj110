@@ -1,0 +1,296 @@
+/* PLJ110 cold AUDIO/26M register-clock -> disabled OUT4 -> reverse restore.
+ * OPPO mt6993-afe-clk.c, clk-mt6993{,-pd,-adsp}.c and captured live DT.
+ * No APLL/pad/PA/DMA writes, no engine enable or fabricated physical backend.
+ * Separate board mutex -> short AP resource leaf; no callbacks to IOService.
+ */
+#include <sys/param.h>
+#include <sys/systm.h>
+#include <sys/errno.h>
+#include <kern/clock.h>
+#include <kern/locks.h>
+#include <mach/vm_types.h>
+#include "x9_audio_resources.h"
+#include "x9_speaker_mt6993.h"
+#include "x9_speaker_out4.h"
+#include "x9_mic_mt6993_regs.h"
+extern vm_offset_t ml_io_map(vm_offset_t,vm_size_t);
+extern int sweet_early_is_x9(void);
+extern int sweet_x9_arg(const char *,int);
+LCK_GRP_DECLARE(x9_speaker_clock_group,"x9-speaker-clock");
+LCK_MTX_DECLARE(x9_speaker_clock_lock,&x9_speaker_clock_group);
+static X9AudioClockStatus s={.version=X9_AUDIO_CLOCK_STATUS_VERSION};
+static struct {
+    vm_offset_t hwv,vlp,afe,apll;
+    uint32_t mux_owned, mux_expected[2];
+    bool captured, stuck;
+} j;
+struct field {unsigned off;uint32_t mask,value,saved,expected;};
+/* Gate bank1 bits0/1: HOPPING/F26M. OUT4/other clocks remain untouched. */
+static struct field fields[]={
+    {0x10,3,0,0,0}, X9_SPEAKER_OUT4_DISABLED_CONFIG
+};
+#define FIELD_COUNT ((unsigned)(sizeof(fields)/sizeof(fields[0])))
+static uint32_t rd(vm_offset_t b,unsigned r)
+{uint32_t v=*(volatile uint32_t *)(b+r);__asm__ volatile("dmb oshld":::"memory");return v;}
+static void wr(vm_offset_t b,unsigned r,uint32_t v)
+{*(volatile uint32_t *)(b+r)=v;__asm__ volatile("dsb sy":::"memory");}
+static int wait_bits(vm_offset_t b,unsigned r,uint32_t mask,uint32_t value,unsigned us)
+{
+    uint64_t ticks;nanoseconds_to_absolutetime((uint64_t)us*1000,&ticks);
+    uint64_t start=mach_absolute_time();
+    for(unsigned n=0;n<us;n++) {
+        if((rd(b,r)&mask)==value)return 0;
+        if(mach_absolute_time()-start>=ticks)break;delay(1);
+    }
+    s.last_register=r;s.last_value=rd(b,r);return ETIMEDOUT;
+}
+static int refuse(vm_offset_t b,unsigned r,uint32_t mask,uint32_t wanted)
+{
+    uint32_t v=rd(b,r);
+    if((v&mask)==wanted)return 0;
+    s.last_register=r;s.last_value=v;return EBUSY;
+}
+static uint32_t foreign(void)
+{
+    uint32_t bits=0;
+    for(unsigned n=1;n<=9;n++) {
+        unsigned base=n<5?0x20000+n*0x10000:0x70000+(n-5)*0x1000;
+        if(rd(j.hwv,base+0x708)&7)bits|=1u<<n;
+    }
+    return bits;
+}
+static void ao_snapshot(void)
+{
+    if(!(s.flags&X9ClockAOCaptured))return;
+    s.ap_after=rd(j.hwv,0x20708);s.all_after=rd(j.hwv,0x13700);
+    s.ack_after=rd(j.hwv,0x12900);s.done=rd(j.hwv,0x1132c);
+    s.foreign_after=foreign();s.vlp_after=rd(j.vlp,0x90);s.fenc_after=rd(j.vlp,0x274);
+}
+static int access(void)
+{
+    int e=refuse(j.hwv,0x20708,13,13);
+    if(!e)e=refuse(j.hwv,0x12900,13,13);
+    if(!e)e=refuse(j.hwv,0x13700,13,13);
+    if(!e)e=refuse(j.hwv,0x20708,2,0);
+    if(!e)e=refuse(j.hwv,0x13700,2,0);
+    if(!e)e=refuse(j.hwv,0x13704,13,0);
+    if(!e)e=refuse(j.hwv,0x1132c,13,13);
+    if(!e)e=refuse(j.vlp,0x90,0x8383,0);
+    if(!e)e=refuse(j.vlp,0x274,0xc0000000,0xc0000000);
+    if(!e && foreign())e=EBUSY;
+    if(e)j.stuck=true;return e;
+}
+static int idle(void)
+{
+    int e=access();if(e)return e;
+    /* Cold domain was proven before power; reject all 32 memif enables,
+     * 7 IN + 7 OUT engines, SRC/test/sine/pad TX and engine monitor activity.
+     * Never infer authoritative DMA drain merely from a disabled memif. */
+    const unsigned engines[]={0x14,0x18,0x1c};
+    for(unsigned n=0;!e && n<3;n++)e=refuse(j.afe,engines[n],15,0);
+    if(!e)e=refuse(j.afe,0x7c,UINT32_MAX,0);
+    const unsigned src[]={0xbd0,0xc50,0xcd0,0x98,0x1204};
+    for(unsigned n=0;!e && n<5;n++)e=refuse(j.afe,src[n],1,0);
+    if(!e)e=refuse(j.afe,0xf14,0xfff,0);
+    if(!e)e=refuse(j.afe,0x20,1u<<26,0);
+    for(unsigned n=0;!e && n<7;n++) {
+        e=refuse(j.afe,0x1300+n*0x30,1,0);
+        if(!e)e=refuse(j.afe,0x1480+n*0x40,1,0);
+    }
+    for(unsigned n=0;!e && n<sizeof(x9_mic_memif_regs)/sizeof(x9_mic_memif_regs[0]);n++)
+        e=refuse(j.afe,x9_mic_memif_regs[n],VUL1_ON,0);
+    if(e)j.stuck=true;return e;
+}
+static int smc(unsigned op,unsigned slot)
+{
+    register uint64_t x0 __asm__("x0")=0xc2000517ULL;
+    register uint64_t x1 __asm__("x1")=op,x2 __asm__("x2")=0,x3 __asm__("x3")=0;
+    register uint64_t x4 __asm__("x4")=0,x5 __asm__("x5")=0,x6 __asm__("x6")=0,x7 __asm__("x7")=0;
+    __asm__ volatile("smc #0":"+r"(x0),"+r"(x1),"+r"(x2),"+r"(x3),"+r"(x4),"+r"(x5),"+r"(x6),"+r"(x7)::"memory");
+    s.smc_result[slot]=x0;
+    /* Unknown secure mutation cannot be repaired by dropping its clocks. */
+    if(x0){j.stuck=true;return (int64_t)x0==-1?ENOTSUP:EIO;}return 0;
+}
+static int vote(unsigned bit,bool on)
+{
+    int e=wait_bits(j.hwv,0x1132c,bit,bit,10000);if(e)return e;
+    if(on)s.owned_vote|=bit; /* BEFORE a possibly late SET */
+    wr(j.hwv,on?0x20700:0x20704,bit);
+    e=wait_bits(j.hwv,0x20708,bit,on?bit:0,10000);
+    if(!e)e=wait_bits(j.hwv,0x1132c,bit,bit,10000);
+    if(!e && on)e=wait_bits(j.hwv,0x12900,bit,bit,10000);
+    if(e)j.stuck=true;else if(!on)s.owned_vote&=~bit;
+    return e;
+}
+static int mux_parent(unsigned n,uint32_t parent)
+{
+    uint32_t mask=3u<<(n*8),pdn=1u<<(7+n*8);
+    int e=refuse(j.vlp,0x90,pdn,pdn);if(e){j.stuck=true;return e;}
+    wr(j.vlp,0x98,mask);wr(j.vlp,0x94,parent&mask);wr(j.vlp,8,1u<<(n+1));
+    e=wait_bits(j.vlp,0x334,1u<<(30-n),0,1000);
+    if(!e)e=refuse(j.vlp,0x90,mask,parent&mask);
+    if(e)j.stuck=true;else j.mux_expected[n]=(parent&mask)|pdn;
+    return e;
+}
+static int mux_take(unsigned n)
+{
+    uint32_t pdn=1u<<(7+n*8),fenc=1u<<(31-n);
+    int e=refuse(j.vlp,0x90,pdn,pdn);
+    if(!e)e=refuse(j.vlp,0x274,fenc,0);
+    if(e)return e;
+    j.mux_owned|=1u<<n;e=mux_parent(n,0);if(e)return e;
+    wr(j.vlp,0x98,pdn); /* direct FENC enable has no UPDATE trigger */
+    e=wait_bits(j.vlp,0x274,fenc,fenc,1000);
+    if(!e)e=refuse(j.vlp,0x90,pdn|(3u<<(n*8)),0);
+    if(e)j.stuck=true;else j.mux_expected[n]=0;
+    return e;
+}
+static int change(unsigned n,uint32_t value)
+{
+    struct field *p=&fields[n];uint32_t old=rd(j.afe,p->off),bit=1u<<n;
+    if((old&p->mask)!=(p->expected&p->mask) &&
+       !((s.uncertain_mask&bit) && (old&p->mask)==(p->saved&p->mask))) {
+        s.last_register=p->off;s.last_value=old;return EBUSY;
+    }
+    uint32_t next=(old&~p->mask)|(value&p->mask);
+    if((next&p->mask)==(old&p->mask)){p->expected=next;s.uncertain_mask&=~bit;return 0;}
+    s.dirty_mask|=bit;s.uncertain_mask|=bit;p->expected=next;
+    wr(j.afe,p->off,next);uint32_t actual=rd(j.afe,p->off);
+    if((actual&p->mask)!=(next&p->mask)){s.last_register=p->off;s.last_value=actual;return EIO;}
+    s.uncertain_mask&=~bit;return 0;
+}
+static int verify_fields(bool saved)
+{
+    for(unsigned n=0;n<FIELD_COUNT;n++) {
+        struct field *p=&fields[n];
+        int e=refuse(j.afe,p->off,p->mask,(saved?p->saved:p->expected)&p->mask);
+        if(e)return e;
+    }
+    return 0;
+}
+static void afe_snapshot(bool configured)
+{
+    uint32_t top=rd(j.afe,0x10);
+    if(configured)s.top_configured=top;else s.top_after=top;
+    for(unsigned n=0;n<4;n++) {
+        uint32_t v=rd(j.afe,fields[n+1].off);
+        if(configured)s.out_configured[n]=v;else s.out_after[n]=v;
+    }
+}
+static int take(void)
+{
+    s.stage=X9ClockMap;
+    j.hwv=ml_io_map(0x1c040000,0x75000);j.vlp=ml_io_map(0x1c200000,0x1000);
+    j.afe=ml_io_map(0x1a110000,0x10000);j.apll=ml_io_map(0x1c203100,0x100);
+    if(!j.hwv || !j.vlp || !j.afe || !j.apll)return ENOMEM;
+    s.flags|=X9ClockAOCaptured;ao_snapshot();
+    s.ap_before=s.ap_after;s.all_before=s.all_after;s.ack_before=s.ack_after;
+    s.foreign_before=s.foreign_after;s.vlp_before=s.vlp_after;s.fenc_before=s.fenc_after;
+    s.stage=X9ClockCold;
+    /* AUDIO and ADSP TOP must be globally off. INFRA/AO AP votes may be
+     * borrowed under the same AP lease; foreign XPU votes are never reset. */
+    if((s.ap_before|s.all_before|s.ack_before|rd(j.hwv,0x1131c)|rd(j.hwv,0x13704))&3 ||
+       s.foreign_before)return EBUSY;
+    int e=refuse(j.vlp,0x90,0x8080,0x8080);
+    if(!e)e=refuse(j.vlp,0x274,0xc0000000,0);
+    if(e)return e;
+    const unsigned apll_regs[]={8,0xc,0x14,0x34,0x38,0x3c,0x40};
+    for(unsigned n=0;n<7;n++)s.apll[n]=rd(j.apll,apll_regs[n]);
+    s.flags|=X9ClockAPLLCaptured;
+    s.stage=X9ClockInit;s.flags|=X9ClockInitIssued;e=smc(0,0);if(e)return e;
+    s.stage=X9ClockDomains;
+    const unsigned bits[]={8,4,1};
+    for(unsigned n=0;n<3;n++) {
+        if(bits[n]==1 && ((rd(j.hwv,0x13700)|rd(j.hwv,0x12900)|rd(j.hwv,0x13704))&3 || foreign())) {
+            j.stuck=true;return EBUSY;
+        }
+        if(rd(j.hwv,0x20708)&bits[n]) {
+            if(bits[n]==1){j.stuck=true;return EBUSY;}
+            s.borrowed_vote|=bits[n];e=wait_bits(j.hwv,0x12900,bits[n],bits[n],10000);
+            if(e)j.stuck=true;
+        } else e=vote(bits[n],true);
+        if(e)return e;
+    }
+    s.stage=X9ClockMux;
+    for(unsigned n=0;n<2;n++){e=mux_take(n);if(e)return e;}
+    s.stage=X9ClockIdle;e=idle();if(e)return e; /* FIRST AFE reads */
+    for(unsigned n=0;n<FIELD_COUNT;n++)fields[n].saved=fields[n].expected=rd(j.afe,fields[n].off);
+    s.top_before=fields[0].saved;
+    for(unsigned n=0;n<4;n++)s.out_before[n]=fields[n+1].saved;
+    j.captured=true;s.flags|=X9ClockAFECaptured;
+    s.stage=X9ClockGates;e=change(0,0);if(e)return e;
+    s.stage=X9ClockSidebands;s.flags|=X9ClockSidebandsIssued;e=smc(7,1);if(e)return e;
+    s.stage=X9ClockI2S;
+    for(unsigned n=1;!e && n<FIELD_COUNT;n++)e=change(n,fields[n].value);
+    if(e)return e;
+    s.stage=X9ClockRecheck;e=idle();if(!e)e=verify_fields(false);if(e)return e;
+    afe_snapshot(true);s.flags|=X9ClockConfigured;return 0;
+}
+static int restore(void)
+{
+    if(j.stuck)return EIO; /* never unvote an uncertain/in-flight request */
+    int e=0;
+    if(j.captured) {
+        e=idle();if(e)return e;
+        for(unsigned n=FIELD_COUNT;n>0;n--)if(s.dirty_mask&(1u<<(n-1))) {
+            e=change(n-1,fields[n-1].saved);if(e)return e;
+            s.dirty_mask&=~(1u<<(n-1));
+        }
+        /* Also validate fields whose initial value needed no write. A
+         * third-party change cannot silently become a restored baseline. */
+        e=verify_fields(true);if(e)return e;
+        afe_snapshot(false);j.captured=false;
+    }
+    for(unsigned n=2;n>0;n--) {
+        unsigned k=n-1;if(!(j.mux_owned&(1u<<k)))continue;
+        uint32_t pdn=1u<<(7+k*8),mask=pdn|(3u<<(k*8)),fenc=1u<<(31-k);
+        e=refuse(j.vlp,0x90,mask,j.mux_expected[k]);if(e)return e;
+        wr(j.vlp,0x94,pdn);e=wait_bits(j.vlp,0x274,fenc,0,1000);
+        if(e){j.stuck=true;return e;}
+        e=mux_parent(k,s.vlp_before);if(e)return e;
+        e=refuse(j.vlp,0x90,mask,s.vlp_before&mask);if(e)return e;
+        j.mux_owned&=~(1u<<k);
+    }
+    /* AUDIO must finish off at authoritative surfaces before INFRA release.
+     * Keep an added AO erratum floor for this boot, matching ADSP stop.
+     * Borrowed votes and all unrelated bits are never withdrawn. */
+    const unsigned bits[]={1,4};
+    for(unsigned n=0;n<2;n++)if(s.owned_vote&bits[n]) {
+        if(foreign()){j.stuck=true;return EBUSY;}
+        e=vote(bits[n],false);if(e)return e;
+        if(bits[n]==1) {
+            e=wait_bits(j.hwv,0x12900,1,0,10000);
+            if(!e)e=refuse(j.hwv,0x13700,1,0);
+            if(!e)e=refuse(j.hwv,0x13704,1,0);
+            if(!e)e=refuse(j.hwv,0x1131c,1,0);
+            if(e){j.stuck=true;return e;}
+        }
+    }
+    if(s.owned_vote&8){s.parked_vote|=8;s.owned_vote&=~8u;}
+    return 0;
+}
+int x9_speaker_mt6993_clock_probe(void)
+{
+    if(!sweet_early_is_x9() || sweet_x9_arg("x9_audio",0)!=2)return ENXIO;
+    lck_mtx_lock(&x9_speaker_clock_lock);
+    if(s.flags&X9ClockAttempted){lck_mtx_unlock(&x9_speaker_clock_lock);return EBUSY;}
+    uint64_t ticket=0;int e=x9_audio_resources_claim(X9AudioResourceSpeaker,&ticket);
+    if(e){lck_mtx_unlock(&x9_speaker_clock_lock);return e;} /* no attempt consumption */
+    s.ticket=ticket;s.flags=X9ClockAttempted|X9ClockHeld;
+    s.smc_result[0]=s.smc_result[1]=INT64_MIN;
+    e=take();s.error=(uint32_t)e;
+    unsigned failure_stage=s.stage,failure_register=s.last_register,failure_value=s.last_value;
+    s.stage=X9ClockRestore;int off=restore();ao_snapshot();
+    if(!off)off=x9_audio_resources_release(X9AudioResourceSpeaker,ticket);
+    s.restore_error=(uint32_t)off;
+    if(off){s.flags|=X9ClockPoisoned;x9_audio_resources_fault(X9AudioResourceSpeaker,ticket,e?e:off);}
+    else {s.flags&=~X9ClockHeld;s.ticket=0;s.flags|=X9ClockRestored;}
+    if(e){s.stage=failure_stage;s.last_register=failure_register;s.last_value=failure_value;}
+    else if(!off)s.stage=X9ClockDone;
+    lck_mtx_unlock(&x9_speaker_clock_lock);return e?e:off;
+}
+int x9_speaker_mt6993_clock_status(X9AudioClockStatus *out)
+{
+    if(!out)return EINVAL;
+    lck_mtx_lock(&x9_speaker_clock_lock);*out=s;lck_mtx_unlock(&x9_speaker_clock_lock);return 0;
+}

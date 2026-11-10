@@ -12,6 +12,7 @@
 #include "../kernel/src/bsd/dev/x9_speaker_afe.h"
 #include "../kernel/src/bsd/dev/x9_tfa_plj110.h"
 #include "../kernel/src/bsd/dev/x9_audio_resources.h"
+#include "../kernel/src/bsd/dev/x9_speaker_mt6993.h"
 static volatile sig_atomic_t interrupted;
 static void on_signal(int n) { (void)n; interrupted = 1; }
 static int status(io_connect_t c, X9AudioControl *s) {
@@ -216,6 +217,30 @@ done:
     for (unsigned i = 0; i < 3; i++) if (maps[i]) IOConnectUnmapMemory64(c, i, mach_task_self(), maps[i]);
     return rc;
 }
+static int clock_status(io_connect_t c) {
+    _Static_assert(sizeof(X9AudioClockStatus) == 216, "clock status v1 size");
+    X9AudioClockStatus s; size_t n = sizeof(s);
+    kern_return_t r = IOConnectCallStructMethod(c, X9AudioClockStatusSelector, NULL, 0, &s, &n);
+    if (r || n != sizeof(s) || s.version != X9_AUDIO_CLOCK_STATUS_VERSION) {
+        fprintf(stderr,"clock status/ABI failed: 0x%x\n",r); return 1;
+    }
+    printf("cold register-clock flags=%x stage=%u errno=%u restore-errno=%u held=%u ticket=%llu\n"
+           "  votes owned/borrowed/parked=%x/%x/%x dirty/uncertain=%x/%x last=%x:%x\n"
+           "  AP before/after=%x/%x aggregate=%x/%x ack=%x/%x done=%x foreign=%x/%x\n"
+           "  VLP before/after=%x/%x FENC=%x/%x TOP before/configured/after=%x/%x/%x\n",
+           s.flags,s.stage,s.error,s.restore_error,(s.flags&X9ClockHeld)!=0,(unsigned long long)s.ticket,
+           s.owned_vote,s.borrowed_vote,s.parked_vote,s.dirty_mask,s.uncertain_mask,s.last_register,s.last_value,
+           s.ap_before,s.ap_after,s.all_before,s.all_after,s.ack_before,s.ack_after,s.done,
+           s.foreign_before,s.foreign_after,s.vlp_before,s.vlp_after,s.fenc_before,s.fenc_after,
+           s.top_before,s.top_configured,s.top_after);
+    for (unsigned i=0;i<4;i++)printf("  OUT4[%u] before/configured/after=%x/%x/%x\n",
+        i,s.out_before[i],s.out_configured[i],s.out_after[i]);
+    printf("  APLL2 AO-only CON0/CON1/CON3/FENC/TUNER/PCW0/PCW1=%x/%x/%x/%x/%x/%x/%x\n"
+           "  AUDIO SMC INIT/SIDEBANDS=%llx/%llx; FENC/nominal profile is NOT PLL lock or speaker Ready\n",
+           s.apll[0],s.apll[1],s.apll[2],s.apll[3],s.apll[4],s.apll[5],s.apll[6],
+           (unsigned long long)s.smc_result[0],(unsigned long long)s.smc_result[1]);
+    return 0;
+}
 int main(int argc, char **argv) {
     if (argc == 4 && !strcmp(argv[1], "amp-inspect")) return inspect_container(argv[2], argv[3]);
     int amp = argc == 2 && !strcmp(argv[1], "amp-status");
@@ -225,18 +250,20 @@ int main(int argc, char **argv) {
     int board = argc == 2 && !strcmp(argv[1], "board-status");
     int afe = argc == 2 && !strcmp(argv[1], "afe-status");
     int resources = argc == 2 && !strcmp(argv[1], "resource-status");
+    int clocks = argc == 2 && !strcmp(argv[1], "clock-status");
+    int clock_probe = argc == 2 && !strcmp(argv[1], "clock-probe");
     int stream = argc == 2 && !strcmp(argv[1], "stream-status");
     int stream_stop = argc == 2 && !strcmp(argv[1], "stream-stop");
     int playing = argc == 3 && !strcmp(argv[1], "play");
     int dsp = argc == 2 && !strcmp(argv[1], "dsp-status");
-    if (!amp && !probing && !playing && !dsp && !board && !afe && !resources && !stream && !stream_stop && !booting && !stopping && !(argc == 2 && !strcmp(argv[1], "status"))) {
-        fprintf(stderr, "usage: audioctl amp-status | amp-probe | status | resource-status | stream-status | stream-stop | afe-status | dsp-status | board-status | dsp-boot | dsp-stop |\n  play <S16LE stereo 48000Hz raw PCM> | amp-inspect <local.cnt> <exact-profile>\n"); return 2;
+    if (!amp && !probing && !playing && !dsp && !board && !afe && !resources && !clocks && !clock_probe && !stream && !stream_stop && !booting && !stopping && !(argc == 2 && !strcmp(argv[1], "status"))) {
+        fprintf(stderr, "usage: audioctl amp-status | amp-probe | status | resource-status | clock-status | clock-probe | stream-status | stream-stop | afe-status | dsp-status | board-status | dsp-boot | dsp-stop |\n  play <S16LE stereo 48000Hz raw PCM> | amp-inspect <local.cnt> <exact-profile>\n"); return 2;
     }
     FILE *f = playing ? fopen(argv[2], "rb") : NULL;
     if (playing && !f) { perror(argv[2]); return 1; }
     io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching(X9_AUDIO_CLASS));
     if (!service) { fprintf(stderr, "X9Audio absent (requires x9_audio=1 or 2)\n"); if (f) fclose(f); return 1; }
-    io_connect_t c = 0; kern_return_t r = IOServiceOpen(service, mach_task_self(), (probing || booting || stopping || stream_stop) ? 2 : playing ? 1 : 0, &c);
+    io_connect_t c = 0; kern_return_t r = IOServiceOpen(service, mach_task_self(), (probing || clock_probe || booting || stopping || stream_stop) ? 2 : playing ? 1 : 0, &c);
     IOObjectRelease(service);
     if (r) { fprintf(stderr, "open failed: 0x%x\n", r); if (f) fclose(f); return 1; }
     X9AudioControl s; int rc = status(c, &s);
@@ -252,6 +279,12 @@ int main(int argc, char **argv) {
         if (board) rc = board_status(c);
         if (afe) rc = afe_status(c);
         if (resources) rc = resource_status(c);
+        if (clocks) rc = clock_status(c);
+        if (clock_probe) {
+            kern_return_t op = call(c, X9AudioClockProbeSelector);
+            if (op) fprintf(stderr,"cold register-clock cycle failed: 0x%x; no retry/reset loop\n",op);
+            int cr = clock_status(c); rc = op || cr;
+        }
         if (stream) rc = stream_status(c);
         if (stream_stop) {
             kern_return_t op = call(c, X9AudioStop);

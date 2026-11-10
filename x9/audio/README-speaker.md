@@ -8,6 +8,8 @@ PCM ABI 仍为 v1；**board-status 和 stream-status 为 v2**，需配套本轮 
 新版结构。私有 kernel backend 回调也升级为 v2（start 增加预填输入）；不能继续注册
 旧版 start 回调。私有 AFE platform 为 v2（新增 cached `held` 回调，保留部分申请失败的资源）。
 AFE/stream/resource 状态 selector 只返回缓存，不申请硬件资源。
+新增 `clock-status` 同样只读缓存；`clock-probe` 是 root／mode2 的一次
+**有电源、时钟和禁用 OUT4 寄存器写入**的显式事务，不是只读 probe，不能自动执行。
 
 ## 构建
 
@@ -64,6 +66,7 @@ staging 必须单独确认、走项目 extent 写入流程；本构建器不安�
 | selector 7/8 | cached AFE status v2 / stream lease + physical cursor status v2；只读，不做 MMIO |
 | selector 9/10 | cached PA status v1 / root type2 显式双 PA reg03 probe；不写 PA 值 |
 | selector 11 | cached AP resource lease status v1／64B；没有 claim/release 用户接口 |
+| selector 12/13 | cached clock status v1／216B / root type2 显式 cold register-clock＋disabled OUT4 配置／恢复 |
 | memory 0 | 只读 kernel control，带 seqlock、generation、真实 played/queued |
 | memory 1 | 可写 producer end-frame，release 发布，kernel 检查窗口 |
 | memory 2 | 65536-frame S16LE stereo PCM 环，256 KiB |
@@ -114,6 +117,52 @@ AFE platform v2 的 `held(context)` 必须是缓存所有权谓词，不做 MMIO
 这仅互斥已接入的本地 AP 音频 owner，**不是 clock provider，也不是物理资源证明**。
 foreign XPU、HWV/PMACK、APLL2、pad、PA、EMI/cache 和 DMA quiesce 检查没有移除。
 `owner=none` 不代表所有电源 vote 已撤或功放已静音；禁止据此设置 speaker Ready。
+
+### 显式接通寄存器电源／时钟与禁用的 OUT4 配置
+
+`x9_speaker_mt6993.c` 现在提供独立的板级窄事务，不注册 speaker AFE 或 playback
+backend。用户完成配套 kernel/tool 部署并以 `x9_audio=2` 启动后，在 **iOS root shell**
+可显式执行一次：
+
+```sh
+audioctl clock-status
+audioctl clock-probe
+audioctl clock-status
+audioctl resource-status
+```
+
+不要把它放进启动脚本。它与 DSP boot、mic、speaker prepare 共用 AP ticket；
+已有 owner 时 EBUSY，且不消耗本 boot 的 attempt。进入事务后每 boot 仅一次，
+失败不 retry/reset，也不通过关闭控制连接撤销保留的硬件资源。
+
+| 阶段 | 实际操作与边界 |
+|---|---|
+| cold admission | AO 快照确认 AUDIO／ADSP TOP 全局 off、无 foreign XPU1..9 AUDIO/TOP/INFRA vote；两个 VLP mux 必须 PDN 且 FENC off |
+| AUDIO resources | AUDIO SMC INIT0 → AO／INFRA／AUDIO AP votes，只添加缺少的票；borrowed INFRA／AO 票不撤 |
+| register clocks | audiointbus／audio_h 的 2-bit parent 在 PDN 下切到 index0 的 26 MHz，再启 direct FENC，检查 UPDATE CHK／FENC／readback |
+| idle admission | 第一次 AFE 读前确认 domain／mux 可访问；拒绝 engine/monitor、32 memif、7 IN＋7 OUT enable、SRC/test/sine/pad TX 活动；不清 IRQ、reset 或取消 DMA |
+| configure | 仅开 HOPPING/F26M 的 bank1 bits0/1 → SMC SIDEBANDS7 → 四个禁用 OUT4 字段；EN 始终0，不写 pads、routes、DL24 地址、DMA、PA 或 APLL |
+| restore | OUT4→base gate 逐字段 masked restore/readback → audio_h／intbus PDN与原 parent → AUDIO AP unvote；确认 PMACK/global/STA/busy off 后才撤自己的 INFRA票 |
+
+OUT4 复用 `x9_speaker_out4.h` 中与实际 engine 相同的 S16／32-bit slot、FS5／relatch10
+profile，避免诊断配置和播放配置漂移。**只是禁用状态下的寄存器格式验证，不是 48 kHz
+时钟或 I²S 波形证明。**这里只接通 26 MHz 寄存器时钟，没有开启 AUDIO engine／SRAM，
+不做 SRAM request，也不建立 safe PA mute。将来 full provider 仍须补足这些条件。
+
+写入前记录 dirty／uncertain；恢复只接受本字段原值或自己的预期值，第三种值立即拒绝。
+final readback 也核对未写字段，不能把外部变化收编成新 baseline。SMC 返回未知失败、
+HWV／FENC timeout、domain accessibility 丢失或 inherited engine 活动均保留 journal／ticket，
+不掉电冒充恢复。`error` 与 `restore_error` 分开，失败阶段保留。`Restored` 仅表示本轮
+可恢复字段与活动票的 cleanup 完成，不表示安全调用从未产生持久效果：成功 SMC INIT／
+SIDEBANDS 没有伪造 undo，若本轮添加 AO vote，按既有 ADSP 的未知 sw_ver erratum 策略
+保留为 **parked_vote=8**，不当作活动播放 lease；borrowed 票也保持不变。
+
+`clock-status` 保留 before/configured/after、raw SMC result、dirty/uncertain、held ticket。
+APLL2 CON0/CON1/CON3/FENC/TUNER/PCW0/PCW1 仅在 cold admission 后读取 AO 快照，
+**从未写 PLL**。OPPO `clk-pll.c` 的 `mtk_pll_fenc_prepare()` 仅维护 software count，
+`is_prepared()` 只读 FENC；FENC不是已证实的 lock/rate/所有权原语。不能依据参数
+`0x78fd5264/65`、FENC或本事务返回0设置 Ready。仍须接 VLP APLL2／全资源 ownership、
+可信双PA mute/config、pads与DMA/cache/quiesce，实体出声与 iOS HAL 路由尚未验收。
 
 ### 对齐启动预填和 PCM 时间线
 
