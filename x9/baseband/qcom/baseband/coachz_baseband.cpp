@@ -435,43 +435,116 @@ static void bb_esim_step(void)
     printf("COACHZ baseband: esim event %u a%u b%u c%u d%u e%u\n", event.kind, event.a, event.b, event.c, event.d, event.e);
 }
 
-// The activation indication (coachz_bb_data.h) to the BSP client that registered, with slot one's ICCID and IMSI once the card gave them.
-static uint8_t bb_iccid[CBD_ICCID_BYTES], bb_imsi[CBD_IMSI_BYTES], bb_iccid_known, bb_imsi_known, bb_act_known, bb_act_channel, bb_act_cid;
+// Cache real identities per physical slot. A UIM client may address both cards;
+// its client ID alone is NOT a subscription and cannot select this cache.
+static uint8_t bb_iccid[2][CBD_ICCID_BYTES], bb_imsi[2][CBD_IMSI_BYTES];
+static uint8_t bb_iccid_known[2], bb_imsi_known[2], bb_act_known, bb_act_channel, bb_act_cid;
+static bool bb_dsds_read_ready;
+static unsigned bb_sim_count(void)
+{
+#if COACHZ_NATIVE_DPMAIF
+  return x9_md_sim_count();
+#else
+  return 1;
+#endif
+}
 static void bb_activation_indicate(void)
 {
   if (!bb_act_known) return;
-  uint8_t tlvs[CBD_ACTIVATION_SIM_TLVS];
-  const uint32_t t = cbd_activation_state(tlvs, sizeof tlvs, bb_iccid_known ? bb_iccid : nullptr, bb_imsi_known ? bb_imsi : nullptr);
+  uint8_t tlvs[CBD_ACTIVATION_DUAL_TLVS];
+  uint32_t t;
+  if (bb_sim_count() == 2)
+    t = cbd_activation_dual_state(tlvs, sizeof tlvs,
+      bb_iccid_known[0] ? bb_iccid[0] : nullptr, bb_imsi_known[0] ? bb_imsi[0] : nullptr,
+      bb_iccid_known[1] ? bb_iccid[1] : nullptr, bb_imsi_known[1] ? bb_imsi[1] : nullptr, bb_dsds_read_ready);
+  else
+    t = cbd_activation_state(tlvs, sizeof tlvs, bb_iccid_known[0] ? bb_iccid[0] : nullptr, bb_imsi_known[0] ? bb_imsi[0] : nullptr);
+  if (!t) return;
   const uint32_t n = cbq_private_indication(CBD_BSP_ACTIVATION_REGISTER, CBD_SVC_BSP, bb_act_cid, tlvs, t, bb_out, sizeof bb_out);
   if (n) bb_push(bb_act_channel, bb_out, n);
 }
+#if COACHZ_NATIVE_DPMAIF
+// Called by X9's QMI owner without bb_lock, only after the complete paired
+// CPIN/ICCID snapshot. Raw EF order in; BSP uses reading-order BCD. NULL clears
+// a card. Publish atomically so no intermediate reply can duplicate SIM1.
+static void bb_dual_card_status(const uint8_t *first, const uint8_t *second)
+{
+  if (!bb_lock || bb_sim_count() != 2) return;
+  uint8_t ids[2][CBD_ICCID_BYTES] = {};
+  bool have[2] = {first != nullptr, second != nullptr};
+  if (first) cbd_iccid_from_ef(first, CBD_ICCID_BYTES, ids[0]);
+  if (second) cbd_iccid_from_ef(second, CBD_ICCID_BYTES, ids[1]);
+  const bool ready = have[0] && have[1] && memcmp(ids[0], ids[1], CBD_ICCID_BYTES);
+  IOLockLock(bb_lock);
+  bool changed = bb_dsds_read_ready != ready;
+  for (unsigned sim = 0; sim < 2; sim++) {
+    if (bb_iccid_known[sim] != have[sim] || (have[sim] && memcmp(ids[sim], bb_iccid[sim], CBD_ICCID_BYTES))) {
+      memcpy(bb_iccid[sim], ids[sim], CBD_ICCID_BYTES); bb_iccid_known[sim] = have[sim];
+      bzero(bb_imsi[sim], CBD_IMSI_BYTES); bb_imsi_known[sim] = 0; changed = true;
+    }
+  }
+  bb_dsds_read_ready = ready;
+  if (changed) {
+    printf("X9 DUALSIM: BSP DsdsAllowed %u; paired ICCID ready %u/%u (not DDS or network success)\n", ready, have[0], have[1]);
+    bb_activation_indicate();
+  }
+  IOLockUnlock(bb_lock);
+  bzero(ids, sizeof ids);
+}
+#endif
 
-// CommCenter's own EF_ICCID and EF_IMSI reads: the request's client, transaction and file, so the answer can be recognized. Never logged.
-struct bb_sim_read { uint8_t used, channel, cid; uint16_t txn, file; };
-static bb_sim_read bb_sim_reads[8];
-static uint32_t bb_sim_next;
+// Match client generation, transaction, session slot, file and full-file read.
+// Never infer a SIM route from the order in which asynchronous replies arrive.
+struct bb_sim_read { uint8_t used, channel, cid, sim; uint16_t txn, file; uint32_t local; uint64_t generation; };
+static bb_sim_read bb_sim_reads[64];
 static void bb_sim_request(const struct cbq_result &r, const uint8_t *sdu)
 {
   if (r.service != CBD_SVC_UIM) return;
   const uint32_t file = cbd_uim_read_file(sdu, r.len);
   if (file != CBD_EF_ICCID && file != CBD_EF_IMSI) return;
-  bb_sim_reads[bb_sim_next++ % 8] = { 1, r.channel, r.cid, cbd_rd16(sdu + 1), (uint16_t)file };
+  uint32_t size = 0;
+  const uint8_t *session = cbd_find(sdu, r.len, 1, &size);
+  if (!session || size != 2 || session[1] ||
+      (session[0] != 0 && session[0] != 2 && session[0] != 6 && session[0] != 7)) return;
+  const uint8_t sim = session[0] == 2 || session[0] == 7 ? 1 : 0;
+  if (sim >= bb_sim_count()) return;
+  const uint8_t *read = cbd_find(sdu, r.len, 3, &size);
+  if (!read || size != 4 || cbd_rd16(read)) return; // no partial offset identities
+  const uint32_t slot = r.local_port - CBQ_PORT_BASE;
+  if (slot >= CBQ_MAX_CLIENTS) return;
+  for (auto &q : bb_sim_reads) {
+    const uint32_t old = q.local - CBQ_PORT_BASE;
+    if (q.used && (old >= CBQ_MAX_CLIENTS || !bb_qmux.client[old].used || bb_qmux.client[old].generation != q.generation)) q.used = 0;
+    if (q.used) continue;
+    q = {1, r.channel, r.cid, sim, cbd_rd16(sdu + 1), (uint16_t)file, r.local_port, bb_qmux.client[slot].generation};
+    return;
+  }
+  // Missing an observation is safer than reusing an in-flight identity owner.
 }
 static void bb_sim_answer(const struct cbq_result &r, const uint8_t *sdu, uint32_t n)
 {
   if (r.service != CBD_SVC_UIM || n < 7u || sdu[0] != 2u || cbd_rd16(sdu + 3) != CBD_UIM_READ_TRANSPARENT) return;
   for (auto &q : bb_sim_reads) {
-    if (!q.used || q.channel != r.channel || q.cid != r.cid || q.txn != cbd_rd16(sdu + 1)) continue;
+    if (!q.used || q.local != r.local_port || q.channel != r.channel || q.cid != r.cid || q.txn != cbd_rd16(sdu + 1)) continue;
     q.used = 0;
-    uint8_t ef[16], value[CBD_ICCID_BYTES];
+    const uint32_t slot = r.local_port - CBQ_PORT_BASE;
+    if (slot >= CBQ_MAX_CLIENTS || q.generation != bb_qmux.client[slot].generation) return;
+    uint8_t ef[16] = {}, value[CBD_ICCID_BYTES] = {};
     const uint32_t len = cbd_uim_read_content(sdu, n, ef, sizeof ef);
     const bool iccid = q.file == CBD_EF_ICCID;
-    if (iccid ? !cbd_iccid_from_ef(ef, len, value) : !cbd_imsi_from_ef(ef, len, value)) return;
-    uint8_t *have = iccid ? bb_iccid : bb_imsi, *known = iccid ? &bb_iccid_known : &bb_imsi_known;
+    const bool valid = iccid ? cbd_iccid_from_ef(ef, len, value) : cbd_imsi_from_ef(ef, len, value);
+    bzero(ef, sizeof ef);
+    if (!valid) { bzero(value, sizeof value); return; }
+    uint8_t *have = iccid ? bb_iccid[q.sim] : bb_imsi[q.sim], *known = iccid ? &bb_iccid_known[q.sim] : &bb_imsi_known[q.sim];
     const uint32_t size = iccid ? CBD_ICCID_BYTES : CBD_IMSI_BYTES;
-    if (*known && !memcmp(value, have, size)) return;
-    memcpy(have, value, size); *known = 1;
-    printf("COACHZ baseband: slot one %s read from the card, activation indication %s\n", iccid ? "ICCID" : "IMSI",
+    if (*known && !memcmp(value, have, size)) { bzero(value, sizeof value); return; }
+    if (iccid) {
+      // New card: never pair its ICCID with the previous card's IMSI.
+      bzero(bb_imsi[q.sim], CBD_IMSI_BYTES); bb_imsi_known[q.sim] = 0;
+      bb_dsds_read_ready = false; // requires a fresh paired snapshot
+    }
+    memcpy(have, value, size); *known = 1; bzero(value, sizeof value);
+    printf("COACHZ baseband: SIM%u %s read from the card, activation indication %s\n", q.sim + 1, iccid ? "ICCID" : "IMSI",
            bb_act_known ? "sent again with it" : "waits for registration");
     bb_activation_indicate();
     return;
@@ -527,8 +600,8 @@ static int bb_private_answer(uint32_t channel, const struct cbq_result &r, const
     bb_act_known = 1; bb_act_channel = (uint8_t)channel; bb_act_cid = r.cid;
     bb_activation_indicate();
     if (bb_activations++ < 4)
-      printf("COACHZ baseband: activation register answered, state activated, slot one ICCID %s, IMSI %s\n", bb_iccid_known ? "included" : "not read yet",
-             bb_imsi_known ? "included" : "not read yet");
+      printf("COACHZ baseband: activation register answered, state activated, slot one ICCID %s, IMSI %s\n", bb_iccid_known[0] ? "included" : "not read yet",
+             bb_imsi_known[0] ? "included" : "not read yet");
     return 1;
   }
   return 0;

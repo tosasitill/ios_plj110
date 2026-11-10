@@ -136,6 +136,7 @@ static bool x9q_dir(x9q_job &j,const uint8_t *p,unsigned n){
  while(i<n)if(p[i++]!=0xff)return false;return true;
 }
 static void x9q_error(x9q_job &j,uint16_t err){
+ if(x9_md_sim_count()==2&&j.port==X9BB_PORT_BASE+0x0b&&(j.id==0x2f||j.id==0x47))bb_dual_card_status(nullptr,nullptr);
  if(!j.background&&!j.probe){x9q_packet p(j.req,err);p.send(j.local,j.port);}
  if(!j.background||j.probe)printf("X9 QMI AT: response service 0x%x msg 0x%04x txn %u error %u SIM%u probe %u stage %u\n",
   j.port-X9BB_PORT_BASE,j.id,x9q_u16(j.req+1),err,j.sim_slot+1,j.probe,j.stage);
@@ -213,6 +214,7 @@ static void x9q_uim_next(x9q_job &j){
   static unsigned logged;if(logged<8){logged++;printf("X9 DUALSIM: SIM1/SIM2 ICCID read via masks 1/2, distinct %u (values private)\n",distinct);}
   if(!distinct){x9q_error(j,X9Q_INTERNAL);return;} // never publish SIM1 twice
  }
+ if(x9_md_sim_count()==2)bb_dual_card_status(j.iccid_valid[0]?j.iccid[0]:nullptr,j.iccid_valid[1]?j.iccid[1]:nullptr);
  x9q_packet p(j.req);p.tlv(0x10,j.id==0x2f?j.cards:j.slots,j.id==0x2f?j.card_bytes:j.slot_bytes);
  x9q_finish(j,p,j.id==0x2f?0x32:0x48);
 }
@@ -648,7 +650,7 @@ static void x9q_poll(){
    j.port=X9BB_PORT_BASE+(probed<2?0x0b:3);j.id=probed==0?0x2f:probed==1?0x47:0x4d;
    j.sim_slot=probed==3?1:0;probed++;j.req[3]=(uint8_t)j.id;
    j.len=7;j.order=++x9q_order;j.deadline=x9q_ms()+180000;
-   printf("X9 DUALSIM: uim2 queued one-shot service %u msg 0x%04x SIM%u probe; D22 gate unchanged\n",j.port-X9BB_PORT_BASE,j.id,j.sim_slot+1);
+   printf("X9 DUALSIM: uim3 queued one-shot service %u msg 0x%04x SIM%u probe; D22 gate unchanged\n",j.port-X9BB_PORT_BASE,j.id,j.sim_slot+1);
   }
  }
  uint64_t now=x9q_ms();
