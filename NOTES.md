@@ -152,7 +152,19 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
 
-## 7. 当前交接(HANDOFF 112,2026-11-10): 174(il)已启动;优先反编译——PS-only信号清零与数据图标启用条件已定位;能力门跟随路由修正,未打包
+## 7. 当前交接(HANDOFF 113-DATA,2026-11-10): 原生蜂窝数据面/流量统计已编译打包;真实收发未验证
+
+- **本轮用户目标**:完成4G/5G蜂窝数据的内核和iOS侧数据链路。没有flash/reboot/设备分区写入/ADB操作/插件重建/测试套件。不要将以下代码完成或编译通过等同于实机联网成功。
+- **实际阻塞证据**:`~/174.txt`14.160s仍是`DMA alloc of 16384 bytes returned no descriptor`,DPMAIF在prepare隔离;20.557s MIPC握手完成;25.937s真实SA注册,45.946s真实LTE注册;仍没有WDS Start。另一个确定源码阻塞:`coachz_bb_pdp.cpp`仍要求`bb_data.step==CBD_DONE`和IPA/QMAP格式,而`COACHZ_NATIVE_DPMAIF`早已禁止该初始化,所以即使原生拨号成功PDP网络栈也永远关闭。
+- **DMA实现**:`X9DPMAIF.inc`使用host-contiguous、无IOMMU的40-bit IOBuffer,保留32KiB对齐及segment/范围验证。依据MT6993厂商`ccci_dpmaif_com.c`的`DMA_BIT_MASK(40)`、普通`dma_map_single/page`和`ccci_dpmaif_drv_{v3,com}`地址写入:DRB高位在UL SRAM+0x18,BAT高位在DL+0x50;**LRO PIT高位在CON1[31:24],不是非LRO的CON4**。DT alloc-ranges只约束可选reserved-memory分配器,不是所有DMA的4GiB硬限制。不扩XNU低端RAM、不占用/改写LK或secure carve-out;硬件DMA可达性仍待证实。
+- **iOS侧PDP实现**:`coachz_bb_pdp.cpp`原生模式以`cbp_observe`的成功会话状态∩`coachz_modem_data_state`的真实MIPC/DPMAIF route为gate,不再等IPA。raw-IP默认MTU1500,使用MD协商MTU(有界3072),保留非X9的1492/QMAP路径。正确处理EBUSY背压;block或route epoch变更清掉旧mbuf队列,避免重连跨会话发送。`ifnet`成功收发计数供iOS原生网络统计使用,未硬编码地址/DNS/路由或UI联网状态。
+- **WDS实现**:`X9WDS.inc`支持0x24 PacketStatistics、0x86计数重置(仅client baseline)、0x01按请求间隔的流量事件;u32包数/u64字节数LE,TX只在payload DRB硬件退休后成功计数,RX在校验真实IP/route后计数;会话按mux/epoch隔离,断开后0x24返回OUT_OF_CALL和last-call总量。0x44 CurrentBearer使用新鲜真实NAS快照的LTE bit5/NR bit10;旧0x37没有NR枚举时返回UNKNOWN,不伪装LTE。0x30 Dormancy只报枚举UNKNOWN,不从CGATT伪造RRC ACTIVE。允许空/省略APN请求网络缺省以及automatic/3GPP technology preference;仍仅IPv4/no-auth,不猜IPv6/SLAAC、profile/IMS或运营商APN。连接指示只在ACT+GET+EIF/IFUP+DPMAIF bind全通过后发送。
+- **构建里程碑**:首次本地53/53 overlay编译、内核链接/strip通过;`im`打包误把产物`boot.json`当构建配置,缺`boot_args`而退出,**im没有boot.img**。主checkout其他会话同时修改光感/手电筒/电池/构建器等,本轮不提交/覆盖它们。独立worktree`.local/x9/worktrees/cellular-data`基于3865453并挑入已提交的能力门修正1ce5010(该worktree提交48b2049,源码相同),只复制本轮四个蜂窝文件;**`x9-cellular-data1-md`构建exit0**,53/53 overlay+6prebuilt、链接/strip/打包通过,构建器报告boot.img **13017088 B**。参数为完整hi加`x9_dpmaif=2 x9_mipc=1 x9_md_lte=0`,32GiB manifest;原始产物在该worktree的`x9/out/x9-cellular-data1-md/`,已原样复制到主checkout **`x9/out/x9-cellular-data1-md/`**。不含其他会话未提交代码;未运行测试套件,成功后未解包/重算hash/反汇编。插件275不变,无需mailbox。
+- **原始证据/构建输入**(不入git):`.local/x9/work/cellular-data-20261110/{scope.md,qmi-enums-wds.h,ios-data-state.txt,boot-config.json,build-im.stdout.log,build-data1.stdout.log,worktree-integration.log}`。现有UniXNU-Dali参考没有可直接移植的MT6993/WDS驱动。没有CI run。
+- **重建/日志复核**:在仅含本轮蜂窝代码与1ce5010能力门修正的源码树运行`/Library/Frameworks/Python.framework/Versions/3.13/bin/python3 -I x9/build/build.py all --name <新的唯一名字> --boot-config /Users/tosasitill/ios_plj110/.local/x9/work/cellular-data-20261110/boot-config.json`。如后续确有新设备日志,用`rg -n 'X9 DPMAIF:|X9 WDS:|X9 MIPC:|COACHZ pdp:.*(active families|tx |rx )' ~/NNN.txt`先确认DMA高位/INIT_DONE→Start→ACT/GET/EIF→真实tx/rx;不能以`initialized`或Start成功单独验收。暂不要求用户启动另一试探镜像。
+- **未完成/验收边界**:①真实DPMAIF硬件初始化与DMA可达性;②iOS发出WDS Start及APN/protocol策略(174没有Start,本轮不以ACK或图标假造突破);③真正ACT→GET→EIF/IFUP→绑定→iOS HTTP/DNS收发,分别LTE和NR;④原代码仍禁止复用旧ccmni channel,需真实DEACT/IFDOWN和DMA排空证据后设计安全复用;⑤IPv6/profile/auth尚未实现。遵守HANDOFF112的“先反编译,不连续要求刷试探镜像”;当前编译不构成完成声明。
+
+### 前次交接(HANDOFF 112,2026-11-10): 174(il)已启动;优先反编译——PS-only信号清零与数据图标启用条件已定位;能力门跟随路由修正,未打包
 
 - **用户要求**:仍无5G、信号条空;明确要求“优先反编译而不是让我不停测试镜像”。本轮没有打包/要求启动新的试探镜像,没有ADB设备操作、flash、重启、根盘写入、mailbox staging、CI或测试套件。
 - **174.txt观察**:Mac `~/174.txt`,1459304B,末57.996s。il越过shim并正常进入iOS;3.352s `X9 CCGATE: already patched (dual-sim + nr gates, page hash)`。约25.96s SA注册、26.022s NR `RSRP=-69 dBm, SNR=27.5 dB`,NAS0x4f成功;45.946s转为LTE(`CEREG=1,C5GREG=0,AcT=7`),45.958s LTE/NR均有真实测量,0x4f仍成功。**未观察到新的CommCenter/SpringBoard崩溃**;mediaserverd/AegirPoster等旧崩溃仍在。不能把这份不到一分钟的日志说成持续SA或数据收发验证。

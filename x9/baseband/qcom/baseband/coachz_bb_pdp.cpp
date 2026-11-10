@@ -23,6 +23,12 @@ extern struct udpstat udpstat;
 
 extern "C" int coachz_modem_data_send(uint32_t, const uint8_t *, uint32_t);
 extern "C" void coachz_modem_data_receiver(void (*)(uint32_t, const uint8_t *, uint32_t, uint32_t));
+#if COACHZ_NATIVE_DPMAIF
+extern "C" uint32_t coachz_modem_data_state(uint32_t, uint32_t *, uint64_t *);
+static const unsigned BB_PDP_MAX_MTU = 3072;
+#else
+static const unsigned BB_PDP_MAX_MTU = 1492;
+#endif
 
 namespace {
 struct bb_pdp_if {
@@ -30,6 +36,7 @@ struct bb_pdp_if {
   mbuf_t head, tail;
   uint32_t queued, families, blocked;
   uint64_t tx, rx, dropped, busy, requested;
+  uint64_t epoch;
 };
 static bb_pdp_if bb_pdp_ifaces[CBP_INTERFACES];
 static IOLock *bb_pdp_lock;
@@ -71,7 +78,7 @@ static errno_t bb_pdp_ioctl(ifnet_t ifp, unsigned long cmd, void *data)
   switch (cmd) {
     case SIOCSIFMTU: {
       const int mtu = static_cast<ifreq *>(data)->ifr_mtu;
-      if (mtu < 1280 || mtu > 1492) return EINVAL;
+      if (mtu < 1280 || mtu > static_cast<int>(BB_PDP_MAX_MTU)) return EINVAL;
       return ifnet_set_mtu(ifp, static_cast<uint32_t>(mtu));
     }
     case SIOCSIFFLAGS: case SIOCSIFADDR: case SIOCSIFDSTADDR: return 0;
@@ -89,8 +96,9 @@ static errno_t bb_pdp_output(ifnet_t ifp, mbuf_t m)
   if (!len || len > ifnet_mtu(ifp) || mbuf_copydata(m, 0, 1, &first)) { mbuf_freem(m); return EMSGSIZE; }
   const uint32_t bit = cbp_family_bit(first >> 4);
   IOLockLock(bb_pdp_lock);
-  if (!bit || !(p->families & bit) || p->blocked || p->queued == 64u) {
-    p->dropped++; IOLockUnlock(bb_pdp_lock); mbuf_freem(m); return ENETDOWN;
+  if (!bit || !(p->families & bit) || p->blocked || p->queued == 64u || !(ifnet_flags(ifp) & IFF_UP)) {
+    const errno_t error = p->queued == 64u ? ENOBUFS : ENETDOWN;
+    p->dropped++; IOLockUnlock(bb_pdp_lock); ifnet_stat_increment_out(ifp, 0, 0, 1); mbuf_freem(m); return error;
   }
   mbuf_setnextpkt(m, nullptr);
   if (p->tail) mbuf_setnextpkt(p->tail, m); else p->head = m;
@@ -146,7 +154,11 @@ static void bb_pdp_init()
     errno_t error = ifnet_allocate_extended(&init, &p->ifp);
     if (!error) {
       ifnet_set_hdrlen(p->ifp, 0); ifnet_set_addrlen(p->ifp, 0);
+#if COACHZ_NATIVE_DPMAIF
+      ifnet_set_mtu(p->ifp, 1500); // Raw IP has no Qualcomm MAPv4 header tax.
+#else
       ifnet_set_mtu(p->ifp, 1492);  // IPA MTU minus MAPv4 headers, as rmnet_vnd_headroom
+#endif
       ifnet_set_flags(p->ifp, IFF_POINTOPOINT | IFF_MULTICAST, 0xffff);
       ifnet_set_eflags(p->ifp, IFEF_NOAUTOIPV6LL, IFEF_NOAUTOIPV6LL);
       error = ifnet_attach(p->ifp, nullptr);
@@ -173,17 +185,38 @@ static void bb_pdp_poll()
         bb_pdp_owners[i] != (1u + bb_qmux.client[i].cid + (uint32_t(bb_qmux.client[i].channel) << 8)))
       bzero(&bb_pdp_clients[i], sizeof bb_pdp_clients[i]);
   }
+#if COACHZ_NATIVE_DPMAIF
+  const bool ready = true; // Further intersected with confirmed native routes below.
+#else
   const bool ready = bb_data.step == CBD_DONE && !bb_data.dpm_error && !bb_data.wda_error &&
     bb_data.llp == CBD_LLP_RAW_IP && bb_data.ul_dap == CBD_DAP_QMAPV4 && bb_data.dl_dap == CBD_DAP_QMAPV4;
+#endif
   for (uint32_t i = 0; i < CBP_INTERFACES; i++) active[i] = ready ? cbp_active_families(bb_pdp_clients, CBQ_MAX_CLIENTS, i + 1u) : 0;
   IOLockUnlock(bb_lock);
   for (uint32_t i = 0; i < CBP_INTERFACES; i++) {
     auto *p = &bb_pdp_ifaces[i];
     if (!p->ifp) continue;
+    uint64_t epoch = 0;
+#if COACHZ_NATIVE_DPMAIF
+    uint32_t mtu = 0;
+    // Never acquire the native route lock while holding bb_lock/pdp_lock.
+    active[i] &= coachz_modem_data_state(i + 1u, &mtu, &epoch);
+    if (active[i] && mtu >= 68 && mtu <= BB_PDP_MAX_MTU && ifnet_mtu(p->ifp) != mtu)
+      ifnet_set_mtu(p->ifp, mtu);
+#endif
     IOLockLock(bb_pdp_lock);
-    const bool changed = p->families != active[i];
+    const bool changed = p->families != active[i] || p->epoch != epoch;
+    mbuf_t stale = nullptr;
+    unsigned discarded = 0;
+    if (changed) {
+      stale = p->head; discarded = p->queued; p->head = p->tail = nullptr; p->queued = 0;
+      p->dropped += discarded;
+    }
+    p->epoch = epoch;
     p->families = active[i];
     IOLockUnlock(bb_pdp_lock);
+    while (stale) { mbuf_t next = mbuf_nextpkt(stale); mbuf_setnextpkt(stale, nullptr); mbuf_freem(stale); stale = next; }
+    if (discarded) ifnet_stat_increment_out(p->ifp, 0, 0, discarded);
     if (changed) {
       ifnet_set_flags(p->ifp, active[i] ? IFF_RUNNING : 0, IFF_RUNNING);
       printf("COACHZ pdp: pdp_ip%u active families %u\n", i, active[i]);
@@ -195,10 +228,10 @@ static void bb_pdp_poll()
       const bool usable = p->families && !p->blocked;
       IOLockUnlock(bb_pdp_lock);
       if (!m) break;
-      uint8_t ip[1492];
+      uint8_t ip[BB_PDP_MAX_MTU];
       const uint32_t n = static_cast<uint32_t>(mbuf_pkthdr_len(m));
       int error = ENETDOWN;
-      if (usable && (ifnet_flags(p->ifp) & IFF_UP) && !mbuf_copydata(m, 0, n, ip) &&
+      if (usable && n <= sizeof(ip) && n <= ifnet_mtu(p->ifp) && (ifnet_flags(p->ifp) & IFF_UP) && !mbuf_copydata(m, 0, n, ip) &&
           (active[i] & cbp_family_bit(ip[0] >> 4))) error = coachz_modem_data_send(i + 1u, ip, n);
       if (error == EBUSY) {
         IOLockLock(bb_pdp_lock);
@@ -216,7 +249,12 @@ static void bb_pdp_poll()
 static IOReturn bb_pdp_block(uint32_t unit, uint32_t blocked)
 {
   if (unit >= CBP_INTERFACES || !bb_pdp_lock) return kIOReturnBadArgument;
-  IOLockLock(bb_pdp_lock); bb_pdp_ifaces[unit].blocked = !!blocked; IOLockUnlock(bb_pdp_lock);
+  IOLockLock(bb_pdp_lock); auto *p = &bb_pdp_ifaces[unit]; p->blocked = !!blocked;
+  mbuf_t stale = nullptr; unsigned discarded = 0;
+  if (blocked) { stale = p->head; discarded = p->queued; p->head = p->tail = nullptr; p->queued = 0; p->dropped += discarded; }
+  IOLockUnlock(bb_pdp_lock);
+  while (stale) { mbuf_t next = mbuf_nextpkt(stale); mbuf_setnextpkt(stale, nullptr); mbuf_freem(stale); stale = next; }
+  if (discarded && p->ifp) ifnet_stat_increment_out(p->ifp, 0, 0, discarded);
   return kIOReturnSuccess;
 }
 static void bb_pdp_report(unsigned second)

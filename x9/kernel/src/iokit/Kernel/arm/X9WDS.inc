@@ -4,13 +4,17 @@
  * -> GET_CALL205 + actual EIF4302/IFUP -> bind.
  * Native decodeDataCallProfile reads ID100 separately from IF125;
  * ccci_dpmaif_com writes channel_id=ccmni_idx. Never use CID-1 as a route.
- * Explicit APN, IPv4, no-auth only; no profiles/IMS/IPv6 SLAAC translation.
+ * Explicit or network-default APN, IPv4, no-auth only; no profiles/IMS/IPv6 SLAAC translation.
  * Old MIPC headers differ from this RIL at tags128..12b: TRANS_ID is NOT a
  * subnet mask. Missing gateway/netmask is omitted, not invented. APN/IP stays
  * in RAM, never diagnostics. Sent activation survives host timeout/DEL_CLIENT
  * until its late CNF and real owned-call cleanup. No cancel/reset/borrowed CID.
  */
-struct x9w_client { uint8_t mux, family, sim_slot; bool starting; };
+struct x9w_client {
+ uint8_t mux, family, sim_slot, stats_interval; bool starting,bearer_report;
+ uint32_t stats_mask,last_rat;uint64_t report_next;
+ x9d_stats baseline,last_call;
+};
 static x9w_client x9w_clients[CBQ_MAX_CLIENTS];
 enum { X9W_DISC=1, X9W_ACT, X9W_CHECK, X9W_DEACT, X9W_IFWAIT };
 struct x9w_bearer {
@@ -120,7 +124,8 @@ static void x9w_init_poll(uint8_t *response,unsigned room){
  uint64_t token=f.submit();if(token){x9w_init_token=token;x9w_init_stage=stage;x9w_init_deadline=x9q_ms()+30000;}
 }
 static bool x9w_apn(const uint8_t *p,unsigned n){
- if(!n||n>100)return false;unsigned label=0;
+ if(!n)return true; // Empty APN is a real network-default request, not a guessed APN.
+ if(!p||n>100)return false;unsigned label=0;
  for(unsigned i=0;i<n;i++){uint8_t c=p[i];
   if(c=='.'){if(!label||p[i-1]=='-')return false;label=0;continue;}
   if(!((c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='-'))return false;
@@ -129,18 +134,37 @@ static bool x9w_apn(const uint8_t *p,unsigned n){
 }
 static unsigned x9w_args(const uint8_t *p,unsigned n,unsigned family){
  if(family!=4)return X9Q_UNSUPPORTED; // native IPv6 uses netagent/SLAAC, no guessed prefix
- x9q_view apn=x9q_tlv(p,n,0x14);if(!apn.p||!x9w_apn(apn.p,apn.n))return X9Q_ARG;
+ x9q_view apn=x9q_tlv(p,n,0x14);if(!x9w_apn(apn.p,apn.n))return X9Q_ARG;
  for(unsigned at=7;at<n;at+=3+x9q_u16(p+at+1)){
   unsigned k=x9q_u16(p+at+1);const uint8_t *v=p+at+3;
   switch(p[at]){
   case 0x14:break;
   case 0x19:if(k!=1||v[0]!=family)return X9Q_ARG;break;
+  case 0x30:if(k!=1||(v[0]!=0&&v[0]!=1))return X9Q_UNSUPPORTED;break; // automatic or 3GPP
   case 0x16:case 0x33:if(k!=1||v[0])return X9Q_UNSUPPORTED;break;
   default:return X9Q_UNSUPPORTED;
   }
  }return 0;
 }
 static bool x9w_live(const x9w_bearer &b){return b.slot<CBQ_MAX_CLIENTS&&x9q_clients[b.slot].generation==b.generation;}
+static void x9w_integer(x9q_packet &p,unsigned tag,uint64_t value,unsigned bytes){
+ uint8_t le[8];for(unsigned i=0;i<bytes;i++){le[i]=(uint8_t)value;value>>=8;}p.tlv((uint8_t)tag,le,bytes);
+}
+static void x9w_statistics(x9q_packet &p,const x9d_stats &s,const x9d_stats &base,unsigned mask){
+ // qmi-service-wds.json: packet counters u32; byte totals u64, LE.
+ const uint64_t values[]={s.tx_packets,s.rx_packets,s.tx_errors,s.rx_errors,s.tx_overflows,s.rx_overflows,s.tx_bytes,s.rx_bytes,s.tx_dropped,s.rx_dropped};
+ const uint64_t start[]={base.tx_packets,base.rx_packets,base.tx_errors,base.rx_errors,base.tx_overflows,base.rx_overflows,base.tx_bytes,base.rx_bytes,base.tx_dropped,base.rx_dropped};
+ const uint8_t tags[]={0x10,0x11,0x12,0x13,0x14,0x15,0x19,0x1a,0x1d,0x1e};
+ for(unsigned i=0;i<10;i++)if(mask&(1u<<i))x9w_integer(p,tags[i],values[i]>=start[i]?values[i]-start[i]:0,i==6||i==7?8:4);
+}
+static unsigned x9w_rat(const x9w_client &c){
+ const x9q_data_radio &r=x9q_data_radios[c.sim_slot];
+ return r.sampled&&x9q_ms()-r.sampled<=30000?r.rat:0;
+}
+static void x9w_rat_tlv(x9q_packet &p,unsigned tag,unsigned rat){
+ uint8_t value[9]={2,(uint8_t)rat,(uint8_t)(rat>>8),(uint8_t)(rat>>16),(uint8_t)(rat>>24),0,0,0,0};
+ p.tlv((uint8_t)tag,value,sizeof(value)); // 3GPP, real LTE/NR RAT mask, SO unknown
+}
 static void x9w_pending_done(x9w_bearer &b){
  if(b.pending&&x9w_live(b))x9w_clients[b.slot].starting=false;b.pending=false;b.len=0;bzero(b.req,sizeof(b.req));
 }
@@ -151,7 +175,9 @@ static void x9w_error(x9w_bearer &b,unsigned error){
  }x9w_pending_done(b);
 }
 static void x9w_disconnect(x9w_bearer &b,unsigned mux){
- bool was=b.active;b.active=false;x9d_unbind(mux);
+ bool was=b.active;
+ if(was&&x9w_live(b))x9d_account(mux,x9w_clients[b.slot].last_call);
+ b.active=false;x9d_unbind(mux);
  if(was&&x9w_live(b)){
   uint8_t req[7]={0,0,0,0x22,0,0,0};x9q_packet p(req);uint8_t status[2]={1,0},family=4;
   p.tlv(1,status,2);p.tlv(0x12,&family,1);p.send(CBQ_PORT_BASE+b.slot,X9BB_PORT_BASE+1,true,0x22);
@@ -195,8 +221,13 @@ static void x9w_publish(x9w_bearer &b,unsigned mux){
   b.abandoned=true;x9w_error(b,X9Q_NOT_READY);x9w_deactivate(b,mux);return;
  }
  b.handle=++x9w_next_handle;b.active=true;b.op=0;b.next=x9q_ms()+10000;
+ x9w_client &c=x9w_clients[b.slot];bzero(&c.baseline,sizeof(c.baseline));c.report_next=0;c.last_rat=0;
  printf("X9 WDS: SIM%u PDP activated call %u -> ccmni%u -> mux %u IPv4 MTU %u, ACT+GET+EIF/IFUP verified, DPMAIF bound\n",b.sim_slot+1,b.cid,b.channel,mux,b.mtu);
  x9w_handle_reply(b);
+ // Connection notification is emitted only AFTER real bind; not CGATT alone.
+ uint8_t req[7]={};x9q_packet connected(req);uint8_t status[2]={2,0},family=4;
+ connected.tlv(1,status,2);connected.tlv(0x12,&family,1);
+ connected.send(CBQ_PORT_BASE+b.slot,X9BB_PORT_BASE+1,true,0x22);
 }
 static void x9w_result(x9w_bearer &b,unsigned mux,const uint8_t *p,unsigned n){
  unsigned op=b.op;b.op=0;unsigned result;
@@ -334,22 +365,70 @@ static void x9w_poll(){
    if(!b.active&&!b.abandoned&&now>=b.deadline){b.abandoned=true;x9w_error(b,X9Q_NOT_READY);x9w_deactivate(b,i+1);printf("X9 WDS: owned call has no matching EIF/IFUP; no host success\n");}
    continue;
   }
-  if(b.active&&!b.hold&&now>=b.next){if(!x9w_check(b))b.next=now+10000;}
+  if(b.active&&!b.hold){
+   x9w_client &c=x9w_clients[b.slot];unsigned rat=x9w_rat(c);
+   bool stats_due=c.stats_interval&&c.stats_mask&&now>=c.report_next;
+   bool rat_changed=c.bearer_report&&rat&&rat!=c.last_rat;
+   if(stats_due||rat_changed){
+    uint8_t req[7]={};x9q_packet report(req);x9d_stats stats={};
+    if(stats_due&&x9d_account(i+1,stats))x9w_statistics(report,stats,c.baseline,c.stats_mask);
+    if(rat_changed){x9w_rat_tlv(report,0x1d,rat);c.last_rat=rat;}
+    report.send(CBQ_PORT_BASE+b.slot,X9BB_PORT_BASE+1,true,1);
+    c.report_next=now+uint64_t(c.stats_interval)*1000;
+   }
+   if(now>=b.next&& !x9w_check(b))b.next=now+10000;
+  }
  }
 }
 static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned n){
  unsigned slot=local-CBQ_PORT_BASE,id=x9q_u16(req+3);x9w_client &c=x9w_clients[slot];
- if(id!=0x20&&id!=0x21&&id!=0x22&&id!=0x2d&&id!=0x4d&&id!=0xa2&&id!=0xaf&&id!=0xb0)return false;
+ if(id!=1&&id!=0x20&&id!=0x21&&id!=0x22&&id!=0x24&&id!=0x2d&&id!=0x30&&id!=0x37&&id!=0x44&&id!=0x4d&&id!=0x86&&id!=0xa2&&id!=0xaf&&id!=0xb0)return false;
  if(!c.family)c.family=4;x9w_bearer *own=nullptr;
  for(x9w_bearer &b:x9w_bearers)if(b.used&&b.slot==slot&&b.generation==x9q_clients[slot].generation)own=&b;
  unsigned error=0;
- if(id==0xaf){
+ if(id==1){
+  x9q_view stats=x9q_tlv(req,n,0x11),bearer=x9q_tlv(req,n,0x15);
+  if(stats.p&&(stats.n!=5||(x9q_u32(stats.p+1)&~0x3ffu)))error=X9Q_ARG;
+  if(bearer.p&&(bearer.n!=1||bearer.p[0]>1))error=X9Q_ARG;
+  if(!error){
+   if(stats.p){c.stats_interval=stats.p[0];c.stats_mask=x9q_u32(stats.p+1);c.report_next=0;}
+   if(bearer.p){c.bearer_report=bearer.p[0]!=0;c.last_rat=0;}
+  }
+ }else if(id==0x30){
+  // RRC dormancy is not exported by our current MD event source. The wire
+  // enum explicitly supports UNKNOWN=0; do not invent ACTIVE from CGATT or
+  // idle packet counters (174.txt requests this during data setup).
+  if(n!=7)error=X9Q_ARG;
+  else{x9q_packet p(req);uint8_t unknown=0;p.tlv(1,&unknown,1);p.send(local,port);return true;}
+ }else if(id==0x24||id==0x86){
+  x9q_view mask=x9q_tlv(req,n,1);unsigned bits=mask.p&&mask.n==4?x9q_u32(mask.p):0;
+  if((id==0x24&&(!mask.p||mask.n!=4||n!=14||(bits&~0x3ffu)))||(id==0x86&&n!=7))error=X9Q_ARG;
+  else if(!own||!own->active||!x9d_ready()||!x9_md_mipc_online()){
+   x9q_packet p(req,15); // OUT_OF_CALL: only retained last-call totals are valid.
+   x9w_integer(p,0x1b,c.last_call.tx_bytes,8);x9w_integer(p,0x1c,c.last_call.rx_bytes,8);p.send(local,port);return true;
+  }else{
+   x9d_stats s={};x9d_account(c.mux,s);x9q_packet p(req);
+   if(id==0x86)c.baseline=s;else x9w_statistics(p,s,c.baseline,bits);
+   p.send(local,port);return true;
+  }
+ }else if(id==0x44||id==0x37){
+  unsigned rat=x9w_rat(c);
+  if(n!=7)error=X9Q_ARG;
+  else if(!own||!own->active||!x9d_ready()||!x9_md_mipc_online())error=15;
+  else if(!rat)error=X9Q_NOT_READY;
+  else{
+   x9q_packet p(req);
+   if(id==0x44)x9w_rat_tlv(p,1,rat);
+   else{uint8_t legacy=rat==(1u<<5)?10:0xff;p.tlv(1,&legacy,1);} // Legacy enum has no NR; never relabel it LTE.
+   p.send(local,port);return true;
+  }
+ }else if(id==0xaf){
   /* WDS differs from NAS/DMS: u32 1=primary, 2=secondary. DEFAULT/ANY
    * need DDS semantics, so reject them rather than silently selecting SIM1. */
   x9q_view sub=x9q_tlv(req,n,1);unsigned value=sub.p&&sub.n==4?x9q_u32(sub.p):0;
   if(n!=14||!value||value>x9_md_sim_count())error=X9Q_ARG;
   else if(c.sim_slot!=value-1&&(c.starting||own))error=X9Q_BUSY;
-  else{c.sim_slot=(uint8_t)(value-1);printf("X9 DUALSIM: WDS client 0x%x bound to SIM%u (not DDS)\n",local,value);}
+  else{c.sim_slot=(uint8_t)(value-1);x9q_clients[slot].sim_slot=c.sim_slot;printf("X9 DUALSIM: WDS client 0x%x bound to SIM%u (not DDS)\n",local,value);}
  }else if(id==0xb0){
   if(n!=7)error=X9Q_ARG;
   else{x9q_packet p(req);uint8_t sub[4]={(uint8_t)(c.sim_slot+1),0,0,0};p.tlv(0x10,sub,4);p.send(local,port);return true;}
@@ -388,6 +467,9 @@ static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
   }
  }else{
   x9q_view f=x9q_tlv(req,n,0x19);unsigned family=f.p&&f.n==1?f.p[0]:c.family;
+  x9q_view start_apn=x9q_tlv(req,n,0x14);
+  printf("X9 WDS: Start SIM%u mux %u family %u APN length %u native-ready %u session-ready %u\n",
+   c.sim_slot+1,c.mux,family,start_apn.n,x9d_ready(),x9w_session_ready);
   if(!cbp_mux_ok(c.mux))error=X9Q_ARG;
   else if(c.starting||own||x9w_bearers[c.mux-1].used)error=X9Q_BUSY;
   else if((error=x9w_args(req,n,family))!=0){}
@@ -395,11 +477,14 @@ static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
   else{
    x9w_bearer &b=x9w_bearers[c.mux-1];bzero(&b,sizeof(b));b.used=b.pending=true;
    b.slot=slot;b.sim_slot=c.sim_slot;b.generation=x9q_clients[slot].generation;b.len=n;memcpy(b.req,req,n);
-   x9q_view apn=x9q_tlv(req,n,0x14);memcpy(b.apn,apn.p,apn.n);c.starting=true;
+   x9q_view apn=x9q_tlv(req,n,0x14);if(apn.n)memcpy(b.apn,apn.p,apn.n);c.starting=true;
    x9w_frame query(0x219,1u<<b.sim_slot);
    if(!x9w_send(b,query,X9W_DISC,10000)){x9w_error(b,X9Q_BUSY);x9w_clear(b,c.mux);}return true;
   }
  }
- if(error){x9bb_reply_error(local,port,req,n,(uint16_t)error);return true;}
+ if(error){
+  if(id==0x20||id==0x21)printf("X9 WDS: request msg 0x%04x SIM%u mux %u error %u\n",id,c.sim_slot+1,c.mux,error);
+  x9bb_reply_error(local,port,req,n,(uint16_t)error);return true;
+ }
  x9q_packet reply(req);reply.send(local,port);return true;
 }

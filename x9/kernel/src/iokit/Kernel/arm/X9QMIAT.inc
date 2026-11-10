@@ -255,7 +255,16 @@ static uint8_t x9q_radio(int act){
  return act==0||act==1||act==3?4:act==2||act==4||act==5||act==6?5:
         act==7||act==9?8:act==11||act==12||act==13?12:0;
 }
+// WDS may describe RAT only from a fresh, real serving-system snapshot.
+// Registration is not an IP route; WDS additionally checks its owned bearer.
+struct x9q_data_radio { uint64_t sampled; uint32_t rat; };
+static x9q_data_radio x9q_data_radios[2];
 static void x9q_nas(x9q_job &j){
+ x9q_data_radio &data=x9q_data_radios[j.sim_slot];data.sampled=x9q_ms();data.rat=0;
+ if(j.attached==1){
+  if(x9q_registered(j.reg[2])&&j.act==11)data.rat=1u<<10; // libqmi 3GPP_5GNR
+  else if(x9q_registered(j.reg[1])&&(j.act==7||j.act==9))data.rat=1u<<5; // LTE
+ }
  /* 166.txt: SysInfo never carried LTE info; log the real registration inputs
   * whenever they change (stat values / CGATT / COPS AcT only, no identities). */
  {static int last[2][5]={{-9,-9,-9,-9,-9},{-9,-9,-9,-9,-9}};int now[5]={j.reg[0],j.reg[1],j.reg[2],j.attached,j.act};

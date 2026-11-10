@@ -11,6 +11,7 @@ namespace {
 constexpr unsigned X9D_DRB = 2048, X9D_BAT = 1024, X9D_PIT = 2048;
 constexpr unsigned X9D_TX_SIZE = 3072, X9D_PKT_SIZE = 1664, X9D_FRG_SIZE = 1920;
 constexpr unsigned X9D_MAIL = 64, X9D_BUDGET = 128;
+constexpr uint64_t X9D_DMA_LIMIT = 1ULL << 40;
 constexpr uint32_t X9D_BUSY_BIT = 0x80000000u;
 constexpr uint32_t X9D_UL_FLOW = (31u << 5) | (31u << 10) | (31u << 15);
 constexpr uint32_t X9D_UL_ERROR = 31u << 20;
@@ -24,7 +25,14 @@ struct x9d_dma {
     uint64_t pa;
     unsigned size;
 };
-struct x9d_route { uint64_t epoch; unsigned mtu; uint8_t channel, families; bool bound; };
+// Per-bearer IP accounting; queue admission is NOT successful transmission.
+// Only retirement of a payload DRB increments TX success. No packet contents.
+struct x9d_stats {
+    uint64_t tx_packets, rx_packets, tx_errors, rx_errors, tx_overflows, rx_overflows;
+    uint64_t tx_bytes, rx_bytes, tx_dropped, rx_dropped;
+};
+struct x9d_route { uint64_t epoch; unsigned mtu; uint8_t channel, families; bool bound; x9d_stats stats; };
+struct x9d_completion { uint64_t epoch; uint16_t size; uint8_t mux; };
 struct x9d_tx { uint64_t epoch; uint16_t size; uint8_t mux; uint8_t ip[X9D_TX_SIZE]; };
 struct x9d_rx {
     unsigned rd, bytes; uint8_t seq, channel; bool message, normal, drop;
@@ -39,6 +47,7 @@ struct x9d_state {
     bool used_channel[20]; // no ambiguous delayed old-bearer RX after channel reuse
     unsigned bat_wr[2], tx_wr, tx_rd, head, count;
     x9d_tx mail[X9D_MAIL]; x9d_route route[CBP_INTERFACES]; x9d_rx rx[2];
+    x9d_completion completion[X9D_DRB / 2];
     unsigned mode; bool prepared, ready, failed, published, hw_attempted, clocks_live;
     unsigned irq_reports;
     const char *phase;
@@ -66,21 +75,20 @@ static void x9d_sync(const x9d_dma &m, unsigned off, unsigned size) {
 }
 static bool x9d_alloc(x9d_dma &m, unsigned bytes) {
     m.size = (bytes + 16383u) & ~16383u;
-    // 32 KiB alignment on purpose (158.txt): with 0xffffc000 a single 16 KiB page
-    // is not "contiguous" in IOKernelAllocateWithPhysicalRestrict, so it falls to
-    // KMA_LOMEM -> vm_page_grablo(), which on arm64 (vm_lopage_needed=FALSE) is a
-    // plain vm_page_grab() anywhere in the 12 GiB and ignores the 4 GiB limit.
-    // alignment > page_size forces kmem_alloc_contig(), which honours max_pnum.
+    // MT6993 ccci_dpmaif_com.c configures DMA_BIT_MASK(40), with ordinary
+    // dma_map_single/page RX/TX buffers. DT alloc-ranges only constrains the
+    // optional reserved-memory allocator, NOT all device DMA. XNU manages RAM
+    // starting at 4GiB, so a low32 allocation can NEVER succeed (174.txt).
+    // >page alignment also forces real host-contiguous pages for small rings.
     m.md = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
-        kIODirectionInOut | kIOMemoryPhysicallyContiguous, m.size, 0xffff8000ULL);
+        kIODirectionInOut | kIOMemoryPhysicallyContiguous | kIOMemoryMapperNone,
+        m.size, (X9D_DMA_LIMIT - 1) & ~32767ULL);
     if (!m.md) { printf("X9 DPMAIF: DMA alloc of %u bytes returned no descriptor\n", m.size); return false; }
     IOByteCount segment = 0;
     m.va = static_cast<uint8_t *>(m.md->getBytesNoCopy());
     m.pa = m.md->getPhysicalSegment(0, &segment, kIOMemoryMapperNone);
-    // Restrict allocations to the live DT alloc-range's low-32-bit subset.
-    // The pool is independent; do NOT claim these are Linux's reserved nodes.
     if (!m.va || segment < m.size || m.pa < 0x40000000ULL ||
-        m.pa >= 0x100000000ULL || m.size > 0x100000000ULL - m.pa || (m.pa & 16383)) {
+        m.pa >= X9D_DMA_LIMIT || m.size > X9D_DMA_LIMIT - m.pa || (m.pa & 32767)) {
         printf("X9 DPMAIF: DMA alloc of %u bytes out of range: pa 0x%llx segment 0x%llx va %d\n",
             m.size, (unsigned long long)m.pa, (unsigned long long)segment, m.va != nullptr);
         return false;
@@ -210,14 +218,15 @@ static bool x9d_hw_init() {
     x9d_phase("PIT-init");
     for (unsigned q = 0; q < 2; q++) {
         x9d_wr(lro, 0x14, (uint32_t)x9d.pit[q].pa);
-        x9d_wr(lro, 0x18, X9D_PIT); // low32 DMA; address extension is zero
+        // drv3_dl_set_lro_pit_base_addr uses CON1[31:24], including on 6993.
+        x9d_wr(lro, 0x18, X9D_PIT | (uint32_t)(x9d.pit[q].pa >> 32) << 24);
         x9d_wr(lro, 0x1c, 0); // reset INIT_CON2; do not inherit queue state
         x9d_wr(lro, 0x20, 1u << 20);
-        x9d_wr(lro, 0x24, 0); // INIT_CON4 address extension is zero for low32 DMA
+        x9d_wr(lro, 0x24, 0); // Not the high address register for the LRO PIT path.
         uint32_t seq = x9d_rd(dls, 0x40), shift = q ? 20 : 8;
         x9d_wr(dls, 0x40, (seq & ~(255u << shift)) | (255u << shift));
         if (!x9d_expect(lro, 0x14, ~0u, (uint32_t)x9d.pit[q].pa) ||
-            !x9d_expect(lro, 0x18, 0xff03ffff, X9D_PIT) ||
+            !x9d_expect(lro, 0x18, 0xff03ffff, X9D_PIT | (uint32_t)(x9d.pit[q].pa >> 32) << 24) ||
             !x9d_expect(lro, 0x20, 1u << 20, 1u << 20)) return false;
         x9d.published = true; // first queue INIT can expose our DMA; never free it
         if (!x9d_command(lro, 0, X9D_BUSY_BIT | 1 | (q << 16))) return false;
@@ -225,11 +234,12 @@ static bool x9d_hw_init() {
     }
     x9d_phase("BAT-init/credit");
     for (unsigned kind = 0; kind < 2; kind++) {
-        x9d_wr(dl, 0x08, (uint32_t)x9d.bat[kind].pa); x9d_wr(dl, 0x50, 0);
+        x9d_wr(dl, 0x08, (uint32_t)x9d.bat[kind].pa);
+        x9d_wr(dl, 0x50, (uint32_t)(x9d.bat[kind].pa >> 32)); // 6993 BAT INIT_CON3
         x9d_wr(dl, 0x0c, X9D_BAT | (1u << 16) | (1u << 22));
         x9d_wr(dl, 0x10, 0); // INIT_CON2: initial indices
         if (!x9d_expect(dl, 0x08, ~0u, (uint32_t)x9d.bat[kind].pa) ||
-            !x9d_expect(dl, 0x50, ~0u, 0) ||
+            !x9d_expect(dl, 0x50, ~0u, (uint32_t)(x9d.bat[kind].pa >> 32)) ||
             !x9d_expect(dl, 0x0c, 0x0041ffff, X9D_BAT | (1u << 16) | (1u << 22))) return false;
         if (!x9d_command(dl, 0, X9D_BUSY_BIT | 1 | (kind << 16))) return false;
         if (!x9d_command(dl, 4, X9D_BUSY_BIT | (X9D_BAT - 1) | (kind << 16))) return false;
@@ -237,7 +247,8 @@ static bool x9d_hw_init() {
     x9d_phase("TXQ0/SRAM-sync");
     // One TX queue initially, others explicitly disabled. DRB size is WORDS.
     x9d_wr(x9d.ao, 0x1c, 0);
-    x9d_wr(uls, 0x10, (uint32_t)x9d.drb.pa); x9d_wr(uls, 0x14, X9D_DRB * 2); x9d_wr(uls, 0x18, 0);
+    x9d_wr(uls, 0x10, (uint32_t)x9d.drb.pa); x9d_wr(uls, 0x14, X9D_DRB * 2);
+    x9d_wr(uls, 0x18, (uint32_t)(x9d.drb.pa >> 32)); // 6993 UL_DRBSIZE_ADDRH_n_1
     x9d_wr(x9d.ao, 0x1c, 1 | (1u << 8));
     // Mark buffers published BEFORE any INIT_DONE makes them DMA reachable.
     x9d.published = true;
@@ -249,7 +260,7 @@ static bool x9d_hw_init() {
     x9d_snapshot("latched");
     if (!x9d_expect(uls, 0x10, ~0u, (uint32_t)x9d.drb.pa) ||
         !x9d_expect(uls, 0x14, 65535, X9D_DRB * 2) ||
-        !x9d_expect(uls, 0x18, ~0u, 0) ||
+        !x9d_expect(uls, 0x18, ~0u, (uint32_t)(x9d.drb.pa >> 32)) ||
         !x9d_expect(x9d.ao, 0x1c, 0x1f1f, 0x101) ||
         !x9d_expect(uls, 0xe0, ~0u, 0) ||
         !x9d_expect(dls, 0xa4, 0x3ffff, 0) || !x9d_expect(dls, 0xc4, 0x3ffff, 0) ||
@@ -300,7 +311,9 @@ static void x9d_prepare() {
         for (unsigned i = 0; i < X9D_PIT; i++) pit[i * 4 + 3] = (i ^ 128u) & 255u;
         x9d_sync(x9d.pit[kind], 0, X9D_PIT * 16);
     }
-    printf("X9 DPMAIF: private DMA allocated below 4GiB, TX 2048/BAT 1024/PIT 2048x2; %s\n",
+    printf("X9 DPMAIF: private 40-bit DMA allocated, DRB high 0x%x PIT high 0x%x/0x%x BAT high 0x%x/0x%x, TX 2048/BAT 1024/PIT 2048x2; %s\n",
+        (unsigned)(x9d.drb.pa >> 32), (unsigned)(x9d.pit[0].pa >> 32), (unsigned)(x9d.pit[1].pa >> 32),
+        (unsigned)(x9d.bat[0].pa >> 32), (unsigned)(x9d.bat[1].pa >> 32),
         x9d.mode == 1 ? "probe only, no descriptors published" : "experimental initialization requested");
     // Physical HS2 can precede the serialized AT initializer's CFUN completion.
     // Active initialization is deferred until the MD owner is actually online.
@@ -316,19 +329,30 @@ static bool x9d_bind(unsigned mux, unsigned channel, unsigned families, unsigned
         IOLockUnlock(x9d.lock); return false;
     }
     x9d_route &r = x9d.route[mux - 1]; r.epoch++; r.channel = (uint8_t)channel; r.families = (uint8_t)families; r.mtu = mtu; r.bound = true;
+    bzero(&r.stats, sizeof(r.stats));
     x9d.used_channel[channel] = true;
     IOLockUnlock(x9d.lock); return true;
 }
 static void x9d_unbind(unsigned mux) {
     if (!x9d.lock || !cbp_mux_ok(mux)) return;
-    IOLockLock(x9d.lock); x9d_route &r = x9d.route[mux - 1]; r.bound = false; r.families = 0; r.epoch++; IOLockUnlock(x9d.lock);
+    IOLockLock(x9d.lock); x9d_route &r = x9d.route[mux - 1];
+    if (r.bound) { r.bound = false; r.families = 0; r.epoch++; }
+    IOLockUnlock(x9d.lock);
+}
+static bool x9d_account(unsigned mux, x9d_stats &stats) {
+    if (!x9d.lock || !cbp_mux_ok(mux)) return false;
+    IOLockLock(x9d.lock); stats = x9d.route[mux - 1].stats; IOLockUnlock(x9d.lock);
+    return true;
 }
 static int x9d_send(unsigned mux, const uint8_t *ip, unsigned n) {
-    if (!x9d.lock || !cbp_mux_ok(mux) || !x9d_ip(ip, n)) return -1;
-    IOLockLock(x9d.lock); const x9d_route &r = x9d.route[mux - 1];
-    if (!x9d.ready || x9d.failed || !r.bound || n > r.mtu || !(r.families & cbp_family_bit(ip[0] >> 4)) || x9d.count == X9D_MAIL) {
-        x9d.rejected++; IOLockUnlock(x9d.lock); return -1;
+    if (!x9d.lock || !cbp_mux_ok(mux)) return ENETDOWN;
+    if (!x9d_ip(ip, n)) return EINVAL;
+    IOLockLock(x9d.lock); x9d_route &r = x9d.route[mux - 1];
+    if (!x9d.ready || x9d.failed || !r.bound || !(r.families & cbp_family_bit(ip[0] >> 4)) || n > r.mtu) {
+        x9d.rejected++; r.stats.tx_dropped++; IOLockUnlock(x9d.lock); return n > r.mtu ? EMSGSIZE : ENETDOWN;
     }
+    // Backpressure is retryable; don't count a retained packet as dropped.
+    if (x9d.count == X9D_MAIL) { IOLockUnlock(x9d.lock); return EBUSY; }
     x9d_tx &t = x9d.mail[(x9d.head + x9d.count) % X9D_MAIL];
     t.epoch = r.epoch; t.size = (uint16_t)n; t.mux = (uint8_t)mux; memcpy(t.ip, ip, n); x9d.count++;
     IOLockUnlock(x9d.lock); return 0; // accepted into bounded mailbox, NOT completion
@@ -341,7 +365,14 @@ static bool x9d_tx_poll() {
     if (done > used) { x9d_fail("TX completion exceeds published descriptors"); return false; }
     // MD may retire the message and payload separately. Payload remains pinned
     // until the next even descriptor boundary; pool reuse uses ring free space.
-    x9d.tx_done += ((rd / 2 + X9D_DRB / 2 - x9d.tx_rd / 2) % (X9D_DRB / 2));
+    for (unsigned i = 0, at = x9d.tx_rd; i < done; i++, at = (at + 1) % X9D_DRB) {
+        if (!(at & 1)) continue; // MSG alone is not a completed IP packet.
+        x9d_completion &c = x9d.completion[at / 2];
+        if (!cbp_mux_ok(c.mux) || !c.size) { x9d_fail("TX completion ownership"); return false; }
+        IOLockLock(x9d.lock); x9d_route &r = x9d.route[c.mux - 1];
+        if (r.bound && r.epoch == c.epoch) { r.stats.tx_packets++; r.stats.tx_bytes += c.size; }
+        IOLockUnlock(x9d.lock); bzero(&c, sizeof(c)); x9d.tx_done++;
+    }
     x9d.tx_rd = rd;
     for (unsigned budget = 0; budget < 16; budget++) {
         unsigned free = X9D_DRB - 1 - (x9d.tx_wr + X9D_DRB - x9d.tx_rd) % X9D_DRB;
@@ -360,6 +391,7 @@ static bool x9d_tx_poll() {
         d[0] = 1 | 4 | ((uint32_t)t.size << 16); d[1] = (uint32_t)channel << 16; // MSG dtype=1/cbit=1
         d[2] = ((uint32_t)(pa >> 32) << 8) | ((uint32_t)t.size << 16); d[3] = (uint32_t)pa; // PD dtype=0/cbit=0
         x9d_sync(x9d.drb, index * 8, 16);
+        x9d.completion[index / 2] = {t.epoch, t.size, t.mux};
         // No checksum offloads advertised by PDP; stack supplies IP/L4 checksums.
         x9d.tx_wr = (index + 2) % X9D_DRB; x9d.tx_packets++; bzero(&t, sizeof(t));
         if (!x9d_command(x9d.pd, 0xb0, X9D_BUSY_BIT | 4)) return false; // two 8B DRBs -> four WORDS
@@ -406,7 +438,14 @@ static bool x9d_rx_item(unsigned q, const uint32_t *d) {
             i + 1 == r.mux && x9d.route[i].epoch == r.epoch && r.bytes <= x9d.route[i].mtu &&
             (x9d.route[i].families & cbp_family_bit(r.ip[0] >> 4))) mux = i + 1;
         receiver = x9d.receiver; IOLockUnlock(x9d.lock);
-        if (!r.drop && mux && receiver && x9d_ip(r.ip, r.bytes)) { receiver(mux, r.ip, r.bytes, r.ip[0] >> 4); x9d.rx_packets++; }
+        bool valid = !r.drop && mux && receiver && x9d_ip(r.ip, r.bytes);
+        IOLockLock(x9d.lock);
+        if (cbp_mux_ok(r.mux) && x9d.route[r.mux - 1].epoch == r.epoch) {
+            x9d_stats &s = x9d.route[r.mux - 1].stats;
+            if (valid) { s.rx_packets++; s.rx_bytes += r.bytes; } else s.rx_dropped++;
+        }
+        IOLockUnlock(x9d.lock);
+        if (valid) { receiver(mux, r.ip, r.bytes, r.ip[0] >> 4); x9d.rx_packets++; }
         else x9d.rx_dropped++;
         bzero(r.ip, r.bytes); r.bytes = 0; r.message = r.normal = false;
     }
@@ -496,6 +535,16 @@ static void x9d_report(unsigned second) {
 }
 } // namespace
 extern "C" int coachz_modem_data_send(uint32_t mux, const uint8_t *ip, uint32_t n) { return x9d_send(mux, ip, n); }
+// Network gate uses the real MIPC-confirmed route, never IPA/QMAP setup.
+// Return epoch too: reconnects with the same family must discard old mbufs.
+extern "C" uint32_t coachz_modem_data_state(uint32_t mux, uint32_t *mtu, uint64_t *epoch) {
+    if (!x9d.lock || !cbp_mux_ok(mux)) return 0;
+    IOLockLock(x9d.lock); const x9d_route &r = x9d.route[mux - 1];
+    uint32_t families = x9d.ready && !x9d.failed && r.bound ? r.families : 0;
+    if (mtu) *mtu = families ? r.mtu : 0;
+    if (epoch) *epoch = r.epoch;
+    IOLockUnlock(x9d.lock); return families;
+}
 extern "C" void coachz_modem_data_receiver(void (*cb)(uint32_t, const uint8_t *, uint32_t, uint32_t)) {
     // Registration can precede x9d_prepare but is performed by the bridge owner.
     if (x9d.lock) IOLockLock(x9d.lock); x9d.receiver = cb; if (x9d.lock) IOLockUnlock(x9d.lock);
