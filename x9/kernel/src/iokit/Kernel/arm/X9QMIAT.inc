@@ -350,7 +350,7 @@ static bool x9q_int(const char *&p,int &v){
  * (0x39d1a0) LTE path (Act 0x1000/0x2000): valid only when sig1<=34 and sig2<98
  * (CESQ-style indices); rsrp/rsrq/rssi = qdbm/4; rssnr(0.1 dB) = sig3*5/2, sig3
  * 0x7fff = invalid. LTE TLV 0x14 (libqmi): rssi i8 dBm, rsrq i8 dB, rsrp i16
- * dBm, snr i16 0.1 dB. Anything not LTE or not measured stays NOT_READY. */
+ * dBm, snr i16 0.1 dB. NR (0x17/0x18) below; nothing measured stays NOT_READY. */
 static void x9q_siginfo(x9q_job &j,const char *r){
  /* 170.txt: "fields 0" for every reply (AT OK) - no single parseable +ECSQ
   * line. Parse the first 24 numeric fields, ignore anything after them, and
@@ -358,27 +358,47 @@ static void x9q_siginfo(x9q_job &j,const char *r){
  /* 171.txt raw: the MD answers one +ECSQ line per RAT, e.g.
   * "+ECSQ: 25,52,-325,1,1,-30,-355,4096,55,3" (LTE) and
   * "+ECSQ: 87,126,-325,1,1,0,0,32768,0,0,0,0,0" (NR, unmeasured); x9q_line
-  * rejects duplicate tags. Take the first line whose Act is LTE. */
- int v[24];unsigned n=0;
+  * rejects duplicate tags; parse every line and pick by Act.
+  * User 2026-11-10 "接上 5g 的信号显示": also report NR. CommCenter 20H392
+  * (libCommCenterMCommandDrivers 0x1f1ae9b40 response / 0x1f1aea150 indication)
+  * parses 0x14 LteSigInfo{i8 rssi,i8 rsrq,i16 rsrp,i16 snr*10}, 0x17 NrSigInfo
+  * {i16 rsrp,i16 snr*10} (parser 0x1f1952660) and 0x18 NrSigInfoExt{i16 rsrq}
+  * (0x1f19526cc). libmtk-ril updateSignalStrength NR path (Act 0x8000): fields
+  * 11/10/12 = ss_rsrp/ss_rsrq/ss_sinr and 6/5/8 = rsrp/rsrq/sinr, all quarter dB,
+  * 0x7fff invalid; the unmeasured NR line is all zeros (171). SS first. */
+ int L[24],N[24];unsigned ln=0,nn=0;
  for(const char *s=r;*s;){const char *e=s;while(*e&&*e!='\r'&&*e!='\n')e++;
   if(e-s>7&&!memcmp(s,"+ECSQ:",6)){char line[256];unsigned k=(unsigned)(e-s-6);
    if(k<sizeof(line)){memcpy(line,s+6,k);line[k]=0;const char *p=line;unsigned m=0;int w[24];
     while(m<24&&x9q_int(p,w[m])){m++;while(*p==' ')p++;if(*p!=',')break;p++;}
-    if(!n||(m>7&&(w[7]==0x1000||w[7]==0x2000)&&!(n>7&&(v[7]==0x1000||v[7]==0x2000)))){memcpy(v,w,sizeof(w));n=m;}}}
+    if(m>=10&&(w[7]==0x1000||w[7]==0x2000)&&!ln){memcpy(L,w,sizeof(w));ln=m;}
+    else if(m>=10&&w[7]==0x8000&&!nn){memcpy(N,w,sizeof(w));nn=m;}}}
   s=e;while(*s=='\r'||*s=='\n')s++;}
+ bool lte_ok=ln>=10&&L[0]>=0&&L[0]<=34&&L[1]>=0&&L[1]<98&&L[6]>=-140*4&&L[6]<=-44*4&&
+  L[5]>=-34*4&&L[5]<=3*4&&L[2]>=-128*4&&L[2]<=0&&L[8]!=0x7fff&&L[8]*5/2>=-200&&L[8]*5/2<=300;
+ /* NR: one consistent set (SS, else the second set); each value range-checked. */
+ int nr_rsrp=0,nr_rsrq=0,nr_sinr=0;bool nr_ok=false,nr_rsrq_ok=false;
+ for(int pass=0;pass<2&&!nr_ok&&nn>=10;pass++){
+  int ip=pass?6:11,iq=pass?5:10,is=pass?8:12;
+  if((unsigned)ip>=nn||(unsigned)is>=nn)continue;
+  int pr=N[ip],ps=N[is];
+  if(pr==0x7fff||ps==0x7fff||pr<-156*4||pr>-31*4||ps<-23*4||ps>40*4)continue;
+  nr_rsrp=pr/4;nr_sinr=ps*5/2;nr_ok=true;
+  if((unsigned)iq<nn&&N[iq]!=0x7fff&&N[iq]>=-43*4&&N[iq]<=20*4&&N[iq]!=0){nr_rsrq=N[iq]/4;nr_rsrq_ok=true;}
+ }
  static unsigned logged;
- if(logged<6){logged++;char raw[200];unsigned w=0;
+ if(logged<8){logged++;char raw[220];unsigned w=0;
   for(const char *q=r;*q&&w+2<sizeof(raw);q++)raw[w++]=*q=='\r'?'|':*q=='\n'?'/':((unsigned char)*q<32||(unsigned char)*q>126)?'?':*q;
   raw[w]=0;
-  printf("X9 QMI AT: ECSQ fields %u act 0x%x sig1 %d sig2 %d rssi_q %d rsrq_q %d rsrp_q %d sig3 %d raw \"%s\"\n",
-   n,n>7?v[7]:-1,n?v[0]:-1,n>1?v[1]:-1,n>2?v[2]:-1,n>5?v[5]:-1,n>6?v[6]:-1,n>8?v[8]:-1,raw);}
- if(n<10||(v[7]!=0x1000&&v[7]!=0x2000)||v[0]<0||v[0]>34||v[1]<0||v[1]>=98||
-    v[6]<-140*4||v[6]>-44*4||v[5]<-34*4||v[5]>3*4||v[2]<-128*4||v[2]>0||v[8]==0x7fff){
-  x9q_error(j,X9Q_NOT_READY);return;}
- int snr=v[8]*5/2;if(snr<-200||snr>300){x9q_error(j,X9Q_NOT_READY);return;}
- int rsrp=v[6]/4;uint8_t lte[6]={(uint8_t)(int8_t)(v[2]/4),(uint8_t)(int8_t)(v[5]/4),
-  (uint8_t)rsrp,(uint8_t)(rsrp>>8),(uint8_t)snr,(uint8_t)(snr>>8)};
- x9q_packet p(j.req);p.tlv(0x14,lte,sizeof(lte));x9q_finish(j,p,0x51);
+  printf("X9 QMI AT: ECSQ lte %d (rsrp_q %d rsrq_q %d sinr_q %d) nr %d (rsrp %d rsrq %d%s snr*10 %d) raw \"%s\"\n",
+   lte_ok,ln>6?L[6]:0,ln>5?L[5]:0,ln>8?L[8]:0,nr_ok,nr_rsrp,nr_rsrq,nr_rsrq_ok?"":"(n/a)",nr_sinr,raw);}
+ if(!lte_ok&&!nr_ok){x9q_error(j,X9Q_NOT_READY);return;}
+ x9q_packet p(j.req);
+ if(lte_ok){int snr=L[8]*5/2,rsrp=L[6]/4;uint8_t lte[6]={(uint8_t)(int8_t)(L[2]/4),(uint8_t)(int8_t)(L[5]/4),
+  (uint8_t)rsrp,(uint8_t)(rsrp>>8),(uint8_t)snr,(uint8_t)(snr>>8)};p.tlv(0x14,lte,sizeof(lte));}
+ if(nr_ok){uint8_t nr[4]={(uint8_t)nr_rsrp,(uint8_t)(nr_rsrp>>8),(uint8_t)nr_sinr,(uint8_t)(nr_sinr>>8)};p.tlv(0x17,nr,sizeof(nr));
+  if(nr_rsrq_ok){uint8_t q[2]={(uint8_t)nr_rsrq,(uint8_t)(nr_rsrq>>8)};p.tlv(0x18,q,sizeof(q));}}
+ x9q_finish(j,p,0x51);
 }
 static void x9q_start(x9q_job &j){
  unsigned service=j.port-X9BB_PORT_BASE;
