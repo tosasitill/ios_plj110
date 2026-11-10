@@ -7,7 +7,10 @@
  * No native DDS read command has been established. On boot, explicitly
  * SELECT the host policy (x9_dds_boot_slot=1/2, default 1, 0 disables), then
  * cache only a successful CNF. This is initialization, NOT an MD query.
- * Two READY, distinct physical ICCIDs are required. Sent mutation tokens
+ * Initialization belongs to the real card-pair/MIPC lifecycle, not to a
+ * future DDS client registration. 181 had a READY pair and online MIPC but
+ * no DDS38/18 or 4f; waiting for those left current permanently unknown and
+ * every WDS start ineligible. Two READY, distinct physical ICCIDs are required. Sent mutation tokens
  * survive client death/timeouts; never retry an operation of unknown outcome.
  */
 struct x9ds_client {
@@ -22,7 +25,7 @@ static x9ds_operation x9ds_op;
 static uint8_t x9ds_iccid[2][10];
 static bool x9ds_mapped_apps;
 static void x9ds_apps(bool ready){x9ds_mapped_apps=ready;}
-static bool x9ds_pair,x9ds_known,x9ds_requested,x9ds_boot_attempted;
+static bool x9ds_pair,x9ds_known,x9ds_boot_attempted;
 static unsigned x9ds_current;
 static uint64_t x9ds_epoch;
 static bool x9ds_live(){return !x9ds_op.host&&x9ds_op.slot<CBQ_MAX_CLIENTS&&x9q_clients[x9ds_op.slot].generation==x9ds_op.generation;}
@@ -67,12 +70,12 @@ static void x9ds_request(uint32_t local,uint32_t port,const uint8_t *req,unsigne
   x9q_view flag=x9q_tlv(req,n,0x18);
   if(!flag.p)error=X9Q_UNSUPPORTED; // e.g. 176: a2 dynamic-RRC registration, NOT DDS18
   else if(n!=11||flag.n!=1||flag.p[0]>1)error=X9Q_ARG;
-  else{c.subscribed=flag.p[0]!=0;x9ds_requested=true;x9q_packet p(req);p.send(local,port);
+  else{c.subscribed=flag.p[0]!=0;x9q_packet p(req);p.send(local,port);
    if(c.subscribed&&x9ds_known&&x9ds_pair&&!x9ds_op.used)x9ds_current_ind(slot);return;}
  }else if(id==0x4f){
   if(n!=7)error=X9Q_ARG;
   else if(c.query)error=X9Q_BUSY;
-  else{c.query=true;memcpy(c.req,req,7);c.deadline=x9q_ms()+180000;x9ds_requested=true;return;}
+  else{c.query=true;memcpy(c.req,req,7);c.deadline=x9q_ms()+180000;return;}
  }else if(id==0x4e){
   x9q_view sub=x9q_tlv(req,n,1),type=x9q_tlv(req,n,0x10);
   if(n!=21||!sub.p||sub.n!=4||!type.p||type.n!=4||x9q_u32(sub.p)<1||x9q_u32(sub.p)>2||x9q_u32(type.p)>1)error=X9Q_ARG;
@@ -82,7 +85,6 @@ static void x9ds_request(uint32_t local,uint32_t port,const uint8_t *req,unsigne
    bzero(&x9ds_op,sizeof(x9ds_op));x9ds_op.used=x9ds_op.reply=true;x9ds_op.slot=slot;
    x9ds_op.target=x9q_u32(sub.p)-1;x9ds_op.generation=x9q_clients[slot].generation;x9ds_op.epoch=x9ds_epoch;
    x9ds_op.deadline=x9q_ms()+60000;memcpy(x9ds_op.req,req,n);
-   x9ds_requested=true;
    printf("X9 DDS: switch request SIM%u -> SIM%u type %u; drain owned WDS before 020d\n",x9ds_known?x9ds_current+1:0,x9ds_op.target+1,x9q_u32(type.p));return;
   }
  }else error=X9Q_UNSUPPORTED;
@@ -102,7 +104,7 @@ static bool x9ds_drain(){
 static void x9ds_poll(){
  uint64_t now=x9q_ms();bool online=x9_md_mipc_online();
  if(!online)x9ds_known=false;
- if(!x9ds_op.used&&x9ds_requested&&!x9ds_boot_attempted&&x9ds_pair&&x9w_session_ready&&online){
+ if(!x9ds_op.used&&!x9ds_boot_attempted&&x9ds_pair&&x9w_session_ready&&online){
   int initial=1;PE_parse_boot_argn("x9_dds_boot_slot",&initial,sizeof(initial));x9ds_boot_attempted=true;
   if(initial==1||initial==2){
    bzero(&x9ds_op,sizeof(x9ds_op));x9ds_op.used=x9ds_op.host=true;x9ds_op.target=(unsigned)initial-1;

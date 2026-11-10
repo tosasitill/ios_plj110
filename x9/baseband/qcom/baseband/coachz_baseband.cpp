@@ -439,6 +439,22 @@ static void bb_esim_step(void)
 // its client ID alone is NOT a subscription and cannot select this cache.
 static uint8_t bb_iccid[2][CBD_ICCID_BYTES], bb_imsi[2][CBD_IMSI_BYTES];
 static uint8_t bb_iccid_known[2], bb_imsi_known[2], bb_act_known, bb_act_channel, bb_act_cid;
+// Read-only matching evidence: EF_AD supplies MNC width. Never print MSIN,
+// whole IMSI/ICCID, or infer a carrier from the serving (possibly shared) PLMN.
+static uint8_t bb_home_mnc_digits[2];
+static const uint16_t BB_EF_AD = 0x6fadu;
+static void bb_home_plmn_observe(unsigned sim)
+{
+  const unsigned width = bb_home_mnc_digits[sim];
+  if (!bb_imsi_known[sim] || (width != 2 && width != 3)) return;
+  char plmn[7] = {};
+  for (unsigned i = 0; i < 3 + width; i++) {
+    unsigned d = (i & 1) ? bb_imsi[sim][i / 2] & 15 : bb_imsi[sim][i / 2] >> 4;
+    if (d > 9) return;
+    plmn[i] = (char)('0' + d);
+  }
+  printf("X9 CARRIER SIM%u: home PLMN %s from real EF_IMSI + EF_AD MNC width %u (subscriber digits omitted)\n", sim + 1, plmn, width);
+}
 static bool bb_dsds_read_ready;
 static unsigned bb_sim_count(void)
 {
@@ -481,6 +497,7 @@ static void bb_dual_card_status(const uint8_t *first, const uint8_t *second)
     if (bb_iccid_known[sim] != have[sim] || (have[sim] && memcmp(ids[sim], bb_iccid[sim], CBD_ICCID_BYTES))) {
       memcpy(bb_iccid[sim], ids[sim], CBD_ICCID_BYTES); bb_iccid_known[sim] = have[sim];
       bzero(bb_imsi[sim], CBD_IMSI_BYTES); bb_imsi_known[sim] = 0; changed = true;
+      bb_home_mnc_digits[sim] = 0;
     }
   }
   bb_dsds_read_ready = ready;
@@ -501,7 +518,7 @@ static void bb_sim_request(const struct cbq_result &r, const uint8_t *sdu)
 {
   if (r.service != CBD_SVC_UIM) return;
   const uint32_t file = cbd_uim_read_file(sdu, r.len);
-  if (file != CBD_EF_ICCID && file != CBD_EF_IMSI) return;
+  if (file != CBD_EF_ICCID && file != CBD_EF_IMSI && file != BB_EF_AD) return;
   uint32_t size = 0;
   const uint8_t *session = cbd_find(sdu, r.len, 1, &size);
   if (!session || size != 2 || session[1] ||
@@ -531,6 +548,14 @@ static void bb_sim_answer(const struct cbq_result &r, const uint8_t *sdu, uint32
     if (slot >= CBQ_MAX_CLIENTS || q.generation != bb_qmux.client[slot].generation) return;
     uint8_t ef[16] = {}, value[CBD_ICCID_BYTES] = {};
     const uint32_t len = cbd_uim_read_content(sdu, n, ef, sizeof ef);
+    if (q.file == BB_EF_AD) {
+      const unsigned width = len >= 4 ? ef[3] & 15 : 0;
+      bzero(ef, sizeof ef);
+      bb_home_mnc_digits[q.sim] = width == 2 || width == 3 ? (uint8_t)width : 0;
+      printf("X9 CARRIER SIM%u: EF_AD result %u bytes %u MNC width %u (0 unknown)\n", q.sim + 1, cbd_error(sdu, n), len, bb_home_mnc_digits[q.sim]);
+      bb_home_plmn_observe(q.sim);
+      return;
+    }
     const bool iccid = q.file == CBD_EF_ICCID;
     const bool valid = iccid ? cbd_iccid_from_ef(ef, len, value) : cbd_imsi_from_ef(ef, len, value);
     bzero(ef, sizeof ef);
@@ -541,11 +566,13 @@ static void bb_sim_answer(const struct cbq_result &r, const uint8_t *sdu, uint32
     if (iccid) {
       // New card: never pair its ICCID with the previous card's IMSI.
       bzero(bb_imsi[q.sim], CBD_IMSI_BYTES); bb_imsi_known[q.sim] = 0;
+      bb_home_mnc_digits[q.sim] = 0;
       bb_dsds_read_ready = false; // requires a fresh paired snapshot
     }
     memcpy(have, value, size); *known = 1; bzero(value, sizeof value);
     printf("COACHZ baseband: SIM%u %s read from the card, activation indication %s\n", q.sim + 1, iccid ? "ICCID" : "IMSI",
            bb_act_known ? "sent again with it" : "waits for registration");
+    if (!iccid) bb_home_plmn_observe(q.sim);
     bb_activation_indicate();
     return;
   }

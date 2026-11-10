@@ -4871,6 +4871,16 @@ x9_cc_path_interesting(const char *p)
 	return 0;
 }
 static unsigned x9_cc_fail_lines;
+/* Carrier matching must not share ABM's 200-file budget: 181 exhausted it
+ * before late SIM matching, and successful carrier.plist opens were omitted.
+ * Fixed bundle paths only, no SIM identifiers or plist contents. */
+static unsigned x9_carrier_file_lines;
+static int
+x9_carrier_path_interesting(const char *p)
+{
+	return sweet_text_contains(p, "/Carrier Bundles/") && !sweet_text_contains(p, ".lproj") &&
+	    (sweet_text_contains(p, ".plist") || sweet_text_contains(p, ".der") || sweet_text_contains(p, "/46015"));
+}
 #endif
 int
 open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
@@ -4880,6 +4890,7 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 	static unsigned observations, cc_observations;
 	char path[256] = "";
 	int cc_observe = 0;
+	int carrier_observe = 0;
 	proc_t p = vfs_context_proc(ctx);
 	int observe = 0;
 	extern int sweet_early_is_x9(void);
@@ -4901,8 +4912,17 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 			cc_observe = 2;   /* decide after the call: failures and baseband-looking paths */
 		}
 	}
+	if (sweet_early_is_x9() && !strcmp(p->p_comm, "CommCenter") &&
+	    UIO_SEG_IS_USER_SPACE(ndp->ni_segflg) && x9_carrier_file_lines < 96) {
+		size_t copied = 0;
+		carrier_observe = !copyinstr(ndp->ni_dirp, path, sizeof(path), &copied) &&
+		    x9_carrier_path_interesting(path);
+	}
 	int error = sweet_open1_impl(ctx, ndp, uflags, vap, fp_init, initarg, retval, authfd);
 #if defined(ARM64_BOARD_CONFIG_SWEET)
+	if (carrier_observe && __sync_fetch_and_add(&x9_carrier_file_lines, 1) < 96) {
+		printf("X9 CARRIER OPEN: path=%s flags=%x errno=%d\n", path, uflags, error);
+	}
 	if (cc_observe && ((error && __sync_fetch_and_add(&x9_cc_fail_lines, 1) < 150) ||
 	    (x9_cc_path_interesting(path) && __sync_fetch_and_add(&cc_observations, 1) < 200))) {
 		printf("X9 CC OPEN: path=%s flags=%x errno=%d\n", path, uflags, error);
@@ -7010,6 +7030,10 @@ fstatat_internal(vfs_context_t ctx, user_addr_t path, user_addr_t ub,
 		sobserve = !copyinstr(path, spath, sizeof(spath), &copied);
 	}
 	int serror = fstatat_internal_impl(ctx, path, ub, xsecurity, xsecurity_size, isstat64, segflg, fd, flag);
+	if (sobserve && x9_carrier_path_interesting(spath) &&
+	    __sync_fetch_and_add(&x9_carrier_file_lines, 1) < 96) {
+		printf("X9 CARRIER STAT: path=%s errno=%d\n", spath, serror);
+	}
 	if (sobserve && ((serror && __sync_fetch_and_add(&x9_cc_fail_lines, 1) < 150) ||
 	    (x9_cc_path_interesting(spath) && __sync_fetch_and_add(&cc_stat_lines, 1) < 200))) {
 		printf("X9 CC STAT: path=%s errno=%d\n", spath, serror);

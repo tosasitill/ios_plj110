@@ -73,7 +73,7 @@ X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>      # 之后再�
 
 ## 3. 当前基线镜像与参数
 
-- **最新蜂窝180回归+官方广电联合候选(122)**:`x9/out/x9-all122-cell180-cbn-md/boot.img`,固定完整**a464743**,**72/72 overlay+6prebuilt、kernel link/strip/iOS工具/shim/boot全部exit0**,构建器报告**13357056B**。603B完整180参数不变(dual1/camera1/torch3/ALS1/BT1、ug5/dv1),32GiB manifest/插件275不变,**无需mailbox**。恢复MDOTA784文件/7292219B、Wi-Fi固件/WIFI/connfem,包含121的native plan/tag19信号修正及截至a464743的已提交音频/USB/GPS气压/相机(dd96a45祖先,含7258af4),不额外开启默认off诊断功能。官方**CBN_cn54.1.0原IPCC+完整26文件**内嵌,在PID1 exec launchd前非破坏性安装并发布46015alias,移动不改。**未上机,ICCID/菜单/真实切换/5G仍未验收**,D22使用原官方覆盖,不宣称自动打开现代5G策略;详见蜂窝180活动交接。
+- **最新蜂窝180回归+官方广电联合候选(122)**:`x9/out/x9-all122-cell180-cbn-md/boot.img`,固定完整**a464743**,**72/72 overlay+6prebuilt、kernel link/strip/iOS工具/shim/boot全部exit0**,构建器报告**13357056B**。603B完整180参数不变(dual1/camera1/torch3/ALS1/BT1、ug5/dv1),32GiB manifest/插件275不变,**无需mailbox**。恢复MDOTA784文件/7292219B、Wi-Fi固件/WIFI/connfem,包含121的native plan/tag19信号修正及截至a464743的已提交音频/USB/GPS气压/相机(dd96a45祖先,含7258af4),不额外开启默认off诊断功能。官方**CBN_cn54.1.0原IPCC+完整26文件**内嵌,在PID1 exec launchd前非破坏性安装并发布46015alias,移动不改。**181已上机:卡2信号正常、双ICCID恢复、官方CBN安装成功;SIM1仍Carrier54.0且两卡网络不可用,默认卡菜单/真实切换/5G未验收**。D22使用原官方覆盖,不宣称自动打开现代5G策略;最新缺口见蜂窝181活动交接。
 
 - **UFS最新已实测G5基线(180)**:`x9/out/x9-ufs-g5-panic179-idle603/boot.img`,固定**2902928**,原整包exit0/10010624B。用户报告正常;180确认G5/FAST/RateB/双lane、SHA通过、frontboard errno0、launchd/SpringBoard及后续根盘读写,详见UFS-180。603B/ug5/dv1、32GiB manifest/插件275不变,无需mailbox;这是179最小差分包,不含后来main其他窗口的最新功能。
 
@@ -137,7 +137,7 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 
 ## 5. 未解决问题
 
-当前主线是 **QMI→MediaTek AT控制查询 + MIPC1/WDS + DPMAIF**(§7):175确认40-bit分配与INIT_DONE、真实SA→LTE,但没有WDS Start/ACT/GET/EIF或PDP收发;41.523s因raw DL状态0x8被隔离。15f597b区分未使用legacy PIT的masked状态与真实LRO/DMA错误,已与ALS整合编译,实机效果仍未验收。下一步先追iOS为何没有Start及NR回退的真实MD/网络原因,不伪造connected、不强锁NR、不连续刷探针。下列为保留的GPU/Wi-Fi待办,不是新的硬件验证结论。
+当前主线是 **QMI→MediaTek AT控制查询 + MIPC/WDS + DPMAIF**:181确认两实卡ICCID恢复、卡2信号正常、两槽真实SA/LTE注册,DPMAIF INIT_DONE且全程ready1/quarantined0,legacy PIT误隔离修正已生效。仍无WDS Start/ACT/GET/EIF或PDP收发,SIM1仍Carrier54.0。已定位native CCPLAN因UF_COMPRESSED被拒及DDS启动选择错误依赖未来client查询两个漏接点,见蜂窝181活动交接;官方CBN安装成功≠loader最终选中,不伪造名称/connected或强锁NR。下列为保留的GPU/Wi-Fi待办,不是新的硬件验证结论。
 
 1. **GPU 带宽/帧率**:旧110的avg ~17-22 fps/稳态24 fps/job wait6-15ms曾推测显存带宽受限,不是175/176性能验收。**DVFSRC已初始化**:175和176均确认SMC INIT a0=0、OPP93、DDR请求9后current VCORE gear5,不能再沿用110的basic8/gear0。
    TF-A `MTK_SIP_VCOREFS_CONTROL=0xC2000506`,INIT=0锁高OPP;现有`x9_dvfsrc=1`已运行成功,START=1(`x9_dvfsrc=2`)自由运行尚无本轮验收。UFS G5需独立持久VCORE floor,不把偶然current gear5当电压所有权;见UFS-G5交接。
@@ -475,7 +475,16 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **不能称为全部USB完成**:本轮暂无枚举/DMA/ue0 ping/bulk回环实机结果,live EMI/MPU允许普通XNU DMA页也未证明。`native_apple_stack=0`,没有冒充IOUSBDeviceController或AppleUSBDeviceMux;原始configd USBDeviceConfiguration/lockdownd、Finder/iTunes Trust/配对/照片同步仍缺20H392 controller adapter及kext构建接入。USB3 XS-PHY/retimer、charger Type-C role与原生xHCI也未完成。参考文章chip/board/security-domain/fsid/锁状态条件要到原生栈接通后才验证,不先改身份/配对状态制造成功。
 - **下一步/验收**:先在用户手动启动的单一候选核对`CAP_EPINFO/TXFIFO/RXFIFO/MISC`→config1/alt1→真实QMU OUT/IN→ue0 ping,再用iOS `usbctl --echo`+host单次echo证明host→iOS→host字节相同。保留EP0日志,无需重建Metal插件/mailbox。接口/回退/构建说明在`x9/usb/README.md`;不要求用户现在连续刷试探镜像。
 
-## 蜂窝活动交接(180回归,2026-11-10): 两卡标识消失前真实MD已在MCF配置加载断言;隔离构建遗漏私有输入已定位
+## 蜂窝活动交接(181,2026-11-10): 两卡ICCID/卡2信号已恢复;native压缩文件门及默认数据卡启动漏接已修,待固定整包
+
+- **用户/运行基线**:用户明确确认卡2信号彻底正常、两卡ICCID回来了,SIM1仍Carrier54.0、两卡网络不可用。`~/181.txt`2590208B/24689行/末207.770s,原样保存`.local/x9/work/dual-sim-181/181-original.txt`;181对应122/a464743,不继续记122为未上机。20.744s双槽radio enable最终OK,20.771sMIPC五阶段/双槽DEACT+EIF订阅完整;25.786s两卡真实distinct ICCID/READY,27.292/27.431s各槽真实IMSI。两槽27.211/27.236s真实C5GREG1/CGATT1/AcT11,后续LTE及再次SA,无180 MCF断言。用户“网络不可用”保留,注册不等于数据或语音可用,不重新改已正常的卡2信号/ICCID。
+- **已确认未接入1/native套餐**:3.280s CCGATE第五完整状态已装,但3.284s`CCPLAN file errno0 reg1 size24740528 flags0x20; not touched`/errno22。0x20正是UF_COMPRESSED,不是大小/版本不符;原生factory的40/eSIM、28/AppleSIM查找还未切到真实70/dual,不能把cache gate成功当native controller可用。复读原20H392反汇编100211c88..ce0及原文件page529,原指令081540f9/页与stored hash faef7752…b4da5,28→70派生页cc41560b…14a4b。新增先验证逻辑header/指令/hash及实际4096B页SHA,仅在需更改时以**相同size的vnode_setattr**调用既有HFS→decmpfs(-1,truncate_okay0)无损解压,再验证size/flags/header/指令/hash/实际页后写原窄补丁。没有直接清压缩flag、写压缩raw fork或FWRITE open(truncate_okay1),unknown/mixed仍拒绝,mode2/single仍恢复原指令/hash。无设备操作,只是下一次启动执行路径。
+- **已确认未接入2/DDS默认卡**:181真实READY pair在25.786s使current无效,但没有DDS38/tag18、4f或4e,因此旧`x9ds_requested`条件永久挡住已有boot policy。删除仅这一client-request依赖:两卡真实READY distinct+MIPC online+WDS控制session就绪时,启动策略默认SIM1(`x9_dds_boot_slot=1/2`,0禁用)只显式发一次已有020d,**仍只有匹配020e/TLV0 result0、同card epoch/online后才缓存current和发IND**。不是读回/伪造default,不重试已发/未知结果、不取消mutation owner;显式iOS切卡原流程不改。WDS仍必须真实current slot且无在途DDS才准ACT。181没有Start,不能宣称这个修改已完成实际拨号。
+- **数据证据/排除旧误路**:DPMAIF20.747sINIT_DONE;24.936–199.375sready1/quarantined0/published1,TXsubmitted/completed0、RXdelivered0。38.461slegacy PIT0x8正确masked,没有quarantine,不重修PIT。正确解析请求为WDS41条(a2/af/3/30/4d/1/cd/5566/3e/85),**Start0x20=0**;DSD10条(27/25/24/69/38各2),38是a2动态RRC注册不是DDS18。之前初查Counter空是正则没匹配`WDS(0x1) from...`,不是无WDS请求。
+- **广电已装/尚未确认最终匹配**:2.290s`CBN original54.1.0 verified created27 kept0;46015 alias ready(D22 original overrides)`证明122实际带入并安装原IPCC+完整26文件;不能再归因缺输入/未安装。25.943sDefault原覆盖,27.309–27.460s46000移动原覆盖;**没有捕获到46015访问不等于从未访问**:旧open/stat各200的interesting预算+共享150失败预算已耗尽(OPEN278/STAT272合550),成功carrier.plist读取本来也未被记录。新加独立96条carrier.plist/Info/supported_devices/DER/46015限量文件跟踪,排除lproj,不读内容;并从真实EF_IMSI+EF_AD MNC位数输出只含归属MCC/MNC的脱敏匹配证据,不打印MSIN/整IMSI/ICCID、不以COPS共享网络PLMN猜SIM归属。官方IPCC/签名/APN原样不变,不伪装运营商/现代机型/强开5G。载入链反汇编1000b5c70读取carrier.plist/SupportedSIMs、1004b516c先验官方签名;尚无确定签名/匹配失败结果,不绕过校验。
+- **源码/编译里程碑**:本轮只改kern_exec.c、X9DSDS.inc、vfs_syscalls.c和coachz_baseband.cpp,不覆盖其他窗口相机/BT/torch/GPS等提交。kern_exec/X9Baseband单对象交叉编译成功;vfs首轮新strstr未声明失败,改用文件已有sweet_text_contains后第二轮成功。无测试套件/设备/分区/mailbox写入。私有`object-build.log/object-results.json/object-build2.log/object-result2.json`保存首失败与修正,`native-page-evidence.json`、`native-factory.asm`、`carrier-*.asm`、`qmi-counts.json`、`uim-responses.txt`保存只读证据。下一步提交这组完整修正后冻结最新已提交main,沿用122绝对路径CBN/MDOTA/Wi-Fi/32GiB/插件275及603B参数完整构建**一个**联合候选,不要求用户反复刷猜测镜像。
+
+## 前次蜂窝交接(180回归,2026-11-10): 两卡标识消失前真实MD已在MCF配置加载断言;隔离构建遗漏私有输入已定位
 
 - **用户观察/日志**:用户明确报告180两卡均显示Carrier、原先移动名称与两卡ICCID消失。180正常G5/PID1/GUI仍成立,但**不是蜂窝成功**。原日志1250618B保存`.local/x9/work/dual-sim-180/180-original.txt`,未修改用户原件。不能归因于本轮下载的CBN IPCC:包从未安装/合入root。
 - **最早决定性失败(纠正仅盯CCGATE/online gate的初查)**:9.640s真实MD HS2→READY,15.826s`SIM radio flight slots 2 final OK`,16.030s跳过LTE-only,**16.257s EX_INIT→16.317s MCU assert `mcu/service/mcf/src/mcf_util.c:360`,lr907e7ec2**,16.510s切exception rings、16.529sBOOT_STATUS全0。`x9md_listen`在首exception执行`x9at_bridge_online(0)/x9mi_online(0)`并停止ready_tick;因此既没有EFUN最终OK/MIPC OPEN/真实AT→QMI响应,又使DPMAIF一直prepare。180不是SIM未插或只缺信号换算;不伪造ICCID、绕过异常隔离或调信号系数。

@@ -7707,7 +7707,26 @@ sweet_x9_ccgate(void)
  * Root binaries are already CS_ADHOC; retain the original entitlements and
  * signature layout, changing only this instruction and its SHA256 page slot.
  * Refuse unknown/mixed inputs before writing; single/restore mode restores
- * original. Runtime bounds/shape/readback mirror the existing cache gate. */
+ * original. A stock HFS file may have UF_COMPRESSED (181). Qualify logical
+ * bytes first, then request the SAME size via HFS setattr: that uses
+ * decmpfs_decompress_file(...,-1,truncate_okay=0), preserving the compressed
+ * source on failure. Never clear UF_COMPRESSED or write the raw data fork.
+ * Runtime bounds/shape/readback mirror the existing cache gate. */
+static int
+x9_ccplan_page(vnode_t vp, const uint8_t expected[32], vfs_context_t ctx)
+{
+ uint8_t buf[256], digest[32];
+ SHA256_CTX hash;
+ SHA256_Init(&hash);
+ for (unsigned i = 0; i < 4096; i += sizeof(buf)) {
+  int error = x9_ccgate_io(vp, 529 * 4096 + i, buf, sizeof(buf), UIO_READ, ctx);
+  if (error) return error;
+  SHA256_Update(&hash, buf, sizeof(buf));
+ }
+ SHA256_Final(digest, &hash);
+ return memcmp(digest, expected, sizeof(digest)) ? EINVAL : 0;
+}
+
 static int
 sweet_x9_ccplan_gate(void)
 {
@@ -7733,7 +7752,7 @@ sweet_x9_ccplan_gate(void)
  if (error) { printf("X9 CCPLAN: lookup errno=%d; not touched\n", error); return error; }
  VATTR_INIT(&va); VATTR_WANTED(&va, va_data_size); VATTR_WANTED(&va, va_flags);
  error = vnode_getattr(vp, &va, ctx);
- if (error || !vnode_isreg(vp) || va.va_data_size != 24740528 || (va.va_flags & UF_COMPRESSED)) {
+ if (error || !vnode_isreg(vp) || va.va_data_size != 24740528) {
   printf("X9 CCPLAN: file errno=%d reg=%d size=%lld flags=0x%x; not touched\n",
       error, vnode_isreg(vp), (long long)va.va_data_size, va.va_flags);
   error = error ? error : EINVAL; goto out;
@@ -7756,7 +7775,29 @@ sweet_x9_ccplan_gate(void)
   error = EINVAL; goto out;
  }
  source = matches == 2;
+ error = x9_ccplan_page(vp, source ? edits[1].patched : edits[1].orig, ctx);
+ if (error) { printf("X9 CCPLAN: logical page 529 mismatch/read errno=%d; not touched\n", error); goto out; }
  if (source == target) { printf("X9 CCPLAN: already %s (factory and page hash)\n", target ? "real dual-plan capable" : "original"); goto out; }
+ if (va.va_flags & UF_COMPRESSED) {
+  /* Native HFS setattr with unchanged length converts without truncation.
+   * No FWRITE open: HFS's open path uses truncate_okay=1 on failure. */
+  VATTR_INIT(&va); VATTR_SET(&va, va_data_size, 24740528);
+  error = vnode_setattr(vp, &va, ctx);
+  if (error) { printf("X9 CCPLAN: lossless HFS decompression errno=%d; factory not written\n", error); goto out; }
+  VATTR_INIT(&va); VATTR_WANTED(&va, va_data_size); VATTR_WANTED(&va, va_flags);
+  error = vnode_getattr(vp, &va, ctx);
+  if (!error && (va.va_data_size != 24740528 || (va.va_flags & UF_COMPRESSED))) error = EINVAL;
+  if (!error) error = x9_ccgate_io(vp, 0, buf, sizeof(hdr), UIO_READ, ctx);
+  if (!error && memcmp(buf, hdr, sizeof(hdr))) error = EINVAL;
+  for (i = 0; i < 2 && !error; i++) {
+   const struct x9_ccgate_edit *e = &edits[i];
+   error = x9_ccgate_io(vp, e->off, buf, e->len, UIO_READ, ctx);
+   if (!error && memcmp(buf, source ? e->patched : e->orig, e->len)) error = EINVAL;
+  }
+  if (!error) error = x9_ccplan_page(vp, source ? edits[1].patched : edits[1].orig, ctx);
+  printf("X9 CCPLAN: compressed source converted at unchanged size, logical page/header/hash errno=%d\n", error);
+  if (error) goto out;
+ }
  /* Code first, CodeDirectory hash last. Any failed write keeps its error;
   * no retry, unknown mixture repair, or fabricated success. */
  for (i = 0; i < 2; i++) {
