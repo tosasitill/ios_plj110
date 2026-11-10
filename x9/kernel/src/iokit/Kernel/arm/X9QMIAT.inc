@@ -47,6 +47,8 @@ struct x9q_packet {
 };
 struct x9q_client {uint64_t generation,next;uint32_t uim_mask;uint8_t sim_slot;bool serving,system,signal;};
 static x9q_client x9q_clients[CBQ_MAX_CLIENTS];
+static void x9ds_cards(const uint8_t *first,const uint8_t *second,bool ready);
+static bool x9ds_data_ready(unsigned slot);
 struct x9q_job {
  bool used,background,probe,mipc;uint32_t local,port,len;uint64_t generation,order,deadline,token,token_deadline;
  uint8_t req[X9Q_REQ];uint16_t id;unsigned stage;
@@ -56,7 +58,7 @@ struct x9q_job {
  char path[33];uint8_t raw[512];unsigned raw_len,record;
  uint8_t aid[4][32],aid_len[4],aid_type[4];unsigned apps;
  uint8_t sim_slot,cards[512],slots[41],iccid[2][10];unsigned card_bytes,slot_bytes;
- bool iccid_valid[2];
+ bool iccid_valid[2],card_ready[2];
  int reg[3],attached,act,csq;uint16_t mcc,mnc;unsigned mnc_digits;
 };
 static x9q_job x9q_jobs[X9Q_JOBS];static int x9q_active=-1;static uint64_t x9q_order;
@@ -136,7 +138,9 @@ static bool x9q_dir(x9q_job &j,const uint8_t *p,unsigned n){
  while(i<n)if(p[i++]!=0xff)return false;return true;
 }
 static void x9q_error(x9q_job &j,uint16_t err){
- if(x9_md_sim_count()==2&&j.port==X9BB_PORT_BASE+0x0b&&(j.id==0x2f||j.id==0x47))bb_dual_card_status(nullptr,nullptr);
+ if(x9_md_sim_count()==2&&j.port==X9BB_PORT_BASE+0x0b&&(j.id==0x2f||j.id==0x47)){
+  bb_dual_card_status(nullptr,nullptr);x9ds_cards(nullptr,nullptr,false);
+ }
  if(!j.background&&!j.probe){x9q_packet p(j.req,err);p.send(j.local,j.port);}
  if(!j.background||j.probe)printf("X9 QMI AT: response service 0x%x msg 0x%04x txn %u error %u SIM%u probe %u stage %u\n",
   j.port-X9BB_PORT_BASE,j.id,x9q_u16(j.req+1),err,j.sim_slot+1,j.probe,j.stage);
@@ -215,10 +219,12 @@ static void x9q_uim_next(x9q_job &j){
   if(!distinct){x9q_error(j,X9Q_INTERNAL);return;} // never publish SIM1 twice
  }
  if(x9_md_sim_count()==2)bb_dual_card_status(j.iccid_valid[0]?j.iccid[0]:nullptr,j.iccid_valid[1]?j.iccid[1]:nullptr);
+ if(x9_md_sim_count()==2)x9ds_cards(j.iccid_valid[0]?j.iccid[0]:nullptr,j.iccid_valid[1]?j.iccid[1]:nullptr,j.card_ready[0]&&j.card_ready[1]);
  x9q_packet p(j.req);p.tlv(0x10,j.id==0x2f?j.cards:j.slots,j.id==0x2f?j.card_bytes:j.slot_bytes);
  x9q_finish(j,p,j.id==0x2f?0x32:0x48);
 }
 static void x9q_slot(x9q_job &j,const uint8_t *iccid){
+ j.card_ready[j.sim_slot]=iccid&&j.sim==1;
  unsigned n=j.slot_bytes;uint8_t *s=j.slots;
  if(n+20>sizeof(j.slots)){x9q_error(j,X9Q_INTERNAL);return;}
  bzero(s+n,10);s[n]=iccid?2:1;s[n+4]=1;s[n+8]=j.sim_slot+1;s[n+9]=iccid?10:0;n+=10;
@@ -226,6 +232,7 @@ static void x9q_slot(x9q_job &j,const uint8_t *iccid){
  j.slot_bytes=n;x9q_uim_next(j);
 }
 static void x9q_card(x9q_job &j,bool present=true){
+ j.card_ready[j.sim_slot]=present&&j.sim==1&&j.apps!=0;
  uint8_t *s=j.cards;unsigned n=j.card_bytes;
  if(n+6+j.apps*46>sizeof(j.cards)){x9q_error(j,X9Q_INTERNAL);return;}
  /* CPIN does not distinguish PIN verified from disabled or expose retries.
@@ -430,7 +437,9 @@ static void x9q_start(x9q_job &j){
    * map to real CFUN=1 / CFUN=4. RESET, OFFLINE, SHUTDOWN, FTM stay unsupported. */
   x9q_view m=x9q_tlv(j.req,j.len,1);unsigned mode=m.p&&m.n==1?m.p[0]:255;
   printf("X9 QMI AT: DMS 0x002e set operating mode %u\n",mode);
-  if(mode==0)x9q_command(j,"AT+CFUN=1\r",21);
+  /* Do not undo the original RIL's two-slot EFUN enable when CommCenter
+   * subsequently requests global ONLINE. LOW_POWER remains global flight. */
+  if(mode==0)x9q_command(j,x9_md_sim_count()==2?"AT+EFUN=3\r":"AT+CFUN=1\r",21);
   else if(mode==1||mode==6)x9q_command(j,"AT+CFUN=4\r",21);
   else x9q_error(j,X9Q_UNSUPPORTED);
  }else if(service==2){
@@ -599,6 +608,7 @@ static bool x9q_enqueue(uint32_t local,uint32_t port,const uint8_t *req,unsigned
 }
 #include "X9WDS.inc"
 #include "X9Messages.inc"
+#include "X9DSDS.inc"
 /* Requests answered without an AT job used to be silent (158.txt: 178 requests,
  * 14 logged answers). Log tags/lengths only; values only for 1-byte flags. */
 static void x9q_reject(uint32_t local,uint32_t port,const uint8_t *req,unsigned len,uint16_t err){
@@ -618,6 +628,7 @@ static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *r
  }
  x9q_client &c=x9q_clients[slot];
  if(x9m_request(local,port,req,len))return;
+ if(service==0x2a){x9ds_request(local,port,req,len);return;}
  if(service==1&&x9w_request(local,port,req,len))return;
  /* NAS/DMS BindSubscription: client-local 0=primary, 1=secondary, not DDS.
   * Jobs snapshot their route; changing binding cannot retarget old replies. */
@@ -704,6 +715,7 @@ static void x9q_del(uint32_t local){
  unsigned slot=local-CBQ_PORT_BASE;if(local<CBQ_PORT_BASE||slot>=CBQ_MAX_CLIENTS)return;
  x9w_del(slot);
  x9m_del(slot);
+ x9ds_del(slot);
  uint64_t generation=x9q_clients[slot].generation+1;bzero(&x9q_clients[slot],sizeof(x9q_clients[slot]));x9q_clients[slot].generation=generation;
  for(unsigned i=0;i<X9Q_JOBS;i++)if(x9q_jobs[i].used&&!x9q_jobs[i].probe&&x9q_jobs[i].local==local){
   x9q_cancel(x9q_jobs[i]);
@@ -713,6 +725,7 @@ static void x9q_del(uint32_t local){
 static void x9q_poll(){
  x9w_poll();
  x9m_poll();
+ x9ds_poll();
  /* One bounded read-only pass even when D22 never creates a SIM2 client.
   * It does not send QMI responses, change radio policy or manufacture a SIM. */
  static unsigned probed;

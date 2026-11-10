@@ -64,6 +64,10 @@ uint64_t x9_md_mipc_submit(const uint8_t *p,uint32_t n){
      strnlen((const char *)p+20,k)!=k-1||!x9mi_at_read((const char *)p+20))return 0;
  }
  else if(id==0x30b||id==0x601||id==0x605||id==0xa04){if(!x9mm_request(p,n,id))return 0;}
+ /* PLJ110 RmmDcEventHandler::requestSetPreferredDataModem, ELF 0x2cb1a0:
+  * 020d has no TLVs; the target is the header SIM mask. Only the DDS
+  * owner may issue this operation, retaining its token through late 020e. */
+ else if(id==0x20d){if(x9_md_sim_count()!=2||(p[8]!=1&&p[8]!=2)||n!=16)return 0;}
  else if((p[8]!=1&&(p[8]!=2||x9_md_sim_count()!=2))||
     (id!=0x201&&id!=0x203&&id!=0x205&&id!=0x219&&id!=0x307))return 0;
  uint64_t token=0;lck_mtx_lock(&x9_mi_lock);

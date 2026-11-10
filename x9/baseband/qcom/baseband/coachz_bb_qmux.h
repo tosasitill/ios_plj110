@@ -53,7 +53,11 @@
 #define CBQ_CHANNELS 2u                /* qmux1, qmux2 */
 #define CBQ_INTERNAL CBQ_CHANNELS      /* clients the bridge itself holds */
 #define CBQ_MAX_SERVERS 64u
-#define CBQ_MAX_CLIENTS 64u
+/* 172/174 reach 64 live clients before a DSD client exists. DSDS creates
+ * separate NAS/WDS clients per subscription; keep the table bounded but
+ * leave room for the real default-data subscription driver. CID remains
+ * 1..254 per service/channel, and delayed DEL_CLIENT reuse is unchanged. */
+#define CBQ_MAX_CLIENTS 128u
 #define CBQ_PORT_BASE 0x4100u          /* local QRTR ports: base + client slot (Wi-Fi and IPA use 0x4000..0x4003) */
 
 static inline int cbq_private_service(uint32_t service) { return service >= 0xe1u && service <= 0xeau; }

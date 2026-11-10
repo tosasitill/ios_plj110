@@ -1086,20 +1086,37 @@ static const struct x9at_step x9at_script[]={
  {"AT+CEREG?\r",0,5000},{"AT+C5GREG?\r",0,5000},{"AT+CSQ\r",0,5000},{"AT+COPS?\r",15000,10000},{"AT+CREG?\r",0,5000},
  {"AT+CEREG?\r",0,5000},{"AT+C5GREG?\r",0,5000},{"AT+CGATT?\r",0,10000},{"AT+CSQ\r",0,5000},
 };
+/* PLJ110 libmtk-ril bootupSetRadioPower (ELF 0x397020) enables the
+ * per-SIM radio mask with EFUN, not CFUN. Two enabled slots -> mask 3,
+ * independent of the major-SIM remapping. Keep the single-slot path. */
+static const char *x9at_step_command(unsigned idx){
+ return idx==10&&x9_md_sim_count()==2?"AT+EFUN=3\r":x9at_script[idx].cmd;
+}
 static void x9at_engine(unsigned ms){
  static unsigned idx,sent_ms,free_ms,started;
+ static int radio_ready,radio_failed;
  if(!started){started=1;free_ms=ms;}
- /* Bridge jobs start after CFUN=1 (index 10 since the ERAT step was added). */
- if(x9at_bridge_tick(ms,idx>=11))return;
+ /* Only the real radio-enable final OK releases the bridge. Advancing
+  * the script past ERROR/overflow is not a successful radio transition. */
+ if(x9at_bridge_tick(ms,radio_ready))return;
+ if(radio_failed)return;
  if(x9at_pending){
   if(x9at_done){
-   X9MD_LOG("X9 MODEM: AT step %u '%.20s' -> %s after %u ms\n",idx,x9at_script[idx].cmd,x9at_done>0?"OK":"ERROR",ms-sent_ms);
+   const char *cmd=x9at_step_command(idx);
+   int ok=x9at_done>0&&!x9at_overflow;
+   X9MD_LOG("X9 MODEM: AT step %u '%.20s' -> %s after %u ms\n",idx,cmd,ok?"OK":"ERROR/overflow",ms-sent_ms);
+   if(idx==2||idx==10){
+    if(!ok)radio_failed=1;
+    else if(idx==10)radio_ready=1;
+    printf("X9 MODEM: SIM radio %s slots %u final %s; bridge-ready %u\n",
+     idx==2?"flight":"enable",x9_md_sim_count(),ok?"OK":"ERROR/overflow",radio_ready);
+   }
    if(!strncmp(x9at_script[idx].cmd,"AT+ERAT=",8))
     printf("X9 MODEM: LTE-only AT+ERAT=3 -> %s after %u ms\n",x9at_done>0?"OK":"ERROR",ms-sent_ms);
    x9at_pending=0;x9at_done=0;idx++;free_ms=ms;
   }else if(ms-sent_ms>x9at_script[idx].timeout_ms){
-   X9MD_LOG("X9 MODEM: AT step %u '%.20s' TIMEOUT\n",idx,x9at_script[idx].cmd);
-   x9at_pending=0;idx++;free_ms=ms;
+   X9MD_LOG("X9 MODEM: AT step %u '%.20s' TIMEOUT\n",idx,x9at_step_command(idx));
+   x9at_pending=0;radio_failed=1;free_ms=ms;
    if(x9_at_enabled())x9at_bridge_poison();
   }
   return;
@@ -1112,7 +1129,7 @@ static void x9at_engine(unsigned ms){
  if(!strncmp(x9at_script[idx].cmd,"AT+ERAT=",8)&&!sweet_x9_arg("x9_md_lte",1)){
   printf("X9 MODEM: x9_md_lte=0, RAT left as the MD default\n");idx++;free_ms=ms;return;}
  x9at_reset();x9at_pending=1;sent_ms=ms;
- if(x9md_at_send(x9at_script[idx].cmd)<0){x9at_pending=0;if(x9_at_enabled())x9at_bridge_poison();}
+ if(x9md_at_send(x9at_step_command(idx))<0){x9at_pending=0;radio_failed=1;if(x9_at_enabled())x9at_bridge_poison();}
 }
 static void x9md_ready_tick(unsigned ms_since_ready){
  x9mi_tick();

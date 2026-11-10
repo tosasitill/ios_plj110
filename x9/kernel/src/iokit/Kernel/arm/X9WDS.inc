@@ -382,7 +382,7 @@ static void x9w_poll(){
 }
 static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned n){
  unsigned slot=local-CBQ_PORT_BASE,id=x9q_u16(req+3);x9w_client &c=x9w_clients[slot];
- if(id!=1&&id!=0x20&&id!=0x21&&id!=0x22&&id!=0x24&&id!=0x2d&&id!=0x30&&id!=0x37&&id!=0x44&&id!=0x4d&&id!=0x86&&id!=0xa2&&id!=0xaf&&id!=0xb0)return false;
+ if(id!=1&&id!=0x20&&id!=0x21&&id!=0x22&&id!=0x24&&id!=0x2d&&id!=0x30&&id!=0x37&&id!=0x44&&id!=0x4d&&id!=0x86&&id!=0xa2&&id!=0xaf&&id!=0xb0&&id!=0x5569)return false;
  if(!c.family)c.family=4;x9w_bearer *own=nullptr;
  for(x9w_bearer &b:x9w_bearers)if(b.used&&b.slot==slot&&b.generation==x9q_clients[slot].generation)own=&b;
  unsigned error=0;
@@ -422,6 +422,19 @@ static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
    else{uint8_t legacy=rat==(1u<<5)?10:0xff;p.tlv(1,&legacy,1);} // Legacy enum has no NR; never relabel it LTE.
    p.send(local,port);return true;
   }
+ }else if(id==0x5569){
+  /* 20H392 updateCurrentDataSIM_sync, 0x1f19d751c: NotifyCurrentDataSub,
+   * TLV10/u8 subscriber SimSlot, TLV11/u8 reason (1..3). Its callback
+   * only checks QMI result. This is host data routing, not a DDS command:
+   * accept only the subscription already confirmed by the real 020e.
+   * Never ACK a mismatch or retarget an existing bearer. */
+  x9q_view sub=x9q_tlv(req,n,0x10),reason=x9q_tlv(req,n,0x11);
+  unsigned value=sub.p&&sub.n==1?sub.p[0]:0;
+  if(n!=15||!value||value>x9_md_sim_count()||!reason.p||reason.n!=1||reason.p[0]<1||reason.p[0]>3)error=X9Q_ARG;
+  else if(!x9ds_data_ready(value-1))error=X9Q_NOT_READY;
+  else if(c.sim_slot!=value-1&&(c.starting||own))error=X9Q_BUSY;
+  else{c.sim_slot=(uint8_t)(value-1);x9q_clients[slot].sim_slot=c.sim_slot;
+   printf("X9 DDS: WDS 5569 client 0x%x routes confirmed default SIM%u reason %u\n",local,value,reason.p[0]);}
  }else if(id==0xaf){
   /* WDS differs from NAS/DMS: u32 1=primary, 2=secondary. DEFAULT/ANY
    * need DDS semantics, so reject them rather than silently selecting SIM1. */
@@ -471,6 +484,7 @@ static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
   printf("X9 WDS: Start SIM%u mux %u family %u APN length %u native-ready %u session-ready %u\n",
    c.sim_slot+1,c.mux,family,start_apn.n,x9d_ready(),x9w_session_ready);
   if(!cbp_mux_ok(c.mux))error=X9Q_ARG;
+  else if(!x9ds_data_ready(c.sim_slot))error=X9Q_NOT_READY;
   else if(c.starting||own||x9w_bearers[c.mux-1].used)error=X9Q_BUSY;
   else if((error=x9w_args(req,n,family))!=0){}
   else if(!x9d_ready()||!x9_md_mipc_online()||!x9w_session_ready)error=X9Q_NOT_READY;
