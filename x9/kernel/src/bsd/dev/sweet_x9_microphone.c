@@ -120,13 +120,17 @@ static int mic_ioctl(dev_t d,u_long cmd,caddr_t data,__unused int f,struct proc 
     if(cmd==X9_MIC_GET_BOARD) {
         x9_mic_mt6993_get_board((void *)data);return 0;
     }
-    if(cmd==X9_MIC_POWER_PROBE) {
+    if(cmd==X9_MIC_GET_AFE) {
+        x9_mic_mt6993_get_afe((void *)data);return 0;
+    }
+    if(cmd==X9_MIC_POWER_PROBE || cmd==X9_MIC_CALIBRATE) {
         if(minor(d)!=0 || kauth_cred_getuid(kauth_cred_get())!=0)return EPERM;
         /* mode1/status remain strictly passive. No implicit capture backend. */
         /* mode is immutable after devfs publication. The AFE lock serializes
          * probe against registration/capture; don't invert register's
          * AFE -> mic_control lock order here. */
-        return st.mode==2?x9_mic_mt6993_power_probe():EPERM;
+        if(st.mode!=2)return EPERM;
+        return cmd==X9_MIC_CALIBRATE?x9_mic_mt6993_calibrate():x9_mic_mt6993_power_probe();
     }
     if(cmd==X9_MIC_GET_STATUS) {
         lck_mtx_lock(&mic_lock);st.queued_frames=count;

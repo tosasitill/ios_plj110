@@ -38,6 +38,9 @@ int x9_mic_mt6681_power_calibrate(struct x9_mic_mt6681 *,
  * Caller must unprepare, then return GPIO9 to the proven off baseline. */
 int x9_mic_mt6681_power_on(struct x9_mic_mt6681 *,
     const struct x9_mic_mt6681_io *);
+/* Upgrade io.flags to REQUIRED only AFTER the board has acquired AFE/pads.
+ * Reuses the successful power_on, never repeats cold initialization. */
+int x9_mic_mt6681_calibrate_powered(struct x9_mic_mt6681 *, volatile uint32_t *);
 /* Call only after DMA/ADC are stopped, while transport/XO are still held.
  * On error retain resources; caller must NOT power down an unquiesced codec.
  * Success still requires board unprepare to return GPIO9/rails to off baseline:

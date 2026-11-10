@@ -4,6 +4,8 @@
  * pinctrl-mtk-mt6993.h, spmi-mtk-pmif-core.c, mt6685-audclk.c.
  * Dedicated SCP bank + wake handshake; no AP-channel shadow writes, DMA,
  * global reset, foreign IRQ clearing, PLL retuning or off-domain AFE reads.
+ * Explicit calibrate additionally acquires the AFE journal below; power-only
+ * never touches AFE. Both return to the cold baseline, not a recording state.
  * Source clock nominal 130MHz is the DT clk-src-in-hz, not a measured rate.
  * GPIO9 must already be physically low. An inherited live codec/XO/session
  * is refused, not reset. A failed restore retains the journal for this boot.
@@ -25,6 +27,7 @@ enum { DATA=0, MASK=8, STAT=0xc, CTRL=0x10, LEN=0x14, TRANS=0x18,
 static const unsigned saved_regs[]={MASK,CTRL,LEN,TRANS,DELAY,AUX,ADDR,
     TIMING,EXT,LTIMING,HS,SDA,DIV,IO,MIS};
 struct pin {unsigned n,mode,dir,dout;bool owned;};
+struct afe_journal;
 struct power_journal {
     vm_offset_t gpio,vlp,gipc,gate,bus,pmif;
     struct pin enable,route[2];
@@ -34,6 +37,7 @@ struct power_journal {
     bool bus_stuck,pmif_stuck,enabled;
     struct x9_mic_mt6681 codec;
     struct x9_mic_board_status *status;
+    struct afe_journal *cal;
 };
 static struct power_journal board;
 static uint32_t rr(vm_offset_t b,unsigned r)
@@ -54,6 +58,7 @@ static int wait_bits(vm_offset_t b,unsigned r,uint32_t mask,uint32_t v,unsigned 
     for(unsigned i=0;i<us;i++){if((rr(b,r)&mask)==v)return 0;delay(1);}
     return ETIMEDOUT;
 }
+#include "x9_mic_plj110_afe.inc"
 static unsigned pin_bit(struct power_journal *j,unsigned bank,unsigned n)
 {return (rr(j->gpio,bank+(n/32)*16)>>(n%32))&1;}
 static unsigned pin_mode(struct power_journal *j,unsigned n)
@@ -276,9 +281,11 @@ static int codec_enable(struct power_journal *j)
 static int restore(struct power_journal *j)
 {
     /* Never release clocks/wake with an in-flight FIFO or uncertain PMIF.
-     * power_on has no AFE/ADC/test writes; nevertheless an unsuccessful
-     * codec unwind is latched rather than pretending it was restored. */
+     * An unsuccessful codec/AFE unwind is latched, not reported restored. */
     if(j->bus_stuck || j->pmif_stuck || j->codec.poisoned)return EIO;
+    if(j->cal && j->cal->stuck)return EIO;
+    /* Codec cleanup may access AFE PAD/TEST: first prove clocks are held. */
+    if(j->codec.afe_snapshot && (!j->cal || afe_access(j->cal)))return EBUSY;
     if(j->bus_owned && ((rr(j->gate,0xe10)&2) || !j->awake ||
        (rr(j->vlp,0x92c)&5)!=4))return EBUSY;
     int e=x9_mic_mt6681_unprepare(&j->codec);if(e)return e;
@@ -300,6 +307,15 @@ static int restore(struct power_journal *j)
         j->status->xo_after=v;
         if(!e && (v&7)!=(j->xo&7))e=EIO;
         X9PMIFRelease();if(e)return e;j->xo_owned=false;
+    }
+    /* Codec TX/loopback stopped, GPIO9 low and XO off before pad/domain
+     * unwind. Do not release transport/wake if the AFE unwind is uncertain. */
+    if(j->cal) {
+        e=afe_restore(j->cal);
+        j->cal->s->restore_errno=e;
+        if(e){j->cal->s->flags|=X9_MIC_AFE_RETAINED;return e;}
+        j->cal->s->flags|=X9_MIC_AFE_RESTORED;
+        if(!j->cal->s->last_errno)j->cal->s->stage=X9_MIC_AFE_OFF;
     }
     if(j->bus_owned) {
         e=bank_idle(j);if(e)return e;
@@ -326,7 +342,8 @@ static int restore(struct power_journal *j)
     }
     return 0;
 }
-int x9_mic_plj110_power_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_status *s)
+static int board_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_status *s,
+    struct x9_mic_afe_status *a)
 {
     if(s->flags&X9_MIC_BOARD_ATTEMPTED)return EALREADY;
     bzero(s,sizeof(*s));s->version=1;s->flags=X9_MIC_BOARD_ATTEMPTED;s->stage=X9_MIC_BOARD_BASELINE;
@@ -358,10 +375,29 @@ int x9_mic_plj110_power_probe(struct x9_mic_hardware_status *h,struct x9_mic_boa
         *h=j->codec.status;
         if(!e)s->flags|=X9_MIC_BOARD_POWER_OK;
     }
+    if(!e && a) {
+        j->cal=&calibration;e=afe_take(j->cal,j->gpio,a);
+        if(!e) {
+            j->codec.io.flags=X9_MT6681_REQUIRED;
+            a->stage=X9_MIC_AFE_SCAN;
+            e=x9_mic_mt6681_calibrate_powered(&j->codec,(volatile uint32_t *)j->cal->afe);
+            if(!e)a->flags|=X9_MIC_AFE_CALIBRATED;
+        }
+        a->last_errno=e;*h=j->codec.status;
+        afe_ao_snapshot(j->cal);
+        if(!j->cal->stuck)afe_reg_snapshot(j->cal);
+    }
     s->last_errno=e;if(e && !h->last_errno)h->last_errno=e;
     uint32_t last_reg=s->last_register,codec_reg=h->last_register;
     if(!e)s->stage=X9_MIC_BOARD_RESTORE;
     int off=restore(j);
+    if(j->cal) {
+        afe_ao_snapshot(j->cal);
+        if(off && !(a->flags&X9_MIC_AFE_RESTORED)) {
+            a->flags|=X9_MIC_AFE_RETAINED;
+            if(!a->restore_errno)a->restore_errno=off;
+        }
+    }
     s->last_register=last_reg;h->last_register=codec_reg;
     s->restore_errno=off;
     if(off) {
@@ -374,8 +410,17 @@ int x9_mic_plj110_power_probe(struct x9_mic_hardware_status *h,struct x9_mic_boa
     if(j->gpio)s->gpio9_after=pin_state(j,9);
     if(j->vlp)s->sleep_after=rr(j->vlp,0x92c);
     if(j->gate)s->gate_after=rr(j->gate,0xe10);
-    printf("X9 MIC POWER: stage=%u flags=%x errno=%u restore=%u id=%x ready=%x vaud18=%x gpio9=%x/%x bus=%x (no AFE/ADC/DMA)\n",
-        s->stage,s->flags,s->last_errno,s->restore_errno,h->swcid,h->internal_ready,
+    printf("X9 MIC %s: stage=%u flags=%x errno=%u restore=%u id=%x ready=%x vaud18=%x gpio9=%x/%x bus=%x (no ADC/DMA)\n",
+        a?"CALIBRATE":"POWER",s->stage,s->flags,s->last_errno,s->restore_errno,h->swcid,h->internal_ready,
         h->vaud18_monitor,s->gpio9_before,s->gpio9_after,s->bus_status);
+    if(j->cal)printf("X9 MIC AFE: stage=%u flags=%x errno=%u restore=%u AP=%x/%x ACK=%x/%x VLP=%x/%x phases=%d/%d cycles=%d/%d scanned=%u\n",
+        a->stage,a->flags,a->last_errno,a->restore_errno,a->ap_vote_before,a->ap_vote_after,
+        a->ack_before,a->ack_after,a->vlp_before,a->vlp_after,h->chosen_phase[0],h->chosen_phase[1],
+        h->cycle[0],h->cycle[1],h->scanned_phases);
     return off?off:e;
 }
+int x9_mic_plj110_power_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_status *s)
+{return board_probe(h,s,NULL);}
+int x9_mic_plj110_calibrate(struct x9_mic_hardware_status *h,struct x9_mic_board_status *s,
+    struct x9_mic_afe_status *a)
+{return board_probe(h,s,a);}

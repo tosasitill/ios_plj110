@@ -317,6 +317,14 @@ int x9_mic_mt6681_power_calibrate(struct x9_mic_mt6681 *c,
 {
     if(!io || io->flags!=X9_MT6681_REQUIRED || !afe || ((uintptr_t)afe&3))return EINVAL;
     int e=x9_mic_mt6681_power_on(c,io);if(e)return e;
+    return x9_mic_mt6681_calibrate_powered(c,afe);
+}
+int x9_mic_mt6681_calibrate_powered(struct x9_mic_mt6681 *c,volatile uint32_t *afe)
+{
+    if(!c || !afe || ((uintptr_t)afe&3) || c->io.flags!=X9_MT6681_REQUIRED ||
+       !c->touched || !c->audio_snapshot || c->poisoned || c->afe_snapshot ||
+       !(c->status.flags&X9_MIC_HW_POWERED) || (c->status.flags&X9_MIC_HW_CALIBRATED))return EINVAL;
+    int e=0;
     c->afe=afe;
     c->old_pad=afe_read(c,PAD_CFG);c->old_test=afe_read(c,TEST_CFG);
     if((c->old_pad&1) || (c->old_test&1))e=EBUSY;

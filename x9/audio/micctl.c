@@ -10,6 +10,7 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 _Static_assert(sizeof(struct x9_mic_board_status)==96,"board ABI size");
+_Static_assert(sizeof(struct x9_mic_afe_status)==192,"AFE ABI size");
 static int hardware_status(int fd)
 {
     struct x9_mic_hardware_status h={0};
@@ -26,6 +27,23 @@ static int hardware_status(int fd)
             b.sleep_before,b.sleep_after,b.sleep_stat,b.sleep_stat2,b.gate_before,b.gate_after,
             b.bus_status,b.bus_start,b.bus_fifo,b.last_register,b.xo_before,b.xo_after,b.timing_hz);
     } else if(errno!=ENOTTY){perror("board status");return 1;}
+    struct x9_mic_afe_status a={0};
+    if(ioctl(fd,X9_MIC_GET_AFE,&a)==0) {
+        printf("afe v%u stage=%u flags=%#x errno=%u restore_errno=%u AP=%#x/%#x all=%#x/%#x ACK=%#x/%#x DONE=%#x VLP=%#x/%#x FENC=%#x/%#x top0=%#x/%#x top4=%#x/%#x engine=%#x/%#x mon=%#x spm=%#x/%#x cbip=%#x/%#x reg=%#x\n",
+            a.version,a.stage,a.flags,a.last_errno,a.restore_errno,a.ap_vote_before,a.ap_vote_after,
+            a.all_vote_before,a.all_vote_after,a.ack_before,a.ack_after,a.done,a.vlp_before,a.vlp_after,
+            a.fenc_before,a.fenc_after,a.top0_before,a.top0_after,a.top4_before,a.top4_after,
+            a.engine_before,a.engine_after,a.engine_monitor,a.spm_before,a.spm_after,
+            a.cbip_before,a.cbip_after,a.last_register);
+        if(a.flags&X9_MIC_AFE_ATTEMPTED) {
+            printf("afe foreign AUDIO XPU votes=%#x/%#x\n",a.foreign_vote_before,a.foreign_vote_after);
+            printf("afe smc INIT=%lld SIDEBANDS=%lld SRAM_REQ=%lld REL=%lld (INT64_MIN=not issued; INIT/SIDEBANDS have no inverse)\n",
+                (long long)a.smc_result[0],(long long)a.smc_result[1],
+                (long long)a.smc_result[2],(long long)a.smc_result[3]);
+            const unsigned pins[]={98,100,101,102,103};
+            for(unsigned i=0;i<5;i++)printf("afe pin%u=%#x/%#x\n",pins[i],a.pins_before[i],a.pins_after[i]);
+        }
+    } else if(errno!=ENOTTY){perror("AFE status");return 1;}
     return 0;
 }
 static uint64_t ns(void)
@@ -37,8 +55,9 @@ int main(int argc,char **argv)
 {
     bool record=argc==4 && !strcmp(argv[1],"record");
     bool power=argc==2 && !strcmp(argv[1],"power");
-    if(!record && !power && !(argc==2 && !strcmp(argv[1],"status"))) {
-        fprintf(stderr,"usage: micctl status | micctl power | micctl record <seconds:1..30> <new.pcm>\n");return 2;
+    bool calibrate=argc==2 && !strcmp(argv[1],"calibrate");
+    if(!record && !power && !calibrate && !(argc==2 && !strcmp(argv[1],"status"))) {
+        fprintf(stderr,"usage: micctl status | micctl power | micctl calibrate | micctl record <seconds:1..30> <new.pcm>\n");return 2;
     }
     int fd=open(record?X9_MIC_DEVICE:X9_MIC_STATUS_DEVICE,O_RDONLY|O_NONBLOCK|O_CLOEXEC);
     if(fd<0){perror("open microphone");return 1;}
@@ -49,13 +68,14 @@ int main(int argc,char **argv)
         s.generation,s.captured_frames,s.read_frames,s.dropped_frames,s.queued_frames);
     if(!record) {
         int result=0;
-        if(power) {
+        if(power || calibrate) {
             if(geteuid()!=0 || s.version!=1 || s.mode!=2) {
-                fprintf(stderr,"power requires root and x9_mic=2; no hardware request issued\n");
+                fprintf(stderr,"power/calibrate requires root and x9_mic=2; no hardware request issued\n");
                 close(fd);return 1;
             }
-            printf("explicit cold power/ID/VAUD18 probe, one attempt per boot; no AFE/ADC/DMA or recording\n");
-            if(ioctl(fd,X9_MIC_POWER_PROBE)<0){perror("cold power probe");result=1;}
+            printf("explicit cold %s, shared one attempt per boot; no ADC/DMA or recording\n",
+                calibrate?"power + AFE/MTKAIF phase calibration":"power/ID/VAUD18 probe (no AFE)");
+            if(ioctl(fd,calibrate?X9_MIC_CALIBRATE:X9_MIC_POWER_PROBE)<0){perror("cold microphone diagnostic");result=1;}
             /* Even on failure retrieve the decisive stage and retained journal. */
         }
         result|=hardware_status(fd);

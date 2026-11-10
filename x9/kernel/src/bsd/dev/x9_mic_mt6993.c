@@ -234,3 +234,15 @@ void x9_mic_mt6993_get_board(struct x9_mic_board_status *s)
 {
     lck_mtx_lock(&afe_mic_lock);*s=board_diagnostic;lck_mtx_unlock(&afe_mic_lock);
 }
+static struct x9_mic_afe_status afe_diagnostic={.version=1};
+int x9_mic_mt6993_calibrate(void)
+{
+    lck_mtx_lock(&afe_mic_lock);
+    int e=(registered || prepared || active || dma_stuck)?EBUSY:
+        x9_mic_plj110_calibrate(&diagnostic,&board_diagnostic,&afe_diagnostic);
+    lck_mtx_unlock(&afe_mic_lock);return e;
+}
+void x9_mic_mt6993_get_afe(struct x9_mic_afe_status *s)
+{
+    lck_mtx_lock(&afe_mic_lock);*s=afe_diagnostic;lck_mtx_unlock(&afe_mic_lock);
+}
