@@ -1127,3 +1127,5 @@ x9:X9CSFInterfaces.o
 x9:X9CSFRenderQueue.o
 x9:X9CSFQueueAccess.o
 x9:SweetX9Battery.cpp.o
+x9:x9_bluetooth.o
+x9:SweetX9Bluetooth.o

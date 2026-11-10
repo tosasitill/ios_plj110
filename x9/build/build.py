@@ -165,6 +165,11 @@ class Builder:
         fw = Path(self.cfg.get('wifi_firmware') or ROOT / '.local/x9/wifi-fw').expanduser()
         self.run_or_exit([sys.executable, '-I', str(X9 / 'tools/wifi_firmware.py'), '--src', str(fw)], ROOT,
                          label='wifi_firmware.py')
+        # MT6653 BT uses a separate little-endian container. Metadata only in
+        # this bring-up stage; never reuse the Wi-Fi patch parser/download path.
+        bt = Path(self.cfg.get('bluetooth_firmware') or fw).expanduser()
+        self.run_or_exit([sys.executable, '-I', str(X9 / 'tools/bluetooth_firmware.py'), '--src', str(bt)], ROOT,
+                         label='bluetooth_firmware.py')
         # Device Wi-Fi NVRAM -> generated/x9_wifi_nvram.inc (gitignored; stub when absent)
         nv = Path(self.cfg.get('wifi_nvram') or ROOT / '.local/x9/wifi-nvram/WIFI').expanduser()
         self.run_or_exit([sys.executable, '-I', str(X9 / 'tools/wifi_nvram.py'), '--src', str(nv)], ROOT,

@@ -6438,6 +6438,16 @@
    "name": "bind_vfsops.o",
    "source": "bsd/miscfs/bindfs/bind_vfsops.c",
    "template": "bsd-c-9"
+  },
+  {
+   "name": "x9_bluetooth.o",
+   "source": "bsd/dev/x9_bluetooth.c",
+   "template": "bsd-c-11"
+  },
+  {
+   "name": "SweetX9Bluetooth.o",
+   "source": "iokit/Kernel/arm/SweetX9Bluetooth.cpp",
+   "template": "iokit-cxx-3"
   }
  ],
  "link": {
