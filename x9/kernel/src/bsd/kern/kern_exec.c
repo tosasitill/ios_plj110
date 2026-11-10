@@ -6964,6 +6964,7 @@ sweet_x9_prepare_wallpaper_collections(proc_t p,user_addr_t scratch,user_addr_t 
 
 #include "x9_render_external.inc"
 #include "x9_baseband_firmware.inc"
+#include "x9_carrier_cbn_install.inc"
 #include "x9_torch_install.inc"
 #include "x9_camera_install.inc"
 /* Explicit opt-in: seed migration preferences before original launchd starts.
@@ -8614,6 +8615,8 @@ load_init_program_at_path(proc_t p, user_addr_t scratch_addr, const char* path)
 	init_exec_args.envp = USER_ADDR_NULL;
 #if defined(ARM64_BOARD_CONFIG_SWEET)
 	{
+	 int cbn_error=x9_cbn_install(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
+	 if(cbn_error)printf("X9 CBN: carrier bundle unavailable errno=%d; continuing boot\n",cbn_error);
 	 int torch_error=x9_torch_install(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	 if(torch_error)printf("X9 TORCH: bridge unavailable errno=%d; continuing boot\n",torch_error);
 	 int camera_error=x9_camera_install(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);

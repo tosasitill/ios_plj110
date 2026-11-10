@@ -55,7 +55,7 @@ def load_config(path):
     missing = [k for k in REQUIRED if not cfg.get(k)]
     if missing:
         sys.exit(f'{path}: missing {", ".join(missing)}')
-    for key in ('dxb', 'root_manifest', 'wifi_firmware', 'bluetooth_firmware', 'wifi_nvram', 'mdota_source'):
+    for key in ('dxb', 'root_manifest', 'wifi_firmware', 'bluetooth_firmware', 'wifi_nvram', 'mdota_source', 'carrier_cbn_ipcc'):
         if cfg.get(key):
             path = Path(cfg[key]).expanduser()
             cfg[key] = str(path if path.is_absolute() else ROOT / path)
@@ -211,6 +211,10 @@ class Builder:
         self.run_or_exit([sys.executable, '-I', str(X9 / 'tools/md_ota_pack.py'), '--src', str(mdota)] +
                          (['--required'] if real_modem or self.cfg.get('mdota_source') else []), ROOT,
                          label='md_ota_pack.py')
+        cbn = [sys.executable, '-I', str(X9 / 'tools/carrier_cbn_pack.py'), '--metadata', str(self.out / 'carrier-cbn.json')]
+        if self.cfg.get('carrier_cbn_ipcc'):
+            cbn += ['--src', self.cfg['carrier_cbn_ipcc'], '--expected-sha1', self.cfg.get('carrier_cbn_sha1', '')]
+        self.run_or_exit(cbn, ROOT, label='carrier_cbn_pack.py')
         # Original Apple Mav17 files are for ABM/BBUpdater only, never MTK MD firmware.
         bb = [sys.executable, '-I', str(X9 / 'tools/baseband_firmware.py'),
               '--metadata', str(self.out / 'baseband-firmware.json')]

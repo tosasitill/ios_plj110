@@ -44,7 +44,9 @@ static int memory(uintptr_t dt,struct x9_scp_handoff *h)
  const char *scp="/soc/scp@1d000000";
  const char *rmem="/reserved-memory/mblock-45-reserve-memory-scp_share";
  const char *sap="/soc/sap@1d39c000";
- const char *fields[]={"scp-sram-size","scp-cache-dump-buf-size","scp-reg-dump-buf-size",
+ /* Inline strings, not pointer tables: LK relocates the whole shim, so
+  * absolute .rodata addresses (R_AARCH64_ABS64) are not permitted. */
+ const char fields[][32]={"scp-sram-size","scp-cache-dump-buf-size","scp-reg-dump-buf-size",
      "scp-tbuf-dump-buf-size","scp-dram-size"};
  const uint8_t *p;size_t n;
  if(!str(dt,scp,"scp-mem-key","mediatek,reserve-memory-scp_share")||
@@ -82,7 +84,7 @@ static int memory(uintptr_t dt,struct x9_scp_handoff *h)
 static int pins(uintptr_t dt,struct x9_scp_handoff *h)
 {
  const char *scp="/soc/scp@1d000000";
- const char *keys[]={"send-table","recv-table"};
+ const char keys[][16]={"send-table","recv-table"};
  const unsigned step[]={3,7},wanted[]={29,30,31,32},words[]={16,2,7,7};
  uint32_t used[5]={0},seen[2][2]={{0}},matched=0;
  if(!value(dt,scp,"mbox-count",5)||!value(dt,scp,"#recv-cells-mode",1))return 0;
@@ -110,8 +112,8 @@ static int pins(uintptr_t dt,struct x9_scp_handoff *h)
 static int qualify(uintptr_t dt,struct x9_scp_handoff *h)
 {
  const char *scp="/soc/scp@1d000000";
- const char *paths[]={"","/soc","/reserved-memory"};
- const char *enabled[]={"core-0","secure-dump","scp-dram-region","scp-protect","scp-scpsys-regmap","scp-read-infra-irq-status"};
+ const char paths[][32]={"","/soc","/reserved-memory"};
+ const char enabled[][32]={"core-0","secure-dump","scp-dram-region","scp-protect","scp-scpsys-regmap","scp-read-infra-irq-status"};
  const uint8_t *p;size_t n;uint32_t size;
  for(unsigned i=0;i<3;i++)if(!value(dt,paths[i],"#address-cells",2)||!value(dt,paths[i],"#size-cells",2))return 0;
  if(!fdt_property(dt,"/soc","ranges",&p,&n)||n||!fdt_property(dt,"/reserved-memory","ranges",&p,&n)||n)return 0;
