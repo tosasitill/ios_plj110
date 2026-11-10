@@ -119,6 +119,18 @@ GET_STATUS 仍为 **88B**，原 reserved 前两字现为 `cold_retained/cold_res
 
 这只能检测可见的配置冲突，不能消除检查与写入之间的 AP/SCP 竞态，也不是长期硬件 lease。`X9 CAMERA AP CLOCK` 为申请结果，`X9 CAMERA COLD CLOCK` 为事务结束后的 journal；后者不重新读取已撤供电的硬件。mode/用户 ioctl/READY 不变，仍需真实 ID/standby 及 SID80 mapping/CSI RAW10 实测。
 
+### WL28681C enable 只更新一个通道，冲突时不撤共享供电
+
+厂商 regulator 的 enable_mask 是 `BIT(channel-1)`；芯片 `0x03` 的实际写入仍是一个共享字节。此前 X9 按整个 main/front mask 允许差分，可能把两次读取之间同组其他通道的变化覆盖。`x9_camera_wl.inc` 现接入 cold `probe/standby` 的实际启停：独立保留已预期 enable 字节、最后写前字节、唯一未确认通道 bit；普通 selector helper 不再接受 enable 寄存器写入。
+
+源码反例（不是实机测试）：main mask `0x4a`，准备把 channel7 从 `enable=0x08` 设为 `0x48`；随后读取到 `0x0a`（channel2 新启用），旧 mask 检查仍允许写 `0x48`，会清掉 channel2。新路径在受控 enable 与 journal 不符处返回 `EBUSY`，不发该写入。
+
+每次 enable 更新从最后一次读取的字节仅改目标 bit，保留非目标通道；相机控制组的任何其他 bit 必须仍符合 journal。起始目标通道全部 off 的既有约束不放宽，不清借用通道。未知其他组通道的变化不回写入口值；若写后整字节读回不一致则锁存冲突，而不是宣称启停成功。模糊 SET 仅在 cleanup 时接受该 bit 的精确 prior/expected；如果确认仍 off，退休此次 SET journal，不再发冗余 disable。
+
+在启用目标通道前、启停时、interleaved AFVDD/DOVDD 申请前、MCLK/reset 放行前及恢复共享 rail 前，核对实际已申请且仍 enabled 通道的 selector 是自己的目标电压。发现 enable 或 live selector 变化便保留，**先 reset-low/MCLK-off 隔离，再停在 WL 恢复屏障；不先把 DOVDD/AFVDD 降下去，也不先清 enable 才发现 selector 已被改**。`X9 CAMERA WL CONFLICT` 给首次决定字段，`X9 CAMERA COLD WL` 仅输出最后软件 journal；ioctl/结构尺寸/READY 不变。
+
+这修正的是可见变化下的单通道 RMW 和恢复依赖顺序，仍不能消除最后一次 read 与整字节 write 之间的竞态、识别同值 ABA 或证明 SCP 硬件 lease。未上机、不 stream-on，不能据此声称共享供电实测通过或已经拍摄。
+
 ### AP timing/control 冲突时保留，而不是覆盖
 
 14 个可恢复 CSR 现在分别记录入口值、当前预期值、最后一次写前值、dirty/uncertain bit。第一次 timing/control 写之前、每次 FIFO 请求、START 之前及完成后都核对配置；每次 CSR 写再核对该项写前值。共享 MULTI 必须保持零。检测到配置变化时记录 `X9 CAMERA AP CONFLICT`，不再写配置、清 IRQ/FIFO 或发 START；已填 FIFO 或已发请求的冲突另置 wedged，保留依赖。

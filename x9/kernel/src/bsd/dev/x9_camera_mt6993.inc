@@ -69,6 +69,8 @@ struct cam_probe_journal {
     uint32_t drive, mode, dir, dout;
     uint8_t wl_enable, wl_voltage[3];
     uint8_t wl_programmed, wl_enabled;
+    uint8_t wl_enable_expected, wl_enable_prior, wl_enable_uncertain;
+    bool wl_tracking, wl_conflict;
     struct cam_probe_pin route[4], wake;
     struct cam_probe_rail dovdd, afvdd;
     bool vs_owned, pmif_fault;
@@ -492,16 +494,17 @@ static int cam_bus_transfer(struct cam_probe_bus *b, uint8_t slave,
 }
 static int cam_wl_read(struct cam_probe_journal *j, uint8_t reg, uint8_t *v)
 { return cam_bus_transfer(&j->ldo,0x35,&reg,1,v); }
+#include "x9_camera_wl.inc"
 static int cam_wl_write(struct cam_probe_journal *j, uint8_t reg, uint8_t value)
 {
     bool voltage=false;
     for(unsigned i=0;i<j->board.wl_count;i++)
         if(reg==3+j->board.wl_channel[i])voltage=true;
-    if(reg!=3 && !voltage)return EPERM;
-    uint8_t enable=0;int e=cam_wl_read(j,3,&enable);if(e)return e;
-    if(reg==3) {
-        if((enable&~j->board.wl_mask)!=(value&~j->board.wl_mask))return EBUSY;
-    } else if(enable&(1u<<(reg-4)))return EBUSY; /* no live voltage change */
+    /* ENABLE is an explicit single-channel operation, never a caller's
+     * stale whole-byte value. This helper only programs disabled selectors. */
+    if(!voltage)return EPERM;
+    uint8_t enable=0;int e=cam_wl_guard(j,false,&enable);if(e)return e;
+    if(enable&(1u<<(reg-4)))return EBUSY; /* no live voltage change */
     uint8_t tx[2]={reg,value},back=0;
     e=cam_bus_transfer(&j->ldo,0x35,tx,2,NULL);
     if(!e)e=cam_wl_read(j,reg,&back);
@@ -678,13 +681,12 @@ static int cam_vs_vote(struct cam_probe_journal *j, bool on)
 }
 static int cam_wl_restore_channel(struct cam_probe_journal *j, unsigned i)
 {
-    uint8_t bit=(uint8_t)(1u<<(j->board.wl_channel[i]-1)),current=0;
+    uint8_t bit=(uint8_t)(1u<<(j->board.wl_channel[i]-1));
     int e=0;
     if(j->wl_enabled&bit) {
-        e=cam_wl_read(j,3,&current);
-        if(!e)e=cam_wl_write(j,3,(uint8_t)(current&~bit));
+        e=cam_wl_enable_change(j,i,false);
         if(e)return e;
-        j->wl_enabled&=~bit;delay(150);
+        delay(150);
     }
     if(j->wl_programmed&bit) {
         uint8_t voltage=0;
@@ -746,6 +748,12 @@ static int cam_restore(struct cam_probe_journal *j)
     /* After releasing PMIF lock never clear a later response as ours. */
     if(j->pmif_pending || j->pmif_fault) {
         j->restore_step=X9_CAM_COLD_RESTORE_PMIF;return cam_restore_failed(j,EIO);
+    }
+    /* A changed live WL channel must be caught BEFORE interleaved DOVDD/
+     * AFVDD are lowered, not only later when undoing its selector. */
+    if(j->wl_conflict || j->wl_enabled || j->wl_programmed) {
+        uint8_t enable=0;j->restore_step=X9_CAM_COLD_RESTORE_WL;
+        e=cam_wl_guard(j,true,&enable);if(e)return cam_restore_failed(j,e);
     }
     /* Reverse actual board power order, including the interleaved shared
      * supplies. A failed rail/channel keeps its journal and all prerequisites. */
@@ -895,6 +903,10 @@ static int cam_sensor_transaction(uint32_t which, struct x9_camera_probe *r,
         }
         for(unsigned i=0;i<j->board.wl_count && !e;i++)
             e=cam_wl_read(j,(uint8_t)(3+j->board.wl_channel[i]),&j->wl_voltage[i]);
+        if(!e) {
+            j->wl_enable_expected=j->wl_enable;j->wl_tracking=true;
+            e=cam_wl_guard(j,false,&v); /* reject an incoherent entry snapshot */
+        }
     }
     if(!e) {
         r->stage=X9_CAM_STAGE_POWER;
@@ -906,26 +918,29 @@ static int cam_sensor_transaction(uint32_t which, struct x9_camera_probe *r,
         delay(1000);
         /* Journal before writes: an ambiguous write must still be unwound. */
         for(unsigned i=0;i<j->board.wl_count && !e;i++) {
-            uint8_t en=0,bit=(uint8_t)(1u<<(j->board.wl_channel[i]-1));
+            uint8_t bit=(uint8_t)(1u<<(j->board.wl_channel[i]-1));
             j->wl_owned=true;j->wl_programmed|=bit;
             e=cam_wl_write(j,(uint8_t)(3+j->board.wl_channel[i]),(uint8_t)j->board.wl_code[i]);
-            if(!e)e=cam_wl_read(j,3,&en);
-            if(!e && (en&bit))e=EBUSY;
-            if(!e){j->wl_enabled|=bit;e=cam_wl_write(j,3,(uint8_t)(en|bit));}
+            if(!e)e=cam_wl_enable_change(j,i,true);
             if(!e)delay(j->board.wl_delay[i]);
             if(!e && which==X9_CAMERA_BACK && i==1) {
-                e=cam_rail_take(j,&j->afvdd);if(!e)delay(3000);
+                e=cam_wl_guard(j,false,&v);
+                if(!e)e=cam_rail_take(j,&j->afvdd);if(!e)delay(3000);
             }
             if(!e && which==X9_CAMERA_FRONT && i==0) {
-                e=cam_rail_take(j,&j->dovdd);if(!e)delay(1000);
+                e=cam_wl_guard(j,false,&v);
+                if(!e)e=cam_rail_take(j,&j->dovdd);if(!e)delay(1000);
             }
         }
         if(!e && which==X9_CAMERA_BACK) {
-            e=cam_rail_take(j,&j->dovdd);if(!e)delay(3000);
+            e=cam_wl_guard(j,false,&v);
+            if(!e)e=cam_rail_take(j,&j->dovdd);if(!e)delay(3000);
         }
+        if(!e)e=cam_wl_guard(j,false,&v);
         if(!e)e=cam_update(j->board.drive_base,0,7,1); /* DT encoded 4mA */
         if(!e)e=cam_pin_mux(j->gpio,j->board.mclk,1);
         if(!e)delay(which==X9_CAMERA_BACK?6000:1000);
+        if(!e)e=cam_wl_guard(j,false,&v);
         if(!e)e=cam_pin_bit(j->gpio,0x100,j->board.reset,1);
         if(!e)delay(4000);
     }
@@ -963,6 +978,9 @@ static int cam_sensor_transaction(uint32_t which, struct x9_camera_probe *r,
         j->sensor.parent_seen,j->ldo.parent_seen,j->sensor.parent_entry,j->ldo.parent_entry,
         j->sensor.parent_expected,j->ldo.parent_expected,j->sensor.parent_owned,j->ldo.parent_owned,
         j->sensor.parent_conflict,j->ldo.parent_conflict);
+    printf("X9 CAMERA COLD WL: expected=%02x prior=%02x uncertain=%02x conflict=%u retained=%02x/%02x (journal, single-channel enable)\n",
+        j->wl_enable_expected,j->wl_enable_prior,j->wl_enable_uncertain,j->wl_conflict,
+        j->wl_enabled,j->wl_programmed);
     return r->last_errno;
 }
 static int cam_sensor_probe(uint32_t which, struct x9_camera_probe *r)
