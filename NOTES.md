@@ -154,7 +154,14 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
 
-## 7. 当前交接(HANDOFF 114-175,2026-11-10): 175真实SA→LTE;蜂窝与ALS独立整合构建通过,收发/物理光感仍未验收
+## 7. 当前交接(HANDOFF 115-INTEGRATE,2026-11-10): 按用户要求继续整合两个手电筒提交
+
+- **本轮范围**:用户明确“继续合:5e06897、a4c8857这两个”。它们已是main祖先,不在main重复提交源码;本轮是把这两份代码纳入上一蜂窝+ALS候选。独立树`.local/x9/worktrees/cellular-als-torch-175/`从ca4980f开始,依次cherry-pick成**d68c37b**(5e06897)、**586184f**(a4c8857),保留DMA40/PDP/WDS、single-SIM+NR能力门、ALS与legacy PIT修正;没有夹带BT/SMS等功能。
+- **合并里程碑**:代码没有冲突;只有5e06897的NOTES插入依赖已存在的ALS交接段,已在独立树采用该提交的文档版本后继续,主checkout活动交接不回退。a4c8857完整应用。源码独立固定586184f,main不切分支、不覆盖其他会话源码。
+- **参数选择**:完整上个蜂窝+ALS配置继续保留,启用**`x9_torch=3`**iOS受限writer/flash元数据/自有mediaserverd桥,**启动不自动点灯**,不选择会自动25mA脉冲的mode2。598B旧参数追加torch会达609B而超607B ABI上限;仅删除诊断`-v`,新参数**606B**,Wi-Fi校准/GPU/蜂窝/ALS开关不变。32GiB manifest、插件275不变,无需mailbox;不自动清MG缓存。
+- **构建状态**:正在独立树本地编译/打包唯一名字`x9-cellular-als-torch175-md`;原始输入/输出日志在`.local/x9/work/cellular-als-torch-175/{boot-config.json,build.stdout.log}`。当前尚未取得最终boot成功结果,不能把合并成功当作编译或实机成功。没有测试套件、CI run、push、ADB/flash/reboot/设备分区写入。
+
+### 前次交接(HANDOFF 114-175,2026-11-10): 175真实SA→LTE;蜂窝与ALS独立整合构建通过,收发/物理光感仍未验收
 
 - **用户观察与日志边界**:用户报告5G现在能显示、会回LTE且可以上网。只读`~/175.txt`(2067434B,末121s),3.153s能力门切为single-SIM+NR;16.011s DMA40分配通过,高位均1;22.859s INIT_DONE,22.871s MIPC OPEN/DEACT/EIF订阅完成。25.122s真实`C5GREG=1,CEREG=0,AcT=11`(SA),55.144s真实`C5GREG=0,CEREG=1,AcT=7`(LTE)。**本日志没有WDS Start(0x20)、ACT/GET/EIF、成功绑定;截至119.253s四个PDP仍families0/blocked1/tx0/rx0,DPMAIF submitted/completed/RX均0**;120.978s Wi-Fi亦joins0/tx0/rx0/en0=none。不能用这份日志验证蜂窝或Wi-Fi联网,也不能否定日志结束后用户的上网观察;需要对应实际浏览时间的记录。
 - **NR回退结论**:19.282s明确`x9_md_lte=0, RAT left as the MD default`;NAS0x33/0x34策略请求被拒,没有成功设置LTE-only的证据。回退是MD查询得到的真实注册变化,不是仅UI替换。没有PDP激活,不能说是已联网PDP切换失败。MD/网络的降级原因尚无reject/URC证据,本轮不猜运营商/信号、不发送ERAT锁NR。
@@ -195,6 +202,8 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **所有权/失败边界**:MD command 使用不复用本地 token 作为 WMS ACK transaction;同一接收只交一个 client,校验 SIM/port generation。发短信与 ACK 在 timeout/DEL_CLIENT 后保留 token,不重发,消费 late CNF/TX result;每 SIM 只允许一个未完成 send。transfer-only 等 host ACK,显式 discard 才自动 ACK;不支持 NV/SIM 存储路由。消息 overflow 隔离消息队列,不混进 WDS 的 4202/4302 inbox。未知/畸形/IMS8105 command 保留且不成功 ACK,满队列后需重启恢复。
 - **IMS 可用部分**:IMSA(21) `20` 真实 `0a04/0a05` 注册查询、`22/23` 注册订阅/指示,并按需每15s查询。query `101` 是 CIREG 0..4(2=registered,3/4=no registration,1含义未确认则失败),IND `4a01/101` 是 **CIREGU 0/1**,分别映射;不把两个枚举混用或凭数值相似生成 REGISTERING。`102/extInfo` 服务位尚未解码,不伪造 SMS/voice/video capability;GetServices 返回 unsupported。IMS-only RawSend、IMS8105 编码/ACK、IMS settings/EIMSCFG 六字段、SIP/鉴权/VoLTE 没有被证明可用,**仍未实现**。LinkTimer 0/1 只当复用提示,保留 MTK 原生链路寿命;不实现其精确计时。
 - **分析/编译输入**(私有):`.local/x9/work/sms-ims-20261110/` 的 `mtk-*.asm`、`ios-*.asm`、`qmi-service-*.json` 与枚举、只读 ELF/Mach-O 解析器;`compile.stdout.log` 包含两编译单元 `sweet_x9_gpu_dependencies.o` / `X9Baseband.cpp.o` exit0(随后继续作源码边界修正,最终构建另记录)。无额外测试套件/测试脚本,无设备启动/flash/分区写入,未主动 push/CI。
+- **提交/最终构建**:实现 **`6eb119f`**,含糊 send CNF 锁存补丁 **`fa83fbf`**(仅本窗口文件)。若 send CNF 缺少/破坏 result,或成功 CNF 缺少真实 message reference,不释放该 SIM 的发送门,擦掉 host PDU,需重启恢复;避免“返回错误后再次发送”造成重复短信。独立 detached worktree `.local/x9/worktrees/sms-ims` 构建已提交树 `fa83fbf`;它包含另一窗口已提交的 **`15f597b`** PIT 状态修正,不包含其他窗口未提交文件。`x9-sms-ims1-md`(6eb119f)与最终 **`x9-sms-ims2-md`(fa83fbf)** 均 build exit0,57/57 overlay+6prebuilt、链接/strip/shim/打包成功;构建器报告最终 boot.img **13066240 B**,已原样复制至主工作区 **`x9/out/x9-sms-ims2-md/boot.img`**。旧1不含15f597b/锁存修正,不要用它替代最终2。插件275不变、32GiB manifest,**无需 mailbox**;未上机,未在成功后解包/hash/反汇编二次验证。
+- **重建命令/日志**:在上述 worktree 的已提交 `fa83fbf` 树运行 `/Library/Frameworks/Python.framework/Versions/3.13/bin/python3 -I x9/build/build.py all --name <新的唯一名字> --config /Users/tosasitill/ios_plj110/.local/x9/work/sms-ims-20261110/local-config.json --boot-config /Users/tosasitill/ios_plj110/.local/x9/work/sms-ims-20261110/boot-config.json`。私有 `build2.stdout.log` 为最终原始构建记录,`build.stdout.log` 为旧1;`local-config.json/boot-config.json` 是固定的完整数据候选启动配置,未重建插件。未来日志用 `rg -n 'X9 SMS:|X9 IMS:|X9 SMS/IMS:|WMS\(0x5\)|IMSA\(0x21\)' ~/NNN.txt`;ACK 日志明确记录 local token、MD reply id、原始 wire txn 与物理 transport result,不包含 PDU/号码。没有主动 push/CI run。
 - **下一步/验收**:独立工作树直接构建最终候选,不夹带其他窗口未提交修改。未来用户提供实际启动日志后,先看 `X9 SMS:` 初始化真实 CNF;再由用户明确发一条短信,核对 modem acceptance 与接收端真实收到;反向接收要看到同一个 command token 的 host ACK→原 txid 物理 TX,状态报告须真实 PDU。IMS 必须得到真实注册与服务能力并证明 iOS 消费/SIP 路径,不能仅用服务公告、编译成功或注册查询代替验收。
 
 ### 蓝牙并行交接(BT-1,2026-11-10): MT6653 UART/H4 bootstrap和自有iOS诊断ABI已编译打包;未验证原始bluetoothd或射频
