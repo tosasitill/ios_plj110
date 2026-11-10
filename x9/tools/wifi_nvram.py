@@ -95,8 +95,11 @@ def main():
     ap.add_argument('--src', type=Path, default=ROOT / '.local/x9/wifi-nvram/WIFI')
     ap.add_argument('--out', type=Path, default=ROOT / 'x9/kernel/generated/x9_wifi_nvram.inc')
     ap.add_argument('--connfem', type=Path, default=None)
+    ap.add_argument('--required', action='store_true', help='reject absent calibration/connfem instead of generating stubs')
     a = ap.parse_args()
     cf = a.connfem or a.src.with_name('connfem.dts')
+    if a.required and (not a.src.is_file() or not cf.is_file()):
+        sys.exit(f'wifi_nvram: required WIFI/connfem input absent at {a.src.parent}; no stub written')
     if a.src.is_file():
         blob = a.src.read_bytes()
         frags = fragments(blob)

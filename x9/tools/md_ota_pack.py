@@ -8,13 +8,14 @@ never committed. The modem's FSD serves it as drive T: (read-only). Writes <out>
 x9/kernel/generated/x9_mdota.inc (gitignored) which `.incbin`s the pack; without the directory it writes a stub (length 0), so
 a clean checkout still builds. Pack: 'MDOT', u32 count, then count x (u16 pathlen, path, u32 size, u32 offset), then data.
 """
-import argparse, hashlib, struct
+import argparse, hashlib, struct, sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 ap = argparse.ArgumentParser()
 ap.add_argument('--src', type=Path, default=ROOT / '.local/x9/modem/mdota')
 ap.add_argument('--out', type=Path, default=ROOT / '.local/x9/modem/mdota.pack')
+ap.add_argument('--required', action='store_true', help='reject missing/incomplete MCF input instead of generating a stub')
 args = ap.parse_args()
 inc = ROOT / 'x9/kernel/generated/x9_mdota.inc'
 
@@ -23,6 +24,15 @@ if args.src.is_dir():
     for p in sorted(args.src.rglob('*')):
         if p.is_file() and not p.is_symlink():
             files.append((p.relative_to(args.src).as_posix(), p.read_bytes()))
+if args.required:
+    # 177 reads both OTA layers and their matching security files; 180's
+    # empty T: drive precedes mcf_util.c:360 and loss of both SIM identities.
+    mandatory = ('mtk_default/MTK_OTA.mcfota', 'mtk_default/mcf_file_sec.bin',
+                 'custom/MTK_OTA.mcfota', 'custom/mcf_file_sec.bin')
+    available = {name for name, data in files if data}
+    missing = [name for name in mandatory if name not in available]
+    if missing:
+        sys.exit(f'mdota: required MCF input missing/empty in {args.src}: {", ".join(missing)}; no stub written')
 if files:
     table = b''.join(struct.pack('<H', len(n)) + n.encode() + b'\0\0\0\0\0\0\0\0' for n, _ in files)
     base = 8 + len(table)

@@ -19,6 +19,8 @@ Inputs:
   .local/x9/wifi-fw          MT6653 vendor firmware, embedded via x9/tools/wifi_firmware.py
   .local/x9/wifi-nvram/WIFI  device Wi-Fi NVRAM (nvdata), embedded via x9/tools/wifi_nvram.py
                              ("wifi_firmware" in local.json overrides; absent = stub)
+  .local/x9/modem/mdota     vendor MCF configuration, embedded as the modem's T: drive
+                             ("mdota_source" overrides; real-radio all builds reject stubs)
   .local/x9/baseband/Mav17-9.00.02.Release.bbfw  original Apple ABM assets, not physical MTK firmware
                              ("baseband_firmware" in local.json overrides; absent = explicit stub)
 
@@ -53,7 +55,7 @@ def load_config(path):
     missing = [k for k in REQUIRED if not cfg.get(k)]
     if missing:
         sys.exit(f'{path}: missing {", ".join(missing)}')
-    for key in ('dxb', 'root_manifest'):
+    for key in ('dxb', 'root_manifest', 'wifi_firmware', 'bluetooth_firmware', 'wifi_nvram', 'mdota_source'):
         if cfg.get(key):
             path = Path(cfg[key]).expanduser()
             cfg[key] = str(path if path.is_absolute() else ROOT / path)
@@ -68,6 +70,32 @@ def default_name():
         return f'x9-{rev}' + ('-dirty' if dirty else '')
     except (OSError, subprocess.CalledProcessError):
         return 'x9-local'
+
+
+def boot_options(path, extra_args=()):
+    opts = json.loads(path.read_text())
+    for arg in extra_args:
+        if not arg or any(c.isspace() for c in arg):
+            sys.exit(f'--boot-arg must be one non-empty token: {arg!r}')
+        if arg in opts['boot_args']:
+            sys.exit(f'--boot-arg {arg} is already in {path}')
+        opts['boot_args'].append(arg)
+    return opts
+
+
+def radio_arg(args, name):
+    # These three kernel entrypoints default to zero. PE_parse_boot_argn
+    # selects the first exact name; do not use substring matching here.
+    for arg in args:
+        key, sep, value = arg.partition('=')
+        if key == name:
+            if not sep:
+                sys.exit(f'{name} needs an integer value for radio input selection')
+            try:
+                return int(value, 0)
+            except ValueError:
+                sys.exit(f'invalid radio boot arg: {arg!r}')
+    return 0
 
 
 class Builder:
@@ -158,12 +186,15 @@ class Builder:
             return entry['name']
         return True
 
-    def compile(self):
+    def compile(self, boot_args=()):
         if not self.dry_run:
             self.objdir.mkdir(parents=True, exist_ok=True)
+        real_wifi = radio_arg(boot_args, 'x9_wifi_real') == 1
+        real_modem = radio_arg(boot_args, 'x9_bb') != 0 and radio_arg(boot_args, 'x9_modem') >= 3
         # MT6653 firmware -> generated/x9_wifi_firmware.inc (gitignored; stub when absent)
         fw = Path(self.cfg.get('wifi_firmware') or ROOT / '.local/x9/wifi-fw').expanduser()
-        self.run_or_exit([sys.executable, '-I', str(X9 / 'tools/wifi_firmware.py'), '--src', str(fw)], ROOT,
+        self.run_or_exit([sys.executable, '-I', str(X9 / 'tools/wifi_firmware.py'), '--src', str(fw)] +
+                         (['--required'] if real_wifi or self.cfg.get('wifi_firmware') else []), ROOT,
                          label='wifi_firmware.py')
         # MT6653 BT uses a separate little-endian container. Metadata only in
         # this bring-up stage; never reuse the Wi-Fi patch parser/download path.
@@ -172,10 +203,14 @@ class Builder:
                          label='bluetooth_firmware.py')
         # Device Wi-Fi NVRAM -> generated/x9_wifi_nvram.inc (gitignored; stub when absent)
         nv = Path(self.cfg.get('wifi_nvram') or ROOT / '.local/x9/wifi-nvram/WIFI').expanduser()
-        self.run_or_exit([sys.executable, '-I', str(X9 / 'tools/wifi_nvram.py'), '--src', str(nv)], ROOT,
+        self.run_or_exit([sys.executable, '-I', str(X9 / 'tools/wifi_nvram.py'), '--src', str(nv)] +
+                         (['--required'] if real_wifi or self.cfg.get('wifi_nvram') else []), ROOT,
                          label='wifi_nvram.py')
         # Vendor MD OTA tree (T: drive of the modem FSD) -> generated/x9_mdota.inc (gitignored; stub when absent)
-        self.run_or_exit([sys.executable, '-I', str(X9 / 'tools/md_ota_pack.py')], ROOT, label='md_ota_pack.py')
+        mdota = Path(self.cfg.get('mdota_source') or ROOT / '.local/x9/modem/mdota').expanduser()
+        self.run_or_exit([sys.executable, '-I', str(X9 / 'tools/md_ota_pack.py'), '--src', str(mdota)] +
+                         (['--required'] if real_modem or self.cfg.get('mdota_source') else []), ROOT,
+                         label='md_ota_pack.py')
         # Original Apple Mav17 files are for ABM/BBUpdater only, never MTK MD firmware.
         bb = [sys.executable, '-I', str(X9 / 'tools/baseband_firmware.py'),
               '--metadata', str(self.out / 'baseband-firmware.json')]
@@ -278,14 +313,9 @@ class Builder:
 
     # ---- boot.img --------------------------------------------------------------
     def boot(self, kernel, boot_config, extra_args=()):
-        opts = json.loads(boot_config.read_text())
+        opts = boot_options(boot_config, extra_args)
         self.log(f'boot configuration: {boot_config}')
         for arg in extra_args:
-            if not arg or any(c.isspace() for c in arg):
-                sys.exit(f'--boot-arg must be one non-empty token: {arg!r}')
-            if arg in opts['boot_args']:
-                sys.exit(f'--boot-arg {arg} is already in {boot_config}')
-            opts['boot_args'].append(arg)
             self.log(f'extra boot arg: {arg}')
         manifest = self.cfg.get('root_manifest')
         if not manifest:
@@ -349,6 +379,9 @@ def main():
     if not a.dry_run:
         out.mkdir(parents=True, exist_ok=True)
     b = Builder(cfg, out, a.dry_run, a.jobs)
+    # Validate source requirements against the very same argument list that
+    # will be packaged, before compiling an apparently successful stub image.
+    radio_args = boot_options(a.boot_config, a.boot_arg)['boot_args'] if a.step == 'all' else ()
     if a.step == 'plugins' and a.revision is None:
         sys.exit('plugins needs --revision N')
     if a.revision is not None and a.step in ('plugins', 'all'):
@@ -360,7 +393,7 @@ def main():
         return
     kernel = a.kernel
     if a.step in ('all', 'kernel'):
-        b.compile()
+        b.compile(radio_args)
         kernel = b.link()
     if a.step in ('all', 'boot'):
         if kernel is None:

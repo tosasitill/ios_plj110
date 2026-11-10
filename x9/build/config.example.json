@@ -1,5 +1,5 @@
 {
- "_comment": "Copy to x9/build/local.json (gitignored) and adjust for this machine. Relative dxb/root_manifest resolve against the repository root. compiler_launcher is optional (ccache from PATH or an absolute path). developer_dir and homebrew are also read by the Metal/PanVK scripts in x9/build/scripts.",
+ "_comment": "Copy to x9/build/local.json (gitignored) and adjust for this machine. Relative dxb/root_manifest and radio input paths resolve against the repository root. In detached worktrees use absolute wifi_firmware, wifi_nvram, bluetooth_firmware and mdota_source paths to the main checkout's private inputs. Explicit radio paths and real-radio all builds reject missing inputs instead of silently embedding stubs. compiler_launcher is optional (ccache from PATH or an absolute path). developer_dir and homebrew are also read by the Metal/PanVK scripts in x9/build/scripts.",
  "developer_dir": "/Users/tosasitill/Downloads/Xcode.app/Contents/Developer",
  "dxb": ".local/dxb",
  "llvm_clang": "/opt/homebrew/opt/llvm@22/bin/clang",

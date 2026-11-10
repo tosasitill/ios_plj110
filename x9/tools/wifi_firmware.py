@@ -71,8 +71,13 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('--src', type=Path, default=ROOT / '.local/x9/wifi-fw')
     ap.add_argument('--out', type=Path, default=ROOT / 'x9/kernel/generated/x9_wifi_firmware.inc')
+    ap.add_argument('--required', action='store_true', help='reject absent/empty firmware instead of generating a stub')
     a = ap.parse_args()
     try:
+        if a.required:
+            missing = [name for _, name in FILES if not (a.src / name).is_file() or (a.src / name).stat().st_size == 0]
+            if missing:
+                sys.exit(f'wifi_firmware: required input missing/empty in {a.src}: {", ".join(missing)}; no stub written')
         text, present, notes = render(a.src)
     except (OSError, ValueError) as e:
         sys.exit(f'wifi_firmware: {e}')
