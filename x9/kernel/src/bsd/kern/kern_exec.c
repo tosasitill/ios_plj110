@@ -7501,10 +7501,13 @@ x9_siri_write(vnode_t vp, off_t off, uint8_t value, vfs_context_t ctx)
  * x9_ccgate=0 off, 1 (default) NR plus a dual-SIM gate matching x9_dual_sim,
  * 2 restore the original bytes and hash. 174.txt proved that disabling the
  * bridge alone left the previously installed dual-SIM personality enabled.
- * Accept five complete page states, never an arbitrary mixture of edits.
+ * Accept six complete page states, never an arbitrary mixture of edits.
  * In dual mode select the slot-aware Mav20 signal driver (personality+11c=2)
  * rather than D22's Mav7 driver, whose start(slot,...) ignores slot. The real
  * NAS45/03(tag19)/4f/6c/51 contracts are implemented by the MTK adapter.
+ * Keep +1f8 false: CommCenter's evaluator at 0x10044b630 then enumerates
+ * straight-mapped physical instances instead of assigning just one to SIM1.
+ * DDS controller +171 remains true; this is not a DDS or dual-plan disable.
  */
 #define X9_CCGATE_FILE "/private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64.31"
 #define X9_CCGATE_SIZE 103677952LL
@@ -7555,14 +7558,26 @@ static const uint8_t x9_ccgate_slotsignal_hash[32] = {
 	0x25,0x7f,0xc8,0xcb,0xe1,0x7f,0xb7,0x03,0x4b,0x32,0xc9,0x35,0xb8,0x59,0x8e,0x05,0x79,0x47,0x90,0xb4,0xcb,0x20,0x98,0x50,0xc7,0xd3,0xd3,0x51,0x50,0xa8,0x82,0xcf
 };
 
+/* State4 with only the +1f8 store changed; the following +171 store still
+ * consumes w0=1. Derived from the verified original 20H392 code page. */
+static const uint8_t x9_ccgate_fixedslots[8] = {
+	0x20,0x00,0x80,0x52,0x7f,0xe2,0x07,0x39
+};
+static const uint8_t x9_ccgate_fixedslots_hash[32] = {
+	0x87,0x6d,0x57,0x46,0x44,0xe7,0xc8,0x48,0x35,0x96,0x8d,0x05,0xcb,0x3d,0x94,0x7e,
+	0xcd,0x55,0x8f,0xeb,0x44,0x86,0x06,0x35,0x2d,0xbe,0x7c,0xa5,0x9f,0xe1,0x36,0xe6
+};
+
 static const uint8_t *
 x9_ccgate_value(int i, int state)
 {
 	/* 0 original; 1 single+NR; 2 old dual+NR; 3 dual+NR+DDS; 4 plus slot-aware signal.
+	 * 5 keeps DDS/signal but uses the evaluator's fixed physical-slot mapping.
 	 * D22 case sets callee-saved w21=1 at 0x1f036cc18, preserved through
 	 * the call at cf3c to d000. Use it ONLY for +124; +125/+126 stay intact.
-	 * +1f8 enables UIM slot mapping; +124 selects the standard QMI DDS driver;
-	 * +171 supports DataSubscriptionController. Keep old installed state2. */
+	 * +1f8 selects dynamic single-primary mapping, not the dual-plan menu;
+	 * +124 selects the standard QMI DDS driver; +171 supports the controller.
+	 * Preserve all old installed states, including 183's state4. */
 	const struct x9_ccgate_edit *e = &x9_ccgate_edits[i];
 	if (state == 0 || (state == 1 && i == 0) || (state < 3 && (i == 2 || i == 3)) || (state < 4 && i == 4)) {
 		return e->orig;
@@ -7575,6 +7590,12 @@ x9_ccgate_value(int i, int state)
 	}
 	if (state == 4 && i == 5) {
 		return x9_ccgate_slotsignal_hash;
+	}
+	if (state == 5 && i == 3) {
+		return x9_ccgate_fixedslots;
+	}
+	if (state == 5 && i == 5) {
+		return x9_ccgate_fixedslots_hash;
 	}
 	return e->patched;
 }
@@ -7604,14 +7625,14 @@ sweet_x9_ccgate(void)
 	extern boolean_t sweet_x9_ufs_root_writable(void);
 	const int count = (int)(sizeof(x9_ccgate_edits) / sizeof(x9_ccgate_edits[0]));
 	const int mode = sweet_x9_arg("x9_ccgate", 1);
-	const int target = mode == 2 ? 0 : sweet_x9_arg("x9_dual_sim", 0) == 1 ? 4 : 1;
-	static const char *const states[] = {"original", "single-sim + nr", "dual-sim + nr", "dual-sim + nr + dds", "dual-sim + nr + dds + slot-signal"};
+	const int target = mode == 2 ? 0 : sweet_x9_arg("x9_dual_sim", 0) == 1 ? 5 : 1;
+	static const char *const states[] = {"original", "single-sim + nr", "dual-sim + nr", "dual-sim + nr + dds", "dual-sim + nr + dds + slot-signal", "dual-sim + nr + dds + slot-signal + fixed-slots"};
 	vfs_context_t ctx = vfs_context_kernel();
 	struct vnode_attr va;
 	vnode_t vp = NULLVP;
 	uint8_t buf[32], hdr[16];
 	int error, i, state, source = -1;
-	unsigned matches = 31;
+	unsigned matches = 63;
 
 	if (mode != 1 && mode != 2) {
 		return 0;
@@ -7649,7 +7670,7 @@ sweet_x9_ccgate(void)
 			vnode_put(vp);
 			return error;
 		}
-		for (state = 0; state < 5; state++) {
+		for (state = 0; state < 6; state++) {
 			if (memcmp(buf, x9_ccgate_value(i, state), e->len) != 0) {
 				matches &= ~(1u << state);
 			}
@@ -7660,7 +7681,7 @@ sweet_x9_ccgate(void)
 		vnode_put(vp);
 		return EINVAL;
 	}
-	for (state = 0; state < 5; state++) {
+	for (state = 0; state < 6; state++) {
 		if (matches & (1u << state)) {
 			source = state;
 		}

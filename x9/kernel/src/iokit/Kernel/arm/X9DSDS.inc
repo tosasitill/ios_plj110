@@ -157,12 +157,14 @@ static void x9ds_poll(){
 }
 
 /* 20H392 1f19febb8 builds UIM6e: 10 primary/11 secondary, each independently
- * optional, u8 physical slot. A zero HardwareSimSlot omits that TLV; it does
- * NOT unmap the other session. 182 sends 11-byte requests six times, while
+ * optional, u8 physical slot. A zero HardwareSimSlot omits that TLV; omission
+ * alone is not proof of a supported dynamic map. 182 sends 11-byte requests six times, while
  * the old mandatory-two-TLV parser returned ARG every time. The native
  * 1f1a01938 callback passes that failure into configureSubscription.
  * Current UIM CardStatus already maps primary USIM -> slot1, secondary USIM
- * -> slot2 from real EF_DIR. Accept only supplied entries of that existing map;
+ * -> slot2 from real EF_DIR. The evaluator's +1f8 dynamic mode instead asks
+ * for primary->slot2 in 183; CCGATE state5 selects its fixed-slot branch.
+ * Accept only supplied entries of the verified existing map;
  * no APDU, physical switching, arbitrary remap or fake provisioning success. */
 static void x9ds_map(uint32_t local,uint32_t port,const uint8_t *req,unsigned n){
  x9q_view primary=x9q_tlv(req,n,0x10),secondary=x9q_tlv(req,n,0x11);
