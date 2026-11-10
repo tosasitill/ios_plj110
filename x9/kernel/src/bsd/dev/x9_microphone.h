@@ -119,6 +119,11 @@ _Static_assert(sizeof(struct x9_mic_board_status)==96,"board ABI size");
 #define X9_MIC_AFE_INIT_ISSUED 32u
 #define X9_MIC_AFE_SIDEBANDS_ISSUED 64u
 #define X9_MIC_AFE_SRAM_HELD 128u
+/* GET_AFE.last_register: untagged = AFE offset; bit30 = SPM_BASE offset.
+ * This labels a failed AO power/protection access prerequisite, not a DMA
+ * completion/ownership observation. ABI v1/192B/ioctl0x97 is unchanged.
+ */
+#define X9_MIC_AFE_REGISTER_SPM (1u<<30)
 enum x9_mic_afe_stage {
     X9_MIC_AFE_UNTRIED, X9_MIC_AFE_BASELINE, X9_MIC_AFE_SMC_INIT,
     X9_MIC_AFE_DOMAINS, X9_MIC_AFE_MUX, X9_MIC_AFE_GATES,

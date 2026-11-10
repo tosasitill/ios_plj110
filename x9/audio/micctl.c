@@ -41,6 +41,9 @@ static int hardware_status(int fd)
             a.fenc_before,a.fenc_after,a.top0_before,a.top0_after,a.top4_before,a.top4_after,
             a.engine_before,a.engine_after,a.engine_monitor,a.spm_before,a.spm_after,
             a.cbip_before,a.cbip_after,a.last_register);
+        if(a.last_register&X9_MIC_AFE_REGISTER_SPM)
+            printf("afe access prerequisite failed at SPM+%#x (AO power/protection state, not DMA drain)\n",
+                a.last_register&~X9_MIC_AFE_REGISTER_SPM);
         if(a.flags&X9_MIC_AFE_ATTEMPTED) {
             printf("afe foreign AUDIO XPU votes=%#x/%#x\n",a.foreign_vote_before,a.foreign_vote_after);
             printf("afe smc INIT=%lld SIDEBANDS=%lld SRAM_REQ=%lld REL=%lld (INT64_MIN=not issued; INIT/SIDEBANDS have no inverse)\n",

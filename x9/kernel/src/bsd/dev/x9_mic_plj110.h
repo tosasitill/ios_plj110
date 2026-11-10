@@ -53,6 +53,9 @@ int x9_mic_plj110_capture_prepare(volatile uint32_t *,
     struct x9_mic_afe_status *, struct x9_mic_analog_status *,
     struct x9_mic_digital_status *, struct x9_mic_dma_status *, uint32_t memory_type);
 int x9_mic_plj110_capture_unprepare(void);
+/* AO-only live power/protection check with the MT6993 control lock held.
+ * Does not wait, touch AFE, acquire resources or prove DMA drain/ownership. */
+int x9_mic_plj110_capture_access(void);
 int x9_mic_plj110_capture_restart_ready(void);
 int x9_mic_plj110_capture_rearm(void);
 void x9_mic_plj110_capture_retain(int error);

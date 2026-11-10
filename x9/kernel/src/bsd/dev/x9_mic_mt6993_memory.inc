@@ -123,6 +123,7 @@ static int mic_memory_cache(uint32_t offset,uint32_t bytes,bool initial)
  */
 static int mic_memory_cursor(uint32_t *offset)
 {
+    int e=capture_access();if(e)return e;
     if((rd(VUL1_CON0)&(VUL1_CAPTURE_MASK|VUL1_ON|(1u<<7)))!=(VUL1_CAPTURE_CONFIG|VUL1_ON) ||
        (rd(VUL1_MON0)&VUL1_MON_FULL))return EIO;
     uint64_t end=mic_memory.bus+mic_memory.bytes-1;

@@ -37,6 +37,14 @@ static const uint32_t reg_masks[]={VUL1_CAPTURE_MASK,0x1ff,0xfffffff0,
     0x1ff,0xfffffff0,UINT32_MAX,UINT32_MAX};
 static const uint32_t save_regs[]={VUL1_CON0,VUL1_BASE_MSB,VUL1_BASE,
     VUL1_END_MSB,VUL1_END,CONN020,CONN021};
+static int capture_access(void)
+{
+    if(hw.prepare!=x9_mic_plj110_capture_prepare)return 0;
+    int e=x9_mic_plj110_capture_access();
+    if(e && (afe_diagnostic.last_register&X9_MIC_AFE_REGISTER_SPM))
+        dma_diagnostic.last_register=afe_diagnostic.last_register;
+    return e;
+}
 static uint32_t rd(uint32_t reg)
 {
     uint32_t value=hw.afe[reg/4];__asm__ volatile("dmb oshld":::"memory");return value;
@@ -47,6 +55,7 @@ static void wr(uint32_t reg,uint32_t value)
 }
 static int program_reg(unsigned i,uint32_t value)
 {
+    int e=capture_access();if(e)return e;
     uint32_t mask=reg_masks[i];
     dma_diagnostic.last_register=save_regs[i];
     uint32_t old=rd(save_regs[i]);
@@ -65,6 +74,7 @@ static int stop_locked(void)
     if(dma_stuck)return dma_diagnostic.restore_errno?dma_diagnostic.restore_errno:EIO;
     int e=0;
     if(saved) {
+        e=capture_access();if(e)goto dma_failed;
         if(dma_issued) {
             dma_diagnostic.stage=X9_MIC_DMA_DISABLE;
             dma_diagnostic.last_register=VUL1_CON0;
@@ -79,6 +89,7 @@ static int stop_locked(void)
              * Only the board's complete write-path provider authorizes
              * restoring addresses/routing and releasing clocks/memory. */
             e=hw.dma_quiesce();if(e)goto dma_failed;
+            e=capture_access();if(e)goto dma_failed;
             dma_diagnostic.monitor_after=rd(VUL1_MON0);
             dma_diagnostic.last_register=VUL1_MON0;
             if(dma_diagnostic.monitor_after&VUL1_MON_BUSY){e=EIO;goto dma_failed;}
@@ -88,6 +99,7 @@ static int stop_locked(void)
         static const unsigned reverse_write_order[]={6,5,0,4,3,2,1};
         for(unsigned i=0;i<7;i++) {
             unsigned k=reverse_write_order[i];if(!(written&(1u<<k)))continue;
+            e=capture_access();if(e)goto dma_failed;
             dma_diagnostic.last_register=save_regs[k];
             if(rd(VUL1_CON0)&(VUL1_ON|(1u<<7))){e=EBUSY;goto dma_failed;}
             uint32_t v=rd(save_regs[k]),mask=reg_masks[k];
@@ -189,6 +201,7 @@ static int afe_start(uint64_t g)
         dma_diagnostic.flags|=X9_MIC_DMA_BOUND;dma_diagnostic.blockers=0;
         dma_diagnostic.adc_channel=hw.adc_channel;dma_diagnostic.ring_bytes=hw.dma_bytes;
         dma_diagnostic.base=hw.dma_bus_address;dma_diagnostic.end=hw.dma_bus_address+hw.dma_bytes-1;
+        if(!e)e=capture_access();
         if(!e) {
             diagnostic.stage=X9_MIC_HW_DMA;
             dma_diagnostic.stage=X9_MIC_DMA_BASELINE;
@@ -229,6 +242,7 @@ static int afe_start(uint64_t g)
             if(!e)e=program_reg(0,VUL1_CAPTURE_CONFIG);
             if(!e)e=program_reg(5,1u<<16);
             if(!e)e=program_reg(6,1u<<17);
+            if(!e)e=capture_access();
             if(e)goto start_failed;
             dma_diagnostic.stage=X9_MIC_DMA_ENABLE;dma_diagnostic.last_register=VUL1_CON0;
             dma_issued=true; /* before ON write, even a failed readback can DMA */
@@ -262,6 +276,7 @@ static int afe_commit(uint64_t g)
 }
 static int poll_locked(void)
 {
+    int access=capture_access();if(access)return access;
     dma_diagnostic.last_register=VUL1_MON0;
     if(!(rd(VUL1_CON0)&VUL1_ON) || (rd(VUL1_MON0)&VUL1_MON_FULL))return EIO;
     uint32_t hi=0,lo=0;bool stable=false;

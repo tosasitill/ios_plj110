@@ -57,12 +57,12 @@ static struct power_journal board;
  * A failed map is not retried, and caching VA conveys no power/owner lease. */
 enum { MIC_MAP_GPIO, MIC_MAP_SLEEP, MIC_MAP_GIPC, MIC_MAP_GATE, MIC_MAP_BUS,
     MIC_MAP_PMIF, MIC_MAP_HWV, MIC_MAP_CLOCK, MIC_MAP_AFE, MIC_MAP_IOC0,
-    MIC_MAP_IOC1, MIC_MAP_COUNT };
+    MIC_MAP_IOC1, MIC_MAP_SPM_PBUS, MIC_MAP_COUNT };
 static const struct { vm_offset_t physical; vm_size_t bytes; } mic_map_ranges[]={
     {0x1002d000,0x1000},{0x1c001000,0x1000},{0x1df50000,0x1000},
     {0x1da00000,0x1000},{0x1d860000,0x1000},{0x1c01a000,0x2000},
     {0x1c040000,0x75000},{0x1c200000,0x1000},{0x1a110000,0x10000},
-    {0x12840000,0x1000},{0x12860000,0x1000}
+    {0x12840000,0x1000},{0x12860000,0x1000},{0x1c00d000,0x1000}
 };
 _Static_assert(sizeof(mic_map_ranges)/sizeof(mic_map_ranges[0])==MIC_MAP_COUNT,"MMIO map slots");
 static vm_offset_t mic_map_addresses[MIC_MAP_COUNT];
@@ -651,6 +651,12 @@ static int board_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_stat
     return board_finish(j,e);
 }
 
+int x9_mic_plj110_capture_access(void)
+{
+    if(!board.session || !board.capture_held || board.finished ||
+       !board.resource_ticket || !board.cal || !board.cal->snapshot || board.cal->stuck)return ENXIO;
+    return afe_access(board.cal);
+}
 int x9_mic_plj110_power_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_status *s)
 {return board_probe(h,s,NULL,NULL,NULL,NULL,NULL,false,0);}
 int x9_mic_plj110_calibrate(struct x9_mic_hardware_status *h,struct x9_mic_board_status *s,

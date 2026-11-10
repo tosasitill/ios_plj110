@@ -7,7 +7,7 @@
  * These clocks are the active direct-PDN VLP mux branch, NOT HWV muxes.
  */
 struct afe_journal {
-    vm_offset_t hwv, vlp, afe, gpio, ioc[2];
+    vm_offset_t hwv, vlp, afe, gpio, ioc[2], spm_pbus;
     struct x9_mic_afe_status *s;
     uint32_t votes, borrowed, mux_owned, pin_owned;
     uint32_t saved[5];
@@ -23,6 +23,24 @@ static const unsigned afe_regs[]={0x10,0,0x60,0x4380,0x14};
 static const uint32_t afe_masks[]={3,1u<<25,4,1,1};
 static const unsigned cal_pins[]={98,100,101,102,103};
 static const unsigned cal_ioc[]={0,0,1,0,0}, cal_bits[]={0,3,2,1,2};
+/* OPPO v6993/spm_reg.h: AUDIO_SSYSPM_CON = SPM+0x903c.
+ * These are the actual domain ACK and protection state, not HWV request/DONE.
+ * Observe only: no SSYSPM/global protection writes, borrowed protection ticket
+ * or claimed write-path drain. The firmware may control both bus directions;
+ * an enabled/pending protection state must never be followed by AFE access.
+ */
+#define AUDIO_SSYSPM_PBUS_OFFSET 0x3cu
+#define AUDIO_SSYSPM_PWR_ACK (1u<<31)
+#define AUDIO_SSYSPM_PROTECT ((1u<<2)|(1u<<3))
+static int afe_spm_wait(struct afe_journal *a,uint32_t mask,uint32_t expected)
+{
+    int e=wait_bits(a->spm_pbus,AUDIO_SSYSPM_PBUS_OFFSET,mask,expected,10000);
+    if(e) {
+        a->s->last_register=X9_MIC_AFE_REGISTER_SPM|0x903cu;
+        a->stuck=true;
+    }
+    return e;
+}
 static uint32_t afe_foreign_votes(struct afe_journal *a)
 {
     uint32_t v=0;
@@ -94,6 +112,16 @@ static int afe_access(struct afe_journal *a)
     if((rr(a->hwv,0x12900)&0xd)!=0xd || !(rr(a->hwv,0x20708)&1) ||
        (rr(a->vlp,0x90)&0x8383) || (rr(a->vlp,0x274)&0xc0000000)!=0xc0000000 ||
        afe_foreign_votes(a)) {
+        a->stuck=true;return EBUSY;
+    }
+    /* Last AO-only qualification before reading/writing the powered domain.
+     * A matching AP vote does not prove power-up/protection release finished.
+     * This is a non-atomic access prerequisite, not a firmware ownership grant.
+     */
+    if(!a->spm_pbus ||
+       (rr(a->spm_pbus,AUDIO_SSYSPM_PBUS_OFFSET)&
+        (AUDIO_SSYSPM_PWR_ACK|AUDIO_SSYSPM_PROTECT))!=AUDIO_SSYSPM_PWR_ACK) {
+        a->s->last_register=X9_MIC_AFE_REGISTER_SPM|0x903cu;
         a->stuck=true;return EBUSY;
     }
     return 0;
@@ -200,15 +228,22 @@ static int afe_take(struct afe_journal *a,vm_offset_t gpio,struct x9_mic_afe_sta
     s->version=1;s->stage=X9_MIC_AFE_BASELINE;s->flags=X9_MIC_AFE_ATTEMPTED;
     for(unsigned i=0;i<4;i++)s->smc_result[i]=INT64_MIN; /* not issued */
     a->hwv=mic_map_once(MIC_MAP_HWV);a->vlp=mic_map_once(MIC_MAP_CLOCK);
+    a->spm_pbus=mic_map_once(MIC_MAP_SPM_PBUS);
     a->afe=mapped_afe?(vm_offset_t)mapped_afe:mic_map_once(MIC_MAP_AFE);
     a->ioc[0]=mic_map_once(MIC_MAP_IOC0);a->ioc[1]=mic_map_once(MIC_MAP_IOC1);
-    if(!a->hwv || !a->vlp || !a->afe || !a->ioc[0] || !a->ioc[1])return ENOMEM;
+    if(!a->hwv || !a->vlp || !a->afe || !a->ioc[0] || !a->ioc[1] || !a->spm_pbus)return ENOMEM;
     s->ap_vote_before=rr(a->hwv,0x20708);s->all_vote_before=rr(a->hwv,0x13700);
     s->ack_before=rr(a->hwv,0x12900);s->done=rr(a->hwv,0x1132c);
     s->vlp_before=rr(a->vlp,0x90);s->fenc_before=rr(a->vlp,0x274);
     s->foreign_vote_before=afe_foreign_votes(a);
     if(s->foreign_vote_before || ((s->ap_vote_before|s->all_vote_before|s->ack_before|
        rr(a->hwv,0x1131c)|rr(a->hwv,0x13704))&1))return EBUSY;
+    /* No AFE access even for baseline inspection while AUDIO is inherited on.
+     * Protection bits in the cold state are not used as a DMA drain receipt.
+     */
+    if(rr(a->spm_pbus,AUDIO_SSYSPM_PBUS_OFFSET)&AUDIO_SSYSPM_PWR_ACK) {
+        s->last_register=X9_MIC_AFE_REGISTER_SPM|0x903cu;return EBUSY;
+    }
     if((s->vlp_before&0x8080)!=0x8080 || (s->fenc_before&0xc0000000))return EBUSY;
     s->stage=X9_MIC_AFE_SMC_INIT;
     int e=0;
@@ -229,6 +264,10 @@ static int afe_take(struct afe_journal *a,vm_offset_t gpio,struct x9_mic_afe_sta
             a->borrowed|=bits[i];e=wait_bits(a->hwv,0x12900,bits[i],bits[i],10000);
         } else e=afe_vote(a,bits[i],true);
         if(e)return e;
+        if(bits[i]==1) {
+            e=afe_spm_wait(a,AUDIO_SSYSPM_PWR_ACK|AUDIO_SSYSPM_PROTECT,AUDIO_SSYSPM_PWR_ACK);
+            if(e)return e; /* retain uncertain votes; do not touch AFE */
+        }
     }
     s->stage=X9_MIC_AFE_MUX;
     for(unsigned i=0;i<2;i++){e=afe_mux_take(a,i);if(e)return e;}
@@ -302,6 +341,7 @@ static int afe_restore(struct afe_journal *a)
         if(bits[i]==1) {
             e=wait_bits(a->hwv,0x12900,1,0,10000);
             if(!e && (rr(a->hwv,0x13700)&1))e=EBUSY;
+            if(!e)e=afe_spm_wait(a,AUDIO_SSYSPM_PWR_ACK,0);
             if(e){a->stuck=true;return e;}
         }
     }
