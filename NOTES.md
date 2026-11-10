@@ -159,14 +159,16 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 ## 相机活动交接(CAMERA-1,2026-11-10): 控制/RAW10/iOS双流初步移植;硬件后端未实现
 
 - **用户目标**:参考 UniXNU / hackios 做前后相机初步实现、驱动构建与 iOS 对接。当前仅代码/构建工作;没有设备操作、flash/reboot、分区写入、mailbox staging、测试套件或 CI run。
-- **上游核对**:本轮 fetch 后 UniXNU `95ad781`没有相机/MT6993 ISP实现;HakiOS `63fc2b4`的userland `camera_device.c/camera_isp.c`提供RAW10→软件ISP→FigCaptureDevice双流。其高通内核相机已从旧单文件拆分,没有移植高通MMIO。移植保留MIT许可证;厂商寄存器表仅本地生成,保留GPL/OPLUS/MediaTek声明,不入git。
+- **上游核对**:本轮 fetch 后 UniXNU `95ad781`没有相机/MT6993 ISP实现;HakiOS `63fc2b4`的userland `camera_device.c/camera_isp.c`提供RAW10→软件ISP→FigCaptureDevice双流。其高通内核相机已迁到drivers/camera/hakios.camera.c,没有移植高通MMIO。移植保留MIT许可证;厂商寄存器表仅本地生成,保留GPL/OPLUS/MediaTek声明,不入git。
 - **设备观察来源**:既有`.local/x9/android-ccci-20261109-125536/dmesg.txt`5626起选中主摄`hhmain_mipi_raw`、6036起选中前摄`hhfront_mipi_raw`;captured DT `.local/x9/modem/live.dts`对应i2c4/0x1a和i2c2/0x10。芯片物理ID0x9186/0x0615来自厂商实际get_id分支,不是宏中加offset的软件ID。不是本轮XNU读到了ID。
 - **20H392 ABI证据**:已有设备cache抽取`H10ISP.mediacapture`的base/device/stream表确认base v1、device v3、stream v2,设备和流表分别5/4个64-bit槽;CMCapture vendor IMP为0x1a1f40c84,调用initWithDeviceCreateFunction:在0x1a1f40cd8。UUID沿用已核对45d37488-2cc7-3028-8a4d-936bce7a220b。原始证据`.local/x9/work/camera-20261110/abi.txt`及既有torch的`cmcapture-dis.txt`;共享cache encoded指针保留原值,不当成可直接调用地址。
 - **实现边界**:`sweet_x9_camera.c/x9_camera.h`含独占owner、两传感器power数据/ID验证、init/preview、stream/exposure、16MiB RAW10、有界1s等待、generation旧帧拒绝、关闭排空/恢复。控制锁与帧锁分开,停流不持帧锁等待DMA worker。Sony倒数编码增益转线性Q10,不照搬高通线性寄存器。`x9/camera/`有MIT双流/软件ISP/状态工具/构建器;只提供D22 Photo兼容格式,未声明视频/高FPS/AF/OIS/flash。
 - **模式**:x9_camera=0默认off;=1只创建设备/状态,不访问MMIO/I2C/电源、不写root;=2才允许后端注册并安装hash-addressed自有dylib/注入mediaserverd。**MT6993 power/I2C/SENINF/RAW DMA/SMMU adapter尚未实现、没有register调用者,所以supported=0、无READY是当前正确状态,不能拍摄**。两枚真实ID确认后才建iOS vendor;不覆盖原非空vendor,不伪造图案/照片。模式2首次设备运行须先确认root写入。
 - **对接约束**:20H392原plist运行mediaserverd为mobile(501:501),非macOS的32;writer限root或该身份mediaserverd。原DYLD_INSERT_LIBRARIES保留,若torch=3已注入,相机跳过;多桥同时启用尚未整合。颜色CCM=identity/无LSC,光学字段是D22兼容描述,朝向/Bayer/实际帧率/色彩待实机帧确认。
-- **已知构建里程碑**:用户态117040B初步桥交叉编译/签名通过;首次kernel使用已从XNU移除的_MALLOC/M_DEVBUF失败,改kalloc_data/kfree_data后`phase1b`56/56 overlay+6prebuilt、link/strip/boot打包exit0(13090816B)。随后静态审查修复停流/完成锁顺序、读等待deadline/session取消,将做最终干净源码构建;phase1b不是最终候选。无测试套件/成功后二次镜像检查。
-- **下一步**:先完成当前固定源码构建交接;硬件阶段按一枚sensor上电→AP I2C ID→恢复,再SENINF包→RAW DMA完整帧,最后前后切换/预览/落盘照片。不能通过空ACK或字符节点“验收相机”。不要求用户现在连续刷试探镜像。
+- **已知构建里程碑**:用户态117040B初步桥交叉编译/签名通过;首次kernel使用已从XNU移除的_MALLOC/M_DEVBUF失败,改kalloc_data/kfree_data后`phase1b`56/56 overlay+6prebuilt、link/strip/boot打包exit0(13090816B)。随后静态审查修复停流/完成锁顺序、读等待deadline/session取消;最终干净源码`ca3a93e`构建`x9-camera-phase1c`exit0,56/56 overlay+6prebuilt、link/strip/boot通过,boot.img **13094912B**,用户态桥117040B;phase1b不再是最终候选。无测试套件/成功后二次镜像检查。
+- **提交/最终产物**:代码`ca3a93e`在独立worktree `.local/x9/worktrees/camera` / 分支work/x9-camera,基于5e06897(含已提交ALS/torch,不含后续SMS/Bluetooth修改)。最终产物`x9/out/x9-camera-phase1c/`已原样复制到主checkout同名目录;mode1、完整boot参数601B、32GiB manifest、插件275不变,**无需mailbox**。本次不是包含后续全部功能的联合镜像,不要求现在上机。末尾仅清理import行尾空格并补交接,无功能修改,不二次解包/hash/验证镜像。
+- **重建与证据**:在上述worktree运行`/Library/Frameworks/Python.framework/Versions/3.13/bin/python3 -I x9/build/build.py all --name <新的唯一名字> --boot-config /Users/tosasitill/ios_plj110/.local/x9/work/camera-20261110/boot-config.json`;worktree私有local.json含camera_vendor_root指向OPPO模块common目录。日志`.local/x9/work/camera-20261110/{user-build.log,user-build2.log,build-phase1.log,build-phase1b.log,build-phase1c.log}`,最终输出下camera/sensor-tables.json记录表对数/来源;ABI/配置/设备信息均不入git。未建立CI run(gh run list空),无新增设备日志。
+- **下一步**:硬件阶段按一枚sensor上电→AP I2C ID→恢复,再SENINF包→RAW DMA完整帧,最后前后切换/预览/落盘照片。不能通过空ACK或字符节点“验收相机”。不要求用户现在连续刷试探镜像。
 
 ## 7. 当前交接(HANDOFF 116-INTEGRATE-BT,2026-11-10): 蜂窝+ALS+torch+BT独立整合构建通过,未上机
 
