@@ -99,6 +99,14 @@ uint64_t x9_md_mipc_submit(const uint8_t *p,uint32_t n){
  }
  else if(id==0x30b||id==0x601||id==0x605||id==0xa04){if(!x9mm_request(p,n,id))return 0;}
  else if(id==0x101){if(!x9mi_attach_request(p,n))return 0;}
+ /* PLJ110 2d19d8..2d1a34: PS-only attach/detach, not combined CS/PS
+  * 0403 and not RESET/CFUN. Only exact two raw u8 TLVs, original single
+  * SIM route, zero padding. WDS attach owner retains each token. */
+ else if(id==0x40b){
+  if((p[8]!=1&&(p[8]!=2||x9_md_sim_count()!=2))||n!=32||
+     x9mi_u16(p+16)!=0x101||x9mi_u16(p+18)!=1||p[20]!=1||p[21]||p[22]||p[23]||
+     x9mi_u16(p+24)!=0x100||x9mi_u16(p+26)!=1||p[28]>1||p[29]||p[30]||p[31])return 0;
+ }
  /* PLJ110 RmmDcEventHandler::requestSetPreferredDataModem, ELF 0x2cb1a0:
   * 020d has no TLVs; the target is the header SIM mask. Only the DDS
   * owner may issue this operation, retaining its token through late 020e. */

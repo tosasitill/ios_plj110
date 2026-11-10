@@ -7905,6 +7905,35 @@ sweet_x9_ccinternet_gate(void)
  return x9_ccnative_gate("CCINTERNET", 3739, edits, target, "ticket-only compatibility; native data checks retained");
 }
 
+/* 20H392 compute-bars completion 1008ed1f4: after computing actual model
+ * bars/displayBars/max, !CS-attached plus this slot's data-attached bool
+ * selects "Data-only attached, reporting zero bars" at 1008ed2c0.
+ * Take the EXISTING computed-result path at 1008ed3b8 only from that branch.
+ * The preceding CS check, per-slot tree lookup and data-attached check,
+ * non-attached path and native measurement/model eligibility all remain.
+ * No fixed bars, CS/IMS registration, bearer state or NR-as-LTE invention.
+ * Qualify the full original/patched 4KiB page and CodeDirectory slot through
+ * the shared lossless HFS/readback gate. Independent 0/2 restores; global
+ * ccgate=2 restores too. Older kernels alone cannot undo a persisted edit.
+ */
+static int
+sweet_x9_ccpsbars_gate(void)
+{
+ static const struct x9_ccgate_edit edits[] = {
+  {"PS-only attached measured-bars branch", 9360064, 4,
+   {0xd5,0x02,0x40,0xf9}, {0x3e,0x00,0x00,0x14}},
+  {"native page 2285 hash", 24581588, 32,
+   {0x9a,0x78,0xec,0x0b,0x11,0xcb,0x4f,0x28,0x43,0x8d,0x3d,0xdc,0xb8,0x30,0xfc,0xc4,
+    0x1b,0x28,0xcc,0x0b,0x68,0xb8,0xa5,0xb4,0xc2,0x66,0xe7,0x11,0xf1,0xe2,0x5a,0x90},
+   {0x6b,0x34,0xc4,0xe8,0xd4,0x42,0x4f,0xbe,0xc4,0x3a,0x7b,0xdf,0x3b,0xd3,0xfe,0x8b,
+    0x8e,0x8a,0xba,0x9f,0x06,0x28,0x36,0x27,0xe5,0x7b,0x44,0xa2,0x9e,0x1a,0x07,0x5a}},
+ };
+ const int mode = sweet_x9_arg("x9_ps_signal_bars", 1);
+ if (mode != 0 && mode != 1 && mode != 2) return 0;
+ const int target = mode == 1 && sweet_x9_arg("x9_ccgate", 1) == 1;
+ return x9_ccnative_gate("CCPSBARS", 2285, edits, target, "PS-only attached native measured bars");
+}
+
 static int
 sweet_x9_siri_off(proc_t p, user_addr_t scratch, user_addr_t end)
 {
@@ -8805,6 +8834,8 @@ load_init_program_at_path(proc_t p, user_addr_t scratch_addr, const char* path)
 	  if(ccbundle_error)printf("X9 CCBUNDLE: native scan not changed errno=%d; continuing boot\n",ccbundle_error);
 	  int ccinternet_error=sweet_x9_ccinternet_gate();
 	  if(ccinternet_error)printf("X9 CCINTERNET: ticket branch not changed errno=%d; continuing boot without fake activation\n",ccinternet_error);
+	  int ccpsbars_error=sweet_x9_ccpsbars_gate();
+	  if(ccpsbars_error)printf("X9 CCPSBARS: PS-only bars branch not changed errno=%d; native signal state retained\n",ccpsbars_error);
 	 }
 	 int siri_error=sweet_x9_siri_off(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	 if(siri_error)printf("X9 SIRI: launchd.plist not changed errno=%d; continuing boot\n",siri_error);

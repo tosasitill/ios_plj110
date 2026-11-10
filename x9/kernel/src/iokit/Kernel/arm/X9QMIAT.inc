@@ -424,12 +424,12 @@ static void x9q_siginfo(x9q_job &j,const char *r){
   nr_rsrp=pr/4;nr_sinr=ps*5/2;nr_ok=true;
   if((unsigned)iq<nn&&N[iq]!=0x7fff&&N[iq]>=-43*4&&N[iq]<=20*4&&N[iq]!=0){nr_rsrq=N[iq]/4;nr_rsrq_ok=true;}
  }
- static unsigned logged;
- if(logged<8){logged++;char raw[220];unsigned w=0;
+ static unsigned logged[2];
+ if(j.sim_slot<2&&logged[j.sim_slot]<8){logged[j.sim_slot]++;char raw[220];unsigned w=0;
   for(const char *q=r;*q&&w+2<sizeof(raw);q++)raw[w++]=*q=='\r'?'|':*q=='\n'?'/':((unsigned char)*q<32||(unsigned char)*q>126)?'?':*q;
   raw[w]=0;
-  printf("X9 QMI AT: ECSQ lte %d (rsrp_q %d rsrq_q %d sinr_q %d) nr %d (rsrp %d rsrq %d%s snr*10 %d) raw \"%s\"\n",
-   lte_ok,ln>6?L[6]:0,ln>5?L[5]:0,ln>8?L[8]:0,nr_ok,nr_rsrp,nr_rsrq,nr_rsrq_ok?"":"(n/a)",nr_sinr,raw);}
+  printf("X9 QMI AT: ECSQ SIM%u client 0x%x generation %llu background %u lte %d (rsrp_q %d rsrq_q %d sinr_q %d) nr %d (rsrp %d rsrq %d%s snr*10 %d) raw \"%s\"\n",
+   j.sim_slot+1,j.local,j.generation,j.background,lte_ok,ln>6?L[6]:0,ln>5?L[5]:0,ln>8?L[8]:0,nr_ok,nr_rsrp,nr_rsrq,nr_rsrq_ok?"":"(n/a)",nr_sinr,raw);}
  if(!lte_ok&&!nr_ok){x9q_error(j,X9Q_NOT_READY);return;}
  x9q_packet p(j.req);
  if(lte_ok){int snr=L[8]*5/2,rsrp=L[6]/4;uint8_t lte[6]={(uint8_t)(int8_t)(L[2]/4),(uint8_t)(int8_t)(L[5]/4),
