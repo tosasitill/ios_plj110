@@ -6519,6 +6519,11 @@
    "template": "bsd-c-11"
   },
   {
+   "name": "x9_dsp_playback.o",
+   "source": "bsd/dev/x9_dsp_playback.c",
+   "template": "bsd-c-11"
+  },
+  {
    "name": "x9_audio_resources.o",
    "source": "bsd/dev/x9_audio_resources.c",
    "template": "bsd-c-11"

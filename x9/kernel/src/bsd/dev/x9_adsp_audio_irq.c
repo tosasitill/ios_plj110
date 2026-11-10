@@ -265,12 +265,32 @@ int x9_adsp_audio_irq_bind(uint64_t ticket,uint32_t generation,
     }
     lck_mtx_unlock(&audio_irq_lock);lck_mtx_unlock(lock);return e;
 }
-int x9_adsp_audio_irq_quiesce(void)
+static bool binding_matches(uint64_t ticket,uint32_t generation,struct x9_dsp_pcm_session *session)
+{return irq.attempted&&ticket&&ticket==irq.ticket&&generation&&generation==irq.generation&&session&&session==irq.session;}
+int x9_adsp_audio_irq_validate(uint64_t ticket,uint32_t generation,struct x9_dsp_pcm_session *session)
+{
+    lck_mtx_lock(&audio_irq_lock);int e=binding_matches(ticket,generation,session)?0:EPERM;
+    if(e){lck_mtx_unlock(&audio_irq_lock);return e;}
+    boolean_t old=spin_lock();bool armed=irq.armed;spin_unlock(old);
+    if(irq.error)e=(int)irq.error;
+    if(!e&&(!armed||!irq.child||irq.quiesced))e=ENXIO;
+    if(!e)e=ready();
+    if(!e)e=verify_config(false);
+    if(e)e=fault(e);
+    lck_mtx_unlock(&audio_irq_lock);return e;
+}
+bool x9_adsp_audio_irq_binding_held(uint64_t ticket,uint32_t generation,struct x9_dsp_pcm_session *session)
+{
+    lck_mtx_lock(&audio_irq_lock);bool held=binding_matches(ticket,generation,session);
+    lck_mtx_unlock(&audio_irq_lock);return held;
+}
+int x9_adsp_audio_irq_quiesce(uint64_t ticket,uint32_t generation,struct x9_dsp_pcm_session *session)
 {
     /* First stop new delivery, WITHOUT holding the PCM lock the worker may
      * be queued on. Then drain its pin, not merely the running callback. */
     lck_mtx_lock(&audio_irq_lock);
-    int e=irq.attempted?0:ENXIO;
+    int e=binding_matches(ticket,generation,session)?0:EPERM;
+    if(e){lck_mtx_unlock(&audio_irq_lock);return e;} /* No foreign mask. */
     if(!e) {
         boolean_t old=spin_lock();irq.armed=false;irq.pending=false;spin_unlock(old);
         if(irq.captured)e=mapping();
@@ -289,9 +309,14 @@ int x9_adsp_audio_irq_quiesce(void)
         spin_unlock(old);thread_block(THREAD_CONTINUE_NULL);
     }
     lck_mtx_lock(&audio_irq_lock);
+    if(!binding_matches(ticket,generation,session)) {
+        lck_mtx_unlock(&audio_irq_lock);return EPERM;
+    }
     if(e){e=fault(e);lck_mtx_unlock(&audio_irq_lock);return e;}
     if(irq.captured) {
-        e=wait_rwp();
+        e=mapping(); /* Requalify after sleeping for a queued worker pin. */
+        if(!e)e=wait_rwp();
+        if(!e)e=controller();
         if(!e && (rd(ENABLE)&IRQ_BIT))e=EIO;
         if(!e) {
             for(unsigned i=0;i<500 && (rd(ACTIVE)&IRQ_BIT);i++)delay(2);
@@ -305,11 +330,13 @@ int x9_adsp_audio_irq_quiesce(void)
     if(e)e=fault(e);
     lck_mtx_unlock(&audio_irq_lock);return e;
 }
-int x9_adsp_audio_irq_release(void)
+int x9_adsp_audio_irq_release(uint64_t ticket,uint32_t generation,struct x9_dsp_pcm_session *session)
 {
     lck_mtx_lock(&audio_irq_lock);
     boolean_t saved=spin_lock();bool busy=irq.busy;spin_unlock(saved);
-    int e=!irq.attempted || !irq.quiesced || busy?EBUSY:0;
+    int e=binding_matches(ticket,generation,session)?0:EPERM;
+    if(e){lck_mtx_unlock(&audio_irq_lock);return e;} /* No foreign restore/drop. */
+    if(!irq.quiesced||busy)e=EBUSY;
     if(!e)e=x9_adsp_mt6993_speaker_halted_validate(irq.ticket);
     if(!e && irq.captured) {
         e=controller();

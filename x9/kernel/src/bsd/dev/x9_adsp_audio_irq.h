@@ -27,14 +27,20 @@ extern "C" {
  * shared/PCM and firmware AFE route binding already established. */
 int x9_adsp_audio_irq_bind(uint64_t ticket,uint32_t generation,
     struct x9_dsp_pcm_session *,lck_mtx_t *session_lock);
+/* Caller holds SAME session mutex. Fresh ownership/config/route and latched
+ * IRQ fault validation; not output/AFE-on proof or cached held. */
+int x9_adsp_audio_irq_validate(uint64_t ticket,uint32_t generation,struct x9_dsp_pcm_session *);
 /* Mask and drain threaded delivery/active GIC ownership, then permit halt;
  * board child stays pinned through final release. Does NOT restore routing
  * or clear pending while the producer is live. Failure stops new callbacks
  * and retains all ownership; a lost mapping cannot be used to force a mask. */
-int x9_adsp_audio_irq_quiesce(void);
+int x9_adsp_audio_irq_quiesce(uint64_t ticket,uint32_t generation,struct x9_dsp_pcm_session *);
 /* After real board halt, retire pending and restore ONLY this SPI's saved
  * priority/route. Retains first error and uncertain journal on conflict. */
-int x9_adsp_audio_irq_release(void);
+int x9_adsp_audio_irq_release(uint64_t ticket,uint32_t generation,struct x9_dsp_pcm_session *);
+/* Cached attribution only, including partial bind failures. Does not read
+ * GIC/board/RAM, grant Ready or substitute for targeted quiesce/release. */
+bool x9_adsp_audio_irq_binding_held(uint64_t ticket,uint32_t generation,struct x9_dsp_pcm_session *);
 /* sleh_irq only: masks this SPI and wakes the real thread; NO board/RAM
  * access, sleep lock, DTOA inference or EOI here. sleh retains the IAR EOI. */
 bool x9_adsp_audio_irq_filter(uint32_t intid);

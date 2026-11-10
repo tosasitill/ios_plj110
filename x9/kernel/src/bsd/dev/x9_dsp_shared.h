@@ -54,6 +54,15 @@ int x9_dsp_shared_acquire(const struct x9_dsp_shared_policy *);
 int x9_dsp_shared_register(void); /* pool8/COREMEM7 BYPASS != DSP acceptance */
 int x9_dsp_shared_pcm_binding(struct x9_dsp_pcm_binding *);
 int x9_dsp_shared_afe_region(struct x9_dsp_pcm_region *);
+/* One downstream native PCM/IRQ session. Pin before obtaining/using its
+ * binding; retain through all failures. Parent shared_release is EBUSY
+ * until this child drops AFTER actual halt and independent selected DMA
+ * drain. Tokens are monotonically minted, not readiness or new map grants. */
+int x9_dsp_shared_pcm_hold(uint64_t ticket,uint32_t generation,uint64_t *lease);
+/* Physical cleanup proof accepts same-generation transport quarantine;
+ * never calls shared's online-only PCM validator or the AFE engine. */
+int x9_dsp_shared_pcm_drained(uint64_t ticket,uint32_t generation,uint64_t lease);
+int x9_dsp_shared_pcm_drop(uint64_t ticket,uint32_t generation,uint64_t lease);
 int x9_dsp_shared_afe_sync_device(uint32_t offset,uint32_t bytes);
 int x9_dsp_shared_afe_sync_cpu(uint32_t offset,uint32_t bytes);
 /* Only the production core-A AUDIO IRQ thread may call this. It must first

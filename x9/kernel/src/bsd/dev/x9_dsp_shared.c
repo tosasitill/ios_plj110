@@ -30,7 +30,7 @@ _Static_assert(0x24000+X9_DSP_SHARED_RING_BYTES<=X9_DSP_SHARED_MAP_BYTES,"AFE in
 static struct {
     struct x9_dsp_shared_policy policy;
     struct x9_dsp_pcm_region region[SharedCount];
-    uint64_t pool_bus,map_bus,sem_lease,child_lease;
+    uint64_t pool_bus,map_bus,sem_lease,child_lease,pcm_child,pcm_serial;
     uint32_t pool_bytes,last_generation,error;
     vm_offset_t map;
     bool attempted,mapped,registered,register_attempted;
@@ -276,6 +276,61 @@ int x9_dsp_shared_afe_region(struct x9_dsp_pcm_region *out)
     if(!e)*out=shared.region[SharedAFE];
     lck_mtx_unlock(&shared_lock);return e;
 }
+int x9_dsp_shared_pcm_hold(uint64_t ticket,uint32_t generation,uint64_t *lease)
+{
+    if(!lease)return EINVAL;*lease=0;
+    lck_mtx_lock(&shared_lock);int e=shared.pcm_child?EBUSY:0;
+    if(!e&&(!ticket||ticket!=shared.policy.ticket||!generation||generation!=shared.policy.generation))e=EPERM;
+    if(!e)e=shared.registered?qualify():ENXIO;
+    if(!e&&shared.pcm_serial==UINT64_MAX)e=EOVERFLOW;
+    if(!e)*lease=shared.pcm_child=++shared.pcm_serial;
+    lck_mtx_unlock(&shared_lock);return e;
+}
+static int pcm_child_match(uint64_t ticket,uint32_t generation,uint64_t lease)
+{
+    return !shared.attempted||!ticket||ticket!=shared.policy.ticket||!generation||
+        generation!=shared.policy.generation||!lease||lease!=shared.pcm_child?EPERM:0;
+}
+static int pcm_physical_authority(void)
+{
+    /* A malformed reply/DTOA must not prevent independent drain -> halt.
+     * This is physical ownership only; no new RAM/PCM/START permission. */
+    int e=x9_adsp_mt6993_speaker_validate(shared.policy.ticket);
+    if(!e)e=shared.policy.validate_memory(shared.policy.context,shared.policy.ticket,
+        shared.policy.generation,shared.policy.task_scene,shared.policy.daemon_scene,
+        shared.pool_bus,shared.pool_bytes,shared.map_bus,X9_DSP_SHARED_MAP_BYTES,shared.policy.afe_memif);
+    X9AudioDSPStatus ds={0};if(!e)e=x9_adsp_status(0,&ds);
+    if(!e&&(ds.generation!=shared.policy.generation||
+       (ds.state!=X9DSPOnline&&ds.state!=X9DSPQuarantined&&ds.state!=X9DSPOffline)))e=ESTALE;
+    if(!e&&ds.state==X9DSPOffline)e=x9_adsp_mt6993_speaker_halted_validate(shared.policy.ticket);
+    if(!e)e=shared.mapped?cache_binding(true):ENXIO;
+    return e;
+}
+static int pcm_child_drained(void)
+{
+    int e=pcm_physical_authority();
+    if(!e)e=shared.policy.validate_drained(shared.policy.context,shared.policy.ticket,
+        shared.policy.generation,shared.map_bus+0x24000,X9_DSP_SHARED_RING_BYTES,shared.policy.afe_memif);
+    if(!e)e=pcm_physical_authority();return e;
+}
+int x9_dsp_shared_pcm_drained(uint64_t ticket,uint32_t generation,uint64_t lease)
+{
+    lck_mtx_lock(&shared_lock);int e=pcm_child_match(ticket,generation,lease);
+    if(e){lck_mtx_unlock(&shared_lock);return e;}
+    if(!e)e=pcm_child_drained();
+    if(e)e=fault(e);
+    lck_mtx_unlock(&shared_lock);return e;
+}
+int x9_dsp_shared_pcm_drop(uint64_t ticket,uint32_t generation,uint64_t lease)
+{
+    lck_mtx_lock(&shared_lock);int e=pcm_child_match(ticket,generation,lease);
+    if(e){lck_mtx_unlock(&shared_lock);return e;}
+    if(!e)e=x9_adsp_mt6993_speaker_halted_validate(ticket);
+    if(!e)e=pcm_child_drained();
+    if(!e)shared.pcm_child=0;
+    if(e)e=fault(e);
+    lck_mtx_unlock(&shared_lock);return e;
+}
 static int afe_sync(uint32_t offset,uint32_t bytes,bool device)
 {
     lck_mtx_lock(&shared_lock);
@@ -353,6 +408,9 @@ int x9_dsp_shared_resolve_semaphore(void)
 int x9_dsp_shared_release(void)
 {
     lck_mtx_lock(&shared_lock);int e=shared.attempted?0:ENXIO;
+    /* Includes failed prepare/START and queued IRQ references. No unmap or
+     * parent mutation merely because a PCM object's Running flag is zero. */
+    if(!e&&shared.pcm_child){lck_mtx_unlock(&shared_lock);return EBUSY;}
     /* A failed shared-memory operation is not repaired here. Explicit
      * release of an uncertain semaphore must settle BEFORE halt can pass. */
     if(!e && shared.sem_lease)e=EBUSY;

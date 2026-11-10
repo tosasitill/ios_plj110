@@ -453,6 +453,7 @@ lease空间不是CSR，ticket细节另读resource-status；lease-error0时guard�
 | 文件／入口 | 已实现 | 仍需实际板级提供者 |
 |---|---|---|
 | `x9_dsp_pcm.{c,h}` | 96B PCM descriptor与32B shared-DRAM record字节codec；真实transport上的INIT／share／OPEN／HWPARAM／AFE PCM配置／PREPARE／DLCOPY／START／STOP／HWFREE／CLOSE；generation-bound消费消息、双快照DTOA与输入环容量检查 | unified AP lease下实际共享DRAM/MPU/cache、task/core绑定与生产调用者；DSP消费不能代替AFE物理played |
+| `x9_dsp_playback.{c,h}` | singleton生产PCM生命周期：shared子租约、真实绑定／prepare／预填／IRQ bind／START、同session锁、定向IRQ quiesce及真实producer halt、IRQ引用退休后才drop shared子租约 | 仍需combined backend调用；不注册Ready、不配置双PA供电／profile、不提供output committed或AFE enable |
 | `x9_speaker_afe.{c,h}` | explicit DL24=10或DL_24CH=14→OUT4逐字段journal；32-bit I2S slots/S16、48k；AP transition ticket、platform v6真实lease/config guard、combined producer halt；AP copy与DSP外部生产者start分离，DSP模式不碰输出DMA内存，watcher更新独立output committed边界／真实CUR；完全退休后新generation可rebind不同VA | AUDIO/VLP APLL2、pad/物理共享资源lease、DMA bus/EMI/cache、双PA mute、权威selected memif DMA quiesce，以及当前firmware实际output publication supplier |
 | `x9_tfa_plj110.{c,h}` | root 显式只读 reg03；PMIF-P SID3 reset/SID5 左供电快照，已开启 I²C6/共享 DMA clock 与 pads 校验、2 CSR bank/1 DMA idle、FIFO WRRD 1+2 BE、逐字段总线恢复 | 不具备双侧供电/reset/write lease；右 rail、真实 binding/profile/校准仍待确认 |
 | `x9_i2c6.h/x9_i2c6_native.inc` | 与只读probe共用controller mutex；真实PA epoch下游child、reg8/value16 BE FIFO read/write、双CSR bank/DMA资格、last-prior journal、terminal-only no-replay清理与halt/drain前后屏障；iOS缓存状态 | 必须实际pin住I2C6/APDMA clocks、mux/PLL、GPIO114/115与所有master互斥，现无真实supplier或combined调用者；不授profile/校准/unmute |
@@ -504,6 +505,39 @@ DTOA读回使用两次sync后的稳定双快照，不采用撕裂cursor。读指
 在真实mute／drain后用新reset／READY generation启动下一流，不能换session对象伪造恢复。
 本组件不申请资源、不boot DSP、不unmute PA、不注册Ready；实际共享DRAM／MPU／cache、
 core通知、AFE／功放与iOS播放backend仍需完成集成。
+
+### 生产 PCM／IRQ 生命周期（阶段29）
+
+`x9_dsp_playback` 已直接调用现有shared／PCM／IRQ／board入口，不接收任意
+caller提供的validator，也不注册播放后端。它持有boot-lifetime session，两把锁分工：
+生命周期锁串行公开prepare／submit／start／halt／release；session锁覆盖所有PCM
+读写，并实际传给SPI570 worker。IRQ bind／quiesce／release不持session锁，避免等待
+排队worker pin时死锁。所有memory／route／drain supplier仍必须真实、长期pin且不反向重入。
+
+| 入口 | 实际流程／边界 |
+|---|---|
+| `prepare(ticket,generation,afe,start_frames)` | 同真实Speaker ticket／Online generation；先hold shared PCM child，再取得真实binding及独立AFE region；显式480帧／64period／S16 stereo48k descriptor由实际route supplier验证后才OPEN、HWPARAM、AFE params/prepare和PCM prepare。每generation一次，失败不换对象重试 |
+| `submit(ticket,generation,pcm,frames)` | kernel-resident且调用期pin／immutable的输入；与worker同session锁；只写输入环。拒绝ATOD／DTOA／输入环及独立AFE输出region重叠，不读取或sync输出环；输入容量不足的pre-write EAGAIN可重试，authority／mailbox错误锁存 |
+| `start(ticket,generation)` | 尚未满足input start threshold时EAGAIN且不bind IRQ；否则实际IRQ bind，再fresh检查该IRQ首错／owned config及route，最后真正PCM START。输入预填／START均不当output committed或AFE enable |
+| `halt(ticket,generation)` | 外层已双PA mute及AFE disable/drain；关新submit，定向IRQ quiesce／worker drain，尽力一次PCM STOP/CLOSE，再独立selected memif drain、board op1及fresh同generation Offline＋actual halted。protocol错误保留但不单凭STOP失败阻断独立安全halt；IRQ／drain失败不reset。无AFE re-entry／恢复／掉电／ticket release |
+| `release(ticket,generation)` | fresh actual halt；先定向IRQ release退休所有session引用，再shared PCM drop重新独立drain，最后退休session。任一失败保留对象／子租约；shared release在child存续时在任何unmap或父资源操作之前返回EBUSY |
+
+IRQ quiesce／release现在必须带原`ticket,generation,session`；旧无参数调用已退役。
+错配立即EPERM，不mask／restore／drop其他session，也不污染其首错。
+`irq_binding_held`只判断cached归属（含partial bind失败），不是Ready；新的IRQ
+validate在同session锁下检查真实config／route和IRQ首错，避免worker失败后仍继续START／提交。
+
+shared PCM drain/drop物理资格允许同generation Quarantined和真halted Offline，
+不被online-only PCM validator或历史reply／DTOA错误卡住；仍必须真实memory authority、
+actual pmap/cache binding和独立selected DMA drain。它不授权任何新RAM访问或START。
+若保留SEMA_AUDIO，board halt只能requalify后返回EBUSY，需外层显式resolve semaphore，
+随后再次显式halt；不自动重放uncertain toggle。prepare在hold之前失败则本组件没有
+reset授权，外层独立halt/drain后才能release。halt返回0只证明安全物理停核，不清protocol首错。
+
+上述native halt是最终AFE `halt_producer` callback要调用的实际实现，**目前尚无combined
+platform／backend注册者**。shared memory/route/drain真实suppliers、output publication、
+RIGHT／LEFT长期排他供电、controller全master lease与功放可信profile仍缺；iOS PCM／HAL
+ABI和Ready门不变，无新用户selector、部署或出声结论。阶段29只直接单位编译，不生成候选镜像。
 
 ### 接同一张票据与本次 LK 共享内存布局
 
@@ -592,9 +626,9 @@ backend调用顺序（kernel-only API，无新用户selector）：
 |---|---|
 | 首次绑定 | 真实shared／PCM和AFE route已建立；`x9_adsp_audio_irq_bind(ticket,generation,session,session_lock)`；每generation一次 |
 | 所有PCM操作 | 与IRQ worker共用同一`session_lock`；public IRQ lifecycle调用时不能持该锁 |
-| 故障／stop | PA mute＋AFE disable／独立drain后`x9_adsp_audio_irq_quiesce()`；禁止新callback，等待worker pin退休（500ms限额）和GIC active清除 |
+| 故障／stop | PA mute＋AFE disable／独立drain后`x9_adsp_audio_irq_quiesce(ticket,generation,session)`；禁止新callback，等待worker pin退休（500ms限额）和GIC active清除 |
 | 停核 | IRQ child已quiesced才允许真正board halt；child仍pin parents，不允许restart／power-off |
-| 最终退休 | real halted后`x9_adsp_audio_irq_release()`清本SPI pending、恢复仅saved priority/route并读回，最后drop IRQ child；然后原shared/pads/clocks/board清理 |
+| 最终退休 | real halted后`x9_adsp_audio_irq_release(ticket,generation,session)`清本SPI pending、恢复仅saved priority/route并读回，最后drop IRQ child；然后PCM child退休及原shared/pads/clocks/board清理 |
 
 关闭先阻断新delivery再等待worker **pin**，不只等当前callback；避免已排队线程在
 release后访问旧session／mutex。超时／配置第三值／uncertain保留child与journal。
