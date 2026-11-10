@@ -390,6 +390,12 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **失败尝试/重建**:第一次`x9-microphone-phase1-final`误在共享main目录执行,撞到另一窗口正在编辑的USB`bsd_init`引用 **`_x9_usb_start`未定义**,link exit1;没有boot成功结论,不是麦克风ABI错误。随后改为上述干净固定worktree、唯一新名字`phase1-fixed`构建成功,失败目录不交付。精确重建:在固定worktree运行`/Library/Frameworks/Python.framework/Versions/3.13/bin/python3 -I x9/build/build.py all --name <新的唯一名字> --config /Users/tosasitill/ios_plj110/.local/x9/work/microphone-20261110/local-config.json --boot-config /Users/tosasitill/ios_plj110/.local/x9/work/microphone-20261110/boot-config.json -j 8`。配置/输入/原始日志均在同一私有目录,不入git。
 - **共享树隔离/下一步**:麦克风只提交自己的文件和recipe/link-order/build/ufs改动;另一窗口扬声器9900f6b恰在提交前先入main,所以作为已提交祖先纳入固定构建,不是夹带其未提交代码。后续保持完整参数集,不为凑607B删`cpus=8`(SWEET缺该参数会退单核);当前无需激活mic诊断或连续刷探针。板级按codec读回/资源还原→DCC/MTKAIF→DMA推进/真实声学PCM→HAL/AVAudioSession录音依次验收,不能把状态节点/插件出现当成麦克风可用。
 
+## 相机活动交接(CAMERA-11,2026-11-10): 完成帧metadata绑定与源完成顺序修复开发中;尚未编译/无实帧
+
+- **当前隔离/输入**:独立 `.local/x9/worktrees/camera-completion11` / `work/x9-camera-completion11`,固定起点 **432e7cb** 延续CAMERA-10与插件275,未夹带main后续GPU276/蜂窝/AUDIO等改动。四份camera源码/README尚未提交,本轮局部和完整构建均尚未执行,旧CAMERA-10交付不变。最新 **~/183.txt** 只有mode1/platform0,无standby/fab/receiver/DMA运行证据,不能称CAMERA-10已测;原件/窄提取保留于 `.local/x9/work/camera-completion11-20261110/`。
+- **修复方向/证据**:HakiOS将已应用控制状态绑定完成的slot;X9旧deliver在DMA完成后晚读当前曝光/增益/帧长,不能证明属于这张RAW10。拟升级kernel-only platform2完成记录,携带generation/owned-request capture_id/time及帧绑定exposure/gain_code/frame_lines,去掉late-I2C降级路径;重复/倒序源完成拒绝,CPU reader背压的有效帧也退休。iOS固定preview header/时间/顺序校验发生于allocation/ISP/metadata/output前;用户RAW10/ioctl ABI不变。
+- **仍缺/下一步**:先完成源码审阅与局部编译,提交后在固定独立树以唯一新名字all,沿原605B camera3/dvfsrc1/32GiB manifest/插件275配置;保留完整日志并查询gh。无实际capture provider、READY/supported0、仍不能拍摄;frame metadata契约不是PASS1_DONE/tag/inner sequence、SOF控制延迟或SMMUv3合法映射证明。SID80/domain委派、rate/SMI/PHY/route/cache/drain与真实iOS预览落盘仍待实现。不运行测试套件、不自动设备/安装/root/mailbox、不主动push或成功镜像二次检查。
+
 ## 相机活动交接(CAMERA-10,2026-11-10): AP timing/control journal 与 RAW10 CPU reader 生命周期修复;固定整包通过,真实接收仍缺
 
 - **隔离/实际日志**:独立 `.local/x9/worktrees/camera-ap10` / `work/x9-camera-ap10` 从 **e5d715e** 冻结开始,代码 **81e6388**;没有取其他窗口后续修改、子代理、测试套件、设备/部署/根盘/mailbox操作或主动push。先读最新 **~/182.txt**:只有 `X9 CAMERA mode=1/platform=0`,无standby/fab/receiver/DMA记录,不能宣称CAMERA-9已实测。原件和窄提取在 `.local/x9/work/camera-ap10-20261110/{182-original.txt,182-camera-lines.txt,baseline.commit}`。
