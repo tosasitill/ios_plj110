@@ -4,7 +4,8 @@
 没有 MT6993 物理 backend 注册者；`Ready=0`，`Start` 返回
 `kIOReturnNotReady`。不访问 off-domain MMIO、不自动起 DSP、不写功放／root，
 没有自动安装 HAL。麦克风是另一套接口，不在此输出设备中虚报输入流。
-PCM ABI 仍为 v1；**board-status 和 stream-status 为 v2**，需配套本轮 `audioctl`，旧工具会拒绝
+PCM ABI 仍为 v1；**board-status v3／160B、dsp-status v2／128B、stream-status v2**，
+需配套本轮 `audioctl`，旧工具会拒绝
 新版结构。私有 kernel backend 回调也升级为 v2（start 增加预填输入）；不能继续注册
 旧版 start 回调。私有 AFE platform 为 v3（cached `held`＋真实、无副作用的 `validate`），
 **AFE status 为 v3／152B**；旧 platform 不可注册，旧版 `afe-status` 工具会拒绝。
@@ -395,10 +396,11 @@ pending-count=0 → SYS_CLEAR → secure RELOAD → CORE_START0 → transport �
 AP HWCCF 在 `0x1c040000`，SET/CLR/EN 为 `0x20700/704/708`，DONE 为
 `0x1132c`，global EN/transition 为 `0x13700/704`。每次只写单域 bit，
 有界 EN/DONE/global 检查；错误保留 ownership、尝试恢复可访问电源链。
-transport v2 的 `power_held` 确保回滚失败的资源仍可显式停机／恢复。
+私有transport platform v3 的 `power_held`＋真实 `validate` 保留部分失败资源与访问资格；
+旧platform v1/v2不可再注册，内置MT6993提供者已配套升级。
 **sw_ver 未确证，自己取得的 AO vote 保留到本次 boot 结束**，不猜 A0 erratum
 已不适用；继承 AO 不撤销。SMC 为 `0xc200052b`，magic 为 `0xad5bad5b`，
-a0..a3 原值和首错／撤票错／恢复电源链错分别保存在 cached board status v2；只有零返回被接受。
+a0..a3 原值和首错／撤票错／恢复电源链错分别保存在 cached board status v3；只有零返回被接受。
 `registers-valid=0` 时域内 pending/DPSW/ACK 数据标记为 `UINT32_MAX`，不是旧的正常读数；
 wake 必须有本次有效域内快照，不能以未刷新字段授权访问。
 SMC 本身依赖 secure monitor 返回，AP 不能为一个不返回的 monitor 实现抢占超时。
@@ -407,6 +409,42 @@ v3 没有旧 prelock/IPIC 回调。当前不发送 runtime suspend IPI，域持�
 wake lease 验证全电源链稳定且 DPSW req/ack bit0 均为0，不把 WFI 等同于 suspend，
 不将 firmware RSV 状态猜成 Linux enum。新 suspend/DPSW 状态会拒绝邮箱访问，
 而不是空回调虚报 wake。固件是否存在／能重载仍须 SMC 结果与真实 fresh READY 证明。
+
+### AUDIO-13：真实 ADSP power／Secure RELOAD／mailbox 访问资格
+
+内置 `x9_adsp_mt6993.c` 的真实validate不是空回调：先核对AP arbiter owner/ticket、
+exclusive和owned TOP/INFRA，再读AO HWV AP EN／DONE／global EN／BUSY的CHAIN mask14；
+全链稳定且本AP仍持有之后才读CFG pending／DPSW。DPSW req/ack bit0非零拒绝访问；
+WFI、firmware RSV、VLOGIC/SRAM ack仅诊断，不推导Linux state或新wake流程。
+失败在本次显式control锁存，后续snapshot最多读AO，不读CFG／邮箱，不隐式重新上电。
+新control只设置待恢复标志，等取得transport core mutex后的power_on/reset才清本次门；
+等待中的管理员stop不会提前清除仍在运行的poll故障锁存。
+CORE_STOP／pending wait／SYS_CLEAR、Secure RELOAD和START之间同样重新资格化；
+pending的10ms有界轮询每次先核对租约，不只首次检查。
+
+transport在reset完成后清旧RX之前、每次READY接收、发送前及TX-consume／ACK等待
+期间调用真实validate。租约失败含EAGAIN作为fatal，不当作“RX空”或可重发；
+同次操作不retry validate／reset／power-off，power/mapping/ticket保留。
+初次power_on或reset失败不在cleanup自动重做破坏性reset；明确dsp-stop才重新尝试恢复。
+普通READY超时／协议错误仍在fresh资格通过时reset后power-off；release返回0但
+power_held仍true视为EIO，不虚报释放。wake_unlock必须自行资格化可能触及的硬件；
+内置实现只释放软件wake标记。validate耗时不延长2s READY／1ms TX／250ms最大ACK预算，
+边界后才观察到的READY或ACK不被发布为成功；失败reply不写回。
+
+`audioctl dsp-status`为 **v2／128B**：主错primary、清理错cleanup分开，lease首错、
+首次guard stage和累计checks；cleanup不得覆盖boot/发送的主错误。
+cleanup也记录因租约／reset失败而被阻止的清理原因，0不单独证明已掉电；
+还需核对board-status和resource-status的实际retained ownership。
+`audioctl board-status`为 **v3／160B**：新增首次lease errno、guard-space（lease/HWV/CFG）、
+reg及mask下expected/actual、checks；HWV/CFG的reg是各映射相对偏移。
+lease空间不是CSR，ticket细节另读resource-status；lease-error0时guard字段无诊断意义。
+错误后域内snapshot仍标invalid／UINT32_MAX，新增guard保留拒绝时原值。
+读状态不validate、不做MMIO或恢复；guard历史不等于当前资格或Ready。
+隔离会话不再交付缓存event，reset generation溢出拒绝boot、不复用代际。
+
+**未执行dsp-boot／SMC／READY物理验证；没有启DMA或功放。** Secure RELOAD仍是
+已有固件来源接点，不生成firmware blob；真实固件可重载与IPI13 READY仍须实测。
+此轮不注册AFE/TFA write/playback backend，扬声器仍Ready0。
 
 ## AFE／功放配置组件与当前缺口
 

@@ -23,7 +23,10 @@ LCK_MTX_DECLARE(board_lock,&board_group);
 static volatile uint32_t *hwv,*cfg,*cfg2;
 static bool registered,exclusive,reset_done,started,wake;
 static uint64_t resource_ticket;
+static int access_error; /* reset only by a new explicit control operation */
+static bool new_control;
 static X9AudioBoardStatus status;
+_Static_assert(sizeof(X9AudioBoardStatus)==160,"ADSP board status v3 size");
 enum { PD_SET=0x20700,PD_CLR=0x20704,PD_EN=0x20708,PD_DONE=0x1132c,
        PD_ALL=0x13700,PD_BUSY=0x13704,TOP=2,INFRA=4,AO=8,CHAIN=14,
        SMC_CLEAR=3,SMC_START=4,SMC_STOP=5,SMC_RELOAD=7 };
@@ -48,12 +51,70 @@ static void snapshot(void)
     status.flags&=~X9BoardRegistersValid;
     status.pending=status.sleep=status.dpsw_req=status.dpsw_ack=UINT32_MAX;
     status.vlogic_ack=status.sram_ack=UINT32_MAX;
-    if(exclusive && (status.all_vote&CHAIN)==CHAIN && !(status.pd_busy&CHAIN)) {
+    X9AudioResourceStatus ticket;
+    /* The global ON aggregate alone is not proof of our AP lease. Qualify
+     * only using AO HWV/arbiter before touching either domain mapping. */
+    bool held=exclusive && resource_ticket && !access_error &&
+        !x9_audio_resources_status(&ticket) && ticket.owner==X9AudioResourceADSP &&
+        ticket.ticket==resource_ticket && (status.owned_vote&(TOP|INFRA))==(TOP|INFRA) &&
+        (status.ap_vote&CHAIN)==CHAIN && (status.pd_done&CHAIN)==CHAIN &&
+        (status.all_vote&CHAIN)==CHAIN && !(status.pd_busy&CHAIN);
+    if(held) {
         status.pending=rd(cfg,0x15c);status.sleep=rd(cfg,0x158);
         status.dpsw_req=rd(cfg,0x590);status.dpsw_ack=rd(cfg,0x594);
         status.vlogic_ack=rd(cfg2,0x50);status.sram_ack=rd(cfg2,0x54);
         status.flags|=X9BoardRegistersValid;
     }
+}
+static int guard_failure(uint32_t space,uint32_t reg,uint32_t expected,uint32_t actual,int e)
+{
+    if(!status.lease_error) {
+        status.lease_error=(uint32_t)e;status.guard_space=space;status.guard_reg=reg;
+        status.guard_expected=expected;status.guard_actual=actual;
+    }
+    access_error=e;return e;
+}
+static int qualify(void)
+{
+    if(access_error)return access_error;
+    if(status.lease_checks!=UINT64_MAX)status.lease_checks++;
+    snapshot();
+    if(!(status.flags&X9BoardRegistersValid)) {
+        X9AudioResourceStatus ticket;x9_audio_resources_status(&ticket);
+        if(!exclusive || !resource_ticket || ticket.owner!=X9AudioResourceADSP || ticket.ticket!=resource_ticket)
+            return guard_failure(X9BoardGuardLease,UINT32_MAX,X9AudioResourceADSP,ticket.owner,ENXIO);
+        if((status.owned_vote&(TOP|INFRA))!=(TOP|INFRA))
+            return guard_failure(X9BoardGuardLease,UINT32_MAX,TOP|INFRA,status.owned_vote&(TOP|INFRA),ENXIO);
+        if((status.ap_vote&CHAIN)!=CHAIN)
+            return guard_failure(X9BoardGuardHWV,PD_EN,CHAIN,status.ap_vote&CHAIN,ENXIO);
+        if((status.pd_done&CHAIN)!=CHAIN)
+            return guard_failure(X9BoardGuardHWV,PD_DONE,CHAIN,status.pd_done&CHAIN,ENXIO);
+        if((status.all_vote&CHAIN)!=CHAIN)
+            return guard_failure(X9BoardGuardHWV,PD_ALL,CHAIN,status.all_vote&CHAIN,ENXIO);
+        return guard_failure(X9BoardGuardHWV,PD_BUSY,0,status.pd_busy&CHAIN,ENXIO);
+    }
+    /* WFI, firmware RSV, VLOGIC/SRAM diagnostic values are not guessed
+     * wake semantics. The pinned v3 path never initiates runtime suspend. */
+    if(status.dpsw_req&1)return guard_failure(X9BoardGuardCFG,0x590,0,status.dpsw_req&1,EBUSY);
+    if(status.dpsw_ack&1)return guard_failure(X9BoardGuardCFG,0x594,0,status.dpsw_ack&1,EBUSY);
+    return 0;
+}
+static int validate(void *unused)
+{
+    (void)unused;lck_mtx_lock(&board_lock);int e=qualify();
+    if(e){status.error=(uint32_t)e;x9_audio_resources_fault(X9AudioResourceADSP,resource_ticket,e);}
+    lck_mtx_unlock(&board_lock);return e;
+}
+static int wait_pending_idle(void)
+{
+    uint64_t ticks;nanoseconds_to_absolutetime(10000000,&ticks);
+    uint64_t end=mach_absolute_time()+ticks;
+    for(unsigned n=0;n<5001;n++) {
+        int e=qualify();if(e)return e;
+        if(!status.pending)return 0;
+        if(mach_absolute_time()>=end)break;delay(2);
+    }
+    status.timeouts++;return ETIMEDOUT;
 }
 /* CCF_XPU(0)=0x20000. DONE/global regs have NO XPU offset. Own a SET
  * before sending it (timeout is ambiguous), and never clear inherited bits. */
@@ -92,7 +153,7 @@ static int chain_off(void)
     if(e) {
         /* Restore accessibility after a partial withdraw. Do not release any
          * remaining resource on error. Both primary and rollback errors live
-         * in status. Transport v2 retains this lease for explicit recovery. */
+         * in status. Transport v3 retains this lease for explicit recovery. */
         int restore=chain_on();status.rollback_error=(uint32_t)restore;
         status.owned_vote|=owned & rd(hwv,PD_EN);
     }
@@ -114,11 +175,20 @@ static int smc(uint32_t op,uint32_t value)
 }
 static bool power_held(void *unused)
 { (void)unused;lck_mtx_lock(&board_lock);bool held=exclusive || resource_ticket;lck_mtx_unlock(&board_lock);return held; }
+static void begin_control(void)
+{
+    /* Called only from power_on/reset under the transport core mutex.
+     * A waiting admin operation must not clear a running poll's failure. */
+    if(new_control){new_control=false;access_error=0;}
+}
 static int power_on(void *unused)
 {
     (void)unused;lck_mtx_lock(&board_lock);int e=0;
+    begin_control();
     if(exclusive || resource_ticket)e=EBUSY;
     else {
+        status.lease_error=0;status.guard_space=X9BoardGuardLease;
+        status.guard_reg=UINT32_MAX;status.guard_expected=status.guard_actual=0;
         /* Claim before even observing a cold baseline; retain until all
          * owned parent transitions settle, not merely until start returns. */
         e=x9_audio_resources_claim(X9AudioResourceADSP,&resource_ticket);
@@ -148,11 +218,20 @@ static int power_on(void *unused)
 }
 static int reset(void *unused)
 {
-    (void)unused;lck_mtx_lock(&board_lock);int e=exclusive?0:ENXIO;
+    (void)unused;lck_mtx_lock(&board_lock);begin_control();int e=exclusive?0:ENXIO;
+    if(!e && access_error)e=access_error;
+    if(!e) {
+        X9AudioResourceStatus ticket;x9_audio_resources_status(&ticket);
+        if(!resource_ticket || ticket.owner!=X9AudioResourceADSP || ticket.ticket!=resource_ticket)
+            e=guard_failure(X9BoardGuardLease,UINT32_MAX,X9AudioResourceADSP,ticket.owner,ENXIO);
+    }
     if(!e)e=chain_on(); /* recover a partially revoked power lease first */
+    if(!e)e=qualify();
     if(!e)e=smc(SMC_STOP,0);
     if(!e)started=false;
-    if(!e)e=wait_bits(cfg,0x15c,UINT32_MAX,0,10000);
+    if(!e)e=qualify(); /* secure monitor may have changed domain state */
+    if(!e)e=wait_pending_idle();
+    if(!e)e=qualify();
     if(!e)e=smc(SMC_CLEAR,0xad5bad5b);
     if(!e) {reset_done=true;status.flags&=~X9BoardStarted;status.resets++;}
     else reset_done=false;
@@ -161,7 +240,9 @@ static int reset(void *unused)
 static int core_start(void *unused)
 {
     (void)unused;lck_mtx_lock(&board_lock);int e=exclusive&&reset_done&&!started?0:ENXIO;
+    if(!e)e=qualify();
     if(!e)e=smc(SMC_RELOAD,0xad5bad5b);
+    if(!e)e=qualify();
     if(!e)e=smc(SMC_START,0);
     reset_done=false;
     if(!e){started=true;status.flags|=X9BoardStarted;}
@@ -172,7 +253,8 @@ static int power_off(void *unused)
     (void)unused;lck_mtx_lock(&board_lock);int e=0;
     if(started || wake || !reset_done)e=EBUSY;
     else if(exclusive) {
-        e=chain_off();
+        e=qualify();
+        if(!e)e=chain_off();
         if(!e){exclusive=reset_done=false;status.flags&=~(X9BoardPowered|X9BoardExclusive);}
     }
     if(!e && !exclusive && resource_ticket) {
@@ -185,16 +267,7 @@ static int power_off(void *unused)
 static int wake_lock(void *unused)
 {
     (void)unused;lck_mtx_lock(&board_lock);int e=exclusive&&started&&!wake?0:ENXIO;
-    if(!e) {
-        snapshot();
-        /* v3 registers no pre_lock/check_core_active callbacks. Do NOT use
-         * old infracfg/IPIC/semaphore protocol or interpret firmware RSV as
-         * Linux state enum. Pinned, nonsuspended domain + DPSW off is required.
-         * A sleeping/changed domain is a hard error, not fake wake success. */
-        if(!(status.flags&X9BoardRegistersValid) ||
-           (status.all_vote&CHAIN)!=CHAIN || (status.pd_busy&CHAIN) ||
-           (status.dpsw_req&1) || (status.dpsw_ack&1))e=ENXIO;
-    }
+    if(!e)e=qualify();
     if(!e){wake=true;status.flags|=X9BoardWake;}
     status.error=(uint32_t)e;lck_mtx_unlock(&board_lock);return e;
 }
@@ -221,10 +294,10 @@ int x9_adsp_mt6993_init(void)
             X9AudioDSPStatus other;x9_adsp_status(1,&other);
             if(other.state!=X9DSPUnconfigured)e=EBUSY;
             else {
-                struct x9_adsp_platform p={.version=2,.core=0,.tx=tx,.rx=rx,
+                struct x9_adsp_platform p={.version=X9_ADSP_PLATFORM_VERSION,.core=0,.tx=tx,.rx=rx,
                     .power_on=power_on,.power_off=power_off,.stop_and_reset=reset,
                     .core_start=core_start,.wake_lock=wake_lock,.wake_unlock=wake_unlock,
-                    .power_held=power_held};
+                    .power_held=power_held,.validate=validate};
                 e=x9_adsp_register_transport(&p);
                 if(!e){registered=true;status.version=X9_AUDIO_BOARD_STATUS_VERSION;status.flags=X9BoardRegistered;}
             }
@@ -237,6 +310,7 @@ int x9_adsp_mt6993_control(uint32_t op)
     if(sweet_x9_arg("x9_audio",0)!=2)return ENXIO;
     if(op>1)return EINVAL;
     lck_mtx_lock(&board_control_lock);
+    lck_mtx_lock(&board_lock);new_control=true;lck_mtx_unlock(&board_lock);
     int e=registered?(op?x9_adsp_shutdown(0):x9_adsp_boot(0)):ENXIO;
     lck_mtx_unlock(&board_control_lock);return e;
 }

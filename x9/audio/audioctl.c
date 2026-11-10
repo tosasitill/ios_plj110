@@ -28,40 +28,50 @@ static int status(io_connect_t c, X9AudioControl *s) {
 static kern_return_t call(io_connect_t c, unsigned sel)
 { return IOConnectCallScalarMethod(c, sel, NULL, 0, NULL, NULL); }
 static int dsp_status(io_connect_t c) {
+    _Static_assert(sizeof(X9AudioDSPStatus) == 128, "DSP status v2 size");
     const char *states[] = { "unconfigured", "offline", "booting", "online", "quarantined" };
+    const char *guards[] = { "none", "boot", "poll", "send", "wait", "cleanup", "stop" };
     for (uint64_t core = 0; core < 2; core++) {
         X9AudioDSPStatus s = {0}; size_t n = sizeof(s);
         kern_return_t r = IOConnectCallMethod(c, X9AudioDSPStatusSelector, &core, 1,
             NULL, 0, NULL, NULL, &s, &n);
-        if (r || n != sizeof(s) || s.version != 1 || s.core != core || s.state > X9DSPQuarantined) {
+        if (r || n != sizeof(s) || s.version != X9_AUDIO_DSP_STATUS_VERSION || s.core != core || s.state > X9DSPQuarantined) {
             fprintf(stderr, "DSP status/ABI failed: 0x%x\n", r); return 1;
         }
         printf("ADSP%llu %s errno=%u reset-generation=%u pending=%u last-ipi=%u last-message=%u\n"
                "  tx=%llu rx=%llu ready=%llu ack=%llu stray=%llu malformed=%llu\n"
-               "  timeout=%llu wake-error=%llu event-overflow=%llu\n",
+               "  timeout=%llu wake-error=%llu event-overflow=%llu\n"
+               "  primary=%u cleanup=%u lease=%u guard=%s(%u) lease-checks=%llu\n",
                (unsigned long long)core, states[s.state], s.error, s.generation, s.event_pending,
                s.last_ipi, s.last_message, (unsigned long long)s.sent, (unsigned long long)s.received,
                (unsigned long long)s.ready_count, (unsigned long long)s.matched_acks,
                (unsigned long long)s.stray_acks, (unsigned long long)s.malformed,
                (unsigned long long)s.timeouts, (unsigned long long)s.wake_errors,
-               (unsigned long long)s.event_overflows);
+               (unsigned long long)s.event_overflows,s.primary_error,s.cleanup_error,s.lease_error,
+               s.guard_stage < sizeof(guards)/sizeof(guards[0]) ? guards[s.guard_stage] : "unknown",
+               s.guard_stage,(unsigned long long)s.lease_checks);
     }
     puts("DSP online is not speaker-ready; board boot/stop require root and x9_audio=2.");
     return 0;
 }
 static int board_status(io_connect_t c) {
+    _Static_assert(sizeof(X9AudioBoardStatus) == 160, "board status v3 size");
+    const char *spaces[] = { "lease", "HWV", "CFG" };
     X9AudioBoardStatus s = {0}; size_t n = sizeof(s);
     kern_return_t r = IOConnectCallStructMethod(c, X9AudioBoardStatusSelector, NULL, 0, &s, &n);
     if (r || n != sizeof(s) || s.version != X9_AUDIO_BOARD_STATUS_VERSION) { fprintf(stderr,"board status/ABI failed: 0x%x\n",r); return 1; }
     printf("ADSP board flags=0x%x errno=%u restore=%u rollback=%u registers-valid=%u owned=0x%x AP=0x%x all=0x%x done=0x%x busy=0x%x\n"
            "  pending=0x%x sleep=0x%x DPSW=%x/%x vlogic=%x sram=%x\n"
-           "  SMC op=%u a0=%llx a1=%llx a2=%llx a3=%llx calls=%llu resets=%llu timeouts=%llu\n",
+           "  SMC op=%u a0=%llx a1=%llx a2=%llx a3=%llx calls=%llu resets=%llu timeouts=%llu\n"
+           "  lease=%u guard-space=%s(%u) reg=0x%08x expected=0x%08x actual=0x%08x checks=%llu\n",
            s.flags,s.error,s.restore_error,s.rollback_error,!!(s.flags&X9BoardRegistersValid),
            s.owned_vote,s.ap_vote,s.all_vote,s.pd_done,s.pd_busy,
            s.pending,s.sleep,s.dpsw_req,s.dpsw_ack,s.vlogic_ack,s.sram_ack,s.smc_op,
            (unsigned long long)s.smc_result[0],(unsigned long long)s.smc_result[1],
            (unsigned long long)s.smc_result[2],(unsigned long long)s.smc_result[3],
-           (unsigned long long)s.smc_calls,(unsigned long long)s.resets,(unsigned long long)s.timeouts);
+           (unsigned long long)s.smc_calls,(unsigned long long)s.resets,(unsigned long long)s.timeouts,
+           s.lease_error,s.guard_space < sizeof(spaces)/sizeof(spaces[0]) ? spaces[s.guard_space] : "unknown",
+           s.guard_space,s.guard_reg,s.guard_expected,s.guard_actual,(unsigned long long)s.lease_checks);
     puts("Cached snapshot only. Owned AO may remain pinned; no PA unmute or speaker-ready implied.");
     return 0;
 }

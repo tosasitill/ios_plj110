@@ -3,6 +3,7 @@
  * No automatic MMIO mapping, guessed firmware, or user-set READY exists. */
 #ifndef X9_ADSP_TRANSPORT_H
 #define X9_ADSP_TRANSPORT_H
+#include <stdbool.h>
 #include "x9_audio.h"
 #include "x9_audio_dsp.h"
 #if defined(KERNEL)
@@ -12,6 +13,7 @@ extern "C" {
 #define X9_ADSP_OUTER_HEADER 16u
 #define X9_ADSP_RX_BYTES 240u /* 60 four-byte slots, NOT 60 eight-byte slots */
 #define X9_ADSP_EVENT_BYTES (X9_ADSP_RX_BYTES - X9_ADSP_OUTER_HEADER)
+#define X9_ADSP_PLATFORM_VERSION 3u
 struct x9_adsp_event {
     uint32_t id, length, generation;
     uint8_t data[X9_ADSP_EVENT_BYTES];
@@ -24,9 +26,9 @@ struct x9_adsp_platform {
      * and must never be overwritten. Exclusive polling ownership required. */
     volatile uint32_t *tx, *rx;
     void *context;
-    /* power_on holds clocks/sleep protection through the boot wait and must
-     * fully unwind on error in v1. In v2, power_held reports a retained
-     * safety lease after an ambiguous vote/unwind failure. After READY, runtime MMIO uses wake_lock. */
+    /* power_on holds clocks/sleep protection through the boot wait.
+     * power_held reports a retained safety lease after an ambiguous
+     * vote/unwind failure. After READY, runtime MMIO uses wake_lock. */
     int (*power_on)(void *);
     /* Failure retains an accessible domain lease, never partially gates the
      * domain. reset failure must also leave this lease intact for recovery. */
@@ -42,7 +44,18 @@ struct x9_adsp_platform {
      * Held across TX consumption AND ACK, not just the MMIO write. */
     int (*wake_lock)(void *);
     int (*wake_unlock)(void *);
-    bool (*power_held)(void *); /* v2 mandatory, v1 NULL; no MMIO without lease */
+    bool (*power_held)(void *); /* cached ownership only, not accessibility */
+    /* Private platform v3: fresh, bounded, side-effect-free validation of
+     * this same power/clock/mailbox lease, both HALTED and running. AO-safe
+     * checks precede any domain read. Never acquire/reset/wake or substitute
+     * cached power_held for physical evidence; mappings remain pinned on
+     * failure. Return positive errno; EAGAIN is fatal, not an empty RX pin.
+     * stop/reset/start must independently qualify their own hardware paths.
+     * wake_unlock also qualifies any hardware it touches on error; it may
+     * release a software wake token without reading a gated mailbox.
+     * After validation failure this operation performs NO mailbox or reset/
+     * power-off accesses; explicit shutdown may qualify anew for recovery. */
+    int (*validate)(void *);
 };
 /* All entrypoints are thread-context, serialized per core. Callbacks may not
  * re-enter this transport or take the X9Audio service lock. Resources and

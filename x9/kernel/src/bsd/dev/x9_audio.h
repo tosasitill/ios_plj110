@@ -49,24 +49,32 @@ typedef struct { uint64_t written; } X9AudioProducer;
  * DSP Online only means a fresh mailbox READY was observed; it must NEVER
  * set speaker Ready. Not configured/offline is the default without a board. */
 enum { X9DSPUnconfigured, X9DSPOffline, X9DSPBooting, X9DSPOnline, X9DSPQuarantined };
+#define X9_AUDIO_DSP_STATUS_VERSION 2u
+enum { X9DSPGuardNone, X9DSPGuardBoot, X9DSPGuardPoll, X9DSPGuardSend,
+       X9DSPGuardWait, X9DSPGuardCleanup, X9DSPGuardStop };
 typedef struct {
     uint32_t version, core, state, error, generation, event_pending;
     uint32_t last_ipi, last_message;
     uint64_t sent, received, matched_acks, stray_acks, malformed;
     uint64_t timeouts, wake_errors, ready_count, event_overflows;
+    uint32_t primary_error, cleanup_error, lease_error, guard_stage;
+    uint64_t lease_checks;
 } X9AudioDSPStatus;
 /* selector 4 is a cached board snapshot; 5/6 require admin open type 2.
  * Version separate from PCM ABI. Raw SMC returns and DPSW ack are diagnostics,
  * NOT a firmware revision, physical voltage reading, or speaker-ready bit. */
 enum { X9BoardRegistered=1, X9BoardExclusive=2, X9BoardPowered=4,
        X9BoardStarted=8, X9BoardWake=16, X9BoardRegistersValid=32 };
-#define X9_AUDIO_BOARD_STATUS_VERSION 2u
+#define X9_AUDIO_BOARD_STATUS_VERSION 3u
+enum { X9BoardGuardLease, X9BoardGuardHWV, X9BoardGuardCFG };
 typedef struct {
     uint32_t version, flags, error, restore_error;
     uint32_t owned_vote, ap_vote, all_vote, pd_done, pd_busy;
     uint32_t pending, sleep, dpsw_req, dpsw_ack, vlogic_ack, sram_ack, smc_op;
     uint64_t smc_result[4], smc_calls, resets, timeouts;
     uint32_t rollback_error, reserved;
+    uint32_t lease_error, guard_space, guard_reg, guard_expected, guard_actual, guard_reserved;
+    uint64_t lease_checks;
 } X9AudioBoardStatus;
 /* selector 8 v2 preserves PCM ABI v1 while exposing physical prefill/cursor.
  * A cleared Running flag is not proof that stop released physical DMA/PA. */
