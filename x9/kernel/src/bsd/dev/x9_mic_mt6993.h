@@ -15,7 +15,8 @@ struct x9_mic_mt6993_platform {
     uint64_t dma_bus_address;    /* AFE-visible, NOT a guessed CPU physical address */
     uint32_t dma_bytes;          /* 16-byte aligned, 64..128 KiB */
     /* Claim exclusive VUL1/ADDA/codec, SCP wake+I2C arbitration, GPIO9 fresh
-     * codec power, MT6687 DCXO, APLL2/48k-family clocks, aud_ul0 and pads.
+     * codec power, MT6687 DCXO, proven ordinary 48k/26M-family clocks,
+     * aud_ul0 and pads (do not assume an APLL2 requirement from the rate).
      * prepare does NOT start ADC/TX/DMA. Codec init/calibration run centrally
      * after prepare succeeds. No borrowed active codec or dummy success.
      * unprepare handles partial resource prepare; after codec/ADC/DMA stop
@@ -44,6 +45,8 @@ void x9_mic_mt6993_get_hardware(struct x9_mic_hardware_status *);
 int x9_mic_mt6993_power_probe(void);
 int x9_mic_mt6993_calibrate(void);
 int x9_mic_mt6993_analog_l(void);
+int x9_mic_mt6993_digital_l(void);
+void x9_mic_mt6993_get_digital(struct x9_mic_digital_status *);
 void x9_mic_mt6993_get_analog(struct x9_mic_analog_status *);
 void x9_mic_mt6993_get_afe(struct x9_mic_afe_status *);
 void x9_mic_mt6993_get_board(struct x9_mic_board_status *);

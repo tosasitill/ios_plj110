@@ -12,6 +12,7 @@
 _Static_assert(sizeof(struct x9_mic_board_status)==96,"board ABI size");
 _Static_assert(sizeof(struct x9_mic_afe_status)==192,"AFE ABI size");
 _Static_assert(sizeof(struct x9_mic_analog_status)==128,"analog ABI size");
+_Static_assert(sizeof(struct x9_mic_digital_status)==192,"digital ABI size");
 static int hardware_status(int fd)
 {
     struct x9_mic_hardware_status h={0};
@@ -55,6 +56,19 @@ static int hardware_status(int fd)
             q.pga_active,q.adc_active,q.bias0_active,q.bias2_active,q.dcc_active,
             q.clksq_active,q.clocks_active,q.pga_after,q.adc_after,q.bias0_after,q.bias2_after,q.dcc_after);
     } else if(errno!=ENOTTY){perror("analog status");return 1;}
+    struct x9_mic_digital_status g={0};
+    if(ioctl(fd,X9_MIC_GET_DIGITAL,&g)==0) {
+        printf("digital v%u stage=%u flags=%#x errno=%u restore_errno=%u nominal_rate=%u delay=%u/%u journal codec=%u/%u afe=%u/%u reg=%#x elapsed_ns=%llu\n",
+            g.version,g.stage,g.flags,g.last_errno,g.restore_errno,g.nominal_rate,g.delay_data,g.delay_cycle,
+            g.codec_journal_restored,g.codec_journal_count,g.afe_journal_restored,g.afe_journal_count,
+            g.last_register,g.elapsed_ns);
+        printf("digital codec SRC/TOP/TX0/TX1/PAD/MODE4=%#x/%#x/%#x/%#x/%#x/%#x MUX=%#x/%#x; after=%#x/%#x/%#x/%#x/%#x/%#x\n",
+            g.codec_src,g.codec_top,g.codec_tx[0],g.codec_tx[1],g.codec_pad,g.codec_mode4,g.codec_mux[0],g.codec_mux[1],
+            g.codec_after_src,g.codec_after_top,g.codec_after_tx[0],g.codec_after_tx[1],g.codec_after_pad,g.codec_after_mode4);
+        printf("digital afe UL/RX0/RX1/PAD/CLK/GATE=%#x/%#x/%#x/%#x/%#x/%#x MON=%#x/%#x; after=%#x/%#x/%#x/%#x/%#x/%#x (configuration readback only, not PCM/sound proof)\n",
+            g.afe_ul,g.afe_rx[0],g.afe_rx[1],g.afe_pad,g.afe_clock,g.afe_gate,g.afe_monitor[0],g.afe_monitor[1],
+            g.afe_after_ul,g.afe_after_rx[0],g.afe_after_rx[1],g.afe_after_pad,g.afe_after_clock,g.afe_after_gate);
+    } else if(errno!=ENOTTY){perror("digital status");return 1;}
     return 0;
 }
 static uint64_t ns(void)
@@ -68,8 +82,9 @@ int main(int argc,char **argv)
     bool power=argc==2 && !strcmp(argv[1],"power");
     bool calibrate=argc==2 && !strcmp(argv[1],"calibrate");
     bool analog=argc==2 && !strcmp(argv[1],"analog-l");
-    if(!record && !power && !calibrate && !analog && !(argc==2 && !strcmp(argv[1],"status"))) {
-        fprintf(stderr,"usage: micctl status | micctl power | micctl calibrate | micctl analog-l | micctl record <seconds:1..30> <new.pcm>\n");return 2;
+    bool digital=argc==2 && !strcmp(argv[1],"digital-l");
+    if(!record && !power && !calibrate && !analog && !digital && !(argc==2 && !strcmp(argv[1],"status"))) {
+        fprintf(stderr,"usage: micctl status | micctl power | micctl calibrate | micctl analog-l | micctl digital-l | micctl record <seconds:1..30> <new.pcm>\n");return 2;
     }
     int fd=open(record?X9_MIC_DEVICE:X9_MIC_STATUS_DEVICE,O_RDONLY|O_NONBLOCK|O_CLOEXEC);
     if(fd<0){perror("open microphone");return 1;}
@@ -80,15 +95,16 @@ int main(int argc,char **argv)
         s.generation,s.captured_frames,s.read_frames,s.dropped_frames,s.queued_frames);
     if(!record) {
         int result=0;
-        if(power || calibrate || analog) {
+        if(power || calibrate || analog || digital) {
             if(geteuid()!=0 || s.version!=1 || s.mode!=2) {
                 fprintf(stderr,"cold diagnostics require root and mode2 (x9_mic or ADT); no hardware request issued\n");
                 close(fd);return 1;
             }
             printf("explicit cold %s, shared one attempt per boot; no PCM/DMA or recording\n",
+                digital?"power + phasecal + ADC_L + codec SRC/TX + AFE RX diagnostic":
                 analog?"power + phasecal + AIN0/PGA_L/ADC_L DCC diagnostic":
                 calibrate?"power + AFE/MTKAIF phase calibration":"power/ID/VAUD18 probe (no AFE)");
-            if(ioctl(fd,analog?X9_MIC_ANALOG_L:calibrate?X9_MIC_CALIBRATE:X9_MIC_POWER_PROBE)<0){perror("cold microphone diagnostic");result=1;}
+            if(ioctl(fd,digital?X9_MIC_DIGITAL_L:analog?X9_MIC_ANALOG_L:calibrate?X9_MIC_CALIBRATE:X9_MIC_POWER_PROBE)<0){perror("cold microphone diagnostic");result=1;}
             /* Even on failure retrieve the decisive stage and retained journal. */
         }
         result|=hardware_status(fd);

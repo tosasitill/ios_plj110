@@ -32,6 +32,11 @@ struct x9_mic_mt6681 {
     uint32_t analog_pending;
     uint64_t analog_deadline;
     bool analog_owned;
+    struct x9_mic_digital_status *digital;
+    struct { uint16_t reg; uint8_t mask, old; } digital_saved[64];
+    uint32_t digital_pending;
+    uint64_t digital_deadline;
+    bool digital_owned;
 };
 /* Caller serializes all operations, including status snapshots. This is a
  * power/calibration prerequisite, NOT an ADC/PCM backend and never sets READY.
@@ -54,5 +59,9 @@ int x9_mic_mt6681_calibrate_powered(struct x9_mic_mt6681 *, volatile uint32_t *)
 int x9_mic_mt6681_unprepare(struct x9_mic_mt6681 *);
 int x9_mic_mt6681_verify_capture(struct x9_mic_mt6681 *);
 int x9_mic_mt6681_analog_l(struct x9_mic_mt6681 *);
+/* Requires powered, calibrated and RC-verified ADC_L; leaves SRC/TX active
+ * only for the board's bounded RX diagnostic. Stop before clock/pad release. */
+int x9_mic_mt6681_digital_l(struct x9_mic_mt6681 *, struct x9_mic_digital_status *);
+int x9_mic_mt6681_digital_stop(struct x9_mic_mt6681 *);
 #endif
 #endif

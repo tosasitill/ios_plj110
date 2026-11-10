@@ -2,6 +2,9 @@
 #define X9_MIC_PLJ110_H
 #include "x9_mic_mt6681.h"
 #ifdef KERNEL
+int x9_mic_plj110_digital_l(struct x9_mic_hardware_status *,
+    struct x9_mic_board_status *, struct x9_mic_afe_status *, struct x9_mic_analog_status *,
+    struct x9_mic_digital_status *);
 int x9_mic_plj110_analog_l(struct x9_mic_hardware_status *,
     struct x9_mic_board_status *, struct x9_mic_afe_status *, struct x9_mic_analog_status *);
 /* Called with the MT6993 control lock held, never concurrently with capture.

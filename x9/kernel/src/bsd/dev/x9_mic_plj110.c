@@ -59,6 +59,7 @@ static int wait_bits(vm_offset_t b,unsigned r,uint32_t mask,uint32_t v,unsigned 
     return ETIMEDOUT;
 }
 #include "x9_mic_plj110_afe.inc"
+#include "x9_mic_plj110_digital.inc"
 static unsigned pin_bit(struct power_journal *j,unsigned bank,unsigned n)
 {return (rr(j->gpio,bank+(n/32)*16)>>(n%32))&1;}
 static unsigned pin_mode(struct power_journal *j,unsigned n)
@@ -288,7 +289,12 @@ static int restore(struct power_journal *j)
     if(j->codec.afe_snapshot && (!j->cal || afe_access(j->cal)))return EBUSY;
     if(j->bus_owned && ((rr(j->gate,0xe10)&2) || !j->awake ||
        (rr(j->vlp,0x92c)&5)!=4))return EBUSY;
-    int e=x9_mic_mt6681_unprepare(&j->codec);if(e)return e;
+    /* RX/SRC off, then codec TX/SRC off while PAD_CLK is still held. Only
+     * after both ends are quiescent restore digital clocks, then analog. */
+    int e=j->cal?digital_afe_quiesce(j->cal):0;if(e)return e;
+    e=x9_mic_mt6681_digital_stop(&j->codec);if(e)return e;
+    if(j->cal){e=digital_afe_restore(j->cal);if(e)return e;}
+    e=x9_mic_mt6681_unprepare(&j->codec);if(e)return e;
     if(j->enable.owned) {
         if(pin_mode(j,9) || (pin_bit(j,0,9)!=1 && pin_bit(j,0,9)!=j->enable.dir))return EBUSY;
         e=set_bit(j,0x100,9,0);if(e)return e;
@@ -343,9 +349,16 @@ static int restore(struct power_journal *j)
     return 0;
 }
 static int board_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_status *s,
-    struct x9_mic_afe_status *a,struct x9_mic_analog_status *analog)
+    struct x9_mic_afe_status *a,struct x9_mic_analog_status *analog,
+    struct x9_mic_digital_status *digital)
 {
     if(s->flags&X9_MIC_BOARD_ATTEMPTED)return EALREADY;
+    uint64_t start=mach_absolute_time();
+    /* Static journals may never outlive their persistent status surfaces. */
+    bzero(&digital_afe,sizeof(digital_afe));
+    if(digital)*digital=(struct x9_mic_digital_status){.version=1,
+        .stage=X9_MIC_DIGITAL_PREREQUISITES,.flags=X9_MIC_DIGITAL_ATTEMPTED,
+        .nominal_rate=X9_MIC_RATE};
     bzero(s,sizeof(*s));s->version=1;s->flags=X9_MIC_BOARD_ATTEMPTED;s->stage=X9_MIC_BOARD_BASELINE;
     bzero(h,sizeof(*h));h->version=1;h->stage=X9_MIC_HW_RESOURCES;
     h->chosen_phase[0]=h->chosen_phase[1]=h->cycle[0]=h->cycle[1]=-1;
@@ -392,10 +405,30 @@ static int board_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_stat
         if(!e)e=x9_mic_mt6681_analog_l(&j->codec);
         *h=j->codec.status;
     }
+    if(!e && digital) {
+        e=digital_afe_preflight(j->cal,digital,h);
+        if(!e){e=x9_mic_mt6681_digital_l(&j->codec,digital);
+            if(e)digital->last_register=j->codec.status.last_register;}
+        if(!e)e=digital_afe_enable(j->cal);
+        *h=j->codec.status;
+    }
+    if(digital)digital->last_errno=e;
     s->last_errno=e;if(e && !h->last_errno)h->last_errno=e;
     uint32_t last_reg=s->last_register,codec_reg=h->last_register;
+    uint32_t digital_reg=digital?digital->last_register:0;
     if(!e)s->stage=X9_MIC_BOARD_RESTORE;
+    if(digital && !e)digital->stage=X9_MIC_DIGITAL_RESTORE;
     int off=restore(j);
+    if(digital) {
+        if(off){digital->flags|=X9_MIC_DIGITAL_RETAINED;
+            if(!digital->restore_errno)digital->restore_errno=off;}
+        else {digital->flags|=X9_MIC_DIGITAL_RESTORED;
+            if(!e)digital->stage=X9_MIC_DIGITAL_OFF;}
+        /* Preserve first failed input stage/register; on unwind-only errors
+         * the cleanup helper's register remains the decisive one. */
+        if(e || !off)digital->last_register=digital_reg;
+        absolutetime_to_nanoseconds(mach_absolute_time()-start,&digital->elapsed_ns);
+    }
     if(analog) {
         *analog=j->codec.analog;
         if(!analog->version)analog->version=1;
@@ -424,7 +457,7 @@ static int board_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_stat
     if(j->vlp)s->sleep_after=rr(j->vlp,0x92c);
     if(j->gate)s->gate_after=rr(j->gate,0xe10);
     printf("X9 MIC %s: stage=%u flags=%x errno=%u restore=%u id=%x ready=%x vaud18=%x gpio9=%x/%x bus=%x (no PCM/DMA)\n",
-        analog?"ANALOG-L":a?"CALIBRATE":"POWER",s->stage,s->flags,s->last_errno,s->restore_errno,h->swcid,h->internal_ready,
+        digital?"DIGITAL-L":analog?"ANALOG-L":a?"CALIBRATE":"POWER",s->stage,s->flags,s->last_errno,s->restore_errno,h->swcid,h->internal_ready,
         h->vaud18_monitor,s->gpio9_before,s->gpio9_after,s->bus_status);
     if(j->cal)printf("X9 MIC AFE: stage=%u flags=%x errno=%u restore=%u AP=%x/%x ACK=%x/%x VLP=%x/%x phases=%d/%d cycles=%d/%d scanned=%u\n",
         a->stage,a->flags,a->last_errno,a->restore_errno,a->ap_vote_before,a->ap_vote_after,
@@ -434,13 +467,22 @@ static int board_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_stat
         analog->stage,analog->flags,analog->last_errno,analog->restore_errno,
         analog->hwcid_h,analog->hwcid_l,analog->rc_monitor,
         analog->journal_restored,analog->journal_count);
+    if(digital)printf("X9 MIC DIGITAL: stage=%u flags=%x errno=%u restore=%u delay=%u/%u codecSRC=%x TX=%x/%x RX=%x/%x UL=%x MON=%x/%x journal=%u/%u,%u/%u (readback only, no PCM/DMA)\n",
+        digital->stage,digital->flags,digital->last_errno,digital->restore_errno,
+        digital->delay_data,digital->delay_cycle,digital->codec_src,digital->codec_tx[0],digital->codec_tx[1],
+        digital->afe_rx[0],digital->afe_rx[1],digital->afe_ul,digital->afe_monitor[0],digital->afe_monitor[1],
+        digital->codec_journal_restored,digital->codec_journal_count,
+        digital->afe_journal_restored,digital->afe_journal_count);
     return off?off:e;
 }
 int x9_mic_plj110_power_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_status *s)
-{return board_probe(h,s,NULL,NULL);}
+{return board_probe(h,s,NULL,NULL,NULL);}
 int x9_mic_plj110_calibrate(struct x9_mic_hardware_status *h,struct x9_mic_board_status *s,
     struct x9_mic_afe_status *a)
-{return board_probe(h,s,a,NULL);}
+{return board_probe(h,s,a,NULL,NULL);}
 int x9_mic_plj110_analog_l(struct x9_mic_hardware_status *h,struct x9_mic_board_status *s,
     struct x9_mic_afe_status *a,struct x9_mic_analog_status *analog)
-{return board_probe(h,s,a,analog);}
+{return board_probe(h,s,a,analog,NULL);}
+int x9_mic_plj110_digital_l(struct x9_mic_hardware_status *h,struct x9_mic_board_status *s,
+    struct x9_mic_afe_status *a,struct x9_mic_analog_status *analog,struct x9_mic_digital_status *digital)
+{return board_probe(h,s,a,analog,digital);}

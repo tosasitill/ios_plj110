@@ -126,6 +126,38 @@ struct x9_mic_analog_status {
     uint64_t elapsed_ns;
 };
 #define X9_MIC_GET_ANALOG _IOR('M', 0x99, struct x9_mic_analog_status)
+/* Explicit cold ADC_L -> codec UL1 -> R-MISO1 -> AFE UL0 diagnostic.
+ * GET is memory-only. Shares the one-attempt budget; never starts a memif,
+ * delivers PCM or publishes READY. READBACK is configuration, not sound proof.
+ * Codec IIR is deliberately bypassed; AFE IIR has explicit 35Hz coefficients. */
+#define X9_MIC_DIGITAL_L _IO('M', 0x9a)
+#define X9_MIC_DIGITAL_ATTEMPTED 1u
+#define X9_MIC_DIGITAL_CODEC_ON 2u
+#define X9_MIC_DIGITAL_AFE_ON 4u
+#define X9_MIC_DIGITAL_READBACK 8u
+#define X9_MIC_DIGITAL_RESTORED 16u
+#define X9_MIC_DIGITAL_RETAINED 32u
+enum x9_mic_digital_stage {
+    X9_MIC_DIGITAL_UNTRIED, X9_MIC_DIGITAL_PREREQUISITES,
+    X9_MIC_DIGITAL_BASELINE, X9_MIC_DIGITAL_CODEC_CLOCKS,
+    X9_MIC_DIGITAL_CODEC_SRC, X9_MIC_DIGITAL_CODEC_TX,
+    X9_MIC_DIGITAL_AFE_CONFIG, X9_MIC_DIGITAL_AFE_ENABLE,
+    X9_MIC_DIGITAL_OBSERVE, X9_MIC_DIGITAL_RESTORE, X9_MIC_DIGITAL_OFF
+};
+struct x9_mic_digital_status {
+    uint32_t version, stage, flags, last_errno, restore_errno;
+    uint32_t nominal_rate, delay_data, delay_cycle;
+    /* SRC = CON0_2:CON0_1:CON0_0; TOP = AUDIO_TOP_CON0:AFE_TOP_CON0. */
+    uint32_t codec_src, codec_top, codec_tx[2], codec_pad, codec_mux[2], codec_mode4;
+    uint32_t codec_after_src, codec_after_top, codec_after_tx[2], codec_after_pad, codec_after_mode4;
+    uint32_t afe_ul, afe_rx[2], afe_pad, afe_clock, afe_gate, afe_monitor[2];
+    uint32_t afe_after_ul, afe_after_rx[2], afe_after_pad, afe_after_clock, afe_after_gate;
+    uint32_t codec_journal_count, codec_journal_restored, afe_journal_count, afe_journal_restored;
+    /* bit31 distinguishes AFE offsets from codec addresses; no MMIO on GET. */
+    uint32_t last_register, reserved[5];
+    uint64_t elapsed_ns;
+};
+#define X9_MIC_GET_DIGITAL _IOR('M', 0x9b, struct x9_mic_digital_status)
 #ifdef KERNEL
 #include <stdbool.h>
 /* Thread context only. start/stop are serialized and called WITHOUT the PCM

@@ -261,3 +261,16 @@ void x9_mic_mt6993_get_analog(struct x9_mic_analog_status *s)
 {
     lck_mtx_lock(&afe_mic_lock);*s=analog_diagnostic;lck_mtx_unlock(&afe_mic_lock);
 }
+static struct x9_mic_digital_status digital_diagnostic={.version=1};
+int x9_mic_mt6993_digital_l(void)
+{
+    lck_mtx_lock(&afe_mic_lock);
+    int e=(registered || prepared || active || dma_stuck)?EBUSY:
+        x9_mic_plj110_digital_l(&diagnostic,&board_diagnostic,&afe_diagnostic,
+            &analog_diagnostic,&digital_diagnostic);
+    lck_mtx_unlock(&afe_mic_lock);return e;
+}
+void x9_mic_mt6993_get_digital(struct x9_mic_digital_status *s)
+{
+    lck_mtx_lock(&afe_mic_lock);*s=digital_diagnostic;lck_mtx_unlock(&afe_mic_lock);
+}
