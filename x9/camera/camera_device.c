@@ -190,6 +190,15 @@ find_functions(void)
 	return true;
 }
 
+static pthread_once_t media_functions_once = PTHREAD_ONCE_INIT;
+static bool media_functions_usable;
+
+static void
+media_functions_init(void)
+{
+	media_functions_usable = find_functions();
+}
+
 /* ---- what is asked and not answered: said once per name ------------------------------------------- */
 
 static CFMutableSetRef said_names;
@@ -448,9 +457,9 @@ struct stream {
 	CFDictionaryRef supported;
 	CFDictionaryRef colour_info;    /* from VideoOutputsColorInfo */
 	unsigned        stills_wanted;  /* photographs asked for by StillImageCaptureNow, not yet given */
-	int             format_index;
-	double          min_fps, max_fps;
-	float           zoom;           /* ZoomFactor: the picture is the middle 1/zoom of the sensor each way */
+	_Atomic int     format_index;
+	_Atomic double  min_fps, max_fps;
+	_Atomic float   zoom;           /* ZoomFactor: the picture is the middle 1/zoom of the sensor each way */
 	const struct camera *camera;
 	CFStringRef     port;
 	bool            af_now;         /* a focus asked for (AutoFocusNow and the like): a search at the next frame */
@@ -463,9 +472,42 @@ struct stream {
 	_Atomic bool    graph_running;  /* the capture graph has started this stream: frames may be given out */
 	bool            worker_started;
 	int             torch;
-	uint64_t        frames, stills_given;
+	_Atomic uint64_t frames, stills_given;
+	_Atomic int     first_errno, close_errno;
 	int             camera_fd; /* owned by this worker; selected synchronously */
 };
+
+/* Global native-device transitions are serialized across every Fig device, not a weak two-stream array.
+ * Workers never take this mutex; callback reentry fails rather than deadlocking a transition's join. */
+static pthread_mutex_t capture_control = PTHREAD_MUTEX_INITIALIZER;
+static CMBaseObjectRef active_stream;   /* strong reference, released only after successful worker join */
+static _Atomic int capture_retire_errno;
+static __thread bool camera_worker_thread;
+
+static void
+stream_fault(struct stream *s, int error)
+{
+	int zero = 0;
+
+	if (error) atomic_compare_exchange_strong(&s->first_errno, &zero, error);
+}
+
+static int
+close_camera_once(struct stream *s, int fd)
+{
+	/* A failed close may already have consumed the descriptor. Never retry it or touch that fd again. */
+	int error = close(fd) == 0 ? 0 : errno;
+
+	s->camera_fd = -1;
+	if (error) {
+		int zero = 0;
+
+		atomic_store(&s->close_errno, error);
+		atomic_compare_exchange_strong(&capture_retire_errno, &zero, error);
+		stream_fault(s, error);
+	}
+	return error;
+}
 
 static struct stream *
 stream_of(CMBaseObjectRef o)
@@ -669,6 +711,7 @@ stream_set_property(CMBaseObjectRef o, CFStringRef key, CFTypeRef value)
 			CFNumberGetValue(value, kCFNumberDoubleType, &zoom);
 		}
 		zoom = zoom < 1 ? 1 : zoom > MAX_ZOOM ? MAX_ZOOM : zoom;
+		if (!isfinite(zoom)) return ERR_PARAM;
 		if (fabs(zoom - s->zoom) >= 0.25 || (zoom == 1) != (s->zoom == 1)) {
 			say("stream: zoom %.2fx", zoom);
 		}
@@ -779,6 +822,7 @@ stream_set_property(CMBaseObjectRef o, CFStringRef key, CFTypeRef value)
 		    CFArrayGetCount(value) > 0)) {
 			say_value("stream: focus:", key, value);        /* (an empty window, the middle: often, unsaid) */
 		}
+		pthread_mutex_lock(&s->lock);
 		if (key_is(key, "AFWindowParams")) {
 			af_window(s, value);
 		} else if (key_is(key, "LockAFNow")) {
@@ -788,6 +832,7 @@ stream_set_property(CMBaseObjectRef o, CFStringRef key, CFTypeRef value)
 			s->af_locked = false;
 			s->af_now = true;
 		}
+		pthread_mutex_unlock(&s->lock);
 		return 0;
 	}
 	say_once("stream: set (not used)", key, value);
@@ -1420,67 +1465,59 @@ worker(void *context)
 	uint8_t *buffer = NULL;
 	size_t bytes = 0;
 	uint32_t tuned_for = ~0u;
-	bool switched = false;
 	float lux = -1, cct = -1;
 	struct af af = { 0 };
-	int device = s->camera_fd, failures = 0;
+	int device = s->camera_fd, error = 0;
     uint64_t last_sequence=0,last_time=0;
 
+	camera_worker_thread = true;
 	pthread_setname_np("hakios-camera");
 	if (device < 0) {
-		say("no %s (%s): no frames", HAKIOS_CAMERA_DEVICE, strerror(errno));
+		stream_fault(s, EBADF);
+		s->graph_running = false;
+		s->running = false;
+		camera_worker_thread = false;
 		return NULL;
 	}
 	isp_init(&isp);
-	while (s->running && failures < 5) {
+	while (s->running) {
 		ssize_t n;
 
 		if (buffer == NULL) {
 			n = read(device, &head, sizeof(head));
-			if (n != (ssize_t)sizeof(head)) {
-				failures += n < 0 && errno == EAGAIN ? 0 : 1;
-				if (n < 0 && errno == EIO) {
-					say("the kernel's camera has had a fault: no frames");
-					break;
-				}
-				continue;
-			}
-			if (head.sensor != s->camera->sensor) {
-				/* another camera's frames (the kernel's last sensor): changed, and the next ones are this one's */
-				if (!switched) {
-					struct hakios_camera_command c = { .command = HAKIOS_CAMERA_SENSOR, .a = s->camera->sensor, .b = ~0u };
+			int read_error = n < 0 ? errno : 0;
 
-					switched = true;
-					say("the kernel's frames are camera %u's: to %u, the %s", head.sensor, s->camera->sensor, s->camera->name);
-					(void)write(device, &c, sizeof(c));
-				}
-				continue;
+			if (!s->running) break;
+			if (n != (ssize_t)sizeof(head)) {
+				if (n < 0 && (read_error == EAGAIN || read_error == EINTR)) continue;
+				error = n < 0 ? read_error : EMSGSIZE;
+				break;
 			}
+			/* Start already selected this sensor synchronously. A mismatched record is not permission to reissue SENSOR. */
 			if (!valid_frame(&head, s->camera->sensor)) {
-                say("invalid RAW10 header; stopping before allocation"); break;
+                say("invalid RAW10 header; stopping before allocation"); error=EPROTO; break;
             }
             bytes = sizeof(head) + (size_t)head.stride * head.height;
 			buffer = malloc(bytes);
-            if (!buffer) break;
+            if (!buffer) { error=ENOMEM; break; }
 			say("frames of %ux%u from the kernel (the %s)", head.width, head.height, s->camera->name);
 			continue;
 		}
 		n = read(device, buffer, bytes);
+		int read_error = n < 0 ? errno : 0;
+
+		if (!s->running) break;
 		if (n != (ssize_t)bytes) {
-			if (n < 0 && errno == EIO) {
-				say("the kernel's camera has had a fault: no more frames");
-				break;
-			}
-			failures += n < 0 && errno == EAGAIN ? 0 : 1;
-			continue;
+			if (n < 0 && (read_error == EAGAIN || read_error == EINTR)) continue;
+			error = n < 0 ? read_error : EMSGSIZE;
+			break;
 		}
-		failures = 0;
 
 		const struct hakios_camera_frame *f = (const void *)buffer;
 		if (!valid_frame(f, s->camera->sensor) ||
             bytes != sizeof(*f) + (size_t)f->stride * f->height ||
             f->sequence<=last_sequence || f->time<=last_time) {
-            say("invalid/stale frame; not delivering to capture graph"); break;
+            say("invalid/stale frame; not delivering to capture graph"); error=EPROTO; break;
         }
         last_sequence=f->sequence;last_time=f->time;
         const uint8_t *raw = buffer + f->header_bytes;
@@ -1499,21 +1536,31 @@ worker(void *context)
 		lux = lux < 0 ? lux_index(&isp, f) : lux * 0.9f + lux_index(&isp, f) * 0.1f;
 		cct = cct < 0 ? colour_temperature(&isp) : cct * 0.97f + colour_temperature(&isp) * 0.03f;
 		isp_tune(&isp, lux, cct);
+		pthread_mutex_lock(&s->lock);
 		isp.zoom = s->zoom;
+		bool af_now = s->af_now, af_locked = s->af_locked;
+		float af_window[4];
+
+		memcpy(af_window, s->af_window, sizeof(af_window));
+		s->af_now = false;
+		pthread_mutex_unlock(&s->lock);
 		isp.turned = s->camera->turned;
 		if (isp_ae(&isp, f, &st, &c)) {
-			if (write(device, &c, sizeof(c)) != sizeof(c)) {
-                isp.asked = false; say("AE rejected: %s", strerror(errno));
+			ssize_t sent = write(device, &c, sizeof(c));
+
+			if (sent != sizeof(c)) {
+                error = sent < 0 ? errno : EMSGSIZE;
+                isp.asked = false; say("AE rejected: %s", strerror(error));
+                break;
             }
 		}
-		if (s->af_now) {
-			s->af_now = false;
+		if (af_now) {
 			/* (whatever it was doing: at once, from the next frame) */
 			af.state = AF_STEADY;
 			af.now = true;
 			af.sweep = true;
 		}
-		af_frame(device, &af, f, raw, s->af_window, s->af_locked);
+		af_frame(device, &af, f, raw, af_window, af_locked);
 		s->frames++;
 
 		CFDictionaryRef metadata = frame_metadata(&isp, f, &st, s->port);
@@ -1558,10 +1605,14 @@ worker(void *context)
 			    (double)f->gain / f->gain_unity, isp.digital, st.mean[1], isp.wb[0], isp.wb[2], lux, cct);
 		}
 	}
+	stream_fault(s, error);
+	s->graph_running = false;
 	free(buffer);
-	close(device);
-    s->camera_fd = -1; s->running = false;
-	say("the frames stopped (%llu)", s->frames);
+	(void)close_camera_once(s, device);
+	s->running = false;
+	say("frames stopped (%llu): first_errno=%d close_errno=%d", (unsigned long long)s->frames,
+	    atomic_load(&s->first_errno), atomic_load(&s->close_errno));
+	camera_worker_thread = false;
 	return NULL;
 }
 
@@ -1571,49 +1622,132 @@ worker(void *context)
  * takes a moment to settle and the exposure longer), the second only when the graph starts the
  * stream itself (`graph` true, the FigCaptureStream start method).
  */
-static CMBaseObjectRef all_streams[2];  /* the device's, back and front */
-static OSStatus stream_stop(CMBaseObjectRef o);
+static int capture_join_errno; /* protected by capture_control; a failed join is never blindly retried */
+
+static OSStatus
+stream_stop_locked(CMBaseObjectRef o, CMBaseObjectRef *release)
+{
+	struct stream *s = stream_of(o);
+
+	if (capture_join_errno) return ERR_NOT_AVAILABLE;
+	s->running = false;
+	s->graph_running = false;
+	pthread_mutex_lock(&s->lock);
+	for (int i = 0; i < OUTPUTS; i++) let_go(&s->out[i]);
+	pthread_mutex_unlock(&s->lock);
+	/* No worker-required lock held across join. The active reference pins this storage/context. */
+	if (s->worker_started) {
+		if (active_stream != o) {
+			capture_join_errno = EPROTO;
+			stream_fault(s, EPROTO);
+			return ERR_NOT_AVAILABLE;
+		}
+		int error = pthread_join(s->worker, NULL);
+
+		if (error) {
+			capture_join_errno = error;
+			stream_fault(s, error);
+			say("stream join failed errno=%d; active context retained, no retry", error);
+			return ERR_NOT_AVAILABLE;
+		}
+		s->worker_started = false;
+	}
+	if (active_stream == o) {
+		*release = active_stream;
+		active_stream = NULL;
+	}
+	int error = atomic_load(&s->first_errno), close_error = atomic_load(&s->close_errno);
+
+	if (!error && !close_error && !atomic_load(&capture_retire_errno)) {
+		pthread_mutex_lock(&s->lock);
+		unsigned cancelled = s->stills_wanted;
+
+		s->stills_wanted = 0; /* Explicit stop cancels old requests; never count them as pictures given. */
+		pthread_mutex_unlock(&s->lock);
+		say("stream stopped: frames=%llu photographs=%llu cancelled=%u", (unsigned long long)s->frames,
+		    (unsigned long long)s->stills_given, cancelled);
+		return 0;
+	}
+	say("stream stop rejected: first_errno=%d close_errno=%d shared_retire_errno=%d", error, close_error,
+	    atomic_load(&capture_retire_errno));
+	return ERR_NOT_AVAILABLE;
+}
 
 static OSStatus
 stream_begin(CMBaseObjectRef o, bool graph)
 {
 	struct stream *s = stream_of(o);
+	CMBaseObjectRef release = NULL;
+	OSStatus result = ERR_NOT_AVAILABLE;
 
-	if (graph) {
-		pthread_mutex_lock(&s->lock);
-		s->graph_running = true;
-		pthread_mutex_unlock(&s->lock);
-		say("stream: the graph starts the stream (format %d)", s->format_index);
+	if (camera_worker_thread || pthread_mutex_trylock(&capture_control) != 0) return ERR_NOT_AVAILABLE;
+	if (capture_join_errno || atomic_load(&capture_retire_errno) || atomic_load(&s->first_errno)) goto done;
+	/* Reap even a worker that already exited: running=false is not retirement or permission to open another sensor. */
+	if (active_stream != NULL && active_stream != o) {
+		result = stream_stop_locked(active_stream, &release);
+		if (result) goto done;
 	}
 	if (s->running) {
-		return 0;
-	}
-	/* one camera at a time: the kernel gives one sensor's frames (the other stream's worker stopped first) */
-	for (int i = 0; i < 2; i++) {
-		if (all_streams[i] != NULL && all_streams[i] != o && stream_of(all_streams[i])->running) {
-			say("stream: the %s's frames stop for the %s's", stream_of(all_streams[i])->camera->name, s->camera->name);
-			(void)stream_stop(all_streams[i]);
+		if (active_stream != o || !s->worker_started) { result = ERR_NOT_AVAILABLE; goto done; }
+		if (graph) {
+			pthread_mutex_lock(&s->lock);
+			s->graph_running = true;
+			pthread_mutex_unlock(&s->lock);
 		}
+		result = 0;
+		goto done;
 	}
-    if (s->worker_started) { pthread_join(s->worker, NULL); s->worker_started = false; }
-    int fd = open(HAKIOS_CAMERA_DEVICE, O_RDWR | O_CLOEXEC);
-    struct hakios_camera_command select = { .command = HAKIOS_CAMERA_SENSOR,
-        .a = s->camera->sensor, .b = ~0u };
-    if (fd < 0 || write(fd, &select, sizeof(select)) != sizeof(select)) {
-        say("physical sensor start rejected: %s", strerror(errno));
-        if (fd >= 0) close(fd); s->graph_running = false; return ERR_NOT_AVAILABLE;
-    }
-    s->camera_fd = fd;
-	s->running = true;
+	if (s->worker_started) {
+		result = stream_stop_locked(o, &release);
+		if (result) goto done;
+	}
+	int fd = open(HAKIOS_CAMERA_DEVICE, O_RDWR | O_CLOEXEC);
+	struct hakios_camera_command select = { .command = HAKIOS_CAMERA_SENSOR, .a = s->camera->sensor, .b = ~0u };
+
+	if (fd < 0) {
+		stream_fault(s, errno);
+		result = ERR_NOT_AVAILABLE;
+		goto done;
+	}
+	s->camera_fd = fd;
+	ssize_t sent = write(fd, &select, sizeof(select));
+
+	if (sent != sizeof(select)) {
+		int error = sent < 0 ? errno : EMSGSIZE;
+
+		stream_fault(s, error);
+		(void)close_camera_once(s, fd);
+		say("physical sensor start rejected: first_errno=%d close_errno=%d", error, atomic_load(&s->close_errno));
+		result = ERR_NOT_AVAILABLE;
+		goto done;
+	}
 	s->frames = 0;
-	say("stream: frames begin (format %d)", s->format_index);
-	if (pthread_create(&s->worker, NULL, worker, o) != 0) {
+	s->graph_running = graph;
+	s->running = true;
+	active_stream = (CMBaseObjectRef)CFRetain(o);
+	int error = pthread_create(&s->worker, NULL, worker, o);
+
+	if (error) {
 		s->running = false;
-        close(s->camera_fd); s->camera_fd = -1;
-		return ERR_UNSUPPORTED;
+		s->graph_running = false;
+		stream_fault(s, error);
+		(void)close_camera_once(s, fd);
+		/* release can already be the previous sensor; do not release either under this mutex. */
+		CMBaseObjectRef failed = active_stream;
+
+		active_stream = NULL;
+		pthread_mutex_unlock(&capture_control);
+		if (release != NULL) CFRelease(release);
+		CFRelease(failed);
+		return ERR_NOT_AVAILABLE;
 	}
 	s->worker_started = true;
-	return 0;
+	result = 0;
+	say("stream: physical frames begin (format %d, graph=%u)", s->format_index, graph);
+done:
+	pthread_mutex_unlock(&capture_control);
+	if (release != NULL) CFRelease(release);
+	return result;
 }
 
 static OSStatus
@@ -1625,22 +1759,14 @@ stream_start(CMBaseObjectRef o)
 static OSStatus
 stream_stop(CMBaseObjectRef o)
 {
-	struct stream *s = stream_of(o);
+	CMBaseObjectRef release = NULL;
 
-	say("stream: stop (%llu frames, %llu pictures given)", (unsigned long long)s->frames,
-	    (unsigned long long)s->out[0].delivered);
-	pthread_mutex_lock(&s->lock);
-	s->graph_running = false;
-	for (int i = 0; i < OUTPUTS; i++) {
-		let_go(&s->out[i]);
-	}
-	pthread_mutex_unlock(&s->lock);
-	s->running = false;
-	if (s->worker_started) {
-		pthread_join(s->worker, NULL);
-		s->worker_started = false;
-	}
-	return 0;
+	if (camera_worker_thread || pthread_mutex_trylock(&capture_control) != 0) return ERR_NOT_AVAILABLE;
+	OSStatus result = stream_stop_locked(o, &release);
+
+	pthread_mutex_unlock(&capture_control);
+	if (release != NULL) CFRelease(release);
+	return result;
 }
 
 static void
@@ -1660,14 +1786,13 @@ static OSStatus
 stream_add_attachments(CMBaseObjectRef o, CMSampleBufferRef sbuf, CFDictionaryRef options)
 {
 	struct stream *s = stream_of(o);
-	static bool said;
+	static _Atomic bool said;
 	CVImageBufferRef image = sbuf != NULL ? CMSampleBufferGetImageBuffer(sbuf) : NULL;
 	CFTypeRef ours = image != NULL && md_attachment != NULL ? CVBufferGetAttachment(image, md_attachment, NULL) : NULL, theirs;
 	CFMutableDictionaryRef m;
 	CMTime pts;
 
-	if (!said) {
-		said = true;
+	if (!atomic_exchange(&said, true)) {
 		say("stream: AddAttachmentsToSampleBuffer (options %s): the frames' metadata %s", options ? "given" : "none",
 		    md_attachment != NULL ? "attached" : "NOT THERE");
 	}
@@ -1714,8 +1839,7 @@ stream_add_attachments(CMBaseObjectRef o, CMSampleBufferRef sbuf, CFDictionaryRe
 static OSStatus
 stream_invalidate(CMBaseObjectRef o)
 {
-	(void)stream_stop(o);
-	return 0;
+	return stream_stop(o);
 }
 
 static void
@@ -1723,8 +1847,7 @@ stream_finalize(CMBaseObjectRef o)
 {
 	struct stream *s = stream_of(o);
 
-	(void)stream_stop(o);
-    for (int i=0;i<2;i++) if (all_streams[i]==o) all_streams[i]=NULL;
+	if (stream_stop(o)) say("stream finalize: stop status was not successful");
 	for (int i = 0; i < OUTPUTS; i++) {
 		if (s->out[i].config) {
 			CFRelease(s->out[i].config);
@@ -1776,6 +1899,16 @@ stream_create(CFAllocatorRef allocator, const struct camera *camera, CFStringRef
 	}
 	s = stream_of(o);
 	memset(s, 0, sizeof(*s));
+	atomic_init(&s->running, false);
+	atomic_init(&s->graph_running, false);
+	atomic_init(&s->frames, 0);
+	atomic_init(&s->stills_given, 0);
+	atomic_init(&s->first_errno, 0);
+	atomic_init(&s->close_errno, 0);
+	atomic_init(&s->format_index, 0);
+	atomic_init(&s->min_fps, 2);
+	atomic_init(&s->max_fps, 30);
+	atomic_init(&s->zoom, 1);
 	pthread_mutex_init(&s->lock, NULL);
 	s->torch = -1;
     s->camera_fd = -1;
@@ -1895,8 +2028,15 @@ device_relinquish_streams(CMBaseObjectRef o, CFArrayRef streams, CFDictionaryRef
 static OSStatus
 device_invalidate(CMBaseObjectRef o)
 {
-	(void)o;
-	return 0;
+	struct device *d = derived_storage(o);
+	OSStatus first = 0;
+
+	for (CFIndex i = 0; d->streams != NULL && i < CFArrayGetCount(d->streams); i++) {
+		OSStatus error = stream_stop((CMBaseObjectRef)CFArrayGetValueAtIndex(d->streams, i));
+
+		if (!first) first = error;
+	}
+	return first;
 }
 
 static void
@@ -1904,6 +2044,7 @@ device_finalize(CMBaseObjectRef o)
 {
 	struct device *d = derived_storage(o);
 
+	if (device_invalidate(o)) say("device finalize: stop not confirmed; active worker remains pinned");
 	if (d->streams) {
 		CFRelease(d->streams);
 	}
@@ -1932,24 +2073,26 @@ OSStatus x9_camera_device_create(CFAllocatorRef allocator, CFDictionaryRef optio
 OSStatus
 x9_camera_device_create(CFAllocatorRef allocator, CFDictionaryRef options, CMBaseObjectRef *out)
 {
-	static bool found, usable;
 	CMBaseObjectRef device = NULL, stream[2];
 	struct device *d;
 
 	(void)options;
     if (out) *out = NULL;
+    if (atomic_load(&capture_retire_errno)) return ERR_NOT_AVAILABLE;
     int fd = open(X9_CAMERA_DEVICE, O_RDONLY | O_CLOEXEC);
     struct x9_camera_status status = {0};
     bool ready = fd >= 0 && ioctl(fd, X9_CAMERA_GET_STATUS, &status) == 0 &&
         status.version == 1 && status.mode == 2 && (status.flags & X9_CAMERA_READY) &&
         !(status.flags & X9_CAMERA_FAULT) && status.supported_mask == 6;
-    if (fd >= 0) close(fd);
+    if (fd >= 0 && close(fd) != 0) {
+        int zero=0,error=errno;
+        atomic_compare_exchange_strong(&capture_retire_errno,&zero,error);
+        say("device status close failed errno=%d; no device published",error);
+        ready=false;
+    }
     if (!ready) return ERR_NOT_AVAILABLE;
-	if (!found) {
-		found = true;
-		usable = find_functions();
-	}
-	if (!usable || out == NULL) {
+	pthread_once(&media_functions_once, media_functions_init);
+	if (!media_functions_usable || out == NULL) {
 		return ERR_UNSUPPORTED;
 	}
 	if ((stream[0] = stream_create(allocator, &cameras[0], port_back)) == NULL) {
@@ -1968,8 +2111,12 @@ x9_camera_device_create(CFAllocatorRef allocator, CFDictionaryRef options, CMBas
 	d = derived_storage(device);
 	memset(d, 0, sizeof(*d));
 	d->streams = CFArrayCreate(NULL, (const void **)stream, 2, &kCFTypeArrayCallBacks);
-	all_streams[0] = stream[0];             /* (kept by the device's array) */
-	all_streams[1] = stream[1];
+	if (d->streams == NULL) {
+		CFRelease(stream[0]);
+		CFRelease(stream[1]);
+		CFRelease(device);
+		return ERR_NOT_AVAILABLE;
+	}
 	d->supported = supported(device_props, sizeof(device_props) / sizeof(device_props[0]));
 	CFRelease(stream[0]);
 	CFRelease(stream[1]);

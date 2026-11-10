@@ -37,7 +37,15 @@
 
 所有 renderer 返回 `bool`，失败意味着整张 buffer 不可发布。still 的 scratch 分组全部分配成功才替换旧指针/容量，避免早项 malloc 失败但后项成功时误认为可用；完整 NV12 和 BGRA still 共用逐像素 demosaic/缩放路径，BGRA 照片不再使用 2×2-cell 预览算法。分片按行对划分，短或奇数高度 BGRA 不留缝、不重复写。
 
-`AddAttachmentsToSampleBuffer` 只接受自身 pixelbuffer 上已绑定且 port/PTS 有效的 metadata；没有“最近帧”fallback。samplebuffer 已有 metadata 的 port/原始 PTS 与自身图像冲突时返回错误，其它 graph-added keys 保留。RAW header 同时核对 NO_FOCUS 与 reserved 全零。以上为源码与真实 SDK 编译结果，**没有实际照片、前后切换或相机硬件验证；worker STOP 错误传播及 native capture 全链仍继续实现**。
+`AddAttachmentsToSampleBuffer` 只接受自身 pixelbuffer 上已绑定且 port/PTS 有效的 metadata；没有“最近帧”fallback。samplebuffer 已有 metadata 的 port/原始 PTS 与自身图像冲突时返回错误，其它 graph-added keys 保留。RAW header 同时核对 NO_FOCUS 与 reserved 全零。以上为源码与真实 SDK 编译结果，**没有实际照片、前后切换或相机硬件验证；native capture 全链仍继续实现**。
+
+### Stop 与传感器切换保留真实退休错误
+
+worker 的 fatal read、短记录、非法/重复帧、malloc、曝光命令失败记录首个 errno；仅 EAGAIN/EINTR 继续等待。不再从 worker 以“另一传感器帧”为由重新发 SENSOR。实际 close 只调用一次，单独保留 close errno：descriptor 可能已被消费，不能重试。Stop/Invalidate/Relinquish 及切传感器必须先 join 原 worker，并传播真实错误；`running=false` 不是退休证明。任何 close 失败在该进程中锁存 shared-retire error，后续不能重新 open/发新 SENSOR，不能掩盖内核 full-drain 失败。
+
+全局 native-device transition mutex 用 trylock 串行 Start/Stop；busy 或 worker callback 重入立即返回 unavailable，不阻塞等待。worker 本身不取该 mutex，join 不持它需要的 output lock。唯一 active stream 持有强引用，join 成功后才在 transition mutex 外释放；join 失败保留上下文并禁止盲目重试。删除由最近一个 device 覆盖的两 stream 弱数组，避免另一 device 覆盖旧 worker 的生命周期。Device invalidate 尝试停止自身两流并返回首错，finalize 不把失败当成功；未能 join 的 active worker 保持 pin。
+
+仅完整成功的显式 Stop 取消未交付的旧 still 请求，取消不增加已交付照片数；新一代不能继承旧 shutter 请求。图像 zoom/AF 取本帧快照，计数与可并发读写的标量使用 atomic；符号初始化用 pthread_once。此处的 iOS 错误传播/serialization **不授予硬件 lease，不证明 source/AXI/SMMU drain 已实现或成功**，也不保证 output/property handler 的所有重入路径：当前像素交付仍持 output lock，非生命周期 property 的同步重入还需后续核对。
 
 ## 构建
 
