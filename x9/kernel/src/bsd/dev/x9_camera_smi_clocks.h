@@ -54,6 +54,10 @@ struct x9_camera_smi_clock_status {
  * Takes actual CAM_VCORE_R1A subcomm1/2/3 and CAM_MRAW larb19/14/29 gates
  * through MM HWV, retaining the existing MM/CSI/secure power references.
  * Unique physical gates are deduplicated across supplier and consumer.
+ * The MM lifetime first freezes CAMSV B..F's ten XPU votes; after MRAW
+ * domain take their physical gates must stay closed. No sibling is enabled
+ * to inspect producer CSR. This guard remains active through MM restore.
+ * All consumed COMM1/2/3 and L14/19/29 foreign clock bits are frozen too.
  * Captures all ten relevant XPU banks BEFORE clock votes. After clocks,
  * initializes COMM33/L19 misc only when the pre-vote supplier/consumers
  * were gated/unvoted and sibling L27/RAW_C paths remain inactive. Existing

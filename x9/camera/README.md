@@ -390,6 +390,16 @@ captured DT 区分 normal camera **SID80**、protected camera **SID89**、displa
 
 准入完成及撤 clock 前双采样三路 LARB 的普通 RO `STAT+0` / internal `STAT+500` 必须0；失败部分仍 gated 的 larb 不读。它仅是当前未启 producer 的必要 clock-unvote 条件，**不是完整 AXI/IRQ/cache/worker drain**。没有 IRQ/R-C 读取、SID80/path/MMU 写入、native capture caller 或实机证据；因此 **NEED_SMI/NEED_RATE/NEED_DMA_MAP/NEED_DRAIN 均不清除**，`SMI_CLOCKS_CONFIGURED` 只表示时钟控制读回，不造 READY。
 
+#### 共享时钟打开前保持其他 CAMSV inactive
+
+Captured DT 中，A 的 L19 与 B 共用，L14 与 C 共用，L29 与 D/E/F 共用。只采样 A 的 disabled controls 和 LARB STAT0，不能保证共享 clock 打开后这些 producer 不会恢复运行。`x9_camera_sv_siblings.inc` 已接实际 MM take/guard/restore：**在任何 MM vote 之前**双采样 CG34 bits15..19（B～F）的全部十个 XPU EN、global 和 STA，必须全0；不等 foreign vote 消失、不追加 sibling vote。
+
+CG34 bit12/13/14 实际是 CAMTG/TOP/A，不是三个 CAMSV engine。MRAW domain8 真正消费后，在仍 held 的 `seen` 和 fresh domain AP/global/PM_ACK/STA 资格下读取 CG34，B～F 的 physical gate 必须全部为1。partial take 的 MRAW SET 即使尚未 `completed`，也必须证明实际完整 target 才能检查 CG 和继续唯一 close；入口 off/prior 不能退休已发请求。未消费/未发 MRAW 引用或已退休 domain 时只读受 secure/infra authority 保护的 HWV，不读断电 CG；不为了检查而启用 B～F，也不读它们的 producer、CQ 或 IRQ banks。
+
+上述 guard 覆盖每笔 MM SET/CG_CLR/CLR、receiver/MAC/PHY/OUTMUX/SMI 配置及整个 MM 逆序恢复。准入后出现 foreign vote、direct ungate 或电源资格变化会 terminal latch，即使之后回到0也不恢复操作；保留尚未退休的依赖。初次准入被拒且尚未发 MM vote，只恢复自己的 receive power 引用。关闭后 `X9 CAMERA SV SIBLING JOURNAL/XPU` 只输出保存的实际采样，不回读已撤电硬件；失败路径也不为了补日志再读失去资格的 effect。
+
+SMI 共享快照同时冻结实际消费的 **CG35 bits13/14/15 和 CG34 bits1/2/5** 的全部 foreign EN，不再只检查 COMM33/L19 单位。新增 L14/L29、COMM1/2 的外部 owner 即使被本 AP aggregate 隐藏也会拒绝；COMM33/L19 冷 misc 的资格仍只按各自 bit15/bit2 scope 计算，不因此取得或写入其它 common 的配置。这里是 inactive 时钟准入和可见冲突保护，**不是硬件 lease、ABA 防护、SMMUv3 ownership、完整 DMA drain 或拍摄就绪**；已有工作的 sibling 会被拒绝，未来需要真正共享 owner 才能支持并行使用。
+
 #### 初始化冷启动的共享 SMI misc
 
 `x9_camera_smi_shared.inc` 在同一个准备入口中，先于 SMI clock votes 捕获共享资格，clock 消费后才初始化 misc。**这不是以新增 AP clock 冒充全局独占：已有共享 owner 的不匹配配置仍返回 `EOPNOTSUPP`，不接管、不 reset。** Captured COMM33 不只供应 L19，还供应 **L27/CAM_MAIN 和 L44/RAW_C**；L44 的两路 SMI clock 实际为 RAW_C larbx bit0、cam bit1，不能只检查 L19。
@@ -403,7 +413,7 @@ captured DT 区分 normal camera **SID80**、protected camera **SID89**、displa
 | L27 | CG22 bit0 global/XPU0且 CAM_MAIN 实际 gate0=1，不启用它来检查 |
 | L44/RAW_C | CG30 bits0/1 global/XPU0，RAW_C domain11 AP/global/PM_ACK和十个 XPU0；不读断电 RAW_C 的物理 CG |
 
-十个 XPU 的 v1 EN 地址来自 `hwccf.h::CCF_XPU`：0..4 为 `20000+n*10000`，5..9 为 `70000+(n-5)*1000`，CG EN 为 `base+cg*0xc+8`。原 AP-only MM_HWV mapping 不足以读非 AP bank，因此单独映射实际 DT resource 内 `0x31c30000/0x45000`；不访问 history/IRQ，也不写非 AP bank。投票快照跨阶段保持，只有本 journal 消费的两个 AP bit允许变为自身 expected；新增外部投票即使被现有 aggregate 隐藏也会拒绝后续写入。
+十个 XPU 的 v1 EN 地址来自 `hwccf.h::CCF_XPU`：0..4 为 `20000+n*10000`，5..9 为 `70000+(n-5)*1000`，CG EN 为 `base+cg*0xc+8`。原 AP-only MM_HWV mapping 不足以读非 AP bank，因此单独映射实际 DT resource 内 `0x31c30000/0x45000`；不访问 history/IRQ，也不写非 AP bank。投票快照跨阶段保持，只有本 journal 消费的两个 AP mask允许变为自身 expected；新增外部投票即使被现有 aggregate 隐藏也会拒绝后续写入。
 
 COMM33 的 scoped cold 条件还要求 L19/L27/L44 全部上述条件成立；L19-wide misc 的 cold 条件只针对准备前 L19 gated/unvoted。通过后双采样真实 misc，仅写下表五个配置 CSR：
 

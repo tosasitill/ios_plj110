@@ -11,6 +11,9 @@
  * No VMM CVFS/AVS/eFuse rewrite, rate/PLL/AL-map change, CG47 pulse, SMI
  * larb enable, PHY/route/DMA write or NS SMMU ownership claim. The secure
  * receive reference is kept through every dummy read and dependent unvote.
+ * CAMSV B..F EN banks are screened before MM writes, and their physical
+ * gates after MRAW power take; keep these siblings inactive throughout the
+ * shared CAMTG/TOP/A and optional SMI lifetime, without enabling/probing them.
  */
 _Static_assert(sizeof(struct x9_camera_mm_status)==576,"camera MM ABI");
 enum cam_mm_kind { CAM_MM_BACKUP, CAM_MM_DOMAIN, CAM_MM_AL, CAM_MM_MUX, CAM_MM_GATE };
@@ -54,6 +57,8 @@ static struct {
     struct x9_camera_mm_status status;
     struct x9_camera_resources receive;
 } cam_mm_live;
+
+#include "x9_camera_sv_siblings.inc"
 
 static vm_offset_t cam_mm_effect_base(struct cam_mm_journal *j,unsigned n)
 {
@@ -116,6 +121,7 @@ static int cam_mm_effect_on(struct cam_mm_journal *j,unsigned n)
 static int cam_mm_guard(struct cam_mm_journal *j,bool complete)
 {
     int e;
+    e=cam_sv_sibling_guard(j);if(e)return e;
     if(complete && (!j->active || j->completed!=((1u<<X9_CAM_MM_SLOTS)-1)))return ENXIO;
     if(!j->receive.smmu_owned)return j->seen?ENXIO:0;
     if((cam_rr(j->receive.hwv,0x12900)&CAM_RES_MM_INFRA)!=CAM_RES_MM_INFRA ||
@@ -140,15 +146,17 @@ static int cam_mm_guard(struct cam_mm_journal *j,bool complete)
             e=cam_mm_effect_on(j,n);if(e)return e;
         }
     }
-    return cam_mm_fsm_stuck(&j->receive)?EBUSY:0;
+    if(cam_mm_fsm_stuck(&j->receive))return EBUSY;
+    return cam_sv_sibling_guard(j);
 }
 static int cam_mm_slot_take(struct cam_mm_journal *j,unsigned n,struct x9_camera_mm_status *r)
 {
+    int e=cam_sv_sibling_guard(j);if(e)return e;
     const struct cam_mm_desc *d=&j->desc[n];struct x9_camera_mm_sample *s=&r->sample[n];
     vm_offset_t b=j->receive.hwv;uint32_t before[3];
     s->mask=d->mask;s->flags=X9_CAM_MM_SLOT_SEEN;j->seen|=1u<<n;
     cam_mm_snapshot(j,n,s->before);
-    int e=cam_mm_idle(j,n,true);if(e)return e;
+    e=cam_mm_idle(j,n,true);if(e)return e;
     cam_mm_snapshot(j,n,before);
     if(((before[0]^s->before[0])&d->mask) || ((before[1]^s->before[1])&d->mask))return EBUSY;
     e=cam_mm_cfg_check(j,n);if(e)return e;
@@ -181,6 +189,7 @@ static int cam_mm_slot_take(struct cam_mm_journal *j,unsigned n,struct x9_camera
         }
         uint32_t add=d->mask&~ap;
         if(add) {
+            e=cam_sv_sibling_guard(j);if(e)return e;
             j->owned[n]=add;s->flags|=X9_CAM_MM_SLOT_OWNED;
             cam_rw(b,d->set,add); /* ambiguous SET is already journaled */
             e=cam_wait_bits(b,d->set+8,d->mask,d->mask,200);
@@ -194,6 +203,7 @@ static int cam_mm_slot_take(struct cam_mm_journal *j,unsigned n,struct x9_camera
             uint32_t gated=cam_rr(cg,0)&d->mask;
             if(gated&~j->gate_before[n])return ESTALE;
             if(gated) {
+                e=cam_sv_sibling_guard(j);if(e)return e;
                 j->gate_changed[n]=gated;
                 /* Same single-bit CG_CLR as clk-gate.c's normal path,
                  * never a whole-bank RMW, never a reset/retrigger. */
@@ -204,7 +214,8 @@ static int cam_mm_slot_take(struct cam_mm_journal *j,unsigned n,struct x9_camera
     }
     e=cam_mm_cfg_check(j,n);if(e)return e;
     cam_mm_snapshot(j,n,s->active);s->sta=cam_rr(b,d->sta);
-    j->completed|=1u<<n;s->flags|=X9_CAM_MM_SLOT_ACTIVE;return 0;
+    j->completed|=1u<<n;s->flags|=X9_CAM_MM_SLOT_ACTIVE;
+    return cam_sv_sibling_guard(j);
 }
 static int cam_mm_vmm_can_drop(struct cam_mm_journal *j,uint32_t drop)
 {
@@ -222,9 +233,10 @@ static int cam_mm_vmm_can_drop(struct cam_mm_journal *j,uint32_t drop)
 static int cam_mm_slot_restore(struct cam_mm_journal *j,unsigned n,struct x9_camera_mm_status *r)
 {
     if(!(j->seen&(1u<<n)))return 0;
+    int e=cam_sv_sibling_guard(j);if(e)return e;
     const struct cam_mm_desc *d=&j->desc[n];vm_offset_t b=j->receive.hwv;
     struct x9_camera_mm_sample *s=&r->sample[n];
-    int e=cam_mm_idle(j,n,false);if(e)return e;
+    e=cam_mm_idle(j,n,false);if(e)return e;
     e=cam_mm_cfg_check(j,n);if(e)return e;
     if(d->kind==CAM_MM_AL) {
         /* Not our AP vote. Its effect may go away only with our domains. */
@@ -234,6 +246,7 @@ static int cam_mm_slot_restore(struct cam_mm_journal *j,unsigned n,struct x9_cam
         uint32_t drop=j->owned[n];
         if(drop) {
             if(n==X9_CAM_MM_VMM && (e=cam_mm_vmm_can_drop(j,drop)))return e;
+            e=cam_sv_sibling_guard(j);if(e)return e;
             cam_rw(b,d->set+4,drop);
             e=cam_wait_bits(b,d->set+8,drop,0,200);
             if(d->kind==CAM_MM_BACKUP || d->kind==CAM_MM_DOMAIN)delay(100);
@@ -262,7 +275,8 @@ static int cam_mm_slot_restore(struct cam_mm_journal *j,unsigned n,struct x9_cam
         j->borrowed[n]=0;
     }
     cam_mm_snapshot(j,n,s->after);s->sta=cam_rr(b,d->sta);
-    s->flags|=X9_CAM_MM_SLOT_RESTORED;j->seen&=~(1u<<n);return 0;
+    s->flags|=X9_CAM_MM_SLOT_RESTORED;j->seen&=~(1u<<n);
+    return cam_sv_sibling_guard(j);
 }
 static int cam_mm_restore(struct cam_mm_journal *j,struct x9_camera_mm_status *r,
                            struct x9_camera_resources *receive)
@@ -279,8 +293,9 @@ static int cam_mm_restore(struct cam_mm_journal *j,struct x9_camera_mm_status *r
     for(unsigned i=X9_CAM_MM_SLOTS;i;i--) {
         unsigned n=i-1;int e=cam_mm_slot_restore(j,n,r);
         if(e) {
-            cam_mm_snapshot(j,n,r->sample[n].after);
-            r->sample[n].sta=cam_rr(j->receive.hwv,j->desc[n].sta);
+            /* A dependency/sibling guard may have failed before safe CSR
+             * access, including after retiring MRAW. Preserve the last
+             * actual sample instead of probing an unpowered effect. */
             printf("X9 CAMERA MM RESTORE: failed slot=%u errno=%d pending=%x; retaining dependencies\n",
                 n,e,j->seen);
             r->retained=j->seen;r->slot=n;
@@ -289,8 +304,9 @@ static int cam_mm_restore(struct cam_mm_journal *j,struct x9_camera_mm_status *r
             return e; /* lower domains/VMM/infra/secure power must stay */
         }
     }
-    int e=cam_receive_power_restore(&j->receive,receive);
-    if(!e){j->active=false;j->completed=0;}return e;
+    int e=cam_sv_sibling_guard(j);
+    if(!e)e=cam_receive_power_restore(&j->receive,receive);
+    if(!e){j->active=false;j->completed=0;cam_sv_sibling_retire();}return e;
 }
 static int cam_mm_take(struct cam_mm_journal *j,unsigned sensor,struct x9_camera_mm_status *r,
                         struct x9_camera_resources *receive)
@@ -315,12 +331,15 @@ static int cam_mm_take(struct cam_mm_journal *j,unsigned sensor,struct x9_camera
         j->cfg[k]=r->cfg[k]=(cam_rr(j->top,d->cfg)>>d->shift)&0x7f;
         if((j->cfg[k]&((1u<<d->width)-1))>=d->parents)return ENOTSUP;
     }
+    /* Before any domain, CAMTG/TOP/A or register-clock vote: foreign
+     * CAMSV B..F must be unvoted. Their CG is read only after MRAW take. */
+    e=cam_sv_sibling_begin(j);if(e)return e;
     r->stage=X9_CAM_MM_STAGE_TAKE;
     for(unsigned n=0;n<X9_CAM_MM_SLOTS;n++) {
         r->slot=n;e=cam_mm_slot_take(j,n,r);
         if(e) {
-            cam_mm_snapshot(j,n,r->sample[n].active);
-            r->sample[n].sta=cam_rr(j->receive.hwv,j->desc[n].sta);
+            /* Entry/after-effect guard can reject before a safe sample.
+             * slot_take already records actual reads when authorized. */
             return e;
         }
         if(n==X9_CAM_MM_MRAW) {
@@ -449,6 +468,7 @@ static void cam_mm_log(unsigned sensor,const struct x9_camera_mm_status *r)
             "effect=%x/%x/%x sta=%x\n",n,s->mask,s->flags,s->before[0],s->active[0],s->after[0],
             s->before[1],s->active[1],s->after[1],s->before[2],s->active[2],s->after[2],s->sta);
     }
+    cam_sv_sibling_log();
 }
 static int cam_mm_probe(unsigned sensor,struct x9_camera_mm_status *r)
 {

@@ -11,7 +11,9 @@ enum { CAM_SMI_SHARED_GROUPS=4, CAM_SMI_SHARED_XPUS=10,
     CAM_SMI_SHARED_LARB_FIRST=3 };
 static const unsigned cam_smi_shared_cg[CAM_SMI_SHARED_GROUPS]={35,34,30,22};
 /* L44's two DT SMI clocks are RAW_C larbx bit0 AND cam bit1. */
-static const uint32_t cam_smi_shared_mask[CAM_SMI_SHARED_GROUPS]={1u<<15,4,3,1};
+/* Freeze ALL SMI clock bits actually consumed, not only COMM33/L19.
+ * A foreign owner of L14/L29 or COMM1/2 can be hidden by our AP vote. */
+static const uint32_t cam_smi_shared_mask[CAM_SMI_SHARED_GROUPS]={7u<<13,0x26,3,1};
 static const unsigned cam_smi_shared_offsets[CAM_SMI_SHARED_WORDS]={0x100,0x244,0x444,0x24,0x40};
 static const uint32_t cam_smi_shared_targets[CAM_SMI_SHARED_WORDS]={0xa,0x4146,1,0x370456,1};
 static struct {
@@ -45,9 +47,9 @@ static int cam_smi_shared_fault(int e)
     if(cam_smi_shared.captured)s->flags|=X9_CAM_SMI_SHARED_RETAINED;
     cam_smi_shared_status();return e;
 }
-/* Nonrecursive and safe before either consumer clock is on. Exact foreign
+/* Nonrecursive and safe before either clock group is on. Exact foreign
  * EN snapshots prevent a hidden second owner masked by our aggregate vote.
- * The two AP bits acquired by SMI are compared to that clock journal's
+ * The two AP masks acquired by SMI are compared to that clock journal's
  * expected targets; no adoption of a late foreign vote. */
 static int cam_smi_shared_voter_guard(void)
 {
@@ -125,15 +127,17 @@ static int cam_smi_shared_capture_locked(void)
     memcpy(s->global,cam_smi_shared.global,sizeof(s->global));
     s->supplier_gate=cam_smi_shared.gate[0];s->larb27_gate=cam_smi_shared.gate[1];
     s->larb19_gate=cam_smi_shared.gate[2];
-    cam_smi_shared.larb_cold=!cam_smi_shared.global[1] && cam_smi_shared.gate[2];
-    cam_smi_shared.common_cold=!cam_smi_shared.global[0] &&
+    cam_smi_shared.larb_cold=!(cam_smi_shared.global[1]&4) && cam_smi_shared.gate[2];
+    cam_smi_shared.common_cold=!(cam_smi_shared.global[0]&(1u<<15)) &&
         !cam_smi_shared.global[2] && !cam_smi_shared.global[3] &&
         cam_smi_shared.gate[0] && cam_smi_shared.gate[1] &&
         !cam_smi_shared.rawc_global && !cam_smi_shared.rawc_ack;
     for(unsigned n=0;n<CAM_SMI_SHARED_XPUS;n++) {
-        if(cam_smi_shared.votes[1][n])cam_smi_shared.larb_cold=false;
-        for(unsigned g=0;g<CAM_SMI_SHARED_GROUPS;g++)
-            if(cam_smi_shared.votes[g][n])cam_smi_shared.common_cold=false;
+        if(cam_smi_shared.votes[1][n]&4)cam_smi_shared.larb_cold=false;
+        if((cam_smi_shared.votes[0][n]&(1u<<15)) ||
+            (cam_smi_shared.votes[1][n]&4) ||
+            cam_smi_shared.votes[2][n] || cam_smi_shared.votes[3][n])
+            cam_smi_shared.common_cold=false;
         if(s->rawc_votes[n])cam_smi_shared.common_cold=false;
     }
     if(!cam_smi_shared.larb_cold)cam_smi_shared.common_cold=false;
