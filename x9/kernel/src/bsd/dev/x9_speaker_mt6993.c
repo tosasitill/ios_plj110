@@ -11,6 +11,8 @@
 #include <kern/locks.h>
 #include <mach/vm_types.h>
 #include "x9_audio_resources.h"
+#include "x9_adsp_mt6993.h"
+#include "x9_adsp_transport.h"
 #include "x9_speaker_mt6993.h"
 #include "x9_speaker_pll.h"
 #include "x9_speaker_path.h"
@@ -26,7 +28,7 @@ static X9AudioClockStatus s={.version=X9_AUDIO_CLOCK_STATUS_VERSION};
 static struct {
     vm_offset_t hwv,vlp,afe,apll;
     uint32_t mux_owned, mux_expected[2];
-    bool captured, stuck;
+    bool captured, stuck,combined;
 } j;
 struct field {unsigned off;uint32_t mask,value,saved,expected;};
 /* Gate bank1 bits0/1: HOPPING/F26M. OUT4/other clocks remain untouched. */
@@ -34,6 +36,10 @@ static struct field fields[]={
     {0x10,3,0,0,0}, X9_SPEAKER_OUT4_DISABLED_CONFIG
 };
 #define FIELD_COUNT ((unsigned)(sizeof(fields)/sizeof(fields[0])))
+static uint32_t field_prior[FIELD_COUNT];
+static unsigned field_count(void){return j.combined?1:FIELD_COUNT;}
+static uint32_t native_engen_expected(void);
+static int native_engen_idle(void);
 static uint32_t rd(vm_offset_t b,unsigned r)
 {uint32_t v=*(volatile uint32_t *)(b+r);__asm__ volatile("dmb oshld":::"memory");return v;}
 static void wr(vm_offset_t b,unsigned r,uint32_t v)
@@ -72,11 +78,14 @@ static void ao_snapshot(void)
 }
 static int access(void)
 {
-    int e=refuse(j.hwv,0x20708,13,13);
+    /* Native acquisition borrows the ACTUAL board owner, not a probe flag.
+     * Its AO-safe board qualification precedes any powered-domain read. */
+    int e=j.combined?x9_adsp_mt6993_speaker_validate(s.ticket):0;
+    if(!e)e=refuse(j.hwv,0x20708,13,13);
     if(!e)e=refuse(j.hwv,0x12900,13,13);
     if(!e)e=refuse(j.hwv,0x13700,13,13);
-    if(!e)e=refuse(j.hwv,0x20708,2,0);
-    if(!e)e=refuse(j.hwv,0x13700,2,0);
+    if(!e)e=refuse(j.hwv,0x20708,2,j.combined?2:0);
+    if(!e)e=refuse(j.hwv,0x13700,2,j.combined?2:0);
     if(!e)e=refuse(j.hwv,0x13704,13,0);
     if(!e)e=refuse(j.hwv,0x1132c,13,13);
     if(!e)e=refuse(j.vlp,0x90,0x8383,j.mux_expected[0]|j.mux_expected[1]);
@@ -91,8 +100,12 @@ static int idle(void)
      * 7 IN + 7 OUT engines, SRC/test/sine/pad TX and engine monitor activity.
      * Never infer authoritative DMA drain merely from a disabled memif. */
     const unsigned engines[]={0x14,0x18,0x1c};
-    for(unsigned n=0;!e && n<3;n++)e=refuse(j.afe,engines[n],15,0);
-    if(!e)e=refuse(j.afe,0x7c,UINT32_MAX,0);
+    for(unsigned n=0;!e && n<3;n++)e=j.combined && !n?native_engen_idle():
+        refuse(j.afe,engines[n],15,0);
+    /* AUDIO_ENGEN_MON has no documented bit mapping. With our own APLL2
+     * generator active it is NOT a zero/DMA-idle certificate. Native clock
+     * release separately requires the authoritative drain callback. */
+    if(!e && (!j.combined || !native_engen_expected()))e=refuse(j.afe,0x7c,UINT32_MAX,0);
     const unsigned src[]={0xbd0,0xc50,0xcd0,0x98,0x1204};
     for(unsigned n=0;!e && n<5;n++)e=refuse(j.afe,src[n],1,0);
     if(!e)e=refuse(j.afe,0xf14,0xfff,0);
@@ -107,13 +120,20 @@ static int idle(void)
 }
 static int smc(unsigned op,unsigned slot)
 {
+    if(j.combined) {
+        int e=x9_adsp_mt6993_speaker_validate(s.ticket);if(e){j.stuck=true;return e;}
+    }
     register uint64_t x0 __asm__("x0")=0xc2000517ULL;
     register uint64_t x1 __asm__("x1")=op,x2 __asm__("x2")=0,x3 __asm__("x3")=0;
     register uint64_t x4 __asm__("x4")=0,x5 __asm__("x5")=0,x6 __asm__("x6")=0,x7 __asm__("x7")=0;
     __asm__ volatile("smc #0":"+r"(x0),"+r"(x1),"+r"(x2),"+r"(x3),"+r"(x4),"+r"(x5),"+r"(x6),"+r"(x7)::"memory");
     s.smc_result[slot]=x0;
     /* Unknown secure mutation cannot be repaired by dropping its clocks. */
-    if(x0){j.stuck=true;return (int64_t)x0==-1?ENOTSUP:EIO;}return 0;
+    if(x0){j.stuck=true;return (int64_t)x0==-1?ENOTSUP:EIO;}
+    if(j.combined) {
+        int e=x9_adsp_mt6993_speaker_validate(s.ticket);if(e){j.stuck=true;return e;}
+    }
+    return 0;
 }
 static int vote(unsigned bit,bool on)
 {
@@ -151,21 +171,24 @@ static int mux_take(unsigned n)
 }
 static int change(unsigned n,uint32_t value)
 {
+    int e=j.combined?access():0;if(e)return e;
     struct field *p=&fields[n];uint32_t old=rd(j.afe,p->off),bit=1u<<n;
     if((old&p->mask)!=(p->expected&p->mask) &&
-       !((s.uncertain_mask&bit) && (old&p->mask)==(p->saved&p->mask))) {
+       !((s.uncertain_mask&bit) && (old&p->mask)==(field_prior[n]&p->mask))) {
         s.last_register=p->off;s.last_value=old;return EBUSY;
     }
     uint32_t next=(old&~p->mask)|(value&p->mask);
     if((next&p->mask)==(old&p->mask)){p->expected=next;s.uncertain_mask&=~bit;return 0;}
-    s.dirty_mask|=bit;s.uncertain_mask|=bit;p->expected=next;
-    wr(j.afe,p->off,next);uint32_t actual=rd(j.afe,p->off);
+    field_prior[n]=old;s.dirty_mask|=bit;s.uncertain_mask|=bit;p->expected=next;
+    wr(j.afe,p->off,next);
+    if(j.combined){e=access();if(e)return e;}
+    uint32_t actual=rd(j.afe,p->off);
     if((actual&p->mask)!=(next&p->mask)){s.last_register=p->off;s.last_value=actual;return EIO;}
     s.uncertain_mask&=~bit;return 0;
 }
 static int verify_fields(bool saved)
 {
-    for(unsigned n=0;n<FIELD_COUNT;n++) {
+    for(unsigned n=0;n<field_count();n++) {
         struct field *p=&fields[n];
         int e=refuse(j.afe,p->off,p->mask,(saved?p->saved:p->expected)&p->mask);
         if(e)return e;
@@ -176,6 +199,7 @@ static void afe_snapshot(bool configured)
 {
     uint32_t top=rd(j.afe,0x10);
     if(configured)s.top_configured=top;else s.top_after=top;
+    if(j.combined)return; /* OUT4 belongs to the AFE engine, not this child */
     for(unsigned n=0;n<4;n++) {
         uint32_t v=rd(j.afe,fields[n+1].off);
         if(configured)s.out_configured[n]=v;else s.out_after[n]=v;
@@ -183,20 +207,27 @@ static void afe_snapshot(bool configured)
 }
 #include "x9_speaker_mt6993_pll.inc"
 #include "x9_speaker_mt6993_path.inc"
+#include "x9_speaker_mt6993_native.inc"
 static int take(bool with_pll,bool with_path)
 {
     s.stage=X9ClockMap;
-    j.hwv=ml_io_map(0x1c040000,0x75000);j.vlp=ml_io_map(0x1c200000,0x1000);
-    j.afe=ml_io_map(0x1a110000,0x10000);j.apll=ml_io_map(0x1c203100,0x100);
+    if(!j.hwv)j.hwv=ml_io_map(0x1c040000,0x75000);
+    if(!j.vlp)j.vlp=ml_io_map(0x1c200000,0x1000);
+    if(!j.afe)j.afe=ml_io_map(0x1a110000,0x10000);
+    if(!j.apll)j.apll=ml_io_map(0x1c203100,0x100);
     if(!j.hwv || !j.vlp || !j.afe || !j.apll)return ENOMEM;
+    if(j.combined){int mapping=native_mapping();if(mapping)return mapping;}
     s.flags|=X9ClockAOCaptured;ao_snapshot();
     s.ap_before=s.ap_after;s.all_before=s.all_after;s.ack_before=s.ack_after;
     s.foreign_before=s.foreign_after;s.vlp_before=s.vlp_after;s.fenc_before=s.fenc_after;
     s.stage=X9ClockCold;
     /* AUDIO and ADSP TOP must be globally off. INFRA/AO AP votes may be
      * borrowed under the same AP lease; foreign XPU votes are never reset. */
-    if((s.ap_before|s.all_before|s.ack_before|rd(j.hwv,0x1131c)|rd(j.hwv,0x13704))&3 ||
+    if((s.ap_before|s.all_before|s.ack_before|rd(j.hwv,0x1131c)|rd(j.hwv,0x13704))&(j.combined?1:3) ||
        s.foreign_before)return EBUSY;
+    if(j.combined) {
+        int lease=x9_adsp_mt6993_speaker_validate(s.ticket);if(lease)return lease;
+    }
     int e=refuse(j.vlp,0x90,0x8080,0x8080);
     if(!e)e=refuse(j.vlp,0x274,0xc0000000,0);
     if(e)return e;
@@ -207,8 +238,11 @@ static int take(bool with_pll,bool with_path)
     s.stage=X9ClockInit;s.flags|=X9ClockInitIssued;e=smc(0,0);if(e)return e;
     s.stage=X9ClockDomains;
     const unsigned bits[]={8,4,1};
-    for(unsigned n=0;n<3;n++) {
-        if(bits[n]==1 && ((rd(j.hwv,0x13700)|rd(j.hwv,0x12900)|rd(j.hwv,0x13704))&3 || foreign())) {
+    /* ADSP owner retains TOP/INFRA/AO. Native child MUST NOT vote/recover
+     * those dependencies itself; it owns only AUDIO bit0. */
+    for(unsigned n=j.combined?2:0;n<3;n++) {
+        if(j.combined){e=x9_adsp_mt6993_speaker_validate(s.ticket);if(e){j.stuck=true;return e;}}
+        if(bits[n]==1 && ((rd(j.hwv,0x13700)|rd(j.hwv,0x12900)|rd(j.hwv,0x13704))&(j.combined?1:3) || foreign())) {
             j.stuck=true;return EBUSY;
         }
         if(rd(j.hwv,0x20708)&bits[n]) {
@@ -221,15 +255,19 @@ static int take(bool with_pll,bool with_path)
     s.stage=X9ClockMux;
     for(unsigned n=0;n<2;n++){e=mux_take(n);if(e)return e;}
     s.stage=X9ClockIdle;e=idle();if(e)return e; /* FIRST AFE reads */
-    for(unsigned n=0;n<FIELD_COUNT;n++)fields[n].saved=fields[n].expected=rd(j.afe,fields[n].off);
+    for(unsigned n=0;n<field_count();n++)field_prior[n]=fields[n].saved=fields[n].expected=rd(j.afe,fields[n].off);
     s.top_before=fields[0].saved;
-    for(unsigned n=0;n<4;n++)s.out_before[n]=fields[n+1].saved;
+    if(!j.combined)for(unsigned n=0;n<4;n++)s.out_before[n]=fields[n+1].saved;
+    if(j.combined && (fields[0].saved&0x1018)!=0x1018)return EBUSY;
     j.captured=true;s.flags|=X9ClockAFECaptured;
-    s.stage=X9ClockGates;e=change(0,0);if(e)return e;
+    /* Keep native APLL2/TUNER2 leaf gates off until PLL settling/meter
+     * qualification completes; open HOPPING/F26M first for register access. */
+    s.stage=X9ClockGates;e=change(0,j.combined?fields[0].saved&0x1018:0);if(e)return e;
     s.stage=X9ClockSidebands;s.flags|=X9ClockSidebandsIssued;e=smc(7,1);if(e)return e;
     if(with_pll){e=pll_take();if(e)return e;}
+    if(j.combined){e=native_tuner_take();if(e)return e;}
     s.stage=X9ClockI2S;
-    for(unsigned n=1;!e && n<FIELD_COUNT;n++)e=change(n,fields[n].value);
+    for(unsigned n=1;!e && n<field_count();n++)e=change(n,fields[n].value);
     if(e)return e;
     if(with_path){e=path_take();if(e)return e;}
     s.stage=X9ClockRecheck;e=idle();if(!e)e=verify_fields(false);if(e)return e;
@@ -241,7 +279,7 @@ static int restore(void)
     int e=0;
     if(j.captured) {
         e=idle();if(e)return e;
-        for(unsigned n=FIELD_COUNT;n>0;n--)if(s.dirty_mask&(1u<<(n-1))) {
+        for(unsigned n=field_count();n>0;n--)if(s.dirty_mask&(1u<<(n-1))) {
             e=change(n-1,fields[n-1].saved);if(e)return e;
             s.dirty_mask&=~(1u<<(n-1));
         }

@@ -12,6 +12,7 @@ static struct {
 } pj;
 struct pll_field {vm_offset_t base;unsigned off;uint32_t mask,saved,expected;};
 static struct pll_field pf[7];
+static uint32_t pll_prior[7];
 static const unsigned pll_regs[]={8,0xc,0x14,0x34,0x38,0x3c,0x40};
 static int pll_refuse(vm_offset_t b,unsigned off,uint32_t mask,uint32_t wanted)
 {
@@ -22,7 +23,7 @@ static int pll_change(unsigned n,uint32_t value)
 {
     struct pll_field *p=&pf[n];uint32_t old=rd(p->base,p->off),bit=1u<<n;
     if((old&p->mask)!=(p->expected&p->mask) &&
-       !((pll_s.uncertain_mask&bit) && (old&p->mask)==(p->saved&p->mask))) {
+       !((pll_s.uncertain_mask&bit) && (old&p->mask)==(pll_prior[n]&p->mask))) {
         pll_s.last_register=p->off;pll_s.last_value=old;return EBUSY;
     }
     if(n<3 && (old&~p->mask)!=(p->saved&~p->mask)) {
@@ -30,7 +31,11 @@ static int pll_change(unsigned n,uint32_t value)
     }
     uint32_t next=(old&~p->mask)|(value&p->mask);
     if((next&p->mask)==(old&p->mask)){p->expected=next;pll_s.uncertain_mask&=~bit;return 0;}
-    pll_s.dirty_mask|=bit;pll_s.uncertain_mask|=bit;p->expected=next;
+    /* Only the immediate prewrite image may reconcile an uncertain RW
+     * transition, including a failed restore. The cold saved value is not
+     * necessarily that image after configure -> restore. Triggered meter
+     * operations remain separately fenced by trigger_issued/meter_done. */
+    pll_prior[n]=old;pll_s.dirty_mask|=bit;pll_s.uncertain_mask|=bit;p->expected=next;
     if(n<3)pj.pll_written=true;
     if(n==4 && (value&16)){pj.trigger_issued=true;pj.meter_done=false;}
     wr(p->base,p->off,next);uint32_t actual=rd(p->base,p->off);
@@ -147,8 +152,9 @@ static int meter_sample(unsigned id,unsigned slot,uint32_t target)
 static int pll_cold(void)
 {
     pll_s.stage=X9PLLCold;
-    pj.meter=ml_io_map(0x1c201000,0x1000);pj.top=ml_io_map(0x1c210000,0x1000);
-    pj.mm=ml_io_map(0x10040000,0x1000);
+    if(!pj.meter)pj.meter=ml_io_map(0x1c201000,0x1000);
+    if(!pj.top)pj.top=ml_io_map(0x1c210000,0x1000);
+    if(!pj.mm)pj.mm=ml_io_map(0x10040000,0x1000);
     if(!pj.meter || !pj.top || !pj.mm)return ENOMEM;
     pll_snapshot(pll_s.pll_before);pll_s.flags|=X9PLLCaptured;
     const unsigned offsets[]={8,0x14,0x38,0x344,0,4,8};
@@ -156,7 +162,7 @@ static int pll_cold(void)
     for(unsigned n=0;n<7;n++) {
         pf[n].base=n<3?j.apll:n==3?j.vlp:pj.meter;
         pf[n].off=offsets[n];pf[n].mask=masks[n];
-        pf[n].saved=pf[n].expected=rd(pf[n].base,pf[n].off);
+        pll_prior[n]=pf[n].saved=pf[n].expected=rd(pf[n].base,pf[n].off);
     }
     pj.gen_expected=rd(j.vlp,0x80)&0x8300;
     pll_s.consumers[0]=rd(j.vlp,0x80);pll_s.consumers[1]=rd(j.vlp,0x270);

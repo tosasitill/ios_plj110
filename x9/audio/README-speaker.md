@@ -538,9 +538,9 @@ pool并不16KiB页对齐，后续子分配/映射须保留与XHCI相邻页边界
 
 共享RAM映射／daemon登记／core DTOA处理组件现已编写，见下一节；仍没有真实memory
 authority／IRQ provider和combined caller，因此不访问pool、不宣称登记或播放已运行。
-还需完成完整AUDIO/APLL2 VLP/pad与双PA provider，以及将PCM session接到iOS backend。
+生产AUDIO/APLL2子租约已有实现，见下节；pad／双PA provider以及PCM到iOS backend的接线仍未完成。
 独立cold clock/pll/path probe仍要求TOP/INFRA baseline，不能拿它们的成功flag冒充
-combined acquire；统一电源初始化顺序必须单独实现。固件/共享RAM不能用Device映射；
+combined acquire；生产入口独立按真实DSP父owner的顺序申请。固件/共享RAM不能用Device映射；
 不采用WC/WB混合别名。最终只在这些生产接线完成后冻结并构建一个镜像。
 
 ### 接共享 DRAM、真实信号量和 core DTOA
@@ -589,6 +589,45 @@ IRQ源，不将mailbox IPI9当core IRQ，也不轮询任意RAM。它在真实sem
 已登记core flags，持sem调用同一PCM session的DTOA双快照，成功才清本task bit并clean；
 未知scene bit保留并隔离。没有当前IRQ注册者，不声称core通知已跑通。输出ring的
 sync/binding和PCM binding已有实现，最终仍待combined电源／AFE／双PA／iOS caller。
+
+### 接生产 AUDIO/APLL2 时钟子租约
+
+**生产时钟代码不是已注册的播放backend。** `clock_acquire`仅在本次真实DSP READY
+之后使用同一张Speaker ticket；缺独立的权威DL24 drain callback即拒绝。它不调用
+cold probe、不借probe成功flag，也不授予Ready或使能DMA。首次申请前／pin后均检查
+真实Online、无transport error及同generation，随后再进行AUDIO SMC与时钟操作。
+
+| 入口／资源 | 实际含义 |
+|---|---|
+| `x9_adsp_mt6993_clock_hold/drop` | 独立于shared-RAM的单调子租约；pin DSP父电源，阻止重启／父资源释放，允许真实halt；完成clock restore后才drop |
+| `x9_speaker_mt6993_clock_acquire(policy)` | 只投票AUDIO bit0，不接管DSP已有TOP/INFRA/AO；AUDIO全球off和全部foreign HWV仍严格验证；失败保留child／journal，不自动撤销父资源 |
+| AFE bank1 common CG | `0x10` mask **0x101b**：HOPPING0、F26M1、APLL2 3、H208M4、TUNER2 **12**；先只开HOPPING/F26M，真PLL／测频资格后才开APLL2 leaves |
+| tuner／ENGEN／OUT4 CG | AFE `0x38` mask0xfff7写0x375；`AUDIO_ENGEN_CON0=0x14` bit3；bank3 **0x08** bit17只ungate OUT4 leaf，不是engine enable。三字段独立journal，不接管AFE的OUT4格式／DL24 route |
+| `clock_validate/clock_afe` | fresh board/HWV/mux/APLL immutable PCW及consumer、逐页AFE CPU→PA与owned clock image；**不是Online/Ready/start准入**，允许同代际transport quarantine／保留历史stream fault时执行安全AFE disable/drain |
+| `clock_release(ticket)` | 真实board halt＋mandatory实际DL24 drain→restore tuner/OUT4 CG→PLL→common clock/AUDIO→fresh AO原值／AUDIO-off→drop child；失败保留资源／首错 |
+
+物理validate不要求所有memif idle，因此允许租约内AFE运行；它不会清掉native clock
+历史error、`j.stuck/pj.stuck`或不确定meter/update标记。未知时钟动作／第三方journal值
+仍拒绝访问与掉电。上层start/submit必须独立验证其真实DSP/PCM session；同代际
+quarantine不能成为新流许可。`AUDIO_ENGEN_CON0_MON=0x7c`没有公开bit语义，本子租约
+自己的APLL2 generator活跃时不把MON非零当foreign，也不把MON零当DMA drain证明。
+
+common CG、native tuner与PLL RW journal仅可用**最后一次写前prior**收敛uncertain，
+不能用最初cold saved值替代。meter trigger仍须fresh BUSY rise/fall；缺完整cycle
+不重放trigger、不撤PLL。首次pin后准入／map失败且未发出任何clock动作时，真实halt
+与drain通过即可drop未触碰child，不为了清理强求尚未建立的AFE映射。
+完整restore后重试drop只检查AO，不读已断电AFE，不二次restore。下一流必须完整
+cleanup并获取新的真实generation；永久CSR mapping首次创建后复用，避免每流泄漏。
+
+锁顺序为AFE→clock→board或transport→board→AP resource leaf。clock policy的drain
+callback必须独立资格化、不能反向重入clock或AFE；caller串行化生命周期。cached
+`clock_held`仅用于ownership，不替代fresh validate。iOS clock216B／PLL264B／board160B／
+DSP128B／AFE184B诊断ABI保持，未增加Ready或用户可控的生产验证位。
+
+本阶段只直接编译board／clock／AFE／shared／SweetX9Audio及iOS header ABI对象；
+没有重编HAL bundle、联合kernel/boot、运行测试套件或操作设备。生产clock目前
+**无combined调用者**；SMPU／实际firmware scene、core-A IRQ、pad／PA／drain与最终
+iOS backend仍需实接，不能将这组API当成完成出声或最终镜像。
 
 ### AUDIO-12：启动／运行配置资格与缓存故障位置
 

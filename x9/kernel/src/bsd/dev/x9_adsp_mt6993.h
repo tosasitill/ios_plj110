@@ -25,6 +25,10 @@ int x9_adsp_mt6993_speaker_halted_validate(uint64_t ticket);
  * actual unmap, while caller still owns the same ticket. No power acquisition. */
 int x9_adsp_mt6993_shared_hold(uint64_t ticket,uint64_t *lease);
 int x9_adsp_mt6993_shared_drop(uint64_t ticket,uint64_t lease);
+/* Independent AUDIO/APLL child, alongside the shared-RAM child. Holds the
+ * same board parents but never claims another AP ticket. */
+int x9_adsp_mt6993_clock_hold(uint64_t ticket,uint64_t *lease);
+int x9_adsp_mt6993_clock_drop(uint64_t ticket,uint64_t lease);
 /* MT6993 v3 SEMA_AUDIO: CFG+0x64, AP way bit 4*3+2. Thread context,
  * nonrecursive. lease is a monotonically minted per-acquisition token,
  * including an uncertain toggle: retain it on error for explicit release.
