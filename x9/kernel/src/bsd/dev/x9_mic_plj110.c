@@ -16,6 +16,7 @@
 #include <mach/vm_types.h>
 #include <kern/clock.h>
 #include "x9_mic_plj110.h"
+#include "x9_mic_mt6993_regs.h"
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 extern int X9PMIFAcquire(void);
 extern void X9PMIFRelease(void);
@@ -350,7 +351,7 @@ static int restore(struct power_journal *j)
 }
 static int board_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_status *s,
     struct x9_mic_afe_status *a,struct x9_mic_analog_status *analog,
-    struct x9_mic_digital_status *digital)
+    struct x9_mic_digital_status *digital,struct x9_mic_dma_status *dma)
 {
     if(s->flags&X9_MIC_BOARD_ATTEMPTED)return EALREADY;
     uint64_t start=mach_absolute_time();
@@ -407,6 +408,8 @@ static int board_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_stat
     }
     if(!e && digital) {
         e=digital_afe_preflight(j->cal,digital,h);
+        if(!e && dma){e=digital_dma_snapshot(j->cal,dma,false);
+            if(e)digital->last_register=0x80000000u|dma->last_register;}
         if(!e){e=x9_mic_mt6681_digital_l(&j->codec,digital);
             if(e)digital->last_register=j->codec.status.last_register;}
         if(!e)e=digital_afe_enable(j->cal);
@@ -416,9 +419,23 @@ static int board_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_stat
     s->last_errno=e;if(e && !h->last_errno)h->last_errno=e;
     uint32_t last_reg=s->last_register,codec_reg=h->last_register;
     uint32_t digital_reg=digital?digital->last_register:0;
+    if(dma && (dma->flags&X9_MIC_DMA_REGISTERS_VALID) && j->cal && !j->cal->stuck) {
+        uint32_t reg=dma->last_register;
+        int snapshot=digital_dma_snapshot(j->cal,dma,true);
+        if(snapshot && !e){e=snapshot;s->last_errno=e;h->last_errno=e;
+            digital_reg=digital->last_register=0x80000000u|dma->last_register;digital->last_errno=e;}
+        else dma->last_register=reg;
+    }
     if(!e)s->stage=X9_MIC_BOARD_RESTORE;
     if(digital && !e)digital->stage=X9_MIC_DIGITAL_RESTORE;
     int off=restore(j);
+    if(dma) {
+        dma->last_errno=e;
+        absolutetime_to_nanoseconds(mach_absolute_time()-start,&dma->elapsed_ns);
+        /* Never read VUL1 after restore releases the AFE mapping's clocks. */
+        if(off){dma->restore_errno=off;dma->flags|=X9_MIC_DMA_RETAINED;}
+        else if(dma->flags&X9_MIC_DMA_ATTEMPTED)dma->flags|=X9_MIC_DMA_RESTORED;
+    }
     if(digital) {
         if(off){digital->flags|=X9_MIC_DIGITAL_RETAINED;
             if(!digital->restore_errno)digital->restore_errno=off;}
@@ -473,16 +490,21 @@ static int board_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_stat
         digital->afe_rx[0],digital->afe_rx[1],digital->afe_ul,digital->afe_monitor[0],digital->afe_monitor[1],
         digital->codec_journal_restored,digital->codec_journal_count,
         digital->afe_journal_restored,digital->afe_journal_count);
+    if(dma)printf("X9 MIC VUL1: stage=%u flags=%x errno=%u restore=%u eligible=%u blockers=%x memifs=%x CPU=%x CON=%x/%x MON=%x/%x CUR=%llx/%llx (no DMA allocation/start)\n",
+        dma->stage,dma->flags,dma->last_errno,dma->restore_errno,dma->eligible,dma->blockers,
+        dma->active_memifs,dma->memif_con0,dma->con0_before,dma->con0_after,
+        dma->monitor_before,dma->monitor_after,dma->cur_before,dma->cur_after);
     return off?off:e;
 }
 int x9_mic_plj110_power_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_status *s)
-{return board_probe(h,s,NULL,NULL,NULL);}
+{return board_probe(h,s,NULL,NULL,NULL,NULL);}
 int x9_mic_plj110_calibrate(struct x9_mic_hardware_status *h,struct x9_mic_board_status *s,
     struct x9_mic_afe_status *a)
-{return board_probe(h,s,a,NULL,NULL);}
+{return board_probe(h,s,a,NULL,NULL,NULL);}
 int x9_mic_plj110_analog_l(struct x9_mic_hardware_status *h,struct x9_mic_board_status *s,
     struct x9_mic_afe_status *a,struct x9_mic_analog_status *analog)
-{return board_probe(h,s,a,analog,NULL);}
+{return board_probe(h,s,a,analog,NULL,NULL);}
 int x9_mic_plj110_digital_l(struct x9_mic_hardware_status *h,struct x9_mic_board_status *s,
-    struct x9_mic_afe_status *a,struct x9_mic_analog_status *analog,struct x9_mic_digital_status *digital)
-{return board_probe(h,s,a,analog,digital);}
+    struct x9_mic_afe_status *a,struct x9_mic_analog_status *analog,struct x9_mic_digital_status *digital,
+    struct x9_mic_dma_status *dma)
+{return board_probe(h,s,a,analog,digital,dma);}

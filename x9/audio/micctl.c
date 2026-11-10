@@ -13,6 +13,7 @@ _Static_assert(sizeof(struct x9_mic_board_status)==96,"board ABI size");
 _Static_assert(sizeof(struct x9_mic_afe_status)==192,"AFE ABI size");
 _Static_assert(sizeof(struct x9_mic_analog_status)==128,"analog ABI size");
 _Static_assert(sizeof(struct x9_mic_digital_status)==192,"digital ABI size");
+_Static_assert(sizeof(struct x9_mic_dma_status)==192,"DMA ABI size");
 static int hardware_status(int fd)
 {
     struct x9_mic_hardware_status h={0};
@@ -69,6 +70,18 @@ static int hardware_status(int fd)
             g.afe_ul,g.afe_rx[0],g.afe_rx[1],g.afe_pad,g.afe_clock,g.afe_gate,g.afe_monitor[0],g.afe_monitor[1],
             g.afe_after_ul,g.afe_after_rx[0],g.afe_after_rx[1],g.afe_after_pad,g.afe_after_clock,g.afe_after_gate);
     } else if(errno!=ENOTTY){perror("digital status");return 1;}
+    struct x9_mic_dma_status d={0};
+    if(ioctl(fd,X9_MIC_GET_DMA,&d)==0) {
+        printf("dma v%u stage=%u flags=%#x errno=%u restore_errno=%u eligible=%u blockers=%#x active_memifs=%#x CPU=%#x channel=%u ring_bytes=%u CON=%#x/%#x MON=%#x/%#x CUR=%#llx/%#llx journal=%u/%u pending=%#x observed=%llu dropped=%llu reg=%#x restore_reg=%#x\n",
+            d.version,d.stage,d.flags,d.last_errno,d.restore_errno,d.eligible,d.blockers,d.active_memifs,
+            d.memif_con0,d.adc_channel,d.ring_bytes,d.con0_before,d.con0_after,d.monitor_before,d.monitor_after,
+            d.cur_before,d.cur_after,d.journal_restored,d.journal_count,d.pending_flags,
+            d.observed_frames,d.dropped_frames,d.last_register,d.restore_register);
+        if(d.flags&X9_MIC_DMA_REGISTERS_VALID)for(unsigned c=0;c<2;c++)
+            printf("dma CONN%u words0,1,2,4,5,6,7=%#x/%#x/%#x/%#x/%#x/%#x/%#x\n",
+                20+c,d.route[c][0],d.route[c][1],d.route[c][2],d.route[c][3],d.route[c][4],d.route[c][5],d.route[c][6]);
+        if(d.blockers)printf("dma blockers: MAP=1 OWNER=2 COPY=4 QUIESCE=8 SOURCE_ID=16; eligible/idle is not allocated DMA, PCM or acoustic proof\n");
+    } else if(errno!=ENOTTY){perror("DMA status");return 1;}
     return 0;
 }
 static uint64_t ns(void)

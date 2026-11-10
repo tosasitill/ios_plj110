@@ -18,6 +18,49 @@ struct digital_afe_journal {
     bool owned, quiesced;
 };
 static struct digital_afe_journal digital_afe;
+static int digital_dma_snapshot(struct afe_journal *a,struct x9_mic_dma_status *s,bool after)
+{
+    /* Read only under the same cold AFE lease. No SRAM mapping, allocation,
+     * CPU loads, address writes, IRQ clear or memif enable. SMC power status
+     * cannot authorize any of those operations. */
+    int e=afe_access(a);if(e)return e;
+    if(!after) {
+        bzero(s,sizeof(*s));s->version=1;s->stage=X9_MIC_DMA_BASELINE;
+        s->flags=X9_MIC_DMA_ATTEMPTED;
+        s->blockers=X9_MIC_DMA_NEED_MAP|X9_MIC_DMA_NEED_OWNER|X9_MIC_DMA_NEED_COPY|
+            X9_MIC_DMA_NEED_QUIESCE|X9_MIC_DMA_NEED_SOURCE_ID;
+        s->ring_bytes=65536;s->adc_channel=0; /* proposal, NOT allocated */
+        s->memif_con0=rr(a->afe,MEMIF_CON0);
+        s->con0_before=rr(a->afe,VUL1_CON0);s->monitor_before=rr(a->afe,VUL1_MON0);
+        for(unsigned i=0;i<32;i++)if(rr(a->afe,x9_mic_memif_regs[i])&VUL1_ON)s->active_memifs|=1u<<i;
+        for(unsigned c=0;c<2;c++)for(unsigned w=0;w<7;w++)
+            s->route[c][w]=rr(a->afe,(c?CONN021:CONN020)+x9_mic_route_words[w]*4);
+    } else {
+        s->con0_after=rr(a->afe,VUL1_CON0);s->monitor_after=rr(a->afe,VUL1_MON0);
+    }
+    uint32_t hi=0,lo=0;bool stable=false;
+    for(unsigned i=0;i<3;i++) {
+        hi=rr(a->afe,VUL1_CUR_MSB);lo=rr(a->afe,VUL1_CUR);
+        if(hi==rr(a->afe,VUL1_CUR_MSB)){stable=true;break;}
+    }
+    s->last_register=VUL1_CUR;if(!stable || (hi&~0x1ffu))return EIO;
+    uint64_t cur=((uint64_t)hi<<32)|lo;
+    if(after){s->cur_after=cur;return 0;}
+    s->cur_before=cur;s->flags|=X9_MIC_DMA_REGISTERS_VALID;
+    if(!s->active_memifs && !(s->monitor_before&(VUL1_MON_BUSY|VUL1_MON_FULL)))s->flags|=X9_MIC_DMA_IDLE;
+    bool empty=true;
+    for(unsigned c=0;c<2;c++)for(unsigned w=0;w<7;w++)if(s->route[c][w])empty=false;
+    if(empty)s->flags|=X9_MIC_DMA_ROUTE_EMPTY;
+    s->last_register=VUL1_MON0;
+    if(!(s->flags&X9_MIC_DMA_IDLE))return EBUSY;
+    s->last_register=CONN020;if(!empty)return EBUSY;
+    s->last_register=MEMIF_CON0;
+    if(s->memif_con0&4)return EBUSY; /* CPU compact SRAM is not normal S16 */
+    s->last_register=VUL1_CON0;
+    if(s->con0_before&(1u<<7))return EBUSY; /* do not replay a clear strobe */
+    s->eligible=1;s->last_register=0;
+    return 0; /* local format/idle only; all provider blockers stay asserted */
+}
 static int digital_afe_update(struct afe_journal *a,unsigned reg,uint32_t mask,uint32_t value)
 {
     struct digital_afe_journal *d=&digital_afe;

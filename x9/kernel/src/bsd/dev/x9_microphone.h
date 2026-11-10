@@ -158,6 +158,38 @@ struct x9_mic_digital_status {
     uint64_t elapsed_ns;
 };
 #define X9_MIC_GET_DIGITAL _IOR('M', 0x9b, struct x9_mic_digital_status)
+/* Cached VUL1 qualification/stream evidence, independent of existing ABIs.
+ * digital-l only reads registers while its AFE lease is held. SRAM_REQUEST
+ * is a power request, NOT an allocator or a DMA drain acknowledgement.
+ * ELIGIBLE/IDLE/ROUTE_EMPTY must never be interpreted as PCM or READY. */
+#define X9_MIC_DMA_ATTEMPTED 1u
+#define X9_MIC_DMA_REGISTERS_VALID 2u
+#define X9_MIC_DMA_IDLE 4u
+#define X9_MIC_DMA_ROUTE_EMPTY 8u
+#define X9_MIC_DMA_BOUND 16u
+#define X9_MIC_DMA_STARTED 32u
+#define X9_MIC_DMA_DRAINED 64u
+#define X9_MIC_DMA_RESTORED 128u
+#define X9_MIC_DMA_RETAINED 256u
+#define X9_MIC_DMA_NEED_MAP 1u
+#define X9_MIC_DMA_NEED_OWNER 2u
+#define X9_MIC_DMA_NEED_COPY 4u
+#define X9_MIC_DMA_NEED_QUIESCE 8u
+#define X9_MIC_DMA_NEED_SOURCE_ID 16u
+enum x9_mic_dma_stage { X9_MIC_DMA_UNBOUND, X9_MIC_DMA_BASELINE,
+    X9_MIC_DMA_CONFIG, X9_MIC_DMA_ENABLE, X9_MIC_DMA_POLL,
+    X9_MIC_DMA_DISABLE, X9_MIC_DMA_DRAIN, X9_MIC_DMA_RESTORE,
+    X9_MIC_DMA_OFF };
+struct x9_mic_dma_status {
+    uint32_t version, stage, flags, last_errno, restore_errno;
+    uint32_t blockers, eligible, adc_channel, ring_bytes, memif_con0;
+    uint32_t active_memifs, last_register;
+    uint32_t con0_before, con0_after, monitor_before, monitor_after;
+    uint32_t route[2][7]; /* words 0,1,2,4,5,6,7; never read reserved word3 */
+    uint32_t journal_count, journal_restored, pending_flags, restore_register;
+    uint64_t base, end, cur_before, cur_after, observed_frames, dropped_frames, elapsed_ns;
+};
+#define X9_MIC_GET_DMA _IOR('M', 0x9c, struct x9_mic_dma_status)
 #ifdef KERNEL
 #include <stdbool.h>
 /* Thread context only. start/stop are serialized and called WITHOUT the PCM

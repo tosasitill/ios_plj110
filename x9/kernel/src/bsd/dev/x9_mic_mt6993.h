@@ -9,7 +9,7 @@
 #define X9_MIC_AFE_PHYS 0x1a110000ULL
 #define X9_MIC_AFE_BYTES 0x10000u
 struct x9_mic_mt6993_platform {
-    uint32_t version, adc_channel; /* version=2; verified bottom mic mapping */
+    uint32_t version, adc_channel; /* version=3; verified board mic mapping */
     volatile uint32_t *afe;       /* device mapping of X9_MIC_AFE_PHYS */
     void *dma;                    /* exclusively owned stereo S16 ring */
     uint64_t dma_bus_address;    /* AFE-visible, NOT a guessed CPU physical address */
@@ -33,10 +33,18 @@ struct x9_mic_mt6993_platform {
      * before codec clocks/transport are restored or released. */
     int (*capture_prepare)(const struct x9_mic_hardware_status *);
     int (*capture_unprepare)(void);
-    /* For noncoherent mappings, invalidate only DMA-written complete bytes
-     * before CPU loads; also prevent dirty CPU lines overwriting DMA output. */
-    void (*sync_for_cpu)(uint32_t offset, uint32_t bytes);
-    void (*sync_for_device)(void);
+    /* Called after ON clear/readback, including partial start. Must prove
+     * the entire write path has drained, NOT just ON=0, stable CUR or the
+     * local VUL1 MON0. Failure pins journal/buffer/clocks/transport for boot.
+     * Runs with polling lock held; no worker waits or guessed-delay success. */
+    int (*dma_quiesce)(void);
+    /* The provider owns CPU/cache semantics. For device-mapped SRAM use
+     * aligned volatile MMIO loads (not ordinary int16_t/memcpy loads). For
+     * DRAM synchronize complete DMA-written bytes first. Copy exactly frames
+     * of the selected channel; never synthesize data. Offsets cannot wrap.
+     * sync_for_device prevents dirty CPU lines overwriting DMA output. */
+    int (*copy_frames)(uint32_t offset, int16_t *mono, uint32_t frames, uint32_t channel);
+    int (*sync_for_device)(void);
 };
 /* Call only after platform transport/identity/calibration and exclusive DMA
  * contract have been verified. There is NO board caller in the current tree. */
@@ -47,6 +55,7 @@ int x9_mic_mt6993_calibrate(void);
 int x9_mic_mt6993_analog_l(void);
 int x9_mic_mt6993_digital_l(void);
 void x9_mic_mt6993_get_digital(struct x9_mic_digital_status *);
+void x9_mic_mt6993_get_dma(struct x9_mic_dma_status *);
 void x9_mic_mt6993_get_analog(struct x9_mic_analog_status *);
 void x9_mic_mt6993_get_afe(struct x9_mic_afe_status *);
 void x9_mic_mt6993_get_board(struct x9_mic_board_status *);

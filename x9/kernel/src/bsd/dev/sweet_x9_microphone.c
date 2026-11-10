@@ -130,6 +130,9 @@ static int mic_ioctl(dev_t d,u_long cmd,caddr_t data,__unused int f,struct proc 
     if(cmd==X9_MIC_GET_DIGITAL) {
         x9_mic_mt6993_get_digital((void *)data);return 0;
     }
+    if(cmd==X9_MIC_GET_DMA) {
+        x9_mic_mt6993_get_dma((void *)data);return 0;
+    }
     if(cmd==X9_MIC_POWER_PROBE || cmd==X9_MIC_CALIBRATE || cmd==X9_MIC_ANALOG_L || cmd==X9_MIC_DIGITAL_L) {
         if(minor(d)!=0 || kauth_cred_getuid(kauth_cred_get())!=0)return EPERM;
         /* mode1/status remain strictly passive. No implicit capture backend. */

@@ -106,11 +106,8 @@ static int afe_idle(struct afe_journal *a,bool engine_on)
     for(unsigned i=0;i<5;i++)if(rr(a->afe,src[i])&1){a->s->last_register=src[i];return EBUSY;}
     if(rr(a->afe,0xf14)&0xfff){a->s->last_register=0xf14;return EBUSY;}
     if(rr(a->afe,0x20)&(1u<<26)){a->s->last_register=0x20;return EBUSY;}
-    static const unsigned memifs[]={0x4460,0x4490,0x44c0,0x44f0,0x4520,0x4550,
-        0x4580,0x45b0,0x45e0,0x46a0,0x46d0,0x4700,0x4730,
-        0x4d80,0x4db0,0x4de0,0x4e10,0x4e40,0x4e70,0x4ea0,0x4ed0,0x4f00,0x4f30,0x4f60};
-    for(unsigned i=0;i<sizeof(memifs)/sizeof(memifs[0]);i++)if(rr(a->afe,memifs[i])&(1u<<28)) {
-        a->s->last_register=memifs[i];return EBUSY;
+    for(unsigned i=0;i<sizeof(x9_mic_memif_regs)/sizeof(x9_mic_memif_regs[0]);i++)if(rr(a->afe,x9_mic_memif_regs[i])&VUL1_ON) {
+        a->s->last_register=x9_mic_memif_regs[i];return EBUSY;
     }
     return 0;
 }

@@ -13,10 +13,8 @@
 #include "x9_mic_mt6993.h"
 #include "x9_mic_plj110.h"
 
-enum {VUL1_BASE_MSB=0x4d90,VUL1_BASE=0x4d94,VUL1_CUR_MSB=0x4d98,
-    VUL1_CUR=0x4d9c,VUL1_END_MSB=0x4da0,VUL1_END=0x4da4,VUL1_CON0=0x4db0,
-    CONN020=0x2300,CONN021=0x2320};
-#define VUL1_ON (1u<<28)
+#include "x9_mic_mt6993_regs.h"
+_Static_assert(sizeof(struct x9_mic_dma_status)==192,"DMA ABI size");
 LCK_GRP_DECLARE(afe_mic_group,"x9-mic-afe");
 LCK_MTX_DECLARE(afe_mic_lock,&afe_mic_group);
 static struct x9_mic_mt6993_platform hw;
@@ -27,9 +25,15 @@ static struct x9_mic_hardware_status diagnostic={.version=1,
     .chosen_phase={-1,-1},.cycle={-1,-1}};
 static struct x9_mic_board_status board_diagnostic={.version=1};
 static uint64_t generation,last_poll,last_progress;
-static uint32_t cursor,old_regs[9];
+static struct x9_mic_dma_status dma_diagnostic={.version=1,
+    .blockers=X9_MIC_DMA_NEED_MAP|X9_MIC_DMA_NEED_OWNER|X9_MIC_DMA_NEED_COPY|
+        X9_MIC_DMA_NEED_QUIESCE|X9_MIC_DMA_NEED_SOURCE_ID};
+static bool dma_issued;
+static uint32_t cursor,old_regs[7],expected_regs[7],written;
+static const uint32_t reg_masks[]={VUL1_FORMAT_MASK,0x1ff,0xfffffff0,
+    0x1ff,0xfffffff0,UINT32_MAX,UINT32_MAX};
 static const uint32_t save_regs[]={VUL1_CON0,VUL1_BASE_MSB,VUL1_BASE,
-    VUL1_END_MSB,VUL1_END,CONN020,CONN021,CONN020+4,CONN021+4};
+    VUL1_END_MSB,VUL1_END,CONN020,CONN021};
 static uint32_t rd(uint32_t reg)
 {
     uint32_t value=hw.afe[reg/4];__asm__ volatile("dmb oshld":::"memory");return value;
@@ -38,19 +42,63 @@ static void wr(uint32_t reg,uint32_t value)
 {
     hw.afe[reg/4]=value;__asm__ volatile("dsb oshst":::"memory");
 }
+static int program_reg(unsigned i,uint32_t value)
+{
+    uint32_t mask=reg_masks[i];
+    dma_diagnostic.last_register=save_regs[i];
+    uint32_t old=rd(save_regs[i]);
+    if((rd(VUL1_CON0)&(VUL1_ON|(1u<<7))) || (old&mask)!=(old_regs[i]&mask))return EBUSY;
+    expected_regs[i]=value&mask;written|=1u<<i; /* before possibly effective write */
+    dma_diagnostic.pending_flags=written;
+    ++dma_diagnostic.journal_count;dma_diagnostic.last_register=save_regs[i];
+    wr(save_regs[i],(old&~mask)|expected_regs[i]);
+    return (rd(save_regs[i])&mask)==expected_regs[i]?0:EIO;
+}
 static int stop_locked(void)
 {
     active=false;
+    /* Uncertain DMA ownership/drain is terminal for this boot. Do not turn
+     * a second StopIO into an ON=0 success or free the retained buffer. */
+    if(dma_stuck)return dma_diagnostic.restore_errno?dma_diagnostic.restore_errno:EIO;
+    int e=0;
     if(saved) {
-        wr(VUL1_CON0,rd(VUL1_CON0)&~VUL1_ON);
-        /* Never restore DMA addresses or release memory while ON is stuck. */
-        if(rd(VUL1_CON0)&VUL1_ON){dma_stuck=true;
-            diagnostic.restore_errno=EIO;diagnostic.flags|=X9_MIC_HW_RESTORE_FAILED;return EIO;}
-        delay(125); /* OPPO ADDA capture-off minimum one 8k sample */
-        for(unsigned i=1;i<sizeof(save_regs)/sizeof(save_regs[0]);i++)wr(save_regs[i],old_regs[i]);
-        wr(VUL1_CON0,old_regs[0]);saved=false;
+        if(dma_issued) {
+            dma_diagnostic.stage=X9_MIC_DMA_DISABLE;
+            dma_diagnostic.last_register=VUL1_CON0;
+            uint32_t con=rd(VUL1_CON0);
+            if(con&(1u<<7)){e=EBUSY;goto dma_failed;}
+            wr(VUL1_CON0,con&~VUL1_ON);
+            dma_diagnostic.con0_after=rd(VUL1_CON0);
+            dma_diagnostic.monitor_after=rd(VUL1_MON0);
+            if(dma_diagnostic.con0_after&VUL1_ON){e=EIO;goto dma_failed;}
+            dma_diagnostic.stage=X9_MIC_DMA_DRAIN;
+            /* Local pending/WEN/sync and stable CUR are diagnostic only.
+             * Only the board's complete write-path provider authorizes
+             * restoring addresses/routing and releasing clocks/memory. */
+            e=hw.dma_quiesce();if(e)goto dma_failed;
+            dma_diagnostic.monitor_after=rd(VUL1_MON0);
+            dma_diagnostic.last_register=VUL1_MON0;
+            if(dma_diagnostic.monitor_after&VUL1_MON_BUSY){e=EIO;goto dma_failed;}
+            dma_diagnostic.flags|=X9_MIC_DMA_DRAINED;dma_issued=false;
+        }
+        dma_diagnostic.stage=X9_MIC_DMA_RESTORE;
+        static const unsigned reverse_write_order[]={6,5,0,4,3,2,1};
+        for(unsigned i=0;i<7;i++) {
+            unsigned k=reverse_write_order[i];if(!(written&(1u<<k)))continue;
+            dma_diagnostic.last_register=save_regs[k];
+            if(rd(VUL1_CON0)&(VUL1_ON|(1u<<7))){e=EBUSY;goto dma_failed;}
+            uint32_t v=rd(save_regs[k]),mask=reg_masks[k];
+            if((v&mask)!=expected_regs[k] && (v&mask)!=(old_regs[k]&mask)) {
+                e=EBUSY;goto dma_failed; /* never overwrite a late foreign owner */
+            }
+            wr(save_regs[k],(v&~mask)|(old_regs[k]&mask));
+            if((rd(save_regs[k])&mask)!=(old_regs[k]&mask)){e=EIO;goto dma_failed;}
+            written&=~(1u<<k);dma_diagnostic.pending_flags=written;
+            ++dma_diagnostic.journal_restored;
+        }
+        saved=false;dma_diagnostic.con0_after=rd(VUL1_CON0);
     }
-    int e=capture_prepared?hw.capture_unprepare():0;
+    e=capture_prepared?hw.capture_unprepare():0;
     if(e)goto failed;
     capture_prepared=false;diagnostic.flags&=~X9_MIC_HW_CAPTURE;
     if(codec_prepared) {
@@ -60,8 +108,18 @@ static int stop_locked(void)
     }
     e=prepared?hw.unprepare():0;
     if(!e)prepared=false;
-    if(!e){if(!diagnostic.last_errno)diagnostic.stage=X9_MIC_HW_STOPPED;return 0;}
+    if(!e){
+        dma_diagnostic.flags|=X9_MIC_DMA_RESTORED;dma_diagnostic.stage=X9_MIC_DMA_OFF;
+        if(!diagnostic.last_errno)diagnostic.stage=X9_MIC_HW_STOPPED;
+        return 0;
+    }
+    goto failed;
+dma_failed:
+    dma_stuck=true;
 failed:
+    dma_diagnostic.restore_register=dma_diagnostic.last_register;
+    if(!dma_diagnostic.restore_errno)dma_diagnostic.restore_errno=e;
+    dma_diagnostic.flags|=X9_MIC_DMA_RETAINED;
     if(!diagnostic.restore_errno)diagnostic.restore_errno=e;
     diagnostic.flags|=X9_MIC_HW_RESTORE_FAILED;
     return e;
@@ -73,8 +131,12 @@ static int afe_stop(void)
 static int afe_start(uint64_t g)
 {
     lck_mtx_lock(&afe_mic_lock);int e=0;
-    if(active || prepared || dma_stuck)e=EBUSY;
+    if(active || prepared || dma_stuck || (diagnostic.flags&X9_MIC_HW_RESTORE_FAILED))e=EBUSY;
     else {
+        bzero(&dma_diagnostic,sizeof(dma_diagnostic));dma_diagnostic.version=1;
+        dma_diagnostic.flags=X9_MIC_DMA_ATTEMPTED|X9_MIC_DMA_BOUND;
+        dma_diagnostic.adc_channel=hw.adc_channel;dma_diagnostic.ring_bytes=hw.dma_bytes;
+        dma_diagnostic.base=hw.dma_bus_address;dma_diagnostic.end=hw.dma_bus_address+hw.dma_bytes-1;
         bzero(&diagnostic,sizeof(diagnostic));diagnostic.version=1;
         diagnostic.stage=X9_MIC_HW_RESOURCES;
         diagnostic.chosen_phase[0]=diagnostic.chosen_phase[1]=-1;
@@ -95,57 +157,74 @@ static int afe_start(uint64_t g)
         }
         if(!e) {
             diagnostic.stage=X9_MIC_HW_DMA;
-            for(unsigned i=0;i<sizeof(save_regs)/sizeof(save_regs[0]);i++)old_regs[i]=rd(save_regs[i]);
-            saved=true;
-            /* The board owns ALL routing words for these outputs, not just
-             * bit16/17. Refuse an inherited/mixed source rather than record
-             * DL/PCM/sine. Other words (2,4..7) must also be empty. */
-            for(unsigned c=0;c<2 && !e;c++)for(unsigned w=0;w<8;w++) {
-                if(w==3)continue; /* reserved hole, no AFE_CONN020/021_3 */
-                if(rd((c?CONN021:CONN020)+w*4))e=EBUSY;
+            dma_diagnostic.stage=X9_MIC_DMA_BASELINE;
+            dma_diagnostic.con0_before=rd(VUL1_CON0);
+            dma_diagnostic.monitor_before=rd(VUL1_MON0);
+            dma_diagnostic.memif_con0=rd(MEMIF_CON0);
+            dma_diagnostic.flags|=X9_MIC_DMA_REGISTERS_VALID;
+            if(dma_diagnostic.con0_before&(VUL1_ON|(1u<<7)))e=EBUSY;
+            if(dma_diagnostic.monitor_before&(VUL1_MON_BUSY|VUL1_MON_FULL))e=EBUSY;
+            /* Every actual routing word must be empty; word3 is reserved.
+             * Reject before saving/writing: failure must not restore foreign
+             * routes or untouched address registers. */
+            for(unsigned c=0;c<2 && !e;c++)for(unsigned w=0;w<7;w++) {
+                uint32_t value=rd((c?CONN021:CONN020)+x9_mic_route_words[w]*4);
+                dma_diagnostic.route[c][w]=value;
+                if(value){dma_diagnostic.last_register=(c?CONN021:CONN020)+x9_mic_route_words[w]*4;e=EBUSY;}
             }
+            if(!e)dma_diagnostic.flags|=X9_MIC_DMA_IDLE|X9_MIC_DMA_ROUTE_EMPTY;
         }
         if(!e) {
+            for(unsigned i=0;i<7;i++)old_regs[i]=rd(save_regs[i]);
+            written=0;saved=true;
+            dma_diagnostic.stage=X9_MIC_DMA_CONFIG;
             uint64_t base=hw.dma_bus_address,end=base+hw.dma_bytes-1;
-            hw.sync_for_device();
-            wr(VUL1_BASE_MSB,(uint32_t)(base>>32));wr(VUL1_BASE,(uint32_t)base);
-            wr(VUL1_END_MSB,(uint32_t)(end>>32));wr(VUL1_END,(uint32_t)end);
-            /* stereo, 16-bit packed, normal mode; select fs=0xa (48k).
-             * Burst/domain fields are board-qualified values from prepare. */
-            uint32_t mask=(0x1fu<<8)|(1u<<6)|(1u<<5)|(1u<<4)|(1u<<3)|(1u<<2)|3u;
-            uint32_t con=(old_regs[0]&~mask)|(0xau<<8)|(1u<<3);
-            wr(CONN020,1u<<16);wr(CONN021,1u<<17); /* vendor ADDA_UL_CH1/2, word0 */
-            if(rd(CONN020)!=(1u<<16) || rd(CONN021)!=(1u<<17))e=EIO;
+            e=hw.sync_for_device();
+            if(!e)e=program_reg(1,(uint32_t)(base>>32));
+            if(!e)e=program_reg(2,(uint32_t)base);
+            if(!e)e=program_reg(3,(uint32_t)(end>>32));
+            if(!e)e=program_reg(4,(uint32_t)end);
+            /* stereo, signed packed S16, normal SRAM, fs=0xa (48k).
+             * Burst/domain fields remain board-qualified prepare values. */
+            if(!e)e=program_reg(0,(0xau<<8)|(1u<<3));
+            if(!e)e=program_reg(5,1u<<16);
+            if(!e)e=program_reg(6,1u<<17);
             if(e)goto start_failed;
-            wr(VUL1_CON0,con|VUL1_ON);
-            /* Address registers expose bits31:4; low nibble is reserved. */
-            if(!(rd(VUL1_CON0)&VUL1_ON) || (rd(VUL1_BASE)&~15u)!=((uint32_t)base&~15u) ||
-               (rd(VUL1_END)&~15u)!=((uint32_t)end&~15u) ||
-               (rd(VUL1_BASE_MSB)&0x1ffu)!=(uint32_t)(base>>32) ||
-               (rd(VUL1_END_MSB)&0x1ffu)!=(uint32_t)(end>>32))e=EIO;
+            dma_diagnostic.stage=X9_MIC_DMA_ENABLE;dma_diagnostic.last_register=VUL1_CON0;
+            dma_issued=true; /* before ON write, even a failed readback can DMA */
+            dma_diagnostic.flags|=X9_MIC_DMA_STARTED;
+            wr(VUL1_CON0,rd(VUL1_CON0)|VUL1_ON);
+            if(!(rd(VUL1_CON0)&VUL1_ON))e=EIO;
             else {generation=g;cursor=0;last_progress=last_poll=mach_absolute_time();active=true;
-                diagnostic.flags|=X9_MIC_HW_CAPTURE;}
+                diagnostic.flags|=X9_MIC_HW_CAPTURE;dma_diagnostic.stage=X9_MIC_DMA_POLL;}
         }
 start_failed:
-        if(e) {diagnostic.last_errno=e;int off=stop_locked();if(off)e=off;}
+        if(e) {diagnostic.last_errno=e;dma_diagnostic.last_errno=e;
+            uint32_t reg=dma_diagnostic.last_register;
+            int off=stop_locked();dma_diagnostic.last_register=reg;if(off)e=off;}
     }
     lck_mtx_unlock(&afe_mic_lock);return e;
 }
 static int poll_locked(void)
 {
+    dma_diagnostic.last_register=VUL1_MON0;
+    if(!(rd(VUL1_CON0)&VUL1_ON) || (rd(VUL1_MON0)&VUL1_MON_FULL))return EIO;
     uint32_t hi=0,lo=0;bool stable=false;
     for(unsigned i=0;i<3;i++) {
         hi=rd(VUL1_CUR_MSB);lo=rd(VUL1_CUR);
         if(hi==rd(VUL1_CUR_MSB)){stable=true;break;}
     }
-    if(!stable)return EAGAIN;
-    uint64_t ptr=((uint64_t)hi<<32)|lo,base=hw.dma_bus_address;
     uint64_t now=mach_absolute_time(),elapsed;
     absolutetime_to_nanoseconds(now-last_poll,&elapsed);
     uint64_t stalled;absolutetime_to_nanoseconds(now-last_progress,&stalled);
     if(stalled>=250000000)return ETIMEDOUT;
-    if(!ptr && elapsed<100000000)return 0; /* bounded initial DMA wait */
+    dma_diagnostic.last_register=VUL1_CUR;
+    if(!stable)return EAGAIN; /* instability is still bounded by last_progress */
+    if(hi&~0x1ffu)return EIO;
+    uint64_t ptr=((uint64_t)hi<<32)|lo,base=hw.dma_bus_address;
+    if(!ptr && stalled<100000000){last_poll=now;return 0;} /* bounded initial DMA wait */
     if(ptr<base || ptr>=base+hw.dma_bytes || (ptr&3))return EIO;
+    dma_diagnostic.cur_after=ptr;
     uint32_t next=(uint32_t)(ptr-base);
     /* A pointer alone cannot distinguish a full wrap. If the worker was
      * delayed >=100ms (ring >=341ms), discard ambiguous pending bytes instead
@@ -153,19 +232,20 @@ static int poll_locked(void)
     if(elapsed>=100000000) {
         uint64_t frames=elapsed*X9_MIC_RATE/1000000000;
         x9_mic_backend_drop(generation,(uint32_t)MIN(frames,UINT32_MAX));
+        dma_diagnostic.dropped_frames+=(uint32_t)MIN(frames,UINT32_MAX);
         if(next!=cursor)last_progress=now;
         cursor=next;last_poll=now;return 0;
     }
     uint32_t bytes=(next+hw.dma_bytes-cursor)%hw.dma_bytes;
-    if(!bytes)return 0;
+    if(!bytes){last_poll=now;return 0;}
     last_progress=now;
     if(bytes>hw.dma_bytes/2)return EIO;
     int16_t mono[256];
     while(bytes) {
         uint32_t n=MIN(MIN(bytes,hw.dma_bytes-cursor)/4,256u);
-        hw.sync_for_cpu(cursor,n*4);
-        const int16_t *pcm=(const int16_t *)((const uint8_t *)hw.dma+cursor);
-        for(uint32_t i=0;i<n;i++)mono[i]=pcm[i*2+hw.adc_channel];
+        int copy=hw.copy_frames(cursor,mono,n,hw.adc_channel);
+        if(copy){bzero(mono,sizeof(mono));return copy;}
+        dma_diagnostic.observed_frames+=n;
         /* Preserve increasing last-sample time across chunks of one poll. */
         uint64_t behind,t=now;
         nanoseconds_to_absolutetime((uint64_t)(bytes-n*4)/4*1000000000/X9_MIC_RATE,&behind);
@@ -185,8 +265,9 @@ static void afe_worker(__unused void *arg,__unused wait_result_t result)
         if(active) {
             int e=poll_locked();
             if(e && e!=EAGAIN) {
-                diagnostic.last_errno=e;
-                uint64_t g=generation;int off=stop_locked();
+                diagnostic.last_errno=e;dma_diagnostic.last_errno=e;
+                uint32_t reg=dma_diagnostic.last_register;
+                uint64_t g=generation;int off=stop_locked();dma_diagnostic.last_register=reg;
                 x9_mic_backend_fault(g,off?off:e);
             }
         }
@@ -198,8 +279,8 @@ static void afe_worker(__unused void *arg,__unused wait_result_t result)
 }
 int x9_mic_mt6993_register(const struct x9_mic_mt6993_platform *p)
 {
-    if(!p || p->version!=2 || p->adc_channel>1 || !p->afe || !p->dma ||
-       !p->prepare || !p->unprepare || !p->sync_for_cpu || !p->sync_for_device ||
+    if(!p || p->version!=3 || p->adc_channel>1 || !p->afe || !p->dma ||
+       !p->prepare || !p->unprepare || !p->copy_frames || !p->sync_for_device || !p->dma_quiesce ||
        !p->capture_prepare || !p->capture_unprepare || p->codec.version!=1 ||
        p->codec.flags!=X9_MT6681_REQUIRED || !p->codec.read8 || !p->codec.write8 ||
        ((uintptr_t)p->afe&3) || ((uintptr_t)p->dma&15) || (p->dma_bus_address&15) ||
@@ -219,7 +300,7 @@ int x9_mic_mt6993_register(const struct x9_mic_mt6993_platform *p)
     }
     const struct x9_mic_backend backend={1,afe_start,afe_stop};
     if(!e)e=x9_mic_register_backend(&backend);
-    if(!e)registered=true;
+    if(!e){registered=true;dma_diagnostic.blockers=0;dma_diagnostic.flags|=X9_MIC_DMA_BOUND;}
     lck_mtx_unlock(&afe_mic_lock);return e;
 }
 void x9_mic_mt6993_get_hardware(struct x9_mic_hardware_status *s)
@@ -267,10 +348,15 @@ int x9_mic_mt6993_digital_l(void)
     lck_mtx_lock(&afe_mic_lock);
     int e=(registered || prepared || active || dma_stuck)?EBUSY:
         x9_mic_plj110_digital_l(&diagnostic,&board_diagnostic,&afe_diagnostic,
-            &analog_diagnostic,&digital_diagnostic);
+            &analog_diagnostic,&digital_diagnostic,&dma_diagnostic);
     lck_mtx_unlock(&afe_mic_lock);return e;
 }
 void x9_mic_mt6993_get_digital(struct x9_mic_digital_status *s)
 {
     lck_mtx_lock(&afe_mic_lock);*s=digital_diagnostic;lck_mtx_unlock(&afe_mic_lock);
+}
+
+void x9_mic_mt6993_get_dma(struct x9_mic_dma_status *s)
+{
+    lck_mtx_lock(&afe_mic_lock);*s=dma_diagnostic;lck_mtx_unlock(&afe_mic_lock);
 }
