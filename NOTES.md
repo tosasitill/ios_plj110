@@ -183,13 +183,14 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
 
-## GPU活动交接(GPU-PAD-1,2026-11-10): 顶点补齐覆盖/绑定恢复与真实资源barrier修正;待插件编译及实机
+## GPU活动交接(GPU-PAD-1,2026-11-10): 顶点补齐覆盖/绑定恢复与真实资源barrier修正;276插件编译成功,联合包待构建
 
 - **本轮用户观察/运行证据**:用户仍观察少量三角形闪烁、渲染/显示错误,文字多时明显。只读`~/181.txt`确认32.718s `X9 PAD padded=1 skipped=0 last=6->12`,82.458s padded16384;捕获内ASYNC窗口failed均0,且IB WIDEN实际命中。**提交成功不等于像素正确**;旧skipped没有统计start非零/实例/超过96等入口排除,不能据skipped0证明文字批次已受保护。此轮没有新的设备测试/截图/像素回读。
 - **参考/确定差异**:只读本地UniXNU GPU parity引用及新取`UniXNU/AdrenoMetal`固定HEAD **da7aedd827dfdb581eac041615c45cc1cd5e71db**,没有将A740/Turnip硬件修复混入Mali。继续保留现有963f+ce63701译码器与PanVK275代码;没有证据要求换整个translator。实际执行的pinned runtime `argument_table.rs`明确offset setter会使inline bytes失效(即使offset0),自己的pad镜像却保留旧bytes并在pad后恢复;`fence.rs`真实resources barrier会`barrier_orders_loads_of`,旧前端改成buffers|textures scope时漏掉这个分支。**这两个API差异已静态确认,不是181文字闪烁根因已实机确认**。
 - **顶点代码**:保留12对齐/`x9p0`关闭,移除96顶点上限,支持非零start(复制原prefix,不重基vertex_id)及实例绘制(保留constant/per-instance绑定/baseInstance);大于4096B用真正Shared scratch,小draw仍用原inline上传。全draw临时快照上限1MiB、start/count各上限65536;所有scratch先分配、由CB持有至完成,分配/格式/资格失败走原绘制。按Metal格式字节宽和stepRate1校验,不读取紧致buffer缺失的末record尾部,只补零未被attribute使用的尾部;不把残缺primitive补成真实三角形。offset setter清掉inline镜像,每次绑定/绘制/全部恢复均检查返回值;失败CB不继续提交旧pad状态。线程安全once初始化;日志增加large/started/instanced及其首次命中,用于确认新增路径是否真运行。
 - **同步代码**:新增C ABI `nmb_render_barrier_resources`,检查每entry只有一个buffer/texture、转真实`ResourceRef`并保留原after/before stages;前端保留资源/surface生命周期,不再伪造每项read|write use或以scope代替指定资源barrier。这是指定资源load同步语义修正,不宣称减少了帧时间。
 - **编译里程碑/范围**:第一轮arm64-iOS16前端对象 **exit0**,仅两条既有X9FrameCapture NBBuffer协议warning;后续barrier桥接/once修改尚待完整插件编译。没有跑测试脚本/套件、CI build、device/mailbox/root写入或成功镜像二次校验。源码只改四个Metal前端/桥接文件,其他窗口蜂窝/相机/MIC等工作保持;私有`.local/x9/work/gpu-pad-20261110/`保存reference/命令/原始编译日志。
+- **插件固定构建里程碑**:代码提交 **3b13365**,pinned963f系列stamp匹配;`build-general-metal.py --revision 276` **Rust release/ObjC++/transport/buffer manager/factory/probe/link/strip/adhoc签名全exit0**,只有上述两条既有NBBuffer协议warning,无新增编译error。`package-panvk-native.py --revision 276 --source-library .local/x9/work/x9-metal-render/X9PanVK275.bundle/X9PanVK`只重新版本化275已实跑ICD,**没有更换/重编Mesa代码**。插件包新目录 **`x9/out/x9-gpu276-joint125/plugin-package/`**,10文件/payload53264384B;generated allowlist随276入库。**未来此allowlist内核必须先stage276 mailbox**,当前已安装275未操作/旧候选不变。完整kernel/boot尚未构建。`gh run list --commit 3b13365`为[]/exit0,无CI run/主动push;新取`~/182.txt`窄GPU行仍failed0且旧PAD命中,不是276实测。私有`plugin-build.log/.exit=0`、`panvk-package.log/.exit=0`、`plugins-package.log/.exit=0`和`{181,182}-gpu-selected.txt`保留原始依据。
 - **剩余/下一步**:新增大批次/start/instances未实机验收;indexed/indirect/GPU产生的顶点仍不是此CPU snapshot workaround的解决范围,依赖vertex_id产生不同尾部位置/有shader副作用的泛用shader也不能据属性复制保证退化。256px竖缝与glyph atlas/cache问题仍待对应场景证据,不能一概归因顶点。下一步完整编译桥接/插件,固定新输出与源码;若打包新revision,须明确mailbox变更,不让旧275内核/插件混用。
 
 ## UFS活动交接(UFS-DEFAULT,2026-11-10): 按用户要求G5默认开启,DVFSRC依赖同步默认INIT
