@@ -10,12 +10,15 @@ static int overlap(size_t a,size_t n,size_t b,size_t m)
 
 static int lookup(uintptr_t address,const char *wanted_path,const char *wanted_key,
                   const uint8_t **value,size_t *length,const char keys[][32],unsigned count,
-                  struct fdt_node_property *props,uint32_t *mask,unsigned *children,uint32_t handle)
+                  struct fdt_node_property *props,uint32_t *mask,unsigned *children,uint32_t handle,
+                  const char capture_paths[][FDT_CAPTURE_PATH_BYTES],unsigned capture_count,
+                  struct fdt_captured_property *captured,unsigned capacity,unsigned *captured_count)
 {
  if(value)*value=0;
  if(length)*length=0;
  if(mask)*mask=0;
  if(children)*children=0;
+ if(captured_count)*captured_count=0;
  if(props)for(unsigned i=0;i<count;i++)props[i]=(struct fdt_node_property){0};
  if(!address||(address&7)||!wanted_path||!value||!length||
     (!keys&&!handle&&(!wanted_key||!*wanted_key)))
@@ -45,6 +48,8 @@ static int lookup(uintptr_t address,const char *wanted_path,const char *wanted_k
  unsigned target_depth=0,direct_children=0;uint32_t seen=0;
  unsigned handle_matches=0;
  struct fdt_node_property schema[32]={0};
+ struct fdt_captured_property capture[FDT_CAPTURE_MAX_PROPERTIES];
+ unsigned capture_node[32],recorded=0;uint32_t capture_seen=0;
  char path[256]={0};const uint8_t *found=0;size_t found_size=0;
  while(end-at>=4) {
   unsigned t=be(b+at);at+=4;
@@ -63,9 +68,16 @@ static int lookup(uintptr_t address,const char *wanted_path,const char *wanted_k
     for(size_t i=0;i<n;i++)path[used++]=(char)b[first+i];
     path[used]=0;
    } else if(at!=first||++roots!=1)return FDT_PROPERTY_INVALID;
-   if(eq(path,wanted_path)) {
+   if(!capture_paths&&eq(path,wanted_path)) {
     if(++targets>1)return FDT_PROPERTY_INVALID;
     target_depth=depth+1;
+   }
+   if(capture_paths) {
+    capture_node[depth]=UINT32_MAX;
+    for(unsigned i=0;i<capture_count;i++)if(eq(path,capture_paths[i])) {
+     if(capture_seen&(1u<<i))return FDT_PROPERTY_INVALID;
+     capture_seen|=1u<<i;capture_node[depth]=i;
+    }
    }
    depth++;at=(at+4)&~(size_t)3;
   } else if(t==2) {
@@ -78,14 +90,20 @@ static int lookup(uintptr_t address,const char *wanted_path,const char *wanted_k
    if(n>end-at||offset>=ss)return FDT_PROPERTY_INVALID;
    const char *key=(const char *)b+strings+offset;
    size_t limit=ss-offset,i=0;
-   while(i<limit&&key[i])i++;
+   while(i<limit&&key[i]) {
+    /* Capture is a boot-critical bounded operation. Do not scan the same
+     * hostile multi-megabyte name for every property, or truncate it into
+     * a known key. Legacy lookup/schema contracts stay unchanged. */
+    if(capture_paths&&i>=FDT_CAPTURE_KEY_BYTES-1)return FDT_PROPERTY_INVALID;
+    i++;
+   }
    if(!i||i==limit)return FDT_PROPERTY_INVALID;
    if(handle&&(eq(key,"phandle")||eq(key,"linux,phandle"))) {
     if(n!=4)return FDT_PROPERTY_INVALID;
     if(be(b+at)==handle && (++handle_matches!=1||!eq(path,wanted_path)))
      return FDT_PROPERTY_INVALID;
    }
-   if(eq(path,wanted_path)) {
+   if(!capture_paths&&eq(path,wanted_path)) {
     if(keys) {
      unsigned k=0;while(k<count&&!eq(key,keys[k]))k++;
      if(k==count||(seen&(1u<<k)))return FDT_PROPERTY_INVALID;
@@ -94,6 +112,13 @@ static int lookup(uintptr_t address,const char *wanted_path,const char *wanted_k
      if(++matches!=1)return FDT_PROPERTY_INVALID;
      found=b+at;found_size=n;
     }
+   }
+   if(capture_paths&&capture_node[depth-1]!=UINT32_MAX) {
+    if(recorded==capacity)return FDT_PROPERTY_INVALID;
+    unsigned node=capture_node[depth-1];
+    for(unsigned i=0;i<recorded;i++)if(capture[i].node==node&&eq(capture[i].key,key))
+     return FDT_PROPERTY_INVALID;
+    capture[recorded++]=(struct fdt_captured_property){node,0,key,b+at,n};
    }
    at=(at+n+3)&~(size_t)3;
   } else if(t==4)continue;
@@ -104,6 +129,11 @@ static int lookup(uintptr_t address,const char *wanted_path,const char *wanted_k
     if(tail&&tail!=4)return FDT_PROPERTY_INVALID;
    }
    if(at!=end)return FDT_PROPERTY_INVALID;
+   if(capture_paths) {
+    if(capture_seen!=((1u<<capture_count)-1))return FDT_PROPERTY_NODE_MISSING;
+    for(unsigned i=0;i<recorded;i++)captured[i]=capture[i];
+    *captured_count=recorded;return FDT_PROPERTY_PRESENT;
+   }
    if(!targets)return FDT_PROPERTY_NODE_MISSING;
    if(handle)return handle_matches==1?FDT_PROPERTY_PRESENT:FDT_PROPERTY_ABSENT;
    if(keys) {
@@ -119,7 +149,7 @@ static int lookup(uintptr_t address,const char *wanted_path,const char *wanted_k
 }
 int fdt_property_lookup(uintptr_t address,const char *path,const char *key,
                        const uint8_t **value,size_t *length)
-{return lookup(address,path,key,value,length,0,0,0,0,0,0);}
+{return lookup(address,path,key,value,length,0,0,0,0,0,0,0,0,0,0,0);}
 int fdt_node_schema(uintptr_t address,const char *path,const char keys[][32],unsigned count,
                     struct fdt_node_property *props,uint32_t *mask,unsigned *children)
 {
@@ -130,13 +160,28 @@ int fdt_node_schema(uintptr_t address,const char *path,const char keys[][32],uns
   for(unsigned j=0;j<i;j++)if(eq(keys[i],keys[j]))return FDT_PROPERTY_INVALID;
  }
  const uint8_t *p;size_t n;
- return lookup(address,path,0,&p,&n,keys,count,props,mask,children,0);
+ return lookup(address,path,0,&p,&n,keys,count,props,mask,children,0,0,0,0,0,0);
 }
 int fdt_phandle_unique(uintptr_t address,const char *path,uint32_t handle)
 {
  if(!handle||handle==UINT32_MAX)return FDT_PROPERTY_INVALID;
  const uint8_t *p;size_t n;
- return lookup(address,path,0,&p,&n,0,0,0,0,0,handle);
+ return lookup(address,path,0,&p,&n,0,0,0,0,0,handle,0,0,0,0,0);
+}
+int fdt_capture_nodes(uintptr_t address,const char paths[][FDT_CAPTURE_PATH_BYTES],unsigned count,
+                     struct fdt_captured_property *props,unsigned capacity,unsigned *used)
+{
+ if(used)*used=0;
+ if(!paths||!count||count>FDT_CAPTURE_MAX_NODES||!props||!used||
+    !capacity||capacity>FDT_CAPTURE_MAX_PROPERTIES)return FDT_PROPERTY_INVALID;
+ for(unsigned i=0;i<count;i++) {
+  unsigned n=0;while(n<FDT_CAPTURE_PATH_BYTES&&paths[i][n])n++;
+  if(n==FDT_CAPTURE_PATH_BYTES||(n&&paths[i][0]!='/'))return FDT_PROPERTY_INVALID;
+  for(unsigned j=0;j<i;j++)if(eq(paths[i],paths[j]))return FDT_PROPERTY_INVALID;
+ }
+ const uint8_t *p;size_t n;
+ /* Scalar outputs are inert for capture mode; legacy matching is disabled. */
+ return lookup(address,"","capture",&p,&n,0,0,0,0,0,0,paths,count,props,capacity,used);
 }
 
 /* Preserve the concurrent ADSP consumer's checked API using the same strict

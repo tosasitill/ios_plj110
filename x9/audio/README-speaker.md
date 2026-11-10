@@ -531,6 +531,16 @@ property可缺失或为0，重复/畸形property不能当成缺失。CFG/CFG2、
 BASE/SET/CLR、两core system image区域和cell/ranges合同同时核对。
 `fdt_property_checked`区分absent与malformed/duplicate；既有boolean API语义保留。
 
+基础资格现经 `fdt_capture_nodes()` **一次完整树遍历**捕获root、soc、adspsys和两core，
+随后从同步调用内的局部records解码，不再为每个标量和named-reg反复遍历整棵树。
+复用同一严格lexer，全部required nodes唯一存在、被捕获node的所有property key唯一，
+valid END和尾部padding核对后才发布；超容量或超过127字节的key直接拒绝、不截断，
+失败不发布partial records。ADSP容量96条，已有旧DT五node共66条；**不是当前LK grant**。
+没有全局cache，不跨DT修改/boot保留指针；可选I2S4/PA的strict schema/phandle资格仍走
+原完整树路径，不能称所有ADSP查询已single-pass。增加入口/捕获/布局三阶段日志供最终
+镜像定位。当前 `X9_ADSP_LOADER=0` 不变：130停止在pre-XNU FDT阶段，重复遍历是
+已确认源码工作量，**不是已证明的watchdog/启动失败根因**，本轮无重新启动证据。
+
 共享区还必须与本次有效live RAM allocator map完全不相交；小RAM/default boot模式
 不授予布局。内核再次核对chosen handoff、完整RAM-map计数/边界/总字节/零尾和交集。
 按现有捕获值推导：AUDIO_COMMON offset **0x543000**、bytes **0x852000**，所有分块

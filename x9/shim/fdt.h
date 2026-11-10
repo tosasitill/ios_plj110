@@ -23,6 +23,25 @@ int fdt_node_schema(uintptr_t,const char *,const char (*)[32],unsigned,
 /* Exactly one phandle/linux,phandle occurrence of this value, at this path.
  * Conservative: duplicate aliases also refuse a new hardware grant. */
 int fdt_phandle_unique(uintptr_t,const char *,uint32_t);
+/* Capture required nodes in ONE complete-tree pass. No persistent cache or
+ * early-success shortcut: publish only after valid END/trailing padding.
+ * Paths are unique inline strings (safe for relocated shim); all required
+ * nodes must exist uniquely, every captured property key must be unique.
+ * Records point into this caller-owned FDT and are consumed immediately,
+ * never retained across mutations/another boot. Unknown properties allowed;
+ * strict pinctrl schemas must still use fdt_node_schema, not this API. */
+#define FDT_CAPTURE_PATH_BYTES 128u
+#define FDT_CAPTURE_MAX_NODES 16u
+#define FDT_CAPTURE_MAX_PROPERTIES 128u
+#define FDT_CAPTURE_KEY_BYTES 128u /* includes NUL; fail, never truncate */
+struct fdt_captured_property {
+    uint32_t node,reserved;
+    const char *key;
+    const uint8_t *value;
+    size_t bytes;
+};
+int fdt_capture_nodes(uintptr_t,const char (*)[FDT_CAPTURE_PATH_BYTES],unsigned,
+                     struct fdt_captured_property *,unsigned,unsigned *);
 
 /* Bounded metadata from the last RAM check, for USB/pstore failure logs. */
 const char *fdt_ram_failure(uint64_t *,uint64_t *,uint64_t *,uint64_t *);
