@@ -4871,15 +4871,18 @@ x9_cc_path_interesting(const char *p)
 	return 0;
 }
 static unsigned x9_cc_fail_lines;
-/* Carrier matching must not share ABM's 200-file budget: 181 exhausted it
- * before late SIM matching, and successful carrier.plist opens were omitted.
+/* Matching evidence only: 182's bulk Default.bundle plist enumeration
+ * exhausted the independent budget before real IMSI/EF_AD arrived. Exclude
+ * unrelated dictionaries and Info.plist; keep signed policy and overlays.
  * Fixed bundle paths only, no SIM identifiers or plist contents. */
 static unsigned x9_carrier_file_lines;
 static int
 x9_carrier_path_interesting(const char *p)
 {
 	return sweet_text_contains(p, "/Carrier Bundles/") && !sweet_text_contains(p, ".lproj") &&
-	    (sweet_text_contains(p, ".plist") || sweet_text_contains(p, ".der") || sweet_text_contains(p, "/46015"));
+	    (sweet_text_contains(p, "/carrier.plist") || sweet_text_contains(p, ".der") ||
+	    sweet_text_contains(p, "/overrides_D22.plist") || sweet_text_contains(p, "/device+carrier+") ||
+	    sweet_text_contains(p, "/46015"));
 }
 #endif
 int

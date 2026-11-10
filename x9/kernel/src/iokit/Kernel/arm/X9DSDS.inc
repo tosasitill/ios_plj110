@@ -30,7 +30,7 @@ static unsigned x9ds_current;
 static uint64_t x9ds_epoch;
 static bool x9ds_live(){return !x9ds_op.host&&x9ds_op.slot<CBQ_MAX_CLIENTS&&x9q_clients[x9ds_op.slot].generation==x9ds_op.generation;}
 static bool x9ds_data_ready(unsigned slot){
- return x9_md_sim_count()!=2||(x9ds_pair&&x9ds_known&&!x9ds_op.used&&slot==x9ds_current);
+ return x9_md_sim_count()!=2||(x9ds_pair&&x9ds_mapped_apps&&x9ds_known&&!x9ds_op.used&&slot==x9ds_current);
 }
 static void x9ds_cards(const uint8_t *first,const uint8_t *second,bool ready){
  bool pair=ready&&first&&second&&memcmp(first,second,10)!=0;
@@ -80,7 +80,7 @@ static void x9ds_request(uint32_t local,uint32_t port,const uint8_t *req,unsigne
   x9q_view sub=x9q_tlv(req,n,1),type=x9q_tlv(req,n,0x10);
   if(n!=21||!sub.p||sub.n!=4||!type.p||type.n!=4||x9q_u32(sub.p)<1||x9q_u32(sub.p)>2||x9q_u32(type.p)>1)error=X9Q_ARG;
   else if(x9ds_op.used)error=X9Q_BUSY;
-  else if(!x9ds_pair||!x9w_session_ready||!x9_md_mipc_online())error=X9Q_NOT_READY;
+ else if(!x9ds_pair||!x9ds_mapped_apps||!x9w_session_ready||!x9_md_mipc_online())error=X9Q_NOT_READY;
   else{
    bzero(&x9ds_op,sizeof(x9ds_op));x9ds_op.used=x9ds_op.reply=true;x9ds_op.slot=slot;
    x9ds_op.target=x9q_u32(sub.p)-1;x9ds_op.generation=x9q_clients[slot].generation;x9ds_op.epoch=x9ds_epoch;
@@ -156,16 +156,23 @@ static void x9ds_poll(){
  }
 }
 
-/* 20H392 sendProvisioningSessionToSlots_sync: UIM6e, 10 primary/11 secondary
- * u8 physical slot. Current UIM CardStatus already maps primary USIM -> slot1,
- * secondary USIM -> slot2 from real EF_DIR. Accept only that existing map;
+/* 20H392 1f19febb8 builds UIM6e: 10 primary/11 secondary, each independently
+ * optional, u8 physical slot. A zero HardwareSimSlot omits that TLV; it does
+ * NOT unmap the other session. 182 sends 11-byte requests six times, while
+ * the old mandatory-two-TLV parser returned ARG every time. The native
+ * 1f1a01938 callback passes that failure into configureSubscription.
+ * Current UIM CardStatus already maps primary USIM -> slot1, secondary USIM
+ * -> slot2 from real EF_DIR. Accept only supplied entries of that existing map;
  * no APDU, physical switching, arbitrary remap or fake provisioning success. */
 static void x9ds_map(uint32_t local,uint32_t port,const uint8_t *req,unsigned n){
  x9q_view primary=x9q_tlv(req,n,0x10),secondary=x9q_tlv(req,n,0x11);
  unsigned error=0;
- if(n!=15||!primary.p||primary.n!=1||!secondary.p||secondary.n!=1)error=X9Q_ARG;
- else if(primary.p[0]!=1||secondary.p[0]!=2)error=X9Q_UNSUPPORTED;
+ if((!primary.p&&!secondary.p)||(primary.p&&primary.n!=1)||(secondary.p&&secondary.n!=1)||
+    n!=7u+(primary.p?4u:0u)+(secondary.p?4u:0u))error=X9Q_ARG;
+ else if((primary.p&&primary.p[0]!=1)||(secondary.p&&secondary.p[0]!=2))error=X9Q_UNSUPPORTED;
  else if(x9_md_sim_count()!=2||!x9ds_pair||!x9ds_mapped_apps)error=X9Q_NOT_READY;
  x9q_packet p(req,(uint16_t)error);p.send(local,port);
- printf("X9 DDS: UIM6e existing physical 1/2 provisioning map result %u (no SIM mutation)\n",error);
+ printf("X9 DDS: UIM6e bytes %u primary %d secondary %d pair %u apps %u existing-map result %u (omitted=-1, no SIM mutation)\n",
+  n,primary.p&&primary.n==1?(int)primary.p[0]:-1,secondary.p&&secondary.n==1?(int)secondary.p[0]:-1,
+  x9ds_pair,x9ds_mapped_apps,error);
 }

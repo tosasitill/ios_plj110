@@ -140,7 +140,12 @@ static bool x9q_dir(x9q_job &j,const uint8_t *p,unsigned n){
 }
 static void x9q_error(x9q_job &j,uint16_t err){
  if(x9_md_sim_count()==2&&j.port==X9BB_PORT_BASE+0x0b&&(j.id==0x2f||j.id==0x47)){
-  bb_dual_card_status(nullptr,nullptr);x9ds_cards(nullptr,nullptr,false);
+  /* A failed snapshot is not two physical removals. 182's SIM2 CME14
+   * (SIM busy) used to clear both identities. Preserve the last observed
+   * cards and DDS identity epoch, but block provisioning/data until a fresh
+   * complete CardStatus verifies the applications again. CME10 still goes
+   * through x9q_card(false)/x9q_slot(NULL) and publishes real absence. */
+  x9ds_apps(false);
  }
  if(!j.background&&!j.probe){x9q_packet p(j.req,err);p.send(j.local,j.port);}
  if(!j.background||j.probe)printf("X9 QMI AT: response service 0x%x msg 0x%04x txn %u error %u SIM%u probe %u stage %u\n",
