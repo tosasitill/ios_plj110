@@ -7,10 +7,11 @@
  * compiled here from IOHIDFamily-1915.140.3, the version the iOS 16.7
  * userland ships) and reads serialized IOHIDEvents from the user client's
  * shared queue. This file has the minimal IOHIDEventService base class and
- * two services:
+ * services:
  *
  *   SweetHIDButtons  consumer-control keys (power, volume, home)
  *   SweetHIDTouch    the built-in touch screen (digitizer collections)
+ *   X9AmbientLight  opt-in native ALS HID (MTK ingress / diagnostics)
  *
  * Hardware drivers feed them through the C entry points sweet_hid_key()
  * and sweet_hid_touch(). Boot-arg sweethidtest=N (seconds) presses Home
@@ -572,3 +573,5 @@ sweet_hid_touch(int finger, int down, int x, int y)
 		gSweetTouch->touch(finger, down != 0, x, y);
 	}
 }
+
+#include "X9AmbientLight.inc"
