@@ -1,16 +1,21 @@
 /* Normal ISP8s CAMSV0 DMA-top stop request, after real streamed controls.
  * sv_reset writes base_dma+20=1 and polls bit1 (100ms); its subsequent
  * STG/CQ/central resets, inner stores/debug sweep/void-success are NOT used.
- * Do not write a release: no retry/reset or claim of whole AXI/SMMU
- * retirement. Native request check independently grants this DMA-top scope.
+ * Restore only this stop command and our DCM inhibit after the real owned
+ * OFF/DONE/CPU/worker/GIC boundary and observed ACK/port retirement. No
+ * STG/CQ/central reset or claim of whole AXI/SMMU retirement. Native request
+ * check independently grants this DMA-top scope; backing stays pinned.
  * Control + IRQ mutex held. All observations precede cached comparison.
  */
-enum { CAM_DMA_STOP_IDLE, CAM_DMA_STOP_CLOCK, CAM_DMA_STOP_PENDING, CAM_DMA_STOP_ACKED };
+enum { CAM_DMA_STOP_IDLE, CAM_DMA_STOP_CLOCK, CAM_DMA_STOP_PENDING, CAM_DMA_STOP_ACKED,
+    CAM_DMA_STOP_RESTORING, CAM_DMA_STOP_RESTORED };
 static struct {
     uint64_t epoch;
     struct x9_camera_camsv_request request;
     unsigned phase,samples,port_samples;
     bool captured,issued,dcm_issued;
+    bool restore_attempted,dcm_restore_issued,release_issued;
+    uint32_t dcm_restore_seen,release_seen,restore_samples;
     uint32_t prior[2],actual[2],seen[2],sampled,ostd[2],ostd_sampled;
     uint32_t dcm_prior[2],dcm_actual[2],dcm_seen,dcm_sampled,dcm_samples;
     int error;
@@ -35,6 +40,15 @@ static int cam_sv_dma_stop_observe(unsigned bank,vm_offset_t view,unsigned offse
     if(offset==0x7c) {
         if(!cam_dma_stop.dcm_issued)
             return value==cam_dma_stop.dcm_prior[bank]?0:cam_sv_dma_stop_fault(ESTALE);
+        if(cam_dma_stop.dcm_restore_issued) {
+            if((cam_dma_stop.phase!=CAM_DMA_STOP_RESTORING &&
+                cam_dma_stop.phase!=CAM_DMA_STOP_RESTORED) ||
+               (value!=cam_dma_stop.dcm_prior[bank] &&
+                ((cam_dma_stop.dcm_restore_seen&(1u<<bank)) || value!=1)))
+                return cam_sv_dma_stop_fault(ESTALE);
+            if(value==cam_dma_stop.dcm_prior[bank])cam_dma_stop.dcm_restore_seen|=1u<<bank;
+            *allowed=true;return 0;
+        }
         if(value!=1 && ((cam_dma_stop.dcm_seen&(1u<<bank)) ||
            value!=cam_dma_stop.dcm_prior[bank]))return cam_sv_dma_stop_fault(ESTALE);
         if(value==1)cam_dma_stop.dcm_seen|=1u<<bank;
@@ -49,7 +63,14 @@ static int cam_sv_dma_stop_observe(unsigned bank,vm_offset_t view,unsigned offse
      * at ACK cannot reappear. Pre-ACK prior reads grant nothing and never
      * authorize cancellation/retry. No reserved/reset bits are allowed.
      * Inner may remain prior: no guessed inner ACK requirement or write. */
-    if((cam_dma_stop.phase!=CAM_DMA_STOP_PENDING && cam_dma_stop.phase!=CAM_DMA_STOP_ACKED) ||
+    if(cam_dma_stop.release_issued && value==cam_dma_stop.prior[bank]) {
+        if(cam_dma_stop.phase!=CAM_DMA_STOP_RESTORING &&
+           cam_dma_stop.phase!=CAM_DMA_STOP_RESTORED)return cam_sv_dma_stop_fault(ESTALE);
+        cam_dma_stop.release_seen|=1u<<bank;*allowed=true;return 0;
+    }
+    if((cam_dma_stop.release_seen&(1u<<bank)) ||
+       (cam_dma_stop.phase!=CAM_DMA_STOP_PENDING && cam_dma_stop.phase!=CAM_DMA_STOP_ACKED &&
+        cam_dma_stop.phase!=CAM_DMA_STOP_RESTORING) ||
        (value&~3u) || ((cam_dma_stop.seen[bank]&2u) && !(value&2u)) ||
        ((cam_dma_stop.seen[bank]&4u) && (value&1u)))return cam_sv_dma_stop_fault(ESTALE);
     if(value&1u)cam_dma_stop.seen[bank]|=1u;
@@ -196,5 +217,99 @@ out:
         cam_dma_stop.prior[0],cam_dma_stop.prior[1],cam_dma_stop.actual[0],cam_dma_stop.actual[1],
         cam_dma_stop.sampled,cam_dma_stop.seen[0],cam_dma_stop.seen[1],cam_dma_stop.samples,
         cam_dma_stop.ostd[0],cam_dma_stop.ostd[1],cam_dma_stop.ostd_sampled,cam_dma_stop.port_samples,e);
+    return e;
+}
+/* Restore a complete, actually consumed DMA stop, never a partial request.
+ * Upstream sv_reset's final normal order is DCM inhibit0 then DMA SW_RST0;
+ * only our changed DCM field is returned. No inherited1 is released.
+ * This is NOT credit cancellation, full bus/map retirement or RAW rearm.
+ * Called while the original control/IRQ locks and native lease still hold,
+ * BEFORE IRQ close starts priority/route unwind, so its original qualified
+ * worker/GIC/FBC receipt can be revalidated before every posted store.
+ */
+static int cam_sv_dma_restore_sample_locked(bool *match)
+{
+    int e;
+    *match=true;
+    for(unsigned bank=0;bank<2;bank++) {
+        bool allowed=false;
+        e=cam_sv_power_guard();if(e)return e;
+        e=cam_sv_dma_stop_observe(bank,cam_sv.view[bank],0x7c,
+            cam_rr(cam_sv.view[bank],0x7c),&allowed);if(e)return e;
+        e=cam_sv_dma_stop_observe(bank,cam_sv.view[bank],0x1020,
+            cam_rr(cam_sv.view[bank],0x1020),&allowed);if(e)return e;
+        if(cam_dma_stop.dcm_actual[bank]!=cam_dma_stop.dcm_prior[bank] ||
+           (cam_dma_stop.release_issued && cam_dma_stop.actual[bank]!=cam_dma_stop.prior[bank]))
+            *match=false;
+    }
+    e=cam_sv_dma_stop_port_sample_locked();if(e)return e;
+    if(cam_dma_stop.ostd[0] || cam_dma_stop.ostd[1])return EBUSY;
+    return 0;
+}
+static int cam_sv_dma_stop_restore_locked(uint64_t epoch)
+{
+    uint64_t span,end;
+    int e;
+    if(!cam_dma_stop.captured || cam_dma_stop.epoch!=epoch ||
+       cam_dma_stop.restore_attempted || !cam_dma_stop.issued ||
+       cam_dma_stop.phase!=CAM_DMA_STOP_ACKED || cam_dma_stop.error ||
+       cam_dma_stop.samples<2 || cam_dma_stop.port_samples!=2 ||
+       cam_dma_stop.ostd_sampled!=3)return cam_dma_stop.error?cam_dma_stop.error:ESTALE;
+    cam_dma_stop.restore_attempted=true; /* no retry even before first store */
+    nanoseconds_to_absolutetime(100000000,&span);end=mach_absolute_time()+span;
+    /* Fresh ACK+P0-zero, original OFF/DONE/CPU/worker/GIC and current lease,
+     * not the cached prior stop samples used as an independent grant. */
+    for(unsigned sample=0;sample<2;sample++) {
+        e=cam_sv_dma_stop_guard_locked(epoch);if(e)goto out;
+        e=cam_sv_dma_stop_sample_locked();if(e)goto out;
+        e=cam_sv_dma_stop_port_sample_locked();if(e)goto out;
+        if(!(cam_dma_stop.actual[0]&2u) || cam_dma_stop.ostd[0] || cam_dma_stop.ostd[1]) {
+            e=ESTALE;goto out;
+        }
+        if(mach_absolute_time()>=end){e=ETIMEDOUT;goto out;}
+    }
+    cam_dma_stop.phase=CAM_DMA_STOP_RESTORING;
+    if(cam_dma_stop.dcm_issued) {
+        e=cam_sv_dma_stop_guard_locked(epoch);if(e)goto out;
+        if(mach_absolute_time()>=end){e=ETIMEDOUT;goto out;}
+        cam_dma_stop.dcm_restore_issued=true;
+        cam_rw(cam_sv.view[0],0x7c,cam_dma_stop.dcm_prior[0]);
+    }
+    /* Two complete target samples at each stage; DCM must be restored
+     * before SW_RST is released. Commands are journaled BEFORE the store. */
+    for(unsigned stage=0;stage<2;stage++) {
+        bool complete=false;
+        if(stage) {
+            e=cam_sv_dma_stop_guard_locked(epoch);if(e)goto out;
+            if(mach_absolute_time()>=end){e=ETIMEDOUT;goto out;}
+            cam_dma_stop.release_issued=true;
+            cam_rw(cam_sv.view[0],0x1020,cam_dma_stop.prior[0]);
+        }
+        cam_dma_stop.restore_samples=0;
+        for(unsigned poll=0;poll<100000;poll++) {
+            bool match;
+            if(mach_absolute_time()>=end){e=ETIMEDOUT;goto out;}
+            e=cam_sv_dma_stop_guard_locked(epoch);if(e)goto out;
+            e=cam_sv_dma_restore_sample_locked(&match);if(e)goto out;
+            if(mach_absolute_time()>=end){e=ETIMEDOUT;goto out;}
+            cam_dma_stop.restore_samples=match?cam_dma_stop.restore_samples+1:0;
+            if(cam_dma_stop.restore_samples==2){complete=true;break;}
+            delay(1);
+        }
+        if(!complete){e=ETIMEDOUT;goto out;}
+    }
+    e=cam_sv_dma_stop_guard_locked(epoch);if(e)goto out;
+    if(mach_absolute_time()>=end){e=ETIMEDOUT;goto out;}
+    cam_dma_stop.phase=CAM_DMA_STOP_RESTORED;
+out:
+    if(e)e=cam_sv_dma_stop_fault(e);
+    printf("X9 CAMERA DMA RESTORE: epoch=%llu capture_id=%llu phase=%u "
+        "issued=%u/%u seen=%x/%x samples=%u dcm=%x/%x stop=%x/%x "
+        "ostd=%x/%x errno=%d (own stop/DCM only; credit/map/backing retained)\n",
+        epoch,cam_dma_stop.request.frame.capture_id,cam_dma_stop.phase,
+        cam_dma_stop.dcm_restore_issued,cam_dma_stop.release_issued,
+        cam_dma_stop.dcm_restore_seen,cam_dma_stop.release_seen,cam_dma_stop.restore_samples,
+        cam_dma_stop.dcm_actual[0],cam_dma_stop.dcm_actual[1],
+        cam_dma_stop.actual[0],cam_dma_stop.actual[1],cam_dma_stop.ostd[0],cam_dma_stop.ostd[1],e);
     return e;
 }

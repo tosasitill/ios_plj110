@@ -595,9 +595,11 @@ static int cam_irq_close_locked(uint64_t epoch)
     if(!e)e=cam_sv_gate_quiesce_locked(epoch);
     if(!e)e=cam_sv_receive_quiesce_locked(epoch);
     if(!e && session.stream)e=cam_stream_close_controls_locked(epoch);
-    /* Sole normal DMA stop request; ACK/SMI zeros do not authorize map,
-     * credit or supplier release. No release write; backing stays pinned. */
+    /* Sole normal DMA stop request, then restore only OUR stop/DCM after
+     * the actual owned OFF/DONE/CPU/worker/GIC+ACK boundary. ACK/SMI zeros
+     * do not authorize credit/map/supplier release; backing stays pinned. */
     if(!e && session.stream)e=cam_sv_dma_stop_locked(epoch);
+    if(!e && session.stream)e=cam_sv_dma_stop_restore_locked(epoch);
     cam_irq.close_attempted=true;
     old=cam_irq_spin_take();cam_irq.accepting=false;owns=cam_irq.owns;
     if(owns)cam_irq_mask_all();cam_irq_spin_drop(old);

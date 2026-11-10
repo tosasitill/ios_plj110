@@ -86,6 +86,10 @@
  * It then inhibits normal DMA DCM and issues one outer DMA-top stop;
  * actual ACK bit1 and L19/P0 external/internal monitor zeros are necessary
  * observations, NOT whole RAW/AXI/SMMU/map retirement or reuse permission.
+ * Complete ACK then revalidates that same boundary and restores only our
+ * changed DCM inhibit and our consumed stop, with two-bank target readback;
+ * borrowed DCM remains untouched, credit/map/supplier still pinned. Partial
+ * or unknown stop/restore is terminal, never released/reissued on cleanup.
  * The real IRQ worker additionally binds accepted FBC at begin and requires
  * owned SOF/DONE plus actual WCNT+1/CNT0 both-bank counts before CPU read.
  * That IRQ-private count evidence does not mutate the control-locked SV

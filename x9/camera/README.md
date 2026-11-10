@@ -805,9 +805,11 @@ controls完成后才标 `X9 CAMERA STREAM CONTROLS` 的stopped并进入下一节
 
 首先实际核两bank原stop CSR为0、DCM prior仅0/1。outer DCM prior0时先记issued，再唯一store1并两次实际readback；prior1只borrow、不重写/释放。随后先记DMA issued，再唯一outer request1；100ms单总deadline覆盖DCM、ACK、SMI观察及最后guard。vendor只要求ACK bit1，未证明request bit0保持，所以ACK完整值2或3均合法；见ACK不得回0/1，见ACK2后bit0不得再出现。reserved/其他reset bits拒绝。inner可保持原值，不猜inner ACK或写DB/inner。actual在下一sample/比较前记录，不修改原SV expected、accepted credit或S1 range。
 
-ACK后要求实际held的同epoch L19/P0 mapping、SMI/A0、原native request/power/config；读取普通`mtk-smi.c` external `+280`、internal `+780` monitor pair，两次0及最后fresh pair0，保存raw/sample masks。每store/poll仍核同一actual source/TG/receive/PHY/MAC/OUTMUX/FBC/S1。首错/回退/timeout保留请求和依赖；不重复request、不写release0、clear/reset或补RCNT。`X9 CAMERA DMA STOP`输出issued/DCM/ACK/sample/OSTD/errno。
+ACK后要求实际held的同epoch L19/P0 mapping、SMI/A0、原native request/power/config；读取普通`mtk-smi.c` external `+280`、internal `+780` monitor pair，两次0及最后fresh pair0，保存raw/sample masks。每store/poll仍核同一actual source/TG/receive/PHY/MAC/OUTMUX/FBC/S1。首错/回退/timeout保留请求和依赖；失败请求不重复、不release/clear/reset或补RCNT。`X9 CAMERA DMA STOP`输出issued/DCM/ACK/sample/OSTD/errno。
 
-**DMA ACK和port zeros只是必要观察，不是full downstream AXI/SMMU/EMI/map退休。** 不取消原issued credit，不释放DCM/request/S1/supplier，不允许repeat；仍必须实现完整退休、normal NS controller/prior-preserving SID80 attach、持续rate/MMQoS、actual native provider和iOS前后实帧链。只有全链完成后才构建唯一最终镜像。
+成功的原stop现在继续实际恢复本次局部 DMA 控制，仍在 GIC priority/route unwind 前、同一 control/IRQ mutex 和 request/lease 下。先重新验证完整原 OFF/DONE/CPU/worker/GIC/两bank实际 WCNT+1/CNT0，并取得两次新 ACK/P0 monitor0；单个100ms deadline包含全部restore操作。按上游 `sv_reset` 的局部终序：**只对自己曾改变的 DCM inhibit 写一次原值并确认两bank目标两次，再对自己已 ACK 的 DMA-top stop 写一次原值0并确认两bank目标两次**。借用DCM1不写、不释放；不搬central SW_CTL/STG/CQ/inner reset。所有 issued 先于唯一store，pending只允许原已消费状态到精确prior，观察到prior后再出现请求/ACK或DCM目标回退即失败，不能靠重发修复。初次restore失败锁存、任何晚到目标不重置错误。`X9 CAMERA DMA RESTORE`保存phase/issued/seen/sample/实际DCM-stop/OSTD/errno；RESTORED只描述这两项局部控制，不是credit/map/namespace退休凭证。
+
+**DMA ACK、port zeros及局部控制恢复都不是full downstream AXI/SMMU/EMI/map退休。** 不取消原issued credit，不释放request/S1/supplier，不允许repeat；CAMSV close仍拒绝issued credit。仍必须实现完整退休、normal NS controller/prior-preserving SID80 attach、持续rate/MMQoS、actual native provider和iOS前后实帧链。只有全链完成后才构建唯一最终镜像。
 
 ### 保留共享 normal NS 控制器的 SID80 安装/退休
 
