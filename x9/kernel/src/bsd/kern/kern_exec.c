@@ -7460,6 +7460,156 @@ x9_siri_write(vnode_t vp, off_t off, uint8_t value, vfs_context_t ctx)
 	return error;
 }
 
+/*
+ * X9 2026-11-10 (user: "放内核里第一次启动就修复"): CommCenter capability gates in
+ * libCommCenterBase (20H392 arm64, UUID 64cd5d55-eec1-3ee0-a697-cc0ecd0ee021),
+ * from the dual-SIM (prepare_dual_sim_cache.py, VM 0x1F036CF98, 28 B: D22 enum 7
+ * added to the dual-slot personality predicate, GsmRadioPersonality+0x241) and
+ * NR SA (prepare_nr_registration_cache.py, VM 0x1F036D1B0, 8 B: +0x121=1 with
+ * +0x120=1 kept) branches. Both sites lie in 16 KiB code page 3515 of
+ * dyld_shared_cache_arm64.31, whose single CodeDirectory (SHA-256, 16 KiB pages)
+ * stores the page hash at file offset 103577665; the patched page hash is
+ * precomputed offline from the root snapshot (the stored hash was verified to
+ * equal the original page's hash), so the kernel needs no hashing and pages
+ * never validate as tainted. The old hash covers the whole page: matching it
+ * proves the entire page is original. All-or-nothing; already patched = no-op.
+ * x9_ccgate=0 off, 1 (default) patch, 2 restore the original bytes and hash.
+ */
+#define X9_CCGATE_FILE "/private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64.31"
+#define X9_CCGATE_SIZE 103677952LL
+static const struct x9_ccgate_edit {
+	const char *what;
+	off_t off;
+	uint8_t len;
+	uint8_t orig[32], patched[32];
+} x9_ccgate_edits[] = {
+	{"dual-sim gate", 57593752, 28,
+	 {0x09,0x33,0x00,0x51,0x2a,0x1d,0x00,0x12,0x5f,0xb5,0x00,0x71,0xea,0x27,0x9f,0x1a,
+	  0xeb,0xc0,0x91,0xd2,0xeb,0xc0,0xa3,0xf2,0x4b,0xe0,0xc3,0xf2},
+	 {0x09,0x1f,0x00,0x51,0x3f,0xc9,0x00,0x71,0xea,0x27,0x9f,0x1a,0x2b,0x1c,0x98,0xd2,
+	  0x2b,0x1e,0xb8,0xf2,0x6b,0x08,0xdc,0xf2,0x6b,0x00,0xe0,0xf2}},
+	{"nr gate", 57594288, 8,
+	 {0x29,0x00,0x80,0x52,0x69,0x82,0x04,0x39},
+	 {0x29,0x20,0x80,0x52,0x69,0x42,0x02,0x79}},
+	{"page 3515 hash", 103577665, 32,
+	 {0xe3,0x61,0x65,0x0f,0x48,0x44,0xb1,0xbd,0xd6,0x93,0x40,0xb1,0x1b,0xa8,0x36,0xca,
+	  0x79,0x07,0x45,0xe2,0xba,0x63,0xa6,0xb0,0x95,0xe7,0x5d,0xe3,0x31,0x52,0x79,0x08},
+	 {0xb3,0x07,0x65,0xa1,0xa5,0x9c,0x96,0xe5,0x08,0x81,0x8f,0xdc,0x18,0x4f,0xba,0xce,
+	  0xdd,0x03,0x1c,0xf0,0x31,0x4d,0x75,0x92,0x11,0x7d,0x65,0x27,0x9a,0xcc,0x72,0x3c}},
+};
+
+static int
+x9_ccgate_io(vnode_t vp, off_t off, void *buf, size_t len, int rw, vfs_context_t ctx)
+{
+	uio_t auio = uio_create(1, off, UIO_SYSSPACE, rw);
+	int error;
+	if (auio == NULL) {
+		return ENOMEM;
+	}
+	error = uio_addiov(auio, CAST_USER_ADDR_T((char *)buf), len);
+	if (error == 0) {
+		error = rw == UIO_READ ? VNOP_READ(vp, auio, 0, ctx) : VNOP_WRITE(vp, auio, 0, ctx);
+	}
+	if (error == 0 && uio_resid(auio) != 0) {
+		error = EIO;
+	}
+	uio_free(auio);
+	return error;
+}
+
+static int
+sweet_x9_ccgate(void)
+{
+	extern boolean_t sweet_x9_ufs_root_writable(void);
+	const int count = (int)(sizeof(x9_ccgate_edits) / sizeof(x9_ccgate_edits[0]));
+	const int mode = sweet_x9_arg("x9_ccgate", 1);
+	vfs_context_t ctx = vfs_context_kernel();
+	struct vnode_attr va;
+	vnode_t vp = NULLVP;
+	uint8_t buf[32], hdr[16];
+	int error, i, orig = 0, patched = 0;
+
+	if (mode != 1 && mode != 2) {
+		return 0;
+	}
+	if (!sweet_x9_ufs_root_writable()) {
+		return 0;
+	}
+	error = vnode_lookup(X9_CCGATE_FILE, VNODE_LOOKUP_NOFOLLOW, &vp, ctx);
+	if (error) {
+		printf("X9 CCGATE: cache lookup errno=%d; not touched\n", error);
+		return error;
+	}
+	VATTR_INIT(&va);
+	VATTR_WANTED(&va, va_data_size);
+	VATTR_WANTED(&va, va_flags);
+	error = vnode_getattr(vp, &va, ctx);
+	if (error || !vnode_isreg(vp) || va.va_data_size != X9_CCGATE_SIZE || (va.va_flags & UF_COMPRESSED)) {
+		printf("X9 CCGATE: cache errno=%d reg=%d size=%lld flags=0x%x; not touched\n", error, vnode_isreg(vp),
+		    (long long)va.va_data_size, va.va_flags);
+		vnode_put(vp);
+		return error ? error : EINVAL;
+	}
+	error = x9_ccgate_io(vp, 0, hdr, sizeof(hdr), UIO_READ, ctx);
+	if (error || memcmp(hdr, "dyld_v1   arm64", 15) != 0) {
+		printf("X9 CCGATE: cache magic mismatch errno=%d; not touched\n", error);
+		vnode_put(vp);
+		return EINVAL;
+	}
+	/* Classify every edit before any write: never half-patch the page. */
+	for (i = 0; i < count; i++) {
+		const struct x9_ccgate_edit *e = &x9_ccgate_edits[i];
+		error = x9_ccgate_io(vp, e->off, buf, e->len, UIO_READ, ctx);
+		if (error) {
+			printf("X9 CCGATE: read %s errno=%d; not touched\n", e->what, error);
+			vnode_put(vp);
+			return error;
+		}
+		if (memcmp(buf, e->orig, e->len) == 0) {
+			orig++;
+		} else if (memcmp(buf, e->patched, e->len) == 0) {
+			patched++;
+		} else {
+			printf("X9 CCGATE: %s at %lld matches neither original nor patch; not touched\n", e->what, (long long)e->off);
+			vnode_put(vp);
+			return EINVAL;
+		}
+	}
+	if ((mode == 1 && patched == count) || (mode == 2 && orig == count)) {
+		printf("X9 CCGATE: already %s (dual-sim + nr gates, page hash)\n", mode == 1 ? "patched" : "original");
+		vnode_put(vp);
+		return 0;
+	}
+	if (orig != count && patched != count) {
+		printf("X9 CCGATE: mixed state orig=%d patched=%d of %d; not touched\n", orig, patched, count);
+		vnode_put(vp);
+		return EINVAL;
+	}
+	/* Code bytes first, page hash last; then flush. */
+	for (i = 0; i < count; i++) {
+		const struct x9_ccgate_edit *e = &x9_ccgate_edits[i];
+		memcpy(buf, mode == 1 ? e->patched : e->orig, e->len);
+		error = x9_ccgate_io(vp, e->off, buf, e->len, UIO_WRITE, ctx);
+		if (error) {
+			printf("X9 CCGATE: write %s errno=%d after %d of %d edits\n", e->what, error, i, count);
+			vnode_put(vp);
+			return error;
+		}
+	}
+	error = VNOP_FSYNC(vp, MNT_WAIT, ctx);
+	for (i = 0; i < count && !error; i++) {
+		const struct x9_ccgate_edit *e = &x9_ccgate_edits[i];
+		error = x9_ccgate_io(vp, e->off, buf, e->len, UIO_READ, ctx);
+		if (!error && memcmp(buf, mode == 1 ? e->patched : e->orig, e->len) != 0) {
+			error = EIO;
+		}
+	}
+	printf("X9 CCGATE: %s dual-sim + nr gates and page 3515 hash in dyld_shared_cache_arm64.31, readback errno=%d\n",
+	    mode == 1 ? "patched" : "restored", error);
+	vnode_put(vp);
+	return error;
+}
+
 static int
 sweet_x9_siri_off(proc_t p, user_addr_t scratch, user_addr_t end)
 {
@@ -8334,6 +8484,8 @@ load_init_program_at_path(proc_t p, user_addr_t scratch_addr, const char* path)
 	 if(dictation_error)printf("X9 DICTATION: preference not installed errno=%d; continuing boot\n",dictation_error);
 	 int kbd_dictation_error=sweet_x9_seed_kbd_dictation(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	 if(kbd_dictation_error)printf("X9 KBD DICT: preference not installed errno=%d; continuing boot\n",kbd_dictation_error);
+	 int ccgate_error=sweet_x9_ccgate();
+	 if(ccgate_error)printf("X9 CCGATE: CommCenter gates not changed errno=%d; continuing boot\n",ccgate_error);
 	 int siri_error=sweet_x9_siri_off(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	 if(siri_error)printf("X9 SIRI: launchd.plist not changed errno=%d; continuing boot\n",siri_error);
 	 int jobs_error=sweet_x9_seed_disabled_jobs(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
