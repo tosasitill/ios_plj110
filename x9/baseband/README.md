@@ -174,7 +174,7 @@ MIPC 使用 16 B header、8 B padded TLV；实际库的部分 tag 已不同于�
    配置对象不是 modem CID，不假成功持久写入；未知选项只存储，Start 不支持就拒绝。
    Start20（含原生 V2）校验显式/31引用的3GPP profile APN、IPv4、no-auth、DPMAIF ready；32仅验证
    配套3GPP2引用，不替代3GPP Internet。`GET_PDP_CID219/21a` 获取真实 CID 范围。
-4. `ACT201/202` 明确 `NOT_REUSE=2`、fallback0（自有 fresh IPv4 策略，不是照抄 Android 默认值）；ID100 是 call ID，IF125 是独立 ccmni 索引，
+4. `ACT201/202` 明确 IPv4/no-auth、`8106/8107`各len1/value00、`NOT_REUSE=2`、fallback0；**这些不保证fresh CID**，MD usr/CID所有权仍待资格化；ID100 是 call ID，IF125 是独立 ccmni 索引，
    ACT12a 是 transIntfId，**不是 netmask，也不使用 CID-1 映射**。
 5. `GET_CALL205/206` 再核对同 CID/interface/IPv4/MTU；同时等待本次 ACT 后真实 `EIF4302/IFUP` 的
    transIntfId/IPv4/MTU 一致。只有这些通过且 `x9d_bind` 成功才生成自有 handle/connected。
@@ -184,7 +184,8 @@ MIPC 使用 16 B header、8 B padded TLV；实际库的部分 tag 已不同于�
 
 `NetAgentService::configureNetworkInterface` 的 IFUP 路径是本地 netdev/ioctl/address/回调，
 EIPPORT 命令用于其他资源，未凭名字添加未知 MD 通知。当前仅接实际 EIF/IFUP 并建立本地 raw-IP route。
-超时/DEL_CLIENT 不丢已发 token；迟到 ACT 成功只做 owned-call 清理，不迟到回复 host success。
+超时/DEL_CLIENT 不丢已发 token；当前代码把迟到 ACT 成功转清理、不迟到回复 host success。
+但`owned`只是现有本地状态，不是独立MD所有权证明；下述usr/CID边界解决前不据此构建新boot候选。
 partial-success/fallback cause 也清理，不冒充完整 IPv4；不明 framing/CNF 保留所有权隔离到下次 boot。
 IPv6/SLAAC、持久/原 modem profile、auth、默认 APN 发现、autoconnect、语音/IMS 未实现；
 非 Internet APN mask、未映射 profile/Start 扩展选项明确失败。RAM profile/Start20 新接线
@@ -206,7 +207,7 @@ IPv6/SLAAC、持久/原 modem profile、auth、默认 APN 发现、autoconnect�
 | profile37 / 38 / 39 | OperatorReservedPcoId u16 / MCC u16 / MNC u16+u8；37须 context 提供非零ID；38/39来自 `PcoOptions` | 是协议配置，不是可忽略 RAM 注释；未证明 MTK 下发映射，仍拒绝 |
 | profile47 PcoContainerIds | 固定 **20 B**，10个u16槽；容器列表非空且 PcoMcc/PcoMnc 均非零才追加38/39/47，超过10个截到10个 | 不把整个 QMI TLV 塞进 MTK profile-v2；未知映射仍拒绝 |
 | Startc2 IDataCall | u8=1；handover 参数及 context 条件成立才添加，非普通 Start 无条件项 | 不等价 Internet type；尚无可信 MTK 对应，不放行 |
-| Start36 / 3f / d0 | HandOverContext 固定21 B / ExtendedHandoffContext 变长（16 B头、长度前缀字符串列表及尾u8）/ IPv6Prefix 固定17 B（IPv6地址16 B+prefix u8）；只在相关 handover 条件成立时出现 | 需要旧会话地址、PDU session等真实状态；当前 fresh IPv4 dialler不支持，不能当默认0略过 |
+| Start36 / 3f / d0 | HandOverContext 固定21 B / ExtendedHandoffContext 变长（16 B头、长度前缀字符串列表及尾u8）/ IPv6Prefix 固定17 B（IPv6地址16 B+prefix u8）；只在相关 handover 条件成立时出现 | 需要旧会话地址、PDU session等真实状态；当前 IPv4-only dialler不支持，不能当默认0略过 |
 
 MT6993 **已加载的** `libmtkmipc-ril.so` 中，`fillMipcApnItem@2c94c0` 填的是 **0x11c B**
 `mipc_apn_profile_v2_struct4`（其中 APN/username/password 为定长数组、APN type为u32、protocol/auth为u8）。
@@ -241,8 +242,8 @@ preferences；country domain、配置装载合并与实际 c7 参数仍须现场
 
 | TLV | 已加载 RIL 普通分支 | 当前适配层 | 含义与修复边界 |
 |---|---|---|---|
-| 108 `IPV4V6_FALLBACK` | `2b8764..876c` 写 **0x7f** | **0=DISABLE** | 保存的 MT6993 P77 MD 中，`91326e76..91326e94` 将0/1/2映射为内部0/2/3，将7f保留为INT_MAX哨兵；`913d5cda..913d5cfc`再取每SIM策略。`l5updn_init`调用的custom函数返回1，初始化为IPv4-first；7f不是直接禁用。现场策略覆盖与最终family结果仍未证明 |
-| 10a `REUSE_FLAG` | 普通分支 `2b8830..8840` 写 **0=DEFAULT**；APN type2/100 特殊分支写3 | **2=NOT_REUSE** | 0允许 MD 的默认复用政策，不等同强制新建；3=REUSE_ONLY，不是普通 Internet 分支。当前只管理自有 fresh call，不能直接改成0后仍沿用成功/超时即 DEACT 的清理逻辑 |
+| 108 `IPV4V6_FALLBACK` | `2b8764..876c` 写 **0x7f** | **0=DISABLE** | 保存P77中7f→INT_MAX→每SIM策略；init为IPv4-first，但AT EGFB可覆盖，普通APN缓存路径还会清request+a4为0。改wire7f不保证使用每SIM初值；最终family仍未证明 |
+| 10a `REUSE_FLAG` | 普通分支 `2b8830..8840` 写 **0=DEFAULT**；APN type2/100 特殊分支写3 | **2=NOT_REUSE** | 0允许默认复用，3为特殊REUSE_ONLY；**2既不能排除原省参缓存复用，也不保证补齐参数后fresh**。当前代码按fresh管理返回CID，但该假设尚不成立；须先补所有权资格，不能直接改0或据ACT成功自动DEACT |
 
 以上差分不是189失败原因的实跑证据：189没有 Start20/ACT201。当前保持 fallback0、NOT_REUSE2，
 也不增加未知 QoS/PCO TLV。要改复用必须先有实际 existing-call 身份、所有权和 GET/EIF 资格，
@@ -251,13 +252,47 @@ preferences；country domain、配置装载合并与实际 c7 参数仍须现场
 **MD消费端补充（静态，不替代实跑）**：原始`modem_a.img`内置`md1_dbginfo`解出146850条
 符号，版本为`MOLY.NR17.R2.MP2.TC16.PR3.SP.V2.P77`。`mipc_data_act_call_req`→
 `l5mipc_ilm_send`→L5UPDN消费链已定位；两处fallback映射表均为`[0,2,3]`。
-10a的u8值0..3保存在请求`+a0`；L5UPDN对3与APN type2/100有明确existing-call复用分支，
-另有按APN查旧call并调用`reuse_data_call_info`的路径。因此**2是否跨所有分支保证fresh PDN仍待确认**，
-不以枚举名替代所有权验证。CarrierSettings装载已追到`100535418`按domain/filename缓存，
+10a的u8值0..3保存在请求`+a0`；L5UPDN对3与APN type2/100有明确existing-call复用分支。
+修补前builder缺8106/8107，使MD保持request+98=0，走APN缓存匹配；匹配后覆盖
+protocol/auth/credentials及fallback，再按APN查旧call。`913d5b54..5b6e`可进入
+`reuse_data_call_info`，**该路径不检查+a0，旧CID可作为普通ACT result0返回**。
+正常DEACT只保护其他usr引用，却会把本usr引用整字节清零；MD usr是固定IO身份，
+OPEN名字不产生每次ACT的独立身份。因此不把ACT/GET/EIF或NOT_REUSE2当作fresh所有权证明，
+也不把正常DEACT说成必然摧毁所有其他usr的PDN。
+AT EGFB→ILM daa6→`l5updn_set_egfb_req`已证实可更新相同每SIM+12f9，且更新先于AT确认；
+最终现场值与family仍未知。CarrierSettings装载已追到`100535418`按domain/filename缓存，
 `1005388f0`→`100611f84`通过FileSystemInterface读取并转换字典；同文件名可跳过重载，
-读取失败仅在RadioPersonality为1时尝试MobileHelper。D22 override组成及189有效配置仍未知。
+读取失败仅在RadioPersonality为1时尝试MobileHelper。189有效配置仍未知。
 证据与只读重放入口：`.local/x9/work/cell189-md-consumer-20261110/{findings.json,md-dis.py,replay.sh}`；
-本轮未改下发字段、未构建镜像或采集新runtime。
+该前次里程碑未改下发字段、未构建镜像或采集新runtime。
+并行新增证据及主agent独立审核在
+`.local/x9/work/cell189-parallel-{fallback,reuse,carrier,mapping,explicit-params,review}-20261110/`；
+三个worker已交回结果，主agent独立重读关键块；新增结论如下，均不据静态分支宣称189已执行。
+
+**显式no-auth修正（95249a1，仅源码/单对象编译）**：已加载普通RIL在`2b8740/8750`
+发送8106/8107；NULL credential由copyString归一化empty-NUL，addMipcTlvStr使用strlen+1。
+因此当前builder补两项**len1/value00**，令MD presence guard的request+98=1，无需109。
+保持1050/1080/10a2、不改APN或ownership/清理/拒绝门。空APN仍101=1B00，但从省参缓存
+转fullparams是有意语义变化，不保证网络结果等价或network-default成功。fullparams还可能
+被profile/config精确匹配guard回raw result0x140004；同APN同creator usr、当前nonURSP回0x16d7，
+不增/清旧refs；不同creator usr且IPv4协议兼容仍可能reuse，creator检查不是当前usr引用检查。
+隔离deecd25+本文件修正仅编译X9Baseband.cpp.o，result True/exit0/32 warnings；无新boot。
+
+**requested PCO/QoS设置面（不是已完成QMI映射）**：保存P77中SET_PCO23b→receiver→
+ILMda8f→setter913dd398真正改每SIM context+828的APN缓存，dadc/23c回result0；内部IMS
+builder911e6a8e真实发送。100=APN、101=u32/defaultFFFFFFFF（语义未明）、8102=88B entry数组；
+ACT913d5fc2..603e将同缓存entry转39B D2CM结构，含4B hex-string ID、31B content及flags，
+不是QMI47/20B直接复制。CGEQREQ→L4C requested selector0→ILMbce→TCM更新requested R99
+QoS、编码/转换后写FIC+36c/32B、cnf755成功；不是QMI29/34B raw copy。仍缺QMI29/37/38/39/47
+转换及最终无线PCO encoder闭环，MD默认另有SBP33/TD-SCDMA条件，**非零未知继续拒绝**。
+
+**carrier文件来源（接口绑定与现场仍待确认）**：kMatchBundle响应kCarrierFilePathName→
+MatchedBundle+b0/map node+d8→perSIM Carrier1/2 domain→CarrierSettings+38 reload；
+kPrefFile另存+c0。原carrier.plist路径可由kOverlayBundle响应替换；设备overlay链按
+RadioPersonality hardware config找文件→base/device递归merge→写生成路径；overlay+c8
+等于嵌入结构+40的filename+88，10052539c..3a4→100633454复制回reply、编码新filename。
+但handler this+50初始化/RTTI绑定、具体匹配/文件顺序/MVNO overlay未全证；不能称189已加载
+D22特定override。下一步仍须有效perSIM filename/preferences及实际c7/Start证据。
 
 ### 5. iOS 网络最终验证
 
