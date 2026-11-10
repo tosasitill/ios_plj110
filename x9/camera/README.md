@@ -67,7 +67,23 @@ worker 不再持 output mutex 渲染或调用 `PixelBufferHandler`。每次输�
 
 已 admission 的 callback 期间，任何图像输出配置/handler/enable 替换返回 unavailable、不修改 graph context；getter、zoom、AF、shutter 等同步重入不再撞上持锁 callback。CF/Block/CV 析构和图像池调用在 output lock 外。主输出的默认启用仅用于没有显式 enable 属性时，明确 false 不再被 preview fallback 覆盖。old config/pool 与 handler 持有到实际回调完成或被丢弃，preview 的 HELD 防重用引用保留。
 
-每个 still 请求有 FIFO ticket、真实 `mach_absolute_time()` 接受时间和目标 run epoch。只选择**完成时间不早于该请求**、同一 run 的 RAW 帧；预览回调中新发出的 shutter 不会消费早已完成的同一 RAW。callback 真正调用并返回后才退休原队头/增加照片数，失败或背压保留原队头；Stop 取消与 object finalize 丢弃都不计照片完成。这里约束的是 header 的实际 DONE time，**不是已证明 SOF/exposure 在 shutter 之后、零快门延迟、拍照 settings ID 回传、相册写入或前后摄实测**。
+每个 still 请求有 FIFO ticket、真实 `mach_absolute_time()` 接受时间、目标 run epoch 和不可变的已验收 options。只选择**完成时间不早于该请求**、同一 run 的 RAW 帧；预览回调中新发出的 shutter 不会消费早已完成的同一 RAW。snapshot 持有原 options 到实际回调结束或丢弃，admission/回调返回重新核对原队头 options 身份及 ticket，不消费替换请求。callback 真正调用并返回后才退休原队头/增加照片数，失败或背压保留原队头；Stop 取消与 object finalize 丢弃都不计照片完成。所有 options 析构均在 output lock 外。这里约束的是 header 的实际 DONE time，**不是已证明 SOF/exposure 在 shutter 之后、零快门延迟、拍照 settings ID 回传、相册写入或前后摄实测**。
+
+### 拍照参数不再静默降级
+
+只读分析现有 20H392 `H10ISP.mediacapture` 的 `StillImageCaptureNow`：NULL 走普通默认请求，非 NULL 必须是 dictionary；AE/manual/OIS/unified/time-machine 参数会进入不同采集分支，不能全部当一次普通拍照。`CMCaptureCore` 的实际 `FlashMode`/`ForceFlashOff`/`ForceFlashOn`/`Auto` 是 CFString，原桥的 Number 描述和数字 0 getter 已修正为 String、实际导出的 `ForceFlashOff`；独立 setter 与本次拍照 override 均只接受明确 OFF。
+
+| 请求 | 当前结果 |
+|---|---|
+| NULL、空 dictionary，或 `FlashMode = ForceFlashOff` | 可排队普通单帧请求；仍需实际 RAW 和输出池才能调用 handler |
+| RAW 附件、红眼、同步 master-only、chroma NR、keypoint/highlight override、histogram/LTM 选项 | 只接受对应明确 false；CFBoolean 或准确的 CFNumber 0/1，true 返回 unsupported |
+| bracket/HDR/manual exposure/OIS/ZSL、tone/NR 配置、未知键 | 返回 `ERR_UNSUPPORTED (-12782)`，即使 bracket 数组为空也不吞掉；不发行 ticket、不改变队列 |
+| 非 dictionary、非字符串或超过 127 字符的键、错误 boolean/flash 类型、超过 32 个键 | 返回 `ERR_PARAM (-12780)`，无队列变更 |
+| 待交付 FIFO 已满 32、故障/停止中或分配失败 | 返回 `ERR_NOT_AVAILABLE (-12783)`；原请求及计数保持 |
+
+验收后重新构造不可变 dictionary；key 使用独立 canonical 字符串，flash 使用实际 enum，boolean/number 仅保留不可变标量，不持有调用方 mutable dictionary/string。unsupported 日志不展开未知嵌套对象。options 随原 FIFO/snapshot 持有、在拒绝/实际回调完成/取消/finalize 时释放，不以参数解析成功声明照片完成。
+
+已追到的 20H392 coordinator 路径先调用 `_addAttachmentsToSampleBuffer:`，由自身的 current requested/resolved settings 挂载 `StillSettings`/`StillImageSettings`。本桥**不臆造 driver `SettingsID`、MakerNote 或 LivePhoto 身份字段**；该观察不等于证明完整 coordinator/request 生命周期或相册落盘。普通拍照端到端仍待真实 native 映射/采集链完成，未生成新供测镜像。
 
 ## 构建
 

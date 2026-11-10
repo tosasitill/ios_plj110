@@ -26,8 +26,9 @@
  * matches them by), so that their AVCaptureDevice formats and session presets resolve: the pictures
  * are scaled from the sensor's frames to whatever size is asked for.
  *
- * The shutter: StillImageCaptureNow asks for one frame of the whole sensor on the StillImage output
- * (the time machine's TimeMachineSuspendNow/ResumeNow are taken and ignored). Focus, where there is
+ * The shutter: only an ordinary single-frame StillImageCaptureNow request is admitted on the
+ * StillImage output; bracket/ZSL/flash-on/unknown options are rejected, not silently downgraded.
+ * (There is no time-machine buffer.) Focus, where there is
  * a lens motor (the wide camera's): by contrast, continuous, and on the window a tap gives (af_frame()).
  *
  * Everything asked of the device and the streams that is not answered here is said in mediaserverd's
@@ -125,6 +126,7 @@ static CMBaseClassID (*device_class_id)(void);
 static CMBaseClassID (*stream_class_id)(void);
 static CFStringRef port_back;           /* kFigCapturePortType_BackFacingCamera */
 static CFStringRef port_front;          /* kFigCapturePortType_FrontFacingCamera */
+static CFStringRef flash_off;           /* real 20H392 String enum, not a numeric mode */
 static Class block_class[3];            /* real libclosure concrete block classes, not arbitrary CF values */
 
 /*
@@ -173,6 +175,12 @@ find_functions(void)
 	port_back = port != NULL ? *port : NULL;
 	port = dlsym(RTLD_DEFAULT, "kFigCapturePortType_FrontFacingCamera");
 	port_front = port != NULL ? *port : NULL;
+	port = dlsym(RTLD_DEFAULT, "kFigCaptureFlashMode_ForceFlashOff");
+	flash_off = port != NULL ? *port : NULL;
+	if (flash_off == NULL || CFGetTypeID(flash_off) != CFStringGetTypeID()) {
+		say("capture flash-off enum unavailable: no capture device");
+		return false;
+	}
 	block_class[0] = dlsym(RTLD_DEFAULT, "_NSConcreteStackBlock");
 	block_class[1] = dlsym(RTLD_DEFAULT, "_NSConcreteMallocBlock");
 	block_class[2] = dlsym(RTLD_DEFAULT, "_NSConcreteGlobalBlock");
@@ -312,7 +320,7 @@ static const struct prop stream_props[] = {
 	{ "VideoOutputsEnabled", "Collection", "ReadWrite" }, { "VideoOutputHandlers", "Collection", "WriteOnly" },
 	{ "DeferAdditionOfAttachments", "Boolean", "ReadWrite" },
 	 { "ColorSpace", "Number", "ReadWrite" }, { "ZoomFactor", "Number", "ReadWrite" },
-	{ "ExposureBias", "Number", "ReadWrite" }, { "DeviceOrientation", "Number", "ReadWrite" }, { "FlashMode", "Number", "ReadWrite" },
+	{ "ExposureBias", "Number", "ReadWrite" }, { "DeviceOrientation", "Number", "ReadWrite" }, { "FlashMode", "String", "ReadWrite" },
 	{ "StillImageCaptureNow", "Collection", "WriteOnly" }, { "LockAENow", "Boolean", "WriteOnly" }, { "UnlockAENow", "Boolean", "WriteOnly" },
 	{ "LockAWBNow", "Boolean", "WriteOnly" }, { "UnlockAWBNow", "Boolean", "WriteOnly" }, { "MaxIntegrationTime", "Number", "ReadWrite" },
 	{ "AEMaxGain", "Number", "ReadWrite" }, { "AEMinGain", "Number", "ReadWrite" }, { "FaceDetectionEnabled", "Boolean", "ReadWrite" },
@@ -469,7 +477,109 @@ static const struct camera {
 struct still_request {
 	struct still_request *next;
 	uint64_t ticket, not_before, run_epoch;
+	CFDictionaryRef options; /* immutable, validated single-frame options; no caller-owned mutable leaves */
 };
+
+/* One RAW completion per request. Do not let an absent consumer build an unbounded shutter FIFO. */
+#define STILL_REQUEST_LIMIT 32u
+#define STILL_OPTION_LIMIT 32
+
+/* These are actual 20H392 CFString values. Only explicit OFF is supported for these features.
+ * All other keys (including empty bracket arrays, tone/NR configuration and unknown IDs) fail
+ * closed until their own input -> physical capture -> output contract has an implementation. */
+static const char *const still_disabled_options[] = {
+	"AttachFocusPixelData", "AttachSushiRaw", "AttachSashimiRaw",
+	"GenerateRedEyeAuxiliaryImage", "GenerateRedEyeAuxiliaryImageForSlave",
+	"SynchronizedStreamsDeliverFromMasterStreamOnly", "ChromaNoiseReductionEnabled",
+	"KeypointDetectionEnabledOverride", "HighlightRecoveryEnabledOverride",
+	"DeliverLocalHistogramsMetadata", "DeliverLocalHistogramClippingData",
+	"DeliverLTMLookUpTableMetadata", "DeliverLumaHistogram",
+};
+
+/* CMCapture uses both CFBoolean and NSNumber(numberWithBool:). Reject lossy truthiness. */
+static bool
+still_boolean(CFTypeRef value, bool *enabled)
+{
+	if (value == NULL) return false;
+	if (CFGetTypeID(value) == CFBooleanGetTypeID()) {
+		*enabled = CFBooleanGetValue(value);
+		return true;
+	}
+	if (CFGetTypeID(value) == CFNumberGetTypeID()) {
+		double number;
+
+		if (!CFNumberGetValue(value, kCFNumberDoubleType, &number) || !isfinite(number) ||
+		    (number != 0 && number != 1)) return false;
+		*enabled = number == 1;
+		return true;
+	}
+	return false;
+}
+
+static OSStatus
+still_options_copy(CFTypeRef value, CFDictionaryRef *result)
+{
+	const void *keys[STILL_OPTION_LIMIT], *values[STILL_OPTION_LIMIT];
+	CFIndex count = 0;
+	OSStatus status = 0;
+
+	*result = NULL;
+	/* H10ISP accepts NULL as the ordinary default request; non-NULL must be a dictionary. */
+	if (value != NULL) {
+		if (CFGetTypeID(value) != CFDictionaryGetTypeID()) return ERR_PARAM;
+		count = CFDictionaryGetCount(value);
+		if (count < 0 || count > STILL_OPTION_LIMIT) return ERR_PARAM;
+		CFDictionaryGetKeysAndValues(value, keys, values);
+	}
+	CFMutableDictionaryRef copy = CFDictionaryCreateMutable(NULL, count, &kCFTypeDictionaryKeyCallBacks,
+	    &kCFTypeDictionaryValueCallBacks);
+
+	if (copy == NULL) return ERR_NOT_AVAILABLE;
+	for (CFIndex i = 0; i < count; i++) {
+		if (keys[i] == NULL || CFGetTypeID(keys[i]) != CFStringGetTypeID() || CFStringGetLength(keys[i]) > 127) {
+			status = ERR_PARAM;
+			break;
+		}
+		CFStringRef canonical = NULL;
+		CFTypeRef leaf = values[i];
+
+		if (key_is(keys[i], "FlashMode")) {
+			if (leaf == NULL || CFGetTypeID(leaf) != CFStringGetTypeID()) status = ERR_PARAM;
+			else if (!CFEqual(leaf, flash_off)) status = ERR_UNSUPPORTED;
+			else {
+				canonical = CFRetain(CFSTR("FlashMode"));
+				leaf = flash_off;
+			}
+		} else {
+			for (size_t j = 0; j < sizeof(still_disabled_options) / sizeof(still_disabled_options[0]); j++) {
+				if (!key_is(keys[i], still_disabled_options[j])) continue;
+				bool enabled;
+
+				if (!still_boolean(leaf, &enabled)) status = ERR_PARAM;
+				else if (enabled) status = ERR_UNSUPPORTED;
+				else canonical = CFStringCreateWithCString(NULL, still_disabled_options[j], kCFStringEncodingUTF8);
+				/* CFBoolean/CFNumber are immutable; never retain the caller's mutable string key. */
+				if (!status && canonical == NULL) status = ERR_NOT_AVAILABLE;
+				break;
+			}
+			if (!status && canonical == NULL) status = ERR_UNSUPPORTED;
+		}
+		if (status) {
+			/* Do not expand an unsupported nested array/dictionary or arbitrary CF object's description. */
+			say_once("stream: rejected still option", keys[i], NULL);
+			if (canonical != NULL) CFRelease(canonical);
+			break;
+		}
+		CFDictionarySetValue(copy, canonical, leaf);
+		CFRelease(canonical);
+	}
+	if (!status) {
+		*result = CFDictionaryCreateCopy(NULL, copy);
+		if (*result == NULL) status = ERR_NOT_AVAILABLE;
+	}
+	CFRelease(copy);
+	return status;
+}
 
 struct stream {
 	CFArrayRef      formats;
@@ -517,12 +627,20 @@ stream_fault(struct stream *s, int error)
 }
 
 static void
+still_release(struct still_request *request)
+{
+	if (request == NULL) return;
+	if (request->options != NULL) CFRelease(request->options);
+	free(request);
+}
+
+static void
 stills_release(struct still_request *request)
 {
 	while (request != NULL) {
 		struct still_request *next = request->next;
 
-		free(request);
+		still_release(request);
 		request = next;
 	}
 }
@@ -753,7 +871,9 @@ stream_copy_property(CMBaseObjectRef o, CFStringRef key, CFAllocatorRef allocato
 
 		value = CFArrayCreate(NULL, (const void **)&srgb, 1, &kCFTypeArrayCallBacks);
 		CFRelease(srgb);
-	} else if (key_is(key, "ColorSpace") || key_is(key, "DeviceOrientation") || key_is(key, "FlashMode")) {
+	} else if (key_is(key, "FlashMode")) {
+		value = CFRetain(flash_off);
+	} else if (key_is(key, "ColorSpace") || key_is(key, "DeviceOrientation")) {
 		value = number_i(0);
 	} else if (key_is(key, "HasAutoFocusPositionSensor") || key_is(key, "HighCurrentTorchEnabled") ||
 	    key_is(key, "DeferAdditionOfAttachments")) {
@@ -871,20 +991,24 @@ stream_set_property(CMBaseObjectRef o, CFStringRef key, CFTypeRef value)
 		return outputs_set(s, key, value);
 	}
 	if (key_is(key, "StillImageCaptureNow")) {
-		/*
-		 * The shutter: the capture graph's still image coordinator asks for a photograph by writing
-		 * this, with what it wants of it (how many pictures, the flash, the settings' number by which
-		 * it will know the frames again). One frame of the sensor goes to the StillImage output for
-		 * each ask.
-		 */
+		/* Validate BEFORE issuing a ticket. 20H392's coordinator attaches its current settings
+		 * downstream; there is no proven driver SettingsID field to fabricate here. */
+		CFDictionaryRef options;
+		OSStatus status = still_options_copy(value, &options);
+
+		if (status) return status;
 		struct still_request *request = calloc(1, sizeof(*request));
 
-		if (request == NULL) return ERR_NOT_AVAILABLE;
+		if (request == NULL) {
+			CFRelease(options);
+			return ERR_NOT_AVAILABLE;
+		}
+		request->options = options;
 		pthread_mutex_lock(&s->lock);
 		if (s->stopping || atomic_load(&s->first_errno) || atomic_load(&capture_retire_errno) ||
-		    s->stills_wanted == UINT_MAX || s->stills_issued == UINT64_MAX || (!s->running && s->run_epoch == UINT64_MAX)) {
+		    s->stills_wanted >= STILL_REQUEST_LIMIT || s->stills_issued == UINT64_MAX || (!s->running && s->run_epoch == UINT64_MAX)) {
 			pthread_mutex_unlock(&s->lock);
-			free(request);
+			still_release(request);
 			return ERR_NOT_AVAILABLE;
 		}
 		s->stills_wanted++;
@@ -895,8 +1019,13 @@ stream_set_property(CMBaseObjectRef o, CFStringRef key, CFTypeRef value)
 		else s->stills_head = request;
 		s->stills_tail = request;
 		pthread_mutex_unlock(&s->lock);
-		say_once("stream: a photograph asked for", key, value);
+		say_once("stream: an ordinary photograph asked for", key, NULL);
 		return 0;
+	}
+	if (key_is(key, "FlashMode")) {
+		if (value == NULL || CFGetTypeID(value) != CFStringGetTypeID()) return ERR_PARAM;
+		if (!CFEqual(value, flash_off)) return ERR_UNSUPPORTED;
+		return 0; /* Explicit OFF only. No physical shutter-flash capability is advertised. */
 	}
 	if (key_is(key, "VideoOutputsColorInfo")) {
 		pthread_mutex_lock(&s->lock);
@@ -990,6 +1119,7 @@ render_piece(void *context, size_t i)
 
 struct output_snapshot {
 	CFDictionaryRef config;
+	CFDictionaryRef still_options;
 	void *handler, *handler_identity;
 	const char *name;
 	uint64_t revision, run_epoch, still_ticket;
@@ -1004,7 +1134,8 @@ snapshot_current(struct stream *s, const struct output_snapshot *snapshot)
 	struct output *out = &s->out[snapshot->slot];
 
 	return s->run_epoch == snapshot->run_epoch && out->revision == snapshot->revision &&
-	    out->config == snapshot->config && out->handler == snapshot->handler_identity;
+	    out->config == snapshot->config && out->handler == snapshot->handler_identity &&
+	    (!snapshot->still || (s->stills_head != NULL && s->stills_head->options == snapshot->still_options));
 }
 
 static bool
@@ -1022,12 +1153,14 @@ snapshot_take(struct stream *s, unsigned slot, uint64_t frame_time, struct outpu
 		return false;
 	}
 	*snapshot = (struct output_snapshot){ .config = CFRetain(out->config), .handler = Block_copy(out->handler),
+	    .still_options = still ? CFRetain(s->stills_head->options) : NULL,
 	    .handler_identity = out->handler, .name = out->name, .revision = out->revision, .run_epoch = s->run_epoch,
 	    .still_ticket = still ? s->stills_head->ticket : 0, .slot = slot, .still = still };
 	pthread_mutex_unlock(&s->lock);
 	if (snapshot->handler == NULL) {
+		if (snapshot->still_options != NULL) CFRelease(snapshot->still_options);
 		CFRelease(snapshot->config);
-		snapshot->config = NULL;
+		*snapshot = (struct output_snapshot){ 0 };
 		return false;
 	}
 	return true;
@@ -1038,6 +1171,7 @@ snapshot_release(struct output_snapshot *snapshot)
 {
 	if (snapshot->handler != NULL) Block_release(snapshot->handler);
 	if (snapshot->config != NULL) CFRelease(snapshot->config);
+	if (snapshot->still_options != NULL) CFRelease(snapshot->still_options);
 }
 
 static void
@@ -1362,7 +1496,7 @@ deliver(struct stream *s, const struct output_snapshot *snapshot, const struct i
 	}
 	s->callback_active = false;
 	pthread_mutex_unlock(&s->lock);
-	free(completed_request);
+	still_release(completed_request);
 	if (release != NULL) CVPixelBufferRelease(release);
 	if (!keep) CVPixelBufferRelease(pb);
 	if (first) say("%s: first picture given (%ux%u %c%c%c%c)", snapshot->name, width, height,
