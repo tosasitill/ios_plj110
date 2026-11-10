@@ -7719,6 +7719,8 @@ sweet_x9_ccgate(void)
 	return error;
 }
 
+#include "x9_carrier_activation_alert.inc"
+
 /* 20H392 CommCenter, native 4 KiB CodeDirectory page 529. The plan controller
  * factory accepts SettingsDevice#40 (eSIM) OR #28 (AppleSIM) on stock D22.
  * In our dual-physical adapter use #70, the actual RadioPersonality+241 dual
@@ -8756,6 +8758,8 @@ load_init_program_at_path(proc_t p, user_addr_t scratch_addr, const char* path)
 	 if(dictation_error)printf("X9 DICTATION: preference not installed errno=%d; continuing boot\n",dictation_error);
 	 int kbd_dictation_error=sweet_x9_seed_kbd_dictation(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	 if(kbd_dictation_error)printf("X9 KBD DICT: preference not installed errno=%d; continuing boot\n",kbd_dictation_error);
+	 int activation_ui_error=sweet_x9_carrier_activation_alert();
+	 if(activation_ui_error)printf("X9 init: carrier activation popup workaround errno=%d; original error/state retained\n",activation_ui_error);
 	 int ccgate_error=sweet_x9_ccgate();
 	 if(ccgate_error)printf("X9 CCGATE: CommCenter gates not changed errno=%d; continuing boot\n",ccgate_error);
 	 if(!ccgate_error){
