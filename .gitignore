@@ -28,6 +28,7 @@ x9/kernel/generated/x9_baseband_firmware.inc
 x9/kernel/generated/x9_carrier_cbn.inc
 x9/kernel/generated/x9_torch_bridge.inc
 x9/kernel/generated/x9_camera_bridge.inc
+x9/kernel/generated/x9_microphone_hal.inc
 x9/kernel/generated/x9_camera_sensor_tables.inc
 
 # Local dependency snapshots, Apple inputs and private device state

@@ -30,6 +30,10 @@ static struct x9_mic_backend hw;
 static int16_t ring[X9_MIC_RING_FRAMES];
 static uint32_t head, count;
 static bool opened, hardware_active;
+/* Memory-only boot mode. PID1 uses the same ADT/explicit-arg decision as
+ * devfs; it must not independently default x9_mic or infer DMA readiness. */
+int sweet_x9_microphone_mode(void)
+{ return (int)__atomic_load_n(&st.mode, __ATOMIC_ACQUIRE); }
 /* Protected across uiomove by mic_read_lock. Do not add an 8KiB buffer to
  * the kernel stack or allocate from the real-time nonblocking read path. */
 static int16_t read_pcm[X9_MIC_MAX_READ_FRAMES];
@@ -257,7 +261,7 @@ void sweet_x9_microphone_init(void)
         if(value<=2)fallback=(int)value;
     }
     int mode=sweet_x9_arg("x9_mic",fallback);if(mode!=1 && mode!=2)return;
-    if(st.mode)return;st.mode=mode;
+    if(st.mode)return;__atomic_store_n(&st.mode,mode,__ATOMIC_RELEASE);
     int major=cdevsw_add(-1,&mic_cdev);
     if(major<0){st.last_errno=ENXIO;return;}
     if(!devfs_make_node(makedev(major,0),DEVFS_CHAR,501,501,0644,"x9-mic-status") ||
