@@ -1,6 +1,6 @@
 /* Native IPv4 WDS dialler, single QMI/DPMAIF owner (NOT the AT job queue).
  * Runtime: libmtkmipc-ril + libmipc, ttyCMIPC1/RX216/TX217.
- * OPEN301/register307 -> GET_PDP_CID219 -> ACT201 (REUSE=2, fallback=0)
+ * OPEN301/register307 -> GET_PDP_CID219 -> explicit no-auth ACT201 (REUSE=2, fallback=0)
  * -> GET_CALL205 + actual EIF4302/IFUP -> bind.
  * Native decodeDataCallProfile reads ID100 separately from IF125;
  * ccci_dpmaif_com writes channel_id=ccmni_idx. Never use CID-1 as a route.
@@ -8,7 +8,10 @@
  * Old MIPC headers differ from this RIL at tags128..12b: TRANS_ID is NOT a
  * subnet mask. Missing gateway/netmask is omitted, not invented. APN/IP stays
  * in RAM, never diagnostics. Sent activation survives host timeout/DEL_CLIENT
- * until its late CNF and real owned-call cleanup. No cancel/reset/borrowed CID.
+ * until its late CNF and cleanup. REUSE=2 does not prove a globally fresh CID:
+ * saved P77 can reuse same-APN calls, and normal DEACT clears the MD user's
+ * entire reference slot. User/CID lifetime still needs qualification before
+ * treating this dialler as ready for a new boot candidate. No cancel/reset.
  */
 struct x9w_client {
  uint8_t mux, family, sim_slot, stats_interval; bool starting,bearer_report;
@@ -255,10 +258,18 @@ static void x9w_result(x9w_bearer &b,unsigned mux,const uint8_t *p,unsigned n){
   }
   if(!x9d_ready()||!x9_md_mipc_online()){x9w_error(b,X9Q_NOT_READY);x9w_clear(b,mux);return;}
   x9w_frame f(0x201,1u<<b.sim_slot);f.tlv(0x101,b.apn,(unsigned)strlen(b.apn)+1);
-  f.word(0x102,1);f.byte(0x103,1);f.byte(0x104,1);f.byte(0x105,0);f.byte(0x108,0);f.byte(0x10a,2);
+  f.word(0x102,1);f.byte(0x103,1);f.byte(0x104,1);f.byte(0x105,0);
+  // Loaded RIL 2b8740/8750 sends strlen+1 credentials even for no-auth.
+  // MD 91326e0e..e44 requires both TLVs PRESENT to set full-parameters +98.
+  // Omitting them lets its APN cache replace protocol/auth/fallback. These
+  // are explicit empty strings, not zero-length TLVs or invented credentials.
+  static const char no_credentials[]="";
+  f.tlv(0x8106,no_credentials,sizeof(no_credentials));
+  f.tlv(0x8107,no_credentials,sizeof(no_credentials));
+  f.byte(0x108,0);f.byte(0x10a,2);
   b.if_floor=x9w_if_serial;
   if(!x9w_send(b,f,X9W_ACT,120000)){x9w_error(b,X9Q_BUSY);x9w_clear(b,mux);}
-  else printf("X9 WDS: activating new IPv4 call mux %u, no reuse/fallback\n",mux);return;
+  else printf("X9 WDS: requesting IPv4 call mux %u, explicit no-auth, reuse flag 2 fallback 0 (not a fresh-CID guarantee)\n",mux);return;
  }
  if(op==X9W_ACT){
   unsigned cid;
