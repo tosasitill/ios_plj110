@@ -23,11 +23,54 @@ static uint32_t baro_crc32(const uint8_t *p, unsigned n)
  }
  return crc ^ 0xffffffffu;
 }
+
+static void baro_put_le32(uint8_t *p, uint32_t value)
+{
+ for (unsigned i = 0; i < 4; i++) p[i] = (uint8_t)(value>>(8*i));
+}
+
+int x9_baro_scp_make_list(void *shared_tx, unsigned bytes,
+    void *notification, unsigned nbytes, uint8_t sequence)
+{
+ uint8_t *p = shared_tx, *n = notification;
+ /* Build a host snapshot only. The real worker must copy it into the
+  * qualified SHARE_BUFFER_W, perform cache ownership and send OUT31. */
+ if (!p || !n || bytes < 4096+28 || bytes > 8192 || nbytes < 28) return EINVAL;
+ lck_mtx_lock(&x9_baro_lock);
+ int error = !active ? ENXIO : test_mode || scp_list_pending || scp_pending ? EBUSY : 0;
+ if (!error) {
+  bzero(p, bytes); bzero(n, 28);
+  baro_put_le32(p, 0xdeadbeefu); baro_put_le32(p+bytes-4, 0xdeadbeefu);
+  /* Vendor LIST: channel0/command0/subcommand0, TX0, RX capacity4096.
+   * Inner header sequence is zero; OUT31 sequence owns the transaction. */
+  baro_put_le32(p+16, 4096); baro_put_le32(p+20, 4096);
+  baro_put_le32(p+4, baro_crc32(p+8, 16));
+  n[0] = sequence; n[2] = 9; n[3] = 12; n[4] = baro_crc8(n, 4);
+  memcpy(n+8, p+8, 12);
+  /* Quarantine the previous gain/stream BEFORE the worker exposes a new
+   * request; a synchronous reply must not race a late pending flag. */
+  configure_mtk_locked(0);
+  scp_list_sequence = sequence; scp_list_pending = 1;
+  scp_list_request_time = mach_absolute_time();
+ }
+ lck_mtx_unlock(&x9_baro_lock); return error;
+}
+
 int x9_baro_scp_configure_list(const void *shared_rx, unsigned bytes,
     const void *notification, unsigned nbytes, uint8_t sequence)
 {
  const uint8_t *p = shared_rx, *n = notification, *pressure = NULL;
- int error = 0;
+ lck_mtx_lock(&x9_baro_lock);
+ int error = !active ? ENXIO : test_mode ? EBUSY : !scp_list_pending ? EALREADY : 0;
+ if (!error && sequence != scp_list_sequence) error = ESTALE;
+ if (!error) {
+  uint64_t age; absolutetime_to_nanoseconds(mach_absolute_time()-scp_list_request_time, &age);
+  /* OPPO share_buffer_seq_comm waits 100ms, not the ENABLE timeout. */
+  if (age > 100000000ULL) {
+   scp_list_pending = 0; scp_list_request_time = 0; error = ETIMEDOUT;
+  }
+ }
+ if (error) { lck_mtx_unlock(&x9_baro_lock); return error; }
  /* Platform's SENS_SHARE_BUFFER_R is 0x2000; the list request is <=4096.
   * Use the supplied region size, not any untrusted header-derived pointer. */
  if (!p || !n || nbytes != 28 || bytes < 28 || bytes > 8192) error = EINVAL;
@@ -54,10 +97,15 @@ int x9_baro_scp_configure_list(const void *shared_rx, unsigned bytes,
   }
   if (!error && !pressure) error = ENODEV;
  }
- if (error) { x9_baro_invalidate_mtk(); return error; }
  /* Complete validation first: a partial/malformed reply cannot install gain
-  * or publish a sensor. This configures units only, not physical readiness. */
- return x9_baro_configure_mtk(pressure, X9_BARO_MTK_INFO_BYTES);
+  * or publish a sensor. Unrelated/malformed replies do not consume the real
+  * outstanding query, and unsolicited/duplicate LIST cannot reset a stream.
+  * A matching valid list without PRESSURE completes with ENODEV, not a
+  * defaultsensorlist or a fabricated gain. */
+ if (!error) configure_mtk_locked(le32(pressure+4));
+ else if (error == ENODEV) { scp_list_pending = 0; scp_list_request_time = 0; }
+ lck_mtx_unlock(&x9_baro_lock);
+ return error;
 }
 
 int x9_baro_scp_make_enable(void *request, unsigned capacity,
@@ -67,7 +115,7 @@ int x9_baro_scp_make_enable(void *request, unsigned capacity,
  if (!p || capacity < 24 || interval_ns < 20000000ULL || interval_ns > 1000000000ULL)
   return EINVAL;
  lck_mtx_lock(&x9_baro_lock);
- int error = !active ? ENXIO : test_mode ? EBUSY : !mtk_gain ? EAGAIN : scp_pending ? EBUSY : 0;
+ int error = !active ? ENXIO : test_mode || scp_list_pending || scp_pending ? EBUSY : !mtk_gain ? EAGAIN : 0;
  if (!error) {
   bzero(p, 24); p[0] = sequence; p[1] = 6; p[2] = 1; p[3] = 16;
   p[4] = baro_crc8(p, 4);

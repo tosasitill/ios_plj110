@@ -48,6 +48,15 @@ void x9_baro_invalidate_mtk(void);
  * the 8-bit wire sequence alone cannot identify a firmware generation.
  * Duplicate/unrelated ACKs leave state unchanged; ENABLE ACK expires in 1s.
  * No default gain, pressure or synthetic success is supplied. */
+/* First construct the LIST snapshot and establish its pending lease. This
+ * does not write shared RAM or send IPI31. shared_bytes is the real W region
+ * size (MT6993:8192), notification capacity>=28. Distinct output buffers;
+ * transport invalidates on send/reset/timeout failure before starting again.
+ * configure_list rejects replies without a matching pending request and a
+ * 100ms deadline; bad/unrelated packets never revoke an established stream.
+ * Existing HID setProperties maps in-flight LIST/ENABLE to kIOReturnBusy. */
+int x9_baro_scp_make_list(void *shared_tx, unsigned int shared_bytes,
+    void *notify, unsigned int notify_capacity, uint8_t sequence);
 int x9_baro_scp_configure_list(const void *shared_rx, unsigned int shared_bytes,
     const void *notify, unsigned int notify_bytes, uint8_t request_sequence);
 int x9_baro_scp_make_enable(void *request, unsigned int capacity,

@@ -23,6 +23,9 @@ static int scp_layout_valid;
 static int active, test_mode, valid;
 static int scp_pending, scp_enabled;
 static uint8_t scp_sequence;
+static int scp_list_pending;
+static uint8_t scp_list_sequence;
+static uint64_t scp_list_request_time;
 
 /* Read only the shim's qualified copy, never stale SRAM or an assumed EMI
  * pointer. FDT facts are necessary but insufficient for hardware ownership. */
@@ -92,7 +95,7 @@ x9_baro_set_report_interval_us(uint32_t us)
  lck_mtx_lock(&x9_baro_lock);
  /* Until a real IPI sender owns cadence changes, do not report a host-poll
   * change as a hardware batch update. Diagnostics are explicitly host-only. */
- int error = !active ? ENXIO : scp_pending ? EBUSY :
+ int error = !active ? ENXIO : scp_pending || scp_list_pending ? EBUSY :
      !test_mode && us != report_interval_us ? ENOTSUP : 0;
  if (!error) report_interval_us = us;
  lck_mtx_unlock(&x9_baro_lock); return error;
@@ -162,6 +165,7 @@ x9_baro_init(int diagnostic)
 	scp_pending = scp_enabled = 0;
 	scp_request_time = 0;
 	scp_request_interval_ns = 0;
+	scp_list_pending = 0; scp_list_request_time = 0;
 	report_interval_us = 200000;
 	copy_scp_layout();
 	lck_mtx_unlock(&x9_baro_lock);
@@ -178,6 +182,7 @@ x9_baro_shutdown(void)
 	scp_pending = scp_enabled = 0;
 	scp_request_time = 0;
 	scp_request_interval_ns = 0;
+	scp_list_pending = 0; scp_list_request_time = 0;
 	scp_layout_valid = 0;
 	lck_mtx_unlock(&x9_baro_lock);
 }
@@ -197,6 +202,18 @@ x9_baro_copy_sample(struct x9_baro_sample *sample)
 	return age_ns <= X9_BARO_MAX_AGE_NS ? 0 : ETIMEDOUT;
 }
 
+/* Caller holds x9_baro_lock, and has validated the whole transaction. */
+static void
+configure_mtk_locked(uint32_t gain)
+{
+	mtk_gain = gain;
+	last_scp_time = 0;
+	valid = 0;
+	scp_pending = scp_enabled = 0;
+	scp_request_time = scp_request_interval_ns = 0;
+	scp_list_pending = 0; scp_list_request_time = 0;
+}
+
 int
 x9_baro_configure_mtk(const void *info, unsigned int length)
 {
@@ -208,15 +225,8 @@ x9_baro_configure_mtk(const void *info, unsigned int length)
 	gain = le32(p + 4);
 	if (!gain) return EINVAL;
 	lck_mtx_lock(&x9_baro_lock);
-	error = !active ? ENXIO : (test_mode ? EBUSY : 0);
-	if (!error) {
-		mtk_gain = gain;
-		last_scp_time = 0;
-		valid = 0;
-		scp_pending = scp_enabled = 0;
-		scp_request_time = 0;
-		scp_request_interval_ns = 0;
-	}
+	error = !active ? ENXIO : test_mode || scp_list_pending || scp_pending ? EBUSY : 0;
+	if (!error) configure_mtk_locked(gain);
 	lck_mtx_unlock(&x9_baro_lock);
 	if (!error) printf("X9 BARO: MTK PRESSURE configured gain=%u; awaiting DATA (not a hardware enable)\n", gain);
 	return error;
@@ -251,6 +261,7 @@ x9_baro_invalidate_mtk(void)
 		scp_pending = scp_enabled = 0;
 		scp_request_time = 0;
 		scp_request_interval_ns = 0;
+		scp_list_pending = 0; scp_list_request_time = 0;
 	}
 	lck_mtx_unlock(&x9_baro_lock);
 }

@@ -4,6 +4,7 @@
  * TAIL: A3. There is no payload checksum in this envelope; NMEA must pass its
  * own checksum as well. Header seq includes slot bits: NOT a monotonic ID. */
 #include "x9_gps_mcudl.h"
+#include "x9_gps_mnl.inc"
 
 void
 x9_gps_mcudl_stream_init(struct x9_gps_mcudl_stream *s, uint64_t generation,
@@ -12,6 +13,16 @@ x9_gps_mcudl_stream_init(struct x9_gps_mcudl_stream *s, uint64_t generation,
  if (!s) return;
  bzero(s, sizeof(*s)); s->generation = generation;
  s->control = control; s->context = context;
+}
+
+void
+x9_gps_mcudl_stream_init_mnl(struct x9_gps_mcudl_stream *s, uint64_t generation,
+    int (*control)(void *, uint8_t, const uint8_t *, unsigned, uint64_t),
+    int (*mnl)(void *, const uint8_t *, unsigned, uint64_t), void *context)
+{
+ if (!s) return;
+ x9_gps_mcudl_stream_init(s, generation, control, context);
+ x9_gps_mnl_stream_init(&s->mnl, generation, mnl, context);
 }
 
 static void
@@ -26,6 +37,7 @@ mcudl_clear_partial(struct x9_gps_mcudl_stream *s)
 {
  s->used = s->sentence_used = 0;
  s->sentence_time = s->fragment_time = 0;
+ x9_gps_mnl_discard_partial(&s->mnl);
 }
 
 static int
@@ -68,18 +80,21 @@ mcudl_parse(struct x9_gps_mcudl_stream *s, uint64_t host_time)
 {
  while (s->used) {
   if (s->frame[0] != 0xa5) {
-   s->bad_frames++; s->sentence_used = 0; mcudl_discard(s, 1); continue;
+   s->bad_frames++; s->sentence_used = 0;
+   x9_gps_mnl_discard_partial(&s->mnl); mcudl_discard(s, 1); continue;
   }
   if (s->used < 6) break;
   unsigned payload = ((unsigned)s->frame[3] << 8) | s->frame[4];
   uint8_t checksum = (uint8_t)(s->frame[1] + s->frame[2] + s->frame[3] + s->frame[4]);
   if (checksum != s->frame[5] || payload > X9_MCUDL_PAYLOAD_MAX) {
-   s->bad_frames++; s->sentence_used = 0; mcudl_discard(s, 1); continue;
+   s->bad_frames++; s->sentence_used = 0;
+   x9_gps_mnl_discard_partial(&s->mnl); mcudl_discard(s, 1); continue;
   }
   unsigned frame_bytes = 6 + payload + 1;
   if (s->used < frame_bytes) break;
   if (s->frame[frame_bytes-1] != 0xa3) {
-   s->bad_frames++; s->sentence_used = 0; mcudl_discard(s, 1); continue;
+   s->bad_frames++; s->sentence_used = 0;
+   x9_gps_mnl_discard_partial(&s->mnl); mcudl_discard(s, 1); continue;
   }
   /* A control ACK may start tracking, or fault/reset the generation, within
    * this same coalesced receive. Never reuse receive-entry state for the
@@ -100,8 +115,12 @@ mcudl_parse(struct x9_gps_mcudl_stream *s, uint64_t host_time)
   else {
    s->non_nmea++;
    /* Never silently discard firmware/system/flow-control transactions. */
-   if (!s->control) { mcudl_clear_partial(s); return ENOTSUP; }
-   int error = s->control(s->context, s->frame[2], s->frame+6, payload, host_time);
+   int error;
+   if (s->frame[2] == 0xa2 && s->mnl.complete)
+    error = x9_gps_mnl_receive(&s->mnl, s->frame+6, payload, s->generation, host_time);
+   else if (s->control)
+    error = s->control(s->context, s->frame[2], s->frame+6, payload, host_time);
+   else error = ENOTSUP;
    if (error) { mcudl_clear_partial(s); return error; }
    x9_gps_copy_status(&status);
    if (status.generation != s->generation || status.fault) {
