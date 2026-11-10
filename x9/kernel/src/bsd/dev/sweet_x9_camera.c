@@ -72,6 +72,7 @@ static const struct x9_camera_sensor sensors[] = {
 };
 #include "x9_camera_pipeline.inc"
 #include "x9_camera_s1.inc"
+#include "x9_camera_smmu.inc"
 #include "x9_camera_sensor.inc"
 #include "x9_camera_mt6993.inc"
 #include "x9_camera_resources.inc"

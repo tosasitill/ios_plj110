@@ -133,9 +133,10 @@ static int cam_smmu_observe(struct cam_receive_power *p,struct x9_camera_resourc
     }
     /* Capability prerequisite for a future 16KiB stage1 SID80/SSID domain.
      * No page table is allocated or attached by this power-only provider. */
-    unsigned sidbits=r->idr[1]&63,ssidbits=(r->idr[1]>>6)&31;
-    if(!(r->idr[0]&2) || sidbits<8 || sidbits>32 || !ssidbits || ssidbits>20 ||
-       !(r->idr[5]&(1u<<5)) || (r->idr[5]&7)>6) {
+    /* Use the actual native IAS34/16K/SSID0 engine's prerequisites. A
+     * hardware SSIDSIZE of zero still permits the default SSID0 CD. This
+     * is capability screening only; it allocates/attaches nothing here. */
+    if(!cam_smmu_capable(r->idr[0],r->idr[1],r->idr[5])) {
         r->flags|=X9_CAM_RES_SMMU_UNSUPPORTED;
         r->blockers|=X9_CAM_RES_NEED_SMMU_FEATURE;return ENOTSUP;
     }
