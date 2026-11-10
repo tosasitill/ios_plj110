@@ -174,7 +174,7 @@ MIPC 使用 16 B header、8 B padded TLV；实际库的部分 tag 已不同于�
    配置对象不是 modem CID，不假成功持久写入；未知选项只存储，Start 不支持就拒绝。
    Start20（含原生 V2）校验显式/31引用的3GPP profile APN、IPv4、no-auth、DPMAIF ready；32仅验证
    配套3GPP2引用，不替代3GPP Internet。`GET_PDP_CID219/21a` 获取真实 CID 范围。
-4. `ACT201/202` 明确 `NOT_REUSE=2`、fallback0；ID100 是 call ID，IF125 是独立 ccmni 索引，
+4. `ACT201/202` 明确 `NOT_REUSE=2`、fallback0（自有 fresh IPv4 策略，不是照抄 Android 默认值）；ID100 是 call ID，IF125 是独立 ccmni 索引，
    ACT12a 是 transIntfId，**不是 netmask，也不使用 CID-1 映射**。
 5. `GET_CALL205/206` 再核对同 CID/interface/IPv4/MTU；同时等待本次 ACT 后真实 `EIF4302/IFUP` 的
    transIntfId/IPv4/MTU 一致。只有这些通过且 `x9d_bind` 成功才生成自有 handle/connected。
@@ -201,10 +201,10 @@ IPv6/SLAAC、持久/原 modem profile、auth、默认 APN 发现、autoconnect�
 | Start31 / 32 | 各 u8，3GPP / 3GPP2 profile index | 每 SIM QMI RAM 引用，非 MTK CID；只用3GPP APN拨号 |
 | Start35 CallType | u8；扩展入口总是添加；`1f1a8beb0` 的 block 写1=Embedded NAI、0=Tethering NAI | 接受1，作为普通 embedded 呼叫选择元数据；不改已有 ACT201 Internet APN/no-auth。0不支持；不是 IMS/emergency 标记 |
 | Start3e / profiledd | u64 APN type mask | 仅 Internet1；MTK ACT201 的102是 **u32**，经 `getMipcApnTypeId(0)` 也为1；其余 mask 不原样截断/照搬 |
-| profile29 QoS/SigInd | **34 B**：traffic class u8、多个 LE u32/u8 QoS 字段、末尾 signaling u8；原生填 traffic3、priority1、signaling1，其余0 | 不是 bool，也不是 IMS APN 身份。受 set3GPPParameters 的扩展 bool 与 carrier `SupportsIMSSignalingIndication=true` 两层条件保护；非零仍拒绝，无可信请求映射 |
+| profile29 QoS/SigInd | **34 B**：traffic class u8、多个 LE u32/u8 QoS 字段、末尾 signaling u8；原生填 traffic3、priority1、signaling1，其余0 | 不是 bool，也不是 IMS APN 身份。须 APN observer 的 `isImsSupported` 谓词、set3GPPParameters 扩展 bool、carrier `SupportsIMSSignalingIndication=true` 都满足；carrier 缺键默认 false。非零仍拒绝，无可信请求映射 |
 | profile1f / 36 | 各u8，PCSCF address via PCO / emergency support | 仅尺寸正确的0；非零不转普通 Internet |
 | profile37 / 38 / 39 | OperatorReservedPcoId u16 / MCC u16 / MNC u16+u8；37须 context 提供非零ID；38/39来自 `PcoOptions` | 是协议配置，不是可忽略 RAM 注释；未证明 MTK 下发映射，仍拒绝 |
-| profile47 PcoContainerIds | 固定 **20 B**，10个u16槽；仅容器列表非空时追加38/39/47，超过10个截到10个 | 不把整个 QMI TLV 塞进 MTK profile-v2；未知映射仍拒绝 |
+| profile47 PcoContainerIds | 固定 **20 B**，10个u16槽；容器列表非空且 PcoMcc/PcoMnc 均非零才追加38/39/47，超过10个截到10个 | 不把整个 QMI TLV 塞进 MTK profile-v2；未知映射仍拒绝 |
 | Startc2 IDataCall | u8=1；handover 参数及 context 条件成立才添加，非普通 Start 无条件项 | 不等价 Internet type；尚无可信 MTK 对应，不放行 |
 | Start36 / 3f / d0 | HandOverContext 固定21 B / ExtendedHandoffContext 变长（16 B头、长度前缀字符串列表及尾u8）/ IPv6Prefix 固定17 B（IPv6地址16 B+prefix u8）；只在相关 handover 条件成立时出现 | 需要旧会话地址、PDU session等真实状态；当前 fresh IPv4 dialler不支持，不能当默认0略过 |
 
@@ -216,9 +216,37 @@ MT6993 **已加载的** `libmtkmipc-ril.so` 中，`fillMipcApnItem@2c94c0` 填�
 `updateEpsQos@2ccea0` 是发送 **221/GetQoS**、读回网络已分配 QoS；不能把它当作设置请求 QoS。
 `onPcoInfoNotify@2a4910` 是读取 PCO count/内容的 indication 路径，也不证明 operator/container 请求已发出。
 
-本地官方 CBN54.1.0 与旧20H392 CMCC的 carrier/D22 override 未见上述 carrier capability / PcoOptions
-显式配置；这只说明这几份文件没有该项，**不是运行时合并策略的证明**。若实机 c7 有非零29或37/38/39/47，
-需要继续追其配置来源及真实 MD 接口，不能绕过。新增拒绝日志只打印 tag/长度，不打印 APN、地址或认证内容。
+**默认值与查询路径不能混为一谈：**
+
+- QoS 在 `1f1a7d440` 传入 **`kCFBooleanFalse`**，经 QMI driver → BBDataContextHelper 的
+  `1002988c0` → CarrierSettings scoped key-with-default → `100534f80` 查询。
+  对已存在的非字典值直接采用（显式 false 也不被默认 true 覆盖）；字典或缺键才进入
+  country／Default fallback。`100b58cac` 以低优先级字典为基底、上层值覆盖同名项，
+  仅两个字典递归合并，数组整体替换；上层 **`_Exclude`** 数组会删除结果中的指定键。
+  该函数证明查询时的合并规则，不证明现场 carrier/override/preferences 已加载成什么值。
+- PCO 的 `1f1a7db74` 调用 CarrierSettings **另一槽 `+58`**，经 `100536898` →
+  `100535414/1000e1cac` 的 hierarchy 查询。它不经过上述 key-with-default 的 country／Default
+  fallback；不能把 QoS 的合并路径直接套到 PCO。ContainerIds 缺键取空，PcoMcc/PcoMnc
+  缺键或无法取数取0，且 `1f1a7de7c..de8c` 同时检查两者非零与列表非空。
+- profile37 的 OperatorReservedPcoId 是另一来源：APN configuration 中 **`PcoContainerId`**
+  经 `100a62060..620a8` 解析为 u16，缺键/非数值默认0；context getter `1003cb4d0` 返回此值。
+  不等同 `PcoOptions/ContainerIds`，不能只检查后者便宣称所有 PCO 参数都不会出现。
+
+本地官方 CBN54.1.0 carrier/D22 override，以及旧20H392 Default/Unknown/CMCC carrier 与 CMCC D22
+override，定点递归读取均未见以上 capability、PcoOptions、PcoContainerId。旧根盘快照不是189现场
+preferences；country domain、配置装载合并与实际 c7 参数仍须现场证据。若实机有非零29或37/38/39/47，
+仍明确拒绝，不能绕过。拒绝日志只打印 tag/长度，不打印 APN、地址或认证内容。
+
+**ACT201 两个差异参数（均为 u8，不是 QoS/PCO 字段）：**
+
+| TLV | 已加载 RIL 普通分支 | 当前适配层 | 含义与修复边界 |
+|---|---|---|---|
+| 108 `IPV4V6_FALLBACK` | `2b8764..876c` 写 **0x7f** | **0=DISABLE** | 旧头文件中1=IPv4 first、2=IPv6 first、0x7f=MAX。已证明 RIL 发0x7f，但尚未证明本机 MD 将它解释为哪种策略；不能把 MAX 当成已证实的“自动/禁用” |
+| 10a `REUSE_FLAG` | 普通分支 `2b8830..8840` 写 **0=DEFAULT**；APN type2/100 特殊分支写3 | **2=NOT_REUSE** | 0允许 MD 的默认复用政策，不等同强制新建；3=REUSE_ONLY，不是普通 Internet 分支。当前只管理自有 fresh call，不能直接改成0后仍沿用成功/超时即 DEACT 的清理逻辑 |
+
+以上差分不是189失败原因的实跑证据：189没有 Start20/ACT201。当前保持 fallback0、NOT_REUSE2，
+也不增加未知 QoS/PCO TLV。要改复用必须先有实际 existing-call 身份、所有权和 GET/EIF 资格，
+避免清理非本次创建的 PDN；要改 fallback 必须确认 MD 的0x7f策略及对应 family/partial-success处理。
 
 ### 5. iOS 网络最终验证
 
