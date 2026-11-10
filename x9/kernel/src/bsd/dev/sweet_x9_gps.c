@@ -197,12 +197,17 @@ static uint64_t gps_le64(const uint8_t *p)
 {
  return GPS_LE32(p) | (uint64_t)GPS_LE32(p+4)<<32;
 }
+#include "x9_gps_pvt.inc"
 /* Validate IEEE wire bits without enabling FP/SIMD in kernel context. This
  * function does not invent uncertainty, infer a fix from GGA or convert units.
  * Inactive fields may be zero; all numeric slots must still be finite. */
 static int gps_position_valid(const uint8_t *p, unsigned n)
 {
  if (!p || n != X9_GPS_PDS_POSITION_BYTES) return EINVAL;
+ uint32_t mask=GPS_LE32(p);
+ /* PDS defines bits0..22. A parsed position must actually contain BOTH
+  * coordinates; an empty/unknown mask is not a measured receiver fix. */
+ if ((mask&~0x007fffffu) || (mask&0x30u)!=0x30u) return EBADMSG;
  uint64_t lat = gps_le64(p+27) & 0x7fffffffffffffffULL;
  uint64_t lon = gps_le64(p+35) & 0x7fffffffffffffffULL;
  /* IEEE754 magnitudes of 90.0 and 180.0 degrees. */
@@ -211,6 +216,23 @@ static int gps_position_valid(const uint8_t *p, unsigned n)
   if ((GPS_LE32(p+i) & 0x7f800000u) == 0x7f800000u) return ERANGE;
  for (unsigned i = 92; i <= 100; i += 4)
   if ((GPS_LE32(p+i) & 0x7f800000u) == 0x7f800000u) return ERANGE;
+ /* Validate active unsigned-magnitude quantities without any kernel FP.
+  * Vertical speed and altitudes may be negative; they are not in this set.
+  * Inactive zero placeholders MUST NOT cause validity bits to be inferred. */
+ const uint8_t nonnegative[]={8,11,12,13,15,16,17};
+ for(unsigned j=0;j<sizeof(nonnegative);j++) {
+  unsigned bit=nonnegative[j]; uint32_t v=GPS_LE32(p+43+4*(bit-6));
+  if((mask&(1u<<bit)) && (v&0x80000000u) && (v&0x7fffffffu))return ERANGE;
+ }
+ for(unsigned bit=10;bit<=14;bit+=4)if(mask&(1u<<bit)) {
+  uint32_t v=GPS_LE32(p+43+4*(bit-6));
+  if(((v&0x80000000u) && (v&0x7fffffffu)) ||
+      (v&0x7fffffffu)>=0x43b40000u)return ERANGE; /* [0,360) degrees */
+ }
+ for(unsigned bit=19;bit<=21;bit++)if(mask&(1u<<bit)) {
+  uint32_t v=GPS_LE32(p+92+4*(bit-19));
+  if((v&0x80000000u) || !v)return ERANGE; /* positive DOP */
+ }
  /* Confidence is a percentage; operation mode 0 is standalone. Assistance
   * remains unsupported rather than silently labelling a fix MS-based. */
  if (p[91] > 100 || p[104] != 0) return ENOTSUP;

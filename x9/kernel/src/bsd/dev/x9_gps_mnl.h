@@ -16,8 +16,10 @@ struct x9_gps_mnl_stream {
  uint8_t total, next;
  uint8_t message[X9_MNL_MESSAGE_MAX];
  /* Complete MCU response BODY, without the four-byte fragment header.
-  * NOT the AP command format: MCU event/length are LE16. Event2 has a
-  * vendor-specific prefix and 3168B position payload. This callback must
+  * NOT the AP command format: MCU event/length are LE16 at body+0/+2.
+  * Vendor's synthetic 4B reassembly header is NOT part of this body.
+  * Event2 PVT begins at body+6 (vendor buffer+10), with 3168B payload.
+  * This callback must
   * translate measured fields before deliver_position; never infer READY.
   * Body lifetime is only the call; callback must not reenter this stream. */
  int (*complete)(void *, const uint8_t *, unsigned, uint64_t);
@@ -32,6 +34,14 @@ void x9_gps_mnl_discard_partial(struct x9_gps_mnl_stream *);
 /* One complete inner packet per call, after outer MCUDL validation. */
 int x9_gps_mnl_receive(struct x9_gps_mnl_stream *, const void *, unsigned,
     uint64_t generation, uint64_t host_time);
+/* Strict event2 BODY -> 105B PDS partial translation, no publication/READY.
+ * Only measured degree latitude/longitude are currently qualified. All
+ * time/accuracy/confidence/altitude/DOP/mode validity bits remain clear.
+ * ENOENT is a valid no-fix grade0/1; ENOTSUP is another event/unknown grade.
+ * Error leaves output untouched. Receiver/session/age must be qualified
+ * separately before submitting to an explicitly capable backend. */
+int x9_gps_mnl_position_wire(const void *body, unsigned body_bytes,
+    void *wire, unsigned capacity);
 #ifdef __cplusplus
 }
 #endif

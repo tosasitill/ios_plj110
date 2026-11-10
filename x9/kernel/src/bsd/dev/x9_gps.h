@@ -29,6 +29,11 @@ struct x9_gps_status {
   * started without returned may represent a partially accepted secure call. */
  uint32_t afe_smc_started, afe_smc_returned, afe_smc_qualified;
  uint64_t afe_smc_result[4];
+ /* Native event2 parser journal, never availability or a FIX lease.
+  * Counts only reports accepted by the physical application's handler. */
+ uint64_t pvt_received, pvt_no_fix, pvt_rejected, pvt_delivered;
+ uint32_t pvt_valid_mask;
+ int32_t pvt_errno;
 };
 struct x9_gps_nmea {
  uint64_t sequence, generation, host_time;

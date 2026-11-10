@@ -412,7 +412,41 @@ static int gps_runtime_mnl(void *ctx,const uint8_t *p,unsigned n,uint64_t now)
 {
  (void)ctx; gps_rt.in_callback=1;
  int e=gps_rt.ops.mnl(gps_rt.ops.context,p,n,now);
- gps_rt.in_callback=0; return e;
+ gps_rt.in_callback=0;
+ /* The physical handler must first accept this report in its real MNL
+  * session. Do not turn unsolicited event2/management traffic into READY.
+  * Unknown events still require that handler; no blanket acknowledgement. */
+ if (e || n<2 || gps_pvt_u16(p)!=2) return e;
+ uint8_t wire[X9_GPS_PDS_POSITION_BYTES];
+ e=x9_gps_mnl_position_wire(p,n,wire,sizeof(wire));
+ int no_fix=e==ENOENT;
+ lck_mtx_lock(&gps_lock);
+ if(st.generation!=gps_rt.generation || st.fault) {
+  lck_mtx_unlock(&gps_lock); return ESTALE;
+ }
+ st.pvt_received++;
+ if(no_fix) {
+  st.pvt_no_fix++;
+  /* A newly accepted no-fix report retires queued OLD fixes immediately.
+   * Preserve the sequence/client cursors and the acknowledged tracking
+   * session: loss of a fix is not receiver/DMA shutdown or a fault. */
+  position_head=position_count=0;
+ }
+ else if(e)st.pvt_rejected++;
+ st.pvt_errno=e; st.pvt_valid_mask=e ? 0 : gps_pvt_u32(wire);
+ int publish=!e && st.ready && st.tracking && st.position_supported;
+ lck_mtx_unlock(&gps_lock);
+ if(no_fix)return 0; /* legitimate no-fix does not poison the HIF */
+ if(e)return e;
+ if(!publish)return 0; /* parsed bytes cannot grant a backend/output lease */
+ e=x9_gps_deliver_position(gps_rt.generation,wire,sizeof(wire),now);
+ lck_mtx_lock(&gps_lock);
+ if(st.generation==gps_rt.generation && !st.fault) {
+  st.pvt_errno=e;
+  if(!e)st.pvt_delivered++;
+ }
+ lck_mtx_unlock(&gps_lock);
+ return e;
 }
 static int gps_runtime_ccif(void *ctx,unsigned ch,uint64_t now)
 {

@@ -42,6 +42,11 @@ struct x9_gps_connv2_ops {
   * outboxes only; callbacks must not reenter HIF or release/reset resources.
   * Unknown data must return ENOTSUP, not be silently ACKed/discarded. */
  int (*control)(void *, unsigned, uint8_t, const uint8_t *, unsigned, uint64_t);
+ /* Accept complete BODY (no vendor synthetic4B header) only in a proved
+  * application session, with measurement age qualified (not just packet
+  * arrival/cache presence). Event2 PVT begins at BODY+6. Native worker then
+  * translates its qualified fields; this callback must not also submit the
+  * same event2 position. No fix or session qualification from a cache flag. */
  int (*mnl)(void *, const uint8_t *, unsigned, uint64_t);
  int (*other_ccif)(void *, unsigned, uint64_t);
  /* Version-2..5 tail. Version 1 remains the full vendor POS supplier.
