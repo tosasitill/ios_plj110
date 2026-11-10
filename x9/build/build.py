@@ -198,6 +198,12 @@ class Builder:
         self.run_or_exit([sys.executable, '-I', str(X9 / 'torch/build.py'),
                           '--developer-dir', self.cfg['developer_dir'],
                           '--out', str(self.out / 'torch')], ROOT, label='torch/build.py')
+        camera = [sys.executable, '-I', str(X9 / 'camera/build.py'),
+                  '--developer-dir', self.cfg['developer_dir'],
+                  '--out', str(self.out / 'camera')]
+        if self.cfg.get('camera_vendor_root'):
+            camera += ['--vendor-root', str(Path(self.cfg['camera_vendor_root']).expanduser())]
+        self.run_or_exit(camera, ROOT, label='camera/build.py')
         todo = [e for e in self.recipe['objects'] if 'prebuilt' not in e]
         with concurrent.futures.ThreadPoolExecutor(self.jobs) as pool:
             results = list(pool.map(self.compile_one, todo))

@@ -26,6 +26,8 @@ x9/kernel/generated/x9_wifi_nvram.inc
 x9/kernel/generated/x9_mdota.inc
 x9/kernel/generated/x9_baseband_firmware.inc
 x9/kernel/generated/x9_torch_bridge.inc
+x9/kernel/generated/x9_camera_bridge.inc
+x9/kernel/generated/x9_camera_sensor_tables.inc
 
 # Local dependency snapshots, Apple inputs and private device state
 .local/
