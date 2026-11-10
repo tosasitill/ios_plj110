@@ -45,6 +45,40 @@ static int x9mi_at_read(const char *cmd){
  unsigned n=0;while((*p>='0'&&*p<='9')||(*p>='A'&&*p<='F')){p++;if(++n>32)return 0;}
  return n&&!(n%4)&&*p++=='"'&&!*p;
 }
+/* Audited APN_SET_IA_REQ only, not a general MIPC mutation escape hatch.
+ * Exact six TLVs from requestSetInitialAttachApn, strict unique/raw tags,
+ * padded lengths, NUL strings and protocol types. Adapter supports no-auth;
+ * credentials must be empty here too. No payload diagnostics. */
+static int x9mi_attach_request(const uint8_t *p,unsigned n){
+ if(p[8]!=1&&(p[8]!=2||x9_md_sim_count()!=2))return 0;
+ unsigned seen=0,at=16;
+ while(at<n){
+  if(n-at<4)return 0;
+  unsigned tag=x9mi_u16(p+at),k=x9mi_u16(p+at+2),size=(k+11)&~7u,bit;
+  if(!k||size>n-at)return 0;
+  const uint8_t *v=p+at+4;
+  switch(tag){
+  case 0x101:
+   bit=1;if(k>101||v[k-1]||strnlen((const char *)v,k)!=k-1)return 0;
+   {unsigned label=0;
+    for(unsigned i=0;i+1<k;i++){
+     unsigned c=v[i];if(c=='.'){if(!label||v[i-1]=='-')return 0;label=0;continue;}
+     if(!((c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='-'))return 0;
+     if((!label&&c=='-')||++label>63)return 0;
+    }
+    if(k>1&&(!label||v[k-2]=='-'))return 0;
+   }break;
+  case 0x102:case 0x103:bit=tag==0x102?2:4;if(k!=1||v[0]<1||v[0]>3)return 0;break;
+  case 0x104:bit=8;if(k!=1||v[0])return 0;break;
+  case 0x8105:case 0x8106:bit=tag==0x8105?16:32;if(k!=1||v[0])return 0;break;
+  default:return 0;
+  }
+  if(seen&bit)return 0;seen|=bit;
+  for(unsigned i=4+k;i<size;i++)if(p[at+i])return 0;
+  at+=size;
+ }
+ return at==n&&seen==63;
+}
 int x9_md_mipc_online(void){
  lck_mtx_lock(&x9_mi_lock);int on=x9_mi_online&&!x9_mi_poisoned;
  lck_mtx_unlock(&x9_mi_lock);return on&&x9_md_at_online();
@@ -64,6 +98,7 @@ uint64_t x9_md_mipc_submit(const uint8_t *p,uint32_t n){
      strnlen((const char *)p+20,k)!=k-1||!x9mi_at_read((const char *)p+20))return 0;
  }
  else if(id==0x30b||id==0x601||id==0x605||id==0xa04){if(!x9mm_request(p,n,id))return 0;}
+ else if(id==0x101){if(!x9mi_attach_request(p,n))return 0;}
  /* PLJ110 RmmDcEventHandler::requestSetPreferredDataModem, ELF 0x2cb1a0:
   * 020d has no TLVs; the target is the header SIM mask. Only the DDS
   * owner may issue this operation, retaining its token through late 020e. */

@@ -708,24 +708,7 @@ static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *r
  }
  /* WDS Set Event Report (0x01) / Indication Register (0x03) and DMS Set Event
   * Report (0x01): acknowledged, no indication is generated (no event source). */
- /* WDS 0x00c8 = CommCenter's attach-APN push (AttachAPN; 163 logd: "trying to
-  * push 3GPP attach APN {apn:"",AllowedProtocolMask 1}" -> QMI_ERR_NOT_SUPPORTED
-  * -> "Resetting baseband after Failure to Push", a HardReset every 1-5 s).
-  * Request seen: 11/1 PDP type, 14/0 APN, 1f/1, 90/1, 91/4. An EMPTY APN means
-  * "network default", which is what the MD already uses (it attaches with no
-  * configured attach APN), so that push is acknowledged without an AT command.
-  * A non-empty attach APN needs a real MTK attach-APN command (not verified):
-  * it stays NOT_SUPPORTED and is logged with its length only. */
- if(service==1&&id==0xc8){
-  x9q_view apn=x9q_tlv(req,len,0x14);
-  static unsigned logged;
-  if(apn.p&&apn.n==0){
-   if(logged<8){logged++;printf("X9 QMI AT: WDS 0x00c8 attach APN push with empty APN acknowledged (MD uses the network default)\n");}
-   x9q_packet p(req);p.send(local,port);return;
-  }
-  if(logged<8){logged++;printf("X9 QMI AT: WDS 0x00c8 attach APN push with APN length %d not supported\n",apn.p?(int)apn.n:-1);}
-  x9q_reject(local,port,req,len,X9Q_UNSUPPORTED);return;
- }
+ /* WDS 00c8 (including empty APN) is handled by the typed MIPC owner above. */
  /* UIM Refresh Register (0x2a): acknowledged; this bridge never sends refresh events. */
  /* NAS 0x6c Config Signal Info v2 (167.txt, right after LTE SysInfo): thresholds
   * are not applied; the client gets a 0x51 Sig Info indication from real

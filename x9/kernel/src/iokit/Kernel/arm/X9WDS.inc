@@ -132,6 +132,7 @@ static bool x9w_apn(const uint8_t *p,unsigned n){
   if((!label&&c=='-')||++label>63)return false;
  }return label&&p[n-1]!='-';
 }
+#include "X9AttachAPN.inc"
 static unsigned x9w_args(const uint8_t *p,unsigned n,unsigned family){
  if(family!=4)return X9Q_UNSUPPORTED; // native IPv6 uses netagent/SLAAC, no guessed prefix
  x9q_view apn=x9q_tlv(p,n,0x14);if(!x9w_apn(apn.p,apn.n))return X9Q_ARG;
@@ -288,6 +289,7 @@ static void x9w_result(x9w_bearer &b,unsigned mux,const uint8_t *p,unsigned n){
  printf("X9 WDS: owned call %u deactivation confirmed mux %u\n",b.cid,mux);x9w_clear(b,mux);
 }
 static void x9w_del(unsigned slot){
+ x9a_del(slot);
  for(unsigned i=0;i<CBP_INTERFACES;i++){x9w_bearer &b=x9w_bearers[i];
   if(b.used&&b.slot==slot&&b.generation==x9q_clients[slot].generation){b.abandoned=true;x9w_pending_done(b);x9w_disconnect(b,i+1);}
  }bzero(&x9w_clients[slot],sizeof(x9w_clients[slot]));
@@ -327,6 +329,7 @@ static bool x9w_interface_event(const uint8_t *p,unsigned n,unsigned sim){
 static void x9w_poll(){
  static uint8_t response[X9_MIPC_FRAME_MAX];unsigned n=0;
  x9w_init_poll(response,sizeof(response));
+ x9a_poll(response,sizeof(response));
  for(unsigned i=0;i<8;i++){
   int event=x9_md_mipc_event(response,sizeof(response),&n);if(event<=0)break;unsigned cid;
   if(!x9w_wire(response,n)){x9w_bad_event();}
@@ -382,6 +385,7 @@ static void x9w_poll(){
 }
 static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned n){
  unsigned slot=local-CBQ_PORT_BASE,id=x9q_u16(req+3);x9w_client &c=x9w_clients[slot];
+ if(id==0xc8){x9a_request(local,port,req,n);return true;}
  if(id!=1&&id!=0x20&&id!=0x21&&id!=0x22&&id!=0x24&&id!=0x2d&&id!=0x30&&id!=0x37&&id!=0x44&&id!=0x4d&&id!=0x86&&id!=0xa2&&id!=0xaf&&id!=0xb0&&id!=0x5569)return false;
  if(!c.family)c.family=4;x9w_bearer *own=nullptr;
  for(x9w_bearer &b:x9w_bearers)if(b.used&&b.slot==slot&&b.generation==x9q_clients[slot].generation)own=&b;
@@ -432,7 +436,7 @@ static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
   unsigned value=sub.p&&sub.n==1?sub.p[0]:0;
   if(n!=15||!value||value>x9_md_sim_count()||!reason.p||reason.n!=1||reason.p[0]<1||reason.p[0]>3)error=X9Q_ARG;
   else if(!x9ds_data_ready(value-1))error=X9Q_NOT_READY;
-  else if(c.sim_slot!=value-1&&(c.starting||own))error=X9Q_BUSY;
+  else if(c.sim_slot!=value-1&&(c.starting||own||x9a_client_busy(slot)))error=X9Q_BUSY;
   else{c.sim_slot=(uint8_t)(value-1);x9q_clients[slot].sim_slot=c.sim_slot;
    printf("X9 DDS: WDS 5569 client 0x%x routes confirmed default SIM%u reason %u\n",local,value,reason.p[0]);}
  }else if(id==0xaf){
@@ -440,7 +444,7 @@ static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
    * need DDS semantics, so reject them rather than silently selecting SIM1. */
   x9q_view sub=x9q_tlv(req,n,1);unsigned value=sub.p&&sub.n==4?x9q_u32(sub.p):0;
   if(n!=14||!value||value>x9_md_sim_count())error=X9Q_ARG;
-  else if(c.sim_slot!=value-1&&(c.starting||own))error=X9Q_BUSY;
+  else if(c.sim_slot!=value-1&&(c.starting||own||x9a_client_busy(slot)))error=X9Q_BUSY;
   else{c.sim_slot=(uint8_t)(value-1);x9q_clients[slot].sim_slot=c.sim_slot;printf("X9 DUALSIM: WDS client 0x%x bound to SIM%u (not DDS)\n",local,value);}
  }else if(id==0xb0){
   if(n!=7)error=X9Q_ARG;
@@ -485,7 +489,7 @@ static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
    c.sim_slot+1,c.mux,family,start_apn.n,x9d_ready(),x9w_session_ready);
   if(!cbp_mux_ok(c.mux))error=X9Q_ARG;
   else if(!x9ds_data_ready(c.sim_slot))error=X9Q_NOT_READY;
-  else if(c.starting||own||x9w_bearers[c.mux-1].used)error=X9Q_BUSY;
+  else if(c.starting||own||x9w_bearers[c.mux-1].used||x9a_busy())error=X9Q_BUSY;
   else if((error=x9w_args(req,n,family))!=0){}
   else if(!x9d_ready()||!x9_md_mipc_online()||!x9w_session_ready)error=X9Q_NOT_READY;
   else{

@@ -22,6 +22,7 @@ struct x9ds_operation {
  uint8_t req[21];uint64_t generation,epoch,token,deadline;
 };
 static x9ds_operation x9ds_op;
+static bool x9ds_mutating(){return x9ds_op.used;}
 static uint8_t x9ds_iccid[2][10];
 static bool x9ds_mapped_apps;
 static void x9ds_apps(bool ready){x9ds_mapped_apps=ready;}
@@ -35,7 +36,7 @@ static bool x9ds_data_ready(unsigned slot){
 static void x9ds_cards(const uint8_t *first,const uint8_t *second,bool ready){
  bool pair=ready&&first&&second&&memcmp(first,second,10)!=0;
  if(pair==x9ds_pair&&(!pair||(!memcmp(x9ds_iccid[0],first,10)&&!memcmp(x9ds_iccid[1],second,10))))return;
- x9ds_epoch++;x9ds_mapped_apps=false;x9ds_known=false;x9ds_pair=pair;bzero(x9ds_iccid,sizeof(x9ds_iccid));
+ x9ds_epoch++;x9a_cards_changed();x9ds_mapped_apps=false;x9ds_known=false;x9ds_pair=pair;bzero(x9ds_iccid,sizeof(x9ds_iccid));
  if(pair){memcpy(x9ds_iccid[0],first,10);memcpy(x9ds_iccid[1],second,10);}
  printf("X9 DDS: real READY card pair %u epoch %llu; current subscription invalidated\n",pair,x9ds_epoch);
 }
@@ -92,6 +93,7 @@ static void x9ds_request(uint32_t local,uint32_t port,const uint8_t *req,unsigne
  x9q_packet p(req);p.send(local,port);
 }
 static bool x9ds_drain(){
+ if(x9a_busy())return false; // wait for actual attach completion; never cancel/replay it
  bool empty=true;
  for(unsigned i=0;i<CBP_INTERFACES;i++){
   x9w_bearer &b=x9w_bearers[i];if(!b.used)continue;empty=false;
