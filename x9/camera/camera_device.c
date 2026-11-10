@@ -34,6 +34,7 @@
  * log ("X9 CAMERA MEDIA: ..."), once per property.
  */
 #include <CoreFoundation/CoreFoundation.h>
+#include <Block.h>
 #include <CoreMedia/CoreMedia.h>
 #include <CoreVideo/CoreVideo.h>
 #include <IOSurface/IOSurfaceRef.h>
@@ -45,6 +46,7 @@
 #include <math.h>
 #include <limits.h>
 #include <pthread.h>
+#include <objc/runtime.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -122,6 +124,7 @@ static CMBaseClassID (*device_class_id)(void);
 static CMBaseClassID (*stream_class_id)(void);
 static CFStringRef port_back;           /* kFigCapturePortType_BackFacingCamera */
 static CFStringRef port_front;          /* kFigCapturePortType_FrontFacingCamera */
+static Class block_class[3];            /* real libclosure concrete block classes, not arbitrary CF values */
 
 /*
  * The frames' metadata: what H10ISP's stream attaches to every frame (a dictionary under
@@ -169,6 +172,13 @@ find_functions(void)
 	port_back = port != NULL ? *port : NULL;
 	port = dlsym(RTLD_DEFAULT, "kFigCapturePortType_FrontFacingCamera");
 	port_front = port != NULL ? *port : NULL;
+	block_class[0] = dlsym(RTLD_DEFAULT, "_NSConcreteStackBlock");
+	block_class[1] = dlsym(RTLD_DEFAULT, "_NSConcreteMallocBlock");
+	block_class[2] = dlsym(RTLD_DEFAULT, "_NSConcreteGlobalBlock");
+	if (block_class[0] == Nil || block_class[1] == Nil || block_class[2] == Nil) {
+		say("libclosure concrete block classes unavailable: no capture device");
+		return false;
+	}
 	port = dlsym(RTLD_DEFAULT, "kFigCaptureSampleBufferAttachmentKey_MetadataDictionary");
 	md_attachment = port != NULL ? *port : NULL;
 	for (int i = 0; i < MD_KEYS; i++) {
@@ -418,7 +428,9 @@ struct output {
 	const char *    name;
 	CFDictionaryRef config;                 /* from VideoOutputConfigurations */
 	bool            enabled;
+	bool            enabled_known;          /* an explicit false must not be overridden by the preview default */
 	void *          handler;                /* a block: ^(CVPixelBufferRef, CMTime) */
+	uint64_t        revision;               /* config/handler/enable admission, monotonic within this object */
 	bool            said_shape;
 	uint64_t        delivered, refused;
 	CVPixelBufferRef held[HELD];            /* the pictures given last, kept from the pool (see deliver) */
@@ -427,6 +439,7 @@ struct output {
 };
 
 static void let_go(struct output *out);
+static void detach_held(struct output *out, CVPixelBufferRef release[HELD]);
 
 #define OUTPUTS 3
 static const char *const output_names[OUTPUTS] = { "PrimaryScaler", "SecondaryScaler", "StillImage" };
@@ -452,11 +465,20 @@ static const struct camera {
 	  { { 3088, 2320, 30 }, { 3840, 2160, 30 } } },        /* "Photo", "Video-30" */
 };
 
+struct still_request {
+	struct still_request *next;
+	uint64_t ticket, not_before, run_epoch;
+};
+
 struct stream {
 	CFArrayRef      formats;
 	CFDictionaryRef supported;
 	CFDictionaryRef colour_info;    /* from VideoOutputsColorInfo */
 	unsigned        stills_wanted;  /* photographs asked for by StillImageCaptureNow, not yet given */
+	uint64_t        stills_issued, stills_consumed, run_epoch;
+	struct still_request *stills_head, *stills_tail;
+	bool            callback_active; /* graph output mutations cannot retire an admitted handler */
+	bool            stopping;        /* no new shutter tickets may race the old run's cancellation */
 	_Atomic int     format_index;
 	_Atomic double  min_fps, max_fps;
 	_Atomic float   zoom;           /* ZoomFactor: the picture is the middle 1/zoom of the sensor each way */
@@ -483,6 +505,7 @@ static pthread_mutex_t capture_control = PTHREAD_MUTEX_INITIALIZER;
 static CMBaseObjectRef active_stream;   /* strong reference, released only after successful worker join */
 static _Atomic int capture_retire_errno;
 static __thread bool camera_worker_thread;
+static __thread struct stream *camera_worker_stream;
 
 static void
 stream_fault(struct stream *s, int error)
@@ -490,6 +513,17 @@ stream_fault(struct stream *s, int error)
 	int zero = 0;
 
 	if (error) atomic_compare_exchange_strong(&s->first_errno, &zero, error);
+}
+
+static void
+stills_release(struct still_request *request)
+{
+	while (request != NULL) {
+		struct still_request *next = request->next;
+
+		free(request);
+		request = next;
+	}
 }
 
 static int
@@ -515,15 +549,108 @@ stream_of(CMBaseObjectRef o)
 	return derived_storage(o);
 }
 
-static int
-output_index(CFStringRef name)
+static CFStringRef
+output_key(unsigned i)
 {
-	for (int i = 0; i < OUTPUTS; i++) {
-		if (key_is(name, output_names[i])) {
-			return i;
+	switch (i) {
+	case 0: return CFSTR("PrimaryScaler");
+	case 1: return CFSTR("SecondaryScaler");
+	case 2: return CFSTR("StillImage");
+	default: return NULL;
+	}
+}
+
+static bool
+handler_is_block(CFTypeRef handler)
+{
+	Class cls = object_getClass((id)handler);
+
+	return cls != Nil && (cls == block_class[0] || cls == block_class[1] || cls == block_class[2]);
+}
+
+/* Prepare the whole known-output transaction before its sole state mutation. Destructors run unlocked. */
+static OSStatus
+outputs_set(struct stream *s, CFStringRef key, CFTypeRef value)
+{
+	bool configs = key_is(key, "VideoOutputConfigurations"), enabled = key_is(key, "VideoOutputsEnabled");
+	bool touched[OUTPUTS] = { false }, next_enabled[OUTPUTS] = { false };
+	CFDictionaryRef next_config[OUTPUTS] = { NULL }, old_config[OUTPUTS] = { NULL };
+	void *next_handler[OUTPUTS] = { NULL }, *old_handler[OUTPUTS] = { NULL };
+	CVPixelBufferRef release[OUTPUTS][HELD] = { { NULL } };
+	OSStatus result = ERR_PARAM;
+
+	if (value == NULL || CFGetTypeID(value) != CFDictionaryGetTypeID()) return ERR_PARAM;
+	for (unsigned i = 0; i < OUTPUTS; i++) {
+		CFTypeRef item = CFDictionaryGetValue(value, output_key(i));
+
+		if (item == NULL) continue;
+		touched[i] = true;
+		if (configs) {
+			if (item == kCFNull) continue;
+			if (CFGetTypeID(item) != CFDictionaryGetTypeID()) goto done;
+			next_config[i] = CFDictionaryCreateCopy(NULL, item);
+			if (next_config[i] == NULL) { result = ERR_NOT_AVAILABLE; goto done; }
+		} else if (enabled) {
+			int64_t on;
+
+			if (CFGetTypeID(item) == CFBooleanGetTypeID()) on = CFBooleanGetValue(item);
+			else if (CFGetTypeID(item) != CFNumberGetTypeID() || !CFNumberGetValue(item, kCFNumberSInt64Type, &on)) goto done;
+			next_enabled[i] = on != 0;
+		} else {
+			if (item == kCFNull) continue;
+			if (CFGetTypeID(item) != CFDictionaryGetTypeID()) goto done;
+			CFTypeRef handler = CFDictionaryGetValue(item, CFSTR("PixelBufferHandler"));
+
+			if (handler == NULL || handler == kCFNull) continue;
+			if (!handler_is_block(handler)) goto done;
+			next_handler[i] = Block_copy((void *)handler);
+			if (next_handler[i] == NULL) { result = ERR_NOT_AVAILABLE; goto done; }
 		}
 	}
-	return -1;
+	pthread_mutex_lock(&s->lock);
+	/* No caller, including a synchronous handler reentry, may replace a currently admitted graph context. */
+	if (s->callback_active) {
+		result = ERR_NOT_AVAILABLE;
+		pthread_mutex_unlock(&s->lock);
+		goto done;
+	}
+	for (unsigned i = 0; i < OUTPUTS; i++) {
+		if (touched[i] && s->out[i].revision == UINT64_MAX) {
+			result = ERR_NOT_AVAILABLE;
+			pthread_mutex_unlock(&s->lock);
+			goto done;
+		}
+	}
+	for (unsigned i = 0; i < OUTPUTS; i++) {
+		struct output *out = &s->out[i];
+
+		if (!touched[i]) continue;
+		out->revision++;
+		if (configs) {
+			old_config[i] = out->config;
+			out->config = next_config[i];
+			next_config[i] = NULL;
+			detach_held(out, release[i]);
+		} else if (enabled) {
+			out->enabled = next_enabled[i];
+			out->enabled_known = true;
+		} else {
+			old_handler[i] = out->handler;
+			out->handler = next_handler[i];
+			next_handler[i] = NULL;
+		}
+	}
+	pthread_mutex_unlock(&s->lock);
+	result = 0;
+done:
+	for (unsigned i = 0; i < OUTPUTS; i++) {
+		if (next_config[i] != NULL) CFRelease(next_config[i]);
+		if (old_config[i] != NULL) CFRelease(old_config[i]);
+		if (next_handler[i] != NULL) Block_release(next_handler[i]);
+		if (old_handler[i] != NULL) Block_release(old_handler[i]);
+		for (unsigned h = 0; h < HELD; h++) if (release[i][h] != NULL) CVPixelBufferRelease(release[i][h]);
+	}
+	return result;
 }
 
 static OSStatus
@@ -729,55 +856,8 @@ stream_set_property(CMBaseObjectRef o, CFStringRef key, CFTypeRef value)
 		return 0;
 	}
 	if (key_is(key, "VideoOutputConfigurations") || key_is(key, "VideoOutputsEnabled") || key_is(key, "VideoOutputHandlers")) {
-		bool configs = key_is(key, "VideoOutputConfigurations"), enabled = key_is(key, "VideoOutputsEnabled");
-
 		say_once("stream: set", key, value);
-		if (value == NULL || CFGetTypeID(value) != CFDictionaryGetTypeID()) {
-			return 0;
-		}
-		pthread_mutex_lock(&s->lock);
-		CFIndex n = CFDictionaryGetCount(value);
-		const void **keys = calloc((size_t)n + 1, sizeof(void *)), **values = calloc((size_t)n + 1, sizeof(void *));
-
-		CFDictionaryGetKeysAndValues(value, keys, values);
-		for (CFIndex i = 0; i < n; i++) {
-			int k = CFGetTypeID(keys[i]) == CFStringGetTypeID() ? output_index(keys[i]) : -1;
-			struct output *out;
-
-			if (k < 0) {
-				say_once("stream: an output not here:", keys[i], NULL);
-				continue;
-			}
-			out = &s->out[k];
-			if (configs) {
-				if (out->config != NULL) {
-					CFRelease(out->config);
-				}
-				let_go(out);
-				out->config = CFGetTypeID(values[i]) == CFDictionaryGetTypeID() ? CFRetain(values[i]) : NULL;
-			} else if (enabled) {
-				int64_t on = 1;
-
-				if (CFGetTypeID(values[i]) == CFBooleanGetTypeID()) {
-					on = CFBooleanGetValue(values[i]);
-				} else if (CFGetTypeID(values[i]) == CFNumberGetTypeID()) {
-					CFNumberGetValue(values[i], kCFNumberSInt64Type, &on);
-				}
-				out->enabled = on != 0;
-			} else {
-				CFTypeRef h = CFGetTypeID(values[i]) == CFDictionaryGetTypeID() ?
-				    CFDictionaryGetValue(values[i], CFSTR("PixelBufferHandler")) : NULL;
-
-				if (out->handler != NULL) {
-					CFRelease(out->handler);
-				}
-				out->handler = h != NULL ? (void *)CFRetain(h) : NULL;
-			}
-		}
-		free(keys);
-		free(values);
-		pthread_mutex_unlock(&s->lock);
-		return 0;
+		return outputs_set(s, key, value);
 	}
 	if (key_is(key, "StillImageCaptureNow")) {
 		/*
@@ -786,12 +866,23 @@ stream_set_property(CMBaseObjectRef o, CFStringRef key, CFTypeRef value)
 		 * it will know the frames again). One frame of the sensor goes to the StillImage output for
 		 * each ask.
 		 */
+		struct still_request *request = calloc(1, sizeof(*request));
+
+		if (request == NULL) return ERR_NOT_AVAILABLE;
 		pthread_mutex_lock(&s->lock);
-		if (s->stills_wanted == UINT_MAX) {
+		if (s->stopping || atomic_load(&s->first_errno) || atomic_load(&capture_retire_errno) ||
+		    s->stills_wanted == UINT_MAX || s->stills_issued == UINT64_MAX || (!s->running && s->run_epoch == UINT64_MAX)) {
 			pthread_mutex_unlock(&s->lock);
+			free(request);
 			return ERR_NOT_AVAILABLE;
 		}
 		s->stills_wanted++;
+		request->ticket = ++s->stills_issued;
+		request->not_before = mach_absolute_time();
+		request->run_epoch = s->running ? s->run_epoch : s->run_epoch + 1;
+		if (s->stills_tail != NULL) s->stills_tail->next = request;
+		else s->stills_head = request;
+		s->stills_tail = request;
 		pthread_mutex_unlock(&s->lock);
 		say_once("stream: a photograph asked for", key, value);
 		return 0;
@@ -886,61 +977,112 @@ render_piece(void *context, size_t i)
 	if (!ok) atomic_store_explicit(&j->failed, true, memory_order_relaxed);
 }
 
-static CVPixelBufferRef
-output_buffer(struct output *out)
-{
-	CVPixelBufferPoolRef pool = NULL;
-	CVPixelBufferRef pb = NULL;
-	CFTypeRef value = out->config != NULL ? CFDictionaryGetValue(out->config, CFSTR("BufferPool")) : NULL;
+struct output_snapshot {
+	CFDictionaryRef config;
+	void *handler, *handler_identity;
+	const char *name;
+	uint64_t revision, run_epoch, still_ticket;
+	unsigned slot;
+	bool still;
+};
 
-	/*
-	 * The graph makes the pool itself and hands it over in the output's configuration
-	 * (kFigCaptureStreamVideoOutputConfigurationKey_BufferPool), sized and laid out as the node
-	 * behind the output wants it (an IOSurface each, extra rows at the bottom where a scaler wants
-	 * them, as few buffers as the node holds at once) -- there is nothing for this side to choose,
-	 * and a buffer of our own making is not one the graph would take. The configuration carries no
-	 * width or height: the pool's buffers have them.
-	 */
-	if (value != NULL && CFGetTypeID(value) == CVPixelBufferPoolGetTypeID()) {
-		pool = (CVPixelBufferPoolRef)value;
+/* Caller holds s->lock. Config is immutable and the registered handler has already been Block_copy'd. */
+static bool
+snapshot_current(struct stream *s, const struct output_snapshot *snapshot)
+{
+	struct output *out = &s->out[snapshot->slot];
+
+	return s->run_epoch == snapshot->run_epoch && out->revision == snapshot->revision &&
+	    out->config == snapshot->config && out->handler == snapshot->handler_identity;
+}
+
+static bool
+snapshot_take(struct stream *s, unsigned slot, uint64_t frame_time, struct output_snapshot *snapshot)
+{
+	struct output *out = &s->out[slot];
+	bool still = slot == 2;
+
+	pthread_mutex_lock(&s->lock);
+	if (!s->running || !s->graph_running || out->config == NULL || out->handler == NULL ||
+	    !(out->enabled || (slot == 0 && !out->enabled_known)) ||
+	    (still && (s->stills_wanted == 0 || s->stills_head == NULL || s->stills_head->run_epoch != s->run_epoch ||
+	    frame_time < s->stills_head->not_before))) {
+		pthread_mutex_unlock(&s->lock);
+		return false;
 	}
-	if (pool == NULL) {
-		if (!out->said_shape) {
-			out->said_shape = true;
-			say("%s: no pool of the graph's in the configuration: no pictures", out->name);
-		}
+	*snapshot = (struct output_snapshot){ .config = CFRetain(out->config), .handler = Block_copy(out->handler),
+	    .handler_identity = out->handler, .name = out->name, .revision = out->revision, .run_epoch = s->run_epoch,
+	    .still_ticket = still ? s->stills_head->ticket : 0, .slot = slot, .still = still };
+	pthread_mutex_unlock(&s->lock);
+	if (snapshot->handler == NULL) {
+		CFRelease(snapshot->config);
+		snapshot->config = NULL;
+		return false;
+	}
+	return true;
+}
+
+static void
+snapshot_release(struct output_snapshot *snapshot)
+{
+	if (snapshot->handler != NULL) Block_release(snapshot->handler);
+	if (snapshot->config != NULL) CFRelease(snapshot->config);
+}
+
+static void
+snapshot_bad_shape(struct stream *s, const struct output_snapshot *snapshot, const char *reason)
+{
+	pthread_mutex_lock(&s->lock);
+	bool say_shape = snapshot_current(s, snapshot) && !s->out[snapshot->slot].said_shape;
+
+	if (say_shape) s->out[snapshot->slot].said_shape = true;
+	pthread_mutex_unlock(&s->lock);
+	if (say_shape) say("%s: %s", snapshot->name, reason);
+}
+
+static CVPixelBufferRef
+output_buffer(struct stream *s, const struct output_snapshot *snapshot)
+{
+	CFTypeRef value = CFDictionaryGetValue(snapshot->config, CFSTR("BufferPool"));
+	CVPixelBufferRef pb = NULL;
+
+	if (value == NULL || CFGetTypeID(value) != CVPixelBufferPoolGetTypeID()) {
+		snapshot_bad_shape(s, snapshot, "no actual buffer pool in this configuration");
 		return NULL;
 	}
+	/* Only the graph's exact, retained pool is used. No CoreVideo API or destructor holds the output mutex. */
 	for (unsigned i = 0; i <= HELD; i++) {
-		CVReturn result = CVPixelBufferPoolCreatePixelBuffer(NULL, pool, &pb);
+		CVReturn result = CVPixelBufferPoolCreatePixelBuffer(NULL, (CVPixelBufferPoolRef)value, &pb);
 
 		if (result == kCVReturnSuccess && pb != NULL) break;
-		/* Never publish an output pointer from a failed pool call. */
 		if (pb != NULL) CVPixelBufferRelease(pb);
 		pb = NULL;
 		if (i == HELD) break;
-		/* a pool that will not grow that far: the oldest picture kept is the one to have */
-		unsigned oldest = (out->held_next + i) % HELD;
+		CVPixelBufferRef oldest = NULL;
+		bool say_pool = false;
 
-		if (out->held[oldest] != NULL) {
-			CVPixelBufferRelease(out->held[oldest]);
-			out->held[oldest] = NULL;
-		}
-		if (!out->said_pool) {
+		pthread_mutex_lock(&s->lock);
+		if (snapshot_current(s, snapshot)) {
+			struct output *out = &s->out[snapshot->slot];
+			unsigned index = (out->held_next + i) % HELD;
+
+			oldest = out->held[index];
+			out->held[index] = NULL;
+			say_pool = !out->said_pool;
 			out->said_pool = true;
-			say("%s: the graph's pool will not grow by %u: fewer pictures kept", out->name, HELD);
 		}
+		pthread_mutex_unlock(&s->lock);
+		if (oldest != NULL) CVPixelBufferRelease(oldest);
+		if (say_pool) say("%s: buffer pool backpressure; fewer old pictures retained", snapshot->name);
 	}
 	if (pb == NULL) {
-		/*
-		 * The preview pool holds one buffer (MinimumBufferCount 1): while the graph still has it,
-		 * there is none to be had, and this frame is not given out. Said at most every 300th frame.
-		 */
-		if (out->refused++ % 300 == 0) {
-			say("%s: the graph's pool has no buffer to spare (%llu frames so)", out->name,
-			    (unsigned long long)out->refused);
-		}
-		return NULL;
+		uint64_t refused = 0;
+
+		pthread_mutex_lock(&s->lock);
+		if (snapshot_current(s, snapshot)) refused = ++s->out[snapshot->slot].refused;
+		pthread_mutex_unlock(&s->lock);
+		if (refused == 1 || (refused != 0 && refused % 300 == 0))
+			say("%s: graph pool has no buffer (%llu frames)", snapshot->name, (unsigned long long)refused);
 	}
 	return pb;
 }
@@ -948,14 +1090,23 @@ output_buffer(struct output *out)
 typedef void (^pixel_buffer_handler)(CVPixelBufferRef, CMTime);
 
 static void
-let_go(struct output *out)
+detach_held(struct output *out, CVPixelBufferRef release[HELD])
 {
 	for (unsigned i = 0; i < HELD; i++) {
-		if (out->held[i] != NULL) {
-			CVPixelBufferRelease(out->held[i]);
-			out->held[i] = NULL;
-		}
+		release[i] = out->held[i];
+		out->held[i] = NULL;
 	}
+	out->held_next = 0;
+}
+
+/* Finalize only: no other reference can be changing this storage. */
+static void
+let_go(struct output *out)
+{
+	CVPixelBufferRef release[HELD];
+
+	detach_held(out, release);
+	for (unsigned i = 0; i < HELD; i++) if (release[i] != NULL) CVPixelBufferRelease(release[i]);
 }
 
 static void
@@ -1081,17 +1232,17 @@ buffer_layout(CVPixelBufferRef pb, struct render_job *job)
 }
 
 static bool
-deliver(struct stream *s, struct output *out, const struct isp *isp, const struct hakios_camera_frame *f, const uint8_t *raw,
+deliver(struct stream *s, const struct output_snapshot *snapshot, const struct isp *isp, const struct hakios_camera_frame *f, const uint8_t *raw,
     CFDictionaryRef metadata)
 {
 	CMTime pts;
 	CVPixelBufferRef pb;
 	struct render_job job = { .isp = isp, .f = f, .raw = raw, .pieces = 8,
-	    .still = strcmp(out->name, "StillImage") == 0 };
+	    .still = snapshot->still };
 
-	if (out->handler == NULL || !metadata_time(metadata, s->port, &pts) ||
+	if (!metadata_time(metadata, s->port, &pts) ||
 	    CMTimeCompare(pts, CMClockMakeHostTimeFromSystemUnits(f->time)) != 0) return false;
-	pb = output_buffer(out);
+	pb = output_buffer(s, snapshot);
 	if (pb == NULL) {
 		return false;
 	}
@@ -1100,10 +1251,7 @@ deliver(struct stream *s, struct output *out, const struct isp *isp, const struc
 		return false;
 	}
 	if (!buffer_layout(pb, &job)) {
-		if (out->delivered == 0 && out->said_shape == false) {
-			out->said_shape = true;
-			say("%s: unsupported/invalid locked pixel buffer layout", out->name);
-		}
+		snapshot_bad_shape(s, snapshot, "unsupported/invalid locked pixel buffer layout");
 		(void)CVPixelBufferUnlockBaseAddress(pb, 0);
 		CVPixelBufferRelease(pb);
 		return false;
@@ -1126,7 +1274,7 @@ deliver(struct stream *s, struct output *out, const struct isp *isp, const struc
 		if (tb.denom == 0) {
 			mach_timebase_info(&tb);
 		}
-		say("%s: %ux%u made of every pixel in %.0f ms", out->name, width, height,
+		say("%s: %ux%u made of every pixel in %.0f ms", snapshot->name, width, height,
 		    (double)(mach_absolute_time() - began) * tb.numer / tb.denom / 1e6);
 	}
 	CVBufferSetAttachment(pb, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_601_4, kCVAttachmentMode_ShouldPropagate);
@@ -1149,28 +1297,68 @@ deliver(struct stream *s, struct output *out, const struct isp *isp, const struc
 		return false;
 	}
 
-	((pixel_buffer_handler)out->handler)(pb, pts);
-	/*
-	 * The moving picture's buffers are kept for HELD frames after they are given. The preview's pool
-	 * would otherwise hand a buffer straight back -- the graph lets go of it as soon as it has passed
-	 * it on -- while it is still on its way to the screen (the preview sink, Camera.app's image queue,
-	 * the window server copying it), and the next frame drawn into it showed as bands of two frames,
-	 * torn across. Kept, they make the pool take others. (One kept was not enough.)
-	 */
-	if (strcmp(out->name, "StillImage") != 0) {
-		if (out->held[out->held_next] != NULL) {
-			CVPixelBufferRelease(out->held[out->held_next]);
-		}
-		out->held[out->held_next] = pb;
-		out->held_next = (out->held_next + 1) % HELD;
-	} else {
+	/* Admission binds one actual handler invocation to this exact run/configuration/request.
+	 * Output mutations reject while admitted; Stop closes admission and cannot declare retirement until it is over. */
+	pthread_mutex_lock(&s->lock);
+	if (!s->running || !s->graph_running || s->callback_active || !snapshot_current(s, snapshot) ||
+	    (snapshot->still && (s->stills_wanted == 0 || s->stills_head == NULL ||
+	    s->stills_head->ticket != snapshot->still_ticket || s->stills_consumed + 1 != snapshot->still_ticket ||
+	    s->stills_head->run_epoch != snapshot->run_epoch || f->time < s->stills_head->not_before))) {
+		pthread_mutex_unlock(&s->lock);
 		CVPixelBufferRelease(pb);
+		return false;
 	}
-	if (out->delivered++ == 0) {
-		say("%s: the first picture given (%ux%u %c%c%c%c)", out->name, width, height, pf >> 24, pf >> 16 & 255,
-		    pf >> 8 & 255, pf & 255);
+	s->callback_active = true;
+	pthread_mutex_unlock(&s->lock);
+	((pixel_buffer_handler)snapshot->handler)(pb, pts);
+
+	CVPixelBufferRef release = NULL;
+	bool keep = false, first = false;
+	uint64_t photographs = 0;
+	struct still_request *completed_request = NULL;
+
+	pthread_mutex_lock(&s->lock);
+	struct output *out = &s->out[snapshot->slot];
+
+	if (!snapshot_current(s, snapshot)) {
+		/* This violates the admission protocol; never debit a replacement request. */
+		stream_fault(s, EPROTO);
+		s->running = false;
+		s->graph_running = false;
+	} else {
+		first = out->delivered++ == 0;
+		if (snapshot->still) {
+			if (s->stills_wanted == 0 || s->stills_head == NULL || s->stills_head->ticket != snapshot->still_ticket ||
+			    s->stills_consumed + 1 != snapshot->still_ticket) {
+				stream_fault(s, EPROTO);
+				s->running = false;
+				s->graph_running = false;
+			} else {
+				completed_request = s->stills_head;
+				s->stills_head = completed_request->next;
+				if (s->stills_head == NULL) s->stills_tail = NULL;
+				s->stills_consumed = snapshot->still_ticket;
+				s->stills_wanted--;
+				photographs = ++s->stills_given;
+			}
+		} else if (s->running && s->graph_running) {
+			/* Retain HELD pictures against preview pool reuse; swapping/releasing happens after the callback. */
+			release = out->held[out->held_next];
+			out->held[out->held_next] = pb;
+			out->held_next = (out->held_next + 1) % HELD;
+			keep = true;
+		}
 	}
-	return true;
+	s->callback_active = false;
+	pthread_mutex_unlock(&s->lock);
+	free(completed_request);
+	if (release != NULL) CVPixelBufferRelease(release);
+	if (!keep) CVPixelBufferRelease(pb);
+	if (first) say("%s: first picture given (%ux%u %c%c%c%c)", snapshot->name, width, height,
+	    pf >> 24, pf >> 16 & 255, pf >> 8 & 255, pf & 255);
+	if (photographs) say("photograph given: ticket=%llu count=%llu", (unsigned long long)snapshot->still_ticket,
+	    (unsigned long long)photographs);
+	return true; /* actual invocation, not a graph/storage completion claim */
 }
 
 /*
@@ -1471,12 +1659,14 @@ worker(void *context)
     uint64_t last_sequence=0,last_time=0;
 
 	camera_worker_thread = true;
+	camera_worker_stream = s;
 	pthread_setname_np("hakios-camera");
 	if (device < 0) {
 		stream_fault(s, EBADF);
 		s->graph_running = false;
 		s->running = false;
 		camera_worker_thread = false;
+		camera_worker_stream = NULL;
 		return NULL;
 	}
 	isp_init(&isp);
@@ -1572,30 +1762,13 @@ worker(void *context)
 		 * it walks a pointer that is not there yet and mediaserverd dies of SIGSEGV. The frames
 		 * before that are read and thrown away, which is also what settles the exposure.
 		 */
-		pthread_mutex_lock(&s->lock);
-		for (int i = 0; s->graph_running && i < OUTPUTS; i++) {
-			struct output *out = &s->out[i];
+		for (unsigned i = 0; s->graph_running && i < OUTPUTS; i++) {
+			struct output_snapshot snapshot = { 0 };
 
-			/*
-			 * The scalers' outputs are the moving picture and are given every frame. The still image
-			 * output is the whole sensor (4032x3024) and is the photograph: a frame goes to it only
-			 * when the graph has asked for one, which is not something to make thirty times a second.
-			 */
-			bool still = strcmp(out->name, "StillImage") == 0;
-
-			if (out->handler == NULL || out->config == NULL || !(out->enabled || i == 0)) {
-				continue;
-			}
-			if (still && s->stills_wanted == 0) {
-				continue;
-			}
-			bool given = deliver(s, out, &isp, f, raw, metadata);
-			if (still && given) {
-				s->stills_wanted--;
-				say("the photograph is given (%llu so far)", (unsigned long long)++s->stills_given);
-			}
+			if (!snapshot_take(s, i, f->time, &snapshot)) continue;
+			(void)deliver(s, &snapshot, &isp, f, raw, metadata);
+			snapshot_release(&snapshot);
 		}
-		pthread_mutex_unlock(&s->lock);
 		if (metadata != NULL) {
 			CFRelease(metadata);
 		}
@@ -1613,6 +1786,7 @@ worker(void *context)
 	say("frames stopped (%llu): first_errno=%d close_errno=%d", (unsigned long long)s->frames,
 	    atomic_load(&s->first_errno), atomic_load(&s->close_errno));
 	camera_worker_thread = false;
+	camera_worker_stream = NULL;
 	return NULL;
 }
 
@@ -1630,11 +1804,17 @@ stream_stop_locked(CMBaseObjectRef o, CMBaseObjectRef *release)
 	struct stream *s = stream_of(o);
 
 	if (capture_join_errno) return ERR_NOT_AVAILABLE;
-	s->running = false;
-	s->graph_running = false;
 	pthread_mutex_lock(&s->lock);
-	for (int i = 0; i < OUTPUTS; i++) let_go(&s->out[i]);
+	s->stopping = true;
+	s->running = false;
+	s->graph_running = false; /* close admission before waiting for any render/callback */
+	bool in_callback = s->callback_active;
 	pthread_mutex_unlock(&s->lock);
+	if (in_callback) {
+		/* A handler can depend synchronously on this caller, even on another thread. No join cycle.
+		 * Worker finishes the admitted callback and closes once; the active pin remains until a real join. */
+		return ERR_NOT_AVAILABLE;
+	}
 	/* No worker-required lock held across join. The active reference pins this storage/context. */
 	if (s->worker_started) {
 		if (active_stream != o) {
@@ -1656,14 +1836,25 @@ stream_stop_locked(CMBaseObjectRef o, CMBaseObjectRef *release)
 		*release = active_stream;
 		active_stream = NULL;
 	}
+	CVPixelBufferRef held[OUTPUTS][HELD];
+
+	pthread_mutex_lock(&s->lock);
+	for (unsigned i = 0; i < OUTPUTS; i++) detach_held(&s->out[i], held[i]);
+	pthread_mutex_unlock(&s->lock);
+	for (unsigned i = 0; i < OUTPUTS; i++)
+		for (unsigned h = 0; h < HELD; h++) if (held[i][h] != NULL) CVPixelBufferRelease(held[i][h]);
 	int error = atomic_load(&s->first_errno), close_error = atomic_load(&s->close_errno);
 
 	if (!error && !close_error && !atomic_load(&capture_retire_errno)) {
 		pthread_mutex_lock(&s->lock);
 		unsigned cancelled = s->stills_wanted;
+		struct still_request *cancelled_requests = s->stills_head;
 
 		s->stills_wanted = 0; /* Explicit stop cancels old requests; never count them as pictures given. */
+		s->stills_consumed = s->stills_issued;
+		s->stills_head = s->stills_tail = NULL;
 		pthread_mutex_unlock(&s->lock);
+		stills_release(cancelled_requests);
 		say("stream stopped: frames=%llu photographs=%llu cancelled=%u", (unsigned long long)s->frames,
 		    (unsigned long long)s->stills_given, cancelled);
 		return 0;
@@ -1682,6 +1873,11 @@ stream_begin(CMBaseObjectRef o, bool graph)
 
 	if (camera_worker_thread || pthread_mutex_trylock(&capture_control) != 0) return ERR_NOT_AVAILABLE;
 	if (capture_join_errno || atomic_load(&capture_retire_errno) || atomic_load(&s->first_errno)) goto done;
+	pthread_mutex_lock(&s->lock);
+	bool epoch_exhausted = !s->running && s->run_epoch == UINT64_MAX;
+
+	pthread_mutex_unlock(&s->lock);
+	if (epoch_exhausted) goto done;
 	/* Reap even a worker that already exited: running=false is not retirement or permission to open another sensor. */
 	if (active_stream != NULL && active_stream != o) {
 		result = stream_stop_locked(active_stream, &release);
@@ -1722,8 +1918,12 @@ stream_begin(CMBaseObjectRef o, bool graph)
 		goto done;
 	}
 	s->frames = 0;
+	pthread_mutex_lock(&s->lock);
+	s->run_epoch++;
+	s->stopping = false;
 	s->graph_running = graph;
 	s->running = true;
+	pthread_mutex_unlock(&s->lock);
 	active_stream = (CMBaseObjectRef)CFRetain(o);
 	int error = pthread_create(&s->worker, NULL, worker, o);
 
@@ -1761,7 +1961,19 @@ stream_stop(CMBaseObjectRef o)
 {
 	CMBaseObjectRef release = NULL;
 
-	if (camera_worker_thread || pthread_mutex_trylock(&capture_control) != 0) return ERR_NOT_AVAILABLE;
+	if (camera_worker_thread) {
+		struct stream *s = stream_of(o);
+
+		if (s == camera_worker_stream) {
+			pthread_mutex_lock(&s->lock);
+			s->stopping = true;
+			s->graph_running = false;
+			s->running = false;
+			pthread_mutex_unlock(&s->lock);
+		}
+		return ERR_NOT_AVAILABLE; /* close requested, but this thread cannot join itself or attest retirement */
+	}
+	if (pthread_mutex_trylock(&capture_control) != 0) return ERR_NOT_AVAILABLE;
 	OSStatus result = stream_stop_locked(o, &release);
 
 	pthread_mutex_unlock(&capture_control);
@@ -1848,12 +2060,14 @@ stream_finalize(CMBaseObjectRef o)
 	struct stream *s = stream_of(o);
 
 	if (stream_stop(o)) say("stream finalize: stop status was not successful");
+	stills_release(s->stills_head); /* unfulfilled requests are discarded, never counted as photographs */
 	for (int i = 0; i < OUTPUTS; i++) {
+		let_go(&s->out[i]);
 		if (s->out[i].config) {
 			CFRelease(s->out[i].config);
 		}
 		if (s->out[i].handler) {
-			CFRelease(s->out[i].handler);
+			Block_release(s->out[i].handler);
 		}
 	}
 	if (s->formats) {
@@ -1921,6 +2135,7 @@ stream_create(CFAllocatorRef allocator, const struct camera *camera, CFStringRef
 	s->port = port;
 	for (int i = 0; i < OUTPUTS; i++) {
 		s->out[i].name = output_names[i];
+		s->out[i].revision = 1;
 	}
 
 	CFDictionaryRef f[2] = { format(camera->formats[0][0], camera->formats[0][1], camera->formats[0][2], false, camera->fov),

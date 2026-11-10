@@ -43,9 +43,17 @@
 
 worker 的 fatal read、短记录、非法/重复帧、malloc、曝光命令失败记录首个 errno；仅 EAGAIN/EINTR 继续等待。不再从 worker 以“另一传感器帧”为由重新发 SENSOR。实际 close 只调用一次，单独保留 close errno：descriptor 可能已被消费，不能重试。Stop/Invalidate/Relinquish 及切传感器必须先 join 原 worker，并传播真实错误；`running=false` 不是退休证明。任何 close 失败在该进程中锁存 shared-retire error，后续不能重新 open/发新 SENSOR，不能掩盖内核 full-drain 失败。
 
-全局 native-device transition mutex 用 trylock 串行 Start/Stop；busy 或 worker callback 重入立即返回 unavailable，不阻塞等待。worker 本身不取该 mutex，join 不持它需要的 output lock。唯一 active stream 持有强引用，join 成功后才在 transition mutex 外释放；join 失败保留上下文并禁止盲目重试。删除由最近一个 device 覆盖的两 stream 弱数组，避免另一 device 覆盖旧 worker 的生命周期。Device invalidate 尝试停止自身两流并返回首错，finalize 不把失败当成功；未能 join 的 active worker 保持 pin。
+全局 native-device transition mutex 用 trylock 串行 Start/Stop；busy 不阻塞等待。Stop 先关闭 callback admission；若已有 handler 在执行，立即返回 unavailable，worker 在该回调返回后 close 一次，active 引用仍保留到后续实际 join。worker 对自身流的 Stop 重入也只关闭 admission/请求停止，不 join 自己或伪造退休成功。Start 的 worker 重入仍拒绝。worker 本身不取 transition mutex，join 不持它需要的 output lock。唯一 active stream 持有强引用，join 成功后才在 transition mutex 外释放；join 失败保留上下文并禁止盲目重试。Device invalidate 尝试停止自身两流并返回首错，finalize 不把失败当成功；未能 join 的 active worker 保持 pin。
 
-仅完整成功的显式 Stop 取消未交付的旧 still 请求，取消不增加已交付照片数；新一代不能继承旧 shutter 请求。图像 zoom/AF 取本帧快照，计数与可并发读写的标量使用 atomic；符号初始化用 pthread_once。此处的 iOS 错误传播/serialization **不授予硬件 lease，不证明 source/AXI/SMMU drain 已实现或成功**，也不保证 output/property handler 的所有重入路径：当前像素交付仍持 output lock，非生命周期 property 的同步重入还需后续核对。
+仅完整成功的显式 Stop 取消未交付的旧 still 请求，取消不增加已交付照片数；停止期间拒绝新 shutter ticket。图像 zoom/AF 取本帧快照，计数与可并发读写的标量使用 atomic；符号初始化用 pthread_once。此处的 iOS 错误传播/serialization **不授予硬件 lease，不证明 source/AXI/SMMU drain 已实现或成功**。XNU 源码 `fg_drop→fo_close→vn_closefile→vn_close→spec_close→cam_close` 保留错误返回，但只有最后 fileglob/vnode 引用才执行 driver close；不能把普通 `close()==0` 单独当作完整退休凭证。仍需显式、同 generation 的 kernel stop/receipt 对接。
+
+### 锁外回调绑定实际配置与下一完成帧
+
+worker 不再持 output mutex 渲染或调用 `PixelBufferHandler`。每次输出取得不可变 config、`Block_copy` 的真实 handler、配置 revision、run epoch 和对应 shutter ticket。锁外从原图像池分配及渲染，最后短锁 admission 只接受仍匹配的运行/配置/handler/request；渲染期间配置被改掉则丢弃旧输出，不调用旧 handler。handler 输入必须是实际 libclosure concrete block class，stack block 在注册时复制，不以普通 CF 值充当 callable。config/handler/enable 多输出更新先完整准备，再一次受锁提交；分配或参数错误不留下部分更新。
+
+已 admission 的 callback 期间，任何图像输出配置/handler/enable 替换返回 unavailable、不修改 graph context；getter、zoom、AF、shutter 等同步重入不再撞上持锁 callback。CF/Block/CV 析构和图像池调用在 output lock 外。主输出的默认启用仅用于没有显式 enable 属性时，明确 false 不再被 preview fallback 覆盖。old config/pool 与 handler 持有到实际回调完成或被丢弃，preview 的 HELD 防重用引用保留。
+
+每个 still 请求有 FIFO ticket、真实 `mach_absolute_time()` 接受时间和目标 run epoch。只选择**完成时间不早于该请求**、同一 run 的 RAW 帧；预览回调中新发出的 shutter 不会消费早已完成的同一 RAW。callback 真正调用并返回后才退休原队头/增加照片数，失败或背压保留原队头；Stop 取消与 object finalize 丢弃都不计照片完成。这里约束的是 header 的实际 DONE time，**不是已证明 SOF/exposure 在 shutter 之后、零快门延迟、拍照 settings ID 回传、相册写入或前后摄实测**。
 
 ## 构建
 
