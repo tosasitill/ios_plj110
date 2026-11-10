@@ -85,7 +85,8 @@ static int cam_bus_parent_take(struct cam_probe_bus *b)
 static int cam_bus_parent_restore(struct cam_probe_bus *b)
 {
     if(!b->parent_owned)return 0; /* borrowed clock is never disabled */
-    if(b->parent_conflict || b->owned || b->gate_owned || b->wedged)return EBUSY;
+    if(b->parent_conflict || b->owned || b->gate_owned || b->wedged ||
+       b->conflict || b->fifo_owned || b->request_owned)return EBUSY;
     int e=cam_wait_bits(b->top,0x338,1u<<(b->clock_bit-2),0,1000);
     if(e)return e;
     uint32_t cfg=cam_bus_parent_byte(b);

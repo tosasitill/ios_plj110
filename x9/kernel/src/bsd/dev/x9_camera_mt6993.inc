@@ -45,6 +45,7 @@ struct cam_probe_bus {
     uint32_t group_gate_mask, parent_entry, parent_expected;
     bool parent_seen, parent_owned, parent_conflict;
     bool owned, gate_owned, clock_saved, wedged, failed_status, conflict;
+    bool fifo_owned, request_owned; /* attempted operations, NOT hardware leases */
 };
 struct cam_probe_board {
     uint32_t reset, mclk, scl, sda, wl_mask, wl_count;
@@ -370,12 +371,29 @@ static int cam_bus_take(struct cam_probe_bus *b)
     if(!b->saved[6])return cam_bus_init_timing(b);
     return cam_bus_timing_check(b,false); /* nonzero is not a qualified timing profile */
 }
+static bool cam_bus_unretired(const struct cam_probe_bus *b)
+{
+    return b->fifo_owned || b->request_owned || b->wedged ||
+        b->conflict || b->parent_conflict;
+}
+/* Called after local reset/MCLK isolation, BEFORE any supply teardown.
+ * An idle snapshot is not a lease, but a hot journal may never be bypassed
+ * by the owned/gate flags or by a subsequently cleared START bit. */
+static int cam_bus_supply_guard(struct cam_probe_bus *b)
+{
+    if(cam_bus_unretired(b))return EBUSY;
+    if(!b->owned)return 0; /* no complete control snapshot to validate */
+    int e=cam_bus_controls(b,true);
+    if(!e)e=cam_bus_idle(b);
+    if(e)b->wedged=true; /* preserve an unknown active/configuration state */
+    return e;
+}
 static int cam_bus_restore(struct cam_probe_bus *b)
 {
+    if(cam_bus_unretired(b))return EBUSY;
     if(!b->owned && !b->gate_owned)return 0;
-    if(b->conflict)return EBUSY;
     int e=cam_bus_clock(b);if(e)return e;
-    if(b->wedged || cam_bus_idle(b))return EBUSY;
+    if(cam_bus_idle(b))return EBUSY;
     if(b->owned) {
         e=cam_bus_controls(b,true);if(e)return e;
         for(unsigned n=CAM_I2C_SAVED_COUNT;n>0;n--) {
@@ -392,58 +410,7 @@ static int cam_bus_restore(struct cam_probe_bus *b)
     }
     return 0;
 }
-/* WRRD: one/two register-address bytes followed by ONE data byte.
- * FIFO_DATA is byte-accessed in the upstream driver even with 32-bit CSR.
- * No DMA, retries, broad slave scan, shared reset or inherited W1C. */
-static int cam_bus_transfer(struct cam_probe_bus *b, uint8_t slave,
-                            const uint8_t *tx, unsigned count, uint8_t *rx)
-{
-    if(!b->owned || b->wedged || !count || count>3)return EINVAL;
-    int e=cam_bus_clock(b);if(!e)e=cam_bus_idle(b);
-    if(!e)e=cam_bus_controls(b,false);if(e)return e;
-    uint32_t control=(b->saved[1]&~((1u<<1)|(1u<<2)|(1u<<4)|(1u<<8)|(1u<<9)))|
-        (1u<<3)|(1u<<5);
-    if(rx)control|=(1u<<1)|(1u<<4);
-    e=cam_bus_control_write(b,CAM_I2C_CTRL,control,false);
-    if(!e)e=cam_bus_control_write(b,CAM_I2C_MASK,0,false);
-    if(!e)e=cam_bus_control_write(b,CAM_I2C_ADDR,(uint32_t)slave<<1,false);
-    if(!e)e=cam_bus_control_write(b,CAM_I2C_LEN,count,false);
-    if(!e)e=cam_bus_control_write(b,CAM_I2C_AUX,rx?1:0,false);
-    if(!e)e=cam_bus_control_write(b,CAM_I2C_TRANS,rx?2:1,false);
-    if(e)return e; /* no FIFO/status/START writes after a CSR conflict */
-    cam_rw(b->base,CAM_I2C_FIFO_CLR,1);
-    for(unsigned i=0;i<count;i++)*(volatile uint8_t *)(b->base+CAM_I2C_DATA)=tx[i];
-    __asm__ volatile("dsb sy" ::: "memory");
-    e=cam_bus_controls(b,false);
-    if(e){b->wedged=true;return e;} /* filled FIFO must remain isolated */
-    cam_rw(b->base,CAM_I2C_START,(1u<<14)|1u);
-    uint32_t status=0;
-    for(unsigned i=0;i<1000;i++) {
-        status=cam_rr(b->base,CAM_I2C_STAT);
-        if(status&(0x200|0xf))break;
-        delay(5);
-    }
-    if(!b->failed_status)b->last_status=status;
-    if(!status || (cam_rr(b->base,CAM_I2C_START)&1)) {
-        b->wedged=b->failed_status=true;return ETIMEDOUT; /* retain journal, no global reset */
-    }
-    e=cam_bus_controls(b,false);
-    if(e){b->wedged=b->failed_status=true;return e;} /* do not clear a new owner's IRQ/FIFO */
-    if(status&~0x207u)e=EIO; /* arbitration/conferr/unknown are not ACKs */
-    else if(status&0x206)e=EIO;
-    else if(!(status&1))e=EIO;
-    if(!e && rx) {
-        if((cam_rr(b->base,CAM_I2C_FIFO)&31)!=1)e=EIO;
-        else *rx=*(volatile uint8_t *)(b->base+CAM_I2C_DATA);
-    }
-    /* Clear only status produced by THIS request. Not an inherited IRQ. */
-    cam_rw(b->base,CAM_I2C_STAT,status&0x20f);
-    cam_rw(b->base,CAM_I2C_FIFO_CLR,1);
-    cam_rw(b->base,CAM_I2C_START,0);
-    if(cam_bus_idle(b)){b->wedged=true;if(!e)e=EIO;}
-    if(e)b->failed_status=true;
-    return e;
-}
+#include "x9_camera_i2c_xfer.inc"
 static int cam_wl_read(struct cam_probe_journal *j, uint8_t reg, uint8_t *v)
 { return cam_bus_transfer(&j->ldo,0x35,&reg,1,v); }
 #include "x9_camera_wl.inc"
@@ -561,8 +528,8 @@ static uint32_t cam_cold_retained(const struct cam_probe_journal *j)
     uint32_t mask=0;
     if(j->pins_owned)mask|=X9_CAM_COLD_PINS;
     if(j->mux_owned || j->vote_owned)mask|=X9_CAM_COLD_MCLK;
-    if(j->sensor.owned || j->sensor.gate_owned)mask|=X9_CAM_COLD_SENSOR_BUS;
-    if(j->ldo.owned || j->ldo.gate_owned)mask|=X9_CAM_COLD_WL_BUS;
+    if(j->sensor.owned || j->sensor.gate_owned || cam_bus_unretired(&j->sensor))mask|=X9_CAM_COLD_SENSOR_BUS;
+    if(j->ldo.owned || j->ldo.gate_owned || cam_bus_unretired(&j->ldo))mask|=X9_CAM_COLD_WL_BUS;
     if(j->wl_owned || j->wl_enabled || j->wl_programmed)mask|=X9_CAM_COLD_WL_RAILS;
     if(j->dovdd.taken || j->dovdd.enable_owned || j->dovdd.voltage_owned)mask|=X9_CAM_COLD_DOVDD;
     if(j->afvdd.taken || j->afvdd.enable_owned || j->afvdd.voltage_owned)mask|=X9_CAM_COLD_AFVDD;
@@ -595,6 +562,13 @@ static int cam_restore(struct cam_probe_journal *j)
     if(j->pmif_pending || j->pmif_fault) {
         j->restore_step=X9_CAM_COLD_RESTORE_PMIF;return cam_restore_failed(j,EIO);
     }
+    /* AP requests must be retired before lowering DOVDD/AFVDD/WL, not
+     * first checked in cam_bus_restore after the supplies have gone away.
+     * No W1C, FIFO clear, START stop, reset or polling to retire a fault. */
+    j->restore_step=X9_CAM_COLD_RESTORE_SENSOR_BUS;
+    e=cam_bus_supply_guard(&j->sensor);if(e)return cam_restore_failed(j,e);
+    j->restore_step=X9_CAM_COLD_RESTORE_WL_BUS;
+    e=cam_bus_supply_guard(&j->ldo);if(e)return cam_restore_failed(j,e);
     /* Validate ALL consumed PMIC rails before lowering even the first WL
      * channel. Front DOVDD and main AFVDD occur later in reverse order. */
     j->restore_step=X9_CAM_COLD_RESTORE_DOVDD;
@@ -843,6 +817,11 @@ static int cam_sensor_transaction(uint32_t which, struct x9_camera_probe *r,
     printf("X9 CAMERA COLD WL: expected=%02x prior=%02x uncertain=%02x conflict=%u retained=%02x/%02x (journal, single-channel enable)\n",
         j->wl_enable_expected,j->wl_enable_prior,j->wl_enable_uncertain,j->wl_conflict,
         j->wl_enabled,j->wl_programmed);
+    printf("X9 CAMERA COLD AP: fifo=%u/%u request=%u/%u wedged=%u/%u conflict=%u/%u "
+        "status=%08x/%08x (journal, NOT live readback or lease)\n",
+        j->sensor.fifo_owned,j->ldo.fifo_owned,j->sensor.request_owned,j->ldo.request_owned,
+        j->sensor.wedged,j->ldo.wedged,j->sensor.conflict,j->ldo.conflict,
+        j->sensor.last_status,j->ldo.last_status);
     return r->last_errno;
 }
 static int cam_sensor_probe(uint32_t which, struct x9_camera_probe *r)

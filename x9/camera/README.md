@@ -103,10 +103,10 @@ cameractl probe front
 
 `blockers` 位：`1=clock`、`2=shared rail`、`4=AP route`、`8=I2C state`、`16=inherited active/reset state`。
 阶段编号：`1=preflight`、`2=PMIC`、`3=bus`、`4=LDO`、`5=power`、`6=ID`、`7=restore`、`8=done`，追加 `9=clock`、`10=config`（不改旧编号）。
-一次 AP FIFO 请求最多约 5ms，单次 PMIF 状态等待最多约 1ms，DA 另有最多20次/100µs有界采样；单次 HWCCF DONE 等待最多 10ms，AP EN 最多 200µs，CKSTA/FENC 最多 1ms。未知继承状态不清 IRQ、不做总线 reset/retry。
+一次 AP FIFO 请求的完成等待使用绝对时间 5ms deadline，另有1000次轮询上限；配置、clock guard 和收尾不包含在这个5ms预算内。单次 PMIF 状态等待最多约 1ms，DA 另有最多20次/100µs有界采样；单次 HWCCF DONE 等待最多 10ms，AP EN 最多 200µs，CKSTA/FENC 最多 1ms。未知继承状态不清 IRQ、不做总线 reset/retry。
 失败后先把 sensor reset 拉低、断开 MCLK，再按真实反向顺序撤 DOVDD、WL DVDD、AF/AVDD（前摄 DOVDD 在 DVDD 之后），恢复仅自己改过的电压/引脚/14个控制寄存器/单控制器门控，撤销 CAMTG vote 并在无人使用时还原 parent，最后撤自己的 VS vote。共享 rail 的 EN_CLR 确认/DA-off 后才恢复原 selector；已有 live rail 不动。继承投票和其他通道保持；恢复失败保留 journal、锁存并明确报告，不声称资源已恢复。
 
-**恢复采用首错即停的依赖屏障**：reset-low 和 MCLK-off 均确认后才撤供电；任一 rail/WL 通道失败不再撤更早启用的 supply，也不恢复 pins/撤 bus、clock、VS。sensor bus 或 gate 恢复失败，不继续撤 WL bus、AP routes 或 CAMTG。PMIF pending/fault 先尝试本地 reset/MCLK 隔离，再保留依赖退出，不冒领后来响应。此前“累计错误但继续恢复”会破坏保留依赖，这一行为已修正。
+**恢复采用首错即停的依赖屏障**：reset-low 和 MCLK-off 均确认后，先检查 sensor/WL AP 请求 journal、配置和空闲状态，再允许撤任何供电；未退休 FIFO/START、wedged 或可见配置/parent 冲突立即止于 bus 阶段，保留 supply/pins/bus/clock/VS。任一 rail/WL 通道失败不再撤更早启用的 supply，也不恢复 pins/撤 bus、clock、VS。sensor bus 或 gate 恢复失败，不继续撤 WL bus、AP routes 或 CAMTG。PMIF pending/fault 先尝试本地 reset/MCLK 隔离，再保留依赖退出，不冒领后来响应。此前“累计错误但继续恢复”会破坏保留依赖，这一行为已修正。
 
 GET_STATUS 仍为 **88B**，原 reserved 前两字现为 `cold_retained/cold_restore_step`；旧工具和 ioctl 尺寸兼容。它们是最后冷事务的**软件 journal 缓存，不是实际硬件状态或 lease**。保留 mask：`1=pins`、`2=MCLK mux/vote`、`4=sensor bus/gate`、`8=WL bus/gate`、`16=WL rails`、`32=DOVDD`、`64=AFVDD`、`128=VS`、`256=WL wake`、`512=AP routes`、`1024=PMIF fault/pending`、`2048=sensor I2C parent`、`4096=WL I2C parent`。restore_step：1=quiesce、2=DOVDD、3=WL（日志另给 channel）、4=AFVDD、5=wake、6=pins、7=sensor bus、8=WL bus、9=routes、10=clock、11=VS、13=PMIF、14=WL I2C parent、15=sensor I2C parent；成功时缓存 step=0。失败看 `X9 CAMERA COLD RESTORE`，不在同一 boot 重试。
 **这补齐了冷启动供电/AP timing 的局部 ownership 和有条件 I2C 父时钟开启，但 HWCCF autolink/所选 PLL 仍要求已就绪；未知 HW/EINT 用户或 SCP owner 会拒绝。没有本轮实机 ID，不能宣称冷 LK 已全部打通，更不是可拍摄镜像。**
@@ -162,6 +162,18 @@ GET_STATUS 仍为 **88B**，原 reserved 前两字现为 `cold_retained/cold_res
 恢复只回写实际尝试改过的 dirty CSR，不再无条件回写整个快照；没有变化的 CSR 不写。模糊写入仅在当前值等于本次预期值或精确写前值时允许单次恢复，第三种值立即止于冷恢复屏障。dirty 仅在恢复读回确认后清除。
 
 这是一道配置冲突检测/恢复屏障，**不是跨 AP/SCP 的硬件 lease，也不能消除核对与 MMIO 写之间的全部竞态**。共同 provider/未知 owner 前置要求不变；没有冷启动实测时，不宣称 bus 独占或 AP timing 已验收。旧 ioctl、结构尺寸及 per-sensor 一次事务限制不变。
+
+### AP FIFO 请求完成与撤电屏障
+
+`probe/standby → cam_bus_transfer` 实际调用 `x9_camera_i2c_xfer.inc`。FIFO mutation 和 START **写前**分别标记 `fifo_owned/request_owned`，它们只是已尝试操作的 journal，不是硬件所有权。填完后要求 FIFO count 等于 tx 字节数；该寄存器定义来自厂商 common FIFO，厂商显式填充检查位于 SCP FIFO 分支，**本板 AP channel0 的行为尚待实测**。
+
+任意非零状态都会结束轮询；只接受停止且配置稳定、其他暴露 bank/APDMA 空闲的 COMP/ACKERR/HS_NACK（bits0–2）。deadline 后看到的完成不算成功。ARB_LOST、CONFERR、RS_TRANSFER、未知位、仍运行的 START 或模糊 FIFO/配置直接锁存，**不清 W1C/FIFO/START、不发 resume/reset、不重试**。合格 NACK 以 `ENXIO` 返回，不冒充应答成功。
+
+成功 read 必须恰有1个 RX 字节，write 必须无残留；RX 先放局部变量，只有状态、FIFO、START 收尾及最终完整空闲检查全部通过后才发布输出。收尾的 W1C 与 FIFO clear 后再次检查配置/其他 bank/START/新状态，失败立即停，不继续剩余清理。hot journal 只有确认完成收尾后才能退休；START 后来清零不能自行解除它。
+
+冷恢复先隔离 reset/MCLK，再在 PMIC/WL/DOVDD/AFVDD 撤销前执行 AP 屏障；bus restore 与 parent restore 也拒绝 hot journal。`cold_retained` 原有 sensor/WL bus 位包含这些未退休状态，restore_step 仍用7/8，无 ABI 扩展。`X9 CAMERA AP REQUEST` 记录捕获状态和停止原因，`X9 CAMERA COLD AP` 仅输出最后 journal，撤时钟后不补读硬件。
+
+多次 CSR 检查仍不是原子 lease，不能消除 AP/SCP check→write 竞态或同值 ABA。这一修复不建立 SID80/domain 映射，也不启动 SENINF/CAMSV DMA；**未上机、READY/supported0、无真实 RAW10，不能拍摄**。
 
 ### RAW10 复制与关闭不占住 DMA 完成锁
 
@@ -228,7 +240,7 @@ cameractl standby front
 1. 本地表长度/字节值/禁止寄存器检查，并检查最终 RAW10、尺寸、binning、PLL、行/帧长、曝光、增益、VC 关键值；不访问 MMIO。
 2. 复用原冷启动/AP timing/共享 rail journal，读取真实 `0x16/0x17` ID。匹配后仍持有同一供电/总线，不先恢复再另行上电。
 3. 读取 `0x0100` 与 `0x0104`，均为0才开始配置。前摄先执行下面的固定 fab 分支，再逐个 reg16/data8 FIFO 写 init/preview 和镜像（主3/前0）。**从不写 `0x0100/0x0103/0x0104`、OTP programming、EEPROM、AF/OIS**。生成器和内核仍拒绝 OTP 表项；仅已匹配前摄的固定 read-port 命令有独立例外，镜像也只能独立写固定值。
-4. 按稳定控制白名单读回，主 **41** 个、前普通分支 **38** 个、B4 分支 **40** 个字节（额外两项 patch，包括再次检查 stream/hold）。不读回全部厂商 microcode/write-only 命令。每个 I2C 请求≤约5ms，配置段总 deadline5s，调用前后检查预算；超时不重试、不继续 init。fab read-port exit 可独立进行一次≤约5ms清理写，不是延长初始化预算。
+4. 按稳定控制白名单读回，主 **41** 个、前普通分支 **38** 个、B4 分支 **40** 个字节（额外两项 patch，包括再次检查 stream/hold）。不读回全部厂商 microcode/write-only 命令。每个 I2C 请求完成等待预算5ms（不含配置/guard/收尾），配置段总 deadline5s，调用前后检查预算；超时不重试、不继续 init。fab read-port exit 可独立尝试一次清理写、使用同样的完成等待预算，不延长初始化预算；AP hot/fault 时拒绝实际发出该写。
 5. 无论中途写入/读回是否失败，均调用 `cam_restore`：先 reset-low/MCLK-off，再逆序恢复自己的依赖；任一恢复失败立即停在该屏障，保留 journal、FAULT/RETAINED，不在 close 或另一 sensor 上重试。
 
 结果包括原80B probe、独立操作/恢复错误、成功 ACK/实际尝试写入数、决定阶段/寄存器/index、expected/observed 与逐字节读数；`observed=ffffffff` 表示没有被接受的读数，不能当硬件值。预算耗尽而未发出的写不计 attempted；成功 ACK 即使随后发现总预算耗尽也计 written，但仍返回超时。index 在 init/preview 阶段为表 pair offset，在 readback 阶段为 sample offset。阶段1..9不变：1=table-check、2=cold、3=idle、4=init、5=preview、6=mirror、7=readback、8=restore、9=done；追加10=fab、11=fab-exit、12=fab-patch。
