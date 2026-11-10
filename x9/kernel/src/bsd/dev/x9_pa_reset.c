@@ -240,12 +240,21 @@ int x9_pa_reset_bus_validate(uint64_t ticket,uint64_t epoch,uint64_t lease)
     int e=!lease||lease!=pa.bus_child?EPERM:validate_locked(ticket,epoch);
     lck_mtx_unlock(&pa_reset_lock);return e;
 }
-int x9_pa_reset_bus_drop(uint64_t ticket,uint64_t epoch,uint64_t lease)
+static int bus_quiesced_locked(uint64_t ticket,uint64_t epoch,uint64_t lease)
 {
-    lck_mtx_lock(&pa_reset_lock);
     int e=!lease||lease!=pa.bus_child?EPERM:validate_locked(ticket,epoch);
     if(!e)e=x9_adsp_mt6993_speaker_halted_validate(ticket);
     if(!e)e=pa.policy.validate_drained(pa.policy.context,ticket,pa.policy.generation,0x1a110000,0x10000);
+    return e;
+}
+int x9_pa_reset_bus_quiesced_validate(uint64_t ticket,uint64_t epoch,uint64_t lease)
+{
+    lck_mtx_lock(&pa_reset_lock);int e=bus_quiesced_locked(ticket,epoch,lease);
+    lck_mtx_unlock(&pa_reset_lock);return e;
+}
+int x9_pa_reset_bus_drop(uint64_t ticket,uint64_t epoch,uint64_t lease)
+{
+    lck_mtx_lock(&pa_reset_lock);int e=bus_quiesced_locked(ticket,epoch,lease);
     if(!e)pa.bus_child=0;
     lck_mtx_unlock(&pa_reset_lock);return e;
 }

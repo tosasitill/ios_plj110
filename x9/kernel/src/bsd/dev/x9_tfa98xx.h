@@ -26,7 +26,7 @@ struct x9_tfa_bus {
     uint32_t version, verified;
     uint16_t expected_revision[2]; /* actual full reg03 readback, not DT label */
     void *context;
-    /* I2C6 lease includes correct reset GPIO controller, rails, 400k clock
+    /* I2C6 lease includes correct reset GPIO controller, rails, audited bus clock
      * and mutual exclusion. read/write implement reg8/value16 big-endian;
      * each access bounded; no blind replay of a timed-out write. */
     int (*read16)(void *,uint8_t slave,uint8_t reg,uint16_t *);

@@ -28,7 +28,8 @@ typedef struct {
 #ifdef __cplusplus
 extern "C" {
 #endif
-/* Service audioLock serializes both calls; no registration/automatic probe. */
+/* Internal controller mutex also excludes the native I2C6 lease. Status is
+ * cached only; neither call registers a provider or automatically probes. */
 int x9_tfa_plj110_probe(void);
 int x9_tfa_plj110_status(X9AudioAmpStatus *);
 #ifdef __cplusplus

@@ -11,11 +11,29 @@
 #include "../kernel/src/bsd/dev/x9_tfa98xx.h"
 #include "../kernel/src/bsd/dev/x9_speaker_afe.h"
 #include "../kernel/src/bsd/dev/x9_tfa_plj110.h"
+#include "../kernel/src/bsd/dev/x9_i2c6.h"
 #include "../kernel/src/bsd/dev/x9_audio_resources.h"
 #include "../kernel/src/bsd/dev/x9_speaker_mt6993.h"
 #include "../kernel/src/bsd/dev/x9_speaker_pll.h"
 #include "../kernel/src/bsd/dev/x9_speaker_path.h"
 static volatile sig_atomic_t interrupted;
+_Static_assert(sizeof(X9AudioI2C6Status)==128,"native I2C6 status ABI");
+static int i2c6_status(io_connect_t c) {
+    X9AudioI2C6Status s={0};size_t n=sizeof(s);
+    kern_return_t r=IOConnectCallStructMethod(c,X9AudioI2C6StatusSelector,NULL,0,&s,&n);
+    if(r||n!=sizeof(s)||s.version!=X9_I2C6_STATUS_VERSION) {
+        fprintf(stderr,"native I2C6 status/ABI failed: 0x%x\n",r);return 1;
+    }
+    printf("I2C6 cached: generation=%u flags=0x%x error=%u dirty=0x%x uncertain=0x%x pending=%u terminal=0x%x\n",
+        s.generation,s.flags,s.error,s.dirty,s.uncertain,s.pending,s.terminal);
+    printf("parent=%u dma-parent=%u nominal=%uHz configured=%uHz last=0x%x/reg0x%x %s tx-bytes=%u requests=%llu completed=%llu writes=%llu\n",
+        s.parent,s.dma_parent,s.nominal_hz,s.timing_hz,s.slave,s.reg,s.reading?"read":"write",s.tx_bytes,
+        (unsigned long long)s.requests,(unsigned long long)s.completed,(unsigned long long)s.write_attempts);
+    for(unsigned i=0;i<2;i++)printf("bank%u last-observed: START=0x%x STAT=0x%x FIFO=0x%x\n",
+        i,s.bank_start[i],s.bank_status[i],s.bank_fifo[i]);
+    puts("Cached only. No validation/MMIO/recovery or value write; controller transport is not rail/profile/calibration/unmute/Ready proof.");
+    return 0;
+}
 static void on_signal(int n) { (void)n; interrupted = 1; }
 static int status(io_connect_t c, X9AudioControl *s) {
     size_t n = sizeof(*s);
@@ -328,6 +346,7 @@ static int path_status(io_connect_t c) {
 int main(int argc, char **argv) {
     if (argc == 4 && !strcmp(argv[1], "amp-inspect")) return inspect_container(argv[2], argv[3]);
     int amp = argc == 2 && !strcmp(argv[1], "amp-status");
+    int i2c6 = argc == 2 && !strcmp(argv[1], "i2c6-status");
     int probing = argc == 2 && !strcmp(argv[1], "amp-probe");
     int booting = argc == 2 && !strcmp(argv[1], "dsp-boot");
     int stopping = argc == 2 && !strcmp(argv[1], "dsp-stop");
@@ -344,8 +363,8 @@ int main(int argc, char **argv) {
     int stream_stop = argc == 2 && !strcmp(argv[1], "stream-stop");
     int playing = argc == 3 && !strcmp(argv[1], "play");
     int dsp = argc == 2 && !strcmp(argv[1], "dsp-status");
-    if (!amp && !probing && !playing && !dsp && !board && !afe && !resources && !clocks && !clock_probe && !pll && !pll_probe && !path && !path_probe && !stream && !stream_stop && !booting && !stopping && !(argc == 2 && !strcmp(argv[1], "status"))) {
-        fprintf(stderr, "usage: audioctl amp-status | amp-probe | status | resource-status | clock-status | clock-probe | pll-status | pll-probe | path-status | path-probe | stream-status | stream-stop | afe-status | dsp-status | board-status | dsp-boot | dsp-stop |\n  play <S16LE stereo 48000Hz raw PCM> | amp-inspect <local.cnt> <exact-profile>\n"); return 2;
+    if (!i2c6 && !amp && !probing && !playing && !dsp && !board && !afe && !resources && !clocks && !clock_probe && !pll && !pll_probe && !path && !path_probe && !stream && !stream_stop && !booting && !stopping && !(argc == 2 && !strcmp(argv[1], "status"))) {
+        fprintf(stderr, "usage: audioctl i2c6-status | amp-status | amp-probe | status | resource-status | clock-status | clock-probe | pll-status | pll-probe | path-status | path-probe | stream-status | stream-stop | afe-status | dsp-status | board-status | dsp-boot | dsp-stop |\n  play <S16LE stereo 48000Hz raw PCM> | amp-inspect <local.cnt> <exact-profile>\n"); return 2;
     }
     FILE *f = playing ? fopen(argv[2], "rb") : NULL;
     if (playing && !f) { perror(argv[2]); return 1; }
@@ -357,6 +376,7 @@ int main(int argc, char **argv) {
     X9AudioControl s; int rc = status(c, &s);
     if (!rc) {
         print_status(&s);
+        if (i2c6) rc = i2c6_status(c);
         if (amp) rc = amp_status(c);
         if (probing) {
             kern_return_t op = call(c, X9AudioAmpProbeSelector);

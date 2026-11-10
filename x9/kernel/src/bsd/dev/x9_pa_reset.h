@@ -31,8 +31,9 @@ struct x9_pa_reset_policy {
  * Any failure retains pending PMIF operation/journal/child until explicit
  * halted+drained cleanup. No low/high pulse replay on failed acquisition.
  * Backend serializes lifecycle and must close/drain its I2C6 child BEFORE
- * release. No I2C supplier/consumer is currently registered here.
- * Lock: AFE/pads -> PA reset -> power callback -> PMIF -> clock/board/AP.
+ * release. Native I2C6 consumes the downstream child; actual physical
+ * rail/controller suppliers and a combined backend remain unregistered.
+ * Lock: AFE/pads -> I2C6 -> PA reset -> power callback -> PMIF -> clock/board/AP.
  * Read-only validate may be used by the PA mute/I2C provider; do not call
  * it while holding the clock mutex or common PMIF mutex. */
 int x9_pa_reset_acquire(const struct x9_pa_reset_policy *,uint64_t *epoch);
@@ -46,6 +47,10 @@ int x9_pa_reset_held(uint64_t ticket); /* cached, not fresh-reset proof */
  * An open child makes PA release EBUSY BEFORE any reset/power mutation. */
 int x9_pa_reset_bus_hold(uint64_t ticket,uint64_t epoch,uint64_t *lease);
 int x9_pa_reset_bus_validate(uint64_t ticket,uint64_t epoch,uint64_t lease);
+/* Same physical parent + actual halt/independent DL24 drain, WITHOUT
+ * dropping the child. I2C6 must call this BEFORE resolving/restoring CSRs,
+ * then bus_drop repeats it AFTER controller cleanup. No I2C mutation. */
+int x9_pa_reset_bus_quiesced_validate(uint64_t ticket,uint64_t epoch,uint64_t lease);
 int x9_pa_reset_bus_drop(uint64_t ticket,uint64_t epoch,uint64_t lease);
 /* Explicit halted/drained cleanup of THIS owner's late PMIF operation.
  * May run while I2C6 child is retained; no GPIO/power/bus writes or reset

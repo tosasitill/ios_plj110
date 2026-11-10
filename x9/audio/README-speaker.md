@@ -453,6 +453,7 @@ lease空间不是CSR，ticket细节另读resource-status；lease-error0时guard�
 | `x9_dsp_pcm.{c,h}` | 96B PCM descriptor与32B shared-DRAM record字节codec；真实transport上的INIT／share／OPEN／HWPARAM／AFE PCM配置／PREPARE／DLCOPY／START／STOP／HWFREE／CLOSE；generation-bound消费消息、双快照DTOA与输入环容量检查 | unified AP lease下实际共享DRAM/MPU/cache、task/core绑定与生产调用者；DSP消费不能代替AFE物理played |
 | `x9_speaker_afe.{c,h}` | DL24/OUT4 逐字段写入/不确定/恢复 journal、32-bit I2S slots/S16、48k、CONN116/117 DL24 route；AP transition ticket、platform v4 部分失败 ownership＋fresh lease/config guard、combined ticket和producer halt；prefill 后 DMA start、period copy/cache、稳定 CUR、高低地址/半环歧义检查；独立低水位 watcher、mute/disable/quiesce/restore | AUDIO/VLP APLL2、pad/物理共享资源 lease、DMA bus/EMI/cache、双 PA mute、权威 DMA quiesce与DSP producer adapter |
 | `x9_tfa_plj110.{c,h}` | root 显式只读 reg03；PMIF-P SID3 reset/SID5 左供电快照，已开启 I²C6/共享 DMA clock 与 pads 校验、2 CSR bank/1 DMA idle、FIFO WRRD 1+2 BE、逐字段总线恢复 | 不具备双侧供电/reset/write lease；右 rail、真实 binding/profile/校准仍待确认 |
+| `x9_i2c6.h/x9_i2c6_native.inc` | 与只读probe共用controller mutex；真实PA epoch下游child、reg8/value16 BE FIFO read/write、双CSR bank/DMA资格、last-prior journal、terminal-only no-replay清理与halt/drain前后屏障；iOS缓存状态 | 必须实际pin住I2C6/APDMA clocks、mux/PLL、GPIO114/115与所有master互斥，现无真实supplier或combined调用者；不授profile/校准/unmute |
 | `x9_pa_reset.{c,h}` | 本次FDT SID3双active-low reset拓扑、生产clock PA子租约、低1ms→高1ms/物理DI读回与fresh epoch、PMIF pending no-replay、halt/drain后重新assert low；I2C6下游子租约屏障 | 实际双侧rail/reset物理独占supplier仍无注册者，不提供PA寄存器写／profile／校准／unmute |
 | `x9_tfa98xx.{c,h}` | PM container total-size/CRC、双 I2C 类型（container bus=0）的地址、明确名字的两侧 profile、descriptor 边界；真实 reg03 revision 比对、AMPE=0 且读回；双侧预检白名单 register/bitfield prefix | 实际完整 revision、immutable container、per-revision 白名单、I2C6/reset/rails 互斥；Probus DSP file/patch/校准/boost 未执行 |
 
@@ -696,7 +697,7 @@ I2C ACK或可控boolean替代它；当前该mandatory supplier没有实现/注�
 | PMIF 写入／journal | GPIO属于MT6661 `FLAG_MT66XX` 的regmap_update_bits，不使用AP GPIO SET/CLR；保存最后写前prior，只改GPIO10/11、保留邻bit，uncertain在命令前置位；失败不重播reset pulse |
 | `pa_reset_validate(ticket,epoch)` | fresh parent/双侧物理lease、PMIF CPU→PA首尾、reset image与DO/DI；允许同代际历史流fault后的物理mute，但不是新流Online/profile/校准授权 |
 | `pa_reset_resolve_pmif` | 真halt/drain后显式解决本owner pending；Read只有实际late VALID才能读弃并CLR，不把idle当“未来不会有响应”；timeout write/CLEAR不重放，不清未知error或别人的VALID |
-| `pa_reset_bus_hold/validate/drop` | I2C6下游单调token。hold须真实Online/noerror/fresh epoch，drop由native controller在真实bus/FIFO/DMA idle及CSR恢复后调用，再检PA parent和board halt/DL24 drain；现无I2C6生产caller |
+| `pa_reset_bus_hold/validate/quiesced_validate/drop` | I2C6下游单调token。hold须真实Online/noerror/fresh epoch；native controller清理前先quiesced_validate实际halt/独立DL24 drain，真正bus/FIFO/DMA idle及CSR恢复后drop再验证，不提前撤PA reset |
 | `pa_reset_release` | 下游bus尚held立即EBUSY，不assert reset/污染flow；真board halt＋独立DL24 drain后撤configured、resolve pending、重新assert low至少1ms且DO/DI确认，再drop PA clock child；失败保留父资源，drop重试不重播高脉冲 |
 
 clock的pads/PA两个子租约使用**同一全局单调leaf serial**，token不跨类型复用；任一held时
@@ -704,6 +705,45 @@ clock_release在restore/vote之前EBUSY。已pin物理rail/reset supplier的生�
 child；成功清理顺序是mute/AFE停流/drain/producer halt→恢复I2S4 pads→I2C6 close/restore→
 assert PA reset/drop child→clock restore→物理rail父资源退休，AP ticket最后释放。
 新流需新的真实DSP generation，不允许用替换status/context消除reset/PMIF不确定性。
+
+### Native I2C6：连接PA子租约与真实FIFO事务
+
+**物理supplier与combined调用者仍未完成，不会自动注册backend、执行事务或发布Ready。**
+实现包含在`x9_tfa_plj110.c`的生产include中，因此和诊断用同一个controller mutex，
+但映射、clock image、journal及故障状态完全独立；不把诊断成功当write grant。
+native child存续（包括失败）时`amp-probe`返回Busy且不消耗其一次性尝试；
+诊断留有poison／未恢复journal时native acquire同样拒绝。
+
+`x9_i2c6_policy.validate_controller`必须提供已pin且覆盖**整个生命周期**的实际
+I2C6/APDMA clock、stable mux/PLL、当前GPIO114/115 mode1电气与两CSR bank/DMA所有权，
+排除本地及远端master；一次gate/idle快照不是该supplier。PA rail/reset另由真实parent
+独立证明，controller supplier还须实际证明APDMA无outstanding，不仅EN0。
+回调有界且不得重入I2C6/PA/pads/AFE/clock生命周期。
+现有PA handoff检查`mediatek,mt6991-i2c`、两reg tuple与slave/reset拓扑，
+不额外冒充I2C pin/clock物理资格。loader仍关闭，没有本次live grant。
+
+| 入口／动作 | 实际契约 |
+|---|---|
+| `x9_i2c6_acquire(policy,&lease)` | 同真实Online generation与fresh PA epoch，先hold PA bus child再map；输出token非零后即使失败也必须显式release，token本身不是成功配置资格 |
+| `read16(ticket,lease,slave,reg,out)` | 只许34/35；FIFO reg1字节、LEN1/AUX2/TRANS2、RS+DIR_CHANGE，START bit14+bit0；仅完成ACK、START退出且FIFO精确2→1→0后返回BE16，失败不改out |
+| `write16(ticket,lease,slave,reg,value)` | FIFO reg/high/low三字节、LEN3/AUX0/TRANS1，清RS/DIR_CHANGE/DMA/DMAACK/ASYNC/IRQ/LEN_CHANGE；完成ACK且FIFO0才成功，不验证PA寄存器最终值，上层仍须读回与可信白名单 |
+| timing／clock | 不接管gate、PLL、pads或APDMA；用已pin真实parent名义PCW生成保守≤100kHz timing，非400kHz证书；fresh检查CKSTA/FENC与I2C_WEST UPDATE2 bit5、PERI_AXI UPDATE bit1 |
+| journal／pending | 两bank逐字段fresh核对；普通RW只接最后一次写前prior或expected，不自动unwind。DATA/START/W1C/FIFO_CLR在动作前登记；未知status/timeout不清、不取消、不重发 |
+| `release(ticket,lease)` | 撤configured并禁止后续事务，先真实halt/独立DL24 drain，再只收敛本owner的实际terminal请求，逆序恢复touched CSR，fresh saved/idle后drop PA child；drop失败重试只复验，不再restore |
+
+START曾尝试但仅观察到START0/STAT0，不能证明未来没有响应，必须继续保留资源。
+晚到的明确terminal仅可清该owner的ACK/NACK；W1C/FIFO_CLR/START-clear的失败只观察
+实际完成效果，不重放动作。START前失败可在真halt/drain后弃自己的queued bytes，
+不重发DATA。故障后明确已结束的NACK不阻止另一次安全mute事务，但不确定pending或
+RW journal会阻止**所有**后续事务；release一旦开始，只允许cleanup。
+如果PA自身PMIF出现pending，先在I2C mutex外执行本owner的
+`pa_reset_resolve_pmif`（允许bus child保留），然后继续显式bus release。
+
+`audioctl i2c6-status`使用追加selector18返回独立**128B v1缓存**，含generation、
+held/configured/teardown、首错、dirty/uncertain/pending、名义时钟与最后CSR观察、
+请求/完成/写尝试计数。仅复制内存，不validate、MMIO、清错或提供用户write/recovery入口。
+旧PCM/status/amp ABI不变，HAL Ready门不变；可信full revision/container/profile、
+probus保护校准和真实unmute仍须后续生产接线，不能设`x9_tfa_bus.verified=7`。
 
 ### AUDIO-12：启动／运行配置资格与缓存故障位置
 

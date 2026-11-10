@@ -2,8 +2,8 @@
  * Borrow only ALREADY ON clocks / ALREADY ROUTED pads; never power/reset a PA,
  * change a shared PLL, take APDMA clock, scan a slave, or expose MMIO to users.
  * I2C6 also has display/charger fixtures: idle/shadow/IRQ/DMA admission is
- * mandatory. XNU currently has no other I2C6 consumer; future users must share
- * a controller arbiter before this diagnostic may coexist with them.
+ * mandatory. Diagnostic and native production use the SAME controller
+ * mutex; the native lease excludes this probe for its whole lifetime.
  * A bus read necessarily writes its register-address byte and AP FIFO CSRs;
  * it never writes a PA register value. This is NOT x9_tfa_bus verified=7.
  */
@@ -12,10 +12,23 @@
 #include <sys/errno.h>
 #include <mach/vm_types.h>
 #include <kern/clock.h>
+#include <kern/locks.h>
+#include <vm/pmap.h>
 #include "x9_tfa_plj110.h"
+#include "x9_i2c6.h"
+#include "x9_pa_reset.h"
+#include "x9_audio_resources.h"
+#include "x9_adsp_mt6993.h"
+#include "x9_adsp_transport.h"
 extern vm_offset_t ml_io_map(vm_offset_t,vm_size_t);
+extern ppnum_t pmap_find_phys(pmap_t,addr64_t);
+extern int sweet_early_is_x9(void);
+extern int sweet_x9_arg(const char *,int);
 extern int X9PMIFAcquire(void);
 extern void X9PMIFRelease(void);
+LCK_GRP_DECLARE(i2c6_group,"x9-i2c6");
+LCK_MTX_DECLARE(i2c6_lock,&i2c6_group);
+static bool native_bus_held;
 enum { DATA=0, MASK=8, STAT=0xc, CTRL=0x10, LEN=0x14, TRANS=0x18,
     DELAY=0x1c, TIMING=0x20, START=0x24, EXT=0x28, LTIMING=0x2c,
     HS=0x30, IO=0x34, FIFO_CLR=0x38, SDA=0x3c, AUX=0x44, DIV=0x48,
@@ -243,7 +256,10 @@ static int restore(void)
 }
 int x9_tfa_plj110_probe(void)
 {
-    if(s.flags&X9PAProbeAttempted)return EBUSY; /* once per boot, including misses */
+    lck_mtx_lock(&i2c6_lock);
+    if(native_bus_held || (s.flags&X9PAProbeAttempted)) {
+        lck_mtx_unlock(&i2c6_lock);return EBUSY;
+    } /* a busy native lease does not consume the once-per-boot attempt */
     s.flags=X9PAProbeAttempted;s.stage=X9PAStageMap;
     j.pmif=ml_io_map(0x1c018000,0x2000);j.gpio=ml_io_map(0x1002d000,0x1000);
     j.gate=ml_io_map(0x129d0000,0x1000);j.perao=ml_io_map(0x16640000,0x1000);
@@ -280,7 +296,13 @@ int x9_tfa_plj110_probe(void)
     if(j.pmif_stuck || j.bus_stuck || s.restore_error)s.flags|=X9PAPoisoned;
     if(locked)X9PMIFRelease();
     if(!e && !s.restore_error){s.flags|=X9PAProbeComplete;s.stage=X9PAStageDone;}
-    return e?e:(int)s.restore_error;
+    int result=e?e:(int)s.restore_error;
+    lck_mtx_unlock(&i2c6_lock);return result;
 }
 int x9_tfa_plj110_status(X9AudioAmpStatus *out)
-{if(!out)return EINVAL;*out=s;return 0;}
+{
+    if(!out)return EINVAL;lck_mtx_lock(&i2c6_lock);*out=s;
+    lck_mtx_unlock(&i2c6_lock);return 0;
+}
+/* Separate state: diagnostic observations never authorize native writes. */
+#include "x9_i2c6_native.inc"
