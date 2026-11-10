@@ -209,7 +209,7 @@ x9_baro_init(int diagnostic)
 	scp_request_interval_ns = 0;
 	scp_list_pending = 0; scp_list_request_time = 0;
 	report_interval_us = 200000;
-	scp_error = 0;
+	/* A software restart cannot prove remote reset/drain. Keep quarantine. */
 	copy_scp_layout();
 	lck_mtx_unlock(&x9_baro_lock);
 	return 0;
@@ -226,7 +226,7 @@ x9_baro_shutdown(void)
 	scp_request_time = 0;
 	scp_request_interval_ns = 0;
 	scp_list_pending = 0; scp_list_request_time = 0;
-	scp_layout_valid = 0; scp_error = 0;
+	scp_layout_valid = 0; /* retain scp_error across stop/start */
 	lck_mtx_unlock(&x9_baro_lock);
 }
 
