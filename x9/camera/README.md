@@ -96,7 +96,7 @@ cameractl probe front
 当前实现刻意不接管未知的共享资源，前置条件包括：
 
 - UNIVPLL 的已有 PCW/postdiv 配置在 `/104` 后为标称 24MHz（容差 ±1kHz）。不重编 PLL、不初始化 HWCCF 的全局/autolink 表；DONE 不就绪时有界退出。没有其他 XPU 投票且 CAMTG FENC 为 off 时，才允许把目标 mux 改为 parent7。已有投票则只接受正确 parent 和 FENC-on，不改 live parent。
-- i2c4/i2c2 和 **i2c12** 的共享 I2C_EAST/I2C_PERI parent 必须 CKSTA-idle，选用 PLL 时该 PLL 已 FENC-on；不修改共同 source。已 FENC-on 且 PDN-off 的 parent 只借用。若 FENC-off、PDN-on、该分组**全部**物理子控制器 gate-off（IMPE mask `0x3f`、IMPC mask `0x0d`），两次入口快照及源 PCW 稳定，才记录 journal 并单 bit CLR 父 PDN，等待 FENC-on。随后只 ungate 目标 IMPE/IMPC bit，退出恢复自己增加的门控。所有暴露 bank 必须无事务/IRQ/FIFO 残留，所有 DMA bank 均未运行；主/前各 8 个 I2C、3 个 DMA bank，WL 为 4/1。TIMING 非零时只借用 open-drain/非 HS 状态；TIMING 为零且 MULTI 为零时，可按已验证 parent PCW 推导标准模式 ≤98kHz 的 high/low sample、step、divider 和 5µs EXT，保存/恢复 14 个 CSR。不会 reset 整个控制器、改 MCU IRQ 或共享 shadow mode。实际 DT 没有 `ch-offset-i2c`，使用 channel0，不能猜成 `+0x10000`。
+- i2c4/i2c2 和 **i2c12** 的共享 I2C_EAST/I2C_PERI parent 必须 CKSTA-idle，选用 PLL 时该 PLL 已 FENC-on；不修改共同 source。已 FENC-on 且 PDN-off 的 parent 只借用。若 FENC-off、PDN-on、该分组**全部**物理子控制器 gate-off（IMPE mask `0x3f`、IMPC mask `0x0d`），两次入口快照及源 PCW 稳定，才记录 journal 并单 bit CLR 父 PDN，等待 FENC-on。随后只 ungate 目标 IMPE/IMPC bit，退出恢复自己增加的门控。所有暴露 bank 必须无事务/IRQ/FIFO 残留，所有 DMA bank 均未运行；主/前各 8 个 I2C、3 个 DMA bank，WL 为 4/1。TIMING 非零时仅借用经 divider/high/low/EXT 资格检查的 20–100kHz 标准模式、open-drain/非 HS 配置；TIMING 为零且 MULTI 为零时，可按已验证 parent PCW 推导标准模式 ≤98kHz 的 high/low sample、step、divider 和 5µs EXT，保存/恢复 14 个 CSR。不会 reset 整个控制器、改 MCU IRQ 或共享 shadow mode。实际 DT 没有 `ch-offset-i2c`，使用 channel0，不能猜成 `+0x10000`。
 - AP I2C 引脚允许已为 mode1，或 mode0/input 后仅切目标引脚的 mode1，退出恢复；mode2/SCP、GPIO output 等未知 owner 一律拒绝。GPIO203 已 output-high 时只借用；output-low 或 mode0/input 且 DIN-low 时可记录 DIR/DOUT，先低→output→高，等 1ms 后读 WL ID。退出前必须读整个 WL enable 字节为零才恢复自己拉高的203；GPIO187/202 和 UVP 控制始终不写。
 - SID3 LN60_7 DOVDD、主摄 SID6 LDC0_3 AFVDD：已启用时只借精确电压/normal/DA-enabled。禁用时还必须 DA-off/HW_OP_EN0=0，AF 另要求 EINT_EN=0，才能记录 selector，设置电压并单 bit EN_SET。DOVDD 的实际编码是 **0xd0=1.8V**（coarse 高 nibble、fine 低 nibble），AF 0x0a=3V；此前 0x0d 检查不正确。每次 snapshot→ownership→写入→readback 同持共享 X9PMIF 锁；模糊写入保留 journal。主摄仅申请 SID3 0x178a 的 VS mask4，最后撤销自己的 vote，不清其他 bit。
 - 目标 sensor 的 reset 为 GPIO output-low，或 mode0/input 且 DIN-low（保存 DIR/DOUT 后可转 output-low）；MCLK pinmux 为 off、它的 WL 通道均 disabled。主摄使用 WL4/7/2，前摄使用 WL3/1；其他通道保持。
@@ -130,6 +130,18 @@ GET_STATUS 仍为 **88B**，原 reserved 前两字现为 `cold_retained/cold_res
 在启用目标通道前、启停时、interleaved AFVDD/DOVDD 申请前、MCLK/reset 放行前及恢复共享 rail 前，核对实际已申请且仍 enabled 通道的 selector 是自己的目标电压。发现 enable 或 live selector 变化便保留，**先 reset-low/MCLK-off 隔离，再停在 WL 恢复屏障；不先把 DOVDD/AFVDD 降下去，也不先清 enable 才发现 selector 已被改**。`X9 CAMERA WL CONFLICT` 给首次决定字段，`X9 CAMERA COLD WL` 仅输出最后软件 journal；ioctl/结构尺寸/READY 不变。
 
 这修正的是可见变化下的单通道 RMW 和恢复依赖顺序，仍不能消除最后一次 read 与整字节 write 之间的竞态、识别同值 ABA 或证明 SCP 硬件 lease。未上机、不 stream-on，不能据此声称共享供电实测通过或已经拍摄。
+
+### 非零 AP TIMING 也必须通过标准模式资格检查
+
+`probe/standby → cam_bus_take` 原来只检查非 HS、open-drain；非零 TIMING 不能证明本次 FIFO 事务的速度、high/low 或 START/STOP 设置可用。`x9_camera_i2c_timing.inc` 现在同时用于已有配置准入和零 TIMING 初始化，不增加诊断 ioctl、不修改用户态 ABI。
+
+确定的源码反例（未执行测试、不代表实机状态）：26MHz source、TIMING=1、LTIMING=1、DIV=0、HS=0、IO=3，原借用分支会接受；high/low 各仅2计数，显然不是本次标准模式 profile。新分支在 bus 阶段拒绝，尚未发 WL ID 或 sensor 请求。
+
+按厂商 `mtk_i2c_set_speed_v2` 解码 separate high/low sample×step 和复制的 5-bit divider。只接受标准模式 profile：TIMING/LTIMING/DIV/EXT 无未知位、两份 divider 相同、HS/SDA/MIS 为零、IO 为 open-drain、LS EXT 启用。根据稳定入口 source/PCW 求向上取整的配置频率上界，完整周期扣一计数（与厂商 LS solver 的额外一计数余量对应）、每个 phase 再保守扣一计数，要求 rate 上界 ≤100kHz、保守下界 ≥20kHz、high ≥4µs、low ≥4.7µs、EXT ≥5µs。20kHz 下限仅限定现有约5ms请求预算，不保证 clock stretching 一定在预算内。
+
+零 TIMING 求解仍优选 45% duty、上界 ≤98kHz；EXT 改为完整表达式向上取整，避免二次截断使其短于5µs。编码在第一笔 timing 写之前通过同一 profile 检查，全部写后沿原 journal 再检查；已有非零配置不通过时直接拒绝，不重新定时、不清 FIFO/IRQ、不发 START，不修改已有 timing。原 dirty/uncertain 和恢复屏障保持。
+
+`X9 CAMERA AP TIMING` 输出借用/初始化、raw CSR、source/rate **配置上界**和 errno；原 `COLD timing_hz` 现在也为上界（并补齐借用时此前为零的字段），不是测得的总线频率。资格只证明这个窄配置模型，不证明波形、rise time、stretch、AP/SCP 独占或真实传感器应答。继承400kHz/HS/其他profile会明确拒绝，不能借此称冷启动或拍摄已实测通过。
 
 ### AP timing/control 冲突时保留，而不是覆盖
 

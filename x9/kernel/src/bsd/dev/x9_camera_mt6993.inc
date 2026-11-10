@@ -342,58 +342,7 @@ static int cam_bus_control_write(struct cam_probe_bus *b, unsigned reg, uint32_t
     b->uncertain&=~bit;if(restoring)b->dirty&=~bit;
     return 0;
 }
-/* MT6991-compatible speed_ver=1: high/low products are sample(1..8) *
- * step(1..64). Solve close to 45% duty, [41%,49%), at <=98kHz. Bounded
- * arithmetic search, not a full sample/step Cartesian product. */
-static bool cam_timing_factor(unsigned n, unsigned *sample, unsigned *step)
-{
-    for(unsigned s=1;s<=8;s++)if(n%s==0 && n/s>=1 && n/s<=64) {
-        *sample=s;*step=n/s;return true;
-    }
-    return false;
-}
-static int cam_bus_init_timing(struct cam_probe_bus *b)
-{
-    uint64_t hz=26000000;
-    if(b->clock_source) {
-        uint64_t divisor=(uint64_t)16384*(1u<<((b->clock_con1>>24)&7));
-        hz=((uint64_t)(b->clock_con1&0x3fffff)*26000000+divisor-1)/divisor;
-        hz/=b->clock_source==1?20:b->clock_source==2?16:10;
-    }
-    if(hz<1000000 || hz>500000000)return ENOTSUP;
-    unsigned div,hs=0,ht=0,ls=0,lt=0,ext=0,total=0;
-    bool found=false;
-    for(div=1;div<=32 && !found;div++) {
-        ext=(unsigned)((hz/div)*5/1000000);
-        if(ext>255)continue;
-        total=(unsigned)((hz+(uint64_t)div*98000-1)/((uint64_t)div*98000))+1;
-        if(total<4 || total>1024)continue;
-        unsigned ideal=total*45/100;
-        for(unsigned delta=0;delta<=total/2 && !found;delta++) {
-            for(unsigned side=0;side<2 && !found;side++) {
-                if(side && delta>ideal)continue;
-                unsigned high=side?ideal-delta:ideal+delta;
-                if(high<2 || high>=total-1 || high*1000<total*410 || high*1000>=total*490)continue;
-                found=cam_timing_factor(high,&hs,&ht) && cam_timing_factor(total-high,&ls,&lt);
-            }
-        }
-    }
-    if(!found)return ENOTSUP;
-    div--; /* loop increments once after the successful divider */
-    int e=cam_bus_clock(b);if(!e)e=cam_bus_idle(b);if(e)return e;
-    if(cam_rr(b->base,CAM_I2C_MULTI) || cam_rr(b->base,CAM_I2C_TIMING))return EBUSY;
-    /* No softreset, MCU interrupt routing, APDMA reset or shared shadow mode.
-     * Journal was captured and marked owned before any timing write. */
-    const unsigned regs[]={CAM_I2C_TIMING,CAM_I2C_EXT,CAM_I2C_LTIMING,
-        CAM_I2C_HS,CAM_I2C_SDA,CAM_I2C_DIV,CAM_I2C_IO,CAM_I2C_MIS};
-    const uint32_t values[]={((hs-1)<<8)|(ht-1),(ext<<8)|1,
-        ((ls-1)<<6)|(lt-1),0,0,((div-1)<<8)|(div-1),3,0};
-    for(unsigned i=0;i<sizeof(regs)/sizeof(regs[0]);i++) {
-        e=cam_bus_control_write(b,regs[i],values[i],false);if(e)return e;
-    }
-    b->timing_hz=(uint32_t)(hz/(div*total));
-    return 0;
-}
+#include "x9_camera_i2c_timing.inc"
 static int cam_bus_take(struct cam_probe_bus *b)
 {
     int e=cam_bus_parent_take(b);if(e)return e;
@@ -415,8 +364,7 @@ static int cam_bus_take(struct cam_probe_bus *b)
     if(cam_rr(b->base,CAM_I2C_MULTI))return ENOTSUP; /* no shared shadow/DMA mode */
     b->owned=true;
     if(!b->saved[6])return cam_bus_init_timing(b);
-    if((cam_rr(b->base,CAM_I2C_HS)&0x8001) || cam_rr(b->base,CAM_I2C_IO)!=3)return ENOTSUP;
-    return 0;
+    return cam_bus_timing_check(b,false); /* nonzero is not a qualified timing profile */
 }
 static int cam_bus_restore(struct cam_probe_bus *b)
 {
