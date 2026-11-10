@@ -1,5 +1,13 @@
 # MT6993 DSP / 音频驱动移植难度评估
 
+> **2026-11-10 更新**：本文是旧的通用源码评估，不是本板已验证的播放路线。
+> 本机捕获的 DT 同时启用了 I2C6 `RT5512@5c/5d` 和 `TFA98xx@34/35`，
+> 实际绑定的 PA 仍待确认；不能直接把下文 MT6681→Ext_Speaker_Amp 当作真实扬声器链路。
+> 实际 ADSP shared memory 为 `0x160000000/0xda0000`、audio reserve 为 `0x852000`，
+> 与下文通用 DTS 数值不同。输出专用内核接口、MTK IPI codec 和 iOS HAL 已新增，
+> 用法及未实现边界见 [`x9/audio/README-speaker.md`](../../x9/audio/README-speaker.md)。
+> 物理 DSP/AFE/PA backend 尚未实现，不能出声；编译通过不等于本评估路线已验收。
+
 - 设备：OPPO Find X9（`PLJ110` / `OP5E17L1`，MediaTek MT6993），X9 分支
 - 目标 OS：未经修改的 iOS 16.7.16（`20H392`，iPhone X 身份）用户land + 本仓库 XNU `8796.141.3`
 - 源码基线：`/Users/tosasitill/HelioDarwin/oppo-source`（`android_kernel_oppo_mt6993` + `modules/kernel/kernel_device_modules-6.12`）
