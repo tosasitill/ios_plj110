@@ -3,6 +3,7 @@
 #define X9_CAMERA_SENSOR_SESSION_H
 #include "x9_camera.h"
 #include "x9_camera_outmux.h"
+#include "x9_camera_mac.h"
 #ifdef KERNEL
 /* Thread context, standalone callers: these acquire camera_control_lock.
  * A platform callback already holding that mutex must use the internal
@@ -21,6 +22,10 @@
  * through the sensor epoch, after configured standby. It samples disabled
  * receiver controls, but neither writes PHY/route/DMA nor grants ownership.
  * Failed admitted preparation also remains tied to this ONE sensor close.
+ * Optional configure_mac BEFORE configure_outmux journals inactive packet
+ * format / normal RAW10 identity / unsplit async and CAM_MAIN AFIFO; no PHY
+ * mux or MAC lane enable. It restores AFTER OUTMUX on sensor close so the
+ * async clock remains held through OUTMUX's restoration commit.
  * Optional configure_outmux then applies only the fixed inactive OUTMUX0
  * image route and confirms real shadow/inner consumption, still DL/IRQ off.
  * Its journal restores BEFORE dropping receiver/MM; a pending trigger has

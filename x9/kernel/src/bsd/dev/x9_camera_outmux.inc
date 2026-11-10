@@ -80,7 +80,8 @@ static int cam_out_environment(void)
     unsigned port=cam_out.status.sensor==X9_CAMERA_BACK?3:0;
     const struct cam_rx_maps *m=&cam_rx_maps[cam_out.status.sensor==X9_CAMERA_BACK?0:1];
     int e=cam_rx_sample(m,&live);if(e)return e;
-    base=cam_rx_live.status.before;
+    e=cam_mac_guard();if(e)return e;
+    base=cam_rx_live.expected;
     /* OUTMUX is checked completely below, including all seven unused tags;
      * never suppress MAC/async/AFIFO/CAMSV changes under a route commit. */
     memset(live.out,0,sizeof(live.out));memset(base.out,0,sizeof(base.out));
@@ -175,6 +176,7 @@ static int cam_out_open_locked(uint64_t epoch,struct x9_camera_outmux_status *r)
     if(!cam_rx_sensor_held_locked(epoch) || cam_rx_live.close_attempted || cam_rx_live.error)return ESTALE;
     e=cam_pipeline_plan(r->sensor,&plan);if(e)return e;
     e=cam_rx_session_guard();if(e)return cam_rx_session_fault(e);
+    e=cam_mac_guard();if(e)return cam_rx_session_fault(e);
     if(!cam_out.top)cam_out.top=ml_io_map(0x3a400000,0x1000);
     if(!cam_out.top)return ENOMEM;
     m=&cam_rx_maps[r->sensor==X9_CAMERA_BACK?0:1];

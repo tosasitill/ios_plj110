@@ -18,6 +18,7 @@
 | MM 寄存器时钟事务 | 显式 AO/infra0/VMM BACKUP 引用、CAM_VCORE/MAIN/MRAW 域、CAM autolink FENC、CAMTM/SENINF voter、CAM/CAMSV 寄存器 CG 申请/逆序恢复。**未上机；不改共享 AVS/CVFS/PLL，不申请 SMI larb，不证明采集速率** |
 | 接收寄存器预检 | 持有完整 MM 寄存器时钟链时，读取目标 MAC、async/AFIFO、outmux0 outer/inner、CAMSV0 central/DMA/CQ 控制，双采样验证稳定及使能位关闭。**只读，不提交配置，不证明 ownership 或 DMA 排空** |
 | 持久 sensor/receiver 生命周期 | kernel-private 冷会话可在 verified standby 后持有同一 MM 时钟与 CSI/secure 电源 journal；后续请求及撤销前检查完整已消费依赖与原始接收控制，先隔离 sensor reset/MCLK，再退休 MM，最后还原 sensor 供电。**无 native capture caller，不 stream-on；不是 DMA lease/drain** |
+| MAC/async 包配置 | verified standby/receiver 后，真实配置前 DPHY／后 CPHY 包格式、正常 RAW10 DT、unsplit async/CAM_MAIN AFIFO，并仅追加选定 async CG；逐控制 journal/guard/逆序恢复，保留其它端口及原 IRQ policy。**已局部编译，未运行；不启用 PHY mux/MAC lane，不是完整 PHY 或采集后端** |
 | OUTMUX 配置引擎 | 同一已持有会话可显式配置 inactive OUTMUX0 的固定 image tag0，真实 masked shadow 写入、CFG_DONE、完整 inner 消费确认及逆序恢复。保留其它 tags/端口及 IRQ policy，DL/IRQ/DMA 关闭。**已局部编译，未运行；无 PHY/rate/SMI/SID80 grant/native capture caller** |
 | 采集后端 | **缺失**：完整 DVFS/rate/SMI ownership、PHY 校准/速率、SENINF 路由提交、MM-SMMUv3 映射、RAW DMA 完成/排空队列 |
 
@@ -379,13 +380,19 @@ captured DT 区分 normal camera **SID80**、protected camera **SID89**、displa
 ### 持有冷传感器与接收时钟
 
 `kernel/src/bsd/dev/x9_camera_sensor_session.h` 的 kernel-private 调用顺序为：
-`open → configure → prepare_receiver → read8 → close`。`prepare_receiver` 可省略，原 probe/standby 不因此增加 MM 操作。准备 receiver 后还可显式调用 kernel-private `x9_camera_sensor_session_configure_outmux`；原诊断不会自动进行 OUTMUX 写入。
+`open → configure → prepare_receiver → read8 → close`。`prepare_receiver` 可省略，原 probe/standby 不因此增加 MM 操作。准备 receiver 后可显式 `x9_camera_sensor_session_configure_mac → x9_camera_sensor_session_configure_outmux`；两者都可省略，原诊断不会自动写这些配置。MAC 必须先于 OUTMUX；已持有 OUTMUX 时再配置 MAC 返回 `EBUSY`，不能改变已 posted 命令的输入环境。
 
 - standalone 入口取得 `camera_control_lock`；同 TU 的 native 回调已经持锁，必须使用内部 `_locked` helper，不重入公开入口。
 - `open` 返回的非零 epoch（包括错误返回）代表已准入 journal，必须安排一次 close；旧 epoch、重复 prepare/close 不做 MMIO。成功 prepare 不撤销 MM votes，不设置 READY，不返回 IOVA。
 - MM 与 receiver probe 实际复用同一持久引擎，但立即 close；诊断的 once-per-boot success 与持久会话正常退休后的再次开关独立。GET 仍只读缓存，不实时访问硬件。
-- 每次后续 sensor 请求检查 held receiver/MM；close 将新采样与**最初消费的**配置比较，而非只验证两次当前读数相等。共享 async/AFIFO 只比较选定端口字段，不接管其它 AOV/SCP 端口；不读取 read-clear IRQ/DONE。
+- 每次后续 sensor 请求检查 held receiver/MM；将新采样与**最初消费的配置及本 journal 确认的写入**比较，而非只验证两次当前读数相等。初始 snapshot 保留。共享 async/AFIFO 只比较选定端口字段，不接管其它 AOV/SCP 端口；不读取 read-clear IRQ/DONE。
 - 一旦依赖丢失、接收控制被修改/使能、或 close 失败，保持 epoch 和尚未退休依赖，整 boot 锁存。接收检测失败不会继续撤 sensor rails；sensor 隔离失败也不会撤 MM。没有单独 receiver-drop 或外部 `drained=true` 参数。
+
+MAC 服务使用独立 MAC-top／MAC-A banks（前 `0x13884000/0x13885000`，后 `0x1389c000/0x1389d000`），不是把 TOP 当作 CSI2 parser。它检查 155 项命名控制字段，包括两个 MAC lane-enable、包转换/DT/VC words、两套 checker 控制及 IRQ enable；不读 packet/IRQ status 或 checker 接收结果。要求目标未使能、没有 PRBS/BIST/reset、checker/IRQ off、没有借用 async CG，拒绝继承 descramble/RAW10 DPCM/forced-DT/bypass/LRTE 配置。
+
+仅改九字段：TOP 普通非 shared-16p、PHY mux unsplit mode（enable 仍 0）、CSI2 ECC/B2P/image/spec2/multiframe/VS1T/early-VSYNC、header、resync/dummy、RAW10 DT identity，以及选定 async/AFIFO split。主 CPHY3 的 `HEADER_MODE/LEN=2/4`，不是把 trio 数 3 当 LEN；前 DPHY 为 `0/0`。共享 split mask 均为 `3 << (2*port)`，CAM_MAIN AFIFO 的 **`+0x7dc`** 不是其 vendor 已偏移子映射的相对地址。只追加 TOP async CG 的 `1 << port`，不搬运厂商 all-port CG/overrun IRQ；原 async debug policy 保留，不启用 test model。
+
+每个写入在 MMIO 前记录 dirty/pending，确认后才更新 receiver expected；失败只接受 exact old/new 观察资格化，再还原 owned 字段，不重做失败写。sensor close 隔离 reset/MCLK 后先恢复 OUTMUX 并确认其 commit，再恢复 MAC/async 并撤本次 async CG，然后退休 MM/rails，避免 OUTMUX 恢复时先丢 async 时钟。任一冲突/恢复失败保留尚未退休依赖，不 reset/retry。MAC 的 `CONFIGURED/RESTORED` 不是 PHY 校准、packet arrival、IRQ/event/AXI drain 或独占证明。
 
 OUTMUX 引擎只接受选定 bank 的 TOP CG 原为 off、当前 IRQ policy 为 AP/VM0 且其它 VM 未选中、DL/ready/reset/IRQ 与所有 tag filters 关闭、无 crop、所有已知 shadow/inner 配置一致且双采样稳定。拒绝继承的 staged difference，不替其它 owner 发布配置，也不修改 VM routing。它保留所有 8 个 tag 的完整已知控制，只改普通 pixel mode、unsplit source、reference/last VC、tag0 VC/RAW10 format/word-count size/filter 的固定字段，并只追加 TOP outmux0 CG bit。
 
