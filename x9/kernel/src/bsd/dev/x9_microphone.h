@@ -12,13 +12,27 @@
 #define X9_MIC_RUNNING 2u
 #define X9_MIC_FAULT 4u
 #define X9_MIC_RING_FRAMES 32768u
+/* Nonblocking read contract 1: for requests up to max_read_frames, either
+ * dequeue the entire request or return EAGAIN without consuming any PCM.
+ * User-copy failure can still consume/drop frames and must fault the client.
+ * Larger requests return at most max_read_frames. Blocking reads unchanged.
+ * This capability is not hardware READY or a measured capture clock. */
+#define X9_MIC_READ_EXACT_NONBLOCK 1u
+#define X9_MIC_MAX_READ_FRAMES 4096u
 struct x9_mic_status {
     uint32_t version, mode, flags, supported_sources;
     uint32_t rate, channels, sample_bits, last_errno;
     uint64_t generation, captured_frames, read_frames, dropped_frames;
     uint64_t last_host_time;
-    uint32_t queued_frames, source, reserved[6];
+    /* Former reserved words; v1/104B/ioctl numbers remain unchanged.
+     * Old kernels report zero: clients must qualify before one-shot START. */
+    uint32_t queued_frames, source, read_contract, max_read_frames, reserved[4];
 };
+#ifdef __cplusplus
+static_assert(sizeof(struct x9_mic_status)==104,"PCM status ABI size");
+#else
+_Static_assert(sizeof(struct x9_mic_status)==104,"PCM status ABI size");
+#endif
 struct x9_mic_config {
     uint32_t version, rate, channels, sample_bits, source, reserved[3];
 };

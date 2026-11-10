@@ -120,9 +120,10 @@ int main(int argc,char **argv)
     if(fd<0){perror("open microphone");return 1;}
     struct x9_mic_status s={0};
     if(ioctl(fd,X9_MIC_GET_STATUS,&s)<0){perror("status");close(fd);return 1;}
-    printf("v%u mode=%u flags=%#x sources=%#x %uHz/%uch/%ubit errno=%u generation=%llu captured=%llu read=%llu dropped=%llu queue=%u\n",
+    printf("v%u mode=%u flags=%#x sources=%#x %uHz/%uch/%ubit errno=%u generation=%llu captured=%llu read=%llu dropped=%llu queue=%u read_contract=%u max_read_frames=%u\n",
         s.version,s.mode,s.flags,s.supported_sources,s.rate,s.channels,s.sample_bits,s.last_errno,
-        s.generation,s.captured_frames,s.read_frames,s.dropped_frames,s.queued_frames);
+        s.generation,s.captured_frames,s.read_frames,s.dropped_frames,s.queued_frames,
+        s.read_contract,s.max_read_frames);
     if(!record) {
         int result=0;
         if(power || calibrate || analog || digital) {
@@ -144,6 +145,9 @@ int main(int argc,char **argv)
     if(errno || end==argv[2] || *end || seconds<1 || seconds>30){close(fd);return 2;}
     if(s.version!=1 || s.mode!=2 || !(s.flags&X9_MIC_READY) || (s.flags&X9_MIC_FAULT)) {
         fprintf(stderr,"physical microphone backend is not ready; no file created\n");close(fd);return 1;
+    }
+    if(s.read_contract!=X9_MIC_READ_EXACT_NONBLOCK || s.max_read_frames<512) {
+        fprintf(stderr,"kernel lacks exact nonblocking PCM reads; no START or file created\n");close(fd);return 1;
     }
     /* Refuse to overwrite an existing recording or symlink. */
     int out=open(argv[3],O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);

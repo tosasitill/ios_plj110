@@ -24,11 +24,15 @@ LCK_MTX_DECLARE(mic_lock, &mic_group);
 LCK_MTX_DECLARE(mic_control_lock, &mic_group);
 LCK_MTX_DECLARE(mic_read_lock, &mic_group);
 static struct x9_mic_status st = {.version=1, .rate=X9_MIC_RATE,
-    .channels=1, .sample_bits=16, .source=X9_MIC_SOURCE_INTERNAL};
+    .channels=1, .sample_bits=16, .source=X9_MIC_SOURCE_INTERNAL,
+    .read_contract=X9_MIC_READ_EXACT_NONBLOCK,.max_read_frames=X9_MIC_MAX_READ_FRAMES};
 static struct x9_mic_backend hw;
 static int16_t ring[X9_MIC_RING_FRAMES];
 static uint32_t head, count;
 static bool opened, hardware_active;
+/* Protected across uiomove by mic_read_lock. Do not add an 8KiB buffer to
+ * the kernel stack or allocate from the real-time nonblocking read path. */
+static int16_t read_pcm[X9_MIC_MAX_READ_FRAMES];
 
 static bool permitted(struct proc *p)
 {
@@ -217,14 +221,17 @@ static int mic_read(dev_t d,struct uio *uio,int flags)
         if(e==EWOULDBLOCK)e=EAGAIN;
     }
     if(!e && (generation!=st.generation || !(st.flags&X9_MIC_RUNNING)))e=ECANCELED;
-    if(!e && !count)e=EAGAIN;
-    int16_t pcm[512];
-    uint32_t n=e?0:(uint32_t)MIN(MIN((uint64_t)uio_resid(uio)/2,count),512u);
-    for(uint32_t i=0;i<n;i++)pcm[i]=ring[(head+i)%X9_MIC_RING_FRAMES];
+    uint32_t wanted=(uint32_t)MIN((uint64_t)uio_resid(uio)/2,
+        nonblock?X9_MIC_MAX_READ_FRAMES:512u);
+    /* Check the whole bounded request under the same PCM lock as dequeue.
+     * An underflow must not move head/count or spend half a HAL cycle. */
+    if(!e && (!count || (nonblock && count<wanted)))e=EAGAIN;
+    uint32_t n=e?0:MIN(wanted,count);
+    for(uint32_t i=0;i<n;i++)read_pcm[i]=ring[(head+i)%X9_MIC_RING_FRAMES];
     head=(head+n)%X9_MIC_RING_FRAMES;count-=n;
     lck_mtx_unlock(&mic_lock);
     if(n) {
-        user_ssize_t before=uio_resid(uio);e=uiomove((char *)pcm,n*2,uio);
+        user_ssize_t before=uio_resid(uio);e=uiomove((char *)read_pcm,n*2,uio);
         lck_mtx_lock(&mic_lock);
         if(generation==st.generation) {
             uint32_t transferred=(uint32_t)(before-uio_resid(uio))/2;
@@ -232,7 +239,8 @@ static int mic_read(dev_t d,struct uio *uio,int flags)
         }
         lck_mtx_unlock(&mic_lock);
     }
-    bzero(pcm,sizeof(pcm));lck_mtx_unlock(&mic_read_lock);return e;
+    if(n)bzero(read_pcm,n*2);
+    lck_mtx_unlock(&mic_read_lock);return e;
 }
 static const struct cdevsw mic_cdev={.d_open=mic_open,.d_close=mic_close,
     .d_read=mic_read,.d_write=eno_rdwrt,.d_ioctl=mic_ioctl,.d_stop=eno_stop,

@@ -22,7 +22,7 @@ _Static_assert(sizeof(struct x9_mic_status)==104,"PCM status ABI size");
 enum {PLUGIN=1,CODEC=2,INPUT=3,SOURCE=4};
 #define MIC_SOURCE 'imic'
 #define PERIOD 512u
-#define MAX_IO_FRAMES 4096u
+#define MAX_IO_FRAMES X9_MIC_MAX_READ_FRAMES
 #define MAX_CLIENTS 64u
 struct client {UInt32 id;bool used,running;};
 static struct client clients[MAX_CLIENTS];
@@ -64,6 +64,7 @@ static OSStatus stream_status(struct x9_mic_status *s)
        s->generation!=capture_generation || s->source!=X9_MIC_SOURCE_INTERNAL ||
        !(s->supported_sources&X9_MIC_SOURCE_INTERNAL) || s->rate!=X9_MIC_RATE ||
        s->channels!=1 || s->sample_bits!=16 || s->last_errno || s->dropped_frames ||
+       s->read_contract!=X9_MIC_READ_EXACT_NONBLOCK || s->max_read_frames<MAX_IO_FRAMES ||
        s->read_frames!=received || s->read_frames>s->captured_frames ||
        s->queued_frames>X9_MIC_RING_FRAMES || s->queued_frames>s->captured_frames-s->read_frames ||
        s->captured_frames>9007199254740991ULL || /* exact Float64 frame indexing */
@@ -87,7 +88,8 @@ static bool probe_ready(void)
      * one-shot START. Old kernels cannot supply the real-time freshness gate. */
     bool ok=ioctl(fd,X9_MIC_GET_STATUS_NOWAIT,&s)==0 && s.version==1 && s.mode==2 &&
         (s.flags&X9_MIC_READY) && !(s.flags&X9_MIC_FAULT) &&
-        (s.supported_sources&X9_MIC_SOURCE_INTERNAL) && s.rate==X9_MIC_RATE && s.channels==1 && s.sample_bits==16;
+        (s.supported_sources&X9_MIC_SOURCE_INTERNAL) && s.rate==X9_MIC_RATE && s.channels==1 && s.sample_bits==16 &&
+        s.read_contract==X9_MIC_READ_EXACT_NONBLOCK && s.max_read_frames>=MAX_IO_FRAMES;
     close(fd);return ok;
 }
 static HRESULT query(void *d,REFIID uuid,LPVOID *out)
@@ -339,7 +341,10 @@ static OSStatus start_io(__unused AudioServerPlugInDriverRef d,AudioObjectID o,U
     }
     else if(!c->running) {
         if(!running) {
-            if(!probe_ready())e=unavailable;
+            /* Reprobe is authoritative, including a backend published after
+             * Initialize. Never leave ready false after a qualified START. */
+            ready=probe_ready();
+            if(!ready)e=unavailable;
             else {
                 mic=open(X9_MIC_DEVICE,O_RDONLY|O_NONBLOCK|O_CLOEXEC);
                 struct x9_mic_config config={.version=1,.rate=X9_MIC_RATE,.channels=1,.sample_bits=16,.source=X9_MIC_SOURCE_INTERNAL};
@@ -349,6 +354,7 @@ static OSStatus start_io(__unused AudioServerPlugInDriverRef d,AudioObjectID o,U
                     struct x9_mic_status s={0};
                     if(ioctl(mic,X9_MIC_GET_STATUS,&s)<0 || s.version!=1 ||
                        (s.flags&(X9_MIC_RUNNING|X9_MIC_READY|X9_MIC_FAULT))!=(X9_MIC_RUNNING|X9_MIC_READY) ||
+                       s.read_contract!=X9_MIC_READ_EXACT_NONBLOCK || s.max_read_frames<MAX_IO_FRAMES ||
                        s.read_frames || s.dropped_frames || s.last_errno) {
                         io_fault=true;ready=false;(void)stop_device();e=unavailable;
                     } else {capture_generation=s.generation;start_host=mach_absolute_time();anchor=0;
@@ -414,11 +420,12 @@ static OSStatus do_io(__unused AudioServerPlugInDriverRef d,AudioObjectID o,Audi
     if(o!=CODEC || stream!=INPUT || operation!=kAudioServerPlugInIOOperationReadInput)return bad_object;
     if(frames>MAX_IO_FRAMES || (!buffer && frames))return '!siz';
     if(!frames)return 0;
-    /* Zero only an explicit transient underflow. Never allocate, log, sleep,
+    /* Failed/underflow cycles return an error, never successful padded PCM.
+     * Never allocate, log, sleep,
      * wait on a mutex, or conceal a permanent hardware error in the IO path. */
     memset(buffer,0,(size_t)frames*2);
     if(pthread_mutex_trylock(&lock))return unavailable;
-    struct client *c=find_client(id);OSStatus e=0;UInt32 have=0;
+    struct client *c=find_client(id);OSStatus e=0;
     if(!c || !c->running || mic<0 || !ready || io_fault || stop_failed) {
         pthread_mutex_unlock(&lock);return unavailable;
     }
@@ -441,18 +448,19 @@ static OSStatus do_io(__unused AudioServerPlugInDriverRef d,AudioObjectID o,Audi
          * never consume fresh PCM in response to a replayed input cycle. */
         pthread_mutex_unlock(&lock);return '!dat';
     }
-    while(have<frames) {
-        ssize_t n=read(mic,(int16_t *)buffer+have,(size_t)(frames-have)*2);
-        if(n>0 && !(n&1) && (size_t)n<=(size_t)(frames-have)*2){have+=(UInt32)n/2;continue;}
-        if(n<0 && (errno==EAGAIN || errno==EWOULDBLOCK))break;
-        e=stream_fault();break;
+    /* The qualified kernel checks/dequeues the entire request atomically.
+     * EAGAIN consumes no samples: retry the same cycle, without inserting
+     * silence or advancing a fan-out cache. A short read violates contract. */
+    ssize_t n=read(mic,buffer,(size_t)frames*2);
+    if(n<0 && (errno==EAGAIN || errno==EWOULDBLOCK)) {
+        underrun+=frames;pthread_mutex_unlock(&lock);return unavailable;
     }
-    received+=have;underrun+=frames-have;
+    if(n==(ssize_t)frames*2)received+=frames;
+    else e=stream_fault();
     /* A dequeue of stale backlog is not producer progress. Recheck actual
      * kernel generation/drops/producer host time after all nonblocking reads
      * and before publishing a new fan-out cache. */
     if(!e)e=stream_status(&after);
-    if(!e && !received)e=unavailable; /* no successful first cycle of padded silence */
     if(e) {
         cycle_valid=false;
         memset(cycle_pcm,0,sizeof(cycle_pcm));memset(buffer,0,(size_t)frames*2);
