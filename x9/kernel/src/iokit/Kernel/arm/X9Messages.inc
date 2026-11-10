@@ -18,7 +18,7 @@ struct x9m_client {
 static x9m_client x9m_clients[CBQ_MAX_CLIENTS];
 struct x9m_job {
  unsigned op,slot,sim,len; uint64_t generation,token,deadline;
- bool answered,background; uint8_t req[X9Q_REQ];
+ bool answered,background,hold; uint8_t req[X9Q_REQ];
 };
 static x9m_job x9m_jobs[X9M_JOBS];
 struct x9m_incoming {
@@ -286,12 +286,12 @@ static bool x9m_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
 }
 static void x9m_job_done(x9m_job &j,const uint8_t *p,unsigned n){
  unsigned result=1;
- bool good=x9w_wire(p,n)&&x9q_u16(p+10)==(j.op==X9M_SEND?0x606:j.op==X9M_REG?0xa05:0x602)&&
-  x9w_word(p,n,0,result)&&!result;
- if(!good){x9m_error(j,X9Q_INTERNAL);return;}
+ bool known=x9w_wire(p,n)&&x9q_u16(p+10)==(j.op==X9M_SEND?0x606:j.op==X9M_REG?0xa05:0x602)&&
+  x9w_word(p,n,0,result);
+ if(!known||result){j.hold=j.op==X9M_SEND&&!known;x9m_error(j,X9Q_INTERNAL);return;}
  x9q_packet response(j.req);
  if(j.op==X9M_SEND){
-  unsigned mr;if(!x9w_byte(p,n,0x103,mr)){x9m_error(j,X9Q_INTERNAL);return;}x9m_number(response,1,mr,2);
+  unsigned mr;if(!x9w_byte(p,n,0x103,mr)){j.hold=true;x9m_error(j,X9Q_INTERNAL);return;}x9m_number(response,1,mr,2);
   printf("X9 SMS: SIM%u send CNF accepted by modem; NOT a delivery receipt\n",j.sim+1);
  }else if(j.op==X9M_REG){
   unsigned type,state;
@@ -328,6 +328,7 @@ static void x9m_poll(){
   x9m_sims[sim].reg_valid=false;
  }
  for(x9m_job &j:x9m_jobs)if(j.op){
+  if(j.hold)continue;
   unsigned n=0;
   if(j.op==X9M_ACK){
    int result=0,rc=x9_md_mipc_message_reply_take((uint32_t)j.token,&result);
@@ -337,7 +338,10 @@ static void x9m_poll(){
     bzero(&j,sizeof(j));continue;
    }
   }else if(x9_md_mipc_take(j.token,p,sizeof(p),&n)==1){
-   x9m_job_done(j,p,n);bzero(p,sizeof(p));bzero(&j,sizeof(j));continue;
+   x9m_job_done(j,p,n);bzero(p,sizeof(p));
+   if(j.hold){bzero(j.req+7,sizeof(j.req)-7);
+    printf("X9 SMS: SIM%u ambiguous send CNF; no new send until boot, payload erased\n",j.sim+1);}
+   else bzero(&j,sizeof(j));continue;
   }
   if(!j.answered&&now>=j.deadline){x9m_error(j,X9Q_NOT_READY);
    printf("X9 SMS/IMS: operation %u SIM%u timed out; sent token retained, no resend\n",j.op,j.sim+1);}
