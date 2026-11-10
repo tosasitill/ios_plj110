@@ -25,13 +25,22 @@ struct x9_dsp_shared_policy {
     int (*validate_memory)(void *,uint64_t ticket,uint32_t generation,
         uint32_t task_scene,uint32_t daemon_scene,uint64_t pool_bus,
         uint32_t pool_bytes,uint64_t map_bus,uint32_t map_bytes);
+    /* Mandatory actual firmware/AFE route supplier, not a second boolean
+     * for validate_memory. Shared validates the exact dedicated AFE region;
+     * this supplier additionally proves the current task's hardware DL
+     * memif, IRQ usage/ownership, format and period contract. No mutation,
+     * allocation or re-entry. A named DL24 is C enum10, NOT DL_24CH enum14
+     * or scene32; old FDT playback MEMDL14 is not DL24 authority. The route
+     * must remain pinned through all faults, halt, and final unmap. */
+    int (*validate_afe_route)(void *,uint64_t ticket,uint32_t generation,
+        uint32_t task_scene,const struct x9_dsp_pcm_buffer *);
     /* Mandatory independent authoritative DL24 drain/no DMA access proof
      * before unmap. Not a cached AFE leased/running flag. Qualify its own
      * power/clock/register path and do not re-enter AFE/shared engines. */
     int (*validate_drained)(void *,uint64_t ticket,uint32_t generation,
         uint64_t afe_bus,uint32_t afe_bytes);
 };
-#define X9_DSP_SHARED_POLICY_VERSION 1u
+#define X9_DSP_SHARED_POLICY_VERSION 2u
 #ifdef __cplusplus
 extern "C" {
 #endif

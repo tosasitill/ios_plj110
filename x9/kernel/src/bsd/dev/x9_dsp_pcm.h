@@ -48,10 +48,17 @@ struct x9_dsp_pcm_binding {
      * No acquisition/reset, no cached-ready substitution. Called before
      * every shared-memory access and before/after mailbox requests. */
     int (*validate)(void *);
+    /* Mandatory fresh hardware-output binding, separate from the input
+     * ring. Prove this exact bus/size/format/period/memif/IRQ maps to the
+     * retained AFE allocation and this firmware task's REAL DL route.
+     * No mapping, reparenting or configuration in the callback. Called
+     * before/after publishing an AFE descriptor and on later admission.
+     * A NEED_ACK or input-ring consumed count cannot supply this proof. */
+    int (*validate_afe)(void *,const struct x9_dsp_pcm_buffer *);
     int (*sync_device)(void *,unsigned region,uint32_t offset,uint32_t bytes);
     int (*sync_cpu)(void *,unsigned region,uint32_t offset,uint32_t bytes);
 };
-#define X9_DSP_PCM_BINDING_VERSION 1u
+#define X9_DSP_PCM_BINDING_VERSION 2u
 struct x9_dsp_pcm_session {
     struct x9_dsp_pcm_binding hw;
     struct x9_dsp_pcm_buffer buffer, afe_buffer;

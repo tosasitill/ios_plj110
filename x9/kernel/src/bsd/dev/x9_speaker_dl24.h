@@ -4,6 +4,7 @@
 #ifndef X9_SPEAKER_DL24_H
 #define X9_SPEAKER_DL24_H
 #include <stdint.h>
+#define X9_SPEAKER_DL24_MEMIF 10u /* mt6993-afe-common.h C enum, NOT DL_24CH=14 */
 #define X9_SPEAKER_DL24_CON0 0x46d0u
 /* SW_CLEAR_MEM_RAN_OUT/SW_CLEAR_BUF_EMPTY are actions, not ordinary RW.
  * Never replay an inherited clear bit via an unrelated format RMW. */

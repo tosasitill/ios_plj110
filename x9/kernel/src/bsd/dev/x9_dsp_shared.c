@@ -12,6 +12,7 @@
 #include "x9_dsp_shared.h"
 #include "x9_adsp_mt6993.h"
 #include "x9_audio_resources.h"
+#include "x9_speaker_dl24.h"
 /* Frozen BSD exports omit these native declarations, as for UFS/MIC.
  * Signatures from arm/pmap.h, vm/pmap.h and arm/machine_routines.h. */
 extern ppnum_t pmap_find_phys(pmap_t,addr64_t);
@@ -117,6 +118,29 @@ static int pcm_validate(void *context)
     lck_mtx_lock(&shared_lock);int e=shared.registered?qualify():ENXIO;
     lck_mtx_unlock(&shared_lock);return e;
 }
+static int pcm_validate_afe(void *context,const struct x9_dsp_pcm_buffer *buffer)
+{
+    if(context!=&shared || !buffer)return EINVAL;
+    /* Never let an otherwise valid input binding publish a different DMA
+     * allocation. Snapshot the caller's descriptor before supplier calls. */
+    const struct x9_dsp_pcm_buffer b=*buffer;
+    lck_mtx_lock(&shared_lock);int e=shared.registered?qualify():ENXIO;
+    const struct x9_dsp_pcm_region *r=&shared.region[SharedAFE];
+    if(!e && (b.base!=r->bus || b.bytes!=r->bytes || b.hardware!=1 ||
+       b.memif!=X9_SPEAKER_DL24_MEMIF || b.memory!=1 || b.format!=2 ||
+       b.rate!=48000 || b.channels!=2 || b.direction!=1 ||
+       (b.read&3) || (b.write&3) || (b.count&3) || b.count>b.bytes ||
+       !b.period_frames || !b.periods ||
+       (uint64_t)b.period_frames*b.periods!=b.bytes/4 ||
+       b.read<b.base || b.read>=b.base+b.bytes ||
+       b.write<b.base || b.write>=b.base+b.bytes))e=EINVAL;
+    if(!e)e=shared.policy.validate_afe_route(shared.policy.context,
+        shared.policy.ticket,shared.policy.generation,shared.policy.task_scene,&b);
+    if(!e)e=qualify();
+    /* EAGAIN is an authority failure, not a DSP-consumption cursor retry. */
+    if(e)e=fault(e);
+    lck_mtx_unlock(&shared_lock);return e;
+}
 static int pcm_sync(void *context,unsigned region,uint32_t offset,uint32_t bytes,bool device)
 {
     if(context!=&shared || region>=X9PCMRegionCount)return EINVAL;
@@ -132,7 +156,7 @@ static int pcm_sync_cpu(void *c,unsigned r,uint32_t o,uint32_t n)
 int x9_dsp_shared_acquire(const struct x9_dsp_shared_policy *p)
 {
     if(!p || p->version!=X9_DSP_SHARED_POLICY_VERSION || !p->ticket ||
-       !p->generation || !p->validate_memory || !p->validate_drained ||
+       !p->generation || !p->validate_memory || !p->validate_afe_route || !p->validate_drained ||
        (p->task_scene!=7 && p->task_scene!=32) || p->daemon_scene<=41 ||
        p->daemon_scene>=64)return EINVAL;
     lck_mtx_lock(&shared_lock);
@@ -234,7 +258,8 @@ int x9_dsp_shared_pcm_binding(struct x9_dsp_pcm_binding *out)
         struct x9_dsp_pcm_binding b={.version=X9_DSP_PCM_BINDING_VERSION,.core=0,
             .generation=shared.policy.generation,.scene=shared.policy.task_scene,
             .control_timeout_ms=250,.copy_timeout_ms=10,.context=&shared,
-            .validate=pcm_validate,.sync_device=pcm_sync_device,.sync_cpu=pcm_sync_cpu};
+            .validate=pcm_validate,.validate_afe=pcm_validate_afe,
+            .sync_device=pcm_sync_device,.sync_cpu=pcm_sync_cpu};
         b.region[X9PCMRegionATOD]=shared.region[SharedATOD];
         b.region[X9PCMRegionDTOA]=shared.region[SharedDTOA];
         b.region[X9PCMRegionRing]=shared.region[SharedInput];*out=b;

@@ -77,6 +77,10 @@ static int qualify(struct x9_dsp_pcm_session *s)
     if(s->error)return (int)s->error;
     if(s->lease_checks!=UINT64_MAX)s->lease_checks++;
     int e=s->hw.validate(s->hw.context);if(e==EAGAIN)e=EIO;
+    if(!e && (s->flags&X9PCMAFEParams)) {
+        e=s->hw.validate_afe(s->hw.context,&s->afe_buffer);
+        if(e==EAGAIN)e=EIO;
+    }
     X9AudioDSPStatus ds={0};
     if(!e)e=x9_adsp_status(s->hw.core,&ds);
     if(!e && (ds.state!=X9DSPOnline || ds.error || ds.generation!=s->hw.generation))e=ESTALE;
@@ -107,14 +111,30 @@ static int record_request(struct x9_dsp_pcm_session *s,uint16_t id,
     uint8_t data[X9_DSP_PCM_RECORD_BYTES],address[8];
     int e=x9_dsp_pcm_encode_buffer(b,data,sizeof(data));if(e)return e;
     e=qualify(s);if(e)return e;
+    if(b->hardware) {
+        e=s->hw.validate_afe(s->hw.context,b);
+        if(e)return fault(s,e==EAGAIN?EIO:e);
+        e=qualify(s);if(e)return e;
+    }
     memcpy(s->hw.region[X9PCMRegionATOD].cpu,data,sizeof(data));
     e=s->hw.sync_device(s->hw.context,X9PCMRegionATOD,0,sizeof(data));
     if(e)return fault(s,e==EAGAIN?EIO:e);
     e=qualify(s);if(e)return e;
+    if(b->hardware) {
+        e=s->hw.validate_afe(s->hw.context,b);
+        if(e)return fault(s,e==EAGAIN?EIO:e);
+        e=qualify(s);if(e)return e;
+    }
     put64(address,s->hw.region[X9PCMRegionATOD].bus);
     /* NEED_ACK protects reuse of the single ATOD record even while running.
      * TX-consume/BYPASS alone does not prove DSP has copied the record. */
-    return request(s,id,X9DSPNeedAck,address,sizeof(address),0);
+    e=request(s,id,X9DSPNeedAck,address,sizeof(address),0);
+    if(!e && b->hardware) {
+        e=s->hw.validate_afe(s->hw.context,b);
+        if(e)return fault(s,e==EAGAIN?EIO:e);
+        e=qualify(s);
+    }
+    return e;
 }
 static bool overlap(uint64_t a,uint64_t n,uint64_t b,uint64_t m)
 {return a<b+m && b<a+n;}
@@ -130,7 +150,7 @@ static int clear_region(struct x9_dsp_pcm_session *s,unsigned n)
 int x9_dsp_pcm_bind(struct x9_dsp_pcm_session *s,const struct x9_dsp_pcm_binding *p)
 {
     if(!s || !p || s->bound || p->version!=X9_DSP_PCM_BINDING_VERSION || p->core>1 ||
-       !p->generation || p->scene>=64 || !p->validate || !p->sync_device || !p->sync_cpu ||
+       !p->generation || p->scene>=64 || !p->validate || !p->validate_afe || !p->sync_device || !p->sync_cpu ||
        !p->control_timeout_ms || p->control_timeout_ms>250 ||
        !p->copy_timeout_ms || p->copy_timeout_ms>10)return EINVAL;
     for(unsigned n=0;n<X9PCMRegionCount;n++) {
@@ -190,6 +210,9 @@ int x9_dsp_pcm_afe_params(struct x9_dsp_pcm_session *s,const struct x9_dsp_pcm_b
     if(s->flags&X9PCMStartIssued)return EBUSY;
     if(!b || !b->hardware || b->format!=2 || b->rate!=48000 || b->channels!=2 || b->direction!=1)
         return EINVAL;
+    /* Callback and mailbox waits must not cause us to encode one descriptor
+     * and retain a later caller-owned image as the supposedly same binding. */
+    const struct x9_dsp_pcm_buffer candidate=*b;b=&candidate;
     if(prepare && !(s->flags&X9PCMAFEParams))return ENXIO;
     if(!prepare && (s->flags&X9PCMAFEParams))return EBUSY;
     if(prepare) {

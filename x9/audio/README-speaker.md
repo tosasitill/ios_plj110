@@ -558,10 +558,28 @@ combined acquire；生产入口独立按真实DSP父owner的顺序申请。固�
 ### 接共享 DRAM、真实信号量和 core DTOA
 
 **本组件没有默认成功的EMI／物理租约／IRQ回调，也没有注册播放backend。**
+**private shared policy／PCM binding已升级为v2；旧v1或缺`validate_afe_route`／
+`validate_afe`直接拒绝。iOS selector、96B/32B wire与256B handoff不变。**
 `x9_dsp_shared` 的 `validate_memory` 必须逐次证明物理子区独占、当前AP/DSP/AFE
 EMI/SMPU权限、实际固件build的daemon scene及core-A task routing；不能从FDT布局、
 SMC返回0、cached ticket或用户输入的verified位推断。缺任一必要callback即拒绝
 acquire，未映射/清零pool。`validate_drained` 必须在unmap前独立证明真实DL24 drain。
+
+输出AFE描述符不能借输入环的权限直接发布。shared提供的`validate_afe`绑定**独立
+AFE allocation**的完整bus/122880B边界、DRAM、S16/stereo/48k/DL与整数period容量，
+不接受输入环或任意其他DMA地址；另调用mandatory `validate_afe_route`证明同Speaker
+ticket/generation/task下真实hardware memif、IRQ usage/ownership及固件route。
+PCM先snapshot候选描述符，ATOD写入前、sync后/mailbox前、真实请求后均重新验证；
+建立AFE参数后，每次后续admission继续验证原AFE binding。验证失败留首错，EAGAIN
+按authority故障处理、不当cursor retry，不能靠NEED_ACK或DSP输入消费量放行。
+
+OPPO `mt6993-afe-common.h`明确`MT6993_MEMIF_DL24=10`，而`DL_24CH=14`是另一
+memif；旧DT `/snd-audio-dsp`的playback MEMDL是14、primary为-1，**不是本引擎
+DL24→OUT4的有效route证据**。`get_taskid_by_afe_daiid()`还要求default bit0与实际
+runtime/ref-runtime，不能仅看scene7/32或启用位。当前没有真正输出route supplier；
+这些拒绝与验证接线不等于已改好固件route。现有AFE start/copy是AP写环路径，不能
+直接接DSP output环，否则会清零/覆盖DSP生产的数据；DSP output提交边界及生产者
+adapter仍须依实际固件协议补齐，不能把输入`consumed`冒充输出`produced/played`。
 
 | 分配 | 相对16KiB向内对齐map起点的offset | 大小／wire含义 |
 |---|---:|---|
