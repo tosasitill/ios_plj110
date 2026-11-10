@@ -62,7 +62,9 @@ static int native_root_verify(unsigned lun,const struct x9u_partition *part)
  for(unsigned i=0;i<8;i++)if(native_header[1128+i]!=x9_root_volume_uuid[i])return X9U_GEOMETRY;
  if(native_header[1024]!='H'||(native_header[1025]!='X'&&native_header[1025]!='+'))return X9U_GEOMETRY;
  uint64_t bytes=(uint64_t)be32(native_header+1064)*be32(native_header+1068);
- if(bytes!=X9_ROOT_BYTES)return X9U_GEOMETRY;
+ /* 2026-11-10: a mutable root may carry a manifest extension; HFS may be
+  * smaller than the device until the kernel grows it (same rule as XNU). */
+ if(!bytes||(X9_ROOT_MUTABLE?bytes>X9_ROOT_BYTES:bytes!=X9_ROOT_BYTES))return X9U_GEOMETRY;
  plog_str("UFS NATIVE ROOT HEADER VERIFIED: SHA256/UUID/HFS geometry match; full image stays on disk\n");plog_flush();
  return 0;
 }

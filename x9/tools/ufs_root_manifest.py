@@ -129,15 +129,17 @@ def device(data):
 
 def header(manifest, native=False):
     data=validate(manifest,native)
+    # 173: the shim must see the same root||extension device as the ADT.
+    total,runs=device(data)
     lines=['/* Generated frozen root identity; no keys, no storage-write authority. */',
            '#pragma once','#include "ufs_root.h"',
-           '#define X9_ROOT_BYTES %dUL'%data['bytes'],
+           '#define X9_ROOT_BYTES %dUL'%total,
            '#define X9_ROOT_MUTABLE %dU'%bool(data.get('write_policy')),
            '#define X9_ROOT_LUN %dU'%data['lun'],
            '#define X9_ROOT_PART_FIRST %dUL'%data['partition_first'],
            '#define X9_ROOT_PART_BLOCKS %dUL'%data['partition_blocks'],
            'static const struct x9u_extent x9_root_extents[]={']
-    for e in data['extents']:lines.append(' {%dUL,%dUL,%dUL},'%(e['file_block'],e['partition_block'],e['blocks']))
+    for e in runs:lines.append(' {%dUL,%dUL,%dUL},'%(e['file_block'],e['partition_block'],e['blocks']))
     lines+=['};']
     for name,field in [('x9_root_guid','partition_guid_hex'),('x9_root_sha256','sha256')]:
         raw=bytes.fromhex(data[field]);lines.append('static const uint8_t %s[%d]={%s};'%(name,len(raw),','.join('0x%02x'%b for b in raw)))
