@@ -25,6 +25,26 @@ struct x9_mic_config {
 #define X9_MIC_GET_STATUS _IOR('M', 0x90, struct x9_mic_status)
 #define X9_MIC_START _IOW('M', 0x91, struct x9_mic_config)
 #define X9_MIC_STOP _IO('M', 0x92)
+/* Independent diagnostics v1; old PCM/status ABI stays unchanged. Reading
+ * this never powers the codec or starts calibration/recording. */
+#define X9_MIC_HW_POWERED 1u
+#define X9_MIC_HW_CALIBRATED 2u
+#define X9_MIC_HW_CAPTURE 4u
+#define X9_MIC_HW_RESTORE_FAILED 8u
+enum x9_mic_hardware_stage {
+    X9_MIC_HW_UNBOUND, X9_MIC_HW_RESOURCES, X9_MIC_HW_ID,
+    X9_MIC_HW_INIT, X9_MIC_HW_CALIBRATION, X9_MIC_HW_ADC,
+    X9_MIC_HW_DMA, X9_MIC_HW_STOPPED
+};
+struct x9_mic_hardware_status {
+    uint32_t version, stage, flags, last_errno, restore_errno;
+    uint32_t swcid, internal_ready, scanned_phases;
+    int32_t chosen_phase[2], cycle[2];
+    uint32_t monitor, last_register;
+    uint64_t calibration_ns;
+    uint32_t vaud18_monitor, reserved[3];
+};
+#define X9_MIC_GET_HARDWARE _IOR('M', 0x93, struct x9_mic_hardware_status)
 #ifdef KERNEL
 #include <stdbool.h>
 /* Thread context only. start/stop are serialized and called WITHOUT the PCM

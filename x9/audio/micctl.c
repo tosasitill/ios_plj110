@@ -27,7 +27,16 @@ int main(int argc,char **argv)
     printf("v%u mode=%u flags=%#x sources=%#x %uHz/%uch/%ubit errno=%u generation=%llu captured=%llu read=%llu dropped=%llu queue=%u\n",
         s.version,s.mode,s.flags,s.supported_sources,s.rate,s.channels,s.sample_bits,s.last_errno,
         s.generation,s.captured_frames,s.read_frames,s.dropped_frames,s.queued_frames);
-    if(!record){close(fd);return 0;}
+    if(!record) {
+        struct x9_mic_hardware_status h={0};
+        if(ioctl(fd,X9_MIC_GET_HARDWARE,&h)==0) {
+            printf("hardware v%u stage=%u flags=%#x errno=%u restore_errno=%u swcid=%#x ready=%#x phases=%u chosen=%d/%d cycles=%d/%d monitor=%#x reg=%#x calibration_ns=%llu vaud18=%#x\n",
+                h.version,h.stage,h.flags,h.last_errno,h.restore_errno,h.swcid,h.internal_ready,
+                h.scanned_phases,h.chosen_phase[0],h.chosen_phase[1],h.cycle[0],h.cycle[1],
+                h.monitor,h.last_register,h.calibration_ns,h.vaud18_monitor);
+        } else if(errno!=ENOTTY){perror("hardware status");close(fd);return 1;}
+        close(fd);return 0;
+    }
     char *end;long seconds=strtol(argv[2],&end,10);
     if(*end || seconds<1 || seconds>30){close(fd);return 2;}
     if(s.version!=1 || s.mode!=2 || !(s.flags&X9_MIC_READY) || (s.flags&X9_MIC_FAULT)) {

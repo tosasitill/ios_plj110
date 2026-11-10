@@ -20,6 +20,10 @@ LCK_GRP_DECLARE(afe_mic_group,"x9-mic-afe");
 LCK_MTX_DECLARE(afe_mic_lock,&afe_mic_group);
 static struct x9_mic_mt6993_platform hw;
 static bool registered, worker_created, active, prepared, saved, dma_stuck;
+static bool codec_prepared, capture_prepared;
+static struct x9_mic_mt6681 codec;
+static struct x9_mic_hardware_status diagnostic={.version=1,
+    .chosen_phase={-1,-1},.cycle={-1,-1}};
 static uint64_t generation,last_poll,last_progress;
 static uint32_t cursor,old_regs[9];
 static const uint32_t save_regs[]={VUL1_CON0,VUL1_BASE_MSB,VUL1_BASE,
@@ -38,13 +42,26 @@ static int stop_locked(void)
     if(saved) {
         wr(VUL1_CON0,rd(VUL1_CON0)&~VUL1_ON);
         /* Never restore DMA addresses or release memory while ON is stuck. */
-        if(rd(VUL1_CON0)&VUL1_ON){dma_stuck=true;return EIO;}
+        if(rd(VUL1_CON0)&VUL1_ON){dma_stuck=true;
+            diagnostic.restore_errno=EIO;diagnostic.flags|=X9_MIC_HW_RESTORE_FAILED;return EIO;}
         delay(125); /* OPPO ADDA capture-off minimum one 8k sample */
         for(unsigned i=1;i<sizeof(save_regs)/sizeof(save_regs[0]);i++)wr(save_regs[i],old_regs[i]);
         wr(VUL1_CON0,old_regs[0]);saved=false;
     }
-    int e=prepared?hw.unprepare():0;
+    int e=capture_prepared?hw.capture_unprepare():0;
+    if(e)goto failed;
+    capture_prepared=false;diagnostic.flags&=~X9_MIC_HW_CAPTURE;
+    if(codec_prepared) {
+        e=x9_mic_mt6681_unprepare(&codec);
+        if(e)goto failed;
+        codec_prepared=false;diagnostic.flags&=~X9_MIC_HW_POWERED;
+    }
+    e=prepared?hw.unprepare():0;
     if(!e)prepared=false;
+    if(!e){if(!diagnostic.last_errno)diagnostic.stage=X9_MIC_HW_STOPPED;return 0;}
+failed:
+    if(!diagnostic.restore_errno)diagnostic.restore_errno=e;
+    diagnostic.flags|=X9_MIC_HW_RESTORE_FAILED;
     return e;
 }
 static int afe_stop(void)
@@ -56,9 +73,26 @@ static int afe_start(uint64_t g)
     lck_mtx_lock(&afe_mic_lock);int e=0;
     if(active || prepared || dma_stuck)e=EBUSY;
     else {
+        bzero(&diagnostic,sizeof(diagnostic));diagnostic.version=1;
+        diagnostic.stage=X9_MIC_HW_RESOURCES;
+        diagnostic.chosen_phase[0]=diagnostic.chosen_phase[1]=-1;
+        diagnostic.cycle[0]=diagnostic.cycle[1]=-1;
         prepared=true;e=hw.prepare();
         if(!e && (rd(VUL1_CON0)&VUL1_ON))e=EBUSY;
         if(!e) {
+            codec_prepared=true;
+            e=x9_mic_mt6681_power_calibrate(&codec,&hw.codec,hw.afe);
+            diagnostic=codec.status;
+        }
+        if(!e) {
+            diagnostic.stage=X9_MIC_HW_ADC;capture_prepared=true;
+            e=hw.capture_prepare(&diagnostic);
+            if(!e)e=x9_mic_mt6681_verify_capture(&codec);
+            if(e)diagnostic.last_register=codec.status.last_register;
+            if(!e && (rd(VUL1_CON0)&VUL1_ON))e=EBUSY;
+        }
+        if(!e) {
+            diagnostic.stage=X9_MIC_HW_DMA;
             for(unsigned i=0;i<sizeof(save_regs)/sizeof(save_regs[0]);i++)old_regs[i]=rd(save_regs[i]);
             saved=true;
             /* The board owns ALL routing words for these outputs, not just
@@ -85,9 +119,10 @@ static int afe_start(uint64_t g)
                (rd(VUL1_END)&~15u)!=((uint32_t)end&~15u) ||
                (rd(VUL1_BASE_MSB)&0x1ffu)!=(uint32_t)(base>>32) ||
                (rd(VUL1_END_MSB)&0x1ffu)!=(uint32_t)(end>>32))e=EIO;
-            else {generation=g;cursor=0;last_progress=last_poll=mach_absolute_time();active=true;}
+            else {generation=g;cursor=0;last_progress=last_poll=mach_absolute_time();active=true;
+                diagnostic.flags|=X9_MIC_HW_CAPTURE;}
         }
-        if(e) {int off=stop_locked();if(off)e=off;}
+        if(e) {diagnostic.last_errno=e;int off=stop_locked();if(off)e=off;}
     }
     lck_mtx_unlock(&afe_mic_lock);return e;
 }
@@ -145,6 +180,7 @@ static void afe_worker(__unused void *arg,__unused wait_result_t result)
         if(active) {
             int e=poll_locked();
             if(e && e!=EAGAIN) {
+                diagnostic.last_errno=e;
                 uint64_t g=generation;int off=stop_locked();
                 x9_mic_backend_fault(g,off?off:e);
             }
@@ -157,8 +193,10 @@ static void afe_worker(__unused void *arg,__unused wait_result_t result)
 }
 int x9_mic_mt6993_register(const struct x9_mic_mt6993_platform *p)
 {
-    if(!p || p->version!=1 || p->adc_channel>1 || !p->afe || !p->dma ||
+    if(!p || p->version!=2 || p->adc_channel>1 || !p->afe || !p->dma ||
        !p->prepare || !p->unprepare || !p->sync_for_cpu || !p->sync_for_device ||
+       !p->capture_prepare || !p->capture_unprepare || p->codec.version!=1 ||
+       p->codec.flags!=X9_MT6681_REQUIRED || !p->codec.read8 || !p->codec.write8 ||
        ((uintptr_t)p->afe&3) || ((uintptr_t)p->dma&15) || (p->dma_bus_address&15) ||
        !p->dma_bus_address || p->dma_bytes<65536 || p->dma_bytes>131072 || (p->dma_bytes&15) ||
        p->dma_bus_address>((1ULL<<41)-p->dma_bytes))return EINVAL;
@@ -176,4 +214,8 @@ int x9_mic_mt6993_register(const struct x9_mic_mt6993_platform *p)
     if(!e)e=x9_mic_register_backend(&backend);
     if(!e)registered=true;
     lck_mtx_unlock(&afe_mic_lock);return e;
+}
+void x9_mic_mt6993_get_hardware(struct x9_mic_hardware_status *s)
+{
+    lck_mtx_lock(&afe_mic_lock);*s=diagnostic;lck_mtx_unlock(&afe_mic_lock);
 }

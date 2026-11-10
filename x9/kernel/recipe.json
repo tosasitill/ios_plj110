@@ -6198,6 +6198,11 @@
    "template": "bsd-c-4"
   },
   {
+   "name": "x9_mic_mt6681.o",
+   "source": "bsd/dev/x9_mic_mt6681.c",
+   "template": "bsd-c-4"
+  },
+  {
    "name": "sweet_x9_camera.o",
    "source": "bsd/dev/sweet_x9_camera.c",
    "template": "bsd-c-4"

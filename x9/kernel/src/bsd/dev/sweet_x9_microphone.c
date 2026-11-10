@@ -113,6 +113,10 @@ static int mic_close(dev_t d,__unused int f,__unused int t,__unused struct proc 
 }
 static int mic_ioctl(dev_t d,u_long cmd,caddr_t data,__unused int f,struct proc *p)
 {
+    if(cmd==X9_MIC_GET_HARDWARE) {
+        extern void x9_mic_mt6993_get_hardware(struct x9_mic_hardware_status *);
+        x9_mic_mt6993_get_hardware((void *)data);return 0;
+    }
     if(cmd==X9_MIC_GET_STATUS) {
         lck_mtx_lock(&mic_lock);st.queued_frames=count;
         memcpy(data,&st,sizeof(st));lck_mtx_unlock(&mic_lock);return 0;
