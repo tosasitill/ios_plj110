@@ -12,7 +12,8 @@
  * may be claimed; live rails are only borrowed at their exact voltage.
  * WL wake touches only GPIO203, never 187/202 or the chip's UVP control.
  * Do NOT route SCP pins, retune PLLs, clear inherited IRQs or reset a bus.
- * Writes are confined to the selected CAMTG/AP vote, per-I2C gate bits,
+ * Writes are confined to the selected CAMTG/AP vote, guarded I2C parent PDN
+ * and per-I2C gate bits,
  * idle AP FIFO transactions, inactive reset/MCLK pins, disabled WL channels
  * and unowned/off shared rails plus the selected VS bit. A journal
  * is retained after failed restoration; never retry in this boot.
@@ -41,6 +42,8 @@ struct cam_probe_bus {
     uint32_t banks, dma_banks, timing_hz, clock_con1;
     uint32_t expected[CAM_I2C_SAVED_COUNT], prior[CAM_I2C_SAVED_COUNT];
     uint32_t dirty, uncertain;
+    uint32_t group_gate_mask, parent_entry, parent_expected;
+    bool parent_seen, parent_owned, parent_conflict;
     bool owned, gate_owned, clock_saved, wedged, failed_status, conflict;
 };
 struct cam_probe_board {
@@ -287,22 +290,7 @@ static int cam_bus_idle(struct cam_probe_bus *b)
         if(cam_rr(b->dma,channel*0x10000+0x08)&1)return EBUSY;
     return 0;
 }
-static int cam_bus_clock(struct cam_probe_bus *b)
-{
-    /* IMPE uses I2C_EAST, IMPC uses I2C_PERI. Common source/PDN are read-only;
-     * clk-mt6993 gate_fenc ops use FENC as the hardware-on indication. */
-    int e=cam_wait_bits(b->top,0x338,1u<<(b->clock_bit-2),0,1000);
-    if(e)return e;
-    if(!(cam_rr(b->top,0x278)&(1u<<b->clock_bit)))return ENOTSUP;
-    uint32_t source=(cam_rr(b->top,0x110)>>b->clock_shift)&3;
-    if(b->clock_saved && b->clock_source!=source)return EBUSY;
-    /* parent0=TCK26M, 1=UNIVPLL/20, 2=MAINPLL/16, 3=UNIVPLL/10.
-     * A gate FENC alone does not prove the selected PLL is awake. */
-    if(source && !(cam_rr(source==2?b->mainpll:b->univpll,0x34)&(1u<<4)))return ENOTSUP;
-    uint32_t con1=source?cam_rr(source==2?b->mainpll:b->univpll,0x0c):0;
-    if(b->clock_saved && b->clock_con1!=con1)return EBUSY;
-    b->clock_con1=con1;b->clock_source=source;b->clock_saved=true;return 0;
-}
+#include "x9_camera_i2c_clock.inc"
 /* Idle/FENC is not ownership of TIMING or transfer controls. Track every
  * writable CSR separately; never overwrite a changed borrowed configuration.
  * The selected AP mutex serializes our callers, not SCP/other hardware users.
@@ -320,6 +308,7 @@ static int cam_bus_controls(struct cam_probe_bus *b, bool restoring)
 {
     if(b->conflict)return EBUSY;
     if(!restoring && b->uncertain)return EIO;
+    int e=cam_bus_clock(b);if(e)return e;
     if(cam_rr(b->gate,0xe00)&b->gate_bit)return EBUSY;
     uint32_t multi=cam_rr(b->base,CAM_I2C_MULTI);
     if(multi)return cam_bus_conflict(b,CAM_I2C_MULTI,0,multi);
@@ -405,7 +394,7 @@ static int cam_bus_init_timing(struct cam_probe_bus *b)
 }
 static int cam_bus_take(struct cam_probe_bus *b)
 {
-    int e=cam_bus_clock(b);if(e)return e;
+    int e=cam_bus_parent_take(b);if(e)return e;
     /* Only the per-controller IMPC/IMPE bit; the common I2C parent is not
      * reparented. Journal BEFORE CLR, including an unconfirmed gate write. */
     if(cam_rr(b->gate,0xe00)&b->gate_bit) {
@@ -733,6 +722,8 @@ static uint32_t cam_cold_retained(const struct cam_probe_journal *j)
     if(j->wake.owned)mask|=X9_CAM_COLD_WAKE;
     for(unsigned i=0;i<4;i++)if(j->route[i].owned)mask|=X9_CAM_COLD_ROUTES;
     if(j->pmif_fault || j->pmif_pending)mask|=X9_CAM_COLD_PMIF;
+    if(j->sensor.parent_owned)mask|=X9_CAM_COLD_SENSOR_PARENT;
+    if(j->ldo.parent_owned)mask|=X9_CAM_COLD_WL_PARENT;
     return mask;
 }
 static int cam_restore_failed(struct cam_probe_journal *j, int e)
@@ -797,6 +788,12 @@ static int cam_restore(struct cam_probe_journal *j)
     }
     j->restore_step=X9_CAM_COLD_RESTORE_ROUTES;
     e=cam_routes_restore(j);if(e)return cam_restore_failed(j,e);
+    /* Restore both child buses and AP pins BEFORE removing either common
+     * parent. A failed child/parent restore retains CAMTG/PLL and VS. */
+    j->restore_step=X9_CAM_COLD_RESTORE_WL_PARENT;
+    e=cam_bus_parent_restore(&j->ldo);if(e)return cam_restore_failed(j,e);
+    j->restore_step=X9_CAM_COLD_RESTORE_SENSOR_PARENT;
+    e=cam_bus_parent_restore(&j->sensor);if(e)return cam_restore_failed(j,e);
     j->restore_step=X9_CAM_COLD_RESTORE_CLOCK;
     e=cam_clock_restore(j);if(e)return cam_restore_failed(j,e);
     j->restore_step=X9_CAM_COLD_RESTORE_VS;
@@ -834,11 +831,13 @@ static int cam_board_prepare(struct cam_probe_journal *j, uint32_t which,
         .base=ml_io_map(back?0x12450000:0x123d0000,0x80000),
         .dma=ml_io_map(back?0x163d0000:0x16390000,0x30000),.banks=8,.dma_banks=3,
         .gate=ml_io_map(0x12650000,0x1000),.gate_bit=back?4:2,
-        .top=j->top,.univpll=j->pll,.mainpll=j->mainpll,.clock_shift=16,.clock_bit=29};
+        .top=j->top,.univpll=j->pll,.mainpll=j->mainpll,.clock_shift=16,.clock_bit=29,
+        .group_gate_mask=0x3f};
     j->ldo=(struct cam_probe_bus){.base=ml_io_map(0x16200000,0x40000),
         .dma=ml_io_map(0x164f0000,0x10000),.banks=4,.dma_banks=1,
         .gate=ml_io_map(0x16300000,0x1000),.gate_bit=1,
-        .top=j->top,.univpll=j->pll,.mainpll=j->mainpll,.clock_shift=0,.clock_bit=31};
+        .top=j->top,.univpll=j->pll,.mainpll=j->mainpll,.clock_shift=0,.clock_bit=31,
+        .group_gate_mask=0x0d};
     if(!j->gpio || !j->vlp || !j->top || !j->hwv || !j->pll || !j->mainpll || !j->pmif_p || (back && !j->pmif_m) ||
        !j->board.drive_base || !j->sensor.base || !j->sensor.dma || !j->sensor.gate ||
        !j->ldo.base || !j->ldo.dma || !j->ldo.gate)return ENOMEM;
@@ -960,6 +959,10 @@ static int cam_sensor_transaction(uint32_t which, struct x9_camera_probe *r,
         j->sensor.timing_hz,j->ldo.timing_hz,r->dovdd,r->afvdd,j->wl_enabled,j->wl_programmed,
         j->wake.owned,j->dovdd.enable_owned||j->dovdd.voltage_owned,
         j->afvdd.enable_owned||j->afvdd.voltage_owned,j->vs_owned,j->pmif_fault);
+    printf("X9 CAMERA COLD CLOCK: parent seen=%u/%u entry=%02x/%02x expected=%02x/%02x retained=%u/%u conflict=%u/%u (journal, no CSI/DMA)\n",
+        j->sensor.parent_seen,j->ldo.parent_seen,j->sensor.parent_entry,j->ldo.parent_entry,
+        j->sensor.parent_expected,j->ldo.parent_expected,j->sensor.parent_owned,j->ldo.parent_owned,
+        j->sensor.parent_conflict,j->ldo.parent_conflict);
     return r->last_errno;
 }
 static int cam_sensor_probe(uint32_t which, struct x9_camera_probe *r)

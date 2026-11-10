@@ -11,7 +11,7 @@
 | XNU | `/dev/x9-camera` 独占控制；只读状态；16 MiB 上限 RAW10；1 s 有界等待；generation 拒绝旧 DMA 完成；CPU staging 在用户复制期间 pin，关闭时停止、排空、恢复 |
 | 软件 ISP | HakiOS MIT 软件去马赛克、灰世界 AWB、AE、sRGB、NV12/BGRA；不使用高通 Chromatix；CCM 为单位矩阵，无 LSC |
 | iOS | HakiOS `CMDerivedObjectCreate` 设备类 v3/流类 v2，前后 `FigCaptureStream`；输出池、PixelBufferHandler、帧 metadata；先确认真实 start 再返回成功 |
-| sensor-probe | MT6993 CAMTG voter/parent 申请与释放、AP I2C 单控制器门控/FIFO/WRRD；WL28681C 指定通道电压/启停；reset/MCLK pinmux；真实 ID 检查与恢复日志。闲置 AP timing 初始化、禁用共享 rail 的申请/还原、GPIO203 局部唤醒。**仍要求共享时钟/HWCCF provider 已就绪，未上机验证** |
+| sensor-probe | MT6993 CAMTG voter/parent 申请与释放、AP I2C 父时钟及单控制器门控/FIFO/WRRD；WL28681C 指定通道电压/启停；reset/MCLK pinmux；真实 ID 检查与恢复日志。闲置 AP timing 初始化、禁用共享 rail 的申请/还原、GPIO203 局部唤醒。**I2C 父时钟可有条件从 off 开启；HWCCF autolink/所选 PLL 仍需已就绪，未上机验证** |
 | sensor-standby | 同一冷启动 journal 内，ID 匹配后经真实 AP I2C 写 init/preview 与镜像；前摄先做固定 fab 读端口识别，仅 B4/01 分支追加两项 init patch；读回稳定控制，然后 reset/恢复。mode3 显式命令；与未来 mode2 共用表验证/加载/读回。**不 stream-on、不做 QSC/LRC 标定；未上机** |
 | SENINF/CAMSV 计划 | 零 MMIO 查询实际 CSI 端口、VC0/RAW10、候选 outmux/CAMSV、尺寸/64B stride/WDMA 打包及 SID；**不是资源申请或采集** |
 | 接收电源接口 | TF-A MM-SMMU `PM_GET/PM_PUT`、CSI_BS_RX MM HWCCF 单 bit 申请/恢复；带供电前置检查的 SMMUv3 只读快照。**代码已构建，未上机；不是完整 MM power/clock provider 或 DMA mapping** |
@@ -96,7 +96,7 @@ cameractl probe front
 当前实现刻意不接管未知的共享资源，前置条件包括：
 
 - UNIVPLL 的已有 PCW/postdiv 配置在 `/104` 后为标称 24MHz（容差 ±1kHz）。不重编 PLL、不初始化 HWCCF 的全局/autolink 表；DONE 不就绪时有界退出。没有其他 XPU 投票且 CAMTG FENC 为 off 时，才允许把目标 mux 改为 parent7。已有投票则只接受正确 parent 和 FENC-on，不改 live parent。
-- i2c4/i2c2 和 **i2c12** 的共享 I2C_EAST/I2C_PERI parent 已 FENC-on/CKSTA-idle，选用 PLL 时该 PLL 已 FENC-on；不修改共同 parent。允许只 ungate 目标 IMPE/IMPC bit，退出恢复自己增加的门控。所有暴露 bank 必须无事务/IRQ/FIFO 残留，所有 DMA bank 均未运行；主/前各 8 个 I2C、3 个 DMA bank，WL 为 4/1。TIMING 非零时只借用 open-drain/非 HS 状态；TIMING 为零且 MULTI 为零时，可按已验证 parent PCW 推导标准模式 ≤98kHz 的 high/low sample、step、divider 和 5µs EXT，保存/恢复 14 个 CSR。不会 reset 整个控制器、改 MCU IRQ 或共享 shadow mode。实际 DT 没有 `ch-offset-i2c`，使用 channel0，不能猜成 `+0x10000`。
+- i2c4/i2c2 和 **i2c12** 的共享 I2C_EAST/I2C_PERI parent 必须 CKSTA-idle，选用 PLL 时该 PLL 已 FENC-on；不修改共同 source。已 FENC-on 且 PDN-off 的 parent 只借用。若 FENC-off、PDN-on、该分组**全部**物理子控制器 gate-off（IMPE mask `0x3f`、IMPC mask `0x0d`），两次入口快照及源 PCW 稳定，才记录 journal 并单 bit CLR 父 PDN，等待 FENC-on。随后只 ungate 目标 IMPE/IMPC bit，退出恢复自己增加的门控。所有暴露 bank 必须无事务/IRQ/FIFO 残留，所有 DMA bank 均未运行；主/前各 8 个 I2C、3 个 DMA bank，WL 为 4/1。TIMING 非零时只借用 open-drain/非 HS 状态；TIMING 为零且 MULTI 为零时，可按已验证 parent PCW 推导标准模式 ≤98kHz 的 high/low sample、step、divider 和 5µs EXT，保存/恢复 14 个 CSR。不会 reset 整个控制器、改 MCU IRQ 或共享 shadow mode。实际 DT 没有 `ch-offset-i2c`，使用 channel0，不能猜成 `+0x10000`。
 - AP I2C 引脚允许已为 mode1，或 mode0/input 后仅切目标引脚的 mode1，退出恢复；mode2/SCP、GPIO output 等未知 owner 一律拒绝。GPIO203 已 output-high 时只借用；output-low 或 mode0/input 且 DIN-low 时可记录 DIR/DOUT，先低→output→高，等 1ms 后读 WL ID。退出前必须读整个 WL enable 字节为零才恢复自己拉高的203；GPIO187/202 和 UVP 控制始终不写。
 - SID3 LN60_7 DOVDD、主摄 SID6 LDC0_3 AFVDD：已启用时只借精确电压/normal/DA-enabled。禁用时还必须 DA-off/HW_OP_EN0=0，AF 另要求 EINT_EN=0，才能记录 selector，设置电压并单 bit EN_SET。DOVDD 的实际编码是 **0xd0=1.8V**（coarse 高 nibble、fine 低 nibble），AF 0x0a=3V；此前 0x0d 检查不正确。每次 snapshot→ownership→写入→readback 同持共享 X9PMIF 锁；模糊写入保留 journal。主摄仅申请 SID3 0x178a 的 VS mask4，最后撤销自己的 vote，不清其他 bit。
 - 目标 sensor 的 reset 为 GPIO output-low，或 mode0/input 且 DIN-low（保存 DIR/DOUT 后可转 output-low）；MCLK pinmux 为 off、它的 WL 通道均 disabled。主摄使用 WL4/7/2，前摄使用 WL3/1；其他通道保持。
@@ -108,8 +108,16 @@ cameractl probe front
 
 **恢复采用首错即停的依赖屏障**：reset-low 和 MCLK-off 均确认后才撤供电；任一 rail/WL 通道失败不再撤更早启用的 supply，也不恢复 pins/撤 bus、clock、VS。sensor bus 或 gate 恢复失败，不继续撤 WL bus、AP routes 或 CAMTG。PMIF pending/fault 先尝试本地 reset/MCLK 隔离，再保留依赖退出，不冒领后来响应。此前“累计错误但继续恢复”会破坏保留依赖，这一行为已修正。
 
-GET_STATUS 仍为 **88B**，原 reserved 前两字现为 `cold_retained/cold_restore_step`；旧工具和 ioctl 尺寸兼容。它们是最后冷事务的**软件 journal 缓存，不是实际硬件状态或 lease**。保留 mask：`1=pins`、`2=MCLK mux/vote`、`4=sensor bus/gate`、`8=WL bus/gate`、`16=WL rails`、`32=DOVDD`、`64=AFVDD`、`128=VS`、`256=WL wake`、`512=AP routes`、`1024=PMIF fault/pending`。restore_step：1=quiesce、2=DOVDD、3=WL（日志另给 channel）、4=AFVDD、5=wake、6=pins、7=sensor bus、8=WL bus、9=routes、10=clock、11=VS、13=PMIF；成功时缓存 step=0。失败看 `X9 CAMERA COLD RESTORE`，不在同一 boot 重试。
-**这补齐了冷启动供电/AP timing 的局部 ownership，但共同 I2C clock FENC/HWCCF autolink 仍要求已就绪；未知 HW/EINT 用户或 SCP owner 会拒绝。没有本轮实机 ID，不能宣称冷 LK 已全部打通，更不是可拍摄镜像。**
+GET_STATUS 仍为 **88B**，原 reserved 前两字现为 `cold_retained/cold_restore_step`；旧工具和 ioctl 尺寸兼容。它们是最后冷事务的**软件 journal 缓存，不是实际硬件状态或 lease**。保留 mask：`1=pins`、`2=MCLK mux/vote`、`4=sensor bus/gate`、`8=WL bus/gate`、`16=WL rails`、`32=DOVDD`、`64=AFVDD`、`128=VS`、`256=WL wake`、`512=AP routes`、`1024=PMIF fault/pending`、`2048=sensor I2C parent`、`4096=WL I2C parent`。restore_step：1=quiesce、2=DOVDD、3=WL（日志另给 channel）、4=AFVDD、5=wake、6=pins、7=sensor bus、8=WL bus、9=routes、10=clock、11=VS、13=PMIF、14=WL I2C parent、15=sensor I2C parent；成功时缓存 step=0。失败看 `X9 CAMERA COLD RESTORE`，不在同一 boot 重试。
+**这补齐了冷启动供电/AP timing 的局部 ownership 和有条件 I2C 父时钟开启，但 HWCCF autolink/所选 PLL 仍要求已就绪；未知 HW/EINT 用户或 SCP owner 会拒绝。没有本轮实机 ID，不能宣称冷 LK 已全部打通，更不是可拍摄镜像。**
+
+### I2C 父时钟遵循厂商 PDN/FENC 路径，不冒领 CAMTG voter
+
+`x9_camera_i2c_clock.inc` 接在现有 `probe/standby → cam_board_prepare → cam_bus_take`，不是等待注册的后端。厂商 A0/B0 两表均把这两个 mux 定义为 `MUX_GATE_FENC_CLR_SET_UPD_CHK`，实际 enable/disable 只写 CKSYS `+0x118/+0x114` 的 PDN 位：EAST bit23、PERI bit7。**不发 UPDATE、不 reparent、不伪造 HWV vote、不写 PLL。** FENC `+0x278` 的 bit29/31 是 on，CKSTA `+0x338` 的 bit27/29 是 busy。
+
+自己的父时钟持有期间，每次控制 CSR 校验（含 timing 写、FIFO 前、START 前及完成后）检查完整 mux byte、源 PCW、FENC 和所有 sibling gate；变化立即停止后续写入。恢复须先完成两条 bus/timing/子 gate 及 AP pins，再按 WL parent→sensor parent→CAMTG→VS 逆序撤依赖。借用的父时钟不 SET；自己的 CLR 模糊写仅允许精确入口/预期 byte，任意第三种值或子 gate 被其他用户开启便保留，不关未知使用者的时钟。SET/FENC 恢复失败同样保留，boot 内不重试。
+
+这只能检测可见的配置冲突，不能消除检查与写入之间的 AP/SCP 竞态，也不是长期硬件 lease。`X9 CAMERA AP CLOCK` 为申请结果，`X9 CAMERA COLD CLOCK` 为事务结束后的 journal；后者不重新读取已撤供电的硬件。mode/用户 ioctl/READY 不变，仍需真实 ID/standby 及 SID80 mapping/CSI RAW10 实测。
 
 ### AP timing/control 冲突时保留，而不是覆盖
 
