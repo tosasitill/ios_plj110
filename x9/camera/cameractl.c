@@ -11,6 +11,24 @@
 #include "../kernel/src/bsd/dev/x9_camera.h"
 _Static_assert(sizeof(struct x9_camera_mm_status)==576,"camera MM ABI");
 _Static_assert(sizeof(struct x9_camera_receiver)==1192,"camera receiver ABI");
+_Static_assert(sizeof(struct x9_camera_config)==720,"camera config ABI");
+static void print_config(const struct x9_camera_config *r)
+{
+    printf("sensor-standby sensor=%u flags=%x stage=%u errno=%u restore=%u blockers=%x pairs=%u/%u writes=%u/%u index=%u reg=%04x expected=%02x observed=%08x read=%u (temporary, uncalibrated, NOT capture ready)\n",
+        r->sensor,r->flags,r->stage,r->last_errno,r->restore_errno,r->blockers,
+        r->init_pairs,r->preview_pairs,r->written,r->attempted,r->table_index,
+        r->reg,r->expected,r->observed,r->read_count);
+    if(!(r->flags&X9_CAM_CFG_ATTEMPTED))return;
+    printf("standby cold stage=%u chip=%04x flags=%x blockers=%x errno=%u restore=%u AP timing CSR/clock evidence: use kernel X9 CAMERA COLD/CLOCK log\n",
+        r->probe.stage,r->probe.chip_id,r->probe.flags,r->probe.blockers,
+        r->probe.last_errno,r->probe.restore_errno);
+    for(unsigned i=0;i<X9_CAM_CFG_SAMPLES && r->sample[i].reg;i++) {
+        const struct x9_camera_config_sample *s=&r->sample[i];
+        if(i<r->read_count)printf("standby reg=%04x expected=%02x observed=%02x %s\n",
+            s->reg,s->expected,s->observed,s->observed==s->expected?"match":"MISMATCH");
+        else printf("standby reg=%04x expected=%02x unread\n",s->reg,s->expected);
+    }
+}
 static void print_mm(const struct x9_camera_mm_status *r)
 {
     static const char *const names[X9_CAM_MM_SLOTS]={"AO","infra0","VMM","CAM_VCORE",
@@ -59,11 +77,12 @@ int main(int argc,char **argv)
     bool resources=argc==2 && !strcmp(argv[1],"resources");
     bool clocks=argc==3 && !strcmp(argv[1],"clocks");
     bool receiver=argc==3 && !strcmp(argv[1],"receiver");
-    const char *which=(probe||pipeline||clocks||receiver)?argv[2]:argc==2?argv[1]:"status";
+    bool standby=argc==3 && !strcmp(argv[1],"standby");
+    const char *which=(probe||pipeline||clocks||receiver||standby)?argv[2]:argc==2?argv[1]:"status";
     unsigned sensor=!strcmp(which,"back")?1:!strcmp(which,"front")?2:0;
-    if(argc>3 || (argc==3 && !probe && !pipeline && !clocks && !receiver) || ((probe||pipeline||clocks||receiver) && !sensor) ||
+    if(argc>3 || (argc==3 && !probe && !pipeline && !clocks && !receiver && !standby) || ((probe||pipeline||clocks||receiver||standby) && !sensor) ||
        (argc>=2 && !sensor && !resources && strcmp(which,"status"))) {
-        fprintf(stderr,"usage: cameractl [status|back|front|probe back|probe front|pipeline back|pipeline front|resources|clocks back|clocks front|receiver back|receiver front]\n");return 2;
+        fprintf(stderr,"usage: cameractl [status|back|front|probe back|probe front|standby back|standby front|pipeline back|pipeline front|resources|clocks back|clocks front|receiver back|receiver front]\n");return 2;
     }
     int fd=open(X9_CAMERA_DEVICE,((sensor && !pipeline)||resources?O_RDWR:O_RDONLY)|O_CLOEXEC);
     if(fd<0){perror(X9_CAMERA_DEVICE);return 1;}
@@ -72,6 +91,15 @@ int main(int argc,char **argv)
     printf("version=%u mode=%u flags=%x supported=%x sensor=%u errno=%u frames=%llu rejected=%llu chips=%x/%x probe_mask=%x probe_flags=%x\n",
            s.version,s.mode,s.flags,s.supported_mask,s.sensor,s.last_errno,
            (unsigned long long)s.frames,(unsigned long long)s.rejected,s.chip_id[0],s.chip_id[1],s.probe_mask,s.probe_flags);
+    if(standby || !sensor) {
+        struct x9_camera_config r={.version=1,.sensor=standby?sensor:0};
+        if(ioctl(fd,standby?X9_CAMERA_CONFIG_STANDBY:X9_CAMERA_GET_CONFIG,&r)) {
+            if(standby || errno!=ENOTTY){perror("standby ioctl");close(fd);return 1;}
+        } else {
+            print_config(&r);
+            if(standby){close(fd);return r.last_errno || r.restore_errno?1:0;}
+        }
+    }
     if(receiver || !sensor) {
         struct x9_camera_receiver r={.version=1,.sensor=receiver?sensor:0};
         if(ioctl(fd,receiver?X9_CAMERA_PROBE_RECEIVER:X9_CAMERA_GET_RECEIVER,&r)) {

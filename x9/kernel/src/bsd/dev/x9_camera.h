@@ -35,7 +35,7 @@ struct x9_camera_status {
 enum x9_camera_probe_stage { X9_CAM_STAGE_NONE, X9_CAM_STAGE_PREFLIGHT,
     X9_CAM_STAGE_PMIC, X9_CAM_STAGE_BUS, X9_CAM_STAGE_LDO,
     X9_CAM_STAGE_POWER, X9_CAM_STAGE_ID, X9_CAM_STAGE_RESTORE,
-    X9_CAM_STAGE_DONE, X9_CAM_STAGE_CLOCK }; /* Append: preserve existing stage ABI. */
+    X9_CAM_STAGE_DONE, X9_CAM_STAGE_CLOCK, X9_CAM_STAGE_CONFIG }; /* Append only. */
 struct x9_camera_probe {
     uint32_t version, sensor, flags, stage;
     uint32_t chip_id, last_errno, restore_errno, blockers;
@@ -196,10 +196,45 @@ struct x9_camera_receiver {
 };
 #define X9_CAMERA_GET_RECEIVER _IOR('C', 0x98, struct x9_camera_receiver)
 #define X9_CAMERA_PROBE_RECEIVER _IOWR('C', 0x99, struct x9_camera_receiver)
+/* Explicit cold sensor configuration, NOT CSI/capture. Request is exactly
+ * {.version=1,.sensor=1/2}; root/mode3/FWRITE. Shares probe's once-per-sensor
+ * success / first-hardware-error latch: choose probe OR standby in a boot.
+ * GET is cache-only. Tables are checked before acquiring power. No stream,
+ * reset-command, group-hold, OTP, EEPROM or actuator commands are accepted.
+ * Successful readback describes a temporary standby, then reset/power restore;
+ * it is NOT persistent configuration, PHY-rate measurement or calibration. */
+#define X9_CAM_CFG_TABLE_VALID 1u
+#define X9_CAM_CFG_ATTEMPTED 2u
+#define X9_CAM_CFG_STANDBY 4u
+#define X9_CAM_CFG_WRITTEN 8u
+#define X9_CAM_CFG_VERIFIED 16u
+#define X9_CAM_CFG_RESTORED 32u
+#define X9_CAM_CFG_LATCHED 64u
+#define X9_CAM_CFG_NEED_FACTORY 1u /* QSC/LRC/front fab branch not performed. */
+#define X9_CAM_CFG_NEED_RECEIVER 2u
+#define X9_CAM_CFG_NEED_DMA_MAP 4u
+#define X9_CAM_CFG_NEED_DRAIN 8u
+enum x9_camera_config_stage { X9_CAM_CFG_NONE, X9_CAM_CFG_TABLE_CHECK,
+    X9_CAM_CFG_COLD, X9_CAM_CFG_IDLE, X9_CAM_CFG_INIT, X9_CAM_CFG_PREVIEW,
+    X9_CAM_CFG_MIRROR, X9_CAM_CFG_READBACK, X9_CAM_CFG_RESTORE, X9_CAM_CFG_DONE };
+#define X9_CAM_CFG_SAMPLES 48u
+struct x9_camera_config_sample { uint32_t reg, expected, observed; };
+struct x9_camera_config {
+    uint32_t version, sensor, flags, stage, last_errno, restore_errno;
+    uint32_t init_pairs, preview_pairs, attempted, written;
+    /* table_index is pair offset in INIT/PREVIEW, sample offset in READBACK. */
+    uint32_t table_index, reg, expected, observed, read_count, blockers;
+    struct x9_camera_probe probe;
+    /* Only the first read_count entries have observed bytes. Unread values
+     * are UINT32_MAX; never interpret zero-initialized/unread CSR as evidence. */
+    struct x9_camera_config_sample sample[X9_CAM_CFG_SAMPLES];
+};
+#define X9_CAMERA_GET_CONFIG _IOR('C', 0x9a, struct x9_camera_config)
+#define X9_CAMERA_CONFIG_STANDBY _IOWR('C', 0x9b, struct x9_camera_config)
 #ifdef KERNEL
 /* Platform adapter must own/restore only its camera resources. Calls below
  * run in thread context, serialized, and must not re-enter camera APIs.
- * No adapter exists yet for MT6993 power/SENINF/RAW DMA: registering a dummy
+ * No MT6993 capture adapter is registered: registering a dummy
  * one, bypassing SMMU, or feeding patterns is NOT a hardware implementation. */
 enum x9_camera_power_id { X9_CAM_MCLK, X9_CAM_RESET, X9_CAM_AVDD,
     X9_CAM_AVDD1, X9_CAM_AFVDD, X9_CAM_DVDD, X9_CAM_DOVDD,

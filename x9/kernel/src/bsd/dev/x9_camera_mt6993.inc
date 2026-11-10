@@ -777,7 +777,10 @@ static int cam_board_prepare(struct cam_probe_journal *j, uint32_t which,
     if(e)r->blockers|=X9_CAM_BLOCK_I2C;
     return e;
 }
-static int cam_sensor_probe(uint32_t which, struct x9_camera_probe *r)
+/* Optional configuration runs only after matched ID, before the SAME cold
+ * journal is restored. Probe wrapper below never writes sensor registers. */
+static int cam_sensor_transaction(uint32_t which, struct x9_camera_probe *r,
+    int (*configure)(struct cam_probe_journal *, void *), void *context)
 {
     memset(r,0,sizeof(*r));r->version=1;r->sensor=which;
     if(cam_probe_latched || (cam_probe_done&(1u<<which))) {
@@ -845,6 +848,7 @@ static int cam_sensor_probe(uint32_t which, struct x9_camera_probe *r)
         if(!e && r->chip_id!=(which==X9_CAMERA_BACK?0x9186:0x0615))e=ENODEV;
         if(!e)r->flags|=X9_CAM_PROBE_MATCHED;
     }
+    if(!e && configure){r->stage=X9_CAM_STAGE_CONFIG;e=configure(j,context);}
     r->i2c_status[0]=j->sensor.last_status;
     r->i2c_status[1]=j->ldo.last_status;
     /* Keep the failed decisive stage. DONE means ID matched AND restored. */
@@ -866,3 +870,5 @@ static int cam_sensor_probe(uint32_t which, struct x9_camera_probe *r)
         j->afvdd.enable_owned||j->afvdd.voltage_owned,j->vs_owned,j->pmif_fault);
     return r->last_errno;
 }
+static int cam_sensor_probe(uint32_t which, struct x9_camera_probe *r)
+{ return cam_sensor_transaction(which,r,NULL,NULL); }

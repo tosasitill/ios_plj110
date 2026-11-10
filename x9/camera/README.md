@@ -1,6 +1,6 @@
 # X9 前后相机初步移植
 
-**已实现控制层、RAW10 帧接口、iOS 双流桥、冷启动 sensor-probe、共享接收电源与 MM 寄存器时钟事务、SENINF/CAMSV 接收计划及带供电前置的寄存器预检；采集后端仍缺失，不能拍摄。**
+**已实现控制层、RAW10 帧接口、iOS 双流桥、冷启动 sensor-probe/standby 配置、共享接收电源与 MM 寄存器时钟事务、SENINF/CAMSV 接收计划及带供电前置的寄存器预检；采集后端仍缺失，不能拍摄。**
 没有假帧、测试图案、Android 代理或 Camera.app 成功状态伪造。默认关闭。
 
 ## 实现边界
@@ -12,6 +12,7 @@
 | 软件 ISP | HakiOS MIT 软件去马赛克、灰世界 AWB、AE、sRGB、NV12/BGRA；不使用高通 Chromatix；CCM 为单位矩阵，无 LSC |
 | iOS | HakiOS `CMDerivedObjectCreate` 设备类 v3/流类 v2，前后 `FigCaptureStream`；输出池、PixelBufferHandler、帧 metadata；先确认真实 start 再返回成功 |
 | sensor-probe | MT6993 CAMTG voter/parent 申请与释放、AP I2C 单控制器门控/FIFO/WRRD；WL28681C 指定通道电压/启停；reset/MCLK pinmux；真实 ID 检查与恢复日志。闲置 AP timing 初始化、禁用共享 rail 的申请/还原、GPIO203 局部唤醒。**仍要求共享时钟/HWCCF provider 已就绪，未上机验证** |
+| sensor-standby | 同一冷启动 journal 内，ID 匹配后经真实 AP I2C 写 init/preview 与镜像，读回 RAW10/尺寸/PLL/行帧长/曝光/增益/VC 控制，然后 reset/恢复。mode3 显式命令；与未来 mode2 共用表验证/加载/读回。**不 stream-on、不做前摄 fab 或 QSC/LRC 标定；未上机** |
 | SENINF/CAMSV 计划 | 零 MMIO 查询实际 CSI 端口、VC0/RAW10、候选 outmux/CAMSV、尺寸/64B stride/WDMA 打包及 SID；**不是资源申请或采集** |
 | 接收电源接口 | TF-A MM-SMMU `PM_GET/PM_PUT`、CSI_BS_RX MM HWCCF 单 bit 申请/恢复；带供电前置检查的 SMMUv3 只读快照。**代码已构建，未上机；不是完整 MM power/clock provider 或 DMA mapping** |
 | MM 寄存器时钟事务 | 显式 AO/infra0/VMM BACKUP 引用、CAM_VCORE/MAIN/MRAW 域、CAM autolink FENC、CAMTM/SENINF voter、CAM/CAMSV 寄存器 CG 申请/逆序恢复。**未上机；不改共享 AVS/CVFS/PLL，不申请 SMI larb，不证明采集速率** |
@@ -57,7 +58,7 @@ python3 -I x9/camera/build.py \
 | 不传 / `x9_camera=0` | 不创建设备节点，不安装/注入桥 |
 | `x9_camera=1` | 创建设备节点，只能查询状态；不访问 MMIO/I2C、电源，不安装桥 |
 | `x9_camera=2` | 允许硬件后端注册和控制；在 iOS 根盘创建 hash-addressed 自有 dylib，并为 mediaserverd 注入；**当前仍没有硬件后端** |
-| `x9_camera=3` | probe-only，节点 root:root/0600；启动与状态查询不访问 MMIO、不上电、不安装桥；只有 root 的显式 sensor/resource/MM-clocks probe ioctl 才访问硬件 |
+| `x9_camera=3` | 诊断模式，节点 root:root/0600；启动与状态查询不访问 MMIO、不上电、不安装桥；只有 root 的显式 sensor/standby/resource/MM-clocks/receiver ioctl 才访问硬件 |
 
 模式 2 的首次设备运行涉及根盘写入，需要先确认；本模块没有自动 staging/flash/boot。
 安装只创建 `/private/var/x9/camera/libx9-camera-<hash>.dylib`，校验内容与属性，不覆盖 Apple 文件、symlink、不同内容文件或 launchd plist。
@@ -88,7 +89,7 @@ cameractl probe back
 cameractl probe front
 ```
 
-此模式不会写 `0x0100`，不加载 init/preview 表、不启动 ISP/DMA、不安装或注入 iOS 桥。
+上述 `probe` 命令不会写 `0x0100`，不加载 init/preview 表、不启动 ISP/DMA、不安装或注入 iOS 桥。`standby` 是下面的独立命令，不能混为只读 ID 探测。
 成功时 `probe_mask` 对应位与 `PROBED` 标志生效；**`supported_mask=0`、READY 不置位**。两枚 ID 都通过也不意味着能拍摄。
 每枚 sensor 每次启动最多成功探测一次；任何失败锁存，后续请求不会重复硬件访问。工具返回非零退出码并打印决定阶段、blockers、芯片 ID 和独立恢复错误；`status` 可读取保留的最后证据。
 
@@ -101,7 +102,7 @@ cameractl probe front
 - 目标 sensor 的 reset 为 GPIO output-low，或 mode0/input 且 DIN-low（保存 DIR/DOUT 后可转 output-low）；MCLK pinmux 为 off、它的 WL 通道均 disabled。主摄使用 WL4/7/2，前摄使用 WL3/1；其他通道保持。
 
 `blockers` 位：`1=clock`、`2=shared rail`、`4=AP route`、`8=I2C state`、`16=inherited active/reset state`。
-阶段编号：`1=preflight`、`2=PMIC`、`3=bus`、`4=LDO`、`5=power`、`6=ID`、`7=restore`、`8=done`，追加 `9=clock`（不改旧编号）。
+阶段编号：`1=preflight`、`2=PMIC`、`3=bus`、`4=LDO`、`5=power`、`6=ID`、`7=restore`、`8=done`，追加 `9=clock`、`10=config`（不改旧编号）。
 一次 AP FIFO 请求最多约 5ms，单次 PMIF 状态等待最多约 1ms，DA 另有最多20次/100µs有界采样；单次 HWCCF DONE 等待最多 10ms，AP EN 最多 200µs，CKSTA/FENC 最多 1ms。未知继承状态不清 IRQ、不做总线 reset/retry。
 失败后先把 sensor reset 拉低、断开 MCLK，再按真实反向顺序撤 DOVDD、WL DVDD、AF/AVDD（前摄 DOVDD 在 DVDD 之后），恢复仅自己改过的电压/引脚/14个控制寄存器/单控制器门控，撤销 CAMTG vote 并在无人使用时还原 parent，最后撤自己的 VS vote。共享 rail 的 EN_CLR 确认/DA-off 后才恢复原 selector；已有 live rail 不动。继承投票和其他通道保持；恢复失败保留 journal、锁存并明确报告，不声称资源已恢复。
 **这补齐了冷启动供电/AP timing 的局部 ownership，但共同 I2C clock FENC/HWCCF autolink 仍要求已就绪；未知 HW/EINT 用户或 SCP owner 会拒绝。没有本轮实机 ID，不能宣称冷 LK 已全部打通，更不是可拍摄镜像。**
@@ -121,6 +122,52 @@ cameractl probe front
 VLP base 为 `0x1c200000`，AP HWV base 为 `0x1c040000`。共享 UNIVPLL base `0x1c213100`，CON1 `+0x0c`、FENC `+0x34 bit4`；只读。
 probe v1 仍为 80B，把末尾四个 reserved 字用于 `hwv_vote`（入口 AP EN）、`hwv_done`、`pll_con1`、`pll_fence`；请求仍须全零。旧内核返回零，旧工具仍可读取前面字段。
 `flags & 16` 表示 voter/CAMTG/PLL FENC 检查通过，不表示实测频率、更不表示 capture READY；`cameractl` 输出 raw 证据并明确标注标称配置。
+
+## 冷启动配置 sensor standby，再复位恢复
+
+仅在 `x9_camera=3` 的设备 **root shell** 中手动执行。工具来自该次构建的 `camera/cameractl`，不会自动部署：
+
+```bash
+cameractl status
+cameractl standby back
+cameractl status
+# 主摄 last_errno=0、restore_errno=0 后，可以在同一 boot 单独配置前摄：
+cameractl standby front
+```
+
+**每枚 sensor 在一个 boot 里选择 `probe` 或 `standby` 之一，不要先 probe 再 standby。** 两者共用每 sensor 一次成功/首次硬件错误锁存；任何硬件或恢复错误后不再访问硬件、不自动重试。表缺失/关键值不匹配在上电前拒绝，不消耗硬件事务；GET_CONFIG/status 保留缓存，重复请求不覆盖此前成功或失败证据。
+
+新 GET_CONFIG/CONFIG_STANDBY（`0x9a/0x9b`）为独立 **720B** v1 ABI，请求只能有 version1/sensor1或2，其余全零；旧 ioctl 和结构尺寸不变。执行顺序：
+
+1. 本地表长度/字节值/禁止寄存器检查，并检查最终 RAW10、尺寸、binning、PLL、行/帧长、曝光、增益、VC 关键值；不访问 MMIO。
+2. 复用原冷启动/AP timing/共享 rail journal，读取真实 `0x16/0x17` ID。匹配后仍持有同一供电/总线，不先恢复再另行上电。
+3. 读取 `0x0100` 与 `0x0104`，均为0才开始写表。逐个 reg16/data8 FIFO 写 init/preview，再写镜像（主3/前0）。**从不写 `0x0100/0x0103/0x0104`、OTP、EEPROM、AF/OIS**。生成器和内核均拒绝这些表项，镜像只能独立写入固定值。
+4. 按稳定控制白名单读回，主 **41** 个、前 **38** 个字节（包括再次检查 stream/hold）。不尝试读回全部厂商 microcode/write-only 命令。每个 I2C 请求≤约5ms，配置段总 deadline5s，超时不重试；恢复使用原独立有界流程。
+5. 无论中途写入/读回是否失败，均调用原 `cam_restore`：先 reset-low/MCLK-off，再逆序恢复自己的供电、引脚、AP timing/gate/vote。恢复失败保留 journal、FAULT/RETAINED，不在 close 或另一 sensor 上重试。
+
+结果包括原80B probe、独立操作/恢复错误、成功/尝试写入数、决定阶段/寄存器/index、expected/observed 与逐字节读数；`observed=ffffffff` 表示未读，不能当硬件值。index 在 init/preview 阶段为表 pair offset，在 readback 阶段为 sample offset。阶段：1=table-check、2=cold（详看内嵌 probe.stage）、3=idle、4=init、5=preview、6=mirror、7=readback、8=restore、9=done。
+
+厂商模式的主要核对项：
+
+| 项 | 主摄 | 前摄 |
+|---|---|---|
+| 输出 | 4096×3072 / RAW10 | 3264×2448 / RAW10 |
+| `0342/0340` 行长/帧长 | 9696 / 7546 | 3768 / 7642 |
+| `0202/0204` 初始曝光/增益寄存器 | 1000 / 0 | 7594 / 112 |
+| sensor PLL `0306/030e` | `016e / 0226` | `010e / 0438` |
+| vendor nominal pclk | 2196000000 | 864000000 |
+
+标称 pclk、sensor PLL 读回或 `VERIFIED` **不是实测 lane/trio 速率、PHY 校准或 rate lease**。主 preview 包含 PDAF/额外 VC，写表不代表接收器已过滤为纯 VC0。此路径不执行 vendor open 中的主摄 AF 激活/QSC、前摄 `Imx615_fab_read` OTP/fab 变体和 QSC/LRC，因此只称 **未标定 nominal standby**，不能称厂商完整 open 或成像质量验证。blockers `1=factory/fab`、`2=receiver`、`4=DMA mapping`、`8=drain` 不因读回成功清除。
+
+成功后器件已 reset/恢复原供电，**配置不持久、READY/supported仍0、不能拍摄**。未来 mode2 的 start 共用同一 preflight/表加载/稳定读回，再交由真实 capture provider 建立 CSI/DMA，最后才 stream-on；目前无该 provider。
+
+读用户本次日志与缓存（无需自动操作设备）：
+
+```bash
+rg -n 'X9 CAMERA (STANDBY|PROBE|COLD|CLOCK)' ~/N.txt
+```
+
+先按该次日志证明 ID→表写→读回→恢复的完整路径，再接 rate/SMI/SMMUv3 owner 与 SENINF/CAMSV，不把构建成功当作硬件验收。
 
 ## 查询 SENINF → CAMSV RAW DMA 接收计划
 

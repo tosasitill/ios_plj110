@@ -49,11 +49,13 @@ def sensor_tables(root, out):
                 if any(not re.fullmatch(r'0x[0-9a-fA-F]+|[0-9]+', t) for t in tokens):
                     raise ValueError(f'{name}: not a literal register table')
                 values = [int(t, 0) for t in tokens]
-                if not values or len(values) % 2 or len(values) > 16384:
+                if not values or len(values) % 2 or len(values) > 4096:
                     raise ValueError(f'{name}: invalid size')
                 for reg, val in zip(values[::2], values[1::2]):
-                    if not 0 <= reg <= 65535 or not 0 <= val <= 255 or reg == 0x0100:
-                        raise ValueError(f'{name}: unsafe/non-byte/stream register pair')
+                    if (not 0 <= reg <= 65535 or not 0 <= val <= 255 or
+                            reg in (0x0016, 0x0017, 0x0100, 0x0101, 0x0103, 0x0104) or
+                            0x0a00 <= reg <= 0x0aff):
+                        raise ValueError(f'{name}: unsafe/non-byte/stream/reset/hold/OTP register pair')
                 manifest[sensor][mode + '_pairs'] = len(values) // 2
             lines.append(f'#define X9_{name.upper()}_COUNT {len(values)}u')
             lines.append(f'static const uint16_t x9_{name}[] = {{')
@@ -104,9 +106,11 @@ def main():
         'bytes': len(data), 'sha256': sha.hex(), 'ios_path': path,
         'profile': '20H392 / CMCapture 45d37488-2cc7-3028-8a4d-936bce7a220b',
         'vendor_tables': bool(a.vendor_root), 'platform_adapter': False,
-        'sensor_probe_backend': 'MT6993 AP FIFO/WL28681C; inherited clock/rails only',
+        'sensor_probe_backend': 'MT6993 cold AP FIFO/WL28681C; shared providers required',
+        'sensor_standby_backend': 'explicit mode3 cold init/preview + stable readback + restore',
+        'sensor_factory_calibration': False,
         'hardware_tested': False}, indent=2) + '\n')
-    print(f'X9 camera: {len(data)} bytes; conditional sensor probe only, no capture adapter; install only with x9_camera=2', flush=True)
+    print(f'X9 camera: {len(data)} bytes; explicit cold probe/standby, no capture adapter; install only with x9_camera=2', flush=True)
 
 
 if __name__ == '__main__':
