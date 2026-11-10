@@ -438,6 +438,25 @@ WFI、firmware RSV、VLOGIC/SRAM ack仅诊断，不推导Linux state或新wake�
 CORE_STOP／pending wait／SYS_CLEAR、Secure RELOAD和START之间同样重新资格化；
 pending的10ms有界轮询每次先核对租约，不只首次检查。
 
+首次cold exclusive接管以真实TOP+INFRA全局off证明两核尚未运行，且本次从未发RELOAD/START，
+此时reset直接pending-idle→实际SYS_CLEAR，不先对secure configured状态发无效STOP。
+新增private `launch_issued`在RELOAD调用**之前**置位，CORE_START前也保持；加载错误、
+加载后资格失败及START错误均保留，必须实际CORE_STOP成功才清。
+故障停核、halted验证、再次start、父电源release均检查该状态，
+不能把`started=false`或非零SMC返回解释为已停核。该修正不忽略STOP失败、不新增
+重试、force reset、monitor op或用户selector；仍须同ticket／真实物理资格及pending0。
+
+保存的slotA ATF中，两条kernel whitelist均选择`c200052b`的ADSP handler，STOP5
+只接受per-core状态4、SYS_CLEAR3/reload7核对magic；这与纯源码的EMI READ不可混用。
+OPPO `adsp_init_reserve_memory`取得LK `shared_memory`后直接进入WC映射，绕过legacy
+MPU设置分支；该行为不是XNU Normal-WB／AP-DSP-AFE权限证据。保存ATF的050b/op2拒绝，
+0415/op2为BL-only，不能用旧GPS reader充当speaker memory supplier。保存件不是当前
+selected槽位／运行secure ABI证明，RELOAD成功仍不授shared RAM或speaker Ready。
+保存件的`0x2a380`通过`0x11aa98`间接调用实际`adsp_mt_run_loader`；`0x59c8`安装
+的callback为`0x5520`（auth/map→copy `0x1a200000`／`0x20000B`→cache sync→unmap），
+与CORE_START的`0x55a4`分开。即便这份旧保存件不在loader内启动核，也不凭它对当前
+RELOAD失败跳过STOP；若STOP拒绝，保留父电源／票据而不假称halted或直接退资源。
+
 transport在reset完成后清旧RX之前、每次READY接收、发送前及TX-consume／ACK等待
 期间调用真实validate。租约失败含EAGAIN作为fatal，不当作“RX空”或可重发；
 同次操作不retry validate／reset／power-off，power/mapping/ticket保留。

@@ -23,6 +23,11 @@ LCK_MTX_DECLARE(board_control_lock,&board_group);
 LCK_MTX_DECLARE(board_lock,&board_group);
 static volatile uint32_t *hwv,*cfg,*cfg2;
 static bool registered,exclusive,reset_done,started,wake;
+/* Set BEFORE RELOAD or CORE_START, cleared only by successful CORE_STOP.
+ * Even a loader error can leave secure effects; neither a monitor error nor
+ * started=false proves a never-launched cold core. Exclusive is minted only
+ * after TOP+INFRA were freshly globally OFF. No slot-capture shortcut. */
+static bool launch_issued;
 static uint64_t resource_ticket;
 static uint64_t borrowed_ticket;
 static uint32_t resource_owner=X9AudioResourceADSP;
@@ -166,7 +171,7 @@ int x9_adsp_mt6993_speaker_validate(uint64_t ticket)
 static int speaker_halted_qualify(uint64_t ticket)
 {
     int e=speaker_qualify(ticket);
-    if(!e && (!reset_done || started || wake || status.pending ||
+    if(!e && (!reset_done || started || launch_issued || wake || status.pending ||
        audio_sem_state!=AudioSemIdle))e=EBUSY;
     if(!e && (rd(cfg,AUDIO_SEM_REG)&AUDIO_SEM_BIT))e=EBUSY;
     return e;
@@ -429,7 +434,7 @@ static int power_on(void *unused)
 {
     (void)unused;lck_mtx_lock(&board_lock);int e=0;
     begin_control();
-    if(exclusive || resource_ticket)e=EBUSY;
+    if(exclusive || resource_ticket || started || launch_issued)e=EBUSY;
     else {
         status.lease_error=0;status.guard_space=X9BoardGuardLease;
         status.guard_reg=UINT32_MAX;status.guard_expected=status.guard_actual=0;
@@ -477,8 +482,17 @@ static int reset(void *unused)
     if(!e)e=chain_on(); /* recover a partially revoked power lease first */
     if(!e)e=qualify();
     if(!e && (rd(cfg,AUDIO_SEM_REG)&AUDIO_SEM_BIT))e=EBUSY;
-    if(!e)e=smc(SMC_STOP,0);
-    if(!e)started=false;
+    if(!e && (started || launch_issued)) {
+        e=smc(SMC_STOP,0);
+        if(!e) {
+            started=launch_issued=false;status.flags&=~X9BoardStarted;
+        }
+    }
+    /* Never-launched cold exclusive acquisition needs SYS_CLEAR, not STOP:
+     * the secure STOP handler accepts RUNNING only, while LK may leave its
+     * configured state. This is NOT an ignored STOP error or firmware-state
+     * guess. Any issued RELOAD/START, including errors, requires STOP above.
+     * Pending/lease/semaphore qualification and actual SYS_CLEAR still apply. */
     if(!e)e=qualify(); /* secure monitor may have changed domain state */
     if(!e)e=wait_pending_idle();
     if(!e)e=qualify();
@@ -489,13 +503,22 @@ static int reset(void *unused)
 }
 static int core_start(void *unused)
 {
-    (void)unused;lck_mtx_lock(&board_lock);int e=exclusive&&reset_done&&!started?0:ENXIO;
+    (void)unused;lck_mtx_lock(&board_lock);int e=exclusive&&reset_done&&!started&&!launch_issued?0:ENXIO;
     if(!e && (audio_sem_state!=AudioSemIdle || shared_child_lease || ipi_child_lease || clock_child_lease || irq_child_lease))e=EBUSY;
     if(!e)e=qualify();
     if(!e && (rd(cfg,AUDIO_SEM_REG)&AUDIO_SEM_BIT))e=EBUSY;
-    if(!e)e=smc(SMC_RELOAD,0xad5bad5b);
+    if(!e) {
+        /* Revoke the cold shortcut BEFORE entering secure firmware loading.
+         * An error, or a lost lease after success, cannot retire these effects
+         * using only our old reset_done/started snapshots. */
+        launch_issued=true;reset_done=false;e=smc(SMC_RELOAD,0xad5bad5b);
+    }
     if(!e)e=qualify();
-    if(!e)e=smc(SMC_START,0);
+    if(!e) {
+        /* Publication intent precedes the monitor call. An error/nonreturn
+         * is not proof that the physical core remained stopped. */
+        launch_issued=true;reset_done=false;e=smc(SMC_START,0);
+    }
     reset_done=false;
     if(!e){started=true;status.flags|=X9BoardStarted;}
     status.error=(uint32_t)e;snapshot();lck_mtx_unlock(&board_lock);return e;
@@ -503,7 +526,7 @@ static int core_start(void *unused)
 static int power_off(void *unused)
 {
     (void)unused;lck_mtx_lock(&board_lock);int e=0;
-    if(started || wake || !reset_done || audio_sem_state!=AudioSemIdle || shared_child_lease || ipi_child_lease || clock_child_lease || irq_child_lease)e=EBUSY;
+    if(started || launch_issued || wake || !reset_done || audio_sem_state!=AudioSemIdle || shared_child_lease || ipi_child_lease || clock_child_lease || irq_child_lease)e=EBUSY;
     else if(exclusive) {
         e=qualify();
         if(!e && (rd(cfg,AUDIO_SEM_REG)&AUDIO_SEM_BIT))e=EBUSY;
@@ -593,7 +616,7 @@ int x9_adsp_mt6993_speaker_control(uint32_t op,uint64_t ticket)
     if(!e)e=!op?x9_adsp_boot(0):op==1?x9_adsp_halt(0):x9_adsp_release(0);
     if(!e && op==2) {
         lck_mtx_lock(&board_lock);
-        if(exclusive || resource_ticket || started || wake || audio_sem_state!=AudioSemIdle || shared_child_lease || ipi_child_lease || clock_child_lease || irq_child_lease)e=EIO;
+        if(exclusive || resource_ticket || started || launch_issued || wake || audio_sem_state!=AudioSemIdle || shared_child_lease || ipi_child_lease || clock_child_lease || irq_child_lease)e=EIO;
         else {borrowed_ticket=0;resource_owner=X9AudioResourceADSP;}
         lck_mtx_unlock(&board_lock);
     }

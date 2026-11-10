@@ -9,6 +9,11 @@ extern "C" {
 #endif
 int x9_adsp_mt6993_init(void); /* maps/registers only, NO MMIO/SMC */
 int x9_adsp_mt6993_control(uint32_t operation); /* 0 boot, 1 stop; mode 2 only */
+/* Cold exclusive takeover (TOP+INFRA freshly globally OFF) has never issued
+ * RELOAD/START: reset qualifies pending-idle then SYS_CLEAR without an invalid
+ * STOP of secure configured state. Once RELOAD or START was attempted, even
+ * on error, reset MUST successfully CORE_STOP before SYS_CLEAR or retirement.
+ * No cached started=false shortcut, ignored monitor error or READY claim. */
 /* Kernel-only combined owner; does not claim/release the supplied Speaker
  * ticket. operation: 0 first boot, 1 explicit halt/recovery keeping parents,
  * 2 release parents after AFE/pad/clock teardown. Caller owns one immutable
