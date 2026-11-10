@@ -2,6 +2,7 @@
  * conflicting files/links are never replaced. No loader/signature/identity patch.
  * A partial install does not publish the MCCMNC alias or claim success. */
 #include "../../../generated/x9_carrier_cbn.inc"
+static int x9_cbn_install_verified;
 #if X9_CBN_PRESENT
 static int x9_cbn_alias(proc_t p,user_addr_t scratch,user_addr_t end,int create)
 {
@@ -30,6 +31,7 @@ static int x9_cbn_alias(proc_t p,user_addr_t scratch,user_addr_t end,int create)
 }
 static int x9_cbn_install(proc_t p,user_addr_t scratch,user_addr_t end)
 {
+ x9_cbn_install_verified=0;
  if(!sweet_early_is_x9()||sweet_x9_arg("x9_bb",0)!=1||sweet_x9_arg("x9_carrier_cbn",1)!=1||proc_getpid(p)!=1)return 0;
  if(!sweet_x9_ufs_root_active()||!sweet_x9_ufs_root_writable())return EROFS;
  if((size_t)(x9_cbn_pack_end-x9_cbn_pack)!=X9_CBN_PACK_BYTES)return EINVAL;
@@ -50,6 +52,7 @@ static int x9_cbn_install(proc_t p,user_addr_t scratch,user_addr_t end)
   created+=(unsigned)made;kept+=(unsigned)!made;
  }
  error=x9_cbn_alias(p,scratch,end,1);
+ if(!error)x9_cbn_install_verified=1;
  if(!error)printf("X9 CBN: original 54.1.0 bundle/IPCC verified created=%u kept=%u; 46015 alias ready (D22 original overrides)\n",created,kept);
  return error;
 }

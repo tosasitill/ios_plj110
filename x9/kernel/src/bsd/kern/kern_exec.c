@@ -7734,13 +7734,13 @@ sweet_x9_ccgate(void)
  * source on failure. Never clear UF_COMPRESSED or write the raw data fork.
  * Runtime bounds/shape/readback mirror the existing cache gate. */
 static int
-x9_ccplan_page(vnode_t vp, const uint8_t expected[32], vfs_context_t ctx)
+x9_ccnative_page(vnode_t vp, unsigned page, const uint8_t *expected, vfs_context_t ctx)
 {
  uint8_t buf[256], digest[32];
  SHA256_CTX hash;
  SHA256_Init(&hash);
  for (unsigned i = 0; i < 4096; i += sizeof(buf)) {
-  int error = x9_ccgate_io(vp, 529 * 4096 + i, buf, sizeof(buf), UIO_READ, ctx);
+  int error = x9_ccgate_io(vp, (off_t)page * 4096 + i, buf, sizeof(buf), UIO_READ, ctx);
   if (error) return error;
   SHA256_Update(&hash, buf, sizeof(buf));
  }
@@ -7749,19 +7749,12 @@ x9_ccplan_page(vnode_t vp, const uint8_t expected[32], vfs_context_t ctx)
 }
 
 static int
-sweet_x9_ccplan_gate(void)
+x9_ccnative_gate(const char *label, unsigned page, const struct x9_ccgate_edit edits[2],
+    int target, const char *patched_name)
 {
  extern boolean_t sweet_x9_ufs_root_writable(void);
  static const char path[] = "/System/Library/Frameworks/CoreTelephony.framework/Support/CommCenter";
- static const struct x9_ccgate_edit edits[] = {
-  {"plan factory dual-capability lookup", 2170072, 4,
-   {0x08,0x15,0x40,0xf9}, {0x08,0x39,0x40,0xf9}},
-  {"native page 529 hash", 24525396, 32,
-   {0xfa,0xef,0x77,0x52,0x63,0xc4,0xa2,0xc3,0x02,0x1c,0x4d,0x98,0xe9,0x29,0x83,0xf9,0xc1,0x93,0x8f,0x3c,0x8d,0x0d,0x7c,0xd4,0x10,0xe9,0x11,0x6b,0xed,0x6b,0x4d,0xa5},
-   {0xcc,0x41,0x56,0x0b,0x05,0x60,0xe5,0x00,0xe4,0xc9,0xc8,0x1b,0xa2,0x1a,0x29,0x8e,0xbe,0x5a,0x96,0x7a,0x4c,0xfd,0x2e,0xb8,0xf6,0x2f,0x1e,0xe6,0xa7,0x91,0x4a,0x4b}},
- };
  const int mode = sweet_x9_arg("x9_ccgate", 1);
- const int target = mode == 1 && sweet_x9_arg("x9_dual_sim", 0) == 1;
  vfs_context_t ctx = vfs_context_kernel();
  struct vnode_attr va;
  vnode_t vp = NULLVP;
@@ -7770,11 +7763,11 @@ sweet_x9_ccplan_gate(void)
  int error, i, state, source = -1;
  if ((mode != 1 && mode != 2) || !sweet_x9_ufs_root_writable()) return 0;
  error = vnode_lookup(path, VNODE_LOOKUP_NOFOLLOW, &vp, ctx);
- if (error) { printf("X9 CCPLAN: lookup errno=%d; not touched\n", error); return error; }
+ if (error) { printf("X9 %s: lookup errno=%d; not touched\n", label, error); return error; }
  VATTR_INIT(&va); VATTR_WANTED(&va, va_data_size); VATTR_WANTED(&va, va_flags);
  error = vnode_getattr(vp, &va, ctx);
  if (error || !vnode_isreg(vp) || va.va_data_size != 24740528) {
-  printf("X9 CCPLAN: file errno=%d reg=%d size=%lld flags=0x%x; not touched\n",
+  printf("X9 %s: file errno=%d reg=%d size=%lld flags=0x%x; not touched\n", label,
       error, vnode_isreg(vp), (long long)va.va_data_size, va.va_flags);
   error = error ? error : EINVAL; goto out;
  }
@@ -7782,7 +7775,7 @@ sweet_x9_ccplan_gate(void)
  if (error) goto out;
  /* MH_MAGIC_64, CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64_ALL, MH_EXECUTE. */
  if (memcmp(hdr, "\xcf\xfa\xed\xfe\x0c\x00\x00\x01\x00\x00\x00\x00\x02\x00\x00\x00", 16)) {
-  error = EINVAL; printf("X9 CCPLAN: Mach-O header mismatch; not touched\n"); goto out;
+  error = EINVAL; printf("X9 %s: Mach-O header mismatch; not touched\n", label); goto out;
  }
  for (i = 0; i < 2; i++) {
   const struct x9_ccgate_edit *e = &edits[i];
@@ -7792,19 +7785,19 @@ sweet_x9_ccplan_gate(void)
    if (memcmp(buf, state ? e->patched : e->orig, e->len)) matches &= ~(1u << state);
  }
  if (matches != 1 && matches != 2) {
-  printf("X9 CCPLAN: mixed/unknown page state mask=0x%x; not touched\n", matches);
+  printf("X9 %s: mixed/unknown page state mask=0x%x; not touched\n", label, matches);
   error = EINVAL; goto out;
  }
  source = matches == 2;
- error = x9_ccplan_page(vp, source ? edits[1].patched : edits[1].orig, ctx);
- if (error) { printf("X9 CCPLAN: logical page 529 mismatch/read errno=%d; not touched\n", error); goto out; }
- if (source == target) { printf("X9 CCPLAN: already %s (factory and page hash)\n", target ? "real dual-plan capable" : "original"); goto out; }
+ error = x9_ccnative_page(vp, page, source ? edits[1].patched : edits[1].orig, ctx);
+ if (error) { printf("X9 %s: logical page %u mismatch/read errno=%d; not touched\n", label, page, error); goto out; }
+ if (source == target) { printf("X9 %s: already %s (code and page hash)\n", label, target ? patched_name : "original"); goto out; }
  if (va.va_flags & UF_COMPRESSED) {
   /* Native HFS setattr with unchanged length converts without truncation.
    * No FWRITE open: HFS's open path uses truncate_okay=1 on failure. */
   VATTR_INIT(&va); VATTR_SET(&va, va_data_size, 24740528);
   error = vnode_setattr(vp, &va, ctx);
-  if (error) { printf("X9 CCPLAN: lossless HFS decompression errno=%d; factory not written\n", error); goto out; }
+  if (error) { printf("X9 %s: lossless HFS decompression errno=%d; code not written\n", label, error); goto out; }
   VATTR_INIT(&va); VATTR_WANTED(&va, va_data_size); VATTR_WANTED(&va, va_flags);
   error = vnode_getattr(vp, &va, ctx);
   if (!error && (va.va_data_size != 24740528 || (va.va_flags & UF_COMPRESSED))) error = EINVAL;
@@ -7815,8 +7808,8 @@ sweet_x9_ccplan_gate(void)
    error = x9_ccgate_io(vp, e->off, buf, e->len, UIO_READ, ctx);
    if (!error && memcmp(buf, source ? e->patched : e->orig, e->len)) error = EINVAL;
   }
-  if (!error) error = x9_ccplan_page(vp, source ? edits[1].patched : edits[1].orig, ctx);
-  printf("X9 CCPLAN: compressed source converted at unchanged size, logical page/header/hash errno=%d\n", error);
+  if (!error) error = x9_ccnative_page(vp, page, source ? edits[1].patched : edits[1].orig, ctx);
+  printf("X9 %s: compressed source converted at unchanged size, logical page/header/hash errno=%d\n", label, error);
   if (error) goto out;
  }
  /* Code first, CodeDirectory hash last. Any failed write keeps its error;
@@ -7825,7 +7818,7 @@ sweet_x9_ccplan_gate(void)
   const struct x9_ccgate_edit *e = &edits[i];
   memcpy(buf, target ? e->patched : e->orig, e->len);
   error = x9_ccgate_io(vp, e->off, buf, e->len, UIO_WRITE, ctx);
-  if (error) { printf("X9 CCPLAN: write %s errno=%d after %d edits\n", e->what, error, i); goto out; }
+  if (error) { printf("X9 %s: write %s errno=%d after %d edits\n", label, e->what, error, i); goto out; }
  }
  error = VNOP_FSYNC(vp, MNT_WAIT, ctx);
  for (i = 0; i < 2 && !error; i++) {
@@ -7833,11 +7826,47 @@ sweet_x9_ccplan_gate(void)
   error = x9_ccgate_io(vp, e->off, buf, e->len, UIO_READ, ctx);
   if (!error && memcmp(buf, target ? e->patched : e->orig, e->len)) error = EIO;
  }
- printf("X9 CCPLAN: %s -> %s, factory and native page 529 hash, readback errno=%d\n",
-     source ? "dual-capable" : "original", target ? "dual-capable" : "original", error);
+ printf("X9 %s: %s -> %s, native page %u hash, readback errno=%d\n", label,
+     source ? patched_name : "original", target ? patched_name : "original", page, error);
 out:
  vnode_put(vp);
  return error;
+}
+
+static int
+sweet_x9_ccplan_gate(void)
+{
+ static const struct x9_ccgate_edit edits[] = {
+  {"plan factory dual-capability lookup", 2170072, 4,
+   {0x08,0x15,0x40,0xf9}, {0x08,0x39,0x40,0xf9}},
+  {"native page 529 hash", 24525396, 32,
+   {0xfa,0xef,0x77,0x52,0x63,0xc4,0xa2,0xc3,0x02,0x1c,0x4d,0x98,0xe9,0x29,0x83,0xf9,0xc1,0x93,0x8f,0x3c,0x8d,0x0d,0x7c,0xd4,0x10,0xe9,0x11,0x6b,0xed,0x6b,0x4d,0xa5},
+   {0xcc,0x41,0x56,0x0b,0x05,0x60,0xe5,0x00,0xe4,0xc9,0xc8,0x1b,0xa2,0x1a,0x29,0x8e,0xbe,0x5a,0x96,0x7a,0x4c,0xfd,0x2e,0xb8,0xf6,0x2f,0x1e,0xe6,0xa7,0x91,0x4a,0x4b}},
+ };
+ const int target = sweet_x9_arg("x9_ccgate", 1) == 1 && sweet_x9_arg("x9_dual_sim", 0) == 1;
+ return x9_ccnative_gate("CCPLAN", 529, edits, target, "real dual-plan capable");
+}
+
+/* Raw installation adds signed CBN files, but the stock root already carries
+ * a persistent system-directory list without CBN/46015. CommCenter scan at
+ * 10051808c..0bc treats that cache as proof that no enumeration is needed.
+ * Ignore ONLY that skip decision. The cached object's normal release, live
+ * filesystem enumeration, device eligibility and bundle signature checks
+ * remain. No user preferences, bundle contents or card identities are edited.
+ * Arm only after this boot's complete original CBN install/hash/alias checks;
+ * ccgate=2 or no qualified CBN restores the original instruction/page hash. */
+static int
+sweet_x9_ccbundle_scan(void)
+{
+ static const struct x9_ccgate_edit edits[] = {
+  {"carrier-directory scan decision", 5341328, 4,
+   {0xe8,0x23,0x40,0xf9}, {0x08,0x00,0x80,0xd2}},
+  {"native page 1304 hash", 24550196, 32,
+   {0x6d,0x71,0xd9,0xff,0x41,0xab,0x73,0x3b,0x03,0x14,0xee,0x5e,0x04,0xc4,0xe1,0x76,0xcf,0x69,0x2c,0x73,0x02,0x9f,0x3a,0xc0,0xcc,0x03,0x18,0x5e,0x94,0x71,0x0a,0xd5},
+   {0x36,0xa2,0x42,0xef,0x18,0x8b,0xde,0xfa,0x7d,0x0e,0xa7,0x0c,0xd5,0x5b,0x9b,0x34,0x12,0x16,0xfe,0x95,0x22,0x1b,0x80,0x92,0xab,0xd0,0xdf,0x58,0x84,0x62,0x66,0x29}},
+ };
+ const int target = sweet_x9_arg("x9_ccgate", 1) == 1 && x9_cbn_install_verified;
+ return x9_ccnative_gate("CCBUNDLE", 1304, edits, target, "live carrier-directory scan");
 }
 
 static int
@@ -8732,6 +8761,8 @@ load_init_program_at_path(proc_t p, user_addr_t scratch_addr, const char* path)
 	 if(!ccgate_error){
 	  int ccplan_error=sweet_x9_ccplan_gate();
 	  if(ccplan_error)printf("X9 CCPLAN: factory not changed errno=%d; continuing boot\n",ccplan_error);
+	  int ccbundle_error=sweet_x9_ccbundle_scan();
+	  if(ccbundle_error)printf("X9 CCBUNDLE: native scan not changed errno=%d; continuing boot\n",ccbundle_error);
 	 }
 	 int siri_error=sweet_x9_siri_off(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	 if(siri_error)printf("X9 SIRI: launchd.plist not changed errno=%d; continuing boot\n",siri_error);
