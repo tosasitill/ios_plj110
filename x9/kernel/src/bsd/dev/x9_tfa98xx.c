@@ -91,7 +91,10 @@ int x9_tfa_select_profile(const void *data,uint32_t size,const char *name,struct
     for(unsigned i=0;i<2;i++) {
         uint32_t d=le32(p+46+i*4),off=d&0xffffffu;
         if((d>>24)!=0 || range(&c,off,12))return EINVAL;
-        unsigned slave=p[off+2];if(p[off+1]!=6 || (slave!=0x34 && slave!=0x35))return ENXIO;
+        unsigned slave=p[off+2];/* Container bus is a transport-kind flag, NOT Linux adapter number:
+         * tfaRunStartup skips I2C when dev->bus != 0. Physical I2C6 belongs
+         * to the board lease, never to this untrusted descriptor field. */
+        if(p[off+1]!=0 || (slave!=0x34 && slave!=0x35))return ENXIO;
         unsigned idx=slave-0x34;if(seen&(1u<<idx))return EINVAL;seen|=1u<<idx;
         result.device_offset[idx]=off;
         if(string_at(&c,le32(p+off+8),result.device_name[idx]))return EINVAL;

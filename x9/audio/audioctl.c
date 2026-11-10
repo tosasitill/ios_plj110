@@ -67,7 +67,7 @@ static int inspect_container(const char *path,const char *profile) {
     size_t n=fread(data,1,(size_t)length,f);int read_error=ferror(f);fclose(f);
     struct x9_tfa_profile p;int e=n==(size_t)length && !read_error?
         x9_tfa_select_profile(data,(uint32_t)length,profile,&p):1;
-    if(e)fprintf(stderr,"container rejected: errno=%d (requires exact dual-I2C6 profile, size, CRC)\n",e);
+    if(e)fprintf(stderr,"container rejected: errno=%d (requires exact dual-I2C-kind/bus0 profile, size, CRC)\n",e);
     else for(unsigned i=0;i<2;i++)printf("PA6-%02x %s profile=%s CRC=%08x register-prefix=%u opaque=%u\n",
         0x34+i,p.device_name[i],p.profile_name[i],p.crc,p.prefix_items[i],p.opaque_items[i]);
     memset(data,0,(size_t)length);free(data);

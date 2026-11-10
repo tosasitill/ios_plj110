@@ -158,7 +158,7 @@ wake lease 验证全电源链稳定且 DPSW req/ack bit0 均为0，不把 WFI �
 | 文件／入口 | 已实现 | 仍需实际板级提供者 |
 |---|---|---|
 | `x9_speaker_afe.{c,h}` | DL24/OUT4 masked journal、32-bit I2S slots/S16、48k、CONN116/117 DL24 route；prefill 后 DMA start、period copy/cache、稳定 CUR、高低地址/半环歧义检查；mute/disable/quiesce/restore | AUDIO/VLP APLL2、pad/共享资源 lease、DMA bus/EMI/cache、双 PA mute、权威 DMA quiesce |
-| `x9_tfa98xx.{c,h}` | PM container total-size/CRC、双 I2C6 地址、明确名字的两侧 profile、descriptor 边界；真实 reg03 revision 比对、AMPE=0 且读回；双侧预检白名单 register/bitfield prefix | 实际完整 revision、immutable container、per-revision 白名单、I2C6/reset/rails 互斥；Probus DSP file/patch/校准/boost 未执行 |
+| `x9_tfa98xx.{c,h}` | PM container total-size/CRC、双 I2C 类型（container bus=0）的地址、明确名字的两侧 profile、descriptor 边界；真实 reg03 revision 比对、AMPE=0 且读回；双侧预检白名单 register/bitfield prefix | 实际完整 revision、immutable container、per-revision 白名单、I2C6/reset/rails 互斥；Probus DSP file/patch/校准/boost 未执行 |
 
 AFE start 必须预填至少960帧后才使能 DMA；PA 始终由外部 board 维持 muted。
 组件**没有调用 `x9_audio_register_backend`**：最终 service/HAL 还须接预填 timeline、
@@ -167,6 +167,10 @@ ON 清零不是全部 outstanding AXI DMA 已结束的证据，必须有真实 `
 才恢复地址／释放 lease；任何失败都保留资源。没有共享 lease 提供者时不会触碰 AFE，
 也不与麦克风 VUL1/ADDA 争寄存器。captured DT 的 OUT4 是2ch/sync0/mclk0、
 `etdm-vlp[4]=1`，不能把普通非VLP APLL2 回调充当已接通的板级资源。
+
+**container 的 `bus` 不是 Linux I2C adapter号**：厂商 `tfaRunStartup` 对
+`dev->bus != 0` 跳过I2C初始化，所以 parser要求bus=0；I2C6由board lease选择，
+不能把DT的adapter6硬塞到container字段。
 
 功放 reset 的 DT phandle `0x25` 已解析为 **MT6661-3 PMIC pinctrl** 的 GPIO10/11，
 不是 AP GPIO10/11。不能直接写 AP GPIO来“解除 reset”。真实 I2C6 gate、

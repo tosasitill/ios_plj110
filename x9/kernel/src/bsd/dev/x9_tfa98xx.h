@@ -9,7 +9,7 @@ struct x9_tfa_profile {
     char device_name[2][64], profile_name[2][64];
 };
 /* Exact profile name is required; no default/fallback/reverse profile guess.
- * CRC, size, both I2C6 devices and selected profile descriptors checked.
+ * CRC, size, both I2C-kind (bus=0) devices and selected profile descriptors checked.
  * Output changes only after full validation; never a hardware-ready flag. */
 int x9_tfa_select_profile(const void *,uint32_t,const char *,struct x9_tfa_profile *);
 #if defined(KERNEL)
