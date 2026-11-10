@@ -25,6 +25,10 @@ int x9_adsp_mt6993_speaker_halted_validate(uint64_t ticket);
  * actual unmap, while caller still owns the same ticket. No power acquisition. */
 int x9_adsp_mt6993_shared_hold(uint64_t ticket,uint64_t *lease);
 int x9_adsp_mt6993_shared_drop(uint64_t ticket,uint64_t lease);
+/* Independent IPI_DMA RAM child, not AUDIO_COMMON. Same halt/unmap/drop
+ * requirement; coexistence with PCM must not reuse its single child token. */
+int x9_adsp_mt6993_ipi_hold(uint64_t ticket,uint64_t *lease);
+int x9_adsp_mt6993_ipi_drop(uint64_t ticket,uint64_t lease);
 /* Independent AUDIO/APLL child, alongside the shared-RAM child. Holds the
  * same board parents but never claims another AP ticket. */
 int x9_adsp_mt6993_clock_hold(uint64_t ticket,uint64_t *lease);

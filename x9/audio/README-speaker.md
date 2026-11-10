@@ -329,10 +329,12 @@ logical sample0 anchor。时间戳来自物理游标和 nominal timebase，未�
 
 `x9_audio_dsp.{c,h}` 已提供独立的 MTK `audio_ipi` 字节编码、解码和 ACK
 匹配：magic `0x8888`、16 B header、最多 96 B payload、明确 source/target
-4-bit 布局，支持 MSG_ONLY/PAYLOAD；DMA 描述符尚未支持，不接受用户物理地址。
+4-bit 布局，支持 MSG_ONLY/PAYLOAD以及56B region-index DMA描述符的字节codec，
+不接受用户物理地址。普通`x9_adsp_request`仍拒绝DMA；只有native IPI DMA所有者的
+generation-bound physical guard可以发送。HAL/writeback DMA地址形式仍不支持。
 OPEN/CLOSE/PREPARE/HWPARAM/START/STOP 等 ID 来自 OPPO 协议定义。
-这仍不是 OPEN→HWPARAM→PREPARE→START 播放状态机；DSP shared-DMA 描述符、
-AFE 和功放需要下一阶段实现。外层 mailbox 传输现在由
+PCM的 OPEN→HWPARAM→PREPARE→START 状态机已在`x9_dsp_pcm`／`x9_dsp_playback`，
+但完整AFE、双PA与firmware output authority仍未接齐。外层 mailbox 传输由
 `x9_adsp_transport.{c,h}` 实现，**mode2 已有 ADSP 板级注册者，但默认不执行 MMIO**。
 
 ### 接入有界 ADSP mailbox
@@ -346,13 +348,17 @@ AFE 和功放需要下一阶段实现。外层 mailbox 传输现在由
 |---|---|
 | `x9_adsp_boot(core)` | 真实 halt/reset→清旧 RX→检查 TX 已空→start→等待新 READY，最多 2 秒 |
 | `x9_adsp_request(core, request, reply, timeout_ms)` | 单请求，先排除旧 ACK；TX 消费最多 1 ms，NEED_ACK 最多 250 ms |
+| `x9_adsp_request_guarded(..., guard)` | native IPI DMA专用；相同generation、完整字节descriptor及fresh physical guard，发送／消费与ACK等待／回复发布均重新资格化；不授Ready |
 | `x9_adsp_poll(core)` | 单包接收；无消息返回 EAGAIN，不更新播放 cursor |
 | `x9_adsp_next_event(core, event)` | 取 logger/timesync/audio 异步包；最多 16 包，溢出 fail-closed |
 | `x9_adsp_shutdown(core)` | 先 halt/reset 再撤 power；reset 失败不释放仍可能使用的资源 |
 | `audioctl dsp-status` | iOS 只读查看两个 core 的状态、generation、TX/RX/ACK、超时和错误计数 |
 
 外层头是四个 LE u32（16 B），发送 IPI ID=9、options=`0xffff0000`、
-reserved=`0xdeadbeef`；其后才是 inner audio_ipi，不复制 host data 指针。
+reserved=`0xdeadbeef`；其后是明确编码的 inner audio_ipi，不序列化host struct。
+region-DMA按OPPO union ABI显式携带boot-lifetime私有staging的legacy `dma_addr`
+token；**不是DSP可解引用地址**，真实supplier必须证明处理的是region-index协议，
+不拿这个token替代pool bus或允许用户指针。
 mbox0/2 是 AP→DSP，mbox1/3 是 DSP→AP；**每 slot 是 4 B，`is64d` 不改变它**。
 RX 主 pin 60 slots=240 B，末尾 VP pin 的 16 B 不碰。先验证 RX 长度，复制到
 私有包后才 CLR；不把整个 direct-copy 缓冲区长度当成 inner payload 长度。
@@ -462,6 +468,7 @@ lease空间不是CSR，ticket细节另读resource-status；lease-error0时guard�
 |---|---|---|
 | `x9_dsp_pcm.{c,h}` | 96B PCM descriptor与32B shared-DRAM record字节codec；真实transport上的INIT／share／OPEN／HWPARAM／AFE PCM配置／PREPARE／DLCOPY／START／STOP／HWFREE／CLOSE；generation-bound消费消息、双快照DTOA与输入环容量检查 | unified AP lease下实际共享DRAM/MPU/cache、task/core绑定与生产调用者；DSP消费不能代替AFE物理played |
 | `x9_dsp_playback.{c,h}` | singleton生产PCM生命周期：shared子租约、真实绑定／prepare／预填／IRQ bind／START、同session锁、定向IRQ quiesce及真实producer halt、IRQ引用退休后才drop shared子租约 | 仍需combined backend调用；不注册Ready、不配置双PA供电／profile、不提供output committed或AFE enable |
+| `x9_ipi_dma.{c,h}` | 从当前handoff独立IPI_A carveout取得native board child；Normal-WB header/table/TX内层映射，动态TASK_SCENE_SIZE／384B region、128B读写索引、DMA_INIT→UPDATE ACK、可信参数副本→PoC→写索引→guarded SET ACK→实际DSP read_idx；物理halt后才unmap/drop | 当前firmware/controller/runtime scene／EMI与pool长期排他、真实参数信任和reply语义supplier无默认实现；不加载参数、不做GET/校准、不注册Ready |
 | `x9_speaker_afe.{c,h}` | explicit DL24=10或DL_24CH=14→OUT4逐字段journal；32-bit I2S slots/S16、48k；AP transition ticket、platform v6真实lease/config guard、combined producer halt；AP copy与DSP外部生产者start分离，DSP模式不碰输出DMA内存，watcher更新独立output committed边界／真实CUR；完全退休后新generation可rebind不同VA | AUDIO/VLP APLL2、pad/物理共享资源lease、DMA bus/EMI/cache、双PA mute、权威selected memif DMA quiesce，以及当前firmware实际output publication supplier |
 | `x9_tfa_plj110.{c,h}` | root 显式只读 reg03；PMIF-P SID3 reset/SID5 左供电快照，已开启 I²C6/共享 DMA clock 与 pads 校验、2 CSR bank/1 DMA idle、FIFO WRRD 1+2 BE、逐字段总线恢复 | 不具备双侧供电/reset/write lease；右 rail、真实 binding/profile/校准仍待确认 |
 | `x9_i2c6.h/x9_i2c6_native.inc` | 与只读probe共用controller mutex；真实PA epoch下游child、reg8/value16 BE FIFO read/write、双CSR bank/DMA资格、last-prior journal、terminal-only no-replay清理与halt/drain前后屏障；iOS缓存状态 | 必须实际pin住I2C6/APDMA clocks、mux/PLL、GPIO114/115与所有master互斥，现无真实supplier或combined调用者；不授profile/校准/unmute |
@@ -1151,6 +1158,28 @@ packing必须明确为 `be24` 或 `le32`；输出byte offset和opaque command，
 generic register-prefix bus准入现在与native PA共用完整stepping表；低字节family匹配
 不再允许未知高字节revision进入读写路径。完整型号匹配仍不替代实际reg03、reset epoch、
 双侧rails／I2C6长期租约或revision-specific register policy。
+
+### 将参数发布到真实 IPI DMA region
+
+`x9_ipi_dma` 已接实际native board／transport调用，不是模拟队列。**当前没有安装
+memory／parameter／reply supplier，所以没有执行map、注册或SET，更没有校准／解静音。**
+它仅处理core-A的IPI_A carveout；AUDIO_COMMON PCM、IPI_B和AFE输出均不是此region。
+
+| 顺序／入口 | 实现与边界 |
+|---|---|
+| `x9_ipi_dma_acquire(policy)` | 同Speaker ticket／fresh READY generation，先验证当前firmware task count、controller和runtime CALL_FINAL14或AUDPLAYBACK32、EMI／pool排他，再pin独立board IPI child。只map16K-aligned header/table/TX prefix为Normal-WB，拒绝WC/Device alias，不清整个1.5MiB pool |
+| Table | header128B；每task有AP→DSP和DSP→AP两个384B region，read_idx在+128、write_idx在+256。`checksum=128+task_count*2*384`只是字段offset，不是CRC／校准证明；pool_offset按其字段地址向上128B对齐，不能按sizeof误算 |
+| `x9_ipi_dma_register(ticket,generation)` | 一次DIRECT DMA_INIT `0xadd0` 携带LE64 bus/bytes，再NEED_ACK UPDATE `0xadd1` 携带task_scene。DIRECT消费不等于初始化被接受；UPDATE回复必须由实际firmware语义supplier验证 |
+| `x9_ipi_dma_set(...)` | 整包解析／转换为私有wire副本，再由真实参数supplier确认对应profile／silicon／保护状态；只写AP TX ring并补齐128B padding，不把多个消息拆成普通payload |
+| 发布与消费 | 数据先CVAC到PoC，再发布AP write_idx；发送72B inner DMA SET `0x204`（rw_idx是发布前index，data_size是真实字节数，type3），guard贯穿TX／ACK。ACK语义检查后还须IVAC独立read_idx cache line、等实际DSP消费到expected end；不清DSP拥有的index |
+| 失败与release | 单请求、不pipelining。非法index不modulo修复；任何已发布后的EAGAIN／timeout／未知ACK保留首错、映射和parent pin，不能撤回write_idx／重新发送／free。外层先mute、AFE disable/drain并实际halt，release重新验证同generation Offline＋物理halt＋独立memory authority后才unmap/drop |
+
+Plain mailbox API仍不能发DMA；byte codec成功、DIRECT消费、UPDATE／SET ACK和read_idx
+推进都不证明speaker Ready或物理出声。legacy reserve `dma_addr`严格绑定本组件的
+boot-lifetime私有staging token；不是bus地址，不接受user pointer或HAL/writeback地址形态。
+GET `0x205`属于另一种16B `aud_data_t` payload／shared回写事务，**尚未接入**，
+不会借SET成功伪造校准读数。三个supplier均不得反向重入IPI DMA；memory callback运行于
+transport mutex内，禁止调用transport/status或任何会反向获取本组件锁的路径。
 
 ## 参考与证据边界
 

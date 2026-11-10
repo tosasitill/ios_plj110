@@ -322,14 +322,26 @@ int x9_adsp_next_event(uint32_t core,struct x9_adsp_event *e)
     }
     lck_mtx_unlock(locks[core]); return r;
 }
-int x9_adsp_request(uint32_t core,const struct x9_dsp_message *request,
-                    struct x9_dsp_message *reply,uint32_t timeout_ms)
+static int request_qualify(struct transport *t,uint32_t stage,
+    const struct x9_adsp_request_guard *g,const struct x9_dsp_message *m)
+{
+    int e=qualify(t,stage);
+    if(!e && g) {
+        e=t->status.generation!=g->generation?ESTALE:g->validate(g->context,m);
+        if(e==EAGAIN)e=EIO;
+        if(e)e=poison(t,e);
+    }
+    return e;
+}
+static int request_common(uint32_t core,const struct x9_dsp_message *request,
+    struct x9_dsp_message *reply,uint32_t timeout_ms,const struct x9_adsp_request_guard *guard)
 {
     if(core>=2 || !request || request->source!=1 || request->target!=2 ||
        request->ack==X9DSPAckBack || (request->ack==X9DSPNeedAck && !reply) ||
        !timeout_ms || timeout_ms>250)return EINVAL;
-    /* Own a private snapshot before locking or touching hardware. encode
-     * rejects DMA descriptors and bounds payload. Zero rounded MMIO tail. */
+    if(request->type==X9DSPDMA && !guard)return ENOTSUP;
+    /* Own a private snapshot before locking or touching hardware. DMA is
+     * region-index only and requires a fresh physical guard. */
     struct x9_dsp_message message=*request;
     uint8_t wire[X9_DSP_MESSAGE_MAX]={0}; uint32_t bytes=sizeof(wire);
     int e=x9_dsp_encode(&message,wire,&bytes); if(e)return e;
@@ -340,18 +352,20 @@ int x9_adsp_request(uint32_t core,const struct x9_dsp_message *request,
         begin_operation(t);
         e=t->hw.wake_lock(t->hw.context);
         if(e){t->status.wake_errors++;poison(t,e);lck_mtx_unlock(locks[core]);return e;}
+        e=request_qualify(t,X9DSPGuardSend,guard,&message);
         /* Drain at most one preexisting event. If more remain, return EAGAIN
          * without a doorbell. A stale ACK cannot match the new request. */
         struct x9_adsp_event event;
-        int r=receive(t,&event,X9DSPGuardSend);
+        int r=e?e:receive(t,&event,X9DSPGuardSend);
         if(!r)e=dispatch(t,&event,NULL,NULL,&matched);
         else if(r!=EAGAIN)e=r;
         if(!e && rd(t->hw.rx+CLR))e=EAGAIN;
         if(!e && rd(t->hw.tx+SET))e=poison(t,EBUSY);
-        if(!e)e=qualify(t,X9DSPGuardSend);
+        if(!e)e=request_qualify(t,X9DSPGuardSend,guard,&message);
         if(!e) {
-            /* mtk_ipi_msg_hd: four LE u32, followed by the inner audio_ipi.
-             * Never copy the host struct's data pointer into mailbox SRAM. */
+            /* mtk_ipi_msg_hd: four LE u32, followed by explicit audio_ipi
+             * bytes, never a copied host struct. Guarded region-DMA has an
+             * explicit legacy opaque dma_addr token, not a DSP address. */
             wr(t->hw.tx,AUDIO_IPI); wr(t->hw.tx+1,bytes);
             wr(t->hw.tx+2,0xffff0000u); wr(t->hw.tx+3,0xdeadbeefu);
             for(uint32_t i=0;i<bytes;i+=4)wr(t->hw.tx+4+i/4,get32(wire+i));
@@ -369,7 +383,7 @@ int x9_adsp_request(uint32_t core,const struct x9_dsp_message *request,
                 }
                 /* Once consumed, SET can only become busy from an unexpected
                  * other owner. No pipelining is allowed on this transport. */
-                e=qualify(t,X9DSPGuardWait);if(e)break;
+                e=request_qualify(t,X9DSPGuardWait,guard,&message);if(e)break;
                 now=mach_absolute_time();
                 if((waiting_consumption && now>=consumed_by) || (waiting_ack && now>=acked_by)) {
                     t->status.timeouts++;e=poison(t,ETIMEDOUT);break;
@@ -397,8 +411,19 @@ int x9_adsp_request(uint32_t core,const struct x9_dsp_message *request,
                 if(!consumed)delay(10); else pause_poll();
             }
         }
+        if(!e)e=request_qualify(t,X9DSPGuardWait,guard,&message);
         e=finish_wake(t,e);
         if(!e && message.ack==X9DSPNeedAck)*reply=answer;
     }
     lck_mtx_unlock(locks[core]); return e;
+}
+int x9_adsp_request(uint32_t core,const struct x9_dsp_message *request,
+                    struct x9_dsp_message *reply,uint32_t timeout_ms)
+{return request_common(core,request,reply,timeout_ms,NULL);}
+int x9_adsp_request_guarded(uint32_t core,const struct x9_dsp_message *request,
+    struct x9_dsp_message *reply,uint32_t timeout_ms,const struct x9_adsp_request_guard *guard)
+{
+    if(!guard || guard->version!=1 || !guard->generation || !guard->validate)return EINVAL;
+    const struct x9_adsp_request_guard g=*guard;
+    return request_common(core,request,reply,timeout_ms,&g);
 }

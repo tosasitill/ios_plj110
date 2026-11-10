@@ -6579,6 +6579,11 @@
    "template": "bsd-c-11"
   },
   {
+   "name": "x9_ipi_dma.o",
+   "source": "bsd/dev/x9_ipi_dma.c",
+   "template": "bsd-c-11"
+  },
+  {
    "name": "x9_adsp_transport.o",
    "source": "bsd/dev/x9_adsp_transport.c",
    "template": "bsd-c-11"

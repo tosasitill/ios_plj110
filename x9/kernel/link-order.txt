@@ -1156,4 +1156,5 @@ x9:x9_pa_reset.o
 x9:x9_pa_vdd_left.o
 x9:x9_tfa98xx.o
 x9:x9_tfa_multimsg.o
+x9:x9_ipi_dma.o
 x9:SweetX9Audio.o

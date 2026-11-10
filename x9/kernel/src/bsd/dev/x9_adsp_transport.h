@@ -76,6 +76,22 @@ int x9_adsp_release(uint32_t core);
  * DSP reply param1/param2 are returned unchanged, NOT assumed to mean errno. */
 int x9_adsp_request(uint32_t core, const struct x9_dsp_message *,
                     struct x9_dsp_message *reply, uint32_t ack_timeout_ms);
+/* Private physical-DMA caller only. Caller holds its native region mutex;
+ * callback context/memory remain pinned through faults and actual halt.
+ * Validate this exact generation, registered pool/table/scene/indices and
+ * immutable command policy, without re-entering transport or caller mutex.
+ * Runs under transport lock before TX, throughout consumption/ACK wait and
+ * before reply publication. EAGAIN from validator is fatal. No default or
+ * userspace validator; plain x9_adsp_request still rejects DMA.
+ * Lock: native IPI DMA -> transport -> board / physical-memory supplier. */
+struct x9_adsp_request_guard {
+    uint32_t version,generation;
+    void *context;
+    int (*validate)(void *,const struct x9_dsp_message *);
+};
+int x9_adsp_request_guarded(uint32_t core,const struct x9_dsp_message *,
+    struct x9_dsp_message *reply,uint32_t ack_timeout_ms,
+    const struct x9_adsp_request_guard *);
 /* Quarantine blocks mailbox sends; it does not mute a PA or quiesce AFE.
  * The eventual speaker backend must stop those on EVERY transport error. */
 int x9_adsp_poll(uint32_t core); /* bounded single-packet receive */

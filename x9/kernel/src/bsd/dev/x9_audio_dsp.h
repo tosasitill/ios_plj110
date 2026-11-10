@@ -7,6 +7,7 @@
 #define X9_DSP_HEADER 16u
 #define X9_DSP_PAYLOAD_MAX 96u
 #define X9_DSP_MESSAGE_MAX 112u
+#define X9_DSP_DMA_INFO_BYTES 56u /* reserve16, hal16, rw_idx4, size4, wb16 */
 enum { X9DSPOnly, X9DSPPayload, X9DSPDMA };
 enum { X9DSPBypass, X9DSPNeedAck, X9DSPAckBack, X9DSPDirect };
 enum {
@@ -20,8 +21,15 @@ struct x9_dsp_message {
     uint32_t param1, param2;
     uint8_t payload[X9_DSP_PAYLOAD_MAX];
 };
-/* return 0 or errno. DMA descriptors deliberately unsupported until their
- * physical carve-out/checksum/128-byte index ABI is implemented. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+/* Return 0 or errno. DMA encoding admits ONLY the region-index form:
+ * legacy opaque dma_addr in reserve[0..7], rest of reserve/hal/writeback
+ * zero, 128B-aligned rw_idx, data_size=param1>1. The legacy token is NOT a
+ * DMA address or a pointer that decode may dereference.
+ * Decode preserves the 56B byte descriptor, never dereferences addresses.
+ * Encoding/decoding grants NO physical-region or DMA-send authorization. */
 int x9_dsp_encode(const struct x9_dsp_message *, void *, uint32_t *length);
 int x9_dsp_decode(const void *, uint32_t length, struct x9_dsp_message *);
 /* Match ACK against the one outstanding serialized request. No invented
@@ -29,4 +37,7 @@ int x9_dsp_decode(const void *, uint32_t length, struct x9_dsp_message *);
  * that mailbox session before another identical request can be issued. */
 int x9_dsp_ack_matches(const struct x9_dsp_message *request,
                        const struct x9_dsp_message *reply);
+#ifdef __cplusplus
+}
+#endif
 #endif
