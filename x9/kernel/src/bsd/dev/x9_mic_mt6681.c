@@ -94,6 +94,7 @@ static int settings(struct x9_mic_mt6681 *c,const struct setting *s,unsigned n)
 }
 #define SETTINGS(c,a) settings((c),(a),sizeof(a)/sizeof((a)[0]))
 static void first_error(int *e,int next){if(!*e && next)*e=next;}
+#include "x9_mic_mt6681_analog.inc"
 static int restore_audio(struct x9_mic_mt6681 *c)
 {
     int e=0;
@@ -124,7 +125,13 @@ int x9_mic_mt6681_unprepare(struct x9_mic_mt6681 *c)
 {
     if(c->poisoned)return c->status.restore_errno?c->status.restore_errno:EIO;
     if(!c->touched)return c->poisoned?EIO:0;
-    int e=restore_audio(c);
+    int e=analog_restore(c);
+    /* Do not cut transport/clocks after an uncertain analog shutdown. */
+    if(!e)e=restore_audio(c);
+    if(e) {
+        c->poisoned=true;c->status.restore_errno=e;
+        c->status.flags|=X9_MIC_HW_RESTORE_FAILED;return e;
+    }
     /* Actual protection keys, NOT vendor's misleading keylock_set name. */
     for(unsigned i=0;i<sizeof(keys)/sizeof(keys[0]);i++)
         first_error(&e,write8(c,keys[i].reg,0));

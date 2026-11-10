@@ -101,6 +101,31 @@ struct x9_mic_afe_status {
     int64_t smc_result[4]; /* INIT(0), SIDEBANDS(7), SRAM_REQ(3), REL(4) */
 };
 #define X9_MIC_GET_AFE _IOR('M', 0x97, struct x9_mic_afe_status)
+/* Named AIN0/PGA_L/ADC_L only: board microphone position is unproven.
+ * Ordinary DCC/2.7V bias0+2, bounded RC readback then power-off restore.
+ * Shares the cold diagnostic budget; no UL SRC/TX/DMA or READY publication. */
+#define X9_MIC_ANALOG_L _IO('M', 0x98)
+#define X9_MIC_ANALOG_ATTEMPTED 1u
+#define X9_MIC_ANALOG_PREPARED 2u
+#define X9_MIC_ANALOG_RC_OK 4u
+#define X9_MIC_ANALOG_RESTORED 8u
+#define X9_MIC_ANALOG_RETAINED 16u
+enum x9_mic_analog_stage {
+    X9_MIC_ANALOG_UNTRIED, X9_MIC_ANALOG_ID, X9_MIC_ANALOG_BASELINE,
+    X9_MIC_ANALOG_INIT, X9_MIC_ANALOG_CLOCKS, X9_MIC_ANALOG_BIAS,
+    X9_MIC_ANALOG_DCC, X9_MIC_ANALOG_PGA, X9_MIC_ANALOG_ADC,
+    X9_MIC_ANALOG_RC, X9_MIC_ANALOG_RESTORE, X9_MIC_ANALOG_OFF
+};
+struct x9_mic_analog_status {
+    uint32_t version, stage, flags, last_errno, restore_errno;
+    uint32_t hwcid_h, hwcid_l, ain, adc, mic_type, bias_mv, gain_x2, rc_sw, rc_monitor;
+    uint32_t pga_active, adc_active, bias0_active, bias2_active, dcc_active;
+    uint32_t clksq_active, clocks_active;
+    uint32_t pga_after, adc_after, bias0_after, bias2_after, dcc_after;
+    uint32_t journal_count, journal_restored, last_register, reserved;
+    uint64_t elapsed_ns;
+};
+#define X9_MIC_GET_ANALOG _IOR('M', 0x99, struct x9_mic_analog_status)
 #ifdef KERNEL
 #include <stdbool.h>
 /* Thread context only. start/stop are serialized and called WITHOUT the PCM

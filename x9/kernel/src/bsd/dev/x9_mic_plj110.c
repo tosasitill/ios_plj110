@@ -343,7 +343,7 @@ static int restore(struct power_journal *j)
     return 0;
 }
 static int board_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_status *s,
-    struct x9_mic_afe_status *a)
+    struct x9_mic_afe_status *a,struct x9_mic_analog_status *analog)
 {
     if(s->flags&X9_MIC_BOARD_ATTEMPTED)return EALREADY;
     bzero(s,sizeof(*s));s->version=1;s->flags=X9_MIC_BOARD_ATTEMPTED;s->stage=X9_MIC_BOARD_BASELINE;
@@ -387,10 +387,23 @@ static int board_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_stat
         afe_ao_snapshot(j->cal);
         if(!j->cal->stuck)afe_reg_snapshot(j->cal);
     }
+    if(!e && analog) {
+        e=afe_access(j->cal);
+        if(!e)e=x9_mic_mt6681_analog_l(&j->codec);
+        *h=j->codec.status;
+    }
     s->last_errno=e;if(e && !h->last_errno)h->last_errno=e;
     uint32_t last_reg=s->last_register,codec_reg=h->last_register;
     if(!e)s->stage=X9_MIC_BOARD_RESTORE;
     int off=restore(j);
+    if(analog) {
+        *analog=j->codec.analog;
+        if(!analog->version)analog->version=1;
+        if(off && j->codec.analog_owned) {
+            analog->flags|=X9_MIC_ANALOG_RETAINED;
+            if(!analog->restore_errno)analog->restore_errno=off;
+        }
+    }
     if(j->cal) {
         afe_ao_snapshot(j->cal);
         if(off && !(a->flags&X9_MIC_AFE_RESTORED)) {
@@ -410,17 +423,24 @@ static int board_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_stat
     if(j->gpio)s->gpio9_after=pin_state(j,9);
     if(j->vlp)s->sleep_after=rr(j->vlp,0x92c);
     if(j->gate)s->gate_after=rr(j->gate,0xe10);
-    printf("X9 MIC %s: stage=%u flags=%x errno=%u restore=%u id=%x ready=%x vaud18=%x gpio9=%x/%x bus=%x (no ADC/DMA)\n",
-        a?"CALIBRATE":"POWER",s->stage,s->flags,s->last_errno,s->restore_errno,h->swcid,h->internal_ready,
+    printf("X9 MIC %s: stage=%u flags=%x errno=%u restore=%u id=%x ready=%x vaud18=%x gpio9=%x/%x bus=%x (no PCM/DMA)\n",
+        analog?"ANALOG-L":a?"CALIBRATE":"POWER",s->stage,s->flags,s->last_errno,s->restore_errno,h->swcid,h->internal_ready,
         h->vaud18_monitor,s->gpio9_before,s->gpio9_after,s->bus_status);
     if(j->cal)printf("X9 MIC AFE: stage=%u flags=%x errno=%u restore=%u AP=%x/%x ACK=%x/%x VLP=%x/%x phases=%d/%d cycles=%d/%d scanned=%u\n",
         a->stage,a->flags,a->last_errno,a->restore_errno,a->ap_vote_before,a->ap_vote_after,
         a->ack_before,a->ack_after,a->vlp_before,a->vlp_after,h->chosen_phase[0],h->chosen_phase[1],
         h->cycle[0],h->cycle[1],h->scanned_phases);
+    if(analog)printf("X9 MIC ANALOG: stage=%u flags=%x errno=%u restore=%u HWCID=%x/%x AIN0/ADC_L DCC 2700mV 0dB RC=%x journal=%u/%u (not physical mic/PCM proof)\n",
+        analog->stage,analog->flags,analog->last_errno,analog->restore_errno,
+        analog->hwcid_h,analog->hwcid_l,analog->rc_monitor,
+        analog->journal_restored,analog->journal_count);
     return off?off:e;
 }
 int x9_mic_plj110_power_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_status *s)
-{return board_probe(h,s,NULL);}
+{return board_probe(h,s,NULL,NULL);}
 int x9_mic_plj110_calibrate(struct x9_mic_hardware_status *h,struct x9_mic_board_status *s,
     struct x9_mic_afe_status *a)
-{return board_probe(h,s,a);}
+{return board_probe(h,s,a,NULL);}
+int x9_mic_plj110_analog_l(struct x9_mic_hardware_status *h,struct x9_mic_board_status *s,
+    struct x9_mic_afe_status *a,struct x9_mic_analog_status *analog)
+{return board_probe(h,s,a,analog);}

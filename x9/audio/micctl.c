@@ -11,6 +11,7 @@
 #include <unistd.h>
 _Static_assert(sizeof(struct x9_mic_board_status)==96,"board ABI size");
 _Static_assert(sizeof(struct x9_mic_afe_status)==192,"AFE ABI size");
+_Static_assert(sizeof(struct x9_mic_analog_status)==128,"analog ABI size");
 static int hardware_status(int fd)
 {
     struct x9_mic_hardware_status h={0};
@@ -44,6 +45,16 @@ static int hardware_status(int fd)
             for(unsigned i=0;i<5;i++)printf("afe pin%u=%#x/%#x\n",pins[i],a.pins_before[i],a.pins_after[i]);
         }
     } else if(errno!=ENOTTY){perror("AFE status");return 1;}
+    struct x9_mic_analog_status q={0};
+    if(ioctl(fd,X9_MIC_GET_ANALOG,&q)==0) {
+        printf("analog v%u stage=%u flags=%#x errno=%u restore_errno=%u HWCID=%#x/%#x AIN%u/ADC%u type=%u bias=%umV gain_x2=%u rc_sw=%u rc_monitor=%#x journal=%u/%u reg=%#x elapsed_ns=%llu\n",
+            q.version,q.stage,q.flags,q.last_errno,q.restore_errno,q.hwcid_h,q.hwcid_l,
+            q.ain,q.adc,q.mic_type,q.bias_mv,q.gain_x2,q.rc_sw,q.rc_monitor,
+            q.journal_restored,q.journal_count,q.last_register,q.elapsed_ns);
+        printf("analog active PGA/ADC/bias0/bias2/DCC=%#x/%#x/%#x/%#x/%#x CLKSQ/CKPDN=%#x/%#x; after=%#x/%#x/%#x/%#x/%#x (codec pin names, not physical microphone or PCM proof)\n",
+            q.pga_active,q.adc_active,q.bias0_active,q.bias2_active,q.dcc_active,
+            q.clksq_active,q.clocks_active,q.pga_after,q.adc_after,q.bias0_after,q.bias2_after,q.dcc_after);
+    } else if(errno!=ENOTTY){perror("analog status");return 1;}
     return 0;
 }
 static uint64_t ns(void)
@@ -56,8 +67,9 @@ int main(int argc,char **argv)
     bool record=argc==4 && !strcmp(argv[1],"record");
     bool power=argc==2 && !strcmp(argv[1],"power");
     bool calibrate=argc==2 && !strcmp(argv[1],"calibrate");
-    if(!record && !power && !calibrate && !(argc==2 && !strcmp(argv[1],"status"))) {
-        fprintf(stderr,"usage: micctl status | micctl power | micctl calibrate | micctl record <seconds:1..30> <new.pcm>\n");return 2;
+    bool analog=argc==2 && !strcmp(argv[1],"analog-l");
+    if(!record && !power && !calibrate && !analog && !(argc==2 && !strcmp(argv[1],"status"))) {
+        fprintf(stderr,"usage: micctl status | micctl power | micctl calibrate | micctl analog-l | micctl record <seconds:1..30> <new.pcm>\n");return 2;
     }
     int fd=open(record?X9_MIC_DEVICE:X9_MIC_STATUS_DEVICE,O_RDONLY|O_NONBLOCK|O_CLOEXEC);
     if(fd<0){perror("open microphone");return 1;}
@@ -68,14 +80,15 @@ int main(int argc,char **argv)
         s.generation,s.captured_frames,s.read_frames,s.dropped_frames,s.queued_frames);
     if(!record) {
         int result=0;
-        if(power || calibrate) {
+        if(power || calibrate || analog) {
             if(geteuid()!=0 || s.version!=1 || s.mode!=2) {
-                fprintf(stderr,"power/calibrate requires root and x9_mic=2; no hardware request issued\n");
+                fprintf(stderr,"cold diagnostics require root and mode2 (x9_mic or ADT); no hardware request issued\n");
                 close(fd);return 1;
             }
-            printf("explicit cold %s, shared one attempt per boot; no ADC/DMA or recording\n",
+            printf("explicit cold %s, shared one attempt per boot; no PCM/DMA or recording\n",
+                analog?"power + phasecal + AIN0/PGA_L/ADC_L DCC diagnostic":
                 calibrate?"power + AFE/MTKAIF phase calibration":"power/ID/VAUD18 probe (no AFE)");
-            if(ioctl(fd,calibrate?X9_MIC_CALIBRATE:X9_MIC_POWER_PROBE)<0){perror("cold microphone diagnostic");result=1;}
+            if(ioctl(fd,analog?X9_MIC_ANALOG_L:calibrate?X9_MIC_CALIBRATE:X9_MIC_POWER_PROBE)<0){perror("cold microphone diagnostic");result=1;}
             /* Even on failure retrieve the decisive stage and retained journal. */
         }
         result|=hardware_status(fd);

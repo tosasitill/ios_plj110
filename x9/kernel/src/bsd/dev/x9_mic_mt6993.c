@@ -101,7 +101,7 @@ static int afe_start(uint64_t g)
              * bit16/17. Refuse an inherited/mixed source rather than record
              * DL/PCM/sine. Other words (2,4..7) must also be empty. */
             for(unsigned c=0;c<2 && !e;c++)for(unsigned w=0;w<8;w++) {
-                if(w==3)continue;
+                if(w==3)continue; /* reserved hole, no AFE_CONN020/021_3 */
                 if(rd((c?CONN021:CONN020)+w*4))e=EBUSY;
             }
         }
@@ -114,7 +114,9 @@ static int afe_start(uint64_t g)
              * Burst/domain fields are board-qualified values from prepare. */
             uint32_t mask=(0x1fu<<8)|(1u<<6)|(1u<<5)|(1u<<4)|(1u<<3)|(1u<<2)|3u;
             uint32_t con=(old_regs[0]&~mask)|(0xau<<8)|(1u<<3);
-            wr(CONN020,1u<<16);wr(CONN021,1u<<17);
+            wr(CONN020,1u<<16);wr(CONN021,1u<<17); /* vendor ADDA_UL_CH1/2, word0 */
+            if(rd(CONN020)!=(1u<<16) || rd(CONN021)!=(1u<<17))e=EIO;
+            if(e)goto start_failed;
             wr(VUL1_CON0,con|VUL1_ON);
             /* Address registers expose bits31:4; low nibble is reserved. */
             if(!(rd(VUL1_CON0)&VUL1_ON) || (rd(VUL1_BASE)&~15u)!=((uint32_t)base&~15u) ||
@@ -124,6 +126,7 @@ static int afe_start(uint64_t g)
             else {generation=g;cursor=0;last_progress=last_poll=mach_absolute_time();active=true;
                 diagnostic.flags|=X9_MIC_HW_CAPTURE;}
         }
+start_failed:
         if(e) {diagnostic.last_errno=e;int off=stop_locked();if(off)e=off;}
     }
     lck_mtx_unlock(&afe_mic_lock);return e;
@@ -245,4 +248,16 @@ int x9_mic_mt6993_calibrate(void)
 void x9_mic_mt6993_get_afe(struct x9_mic_afe_status *s)
 {
     lck_mtx_lock(&afe_mic_lock);*s=afe_diagnostic;lck_mtx_unlock(&afe_mic_lock);
+}
+static struct x9_mic_analog_status analog_diagnostic={.version=1};
+int x9_mic_mt6993_analog_l(void)
+{
+    lck_mtx_lock(&afe_mic_lock);
+    int e=(registered || prepared || active || dma_stuck)?EBUSY:
+        x9_mic_plj110_analog_l(&diagnostic,&board_diagnostic,&afe_diagnostic,&analog_diagnostic);
+    lck_mtx_unlock(&afe_mic_lock);return e;
+}
+void x9_mic_mt6993_get_analog(struct x9_mic_analog_status *s)
+{
+    lck_mtx_lock(&afe_mic_lock);*s=analog_diagnostic;lck_mtx_unlock(&afe_mic_lock);
 }

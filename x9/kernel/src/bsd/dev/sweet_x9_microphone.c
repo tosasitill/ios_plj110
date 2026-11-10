@@ -12,6 +12,7 @@
 #include <miscfs/devfs/devfs.h>
 #include <kern/clock.h>
 #include <kern/locks.h>
+#include <pexpert/device_tree.h>
 #include "x9_microphone.h"
 #include "x9_mic_mt6993.h"
 
@@ -123,13 +124,17 @@ static int mic_ioctl(dev_t d,u_long cmd,caddr_t data,__unused int f,struct proc 
     if(cmd==X9_MIC_GET_AFE) {
         x9_mic_mt6993_get_afe((void *)data);return 0;
     }
-    if(cmd==X9_MIC_POWER_PROBE || cmd==X9_MIC_CALIBRATE) {
+    if(cmd==X9_MIC_GET_ANALOG) {
+        x9_mic_mt6993_get_analog((void *)data);return 0;
+    }
+    if(cmd==X9_MIC_POWER_PROBE || cmd==X9_MIC_CALIBRATE || cmd==X9_MIC_ANALOG_L) {
         if(minor(d)!=0 || kauth_cred_getuid(kauth_cred_get())!=0)return EPERM;
         /* mode1/status remain strictly passive. No implicit capture backend. */
         /* mode is immutable after devfs publication. The AFE lock serializes
          * probe against registration/capture; don't invert register's
          * AFE -> mic_control lock order here. */
         if(st.mode!=2)return EPERM;
+        if(cmd==X9_MIC_ANALOG_L)return x9_mic_mt6993_analog_l();
         return cmd==X9_MIC_CALIBRATE?x9_mic_mt6993_calibrate():x9_mic_mt6993_power_probe();
     }
     if(cmd==X9_MIC_GET_STATUS) {
@@ -205,7 +210,15 @@ static const struct cdevsw mic_cdev={.d_open=mic_open,.d_close=mic_close,
 void sweet_x9_microphone_init(void)
 {
     if(!sweet_early_is_x9())return;
-    int mode=sweet_x9_arg("x9_mic",0);if(mode!=1 && mode!=2)return;
+    /* ADT is a mode-only fallback, not a readiness/ownership assertion.
+     * Explicit x9_mic=0 also overrides it. Reject malformed properties. */
+    int fallback=0;DTEntry chosen;const void *p=NULL;unsigned size=0;
+    if(SecureDTLookupEntry(NULL,"/chosen",&chosen)==kSuccess &&
+       SecureDTGetProperty(chosen,"x9-microphone-mode",&p,&size)==kSuccess && size==4) {
+        uint32_t value=0;memcpy(&value,p,sizeof(value));
+        if(value<=2)fallback=(int)value;
+    }
+    int mode=sweet_x9_arg("x9_mic",fallback);if(mode!=1 && mode!=2)return;
     if(st.mode)return;st.mode=mode;
     int major=cdevsw_add(-1,&mic_cdev);
     if(major<0){st.last_errno=ENXIO;return;}

@@ -26,11 +26,17 @@ struct x9_mic_mt6681 {
     uint32_t old_pad, old_test;
     uint8_t audio_saved[11];
     bool touched, audio_snapshot, afe_snapshot, poisoned;
+    struct x9_mic_analog_status analog;
+    /* Persistent per-write RW field journal, including a failed write. */
+    struct { uint16_t reg; uint8_t mask, old; } analog_saved[80];
+    uint32_t analog_pending;
+    uint64_t analog_deadline;
+    bool analog_owned;
 };
 /* Caller serializes all operations, including status snapshots. This is a
  * power/calibration prerequisite, NOT an ADC/PCM backend and never sets READY.
  * Both MISO0 and MISO1 must cross a cycle boundary; phase0 fallback is rejected.
- * Analog routing, DCC micbias/ADC RC tune and ADDA remain board responsibilities. */
+ * The explicit analog_l diagnostic does not enable ADDA/PCM. */
 int x9_mic_mt6681_power_calibrate(struct x9_mic_mt6681 *,
     const struct x9_mic_mt6681_io *, volatile uint32_t *afe);
 /* Real cold init + VAUD18 monitor, without touching AFE/pads/loopback/ADC.
@@ -47,5 +53,6 @@ int x9_mic_mt6681_calibrate_powered(struct x9_mic_mt6681 *, volatile uint32_t *)
  * MTC/DA_INTF trigger sequences are not reversible register snapshots. */
 int x9_mic_mt6681_unprepare(struct x9_mic_mt6681 *);
 int x9_mic_mt6681_verify_capture(struct x9_mic_mt6681 *);
+int x9_mic_mt6681_analog_l(struct x9_mic_mt6681 *);
 #endif
 #endif

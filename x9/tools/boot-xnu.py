@@ -41,6 +41,8 @@ def main():
                     help='reconstruct zero root-image gaps in RAM using v1 segment BSS')
     ap.add_argument('--ramdisk', type=Path, help='optional md0 root image embedded in SWEETXNU')
     ap.add_argument('--boot-args', default='debug=0xc serial=3 cpus=1 keepsyms=1 -v')
+    ap.add_argument('--microphone-mode', type=int, choices=(0, 1, 2), default=None,
+                    help='ADT diagnostic mode fallback; x9_mic boot arg overrides, no automatic hardware access')
     ap.add_argument('--ram-window', choices=mkadt.RAM_WINDOWS, default='legacy512',
                     help='captured X9 RAM range; large4g is experimental, not hardware-verified')
     ap.add_argument('--boot-partition-size', type=lambda s: int(s,0), default=0x4000000)
@@ -89,6 +91,9 @@ def main():
                        wlan=any(x in a.boot_args.split() for x in ('x9_wifi_fake=1', 'x9_wifi_real=1')),
                        baseband='x9_bb=1' in a.boot_args.split(),
                        torch='x9_torch=3' in a.boot_args.split())
+    if a.microphone_mode is not None:
+        chosen = next(n for n in tree.children if n.prop('name') == b'chosen\0')
+        chosen.props.append(('x9-microphone-mode', 0, a.microphone_mode.to_bytes(4, 'little')))
     if a.usb_receiver or a.ufs_root_manifest:
         chosen = next(n for n in tree.children if n.prop('name') == b'chosen\0')
         mmap = next(n for n in chosen.children if n.prop('name') == b'memory-map\0')
@@ -126,6 +131,7 @@ def main():
                    'kernel_sha256': info['kernel_sha256'], 'slot': a.slot,
                    'x9_board_isolation_tag': info['x9_board_isolation_tag'],
                    'device_written': False, 'boot_control_prepared': bctl is not None,
+                   'microphone_mode_adt': a.microphone_mode,
                    'ram_window': a.ram_window, 'dram_base': hex(mkadt.RAM_WINDOWS[a.ram_window][0]),
                    'dram_size': hex(mkadt.RAM_WINDOWS[a.ram_window][1]),
                    'dram_usable_source': 'live LK FDT -> chosen/x9-ram-map' if a.ram_window=='segmented8g' else 'fixed window',
