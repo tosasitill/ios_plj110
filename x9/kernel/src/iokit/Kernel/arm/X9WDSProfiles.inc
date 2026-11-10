@@ -1,5 +1,5 @@
 /* 20H392 Mav16: 27 creates a NON-PERSISTENT profile, c7 replaces its
- * settings, 31/32 select the resulting profile in Start20/d0. These are
+ * settings, 31/32 select the resulting profile in Start20 (also V2). These are
  * adapter-owned QMI configuration objects, NOT MTK CIDs or connected calls.
  * Storage success means only RAM was changed. Only the IPv4 dialler can
  * create a modem call, and only matched ACT/GET/EIF can publish success.
@@ -86,13 +86,26 @@ static unsigned x9p_start(const uint8_t *req,unsigned n,unsigned sim,unsigned fa
   x9q_view credentials=x9q_tlv(p->settings,p->len,(uint8_t)tag);
   if(credentials.p&&credentials.n)return X9Q_UNSUPPORTED;
  }
- // Do not silently turn an IMS/emergency/proxy profile into Internet.
- // Native profile tags: proxy1f, IMS QoS/SigInd29, emergency36.
- // 23/24 are UMTS QoS settings, not the IMS/emergency flags.
+ // These options affect modem configuration, not just QMI RAM metadata.
+ // 29 is a packed 34-byte UMTS requested QoS + signaling indication,
+ // not a boolean or an IMS APN selector. Native can add it when carrier
+ // SupportsIMSSignalingIndication is true. No ACT201/profile-v2 mapping
+ // for that request has been established; do not silently discard it.
+ // 1f is PCSCF address via PCO, 36 is emergency support; both are u8.
  const unsigned flags[]={0x1f,0x29,0x36};
- for(unsigned tag:flags){
+ const unsigned sizes[]={1,34,1};
+ for(unsigned j=0;j<3;j++){
+  unsigned tag=flags[j];
   x9q_view option=x9q_tlv(p->settings,p->len,(uint8_t)tag);
-  if(option.p){for(unsigned i=0;i<option.n;i++)if(option.p[i])return X9Q_UNSUPPORTED;}
+  if(!option.p)continue;
+  if(option.n!=sizes[j]){
+   printf("X9 PROFILE: Start SIM%u index %u malformed tag %02x length %u expected %u; no dial\n",sim+1,p->index,tag,option.n,sizes[j]);
+   return X9Q_ARG;
+  }
+  for(unsigned i=0;i<option.n;i++)if(option.p[i]){
+   printf("X9 PROFILE: Start SIM%u index %u unmapped nonzero modem option %02x length %u; no dial\n",sim+1,p->index,tag,option.n);
+   return X9Q_UNSUPPORTED;
+  }
  }
  x9q_view mask=x9q_tlv(p->settings,p->len,0xdd);
  if(mask.p&&(mask.n!=8||x9q_u32(mask.p)!=1||x9q_u32(mask.p+4)))return X9Q_UNSUPPORTED;

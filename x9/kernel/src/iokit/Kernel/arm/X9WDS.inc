@@ -144,9 +144,16 @@ static unsigned x9w_args(const uint8_t *p,unsigned n,unsigned family){
   case 0x19:if(k!=1||v[0]!=family)return X9Q_ARG;break;
   case 0x30:if(k!=1||(v[0]!=0&&v[0]!=1))return X9Q_UNSUPPORTED;break; // automatic or 3GPP
   case 0x31:case 0x32:if(k!=1||!v[0])return X9Q_ARG;break;
+  // 20H392 setDataExtensionParameters always adds CallType35/u8:
+  // 1 = Embedded NAI, 0 = Tethering NAI. This is NOT an IMS/emergency
+  // selector or an MTK APN type. Embedded Internet uses the existing
+  // explicit APN/no-auth ACT201 builder (MTK ApnType102/u32=1).
+  case 0x35:if(k!=1)return X9Q_ARG;if(v[0]!=1)return X9Q_UNSUPPORTED;break;
   case 0x3e:if(k!=8||x9q_u32(v)!=1||x9q_u32(v+4))return X9Q_UNSUPPORTED;break; // Internet APN type
   case 0x16:case 0x33:if(k!=1||v[0])return X9Q_UNSUPPORTED;break;
-  default:return X9Q_UNSUPPORTED;
+  default:
+   printf("X9 WDS: Start unsupported request tag %02x length %u; no dial\n",p[at],k);
+   return X9Q_UNSUPPORTED;
   }
  }return 0;
 }
@@ -390,7 +397,10 @@ static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
  unsigned slot=local-CBQ_PORT_BASE,id=x9q_u16(req+3);x9w_client &c=x9w_clients[slot];
  if(x9p_request(local,port,req,n,c.sim_slot))return true;
  if(id==0xc8){x9a_request(local,port,req,n);return true;}
- if(id!=1&&id!=0x20&&id!=0xd0&&id!=0x21&&id!=0x22&&id!=0x24&&id!=0x2d&&id!=0x30&&id!=0x37&&id!=0x44&&id!=0x4d&&id!=0x86&&id!=0xa2&&id!=0xaf&&id!=0xb0&&id!=0x5569)return false;
+ // Native StartNetworkIfaceV2 still constructs message20. At 1f1a8ba3c,
+ // d0 is passed to getTLV<HandOverIPv6Prefix>, NOT a request constructor.
+ // Never interpret a message with that unrelated ID as a data activation.
+ if(id!=1&&id!=0x20&&id!=0x21&&id!=0x22&&id!=0x24&&id!=0x2d&&id!=0x30&&id!=0x37&&id!=0x44&&id!=0x4d&&id!=0x86&&id!=0xa2&&id!=0xaf&&id!=0xb0&&id!=0x5569)return false;
  if(!c.family)c.family=4;x9w_bearer *own=nullptr;
  for(x9w_bearer &b:x9w_bearers)if(b.used&&b.slot==slot&&b.generation==x9q_clients[slot].generation)own=&b;
  unsigned error=0;
@@ -511,7 +521,7 @@ static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
   bzero(selected_apn,sizeof(selected_apn));
  }
  if(error){
-  if(id==0x20||id==0xd0||id==0x21)printf("X9 WDS: request msg 0x%04x SIM%u mux %u error %u\n",id,c.sim_slot+1,c.mux,error);
+  if(id==0x20||id==0x21)printf("X9 WDS: request msg 0x%04x SIM%u mux %u error %u\n",id,c.sim_slot+1,c.mux,error);
   x9bb_reply_error(local,port,req,n,(uint16_t)error);return true;
  }
  x9q_packet reply(req);reply.send(local,port);return true;

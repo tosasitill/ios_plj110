@@ -84,7 +84,7 @@ AT 正文、SIM 标识、APN、APDU 和 ch10 包正文不写 USB/pstore；仅记
 | NAS RegisterIndications `0x03` | 仅 serving/system 的后台快照 | SignalInfo、网络选择、band/reject/time 等未支持 |
 | DMS `0x21/22/23/25/2d/3c/43` | CGMI/CGMM/CGMR/CGSN/CFUN/CRSM ICCID/CIMI | 无伪造 IMEI/IMSI；CFUN0/4 映射 LOW_POWER，不是 RESET |
 | WDS `0x27/c7/29/2b` | 每槽 RAM-only 非持久 profile 创建、替换、删除、读取 | 不等于 MTK CID/连接；卡 epoch 隔离，索引同 boot 不复用 |
-| WDS `0xa2/4d/20/d0/21/22/2d` | mux/family 意图；MIPC OPEN/订阅 → CID 范围 → ACT → GET + EIF/IFUP → DPMAIF bind | 显式/非持久 profile/网络默认 APN、IPv4/no-auth；失败不生成 handle，不借用外部 context |
+| WDS `0xa2/4d/20/21/22/2d` | mux/family 意图；MIPC OPEN/订阅 → CID 范围 → ACT → GET + EIF/IFUP → DPMAIF bind | 显式/非持久 profile/网络默认 APN、IPv4/no-auth；失败不生成 handle，不借用外部 context |
 | WDA/DPM | 明确 NOT_SUPPORTED；X9 native backend 不创建内部 IPA 配置 client | 不打开假 IPA endpoint，不套 Qualcomm QMAP 映射 |
 
 UIM 读请求仅接受 empty-AID primaryGW 的 current USIM（`3F007FFF`），或 card1 的 MF
@@ -172,7 +172,7 @@ MIPC 使用 16 B header、8 B padded TLV；实际库的部分 tag 已不同于�
 3. `CreateProfile27` 接受原生空 profile（Type0/1、Persistence0），返回实际分配的 type/index；
    `ResetAndModifyProfileSettings c7` 原子替换 RAM 配置，`29/2b` 删除/读取同槽对象。
    配置对象不是 modem CID，不假成功持久写入；未知选项只存储，Start 不支持就拒绝。
-   Start20/d0 校验显式/31引用的3GPP profile APN、IPv4、no-auth、DPMAIF ready；32仅验证
+   Start20（含原生 V2）校验显式/31引用的3GPP profile APN、IPv4、no-auth、DPMAIF ready；32仅验证
    配套3GPP2引用，不替代3GPP Internet。`GET_PDP_CID219/21a` 获取真实 CID 范围。
 4. `ACT201/202` 明确 `NOT_REUSE=2`、fallback0；ID100 是 call ID，IF125 是独立 ccmni 索引，
    ACT12a 是 transIntfId，**不是 netmask，也不使用 CID-1 映射**。
@@ -187,8 +187,38 @@ EIPPORT 命令用于其他资源，未凭名字添加未知 MD 通知。当前�
 超时/DEL_CLIENT 不丢已发 token；迟到 ACT 成功只做 owned-call 清理，不迟到回复 host success。
 partial-success/fallback cause 也清理，不冒充完整 IPv4；不明 framing/CNF 保留所有权隔离到下次 boot。
 IPv6/SLAAC、持久/原 modem profile、auth、默认 APN 发现、autoconnect、语音/IMS 未实现；
-非 Internet APN mask、未映射 profile/Start 扩展选项明确失败。RAM profile/Start20/d0 新接线
+非 Internet APN mask、未映射 profile/Start 扩展选项明确失败。RAM profile/Start20 新接线
 仅完成源码与编译，真实 profile→ACT→IP 收发和默认数据卡切换仍须实机日志确认。
+
+#### 20H392 QoS / PCO / Start V2 核对（静态证据，不是拨号成功）
+
+原生 `StartNetworkIfaceV2::Request` 在 `1f1a8ab18` 构造的消息号仍为 **20**。
+`1f1a8ba3c` 的 **d0 是 `getTLV<HandOverIPv6Prefix>` 标签**，不是第二种 Start 消息号；
+适配层已删除旧 d0 消息别名。不同消息的同号 TLV 不能混用：profile36 是 emergency，Start36 是 handover。
+
+| 消息 / TLV | 原生宽度、触发及含义 | 当前 MTK 映射 / 边界 |
+|---|---|---|
+| Start31 / 32 | 各 u8，3GPP / 3GPP2 profile index | 每 SIM QMI RAM 引用，非 MTK CID；只用3GPP APN拨号 |
+| Start35 CallType | u8；扩展入口总是添加；`1f1a8beb0` 的 block 写1=Embedded NAI、0=Tethering NAI | 接受1，作为普通 embedded 呼叫选择元数据；不改已有 ACT201 Internet APN/no-auth。0不支持；不是 IMS/emergency 标记 |
+| Start3e / profiledd | u64 APN type mask | 仅 Internet1；MTK ACT201 的102是 **u32**，经 `getMipcApnTypeId(0)` 也为1；其余 mask 不原样截断/照搬 |
+| profile29 QoS/SigInd | **34 B**：traffic class u8、多个 LE u32/u8 QoS 字段、末尾 signaling u8；原生填 traffic3、priority1、signaling1，其余0 | 不是 bool，也不是 IMS APN 身份。受 set3GPPParameters 的扩展 bool 与 carrier `SupportsIMSSignalingIndication=true` 两层条件保护；非零仍拒绝，无可信请求映射 |
+| profile1f / 36 | 各u8，PCSCF address via PCO / emergency support | 仅尺寸正确的0；非零不转普通 Internet |
+| profile37 / 38 / 39 | OperatorReservedPcoId u16 / MCC u16 / MNC u16+u8；37须 context 提供非零ID；38/39来自 `PcoOptions` | 是协议配置，不是可忽略 RAM 注释；未证明 MTK 下发映射，仍拒绝 |
+| profile47 PcoContainerIds | 固定 **20 B**，10个u16槽；仅容器列表非空时追加38/39/47，超过10个截到10个 | 不把整个 QMI TLV 塞进 MTK profile-v2；未知映射仍拒绝 |
+| Startc2 IDataCall | u8=1；handover 参数及 context 条件成立才添加，非普通 Start 无条件项 | 不等价 Internet type；尚无可信 MTK 对应，不放行 |
+| Start36 / 3f / d0 | HandOverContext 固定21 B / ExtendedHandoffContext 变长（16 B头、长度前缀字符串列表及尾u8）/ IPv6Prefix 固定17 B（IPv6地址16 B+prefix u8）；只在相关 handover 条件成立时出现 | 需要旧会话地址、PDU session等真实状态；当前 fresh IPv4 dialler不支持，不能当默认0略过 |
+
+MT6993 **已加载的** `libmtkmipc-ril.so` 中，`fillMipcApnItem@2c94c0` 填的是 **0x11c B**
+`mipc_apn_profile_v2_struct4`（其中 APN/username/password 为定长数组、APN type为u32、protocol/auth为u8）。
+其实际 callers 是 `onAttachApnChanged@2b5230` 和 `requestSyncApnTable@2c7f70`，后者发送 **APN113**
+及 `8101` profile数组；**不是 ACT201 的 builder**。当前未在该结构的已写字段或
+`requestSetupDataCall@2b6af0` 的 ACT builder 中确认上述 requested QoS / operator PCO 下发字段。
+`updateEpsQos@2ccea0` 是发送 **221/GetQoS**、读回网络已分配 QoS；不能把它当作设置请求 QoS。
+`onPcoInfoNotify@2a4910` 是读取 PCO count/内容的 indication 路径，也不证明 operator/container 请求已发出。
+
+本地官方 CBN54.1.0 与旧20H392 CMCC的 carrier/D22 override 未见上述 carrier capability / PcoOptions
+显式配置；这只说明这几份文件没有该项，**不是运行时合并策略的证明**。若实机 c7 有非零29或37/38/39/47，
+需要继续追其配置来源及真实 MD 接口，不能绕过。新增拒绝日志只打印 tag/长度，不打印 APN、地址或认证内容。
 
 ### 5. iOS 网络最终验证
 
