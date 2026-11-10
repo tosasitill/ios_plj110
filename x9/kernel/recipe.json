@@ -6500,6 +6500,21 @@
    "template": "bsd-c-11"
   },
   {
+   "name": "x9_adsp_mt6993.o",
+   "source": "bsd/dev/x9_adsp_mt6993.c",
+   "template": "bsd-c-11"
+  },
+  {
+   "name": "x9_speaker_afe.o",
+   "source": "bsd/dev/x9_speaker_afe.c",
+   "template": "bsd-c-11"
+  },
+  {
+   "name": "x9_tfa98xx.o",
+   "source": "bsd/dev/x9_tfa98xx.c",
+   "template": "bsd-c-11"
+  },
+  {
    "name": "x9_adsp_transport.o",
    "source": "bsd/dev/x9_adsp_transport.c",
    "template": "bsd-c-11"

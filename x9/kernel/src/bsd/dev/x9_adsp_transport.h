@@ -25,7 +25,8 @@ struct x9_adsp_platform {
     volatile uint32_t *tx, *rx;
     void *context;
     /* power_on holds clocks/sleep protection through the boot wait and must
-     * fully unwind on error. After READY, runtime MMIO uses wake_lock. */
+     * fully unwind on error in v1. In v2, power_held reports a retained
+     * safety lease after an ambiguous vote/unwind failure. After READY, runtime MMIO uses wake_lock. */
     int (*power_on)(void *);
     /* Failure retains an accessible domain lease, never partially gates the
      * domain. reset failure must also leave this lease intact for recovery. */
@@ -35,11 +36,13 @@ struct x9_adsp_platform {
      * only way out of quarantine. Both must have bounded completion. */
     int (*stop_and_reset)(void *);
     int (*core_start)(void *);
-    /* Implement OPPO adsp_pre_wake_lock/unlock semantics (including sleep
-     * protection/semaphores). Failed lock must leave no partial ownership.
+    /* Implement the active platform wake semantics (v1 may use prelock/
+     * semaphores; v3 must not invent those unregistered callbacks).
+     * Failed lock must leave no partial ownership.
      * Held across TX consumption AND ACK, not just the MMIO write. */
     int (*wake_lock)(void *);
     int (*wake_unlock)(void *);
+    bool (*power_held)(void *); /* v2 mandatory, v1 NULL; no MMIO without lease */
 };
 /* All entrypoints are thread-context, serialized per core. Callbacks may not
  * re-enter this transport or take the X9Audio service lock. Resources and

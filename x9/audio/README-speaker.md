@@ -2,7 +2,7 @@
 
 **当前是可编译的输出链路基础实现，不是已经出声的驱动。**
 没有 MT6993 物理 backend 注册者；`Ready=0`，`Start` 返回
-`kIOReturnNotReady`。不访问 off-domain MMIO、不起 DSP、不写功放／root，
+`kIOReturnNotReady`。不访问 off-domain MMIO、不自动起 DSP、不写功放／root，
 没有自动安装 HAL。麦克风是另一套接口，不在此输出设备中虚报输入流。
 
 ## 构建
@@ -19,7 +19,8 @@
 
 输出 `audio/X9Audio.driver`、`audio/audioctl`（iOS 16 arm64、adhoc 签名）
 和 `kernel.development.sweet`。这不会重建 Metal 插件或修改设备。
-启动参数 `x9_audio=1` 仅发布音频服务；默认关闭。
+启动参数 `x9_audio=1` 仅发布音频服务；`=2` 还注册板级 ADSP core0 transport，
+但不在开机时上电／SMC。默认关闭。
 打包 boot 时必须沿用最新完整参数，不能拿缺 Wi-Fi／蜂窝校准的默认配置替换。
 
 ## 部署后使用
@@ -68,7 +69,7 @@ DMA 并发修改。多 IO context 的混音尚未实现。时基取实际 XNU ti
 OPEN/CLOSE/PREPARE/HWPARAM/START/STOP 等 ID 来自 OPPO 协议定义。
 这仍不是 OPEN→HWPARAM→PREPARE→START 播放状态机；DSP shared-DMA 描述符、
 AFE 和功放需要下一阶段实现。外层 mailbox 传输现在由
-`x9_adsp_transport.{c,h}` 实现，**没有板级注册者，因此默认不执行 MMIO**。
+`x9_adsp_transport.{c,h}` 实现，**mode2 已有 ADSP 板级注册者，但默认不执行 MMIO**。
 
 ### 接入有界 ADSP mailbox
 
@@ -101,7 +102,7 @@ WDT、错配／迟到 ACK、畸形包或事件队列溢出均隔离会话；**�
 
 DSP `online` 与扬声器 `Ready` 完全分离。隔离只阻止后续 mailbox send，不代替
 PA mute／AFE DMA stop；最终 backend 必须在任何 transport 错误后执行物理停流。
-目前没有启动命令暴露给用户态，也没有 ADSP firmware loader／板级回调提供者。
+现有板级提供者 `x9_adsp_mt6993.c` 接通以下显式启动入口；没有 host firmware uploader。
 
 物理驱动通过 `x9_audio_register_backend()` 注册 boot-lifetime callbacks：
 start（真实 sample-0 host anchor）、stop（必须 mute/quiesce）、submit（完整
@@ -116,6 +117,70 @@ EAGAIN 不消费 PCM。只有八项 physical prerequisites 全部确认才能注
 3. 固定实际 carve-out、EMI 权限、缓存策略和 ring 描述符；完成有界 ACK 生命周期。
 4. AFE／I2S／PA 安全 mute→配置→低增益 unmute→真实 period→mute。
 5. `audioctl` 的 played cursor 与实体出声都确认后，再验收 HAL／iOS 路由。
+
+## 显式 ADSP 板级操作（不等于播放）
+
+仅当候选以 `x9_audio=2` 启动、工具已经按 extent 流程部署后，才可在 **iOS root shell** 使用：
+
+```sh
+audioctl board-status
+audioctl dsp-boot
+audioctl dsp-status
+audioctl dsp-stop
+```
+
+`board-status` 是缓存快照，无 MMIO 副作用。boot/stop 使用独占管理员 type2
+连接和 selector5/6；有已注册 speaker backend 或活动流时拒绝 reset。
+`dsp-boot` 单次执行，不轮询设备连接、不失败重试、不自动 unmute。
+关闭连接不会隐式重启／停止 DSP，需显式 `dsp-stop`。
+
+板级流程：确认 TOP/INFRA **全局 off** → AO/INFRA/TOP AP vote → CORE_STOP →
+pending-count=0 → SYS_CLEAR → secure RELOAD → CORE_START0 → transport 新 READY。
+继承 TOP/INFRA vote 返回 EBUSY，不借 QUERY_STATE 的布尔电源查询来猜 core 是否空闲。
+不启动 core1，mode2 禁止 core1 transport 注册，避免全局 SYS_CLEAR 破坏另一个 owner。
+
+AP HWCCF 在 `0x1c040000`，SET/CLR/EN 为 `0x20700/704/708`，DONE 为
+`0x1132c`，global EN/transition 为 `0x13700/704`。每次只写单域 bit，
+有界 EN/DONE/global 检查；错误保留 ownership、尝试恢复可访问电源链。
+transport v2 的 `power_held` 确保回滚失败的资源仍可显式停机／恢复。
+**sw_ver 未确证，自己取得的 AO vote 保留到本次 boot 结束**，不猜 A0 erratum
+已不适用；继承 AO 不撤销。SMC 为 `0xc200052b`，magic 为 `0xad5bad5b`，
+a0..a3 原值和首错／恢复错写入日志和 cached board status；只有零返回被接受。
+SMC 本身依赖 secure monitor 返回，AP 不能为一个不返回的 monitor 实现抢占超时。
+
+v3 没有旧 prelock/IPIC 回调。当前不发送 runtime suspend IPI，域持续 pinned；
+wake lease 验证全电源链稳定且 DPSW req/ack bit0 均为0，不把 WFI 等同于 suspend，
+不将 firmware RSV 状态猜成 Linux enum。新 suspend/DPSW 状态会拒绝邮箱访问，
+而不是空回调虚报 wake。固件是否存在／能重载仍须 SMC 结果与真实 fresh READY 证明。
+
+## AFE／功放配置组件与当前缺口
+
+| 文件／入口 | 已实现 | 仍需实际板级提供者 |
+|---|---|---|
+| `x9_speaker_afe.{c,h}` | DL24/OUT4 masked journal、32-bit I2S slots/S16、48k、CONN116/117 DL24 route；prefill 后 DMA start、period copy/cache、稳定 CUR、高低地址/半环歧义检查；mute/disable/quiesce/restore | AUDIO/VLP APLL2、pad/共享资源 lease、DMA bus/EMI/cache、双 PA mute、权威 DMA quiesce |
+| `x9_tfa98xx.{c,h}` | PM container total-size/CRC、双 I2C6 地址、明确名字的两侧 profile、descriptor 边界；真实 reg03 revision 比对、AMPE=0 且读回；双侧预检白名单 register/bitfield prefix | 实际完整 revision、immutable container、per-revision 白名单、I2C6/reset/rails 互斥；Probus DSP file/patch/校准/boost 未执行 |
+
+AFE start 必须预填至少960帧后才使能 DMA；PA 始终由外部 board 维持 muted。
+组件**没有调用 `x9_audio_register_backend`**：最终 service/HAL 还须接预填 timeline、
+underflow 前静音和真实 host anchor，不可把启动前空环的 cursor 冒充已排队播放。
+ON 清零不是全部 outstanding AXI DMA 已结束的证据，必须有真实 `quiesce` 后
+才恢复地址／释放 lease；任何失败都保留资源。没有共享 lease 提供者时不会触碰 AFE，
+也不与麦克风 VUL1/ADDA 争寄存器。captured DT 的 OUT4 是2ch/sync0/mclk0、
+`etdm-vlp[4]=1`，不能把普通非VLP APLL2 回调充当已接通的板级资源。
+
+功放 reset 的 DT phandle `0x25` 已解析为 **MT6661-3 PMIC pinctrl** 的 GPIO10/11，
+不是 AP GPIO10/11。不能直接写 AP GPIO来“解除 reset”。真实 I2C6 gate、
+MT6661-3 reset/rail 控制与芯片 revision 尚未获得；本轮没有在线采集或 PA 写操作。
+
+`audioctl` 还可仅离线检查本地 container（不需要 X9Audio 服务、不加载到功放）：
+
+```sh
+audioctl amp-inspect /var/tmp/tfa98xx.cnt '<exact-profile-name>'
+```
+
+parser 报告两个 PA 的 profile/prefix/opaque 数目。CRC通过和 prefix写完均不表示
+完整初始化／校准成功。不会执行未知 opaque payload、猜默认profile、写MTP/OTP，
+没有 unmute API；真实 profile／芯片证据未齐时，不允许进入 speaker Ready。
 
 ## 参考与证据边界
 
@@ -155,6 +220,6 @@ python3 -I x9/audio/collect-speaker.py \
 `capture.json` 的 complete 仅表示必需采集命令完成；候选文件是否存在、是否被加载
 及首尾 boot ID 是否一致必须按各原始结果核对，不是 backend 验收标志。
 
-当前明确未完成：板级 DSP power/reset/firmware/SMC 注册、真实 IPI 硬件验收、
+当前明确未完成：真实 DSP power/secure RELOAD/READY 硬件验收、
 AFE/PA 后端与型号／profile 验证、设备出声、
 HAL 安装／原生 iOS 选择、CoreAudio host-clock 调度差异，以及多 context 混音。

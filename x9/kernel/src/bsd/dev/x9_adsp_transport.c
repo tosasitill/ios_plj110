@@ -117,10 +117,13 @@ static int finish_wake(struct transport *t,int error)
 }
 int x9_adsp_register_transport(const struct x9_adsp_platform *p)
 {
-    if(!sweet_early_is_x9() || sweet_x9_arg("x9_audio",0)!=1)return ENXIO;
-    if(!p || p->version!=1 || p->core>=2 || !p->tx || !p->rx || p->tx==p->rx ||
+    int mode=sweet_x9_arg("x9_audio",0);
+    if(!sweet_early_is_x9() || (mode!=1 && mode!=2))return ENXIO;
+    if(mode==2 && p && p->core!=0)return ENXIO;
+    if(!p || (p->version!=1 && p->version!=2) || p->core>=2 || !p->tx || !p->rx || p->tx==p->rx ||
        ((uintptr_t)p->tx&3) || ((uintptr_t)p->rx&3) || !p->power_on || !p->power_off ||
-       !p->stop_and_reset || !p->core_start || !p->wake_lock || !p->wake_unlock)return EINVAL;
+       !p->stop_and_reset || !p->core_start || !p->wake_lock || !p->wake_unlock ||
+       (p->version==2 && !p->power_held))return EINVAL;
     lck_mtx_lock(locks[p->core]); struct transport *t=&cores[p->core];
     int e=t->registered?EBUSY:0;
     if(!e) {
@@ -148,6 +151,7 @@ int x9_adsp_boot(uint32_t core)
         if(!t->powered) {
             e=t->hw.power_on(t->hw.context);
             if(!e)t->powered=true;
+            else if(t->hw.version==2)t->powered=t->hw.power_held(t->hw.context);
         }
         if(!e)e=t->hw.stop_and_reset(t->hw.context);
         if(!e) {

@@ -13,6 +13,7 @@
 #include <sys/proc.h>
 #include "../../../bsd/dev/x9_audio.h"
 #include "../../../bsd/dev/x9_adsp_transport.h"
+#include "../../../bsd/dev/x9_adsp_mt6993.h"
 #if defined(ARM64_BOARD_CONFIG_SWEET)
 extern "C" int sweet_early_is_x9(void);
 extern "C" int sweet_x9_arg(const char *, int);
@@ -95,7 +96,7 @@ static int ensureWorker()
 }
 extern "C" int x9_audio_register_backend(const x9_audio_backend *b)
 {
-    if (!sweet_early_is_x9() || sweet_x9_arg("x9_audio", 0) != 1) return ENXIO;
+    if (!sweet_early_is_x9() || (sweet_x9_arg("x9_audio", 0) != 1 && sweet_x9_arg("x9_audio", 0) != 2)) return ENXIO;
     if (!b || b->version != X9_AUDIO_VERSION || b->verified != X9_AUDIO_REQUIRED ||
         b->lead_frames > X9_AUDIO_RING / 2 || !b->start || !b->stop || !b->submit || !b->position) return EINVAL;
     lck_mtx_lock(&audioLock);
@@ -133,7 +134,7 @@ public:
 OSDefineMetaClassAndStructors(X9Audio, IOService);
 IOService *X9Audio::probe(IOService *p, SInt32 *score)
 {
-    if (!sweet_early_is_x9() || sweet_x9_arg("x9_audio", 0) != 1) return nullptr;
+    if (!sweet_early_is_x9() || (sweet_x9_arg("x9_audio", 0) != 1 && sweet_x9_arg("x9_audio", 0) != 2)) return nullptr;
     return IOService::probe(p, score);
 }
 bool X9Audio::start(IOService *p)
@@ -169,6 +170,10 @@ bool X9Audio::start(IOService *p)
     control->state = e ? X9AudioFault : haveBackend ? X9AudioReady : 0;
     control->error = e ? e : haveBackend ? 0 : ENXIO;
     lck_mtx_unlock(&audioLock);
+    if (sweet_x9_arg("x9_audio", 0) == 2) {
+        int boardError = x9_adsp_mt6993_init();
+        setProperty("X9AudioBoardInitError", boardError, 32);
+    }
     registerService();
     IOLog("X9 AUDIO: ABI v%u output 48000/S16/stereo; physical backend=%u, no automatic PA/DSP writes\n",
           X9_AUDIO_VERSION, haveBackend);
@@ -176,7 +181,7 @@ bool X9Audio::start(IOService *p)
 }
 class X9AudioUserClient : public IOUserClient {
     OSDeclareDefaultStructors(X9AudioUserClient);
-    bool writer = false, exclusive = false;
+    bool writer = false, administrator = false, boardController = false, exclusive = false;
 public:
     bool initWithTask(task_t, void *, UInt32, OSDictionary *) APPLE_KEXT_OVERRIDE;
     bool start(IOService *) APPLE_KEXT_OVERRIDE;
@@ -189,12 +194,15 @@ public:
 OSDefineMetaClassAndStructors(X9AudioUserClient, IOUserClient);
 bool X9AudioUserClient::initWithTask(task_t task, void *id, UInt32 type, OSDictionary *props)
 {
-    if (type > 1 || !IOUserClient::initWithTask(task, id, type, props)) return false;
+    if (type > 2 || !IOUserClient::initWithTask(task, id, type, props)) return false;
     char name[32] = {}; proc_selfname(name, sizeof(name));
-    bool permitted = clientHasPrivilege(task, kIOClientPrivilegeAdministrator) == kIOReturnSuccess ||
+    administrator = clientHasPrivilege(task, kIOClientPrivilegeAdministrator) == kIOReturnSuccess;
+    bool permitted = administrator ||
         !strcmp(name, "audiomxd") || !strcmp(name, "mediaserverd");
     if (type == 1 && !permitted) return false;
-    writer = type == 1; return true;
+    if (type == 2 && (!administrator || sweet_x9_arg("x9_audio", 0) != 2)) return false;
+    boardController = type == 2;
+    writer = type == 1 || type == 2; return true;
 }
 bool X9AudioUserClient::start(IOService *p)
 {
@@ -247,6 +255,27 @@ IOReturn X9AudioUserClient::externalMethod(uint32_t sel, IOExternalMethodArgumen
 {
     (void)dispatch; (void)target; (void)reference;
     if (!a || isInactive() || !control) return kIOReturnNotReady;
+    if (sel == X9AudioBoardStatusSelector) {
+        if (a->structureInputDescriptor || a->structureOutputDescriptor || a->asyncWakePort ||
+            a->scalarInputCount || a->scalarOutputCount || a->structureInputSize ||
+            !a->structureOutput || a->structureOutputSize < sizeof(X9AudioBoardStatus)) return kIOReturnBadArgument;
+        X9AudioBoardStatus s; int e = x9_adsp_mt6993_status(&s);
+        if (e) return result(e);
+        memcpy(a->structureOutput, &s, sizeof(s)); a->structureOutputSize = sizeof(s);
+        return kIOReturnSuccess;
+    }
+    if (sel == X9AudioDSPBootSelector || sel == X9AudioDSPStopSelector) {
+        if (a->structureInputDescriptor || a->structureOutputDescriptor || a->asyncWakePort ||
+            a->scalarInputCount || a->scalarOutputCount || a->structureInputSize ||
+            a->structureOutputSize) return kIOReturnBadArgument;
+        if (!exclusive || !administrator || !boardController) return kIOReturnNotPrivileged;
+        /* Lock order: audio -> transport -> board. No callback re-enters the
+         * service. Never reset an ADSP used by an active/registered backend. */
+        lck_mtx_lock(&audioLock);
+        int e = haveBackend || (control->state & X9AudioRunning) ? EBUSY :
+            x9_adsp_mt6993_control(sel == X9AudioDSPStopSelector ? 1 : 0);
+        lck_mtx_unlock(&audioLock); return result(e);
+    }
     if (sel == X9AudioDSPStatusSelector) {
         if (a->structureInputDescriptor || a->structureOutputDescriptor || a->asyncWakePort ||
             a->scalarInputCount != 1 || !a->scalarInput || a->scalarOutputCount || a->structureInputSize ||
