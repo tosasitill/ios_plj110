@@ -118,8 +118,8 @@ static bool x9g_send(uint32_t local, uint32_t port, const uint8_t *req, unsigned
    x9_gps_status s; x9_gps_copy_status(&s);
    /* The native client must distinguish a qualified LK layout from an
     * activated receiver. Never use layout_valid to grant a PDS lease. */
-   printf("X9 GPS PDS: hardware transition errno %d layout %u ready %u fault %u\n",
-       e, s.layout_valid, s.ready, s.fault);
+   printf("X9 GPS PDS: hardware transition errno %d layout %u ready %u fault %u physical %u/%d\n",
+       e, s.layout_valid, s.ready, s.fault, s.physical_stage, s.physical_errno);
   }
   else {
    x9_gps_status s; x9_gps_copy_status(&s);

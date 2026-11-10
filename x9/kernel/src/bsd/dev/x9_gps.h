@@ -15,6 +15,9 @@ struct x9_gps_status {
  uint64_t position_sequence;
  uint32_t position_supported;
  uint32_t layout_valid;
+ /* Bring-up stage/error, independent of receiver-ready and output leases. */
+ uint32_t physical_stage;
+ int32_t physical_errno;
 };
 struct x9_gps_nmea {
  uint64_t sequence, generation, host_time;

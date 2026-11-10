@@ -1,13 +1,15 @@
 /* OPPO MT6993 uses gps_mcudl + MNL firmware, NOT serial.c/mtk.c.
  * This boundary accepts complete receiver NMEA AFTER MCU transport decoding.
- * gps_mcudl / conninfra power, firmware, EMI, mailbox and MNL framing are not
- * implemented here. Never feed an MCU payload directly as a position fix. */
+ * The physical worker requires a real connv2 resource/image/protocol supplier;
+ * no default power ownership or receiver readiness. Never feed an MCU payload
+ * directly as a position fix. */
 #include <sys/systm.h>
 #include <sys/errno.h>
 #include <kern/clock.h>
 #include <kern/locks.h>
 #include <pexpert/device_tree.h>
 #include "x9_gps.h"
+#include "x9_gps_runtime.h"
 extern int sweet_early_is_x9(void);
 extern int sweet_x9_arg(const char *, int);
 static LCK_GRP_DECLARE(gps_group, "x9-gps");
@@ -21,6 +23,7 @@ static struct x9_gps_position positions[X9_GPS_POSITION_RING];
 static unsigned position_head, position_count;
 static int active;
 static struct x9_gps_handoff gps_layout;
+static void gps_runtime_start(void);
 static void gps_copy_layout(void)
 {
  DTEntry chosen; void *p = NULL; unsigned int size = 0;
@@ -50,14 +53,20 @@ int x9_gps_copy_handoff(struct x9_gps_handoff *out)
 
 void x9_gps_init(void)
 {
+ int start = 0;
  lck_mtx_lock(&gps_control); lck_mtx_lock(&gps_lock);
  if (!active && sweet_early_is_x9() && sweet_x9_arg("x9_gps", (sweet_x9_arg("x9s", 0)&4) ? 1 : 0) == 1) {
   active = 1; st.generation = 1; st.interval_ms = 1000;
   gps_copy_layout();
+  if (st.layout_valid) {
+   st.physical_stage = X9_GPS_PHYSICAL_WAIT_CONNV2;
+   st.physical_errno = ENXIO; start = 1;
+  }
   printf("X9 GPS: consys HIF layout %s; physical receiver remains unavailable\n",
       st.layout_valid ? "qualified" : "pending");
  }
  lck_mtx_unlock(&gps_lock); lck_mtx_unlock(&gps_control);
+ if (start) gps_runtime_start();
 }
 int x9_gps_register_backend(const struct x9_gps_backend *p)
 {
@@ -244,3 +253,4 @@ int x9_gps_next_position(uint64_t *cursor, struct x9_gps_position *out)
 
 #include "x9_gps_mcudl.inc"
 #include "x9_gps_hif.inc"
+#include "x9_gps_runtime.inc"
