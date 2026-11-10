@@ -29,7 +29,9 @@ struct x9_camera_smmu {
     struct x9_camera_smmu_export view;
     vm_offset_t mmio;
     uint64_t commands,syncs;
-    bool exported,pending;
+    struct cam_smmu_cmd batch[3];
+    uint32_t batch_start,batch_count,close_samples,close_errno;
+    bool exported,pending,close_attempted,timedout_retired;
 };
 static struct x9_camera_smmu *cam_smmu_namespace;
 
@@ -273,6 +275,69 @@ int x9_camera_smmu_check(struct x9_camera_smmu *m)
     lck_mtx_unlock(&camera_smmu_lock);return e;
 }
 
+/* CMDQ is device-read-only. Never accept CONS advancement for a substituted
+ * CPU queue record, even if its bases/configuration still match. The actual
+ * native owner remains responsible for excluding other firmware producers. */
+static int cam_smmu_batch_check(struct x9_camera_smmu *m)
+{
+    uint32_t ring=1u<<m->cmd_shift,mask=2*ring-1;
+    if(!m->batch_count || m->batch_count>3 || m->batch_count>ring ||
+        (m->batch_start&~mask))return EINVAL;
+    if(m->pending && (m->cons!=m->batch_start ||
+        m->prod!=((m->batch_start+m->batch_count)&mask)))return ESTALE;
+    if(m->batch[m->batch_count-1].word[0]!=CAM_SMMU_CMD_SYNC ||
+        m->batch[m->batch_count-1].word[1])return ESTALE;
+    for(unsigned i=0;i<m->batch_count;i++) {
+        unsigned slot=(m->batch_start+i)&(ring-1);
+        const volatile uint64_t *entry=(const volatile uint64_t *)m->cmd.va+slot*2;
+        if(entry[0]!=m->batch[i].word[0] || entry[1]!=m->batch[i].word[1])return ESTALE;
+    }
+    __asm__ volatile("dsb sy":::"memory");return 0;
+}
+
+/* Sole timeout-close observation, inside the same owner-pinned call/lock.
+ * A late SYNC may actually consume our submitted batch, but cannot turn the
+ * original expired request into success or make this controller reusable.
+ * No second PROD store, CONS/GERRORN/EVTQ ack, cancel, reset or new command.
+ */
+static void cam_smmu_retire_timeout(struct x9_camera_smmu *m)
+{
+    uint64_t span,deadline;
+    int e=ETIMEDOUT;
+    if(!m->pending || m->last_errno!=ETIMEDOUT || m->close_attempted)return;
+    m->close_attempted=true;
+    nanoseconds_to_absolutetime(10000000ull,&span);
+    deadline=mach_absolute_time()+span;
+    e=cam_smmu_storage(m);
+    for(unsigned poll=0;poll<10000 && !e;poll++) {
+        if(mach_absolute_time()>=deadline){e=ETIMEDOUT;break;}
+        e=cam_smmu_batch_check(m);if(!e)e=cam_smmu_live(m);
+        if(e)break;
+        m->close_samples++;
+        if(mach_absolute_time()>=deadline){e=ETIMEDOUT;break;}
+        if(m->last_cons!=m->prod){delay(1);continue;}
+        /* First full target observation is irreversible: live's forward
+         * window now has zero remaining; a regression/ABA is a conflict. */
+        delay(1);
+        e=cam_smmu_storage(m);
+        if(!e)e=cam_smmu_batch_check(m);
+        if(!e)e=cam_smmu_live(m);
+        if(e)break;
+        m->close_samples++;
+        if(mach_absolute_time()>=deadline){e=ETIMEDOUT;break;}
+        if(m->last_cons!=m->prod){e=ESTALE;break;}
+        m->cons=m->prod;m->pending=false;m->timedout_retired=true;
+        __asm__ volatile("dsb sy":::"memory");break;
+    }
+    if(!e && !m->timedout_retired)e=ETIMEDOUT;
+    m->close_errno=(uint32_t)e;
+    printf("X9 CAMERA SMMU CLOSE: original=%u qualify=%u pending=%u retired=%u "
+        "samples=%u batch=%x/%u actual=%x/%x target=%x "
+        "(observation only; retain backing/power, no DMA drain)\n",
+        m->last_errno,m->close_errno,m->pending,m->timedout_retired,m->close_samples,
+        m->batch_start,m->batch_count,m->last_prod,m->last_cons,m->prod);
+}
+
 /* One batch + one architected SYNC, no restart, blind retry, global TLBI,
  * consumer writes, IRQ enables or GERRORN acknowledgements. CS_NONE needs
  * neither MSI nor SEV: advancing CONS beyond SYNC is the completion proof.
@@ -287,10 +352,12 @@ static int cam_smmu_submit(struct x9_camera_smmu *m,const struct cam_smmu_cmd *c
     if(count+1>ring || count>2)return EINVAL;
     e=cam_smmu_storage(m);if(!e)e=cam_smmu_live(m);
     if(e)return cam_smmu_latch(m,e);
+    m->batch_start=old;m->batch_count=count+1;
     for(unsigned i=0;i<=count;i++) {
         unsigned slot=(old+i)&(ring-1);
         struct cam_smmu_cmd *entry=(struct cam_smmu_cmd *)m->cmd.va+slot;
-        *entry=i<count?cmd[i]:(struct cam_smmu_cmd){{CAM_SMMU_CMD_SYNC,0}};
+        m->batch[i]=i<count?cmd[i]:(struct cam_smmu_cmd){{CAM_SMMU_CMD_SYNC,0}};
+        *entry=m->batch[i];
         e=cam_cache_range(m->cmd.va+(vm_offset_t)slot*16,16,CAM_CACHE_CLEAN);
         if(e)return cam_smmu_latch(m,e);
     }
@@ -298,18 +365,21 @@ static int cam_smmu_submit(struct x9_camera_smmu *m,const struct cam_smmu_cmd *c
     /* Recheck producer/config after CPU cache work but before the only
      * device write. This is still not atomic exclusion of firmware users.
      */
-    e=cam_smmu_live(m);if(e)return cam_smmu_latch(m,e);
+    e=cam_smmu_batch_check(m);if(!e)e=cam_smmu_live(m);
+    if(e)return cam_smmu_latch(m,e);
     m->wait_cons=m->cons;m->prod=(old+count+1)&mask;m->pending=true;
     cam_smmu_rw(m,0x98,m->prod);
     nanoseconds_to_absolutetime(10000000ull,&interval);
     deadline=mach_absolute_time()+interval;
     for(unsigned poll=0;poll<10000;poll++) {
-        e=cam_smmu_live(m);if(e)return cam_smmu_latch(m,e);
+        if(mach_absolute_time()>=deadline)break;
+        e=cam_smmu_batch_check(m);if(!e)e=cam_smmu_live(m);
+        if(e)return cam_smmu_latch(m,e);
+        if(mach_absolute_time()>=deadline)break;
         if(m->last_cons==m->prod) {
             m->cons=m->prod;m->pending=false;m->commands+=count;m->syncs++;
             __asm__ volatile("dsb sy":::"memory");return 0;
         }
-        if(mach_absolute_time()>=deadline)break;
         delay(1);
     }
     return cam_smmu_latch(m,ETIMEDOUT);
@@ -333,6 +403,7 @@ static int cam_smmu_commands(struct x9_camera_smmu *m,unsigned operation)
                 ((uint64_t)CAM_SMMU_ASID<<48),0}};count=1;
         }
         e=cam_smmu_submit(m,cmd,count);
+        if(e==ETIMEDOUT)cam_smmu_retire_timeout(m);
     }
     lck_mtx_unlock(&camera_smmu_lock);return e;
 }

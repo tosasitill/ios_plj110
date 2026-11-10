@@ -379,6 +379,16 @@ captured DT 区分 normal camera **SID80**、protected camera **SID89**、displa
 
 下一具体工作是落实 **MM-SMMUv3 主机初始化/委派契约及正常 SID80 attach**：明确当前 NS/HYP 归属、合法的 STRTAB/CMDQ owner、CD/ASID/IOVA 分配与显示保留方式，再实现 map/unmap、TLBI/cache 和真实 CAMSV producer。当前仓库只有受供电保护的 MM-SMMUv3 快照，没有这套 mapper，也没有 `x9_camera_register_platform` 的调用者。该缺口不能由新的 completion adapter 或 diagnostic 镜像补齐。
 
+### 自有转换 backing 与 CMDQ 超时收尾
+
+`x9_camera_s1` 与 `x9_camera_smmu` 已提供真实wired RAW/16KiB页表/CD/STE/CMDQ/EVTQ分配、PoC发布及固定SID80/SSID0/ASID1的CFGI/TLBI/SYNC命令实体，**尚不是正常主机bootstrap/attach或授权mapping服务**。模板保留display90 bypass、其他STE abort，不能未经prior-preservation和native NS授权安装。export之后永久保留所有分配；本节不新增controller注册、PM票据或READY。
+
+每个批次保存最多三个完整16B command record（最后一笔固定CS_NONE SYNC），写入自有wired队列并实际CVAC；提交PROD前及观察CONS时核对原record、批次起点/目标、own storage/bases/config、actual PROD/CONS和GERROR/EVTQ。private CPU record相同也不是firmware grant，controller仍必须排除其他producer和HYP重定向。
+
+命令10ms deadline在每次观察前后检查；超过deadline的CONS即使已经到目标也不能返回正常成功。只有明确的`ETIMEDOUT + pending`在**同一owner-pinned调用与锁内**进入一次额外、有界的10ms close观察，真实批次/自有storage完整保持且两个actual CONS样本均等于已发PROD目标才退休这笔pending。第一次实际到目标后，原forward-window已收缩为零，任何回退或外部producer/config/batch变化都拒绝。其它queue/global/EVTQ错误不沿timeout例外收尾。
+
+close不写任何MMIO，不重发PROD、不写CONS/GERRORN/EVTQ、不cancel/reset，也不新增命令。即使实际迟到消费已确认，**原调用仍返回首个ETIMEDOUT，namespace保持终态，不接受后续命令或重试**；`X9 CAMERA SMMU CLOSE`缓存日志区分original、qualify、pending、retired、samples与actual/target。两次CONS到目标只资格化这一批含SYNC命令，不是RAW/AXI/IRQ/worker drain，更不是释放backing/shared power、恢复继承policy或unmap的许可。仍需完整native正常控制器与真实采集producer。
+
 ## 硬件后端接入契约
 
 ### 持有冷传感器与接收时钟

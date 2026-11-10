@@ -33,6 +33,14 @@ int x9_camera_smmu_discard(struct x9_camera_smmu **); /* unpublished only */
  * ASID, HVC or CPU-PA-as-IOVA interface. Checks are necessary readbacks,
  * not themselves authority or proof of DMA/worker drain. Unknown changes,
  * queue/global errors, EVTQ events and command timeout are terminal.
+ * Each submitted batch (including its trailing CS_NONE SYNC) is checked
+ * against the private CPU queue record before publication/consumption.
+ * On timeout, the SAME owner-pinned call performs one bounded, read-only
+ * close observation: two actual full-target CONS samples plus exact own
+ * storage/config/PROD/record are required to retire only that pending batch.
+ * The original timeout stays terminal even if late consumption is proven;
+ * no further command/retry or release of backing/power follows. This is
+ * not RAW/AXI/IRQ/worker drain or permission to unmap/restore the controller.
  */
 int x9_camera_smmu_check(struct x9_camera_smmu *);
 int x9_camera_smmu_cfgi(struct x9_camera_smmu *); /* STE80 + CD80/SSID0 + SYNC */
