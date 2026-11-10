@@ -6158,8 +6158,7 @@
   {
    "name": "sleh.o",
    "source": "osfmk/arm64/sleh.c",
-   "prebuilt": "prebuilt/sleh.o",
-   "prebuilt_sha256": "193c6173b8a8b876772d1041ed984cba65d3833b99730c731d1a10df96ba23b8"
+   "template": "osfmk-c-3"
   },
   {
    "name": "start.o",
@@ -6527,6 +6526,11 @@
   {
    "name": "x9_adsp_mt6993.o",
    "source": "bsd/dev/x9_adsp_mt6993.c",
+   "template": "bsd-c-11"
+  },
+  {
+   "name": "x9_adsp_audio_irq.o",
+   "source": "bsd/dev/x9_adsp_audio_irq.c",
    "template": "bsd-c-11"
   },
   {

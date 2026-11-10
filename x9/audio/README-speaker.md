@@ -533,7 +533,7 @@ property可缺失或为0，重复/畸形property不能当成缺失。CFG/CFG2、
 BASE/SET/CLR、两core system image区域和cell/ranges合同同时核对。
 `fdt_property_checked`区分absent与malformed/duplicate；既有boolean API语义保留。
 
-基础资格现经 `fdt_capture_nodes()` **一次完整树遍历**捕获root、soc、adspsys和两core，
+基础资格现经 `fdt_capture_nodes()` **一次完整树遍历**捕获root、soc、adspsys、两core及GIC，
 随后从同步调用内的局部records解码，不再为每个标量和named-reg反复遍历整棵树。
 复用同一严格lexer，全部required nodes唯一存在、被捕获node的所有property key唯一，
 valid END和尾部padding核对后才发布；超容量或超过127字节的key直接拒绝、不截断，
@@ -551,11 +551,55 @@ bus是0x160543000。这只是源码与旧DT的布局算术，**不是本次启�
 pool并不16KiB页对齐，后续子分配/映射须保留与XHCI相邻页边界，不可清零整页。
 
 共享RAM映射／daemon登记／core DTOA处理组件现已编写，见下一节；仍没有真实memory
-authority／IRQ provider和combined caller，因此不访问pool、不宣称登记或播放已运行。
+authority／combined caller，因此不访问pool、不宣称登记或播放已运行。native IRQ
+provider与实际DTOA线程caller已编写（下节），未被combined backend绑定／启用。
 生产AUDIO/APLL2及I2S4 pads子租约已有实现，见下节；真实双PA／drain回调以及PCM到iOS backend的接线仍未完成。
 独立cold clock/pll/path probe仍要求TOP/INFRA baseline，不能拿它们的成功flag冒充
 combined acquire；生产入口独立按真实DSP父owner的顺序申请。固件/共享RAM不能用Device映射；
 不采用WC/WB混合别名。最终只在这些生产接线完成后冻结并构建一个镜像。
+
+### 将 core-A AUDIO IRQ 接到真实 DTOA 线程
+
+**代码入口已写，尚未实际绑定／启用；不是独立输出 committed 证明。**
+完整目标继续只构建最终一个镜像，本阶段仅单位编译，不执行前述独立候选构建／部署命令。
+
+- 原OPPO v3 `audioirq`是四cell GIC SPI：`0 / 0x21a / 4 / 0`，对应
+  INTID570、level-high。shim一次基础capture新增GIC node，核对当前root／soc parent、
+  唯一phandle、完整`sysirq/wdt/audioirq`列表、四cell格式与GICD/GICR区域；
+  `interrupts-extended`／不同parent／map拒绝。单独32B chosen
+  `x9-adsp-audio-irq`与原256B pool ABI分开，默认全零。**loader仍默认0**，
+  旧Android capture不授予本次IRQ绑定。
+- `sleh_irq`从真实`ICC_IAR1_EL1`获得INTID，先调用
+  `x9_adsp_audio_irq_filter`。只接管已owned的570，其他IRQ继续原external
+  handler，timer／IPI和EOIR处理不变。`sleh.o`从prebuilt改为实际源码编译；
+  只改源文件而继续链接冻结对象不会使这条链生效。
+- native provider使用与实际`pe_init_fiq`相同Device GICD区域和逐页pmap；
+  不重置global distributor／redistributor，不改Group／trigger／timer／IPI。
+  冷准入要求本SPI disabled／inactive／not-pending、Group1NS／level trigger，
+  保存一个priority byte与一个IROUTER，目标采用真实当前MPIDR（IRM0／含AFF3）。
+  每次unmask必须enable readback或新的**真实IAR delivery**证明；busy／host time不充数。
+- hard IRQ只mask本SPI和wake thread，不拿board/shared/PCM睡眠锁、不访问CFG／RAM。
+  worker使用backend同一PCM mutex，fresh ticket／READY generation／shared与实际AFE
+  route后，调用板级ACK：CFG+0x5c只清SPM bit0并整字readback，CFG+0x38只写
+  AUDIO bit2；**不读CLR当pending，不把ACK当DSP输出完成**。然后实际调用
+  `x9_dsp_shared_dtoa()`，在SEMA_AUDIO下处理同session的input consumed。
+  任一失败禁止重新unmask并保留首错，不冒充mute、output或Ready。
+
+backend调用顺序（kernel-only API，无新用户selector）：
+
+| 阶段 | 必需调用／条件 |
+|---|---|
+| 首次绑定 | 真实shared／PCM和AFE route已建立；`x9_adsp_audio_irq_bind(ticket,generation,session,session_lock)`；每generation一次 |
+| 所有PCM操作 | 与IRQ worker共用同一`session_lock`；public IRQ lifecycle调用时不能持该锁 |
+| 故障／stop | PA mute＋AFE disable／独立drain后`x9_adsp_audio_irq_quiesce()`；禁止新callback，等待worker pin退休（500ms限额）和GIC active清除 |
+| 停核 | IRQ child已quiesced才允许真正board halt；child仍pin parents，不允许restart／power-off |
+| 最终退休 | real halted后`x9_adsp_audio_irq_release()`清本SPI pending、恢复仅saved priority/route并读回，最后drop IRQ child；然后原shared/pads/clocks/board清理 |
+
+关闭先阻断新delivery再等待worker **pin**，不只等当前callback；避免已排队线程在
+release后访问旧session／mutex。超时／配置第三值／uncertain保留child与journal。
+上述实际caller不包含combined注册者，当前没有运行IRQ/CFG/SMC操作或上板证据，
+也不替代尚缺的EMI、双PA rails/controller、可信profile/probus保护、真实输出publication
+supplier和最终iOS backend。
 
 ### 接共享 DRAM、真实信号量和 core DTOA
 
@@ -673,7 +717,8 @@ bus/bytes；`COREMEM_SET7`发送32B dram record，size16B。二者保持原BYPAS
 `x9_dsp_shared_dtoa()`只供生产core-A AUDIO IRQ线程调用；调用者必须先证明/ack真实
 IRQ源，不将mailbox IPI9当core IRQ，也不轮询任意RAM。它在真实sem下invalidate并读
 已登记core flags，持sem调用同一PCM session的DTOA双快照，成功才清本task bit并clean；
-未知scene bit保留并隔离。没有当前IRQ注册者，不声称core通知已跑通。输出ring的
+未知scene bit保留并隔离。native IRQ注册／DTOA线程caller现已编写，但未实际绑定／
+启用，不声称core通知已跑通。输出ring的
 sync/binding和PCM binding已有实现，最终仍待combined电源／AFE／双PA／iOS caller。
 
 ### 接生产 AUDIO/APLL2 时钟子租约

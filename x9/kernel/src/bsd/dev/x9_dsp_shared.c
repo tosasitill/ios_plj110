@@ -284,6 +284,20 @@ static int afe_sync(uint32_t offset,uint32_t bytes,bool device)
 }
 int x9_dsp_shared_afe_sync_device(uint32_t o,uint32_t n){return afe_sync(o,n,true);}
 int x9_dsp_shared_afe_sync_cpu(uint32_t o,uint32_t n){return afe_sync(o,n,false);}
+int x9_dsp_shared_irq_validate(struct x9_dsp_pcm_session *s,uint64_t ticket,uint32_t generation)
+{
+    if(!s)return EINVAL;
+    lck_mtx_lock(&shared_lock);int e=shared.registered?qualify():ENXIO;
+    unsigned needed=X9PCMPrepared|X9PCMAFEPrepared;
+    if(!e && (!s->bound || s->error || (s->flags&needed)!=needed ||
+       s->hw.context!=&shared || s->hw.core || shared.policy.ticket!=ticket ||
+       s->hw.generation!=generation || shared.policy.generation!=generation ||
+       s->hw.scene!=shared.policy.task_scene || s->hw.validate!=pcm_validate ||
+       s->hw.validate_afe!=pcm_validate_afe))e=EPERM;
+    lck_mtx_unlock(&shared_lock);
+    if(!e)e=pcm_validate_afe(&shared,&s->afe_buffer);
+    return e;
+}
 int x9_dsp_shared_dtoa(struct x9_dsp_pcm_session *s)
 {
     if(!s)return EINVAL;

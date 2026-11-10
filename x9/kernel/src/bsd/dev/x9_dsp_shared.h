@@ -60,7 +60,8 @@ int x9_dsp_shared_afe_sync_cpu(uint32_t offset,uint32_t bytes);
  * qualify/ack the real IRQ source; not a mailbox IPI9 or arbitrary RAM poll.
  * Fresh registered core DTOA flag and this exact PCM session's DTOA are
  * observed under SEMA_AUDIO; only then clear the bit. Unknown bits retained.
- * No current IRQ provider is registered by this module. */
+ * Native caller: x9_adsp_audio_irq worker, serialized with the backend. */
+int x9_dsp_shared_irq_validate(struct x9_dsp_pcm_session *,uint64_t ticket,uint32_t generation);
 int x9_dsp_shared_dtoa(struct x9_dsp_pcm_session *);
 /* Explicit error cleanup only: after a failed halt requalifies board access,
  * resolve a retained semaphore without touching RAM/replaying its toggle.

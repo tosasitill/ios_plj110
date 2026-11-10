@@ -3,6 +3,7 @@
 #include "fdt.h"
 #include "plog.h"
 #include "../kernel/src/bsd/dev/x9_adsp_handoff.h"
+#include "../kernel/src/bsd/dev/x9_adsp_audio_irq.h"
 _Static_assert(sizeof(struct x9_adsp_handoff)==X9_ADSP_HANDOFF_BYTES,"ADSP handoff ABI");
 static uint32_t be(const uint8_t *p)
 {return (uint32_t)p[0]<<24|(uint32_t)p[1]<<16|(uint32_t)p[2]<<8|p[3];}
@@ -21,8 +22,8 @@ static int value(uintptr_t dt,const char *path,const char *key,uint32_t v)
 {uint32_t a;return word(dt,path,key,&a,0)&&a==v;}
 static int str(uintptr_t dt,const char *path,const char *key,const char *v)
 {const uint8_t *p;size_t n;return fdt_property(dt,path,key,&p,&n)&&eq(p,n,v);}
-enum { CaptureRoot,CaptureSoc,CaptureSystem,CaptureCoreA,CaptureCoreB };
-struct adsp_capture {struct fdt_captured_property p[96];unsigned count;};
+enum { CaptureRoot,CaptureSoc,CaptureSystem,CaptureCoreA,CaptureCoreB,CaptureGIC };
+struct adsp_capture {struct fdt_captured_property p[128];unsigned count;};
 static int captured_get(const struct adsp_capture *c,unsigned node,const char *key,const uint8_t **p,size_t *n)
 {
     *p=0;*n=0;
@@ -72,12 +73,43 @@ static int captured_named_reg(const struct adsp_capture *c,unsigned node,const c
 }
 #include "adsp_i2s4.inc"
 #include "adsp_pa_reset.inc"
-static int qualify(uintptr_t dt,struct x9_adsp_handoff *h)
+/* Four cells per interrupt are required by THIS GIC binding. Reject an
+ * alternate parent/extended/map instead of silently decoding as 3 cells. */
+static int qualify_audio_irq(uintptr_t dt,const struct adsp_capture *c,struct x9_adsp_audio_irq_layout *q)
+{
+    const uint8_t *p;size_t n;uint32_t ph;
+    if(!captured_str(c,CaptureGIC,"compatible","arm,gic-v3") ||
+       !captured_value(c,CaptureGIC,"#interrupt-cells",4) ||
+       !captured_word(c,CaptureGIC,"phandle",&ph,0) || !ph ||
+       fdt_phandle_unique(dt,"/interrupt-controller@6800000",ph)!=FDT_PROPERTY_PRESENT ||
+       !captured_get(c,CaptureGIC,"interrupt-controller",&p,&n) || n ||
+       !captured_get(c,CaptureGIC,"reg",&p,&n) || n!=32 ||
+       be(p) || be(p+4)!=0x06800000 || be(p+8) || be(p+12)!=0x40000 ||
+       be(p+16) || be(p+20)!=0x06880000 || be(p+24) || be(p+28)!=0x200000)return 0;
+    /* Root and soc use the same parent; a core-local override must agree. */
+    for(unsigned i=CaptureRoot;i<=CaptureSoc;i++)
+        if(!captured_value(c,i,"interrupt-parent",ph) ||
+           captured_get(c,i,"interrupt-map",&p,&n))return 0;
+    if(captured_get(c,CaptureCoreA,"interrupt-parent",&p,&n) &&
+       (n!=4 || be(p)!=ph))return 0;
+    if(captured_get(c,CaptureCoreA,"interrupts-extended",&p,&n) ||
+       !captured_get(c,CaptureCoreA,"interrupt-names",&p,&n))return 0;
+    const char names[]="sysirq\0wdt\0audioirq";
+    if(n!=sizeof(names))return 0;
+    for(unsigned i=0;i<n;i++)if(p[i]!=(uint8_t)names[i])return 0;
+    if(!captured_get(c,CaptureCoreA,"interrupts",&p,&n) || n!=48)return 0;
+    for(unsigned i=0;i<3;i++)if(be(p+i*16) || be(p+i*16+4)!=0x216+i*2 ||
+        be(p+i*16+8)!=4 || be(p+i*16+12))return 0;
+    *q=(struct x9_adsp_audio_irq_layout){1,0,X9_ADSP_AUDIO_INTID,4,
+        0x1a000000,0x06800000,0x40000,0};
+    return x9_adsp_audio_irq_layout_valid(q);
+}
+static int qualify(uintptr_t dt,struct x9_adsp_handoff *h,struct x9_adsp_audio_irq_layout *q)
 {
     /* Inline arrays are required: pointer tables create ABS64 relocations
      * which are invalid when LK relocates the shim. */
     const char paths[][FDT_CAPTURE_PATH_BYTES]={"","/soc","/soc/adspsys@1a000000",
-        "/soc/adsp-core0@1a200000","/soc/adsp-core1@1a210000"};
+        "/soc/adsp-core0@1a200000","/soc/adsp-core1@1a210000","/interrupt-controller@6800000"};
     const char mem[][24]={"adsp-rsv-logger-a","adsp-rsv-dbg-dump-a","adsp-rsv-ipidma-a",
         "adsp-rsv-core-dump-a","adsp-rsv-mbrain-a","adsp-rsv-logger-b",
         "adsp-rsv-dbg-dump-b","adsp-rsv-ipidma-b","adsp-rsv-core-dump-b",
@@ -91,7 +123,7 @@ static int qualify(uintptr_t dt,struct x9_adsp_handoff *h)
     struct adsp_capture c;
     /* One complete-tree pass, not one rescan per scalar or named register.
      * Captured pointers are local to this synchronous call, not a cache. */
-    if(fdt_capture_nodes(dt,paths,5,c.p,96,&c.count)!=FDT_PROPERTY_PRESENT)return 0;
+    if(fdt_capture_nodes(dt,paths,6,c.p,128,&c.count)!=FDT_PROPERTY_PRESENT)return 0;
     plog_str("X9 ADSP FDT: required nodes captured; validating shared layout\n");
     for(unsigned i=0;i<2;i++)if(!captured_value(&c,i,"#address-cells",2)||
        !captured_value(&c,i,"#size-cells",2))return 0;
@@ -143,15 +175,18 @@ static int qualify(uintptr_t dt,struct x9_adsp_handoff *h)
         h->i2s4_pins=X9_ADSP_I2S4_PINS;h->i2s4_modes=X9_ADSP_I2S4_MODES;
     }
     if(qualify_pa_reset(dt))h->flags|=X9_ADSP_PA_RESET_VERIFIED;
-    return x9_adsp_handoff_valid(h);
+    if(!x9_adsp_handoff_valid(h))return 0;
+    /* Optional metadata has no authorization bit in the shared-pool ABI. */
+    (void)qualify_audio_irq(dt,&c,q);
+    return 1;
 }
-struct walk {uint8_t *p;size_t size,at,found;unsigned nodes,matches;};
+struct walk {uint8_t *p;size_t size,at,found,irq_found;unsigned nodes,matches,irq_matches;};
 static int node(struct walk *w,unsigned depth)
 {
     if(depth>32||++w->nodes>1024||w->at>w->size||w->size-w->at<8)return 0;
     uint32_t props=le(w->p+w->at),children=le(w->p+w->at+4);w->at+=8;
     if(props>1024||children>1024)return 0;
-    size_t candidate=0;unsigned chosen=0,found=0;
+    size_t candidate=0;unsigned chosen=0,found=0,irq_found=0;size_t irq_candidate=0;
     for(unsigned i=0;i<props;i++) {
         if(w->size-w->at<36)return 0;
         uint8_t *key=w->p+w->at;uint32_t n=le(key+32)&0x7fffffff;w->at+=36;
@@ -159,24 +194,31 @@ static int node(struct walk *w,unsigned depth)
         if(padded>w->size-w->at)return 0;
         if(eq(key,32,"name"))chosen=depth==1&&eq(w->p+w->at,n,"chosen");
         if(eq(key,32,"x9-adsp-handoff")){if(n!=X9_ADSP_HANDOFF_BYTES)return 0;candidate=w->at;found++;}
+        if(eq(key,32,"x9-adsp-audio-irq")){if(n!=sizeof(struct x9_adsp_audio_irq_layout))return 0;irq_candidate=w->at;irq_found++;}
         w->at+=padded;
     }
     if(chosen&&found){w->found=candidate;w->matches+=found;}
+    if(chosen&&irq_found){w->irq_found=irq_candidate;w->irq_matches+=irq_found;}
     for(unsigned i=0;i<children;i++)if(!node(w,depth+1))return 0;
     return 1;
 }
 int fdt_adsp_patch_adt(uintptr_t dt,void *adt,size_t bytes)
 {
     plog_str("X9 ADSP FDT: entering handoff slot validation\n");
-    struct walk w={(uint8_t *)adt,bytes,0,0,0,0};
-    if(!node(&w,0)||w.at!=bytes||w.matches!=1)return -1;
+    struct walk w={.p=(uint8_t *)adt,.size=bytes};
+    if(!node(&w,0)||w.at!=bytes||w.matches!=1||w.irq_matches!=1)return -1;
     uint8_t *dst=w.p+w.found;
     for(unsigned i=0;i<X9_ADSP_HANDOFF_BYTES;i++)dst[i]=0;
-    struct x9_adsp_handoff h={0};
+    uint8_t *irq_dst=w.p+w.irq_found;
+    for(unsigned i=0;i<sizeof(struct x9_adsp_audio_irq_layout);i++)irq_dst[i]=0;
+    struct x9_adsp_handoff h={0};struct x9_adsp_audio_irq_layout q={0};
     plog_str("X9 ADSP FDT: capturing this-boot nodes\n");
-    if(!qualify(dt,&h)){plog_str("X9 ADSP FDT: shared layout refused; no DRAM grant\n");return 0;}
+    if(!qualify(dt,&h,&q)){plog_str("X9 ADSP FDT: shared layout refused; no DRAM grant\n");return 0;}
     const uint8_t *src=(const uint8_t *)&h;
     for(unsigned i=0;i<X9_ADSP_HANDOFF_BYTES;i++)dst[i]=src[i];
+    src=(const uint8_t *)&q;
+    for(unsigned i=0;i<sizeof(q);i++)irq_dst[i]=src[i];
+    if(q.version)plog_str("X9 ADSP FDT: core-A AUDIO SPI570 level-high topology; IRQ not armed\n");
     plog_str("X9 ADSP FDT: common pool and mailbox layout qualified; EMI/firmware not yet ready\n");
     if(h.flags&X9_ADSP_I2S4_VERIFIED)plog_str("X9 ADSP FDT: I2SIN4/OUT4 pinctrl metadata qualified; pads not owned\n");
     if(h.flags&X9_ADSP_PA_RESET_VERIFIED)plog_str("X9 ADSP FDT: SID3 dual active-low PA reset topology; no rail/reset lease\n");

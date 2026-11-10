@@ -36,6 +36,8 @@ static uint32_t audio_sem_state;
 static uint64_t audio_sem_lease,audio_sem_serial;
 static uint64_t shared_child_lease,shared_child_serial;
 static uint64_t clock_child_lease,clock_child_serial;
+static uint64_t irq_child_lease,irq_child_serial;
+static bool irq_child_quiesced;
 enum { AUDIO_SEM_REG=0x64,AUDIO_SEM_BIT=1u<<(4*3+2),AUDIO_SEM_RETRIES=5000 };
 _Static_assert(sizeof(X9AudioBoardStatus)==160,"ADSP board status v3 size");
 enum { PD_SET=0x20700,PD_CLR=0x20704,PD_EN=0x20708,PD_DONE=0x1132c,
@@ -203,6 +205,52 @@ int x9_adsp_mt6993_clock_drop(uint64_t ticket,uint64_t lease)
     lck_mtx_lock(&board_lock);int e=!lease || lease!=clock_child_lease?EPERM:0;
     if(!e)e=speaker_halted_qualify(ticket);
     if(!e)clock_child_lease=0;
+    lck_mtx_unlock(&board_lock);return e;
+}
+/* AUDIO IRQ pins parents until final route retirement. Active delivery
+ * blocks reset; masked/drained quiescence permits halt but NOT restart/off. */
+int x9_adsp_mt6993_audio_irq_hold(uint64_t ticket,uint64_t *lease)
+{
+    if(!lease)return EINVAL;*lease=0;
+    lck_mtx_lock(&board_lock);int e=speaker_qualify(ticket);
+    if(!e && (!started || irq_child_lease))e=EBUSY;
+    if(!e && irq_child_serial==UINT64_MAX)e=EOVERFLOW;
+    if(!e){irq_child_lease=++irq_child_serial;irq_child_quiesced=false;*lease=irq_child_lease;}
+    lck_mtx_unlock(&board_lock);return e;
+}
+int x9_adsp_mt6993_audio_irq_quiesce(uint64_t ticket,uint64_t lease)
+{
+    lck_mtx_lock(&board_lock);int e=!lease || lease!=irq_child_lease?EPERM:0;
+    if(!e)e=speaker_qualify(ticket);
+    if(!e)irq_child_quiesced=true;
+    lck_mtx_unlock(&board_lock);return e;
+}
+int x9_adsp_mt6993_audio_irq_drop(uint64_t ticket,uint64_t lease)
+{
+    lck_mtx_lock(&board_lock);int e=!lease || lease!=irq_child_lease?EPERM:0;
+    if(!e && !irq_child_quiesced)e=EBUSY;
+    if(!e)e=speaker_halted_qualify(ticket);
+    if(!e){irq_child_lease=0;irq_child_quiesced=false;}
+    lck_mtx_unlock(&board_lock);return e;
+}
+int x9_adsp_mt6993_audio_irq_ack(uint64_t ticket,uint64_t lease)
+{
+    lck_mtx_lock(&board_lock);int e=!lease || lease!=irq_child_lease?EPERM:0;
+    if(!e)e=speaker_qualify(ticket);
+    if(!e && (!started || irq_child_quiesced))e=EBUSY;
+    /* Vendor v3 top half clears core-A SPM wake bit0, then exact AUDIO
+     * CLR bit2. CLR is write-only action, NEVER a pending/ownership read. */
+    if(!e) {
+        uint32_t old=rd(cfg,0x5c);
+        e=speaker_qualify(ticket);
+        if(!e && (old&1)) {
+            wr(cfg,0x5c,old&~1u);e=speaker_qualify(ticket);
+            if(!e && rd(cfg,0x5c)!=(old&~1u))e=EIO;
+        }
+    }
+    if(!e){e=speaker_qualify(ticket);if(!e)wr(cfg,0x38,1u<<2);}
+    if(!e)e=speaker_qualify(ticket);
+    if(e)x9_audio_resources_fault(X9AudioResourceSpeaker,ticket,e);
     lck_mtx_unlock(&board_lock);return e;
 }
 int x9_adsp_mt6993_audio_sem_acquire(uint64_t ticket,uint64_t *lease)
@@ -402,7 +450,7 @@ static int power_on(void *unused)
 static int reset(void *unused)
 {
     (void)unused;lck_mtx_lock(&board_lock);begin_control();int e=exclusive?0:ENXIO;
-    if(!e && audio_sem_state!=AudioSemIdle)e=EBUSY;
+    if(!e && (audio_sem_state!=AudioSemIdle || (irq_child_lease && !irq_child_quiesced)))e=EBUSY;
     if(!e && access_error)e=access_error;
     if(!e) {
         X9AudioResourceStatus ticket;x9_audio_resources_status(&ticket);
@@ -425,7 +473,7 @@ static int reset(void *unused)
 static int core_start(void *unused)
 {
     (void)unused;lck_mtx_lock(&board_lock);int e=exclusive&&reset_done&&!started?0:ENXIO;
-    if(!e && (audio_sem_state!=AudioSemIdle || shared_child_lease || clock_child_lease))e=EBUSY;
+    if(!e && (audio_sem_state!=AudioSemIdle || shared_child_lease || clock_child_lease || irq_child_lease))e=EBUSY;
     if(!e)e=qualify();
     if(!e && (rd(cfg,AUDIO_SEM_REG)&AUDIO_SEM_BIT))e=EBUSY;
     if(!e)e=smc(SMC_RELOAD,0xad5bad5b);
@@ -438,7 +486,7 @@ static int core_start(void *unused)
 static int power_off(void *unused)
 {
     (void)unused;lck_mtx_lock(&board_lock);int e=0;
-    if(started || wake || !reset_done || audio_sem_state!=AudioSemIdle || shared_child_lease || clock_child_lease)e=EBUSY;
+    if(started || wake || !reset_done || audio_sem_state!=AudioSemIdle || shared_child_lease || clock_child_lease || irq_child_lease)e=EBUSY;
     else if(exclusive) {
         e=qualify();
         if(!e && (rd(cfg,AUDIO_SEM_REG)&AUDIO_SEM_BIT))e=EBUSY;
@@ -528,7 +576,7 @@ int x9_adsp_mt6993_speaker_control(uint32_t op,uint64_t ticket)
     if(!e)e=!op?x9_adsp_boot(0):op==1?x9_adsp_halt(0):x9_adsp_release(0);
     if(!e && op==2) {
         lck_mtx_lock(&board_lock);
-        if(exclusive || resource_ticket || started || wake || audio_sem_state!=AudioSemIdle || shared_child_lease || clock_child_lease)e=EIO;
+        if(exclusive || resource_ticket || started || wake || audio_sem_state!=AudioSemIdle || shared_child_lease || clock_child_lease || irq_child_lease)e=EIO;
         else {borrowed_ticket=0;resource_owner=X9AudioResourceADSP;}
         lck_mtx_unlock(&board_lock);
     }

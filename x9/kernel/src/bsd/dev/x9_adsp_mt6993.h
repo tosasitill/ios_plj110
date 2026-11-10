@@ -36,6 +36,13 @@ int x9_adsp_mt6993_clock_drop(uint64_t ticket,uint64_t lease);
  * qualification performs no further domain access. An explicit halt may
  * requalify but returns EBUSY without resetting an outstanding semaphore;
  * the caller must then resolve release before attempting halt again. */
+/* IRQ module only: pins board through real masked/drained threaded delivery.
+ * quiesce permits halt but keeps parents pinned; drop requires real halt.
+ * ACK is thread-context and requires this exact child, not an IPI event. */
+int x9_adsp_mt6993_audio_irq_hold(uint64_t ticket,uint64_t *lease);
+int x9_adsp_mt6993_audio_irq_quiesce(uint64_t ticket,uint64_t lease);
+int x9_adsp_mt6993_audio_irq_drop(uint64_t ticket,uint64_t lease);
+int x9_adsp_mt6993_audio_irq_ack(uint64_t ticket,uint64_t lease);
 int x9_adsp_mt6993_audio_sem_acquire(uint64_t ticket,uint64_t *lease);
 int x9_adsp_mt6993_audio_sem_validate(uint64_t ticket,uint64_t lease);
 int x9_adsp_mt6993_audio_sem_release(uint64_t ticket,uint64_t lease);
