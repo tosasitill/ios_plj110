@@ -1,4 +1,31 @@
 /* No power/firmware/EMI access or invented position/enable acknowledgements. */
+int
+x9_gps_mnl_control_decode(const void *body, unsigned length,
+    struct x9_gps_mnl_control_message *output)
+{
+ const uint8_t *p=body;
+ if(!p || !output)return EINVAL;
+ if(length<4 || length>X9_MNL_MESSAGE_MAX)return EBADMSG;
+ struct x9_gps_mnl_control_message message={
+  (uint32_t)p[0]|(uint32_t)p[1]<<8,
+  (uint32_t)p[2]|(uint32_t)p[3]<<8,length,0
+ };
+ switch(message.event) {
+ case X9_GPS_MNL_NOTIFICATION: {
+  if(message.declared_bytes!=2 || length<6)return EBADMSG;
+  uint32_t value=(uint32_t)p[4]|(uint32_t)p[5]<<8;
+  message.notification=(int32_t)value-(value&0x8000u ? 0x10000 : 0);
+  break;
+ }
+ case X9_GPS_MNL_TERMINATED:case X9_GPS_MNL_STOP_DONE:
+  /* Vendor705d24/705cc0 do not read a payload or check declared length.
+   * Record both sizes, but do not invent a zero-payload success schema. */
+  break;
+ default:return ENOTSUP;
+ }
+ *output=message;return 0;
+}
+
 void
 x9_gps_mnl_discard_partial(struct x9_gps_mnl_stream *s)
 {

@@ -9,6 +9,19 @@
 #define X9_MNL_FRAGMENT_MAX (X9_MNL_PACKET_MAX - 4u)
 /* The vendor dispatch rejects a negative signed16 assembled length. */
 #define X9_MNL_MESSAGE_MAX 32767u
+/* Actual MCU event IDs in libmnl's 7055a0 dispatch table. Event0 calls
+ * the generic notification callback, NOT an OPEN/START result callback.
+ * Event128 wakes the STOP waiter; event5 only reports MNL termination.
+ * Neither carries a proved application transaction ID. */
+enum x9_gps_mnl_control_event {
+ X9_GPS_MNL_NOTIFICATION=0,
+ X9_GPS_MNL_TERMINATED=5,
+ X9_GPS_MNL_STOP_DONE=128
+};
+struct x9_gps_mnl_control_message {
+ uint32_t event, declared_bytes, body_bytes;
+ int32_t notification; /* signed16 only for event0; otherwise uninterpreted */
+};
 struct x9_gps_mnl_stream {
  uint64_t generation, first_time, last_time; /* physical/hardware epoch */
  uint64_t messages, bad_fragments;
@@ -34,6 +47,15 @@ void x9_gps_mnl_discard_partial(struct x9_gps_mnl_stream *);
 /* One complete inner packet per call, after outer MCUDL validation. */
 int x9_gps_mnl_receive(struct x9_gps_mnl_stream *, const void *, unsigned,
     uint64_t generation, uint64_t host_time);
+/* Metadata-only decoder of the three control events above. Event0 needs
+ * declared2 and at least its two real bytes at BODY+4, NOT PVT's BODY+6.
+ * Trailing bytes, and event5/128 payloads, are deliberately uninterpreted:
+ * their schema is not established by vendor's unchecked dispatch handlers.
+ * Success proves only that this notification was received. It NEVER proves
+ * START/STOP, quiesced DMA, a matching request or receiver readiness.
+ * Unknown events return ENOTSUP; every error leaves output untouched. */
+int x9_gps_mnl_control_decode(const void *body, unsigned body_bytes,
+    struct x9_gps_mnl_control_message *);
 /* Strict event2 BODY -> 105B PDS partial translation, no publication/READY.
  * Only measured degree latitude/longitude are currently qualified. All
  * time/accuracy/confidence/altitude/DOP/mode validity bits remain clear.

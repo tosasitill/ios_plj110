@@ -180,6 +180,13 @@ static struct {
   uint64_t frames,transitions,scif_events;
   int error;
  } mcusys;
+ struct {
+  unsigned initialized;
+  uint32_t event,declared,body;
+  int32_t notification;
+  uint64_t frames,notifications,stop_done,terminations,application,time;
+  int error;
+ } mnl_control;
 } gps_rt;
 static void gps_runtime_pause(unsigned us)
 {
@@ -491,6 +498,7 @@ static int gps_runtime_owned(void *ctx, uint64_t generation, int reset)
 #include "x9_gps_flow.inc"
 #include "x9_gps_nv.inc"
 #include "x9_gps_mcusys.inc"
+#include "x9_gps_mnl_monitor.inc"
 static int gps_runtime_control(void *ctx,unsigned ch,uint8_t type,
     const uint8_t *p,unsigned n,uint64_t now)
 {
@@ -527,9 +535,16 @@ static int gps_runtime_mnl(void *ctx,const uint8_t *p,unsigned n,uint64_t now)
  /* Captured at RX POST and first inner fragment, not at callback arrival.
   * A late old/mixed PVT must not publish or retire the new session's fix. */
  uint64_t application=gps_rt.hif.stream[0].mnl_application_generation;
+ int observed=gps_mnl_control_receive(p,n,application,now);
+ /* Terminal notification has already revoked both epochs atomically.
+  * Still deliver it to the existing provider for its own state teardown;
+  * runtime_queue and all publication APIs now reject this hardware epoch.
+  * Invalid known control data is never passed to an unchecked callback. */
+ if(observed && observed!=ECONNABORTED)return observed;
  (void)ctx; gps_rt.in_callback=1;
  int e=gps_rt.ops.mnl(gps_rt.ops.context,p,n,now);
  gps_rt.in_callback=0;
+ if(observed)return observed; /* provider return0 cannot swallow termination */
  if(gps_nv.error){x9_gps_hardware_fault(gps_rt.generation,gps_nv.error);return gps_nv.error;}
  /* The physical handler must first accept this report in its real MNL
   * session. Do not turn unsolicited event2/management traffic into READY.
@@ -586,6 +601,11 @@ int x9_gps_runtime_queue(uint64_t generation,unsigned ch,const void *p,unsigned 
  if (!p || !n || n>4096 || ch<1 || ch>2) return EINVAL;
  if (current_thread()!=gps_rt.worker || !gps_rt.in_callback) return EPERM;
  if (generation!=gps_rt.generation || gps_rt.hif.fault) return ESTALE;
+ /* A reset/termination callback runs only to notify its provider. It must
+  * not queue new traffic after the monitor has revoked hardware ownership,
+  * even before HIF latches that callback's terminal error. */
+ struct x9_gps_status status;x9_gps_copy_status(&status);
+ if(status.hardware_generation!=generation || status.fault)return ESTALE;
  if(gps_rt.ops.version>=5) {
   int e=gps_flow_queue(ch-1,p,n,0);gps_flow_journal(0);return e;
  }
@@ -672,6 +692,7 @@ static int gps_runtime_bringup(void)
  MCU_TRY(x9_gps_hif_prepare(&gps_rt.hif,&ops,gps_rt.ap,gps_rt.mcu,
      gps_rt.ccif,gps_rt.generation));
  MCU_TRY(gps_mcusys_init());
+ MCU_TRY(gps_mnl_control_init());
  if(gps_rt.ops.version>=5)MCU_TRY(gps_flow_init());
  gps_runtime_stage(X9_GPS_PHYSICAL_PLL,0); MCU_TRY(gps_mcu_pll());
  gps_runtime_stage(X9_GPS_PHYSICAL_IDLE,0); MCU_TRY(gps_mcu_boot());

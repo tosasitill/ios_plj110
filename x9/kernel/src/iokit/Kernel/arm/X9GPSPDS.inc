@@ -136,6 +136,12 @@ static bool x9g_send(uint32_t local, uint32_t port, const uint8_t *req, unsigned
         s.nv_remote_events,s.nv_remote_mask,s.nv_last_id,s.nv_last_version,
         s.nv_last_size,s.nv_checks,s.nv_reads,s.nv_writes,s.nv_invalidations,
         s.nv_contentions,s.nv_errno);
+   if(s.mnl_control_initialized)
+    printf("X9 GPS PDS: MNL control frames %llu last event %u declared/body %u/%u notification %d generic/stop-done/terminated %llu/%llu/%llu RX app/time %llu/%llu errno %d (observations, not matched START/STOP ACK or receiver readiness)\n",
+        s.mnl_control_frames,s.mnl_control_event,s.mnl_control_declared,
+        s.mnl_control_body,s.mnl_notification,s.mnl_notifications,
+        s.mnl_stop_done,s.mnl_terminations,s.mnl_control_application,
+        s.mnl_control_time,s.mnl_control_errno);
    if(s.pvt_received)
     printf("X9 GPS PDS: native PVT reports %llu no-fix %llu rejected %llu delivered %llu retired %llu mask %x errno %d (not a readiness lease)\n",
         s.pvt_received,s.pvt_no_fix,s.pvt_rejected,s.pvt_delivered,s.pvt_retired,

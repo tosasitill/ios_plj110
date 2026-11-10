@@ -74,6 +74,11 @@ struct x9_gps_connv2_ops {
   * arrival/cache presence). Event2 PVT begins at BODY+6. Native worker then
   * translates its qualified fields; this callback must not also submit the
   * same event2 position. No fix or session qualification from a cache flag. */
+ /* Native control monitor observes generic event0 and STOP_DONE128, but
+  * does not match either to an application transaction or grant readiness.
+  * MNL terminal event5 revokes hardware/output epochs before this callback;
+  * the callback still receives it for teardown, then worker quarantines.
+  * It cannot queue or publish traffic using the revoked generation. */
  int (*mnl)(void *, const uint8_t *, unsigned, uint64_t);
  int (*other_ccif)(void *, unsigned, uint64_t);
  /* Version-2..5 tail. Version 1 remains the full vendor POS supplier.

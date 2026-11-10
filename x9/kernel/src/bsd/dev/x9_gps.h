@@ -98,6 +98,16 @@ struct x9_gps_status {
  uint32_t nv_last_id,nv_last_version,nv_last_size;
  uint64_t nv_checks,nv_reads,nv_writes,nv_invalidations,nv_contentions,nv_remote_events;
  int32_t nv_errno;
+ /* Native control-event observation, not a request/response matcher.
+  * Event0 is generic, STOP_DONE128 alone does not authorize a STOP ACK;
+  * event5 atomically revokes output before notifying the provider.
+  * Source application epoch/time identify the actual first RX fragment,
+  * not a new session or measurement time. No coordinates in this journal. */
+ uint32_t mnl_control_initialized,mnl_control_event,mnl_control_declared;
+ uint32_t mnl_control_body;
+ int32_t mnl_notification,mnl_control_errno;
+ uint64_t mnl_control_frames,mnl_notifications,mnl_stop_done,mnl_terminations;
+ uint64_t mnl_control_application,mnl_control_time;
 };
 struct x9_gps_nmea {
  uint64_t sequence, generation, host_time;
