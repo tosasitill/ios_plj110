@@ -1,11 +1,11 @@
 /* Native MT6993 cold D-die phase, actual conninfra.ko 547a0 -> 55960 /
  * 55a28 / 55a6c. Not a connv2 supplier or a runtime power probe. Only a
- * version-2 supplier may expose the exclusive cold SRAM/DMA boundary.
+ * version-2/3 supplier may expose the exclusive cold SRAM/DMA boundary.
  * No caller/default supplier is fabricated here; v1 never enters this.
  * Do not move the 8KiB clear before acquire or after pos_finalize/HIF. */
 static int gps_pos_guard(void)
 {
- if(gps_rt.ops.version!=2 || !gps_rt.ops.pos_validate ||
+ if((gps_rt.ops.version!=2 && gps_rt.ops.version!=3) || !gps_rt.ops.pos_validate ||
     !(gps_rt.layout.flags&X9_GPS_POS_LAYOUT_VERIFIED))return ENXIO;
  int e=gps_mcu_guard();if(e)return e;
  e=gps_rt.ops.pos_validate(gps_rt.ops.context,&gps_rt.layout,
@@ -61,6 +61,65 @@ static int gps_pos_d_die(void)
  MCU_TRY(gps_pos_write(0x40051038,3,UINT32_MAX));
  MCU_TRY(gps_mcu_expect(F_reset,0));MCU_TRY(gps_mcu_expect(F_function,0));
  MCU_TRY(gps_pos_guard());
+ gps_rt.pos_d_die_complete=1;
  printf("X9 GPS native D-die: cold SRAM phase completed; POS finalize/MCU/MNL still required\n");
+ return 0;
+}
+/* Actual conninfra.ko 55b20/9c and 55bc4/a0, through the cold route
+ * 103b8 -> 1041c -> 1046c. These are register configuration stages,
+ * NOT an RF transaction, PLL-lock ACK, ROM qualification or GPS fix. */
+static int gps_pos_rf_guard(void)
+{
+ if(gps_rt.ops.version!=3 || !gps_rt.ops.pos_afe ||
+    !(gps_rt.layout.flags&X9_GPS_RF_LAYOUT_VERIFIED))return ENXIO;
+ return gps_pos_guard();
+}
+static int gps_pos_rf_set(uint32_t address,uint32_t mask,uint32_t value)
+{
+ if(!mask || (value&~mask))return EINVAL;
+ MCU_TRY(gps_pos_rf_guard());
+ uint32_t old;MCU_TRY(gps_pos_read(address,&old));
+ /* Retained EXCLUSIVE WT_SLP/AFE qualification makes this masked RMW
+  * legitimate; a stable register snapshot alone must never grant it. */
+ MCU_TRY(gps_pos_rf_guard());
+ return gps_pos_write(address,(old&~mask)|value,mask);
+}
+static int gps_pos_spi(void)
+{
+ if(!gps_rt.pos_d_die_complete || gps_rt.pos_spi_started ||
+    gps_rt.pos_afe_started || gps_rt.pos_pll_started || gps_rt.pos_complete)return EBUSY;
+ MCU_TRY(gps_pos_rf_guard());
+ gps_rt.pos_spi_started=1; /* journal before any possibly accepted write */
+ MCU_TRY(gps_pos_rf_set(0x40003084,0x00000fff,0x00000a00));
+ MCU_TRY(gps_pos_rf_set(0x40003088,0x0fff0fff,0x0afc0a0c));
+ MCU_TRY(gps_pos_rf_set(0x40003094,0x00000fff,0x000000fc));
+ MCU_TRY(gps_pos_rf_set(0x40003098,0x00000fff,0x000000f8));
+ MCU_TRY(gps_pos_rf_guard());gps_rt.pos_spi_complete=1;
+ return 0;
+}
+static int gps_pos_afe(void)
+{
+ if(!gps_rt.pos_spi_complete || gps_rt.pos_afe_started ||
+    gps_rt.pos_pll_started || gps_rt.pos_complete)return EBUSY;
+ MCU_TRY(gps_pos_rf_guard());
+ gps_rt.pos_afe_started=1; /* even a failed SMC may have changed hardware */
+ MCU_TRY(gps_rt.ops.pos_afe(gps_rt.ops.context,&gps_rt.layout,
+     gps_rt.generation,gps_rt.lease));
+ MCU_TRY(gps_pos_rf_guard());gps_rt.pos_afe_complete=1;
+ return 0;
+}
+static int gps_pos_pll(void)
+{
+ if(!gps_rt.pos_afe_complete || gps_rt.pos_pll_started || gps_rt.pos_complete)return EBUSY;
+ MCU_TRY(gps_pos_rf_guard());
+ gps_rt.pos_pll_started=1;
+ /* The actual MT6993 wrapper 549d4 calls this vendor table
+  * unconditionally. Its name xtal_26000k is NOT oscillator evidence;
+  * acquire/validate must still qualify the measured clock schematic. */
+ MCU_TRY(gps_pos_rf_set(0x400410f4,0x7fff7fff,0x020d0521));
+ MCU_TRY(gps_pos_rf_set(0x40041004,0x000300cf,0x00030047));
+ MCU_TRY(gps_pos_rf_set(0x4004100c,0x00078000,0x00068000));
+ MCU_TRY(gps_pos_rf_guard());gps_rt.pos_pll_complete=1;
+ printf("X9 GPS native POS: WT_SLP/AFE/subsystem PLL configuration completed; radio/low-power/MCU/MNL still required\n");
  return 0;
 }

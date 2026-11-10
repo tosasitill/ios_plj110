@@ -10,6 +10,8 @@
 #define X9_GPS_POWER_LAYOUT_VERIFIED 2u
 /* Optional native D-die register topology, still NOT a power/DMA lease. */
 #define X9_GPS_POS_LAYOUT_VERIFIED 4u
+/* Optional WT_SLP/AFE topology only, NOT RF/clock/exclusive ownership. */
+#define X9_GPS_RF_LAYOUT_VERIFIED 8u
 struct x9_gps_handoff {
  uint32_t version, flags, reserve_base, reserve_size;
  uint32_t layout_size, legacy_offset, legacy_size, ap2mcu_offset;

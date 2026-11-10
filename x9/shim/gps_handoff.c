@@ -82,16 +82,17 @@ static int power_topology(uintptr_t dt)
     !word(dt,hwv,"phandle",&hp)||!hp||!value(dt,pd,"hw-voter-regmap",hp))return 0;
  return 1;
 }
-static int pos_topology(uintptr_t dt)
+static int pos_topology(uintptr_t dt,unsigned rf)
 {
  const uint8_t *r;size_t n;
- /* Actual conninfra.ko g_conn_reg uses FDT indices 0/4/9/11 for these
-  * four banks. Never infer SYSRAM ownership from these address tuples. */
+ /* Actual conninfra.ko g_conn_reg uses FDT indices 0/4/9/11 for D-die,
+  * and 2/7 for WT_SLP/AFE. Address tuples never grant ownership. */
  const uint32_t tuple[][3]={{0,0x40000000,0x480},{4,0x40011000,0x138},
-     {9,0x4004b000,0x414},{11,0x40050000,0x2000}};
+     {9,0x4004b000,0x414},{11,0x40050000,0x2000},
+     {2,0x40003000,0x204},{7,0x40041000,0x128}};
  if(!enabled(dt,"/soc/consys@40000000")||
     !fdt_property(dt,"/soc/consys@40000000","reg",&r,&n)||n!=17*16)return 0;
- for(unsigned i=0;i<sizeof(tuple)/sizeof(tuple[0]);i++) {
+ for(unsigned i=0;i<(rf ? 6u : 4u);i++) {
   const uint8_t *p=r+tuple[i][0]*16;
   if(be(p)||be(p+4)!=tuple[i][1]||be(p+8)||be(p+12)!=tuple[i][2])return 0;
  }
@@ -147,7 +148,8 @@ static int qualify(uintptr_t dt,struct x9_gps_handoff *h)
  h->mcu_bus_base=0x70000000;h->ccif_base=0x4003d000;h->ccif_size=0x100;
  h->version=1;h->flags=X9_GPS_LAYOUT_VERIFIED;
  if(power_topology(dt))h->flags|=X9_GPS_POWER_LAYOUT_VERIFIED;
- if(pos_topology(dt))h->flags|=X9_GPS_POS_LAYOUT_VERIFIED;
+ if(pos_topology(dt,0))h->flags|=X9_GPS_POS_LAYOUT_VERIFIED;
+ if(pos_topology(dt,1))h->flags|=X9_GPS_RF_LAYOUT_VERIFIED;
  return 1;
 }
 struct walk {uint8_t *p;size_t size,at,found;unsigned nodes,matches;};
@@ -183,5 +185,7 @@ int fdt_gps_patch_adt(uintptr_t dt,void *adt,size_t size)
   plog_str("X9 GPS FDT: SID3 LNC0_8 / PMIF-P / CONN clock topology qualified; not a power lease\n");
  if(h.flags&X9_GPS_POS_LAYOUT_VERIFIED)
   plog_str("X9 GPS FDT: D-die CFG/bus/SYSRAM tuples qualified; not SRAM/DMA ownership\n");
+ if(h.flags&X9_GPS_RF_LAYOUT_VERIFIED)
+  plog_str("X9 GPS FDT: WT_SLP/AFE tuples qualified; not RF/clock ownership\n");
  return 1;
 }

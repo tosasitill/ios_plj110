@@ -9,10 +9,12 @@ enum x9_gps_physical_stage {
  X9_GPS_PHYSICAL_IMAGE, X9_GPS_PHYSICAL_PLL,
  X9_GPS_PHYSICAL_IDLE, X9_GPS_PHYSICAL_HIF,
  X9_GPS_PHYSICAL_TRANSPORT, X9_GPS_PHYSICAL_QUARANTINE,
- X9_GPS_PHYSICAL_D_DIE, X9_GPS_PHYSICAL_POS_FINALIZE
+ X9_GPS_PHYSICAL_D_DIE, X9_GPS_PHYSICAL_POS_FINALIZE,
+ X9_GPS_PHYSICAL_POS_SPI, X9_GPS_PHYSICAL_POS_AFE,
+ X9_GPS_PHYSICAL_POS_PLL
 };
 struct x9_gps_connv2_ops {
- uint32_t version; /* 1 or 2; descriptor/context remain live until reboot. */
+ uint32_t version; /* 1..3; descriptor/context remain live until reboot. */
  void *context;
  /* Exclusive long-lived connv2 lease, NOT Wi-Fi connv3/MT6653 ownership.
   * Must power/qualify MT6661 VGPS18, CONNSYS domain, AP bus clocks/protect,
@@ -40,22 +42,35 @@ struct x9_gps_connv2_ops {
  int (*control)(void *, unsigned, uint8_t, const uint8_t *, unsigned, uint64_t);
  int (*mnl)(void *, const uint8_t *, unsigned, uint64_t);
  int (*other_ccif)(void *, unsigned, uint64_t);
- /* Version-2 tail only. Version 1 remains the full vendor POS supplier.
-  * Version 2 acquire must instead stop at the cold pre-D-die boundary:
+ /* Version-2/3 tail. Version 1 remains the full vendor POS supplier.
+  * Version 2/3 acquire must instead stop at the cold pre-D-die boundary:
   * real clock schematic/buffer/HWV/AP bus, secure EMI/MPU and EXCLUSIVE
   * whole connv2 SYSRAM + all old BGF DMA quiesce; GPS reset held and
   * function disabled. No D-die/SPI/AFE/ADie/radio initialization yet.
   * The worker then executes native D-die before pos_finalize. Never
-  * register v2 merely because a register snapshot or SMC returned zero. */
+  * register v2/v3 merely because a register snapshot or SMC returned zero. */
  uint32_t pos_clock_schematic; /* measured vendor enum 0..3, not Hz/guess */
  /* Every native POS read/write revalidates exclusive SRAM/DMA ownership
   * in addition to validate's power/bus lease. Must be bounded, live and
-  * non-reentrant; no constant-success implementation. */
+  * non-reentrant; no constant-success implementation. For v3, also
+  * dynamically prove EXCLUSIVE WT_SLP/AFE ownership on every access. */
  int (*pos_validate)(void *, const struct x9_gps_handoff *, uint64_t, uint64_t);
  /* Complete actual SPI/AFE/PLL/radio/low-power/MT6686 POS under the same
   * retained lease. Must leave GPS reset held/function disabled, not
   * reenter HIF, clear native SYSRAM, or register a ready backend. */
  int (*pos_finalize)(void *, const struct x9_gps_handoff *, uint64_t, uint64_t);
+ /* Version-3 tail ONLY; v1/v2 descriptors end before this member.
+  * v3 moves the actual MT6686 WT_SLP setup and MT6993 subsystem PLL
+  * writes into the sole worker: D-die -> native SPI -> this AFE callback
+  * -> native PLL -> pos_finalize. Acquire has the same cold contract,
+  * with EXCLUSIVE WT_SLP/AFE access as well as SYSRAM/all BGF DMA.
+  * Complete and dynamically qualify this board's actual AFE patch
+  * (conninfra SMC c2000534/op14, HW02050800/ADie6686). SMC return0 by
+  * itself is NOT proof. No duplicate native D-die/SPI/PLL, low-power,
+  * radio activation, reset release, backend registration or reentry.
+  * v3 pos_finalize completes the remaining radio/voltage/low-power/
+  * MT6686 qualification, NOT the already executed native stages. */
+ int (*pos_afe)(void *, const struct x9_gps_handoff *, uint64_t, uint64_t);
 };
 #ifdef __cplusplus
 extern "C" {
