@@ -44,8 +44,11 @@ static struct patch config[]={
     X9_SPEAKER_DL24_DISABLED_ROUTES,
 };
 #define COUNT ((unsigned)(sizeof(config)/sizeof(config[0])))
+/* Separate from shared five-word descriptors. saved is the lease baseline;
+ * prior is the observed value immediately before the LAST attempted write. */
+static uint32_t prior[COUNT];
 _Static_assert(COUNT==13, "DL24 journal index10 and route indices11/12");
-_Static_assert(sizeof(struct x9_speaker_afe_status)==152,"AFE cached status v3 size");
+_Static_assert(sizeof(struct x9_speaker_afe_status)==184,"AFE cached status v4 size");
 static int guard_error(unsigned stage,int e,bool configuration,uint32_t off,
                        uint32_t expected,uint32_t actual)
 {
@@ -54,8 +57,32 @@ static int guard_error(unsigned stage,int e,bool configuration,uint32_t off,
     if(!state.guard_stage) {
         state.guard_stage=stage;state.guard_reg=off;
         state.guard_expected=expected;state.guard_actual=actual;
+        state.guard_index=UINT32_MAX;state.guard_prior_valid=0;
+        state.guard_prior=state.guard_saved=0;
     }
     return e;
+}
+static int journal_error(unsigned stage,int e,unsigned i,uint32_t expected,uint32_t actual)
+{
+    bool first=!state.guard_stage;
+    const struct patch *p=&config[i];
+    guard_error(stage,e,true,p->off,expected,actual);
+    if(first) {
+        state.guard_index=i;state.guard_saved=p->saved&p->mask;
+        state.guard_prior=prior[i]&p->mask;
+        state.guard_prior_valid=(state.uncertain_mask&(1u<<i))!=0;
+    }
+    return e;
+}
+static bool known_value(unsigned i,uint32_t actual,bool recovering)
+{
+    const struct patch *p=&config[i];
+    if(actual==(p->expected&p->mask))return true;
+    if(recovering && (state.uncertain_mask&(1u<<i)) && actual==(prior[i]&p->mask)) {
+        if(state.prior_observations!=UINT64_MAX)state.prior_observations++;
+        return true;
+    }
+    return false;
 }
 static int check_lease(unsigned stage)
 {
@@ -85,25 +112,30 @@ static int change(unsigned i,uint32_t value,unsigned stage)
     int e=check_lease(stage);if(e)return e;
     struct patch *p=&config[i];uint32_t old=rd(p->off);
     uint32_t bit=1u<<i;
-    /* A failed readback may mean the write never landed. Only the two
-     * journaled values are recoverable; never adopt a third/foreign value. */
-    if((old&p->mask)!=(p->expected&p->mask) &&
-       !((state.uncertain_mask&bit) && (old&p->mask)==(p->saved&p->mask)))
-        return guard_error(stage,EBUSY,true,p->off,p->expected&p->mask,old&p->mask);
+    /* A failed readback may mean this write never landed. Recover ONLY its
+     * target or immediate prewrite value, not an older lease baseline. */
+    bool recovering=stage==X9AFEGuardDisable || stage==X9AFEGuardRestore;
+    if(!known_value(i,old&p->mask,recovering))
+        return journal_error(stage,EBUSY,i,p->expected&p->mask,old&p->mask);
     if(p->off==X9_SPEAKER_DL24_CON0 && (old&(X9_SPEAKER_DL24_INACTIVE_MASK&~(1u<<28))))
         return guard_error(stage,EBUSY,true,p->off,0,old&(X9_SPEAKER_DL24_INACTIVE_MASK&~(1u<<28)));
     uint32_t next=(old&~p->mask)|(value&p->mask);
     if(p->off==X9_SPEAKER_DL24_CON0)next&=~X9_SPEAKER_DL24_CLEAR_MASK;
     if((next&p->mask)==(old&p->mask)) {
+        if((state.uncertain_mask&bit) && state.no_write_reconciliations!=UINT64_MAX)
+            state.no_write_reconciliations++;
         p->expected=next;state.uncertain_mask&=~bit;return 0;
     }
+    /* Capture BEFORE publishing the intended value or issuing MMIO. If a
+     * later cleanup changes it again, only that new transition is uncertain. */
+    prior[i]=old;
     state.dirty_mask|=bit;state.uncertain_mask|=bit;
     p->expected=next;wr(p->off,next);
     uint32_t actual=rd(p->off)&p->mask;
-    if(actual!=(next&p->mask))return guard_error(stage,EIO,true,p->off,next&p->mask,actual);
+    if(actual!=(next&p->mask))return journal_error(stage,EIO,i,next&p->mask,actual);
     state.uncertain_mask&=~bit;return 0;
 }
-/* Recovery accepts only our expected value, or the original saved value for
+/* Recovery accepts only our expected value, or the immediate prior value for
  * an uncertain write. It must also validate untouched/already-restored words. */
 static int verify_journal(bool saved,bool recovering,unsigned stage)
 {
@@ -112,9 +144,9 @@ static int verify_journal(bool saved,bool recovering,unsigned stage)
     for(unsigned n=0;n<COUNT;n++) {
         const struct patch *p=&config[n];
         uint32_t expected=(saved?p->saved:p->expected)&p->mask,actual=rd(p->off)&p->mask;
-        if(actual!=expected && !(recovering && (state.uncertain_mask&(1u<<n)) &&
-                                actual==(p->saved&p->mask)))
-            return guard_error(stage,EBUSY,true,p->off,expected,actual);
+        if(saved) {
+            if(actual!=expected)return journal_error(stage,EBUSY,n,expected,actual);
+        } else if(!known_value(n,actual,recovering))return journal_error(stage,EBUSY,n,expected,actual);
     }
     return 0;
 }
@@ -230,6 +262,7 @@ int x9_speaker_afe_prepare(void)
     state.mute_error=state.disable_error=state.quiesce_error=0;
     state.lease_error=state.config_error=state.guard_stage=0;
     state.guard_reg=UINT32_MAX;state.guard_expected=state.guard_actual=0;
+    state.guard_index=UINT32_MAX;state.guard_prior_valid=0;state.guard_prior=state.guard_saved=0;
     e=hw.acquire(hw.context);
     if(!e)e=check_lease(X9AFEGuardPrepare);
     if(!e) {
@@ -250,7 +283,9 @@ int x9_speaker_afe_prepare(void)
             uint64_t base=hw.dma_bus,end=base+hw.dma_bytes-1;
             config[6].value=(uint32_t)(base>>32);config[7].value=(uint32_t)base;
             config[8].value=(uint32_t)(end>>32);config[9].value=(uint32_t)end;
-            for(unsigned i=0;i<COUNT;i++)config[i].saved=config[i].expected=rd(config[i].off);
+            for(unsigned i=0;i<COUNT;i++) {
+                config[i].saved=config[i].expected=rd(config[i].off);prior[i]=config[i].saved;
+            }
             state.dirty_mask=state.uncertain_mask=0;
             journaled=true;
             for(unsigned i=0;!e && i<COUNT;i++)e=change(i,config[i].value,X9AFEGuardPrepare);

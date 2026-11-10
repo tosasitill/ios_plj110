@@ -8,7 +8,7 @@ PCM ABI 仍为 v1；**board-status v3／160B、dsp-status v2／128B、stream-sta
 需配套本轮 `audioctl`，旧工具会拒绝
 新版结构。私有 kernel backend 回调也升级为 v2（start 增加预填输入）；不能继续注册
 旧版 start 回调。私有 AFE platform 为 v3（cached `held`＋真实、无副作用的 `validate`），
-**AFE status 为 v3／152B**；旧 platform 不可注册，旧版 `afe-status` 工具会拒绝。
+**AFE status 为 v4／184B**；旧 platform 不可注册，旧版 `afe-status` 工具会拒绝。
 AFE/stream/resource 状态 selector 只返回缓存，不申请硬件资源。
 新增 `clock-status` 同样只读缓存；`clock-probe` 是 root／mode2 的一次
 **有电源、时钟和禁用 OUT4 寄存器写入**的显式事务，不是只读 probe，不能自动执行。
@@ -69,7 +69,7 @@ staging 必须单独确认、走项目 extent 写入流程；本构建器不安�
 | open type 1 | root／指定音频 daemon 的独占 writer |
 | open type 2 | mode2 的 root 控制会话；不能映射 PCM 或 start 播放，可完成失败后保留的 stop |
 | selector 0/1/2 | status / start / stop；拒绝 async、descriptor 和额外参数 |
-| selector 7/8 | cached AFE status v3 / stream lease + physical cursor status v2；只读，不做 MMIO |
+| selector 7/8 | cached AFE status v4／184B / stream lease + physical cursor status v2；只读，不做 MMIO |
 | selector 9/10 | cached PA status v1 / root type2 显式双 PA reg03 probe；不写 PA 值 |
 | selector 11 | cached AP resource lease status v1／64B；没有 claim/release 用户接口 |
 | selector 12/13 | cached clock status v1／216B / root type2 显式 cold register-clock＋disabled OUT4 配置／恢复 |
@@ -476,9 +476,11 @@ running／anchor并唤醒 watcher。运行期 copy／CUR poll 不只检查 CUR�
 全环清零和PCM复制在写 VA 前置 `copy_pending`，sync 或其后校验失败保留，
 不能把可能可见的字节报告为“未消费”；DMA ON失败仍走安全停流。
 disable 的 DL24失败后不继续写 OUT4；restore 先核对所有 expected 字段，
-仅对 uncertain 项容许原 saved 值，支持部分prepare／部分restore且不接纳第三值。
+当时仅对 uncertain 项容许原 saved 值；AUDIO-14 已修正为最后一次写前的 immediate prior，
+以覆盖 enable 未落地时仍停在 configured-disabled 的恢复缺口，不接纳第三值。
 
-`audioctl afe-status`（selector7，无新增selector）只返回 **v3／152B**缓存：
+本节引入的 `audioctl afe-status`（selector7，无新增selector）为 **v3／152B**缓存，
+当前已由 AUDIO-14 升为 **v4／184B**：
 `lease-errno/config-errno`、首次 `guard` 阶段及 `reg/expected/actual`、累计校验次数。
 字段差分均为对应 journal mask 下的值；foreign route／禁用位显示实际拒绝值。
 `guard=none`时reg无诊断意义，`reg=0xffffffff` 的租约失败没有读取AFE寄存器。
@@ -494,6 +496,37 @@ watcher不会 unmute PA，也不会注册 speaker backend。
 字段，已恢复字段不重写。跨环 copy/cache sync 失败保留 `copy_pending`，不能报告
 EAGAIN“没有消费”；失败 stop 的 lease/poison 保留，只有完整 quiesce/restore/release
 后才能进行新的 prepare。
+
+### AUDIO-14：恢复最后一次不确定写入，不重放已禁用的 CSR
+
+prepare 的基线 `saved` 与 start 写 EN／ON 前的 configured-disabled 通常不同。
+旧恢复只接受 expected 或 saved：若 enable 未落地而读回失败，紧邻此次写入前的
+disabled 值可能被误判为 foreign conflict。本轮根据源码修复此分支，**未实机复现**。
+
+每个 journal 字段单独保存 `prior`，仅在真正 MMIO 写入前捕获实际旧值；共享五字段
+descriptor 不变。disable／restore 只接受当前 expected，或 uncertain 最后一次写入的
+immediate prior；普通 prepare／start／copy／poll 不接受 prior。无关的原 saved 不是
+第三个可接受值。恢复又发生写入时更新 prior，不累积更早的可接受历史。
+最终恢复仍严格核对全部 saved 基线，含 untouched／already-restored 字段，诊断
+expected 也采用该次实际比较目标。
+
+若读到的值已经等于本次禁用／恢复目标，仅更新 expected 并清 uncertain，**不写 CSR**；
+dirty 由 restore 外层在该字段收敛后清除。动作位拒绝／no-replay、foreign routes、
+fresh lease、mute／quiesce 与失败保留 mapping／ticket 的要求全部不变。
+
+`afe-status` 当前是 **v4／184B**，platform 仍 v3，无新增 selector。首次 guard 若与
+journal 有关，缓存 `journal-index/prior-valid/prior/saved`，值均在字段 mask 下；
+prior-valid 只表示首次错误时该写 uncertain，不能当作租约／硬件动作重放资格。
+租约、动作位或 foreign-route 首错不填 journal 诊断，index=0xffffffff、prior-valid=0。
+`guard=none` 时这些字段无意义。新增两个饱和累计计数：
+
+| 字段 | 含义 |
+|---|---|
+| `prior-observations` | cleanup 比较命中 immediate prior 的次数；同字段可多次观察，不是独立恢复次数 |
+| `no-write-reconciliations` | uncertain 字段已处于目标、未写 CSR 即清不确定的次数 |
+
+查询只读缓存，不调用 validate、MMIO 或恢复。**没有真实 AFE platform／双 PA write
+provider／speaker backend 注册者，仍 Ready0；本轮没有启 DMA、解静音或物理播放证据。**
 
 **container 的 `bus` 不是 Linux I2C adapter号**：厂商 `tfaRunStartup` 对
 `dev->bus != 0` 跳过I2C初始化，所以 parser要求bus=0；I2C6由board lease选择，

@@ -76,7 +76,7 @@ static int board_status(io_connect_t c) {
     return 0;
 }
 static int afe_status(io_connect_t c) {
-    _Static_assert(sizeof(struct x9_speaker_afe_status) == 152, "AFE status v3 size");
+    _Static_assert(sizeof(struct x9_speaker_afe_status) == 184, "AFE status v4 size");
     const char *stages[] = { "none", "prepare", "start", "copy", "poll", "disable", "restore" };
     struct x9_speaker_afe_status s = {0}; size_t n = sizeof(s);
     kern_return_t r = IOConnectCallStructMethod(c, X9AudioAFEStatusSelector, NULL, 0, &s, &n);
@@ -88,14 +88,19 @@ static int afe_status(io_connect_t c) {
            "  played=%llu submitted=%llu cursor=%u cached-DL24=%x cached-OUT4=%x\n"
            "  low-water-stops=%llu late-polls=%llu\n"
            "  lease-errno=%u config-errno=%u guard=%s(%u) reg=0x%08x expected=0x%08x actual=0x%08x\n"
-           "  lease-checks=%llu config-checks=%llu\n",
+           "  lease-checks=%llu config-checks=%llu\n"
+           "  journal-index=%u prior-valid=%u prior=0x%08x saved=0x%08x\n"
+           "  prior-observations=%llu no-write-reconciliations=%llu\n",
            s.registered,s.leased,s.prepared,s.running,s.poisoned,s.error,s.restore_error,
            s.dirty_mask,s.uncertain_mask,s.copy_pending,s.mute_error,s.disable_error,s.quiesce_error,
            (unsigned long long)s.played,(unsigned long long)s.submitted,s.cursor,s.dl24,s.out4,
            (unsigned long long)s.low_water_stops,(unsigned long long)s.late_polls,
            s.lease_error,s.config_error,s.guard_stage < sizeof(stages)/sizeof(stages[0]) ? stages[s.guard_stage] : "unknown",
            s.guard_stage,s.guard_reg,s.guard_expected,s.guard_actual,
-           (unsigned long long)s.lease_checks,(unsigned long long)s.config_checks);
+           (unsigned long long)s.lease_checks,(unsigned long long)s.config_checks,
+           s.guard_index,s.guard_prior_valid,s.guard_prior,s.guard_saved,
+           (unsigned long long)s.prior_observations,(unsigned long long)s.no_write_reconciliations);
+    puts("Prior is the immediate prewrite value only when prior-valid=1; saved is the lease baseline, not an extra accepted value.");
     puts("Guard is the first failure in this lease; reg=0xffffffff means no AFE register was read for that failure.");
     puts("Cached only; absent provider is expected. Watchdog scheduling is not a hardware no-replay guarantee.");
     return 0;

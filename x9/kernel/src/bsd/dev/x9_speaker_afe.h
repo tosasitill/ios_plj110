@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 /* Cached diagnostic ABI; reading it never touches an off-domain register. */
-#define X9_SPEAKER_AFE_STATUS_VERSION 3u
+#define X9_SPEAKER_AFE_STATUS_VERSION 4u
 enum { X9AFEGuardNone, X9AFEGuardPrepare, X9AFEGuardStart, X9AFEGuardCopy,
        X9AFEGuardPoll, X9AFEGuardDisable, X9AFEGuardRestore };
 struct x9_speaker_afe_status {
@@ -18,6 +18,11 @@ struct x9_speaker_afe_status {
     uint32_t lease_error, config_error, guard_stage, guard_reg;
     uint32_t guard_expected, guard_actual;
     uint64_t lease_checks, config_checks;
+    /* First guard failure, if journal-related; values under its field mask. A valid
+     * prior is meaningful only for an uncertain last write, never a lease
+     * proof or permission to replay a hardware action. */
+    uint32_t guard_prior, guard_saved, guard_index, guard_prior_valid;
+    uint64_t prior_observations, no_write_reconciliations;
 };
 #if defined(KERNEL)
 #ifdef __cplusplus
