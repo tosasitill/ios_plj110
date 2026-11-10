@@ -4,13 +4,17 @@
  * DONE outer +0348, ERR inner +0350, CQ +001c; FIRST_TAG inner +01cc,
  * GROUP_TAG0 +01b8/+4, FH_SPARE_TAG1 +057c/+40. Never re-read a read-clear
  * status bank in this worker. These constants are facts, not a route lease.
- * No MMIO, DMA programming, map allocation, IRQ registration or dummy backend.
+ * Concrete S1 cache ownership below; no MMIO, DMA programming, map allocation,
+ * IRQ registration or dummy backend. The native controller lease is mandatory.
  */
+#include "x9_camera_s1_dma.inc"
 LCK_MTX_DECLARE(camera_camsv_lock, &camera_group);
 _Static_assert(sizeof(struct x9_camera_camsv_irq)==80,"CAMSV snapshot layout");
 
 static int cam_camsv_retain(struct x9_camera_camsv_slot *slot,int e)
 {
+    if(slot->state==X9_CAMSV_RETAINED && slot->last_errno)e=slot->last_errno;
+    cam_s1_dma_retain(slot,e);
     slot->state=X9_CAMSV_RETAINED;slot->last_errno=e;
     return e;
 }
@@ -28,17 +32,19 @@ int x9_camera_camsv_arm(struct x9_camera_camsv_slot *slot,
     /* 16KiB mapping granule and captured CAM dma-range, not just 35-bit DMA
      * register width. A legal owner must still prove EVERY mapped byte. */
     if(!e && (r.reserved || r.tag>=8 || r.group>=4 || r.frame.time ||
-        !r.frame.capture_id || !r.iova || (r.iova&0x3fffull) ||
+        !r.frame.generation || !r.frame.capture_id || !r.iova || (r.iova&0x3fffull) ||
         r.iova>=0x400000000ull || r.frame.bytes>0x400000000ull-r.iova ||
         d.version!=X9_CAMERA_CAMSV_VERSION || d.reserved || !d.context ||
-        !d.lease || !d.check || !d.sync_cpu))e=EINVAL;
+        !d.lease || !d.check || !d.backing))e=EINVAL;
     if(e)return e; /* no callback/hardware/raw access on malformed inputs */
     lck_mtx_lock(&camera_camsv_lock);
-    if(slot->state==X9_CAMSV_RETAINED)e=EIO;
+    if(slot->state==X9_CAMSV_RETAINED)e=slot->last_errno?slot->last_errno:EIO;
     else if(slot->state!=X9_CAMSV_EMPTY && slot->state!=X9_CAMSV_RETIRED)e=EBUSY;
     else if(slot->state==X9_CAMSV_RETIRED) {
         const struct x9_camera_camsv_request *old=&slot->request;
-        if(r.frame.generation<old->frame.generation)e=ESTALE;
+        if(d.backing!=slot->dma.backing || d.context!=slot->dma.context ||
+            d.check!=slot->dma.check)e=EINVAL;
+        else if(r.frame.generation<old->frame.generation)e=ESTALE;
         else if(r.frame.generation==old->frame.generation) {
             /* Hardware sequence can wrap through zero. Require an unambiguous
              * forward delta; never widen it to the 64-bit source capture_id. */
@@ -51,6 +57,8 @@ int x9_camera_camsv_arm(struct x9_camera_camsv_slot *slot,
         /* An uncertain lease check is terminal. It cannot be converted into
          * a free/reusable slot merely because no RAW copy was attempted. */
         e=d.check(d.context,d.lease,&slot->request);
+        if(!e)e=cam_s1_dma_device(slot);
+        if(!e)e=d.check(d.context,d.lease,&slot->request);
         if(e)cam_camsv_retain(slot,e);
         else {slot->state=X9_CAMSV_ARMED;slot->last_errno=0;}
     }
@@ -63,7 +71,7 @@ int x9_camera_camsv_finish(struct x9_camera_camsv_slot *slot,
     if(!slot || !snapshot)return EINVAL;
     const struct x9_camera_camsv_irq irq=*snapshot;
     lck_mtx_lock(&camera_camsv_lock);int e=0;
-    if(slot->state==X9_CAMSV_RETAINED)e=EIO;
+    if(slot->state==X9_CAMSV_RETAINED)e=slot->last_errno?slot->last_errno:EIO;
     else if(slot->state!=X9_CAMSV_ARMED)e=ESTALE;
     else if(irq.version!=X9_CAMERA_CAMSV_VERSION || irq.reserved || irq.reserved1)e=EINVAL;
     else if(irq.generation!=slot->request.frame.generation ||
@@ -114,15 +122,21 @@ int x9_camera_camsv_finish(struct x9_camera_camsv_slot *slot,
      * while invoking owner callbacks, allowing capture(off) to drain. */
     slot->state=X9_CAMSV_RETAINED;
     e=slot->dma.check(slot->dma.context,slot->dma.lease,&slot->request);
-    if(!e)e=slot->dma.sync_cpu(slot->dma.context,slot->dma.lease,&slot->request);
+    if(!e)e=cam_s1_dma_cpu(slot);
     if(!e)e=slot->dma.check(slot->dma.context,slot->dma.lease,&slot->request);
     if(!e) {
         struct x9_camera_completed_frame f=slot->request.frame;f.time=irq.time;
         e=x9_camera_deliver(&f);
         /* Successful completion, CPU backpressure or concurrent stop all
          * retire this source. Never replay or hold the hardware slot for VM. */
-        if(!e || e==EBUSY || e==ESTALE)slot->state=X9_CAMSV_RETIRED;
+        if(!e || e==EBUSY || e==ESTALE) {
+            int retire=slot->dma.check(slot->dma.context,slot->dma.lease,&slot->request);
+            if(!retire)retire=cam_s1_dma_retire(slot);
+            if(retire)e=cam_camsv_retain(slot,retire);
+            else slot->state=X9_CAMSV_RETIRED;
+        } else cam_camsv_retain(slot,e);
     }
+    if(e && slot->state==X9_CAMSV_RETAINED)cam_camsv_retain(slot,e);
     slot->last_errno=e;
 out:
     if(slot->state!=X9_CAMSV_RETAINED)slot->last_errno=e;

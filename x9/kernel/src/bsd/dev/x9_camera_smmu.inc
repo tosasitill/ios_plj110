@@ -197,12 +197,13 @@ int x9_camera_smmu_export(struct x9_camera_smmu *m,struct x9_camera_smmu_export 
             e=cam_smmu_storage(m);
         }
         if(!e) {
-            clean_dcache64(m->ste.pa,CAM_S1_PAGE,TRUE);
-            flush_dcache64(m->cmd.pa,CAM_S1_PAGE,TRUE);
-            flush_dcache64(m->evt.pa,CAM_S1_PAGE,TRUE);
-            __asm__ volatile("dsb sy":::"memory");
-            *out=m->view;
-        } else cam_smmu_latch(m,e);
+            e=cam_cache_range(m->ste.va,CAM_S1_PAGE,CAM_CACHE_CLEAN);
+            if(!e)e=cam_cache_range(m->cmd.va,CAM_S1_PAGE,CAM_CACHE_DEVICE);
+            if(!e)e=cam_cache_range(m->evt.va,CAM_S1_PAGE,CAM_CACHE_DEVICE);
+            if(!e)e=cam_smmu_storage(m);
+        }
+        if(!e)*out=m->view;
+        else cam_smmu_latch(m,e);
     }
     lck_mtx_unlock(&camera_smmu_lock);return e;
 }
@@ -290,7 +291,8 @@ static int cam_smmu_submit(struct x9_camera_smmu *m,const struct cam_smmu_cmd *c
         unsigned slot=(old+i)&(ring-1);
         struct cam_smmu_cmd *entry=(struct cam_smmu_cmd *)m->cmd.va+slot;
         *entry=i<count?cmd[i]:(struct cam_smmu_cmd){{CAM_SMMU_CMD_SYNC,0}};
-        clean_dcache64(m->cmd.pa+(uint64_t)slot*16,16,TRUE);
+        e=cam_cache_range(m->cmd.va+(vm_offset_t)slot*16,16,CAM_CACHE_CLEAN);
+        if(e)return cam_smmu_latch(m,e);
     }
     __asm__ volatile("dsb sy":::"memory");
     /* Recheck producer/config after CPU cache work but before the only

@@ -16,6 +16,9 @@ struct x9_camera_s1;
  * implemented. There is intentionally no caller-supplied 'drained' bool.
  */
 struct x9_camera_s1_export {
+    /* Opaque permanently retained backing for CAMSV's concrete per-frame
+     * cache/CPU pin path. This pointer is not controller/route authority. */
+    struct x9_camera_s1 *backing;
     const void *raw;
     uint64_t iova, root_pa, cd_pa;
     uint32_t bytes, mapped_bytes, pages, oas;

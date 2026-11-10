@@ -318,7 +318,8 @@ int x9_camera_deliver(const struct x9_camera_completed_frame *);
  * IRQ/route owner supplies ONE coherent snapshot, with group_tags latched for
  * this frame at SOF and inner_sequence read from its tag's FH_SPARE register.
  * CQ setting-done and input EOF alone never qualify a completed RAW buffer. */
-#define X9_CAMERA_CAMSV_VERSION 1u
+#define X9_CAMERA_CAMSV_VERSION 2u
+struct x9_camera_s1;
 struct x9_camera_camsv_irq {
     uint32_t version, reserved;
     uint64_t generation, capture_id, time;
@@ -338,13 +339,17 @@ struct x9_camera_camsv_dma {
     uint32_t version, reserved;
     void *context;
     uint64_t lease;
+    /* Exact exported S1 backing, not an arbitrary CPU range or PA. CAMSV
+     * itself performs DEVICE CIVAC -> qualified CPU IVAC -> pinned copy.
+     * Native controller must prohibit FBC/RCNT/automatic slot reuse until
+     * finish returns RETIRED; a CPU pin cannot stop hardware by itself. */
+    struct x9_camera_s1 *backing;
     /* Mandatory legal domain/route/slot lease check, including exact
      * IOVA->raw range and cache policy. NOT PM_GET or a CPU-PA identity map.
-     * check never reads RAW or mutates hardware. sync_cpu runs only after
-     * qualified PASS1_DONE and must keep this buffer CPU-owned/immutable.
+     * check never reads RAW or mutates hardware, and proves immutable
+     * backing while this worker owns the slot, including after PASS1_DONE.
      * Callbacks cannot re-enter camera/CAMSV APIs. */
     int (*check)(void *, uint64_t lease, const struct x9_camera_camsv_request *);
-    int (*sync_cpu)(void *, uint64_t lease, const struct x9_camera_camsv_request *);
 };
 enum x9_camera_camsv_slot_state {
     X9_CAMSV_EMPTY, X9_CAMSV_ARMED, X9_CAMSV_RETIRED, X9_CAMSV_RETAINED

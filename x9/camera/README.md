@@ -210,15 +210,19 @@ provider 必须先确认真实 PASS1_DONE/group/tag/inner sequence 与本次 own
 
 ### CAMSV 单 tag 的完成资格层
 
-`x9_camera_camsv_arm/finish` 为真实 provider 提供 kernel-only 的 owned-slot 完成路径，不注册后端、不改变 READY，也不读取 MMIO 或新增 ioctl。arm 保存已绑定的 metadata、64-bit capture_id、预期硬件 inner sequence、tag/group 和 IOVA；必须有合法 domain/route/slot 的 lease 检查及 CPU cache 同步回调。16KiB 对齐及 16GiB dma-range 只是边界检查，不能证明映射成立；PM_GET、CPU PA 和空成功回调均不是 lease。
+`x9_camera_camsv_arm/finish` 为真实 provider 提供 kernel-only 的 owned-slot 完成路径，不注册后端、不改变 READY，也不读取 MMIO 或新增 ioctl。**kernel-private CAMSV version 已为2**：删除可被空实现冒充的 `sync_cpu` 回调，强制提供 `x9_camera_s1_export` 返回的 `backing`，由具体 S1 代码同步缓存。旧版1不能混用；用户态 RAW10/ioctl ABI 不变。arm 保存已绑定的 metadata、64-bit capture_id、预期硬件 inner sequence、tag/group 和 IOVA；合法 domain/route/slot 的 `check` 回调仍必需。16KiB 对齐、16GiB dma-range、backing 指针或 cache state 都不能证明授权映射；PM_GET、CPU PA 和空成功 check 均不是 lease。
+
+arm 的实际路径为 **lease check → 完整 S1/PTE/wired-page 核对 → 每一16KiB RAW物理页对应VA的 `DC CIVAC` → 再核对S1和lease → ARMED**。backing 的软件状态在首笔 cache op 前绑定唯一 slot/context、lease 与完整 request；DEVICE/CPU/RETAINED 都不得重发/rebind。已退休 backing 的 generation/capture_id/inner sequence 也独立核对，不依赖 slot 被外部清零后丢失的历史。同 generation 不得换 lease；新 generation 可在同 slot/context 上取得新的真实 lease，但不能换 backing/回调/图像sensor/tag/group。
 
 唯一 IRQ owner 必须提供一次**一致的原始快照**：outer DONE `+0x348`、inner ERR `+0x350`、CQ STATUS `+0x1c`、inner FIRST/LAST_TAG 与该 tag 的 FH_SPARE，group_tags 来自该帧 SOF 的有效 group 绑定。读清状态只消费一次，worker 不补读；快照的 generation/capture_id 来自实际 slot journal，不能由硬件 counter 猜出。
 
-finish 优先拒绝错误；CQ setting-done 或普通 GP_DONE 单独返回 `EAGAIN`，不是帧。只接受目标 `SW_GP_PASS1_DONE`（bit16..19）、单 tag/group 及精确 inner sequence，outer 即使超前也不当作完成凭据。通过后重新验证 lease → sync_cpu → 再验证 lease → `x9_camera_deliver`，此前不读取 RAW。成功、CPU 背压或同步期间 stop 都退休 source；重复 finish 不重放。tag/group/序号歧义或 lease/cache 失败置终态 RETAINED，不 rearm、free、unmap 或撤依赖。重用退休 slot 时 capture_id 必须前进，32-bit inner sequence 只接受小于半周期的非零向前差值，允许 wrap 到零但不自动扩展成 capture_id。
+finish 优先拒绝错误；CQ setting-done 或普通 GP_DONE 单独返回 `EAGAIN`，不是帧。只接受目标 `SW_GP_PASS1_DONE`（bit16..19）、单 tag/group 及精确 inner sequence，outer 即使超前也不当作完成凭据。通过后实际执行 **lease check → S1精确request匹配 → CPU pin/逐页 `DC IVAC` → 再验证S1和lease → `x9_camera_deliver` 同步复制 → 再验证lease/S1 → CPU pin退休/slot RETIRED**，此前不读取 RAW。完成后只 invalidate，绝不 clean+invalidate 将旧CPU dirty bytes写回覆盖DMA图像。成功、CPU 背压或同步期间 stop 都退休 source；重复 finish 不重放。tag/group/序号歧义或 lease/cache 失败使slot及其已绑定backing终态 RETAINED，保存首错，不 rearm、free、unmap 或撤依赖。其他slot误用正在使用的backing仅拒绝/保留其错误尝试，不替合法worker取得或更改缓存所有权。重用退休 slot 时 capture_id 必须前进，32-bit inner sequence 只接受小于半周期的非零向前差值，允许 wrap 到零但不自动扩展成 capture_id。
+
+本地冻结 SWEET `caches.c` 的 coherent-IO 分支将通用 `clean_dcache/flush_dcache` 实现为仅屏障，`*64` assembly入口跳转到它们；不能据API名称保证NC相机硬件能看到数据。相机局部 `x9_camera_cache.inc` 直接使用 `CTR_EL0.DminLine`、`DSB SY` 和PoC指令，不依赖该分支，也不改变其它子系统的cache政策。所有range限定在一个已核对的wired物理页；RAW包括末页padding都拥有整行，只做全页invalidate，无相邻分配partial-line丢弃。S1/CD/STE/CMDQ/EVTQ首次发布与每笔CMDQ command也已接实际CVAC/CIVAC，只有成功同步并再验证storage后才返回export或提交producer；不能用第一物理页+整个非连续虚拟长度同步。RAW ownership首错单独保存在 `raw_errno`，不伪装为PTE/storage损坏来阻断未来合法owner的abort/TLBI/drain；RAW仍终态不可重用，现有代码不新增map退休/授权。
 
 返回码不能单独决定 slot 归属：`EAGAIN + ARMED` 才是继续等完成，`EBUSY + RETIRED` 才是 CPU 背压丢帧；lease/cache 回调也可能返回同样 errno，但此时是 `RETAINED`，不能重试或回收。终态保留最初失败 errno。
 
-slot、raw、映射和回调 context 必须由 provider pin 到同步调用返回，capture(off) 必须先停硬件并排空这些 worker。**本层只实现快照资格检查、cache 回调顺序和交付路径，不证明 IRQ 快照来自硬件、SOF metadata 绑定、合法映射或实际 drain。** 目前没有调用它的真实 provider；SID80/domain 委派、rate/SMI/PHY/route、IRQ owner/采集启动仍缺，不能拍摄。
+slot、raw、映射和回调 context 必须由 provider pin 到同步调用返回。**native controller 必须禁止 FBC/RCNT 或任何自动重用在 finish 返回 RETIRED 前重新写此RAW slot**；软件CPU pin不能自行停硬件，也不是整个DMA/AXI drain证明。同步复制完成后才可重新发布DEVICE cache状态；用户 `uiomove` 只读取独立CPU staging，旧的 `frame_readers` 背压不是RAW source ownership。capture(off) 必须先停硬件并排空这些 worker；export后仍永久保留，不以CPU退休当作map/unmap授权。**本层实现快照资格检查、具体逐页cache/CPU pin与交付，不证明 IRQ 快照来自硬件、SOF metadata 绑定、合法映射或实际 drain。** 目前没有调用它的真实 provider；SID80/domain 委派、rate/SMI/PHY/route、IRQ owner/采集启动仍缺，不能拍摄。UniXNU的4KiB kit不替代此16KiB/v3路径，HakiOS `PLACE_READING`/ring初始化说明reader pin边界，未移植其QCOM地址或完成后CIVAC策略。
 
 ### CAMTG 时钟申请和诊断
 

@@ -8,7 +8,6 @@
  */
 #include <vm/pmap.h>
 #include <vm/vm_kern.h>
-#include <arm/caches_internal.h>
 #include "x9_camera_s1.h"
 extern ppnum_t pmap_find_phys(pmap_t, addr64_t);
 LCK_MTX_DECLARE(camera_s1_lock, &camera_group);
@@ -29,6 +28,10 @@ enum { CAM_S1_SHIFT=14, CAM_S1_PAGE=1u<<CAM_S1_SHIFT,
 #define CAM_S1_MAIR 0x00000000f404ff44ull
 #define CAM_S1_MAGIC 0x583943414d533131ull
 static const uint32_t cam_s1_oas[]={32,36,40,42,44,48};
+#include "x9_camera_cache.inc"
+
+enum { CAM_RAW_PRIVATE, CAM_RAW_DEVICE, CAM_RAW_CPU, CAM_RAW_IDLE,
+    CAM_RAW_RETAINED };
 
 struct cam_s1_page { vm_offset_t va; uint64_t pa; };
 struct x9_camera_s1 {
@@ -39,6 +42,16 @@ struct x9_camera_s1 {
     uint64_t raw_pa[CAM_S1_MAX_PAGES];
     int last_errno;
     bool published; /* may be visible to HW, NOT attached/ready */
+    /* CPU pin is independent of userspace staging frame_readers. Only the
+     * CAMSV qualified-completion path changes this cache ownership record.
+     * One immutable slot/context per backing; no cross-slot alias/rebind. */
+    unsigned raw_state;
+    int raw_errno; /* RAW uncertainty must not masquerade as broken PTEs */
+    const struct x9_camera_camsv_slot *raw_slot;
+    void *raw_context;
+    int (*raw_check)(void *,uint64_t,const struct x9_camera_camsv_request *);
+    uint64_t raw_lease;
+    struct x9_camera_camsv_request raw_request;
 };
 _Static_assert(CAM_S1_ENTRIES*sizeof(uint64_t)==CAM_S1_PAGE,"16K table");
 _Static_assert(CAM_S1_MAX_PAGES==1024,"bounded RAW allocation");
@@ -246,14 +259,17 @@ int x9_camera_s1_export(struct x9_camera_s1 *m,uint32_t asid,
             /* Flush WB CPU RAW before any NC device writes. Every physical
              * page is distinct; never sync raw[0] PA plus a virtual length.
              */
-            for(unsigned i=0;i<m->pages;i++)
-                flush_dcache64(m->raw_pa[i],CAM_S1_PAGE,TRUE);
-            for(unsigned i=0;i<m->leaves;i++)
-                clean_dcache64(m->leaf[i].pa,CAM_S1_PAGE,TRUE);
-            clean_dcache64(m->root.pa,CAM_S1_PAGE,TRUE);
-            clean_dcache64(m->cd.pa,CAM_S1_PAGE,TRUE);
-            __asm__ volatile("dsb sy":::"memory");
-            *out=(struct x9_camera_s1_export){.raw=(const void *)m->raw,
+            for(unsigned i=0;i<m->pages && !e;i++)
+                e=cam_cache_range(m->raw+(vm_offset_t)i*CAM_S1_PAGE,
+                    CAM_S1_PAGE,CAM_CACHE_DEVICE);
+            for(unsigned i=0;i<m->leaves && !e;i++)
+                e=cam_cache_range(m->leaf[i].va,CAM_S1_PAGE,CAM_CACHE_CLEAN);
+            if(!e)e=cam_cache_range(m->root.va,CAM_S1_PAGE,CAM_CACHE_CLEAN);
+            if(!e)e=cam_cache_range(m->cd.va,CAM_S1_PAGE,CAM_CACHE_CLEAN);
+            if(!e)e=cam_s1_check_private(m);
+        }
+        if(!e) {
+            *out=(struct x9_camera_s1_export){.backing=m,.raw=(const void *)m->raw,
                 .iova=m->iova,.root_pa=m->root.pa,.cd_pa=m->cd.pa,
                 .bytes=m->bytes,.mapped_bytes=m->mapped_bytes,
                 .pages=m->pages,.oas=m->oas};
