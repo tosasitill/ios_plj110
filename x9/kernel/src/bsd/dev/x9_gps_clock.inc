@@ -98,9 +98,10 @@ static int gps_clock_take(void)
   e=gps_clock_authority();if(e)goto done;
   gps_rt.clock.set_started=1;gps_clock_journal(0);
   gps_power_write(gps_rt.clock.top,0x74,GPS_CLOCK_SELECTOR);
-  /* Match the measured vendor settle, not a guessed RF oscillator rate.
-   * Sleep/wake makes no READY claim. Any later guard failure retains SET. */
-  gps_runtime_pause(20);
+  /* Match the measured minimum settle on this unlocked worker. An event
+   * wake must not shorten the 20us hardware delay. This is not a guessed
+   * RF oscillator rate. Any later guard failure retains the accepted SET. */
+  delay(20);
  }
  e=gps_clock_effect();if(e)goto done;
  gps_rt.clock.complete=1;
