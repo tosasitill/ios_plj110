@@ -155,7 +155,13 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
 
-## 7. 当前交接(HANDOFF 115-INTEGRATE,2026-11-10): 蜂窝+ALS+两个手电筒提交独立整合构建通过,未上机
+## 7. 当前交接(HANDOFF 116-INTEGRATE-BT,2026-11-10): 继续纳入c9b3e46蓝牙代码与3535ac5交接
+
+- **用户要求/源码范围**:用户指定代码c9b3e46、交接3535ac5。两者已在main历史,不重复提交代码;把它们继续纳入上一蜂窝+ALS+torch候选。新独立树`.local/x9/worktrees/cellular-als-torch-bt-175/`以586184f为基线,依次cherry-pick为**efad465**(代码)、**f1cddba**(交接),只增加12个BT实现文件及11行BT交接。代码无冲突;文档插入上下文原本含SMS段,仅抽入完整BT段并保留独立树既有文档,未夹带SMS代码或回退main活动交接。
+- **参数/边界**:保留DMA40/PDP/WDS、single-SIM+NR、ALS1、torch3及Wi-Fi/GPU配置,新增**`x9_bt=1`**只读AO/时钟门诊断;probe/raw/discovery仍关闭,不接管UART/自动发ROM查询。606B旧参数追加BT超607B;源码`x9_at_bridge.inc:17`明确`x9_bb=1`且默认`x9_qmi_at=1`启用AT桥,`x9_modem_s3.inc:1127`强制lvl3,所以仅移除冗余`x9_md_at=3`,新完整参数**603B**,AT初始化语义不变。32GiB manifest、插件275不变,无需mailbox。
+- **构建里程碑**:在固定f1cddba独立树直接编译iOS16 arm64诊断客户端和内核/boot,唯一名字`x9-cellular-als-torch-bt175-md`;目前构建进行中,尚未有最终boot结果。输入/原始日志`.local/x9/work/cellular-als-torch-bt-175/{boot-config.json,bt-client.stdout.log,build.stdout.log}`。无测试套件、CI run、push、设备操作/flash/reboot/分区写入。完成后续补结果,不以BT服务/节表存在称蓝牙可用。
+
+### 前次交接(HANDOFF 115-INTEGRATE,2026-11-10): 蜂窝+ALS+两个手电筒提交独立整合构建通过,未上机
 
 - **本轮范围**:用户明确“继续合:5e06897、a4c8857这两个”。它们已是main祖先,不在main重复提交源码;本轮是把这两份代码纳入上一蜂窝+ALS候选。独立树`.local/x9/worktrees/cellular-als-torch-175/`从ca4980f开始,依次cherry-pick成**d68c37b**(5e06897)、**586184f**(a4c8857),保留DMA40/PDP/WDS、single-SIM+NR能力门、ALS与legacy PIT修正;没有夹带BT/SMS等功能。
 - **合并里程碑**:代码没有冲突;只有5e06897的NOTES插入依赖已存在的ALS交接段,已在独立树采用该提交的文档版本后继续,主checkout活动交接不回退。a4c8857完整应用。源码独立固定586184f,main不切分支、不覆盖其他会话源码。
