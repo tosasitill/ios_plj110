@@ -4,6 +4,7 @@
 #include "x9_camera.h"
 #include "x9_camera_outmux.h"
 #include "x9_camera_mac.h"
+#include "x9_camera_phy.h"
 #ifdef KERNEL
 /* Thread context, standalone callers: these acquire camera_control_lock.
  * A platform callback already holding that mutex must use the internal
@@ -26,6 +27,11 @@
  * format / normal RAW10 identity / unsplit async and CAM_MAIN AFIFO; no PHY
  * mux or MAC lane enable. It restores AFTER OUTMUX on sensor close so the
  * async clock remains held through OUTMUX's restoration commit.
+ * Optional prepare_analog AFTER configure_mac and BEFORE configure_outmux
+ * initializes/calibrates both inactive analog banks using current LK
+ * devinfo. No digital lane enable or rate/SMI/mapping grant. An unconsumed
+ * calibration blocks receiver/MM/supply retirement. Close restores analog
+ * AFTER OUTMUX and BEFORE MAC/async, keeping selected async CG through both.
  * Optional configure_outmux then applies only the fixed inactive OUTMUX0
  * image route and confirms real shadow/inner consumption, still DL/IRQ off.
  * Its journal restores BEFORE dropping receiver/MM; a pending trigger has

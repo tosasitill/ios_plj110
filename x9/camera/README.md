@@ -380,7 +380,7 @@ captured DT 区分 normal camera **SID80**、protected camera **SID89**、displa
 ### 持有冷传感器与接收时钟
 
 `kernel/src/bsd/dev/x9_camera_sensor_session.h` 的 kernel-private 调用顺序为：
-`open → configure → prepare_receiver → read8 → close`。`prepare_receiver` 可省略，原 probe/standby 不因此增加 MM 操作。准备 receiver 后可显式 `x9_camera_sensor_session_configure_mac → x9_camera_sensor_session_configure_outmux`；两者都可省略，原诊断不会自动写这些配置。MAC 必须先于 OUTMUX；已持有 OUTMUX 时再配置 MAC 返回 `EBUSY`，不能改变已 posted 命令的输入环境。
+`open → configure → prepare_receiver → read8 → close`。`prepare_receiver` 可省略，原 probe/standby 不因此增加 MM 操作。准备 receiver 后可显式 `configure_mac → prepare_analog → configure_outmux`（均为 `x9_camera_sensor_session_*`）；analog 需要先成功配置 MAC，三个阶段均可省略，原诊断不会自动写这些配置。MAC 必须先于 OUTMUX；已持有 OUTMUX 时再配置 MAC 返回 `EBUSY`，不能改变已 posted 命令的输入环境。
 
 - standalone 入口取得 `camera_control_lock`；同 TU 的 native 回调已经持锁，必须使用内部 `_locked` helper，不重入公开入口。
 - `open` 返回的非零 epoch（包括错误返回）代表已准入 journal，必须安排一次 close；旧 epoch、重复 prepare/close 不做 MMIO。成功 prepare 不撤销 MM votes，不设置 READY，不返回 IOVA。
@@ -392,7 +392,15 @@ MAC 服务使用独立 MAC-top／MAC-A banks（前 `0x13884000/0x13885000`，后
 
 仅改九字段：TOP 普通非 shared-16p、PHY mux unsplit mode（enable 仍 0）、CSI2 ECC/B2P/image/spec2/multiframe/VS1T/early-VSYNC、header、resync/dummy、RAW10 DT identity，以及选定 async/AFIFO split。主 CPHY3 的 `HEADER_MODE/LEN=2/4`，不是把 trio 数 3 当 LEN；前 DPHY 为 `0/0`。共享 split mask 均为 `3 << (2*port)`，CAM_MAIN AFIFO 的 **`+0x7dc`** 不是其 vendor 已偏移子映射的相对地址。只追加 TOP async CG 的 `1 << port`，不搬运厂商 all-port CG/overrun IRQ；原 async debug policy 保留，不启用 test model。
 
-每个写入在 MMIO 前记录 dirty/pending，确认后才更新 receiver expected；失败只接受 exact old/new 观察资格化，再还原 owned 字段，不重做失败写。sensor close 隔离 reset/MCLK 后先恢复 OUTMUX 并确认其 commit，再恢复 MAC/async 并撤本次 async CG，然后退休 MM/rails，避免 OUTMUX 恢复时先丢 async 时钟。任一冲突/恢复失败保留尚未退休依赖，不 reset/retry。MAC 的 `CONFIGURED/RESTORED` 不是 PHY 校准、packet arrival、IRQ/event/AXI drain 或独占证明。
+每个写入在 MMIO 前记录 dirty/pending，确认后才更新 receiver expected；失败只接受 exact old/new 观察资格化，再还原 owned 字段，不重做失败写。sensor close 隔离 reset/MCLK 后先恢复 OUTMUX 并确认其 commit，再停止/恢复 analog（若请求仍 pending 则在 OUTMUX 恢复之前拒绝退休），最后恢复 MAC/async 并撤本次 async CG，然后退休 MM/rails，避免 OUTMUX 恢复时先丢 async 时钟。任一冲突/恢复失败保留尚未退休依赖，不 reset/retry。MAC 的 `CONFIGURED/RESTORED` 不是 PHY 校准、packet arrival、IRQ/event/AXI drain 或独占证明。
+
+analog 服务（`x9_camera_phy.h/.inc`）使用前摄 A/B `13880000/13881000`、后摄 A/B `13898000/13899000`；两个 unsplit profile 都初始化并校准两个 banks。要求 analog CORE/LPF/OS_RSTB、calibration/force/scan、digital lanes/BIST/IRQ off，并对命名控制双采样、持续比较本 journal expected。写入仅影响 LP/ALP/VREF、终端电阻、EQ/CDR、16-bit AFIFO、普通 split/dummy 与 reference/source 字段；不重放 AFIFO CLEAR/IRQ CLR 或任意 RO 结果。
+
+校准数据不是 `10160000` 的直接 MMIO。上游 `mtk-devinfo.c` 从 `/chosen`（或唯一 `/chosen@0`）的 **little-endian** `atag,devinfo` 取 `data[reg/4]`。shim 本次启动资格化 CSI0/3 的 nvmem consumer/phandle/cell（offset `1d0/1dc`），只转交两个 word 至 32B `x9-camera-calibration`；全表/设备标识不转交、不打印或写入 git。缺失/长度错误/重复/未知 cell mapping 不给数据；明确存在的 all-zero word 才使用 vendor 默认 termination16，不能把缺失当 zero。
+
+标称 front2160Mbps、main3300.004166Msps 仅用于 preview band 配置，不是测频/SMI 票或吞吐保证。CPHY 的上游 `setting0=0x322` 会覆盖早先 source setter 的 REF_CK_SEL 为0；本实现保留该已确认调用顺序，不能擅自改成32a并声称 oscillator 已持有。DPHY A 使用 upstream oscillator1/gating2。主摄 CTLE delay9/IS2/zero-DG override、digital settle/trail/deskew/ULPS/lane 启用**还未在此阶段实现**。
+
+每个 bank 执行 idle200us → CORE1/30us → LPF1/5us → OS_RSTB1/1us → CAL_EN → 25us → 有界状态消费。只有触发前 CPLT0、10ms/10000次内六个完成位全部1且再次保持1，才标记该 bank CALIBRATED；上游 delay 后写 `ANA9.CPLT=1` 的做法不移植。结果/code 不用作普通控制 guard；完成后 CAL_EN 仍 on 时持续检查完成位。入场已有 CPLT 历史不猜 W1C，也不清零。任何已 posted 但未确认的校准阻止全部接收/MM/rail 退休，不 reset/cancel/retry；已完成才能单次逆序关 CAL_EN/RSTB/LPF/CORE、等待200us并还原 owned 配置。RESTORED 不表示 RO 校准结果/IRQ history 已回到入口或全链 drain。
 
 OUTMUX 引擎只接受选定 bank 的 TOP CG 原为 off、当前 IRQ policy 为 AP/VM0 且其它 VM 未选中、DL/ready/reset/IRQ 与所有 tag filters 关闭、无 crop、所有已知 shadow/inner 配置一致且双采样稳定。拒绝继承的 staged difference，不替其它 owner 发布配置，也不修改 VM routing。它保留所有 8 个 tag 的完整已知控制，只改普通 pixel mode、unsplit source、reference/last VC、tag0 VC/RAW10 format/word-count size/filter 的固定字段，并只追加 TOP outmux0 CG bit。
 
@@ -400,7 +408,7 @@ OUTMUX 引擎只接受选定 bank 的 TOP CG 原为 off、当前 IRQ policy 为 
 
 `RESTORED` 只描述配置与 CG。CFG_DONE 可能留下 masked IRQ status；本服务不读/ack IRQ_STATUS，也不声称 IRQ/event drain。未来 native 唯一 IRQ owner 必须在 unmask 前资格化并退休该配置命令历史，不能把它当作图像完成。
 
-这套生命周期不启用 PHY、SENINF DL、IRQ 或 DMA。CG/VM0/稳定 disabled 条件只是配置准入，不证明独占 AP/SCP、采集速率、包接收、全写链 drain 或 IOVA 授权；共享 CG 的 masked RMW 与检查也不是跨固件的原子 lease/ABA 检测。LARB/SMI 数据通路、PHY 校准、正常 SID80 attach 与真正采集仍缺失。
+这套生命周期可显式开启 inactive analog 校准，但不启用 digital PHY lanes、SENINF DL、IRQ 或 DMA。CG/VM0/稳定 disabled 条件只是配置准入，不证明独占 AP/SCP、采集速率、包接收、全写链 drain 或 IOVA 授权；共享 CG 的 masked RMW 与检查也不是跨固件的原子 lease/ABA 检测。LARB/SMI 数据通路、PHY 校准、正常 SID80 attach 与真正采集仍缺失。
 
 ### 接通采集回调
 

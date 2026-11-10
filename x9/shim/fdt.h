@@ -40,6 +40,8 @@ int fdt_scp_patch_adt(uintptr_t,void *,size_t);
 int fdt_gps_patch_adt(uintptr_t,void *,size_t);
 /* DMA topology only, not buffer ownership, AIN0 or complete write drain. */
 int fdt_mic_dma_patch_adt(uintptr_t,void *,size_t);
+/* Current LK devinfo provenance only; no efuse MMIO or hardware grant. */
+int fdt_camera_calibration_patch_adt(uintptr_t,void *,size_t);
 int fdt_adsp_patch_adt(uintptr_t,void *,size_t);
 
 /* Read-only Wi-Fi DT facts into /chosen/x9-lk-wifi-dt: 0 written, 1 no placeholder, -1 FDT unusable. */

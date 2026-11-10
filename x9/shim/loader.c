@@ -157,6 +157,8 @@ static const char *boot_impl(uintptr_t dtb, const void *embedded, size_t embedde
   plog_str("X9 GPS FDT: missing/invalid ADT placeholder; GNSS remains pending\n");
  if(fdt_mic_dma_patch_adt(dtb,(void *)(uintptr_t)adt_pa,p->adt_size)<0)
   plog_str("X9 MIC DMA FDT: missing/invalid ADT placeholder; DMA remains pending\n");
+ if(fdt_camera_calibration_patch_adt(dtb,(void *)(uintptr_t)adt_pa,p->adt_size)<0)
+  plog_str("X9 CAMERA CAL FDT: missing/invalid ADT placeholder; PHY calibration pending\n");
 #if X9_ADSP_LOADER
  if(fdt_adsp_patch_adt(dtb,(void *)(uintptr_t)adt_pa,p->adt_size)<0)
   plog_str("X9 ADSP FDT: missing/invalid ADT placeholder; shared DRAM remains pending\n");

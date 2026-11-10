@@ -87,6 +87,7 @@ static int cam_mac_dependencies(void)
 {
     int e=cam_mac_guard();if(e)return e;
     e=cam_rx_session_guard();if(e)return e;
+    e=cam_phy_guard();if(e)return e;
     return cam_out_guard(); /* its MAC guard does NOT recurse into OUTMUX */
 }
 static int cam_mac_write(unsigned slot,uint32_t value)

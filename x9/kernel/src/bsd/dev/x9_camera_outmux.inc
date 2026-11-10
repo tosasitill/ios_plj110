@@ -81,6 +81,7 @@ static int cam_out_environment(void)
     const struct cam_rx_maps *m=&cam_rx_maps[cam_out.status.sensor==X9_CAMERA_BACK?0:1];
     int e=cam_rx_sample(m,&live);if(e)return e;
     e=cam_mac_guard();if(e)return e;
+    e=cam_phy_guard();if(e)return e;
     base=cam_rx_live.expected;
     /* OUTMUX is checked completely below, including all seven unused tags;
      * never suppress MAC/async/AFIFO/CAMSV changes under a route commit. */

@@ -15,6 +15,9 @@ static int cam_out_guard(void);
 static int cam_out_close_locked(uint64_t);
 static int cam_mac_guard(void);
 static int cam_mac_close_locked(uint64_t);
+static int cam_phy_guard(void);
+static int cam_phy_retirement_guard(uint64_t);
+static int cam_phy_close_locked(uint64_t);
 static const unsigned cam_rx_out_offsets[X9_CAM_RX_OUT_WORDS]={
     0x000,0x004,0x008,0x00c,0x010,0x014,0x018,0x020,
     0x02c,0x034,0x038,0x100,0x104,0x108
@@ -189,10 +192,12 @@ static int cam_rx_session_close(struct x9_camera_receiver *r)
     cam_rx_live.close_attempted=true;
     /* An incomplete MM take cannot safely sample receiver registers. It
      * has not issued any receiver writes; unwind only its consumed slots.
-     * A complete take first restores OUTMUX, keeping the optional MAC/async
-     * clock journal held during its commit; then restores MAC/async and
-     * must still match the initially captured disabled controls. */
-    off=cam_out_close_locked(cam_rx_live.sensor_epoch);
+     * A complete take first refuses unconsumed analog requests, restores
+     * OUTMUX with MAC/async clocks held, restores/stops analog, then
+     * restores MAC/async. The receiver must still match the initially captured disabled controls. */
+    off=cam_phy_retirement_guard(cam_rx_live.sensor_epoch);
+    if(!off)off=cam_out_close_locked(cam_rx_live.sensor_epoch);
+    if(!off)off=cam_phy_close_locked(cam_rx_live.sensor_epoch);
     if(!off)off=cam_mac_close_locked(cam_rx_live.sensor_epoch);
     if(!off)off=cam_mm.active?cam_rx_session_guard():0;
     if(!off)off=cam_mm_session_close(cam_rx_live.epoch,&cam_rx_live.status.mm);
@@ -223,6 +228,7 @@ static int cam_rx_sensor_guard_locked(uint64_t epoch)
     e=cam_mm_session_check(cam_rx_live.epoch);
     if(!e)e=cam_rx_session_guard();
     if(!e)e=cam_mac_guard();
+    if(!e)e=cam_phy_guard();
     if(!e)e=cam_out_guard();
     return e?cam_rx_session_fault(e):0;
 }
@@ -240,6 +246,7 @@ static int cam_rx_sensor_close_locked(uint64_t epoch)
 }
 #include "x9_camera_outmux.inc"
 #include "x9_camera_mac.inc"
+#include "x9_camera_phy.inc"
 static int cam_rx_probe(unsigned sensor,struct x9_camera_receiver *r)
 {
     int e,off=0;
