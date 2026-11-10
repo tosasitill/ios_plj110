@@ -45,7 +45,10 @@ def main():
     (a.out / 'microphone-build.json').write_text(json.dumps({
         'abi': 1, 'format': '48000 Hz / mono / S16_LE', 'uid': 'Codec', 'source': 'imic',
         'hal_bundle': str(bundle), 'installed': False,
-        'board_prerequisites_implemented': False, 'cold_power_probe_control': True,
+        'board_prerequisites_implemented': False, 'board_capture_lifecycle_implemented': True,
+        'dma_provider_registered': False, 'plj110_cold_sessions_per_boot': 1,
+        'exact_recording_frames_required': True, 'kernel_stop_state_checked': True,
+        'cold_power_probe_control': True,
         'power_probe_activates_recording': False, 'hardware_tested': False,
         'route_tested': False, 'autoload': False}, indent=2) + '\n')
     print(f'X9 microphone HAL + micctl built: {a.out}; not installed/hardware-tested', flush=True)

@@ -49,14 +49,19 @@ static int stop_locked(void)
         lck_mtx_unlock(&mic_lock);
         e=hw.stop();
         lck_mtx_lock(&mic_lock);
-        if(!e)hardware_active=false;
+        if(!e) {
+            hardware_active=false;
+            /* A board that has only qualified one cold transaction cannot
+             * advertise restart readiness after that transaction is spent. */
+            if(hw.flags&X9_MIC_BACKEND_COLD_ONESHOT)st.flags&=~X9_MIC_READY;
+        }
         else {st.flags|=X9_MIC_FAULT;st.flags&=~X9_MIC_READY;st.last_errno=e;}
     }
     return e;
 }
 int x9_mic_register_backend(const struct x9_mic_backend *p)
 {
-    if(!p || p->version!=1 || !p->start || !p->stop)return EINVAL;
+    if(!p || p->version!=2 || (p->flags&~X9_MIC_BACKEND_COLD_ONESHOT) || !p->start || !p->stop)return EINVAL;
     lck_mtx_lock(&mic_control_lock);lck_mtx_lock(&mic_lock);
     int e=st.mode!=2?EPERM:hw.version?EBUSY:0;
     if(!e) {hw=*p;st.supported_sources=X9_MIC_SOURCE_INTERNAL;st.flags=X9_MIC_READY;}

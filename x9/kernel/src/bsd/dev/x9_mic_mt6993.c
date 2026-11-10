@@ -20,11 +20,12 @@ LCK_GRP_DECLARE(afe_mic_group,"x9-mic-afe");
 LCK_MTX_DECLARE(afe_mic_lock,&afe_mic_group);
 static struct x9_mic_mt6993_platform hw;
 static bool registered, worker_created, active, prepared, saved, dma_stuck;
-static bool codec_prepared, capture_prepared;
-static struct x9_mic_mt6681 codec;
 static struct x9_mic_hardware_status diagnostic={.version=1,
     .chosen_phase={-1,-1},.cycle={-1,-1}};
 static struct x9_mic_board_status board_diagnostic={.version=1};
+static struct x9_mic_afe_status afe_diagnostic={.version=1};
+static struct x9_mic_analog_status analog_diagnostic={.version=1};
+static struct x9_mic_digital_status digital_diagnostic={.version=1};
 static uint64_t generation,last_poll,last_progress;
 static uint64_t resource_ticket;
 static struct x9_mic_dma_status dma_diagnostic={.version=1,
@@ -100,16 +101,8 @@ static int stop_locked(void)
         }
         saved=false;dma_diagnostic.con0_after=rd(VUL1_CON0);
     }
-    e=capture_prepared?hw.capture_unprepare():0;
-    if(e)goto failed;
-    capture_prepared=false;diagnostic.flags&=~X9_MIC_HW_CAPTURE;
-    if(codec_prepared) {
-        e=x9_mic_mt6681_unprepare(&codec);
-        if(e)goto failed;
-        codec_prepared=false;diagnostic.flags&=~X9_MIC_HW_POWERED;
-    }
     e=prepared?hw.unprepare():0;
-    if(!e)prepared=false;
+    if(!e){prepared=false;diagnostic.flags&=~X9_MIC_HW_CAPTURE;}
     if(!e && resource_ticket) {
         e=x9_audio_resources_release(X9AudioResourceMic,resource_ticket);
         if(!e)resource_ticket=0;
@@ -124,11 +117,30 @@ dma_failed:
     dma_stuck=true;
 failed:
     if(resource_ticket)x9_audio_resources_fault(X9AudioResourceMic,resource_ticket,e);
+    if(hw.prepare==x9_mic_plj110_capture_prepare)x9_mic_plj110_capture_retain(e);
     dma_diagnostic.restore_register=dma_diagnostic.last_register;
     if(!dma_diagnostic.restore_errno)dma_diagnostic.restore_errno=e;
     dma_diagnostic.flags|=X9_MIC_DMA_RETAINED;
     if(!diagnostic.restore_errno)diagnostic.restore_errno=e;
     diagnostic.flags|=X9_MIC_HW_RESTORE_FAILED;
+    /* DMA failure skips board teardown entirely. Make retained dependencies
+     * visible on every cache surface without off-domain/extra MMIO. */
+    if(prepared && (board_diagnostic.flags&X9_MIC_BOARD_ATTEMPTED)) {
+        board_diagnostic.flags|=X9_MIC_BOARD_RETAINED;
+        if(!board_diagnostic.restore_errno)board_diagnostic.restore_errno=e;
+        if(afe_diagnostic.flags&X9_MIC_AFE_ACQUIRED) {
+            afe_diagnostic.flags|=X9_MIC_AFE_RETAINED;
+            if(!afe_diagnostic.restore_errno)afe_diagnostic.restore_errno=e;
+        }
+        if(analog_diagnostic.flags&X9_MIC_ANALOG_PREPARED) {
+            analog_diagnostic.flags|=X9_MIC_ANALOG_RETAINED;
+            if(!analog_diagnostic.restore_errno)analog_diagnostic.restore_errno=e;
+        }
+        if(digital_diagnostic.flags&X9_MIC_DIGITAL_ATTEMPTED) {
+            digital_diagnostic.flags|=X9_MIC_DIGITAL_RETAINED;
+            if(!digital_diagnostic.restore_errno)digital_diagnostic.restore_errno=e;
+        }
+    }
     return e;
 }
 static int afe_stop(void)
@@ -140,8 +152,13 @@ static int afe_start(uint64_t g)
     lck_mtx_lock(&afe_mic_lock);int e=0;
     if(active || prepared || dma_stuck || resource_ticket || (diagnostic.flags&X9_MIC_HW_RESTORE_FAILED))e=EBUSY;
     else {
-        e=x9_audio_resources_claim(X9AudioResourceMic,&resource_ticket);
-        if(e){lck_mtx_unlock(&afe_mic_lock);return e;}
+        /* PLJ110 claims once inside its board pipeline and keeps that lease
+         * across VUL1 polling/drain. A nested engine claim is nonrecursive
+         * and would always fail. Other providers use the engine's lease. */
+        if(hw.prepare!=x9_mic_plj110_capture_prepare) {
+            e=x9_audio_resources_claim(X9AudioResourceMic,&resource_ticket);
+            if(e){lck_mtx_unlock(&afe_mic_lock);return e;}
+        }
         bzero(&dma_diagnostic,sizeof(dma_diagnostic));dma_diagnostic.version=1;
         dma_diagnostic.flags=X9_MIC_DMA_ATTEMPTED|X9_MIC_DMA_BOUND;
         dma_diagnostic.adc_channel=hw.adc_channel;dma_diagnostic.ring_bytes=hw.dma_bytes;
@@ -150,20 +167,14 @@ static int afe_start(uint64_t g)
         diagnostic.stage=X9_MIC_HW_RESOURCES;
         diagnostic.chosen_phase[0]=diagnostic.chosen_phase[1]=-1;
         diagnostic.cycle[0]=diagnostic.cycle[1]=-1;
-        prepared=true;e=hw.prepare();
-        if(!e && (rd(VUL1_CON0)&VUL1_ON))e=EBUSY;
-        if(!e) {
-            codec_prepared=true;
-            e=x9_mic_mt6681_power_calibrate(&codec,&hw.codec,hw.afe);
-            diagnostic=codec.status;
-        }
-        if(!e) {
-            diagnostic.stage=X9_MIC_HW_ADC;capture_prepared=true;
-            e=hw.capture_prepare(&diagnostic);
-            if(!e)e=x9_mic_mt6681_verify_capture(&codec);
-            if(e)diagnostic.last_register=codec.status.last_register;
-            if(!e && (rd(VUL1_CON0)&VUL1_ON))e=EBUSY;
-        }
+        prepared=true;
+        e=hw.prepare(hw.afe,&diagnostic,&board_diagnostic,&afe_diagnostic,
+            &analog_diagnostic,&digital_diagnostic,&dma_diagnostic);
+        /* A board may reuse read-only eligibility snapshots. Binding is a
+         * separate verified contract, never inferred from those flags. */
+        dma_diagnostic.flags|=X9_MIC_DMA_BOUND;dma_diagnostic.blockers=0;
+        dma_diagnostic.adc_channel=hw.adc_channel;dma_diagnostic.ring_bytes=hw.dma_bytes;
+        dma_diagnostic.base=hw.dma_bus_address;dma_diagnostic.end=hw.dma_bus_address+hw.dma_bytes-1;
         if(!e) {
             diagnostic.stage=X9_MIC_HW_DMA;
             dma_diagnostic.stage=X9_MIC_DMA_BASELINE;
@@ -171,6 +182,11 @@ static int afe_start(uint64_t g)
             dma_diagnostic.monitor_before=rd(VUL1_MON0);
             dma_diagnostic.memif_con0=rd(MEMIF_CON0);
             dma_diagnostic.flags|=X9_MIC_DMA_REGISTERS_VALID;
+            dma_diagnostic.active_memifs=0;
+            for(unsigned i=0;i<32;i++)if(rd(x9_mic_memif_regs[i])&VUL1_ON)
+                dma_diagnostic.active_memifs|=1u<<i;
+            if(dma_diagnostic.active_memifs)e=EBUSY;
+            if(dma_diagnostic.memif_con0&4){dma_diagnostic.last_register=MEMIF_CON0;e=EBUSY;}
             if(dma_diagnostic.con0_before&(VUL1_ON|(1u<<7)))e=EBUSY;
             if(dma_diagnostic.monitor_before&(VUL1_MON_BUSY|VUL1_MON_FULL))e=EBUSY;
             /* Every actual routing word must be empty; word3 is reserved.
@@ -288,16 +304,18 @@ static void afe_worker(__unused void *arg,__unused wait_result_t result)
 }
 int x9_mic_mt6993_register(const struct x9_mic_mt6993_platform *p)
 {
-    if(!p || p->version!=3 || p->adc_channel>1 || !p->afe || !p->dma ||
+    if(!p || p->version!=4 || p->adc_channel>1 || !p->afe || !p->dma ||
        !p->prepare || !p->unprepare || !p->copy_frames || !p->sync_for_device || !p->dma_quiesce ||
-       !p->capture_prepare || !p->capture_unprepare || p->codec.version!=1 ||
-       p->codec.flags!=X9_MT6681_REQUIRED || !p->codec.read8 || !p->codec.write8 ||
        ((uintptr_t)p->afe&3) || ((uintptr_t)p->dma&15) || (p->dma_bus_address&15) ||
        !p->dma_bus_address || p->dma_bytes<65536 || p->dma_bytes>131072 || (p->dma_bytes&15) ||
        p->dma_bus_address>((1ULL<<41)-p->dma_bytes))return EINVAL;
     lck_mtx_lock(&afe_mic_lock);
     if(registered || (board_diagnostic.flags&X9_MIC_BOARD_RETAINED)) {
         lck_mtx_unlock(&afe_mic_lock);return EBUSY;
+    }
+    if(p->prepare==x9_mic_plj110_capture_prepare &&
+       (board_diagnostic.flags&X9_MIC_BOARD_ATTEMPTED)) {
+        lck_mtx_unlock(&afe_mic_lock);return EALREADY;
     }
     hw=*p;
     int e=0;
@@ -307,10 +325,27 @@ int x9_mic_mt6993_register(const struct x9_mic_mt6993_platform *p)
             e=ENOMEM;
         } else {thread_deallocate(t);worker_created=true;}
     }
-    const struct x9_mic_backend backend={1,afe_start,afe_stop};
+    const struct x9_mic_backend backend={.version=2,
+        .flags=p->prepare==x9_mic_plj110_capture_prepare?X9_MIC_BACKEND_COLD_ONESHOT:0,
+        .start=afe_start,.stop=afe_stop};
     if(!e)e=x9_mic_register_backend(&backend);
     if(!e){registered=true;dma_diagnostic.blockers=0;dma_diagnostic.flags|=X9_MIC_DMA_BOUND;}
     lck_mtx_unlock(&afe_mic_lock);return e;
+}
+int x9_mic_plj110_register_dma(const struct x9_mic_plj110_dma *p)
+{
+    if(!p || p->version!=1 || p->flags!=X9_MIC_PLJ110_DMA_REQUIRED ||
+       p->adc_channel!=0)return EINVAL;
+    /* This supplies real PLJ110 lifecycle callbacks, not stub DMA/owner
+     * callbacks. AFE SRAM SMC/idle/board XML cannot satisfy p's contract. */
+    const struct x9_mic_mt6993_platform platform={
+        .version=4,.adc_channel=0,.afe=p->afe,.dma=p->ring,
+        .dma_bus_address=p->bus_address,.dma_bytes=p->ring_bytes,
+        .prepare=x9_mic_plj110_capture_prepare,
+        .unprepare=x9_mic_plj110_capture_unprepare,
+        .dma_quiesce=p->quiesce,.copy_frames=p->copy_frames,
+        .sync_for_device=p->sync_for_device};
+    return x9_mic_mt6993_register(&platform);
 }
 void x9_mic_mt6993_get_hardware(struct x9_mic_hardware_status *s)
 {
@@ -327,7 +362,6 @@ void x9_mic_mt6993_get_board(struct x9_mic_board_status *s)
 {
     lck_mtx_lock(&afe_mic_lock);*s=board_diagnostic;lck_mtx_unlock(&afe_mic_lock);
 }
-static struct x9_mic_afe_status afe_diagnostic={.version=1};
 int x9_mic_mt6993_calibrate(void)
 {
     lck_mtx_lock(&afe_mic_lock);
@@ -339,7 +373,6 @@ void x9_mic_mt6993_get_afe(struct x9_mic_afe_status *s)
 {
     lck_mtx_lock(&afe_mic_lock);*s=afe_diagnostic;lck_mtx_unlock(&afe_mic_lock);
 }
-static struct x9_mic_analog_status analog_diagnostic={.version=1};
 int x9_mic_mt6993_analog_l(void)
 {
     lck_mtx_lock(&afe_mic_lock);
@@ -351,7 +384,6 @@ void x9_mic_mt6993_get_analog(struct x9_mic_analog_status *s)
 {
     lck_mtx_lock(&afe_mic_lock);*s=analog_diagnostic;lck_mtx_unlock(&afe_mic_lock);
 }
-static struct x9_mic_digital_status digital_diagnostic={.version=1};
 int x9_mic_mt6993_digital_l(void)
 {
     lck_mtx_lock(&afe_mic_lock);

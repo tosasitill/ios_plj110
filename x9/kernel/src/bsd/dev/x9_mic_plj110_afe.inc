@@ -151,13 +151,14 @@ static void afe_reg_snapshot(struct afe_journal *a)
     a->s->spm_after=rr(a->afe,0x60);a->s->cbip_after=rr(a->afe,0x4380);
     a->s->engine_after=rr(a->afe,0x14);a->s->engine_monitor=rr(a->afe,0x7c);
 }
-static int afe_take(struct afe_journal *a,vm_offset_t gpio,struct x9_mic_afe_status *s)
+static int afe_take(struct afe_journal *a,vm_offset_t gpio,struct x9_mic_afe_status *s,
+    volatile uint32_t *mapped_afe)
 {
     bzero(a,sizeof(*a));bzero(s,sizeof(*s));a->s=s;a->gpio=gpio;
     s->version=1;s->stage=X9_MIC_AFE_BASELINE;s->flags=X9_MIC_AFE_ATTEMPTED;
     for(unsigned i=0;i<4;i++)s->smc_result[i]=INT64_MIN; /* not issued */
     a->hwv=ml_io_map(0x1c040000,0x75000);a->vlp=ml_io_map(0x1c200000,0x1000);
-    a->afe=ml_io_map(0x1a110000,0x10000);
+    a->afe=mapped_afe?(vm_offset_t)mapped_afe:ml_io_map(0x1a110000,0x10000);
     a->ioc[0]=ml_io_map(0x12840000,0x1000);a->ioc[1]=ml_io_map(0x12860000,0x1000);
     if(!a->hwv || !a->vlp || !a->afe || !a->ioc[0] || !a->ioc[1])return ENOMEM;
     s->ap_vote_before=rr(a->hwv,0x20708);s->all_vote_before=rr(a->hwv,0x13700);

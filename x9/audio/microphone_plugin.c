@@ -93,13 +93,24 @@ static OSStatus add_client(__unused AudioServerPlugInDriverRef d,AudioObjectID o
 static OSStatus stop_device(void)
 {
     if(mic<0)return stop_failed?unavailable:0;
-    if(ioctl(mic,X9_MIC_STOP)<0) {
+    struct x9_mic_status before={0},after={0};
+    bool baseline=ioctl(mic,X9_MIC_GET_STATUS,&before)==0 && before.version==1;
+    bool stopped=ioctl(mic,X9_MIC_STOP)==0;
+    bool confirmed=stopped && ioctl(mic,X9_MIC_GET_STATUS,&after)==0 && after.version==1 &&
+        baseline && after.generation==before.generation+1 &&
+        !(after.flags&X9_MIC_RUNNING) && !after.queued_frames &&
+        !((after.flags&X9_MIC_FAULT) && !(before.flags&X9_MIC_FAULT));
+    if(!confirmed) {
         /* Keep the control fd for a later StopIO. Never replace it with a
          * new recording after an unacknowledged drain/resource restore. */
         stop_failed=io_fault=true;ready=false;cycle_valid=false;
         memset(cycle_pcm,0,sizeof(cycle_pcm));++seed;
         return unavailable;
     }
+    /* A spent cold one-shot budget and a fault cannot remain DeviceIsAlive
+     * merely because the last HAL refcount reached zero. */
+    ready=(after.flags&X9_MIC_READY) && !(after.flags&X9_MIC_FAULT);
+    if(after.flags&X9_MIC_FAULT)io_fault=true;
     int fd=mic;mic=-1;stop_failed=false;
     if(close(fd)<0){io_fault=true;ready=false;return unavailable;}
     return 0;

@@ -123,8 +123,8 @@ int main(int argc,char **argv)
         result|=hardware_status(fd);
         close(fd);return result;
     }
-    char *end;long seconds=strtol(argv[2],&end,10);
-    if(*end || seconds<1 || seconds>30){close(fd);return 2;}
+    char *end;errno=0;long seconds=strtol(argv[2],&end,10);
+    if(errno || end==argv[2] || *end || seconds<1 || seconds>30){close(fd);return 2;}
     if(s.version!=1 || s.mode!=2 || !(s.flags&X9_MIC_READY) || (s.flags&X9_MIC_FAULT)) {
         fprintf(stderr,"physical microphone backend is not ready; no file created\n");close(fd);return 1;
     }
@@ -132,31 +132,77 @@ int main(int argc,char **argv)
     int out=open(argv[3],O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);
     if(out<0){perror("new PCM file");close(fd);return 1;}
     struct x9_mic_config c={.version=1,.rate=X9_MIC_RATE,.channels=1,.sample_bits=16,.source=X9_MIC_SOURCE_INTERNAL};
-    int result=0;uint64_t total=0;
+    int result=0;uint64_t total=0,generation=0;
+    uint64_t target=(uint64_t)seconds*X9_MIC_RATE*X9_MIC_FRAME_BYTES;
+    bool started=false;
     if(ioctl(fd,X9_MIC_START,&c)<0){perror("start");result=1;}
-    uint64_t deadline=ns()+(uint64_t)seconds*1000000000,first_deadline=ns()+1000000000;
-    while(!result && ns()<deadline) {
-        int16_t pcm[512];ssize_t n=read(fd,pcm,sizeof(pcm));
-        if(n<0 && (errno==EAGAIN || errno==EWOULDBLOCK)) {
-            if(!total && ns()>=first_deadline){fprintf(stderr,"no real PCM within 1 second\n");result=1;break;}
-            usleep(5000);continue;
+    else {
+        started=true;
+        if(ioctl(fd,X9_MIC_GET_STATUS,&s)<0){perror("started status");result=1;}
+        else if(s.version!=1 ||
+            (s.flags&(X9_MIC_READY|X9_MIC_RUNNING|X9_MIC_FAULT))!=(X9_MIC_READY|X9_MIC_RUNNING) ||
+            s.source!=X9_MIC_SOURCE_INTERNAL || s.read_frames) {
+            fprintf(stderr,"started capture state is not valid\n");result=1;
+        } else generation=s.generation;
+    }
+    /* Capture an exact frame count, not whatever a wall-clock loop received.
+     * Cold initialization is outside this deadline. Allow <=1s for first
+     * real bytes, then <=250ms without progress; no silence/short success. */
+    uint64_t now=ns(),deadline=now+((uint64_t)seconds+1)*1000000000;
+    uint64_t first_deadline=now+1000000000,last_progress=now;
+    while(!result && total<target) {
+        now=ns();
+        if(now>=deadline || (!total && now>=first_deadline) ||
+           (total && now-last_progress>=250000000)) {
+            fprintf(stderr,"real PCM deadline/stall: bytes=%llu expected=%llu\n",total,target);
+            result=1;break;
         }
-        if(n<=0 || (n&1)){perror("read PCM");result=1;break;}
+        int16_t pcm[512];size_t want=(size_t)(target-total);
+        if(want>sizeof(pcm))want=sizeof(pcm);
+        ssize_t n=read(fd,pcm,want);
+        if(n<0 && errno==EINTR)continue;
+        if(n<0 && (errno==EAGAIN || errno==EWOULDBLOCK)) {usleep(5000);continue;}
+        if(n<=0 || (n&1) || (size_t)n>want) {
+            if(n<0)perror("read PCM");else fprintf(stderr,"invalid/ended PCM read: %zd\n",n);
+            result=1;break;
+        }
+        last_progress=ns();
         for(ssize_t sent=0;sent<n;) {
             ssize_t wrote=write(out,(char *)pcm+sent,(size_t)(n-sent));
             if(wrote<0 && errno==EINTR)continue;
-            if(wrote<=0){perror("write PCM");result=1;break;}sent+=wrote;
+            if(wrote<=0){perror("write PCM");result=1;break;}
+            sent+=wrote;total+=(uint64_t)wrote;
         }
-        total+=(uint64_t)n;
+        memset(pcm,0,sizeof(pcm));
     }
-    if(ioctl(fd,X9_MIC_GET_STATUS,&s)<0){perror("final status");result=1;}
-    if((s.flags&X9_MIC_FAULT) || s.read_frames!=total/2) {
-        fprintf(stderr,"capture fault or frame accounting mismatch\n");result=1;
+    if(started) {
+        if(ioctl(fd,X9_MIC_GET_STATUS,&s)<0){perror("final running status");result=1;}
+        else if(s.version!=1 || s.generation!=generation ||
+            (s.flags&(X9_MIC_READY|X9_MIC_RUNNING|X9_MIC_FAULT))!=(X9_MIC_READY|X9_MIC_RUNNING) ||
+            s.read_frames!=total/2 || s.captured_frames<s.read_frames || s.dropped_frames || total!=target) {
+            fprintf(stderr,"capture fault, discontinuity or incomplete frame accounting\n");result=1;
+        }
     }
-    if(ioctl(fd,X9_MIC_STOP)<0){perror("stop");result=1;}
-    close(fd);if(close(out)<0){perror("close PCM");result=1;}
+    bool stopped=ioctl(fd,X9_MIC_STOP)==0;
+    if(!stopped){perror("stop");result=1;}
+    if(started && stopped) {
+        struct x9_mic_status after={0};
+        if(ioctl(fd,X9_MIC_GET_STATUS,&after)<0){perror("stopped status");result=1;}
+        else if(after.version!=1 || after.generation!=generation+1 ||
+            (after.flags&(X9_MIC_RUNNING|X9_MIC_FAULT)) || after.last_errno || after.queued_frames ||
+            after.read_frames!=s.read_frames || after.captured_frames!=s.captured_frames ||
+            after.dropped_frames!=s.dropped_frames) {
+            fprintf(stderr,"kernel STOP did not confirm a clean final state\n");result=1;
+        }
+    }
+    /* Cache snapshots after explicit STOP: never another hardware request.
+     * Preserve all decisive power/calibration/DMA evidence even on failure. */
+    result|=hardware_status(fd);
+    if(close(fd)<0){perror("close microphone");result=1;}
+    if(close(out)<0){perror("close PCM");result=1;}
     if(!total){unlink(argv[3]);result=1;}
-    printf("real PCM bytes=%llu captured=%llu read=%llu dropped=%llu; %s (raw S16_LE/mono/48000, never zero-padded)\n",
-        total,s.captured_frames,s.read_frames,s.dropped_frames,result?"incomplete":"captured; acoustic verification still required");
+    printf("real PCM bytes=%llu expected=%llu captured=%llu read=%llu dropped=%llu; %s (raw S16_LE/mono/48000, never zero-padded)\n",
+        total,target,s.captured_frames,s.read_frames,s.dropped_frames,
+        result?"incomplete":"captured and stopped; acoustic verification still required");
     return result;
 }

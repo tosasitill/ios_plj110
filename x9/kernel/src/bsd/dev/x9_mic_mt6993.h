@@ -9,30 +9,23 @@
 #define X9_MIC_AFE_PHYS 0x1a110000ULL
 #define X9_MIC_AFE_BYTES 0x10000u
 struct x9_mic_mt6993_platform {
-    uint32_t version, adc_channel; /* version=3; verified board mic mapping */
+    uint32_t version, adc_channel; /* version=4; verified board mic mapping */
     volatile uint32_t *afe;       /* device mapping of X9_MIC_AFE_PHYS */
     void *dma;                    /* exclusively owned stereo S16 ring */
     uint64_t dma_bus_address;    /* AFE-visible, NOT a guessed CPU physical address */
     uint32_t dma_bytes;          /* 16-byte aligned, 64..128 KiB */
-    /* Claim exclusive VUL1/ADDA/codec, SCP wake+I2C arbitration, GPIO9 fresh
-     * codec power, MT6687 DCXO, proven ordinary 48k/26M-family clocks,
-     * aud_ul0 and pads (do not assume an APLL2 requirement from the rate).
-     * prepare does NOT start ADC/TX/DMA. Codec init/calibration run centrally
-     * after prepare succeeds. No borrowed active codec or dummy success.
-     * unprepare handles partial resource prepare; after codec/ADC/DMA stop
-     * it must restore the cold GPIO/rails baseline and prove readback.
-     * All callbacks run with the polling lock held: never wait for worker. */
-    int (*prepare)(void);
+    /* v4: one board-owned journal for cold power, MTKAIF calibration,
+     * ADC RC, codec SRC/TX and AFE RX. prepare leaves real capture active,
+     * but never writes memif/IRQ/DMA. No second engine-owned codec journal.
+     * Status pointers remain valid until unprepare; callbacks hold the AFE
+     * polling lock and must never wait for the worker. unprepare is called
+     * only after complete DMA drain/address restoration, including failures.
+     * A failed partial prepare must also be unwound; no borrowed live codec. */
+    int (*prepare)(volatile uint32_t *afe, struct x9_mic_hardware_status *,
+        struct x9_mic_board_status *, struct x9_mic_afe_status *,
+        struct x9_mic_analog_status *, struct x9_mic_digital_status *,
+        struct x9_mic_dma_status *);
     int (*unprepare)(void);
-    struct x9_mic_mt6681_io codec;
-    /* Full verified AIN/PGA/DCC/micbias/ADC RC calibration -> real ADDA UL
-     * at 48k, R-MISO1 capture routing and RX delay using chosen_phase/cycle.
-     * Only called after successful calibration and loopback-off readback.
-     * Must not overwrite calibrated codec phase bits or emit test/sine PCM.
-     * capture_unprepare safely unwinds even a partially failed capture_prepare,
-     * before codec clocks/transport are restored or released. */
-    int (*capture_prepare)(const struct x9_mic_hardware_status *);
-    int (*capture_unprepare)(void);
     /* Called after ON clear/readback, including partial start. Must prove
      * the entire write path has drained, NOT just ON=0, stable CUR or the
      * local VUL1 MON0. Failure pins journal/buffer/clocks/transport for boot.
@@ -46,8 +39,8 @@ struct x9_mic_mt6993_platform {
     int (*copy_frames)(uint32_t offset, int16_t *mono, uint32_t frames, uint32_t channel);
     int (*sync_for_device)(void);
 };
-/* Call only after platform transport/identity/calibration and exclusive DMA
- * contract have been verified. There is NO board caller in the current tree. */
+/* Generic providers must establish the full board pipeline above. PLJ110
+ * uses x9_mic_plj110_register_dma; no unverified provider is auto-registered. */
 int x9_mic_mt6993_register(const struct x9_mic_mt6993_platform *);
 void x9_mic_mt6993_get_hardware(struct x9_mic_hardware_status *);
 int x9_mic_mt6993_power_probe(void);

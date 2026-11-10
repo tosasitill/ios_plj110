@@ -195,8 +195,9 @@ struct x9_mic_dma_status {
 /* Thread context only. start/stop are serialized and called WITHOUT the PCM
  * lock. stop must disable/drain DMA and restore owned rails/clocks even after
  * a partially failed start. Failure latches FAULT; no automatic retry. */
+#define X9_MIC_BACKEND_COLD_ONESHOT 1u
 struct x9_mic_backend {
-    uint32_t version;
+    uint32_t version, flags; /* private v2, optional COLD_ONESHOT */
     int (*start)(uint64_t generation);
     int (*stop)(void);
 };

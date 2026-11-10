@@ -1,11 +1,12 @@
-/* PLJ110 cold codec power transport, NOT an ADC/PCM backend.
+/* PLJ110 cold codec power/calibration/capture pipeline; DMA is separate.
  * Wiring: captured DT scp_i2c1, mt6681-pmic@6b, codec-en GPIO9.
  * Protocol/gates: OPPO i2c-mt65xx.c (mt6991_compat), clk-mt6993-peri.c,
  * pinctrl-mtk-mt6993.h, spmi-mtk-pmif-core.c, mt6685-audclk.c.
  * Dedicated SCP bank + wake handshake; no AP-channel shadow writes, DMA,
  * global reset, foreign IRQ clearing, PLL retuning or off-domain AFE reads.
  * Explicit calibrate additionally acquires the AFE journal below; power-only
- * never touches AFE. Both return to the cold baseline, not a recording state.
+ * never touches AFE. Diagnostics restore immediately; a verified DMA
+ * provider may instead hold this same pipeline until its STOP/drain barrier.
  * Source clock nominal 130MHz is the DT clk-src-in-hz, not a measured rate.
  * GPIO9 must already be physically low. An inherited live codec/XO/session
  * is refused, not reset. A failed restore retains the journal for this boot.
@@ -40,7 +41,13 @@ struct power_journal {
     struct x9_mic_mt6681 codec;
     struct x9_mic_board_status *status;
     struct afe_journal *cal;
-    uint64_t resource_ticket;
+    struct x9_mic_hardware_status *hardware;
+    struct x9_mic_analog_status *analog;
+    struct x9_mic_digital_status *digital;
+    struct x9_mic_dma_status *dma;
+    uint64_t started, resource_ticket;
+    bool session, capture_held, finished;
+    int finish_errno;
 };
 static struct power_journal board;
 static uint32_t rr(vm_offset_t b,unsigned r)
@@ -351,76 +358,19 @@ static int restore(struct power_journal *j)
     }
     return 0;
 }
-static int board_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_status *s,
-    struct x9_mic_afe_status *a,struct x9_mic_analog_status *analog,
-    struct x9_mic_digital_status *digital,struct x9_mic_dma_status *dma)
+static int board_finish(struct power_journal *j,int e)
 {
-    if(s->flags&X9_MIC_BOARD_ATTEMPTED)return EALREADY;
-    uint64_t ticket=0;
-    int admission=x9_audio_resources_claim(X9AudioResourceMic,&ticket);
-    if(admission)return admission; /* no MMIO, journal reset or attempt consumed */
-    uint64_t start=mach_absolute_time();
-    /* Static journals may never outlive their persistent status surfaces. */
-    bzero(&digital_afe,sizeof(digital_afe));
-    if(digital)*digital=(struct x9_mic_digital_status){.version=1,
-        .stage=X9_MIC_DIGITAL_PREREQUISITES,.flags=X9_MIC_DIGITAL_ATTEMPTED,
-        .nominal_rate=X9_MIC_RATE};
-    bzero(s,sizeof(*s));s->version=1;s->flags=X9_MIC_BOARD_ATTEMPTED;s->stage=X9_MIC_BOARD_BASELINE;
-    bzero(h,sizeof(*h));h->version=1;h->stage=X9_MIC_HW_RESOURCES;
-    h->chosen_phase[0]=h->chosen_phase[1]=h->cycle[0]=h->cycle[1]=-1;
-    struct power_journal *j=&board;bzero(j,sizeof(*j));j->status=s;j->resource_ticket=ticket;
-    j->gpio=ml_io_map(0x1002d000,0x1000);j->vlp=ml_io_map(0x1c001000,0x1000);
-    j->gipc=ml_io_map(0x1df50000,0x1000);if(j->gipc)j->gipc+=0x40;
-    j->gate=ml_io_map(0x1da00000,0x1000);j->bus=ml_io_map(0x1d860000,0x1000);
-    j->pmif=ml_io_map(0x1c01a000,0x2000);
-    int e=0;
-    if(!j->gpio || !j->vlp || !j->gipc || !j->gate || !j->bus || !j->pmif)e=ENOMEM;
-    if(!e) {
-        save_pin(j,&j->enable,9);save_pin(j,&j->route[0],96);save_pin(j,&j->route[1],97);
-        s->gpio9_before=pin_state(j,9);
-        if(j->enable.mode || j->enable.dout || pin_bit(j,0x200,9))e=EBUSY;
-        for(unsigned i=0;i<2 && !e;i++) {
-            struct pin *p=&j->route[i];if(p->mode!=1 && (p->mode || p->dir))e=EBUSY;
-        }
-    }
-    if(!e){s->stage=X9_MIC_BOARD_WAKE;e=wake_take(j);}
-    if(!e){s->stage=X9_MIC_BOARD_BUS;e=bus_take(j);}
-    if(!e){s->stage=X9_MIC_BOARD_XO;e=xo_take(j);}
-    if(!e){s->stage=X9_MIC_BOARD_CODEC;e=codec_enable(j);}
-    if(!e) {
-        const struct x9_mic_mt6681_io io={.version=1,.flags=X9_MT6681_COLD_OWNED,
-            .cookie=j,.read8=codec_read,.write8=codec_write};
-        e=x9_mic_mt6681_power_on(&j->codec,&io);
-        *h=j->codec.status;
-        if(!e)s->flags|=X9_MIC_BOARD_POWER_OK;
-    }
-    if(!e && a) {
-        j->cal=&calibration;e=afe_take(j->cal,j->gpio,a);
-        if(!e) {
-            j->codec.io.flags=X9_MT6681_REQUIRED;
-            a->stage=X9_MIC_AFE_SCAN;
-            e=x9_mic_mt6681_calibrate_powered(&j->codec,(volatile uint32_t *)j->cal->afe);
-            if(!e)a->flags|=X9_MIC_AFE_CALIBRATED;
-        }
-        a->last_errno=e;*h=j->codec.status;
-        afe_ao_snapshot(j->cal);
-        if(!j->cal->stuck)afe_reg_snapshot(j->cal);
-    }
-    if(!e && analog) {
-        e=afe_access(j->cal);
-        if(!e)e=x9_mic_mt6681_analog_l(&j->codec);
-        *h=j->codec.status;
-    }
-    if(!e && digital) {
-        e=digital_afe_preflight(j->cal,digital,h);
-        if(!e && dma){e=digital_dma_snapshot(j->cal,dma,false);
-            if(e)digital->last_register=0x80000000u|dma->last_register;}
-        if(!e){e=x9_mic_mt6681_digital_l(&j->codec,digital);
-            if(e)digital->last_register=j->codec.status.last_register;}
-        if(!e)e=digital_afe_enable(j->cal);
-        *h=j->codec.status;
-    }
-    if(digital)digital->last_errno=e;
+    /* Persistent pointers/journals are retained on uncertainty. Never read
+     * powered-off AFE or replay a failed restore on a second StopIO. */
+    if(j->finished)return j->finish_errno;
+    j->finished=true;
+    struct x9_mic_hardware_status *h=j->hardware;
+    struct x9_mic_board_status *s=j->status;
+    struct x9_mic_afe_status *a=j->cal?j->cal->s:NULL;
+    struct x9_mic_analog_status *analog=j->analog;
+    struct x9_mic_digital_status *digital=j->digital;
+    struct x9_mic_dma_status *dma=j->dma;
+    uint64_t start=j->started;
     s->last_errno=e;if(e && !h->last_errno)h->last_errno=e;
     uint32_t last_reg=s->last_register,codec_reg=h->last_register;
     uint32_t digital_reg=digital?digital->last_register:0;
@@ -434,10 +384,8 @@ static int board_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_stat
     if(!e)s->stage=X9_MIC_BOARD_RESTORE;
     if(digital && !e)digital->stage=X9_MIC_DIGITAL_RESTORE;
     int off=restore(j);
+    /* All physical snapshots stay inside the single AP transition lease. */
     if(j->cal)afe_ao_snapshot(j->cal);
-    /* Finish snapshots while still owning the transition lease. A failed
-     * physical restore pins the ticket for this boot, preventing an ADSP
-     * start/stop or speaker acquisition from dismantling retained parents. */
     if(j->gpio)s->gpio9_after=pin_state(j,9);
     if(j->vlp)s->sleep_after=rr(j->vlp,0x92c);
     if(j->gate)s->gate_after=rr(j->gate,0xe10);
@@ -447,7 +395,7 @@ static int board_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_stat
     }
     if(off)x9_audio_resources_fault(X9AudioResourceMic,j->resource_ticket,off);
     if(dma) {
-        dma->last_errno=e;
+        if(!dma->last_errno)dma->last_errno=e;
         absolutetime_to_nanoseconds(mach_absolute_time()-start,&dma->elapsed_ns);
         /* Never read VUL1 after restore releases the AFE mapping's clocks. */
         if(off){dma->restore_errno=off;dma->flags|=X9_MIC_DMA_RETAINED;}
@@ -486,8 +434,8 @@ static int board_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_stat
         s->flags|=X9_MIC_BOARD_RESTORED;h->flags&=~X9_MIC_HW_POWERED;
         if(!e){s->stage=X9_MIC_BOARD_OFF;h->stage=X9_MIC_HW_STOPPED;}
     }
-    printf("X9 MIC %s: stage=%u flags=%x errno=%u restore=%u id=%x ready=%x vaud18=%x gpio9=%x/%x bus=%x (no PCM/DMA)\n",
-        digital?"DIGITAL-L":analog?"ANALOG-L":a?"CALIBRATE":"POWER",s->stage,s->flags,s->last_errno,s->restore_errno,h->swcid,h->internal_ready,
+    printf("X9 MIC %s: stage=%u flags=%x errno=%u restore=%u id=%x ready=%x vaud18=%x gpio9=%x/%x bus=%x (board pipeline only)\n",
+        j->session?"CAPTURE-STOP":digital?"DIGITAL-L":analog?"ANALOG-L":a?"CALIBRATE":"POWER",s->stage,s->flags,s->last_errno,s->restore_errno,h->swcid,h->internal_ready,
         h->vaud18_monitor,s->gpio9_before,s->gpio9_after,s->bus_status);
     if(j->cal)printf("X9 MIC AFE: stage=%u flags=%x errno=%u restore=%u AP=%x/%x ACK=%x/%x VLP=%x/%x phases=%d/%d cycles=%d/%d scanned=%u\n",
         a->stage,a->flags,a->last_errno,a->restore_errno,a->ap_vote_before,a->ap_vote_after,
@@ -497,27 +445,135 @@ static int board_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_stat
         analog->stage,analog->flags,analog->last_errno,analog->restore_errno,
         analog->hwcid_h,analog->hwcid_l,analog->rc_monitor,
         analog->journal_restored,analog->journal_count);
-    if(digital)printf("X9 MIC DIGITAL: stage=%u flags=%x errno=%u restore=%u delay=%u/%u codecSRC=%x TX=%x/%x RX=%x/%x UL=%x MON=%x/%x journal=%u/%u,%u/%u (readback only, no PCM/DMA)\n",
+    if(digital)printf("X9 MIC DIGITAL: stage=%u flags=%x errno=%u restore=%u delay=%u/%u codecSRC=%x TX=%x/%x RX=%x/%x UL=%x MON=%x/%x journal=%u/%u,%u/%u (configuration readback, not acoustic proof)\n",
         digital->stage,digital->flags,digital->last_errno,digital->restore_errno,
         digital->delay_data,digital->delay_cycle,digital->codec_src,digital->codec_tx[0],digital->codec_tx[1],
         digital->afe_rx[0],digital->afe_rx[1],digital->afe_ul,digital->afe_monitor[0],digital->afe_monitor[1],
         digital->codec_journal_restored,digital->codec_journal_count,
         digital->afe_journal_restored,digital->afe_journal_count);
-    if(dma)printf("X9 MIC VUL1: stage=%u flags=%x errno=%u restore=%u eligible=%u blockers=%x memifs=%x CPU=%x CON=%x/%x MON=%x/%x CUR=%llx/%llx (no DMA allocation/start)\n",
+    if(dma)printf("X9 MIC VUL1: stage=%u flags=%x errno=%u restore=%u eligible=%u blockers=%x memifs=%x CPU=%x CON=%x/%x MON=%x/%x CUR=%llx/%llx (DMA flags are authoritative for start/drain)\n",
         dma->stage,dma->flags,dma->last_errno,dma->restore_errno,dma->eligible,dma->blockers,
         dma->active_memifs,dma->memif_con0,dma->con0_before,dma->con0_after,
         dma->monitor_before,dma->monitor_after,dma->cur_before,dma->cur_after);
+    /* Auto-unwind during failed prepare returns its original input error to
+     * START, but subsequent unprepare reports only cleanup failure. A held
+     * capture's stop failure must remain sticky across repeated StopIO. */
+    j->finish_errno=j->capture_held?(off?off:e):off;
     return off?off:e;
 }
+static int board_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_status *s,
+    struct x9_mic_afe_status *a,struct x9_mic_analog_status *analog,
+    struct x9_mic_digital_status *digital,struct x9_mic_dma_status *dma,
+    volatile uint32_t *mapped_afe,bool hold)
+{
+    if(s->flags&X9_MIC_BOARD_ATTEMPTED)return EALREADY;
+    uint64_t ticket=0;
+    int admission=x9_audio_resources_claim(X9AudioResourceMic,&ticket);
+    if(admission)return admission; /* no MMIO/reset/attempt consumed */
+    uint64_t start=mach_absolute_time();
+    /* Static journals may never outlive their persistent status surfaces. */
+    bzero(&digital_afe,sizeof(digital_afe));
+    if(digital)*digital=(struct x9_mic_digital_status){.version=1,
+        .stage=X9_MIC_DIGITAL_PREREQUISITES,.flags=X9_MIC_DIGITAL_ATTEMPTED,
+        .nominal_rate=X9_MIC_RATE};
+    bzero(s,sizeof(*s));s->version=1;s->flags=X9_MIC_BOARD_ATTEMPTED;s->stage=X9_MIC_BOARD_BASELINE;
+    bzero(h,sizeof(*h));h->version=1;h->stage=X9_MIC_HW_RESOURCES;
+    h->chosen_phase[0]=h->chosen_phase[1]=h->cycle[0]=h->cycle[1]=-1;
+    struct power_journal *j=&board;bzero(j,sizeof(*j));j->status=s;
+    j->hardware=h;j->analog=analog;j->digital=digital;j->dma=dma;
+    j->started=start;j->session=hold;j->resource_ticket=ticket;
+    j->gpio=ml_io_map(0x1002d000,0x1000);j->vlp=ml_io_map(0x1c001000,0x1000);
+    j->gipc=ml_io_map(0x1df50000,0x1000);if(j->gipc)j->gipc+=0x40;
+    j->gate=ml_io_map(0x1da00000,0x1000);j->bus=ml_io_map(0x1d860000,0x1000);
+    j->pmif=ml_io_map(0x1c01a000,0x2000);
+    int e=0;
+    if(!j->gpio || !j->vlp || !j->gipc || !j->gate || !j->bus || !j->pmif)e=ENOMEM;
+    if(!e) {
+        save_pin(j,&j->enable,9);save_pin(j,&j->route[0],96);save_pin(j,&j->route[1],97);
+        s->gpio9_before=pin_state(j,9);
+        if(j->enable.mode || j->enable.dout || pin_bit(j,0x200,9))e=EBUSY;
+        for(unsigned i=0;i<2 && !e;i++) {
+            struct pin *p=&j->route[i];if(p->mode!=1 && (p->mode || p->dir))e=EBUSY;
+        }
+    }
+    if(!e){s->stage=X9_MIC_BOARD_WAKE;e=wake_take(j);}
+    if(!e){s->stage=X9_MIC_BOARD_BUS;e=bus_take(j);}
+    if(!e){s->stage=X9_MIC_BOARD_XO;e=xo_take(j);}
+    if(!e){s->stage=X9_MIC_BOARD_CODEC;e=codec_enable(j);}
+    if(!e) {
+        const struct x9_mic_mt6681_io io={.version=1,.flags=X9_MT6681_COLD_OWNED,
+            .cookie=j,.read8=codec_read,.write8=codec_write};
+        e=x9_mic_mt6681_power_on(&j->codec,&io);
+        *h=j->codec.status;
+        if(!e)s->flags|=X9_MIC_BOARD_POWER_OK;
+    }
+    if(!e && a) {
+        j->cal=&calibration;e=afe_take(j->cal,j->gpio,a,mapped_afe);
+        if(!e) {
+            j->codec.io.flags=X9_MT6681_REQUIRED;
+            a->stage=X9_MIC_AFE_SCAN;
+            e=x9_mic_mt6681_calibrate_powered(&j->codec,(volatile uint32_t *)j->cal->afe);
+            if(!e)a->flags|=X9_MIC_AFE_CALIBRATED;
+        }
+        a->last_errno=e;*h=j->codec.status;
+        afe_ao_snapshot(j->cal);
+        if(!j->cal->stuck)afe_reg_snapshot(j->cal);
+    }
+    if(!e && analog) {
+        e=afe_access(j->cal);
+        if(!e)e=x9_mic_mt6681_analog_l(&j->codec);
+        *analog=j->codec.analog;*h=j->codec.status;
+    }
+    if(!e && digital) {
+        e=digital_afe_preflight(j->cal,digital,h);
+        if(!e && dma){e=digital_dma_snapshot(j->cal,dma,false);
+            if(e)digital->last_register=0x80000000u|dma->last_register;}
+        if(!e){e=x9_mic_mt6681_digital_l(&j->codec,digital);
+            if(e)digital->last_register=j->codec.status.last_register;}
+        if(!e)e=digital_afe_enable(j->cal);
+        if(!e){e=x9_mic_mt6681_verify_capture(&j->codec);
+            if(e)digital->last_register=j->codec.status.last_register;}
+        *h=j->codec.status;
+    }
+    if(digital)digital->last_errno=e;
+    s->last_errno=e;if(e && !h->last_errno)h->last_errno=e;
+    if(hold && !e){j->capture_held=true;return 0;} /* caller owns real RX/TX until DMA stop/drain */
+    return board_finish(j,e);
+}
+
 int x9_mic_plj110_power_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_status *s)
-{return board_probe(h,s,NULL,NULL,NULL,NULL);}
+{return board_probe(h,s,NULL,NULL,NULL,NULL,NULL,false);}
 int x9_mic_plj110_calibrate(struct x9_mic_hardware_status *h,struct x9_mic_board_status *s,
     struct x9_mic_afe_status *a)
-{return board_probe(h,s,a,NULL,NULL,NULL);}
+{return board_probe(h,s,a,NULL,NULL,NULL,NULL,false);}
 int x9_mic_plj110_analog_l(struct x9_mic_hardware_status *h,struct x9_mic_board_status *s,
     struct x9_mic_afe_status *a,struct x9_mic_analog_status *analog)
-{return board_probe(h,s,a,analog,NULL,NULL);}
+{return board_probe(h,s,a,analog,NULL,NULL,NULL,false);}
 int x9_mic_plj110_digital_l(struct x9_mic_hardware_status *h,struct x9_mic_board_status *s,
     struct x9_mic_afe_status *a,struct x9_mic_analog_status *analog,struct x9_mic_digital_status *digital,
     struct x9_mic_dma_status *dma)
-{return board_probe(h,s,a,analog,digital,dma);}
+{return board_probe(h,s,a,analog,digital,dma,NULL,false);}
+
+int x9_mic_plj110_capture_prepare(volatile uint32_t *afe,
+    struct x9_mic_hardware_status *h,struct x9_mic_board_status *s,
+    struct x9_mic_afe_status *a,struct x9_mic_analog_status *analog,
+    struct x9_mic_digital_status *digital,struct x9_mic_dma_status *dma)
+{
+    if(!afe || !h || !s || !a || !analog || !digital || !dma)return EINVAL;
+    /* Do not adopt/close a prior diagnostic's transaction on rejection. */
+    if(s->flags&X9_MIC_BOARD_ATTEMPTED)return EALREADY;
+    return board_probe(h,s,a,analog,digital,dma,afe,true);
+}
+int x9_mic_plj110_capture_unprepare(void)
+{
+    if(!board.session)return 0;
+    return board_finish(&board,board.status->last_errno);
+}
+
+void x9_mic_plj110_capture_retain(int error)
+{
+    /* DMA/route drain failed before board_finish: fault the same held lease
+     * without MMIO or teardown, so ADSP/speaker cannot dismantle parents. */
+    if(board.session && board.resource_ticket)
+        x9_audio_resources_fault(X9AudioResourceMic,board.resource_ticket,error);
+}
