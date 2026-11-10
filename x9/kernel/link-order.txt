@@ -1121,6 +1121,8 @@ x9:decmpfs_lzfse_fse.o
 x9:decmpfs_lzvn_decode_base.o
 x9:ufs_hs.o
 x9:x9_usb_log.o
+x9:x9_usb_device.o
+x9:SweetX9USB.o
 x9:SweetX9NetworkStack.cpo
 x9:sweet_x9_keys.o
 x9:sweet_x9_gpu_dependencies.o

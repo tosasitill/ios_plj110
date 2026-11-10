@@ -209,6 +209,10 @@ class Builder:
         self.run_or_exit([sys.executable, '-I', str(X9 / 'audio/build-microphone.py'),
                           '--developer-dir', self.cfg['developer_dir'],
                           '--out', str(self.out / 'audio')], ROOT, label='audio/build-microphone.py')
+        # MTU3 USB iOS SDK/diagnostic client; standalone artifact, no root edits.
+        self.run_or_exit([sys.executable, '-I', str(X9 / 'usb/build.py'),
+                          '--developer-dir', self.cfg['developer_dir'],
+                          '--out', str(self.out / 'usb')], ROOT, label='usb/build.py')
         todo = [e for e in self.recipe['objects'] if 'prebuilt' not in e]
         with concurrent.futures.ThreadPoolExecutor(self.jobs) as pool:
             results = list(pool.map(self.compile_one, todo))

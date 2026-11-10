@@ -8,6 +8,7 @@
 #include <machine/machine_routines.h>
 #include <libkern/libkern.h>
 #include "x9_usb_log_protocol.h"
+#include "x9_usb_device.h"
 extern vm_offset_t ml_io_map(vm_offset_t,vm_size_t);
 extern uint32_t sweet_log_copy(uint64_t *,char *,uint32_t);
 extern uint64_t sweet_log_position(void);
@@ -74,7 +75,9 @@ static void poll(void)
 static void usb_delay(unsigned us){delay_for_interval(us,NSEC_PER_USEC);}
 #define P(o) phy[(o)/4]
 #define PU(o,mask,bits) (P(o)=(P(o)&(mask))|(bits))
-static int init(void)
+/* Shared bring-up; exactly one worker owns this controller per boot. The
+ * full device worker keeps SOFT_CONN clear until its DMA/config is ready. */
+int x9_mtu3_init(int connect)
 {
  mac=(volatile uint32_t *)(uintptr_t)ml_io_map(0x16751000,0x3000);ippc=(volatile uint32_t *)(uintptr_t)ml_io_map(0x16753000,0x1000);phy=(volatile uint32_t *)(uintptr_t)ml_io_map(0x16760000,0x1000);if(!mac||!ippc||!phy)return -1;
  volatile uint32_t *ip=(volatile uint32_t *)((uintptr_t)ippc+0xe00);ip[8/4]&=~BIT(0);ip[0x50/4]=(ip[0x50/4]&~(BIT(0)|BIT(1)|BIT(2)|BIT(9)|BIT(7)))|BIT(11)|BIT(12);__asm__ volatile("dsb sy":::"memory");usb_delay(1000);
@@ -86,7 +89,12 @@ static int init(void)
  wr(EPISR,0xffffffff);wr(COMMON,0xffffffff);usb_delay(30000);
  PU(0x344,0xffffffff,0x20);usb_delay(250);PU(0x368,0xffffffff,0x40000);PU(0x368,0xfffffff7,0);PU(0x368,0xffffffff,8);usb_delay(30);PU(0x368,0xfffbffff,0);PU(0x368,0xfffffff7,0);PU(0x368,0xfbffffff,0);PU(0x36c,0xfffeffff,0);PU(0x320,0xfffffcff,0);PU(0x368,0xfffbffff,0);PU(0x368,0xff41c30b,0);PU(0x318,0xff7fffff,0);PU(0x318,0xffffffff,0x100000);PU(0x36c,0xffffffcf,0x24);PU(0x300,0xf8ffffff,0);PU(0x318,0x3dffffff,0);PU(0x318,0xffffffff,0x40000000);usb_delay(800);
  ip[0x98/4]|=1;usb_delay(1);ip[0x98/4]&=~1U;uint32_t info=rr(0xc10);if(!(info&31)||!((info>>8)&31))return -3;
- wr(0x141c,rr(0x141c)&~BIT(0));wr(0xc,0xffffffff);wr(0x8c,0xffffffff);wr(CONFIG,rr(CONFIG)&~(0x7fU<<24));wr(EP0,64);wr(EPISR,0x10001);wr(COMMON,0xffffffff);wr(0x88,0x10001);wr(0x2418,BIT(2)|BIT(5));wr(POWER,rr(POWER)|BIT(6)|BIT(5)|BIT(0));return 0;
+ wr(0x141c,rr(0x141c)&~BIT(0));wr(0xc,0xffffffff);wr(0x8c,0xffffffff);wr(CONFIG,rr(CONFIG)&~(0x7fU<<24));wr(EP0,64);wr(EPISR,0x10001);wr(COMMON,0xffffffff);wr(0x88,0x10001);wr(0x2418,BIT(2)|BIT(5));wr(POWER,(rr(POWER)&~BIT(6))|(connect?BIT(6):0)|BIT(5)|BIT(0));return 0;
 }
-static void thread_main(void *arg,wait_result_t why){(void)arg;(void)why;int e=init();if(e){printf("X9 USB LOG init failed %d\n",e);thread_terminate_self();return;}printf("X9 USB LOG polling active; batch4096 poll1ms\n");for(;;){poll();uint64_t deadline;clock_interval_to_deadline(1,NSEC_PER_MSEC,&deadline);(void)assert_wait_deadline(&channel,THREAD_UNINT,deadline);thread_block(THREAD_CONTINUE_NULL);}}
+uint32_t x9_mtu3_read(unsigned off){return rr(off);}
+void x9_mtu3_write(unsigned off,uint32_t v){wr(off,v);}
+uint32_t x9_mtu3_ip_read(unsigned off){return ippc[(0xe00+off)/4];}
+void x9_mtu3_fifo_read(uint8_t *p,unsigned n){fifo_read(p,n);}
+void x9_mtu3_fifo_write(const uint8_t *p,unsigned n){fifo_write(p,n);}
+static void thread_main(void *arg,wait_result_t why){(void)arg;(void)why;int e=x9_mtu3_init(1);if(e){printf("X9 USB LOG init failed %d\n",e);thread_terminate_self();return;}printf("X9 USB LOG polling active; batch4096 poll1ms\n");for(;;){poll();uint64_t deadline;clock_interval_to_deadline(1,NSEC_PER_MSEC,&deadline);(void)assert_wait_deadline(&channel,THREAD_UNINT,deadline);thread_block(THREAD_CONTINUE_NULL);}}
 void x9_usb_log_start(void){thread_t thread;if(kernel_thread_start(thread_main,NULL,&thread)==KERN_SUCCESS)thread_deallocate(thread);else printf("X9 USB LOG thread unavailable\n");}

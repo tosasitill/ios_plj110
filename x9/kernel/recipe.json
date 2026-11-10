@@ -6395,6 +6395,16 @@
    "template": "bsd-c-1"
   },
   {
+   "name": "x9_usb_device.o",
+   "source": "bsd/dev/x9_usb_device.c",
+   "template": "bsd-c-11"
+  },
+  {
+   "name": "SweetX9USB.o",
+   "source": "iokit/Kernel/arm/SweetX9USB.cpp",
+   "template": "iokit-cxx-3"
+  },
+  {
    "name": "x9_usb_log.o",
    "source": "bsd/dev/x9_usb_log.c",
    "template": "bsd-c-11"
