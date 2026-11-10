@@ -93,6 +93,7 @@ def build(seed=None, timebase=TIMEBASE, console_base=0, console_size=0, ram_wind
         ('x9-gps-handoff', bytes(64)),  # consys/HIF layout only, not MCU ownership/READY
         ('x9-mic-dma-handoff', bytes(64)),  # ABI retained, zero: audio loader removed
         ('x9-camera-calibration', bytes(32)),  # only this boot's CSI0/3 LK devinfo words
+        ('x9-camera-irq-layout', bytes(64)),  # live GIC4 topology only, never IRQ/DMA ownership
         ('x9-adsp-audio-irq', bytes(32)),  # ABI retained, zero: no audio IRQ topology grant
         ('x9-adsp-handoff', bytes(256)),  # ABI retained, zero: no DSP shared-memory grant
         ('x9-lk-wifi-dt', bytes(16384)),  # shim fdt_wifi_dump.c: read-only Wi-Fi DT facts as text

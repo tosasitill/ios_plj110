@@ -53,6 +53,12 @@
  * address, FBC/CQ/DMA/CMOS/VF enable or IRQ history read is performed. The
  * inactive CAMSV journal restores BEFORE OUTMUX; a pending field or DB
  * phase requires its actual target and keeps the lower dependencies held.
+ * On success CAMSV also prepares this boot's GIC4 topology and a dormant
+ * IRQ worker. That alone never claims/enables GIC or consumes IRQ history.
+ * The normal controller's exact mapping/AP-IRQ lease is required before
+ * arming a request. Sensor close retires GIC and queued/running worker pins
+ * BEFORE restoring CAMSV/OUTMUX/PHY/MM. An unfinished RAW slot retains all
+ * dependencies; this worker retirement is not full AXI/SMMU/map drain.
  * Its journal restores BEFORE dropping receiver/MM; a pending trigger has
  * no cancellation proof and blocks all dependent teardown.
  * Optional prepare_smi_clocks AFTER prepare_receiver and BEFORE MAC/PHY/
@@ -73,7 +79,7 @@
  * Sensor close first isolates reset/MCLK, then qualifies/retires that MM
  * lifetime, then restores sensor supplies. A receiver conflict retains both.
  * No standalone receiver-drop or caller-supplied drain assertion is exposed.
- * close is never DMA or completion-worker drain.
+ * close includes the bound CAMSV GIC/worker retirement, never full DMA drain.
  * A receiver must drain before requesting a power unwind. An independently
  * journaled core capture attempt blocks close, even after partial failure.
  * No new ioctl, boot mode, READY or supported_mask is added.

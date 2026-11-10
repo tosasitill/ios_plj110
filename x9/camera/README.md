@@ -20,6 +20,7 @@
 | 持久 sensor/receiver 生命周期 | kernel-private 冷会话可在 verified standby 后持有同一 MM 时钟与 CSI/secure 电源 journal；后续请求及撤销前检查完整已消费依赖与原始接收控制，先隔离 sensor reset/MCLK，再退休 MM，最后还原 sensor 供电。**无 native capture caller，不 stream-on；不是 DMA lease/drain** |
 | MAC/async 包配置 | verified standby/receiver 后，真实配置前 DPHY／后 CPHY 包格式、正常 RAW10 DT、unsplit async/CAM_MAIN AFIFO，并仅追加选定 async CG；逐控制 journal/guard/逆序恢复，保留其它端口及原 IRQ policy。**已局部编译，未运行；不启用 PHY mux/MAC lane，不是完整 PHY 或采集后端** |
 | OUTMUX 配置引擎 | 同一已持有会话可显式配置 inactive OUTMUX0 的固定 image tag0，真实 masked shadow 写入；CFG_DONE 需 fresh masked STATUSX 事件和完整实际 inner target，再单 bit W1C 退休。WCLR policy 独立 journal/恢复，不启 AP/CCU IRQ 或 DL/DMA。**已局部编译，未运行；无 GIC/PHY/rate/SMI/SID80 grant/native capture caller** |
+| CAMSV GIC/worker | 本次 LK FDT 的四 cell GIC 拓扑→SWEET Group1 分发→单次 SOF/hybrid/debug 采样→有界队列→既有逐页 cache/RAW10 finish；未启采集的配置路径只准备 dormant worker，close 先退休 GIC/worker。**已局部编译，未运行；begin 仍必须真实 normal domain/route/AP-IRQ lease，没有 native capture caller，不启 source/DMA 或置 READY** |
 | 采集后端 | **缺失**：完整 DVFS/rate/SMI ownership、PHY 校准/速率、SENINF 路由提交、MM-SMMUv3 映射、RAW DMA 完成/排空队列 |
 
 原始 X9 DT 与 Android 启动日志确定：主摄为 i2c4/7-bit `0x1a`，ID 寄存器 `0x16/0x17` 返回 `0x9186`；前摄 i2c2/`0x10`，返回 `0x0615`。
@@ -222,7 +223,7 @@ finish 优先拒绝错误；CQ setting-done 或普通 GP_DONE 单独返回 `EAGA
 
 返回码不能单独决定 slot 归属：`EAGAIN + ARMED` 才是继续等完成，`EBUSY + RETIRED` 才是 CPU 背压丢帧；lease/cache 回调也可能返回同样 errno，但此时是 `RETAINED`，不能重试或回收。终态保留最初失败 errno。
 
-slot、raw、映射和回调 context 必须由 provider pin 到同步调用返回。**native controller 必须禁止 FBC/RCNT 或任何自动重用在 finish 返回 RETIRED 前重新写此RAW slot**；软件CPU pin不能自行停硬件，也不是整个DMA/AXI drain证明。同步复制完成后才可重新发布DEVICE cache状态；用户 `uiomove` 只读取独立CPU staging，旧的 `frame_readers` 背压不是RAW source ownership。capture(off) 必须先停硬件并排空这些 worker；export后仍永久保留，不以CPU退休当作map/unmap授权。**本层实现快照资格检查、具体逐页cache/CPU pin与交付，不证明 IRQ 快照来自硬件、SOF metadata 绑定、合法映射或实际 drain。** 目前没有调用它的真实 provider；SID80/domain 委派、rate/SMI/PHY/route、IRQ owner/采集启动仍缺，不能拍摄。UniXNU的4KiB kit不替代此16KiB/v3路径，HakiOS `PLACE_READING`/ring初始化说明reader pin边界，未移植其QCOM地址或完成后CIVAC策略。
+slot、raw、映射和回调 context 必须由 provider pin 到同步调用返回。**native controller 必须禁止 FBC/RCNT 或任何自动重用在 finish 返回 RETIRED 前重新写此RAW slot**；软件CPU pin不能自行停硬件，也不是整个DMA/AXI drain证明。同步复制完成后才可重新发布DEVICE cache状态；用户 `uiomove` 只读取独立CPU staging，旧的 `frame_readers` 背压不是RAW source ownership。capture(off) 必须先停硬件并排空这些 worker；export后仍永久保留，不以CPU退休当作map/unmap授权。**finish 本层实现快照资格检查、具体逐页cache/CPU pin与交付，不独立证明 IRQ 来源、控制生效、合法映射或实际 drain。** 下述 GIC worker 已有实际采样/调用代码，但尚无真实 native capture provider 调用 begin，也没有运行 IRQ/RAW10 证据；SID80/domain 委派、rate/SMI/PHY/route/AP-IRQ owner与采集启动仍缺，不能拍摄。UniXNU的4KiB kit不替代此16KiB/v3路径，HakiOS `PLACE_READING`/ring初始化说明reader pin边界，未移植其QCOM地址或完成后CIVAC策略。
 
 ### CAMTG 时钟申请和诊断
 
@@ -517,6 +518,26 @@ OUTMUX 引擎只接受选定 bank 的 TOP CG 原为 off、当前 IRQ policy 为 
 关闭先在完整 MM/SMI/MAC/PHY/OUTMUX 时钟资格下退休 CAMSV pending。若在首个 DB command 前 shadow-only 失败，须先独立消费完整 actual partial target，不能以旧 inner/prior 假定早先写入已取消。随后逆序还原本次改变的十字段，再以独立 DB down/up 消费原配置，最后恢复原 DB policy，整个 ordinary snapshot 必须 actual 回原。借用字段不写、不恢复。失败/unknown control/authority/producer 变化保留尚未退休依赖，不 reset/cancel/retry。receiver expected 只发布 journal 接受的 actual bank 值，包括尚未结束但已实际观测的 posted BASIC target；不能先以旧 expected 拒绝自己这笔写，再假装恢复成功。原快照保持证据。kernel-private OUTMUX status 嵌套 `sv` 保存 before/target/actual/sequence/pending/DB policy，并绑定同一 sensor epoch，无新 ioctl/READY，close 日志只输出缓存。
 
 这是实际 inactive 接收配置，**不是可拍摄链路**。正常 SID80/HYP delegation、合法 IOVA、持续 MMQoS/rate、PHY/AFIFO 启停、唯一 GIC owner、CAMSV DMA/PASS1_DONE/cache/worker drain 与 native→iOS preview/photo 尚须完成；没有本轮硬件消费或 RAW10 运行证据。
+
+### 接入 CAMSV 的 GIC 与完成线程
+
+**尚无 native capture caller，不能拍摄；此路径不新增 ioctl、READY 或供测镜像。** `configure_outmux` 在实际 CAMSV 配置消费后调用 `cam_irq_prepare_locked`，只核对本次启动的拓扑、物理 MMIO alias 与当前 GIC 配置，准备 dormant worker；不读取 IRQ 历史、不修改 GIC prior、不启任何 IRQ/DMA source。
+
+shim 的 `camera_irq_handoff.c` 从本次 LK FDT 一次完整 capture 验证 root→soc→CAMSV 的父节点继承/覆盖、唯一 GIC phandle、`#interrupt-cells=4`、十个命名 bank 和三笔中断 specifier。`/soc` 可以合法继承根节点，不能要求它必须重复 interrupt-parent。第四 cell 必须0，SPI cell 必须加32得到 INTID；拒绝 alternate parent、interrupt-map/extended、错误 bank 或 specifier。只向 `/chosen/x9-camera-irq-layout` 的唯一64B placeholder 复制拓扑，不传设备身份/转储或 MM-SMMU owner 标志。无效 FDT 保持全零；缺失或旧 ADT 不偷偷回退到 captured 常量。
+
+| role | INTID | 该 handler 的单次 read-clear 采样 |
+|---|---:|---|
+| hybrid | 653 | inner ERR `+350`、outer DONE `+348`、outer SCQ `+201c` |
+| SOF | 659 | outer SOF `+360`、CHANNEL `+370`；同时锁存 inner FIRST/LAST、四 GROUP_TAG 与对应 FH_SPARE |
+| debug | 665 | outer COMMON `+368`、TOP `+378`、DMA FIFO_STAT `+104c`；**不重复读 CHANNEL，不写 debug selector/CCU** |
+
+正常 controller 才能调用 `cam_irq_begin_locked`（同一翻译单元、已持控制锁）或独立包装 `x9_camera_camsv_irq_begin`。该调用先经真实 `.check`/export backing 与逐页 CIVAC 绑定一个 tag0/group0 request，才对这三路已 disabled/pending0/active0 的 Group1NS、level IRQ 保存/配置 route 与 priority。`.check` **还必须证明 AP 而非 CCU/他方的 IRQ policy、prior source/request 历史已实际退休**；GIC masked、拓扑正确、PM_GET 或 all-zero 不提供此授权。每笔 prior mutation 前复核整个已消费 route/priority 集合及真实 owner，允许 unresolved posted prior/target，但 accepted target 不能回退。只写该三路 route/priority/enable/mask，不改 CTLR/IGROUP/ICFGR/redistributor/timer/IPI，也不设置 CAMSV IRQ enable、FH metadata、地址、FBC、CQ、CMOS/VF 或 sensor stream-on。
+
+SWEET `sleh.c` 保留 timer/IPI、ADSP filter、后备 `interrupt_handler` 和原来的唯一 EOI。camera filter 仅在已绑定的 actual IAR 下先 mask 对应 line，再从永久映射单次采样；不用 mutex、owner callback、缓存/PTE/RAW 访问。SOF 保持 masked 直到下一 request，hybrid 可以独立到达。DONE 只使用该 request **先前 SOF 锁存**的 group/last/inner sequence，缺 SOF 或迟到/歧义绑定直接保留，不能在 DONE 时晚读 group 猜 frame。四槽有界队列不能覆盖旧事件；溢出、错误/unknown/debug 或丢失 power/config 立即 mask 并保留。
+
+worker 在线程上下文调用已有 `x9_camera_camsv_finish`；CQ-only/input 事件不进入 frame copy。首个真实 DONE 若抢在 sensor stream-on ACK 后的 core flag 发布之前，最多等待500ms的实际发布事件，不伪置 STREAMING；stop 先失效 generation/唤醒该事件再 drain，所以不与控制锁形成循环等待。前后各有固定独立 slot/backing 历史，IRQ lane 仍单 request 串行。完成或明确背压/并发 stop 的 RETIRED 只 mask，不增 FBC/RCNT、不自动重写 RAW；前32笔事件及错误输出缓存日志，避免每帧持续打印。
+
+receiver close **先**停止 filter 接受新采样，再排空 queued/running worker pin（500ms界限）和实际 GIC RWP/PENDING/ACTIVE（1ms观察、两个 idle 样本），之后才恢复 CAMSV/OUTMUX/PHY/SMI/MM/sensor。每笔 route/priority 恢复仍复核 owner 和完整 prior/consumed set；不写 ICPENDR/ICACTIVER，不重发 EOI、不吞未退休 source 历史。未完成或 RETAINED RAW slot、未消失 GIC event、authority/config 变化均阻止撤电。成功只是 **GIC/worker retirement**，不是 RAW/AXI/TLBI/unmap 或全链 drain；永久 S1 export retention 不变。
 
 ### 接通采集回调
 

@@ -120,6 +120,7 @@ static int stop(void)
     const struct x9_camera_sensor *s=sensor();
     if(session.latched)return session.last_errno; /* no stale generation/retry */
     st.generation++; st.flags&=~X9_CAMERA_STREAMING; frame_bytes=0; consumed=st.frames;
+    thread_wakeup((event_t)&st.generation); /* queued first-frame IRQ worker */
     wakeup(&frame_bytes);
     if(session.power || session.capture || session.stream) {
         lck_mtx_unlock(&camera_lock);
@@ -191,6 +192,7 @@ static int start(uint32_t which, uint32_t mode)
         return e;
     }
     st.flags|=X9_CAMERA_STREAMING;st.width=s->width;st.height=s->height;st.last_errno=0;
+    thread_wakeup((event_t)&st.generation); /* actual stream-on ACK published */
     printf("X9 CAMERA: start sensor=%u generation=%llu (waiting for physical DMA)\n",which,st.generation);
     return 0;
 }
@@ -274,6 +276,7 @@ int x9_camera_deliver(const struct x9_camera_completed_frame *completed)
     lck_mtx_unlock(&camera_lock);return e;
 }
 #include "x9_camera_camsv.inc"
+#include "x9_camera_irq.inc"
 static int cam_open(__unused dev_t d,int f,__unused int t,struct proc *p)
 {
     if(f&FWRITE) {

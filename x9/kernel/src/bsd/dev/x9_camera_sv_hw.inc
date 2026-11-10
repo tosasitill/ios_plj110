@@ -360,8 +360,11 @@ static int cam_sv_open_locked(uint64_t epoch)
     e=cam_sv_environment();
     for(unsigned slot=0;slot<CAM_SV_FIELDS && !e;slot++)e=cam_sv_field_write(slot,cam_sv.target[slot]);
     if(!e)e=cam_sv.dirty?cam_sv_commit():cam_sv_target_observe();
-    if(!e)cam_sv.status.flags|=X9_CAM_SV_HW_CONFIGURED;
-    else cam_sv_fault(e);
+    if(!e) {
+        cam_sv.status.flags|=X9_CAM_SV_HW_CONFIGURED;
+        e=cam_irq_prepare_locked(epoch); /* dormant; no GIC/source enable */
+    }
+    if(e)cam_sv_fault(e);
     cam_sv_status();return e;
 }
 static int cam_sv_close_locked(uint64_t epoch)

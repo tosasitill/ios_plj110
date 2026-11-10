@@ -348,6 +348,9 @@ struct x9_camera_camsv_dma {
      * IOVA->raw range and cache policy. NOT PM_GET or a CPU-PA identity map.
      * check never reads RAW or mutates hardware, and proves immutable
      * backing while this worker owns the slot, including after PASS1_DONE.
+     * When used with the native GIC worker, also proves sole CAMSV0 AP IRQ
+     * (not CCU/other owner) policy and prior source/request-history retirement
+     * before GIC/source publication. Masked/zero registers are not this grant.
      * Callbacks cannot re-enter camera/CAMSV APIs. */
     int (*check)(void *, uint64_t lease, const struct x9_camera_camsv_request *);
 };
@@ -373,6 +376,18 @@ int x9_camera_camsv_arm(struct x9_camera_camsv_slot *,
  * state, not errno alone. ESTALE may be an obsolete IRQ/generation. A retained
  * slot requires the owner's fault/drain path, not retry or dependency release. */
 int x9_camera_camsv_finish(struct x9_camera_camsv_slot *, const struct x9_camera_camsv_irq *);
+/* Thread-context standalone controller calls; acquire camera_control_lock.
+ * In-TU platform callbacks already holding that lock use the locked helper.
+ * Requires the prepared live-topology/receiver epoch and a REAL DMA lease.
+ * begin arms one tag0/group0 request and GIC lines, but does not write source
+ * IRQ enables, addresses, FH metadata, FBC/CQ/CMOS/VF or start the sensor.
+ * Keep that controller/request/RAW immutable until state says RETIRED; no
+ * automatic DMA reuse. State is cache-only, not source/AXI/map drain.
+ * There is still no registered native capture caller. */
+int x9_camera_camsv_irq_begin(uint64_t, const struct x9_camera_camsv_request *,
+    const struct x9_camera_camsv_dma *);
+int x9_camera_camsv_irq_state(uint64_t, uint32_t *state, int *error);
+bool x9_camera_irq_filter(uint32_t);
 void sweet_x9_camera_init(void);
 #endif
 #endif
