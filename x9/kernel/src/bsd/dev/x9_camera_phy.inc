@@ -57,6 +57,8 @@ static const struct cam_phy_desc cam_phy_analog[]={
     {0x0f0,0xff3ffffb,0xff000003}, /* CDPHY_RX_ANA_SETTING_0 */
     {0x0f4,0x7fff73ff,0x00007300}, /* CDPHY_RX_ANA_SETTING_1 */
     {0x100,0x01f3f3f3,0x00c3c3c3}, /* CDPHY_RX_ASYM_AFIFO_CTRL_0 */
+    {0x110,0x00131313,0x00111111}, /* ULPS unsupported: enables/forced CG off */
+    {0x118,0x0ff1ffff,0x00010000}, /* escape sample delay inactive */
     {0x150,0x0000ffff,0x0000ffff}, /* ULPS IRQ_EN/CLR; never write */
     {0x160,1,1}, {0x168,0x11,0x11} /* PMSR and forced digital CG */
 };
@@ -173,7 +175,9 @@ static int cam_phy_write(unsigned bank,unsigned offset,uint32_t mask,uint32_t va
     if((raw&r->mask)!=r->expected)return ESTALE;
     next=(raw&~(mask|cam_phy_write_zero(bank,offset)))|(value&mask);
     if((next&r->mask)==r->expected)return 0;
-    if(offset==0x20 && (mask&CAM_PHY_CAL_MASK) && (value&CAM_PHY_CAL_MASK))
+    /* +20 is ANA8 only in A/B. DPHY_TOP+20 is ordinary data-lane HS
+     * timing: its settle/trail bits must never post analog calibration. */
+    if(bank<=CAM_PHY_B && offset==0x20 && (mask&CAM_PHY_CAL_MASK) && (value&CAM_PHY_CAL_MASK))
         cam_phy.calibration_pending|=1u<<bank;
     r->owned|=mask;cam_phy.pending_reg=n;cam_phy.pending_next=next&r->mask;
     cam_rw(cam_phy.bank[bank],offset,next);v=cam_phy_read(n);
@@ -184,6 +188,7 @@ static int cam_phy_write(unsigned bank,unsigned offset,uint32_t mask,uint32_t va
 static int cam_phy_pause(unsigned us)
 {int e=cam_phy_dependencies();if(e)return e;delay(us);return cam_phy_dependencies();}
 #include "x9_camera_phy_clock.inc"
+#include "x9_camera_phy_digital.inc"
 /* Vendor fixed timing inputs are ns, not register values. Use only fresh
  * CKGEN_CK2 counts. Require both samples to agree in register space as well
  * as <=2 counter ticks; no nominal312MHz or caller-supplied frequency.
@@ -238,18 +243,22 @@ static int cam_phy_timing_locked(uint64_t epoch)
     for(unsigned k=0;k<2&&!e;k++)e=cam_phy_write(CAM_PHY_D,0x10+k*4,0x50ff00ff,
         cphy?(settle[0]<<16):0x10000000u); /* DPHY CK settle0/prepare0/en1/option0 */
     if(!e && cphy)e=cam_phy_write(CAM_PHY_C,0x18,16,16); /* POST valid only */
+    if(!e)e=cam_phy_digital_settings();
     if(!e)e=cam_phy_dependencies();
     if(e)return cam_phy_fault(e);
     cam_phy.status.csi_clock_hz=hz[c0>=c1?0:1];
     cam_phy.status.data_settle=settle[0];cam_phy.status.clock_settle=cphy?settle[0]:0;
     cam_phy.status.hs_trail=trail[0];cam_phy.status.flags|=X9_CAM_PHY_TIMING_CONFIGURED;
-    cam_phy.status.stage=10;cam_phy_status();return 0;
+    cam_phy.status.flags|=X9_CAM_PHY_DIGITAL_CONFIGURED;
+    cam_phy.status.stage=11;cam_phy_status();return 0;
 }
 static int cam_phy_timing_restore(void)
 {
     int e=cam_phy_meter_restore();if(e)return e;
-    /* No lanes were enabled, so ordinary digital timing can be restored
-     * before analog power-off without a receive/deskew drain assertion. */
+    e=cam_phy_digital_stop();if(e)return e;
+    /* No PHY lanes or deskew DELAY_EN/PERIODIC/APPLY were enabled. After
+     * stopping the generic deskew configuration, restore digital controls
+     * before analog power-off; this is NOT a receive/IRQ-history drain. */
     for(unsigned i=cam_phy.count;i;i--) {
         struct cam_phy_reg *r=&cam_phy.reg[i-1];
         if(r->bank>=CAM_PHY_D && r->owned) {
@@ -433,13 +442,26 @@ static int cam_phy_open_locked(uint64_t epoch,struct x9_camera_phy_status *s)
     cam_phy_add(CAM_PHY_C,0,0xf00ff,0xf00ff); /* LP/HS/BIST lanes */
     cam_phy_add(CAM_PHY_C,0x168,0xf,0xf); /* valid-pipe */
     cam_phy_add(CAM_PHY_C,0xf0,0x8000f1ff,0xf0ff); /* IRQ EN only */
-    cam_phy_add(CAM_PHY_D,0x50,0xff3fffff,0xc0000100); /* deskew enable/reset/LP11 off */
+    cam_phy_add(CAM_PHY_D,0x50,UINT32_MAX,0xc0000100); /* includes APPLY_SEL[23:22] */
     cam_phy_add(CAM_PHY_D,0x100,0x70f,0x10f); /* BIST/lane + PHY2MAC gen off */
     cam_phy_add(CAM_PHY_D,0x41c,0xffffff01,1); /* idle SR BIST off */
     cam_phy_add(CAM_PHY_C,0x100,0xffffff0f,0xf0f); /* state-check and count-init off */
     for(unsigned k=0;k<2;k++)cam_phy_add(CAM_PHY_D,0x10+k*4,0x50ff00ff,0);
     for(unsigned k=0;k<4;k++)cam_phy_add(CAM_PHY_D,0x20+k*4,0x73ffffff,0x40000000);
     cam_phy_add(CAM_PHY_C,0x18,0x1fffff11,0); /* POST detect/config, no RO debug */
+    cam_phy_add(CAM_PHY_D,4,0x80777777,0); /* fixed DPHY lane-select; lanes remain off */
+    cam_phy_add(CAM_PHY_D,0x44,UINT32_MAX,0); /* deskew pattern/mask, not received data */
+    cam_phy_add(CAM_PHY_D,0x54,0xff7fffff,0); /* deskew timing */
+    cam_phy_add(CAM_PHY_D,0x58,0xf70000ff,0x20000000); /* DBG_CLR must never be replayed */
+    for(unsigned k=0;k<4;k++)cam_phy_add(CAM_PHY_D,0x60+4*k,0x00f33f03,0x00010003);
+    cam_phy_add(CAM_PHY_D,0x88,UINT32_MAX,UINT32_MAX); /* DESKEW IRQ_EN off, never CLR/status */
+    cam_phy_add(CAM_PHY_D,0xf0,UINT32_MAX,0); /* upstream SPARE0=31, not analog SETTING0 */
+    cam_phy_add(CAM_PHY_D,0x180,0xffffff7f,0x57); /* normal DPHY: CAL/ALP/preamble idle off */
+    cam_phy_add(CAM_PHY_D,0x400,1,1); /* LRTE PHYA_SYNC_INIT_ENABLE off */
+    cam_phy_add(CAM_PHY_D,0x418,0xffff13ff,0x00111300); /* LRTE idle clocks/method inactive */
+    cam_phy_add(CAM_PHY_C,0x130,UINT32_MAX,3); /* CAL/ALP off */
+    cam_phy_add(CAM_PHY_C,0x134,0x808fffff,0x80800000); /* TINIT/ALP HSRX off */
+    cam_phy_add(CAM_PHY_C,0x208,0xf3,3); /* LRTE POST encode/replace off */
     if(cam_phy.count>=CAM_PHY_MAX_REGS)return EOVERFLOW;
     e=cam_mm_guard(&cam_mm,true);if(e)return e;
     for(unsigned n=0;n<cam_phy.count;n++)cam_phy.reg[n].before=cam_phy_read(n);
@@ -476,6 +498,7 @@ static int cam_phy_retirement_guard(uint64_t epoch)
     if(!cam_phy.held)return 0;
     if(epoch!=cam_phy.epoch)return ESTALE;
     if(cam_phy.calibration_pending)return EBUSY;
+    if(cam_phy.status.deskew_reset_pending)return EBUSY;
     e=cam_phy_meter_retirement_guard();if(e)return e;
     return cam_phy_guard();
 }
@@ -514,11 +537,11 @@ static int cam_phy_close_locked(uint64_t epoch)
     else cam_phy_fault(e);
     cam_phy.status.restore_errno=e;cam_phy_status();
     printf("X9 CAMERA PHY CLOSE: sensor=%u epoch=%llu flags=%x errno=%u restore=%d dirty=%u "
-        "pending=%u cal=%x/%x clock=%u/%u/%x/%u (inactive PHY config; NOT IRQ/DMA drain)\n",
+        "pending=%u cal=%x/%x clock=%u/%u/%x/%u deskew-reset=%u/%u (inactive PHY config; NOT IRQ/DMA drain)\n",
         cam_phy.status.sensor,epoch,cam_phy.status.flags,cam_phy.status.last_errno,e,
         cam_phy.status.dirty_count,cam_phy.pending_reg,cam_phy.calibration_pending,cam_phy.calibration_done,
         cam_phy.status.clock_pending,cam_phy.status.clock_busy_seen,cam_phy.status.clock_dirty_mask,
-        cam_phy.status.clock_pending_field);
+        cam_phy.status.clock_pending_field,cam_phy.status.deskew_reset_pending,cam_phy.status.deskew_reset_released);
     return e;
 }
 int x9_camera_sensor_session_prepare_analog(uint64_t epoch,struct x9_camera_phy_status *s)

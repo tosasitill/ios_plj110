@@ -33,11 +33,17 @@
  * calibration blocks receiver/MM/supply retirement. Close restores analog
  * AFTER OUTMUX and BEFORE MAC/async, keeping selected async CG through both.
  * Optional configure_timing measures the current CSI clock twice with real
- * meter BUSY rise/fall and applies fixed HS timing/CPHY POST, lanes off.
- * It must precede CTLE/OUTMUX. A pending meter trigger blocks teardown;
- * close restores its controls and owned digital timing before analog off.
+ * meter BUSY rise/fall and applies fixed HS timing/CPHY POST, lane-map and
+ * normal protocol controls, PHY lanes off. Front's >1500Mbps generic
+ * deskew EN/LP11 are on, but DELAY_EN/PERIODIC/APPLY and IRQs remain off;
+ * both sensors' ULPS/ALP/LRTE support flags0 are qualified, not enabled.
+ * The dedicated inactive deskew reset proves only control assertion and
+ * release, NOT calibration results, IRQ-history retirement or drain.
+ * Timing must precede CTLE/OUTMUX. A pending meter/reset blocks teardown;
+ * close stops generic deskew and restores owned digital controls before
+ * analog off, with no late reset/cancel/retry to manufacture retirement.
  * Optional configure_ctle then applies front static EQ or main preview
- * EQ/CDR9 to both banks, before OUTMUX. Timing and future generic PHY setup
+ * EQ/CDR9 to both banks, before OUTMUX. Timing and generic PHY setup
  * must precede this final override. It has no APPLY pulse or lane start;
  * close restores the owned delay-force controls BEFORE analog power-off.
  * Optional configure_outmux then applies only the fixed inactive OUTMUX0
