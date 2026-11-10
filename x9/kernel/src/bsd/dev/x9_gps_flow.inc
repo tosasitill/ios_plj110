@@ -108,7 +108,7 @@ static int gps_flow_queue(unsigned c,const uint8_t *p,unsigned n,unsigned host_a
  if(s->count==GPS_FLOW_ENTRIES || n+reserve>GPS_FLOW_RING_BYTES-s->used)return ENOBUFS;
  struct gps_flow_entry *entry=&s->entries[(s->head+s->count)%GPS_FLOW_ENTRIES];
  entry->offset=s->write;entry->length=n;entry->host_ack=host_ack;
- entry->bootstrap_step=0;
+ entry->bootstrap_step=entry->session_command=0;
  entry->time=mach_absolute_time();
  /* Local ring may wrap a packet; gather it contiguously before HIF POST.
   * Its layout is not the firmware's ring and imposes no target ABI. */
@@ -177,7 +177,7 @@ static int gps_flow_flush(unsigned c,uint64_t now)
  unsigned limit=window>GPS_FLOW_BATCH ? GPS_FLOW_BATCH : window;
  if(limit<=GPS_FLOW_MARGIN)return 0;
  limit-=GPS_FLOW_MARGIN;
- unsigned bytes=0,packets=0,ack=0,bootstrap=0;
+ unsigned bytes=0,packets=0,ack=0,bootstrap=0,session=0;
  while(packets<s->count) {
   struct gps_flow_entry *entry=&s->entries[(s->head+packets)%GPS_FLOW_ENTRIES];
   if(entry->bootstrap_step) {
@@ -192,11 +192,20 @@ static int gps_flow_flush(unsigned c,uint64_t now)
        gps_rt.bootstrap.posted!=gps_rt.bootstrap.completed)return 0;
    bootstrap=entry->bootstrap_step;
   }
+  if(entry->session_command) {
+   /* OPEN/STOP get their own descriptor too. Never retire their TX from
+    * completion of a coalesced status ACK or unrelated application bytes. */
+   if(packets)break;
+   if(c || bootstrap)return EPROTO;
+   int e=gps_session_can_post(entry->session_command);
+   if(e==EAGAIN)return 0;if(e)return e;
+   session=entry->session_command;
+  }
   if(entry->length>limit-bytes)break; /* preserve same-slot FIFO */
   for(unsigned i=0;i<entry->length;i++)
    f->batch[bytes+i]=s->bytes[(entry->offset+i)%GPS_FLOW_RING_BYTES];
   bytes+=entry->length;ack+=entry->host_ack;packets++;
-  if(bootstrap)break;
+  if(bootstrap || session)break;
  }
  if(!bytes)return 0;
  if(ack>1 || (ack && (!f->ack_queued || f->ack_inflight)))return EPROTO;
@@ -207,6 +216,7 @@ static int gps_flow_flush(unsigned c,uint64_t now)
  /* Published interface bytes, not requested bytes or MCU application ACK.
   * HIF owns its own copy; local entries retire only after successful POST. */
  if(!c)f->published+=bytes;
+ if(session)gps_session_posted(session,now);
  if(bootstrap) {
   gps_rt.bootstrap.posted=bootstrap;gps_rt.bootstrap.inflight=bootstrap;
   gps_rt.bootstrap.id=gps_rt.hif.id[2];gps_runtime_bootstrap_journal(0);

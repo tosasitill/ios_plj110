@@ -117,6 +117,17 @@ struct x9_gps_status {
  int32_t mnl_bootstrap_errno;
  uint32_t mnl_bootstrap_native;
  int32_t mnl_native_candidate_errno;
+ /* Native cold-session safety fence, NOT application success. A native
+  * OPEN/STOP has a separate HIF descriptor. STOP reservation immediately
+  * inhibits both NMEA and PDS output; TX retirement or event128 never
+  * restores it, grants READY, or permits DMA/resource disposal. Without
+  * a proved reusable response identity this cold session is one-shot. */
+ uint32_t mnl_session_initialized,mnl_session_open_queued,mnl_session_open_posted;
+ uint32_t mnl_session_open_completed,mnl_session_stop_queued,mnl_session_stop_posted;
+ uint32_t mnl_session_stop_completed,mnl_session_stop_signal,mnl_session_inflight;
+ uint32_t mnl_session_id;
+ uint64_t mnl_session_hardware,mnl_session_stop_time;
+ int32_t mnl_session_errno;
 };
 struct x9_gps_nmea {
  uint64_t sequence, generation, host_time;

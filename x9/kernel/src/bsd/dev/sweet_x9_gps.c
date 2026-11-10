@@ -24,6 +24,7 @@ static unsigned position_head, position_count;
 static int active;
 static struct x9_gps_handoff gps_layout;
 static void gps_runtime_start(void);
+static int gps_native_output_inhibited(void);
 static void gps_copy_layout(void)
 {
  DTEntry chosen; void *p = NULL; unsigned int size = 0;
@@ -123,8 +124,14 @@ int x9_gps_set_state(int enable, int tracking, uint32_t interval_ms)
   return EINVAL;
  lck_mtx_lock(&gps_control); lck_mtx_lock(&gps_lock);
  int e = !active ? ENXIO : st.fault ? EIO : 0;
- if (!e && st.enabled == (uint32_t)enable && st.tracking == (uint32_t)tracking && (!tracking || st.interval_ms == interval_ms))
+ /* Do not return an idempotent iOS success while native STOP has already
+  * inhibited output. Reject a new activation BEFORE epoch/state mutation;
+  * this is unsupported admission, not a partially activated receiver. */
+ if(!e && enable && st.mnl_session_initialized && st.mnl_session_stop_queued)e=ENOTSUP;
+ if (!e && st.enabled == (uint32_t)enable && st.tracking == (uint32_t)tracking && (!tracking || st.interval_ms == interval_ms)) {
+  if(tracking && gps_native_output_inhibited())e=EAGAIN;
   goto done;
+ }
  if (!e && !st.ready) e = ENXIO;
  if (e) goto done;
  uint64_t generation = ++st.generation;
@@ -148,6 +155,15 @@ static int hex(uint8_t c)
 {
  return c >= '0' && c <= '9' ? c - '0' : c >= 'A' && c <= 'F' ? c - 'A' + 10 :
      c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1;
+}
+/* Called with gps_lock held. Transport completion only removes an extra
+ * inhibition; the real application's ready/tracking/age contract is still
+ * required. STOP inhibits immediately at successful local reservation. */
+static int gps_native_output_inhibited(void)
+{
+ return st.mnl_session_initialized &&
+     (!st.mnl_session_open_completed || st.mnl_session_stop_queued ||
+      st.mnl_session_errno);
 }
 int x9_gps_deliver_nmea(uint64_t generation, const void *sentence,
     unsigned length, uint64_t host_time)
@@ -176,7 +192,8 @@ int x9_gps_deliver_nmea(uint64_t generation, const void *sentence,
  int hi = hex(p[n-2]), lo = hex(p[n-1]);
  if (hi < 0 || lo < 0 || checksum != (uint8_t)(hi*16+lo)) return EBADMSG;
  lck_mtx_lock(&gps_lock);
- int e = !st.ready || !st.tracking ? ENXIO : generation != st.generation ? ESTALE : 0;
+ int e = !st.ready || !st.tracking || gps_native_output_inhibited() ? ENXIO :
+     generation != st.generation ? ESTALE : 0;
  if (!e && count && host_time < ring[(head+count-1)%X9_GPS_RING].host_time) e = EINVAL;
  if (!e) {
   if (count == X9_GPS_RING) { head = (head+1)%X9_GPS_RING; count--; st.dropped++; }
@@ -192,7 +209,7 @@ int x9_gps_next_nmea(uint64_t *cursor, struct x9_gps_nmea *out)
  if (!cursor || !out) return EINVAL;
  int e = ENOENT;
  lck_mtx_lock(&gps_lock);
- if (!st.ready || !st.tracking) e = ENXIO;
+ if (!st.ready || !st.tracking || gps_native_output_inhibited()) e = ENXIO;
  else for (unsigned i = 0; i < count; i++) {
   struct x9_gps_nmea *r = &ring[(head+i)%X9_GPS_RING];
   if (r->sequence <= *cursor) continue;
@@ -263,7 +280,8 @@ int x9_gps_deliver_position(uint64_t generation, const void *wire,
  if (error) return error;
  if (!host_time || host_time > mach_absolute_time()) return EINVAL;
  lck_mtx_lock(&gps_lock);
- error = !st.ready || !st.tracking ? ENXIO : generation != st.generation ? ESTALE :
+ error = !st.ready || !st.tracking || gps_native_output_inhibited() ? ENXIO :
+     generation != st.generation ? ESTALE :
      !st.position_supported ? ENOTSUP : 0;
  if (!error && position_count && host_time <
      positions[(position_head+position_count-1)%X9_GPS_POSITION_RING].host_time) error = EINVAL;
@@ -282,7 +300,7 @@ int x9_gps_next_position(uint64_t *cursor, struct x9_gps_position *out)
  if (!cursor || !out) return EINVAL;
  int error = ENOENT;
  lck_mtx_lock(&gps_lock);
- if (!st.ready || !st.tracking) error = ENXIO;
+ if (!st.ready || !st.tracking || gps_native_output_inhibited()) error = ENXIO;
  else for (unsigned i = 0; i < position_count; i++) {
   struct x9_gps_position *r = &positions[(position_head+i)%X9_GPS_POSITION_RING];
   if (r->sequence <= *cursor) continue;

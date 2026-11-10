@@ -239,6 +239,21 @@ int x9_gps_runtime_queue(uint64_t generation, unsigned channel,
  * four validated HIF TX descriptors complete; enqueue/POST/management ACK
  * alone cannot pass this barrier. No application ACK or readiness is
  * granted. Existing caller INITs do not opt into this new bootstrap.
+ * The native cold path also owns a one-shot OPEN/STOP transport fence:
+ * duplicate OPEN/STOP is EALREADY, STOP before OPEN TX retirement is
+ * EAGAIN, and no STOP without OPEN is sent. Each uses its own descriptor,
+ * with real ID/pending/tx_time retirement, never batched with host status.
+ * A successfully reserved STOP inhibits BOTH NMEA and PDS immediately,
+ * clears queued old outputs without advancing client sequences, and cannot
+ * be reopened/reconfigured/agent-driven in this hardware epoch (ENOTSUP).
+ * A STOP signal whose first received fragment is later than STOP POST
+ * merely satisfies a local six-second observation budget; it is NOT a
+ * wire transaction identity, matched application ACK or DMA quiesce.
+ * Preposted RX data is not claimed fresh by this observation. Missing
+ * signal times out to retained-resource quarantine. Neither OPEN TX done
+ * nor STOP signal sets ready/tracking, registers a backend or satisfies
+ * a synchronous iOS transition. Reusable native sessions require further
+ * response/producer proof; the old full-caller/supplier mode is unchanged.
  * The caller's payload is never modified, including on enqueue failure.
  * DRIVER3 may instead use NULL/0 on v2..v4: the worker produces the
  * 216B baseline from the original AP zero-fill and MCU explicit default

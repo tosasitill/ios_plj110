@@ -142,6 +142,12 @@ static bool x9g_send(uint32_t local, uint32_t port, const uint8_t *req, unsigned
         s.mnl_control_body,s.mnl_notification,s.mnl_notifications,
         s.mnl_stop_done,s.mnl_terminations,s.mnl_control_application,
         s.mnl_control_time,s.mnl_control_errno);
+   if(s.mnl_session_initialized)
+    printf("X9 GPS PDS: native cold fence OPEN queued/posted/TX-done %u/%u/%u STOP %u/%u/%u signal %u inflight/id %u/%u hw/time %llu/%llu errno %d (one-shot, not application ACK/READY or DMA retirement)\n",
+        s.mnl_session_open_queued,s.mnl_session_open_posted,s.mnl_session_open_completed,
+        s.mnl_session_stop_queued,s.mnl_session_stop_posted,s.mnl_session_stop_completed,
+        s.mnl_session_stop_signal,s.mnl_session_inflight,s.mnl_session_id,
+        s.mnl_session_hardware,s.mnl_session_stop_time,s.mnl_session_errno);
    if(s.pvt_received)
     printf("X9 GPS PDS: native PVT reports %llu no-fix %llu rejected %llu delivered %llu retired %llu mask %x errno %d (not a readiness lease)\n",
         s.pvt_received,s.pvt_no_fix,s.pvt_rejected,s.pvt_delivered,s.pvt_retired,

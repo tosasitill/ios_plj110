@@ -11,7 +11,7 @@
 #define GPS_FLOW_ACK_BYTES 39u /* 6B envelope + 32B status + tail */
 struct gps_flow_entry {
  uint64_t time;
- unsigned offset, length, host_ack, bootstrap_step;
+ unsigned offset, length, host_ack, bootstrap_step, session_command;
 };
 struct gps_flow_slot {
  struct gps_flow_entry entries[GPS_FLOW_ENTRIES];

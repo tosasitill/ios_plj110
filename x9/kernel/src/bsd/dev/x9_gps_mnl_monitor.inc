@@ -65,7 +65,17 @@ static int gps_mnl_control_receive(const uint8_t *p,unsigned length,
   gps_rt.mnl_control.time=first_time;
   switch(message.event) {
   case X9_GPS_MNL_NOTIFICATION:gps_rt.mnl_control.notifications++;break;
-  case X9_GPS_MNL_STOP_DONE:gps_rt.mnl_control.stop_done++;break;
+  case X9_GPS_MNL_STOP_DONE:
+   gps_rt.mnl_control.stop_done++;
+   /* Arrival after this sole worker's STOP POST is only an observation,
+    * never a reusable response identity/application ACK or DMA quiesce.
+    * A fragment begun earlier cannot satisfy even this limited budget. */
+   if(gps_rt.session.initialized && gps_rt.session.stop_posted &&
+       gps_rt.session.generation==gps_rt.generation &&
+       first_time>gps_rt.session.stop_time && !gps_rt.session.stop_signal) {
+    gps_rt.session.stop_signal=1;st.mnl_session_stop_signal=1;
+   }
+   break;
   case X9_GPS_MNL_TERMINATED:
    gps_rt.mnl_control.terminations++;error=ECONNABORTED;break;
   }

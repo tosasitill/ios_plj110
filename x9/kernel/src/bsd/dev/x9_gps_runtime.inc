@@ -200,6 +200,13 @@ static struct {
   uint32_t id;
   int error;
  } bootstrap;
+ struct {
+  uint64_t generation,stop_time;
+  unsigned initialized,open_queued,open_posted,open_completed;
+  unsigned stop_queued,stop_posted,stop_completed,stop_signal,inflight;
+  uint32_t id;
+  int error;
+ } session;
 } gps_rt;
 static void gps_runtime_pause(unsigned us)
 {
@@ -509,6 +516,7 @@ static int gps_runtime_owned(void *ctx, uint64_t generation, int reset)
  return 0;
 }
 static void gps_runtime_bootstrap_journal(int);
+#include "x9_gps_session.inc"
 #include "x9_gps_flow.inc"
 #include "x9_gps_nv.inc"
 #include "x9_gps_mcusys.inc"
@@ -594,7 +602,8 @@ static int gps_runtime_mnl(void *ctx,const uint8_t *p,unsigned n,uint64_t now)
  }
  else if(e)st.pvt_rejected++;
  st.pvt_errno=e; st.pvt_valid_mask=e ? 0 : gps_pvt_u32(wire);
- int publish=!e && st.ready && st.tracking && st.position_supported;
+ int publish=!e && st.ready && st.tracking && st.position_supported &&
+     !gps_native_output_inhibited();
  lck_mtx_unlock(&gps_lock);
  if(no_fix)return 0; /* legitimate no-fix does not poison the HIF */
  if(e)return e;
@@ -857,6 +866,7 @@ int x9_gps_runtime_mnl_command(uint64_t generation,uint8_t slot_seq,
  unsigned bytes=0,channel=0;
  unsigned bootstrap_step=0;
  unsigned native_start=0;
+ unsigned session_command=0;
  int error;
  /* Reject calls outside the owner callback before reading configuration
   * bytes. Do not let QRTR/set_state/IRQ feed the physical outbox directly. */
@@ -893,6 +903,9 @@ int x9_gps_runtime_mnl_command(uint64_t generation,uint8_t slot_seq,
   if(gps_rt.out_count[0] || gps_rt.out_count[1] ||
       (gps_rt.hif.pending&((1u<<2)|(1u<<4))))return EAGAIN;
   if(gps_rt.mcusys.state!=X9_GPS_MCUSYS_CONTROLLER)return EAGAIN;
+  /* There must not have been a pre-native STOP signal in this reset
+   * epoch. It cannot be reclassified as a future native STOP response. */
+  if(gps_rt.mnl_control.stop_done)return EPROTO;
   if(gps_rt.flow.remote_received>gps_rt.flow.published)return EPROTO;
   native_start=1;
  }
@@ -900,6 +913,9 @@ int x9_gps_runtime_mnl_command(uint64_t generation,uint8_t slot_seq,
   * Actual local ring admission below reserves the slot. */
  if((native_start || gps_rt.flow.native) &&
      slot_seq!=(command==X9_GPS_MNL_AGENT ? 0x20u : 0u))return EINVAL;
+ if(gps_rt.flow.native) {
+  error=gps_session_admit(command,&session_command);if(error)return error;
+ }
  if(command==X9_GPS_MNL_INIT_CONFIG && !payload) {
   if(length)return EINVAL;
   error=gps_runtime_mnl_init_defaults(generation,init);
@@ -944,6 +960,19 @@ int x9_gps_runtime_mnl_command(uint64_t generation,uint8_t slot_seq,
  gps_rt.in_native_start=0;gps_rt.in_mnl_queue=0;
  if(error)return error;
  if(native_start)gps_rt.flow.native=1; /* commit only after actual admission */
+ if(native_start) {
+  gps_rt.session.initialized=1;gps_rt.session.generation=generation;
+  gps_session_journal(0);
+ }
+ if(session_command) {
+  struct gps_flow_slot *slot=&gps_rt.flow.slots[0];
+  unsigned tail=(slot->head+slot->count-1)%GPS_FLOW_ENTRIES;
+  slot->entries[tail].session_command=session_command;
+  if(session_command==1)gps_rt.session.open_queued=1;
+  else gps_rt.session.stop_queued=1;
+  /* No failed producer/admission consumes a session or inhibits output. */
+  gps_session_journal(0);
+ }
  if(bootstrap_step) {
   /* The normal queue has snapshotted this packet. No failed producer,
    * serializer or ENOBUFS attempt advances history or consumes a step.
@@ -989,7 +1018,9 @@ static int gps_runtime_bootstrap_pump(void)
 }
 static int gps_runtime_drain(void)
 {
- int error=gps_runtime_bootstrap_complete();
+ int error=gps_session_complete();
+ if(error){gps_session_journal(error);return error;}
+ error=gps_runtime_bootstrap_complete();
  if(error){gps_runtime_bootstrap_journal(error);return error;}
  int ack=x9_gps_hif_management_result(&gps_rt.hif,1);
  if (ack && ack!=EAGAIN) return ack;
@@ -1125,6 +1156,7 @@ static void gps_runtime_worker(void *unused, wait_result_t result)
  lck_mtx_unlock(&gps_runtime_lock);
  int e=gps_runtime_bringup();
  if(gps_rt.bootstrap.active)gps_runtime_bootstrap_journal(e);
+ if(gps_rt.session.initialized)gps_session_journal(e);
  if(gps_nv.started)gps_nv_journal(e);
  if(gps_rt.flow.native)gps_flow_journal(e);
  /* Never auto-retry, clear descriptors, release power, or unmap uncertain
