@@ -241,7 +241,7 @@ static void x9q_nas(x9q_job &j){
   if(x9q_registered(best)){uint8_t roam=(uint8_t)(best==5?0:1);p.tlv(0x10,&roam,1);}
   if(j.mnc_digits){uint8_t plmn[5]={(uint8_t)j.mcc,(uint8_t)(j.mcc>>8),(uint8_t)j.mnc,(uint8_t)(j.mnc>>8),0};
    p.tlv(0x12,plmn,sizeof(plmn));plmn[4]=(uint8_t)(j.mnc_digits==3);p.tlv(0x27,plmn,sizeof(plmn));}
- }else{ /* Validity-free service status only: no invented LTE/NR cell/RSRP. */
+ }else{ /* NAS GetSysInfo response / SysInfo indication from real AT state. */
   if(j.reg[1]>=0){uint8_t lte[3]={(uint8_t)(x9q_registered(j.reg[1])?2:0),(uint8_t)(x9q_registered(j.reg[1])?2:0),0};p.tlv(0x14,lte,3);}
   /* 165.txt + 163 logd: CommCenter kept cellularRegistrationStatus=unknown /
    * kNotRegistered with status-only SysInfo, so it never started data. LTE System
@@ -267,7 +267,38 @@ static void x9q_nas(x9q_job &j){
    if(logged<4){logged++;printf("X9 QMI AT: NAS SysInfo LTE registered domain %u roam %u plmn %s (lac/cell/tac not reported)\n",
      domain,(unsigned)(j.reg[1]==5),j.mnc_digits?"from COPS":"unknown");}
   }
-  if(j.reg[2]>=0){uint8_t nr[3]={(uint8_t)(x9q_registered(j.reg[2])?2:0),(uint8_t)(x9q_registered(j.reg[2])?2:0),0};p.tlv(0x4a,nr,3);}
+  /* 20H392 has different NR TLV IDs for response vs indication. Its 0x4e
+   * parser expects 0x4c/0x4d, NOT the response's 0x4a/0x4b. LTE IDs are shared.
+   * This poll spans multiple AT queries; require COPS AcT=11 (NR connected to
+   * 5GC) as well as C5GREG before reporting SA. Do not turn LTE+NR/NSA or a
+   * RAT transition into an invented SA serving system. */
+  const bool nr_registered=x9q_registered(j.reg[2])&&j.act==11;
+  if(j.reg[2]>=0){uint8_t nr[3]={(uint8_t)(nr_registered?2:0),(uint8_t)(nr_registered?2:0),0};
+   p.tlv(j.background?0x4c:0x4a,nr,sizeof(nr));}
+  if(nr_registered){
+   /* NR5GSysInfo's base wire sequence is also 29 bytes (libqmi + Apple
+    * tlv::parseV<NR5GSysInfo>). The separate 24-bit NR TAC is not available.
+    * NR is PS-only: never copy CREG's CS domain into it. Missing CGATT stays
+    * invalid; COPS supplies PLMN, C5GREG supplies registration/roaming. */
+   uint8_t ni[29]={};unsigned w=0;
+   uint8_t domain=(uint8_t)(j.attached==1?2:0);
+   ni[w++]=(uint8_t)(j.attached>=0);ni[w++]=domain;
+   ni[w++]=(uint8_t)(j.attached>=0);ni[w++]=domain;
+   ni[w++]=1;ni[w++]=(uint8_t)(j.reg[2]==5);                   /* roaming */
+   ni[w++]=1;ni[w++]=0;                                      /* registered, not forbidden */
+   ni[w++]=0;w+=2;ni[w++]=0;w+=4;                            /* LAC/CID invalid */
+   ni[w++]=0;w+=2;                                          /* reject info invalid */
+   if(j.mnc_digits){ni[w++]=1;
+    ni[w++]=(uint8_t)('0'+j.mcc/100);ni[w++]=(uint8_t)('0'+j.mcc/10%10);ni[w++]=(uint8_t)('0'+j.mcc%10);
+    if(j.mnc_digits==3){ni[w++]=(uint8_t)('0'+j.mnc/100);ni[w++]=(uint8_t)('0'+j.mnc/10%10);ni[w++]=(uint8_t)('0'+j.mnc%10);}
+    else{ni[w++]=(uint8_t)('0'+j.mnc/10);ni[w++]=(uint8_t)('0'+j.mnc%10);ni[w++]=0xff;}
+   }else{ni[w++]=0;w+=6;}
+   ni[w++]=0;w+=2;                                          /* base TAC invalid */
+   uint8_t tag=j.background?0x4d:0x4b;p.tlv(tag,ni,w);
+   static unsigned logged;
+   if(logged<8){logged++;printf("X9 QMI AT: NAS SysInfo NR SA %s tlv 0x%02x domain %u valid %u roam %u plmn %s (lac/cell/tac not reported)\n",
+    j.background?"indication":"response",tag,domain,(unsigned)(j.attached>=0),(unsigned)(j.reg[2]==5),j.mnc_digits?"from COPS":"unknown");}
+  }
  }
  x9q_finish(j,p,j.id==0x4d?0x4e:0x24);
 }

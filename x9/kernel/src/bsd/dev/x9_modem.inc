@@ -887,7 +887,7 @@ static void x9md_stage2(void){
 static void x9md_thread(void *arg,wait_result_t wr) {
  (void)wr;
  int mode=(int)(uintptr_t)arg;
- printf("X9 MODEM: build=rev252ie-md fs128-qmi-at-dpmaif-mipc1-ipv4-wds-ram4g-opmode-ltesysinfo-reglog-lteonly-ecsq-csgclose mode=%d bb=%d\n",mode,sweet_x9_arg("x9_bb",0));
+ printf("X9 MODEM: build=rev252nr1-md fs128-qmi-at-dpmaif-mipc1-ipv4-wds-ram4g-opmode-ltesysinfo-reglog-lteonly-ecsq-csgclose-nrsysinfo mode=%d bb=%d\n",mode,sweet_x9_arg("x9_bb",0));
  printf("X9 MODEM: stage-1 bring-up mode=%d\n",mode);
  x9md_pmif_m=ml_io_map(0x1c01a000,0x1000);
  x9md_pmif_p=ml_io_map(0x1c018000,0x1000);
