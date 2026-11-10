@@ -125,6 +125,11 @@ static bool x9g_send(uint32_t local, uint32_t port, const uint8_t *req, unsigned
     printf("X9 GPS PDS: last connv2 registration refused v%u secure profile %u errno %d before acquire (not current provider state or receiver readiness)\n",
         s.connv2_rejected_version,s.connv2_rejected_profile,
         s.connv2_rejected_errno);
+   if(s.mcusys_initialized)
+    printf("X9 GPS PDS: MCUSYS RX frames %llu state %u events %x transitions %llu last type/id/event %u/%u/%u SCIF %llu tick %u errno %d (not NV/app ACK or receiver readiness)\n",
+        s.mcusys_frames,s.mcusys_state,s.mcusys_seen_events,s.mcusys_transitions,
+        s.mcusys_last_type,s.mcusys_last_id,s.mcusys_last_event,
+        s.mcusys_scif_events,s.mcusys_scif_tick,s.mcusys_errno);
    if(s.pvt_received)
     printf("X9 GPS PDS: native PVT reports %llu no-fix %llu rejected %llu delivered %llu retired %llu mask %x errno %d (not a readiness lease)\n",
         s.pvt_received,s.pvt_no_fix,s.pvt_rejected,s.pvt_delivered,s.pvt_retired,

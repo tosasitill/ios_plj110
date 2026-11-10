@@ -85,6 +85,13 @@ struct x9_gps_status {
   * physical stage/fault/epoch or imply that power callbacks were called. */
  uint32_t connv2_rejected_version, connv2_rejected_profile;
  int32_t connv2_rejected_errno;
+ /* Real NORMAL/a0 MCUSYS receive observations; initialized is only the
+  * AP parser. CTLR_CREATED/SCIF are not MNL START, PDS READY or an NV lease.
+  * Error latches before the existing HIF/worker quarantine path runs. */
+ uint32_t mcusys_initialized,mcusys_state,mcusys_seen_events;
+ uint32_t mcusys_last_type,mcusys_last_id,mcusys_last_event,mcusys_scif_tick;
+ uint64_t mcusys_frames,mcusys_transitions,mcusys_scif_events;
+ int32_t mcusys_errno;
 };
 struct x9_gps_nmea {
  uint64_t sequence, generation, host_time;

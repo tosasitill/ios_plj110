@@ -13,6 +13,9 @@
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 extern kern_return_t thread_terminate(thread_t);
 static LCK_MTX_DECLARE(gps_runtime_lock, &gps_group);
+/* Keep above startup macro's line distinct from sweet_x9_gps.c locks;
+ * STARTUP_ARG generates a translation-unit symbol from __LINE__. */
+#include "x9_gps_mcusys.h"
 _Static_assert(__builtin_offsetof(struct x9_gps_connv2_ops,pos_clock_schematic)==64,
     "connv2 version-1 descriptor prefix");
 _Static_assert(__builtin_offsetof(struct x9_gps_connv2_ops,pos_afe)==88,
@@ -170,6 +173,12 @@ static struct {
  unsigned in_callback, out_head[2], out_count[2];
  struct gps_runtime_packet outbox[2][2];
  struct gps_native_flow flow;
+ struct {
+  unsigned initialized;
+  uint32_t state,seen_events,last_type,last_id,last_event,scif_tick;
+  uint64_t frames,transitions,scif_events;
+  int error;
+ } mcusys;
 } gps_rt;
 static void gps_runtime_pause(unsigned us)
 {
@@ -479,6 +488,7 @@ static int gps_runtime_owned(void *ctx, uint64_t generation, int reset)
  return 0;
 }
 #include "x9_gps_flow.inc"
+#include "x9_gps_mcusys.inc"
 static int gps_runtime_control(void *ctx,unsigned ch,uint8_t type,
     const uint8_t *p,unsigned n,uint64_t now)
 {
@@ -486,9 +496,24 @@ static int gps_runtime_control(void *ctx,unsigned ch,uint8_t type,
      (type==0x35 || type==0x36)) {
   int e=gps_flow_control(type,p,n);gps_flow_journal(e);return e;
  }
+ int observed=0;
+ if(type==X9_GPS_MCUSYS_PACKET) {
+  observed=gps_mcusys_receive(ch,p,n);
+  /* Never forward malformed frames as a zero-filled native event. A real
+   * reset still reaches the provider's software handler before quarantine,
+   * but no queued response can be drained or posted afterwards. */
+  if(observed && observed!=ECONNRESET)return observed;
+  /* Revoke output before calling even a bounded provider: a concurrent
+   * PDS transition cannot publish during software reset notification.
+   * The worker's later hardware_fault sees the changed epoch and cannot
+   * revoke twice; all physical mappings/leases remain retained. */
+  if(observed==ECONNRESET)x9_gps_hardware_fault(gps_rt.generation,observed);
+ }
  (void)ctx; gps_rt.in_callback=1;
  int e=gps_rt.ops.control(gps_rt.ops.context,ch,type,p,n,now);
- gps_rt.in_callback=0; return e;
+ gps_rt.in_callback=0;
+ if(type==X9_GPS_MCUSYS_PACKET)gps_mcusys_journal(observed ? observed : e);
+ return observed ? observed : e;
 }
 static int gps_runtime_mnl(void *ctx,const uint8_t *p,unsigned n,uint64_t now)
 {
@@ -632,6 +657,7 @@ static int gps_runtime_bringup(void)
  /* Prepare host RAM BEFORE releasing reset. Never clear MCU-owned RAM. */
  MCU_TRY(x9_gps_hif_prepare(&gps_rt.hif,&ops,gps_rt.ap,gps_rt.mcu,
      gps_rt.ccif,gps_rt.generation));
+ MCU_TRY(gps_mcusys_init());
  if(gps_rt.ops.version>=5)MCU_TRY(gps_flow_init());
  gps_runtime_stage(X9_GPS_PHYSICAL_PLL,0); MCU_TRY(gps_mcu_pll());
  gps_runtime_stage(X9_GPS_PHYSICAL_IDLE,0); MCU_TRY(gps_mcu_boot());
