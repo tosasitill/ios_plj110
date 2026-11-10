@@ -190,6 +190,7 @@ static int cam_out_irq_wait(int (*step)(void))
     for(unsigned n=0;n<10000;n++) {
         if(mach_absolute_time()>=deadline)return cam_out_irq_error(ETIMEDOUT);
         e=step();
+        if(mach_absolute_time()>=deadline)return cam_out_irq_error(ETIMEDOUT);
         if(e!=EAGAIN)return cam_out_irq_error(e);
         delay(1);
     }

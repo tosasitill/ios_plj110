@@ -234,6 +234,7 @@ static int cam_out_cg_retirement_guard(void)
         e=cam_out_guard();if(e)return e;
         if(cam_rr(cam_out.top,0xc)&1) {
             delay(1);e=cam_out_guard();if(e)return e;
+            if(mach_absolute_time()>=deadline)return ETIMEDOUT;
             if(cam_rr(cam_out.top,0xc)&1) {
                 cam_out.cg_uncertain=false;
                 return cam_out_guard();
