@@ -11,6 +11,13 @@ static struct {
  uint32_t cfg_before,cfg_after,univ_rate,main_rate,voltage[3];
  uint32_t fenc_before,fenc_after,cksta_before,cksta_after,univ_fenc,main_fenc;
  unsigned attempted,active,clocks_changed,floor_held,stage;
+ int result;
+ unsigned completed,guard;
+ struct x9u_hs_state hs;
+ struct {
+  unsigned valid,stage,guard;
+  uint32_t is,hcs,hce,doorbell,ue[5],cfg,fenc,cksta,pll[4],voltage[3];
+ } fault;
 } xg;
 static uint32_t high_rd(vm_offset_t base,unsigned off)
 {return *(volatile uint32_t *)(base+off);}
@@ -18,6 +25,25 @@ static void high_wr(vm_offset_t base,unsigned off,uint32_t value)
 {*(volatile uint32_t *)(base+off)=value;__asm__ volatile("dsb sy":::"memory");}
 static void high_poison(void)
 {
+ /* Preserve the FIRST fault, not a later failed read or panic-time state.
+  * All callers hold x9ufs_lock. UEC registers are read-to-clear: read them
+  * only for a real UIC_ERROR and never from the formatting/query path. */
+ if(!xg.fault.valid) {
+  xg.fault.stage=xg.stage;xg.fault.guard=xg.guard;
+  if(xu.hci) {
+   xg.fault.is=read32(NULL,0x20);xg.fault.hcs=read32(NULL,0x30);
+   xg.fault.hce=read32(NULL,0x34);xg.fault.doorbell=read32(NULL,0x58);
+   if(xg.fault.is&4U)for(unsigned i=0;i<5;i++)xg.fault.ue[i]=read32(NULL,0x38+4*i);
+  }
+  if(xg.top) {
+   xg.fault.cfg=high_rd(xg.top,0xf0);xg.fault.fenc=high_rd(xg.top,0x274);
+   xg.fault.cksta=high_rd(xg.top,0x334);
+  }
+  if(xg.univ){xg.fault.pll[0]=high_rd(xg.univ,0x34);xg.fault.pll[2]=high_rd(xg.univ,0xc);}
+  if(xg.main){xg.fault.pll[1]=high_rd(xg.main,0x34);xg.fault.pll[3]=high_rd(xg.main,0xc);}
+  (void)sweet_x9_vcore_ufs_check(xg.fault.voltage);
+  xg.fault.valid=1;
+ }
  /* xl and every transient view use the same callback and DMA aperture. */
  xu.failed=true;xu.writable=false;xu.host.poisoned=1;xl.host.poisoned=1;
 }
@@ -51,9 +77,14 @@ static int high_platform_check(void *context)
  /* All native READ/WRITE/SYNC views pass here before ringing the doorbell
   * and before accepting completion. Losing the floor/clock/link stops them
   * all; never repair clock drift while a command might be in flight. */
- if(!sweet_x9_vcore_ufs_ok()||!high_clocks_ok()||
-    (read32(NULL,0x20)&X9_HIGH_ERRORS)||!(read32(NULL,0x34)&1)||
-    (read32(NULL,0x30)&0xb)!=0xb) {
+ unsigned reason=0;
+ if(!sweet_x9_vcore_ufs_ok())reason|=1;
+ if(!high_clocks_ok())reason|=2;
+ if(read32(NULL,0x20)&X9_HIGH_ERRORS)reason|=4;
+ if(!(read32(NULL,0x34)&1))reason|=8;
+ if((read32(NULL,0x30)&0xb)!=0xb)reason|=16;
+ if(reason) {
+  xg.guard=reason;
   xg.stage=90;high_poison();return -1;
  }
  return 0;
@@ -138,7 +169,7 @@ void sweet_x9_ufs_late_high(void)
  unsigned checked=0;int e=X9U_NOT_READY;uint8_t before[32],after[32];
  lck_mtx_lock(&x9ufs_lock);
  if(xg.attempted){lck_mtx_unlock(&x9ufs_lock);return;}
- xg.attempted=1;xg.stage=1;
+ xg.attempted=1;xg.stage=1;xg.result=X9U_NOT_READY;
  if(!xu.ready||xu.failed||xu.host.poisoned)goto done;
  /* Mutex drains all native root/log/mailbox/modem views. Reject external
   * outstanding transfers or stale UICs; no forced clear/reset to proceed. */
@@ -159,7 +190,11 @@ void sweet_x9_ufs_late_high(void)
   xg.stage=10+gear;
   if(high_platform_check(NULL)){e=X9U_NOT_READY;goto done;}
   e=x9u_hs_apply_high(&xu.host.io,&hs,gear);
-  if(e){high_poison();goto done;}
+  if(e){
+   high_poison();
+   if(hs.stage==46&&(hs.pmc_is&4U))memcpy(xg.fault.ue,hs.pmc_ue,sizeof(hs.pmc_ue));
+   goto done;
+  }
   e=high_sample(after);
   if(e||memcmp(before,after,32)){if(!e)e=X9U_CRC;high_poison();goto done;}
   if(checked<2)memcpy(qualified[checked++],hs.after,sizeof(hs.after));
@@ -167,6 +202,7 @@ void sweet_x9_ufs_late_high(void)
  if(high_platform_check(NULL)){e=X9U_NOT_READY;goto done;}
  xg.stage=20;e=0;
 done:;
+ xg.result=e;xg.hs=hs;xg.completed=1;
  if(xg.top) {
   xg.cfg_after=high_rd(xg.top,0xf0);xg.fenc_after=high_rd(xg.top,0x274);
   xg.cksta_after=high_rd(xg.top,0x334);
@@ -185,6 +221,8 @@ done:;
  printf("X9 UFS HIGH fences: TOP=%08x->%08x CKSTA=%08x->%08x UNIV=%08x MAIN=%08x CON1=%08x/%08x\n",
   xg.fenc_before,xg.fenc_after,xg.cksta_before,xg.cksta_after,
   xg.univ_fenc,xg.main_fenc,xg.univ_rate,xg.main_rate);
+ printf("X9 UFS HIGH PMC: isolated_line_resets=%u IS=%08x UEC=%08x/%08x/%08x/%08x/%08x\n",
+  hs.pmc_line_resets,hs.pmc_is,hs.pmc_ue[0],hs.pmc_ue[1],hs.pmc_ue[2],hs.pmc_ue[3],hs.pmc_ue[4]);
  for(unsigned i=0;i<checked;i++) {
   uint32_t *p=qualified[i];
   printf("X9 UFS HIGH sample: mode=0x%x TX_G%u RX_G%u TX_lanes=%u RX_lanes=%u series=%u SHA256_match=1 windows=4 bytes=262144 final_status=%d\n",
@@ -192,4 +230,25 @@ done:;
  }
  if(e)printf("X9 UFS HIGH: %s; no retry/reset/voltage rollback, DMA retained\n",
   failed?"uncertain state: all native I/O disabled":"precondition blocked: unchanged qualified link retained");
+}
+void sweet_x9_ufs_boot_failure(char *out,unsigned capacity)
+{
+ if(!out||!capacity)return;
+ /* Called after load_init_program_at_path returned, before panic begins.
+  * No SMC, DME command, DMA, MMIO, console, vote or filesystem operation.
+  * Wait only for the same bounded transfer/transition lock used by I/O. */
+ lck_mtx_lock(&x9ufs_lock);
+ uint32_t ue[5];memcpy(ue,xg.fault.ue,sizeof(ue));
+ snprintf(out,capacity,
+  "ufs=%u/%u/%u/%u high=%u/%u/%u:%d G%u PA=%u:%x:%u:%u guard=%x IS/HCS/HCE/DB=%08x/%08x/%x/%x UEC=%08x/%08x/%08x/%08x/%08x CLK=%08x/%08x/%08x PLL=%08x/%08x/%08x/%08x DV=%08x/%08x/%08x OCS/phase=%u/%u LR=%u",
+  xu.ready,xu.writable,xu.failed,xu.host.poisoned,xg.attempted,xg.completed,
+  xg.fault.valid?xg.fault.stage:xg.stage,xg.result,xg.hs.after[1],
+  xg.hs.stage,xg.hs.last_attribute,xg.hs.uic_result,xg.hs.upmcrs,
+  xg.fault.guard,xg.fault.is,xg.fault.hcs,xg.fault.hce,xg.fault.doorbell,
+  ue[0],ue[1],ue[2],ue[3],ue[4],
+  xg.fault.cfg,xg.fault.fenc,xg.fault.cksta,
+  xg.fault.pll[0],xg.fault.pll[1],xg.fault.pll[2],xg.fault.pll[3],
+  xg.fault.voltage[0],xg.fault.voltage[1],xg.fault.voltage[2],
+  xu.host.last_ocs,xu.host.failure_phase,xg.hs.pmc_line_resets);
+ lck_mtx_unlock(&x9ufs_lock);
 }

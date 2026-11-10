@@ -6835,6 +6835,18 @@ extern int sweet_x9_arg(const char *name, int def);
  */
 #if defined(ARM64_BOARD_CONFIG_SWEET)
 extern boolean_t sweet_x9_ufs_root_active(void);
+extern void sweet_x9_ufs_boot_failure(char *, unsigned);
+/* PID1 is the sole caller. Retain the real stage in the panic string:
+ * failed preparation is not necessarily a failed execve of launchd. */
+static const char *sweet_x9_init_stage = "arguments";
+static void __attribute__((noreturn))
+sweet_x9_init_panic(const char *path, int error)
+{
+ char state[640];
+ sweet_x9_ufs_boot_failure(state, sizeof(state));
+ panic("Process 1 start %s failed, errno %d stage=%s; %s",
+     path, error, sweet_x9_init_stage, state);
+}
 extern void commpage_update_dyld_flags(uint64_t);
 
 /* An opt-in initial environment for the original dyld on our HFS root.
@@ -8531,6 +8543,7 @@ load_init_program_at_path(proc_t p, user_addr_t scratch_addr, const char* path)
 	user_addr_t argv0 = USER_ADDR_NULL, argv1 = USER_ADDR_NULL;
 #if defined(ARM64_BOARD_CONFIG_SWEET)
 	user_addr_t scratch_end = scratch_addr + vm_map_page_size(current_map());
+	sweet_x9_init_stage = "arguments";
 #endif
 
 	/*
@@ -8606,16 +8619,20 @@ load_init_program_at_path(proc_t p, user_addr_t scratch_addr, const char* path)
 	 int camera_error=x9_camera_install(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	 if(camera_error)printf("X9 CAMERA: bridge unavailable errno=%d; continuing boot\n",camera_error);
 	}
+	sweet_x9_init_stage="objc-trampolines";
 	error=sweet_x9_prepare_objc_trampolines(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	if(error)return error;
 	{
 	 int wallpaper_error=sweet_x9_prepare_wallpaper_collections(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	 if(wallpaper_error)printf("X9 Wallpaper: fallback unavailable errno=%d; continuing boot\n",wallpaper_error);
 	}
+	sweet_x9_init_stage="keybags";
 	error=sweet_x9_prepare_keybags(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	if(error)return error;
+	sweet_x9_init_stage="migration";
 	error=sweet_x9_seed_migration(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	if(error)return error;
+	sweet_x9_init_stage="springboard";
 	error=sweet_x9_seed_springboard(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	if(error)return error;
 	{
@@ -8660,15 +8677,20 @@ load_init_program_at_path(proc_t p, user_addr_t scratch_addr, const char* path)
 	 int baseband_error=sweet_x9_prepare_baseband_firmware(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	 if(baseband_error)printf("X9 BBFW: firmware integration errno=%d; continuing boot without declaring ABM ready\n",baseband_error);
 	}
+	sweet_x9_init_stage="frontboard";
 	error=sweet_x9_seed_frontboard(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	if(error)return error;
+	sweet_x9_init_stage="purplebuddy";
 	error=sweet_x9_seed_purplebuddy(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	if(error)return error;
+	sweet_x9_init_stage="purplebuddy-notbackedup";
 	error=sweet_x9_seed_purplebuddy_notbackedup(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	if(error)return error;
+	sweet_x9_init_stage="managedconfiguration";
 	error=sweet_x9_seed_managedconfiguration_notbackedup(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	if(error)return error;
 	/* argv occupies three words; place env strings and its vector after it. */
+	sweet_x9_init_stage="cache-env";
 	error = sweet_x9_init_cache_env(p, scratch_addr + 3 * sizeof(user64_addr_t),
 	    scratch_end, &init_exec_args.envp);
 	if (error) {
@@ -8681,6 +8703,9 @@ load_init_program_at_path(proc_t p, user_addr_t scratch_addr, const char* path)
 	 */
 	set_security_token(p);
 
+#if defined(ARM64_BOARD_CONFIG_SWEET)
+	sweet_x9_init_stage="execve";
+#endif
 	return execve(p, &init_exec_args, retval);
 }
 
@@ -8752,7 +8777,11 @@ load_init_program(proc_t p)
 				return;
 			}
 
+#if defined(ARM64_BOARD_CONFIG_SWEET)
+			sweet_x9_init_panic("launchd.release", error);
+#else
 			panic("Process 1 exec of launchd.release failed, errno %d", error);
+#endif
 		} else {
 			strlcpy(launchd_path, "/usr/appleinternal/sbin/launchd.", sizeof(launchd_path));
 			strlcat(launchd_path, launchd_suffix, sizeof(launchd_path));
@@ -8779,7 +8808,11 @@ load_init_program(proc_t p)
 		}
 	}
 
+#if defined(ARM64_BOARD_CONFIG_SWEET)
+	sweet_x9_init_panic(((i == 0) ? "<null>" : init_programs[i - 1]), error);
+#else
 	panic("Process 1 exec of %s failed, errno %d", ((i == 0) ? "<null>" : init_programs[i - 1]), error);
+#endif
 }
 
 /*

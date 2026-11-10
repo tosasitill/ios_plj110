@@ -7,6 +7,10 @@ struct x9u_hs_state {
  uint32_t max_rx_gear,peer_max_rx_gear,tx_lanes,rx_lanes,refclk_before,refclk_after;
  uint32_t local_version,target_gear;
  unsigned changed,uncertain;
+ /* Only populated for a late PA_PWRMODE completion with UIC_ERROR.
+  * Keep raw read-to-clear UEC registers before acknowledging the event. */
+ uint32_t pmc_is,pmc_ue[5];
+ unsigned pmc_line_resets;
 };
 int x9u_hs_read(const struct x9u_io *,struct x9u_hs_state *,uint32_t out[6]);
 int x9u_hs_valid(const uint32_t state[6]);

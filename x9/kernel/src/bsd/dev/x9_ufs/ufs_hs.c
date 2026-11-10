@@ -39,6 +39,28 @@ static int get(const struct x9u_io *io,struct x9u_hs_state *s,unsigned op,unsign
 {*v=0;return cmd(io,s,op,attr,v);}
 static int set(const struct x9u_io *io,struct x9u_hs_state *s,unsigned attr,uint32_t v)
 {return cmd(io,s,2,attr,&v);}
+static int high_pmc_errors(const struct x9u_io *io,struct x9u_hs_state *s)
+{
+ uint32_t status=rd(io,0x20);s->pmc_is=status;
+ if(status&4U)for(unsigned i=0;i<5;i++)s->pmc_ue[i]=rd(io,0x38+4*i);
+ if(status&(LINK_ERRORS&~4U))return X9U_RESPONSE;
+ if(!(status&4U))return 0;
+ /* ufshcd_update_uic_error ignores PA_GENERIC_ERROR (LINERESET) while
+  * DME_SET changes power mode. Restrict this polling equivalent further:
+  * no pending error before this SET (checked by apply), UCCS/result=0,
+  * UPMS/PWR_LOCAL, exact isolated valid PA LINERESET, and no other layer
+  * error. A stale, lane, PA_INIT, NL/TL/DME or ordinary I/O error is fatal.
+  * UEC registers are read-to-clear; preserve them above, acknowledge only
+  * this classified UIC_ERROR, never broad-clear interrupt status. */
+ if(s->last_command!=2||s->last_attribute!=0x1571||s->uic_result||s->upmcrs!=1||
+    s->pmc_ue[0]!=0x80000010U||s->pmc_ue[1]||s->pmc_ue[2]||
+    s->pmc_ue[3]||s->pmc_ue[4]||!(rd(io,0x34)&1)||
+    (rd(io,0x30)&0x70bU)!=0x10bU||rd(io,0x58)||rd(io,0x78))return X9U_RESPONSE;
+ wr(io,0x20,4U);
+ if(rd(io,0x20)&LINK_ERRORS)return X9U_RESPONSE;
+ s->pmc_line_resets++;
+ return 0; /* Caller still requires six PA readbacks and four SHA windows. */
+}
 int x9u_hs_read(const struct x9u_io *io,struct x9u_hs_state *s,uint32_t out[6])
 {
  if(!s||!out)return X9U_ARGUMENT;
@@ -147,7 +169,8 @@ int x9u_hs_apply_high(const struct x9u_io *io,struct x9u_hs_state *s,unsigned ge
 {
  if(!s||s->local_version<5||gear<4||gear>s->target_gear||gear>5)return X9U_ARGUMENT;
  int e=ready(io);if(e)return e;
- uint32_t cur[6];s->stage=43;
+ uint32_t cur[6];s->stage=43;s->pmc_is=0;s->upmcrs=0;
+ for(unsigned i=0;i<5;i++)s->pmc_ue[i]=0;
  if((e=x9u_hs_read(io,s,cur)))return e;
  for(unsigned i=0;i<6;i++)if(cur[i]!=s->after[i])return X9U_RESPONSE;
  if(gear<cur[1]||gear<cur[2])return X9U_ARGUMENT;
@@ -161,14 +184,16 @@ int x9u_hs_apply_high(const struct x9u_io *io,struct x9u_hs_state *s,unsigned ge
     (e=set(io,s,0x1584,1))||(e=set(io,s,0x1568,gear))||
     (e=set(io,s,0x1560,2))||(e=set(io,s,0x1569,1))||
     (e=set(io,s,0x156a,2)))return e;
- if(rd(io,0x20)&UPMS)return X9U_BUSY;
+ /* Attribute SETs must not have raised an error that could be mistaken
+  * for the following PA_PWRMODE's expected isolated LINERESET. */
+ if(rd(io,0x20)&(UCCS|UPMS|LINK_ERRORS))return X9U_BUSY;
  s->stage=45;
  if((e=set(io,s,0x1571,0x11)))return e; /* Android FAST/FAST, not FASTAUTO */
  s->stage=46;
  if((e=wait(io,0x20,UPMS,UPMS,500000))){s->uncertain=1;return e;}
  s->upmcrs=(rd(io,0x30)>>8)&7;wr(io,0x20,UPMS);
  if(s->upmcrs!=1)return X9U_RESPONSE; /* require PWR_LOCAL */
- if(rd(io,0x20)&LINK_ERRORS)return X9U_RESPONSE;
+ if((e=high_pmc_errors(io,s)))return e;
  s->stage=47;
  if((e=x9u_hs_read(io,s,s->after)))return e;
  if(s->after[0]!=0x11||s->after[1]!=gear||s->after[2]!=gear||

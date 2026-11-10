@@ -215,10 +215,12 @@ static unsigned dvfsrc_ready,ufs_vcore_floor;
 /* MT6993 regulator selectors: 575/600/650/725/825/950 mV. UFS high clocks
  * require selector2 (650 mV). Own only SW_REQ[6:4]; preserve DRAM/EMI and any
  * stronger inherited AP vote. A one-time high current gear is not a floor. */
-static int vcore_ok_locked(void)
+static int vcore_ok_locked(uint32_t snapshot[3])
 {
- if(!dvfsrc_ready||!ufs_vcore_floor)return 0;
+ if(!dvfsrc){if(snapshot)memset(snapshot,0,3*sizeof(*snapshot));return 0;}
  uint32_t req=rd(dvfsrc,0x18),cur=rd(dvfsrc,0x6ac),basic=rd(dvfsrc,0);
+ if(snapshot){snapshot[0]=basic;snapshot[1]=req;snapshot[2]=cur;}
+ if(!dvfsrc_ready||!ufs_vcore_floor)return 0;
  return basic!=0xffffffffu&&(basic&1)&&((basic>>20)&0x7f)>0&&
   req!=0xffffffffu&&cur!=0xffffffffu&&
   ((req>>4)&7)>=ufs_vcore_floor&&((req>>4)&7)<=5&&
@@ -226,7 +228,11 @@ static int vcore_ok_locked(void)
 }
 int sweet_x9_vcore_ufs_ok(void)
 {
- lck_mtx_lock(&x9_dvfsrc_lock);int ok=vcore_ok_locked();
+ return sweet_x9_vcore_ufs_check(NULL);
+}
+int sweet_x9_vcore_ufs_check(uint32_t snapshot[3])
+{
+ lck_mtx_lock(&x9_dvfsrc_lock);int ok=vcore_ok_locked(snapshot);
  lck_mtx_unlock(&x9_dvfsrc_lock);return ok;
 }
 int sweet_x9_vcore_ufs_hold(uint32_t snapshot[3])
@@ -245,7 +251,7 @@ int sweet_x9_vcore_ufs_hold(uint32_t snapshot[3])
  /* mt6989_wait_for_vcore_level: bounded current VCORE >= requested. */
  for(unsigned i=0;i<=100;i++) {
   snapshot[2]=rd(dvfsrc,0x6ac);
-  if(vcore_ok_locked()){error=0;break;}
+  if(vcore_ok_locked(NULL)){error=0;break;}
   if(i<100)delay(10);
  }
 done:
