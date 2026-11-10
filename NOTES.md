@@ -152,7 +152,15 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
 
-## 7. 当前交接(HANDOFF 110,2026-11-10): 172 logd——iOS已认出5G SA(indicator=5G/NR),但SIM1被打回NotReady且bars=0;Android两卡均在;ik关双卡路由做对照
+## 7. 当前交接(HANDOFF 111,2026-11-10): 173(ik)停在shim——shim根盘表仍是16GiB;il修复
+
+- **173.txt**(Mac `~/173.txt`,151行,只有shim日志)。`UFS READ-ONLY GPT VERIFIED`后`UFS native header status=0xfffffffffffffff8`(X9U_GEOMETRY)→`loader: native UFS root not verified/quiescent`,内核未启动。**设备未受影响**(shim只读)。
+- **根因(本会话的遗漏)**:shim的根盘常量来自`ufs_root_manifest.header()`→`shim/ufs_root_config.h`,HANDOFF106只改了ADT(`add_native_adt`)没改`header()`,所以ij/ik的shim仍是`X9_ROOT_BYTES 17179869184`、709个extent,并要求HFS大小==16GiB。ij能启动是因为当时HFS还是16GiB(扩容在ij内核里才发生);扩容后所有这类镜像都会在shim失败。
+- **il修复**(提交f5c3f38):`header()`改用`device()`(root‖extension,32GiB,4839 extent);shim的`native_root_verify`与内核一致:可写根盘允许HFS≤设备,只读根盘须相等。`x9-rev252il-md` = ik + 此修复(仍无`x9_dual_sim`,有`x9_md_lte=0`、ccgate、NR信号),`shim/ufs_root_config.h`已核对为34359738368/4839;boot.img 13008896B;产物`~/ios_plj110/x9/out/x9-rev252il-md/`,日志`.local/x9/work/pdp-activation/build-il.stdout.log`。
+- **注意**:ij/ik/ii/ih/ig等在HANDOFF111之前构建的镜像现在都会停在shim,不要再用。
+- 下一步由用户手动:`fastboot boot x9/out/x9-rev252il-md/boot.img`→`~/174.txt`(目的同HANDOFF110的ik:SIM保持Ready时5G图标/信号格)。
+
+### 前次交接(HANDOFF 110,2026-11-10): 172 logd——iOS已认出5G SA(indicator=5G/NR),但SIM1被打回NotReady且bars=0;Android两卡均在;ik关双卡路由做对照
 
 - **Android(观察,adb)**:`gsm.sim.state=LOADED,LOADED`,`persist.radio.multisim.config=dsds`,`gsm.operator.numeric=46015,46000`——**卡槽2有实体卡**。172里MD对SIM2回`+CME ERROR: 10`,所以是我们的MD bring-up没让SIM2上线(热插拔/上电/多卡模式),不是用户态问题。未查。
 - **logd**:扩容后首次用新manifest拉取(`pull_ios_logs.py --paths private/var/db/diagnostics --recent-hours 2`,26文件51.8MiB,3分41秒,`.local/x9/logs/172-logd/`),说明root‖extension读取可用。`tracev3_strings.py`解出`strings.txt`(Persist 19b–19d + Special)。
