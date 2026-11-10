@@ -13,10 +13,14 @@
 enum x9_gps_mnl_command {
  X9_GPS_MNL_OPEN=0, X9_GPS_MNL_STOP=1,
  X9_GPS_MNL_INIT_CONFIG=2, X9_GPS_MNL_DRIVER_CONFIG=3,
- X9_GPS_MNL_AGENT=6
+ X9_GPS_MNL_AGENT=6,
+ X9_GPS_MNL_HOST_TIME=7,
+ X9_GPS_MNL_BOOT_TIME=15
 };
 #define X9_MNL_INIT_CONFIG_BYTES 136u
 #define X9_MNL_DRIVER_CONFIG_BYTES 216u
+#define X9_MNL_HOST_TIME_BYTES 8u
+#define X9_MNL_BOOT_TIME_BYTES 16u
 /* Three DIFFERENT representations of the same qualified clock schematic.
  * driver_flag is the Linux IOCTL11 value, NOT the MNL init+0x13 byte.
  * This describes configuration only, never a running clock/power lease. */
@@ -76,6 +80,9 @@ int x9_gps_mnl_control_decode(const void *body, unsigned body_bytes,
  * OPEN/STOP have no payload. INIT_CONFIG requires the original 136B object
  * with offload enabled at +0x68. DRIVER_CONFIG requires the original 216B
  * prefix and its observed +0xd0..d7 extension metadata (210/6/aa55/0102).
+ * HOST_TIME7 is8B LE signed64 Unix seconds; BOOT_TIME15 is16B LE
+ * signed64 boot nanoseconds followed by raw CNTVCT ticks. These are AP
+ * clock inputs, NOT measured GNSS time or PDS UTC/leap authority.
  * Other supported sender commands retain their bounded opaque payloads.
  * This does NOT validate the remaining board configuration, calibration,
  * file descriptors, pointers, NV authority, session or receiver readiness.

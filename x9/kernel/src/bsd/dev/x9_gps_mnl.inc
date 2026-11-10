@@ -111,6 +111,10 @@ x9_gps_mnl_command_validate(uint32_t command, const void *payload,
  switch(command) {
  case X9_GPS_MNL_OPEN:case X9_GPS_MNL_STOP:
   return length ? EBADMSG : 0;
+ case X9_GPS_MNL_HOST_TIME:
+  return length==X9_MNL_HOST_TIME_BYTES ? 0 : EBADMSG;
+ case X9_GPS_MNL_BOOT_TIME:
+  return length==X9_MNL_BOOT_TIME_BYTES ? 0 : EBADMSG;
  case X9_GPS_MNL_INIT_CONFIG:
   if(length!=X9_MNL_INIT_CONFIG_BYTES)return EBADMSG;
   /* libmnl53e4a4 only sends config2/3 when this LE32 flag equals1.

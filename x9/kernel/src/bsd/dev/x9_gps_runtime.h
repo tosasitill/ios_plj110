@@ -207,6 +207,15 @@ int x9_gps_runtime_queue(uint64_t generation, unsigned channel,
  * v1 has no such POS contract and retains its caller-owned configuration.
  * No empty-config builder, guessed drift, driver metadata or NV authority.
  * The caller's payload is never modified, including on enqueue failure.
+ * HOST_TIME7 and BOOT_TIME15 instead require NULL/0 input: this worker
+ * generates the real XNU calendar seconds / continuous boot nanoseconds
+ * and raw CNTVCT pair immediately before serialization. No caller-made
+ * timestamp, Android ioctl, fabricated zero pair or fixed tick frequency.
+ * The15 pair is sampled with local IRQs disabled and then restored;
+ * continuous time includes suspend. These are HOST assistance inputs,
+ * not receiver measurement time, GNSS UTC/leap authority or PDS validity.
+ * libmnl53e4d8/53e4dc sends7/15 after configs2/3; ordering/slot reservations
+ * remain the real protocol handler's job, not inferred from local enqueue.
  * Success is only a copied local outbox reservation,
  * not TX completion, OPEN/STOP_DONE, receiver READY or a PDS transition.
  * Inputs may be released after return; on error no outbox entry is added. */

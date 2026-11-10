@@ -15,6 +15,8 @@ extern kern_return_t thread_terminate(thread_t);
 static LCK_MTX_DECLARE(gps_runtime_lock, &gps_group);
 /* Keep above startup macro's line distinct from sweet_x9_gps.c locks;
  * STARTUP_ARG generates a translation-unit symbol from __LINE__. */
+#include <mach/mach_time.h>
+#include <machine/machine_routines.h>
 #include "x9_gps_mcusys.h"
 #include "x9_gps_nv.h"
 _Static_assert(__builtin_offsetof(struct x9_gps_connv2_ops,pos_clock_schematic)==64,
@@ -649,10 +651,52 @@ static int gps_runtime_mnl_init_clock(uint64_t generation,void *payload,unsigned
   for(unsigned i=0;i<4;i++)p[0x18+i]=(uint8_t)(clock.nominal_hz>>(8*i));
  return 0;
 }
+static void gps_runtime_time_le64(uint8_t *p,uint64_t value)
+{
+ for(unsigned i=0;i<8;i++)p[i]=(uint8_t)(value>>(8*i));
+}
+static int gps_runtime_mnl_host_time(uint64_t generation,uint32_t command,
+    uint8_t *payload,unsigned *length)
+{
+ uint64_t value,counter,ticks;
+ clock_sec_t sec;
+ clock_usec_t usec;
+ boolean_t irq;
+ int error;
+ if(current_thread()!=gps_rt.worker || !gps_rt.in_callback)return EPERM;
+ if(!generation || generation!=gps_rt.generation || gps_rt.hif.fault)return ESTALE;
+ if(!gps_rt.hif.prepared || !gps_rt.booted)return ENXIO;
+ if(gps_rt.ops.version<1 || gps_rt.ops.version>4)return ENOTSUP;
+ error=gps_runtime_owned(NULL,generation,0);if(error)return error;
+ if(command==X9_GPS_MNL_HOST_TIME) {
+  /* Original7084f8 time(NULL) -> command7/8B. Host wall-clock input
+   * does not authorize the independent GNSS UTC/leap output fields. */
+  clock_get_calendar_microtime(&sec,&usec);
+  value=(uint64_t)sec;
+  if(!value || value>INT64_MAX || usec>=1000000)return EAGAIN;
+  gps_runtime_time_le64(payload,value);*length=X9_MNL_HOST_TIME_BYTES;
+  return 0;
+ }
+ if(command!=X9_GPS_MNL_BOOT_TIME)return ENOTSUP;
+ /* OriginalKO2af88..2afb4: IRQ save, BOOTTIME, ISB/CNTVCT, IRQ restore.
+  * Capture the matching pair without sleeping or holding any GPS mutex.
+  * Convert XNU continuous ticks AFTER IRQ restore; it includes suspend.
+  * Do not substitute mach_absolute ticks or a guessed26M frequency. */
+ irq=ml_set_interrupts_enabled(FALSE);
+ ticks=mach_continuous_time();
+ __asm__ volatile("isb; mrs %0,cntvct_el0" : "=r"(counter) :: "memory");
+ ml_set_interrupts_enabled(irq);
+ absolutetime_to_nanoseconds(ticks,&value);
+ if(!value || value>INT64_MAX || !counter || counter>INT64_MAX)return EAGAIN;
+ gps_runtime_time_le64(payload,value);
+ gps_runtime_time_le64(payload+8,counter);*length=X9_MNL_BOOT_TIME_BYTES;
+ return 0;
+}
 int x9_gps_runtime_mnl_command(uint64_t generation,uint8_t slot_seq,
     uint32_t command,const void *payload,unsigned length)
 {
  uint8_t init[X9_MNL_INIT_CONFIG_BYTES];
+ uint8_t host_time[X9_MNL_BOOT_TIME_BYTES];
  uint8_t frame[X9_MNL_PACKET_MAX+7];
  unsigned bytes=0,channel=0;
  int error;
@@ -660,6 +704,14 @@ int x9_gps_runtime_mnl_command(uint64_t generation,uint8_t slot_seq,
   * bytes. Do not let QRTR/set_state/IRQ feed the physical outbox directly. */
  if(current_thread()!=gps_rt.worker || !gps_rt.in_callback)return EPERM;
  if(!generation || generation!=gps_rt.generation || gps_rt.hif.fault)return ESTALE;
+ if(command==X9_GPS_MNL_HOST_TIME || command==X9_GPS_MNL_BOOT_TIME) {
+  /* The actual producer executes here; no uninstalled timing supplier,
+   * caller placeholders or stale serialized timestamps enter this path. */
+  if(payload || length)return EINVAL;
+  error=gps_runtime_mnl_host_time(generation,command,host_time,&length);
+  if(error)return error;
+  payload=host_time;
+ }
  if(command==X9_GPS_MNL_INIT_CONFIG && gps_rt.ops.version>=2) {
   error=x9_gps_mnl_command_validate(command,payload,length);
   if(error)return error;
