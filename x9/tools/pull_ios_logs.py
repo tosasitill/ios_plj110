@@ -26,6 +26,12 @@ class Raw:
         m = json.loads(Path(manifest).read_text())
         self.path, self.size = m['device_file'], m['bytes']
         self.tool = str(Path(self.path).parent / 'pinfile')
+        # 2026-11-10: the HFS spans root||extension_policy file (32 GiB device).
+        self.parts = [(0, m['bytes'], m['device_file'])]
+        ext = m.get('extension_policy')
+        if ext:
+            self.parts.append((m['bytes'], ext['bytes'], ext['device_file']))
+            self.size += ext['bytes']
         self.serial = serial
         self.reads = 0
 
@@ -37,12 +43,23 @@ class Raw:
         if off < 0 or n < 0 or off + n > self.size:
             raise ValueError('read outside root image: %#x+%#x' % (off, n))
         out = bytearray()
+        for base, length, path in self.parts:
+            if n and base <= off < base + length:
+                k = min(n, base + length - off)
+                out += self._read_file(path, off - base, k)
+                off += k; n -= k
+        if n:
+            raise ValueError('read not covered by root/extension: %#x+%#x' % (off, n))
+        return bytes(out)
+
+    def _read_file(self, path, off, n):
+        out = bytearray()
         while n:
             # rawreadat wants 4 KiB alignment for O_DIRECT; widen and trim.
             a = off & ~4095
             take = min(CHUNK, ((off + n + 4095) & ~4095) - a)
             q = shlex.quote
-            data = self._adb(q(self.tool) + ' rawreadat ' + q(self.path) + ' ' + DEVICE +
+            data = self._adb(q(self.tool) + ' rawreadat ' + q(path) + ' ' + DEVICE +
                              ' %d %d 2>/dev/null' % (a, take))
             self.reads += 1
             if len(data) != take:
