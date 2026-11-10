@@ -44,6 +44,44 @@ static int named_reg(uintptr_t dt,const char *path,const char *name,uint32_t bas
  }
  return (size_t)idx*16==rb&&matches==1;
 }
+static int enabled(uintptr_t dt,const char *path)
+{
+ const uint8_t *p;size_t n;
+ return !fdt_property(dt,path,"status",&p,&n)||eq(p,n,"okay")||eq(p,n,"ok");
+}
+static int power_topology(uintptr_t dt)
+{
+ const char *spmi="/spmi@1c01a000",*chip="/spmi@1c01a000/mt6661-3@3";
+ const char *rail="/spmi@1c01a000/mt6661-3@3/regulators/mt6661-3-lnc0-8";
+ const char *pd="/clock-controller@1c040000",*hwv="/syscon@1c040000";
+ uint32_t rp,cp,hp,base,size;
+ /* Resolve the phandle edges, not the captured Android phandle numbers.
+  * No fallback to SID5/6, connv3 or another clock index is allowed. */
+ if(!enabled(dt,"/soc")||!enabled(dt,"/soc/consys@40000000")||
+    !enabled(dt,spmi)||!enabled(dt,chip)||
+    !enabled(dt,"/spmi@1c01a000/mt6661-3@3/regulators")||
+    !enabled(dt,rail)||!enabled(dt,pd)||!enabled(dt,hwv)||
+    !str(dt,spmi,"compatible","mediatek,mt6993-spmi")||
+    !value(dt,spmi,"#address-cells",2)||!value(dt,spmi,"#size-cells",0)||
+    !value(dt,spmi,"spmi-dev-mask",0x55a8)||
+    !named_reg(dt,spmi,"pmif-p",0x1c018000,0x111c)||
+    !str(dt,chip,"compatible","mediatek,mt6661")||!pair(dt,chip,"reg",3,0)||
+    !str(dt,rail,"regulator-compatible","LNC0_8")||
+    !str(dt,rail,"regulator-name","mt6661_3_lnc0_8")||
+    !value(dt,rail,"regulator-min-microvolt",500000)||
+    !value(dt,rail,"regulator-max-microvolt",2090000)||
+    !word(dt,rail,"phandle",&rp)||!rp||
+    !value(dt,"/soc/consys@40000000","vcn18-supply",rp)||
+    !str(dt,"/soc/consys@40000000","clock-names","clk_pd_conn_connsys")||
+    !str(dt,pd,"compatible","mediatek,mt6993-ap_pd_clk")||
+    !range(dt,pd,&base,&size)||base!=0x1c040000||size!=0x74900||
+    !value(dt,pd,"#clock-cells",1)||!word(dt,pd,"phandle",&cp)||!cp||
+    !pair(dt,"/soc/consys@40000000","clocks",cp,1)||
+    !str(dt,hwv,"compatible","mediatek,mt6993-ap_hwv")||
+    !range(dt,hwv,&base,&size)||base!=0x1c040000||size!=0x74900||
+    !word(dt,hwv,"phandle",&hp)||!hp||!value(dt,pd,"hw-voter-regmap",hp))return 0;
+ return 1;
+}
 static int qualify(uintptr_t dt,struct x9_gps_handoff *h)
 {
  const char *cfg="/connsys-emi-config",*consys="/soc/consys@40000000";
@@ -92,7 +130,9 @@ static int qualify(uintptr_t dt,struct x9_gps_handoff *h)
  /* v062 gps_dl_bus_read resolves the CCIF bus address within conn_gps_base. */
  if(!named_reg(dt,"/soc/gps@40c00000","conn_gps_base",0x40000000,0x100000))return 0;
  h->mcu_bus_base=0x70000000;h->ccif_base=0x4003d000;h->ccif_size=0x100;
- h->version=1;h->flags=X9_GPS_LAYOUT_VERIFIED;return 1;
+ h->version=1;h->flags=X9_GPS_LAYOUT_VERIFIED;
+ if(power_topology(dt))h->flags|=X9_GPS_POWER_LAYOUT_VERIFIED;
+ return 1;
 }
 struct walk {uint8_t *p;size_t size,at,found;unsigned nodes,matches;};
 static int node(struct walk *w,unsigned depth)
@@ -123,5 +163,7 @@ int fdt_gps_patch_adt(uintptr_t dt,void *adt,size_t size)
  if(!qualify(dt,&h)){plog_str("X9 GPS FDT: consys/HIF contract refused; no GNSS hardware access\n");return 0;}
  const uint8_t *src=(const uint8_t *)&h;for(unsigned i=0;i<X9_GPS_HANDOFF_BYTES;i++)dst[i]=src[i];
  plog_str("X9 GPS FDT: soc721a consys EMI / HIF +0x70 qualified; MCU not yet owned/ready\n");
+ if(h.flags&X9_GPS_POWER_LAYOUT_VERIFIED)
+  plog_str("X9 GPS FDT: SID3 LNC0_8 / PMIF-P / CONN clock topology qualified; not a power lease\n");
  return 1;
 }

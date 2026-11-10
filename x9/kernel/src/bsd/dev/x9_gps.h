@@ -18,6 +18,13 @@ struct x9_gps_status {
  /* Bring-up stage/error, independent of receiver-ready and output leases. */
  uint32_t physical_stage;
  int32_t physical_errno;
+ /* One opt-in AON/PMIC observation, never a power or PDS lease.
+  * Valid only at power_sample_time; does not qualify CONN register access. */
+ uint32_t power_layout_valid, power_sample_valid;
+ int32_t power_errno;
+ uint64_t power_sample_time;
+ uint32_t power_uv, power_control, power_da, power_hw_en, power_rc_mux;
+ uint32_t power_ap_vote, power_global_vote, power_busy, power_done, power_ack;
 };
 struct x9_gps_nmea {
  uint64_t sequence, generation, host_time;

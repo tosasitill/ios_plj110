@@ -105,6 +105,7 @@ static void gps_runtime_pause(unsigned us)
  (void)assert_wait_deadline((event_t)&gps_rt.hif,THREAD_UNINT,deadline);
  thread_block(THREAD_CONTINUE_NULL);
 }
+#include "x9_gps_power.inc"
 static void gps_runtime_stage(unsigned stage, int error)
 {
  lck_mtx_lock(&gps_lock);
@@ -403,6 +404,10 @@ static void gps_runtime_worker(void *unused, wait_result_t result)
 {
  (void)unused; (void)result;
  gps_rt.worker=current_thread();
+ /* Explicit diagnostic, default OFF. It observes only AON HWV and SID3
+  * via serialized PMIF-P reads, never takes power or touches CONN/EMI.
+  * A stable inherited vote cannot replace the actual connv2 supplier. */
+ if(sweet_x9_arg("x9_gps_power",0)==1)gps_power_observe();
  lck_mtx_lock(&gps_runtime_lock);
  while (!gps_rt.provider.version)
   lck_mtx_sleep(&gps_runtime_lock,LCK_SLEEP_DEFAULT,

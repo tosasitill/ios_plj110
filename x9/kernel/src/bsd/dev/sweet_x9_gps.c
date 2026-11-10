@@ -32,7 +32,8 @@ static void gps_copy_layout(void)
      SecureDTGetProperty(chosen,"x9-gps-handoff",&p,&size) != kSuccess ||
      !p || size != sizeof(h)) return;
  memcpy(&h,p,sizeof(h));
- if (h.version != 1 || h.flags != X9_GPS_LAYOUT_VERIFIED || h.reserved ||
+ if (h.version != 1 || !(h.flags & X9_GPS_LAYOUT_VERIFIED) ||
+     (h.flags & ~(X9_GPS_LAYOUT_VERIFIED|X9_GPS_POWER_LAYOUT_VERIFIED)) || h.reserved ||
      h.reserve_base < 0x80000000 || h.reserve_base > 0xf0000000 ||
      (h.reserve_base & 0xffff) || h.reserve_size != 0xa00000 ||
      h.reserve_size > 0xf0000000-h.reserve_base || h.layout_size != 0x630000 ||
@@ -41,6 +42,7 @@ static void gps_copy_layout(void)
      h.region_size != 0x4000 || h.data_offset != 0x70 || h.data_size != 0x1000 ||
      h.mcu_bus_base != 0x70000000 || h.ccif_base != 0x4003d000 || h.ccif_size != 0x100) return;
  gps_layout=h; st.layout_valid=1;
+ st.power_layout_valid=!!(h.flags & X9_GPS_POWER_LAYOUT_VERIFIED);
 }
 int x9_gps_copy_handoff(struct x9_gps_handoff *out)
 {

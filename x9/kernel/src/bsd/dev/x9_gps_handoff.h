@@ -5,6 +5,9 @@
 #include <stdint.h>
 #define X9_GPS_HANDOFF_BYTES 64u
 #define X9_GPS_LAYOUT_VERIFIED 1u
+/* Optional topology proof only: SID3 LNC0_8 / PMIF-P / CONN parent.
+ * Does not prove regulator, clock, secure EMI or DMA ownership. */
+#define X9_GPS_POWER_LAYOUT_VERIFIED 2u
 struct x9_gps_handoff {
  uint32_t version, flags, reserve_base, reserve_size;
  uint32_t layout_size, legacy_offset, legacy_size, ap2mcu_offset;

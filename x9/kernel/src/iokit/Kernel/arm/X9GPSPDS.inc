@@ -120,6 +120,12 @@ static bool x9g_send(uint32_t local, uint32_t port, const uint8_t *req, unsigned
     * activated receiver. Never use layout_valid to grant a PDS lease. */
    printf("X9 GPS PDS: hardware transition errno %d layout %u ready %u fault %u physical %u/%d\n",
        e, s.layout_valid, s.ready, s.fault, s.physical_stage, s.physical_errno);
+   /* A supply readback is a timestamped observation, not permission to
+    * activate receiver services or infer availability from Android. */
+   if(s.power_sample_time || s.power_errno)
+    printf("X9 GPS PDS: power observation topology %u valid %u errno %d uv %u ap %x global %x busy %x (not a lease)\n",
+        s.power_layout_valid,s.power_sample_valid,s.power_errno,s.power_uv,
+        s.power_ap_vote,s.power_global_vote,s.power_busy);
   }
   else {
    x9_gps_status s; x9_gps_copy_status(&s);
