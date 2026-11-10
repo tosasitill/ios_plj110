@@ -380,7 +380,7 @@ captured DT 区分 normal camera **SID80**、protected camera **SID89**、displa
 ### 持有冷传感器与接收时钟
 
 `kernel/src/bsd/dev/x9_camera_sensor_session.h` 的 kernel-private 调用顺序为：
-`open → configure → prepare_receiver → read8 → close`。`prepare_receiver` 可省略，原 probe/standby 不因此增加 MM 操作。准备 receiver 后可显式 `configure_mac → prepare_analog → configure_ctle → configure_outmux`（均为 `x9_camera_sensor_session_*`）；analog 需要先成功配置 MAC，CTLE 需要已校准 analog，各阶段均可省略，原诊断不会自动写这些配置。MAC/analog/CTLE 必须先于 OUTMUX；已持有 OUTMUX 时再配置返回 `EBUSY`，不能改变已 posted 命令的输入环境。后续接入的 digital/generic PHY 配置须在最终 CTLE override 之前完成。
+`open → configure → prepare_receiver → read8 → close`。`prepare_receiver` 可省略，原 probe/standby 不因此增加 MM 操作。准备 receiver 后可显式 `configure_mac → prepare_analog → configure_timing → configure_ctle → configure_outmux`（均为 `x9_camera_sensor_session_*`）；analog 需要先成功配置 MAC，timing/CTLE 需要已校准 analog，各阶段均可省略，原诊断不会自动写这些配置。MAC/analog/timing/CTLE 必须先于 OUTMUX；已持有 OUTMUX 时再配置返回 `EBUSY`，不能改变已 posted 命令的输入环境。timing 不能在 CTLE 已尝试后追加；后续接入的 generic PHY 配置也须在最终 CTLE override 之前完成。
 
 - standalone 入口取得 `camera_control_lock`；同 TU 的 native 回调已经持锁，必须使用内部 `_locked` helper，不重入公开入口。
 - `open` 返回的非零 epoch（包括错误返回）代表已准入 journal，必须安排一次 close；旧 epoch、重复 prepare/close 不做 MMIO。成功 prepare 不撤销 MM votes，不设置 READY，不返回 IOVA。
@@ -398,7 +398,13 @@ analog 服务（`x9_camera_phy.h/.inc`）使用前摄 A/B `13880000/13881000`、
 
 校准数据不是 `10160000` 的直接 MMIO。上游 `mtk-devinfo.c` 从 `/chosen`（或唯一 `/chosen@0`）的 **little-endian** `atag,devinfo` 取 `data[reg/4]`。shim 本次启动资格化 CSI0/3 的 nvmem consumer/phandle/cell（offset `1d0/1dc`），只转交两个 word 至 32B `x9-camera-calibration`；全表/设备标识不转交、不打印或写入 git。缺失/长度错误/重复/未知 cell mapping 不给数据；明确存在的 all-zero word 才使用 vendor 默认 termination16，不能把缺失当 zero。
 
-标称 front2160Mbps、main3300.004166Msps 仅用于 preview band 配置，不是测频/SMI 票或吞吐保证。CPHY 的上游 `setting0=0x322` 会覆盖早先 source setter 的 REF_CK_SEL 为0；本实现保留该已确认调用顺序，不能擅自改成32a并声称 oscillator 已持有。DPHY A 使用 upstream oscillator1/gating2。digital settle/trail/deskew/ULPS/lane 启用**还未实现**；主摄的 settle57、前摄的 trail64 是 timing 输入而非原样寄存器数，须按真实 CSI clock 和 vendor 公式转换，不能直接写57/64或把标称312MHz当作测频。
+标称 front2160Mbps、main3300.004166Msps 仅用于 preview band 配置，不是测频/SMI 票或吞吐保证。CPHY 的上游 `setting0=0x322` 会覆盖早先 source setter 的 REF_CK_SEL 为0；本实现保留该已确认调用顺序，不能擅自改成32a并声称 oscillator 已持有。DPHY A 使用 upstream oscillator1/gating2。digital lane/map/deskew/ULPS 启用**还未实现**；settle/trail/prepare/CPHY POST 已由下面的单次 timing 服务写入，仍无 native capture caller 或本机运行证据。
+
+`configure_timing(epoch, &phy_status)` 使用真实 **CKSYS_MM `10040000` / CKMTR_MM `10041000`（DT范围0x20/32B）**：前/后 CSI0/3 的 CKGEN_CK2 ID **18/21**、FENC bit **14/11**，不搬 VLP audio meter ID/address、不触 PLL test clock。要求当前 parent/PDN/CKSTA/FENC 与 MM journal 一致、meter HW-mode/trigger/BUSY off且 DBG ID 空闲，两次采样稳定后才开始；不接管继承 HW 模式或清前任 trigger。软件mode0、load1023、divider1（/2）、source1/ref0；参考26MHz是 vendor hardware contract，**不是独立测得晶振 ppm**。每次发出 trigger 前记录 pending，要求真实 BUSY rise→fall、deadline500us/400次上限、非零非饱和重复稳定 count，再恢复本次控制。BUSY 窗口中只检查 AO meter、CSI parent/CKSTA/FENC；发出前和完成后检查全部 MM/PHY/sensor 依赖，避免慢 secure/HWV guard 在约39us窗口前吞掉起沿。
+
+两次 count 差≤2 tick且独立换算后的寄存器数完全一致才写 timing。`csi_clock_hz=count*26000000*2/1024`：主CPHY data/clock settle=`ceil(57ns*clk)`、prepare/trail enable0，POST valid1；前DPHY data settle=`ceil(100ns*clk)-6`、clock settle0，prepare0/en1，trail=`ceil((floor(224000/2160)-64)ns*clk)`，仅非零才TRAIL_EN。校验8-bit settle和10-bit trail范围，无nominal312MHz或外部频率fallback。例如**仅公式示例**，312MHz会得到主settle18、前settle26/trail13，不是本机测量结果。只写4个data HS、2个clock HS及主POST enable；保留非参数字段，拒绝继承LP00-start，所有lane/deskew/IRQ仍off。
+
+meter DBG/CON0/CON1 load/CON2 各有before/expected/owned/单笔pending；CON1 count `[15:0]` 写时置零，不重放结果。成功测量立即逆序还原本次meter控制，释放该短meter journal，不占用它到整个预览结束；返回count仅是当时频率观察，**不是持续DVFS/rate lease或SMI吞吐资格**。未消费trigger无取消证明，在OUTMUX恢复之前就拒绝全部依赖撤销；消费后坏count或普通配置读回失败，只允许exact old/new资格化及一次close恢复，不重复测量/重发失败写。close 在OUTMUX之后先恢复meter和owned digital timing，再还原CTLE force/analog/MAC。失败状态包含 `clock_pending/clock_busy_seen/clock_dirty_mask/clock_pending_field`；`TIMING_CONFIGURED` 不是PHY接收、RAW10、SID80或capture READY。
 
 `configure_ctle(epoch, &phy_status)` 是单次显式最终 override，仍无 native capture caller。前摄的 `hhfront_static_ctle_param` 和后摄 preview 的 `hhmain_cdr_0x9` 都要求 EQ IS2/BW3、DG0/DG1/LATCH/SR0/SR1=0；只改 ANA5 `0xff7f`，保留非参数 IS_RDC bit7。后摄额外将两 bank 的 ANA6/7 CK_DELAY 和 ANA13 两个 SEL_CODE 设9，保留其它 CDR width。遵循上游 CPHY 共用 setter，两 bank 的三个 DPHY delay-force enable word 写 `0x301`、value word 只设 DELAY_EN；**不改 DPHY delay code、不发 DELAY_APPLY 脉冲**。force value 的 RO_DA `[25:16]` 和 EN6 的 RO_AD `[31:16]` 在写入时置零，不重放采样结果；保留 reserved bits。入口要求 force/VAL EN/APPLY 均off，任何外部 APPLY 变化由 expected guard 拒绝，通用 writer 不接受 APPLY mask。
 

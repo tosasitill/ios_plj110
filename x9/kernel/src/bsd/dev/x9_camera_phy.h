@@ -11,6 +11,8 @@
 #define X9_CAM_PHY_DEFAULT_TERM 32u
 #define X9_CAM_PHY_CTLE_ATTEMPTED 64u
 #define X9_CAM_PHY_CTLE_CONFIGURED 128u
+#define X9_CAM_PHY_TIMING_ATTEMPTED 256u
+#define X9_CAM_PHY_TIMING_CONFIGURED 512u
 struct x9_camera_phy_status {
     uint64_t sensor_epoch, nominal_data_rate;
     uint32_t sensor, flags, last_errno, restore_errno;
@@ -18,6 +20,10 @@ struct x9_camera_phy_status {
     uint32_t dirty_count, pending_reg, calibration_pending, calibration_done;
     uint32_t completion[2], ref_ck[2];
     uint32_t cdr_delay, eq_control;
+    uint64_t csi_clock_hz;
+    uint32_t clock_count[2], clock_pending, clock_busy_seen;
+    uint32_t clock_dirty_mask, clock_pending_field;
+    uint32_t data_settle, clock_settle, hs_trail;
 };
 /* Thread context; takes camera_control_lock. After configured standby,
  * prepare_receiver AND configure_mac, BEFORE configure_outmux. Programs
@@ -27,19 +33,27 @@ struct x9_camera_phy_status {
  * OS-cal completion must be observed freshly; no completion-bit writes.
  * Failures pin the journal to the sole sensor close; an unconsumed trigger
  * has no cancellation proof and blocks all receiver/MM/supply teardown.
- * Digital settle/trail/deskew/ULPS/lane enables are still separate work.
- * configure_ctle applies the sensor override separately, after generic
+ * configure_timing separately programs digital HS timing/CPHY POST from
+ * measured CSI clock counts. Deskew/ULPS/lane enables are separate work.
+ * configure_ctle applies the sensor override separately, after timing/generic
  * PHY configuration and before OUTMUX. CALIBRATED is not measured rate, packet success,
  * SMI/SID80 ownership or capture READY. Not yet called by native capture. */
 int x9_camera_sensor_session_prepare_analog(uint64_t,struct x9_camera_phy_status *);
 /* Same lifetime/status, standalone thread context. Requires successful
  * prepare_analog, no OUTMUX, configured sensor still in standby. Front's
  * static EQ override and main preview's EQ/CDR9 override are fixed profiles,
- * not user-supplied tuning. Future digital/generic PHY configuration must
+ * not user-supplied tuning. configure_timing and future generic PHY configuration must
  * precede this final override. No lane enable, APPLY pulse, IRQ or DMA.
  * Errors after CTLE_ATTEMPTED pin this journal to the sole sensor close.
  * Close restores delay-force controls BEFORE analog power-off, using only
  * exact confirmed controls and no replay of read-only DA/AD results. */
 int x9_camera_sensor_session_configure_ctle(uint64_t,struct x9_camera_phy_status *);
+/* Inactive digital HS timing and CPHY POST configuration, after analog
+ * calibration, BEFORE final CTLE and OUTMUX. Measures the current selected
+ * SENINF clock twice (CKGEN_CK2 ID18/21) with a fresh BUSY cycle and stable
+ * count. 26MHz reference is a vendor hardware contract, not measured ppm.
+ * No rate/PLL change, nominal fallback, lane/deskew/IRQ enable or DMA.
+ * A posted unconsumed meter trigger blocks the sole close's teardown. */
+int x9_camera_sensor_session_configure_timing(uint64_t,struct x9_camera_phy_status *);
 #endif
 #endif

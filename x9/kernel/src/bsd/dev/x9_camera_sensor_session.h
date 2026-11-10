@@ -32,8 +32,12 @@
  * devinfo. No digital lane enable or rate/SMI/mapping grant. An unconsumed
  * calibration blocks receiver/MM/supply retirement. Close restores analog
  * AFTER OUTMUX and BEFORE MAC/async, keeping selected async CG through both.
+ * Optional configure_timing measures the current CSI clock twice with real
+ * meter BUSY rise/fall and applies fixed HS timing/CPHY POST, lanes off.
+ * It must precede CTLE/OUTMUX. A pending meter trigger blocks teardown;
+ * close restores its controls and owned digital timing before analog off.
  * Optional configure_ctle then applies front static EQ or main preview
- * EQ/CDR9 to both banks, before OUTMUX. Future digital/generic PHY setup
+ * EQ/CDR9 to both banks, before OUTMUX. Timing and future generic PHY setup
  * must precede this final override. It has no APPLY pulse or lane start;
  * close restores the owned delay-force controls BEFORE analog power-off.
  * Optional configure_outmux then applies only the fixed inactive OUTMUX0
