@@ -49,7 +49,10 @@ int x9_camera_smmu_sync(struct x9_camera_smmu *);
 
 /* Prior-preserving live NS attachment. This path NEVER installs the private
  * whole-controller template or changes STRTAB/CMDQ/EVTQ/CR0/GBPA registers.
- * Only linear LOG2SIZE8 tables and CMDQ LOG2SIZE2..8 are supported initially.
+ * Supports linear LOG2SIZE8 or the normal two-level SPLIT8 layout with
+ * LOG2SIZE8..20 and an already-populated full-span L2 for SID0..255.
+ * CMDQ LOG2SIZE2..19, bounded by the actual IDR1.CMDQS, not by the private
+ * template's one-page queue. Never allocates/publishes a missing L1 descriptor.
  * Mappings are provider-pinned, current coherent normal CPU mappings of the
  * ACTUAL installed storage, not old cached snapshots; page PA correspondence
  * is independently checked, not a PA cast. Whole cache lines touched by PoC
@@ -57,7 +60,10 @@ int x9_camera_smmu_sync(struct x9_camera_smmu *);
  * enter obtains exclusive table/queue serialization across all producers,
  * including firmware, and proves NS permission, leased SID80/SSID0/ASID1,
  * unreferenced private backing/CD and exact cache policy. No other stream
- * may reference this ASID/CD/tree. INSTALL requires stopped endpoints and
+ * may reference this ASID/CD/tree. For two-level tables, guard also proves
+ * that unrelated L2 contents remain unchanged: this engine directly checks
+ * all L1 descriptors and all STEs in the selected L2, not unmapped L2s.
+ * INSTALL requires stopped endpoints and
  * retired prior DMA/history; RETIRE additionally proves full source/AXI/IRQ/
  * worker retirement. CHECK permits this stream's live DMA but no competing
  * table/queue writer. guard revalidates these facts before every mutation
@@ -73,19 +79,28 @@ enum x9_camera_smmu_host_op {
 struct x9_camera_smmu_host_region {
     uintptr_t va;
     uint64_t pa;
-    uint32_t bytes, reserved; /* 16K aligned, at most32K, physically contiguous */
+    uint32_t bytes, reserved; /* 16K aligned and physically contiguous */
 };
+#define X9_CAM_SMMU_HOST_L1_MAX 4096u /* at most32K of installed L1 descriptors */
+#define X9_CAM_SMMU_HOST_CMDQ_SHIFT 19u /* at most8MiB of actual queue storage */
 struct x9_camera_smmu_host {
     void *context;
     uint64_t lease;
+    /* strtab/L2 regions at most32K; cmdq at most16<<CMDQ_SHIFT bytes.
+     * The complete configured structures must fit, not a small prefix. */
     struct x9_camera_smmu_host_region strtab,cmdq;
+    /* Zero for linear. For two-level, strtab pins the complete L1 and
+     * strtab_l2 pins the actual first L2 separately. No physical aliases
+     * with any other L1 target, queues or private backing are accepted. */
+    struct x9_camera_smmu_host_region strtab_l2;
     int (*enter)(void *,uint64_t,unsigned,const struct x9_camera_smmu_export *);
     int (*guard)(void *,uint64_t,unsigned,const struct x9_camera_smmu_export *);
     void (*leave)(void *,uint64_t,unsigned);
 };
 /* Once-only attach accepts ONLY zero-invalid or canonical ABORT STE80.
- * It snapshots/preserves every other STE, including display90/protected89,
- * and all live controller registers, then uses atomic64 BBM/PoC clean and
+ * It snapshots/preserves every other STE in SID0..255, including
+ * display90/protected89, the full installed L1 when present and all live
+ * controller registers, then uses atomic64 BBM/PoC clean and
  * exact inherited-queue CFGI80/CD80/TLBI-ASID1/SYNC consumption. One 100ms
  * total deadline, no reset/retry/whole-table copy or stale-dump fallback.
  * Shared checking uses the retained host, never the private own-base engine.
