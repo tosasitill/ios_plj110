@@ -1,9 +1,12 @@
 /* Sole CAMSV0 GIC1NS IAR -> one-shot bank sample -> pinned thread worker.
  * The inactive prepare path creates only a dormant worker. begin still needs
  * the real controller's exact S1/domain/route/request lease, and enables NO
- * CAMSV source/DMA/CMOS/VF/CQ or FBC credit. After RAW arm it publishes the
+ * CAMSV source/DMA/CMOS/VF/CQ. After RAW arm it publishes the
  * actual S1 IOVA/tag0 FH metadata, then no-credit FBC_EN with unchanged empty
- * counters and both-bank DB consumption, before GIC changes.
+ * counters and both-bank DB consumption, before GIC changes. After all
+ * three actual GIC lines are published, it issues one RCNT command and
+ * requires the full both-bank counter/control acceptance twice. No replay,
+ * no automatic rearm, no credit cancellation by EN-off/reset or CPU RETIRED.
  * It is not a capture provider registration.
  * Lock order: camera_control_lock -> camera_irq_lock -> camera_camsv_lock.
  * Worker NEVER acquires camera_control_lock; close can drain its pin there.
@@ -177,6 +180,27 @@ static int cam_irq_mutation_guard(void)
     if(!e)e=cam_sv_request_guard_locked(cam_irq.epoch,cam_irq.slot);
     if(!e)e=cam_irq_power();if(!e)e=cam_irq_controller();
     if(!e)e=cam_irq_idle();if(!e)e=cam_irq_partial_config();return e;
+}
+/* Thread-only, camera_control_lock + camera_irq_lock held. A topology,
+ * masked line or zero FBC counter is not authority: request_guard independently
+ * calls the real immutable lease check. Here prove the actual prepared GIC
+ * publication still exists, with no sampled/pending/active input history. */
+static int cam_irq_credit_guard_locked(uint64_t epoch)
+{
+    boolean_t old;
+    int e;
+    old=cam_irq_spin_take();
+    e=epoch!=cam_irq.epoch || !cam_irq.prepared || !cam_irq.owns || !cam_irq.accepting ||
+        cam_irq.close_attempted || cam_irq.count || cam_irq.busy || cam_irq.sof_seen?ESTALE:cam_irq.error;
+    cam_irq_spin_drop(old);if(e)return e;
+    e=cam_irq_mapping();if(!e)e=cam_irq_power();if(!e)e=cam_irq_config(false);
+    for(unsigned i=0;i<3 && !e;i++) {
+        uint32_t bit=cam_irq_bit(i);
+        if(!(cam_irq_rd(cam_irq.gic,cam_irq_bank(i,0x100))&bit) ||
+           ((cam_irq_rd(cam_irq.gic,cam_irq_bank(i,0x200))|
+             cam_irq_rd(cam_irq.gic,cam_irq_bank(i,0x300)))&bit))e=EBUSY;
+    }
+    return e;
 }
 /* Under spin, after actual IAR and only while accepting. Ordinary FIRST/FH
  * reads select exactly the vendor bank. No multi-tag fallback or status sweep. */
@@ -437,6 +461,9 @@ static int cam_irq_begin_locked(uint64_t epoch,const struct x9_camera_camsv_requ
     if(!e)e=cam_irq.error;
     owns=cam_irq.owns;cam_irq_spin_drop(old);
     if(!e&&r.frame.sensor!=cam_sv.status.sensor)e=EINVAL;
+    /* Refuse a new arm BEFORE changing S1 if the previous request has an
+     * issued credit. Only the real future producer retirement can end it. */
+    if(!e&&cam_sv.credit_issued)e=EBUSY;
     if(!e)e=cam_sv_environment();if(!e)e=cam_irq_mapping();
     if(!e)e=cam_irq_controller();if(!e)e=cam_irq_idle();
     if(!e&&owns)e=cam_irq_config(false);
@@ -447,8 +474,9 @@ static int cam_irq_begin_locked(uint64_t epoch,const struct x9_camera_camsv_requ
     }
     /* Do not make a hardware source observable with stale address/cookie.
      * Both banks must consume ONLY this already-armed request's S1 IOVA
-     * and FH_SPARE, then no-credit FBC_EN. No RCNT/SOURCE/DMA/CQ/CMOS/VF
-     * enable follows here; a counter change is retained, never re-credited. */
+     * and FH_SPARE, then no-credit FBC_EN. No SOURCE/DMA/CQ/CMOS/VF enable
+     * follows. The ONE credit command comes only after actual GIC publication;
+     * unexpected counter changes are retained, never re-credited. */
     if(!e)e=cam_sv_request_prepare_locked(epoch,cam_irq.slot);
     if(!e&&!owns) {
         /* Capture all priors before any route/priority write. Never change
@@ -492,6 +520,7 @@ static int cam_irq_begin_locked(uint64_t epoch,const struct x9_camera_camsv_requ
             if(!e)e=cam_irq_unmask(order[n]);
         }
     }
+    if(!e)e=cam_sv_credit_issue_locked(epoch,cam_irq.slot);
     if(e&&arm_attempted&&cam_irq.slot->state!=X9_CAMSV_EMPTY&&cam_irq.slot->state!=X9_CAMSV_RETIRED) {
         e=cam_irq_fault(e);lck_mtx_lock(&camera_camsv_lock);
         cam_camsv_retain(cam_irq.slot,e);lck_mtx_unlock(&camera_camsv_lock);

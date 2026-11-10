@@ -58,9 +58,13 @@
  * The normal controller's exact mapping/AP-IRQ lease is required before
  * arming a request. Normal begin consumes that actually armed S1 request's A0
  * address and tag0 FH_SPARE, then tag0 FBC_EN with unchanged empty counters
- * in both banks before GIC publication. It does not issue RCNT/credit or
- * source/DMA enable; cold configure_outmux still never writes an address,
- * cookie or FBC. Partial address/FBC/DB publication retains the cold epoch.
+ * in both banks before GIC publication. After all three actual GIC lines
+ * are published, begin issues ONE RCNT and requires two actual both-bank
+ * RCNT+1/CNT1/unchanged WCNT/DROP/reserved/control-clear observations.
+ * It does not enable source/DMA; cold configure_outmux still never writes
+ * an address, cookie or FBC. Partial address/FBC/DB/credit publication retains
+ * the cold epoch. No command retry/DB/reset cancels an issued credit; rearm
+ * and CAMSV restore remain prohibited until real producer retirement exists.
  * Sensor close retires GIC and queued/running worker pins BEFORE restoring
  * CAMSV/OUTMUX/PHY/MM. An unfinished RAW slot retains all
  * dependencies; this worker retirement is not full AXI/SMMU/map drain.

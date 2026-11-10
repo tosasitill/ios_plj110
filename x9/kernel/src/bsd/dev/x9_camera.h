@@ -341,8 +341,9 @@ struct x9_camera_camsv_dma {
     uint64_t lease;
     /* Exact exported S1 backing, not an arbitrary CPU range or PA. CAMSV
      * itself performs DEVICE CIVAC -> qualified CPU IVAC -> pinned copy.
-     * Native controller must prohibit FBC/RCNT/automatic slot reuse until
-     * finish returns RETIRED; a CPU pin cannot stop hardware by itself. */
+     * Native controller must prohibit replenishing FBC/RCNT or automatically
+     * reusing this RAW until finish returns RETIRED AND real producer/AXI
+     * retirement permits it; a CPU pin cannot stop hardware by itself. */
     struct x9_camera_s1 *backing;
     /* Mandatory legal domain/route/slot lease check, including exact
      * IOVA->raw range and cache policy. NOT PM_GET or a CPU-PA identity map.
@@ -350,7 +351,7 @@ struct x9_camera_camsv_dma {
      * backing while this worker owns the slot, including after PASS1_DONE.
      * When used with the native GIC worker, also proves sole CAMSV0 AP IRQ
      * AND tag0 FBC policy (not CCU/other owner) and prior source/request-history
-     * retirement before no-credit FBC initialization/GIC/source publication.
+     * retirement before FBC initialization/GIC/one-credit/source publication.
      * Masked/zero registers or FBC_CNT0 are not this grant.
      * Callbacks cannot re-enter camera/CAMSV APIs. */
     int (*check)(void *, uint64_t lease, const struct x9_camera_camsv_request *);
@@ -382,13 +383,17 @@ int x9_camera_camsv_finish(struct x9_camera_camsv_slot *, const struct x9_camera
  * Requires the prepared live-topology/receiver epoch and a REAL DMA lease.
  * begin arms one tag0/group0 request, publishes its actual S1 IOVA and
  * 32-bit FH metadata with both-bank DB consumption, initializes only tag0
- * FBC_EN with unchanged empty FBC1 counters, THEN arms GIC lines.
- * It does not write RCNT/credit, source IRQ enables, CQ/CMOS/VF/DMA or start
- * the sensor. EMPTY is not a source/AXI/map drain or native ownership grant.
- * Address/metadata failure retains this slot and the dependent cold epoch;
+ * FBC_EN with unchanged empty FBC1 counters, THEN arms GIC lines and emits
+ * exactly one RCNT command. It requires actual both-bank RCNT+1(mod256),
+ * CNT=1, unchanged WCNT/DROP/reserved and command self-clear, twice.
+ * It does not write source IRQ enables, CQ/CMOS/VF/DMA or start the sensor.
+ * EMPTY/CREDIT are not a source/AXI/map drain or native ownership grant.
+ * Address/metadata/credit failure retains this slot and dependent cold epoch;
  * GIC/CPU retirement alone does not permit revoking its backing/lease.
  * Keep that controller/request/RAW immutable until state says RETIRED; no
- * automatic DMA reuse. State is cache-only, not source/AXI/map drain.
+ * automatic DMA reuse. State is cache-only, not source/AXI/map drain. An
+ * issued credit currently blocks rearm/restore: producer retirement is not
+ * implemented and EN-off/reset is not permission to revoke that credit.
  * There is still no registered native capture caller. */
 int x9_camera_camsv_irq_begin(uint64_t, const struct x9_camera_camsv_request *,
     const struct x9_camera_camsv_dma *);

@@ -3,12 +3,13 @@
  * mtk_cam_sv_toggle_db / slave_sv_dev_config register writers. The slave
  * stress source, DMA/CMOS/IRQ enables and reset are NOT ported. The normal
  * libccd sv_pipe_composer writes FBC0=8000 (50640..50af4: central+40,
- * tag*40+500) and later 8080 (5325c..535bc). Only the former, NO RCNT,
- * is ported after actual S1 IOVA/FH consumption and an empty counter sample.
+ * tag*40+500) and later 8080 (5325c..535bc). EN initialization precedes GIC;
+ * exactly ONE RCNT descriptor is ported after actual GIC publication. Its
+ * complete counter/control acceptance is observed, not guessed from a pulse.
  * camera_control_lock held. Named ordinary configuration only: no DONE,
  * SOF, ERR, COMMON, CHANNEL, VF_ST, FIFO_STAT or CQ IRQ_STATUS reads.
  * Tag0 FBC1 is sampled separately, as in the normal upstream FBC readers;
- * no counter/reset command, implicit credit or AXI retirement is inferred.
+ * No reset, implicit credit, write completion or AXI retirement is inferred.
  */
 #include "x9_camera_sv_hw.h"
 enum { CAM_SV_MAX_REGS=352, CAM_SV_FIELDS=X9_CAM_SV_HW_FIELDS,
@@ -18,8 +19,10 @@ enum { CAM_SV_MAX_REGS=352, CAM_SV_FIELDS=X9_CAM_SV_HW_FIELDS,
 #define CAM_SV_DB_EN (1u<<30)
 #define CAM_SV_FBC_BUSY ((1u<<7)|(1u<<8)|(1u<<12)|(1u<<14)|(1u<<15))
 #define CAM_SV_FBC_EN (1u<<15)
+#define CAM_SV_FBC_RCNT (1u<<7)
 /* Named writable FBC0 fields only; reserved bits remain at captured prior.
- * RCNT/RESET are command bits and must NEVER be emitted by this journal. */
+ * Configuration writes NEVER emit RCNT/RESET. The separate RCNT command
+ * engine journals one issued store; it cannot be replayed by DB or restore. */
 #define CAM_SV_FBC_MASK 0xffffd180u
 #define CAM_SV_FBC_COUNT_MASK 0x000f0000u
 /* Absolute offsets within each three-bank view. In particular global
@@ -71,6 +74,9 @@ static struct {
     bool request_held, request_ready;
     bool fbc_sampled, fbc_ready;
     uint32_t fbc_before[2];
+    unsigned credit_phase;
+    bool credit_issued;
+    uint32_t credit_seen, credit_ack, credit_samples, credit_target[2];
     struct x9_camera_camsv_slot *request_slot;
     struct x9_camera_camsv_request request;
     struct x9_camera_camsv_dma request_dma;
@@ -100,8 +106,13 @@ static void cam_sv_status(void)
     else s->flags&=~X9_CAM_SV_HW_RETAINED;
     if(cam_sv.request_ready)s->flags|=X9_CAM_SV_HW_REQUEST;
     else s->flags&=~X9_CAM_SV_HW_REQUEST;
-    if(cam_sv.fbc_ready)s->flags|=X9_CAM_SV_HW_FBC_EMPTY;
+    if(cam_sv.fbc_ready && cam_sv.credit_phase==X9_CAM_SV_CREDIT_EMPTY)s->flags|=X9_CAM_SV_HW_FBC_EMPTY;
     else s->flags&=~X9_CAM_SV_HW_FBC_EMPTY;
+    if(cam_sv.fbc_ready && cam_sv.credit_phase==X9_CAM_SV_CREDIT_ACCEPTED)s->flags|=X9_CAM_SV_HW_FBC_CREDIT;
+    else s->flags&=~X9_CAM_SV_HW_FBC_CREDIT;
+    s->credit_phase=cam_sv.credit_phase;s->credit_issued=cam_sv.credit_issued;
+    s->credit_seen=cam_sv.credit_seen;s->credit_ack=cam_sv.credit_ack;
+    s->credit_samples=cam_sv.credit_samples;
     if(cam_sv.request_held) {
         s->request_generation=cam_sv.request.frame.generation;
         s->request_capture_id=cam_sv.request.frame.capture_id;
@@ -122,6 +133,7 @@ static int cam_sv_fault(int e)
         cam_sv.fbc_ready=false;
         if(!cam_sv.status.request_errno)cam_sv.status.request_errno=e;
         if(cam_sv.fbc_sampled && !cam_sv.status.fbc_errno)cam_sv.status.fbc_errno=e;
+        if(cam_sv.credit_issued && !cam_sv.status.credit_errno)cam_sv.status.credit_errno=e;
     }
     if(e==ESTALE || e==EACCES || e==EBUSY || e==EOVERFLOW)cam_sv.terminal=true;
     cam_sv_status();return e;
@@ -151,22 +163,38 @@ static int cam_sv_inactive(const uint32_t *v)
     if((v[cam_sv_find(0x2100)]|v[cam_sv_find(0x2130)])&(1u<<16))return EBUSY; /* both CQ resets */
     for(unsigned tag=0;tag<8;tag++) {
         uint32_t mask=CAM_SV_FBC_BUSY;
-        /* Sole exception: THIS immutable S1 request's no-credit FBC_EN.
-         * Exact prior/posted/accepted values are still checked below. This
-         * never permits foreign tag enables or RCNT/RESET/LOCK/SUB_EN. */
-        if(!tag && cam_sv.held && cam_sv.request_held && cam_sv.fbc_sampled)
-            mask&=~CAM_SV_FBC_EN;
+        /* THIS request's EN and, only during its one issued command, RCNT.
+         * Exact control/command values and counters are still checked below.
+         * No foreign tag, RESET/LOCK/SUB_EN or unissued RCNT is permitted. */
+        if(!tag)mask&=~cam_sv_fbc_busy_exemption();
         if(v[cam_sv_find(0x540+tag*0x40)]&mask)return EBUSY;
     }
     return 0;
 }
 /* Receiver's cold admission remains strict. Its LIVE busy check can ignore
- * only tag0 EN after this engine has checked the exact journal and counters.
+ * only our tag0 EN and the pending issued command after exact journal checks.
  * Not an ownership grant derived from expected/zero registers. */
-static uint32_t cam_sv_no_credit_mask(void)
+static uint32_t cam_sv_fbc_busy_exemption(void)
 {
-    return cam_sv.held && cam_sv.request_held && cam_sv.fbc_sampled &&
-        !cam_sv.terminal?CAM_SV_FBC_EN:0;
+    uint32_t mask=0;
+    if(cam_sv.held && cam_sv.request_held && cam_sv.fbc_sampled && !cam_sv.terminal) {
+        mask=CAM_SV_FBC_EN;
+        if(cam_sv.credit_issued && cam_sv.credit_phase==X9_CAM_SV_CREDIT_PENDING)
+            mask|=CAM_SV_FBC_RCNT;
+    }
+    return mask;
+}
+/* Canonical comparison only, NOT a published/accepted register value. This
+ * one request may momentarily read its exact EN|RCNT command before hardware
+ * consumes it. Once a bank has acknowledged the command, reappearance is a
+ * conflict even if a later read would again be EN. Cold admission has no
+ * issued command and therefore no exception. All other bits remain exact. */
+static uint32_t cam_sv_fbc_compare_word(unsigned bank,uint32_t value)
+{
+    if(bank<2 && cam_sv.credit_issued && cam_sv.credit_phase==X9_CAM_SV_CREDIT_PENDING &&
+       !(cam_sv.credit_ack&(1u<<bank)) &&
+       value==(cam_sv.target[CAM_SV_FBC]|CAM_SV_FBC_RCNT))return value&~CAM_SV_FBC_RCNT;
+    return value;
 }
 static int cam_sv_fbc_counters_guard(void)
 {
@@ -177,7 +205,15 @@ static int cam_sv_fbc_counters_guard(void)
         e=cam_sv_power_guard();if(e)return e;
         value=cam_rr(cam_sv.view[bank],0x544);
         cam_sv.status.fbc_after[bank]=value;
-        if(value!=cam_sv.fbc_before[bank])return ESTALE;
+        if(cam_sv.credit_phase==X9_CAM_SV_CREDIT_EMPTY) {
+            if(value!=cam_sv.fbc_before[bank])return ESTALE;
+        } else if(cam_sv.credit_phase==X9_CAM_SV_CREDIT_PENDING ||
+                  cam_sv.credit_phase==X9_CAM_SV_CREDIT_ACCEPTED) {
+            bool target=value==cam_sv.credit_target[bank];
+            if(!target && (cam_sv.credit_phase!=X9_CAM_SV_CREDIT_PENDING ||
+               (cam_sv.credit_seen&(1u<<bank)) || value!=cam_sv.fbc_before[bank]))return ESTALE;
+            if(target)cam_sv.credit_seen|=1u<<bank;
+        } else return ESTALE;
     }
     return 0;
 }
@@ -215,6 +251,10 @@ static int cam_sv_guard_impl(void)
         e=cam_sv_power_guard();if(e)return e;
         for(unsigned n=0;n<cam_sv.count;n++)v[n]=cam_rr(cam_sv.view[bank],cam_sv.offset[n]);
         cam_sv_observed(bank,v);e=cam_sv_inactive(v);if(e)return e;
+        /* Keep raw command observations in status; only stable FBC control
+         * is part of expected. The separate issued/seen/ack record accounts
+         * for RCNT, including its legitimate hardware self-clear. */
+        v[cam_sv.field[CAM_SV_FBC]]=cam_sv_fbc_compare_word(bank,v[cam_sv.field[CAM_SV_FBC]]);
         for(unsigned n=0;n<cam_sv.count;n++) {
             bool allowed=v[n]==cam_sv.expected[bank][n];
             if(n==pending_reg) {
@@ -300,6 +340,9 @@ static int cam_sv_post(unsigned slot,uint32_t next)
 {
     unsigned reg=slot==CAM_SV_FIELDS?cam_sv.db_reg:cam_sv.field[slot];
     int e=cam_sv_environment();if(e)return e;
+    /* Credits are NOT ordinary configuration dirty bits. No DB load,
+     * field restore or address rearm may cancel/replay an issued credit. */
+    if(cam_sv.credit_issued)return EBUSY;
     if(cam_sv.pending_slot<=CAM_SV_FIELDS)return EBUSY;
     if(next==cam_sv.expected[0][reg])return 0;
     cam_sv.pending_slot=slot;cam_sv.pending_next=next;cam_sv.pending_seen=false;
@@ -417,6 +460,9 @@ static int cam_sv_open_locked(uint64_t epoch)
     cam_sv.request_held=cam_sv.request_ready=false;cam_sv.request_slot=NULL;
     cam_sv.fbc_sampled=cam_sv.fbc_ready=false;
     memset(cam_sv.fbc_before,0,sizeof(cam_sv.fbc_before));
+    cam_sv.credit_phase=X9_CAM_SV_CREDIT_EMPTY;cam_sv.credit_issued=false;
+    cam_sv.credit_seen=cam_sv.credit_ack=cam_sv.credit_samples=0;
+    memset(cam_sv.credit_target,0,sizeof(cam_sv.credit_target));
     memset(&cam_sv.request,0,sizeof(cam_sv.request));
     memset(&cam_sv.request_dma,0,sizeof(cam_sv.request_dma));
     cam_sv.commit_pending=cam_sv.pending_seen=cam_sv.db_issued=false;cam_sv.db_phase=CAM_SV_DB_IDLE;
@@ -461,7 +507,8 @@ static int cam_sv_open_locked(uint64_t epoch)
     cam_sv_status();return e;
 }
 /* Normal composer FBC_EN initialization, AFTER the exact address/FH target
- * has reached both banks. Never submit the later 8080 RCNT descriptor.
+ * has reached both banks. This helper never submits the later 8080 command;
+ * the separate one-command engine follows actual GIC publication.
  * The owner callback must independently retire prior producer/history;
  * count0 here only selects an EMPTY no-credit programming baseline. It is
  * neither a DMA completion nor authority to release mapping/power/RAW.
@@ -518,6 +565,7 @@ static int cam_sv_request_prepare_locked(uint64_t epoch,struct x9_camera_camsv_s
     if(!slot || !cam_sv.held || cam_sv.epoch!=epoch || cam_sv.close_attempted ||
        !(cam_sv.status.flags&X9_CAM_SV_HW_CONFIGURED))return ESTALE;
     if(cam_sv.error)return cam_sv.error;
+    if(cam_sv.credit_issued)return EBUSY;
     if(cam_sv.commit_pending || cam_sv.pending_slot<=CAM_SV_FIELDS)return EBUSY;
     /* Copy under the actual slot lock; no callback while it is held. IRQ
      * accepting is still false, and controller serialization pins the slot. */
@@ -597,6 +645,86 @@ static int cam_sv_request_guard_locked(uint64_t epoch,const struct x9_camera_cam
     }
     return e?cam_sv_fault(e):0;
 }
+/* Called ONLY at the actual end of normal GIC begin, with control/IRQ mutex
+ * held, a pinned ARMED S1 and all three actual GIC lines published. Sources
+ * and DMA/CMOS/VF/CQ remain off. We port one normal 8080 command, never the
+ * vendor's optional duplicate descriptor or software fill-to-two loop.
+ * The expected counter DELTA is a runtime acceptance criterion, not an
+ * emulated counter: RCNT+1(mod256), CNT=1, unchanged WCNT/DROP/reserved.
+ * Both banks and cleared command control must be observed twice. If the
+ * hardware cannot accept in this state, retain; never enable DMA to hide it.
+ */
+static int cam_sv_credit_issue_locked(uint64_t epoch,struct x9_camera_camsv_slot *slot)
+{
+    uint64_t span,end;
+    uint32_t control;
+    int e;
+    if(cam_sv.credit_issued || cam_sv.credit_phase!=X9_CAM_SV_CREDIT_EMPTY)return EBUSY;
+    e=cam_sv_request_guard_locked(epoch,slot);if(e)return e;
+    lck_mtx_lock(&camera_camsv_lock);e=slot->state==X9_CAMSV_ARMED?0:ESTALE;
+    lck_mtx_unlock(&camera_camsv_lock);if(e)return e;
+    if(cam_sv.commit_pending || cam_sv.pending_slot<=CAM_SV_FIELDS)return EBUSY;
+    control=cam_sv.target[CAM_SV_FBC];
+    if((control&CAM_SV_FBC_MASK)!=CAM_SV_FBC_EN)return EINVAL;
+    for(unsigned bank=0;bank<2;bank++) {
+        uint32_t before=cam_sv.fbc_before[bank];
+        if(before&CAM_SV_FBC_COUNT_MASK)return EBUSY;
+        cam_sv.status.credit_target[bank]=cam_sv.credit_target[bank]=
+            (before&~(CAM_SV_FBC_COUNT_MASK|0xffu))|0x10000u|((before+1)&0xffu);
+    }
+    e=cam_sv_request_guard_locked(epoch,slot);if(e)return e;
+    e=cam_irq_credit_guard_locked(epoch);if(e)return e;
+    nanoseconds_to_absolutetime(10000000,&span);end=mach_absolute_time()+span;
+    /* Journal BEFORE the single store. Once issued, failure is terminal and
+     * leaves the SAME lease/RAW/controller/power pinned, with no cancellation.
+     * RCNT is not put in geometry dirty/pending and no DB pulse follows it. */
+    cam_sv.credit_issued=true;cam_sv.credit_phase=X9_CAM_SV_CREDIT_PENDING;
+    cam_sv.credit_seen=cam_sv.credit_ack=cam_sv.credit_samples=0;
+    cam_sv_status();cam_rw(cam_sv.view[0],0x540,control|CAM_SV_FBC_RCNT);
+    e=EAGAIN;
+    for(unsigned poll=0;poll<10000;poll++) {
+        bool target=true;
+        if(mach_absolute_time()>=end){e=ETIMEDOUT;break;}
+        e=cam_sv_request_guard_locked(epoch,slot);if(e)break;
+        e=cam_irq_credit_guard_locked(epoch);if(e)break;
+        for(unsigned bank=0;bank<2 && !e;bank++) {
+            uint32_t count,actual;
+            e=cam_sv_power_guard();if(e)break;
+            count=cam_rr(cam_sv.view[bank],0x544);
+            actual=cam_rr(cam_sv.view[bank],0x540);
+            cam_sv.status.fbc_after[bank]=count;cam_sv.status.credit_control[bank]=actual;
+            if(count==cam_sv.credit_target[bank])cam_sv.credit_seen|=1u<<bank;
+            else if((cam_sv.credit_seen&(1u<<bank)) || count!=cam_sv.fbc_before[bank])e=ESTALE;
+            if(actual!=control && cam_sv_fbc_compare_word(bank,actual)!=control)e=ESTALE;
+            if(!e && count==cam_sv.credit_target[bank] && actual==control)
+                cam_sv.credit_ack|=1u<<bank;
+            else target=false;
+        }
+        if(e)break;
+        if(mach_absolute_time()>=end){e=ETIMEDOUT;break;}
+        cam_sv.credit_samples=target?cam_sv.credit_samples+1:0;
+        if(cam_sv.credit_samples==2) {
+            cam_sv.credit_phase=X9_CAM_SV_CREDIT_ACCEPTED;
+            e=cam_sv_request_guard_locked(epoch,slot);
+            if(!e)e=cam_irq_credit_guard_locked(epoch);
+            break;
+        }
+        e=EAGAIN;delay(1);
+    }
+    if(e) {
+        if(e==EAGAIN)e=ETIMEDOUT;
+        cam_sv.terminal=true;cam_sv_fault(e);
+    }
+    cam_sv_status();
+    printf("X9 CAMERA FBC CREDIT: sensor=%u epoch=%llu capture_id=%llu phase=%u "
+        "issued=%u seen=%x ack=%x samples=%u errno=%d control=%x/%x count=%x/%x "
+        "target=%x/%x (one actual RCNT, no source/DMA/frame or AXI drain)\n",
+        cam_sv.status.sensor,epoch,cam_sv.request.frame.capture_id,cam_sv.credit_phase,
+        cam_sv.credit_issued,cam_sv.credit_seen,cam_sv.credit_ack,cam_sv.credit_samples,e,
+        cam_sv.status.credit_control[0],cam_sv.status.credit_control[1],
+        cam_sv.status.fbc_after[0],cam_sv.status.fbc_after[1],cam_sv.credit_target[0],cam_sv.credit_target[1]);
+    return e;
+}
 static int cam_sv_close_locked(uint64_t epoch)
 {
     uint64_t span,deadline;
@@ -604,6 +732,9 @@ static int cam_sv_close_locked(uint64_t epoch)
     int e;
     if(!cam_sv.held)return 0;
     if(cam_sv.epoch!=epoch || cam_sv.close_attempted)return ESTALE;
+    /* No producer retirement exists yet. FBC_EN off/reset is NOT a way to
+     * revoke an accepted/pending credit or justify dropping its backing. */
+    if(cam_sv.credit_issued)return cam_sv_fault(EBUSY);
     cam_sv.close_attempted=true;
     cam_sv.request_ready=cam_sv.fbc_ready=false;
     nanoseconds_to_absolutetime(10000000,&span);deadline=mach_absolute_time()+span;

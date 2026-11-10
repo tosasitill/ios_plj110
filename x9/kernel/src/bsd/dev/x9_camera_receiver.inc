@@ -23,13 +23,15 @@ static int cam_smi_clock_guard(void);
 static int cam_smi_clocks_close_locked(uint64_t);
 static int cam_smi_retirement_guard(uint64_t);
 static int cam_sv_guard(void);
-static uint32_t cam_sv_no_credit_mask(void);
+static uint32_t cam_sv_fbc_busy_exemption(void);
+static uint32_t cam_sv_fbc_compare_word(unsigned,uint32_t);
 static int cam_sv_open_locked(uint64_t);
 static int cam_sv_close_locked(uint64_t);
 static void cam_sv_status_copy(uint64_t,struct x9_camera_sv_hw_status *);
 static int cam_irq_prepare_locked(uint64_t);
 static int cam_irq_guard_locked(uint64_t);
 static int cam_irq_close_locked(uint64_t);
+static int cam_irq_credit_guard_locked(uint64_t);
 static const unsigned cam_rx_out_offsets[X9_CAM_RX_OUT_WORDS]={
     0x000,0x004,0x008,0x00c,0x010,0x014,0x018,0x020,
     0x02c,0x034,0x038,0x100,0x104,0x108
@@ -99,7 +101,16 @@ static uint32_t cam_rx_changed(const struct x9_camera_receiver_sample *a,
        ((a->async_split^b->async_split)&(3u<<(2*port))) ||
        ((a->afifo^b->afifo)&(3u<<(2*port))))changed|=2;
     if(memcmp(a->out,b->out,sizeof(a->out)))changed|=4;
-    if(memcmp(a->sv,b->sv,sizeof(a->sv)))changed|=8;
+    for(unsigned bank=0;bank<2;bank++)for(unsigned word=0;word<X9_CAM_RX_SV_WORDS;word++) {
+        uint32_t av=a->sv[bank][word],bv=b->sv[bank][word];
+        /* FBC's command bit has its own exact, one-issued transition. Only
+         * compare its canonical control while that transition is pending;
+         * original/cached/public samples are never overwritten or rebased. */
+        if(word==4) {
+            av=cam_sv_fbc_compare_word(bank,av);bv=cam_sv_fbc_compare_word(bank,bv);
+        }
+        if(av!=bv)changed|=8;
+    }
     return changed;
 }
 static int cam_rx_inspect(void *arg)
@@ -197,7 +208,7 @@ static int cam_rx_session_guard(void)
     e=cam_rx_sample(m,&a);if(e)return e;
     delay(10);
     e=cam_rx_sample(m,&b);if(e)return e;
-    fbc0_mask=cam_sv_no_credit_mask();
+    fbc0_mask=cam_sv_fbc_busy_exemption();
     busy=cam_rx_busy(&a,port,fbc0_mask)|cam_rx_busy(&b,port,fbc0_mask);
     changed=cam_rx_changed(&a,&b,port)|cam_rx_changed(&cam_rx_live.expected,&a,port)|
         cam_rx_changed(&cam_rx_live.expected,&b,port);
