@@ -7,7 +7,8 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-/* Sole physical worker only. clock is the measured vendor schematic enum,
+/* Sole physical worker only; generation is hardware_generation, not the
+ * output/backend application's epoch. clock is the measured schematic enum,
  * never a guessed frequency. Partial failure retains its nonzero token
  * and every possibly accepted write. No release/retry API is provided. */
 int x9_gps_native_power_acquire(const struct x9_gps_handoff *, uint64_t,

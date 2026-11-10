@@ -10,7 +10,7 @@
 /* The vendor dispatch rejects a negative signed16 assembled length. */
 #define X9_MNL_MESSAGE_MAX 32767u
 struct x9_gps_mnl_stream {
- uint64_t generation, first_time, last_time;
+ uint64_t generation, first_time, last_time; /* physical/hardware epoch */
  uint64_t messages, bad_fragments;
  unsigned used;
  uint8_t total, next;

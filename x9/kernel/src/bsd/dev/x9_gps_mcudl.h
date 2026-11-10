@@ -11,6 +11,10 @@
 #define X9_MCUDL_NMEA 0xa4u
 struct x9_gps_mcudl_stream {
  uint64_t generation, sentence_time, fragment_time, last_host_time;
+ /* generation is the hardware epoch. Preserve output epochs from the
+  * first byte/fragment/sentence; never rebind old fragments after START. */
+ uint64_t frame_application_generation, sentence_application_generation;
+ uint64_t mnl_application_generation;
  uint64_t received_bytes, frames, bad_frames, non_nmea, sentences, bad_sentences;
  unsigned used, sentence_used;
  uint8_t frame[X9_MCUDL_FRAME_MAX], sentence[X9_GPS_NMEA_MAX];
@@ -43,10 +47,16 @@ int x9_gps_mcudl_make_mnl_control(void *, unsigned, uint8_t slot_seq,
  * synchronization. This does not map EMI, acknowledge CCIF or boot firmware.
  * Other packet types go to control even before tracking/receiver readiness;
  * only type 0xa4 can deliver NMEA to PDS, and only while tracking is active.
- * Input and callbacks run in thread context. A reset needs a new generation.
+ * Input and callbacks run in thread context. A physical reset needs a new
+ * hardware generation; output transitions retain the old transport owner.
  * Nonzero errors mean the transport must stop using the partial stream. */
 int x9_gps_mcudl_receive(struct x9_gps_mcudl_stream *, const void *, unsigned,
     uint64_t host_time);
+/* HIF passes the epoch captured when the RX descriptor was POSTED, not at
+ * completion. Controls still dispatch across application transitions;
+ * only their proved session handler may accept OPEN/START/STOP responses. */
+int x9_gps_mcudl_receive_epoch(struct x9_gps_mcudl_stream *, const void *, unsigned,
+    uint64_t host_time, uint64_t application_generation);
 #ifdef __cplusplus
 }
 #endif

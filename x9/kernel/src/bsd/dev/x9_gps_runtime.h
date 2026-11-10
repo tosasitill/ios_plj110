@@ -12,13 +12,17 @@ enum x9_gps_physical_stage {
  X9_GPS_PHYSICAL_D_DIE, X9_GPS_PHYSICAL_POS_FINALIZE,
  X9_GPS_PHYSICAL_POS_SPI, X9_GPS_PHYSICAL_POS_AFE,
  X9_GPS_PHYSICAL_POS_PLL, X9_GPS_PHYSICAL_POS_RADIO,
- X9_GPS_PHYSICAL_POS_LOW_POWER, X9_GPS_PHYSICAL_POS_CLOCK
+ X9_GPS_PHYSICAL_POS_LOW_POWER, X9_GPS_PHYSICAL_POS_CLOCK,
+ X9_GPS_PHYSICAL_BUS
 };
 struct x9_gps_afe_smc_result { uint64_t a[4]; };
 struct x9_gps_connv2_ops {
  uint32_t version; /* 1..5; descriptor/context remain live until reboot. */
  void *context;
- /* Exclusive long-lived connv2 lease, NOT Wi-Fi connv3/MT6653 ownership.
+ /* generation in ALL physical callbacks is hardware_generation, not the
+  * application/output generation passed to backend.set_state. Successful
+  * application transitions keep this lease and its posted DMA intact.
+  * Exclusive long-lived connv2 lease, NOT Wi-Fi connv3/MT6653 ownership.
   * Must power/qualify MT6661 VGPS18, CONNSYS domain, AP bus clocks/protect,
   * MT6686 setup and ATF EMI configuration/MPU for this exact LK layout.
   * Must also quiesce all old BGF DMA/HIF users BEFORE permitting reset or
@@ -28,7 +32,11 @@ struct x9_gps_connv2_ops {
  int (*acquire)(void *, const struct x9_gps_handoff *, uint64_t generation,
      uint64_t *lease);
  /* Prove the above resources are still held and the conninfra host/CFG
-  * registers are safe to access. Check every MMIO operation. No constant
+  * registers are safe to access. AON-safe power/upstream-clock checks MUST
+  * precede any CONN access, including native bus detection. Native v4/v5
+  * additionally qualifies actual TOP wake/off clock/IP/IRQ before BGF/POS
+  * mapping; this does not replace secure EMI or exclusive DMA ownership.
+  * Check every MMIO operation. No constant
   * success implementation, and no ownership inferred from Android READY. */
  int (*validate)(void *, const struct x9_gps_handoff *, uint64_t generation,
      uint64_t lease);
@@ -87,7 +95,9 @@ struct x9_gps_connv2_ops {
   * bookkeeping bit, this voltage/pre-low-power callback, then native
   * low-power/WLA/CMDBT and finally pos_finalize (remaining PMIC/MT6686
   * qualification). A bookkeeping bit is NOT RF or receiver readiness.
-  * Acquire must additionally retain TOP force-wake 400601a0[0]=1, and
+  * Acquire must additionally provide safe HOST/CFG_ON/debug access and a
+  * quiesced CMDBT engine with CFG_PWRCTRL0[0]=0. The worker retains/sets
+  * TOP force-wake 400601a0[0]=1 BEFORE native POS, and
   * pos_validate must dynamically qualify EXCLUSIVE access to ALL native
   * LP banks, including CFG WLA +420..430 (beyond the compact FDT +138
   * tuple), the entire 8KiB SYSRAM and all old BGF DMA quiesce. The
@@ -131,6 +141,8 @@ int x9_gps_register_connv2(const struct x9_gps_connv2_ops *);
  * MCUDL bytes must already carry a real slot/flow reservation; this is not
  * a slot allocator. Copies at most4096B, two entries/channel. Worker sends
  * only after fresh management1 ACK, retains busy entries and their lease.
+ * generation is hardware_generation; application reservations/ACK epochs
+ * remain the protocol handler's responsibility, not a transport rebind.
  * Enqueue success is NOT TX completion or an application ACK. */
 int x9_gps_runtime_queue(uint64_t generation, unsigned channel,
     const void *, unsigned length);

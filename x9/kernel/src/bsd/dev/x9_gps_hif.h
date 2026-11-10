@@ -30,6 +30,9 @@ struct x9_gps_hif {
   * device/noncacheable attributes, no conflicting cached aliases. */
  volatile uint8_t *ap, *mcu, *ccif;
  uint64_t generation, last_time, tx_time[3], command_time, start_time;
+ /* Application epoch at each RX descriptor publication. A descriptor
+  * posted before START/STOP must not relabel late bytes as the new fix. */
+ uint64_t rx_application_generation[3];
  uint32_t id[6], length[6], pending, prepared, started, fault;
  uint32_t command, command_ack, commands_used, dispatching;
  uint64_t tx_bytes, rx_bytes, completions;
@@ -44,9 +47,9 @@ extern "C" {
  * map RAM or clear target-owned completion flags. No retry/reuse while the
  * old session could still access these mappings. Object must be initially
  * zeroed and off-stack; only a verified board quiesce allows disposal.
- * generation is the current GPS output generation. This conservative API
- * does NOT live-rebind posted DMA to a new tracking generation: a transition
- * must quiesce/reset the old session before preparing another. */
+ * generation is the current GPS hardware_generation. Application changes
+ * do not rebind this transport. RX descriptors keep their original output
+ * epoch; only a proved hardware quiesce/reset allows another prepare. */
 int x9_gps_hif_prepare(struct x9_gps_hif *, const struct x9_gps_hif_ops *,
     volatile void *ap, volatile void *mcu, volatile void *ccif, uint64_t generation);
 /* After real MCU boot: validate fresh target state; poll subsequently arms

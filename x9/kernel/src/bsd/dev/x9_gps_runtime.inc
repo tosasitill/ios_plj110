@@ -139,6 +139,12 @@ static struct {
   unsigned started, set_started, complete, borrowed;
   uint32_t prior, selector, ap, global, busy, done, ack;
  } clock;
+ struct {
+  volatile uint32_t *host, *cfg_on, *debug, *cfg;
+  unsigned started, complete, wake_started, wake_borrowed, detect_attempts;
+  uint32_t wake_prior, wake, detect, version, irq, restore_required, restore;
+  int error;
+ } bus;
  uint8_t cmdbt[4096]; /* immutable registered snapshot, never on stack */
  thread_t worker;
  unsigned in_callback, out_head[2], out_count[2];
@@ -162,14 +168,16 @@ static int gps_mcu_supplier_guard(void)
 {
  struct x9_gps_status status; x9_gps_copy_status(&status);
  if (!gps_rt.lease || !gps_rt.ops.validate) return ENXIO;
- if (status.generation!=gps_rt.generation || status.fault) return ESTALE;
+ if (status.hardware_generation!=gps_rt.generation || status.fault) return ESTALE;
  return gps_rt.ops.validate(gps_rt.ops.context,&gps_rt.layout,
      gps_rt.generation,gps_rt.lease);
 }
 #include "x9_gps_clock.inc"
+#include "x9_gps_bus.inc"
 static int gps_mcu_guard(void)
 {
  int e=gps_mcu_supplier_guard();if(e)return e;
+ if(gps_rt.bus.started) {e=gps_bus_validate();if(e)return e;}
  /* After the native selector transaction, every MCU/POS/HIF access also
   * needs its live clock effect. Never repair a lost vote or selector. */
  return gps_rt.clock.complete ? gps_clock_check() : 0;
@@ -244,9 +252,21 @@ static int gps_mcu_raw_expect(uint32_t address, uint32_t mask, uint32_t value)
 static int gps_mcu_map(void)
 {
  int e=gps_mcu_guard(); if (e) return e;
+ if(gps_rt.ops.version>=4) {
+  gps_runtime_stage(X9_GPS_PHYSICAL_BUS,0);
+  e=gps_bus_take();if(e)return e;
+ }
  for (unsigned i=0;i<GPS_MCU_BANK_COUNT;i++) {
+  e=gps_mcu_guard();if(e)return e;
   gps_rt.banks[i].physical=gps_mcu_bases[i];
-  gps_rt.banks[i].p=(volatile uint32_t *)ml_io_map(gps_mcu_bases[i],0x1000);
+  volatile uint32_t *p=NULL;
+  if(gps_rt.bus.complete) {
+   if(gps_mcu_bases[i]==0x40060000)p=gps_rt.bus.host;
+   else if(gps_mcu_bases[i]==0x40001000)p=gps_rt.bus.cfg_on;
+   else if(gps_mcu_bases[i]==0x40011000)p=gps_rt.bus.cfg;
+  }
+  gps_rt.banks[i].p=p ? p :
+      (volatile uint32_t *)ml_io_map(gps_mcu_bases[i],0x1000);
   if (!gps_rt.banks[i].p) return ENOMEM;
  }
  if(gps_rt.ops.version>=2) {
@@ -278,10 +298,13 @@ static int gps_mcu_map(void)
  }
  /* Device attributes throughout; no cached aliases of shared HIF RAM.
   * The 48MiB advertised total is deliberately not mapped as one reserve. */
+ e=gps_mcu_guard();if(e)return e;
  gps_rt.ap=(volatile uint8_t *)ml_io_map(gps_rt.layout.reserve_base+
      gps_rt.layout.ap2mcu_offset,gps_rt.layout.region_size);
+ e=gps_mcu_guard();if(e)return e;
  gps_rt.mcu=(volatile uint8_t *)ml_io_map(gps_rt.layout.reserve_base+
      gps_rt.layout.mcu2ap_offset,gps_rt.layout.region_size);
+ e=gps_mcu_guard();if(e)return e;
  gps_rt.ccif=(volatile uint8_t *)ml_io_map(gps_rt.layout.ccif_base,
      gps_rt.layout.ccif_size);
  return gps_rt.ap && gps_rt.mcu && gps_rt.ccif ? 0 : ENOMEM;
@@ -424,6 +447,9 @@ static int gps_runtime_control(void *ctx,unsigned ch,uint8_t type,
 }
 static int gps_runtime_mnl(void *ctx,const uint8_t *p,unsigned n,uint64_t now)
 {
+ /* Captured at RX POST and first inner fragment, not at callback arrival.
+  * A late old/mixed PVT must not publish or retire the new session's fix. */
+ uint64_t application=gps_rt.hif.stream[0].mnl_application_generation;
  (void)ctx; gps_rt.in_callback=1;
  int e=gps_rt.ops.mnl(gps_rt.ops.context,p,n,now);
  gps_rt.in_callback=0;
@@ -435,10 +461,14 @@ static int gps_runtime_mnl(void *ctx,const uint8_t *p,unsigned n,uint64_t now)
  e=x9_gps_mnl_position_wire(p,n,wire,sizeof(wire));
  int no_fix=e==ENOENT;
  lck_mtx_lock(&gps_lock);
- if(st.generation!=gps_rt.generation || st.fault) {
+ if(st.hardware_generation!=gps_rt.generation || st.fault) {
   lck_mtx_unlock(&gps_lock); return ESTALE;
  }
  st.pvt_received++;
+ if(!application || st.generation!=application) {
+  st.pvt_retired++;
+  lck_mtx_unlock(&gps_lock);return 0;
+ }
  if(no_fix) {
   st.pvt_no_fix++;
   /* A newly accepted no-fix report retires queued OLD fixes immediately.
@@ -453,14 +483,17 @@ static int gps_runtime_mnl(void *ctx,const uint8_t *p,unsigned n,uint64_t now)
  if(no_fix)return 0; /* legitimate no-fix does not poison the HIF */
  if(e)return e;
  if(!publish)return 0; /* parsed bytes cannot grant a backend/output lease */
- e=x9_gps_deliver_position(gps_rt.generation,wire,sizeof(wire),now);
+ e=x9_gps_deliver_position(application,wire,sizeof(wire),now);
  lck_mtx_lock(&gps_lock);
- if(st.generation==gps_rt.generation && !st.fault) {
+ int retired=st.hardware_generation==gps_rt.generation && !st.fault &&
+     (e==ESTALE || e==ENXIO);
+ if(retired)st.pvt_retired++;
+ if(st.generation==application && !st.fault) {
   st.pvt_errno=e;
   if(!e)st.pvt_delivered++;
  }
  lck_mtx_unlock(&gps_lock);
- return e;
+ return retired ? 0 : e;
 }
 static int gps_runtime_ccif(void *ctx,unsigned ch,uint64_t now)
 {
@@ -500,7 +533,7 @@ static int gps_runtime_drain(void)
 static int gps_runtime_bringup(void)
 {
  struct x9_gps_status status; x9_gps_copy_status(&status);
- gps_rt.generation=status.generation;
+ gps_rt.generation=status.hardware_generation;
  MCU_TRY(x9_gps_copy_handoff(&gps_rt.layout));
  gps_runtime_stage(X9_GPS_PHYSICAL_ACQUIRE,0);
  MCU_TRY(gps_rt.ops.acquire(gps_rt.ops.context,&gps_rt.layout,
@@ -580,7 +613,7 @@ static void gps_runtime_worker(void *unused, wait_result_t result)
  /* Never auto-retry, clear descriptors, release power, or unmap uncertain
   * DMA. Even a pre-HIF partial power failure retains the supplier's lease. */
  gps_runtime_stage(X9_GPS_PHYSICAL_QUARANTINE,e);
- x9_gps_fault(gps_rt.generation,e);
+ x9_gps_hardware_fault(gps_rt.generation,e);
  thread_terminate(current_thread());
 }
 static void gps_runtime_start(void)

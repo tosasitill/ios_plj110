@@ -18,7 +18,7 @@ static int hif_poison(struct x9_gps_hif *h, int e)
 {
  h->fault=e ? (uint32_t)e : EIO;
  /* Keep descriptors, mappings and lease intact for uncertain DMA. */
- x9_gps_fault(h->generation,(int)h->fault);return (int)h->fault;
+ x9_gps_hardware_fault(h->generation,(int)h->fault);return (int)h->fault;
 }
 static int hif_timeouts(struct x9_gps_hif *,uint64_t);
 static int hif_owned(struct x9_gps_hif *h, uint64_t now)
@@ -27,7 +27,7 @@ static int hif_owned(struct x9_gps_hif *h, uint64_t now)
  if(h->fault)return (int)h->fault;
  if(!now||now>mach_absolute_time()||now<h->last_time)return EINVAL;
  struct x9_gps_status status;x9_gps_copy_status(&status);
- if(status.generation!=h->generation||status.fault)return hif_poison(h,ESTALE);
+ if(status.hardware_generation!=h->generation||status.fault)return hif_poison(h,ESTALE);
  int e=h->ops.check_owned(h->ops.context,h->generation,0);
  if(e)return hif_poison(h,e);
  h->last_time=now;
@@ -55,7 +55,7 @@ int x9_gps_hif_prepare(struct x9_gps_hif *h,const struct x9_gps_hif_ops *ops,
  if(h->prepared)return EBUSY;
  struct x9_gps_handoff layout;int e=x9_gps_copy_handoff(&layout);if(e)return e;
  struct x9_gps_status status;x9_gps_copy_status(&status);
- if(status.generation!=generation||status.fault)return ESTALE;
+ if(status.hardware_generation!=generation||status.fault)return ESTALE;
  e=ops->check_owned(ops->context,generation,1);if(e)return e;
  struct x9_gps_hif_ops saved_ops=*ops;
  bzero(h,sizeof(*h));h->layout=layout;h->ops=saved_ops;
@@ -84,6 +84,10 @@ static int hif_submit(struct x9_gps_hif *h,unsigned trans,const uint8_t *p,unsig
  if(busy&(1u<<4))return EAGAIN; /* no writes; one serial worker, no spin */
  unsigned ch=trans/2,desc=hif_desc(trans),buf=0x70+ch*4096;
  uint32_t id=h->id[trans]+1;
+ struct x9_gps_status status;x9_gps_copy_status(&status);
+ if(status.hardware_generation!=h->generation||status.fault)return hif_poison(h,ESTALE);
+ if(trans&1)h->rx_application_generation[ch]=
+     status.ready && status.tracking ? status.generation : 0;
  hif_write(h->ccif,4,1u<<4); /* W1S, never read-modify-write */
  if(!(trans&1))for(unsigned i=0;i<n;i++)h->ap[buf+i]=p[i];
  hif_barrier();
@@ -148,7 +152,8 @@ static int hif_timeouts(struct x9_gps_hif *h,uint64_t now)
 }
 static int hif_receive(struct x9_gps_hif *h,unsigned ch,unsigned n,uint64_t now)
 {
- if(ch) return x9_gps_mcudl_receive(&h->stream[ch-1],h->scratch,n,now);
+ if(ch) return x9_gps_mcudl_receive_epoch(&h->stream[ch-1],h->scratch,n,now,
+     h->rx_application_generation[ch]);
  /* Live Android cmd1 reply is exactly one byte 01. Optional status, when
   * present, must be zero. Unknown management replies never acknowledge us. */
  if(!n||n>2||!h->command||h->scratch[0]!=h->command)return ENOMSG;

@@ -49,6 +49,18 @@ struct x9_gps_status {
  uint32_t native_power_vsel_prior, native_power_control_prior;
  uint32_t native_power_selector_prior, native_power_ap_prior;
  int32_t native_power_errno;
+ /* Transport/power lifetime, independent of the application/output epoch
+  * above. Successful OPEN/START/STOP/cadence transitions do not rebind DMA
+  * or revoke an owned power request. Any uncertain transition faults BOTH
+  * epochs; retained descriptors/resources must not be reused afterwards. */
+ uint64_t hardware_generation;
+ uint64_t pvt_retired;
+ /* Native bus qualification AFTER aggregate acquisition, BEFORE BGF/POS
+  * mapping. Journal is not DMA/SYSRAM/secure EMI or receiver readiness. */
+ uint32_t bus_started, bus_complete, bus_wake_started, bus_wake_borrowed;
+ uint32_t bus_wake_prior, bus_wake, bus_detect_attempts, bus_detect;
+ uint32_t bus_version, bus_irq, bus_restore_required, bus_restore;
+ int32_t bus_errno;
 };
 struct x9_gps_nmea {
  uint64_t sequence, generation, host_time;
@@ -94,6 +106,9 @@ int x9_gps_deliver_position(uint64_t generation, const void *wire,
     unsigned length, uint64_t host_time);
 int x9_gps_next_position(uint64_t *cursor, struct x9_gps_position *position);
 void x9_gps_fault(uint64_t generation, int error);
+/* Physical/HIF fault, matched against hardware_generation rather than the
+ * current application's epoch. An old transport cannot fault a new owner. */
+void x9_gps_hardware_fault(uint64_t hardware_generation, int error);
 #ifdef __cplusplus
 }
 #endif

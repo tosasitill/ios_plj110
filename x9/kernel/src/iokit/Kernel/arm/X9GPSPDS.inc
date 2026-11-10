@@ -118,12 +118,18 @@ static bool x9g_send(uint32_t local, uint32_t port, const uint8_t *req, unsigned
    x9_gps_status s; x9_gps_copy_status(&s);
    /* The native client must distinguish a qualified LK layout from an
     * activated receiver. Never use layout_valid to grant a PDS lease. */
-   printf("X9 GPS PDS: hardware transition errno %d layout %u ready %u fault %u physical %u/%d\n",
-       e, s.layout_valid, s.ready, s.fault, s.physical_stage, s.physical_errno);
+   printf("X9 GPS PDS: hardware transition errno %d layout %u ready %u fault %u physical %u/%d app/hw epoch %llu/%llu\n",
+       e, s.layout_valid, s.ready, s.fault, s.physical_stage, s.physical_errno,
+       s.generation,s.hardware_generation);
    if(s.pvt_received)
-    printf("X9 GPS PDS: native PVT reports %llu no-fix %llu rejected %llu delivered %llu mask %x errno %d (not a readiness lease)\n",
-        s.pvt_received,s.pvt_no_fix,s.pvt_rejected,s.pvt_delivered,
+    printf("X9 GPS PDS: native PVT reports %llu no-fix %llu rejected %llu delivered %llu retired %llu mask %x errno %d (not a readiness lease)\n",
+        s.pvt_received,s.pvt_no_fix,s.pvt_rejected,s.pvt_delivered,s.pvt_retired,
         s.pvt_valid_mask,s.pvt_errno);
+   if(s.bus_started)
+    printf("X9 GPS PDS: native bus complete %u wake %u/%u detect %x attempts %u IP %x IRQ %x restore %u/%x errno %d (not DMA/EMI/receiver readiness)\n",
+        s.bus_complete,s.bus_wake_started,s.bus_wake_borrowed,s.bus_detect,
+        s.bus_detect_attempts,s.bus_version,s.bus_irq,s.bus_restore_required,
+        s.bus_restore,s.bus_errno);
    if(s.clock_started)
     printf("X9 GPS PDS: clock started %u set %u complete %u borrowed %u selector %x ap %x global %x busy %x done %x ack %x errno %d (not receiver readiness)\n",
         s.clock_started,s.clock_set_started,s.clock_complete,s.clock_borrowed,

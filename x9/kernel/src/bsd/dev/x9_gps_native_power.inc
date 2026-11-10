@@ -42,7 +42,7 @@ static int gps_np_generation(void)
 {
  if(current_thread()!=gps_rt.worker || !gps_np.generation)return EPERM;
  struct x9_gps_status s;x9_gps_copy_status(&s);
- return s.generation!=gps_np.generation || s.fault ? ESTALE : 0;
+ return s.hardware_generation!=gps_np.generation || s.fault ? ESTALE : 0;
 }
 static int gps_np_xfer(unsigned reg,uint8_t *value,int write)
 {

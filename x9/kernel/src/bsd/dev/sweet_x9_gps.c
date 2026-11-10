@@ -60,7 +60,7 @@ void x9_gps_init(void)
  int start = 0;
  lck_mtx_lock(&gps_control); lck_mtx_lock(&gps_lock);
  if (!active && sweet_early_is_x9() && sweet_x9_arg("x9_gps", (sweet_x9_arg("x9s", 0)&4) ? 1 : 0) == 1) {
-  active = 1; st.generation = 1; st.interval_ms = 1000;
+  active = 1; st.generation = st.hardware_generation = 1; st.interval_ms = 1000;
   gps_copy_layout();
   if (st.layout_valid) {
    st.physical_stage = X9_GPS_PHYSICAL_WAIT_CONNV2;
@@ -77,7 +77,7 @@ int x9_gps_register_backend(const struct x9_gps_backend *p)
  if (!p || (p->version != 1 && p->version != 2) || !p->set_state ||
      (p->version == 2 && p->position_supported > 1)) return EINVAL;
  lck_mtx_lock(&gps_control); lck_mtx_lock(&gps_lock);
- int e = !active ? ENXIO : hw.version ? EBUSY : 0;
+ int e = !active ? ENXIO : st.fault ? EIO : hw.version ? EBUSY : 0;
  if (!e) {
   /* Do not read the new tail of a version-1 descriptor. */
   hw.version = p->version; hw.set_state = p->set_state;
@@ -93,14 +93,27 @@ void x9_gps_copy_status(struct x9_gps_status *out)
  if (!out) return;
  lck_mtx_lock(&gps_lock); *out = st; lck_mtx_unlock(&gps_lock);
 }
+static void gps_fault_locked(int error)
+{
+ /* First fault revokes both epochs once. Preserve the earliest uncertainty;
+  * a second HIF/worker/PDS fault cannot hide it or create another owner. */
+ if (!st.fault) {
+  ++st.generation; ++st.hardware_generation;
+  st.last_errno = error ? error : EIO;
+ }
+ st.fault = 1; st.ready = st.enabled = st.tracking = 0;
+ head = count = position_head = position_count = 0;
+}
 void x9_gps_fault(uint64_t generation, int error)
 {
  lck_mtx_lock(&gps_lock);
- if (generation == st.generation) {
-  st.fault = 1; st.ready = st.enabled = st.tracking = 0; st.last_errno = error ? error : EIO;
-  ++st.generation; head = count = 0;
-  position_head = position_count = 0;
- }
+ if (generation && generation == st.generation) gps_fault_locked(error);
+ lck_mtx_unlock(&gps_lock);
+}
+void x9_gps_hardware_fault(uint64_t generation, int error)
+{
+ lck_mtx_lock(&gps_lock);
+ if (generation && generation == st.hardware_generation) gps_fault_locked(error);
  lck_mtx_unlock(&gps_lock);
 }
 int x9_gps_set_state(int enable, int tracking, uint32_t interval_ms)
@@ -123,9 +136,9 @@ int x9_gps_set_state(int enable, int tracking, uint32_t interval_ms)
  if (!e) { st.enabled = (uint32_t)enable; st.tracking = (uint32_t)tracking; st.interval_ms = interval_ms; }
  else {
   /* Uncertain transition quarantines output; no success ACK to iOS. */
-  st.ready = st.enabled = st.tracking = 0; st.fault = 1; ++st.generation;
+  gps_fault_locked(e);
  }
- st.last_errno = e;
+ if (!st.fault) st.last_errno = e;
 done:
  lck_mtx_unlock(&gps_lock); lck_mtx_unlock(&gps_control);
  return e;
