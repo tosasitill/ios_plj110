@@ -84,6 +84,7 @@
  * No global entitlement bypass or ownership/ABI changes to other bind mounts. */
 extern int sweet_x9_baseband_boot_mount_allowed(const char *source);
 extern int sweet_x9_microphone_boot_mount_allowed(const char *source);
+extern int sweet_x9_haptic_boot_mount_allowed(const char *source);
 #endif
 
 #define BINDFS_ENTITLEMENT "com.apple.private.bindfs-allow"
@@ -169,6 +170,7 @@ bindfs_mount(struct mount * mp, __unused vnode_t devvp, user_addr_t user_data, v
 #if defined(ARM64_BOARD_CONFIG_SWEET)
 	    && !sweet_x9_baseband_boot_mount_allowed(data)
 	    && !sweet_x9_microphone_boot_mount_allowed(data)
+	    && !sweet_x9_haptic_boot_mount_allowed(data)
 #endif
 	    ) {
 		error = EPERM;

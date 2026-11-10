@@ -71,6 +71,15 @@ X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>      # 之后再�
 
 **上机流程**:用户把手机 `fastboot boot x9/out/<name>/boot.img`,跑场景,日志放 Mac `~/N.txt`,我读。永不 `fastboot getvar`。
 
+## 振动驱动活动交接（HAPTIC-1，2026-11-10）
+
+- 独立树 `.local/x9/worktrees/haptic-final` / `work/x9-haptic-final`，固定起点 `f069ed2`；主线其他窗口修改未覆盖。用户目标仍是完整振动驱动、iOS 场景转换和最终一个镜像，不以手动振一下或 HAL 枚举代替完成。
+- 已接原生 I2C5/AW8693XS、GPIO30 reset、178/179 pad、east clock/FIFO transport、devfs generation/sequence PCM、worker 与关闭读回；依据既有 captured live.dts、Android 173Hz/2048 FIFO 日志及本地 OPPO aw8693xs/clk/pinctrl/i2c 源码。未知 I2C transaction 锁存，专用 reset 仅作故障停机；不触 APDMA/global IRQ/分区/固件 efuse。
+- iOS 参照本地 HakiOS 的 `Actuator`/S16 mono 与 `/product/haptics` closed-loop/third-party 路径，不改 Apple Framework、不猜私有 SystemSoundID、不 swizzle UIKit；48k→12k 有 raw/173Hz envelope-retune，18 类显式 scene 辅助 ABI。连续 PCM engine 可跨空闲保持 generation；1s on/1s cool 的转换单独记录 throttled_rtp_frames，不能称全部原样播放。
+- 完整签名 own-code `X9Haptic.driver` 的 four-file embedding、独立 PID1 read-only HAL union、精确 mount caller/source 例外与 boot metadata 已落代码；复用既有 microphone 的原生安装规范，保留 BuiltinAudioPlugin。尚未执行设备安装/播放，也未证明多层 HAL union 或 iOS scene 的实际选择。
+- 本地单位编译：haptic/ufs 两对象 exit0（旧声明/类型 cast 等 36 warnings）；HAL 首轮因 SDK 没有 StreamConfiguration 高层 selector 失败，去掉该非 HAL selector 后 hal-2/hal-3 均 signed embedding exit0。最新生命周期/占空/host-time 修改须由接下来的完整 build 覆盖，不能沿用旧单位结果当最终验证。没有测试脚本/套件/设备操作；`gh run list --commit f069ed2`=[]，无 CI run。
+- 私有材料 `.local/x9/work/haptic-final-20261110/`：compile-haptic.py、compile-1/2.log、hal-1/2/3.log 与 bundle、local-config.json、boot-config.json。配置沿 microphone-final 的原基线，只加 x9_haptic=2（617B），保留真实 Wi-Fi/NVRAM/BT/MDOTA/CBN 与外置 BBFW/root manifest，插件276不改。下一步固定此树完整 all 编译/boot 打包，仅输出一份供用户手动 boot；不得二次解包/hash/反汇编或运行测试套件。当前无新 boot，goal active。
+
 ## 3. 当前基线镜像与参数
 
 - **当前蜂窝测试候选(131，ADSP loader关闭)**：`x9/out/x9-cell131-noadsp-loader-md/boot.img`。**原样复用130内核0cbd413**，只有shim3430b74的ADSP调用默认关闭（main对应11e192e）；未混入之后camera/MIC DMA/GPS17等并发改动。正常shim编译/boot打包exit0，构建器报告**13508608B**，原603B/32GiB/真实MDOTA/CBN/Wi-Fi及蜂窝b122b7a保持。**插件276、无需mailbox；189已实测启动恢复／两卡信号和5G出现，但PDP/切卡仍失败**；不是关闭全部音频内核/HAL。详见CELL189-PROFILE及CELL131-NOADSP。

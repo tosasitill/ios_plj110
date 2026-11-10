@@ -61,7 +61,7 @@ def node(name, props=(), children=()):
 
 
 def build(seed=None, timebase=TIMEBASE, console_base=0, console_size=0, ram_window="legacy512", wlan=False,
-          baseband=False, torch=False):
+          baseband=False, torch=False, haptic=False):
     if ram_window not in RAM_WINDOWS:
         raise ValueError("unknown captured X9 RAM window")
     phys_base, mem_size = RAM_WINDOWS[ram_window]
@@ -151,6 +151,11 @@ def build(seed=None, timebase=TIMEBASE, console_base=0, console_size=0, ram_wind
     fb = node('sweet-fbcon', [ph(), ('reg', u64(FB, FB_SIZE)),
         ('width', u32(FB_W)), ('height', u32(FB_H)), ('stride', u32(FB_STRIDE))])
     product = node('product', [ph()] + product_properties())
+    if haptic:
+        # HakiOS D22 Actuator discovery. Physical READY is separately gated
+        # by the native HAL; these are capabilities, not Apple GPIO/MMIO.
+        product.children.append(node('haptics', [ph(), ('closed-loop', u32(1)),
+            ('supports-3rd-party-haptics', u32(1))]))
     if torch:
         # D22AP camera-flash discovery, as in hackios. Only advertise a flash,
         # not a supported ISP/capture camera or any Apple MMIO/GPIO routing.
@@ -187,10 +192,11 @@ def main():
     ap.add_argument('--ram-window', choices=RAM_WINDOWS, default='legacy512')
     ap.add_argument('--baseband', action='store_true', help='include D22AP cellular discovery metadata (no hardware driver)')
     ap.add_argument('--torch', action='store_true', help='advertise flash capability for x9_torch=3 integration')
+    ap.add_argument('--haptic', action='store_true', help='enable closed-loop/native Actuator discovery')
     ap.add_argument('--dump', action='store_true')
     a = ap.parse_args()
     root = build(timebase=a.timebase, console_base=a.console_base, console_size=a.console_size, ram_window=a.ram_window,
-                 baseband=a.baseband, torch=a.torch)
+                 baseband=a.baseband, torch=a.torch, haptic=a.haptic)
     a.out.parent.mkdir(parents=True, exist_ok=True)
     blob = adt.serialize(root)
     a.out.write_bytes(blob)

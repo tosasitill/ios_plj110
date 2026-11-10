@@ -6223,6 +6223,11 @@
    "template": "bsd-c-4"
   },
   {
+   "name": "sweet_x9_haptic.o",
+   "source": "bsd/dev/sweet_x9_haptic.c",
+   "template": "bsd-c-4"
+  },
+  {
    "name": "sweet_x9_gps.o",
    "source": "bsd/dev/sweet_x9_gps.c",
    "template": "bsd-c-4"

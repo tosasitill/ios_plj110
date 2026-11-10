@@ -360,6 +360,7 @@ xnu:bsd/DEVELOPMENT/sweet_keys.o
 x9:sweet_touch.o
 x9:sweet_x9_touch.o
 x9:sweet_x9_torch.o
+x9:sweet_x9_haptic.o
 x9:sweet_x9_camera.o
 x9:x9_mm_power.o
 x9:sweet_x9_microphone.o
