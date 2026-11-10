@@ -40,6 +40,15 @@ struct x9_gps_status {
  uint32_t clock_prior, clock_selector, clock_ap, clock_global;
  uint32_t clock_busy, clock_done, clock_ack;
  int32_t clock_errno;
+ /* Native power SUBlease journal, not the aggregate connv2/PDS lease.
+  * phase is a latched history: mapped1/rail2/selector4/HWV8/complete16.
+  * No power sublease grants access to BGF DMA/SYSRAM or secure EMI. */
+ uint32_t native_power_phase, native_power_vsel_write;
+ uint32_t native_power_control_write, native_power_selector_write;
+ uint32_t native_power_rc, native_power_clock;
+ uint32_t native_power_vsel_prior, native_power_control_prior;
+ uint32_t native_power_selector_prior, native_power_ap_prior;
+ int32_t native_power_errno;
 };
 struct x9_gps_nmea {
  uint64_t sequence, generation, host_time;

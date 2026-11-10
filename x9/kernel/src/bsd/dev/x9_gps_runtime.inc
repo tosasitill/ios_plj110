@@ -8,6 +8,7 @@
 #include <kern/sched_prim.h>
 #include <mach/mach_types.h>
 #include "x9_ufs/sha256.h" /* existing linked SHA256, no duplicate crypto */
+#include "x9_gps_native_power.h"
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 extern kern_return_t thread_terminate(thread_t);
 static LCK_MTX_DECLARE(gps_runtime_lock, &gps_group);
@@ -633,3 +634,4 @@ int x9_gps_register_connv2(const struct x9_gps_connv2_ops *ops)
  }
  lck_mtx_unlock(&gps_runtime_lock); return e;
 }
+#include "x9_gps_native_power.inc"
