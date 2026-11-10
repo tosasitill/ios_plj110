@@ -108,6 +108,7 @@ def main():
         'vendor_tables': bool(a.vendor_root), 'platform_adapter': False,
         'sensor_probe_backend': 'MT6993 cold AP FIFO/WL28681C; shared providers required',
         'sensor_standby_backend': 'explicit mode3 cold init/preview + stable readback + restore',
+        'front_fab_backend': 'fixed page7f read-port, bounded exit, conditional B4 init patch',
         'sensor_factory_calibration': False,
         'hardware_tested': False}, indent=2) + '\n')
     print(f'X9 camera: {len(data)} bytes; explicit cold probe/standby, no capture adapter; install only with x9_camera=2', flush=True)

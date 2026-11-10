@@ -10,7 +10,11 @@ static int cam_sensor_ap_read(void *context, uint16_t reg, uint8_t *v)
 static int cam_sensor_ap_write(void *context, uint16_t reg, uint8_t v)
 {
     struct cam_sensor_ap *ap=context;
-    if(cam_sensor_forbidden(reg) && reg!=0x0101)return EPERM;
+    /* Tables still cannot contain OTP. Only the known front read-port
+     * commands have an exception; no arbitrary programming or page selector. */
+    bool fab=ap->slave==0x10 && ((reg==0x0a02 && v==0x7f) || (reg==0x0a00 && v<=1));
+    bool mirror=reg==0x0101 && v==(ap->slave==0x1a?3:0);
+    if(cam_sensor_forbidden(reg) && !mirror && !fab)return EPERM;
     const uint8_t tx[3]={(uint8_t)(reg>>8),(uint8_t)reg,v};
     return cam_bus_transfer(ap->bus,ap->slave,tx,3,NULL);
 }

@@ -12,7 +12,7 @@
 | 软件 ISP | HakiOS MIT 软件去马赛克、灰世界 AWB、AE、sRGB、NV12/BGRA；不使用高通 Chromatix；CCM 为单位矩阵，无 LSC |
 | iOS | HakiOS `CMDerivedObjectCreate` 设备类 v3/流类 v2，前后 `FigCaptureStream`；输出池、PixelBufferHandler、帧 metadata；先确认真实 start 再返回成功 |
 | sensor-probe | MT6993 CAMTG voter/parent 申请与释放、AP I2C 单控制器门控/FIFO/WRRD；WL28681C 指定通道电压/启停；reset/MCLK pinmux；真实 ID 检查与恢复日志。闲置 AP timing 初始化、禁用共享 rail 的申请/还原、GPIO203 局部唤醒。**仍要求共享时钟/HWCCF provider 已就绪，未上机验证** |
-| sensor-standby | 同一冷启动 journal 内，ID 匹配后经真实 AP I2C 写 init/preview 与镜像，读回 RAW10/尺寸/PLL/行帧长/曝光/增益/VC 控制，然后 reset/恢复。mode3 显式命令；与未来 mode2 共用表验证/加载/读回。**不 stream-on、不做前摄 fab 或 QSC/LRC 标定；未上机** |
+| sensor-standby | 同一冷启动 journal 内，ID 匹配后经真实 AP I2C 写 init/preview 与镜像；前摄先做固定 fab 读端口识别，仅 B4/01 分支追加两项 init patch；读回稳定控制，然后 reset/恢复。mode3 显式命令；与未来 mode2 共用表验证/加载/读回。**不 stream-on、不做 QSC/LRC 标定；未上机** |
 | SENINF/CAMSV 计划 | 零 MMIO 查询实际 CSI 端口、VC0/RAW10、候选 outmux/CAMSV、尺寸/64B stride/WDMA 打包及 SID；**不是资源申请或采集** |
 | 接收电源接口 | TF-A MM-SMMU `PM_GET/PM_PUT`、CSI_BS_RX MM HWCCF 单 bit 申请/恢复；带供电前置检查的 SMMUv3 只读快照。**代码已构建，未上机；不是完整 MM power/clock provider 或 DMA mapping** |
 | MM 寄存器时钟事务 | 显式 AO/infra0/VMM BACKUP 引用、CAM_VCORE/MAIN/MRAW 域、CAM autolink FENC、CAMTM/SENINF voter、CAM/CAMSV 寄存器 CG 申请/逆序恢复。**未上机；不改共享 AVS/CVFS/PLL，不申请 SMI larb，不证明采集速率** |
@@ -105,6 +105,10 @@ cameractl probe front
 阶段编号：`1=preflight`、`2=PMIC`、`3=bus`、`4=LDO`、`5=power`、`6=ID`、`7=restore`、`8=done`，追加 `9=clock`、`10=config`（不改旧编号）。
 一次 AP FIFO 请求最多约 5ms，单次 PMIF 状态等待最多约 1ms，DA 另有最多20次/100µs有界采样；单次 HWCCF DONE 等待最多 10ms，AP EN 最多 200µs，CKSTA/FENC 最多 1ms。未知继承状态不清 IRQ、不做总线 reset/retry。
 失败后先把 sensor reset 拉低、断开 MCLK，再按真实反向顺序撤 DOVDD、WL DVDD、AF/AVDD（前摄 DOVDD 在 DVDD 之后），恢复仅自己改过的电压/引脚/14个控制寄存器/单控制器门控，撤销 CAMTG vote 并在无人使用时还原 parent，最后撤自己的 VS vote。共享 rail 的 EN_CLR 确认/DA-off 后才恢复原 selector；已有 live rail 不动。继承投票和其他通道保持；恢复失败保留 journal、锁存并明确报告，不声称资源已恢复。
+
+**恢复采用首错即停的依赖屏障**：reset-low 和 MCLK-off 均确认后才撤供电；任一 rail/WL 通道失败不再撤更早启用的 supply，也不恢复 pins/撤 bus、clock、VS。sensor bus 或 gate 恢复失败，不继续撤 WL bus、AP routes 或 CAMTG。PMIF pending/fault 先尝试本地 reset/MCLK 隔离，再保留依赖退出，不冒领后来响应。此前“累计错误但继续恢复”会破坏保留依赖，这一行为已修正。
+
+GET_STATUS 仍为 **88B**，原 reserved 前两字现为 `cold_retained/cold_restore_step`；旧工具和 ioctl 尺寸兼容。它们是最后冷事务的**软件 journal 缓存，不是实际硬件状态或 lease**。保留 mask：`1=pins`、`2=MCLK mux/vote`、`4=sensor bus/gate`、`8=WL bus/gate`、`16=WL rails`、`32=DOVDD`、`64=AFVDD`、`128=VS`、`256=WL wake`、`512=AP routes`、`1024=PMIF fault/pending`。restore_step：1=quiesce、2=DOVDD、3=WL（日志另给 channel）、4=AFVDD、5=wake、6=pins、7=sensor bus、8=WL bus、9=routes、10=clock、11=VS、13=PMIF；成功时缓存 step=0。失败看 `X9 CAMERA COLD RESTORE`，不在同一 boot 重试。
 **这补齐了冷启动供电/AP timing 的局部 ownership，但共同 I2C clock FENC/HWCCF autolink 仍要求已就绪；未知 HW/EINT 用户或 SCP owner 会拒绝。没有本轮实机 ID，不能宣称冷 LK 已全部打通，更不是可拍摄镜像。**
 
 ### CAMTG 时钟申请和诊断
@@ -141,11 +145,19 @@ cameractl standby front
 
 1. 本地表长度/字节值/禁止寄存器检查，并检查最终 RAW10、尺寸、binning、PLL、行/帧长、曝光、增益、VC 关键值；不访问 MMIO。
 2. 复用原冷启动/AP timing/共享 rail journal，读取真实 `0x16/0x17` ID。匹配后仍持有同一供电/总线，不先恢复再另行上电。
-3. 读取 `0x0100` 与 `0x0104`，均为0才开始写表。逐个 reg16/data8 FIFO 写 init/preview，再写镜像（主3/前0）。**从不写 `0x0100/0x0103/0x0104`、OTP、EEPROM、AF/OIS**。生成器和内核均拒绝这些表项，镜像只能独立写入固定值。
-4. 按稳定控制白名单读回，主 **41** 个、前 **38** 个字节（包括再次检查 stream/hold）。不尝试读回全部厂商 microcode/write-only 命令。每个 I2C 请求≤约5ms，配置段总 deadline5s，超时不重试；恢复使用原独立有界流程。
-5. 无论中途写入/读回是否失败，均调用原 `cam_restore`：先 reset-low/MCLK-off，再逆序恢复自己的供电、引脚、AP timing/gate/vote。恢复失败保留 journal、FAULT/RETAINED，不在 close 或另一 sensor 上重试。
+3. 读取 `0x0100` 与 `0x0104`，均为0才开始配置。前摄先执行下面的固定 fab 分支，再逐个 reg16/data8 FIFO 写 init/preview 和镜像（主3/前0）。**从不写 `0x0100/0x0103/0x0104`、OTP programming、EEPROM、AF/OIS**。生成器和内核仍拒绝 OTP 表项；仅已匹配前摄的固定 read-port 命令有独立例外，镜像也只能独立写固定值。
+4. 按稳定控制白名单读回，主 **41** 个、前普通分支 **38** 个、B4 分支 **40** 个字节（额外两项 patch，包括再次检查 stream/hold）。不读回全部厂商 microcode/write-only 命令。每个 I2C 请求≤约5ms，配置段总 deadline5s，调用前后检查预算；超时不重试、不继续 init。fab read-port exit 可独立进行一次≤约5ms清理写，不是延长初始化预算。
+5. 无论中途写入/读回是否失败，均调用 `cam_restore`：先 reset-low/MCLK-off，再逆序恢复自己的依赖；任一恢复失败立即停在该屏障，保留 journal、FAULT/RETAINED，不在 close 或另一 sensor 上重试。
 
-结果包括原80B probe、独立操作/恢复错误、成功/尝试写入数、决定阶段/寄存器/index、expected/observed 与逐字节读数；`observed=ffffffff` 表示未读，不能当硬件值。index 在 init/preview 阶段为表 pair offset，在 readback 阶段为 sample offset。阶段：1=table-check、2=cold（详看内嵌 probe.stage）、3=idle、4=init、5=preview、6=mirror、7=readback、8=restore、9=done。
+结果包括原80B probe、独立操作/恢复错误、成功 ACK/实际尝试写入数、决定阶段/寄存器/index、expected/observed 与逐字节读数；`observed=ffffffff` 表示没有被接受的读数，不能当硬件值。预算耗尽而未发出的写不计 attempted；成功 ACK 即使随后发现总预算耗尽也计 written，但仍返回超时。index 在 init/preview 阶段为表 pair offset，在 readback 阶段为 sample offset。阶段1..9不变：1=table-check、2=cold、3=idle、4=init、5=preview、6=mirror、7=readback、8=restore、9=done；追加10=fab、11=fab-exit、12=fab-patch。
+
+### 前摄 fab 分支
+
+依据公开 `hhfrontmipiraw_Sensor.c::Imx615_fab_read`，在芯片 ID 已匹配且确认 standby 后，仅写 `0x0a02=0x7f`、`0x0a00=1`，等1ms，单次读取 `0x0a01/0x0a1f/0x0a20`。ready=1 且 fab=`b4/01` 时再等2ms；尝试开启读端口后，**任何分支及错误都单次尝试 `0x0a00=0` 退出**，退出成功才加载 init，不把 I2C 错误冒充 fab 字节。厂商 ready!=1 分支未显式关闭读端口，本实现也会关闭，不复制这一遗漏。若总预算已过，不再进入 init；硬件 reset/供电恢复仍独立执行。
+
+B4/01 分支在 init 后、preview 前仅写 `0x574b=1`、`0x5765=0x33`，并纳入最后稳定读回。静态 preflight 拒绝会无条件写入/覆盖这两项的前摄表。普通分支不写 patch；读取成功但 ready!=1 时按厂商 fallback 使用普通表，**不宣称识别到 B4**。此处是 OTP **read-port**，不读 EEPROM/QSC/LRC，不进行 OTP programming、page 扫描或重试。
+
+新增 flags `0x80=FAB_READ`（三字节已读且退出写获 ACK）、`0x100=FAB_B4`（识别到 B4 分支，是否 patch 完成还须 WRITTEN/VERIFIED）。退出寄存器没有强行读回，ACK 不冒充额外硬件状态观察；事务最终还必须通过 reset/供电恢复。`X9 CAMERA FAB` 日志保留成功读字节数、raw ready/fab、原错误与独立 port_exit 错误；未读字节的零不能当结果。预期成功写入数：主930；前普通 **336**（333+三个读端口命令），前 B4 **338**（再加两项 patch）。稳定 read_count 不包括先前三个 fab 观察字节。完整成功 flags 主3f、前普通bf、前B4为1bf；这些是验收条件，不是已上机结果。
 
 厂商模式的主要核对项：
 
@@ -157,14 +169,14 @@ cameractl standby front
 | sensor PLL `0306/030e` | `016e / 0226` | `010e / 0438` |
 | vendor nominal pclk | 2196000000 | 864000000 |
 
-标称 pclk、sensor PLL 读回或 `VERIFIED` **不是实测 lane/trio 速率、PHY 校准或 rate lease**。主 preview 包含 PDAF/额外 VC，写表不代表接收器已过滤为纯 VC0。此路径不执行 vendor open 中的主摄 AF 激活/QSC、前摄 `Imx615_fab_read` OTP/fab 变体和 QSC/LRC，因此只称 **未标定 nominal standby**，不能称厂商完整 open 或成像质量验证。blockers `1=factory/fab`、`2=receiver`、`4=DMA mapping`、`8=drain` 不因读回成功清除。
+标称 pclk、sensor PLL 读回或 `VERIFIED` **不是实测 lane/trio 速率、PHY 校准或 rate lease**。主 preview 包含 PDAF/额外 VC，写表不代表接收器已过滤为纯 VC0。前摄 fab 分支已接入，但 vendor open 中的主摄 AF 激活/QSC 与 QSC/LRC 标定仍未执行，因此只称 **未标定 nominal standby**，不能称厂商完整 open 或成像质量验证。blockers `1=factory/calibration`、`2=receiver`、`4=DMA mapping`、`8=drain` 不因读回成功清除。
 
 成功后器件已 reset/恢复原供电，**配置不持久、READY/supported仍0、不能拍摄**。未来 mode2 的 start 共用同一 preflight/表加载/稳定读回，再交由真实 capture provider 建立 CSI/DMA，最后才 stream-on；目前无该 provider。
 
 读用户本次日志与缓存（无需自动操作设备）：
 
 ```bash
-rg -n 'X9 CAMERA (STANDBY|PROBE|COLD|CLOCK)' ~/N.txt
+rg -n 'X9 CAMERA (STANDBY|FAB|PROBE|COLD|CLOCK)' ~/N.txt
 ```
 
 先按该次日志证明 ID→表写→读回→恢复的完整路径，再接 rate/SMI/SMMUv3 owner 与 SENINF/CAMSV，不把构建成功当作硬件验收。

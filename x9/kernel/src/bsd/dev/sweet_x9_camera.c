@@ -69,6 +69,7 @@ static const struct x9_camera_sensor sensors[] = {
 #include "x9_camera_standby.inc"
 #include "x9_camera_mm.inc"
 #include "x9_camera_receiver.inc"
+_Static_assert(sizeof(struct x9_camera_status)==88,"camera status ABI");
 static const struct x9_camera_sensor *sensor(void) { return &sensors[st.sensor-1]; }
 static int read16(const struct x9_camera_sensor *s, uint16_t reg, uint32_t *v)
 {
@@ -260,6 +261,10 @@ static int cam_ioctl(__unused dev_t d,u_long cmd,caddr_t data,int f,__unused str
         }
         if(r.flags&X9_CAM_CFG_LATCHED)st.flags|=X9_CAMERA_FAULT;
         if(r.restore_errno)st.flags|=X9_CAMERA_RETAINED;
+        if(r.flags&X9_CAM_CFG_ATTEMPTED) {
+            st.cold_retained=cam_cold_retained(&cam_journal);
+            st.cold_restore_step=r.restore_errno?cam_journal.restore_step:0;
+        }
         /* Verified sensor standby does not confer receiver/translation ownership. */
         lck_mtx_unlock(&camera_lock);memcpy(data,&r,sizeof(r));
         lck_mtx_unlock(&camera_control_lock);return 0;
@@ -344,6 +349,11 @@ static int cam_ioctl(__unused dev_t d,u_long cmd,caddr_t data,int f,__unused str
         st.flags|=X9_CAMERA_PROBED;
     }
     if(r->flags&X9_CAM_PROBE_LATCHED)st.flags|=X9_CAMERA_FAULT;
+    if(r->restore_errno)st.flags|=X9_CAMERA_RETAINED;
+    if(r->flags&X9_CAM_PROBE_ATTEMPTED) {
+        st.cold_retained=cam_cold_retained(&cam_journal);
+        st.cold_restore_step=r->restore_errno?cam_journal.restore_step:0;
+    }
     /* supported_mask and READY stay zero: a probe cannot capture. */
     lck_mtx_unlock(&camera_lock);lck_mtx_unlock(&camera_control_lock);
     return 0; /* operation/restore errors are in the copied-out result */

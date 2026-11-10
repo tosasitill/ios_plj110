@@ -1,7 +1,8 @@
 /* Common bounded sensor table/readback path. No MMIO or platform registration.
  * Expected controls are public hhmain/hhfront preview mode facts, not a copied
  * vendor initialization program. Generated register tables stay out of git.
- * This is nominal standby only: no QSC/LRC, front fab OTP or AF/OIS access. */
+ * Front fab read follows hhfront Imx615_fab_read; no QSC/LRC or AF/OIS access.
+ * Read-port exit is attempted once before reset/power restore, even on timeout. */
 _Static_assert(sizeof(struct x9_camera_config)==720,"camera config ABI");
 struct cam_sensor_io {
     void *context;
@@ -83,27 +84,85 @@ static int cam_sensor_config_preflight(uint32_t which, struct x9_camera_config *
             return EINVAL;
         }
     }
+    if(!back) {
+        /* The two fab-dependent patches belong AFTER init and BEFORE preview.
+         * Reject a changed table that would unconditionally apply/undo them. */
+        const uint16_t patch[]={0x574b,0x5765};
+        for(unsigned i=0;i<2;i++) {
+            uint32_t value=UINT32_MAX;
+            if(!cam_sensor_table_value(t,patch[i],&value)) {
+                r->reg=patch[i];return EINVAL;
+            }
+        }
+    }
     r->flags|=X9_CAM_CFG_TABLE_VALID;return 0;
 }
 static int cam_sensor_io_read(struct cam_sensor_io *io, uint16_t reg, uint8_t *v)
 {
     if(mach_absolute_time()>=io->deadline)return ETIMEDOUT;
-    return io->read(io->context,reg,v);
+    int e=io->read(io->context,reg,v);
+    if(!e && mach_absolute_time()>=io->deadline)e=ETIMEDOUT;
+    return e;
 }
-static int cam_sensor_io_write(struct cam_sensor_io *io, uint16_t reg, uint8_t v)
+static int cam_sensor_config_write(struct cam_sensor_io *io, uint16_t reg, uint8_t v,
+                                    struct x9_camera_config *r, bool cleanup)
 {
+    r->reg=reg;r->expected=v;r->observed=UINT32_MAX;
+    if(!cleanup && mach_absolute_time()>=io->deadline)return ETIMEDOUT;
+    r->attempted++; /* BEFORE possibly ambiguous I2C write, not a pre-budget rejection */
+    int e=io->write(io->context,reg,v);
+    if(!e)r->written++; /* An ACK still counts if the total budget expired meanwhile. */
+    if(!e && !cleanup && mach_absolute_time()>=io->deadline)e=ETIMEDOUT;
+    return e;
+}
+static int cam_sensor_front_fab(struct cam_sensor_io *io, struct x9_camera_config *r)
+{
+    /* hhfront open: read page7f, wait1ms, read ready/fab, optional2ms,
+     * close read port, init, patch574b/5765 only for ready1/b4/01.
+     * No scan, OTP programming or repeated polls. I2C errors are NOT bytes. */
+    uint8_t fab[3]={0};bool port_attempted=false;
+    r->stage=X9_CAM_CFG_FAB;r->table_index=0;
+    int e=cam_sensor_config_write(io,0x0a02,0x7f,r,false);
+    if(!e) {
+        port_attempted=true; /* before enable, including ambiguous enable */
+        e=cam_sensor_config_write(io,0x0a00,1,r,false);
+    }
+    if(!e)delay(1000);
+    const uint16_t reg[]={0x0a01,0x0a1f,0x0a20};
+    unsigned read=0;
+    for(unsigned i=0;i<3 && !e;i++) {
+        r->table_index=i;r->reg=reg[i];r->expected=UINT32_MAX;r->observed=UINT32_MAX;
+        e=cam_sensor_io_read(io,reg[i],&fab[i]);
+        if(!e){r->observed=fab[i];read++;}
+    }
+    bool b4=!e && fab[0]==1 && fab[1]==0xb4 && fab[2]==1;
+    if(b4)delay(2000);
+    int off=0;
+    uint32_t index=r->table_index,failed_reg=r->reg,expected=r->expected,observed=r->observed;
+    if(port_attempted) {
+        r->stage=X9_CAM_CFG_FAB_EXIT;r->table_index=0;
+        /* Cleanup is one independently bounded transfer, not a retry or
+         * continuation of init past its deadline. Reset restore still follows. */
+        off=cam_sensor_config_write(io,0x0a00,0,r,true);
+    }
+    printf("X9 CAMERA FAB: read=%u ready/fab=%02x/%02x/%02x variant=%u errno=%d port_exit=%d (front-only read port, no calibration)\n",
+        read,fab[0],fab[1],fab[2],b4,e,off);
+    if(e) {
+        r->stage=X9_CAM_CFG_FAB;r->table_index=index;r->reg=failed_reg;
+        r->expected=expected;r->observed=observed;return e;
+    }
+    if(off)return off;
     if(mach_absolute_time()>=io->deadline)return ETIMEDOUT;
-    return io->write(io->context,reg,v);
+    r->flags|=X9_CAM_CFG_FAB_READ;
+    if(b4)r->flags|=X9_CAM_CFG_FAB_B4;
+    return 0;
 }
 static int cam_sensor_load_table(struct cam_sensor_io *io, const uint16_t *p,
                                  uint32_t n, struct x9_camera_config *r)
 {
     for(uint32_t i=0;i<n;i+=2) {
-        r->table_index=i/2;r->reg=p[i];r->expected=p[i+1];r->observed=UINT32_MAX;
-        /* Attempted precedes I2C: a failure can follow an ambiguous write. */
-        r->attempted++;
-        int e=cam_sensor_io_write(io,p[i],(uint8_t)p[i+1]);if(e)return e;
-        r->written++;
+        r->table_index=i/2;
+        int e=cam_sensor_config_write(io,p[i],(uint8_t)p[i+1],r,false);if(e)return e;
     }
     return 0;
 }
@@ -122,14 +181,24 @@ static int cam_sensor_configure(struct cam_sensor_io *io, uint32_t which,
         int e=cam_sensor_io_read(io,idle[i],&v);if(e)return e;
         r->observed=v;if(v)return EBUSY;
     }
-    r->flags|=X9_CAM_CFG_STANDBY;r->stage=X9_CAM_CFG_INIT;
-    int e=cam_sensor_load_table(io,t.init,t.ni,r);
+    r->flags|=X9_CAM_CFG_STANDBY;
+    int e=which==X9_CAMERA_FRONT?cam_sensor_front_fab(io,r):0;if(e)return e;
+    r->stage=X9_CAM_CFG_INIT;e=cam_sensor_load_table(io,t.init,t.ni,r);
+    if(!e && (r->flags&X9_CAM_CFG_FAB_B4)) {
+        r->stage=X9_CAM_CFG_FAB_PATCH;r->table_index=0;
+        e=cam_sensor_config_write(io,0x574b,1,r,false);
+        if(!e){r->table_index=1;e=cam_sensor_config_write(io,0x5765,0x33,r,false);}
+        if(!e) {
+            uint32_t n=0;while(n<X9_CAM_CFG_SAMPLES && r->sample[n].reg)n++;
+            if(n+2>X9_CAM_CFG_SAMPLES)return EOVERFLOW;
+            cam_sensor_sample(r,&n,0x574b,1);cam_sensor_sample(r,&n,0x5765,0x33);
+        }
+    }
     if(!e){r->stage=X9_CAM_CFG_PREVIEW;e=cam_sensor_load_table(io,t.preview,t.np,r);}
     if(e)return e;
-    r->stage=X9_CAM_CFG_MIRROR;r->reg=0x0101;r->expected=which==1?3:0;
-    r->table_index=0;r->observed=UINT32_MAX;r->attempted++;
-    e=cam_sensor_io_write(io,0x0101,(uint8_t)r->expected);if(e)return e;
-    r->written++;r->flags|=X9_CAM_CFG_WRITTEN;r->stage=X9_CAM_CFG_READBACK;
+    r->stage=X9_CAM_CFG_MIRROR;r->table_index=0;
+    e=cam_sensor_config_write(io,0x0101,which==1?3:0,r,false);if(e)return e;
+    r->flags|=X9_CAM_CFG_WRITTEN;r->stage=X9_CAM_CFG_READBACK;
     /* Read only stable controls, NOT vendor microcode/write-only commands.
      * First two samples recheck stream/hold after all table writes. */
     for(unsigned i=0;i<X9_CAM_CFG_SAMPLES && r->sample[i].reg;i++) {

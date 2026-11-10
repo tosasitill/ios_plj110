@@ -16,8 +16,28 @@ struct x9_camera_status {
     uint32_t version, mode, flags, supported_mask;
     uint32_t sensor, last_errno, width, height;
     uint64_t generation, frames, rejected;
-    uint32_t chip_id[2], probe_mask, probe_flags, reserved[4];
+    uint32_t chip_id[2], probe_mask, probe_flags;
+    /* Former reserved[4]; unchanged 88B ABI. Cached journal, NOT MMIO or
+     * actual rail/clock state. Only nonzero after incomplete cold restore. */
+    uint32_t cold_retained, cold_restore_step, reserved[2];
 };
+#define X9_CAM_COLD_PINS 1u
+#define X9_CAM_COLD_MCLK 2u
+#define X9_CAM_COLD_SENSOR_BUS 4u
+#define X9_CAM_COLD_WL_BUS 8u
+#define X9_CAM_COLD_WL_RAILS 16u
+#define X9_CAM_COLD_DOVDD 32u
+#define X9_CAM_COLD_AFVDD 64u
+#define X9_CAM_COLD_VS 128u
+#define X9_CAM_COLD_WAKE 256u
+#define X9_CAM_COLD_ROUTES 512u
+#define X9_CAM_COLD_PMIF 1024u
+enum x9_camera_cold_restore_step { X9_CAM_COLD_NONE, X9_CAM_COLD_QUIESCE,
+    X9_CAM_COLD_RESTORE_DOVDD, X9_CAM_COLD_RESTORE_WL, X9_CAM_COLD_RESTORE_AFVDD,
+    X9_CAM_COLD_RESTORE_WAKE, X9_CAM_COLD_RESTORE_PINS, X9_CAM_COLD_RESTORE_SENSOR_BUS,
+    X9_CAM_COLD_RESTORE_WL_BUS, X9_CAM_COLD_RESTORE_ROUTES,
+    X9_CAM_COLD_RESTORE_CLOCK, X9_CAM_COLD_RESTORE_VS, X9_CAM_COLD_RESTORE_DONE,
+    X9_CAM_COLD_RESTORE_PMIF };
 #define X9_CAMERA_GET_STATUS _IOR('C', 0x90, struct x9_camera_status)
 /* Separate probe-only ABI. Requests carry version=1 and sensor=1/2, all
  * other fields zero. Results preserve raw observations even on failure.
@@ -200,7 +220,8 @@ struct x9_camera_receiver {
  * {.version=1,.sensor=1/2}; root/mode3/FWRITE. Shares probe's once-per-sensor
  * success / first-hardware-error latch: choose probe OR standby in a boot.
  * GET is cache-only. Tables are checked before acquiring power. No stream,
- * reset-command, group-hold, OTP, EEPROM or actuator commands are accepted.
+ * reset-command, group-hold, OTP, EEPROM or actuator TABLE commands are accepted.
+ * Front-only fab read uses fixed 0a02=7f/0a00=1 then 0a00=0; no OTP programming.
  * Successful readback describes a temporary standby, then reset/power restore;
  * it is NOT persistent configuration, PHY-rate measurement or calibration. */
 #define X9_CAM_CFG_TABLE_VALID 1u
@@ -210,13 +231,16 @@ struct x9_camera_receiver {
 #define X9_CAM_CFG_VERIFIED 16u
 #define X9_CAM_CFG_RESTORED 32u
 #define X9_CAM_CFG_LATCHED 64u
-#define X9_CAM_CFG_NEED_FACTORY 1u /* QSC/LRC/front fab branch not performed. */
+#define X9_CAM_CFG_FAB_READ 128u /* 3 fab bytes read + exit write ACK; not calibration. */
+#define X9_CAM_CFG_FAB_B4 256u /* ready=1, fab=b4/01; requires two init patches. */
+#define X9_CAM_CFG_NEED_FACTORY 1u /* QSC/LRC/actuator work not performed. */
 #define X9_CAM_CFG_NEED_RECEIVER 2u
 #define X9_CAM_CFG_NEED_DMA_MAP 4u
 #define X9_CAM_CFG_NEED_DRAIN 8u
 enum x9_camera_config_stage { X9_CAM_CFG_NONE, X9_CAM_CFG_TABLE_CHECK,
     X9_CAM_CFG_COLD, X9_CAM_CFG_IDLE, X9_CAM_CFG_INIT, X9_CAM_CFG_PREVIEW,
-    X9_CAM_CFG_MIRROR, X9_CAM_CFG_READBACK, X9_CAM_CFG_RESTORE, X9_CAM_CFG_DONE };
+    X9_CAM_CFG_MIRROR, X9_CAM_CFG_READBACK, X9_CAM_CFG_RESTORE, X9_CAM_CFG_DONE,
+    X9_CAM_CFG_FAB, X9_CAM_CFG_FAB_EXIT, X9_CAM_CFG_FAB_PATCH }; /* Append only. */
 #define X9_CAM_CFG_SAMPLES 48u
 struct x9_camera_config_sample { uint32_t reg, expected, observed; };
 struct x9_camera_config {

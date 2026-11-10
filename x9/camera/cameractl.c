@@ -12,6 +12,7 @@
 _Static_assert(sizeof(struct x9_camera_mm_status)==576,"camera MM ABI");
 _Static_assert(sizeof(struct x9_camera_receiver)==1192,"camera receiver ABI");
 _Static_assert(sizeof(struct x9_camera_config)==720,"camera config ABI");
+_Static_assert(sizeof(struct x9_camera_status)==88,"camera status ABI");
 static void print_config(const struct x9_camera_config *r)
 {
     printf("sensor-standby sensor=%u flags=%x stage=%u errno=%u restore=%u blockers=%x pairs=%u/%u writes=%u/%u index=%u reg=%04x expected=%02x observed=%08x read=%u (temporary, uncalibrated, NOT capture ready)\n",
@@ -19,6 +20,9 @@ static void print_config(const struct x9_camera_config *r)
         r->init_pairs,r->preview_pairs,r->written,r->attempted,r->table_index,
         r->reg,r->expected,r->observed,r->read_count);
     if(!(r->flags&X9_CAM_CFG_ATTEMPTED))return;
+    if(r->sensor==X9_CAMERA_FRONT)
+        printf("front fab-read/exit-ACK=%u B4-variant=%u (raw bytes/port-exit error in kernel X9 CAMERA FAB log; NOT QSC/LRC)\n",
+            !!(r->flags&X9_CAM_CFG_FAB_READ),!!(r->flags&X9_CAM_CFG_FAB_B4));
     printf("standby cold stage=%u chip=%04x flags=%x blockers=%x errno=%u restore=%u AP timing CSR/clock evidence: use kernel X9 CAMERA COLD/CLOCK log\n",
         r->probe.stage,r->probe.chip_id,r->probe.flags,r->probe.blockers,
         r->probe.last_errno,r->probe.restore_errno);
@@ -88,9 +92,10 @@ int main(int argc,char **argv)
     if(fd<0){perror(X9_CAMERA_DEVICE);return 1;}
     struct x9_camera_status s={0};
     if(ioctl(fd,X9_CAMERA_GET_STATUS,&s)){perror("status");close(fd);return 1;}
-    printf("version=%u mode=%u flags=%x supported=%x sensor=%u errno=%u frames=%llu rejected=%llu chips=%x/%x probe_mask=%x probe_flags=%x\n",
+    printf("version=%u mode=%u flags=%x supported=%x sensor=%u errno=%u frames=%llu rejected=%llu chips=%x/%x probe_mask=%x probe_flags=%x cold_journal=%x restore_step=%u\n",
            s.version,s.mode,s.flags,s.supported_mask,s.sensor,s.last_errno,
-           (unsigned long long)s.frames,(unsigned long long)s.rejected,s.chip_id[0],s.chip_id[1],s.probe_mask,s.probe_flags);
+           (unsigned long long)s.frames,(unsigned long long)s.rejected,s.chip_id[0],s.chip_id[1],s.probe_mask,s.probe_flags,
+           s.cold_retained,s.cold_restore_step);
     if(standby || !sensor) {
         struct x9_camera_config r={.version=1,.sensor=standby?sensor:0};
         if(ioctl(fd,standby?X9_CAMERA_CONFIG_STANDBY:X9_CAMERA_GET_CONFIG,&r)) {

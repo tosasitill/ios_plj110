@@ -68,6 +68,7 @@ struct cam_probe_journal {
     struct cam_probe_rail dovdd, afvdd;
     bool vs_owned, pmif_fault;
     bool pins_owned, wl_owned, mux_owned, vote_owned;
+    uint32_t restore_step, restore_channel;
 };
 static struct cam_probe_journal cam_journal;
 static struct x9_camera_probe cam_probe_last = { .version=1 };
@@ -658,59 +659,90 @@ static int cam_wake_restore(struct cam_probe_journal *j)
     if(!e)p->owned=false;
     return e;
 }
+static uint32_t cam_cold_retained(const struct cam_probe_journal *j)
+{
+    uint32_t mask=0;
+    if(j->pins_owned)mask|=X9_CAM_COLD_PINS;
+    if(j->mux_owned || j->vote_owned)mask|=X9_CAM_COLD_MCLK;
+    if(j->sensor.owned || j->sensor.gate_owned)mask|=X9_CAM_COLD_SENSOR_BUS;
+    if(j->ldo.owned || j->ldo.gate_owned)mask|=X9_CAM_COLD_WL_BUS;
+    if(j->wl_owned || j->wl_enabled || j->wl_programmed)mask|=X9_CAM_COLD_WL_RAILS;
+    if(j->dovdd.enable_owned || j->dovdd.voltage_owned)mask|=X9_CAM_COLD_DOVDD;
+    if(j->afvdd.enable_owned || j->afvdd.voltage_owned)mask|=X9_CAM_COLD_AFVDD;
+    if(j->vs_owned)mask|=X9_CAM_COLD_VS;
+    if(j->wake.owned)mask|=X9_CAM_COLD_WAKE;
+    for(unsigned i=0;i<4;i++)if(j->route[i].owned)mask|=X9_CAM_COLD_ROUTES;
+    if(j->pmif_fault || j->pmif_pending)mask|=X9_CAM_COLD_PMIF;
+    return mask;
+}
+static int cam_restore_failed(struct cam_probe_journal *j, int e)
+{
+    printf("X9 CAMERA COLD RESTORE: step=%u channel=%u errno=%d retained=%x (journal, no retry)\n",
+        j->restore_step,j->restore_channel,e,cam_cold_retained(j));
+    return e;
+}
 static int cam_restore(struct cam_probe_journal *j)
 {
-    int first=j->pmif_fault?EIO:0,e,pin_error=0;
-    /* After releasing PMIF lock never clear a later response as ours. */
-    if(j->pmif_pending)first=EIO;
+    int e,pin_error=0;j->restore_channel=0;j->restore_step=X9_CAM_COLD_QUIESCE;
     if(j->pins_owned) {
+        /* Try both local isolation actions, but NEVER lower a supply or
+         * release prerequisites when reset-low/MCLK-off was not confirmed. */
         e=cam_pin_bit(j->gpio,0x100,j->board.reset,0);if(e)pin_error=e;
         e=cam_pin_mux(j->gpio,j->board.mclk,0);if(e && !pin_error)pin_error=e;
         delay(1000);
     }
+    if(pin_error)return cam_restore_failed(j,pin_error);
+    /* After releasing PMIF lock never clear a later response as ours. */
+    if(j->pmif_pending || j->pmif_fault) {
+        j->restore_step=X9_CAM_COLD_RESTORE_PMIF;return cam_restore_failed(j,EIO);
+    }
     /* Reverse actual board power order, including the interleaved shared
      * supplies. A failed rail/channel keeps its journal and all prerequisites. */
     if(j->board.wl_count==3) {
-        e=cam_rail_restore(j,&j->dovdd);if(e && !first)first=e;
+        j->restore_step=X9_CAM_COLD_RESTORE_DOVDD;
+        e=cam_rail_restore(j,&j->dovdd);if(e)return cam_restore_failed(j,e);
     }
     for(unsigned i=j->board.wl_count;i>0;i--) {
-        e=cam_wl_restore_channel(j,i-1);if(e && !first)first=e;
+        j->restore_step=X9_CAM_COLD_RESTORE_WL;j->restore_channel=j->board.wl_channel[i-1];
+        e=cam_wl_restore_channel(j,i-1);if(e)return cam_restore_failed(j,e);
+        j->restore_channel=0;
         if(j->board.wl_count==3 && i==3) {
-            e=cam_rail_restore(j,&j->afvdd);if(e && !first)first=e;
+            j->restore_step=X9_CAM_COLD_RESTORE_AFVDD;
+            e=cam_rail_restore(j,&j->afvdd);if(e)return cam_restore_failed(j,e);
         }
         if(j->board.wl_count==2 && i==2) {
-            e=cam_rail_restore(j,&j->dovdd);if(e && !first)first=e;
+            j->restore_step=X9_CAM_COLD_RESTORE_DOVDD;
+            e=cam_rail_restore(j,&j->dovdd);if(e)return cam_restore_failed(j,e);
         }
     }
-    e=cam_wake_restore(j);if(e && !first)first=e;
+    j->restore_step=X9_CAM_COLD_RESTORE_WAKE;
+    e=cam_wake_restore(j);if(e)return cam_restore_failed(j,e);
     if(j->pins_owned) {
-        e=cam_update(j->board.drive_base,0,7,j->drive);if(e && !pin_error)pin_error=e;
+        j->restore_step=X9_CAM_COLD_RESTORE_PINS;
+        e=cam_update(j->board.drive_base,0,7,j->drive);if(e)return cam_restore_failed(j,e);
         /* Restore input direction BEFORE a possibly high inherited DOUT
          * latch. Otherwise cleanup would pulse reset high on an input pin. */
-        e=cam_pin_bit(j->gpio,0,j->board.reset,j->dir);if(e && !pin_error)pin_error=e;
-        e=cam_pin_bit(j->gpio,0x100,j->board.reset,j->dout);if(e && !pin_error)pin_error=e;
-        e=cam_pin_mux(j->gpio,j->board.reset,j->mode);if(e && !pin_error)pin_error=e;
-        if(!pin_error)j->pins_owned=false;
+        e=cam_pin_bit(j->gpio,0,j->board.reset,j->dir);if(e)return cam_restore_failed(j,e);
+        e=cam_pin_bit(j->gpio,0x100,j->board.reset,j->dout);if(e)return cam_restore_failed(j,e);
+        e=cam_pin_mux(j->gpio,j->board.reset,j->mode);if(e)return cam_restore_failed(j,e);
+        j->pins_owned=false;
     }
-    if(pin_error && !first)first=pin_error;
-    e=cam_bus_restore(&j->sensor);if(e && !first)first=e;
+    j->restore_step=X9_CAM_COLD_RESTORE_SENSOR_BUS;
+    e=cam_bus_restore(&j->sensor);if(e)return cam_restore_failed(j,e);
     /* A failed WL shutdown retains its bus gate/timing/pins for diagnostics;
      * do not gate a still-enabled supply controller or undo its wake. */
     if(!j->wl_owned && !j->wake.owned) {
-        e=cam_bus_restore(&j->ldo);if(e && !first)first=e;
+        j->restore_step=X9_CAM_COLD_RESTORE_WL_BUS;
+        e=cam_bus_restore(&j->ldo);if(e)return cam_restore_failed(j,e);
     }
-    if(!j->sensor.owned && !j->ldo.owned) {
-        e=cam_routes_restore(j);if(e && !first)first=e;
-    }
-    if(!j->pins_owned) {
-        e=cam_clock_restore(j);if(e && !first)first=e;
-    }
-    if(!first && !j->wl_owned && !j->wake.owned &&
-       !j->dovdd.enable_owned && !j->dovdd.voltage_owned &&
-       !j->afvdd.enable_owned && !j->afvdd.voltage_owned) {
-        e=cam_vs_vote(j,false);if(e)first=e;
-    }
-    return first;
+    j->restore_step=X9_CAM_COLD_RESTORE_ROUTES;
+    e=cam_routes_restore(j);if(e)return cam_restore_failed(j,e);
+    j->restore_step=X9_CAM_COLD_RESTORE_CLOCK;
+    e=cam_clock_restore(j);if(e)return cam_restore_failed(j,e);
+    j->restore_step=X9_CAM_COLD_RESTORE_VS;
+    e=cam_vs_vote(j,false);if(e)return cam_restore_failed(j,e);
+    if(cam_cold_retained(j))return cam_restore_failed(j,EIO);
+    j->restore_step=X9_CAM_COLD_RESTORE_DONE;return 0;
 }
 static int cam_board_prepare(struct cam_probe_journal *j, uint32_t which,
                               struct x9_camera_probe *r)
