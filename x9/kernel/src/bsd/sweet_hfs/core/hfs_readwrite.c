@@ -5989,6 +5989,53 @@ exit:
  * /private/var/wireless/baseband_data/bbfs/efs1.bin (BBUScratchFile::createWithFile)
  * failed: "Failed to create scratch ... (11)" in log-bb-live-stats.txt.
  */
+/*
+ * X9 2026-11-10: grow the root HFS into the appended extension file (manifest
+ * extension_policy, user approved +16 GiB). Same path as HFSIOC_RESIZE_VOLUME
+ * (hfs_extendfs: journaled, extends the allocation bitmap, writes the new
+ * alternate volume header), called once from PID1 with x9_rootgrow=1. New size
+ * = device size rounded down to the allocation block. No-op when equal.
+ */
+extern int hfs_extendfs(struct hfsmount *hfsmp, u_int64_t newsize, vfs_context_t context);
+int x9_hfs_grow_root(mount_t mp, u_int64_t *before, u_int64_t *after);
+int
+x9_hfs_grow_root(mount_t mp, u_int64_t *before, u_int64_t *after)
+{
+	struct hfsmount *hfsmp;
+	u_int32_t sector_size = 0;
+	u_int64_t sector_count = 0, newsize;
+	vfs_context_t ctx = vfs_context_kernel();
+	int error;
+
+	*before = *after = 0;
+	if (mp == NULL || strncmp(vfs_statfs(mp)->f_fstypename, "hfs", MFSNAMELEN) != 0) {
+		return EINVAL;
+	}
+	hfsmp = VFSTOHFS(mp);
+	if (hfsmp == NULL || hfsmp->blockSize == 0 || hfsmp->hfs_devvp == NULLVP) {
+		return EINVAL;
+	}
+	if (hfsmp->hfs_flags & HFS_READ_ONLY) {
+		return EROFS;
+	}
+	*before = (u_int64_t)hfsmp->totalBlocks * hfsmp->blockSize;
+	if (VNOP_IOCTL(hfsmp->hfs_devvp, DKIOCGETBLOCKSIZE, (caddr_t)&sector_size, 0, ctx) ||
+	    VNOP_IOCTL(hfsmp->hfs_devvp, DKIOCGETBLOCKCOUNT, (caddr_t)&sector_count, 0, ctx) || sector_size == 0) {
+		return ENXIO;
+	}
+	newsize = sector_count * sector_size;
+	newsize -= newsize % hfsmp->blockSize;
+	if (newsize <= *before) {
+		*after = *before;
+		return 0;
+	}
+	IOBSDMountChange(hfsmp->hfs_mp, kIOMountChangeWillResize);
+	error = hfs_extendfs(hfsmp, newsize, ctx);
+	IOBSDMountChange(hfsmp->hfs_mp, kIOMountChangeDidResize);
+	*after = (u_int64_t)hfsmp->totalBlocks * hfsmp->blockSize;
+	return error;
+}
+
 int x9_hfs_lower_reserve(mount_t mp, u_int64_t bytes, u_int64_t *before, u_int64_t *after, u_int64_t *free_bytes);
 int
 x9_hfs_lower_reserve(mount_t mp, u_int64_t bytes, u_int64_t *before, u_int64_t *after, u_int64_t *free_bytes)

@@ -384,7 +384,13 @@ static int initialize(void)
  if((!xu.mutable&&memcmp(digest,xu.header_sha,32))||memcmp(header_data+1128,xu.volume_uuid,8))return EINVAL;
  uint32_t block=(uint32_t)header_data[1064]<<24|(uint32_t)header_data[1065]<<16|(uint32_t)header_data[1066]<<8|header_data[1067];
  uint32_t blocks=(uint32_t)header_data[1068]<<24|(uint32_t)header_data[1069]<<16|(uint32_t)header_data[1070]<<8|header_data[1071];
- if(header_data[1024]!='H'||(header_data[1025]!='X'&&header_data[1025]!='+')||(uint64_t)block*blocks!=xu.bytes)return EINVAL;
+ /* 2026-11-10: a mutable root may carry an appended extension file (manifest
+  * extension_policy); the HFS stays at its old size until x9_rootgrow=1 runs
+  * hfs_extendfs. Read-only roots still require an exact match. */
+ const uint64_t fs_bytes=(uint64_t)block*blocks;
+ if(header_data[1024]!='H'||(header_data[1025]!='X'&&header_data[1025]!='+')||!fs_bytes||
+    (xu.mutable?fs_bytes>xu.bytes:fs_bytes!=xu.bytes))return EINVAL;
+ if(fs_bytes!=xu.bytes)printf("X9 UFS NATIVE ROOT: HFS %llu MiB on a %llu MiB device (extension not yet grown into; x9_rootgrow=1)\n",fs_bytes>>20,xu.bytes>>20);
  int write_error=enable_writes();if(write_error){printf("X9 UFS: write contract rejected errno=%d\n",write_error);return write_error;}
  xu.sector=512;xu.bmajor=bdevsw_add(-1,&bdev);if(xu.bmajor<0)return ENXIO;
  xu.cmajor=cdevsw_add_with_bdev(-1,&cdev,xu.bmajor);if(xu.cmajor<0)return ENXIO;

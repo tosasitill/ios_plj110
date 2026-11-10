@@ -85,9 +85,46 @@ def validate(data, native=False):
                     raise ValueError('external firmware overlaps root/plugin/log/reserved extent')
             position+=n
         if position!=length//4096:raise ValueError('external firmware map size mismatch')
+    extension=data.get('extension_policy')
+    if extension is not None:
+        # 2026-11-10 (user approved +16 GiB): a second dedicated pinned+immutable
+        # file appended after the root image. The kernel sees root||extension as
+        # one device; HFS is grown into it by hfs_extendfs (x9_rootgrow=1).
+        if (not native or not policy or extension.get('version')!=1 or
+            extension.get('kind')!='dedicated-root-extension' or
+            extension.get('pinned') is not True or extension.get('immutable') is not True):
+            raise ValueError('invalid root extension contract')
+        length=extension.get('bytes',0);extruns=extension.get('extents',[]);position=0
+        if type(length)!=int or length<=0 or length&0x3fff or size+length>limit:
+            raise ValueError('invalid root extension size')
+        if not 1<=len(extruns) or len(runs)+len(extruns)>16384:
+            raise ValueError('invalid root extension extent count')
+        reserved=(runs+policy['protected_extents']+data.get('log_policy',{}).get('extents',[])+
+                  data.get('firmware_policy',{}).get('extents',[]))
+        for i,a in enumerate(extruns):
+            f,p,n=(a[k] for k in ['file_block','partition_block','blocks'])
+            if any(type(x)!=int for x in [f,p,n]) or f!=position or p<0 or n<=0 or p>=count or n>count-p:
+                raise ValueError('invalid root extension extent')
+            for b in reserved+extruns[:i]:
+                if p<b['partition_block']+b['blocks'] and b['partition_block']<p+n:
+                    raise ValueError('root extension overlaps root/plugin/log/firmware/reserved extent')
+            position+=n
+        if position!=length//4096:raise ValueError('root extension map size mismatch')
     if policy and len(policy['protected_extents'])+len(data.get('log_policy',{}).get('extents',[]))+len(data.get('firmware_policy',{}).get('extents',[]))>32768:
         raise ValueError('combined protected extent count exceeds kernel limit')
     return data
+
+
+def device(data):
+    """Kernel view of the root device: root image followed by its extension."""
+    runs=[dict(e) for e in data['extents']];size=data['bytes']
+    extension=data.get('extension_policy')
+    if extension:
+        base=size//4096
+        runs+=[{'file_block':base+e['file_block'],'partition_block':e['partition_block'],'blocks':e['blocks']}
+               for e in extension['extents']]
+        size+=extension['bytes']
+    return size,runs
 
 
 def header(manifest, native=False):
@@ -115,18 +152,19 @@ def load(path, native=False):return validate(json.loads(Path(path).read_text()),
 def add_native_adt(tree,manifest):
     import struct
     data=validate(manifest,True)
+    total,runs=device(data)
     chosen=next(n for n in tree.children if n.prop('name')==b'chosen\0')
     props=[('x9-ufs-native-ready',struct.pack('<6Q',1,0x16810000,0x5000,0x14900000,0x63,1)),
-           ('x9-ufs-root-bytes',struct.pack('<Q',data['bytes'])),
+           ('x9-ufs-root-bytes',struct.pack('<Q',total)),
            ('x9-ufs-root-partition',struct.pack('<2Q',data['partition_first'],data['partition_blocks'])),
            ('x9-ufs-root-guid',bytes.fromhex(data['partition_guid_hex'])),
            ('x9-ufs-root-sha256',bytes.fromhex(data['sha256'])),
            ('x9-ufs-root-header-sha256',bytes.fromhex(data['header_sha256'])),
            ('x9-ufs-root-header-bytes',struct.pack('<Q',65536)),
            ('x9-ufs-root-volume-uuid',bytes.fromhex(data['volume_uuid_hex'])),
-           ('x9-ufs-root-extents',b''.join(struct.pack('<3Q',e['file_block'],e['partition_block'],e['blocks']) for e in data['extents']))]
+           ('x9-ufs-root-extents',b''.join(struct.pack('<3Q',e['file_block'],e['partition_block'],e['blocks']) for e in runs))]
     if data.get('write_policy'):
-        props += [('x9-ufs-root-write-contract',struct.pack('<2Q',1,data['bytes'])),
+        props += [('x9-ufs-root-write-contract',struct.pack('<2Q',1,total)),
                   ('x9-ufs-protected-extents',b''.join(struct.pack('<2Q',e['partition_block'],e['blocks']) for e in data['write_policy']['protected_extents']+data.get('log_policy',{}).get('extents',[])+data.get('firmware_policy',{}).get('extents',[])))]
     if data.get('log_policy'):
         log=data['log_policy']

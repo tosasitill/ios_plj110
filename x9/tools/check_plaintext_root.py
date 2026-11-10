@@ -70,6 +70,19 @@ def main():
         if not any(line.startswith(fw['sha256']+'  ') and line.endswith('first '+str(fw['payload_bytes'])+' bytes') for line in report.splitlines()):
             raise ValueError('external firmware raw payload hash mismatch')
         print('EXTERNAL BBFW PREFLIGHT VERIFIED: separate pinned+immutable file, live FIEMAP and full payload SHA256; read-only.')
+    if m.get('extension_policy'):
+        ext=m['extension_policy'];extpath=ext['device_file']
+        if list(map(int,read('stat -c "%i %s" '+quote(extpath)).split()))!=[ext['inode'],ext['bytes']]:
+            raise ValueError('root extension inode/size changed')
+        if 'i' not in read('lsattr '+quote(extpath)).split()[0] or ': pinned (GC move failures 0)' not in read(quote(tool)+' status '+quote(extpath)):
+            raise ValueError('root extension no longer pinned+immutable')
+        live=json.loads(read(quote(tool)+' extents '+quote(extpath)+' --json'))
+        if live!=ext['android_extents']:
+            raise ValueError('root extension FIEMAP changed')
+        from ufs_manifest import extents
+        if extents(live,m['partition_blocks'])['extents']!=ext['extents']:
+            raise ValueError('root extension raw map does not match FIEMAP')
+        print('ROOT EXTENSION PREFLIGHT VERIFIED: separate pinned+immutable file and live FIEMAP; read-only.')
     if m.get('write_policy'):
         # A writable HFS header changes at mount/sync; never compare against
         # the original full-image SHA after legitimate filesystem writes.
@@ -79,8 +92,14 @@ def main():
         import struct
         if len(header)!=65536 or header[1024:1026] not in (b'H+',b'HX'):
             raise ValueError('invalid current mutable HFS header')
-        if header[1128:1136].hex()!=m['volume_uuid_hex'] or struct.unpack_from('>I',header,1064)[0]*struct.unpack_from('>I',header,1068)[0]!=m['bytes']:
+        fs=struct.unpack_from('>I',header,1064)[0]*struct.unpack_from('>I',header,1068)[0]
+        # With an extension the HFS is the original size until x9_rootgrow=1
+        # runs hfs_extendfs, then the whole root+extension device.
+        sizes={m['bytes']}|({m['bytes']+m['extension_policy']['bytes']} if m.get('extension_policy') else set())
+        if header[1128:1136].hex()!=m['volume_uuid_hex'] or fs not in sizes:
             raise ValueError('mutable-root UUID or geometry changed')
+        if m.get('extension_policy'):
+            print('HFS size:',fs,'bytes','(grown)' if fs!=m['bytes'] else '(not grown yet)')
         print('MUTABLE ROOT PREFLIGHT VERIFIED: device, pin+immutable, inode/map/partition, protected extents and current HFS UUID/geometry.')
         print('Original full-image SHA is provisioning provenance; XNU filesystem writes may change content. No device writes performed.')
         return

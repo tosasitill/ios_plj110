@@ -8314,6 +8314,14 @@ load_init_program_at_path(proc_t p, user_addr_t scratch_addr, const char* path)
 	  if(!update_error)external_error=sweet_x9_render_external_ready(); }
 	 if(external_error)printf("X9 RENDER EXTERNAL: not armed errno=%d\n",external_error);
 	}
+	if(sweet_x9_arg("x9_rootgrow",0)==1){
+	 /* 2026-11-10: grow the root HFS into the manifest's extension file (one shot,
+	  * no-op once grown). hfs_extendfs is the HFSIOC_RESIZE_VOLUME path. */
+	 extern int x9_hfs_grow_root(mount_t,uint64_t *,uint64_t *);
+	 uint64_t before=0,after=0;int grow_error=EINVAL;vnode_t root=vfs_rootvnode();
+	 if(root!=NULLVP){grow_error=x9_hfs_grow_root(vnode_mount(root),&before,&after);vnode_put(root);}
+	 printf("X9 ROOTGROW: HFS %llu MiB -> %llu MiB errno=%d\n",before>>20,after>>20,grow_error);
+	}
 	{
 	 int mgwipe_error=sweet_x9_wipe_gestalt_cache(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	 if(mgwipe_error)printf("X9 MGWIPE: cache not removed errno=%d; continuing boot\n",mgwipe_error);
