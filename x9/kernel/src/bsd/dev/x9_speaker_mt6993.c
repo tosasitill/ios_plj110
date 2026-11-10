@@ -90,6 +90,9 @@ static int access(void)
     if(!e)e=refuse(j.hwv,0x1132c,13,13);
     if(!e)e=refuse(j.vlp,0x90,0x8383,j.mux_expected[0]|j.mux_expected[1]);
     if(!e)e=refuse(j.vlp,0x274,0xc0000000,0xc0000000);
+    /* Mux SEL/FENC alone cannot qualify a native lease while a foreign
+     * UPDATE is in flight. OPPO VLP_CKSTA_REG1: INTBUS30 / AUDIO_H29. */
+    if(!e && j.combined)e=refuse(j.vlp,0x334,0x60000000,0);
     if(!e && foreign())e=EBUSY;
     if(e)j.stuck=true;return e;
 }

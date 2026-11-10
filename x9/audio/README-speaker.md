@@ -611,6 +611,9 @@ cold probe、不借probe成功flag，也不授予Ready或使能DMA。首次申�
 仍拒绝访问与掉电。上层start/submit必须独立验证其真实DSP/PCM session；同代际
 quarantine不能成为新流许可。`AUDIO_ENGEN_CON0_MON=0x7c`没有公开bit语义，本子租约
 自己的APLL2 generator活跃时不把MON非零当foreign，也不把MON零当DMA drain证明。
+运行期同时fresh检查INTBUS／AUDIO_H的VLP CKSTA bit30/29无UPDATE在途、APLL2
+FENC0x34 bit4仍on及ENGEN低4位仍只有本子租约的APLL2 bit3，不借SEL读回或旧测频
+flag忽略时钟漂移／外来generator；FENC-on仍不等于PLL lock或48k精度证明。
 
 common CG、native tuner与PLL RW journal仅可用**最后一次写前prior**收敛uncertain，
 不能用最初cold saved值替代。meter trigger仍须fresh BUSY rise/fall；缺完整cycle

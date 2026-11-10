@@ -143,6 +143,12 @@ static int native_validate_locked(uint64_t ticket)
     if(!native_clock.configured || j.stuck || pj.stuck)return ENXIO;
     int e=native_board();if(!e)e=native_mapping();
     if(!e)e=access();if(!e)e=pll_consumers();
+    /* CCF defines APLL2 FENC offset0x34 bit4. Expected-on is necessary,
+     * but is NOT a PLL-lock or audio-rate certificate. Admission already
+     * required fresh meter cycles; runtime must not trust their old flag
+     * after source fencing or an unowned ENGEN enable changed. */
+    if(!e)e=pll_refuse(j.apll,0x34,16,16);
+    if(!e)e=native_engen_idle(); /* only clock generator image, not memif idle */
     if(!e)e=verify_fields(false);if(!e)e=native_tuner_verify(false,false);
     return e?native_fault(e):0;
 }
