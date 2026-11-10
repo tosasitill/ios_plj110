@@ -19,6 +19,10 @@ constexpr uint32_t X9D_UL_ERROR = 31u << 20;
 constexpr uint32_t X9D_DL_DONE = (1u << 13) | (1u << 14);
 constexpr uint32_t X9D_DL_EMPTY = 3u << 4;
 constexpr uint32_t X9D_DL_ERROR = (7u << 1) | (1u << 6) | (7u << 8);
+// Legacy (non-LRO) PIT count status. There is no legacy PIT in native path2;
+// drv3_isr0 filters this masked bit out before its length-error handler.
+// Do NOT confuse it with the real LRO PIT count errors at status bits 8/9.
+constexpr uint32_t X9D_DL_LEGACY_PIT = 1u << 3;
 struct x9d_dma {
     IOBufferMemoryDescriptor *md;
     uint8_t *va;
@@ -51,7 +55,7 @@ struct x9d_state {
     unsigned mode; bool prepared, ready, failed, published, hw_attempted, clocks_live;
     unsigned irq_reports;
     const char *phase;
-    uint32_t last_ul, last_dl;
+    uint32_t last_ul, last_dl; bool legacy_pit_reported;
     uint64_t tx_packets, tx_done, rx_packets, rx_dropped, rejected, flow_events;
     void (*receiver)(uint32_t, const uint8_t *, uint32_t, uint32_t);
 };
@@ -509,11 +513,25 @@ static void x9d_poll() {
     if (!x9_md_at_online()) { x9d_fail("MD/AT offline"); return; }
     if (x9d_rd(x9d.infra, 0xd20) & 12) { x9d_fail("clock gated while active"); return; }
     uint32_t ul = x9d_rd(x9d.pd + 0x400, 0), dl = x9d_rd(x9d.pd + 0x400, 0x50);
+    uint32_t checked_dl = dl;
+    if ((dl & X9D_DL_LEGACY_PIT) &&
+        (x9d_rd(x9d.ao, 0x90) & X9D_DL_LEGACY_PIT) &&
+        (x9d_rd(x9d.pd + 0xc00, 0x38) & 3u) == 2u) {
+        // 175.txt: raw 0x8 with both LRO rings untouched, legacy PIT absent.
+        // A polled owner cannot filter by the entire interrupt mask (all IRQs
+        // are masked here). Exempt ONLY this inactive legacy source, and only
+        // while its mask and path2 selection still match our configuration.
+        checked_dl &= ~X9D_DL_LEGACY_PIT;
+        if (!x9d.legacy_pit_reported) {
+            x9d.legacy_pit_reported = true;
+            printf("X9 DPMAIF: masked legacy PIT count status 0x8 in LRO path2; LRO/DMA errors remain fatal\n");
+        }
+    }
     // EMPTY / MD-not-ready / power-not-ready are flow control, not DMA length
     // faults (native drv3_isr masks PWR_NOTRDY until subsequent TX_DONE).
     // Do not ACK unknown/error bits or reset the modem to hide the evidence.
     if ((ul & (X9D_UL_ERROR | ~(15u | X9D_UL_FLOW | X9D_UL_ERROR))) ||
-        (dl & (X9D_DL_ERROR | ~(X9D_DL_DONE | X9D_DL_EMPTY | X9D_DL_ERROR)))) {
+        (checked_dl & (X9D_DL_ERROR | ~(X9D_DL_DONE | X9D_DL_EMPTY | X9D_DL_ERROR)))) {
         x9d_fail("hardware interrupt error/unknown status"); return;
     }
     if ((ul & X9D_UL_FLOW) || (dl & X9D_DL_EMPTY)) x9d.flow_events++;
