@@ -75,6 +75,10 @@
  * both-bank target must be observed; no replay, reset or unknown-up cancel.
  * STOPPED retains TG_MODE_OFF/FLUSH, not the original cold profile. It does
  * not cancel credit, change RAW ownership or claim AXI/map drain.
+ * The real IRQ worker additionally binds accepted FBC at begin and requires
+ * owned SOF/DONE plus actual WCNT+1/CNT0 both-bank counts before CPU read.
+ * That IRQ-private count evidence does not mutate the control-locked SV
+ * journal, enable input, relax cold policy or permit RAW/AXI/map release.
  * Sensor close retires GIC and queued/running worker pins BEFORE restoring
  * CAMSV/OUTMUX/PHY/MM. An unfinished RAW slot retains all
  * dependencies; this worker retirement is not full AXI/SMMU/map drain.

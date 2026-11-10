@@ -394,6 +394,13 @@ int x9_camera_camsv_finish(struct x9_camera_camsv_slot *, const struct x9_camera
  * order, each with two complete actual both-bank targets. CQ, PHY/MAC lanes,
  * OUTMUX DL and sensor stream stay off. RECEIVE_ARMED/GATE_ARMED describe
  * accepted controls, not a started upstream producer, frame or drain.
+ * After full consumer arm, begin binds the actually accepted FBC counters.
+ * The sole SOF/DONE IAR owner captures ordinary tag0 FBC controls/counters;
+ * before CPU/cache access its worker requires two full both-bank observations
+ * of the original WCNT+1(mod256), CNT=0 and unchanged RCNT/DROP/reserved.
+ * WCNT and CNT are independently monotonic after the actual owned SOF,
+ * not assumed to update together or specifically at DONE. This count proof
+ * does not enable input, relax SV's cold guard, or grant RAW/AXI/map retirement.
  * EMPTY/CREDIT are not a source/AXI/map drain or native ownership grant.
  * Address/metadata/credit failure retains this slot and dependent cold epoch;
  * GIC/CPU retirement alone does not permit revoking its backing/lease.

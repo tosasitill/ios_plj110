@@ -713,3 +713,16 @@ close 在 GIC mask 前，先完成下一节限定的实际 TG stop，再最多�
 S1 arm 之前先拒绝不兼容的 inherited SAT/MSTREAM/sub/downsample/RGBW、VF single/fr-con/delay/mux、JPG/TG DB-disable/escape 模式；不修复 inherited profile。其它 pixel/clock/timing/polarity/reserved 位原样保留且完整核对，兼容性筛查不是 native authority。持续核同一 immutable request/lease、power/config、实际 GIC publication 与无 sampled/pending/active/SOF 输入；accepted FBC1 完整值不变。未知、回退、owner/config/输入事件或超时 terminal retain，不 reset/retry/rebase。此阶段不启 PHY/MAC lanes/OUTMUX DL/sensor source。
 
 close 在 GIC mask 前最多一次 TG stop，再 receive quiesce；仅同一完整 ARMED 且输入未开始的 consumer。失败的部分 arm/DB 不能盲写 off 修复。`GATE_ARMED=1024` 只说明这些实际 controls 接受，`GATE_STOPPED=2048` 只说明 gate 实际关闭；stop 保留 TG_MODE_OFF/FLUSH，不恢复 cold profile。**均不是 READY、帧、RAW/AXI/map drain、信用取消或映射/供电释放许可**。issued credit 与 unfinished RAW slot 继续保留，真正 producer 与完整自然计数消费/全写链退休仍必须接通后才能复用或恢复。
+
+
+### 同一真实 SOF/DONE 的 FBC 计数与 CPU 读取门
+
+**新增的是实际 IRQ worker 的必要计数条件，不是完整 producer、写链退休或可拍摄结果。** begin 在全部 consumer gate 接受、输入仍关闭时调用 `cam_irq_fbc_bind_locked`，额外两次实际读取 outer/inner tag0 `FBC0 +540` 和 `FBC1 +544`，必须精确匹配同一 immutable request 的 accepted control/credit。绑定只进行一次，记录原 RCNT/WCNT/CNT/DROP/reserved，不重立新的稳定基线，不授 native authority。
+
+正常 ISP8s FBC1 字段是 RCNT[7:0]、WCNT[15:8]、CNT[19:16]、reserved[24:20]、DROP[31:25]；正常 SOF handler 会调用 `mtk_cam_sv_is_zero_fbc_cnt`，所以 **CNT 可在 SOF 已减为0，不能要求 CNT 与 WCNT 一起、或都只在 DONE 时变化**。本路径的验收目标是一笔原 credit 的 WCNT+1 modulo256、CNT0，RCNT/DROP/reserved 与 FBC0 完全不变；这是必须观察的条件，尚非本机实测事实。WCNT 与 CNT 各自只接受 prior→target 一次，两个合法字段可分别先变化；未知值、超过一笔、任何回退或 DROP/RCNT 改变都终态拒绝。
+
+真正 SOF/hybrid IAR 的既有唯一 STATUS 采样之后，`cam_irq_fbc_event_locked` 读取上述 ordinary counters/controls，每 bank 立即留账再读下一个 bank；不重读/清 IRQ STATUS、不开其它 tag，不调用 owner/cache/PTE/RAW。队列保留 raw control/counter 和 sampled 两bit（未采样的0不算实际读值）。没有实际匹配的 owned SOF 前，只接受原 counter；DONE 必须使用原 SOF group/last/sequence/time 与同一 immutable request，拒绝重复/foreign/error completion。单请求不更新 outer FH，所以本层同时要求 outer/inner cookie 精确匹配，不采用 next-CQ 解释掩盖变化。
+
+实际 IRQ worker 在 `cam_irq_core_ready` 的真实 STREAMING 发布后、`x9_camera_camsv_finish` 的 CIVAC/CPU copy **之前**，调用 `cam_irq_fbc_done_locked`。仅一次10ms、10000poll上限的 readonly 两bank观察；每次 native `.check` 在 spin 外，真实 power/GIC/config 与 counters 在安全资格内检查，要求两次完整 final targets，最后 owner check 后再实际核 final controls/counters 与 deadline。超时/unknown/回退/冲突保留同一slot/backing/映射/依赖，不重试命令、补 RCNT、reset、取消信用或使用 caller consumed boolean。原 IRQ 日志输出 raw FBC/control/sampled，`X9 CAMERA DONE FBC` 输出 actual/seen/samples/count_accepted/errno。
+
+锁序仍 control→IRQ→slot；新的 record 由 IRQ spin 保护，worker **不取得 control mutex、不修改 SV journal**，避免 stop 持control锁 drain worker 的死锁。**count_accepted 仅表示该 DONE 的计数观察，不是 RAW/AXI/map drain，不能复用或撤 backing。** control-locked SV 的原 accepted-credit strict guard 暂不放宽；实际 upstream source publication/live counter state、自然消费后 stop/full bus/map retirement 与合法 repeat 仍须接通。PHY/MAC lanes/AFIFO/OUTMUX DL/sensor source、normal NS SID80 attach/持续 rate/MMQoS/native capture caller/iOS 实帧链仍未完整，因此不出中间镜像、不声称已拍摄。

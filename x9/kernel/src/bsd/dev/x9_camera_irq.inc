@@ -10,6 +10,10 @@
  * then normal CMOS/FLUSH/VF. CQ/PHY/OUTMUX DL/sensor source stay off.
  * Close stops only this input-inactive TG before receive enables and GIC,
  * never declaring frame/RAW/AXI/map retirement.
+ * Before source-on it also binds that exact accepted FBC state. The actual
+ * SOF/DONE filter records ordinary FBC counters; the worker requires two
+ * both-bank WCNT+1/CNT0 targets before CPU access, preserving RCNT/DROP.
+ * Count evidence never changes SV's cold guard or grants credit/map reuse.
  * It is not a capture provider registration.
  * Lock order: camera_control_lock -> camera_irq_lock -> camera_camsv_lock.
  * Worker NEVER acquires camera_control_lock; close can drain its pin there.
@@ -25,6 +29,7 @@ enum { CAM_IRQ_RING=4, CAM_IRQ_PRIORITY=0xa0 };
 struct cam_irq_event {
     struct x9_camera_camsv_irq frame;
     uint32_t role, sof, channel, common, top, fifo;
+    uint32_t fbc_control[2], fbc_counter[2], fbc_sampled; /* ordinary CSR, never status ack */
     int error;
 };
 static struct {
@@ -205,6 +210,7 @@ static int cam_irq_credit_guard_locked(uint64_t epoch)
     }
     return e;
 }
+#include "x9_camera_irq_fbc.inc"
 /* Under spin, after actual IAR and only while accepting. Ordinary FIRST/FH
  * reads select exactly the vendor bank. No multi-tag fallback or status sweep. */
 static void cam_irq_sample(unsigned role,struct cam_irq_event *ev)
@@ -250,6 +256,7 @@ static void cam_irq_sample(unsigned role,struct cam_irq_event *ev)
         ev->fifo=cam_irq_rd(cam_irq.view[0],0x104c);
         f->time=mach_absolute_time();ev->error=EIO;
     }
+    if(!ev->error && role!=X9_CAM_IRQ_DEBUG)cam_irq_fbc_event_locked(ev);
 }
 bool x9_camera_irq_filter(uint32_t intid)
 {
@@ -357,6 +364,7 @@ static void __attribute__((noreturn)) cam_irq_worker(void *arg,wait_result_t res
             } else {
                 e=ev.frame.err_status||(ev.frame.cq_status&~1u)?EIO:cam_irq_core_ready(&ev.frame);
                 if(!e)e=cam_irq_power();
+                if(!e)e=cam_irq_fbc_done_locked(&ev);
                 if(!e)e=x9_camera_camsv_finish(cam_irq.slot,&ev.frame);
             }
             if(e==EAGAIN&&cam_irq.slot->state==X9_CAMSV_ARMED)e=cam_irq_unmask(X9_CAM_IRQ_HYBRID);
@@ -376,10 +384,12 @@ static void __attribute__((noreturn)) cam_irq_worker(void *arg,wait_result_t res
         if(e||cam_irq.reported<32) {
         if(cam_irq.reported<32)cam_irq.reported++;
         printf("X9 CAMERA IRQ: epoch=%llu role=%u seq=%x/%x done=%x err=%x cq=%x "
-            "sof=%x channel=%x debug=%x/%x/%x state=%u errno=%d (IAR sample, no DMA reuse)\n",
+            "sof=%x channel=%x debug=%x/%x/%x fbc=%x/%x control=%x/%x sampled=%x "
+            "state=%u errno=%d (IAR sample, no DMA reuse)\n",
             cam_irq.epoch,ev.role,ev.frame.inner_sequence,ev.frame.outer_sequence,
             ev.frame.done_status,ev.frame.err_status,ev.frame.cq_status,ev.sof,ev.channel,
-            ev.common,ev.top,ev.fifo,cam_irq.slot->state,e);
+            ev.common,ev.top,ev.fifo,ev.fbc_counter[0],ev.fbc_counter[1],
+            ev.fbc_control[0],ev.fbc_control[1],ev.fbc_sampled,cam_irq.slot->state,e);
         }
         lck_mtx_unlock(&camera_irq_lock);
         old=cam_irq_spin_take();cam_irq.busy=false;cam_irq_spin_drop(old);
@@ -527,6 +537,7 @@ static int cam_irq_begin_locked(uint64_t epoch,const struct x9_camera_camsv_requ
     if(!e)e=cam_sv_credit_issue_locked(epoch,cam_irq.slot);
     if(!e)e=cam_sv_receive_transition_locked(epoch,false);
     if(!e)e=cam_sv_gate_transition_locked(epoch,false);
+    if(!e)e=cam_irq_fbc_bind_locked(epoch);
     if(e&&arm_attempted&&cam_irq.slot->state!=X9_CAMSV_EMPTY&&cam_irq.slot->state!=X9_CAMSV_RETIRED) {
         e=cam_irq_fault(e);lck_mtx_lock(&camera_camsv_lock);
         cam_camsv_retain(cam_irq.slot,e);lck_mtx_unlock(&camera_camsv_lock);
