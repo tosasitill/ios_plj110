@@ -272,6 +272,8 @@ struct x9_camera_sensor {
     uint32_t power_count;
 };
 struct x9_camera_platform {
+    /* Version2 requires immutable, frame-bound completion metadata below.
+     * Version1's late sensor-register sampling cannot identify frame state. */
     uint32_t version;
     /* power(true) follows sensor->power, power(false) restores ownership in
      * reverse order, including failures halfway through power(true). */
@@ -285,14 +287,29 @@ struct x9_camera_platform {
      * power(false), retry cleanup, or start another sensor in this boot. */
     int (*capture)(const struct x9_camera_sensor *, int on, uint64_t generation);
 };
+#define X9_CAMERA_PLATFORM_VERSION 2u
+/* Kernel-only record, not an ioctl or the userland RAW10 header. Provider
+ * binds this to one owned DMA slot/request AFTER PASS1_DONE/group/tag/inner
+ * sequence, error checks and CPU cache sync. capture_id is a nonzero, strictly
+ * increasing 64-bit owned-request identity within generation, not an unchecked
+ * 32-bit IRQ counter. Metadata is the control state applied to THIS frame
+ * (tracked with SOF/control-delay ownership), never registers sampled later.
+ * If the binding is uncertain, do not submit the frame. reserved must be0. */
+struct x9_camera_completed_frame {
+    uint32_t version, sensor, stride, bytes;
+    uint64_t generation, capture_id, time;
+    uint32_t exposure_lines, gain_code, frame_lines, reserved;
+    const void *raw;
+};
 int x9_camera_register_platform(const struct x9_camera_platform *);
 /* Thread-context, synchronous COPY from a completed, CPU/cache-visible RAW10
  * buffer. Provider owns mapping/cache maintenance and keeps raw immutable
  * until return. EBUSY means pinned CPU staging/backpressure: drop this frame,
  * do not replay it or retain the hardware slot waiting on userland. This
- * entrypoint does not establish PASS1_DONE/tag/sequence, drain or a DMA lease. */
-int x9_camera_deliver(uint32_t sensor, uint64_t generation, const void *raw,
-                      uint32_t stride, uint32_t bytes, uint64_t time);
+ * entrypoint validates record/range/order, but does not itself establish
+ * PASS1_DONE/tag/sequence, control application, drain or a DMA lease.
+ * A valid record rejected with EBUSY is retired: replay returns ESTALE. */
+int x9_camera_deliver(const struct x9_camera_completed_frame *);
 void sweet_x9_camera_init(void);
 #endif
 #endif

@@ -1288,15 +1288,21 @@ load_tuning(struct isp *isp, uint32_t sensor)
 
 static bool valid_frame(const struct hakios_camera_frame *f, uint32_t sensor)
 {
+    uint32_t width=sensor==1?4096:3264,height=sensor==1?3072:2448;
+    uint32_t stride=(width/4*5+63)&~63u;
     return !memcmp(f->magic, HAKIOS_CAMERA_MAGIC, 8) && f->header_bytes == sizeof(*f) &&
-        f->sensor == sensor && f->format == 1 && f->bayer < 4 && f->black == 64 &&
-        f->width >= 4 && !(f->width % 4) && f->height >= 2 && !(f->height % 2) &&
-        f->width <= 4096 && f->height <= 3072 && f->stride >= f->width / 4 * 5 &&
+        f->sensor == sensor && f->format == 1 && f->bayer == (sensor==1?3u:0u) && f->black == 64 &&
+        (sensor==1 || sensor==2) && f->width==width && f->height==height && f->stride==stride &&
         (uint64_t)f->stride * f->height <= X9_CAMERA_MAX_BYTES &&
-        f->line_ns && f->gain_unity && f->gain >= f->gain_unity && f->gain <= f->gain_max &&
+        f->line_ns==(sensor==1?4415u:4361u) && f->gain_unity==1024 &&
+        f->gain_max==65536 && f->gain >= f->gain_unity && f->gain <= f->gain_max &&
+        f->frame_lines_min==(sensor==1?7546u:7642u) &&
+        f->frame_lines_max==(sensor==1?65532u:65530u) && f->margin==48 &&
         f->frame_lines_min > f->margin && f->frame_lines >= f->frame_lines_min &&
-        f->frame_lines <= f->frame_lines_max && f->exposure_lines &&
-        f->exposure_lines <= f->frame_lines - f->margin && f->time && f->sequence;
+        f->frame_lines <= f->frame_lines_max && f->exposure_lines >= (sensor==1?6u:16u) &&
+        (sensor!=1 || (!(f->frame_lines%2) && !(f->exposure_lines%2))) &&
+        f->exposure_lines <= f->frame_lines - f->margin && f->time &&
+        f->time<=mach_absolute_time() && f->sequence;
 }
 
 static void *
@@ -1314,6 +1320,7 @@ worker(void *context)
 	float lux = -1, cct = -1;
 	struct af af = { 0 };
 	int device = s->camera_fd, failures = 0;
+    uint64_t last_sequence=0,last_time=0;
 
 	pthread_setname_np("hakios-camera");
 	if (device < 0) {
@@ -1367,9 +1374,11 @@ worker(void *context)
 
 		const struct hakios_camera_frame *f = (const void *)buffer;
 		if (!valid_frame(f, s->camera->sensor) ||
-            bytes != sizeof(*f) + (size_t)f->stride * f->height) {
+            bytes != sizeof(*f) + (size_t)f->stride * f->height ||
+            f->sequence<=last_sequence || f->time<=last_time) {
             say("invalid/stale frame; not delivering to capture graph"); break;
         }
+        last_sequence=f->sequence;last_time=f->time;
         const uint8_t *raw = buffer + f->header_bytes;
 		struct hakios_camera_command c;
 

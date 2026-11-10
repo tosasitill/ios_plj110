@@ -39,6 +39,10 @@ static uint32_t frame_bytes;
 static unsigned frame_readers;
 static uint64_t consumed;
 static struct hakios_camera_frame head;
+/* Source completion order is independent of accepted userland frame count.
+ * Retire even a backpressured frame so it cannot be replayed after a read. */
+static uint64_t last_capture_id, last_capture_time;
+_Static_assert(sizeof(struct x9_camera_completed_frame)==64,"kernel completion record");
 /* Journal attempted callbacks BEFORE invoking them: an error may follow a
  * partial state change. Kept after failed drain/restore; no retry on close. */
 static struct {
@@ -157,6 +161,7 @@ static int start(uint32_t which, uint32_t mode)
     if(!frame)frame=kalloc_data(X9_CAMERA_MAX_BYTES,Z_WAITOK);
     if(!frame)return ENOMEM;
     session.generation=st.generation;
+    last_capture_id=last_capture_time=0;
     session.power=true;
     /* Worker completions can enter camera_deliver during capture setup.
      * Keep control serialization, but never hold the worker's frame lock
@@ -183,7 +188,7 @@ static int start(uint32_t which, uint32_t mode)
 }
 int x9_camera_register_platform(const struct x9_camera_platform *p)
 {
-    if(!p || p->version!=1 || !p->power || !p->read8 || !p->write8 || !p->capture)return EINVAL;
+    if(!p || p->version!=X9_CAMERA_PLATFORM_VERSION || !p->power || !p->read8 || !p->write8 || !p->capture)return EINVAL;
     struct x9_camera_config config={0};
     int tables=cam_sensor_config_preflight(1,&config);
     if(!tables)tables=cam_sensor_config_preflight(2,&config);
@@ -213,33 +218,39 @@ int x9_camera_register_platform(const struct x9_camera_platform *p)
     }
     lck_mtx_unlock(&camera_lock);lck_mtx_unlock(&camera_control_lock);return e;
 }
-int x9_camera_deliver(uint32_t which,uint64_t generation,const void *raw,
-                     uint32_t stride,uint32_t bytes,uint64_t time)
+int x9_camera_deliver(const struct x9_camera_completed_frame *completed)
 {
+    if(!completed)return EINVAL;
+    /* Snapshot the record, not a mutable provider structure during delivery.
+     * raw itself must remain immutable/cache-visible through this call. */
+    const struct x9_camera_completed_frame f=*completed;
     lck_mtx_lock(&camera_lock);int e=0;const struct x9_camera_sensor *s=sensor();
-    if(!(st.flags&X9_CAMERA_STREAMING) || generation!=st.generation || which!=st.sensor)e=ESTALE;
-    else if(!raw || stride<s->width/4*5 || stride>s->width/4*5+4096 ||
-            (uint64_t)stride*s->height!=bytes || bytes>X9_CAMERA_MAX_BYTES ||
-            !time || time<=head.time || time>mach_absolute_time())e=EINVAL;
-    else if(frame_readers)e=EBUSY; /* never overwrite a pinned CPU copy */
-    uint32_t exposure=0,gain=0,lines=0;
-    if(!e)e=read16(s,0x0202,&exposure);
-    if(!e)e=read16(s,0x0204,&gain);
-    if(!e)e=read16(s,0x0340,&lines);
-    if(!e && (lines<s->frame_lines || lines>s->frame_max || exposure<s->exposure_min ||
-              exposure>lines-48 || gain>s->gain_max))e=EIO;
+    if(!(st.flags&X9_CAMERA_STREAMING) || f.generation!=st.generation || f.sensor!=st.sensor)e=ESTALE;
+    else if(f.version!=X9_CAMERA_PLATFORM_VERSION || f.reserved || !f.raw ||
+            f.stride!=((s->width/4*5+63)&~63u) ||
+            (uint64_t)f.stride*s->height!=f.bytes || f.bytes>X9_CAMERA_MAX_BYTES ||
+            !f.capture_id || !f.time || f.time>mach_absolute_time())e=EINVAL;
+    else if(f.capture_id<=last_capture_id || f.time<=last_capture_time)e=ESTALE;
+    else if(f.frame_lines<s->frame_lines || f.frame_lines>s->frame_max ||
+            f.frame_lines%s->exposure_step || f.exposure_lines<s->exposure_min ||
+            f.exposure_lines>f.frame_lines-48 || f.exposure_lines%s->exposure_step ||
+            f.gain_code>s->gain_max)e=EIO;
+    if(!e) {
+        last_capture_id=f.capture_id;last_capture_time=f.time;
+        if(frame_readers)e=EBUSY; /* retire, never overwrite/replay a pinned CPU copy */
+    }
     if(!e) {
         memset(&head,0,sizeof(head));memcpy(head.magic,HAKIOS_CAMERA_MAGIC,8);
         head.header_bytes=sizeof(head);head.width=s->width;head.height=s->height;
-        head.stride=stride;head.format=1;head.bayer=s->bayer;head.black=64;
-        head.sequence=++st.frames;head.time=time;head.exposure_lines=exposure;
+        head.stride=f.stride;head.format=1;head.bayer=s->bayer;head.black=64;
+        head.sequence=++st.frames;head.time=f.time;head.exposure_lines=f.exposure_lines;
         /* HakiOS ISP expects linear gain. Sony registers encode reciprocal
          * gain: unity/(unity-reg), NOT reg/unity. ABI units are linear Q10. */
-        head.line_ns=s->line_ns;head.gain=1024*s->gain_unity/(s->gain_unity-gain);
+        head.line_ns=s->line_ns;head.gain=1024*s->gain_unity/(s->gain_unity-f.gain_code);
         head.gain_unity=1024;head.gain_max=65536;
-        head.frame_lines=lines;head.frame_lines_min=s->frame_lines;head.frame_lines_max=s->frame_max;
-        head.margin=48;head.sensor=which;head.focus=HAKIOS_CAMERA_NO_FOCUS;
-        memcpy(frame,raw,bytes);frame_bytes=bytes;wakeup(&frame_bytes);
+        head.frame_lines=f.frame_lines;head.frame_lines_min=s->frame_lines;head.frame_lines_max=s->frame_max;
+        head.margin=48;head.sensor=f.sensor;head.focus=HAKIOS_CAMERA_NO_FOCUS;
+        memcpy(frame,f.raw,f.bytes);frame_bytes=f.bytes;wakeup(&frame_bytes);
     } else {st.rejected++;st.last_errno=e;}
     lck_mtx_unlock(&camera_lock);return e;
 }

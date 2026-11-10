@@ -127,6 +127,16 @@ stop 先失效 generation 并按原顺序 drain 硬件，再最多等 1 s 排空
 
 **上述 pin 是 CPU 内存生命周期，不是 MM-SMMUv3 映射、CAMSV PASS1_DONE 或硬件 drain 的证明。** `x9_camera_deliver` 仍要求真实 provider 在 thread context 提交已完成、cache-visible 且调用返回前不变的 RAW10；SENINF/RAW DMA provider 仍缺失，READY/supported 仍为零，不能拍摄。
 
+### 完成帧的曝光 metadata 不再从后来的寄存器读数拼接
+
+内核采集接口升级为 **platform version2**，提交一个 `x9_camera_completed_frame`：sensor、generation、非零 capture_id、完成 time、raw/stride/bytes，以及该帧实际应用的 exposure_lines、Sony gain_code、frame_lines。`x9_camera_deliver` 不再执行 I2C 读；旧的“DMA 完成后读当前曝光/增益/帧长”不能证明这些值属于已完成的帧，因此不保留该降级路径。没有已注册的 MT6993 provider，升级不会移除现有可工作的硬件后端。
+
+provider 必须先确认真实 PASS1_DONE/group/tag/inner sequence 与本次 owned slot/request 对应、检查错误并完成 CPU cache 同步，按 SOF/控制生效延迟绑定该帧 metadata。无法确认绑定时不交付；不能把最新 AP 命令、晚读寄存器或未资格化 IRQ 当作完成证明。capture_id 是 generation 内严格递增的 64-bit owned-request 标识，不是直接放宽/截断硬件 32-bit counter。
+
+控制层只验证记录版本/保留字、generation、preview 精确尺寸与 64B stride、字节范围、完成时间、曝光/帧长步长和增益范围。重复或乱序 capture_id/time 返回 `ESTALE`；有效但被 CPU reader 背压丢弃的记录也退休，再提交同一记录仍为 `ESTALE`，不冒充新帧。用户 RAW10 `sequence` 保持接受帧计数，独立于 provider capture_id。iOS 在 allocation/ISP/metadata/PixelBufferHandler 前验证固定 preview header，并拒绝重复、倒序或未来时间帧。
+
+**这实现了完成记录→RAW10 header→iOS 的绑定和拒绝路径，不是 CAMSV 硬件 completion、控制延迟、SMMUv3 mapping 或真实帧的实测。** 旧用户态 RAW10/ioctl ABI 未改，也没有新增诊断 ioctl；仍需真实采集 provider，不能拍摄。
+
 ### CAMTG 时钟申请和诊断
 
 按 OPPO `clk-mt6993.c` → `clk-mux.c` → `hwccf_api.c` 的 v1 AP 路径实现，不能沿用旧版的两个假设：
@@ -263,7 +273,7 @@ cameractl status                 # 只读缓存，不重新触碰硬件
 2. `read8/write8` 是 16-bit register / 8-bit data I2C；只在上电及总线归 AP 后调用。
 3. `capture(on)` 在 stream-on 前完成 SENINF、VC0/DT0x2b、RAW10 DMA、SMMU 配置；`capture(off)` 在返回前停止并排空，即使初始化只做了一半。
 4. 注册会分别上电读 ID 并恢复，只有两枚真实 ID 相符才发布 READY。调用发生在线程上下文；所有回调都不可重入相机 API。
-5. DMA worker 完成缓存同步后调用 `x9_camera_deliver(sensor,generation,raw,stride,bytes,time)`；不得在硬中断调用。generation 必须来自本次 `capture(on)`，time 为帧完成的 `mach_absolute_time`。
+5. provider.version 必须为 `X9_CAMERA_PLATFORM_VERSION`（2）；version1 不接受。DMA worker 在真实 completion/slot/metadata 绑定及缓存同步后调用 `x9_camera_deliver(&completed)`，其中 completed 为 version2 的 `x9_camera_completed_frame`；不得在硬中断调用。generation 来自本次 `capture(on)`，time 为帧完成的 `mach_absolute_time`，capture_id 为该代已资格化 owned-request 标识。record/raw 直到返回都保持不变；EBUSY 丢帧并释放硬件 slot，不重放。记录验证不能代替 provider 的硬件、映射或控制生效证明。
 
 控制层在调用 power/capture/stream 前记录 attempted 阶段及原始 generation；半途错误只清理实际尝试过的阶段。stop 先失效 generation/唤醒读者，再退出帧锁等待 capture(off)，因此完成 worker 不会被 start/stop 持帧锁堵住。**capture(off) 非零时不调用 power(false)**，保持映射/时钟/供电依赖并置 FAULT/RETAINED；power(false) 失败也保留 journal。后续 close 不重试硬件清理、不释放保留的 staging buffer、不切换另一 sensor。注册时的 ID 供电恢复失败同样锁存。非零返回不是已经恢复或可以重新开始，只有明确 drain 成功后才能撤依赖。
 
