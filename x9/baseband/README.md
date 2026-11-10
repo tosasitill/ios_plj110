@@ -241,12 +241,23 @@ preferences；country domain、配置装载合并与实际 c7 参数仍须现场
 
 | TLV | 已加载 RIL 普通分支 | 当前适配层 | 含义与修复边界 |
 |---|---|---|---|
-| 108 `IPV4V6_FALLBACK` | `2b8764..876c` 写 **0x7f** | **0=DISABLE** | 旧头文件中1=IPv4 first、2=IPv6 first、0x7f=MAX。已证明 RIL 发0x7f，但尚未证明本机 MD 将它解释为哪种策略；不能把 MAX 当成已证实的“自动/禁用” |
+| 108 `IPV4V6_FALLBACK` | `2b8764..876c` 写 **0x7f** | **0=DISABLE** | 保存的 MT6993 P77 MD 中，`91326e76..91326e94` 将0/1/2映射为内部0/2/3，将7f保留为INT_MAX哨兵；`913d5cda..913d5cfc`再取每SIM策略。`l5updn_init`调用的custom函数返回1，初始化为IPv4-first；7f不是直接禁用。现场策略覆盖与最终family结果仍未证明 |
 | 10a `REUSE_FLAG` | 普通分支 `2b8830..8840` 写 **0=DEFAULT**；APN type2/100 特殊分支写3 | **2=NOT_REUSE** | 0允许 MD 的默认复用政策，不等同强制新建；3=REUSE_ONLY，不是普通 Internet 分支。当前只管理自有 fresh call，不能直接改成0后仍沿用成功/超时即 DEACT 的清理逻辑 |
 
 以上差分不是189失败原因的实跑证据：189没有 Start20/ACT201。当前保持 fallback0、NOT_REUSE2，
 也不增加未知 QoS/PCO TLV。要改复用必须先有实际 existing-call 身份、所有权和 GET/EIF 资格，
 避免清理非本次创建的 PDN；要改 fallback 必须确认 MD 的0x7f策略及对应 family/partial-success处理。
+
+**MD消费端补充（静态，不替代实跑）**：原始`modem_a.img`内置`md1_dbginfo`解出146850条
+符号，版本为`MOLY.NR17.R2.MP2.TC16.PR3.SP.V2.P77`。`mipc_data_act_call_req`→
+`l5mipc_ilm_send`→L5UPDN消费链已定位；两处fallback映射表均为`[0,2,3]`。
+10a的u8值0..3保存在请求`+a0`；L5UPDN对3与APN type2/100有明确existing-call复用分支，
+另有按APN查旧call并调用`reuse_data_call_info`的路径。因此**2是否跨所有分支保证fresh PDN仍待确认**，
+不以枚举名替代所有权验证。CarrierSettings装载已追到`100535418`按domain/filename缓存，
+`1005388f0`→`100611f84`通过FileSystemInterface读取并转换字典；同文件名可跳过重载，
+读取失败仅在RadioPersonality为1时尝试MobileHelper。D22 override组成及189有效配置仍未知。
+证据与只读重放入口：`.local/x9/work/cell189-md-consumer-20261110/{findings.json,md-dis.py,replay.sh}`；
+本轮未改下发字段、未构建镜像或采集新runtime。
 
 ### 5. iOS 网络最终验证
 
