@@ -14,7 +14,10 @@ static LCK_MTX_DECLARE(x9_baro_lock, &x9_baro_group);
 static struct x9_baro_sample latest;
 static uint32_t mtk_gain;
 static uint64_t last_scp_time;
+static uint64_t scp_request_time;
 static int active, test_mode, valid;
+static int scp_pending, scp_enabled;
+static uint8_t scp_sequence;
 
 static uint32_t
 le32(const uint8_t *p)
@@ -77,6 +80,8 @@ x9_baro_init(int diagnostic)
 	valid = 0;
 	mtk_gain = 0;
 	last_scp_time = 0;
+	scp_pending = scp_enabled = 0;
+	scp_request_time = 0;
 	lck_mtx_unlock(&x9_baro_lock);
 	return 0;
 }
@@ -88,6 +93,8 @@ x9_baro_shutdown(void)
 	active = test_mode = valid = 0;
 	mtk_gain = 0;
 	last_scp_time = 0;
+	scp_pending = scp_enabled = 0;
+	scp_request_time = 0;
 	lck_mtx_unlock(&x9_baro_lock);
 }
 
@@ -122,6 +129,8 @@ x9_baro_configure_mtk(const void *info, unsigned int length)
 		mtk_gain = gain;
 		last_scp_time = 0;
 		valid = 0;
+		scp_pending = scp_enabled = 0;
+		scp_request_time = 0;
 	}
 	lck_mtx_unlock(&x9_baro_lock);
 	if (!error) printf("X9 BARO: MTK PRESSURE configured gain=%u; awaiting DATA (not a hardware enable)\n", gain);
@@ -154,6 +163,8 @@ x9_baro_invalidate_mtk(void)
 		valid = 0;
 		mtk_gain = 0;
 		last_scp_time = 0;
+		scp_pending = scp_enabled = 0;
+		scp_request_time = 0;
 	}
 	lck_mtx_unlock(&x9_baro_lock);
 }
@@ -186,3 +197,5 @@ sysctl_x9_baro_test_pa SYSCTL_HANDLER_ARGS
 }
 SYSCTL_PROC(_debug, OID_AUTO, x9_baro_test_pa, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
     0, 0, sysctl_x9_baro_test_pa, "I", "X9 pressure diagnostic Pa (-1 invalid), requires x9_baro=2");
+
+#include "x9_baro_scp.inc"

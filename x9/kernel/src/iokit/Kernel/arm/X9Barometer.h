@@ -32,6 +32,21 @@ int x9_baro_copy_sample(struct x9_baro_sample *sample);
 int x9_baro_configure_mtk(const void *info, unsigned int length);
 int x9_baro_receive_mtk(const void *record, unsigned int length);
 void x9_baro_invalidate_mtk(void);
+/* sensorhub v2 host wire path (thread context). These are not MMIO/IPI sends:
+ * transport must supply a real SHARE_BUFFER reply plus its IPI32 notification,
+ * send the constructed ENABLE on IPI29, then supply its actual IPI30 ACK.
+ * v2 DATA is rejected until that matching ACK succeeds. Reset invalidates all
+ * state. A single transport worker must serialize list/enable/reset, discard
+ * old mailbox/FIFO traffic on reset and invalidate on send/timeout failure;
+ * the 8-bit wire sequence alone cannot identify a firmware generation.
+ * Duplicate/unrelated ACKs leave state unchanged; ENABLE ACK expires in 1s.
+ * No default gain, pressure or synthetic success is supplied. */
+int x9_baro_scp_configure_list(const void *shared_rx, unsigned int shared_bytes,
+    const void *notify, unsigned int notify_bytes, uint8_t request_sequence);
+int x9_baro_scp_make_enable(void *request, unsigned int capacity,
+    uint8_t sequence, uint64_t interval_ns);
+int x9_baro_scp_accept_enable(const void *ack, unsigned int length);
+int x9_baro_scp_receive_data(const void *record, unsigned int length);
 #ifdef __cplusplus
 }
 #endif

@@ -1,15 +1,16 @@
 /* Native locationd QMI PDS, not CLLocation simulation/injection.
  * 20H392 CLQmiPdsManager::sendSetGpsServiceState builds message0x21 at
  * 0x1004dd638; request state@TLV1 and optional uint64 mask@TLV0x10.
- * Standard PDS NMEA layouts: libqmi qmi-service-pds.json. Parsed fixes,
- * assistance, SUPL and proprietary engine messages remain unsupported.
+ * Standard PDS NMEA layouts: libqmi qmi-service-pds.json. Native parsed
+ * position: 20H392 locationd 0x1004f0a24 requires 105 bytes, not the obsolete
+ * libqmi comment's one-byte validity mask. Assistance/SUPL remain unsupported.
  * All client state is owned by X9Baseband's sole QRTR worker. */
 #include "../../../bsd/dev/x9_gps.h"
 struct x9g_client {
- bool initialized, enabled, automatic, nmea, extended;
+ bool initialized, enabled, automatic, nmea, extended, parsed;
  uint8_t timeout;
  uint32_t interval, accuracy;
- uint64_t cursor;
+ uint64_t cursor, position_cursor;
 };
 static x9g_client x9g_clients[CBQ_MAX_CLIENTS];
 static bool x9g_enabled;
@@ -18,7 +19,8 @@ static x9g_client &x9g_client_for(unsigned slot) {
  if (!c.initialized) {
   c.initialized = true; c.automatic = true;
   c.timeout = 30; c.interval = 1; c.accuracy = 50;
-  x9_gps_status s; x9_gps_copy_status(&s); c.cursor = s.sequence;
+  x9_gps_status s; x9_gps_copy_status(&s);
+  c.cursor = s.sequence; c.position_cursor = s.position_sequence;
  }
  return c;
 }
@@ -50,18 +52,26 @@ static bool x9g_send(uint32_t local, uint32_t port, const uint8_t *req, unsigned
  switch (id) {
  case 0: /* Reset this client's settings/lease only. */
   if (len != 7) { error = X9Q_ARG; break; }
-  next.enabled = next.nmea = next.extended = false;
+  next.enabled = next.nmea = next.extended = next.parsed = false;
   next.automatic = true; next.interval = 1; next.timeout = 30; next.accuracy = 50;
   mutation = true; break;
- case 1: /* Set Event Report; do not promise unavailable parsed-position data. */
+ case 1: /* Only an explicitly capable physical backend can subscribe fixes. */
   for (unsigned i = 7; i < len; i += 3+x9q_u16(req+i+1)) {
    uint8_t tag = req[i]; unsigned n = x9q_u16(req+i+1);
    if (n != 1 || req[i+3] > 1) { error = X9Q_ARG; break; }
    if (tag == 0x10) next.nmea = req[i+3];
    else if (tag == 0x11) next.extended = req[i+3];
+   else if (tag == 0x12) {
+    x9_gps_status s; x9_gps_copy_status(&s);
+    if (req[i+3] && !s.position_supported) { error = X9Q_UNSUPPORTED; break; }
+    next.parsed = req[i+3];
+   }
    else if (tag < 0x12 || tag > 0x23 || req[i+3]) { error = X9Q_UNSUPPORTED; break; }
   }
-  if (!error) { x9_gps_status s; x9_gps_copy_status(&s); next.cursor = s.sequence; c = next; }
+  if (!error) {
+   x9_gps_status s; x9_gps_copy_status(&s);
+   next.cursor = s.sequence; next.position_cursor = s.position_sequence; c = next;
+  }
   break;
  case 0x20: /* Get GPS service state */
   if (len != 7) error = X9Q_ARG;
@@ -104,7 +114,10 @@ static bool x9g_send(uint32_t local, uint32_t port, const uint8_t *req, unsigned
  if (mutation) {
   int e = x9g_apply(slot, next);
   if (e) error = x9g_error(e);
-  else { x9_gps_status s; x9_gps_copy_status(&s); next.cursor = s.sequence; c = next; }
+  else {
+   x9_gps_status s; x9_gps_copy_status(&s);
+   next.cursor = s.sequence; next.position_cursor = s.position_sequence; c = next;
+  }
  }
  x9q_packet p(req, error); p.send(local, port);
  printf("X9 GPS PDS: msg 0x%04x txn %u error %u (no coordinates logged)\n", id, x9q_u16(req+1), error);
@@ -121,7 +134,15 @@ static void x9g_poll(void) {
  if (!x9g_enabled) return;
  for (unsigned slot = 0; slot < CBQ_MAX_CLIENTS; slot++) {
   x9g_client &c = x9g_clients[slot];
-  if (!c.enabled || !c.automatic || (!c.nmea && !c.extended)) continue;
+  if (!c.enabled || !c.automatic) continue;
+  if (c.parsed) for (unsigned i = 0; i < 4; i++) {
+   x9_gps_position position;
+   if (x9_gps_next_position(&c.position_cursor, &position)) break;
+   uint8_t req[7] = {}; x9q_packet p(req);
+   p.tlv(0x13, position.data, sizeof(position.data));
+   p.send(CBQ_PORT_BASE+slot, X9BB_PORT_BASE+6, true, 1);
+  }
+  if (!c.nmea && !c.extended) continue;
   /* Bound work per bridge iteration; no starvation of WDS/CCCI/SIM. */
   for (unsigned i = 0; i < 4; i++) {
    x9_gps_nmea n;
