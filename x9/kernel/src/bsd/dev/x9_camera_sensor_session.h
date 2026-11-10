@@ -48,6 +48,11 @@
  * close restores the owned delay-force controls BEFORE analog power-off.
  * Optional configure_outmux then applies only the fixed inactive OUTMUX0
  * image route and confirms real shadow/inner consumption, still DL/IRQ off.
+ * On success it also configures CAMSV0 tag0 RAW10 grab/format, A0 stride and
+ * group/first/last tags, with actual outer/inner DB_EN consumption. No base
+ * address, FBC/CQ/DMA/CMOS/VF enable or IRQ history read is performed. The
+ * inactive CAMSV journal restores BEFORE OUTMUX; a pending field or DB
+ * phase requires its actual target and keeps the lower dependencies held.
  * Its journal restores BEFORE dropping receiver/MM; a pending trigger has
  * no cancellation proof and blocks all dependent teardown.
  * Optional prepare_smi_clocks AFTER prepare_receiver and BEFORE MAC/PHY/

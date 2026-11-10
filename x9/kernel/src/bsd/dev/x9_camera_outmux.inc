@@ -52,6 +52,7 @@ static unsigned cam_out_offset(unsigned n)
 static void cam_out_status(void)
 {
     cam_out_irq_status();
+    cam_sv_status_copy(cam_out.status.sensor_epoch,&cam_out.status.sv);
     cam_out.status.last_errno=cam_out.error;cam_out.status.dirty=cam_out.dirty;
     cam_out.status.uncertain=cam_out.pending_slot<CAM_OUT_WRITES?1u<<cam_out.pending_slot:0;
     cam_out.status.commit_pending=cam_out.commit_pending;
@@ -120,6 +121,7 @@ static int cam_out_guard_impl(void)
     int e;
     if(!cam_out.held)return 0;
     if(cam_out.epoch!=cam_rx_live.sensor_epoch || cam_rx_live.epoch!=cam_mm_live.epoch)return ESTALE;
+    e=cam_sv_guard();if(e)return e;
     e=cam_out_irq_control_guard();if(e)return e;
     e=cam_out_top_guard(false);if(e)return e;
     e=cam_out_environment();if(e)return e;
@@ -315,6 +317,7 @@ static int cam_out_open_locked(uint64_t epoch,struct x9_camera_outmux_status *r)
     if(!e)e=cam_out_irq_open_locked();
     for(unsigned slot=0;slot<CAM_OUT_WRITES && !e;slot++)e=cam_out_write(slot,cam_out.target[slot]);
     if(!e){cam_out.status.flags|=X9_CAM_OUT_SHADOW;e=cam_out_commit();}
+    if(!e)e=cam_sv_open_locked(epoch);
     if(e)cam_out_fault(e);
     cam_out_status();*r=cam_out.status;
     return e;

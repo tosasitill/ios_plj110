@@ -492,6 +492,18 @@ OUTMUX 引擎只接受选定 bank 的 TOP CG 原为 off、当前 IRQ policy 为 
 
 这套生命周期可显式开启 SMI supplier/larb clocks、inactive analog 校准、数字HS/lane-map/deskew/protocol和最终 CTLE 配置，但不启用 digital PHY lanes、SENINF DL、IRQ 或 DMA。CG/VM0/稳定 disabled 条件只是配置准入，不证明独占 AP/SCP、采集速率、包接收、全写链 drain 或 IOVA 授权；共享 CG 的 masked RMW 与检查也不是跨固件的原子 lease/ABA 检测。完整LARB/SMI port/common数据通路配置、持续rate authority、PHY/AFIFO有界start-stop、正常 SID80 attach、唯一IRQ owner与真正采集仍缺失，SMI clocks/analog/deskew配置也尚无本机运行证据。
 
+### CAMSV0 inactive RAW10 硬件配置
+
+`x9_camera_sv_hw.inc` 实际接在 `configure_outmux` 的 route 消费之后，不是另一个未调用的 capture adapter。固定 CAMSV A/id0 的三个合法 bank 与 inner views（`3a600000/3a601000/3a602000`，inner `+8000`），只写十个字段：tag0 `GRAB_PXL/GRAB_LIN/FORMAT`、A0 `BASIC` 的 stride/MAX_BURST、四组 tag mask 和 FIRST/LAST。前后摄均采用原 pipeline 的 packed RAW10/start0；FORMAT 的 UNPACK/MQE/UFE/QBN 等功能清零，保留 reserved 位；BASIC 的 reserved 位保留。group0/first/last=tag0，group1～3=0。**不写任何 DMA base/IOVA、FBC enable/RCNT、CMOS/VF、IRQ enable 或 CQ**。
+
+准入双采样 central/DMA/SCQ 的命名普通配置，必须稳定且 outer/inner 完全相同，防止 DB toggle 消费继承的其它 staged tag/address/CQ 配置。所有 DMA/IRQ/CMOS/VF/CQ-threshold/reset/trigger 必须关闭，八个 FBC 的 `RCNT_INC bit7 / RESET bit8 / LOCK bit12 / SUB_EN bit14 / EN bit15` 必须0。receiver 的 FBC 准入也补上了原来漏掉的 bit14。全局 DMA SLC_CTRL 是 **`+102c`**，tag0 的才是 `+123c`；不会按错误全局 offset 读写。只读普通 controls，不读 DONE/ERR/SOF/COMMON/CHANNEL/FBC1/VF_ST/FIFO_STAT/CQ status；PDP/STG 和其它 CAMSV instances 不配置，不以这三个 bank 的 inactive 状态宣称全局 owner。
+
+每笔 outer 写之前登记完整 next、pending/dirty，actual target 双采样后才确认；inner effect 无论来自 DB_EN=0 的 live-through 或后续 DB transfer，均只从实际读数接纳与发布，观测 target 后回退即 terminal。只按上游实际 `mtk_cam_sv_toggle_db` 的 **DB_EN down→up** 路径；初始 DB_EN=0 则跳过无效 down，不发送 posted no-op，不用 FORCE_LOAD/SWITCH_FORCE/inner 数据写制造消费。每个 DB phase 明确区分尚未 issued、已 posted pending 和实际消费，**两 bank 的 DOWN target 双采样后才允许 UP**；shadow/DB timeout 的唯一 close 只观察迟到 target，已发 phase 不重放。必须完整两 bank 目标双采样才记录 command/completed，这只证明 inactive 配置，不是 CFG_DONE 或图像完成。
+
+关闭先在完整 MM/SMI/MAC/PHY/OUTMUX 时钟资格下退休 CAMSV pending。若在首个 DB command 前 shadow-only 失败，须先独立消费完整 actual partial target，不能以旧 inner/prior 假定早先写入已取消。随后逆序还原本次改变的十字段，再以独立 DB down/up 消费原配置，最后恢复原 DB policy，整个 ordinary snapshot 必须 actual 回原。借用字段不写、不恢复。失败/unknown control/authority/producer 变化保留尚未退休依赖，不 reset/cancel/retry。receiver expected 只发布 journal 接受的 actual bank 值，包括尚未结束但已实际观测的 posted BASIC target；不能先以旧 expected 拒绝自己这笔写，再假装恢复成功。原快照保持证据。kernel-private OUTMUX status 嵌套 `sv` 保存 before/target/actual/sequence/pending/DB policy，并绑定同一 sensor epoch，无新 ioctl/READY，close 日志只输出缓存。
+
+这是实际 inactive 接收配置，**不是可拍摄链路**。正常 SID80/HYP delegation、合法 IOVA、持续 MMQoS/rate、PHY/AFIFO 启停、唯一 GIC owner、CAMSV DMA/PASS1_DONE/cache/worker drain 与 native→iOS preview/photo 尚须完成；没有本轮硬件消费或 RAW10 运行证据。
+
 ### 接通采集回调
 
 `kernel/src/bsd/dev/x9_camera.h` 定义 `x9_camera_platform`：

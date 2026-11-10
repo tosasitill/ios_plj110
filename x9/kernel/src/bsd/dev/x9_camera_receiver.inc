@@ -5,7 +5,8 @@
  * Only documented configuration CSR reads. Do NOT read interrupt/status
  * banks: upstream enables read-clear on several of them. Probe/prepare does
  * not write receiver CSR. The separately requested OUTMUX engine below
- * journals real shadow/commit/restore; no async/IRQ/all-port setup or PHY guesses.
+ * journals real shadow/commit/restore and inactive CAMSV RAW10 configuration;
+ * no IRQ/all-port setup or PHY guesses.
  * DISABLED is not ownership, queue drain or a mapping lease.
  */
 _Static_assert(sizeof(struct x9_camera_receiver)==1192,"camera receiver ABI");
@@ -21,6 +22,10 @@ static int cam_phy_close_locked(uint64_t);
 static int cam_smi_clock_guard(void);
 static int cam_smi_clocks_close_locked(uint64_t);
 static int cam_smi_retirement_guard(uint64_t);
+static int cam_sv_guard(void);
+static int cam_sv_open_locked(uint64_t);
+static int cam_sv_close_locked(uint64_t);
+static void cam_sv_status_copy(uint64_t,struct x9_camera_sv_hw_status *);
 static const unsigned cam_rx_out_offsets[X9_CAM_RX_OUT_WORDS]={
     0x000,0x004,0x008,0x00c,0x010,0x014,0x018,0x020,
     0x02c,0x034,0x038,0x100,0x104,0x108
@@ -71,7 +76,7 @@ static uint32_t cam_rx_busy(const struct x9_camera_receiver_sample *s,unsigned p
         if(out[9]&1)busy|=32;
         if(sv[0] || sv[1] || ((sv[2]|sv[3])&1))busy|=8;
         for(unsigned tag=0;tag<8;tag++)
-            if(sv[4+tag]&((1u<<15)|(1u<<12)|(1u<<8)|(1u<<7)))busy|=8;
+            if(sv[4+tag]&((1u<<15)|(1u<<14)|(1u<<12)|(1u<<8)|(1u<<7)))busy|=8;
         if((sv[15]&(1u<<16)) || (sv[16]&1))busy|=16;
     }
     return busy;
@@ -164,7 +169,8 @@ static int cam_rx_session_open(unsigned sensor,uint64_t sensor_epoch,struct x9_c
 }
 /* Check against consumed controls plus ONLY our confirmed journal writes,
  * not just two equally redirected current samples. Initial status.before
- * remains evidence; expected is updated by the real OUTMUX engine only.
+ * remains evidence; expected is updated only by actual journaled OUTMUX,
+ * MAC and CAMSV effects.
  * Never touch read-clear DONE/IRQ/fault banks.
  * Disabled/stable controls are only prerequisites for dropping this
  * unprogrammed lifetime; they do not prove bus/DMA/worker drain. */
@@ -178,6 +184,9 @@ static int cam_rx_session_guard(void)
     int e;
     if(!cam_rx_live.epoch || cam_rx_live.epoch!=cam_mm_live.epoch)return ESTALE;
     if(!(r->flags&X9_CAM_RX_SNAPSHOT))return cam_rx_live.error?cam_rx_live.error:ENXIO;
+    /* CAMSV may have confirmed a live-through inner DB effect. Publish
+     * only its actual accepted values before the receiver comparison. */
+    e=cam_sv_guard();if(e)return e;
     e=cam_rx_sample(m,&a);if(e)return e;
     delay(10);
     e=cam_rx_sample(m,&b);if(e)return e;
@@ -197,12 +206,14 @@ static int cam_rx_session_close(struct x9_camera_receiver *r)
     /* An incomplete MM take cannot safely sample receiver registers. It
      * has not issued any receiver writes; unwind only its consumed slots.
      * A complete take first refuses unconsumed analog requests, restores
-     * OUTMUX with MAC/async clocks held, restores/stops analog, then
+     * inactive CAMSV geometry/DB policy, OUTMUX with MAC/async clocks held,
+     * restores/stops analog, then
      * restores MAC/async, then optional SMI clocks. The receiver must still
      * match the initially captured disabled controls. Unconsumed SMI clock
      * requests or new owners retain the MM and sensor dependencies too. */
     off=cam_smi_retirement_guard(cam_rx_live.sensor_epoch);
     if(!off)off=cam_phy_retirement_guard(cam_rx_live.sensor_epoch);
+    if(!off)off=cam_sv_close_locked(cam_rx_live.sensor_epoch);
     if(!off)off=cam_out_close_locked(cam_rx_live.sensor_epoch);
     if(!off)off=cam_phy_close_locked(cam_rx_live.sensor_epoch);
     if(!off)off=cam_mac_close_locked(cam_rx_live.sensor_epoch);
@@ -256,6 +267,7 @@ static int cam_rx_sensor_close_locked(uint64_t epoch)
 #include "x9_camera_mac.inc"
 #include "x9_camera_phy.inc"
 #include "x9_camera_smi_clocks.inc"
+#include "x9_camera_sv_hw.inc"
 static int cam_rx_probe(unsigned sensor,struct x9_camera_receiver *r)
 {
     int e,off=0;

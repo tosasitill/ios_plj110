@@ -3,6 +3,7 @@
 #define X9_CAMERA_OUTMUX_H
 #ifdef KERNEL
 #include <stdint.h>
+#include "x9_camera_sv_hw.h"
 #define X9_CAM_OUT_ATTEMPTED 1u
 #define X9_CAM_OUT_SHADOW 2u
 #define X9_CAM_OUT_CONSUMED 4u
@@ -25,12 +26,14 @@ struct x9_camera_outmux_status {
     uint32_t dirty, uncertain, commit_pending, cg_owned, cg_uncertain;
     uint32_t image_vc, first_vc, last_vc, vcdt, expected_size;
     struct x9_camera_outmux_irq_status irq;
+    struct x9_camera_sv_hw_status sv;
 };
 /* Standalone thread context, takes camera_control_lock. Requires the same
  * configured standby sensor's successful prepare_receiver. No arbitrary
  * route/tag/VC/register input. OUTMUX0 only, image tag0, normal mode, RAW10.
- * Actual masked shadow writes and CFG_DONE consumption, with DL/IRQ/DMA
- * kept off. The sole thread-only raw STATUSX sampler journals WCLR policy,
+ * Actual masked shadow writes and CFG_DONE consumption, then real inactive
+ * CAMSV0 RAW10 geometry/group/stride and DB_EN consumption. DL/IRQ/DMA
+ * stay off. The sole thread-only raw STATUSX sampler journals WCLR policy,
  * retires a qualified stale CFG_DONE baseline, then binds each fresh event
  * to our posted command AND exact inner target before a single-bit W1C.
  * Other/unknown events are not acknowledged. Neither this result nor an
