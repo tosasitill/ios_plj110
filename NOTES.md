@@ -162,7 +162,17 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **x9-rev252ie-md**:Mac构建成功,命令同ic/id(`--name x9-rev252ie-md`),boot.img 12922880B,参数与ic一致,warning 1412(未增加),插件275不变,**无需mailbox staging**。`X9 MODEM: build=rev252ie-md ...-ecsq-csgclose`。日志`.local/x9/work/pdp-activation/build-ie.stdout.log`。
 - 下一步由用户手动:`fastboot boot x9/out/x9-rev252ie-md/boot.img`,日志`~/171.txt`,**尽量采集≥3分钟**。看:`unresolved client teardown`是否消失、`X9 RENDER CLOSE`里"parked"/"retain"行、140s后SpringBoard是否还循环;`ECSQ ... raw`原始回复。
 
-### 前次交接(HANDOFF 103,2026-11-10): 169(ic-mg)出现单卡信号;信号条空=NAS 0x4f被拒,id用真实AT+ECSQ回答;双卡不可行
+### 并行交接(HANDOFF 104-SA分析,2026-11-10,与上条同日另一会话): 更正“iPhone X IPSW没有5G逻辑”;已定位SA解析、能力门及桥接缺项
+
+- **本次仅分析,无设备操作/构建/CI/上机**。代码基线`137ba97`(本轮期间其他工作完成的id提交);最新实测仍169(ic-mg),候选仍id,插件275不变。未修改任何内核或Apple二进制。
+- **更正旧结论**:实际20H392 **arm64** CoreTelephony有`getSupports5GStandalone:error:`(0x1881b8170,实际发XPC查询),QMI MCommandDrivers有`enable5GStandalone`(0x1f1afc288,构造NAS 0x33+NRDisableMode)及`NR5GSysInfo`解析。GetSysInfo响应0x1f1b08934和SysInfo indication 0x1f1b0f928均调用0x4B解析器。因此HANDOFF100/102的“CommCenter没有5G概念/换14 Pro才能认识5G”**撤回**,ERAT=3只是LTE-only实验策略,不是SA已解决。
+- **已定位但未动态验证的能力门**:`processSystemInfo_sync`在0x1f191ce04取`Registry::getRadioPersonality()`,读对象+0x121,为0跳过NR;之后还检查NR输入presence。构造器按硬件配置设置能力。本次未读取设备对象、未完整求值D22分支,不能说该位的运行值已测。不能由代码存在直接说未修改的D22配置能用SA。
+- **桥接缺项(确定)**:`x9q_nas`只输出NR 0x4A三字节service status,没有0x4B NR System Info;LTE有0x19完整信息。167日志的SA→LTE差异因此不能证明用户态缺NR支持。MTK的`C5GREG=1/AcT=11`只证明注册,不证明iOS数据通。
+- **控制中心UI**:`CCUIConnectivityCellularDataViewController buttonTapped:`→`_toggleState`→CT Get/SetCellularDataIsEnabled;只翻转数据总开关,不是LTE/NSA/SA选择器。
+- 证据:`.local/x9/work/cc-5gsa-20H392/`(本地Mach-O符号/反汇编、可复核脚本、provenance;不入git)。四处关键代码与根盘快照原cache一致;快照SystemVersion=16.7.16/20H392。正式结论与复核命令:`docs/2026-11-10_reverse-iphone-x-5gsa-report.md`。
+- **下一步**:保留id的LTE信号验证计划;SA另做最小分支,先定位/观察personality NR能力位,补真实NR SysInfo/信号和NAS 0x33策略映射,核对运营商/APN,再解除LTE-only。必须以CommCenter NR注册→WDS Start→MIPC→DPMAIF→iOS实际收发为验收,不能只看5G图标。无需先换整套arm64e IPSW,也不承诺SA已经可用。
+
+### 前次交接(HANDOFF 103,2026-11-10): 169(ic-mg)出现单卡信号;信号条空=NAS 0x4f被拒,id用真实AT+ECSQ回答;双卡判断仍待专项核验
 
 - **169.txt**(Mac `~/169.txt`,2219165B,末150.8s,无panic)。`X9 MGWIPE: cache errno=0`(3.155s)生效。用户观察:状态栏出现**一张卡**的运营商/信号,但**信号条是空的**,也没有双卡。30.26s `CEREG 1 CGATT 1 COPS-AcT 7`。清缓存后CommCenter的请求明显变多(NAS 0x33/0x44/0x45/0x5562/0x5566/0x5567等,全94拒),仍无0xc8/WDS Start。
 - **信号条(观察+修复)**:CommCenter在30.24–30.29s发NAS 0x4f Get Sig Info ×6,全部94拒;之后只每10s发0x5556(Apple私有)。0x20 Get Signal Strength它根本没发。**id**:0x4f改为真实`AT+ECSQ`。字段布局取自反汇编libmtk-ril `getMdSignalStrengthByAT`(0x39cf90)与`updateSignalStrength`(0x39d1a0)LTE路径:sig1,sig2,rssi_qdbm,rscp,ecn0,rsrq_qdbm,rsrp_qdbm,Act,sig3,band;LTE=Act 0x1000/0x2000,有效条件sig1≤34且sig2<98;rsrp/rsrq/rssi=qdbm/4,**SNR(0.1dB)=sig3*5/2**,sig3=0x7fff无效。回LTE TLV 0x14(rssi i8,rsrq i8,rsrp i16,snr i16)。收到0x6c的client每10s另收一次0x51 Sig Info indication(同一AT来源)。非LTE或无效值仍NOT_READY,不编造。日志`X9 QMI AT: ECSQ fields ...`前6次打印原始数值。
@@ -175,7 +185,7 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **168.txt**(Mac `~/168.txt`,1946100B,末114.57s,无panic,无board重置)。`build=rev252ic-md`;17.29s `LTE-only AT+ERAT=3 -> OK after 40 ms`;21.45s MIPC ready;23.66s SetOperatingMode 0;24.25s注册全0;**33.42s `CEREG 1 CGATT 1 COPS-AcT 7`**,之后到114s不再变化;LTE SysInfo每10s一次(33.4/43.4/53.4/63.4s…)。
 - **观察**:LTE注册后CommCenter只做周期查询:NAS 0x5556×9(Apple私有,拒)、UIM 0x2a×8(ACK)、DMS 0x2f×6(GetTime,拒)、NAS 0x4f×3(拒)、NAS 0x6c×1(ACK)、WDS 0x30×1(拒)。**没有0xc8推送、没有WDS 0x20 Start**,MIPC拨号未触发。
 - **推断**:注册这一环已经过了;现在不拨号是CommCenter数据侧的决定,候选:APN/运营商配置(PLMN 46015,iOS 16.7是否带该运营商bundle未知;163 logd里attach APN为空)、蜂窝数据开关/DataOff、或Apple私有NAS 0x5556。需要logd确认,不再盲改。
-- **关于换iPhone 14 Pro身份**(用户问):唯一收益是CommCenter认识5G,而这个问题已用ERAT解决。代价:14 Pro是arm64e(内核与dyld cache都要PAC版本)、根盘要用新IPSW重建、基带走另一套ABM/BBFW路径(Mav17这套全部重做)、屏幕/键盘适配重来;§6已记录不要换身份。结论:现阶段不换。
+- **关于换iPhone 14 Pro身份**(历史判断,5G部分已由HANDOFF104更正):“换身份才认识5G、ERAT已解决5G问题”不成立;20H392本身有SA代码,ERAT仅限制LTE。14 Pro整套根盘仍涉及arm64e/cache、基带与GUI适配风险;现阶段不换,优先研究当前用户态的能力门和桥接缺项。
 - 无新代码、无新镜像。下一步:用户进Android接ADB,按HANDOFF97流程取logd(`pull_ios_logs.py --recent-hours 2`;uuidtext已有,可只拉diagnostics),grep `FSM:|DataMode|Activat|APN|DataOff|0x5556|NOT_SUPPORTED`。
 
 - **补充(用户观察,同日)**:设置里**完全没有"蜂窝数据"选项**。推断:MobileGestalt缓存过期。MG磁盘缓存只按OS build和build UUID校验,在X9上两者都是常量;最后一次清缓存是2026-11-08的`rev252cn-mgwipe`,而ADT的`/baseband`节点(class 3,mkadt在`x9_bb=1`时添加)是2026-11-09 `0c77622`才加的。所以缓存里蜂窝/基带能力很可能还是旧的"无",设置因此隐藏蜂窝面板,CommCenter也可能据此不启动数据。这和当初iPod问题同一机制(kern_exec.c `sweet_x9_wipe_gestalt_cache`注释)。
@@ -194,7 +204,7 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 ### 前次交接(HANDOFF 100,2026-11-09): 166(ia)读完;LTE SysInfo未触发(采集只到47s,LTE尚未注册);ib加注册状态日志
 
 - **166.txt**(Mac `~/166.txt`,1199596B/11816行,末47.17s,无panic)。`build=rev252ia-md`;21.63s MIPC dialler ready;21.67s SetOperatingMode 0 `(real AT)`;`resets 0`。NAS 0x4d两次`(real AT)`;0x4e indication在21.7/31.7/41.7s发出,全是len 19(只有service status),**没有出现`NAS SysInfo LTE registered`**,即这些时刻CEREG不是1/5。仍无0xc8/WDS Start。
-- **推断**:157(唯一一次91s长采集)里先是C5GREG=2,1(34.5s,CEREG=2,0,**5G SA**),52.4s才CEREG=2,1。160–166的采集都只有32–60s,可能还没等到LTE注册。另一个风险:跑的是iPhone X(D22)的iOS,CommCenter没有5G概念,**NR SA注册它大概率不认**。若LTE迟迟不注册,下一步用真实AT让MD注册到LTE:MTK RIL使用`AT+ERAT=%d,%d`(RAT模式)和`AT+E5GOPT=%d`(NSA/SA开关),**取值语义尚未核实**,需要先从libmtk-ril反汇编出映射表,不要猜。
+- **历史推断(“没有5G概念”已撤回,见HANDOFF104)**:157(唯一一次91s长采集)里先是C5GREG=2,1(34.5s,CEREG=2,0,**5G SA**),52.4s才CEREG=2,1。160–166的采集都只有32–60s,可能还没等到LTE注册。当时未区分NR能力门与桥缺0x4B,误推为用户态不认识5G。LTE隔离实验使用MTK RIL的`AT+ERAT=%d,%d`(RAT模式),映射后来由HANDOFF101核实;`AT+E5GOPT=%d`(NSA/SA开关)取值尚未核实,不要猜。
 - **ib修改**:SysInfo每次计算时,若注册输入有变化,打印`NAS registration CREG x CEREG y C5GREG z CGATT a COPS-AcT b`(只有数字)。
 - **ib构建成功**(未上机):同参数,`--name x9-rev252ib-md`,boot.img 12922880B,日志`.local/x9/work/pdp-activation/build-ib.stdout.log`(Mac)。无新warning,插件275不变,无需mailbox staging。回退:ia/hz。
 - **下一步由用户手动**:`fastboot boot x9/out/x9-rev252ib-md/boot.img`,**采集至少120s**再停,日志放`~/167.txt`。看`NAS registration`的变化过程、`NAS SysInfo LTE registered`、之后有无0xc8/WDS Start。
