@@ -190,15 +190,45 @@ struct x9_mic_dma_status {
     uint64_t base, end, cur_before, cur_after, observed_frames, dropped_frames, elapsed_ns;
 };
 #define X9_MIC_GET_DMA _IOR('M', 0x9c, struct x9_mic_dma_status)
+/* Read-only UL0 COMB_OUT shadow witness captured inside digital-l/prepare.
+ * Reads are NOT hardware frames: no data-ready, atomic pair or sample-clock
+ * evidence. Signed24 is a two's-complement interpretation of bits23:0, not
+ * negotiated PCM. Changes/zero/constant data do not prove acoustic identity.
+ * GET never accesses hardware or spends another cold transaction. */
+#define X9_MIC_SIGNAL_ATTEMPTED 1u
+#define X9_MIC_SIGNAL_COMPLETE 2u
+#define X9_MIC_SIGNAL_CH1_CHANGED 4u
+#define X9_MIC_SIGNAL_CH2_CHANGED 8u
+#define X9_MIC_SIGNAL_RESTORED 16u
+#define X9_MIC_SIGNAL_RETAINED 32u
+struct x9_mic_signal_channel {
+    uint32_t raw_first, raw_last; /* complete MON word, including controls */
+    int32_t first, last, minimum, maximum;
+    uint32_t changes, zero_reads;
+    int64_t sum;
+    uint64_t sum_squares;
+};
+struct x9_mic_signal_status {
+    uint32_t version, flags, last_errno, restore_errno;
+    uint32_t target_reads, reads, interval_us, last_register;
+    uint64_t elapsed_ns;
+    uint32_t ul_control, sync_first[2], sync_last[2], rejected_read;
+    struct x9_mic_signal_channel channel[2];
+    uint32_t reserved[8];
+};
+#define X9_MIC_GET_SIGNAL _IOR('M', 0x9d, struct x9_mic_signal_status)
 #ifdef KERNEL
 #include <stdbool.h>
-/* Thread context only. start/stop are serialized and called WITHOUT the PCM
+/* Thread context only. start/commit/stop are serialized WITHOUT the PCM
  * lock. stop must disable/drain DMA and restore owned rails/clocks even after
- * a partially failed start. Failure latches FAULT; no automatic retry. */
+ * a partially failed start/commit. start may arm DMA but MUST NOT deliver or
+ * consume ring data. commit is called only after RUNNING/generation publication
+ * and authorizes the worker. Failure latches FAULT; no automatic retry. */
 #define X9_MIC_BACKEND_COLD_ONESHOT 1u
 struct x9_mic_backend {
-    uint32_t version, flags; /* private v2, optional COLD_ONESHOT */
+    uint32_t version, flags; /* private v3, optional COLD_ONESHOT */
     int (*start)(uint64_t generation);
+    int (*commit)(uint64_t generation);
     int (*stop)(void);
 };
 int x9_mic_register_backend(const struct x9_mic_backend *);

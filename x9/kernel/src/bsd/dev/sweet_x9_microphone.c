@@ -61,7 +61,7 @@ static int stop_locked(void)
 }
 int x9_mic_register_backend(const struct x9_mic_backend *p)
 {
-    if(!p || p->version!=2 || (p->flags&~X9_MIC_BACKEND_COLD_ONESHOT) || !p->start || !p->stop)return EINVAL;
+    if(!p || p->version!=3 || (p->flags&~X9_MIC_BACKEND_COLD_ONESHOT) || !p->start || !p->commit || !p->stop)return EINVAL;
     lck_mtx_lock(&mic_control_lock);lck_mtx_lock(&mic_lock);
     int e=st.mode!=2?EPERM:hw.version?EBUSY:0;
     if(!e) {hw=*p;st.supported_sources=X9_MIC_SOURCE_INTERNAL;st.flags=X9_MIC_READY;}
@@ -138,6 +138,9 @@ static int mic_ioctl(dev_t d,u_long cmd,caddr_t data,__unused int f,struct proc 
     if(cmd==X9_MIC_GET_DMA) {
         x9_mic_mt6993_get_dma((void *)data);return 0;
     }
+    if(cmd==X9_MIC_GET_SIGNAL) {
+        x9_mic_mt6993_get_signal((void *)data);return 0;
+    }
     if(cmd==X9_MIC_POWER_PROBE || cmd==X9_MIC_CALIBRATE || cmd==X9_MIC_ANALOG_L || cmd==X9_MIC_DIGITAL_L) {
         if(minor(d)!=0 || kauth_cred_getuid(kauth_cred_get())!=0)return EPERM;
         /* mode1/status remain strictly passive. No implicit capture backend. */
@@ -169,12 +172,19 @@ static int mic_ioctl(dev_t d,u_long cmd,caddr_t data,__unused int f,struct proc 
             uint64_t generation=st.generation;
             hardware_active=true;
             lck_mtx_unlock(&mic_lock);e=hw.start(generation);lck_mtx_lock(&mic_lock);
+            if(!e && generation==st.generation && !(st.flags&X9_MIC_FAULT)) {
+                /* Publish PCM acceptance before authorizing the DMA worker.
+                 * Keep control serialization, but never hold mic_lock across
+                 * AFE callbacks: the worker takes AFE -> PCM locks. */
+                st.flags|=X9_MIC_RUNNING;
+                lck_mtx_unlock(&mic_lock);e=hw.commit(generation);lck_mtx_lock(&mic_lock);
+            }
+            if(!e && (generation!=st.generation || (st.flags&X9_MIC_FAULT)))
+                e=st.last_errno?st.last_errno:EIO;
             if(e) {
                 st.flags|=X9_MIC_FAULT;st.flags&=~X9_MIC_READY;st.last_errno=e;
                 (void)stop_locked();
-            } else if(generation!=st.generation || (st.flags&X9_MIC_FAULT)) {
-                e=EIO;(void)stop_locked();
-            } else st.flags|=X9_MIC_RUNNING;
+            }
         }
     }
     lck_mtx_unlock(&mic_lock);lck_mtx_unlock(&mic_control_lock);return e;

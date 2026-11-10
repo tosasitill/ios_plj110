@@ -33,6 +33,8 @@ int x9_mic_plj110_capture_prepare(volatile uint32_t *,
     struct x9_mic_digital_status *, struct x9_mic_dma_status *);
 int x9_mic_plj110_capture_unprepare(void);
 void x9_mic_plj110_capture_retain(int error);
+/* Caller holds MT6993 AFE lock; cached memory only. */
+void x9_mic_plj110_get_signal(struct x9_mic_signal_status *);
 int x9_mic_plj110_digital_l(struct x9_mic_hardware_status *,
     struct x9_mic_board_status *, struct x9_mic_afe_status *, struct x9_mic_analog_status *,
     struct x9_mic_digital_status *, struct x9_mic_dma_status *);

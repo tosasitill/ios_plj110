@@ -19,7 +19,7 @@ _Static_assert(sizeof(struct x9_mic_dma_status)==192,"DMA ABI size");
 LCK_GRP_DECLARE(afe_mic_group,"x9-mic-afe");
 LCK_MTX_DECLARE(afe_mic_lock,&afe_mic_group);
 static struct x9_mic_mt6993_platform hw;
-static bool registered, worker_created, active, prepared, saved, dma_stuck;
+static bool registered, worker_created, armed, active, prepared, saved, dma_stuck;
 static struct x9_mic_hardware_status diagnostic={.version=1,
     .chosen_phase={-1,-1},.cycle={-1,-1}};
 static struct x9_mic_board_status board_diagnostic={.version=1};
@@ -59,7 +59,7 @@ static int program_reg(unsigned i,uint32_t value)
 }
 static int stop_locked(void)
 {
-    active=false;
+    armed=active=false;
     /* Uncertain DMA ownership/drain is terminal for this boot. Do not turn
      * a second StopIO into an ON=0 success or free the retained buffer. */
     if(dma_stuck)return dma_diagnostic.restore_errno?dma_diagnostic.restore_errno:EIO;
@@ -150,7 +150,7 @@ static int afe_stop(void)
 static int afe_start(uint64_t g)
 {
     lck_mtx_lock(&afe_mic_lock);int e=0;
-    if(active || prepared || dma_stuck || resource_ticket || (diagnostic.flags&X9_MIC_HW_RESTORE_FAILED))e=EBUSY;
+    if(armed || active || prepared || dma_stuck || resource_ticket || (diagnostic.flags&X9_MIC_HW_RESTORE_FAILED))e=EBUSY;
     else {
         /* PLJ110 claims once inside its board pipeline and keeps that lease
          * across VUL1 polling/drain. A nested engine claim is nonrecursive
@@ -220,13 +220,28 @@ static int afe_start(uint64_t g)
             dma_diagnostic.flags|=X9_MIC_DMA_STARTED;
             wr(VUL1_CON0,rd(VUL1_CON0)|VUL1_ON);
             if(!(rd(VUL1_CON0)&VUL1_ON))e=EIO;
-            else {generation=g;cursor=0;last_progress=last_poll=mach_absolute_time();active=true;
-                diagnostic.flags|=X9_MIC_HW_CAPTURE;dma_diagnostic.stage=X9_MIC_DMA_POLL;}
+            else {generation=g;cursor=0;last_progress=last_poll=mach_absolute_time();armed=true;
+                diagnostic.flags|=X9_MIC_HW_CAPTURE;}
         }
 start_failed:
         if(e) {diagnostic.last_errno=e;dma_diagnostic.last_errno=e;
             uint32_t reg=dma_diagnostic.last_register;
             int off=stop_locked();dma_diagnostic.last_register=reg;if(off)e=off;}
+    }
+    lck_mtx_unlock(&afe_mic_lock);return e;
+}
+static int afe_commit(uint64_t g)
+{
+    lck_mtx_lock(&afe_mic_lock);
+    int e=0;
+    if(!armed || active || generation!=g)e=ESTALE;
+    else if(!prepared || !saved || !dma_issued || dma_stuck ||
+            diagnostic.last_errno || diagnostic.restore_errno)e=EIO;
+    else {
+        /* Keep ON-time timestamps/cursor: a delayed commit must not hide a
+         * ring wrap or stall by resetting the progress clock. No MMIO/data
+         * consumption until the worker observes this committed state. */
+        armed=false;active=true;dma_diagnostic.stage=X9_MIC_DMA_POLL;
     }
     lck_mtx_unlock(&afe_mic_lock);return e;
 }
@@ -277,7 +292,7 @@ static int poll_locked(void)
         if(t>behind)t-=behind;
         int e=x9_mic_deliver(generation,mono,n,t);
         bzero(mono,sizeof(mono));
-        if(e && e!=ESTALE)return e;
+        if(e)return e; /* never silently advance past rejected PCM */
         cursor=(cursor+n*4)%hw.dma_bytes;bytes-=n*4;
     }
     last_poll=now;return 0;
@@ -325,9 +340,9 @@ int x9_mic_mt6993_register(const struct x9_mic_mt6993_platform *p)
             e=ENOMEM;
         } else {thread_deallocate(t);worker_created=true;}
     }
-    const struct x9_mic_backend backend={.version=2,
+    const struct x9_mic_backend backend={.version=3,
         .flags=p->prepare==x9_mic_plj110_capture_prepare?X9_MIC_BACKEND_COLD_ONESHOT:0,
-        .start=afe_start,.stop=afe_stop};
+        .start=afe_start,.commit=afe_commit,.stop=afe_stop};
     if(!e)e=x9_mic_register_backend(&backend);
     if(!e){registered=true;dma_diagnostic.blockers=0;dma_diagnostic.flags|=X9_MIC_DMA_BOUND;}
     lck_mtx_unlock(&afe_mic_lock);return e;
@@ -400,4 +415,8 @@ void x9_mic_mt6993_get_digital(struct x9_mic_digital_status *s)
 void x9_mic_mt6993_get_dma(struct x9_mic_dma_status *s)
 {
     lck_mtx_lock(&afe_mic_lock);*s=dma_diagnostic;lck_mtx_unlock(&afe_mic_lock);
+}
+void x9_mic_mt6993_get_signal(struct x9_mic_signal_status *s)
+{
+    lck_mtx_lock(&afe_mic_lock);x9_mic_plj110_get_signal(s);lck_mtx_unlock(&afe_mic_lock);
 }

@@ -8,7 +8,8 @@ enum {
     RX_FIFO=0xbd4, RX_COEF=0xbec, RX_CFG0=0x1190, RX_CFG1=0x11f0,
     RX_DATA0=0x1198, RX_DATA1=0x11f8, RX_DELAY=0x11a0,
     RX_PAD=0x1204, RX_CLK=0x1280, RX0=0x1288, RX1=0x1290,
-    RX_MON0=0x12a0, RX_MON1=0x12a8
+    RX_MON0=0x12a0, RX_MON1=0x12a8,
+    UL_SHADOW0=0xbe4, UL_SHADOW1=0xbe8
 };
 struct digital_afe_journal {
     struct x9_mic_digital_status *s;
@@ -18,6 +19,70 @@ struct digital_afe_journal {
     bool owned, quiesced;
 };
 static struct digital_afe_journal digital_afe;
+_Static_assert(sizeof(struct x9_mic_signal_status)==192,"signal ABI size");
+static struct x9_mic_signal_status signal_diagnostic={.version=1};
+static void signal_accumulate(struct x9_mic_signal_channel *c,uint32_t raw,bool first)
+{
+    uint32_t bits=raw&0xffffffu;
+    int32_t value=(int32_t)bits;
+    if(bits&0x800000u)value-=0x1000000; /* defined arithmetic, no signed shifts */
+    if(first) {
+        c->raw_first=raw;c->first=value;c->minimum=c->maximum=value;
+    } else if(value!=c->last)++c->changes;
+    c->raw_last=raw;c->last=value;
+    if(value<c->minimum)c->minimum=value;
+    if(value>c->maximum)c->maximum=value;
+    if(!value)++c->zero_reads;
+    c->sum+=value;c->sum_squares+=(uint64_t)((int64_t)value*value);
+}
+static int digital_signal_observe(struct afe_journal *a)
+{
+    struct x9_mic_signal_status *s=&signal_diagnostic;
+    s->flags=X9_MIC_SIGNAL_ATTEMPTED;s->target_reads=64;s->interval_us=125;
+    uint64_t start=mach_absolute_time(),ticks;
+    nanoseconds_to_absolutetime(20000000,&ticks);uint64_t deadline=start+ticks;
+    int e=0;
+    for(unsigned i=0;i<s->target_reads;i++) {
+        s->rejected_read=i+1;s->last_register=RX_UL0;
+        if(mach_absolute_time()>=deadline){e=ETIMEDOUT;break;}
+        /* Check held domains/foreign votes before each MMIO group. This
+         * cannot guard a bus fault or provide a sample-ready handshake. */
+        e=afe_access(a);if(e)break;
+        s->ul_control=rr(a->afe,RX_UL0);
+        uint32_t sync0=rr(a->afe,RX_MON0),sync1=rr(a->afe,RX_MON1);
+        s->sync_last[0]=sync0;s->sync_last[1]=sync1;
+        if(!i){s->sync_first[0]=sync0;s->sync_first[1]=sync1;}
+        if((sync0|sync1)&(1u<<21)) {
+            s->last_register=(sync0&(1u<<21))?RX_MON0:RX_MON1;e=EIO;break;
+        }
+        /* Known control fields: SRC on, ordinary voice48k3, no loopback.
+         * Do not interpret SDM bit30 or SLT debug counter as PCM/drain. */
+        if((s->ul_control&((7u<<17)|5u))!=((3u<<17)|1u)){e=EIO;break;}
+        uint32_t raw0=rr(a->afe,UL_SHADOW0),raw1=rr(a->afe,UL_SHADOW1);
+        signal_accumulate(&s->channel[0],raw0,!s->reads);
+        signal_accumulate(&s->channel[1],raw1,!s->reads);++s->reads;
+        if((raw0&((1u<<31)|(1u<<29)))!=(1u<<31)) {
+            s->last_register=UL_SHADOW0;e=EIO;break;
+        }
+        if((raw1>>29)!=3){s->last_register=UL_SHADOW1;e=EIO;break;}
+        /* Recheck search failure after the non-atomic pair. No retry or
+         * clearing sticky hardware status to force a successful witness. */
+        s->sync_last[0]=rr(a->afe,RX_MON0);s->sync_last[1]=rr(a->afe,RX_MON1);
+        if((s->sync_last[0]|s->sync_last[1])&(1u<<21)) {
+            s->last_register=(s->sync_last[0]&(1u<<21))?RX_MON0:RX_MON1;e=EIO;break;
+        }
+        if(mach_absolute_time()>=deadline){e=ETIMEDOUT;break;}
+        s->rejected_read=0;
+        if(i+1<s->target_reads)delay(s->interval_us);
+    }
+    absolutetime_to_nanoseconds(mach_absolute_time()-start,&s->elapsed_ns);
+    s->last_errno=e;
+    if(s->channel[0].changes)s->flags|=X9_MIC_SIGNAL_CH1_CHANGED;
+    if(s->channel[1].changes)s->flags|=X9_MIC_SIGNAL_CH2_CHANGED;
+    if(!e){s->flags|=X9_MIC_SIGNAL_COMPLETE;s->last_register=0;}
+    else digital_afe.s->last_register=0x80000000u|s->last_register;
+    return e; /* never x9_mic_deliver; reads are not frames */
+}
 static int digital_dma_snapshot(struct afe_journal *a,struct x9_mic_dma_status *s,bool after)
 {
     /* Read only under the same cold AFE lease. No SRAM mapping, allocation,

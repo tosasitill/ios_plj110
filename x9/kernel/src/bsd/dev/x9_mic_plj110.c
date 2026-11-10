@@ -394,6 +394,11 @@ static int board_finish(struct power_journal *j,int e)
         if(!off)j->resource_ticket=0;
     }
     if(off)x9_audio_resources_fault(X9AudioResourceMic,j->resource_ticket,off);
+    if(digital && (signal_diagnostic.flags&X9_MIC_SIGNAL_ATTEMPTED)) {
+        if(off){signal_diagnostic.flags|=X9_MIC_SIGNAL_RETAINED;
+            if(!signal_diagnostic.restore_errno)signal_diagnostic.restore_errno=off;}
+        else signal_diagnostic.flags|=X9_MIC_SIGNAL_RESTORED;
+    }
     if(dma) {
         if(!dma->last_errno)dma->last_errno=e;
         absolutetime_to_nanoseconds(mach_absolute_time()-start,&dma->elapsed_ns);
@@ -455,6 +460,14 @@ static int board_finish(struct power_journal *j,int e)
         dma->stage,dma->flags,dma->last_errno,dma->restore_errno,dma->eligible,dma->blockers,
         dma->active_memifs,dma->memif_con0,dma->con0_before,dma->con0_after,
         dma->monitor_before,dma->monitor_after,dma->cur_before,dma->cur_after);
+    if(digital && (signal_diagnostic.flags&X9_MIC_SIGNAL_ATTEMPTED)) {
+        const struct x9_mic_signal_status *v=&signal_diagnostic;
+        printf("X9 MIC SHADOW: flags=%x errno=%u restore=%u reads=%u/%u changes=%u/%u zeros=%u/%u signed24=%d..%d,%d..%d elapsed_ns=%llu reg=%x (MMIO shadow reads, not frames/PCM/acoustic proof)\n",
+            v->flags,v->last_errno,v->restore_errno,v->reads,v->target_reads,
+            v->channel[0].changes,v->channel[1].changes,v->channel[0].zero_reads,v->channel[1].zero_reads,
+            v->channel[0].minimum,v->channel[0].maximum,v->channel[1].minimum,v->channel[1].maximum,
+            v->elapsed_ns,v->last_register);
+    }
     /* Auto-unwind during failed prepare returns its original input error to
      * START, but subsequent unprepare reports only cleanup failure. A held
      * capture's stop failure must remain sticky across repeated StopIO. */
@@ -473,6 +486,7 @@ static int board_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_stat
     uint64_t start=mach_absolute_time();
     /* Static journals may never outlive their persistent status surfaces. */
     bzero(&digital_afe,sizeof(digital_afe));
+    if(digital)signal_diagnostic=(struct x9_mic_signal_status){.version=1};
     if(digital)*digital=(struct x9_mic_digital_status){.version=1,
         .stage=X9_MIC_DIGITAL_PREREQUISITES,.flags=X9_MIC_DIGITAL_ATTEMPTED,
         .nominal_rate=X9_MIC_RATE};
@@ -533,6 +547,7 @@ static int board_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_stat
         if(!e)e=digital_afe_enable(j->cal);
         if(!e){e=x9_mic_mt6681_verify_capture(&j->codec);
             if(e)digital->last_register=j->codec.status.last_register;}
+        if(!e)e=digital_signal_observe(j->cal);
         *h=j->codec.status;
     }
     if(digital)digital->last_errno=e;
@@ -574,6 +589,13 @@ void x9_mic_plj110_capture_retain(int error)
 {
     /* DMA/route drain failed before board_finish: fault the same held lease
      * without MMIO or teardown, so ADSP/speaker cannot dismantle parents. */
-    if(board.session && board.resource_ticket)
+    if(board.session && board.resource_ticket) {
         x9_audio_resources_fault(X9AudioResourceMic,board.resource_ticket,error);
+        if(signal_diagnostic.flags&X9_MIC_SIGNAL_ATTEMPTED) {
+            signal_diagnostic.flags|=X9_MIC_SIGNAL_RETAINED;
+            if(!signal_diagnostic.restore_errno)signal_diagnostic.restore_errno=error?error:EIO;
+        }
+    }
 }
+void x9_mic_plj110_get_signal(struct x9_mic_signal_status *s)
+{*s=signal_diagnostic;}

@@ -49,6 +49,7 @@ int x9_mic_mt6993_analog_l(void);
 int x9_mic_mt6993_digital_l(void);
 void x9_mic_mt6993_get_digital(struct x9_mic_digital_status *);
 void x9_mic_mt6993_get_dma(struct x9_mic_dma_status *);
+void x9_mic_mt6993_get_signal(struct x9_mic_signal_status *);
 void x9_mic_mt6993_get_analog(struct x9_mic_analog_status *);
 void x9_mic_mt6993_get_afe(struct x9_mic_afe_status *);
 void x9_mic_mt6993_get_board(struct x9_mic_board_status *);

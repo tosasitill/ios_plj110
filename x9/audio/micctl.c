@@ -14,6 +14,7 @@ _Static_assert(sizeof(struct x9_mic_afe_status)==192,"AFE ABI size");
 _Static_assert(sizeof(struct x9_mic_analog_status)==128,"analog ABI size");
 _Static_assert(sizeof(struct x9_mic_digital_status)==192,"digital ABI size");
 _Static_assert(sizeof(struct x9_mic_dma_status)==192,"DMA ABI size");
+_Static_assert(sizeof(struct x9_mic_signal_status)==192,"signal ABI size");
 static int hardware_status(int fd)
 {
     struct x9_mic_hardware_status h={0};
@@ -82,6 +83,19 @@ static int hardware_status(int fd)
                 20+c,d.route[c][0],d.route[c][1],d.route[c][2],d.route[c][3],d.route[c][4],d.route[c][5],d.route[c][6]);
         if(d.blockers)printf("dma blockers: MAP=1 OWNER=2 COPY=4 QUIESCE=8 SOURCE_ID=16; eligible/idle is not allocated DMA, PCM or acoustic proof\n");
     } else if(errno!=ENOTTY){perror("DMA status");return 1;}
+    struct x9_mic_signal_status v={0};
+    if(ioctl(fd,X9_MIC_GET_SIGNAL,&v)==0) {
+        printf("shadow v%u flags=%#x errno=%u restore_errno=%u reads=%u/%u interval_us=%u elapsed_ns=%llu UL=%#x sync=%#x/%#x -> %#x/%#x rejected_read=%u reg=%#x (non-atomic MMIO reads, no ready/frame/rate/PCM/acoustic proof)\n",
+            v.version,v.flags,v.last_errno,v.restore_errno,v.reads,v.target_reads,v.interval_us,
+            v.elapsed_ns,v.ul_control,v.sync_first[0],v.sync_first[1],v.sync_last[0],v.sync_last[1],
+            v.rejected_read,v.last_register);
+        if(v.reads)for(unsigned i=0;i<2;i++) {
+            const struct x9_mic_signal_channel *c=&v.channel[i];
+            printf("shadow CH%u raw=%#x/%#x signed24 first/last=%d/%d min/max=%d/%d changes=%u zeros=%u sum=%lld sum_squares=%llu (zero/constant is not a failed-mic verdict)\n",
+                i+1,c->raw_first,c->raw_last,c->first,c->last,c->minimum,c->maximum,
+                c->changes,c->zero_reads,(long long)c->sum,(unsigned long long)c->sum_squares);
+        }
+    } else if(errno!=ENOTTY){perror("shadow status");return 1;}
     return 0;
 }
 static uint64_t ns(void)
