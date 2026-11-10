@@ -14,6 +14,7 @@ struct gps_mcu_field { uint32_t physical, mask, shift; };
 enum gps_mcu_field_id {
  F_bgf_state,
  F_wake,
+ F_version,
  F_ready,
  F_reset,
  F_function,
@@ -52,6 +53,7 @@ enum gps_mcu_field_id {
 static const struct gps_mcu_field gps_mcu_fields[] = {
  { 0x40060a10u, 0xc0000u, 18 }, /* bgf_state */
  { 0x400601acu, 0x1u, 0 }, /* wake */
+ { 0x40011000u, 0xffffffffu, 0 }, /* CONN_CFG_IP_VERSION, not RGU */
  { 0x40001210u, 0x10000u, 16 }, /* ready */
  { 0x40000130u, 0x1u, 0 }, /* reset */
  { 0x4000120cu, 0x1u, 0 }, /* function */
@@ -86,11 +88,17 @@ static const struct gps_mcu_field gps_mcu_fields[] = {
  { 0x40001490u, 0x800000u, 23 }, /* a_tx_st */
 };
 struct gps_mcu_bank { uint32_t physical; volatile uint32_t *p; };
+/* Actual v062 bus2 version read is CONN_CFG+0. Keep CONN_RGU_ON mapped
+ * separately: its +0x28 keyed reset control is still used below. */
+static const uint32_t gps_mcu_bases[]={0x40000000,0x40001000,0x40011000,
+    0x40060000,0x40068000,0x40c00000,0x40c12000,0x40c16000,0x40c21000};
+enum { GPS_MCU_BANK_COUNT=sizeof(gps_mcu_bases)/sizeof(gps_mcu_bases[0]) };
+#define GPS_MCU_MT6993_VERSION 0x02050800u
 struct gps_runtime_packet { uint64_t time; unsigned length; uint8_t bytes[4096]; };
 static struct {
  struct x9_gps_connv2_ops provider, ops;
  struct x9_gps_handoff layout;
- struct gps_mcu_bank banks[8];
+ struct gps_mcu_bank banks[GPS_MCU_BANK_COUNT];
  struct x9_gps_hif hif; /* ~70KiB, never on a kernel/QRTR stack */
  volatile uint8_t *ap, *mcu, *ccif;
  uint64_t generation, lease;
@@ -123,7 +131,7 @@ static int gps_mcu_guard(void)
 }
 static volatile uint32_t *gps_mcu_pointer(uint32_t physical)
 {
- for (unsigned i=0;i<8;i++)
+ for (unsigned i=0;i<GPS_MCU_BANK_COUNT;i++)
   if (physical>=gps_rt.banks[i].physical &&
       physical-gps_rt.banks[i].physical<0x1000 && !(physical&3))
    return gps_rt.banks[i].p ?
@@ -175,12 +183,10 @@ static int gps_mcu_raw_expect(uint32_t address, uint32_t mask, uint32_t value)
 }
 static int gps_mcu_map(void)
 {
- static const uint32_t bases[8]={0x40000000,0x40001000,0x40060000,0x40068000,
-     0x40c00000,0x40c12000,0x40c16000,0x40c21000};
  int e=gps_mcu_guard(); if (e) return e;
- for (unsigned i=0;i<8;i++) {
-  gps_rt.banks[i].physical=bases[i];
-  gps_rt.banks[i].p=(volatile uint32_t *)ml_io_map(bases[i],0x1000);
+ for (unsigned i=0;i<GPS_MCU_BANK_COUNT;i++) {
+  gps_rt.banks[i].physical=gps_mcu_bases[i];
+  gps_rt.banks[i].p=(volatile uint32_t *)ml_io_map(gps_mcu_bases[i],0x1000);
   if (!gps_rt.banks[i].p) return ENOMEM;
  }
  /* Device attributes throughout; no cached aliases of shared HIF RAM.
@@ -198,7 +204,9 @@ static int gps_mcu_wake(void)
 {
  MCU_TRY(gps_mcu_set(F_wake,1));
  MCU_TRY(gps_mcu_expect(F_wake,1));
- MCU_TRY(gps_mcu_raw_expect(0x40000000,UINT32_MAX,0x02050800));
+ /* Vendor wake qualifies version and ready with separate bounded polls.
+  * PLJ110 requires MT6993; do not accept the module's other-board version. */
+ MCU_TRY(gps_mcu_poll(F_version,GPS_MCU_MT6993_VERSION));
  MCU_TRY(gps_mcu_poll(F_ready,1));
  /* Keep force-wake and driver ownership for the full session. No FW-own
   * relinquishment timer until the complete sleep/DMA state machine exists. */
@@ -310,7 +318,8 @@ static int gps_runtime_owned(void *ctx, uint64_t generation, int reset)
  MCU_TRY(gps_mcu_expect(F_emi,gps_rt.layout.reserve_base>>16));
  MCU_TRY(gps_mcu_raw_expect(0x40c16014,UINT32_MAX,0x02200000));
  MCU_TRY(gps_mcu_expect(F_c_rx_st,0)); MCU_TRY(gps_mcu_expect(F_c_tx_st,0));
- MCU_TRY(gps_mcu_raw_expect(0x40000000,UINT32_MAX,0x02050800));
+ /* Per-I/O ownership qualification must fail immediately, not sleep/retry. */
+ MCU_TRY(gps_mcu_expect(F_version,GPS_MCU_MT6993_VERSION));
  MCU_TRY(gps_mcu_raw_expect(0x40c12010,UINT32_MAX,0x03040000));
  MCU_TRY(gps_mcu_expect(F_osc_state,1)); MCU_TRY(gps_mcu_expect(F_power_state,2));
  /* The lease holds resources across this check and subsequent HIF accesses. */
