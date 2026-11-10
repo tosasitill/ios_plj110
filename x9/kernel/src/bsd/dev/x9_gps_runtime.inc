@@ -682,11 +682,23 @@ static void gps_runtime_start(void)
 }
 int x9_gps_register_connv2(const struct x9_gps_connv2_ops *ops)
 {
- /* v5 has no field identifying the running SR/AID ABI. Never silently
-  * send its source-only 050b READ or fall back to a bootloader/HYP ID. */
- if(ops && ops->version==5)return ENOTSUP;
- if(ops && ops->version==6 && (ops->secure_reserved ||
-     ops->secure_profile!=X9_GPS_SECURE_0415_4K_V1))return ENOTSUP;
+ /* No supported kernel READ profile exists: 050b/op2 returns -2 and
+  * 0415 is excluded from BOTH post-KERNEL_BOOT dispatchers in saved ATF.
+  * Refuse before callbacks, layout/CMDBT reads or worker arming. A v6
+  * supplier assertion cannot override the actual secure dispatcher. */
+ if(ops && (ops->version==5 || ops->version==6)) {
+  uint32_t version=ops->version;
+  /* Read the v6 tail ONLY for a declared136B descriptor; v5 ends at128B.
+   * This is a refusal journal, not selection of an operational ABI. */
+  uint32_t profile=version==6 ? ops->secure_profile : X9_GPS_SECURE_UNQUALIFIED;
+  lck_mtx_lock(&gps_lock);
+  st.connv2_rejected_version=version;st.connv2_rejected_profile=profile;
+  st.connv2_rejected_errno=ENOTSUP;
+  lck_mtx_unlock(&gps_lock);
+  printf("X9 GPS connv2: rejected v%u secure profile %u errno=%d before acquire; no kernel SR/AID READ route\n",
+      version,profile,ENOTSUP);
+  return ENOTSUP;
+ }
  if (!ops || ops->version<1 || ops->version>6 || !ops->acquire || !ops->validate ||
      !ops->provision || !ops->control || !ops->mnl || !ops->other_ccif) return EINVAL;
  if(ops->version>=2) {

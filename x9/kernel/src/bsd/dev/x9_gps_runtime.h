@@ -16,14 +16,16 @@ enum x9_gps_physical_stage {
  X9_GPS_PHYSICAL_BUS, X9_GPS_PHYSICAL_EMI_CPU,
  X9_GPS_PHYSICAL_SECURE_REMAP
 };
-/* A selected, independently qualified running secure ABI, NOT a DT flag.
- * 0415's BL name does not prove it is callable from a nonsecure kernel.
- * The supplier must establish that callability and retain immutable SR/AID
- * configuration + exclusive selector access. The saved tee_a only proves
- * this implementation exists; it cannot select the current slot's ABI. */
+/* Profile values are not permission to call secure firmware. The saved
+ * PLJ110 ATF dispatches 0415 only BEFORE KERNEL_BOOT(c2000115). Saved LK
+ * calls KERNEL_BOOT on its kernel jump, which sets ATF132080=1; BOTH kernel
+ * whitelists then reject 0415. Keep value1 for descriptor compatibility,
+ * but registration rejects it (and every other v6 profile). There is no
+ * supported kernel SR/AID READ profile yet. Do not change caller bits,
+ * resend KERNEL_BOOT, or infer callability from a supplier assertion/DT. */
 enum x9_gps_secure_profile {
  X9_GPS_SECURE_UNQUALIFIED=0,
- X9_GPS_SECURE_0415_4K_V1=1
+ X9_GPS_SECURE_0415_4K_V1=1 /* retired BL-only ABI; never accepted */
 };
 struct x9_gps_afe_smc_result { uint64_t a[4]; };
 struct x9_gps_connv2_ops {
@@ -141,30 +143,22 @@ struct x9_gps_connv2_ops {
   * fail and retain the lease in quarantine. Result lifetime is this call. */
  int (*pos_afe_verify)(void *, const struct x9_gps_handoff *, uint64_t,
      uint64_t, const struct x9_gps_afe_smc_result *);
- /* Version-6 tail. v5 ends at128B and cannot select a secure ABI: the
-  * old implicit c200050b/op2 is not supported by the saved PLJ110 ATF.
-  * No probing/fallback among SIP IDs. Only an actually qualified running
-  * 0415/op2 ABI may use the native read implementation and op70 checks.
-  * acquire/validate/pos_validate must retain that ABI, long-lived AP/BGF
-  * authority, AID selector exclusion, and actual secure remap ownership.
-  * 0415 READ returns 4KiB page bases (EA is not an inclusive byte bound).
-  * The board's op14 ABI must also match the decoded 10167060[4] condition
-  * and 40041010[7:4] patch. Its source must be safely measured by the real
-  * verifier; do not map a secure-only efuse from this enum alone.
-  * secure_reserved must be zero. No profile arms a default supplier. */
+ /* Version-6 tail retained at136B, not an operational READ route. Saved
+  * ATF's 050b/op2 returns -2 and 0415/op2 is BL-only after tracing the
+  * actual dispatch/boot chain, not merely its service name. All v5/v6
+  * registrations return ENOTSUP BEFORE acquire, CMDBT or worker arming.
+  * A new production profile needs an actually kernel-reachable service,
+  * selected-slot provenance and bounded read/selector semantics; merely
+  * declaring profile1 cannot supply these. No probing or fallback occurs.
+  * Secure remap/AP+BGF authority and the real op14 source verifier remain
+  * necessary, but cannot make a BL-only READ callable from this kernel. */
  uint32_t secure_profile, secure_reserved;
 };
-/* Native v6 additionally requires SMPU_LAYOUT_VERIFIED. Its existing
- * acquire/validate/pos_validate must hold the actual SR/AID READ ABI and
- * immutable secure MPU configuration, as well as AP/BGF access authority.
- * The worker reads NS CPU AID241 policy before mapping HIF RAM and on every
- * HIF ownership check. This is supplementary: FDT geometry, matching READ
- * data or AP permission cannot authorize the secure route or BGF DMA.
- * No secure SET/CLEAR or duplicate conninfra op70 is issued here; the
- * original supplier still executes/proves the actual secure remap route.
- * v1..v4 descriptor prefixes/behavior and the 128B v5 size are unchanged;
- * v6 is136B. Version5 registration now returns
- * ENOTSUP before arming hardware rather than guessing a READ service. */
+/* v1..v4 prefixes/behavior, the128B v5 size and136B v6 size are unchanged.
+ * v5/v6 are disabled before hardware arming, not silently downgraded to
+ * v4. SMPU_LAYOUT_VERIFIED only describes topology, never live policy or
+ * SMC callability. Retained policy/remap code cannot authorize BGF DMA or
+ * receiver readiness; its READ entry is fail-closed with no SMC emitted. */
 #ifdef __cplusplus
 extern "C" {
 #endif

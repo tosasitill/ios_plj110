@@ -121,6 +121,10 @@ static bool x9g_send(uint32_t local, uint32_t port, const uint8_t *req, unsigned
    printf("X9 GPS PDS: hardware transition errno %d layout %u ready %u fault %u physical %u/%d app/hw epoch %llu/%llu\n",
        e, s.layout_valid, s.ready, s.fault, s.physical_stage, s.physical_errno,
        s.generation,s.hardware_generation);
+   if(s.connv2_rejected_errno)
+    printf("X9 GPS PDS: last connv2 registration refused v%u secure profile %u errno %d before acquire (not current provider state or receiver readiness)\n",
+        s.connv2_rejected_version,s.connv2_rejected_profile,
+        s.connv2_rejected_errno);
    if(s.pvt_received)
     printf("X9 GPS PDS: native PVT reports %llu no-fix %llu rejected %llu delivered %llu retired %llu mask %x errno %d (not a readiness lease)\n",
         s.pvt_received,s.pvt_no_fix,s.pvt_rejected,s.pvt_delivered,s.pvt_retired,

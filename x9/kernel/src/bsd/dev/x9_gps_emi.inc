@@ -1,14 +1,16 @@
-/* Selected PLJ110 ATF SR/AID READ, not the source-only 050b/op2 ABI.
- * Saved tee_a dispatcher78680 ->43e3c: c2000415/op2 ->43a64. Only types
- * SA0/EA1/ENABLE3/AID4 below are used. SA/EA43978 return 80000000 +
- * (u32 page<<12); EA is the LAST PAGE BASE, not the inclusive end byte.
- * AID439b8 selects 32 AIDs via secure 1105d9bc and returns packed2bit;
- * this has a selector side effect even though permissions are not written.
- * Supplier must exclude all other selector users across each secure call.
- * The BL name is not proof of nonsecure kernel callability. The supplier
- * must independently qualify the actual running secure ABI BEFORE arming
- * version6; neither saved slotA nor current FDT selects it automatically.
- * No SMC probing/fallback, SET/CLEAR, violation dump/ACK or op70 is issued.
+/* Retained SR/AID policy logic; NO operational secure READ entry.
+ * Saved tee_a registry78680 ->43e3c does implement0415/op2 ->43a64,
+ * but only BL dispatch309e0/309f8 selects it. Saved LK14d98 ->224f0
+ * ->2227c ->15654 sends c2000115 BEFORE kernel entry; ATF c810 ->bfa0
+ * sets132080=1. Getter22954 selects kernel dispatch, whose primary and
+ * secondary whitelists BOTH reject0415. Source-only050b/op2 returns -2.
+ * Existence of a registered handler does not establish kernel reachability.
+ * The read function below therefore returns ENOTSUP WITHOUT emitting SMC,
+ * even if internal v6 state were accidentally armed. No alternate caller
+ * bits, BL/HYP ID, SET/CLEAR, dump/ACK or op70 is tried. Saved slotA is not
+ * current slotB proof; a real kernel READ route still needs establishing.
+ * Retained decoding: SA/EA43978 return80000000+(u32 page<<12), with EA
+ * the LAST PAGE BASE. AID439b8 is packed2bit and WRITES selector1105d9bc.
  */
 #define GPS_EMI_CPU_AID 241u
 #define GPS_EMI_CPU_SR 47u
@@ -17,7 +19,9 @@ static int gps_emi_cpu_epoch(void)
  if(current_thread()!=gps_rt.worker || gps_rt.ops.version!=6 ||
      gps_rt.ops.secure_profile!=X9_GPS_SECURE_0415_4K_V1 || !gps_rt.lease)return EPERM;
  struct x9_gps_status s;x9_gps_copy_status(&s);
- return s.hardware_generation!=gps_rt.generation || s.fault ? ESTALE : 0;
+ if(s.hardware_generation!=gps_rt.generation || s.fault)return ESTALE;
+ /* Profile1 is retired BL-only, not a supplier-qualified kernel service. */
+ return ENOTSUP;
 }
 static int gps_emi_cpu_guard(void)
 {
@@ -44,25 +48,10 @@ static void gps_emi_cpu_journal(int error)
 static int gps_emi_cpu_read(unsigned type,unsigned region,uint64_t *value)
 {
  if(region<1 || region>63 || (type!=0 && type!=1 && type!=3 && type!=4))return EINVAL;
- /* The read-only batch is bracketed by the full live supplier guard.
-  * Check its hardware epoch on every SMC as well. There is no CONN MMIO
-  * here: do not repeat hundreds of PMIF/clock snapshots for one table or
-  * recurse through HIF ownership. No HIF effect occurs until final guard. */
- int e=gps_emi_cpu_epoch();if(e)return e;
- register uint64_t x0 __asm__("x0")=0xc2000415ULL;
- register uint64_t x1 __asm__("x1")=2,x2 __asm__("x2")=type;
- register uint64_t x3 __asm__("x3")=region;
- register uint64_t x4 __asm__("x4")=type==4 ? GPS_EMI_CPU_AID/32 : 0;
- register uint64_t x5 __asm__("x5")=0,x6 __asm__("x6")=0,x7 __asm__("x7")=0;
- __asm__ volatile("dsb sy\nsmc #0\ndsb sy\nisb" :
-     "+r"(x0),"+r"(x1),"+r"(x2),"+r"(x3),"+r"(x4),"+r"(x5),"+r"(x6),"+r"(x7) ::
-     "memory","cc","x8","x9","x10","x11","x12","x13","x14","x15","x16","x17");
- e=gps_emi_cpu_epoch();if(e)return e;
- /* a0 is DATA, not a generic success status. In particular a full-width
-  * all-RW AID word is legitimate data; do not truncate to u32 or mistake
-  * its upper AID241 bits for APC domain permissions. ABI authority must
-  * already be held by the supplier, not inferred from this word. */
- *value=x0;return 0;
+ if(!value)return EINVAL;
+ /* Leave output untouched on error. No BL-only SMC, probing or synthetic
+  * all-RW data. Replacing this requires a proved kernel-callable ABI. */
+ return ENOTSUP;
 }
 static int gps_emi_cpu_snapshot(struct gps_emi_cpu_region *table)
 {

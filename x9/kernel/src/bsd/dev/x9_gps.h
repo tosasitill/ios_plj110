@@ -80,6 +80,11 @@ struct x9_gps_status {
  uint32_t secure_remap_address;
  uint64_t secure_remap_checks;
  int32_t secure_remap_errno;
+ /* Last refused v5/v6 registration, not the current provider's state.
+  * May coexist with an already held v1..v4 lease; never overwrite its
+  * physical stage/fault/epoch or imply that power callbacks were called. */
+ uint32_t connv2_rejected_version, connv2_rejected_profile;
+ int32_t connv2_rejected_errno;
 };
 struct x9_gps_nmea {
  uint64_t sequence, generation, host_time;
