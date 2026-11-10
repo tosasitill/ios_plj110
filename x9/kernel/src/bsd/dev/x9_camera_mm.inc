@@ -331,7 +331,8 @@ static int cam_mm_take(struct cam_mm_journal *j,unsigned sensor,struct x9_camera
         j->cfg[k]=r->cfg[k]=(cam_rr(j->top,d->cfg)>>d->shift)&0x7f;
         if((j->cfg[k]&((1u<<d->width)-1))>=d->parents)return ENOTSUP;
     }
-    /* Before any domain, CAMTG/TOP/A or register-clock vote: foreign
+    /* Receive PM/CSI is held. Before any MM-journal domain, CAMTG/TOP/A
+     * or register-clock vote: foreign
      * CAMSV B..F must be unvoted. Their CG is read only after MRAW take. */
     e=cam_sv_sibling_begin(j);if(e)return e;
     r->stage=X9_CAM_MM_STAGE_TAKE;

@@ -392,7 +392,7 @@ captured DT 区分 normal camera **SID80**、protected camera **SID89**、displa
 
 #### 共享时钟打开前保持其他 CAMSV inactive
 
-Captured DT 中，A 的 L19 与 B 共用，L14 与 C 共用，L29 与 D/E/F 共用。只采样 A 的 disabled controls 和 LARB STAT0，不能保证共享 clock 打开后这些 producer 不会恢复运行。`x9_camera_sv_siblings.inc` 已接实际 MM take/guard/restore：**在任何 MM vote 之前**双采样 CG34 bits15..19（B～F）的全部十个 XPU EN、global 和 STA，必须全0；不等 foreign vote 消失、不追加 sibling vote。
+Captured DT 中，A 的 L19 与 B 共用，L14 与 C 共用，L29 与 D/E/F 共用。只采样 A 的 disabled controls 和 LARB STAT0，不能保证共享 clock 打开后这些 producer 不会恢复运行。`x9_camera_sv_siblings.inc` 已接实际 MM take/guard/restore：既有 receive PM/CSI reference 申请后、**MM journal 第一笔 backup/domain/clock vote 之前**双采样 CG34 bits15..19（B～F）的全部十个 XPU EN、global 和 STA，必须全0；不等 foreign vote 消失、不追加 sibling vote。这没有前移或替换 receive provider 的 secure PM/CSI 申请。
 
 CG34 bit12/13/14 实际是 CAMTG/TOP/A，不是三个 CAMSV engine。MRAW domain8 真正消费后，在仍 held 的 `seen` 和 fresh domain AP/global/PM_ACK/STA 资格下读取 CG34，B～F 的 physical gate 必须全部为1。partial take 的 MRAW SET 即使尚未 `completed`，也必须证明实际完整 target 才能检查 CG 和继续唯一 close；入口 off/prior 不能退休已发请求。未消费/未发 MRAW 引用或已退休 domain 时只读受 secure/infra authority 保护的 HWV，不读断电 CG；不为了检查而启用 B～F，也不读它们的 producer、CQ 或 IRQ banks。
 

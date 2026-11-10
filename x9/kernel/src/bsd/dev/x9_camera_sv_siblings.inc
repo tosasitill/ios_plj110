@@ -3,7 +3,8 @@
  * clk-mt6993-cam.c: CG34 bit12=CAMTG, bit13=TOP, bit14=A,
  * bit15=B, bit16=C, bit17=D, bit18=E, bit19=F. TOP/CAMTG or a
  * LARB ungate must not revive a sibling with inherited producer controls.
- * Freeze B..F's ten XPU EN banks before ANY MM vote. Only after the
+ * After receive PM/CSI take, freeze B..F's ten XPU EN banks before ANY
+ * MM-journal clock/domain vote. Only after the
  * journal has consumed MRAW domain8 may its physical CG be inspected.
  * No sibling register access, enable, reset, IRQ read/ack or vote write.
  * Gated/unvoted is admission for this inactive lifetime, NOT DMA drain,
