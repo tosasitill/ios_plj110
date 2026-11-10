@@ -146,6 +146,10 @@ int x9_gps_next_nmea(uint64_t *cursor, struct x9_gps_nmea *sentence);
  * not raw MNL/MCUSYS bytes. 20H392 decoder 0x1004f09ec requires length0x69,
  * then reads LE32 mask, calendar, leap, UTC, uncertainty, LE doubles/floats.
  * Calendar bit0 is GPS time, not a UTC tm copy; UTC bit1 is Unix epoch ms.
+ * MNL translation supplies measured sea-level height at +47/bit7 only for
+ * 3D grade with positive vertical precision; WGS84 +43/bit6 stays inactive
+ * until the configured datum is proved. DOP fields are unitless, not metre
+ * uncertainty or confidence. Cached low-speed heading is not published.
  * The backend must provide valid_mask/calendar/time/uncertainty semantics;
  * this boundary bounds numeric wire values, but does not complete or infer
  * validity bits, UTC units or session-success status from NMEA traffic.

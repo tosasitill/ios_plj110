@@ -17,8 +17,17 @@
  * +50/+58/+84/+88/+8c, NOT +50/+54/+58 as an accuracy triplet. PDS
  * 1004f09ec/1004f0fc8 consumes these at +51/+59/+63/+79/+83.
  *
+ * NMEA548e10 calls the original get_position into PVT at sp+3ec0;
+ * GGA5496e8 prints +48 as sea-level height in metres and +40-minus-+48
+ * as geoid separation (format17cc2). GSA549a7c/25f22 prints +5c/+60/+64
+ * as PDOP/HDOP/VDOP; 6cae68/2357b independently names +60 as HDOP.
+ * PDS1004f0ef4/1016f7b67 names +47 as alt(sl), and +92/+96/+100 as
+ * PDOP/HDOP/VDOP. Do NOT equate MSL with WGS84: the MNL LLH path can
+ * apply a configurable ellipsoid transform at 56fce4. +40 is withheld.
+ * Heading522420 copies a cached course below 0.15m/s, not a new heading.
+ *
  * This is still a PARTIAL native PDS translation. UTC/leap authority,
- * confidence, altitude datum, ellipses and DOP are not proved here. Only
+ * confidence, WGS84 datum and ellipses are not proved here. Only
  * independently qualified GPS calendar and named measured quantities are
  * included; uncertain/zero precision slots stay INVALID, not fabricated
  * measurements. Physical MNL session qualification and an explicitly
@@ -34,6 +43,7 @@ static unsigned gps_pvt_u16(const uint8_t *p)
 static uint32_t gps_pvt_u32(const uint8_t *p)
 { return GPS_LE32(p); }
 #include "x9_gps_pvt_calendar.inc"
+#include "x9_gps_pvt_scalar.inc"
 
 /* Producer clears speed/precision in several unavailable-mode paths.
  * Keep zero inactive: this also conservatively omits stationary speed,
@@ -72,13 +82,25 @@ int x9_gps_mnl_position_wire(const void *body, unsigned length, void *wire,
  memcpy(result+27,p+0x30,8); memcpy(result+35,p+0x38,8);
  if (gps_pvt_gps_calendar(p,result+4)) mask|=1u;
  if (gps_pvt_copy_positive(p,0x84,result,63)) mask|=1u<<11;
+ if (gps_pvt_copy_positive(p,0x5c,result,92)) mask|=1u<<19;
+ if (gps_pvt_copy_positive(p,0x60,result,96)) mask|=1u<<20;
  /* A 2D fix does not qualify vertical precision. A heading is only
-  * supplied when the vendor actually supplied nonzero ground speed. */
- if (p[0x19]==3 && gps_pvt_copy_positive(p,0x88,result,79)) mask|=1u<<15;
+  * supplied above the original producer's cached-course threshold. */
+ if (p[0x19]==3) {
+  if (gps_pvt_copy_positive(p,0x64,result,100)) mask|=1u<<21;
+  if (gps_pvt_copy_positive(p,0x88,result,79)) {
+   mask|=1u<<15;
+   /* Vertical precision plus 3D grade qualifies measured MSL height,
+    * including zero/negative heights. Failed conversion only omits height;
+    * no guessed geoid, WGS84 height or fabricated uncertainty is supplied. */
+   if (gps_pvt_copy_height(p+0x48,result+47)) mask|=1u<<7;
+  }
+ }
  if (gps_pvt_copy_positive(p,0x50,result,51)) {
   mask|=1u<<8;
   uint32_t heading=gps_pvt_u32(p+0x58);
-  if ((!(heading&0x80000000u) || !(heading&0x7fffffffu)) &&
+  if (gps_pvt_u32(p+0x50)>=0x3e19999au && /* vendor's 0.15f m/s */
+      (!(heading&0x80000000u) || !(heading&0x7fffffffu)) &&
       (heading&0x7fffffffu)<0x43b40000u) {
    memcpy(result+59,p+0x58,4); mask|=1u<<10;
   }
