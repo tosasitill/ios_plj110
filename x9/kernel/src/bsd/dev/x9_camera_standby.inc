@@ -1,30 +1,5 @@
-/* Explicit mode3 AP sensor standby transaction; no receiver MMIO. */
-static struct x9_camera_config cam_config_last={.version=1};
-struct cam_sensor_ap { struct cam_probe_bus *bus; uint8_t slave; };
-static int cam_sensor_ap_read(void *context, uint16_t reg, uint8_t *v)
-{
-    struct cam_sensor_ap *ap=context;
-    const uint8_t tx[2]={(uint8_t)(reg>>8),(uint8_t)reg};
-    return cam_bus_transfer(ap->bus,ap->slave,tx,2,v);
-}
-static int cam_sensor_ap_write(void *context, uint16_t reg, uint8_t v)
-{
-    struct cam_sensor_ap *ap=context;
-    /* Tables still cannot contain OTP. Only the known front read-port
-     * commands have an exception; no arbitrary programming or page selector. */
-    bool fab=ap->slave==0x10 && ((reg==0x0a02 && v==0x7f) || (reg==0x0a00 && v<=1));
-    bool mirror=reg==0x0101 && v==(ap->slave==0x1a?3:0);
-    if(cam_sensor_forbidden(reg) && !mirror && !fab)return EPERM;
-    const uint8_t tx[3]={(uint8_t)(reg>>8),(uint8_t)reg,v};
-    return cam_bus_transfer(ap->bus,ap->slave,tx,3,NULL);
-}
-static int cam_standby_configure(struct cam_probe_journal *j, void *context)
-{
-    struct x9_camera_config *r=context;
-    struct cam_sensor_ap ap={&j->sensor,r->sensor==1?0x1a:0x10};
-    struct cam_sensor_io io={.context=&ap,.read=cam_sensor_ap_read,.write=cam_sensor_ap_write};
-    return cam_sensor_configure(&io,r->sensor,r);
-}
+/* Existing mode3 standby now exercises the persistent engine, then closes
+ * immediately. No new diagnostics or receiver MMIO. */
 static int cam_standby(uint32_t which, struct x9_camera_config *r)
 {
     memset(r,0,sizeof(*r));r->version=1;r->sensor=which;r->observed=UINT32_MAX;
@@ -35,13 +10,24 @@ static int cam_standby(uint32_t which, struct x9_camera_config *r)
     }
     int e=cam_sensor_config_preflight(which,r);
     if(!e) {
+        struct x9_camera_probe probe;
+        uint64_t epoch=0;
+        int off=0;
         r->flags|=X9_CAM_CFG_ATTEMPTED;r->stage=X9_CAM_CFG_COLD;
-        e=cam_sensor_transaction(which,&r->probe,cam_standby_configure,r);
+        e=cam_sensor_session_open_locked(which,&epoch,&probe);
+        if(!epoch)r->flags&=~X9_CAM_CFG_ATTEMPTED;
+        if(!e)e=cam_sensor_session_configure_locked(epoch,r);
+        /* Failed open may own pins/rails/FIFO. Only an admitted epoch may
+         * unwind: EBUSY must not restore another session's journal. */
+        if(epoch)off=cam_sensor_session_close_locked(epoch,&probe);
+        r->probe=probe;
         r->restore_errno=r->probe.restore_errno;
         if(r->probe.flags&X9_CAM_PROBE_RESTORED)r->flags|=X9_CAM_CFG_RESTORED;
         if(r->probe.flags&X9_CAM_PROBE_LATCHED)r->flags|=X9_CAM_CFG_LATCHED;
-        if(!e)r->stage=X9_CAM_CFG_DONE;
+        if(!e && !off){r->stage=X9_CAM_CFG_DONE;cam_probe_done|=1u<<which;}
         else if((r->flags&X9_CAM_CFG_VERIFIED) && r->restore_errno)r->stage=X9_CAM_CFG_RESTORE;
+        if(!e)e=off;
+        if(epoch)cam_sensor_cold_log(&probe);
     }
     r->last_errno=e;cam_config_last=*r;
     printf("X9 CAMERA STANDBY: sensor=%u flags=%x stage=%u pairs=%u/%u writes=%u/%u "

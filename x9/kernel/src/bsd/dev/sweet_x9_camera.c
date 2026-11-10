@@ -76,6 +76,7 @@ static const struct x9_camera_sensor sensors[] = {
 #include "x9_camera_sensor.inc"
 #include "x9_camera_mt6993.inc"
 #include "x9_camera_resources.inc"
+#include "x9_camera_sensor_session.inc"
 #include "x9_camera_standby.inc"
 #include "x9_camera_mm.inc"
 #include "x9_camera_receiver.inc"
@@ -124,11 +125,16 @@ static int stop(void)
         lck_mtx_unlock(&camera_lock);
         if(session.stream)e=write8(s,0x0100,0);
         if(session.capture)a=hw.capture(s,0,session.generation);
+        /* Publish confirmed capture retirement before power(false). Native
+         * sensor unwind must still see capture=true after failed/partial
+         * drain; it cannot rely on a caller-supplied "drained" boolean. */
+        lck_mtx_lock(&camera_lock);
+        if(!a)session.capture=false;
+        lck_mtx_unlock(&camera_lock);
         /* Never remove sensor/MM/translation dependencies below a DMA
          * engine whose stop/drain failed. Provider retains its own journal. */
         if(!a && session.power)b=hw.power(s,0);
         lck_mtx_lock(&camera_lock);
-        if(!a)session.capture=false;
         if(!a && !b){session.power=false;session.stream=false;}
         if(a || b) {
             session.latched=true;session.last_errno=a?a:b;
@@ -197,6 +203,7 @@ int x9_camera_register_platform(const struct x9_camera_platform *p)
     if(tables)return tables; /* including preview/PLL, BEFORE any power callback */
     lck_mtx_lock(&camera_control_lock);lck_mtx_lock(&camera_lock); int e=0;
     if(st.mode!=2)e=EPERM;
+    else if(cam_sensor_session_active)e=EBUSY;
     else if(hw.version)e=EBUSY;
     else if(!X9_HHMAIN_INIT_COUNT || !X9_HHFRONT_INIT_COUNT)e=ENOTSUP;
     else {

@@ -208,6 +208,10 @@ static int cam_receive_power_take(struct cam_receive_power *p,struct x9_camera_r
 }
 static int cam_resources_probe(struct x9_camera_resources *r)
 {
+    if(cam_sensor_session_active) {
+        memset(r,0,sizeof(*r));r->version=1;r->last_errno=EBUSY;
+        return EBUSY; /* no MMIO/unwind of another session's dependencies */
+    }
     memset(r,0,sizeof(*r));r->version=1;
     r->blockers=X9_CAM_RES_NEED_CAM_POWER|X9_CAM_RES_NEED_PHY|X9_CAM_RES_NEED_ROUTE|
         X9_CAM_RES_NEED_DMA_MAP|X9_CAM_RES_NEED_DRAIN|X9_CAM_RES_NEED_SMMU_OWNER|

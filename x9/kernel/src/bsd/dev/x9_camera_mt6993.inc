@@ -93,6 +93,8 @@ static struct cam_probe_journal cam_journal;
 static struct x9_camera_probe cam_probe_last = { .version=1 };
 static uint32_t cam_probe_done;
 static bool cam_probe_latched;
+/* camera_control_lock protects this and the shared cold journal. */
+static bool cam_sensor_session_active;
 static int cam_rails_guard(struct cam_probe_journal *, bool);
 
 static uint32_t cam_rr(vm_offset_t base, unsigned off)
@@ -575,18 +577,11 @@ static int cam_board_prepare(struct cam_probe_journal *j, uint32_t which,
     if(e)r->blockers|=X9_CAM_BLOCK_I2C;
     return e;
 }
-/* Optional configuration runs only after matched ID, before the SAME cold
- * journal is restored. Probe wrapper below never writes sensor registers. */
-static int cam_sensor_transaction(uint32_t which, struct x9_camera_probe *r,
-    int (*configure)(struct cam_probe_journal *, void *), void *context)
+/* Shared cold power engine: leaves a matched sensor and its exact journal
+ * powered on. The session layer owns admission, lifetime and ONE unwind.
+ * No CSI/SMMU/DMA dependency is established here. */
+static int cam_sensor_cold_open(uint32_t which, struct x9_camera_probe *r)
 {
-    memset(r,0,sizeof(*r));r->version=1;r->sensor=which;
-    if(cam_probe_latched || (cam_probe_done&(1u<<which))) {
-        r->last_errno=cam_probe_latched?EIO:EALREADY;
-        if(cam_probe_latched)r->flags=X9_CAM_PROBE_LATCHED;
-        return r->last_errno;
-    }
-    r->flags=X9_CAM_PROBE_ATTEMPTED;r->stage=X9_CAM_STAGE_PREFLIGHT;
     struct cam_probe_journal *j=&cam_journal;
     int e=cam_board_prepare(j,which,r);
     uint8_t v=0;
@@ -658,18 +653,14 @@ static int cam_sensor_transaction(uint32_t which, struct x9_camera_probe *r,
         if(!e && r->chip_id!=(which==X9_CAMERA_BACK?0x9186:0x0615))e=ENODEV;
         if(!e)r->flags|=X9_CAM_PROBE_MATCHED;
     }
-    if(!e && configure){r->stage=X9_CAM_STAGE_CONFIG;e=configure(j,context);}
     r->i2c_status[0]=j->sensor.last_status;
     r->i2c_status[1]=j->ldo.last_status;
-    /* Keep the failed decisive stage. DONE means ID matched AND restored. */
-    int off=cam_restore(j);r->restore_errno=off;
-    if(!off)r->flags|=X9_CAM_PROBE_RESTORED;
-    r->last_errno=e?e:off;
-    if(r->last_errno) {
-        cam_probe_latched=true;r->flags|=X9_CAM_PROBE_LATCHED;
-        if(!e)r->stage=X9_CAM_STAGE_RESTORE;
-    } else {cam_probe_done|=1u<<which;r->stage=X9_CAM_STAGE_DONE;}
-    cam_probe_last=*r;
+    return e;
+}
+static void cam_sensor_cold_log(const struct x9_camera_probe *r)
+{
+    const struct cam_probe_journal *j=&cam_journal;
+    uint32_t which=r->sensor;
     printf("X9 CAMERA PROBE: sensor=%u stage=%u blockers=%x chip=%04x flags=%x errno=%u restore=%u (no capture)\n",
         which,r->stage,r->blockers,r->chip_id,r->flags,r->last_errno,r->restore_errno);
     printf("X9 CAMERA CLOCK: entry cfg=%08x busy=%08x ap=%08x done=%08x pll=%08x fence=%08x (configured nominal, no frequency measurement)\n",
@@ -718,7 +709,4 @@ static int cam_sensor_transaction(uint32_t which, struct x9_camera_probe *r,
         "uncertain=%u conflict=%u (journal, NOT live readback or lease)\n",
         j->drive.taken,j->drive.saved,j->drive.expected,j->drive.prior,j->drive.dirty,
         j->drive.uncertain,j->drive.conflict);
-    return r->last_errno;
 }
-static int cam_sensor_probe(uint32_t which, struct x9_camera_probe *r)
-{ return cam_sensor_transaction(which,r,NULL,NULL); }

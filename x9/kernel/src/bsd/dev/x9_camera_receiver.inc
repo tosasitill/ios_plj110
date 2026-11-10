@@ -107,6 +107,10 @@ static int cam_rx_inspect(void *arg)
 }
 static int cam_rx_probe(unsigned sensor,struct x9_camera_receiver *r)
 {
+    if(cam_sensor_session_active) {
+        memset(r,0,sizeof(*r));r->version=1;r->sensor=sensor;r->last_errno=EBUSY;
+        return EBUSY;
+    }
     memset(r,0,sizeof(*r));r->version=1;r->sensor=sensor;
     r->blockers=X9_CAM_RX_NEED_OWNER|X9_CAM_RX_NEED_RATE|X9_CAM_RX_NEED_PHY|
         X9_CAM_RX_NEED_ROUTE|X9_CAM_RX_NEED_SMI|X9_CAM_RX_NEED_DMA_MAP|

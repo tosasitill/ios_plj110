@@ -328,5 +328,9 @@ static int cam_mm_transaction(unsigned sensor,struct x9_camera_mm_status *r,
 }
 static int cam_mm_probe(unsigned sensor,struct x9_camera_mm_status *r)
 {
+    if(cam_sensor_session_active) {
+        memset(r,0,sizeof(*r));r->version=1;r->sensor=sensor;r->last_errno=EBUSY;
+        return EBUSY;
+    }
     return cam_mm_transaction(sensor,r,NULL,NULL);
 }
