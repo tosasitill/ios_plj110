@@ -7473,7 +7473,10 @@ x9_siri_write(vnode_t vp, off_t off, uint8_t value, vfs_context_t ctx)
  * equal the original page's hash), so the kernel needs no hashing and pages
  * never validate as tainted. The old hash covers the whole page: matching it
  * proves the entire page is original. All-or-nothing; already patched = no-op.
- * x9_ccgate=0 off, 1 (default) patch, 2 restore the original bytes and hash.
+ * x9_ccgate=0 off, 1 (default) NR plus a dual-SIM gate matching x9_dual_sim,
+ * 2 restore the original bytes and hash. 174.txt proved that disabling the
+ * bridge alone left the previously installed dual-SIM personality enabled.
+ * Accept three complete page states, never an arbitrary mixture of edits.
  */
 #define X9_CCGATE_FILE "/private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64.31"
 #define X9_CCGATE_SIZE 103677952LL
@@ -7497,6 +7500,28 @@ static const struct x9_ccgate_edit {
 	 {0xb3,0x07,0x65,0xa1,0xa5,0x9c,0x96,0xe5,0x08,0x81,0x8f,0xdc,0x18,0x4f,0xba,0xce,
 	  0xdd,0x03,0x1c,0xf0,0x31,0x4d,0x75,0x92,0x11,0x7d,0x65,0x27,0x9a,0xcc,0x72,0x3c}},
 };
+
+/* Same original page as above, with only the eight-byte NR edit applied.
+ * Keep this distinct from the dual-SIM+NR hash: restoring just the dual-SIM
+ * instructions without updating the hash would invalidate this code page. */
+static const uint8_t x9_ccgate_nr_hash[32] = {
+	0x78,0x1e,0x43,0xdd,0x2d,0x2a,0x05,0x7b,0x3d,0x85,0x2f,0x26,0xfb,0x56,0x20,0x71,
+	0xd2,0xda,0x33,0x93,0xd1,0xe5,0xda,0x0c,0x00,0xc9,0xb9,0x69,0x31,0x9d,0x73,0x47
+};
+
+static const uint8_t *
+x9_ccgate_value(int i, int state)
+{
+	/* 0 = original; 1 = NR/single-SIM; 2 = NR/dual-SIM. */
+	const struct x9_ccgate_edit *e = &x9_ccgate_edits[i];
+	if (state == 0 || (state == 1 && i == 0)) {
+		return e->orig;
+	}
+	if (state == 1 && i == 2) {
+		return x9_ccgate_nr_hash;
+	}
+	return e->patched;
+}
 
 static int
 x9_ccgate_io(vnode_t vp, off_t off, void *buf, size_t len, int rw, vfs_context_t ctx)
@@ -7523,11 +7548,14 @@ sweet_x9_ccgate(void)
 	extern boolean_t sweet_x9_ufs_root_writable(void);
 	const int count = (int)(sizeof(x9_ccgate_edits) / sizeof(x9_ccgate_edits[0]));
 	const int mode = sweet_x9_arg("x9_ccgate", 1);
+	const int target = mode == 2 ? 0 : sweet_x9_arg("x9_dual_sim", 0) == 1 ? 2 : 1;
+	static const char *const states[] = {"original", "single-sim + nr", "dual-sim + nr"};
 	vfs_context_t ctx = vfs_context_kernel();
 	struct vnode_attr va;
 	vnode_t vp = NULLVP;
 	uint8_t buf[32], hdr[16];
-	int error, i, orig = 0, patched = 0;
+	int error, i, state, source = -1;
+	unsigned matches = 7;
 
 	if (mode != 1 && mode != 2) {
 		return 0;
@@ -7565,30 +7593,34 @@ sweet_x9_ccgate(void)
 			vnode_put(vp);
 			return error;
 		}
-		if (memcmp(buf, e->orig, e->len) == 0) {
-			orig++;
-		} else if (memcmp(buf, e->patched, e->len) == 0) {
-			patched++;
-		} else {
-			printf("X9 CCGATE: %s at %lld matches neither original nor patch; not touched\n", e->what, (long long)e->off);
-			vnode_put(vp);
-			return EINVAL;
+		for (state = 0; state < 3; state++) {
+			if (memcmp(buf, x9_ccgate_value(i, state), e->len) != 0) {
+				matches &= ~(1u << state);
+			}
 		}
 	}
-	if ((mode == 1 && patched == count) || (mode == 2 && orig == count)) {
-		printf("X9 CCGATE: already %s (dual-sim + nr gates, page hash)\n", mode == 1 ? "patched" : "original");
-		vnode_put(vp);
-		return 0;
-	}
-	if (orig != count && patched != count) {
-		printf("X9 CCGATE: mixed state orig=%d patched=%d of %d; not touched\n", orig, patched, count);
+	if (matches == 0 || (matches & (matches - 1)) != 0) {
+		printf("X9 CCGATE: mixed/unknown page state mask=0x%x; not touched\n", matches);
 		vnode_put(vp);
 		return EINVAL;
+	}
+	for (state = 0; state < 3; state++) {
+		if (matches & (1u << state)) {
+			source = state;
+		}
+	}
+	if (source == target) {
+		printf("X9 CCGATE: already %s (gates and page hash)\n", states[target]);
+		vnode_put(vp);
+		return 0;
 	}
 	/* Code bytes first, page hash last; then flush. */
 	for (i = 0; i < count; i++) {
 		const struct x9_ccgate_edit *e = &x9_ccgate_edits[i];
-		memcpy(buf, mode == 1 ? e->patched : e->orig, e->len);
+		if (memcmp(x9_ccgate_value(i, source), x9_ccgate_value(i, target), e->len) == 0) {
+			continue;
+		}
+		memcpy(buf, x9_ccgate_value(i, target), e->len);
 		error = x9_ccgate_io(vp, e->off, buf, e->len, UIO_WRITE, ctx);
 		if (error) {
 			printf("X9 CCGATE: write %s errno=%d after %d of %d edits\n", e->what, error, i, count);
@@ -7600,12 +7632,12 @@ sweet_x9_ccgate(void)
 	for (i = 0; i < count && !error; i++) {
 		const struct x9_ccgate_edit *e = &x9_ccgate_edits[i];
 		error = x9_ccgate_io(vp, e->off, buf, e->len, UIO_READ, ctx);
-		if (!error && memcmp(buf, mode == 1 ? e->patched : e->orig, e->len) != 0) {
+		if (!error && memcmp(buf, x9_ccgate_value(i, target), e->len) != 0) {
 			error = EIO;
 		}
 	}
-	printf("X9 CCGATE: %s dual-sim + nr gates and page 3515 hash in dyld_shared_cache_arm64.31, readback errno=%d\n",
-	    mode == 1 ? "patched" : "restored", error);
+	printf("X9 CCGATE: %s -> %s, gates and page 3515 hash in dyld_shared_cache_arm64.31, readback errno=%d\n",
+	    states[source], states[target], error);
 	vnode_put(vp);
 	return error;
 }
