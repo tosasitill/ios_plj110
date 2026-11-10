@@ -288,9 +288,17 @@ static void x9q_siginfo(x9q_job &j,const char *r){
  /* 170.txt: "fields 0" for every reply (AT OK) - no single parseable +ECSQ
   * line. Parse the first 24 numeric fields, ignore anything after them, and
   * log the raw reply (numbers/commas only; no identities in +ECSQ). */
- char line[256];int v[24];unsigned n=0;
- if(x9q_line(r,"+ECSQ:",line,sizeof(line))){const char *p=line;
-  while(n<24&&x9q_int(p,v[n])){n++;while(*p==' ')p++;if(*p!=',')break;p++;}}
+ /* 171.txt raw: the MD answers one +ECSQ line per RAT, e.g.
+  * "+ECSQ: 25,52,-325,1,1,-30,-355,4096,55,3" (LTE) and
+  * "+ECSQ: 87,126,-325,1,1,0,0,32768,0,0,0,0,0" (NR, unmeasured); x9q_line
+  * rejects duplicate tags. Take the first line whose Act is LTE. */
+ int v[24];unsigned n=0;
+ for(const char *s=r;*s;){const char *e=s;while(*e&&*e!='\r'&&*e!='\n')e++;
+  if(e-s>7&&!memcmp(s,"+ECSQ:",6)){char line[256];unsigned k=(unsigned)(e-s-6);
+   if(k<sizeof(line)){memcpy(line,s+6,k);line[k]=0;const char *p=line;unsigned m=0;int w[24];
+    while(m<24&&x9q_int(p,w[m])){m++;while(*p==' ')p++;if(*p!=',')break;p++;}
+    if(!n||(m>7&&(w[7]==0x1000||w[7]==0x2000)&&!(n>7&&(v[7]==0x1000||v[7]==0x2000)))){memcpy(v,w,sizeof(w));n=m;}}}
+  s=e;while(*s=='\r'||*s=='\n')s++;}
  static unsigned logged;
  if(logged<6){logged++;char raw[200];unsigned w=0;
   for(const char *q=r;*q&&w+2<sizeof(raw);q++)raw[w++]=*q=='\r'?'|':*q=='\n'?'/':((unsigned char)*q<32||(unsigned char)*q>126)?'?':*q;

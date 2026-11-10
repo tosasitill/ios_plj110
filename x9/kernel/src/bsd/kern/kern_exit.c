@@ -2173,6 +2173,36 @@ proc_exit(proc_t p)
 	proc_unlock(p);
 	pid = proc_getpid(p);
 	exitval = p->p_xstat;
+	{
+		/* X9 171.txt: SpringBoard exits ~150 ms after a bottom-edge swipe with no
+		 * CRASH line (not a mach exception). Log the final status and exit reason
+		 * (namespace/code/flags and the EXIT_REASON_USER_DESC string, sanitized)
+		 * for the UI/cellular daemons only. */
+		static const char *const x9_exit_watch[] = {"SpringBoard", "backboardd", "CommCenter", NULL};
+		for (int i = 0; x9_exit_watch[i]; i++) {
+			if (strncmp(p->p_comm, x9_exit_watch[i], sizeof(p->p_comm)) != 0) {
+				continue;
+			}
+			os_reason_t r = p->p_exit_reason;
+			char desc[200] = "";
+			if (r != OS_REASON_NULL && r->osr_kcd_buf != NULL && r->osr_bufsize != 0) {
+				kcdata_iter_t it = kcdata_iter_find_type(kcdata_iter(r->osr_kcd_buf, r->osr_bufsize), EXIT_REASON_USER_DESC);
+				if (kcdata_iter_valid(it)) {
+					const char *src = (const char *)kcdata_iter_payload(it);
+					uint32_t n = kcdata_iter_size(it), k = 0;
+					for (uint32_t j = 0; j < n && src[j] && k + 1 < sizeof(desc); j++) {
+						char c = src[j];
+						desc[k++] = (c >= 32 && c <= 126) ? c : '?';
+					}
+					desc[k] = 0;
+				}
+			}
+			printf("X9 EXIT: %s[%d] xstat 0x%x (signal %d status %d) reason ns %u code 0x%llx flags 0x%llx desc \"%s\"\n",
+			    p->p_comm, pid, exitval, exitval & 0x7f, (exitval >> 8) & 0xff,
+			    r ? r->osr_namespace : 0, r ? r->osr_code : 0ULL, r ? r->osr_flags : 0ULL, desc);
+			break;
+		}
+	}
 	KERNEL_DEBUG_CONSTANT_IST(KDEBUG_COMMON,
 	    BSDDBG_CODE(DBG_BSD_PROC, BSD_PROC_EXIT) | DBG_FUNC_START,
 	    pid, exitval, 0, 0, 0);

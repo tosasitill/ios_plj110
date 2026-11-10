@@ -74,7 +74,7 @@ X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>      # 之后再�
 ## 3. 当前基线镜像与参数
 
 最新实测:**x9-rev252ic-md**(168,见HANDOFF102;LTE-only注册稳定,仍不拨号);再前 **x9-rev252ib-md**(167,见HANDOFF101);再前 **x9-rev252ia-md**(166,见HANDOFF100);再前 **x9-rev252hz-md**(165,见HANDOFF99);再前 **x9-rev252hy-md**(164,见HANDOFF98);再前 **x9-rev252hx-md**(163,见HANDOFF96);再前 **x9-rev252hw-md**(162,见HANDOFF95);再前 **x9-rev252hv-md**(161,见HANDOFF94;MIPC就绪、UIM读通);再前 **x9-rev252hu-md**(160,见HANDOFF93;RAM 10.0GiB生效);再前 **x9-rev252ht-md**(159,见HANDOFF92);再前 **x9-rev252hs-md**(158,见HANDOFF91;MIPC/DPMAIF在prepare/OPEN即隔离,UIM卡状态被拒);前一实测 **x9-rev252hl-md**(代码提交 **`20c64f2`**,构建交接 `0f9d983`),boot.img **12877824 B=12.28125MiB**,路径 `x9/out/x9-rev252hl-md/boot.img`。**157确认完整11文件安装成功、qdsp可读、Sahara finished并进入QMUX/QMI,握手摘要reset=0;真实iOS蜂窝尚未打通**,见HANDOFF87。独立34MiB固件与插件275不需再stage。
-最新实测:**x9-rev252id-md**(170,见HANDOFF104;ECSQ解析为0,CSG槽泄漏导致SpringBoard循环)。当前未上机候选:**x9-rev252ie-md**(ECSQ解析修复+关闭时retire其他parked group,见HANDOFF104);更早候选 **x9-rev252hq-md**(代码`ccbad81`),boot.img12906496B;沿用hn AT→QMI,新增DPMAIF只读/分配探针和WDS前置状态查询,见HANDOFF89。hq默认`x9_dpmaif=1`,不初始化硬件或激活PDP;hn保留。最新实测仍hl;不要把候选当作SIM/蜂窝已验证。
+最新实测:**x9-rev252ie-md**(171,见HANDOFF105;槽泄漏基本解决,SpringBoard上滑后静默退出,磁盘40MiB)。当前未上机候选:**x9-rev252if-md**(ECSQ两行解析+X9 EXIT退出原因日志,见HANDOFF105);更早候选 **x9-rev252hq-md**(代码`ccbad81`),boot.img12906496B;沿用hn AT→QMI,新增DPMAIF只读/分配探针和WDS前置状态查询,见HANDOFF89。hq默认`x9_dpmaif=1`,不初始化硬件或激活PDP;hn保留。最新实测仍hl;不要把候选当作SIM/蜂窝已验证。
 回退:**x9-rev252hk-md**(修复提交 `d1f8515` + 当时未提交的渲染改动,现已入库),boot.img **15278080 B**;156确认reserve生效、efs1.bin已有1MiB,当时15次reset及零传输见HANDOFF84。
 本机回退镜像:`x9/out/x9-rev252hk-md/boot.img`;hl/hk配置沿用 `.local/x9/modem/boot-rev252hi-md.json`。
 157已越过缺qdsp的前置阻塞,**当前阻塞在X9的QMI→MTK适配**:UIM/NAS/DMS/WDS/WDA/DPM请求实际到达后返回0x5e,数据端口配置失败,四个PDP接口仍blocked/tx=rx=0。Sahara是兼容桥交互,不向物理MTK下载Apple固件;PCIControl methods仍0x0,不能说PCIControl已通。以下GPU专用基线与参数为 **2026-11-08 历史记录**,不要当作hk/hl参数直接复用。
@@ -152,7 +152,18 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
 
-## 7. 当前交接(HANDOFF 104,2026-11-10): 170(id)ECSQ解析为0;"注销"=GPU CSG槽泄漏后SpringBoard崩溃循环;ie修两处
+## 7. 当前交接(HANDOFF 105,2026-11-10): 171(ie)槽泄漏已基本解决;SpringBoard改为"底边上滑后静默退出";ECSQ是两行;if加退出原因日志
+
+- **171.txt**(Mac `~/171.txt`,1588410B,末108.1s,无panic)。用户:崩得更频繁。SpringBoard pid 26→323→373→385→398(44.9/66.2/75.9/89.7s退出)。
+- **CSG(观察)**:ie修复生效——之后`X9 RENDER CLOSE ... STOP/TERMINATE acknowledged`十余次都成功,只有62.2s一次`faults or AS1 busy (1ccc40000);retain`;`unresolved client teardown`只1次(170是6次);**没有**`no CSG slot`/`device refused`。
+- **新的退出方式(观察)**:4次SpringBoard退出都**没有CRASH行**(不是mach异常),都发生在`SWEET HID: touch 0 down at x,2723–2743`(屏幕底边,上滑手势)之后约150ms;SpringBoard随即请求CoreImage `_blendWithAlphaMaskB0`/`_scaleClamp`(native-metal refused,EntryNotFound),约40ms后进程消失。170的82s那次相同。168里同样的底边触摸(57.36s)不触发CoreImage也不退出;从169(MG重建那次)起每次都这样。**推断**:MG缓存重建后SpringBoard的某些答案变了(旧缓存建于11-08 cn,早于`da04330`/`b108506`的414pt屏幕呈现),上滑走了新的CoreImage路径,随后被abort_with_reason/外部kill结束。未证实,原因需看退出原因。
+- **磁盘(观察)**:根盘空闲 169 152MiB → 170 52MiB → 171 40MiB(`VeryLowDisk`,非root可用24MiB);170/171里CommCenter写`CellularUsage.db-journal`得到`errno=28`(ENOSPC)38/72次。很可能是mediaserverd每~5s崩溃写的崩溃报告(170里108次)。与SpringBoard退出的关系未知,但空间会继续缩小。清理需要用户确认(建议进Android清`/private/var/mobile/Library/Logs/CrashReporter`等)。
+- **ECSQ(观察)**:原始回复是两行:`+ECSQ: 25,52,-325,1,1,-30,-355,4096,55,3`(LTE:RSRP −88.75dBm,RSRQ −7.5dB,RSSI −81dBm,SNR 13.75dB)和`+ECSQ: 87,126,-325,1,1,0,0,32768,0,0,0,0,0`(NR,未测)。x9q_line遇到重复tag就失败。**if**:逐行取Act为LTE的那一行。
+- **if新增**:`kern_exit.c proc_exit`对SpringBoard/backboardd/CommCenter打印`X9 EXIT: name[pid] xstat (signal/status) reason ns code flags desc "..."`(EXIT_REASON_USER_DESC字符串)。用来确定上滑退出是谁、为什么结束的。
+- **x9-rev252if-md**:Mac上**独立worktree** `~/ios_plj110-wt-if`(HEAD 62e304e…c066ba2 + 本次3文件,`.local`为软链)构建,产物复制到`~/ios_plj110/x9/out/x9-rev252if-md/`,boot.img 12926976B,参数与ie一致,kernel不含`x9_dual_sim`。原因:Mac主checkout里有另外的codex会话未提交的双卡改动(`x9_mipc_bridge.inc`/`x9_modem_bridge.h`/`X9WDS.inc`,`x9_dual_sim=1`门控),不能混进来;那三处文件未被本会话修改。Mac主checkout的`x9_modem.inc/kern_exit.c/X9QMIAT.inc`内容与本提交相同(scp过),但没有pull,留给那个会话自己处理。日志`.local/x9/work/pdp-activation/build-if.stdout.log`。插件275不变,无需mailbox staging。
+- 下一步由用户手动:`fastboot boot x9/out/x9-rev252if-md/boot.img`,日志`~/172.txt`,做几次底边上滑。看`X9 EXIT: SpringBoard`行、0x4f是否`result 0`/信号格。
+
+### 前次交接(HANDOFF 104,2026-11-10): 170(id)ECSQ解析为0;"注销"=GPU CSG槽泄漏后SpringBoard崩溃循环;ie修两处
 
 - **170.txt**(Mac `~/170.txt`,1840702B,末166.6s,无panic)。用户:仍无信号格,设置里**出现了蜂窝**;这几版会不定时"注销"(黑屏转圈)。
 - **ECSQ(观察)**:`AT+ECSQ`每次AT OK,但`ECSQ fields 0`,0x4f回16。id没记录原始回复,不知道是多于13个字段(旧代码遇到就清零)、URC重复行还是别的格式。**ie**:最多解析24个字段,不因尾部内容清零,前6次打印原始回复(`raw "..."`,`|`=CR,`/`=LF)。
