@@ -7488,7 +7488,10 @@ x9_siri_write(vnode_t vp, off_t off, uint8_t value, vfs_context_t ctx)
  * x9_ccgate=0 off, 1 (default) NR plus a dual-SIM gate matching x9_dual_sim,
  * 2 restore the original bytes and hash. 174.txt proved that disabling the
  * bridge alone left the previously installed dual-SIM personality enabled.
- * Accept four complete page states, never an arbitrary mixture of edits.
+ * Accept five complete page states, never an arbitrary mixture of edits.
+ * In dual mode select the slot-aware Mav20 signal driver (personality+11c=2)
+ * rather than D22's Mav7 driver, whose start(slot,...) ignores slot. The real
+ * NAS45/03(tag19)/4f/6c/51 contracts are implemented by the MTK adapter.
  */
 #define X9_CCGATE_FILE "/private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64.31"
 #define X9_CCGATE_SIZE 103677952LL
@@ -7512,6 +7515,9 @@ static const struct x9_ccgate_edit {
 	{"DDS controller and UIM mapping gate", 57594140, 8,
 	 {0xe0,0x03,0x1c,0xaa,0x00,0x6b,0xff,0x97},
 	 {0x20,0x00,0x80,0x52,0x60,0xe2,0x07,0x39}},
+	{"slot-aware signal driver", 57593900, 4,
+	 {0x4a,0x79,0x78,0xb8},
+	 {0x4a,0x00,0x80,0x52}},
 	{"page 3515 hash", 103577665, 32,
 	 {0xe3,0x61,0x65,0x0f,0x48,0x44,0xb1,0xbd,0xd6,0x93,0x40,0xb1,0x1b,0xa8,0x36,0xca,
 	  0x79,0x07,0x45,0xe2,0xba,0x63,0xa6,0xb0,0x95,0xe7,0x5d,0xe3,0x31,0x52,0x79,0x08},
@@ -7532,23 +7538,30 @@ static const uint8_t x9_ccgate_dds_hash[32] = {
 	0x40,0x75,0x30,0x86,0x4a,0x49,0xc9,0x39,0x77,0xa3,0x96,0x05,0x78,0xf5,0x84,0x6a
 };
 
+static const uint8_t x9_ccgate_slotsignal_hash[32] = {
+	0x25,0x7f,0xc8,0xcb,0xe1,0x7f,0xb7,0x03,0x4b,0x32,0xc9,0x35,0xb8,0x59,0x8e,0x05,0x79,0x47,0x90,0xb4,0xcb,0x20,0x98,0x50,0xc7,0xd3,0xd3,0x51,0x50,0xa8,0x82,0xcf
+};
+
 static const uint8_t *
 x9_ccgate_value(int i, int state)
 {
-	/* 0 original; 1 single+NR; 2 old dual+NR; 3 dual+NR+DDS.
+	/* 0 original; 1 single+NR; 2 old dual+NR; 3 dual+NR+DDS; 4 plus slot-aware signal.
 	 * D22 case sets callee-saved w21=1 at 0x1f036cc18, preserved through
 	 * the call at cf3c to d000. Use it ONLY for +124; +125/+126 stay intact.
 	 * +1f8 enables UIM slot mapping; +124 selects the standard QMI DDS driver;
 	 * +171 supports DataSubscriptionController. Keep old installed state2. */
 	const struct x9_ccgate_edit *e = &x9_ccgate_edits[i];
-	if (state == 0 || (state == 1 && i == 0) || (state < 3 && (i == 2 || i == 3))) {
+	if (state == 0 || (state == 1 && i == 0) || (state < 3 && (i == 2 || i == 3)) || (state < 4 && i == 4)) {
 		return e->orig;
 	}
-	if (state == 1 && i == 4) {
+	if (state == 1 && i == 5) {
 		return x9_ccgate_nr_hash;
 	}
-	if (state == 3 && i == 4) {
+	if (state == 3 && i == 5) {
 		return x9_ccgate_dds_hash;
+	}
+	if (state == 4 && i == 5) {
+		return x9_ccgate_slotsignal_hash;
 	}
 	return e->patched;
 }
@@ -7578,14 +7591,14 @@ sweet_x9_ccgate(void)
 	extern boolean_t sweet_x9_ufs_root_writable(void);
 	const int count = (int)(sizeof(x9_ccgate_edits) / sizeof(x9_ccgate_edits[0]));
 	const int mode = sweet_x9_arg("x9_ccgate", 1);
-	const int target = mode == 2 ? 0 : sweet_x9_arg("x9_dual_sim", 0) == 1 ? 3 : 1;
-	static const char *const states[] = {"original", "single-sim + nr", "dual-sim + nr", "dual-sim + nr + dds"};
+	const int target = mode == 2 ? 0 : sweet_x9_arg("x9_dual_sim", 0) == 1 ? 4 : 1;
+	static const char *const states[] = {"original", "single-sim + nr", "dual-sim + nr", "dual-sim + nr + dds", "dual-sim + nr + dds + slot-signal"};
 	vfs_context_t ctx = vfs_context_kernel();
 	struct vnode_attr va;
 	vnode_t vp = NULLVP;
 	uint8_t buf[32], hdr[16];
 	int error, i, state, source = -1;
-	unsigned matches = 15;
+	unsigned matches = 31;
 
 	if (mode != 1 && mode != 2) {
 		return 0;
@@ -7623,7 +7636,7 @@ sweet_x9_ccgate(void)
 			vnode_put(vp);
 			return error;
 		}
-		for (state = 0; state < 4; state++) {
+		for (state = 0; state < 5; state++) {
 			if (memcmp(buf, x9_ccgate_value(i, state), e->len) != 0) {
 				matches &= ~(1u << state);
 			}
@@ -7634,7 +7647,7 @@ sweet_x9_ccgate(void)
 		vnode_put(vp);
 		return EINVAL;
 	}
-	for (state = 0; state < 4; state++) {
+	for (state = 0; state < 5; state++) {
 		if (matches & (1u << state)) {
 			source = state;
 		}
@@ -7670,6 +7683,86 @@ sweet_x9_ccgate(void)
 	    states[source], states[target], error);
 	vnode_put(vp);
 	return error;
+}
+
+/* 20H392 CommCenter, native 4 KiB CodeDirectory page 529. The plan controller
+ * factory accepts SettingsDevice#40 (eSIM) OR #28 (AppleSIM) on stock D22.
+ * In our dual-physical adapter use #70, the actual RadioPersonality+241 dual
+ * capability, instead of #28. No fd/1f0/Vinyl capability, ICCID, plan item or
+ * UI visibility is invented: CellularPlanListModelLocal still enumerates its
+ * real per-slot SimInfo and filters unavailable/missing identities itself.
+ * Root binaries are already CS_ADHOC; retain the original entitlements and
+ * signature layout, changing only this instruction and its SHA256 page slot.
+ * Refuse unknown/mixed inputs before writing; single/restore mode restores
+ * original. Runtime bounds/shape/readback mirror the existing cache gate. */
+static int
+sweet_x9_ccplan_gate(void)
+{
+ extern boolean_t sweet_x9_ufs_root_writable(void);
+ static const char path[] = "/System/Library/Frameworks/CoreTelephony.framework/Support/CommCenter";
+ static const struct x9_ccgate_edit edits[] = {
+  {"plan factory dual-capability lookup", 2170072, 4,
+   {0x08,0x15,0x40,0xf9}, {0x08,0x39,0x40,0xf9}},
+  {"native page 529 hash", 24525396, 32,
+   {0xfa,0xef,0x77,0x52,0x63,0xc4,0xa2,0xc3,0x02,0x1c,0x4d,0x98,0xe9,0x29,0x83,0xf9,0xc1,0x93,0x8f,0x3c,0x8d,0x0d,0x7c,0xd4,0x10,0xe9,0x11,0x6b,0xed,0x6b,0x4d,0xa5},
+   {0xcc,0x41,0x56,0x0b,0x05,0x60,0xe5,0x00,0xe4,0xc9,0xc8,0x1b,0xa2,0x1a,0x29,0x8e,0xbe,0x5a,0x96,0x7a,0x4c,0xfd,0x2e,0xb8,0xf6,0x2f,0x1e,0xe6,0xa7,0x91,0x4a,0x4b}},
+ };
+ const int mode = sweet_x9_arg("x9_ccgate", 1);
+ const int target = mode == 1 && sweet_x9_arg("x9_dual_sim", 0) == 1;
+ vfs_context_t ctx = vfs_context_kernel();
+ struct vnode_attr va;
+ vnode_t vp = NULLVP;
+ uint8_t buf[32], hdr[16];
+ unsigned matches = 3;
+ int error, i, state, source = -1;
+ if ((mode != 1 && mode != 2) || !sweet_x9_ufs_root_writable()) return 0;
+ error = vnode_lookup(path, VNODE_LOOKUP_NOFOLLOW, &vp, ctx);
+ if (error) { printf("X9 CCPLAN: lookup errno=%d; not touched\n", error); return error; }
+ VATTR_INIT(&va); VATTR_WANTED(&va, va_data_size); VATTR_WANTED(&va, va_flags);
+ error = vnode_getattr(vp, &va, ctx);
+ if (error || !vnode_isreg(vp) || va.va_data_size != 24740528 || (va.va_flags & UF_COMPRESSED)) {
+  printf("X9 CCPLAN: file errno=%d reg=%d size=%lld flags=0x%x; not touched\n",
+      error, vnode_isreg(vp), (long long)va.va_data_size, va.va_flags);
+  error = error ? error : EINVAL; goto out;
+ }
+ error = x9_ccgate_io(vp, 0, hdr, sizeof(hdr), UIO_READ, ctx);
+ if (error) goto out;
+ /* MH_MAGIC_64, CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64_ALL, MH_EXECUTE. */
+ if (memcmp(hdr, "\xcf\xfa\xed\xfe\x0c\x00\x00\x01\x00\x00\x00\x00\x02\x00\x00\x00", 16)) {
+  error = EINVAL; printf("X9 CCPLAN: Mach-O header mismatch; not touched\n"); goto out;
+ }
+ for (i = 0; i < 2; i++) {
+  const struct x9_ccgate_edit *e = &edits[i];
+  error = x9_ccgate_io(vp, e->off, buf, e->len, UIO_READ, ctx);
+  if (error) goto out;
+  for (state = 0; state < 2; state++)
+   if (memcmp(buf, state ? e->patched : e->orig, e->len)) matches &= ~(1u << state);
+ }
+ if (matches != 1 && matches != 2) {
+  printf("X9 CCPLAN: mixed/unknown page state mask=0x%x; not touched\n", matches);
+  error = EINVAL; goto out;
+ }
+ source = matches == 2;
+ if (source == target) { printf("X9 CCPLAN: already %s (factory and page hash)\n", target ? "real dual-plan capable" : "original"); goto out; }
+ /* Code first, CodeDirectory hash last. Any failed write keeps its error;
+  * no retry, unknown mixture repair, or fabricated success. */
+ for (i = 0; i < 2; i++) {
+  const struct x9_ccgate_edit *e = &edits[i];
+  memcpy(buf, target ? e->patched : e->orig, e->len);
+  error = x9_ccgate_io(vp, e->off, buf, e->len, UIO_WRITE, ctx);
+  if (error) { printf("X9 CCPLAN: write %s errno=%d after %d edits\n", e->what, error, i); goto out; }
+ }
+ error = VNOP_FSYNC(vp, MNT_WAIT, ctx);
+ for (i = 0; i < 2 && !error; i++) {
+  const struct x9_ccgate_edit *e = &edits[i];
+  error = x9_ccgate_io(vp, e->off, buf, e->len, UIO_READ, ctx);
+  if (!error && memcmp(buf, target ? e->patched : e->orig, e->len)) error = EIO;
+ }
+ printf("X9 CCPLAN: %s -> %s, factory and native page 529 hash, readback errno=%d\n",
+     source ? "dual-capable" : "original", target ? "dual-capable" : "original", error);
+out:
+ vnode_put(vp);
+ return error;
 }
 
 static int
@@ -8554,6 +8647,10 @@ load_init_program_at_path(proc_t p, user_addr_t scratch_addr, const char* path)
 	 if(kbd_dictation_error)printf("X9 KBD DICT: preference not installed errno=%d; continuing boot\n",kbd_dictation_error);
 	 int ccgate_error=sweet_x9_ccgate();
 	 if(ccgate_error)printf("X9 CCGATE: CommCenter gates not changed errno=%d; continuing boot\n",ccgate_error);
+	 if(!ccgate_error){
+	  int ccplan_error=sweet_x9_ccplan_gate();
+	  if(ccplan_error)printf("X9 CCPLAN: factory not changed errno=%d; continuing boot\n",ccplan_error);
+	 }
 	 int siri_error=sweet_x9_siri_off(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	 if(siri_error)printf("X9 SIRI: launchd.plist not changed errno=%d; continuing boot\n",siri_error);
 	 int jobs_error=sweet_x9_seed_disabled_jobs(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);

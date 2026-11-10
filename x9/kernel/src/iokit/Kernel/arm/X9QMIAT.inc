@@ -681,20 +681,25 @@ static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *r
   * (0x10 0x17 0x19 0x1e 0x23 0x25 0x26 0x29 0x2b 0xa0 0xc0 0xd0 0xd1 ...); rejecting
   * the whole request meant it never got ServingSystem/SysInfo indications and
   * never polled 0x24 itself, so it never learned the registration state. Now
-  * 0x13/0x18 are served from real AT snapshots; the rest are accepted, and logged
+  * 0x13/0x18/0x19 are served from real AT snapshots; the rest are accepted, and logged
   * once, but no indication is ever sent for them. */
  if(service==3&&id==3){
-  bool serving=c.serving,system=c.system;char unserved[96];unsigned w=0;unserved[0]=0;
+  bool serving=c.serving,system=c.system,signal=c.signal;char unserved[96];unsigned w=0;unserved[0]=0;
   for(unsigned i=7;i<len;i+=3+x9q_u16(req+i+1)){
    unsigned k=x9q_u16(req+i+1);uint8_t tag=req[i];
-   if(tag==0x13||tag==0x18){
+   if(tag==0x13||tag==0x18||tag==0x19){
     if(k!=1||req[i+3]>1){x9q_reject(local,port,req,len,X9Q_ARG);return;}
-    if(tag==0x13)serving=req[i+3]!=0;else system=req[i+3]!=0;
+    if(tag==0x13)serving=req[i+3]!=0;else if(tag==0x18)system=req[i+3]!=0;else signal=req[i+3]!=0;
    }else if(w+8<sizeof(unserved))w+=(unsigned)snprintf(unserved+w,sizeof(unserved)-w," %02x",tag);
   }
   static unsigned logged;
-  if(w&&logged<8){logged++;printf("X9 QMI AT: NAS 0x0003 accepted; serving %d system %d; never indicated:%s\n",serving,system,unserved);}
-  c.serving=serving;c.system=system;c.next=0;x9q_packet p(req);p.send(local,port);return;
+  if(w&&logged<8){logged++;printf("X9 QMI AT: NAS 0x0003 accepted; serving %d system %d signal %d; never indicated:%s\n",serving,system,signal,unserved);}
+  // Mav20 registerEvents_sync (20H392 1f1ab620c) uses SigInfoEvents
+  // tag19/u8, separately from ConfigSigInfo2 thresholds (6c). Subscribe at
+  // bootstrap, including SA before any LTE threshold request. Unsubscribe0
+  // stops this client's background samples; foreground delivery checks signal.
+  if(signal!=c.signal)printf("X9 DUALSIM: NAS client 0x%x SIM%u signal events %u (tag19, real ECSQ)\n",local,c.sim_slot+1,signal);
+  c.serving=serving;c.system=system;c.signal=signal;c.next=0;x9q_packet p(req);p.send(local,port);return;
  }
  /* WDS Set Event Report (0x01) / Indication Register (0x03) and DMS Set Event
   * Report (0x01): acknowledged, no indication is generated (no event source). */
