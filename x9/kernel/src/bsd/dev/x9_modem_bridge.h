@@ -23,6 +23,13 @@ uint64_t x9_md_mipc_submit(const uint8_t *frame, uint32_t length);
 int x9_md_mipc_take(uint64_t token, uint8_t *frame, uint32_t capacity, uint32_t *length);
 int x9_md_mipc_event(uint8_t *frame, uint32_t capacity, uint32_t *length);
 int x9_md_mipc_online(void);
+/* x9_dual_sim=1: two fixed physical slots, indexed 0/1. Read-only AT via
+ * MIPC 0003/0004 (8100 string); NEVER falls back to ttyC0 for SIM2.
+ * Same nonreused wire token space as MIPC. Cancelled sent queries drain CNF. */
+unsigned x9_md_sim_count(void);
+uint64_t x9_md_sim_at_submit(unsigned sim, const char *command);
+int x9_md_sim_at_take(uint64_t token, char *response, uint32_t capacity, int *result);
+void x9_md_sim_at_cancel(uint64_t token);
 #ifdef __cplusplus
 }
 #endif

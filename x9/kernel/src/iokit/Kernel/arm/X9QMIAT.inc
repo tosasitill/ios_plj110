@@ -45,19 +45,24 @@ struct x9q_packet {
   coachz_baseband_qrtr(local,X9BB_NODE,port,p,n);
  }
 };
-struct x9q_client {uint64_t generation,next;uint32_t uim_mask;bool serving,system,signal;};
+struct x9q_client {uint64_t generation,next;uint32_t uim_mask;uint8_t sim_slot;bool serving,system,signal;};
 static x9q_client x9q_clients[CBQ_MAX_CLIENTS];
 struct x9q_job {
- bool used,background;uint32_t local,port,len;uint64_t generation,order,deadline,token;
+ bool used,background,probe,mipc;uint32_t local,port,len;uint64_t generation,order,deadline,token,token_deadline;
  uint8_t req[X9Q_REQ];uint16_t id;unsigned stage;
  char command[X9_AT_COMMAND_MAX];
  int sim; /* 0 unknown, 1 ready, 2 PIN, 3 PUK */
  uint16_t file,offset,amount,record_size,record_count;uint8_t structure;
  char path[33];uint8_t raw[512];unsigned raw_len,record;
  uint8_t aid[4][32],aid_len[4],aid_type[4];unsigned apps;
+ uint8_t sim_slot,cards[512],slots[41],iccid[2][10];unsigned card_bytes,slot_bytes;
+ bool iccid_valid[2];
  int reg[3],attached,act,csq;uint16_t mcc,mnc;unsigned mnc_digits;
 };
 static x9q_job x9q_jobs[X9Q_JOBS];static int x9q_active=-1;static uint64_t x9q_order;
+static void x9q_cancel(x9q_job &j){
+ if(j.token){if(j.mipc)x9_md_sim_at_cancel(j.token);else x9_md_at_cancel(j.token);j.token=0;}
+}
 /* Exact complete AT lines only; prefix comparisons never cross into another line. */
 static bool x9q_line(const char *s,const char *prefix,char *out,unsigned cap){
  unsigned pl=(unsigned)strlen(prefix);bool found=false;
@@ -131,12 +136,15 @@ static bool x9q_dir(x9q_job &j,const uint8_t *p,unsigned n){
  while(i<n)if(p[i++]!=0xff)return false;return true;
 }
 static void x9q_error(x9q_job &j,uint16_t err){
- if(!j.background){x9q_packet p(j.req,err);p.send(j.local,j.port);
-  printf("X9 QMI AT: response service 0x%x msg 0x%04x txn %u error %u\n",j.port-X9BB_PORT_BASE,j.id,x9q_u16(j.req+1),err);}
- if(j.token)x9_md_at_cancel(j.token);bzero(&j,sizeof(j));x9q_active=-1;
+ if(x9_md_sim_count()==2&&j.port==X9BB_PORT_BASE+0x0b&&(j.id==0x2f||j.id==0x47))bb_dual_card_status(nullptr,nullptr);
+ if(!j.background&&!j.probe){x9q_packet p(j.req,err);p.send(j.local,j.port);}
+ if(!j.background||j.probe)printf("X9 QMI AT: response service 0x%x msg 0x%04x txn %u error %u SIM%u probe %u stage %u\n",
+  j.port-X9BB_PORT_BASE,j.id,x9q_u16(j.req+1),err,j.sim_slot+1,j.probe,j.stage);
+ x9q_cancel(j);bzero(&j,sizeof(j));x9q_active=-1;
 }
 static void x9q_finish(x9q_job &j,x9q_packet &p,uint16_t ind=0){
- if(!j.background||!x9q_u16(p.p+10))p.send(j.local,j.port,j.background,ind);
+ if(!j.probe&&(!j.background||!x9q_u16(p.p+10)))p.send(j.local,j.port,j.background,ind);
+ if(j.probe)printf("X9 DUALSIM: read-only probe service %u msg 0x%04x completed; SIM%u, no synthetic identities\n",j.port-X9BB_PORT_BASE,j.id,j.sim_slot+1);
  if(!j.background)printf("X9 QMI AT: response service 0x%x msg 0x%04x txn %u result %u error %u (real AT)\n",
    j.port-X9BB_PORT_BASE,j.id,x9q_u16(j.req+1),x9q_u16(p.p+10),x9q_u16(p.p+12));
  bzero(&j,sizeof(j));x9q_active=-1;
@@ -164,19 +172,21 @@ static const char *x9q_read_check(x9q_job &j){
  /* QMI length 0 = whole file / whole record; resolved from the FCP. */
  if(j.amount>255)return "length over one CRSM read";
  unsigned st=session.p[0];
- /* CRSM has no proven arbitrary-AID/slot routing on this MD. Only primary GW
-  * (empty AID, current USIM) or card-1 MF files; never map slot-2 to slot-1. */
- if(st!=0&&st!=6)return "session type";
+ /* Fixed primary/secondary GW and card1/card2 routes. No arbitrary AID or
+  * logical-channel selection; SIM2 never falls back to SIM1's ttyC0. */
+ if(st!=0&&st!=6&&st!=2&&st!=7)return "session type";
+ j.sim_slot=(st==2||st==7)?1:0;
+ if(j.sim_slot>=x9_md_sim_count())return "second slot disabled";
  const char hex[]="0123456789ABCDEF";
  for(unsigned i=0;i<file.p[2];i+=2){uint16_t f=x9q_u16(file.p+3+i);unsigned o=i*2;
   j.path[o]=hex[f>>12];j.path[o+1]=hex[(f>>8)&15];j.path[o+2]=hex[(f>>4)&15];j.path[o+3]=hex[f&15];}
  j.path[file.p[2]*2]=0;
  bool mf=!strcmp(j.path,"3F00")&&(j.file==0x2fe2||j.file==0x2f00);
  /* 161.txt: CommCenter also reads EFs in USIM sub-DFs (3F007FFF7F665F30/4F34).
-  * Read-only CRSM on the current USIM; still no slot-2 or arbitrary-AID routing. */
- bool usim=st==0&&!strncmp(j.path,"3F007FFF",8)&&((j.file>=0x6f00&&j.file<=0x6fff)||(j.file>=0x4f00&&j.file<=0x4fff));
+  * Read-only CRSM on the routed USIM; no arbitrary-AID selection. */
+ bool usim=(st==0||st==2)&&!strncmp(j.path,"3F007FFF",8)&&((j.file>=0x6f00&&j.file<=0x6fff)||(j.file>=0x4f00&&j.file<=0x4fff));
  /* 163.txt: EF 6FE5 under DF_TELECOM (3F007F10) is read every cycle. Read-only. */
- bool telecom=(st==0||st==6)&&!strcmp(j.path,"3F007F10")&&((j.file>=0x6f00&&j.file<=0x6fff)||(j.file>=0x4f00&&j.file<=0x4fff));
+ bool telecom=!strcmp(j.path,"3F007F10")&&((j.file>=0x6f00&&j.file<=0x6fff)||(j.file>=0x4f00&&j.file<=0x4fff));
  if(!mf&&!usim&&!telecom)return "path/file outside MF ICCID/DIR, DF_TELECOM and USIM 4Fxx/6Fxx";
  if(j.id==0x21&&(!j.offset||j.offset>255))return "record number";
  /* Reject indication tokens, encryption, multi-record reads and unknown TLVs. */
@@ -193,20 +203,46 @@ static bool x9q_read_args(x9q_job &j){
    j.id,why,se.p&&se.n>=1?se.p[0]:-1,se.p&&se.n>=2?se.p[1]:-1,j.file,j.path[0]?j.path:"-",j.offset,j.amount,t);}
  return false;
 }
-static void x9q_card(x9q_job &j){
- uint8_t s[256];unsigned n=0;memset(s,0xff,8);n=8;s[n++]=1;
+static void x9q_uim_next(x9q_job &j){
+ if(j.sim_slot+1<x9_md_sim_count()){
+  j.sim_slot++;j.sim=0;j.apps=0;j.record=0;j.raw_len=0;
+  bzero(j.aid,sizeof(j.aid));bzero(j.aid_len,sizeof(j.aid_len));bzero(j.aid_type,sizeof(j.aid_type));
+  x9q_command(j,"AT+CPIN?\r",1);return;
+ }
+ if(x9_md_sim_count()==2&&j.iccid_valid[0]&&j.iccid_valid[1]){
+  bool distinct=memcmp(j.iccid[0],j.iccid[1],10)!=0;
+  static unsigned logged;if(logged<8){logged++;printf("X9 DUALSIM: SIM1/SIM2 ICCID read via masks 1/2, distinct %u (values private)\n",distinct);}
+  if(!distinct){x9q_error(j,X9Q_INTERNAL);return;} // never publish SIM1 twice
+ }
+ if(x9_md_sim_count()==2)bb_dual_card_status(j.iccid_valid[0]?j.iccid[0]:nullptr,j.iccid_valid[1]?j.iccid[1]:nullptr);
+ x9q_packet p(j.req);p.tlv(0x10,j.id==0x2f?j.cards:j.slots,j.id==0x2f?j.card_bytes:j.slot_bytes);
+ x9q_finish(j,p,j.id==0x2f?0x32:0x48);
+}
+static void x9q_slot(x9q_job &j,const uint8_t *iccid){
+ unsigned n=j.slot_bytes;uint8_t *s=j.slots;
+ if(n+20>sizeof(j.slots)){x9q_error(j,X9Q_INTERNAL);return;}
+ bzero(s+n,10);s[n]=iccid?2:1;s[n+4]=1;s[n+8]=j.sim_slot+1;s[n+9]=iccid?10:0;n+=10;
+ if(iccid){memcpy(s+n,iccid,10);n+=10;memcpy(j.iccid[j.sim_slot],iccid,10);j.iccid_valid[j.sim_slot]=true;}
+ j.slot_bytes=n;x9q_uim_next(j);
+}
+static void x9q_card(x9q_job &j,bool present=true){
+ uint8_t *s=j.cards;unsigned n=j.card_bytes;
+ if(n+6+j.apps*46>sizeof(j.cards)){x9q_error(j,X9Q_INTERNAL);return;}
  /* CPIN does not distinguish PIN verified from disabled or expose retries.
   * Unknown PIN state (0) makes its required retry bytes unavailable, not a
   * claimed retry budget. Personalization remains unknown, never invented. */
- s[n++]=1;s[n++]=0;s[n++]=0;s[n++]=0;s[n++]=0;s[n++]=(uint8_t)j.apps;
+ s[n++]=present?1:0;s[n++]=0;s[n++]=0;s[n++]=0;s[n++]=0;s[n++]=(uint8_t)j.apps;
  for(unsigned i=0;i<j.apps;i++){
-  if(j.aid_type[i]==2&&s[0]==0xff){s[0]=(uint8_t)i;s[1]=0;}
+  unsigned gw=j.sim_slot?4:0;
+  if(j.aid_type[i]==2&&s[gw]==0xff){s[gw]=(uint8_t)i;s[gw+1]=j.sim_slot;}
   s[n++]=j.aid_type[i];s[n++]=j.aid_type[i]==2&&j.sim==1?7:1;
   s[n++]=0;s[n++]=0xff;s[n++]=0;s[n++]=0;s[n++]=j.aid_len[i];
   memcpy(s+n,j.aid[i],j.aid_len[i]);n+=j.aid_len[i];
   memset(s+n,0,7);n+=7;
  }
- x9q_packet p(j.req);p.tlv(0x10,s,n);x9q_finish(j,p,0x32);
+ static unsigned logged;if(x9_md_sim_count()==2&&logged<16){logged++;
+  printf("X9 DUALSIM: UIM SIM%u present %u CPIN class %d EF_DIR apps %u via MIPC mask %u\n",j.sim_slot+1,present,j.sim,j.apps,1u<<j.sim_slot);}
+ j.card_bytes=n;x9q_uim_next(j);
 }
 static int x9q_registration(const char *s,const char *tag){
  char line[256];if(!x9q_line(s,tag,line,sizeof(line)))return -1;
@@ -222,9 +258,9 @@ static uint8_t x9q_radio(int act){
 static void x9q_nas(x9q_job &j){
  /* 166.txt: SysInfo never carried LTE info; log the real registration inputs
   * whenever they change (stat values / CGATT / COPS AcT only, no identities). */
- {static int last[5]={-9,-9,-9,-9,-9};int now[5]={j.reg[0],j.reg[1],j.reg[2],j.attached,j.act};
-  if(memcmp(last,now,sizeof(now))){memcpy(last,now,sizeof(now));
-   printf("X9 QMI AT: NAS registration CREG %d CEREG %d C5GREG %d CGATT %d COPS-AcT %d\n",now[0],now[1],now[2],now[3],now[4]);}}
+ {static int last[2][5]={{-9,-9,-9,-9,-9},{-9,-9,-9,-9,-9}};int now[5]={j.reg[0],j.reg[1],j.reg[2],j.attached,j.act};
+  if(memcmp(last[j.sim_slot],now,sizeof(now))){memcpy(last[j.sim_slot],now,sizeof(now));
+   printf("X9 QMI AT: NAS SIM%u registration CREG %d CEREG %d C5GREG %d CGATT %d COPS-AcT %d\n",j.sim_slot+1,now[0],now[1],now[2],now[3],now[4]);}}
  if(j.reg[0]<0&&j.reg[1]<0&&j.reg[2]<0){x9q_error(j,X9Q_NOT_READY);return;}
  int best=x9q_registered(j.reg[2])?j.reg[2]:x9q_registered(j.reg[1])?j.reg[1]:j.reg[0]>=0?j.reg[0]:j.reg[1];
  uint8_t radio=x9q_radio(j.act);
@@ -318,6 +354,10 @@ static void x9q_start(x9q_job &j){
  if(service==1){x9q_error(j,X9Q_UNSUPPORTED);
  }else if(service==0x0b||(service==2&&j.id==0x3c)){
   if(service==0x0b&&(j.id==0x20||j.id==0x21||j.id==0x24)&&!x9q_read_args(j)){x9q_error(j,X9Q_ARG);return;}
+  if(service==0x0b&&(j.id==0x2f||j.id==0x47)){
+   j.sim_slot=0;j.card_bytes=9;j.slot_bytes=1;memset(j.cards,0xff,8);
+   j.cards[8]=j.slots[0]=(uint8_t)x9_md_sim_count();
+  }
   x9q_command(j,"AT+CPIN?\r",1);
  }else if(service==3&&j.id==0x4f){
   x9q_command(j,"AT+ECSQ\r",40);
@@ -381,10 +421,7 @@ static void x9q_result(x9q_job &j,const char *r,int result){
   char line[80];const char *v=line;unsigned cme;
   if(j.stage==1&&service==0x0b&&(j.id==0x2f||j.id==0x47)&&
      x9q_line(r,"+CME ERROR:",line,sizeof(line))&&x9q_number(v,cme)&&!*v&&cme==10){
-   x9q_packet p(j.req);
-   if(j.id==0x2f){uint8_t absent[15]={};memset(absent,0xff,8);absent[8]=1;p.tlv(0x10,absent,sizeof(absent));}
-   else{uint8_t absent[11]={1,1,0,0,0,1,0,0,0,1,0};p.tlv(0x10,absent,sizeof(absent));}
-   x9q_finish(j,p,j.id==0x2f?0x32:0x48);return;
+   if(j.id==0x2f)x9q_card(j,false);else x9q_slot(j,nullptr);return;
   }
   {char line2[80];const char *v2=line2;unsigned cme2=0;
    bool has=x9q_line(r,"+CME ERROR:",line2,sizeof(line2))&&x9q_number(v2,cme2)&&!*v2;
@@ -396,7 +433,7 @@ static void x9q_result(x9q_job &j,const char *r,int result){
   j.sim=!strcmp(state,"READY")?1:!strcmp(state,"SIM PIN")?2:!strcmp(state,"SIM PUK")?3:0;
   if(j.sim!=1){printf("X9 QMI AT: service 0x%x msg 0x%04x CPIN class %d (1 READY 2 PIN 3 PUK 0 other)\n",service,j.id,j.sim);
    x9q_error(j,X9Q_NOT_READY);return;}
-  if(service==2||j.id==0x47)x9q_sim_command(j,176,0x2fe2,0,0,10,"3F00",2);
+  if(service==2||j.id==0x47||(j.id==0x2f&&x9_md_sim_count()==2))x9q_sim_command(j,176,0x2fe2,0,0,10,"3F00",2);
   else if(j.id==0x2f)x9q_sim_command(j,192,0x2f00,0,0,0,"3F00",3);
   else x9q_sim_command(j,192,j.file,0,0,0,j.path,5);
   return;
@@ -408,12 +445,17 @@ static void x9q_result(x9q_job &j,const char *r,int result){
   }
   if(j.stage==2){
    if(n!=10){x9q_error(j,X9Q_INTERNAL);return;}x9q_packet p(j.req);
-   if(service==2){char digits[21];unsigned k=0;
-    for(unsigned i=0;i<n;i++)for(unsigned half=0;half<2;half++){
-     unsigned d=(data[i]>>(half*4))&15;if(d==15&&i==9&&half==1)continue;
-     if(d>9){x9q_error(j,X9Q_INTERNAL);return;}digits[k++]=(char)('0'+d);}
-    p.tlv(1,digits,k);
-   }else{uint8_t slot[21]={1,2,0,0,0,1,0,0,0,1,10};memcpy(slot+11,data,10);p.tlv(0x10,slot,sizeof(slot));}
+   char digits[21];unsigned k=0;
+   for(unsigned i=0;i<n;i++)for(unsigned half=0;half<2;half++){
+    unsigned d=(data[i]>>(half*4))&15;if(d==15&&i==9&&half==1)continue;
+    if(d>9){x9q_error(j,X9Q_INTERNAL);return;}digits[k++]=(char)('0'+d);}
+   if(service==2){p.tlv(1,digits,k);
+   }else if(j.id==0x2f){
+    /* Verify two distinct physical ICCIDs before publishing CardStatus too,
+     * not only if the client happens to ask for GetSlotStatus afterwards. */
+    memcpy(j.iccid[j.sim_slot],data,10);j.iccid_valid[j.sim_slot]=true;
+    x9q_sim_command(j,192,0x2f00,0,0,0,"3F00",3);return;
+   }else{x9q_slot(j,data);return;}
    x9q_finish(j,p,0x48);return;
   }
   if(j.stage==3){
@@ -491,7 +533,7 @@ static bool x9q_enqueue(uint32_t local,uint32_t port,const uint8_t *req,unsigned
  unsigned slot=local-CBQ_PORT_BASE;if(local<CBQ_PORT_BASE||slot>=CBQ_MAX_CLIENTS)return false;
  for(x9q_job &j:x9q_jobs)if(!j.used){
   bzero(&j,sizeof(j));j.used=true;j.background=background;j.local=local;j.port=port;j.len=len;
-  j.generation=x9q_clients[slot].generation;j.order=++x9q_order;j.deadline=x9q_ms()+180000;
+  j.generation=x9q_clients[slot].generation;j.sim_slot=x9q_clients[slot].sim_slot;j.order=++x9q_order;j.deadline=x9q_ms()+180000;
   memcpy(j.req,req,len);j.id=x9q_u16(req+3);return true;
  }return false;
 }
@@ -515,6 +557,16 @@ static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *r
  }
  x9q_client &c=x9q_clients[slot];
  if(service==1&&x9w_request(local,port,req,len))return;
+ /* NAS/DMS BindSubscription: client-local 0=primary, 1=secondary, not DDS.
+  * Jobs snapshot their route; changing binding cannot retarget old replies. */
+ if((service==3&&id==0x45)||(service==2&&id==0x54)){
+  x9q_view sub=x9q_tlv(req,len,1);
+  if(!sub.p||sub.n!=1||len!=11||sub.p[0]>=x9_md_sim_count()){
+   x9q_reject(local,port,req,len,X9Q_ARG);return;}
+  if(c.sim_slot!=sub.p[0])for(const x9q_job &j:x9q_jobs)if(j.used&&!j.probe&&j.local==local){x9q_reject(local,port,req,len,X9Q_BUSY);return;}
+  c.sim_slot=sub.p[0];c.next=0;x9q_packet p(req);p.send(local,port);
+  printf("X9 DUALSIM: service %u client 0x%x bound to SIM%u (queries route, not DDS)\n",service,local,c.sim_slot+1);return;
+ }
  if(service==0x0b&&id==0x2e){
   x9q_view m=x9q_tlv(req,len,1);
   if(!m.p||m.n!=4||len!=14||x9q_u32(m.p)&~0x11u){x9q_reject(local,port,req,len,X9Q_UNSUPPORTED);return;}
@@ -590,35 +642,50 @@ static void x9q_del(uint32_t local){
  unsigned slot=local-CBQ_PORT_BASE;if(local<CBQ_PORT_BASE||slot>=CBQ_MAX_CLIENTS)return;
  x9w_del(slot);
  uint64_t generation=x9q_clients[slot].generation+1;bzero(&x9q_clients[slot],sizeof(x9q_clients[slot]));x9q_clients[slot].generation=generation;
- for(unsigned i=0;i<X9Q_JOBS;i++)if(x9q_jobs[i].used&&x9q_jobs[i].local==local){
-  if(x9q_jobs[i].token)x9_md_at_cancel(x9q_jobs[i].token);
+ for(unsigned i=0;i<X9Q_JOBS;i++)if(x9q_jobs[i].used&&!x9q_jobs[i].probe&&x9q_jobs[i].local==local){
+  x9q_cancel(x9q_jobs[i]);
   bzero(&x9q_jobs[i],sizeof(x9q_jobs[i]));if(x9q_active==(int)i)x9q_active=-1;
  }
 }
 static void x9q_poll(){
  x9w_poll();
+ /* One bounded read-only pass even when D22 never creates a SIM2 client.
+  * It does not send QMI responses, change radio policy or manufacture a SIM. */
+ static unsigned probed;
+ if(probed<4&&x9_md_sim_count()==2&&x9w_control_ready){
+  for(x9q_job &j:x9q_jobs)if(!j.used&&probed<4){
+   bzero(&j,sizeof(j));j.used=j.probe=j.background=true;j.local=CBQ_PORT_BASE;
+   j.port=X9BB_PORT_BASE+(probed<2?0x0b:3);j.id=probed==0?0x2f:probed==1?0x47:0x4d;
+   j.sim_slot=probed==3?1:0;probed++;j.req[3]=(uint8_t)j.id;
+   j.len=7;j.order=++x9q_order;j.deadline=x9q_ms()+180000;
+   printf("X9 DUALSIM: uim3 queued one-shot service %u msg 0x%04x SIM%u probe; D22 gate unchanged\n",j.port-X9BB_PORT_BASE,j.id,j.sim_slot+1);
+  }
+ }
  uint64_t now=x9q_ms();
  for(unsigned i=0;i<X9Q_JOBS;i++)if(x9q_jobs[i].used&&now>=x9q_jobs[i].deadline){
   int active=x9q_active;x9q_error(x9q_jobs[i],X9Q_NOT_READY);if(active!=(int)i)x9q_active=active;
  }
  if(x9q_active<0){
   if(!x9_md_at_online())return;
+  if(x9_md_sim_count()==2&&!x9w_control_ready)return;
   for(unsigned i=0;i<X9Q_JOBS;i++)if(x9q_jobs[i].used&&(x9q_active<0||x9q_jobs[i].order<x9q_jobs[x9q_active].order))x9q_active=(int)i;
   if(x9q_active<0)return;x9q_start(x9q_jobs[x9q_active]);if(x9q_active<0)return;
  }
  x9q_job &j=x9q_jobs[x9q_active];
- if(j.generation!=x9q_clients[j.local-CBQ_PORT_BASE].generation){x9q_del(j.local);return;}
+ if(!j.probe&&j.generation!=x9q_clients[j.local-CBQ_PORT_BASE].generation){x9q_del(j.local);return;}
  if(j.token){
   static char response[X9_AT_RESPONSE_MAX];int result;
-  int ready=x9_md_at_take(j.token,response,sizeof(response),&result);
-  if(ready==0)return;
+  int ready=j.mipc?x9_md_sim_at_take(j.token,response,sizeof(response),&result):x9_md_at_take(j.token,response,sizeof(response),&result);
+  if(ready==0){if(j.mipc&&now>=j.token_deadline)x9q_error(j,X9Q_NOT_READY);return;}
   j.token=0;if(ready<0){x9q_error(j,X9Q_INTERNAL);return;}
   x9q_result(j,response,result);bzero(response,sizeof(response));return;
  }
  if(!x9_md_at_online()){x9q_error(j,X9Q_NOT_READY);return;}
  /* CFUN mode changes (stage 21) get the init script's 60 s; a timeout would
   * quarantine ttyC0 until boot. */
- j.token=x9_md_at_submit(j.command,j.stage==21?60000:10000);
+ j.mipc=x9_md_sim_count()==2&&j.stage!=21;
+ j.token=j.mipc?x9_md_sim_at_submit(j.sim_slot,j.command):x9_md_at_submit(j.command,j.stage==21?60000:10000);
+ j.token_deadline=now+10000;
  if(!j.token)x9q_error(j,X9Q_BUSY);
 }
 static void x9q_subscriptions(){

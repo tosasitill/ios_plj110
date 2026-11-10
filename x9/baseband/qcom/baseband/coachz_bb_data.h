@@ -287,6 +287,39 @@ static inline uint32_t cbd_activation_state(uint8_t *tlvs, uint32_t room, const 
     return w;
 }
 
+/* X9 dual-slot activation envelope. 20H392 QMIMav13 activation indication:
+ * 0x53 DsdsAllowed/u8 -> ActivationInfo +0x210/value,+0x211/valid;
+ * 0x46/0x47 are the second physical card's real ICCID/IMSI, not copies of
+ * slot one. The caller only allows DSDS after a paired distinct-ICCID read.
+ * This adapter policy is neither an Apple ticket nor proof of data service. */
+#define CBD_ACTIVATION_DUAL_TLVS 96u
+static inline uint32_t cbd_activation_dual_state(uint8_t *tlvs, uint32_t room,
+    const uint8_t *iccid1, const uint8_t *imsi1,
+    const uint8_t *iccid2, const uint8_t *imsi2, int dsds)
+{
+    if (room < CBD_ACTIVATION_DUAL_TLVS) return 0;
+    const uint8_t state = CBD_ACTIVATED, provisioned = CBD_PROVISIONED;
+    const uint8_t accepted = CBD_ACCEPTED, allowed = dsds ? 1u : 0u, physical = 0u;
+    uint32_t w = cbd_tlv(tlvs, room, 0x01, &state, 1);
+    w += cbd_tlv(tlvs + w, room - w, 0x53, &allowed, 1);
+    w += cbd_tlv(tlvs + w, room - w, 0x56, &accepted, 1);
+    w += cbd_tlv(tlvs + w, room - w, 0x57, &accepted, 1);
+    if (iccid1) {
+        w += cbd_tlv(tlvs + w, room - w, 0x4f, &provisioned, 1);
+        w += cbd_tlv(tlvs + w, room - w, 0x50, &provisioned, 1);
+        w += cbd_tlv(tlvs + w, room - w, 0x42, iccid1, CBD_ICCID_BYTES);
+        if (imsi1) w += cbd_tlv(tlvs + w, room - w, 0x43, imsi1, CBD_IMSI_BYTES);
+    }
+    if (dsds && iccid2) {
+        w += cbd_tlv(tlvs + w, room - w, 0x51, &provisioned, 1);
+        w += cbd_tlv(tlvs + w, room - w, 0x46, iccid2, CBD_ICCID_BYTES);
+        if (imsi2) w += cbd_tlv(tlvs + w, room - w, 0x47, imsi2, CBD_IMSI_BYTES);
+        w += cbd_tlv(tlvs + w, room - w, 0x58, &physical, 1);
+        w += cbd_tlv(tlvs + w, room - w, 0x59, &physical, 1);
+    }
+    return w;
+}
+
 /* After a carrier bundle change CommCenter (QMIBasebandSettingsDriver) pushes the bundle's files: BSP 0xa000, one 1024-byte segment
  * per request, TLV 0x01 {u16 file type, u16 segment, u16 segment count, data}; then SetConfig 0xe00d (TLV 0x10, one byte) for the IMSI
  * switch and multi-PDN settings. Each segment's answer must carry TLV 0x40 ExpectedSegmentInfo, the next segment number (u16): it is
