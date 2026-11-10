@@ -1138,4 +1138,5 @@ x9:SweetX9Battery.cpp.o
 x9:x9_bluetooth.o
 x9:SweetX9Bluetooth.o
 x9:x9_audio_dsp.o
+x9:x9_adsp_transport.o
 x9:SweetX9Audio.o

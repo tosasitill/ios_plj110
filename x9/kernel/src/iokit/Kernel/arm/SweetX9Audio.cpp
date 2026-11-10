@@ -12,6 +12,7 @@
 #include <sys/errno.h>
 #include <sys/proc.h>
 #include "../../../bsd/dev/x9_audio.h"
+#include "../../../bsd/dev/x9_adsp_transport.h"
 #if defined(ARM64_BOARD_CONFIG_SWEET)
 extern "C" int sweet_early_is_x9(void);
 extern "C" int sweet_x9_arg(const char *, int);
@@ -41,8 +42,10 @@ static void publish(const X9AudioControl &s)
     beginUpdate();
     /* Never memcpy an even source seq over the odd live seq, even briefly. */
     memcpy(control, &s, offsetof(X9AudioControl, seq));
-    memcpy(&control->generation, &s.generation,
-           sizeof(s) - offsetof(X9AudioControl, generation));
+    /* Start from the enclosing object, not a 4-byte field: fortified XNU
+     * memcpy otherwise treats this tail copy as a field overflow. */
+    const size_t tail = offsetof(X9AudioControl, generation);
+    memcpy((uint8_t *)control + tail, (const uint8_t *)&s + tail, sizeof(s) - tail);
     endUpdate();
 }
 static void stopLocked(int error)
@@ -244,6 +247,17 @@ IOReturn X9AudioUserClient::externalMethod(uint32_t sel, IOExternalMethodArgumen
 {
     (void)dispatch; (void)target; (void)reference;
     if (!a || isInactive() || !control) return kIOReturnNotReady;
+    if (sel == X9AudioDSPStatusSelector) {
+        if (a->structureInputDescriptor || a->structureOutputDescriptor || a->asyncWakePort ||
+            a->scalarInputCount != 1 || !a->scalarInput || a->scalarOutputCount || a->structureInputSize ||
+            !a->structureOutput || a->structureOutputSize < sizeof(X9AudioDSPStatus) ||
+            a->scalarInput[0] >= 2) return kIOReturnBadArgument;
+        X9AudioDSPStatus s;
+        int e = x9_adsp_status((uint32_t)a->scalarInput[0], &s);
+        if (e) return result(e);
+        memcpy(a->structureOutput, &s, sizeof(s)); a->structureOutputSize = sizeof(s);
+        return kIOReturnSuccess;
+    }
     if (a->structureInputDescriptor || a->structureOutputDescriptor || a->asyncWakePort ||
         a->scalarInputCount || a->scalarOutputCount || a->structureInputSize) return kIOReturnBadArgument;
     if (sel == X9AudioStatus) {

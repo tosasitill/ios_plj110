@@ -28,6 +28,7 @@
 
 ```sh
 audioctl status
+audioctl dsp-status
 audioctl play /var/tmp/stereo-48000-s16le.pcm
 ```
 
@@ -65,8 +66,42 @@ DMA 并发修改。多 IO context 的混音尚未实现。时基取实际 XNU ti
 匹配：magic `0x8888`、16 B header、最多 96 B payload、明确 source/target
 4-bit 布局，支持 MSG_ONLY/PAYLOAD；DMA 描述符尚未支持，不接受用户物理地址。
 OPEN/CLOSE/PREPARE/HWPARAM/START/STOP 等 ID 来自 OPPO 协议定义。
-**这不是 mailbox 传输或 OPEN→HWPARAM→PREPARE→START 状态机**；超时后相同
-task/message 的迟到 ACK 隔离、ADSP 外层 framing 仍需要物理 transport 实现。
+这仍不是 OPEN→HWPARAM→PREPARE→START 播放状态机；DSP shared-DMA 描述符、
+AFE 和功放需要下一阶段实现。外层 mailbox 传输现在由
+`x9_adsp_transport.{c,h}` 实现，**没有板级注册者，因此默认不执行 MMIO**。
+
+### 接入有界 ADSP mailbox
+
+板级驱动确认固件、时钟／睡眠保护／信号量和独占 mailbox 所有权之后，调用
+`x9_adsp_register_transport()` 提供真实 power/reset/start/wake 回调及 Device-memory
+映射。不能把普通 cacheable 指针或另一消费者仍使用的 pin 交给 transport。
+板级回调必须有界；失败的 `power_on`／`wake_lock` 须完整回滚。
+
+| 内核调用 | 行为与失败边界 |
+|---|---|
+| `x9_adsp_boot(core)` | 真实 halt/reset→清旧 RX→检查 TX 已空→start→等待新 READY，最多 2 秒 |
+| `x9_adsp_request(core, request, reply, timeout_ms)` | 单请求，先排除旧 ACK；TX 消费最多 1 ms，NEED_ACK 最多 250 ms |
+| `x9_adsp_poll(core)` | 单包接收；无消息返回 EAGAIN，不更新播放 cursor |
+| `x9_adsp_next_event(core, event)` | 取 logger/timesync/audio 异步包；最多 16 包，溢出 fail-closed |
+| `x9_adsp_shutdown(core)` | 先 halt/reset 再撤 power；reset 失败不释放仍可能使用的资源 |
+| `audioctl dsp-status` | iOS 只读查看两个 core 的状态、generation、TX/RX/ACK、超时和错误计数 |
+
+外层头是四个 LE u32（16 B），发送 IPI ID=9、options=`0xffff0000`、
+reserved=`0xdeadbeef`；其后才是 inner audio_ipi，不复制 host data 指针。
+mbox0/2 是 AP→DSP，mbox1/3 是 DSP→AP；**每 slot 是 4 B，`is64d` 不改变它**。
+RX 主 pin 60 slots=240 B，末尾 VP pin 的 16 B 不碰。先验证 RX 长度，复制到
+私有包后才 CLR；不把整个 direct-copy 缓冲区长度当成 inner payload 长度。
+发送前持有 wake lease，直到消费和 ACK 结束。RX options/reserved 不强制回显，
+因为源码接收方没有这种要求，也没有真实固件抓包支持它。
+
+READY 必须来自 reset 后的 IPI13、4 B payload、正确 core ID。运行中的新 READY、
+WDT、错配／迟到 ACK、畸形包或事件队列溢出均隔离会话；**超时后不重发相同 ID**，
+只有另一次真实 reset/start/fresh READY 可恢复。ACK param1/param2 原样交给调用者，
+不能把未知 DSP 回复格式当成 errno 或直接宣布 HWPARAM 成功。
+
+DSP `online` 与扬声器 `Ready` 完全分离。隔离只阻止后续 mailbox send，不代替
+PA mute／AFE DMA stop；最终 backend 必须在任何 transport 错误后执行物理停流。
+目前没有启动命令暴露给用户态，也没有 ADSP firmware loader／板级回调提供者。
 
 物理驱动通过 `x9_audio_register_backend()` 注册 boot-lifetime callbacks：
 start（真实 sample-0 host anchor）、stop（必须 mute/quiesce）、submit（完整
@@ -90,11 +125,36 @@ EAGAIN 不消费 PCM。只有八项 physical prerequisites 全部确认才能注
 - MTK 协议参考：OPPO `kernel_device_modules-6.12` 的
   `drivers/misc/mediatek/audio_ipi/include/{audio_messenger_ipi,audio_playback_msg_id,audio_task}.h`
   和 `sound/soc/mediatek/audio_dsp/mtk-dsp-platform-driver.c`。
-- 本机捕获 DT 同时包含 I2C6 `RT5512@5c/@5d`、`TFA98xx@34/@35`；既有
-  Android 日志中两套 KO 都已加载。**节点 enabled／KO 加载不能证明哪套 PA 实际绑定。**
+- 本机捕获 DT 的 `audio_extend` 指定 `speaker-vendor="nxp"`、
+  `tfa98xx.6-0034/.6-0035` 和对应两个 DAI，因此当前板级配置指向双 NXP PA。
+  仍需 live driver binding、revision 和实际 container/profile，不能由配置证明物理出声。
+  DT 同时包含 RT5512 节点／两套 KO 加载，不再把它们当作与 NXP 等权的路线证据。
+- `speaker-i2s-id=9/8` 是 `audio_extend_drv.c::extend_i2s_prop` 中
+  I2SIN4/I2SOUT4 的名字索引；`spk-i2s-index=0x19/0x18` 是
+  `mtk-sp-spk-amp.h::mtk_spk_i2s_type` 的 OUT4/IN4（25/24），**不是 I2SOUT5**。
+  仍须取得 mixer 当前路由；不能将这两套编号直接当 AFE DAI ID。
   AFE 为 `0x1a110000`；实际 ADSP `shared_memory` 为 `0x160000000/0xda0000`，
   `adsp-rsv-audio=0x852000`，不能直接使用通用 DTS 的 5.75 MiB 分配。
   原始 DT、日志、厂商固件和校准数据不入 git。
 
-当前明确未完成：真实 DSP boot/IPI、AFE/PA 后端与功放选型、设备出声、
+## 取得 Android 板级证据
+
+Android 连接后执行一次只读采集（目录必须新建且在 `.local` 内）：
+
+```sh
+python3 -I x9/audio/collect-speaker.py \
+  --out .local/x9/audio-capture/android-speaker-01 --card 0
+```
+
+脚本先检查设备和 root 读取权限，失败不重试。只读 ALSA/cards/PCM、四个候选 PA
+的 sysfs binding、NXP 模块参数、version/dsp-state/fw-state、当前 `tinymix`、
+音频相关 dmesg，以及 vendor/odm 中两个默认 `.cnt` 候选。不播放、设 mixer、
+校准、访问 debug RPC、改寄存器选择器、mount、flash 或写设备文件。
+可由用户先在 Android 手动播放媒体，再采集活跃路由。结果／固件／设备身份只进
+私有目录，不入 git；脚本当前未在线执行，文件缺失和硬件 revision 仍可能无法取得。
+`capture.json` 的 complete 仅表示必需采集命令完成；候选文件是否存在、是否被加载
+及首尾 boot ID 是否一致必须按各原始结果核对，不是 backend 验收标志。
+
+当前明确未完成：板级 DSP power/reset/firmware/SMC 注册、真实 IPI 硬件验收、
+AFE/PA 后端与型号／profile 验证、设备出声、
 HAL 安装／原生 iOS 选择、CoreAudio host-clock 调度差异，以及多 context 混音。

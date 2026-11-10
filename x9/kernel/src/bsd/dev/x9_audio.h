@@ -10,7 +10,7 @@
 #define X9_AUDIO_PERIOD 480u
 #define X9_AUDIO_RING 65536u
 #define X9_AUDIO_RING_BYTES (X9_AUDIO_RING * X9_AUDIO_CHANNELS * 2u)
-enum { X9AudioStatus, X9AudioStart, X9AudioStop };
+enum { X9AudioStatus, X9AudioStart, X9AudioStop, X9AudioDSPStatusSelector };
 enum { X9AudioControlMemory, X9AudioProducerMemory, X9AudioOutputMemory };
 enum { X9AudioReady = 1u, X9AudioRunning = 2u, X9AudioFault = 4u };
 enum {
@@ -34,6 +34,16 @@ typedef struct {
  * end sample time on the current timeline, NOT a byte count or DMA address.
  * Every kernel read is range checked. Memory 2 holds LE interleaved S16. */
 typedef struct { uint64_t written; } X9AudioProducer;
+/* Separate read-only diagnostic ABI, selector 3 + one scalar core (0/1).
+ * DSP Online only means a fresh mailbox READY was observed; it must NEVER
+ * set speaker Ready. Not configured/offline is the default without a board. */
+enum { X9DSPUnconfigured, X9DSPOffline, X9DSPBooting, X9DSPOnline, X9DSPQuarantined };
+typedef struct {
+    uint32_t version, core, state, error, generation, event_pending;
+    uint32_t last_ipi, last_message;
+    uint64_t sent, received, matched_acks, stray_acks, malformed;
+    uint64_t timeouts, wake_errors, ready_count, event_overflows;
+} X9AudioDSPStatus;
 #if defined(KERNEL)
 #ifdef __cplusplus
 extern "C" {

@@ -20,6 +20,28 @@ static int status(io_connect_t c, X9AudioControl *s) {
 }
 static kern_return_t call(io_connect_t c, unsigned sel)
 { return IOConnectCallScalarMethod(c, sel, NULL, 0, NULL, NULL); }
+static int dsp_status(io_connect_t c) {
+    const char *states[] = { "unconfigured", "offline", "booting", "online", "quarantined" };
+    for (uint64_t core = 0; core < 2; core++) {
+        X9AudioDSPStatus s = {0}; size_t n = sizeof(s);
+        kern_return_t r = IOConnectCallMethod(c, X9AudioDSPStatusSelector, &core, 1,
+            NULL, 0, NULL, NULL, &s, &n);
+        if (r || n != sizeof(s) || s.version != 1 || s.core != core || s.state > X9DSPQuarantined) {
+            fprintf(stderr, "DSP status/ABI failed: 0x%x\n", r); return 1;
+        }
+        printf("ADSP%llu %s errno=%u reset-generation=%u pending=%u last-ipi=%u last-message=%u\n"
+               "  tx=%llu rx=%llu ready=%llu ack=%llu stray=%llu malformed=%llu\n"
+               "  timeout=%llu wake-error=%llu event-overflow=%llu\n",
+               (unsigned long long)core, states[s.state], s.error, s.generation, s.event_pending,
+               s.last_ipi, s.last_message, (unsigned long long)s.sent, (unsigned long long)s.received,
+               (unsigned long long)s.ready_count, (unsigned long long)s.matched_acks,
+               (unsigned long long)s.stray_acks, (unsigned long long)s.malformed,
+               (unsigned long long)s.timeouts, (unsigned long long)s.wake_errors,
+               (unsigned long long)s.event_overflows);
+    }
+    puts("DSP online is not speaker-ready; no power/reset command is exposed to userspace.");
+    return 0;
+}
 static void print_status(const X9AudioControl *s) {
     printf("X9 audio ABI=%u state=0x%x blockers=0x%x errno=%u rate=%u channels=%u\n"
            "hardware played=%llu queued=%llu underruns=%llu bad_producer=%llu generation=%u\n",
@@ -77,8 +99,9 @@ done:
 }
 int main(int argc, char **argv) {
     int playing = argc == 3 && !strcmp(argv[1], "play");
-    if (!playing && !(argc == 2 && !strcmp(argv[1], "status"))) {
-        fprintf(stderr, "usage: audioctl status | play <S16LE stereo 48000Hz raw PCM>\n"); return 2;
+    int dsp = argc == 2 && !strcmp(argv[1], "dsp-status");
+    if (!playing && !dsp && !(argc == 2 && !strcmp(argv[1], "status"))) {
+        fprintf(stderr, "usage: audioctl status | dsp-status | play <S16LE stereo 48000Hz raw PCM>\n"); return 2;
     }
     FILE *f = playing ? fopen(argv[2], "rb") : NULL;
     if (playing && !f) { perror(argv[2]); return 1; }
@@ -90,6 +113,7 @@ int main(int argc, char **argv) {
     X9AudioControl s; int rc = status(c, &s);
     if (!rc) {
         print_status(&s);
+        if (dsp) rc = dsp_status(c);
         if (playing) {
             signal(SIGINT, on_signal); signal(SIGTERM, on_signal);
             rc = play(c, f);
