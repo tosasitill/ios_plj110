@@ -23,6 +23,10 @@ static struct x9_speaker_afe_status state;
 static bool registered,leased,journaled;
 static uint64_t last_poll,last_progress;
 static uint64_t resource_ticket;
+/* Per-operation accessibility failure: fault cleanup may mute/quiesce via
+ * independently qualified callbacks, but must not retry AFE/DMA access.
+ * A later explicit stop starts a new qualification attempt. */
+static int access_error;
 enum { STOP_MARGIN_FRAMES=480, WATCHDOG_MS=2 };
 static void watchdog(void *,wait_result_t);
 struct patch {uint32_t off,mask,value,saved,expected;};
@@ -41,6 +45,33 @@ static struct patch config[]={
 };
 #define COUNT ((unsigned)(sizeof(config)/sizeof(config[0])))
 _Static_assert(COUNT==13, "DL24 journal index10 and route indices11/12");
+_Static_assert(sizeof(struct x9_speaker_afe_status)==152,"AFE cached status v3 size");
+static int guard_error(unsigned stage,int e,bool configuration,uint32_t off,
+                       uint32_t expected,uint32_t actual)
+{
+    uint32_t *error=configuration?&state.config_error:&state.lease_error;
+    if(!*error)*error=(uint32_t)e;
+    if(!state.guard_stage) {
+        state.guard_stage=stage;state.guard_reg=off;
+        state.guard_expected=expected;state.guard_actual=actual;
+    }
+    return e;
+}
+static int check_lease(unsigned stage)
+{
+    if(access_error)return access_error;
+    if(state.lease_checks!=UINT64_MAX)state.lease_checks++;
+    X9AudioResourceStatus ticket;
+    int e=x9_audio_resources_status(&ticket);
+    if(!e && (!leased || !resource_ticket || ticket.owner!=X9AudioResourceSpeaker ||
+              ticket.ticket!=resource_ticket))e=EIO;
+    if(!e && !hw.held(hw.context))e=ENXIO;
+    if(!e)e=hw.validate(hw.context);
+    /* Unlike a transient CUR retry, failed ownership/accessibility is fatal. */
+    if(e==EAGAIN)e=EIO;
+    if(e)access_error=e;
+    return e?guard_error(stage,e,false,UINT32_MAX,0,0):0;
+}
 static uint32_t rd(uint32_t off)
 {
     uint32_t v=hw.afe[off/4];__asm__ volatile("dmb oshld":::"memory");
@@ -49,15 +80,18 @@ static uint32_t rd(uint32_t off)
 }
 static void wr(uint32_t off,uint32_t value)
 {hw.afe[off/4]=value;__asm__ volatile("dsb sy":::"memory");}
-static int change(unsigned i,uint32_t value)
+static int change(unsigned i,uint32_t value,unsigned stage)
 {
+    int e=check_lease(stage);if(e)return e;
     struct patch *p=&config[i];uint32_t old=rd(p->off);
     uint32_t bit=1u<<i;
     /* A failed readback may mean the write never landed. Only the two
      * journaled values are recoverable; never adopt a third/foreign value. */
     if((old&p->mask)!=(p->expected&p->mask) &&
-       !((state.uncertain_mask&bit) && (old&p->mask)==(p->saved&p->mask)))return EBUSY;
-    if(p->off==X9_SPEAKER_DL24_CON0 && (old&(X9_SPEAKER_DL24_INACTIVE_MASK&~(1u<<28))))return EBUSY;
+       !((state.uncertain_mask&bit) && (old&p->mask)==(p->saved&p->mask)))
+        return guard_error(stage,EBUSY,true,p->off,p->expected&p->mask,old&p->mask);
+    if(p->off==X9_SPEAKER_DL24_CON0 && (old&(X9_SPEAKER_DL24_INACTIVE_MASK&~(1u<<28))))
+        return guard_error(stage,EBUSY,true,p->off,0,old&(X9_SPEAKER_DL24_INACTIVE_MASK&~(1u<<28)));
     uint32_t next=(old&~p->mask)|(value&p->mask);
     if(p->off==X9_SPEAKER_DL24_CON0)next&=~X9_SPEAKER_DL24_CLEAR_MASK;
     if((next&p->mask)==(old&p->mask)) {
@@ -65,51 +99,72 @@ static int change(unsigned i,uint32_t value)
     }
     state.dirty_mask|=bit;state.uncertain_mask|=bit;
     p->expected=next;wr(p->off,next);
-    if((rd(p->off)&p->mask)!=(next&p->mask))return EIO;
+    uint32_t actual=rd(p->off)&p->mask;
+    if(actual!=(next&p->mask))return guard_error(stage,EIO,true,p->off,next&p->mask,actual);
     state.uncertain_mask&=~bit;return 0;
 }
-static int verify_config(bool saved)
+/* Recovery accepts only our expected value, or the original saved value for
+ * an uncertain write. It must also validate untouched/already-restored words. */
+static int verify_journal(bool saved,bool recovering,unsigned stage)
 {
+    int e=check_lease(stage);if(e)return e;
+    if(state.config_checks!=UINT64_MAX)state.config_checks++;
     for(unsigned n=0;n<COUNT;n++) {
         const struct patch *p=&config[n];
-        if((rd(p->off)&p->mask)!=((saved?p->saved:p->expected)&p->mask))return EBUSY;
+        uint32_t expected=(saved?p->saved:p->expected)&p->mask,actual=rd(p->off)&p->mask;
+        if(actual!=expected && !(recovering && (state.uncertain_mask&(1u<<n)) &&
+                                actual==(p->saved&p->mask)))
+            return guard_error(stage,EBUSY,true,p->off,expected,actual);
     }
     return 0;
 }
-static int unowned_routes_idle(void)
+static int verify_config(bool saved,unsigned stage)
+{return verify_journal(saved,false,stage);}
+static int unowned_routes_idle(bool running,unsigned stage)
 {
+    int e=check_lease(stage);if(e)return e;
     const unsigned banks[]={0,4,16,20,24,28};
-    for(unsigned ch=0;ch<2;ch++)for(unsigned n=0;n<6;n++)
-        if(rd(0x2f00+ch*32+banks[n]))return EBUSY;
-    return rd(X9_SPEAKER_DL24_CON0)&X9_SPEAKER_DL24_INACTIVE_MASK?EBUSY:0;
+    for(unsigned ch=0;ch<2;ch++)for(unsigned n=0;n<6;n++) {
+        unsigned off=0x2f00+ch*32+banks[n];uint32_t value=rd(off);
+        if(value)return guard_error(stage,EBUSY,true,off,0,value);
+    }
+    uint32_t mask=X9_SPEAKER_DL24_INACTIVE_MASK;
+    if(running)mask&=~(1u<<28);
+    uint32_t value=rd(X9_SPEAKER_DL24_CON0)&mask;
+    return value?guard_error(stage,EBUSY,true,X9_SPEAKER_DL24_CON0,0,value):0;
 }
 static int restore(void)
 {
     /* Ordinary masked RW only; CUR/MEM_UP/action bits are never replayed. */
-    int e=unowned_routes_idle();if(e)return e;
+    int e=verify_journal(false,true,X9AFEGuardRestore);if(e)return e;
+    e=unowned_routes_idle(false,X9AFEGuardRestore);if(e)return e;
     for(unsigned n=COUNT;n>0;n--) {
         if(!(state.dirty_mask&(1u<<(n-1))))continue;
-        int e=change(n-1,config[n-1].saved);if(e)return e;
+        int e=change(n-1,config[n-1].saved,X9AFEGuardRestore);if(e)return e;
         state.dirty_mask&=~(1u<<(n-1));
     }
-    e=verify_config(true);if(!e)e=unowned_routes_idle();if(e)return e;
+    e=verify_config(true,X9AFEGuardRestore);if(!e)e=unowned_routes_idle(false,X9AFEGuardRestore);if(e)return e;
     journaled=false;return 0;
 }
 static int disable(void)
 {
     /* Do not RMW an untouched or previously restored register. */
-    int e=0;
-    if(state.dirty_mask&(1u<<10))e=change(10,config[10].expected&~(1u<<28));
+    int e=check_lease(X9AFEGuardDisable);if(e)return e;
+    if(state.dirty_mask&(1u<<10))e=change(10,config[10].expected&~(1u<<28),X9AFEGuardDisable);
+    if(e)return e; /* no second write/qualification after a failed disable */
     uint64_t ticks;nanoseconds_to_absolutetime(1000000,&ticks);
     uint64_t end=mach_absolute_time()+ticks;
     for(unsigned n=0;!e && (state.dirty_mask&(1u<<10)) && n<500;n++) {
+        e=check_lease(X9AFEGuardDisable);if(e)break;
         if(!(rd(0x46d0)&(1u<<28)))break;
         if(mach_absolute_time()>=end){e=ETIMEDOUT;break;}delay(2);
     }
-    if(!e && (state.dirty_mask&(1u<<10)) && (rd(0x46d0)&(1u<<28)))e=ETIMEDOUT;
-    int out=0;
-    if(state.dirty_mask&1)out=change(0,config[0].expected&~1u);
-    if(!e)e=out;
+    if(!e && (state.dirty_mask&(1u<<10))) {
+        e=check_lease(X9AFEGuardDisable);
+        if(!e && (rd(0x46d0)&(1u<<28)))e=ETIMEDOUT;
+    }
+    if(e)return e;
+    if(state.dirty_mask&1)e=change(0,config[0].expected&~1u,X9AFEGuardDisable);
     if(!e)state.running=0;
     return e;
 }
@@ -146,7 +201,7 @@ int x9_speaker_afe_register(const struct x9_speaker_afe_platform *p)
 {
     if(!sweet_early_is_x9() || sweet_x9_arg("x9_audio",0)!=2)return ENXIO;
     if(!p || p->version!=X9_SPEAKER_AFE_PLATFORM_VERSION || p->verified!=X9_SPEAKER_AFE_RESOURCES || !p->afe ||
-       !p->dma || !p->acquire || !p->release || !p->mute || !p->quiesce || !p->sync_device || !p->held ||
+       !p->dma || !p->acquire || !p->release || !p->mute || !p->quiesce || !p->sync_device || !p->held || !p->validate ||
        ((uintptr_t)p->afe&3) || ((uintptr_t)p->dma&63) || (p->dma_bus&63) ||
        !p->dma_bus || p->dma_bytes<65536 || p->dma_bytes>131072 || (p->dma_bytes&63) ||
        p->dma_bus>(1ULL<<41)-p->dma_bytes)return EINVAL;
@@ -171,17 +226,26 @@ int x9_speaker_afe_prepare(void)
     e=x9_audio_resources_claim(X9AudioResourceSpeaker,&resource_ticket);
     if(e){lck_mtx_unlock(&speaker_afe_lock);return e;}
     leased=true;state.error=state.restore_error=state.copy_pending=0;
+    access_error=0;
     state.mute_error=state.disable_error=state.quiesce_error=0;
+    state.lease_error=state.config_error=state.guard_stage=0;
+    state.guard_reg=UINT32_MAX;state.guard_expected=state.guard_actual=0;
     e=hw.acquire(hw.context);
-    if(!e && !hw.held(hw.context))e=EIO;
+    if(!e)e=check_lease(X9AFEGuardPrepare);
     if(!e) {
         e=hw.mute(hw.context);
-        if(!e && ((rd(X9_SPEAKER_DL24_CON0)&X9_SPEAKER_DL24_INACTIVE_MASK) || (rd(0x1580)&1)))e=EBUSY;
+        if(!e)e=check_lease(X9AFEGuardPrepare);
+        if(!e) {
+            uint32_t value=rd(X9_SPEAKER_DL24_CON0)&X9_SPEAKER_DL24_INACTIVE_MASK;
+            if(value)e=guard_error(X9AFEGuardPrepare,EBUSY,true,X9_SPEAKER_DL24_CON0,0,value);
+            else if((value=rd(0x1580)&1))e=guard_error(X9AFEGuardPrepare,EBUSY,true,0x1580,0,value);
+        }
         /* Reject other enabled mixer sources. There is no CONN116_3 in this
          * SoC table. Do not clear a foreign route to make our source work. */
         const unsigned banks[]={0,4,8,16,20,24,28};
         for(unsigned ch=0;!e && ch<2;ch++)for(unsigned b=0;b<7;b++)
-            if(rd(0x2f00+ch*32+banks[b])){e=EBUSY;break;}
+            {unsigned off=0x2f00+ch*32+banks[b];uint32_t value=rd(off);
+             if(value){e=guard_error(X9AFEGuardPrepare,EBUSY,true,off,0,value);break;}}
         if(!e) {
             uint64_t base=hw.dma_bus,end=base+hw.dma_bytes-1;
             config[6].value=(uint32_t)(base>>32);config[7].value=(uint32_t)base;
@@ -189,10 +253,10 @@ int x9_speaker_afe_prepare(void)
             for(unsigned i=0;i<COUNT;i++)config[i].saved=config[i].expected=rd(config[i].off);
             state.dirty_mask=state.uncertain_mask=0;
             journaled=true;
-            for(unsigned i=0;!e && i<COUNT;i++)e=change(i,config[i].value);
+            for(unsigned i=0;!e && i<COUNT;i++)e=change(i,config[i].value,X9AFEGuardPrepare);
         }
-        if(!e)e=verify_config(false);
-        if(!e)e=unowned_routes_idle();
+        if(!e)e=verify_config(false,X9AFEGuardPrepare);
+        if(!e)e=unowned_routes_idle(false,X9AFEGuardPrepare);
         if(!e){state.prepared=1;state.dl24=rd(0x46d0);state.out4=rd(0x1580);}
     }
     if(e){int off=stop_locked();if(off)state.restore_error=(uint32_t)off;}
@@ -201,19 +265,25 @@ int x9_speaker_afe_prepare(void)
     if(!leased || !state.running)state.error=(uint32_t)e;
     lck_mtx_unlock(&speaker_afe_lock);return e;
 }
-static int copy_frames(const int16_t *pcm,uint32_t frames)
+static int copy_frames(const int16_t *pcm,uint32_t frames,unsigned stage)
 {
     if(!pcm || !frames || frames>hw.dma_bytes/4)return EINVAL;
+    int e=verify_config(false,stage);if(e)return e;
+    e=unowned_routes_idle(state.running!=0,stage);if(e)return e;
     if(state.copy_pending || state.played>state.submitted || state.submitted>UINT64_MAX-frames)return EIO;
     if(state.submitted-state.played+frames>hw.dma_bytes/4-32)return EAGAIN;
     uint32_t offset=(uint32_t)(state.submitted%(hw.dma_bytes/4))*4;
     uint32_t bytes=frames*4,first=MIN(bytes,hw.dma_bytes-offset);
     state.copy_pending=frames; /* even sync failure may have exposed PCM */
     memcpy((uint8_t *)hw.dma+offset,pcm,first);
-    int e=hw.sync_device(hw.context,offset,first);
+    e=hw.sync_device(hw.context,offset,first);
+    if(!e)e=verify_config(false,stage);
+    if(!e)e=unowned_routes_idle(state.running!=0,stage);
     if(!e && first<bytes) {
         memcpy(hw.dma,(const uint8_t *)pcm+first,bytes-first);
         e=hw.sync_device(hw.context,0,bytes-first);
+        if(!e)e=verify_config(false,stage);
+        if(!e)e=unowned_routes_idle(state.running!=0,stage);
     }
     if(!e){state.submitted+=frames;state.copy_pending=0;}
     else {state.poisoned=1;if(e==EAGAIN)e=EIO;} /* no "consumed nothing" lie */
@@ -229,13 +299,31 @@ int x9_speaker_afe_start(const int16_t *pcm,uint32_t frames,uint64_t *anchor)
         if(frames>hw.dma_bytes/4-32) {
             lck_mtx_unlock(&speaker_afe_lock);return EINVAL;
         }
-        state.played=state.submitted=state.cursor=0;
-        bzero(hw.dma,hw.dma_bytes);e=hw.sync_device(hw.context,0,hw.dma_bytes);
-        if(!e)e=copy_frames(pcm,frames);
-        if(!e)e=change(0,config[0].expected|1);
+        access_error=0;
+        /* A prepared cached journal is not proof the addresses/clock/pads
+         * still belong to us. Check before even touching the CPU DMA VA. */
+        e=verify_config(false,X9AFEGuardStart);
+        if(!e)e=unowned_routes_idle(false,X9AFEGuardStart);
         if(!e) {
-            state.anchor=mach_absolute_time();e=change(10,config[10].expected|(1u<<28));
+            state.played=state.submitted=state.cursor=0;state.anchor=0;
+            state.copy_pending=hw.dma_bytes/4;
+            bzero(hw.dma,hw.dma_bytes);e=hw.sync_device(hw.context,0,hw.dma_bytes);
+            if(e==EAGAIN)e=EIO;
+            if(!e)e=verify_config(false,X9AFEGuardStart);
+            if(!e)e=unowned_routes_idle(false,X9AFEGuardStart);
+            if(!e)state.copy_pending=0;
+        }
+        if(!e)e=copy_frames(pcm,frames,X9AFEGuardStart);
+        if(!e)e=change(0,config[0].expected|1,X9AFEGuardStart);
+        if(!e)e=verify_config(false,X9AFEGuardStart);
+        if(!e)e=unowned_routes_idle(false,X9AFEGuardStart);
+        if(!e) {
+            uint64_t enabled_at=mach_absolute_time();
+            e=change(10,config[10].expected|(1u<<28),X9AFEGuardStart);
+            if(!e)e=verify_config(false,X9AFEGuardStart);
+            if(!e)e=unowned_routes_idle(true,X9AFEGuardStart);
             if(!e) {
+                state.anchor=enabled_at;
                 state.running=1;last_poll=last_progress=state.anchor;*anchor=state.anchor;
                 thread_wakeup((event_t)&state.running);
             }
@@ -246,6 +334,8 @@ int x9_speaker_afe_start(const int16_t *pcm,uint32_t frames,uint64_t *anchor)
 }
 static int position_locked(void)
 {
+    int e=verify_config(false,X9AFEGuardPoll);if(e)return e;
+    e=unowned_routes_idle(true,X9AFEGuardPoll);if(e)return e;
     uint64_t now=mach_absolute_time(),elapsed,stalled;
     absolutetime_to_nanoseconds(now-last_poll,&elapsed);
     absolutetime_to_nanoseconds(now-last_progress,&stalled);
@@ -261,6 +351,7 @@ static int position_locked(void)
     /* Half-ring ambiguity must fail; never infer number of wraps by time. */
     if(elapsed>=(uint64_t)hw.dma_bytes/8*1000000000/48000 || stalled>=250000000)return ETIMEDOUT;
     uint32_t high=0,low=0;bool stable=false;
+    e=check_lease(X9AFEGuardPoll);if(e)return e;
     for(unsigned n=0;n<3;n++) {
         high=rd(0x46b8);low=rd(0x46bc);if(high==rd(0x46b8)){stable=true;break;}
     }
@@ -292,6 +383,7 @@ static void watchdog(void *unused,wait_result_t result)
             lck_mtx_unlock(&speaker_afe_lock);
             thread_block(THREAD_CONTINUE_NULL);continue;
         }
+        access_error=0;
         int e=position_locked();if(e && e!=EAGAIN)fault_locked(e);
         lck_mtx_unlock(&speaker_afe_lock);
         delay_for_interval(WATCHDOG_MS,1000*NSEC_PER_USEC);
@@ -300,7 +392,8 @@ static void watchdog(void *unused,wait_result_t result)
 int x9_speaker_afe_position(uint64_t *played)
 {
     if(!played)return EINVAL;
-    lck_mtx_lock(&speaker_afe_lock);int e=state.error?(int)state.error:state.running?position_locked():ENXIO;
+    lck_mtx_lock(&speaker_afe_lock);access_error=0;
+    int e=state.error?(int)state.error:state.running?position_locked():ENXIO;
     if(!e)*played=state.played;
     else if(e!=EAGAIN && state.running && !state.error)fault_locked(e);
     lck_mtx_unlock(&speaker_afe_lock);return e;
@@ -308,14 +401,15 @@ int x9_speaker_afe_position(uint64_t *played)
 int x9_speaker_afe_submit(const int16_t *pcm,uint32_t frames)
 {
     if(!pcm || !frames)return EINVAL;
-    lck_mtx_lock(&speaker_afe_lock);int e=state.error?(int)state.error:state.running?position_locked():ENXIO;
-    if(!e)e=copy_frames(pcm,frames);
+    lck_mtx_lock(&speaker_afe_lock);access_error=0;
+    int e=state.error?(int)state.error:state.running?position_locked():ENXIO;
+    if(!e)e=copy_frames(pcm,frames,X9AFEGuardCopy);
     if(e && e!=EAGAIN && state.running && !state.error)fault_locked(e);
     lck_mtx_unlock(&speaker_afe_lock);return e;
 }
 int x9_speaker_afe_stop(void)
 {
-    lck_mtx_lock(&speaker_afe_lock);int e=stop_locked();
+    lck_mtx_lock(&speaker_afe_lock);access_error=0;int e=stop_locked();
     if(e && !state.error)state.error=(uint32_t)e;
     lck_mtx_unlock(&speaker_afe_lock);return e;
 }

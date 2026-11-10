@@ -6,7 +6,8 @@
 没有自动安装 HAL。麦克风是另一套接口，不在此输出设备中虚报输入流。
 PCM ABI 仍为 v1；**board-status 和 stream-status 为 v2**，需配套本轮 `audioctl`，旧工具会拒绝
 新版结构。私有 kernel backend 回调也升级为 v2（start 增加预填输入）；不能继续注册
-旧版 start 回调。私有 AFE platform 为 v2（新增 cached `held` 回调，保留部分申请失败的资源）。
+旧版 start 回调。私有 AFE platform 为 v3（cached `held`＋真实、无副作用的 `validate`），
+**AFE status 为 v3／152B**；旧 platform 不可注册，旧版 `afe-status` 工具会拒绝。
 AFE/stream/resource 状态 selector 只返回缓存，不申请硬件资源。
 新增 `clock-status` 同样只读缓存；`clock-probe` 是 root／mode2 的一次
 **有电源、时钟和禁用 OUT4 寄存器写入**的显式事务，不是只读 probe，不能自动执行。
@@ -67,7 +68,7 @@ staging 必须单独确认、走项目 extent 写入流程；本构建器不安�
 | open type 1 | root／指定音频 daemon 的独占 writer |
 | open type 2 | mode2 的 root 控制会话；不能映射 PCM 或 start 播放，可完成失败后保留的 stop |
 | selector 0/1/2 | status / start / stop；拒绝 async、descriptor 和额外参数 |
-| selector 7/8 | cached AFE status v2 / stream lease + physical cursor status v2；只读，不做 MMIO |
+| selector 7/8 | cached AFE status v3 / stream lease + physical cursor status v2；只读，不做 MMIO |
 | selector 9/10 | cached PA status v1 / root type2 显式双 PA reg03 probe；不写 PA 值 |
 | selector 11 | cached AP resource lease status v1／64B；没有 claim/release 用户接口 |
 | selector 12/13 | cached clock status v1／216B / root type2 显式 cold register-clock＋disabled OUT4 配置／恢复 |
@@ -112,11 +113,20 @@ ADSP 正常 stop 后有意保留的 AO erratum vote 不当作活动播放 lease�
 admission 仍须重新核对。当前独立 DSP／mic／speaker owner 保守互斥；未来同一
 DSP＋AFE 播放后端必须统一一次资源 lease，不能递归申请两个独立 owner。
 
-AFE platform v2 的 `held(context)` 必须是缓存所有权谓词，不做 MMIO；部分 acquire
+AFE platform v3 的 `held(context)` 必须是缓存所有权谓词，不做 MMIO；部分 acquire
 失败仍 held 时执行 mute/release，只有物理恢复成功才撤 ticket。没有物理 lease 且
 无 AFE journal 时不调用 off-domain mute/restore；journal 尚未恢复却丢 lease、
 或 release 返回0但仍 held，均隔离并保留 ticket。所有 callback 仍须有界并处理
 部分资源，`held` 本身不替代可访问性／quiesce 证明。
+
+`validate(context)` 必须先用 AO-safe 电源／时钟证据证明域可访问，再检查同一
+pad／route 所有权与固定 DMA bus／VA／EMI／cache binding；不能 acquire、reset、
+reparent 或仅凭 cached held 返回成功。它检查物理租约，不要求 engine-owned
+OUT4／DL24 idle。prepare、start、copy、CUR poll、disable、restore 在访问 AFE／DMA
+前核对 AP owner/ticket、held 和 validate；失败（含 EAGAIN）在同一次操作锁存，
+fault cleanup 不再重试资格化／AFE访问。独立 mute／quiesce 必须自行资格化其硬件路径，
+不可读 off-domain CSR；cleanup 失败保留 journal、mapping 与 ticket。之后显式 stop
+可重新资格化以恢复，不因历史诊断永久封死 cleanup；不是自动播放重试。
 
 这仅互斥已接入的本地 AP 音频 owner，**不是 clock provider，也不是物理资源证明**。
 foreign XPU、HWV/PMACK、APLL2、pad、PA、EMI/cache 和 DMA quiesce 检查没有移除。
@@ -262,7 +272,7 @@ OPPO`mt6993-reg.h`明确DL24_CON0 bit18/7为SW_CLEAR_MEM_RAN_OUT／SW_CLEAR_BUF_
 动作位；板级及AFE引擎均拒绝继承的高位，RMW写入显式带0，绝不重放清除动作。
 AFE引擎也新增prepare final readback与restore final baseline，包含未写字段；
 non-owned route词／one-heart／domain／action变化会阻止物理release，不因dirty mask清零
-就当作恢复。私有platform v2／PCM ABI1及原verified注册门不变，当前没有真实调用者。
+就当作恢复。本节AUDIO-10时为私有platform v2；当前为v3（见下），PCM ABI1及原verified注册门不变，仍没有真实调用者。
 
 | 接口 | 内容 |
 |---|---|
@@ -402,7 +412,7 @@ wake lease 验证全电源链稳定且 DPSW req/ack bit0 均为0，不把 WFI �
 
 | 文件／入口 | 已实现 | 仍需实际板级提供者 |
 |---|---|---|
-| `x9_speaker_afe.{c,h}` | DL24/OUT4 逐字段写入/不确定/恢复 journal、32-bit I2S slots/S16、48k、CONN116/117 DL24 route；AP transition ticket、platform v2 部分失败 ownership；prefill 后 DMA start、period copy/cache、稳定 CUR、高低地址/半环歧义检查；独立低水位 watcher、mute/disable/quiesce/restore | AUDIO/VLP APLL2、pad/物理共享资源 lease、DMA bus/EMI/cache、双 PA mute、权威 DMA quiesce |
+| `x9_speaker_afe.{c,h}` | DL24/OUT4 逐字段写入/不确定/恢复 journal、32-bit I2S slots/S16、48k、CONN116/117 DL24 route；AP transition ticket、platform v3 部分失败 ownership＋fresh lease/config guard；prefill 后 DMA start、period copy/cache、稳定 CUR、高低地址/半环歧义检查；独立低水位 watcher、mute/disable/quiesce/restore | AUDIO/VLP APLL2、pad/物理共享资源 lease、DMA bus/EMI/cache、双 PA mute、权威 DMA quiesce |
 | `x9_tfa_plj110.{c,h}` | root 显式只读 reg03；PMIF-P SID3 reset/SID5 左供电快照，已开启 I²C6/共享 DMA clock 与 pads 校验、2 CSR bank/1 DMA idle、FIFO WRRD 1+2 BE、逐字段总线恢复 | 不具备双侧供电/reset/write lease；右 rail、真实 binding/profile/校准仍待确认 |
 | `x9_tfa98xx.{c,h}` | PM container total-size/CRC、双 I2C 类型（container bus=0）的地址、明确名字的两侧 profile、descriptor 边界；真实 reg03 revision 比对、AMPE=0 且读回；双侧预检白名单 register/bitfield prefix | 实际完整 revision、immutable container、per-revision 白名单、I2C6/reset/rails 互斥；Probus DSP file/patch/校准/boost 未执行 |
 
@@ -415,6 +425,27 @@ ON 清零不是全部 outstanding AXI DMA 已结束的证据，必须有真实 `
 才恢复地址／释放 lease；任何失败都保留资源。没有共享 lease 提供者时不会触碰 AFE，
 也不与麦克风 VUL1/ADDA 争寄存器。captured DT 的 OUT4 是2ch/sync0/mclk0、
 `etdm-vlp[4]=1`，不能把普通非VLP APLL2 回调充当已接通的板级资源。
+
+### AUDIO-12：启动／运行配置资格与缓存故障位置
+
+start 在清零整个 DMA 环之前复查13个 journal 字段（含完整41-bit BASE/END）、
+foreign CONN116/117 route words 与 DL24 action／domain／one-heart 位。
+清零／prefill cache sync 回调后重查；跨环第二段 memcpy 前同样重查。
+OUT4 EN之后、DL24 ON之前及之后复查对应 expected 配置，最终通过才发布
+running／anchor并唤醒 watcher。运行期 copy／CUR poll 不只检查 CUR，还复查全配置。
+这些检查是当前所有权观察，不是阻止 foreign XPU 并发写入的硬件锁。
+
+全环清零和PCM复制在写 VA 前置 `copy_pending`，sync 或其后校验失败保留，
+不能把可能可见的字节报告为“未消费”；DMA ON失败仍走安全停流。
+disable 的 DL24失败后不继续写 OUT4；restore 先核对所有 expected 字段，
+仅对 uncertain 项容许原 saved 值，支持部分prepare／部分restore且不接纳第三值。
+
+`audioctl afe-status`（selector7，无新增selector）只返回 **v3／152B**缓存：
+`lease-errno/config-errno`、首次 `guard` 阶段及 `reg/expected/actual`、累计校验次数。
+字段差分均为对应 journal mask 下的值；foreign route／禁用位显示实际拒绝值。
+`guard=none`时reg无诊断意义，`reg=0xffffffff` 的租约失败没有读取AFE寄存器。
+历史首错保留至下一次合法prepare；只读查询不会调用validate或尝试恢复。
+**平台仍无真实注册者、Ready0；此轮没有接通物理双PA、EMI/cache、DSP READY或原生HAL路由。**
 
 AFE register 时才建立 boot-lifetime watcher；空闲时睡眠，运行时每2ms检查真实 CUR。
 剩余已提交PCM低于或等于480帧（10ms），或 AP 观察/硬件进度超过剩余安全预算，
