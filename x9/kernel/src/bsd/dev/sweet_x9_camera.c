@@ -71,6 +71,7 @@ static const struct x9_camera_sensor sensors[] = {
      front_power, sizeof(front_power)/sizeof(front_power[0])}
 };
 #include "x9_camera_pipeline.inc"
+#include "x9_camera_s1.inc"
 #include "x9_camera_sensor.inc"
 #include "x9_camera_mt6993.inc"
 #include "x9_camera_resources.inc"
