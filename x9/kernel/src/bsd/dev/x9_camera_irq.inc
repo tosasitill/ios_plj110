@@ -323,7 +323,9 @@ static int cam_irq_unmask(unsigned role)
 }
 /* A first real completion can race the sensor stream-on ACK -> core flag
  * publication. Wait for that actual publication, never synthesize STREAMING.
- * stop invalidates/wakes this event BEFORE waiting for our worker pin. */
+ * stop invalidates/wakes this event BEFORE waiting for our worker pin. Only
+ * the exact actual core STOP yields ECANCELED; that is not a grant, merely
+ * selection of the private owned DONE/FBC/cache retirement route below. */
 static int cam_irq_core_ready(const struct x9_camera_camsv_irq *f)
 {
     uint64_t span,end;
@@ -331,7 +333,8 @@ static int cam_irq_core_ready(const struct x9_camera_camsv_irq *f)
     for(;;) {
         int e=0;
         lck_mtx_lock(&camera_lock);
-        if((st.flags&X9_CAMERA_FAULT)||st.generation!=f->generation||
+        if(cam_core_retiring_locked(f->generation,cam_irq.request.frame.sensor))e=ECANCELED;
+        else if((st.flags&X9_CAMERA_FAULT)||st.generation!=f->generation||
            st.sensor!=cam_irq.request.frame.sensor)e=ESTALE;
         else if(!(st.flags&X9_CAMERA_STREAMING))e=EAGAIN;
         if(e==EAGAIN&&mach_absolute_time()>=end)e=ETIMEDOUT;
@@ -339,6 +342,35 @@ static int cam_irq_core_ready(const struct x9_camera_camsv_irq *f)
         assert_wait_deadline((event_t)&st.generation,THREAD_UNINT,end);
         lck_mtx_unlock(&camera_lock);thread_block(THREAD_CONTINUE_NULL);
     }
+}
+/* IRQ mutex + slot lock held, native worker only, after actual DONE FBC
+ * acceptance. No caller-supplied consumed/drained flag or cache callback.
+ * Owner callbacks are performed separately outside spin by finish; this
+ * guard does not acquire slot/S1 locks or read RAW/IRQ history again. */
+static int cam_irq_retiring_frame_guard(const struct x9_camera_camsv_slot *slot,
+    const struct x9_camera_camsv_irq *f)
+{
+    boolean_t old;
+    int e=cam_irq_mapping();if(!e)e=cam_irq_power();
+    if(!e)e=cam_irq_wait_rwp();if(!e)e=cam_irq_config(false);if(e)return e;
+    old=cam_irq_spin_take();
+    e=cam_irq.error?cam_irq.error:cam_irq_fbc.error?cam_irq_fbc.error:cam_irq_fbc.source_error;
+    if(!e && (!slot || slot!=cam_irq.slot || slot!=cam_sv.request_slot || !cam_irq.prepared ||
+       !cam_irq.owns || !cam_irq.accepting || !cam_irq.busy || cam_irq.close_attempted ||
+       !cam_irq.sof_seen || !cam_irq_fbc.bound || !cam_irq_fbc.done_seen ||
+       !cam_irq_fbc.attempted || !cam_irq_fbc.count_accepted || cam_irq_fbc.samples!=2 ||
+       cam_irq_fbc.epoch!=cam_irq.epoch || cam_sv.epoch!=cam_irq.epoch ||
+       !(cam_irq_fbc.source_issued&CAM_STREAM_ON) || !(cam_irq_fbc.source_ack&CAM_STREAM_ON) ||
+       memcmp(&cam_irq_fbc.done,f,sizeof(*f)) ||
+       memcmp(&cam_irq_fbc.request,&slot->request,sizeof(slot->request))))e=ESTALE;
+    for(unsigned bank=0;bank<2 && !e;bank++) {
+        uint32_t control,counter;
+        e=cam_irq_power();if(!e)e=cam_irq_config(true);if(e)break;
+        control=cam_irq_rd(cam_irq.view[bank],0x540);counter=cam_irq_rd(cam_irq.view[bank],0x544);
+        e=cam_irq_fbc_note_locked(bank,control,counter);
+        if(!e && counter!=cam_irq_fbc.target[bank])e=ESTALE;
+    }
+    cam_irq_spin_drop(old);return e;
 }
 static void __attribute__((noreturn)) cam_irq_worker(void *arg,wait_result_t result)
 {
@@ -374,9 +406,14 @@ static void __attribute__((noreturn)) cam_irq_worker(void *arg,wait_result_t res
                 if(!e)e=EAGAIN;
             } else {
                 e=ev.frame.err_status||(ev.frame.cq_status&~1u)?EIO:cam_irq_core_ready(&ev.frame);
+                if(e==ECANCELED)e=0; /* exact core STOP; qualification still required below */
                 if(!e)e=cam_irq_power();
                 if(!e)e=cam_irq_fbc_done_locked(&ev);
-                if(!e)e=x9_camera_camsv_finish(cam_irq.slot,&ev.frame);
+                /* STOP can invalidate after core_ready/FBC acceptance too.
+                 * Recheck current-or-exact-canceled under camera_lock inside
+                 * finish, not only the earlier ECANCELED branch. Public
+                 * callers can never opt in to this private worker route. */
+                if(!e)e=cam_camsv_finish(cam_irq.slot,&ev.frame,true);
             }
             if(e==EAGAIN&&cam_irq.slot->state==X9_CAMSV_ARMED)e=cam_irq_unmask(X9_CAM_IRQ_HYBRID);
             else if(cam_irq.slot->state==X9_CAMSV_RETIRED) {

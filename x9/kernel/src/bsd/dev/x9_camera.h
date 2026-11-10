@@ -404,6 +404,12 @@ int x9_camera_camsv_arm(struct x9_camera_camsv_slot *,
  * state, not errno alone. ESTALE may be an obsolete IRQ/generation. A retained
  * slot requires the owner's fault/drain path, not retry or dependency release. */
 int x9_camera_camsv_finish(struct x9_camera_camsv_slot *, const struct x9_camera_camsv_irq *);
+/* The native IRQ worker has a separate private core-STOP completion path.
+ * Only same sensor, original attempted capture/source, exactly generation+1
+ * invalidation and the actual bound SOF/DONE/FBC/native lease permit cache
+ * CPU retirement without pixel delivery. This public API still rejects an
+ * invalidated generation before owner/cache callbacks. Neither path releases
+ * S1/lease/suppliers or proves full AXI/SMI/SMMU/EMI retirement. */
 /* Thread-context standalone native controller, control mutex acquired.
  * Call AFTER the actual owned sensor OFF/FF and BEFORE capture(off) returns,
  * sensor reset/isolation or power close. In-TU callbacks use the locked helper.

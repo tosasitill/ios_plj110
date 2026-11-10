@@ -17,6 +17,8 @@ static int cam_camsv_retain(struct x9_camera_camsv_slot *slot,int e)
     slot->state=X9_CAMSV_RETAINED;slot->last_errno=e;
     return e;
 }
+static int cam_irq_retiring_frame_guard(const struct x9_camera_camsv_slot *,
+    const struct x9_camera_camsv_irq *);
 
 int x9_camera_camsv_arm(struct x9_camera_camsv_slot *slot,
     const struct x9_camera_camsv_request *request,const struct x9_camera_camsv_dma *dma)
@@ -64,11 +66,12 @@ int x9_camera_camsv_arm(struct x9_camera_camsv_slot *slot,
     lck_mtx_unlock(&camera_camsv_lock);return e;
 }
 
-int x9_camera_camsv_finish(struct x9_camera_camsv_slot *slot,
-    const struct x9_camera_camsv_irq *snapshot)
+static int cam_camsv_finish(struct x9_camera_camsv_slot *slot,
+    const struct x9_camera_camsv_irq *snapshot,bool native_worker)
 {
     if(!slot || !snapshot)return EINVAL;
     const struct x9_camera_camsv_irq irq=*snapshot;
+    bool drop=false;
     lck_mtx_lock(&camera_camsv_lock);int e=0;
     if(slot->state==X9_CAMSV_RETAINED)e=slot->last_errno?slot->last_errno:EIO;
     else if(slot->state!=X9_CAMSV_ARMED)e=ESTALE;
@@ -77,14 +80,16 @@ int x9_camera_camsv_finish(struct x9_camera_camsv_slot *slot,
         irq.capture_id!=slot->request.frame.capture_id)e=ESTALE;
     if(e)goto out;
 
-    /* Reject invalidated sessions BEFORE any lease/cache callback. The real
-     * provider must pin this worker across stop; checking generation is not
-     * itself a hardware drain or protection against unmapping by the owner. */
+    /* Standalone finish rejects invalidated sessions before any lease/cache
+     * callback. The native worker alone may qualify the actual core STOP's
+     * old owned DONE below, with no delivery. Generation is not a DMA grant;
+     * the real provider must still pin this worker and its map across stop. */
     lck_mtx_lock(&camera_lock);
     bool current=(st.flags&X9_CAMERA_STREAMING) && !(st.flags&X9_CAMERA_FAULT) &&
         st.generation==irq.generation && st.sensor==slot->request.frame.sensor;
+    drop=native_worker && cam_core_retiring_locked(irq.generation,slot->request.frame.sensor);
     lck_mtx_unlock(&camera_lock);
-    if(!current){e=ESTALE;goto out;}
+    if(!current && !drop){e=ESTALE;goto out;}
 
     /* Treat any central error or any CQ status other than setting-done as
      * uncertain. This includes known code/VB/DMA/OTF errors and unknown bits.
@@ -116,6 +121,13 @@ int x9_camera_camsv_finish(struct x9_camera_camsv_slot *slot,
     if(!irq.time || irq.time>mach_absolute_time()) {
         e=cam_camsv_retain(slot,EINVAL);goto out;
     }
+    /* A generation mismatch alone never grants cache/DMA retirement. Only
+     * the real native worker's original SOF/DONE/FBC receipt can use this
+     * private canceled-frame route. Standalone finish stays strictly current. */
+    if(drop) {
+        e=cam_irq_retiring_frame_guard(slot,&irq);
+        if(e){e=cam_camsv_retain(slot,e);goto out;}
+    }
     /* Retain by default before external callbacks: no rearm or replay can
      * cross a partial/uncertain cache transition. Never hold camera_lock
      * while invoking owner callbacks, allowing capture(off) to drain. */
@@ -125,7 +137,7 @@ int x9_camera_camsv_finish(struct x9_camera_camsv_slot *slot,
     if(!e)e=slot->dma.check(slot->dma.context,slot->dma.lease,&slot->request);
     if(!e) {
         struct x9_camera_completed_frame f=slot->request.frame;f.time=irq.time;
-        e=x9_camera_deliver(&f);
+        e=drop?ESTALE:x9_camera_deliver(&f); /* STOP never publishes canceled pixels */
         /* Successful completion, CPU backpressure or concurrent stop all
          * retire this source. Never replay or hold the hardware slot for VM. */
         if(!e || e==EBUSY || e==ESTALE) {
@@ -138,6 +150,14 @@ int x9_camera_camsv_finish(struct x9_camera_camsv_slot *slot,
     if(e && slot->state==X9_CAMSV_RETAINED)cam_camsv_retain(slot,e);
     slot->last_errno=e;
 out:
+    if(drop)printf("X9 CAMERA STOP DONE: generation=%llu capture_id=%llu seq=%x "
+        "core_cancel=%u state=%u errno=%d (no delivery; S1/lease retained, NOT AXI/map drain)\n",
+        irq.generation,irq.capture_id,irq.inner_sequence,drop,slot->state,e);
     if(slot->state!=X9_CAMSV_RETAINED)slot->last_errno=e;
     lck_mtx_unlock(&camera_camsv_lock);return e;
+}
+int x9_camera_camsv_finish(struct x9_camera_camsv_slot *slot,
+    const struct x9_camera_camsv_irq *snapshot)
+{
+    return cam_camsv_finish(slot,snapshot,false);
 }

@@ -50,10 +50,20 @@ _Static_assert(sizeof(struct x9_camera_completed_frame)==64,"kernel completion r
 /* Journal attempted callbacks BEFORE invoking them: an error may follow a
  * partial state change. Kept after failed drain/restore; no retry on close. */
 static struct {
-    bool power, capture, stream, latched;
+    bool power, capture, stream, latched, stopping;
     uint64_t generation;
     int last_errno;
 } session;
+/* camera_lock held. Only the actual core STOP's invalidated generation may
+ * finish a privately qualified owned DONE without delivering it. This is a
+ * cancellation journal, NEVER native authority, a DMA receipt or a lease.
+ * Faulted/partial startup, another sensor and arbitrary old frames stay out. */
+static bool cam_core_retiring_locked(uint64_t generation,uint32_t which)
+{
+    return session.stopping && !session.latched && session.power && session.capture && session.stream &&
+        !(st.flags&(X9_CAMERA_STREAMING|X9_CAMERA_FAULT)) && st.sensor==which &&
+        generation==session.generation && generation!=UINT64_MAX && st.generation==generation+1;
+}
 static const struct x9_camera_power_step main_power[] = {
     {X9_CAM_MCLK,24,0}, {X9_CAM_RESET,0,1000},
     {X9_CAM_AVDD,2804000,3000}, {X9_CAM_AVDD1,1804000,3000},
@@ -136,6 +146,7 @@ static int stop(void)
         st.flags|=X9_CAMERA_FAULT|X9_CAMERA_RETAINED;st.last_errno=EOVERFLOW;
         return EOVERFLOW; /* cannot invalidate in-flight generation by wrapping */
     }
+    session.stopping=true; /* before invalidating delivery, not a drained claim */
     st.generation++; st.flags&=~X9_CAMERA_STREAMING; frame_bytes=0; consumed=st.frames;
     thread_wakeup((event_t)&st.generation); /* queued first-frame IRQ worker */
     wakeup(&frame_bytes);
@@ -175,6 +186,7 @@ static int stop(void)
         if(!e && !a && !b)e=copy;
     }
     if(e||a||b){st.flags|=X9_CAMERA_FAULT;st.last_errno=e?e:a?a:b;}
+    else session.stopping=false;
     return e?e:a?a:b;
 }
 /* Both control/frame mutexes held. No MMIO on cached receipt reads or close

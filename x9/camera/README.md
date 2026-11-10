@@ -51,6 +51,16 @@ worker 的 fatal read、短记录、非法/重复帧、malloc、曝光命令失�
 
 用户态共享 `camera_stop.h` 先取实际 status，再发唯一 STOP，严格核对版本、sensor、前后 generation、状态/attempted bits、reader 数、reserved 与 disposition；不对 ENOTTY/EINTR/ESTALE/EALREADY 或坏回执自动重发，也不 fallback 到 close0。已显式 STOP 的 driver close 只验证成功回执仍匹配当前已退休 scope，或返回原停机错误，不再次调用 stop/递增 generation；CPU staging 只有实际无 scope/readers/retained/latched 才释放，S1 export backing 不动。`cameractl back/front` 的所有退出路径都消费显式 STOP 并传播清理错误；只读/mode3诊断不发 STOP，close 错误仍传播。`GET_STOP`/status 打印的是历史缓存，初始 version0 表示没有回执，不发 MMIO、不赋予当前权限。**此为真实控制调用与源码编译结果，仍没有 native capture 注册/SID80 attach/物理帧；full AXI/SMI/SMMU/EMI 退休和完整采集后端继续实现。**
 
+### STOP 不发布旧帧，但可退休真实 owned DONE
+
+core STOP 在下层回调前递增 generation、清除 STREAMING，阻止旧 RAW 交给 iOS。原 worker/公开 finish 只按该 generation 拒绝，会把已经排队、实际 SOF/DONE/FBC 完成的自有请求留在 DEVICE/RETAINED，导致后续局部停机所需的 CPU RETIRED 资格无法成立。现在仅 native IRQ worker 有私有 current-or-canceled finish；公开 `x9_camera_camsv_finish` 仍在 owner/cache 回调前拒绝过期 generation。
+
+私有取消分支要求实际 core STOP journal、同一 sensor、原 attempted power/capture/stream 仍保持、没有 latched/FAULT、core generation 恰好为原 generation+1。worker 在 finish 的 camera_lock 内重新判断，覆盖 STOP 发生在首次 core 检查前、检查后/FBC 验收期间及 finish 准入后的不同窗口；`ECANCELED` 只表示可继续验证，不是退休成功。若 finish 准入后才发生 STOP，原 delivery 的 generation 检查仍拒绝交付，再按原完成路径退休。
+
+取消帧还必须有原 native lease/request、真实 SOF/DONE/tag/group/sequence、已验收两次的双 bank FBC 原单 credit WCNT+1/CNT0、实际 GIC mapping/power/route/priority 和无 IRQ/FBC/source 错误。spin 内新采样仅重核普通 FBC control/count，不重读或清除 IRQ 历史。资格成立后依次执行原 owner check→真实逐页 CPU IVAC→owner check，**不调用 `x9_camera_deliver`**，再 owner check→S1 RAW_IDLE→slot RETIRED。只有实际 slot RETIRED 才允许 worker 将该丢弃的 ESTALE 归为局部完成并 mask 自己的 GIC；其他 stale、缺 SOF/DONE、非法计数、启动 FAULT 或回调失败仍锁存并保留依赖。
+
+`X9 CAMERA STOP DONE` 日志记录 generation/capture_id/sequence/core_cancel/slot state/errno。这是源码修复与真实 kernel 单位编译结果，**无 native caller 或运行证明；不等于 full AXI/SMI/SMMU/EMI drain，不取消 credit、不 unmap、不撤供电，也不放行 rearm**。后续原 consumer-stop/spent 检查必须继续逐项通过，完整采集后端仍未完成。
+
 ### 锁外回调绑定实际配置与下一完成帧
 
 worker 不再持 output mutex 渲染或调用 `PixelBufferHandler`。每次输出取得不可变 config、`Block_copy` 的真实 handler、配置 revision、run epoch 和对应 shutter ticket。锁外从原图像池分配及渲染，最后短锁 admission 只接受仍匹配的运行/配置/handler/request；渲染期间配置被改掉则丢弃旧输出，不调用旧 handler。handler 输入必须是实际 libclosure concrete block class，stack block 在注册时复制，不以普通 CF 值充当 callable。config/handler/enable 多输出更新先完整准备，再一次受锁提交；分配或参数错误不留下部分更新。
