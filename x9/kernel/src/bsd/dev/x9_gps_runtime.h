@@ -13,11 +13,21 @@ enum x9_gps_physical_stage {
  X9_GPS_PHYSICAL_POS_SPI, X9_GPS_PHYSICAL_POS_AFE,
  X9_GPS_PHYSICAL_POS_PLL, X9_GPS_PHYSICAL_POS_RADIO,
  X9_GPS_PHYSICAL_POS_LOW_POWER, X9_GPS_PHYSICAL_POS_CLOCK,
- X9_GPS_PHYSICAL_BUS, X9_GPS_PHYSICAL_EMI_CPU
+ X9_GPS_PHYSICAL_BUS, X9_GPS_PHYSICAL_EMI_CPU,
+ X9_GPS_PHYSICAL_SECURE_REMAP
+};
+/* A selected, independently qualified running secure ABI, NOT a DT flag.
+ * 0415's BL name does not prove it is callable from a nonsecure kernel.
+ * The supplier must establish that callability and retain immutable SR/AID
+ * configuration + exclusive selector access. The saved tee_a only proves
+ * this implementation exists; it cannot select the current slot's ABI. */
+enum x9_gps_secure_profile {
+ X9_GPS_SECURE_UNQUALIFIED=0,
+ X9_GPS_SECURE_0415_4K_V1=1
 };
 struct x9_gps_afe_smc_result { uint64_t a[4]; };
 struct x9_gps_connv2_ops {
- uint32_t version; /* 1..5; descriptor/context remain live until reboot. */
+ uint32_t version; /* 1..6; descriptor/context remain live until reboot. */
  void *context;
  /* generation in ALL physical callbacks is hardware_generation, not the
   * application/output generation passed to backend.set_state. Successful
@@ -119,9 +129,9 @@ struct x9_gps_connv2_ops {
   * No default image is embedded. Wrong/missing image cannot arm v4/v5. */
  const uint8_t *pos_cmdbt;
  uint32_t pos_cmdbt_bytes;
- /* Version-5 ONLY; v4 ends at120B. Native op14 SMC is executed once by
+ /* Version-5/6 tail; v4 ends at120B. Native op14 SMC is executed once by
   * the worker AFTER SPI, BEFORE this verifier and PLL. pos_afe is unused
-  * for v5 and need not be provided; v1..v4 keep their original behavior.
+  * for v5/6 and need not be provided; v1..v4 keep their original behavior.
   * acquire/pos_validate must additionally qualify this actual running ATF
   * ABI and EXCLUSIVE secure patch access (not merely FDT/Android READY).
   * Verify these raw return semantics AND actual completed AFE patch using
@@ -131,8 +141,20 @@ struct x9_gps_connv2_ops {
   * fail and retain the lease in quarantine. Result lifetime is this call. */
  int (*pos_afe_verify)(void *, const struct x9_gps_handoff *, uint64_t,
      uint64_t, const struct x9_gps_afe_smc_result *);
+ /* Version-6 tail. v5 ends at128B and cannot select a secure ABI: the
+  * old implicit c200050b/op2 is not supported by the saved PLJ110 ATF.
+  * No probing/fallback among SIP IDs. Only an actually qualified running
+  * 0415/op2 ABI may use the native read implementation and op70 checks.
+  * acquire/validate/pos_validate must retain that ABI, long-lived AP/BGF
+  * authority, AID selector exclusion, and actual secure remap ownership.
+  * 0415 READ returns 4KiB page bases (EA is not an inclusive byte bound).
+  * The board's op14 ABI must also match the decoded 10167060[4] condition
+  * and 40041010[7:4] patch. Its source must be safely measured by the real
+  * verifier; do not map a secure-only efuse from this enum alone.
+  * secure_reserved must be zero. No profile arms a default supplier. */
+ uint32_t secure_profile, secure_reserved;
 };
-/* Native v5 additionally requires SMPU_LAYOUT_VERIFIED. Its existing
+/* Native v6 additionally requires SMPU_LAYOUT_VERIFIED. Its existing
  * acquire/validate/pos_validate must hold the actual SR/AID READ ABI and
  * immutable secure MPU configuration, as well as AP/BGF access authority.
  * The worker reads NS CPU AID241 policy before mapping HIF RAM and on every
@@ -140,7 +162,9 @@ struct x9_gps_connv2_ops {
  * data or AP permission cannot authorize the secure route or BGF DMA.
  * No secure SET/CLEAR or duplicate conninfra op70 is issued here; the
  * original supplier still executes/proves the actual secure remap route.
- * v1..v4 descriptor prefixes/behavior and the 128B v5 size are unchanged. */
+ * v1..v4 descriptor prefixes/behavior and the 128B v5 size are unchanged;
+ * v6 is136B. Version5 registration now returns
+ * ENOTSUP before arming hardware rather than guessing a READ service. */
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -151,7 +175,7 @@ int x9_gps_register_connv2(const struct x9_gps_connv2_ops *);
 /* Callback-only bounded outbox. Called on the sole physical worker, never
  * from QRTR/set_state/IRQ or a separate supplier thread. v1..v4 retain raw
  * at-most4096B/two entries/channel and require supplier slot/flow admission.
- * Native v5 instead validates/reserves ONE complete MCUDL xlink envelope,
+ * Native v6 instead validates/reserves ONE complete MCUDL xlink envelope,
  * payload<=1800, seq00 NORMAL/20 URGENT (agent a3 only). Its real local
  * slots have64 entries/10KiB per channel, byte-credit/window accounting,
  * near-full admission and critical reserves. No provider-made7e or76.

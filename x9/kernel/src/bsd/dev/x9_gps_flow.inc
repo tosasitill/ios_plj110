@@ -12,7 +12,7 @@ static void gps_flow_put(uint8_t *p,uint64_t v,unsigned n)
 static int gps_flow_guard(void)
 {
  struct gps_native_flow *f=&gps_rt.flow;
- if(current_thread()!=gps_rt.worker || gps_rt.ops.version!=5 || !gps_rt.lease)return EPERM;
+ if(current_thread()!=gps_rt.worker || (gps_rt.ops.version<5 || gps_rt.ops.version>6) || !gps_rt.lease)return EPERM;
  if(f->error)return f->error;
  if(!f->initialized || !gps_rt.hif.prepared)return ENXIO;
  struct x9_gps_status s;x9_gps_copy_status(&s);

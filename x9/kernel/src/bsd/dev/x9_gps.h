@@ -74,6 +74,12 @@ struct x9_gps_status {
  uint64_t flow_published, flow_remote_received, flow_processed, flow_discarded;
  uint64_t flow_ack_total, flow_ack_completions, flow_reset_serial, flow_completed_reset;
  int32_t flow_errno;
+ /* Selected secure ABI/remap observation under the real retained lease.
+  * Not permission to call an SMC, BGF authority, ROM or GPS readiness. */
+ uint32_t emi_cpu_abi, secure_remap_started, secure_remap_valid;
+ uint32_t secure_remap_address;
+ uint64_t secure_remap_checks;
+ int32_t secure_remap_errno;
 };
 struct x9_gps_nmea {
  uint64_t sequence, generation, host_time;

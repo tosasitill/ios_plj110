@@ -21,7 +21,9 @@ _Static_assert(__builtin_offsetof(struct x9_gps_connv2_ops,pos_radio)==96,
     "connv2 version-3 descriptor prefix");
 _Static_assert(__builtin_offsetof(struct x9_gps_connv2_ops,pos_afe_verify)==120,
     "connv2 version-4 descriptor prefix");
-_Static_assert(sizeof(struct x9_gps_connv2_ops)==128,"connv2 version-5 descriptor");
+_Static_assert(__builtin_offsetof(struct x9_gps_connv2_ops,secure_profile)==128,
+    "connv2 version-5 descriptor prefix");
+_Static_assert(sizeof(struct x9_gps_connv2_ops)==136,"connv2 version-6 descriptor");
 _Static_assert(sizeof(struct x9_gps_handoff)==X9_GPS_HANDOFF_BYTES,
     "GPS LK handoff remains 64B");
 struct gps_mcu_field { uint32_t physical, mask, shift; };
@@ -157,6 +159,12 @@ static struct {
   uint64_t checks;
   int error;
  } emi_cpu;
+ struct {
+  uint32_t baseline[11], sample[11], address;
+  unsigned started,valid;
+  uint64_t checks;
+  int error;
+ } secure_remap;
  uint8_t cmdbt[4096]; /* immutable registered snapshot, never on stack */
  thread_t worker;
  unsigned in_callback, out_head[2], out_count[2];
@@ -187,13 +195,20 @@ static int gps_mcu_supplier_guard(void)
 }
 #include "x9_gps_clock.inc"
 #include "x9_gps_bus.inc"
-static int gps_mcu_guard(void)
+static int gps_secure_remap_validate(void);
+static int gps_mcu_platform_guard(void)
 {
  int e=gps_mcu_supplier_guard();if(e)return e;
  if(gps_rt.bus.started) {e=gps_bus_validate();if(e)return e;}
  /* After the native selector transaction, every MCU/POS/HIF access also
   * needs its live clock effect. Never repair a lost vote or selector. */
  return gps_rt.clock.complete ? gps_clock_check() : 0;
+}
+static int gps_mcu_guard(void)
+{
+ int e=gps_mcu_platform_guard();if(e)return e;
+ if(gps_rt.secure_remap.error)return gps_rt.secure_remap.error;
+ return gps_rt.secure_remap.valid ? gps_secure_remap_validate() : 0;
 }
 #include "x9_gps_emi.inc"
 static volatile uint32_t *gps_mcu_pointer(uint32_t physical)
@@ -263,6 +278,7 @@ static int gps_mcu_raw_expect(uint32_t address, uint32_t mask, uint32_t value)
  uint32_t v; int e=gps_mcu_read(address,&v); if (e) return e;
  return (v&mask)==value ? 0 : EIO;
 }
+#include "x9_gps_secure_remap.inc"
 static int gps_mcu_map(void)
 {
  int e=gps_mcu_guard(); if (e) return e;
@@ -312,7 +328,9 @@ static int gps_mcu_map(void)
  }
  /* Device attributes throughout; no cached aliases of shared HIF RAM.
   * The 48MiB advertised total is deliberately not mapped as one reserve. */
- if(gps_rt.ops.version==5) {
+ if(gps_rt.ops.version>=5) {
+  gps_runtime_stage(X9_GPS_PHYSICAL_SECURE_REMAP,0);
+  e=gps_secure_remap_take();if(e)return e;
   gps_runtime_stage(X9_GPS_PHYSICAL_EMI_CPU,0);
   e=gps_emi_cpu_take();if(e)return e;
  }
@@ -384,7 +402,10 @@ static int gps_mcu_hold_reset(void)
 static int gps_mcu_remap(void)
 {
  MCU_TRY(gps_mcu_expect(F_reset,0));
- MCU_TRY(gps_mcu_set(F_emi,gps_rt.layout.reserve_base>>16));
+ /* v6's secure op70 owns HOST+8354. Do not overwrite a mismatch and
+  * manufacture a remap qualification; v1..v4 retain their vendor path. */
+ if(gps_rt.ops.version<5)
+  MCU_TRY(gps_mcu_set(F_emi,gps_rt.layout.reserve_base>>16));
  MCU_TRY(gps_mcu_expect(F_emi,gps_rt.layout.reserve_base>>16));
  MCU_TRY(gps_mcu_write(0x40c16014,0x02200000));
  MCU_TRY(gps_mcu_raw_expect(0x40c16014,UINT32_MAX,0x02200000));
@@ -452,7 +473,7 @@ static int gps_runtime_owned(void *ctx, uint64_t generation, int reset)
  MCU_TRY(gps_mcu_expect(F_version,GPS_MCU_MT6993_VERSION));
  MCU_TRY(gps_mcu_raw_expect(0x40c12010,UINT32_MAX,0x03040000));
  MCU_TRY(gps_mcu_expect(F_osc_state,1)); MCU_TRY(gps_mcu_expect(F_power_state,2));
- if(gps_rt.ops.version==5)MCU_TRY(gps_emi_cpu_validate());
+ if(gps_rt.ops.version>=5)MCU_TRY(gps_emi_cpu_validate());
  /* The lease holds resources across this check and subsequent HIF accesses. */
  if ((hif_read(gps_rt.ccif,4)|hif_read(gps_rt.ccif,0x10))&~0xffu) return EIO;
  return 0;
@@ -461,7 +482,7 @@ static int gps_runtime_owned(void *ctx, uint64_t generation, int reset)
 static int gps_runtime_control(void *ctx,unsigned ch,uint8_t type,
     const uint8_t *p,unsigned n,uint64_t now)
 {
- if(gps_rt.ops.version==5 && ch==X9_GPS_HIF_NORMAL &&
+ if(gps_rt.ops.version>=5 && ch==X9_GPS_HIF_NORMAL &&
      (type==0x35 || type==0x36)) {
   int e=gps_flow_control(type,p,n);gps_flow_journal(e);return e;
  }
@@ -530,7 +551,7 @@ int x9_gps_runtime_queue(uint64_t generation,unsigned ch,const void *p,unsigned 
  if (!p || !n || n>4096 || ch<1 || ch>2) return EINVAL;
  if (current_thread()!=gps_rt.worker || !gps_rt.in_callback) return EPERM;
  if (generation!=gps_rt.generation || gps_rt.hif.fault) return ESTALE;
- if(gps_rt.ops.version==5) {
+ if(gps_rt.ops.version>=5) {
   int e=gps_flow_queue(ch-1,p,n,0);gps_flow_journal(0);return e;
  }
  unsigned c=ch-1; if (gps_rt.out_count[c]==2) return ENOBUFS;
@@ -543,7 +564,7 @@ static int gps_runtime_drain(void)
 {
  int ack=x9_gps_hif_management_result(&gps_rt.hif,1);
  if (ack && ack!=EAGAIN) return ack;
- if(gps_rt.ops.version==5) {
+ if(gps_rt.ops.version>=5) {
   int e=gps_flow_drain(ack,mach_absolute_time());gps_flow_journal(e);return e;
  }
  for (unsigned c=0;c<2;c++) {
@@ -611,7 +632,7 @@ static int gps_runtime_bringup(void)
  /* Prepare host RAM BEFORE releasing reset. Never clear MCU-owned RAM. */
  MCU_TRY(x9_gps_hif_prepare(&gps_rt.hif,&ops,gps_rt.ap,gps_rt.mcu,
      gps_rt.ccif,gps_rt.generation));
- if(gps_rt.ops.version==5)MCU_TRY(gps_flow_init());
+ if(gps_rt.ops.version>=5)MCU_TRY(gps_flow_init());
  gps_runtime_stage(X9_GPS_PHYSICAL_PLL,0); MCU_TRY(gps_mcu_pll());
  gps_runtime_stage(X9_GPS_PHYSICAL_IDLE,0); MCU_TRY(gps_mcu_boot());
  gps_runtime_stage(X9_GPS_PHYSICAL_HIF,0);
@@ -641,7 +662,7 @@ static void gps_runtime_worker(void *unused, wait_result_t result)
  gps_rt.ops=gps_rt.provider;
  lck_mtx_unlock(&gps_runtime_lock);
  int e=gps_runtime_bringup();
- if(gps_rt.ops.version==5)gps_flow_journal(e);
+ if(gps_rt.ops.version>=5)gps_flow_journal(e);
  /* Never auto-retry, clear descriptors, release power, or unmap uncertain
   * DMA. Even a pre-HIF partial power failure retains the supplier's lease. */
  gps_runtime_stage(X9_GPS_PHYSICAL_QUARANTINE,e);
@@ -661,21 +682,26 @@ static void gps_runtime_start(void)
 }
 int x9_gps_register_connv2(const struct x9_gps_connv2_ops *ops)
 {
- if (!ops || ops->version<1 || ops->version>5 || !ops->acquire || !ops->validate ||
+ /* v5 has no field identifying the running SR/AID ABI. Never silently
+  * send its source-only 050b READ or fall back to a bootloader/HYP ID. */
+ if(ops && ops->version==5)return ENOTSUP;
+ if(ops && ops->version==6 && (ops->secure_reserved ||
+     ops->secure_profile!=X9_GPS_SECURE_0415_4K_V1))return ENOTSUP;
+ if (!ops || ops->version<1 || ops->version>6 || !ops->acquire || !ops->validate ||
      !ops->provision || !ops->control || !ops->mnl || !ops->other_ccif) return EINVAL;
  if(ops->version>=2) {
   if(ops->pos_clock_schematic>3 || !ops->pos_validate || !ops->pos_finalize)return EINVAL;
   struct x9_gps_handoff layout;int e=x9_gps_copy_handoff(&layout);if(e)return e;
   unsigned flags=X9_GPS_POWER_LAYOUT_VERIFIED|X9_GPS_POS_LAYOUT_VERIFIED;
   if(ops->version>=3) {
-   if(ops->version==5 ? !ops->pos_afe_verify : !ops->pos_afe)return EINVAL;
+   if(ops->version>=5 ? !ops->pos_afe_verify : !ops->pos_afe)return EINVAL;
    flags|=X9_GPS_RF_LAYOUT_VERIFIED;
   }
   if(ops->version>=4) {
    if(!ops->pos_radio || !ops->pos_cmdbt || ops->pos_cmdbt_bytes!=4096)return EINVAL;
    flags|=X9_GPS_LP_LAYOUT_VERIFIED;
   }
-  if(ops->version==5)flags|=X9_GPS_SMPU_LAYOUT_VERIFIED;
+  if(ops->version>=5)flags|=X9_GPS_SMPU_LAYOUT_VERIFIED;
   if((layout.flags&flags)!=flags)return ENXIO;
  }
  lck_mtx_lock(&gps_runtime_lock);
@@ -688,8 +714,9 @@ int x9_gps_register_connv2(const struct x9_gps_connv2_ops *ops)
   if(!e)gps_rt.pos_cmdbt_valid=1;
  }
  if (!e) {
-  /* Read ONLY declared prefixes: v1=64, v2=88, v3=96, v4=120, v5=128. */
-  size_t n=ops->version==5 ? sizeof(*ops) : ops->version==4 ?
+  /* Read ONLY declared prefixes: v1=64, v2=88, v3=96, v4=120, v5=128, v6=136. */
+  size_t n=ops->version==6 ? sizeof(*ops) : ops->version==5 ?
+      __builtin_offsetof(struct x9_gps_connv2_ops,secure_profile) : ops->version==4 ?
       __builtin_offsetof(struct x9_gps_connv2_ops,pos_afe_verify) : ops->version==3 ?
       __builtin_offsetof(struct x9_gps_connv2_ops,pos_radio) : ops->version==2 ?
       __builtin_offsetof(struct x9_gps_connv2_ops,pos_afe) :

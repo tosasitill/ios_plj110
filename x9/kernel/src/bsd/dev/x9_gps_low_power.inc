@@ -16,7 +16,7 @@ static int gps_pos_cmdbt_identity(void)
 }
 static int gps_pos_lp_guard(void)
 {
- if((gps_rt.ops.version<4 || gps_rt.ops.version>5) || !gps_rt.ops.pos_radio || !gps_rt.pos_cmdbt_valid ||
+ if((gps_rt.ops.version<4 || gps_rt.ops.version>6) || !gps_rt.ops.pos_radio || !gps_rt.pos_cmdbt_valid ||
     !(gps_rt.layout.flags&X9_GPS_LP_LAYOUT_VERIFIED))return ENXIO;
  MCU_TRY(gps_pos_rf_guard());
  /* TOP wake is 1a0, NOT the v062 GPS wake at1ac. Neither is an ACK.

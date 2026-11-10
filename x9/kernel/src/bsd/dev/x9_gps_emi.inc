@@ -1,22 +1,21 @@
-/* Current NSMPU SR/AID READ, not legacy SA<<addr_align + dram_start/APC.
- * Geometry is LK-qualified separately. memory/mediatek/mtk-emi-mpu-test-v2.c
- * returns absolute u64 SA/EA and two-bit AID permissions using c200050b,
- * op2, type SA0/EA1/ENABLE3/AID4. smpu.c identifies NS CPU as AID241.
- * The legacy copy of the test uses a different node/property spelling;
- * do not use its mt6983 node as PLJ110 runtime evidence.
- *
- * Called AFTER the real v5 supplier acquired secure MPU/remap authority,
- * BEFORE host HIF mappings, and for EVERY HIF ownership check. The supplier
- * must hold this running ABI, immutable whole-table configuration and BGF
- * authority. These reads supplement, never replace that retained lease.
- * No region allocation, permission SET/CLEAR, op70, MMIO MPU dump/clear,
- * firmware ACK, backend registration or fabricated readiness is performed.
+/* Selected PLJ110 ATF SR/AID READ, not the source-only 050b/op2 ABI.
+ * Saved tee_a dispatcher78680 ->43e3c: c2000415/op2 ->43a64. Only types
+ * SA0/EA1/ENABLE3/AID4 below are used. SA/EA43978 return 80000000 +
+ * (u32 page<<12); EA is the LAST PAGE BASE, not the inclusive end byte.
+ * AID439b8 selects 32 AIDs via secure 1105d9bc and returns packed2bit;
+ * this has a selector side effect even though permissions are not written.
+ * Supplier must exclude all other selector users across each secure call.
+ * The BL name is not proof of nonsecure kernel callability. The supplier
+ * must independently qualify the actual running secure ABI BEFORE arming
+ * version6; neither saved slotA nor current FDT selects it automatically.
+ * No SMC probing/fallback, SET/CLEAR, violation dump/ACK or op70 is issued.
  */
 #define GPS_EMI_CPU_AID 241u
 #define GPS_EMI_CPU_SR 47u
 static int gps_emi_cpu_epoch(void)
 {
- if(current_thread()!=gps_rt.worker || gps_rt.ops.version!=5 || !gps_rt.lease)return EPERM;
+ if(current_thread()!=gps_rt.worker || gps_rt.ops.version!=6 ||
+     gps_rt.ops.secure_profile!=X9_GPS_SECURE_0415_4K_V1 || !gps_rt.lease)return EPERM;
  struct x9_gps_status s;x9_gps_copy_status(&s);
  return s.hardware_generation!=gps_rt.generation || s.fault ? ESTALE : 0;
 }
@@ -32,6 +31,7 @@ static void gps_emi_cpu_journal(int error)
  if(error && !gps_rt.emi_cpu.error)gps_rt.emi_cpu.error=error;
  if(error)gps_rt.emi_cpu.valid=0;
  lck_mtx_lock(&gps_lock);
+ st.emi_cpu_abi=gps_rt.ops.secure_profile;
  st.emi_cpu_started=gps_rt.emi_cpu.started;
  st.emi_cpu_valid=gps_rt.emi_cpu.valid;
  st.emi_cpu_region=gps_rt.emi_cpu.region;
@@ -49,7 +49,7 @@ static int gps_emi_cpu_read(unsigned type,unsigned region,uint64_t *value)
   * here: do not repeat hundreds of PMIF/clock snapshots for one table or
   * recurse through HIF ownership. No HIF effect occurs until final guard. */
  int e=gps_emi_cpu_epoch();if(e)return e;
- register uint64_t x0 __asm__("x0")=0xc200050bULL;
+ register uint64_t x0 __asm__("x0")=0xc2000415ULL;
  register uint64_t x1 __asm__("x1")=2,x2 __asm__("x2")=type;
  register uint64_t x3 __asm__("x3")=region;
  register uint64_t x4 __asm__("x4")=type==4 ? GPS_EMI_CPU_AID/32 : 0;
@@ -83,7 +83,13 @@ static int gps_emi_cpu_snapshot(struct gps_emi_cpu_region *table)
   if(enabled) {
    e=gps_emi_cpu_read(0,i,&r->start);if(e)return e;
    e=gps_emi_cpu_read(1,i,&r->end);if(e)return e;
-   if(r->start>r->end || r->end>0x000fffffffffffffULL)return EBADMSG;
+   /* The decoded ABI uses 4KiB page bases, regardless of XNU's 16KiB
+    * VM granule. Validate BEFORE canonicalizing the inclusive bound.
+    * Do not expand protected bounds by a guessed XNU page size. */
+   if(r->start<0x80000000ULL || r->start>r->end ||
+       (r->start&0xfff) || (r->end&0xfff) ||
+       r->end>0x000010007ffff000ULL)return EBADMSG;
+   r->end|=0xfff;
    e=gps_emi_cpu_read(4,i,&r->aid_set);if(e)return e;
   }
   e=gps_emi_cpu_read(3,i,&after);if(e)return e;
@@ -102,7 +108,7 @@ static int gps_emi_cpu_policy(const struct gps_emi_cpu_region *table)
  const struct gps_emi_cpu_region *required=&table[GPS_EMI_CPU_SR];
  /* LK places HIF inside layout region7, protected by its group6..11 SR47.
   * The protected range can span other mblocks; never map it as one reserve.
-  * Use absolute bounds, no guessed legacy DRAM offset/alignment/end fixup. */
+  * Use the selected ABI's canonical byte bounds; no 16KiB endpoint fixup. */
  if(!required->enabled)return EACCES;
  for(unsigned c=0;c<2;c++)
   if(required->start>lo[c] || required->end<hi[c])return EACCES;
@@ -133,7 +139,7 @@ static int gps_emi_cpu_same(const struct gps_emi_cpu_region *a,
 }
 static int gps_emi_cpu_take(void)
 {
- if(current_thread()!=gps_rt.worker || gps_rt.ops.version!=5 ||
+ if(current_thread()!=gps_rt.worker || gps_rt.ops.version!=6 ||
      !(gps_rt.layout.flags&X9_GPS_SMPU_LAYOUT_VERIFIED))return ENXIO;
  if(gps_rt.emi_cpu.started)return EBUSY;
  gps_rt.emi_cpu.started=1;gps_emi_cpu_journal(0);

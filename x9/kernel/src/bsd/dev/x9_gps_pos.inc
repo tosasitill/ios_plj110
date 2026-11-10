@@ -5,7 +5,7 @@
  * Do not move the 8KiB clear before acquire or after pos_finalize/HIF. */
 static int gps_pos_guard(void)
 {
- if(gps_rt.ops.version<2 || gps_rt.ops.version>5 || !gps_rt.ops.pos_validate ||
+ if(gps_rt.ops.version<2 || gps_rt.ops.version>6 || !gps_rt.ops.pos_validate ||
     !(gps_rt.layout.flags&X9_GPS_POS_LAYOUT_VERIFIED))return ENXIO;
  int e=gps_mcu_guard();if(e)return e;
  e=gps_rt.ops.pos_validate(gps_rt.ops.context,&gps_rt.layout,
@@ -81,8 +81,8 @@ static int gps_pos_d_die(void)
  * NOT an RF transaction, PLL-lock ACK, ROM qualification or GPS fix. */
 static int gps_pos_rf_guard(void)
 {
- if(gps_rt.ops.version<3 || gps_rt.ops.version>5 ||
-    (gps_rt.ops.version==5 ? !gps_rt.ops.pos_afe_verify : !gps_rt.ops.pos_afe) ||
+ if(gps_rt.ops.version<3 || gps_rt.ops.version>6 ||
+    (gps_rt.ops.version>=5 ? !gps_rt.ops.pos_afe_verify : !gps_rt.ops.pos_afe) ||
     !(gps_rt.layout.flags&X9_GPS_RF_LAYOUT_VERIFIED))return ENXIO;
  return gps_pos_guard();
 }
@@ -114,7 +114,7 @@ static int gps_pos_spi(void)
  * Reachable only on the sole worker after v5's retained secure/AFE lease. */
 static int gps_pos_afe_smc(void)
 {
- if(gps_rt.ops.version!=5 || current_thread()!=gps_rt.worker)return ENXIO;
+ if((gps_rt.ops.version<5 || gps_rt.ops.version>6) || current_thread()!=gps_rt.worker)return ENXIO;
  MCU_TRY(gps_pos_rf_guard());
  lck_mtx_lock(&gps_lock);st.afe_smc_started=1;lck_mtx_unlock(&gps_lock);
  register uint64_t x0 __asm__("x0")=0xc2000534ULL;
@@ -131,10 +131,13 @@ static int gps_pos_afe_smc(void)
  st.afe_smc_returned=1;lck_mtx_unlock(&gps_lock);
  printf("X9 GPS AFE: native SMC returned %llx/%llx/%llx/%llx; hardware qualification still required\n",
      x0,x1,x2,x3);
- /* Do not assume a success-code convention from the source's VOID call.
-  * Only the architected SMCCC NOT_SUPPORTED is recognized here; all other
-  * return semantics must be verified by the board supplier, not guessed. */
+ /* v6 selects the decoded e800 ABI: op14/HW02050800/ADie6686 returns0;
+  * wrong identity/op returns1. e9f8 reads10167060, and ONLY when bit4 is
+  * set copies its low nibble to40041010[7:4]. A legitimate no-op is not
+  * evidence of calibration. The real verifier must safely measure that
+  * source/conditional effect; no NS efuse mapping is inferred here. */
  if(x0==UINT64_MAX)return ENOTSUP;
+ if(gps_rt.ops.version==6 && x0)return EIO;
  return gps_pos_rf_guard();
 }
 static int gps_pos_afe(void)
@@ -143,7 +146,7 @@ static int gps_pos_afe(void)
     gps_rt.pos_pll_started || gps_rt.pos_complete)return EBUSY;
  MCU_TRY(gps_pos_rf_guard());
  gps_rt.pos_afe_started=1; /* even a failed SMC may have changed hardware */
- if(gps_rt.ops.version==5) {
+ if(gps_rt.ops.version>=5) {
   MCU_TRY(gps_pos_afe_smc());
   /* The void vendor wrapper ignores these returns. This version requires
    * a real board verifier for BOTH secure ABI semantics and measured AFE
@@ -153,7 +156,7 @@ static int gps_pos_afe(void)
  } else MCU_TRY(gps_rt.ops.pos_afe(gps_rt.ops.context,&gps_rt.layout,
      gps_rt.generation,gps_rt.lease));
  MCU_TRY(gps_pos_rf_guard());gps_rt.pos_afe_complete=1;
- if(gps_rt.ops.version==5) {
+ if(gps_rt.ops.version>=5) {
   lck_mtx_lock(&gps_lock);st.afe_smc_qualified=1;lck_mtx_unlock(&gps_lock);
  }
  return 0;

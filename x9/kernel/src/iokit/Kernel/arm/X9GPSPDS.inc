@@ -136,9 +136,13 @@ static bool x9g_send(uint32_t local, uint32_t port, const uint8_t *req, unsigned
         s.clock_selector,s.clock_ap,s.clock_global,s.clock_busy,s.clock_done,
         s.clock_ack,s.clock_errno);
    if(s.emi_cpu_started)
-    printf("X9 GPS PDS: HIF CPU SMPU policy valid %u SR %u AID %u intersections %u checks %llu errno %d (not BGF/DMA/receiver authority)\n",
-        s.emi_cpu_valid,s.emi_cpu_region,s.emi_cpu_aid,
+    printf("X9 GPS PDS: HIF CPU SMPU ABI %u policy valid %u SR %u AID %u intersections %u checks %llu errno %d (not BGF/DMA/receiver authority)\n",
+        s.emi_cpu_abi,s.emi_cpu_valid,s.emi_cpu_region,s.emi_cpu_aid,
         s.emi_cpu_intersections,s.emi_cpu_checks,s.emi_cpu_errno);
+   if(s.secure_remap_started)
+    printf("X9 GPS PDS: secure remap readback valid %u CSR %x checks %llu errno %d (not secure ABI/BGF/receiver authority)\n",
+        s.secure_remap_valid,s.secure_remap_address,s.secure_remap_checks,
+        s.secure_remap_errno);
    if(s.flow_initialized)
     printf("X9 GPS PDS: native flow published %llu remote %llu parse %llu/%llu host-ACK %llu completions %llu reset %llu/%llu staged %u inflight %u slots %u/%u bytes %u/%u errno %d (not MNL/PDS readiness)\n",
         s.flow_published,s.flow_remote_received,s.flow_processed,s.flow_discarded,
