@@ -200,7 +200,11 @@ static int cam_mm_slot_restore(struct cam_mm_journal *j,unsigned n,struct x9_cam
             if(d->kind==CAM_MM_GATE) {
                 uint32_t off=j->gate_before[n]&~global;
                 e=cam_wait_bits(cam_mm_effect_base(j,n),0,off,off,10000);
-                if(!e && (j->gate_changed[n]&global))e=ESTALE;
+                /* HWV may already have ungated on SET, with no manual
+                 * CG_CLR recorded. Original gated bits still require a
+                 * last-owner check in that case: do not drop dependencies
+                 * under a new aggregate owner just because gate_changed=0. */
+                if(!e && (j->gate_before[n]&global))e=ESTALE;
             } else if(d->kind==CAM_MM_DOMAIN && !global)
                 e=cam_wait_bits(b,d->effect,d->effect_mask,0,10000);
             if(e)return e;
