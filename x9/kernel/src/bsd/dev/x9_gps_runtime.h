@@ -13,7 +13,7 @@ enum x9_gps_physical_stage {
  X9_GPS_PHYSICAL_POS_SPI, X9_GPS_PHYSICAL_POS_AFE,
  X9_GPS_PHYSICAL_POS_PLL, X9_GPS_PHYSICAL_POS_RADIO,
  X9_GPS_PHYSICAL_POS_LOW_POWER, X9_GPS_PHYSICAL_POS_CLOCK,
- X9_GPS_PHYSICAL_BUS
+ X9_GPS_PHYSICAL_BUS, X9_GPS_PHYSICAL_EMI_CPU
 };
 struct x9_gps_afe_smc_result { uint64_t a[4]; };
 struct x9_gps_connv2_ops {
@@ -129,6 +129,15 @@ struct x9_gps_connv2_ops {
  int (*pos_afe_verify)(void *, const struct x9_gps_handoff *, uint64_t,
      uint64_t, const struct x9_gps_afe_smc_result *);
 };
+/* Native v5 additionally requires SMPU_LAYOUT_VERIFIED. Its existing
+ * acquire/validate/pos_validate must hold the actual SR/AID READ ABI and
+ * immutable secure MPU configuration, as well as AP/BGF access authority.
+ * The worker reads NS CPU AID241 policy before mapping HIF RAM and on every
+ * HIF ownership check. This is supplementary: FDT geometry, matching READ
+ * data or AP permission cannot authorize the secure route or BGF DMA.
+ * No secure SET/CLEAR or duplicate conninfra op70 is issued here; the
+ * original supplier still executes/proves the actual secure remap route.
+ * v1..v4 descriptor prefixes/behavior and the 128B v5 size are unchanged. */
 #ifdef __cplusplus
 extern "C" {
 #endif

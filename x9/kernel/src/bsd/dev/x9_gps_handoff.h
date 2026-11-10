@@ -16,6 +16,9 @@
 #define X9_GPS_LP_LAYOUT_VERIFIED 16u
 /* Optional CKSYS_TOP selector/HWV topology; not PLL or clock ownership. */
 #define X9_GPS_CLOCK_LAYOUT_VERIFIED 32u
+/* Optional current NSMPU SR/AID geometry and LK region assignments only.
+ * Neither this flag nor a register snapshot grants secure/DMA ownership. */
+#define X9_GPS_SMPU_LAYOUT_VERIFIED 64u
 struct x9_gps_handoff {
  uint32_t version, flags, reserve_base, reserve_size;
  uint32_t layout_size, legacy_offset, legacy_size, ap2mcu_offset;

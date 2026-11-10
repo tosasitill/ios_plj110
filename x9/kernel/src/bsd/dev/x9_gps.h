@@ -61,6 +61,12 @@ struct x9_gps_status {
  uint32_t bus_wake_prior, bus_wake, bus_detect_attempts, bus_detect;
  uint32_t bus_version, bus_irq, bus_restore_required, bus_restore;
  int32_t bus_errno;
+ /* Supplementary live NS CPU SR/AID policy check under an already held
+  * secure/EMI supplier lease. Not BGF permission, DMA or receiver READY. */
+ uint32_t emi_cpu_started, emi_cpu_valid, emi_cpu_region, emi_cpu_aid;
+ uint32_t emi_cpu_intersections;
+ uint64_t emi_cpu_checks;
+ int32_t emi_cpu_errno;
 };
 struct x9_gps_nmea {
  uint64_t sequence, generation, host_time;

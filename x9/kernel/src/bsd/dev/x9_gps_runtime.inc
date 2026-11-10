@@ -117,6 +117,10 @@ static const uint32_t gps_lp_bases[]={0x4000e000,0x40012000,0x4004d000,0x1c01100
 enum { GPS_LP_BANK_COUNT=sizeof(gps_lp_bases)/sizeof(gps_lp_bases[0]) };
 #define GPS_MCU_MT6993_VERSION 0x02050800u
 struct gps_runtime_packet { uint64_t time; unsigned length; uint8_t bytes[4096]; };
+struct gps_emi_cpu_region {
+ uint64_t start,end,aid_set;
+ uint32_t enabled;
+};
 static struct {
  struct x9_gps_connv2_ops provider, ops;
  struct x9_gps_handoff layout;
@@ -145,6 +149,13 @@ static struct {
   uint32_t wake_prior, wake, detect, version, irq, restore_required, restore;
   int error;
  } bus;
+ struct {
+  /* Off-stack snapshots, read only under the sole physical worker. */
+  struct gps_emi_cpu_region baseline[64], sample[64];
+  unsigned started,valid,region,intersections;
+  uint64_t checks;
+  int error;
+ } emi_cpu;
  uint8_t cmdbt[4096]; /* immutable registered snapshot, never on stack */
  thread_t worker;
  unsigned in_callback, out_head[2], out_count[2];
@@ -182,6 +193,7 @@ static int gps_mcu_guard(void)
   * needs its live clock effect. Never repair a lost vote or selector. */
  return gps_rt.clock.complete ? gps_clock_check() : 0;
 }
+#include "x9_gps_emi.inc"
 static volatile uint32_t *gps_mcu_pointer(uint32_t physical)
 {
  for (unsigned i=0;i<GPS_MCU_BANK_COUNT;i++)
@@ -298,6 +310,10 @@ static int gps_mcu_map(void)
  }
  /* Device attributes throughout; no cached aliases of shared HIF RAM.
   * The 48MiB advertised total is deliberately not mapped as one reserve. */
+ if(gps_rt.ops.version==5) {
+  gps_runtime_stage(X9_GPS_PHYSICAL_EMI_CPU,0);
+  e=gps_emi_cpu_take();if(e)return e;
+ }
  e=gps_mcu_guard();if(e)return e;
  gps_rt.ap=(volatile uint8_t *)ml_io_map(gps_rt.layout.reserve_base+
      gps_rt.layout.ap2mcu_offset,gps_rt.layout.region_size);
@@ -434,6 +450,7 @@ static int gps_runtime_owned(void *ctx, uint64_t generation, int reset)
  MCU_TRY(gps_mcu_expect(F_version,GPS_MCU_MT6993_VERSION));
  MCU_TRY(gps_mcu_raw_expect(0x40c12010,UINT32_MAX,0x03040000));
  MCU_TRY(gps_mcu_expect(F_osc_state,1)); MCU_TRY(gps_mcu_expect(F_power_state,2));
+ if(gps_rt.ops.version==5)MCU_TRY(gps_emi_cpu_validate());
  /* The lease holds resources across this check and subsequent HIF accesses. */
  if ((hif_read(gps_rt.ccif,4)|hif_read(gps_rt.ccif,0x10))&~0xffu) return EIO;
  return 0;
@@ -643,6 +660,7 @@ int x9_gps_register_connv2(const struct x9_gps_connv2_ops *ops)
    if(!ops->pos_radio || !ops->pos_cmdbt || ops->pos_cmdbt_bytes!=4096)return EINVAL;
    flags|=X9_GPS_LP_LAYOUT_VERIFIED;
   }
+  if(ops->version==5)flags|=X9_GPS_SMPU_LAYOUT_VERIFIED;
   if((layout.flags&flags)!=flags)return ENXIO;
  }
  lck_mtx_lock(&gps_runtime_lock);

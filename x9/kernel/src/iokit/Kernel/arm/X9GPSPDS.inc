@@ -135,6 +135,10 @@ static bool x9g_send(uint32_t local, uint32_t port, const uint8_t *req, unsigned
         s.clock_started,s.clock_set_started,s.clock_complete,s.clock_borrowed,
         s.clock_selector,s.clock_ap,s.clock_global,s.clock_busy,s.clock_done,
         s.clock_ack,s.clock_errno);
+   if(s.emi_cpu_started)
+    printf("X9 GPS PDS: HIF CPU SMPU policy valid %u SR %u AID %u intersections %u checks %llu errno %d (not BGF/DMA/receiver authority)\n",
+        s.emi_cpu_valid,s.emi_cpu_region,s.emi_cpu_aid,
+        s.emi_cpu_intersections,s.emi_cpu_checks,s.emi_cpu_errno);
    if(s.native_power_phase || s.native_power_errno)
     printf("X9 GPS PDS: native power sublease phase %x writes %u/%u/%u RC %u clock %u errno %d (not connv2/DMA/receiver qualification)\n",
         s.native_power_phase,s.native_power_vsel_write,

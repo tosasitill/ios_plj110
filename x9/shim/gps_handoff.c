@@ -113,6 +113,25 @@ static int clock_topology(uintptr_t dt)
      value(dt,top,"#clock-cells",1)&&word(dt,hwv,"phandle",&hp)&&hp&&
      value(dt,top,"hw-voter-regmap",hp);
 }
+static int smpu_topology(uintptr_t dt)
+{
+ const char *path="/soc/nsmpu@11073000";
+ const uint32_t regions[][3]={{0,0,62},{1,1,44},{2,5,45},{6,11,47},{8,9,46}};
+ const uint8_t *p;size_t n;uint32_t base,size;
+ /* Current device FDT + current memory/mediatek/mtk-emi-mpu-test-v2.c:
+  * SR1..63, 256 AIDs, 32 packed two-bit permissions per u64. The legacy
+  * common-emimpu node does NOT establish this READ ABI or its geometry.
+  * Keep this separate from live secure-world authority. */
+ if(!enabled(dt,path)||!str(dt,path,"compatible","mediatek,smpu")||
+    !range(dt,path,&base,&size)||base!=0x11073000||size!=0x1000||
+    !value(dt,path,"sr-cnt",63)||!value(dt,path,"aid-cnt",256)||
+    !value(dt,path,"aid-num-per-set",32)||
+    !fdt_property(dt,"/connsys-emi-config","emi-mpu-region",&p,&n)||
+    n!=sizeof(regions))return 0;
+ for(unsigned i=0;i<5;i++)for(unsigned j=0;j<3;j++)
+  if(be(p+(i*3+j)*4)!=regions[i][j])return 0;
+ return 1;
+}
 static int qualify(uintptr_t dt,struct x9_gps_handoff *h)
 {
  const char *cfg="/connsys-emi-config",*consys="/soc/consys@40000000";
@@ -167,6 +186,7 @@ static int qualify(uintptr_t dt,struct x9_gps_handoff *h)
  if(pos_topology(dt,1))h->flags|=X9_GPS_RF_LAYOUT_VERIFIED;
  if(pos_topology(dt,2))h->flags|=X9_GPS_LP_LAYOUT_VERIFIED;
  if(clock_topology(dt))h->flags|=X9_GPS_CLOCK_LAYOUT_VERIFIED;
+ if(smpu_topology(dt))h->flags|=X9_GPS_SMPU_LAYOUT_VERIFIED;
  return 1;
 }
 struct walk {uint8_t *p;size_t size,at,found;unsigned nodes,matches;};
@@ -208,5 +228,7 @@ int fdt_gps_patch_adt(uintptr_t dt,void *adt,size_t size)
   plog_str("X9 GPS FDT: low-power/RC tuples qualified; not a TOP wake or exclusive lease\n");
  if(h.flags&X9_GPS_CLOCK_LAYOUT_VERIFIED)
   plog_str("X9 GPS FDT: CKSYS_TOP/HWV clock topology qualified; not a PLL or clock lease\n");
+ if(h.flags&X9_GPS_SMPU_LAYOUT_VERIFIED)
+  plog_str("X9 GPS FDT: NSMPU SR63/AID256 geometry and LK region assignments qualified; not live permissions\n");
  return 1;
 }
