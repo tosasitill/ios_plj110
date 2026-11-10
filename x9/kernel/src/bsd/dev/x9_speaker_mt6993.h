@@ -62,6 +62,14 @@ int x9_speaker_mt6993_clock_validate(uint64_t ticket);
 int x9_speaker_mt6993_clock_release(uint64_t ticket);
 int x9_speaker_mt6993_clock_afe(uint64_t ticket,volatile uint32_t **);
 int x9_speaker_mt6993_clock_held(uint64_t ticket); /* cached only */
+/* One native pad subchild, monotonically minted (never a readiness bit).
+ * Hold requires fresh Online/no-error. Validate permits physical cleanup
+ * after a same-generation transport fault. Drop requires real board halt.
+ * An outstanding pad child makes clock_release return EBUSY BEFORE any
+ * clock mutation or flow poisoning. Pads -> clock -> board lock order. */
+int x9_speaker_mt6993_clock_pad_hold(uint64_t ticket,uint64_t *lease);
+int x9_speaker_mt6993_clock_pad_validate(uint64_t ticket,uint64_t lease);
+int x9_speaker_mt6993_clock_pad_drop(uint64_t ticket,uint64_t lease);
 #ifdef __cplusplus
 }
 #endif

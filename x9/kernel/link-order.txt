@@ -1146,6 +1146,7 @@ x9:x9_adsp_transport.o
 x9:x9_audio_resources.o
 x9:x9_adsp_mt6993.o
 x9:x9_speaker_mt6993.o
+x9:x9_speaker_pads.o
 x9:x9_speaker_afe.o
 x9:x9_tfa_plj110.o
 x9:x9_tfa98xx.o

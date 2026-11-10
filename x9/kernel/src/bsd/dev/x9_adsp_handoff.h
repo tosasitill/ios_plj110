@@ -8,6 +8,9 @@
 #include <stdint.h>
 #define X9_ADSP_HANDOFF_BYTES 256u
 #define X9_ADSP_LAYOUT_VERIFIED 1u
+#define X9_ADSP_I2S4_VERIFIED 2u
+#define X9_ADSP_I2S4_PINS 0x6f6e6d6cu
+#define X9_ADSP_I2S4_MODES 0x05050505u
 #define X9_ADSP_MEM_COUNT 15u
 enum { X9ADSPMemLoggerA, X9ADSPMemDebugA, X9ADSPMemIPIA, X9ADSPMemDumpA,
        X9ADSPMemMbrainA, X9ADSPMemLoggerB, X9ADSPMemDebugB, X9ADSPMemIPIB,
@@ -21,7 +24,9 @@ struct x9_adsp_handoff {
     struct x9_adsp_mem_block block[X9_ADSP_MEM_COUNT];
     uint32_t cfg_base[2], cfg_bytes[2];
     struct x9_adsp_mbox_layout mbox[4];
-    uint32_t system_base[2], system_bytes[2], reserved[2];
+    uint32_t system_base[2], system_bytes[2];
+    /* Optional current-FDT I2SIN4/OUT4 topology, not pad ownership. */
+    uint32_t i2s4_pins, i2s4_modes;
 };
 /* Validate the bounded, proved variant independently at both ends. Zero-size
  * source blocks are skipped (not assigned an address), exactly as in OPPO
@@ -31,8 +36,11 @@ static inline int x9_adsp_handoff_valid(const struct x9_adsp_handoff *h)
     const uint32_t sizes[X9_ADSP_MEM_COUNT]={0x80000,0x80000,0x180000,0x400,
         0x400,0x80000,0x80000,0x100000,0x400,0,0x40000,0,0,0x80000,0x852000};
     if(!h)return 0;
-    if(h->version!=1 || h->flags!=X9_ADSP_LAYOUT_VERIFIED || h->cores!=2 ||
-       h->reserved[0] || h->reserved[1] || h->reserve_base<0x100000000ULL ||
+    if(h->version!=1 || (h->flags!=X9_ADSP_LAYOUT_VERIFIED &&
+       h->flags!=(X9_ADSP_LAYOUT_VERIFIED|X9_ADSP_I2S4_VERIFIED)) || h->cores!=2 ||
+       ((h->flags&X9_ADSP_I2S4_VERIFIED)?
+        (h->i2s4_pins!=X9_ADSP_I2S4_PINS || h->i2s4_modes!=X9_ADSP_I2S4_MODES):
+        (h->i2s4_pins || h->i2s4_modes)) || h->reserve_base<0x100000000ULL ||
        !h->reserve_bytes || h->reserve_bytes>0x4000000 ||
        ((h->reserve_base|h->reserve_bytes)&0x3fff) ||
        h->reserve_base>0x37fa00000ULL-h->reserve_bytes ||

@@ -538,7 +538,7 @@ int x9_adsp_mt6993_speaker_control(uint32_t op,uint64_t ticket)
 int x9_adsp_mt6993_copy_handoff(struct x9_adsp_handoff *h)
 {
     if(!h)return EINVAL;
-    lck_mtx_lock(&board_lock);int e=layout.flags==X9_ADSP_LAYOUT_VERIFIED?0:ENXIO;
+    lck_mtx_lock(&board_lock);int e=x9_adsp_handoff_valid(&layout)?0:ENXIO;
     if(!e)*h=layout;
     lck_mtx_unlock(&board_lock);return e;
 }

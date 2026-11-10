@@ -6530,6 +6530,11 @@
    "template": "bsd-c-11"
   },
   {
+   "name": "x9_speaker_pads.o",
+   "source": "bsd/dev/x9_speaker_pads.c",
+   "template": "bsd-c-11"
+  },
+  {
    "name": "x9_speaker_afe.o",
    "source": "bsd/dev/x9_speaker_afe.c",
    "template": "bsd-c-11"

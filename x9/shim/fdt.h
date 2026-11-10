@@ -13,6 +13,16 @@ int fdt_property_lookup(uintptr_t,const char *,const char *,const uint8_t **,siz
 /* 1 unique property, 0 absent in a valid tree, -1 malformed/duplicate. */
 int fdt_property_checked(uintptr_t,const char *,const char *,const uint8_t **,size_t *);
 int fdt_property(uintptr_t,const char *,const char *,const uint8_t **,size_t *);
+/* Strict node schema, using the SAME complete-tree parser. Reject unknown
+ * or duplicate properties; count direct children. Keys are inline arrays
+ * (no relocatable pointer table). Publish outputs only after a valid END.
+ * Returns PRESENT for a unique node, NODE_MISSING/INVALID otherwise. */
+struct fdt_node_property { const uint8_t *value; size_t bytes; };
+int fdt_node_schema(uintptr_t,const char *,const char (*)[32],unsigned,
+                    struct fdt_node_property *,uint32_t *,unsigned *);
+/* Exactly one phandle/linux,phandle occurrence of this value, at this path.
+ * Conservative: duplicate aliases also refuse a new hardware grant. */
+int fdt_phandle_unique(uintptr_t,const char *,uint32_t);
 
 /* Bounded metadata from the last RAM check, for USB/pstore failure logs. */
 const char *fdt_ram_failure(uint64_t *,uint64_t *,uint64_t *,uint64_t *);

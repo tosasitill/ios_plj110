@@ -8,12 +8,17 @@ static int eq(const char *a,const char *b)
 static int overlap(size_t a,size_t n,size_t b,size_t m)
 {return n&&m&&a<b+m&&b<a+n;}
 
-int fdt_property_lookup(uintptr_t address,const char *wanted_path,const char *wanted_key,
-                       const uint8_t **value,size_t *length)
+static int lookup(uintptr_t address,const char *wanted_path,const char *wanted_key,
+                  const uint8_t **value,size_t *length,const char keys[][32],unsigned count,
+                  struct fdt_node_property *props,uint32_t *mask,unsigned *children,uint32_t handle)
 {
  if(value)*value=0;
  if(length)*length=0;
- if(!address||(address&7)||!wanted_path||!wanted_key||!*wanted_key||!value||!length)
+ if(mask)*mask=0;
+ if(children)*children=0;
+ if(props)for(unsigned i=0;i<count;i++)props[i]=(struct fdt_node_property){0};
+ if(!address||(address&7)||!wanted_path||!value||!length||
+    (!keys&&!handle&&(!wanted_key||!*wanted_key)))
   return FDT_PROPERTY_INVALID;
  const uint8_t *b=(const uint8_t *)address;
  if(be(b)!=0xd00dfeed)return FDT_PROPERTY_INVALID;
@@ -37,11 +42,15 @@ int fdt_property_lookup(uintptr_t address,const char *wanted_path,const char *wa
  size_t at=start,end=(size_t)start+sz,used=0,parents[32];
  unsigned depth=0,nodes=0,targets=0,matches=0,roots=0;
  unsigned child[32]={0};
+ unsigned target_depth=0,direct_children=0;uint32_t seen=0;
+ unsigned handle_matches=0;
+ struct fdt_node_property schema[32]={0};
  char path[256]={0};const uint8_t *found=0;size_t found_size=0;
  while(end-at>=4) {
   unsigned t=be(b+at);at+=4;
   if(t==1) {
    if(depth==32||++nodes>8192)return FDT_PROPERTY_INVALID;
+   if(target_depth&&depth==target_depth)direct_children++;
    size_t first=at;
    while(at<end&&b[at]) {if(b[at]=='/')return FDT_PROPERTY_INVALID;at++;}
    if(at==end)return FDT_PROPERTY_INVALID;
@@ -54,10 +63,14 @@ int fdt_property_lookup(uintptr_t address,const char *wanted_path,const char *wa
     for(size_t i=0;i<n;i++)path[used++]=(char)b[first+i];
     path[used]=0;
    } else if(at!=first||++roots!=1)return FDT_PROPERTY_INVALID;
-   if(eq(path,wanted_path)&&++targets>1)return FDT_PROPERTY_INVALID;
+   if(eq(path,wanted_path)) {
+    if(++targets>1)return FDT_PROPERTY_INVALID;
+    target_depth=depth+1;
+   }
    depth++;at=(at+4)&~(size_t)3;
   } else if(t==2) {
    if(!depth)return FDT_PROPERTY_INVALID;
+   if(depth==target_depth)target_depth=0;
    used=parents[--depth];path[used]=0;
   } else if(t==3) {
    if(!depth||child[depth-1]||end-at<8)return FDT_PROPERTY_INVALID;
@@ -67,9 +80,20 @@ int fdt_property_lookup(uintptr_t address,const char *wanted_path,const char *wa
    size_t limit=ss-offset,i=0;
    while(i<limit&&key[i])i++;
    if(!i||i==limit)return FDT_PROPERTY_INVALID;
-   if(eq(path,wanted_path)&&eq(key,wanted_key)) {
-    if(++matches!=1)return FDT_PROPERTY_INVALID;
-    found=b+at;found_size=n;
+   if(handle&&(eq(key,"phandle")||eq(key,"linux,phandle"))) {
+    if(n!=4)return FDT_PROPERTY_INVALID;
+    if(be(b+at)==handle && (++handle_matches!=1||!eq(path,wanted_path)))
+     return FDT_PROPERTY_INVALID;
+   }
+   if(eq(path,wanted_path)) {
+    if(keys) {
+     unsigned k=0;while(k<count&&!eq(key,keys[k]))k++;
+     if(k==count||(seen&(1u<<k)))return FDT_PROPERTY_INVALID;
+     seen|=1u<<k;schema[k]=(struct fdt_node_property){b+at,n};
+    } else if(!handle&&eq(key,wanted_key)) {
+     if(++matches!=1)return FDT_PROPERTY_INVALID;
+     found=b+at;found_size=n;
+    }
    }
    at=(at+n+3)&~(size_t)3;
   } else if(t==4)continue;
@@ -81,12 +105,38 @@ int fdt_property_lookup(uintptr_t address,const char *wanted_path,const char *wa
    }
    if(at!=end)return FDT_PROPERTY_INVALID;
    if(!targets)return FDT_PROPERTY_NODE_MISSING;
+   if(handle)return handle_matches==1?FDT_PROPERTY_PRESENT:FDT_PROPERTY_ABSENT;
+   if(keys) {
+    for(unsigned i=0;i<count;i++)props[i]=schema[i];
+    *mask=seen;*children=direct_children;return FDT_PROPERTY_PRESENT;
+   }
    if(!matches)return FDT_PROPERTY_ABSENT;
    *value=found;*length=found_size;return FDT_PROPERTY_PRESENT;
   } else return FDT_PROPERTY_INVALID;
   if(at>end)return FDT_PROPERTY_INVALID;
  }
  return FDT_PROPERTY_INVALID;
+}
+int fdt_property_lookup(uintptr_t address,const char *path,const char *key,
+                       const uint8_t **value,size_t *length)
+{return lookup(address,path,key,value,length,0,0,0,0,0,0);}
+int fdt_node_schema(uintptr_t address,const char *path,const char keys[][32],unsigned count,
+                    struct fdt_node_property *props,uint32_t *mask,unsigned *children)
+{
+ if(!keys||!count||count>32||!props||!mask||!children)return FDT_PROPERTY_INVALID;
+ for(unsigned i=0;i<count;i++) {
+  unsigned n=0;while(n<32&&keys[i][n])n++;
+  if(!n||n==32)return FDT_PROPERTY_INVALID;
+  for(unsigned j=0;j<i;j++)if(eq(keys[i],keys[j]))return FDT_PROPERTY_INVALID;
+ }
+ const uint8_t *p;size_t n;
+ return lookup(address,path,0,&p,&n,keys,count,props,mask,children,0);
+}
+int fdt_phandle_unique(uintptr_t address,const char *path,uint32_t handle)
+{
+ if(!handle||handle==UINT32_MAX)return FDT_PROPERTY_INVALID;
+ const uint8_t *p;size_t n;
+ return lookup(address,path,0,&p,&n,0,0,0,0,0,handle);
 }
 
 /* Preserve the concurrent ADSP consumer's checked API using the same strict

@@ -10,7 +10,7 @@ static int take(bool,bool);
 static int restore(void);
 static struct {
     struct x9_speaker_clock_policy policy;
-    uint64_t child;
+    uint64_t child,pad_child,pad_serial;
     uint32_t last_generation,error,dirty,uncertain,prior[3];
     bool active,configured,tuner_captured,clocks_restored;
 } native_clock;
@@ -210,6 +210,32 @@ int x9_speaker_mt6993_clock_held(uint64_t ticket)
     int held=native_clock.active && ticket && s.ticket==ticket;
     lck_mtx_unlock(&x9_speaker_clock_lock);return held;
 }
+int x9_speaker_mt6993_clock_pad_hold(uint64_t ticket,uint64_t *lease)
+{
+    if(!lease)return EINVAL;*lease=0;
+    lck_mtx_lock(&x9_speaker_clock_lock);
+    int e=native_clock.pad_child?EBUSY:native_validate_locked(ticket);
+    X9AudioDSPStatus ds={0};if(!e)e=x9_adsp_status(0,&ds);
+    if(!e && (native_clock.error || ds.error || ds.state!=X9DSPOnline ||
+       ds.generation!=native_clock.policy.generation))e=ESTALE;
+    if(!e && native_clock.pad_serial==UINT64_MAX)e=EOVERFLOW;
+    if(!e)*lease=native_clock.pad_child=++native_clock.pad_serial;
+    lck_mtx_unlock(&x9_speaker_clock_lock);return e;
+}
+int x9_speaker_mt6993_clock_pad_validate(uint64_t ticket,uint64_t lease)
+{
+    lck_mtx_lock(&x9_speaker_clock_lock);
+    int e=!lease||lease!=native_clock.pad_child?EPERM:native_validate_locked(ticket);
+    lck_mtx_unlock(&x9_speaker_clock_lock);return e;
+}
+int x9_speaker_mt6993_clock_pad_drop(uint64_t ticket,uint64_t lease)
+{
+    lck_mtx_lock(&x9_speaker_clock_lock);
+    int e=!lease||lease!=native_clock.pad_child?EPERM:native_validate_locked(ticket);
+    if(!e)e=x9_adsp_mt6993_speaker_halted_validate(ticket);
+    if(!e)native_clock.pad_child=0;
+    lck_mtx_unlock(&x9_speaker_clock_lock);return e;
+}
 static int native_restored_ao(void)
 {
     int e=x9_adsp_mt6993_speaker_halted_validate(s.ticket);
@@ -238,6 +264,11 @@ int x9_speaker_mt6993_clock_release(uint64_t ticket)
 {
     lck_mtx_lock(&x9_speaker_clock_lock);
     int e=!native_clock.active || !ticket || s.ticket!=ticket?EPERM:0;
+    if(!e && native_clock.pad_child) {
+        /* Ordering misuse is not a hardware fault. Do not restore clocks,
+         * invoke drain or poison an otherwise valid in-flight pad owner. */
+        lck_mtx_unlock(&x9_speaker_clock_lock);return EBUSY;
+    }
     if(!e)e=x9_adsp_mt6993_speaker_halted_validate(ticket);
     /* This mandatory callback proves DMA stopped independently; idle() below
      * is only an enable-image check, not an authoritative drain substitute. */

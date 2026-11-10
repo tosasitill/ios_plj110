@@ -538,7 +538,7 @@ pool并不16KiB页对齐，后续子分配/映射须保留与XHCI相邻页边界
 
 共享RAM映射／daemon登记／core DTOA处理组件现已编写，见下一节；仍没有真实memory
 authority／IRQ provider和combined caller，因此不访问pool、不宣称登记或播放已运行。
-生产AUDIO/APLL2子租约已有实现，见下节；pad／双PA provider以及PCM到iOS backend的接线仍未完成。
+生产AUDIO/APLL2及I2S4 pads子租约已有实现，见下节；真实双PA／drain回调以及PCM到iOS backend的接线仍未完成。
 独立cold clock/pll/path probe仍要求TOP/INFRA baseline，不能拿它们的成功flag冒充
 combined acquire；生产入口独立按真实DSP父owner的顺序申请。固件/共享RAM不能用Device映射；
 不采用WC/WB混合别名。最终只在这些生产接线完成后冻结并构建一个镜像。
@@ -631,6 +631,42 @@ DSP128B／AFE184B诊断ABI保持，未增加Ready或用户可控的生产验证�
 没有重编HAL bundle、联合kernel/boot、运行测试套件或操作设备。生产clock目前
 **无combined调用者**；SMPU／实际firmware scene、core-A IRQ、pad／PA／drain与最终
 iOS backend仍需实接，不能将这组API当成完成出声或最终镜像。
+
+### 在生产时钟下申请、恢复 I2SIN4/OUT4 pads
+
+**只有元数据和子租约代码已接入；真实双PA mute、DL24 drain及combined caller仍未接入。
+`X9_ADSP_LOADER=0`保持，不会因此自动申请pad、执行MMIO或得到扬声器Ready。**
+
+本次LK FDT须同时绑定AFE的`pinctrl-15/17`至I2SIN4/OUT4两组，GPIO108/109/110/111
+都为mode5。shim资格化`/soc/pinctrl`的GPIO/IOC_LB2基址、AFE与sound的phandle绑定、
+机型speaker enum OUT4=25/IN4=24及ETDM index4的2ch/sync/no-MCLK/VLP/IP配置。
+这两个数来自`mtk-sp-spk-amp.h`，不是`mt6993` C DAI枚举。group必须只有3/1个指定leaf；
+leaf只允许pinmux、Schmitt、bias-disable和可选phandle，拒绝额外/重复pinconf与children。
+`fdt_node_schema`和`fdt_phandle_unique`复用完整树parser，后者保守拒绝重复phandle别名；
+没有跳过完整END/reserve验证，旧lookup/checked的absent契约不变。
+
+`x9_adsp_handoff`仍为256B，尾部原8B保留区用于pins/modes向量，
+`X9_ADSP_I2S4_VERIFIED`仅表示本次拓扑。flags严格只接受layout-only 1或layout+I2S4 3，
+无I2S4 flag时尾部必须仍为零；复制端重新完整校验，不把旧capture当本次grant。
+
+| 入口／字段 | 行为与边界 |
+|---|---|
+| `x9_speaker_pads_acquire(policy)` | 同Speaker ticket、真实Online无error/同generation、validated I2S4 handoff、native clock子租约；mandatory双PA mute成功后再读/改pads，mux mode5最后写 |
+| GPIO MODE0x4b0／DIR0x30 | 冷态拒绝任何alternate mode或DIR output；MODE用+12 MWR，低4位为mode，bit4只作modify-enable，不作为saved重放；DIR仅owned bits12..15 |
+| IOC_LB2 SMT0xe0／PU0xb0／PD0xa0 | GPIO108..111 bits4/6/5/8（mask0x170），Schmitt是DIR0/SMT1，不改IES；bias-disable仅清PU/PD。非MODE用+4 SET/+8 CLR，不覆盖邻pin |
+| DO0x130／IES0x70／drive0x00/0x10 | 保存并fresh验证，完全不写；DT无drive-strength不猜数值。GPIO基址非16K对齐，mapping验证包含VA页内偏移及完整4K bank两端 |
+| `clock_pad_hold/validate/drop` | clock mutex下单调token，父native clock持有时子租约存在；pad未drop前clock_release立即EBUSY，不执行drain、restore/vote或污染流故障 |
+| `pads_validate` | fresh parent/board/HWV/映射、owned字段与未触碰字段；历史stream error或同代际Quarantined本身不阻止物理cleanup，不等同新流Online许可 |
+| `pads_release(ticket)` | 真双PA mute→真实board halt→独立权威DL24 drain→先退出mode5→逆序恢复仅touched电气字段→fresh saved检查→drop clock子租约。开始teardown即撤configured，部分restore不能当mode5有效 |
+
+每次SET/CLR/MWR在动作前记录最后观察prior并标uncertain，动作后先重新资格化父资源
+再读回；cleanup只允许expected或最后写前prior，第三值保留父租约/首错、不自动unwind。
+drop失败重试fresh saved/parent验证，不二次restore；没有任何pad写动作时可在真mute/halt/drain
+后退休untouched child，不强求未建立的pad映射。永久CSR映射首次创建后复用。
+
+锁顺序AFE→pads→clock→board/transport→AP leaf；policy回调禁止重入AFE/pads/clock。
+本阶段仅直接编译内核新pads及受影响对象、shim walker与iOS header/ABI对象；没有HAL
+bundle重编、测试套件/模拟provider、CI联合kernel/boot、设备操作或播放证据。
 
 ### AUDIO-12：启动／运行配置资格与缓存故障位置
 
