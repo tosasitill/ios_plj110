@@ -136,7 +136,8 @@ cameractl pipeline front
 | 前摄 | port0 / async0，base `0x13880000` | D-PHY 4 lane | 3264×2448 / 4096 / 10027008 |
 
 - 当前板 outmux0..5 是 CAMSV、6..8 才是 RAW、9 是 UISP；不按 sensor index 猜 CSI port。
-- tag0 的 outmux VCDT `+0x100=(0x2b<<16)|1`、预期尺寸 `+0x104=(height<<16)|width`。
+- tag0 的 outmux VCDT `+0x100=(0x2b<<16)|1`、首次 `_config_outmux → SET_TAG` 预期尺寸 `+0x104=((height-1)<<16)|(width/4*5-1)`。
+  HSIZE 是 packed RAW10 **字节数减1**，不是像素数；后续 apply-v2 路径的 HSIZE 语义不同，不混用。
   候选 CAMSV0 base `0x3a600000`，DMA bank `+0x1000`：地址 low/high `+0x200/+0x204`，basic `+0x210=(stride<<16)|0x10`；不是旧 unit-test 的 TG 寄存器布局。
 - shared `mm_smmu_cam` 是 MM-SMMUv3 `0x30800000` 的 **SID0x80**、35-bit DMA mask，但 DT camera dma-range 只有16GiB。
   分配还须 obey shared `mm_common` reservations；不能把 CPU PA 当相机 IOVA，也不能套 GPU 专用 SMMU bypass。

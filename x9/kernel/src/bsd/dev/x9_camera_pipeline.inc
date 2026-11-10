@@ -31,9 +31,12 @@ static int cam_pipeline_plan(uint32_t which, struct x9_camera_pipeline *p)
     p->vc=0;p->dt=0x2b;
     p->outmux_candidate=0;p->camsv_candidate=0;
     p->dma_bits=35;p->smmu_sid=0x80;
-    /* Outmux tag0 VCDT +0x100, expected dimensions +0x104. */
+    /* Initial route config calls _config_outmux -> SET_TAG, not SET_TAG_V2:
+     * HSIZE is packed CSI word-count BYTES minus1, VSIZE is lines minus1.
+     * The later apply-v2 path has different HSIZE semantics. Do not infer
+     * this register's units from the header or the name exp_hsize. */
     p->vcdt=(p->dt<<16)|(p->vc<<8)|1;
-    p->expected_size=(p->height<<16)|p->width;
+    p->expected_size=((p->height-1)<<16)|(p->width/4*5-1);
     /* CAMSV central tag1 grab +0x548/+0x54c, RAW10 packed +0x554.
      * DMA bank +0x210 has stride in HIGH16, max-burst in LOW5. */
     p->grab_pixels=p->width<<16;p->grab_lines=p->height<<16;
