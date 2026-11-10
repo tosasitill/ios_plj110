@@ -797,7 +797,7 @@ source ON 真正 issued 后，原单 credit 的 CNT0/WCNT+1 可先于 SOF 服务
 
 实际关闭顺序仍是唯一逆序 source **DL0+fresh CFG_DONE→PHY/AFIFO→MAC lanes→mux**，然后正常 **TG_MODE_OFF→VF0→TG DB down/up→CMOS0**，再原 restricted **DONE/ERR/SOF→IMG0A DMA0**。每一store、嵌套OUTMUX commit/W1C以及目标poll仍核同一独立receipt和实际counter，native callback不在spin，不写inner/RESET/新RCNT、不改变immutable accepted baseline。new receipt的checking不是publication，只有两次fresh观察完成才admitted；partial或首次错误不可重试。cold/on分支仍原credit/ARMED/no-input门，不按off布尔或CPU RETIRED独自放宽。
 
-controls完成后才标 `X9 CAMERA STREAM CONTROLS` 的stopped并进入下一节普通DMA停止观察，再原GIC/worker关闭；**原issued credit、S1 backing、namespace及所有supplier保留**，`cam_sv_close` 继续拒绝issued credit，不能恢复地址、unmap、撤电或repeat。原close后续worker timeout不覆盖更早的source/control首错。GIC route/priority逆序恢复期间，live FBC只在controls完整receipt后改用原dirty/uncertain精确journal比较，不能因本次已合法恢复第一项prior就用旧all-target门拒绝自己；普通close标志或masked line没有该豁免。下一必须完成下游AXI/SMMU退休并消费原credit，再合法复用和native/iOS实帧闭环；不要把此receipt当全链STOP成功，不制作中间镜像。
+controls完成后才标 `X9 CAMERA STREAM CONTROLS` 的stopped并进入下一节普通DMA停止观察，再原GIC/worker关闭；**原issued credit、S1 backing、namespace及所有supplier保留**。本control receipt单独仍不能恢复地址、unmap、撤电或repeat；普通CAMSV配置恢复另需后文真实自然spent receipt。原close后续worker timeout不覆盖更早的source/control首错。GIC route/priority逆序恢复期间，live FBC只在controls完整receipt后改用原dirty/uncertain精确journal比较，不能因本次已合法恢复第一项prior就用旧all-target门拒绝自己；普通close标志或masked line没有该豁免。完整下游AXI/SMMU退休、合法复用和native/iOS实帧闭环仍须实现；不要把此receipt当全链STOP成功，不制作中间镜像。
 
 ### 正常 CAMSV0 DMA-top 停止与必要下游观察
 
@@ -809,7 +809,19 @@ ACK后要求实际held的同epoch L19/P0 mapping、SMI/A0、原native request/po
 
 成功的原stop现在继续实际恢复本次局部 DMA 控制，仍在 GIC priority/route unwind 前、同一 control/IRQ mutex 和 request/lease 下。先重新验证完整原 OFF/DONE/CPU/worker/GIC/两bank实际 WCNT+1/CNT0，并取得两次新 ACK/P0 monitor0；单个100ms deadline包含全部restore操作。按上游 `sv_reset` 的局部终序：**只对自己曾改变的 DCM inhibit 写一次原值并确认两bank目标两次，再对自己已 ACK 的 DMA-top stop 写一次原值0并确认两bank目标两次**。借用DCM1不写、不释放；不搬central SW_CTL/STG/CQ/inner reset。所有 issued 先于唯一store，pending只允许原已消费状态到精确prior，观察到prior后再出现请求/ACK或DCM目标回退即失败，不能靠重发修复。初次restore失败锁存、任何晚到目标不重置错误。`X9 CAMERA DMA RESTORE`保存phase/issued/seen/sample/实际DCM-stop/OSTD/errno；RESTORED只描述这两项局部控制，不是credit/map/namespace退休凭证。
 
-**DMA ACK、port zeros及局部控制恢复都不是full downstream AXI/SMMU/EMI/map退休。** 不取消原issued credit，不释放request/S1/supplier，不允许repeat；CAMSV close仍拒绝issued credit。仍必须实现完整退休、normal NS controller/prior-preserving SID80 attach、持续rate/MMQoS、actual native provider和iOS前后实帧链。只有全链完成后才构建唯一最终镜像。
+**DMA ACK、port zeros及局部控制恢复都不是full downstream AXI/SMMU/EMI/map退休。** 不取消原issued credit，不释放request/S1/supplier，不允许repeat；CAMSV close仍拒绝没有真实spent receipt的issued credit。仍必须实现完整退休、normal NS controller/prior-preserving SID80 attach、持续rate/MMQoS、actual native provider和iOS前后实帧链。只有全链完成后才构建唯一最终镜像。
+
+### 在 sensor 隔离前停止 consumer，确认自然 credit 消费
+
+**这是可编译的真实局部停机实现，不是已注册 native capture 或完整 DMA drain。** 新的内核入口 `x9_camera_camsv_irq_stop(epoch)` 获取 control mutex；同TU的native callback用 `cam_irq_stop_locked`，不能重入公开入口。必须在原owned sensor OFF已完成、sensor仍configured/AP可访问、`session.power/capture/stream`仍保持attempted时调用，先于sensor-close的reset/MCLK隔离。它实际执行原stream receipt→source/TG/receive逆序停机→DMA stop/DCM恢复→GIC priority/route恢复→自然spent确认。若只等power-close再执行，capture已被清除且sensor已隔离，原fresh AP资格必然失败；不能通过放宽这些门来修复顺序。**目前没有实际native caller**，后续provider须调用此入口，并继续独立full bus/map drain成功后才能让capture(off)返回0。
+
+`x9_camera_credit_retire.inc` 不接收“consumed/drained”布尔，不写RCNT、FBC1、RESET或重新建立accepted baseline。只有原epoch/request/lease、真实owned SOF/DONE、count_accepted、两bank原单credit WCNT+1/CNT0、CPU slot RETIRED与实际S1 `RAW_IDLE`、worker busy/count0、GIC enable/pending/active0及全部route/priority回原、source STOPPED、TG/receive停机、DMA stop/DCM已恢复并fresh P0 external/internal monitor0时，才进行两个新AP OFF0/hold0/frame-countFF样本。100ms总deadline覆盖owner、PTE/S1、GIC/SMI与AP操作，末次仍重采两bankFBC；首次attempt先留账，错误终态锁存SV/IRQ/slot并保留所有依赖。owner callback在spin及slot/S1锁外，锁序为control→IRQ→slot→S1。
+
+成功只保存不可变spent counters与 `CREDIT_SPENT`：**`credit_issued=true`、原 `credit_phase=ACCEPTED` 和原native lease/S1仍保留，begin仍拒绝新credit/rearm**。失败保持IRQ prepared/close-attempted，不能被下一次prepared=false快路径吞掉；成功后的power-close也重新核原spent receipt，不重发物理停机。每次spent后的SV environment（包括DB/field目标poll）仍重查原native authority、GIC原配置、slot/S1与actual counters/stop/DCM/P0；不是只在第一store前查一次。
+
+普通CAMSV close仅在该receipt后允许恢复自己的原FBC control；双bank消费后，唯一outer SEN_MODE store只还原自己改过的TG_MODE_OFF/FLUSH字段，CMOS/VF始终0，PATH/TGDB必须已回原。TG restore使用独立RESTORING/RESTORED、issued-before-store、双bank两次目标/seen及10ms总deadline；见原值后再回stopped值、未知位、timeout均不可重放。随后只还原原FH/address/geometry和原DB policy（除正常DB_EN down/up外不得改变其它policy）；不写inner/新TG DB/reset/credit return。历史receiver comparison可跨本次精确FBC/SEN变化，但live spin sampler仍拒绝任何counter变化或target回退。
+
+私有status和日志 `X9 CAMERA CREDIT SPENT` / `X9 CAMERA TG RESTORE`记录实际phase、attempt、issued、seen、samples、count与errno；旧用户态status/STOP/frame ioctl ABI未改。**局部配置restore不授予namespace/unpower或合法repeat**。normal host/current STRTable+CMDQ映射及跨firmware排他、full AXI/SMI/SMMU/EMI退休、native power/I2C/config/capture注册、持续rate/MMQoS和iOS真实前后RAW preview/photo仍继续；不出中间镜像。
 
 ### 保留共享 normal NS 控制器的 SID80 安装/退休
 

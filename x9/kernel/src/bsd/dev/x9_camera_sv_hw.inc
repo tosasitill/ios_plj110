@@ -88,6 +88,8 @@ static struct {
     uint32_t fbc_before[2];
     unsigned credit_phase;
     bool credit_issued;
+    bool credit_retire_attempted,credit_retired,credit_restore_issued;
+    uint32_t credit_retire_samples,credit_spent_count[2],credit_restore_seen;
     uint32_t credit_seen, credit_ack, credit_samples, credit_target[2];
     unsigned receive_phase;
     uint32_t receive_issued, receive_off_issued, receive_seen[2], receive_off_seen[2], receive_samples;
@@ -129,8 +131,14 @@ static void cam_sv_status(void)
     else s->flags&=~X9_CAM_SV_HW_REQUEST;
     if(cam_sv.fbc_ready && cam_sv.credit_phase==X9_CAM_SV_CREDIT_EMPTY)s->flags|=X9_CAM_SV_HW_FBC_EMPTY;
     else s->flags&=~X9_CAM_SV_HW_FBC_EMPTY;
-    if(cam_sv.fbc_ready && cam_sv.credit_phase==X9_CAM_SV_CREDIT_ACCEPTED)s->flags|=X9_CAM_SV_HW_FBC_CREDIT;
+    if(cam_sv.fbc_ready && !cam_sv.credit_retired && cam_sv.credit_phase==X9_CAM_SV_CREDIT_ACCEPTED)s->flags|=X9_CAM_SV_HW_FBC_CREDIT;
     else s->flags&=~X9_CAM_SV_HW_FBC_CREDIT;
+    if(cam_sv.credit_retired && !cam_sv.error)s->flags|=X9_CAM_SV_HW_CREDIT_SPENT;
+    else s->flags&=~X9_CAM_SV_HW_CREDIT_SPENT;
+    s->credit_retire_attempted=cam_sv.credit_retire_attempted;s->credit_retired=cam_sv.credit_retired;
+    s->credit_retire_samples=cam_sv.credit_retire_samples;
+    memcpy(s->credit_spent_count,cam_sv.credit_spent_count,sizeof(s->credit_spent_count));
+    s->credit_restore_issued=cam_sv.credit_restore_issued;s->credit_restore_seen=cam_sv.credit_restore_seen;
     s->credit_phase=cam_sv.credit_phase;s->credit_issued=cam_sv.credit_issued;
     s->credit_seen=cam_sv.credit_seen;s->credit_ack=cam_sv.credit_ack;
     s->credit_samples=cam_sv.credit_samples;
@@ -231,6 +239,17 @@ static uint32_t cam_sv_fbc_compare_word(unsigned bank,uint32_t value)
        !(cam_sv.credit_ack&(1u<<bank)) &&
        value==(cam_sv.target[CAM_SV_FBC]|CAM_SV_FBC_RCNT))return value&~CAM_SV_FBC_RCNT;
     return value;
+}
+/* Historical receiver pairs may span OUR sole original-EN restoration.
+ * Do not use this normalization in the live SV register guard. The actual
+ * spin-ordered FBC sampler below independently rejects target->prior and
+ * any counter change, including after both banks accepted original EN. */
+static uint32_t cam_sv_fbc_history_compare_word(unsigned bank,uint32_t value)
+{
+    if(bank<2 && cam_sv.credit_retired && cam_sv.close_attempted &&
+       cam_sv.credit_restore_issued && !cam_sv.terminal && !cam_sv.error &&
+       (value==cam_sv.target[CAM_SV_FBC] || value==cam_sv.before[bank][cam_sv.field[CAM_SV_FBC]]))return 0;
+    return cam_sv_fbc_compare_word(bank,value);
 }
 /* Merely an exception to the cold busy classifier, NOT authority. The full
  * snapshot guard below still requires the exact per-bank issued transition.
@@ -420,12 +439,17 @@ static int cam_sv_request_authority(void)
 static int cam_sv_environment(void)
 {
     int e=cam_sv_request_authority();if(e)return cam_sv_fault(e);
+    if(cam_sv.credit_retired) {
+        e=cam_irq_credit_retired_guard(cam_sv.epoch);if(e)return cam_sv_fault(e);
+    }
     e=cam_sv_guard();if(e)return e;
     e=cam_out_guard();if(e)return cam_sv_fault(e);
     e=cam_rx_session_guard();if(e)return cam_sv_fault(e);
     e=cam_mac_guard();if(e)return cam_sv_fault(e);
     e=cam_phy_guard();if(e)return cam_sv_fault(e);
-    e=cam_sv_request_authority();return e?cam_sv_fault(e):0;
+    e=cam_sv_request_authority();
+    if(!e && cam_sv.credit_retired)e=cam_irq_credit_retired_guard(cam_sv.epoch);
+    return e?cam_sv_fault(e):0;
 }
 static int cam_sv_pending_observe(void)
 {
@@ -468,12 +492,20 @@ static int cam_sv_post(unsigned slot,uint32_t next)
     int e=cam_sv_environment();if(e)return e;
     /* Credits are NOT ordinary configuration dirty bits. No DB load,
      * field restore or address rearm may cancel/replay an issued credit. */
-    if(cam_sv.credit_issued)return EBUSY;
+    if(cam_sv.credit_issued) {
+        if(!cam_sv.credit_retired || !cam_sv.close_attempted)return EBUSY;
+        e=cam_irq_credit_retired_guard(cam_sv.epoch);if(e)return e;
+        if(slot<CAM_SV_FIELDS && next!=cam_sv.before[0][reg])return EINVAL;
+        if(slot==CAM_SV_FIELDS && ((next^cam_sv.before[0][reg])&~CAM_SV_DB_EN))return EINVAL;
+    }
     if(cam_sv.pending_slot<=CAM_SV_FIELDS)return EBUSY;
     if(next==cam_sv.expected[0][reg])return 0;
     cam_sv.pending_slot=slot;cam_sv.pending_next=next;cam_sv.pending_seen=false;
     if(slot<CAM_SV_FIELDS)cam_sv.dirty|=1u<<slot;
     else cam_sv.db_issued=true;
+    if(slot==CAM_SV_FBC && cam_sv.credit_retired) {
+        cam_sv.credit_restore_issued=true; /* BEFORE the original EN control store */
+    }
     cam_rw(cam_sv.view[0],cam_sv.offset[reg],next);
     e=cam_sv_pending_observe();return e==EAGAIN?EIO:e;
 }
@@ -587,6 +619,9 @@ static int cam_sv_open_locked(uint64_t epoch)
     cam_sv.fbc_sampled=cam_sv.fbc_ready=false;
     memset(cam_sv.fbc_before,0,sizeof(cam_sv.fbc_before));
     cam_sv.credit_phase=X9_CAM_SV_CREDIT_EMPTY;cam_sv.credit_issued=false;
+    cam_sv.credit_retire_attempted=cam_sv.credit_retired=cam_sv.credit_restore_issued=false;
+    cam_sv.credit_retire_samples=cam_sv.credit_restore_seen=0;
+    memset(cam_sv.credit_spent_count,0,sizeof(cam_sv.credit_spent_count));
     cam_sv.credit_seen=cam_sv.credit_ack=cam_sv.credit_samples=0;
     memset(cam_sv.credit_target,0,sizeof(cam_sv.credit_target));
     cam_sv.receive_phase=X9_CAM_SV_RECEIVE_IDLE;
@@ -960,9 +995,9 @@ static int cam_sv_close_locked(uint64_t epoch)
     int e;
     if(!cam_sv.held)return 0;
     if(cam_sv.epoch!=epoch || cam_sv.close_attempted)return ESTALE;
-    /* No producer retirement exists yet. FBC_EN off/reset is NOT a way to
-     * revoke an accepted/pending credit or justify dropping its backing. */
-    if(cam_sv.credit_issued)return cam_sv_fault(EBUSY);
+    /* Only the actual natural spent receipt may restore ordinary FBC EN.
+     * EN off/reset cannot revoke pending credit or release its backing. */
+    if(cam_sv.credit_issued && !cam_sv.credit_retired)return cam_sv_fault(EBUSY);
     cam_sv.close_attempted=true;
     cam_sv.request_ready=cam_sv.fbc_ready=false;
     nanoseconds_to_absolutetime(10000000,&span);deadline=mach_absolute_time()+span;
@@ -983,6 +1018,10 @@ static int cam_sv_close_locked(uint64_t epoch)
         if(!e)for(unsigned bank=0;bank<2;bank++)
             if(cam_sv.expected[bank][cam_sv.field[CAM_SV_FBC]]!=prior)e=cam_sv_fault(ESTALE);
     }
+    /* Return the stopped TG's OFF/FLUSH profile only after original FBC EN
+     * is actually off in both banks. CMOS/VF stay off, source stays stopped,
+     * original natural counters and permanent mapping remain unchanged. */
+    if(!e && cam_sv.credit_retired)e=cam_sv_gate_restore_locked(epoch);
     for(unsigned i=CAM_SV_FBC;i && !e;i--) {
         unsigned slot=i-1;
         if(cam_sv.dirty&(1u<<slot))e=cam_sv_field_write(slot,cam_sv.before[0][cam_sv.field[slot]]);
@@ -1015,7 +1054,7 @@ static int cam_sv_close_locked(uint64_t epoch)
     cam_sv.status.restore_errno=e;cam_sv_status();
     printf("X9 CAMERA CAMSV CLOSE: sensor=%u epoch=%llu flags=%x errno=%u restore=%d "
         "dirty=%x pending=%u commit=%u dbphase=%u sequence=%llu/%llu terminal=%u "
-        "DB=%x/%x (no-credit FBC/RAW10 geometry/address/FH restore, NOT AXI/map drain)\n",
+        "DB=%x/%x (inactive/spent FBC geometry/address/FH restore, NOT AXI/map drain)\n",
         cam_sv.status.sensor,epoch,cam_sv.status.flags,cam_sv.status.last_errno,e,cam_sv.status.dirty,
         cam_sv.status.pending,cam_sv.status.commit_pending,cam_sv.status.db_phase,cam_sv.status.command,
         cam_sv.status.completed,cam_sv.status.terminal,cam_sv.status.db_after[0],cam_sv.status.db_after[1]);

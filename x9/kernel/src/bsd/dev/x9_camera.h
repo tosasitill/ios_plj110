@@ -404,6 +404,18 @@ int x9_camera_camsv_arm(struct x9_camera_camsv_slot *,
  * state, not errno alone. ESTALE may be an obsolete IRQ/generation. A retained
  * slot requires the owner's fault/drain path, not retry or dependency release. */
 int x9_camera_camsv_finish(struct x9_camera_camsv_slot *, const struct x9_camera_camsv_irq *);
+/* Thread-context standalone native controller, control mutex acquired.
+ * Call AFTER the actual owned sensor OFF/FF and BEFORE capture(off) returns,
+ * sensor reset/isolation or power close. In-TU callbacks use the locked helper.
+ * Performs real OFF/DONE/CPU/worker/GIC qualification, reverse source/TG/receive
+ * controls, owned DMA stop+DCM restore, GIC unwind and natural credit-spent
+ * recording. Repeated/partial stops cannot replay or rebase the request.
+ * Return0 proves ONLY this local consumer sequence, NOT full AXI/SMI/SMMU/EMI
+ * retirement. Native full bus/map drain must still succeed independently;
+ * this never clears session.capture, unmaps/frees S1 or releases any supplier.
+ * It requires a real begun/streamed immutable request and retained native lease,
+ * not generic inactive/diagnostic authority. No native caller is registered here. */
+int x9_camera_camsv_irq_stop(uint64_t epoch);
 /* Thread-context standalone controller calls; acquire camera_control_lock.
  * In-TU platform callbacks already holding that lock use the locked helper.
  * Requires the prepared live-topology/receiver epoch and a REAL DMA lease.

@@ -25,6 +25,7 @@ static int cam_smi_retirement_guard(uint64_t);
 static int cam_sv_guard(void);
 static uint32_t cam_sv_fbc_busy_exemption(void);
 static uint32_t cam_sv_fbc_compare_word(unsigned,uint32_t);
+static uint32_t cam_sv_fbc_history_compare_word(unsigned,uint32_t);
 static uint32_t cam_sv_receive_busy_exemption(unsigned);
 static uint32_t cam_sv_receive_compare_word(unsigned,uint32_t);
 static int cam_sv_receive_sample_word(unsigned,vm_offset_t,uint32_t);
@@ -52,6 +53,7 @@ static uint32_t cam_source_busy_exemption(vm_offset_t,unsigned);
 static int cam_source_commit_guard(void);
 static int cam_irq_fbc_live_sample(uint64_t,unsigned,vm_offset_t,
     const struct x9_camera_camsv_request *,uint32_t,uint32_t *,bool *);
+static int cam_irq_credit_retired_guard(uint64_t);
 static const unsigned cam_rx_out_offsets[X9_CAM_RX_OUT_WORDS]={
     0x000,0x004,0x008,0x00c,0x010,0x014,0x018,0x020,
     0x02c,0x034,0x038,0x100,0x104,0x108
@@ -148,7 +150,7 @@ static uint32_t cam_rx_changed(const struct x9_camera_receiver_sample *a,
          * compare its canonical control while that transition is pending;
          * original/cached/public samples are never overwritten or rebased. */
         if(word==4) {
-            av=cam_sv_fbc_compare_word(bank,av);bv=cam_sv_fbc_compare_word(bank,bv);
+            av=cam_sv_fbc_history_compare_word(bank,av);bv=cam_sv_fbc_history_compare_word(bank,bv);
         }
         if(!word) {
             av=cam_sv_receive_compare_word(bank,av);bv=cam_sv_receive_compare_word(bank,bv);

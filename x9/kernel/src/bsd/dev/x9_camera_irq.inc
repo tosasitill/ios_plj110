@@ -221,6 +221,7 @@ static int cam_irq_credit_guard_locked(uint64_t epoch)
 #include "x9_camera_stream.inc"
 #include "x9_camera_stream_stop.inc"
 #include "x9_camera_dma_stop.inc"
+#include "x9_camera_credit_retire.inc"
 /* Under spin, after actual IAR and only while accepting. Ordinary FIRST/FH
  * reads select exactly the vendor bank. No multi-tag fallback or status sweep. */
 static void cam_irq_sample(unsigned role,struct cam_irq_event *ev)
@@ -584,7 +585,16 @@ static int cam_irq_close_locked(uint64_t epoch)
     bool owns;
     uint64_t span,end;
     int e=0;
-    if(!cam_irq.prepared)return 0;
+    if(!cam_irq.prepared) {
+        /* Native capture-stop may have consumed this local sequence before
+         * power-close. Revalidate its real retained spent receipt, never
+         * replay it or mistake prepared=false for whole bus/map drain. */
+        if(cam_sv.credit_issued) {
+            if(!cam_sv.credit_retired)return cam_irq.error?cam_irq.error:ESTALE;
+            return cam_irq_credit_retired_guard(epoch);
+        }
+        return 0;
+    }
     lck_mtx_lock(&camera_irq_lock);
     if(epoch!=cam_irq.epoch||cam_irq.close_attempted){lck_mtx_unlock(&camera_irq_lock);return ESTALE;}
     /* Stop only an inactive arm or the privately qualified streamed request.
@@ -649,11 +659,38 @@ static int cam_irq_close_locked(uint64_t epoch)
     }
     if(!e) {
         old=cam_irq_spin_take();cam_irq.owns=false;cam_irq_spin_drop(old);
-        cam_irq.prepared=false; /* thread/maps/history/S1 backing retained */
-    } else cam_irq_fault(e);
+        if(session.stream)e=cam_sv_credit_retire_locked(epoch);
+        if(!e)cam_irq.prepared=false; /* thread/maps/history/S1 backing retained */
+    }
+    if(e)cam_irq_fault(e); /* keep prepared on spent-receipt failure */
     printf("X9 CAMERA IRQ CLOSE: epoch=%llu owns=%u state=%u restore=%d dirty=%x/%x "
         "uncertain=%x/%x (GIC/worker only, NOT RAW/AXI/map drain)\n",epoch,owns,
         cam_irq.slot->state,e,cam_irq.dirty_route,cam_irq.dirty_priority,
         cam_irq.uncertain_route,cam_irq.uncertain_priority);
     lck_mtx_unlock(&camera_irq_lock);return e;
+}
+/* Actual controller stop entry, BEFORE core capture(off) returns and BEFORE
+ * sensor close/reset/MM teardown. It executes the real local stop sequence;
+ * the independent native full bus/map drain must still follow. Not an ioctl,
+ * caller-supplied receipt, capture=false setter or a generic reset/retry.
+ */
+static int cam_irq_stop_locked(uint64_t epoch)
+{
+    boolean_t old;
+    int e;
+    if(!epoch || epoch!=cam_irq.epoch || epoch!=cam_sensor_live.epoch ||
+       !cam_irq.prepared || !session.power || !session.capture || !session.stream ||
+       cam_sensor_live.close_attempted || cam_rx_live.close_attempted ||
+       cam_sensor_live.phase!=CAM_SENSOR_CONFIGURED)return ESTALE;
+    old=cam_irq_spin_take();
+    e=cam_irq.error?cam_irq.error:cam_irq.close_attempted?EALREADY:0;
+    cam_irq_spin_drop(old);
+    if(!e)e=cam_irq_close_locked(epoch);
+    return e;
+}
+int x9_camera_camsv_irq_stop(uint64_t epoch)
+{
+    int e;
+    lck_mtx_lock(&camera_control_lock);e=cam_irq_stop_locked(epoch);
+    lck_mtx_unlock(&camera_control_lock);return e;
 }

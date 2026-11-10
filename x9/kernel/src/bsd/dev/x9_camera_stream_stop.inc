@@ -3,7 +3,9 @@
  * a private receipt, not a caller-supplied done/drained boolean. A complete
  * sensor OFF and owned DONE/CPU/worker/GIC boundary permits ONLY the normal
  * reverse source/TG/receive stores. The original credit, S1 and all parent
- * dependencies remain pinned; cam_sv_close still refuses issued credit.
+ * dependencies remain pinned. Ordinary CAMSV restore additionally requires
+ * the later private natural-spent receipt; this control receipt alone cannot
+ * release/rearm the issued credit or justify dropping any mapping/supplier.
  */
 static struct {
     uint64_t epoch;

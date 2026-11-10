@@ -91,11 +91,27 @@ static int cam_irq_fbc_bind_locked(uint64_t epoch)
 static int cam_irq_fbc_note_locked(unsigned bank,uint32_t control,uint32_t counter)
 {
     uint32_t prior,want,wcnt,cnt;
+    if(bank>=2)return cam_irq_fbc_fault_locked(EINVAL);
     cam_irq_fbc.after_control[bank]=control;cam_irq_fbc.after[bank]=counter;
     if(!cam_irq_fbc.bound || cam_irq_fbc.epoch!=cam_irq.epoch || cam_irq_fbc.error ||
        memcmp(&cam_irq_fbc.request,&cam_irq.request,sizeof(cam_irq.request)))
         return cam_irq_fbc_fault_locked(ESTALE);
     if(cam_irq_fbc.source_error)return cam_irq_fbc.source_error;
+    if(cam_sv.credit_retired) {
+        uint32_t original=cam_sv.before[bank][cam_sv.field[CAM_SV_FBC]];
+        if(cam_sv.epoch!=cam_irq_fbc.epoch || !cam_irq.close_attempted ||
+           cam_irq.owns || cam_irq.accepting || cam_irq.busy || cam_irq.count ||
+           !cam_irq_fbc.count_accepted || counter!=cam_sv.credit_spent_count[bank])
+            return cam_irq_fbc_fault_locked(ESTALE);
+        /* Preserve RCNT/WCNT/DROP/CNT exactly. Only OUR issued close may
+         * return FBC EN to original; a sampled target cannot regress. */
+        if(cam_sv.credit_restore_issued && control==original) {
+            cam_sv.credit_restore_seen|=1u<<bank;return 0;
+        }
+        if((cam_sv.credit_restore_seen&(1u<<bank)) || control!=cam_irq_fbc.control[bank])
+            return cam_irq_fbc_fault_locked(ESTALE);
+        return 0;
+    }
     prior=cam_irq_fbc.before[bank];want=cam_irq_fbc.target[bank];
     wcnt=counter&CAM_IRQ_FBC_WCNT;cnt=counter&CAM_IRQ_FBC_CNT;
     if(control!=cam_irq_fbc.control[bank] ||

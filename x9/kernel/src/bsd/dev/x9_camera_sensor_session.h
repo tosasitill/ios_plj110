@@ -71,7 +71,8 @@
  * Cold configure_outmux still never writes an address, cookie or FBC.
  * Partial address/FBC/DB/credit/receive-enable publication retains
  * the cold epoch. No command retry/DB/reset cancels an issued credit; rearm
- * and CAMSV restore remain prohibited until real producer retirement exists.
+ * remains prohibited. Ordinary CAMSV restore requires the separate actual
+ * natural credit-spent receipt described below, never a caller assertion.
  * Close first reverses this input-inactive DL/PHY/AFIFO/MAC path, including
  * DL's fresh commit, then attempts TG_MODE_OFF/VF-off/TG-DB-up/down/CMOS-off,
  * then quiesces this input-inactive receive arm. Each phase's full actual
@@ -90,6 +91,19 @@
  * changed DCM inhibit and our consumed stop, with two-bank target readback;
  * borrowed DCM remains untouched, credit/map/supplier still pinned. Partial
  * or unknown stop/restore is terminal, never released/reissued on cleanup.
+ * Native capture-stop uses x9_camera_camsv_irq_stop (locked helper in-TU)
+ * while sensor/AP and attempted capture remain held, BEFORE sensor close
+ * isolates reset/MCLK. After original GIC routes/priorities actually restore,
+ * it verifies the same OFF/DONE/CPU/worker receipt, actual S1 RAW_IDLE, current
+ * native authority, restored stop/DCM, P0 monitors0 and two new AP OFF/hold0/FF
+ * samples. It records immutable natural WCNT+1/CNT0 as SPENT, but keeps the
+ * issued/ACCEPTED credit history, lease, S1 and all suppliers, prohibiting rearm.
+ * Only later ordinary CAMSV close may consume original FBC EN, restore its
+ * own OFF/FLUSH SEN bits (CMOS/VF remain0), FH/address/geometry and DB policy.
+ * Partial stop/spent/TG restoration is terminal and cannot release/replay.
+ * This entry returns0 only for local consumer stop, NEVER full AXI/SMI/SMMU/
+ * EMI retirement; native full drain must still succeed before capture(off)
+ * returns0 and core clears session.capture. No native host/capture registered.
  * The real IRQ worker additionally binds accepted FBC at begin and requires
  * owned SOF/DONE plus actual WCNT+1/CNT0 both-bank counts before CPU read.
  * That IRQ-private count evidence does not mutate the control-locked SV

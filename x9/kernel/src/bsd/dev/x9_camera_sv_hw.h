@@ -15,6 +15,8 @@
 #define X9_CAM_SV_HW_RECEIVE_QUIESCENT 512u
 #define X9_CAM_SV_HW_GATE_ARMED 1024u
 #define X9_CAM_SV_HW_GATE_STOPPED 2048u
+#define X9_CAM_SV_HW_CREDIT_SPENT 4096u /* Natural owned DONE, NOT map retirement. */
+#define X9_CAM_SV_HW_GATE_RESTORED 8192u
 #define X9_CAM_SV_CREDIT_EMPTY 0u
 #define X9_CAM_SV_CREDIT_PENDING 1u
 #define X9_CAM_SV_CREDIT_ACCEPTED 2u
@@ -29,6 +31,8 @@
 #define X9_CAM_SV_GATE_ARMED 2u
 #define X9_CAM_SV_GATE_STOPPING 3u
 #define X9_CAM_SV_GATE_STOPPED 4u
+#define X9_CAM_SV_GATE_RESTORING 5u
+#define X9_CAM_SV_GATE_RESTORED 6u
 #define X9_CAM_SV_GATE_FIELDS 3u
 #define X9_CAM_SV_GATE_STEPS 8u
 #define X9_CAM_SV_HW_CONFIG_FIELDS 10u
@@ -54,6 +58,9 @@ struct x9_camera_sv_hw_status {
     uint32_t gate_phase, gate_pending, gate_issued, gate_seen[2], gate_samples, gate_errno;
     uint32_t gate_before[X9_CAM_SV_GATE_FIELDS], gate_after[2][X9_CAM_SV_GATE_FIELDS];
     uint32_t gate_prior[X9_CAM_SV_GATE_STEPS], gate_target[X9_CAM_SV_GATE_STEPS];
+    uint32_t credit_retire_attempted, credit_retired, credit_retire_samples;
+    uint32_t credit_spent_count[2], credit_restore_issued, credit_restore_seen;
+    uint32_t gate_restore_attempted, gate_restore_issued, gate_restore_seen, gate_restore_samples;
 };
 /* configure_outmux invokes the real locked engine after OUTMUX consumption.
  * It writes only tag0 packed RAW10 geometry, A0 stride/burst, group0 and
@@ -93,11 +100,18 @@ struct x9_camera_sv_hw_status {
  * journaled before historical comparisons, not adopted by canonicalization.
  * QUIESCENT describes four actual disabled controls only, not RAW/AXI/map
  * drain, prior-counter restoration, credit cancellation or dependency release.
- * An issued credit prohibits rearm/config restore until the actual producer
- * retirement chain is implemented; no caller-provided consumed boolean.
+ * An issued credit always prohibits rearm. Ordinary config restore additionally
+ * requires the private actual OFF/DONE/CPU/worker/GIC/DMA-stop-restored receipt,
+ * two fresh OFF/hold0/FF AP samples and immutable natural WCNT+1/CNT0. SPENT
+ * retains credit_issued/ACCEPTED history, S1 and the same native lease. It is
+ * never a caller-provided consumed boolean or full AXI/SMI/SMMU/EMI retirement.
+ * After original FBC EN is consumed in both banks, only OUR TG OFF/FLUSH bits
+ * may return to before, CMOS/VF remain0, and ordinary FH/address/geometry plus
+ * original DB policy may restore. RESTORING/RESTORED track sole SEN store and
+ * both-bank monotonic target samples, not a TG DB/reset/credit-return operation.
  * Sensor close retires this journal BEFORE OUTMUX/PHY/MAC/SMI/MM. Pending
  * writes require their actual targets, not cancellation by a prior value.
  * This state is neither GIC/IRQ history nor producer/DMA/cache/worker drain.
- * No new standalone entrypoint, ioctl, READY or ownership claim. */
+ * This private status adds no ioctl, READY or ownership claim. */
 #endif
 #endif

@@ -22,6 +22,8 @@ static struct {
     uint32_t before[X9_CAM_SV_GATE_FIELDS];
     uint32_t prior[X9_CAM_SV_GATE_STEPS],target[X9_CAM_SV_GATE_STEPS];
     bool captured;
+    bool restore_attempted,restore_issued;
+    uint32_t restore_prior,restore_seen,restore_samples;
     int error;
 } cam_sv_gate;
 static void cam_sv_gate_init(void)
@@ -42,6 +44,8 @@ static void cam_sv_gate_status(void)
     s->gate_phase=cam_sv_gate.phase;s->gate_pending=cam_sv_gate.pending;
     s->gate_issued=cam_sv_gate.issued;s->gate_samples=cam_sv_gate.samples;
     s->gate_errno=cam_sv_gate.error;
+    s->gate_restore_attempted=cam_sv_gate.restore_attempted;s->gate_restore_issued=cam_sv_gate.restore_issued;
+    s->gate_restore_seen=cam_sv_gate.restore_seen;s->gate_restore_samples=cam_sv_gate.restore_samples;
     memcpy(s->gate_seen,cam_sv_gate.seen,sizeof(s->gate_seen));
     memcpy(s->gate_before,cam_sv_gate.before,sizeof(s->gate_before));
     memcpy(s->gate_prior,cam_sv_gate.prior,sizeof(s->gate_prior));
@@ -50,6 +54,8 @@ static void cam_sv_gate_status(void)
     else s->flags&=~X9_CAM_SV_HW_GATE_ARMED;
     if(cam_sv_gate.phase==X9_CAM_SV_GATE_STOPPED && !cam_sv.error)s->flags|=X9_CAM_SV_HW_GATE_STOPPED;
     else s->flags&=~X9_CAM_SV_HW_GATE_STOPPED;
+    if(cam_sv_gate.phase==X9_CAM_SV_GATE_RESTORED && !cam_sv.error)s->flags|=X9_CAM_SV_HW_GATE_RESTORED;
+    else s->flags&=~X9_CAM_SV_HW_GATE_RESTORED;
 }
 static void cam_sv_gate_fault(int e)
 {
@@ -83,7 +89,8 @@ static int cam_sv_gate_admission_locked(uint64_t epoch)
 static bool cam_sv_gate_off_ready(void)
 {
     return !cam_sv_gate.error && !cam_sv.error && !cam_sv.terminal &&
-        (cam_sv_gate.phase==X9_CAM_SV_GATE_IDLE || cam_sv_gate.phase==X9_CAM_SV_GATE_STOPPED);
+        (cam_sv_gate.phase==X9_CAM_SV_GATE_IDLE || cam_sv_gate.phase==X9_CAM_SV_GATE_STOPPED ||
+         cam_sv_gate.phase==X9_CAM_SV_GATE_RESTORING || cam_sv_gate.phase==X9_CAM_SV_GATE_RESTORED);
 }
 /* Only classification, never a grant. Exact issued current controls and
  * every unchanged word still pass the full snapshot guard. Cold is strict. */
@@ -103,6 +110,10 @@ static uint32_t cam_sv_gate_busy_exemption(unsigned offset)
 static uint32_t cam_sv_gate_compare_word(unsigned bank,unsigned offset,uint32_t value)
 {
     unsigned step=cam_sv_gate.pending;
+    if(bank<2 && cam_sv_gate.restore_issued && !cam_sv_gate.error &&
+       offset==cam_sv_gate_offsets[CAM_SV_GATE_SEN] &&
+       (cam_sv_gate.phase==X9_CAM_SV_GATE_RESTORING || cam_sv_gate.phase==X9_CAM_SV_GATE_RESTORED) &&
+       (value==cam_sv_gate.restore_prior || value==cam_sv_gate.before[CAM_SV_GATE_SEN]))return 0;
     if(bank<2 && step<X9_CAM_SV_GATE_STEPS && !cam_sv.terminal &&
        (cam_sv_gate.issued&(1u<<step)) &&
        cam_sv_gate_offsets[cam_sv_gate_step_fields[step]]==offset &&
@@ -113,6 +124,14 @@ static int cam_sv_gate_note(unsigned bank,unsigned offset,uint32_t value,bool *a
 {
     unsigned step=cam_sv_gate.pending;
     uint32_t bit;
+    if(cam_sv_gate.restore_issued && offset==cam_sv_gate_offsets[CAM_SV_GATE_SEN] &&
+       (cam_sv_gate.phase==X9_CAM_SV_GATE_RESTORING || cam_sv_gate.phase==X9_CAM_SV_GATE_RESTORED)) {
+        if(bank>=2 || cam_sv_gate.epoch!=cam_sv.epoch || !cam_sv.credit_retired ||
+           !cam_sv.close_attempted || (value!=cam_sv_gate.before[CAM_SV_GATE_SEN] &&
+            ((cam_sv_gate.restore_seen&(1u<<bank)) || value!=cam_sv_gate.restore_prior)))return ESTALE;
+        if(value==cam_sv_gate.before[CAM_SV_GATE_SEN])cam_sv_gate.restore_seen|=1u<<bank;
+        *allowed=true;return 0;
+    }
     if(step>=X9_CAM_SV_GATE_STEPS || !(cam_sv_gate.issued&(1u<<step)) ||
        cam_sv_gate_offsets[cam_sv_gate_step_fields[step]]!=offset)return 0;
     if(cam_sv_gate.epoch!=cam_sv.epoch || cam_sv.credit_phase!=X9_CAM_SV_CREDIT_ACCEPTED ||
@@ -131,7 +150,10 @@ static int cam_sv_gate_observe_word(unsigned bank,unsigned reg,uint32_t value,bo
     if(e)return e;
     if(owned) {
         *allowed=true;
-        if(value==cam_sv_gate.target[step])cam_sv.expected[bank][reg]=value;
+        if(cam_sv_gate.restore_issued && cam_sv.offset[reg]==cam_sv_gate_offsets[CAM_SV_GATE_SEN] &&
+           (cam_sv_gate.phase==X9_CAM_SV_GATE_RESTORING || cam_sv_gate.phase==X9_CAM_SV_GATE_RESTORED)) {
+            if(value==cam_sv_gate.before[CAM_SV_GATE_SEN])cam_sv.expected[bank][reg]=value;
+        } else if(value==cam_sv_gate.target[step])cam_sv.expected[bank][reg]=value;
     }
     return 0;
 }
@@ -239,4 +261,70 @@ static int cam_sv_gate_quiesce_locked(uint64_t epoch)
      * OFF/DONE/worker/GIC receipt at every transition guard. */
     if(cam_sv_gate.phase!=X9_CAM_SV_GATE_ARMED)return cam_sv.error?cam_sv.error:ESTALE;
     return cam_sv_gate_transition_locked(epoch,true);
+}
+/* Return only OUR stopped OFF/FLUSH profile. This is ordinary SEN_MODE,
+ * not a TG DB load, credit return, central reset or permission to rearm.
+ * Control lock held; original native lease and stopped request stay pinned.
+ */
+static int cam_sv_gate_restore_locked(uint64_t epoch)
+{
+    uint64_t span,end;
+    uint32_t target=cam_sv_gate.before[CAM_SV_GATE_SEN];
+    unsigned sen=cam_sv_find(0x140),vf=cam_sv_find(0x148),path=cam_sv_find(0x14c);
+    int e=0;
+    if(cam_sv_gate.restore_attempted)return cam_sv_gate.error?cam_sv_gate.error:ESTALE;
+    cam_sv_gate.restore_attempted=true;
+    nanoseconds_to_absolutetime(10000000,&span);end=mach_absolute_time()+span;
+    if(!cam_sv.credit_retired || !cam_sv.close_attempted || cam_sv.epoch!=epoch ||
+       !cam_sv_gate.captured || cam_sv_gate.epoch!=epoch || cam_sv_gate.error ||
+       cam_sv_gate.phase!=X9_CAM_SV_GATE_STOPPED || cam_sv_gate.pending!=X9_CAM_SV_GATE_STEPS ||
+       cam_sv.pending_slot<=CAM_SV_FIELDS || cam_sv.commit_pending ||
+       !cam_sv.credit_restore_issued || cam_sv.credit_restore_seen!=3 ||
+       sen>=cam_sv.count || vf>=cam_sv.count || path>=cam_sv.count || (target&CAM_SV_GATE_CMOS)) {
+        e=ESTALE;goto out;
+    }
+    e=cam_sv_environment();if(!e)e=cam_irq_credit_retired_guard(epoch);if(e)goto out;
+    cam_sv_gate.restore_prior=cam_sv.expected[0][sen];
+    for(unsigned bank=0;bank<2;bank++) {
+        if(cam_sv.expected[bank][sen]!=cam_sv_gate.restore_prior ||
+           ((cam_sv_gate.restore_prior^target)&~(CAM_SV_GATE_TGOFF|CAM_SV_GATE_FLUSH)) ||
+           (cam_sv.expected[bank][sen]&CAM_SV_GATE_CMOS) || (cam_sv.expected[bank][vf]&1) ||
+           cam_sv.expected[bank][vf]!=cam_sv_gate.before[CAM_SV_GATE_VF] ||
+           cam_sv.expected[bank][path]!=cam_sv_gate.before[CAM_SV_GATE_PATH] ||
+           cam_sv.expected[bank][cam_sv.field[CAM_SV_FBC]]!=
+                cam_sv.before[bank][cam_sv.field[CAM_SV_FBC]]) {e=ESTALE;goto out;}
+    }
+    e=cam_sv_environment();if(!e)e=cam_irq_credit_retired_guard(epoch);if(e)goto out;
+    if(mach_absolute_time()>=end){e=ETIMEDOUT;goto out;}
+    cam_sv_gate.phase=X9_CAM_SV_GATE_RESTORING;
+    if(cam_sv_gate.restore_prior!=target) {
+        cam_sv_gate.restore_issued=true;cam_sv_status(); /* BEFORE sole store */
+        cam_rw(cam_sv.view[0],0x140,target);
+    }
+    for(unsigned poll=0;poll<10000;poll++) {
+        bool match=true;
+        if(mach_absolute_time()>=end){e=ETIMEDOUT;goto out;}
+        e=cam_sv_environment();if(!e)e=cam_irq_credit_retired_guard(epoch);if(e)goto out;
+        for(unsigned bank=0;bank<2;bank++) {
+            if(cam_sv.status.gate_after[bank][CAM_SV_GATE_SEN]!=target)match=false;
+            else cam_sv_gate.restore_seen|=1u<<bank; /* actual no-op also recorded */
+        }
+        if(mach_absolute_time()>=end){e=ETIMEDOUT;goto out;}
+        cam_sv_gate.restore_samples=match?cam_sv_gate.restore_samples+1:0;
+        if(cam_sv_gate.restore_samples==2)break;
+        delay(1);
+    }
+    if(cam_sv_gate.restore_samples!=2 || cam_sv_gate.restore_seen!=3){e=ETIMEDOUT;goto out;}
+    e=cam_sv_environment();if(!e)e=cam_irq_credit_retired_guard(epoch);
+    if(!e && mach_absolute_time()>=end)e=ETIMEDOUT;
+    if(!e)cam_sv_gate.phase=X9_CAM_SV_GATE_RESTORED;
+out:
+    if(e){cam_sv.terminal=true;cam_sv_fault(e);}
+    cam_sv_status();
+    printf("X9 CAMERA TG RESTORE: epoch=%llu capture_id=%llu phase=%u issued=%u "
+        "seen=%x samples=%u SEN=%x/%x errno=%d (own OFF/FLUSH only; credit history/map retained)\n",
+        epoch,cam_sv.request.frame.capture_id,cam_sv_gate.phase,cam_sv_gate.restore_issued,
+        cam_sv_gate.restore_seen,cam_sv_gate.restore_samples,
+        cam_sv.status.gate_after[0][0],cam_sv.status.gate_after[1][0],e);
+    return e;
 }
