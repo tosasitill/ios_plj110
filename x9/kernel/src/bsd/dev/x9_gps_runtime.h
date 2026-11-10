@@ -14,8 +14,9 @@ enum x9_gps_physical_stage {
  X9_GPS_PHYSICAL_POS_PLL, X9_GPS_PHYSICAL_POS_RADIO,
  X9_GPS_PHYSICAL_POS_LOW_POWER
 };
+struct x9_gps_afe_smc_result { uint64_t a[4]; };
 struct x9_gps_connv2_ops {
- uint32_t version; /* 1..4; descriptor/context remain live until reboot. */
+ uint32_t version; /* 1..5; descriptor/context remain live until reboot. */
  void *context;
  /* Exclusive long-lived connv2 lease, NOT Wi-Fi connv3/MT6653 ownership.
   * Must power/qualify MT6661 VGPS18, CONNSYS domain, AP bus clocks/protect,
@@ -43,24 +44,24 @@ struct x9_gps_connv2_ops {
  int (*control)(void *, unsigned, uint8_t, const uint8_t *, unsigned, uint64_t);
  int (*mnl)(void *, const uint8_t *, unsigned, uint64_t);
  int (*other_ccif)(void *, unsigned, uint64_t);
- /* Version-2..4 tail. Version 1 remains the full vendor POS supplier.
-  * Version 2..4 acquire must instead stop at the cold pre-D-die boundary:
+ /* Version-2..5 tail. Version 1 remains the full vendor POS supplier.
+  * Version 2..5 acquire must instead stop at the cold pre-D-die boundary:
   * real clock schematic/buffer/HWV/AP bus, secure EMI/MPU and EXCLUSIVE
   * whole connv2 SYSRAM + all old BGF DMA quiesce; GPS reset held and
   * function disabled. No D-die/SPI/AFE/ADie/radio initialization yet.
   * The worker then executes native D-die before pos_finalize. Never
-  * register v2..4 merely because a register snapshot or SMC returned zero. */
+  * register v2..5 merely because a register snapshot or SMC returned zero. */
  uint32_t pos_clock_schematic; /* measured vendor enum 0..3, not Hz/guess */
  /* Every native POS read/write revalidates exclusive SRAM/DMA ownership
   * in addition to validate's power/bus lease. Must be bounded, live and
-  * non-reentrant; no constant-success implementation. For v3/v4, also
+  * non-reentrant; no constant-success implementation. For v3/v4/v5, also
   * dynamically prove EXCLUSIVE WT_SLP/AFE ownership on every access. */
  int (*pos_validate)(void *, const struct x9_gps_handoff *, uint64_t, uint64_t);
  /* Complete actual SPI/AFE/PLL/radio/low-power/MT6686 POS under the same
   * retained lease. Must leave GPS reset held/function disabled, not
   * reenter HIF, clear native SYSRAM, or register a ready backend. */
  int (*pos_finalize)(void *, const struct x9_gps_handoff *, uint64_t, uint64_t);
- /* Version-3/4 tail; v1/v2 descriptors end before this member.
+ /* Version-3/4/5 tail; v1/v2 descriptors end before this member.
   * v3 moves the actual MT6686 WT_SLP setup and MT6993 subsystem PLL
   * writes into the sole worker: D-die -> native SPI -> this AFE callback
   * -> native PLL -> pos_finalize. Acquire has the same cold contract,
@@ -72,7 +73,7 @@ struct x9_gps_connv2_ops {
   * v3 pos_finalize completes the remaining radio/voltage/low-power/
   * MT6686 qualification, NOT the already executed native stages. */
  int (*pos_afe)(void *, const struct x9_gps_handoff *, uint64_t, uint64_t);
- /* Version-4 tail ONLY; v3 ends at 96B. Worker executes the actual radio
+ /* Version-4/5 tail; v3 ends at 96B. Worker executes the actual radio
   * bookkeeping bit, this voltage/pre-low-power callback, then native
   * low-power/WLA/CMDBT and finally pos_finalize (remaining PMIC/MT6686
   * qualification). A bookkeeping bit is NOT RF or receiver readiness.
@@ -92,9 +93,21 @@ struct x9_gps_connv2_ops {
  /* EXACT original MT6993 CMDBT 4096B little-endian image, not GPS MCU
   * ROM/MNL firmware. Kernel-only readable input: registration snapshots
   * and verifies identity BEFORE arming the worker or acquiring hardware.
-  * No default image is embedded. Wrong/missing image cannot arm v4. */
+  * No default image is embedded. Wrong/missing image cannot arm v4/v5. */
  const uint8_t *pos_cmdbt;
  uint32_t pos_cmdbt_bytes;
+ /* Version-5 ONLY; v4 ends at120B. Native op14 SMC is executed once by
+  * the worker AFTER SPI, BEFORE this verifier and PLL. pos_afe is unused
+  * for v5 and need not be provided; v1..v4 keep their original behavior.
+  * acquire/pos_validate must additionally qualify this actual running ATF
+  * ABI and EXCLUSIVE secure patch access (not merely FDT/Android READY).
+  * Verify these raw return semantics AND actual completed AFE patch using
+  * measured board evidence. VOID vendor call defines no universal return0
+  * convention. No constant success, duplicate SMC, inferred ACK, reset
+  * release, reentry or READY. A raw zero is NOT sufficient; ambiguity must
+  * fail and retain the lease in quarantine. Result lifetime is this call. */
+ int (*pos_afe_verify)(void *, const struct x9_gps_handoff *, uint64_t,
+     uint64_t, const struct x9_gps_afe_smc_result *);
 };
 #ifdef __cplusplus
 extern "C" {

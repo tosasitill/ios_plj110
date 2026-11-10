@@ -1,17 +1,17 @@
 /* Native MT6993 cold D-die phase, actual conninfra.ko 547a0 -> 55960 /
  * 55a28 / 55a6c. Not a connv2 supplier or a runtime power probe. Only a
- * version-2..4 supplier may expose the exclusive cold SRAM/DMA boundary.
+ * version-2..5 supplier may expose the exclusive cold SRAM/DMA boundary.
  * No caller/default supplier is fabricated here; v1 never enters this.
  * Do not move the 8KiB clear before acquire or after pos_finalize/HIF. */
 static int gps_pos_guard(void)
 {
- if(gps_rt.ops.version<2 || gps_rt.ops.version>4 || !gps_rt.ops.pos_validate ||
+ if(gps_rt.ops.version<2 || gps_rt.ops.version>5 || !gps_rt.ops.pos_validate ||
     !(gps_rt.layout.flags&X9_GPS_POS_LAYOUT_VERIFIED))return ENXIO;
  int e=gps_mcu_guard();if(e)return e;
  e=gps_rt.ops.pos_validate(gps_rt.ops.context,&gps_rt.layout,
      gps_rt.generation,gps_rt.lease);
  if(e)return e;
- if(gps_rt.ops.version==4) {
+ if(gps_rt.ops.version>=4) {
   /* CMDBT engine is not covered by merely holding the GPS MCU reset.
    * Keep TOP wake and cold HW-control disabled throughout SRAM writes.
    * Phase1 journals the one potentially accepted final HW-control write;
@@ -81,7 +81,8 @@ static int gps_pos_d_die(void)
  * NOT an RF transaction, PLL-lock ACK, ROM qualification or GPS fix. */
 static int gps_pos_rf_guard(void)
 {
- if((gps_rt.ops.version!=3 && gps_rt.ops.version!=4) || !gps_rt.ops.pos_afe ||
+ if(gps_rt.ops.version<3 || gps_rt.ops.version>5 ||
+    (gps_rt.ops.version==5 ? !gps_rt.ops.pos_afe_verify : !gps_rt.ops.pos_afe) ||
     !(gps_rt.layout.flags&X9_GPS_RF_LAYOUT_VERIFIED))return ENXIO;
  return gps_pos_guard();
 }
@@ -108,15 +109,53 @@ static int gps_pos_spi(void)
  MCU_TRY(gps_pos_rf_guard());gps_rt.pos_spi_complete=1;
  return 0;
 }
+/* Actual KO 54950/80: c2000534, op14, HW02050800, ADie6686,
+ * x4..x7 zero. No guessed op15/calibration, duplicate patch, or all-POS SMC.
+ * Reachable only on the sole worker after v5's retained secure/AFE lease. */
+static int gps_pos_afe_smc(void)
+{
+ if(gps_rt.ops.version!=5 || current_thread()!=gps_rt.worker)return ENXIO;
+ MCU_TRY(gps_pos_rf_guard());
+ lck_mtx_lock(&gps_lock);st.afe_smc_started=1;lck_mtx_unlock(&gps_lock);
+ register uint64_t x0 __asm__("x0")=0xc2000534ULL;
+ register uint64_t x1 __asm__("x1")=14,x2 __asm__("x2")=GPS_MCU_MT6993_VERSION;
+ register uint64_t x3 __asm__("x3")=0x6686;
+ register uint64_t x4 __asm__("x4")=0,x5 __asm__("x5")=0;
+ register uint64_t x6 __asm__("x6")=0,x7 __asm__("x7")=0;
+ __asm__ volatile("dsb sy\nsmc #0\ndsb sy\nisb" :
+     "+r"(x0),"+r"(x1),"+r"(x2),"+r"(x3),"+r"(x4),"+r"(x5),"+r"(x6),"+r"(x7) :: "memory","cc","x8","x9","x10","x11","x12","x13","x14","x15","x16","x17");
+ gps_rt.afe_result.a[0]=x0;gps_rt.afe_result.a[1]=x1;
+ gps_rt.afe_result.a[2]=x2;gps_rt.afe_result.a[3]=x3;
+ lck_mtx_lock(&gps_lock);
+ for(unsigned i=0;i<4;i++)st.afe_smc_result[i]=gps_rt.afe_result.a[i];
+ st.afe_smc_returned=1;lck_mtx_unlock(&gps_lock);
+ printf("X9 GPS AFE: native SMC returned %llx/%llx/%llx/%llx; hardware qualification still required\n",
+     x0,x1,x2,x3);
+ /* Do not assume a success-code convention from the source's VOID call.
+  * Only the architected SMCCC NOT_SUPPORTED is recognized here; all other
+  * return semantics must be verified by the board supplier, not guessed. */
+ if(x0==UINT64_MAX)return ENOTSUP;
+ return gps_pos_rf_guard();
+}
 static int gps_pos_afe(void)
 {
  if(!gps_rt.pos_spi_complete || gps_rt.pos_afe_started ||
     gps_rt.pos_pll_started || gps_rt.pos_complete)return EBUSY;
  MCU_TRY(gps_pos_rf_guard());
  gps_rt.pos_afe_started=1; /* even a failed SMC may have changed hardware */
- MCU_TRY(gps_rt.ops.pos_afe(gps_rt.ops.context,&gps_rt.layout,
+ if(gps_rt.ops.version==5) {
+  MCU_TRY(gps_pos_afe_smc());
+  /* The void vendor wrapper ignores these returns. This version requires
+   * a real board verifier for BOTH secure ABI semantics and measured AFE
+   * completion; even four zero return registers are not qualification. */
+  MCU_TRY(gps_rt.ops.pos_afe_verify(gps_rt.ops.context,&gps_rt.layout,
+      gps_rt.generation,gps_rt.lease,&gps_rt.afe_result));
+ } else MCU_TRY(gps_rt.ops.pos_afe(gps_rt.ops.context,&gps_rt.layout,
      gps_rt.generation,gps_rt.lease));
  MCU_TRY(gps_pos_rf_guard());gps_rt.pos_afe_complete=1;
+ if(gps_rt.ops.version==5) {
+  lck_mtx_lock(&gps_lock);st.afe_smc_qualified=1;lck_mtx_unlock(&gps_lock);
+ }
  return 0;
 }
 static int gps_pos_pll(void)

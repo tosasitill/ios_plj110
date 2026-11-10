@@ -25,6 +25,14 @@ extern "C" {
 int x9_baro_init(int diagnostic);
 void x9_baro_shutdown(void);
 int x9_baro_copy_sample(struct x9_baro_sample *sample);
+struct x9_baro_transport_status {
+ uint32_t list_pending, enable_pending, control_enabled;
+ int32_t last_errno; /* quarantine/error, NOT physical power-off evidence */
+};
+/* Bounded housekeeping, no hardware operation. Expire missing replies even
+ * if no receive callback fires. Quarantine rejects new requests/old data;
+ * no automatic retry, restored gain, fabricated ACK or claim of power-off. */
+void x9_baro_copy_transport_status(struct x9_baro_transport_status *);
 /* Layout qualification is not a power/firmware/transport readiness signal. */
 int x9_baro_copy_scp_handoff(struct x9_scp_handoff *layout);
 uint32_t x9_baro_get_report_interval_us(void);
@@ -34,7 +42,10 @@ int x9_baro_set_report_interval_us(uint32_t interval_us);
 
 /* sensor/2.0 worker context only (never hard IRQ). PRESSURE=6, DATA=0.
  * gain is raw units/hPa from the real sensor list; do not assume gain=100.
- * On SCP reset invalidate BEFORE reconnect/list/configure.
+ * On SCP reset invalidate BEFORE reconnect/list/configure. After an uncertain
+ * send/timeout/failure, invalidate ONLY once the actual transport has proved
+ * remote reset/quiesce and discarded old mailbox/FIFO traffic; not just to
+ * clear Busy. Invalidate is kernel-only, never a user-controlled retry.
  * SCP transport/firmware and enable/batch remain to be supplied. */
 int x9_baro_configure_mtk(const void *info, unsigned int length);
 int x9_baro_receive_mtk(const void *record, unsigned int length);

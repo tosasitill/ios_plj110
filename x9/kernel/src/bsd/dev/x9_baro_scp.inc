@@ -37,7 +37,8 @@ int x9_baro_scp_make_list(void *shared_tx, unsigned bytes,
   * qualified SHARE_BUFFER_W, perform cache ownership and send OUT31. */
  if (!p || !n || bytes < 4096+28 || bytes > 8192 || nbytes < 28) return EINVAL;
  lck_mtx_lock(&x9_baro_lock);
- int error = !active ? ENXIO : test_mode || scp_list_pending || scp_pending ? EBUSY : 0;
+ int expired = baro_expire_locked();
+ int error = !active ? ENXIO : expired ? expired : test_mode || scp_list_pending || scp_pending ? EBUSY : 0;
  if (!error) {
   bzero(p, bytes); bzero(n, 28);
   baro_put_le32(p, 0xdeadbeefu); baro_put_le32(p+bytes-4, 0xdeadbeefu);
@@ -61,15 +62,9 @@ int x9_baro_scp_configure_list(const void *shared_rx, unsigned bytes,
 {
  const uint8_t *p = shared_rx, *n = notification, *pressure = NULL;
  lck_mtx_lock(&x9_baro_lock);
- int error = !active ? ENXIO : test_mode ? EBUSY : !scp_list_pending ? EALREADY : 0;
+ int expired = baro_expire_locked();
+ int error = !active ? ENXIO : expired ? expired : test_mode ? EBUSY : !scp_list_pending ? EALREADY : 0;
  if (!error && sequence != scp_list_sequence) error = ESTALE;
- if (!error) {
-  uint64_t age; absolutetime_to_nanoseconds(mach_absolute_time()-scp_list_request_time, &age);
-  /* OPPO share_buffer_seq_comm waits 100ms, not the ENABLE timeout. */
-  if (age > 100000000ULL) {
-   scp_list_pending = 0; scp_list_request_time = 0; error = ETIMEDOUT;
-  }
- }
  if (error) { lck_mtx_unlock(&x9_baro_lock); return error; }
  /* Platform's SENS_SHARE_BUFFER_R is 0x2000; the list request is <=4096.
   * Use the supplied region size, not any untrusted header-derived pointer. */
@@ -115,7 +110,8 @@ int x9_baro_scp_make_enable(void *request, unsigned capacity,
  if (!p || capacity < 24 || interval_ns < 20000000ULL || interval_ns > 1000000000ULL)
   return EINVAL;
  lck_mtx_lock(&x9_baro_lock);
- int error = !active ? ENXIO : test_mode || scp_list_pending || scp_pending ? EBUSY : !mtk_gain ? EAGAIN : 0;
+ int expired = baro_expire_locked();
+ int error = !active ? ENXIO : expired ? expired : test_mode || scp_list_pending || scp_pending ? EBUSY : !mtk_gain ? EAGAIN : 0;
  if (!error) {
   bzero(p, 24); p[0] = sequence; p[1] = 6; p[2] = 1; p[3] = 16;
   p[4] = baro_crc8(p, 4);
@@ -134,11 +130,8 @@ int x9_baro_scp_accept_enable(const void *ack, unsigned length)
  const uint8_t *p = ack;
  if (!p || length != 8) return EINVAL;
  lck_mtx_lock(&x9_baro_lock);
- int error = !active ? ENXIO : test_mode ? EBUSY : !scp_pending ? EALREADY : 0;
- if (!error) {
-  uint64_t age; absolutetime_to_nanoseconds(mach_absolute_time()-scp_request_time, &age);
-  if (age > 1000000000ULL) error = ETIMEDOUT;
- }
+ int expired = baro_expire_locked();
+ int error = !active ? ENXIO : expired ? expired : test_mode ? EBUSY : !scp_pending ? EALREADY : 0;
  if (!error && (p[0] != scp_sequence || p[1] != 6 || p[2] != 1 ||
      p[4] != baro_crc8(p, 4))) error = EBADMSG;
  if (!error && (int8_t)p[3] < 0) error = EIO;
@@ -146,14 +139,11 @@ int x9_baro_scp_accept_enable(const void *ack, unsigned length)
   report_interval_us = (uint32_t)((scp_request_interval_ns+999)/1000);
   scp_pending = 0; scp_enabled = 1; scp_request_time = scp_request_interval_ns = 0;
  }
- else if (error == ETIMEDOUT || error == EIO) {
-  scp_pending = scp_enabled = valid = 0; mtk_gain = 0; last_scp_time = 0;
-  scp_request_time = 0;
-  scp_request_interval_ns = 0;
- }
+ else if (error == EIO) baro_quarantine_locked(error);
  /* Duplicate ACKs, unrelated transactions and malformed packets do not
   * revoke an established stream or consume an outstanding ENABLE. The
-  * transport must invalidate on its own send/timeout/reset failure. */
+  * timeout is also expired by HID/status/API calls when no reply arrives.
+  * Only a real reset/drain may clear the uncertain transaction quarantine. */
  lck_mtx_unlock(&x9_baro_lock); return error;
 }
 
@@ -161,7 +151,8 @@ int x9_baro_scp_receive_data(const void *record, unsigned length)
 {
  uint32_t pressure; uint64_t scp_time;
  lck_mtx_lock(&x9_baro_lock);
- int error = !active ? ENXIO : test_mode ? EBUSY : !scp_enabled || !mtk_gain ? EAGAIN : 0;
+ int expired = baro_expire_locked();
+ int error = !active ? ENXIO : expired ? expired : test_mode ? EBUSY : !scp_enabled || !mtk_gain ? EAGAIN : 0;
  if (!error) error = decode_mtk(record, length, mtk_gain, &pressure, &scp_time);
  if (!error && scp_time <= last_scp_time) error = EALREADY;
  if (!error) { last_scp_time = scp_time; publish(pressure, scp_time, 0); }

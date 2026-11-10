@@ -122,6 +122,10 @@ static bool x9g_send(uint32_t local, uint32_t port, const uint8_t *req, unsigned
        e, s.layout_valid, s.ready, s.fault, s.physical_stage, s.physical_errno);
    /* A supply readback is a timestamped observation, not permission to
     * activate receiver services or infer availability from Android. */
+   if(s.afe_smc_started)
+    printf("X9 GPS PDS: AFE SMC started %u returned %u qualified %u raw %llx/%llx/%llx/%llx (not receiver readiness)\n",
+        s.afe_smc_started,s.afe_smc_returned,s.afe_smc_qualified,
+        s.afe_smc_result[0],s.afe_smc_result[1],s.afe_smc_result[2],s.afe_smc_result[3]);
    if(s.power_sample_time || s.power_errno)
     printf("X9 GPS PDS: power observation topology %u valid %u errno %d uv %u ap %x global %x busy %x (not a lease)\n",
         s.power_layout_valid,s.power_sample_valid,s.power_errno,s.power_uv,

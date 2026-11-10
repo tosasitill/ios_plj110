@@ -25,6 +25,10 @@ struct x9_gps_status {
  uint64_t power_sample_time;
  uint32_t power_uv, power_control, power_da, power_hw_en, power_rc_mux;
  uint32_t power_ap_vote, power_global_vote, power_busy, power_done, power_ack;
+ /* Raw native v5 AFE SMC journal, independent of receiver/PDS readiness.
+  * started without returned may represent a partially accepted secure call. */
+ uint32_t afe_smc_started, afe_smc_returned, afe_smc_qualified;
+ uint64_t afe_smc_result[4];
 };
 struct x9_gps_nmea {
  uint64_t sequence, generation, host_time;

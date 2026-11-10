@@ -31,6 +31,9 @@ private:
 	bool fIngressActive;
 	bool fDataValid;
 	bool fPublished;
+	int32_t fTransportError;
+	uint32_t fControlPending;
+	bool fControlEnabled;
 };
 OSDefineMetaClassAndStructors(X9Barometer, IOHIDEventService);
 
@@ -48,6 +51,7 @@ X9Barometer::start(IOService *provider)
 	if (x9_baro_init(diagnostic == 1)) return false;
 	fIntervalUs = getReportInterval();
 	fIngressActive = true;
+	fTransportError = 0; fControlPending = 0; fControlEnabled = false;
 	fTimer = IOTimerEventSource::timerEventSource(this, &X9Barometer::poll);
 	if (!fTimer || _hidWorkLoop->addEventSource(fTimer) != kIOReturnSuccess) {
 		OSSafeReleaseNULL(fTimer);
@@ -59,6 +63,9 @@ X9Barometer::start(IOService *provider)
 	setProperty("X9BaroDataValid", kOSBooleanFalse);
 	setProperty("X9BaroDiagnostic", diagnostic == 1 ? kOSBooleanTrue : kOSBooleanFalse);
 	setProperty("X9BaroPhysicalTransportReady", kOSBooleanFalse);
+	setProperty("X9BaroTransportErrno", (UInt64)0, 32);
+	setProperty("X9BaroControlPending", (UInt64)0, 32);
+	setProperty("X9BaroSCPControlEnabled", kOSBooleanFalse);
 	struct x9_scp_handoff layout;
 	bool qualified = x9_baro_copy_scp_handoff(&layout) == 0;
 	setProperty("X9SCPLiveLayoutQualified", qualified ? kOSBooleanTrue : kOSBooleanFalse);
@@ -127,6 +134,29 @@ void
 X9Barometer::poll(OSObject *owner, IOTimerEventSource *sender)
 {
 	X9Barometer *self = (X9Barometer *)owner;
+	/* No reply callback is needed to expire a lost LIST/ENABLE. Control ACK
+	 * state is metadata only and never publishes availability or pressure. */
+	x9_baro_transport_status transport;
+	x9_baro_copy_transport_status(&transport);
+	uint32_t pending = transport.list_pending | (transport.enable_pending << 1);
+	if (pending != self->fControlPending) {
+		self->fControlPending = pending;
+		self->setProperty("X9BaroControlPending", pending, 32);
+	}
+	if ((transport.control_enabled != 0) != self->fControlEnabled) {
+		self->fControlEnabled = transport.control_enabled != 0;
+		self->setProperty("X9BaroSCPControlEnabled", self->fControlEnabled ? kOSBooleanTrue : kOSBooleanFalse);
+	}
+	if (transport.last_errno != self->fTransportError) {
+		self->fTransportError = transport.last_errno;
+		self->setProperty("X9BaroTransportErrno", (UInt32)transport.last_errno, 32);
+		if (transport.last_errno) {
+			self->setProperty("X9BaroPhysicalTransportReady", kOSBooleanFalse);
+			self->removeProperty("X9BaroLastPressureQ16");
+			self->setProperty("X9BaroBackend", "mtk-scp-quarantine");
+			IOLog("X9 BARO: control transaction quarantined errno=%d; reset/drain required (not hardware off)\n", transport.last_errno);
+		} else self->setProperty("X9BaroBackend", "mtk-scp-pending");
+	}
 	UInt32 appliedUs = self->getReportInterval();
 	if (appliedUs != self->fIntervalUs) {
 		self->fIntervalUs = appliedUs;

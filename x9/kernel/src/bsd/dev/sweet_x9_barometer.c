@@ -26,6 +26,47 @@ static uint8_t scp_sequence;
 static int scp_list_pending;
 static uint8_t scp_list_sequence;
 static uint64_t scp_list_request_time;
+static int scp_error; /* uncertain remote transaction; reset/drain required */
+#define BARO_LIST_TIMEOUT_NS 100000000ULL
+#define BARO_ENABLE_TIMEOUT_NS 1000000000ULL
+
+/* Caller holds x9_baro_lock. A missing reply may mean hardware accepted the
+ * request. Stop ALL ingress, retain the fault, and never auto-retry/claim off.
+ * Only the real transport's explicit reset/drain invalidation clears it. */
+static void baro_quarantine_locked(int error)
+{
+ scp_error = error ? error : EIO;
+ valid = scp_enabled = scp_pending = scp_list_pending = 0;
+ mtk_gain = 0; last_scp_time = 0;
+ scp_request_time = scp_request_interval_ns = scp_list_request_time = 0;
+}
+static int baro_expire_locked(void)
+{
+ if (!active || test_mode) return 0;
+ if (scp_error) return scp_error;
+ uint64_t now = mach_absolute_time(), age = 0;
+ if (scp_list_pending) {
+  absolutetime_to_nanoseconds(now-scp_list_request_time, &age);
+  if (age > BARO_LIST_TIMEOUT_NS) baro_quarantine_locked(ETIMEDOUT);
+ }
+ if (scp_pending) {
+  absolutetime_to_nanoseconds(now-scp_request_time, &age);
+  if (age > BARO_ENABLE_TIMEOUT_NS) baro_quarantine_locked(ETIMEDOUT);
+ }
+ return scp_error;
+}
+
+void x9_baro_copy_transport_status(struct x9_baro_transport_status *out)
+{
+ if (!out) return;
+ lck_mtx_lock(&x9_baro_lock);
+ (void)baro_expire_locked();
+ out->list_pending = (uint32_t)scp_list_pending;
+ out->enable_pending = (uint32_t)scp_pending;
+ out->control_enabled = (uint32_t)scp_enabled;
+ out->last_errno = active ? scp_error : ENXIO;
+ lck_mtx_unlock(&x9_baro_lock);
+}
 
 /* Read only the shim's qualified copy, never stale SRAM or an assumed EMI
  * pointer. FDT facts are necessary but insufficient for hardware ownership. */
@@ -84,7 +125,7 @@ x9_baro_copy_scp_handoff(struct x9_scp_handoff *out)
 uint32_t
 x9_baro_get_report_interval_us(void)
 {
- lck_mtx_lock(&x9_baro_lock); uint32_t us = report_interval_us;
+ lck_mtx_lock(&x9_baro_lock); (void)baro_expire_locked(); uint32_t us = report_interval_us;
  lck_mtx_unlock(&x9_baro_lock); return us;
 }
 
@@ -95,7 +136,8 @@ x9_baro_set_report_interval_us(uint32_t us)
  lck_mtx_lock(&x9_baro_lock);
  /* Until a real IPI sender owns cadence changes, do not report a host-poll
   * change as a hardware batch update. Diagnostics are explicitly host-only. */
- int error = !active ? ENXIO : scp_pending || scp_list_pending ? EBUSY :
+ int expired = baro_expire_locked();
+ int error = !active ? ENXIO : expired ? expired : scp_pending || scp_list_pending ? EBUSY :
      !test_mode && us != report_interval_us ? ENOTSUP : 0;
  if (!error) report_interval_us = us;
  lck_mtx_unlock(&x9_baro_lock); return error;
@@ -167,6 +209,7 @@ x9_baro_init(int diagnostic)
 	scp_request_interval_ns = 0;
 	scp_list_pending = 0; scp_list_request_time = 0;
 	report_interval_us = 200000;
+	scp_error = 0;
 	copy_scp_layout();
 	lck_mtx_unlock(&x9_baro_lock);
 	return 0;
@@ -183,7 +226,7 @@ x9_baro_shutdown(void)
 	scp_request_time = 0;
 	scp_request_interval_ns = 0;
 	scp_list_pending = 0; scp_list_request_time = 0;
-	scp_layout_valid = 0;
+	scp_layout_valid = 0; scp_error = 0;
 	lck_mtx_unlock(&x9_baro_lock);
 }
 
@@ -194,10 +237,11 @@ x9_baro_copy_sample(struct x9_baro_sample *sample)
 	uint64_t age_ns;
 	if (!sample) return EINVAL;
 	lck_mtx_lock(&x9_baro_lock);
+	int expired = baro_expire_locked();
 	ok = active && valid;
 	if (ok) *sample = latest;
 	lck_mtx_unlock(&x9_baro_lock);
-	if (!ok) return ENOENT;
+	if (!ok) return expired ? expired : ENOENT;
 	absolutetime_to_nanoseconds(mach_absolute_time() - sample->host_time, &age_ns);
 	return age_ns <= X9_BARO_MAX_AGE_NS ? 0 : ETIMEDOUT;
 }
@@ -225,7 +269,8 @@ x9_baro_configure_mtk(const void *info, unsigned int length)
 	gain = le32(p + 4);
 	if (!gain) return EINVAL;
 	lck_mtx_lock(&x9_baro_lock);
-	error = !active ? ENXIO : test_mode || scp_list_pending || scp_pending ? EBUSY : 0;
+	int expired = baro_expire_locked();
+	error = !active ? ENXIO : expired ? expired : test_mode || scp_list_pending || scp_pending ? EBUSY : 0;
 	if (!error) configure_mtk_locked(gain);
 	lck_mtx_unlock(&x9_baro_lock);
 	if (!error) printf("X9 BARO: MTK PRESSURE configured gain=%u; awaiting DATA (not a hardware enable)\n", gain);
@@ -239,7 +284,8 @@ x9_baro_receive_mtk(const void *record, unsigned int length)
 	uint64_t scp_time;
 	int error;
 	lck_mtx_lock(&x9_baro_lock);
-	error = !active ? ENXIO : (test_mode ? EBUSY : (!mtk_gain ? EAGAIN : 0));
+	int expired = baro_expire_locked();
+	error = !active ? ENXIO : expired ? expired : (test_mode || scp_pending || scp_list_pending ? EBUSY : (!mtk_gain ? EAGAIN : 0));
 	if (!error) error = decode_mtk(record, length, mtk_gain, &pressure, &scp_time);
 	if (!error && scp_time <= last_scp_time) error = EALREADY;
 	if (!error) {
@@ -255,6 +301,7 @@ x9_baro_invalidate_mtk(void)
 {
 	lck_mtx_lock(&x9_baro_lock);
 	if (!test_mode) {
+		scp_error = 0;
 		valid = 0;
 		mtk_gain = 0;
 		last_scp_time = 0;
