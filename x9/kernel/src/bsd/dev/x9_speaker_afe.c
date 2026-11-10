@@ -26,6 +26,7 @@ static bool registered,leased,journaled;
 static uint64_t last_poll,last_progress;
 static uint64_t resource_ticket;
 static bool ticket_owned;
+static uint32_t last_output_generation;
 /* Per-operation accessibility failure: fault cleanup may mute/quiesce via
  * independently qualified callbacks, but must not retry AFE/DMA access.
  * A later explicit stop starts a new qualification attempt. */
@@ -49,7 +50,7 @@ static struct patch config[]={
  * prior is the observed value immediately before the LAST attempted write. */
 static uint32_t prior[COUNT];
 _Static_assert(COUNT==13, "memif journal index10 and route indices11/12");
-_Static_assert(sizeof(struct x9_speaker_afe_status)==184,"AFE cached status v5 size");
+_Static_assert(sizeof(struct x9_speaker_afe_status)==192,"AFE cached status v6 size");
 static int guard_error(unsigned stage,int e,bool configuration,uint32_t off,
                        uint32_t expected,uint32_t actual)
 {
@@ -251,33 +252,63 @@ static int stop_locked(void)
     if(e){state.poisoned=1;x9_audio_resources_fault(X9AudioResourceSpeaker,resource_ticket,e);}
     return e;
 }
-int x9_speaker_afe_register(const struct x9_speaker_afe_platform *p)
+static int platform_layout(const struct x9_speaker_afe_platform *p,
+                           struct x9_speaker_memif_layout *layout)
 {
     if(!sweet_early_is_x9() || sweet_x9_arg("x9_audio",0)!=2)return ENXIO;
     if(!p || p->version!=X9_SPEAKER_AFE_PLATFORM_VERSION || p->verified!=X9_SPEAKER_AFE_RESOURCES || !p->afe ||
-       !p->dma || !p->acquire || !p->release || !p->mute || !p->quiesce || !p->sync_device || !p->held || !p->validate ||
+       !p->dma || !p->acquire || !p->release || !p->mute || !p->quiesce || !p->held || !p->validate ||
        ((uintptr_t)p->afe&3) || ((uintptr_t)p->dma&63) || (p->dma_bus&63) ||
        !p->dma_bus || p->dma_bytes<65536 || p->dma_bytes>131072 || (p->dma_bytes&63) ||
        p->dma_bus>(1ULL<<41)-p->dma_bytes)return EINVAL;
+    if(p->producer==X9AFEProducerCPU) {
+        if(p->generation || p->output_committed || !p->sync_device)return EINVAL;
+    } else if(p->producer==X9AFEProducerDSP) {
+        if(!p->generation || !p->output_committed || !p->halt_producer)return EINVAL;
+    } else return EINVAL;
+    return x9_speaker_memif_layout(p->memif,layout)?0:EINVAL;
+}
+static void install_platform(const struct x9_speaker_afe_platform *p,
+                             const struct x9_speaker_memif_layout *layout)
+{
+    hw=*p;memif=*layout;
+    config[6]=(struct patch){memif.base_msb,X9_SPEAKER_MEMIF_ADDR_MSB_MASK,0,0,0};
+    config[7]=(struct patch){memif.base,X9_SPEAKER_MEMIF_ADDR_LOW_MASK,0,0,0};
+    config[8]=(struct patch){memif.end_msb,X9_SPEAKER_MEMIF_ADDR_MSB_MASK,0,0,0};
+    config[9]=(struct patch){memif.end,X9_SPEAKER_MEMIF_ADDR_LOW_MASK,0,0,0};
+    config[10]=(struct patch){memif.con,memif.format_mask,memif.format_value,0,0};
+    for(unsigned i=0;i<2;i++)config[11+i]=(struct patch){memif.route[i],UINT32_MAX,memif.source[i],0,0};
+    state.version=X9_SPEAKER_AFE_STATUS_VERSION;state.memif=memif.id;
+    state.producer=hw.producer;state.generation=hw.generation;
+}
+int x9_speaker_afe_register(const struct x9_speaker_afe_platform *p)
+{
     struct x9_speaker_memif_layout layout;
-    if(!x9_speaker_memif_layout(p->memif,&layout))return EINVAL;
-    lck_mtx_lock(&speaker_afe_lock);int e=registered?EBUSY:0;
+    int e=platform_layout(p,&layout);if(e)return e;
+    lck_mtx_lock(&speaker_afe_lock);e=registered?EBUSY:0;
     if(!e) {
-        hw=*p;memif=layout;
-        config[6]=(struct patch){memif.base_msb,X9_SPEAKER_MEMIF_ADDR_MSB_MASK,0,0,0};
-        config[7]=(struct patch){memif.base,X9_SPEAKER_MEMIF_ADDR_LOW_MASK,0,0,0};
-        config[8]=(struct patch){memif.end_msb,X9_SPEAKER_MEMIF_ADDR_MSB_MASK,0,0,0};
-        config[9]=(struct patch){memif.end,X9_SPEAKER_MEMIF_ADDR_LOW_MASK,0,0,0};
-        config[10]=(struct patch){memif.con,memif.format_mask,memif.format_value,0,0};
-        for(unsigned i=0;i<2;i++)config[11+i]=(struct patch){memif.route[i],UINT32_MAX,memif.source[i],0,0};
+        install_platform(p,&layout);
         /* Independent boot-lifetime watcher, not user/HAL position polling.
          * Scheduler latency is not a hardware deadline guarantee. No PA is
          * unmuted by this engine; a final provider still needs that proof. */
         thread_t thread;
         if(kernel_thread_start(watchdog,NULL,&thread)!=KERN_SUCCESS)e=ENOMEM;
-        else {thread_deallocate(thread);registered=true;state.version=X9_SPEAKER_AFE_STATUS_VERSION;state.memif=memif.id;}
+        else {thread_deallocate(thread);registered=true;}
         if(e)bzero(&hw,sizeof(hw));
     }
+    lck_mtx_unlock(&speaker_afe_lock);return e;
+}
+int x9_speaker_afe_rebind_dsp(const struct x9_speaker_afe_platform *p)
+{
+    struct x9_speaker_memif_layout layout;
+    int e=platform_layout(p,&layout);if(e)return e;
+    if(p->producer!=X9AFEProducerDSP)return EINVAL;
+    lck_mtx_lock(&speaker_afe_lock);e=registered?0:ENXIO;
+    if(!e && (hw.producer!=X9AFEProducerDSP || leased || journaled || resource_ticket ||
+       state.running || state.prepared || state.poisoned || state.dirty_mask ||
+       state.uncertain_mask || state.copy_pending || hw.held(hw.context)))e=EBUSY;
+    if(!e && (p->generation<=hw.generation || p->generation<=last_output_generation))e=ESTALE;
+    if(!e)install_platform(p,&layout);
     lck_mtx_unlock(&speaker_afe_lock);return e;
 }
 static int prepare(uint64_t borrowed)
@@ -285,6 +316,8 @@ static int prepare(uint64_t borrowed)
     lck_mtx_lock(&speaker_afe_lock);int e=registered?0:ENXIO;
     if(!e && (leased || state.poisoned))e=EBUSY;
     if(!e && borrowed && !hw.halt_producer)e=ENXIO;
+    if(!e && hw.producer==X9AFEProducerDSP &&
+       (!borrowed || hw.generation<=last_output_generation))e=EBUSY;
     if(e){lck_mtx_unlock(&speaker_afe_lock);return e;}
     if(borrowed) {
         X9AudioResourceStatus t;e=x9_audio_resources_status(&t);
@@ -293,6 +326,7 @@ static int prepare(uint64_t borrowed)
     } else e=x9_audio_resources_claim(X9AudioResourceSpeaker,&resource_ticket);
     if(e){lck_mtx_unlock(&speaker_afe_lock);return e;}
     ticket_owned=!borrowed;
+    if(hw.producer==X9AFEProducerDSP)last_output_generation=hw.generation;
     leased=true;state.error=state.restore_error=state.copy_pending=0;
     access_error=0;
     state.mute_error=state.disable_error=state.quiesce_error=0;
@@ -329,7 +363,12 @@ static int prepare(uint64_t borrowed)
         }
         if(!e)e=verify_config(false,X9AFEGuardPrepare);
         if(!e)e=unowned_routes_idle(false,X9AFEGuardPrepare);
-        if(!e){state.prepared=1;state.dl24=rd(memif.con);state.out4=rd(0x1580);}
+        if(!e){
+            if(hw.producer==X9AFEProducerDSP) {
+                state.played=state.submitted=state.anchor=0;state.cursor=0;
+            }
+            state.prepared=1;state.dl24=rd(memif.con);state.out4=rd(0x1580);
+        }
     }
     if(e){int off=stop_locked();if(off)state.restore_error=(uint32_t)off;}
     /* Admission errors returned above did not alter the prior stream.
@@ -342,6 +381,7 @@ int x9_speaker_afe_prepare_on_ticket(uint64_t ticket)
 {return ticket?prepare(ticket):EINVAL;}
 static int copy_frames(const int16_t *pcm,uint32_t frames,unsigned stage)
 {
+    if(hw.producer!=X9AFEProducerCPU)return ENOTSUP;
     if(!pcm || !frames || frames>hw.dma_bytes/4)return EINVAL;
     int e=verify_config(false,stage);if(e)return e;
     e=unowned_routes_idle(state.running!=0,stage);if(e)return e;
@@ -364,12 +404,49 @@ static int copy_frames(const int16_t *pcm,uint32_t frames,unsigned stage)
     else {state.poisoned=1;if(e==EAGAIN)e=EIO;} /* no "consumed nothing" lie */
     return e;
 }
+static int refresh_output(unsigned stage)
+{
+    if(hw.producer!=X9AFEProducerDSP)return ENOTSUP;
+    int e=verify_config(false,stage);if(e)return e;
+    e=unowned_routes_idle(state.running!=0,stage);if(e)return e;
+    uint64_t candidate=0;
+    e=hw.output_committed(hw.context,hw.generation,memif.id,
+                           hw.dma_bus,hw.dma_bytes,&candidate);
+    if(e)return e==EAGAIN?EIO:e; /* invalid authority, not insufficient prefill */
+    e=verify_config(false,stage);if(e)return e;
+    e=unowned_routes_idle(state.running!=0,stage);if(e)return e;
+    if(state.played>state.submitted || candidate<state.submitted ||
+       candidate-state.played>hw.dma_bytes/4-32)return EPROTO;
+    /* No AP DMA memory read, copy, clean or invalidate. The producer's
+     * publication proof includes DSP->AFE visibility of this exact prefix. */
+    state.submitted=candidate;return 0;
+}
+static int enable_locked(uint64_t *anchor)
+{
+    int e=change(0,config[0].expected|1,X9AFEGuardStart);
+    if(!e)e=verify_config(false,X9AFEGuardStart);
+    if(!e)e=unowned_routes_idle(false,X9AFEGuardStart);
+    if(!e && hw.producer==X9AFEProducerDSP)e=refresh_output(X9AFEGuardStart);
+    if(!e) {
+        uint64_t enabled_at=mach_absolute_time();
+        e=change(10,config[10].expected|memif.enable,X9AFEGuardStart);
+        if(!e)e=verify_config(false,X9AFEGuardStart);
+        if(!e)e=unowned_routes_idle(true,X9AFEGuardStart);
+        if(!e) {
+            state.anchor=enabled_at;
+            state.running=1;last_poll=last_progress=state.anchor;*anchor=state.anchor;
+            thread_wakeup((event_t)&state.running);
+        }
+    }
+    return e;
+}
 int x9_speaker_afe_start(const int16_t *pcm,uint32_t frames,uint64_t *anchor)
 {
     if(!anchor)return EINVAL;
     *anchor=0;
     if(!pcm || frames<960)return EINVAL;
     lck_mtx_lock(&speaker_afe_lock);int e=state.prepared&&!state.running&&!state.error?0:ENXIO;
+    if(hw.producer!=X9AFEProducerCPU){lck_mtx_unlock(&speaker_afe_lock);return ENOTSUP;}
     if(!e) {
         if(frames>hw.dma_bytes/4-32) {
             lck_mtx_unlock(&speaker_afe_lock);return EINVAL;
@@ -389,20 +466,22 @@ int x9_speaker_afe_start(const int16_t *pcm,uint32_t frames,uint64_t *anchor)
             if(!e)state.copy_pending=0;
         }
         if(!e)e=copy_frames(pcm,frames,X9AFEGuardStart);
-        if(!e)e=change(0,config[0].expected|1,X9AFEGuardStart);
-        if(!e)e=verify_config(false,X9AFEGuardStart);
-        if(!e)e=unowned_routes_idle(false,X9AFEGuardStart);
-        if(!e) {
-            uint64_t enabled_at=mach_absolute_time();
-            e=change(10,config[10].expected|memif.enable,X9AFEGuardStart);
-            if(!e)e=verify_config(false,X9AFEGuardStart);
-            if(!e)e=unowned_routes_idle(true,X9AFEGuardStart);
-            if(!e) {
-                state.anchor=enabled_at;
-                state.running=1;last_poll=last_progress=state.anchor;*anchor=state.anchor;
-                thread_wakeup((event_t)&state.running);
-            }
-        }
+        if(!e)e=enable_locked(anchor);
+        if(e){state.error=(uint32_t)e;state.poisoned=1;(void)stop_locked();}
+    }
+    lck_mtx_unlock(&speaker_afe_lock);return e;
+}
+int x9_speaker_afe_start_dsp(uint64_t *anchor)
+{
+    if(!anchor)return EINVAL;*anchor=0;
+    lck_mtx_lock(&speaker_afe_lock);
+    if(hw.producer!=X9AFEProducerDSP){lck_mtx_unlock(&speaker_afe_lock);return ENOTSUP;}
+    int e=state.error?(int)state.error:state.prepared&&!state.running?0:ENXIO;
+    if(!e) {
+        access_error=0;e=refresh_output(X9AFEGuardStart);
+        /* No enable writes and no fault for a proved but short prefix. */
+        if(!e && state.submitted<960){lck_mtx_unlock(&speaker_afe_lock);return EAGAIN;}
+        if(!e)e=enable_locked(anchor);
         if(e){state.error=(uint32_t)e;state.poisoned=1;(void)stop_locked();}
     }
     lck_mtx_unlock(&speaker_afe_lock);return e;
@@ -422,6 +501,17 @@ static int position_locked(void)
     uint64_t budget=(pending-STOP_MARGIN_FRAMES)*1000000000/48000;
     if(elapsed>=budget || stalled>=MIN(budget,10000000ULL)) {
         state.late_polls++;return ETIMEDOUT;
+    }
+    if(hw.producer==X9AFEProducerDSP) {
+        e=refresh_output(X9AFEGuardPoll);if(e)return e;
+        now=mach_absolute_time();
+        absolutetime_to_nanoseconds(now-last_poll,&elapsed);
+        absolutetime_to_nanoseconds(now-last_progress,&stalled);
+        /* A late publication cannot retroactively prove old PCM survived.
+         * Keep the OLD confirmed-prefix deadline across supplier latency. */
+        if(elapsed>=budget || stalled>=MIN(budget,10000000ULL)) {
+            state.late_polls++;return ETIMEDOUT;
+        }
     }
     /* Half-ring ambiguity must fail; never infer number of wraps by time. */
     if(elapsed>=(uint64_t)hw.dma_bytes/8*1000000000/48000 || stalled>=250000000)return ETIMEDOUT;
@@ -479,6 +569,7 @@ int x9_speaker_afe_submit(const int16_t *pcm,uint32_t frames)
 {
     if(!pcm || !frames)return EINVAL;
     lck_mtx_lock(&speaker_afe_lock);access_error=0;
+    if(hw.producer!=X9AFEProducerCPU){lck_mtx_unlock(&speaker_afe_lock);return ENOTSUP;}
     int e=state.error?(int)state.error:state.running?position_locked():ENXIO;
     if(!e)e=copy_frames(pcm,frames,X9AFEGuardCopy);
     if(e && e!=EAGAIN && state.running && !state.error)fault_locked(e);

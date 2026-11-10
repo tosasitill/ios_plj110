@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 /* Cached diagnostic ABI; reading it never touches an off-domain register. */
-#define X9_SPEAKER_AFE_STATUS_VERSION 5u
+#define X9_SPEAKER_AFE_STATUS_VERSION 6u
 enum { X9AFEGuardNone, X9AFEGuardPrepare, X9AFEGuardStart, X9AFEGuardCopy,
        X9AFEGuardPoll, X9AFEGuardDisable, X9AFEGuardRestore };
 struct x9_speaker_afe_status {
@@ -23,6 +23,7 @@ struct x9_speaker_afe_status {
      * proof or permission to replay a hardware action. */
     uint32_t guard_prior, guard_saved, guard_index, guard_prior_valid;
     uint64_t prior_observations, no_write_reconciliations;
+    uint32_t producer, generation; /* cached v6; submitted=committed output in DSP mode */
 };
 #if defined(KERNEL)
 #ifdef __cplusplus
@@ -32,7 +33,7 @@ extern "C" {
  * APLL2 VLP/48k clock path (captured etdm-vlp[4]=1), ETDM4 pads and selected memif/OUT4 route registers.
  * It must establish safe PA mute before returning; never an empty callback.
  * DMA bus mapping/cache attributes are verified independently of a CPU VA.
- * Private platform v5: explicit memif10/14 (no default); held is a cached boot-lifetime ownership predicate,
+ * Private platform v6: explicit memif10/14 (no default); held is a cached boot-lifetime ownership predicate,
  * not a fresh MMIO read. acquire may partially fail; held MUST stay true
  * until mute/quiesce/restore/release authoritatively finish. acquire never
  * enables DMA. release returning zero must also leave held false. The engine
@@ -49,9 +50,10 @@ extern "C" {
  * mute/quiesce independently qualify their own hardware paths; even after
  * validate fails they may be called for safe cleanup, or must fail without
  * accessing an off-domain/unowned CSR. No engine AFE access follows failure. */
-#define X9_SPEAKER_AFE_PLATFORM_VERSION 5u
+#define X9_SPEAKER_AFE_PLATFORM_VERSION 6u
+enum { X9AFEProducerCPU=1, X9AFEProducerDSP=2 };
 struct x9_speaker_afe_platform {
-    uint32_t version, verified, dma_bytes, memif; /* replaces old alignment padding */
+    uint32_t version, verified, dma_bytes, memif;
     volatile uint32_t *afe;
     void *dma, *context;
     uint64_t dma_bus;
@@ -69,9 +71,27 @@ struct x9_speaker_afe_platform {
      * It must not reenter AFE. validate also accepts a physically halted DSP
      * with the same power/memory lease. NULL is only for a CPU-only producer. */
     int (*halt_producer)(void *);
+    uint32_t producer, generation; /* CPU: generation0; DSP: real READY generation */
+    /* Mandatory only for DSP producer. Independently prove the CURRENT
+     * firmware output's immutable committed prefix, starting at dma_bus+0
+     * for this generation, in stereo S16 frames, with DSP->AFE visibility.
+     * This is NOT input consumed, DLCOPY/START ACK, host time, a bare write
+     * pointer, or AP cached progress. Validate actual firmware output record
+     * publication/ownership; no writing/zeroing/cleaning DSP output, no AFE
+     * re-entry. Return a monotonic total ONLY after that proof. Zero frames
+     * is a valid not-yet-prefilled result; validation failure is fatal.
+     * Producer never overwrites unplayed frames or the retained 32-frame
+     * margin. A missing authority is not supplied by this engine. */
+    int (*output_committed)(void *,uint32_t generation,uint32_t memif,
+                            uint64_t dma_bus,uint32_t dma_bytes,uint64_t *frames);
 };
 #define X9_SPEAKER_AFE_RESOURCES 15u /* power/VLP clock + pads/route + DMA/cache + dual PA mute */
 int x9_speaker_afe_register(const struct x9_speaker_afe_platform *);
+/* Replace a DSP binding only after old AFE lease/journal/dirty/uncertain and
+ * physical held predicate fully retire, with a strictly NEW generation.
+ * No new watchdog thread, no unmap, no discard of a faulted live object.
+ * Allows a new shared map VA instead of assuming remap returns the old VA. */
+int x9_speaker_afe_rebind_dsp(const struct x9_speaker_afe_platform *);
 int x9_speaker_afe_prepare(void); /* configure with selected memif/OUT4 disabled */
 /* Borrow the combined backend's live Speaker ticket; no recursive claim and
  * no release of that ticket by this engine, including fault/watchdog cleanup.
@@ -79,6 +99,11 @@ int x9_speaker_afe_prepare(void); /* configure with selected memif/OUT4 disabled
  * coordinator still owns DSP/power/memory teardown and final ticket release. */
 int x9_speaker_afe_prepare_on_ticket(uint64_t ticket);
 int x9_speaker_afe_start(const int16_t *stereo,uint32_t frames,uint64_t *anchor);
+/* DSP mode only, borrowed ticket only. No AP DMA memory access, zero or copy.
+ * Waits for >=960 actual committed output frames; EAGAIN before enable is
+ * just insufficient prefill. Poll/watchdog refresh the real output frontier.
+ * Anchor is the hardware-enable command time, not proof of audible output. */
+int x9_speaker_afe_start_dsp(uint64_t *anchor);
 int x9_speaker_afe_submit(const int16_t *stereo,uint32_t frames);
 int x9_speaker_afe_position(uint64_t *played);
 /* Two-phase combined teardown: mute/disable/drain/halt producer, retaining

@@ -94,22 +94,22 @@ static int board_status(io_connect_t c) {
     return 0;
 }
 static int afe_status(io_connect_t c) {
-    _Static_assert(sizeof(struct x9_speaker_afe_status) == 184, "AFE status v5 size");
+    _Static_assert(sizeof(struct x9_speaker_afe_status) == 192, "AFE status v6 size");
     const char *stages[] = { "none", "prepare", "start", "copy", "poll", "disable", "restore" };
     struct x9_speaker_afe_status s = {0}; size_t n = sizeof(s);
     kern_return_t r = IOConnectCallStructMethod(c, X9AudioAFEStatusSelector, NULL, 0, &s, &n);
     if (r || n != sizeof(s) || s.version != X9_SPEAKER_AFE_STATUS_VERSION) {
         fprintf(stderr,"AFE status/ABI failed: 0x%x\n",r); return 1;
     }
-    printf("AFE registered=%u leased=%u prepared=%u running=%u poisoned=%u errno=%u restore=%u\n"
+    printf("AFE registered=%u leased=%u prepared=%u running=%u poisoned=%u errno=%u restore=%u producer=%u generation=%u\n"
            "  dirty=0x%x uncertain=0x%x partial-copy=%u mute=%u disable=%u quiesce=%u\n"
-           "  played=%llu submitted=%llu cursor=%u memif=%u cached-CON0=%x cached-OUT4=%x\n"
+           "  played=%llu submitted/committed=%llu cursor=%u memif=%u cached-CON0=%x cached-OUT4=%x\n"
            "  low-water-stops=%llu late-polls=%llu\n"
            "  lease-errno=%u config-errno=%u guard=%s(%u) reg=0x%08x expected=0x%08x actual=0x%08x\n"
            "  lease-checks=%llu config-checks=%llu\n"
            "  journal-index=%u prior-valid=%u prior=0x%08x saved=0x%08x\n"
            "  prior-observations=%llu no-write-reconciliations=%llu\n",
-           s.registered,s.leased,s.prepared,s.running,s.poisoned,s.error,s.restore_error,
+           s.registered,s.leased,s.prepared,s.running,s.poisoned,s.error,s.restore_error,s.producer,s.generation,
            s.dirty_mask,s.uncertain_mask,s.copy_pending,s.mute_error,s.disable_error,s.quiesce_error,
            (unsigned long long)s.played,(unsigned long long)s.submitted,s.cursor,s.memif,s.dl24,s.out4,
            (unsigned long long)s.low_water_stops,(unsigned long long)s.late_polls,

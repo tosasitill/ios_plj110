@@ -7,8 +7,9 @@
 PCM ABI 仍为 v1；**board-status v3／160B、dsp-status v2／128B、stream-status v2**，
 需配套本轮 `audioctl`，旧工具会拒绝
 新版结构。私有 kernel backend 回调也升级为 v2（start 增加预填输入）；不能继续注册
-旧版 start 回调。私有 AFE platform 为 v4（cached `held`＋真实 `validate`＋combined producer halt），
-**AFE status 为 v4／184B**；旧 platform 不可注册，旧版 `afe-status` 工具会拒绝。
+旧版 start 回调。私有AFE platform为 **v6／128B**（explicit memif/producer/generation、
+真实validate/producer halt、DSP output committed supplier）；**AFE status为v6／192B**，
+新尾部仅缓存producer/generation，旧platform不可注册，旧版`afe-status`工具会拒绝。
 AFE/stream/resource 状态 selector 只返回缓存，不申请硬件资源。
 新增 `clock-status` 同样只读缓存；`clock-probe` 是 root／mode2 的一次
 **有电源、时钟和禁用 OUT4 寄存器写入**的显式事务，不是只读 probe，不能自动执行。
@@ -69,7 +70,7 @@ staging 必须单独确认、走项目 extent 写入流程；本构建器不安�
 | open type 1 | root／指定音频 daemon 的独占 writer |
 | open type 2 | mode2 的 root 控制会话；不能映射 PCM 或 start 播放，可完成失败后保留的 stop |
 | selector 0/1/2 | status / start / stop；拒绝 async、descriptor 和额外参数 |
-| selector 7/8 | cached AFE status v4／184B / stream lease + physical cursor status v2；只读，不做 MMIO |
+| selector 7/8 | cached AFE status v6／192B / stream lease + physical cursor status v2；只读，不做 MMIO |
 | selector 9/10 | cached PA status v1 / root type2 显式双 PA reg03 probe；不写 PA 值 |
 | selector 11 | cached AP resource lease status v1／64B；没有 claim/release 用户接口 |
 | selector 12/13 | cached clock status v1／216B / root type2 显式 cold register-clock＋disabled OUT4 配置／恢复 |
@@ -114,7 +115,7 @@ ADSP 正常 stop 后有意保留的 AO erratum vote 不当作活动播放 lease�
 admission 仍须重新核对。当前独立 DSP／mic／speaker owner 保守互斥；未来同一
 DSP＋AFE 播放后端必须统一一次资源 lease，不能递归申请两个独立 owner。
 
-AFE platform v3 的 `held(context)` 必须是缓存所有权谓词，不做 MMIO；部分 acquire
+AFE platform v6的 `held(context)` 必须是缓存所有权谓词，不做 MMIO；部分 acquire
 失败仍 held 时执行 mute/release，只有物理恢复成功才撤 ticket。没有物理 lease 且
 无 AFE journal 时不调用 off-domain mute/restore；journal 尚未恢复却丢 lease、
 或 release 返回0但仍 held，均隔离并保留 ticket。所有 callback 仍须有界并处理
@@ -451,7 +452,7 @@ lease空间不是CSR，ticket细节另读resource-status；lease-error0时guard�
 | 文件／入口 | 已实现 | 仍需实际板级提供者 |
 |---|---|---|
 | `x9_dsp_pcm.{c,h}` | 96B PCM descriptor与32B shared-DRAM record字节codec；真实transport上的INIT／share／OPEN／HWPARAM／AFE PCM配置／PREPARE／DLCOPY／START／STOP／HWFREE／CLOSE；generation-bound消费消息、双快照DTOA与输入环容量检查 | unified AP lease下实际共享DRAM/MPU/cache、task/core绑定与生产调用者；DSP消费不能代替AFE物理played |
-| `x9_speaker_afe.{c,h}` | explicit DL24=10或DL_24CH=14→OUT4逐字段写入/不确定/恢复journal；32-bit I2S slots/S16、48k、对应CONN116/117 route；AP transition ticket、platform v5部分失败ownership＋fresh lease/config guard、combined ticket和producer halt；AP prefill/copy、稳定CUR、高低地址/半环歧义检查；独立低水位watcher、mute/disable/quiesce/restore | AUDIO/VLP APLL2、pad/物理共享资源lease、DMA bus/EMI/cache、双PA mute、权威selected memif DMA quiesce与DSP producer adapter |
+| `x9_speaker_afe.{c,h}` | explicit DL24=10或DL_24CH=14→OUT4逐字段journal；32-bit I2S slots/S16、48k；AP transition ticket、platform v6真实lease/config guard、combined producer halt；AP copy与DSP外部生产者start分离，DSP模式不碰输出DMA内存，watcher更新独立output committed边界／真实CUR；完全退休后新generation可rebind不同VA | AUDIO/VLP APLL2、pad/物理共享资源lease、DMA bus/EMI/cache、双PA mute、权威selected memif DMA quiesce，以及当前firmware实际output publication supplier |
 | `x9_tfa_plj110.{c,h}` | root 显式只读 reg03；PMIF-P SID3 reset/SID5 左供电快照，已开启 I²C6/共享 DMA clock 与 pads 校验、2 CSR bank/1 DMA idle、FIFO WRRD 1+2 BE、逐字段总线恢复 | 不具备双侧供电/reset/write lease；右 rail、真实 binding/profile/校准仍待确认 |
 | `x9_i2c6.h/x9_i2c6_native.inc` | 与只读probe共用controller mutex；真实PA epoch下游child、reg8/value16 BE FIFO read/write、双CSR bank/DMA资格、last-prior journal、terminal-only no-replay清理与halt/drain前后屏障；iOS缓存状态 | 必须实际pin住I2C6/APDMA clocks、mux/PLL、GPIO114/115与所有master互斥，现无真实supplier或combined调用者；不授profile/校准/unmute |
 | `x9_pa_reset.{c,h}` | 本次FDT SID3双active-low reset拓扑、生产clock PA子租约、低1ms→高1ms/物理DI读回与fresh epoch、PMIF pending no-replay、halt/drain后重新assert low；I2C6下游子租约屏障 | 实际双侧rail/reset物理独占supplier仍无注册者，不提供PA寄存器写／profile／校准／unmute |
@@ -504,9 +505,9 @@ core通知、AFE／功放与iOS播放backend仍需完成集成。
 
 ### 接同一张票据与本次 LK 共享内存布局
 
-**这里是完整 backend 的内核接点，不是已注册的播放后端。** AFE private platform
-升级为 **v4**；PCM ABI1、AFE cached status v4/184B和iOS selectors不变。没有修改
-HAL路由或授予Ready，不需要把本轮当成用户态已接通的验收。
+**这里是完整backend的内核接点，不是已注册的播放后端。** 同票据/producer halt从
+private platform v4起引入，现在v6还要求显式producer与实际DSP output supplier；
+PCM ABI1和iOS selectors不变，AFE cached status现在v6/192B。没有修改HAL路由或授予Ready。
 
 | 入口 | 语义 |
 |---|---|
@@ -579,9 +580,9 @@ OPPO `mt6993-afe-common.h`明确`MT6993_MEMIF_DL24=10`，而`DL_24CH=14`是另�
 memif；旧DT `/snd-audio-dsp`的playback MEMDL是14、primary为-1，**不是当前firmware
 对任一生产layout的授权证据**。`get_taskid_by_afe_daiid()`还要求default bit0与实际
 runtime/ref-runtime，不能仅看scene7/32或启用位。当前没有真正输出route supplier；
-这些拒绝与验证接线不等于已改好固件route。现有AFE start/copy是AP写环路径，不能
-直接接DSP output环，否则会清零/覆盖DSP生产的数据；DSP output提交边界及生产者
-adapter仍须依实际固件协议补齐，不能把输入`consumed`冒充输出`produced/played`。
+这些拒绝与验证接线不等于已改好固件route。AFE原start/copy仍只供AP producer；
+DSP专用无写环入口已实现（见下节），但其实际firmware output提交边界supplier仍缺，
+不能把输入`consumed`冒充输出`produced/played`。
 
 ### 选择实际 DL24 或 DL_24CH 生产 layout
 
@@ -603,10 +604,37 @@ CUR保留完整low32、high按0x1ff取stable高低高快照。ONE_HEART／DOMAIN
 准入必须inactive，不盲清或重放。全部七个合法route banks持续核对；owned bank由journal
 完整核对，另一个memif不得enabled。每次RW后先fresh lease再readback，失权保留uncertain。
 
-private AFE platform **v5／112B**使用旧alignment padding存memif；cached status
-**v5／184B**使用旧reserved字段存memif，`dl24`旧slot表示selected CON0。
+private AFE platform自v5使用旧alignment padding存memif，目前v6/128B；cached status
+自v5使用旧reserved存memif，目前v6/192B另追加producer/generation，`dl24`旧slot表示selected CON0。
 `audioctl afe-status`打印`memif`和`cached-CON0`，不会为诊断访问MMIO。选择layout本身不
 注册backend、不enable DMA、不unmute；AP start/copy仍不可直接接DSP输出。
+
+### 接 DSP 外部生产者，而不是把输入消费量当播放量
+
+**无实际`output_committed` supplier，不能注册DSP platform或开始播放。** 本地OPPO
+`mtk-dsp-platform-driver.c:mtk_dsp_dl_consume_handler`把DTOA/payload的`pRead`同步到
+**输入环**；`afe_pcm_ipi_to_dsp`仅发送AFE参数，没有给AP返回独立AFE output的committed
+record。不能把这些源码中的DLCOPY/START ACK、输入pRead或时间换算当输出发布协议。
+
+| 入口／状态 | 行为 |
+|---|---|
+| platform CPU=1 | generation必须0，output callback必须NULL，sync_device必需；保留AP prefill/copy |
+| platform DSP=2 | generation必须真实READY、output_committed/真实halt_producer必需；只接受borrowed Speaker ticket，每generation一次prepare尝试 |
+| `start_dsp(anchor)` | 独立supplier证明从AFE ring offset0开始的当前代际单调S16 stereo输出prefix及DSP→AFE可见性；至少960帧后OUT4→memif enable。prefix不足返回EAGAIN，不写enable、不fault |
+| CPU start/submit用于DSP | ENOTSUP且不访问DMA内存；DSP路径不调用bzero/memcpy/sync_device，也不clean/invalidate输出 |
+| watcher／position | 每次fresh实际output证明后更新committed；拒绝倒退、超过last played＋ring capacity−32或超过committed的CUR。played仅由稳定硬件CUR更新 |
+| supplier变慢 | 更新前后都保留**旧已确认prefix**的低水位／deadline；晚到的新count不能掩盖旧prefix可能已耗尽 |
+| fault／stop | 原有双PA mute→disable→独立DMA drain→实际DSP halt→journal restore/release；不因provider错误撤掉父资源 |
+| `rebind_dsp(new_platform)` | 必须原lease/journal/dirty/uncertain/copy_pending/poisoned全退休且old held=false、new generation严格递增；只替换binding，不再创建watcher，允许新shared map返回不同VA |
+
+supplier必须验证**实际firmware输出发布**，完整prefix与同generation/memif/bus/size，不是
+裸write pointer、缓存count或输入消费；缺证据拒绝，不安装成功stub。DMA输出归DSP写，
+producer不能覆盖未播放帧及32-frame margin；supplier不反向重入AFE。除已证明的prefill不足，
+supplier的EAGAIN也作authority failure，不当cursor retry。anchor只是enable命令时间，非实体出声证明。
+
+`audioctl afe-status`为v6/192B，缓存打印producer（1=CPU/2=DSP）和generation；
+`submitted/committed`在CPU模式是AP提交帧，在DSP模式是**独立证明的输出committed**，
+不是PCM session的input submitted/consumed。HAL render/control ABI未改，实际backend未注册。
 
 | 分配 | 相对16KiB向内对齐map起点的offset | 大小／wire含义 |
 |---|---:|---|
@@ -682,7 +710,7 @@ cleanup并获取新的真实generation；永久CSR mapping首次创建后复用�
 锁顺序为AFE→clock→board或transport→board→AP resource leaf。clock policy的drain
 callback必须独立资格化、不能反向重入clock或AFE；caller串行化生命周期。cached
 `clock_held`仅用于ownership，不替代fresh validate。iOS clock216B／PLL264B／board160B／
-DSP128B／AFE184B诊断ABI保持，未增加Ready或用户可控的生产验证位。
+DSP128B等既有诊断ABI保持；AFE现在v6/192B，未增加Ready或用户可控的生产验证位。
 
 本阶段只直接编译board／clock／AFE／shared／SweetX9Audio及iOS header ABI对象；
 没有重编HAL bundle、联合kernel/boot、运行测试套件或操作设备。生产clock目前
@@ -850,7 +878,7 @@ expected 也采用该次实际比较目标。
 dirty 由 restore 外层在该字段收敛后清除。动作位拒绝／no-replay、foreign routes、
 fresh lease、mute／quiesce 与失败保留 mapping／ticket 的要求全部不变。
 
-`afe-status` 当前是 **v5／184B**，private platform v5，无新增selector。首次 guard 若与
+`afe-status`当前是 **v6／192B**，private platform v6，无新增selector。首次 guard 若与
 journal 有关，缓存 `journal-index/prior-valid/prior/saved`，值均在字段 mask 下；
 prior-valid 只表示首次错误时该写 uncertain，不能当作租约／硬件动作重放资格。
 租约、动作位或 foreign-route 首错不填 journal 诊断，index=0xffffffff、prior-valid=0。
