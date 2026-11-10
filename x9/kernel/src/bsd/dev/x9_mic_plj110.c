@@ -352,7 +352,8 @@ static int restore(struct power_journal *j)
     if(j->bus_owned){int guard=bank_idle(j);if(!guard)guard=bus_verify(j);if(guard)return guard;}
     /* RX/SRC off, then codec TX/SRC off while PAD_CLK is still held. Only
      * after both ends are quiescent restore digital clocks, then analog. */
-    int e=j->cal?digital_afe_quiesce(j->cal):0;if(e)return e;
+    int e=x9_mic_mt6681_digital_restore_guard(&j->codec);if(e)return e;
+    e=j->cal?digital_afe_quiesce(j->cal):0;if(e)return e;
     e=x9_mic_mt6681_digital_stop(&j->codec);if(e)return e;
     if(j->cal){e=digital_afe_restore(j->cal);if(e)return e;}
     e=x9_mic_mt6681_unprepare(&j->codec);if(e)return e;

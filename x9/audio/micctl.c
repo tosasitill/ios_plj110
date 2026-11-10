@@ -63,10 +63,11 @@ static int hardware_status(int fd)
     } else if(errno!=ENOTTY){perror("analog status");return 1;}
     struct x9_mic_digital_status g={0};
     if(ioctl(fd,X9_MIC_GET_DIGITAL,&g)==0) {
-        printf("digital v%u stage=%u flags=%#x errno=%u restore_errno=%u nominal_rate=%u delay=%u/%u journal codec=%u/%u afe=%u/%u reg=%#x elapsed_ns=%llu\n",
+        printf("digital v%u stage=%u flags=%#x errno=%u restore_errno=%u nominal_rate=%u delay=%u/%u journal codec=%u/%u afe=%u/%u reg=%#x elapsed_ns=%llu codec_restore_checked=%u codec_restore_errno=%u codec_restore_reg=%#x (RW conflict filter, not ownership/PCM proof)\n",
             g.version,g.stage,g.flags,g.last_errno,g.restore_errno,g.nominal_rate,g.delay_data,g.delay_cycle,
             g.codec_journal_restored,g.codec_journal_count,g.afe_journal_restored,g.afe_journal_count,
-            g.last_register,g.elapsed_ns);
+            g.last_register,g.elapsed_ns,!!(g.flags&X9_MIC_DIGITAL_CODEC_RESTORE_CHECKED),
+            g.codec_restore_errno,g.codec_restore_register);
         printf("digital codec SRC/TOP/TX0/TX1/PAD/MODE4=%#x/%#x/%#x/%#x/%#x/%#x MUX=%#x/%#x; after=%#x/%#x/%#x/%#x/%#x/%#x\n",
             g.codec_src,g.codec_top,g.codec_tx[0],g.codec_tx[1],g.codec_pad,g.codec_mode4,g.codec_mux[0],g.codec_mux[1],
             g.codec_after_src,g.codec_after_top,g.codec_after_tx[0],g.codec_after_tx[1],g.codec_after_pad,g.codec_after_mode4);

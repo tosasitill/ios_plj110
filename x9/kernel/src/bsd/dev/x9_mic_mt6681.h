@@ -39,7 +39,7 @@ struct x9_mic_mt6681 {
     struct x9_mic_codec_saved digital_saved[64];
     uint32_t digital_pending;
     uint64_t digital_deadline;
-    bool digital_owned;
+    bool digital_owned, digital_uncertain;
 };
 /* Caller serializes all operations, including status snapshots. This is a
  * power/calibration prerequisite, NOT an ADC/PCM backend and never sets READY.
@@ -66,5 +66,8 @@ int x9_mic_mt6681_analog_l(struct x9_mic_mt6681 *);
  * only for the board's bounded RX diagnostic. Stop before clock/pad release. */
 int x9_mic_mt6681_digital_l(struct x9_mic_mt6681 *, struct x9_mic_digital_status *);
 int x9_mic_mt6681_digital_stop(struct x9_mic_mt6681 *);
+/* Read-only bounded check before either end's shutdown. A conflict poisons
+ * this transaction; this is not global codec ownership or a DMA drain. */
+int x9_mic_mt6681_digital_restore_guard(struct x9_mic_mt6681 *);
 #endif
 #endif

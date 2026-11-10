@@ -52,6 +52,7 @@ def main():
         'passive_status_discovery': True, 'status_discovery_interval_ms': 500,
         'realtime_fault_notifications_deferred': True,
         'enumeration_empty_lists_supported': True,
+        'codec_masked_restore_guard': True, 'codec_restore_fault_location': True,
         'cold_power_probe_control': True,
         'power_probe_activates_recording': False, 'hardware_tested': False,
         'route_tested': False, 'autoload': False}, indent=2) + '\n')

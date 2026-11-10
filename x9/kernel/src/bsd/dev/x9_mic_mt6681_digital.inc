@@ -16,11 +16,13 @@ static int digital_update(struct x9_mic_mt6681 *c,uint16_t reg,uint8_t mask,uint
     c->digital_saved[n].reg=reg;c->digital_saved[n].mask=mask;c->digital_saved[n].old=old&mask;
     c->digital_saved[n].value=value&mask;
     c->digital->codec_journal_count=c->digital_pending;
+    c->digital_uncertain=true;
     /* Write from the same old byte which was journaled, not a second read
      * with a potentially different unmasked value/restore baseline. */
     e=write8(c,reg,(old&~mask)|(value&mask));
     uint8_t got=0;if(!e)e=read8(c,reg,&got);
     if(!e && (got&mask)!=(value&mask))e=EIO;
+    if(!e)c->digital_uncertain=false;
     return e;
 }
 #define DIGITAL_BYTE(reg,mask,value) do {e=digital_update(c,(reg),(mask),(value));if(e)return e;} while(0)
@@ -45,28 +47,115 @@ static int digital_codec_snapshot(struct x9_mic_mt6681 *c,bool active)
     if(active && !e)e=analog_read(c,MT6681_AFE_MTKAIF_MUX_CFG_H,&s->codec_mux[1]);
     return e;
 }
+static int digital_restore_failure(struct x9_mic_mt6681 *c,int e)
+{
+    struct x9_mic_digital_status *s=c->digital;
+    if(!s->codec_restore_errno) {
+        s->codec_restore_errno=e;s->codec_restore_register=c->status.last_register;
+    }
+    if(!s->restore_errno)s->restore_errno=e;
+    s->last_register=c->status.last_register;s->flags|=X9_MIC_DIGITAL_RETAINED;
+    return restore_failure(c,e,X9_MIC_HW_RESTORE_DIGITAL);
+}
+static uint64_t digital_restore_deadline(void)
+{
+    /* A recording STOP may be long after the preparation deadline expired. */
+    uint64_t ticks;nanoseconds_to_absolutetime(1000000000ULL,&ticks);
+    return mach_absolute_time()+ticks;
+}
+static void digital_restore_expected(struct x9_mic_mt6681 *c,uint16_t reg,
+    uint8_t *mask,uint8_t *expected,uint8_t *alternate)
+{
+    *mask=*expected=*alternate=0;
+    for(unsigned i=0;i<c->digital_pending;i++) {
+        const struct x9_mic_codec_saved *s=&c->digital_saved[i];
+        if(s->reg!=reg)continue;
+        *expected=(*expected&~s->mask)|(s->value&s->mask);
+        /* Only the last issued, unconfirmed write may still hold its old
+         * value. Never accept earlier transient requests as a foreign-free
+         * baseline. Mixed/other values fail closed. */
+        uint8_t v=c->digital_uncertain && i+1==c->digital_pending?s->old:s->value;
+        *alternate=(*alternate&~s->mask)|(v&s->mask);*mask|=s->mask;
+    }
+}
+static int digital_restore_read(struct x9_mic_mt6681 *c,uint16_t reg,
+    uint64_t deadline,uint8_t *got,uint8_t *mask)
+{
+    uint8_t expected,alternate;
+    digital_restore_expected(c,reg,mask,&expected,&alternate);
+    if(!*mask)return 0; /* no issued fields: do not touch this register */
+    c->status.last_register=reg;
+    if(mach_absolute_time()>=deadline)return ETIMEDOUT;
+    int e=read8(c,reg,got);if(e)return e;
+    if(mach_absolute_time()>=deadline)return ETIMEDOUT;
+    return (*got&*mask)==(expected&*mask) || (*got&*mask)==(alternate&*mask)?0:EBUSY;
+}
+static int digital_restore_check(struct x9_mic_mt6681 *c,uint64_t deadline)
+{
+    if(c->poisoned)return c->status.restore_errno?c->status.restore_errno:EIO;
+    for(unsigned i=0;i<c->digital_pending;i++) {
+        bool seen=false;
+        for(unsigned j=0;j<i;j++)if(c->digital_saved[j].reg==c->digital_saved[i].reg){seen=true;break;}
+        if(seen)continue;
+        uint8_t got=0,mask=0;
+        int e=digital_restore_read(c,c->digital_saved[i].reg,deadline,&got,&mask);
+        if(e)return e;
+    }
+    if(c->digital_pending)c->digital->flags|=X9_MIC_DIGITAL_CODEC_RESTORE_CHECKED;
+    return 0; /* non-atomic RW conflict filter, not a hardware ownership proof */
+}
+int x9_mic_mt6681_digital_restore_guard(struct x9_mic_mt6681 *c)
+{
+    if(!c->digital_owned)return 0;
+    int e=digital_restore_check(c,digital_restore_deadline());
+    return e?digital_restore_failure(c,e):0;
+}
+static int digital_restore_off(struct x9_mic_mt6681 *c,uint16_t reg,
+    uint8_t off_mask,uint64_t deadline)
+{
+    uint8_t got=0,mask=0;
+    int e=digital_restore_read(c,reg,deadline,&got,&mask);if(e)return e;
+    off_mask&=mask;if(!off_mask)return 0;
+    /* Track the known quiesced value in the same field journal. Old values
+     * remain intact; reverse restoration must not mistake our own off write
+     * for a foreign update or restore an unissued enable. */
+    for(unsigned i=0;i<c->digital_pending;i++)if(c->digital_saved[i].reg==reg)
+        c->digital_saved[i].value&=~off_mask;
+    e=write8(c,reg,got&~off_mask);
+    if(!e)e=read8(c,reg,&got);
+    if(!e && (got&off_mask))e=EIO;
+    if(!e && mach_absolute_time()>=deadline)e=ETIMEDOUT;
+    return e;
+}
 int x9_mic_mt6681_digital_stop(struct x9_mic_mt6681 *c)
 {
     if(!c->digital_owned)return 0;
     struct x9_mic_digital_status *s=c->digital;
-    /* All four enables were observed off. Quiesce both TXs (vendor's
-     * R-MISO1 disable only stops TX2) before restoring supplies/GPIO. */
-    int e=update8(c,MT6681_AFE_ADDA_UL_SRC_CON0_0,ADDA_UL_SRC_ON_TMP_CTL_MASK_SFT,0);
-    if(!e)e=update8(c,MT6681_AFE_ADDA_MTKAIFV4_TX_CFG0,1,0);
-    if(!e)e=update8(c,MT6681_AFE_ADDA6_MTKAIFV4_TX_CFG0,1,0);
-    if(!e)e=update8(c,MT6681_AFE_AUD_PAD_TOP,9,0);
+    uint64_t deadline=digital_restore_deadline();
+    int e=digital_restore_check(c,deadline);
+    /* All enable baselines were off. Only quiesce actually issued fields;
+     * a failure before SRC/TX programming must not write untouched outputs. */
+    if(!e)e=digital_restore_off(c,MT6681_AFE_ADDA_UL_SRC_CON0_0,ADDA_UL_SRC_ON_TMP_CTL_MASK_SFT,deadline);
+    if(!e)e=digital_restore_off(c,MT6681_AFE_ADDA_MTKAIFV4_TX_CFG0,1,deadline);
+    if(!e)e=digital_restore_off(c,MT6681_AFE_ADDA6_MTKAIFV4_TX_CFG0,1,deadline);
+    if(!e)e=digital_restore_off(c,MT6681_AFE_AUD_PAD_TOP,9,deadline);
     if(!e)delay(125);
     while(!e && c->digital_pending) {
         unsigned n=c->digital_pending-1;
         s->last_register=c->digital_saved[n].reg;
-        e=update8(c,c->digital_saved[n].reg,c->digital_saved[n].mask,c->digital_saved[n].old);
-        if(!e){--c->digital_pending;++s->codec_journal_restored;}
+        uint8_t got=0,mask=0;
+        e=digital_restore_read(c,c->digital_saved[n].reg,deadline,&got,&mask);
+        mask=c->digital_saved[n].mask;
+        if(!e)e=write8(c,c->digital_saved[n].reg,(got&~mask)|(c->digital_saved[n].old&mask));
+        if(!e)e=read8(c,c->digital_saved[n].reg,&got);
+        if(!e && (got&mask)!=(c->digital_saved[n].old&mask))e=EIO;
+        if(!e && mach_absolute_time()>=deadline)e=ETIMEDOUT;
+        if(!e){--c->digital_pending;c->digital_uncertain=false;++s->codec_journal_restored;}
     }
     if(!e)e=digital_codec_snapshot(c,false);
     if(!e && ((s->codec_after_src&1) || (s->codec_after_tx[0]&1) ||
        (s->codec_after_tx[1]&1) || (s->codec_after_pad&9)))e=EIO;
-    if(e){s->restore_errno=e;s->flags|=X9_MIC_DIGITAL_RETAINED;
-        (void)restore_failure(c,e,X9_MIC_HW_RESTORE_DIGITAL);}
+    if(e)(void)digital_restore_failure(c,e);
     else c->digital_owned=false;
     return e;
 }
