@@ -30,6 +30,12 @@ static int access_error; /* reset only by a new explicit control operation */
 static bool new_control;
 static X9AudioBoardStatus status;
 static struct x9_adsp_handoff layout;
+enum { AudioSemIdle, AudioSemAcquireUncertain, AudioSemHeld,
+       AudioSemReleaseUncertain, AudioSemLost };
+static uint32_t audio_sem_state;
+static uint64_t audio_sem_lease,audio_sem_serial;
+static uint64_t shared_child_lease,shared_child_serial;
+enum { AUDIO_SEM_REG=0x64,AUDIO_SEM_BIT=1u<<(4*3+2),AUDIO_SEM_RETRIES=5000 };
 _Static_assert(sizeof(X9AudioBoardStatus)==160,"ADSP board status v3 size");
 enum { PD_SET=0x20700,PD_CLR=0x20704,PD_EN=0x20708,PD_DONE=0x1132c,
        PD_ALL=0x13700,PD_BUSY=0x13704,TOP=2,INFRA=4,AO=8,CHAIN=14,
@@ -41,7 +47,7 @@ static uint64_t get64(const uint8_t *p)
 {return (uint64_t)get32(p)|(uint64_t)get32(p+4)<<32;}
 static void copy_layout(void)
 {
-    DTEntry chosen;void *p=NULL;unsigned int bytes=0;
+    DTEntry chosen;const void *p=NULL;unsigned int bytes=0;
     struct x9_adsp_handoff h;
     if(SecureDTLookupEntry(NULL,"/chosen",&chosen)!=kSuccess ||
        SecureDTGetProperty(chosen,"x9-adsp-handoff",&p,&bytes)!=kSuccess ||
@@ -51,15 +57,15 @@ static void copy_layout(void)
        !p || bytes!=2064)return;
     const uint8_t *map=p;uint32_t count=get32(map+4);
     if(get32(map)!=1 || !count || count>128)return;
-    uint64_t total=0,last=0;
+    uint64_t ram_total=0,last=0;
     for(unsigned i=0;i<count;i++) {
         uint64_t lo=get64(map+16+i*16),hi=get64(map+24+i*16);
         if(lo<0x100000000ULL || hi>0x37fa00000ULL || lo>=hi || lo<last ||
-           ((lo|hi)&0x3fff) || total>UINT64_MAX-(hi-lo) ||
+           ((lo|hi)&0x3fff) || ram_total>UINT64_MAX-(hi-lo) ||
            (h.reserve_base<hi && lo<h.reserve_base+h.reserve_bytes))return;
-        last=hi;total+=hi-lo;
+        last=hi;ram_total+=hi-lo;
     }
-    if(total<(8ULL<<30) || total!=get64(map+8))return;
+    if(ram_total<(8ULL<<30) || ram_total!=get64(map+8))return;
     /* The fixed-size ADT tail must be zero, not a hidden second range list. */
     for(unsigned i=16+count*16;i<bytes;i++)if(map[i])return;
     lck_mtx_lock(&board_lock);layout=h;lck_mtx_unlock(&board_lock);
@@ -137,6 +143,128 @@ static int validate(void *unused)
 {
     (void)unused;lck_mtx_lock(&board_lock);int e=qualify();
     if(e){status.error=(uint32_t)e;x9_audio_resources_fault(resource_owner,resource_ticket,e);}
+    lck_mtx_unlock(&board_lock);return e;
+}
+/* board_lock held. Never use the cached global ON aggregate as admission. */
+static int speaker_qualify(uint64_t ticket)
+{
+    if(!registered || !ticket || borrowed_ticket!=ticket ||
+       resource_ticket!=ticket || resource_owner!=X9AudioResourceSpeaker)return EPERM;
+    int e=qualify();
+    if(e){status.error=(uint32_t)e;x9_audio_resources_fault(resource_owner,ticket,e);}
+    return e;
+}
+int x9_adsp_mt6993_speaker_validate(uint64_t ticket)
+{
+    lck_mtx_lock(&board_lock);int e=speaker_qualify(ticket);
+    lck_mtx_unlock(&board_lock);return e;
+}
+static int speaker_halted_qualify(uint64_t ticket)
+{
+    int e=speaker_qualify(ticket);
+    if(!e && (!reset_done || started || wake || status.pending ||
+       audio_sem_state!=AudioSemIdle))e=EBUSY;
+    if(!e && (rd(cfg,AUDIO_SEM_REG)&AUDIO_SEM_BIT))e=EBUSY;
+    return e;
+}
+int x9_adsp_mt6993_speaker_halted_validate(uint64_t ticket)
+{
+    lck_mtx_lock(&board_lock);int e=speaker_halted_qualify(ticket);
+    lck_mtx_unlock(&board_lock);return e;
+}
+int x9_adsp_mt6993_shared_hold(uint64_t ticket,uint64_t *lease)
+{
+    if(!lease)return EINVAL;
+    *lease=0;lck_mtx_lock(&board_lock);int e=speaker_qualify(ticket);
+    if(!e && (!started || shared_child_lease))e=EBUSY;
+    if(!e && shared_child_serial==UINT64_MAX)e=EOVERFLOW;
+    if(!e){shared_child_lease=++shared_child_serial;*lease=shared_child_lease;}
+    lck_mtx_unlock(&board_lock);return e;
+}
+int x9_adsp_mt6993_shared_drop(uint64_t ticket,uint64_t lease)
+{
+    lck_mtx_lock(&board_lock);int e=!lease || lease!=shared_child_lease?EPERM:0;
+    if(!e)e=speaker_halted_qualify(ticket);
+    if(!e)shared_child_lease=0;
+    lck_mtx_unlock(&board_lock);return e;
+}
+int x9_adsp_mt6993_audio_sem_acquire(uint64_t ticket,uint64_t *lease)
+{
+    if(!lease)return EINVAL;
+    *lease=0;
+    lck_mtx_lock(&board_control_lock);lck_mtx_lock(&board_lock);
+    int e=speaker_qualify(ticket);
+    if(!e && (!started || audio_sem_state!=AudioSemIdle))e=EBUSY;
+    /* An inherited AP bit is foreign ownership, not recursive success. */
+    if(!e && (rd(cfg,AUDIO_SEM_REG)&AUDIO_SEM_BIT))e=EBUSY;
+    if(!e && audio_sem_serial==UINT64_MAX)e=EOVERFLOW;
+    if(!e) {
+        audio_sem_lease=++audio_sem_serial;*lease=audio_sem_lease;
+        for(unsigned n=0;n<AUDIO_SEM_RETRIES;n++) {
+            e=speaker_qualify(ticket);if(e)break;
+            /* Fresh zero read permits exactly one attempt. Mark uncertain
+             * BEFORE the toggle; never blindly replay an unresolved write. */
+            if(rd(cfg,AUDIO_SEM_REG)&AUDIO_SEM_BIT) {
+                audio_sem_state=AudioSemLost;e=EBUSY;break;
+            }
+            audio_sem_state=AudioSemAcquireUncertain;
+            wr(cfg,AUDIO_SEM_REG,AUDIO_SEM_BIT);
+            e=speaker_qualify(ticket);if(e)break;
+            if(rd(cfg,AUDIO_SEM_REG)&AUDIO_SEM_BIT) {
+                audio_sem_state=AudioSemHeld;break;
+            }
+            /* Completed write + qualified readback proves this attempt
+             * did not acquire. DSP may still own one of its two ways. */
+            audio_sem_state=AudioSemIdle;
+            if(n+1==AUDIO_SEM_RETRIES){status.timeouts++;e=ETIMEDOUT;}
+            else delay(2);
+        }
+        if(audio_sem_state==AudioSemIdle){audio_sem_lease=0;*lease=0;}
+    }
+    if(e)x9_audio_resources_fault(X9AudioResourceSpeaker,ticket,e);
+    lck_mtx_unlock(&board_lock);lck_mtx_unlock(&board_control_lock);return e;
+}
+int x9_adsp_mt6993_audio_sem_validate(uint64_t ticket,uint64_t lease)
+{
+    lck_mtx_lock(&board_lock);
+    int e=!lease || lease!=audio_sem_lease || audio_sem_state!=AudioSemHeld?EPERM:0;
+    if(!e)e=speaker_qualify(ticket);
+    if(!e && !(rd(cfg,AUDIO_SEM_REG)&AUDIO_SEM_BIT)) {
+        audio_sem_state=AudioSemLost;e=ESTALE;
+    }
+    if(e)x9_audio_resources_fault(X9AudioResourceSpeaker,ticket,e);
+    lck_mtx_unlock(&board_lock);return e;
+}
+int x9_adsp_mt6993_audio_sem_release(uint64_t ticket,uint64_t lease)
+{
+    lck_mtx_lock(&board_lock);
+    int e=!lease || lease!=audio_sem_lease || audio_sem_state==AudioSemIdle?EPERM:0;
+    if(!e)e=speaker_qualify(ticket);
+    if(!e) {
+        uint32_t bit=rd(cfg,AUDIO_SEM_REG)&AUDIO_SEM_BIT;
+        if(audio_sem_state==AudioSemLost) {
+            /* Explicit cleanup may retire LOST only on a qualified zero
+             * AP bit. A one bit could be foreign: never toggle it. This
+             * does not clear the caller's historical shared/PCM fault. */
+            if(bit)e=ESTALE;
+            else {audio_sem_state=AudioSemIdle;audio_sem_lease=0;}
+        } else if(audio_sem_state==AudioSemHeld && !bit) {
+            audio_sem_state=AudioSemLost;e=ESTALE;
+        } else if(audio_sem_state==AudioSemReleaseUncertain && bit) {
+            /* A previous release might not have settled. No second toggle:
+             * toggling again could reacquire instead of releasing. */
+            e=EIO;
+        } else {
+            if(bit) {
+                audio_sem_state=AudioSemReleaseUncertain;
+                wr(cfg,AUDIO_SEM_REG,AUDIO_SEM_BIT);
+                e=speaker_qualify(ticket);
+                if(!e && (rd(cfg,AUDIO_SEM_REG)&AUDIO_SEM_BIT))e=EIO;
+            }
+            if(!e){audio_sem_state=AudioSemIdle;audio_sem_lease=0;}
+        }
+    }
+    if(e)x9_audio_resources_fault(X9AudioResourceSpeaker,ticket,e);
     lck_mtx_unlock(&board_lock);return e;
 }
 static int wait_pending_idle(void)
@@ -257,6 +385,7 @@ static int power_on(void *unused)
 static int reset(void *unused)
 {
     (void)unused;lck_mtx_lock(&board_lock);begin_control();int e=exclusive?0:ENXIO;
+    if(!e && audio_sem_state!=AudioSemIdle)e=EBUSY;
     if(!e && access_error)e=access_error;
     if(!e) {
         X9AudioResourceStatus ticket;x9_audio_resources_status(&ticket);
@@ -265,6 +394,7 @@ static int reset(void *unused)
     }
     if(!e)e=chain_on(); /* recover a partially revoked power lease first */
     if(!e)e=qualify();
+    if(!e && (rd(cfg,AUDIO_SEM_REG)&AUDIO_SEM_BIT))e=EBUSY;
     if(!e)e=smc(SMC_STOP,0);
     if(!e)started=false;
     if(!e)e=qualify(); /* secure monitor may have changed domain state */
@@ -278,7 +408,9 @@ static int reset(void *unused)
 static int core_start(void *unused)
 {
     (void)unused;lck_mtx_lock(&board_lock);int e=exclusive&&reset_done&&!started?0:ENXIO;
+    if(!e && (audio_sem_state!=AudioSemIdle || shared_child_lease))e=EBUSY;
     if(!e)e=qualify();
+    if(!e && (rd(cfg,AUDIO_SEM_REG)&AUDIO_SEM_BIT))e=EBUSY;
     if(!e)e=smc(SMC_RELOAD,0xad5bad5b);
     if(!e)e=qualify();
     if(!e)e=smc(SMC_START,0);
@@ -289,9 +421,10 @@ static int core_start(void *unused)
 static int power_off(void *unused)
 {
     (void)unused;lck_mtx_lock(&board_lock);int e=0;
-    if(started || wake || !reset_done)e=EBUSY;
+    if(started || wake || !reset_done || audio_sem_state!=AudioSemIdle || shared_child_lease)e=EBUSY;
     else if(exclusive) {
         e=qualify();
+        if(!e && (rd(cfg,AUDIO_SEM_REG)&AUDIO_SEM_BIT))e=EBUSY;
         if(!e)e=chain_off();
         if(!e){exclusive=reset_done=false;status.flags&=~(X9BoardPowered|X9BoardExclusive);}
     }
@@ -378,7 +511,7 @@ int x9_adsp_mt6993_speaker_control(uint32_t op,uint64_t ticket)
     if(!e)e=!op?x9_adsp_boot(0):op==1?x9_adsp_halt(0):x9_adsp_release(0);
     if(!e && op==2) {
         lck_mtx_lock(&board_lock);
-        if(exclusive || resource_ticket || started || wake)e=EIO;
+        if(exclusive || resource_ticket || started || wake || audio_sem_state!=AudioSemIdle || shared_child_lease)e=EIO;
         else {borrowed_ticket=0;resource_owner=X9AudioResourceADSP;}
         lck_mtx_unlock(&board_lock);
     }

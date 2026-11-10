@@ -7,7 +7,7 @@
 PCM ABI 仍为 v1；**board-status v3／160B、dsp-status v2／128B、stream-status v2**，
 需配套本轮 `audioctl`，旧工具会拒绝
 新版结构。私有 kernel backend 回调也升级为 v2（start 增加预填输入）；不能继续注册
-旧版 start 回调。私有 AFE platform 为 v3（cached `held`＋真实、无副作用的 `validate`），
+旧版 start 回调。私有 AFE platform 为 v4（cached `held`＋真实 `validate`＋combined producer halt），
 **AFE status 为 v4／184B**；旧 platform 不可注册，旧版 `afe-status` 工具会拒绝。
 AFE/stream/resource 状态 selector 只返回缓存，不申请硬件资源。
 新增 `clock-status` 同样只读缓存；`clock-probe` 是 root／mode2 的一次
@@ -515,7 +515,7 @@ HAL路由或授予Ready，不需要把本轮当成用户态已接通的验收。
 | `x9_adsp_mt6993_copy_handoff()` | 返回boot-lifetime、两端校验的256B布局；缺失/改变返回ENXIO，输出不变。不映射DRAM、不证明EMI访问权限 |
 
 完整teardown顺序是mute/disable/drain/producer halt→恢复AFE journal→恢复AFE/pads/clocks→
-DSP release→最后释放一张AP Speaker ticket。`halt_producer`也在引擎watchdog和prepare
+共享RAM unmap／child drop→DSP release→最后释放一张AP Speaker ticket。`halt_producer`也在引擎watchdog和prepare
 失败的cleanup执行，不能只在HAL主动stop时停DSP。它必须实际进入board/transport的
 halt路径；只收到PCM DIRECT STOP、cached Offline或一个空回调都不够。callback不能
 反向重入AFE，后续validate必须能检查同一租约下已停核但仍有电的DSP。
@@ -536,12 +536,59 @@ BASE/SET/CLR、两core system image区域和cell/ranges合同同时核对。
 bus是0x160543000。这只是源码与旧DT的布局算术，**不是本次启动的grant或EMI证据**。
 pool并不16KiB页对齐，后续子分配/映射须保留与XHCI相邻页边界，不可清零整页。
 
-仍需完成：实际共享RAM/EMI与cache binding、daemon pool/COREMEM登记、core DTOA通知、
-完整AUDIO/APLL2 VLP/pad与双PA provider，以及将PCM session接到iOS backend。
+共享RAM映射／daemon登记／core DTOA处理组件现已编写，见下一节；仍没有真实memory
+authority／IRQ provider和combined caller，因此不访问pool、不宣称登记或播放已运行。
+还需完成完整AUDIO/APLL2 VLP/pad与双PA provider，以及将PCM session接到iOS backend。
 独立cold clock/pll/path probe仍要求TOP/INFRA baseline，不能拿它们的成功flag冒充
 combined acquire；统一电源初始化顺序必须单独实现。固件/共享RAM不能用Device映射；
-XNU `ml_io_map_wcomb`存在，但本轮尚未执行它，physmap别名/cache属性与EMI资格未齐时
-不访问pool。最终只在这些生产接线完成后冻结并构建一个镜像。
+不采用WC/WB混合别名。最终只在这些生产接线完成后冻结并构建一个镜像。
+
+### 接共享 DRAM、真实信号量和 core DTOA
+
+**本组件没有默认成功的EMI／物理租约／IRQ回调，也没有注册播放backend。**
+`x9_dsp_shared` 的 `validate_memory` 必须逐次证明物理子区独占、当前AP/DSP/AFE
+EMI/SMPU权限、实际固件build的daemon scene及core-A task routing；不能从FDT布局、
+SMC返回0、cached ticket或用户输入的verified位推断。缺任一必要callback即拒绝
+acquire，未映射/清零pool。`validate_drained` 必须在unmap前独立证明真实DL24 drain。
+
+| 分配 | 相对16KiB向内对齐map起点的offset | 大小／wire含义 |
+|---|---:|---|
+| core flags | 0 | 分配256B，登记的`audio_dsp_dram.size`是**16B**，两个LE64 ATOD／DTOA flags |
+| task ATOD | 0x100 | **1024B**原始task分配；PCM descriptor仍96B |
+| task DTOA | 0x500 | **1024B**原始task分配；与ATOD不共享cache line |
+| DSP输入环 | 0x4000 | **122880B**，64×480帧stereo S16 |
+| AFE输出环 | 0x24000 | **122880B**，独立物理子区，不把DSP输入consumed当played |
+
+只映射向内对齐的 **0x44000B**，不占XHCI边界页，不映射整个8.5MiB pool。
+使用XNU `ml_io_map_unmappable(...,VM_WIMG_COPYBACK)`／kernel_map，避免Device DRAM
+和永久8MiB io_submap；映射前后及每次访问验证逐页pmap地址、cache metadata和现有
+physmap别名，不修改全局cache属性。PoC同步在禁抢占后读取本CPU CTR：AP→DSP clean
+用`dc cvac`，DSP→AP **只invalidate**用`dc ivac`，前后`dsb sy`；不clean旧DTOA覆盖固件。
+
+MT6993 v3的真实`SEMA_AUDIO`是 **CFG+0x64、AP bit14（4×3+2）**，写入为toggle。
+acquire拒绝已有AP bit和递归调用；每次资格化的0读回只允许一次toggle，写前保存
+uncertain、写后重新资格化/readback；最多5000次明确未获取的尝试。不确定toggle
+不盲重放，失去已持有bit返回ESTALE并保留隔离；新的显式cleanup只可在fresh AP bit0
+时退休LOST记录，bit1可能是外来持有者，不toggle，也不清shared/PCM历史fault。独立单调lease token防止旧release
+释放新持有者。活动／不确定sem阻止reset/start/power-off，未知继承AP bit同样阻止
+reset/撤父资源。资格失败后不继续读域内CSR；显式halt可以重新资格化但会EBUSY，先
+`x9_dsp_shared_resolve_semaphore()`处理保留的sem，再重新halt，不用软件清状态假恢复。
+
+映射前的board shared child lease阻止父电源撤销/重启，halt仍允许；失败mapping／
+sync／send保留mapping、child、AP ticket和首错。只在fresh Offline generation、
+board真实reset_done/无pending/无sem及真实AFE drain同检后unmap，再drop child；
+drop失败可以只重试drop，不能二次unmap。每代际只允许一次shared初始化尝试。
+
+登记实际走`x9_adsp_request`：daemon `EINGBUFASHAREMEM8`发送16B whole-pool
+bus/bytes；`COREMEM_SET7`发送32B dram record，size16B。二者保持原BYPASS语义，
+**TX-consume不是DSP处理成功或扬声器Ready**。daemon enum受AUTO build条件影响，
+不能硬编码44；task仅接受固定core-A PRIMARY7或AUDPLAYBACK32，实际route仍要authority。
+
+`x9_dsp_shared_dtoa()`只供生产core-A AUDIO IRQ线程调用；调用者必须先证明/ack真实
+IRQ源，不将mailbox IPI9当core IRQ，也不轮询任意RAM。它在真实sem下invalidate并读
+已登记core flags，持sem调用同一PCM session的DTOA双快照，成功才清本task bit并clean；
+未知scene bit保留并隔离。没有当前IRQ注册者，不声称core通知已跑通。输出ring的
+sync/binding和PCM binding已有实现，最终仍待combined电源／AFE／双PA／iOS caller。
 
 ### AUDIO-12：启动／运行配置资格与缓存故障位置
 
