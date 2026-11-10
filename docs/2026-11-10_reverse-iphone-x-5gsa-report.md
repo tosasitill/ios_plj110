@@ -12,7 +12,8 @@ QMI 注册解析和 SA 设置命令。之前 NOTES 中“CommCenter 没有 5G �
 MT6993 基带 + 自编译兼容层 + iPhone X 用户态，不是原装 iPhone X。
 
 范围：只读本地已提取 Mach-O、根盘快照 dyld cache、现有 USB 日志和桥接源码。
-本次没有接触设备、改 Apple 二进制、编译、CI、上机或修改蜂窝策略。
+初次分析没有接触设备、改 Apple 二进制、编译、CI、上机或修改蜂窝策略。
+后续获用户同意,在独立 `x9-nrsa` 分支准备了桥接/用户态实验副本并本地构建,见文末;仍未操作设备。
 源码观察基线为 `137ba97`；该提交在本轮分析期间由其他工作更新，不属于本轮修改。
 
 ## Evidence → Finding → Path
@@ -57,7 +58,8 @@ F5 的注册与 LTE-only 为日志确认，NR 信息缺失为源码/既有消息
 - `libCommCenterMCommandDrivers.dylib` 的 GetSysInfo response 回调：
   `0x1f1b08910` 查 TLV **0x4B**，`0x1f1b08934` 调
   `tryTlv<nas::tlv::NR5GSysInfo>`（`0x1f1b098ac`）。
-  SysInfo indication 回调在 `0x1f1b0f928` 也调用同一解析器。
+  SysInfo indication 回调在 `0x1f1b0f924` 传 **0x4D**,`0x1f1b0f928` 调同一解析器。
+  **共用解析器不代表标签相同**:NR service status在响应/通知中也分别为 **0x4A / 0x4C**。
 - `QMINetworkRegistrationDriver::enable5GStandalone`，`0x1f1afc288`：
   建 NAS **0x33 SetSystemSelectionPreference**，写入 `NRDisableMode`
   （由 enabled 取反）和 `EnableNrUpdateReason`，经 `ClientRouter::SendProxy` 发送。
@@ -76,8 +78,8 @@ F5 的注册与 LTE-only 为日志确认，NR 信息缺失为源码/既有消息
   `NR system is present, processing it` 日志。
 - `GsmRadioPersonality` 构造器会按硬件配置在部分分支设置 +0x121；例如
   `0x1f036d6c4` 写 1。因此“二进制含 NR 代码”与“D22 当前能进 NR 分支”是两回事。
-  **本轮没有读取设备上该对象，也没有完整求值 D22 构造分支，不能把此位的运行值说成已测。**
-- `x9q_nas` 对 NR 目前只给 **0x4A 的三字节 Service Status**；只在 LTE 注册时
+  **没有读取设备上该对象。后续已离线求值D22构造分支,返回时该位为0;仍不能把它当作设备实测。**
+- 初次分析时的 `x9q_nas` 对 NR 只给 **0x4A 的三字节 Service Status**；只在 LTE 注册时
   生成 **0x19 LTE System Info**，没有生成 **0x4B NR System Info**。
   所以 167 中“SA 时不推进、LTE 后推进”的差异不能用于证明 NR 解析代码不存在。
 - ic/id 沿用 `AT+ERAT=3`，主动 LTE-only；这个限制是实验策略，不是 IPSW 能力结论。
@@ -115,3 +117,43 @@ rg -n 'NAS registration|NAS SysInfo|LTE-only' ~/167.txt ~/168.txt
 rg -n 'p.tlv\(0x19|p.tlv\(0x4a|p.tlv\(0x4b' \
   x9/kernel/src/iokit/Kernel/arm/X9QMIAT.inc
 ```
+
+## 获准实施后的离线候选（`x9-nrsa` / `dde26eb`）
+
+完整构建/安装边界以 `NOTES.md` 的 **HANDOFF 105-SA** 为准。
+
+- **E6 → F6 → P4**:新增私有 `nrsa-20261110/evaluate_d22.py` 和
+  `d22-evaluation.txt` 对原始20H392指令做局部执行,得出
+  `D22 → Telephony product 0x40 → hardware config 7 → ctor +0x121=0`。
+  输入模型和少量外部调用有明确建模;这不是整台iOS仿真或设备内存测量。
+- **E7 → F7 → P5**:`X9QMIAT.inc` 已修正 NR 查询/通知标签,并从
+  `C5GREG + COPS(AcT=11) + CGATT` 生成29字节NR信息;保持未知位置字段invalid。
+  Apple解析器 `0x1f194bd78–0x1f194bfdc` 最终消费0x1d字节,与libqmi一致。
+- **E8 → F8 → P6**:新增 `prepare_nr_registration_cache.py` 只产生离线cache副本,
+  不安装、不覆盖源文件。UUID/原指令匹配后将构造器两条指令共8字节替换,
+  保留+0x120并增加+0x121。作用case为硬件配置5–10,D22使用7。
+  这只开放已知NR注册门,**不承诺SA设置、信号和数据策略全部开放**。
+  原签名没有重新生成,设备接受这个副本尚未验证。
+
+本地准备命令（必须在独立worktree运行;输出文件必须不存在）:
+
+```bash
+cd .local/x9/work/ios_plj110-nrsa
+python3 -I x9/tools/prepare_nr_registration_cache.py \
+  --source /tmp/x9root/private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64.31 \
+  --output .local/x9/work/nrsa-20261110/patched-cache/dyld_shared_cache_arm64.31 \
+  > .local/x9/work/nrsa-20261110/cache-patch.json
+```
+
+已有副本不要覆盖;再次准备需选择新的输出名。精确改动为cache组件偏移
+`0x36ed1b0`: `2900805269820439` → `2920805269420279`。
+此处不是根盘/UFS偏移;部署前还须确认原始字节、实际文件映射和可回退安装方式。
+
+`x9-rev252nr1-md/boot.img` 本地构建成功,插件275不变。
+实验参数 `x9_md_lte=0` 仅取消主动LTE-only,不强制SA;
+**boot.img不包含上述cache补丁,尚未具备已验证的SA启动/联网链**。
+原LTE镜像和设备根盘均保留。未上机、未执行额外测试套件、无CI run。
+
+NAS0x33的进一步线索已收敛为 `NRDisableMode=0x2E/u32 LE`、
+`EnableNrUpdateReason=0xA4/u8`;MTK策略映射与NR信号尚未实现。
+下一个决定性证据应是补丁加载后的CommCenter NR处理日志,随后才是数据面实收发。
