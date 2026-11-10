@@ -20,6 +20,7 @@
 #include "../../../bsd/dev/x9_audio_resources.h"
 #include "../../../bsd/dev/x9_speaker_mt6993.h"
 #include "../../../bsd/dev/x9_speaker_pll.h"
+#include "../../../bsd/dev/x9_speaker_path.h"
 #if defined(ARM64_BOARD_CONFIG_SWEET)
 extern "C" int sweet_early_is_x9(void);
 extern "C" int sweet_x9_arg(const char *, int);
@@ -43,6 +44,7 @@ static_assert(sizeof(X9AudioControl) == 112, "PCM ABI v1 size");
 static_assert(sizeof(X9AudioStreamStatus) == 48, "stream status v2 size");
 static_assert(sizeof(X9AudioClockStatus) == 216, "clock status v1 size");
 static_assert(sizeof(X9AudioPLLStatus) == 264, "PLL status v1 size");
+static_assert(sizeof(X9AudioPathStatus) == 272, "path status v1 size");
 static void beginUpdate() { __atomic_add_fetch(&control->seq, 1, __ATOMIC_SEQ_CST); }
 static void endUpdate() { __atomic_add_fetch(&control->seq, 1, __ATOMIC_SEQ_CST); }
 static int stopState(X9AudioControl *s, int error)
@@ -336,6 +338,15 @@ IOReturn X9AudioUserClient::externalMethod(uint32_t sel, IOExternalMethodArgumen
 {
     (void)dispatch; (void)target; (void)reference;
     if (!a || isInactive() || !control) return kIOReturnNotReady;
+    if (sel == X9AudioPathStatusSelector) {
+        if (a->structureInputDescriptor || a->structureOutputDescriptor || a->asyncWakePort ||
+            a->scalarInputCount || a->scalarOutputCount || a->structureInputSize ||
+            !a->structureOutput || a->structureOutputSize < sizeof(X9AudioPathStatus)) return kIOReturnBadArgument;
+        X9AudioPathStatus s; int e = x9_speaker_mt6993_path_status(&s);
+        if (e) return result(e);
+        memcpy(a->structureOutput, &s, sizeof(s));
+        a->structureOutputSize = sizeof(s); return kIOReturnSuccess;
+    }
     if (sel == X9AudioPLLStatusSelector) {
         if (a->structureInputDescriptor || a->structureOutputDescriptor || a->asyncWakePort ||
             a->scalarInputCount || a->scalarOutputCount || a->structureInputSize ||
@@ -354,14 +365,15 @@ IOReturn X9AudioUserClient::externalMethod(uint32_t sel, IOExternalMethodArgumen
         memcpy(a->structureOutput, &s, sizeof(s));
         a->structureOutputSize = sizeof(s); return kIOReturnSuccess;
     }
-    if (sel == X9AudioClockProbeSelector || sel == X9AudioPLLProbeSelector) {
+    if (sel == X9AudioClockProbeSelector || sel == X9AudioPLLProbeSelector || sel == X9AudioPathProbeSelector) {
         if (a->structureInputDescriptor || a->structureOutputDescriptor || a->asyncWakePort ||
             a->scalarInputCount || a->scalarOutputCount || a->structureInputSize ||
             a->structureOutputSize) return kIOReturnBadArgument;
         if (!exclusive || !administrator || !boardController) return kIOReturnNotPrivileged;
         lck_mtx_lock(&audioLock);
         int e = haveBackend || backendHeld || (control->state & X9AudioRunning) ? EBUSY :
-            (sel == X9AudioPLLProbeSelector ? x9_speaker_mt6993_pll_probe() :
+            (sel == X9AudioPathProbeSelector ? x9_speaker_mt6993_path_probe() :
+                sel == X9AudioPLLProbeSelector ? x9_speaker_mt6993_pll_probe() :
                 x9_speaker_mt6993_clock_probe());
         lck_mtx_unlock(&audioLock); return result(e);
     }

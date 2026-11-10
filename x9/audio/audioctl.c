@@ -14,6 +14,7 @@
 #include "../kernel/src/bsd/dev/x9_audio_resources.h"
 #include "../kernel/src/bsd/dev/x9_speaker_mt6993.h"
 #include "../kernel/src/bsd/dev/x9_speaker_pll.h"
+#include "../kernel/src/bsd/dev/x9_speaker_path.h"
 static volatile sig_atomic_t interrupted;
 static void on_signal(int n) { (void)n; interrupted = 1; }
 static int status(io_connect_t c, X9AudioControl *s) {
@@ -266,6 +267,30 @@ static int pll_status(io_connect_t c) {
     puts("Cached only. Rates use unmeasured nominal 26MHz reference; 1% sanity/2-count spread is not ppm accuracy, PLL lock, I2S waveform or speaker Ready.");
     return 0;
 }
+static int path_status(io_connect_t c) {
+    _Static_assert(sizeof(X9AudioPathStatus) == 272, "path status v1 size");
+    X9AudioPathStatus s; size_t n = sizeof(s);
+    kern_return_t r = IOConnectCallStructMethod(c, X9AudioPathStatusSelector, NULL, 0, &s, &n);
+    if (r || n != sizeof(s) || s.version != X9_AUDIO_PATH_STATUS_VERSION) {
+        fprintf(stderr,"path status/ABI failed: 0x%x\n",r); return 1;
+    }
+    printf("disabled DL24->OUT4 flags=%x stage=%u errno=%u restore-errno=%u held=%u ticket=%llu\n"
+           "  dirty/uncertain=%x/%x last=%x:%x\n",
+           s.flags,s.stage,s.error,s.restore_error,(s.flags&X9PathHeld)!=0,(unsigned long long)s.ticket,
+           s.dirty_mask,s.uncertain_mask,s.last_register,s.last_value);
+    const char *names[]={"OUT4 cowork","DL24 CON0","CONN116_2","CONN117_2"};
+    for(unsigned i=0;i<4;i++)printf("  %s before/configured/after=%x/%x/%x\n",
+        names[i],s.before[i],s.configured[i],s.after[i]);
+    const unsigned words[]={0,1,2,4,5,6,7};
+    for(unsigned ch=0;ch<2;ch++)for(unsigned i=0;i<7;i++)printf("  CONN%u_%u before/after=%x/%x\n",
+        116+ch,words[i],s.routes_before[ch*7+i],s.routes_after[ch*7+i]);
+    const char *dma[]={"BASE_MSB","BASE","END_MSB","END"};
+    for(unsigned i=0;i<4;i++)printf("  unchanged DL24 %s before/after=%x/%x\n",dma[i],s.dma_before[i],s.dma_after[i]);
+    const char *control[]={"MEM_UP_MSB","MEM_UP","PAD_TOP"};
+    for(unsigned i=0;i<3;i++)printf("  unchanged %s before/after=%x/%x\n",control[i],s.control_before[i],s.control_after[i]);
+    puts("Cached only. Disabled register-route roundtrip, no DMA address/CUR/MEM_UP/pad/PA writes or engine enable; not DMA quiesce, actual I2S waveform or speaker Ready.");
+    return 0;
+}
 int main(int argc, char **argv) {
     if (argc == 4 && !strcmp(argv[1], "amp-inspect")) return inspect_container(argv[2], argv[3]);
     int amp = argc == 2 && !strcmp(argv[1], "amp-status");
@@ -279,18 +304,20 @@ int main(int argc, char **argv) {
     int clock_probe = argc == 2 && !strcmp(argv[1], "clock-probe");
     int pll = argc == 2 && !strcmp(argv[1], "pll-status");
     int pll_probe = argc == 2 && !strcmp(argv[1], "pll-probe");
+    int path = argc == 2 && !strcmp(argv[1], "path-status");
+    int path_probe = argc == 2 && !strcmp(argv[1], "path-probe");
     int stream = argc == 2 && !strcmp(argv[1], "stream-status");
     int stream_stop = argc == 2 && !strcmp(argv[1], "stream-stop");
     int playing = argc == 3 && !strcmp(argv[1], "play");
     int dsp = argc == 2 && !strcmp(argv[1], "dsp-status");
-    if (!amp && !probing && !playing && !dsp && !board && !afe && !resources && !clocks && !clock_probe && !pll && !pll_probe && !stream && !stream_stop && !booting && !stopping && !(argc == 2 && !strcmp(argv[1], "status"))) {
-        fprintf(stderr, "usage: audioctl amp-status | amp-probe | status | resource-status | clock-status | clock-probe | pll-status | pll-probe | stream-status | stream-stop | afe-status | dsp-status | board-status | dsp-boot | dsp-stop |\n  play <S16LE stereo 48000Hz raw PCM> | amp-inspect <local.cnt> <exact-profile>\n"); return 2;
+    if (!amp && !probing && !playing && !dsp && !board && !afe && !resources && !clocks && !clock_probe && !pll && !pll_probe && !path && !path_probe && !stream && !stream_stop && !booting && !stopping && !(argc == 2 && !strcmp(argv[1], "status"))) {
+        fprintf(stderr, "usage: audioctl amp-status | amp-probe | status | resource-status | clock-status | clock-probe | pll-status | pll-probe | path-status | path-probe | stream-status | stream-stop | afe-status | dsp-status | board-status | dsp-boot | dsp-stop |\n  play <S16LE stereo 48000Hz raw PCM> | amp-inspect <local.cnt> <exact-profile>\n"); return 2;
     }
     FILE *f = playing ? fopen(argv[2], "rb") : NULL;
     if (playing && !f) { perror(argv[2]); return 1; }
     io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching(X9_AUDIO_CLASS));
     if (!service) { fprintf(stderr, "X9Audio absent (requires x9_audio=1 or 2)\n"); if (f) fclose(f); return 1; }
-    io_connect_t c = 0; kern_return_t r = IOServiceOpen(service, mach_task_self(), (probing || clock_probe || pll_probe || booting || stopping || stream_stop) ? 2 : playing ? 1 : 0, &c);
+    io_connect_t c = 0; kern_return_t r = IOServiceOpen(service, mach_task_self(), (probing || clock_probe || pll_probe || path_probe || booting || stopping || stream_stop) ? 2 : playing ? 1 : 0, &c);
     IOObjectRelease(service);
     if (r) { fprintf(stderr, "open failed: 0x%x\n", r); if (f) fclose(f); return 1; }
     X9AudioControl s; int rc = status(c, &s);
@@ -317,6 +344,12 @@ int main(int argc, char **argv) {
             kern_return_t op = call(c, X9AudioPLLProbeSelector);
             if (op) fprintf(stderr,"APLL2/meter cycle failed: 0x%x; shared clock-probe attempt, no retry/reset loop\n",op);
             int pr = pll_status(c), cr = clock_status(c); rc = op || pr || cr;
+        }
+        if (path) rc = path_status(c);
+        if (path_probe) {
+            kern_return_t op = call(c, X9AudioPathProbeSelector);
+            if (op) fprintf(stderr,"disabled DL24/OUT4 cycle failed: 0x%x; shared clock/pll attempt, no retry/reset loop\n",op);
+            int ar = path_status(c), pr = pll_status(c), cr = clock_status(c); rc = op || ar || pr || cr;
         }
         if (stream) rc = stream_status(c);
         if (stream_stop) {

@@ -13,6 +13,8 @@
 #include "x9_audio_resources.h"
 #include "x9_speaker_mt6993.h"
 #include "x9_speaker_pll.h"
+#include "x9_speaker_path.h"
+#include "x9_speaker_dl24.h"
 #include "x9_speaker_out4.h"
 #include "x9_mic_mt6993_regs.h"
 extern vm_offset_t ml_io_map(vm_offset_t,vm_size_t);
@@ -180,7 +182,8 @@ static void afe_snapshot(bool configured)
     }
 }
 #include "x9_speaker_mt6993_pll.inc"
-static int take(bool with_pll)
+#include "x9_speaker_mt6993_path.inc"
+static int take(bool with_pll,bool with_path)
 {
     s.stage=X9ClockMap;
     j.hwv=ml_io_map(0x1c040000,0x75000);j.vlp=ml_io_map(0x1c200000,0x1000);
@@ -228,6 +231,7 @@ static int take(bool with_pll)
     s.stage=X9ClockI2S;
     for(unsigned n=1;!e && n<FIELD_COUNT;n++)e=change(n,fields[n].value);
     if(e)return e;
+    if(with_path){e=path_take();if(e)return e;}
     s.stage=X9ClockRecheck;e=idle();if(!e)e=verify_fields(false);if(e)return e;
     afe_snapshot(true);s.flags|=X9ClockConfigured;return 0;
 }
@@ -274,8 +278,9 @@ static int restore(void)
     if(s.owned_vote&8){s.parked_vote|=8;s.owned_vote&=~8u;}
     return 0;
 }
-static int run_probe(bool with_pll)
+static int run_probe(unsigned mode)
 {
+    bool with_pll=mode!=0,with_path=mode==2;
     if(!sweet_early_is_x9() || sweet_x9_arg("x9_audio",0)!=2)return ENXIO;
     lck_mtx_lock(&x9_speaker_clock_lock);
     if(s.flags&X9ClockAttempted){lck_mtx_unlock(&x9_speaker_clock_lock);return EBUSY;}
@@ -283,12 +288,16 @@ static int run_probe(bool with_pll)
     if(e){lck_mtx_unlock(&x9_speaker_clock_lock);return e;} /* no attempt consumption */
     s.ticket=ticket;s.flags=X9ClockAttempted|X9ClockHeld;
     if(with_pll){pll_s.flags=X9PLLAttempted|X9PLLHeld;pll_s.ticket=ticket;}
+    if(with_path){path_s.flags=X9PathAttempted|X9PathHeld;path_s.ticket=ticket;}
     s.smc_result[0]=s.smc_result[1]=INT64_MIN;
-    e=take(with_pll);s.error=(uint32_t)e;
+    e=take(with_pll,with_path);s.error=(uint32_t)e;
     unsigned failure_stage=s.stage,failure_register=s.last_register,failure_value=s.last_value;
     unsigned pll_failure_stage=pll_s.stage,pll_failure_register=pll_s.last_register,pll_failure_value=pll_s.last_value;
-    s.stage=X9ClockRestore;if(with_pll)pll_s.stage=X9PLLRestore;
-    int off=with_pll?pll_restore():0;
+    unsigned path_failure_stage=path_s.stage,path_failure_register=path_s.last_register,path_failure_value=path_s.last_value;
+    s.stage=X9ClockRestore;if(with_path)path_s.stage=X9PathRestore;
+    int off=with_path?path_restore():0;
+    if(with_pll)pll_s.stage=X9PLLRestore;
+    if(!off && with_pll)off=pll_restore();
     if(!off)off=restore();ao_snapshot();
     if(!off)off=x9_audio_resources_release(X9AudioResourceSpeaker,ticket);
     s.restore_error=(uint32_t)off;
@@ -303,10 +312,17 @@ static int run_probe(bool with_pll)
         if(e){pll_s.stage=pll_failure_stage;pll_s.last_register=pll_failure_register;pll_s.last_value=pll_failure_value;}
         else pll_s.stage=off?X9PLLRestore:X9PLLDone;
     }
+    if(with_path) {
+        path_s.error=(uint32_t)e;path_s.restore_error=(uint32_t)off;
+        if(off)path_s.flags|=X9PathPoisoned;
+        else {path_s.flags&=~X9PathHeld;path_s.flags|=X9PathRestored;path_s.ticket=0;}
+        if(e){path_s.stage=path_failure_stage;path_s.last_register=path_failure_register;path_s.last_value=path_failure_value;}
+        else path_s.stage=off?X9PathRestore:X9PathDone;
+    }
     lck_mtx_unlock(&x9_speaker_clock_lock);return e?e:off;
 }
-int x9_speaker_mt6993_clock_probe(void){return run_probe(false);}
-int x9_speaker_mt6993_pll_probe(void){return run_probe(true);}
+int x9_speaker_mt6993_clock_probe(void){return run_probe(0);}
+int x9_speaker_mt6993_pll_probe(void){return run_probe(1);}
 int x9_speaker_mt6993_clock_status(X9AudioClockStatus *out)
 {
     if(!out)return EINVAL;
@@ -316,4 +332,10 @@ int x9_speaker_mt6993_pll_status(X9AudioPLLStatus *out)
 {
     if(!out)return EINVAL;
     lck_mtx_lock(&x9_speaker_clock_lock);*out=pll_s;lck_mtx_unlock(&x9_speaker_clock_lock);return 0;
+}
+int x9_speaker_mt6993_path_probe(void){return run_probe(2);}
+int x9_speaker_mt6993_path_status(X9AudioPathStatus *out)
+{
+    if(!out)return EINVAL;
+    lck_mtx_lock(&x9_speaker_clock_lock);*out=path_s;lck_mtx_unlock(&x9_speaker_clock_lock);return 0;
 }

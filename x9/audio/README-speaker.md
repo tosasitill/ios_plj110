@@ -11,7 +11,9 @@ AFE/stream/resource 状态 selector 只返回缓存，不申请硬件资源。
 新增 `clock-status` 同样只读缓存；`clock-probe` 是 root／mode2 的一次
 **有电源、时钟和禁用 OUT4 寄存器写入**的显式事务，不是只读 probe，不能自动执行。
 新增 `pll-status` 只读缓存，`pll-probe` 在同一基础事务内额外启停预配置 APLL2、
-切换 VLP mux 并写硬件测频器；**与 clock-probe 共用每 boot 一次机会**，不应先运行两者之一再尝试另一个。
+切换 VLP mux 并写硬件测频器。新增 `path-status` 只读缓存，`path-probe` 进一步配置
+禁用的 DL24→OUT4 路由；**clock-probe／pll-probe／path-probe 共用每 boot 一次机会**，
+不能连续运行这三个事务。
 
 ## 构建
 
@@ -169,7 +171,7 @@ APLL2 CON0/CON1/CON3/FENC/TUNER/PCW0/PCW1 仅在 cold admission 后读取 AO 快
 ### 申请预配置 APLL2 并取得硬件测频样本
 
 `pll-probe` 不是状态查询，不自动运行，不是播放 backend。它替代该 boot 的
-`clock-probe`，共用同一 AP ticket、cold AUDIO／26M／SMC INIT0＋SIDEBANDS7、
+`clock-probe`（或选择下节 `path-probe`），共用同一 AP ticket、cold AUDIO／26M／SMC INIT0＋SIDEBANDS7、
 禁用 OUT4 与恢复流程。必须由用户在配套 kernel／工具已部署且 `x9_audio=2` 的
 **iOS root shell** 中显式选择；本轮只有编译结果，以下硬件流程尚未上机执行：
 
@@ -221,6 +223,57 @@ erratum保留的parked AO vote、不伪造SMC undo。**此事务成功也不设�
 不注册AFE/platform/backend、不启AUDIO engine／DMA、不写SRAM／pads／routes／PA。**
 双PA右rail、实际revision/profile/校准、可信mute/config与完整AFE缓存／EMI／quiesce
 以及iOS原生HAL路由仍未接齐；DSP固件RELOAD/READY也没有新增实机验收。
+
+### 配置禁用的 DL24→OUT4 格式和路由
+
+`path-probe` 复用完整 `pll-probe` 的cold AUDIO／SMC／APLL2／测频事务，在其
+APLL2仍on且OUT4 EN0时接入四字段配置，随后先恢复路由，再恢复PLL与基础电源。
+没有物理AFE/platform/backend注册，不启动播放。**以下设备步骤尚未执行**：
+
+```sh
+# 配套kernel/tool部署及x9_audio=2启动后，在iOS shell读取软件缓存：
+audioctl path-status
+audioctl pll-status
+audioctl clock-status
+audioctl resource-status
+# 仅用户选择有写入的事务、且本boot三个probe均未进入时，在root shell一次执行：
+audioctl path-probe
+# 失败也只读缓存，不重试、不取消未知request：
+audioctl path-status
+audioctl pll-status
+audioctl clock-status
+audioctl resource-status
+```
+
+| 字段／阶段 | 行为与边界 |
+|---|---|
+| board admission | 基础clock／PLL准入保持；AFE engine、32 memif、7IN＋7OUT EN全部off；DL24 ON/one-heart/domain与两个SW_CLEAR位必须0；CONN116/117各7个合法route词全0 |
+| shared descriptors | `x9_speaker_dl24.h`同时供板级事务与AFE引擎使用：inactive cowork、DL24 S16 stereo／FS10、PBUF/MIN/MAX编码0、CONN116_2 bit16与117_2 bit17；不是Android当前mixer的运行证明 |
+| configure | 只修改0x1690 cowork bits8..11、0x46d0普通disabled格式、0x2f08／0x2f28；OUT4／DL24 EN始终0，不写保留route word3 |
+| inherited fields | DL24 BASE_MSB/BASE/END_MSB/END、MEM_UP_MSB/MEM_UP与PAD_TOP只读快照，每次字段变更和恢复前核对未变；其它route词始终空，不清foreign source |
+| restore | 两route→DL24格式→cowork逆序masked恢复；核对四字段（包括不需要写的字段）与全部非自有route/address/control baseline，再恢复PLL、OUT4与基础票；失败保留同一AP ticket |
+
+PLJ110捕获DT的`etdm-out-ch[4]=2`、`etdm-out-sync[4]=0`、`etdm-vlp[4]=1`，
+且所有`etdm-in-mclk/etdm-out-mclk`为0；**本事务不申请MCK，不重编TOP AUD2 mux/divider**。
+同样不写DMA地址／CUR／MEM_UP、SRAM／DRAM request、pad／GPIO、PA或engine enable。
+继承字段未变和memif EN0不是权威DMA drain／无outstanding请求证明，不能据此注册provider。
+
+OPPO`mt6993-reg.h`明确DL24_CON0 bit18/7为SW_CLEAR_MEM_RAN_OUT／SW_CLEAR_BUF_EMPTY
+动作位；板级及AFE引擎均拒绝继承的高位，RMW写入显式带0，绝不重放清除动作。
+AFE引擎也新增prepare final readback与restore final baseline，包含未写字段；
+non-owned route词／one-heart／domain／action变化会阻止物理release，不因dirty mask清零
+就当作恢复。私有platform v2／PCM ABI1及原verified注册门不变，当前没有真实调用者。
+
+| 接口 | 内容 |
+|---|---|
+| selector16 `path-status` v1／272B | 缓存flags／主与restore errno／stage／last register,value／dirty,uncertain／ticket，四字段before/configured/after、14route词before/after、未写地址与control before/after |
+| selector17 `path-probe` | root＋exclusive＋admin＋type2＋audio2，audioLock下拒绝haveBackend/backendHeld/Running，AP资源冲突不消耗attempt；真正进入与selector13/15共用每boot一次 |
+| flags／stage | Attempted1、Captured2（完整准入后的journal）、Configured4、Restored8、Held16、Poisoned32；stage0none/1admission/2configure/3verify/4restore/5done。早期失败须联看PLL与clock缓存 |
+
+`Configured`仅指四个禁用字段readback通过，`Restored`仅指共用事务可恢复配置／活动票
+cleanup（borrowed票与parked AO保持、无SMC undo）；**不等于真实48k I²S、DMA进度、
+PA静音或实体出声，Ready仍0**。仍须取得真实共享资源／EMI/cache/quiesce、双PA
+右rail/revision/profile/校准与可信mute/config，以及DSP固件READY和iOS HAL路由证据。
 
 ### 对齐启动预填和 PCM 时间线
 

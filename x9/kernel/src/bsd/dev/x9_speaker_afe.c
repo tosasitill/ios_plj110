@@ -13,6 +13,7 @@
 #include "x9_speaker_afe.h"
 #include "x9_audio_resources.h"
 #include "x9_speaker_out4.h"
+#include "x9_speaker_dl24.h"
 extern int sweet_x9_arg(const char *,int);
 extern int sweet_early_is_x9(void);
 LCK_GRP_DECLARE(speaker_afe_group,"x9-speaker-afe");
@@ -31,16 +32,15 @@ struct patch {uint32_t off,mask,value,saved,expected;};
  * Cowork OUT4->IN4 master choice=0 only configures the inactive selector. */
 static struct patch config[]={
     X9_SPEAKER_OUT4_DISABLED_CONFIG,
-    {0x1690,15u<<8,0,0,0},
+    X9_SPEAKER_OUT4_COWORK_DISABLED,
     {0x0098,(1u<<5)|(1u<<20),1u<<5,0,0},
     {0x46b0,UINT32_MAX,0,0,0},{0x46b4,UINT32_MAX,0,0,0},
     {0x46c0,UINT32_MAX,0,0,0},{0x46c4,UINT32_MAX,0,0,0},
-    {0x46d0,(1u<<28)|(3u<<20)|(3u<<16)|(31u<<8)|(3u<<5)|(1u<<4)|(1u<<3)|(1u<<2)|3u,
-        (10u<<8)|(1u<<3),0,0}, /* stereo S16, normal SRAM, pbuf32/min0 (10ms) */
-    {0x2f08,UINT32_MAX,1u<<16,0,0}, /* I_DL24_CH1 = 80-64 */
-    {0x2f28,UINT32_MAX,1u<<17,0,0}, /* I_DL24_CH2 = 81-64 */
+    X9_SPEAKER_DL24_DISABLED_FORMAT,
+    X9_SPEAKER_DL24_DISABLED_ROUTES,
 };
 #define COUNT ((unsigned)(sizeof(config)/sizeof(config[0])))
+_Static_assert(COUNT==13, "DL24 journal index10 and route indices11/12");
 static uint32_t rd(uint32_t off)
 {
     uint32_t v=hw.afe[off/4];__asm__ volatile("dmb oshld":::"memory");
@@ -57,7 +57,9 @@ static int change(unsigned i,uint32_t value)
      * journaled values are recoverable; never adopt a third/foreign value. */
     if((old&p->mask)!=(p->expected&p->mask) &&
        !((state.uncertain_mask&bit) && (old&p->mask)==(p->saved&p->mask)))return EBUSY;
+    if(p->off==X9_SPEAKER_DL24_CON0 && (old&(X9_SPEAKER_DL24_INACTIVE_MASK&~(1u<<28))))return EBUSY;
     uint32_t next=(old&~p->mask)|(value&p->mask);
+    if(p->off==X9_SPEAKER_DL24_CON0)next&=~X9_SPEAKER_DL24_CLEAR_MASK;
     if((next&p->mask)==(old&p->mask)) {
         p->expected=next;state.uncertain_mask&=~bit;return 0;
     }
@@ -66,14 +68,31 @@ static int change(unsigned i,uint32_t value)
     if((rd(p->off)&p->mask)!=(next&p->mask))return EIO;
     state.uncertain_mask&=~bit;return 0;
 }
+static int verify_config(bool saved)
+{
+    for(unsigned n=0;n<COUNT;n++) {
+        const struct patch *p=&config[n];
+        if((rd(p->off)&p->mask)!=((saved?p->saved:p->expected)&p->mask))return EBUSY;
+    }
+    return 0;
+}
+static int unowned_routes_idle(void)
+{
+    const unsigned banks[]={0,4,16,20,24,28};
+    for(unsigned ch=0;ch<2;ch++)for(unsigned n=0;n<6;n++)
+        if(rd(0x2f00+ch*32+banks[n]))return EBUSY;
+    return rd(X9_SPEAKER_DL24_CON0)&X9_SPEAKER_DL24_INACTIVE_MASK?EBUSY:0;
+}
 static int restore(void)
 {
-    /* Ordinary masked RW only; CUR and MEM_UP triggers are NEVER replayed. */
+    /* Ordinary masked RW only; CUR/MEM_UP/action bits are never replayed. */
+    int e=unowned_routes_idle();if(e)return e;
     for(unsigned n=COUNT;n>0;n--) {
         if(!(state.dirty_mask&(1u<<(n-1))))continue;
         int e=change(n-1,config[n-1].saved);if(e)return e;
         state.dirty_mask&=~(1u<<(n-1));
     }
+    e=verify_config(true);if(!e)e=unowned_routes_idle();if(e)return e;
     journaled=false;return 0;
 }
 static int disable(void)
@@ -157,7 +176,7 @@ int x9_speaker_afe_prepare(void)
     if(!e && !hw.held(hw.context))e=EIO;
     if(!e) {
         e=hw.mute(hw.context);
-        if(!e && ((rd(0x46d0)&(1u<<28)) || (rd(0x1580)&1)))e=EBUSY;
+        if(!e && ((rd(X9_SPEAKER_DL24_CON0)&X9_SPEAKER_DL24_INACTIVE_MASK) || (rd(0x1580)&1)))e=EBUSY;
         /* Reject other enabled mixer sources. There is no CONN116_3 in this
          * SoC table. Do not clear a foreign route to make our source work. */
         const unsigned banks[]={0,4,8,16,20,24,28};
@@ -172,6 +191,8 @@ int x9_speaker_afe_prepare(void)
             journaled=true;
             for(unsigned i=0;!e && i<COUNT;i++)e=change(i,config[i].value);
         }
+        if(!e)e=verify_config(false);
+        if(!e)e=unowned_routes_idle();
         if(!e){state.prepared=1;state.dl24=rd(0x46d0);state.out4=rd(0x1580);}
     }
     if(e){int off=stop_locked();if(off)state.restore_error=(uint32_t)off;}
