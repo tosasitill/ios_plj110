@@ -26,6 +26,8 @@ bool nmb_blit_texture_hint(NmbEncoder *,const NmbTexture *,uint32_t,uint64_t,uin
 NmbTexture *nmb_texture_new_on_surface(NmbBuffer *,const struct NmbTextureDescriptor *,uint64_t,uint64_t,uint32_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t);
 bool nmb_encoder_sampler_lod(NmbEncoder *,uint32_t,const NmbSampler *,float,float,uint32_t);
 bool nmb_render_barrier(NmbEncoder *,uint64_t,uint64_t,uint64_t);
+struct NmbBarrierResource {const NmbBuffer *buffer;const NmbTexture *texture;};
+bool nmb_render_barrier_resources(NmbEncoder *,const struct NmbBarrierResource *,size_t,uint64_t,uint64_t);
 bool nmb_render_indirect(NmbEncoder *,uint64_t,const NmbBuffer *,uint64_t,const NmbBuffer *,uint64_t,uint64_t);
 bool nmb_blit_synchronize_resource(NmbEncoder *,const NmbBuffer *,const NmbTexture *);
 uint64_t nmb_pipeline_query(const NmbComputePipeline *,const NmbRenderPipeline *,uint32_t,uint64_t,uint64_t,uint64_t);

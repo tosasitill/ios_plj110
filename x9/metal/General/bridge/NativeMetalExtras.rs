@@ -139,6 +139,28 @@ pub extern "C" fn nmb_encoder_sampler_lod(p:*mut NmbEncoder,stage:u32,sampler:*c
 pub extern "C" fn nmb_render_barrier(p:*mut NmbEncoder,scope:u64,after:u64,before:u64)->bool {
  guard(false,||{let NmbEncoder::Render(c)=get_mut(p)? else{return Err("not render".into())};c.memory_barrier_with_scope(raw::<BarrierScope>(scope,"scope")?,raw::<RenderStages>(after,"after stages")?,raw::<RenderStages>(before,"before stages")?);Ok(true)})
 }
+#[repr(C)]
+pub struct NmbBarrierResource {pub buffer:*const NmbBuffer,pub texture:*const NmbTexture}
+/// # Safety
+/// `resources` holds `count` pairs of live handles for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nmb_render_barrier_resources(p:*mut NmbEncoder,resources:*const NmbBarrierResource,count:usize,after:u64,before:u64)->bool {
+ guard(false,||{
+  if count>65536||(count>0&&resources.is_null()){return Err("invalid barrier resources".into())}
+  let input=if count==0{&[][..]}else{unsafe{std::slice::from_raw_parts(resources,count)}};
+  let mut refs=Vec::with_capacity(count);
+  for r in input {
+   refs.push(match (r.buffer.is_null(),r.texture.is_null()) {
+    (false,true)=>ResourceRef::Buffer(&get(r.buffer)?.0),
+    (true,false)=>ResourceRef::Texture(&get(r.texture)?.0),
+    _=>return Err("one resource per barrier entry required".into()),
+   });
+  }
+  let NmbEncoder::Render(c)=get_mut(p)? else{return Err("not render".into())};
+  c.memory_barrier_with_resources(&refs,raw::<RenderStages>(after,"after stages")?,raw::<RenderStages>(before,"before stages")?).map_err(e("render resource barrier"))?;
+  Ok(true)
+ })
+}
 #[unsafe(no_mangle)]
 pub extern "C" fn nmb_render_indirect(p:*mut NmbEncoder,primitive:u64,indirect:*const NmbBuffer,offset:u64,indices:*const NmbBuffer,index_type:u64,index_offset:u64)->bool {
  guard(false,||{let NmbEncoder::Render(c)=get_mut(p)? else{return Err("not render".into())};

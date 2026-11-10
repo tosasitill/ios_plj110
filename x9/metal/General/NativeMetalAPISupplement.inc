@@ -210,8 +210,24 @@
 }
 - (void)memoryBarrierWithScope:(MTLBarrierScope)scope afterStages:(MTLRenderStages)after beforeStages:(MTLRenderStages)before {[self check:nmb_render_barrier(self.handle,scope,after,before) what:"memoryBarrierWithScope"];}
 - (void)memoryBarrierWithResources:(const id<MTLResource> __unsafe_unretained [])resources count:(NSUInteger)count afterStages:(MTLRenderStages)after beforeStages:(MTLRenderStages)before {
- if(!count)return;[self useResources:resources count:count usage:MTLResourceUsageRead|MTLResourceUsageWrite stages:after|before];
- [self memoryBarrierWithScope:MTLBarrierScopeBuffers|MTLBarrierScopeTextures afterStages:after beforeStages:before];
+ if(!count)return;
+ if(!resources||count>65536){[self.commandBuffer refuse:@"invalid render barrier resources"];return;}
+ std::vector<NmbBarrierResource> refs;refs.reserve(count);
+ for(NSUInteger k=0;k<count;k++) {
+  id resource=resources[k];NmbBarrierResource ref={};
+  if([resource isKindOfClass:[NBBuffer class]])ref.buffer=[(NBBuffer *)resource handle];
+  else if([resource isKindOfClass:[NBTexture class]])ref.texture=[(NBTexture *)resource handle];
+  else{[self.commandBuffer refuse:@"foreign render barrier resource"];return;}
+  refs.push_back(ref);
+ }
+ for(NSUInteger k=0;k<count;k++) {
+  [self.commandBuffer.resourceOwners addObject:resources[k]];
+  if(refs[k].texture&&[(NBTexture *)resources[k] surface])[self.commandBuffer.surfaces addObject:resources[k]];
+ }
+ // A resource barrier is not a fabricated read/write use of every resource.
+ // The exact runtime operation also orders attachment load actions for these
+ // textures; the old buffers|textures scope did not enter that branch.
+ [self check:nmb_render_barrier_resources(self.handle,refs.data(),refs.size(),after,before) what:"memoryBarrierWithResources"];
 }
 - (void)drawPrimitives:(MTLPrimitiveType)primitive indirectBuffer:(id<MTLBuffer>)indirect indirectBufferOffset:(NSUInteger)offset {
  if(![(id)indirect isKindOfClass:[NBBuffer class]]){[self.commandBuffer refuse:@"foreign indirect buffer"];return;}

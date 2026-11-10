@@ -851,7 +851,9 @@ static void waitForResource(id resource) {
 - (void)updateFence:(id<MTLFence>)fence {[self fence:fence stages:0 update:true];}
 - (void)waitForFence:(id<MTLFence>)fence {[self fence:fence stages:0 update:false];}
 - (void)offset:(NSUInteger)offset index:(NSUInteger)index stage:(uint32_t)stage {
- if(stage==1&&index<31)_padOff[index]=offset;
+ // ArgumentTable::set_buffer_offset invalidates inline bytes even at offset
+ // zero. Do not resurrect the old setVertexBytes data during padding/restore.
+ if(stage==1&&index<31){_padOff[index]=offset;_padBytes[index]=nil;}
  [self check:nmb_encoder_set_buffer_offset(_handle,stage,offset,(uint32_t)index) what:"setBufferOffset"];
 }
 @end
@@ -992,61 +994,123 @@ static void waitForResource(id resource) {
 // count is not a multiple of 4, the LAST vertex is intermittently placed wrong
 // (Control Center card diagonal split); the same draw padded with copies of its
 // last vertex to 12/24/48 vertices was exact and deterministic every time.
-// Pads to a multiple of 12 (3 and 4) through inline vertex bytes, then restores
-// the app's bindings. Anything it cannot copy exactly takes the original path.
+// Pads to a multiple of 12 (3 and 4) through inline bytes or a CB-owned scratch
+// buffer, then restores the app's bindings. Preserve the prefix for nonzero vertexStart: rebasing the
+// draw to zero would change vertex_id and raw shader buffer addressing.
+// Anything it cannot copy exactly takes the original path. Indexed draws and
+// GPU-generated vertices are not solved by this CPU snapshot workaround.
 static bool x9PadEnabled() {
- static int enabled=-1;
- if(enabled<0) {
+ static const bool enabled=[] {
   int off=0;char args[4096]={};size_t bytes=sizeof(args)-1;
   if(!sysctlbyname("kern.bootargs",args,&bytes,nullptr,0)) {
    args[sizeof(args)-1]=0;
    for(const char *p=args;*p;){while(*p&&(unsigned char)*p<=32)++p;const char *e=p;while(*e&&(unsigned char)*e>32)++e;if(e-p==4&&!memcmp(p,"x9p0",4))off=1;p=e;}
   }
-  enabled=!off;
-  NSLog(@"X9 PAD: partial vertex group padding %s (x9p0 disables)",enabled?"on":"off");
- }
+  NSLog(@"X9 PAD: partial vertex group padding %s (x9p0 disables)",off?"off":"on");
+  return !off;
+ }();
  return enabled;
 }
-static std::atomic<uint64_t> gPadDone{0},gPadSkipped{0};
+static std::atomic<uint64_t> gPadDone{0},gPadSkipped{0},gPadLarge{0},gPadStarted{0},gPadInstanced{0};
+// Byte widths of Metal vertex formats, not their Vulkan converted formats.
+// Unknown formats must not let an attribute extend past the copied record.
+static NSUInteger x9PadAttributeBytes(MTLVertexFormat format) {
+ const NSUInteger f=(NSUInteger)format;
+ if(f>=1&&f<=12)return 2+(f-1)%3;
+ if(f>=13&&f<=27)return 2*(2+(f-13)%3);
+ if(f>=28&&f<=39)return 4*(1+(f-28)%4);
+ if(f>=40&&f<=42)return 4;
+ if(f>=45&&f<=48)return 1;
+ if(f>=49&&f<=53)return 2;
+ if(f==54||f==55)return 4;
+ return 0;
+}
 - (bool)x9PadDraw:(MTLPrimitiveType)t start:(NSUInteger)s count:(NSUInteger)n instances:(NSUInteger)i baseInstance:(NSUInteger)b {
- if(t!=MTLPrimitiveTypeTriangle||s!=0||i!=1||n<3||n%12==0||n>96||!x9PadEnabled())return false;
+ // A partial primitive must stay discarded, not become a real triangle when
+ // copies of its last vertex are added. Bound arithmetic before multiplying.
+ if(t!=MTLPrimitiveTypeTriangle||n<3||n%12==0||!i||!x9PadEnabled())return false;
+ constexpr NSUInteger scratchLimit=1024*1024; // total per draw, not per slot
+ if(n%3||n>65536||s>65536){gPadSkipped++;return false;}
  MTLVertexDescriptor *layout=self.padPipeline.padLayout;
  if(!layout){gPadSkipped++;return false;}
  const NSUInteger padN=(n+11)/12*12;
+ const NSUInteger records=s+padN;
  uint32_t slots=0;
+ NSUInteger attributeEnd[31]={};
  for(unsigned a=0;a<31;a++) {
   MTLVertexAttributeDescriptor *ad=layout.attributes[a];
   if(ad.format==MTLVertexFormatInvalid)continue;
   if(ad.bufferIndex>=31){gPadSkipped++;return false;}
+  MTLVertexBufferLayoutDescriptor *vl=layout.layouts[ad.bufferIndex];
+  // These bindings do not advance with the padded vertex count. Leave the
+  // original per-instance/constant buffers intact, including baseInstance.
+  if(vl.stepFunction==MTLVertexStepFunctionConstant||vl.stepFunction==MTLVertexStepFunctionPerInstance)continue;
+  const NSUInteger width=x9PadAttributeBytes(ad.format);
+  if(vl.stepFunction!=MTLVertexStepFunctionPerVertex||vl.stepRate!=1||
+     !width||ad.offset>vl.stride||width>vl.stride-ad.offset){gPadSkipped++;return false;}
+  attributeEnd[ad.bufferIndex]=std::max(attributeEnd[ad.bufferIndex],ad.offset+width);
   slots|=1u<<ad.bufferIndex;
  }
  if(!slots){gPadSkipped++;return false;}
  NSData *data[31]={};
+ NBBuffer *scratch[31]={};
+ NSUInteger totalBytes=0;
  for(unsigned k=0;k<31;k++)if(slots>>k&1) {
   MTLVertexBufferLayoutDescriptor *vl=layout.layouts[k];
   const uint64_t stride=vl.stride;
-  if(vl.stepFunction!=MTLVertexStepFunctionPerVertex||!stride||padN*stride>4096){gPadSkipped++;return false;}
+  // The old arbitrary 96 vertex / 4096 byte limits excluded text batches.
+  // Larger snapshots use a real buffer, not an oversized setVertexBytes.
+  if(!stride||stride>scratchLimit||records>(scratchLimit-totalBytes)/stride){gPadSkipped++;return false;}
+  totalBytes+=records*stride;
   const uint8_t *src=nullptr;uint64_t avail=0;
   if(_padBuf[k]) {
    NBBuffer *buffer=_padBuf[k];
    if(buffer.storageMode!=MTLStorageModeShared||!buffer.contents||_padOff[k]>buffer.length){gPadSkipped++;return false;}
    src=(const uint8_t *)buffer.contents+_padOff[k];avail=buffer.length-_padOff[k];
   } else if(_padBytes[k]){src=(const uint8_t *)_padBytes[k].bytes;avail=_padBytes[k].length;}
-  if(!src||avail<n*stride){gPadSkipped++;return false;}
-  NSMutableData *m=[NSMutableData dataWithBytes:src length:n*stride];
-  for(NSUInteger v=n;v<padN;v++)[m appendBytes:src+(n-1)*stride length:stride];
+  const NSUInteger used=s+n;
+  const NSUInteger last=(used-1)*stride;
+  // A tightly sized buffer may omit the final record's unused stride tail.
+  // Copy every existing byte, zero only unavailable padding, and never read
+  // past length. All declared attributes must be fully present.
+  if(!src||avail<last+attributeEnd[k]){gPadSkipped++;return false;}
+  NSMutableData *m=[NSMutableData dataWithLength:records*stride];
+  auto *dst=(uint8_t *)m.mutableBytes;
+  memcpy(dst,src,std::min<uint64_t>(avail,used*stride));
+  for(NSUInteger v=used;v<records;v++)memcpy(dst+v*stride,dst+last,stride);
   data[k]=m;
  }
- bool ok=true;
- for(unsigned k=0;k<31;k++)if(data[k])ok=ok&&nmb_encoder_set_bytes(self.handle,1,data[k].bytes,data[k].length,k);
- if(ok)ok=nmb_render_draw(self.handle,t,0,(uint32_t)padN,1,(uint32_t)b);
- for(unsigned k=0;k<31;k++)if(data[k]) {
-  if(_padBuf[k])nmb_encoder_set_buffer(self.handle,1,[_padBuf[k] handle],_padOff[k],k);
-  else nmb_encoder_set_bytes(self.handle,1,_padBytes[k].bytes,_padBytes[k].length,k);
+ // Allocate all scratch buffers before touching any encoder binding. Failure
+ // falls back to the original draw; existing buffers/bindings are unchanged.
+ for(unsigned k=0;k<31;k++)if(data[k].length>4096) {
+  scratch[k]=(NBBuffer *)[gDeviceObject newBufferWithBytes:data[k].bytes length:data[k].length options:MTLResourceStorageModeShared];
+  if(!scratch[k]){gPadSkipped++;return false;}
  }
- if(!ok){[self check:false what:"drawPrimitives (padded)"];return true;}
+ bool ok=true;
+ for(unsigned k=0;k<31;k++)if(data[k]&&ok) {
+  if(scratch[k]) {
+   [self.commandBuffer.resourceOwners addObject:scratch[k]];
+   ok=[self check:nmb_encoder_set_buffer(self.handle,1,scratch[k].handle,0,k) what:"pad vertex scratch binding"];
+  } else ok=[self check:nmb_encoder_set_bytes(self.handle,1,data[k].bytes,data[k].length,k) what:"pad vertex binding"];
+ }
+ if(ok)ok=[self check:nmb_render_draw(self.handle,t,(uint32_t)s,(uint32_t)padN,(uint32_t)i,(uint32_t)b) what:"drawPrimitives (padded)"];
+ for(unsigned k=0;k<31;k++)if(data[k]) {
+  const bool restored=_padBuf[k]?nmb_encoder_set_buffer(self.handle,1,[_padBuf[k] handle],_padOff[k],k):
+   nmb_encoder_set_bytes(self.handle,1,_padBytes[k].bytes,_padBytes[k].length,k);
+  // Restore every binding even after a failure; never submit a later draw
+  // with stale padded data just because the restore error was ignored.
+  if(![self check:restored what:"restore padded vertex binding"])ok=false;
+ }
+ if(!ok)return true;
  const uint64_t done=++gPadDone;
- if(done==1||!(done&16383))NSLog(@"X9 PAD: padded=%llu skipped=%llu last=%llu->%llu",(unsigned long long)done,(unsigned long long)gPadSkipped.load(),(unsigned long long)n,(unsigned long long)padN);
+ const bool firstLarge=n>96&&++gPadLarge==1;
+ const bool firstStarted=s&&++gPadStarted==1;
+ const bool firstInstanced=i>1&&++gPadInstanced==1;
+ if(done==1||!(done&16383)||firstLarge||firstStarted||firstInstanced)
+  NSLog(@"X9 PAD: padded=%llu skipped=%llu large=%llu started=%llu instanced=%llu last=%llu->%llu start=%llu instances=%llu",
+   (unsigned long long)done,(unsigned long long)gPadSkipped.load(),(unsigned long long)gPadLarge.load(),
+   (unsigned long long)gPadStarted.load(),(unsigned long long)gPadInstanced.load(),
+   (unsigned long long)n,(unsigned long long)padN,(unsigned long long)s,(unsigned long long)i);
  return true;
 }
 - (void)drawPrimitives:(MTLPrimitiveType)t vertexStart:(NSUInteger)s vertexCount:(NSUInteger)n instanceCount:(NSUInteger)i baseInstance:(NSUInteger)b {
