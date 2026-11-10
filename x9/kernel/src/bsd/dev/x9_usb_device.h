@@ -5,13 +5,29 @@
 #define X9_USB_ABI 1u
 #define X9_USB_CHUNK 4096u
 #define X9_USB_SERVICE "X9USBDevice"
-enum { X9_USB_STATUS, X9_USB_SEND, X9_USB_RECEIVE };
+enum { X9_USB_STATUS, X9_USB_SEND, X9_USB_RECEIVE, X9_USB_GET_DESCRIPTION };
 enum { X9_USB_OFF, X9_USB_INITIALIZING, X9_USB_READY, X9_USB_CONFIGURED,
        X9_USB_FAULT };
 /* ABI1's reserved word now reports physical bus-command state. */
 #define X9_USB_BUS_FORCED_OFF 1u
 #define X9_USB_BUS_CYCLING 2u
 enum { X9_USB_BUS_OFF, X9_USB_BUS_ON, X9_USB_BUS_CYCLE };
+#define X9_USB_NATIVE_CYCLE_MS 50u
+#define X9_USB_DESCRIPTION_ABI 1u
+#define X9_USB_STRING_CAPACITY 64u
+/* Separate ABI; the original 128-byte transport status remains unchanged.
+ * ASCII subset of USB strings, not a device serial/UDID derived from storage. */
+struct x9_usb_description {
+    uint32_t version, vendor_id, product_id, device_id;
+    uint32_t device_class, device_subclass, device_protocol, bcd_usb;
+    char manufacturer[X9_USB_STRING_CAPACITY];
+    char product[X9_USB_STRING_CAPACITY];
+    char serial[X9_USB_STRING_CAPACITY];
+};
+struct x9_usb_description_status {
+    uint32_t version, revision, mode, forced_off;
+    struct x9_usb_description description;
+};
 struct x9_usb_status {
     uint32_t version, state;
     int32_t error;
@@ -35,6 +51,10 @@ int x9_usb_dma_alloc(void **, uint64_t *);
 /* Kernel-only, synchronous worker barrier. Cycle delay is 0..1000 ms.
  * Timeout is ambiguous: never replay. No native-family identity is implied. */
 int x9_usb_bus_command(unsigned, uint32_t);
+/* Metadata changes only after a completed explicit bus-off, not during a
+ * cycle. Sole worker commits; success does not imply host enumeration. */
+int x9_usb_set_description(const struct x9_usb_description *);
+void x9_usb_get_description(struct x9_usb_description_status *);
 int x9_mtu3_init(int);
 uint32_t x9_mtu3_read(unsigned);
 void x9_mtu3_write(unsigned, uint32_t);

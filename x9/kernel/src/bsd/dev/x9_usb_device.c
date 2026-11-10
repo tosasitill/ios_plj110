@@ -60,11 +60,22 @@ struct queue { struct chunk v[QUEUE]; unsigned head, count; };
 static struct queue net_tx, raw_tx, raw_rx;
 static int channel;
 static int bus_channel;
+enum { COMMAND_DESCRIPTION = X9_USB_BUS_CYCLE + 1 };
+static struct x9_usb_description description = {
+    .version = X9_USB_DESCRIPTION_ABI, .vendor_id = 0x1209, .product_id = 1,
+    .device_id = 0x200, .device_class = 0xef, .device_subclass = 2,
+    .device_protocol = 1, .bcd_usb = 0x200,
+    .manufacturer = "HelioDarwin", .product = "X9 USB Ethernet", .serial = "X9USBLOG1"
+};
+static uint32_t description_revision = 1;
+_Static_assert(sizeof(struct x9_usb_description) == 224, "description ABI");
+_Static_assert(sizeof(struct x9_usb_description_status) == 240, "description status ABI");
 static struct {
     unsigned pending, running, done, abandoned, operation;
     uint32_t delay_ms;
     int result;
     uint64_t reconnect_at;
+    struct x9_usb_description description;
 } bus_command;
 static const uint8_t phone_mac[6] = { 0x02, 0x58, 0x39, 0x55, 0x53, 0x02 };
 
@@ -337,7 +348,7 @@ static void bus_finish(int error)
     if (bus_command.abandoned) bus_command.pending = 0;
     thread_wakeup(&bus_channel);
     lck_mtx_unlock(&usb_lock);
-    printf("X9 USB: original IOKit bus op=%u result=%d forced-off=%u generation=%u; not mux/pairing\n",
+    printf("X9 USB: IOKit worker op=%u result=%d forced-off=%u generation=%u; not mux/pairing\n",
         operation, error, off, generation);
 }
 static void bus_poll(void)
@@ -347,9 +358,24 @@ static void bus_poll(void)
     unsigned running = bus_command.running, operation = bus_command.operation;
     uint32_t delay_ms = bus_command.delay_ms;
     uint64_t reconnect_at = bus_command.reconnect_at;
+    unsigned forced_off = st.reserved & X9_USB_BUS_FORCED_OFF;
     bus_command.running = 1;
     lck_mtx_unlock(&usb_lock);
     if (failed) { bus_finish(ENXIO); return; }
+    if (!running && ((operation == X9_USB_BUS_ON && !forced_off) ||
+        (operation == X9_USB_BUS_OFF && forced_off))) { bus_finish(0); return; }
+    if (operation == COMMAND_DESCRIPTION) {
+        /* A synchronous bus-off has already stopped all DMA. Revalidate the
+         * wire state before changing anything host-visible. No reconnect. */
+        if (R(0x2404) & BIT(6)) { fault(EIO, 0); bus_finish(EIO); return; }
+        lck_mtx_lock(&usb_lock);
+        description = bus_command.description; description_revision++;
+        st.generation++;
+        lck_mtx_unlock(&usb_lock);
+        phase = CTRL_IDLE; sent = length = wanted = 0;
+        bus_finish(0);
+        return;
+    }
     if (running && mach_absolute_time() < reconnect_at) return;
     int error = 0;
     if (!running && operation != X9_USB_BUS_ON) {
@@ -361,6 +387,11 @@ static void bus_poll(void)
         if (!error) error = reset_data();
         phase = CTRL_IDLE; sent = length = wanted = 0;
         W(0x800, R(0x800) & ~(0x7fu << 24));
+        /* Discard pre-disconnect EP0/common events. Do not execute an old
+         * SET_CONFIGURATION while forced off and re-arm its QMU endpoints. */
+        W(0x80, R(0x80) & 0x10001u);
+        W(0x241c, R(0x241c));
+        W(EP0, 64 | EP0_W1C);
         if (error) { fault(error, 0); bus_finish(error); return; }
         if (operation == X9_USB_BUS_OFF) { bus_finish(0); return; }
         clock_interval_to_deadline(delay_ms, NSEC_PER_MSEC, &reconnect_at);
@@ -369,16 +400,25 @@ static void bus_poll(void)
         lck_mtx_unlock(&usb_lock);
         return;
     }
+    if (!running && operation == X9_USB_BUS_ON) {
+        error = reset_data();
+        if (error) { fault(error, 0); bus_finish(error); return; }
+    }
+    /* Events may have latched while disconnected; clear them before a fresh
+     * connection, for both explicit bus-on and the second half of a cycle. */
+    phase = CTRL_IDLE; sent = length = wanted = 0;
+    W(0x800, R(0x800) & ~(0x7fu << 24));
+    W(0x80, R(0x80) & 0x10001u); W(0x241c, R(0x241c));
+    W(EP0, 64 | EP0_W1C);
     W(0x2404, R(0x2404) | BIT(6));
     if (!(R(0x2404) & BIT(6))) error = EIO;
     if (!error) { lck_mtx_lock(&usb_lock); st.reserved &= ~X9_USB_BUS_FORCED_OFF; lck_mtx_unlock(&usb_lock); }
     else fault(error, 0);
     bus_finish(error);
 }
-int x9_usb_bus_command(unsigned operation, uint32_t delay_ms)
+static int worker_command(unsigned operation, uint32_t delay_ms,
+                          const struct x9_usb_description *replacement)
 {
-    if (operation > X9_USB_BUS_CYCLE || delay_ms > 1000 ||
-        (operation != X9_USB_BUS_CYCLE && delay_ms)) return EINVAL;
     uint64_t deadline; clock_interval_to_deadline(2000, NSEC_PER_MSEC, &deadline);
     lck_mtx_lock(&usb_lock);
     if (st.state < X9_USB_READY) { lck_mtx_unlock(&usb_lock); return EAGAIN; }
@@ -389,8 +429,16 @@ int x9_usb_bus_command(unsigned operation, uint32_t delay_ms)
     if (operation == X9_USB_BUS_CYCLE && (st.reserved & X9_USB_BUS_FORCED_OFF)) {
         lck_mtx_unlock(&usb_lock); return EBUSY;
     }
+    if (operation == COMMAND_DESCRIPTION && (!(st.reserved & X9_USB_BUS_FORCED_OFF) ||
+        (st.reserved & X9_USB_BUS_CYCLING) || st.configuration)) {
+        lck_mtx_unlock(&usb_lock); return EBUSY;
+    }
+    if (replacement && description_revision == UINT32_MAX) {
+        lck_mtx_unlock(&usb_lock); return EOVERFLOW;
+    }
     bzero(&bus_command, sizeof(bus_command));
     bus_command.pending = 1; bus_command.operation = operation; bus_command.delay_ms = delay_ms;
+    if (replacement) bus_command.description = *replacement;
     while (!bus_command.done) {
         if (mach_absolute_time() >= deadline) {
             /* A started command retains ownership after a waiter times out.
@@ -403,6 +451,38 @@ int x9_usb_bus_command(unsigned operation, uint32_t delay_ms)
     }
     int result = bus_command.result; bus_command.pending = 0;
     lck_mtx_unlock(&usb_lock); return result;
+}
+int x9_usb_bus_command(unsigned operation, uint32_t delay_ms)
+{
+    if (operation > X9_USB_BUS_CYCLE || delay_ms > 1000 ||
+        (operation != X9_USB_BUS_CYCLE && delay_ms)) return EINVAL;
+    return worker_command(operation, delay_ms, NULL);
+}
+static int valid_string(const char *s)
+{
+    if (!s[0]) return 0;
+    for (unsigned i = 0; i < X9_USB_STRING_CAPACITY; i++) {
+        if (!s[i]) return 1;
+        if ((uint8_t)s[i] < 0x20 || (uint8_t)s[i] > 0x7e) return 0;
+    }
+    return 0;
+}
+int x9_usb_set_description(const struct x9_usb_description *d)
+{
+    if (!d || d->version != X9_USB_DESCRIPTION_ABI || !d->vendor_id ||
+        d->vendor_id > 0xffff || !d->product_id || d->product_id > 0xffff ||
+        d->device_id > 0xffff || d->device_class != 0xef || d->device_subclass != 2 ||
+        d->device_protocol != 1 || d->bcd_usb != 0x200 ||
+        !valid_string(d->manufacturer) || !valid_string(d->product) || !valid_string(d->serial)) return EINVAL;
+    return worker_command(COMMAND_DESCRIPTION, 0, d);
+}
+void x9_usb_get_description(struct x9_usb_description_status *out)
+{
+    lck_mtx_lock(&usb_lock);
+    out->version = X9_USB_DESCRIPTION_ABI; out->revision = description_revision;
+    out->mode = st.mode; out->forced_off = !!(st.reserved & X9_USB_BUS_FORCED_OFF);
+    out->description = description;
+    lck_mtx_unlock(&usb_lock);
 }
 static int set_configuration(unsigned value)
 {
@@ -434,8 +514,8 @@ static uint32_t copylog(void *x, uint64_t *p, char *dst, uint32_t n) { (void)x; 
 static const struct x9log_reader reader = { NULL, getpos, copylog };
 static unsigned string_descriptor(unsigned index)
 {
-    const char *s = index == 1 ? "HelioDarwin" : index == 2 ? "X9 USB Ethernet" :
-                    index == 3 ? "X9USBLOG1" : index == 4 ? "025839555301" : NULL;
+    const char *s = index == 1 ? description.manufacturer : index == 2 ? description.product :
+                    index == 3 ? description.serial : index == 4 ? "025839555301" : NULL;
     if (!index) { control[0] = 4; control[1] = 3; control[2] = 9; control[3] = 4; return 4; }
     if (!s) return 0;
     unsigned n = 2; while (*s && n < 126) { control[n++] = (uint8_t)*s++; control[n++] = 0; }
@@ -491,7 +571,12 @@ static void setup(void)
     if (type == 0x80 && req == 6) {
         static const uint8_t dev[] = {18,1,0,2,0xef,2,1,64,9,0x12,1,0,0,2,1,2,3,1};
         static const uint8_t qual[] = {10,6,0,2,0xef,2,1,64,1,0};
-        if (value == 0x100 && !index) { memcpy(control,dev,sizeof(dev)); count=sizeof(dev); }
+        if (value == 0x100 && !index) {
+            memcpy(control,dev,sizeof(dev)); count=sizeof(dev);
+            control[8]=(uint8_t)description.vendor_id; control[9]=(uint8_t)(description.vendor_id>>8);
+            control[10]=(uint8_t)description.product_id; control[11]=(uint8_t)(description.product_id>>8);
+            control[12]=(uint8_t)description.device_id; control[13]=(uint8_t)(description.device_id>>8);
+        }
         else if ((value == 0x200 || value == 0x700) && !index) count=configuration_descriptor(value == 0x700);
         else if ((value >> 8) == 3 && (!(value & 255) ? !index : index == 0x409)) count=string_descriptor(value & 255);
         else if (value == 0x600 && !index) { memcpy(control,qual,sizeof(qual)); count=sizeof(qual); }
@@ -651,7 +736,8 @@ static void worker(void *arg, wait_result_t why)
     printf("X9 USB: MTU3 USB2 ECM%s ready, GIC INTID533 polled, QMU36 version=%#x; EP0 log retained\n",st.raw_enabled?"+private bulk":"",version);
     for (;;) {
         bus_poll(); /* completes even if the hardware was isolated */
-        if (!failed) poll();
+        lck_mtx_lock(&usb_lock); unsigned off = st.reserved & X9_USB_BUS_FORCED_OFF; lck_mtx_unlock(&usb_lock);
+        if (!failed && !off) poll();
         uint64_t deadline; clock_interval_to_deadline(1,NSEC_PER_MSEC,&deadline);
         (void)assert_wait_deadline(&channel,THREAD_UNINT,deadline); thread_block(THREAD_CONTINUE_NULL);
     }

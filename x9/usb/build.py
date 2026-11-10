@@ -26,7 +26,8 @@ def main():
     lib.unlink(missing_ok=True)
     subprocess.run([str(ar), 'rcs', str(lib), *objects], check=True)
     subprocess.run(common + [str(HERE / 'usbctl.c'), str(lib), '-framework', 'CoreFoundation', '-framework', 'IOKit', '-o', str(ctl)], check=True)
-    subprocess.run(['/usr/bin/codesign', '--force', '--sign', '-', '--timestamp=none', str(ctl)], check=True)
+    subprocess.run(['/usr/bin/codesign', '--force', '--sign', '-', '--timestamp=none',
+                    '--entitlements', str(HERE / 'usbctl.entitlements.plist'), str(ctl)], check=True)
     print(f'USB iOS SDK/client built: {ctl}; not installed/hardware-verified')
 
 if __name__ == '__main__':

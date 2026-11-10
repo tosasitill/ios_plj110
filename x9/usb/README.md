@@ -5,6 +5,11 @@
 `IOUSBDeviceFamily → AppleUSBDeviceMux → lockdownd` 尚未实现；Finder/iTunes
 配对、照片同步及 USB 音频不能据此宣称可用。
 
+**USB-3 接口变化**：`--bus-cycle` 无参数，按原始20H392固定50ms；可变延时
+改为显式 X9-only 的 `--bus-cycle-delay <0..1000 ms>`。旧 `--bus-cycle 100`
+语法不再接受。新的描述符 metadata 支持只影响当前 ECM/private bulk profile，
+不会使 Apple mux 自动绑定。
+
 ## 开启与回退
 
 | Boot arg | 行为 |
@@ -90,6 +95,8 @@ TX最多4096字节，可短包/ZLP。上层需要自定 framing 和确认协议�
 | `x9usb_status(connection, &status)` | ABI1、状态/errno、真实 speed、generation、计数 |
 | `x9usb_send(connection, generation, bytes, n)` | 非阻塞入队，1..4096字节 |
 | `x9usb_receive(connection, generation, bytes, &n)` | 非阻塞取块，不够容量不消费 |
+| `x9usb_get_description(connection, &snapshot)` | selector3，只读240B，旧内核返回Unsupported |
+| `x9usb_set_description(&description)` | 原始IOKit SetDescription，显式bus-off后受控更新224B metadata |
 | `IOServiceClose(connection)` | 撤销 lease；worker 停止/重置 raw DMA，防跨客户端 RX |
 
 selector0/1/2分别对应状态/发送/接收，结构为固定128字节 `x9_usb_status`。
@@ -115,14 +122,16 @@ original IOKit -> IORegistryEntrySetCFProperties
 内核和用户端均要求 root。worker 断连后 STOP 全部 QMU、清队列、推进 generation，
 再按指定时间重连；STOP/寄存器读回失败隔离。调用同步等待真实 worker barrier，
 **不是等待 host 枚举或配对**。2秒等待超时视为歧义，保留正在执行的命令所有权，
-不能自动重放。`SetDeviceDescription`、`SetDevicePreferredConfiguration`
-仍返回 `Unsupported`，不能假存描述符并宣布成功。
+不能自动重放。`SetDevicePreferredConfiguration` 仍返回 `Unsupported`。
+`SetDeviceDescription` 仅支持下一节的真实 ECM/private bulk profile，不接受
+未经绑定的 mux/PTP/USB3 配置。
 
 工具交付后，可由操作者显式调用；以下操作会断开 ECM/bulk，**不自动执行**：
 
 ```sh
 usbctl --native-status       # 只读：三个原生类的数量，不等待30秒/不打开接口
-usbctl --bus-cycle 100       # root；真实断连、STOP、100ms后重连，仅发一次
+usbctl --bus-cycle           # root；原始20H392语义：固定50ms，仅发一次
+usbctl --bus-cycle-delay 100 # root；X9-only延时命令，不冒充原生IOKit参数
 usbctl --bus-off             # root；保持断连
 usbctl --bus-on              # root；恢复软连接
 ```
@@ -130,6 +139,50 @@ usbctl --bus-on              # root；恢复软连接
 ABI1的 `reserved` 字现定义 `X9_USB_BUS_FORCED_OFF` / `X9_USB_BUS_CYCLING`。
 原生类出现不等于 mux 流量、Trust 或 lockdown session；`native_apple_stack` 仍为0。
 本轮只完成编译及静态调用链确认，尚未上机验证这些命令。
+
+### 将原生描述符字段送到实际 EP0
+
+SDK 通过原始 `IOUSBDeviceDescriptionCreate`、导出的
+`_IOUSBDeviceDescriptionGetInfo` 和 `IOUSBDeviceControllerSetDescription`
+构造/发送真实原生对象，不手工制造 CFRuntime 布局。仍显式选择 `X9USBDevice`，
+没有注册假的原生 controller 或改 configd/lockdownd。
+
+`SetDeviceDescription` 的 `USBDeviceCommandParameter` 是20H392字典。支持的
+metadata 为 `vendorID`、`productID`、`deviceID`（USB bcdDevice）、固定
+`deviceClass/deviceSubClass/deviceProtocol=ef/02/01`、`BcdUSBVersion=0200`，
+以及1..63字节可打印ASCII的 `manufacturerString/productString/serialNumber`。
+只接受一个默认配置，`Attributes=80`、`MaxPower=250`、
+`Description="X9 ECM transport"`、`AllowMultipleCreates=true`；其
+`Interfaces=["X9USBECM"]`（mode1）或再加`"X9USBBulk"`（mode2）是**自有函数
+绑定名**，不冒充Apple接口类。ECM函数对应wire interface0/1，bulk对应interface2。
+端点、alt、ECM MAC与电源策略不变；其他配置/接口直接Unsupported，不能假存后返回成功。
+
+内核要求 **root + `com.apple.private.usbdevice.setdescription=true`**（与原始
+controller权限门一致），工具仅带该entitlement，不改内核AMFI/daemon权限。
+必须先完成显式bus-off、QMU STOP与generation barrier；在线、cycling或另一命令
+在飞时拒绝，输入校验失败不改任何状态。唯一worker再次检查SOFTCONN清零才原子
+提交metadata，推进独立revision与传输generation；不自动重连/重放。forced-off时
+不处理旧EP0事件，重连前清掉已锁存的旧setup/reset，避免重新启用旧DMA。
+字段实际用于 `GET_DESCRIPTOR` 的device descriptor及UTF16LE string descriptor，
+不是仅写进IORegistry。默认VID/PID和字符串不变；修改只在RAM，本次boot结束即丢失。
+
+工具已通过交付路径提供后，可由操作者执行一次下面的窄流程（本轮未执行）：
+
+```sh
+# iOS；不要自动重试失败命令；任何失败先保存结果，不继续bus-on
+usbctl --description
+usbctl --bus-off
+usbctl --set-product 'X9 USB Metadata'
+usbctl --description
+usbctl --bus-on
+# Mac/Linux；只读实际wire产品字符串，不读取serial、不reset/detach
+python3 x9/usb/host.py --product
+```
+
+最后一行应从EP0读到`X9 USB Metadata`，配置、端点与旧ECM/bulk仍保持。内核snapshot
+revision增加不是wire成功；只有host读回才验收此metadata路径，也不代表DMA/mux/配对。
+`--description`不输出serial、不MMIO；SDK完整snapshot含操作者设置的synthetic serial。
+本轮没有安装工具、更新描述符、上机或原生配对证据。
 
 独立交叉编译，不运行设备或测试套件：
 

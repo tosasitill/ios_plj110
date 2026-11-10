@@ -11,6 +11,7 @@ import time
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--echo', help='send this UTF-8 text once to usbctl --echo (max4096 bytes)')
+    ap.add_argument('--product', action='store_true', help='read product string via EP0, never read/print serial')
     a = ap.parse_args()
     import usb.core
     import usb.util
@@ -19,6 +20,8 @@ def main():
         ap.error('1209:0001 absent')
     cfg = dev.get_active_configuration()
     print(f'VID={dev.idVendor:04x} PID={dev.idProduct:04x} configuration={cfg.bConfigurationValue}')
+    if a.product:
+        print(f'EP0 product={usb.util.get_string(dev, dev.iProduct)!r}; descriptor read, not mux/pairing')
     private = None
     for interface in cfg:
         print(f'interface={interface.bInterfaceNumber} alt={interface.bAlternateSetting} '
