@@ -162,10 +162,22 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **x9-rev252ie-md**:Mac构建成功,命令同ic/id(`--name x9-rev252ie-md`),boot.img 12922880B,参数与ic一致,warning 1412(未增加),插件275不变,**无需mailbox staging**。`X9 MODEM: build=rev252ie-md ...-ecsq-csgclose`。日志`.local/x9/work/pdp-activation/build-ie.stdout.log`。
 - 下一步由用户手动:`fastboot boot x9/out/x9-rev252ie-md/boot.img`,日志`~/171.txt`,**尽量采集≥3分钟**。看:`unresolved client teardown`是否消失、`X9 RENDER CLOSE`里"parked"/"retain"行、140s后SpringBoard是否还循环;`ECSQ ... raw`原始回复。
 
+### 并行交接(HANDOFF 105-SA,2026-11-10): NR注册实验已编译;D22能力门离线求值为0;8字节cache补丁仅本地准备,未安装
+
+- **隔离分支/代码提交**:`x9-nrsa` / **`dde26eb`**,worktree `.local/x9/work/ios_plj110-nrsa`。基于`c066ba2`(含`62e304e`的ie ECSQ/CSG修复),不含main另一会话后续MIPC/WDS修改。**不要覆盖main当前未提交代码**,后续按提交挑选合并。
+- **更正104-SA的TLV说法**:GetSysInfo response(NAS0x4d)用NR status **0x4A** / info **0x4B**;SysInfo indication(NAS0x4e)用 **0x4C / 0x4D**。Apple indication在0x1f1b0f924明确传0x4D,与response共用解析函数不代表标签相同。旧桥把response标签0x4A用于indication也是bug。
+- **D22门(离线观察,不是设备内存实测)**:20H392 `TelephonyRadios`模型映射0x1937c5368对D22得到product **0x40**(0x1937c7240分支);`getHardwareConfiguration`经0x1f036c11c得 **7**;按实际构造器字段/分支执行,0x1f036c650清零覆盖+0x121,直到返回仍为 **0**。指令级求值只显式建模分配/字符串等无关调用,未知调用会停止。脚本/完整PC链:`.local/x9/work/nrsa-20261110/{evaluate_d22.py,d22-evaluation.txt}`。当前证据是“原始D22构造器关闭NR门”,不推断以后没有对象写入。
+- **桥接已改/编译**:`X9QMIAT.inc`修正response/indication标签;只有真实`C5GREG=1/5`且`COPS AcT=11`才生成29B NR System Info。NR只报PS域,来源CGATT;漫游来自C5GREG、PLMN来自COPS;未知CGATT及LAC/CID/TAC/reject均invalid。不把LTE/NSA当SA,不伪造RSRP或信号格。LTE打包逻辑未改。
+- **用户态离线实验副本已准备,未安装**:`x9/tools/prepare_nr_registration_cache.py`(在上述分支)校验libCommCenterBase UUID及原指令,拒绝覆盖已有文件,仅复制原cache组件后改8字节。D22所在构造器case在0x1f036d1b0/1b4改`mov w9,#1; strb w9,[x19,#0x120]`为`mov w9,#0x101; strh w9,[x19,#0x120]`,保留+0x120=1并置+0x121=1;后续两个STRB仍写1。该case共用于硬件配置5–10,D22是7,不是全局换机型。**只针对NR注册门,不是完整SA功能补丁。**原cache未改;签名未重建、设备加载未验证。
+- 副本:`.local/x9/work/nrsa-20261110/patched-cache/dyld_shared_cache_arm64.31`(103677952B,同原组件大小);精确改动/回退字节见`cache-patch.json`:文件偏移`0x36ed1b0`,原`2900805269820439`,新`2920805269420279`。全部Apple产物保持gitignored。此偏移是**cache组件内偏移**,绝不能当UFS/root盘偏移写入。
+- **候选已构建**:`.local/x9/work/ios_plj110-nrsa/x9/out/x9-rev252nr1-md/boot.img`,构建器报告 **12926976B**;插件275未变,**无需mailbox**。在该worktree运行:`python3 -I x9/build/build.py all --name x9-rev252nr1-md --boot-config .local/x9/modem/boot-rev252hi-md.json --boot-arg x9_dpmaif=2 --boot-arg x9_mipc=1 --boot-arg x9_md_lte=0`。`x9_md_lte=0`只是跳过ERAT3、使用MD默认,**不强制SA**。日志`.local/x9/work/nrsa-20261110/build-nr1.stdout.log`。本地构建exit0,无CI run/测试套件,成功后没有解包/hash/二次产物校验。
+- **当前不能宣称SA已通,也不要只boot这个镜像来验收SA**:cache副本不在boot.img里,只boot仍用原D22能力门。**没有设备操作/根盘写入**。下一步先确定可回退的cache加载/根盘8字节安装方式,具体写入需用户单独确认;验证加载和CommCenter接受NR后再扩展策略/信号/数据链。`getSupports5GStandalone`服务端已定位`CTXPCClientHandler 0x100f23f30`,其控制器vtable+0x1d0的策略仍待追。
+- **尚未实现**:NAS0x33实际SA策略映射、NR信号、运营商/APN和数据连通。新确认0x33 `NRDisableMode`为TLV **0x2E/u32 LE**,`EnableNrUpdateReason`为 **0xA4/u8**(不是两个u8)。MTK E5GOPT读改写在`requestSetNrOption 0x3b84a0`、`requestSmartRatSwitch 0x3b6ed0`,取值/SA语义需继续核实;未猜值、未假ACK。最终仍需**CC NR接纳→WDS Start→MIPC→DPMAIF→iOS真实收发**,当前仅完成可复现的离线准备/编译。
+
 ### 并行交接(HANDOFF 104-SA分析,2026-11-10,与上条同日另一会话): 更正“iPhone X IPSW没有5G逻辑”;已定位SA解析、能力门及桥接缺项
 
 - **本次仅分析,无设备操作/构建/CI/上机**。代码基线`137ba97`(本轮期间其他工作完成的id提交);最新实测仍169(ic-mg),候选仍id,插件275不变。未修改任何内核或Apple二进制。
-- **更正旧结论**:实际20H392 **arm64** CoreTelephony有`getSupports5GStandalone:error:`(0x1881b8170,实际发XPC查询),QMI MCommandDrivers有`enable5GStandalone`(0x1f1afc288,构造NAS 0x33+NRDisableMode)及`NR5GSysInfo`解析。GetSysInfo响应0x1f1b08934和SysInfo indication 0x1f1b0f928均调用0x4B解析器。因此HANDOFF100/102的“CommCenter没有5G概念/换14 Pro才能认识5G”**撤回**,ERAT=3只是LTE-only实验策略,不是SA已解决。
+- **更正旧结论**:实际20H392 **arm64** CoreTelephony有`getSupports5GStandalone:error:`(0x1881b8170,实际发XPC查询),QMI MCommandDrivers有`enable5GStandalone`(0x1f1afc288,构造NAS 0x33+NRDisableMode)及`NR5GSysInfo`解析。GetSysInfo响应0x1f1b08934和SysInfo indication 0x1f1b0f928共用NR解析函数,但标签分别为0x4B/0x4D(105-SA修正)。因此HANDOFF100/102的“CommCenter没有5G概念/换14 Pro才能认识5G”**撤回**,ERAT=3只是LTE-only实验策略,不是SA已解决。
 - **已定位但未动态验证的能力门**:`processSystemInfo_sync`在0x1f191ce04取`Registry::getRadioPersonality()`,读对象+0x121,为0跳过NR;之后还检查NR输入presence。构造器按硬件配置设置能力。本次未读取设备对象、未完整求值D22分支,不能说该位的运行值已测。不能由代码存在直接说未修改的D22配置能用SA。
 - **桥接缺项(确定)**:`x9q_nas`只输出NR 0x4A三字节service status,没有0x4B NR System Info;LTE有0x19完整信息。167日志的SA→LTE差异因此不能证明用户态缺NR支持。MTK的`C5GREG=1/AcT=11`只证明注册,不证明iOS数据通。
 - **控制中心UI**:`CCUIConnectivityCellularDataViewController buttonTapped:`→`_toggleState`→CT Get/SetCellularDataIsEnabled;只翻转数据总开关,不是LTE/NSA/SA选择器。
