@@ -42,6 +42,25 @@ enum x9_camera_cold_restore_step { X9_CAM_COLD_NONE, X9_CAM_COLD_QUIESCE,
     X9_CAM_COLD_RESTORE_PMIF, X9_CAM_COLD_RESTORE_WL_PARENT,
     X9_CAM_COLD_RESTORE_SENSOR_PARENT };
 #define X9_CAMERA_GET_STATUS _IOR('C', 0x90, struct x9_camera_status)
+/* Explicit stop receipt; close(2)==0 is not proof that cdev d_close ran.
+ * Requests contain version/sensor/generation_before only, all else zero.
+ * owned_* journal ATTEMPTED callbacks, not DMA leases or hardware grants.
+ * GET_STOP is historical cached evidence, never a current permission. */
+#define X9_CAM_STOP_IDLE 1u
+#define X9_CAM_STOP_RETIRED 2u
+#define X9_CAM_STOP_RETAINED 4u
+#define X9_CAM_STOP_LATCHED 8u
+#define X9_CAM_STOP_POWER 1u
+#define X9_CAM_STOP_CAPTURE 2u
+#define X9_CAM_STOP_STREAM 4u
+struct x9_camera_stop {
+    uint32_t version, sensor, flags, last_errno;
+    uint64_t generation_before, generation_after;
+    uint32_t owned_before, owned_after, readers_before, readers_after;
+    uint32_t state_before, state_after, reserved[2];
+};
+#define X9_CAMERA_STOP _IOWR('C', 0x9c, struct x9_camera_stop)
+#define X9_CAMERA_GET_STOP _IOR('C', 0x9d, struct x9_camera_stop)
 /* Separate probe-only ABI. Requests carry version=1 and sensor=1/2, all
  * other fields zero. Results preserve raw observations even on failure.
  * mode3 + root + FWRITE only; no stream-on, vendor tables or iOS injection. */

@@ -41,11 +41,15 @@
 
 ### Stop 与传感器切换保留真实退休错误
 
-worker 的 fatal read、短记录、非法/重复帧、malloc、曝光命令失败记录首个 errno；仅 EAGAIN/EINTR 继续等待。不再从 worker 以“另一传感器帧”为由重新发 SENSOR。实际 close 只调用一次，单独保留 close errno：descriptor 可能已被消费，不能重试。Stop/Invalidate/Relinquish 及切传感器必须先 join 原 worker，并传播真实错误；`running=false` 不是退休证明。任何 close 失败在该进程中锁存 shared-retire error，后续不能重新 open/发新 SENSOR，不能掩盖内核 full-drain 失败。
+worker 的 fatal read、短记录、非法/重复帧、malloc、曝光命令失败记录首个 errno；仅 EAGAIN/EINTR 继续等待。不再从 worker 以“另一传感器帧”为由重新发 SENSOR。所有实际采集 fd 在 close 前先执行一次显式 kernel STOP；分别保留 first/stop/close errno，实际 close 也只调用一次：descriptor 可能已被消费，不能重试。Stop/Invalidate/Relinquish 及切传感器必须先 join 原 worker，并传播真实错误；`running=false` 不是退休证明。STOP、回执验证或 close 失败均在该进程中锁存 shared-retire error，后续不能重新 open/发新 SENSOR，不能掩盖内核 full-drain 失败。
 
 全局 native-device transition mutex 用 trylock 串行 Start/Stop；busy 不阻塞等待。Stop 先关闭 callback admission；若已有 handler 在执行，立即返回 unavailable，worker 在该回调返回后 close 一次，active 引用仍保留到后续实际 join。worker 对自身流的 Stop 重入也只关闭 admission/请求停止，不 join 自己或伪造退休成功。Start 的 worker 重入仍拒绝。worker 本身不取 transition mutex，join 不持它需要的 output lock。唯一 active stream 持有强引用，join 成功后才在 transition mutex 外释放；join 失败保留上下文并禁止盲目重试。Device invalidate 尝试停止自身两流并返回首错，finalize 不把失败当成功；未能 join 的 active worker 保持 pin。
 
-仅完整成功的显式 Stop 取消未交付的旧 still 请求，取消不增加已交付照片数；停止期间拒绝新 shutter ticket。图像 zoom/AF 取本帧快照，计数与可并发读写的标量使用 atomic；符号初始化用 pthread_once。此处的 iOS 错误传播/serialization **不授予硬件 lease，不证明 source/AXI/SMMU drain 已实现或成功**。XNU 源码 `fg_drop→fo_close→vn_closefile→vn_close→spec_close→cam_close` 保留错误返回，但只有最后 fileglob/vnode 引用才执行 driver close；不能把普通 `close()==0` 单独当作完整退休凭证。仍需显式、同 generation 的 kernel stop/receipt 对接。
+仅完整成功的显式 Stop 取消未交付的旧 still 请求，取消不增加已交付照片数；停止期间拒绝新 shutter ticket。图像 zoom/AF 取本帧快照，计数与可并发读写的标量使用 atomic；符号初始化用 pthread_once。此处的 iOS 错误传播/serialization **不授予硬件 lease，不证明 source/AXI/SMMU drain 已实现或成功**。XNU 源码 `fg_drop→fo_close→vn_closefile→vn_close→spec_close→cam_close` 保留错误返回，但只有最后 fileglob/vnode 引用才执行 driver close；不能把普通 `close()==0` 单独当作完整退休凭证。
+
+显式 `X9_CAMERA_STOP` 使用独立 **64B** 回执，旧 88B status 不变。请求只能携带 version=1、实际 sensor/generation，其他字节必须零；mode2/FWRITE 且原 open 身份授权，控制锁内先检查同 sensor/generation，过期请求不执行停止。接受后封闭本次 open，重复 STOP 返回 EALREADY，不重发硬件操作，SENSOR/EXPOSURE 返回 ESHUTDOWN；真正新 open 才重置封闭标记。回执记录前后 generation、attempted power/capture/stream、CPU readers 与状态：IDLE 只说明没有 attempted scope；RETIRED 必须实际 stop 成功且 after scope/readers/streaming/retained/latched 都清空；失败返回 RETAINED/LATCHED 与原 errno，不能把 ioctl 返回0当成功。generation 耗尽锁存 EOVERFLOW、不回绕；已有 open/保留状态拒绝 platform 注册，避免注册探测擦掉旧故障。
+
+用户态共享 `camera_stop.h` 先取实际 status，再发唯一 STOP，严格核对版本、sensor、前后 generation、状态/attempted bits、reader 数、reserved 与 disposition；不对 ENOTTY/EINTR/ESTALE/EALREADY 或坏回执自动重发，也不 fallback 到 close0。已显式 STOP 的 driver close 只验证成功回执仍匹配当前已退休 scope，或返回原停机错误，不再次调用 stop/递增 generation；CPU staging 只有实际无 scope/readers/retained/latched 才释放，S1 export backing 不动。`cameractl back/front` 的所有退出路径都消费显式 STOP 并传播清理错误；只读/mode3诊断不发 STOP，close 错误仍传播。`GET_STOP`/status 打印的是历史缓存，初始 version0 表示没有回执，不发 MMIO、不赋予当前权限。**此为真实控制调用与源码编译结果，仍没有 native capture 注册/SID80 attach/物理帧；full AXI/SMI/SMMU/EMI 退休和完整采集后端继续实现。**
 
 ### 锁外回调绑定实际配置与下一完成帧
 

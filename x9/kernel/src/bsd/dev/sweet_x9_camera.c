@@ -33,6 +33,8 @@ LCK_MTX_DECLARE(camera_camsv_lock, &camera_group);
 static struct x9_camera_status st = { .version = 1, .sensor = X9_CAMERA_BACK };
 static struct x9_camera_platform hw;
 static bool opened;
+static bool control_stop_issued; /* sealed until a genuinely new cdev open */
+static struct x9_camera_stop cam_stop_last; /* historical, not a live lease */
 static uint8_t *frame;
 static uint32_t frame_bytes;
 /* Pin CPU staging across faultable uiomove, as HakiOS pins PLACE_READING.
@@ -83,6 +85,7 @@ static const struct x9_camera_sensor sensors[] = {
 #include "x9_camera_standby.inc"
 #include "x9_camera_receiver.inc"
 _Static_assert(sizeof(struct x9_camera_status)==88,"camera status ABI");
+_Static_assert(sizeof(struct x9_camera_stop)==64,"camera stop ABI");
 static const struct x9_camera_sensor *sensor(void) { return &sensors[st.sensor-1]; }
 static int read16(const struct x9_camera_sensor *s, uint16_t reg, uint32_t *v)
 {
@@ -127,7 +130,12 @@ static int stop(void)
 {
     int e=0,a=0,b=0;
     const struct x9_camera_sensor *s=sensor();
-    if(session.latched)return session.last_errno; /* no stale generation/retry */
+    if(session.latched)return session.last_errno?session.last_errno:EIO; /* no retry */
+    if(st.generation==UINT64_MAX) {
+        session.latched=true;session.last_errno=EOVERFLOW;
+        st.flags|=X9_CAMERA_FAULT|X9_CAMERA_RETAINED;st.last_errno=EOVERFLOW;
+        return EOVERFLOW; /* cannot invalidate in-flight generation by wrapping */
+    }
     st.generation++; st.flags&=~X9_CAMERA_STREAMING; frame_bytes=0; consumed=st.frames;
     thread_wakeup((event_t)&st.generation); /* queued first-frame IRQ worker */
     wakeup(&frame_bytes);
@@ -168,6 +176,50 @@ static int stop(void)
     }
     if(e||a||b){st.flags|=X9_CAMERA_FAULT;st.last_errno=e?e:a?a:b;}
     return e?e:a?a:b;
+}
+/* Both control/frame mutexes held. No MMIO on cached receipt reads or close
+ * after explicit STOP; a dup fd cannot restart/reissue within this open. */
+static uint32_t cam_stop_owned(void)
+{
+    return (session.power?X9_CAM_STOP_POWER:0) |
+        (session.capture?X9_CAM_STOP_CAPTURE:0) |
+        (session.stream?X9_CAM_STOP_STREAM:0);
+}
+static void cam_stop_latch(int e)
+{
+    session.latched=true;if(!session.last_errno)session.last_errno=e;
+    st.flags|=X9_CAMERA_FAULT|X9_CAMERA_RETAINED;st.last_errno=session.last_errno;
+}
+static void cam_stop_issue(void)
+{
+    int e;
+    struct x9_camera_stop r={.version=1,.sensor=st.sensor,
+        .generation_before=st.generation,.owned_before=cam_stop_owned(),
+        .readers_before=frame_readers,.state_before=st.flags};
+    control_stop_issued=true; /* BEFORE physical callbacks; never reissue */
+    e=stop();
+    if(!e && (cam_stop_owned() || frame_readers || session.latched ||
+        (st.flags&(X9_CAMERA_STREAMING|X9_CAMERA_RETAINED))))e=EIO;
+    if(e)cam_stop_latch(e);
+    r.generation_after=st.generation;r.owned_after=cam_stop_owned();
+    r.readers_after=frame_readers;r.state_after=st.flags;r.last_errno=e;
+    r.flags=e?X9_CAM_STOP_RETAINED:
+        r.owned_before?X9_CAM_STOP_RETIRED:X9_CAM_STOP_IDLE;
+    if(session.latched)r.flags|=X9_CAM_STOP_LATCHED;
+    cam_stop_last=r;
+}
+static int cam_stop_cached_close(void)
+{
+    /* Preserve the original stop failure even if a retained CPU reader has
+     * since returned. A successful receipt must still match actual scope. */
+    if(cam_stop_last.last_errno)return cam_stop_last.last_errno;
+    if(cam_stop_last.version!=1 || cam_stop_last.sensor!=st.sensor ||
+        cam_stop_last.generation_after!=st.generation ||
+        cam_stop_last.state_after!=st.flags || cam_stop_owned() ||
+        frame_readers || session.latched) {
+        cam_stop_latch(ESTALE);return ESTALE;
+    }
+    return 0;
 }
 static int start(uint32_t which, uint32_t mode)
 {
@@ -218,6 +270,8 @@ int x9_camera_register_platform(const struct x9_camera_platform *p)
     if(tables)return tables; /* including preview/PLL, BEFORE any power callback */
     lck_mtx_lock(&camera_control_lock);lck_mtx_lock(&camera_lock); int e=0;
     if(st.mode!=2)e=EPERM;
+    else if(opened || session.latched || cam_stop_owned() || frame_readers ||
+        (st.flags&(X9_CAMERA_FAULT|X9_CAMERA_RETAINED|X9_CAMERA_STREAMING)))e=EBUSY;
     else if(cam_sensor_session_active)e=EBUSY;
     else if(hw.version)e=EBUSY;
     else if(!X9_HHMAIN_INIT_COUNT || !X9_HHFRONT_INIT_COUNT)e=ENOTSUP;
@@ -299,19 +353,45 @@ static int cam_open(__unused dev_t d,int f,__unused int t,struct proc *p)
         else if(st.mode!=2 || (uid && (uid!=501 || strcmp(name,"mediaserverd"))))return EPERM;
     }
     lck_mtx_lock(&camera_control_lock);lck_mtx_lock(&camera_lock);
-    int e=opened?EBUSY:0;if(!e)opened=true;
+    int e=opened?EBUSY:0;
+    if(!e && st.mode==2 && (session.latched || cam_stop_owned() || frame_readers ||
+        (st.flags&X9_CAMERA_RETAINED)))e=session.last_errno?session.last_errno:EBUSY;
+    if(!e){opened=true;control_stop_issued=false;}
     lck_mtx_unlock(&camera_lock);lck_mtx_unlock(&camera_control_lock);return e;
 }
 static int cam_close(__unused dev_t d,__unused int f,__unused int t,__unused struct proc *p)
 {
-    lck_mtx_lock(&camera_control_lock);lck_mtx_lock(&camera_lock);int e=stop();opened=false;
-    if(frame && !session.latched){kfree_data(frame,X9_CAMERA_MAX_BYTES);frame=NULL;}
+    lck_mtx_lock(&camera_control_lock);lck_mtx_lock(&camera_lock);
+    int e=control_stop_issued?cam_stop_cached_close():stop();opened=false;
+    if(frame && !session.latched && !cam_stop_owned() && !frame_readers &&
+        !(st.flags&(X9_CAMERA_STREAMING|X9_CAMERA_RETAINED))) {
+        kfree_data(frame,X9_CAMERA_MAX_BYTES);frame=NULL;
+    }
     lck_mtx_unlock(&camera_lock);lck_mtx_unlock(&camera_control_lock);return e;
 }
 static int cam_ioctl(__unused dev_t d,u_long cmd,caddr_t data,int f,__unused struct proc *p)
 {
     if(cmd==X9_CAMERA_GET_STATUS) {
         lck_mtx_lock(&camera_lock);memcpy(data,&st,sizeof(st));lck_mtx_unlock(&camera_lock);return 0;
+    }
+    if(cmd==X9_CAMERA_GET_STOP) {
+        lck_mtx_lock(&camera_control_lock);memcpy(data,&cam_stop_last,sizeof(cam_stop_last));
+        lck_mtx_unlock(&camera_control_lock);return 0;
+    }
+    if(cmd==X9_CAMERA_STOP) {
+        int e=0;
+        struct x9_camera_stop r,request={.version=1};
+        if(st.mode!=2 || !(f&FWRITE))return EPERM; /* cam_open enforces identity */
+        memcpy(&r,data,sizeof(r));request.sensor=r.sensor;
+        request.generation_before=r.generation_before;
+        if((r.sensor!=1 && r.sensor!=2) || memcmp(&r,&request,sizeof(r)))return EINVAL;
+        lck_mtx_lock(&camera_control_lock);lck_mtx_lock(&camera_lock);
+        if(!opened)e=ENXIO;
+        else if(control_stop_issued)e=EALREADY;
+        else if(r.sensor!=st.sensor || r.generation_before!=st.generation)e=ESTALE;
+        else {cam_stop_issue();memcpy(data,&cam_stop_last,sizeof(cam_stop_last));}
+        lck_mtx_unlock(&camera_lock);lck_mtx_unlock(&camera_control_lock);
+        return e; /* accepted failures live in receipt; ioctl0 is NOT retirement */
     }
     if(cmd==X9_CAMERA_GET_PROBE) {
         lck_mtx_lock(&camera_control_lock);memcpy(data,&cam_probe_last,sizeof(cam_probe_last));
@@ -438,7 +518,9 @@ static int cam_write(__unused dev_t d,struct uio *uio,__unused int flags)
     struct hakios_camera_command c;if(uio_resid(uio)!=sizeof(c))return EINVAL;
     int e=uiomove((char*)&c,sizeof(c),uio);if(e)return e;if(c.bytes)return ENOTSUP;
     lck_mtx_lock(&camera_control_lock);lck_mtx_lock(&camera_lock);
-    if(c.command==HAKIOS_CAMERA_SENSOR)e=start(c.a,c.b);
+    if(!opened)e=ENXIO;
+    else if(control_stop_issued)e=ESHUTDOWN;
+    else if(c.command==HAKIOS_CAMERA_SENSOR)e=start(c.a,c.b);
     else if(c.command==HAKIOS_CAMERA_EXPOSURE && (st.flags&X9_CAMERA_STREAMING)) {
         const struct x9_camera_sensor *s=sensor();uint32_t lines=c.c?c.c:s->frame_lines;
         if(!c.c && (uint64_t)c.a+48>lines) {

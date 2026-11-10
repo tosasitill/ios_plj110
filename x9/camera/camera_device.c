@@ -56,6 +56,7 @@
 #include <stdatomic.h>
 #include <sys/ioctl.h>
 #include "../kernel/src/bsd/dev/x9_camera.h"
+#include "camera_stop.h"
 
 void hakios_camera_say(const char *format, ...) __attribute__((format(printf, 1, 2)));
 
@@ -495,7 +496,7 @@ struct stream {
 	bool            worker_started;
 	int             torch;
 	_Atomic uint64_t frames, stills_given;
-	_Atomic int     first_errno, close_errno;
+	_Atomic int     first_errno, stop_errno, close_errno;
 	int             camera_fd; /* owned by this worker; selected synchronously */
 };
 
@@ -529,18 +530,28 @@ stills_release(struct still_request *request)
 static int
 close_camera_once(struct stream *s, int fd)
 {
+	struct x9_camera_stop receipt;
+	int stop_error = x9_camera_stop_once(fd, &receipt);
+
 	/* A failed close may already have consumed the descriptor. Never retry it or touch that fd again. */
 	int error = close(fd) == 0 ? 0 : errno;
 
 	s->camera_fd = -1;
-	if (error) {
+	if (stop_error) atomic_store(&s->stop_errno, stop_error);
+	if (error) atomic_store(&s->close_errno, error);
+	if (stop_error || error) {
 		int zero = 0;
+		int retire_error = stop_error ? stop_error : error;
 
-		atomic_store(&s->close_errno, error);
-		atomic_compare_exchange_strong(&capture_retire_errno, &zero, error);
-		stream_fault(s, error);
+		atomic_compare_exchange_strong(&capture_retire_errno, &zero, retire_error);
+		stream_fault(s, retire_error);
 	}
-	return error;
+	say("capture retirement: sensor=%u flags=%x generation=%llu/%llu attempted=%x/%x readers=%u/%u "
+	    "state=%x/%x receipt_errno=%u stop_errno=%d close_errno=%d", receipt.sensor, receipt.flags,
+	    (unsigned long long)receipt.generation_before, (unsigned long long)receipt.generation_after,
+	    receipt.owned_before, receipt.owned_after, receipt.readers_before, receipt.readers_after,
+	    receipt.state_before, receipt.state_after, receipt.last_errno, stop_error, error);
+	return stop_error ? stop_error : error;
 }
 
 static struct stream *
@@ -1783,8 +1794,8 @@ worker(void *context)
 	free(buffer);
 	(void)close_camera_once(s, device);
 	s->running = false;
-	say("frames stopped (%llu): first_errno=%d close_errno=%d", (unsigned long long)s->frames,
-	    atomic_load(&s->first_errno), atomic_load(&s->close_errno));
+	say("frames stopped (%llu): first_errno=%d stop_errno=%d close_errno=%d", (unsigned long long)s->frames,
+	    atomic_load(&s->first_errno), atomic_load(&s->stop_errno), atomic_load(&s->close_errno));
 	camera_worker_thread = false;
 	camera_worker_stream = NULL;
 	return NULL;
@@ -1843,9 +1854,10 @@ stream_stop_locked(CMBaseObjectRef o, CMBaseObjectRef *release)
 	pthread_mutex_unlock(&s->lock);
 	for (unsigned i = 0; i < OUTPUTS; i++)
 		for (unsigned h = 0; h < HELD; h++) if (held[i][h] != NULL) CVPixelBufferRelease(held[i][h]);
-	int error = atomic_load(&s->first_errno), close_error = atomic_load(&s->close_errno);
+	int error = atomic_load(&s->first_errno), stop_error = atomic_load(&s->stop_errno),
+	    close_error = atomic_load(&s->close_errno);
 
-	if (!error && !close_error && !atomic_load(&capture_retire_errno)) {
+	if (!error && !stop_error && !close_error && !atomic_load(&capture_retire_errno)) {
 		pthread_mutex_lock(&s->lock);
 		unsigned cancelled = s->stills_wanted;
 		struct still_request *cancelled_requests = s->stills_head;
@@ -1859,7 +1871,8 @@ stream_stop_locked(CMBaseObjectRef o, CMBaseObjectRef *release)
 		    (unsigned long long)s->stills_given, cancelled);
 		return 0;
 	}
-	say("stream stop rejected: first_errno=%d close_errno=%d shared_retire_errno=%d", error, close_error,
+	say("stream stop rejected: first_errno=%d stop_errno=%d close_errno=%d shared_retire_errno=%d", error,
+	    stop_error, close_error,
 	    atomic_load(&capture_retire_errno));
 	return ERR_NOT_AVAILABLE;
 }
@@ -1913,7 +1926,8 @@ stream_begin(CMBaseObjectRef o, bool graph)
 
 		stream_fault(s, error);
 		(void)close_camera_once(s, fd);
-		say("physical sensor start rejected: first_errno=%d close_errno=%d", error, atomic_load(&s->close_errno));
+		say("physical sensor start rejected: first_errno=%d stop_errno=%d close_errno=%d", error,
+		    atomic_load(&s->stop_errno), atomic_load(&s->close_errno));
 		result = ERR_NOT_AVAILABLE;
 		goto done;
 	}
@@ -2118,6 +2132,7 @@ stream_create(CFAllocatorRef allocator, const struct camera *camera, CFStringRef
 	atomic_init(&s->frames, 0);
 	atomic_init(&s->stills_given, 0);
 	atomic_init(&s->first_errno, 0);
+	atomic_init(&s->stop_errno, 0);
 	atomic_init(&s->close_errno, 0);
 	atomic_init(&s->format_index, 0);
 	atomic_init(&s->min_fps, 2);

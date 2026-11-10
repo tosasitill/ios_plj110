@@ -9,10 +9,29 @@
 #include <sys/ioctl.h>
 #include "hakios.camera.h"
 #include "../kernel/src/bsd/dev/x9_camera.h"
+#include "camera_stop.h"
 _Static_assert(sizeof(struct x9_camera_mm_status)==576,"camera MM ABI");
 _Static_assert(sizeof(struct x9_camera_receiver)==1192,"camera receiver ABI");
 _Static_assert(sizeof(struct x9_camera_config)==720,"camera config ABI");
 _Static_assert(sizeof(struct x9_camera_status)==88,"camera status ABI");
+static void print_stop(const struct x9_camera_stop *r, const char *kind)
+{
+    printf("%s stop-receipt version=%u sensor=%u flags=%x errno=%u generation=%llu/%llu attempted=%x/%x readers=%u/%u state=%x/%x (IDLE is NOT DMA evidence)\n",
+        kind,r->version,r->sensor,r->flags,r->last_errno,
+        (unsigned long long)r->generation_before,(unsigned long long)r->generation_after,
+        r->owned_before,r->owned_after,r->readers_before,r->readers_after,r->state_before,r->state_after);
+}
+static int finish(int fd, int result, bool physical)
+{
+    if(physical) {
+        struct x9_camera_stop receipt;
+        int e=x9_camera_stop_once(fd,&receipt);
+        print_stop(&receipt,"explicit");
+        if(e){fprintf(stderr,"capture retirement: %s (%d)\n",strerror(e),e);result=1;}
+    }
+    if(close(fd)!=0){perror("camera close (not retried)");result=1;}
+    return result;
+}
 static void print_config(const struct x9_camera_config *r)
 {
     printf("sensor-standby sensor=%u flags=%x stage=%u errno=%u restore=%u blockers=%x pairs=%u/%u writes=%u/%u index=%u reg=%04x expected=%02x observed=%08x read=%u (temporary, uncalibrated, NOT capture ready)\n",
@@ -90,43 +109,51 @@ int main(int argc,char **argv)
     }
     int fd=open(X9_CAMERA_DEVICE,((sensor && !pipeline)||resources?O_RDWR:O_RDONLY)|O_CLOEXEC);
     if(fd<0){perror(X9_CAMERA_DEVICE);return 1;}
+    bool physical=sensor && !probe && !pipeline && !clocks && !receiver && !standby;
     struct x9_camera_status s={0};
-    if(ioctl(fd,X9_CAMERA_GET_STATUS,&s)){perror("status");close(fd);return 1;}
+    if(ioctl(fd,X9_CAMERA_GET_STATUS,&s)){perror("status");return finish(fd,1,physical);}
     printf("version=%u mode=%u flags=%x supported=%x sensor=%u errno=%u frames=%llu rejected=%llu chips=%x/%x probe_mask=%x probe_flags=%x cold_journal=%x restore_step=%u\n",
            s.version,s.mode,s.flags,s.supported_mask,s.sensor,s.last_errno,
            (unsigned long long)s.frames,(unsigned long long)s.rejected,s.chip_id[0],s.chip_id[1],s.probe_mask,s.probe_flags,
            s.cold_retained,s.cold_restore_step);
+    if(!sensor) {
+        struct x9_camera_stop receipt={0};
+        if(ioctl(fd,X9_CAMERA_GET_STOP,&receipt)!=0) {
+            if(errno!=ENOTTY){perror("historical stop receipt");return finish(fd,1,false);}
+            printf("historical stop receipt unavailable (not retirement proof)\n");
+        } else print_stop(&receipt,"historical-only, no MMIO/no reissue");
+    }
     if(standby || !sensor) {
         struct x9_camera_config r={.version=1,.sensor=standby?sensor:0};
         if(ioctl(fd,standby?X9_CAMERA_CONFIG_STANDBY:X9_CAMERA_GET_CONFIG,&r)) {
-            if(standby || errno!=ENOTTY){perror("standby ioctl");close(fd);return 1;}
+            if(standby || errno!=ENOTTY){perror("standby ioctl");return finish(fd,1,physical);}
         } else {
             print_config(&r);
-            if(standby){close(fd);return r.last_errno || r.restore_errno?1:0;}
+            if(standby){return finish(fd,r.last_errno || r.restore_errno?1:0,physical);}
         }
     }
     if(receiver || !sensor) {
         struct x9_camera_receiver r={.version=1,.sensor=receiver?sensor:0};
         if(ioctl(fd,receiver?X9_CAMERA_PROBE_RECEIVER:X9_CAMERA_GET_RECEIVER,&r)) {
-            if(receiver || errno!=ENOTTY){perror("receiver ioctl");close(fd);return 1;}
+            if(receiver || errno!=ENOTTY){perror("receiver ioctl");return finish(fd,1,physical);}
         } else {
             print_receiver(&r);
-            if(receiver){close(fd);return r.last_errno?1:0;}
+            if(receiver){return finish(fd,r.last_errno?1:0,physical);}
         }
     }
     if(clocks || !sensor) {
         struct x9_camera_mm_status r={.version=1,.sensor=clocks?sensor:0};
         if(ioctl(fd,clocks?X9_CAMERA_PROBE_MM_CLOCKS:X9_CAMERA_GET_MM_CLOCKS,&r)) {
-            if(clocks || errno!=ENOTTY){perror("MM clocks ioctl");close(fd);return 1;}
+            if(clocks || errno!=ENOTTY){perror("MM clocks ioctl");return finish(fd,1,physical);}
         } else {
             print_mm(&r);
-            if(clocks){close(fd);return r.last_errno?1:0;}
+            if(clocks){return finish(fd,r.last_errno?1:0,physical);}
         }
     }
     if(resources || !sensor) {
         struct x9_camera_resources r={.version=1};
         if(ioctl(fd,resources?X9_CAMERA_PROBE_RESOURCES:X9_CAMERA_GET_RESOURCES,&r)) {
-            if(resources || errno!=ENOTTY){perror("resources ioctl");close(fd);return 1;}
+            if(resources || errno!=ENOTTY){perror("resources ioctl");return finish(fd,1,physical);}
         } else {
             printf("shared receive-power flags=%x stage=%u errno=%u restore=%u blockers=%x smc_get/put=%08x/%08x (NOT capture ready)\n",
                 r.flags,r.stage,r.last_errno,r.restore_errno,r.blockers,r.smc_get,r.smc_put);
@@ -142,12 +169,12 @@ int main(int argc,char **argv)
             printf("unclaimed STRTAB=%llx cfg=%08x CMDQ=%llx prod/cons=%08x/%08x EVTQ=%llx prod/cons=%08x/%08x (no table/queue writes, no mapping)\n",
                 (unsigned long long)r.strtab_base,r.strtab_cfg,(unsigned long long)r.cmdq_base,r.cmdq_prod,r.cmdq_cons,
                 (unsigned long long)r.evtq_base,r.evtq_prod,r.evtq_cons);
-            if(resources){close(fd);return r.last_errno?1:0;}
+            if(resources){return finish(fd,r.last_errno?1:0,physical);}
         }
     }
     if(pipeline) {
         struct x9_camera_pipeline r={.version=1,.sensor=sensor};
-        if(ioctl(fd,X9_CAMERA_GET_PIPELINE,&r)){perror("pipeline ioctl");close(fd);return 1;}
+        if(ioctl(fd,X9_CAMERA_GET_PIPELINE,&r)){perror("pipeline ioctl");return finish(fd,1,physical);}
         printf("source-only pipeline sensor=%u flags=%x blockers=%x CSI%u %s/%u async=%u vc=%u dt=%02x %ux%u stride=%u bytes=%u\n",
             r.sensor,r.flags,r.blockers,r.csi_port,r.cphy?"C-PHY":"D-PHY",r.lanes,r.async,
             r.vc,r.dt,r.width,r.height,r.stride,r.bytes);
@@ -157,35 +184,35 @@ int main(int argc,char **argv)
             (unsigned long long)r.dma_limit);
         printf("planned VCDT=%08x size=%08x grab=%08x/%08x RAW10=%08x WDMA-basic=%08x (no MMIO, no reservation, NOT capture ready)\n",
             r.vcdt,r.expected_size,r.grab_pixels,r.grab_lines,r.format,r.dma_basic);
-        close(fd);return 0;
+        return finish(fd,0,physical);
     }
     if(probe || !sensor) {
         struct x9_camera_probe r={.version=1,.sensor=probe?sensor:0};
         if(ioctl(fd,probe?X9_CAMERA_PROBE_SENSOR:X9_CAMERA_GET_PROBE,&r)) {
             /* Older phase1 kernels have no probe ABI; status remains useful. */
-            if(probe || errno!=ENOTTY){perror("probe ioctl");close(fd);return 1;}
+            if(probe || errno!=ENOTTY){perror("probe ioctl");return finish(fd,1,physical);}
         } else {
             printf("sensor-probe sensor=%u stage=%u flags=%x blockers=%x chip=%04x errno=%u restore=%u wl=%02x/%02x mclk=%08x/%08x rails=%06x/%06x i2c=%x/%x (NOT capture ready)\n",
                 r.sensor,r.stage,r.flags,r.blockers,r.chip_id,r.last_errno,r.restore_errno,
                 r.wl_id,r.wl_enable,r.mclk_cfg,r.mclk_status,r.dovdd,r.afvdd,r.i2c_status[0],r.i2c_status[1]);
             printf("clock ap_vote_before=%08x done=%08x univpll_con1=%08x fence=%08x (configured nominal, NOT measured Hz)\n",
                 r.hwv_vote,r.hwv_done,r.pll_con1,r.pll_fence);
-            if(probe){close(fd);return r.last_errno?1:0;}
+            if(probe){return finish(fd,r.last_errno?1:0,physical);}
         }
     }
-    if(!sensor){close(fd);return 0;}
+    if(!sensor){return finish(fd,0,physical);}
     struct hakios_camera_command c={.command=HAKIOS_CAMERA_SENSOR,.a=sensor,.b=~0u};
-    if(write(fd,&c,sizeof(c))!=sizeof(c)){perror("start");close(fd);return 1;}
+    if(write(fd,&c,sizeof(c))!=sizeof(c)){perror("start");return finish(fd,1,physical);}
     struct hakios_camera_frame h;
-    if(read(fd,&h,sizeof(h))!=sizeof(h)){perror("frame header");close(fd);return 1;}
+    if(read(fd,&h,sizeof(h))!=sizeof(h)){perror("frame header");return finish(fd,1,physical);}
     if(memcmp(h.magic,HAKIOS_CAMERA_MAGIC,8) || h.header_bytes!=sizeof(h) ||
-       !h.height || !h.stride || (uint64_t)h.stride*h.height>X9_CAMERA_MAX_BYTES){close(fd);return 1;}
+       !h.height || !h.stride || (uint64_t)h.stride*h.height>X9_CAMERA_MAX_BYTES){return finish(fd,1,physical);}
     size_t bytes=sizeof(h)+(size_t)h.stride*h.height;void *buffer=malloc(bytes);
-    if(!buffer){close(fd);return 1;}
+    if(!buffer){return finish(fd,1,physical);}
     ssize_t n=read(fd,buffer,bytes);
     if(n==(ssize_t)bytes){h=*(struct hakios_camera_frame*)buffer;
         printf("physical RAW10 sensor=%u %ux%u stride=%u sequence=%llu time=%llu\n",h.sensor,h.width,h.height,h.stride,
                (unsigned long long)h.sequence,(unsigned long long)h.time);}
     else perror("frame");
-    free(buffer);close(fd);return n==(ssize_t)bytes?0:1;
+    free(buffer);return finish(fd,n==(ssize_t)bytes?0:1,physical);
 }
