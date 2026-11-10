@@ -570,14 +570,34 @@ nv12_pair(const uint8_t *rgb0, const uint8_t *rgb1, uint32_t width, uint8_t *y0,
 	}
 }
 
-void
+/* Buffer capacity itself belongs to the caller; reject unsupported shapes before any pixel write. */
+static bool
+render_shape(const struct isp *isp, const struct hakios_camera_frame *f, const uint8_t *raw,
+    uint32_t width, uint32_t height, uint32_t first_row, uint32_t end_row)
+{
+	return isp != NULL && f != NULL && raw != NULL && width > 0 && width <= 8192 && height > 0 && height <= 8192 &&
+	    f->width >= 4 && f->width <= 8192 && !(f->width % 4) && f->height >= 4 && f->height <= 8192 && !(f->height % 2) &&
+	    f->bayer <= 3 && f->black < 1024 && f->stride >= (size_t)f->width / 4 * 5 &&
+	    f->stride <= SIZE_MAX / f->height && isfinite(isp->zoom) && isp->zoom >= 1 && isp->zoom <= 16 &&
+	    first_row <= end_row && end_row <= height;
+}
+
+static bool
+render_stride(const void *base, size_t stride, size_t row_bytes, uint32_t height)
+{
+	return base != NULL && stride >= row_bytes && height > 0 && stride <= SIZE_MAX / height &&
+	    (uintptr_t)base <= UINTPTR_MAX - stride * height;
+}
+
+bool
 isp_render_nv12(const struct isp *isp, const struct hakios_camera_frame *f, const uint8_t *raw, uint8_t *y, size_t y_stride,
     uint8_t *uv, size_t uv_stride, uint32_t width, uint32_t height, uint32_t first_row, uint32_t end_row, bool video_range)
 {
 	uint8_t line[2][3 * 8192];
 
-	if (width > 8192) {
-		return;
+	if (!render_shape(isp, f, raw, width, height, first_row, end_row) || ((width | height | first_row | end_row) & 1u) ||
+	    !render_stride(y, y_stride, width, height) || !render_stride(uv, uv_stride, width, height / 2)) {
+		return false;
 	}
 	for (uint32_t row = first_row & ~1u; row < end_row && row < height; row += 2) {
 		bool second = row + 1 < height;
@@ -587,16 +607,18 @@ isp_render_nv12(const struct isp *isp, const struct hakios_camera_frame *f, cons
 		nv12_pair(line[0], line[1], width, y + (size_t)row * y_stride, second ? y + (size_t)(row + 1) * y_stride : NULL,
 		    uv + (size_t)(row / 2) * uv_stride, video_range);
 	}
+	return true;
 }
 
-void
+bool
 isp_render_bgra(const struct isp *isp, const struct hakios_camera_frame *f, const uint8_t *raw, uint8_t *out, size_t stride,
     uint32_t width, uint32_t height, uint32_t first_row, uint32_t end_row)
 {
 	uint8_t line[3 * 8192];
 
-	if (width > 8192) {
-		return;
+	if (!render_shape(isp, f, raw, width, height, first_row, end_row) ||
+	    !render_stride(out, stride, (size_t)width * 4, height)) {
+		return false;
 	}
 	for (uint32_t row = first_row; row < end_row && row < height; row++) {
 		uint8_t *o = out + (size_t)row * stride;
@@ -609,6 +631,7 @@ isp_render_bgra(const struct isp *isp, const struct hakios_camera_frame *f, cons
 			o[4 * x + 3] = 255;
 		}
 	}
+	return true;
 }
 
 /* ---- every pixel: bilinear demosaic -------------------------------------------------------------------- */
@@ -682,43 +705,20 @@ full_line(const struct isp *isp, const struct hakios_camera_frame *f, const int 
 	}
 }
 
-void
+bool
 isp_render_full_nv12(const struct isp *isp, const struct hakios_camera_frame *f, const uint8_t *raw, uint8_t *y, size_t y_stride,
     uint8_t *uv, size_t uv_stride, uint32_t first_row, uint32_t end_row, bool video_range)
 {
-	uint32_t width = f->width;
-	int colour[4];
-	struct pipe p;
-	static __thread int *lines[4];
-	static __thread uint8_t *rgb[2];
-	static __thread uint32_t have;
-
-	if (width > have) {
-		for (int i = 0; i < 4; i++) {
-			free(lines[i]);
-			lines[i] = malloc(sizeof(int) * width);
-		}
-		for (int i = 0; i < 2; i++) {
-			free(rgb[i]);
-			rgb[i] = malloc(3 * (size_t)width);
-		}
-		have = width;
+	if (isp == NULL || f == NULL) {
+		return false;
 	}
-	cfa(f->bayer, colour);
-	pipe_init(isp, &p);
-	for (uint32_t row = first_row & ~1u; row < end_row && row < f->height; row += 2) {
-		for (int i = 0; i < 4; i++) {
-			unpack_line(f, raw, (int)row - 1 + i, lines[i]);
-		}
-		const int *const above[3] = { lines[0], lines[1], lines[2] }, *const below[3] = { lines[1], lines[2], lines[3] };
+	/* Full-size API has always ignored zoom/orientation; use the same complete demosaic path. */
+	struct isp full = *isp;
 
-		bool second = row + 1 < f->height;
-
-		full_line(isp, f, above, row, colour, &p, rgb[0]);
-		full_line(isp, f, below, second ? row + 1 : row, colour, &p, rgb[1]);
-		nv12_pair(rgb[0], rgb[1], width, y + (size_t)row * y_stride, second ? y + (size_t)(row + 1) * y_stride : NULL,
-		    uv + (size_t)(row / 2) * uv_stride, video_range);
-	}
+	full.zoom = 1;
+	full.turned = false;
+	return isp_render_still_nv12(&full, f, raw, y, y_stride, uv, uv_stride, f->width, f->height,
+	    first_row, end_row, video_range);
 }
 
 /* one line (y) of the sensor demosaiced, as 8-bit R, G, B (the unpacked lines around it in this thread's l) */
@@ -732,10 +732,16 @@ demosaic_row(const struct isp *isp, const struct hakios_camera_frame *f, const u
 	full_line(isp, f, (const int *const *)l, row, colour, p, rgb);
 }
 
-void
-isp_render_still_nv12(const struct isp *isp, const struct hakios_camera_frame *f, const uint8_t *raw, uint8_t *y, size_t y_stride,
-    uint8_t *uv, size_t uv_stride, uint32_t width, uint32_t height, uint32_t first_row, uint32_t end_row, bool video_range)
+static bool
+render_still(const struct isp *isp, const struct hakios_camera_frame *f, const uint8_t *raw, uint8_t *y, size_t y_stride,
+    uint8_t *uv, size_t uv_stride, uint32_t width, uint32_t height, uint32_t first_row, uint32_t end_row, bool video_range, bool bgra)
 {
+	if (!render_shape(isp, f, raw, width, height, first_row, end_row) ||
+	    (!bgra && ((width | height | first_row | end_row) & 1u)) ||
+	    !render_stride(y, y_stride, (size_t)width * (bgra ? 4 : 1), height) ||
+	    (!bgra && !render_stride(uv, uv_stride, width, height / 2))) {
+		return false;
+	}
 	uint32_t x0, y0, cw, ch, fw = f->width;
 	int colour[4];
 	struct pipe p;
@@ -744,33 +750,55 @@ isp_render_still_nv12(const struct isp *isp, const struct hakios_camera_frame *f
 	static __thread uint32_t have_fw, have_width;
 	int32_t cached[2] = { -1, -1 };
 
+	/* Grow each scratch group transactionally. Failed allocation cannot poison its capacity. */
 	if (fw > have_fw) {
+		int *next_lines[3] = { NULL };
+		uint8_t *next_rows[2] = { NULL };
+		bool ready = true;
+
+		for (int i = 0; i < 3; i++) {
+			next_lines[i] = malloc(sizeof(int) * fw);
+			ready = ready && next_lines[i] != NULL;
+		}
+		for (int i = 0; i < 2; i++) {
+			next_rows[i] = malloc(3 * (size_t)fw);
+			ready = ready && next_rows[i] != NULL;
+		}
+		if (!ready) {
+			for (int i = 0; i < 3; i++) free(next_lines[i]);
+			for (int i = 0; i < 2; i++) free(next_rows[i]);
+			return false;
+		}
 		for (int i = 0; i < 3; i++) {
 			free(lines[i]);
-			lines[i] = malloc(sizeof(int) * fw);
+			lines[i] = next_lines[i];
 		}
 		for (int i = 0; i < 2; i++) {
 			free(rows[i]);
-			rows[i] = malloc(3 * (size_t)fw);
+			rows[i] = next_rows[i];
 		}
 		have_fw = fw;
 	}
 	if (width > have_width) {
+		uint8_t *next[2] = { malloc(3 * (size_t)width), malloc(3 * (size_t)width) };
+
+		if (next[0] == NULL || next[1] == NULL) {
+			free(next[0]);
+			free(next[1]);
+			return false;
+		}
 		for (int i = 0; i < 2; i++) {
 			free(out[i]);
-			out[i] = malloc(3 * (size_t)width);
+			out[i] = next[i];
 		}
 		have_width = width;
-	}
-	if (lines[2] == NULL || rows[1] == NULL || out[1] == NULL) {
-		return;
 	}
 	crop(isp, f, width, height, &x0, &y0, &cw, &ch);
 	cfa(f->bayer, colour);
 	pipe_init(isp, &p);
 	float sx_step = 2.0f * cw / width, sy_step = 2.0f * ch / height;
 
-	for (uint32_t row = first_row & ~1u; row < end_row && row < height; row += 2) {
+	for (uint32_t row = first_row; row < end_row && row < height; row += 2) {
 		for (int k = 0; k < 2; k++) {
 			uint32_t r = row + k < height ? row + k : row, at = isp->turned ? height - 1 - r : r;
 			float sy = 2.0f * y0 + (at + 0.5f) * sy_step - 0.5f, ty;
@@ -812,11 +840,39 @@ isp_render_still_nv12(const struct isp *isp, const struct hakios_camera_frame *f
 				}
 			}
 		}
-		bool second = row + 1 < height;
+		bool second = row + 1 < end_row;
 
-		nv12_pair(out[0], out[1], width, y + (size_t)row * y_stride, second ? y + (size_t)(row + 1) * y_stride : NULL,
-		    uv + (size_t)(row / 2) * uv_stride, video_range);
+		if (bgra) {
+			for (int k = 0; k < (second ? 2 : 1); k++) {
+				uint8_t *dest = y + (size_t)(row + k) * y_stride;
+
+				for (uint32_t x = 0; x < width; x++) {
+					dest[4 * x] = out[k][3 * x + 2];
+					dest[4 * x + 1] = out[k][3 * x + 1];
+					dest[4 * x + 2] = out[k][3 * x];
+					dest[4 * x + 3] = 255;
+				}
+			}
+		} else {
+			nv12_pair(out[0], out[1], width, y + (size_t)row * y_stride, y + (size_t)(row + 1) * y_stride,
+			    uv + (size_t)(row / 2) * uv_stride, video_range);
+		}
 	}
+	return true;
+}
+
+bool
+isp_render_still_nv12(const struct isp *isp, const struct hakios_camera_frame *f, const uint8_t *raw, uint8_t *y, size_t y_stride,
+    uint8_t *uv, size_t uv_stride, uint32_t width, uint32_t height, uint32_t first_row, uint32_t end_row, bool video_range)
+{
+	return render_still(isp, f, raw, y, y_stride, uv, uv_stride, width, height, first_row, end_row, video_range, false);
+}
+
+bool
+isp_render_still_bgra(const struct isp *isp, const struct hakios_camera_frame *f, const uint8_t *raw, uint8_t *out, size_t stride,
+    uint32_t width, uint32_t height, uint32_t first_row, uint32_t end_row)
+{
+	return render_still(isp, f, raw, out, stride, NULL, 0, width, height, first_row, end_row, false, true);
 }
 
 /* ---- lens shading from a flat field --------------------------------------------------------------------- */

@@ -106,9 +106,10 @@ void isp_awb(struct isp *isp, const struct isp_stats *s);
  * (rows from first_row to end_row only, for doing it in pieces). NV12: y and uv planes, full range (420f) or video
  * range (420v); BGRA: y only.
  */
-void isp_render_nv12(const struct isp *isp, const struct hakios_camera_frame *f, const uint8_t *raw, uint8_t *y, size_t y_stride,
+/* False means incomplete output: the caller must not publish any part of that buffer. */
+bool isp_render_nv12(const struct isp *isp, const struct hakios_camera_frame *f, const uint8_t *raw, uint8_t *y, size_t y_stride,
     uint8_t *uv, size_t uv_stride, uint32_t width, uint32_t height, uint32_t first_row, uint32_t end_row, bool video_range);
-void isp_render_bgra(const struct isp *isp, const struct hakios_camera_frame *f, const uint8_t *raw, uint8_t *out, size_t stride,
+bool isp_render_bgra(const struct isp *isp, const struct hakios_camera_frame *f, const uint8_t *raw, uint8_t *out, size_t stride,
     uint32_t width, uint32_t height, uint32_t first_row, uint32_t end_row);
 /*
  * Every pixel at the sensor's own size (f->width x f->height): the two colours a site does not have
@@ -119,10 +120,12 @@ void isp_render_bgra(const struct isp *isp, const struct hakios_camera_frame *f,
  * moving pictures are) demosaiced as isp_render_full_nv12() does, and scaled to the picture between the
  * two nearest lines and pixels; rows from first_row to end_row (even), NV12.
  */
-void isp_render_still_nv12(const struct isp *isp, const struct hakios_camera_frame *f, const uint8_t *raw, uint8_t *y,
+bool isp_render_still_nv12(const struct isp *isp, const struct hakios_camera_frame *f, const uint8_t *raw, uint8_t *y,
     size_t y_stride, uint8_t *uv, size_t uv_stride, uint32_t width, uint32_t height, uint32_t first_row, uint32_t end_row,
     bool video_range);
-void isp_render_full_nv12(const struct isp *isp, const struct hakios_camera_frame *f, const uint8_t *raw, uint8_t *y, size_t y_stride,
+bool isp_render_still_bgra(const struct isp *isp, const struct hakios_camera_frame *f, const uint8_t *raw, uint8_t *out,
+    size_t stride, uint32_t width, uint32_t height, uint32_t first_row, uint32_t end_row);
+bool isp_render_full_nv12(const struct isp *isp, const struct hakios_camera_frame *f, const uint8_t *raw, uint8_t *y, size_t y_stride,
     uint8_t *uv, size_t uv_stride, uint32_t first_row, uint32_t end_row, bool video_range);
 /*
  * Lens shading measured from a frame of a flat field (a white sheet held over the lens, evenly lit):

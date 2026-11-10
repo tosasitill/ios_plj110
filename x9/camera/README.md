@@ -31,6 +31,14 @@
 目前只向 D22 用户态提供 Photo-compatible 格式（4032×3024 / 3088×2320），不声明 60/120 fps、视频录制、HDR、OIS、马达 AF 或拍摄闪光能力。
 光学字段沿用 D22 兼容描述，不是 X9 的标定参数；图像朝向、Bayer 顺序、曝光时序、实际帧率和色彩均待物理帧验证。
 
+### iOS 仅交付完整、本帧绑定的输出
+
+`camera_device.c:deliver` 只有在实际输出池成功、CoreVideo lock 成功、锁定后的 allocation/plane/stride/span 不越界且不相交、全部分片渲染成功、unlock 成功及本帧 port/PTS metadata 绑定成功后，才调用 `PixelBufferHandler` 并返回成功。NV12 要求正确的两 plane 和偶数尺寸；BGRA 要求非 planar。池背压、非法 layout、分片分配失败或 attachment 失败都不消费 `StillImageCaptureNow`，不增加照片已交付计数。上限沿现有预览 renderer 的 8192 像素边长，涵盖已声明 D22 Photo 尺寸。
+
+所有 renderer 返回 `bool`，失败意味着整张 buffer 不可发布。still 的 scratch 分组全部分配成功才替换旧指针/容量，避免早项 malloc 失败但后项成功时误认为可用；完整 NV12 和 BGRA still 共用逐像素 demosaic/缩放路径，BGRA 照片不再使用 2×2-cell 预览算法。分片按行对划分，短或奇数高度 BGRA 不留缝、不重复写。
+
+`AddAttachmentsToSampleBuffer` 只接受自身 pixelbuffer 上已绑定且 port/PTS 有效的 metadata；没有“最近帧”fallback。samplebuffer 已有 metadata 的 port/原始 PTS 与自身图像冲突时返回错误，其它 graph-added keys 保留。RAW header 同时核对 NO_FOCUS 与 reserved 全零。以上为源码与真实 SDK 编译结果，**没有实际照片、前后切换或相机硬件验证；worker STOP 错误传播及 native capture 全链仍继续实现**。
+
 ## 构建
 
 常规 `x9/build/build.py kernel|all` 自动构建、ad-hoc 签名 iOS 16 arm64 的 `libx9-camera.dylib` 和 `cameractl`，内嵌自有/MIT 桥。

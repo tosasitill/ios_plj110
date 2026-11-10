@@ -43,6 +43,7 @@
 #include <fcntl.h>
 #include <mach/mach_time.h>
 #include <math.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -177,10 +178,9 @@ find_functions(void)
 			say("%s is not there: the frames' metadata go without it", md_names[i]);
 		}
 	}
-	if (md_attachment == NULL || md_key[MD_PORT] == NULL) {
-		say("kFigCaptureSampleBufferAttachmentKey_MetadataDictionary or the port's key is not there: frames without "
-		    "metadata, and the shutter will wait for ever");
-		md_attachment = NULL;
+	if (md_attachment == NULL || md_key[MD_PORT] == NULL || md_key[MD_PTS] == NULL) {
+		say("frame-bound metadata/port/PTS keys unavailable: no capture device");
+		return false;
 	}
 	if (derived_create == NULL || derived_storage == NULL || device_class_id == NULL || stream_class_id == NULL || port_back == NULL ||
 	    port_front == NULL) {
@@ -447,8 +447,6 @@ struct stream {
 	CFArrayRef      formats;
 	CFDictionaryRef supported;
 	CFDictionaryRef colour_info;    /* from VideoOutputsColorInfo */
-	CFDictionaryRef metadata;       /* the last frame's (frame_metadata()), for a buffer that has none of its own */
-	pthread_mutex_t metadata_lock;  /* (not `lock': AddAttachmentsToSampleBuffer may come while a frame is given out) */
 	unsigned        stills_wanted;  /* photographs asked for by StillImageCaptureNow, not yet given */
 	int             format_index;
 	double          min_fps, max_fps;
@@ -746,6 +744,10 @@ stream_set_property(CMBaseObjectRef o, CFStringRef key, CFTypeRef value)
 		 * each ask.
 		 */
 		pthread_mutex_lock(&s->lock);
+		if (s->stills_wanted == UINT_MAX) {
+			pthread_mutex_unlock(&s->lock);
+			return ERR_NOT_AVAILABLE;
+		}
 		s->stills_wanted++;
 		pthread_mutex_unlock(&s->lock);
 		say_once("stream: a photograph asked for", key, value);
@@ -807,31 +809,36 @@ struct render_job {
 	const struct isp *isp;
 	const struct hakios_camera_frame *f;
 	const uint8_t *raw;
-	CVPixelBufferRef pb;
+	uint8_t *y, *uv;
+	size_t y_stride, uv_stride;
 	uint32_t format, width, height, pieces;
-	bool still;                     /* the photograph: every pixel of the sensor (isp_render_still_nv12) */
+	bool still;                     /* every pixel of the sensor, for both NV12 and BGRA */
+	_Atomic bool failed;
 };
 
 static void
 render_piece(void *context, size_t i)
 {
 	struct render_job *j = context;
-	uint32_t rows = (j->height + j->pieces - 1) / j->pieces, first = (uint32_t)i * rows, end = first + rows;
+	/* Partition pairs, not rounded row ranges: short/odd BGRA heights never leave gaps or overlap. */
+	uint32_t pairs = (j->height + 1) / 2;
+	uint32_t first = (uint32_t)(i * pairs / j->pieces) * 2;
+	uint32_t end = (uint32_t)((i + 1) * pairs / j->pieces) * 2;
+	bool ok;
 
-	first &= ~1u;
-	end = i + 1 == j->pieces ? j->height : end & ~1u;
+	if (end > j->height) end = j->height;
+	if (first >= end || atomic_load_explicit(&j->failed, memory_order_relaxed)) return;
 	if (j->format == PF_BGRA) {
-		isp_render_bgra(j->isp, j->f, j->raw, CVPixelBufferGetBaseAddress(j->pb), CVPixelBufferGetBytesPerRow(j->pb), j->width,
-		    j->height, first, end);
+		ok = j->still ? isp_render_still_bgra(j->isp, j->f, j->raw, j->y, j->y_stride, j->width, j->height, first, end) :
+		    isp_render_bgra(j->isp, j->f, j->raw, j->y, j->y_stride, j->width, j->height, first, end);
 	} else if (j->still) {
-		isp_render_still_nv12(j->isp, j->f, j->raw, CVPixelBufferGetBaseAddressOfPlane(j->pb, 0),
-		    CVPixelBufferGetBytesPerRowOfPlane(j->pb, 0), CVPixelBufferGetBaseAddressOfPlane(j->pb, 1),
-		    CVPixelBufferGetBytesPerRowOfPlane(j->pb, 1), j->width, j->height, first, end, j->format == PF_420V);
+		ok = isp_render_still_nv12(j->isp, j->f, j->raw, j->y, j->y_stride, j->uv, j->uv_stride,
+		    j->width, j->height, first, end, j->format == PF_420V);
 	} else {
-		isp_render_nv12(j->isp, j->f, j->raw, CVPixelBufferGetBaseAddressOfPlane(j->pb, 0), CVPixelBufferGetBytesPerRowOfPlane(j->pb, 0),
-		    CVPixelBufferGetBaseAddressOfPlane(j->pb, 1), CVPixelBufferGetBytesPerRowOfPlane(j->pb, 1), j->width, j->height, first, end,
-		    j->format == PF_420V);
+		ok = isp_render_nv12(j->isp, j->f, j->raw, j->y, j->y_stride, j->uv, j->uv_stride,
+		    j->width, j->height, first, end, j->format == PF_420V);
 	}
+	if (!ok) atomic_store_explicit(&j->failed, true, memory_order_relaxed);
 }
 
 static CVPixelBufferRef
@@ -859,7 +866,14 @@ output_buffer(struct output *out)
 		}
 		return NULL;
 	}
-	for (unsigned i = 0; CVPixelBufferPoolCreatePixelBuffer(NULL, pool, &pb) != kCVReturnSuccess && i < HELD; i++) {
+	for (unsigned i = 0; i <= HELD; i++) {
+		CVReturn result = CVPixelBufferPoolCreatePixelBuffer(NULL, pool, &pb);
+
+		if (result == kCVReturnSuccess && pb != NULL) break;
+		/* Never publish an output pointer from a failed pool call. */
+		if (pb != NULL) CVPixelBufferRelease(pb);
+		pb = NULL;
+		if (i == HELD) break;
 		/* a pool that will not grow that far: the oldest picture kept is the one to have */
 		unsigned oldest = (out->held_next + i) % HELD;
 
@@ -902,12 +916,26 @@ let_go(struct output *out)
 static void
 md_put(CFMutableDictionaryRef m, int key, CFTypeRef value)
 {
-	if (md_key[key] != NULL && value != NULL) {
+	if (m != NULL && md_key[key] != NULL && value != NULL) {
 		CFDictionarySetValue(m, md_key[key], value);
 	}
 	if (value != NULL) {
 		CFRelease(value);
 	}
+}
+
+static bool
+metadata_time(CFTypeRef metadata, CFStringRef port, CMTime *pts)
+{
+	if (md_attachment == NULL || md_key[MD_PORT] == NULL || md_key[MD_PTS] == NULL || metadata == NULL ||
+	    CFGetTypeID(metadata) != CFDictionaryGetTypeID()) return false;
+	CFTypeRef own_port = CFDictionaryGetValue(metadata, md_key[MD_PORT]);
+	CFTypeRef stamp = CFDictionaryGetValue(metadata, md_key[MD_PTS]);
+
+	if (own_port == NULL || !CFEqual(own_port, port) || stamp == NULL || CFGetTypeID(stamp) != CFDictionaryGetTypeID())
+		return false;
+	*pts = CMTimeMakeFromDictionary(stamp);
+	return CMTIME_IS_NUMERIC(*pts);
 }
 
 /* the frame's metadata, as H10ISP's stream gives them (see md_names) */
@@ -924,6 +952,7 @@ frame_metadata(const struct isp *isp, const struct hakios_camera_frame *f, const
 		return NULL;
 	}
 	m = (CFMutableDictionaryRef)new_dict();
+	if (m == NULL) return NULL;
 	md_put(m, MD_PORT, CFRetain(port));
 	md_put(m, MD_PTS, CMTimeCopyAsDictionary(CMClockMakeHostTimeFromSystemUnits(f->time), NULL));
 	md_put(m, MD_EXPOSURE, number_f(exposure));
@@ -947,38 +976,105 @@ frame_metadata(const struct isp *isp, const struct hakios_camera_frame *f, const
 	 * and would make up the rest of what was asked for itself; without it, a zoomed preview stood still.
 	 */
 	md_put(m, MD_ZOOM, number_f(isp->zoom));
+	CMTime pts;
+
+	if (!metadata_time(m, port, &pts) || CMTimeCompare(pts, CMClockMakeHostTimeFromSystemUnits(f->time)) != 0) {
+		CFRelease(m);
+		return NULL;
+	}
 	return m;
 }
 
-static void
+/* Entire row pitches must be within the locked allocation, without plane overlap or arithmetic wrap. */
+static bool
+buffer_span(const void *base, size_t bytes, const void *plane, size_t stride, size_t row_bytes, uint32_t rows, size_t *span)
+{
+	uintptr_t begin = (uintptr_t)base, at = (uintptr_t)plane;
+
+	if (base == NULL || plane == NULL || bytes == 0 || rows == 0 || begin > UINTPTR_MAX - bytes ||
+	    stride < row_bytes || stride > SIZE_MAX / rows) return false;
+	*span = stride * rows;
+	return at >= begin && at <= begin + bytes && *span <= begin + bytes - at;
+}
+
+static bool
+buffer_layout(CVPixelBufferRef pb, struct render_job *job)
+{
+	size_t width = CVPixelBufferGetWidth(pb), height = CVPixelBufferGetHeight(pb);
+	void *base = CVPixelBufferGetBaseAddress(pb);
+	size_t bytes = CVPixelBufferGetDataSize(pb), y_bytes, uv_bytes;
+
+	if (width == 0 || width > 8192 || height == 0 || height > 8192) return false;
+	job->width = (uint32_t)width;
+	job->height = (uint32_t)height;
+	job->format = CVPixelBufferGetPixelFormatType(pb);
+	if (base == NULL) {
+		/* A planar buffer may have no combined CV base; accept only an actual IOSurface allocation. */
+		IOSurfaceRef surface = CVPixelBufferGetIOSurface(pb);
+
+		if (surface == NULL) return false;
+		base = IOSurfaceGetBaseAddress(surface);
+		bytes = IOSurfaceGetAllocSize(surface);
+	}
+	if (job->format == PF_BGRA) {
+		if (CVPixelBufferIsPlanar(pb) || CVPixelBufferGetPlaneCount(pb) != 0) return false;
+		job->y = CVPixelBufferGetBaseAddress(pb);
+		job->y_stride = CVPixelBufferGetBytesPerRow(pb);
+		return buffer_span(base, bytes, job->y, job->y_stride, width * 4, job->height, &y_bytes);
+	}
+	if ((job->format != PF_420F && job->format != PF_420V) || ((width | height) & 1u) ||
+	    !CVPixelBufferIsPlanar(pb) || CVPixelBufferGetPlaneCount(pb) != 2 ||
+	    CVPixelBufferGetWidthOfPlane(pb, 0) != width || CVPixelBufferGetHeightOfPlane(pb, 0) != height ||
+	    CVPixelBufferGetWidthOfPlane(pb, 1) != width / 2 || CVPixelBufferGetHeightOfPlane(pb, 1) != height / 2) return false;
+	job->y = CVPixelBufferGetBaseAddressOfPlane(pb, 0);
+	job->uv = CVPixelBufferGetBaseAddressOfPlane(pb, 1);
+	job->y_stride = CVPixelBufferGetBytesPerRowOfPlane(pb, 0);
+	job->uv_stride = CVPixelBufferGetBytesPerRowOfPlane(pb, 1);
+	if (!buffer_span(base, bytes, job->y, job->y_stride, width, job->height, &y_bytes) ||
+	    !buffer_span(base, bytes, job->uv, job->uv_stride, width, job->height / 2, &uv_bytes)) return false;
+	return (uintptr_t)job->y + y_bytes <= (uintptr_t)job->uv || (uintptr_t)job->uv + uv_bytes <= (uintptr_t)job->y;
+}
+
+static bool
 deliver(struct stream *s, struct output *out, const struct isp *isp, const struct hakios_camera_frame *f, const uint8_t *raw,
     CFDictionaryRef metadata)
 {
-	CVPixelBufferRef pb = output_buffer(out);
-	uint32_t pf, width, height;
+	CMTime pts;
+	CVPixelBufferRef pb;
+	struct render_job job = { .isp = isp, .f = f, .raw = raw, .pieces = 8,
+	    .still = strcmp(out->name, "StillImage") == 0 };
 
-	(void)s;
+	if (out->handler == NULL || !metadata_time(metadata, s->port, &pts) ||
+	    CMTimeCompare(pts, CMClockMakeHostTimeFromSystemUnits(f->time)) != 0) return false;
+	pb = output_buffer(out);
 	if (pb == NULL) {
-		return;
+		return false;
 	}
-	pf = CVPixelBufferGetPixelFormatType(pb);
-	width = (uint32_t)CVPixelBufferGetWidth(pb);
-	height = (uint32_t)CVPixelBufferGetHeight(pb);
-	if (width == 0 || height == 0 || (pf != PF_420F && pf != PF_420V && pf != PF_BGRA)) {
+	if (CVPixelBufferLockBaseAddress(pb, 0) != kCVReturnSuccess) {
+		CVPixelBufferRelease(pb);
+		return false;
+	}
+	if (!buffer_layout(pb, &job)) {
 		if (out->delivered == 0 && out->said_shape == false) {
 			out->said_shape = true;
-			say("%s: %ux%u %c%c%c%c buffers are not for this ISP", out->name, width, height, pf >> 24, pf >> 16 & 255,
-			    pf >> 8 & 255, pf & 255);
+			say("%s: unsupported/invalid locked pixel buffer layout", out->name);
 		}
+		(void)CVPixelBufferUnlockBaseAddress(pb, 0);
 		CVPixelBufferRelease(pb);
-		return;
+		return false;
 	}
-	CVPixelBufferLockBaseAddress(pb, 0);
-
-	struct render_job job = { isp, f, raw, pb, pf, width, height, 8, strcmp(out->name, "StillImage") == 0 && pf != PF_BGRA };
 	uint64_t began = mach_absolute_time();
 
+	atomic_init(&job.failed, false);
 	dispatch_apply_f(job.pieces, dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), &job, render_piece);
+	CVReturn unlocked = CVPixelBufferUnlockBaseAddress(pb, 0);
+
+	if (unlocked != kCVReturnSuccess || atomic_load_explicit(&job.failed, memory_order_relaxed)) {
+		CVPixelBufferRelease(pb);
+		return false;
+	}
+	uint32_t width = job.width, height = job.height, pf = job.format;
+
 	if (job.still) {
 		static mach_timebase_info_data_t tb;
 
@@ -988,20 +1084,25 @@ deliver(struct stream *s, struct output *out, const struct isp *isp, const struc
 		say("%s: %ux%u made of every pixel in %.0f ms", out->name, width, height,
 		    (double)(mach_absolute_time() - began) * tb.numer / tb.denom / 1e6);
 	}
-	CVPixelBufferUnlockBaseAddress(pb, 0);
 	CVBufferSetAttachment(pb, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_601_4, kCVAttachmentMode_ShouldPropagate);
 	CVBufferSetAttachment(pb, kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_709_2, kCVAttachmentMode_ShouldPropagate);
 	CVBufferSetAttachment(pb, kCVImageBufferTransferFunctionKey, kCVImageBufferTransferFunction_ITU_R_709_2,
 	    kCVAttachmentMode_ShouldPropagate);
 
-	if (metadata != NULL) {
-		CFMutableDictionaryRef m = CFDictionaryCreateMutableCopy(NULL, 0, metadata);
+	CFMutableDictionaryRef m = CFDictionaryCreateMutableCopy(NULL, 0, metadata);
 
-		CVBufferSetAttachment(pb, md_attachment, m, kCVAttachmentMode_ShouldPropagate);
-		CFRelease(m);
+	if (m == NULL) {
+		CVPixelBufferRelease(pb);
+		return false;
 	}
+	CVBufferSetAttachment(pb, md_attachment, m, kCVAttachmentMode_ShouldPropagate);
+	bool attached = CVBufferGetAttachment(pb, md_attachment, NULL) == m;
 
-	CMTime pts = CMClockMakeHostTimeFromSystemUnits(f->time);
+	CFRelease(m);
+	if (!attached) {
+		CVPixelBufferRelease(pb);
+		return false;
+	}
 
 	((pixel_buffer_handler)out->handler)(pb, pts);
 	/*
@@ -1024,6 +1125,7 @@ deliver(struct stream *s, struct output *out, const struct isp *isp, const struc
 		say("%s: the first picture given (%ux%u %c%c%c%c)", out->name, width, height, pf >> 24, pf >> 16 & 255,
 		    pf >> 8 & 255, pf & 255);
 	}
+	return true;
 }
 
 /*
@@ -1290,6 +1392,8 @@ static bool valid_frame(const struct hakios_camera_frame *f, uint32_t sensor)
 {
     uint32_t width=sensor==1?4096:3264,height=sensor==1?3072:2448;
     uint32_t stride=(width/4*5+63)&~63u;
+    for (unsigned i=0;i<sizeof(f->reserved)/sizeof(f->reserved[0]);i++)
+        if (f->reserved[i]) return false;
     return !memcmp(f->magic, HAKIOS_CAMERA_MAGIC, 8) && f->header_bytes == sizeof(*f) &&
         f->sensor == sensor && f->format == 1 && f->bayer == (sensor==1?3u:0u) && f->black == 64 &&
         (sensor==1 || sensor==2) && f->width==width && f->height==height && f->stride==stride &&
@@ -1302,7 +1406,7 @@ static bool valid_frame(const struct hakios_camera_frame *f, uint32_t sensor)
         f->frame_lines <= f->frame_lines_max && f->exposure_lines >= (sensor==1?6u:16u) &&
         (sensor!=1 || (!(f->frame_lines%2) && !(f->exposure_lines%2))) &&
         f->exposure_lines <= f->frame_lines - f->margin && f->time &&
-        f->time<=mach_absolute_time() && f->sequence;
+        f->time<=mach_absolute_time() && f->sequence && f->focus==HAKIOS_CAMERA_NO_FOCUS;
 }
 
 static void *
@@ -1421,14 +1525,6 @@ worker(void *context)
 		 * it walks a pointer that is not there yet and mediaserverd dies of SIGSEGV. The frames
 		 * before that are read and thrown away, which is also what settles the exposure.
 		 */
-		if (metadata != NULL) {
-			pthread_mutex_lock(&s->metadata_lock);
-			if (s->metadata != NULL) {
-				CFRelease(s->metadata);
-			}
-			s->metadata = CFRetain(metadata);
-			pthread_mutex_unlock(&s->metadata_lock);
-		}
 		pthread_mutex_lock(&s->lock);
 		for (int i = 0; s->graph_running && i < OUTPUTS; i++) {
 			struct output *out = &s->out[i];
@@ -1446,8 +1542,8 @@ worker(void *context)
 			if (still && s->stills_wanted == 0) {
 				continue;
 			}
-			deliver(s, out, &isp, f, raw, metadata);
-			if (still) {
+			bool given = deliver(s, out, &isp, f, raw, metadata);
+			if (still && given) {
 				s->stills_wanted--;
 				say("the photograph is given (%llu so far)", (unsigned long long)++s->stills_given);
 			}
@@ -1557,8 +1653,8 @@ add_absent(const void *key, const void *value, void *context)
 
 /*
  * The frame's metadata into the sample buffer the graph made of our pixel buffer: the pixel buffer's
- * own dictionary (deliver()), the same object, else the last frame's; whatever the graph has put in a
- * dictionary of the sample buffer's already stays as it is.
+ * own dictionary (deliver()) only. Never attach another frame's latest metadata. Graph-added keys
+ * remain, but a contradictory port or source PTS is an error, not a reason to combine two frames.
  */
 static OSStatus
 stream_add_attachments(CMBaseObjectRef o, CMSampleBufferRef sbuf, CFDictionaryRef options)
@@ -1568,6 +1664,7 @@ stream_add_attachments(CMBaseObjectRef o, CMSampleBufferRef sbuf, CFDictionaryRe
 	CVImageBufferRef image = sbuf != NULL ? CMSampleBufferGetImageBuffer(sbuf) : NULL;
 	CFTypeRef ours = image != NULL && md_attachment != NULL ? CVBufferGetAttachment(image, md_attachment, NULL) : NULL, theirs;
 	CFMutableDictionaryRef m;
+	CMTime pts;
 
 	if (!said) {
 		said = true;
@@ -1575,33 +1672,43 @@ stream_add_attachments(CMBaseObjectRef o, CMSampleBufferRef sbuf, CFDictionaryRe
 		    md_attachment != NULL ? "attached" : "NOT THERE");
 	}
 	if (md_attachment == NULL || sbuf == NULL) {
-		return 0;
+		return ERR_PARAM;
 	}
-	if (ours != NULL && CFGetTypeID(ours) == CFDictionaryGetTypeID()) {
-		CFRetain(ours);
-	} else {
-		pthread_mutex_lock(&s->metadata_lock);
-		ours = s->metadata != NULL ? CFDictionaryCreateMutableCopy(NULL, 0, s->metadata) : NULL;
-		pthread_mutex_unlock(&s->metadata_lock);
-	}
-	if (ours == NULL) {
-		return 0;
-	}
+	if (!metadata_time(ours, s->port, &pts)) return ERR_NOT_AVAILABLE;
+	CFRetain(ours);
 	theirs = CMGetAttachment(sbuf, md_attachment, NULL);
 	if (theirs == ours) {
 		CFRelease(ours);
 		return 0;
 	}
 	if (theirs != NULL && CFGetTypeID(theirs) == CFDictionaryGetTypeID()) {
+		CFTypeRef port = CFDictionaryGetValue(theirs, md_key[MD_PORT]);
+		CFTypeRef stamp = CFDictionaryGetValue(theirs, md_key[MD_PTS]);
+
+		if ((port != NULL && !CFEqual(port, s->port)) || (stamp != NULL &&
+		    (CFGetTypeID(stamp) != CFDictionaryGetTypeID() || !CMTIME_IS_NUMERIC(CMTimeMakeFromDictionary(stamp)) ||
+		    CMTimeCompare(CMTimeMakeFromDictionary(stamp), pts) != 0))) {
+			CFRelease(ours);
+			return ERR_PARAM;
+		}
 		m = CFDictionaryCreateMutableCopy(NULL, 0, theirs);
+		if (m == NULL) {
+			CFRelease(ours);
+			return ERR_NOT_AVAILABLE;
+		}
 		CFDictionaryApplyFunction(ours, add_absent, m);
+	} else if (theirs != NULL) {
+		CFRelease(ours);
+		return ERR_PARAM;
 	} else {
 		m = (CFMutableDictionaryRef)CFRetain(ours);
 	}
 	CMSetAttachment(sbuf, md_attachment, m, kCMAttachmentMode_ShouldPropagate);
+	bool attached = CMGetAttachment(sbuf, md_attachment, NULL) == m;
+
 	CFRelease(m);
 	CFRelease(ours);
-	return 0;
+	return attached ? 0 : ERR_NOT_AVAILABLE;
 }
 
 static OSStatus
@@ -1634,9 +1741,6 @@ stream_finalize(CMBaseObjectRef o)
 	}
 	if (s->colour_info) {
 		CFRelease(s->colour_info);
-	}
-	if (s->metadata) {
-		CFRelease(s->metadata);
 	}
 	if (s->torch >= 0) {
 		close(s->torch);
@@ -1673,7 +1777,6 @@ stream_create(CFAllocatorRef allocator, const struct camera *camera, CFStringRef
 	s = stream_of(o);
 	memset(s, 0, sizeof(*s));
 	pthread_mutex_init(&s->lock, NULL);
-	pthread_mutex_init(&s->metadata_lock, NULL);
 	s->torch = -1;
     s->camera_fd = -1;
 	s->min_fps = 2;
