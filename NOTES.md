@@ -774,6 +774,14 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **私有输入/复建**:`.local/x9/work/gps-baro-20261110/`保存`ios-evidence.py`、locationd符号/ObjC名单、pressure-{constructor,hid-open,consumer,capability}.dis、PDS控制dis、libqmi字典/枚举、compile[-main].stdout.log、build.stdout.log、boot-input.json、builder/recipe/link-order/config输入及integration备份。`python3 -I .../compile.py`在4085f43独立树编五单元;`compile-main.py`对应75f94b2 detached树。`build-candidate.py`依赖保留ALL117对象,拒绝覆盖out;重放先改为新的唯一out目录,以Framework Python3.13运行。校准/设备manifest/Apple原件均不入git。
 - **下一步/完成判据**:①只读取得真实Android/SCP sensor list,确认本板是否有PRESSURE6及gain/器件名,无器件则必须报告不具备硬件,不伪造高度;②补SCP启动/固件/共享内存所有权、IPI/CRC/ACK及压力enable/batch/FIFO/reset排空,将真实记录接上述入口;③依据MT6993**正在运行**的gps_mcudl/MNL固件与EMI布局移植power→MCU READY→MNL session→NMEA/parsed fixes,注册真实GPS后端,补iOS实际要求的PDS/engine消息;④先解决locationd现有崩溃/等待,最终要有户外真实fix→CoreLocation app定位及实际气压变化→CMAltimeter回调证据。当前没有这些证据,**不可称GPS和气压计“内核+iOS都完成”**,不要求用户连续启动未就绪的探针候选。
 
+## 扬声器APLL2活动交接(AUDIO-9,2026-11-10): 预配置PLL／VLP测频与iOS接口已编译，完整kernel待构建
+
+- 独立 `.local/x9/worktrees/speaker-pll9`／`work/x9-speaker-pll9`，固定基线 **d714212**；主checkout并发蜂窝／相机等修改保持。本轮只接预配置196.608MHz APLL2与VLP FQMTR、iOS cached状态／显式一次事务；不写PCW/update trigger、不启DMA／engine／PA、不注册backend，仍Ready0。没有上机测频或PLL锁定证明，不能称板级测频已通过。
+- OPPO `mt6993-afe-clk.c::apll_enable`确认EN／SDM／TUNER位与逆序off；`clk-fmeter-mt6993.c::fqmtr_cal`确认VLP selector／CON0..6、1023负载／divide2／nominal26M公式。计划要求每样本fresh BUSY上升再下降；FENC不是PLL锁定证明，±1%仅路径sanity，未测参考ppm。审查重点是partial enable／late trigger／第三值恢复与主错上下文保留。
+- 仅本机直接编译，不跑测试套件／设备命令／HAL安装／root写入／mailbox／主动push／Metal重建；继承GPU276 allowlist，首次部署仍沿GPU276交接。本轮私有输入／草稿备份位于 `.local/x9/work/audio-pll9-20261110/`；下一步固定源码、新唯一目录整kernel构建。
+- **编译里程碑**：补selector14 cached PLLStatus v1/264B、15 root/exclusive/admin/type2/mode2显式PLLProbe；旧0..13/PCM ABI1不变。工具新增 `pll-status/pll-probe`，probe只调用一次再读PLL与clock缓存。board transaction修复未完成trigger不可取消、completed-but-invalid-count仅清自有trigger、任何partial PLL write恢复均等FENCoff、逐样本foreign消费者/immutable PLL/readback重查、主错stage/register/value不被restore覆盖。`x9_speaker_mt6993.o`／`SweetX9Audio.o`本机 **units-1.exit0**，仅既有C99/header/noreturn warnings；iOS16 arm64 HAL／audioctl编译＋adhoc签名 **hal-units1.exit0**。原始日志与compile-selected1.py在同私有目录。没有整kernel链接结果或硬件验证；仅旧README-speaker更新使用方法与reference精度／恢复边界，不新增报告。
+- **主线源码整合**：独立代码 **8f7be2b** 的8个代码/README文件精准合main为 **8ed23ab**（父8d7fcf9），没有source冲突，不夹带主checkout相机等窗口未提交NOTES。直接冻结联合已提交源码构建一次新的kernel/HAL，不交旧基线独立包；GPU276 allowlist与主线其他已提交模块保留。
+
 ## 扬声器板级时钟活动交接(AUDIO-8,2026-11-10): 显式AUDIO/26M与禁用OUT4配置／恢复已接；无48k物理时钟或出声证明
 
 - **隔离／源码证据**：固定 **00a81f3** 建独立 `.local/x9/worktrees/speaker-clock8`／`work/x9-speaker-clock8`，代码 **569ce6a**；不覆盖main其他窗口Metal/麦克风/相机/GPS/蜂窝改动。OPPO mt6993-afe-clk.c证实AFE base clock依赖INFRA／AUDIO、VLP intbus/audio_h与HOPPING/F26M；clk-mt6993.c证实两个parent都是2-bit/index0=26M。**clk-pll.c的mtk_pll_fenc_prepare只维护software count，is_prepared仅FENC读数，不是已确认PLL lock/rate/ownership**，故本轮不写APLL2／不把PCW参数当48k时钟就绪。UniXNU只借IOKit/HAL架构，不引shared-cache clock patch。
