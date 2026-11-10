@@ -34,6 +34,8 @@ int main(int argc,char **argv)
             printf("sensor-probe sensor=%u stage=%u flags=%x blockers=%x chip=%04x errno=%u restore=%u wl=%02x/%02x mclk=%08x/%08x rails=%06x/%06x i2c=%x/%x (NOT capture ready)\n",
                 r.sensor,r.stage,r.flags,r.blockers,r.chip_id,r.last_errno,r.restore_errno,
                 r.wl_id,r.wl_enable,r.mclk_cfg,r.mclk_status,r.dovdd,r.afvdd,r.i2c_status[0],r.i2c_status[1]);
+            printf("clock ap_vote_before=%08x done=%08x univpll_con1=%08x fence=%08x (configured nominal, NOT measured Hz)\n",
+                r.hwv_vote,r.hwv_done,r.pll_con1,r.pll_fence);
             if(probe){close(fd);return r.last_errno?1:0;}
         }
     }

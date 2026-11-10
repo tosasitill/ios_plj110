@@ -11,8 +11,8 @@
 | XNU | `/dev/x9-camera` 独占控制；只读状态；16 MiB 上限 RAW10；1 s 有界等待；generation 拒绝旧 DMA 完成；关闭时停止、排空、恢复 |
 | 软件 ISP | HakiOS MIT 软件去马赛克、灰世界 AWB、AE、sRGB、NV12/BGRA；不使用高通 Chromatix；CCM 为单位矩阵，无 LSC |
 | iOS | HakiOS `CMDerivedObjectCreate` 设备类 v3/流类 v2，前后 `FigCaptureStream`；输出池、PixelBufferHandler、帧 metadata；先确认真实 start 再返回成功 |
-| sensor-probe | MT6993 AP I2C FIFO/WRRD；WL28681C 指定通道电压/启停；reset/MCLK pinmux；真实 ID 检查与恢复日志。**要求继承的时钟、总线与共享供电已满足前置条件，未上机验证** |
-| 采集后端 | **缺失**：冷启动时钟/PLL/voter、共享 regulator ownership、SENINF C/D-PHY、VC/RAW10 接收、RAW DMA/SMMU、完成队列 |
+| sensor-probe | MT6993 CAMTG voter/parent 申请与释放、AP I2C 单控制器门控/FIFO/WRRD；WL28681C 指定通道电压/启停；reset/MCLK pinmux；真实 ID 检查与恢复日志。**仍要求已配置的 HWCCF/PLL、AP timing/引脚和共享供电，未上机验证** |
+| 采集后端 | **缺失**：完整冷启动 HWCCF/共享 regulator/AP timing ownership、SENINF C/D-PHY、VC/RAW10 接收、RAW DMA/SMMU、完成队列 |
 
 原始 X9 DT 与 Android 启动日志确定：主摄为 i2c4/7-bit `0x1a`，ID 寄存器 `0x16/0x17` 返回 `0x9186`；前摄 i2c2/`0x10`，返回 `0x0615`。
 不把厂商宏中加了 offset 的软件 sensor ID 当成芯片读数。
@@ -90,17 +90,33 @@ cameractl probe front
 
 当前实现刻意不接管未知的共享资源，前置条件包括：
 
-- CAMTG7（主）/CAMTG1（前）已选择 UNIVPLL_192M_D8，并有 CKSTA；不初始化 PLL、不改 mux/voter。配置检查不是实测频率。
-- i2c4/i2c2 和 **i2c12** 已 ungated、具有非零 timing、open-drain、非 HS，四个暴露的 channel bank 均无事务/IRQ/FIFO 残留，DMA 未运行。实际 DT 没有 `ch-offset-i2c`，使用 channel0，不能猜成 `+0x10000`。
+- UNIVPLL 的已有 PCW/postdiv 配置在 `/104` 后为标称 24MHz（容差 ±1kHz）。不重编 PLL、不初始化 HWCCF 的全局/autolink 表；DONE 不就绪时有界退出。没有其他 XPU 投票且 CAMTG FENC 为 off 时，才允许把目标 mux 改为 parent7。已有投票则只接受正确 parent 和 FENC-on，不改 live parent。
+- i2c4/i2c2 和 **i2c12** 的共享 I2C_EAST/I2C_PERI parent 已 FENC-on/CKSTA-idle，选用 PLL 时该 PLL 已 FENC-on；不修改共同 parent。允许只 ungate 目标 IMPE/IMPC bit，退出恢复自己增加的门控。仍要求非零 timing、open-drain、非 HS，四个暴露的 channel bank 均无事务/IRQ/FIFO 残留，DMA 未运行。实际 DT 没有 `ch-offset-i2c`，使用 channel0，不能猜成 `+0x10000`。
 - AP I2C 引脚已为 mode1，尤其前摄不能仍归 SCP；WL28681C 共享 reset GPIO203 已拉高。不切换 SCP ownership，不重置 LDO 芯片或 GPIO187/202。
 - SID3 LN60_7 DOVDD 已处于精确 1.8V/normal/DA-enabled；主摄另需 SID6 LDC0_3 AFVDD 精确 3V。只读 PMIF-P/M 验证，不改共享 rail 或 VS voter。
 - 目标 sensor 的 reset 为 GPIO output-low、MCLK pinmux 为 off、它的 WL 通道均 disabled。主摄使用 WL4/7/2，前摄使用 WL3/1；其他通道保持。
 
 `blockers` 位：`1=clock`、`2=shared rail`、`4=AP route`、`8=I2C state`、`16=inherited active/reset state`。
-阶段编号：`1=preflight`、`2=PMIC`、`3=bus`、`4=LDO`、`5=power`、`6=ID`、`7=restore`、`8=done`。
-一次 AP FIFO 请求最多约 5ms，PMIF 状态等待最多约 1ms；未知继承状态不清 IRQ、不做总线 reset/retry。
-失败后先把 sensor reset 拉低、断开 MCLK，再关闭自身 WL 通道并恢复电压/引脚/控制寄存器；恢复失败保留 journal、锁存并明确报告，不声称资源已恢复。
-**冷 LK 基线很可能不满足前置条件；此实现不是完整的相机电源/时钟驱动，也不是建议现在刷入的可拍摄镜像。**
+阶段编号：`1=preflight`、`2=PMIC`、`3=bus`、`4=LDO`、`5=power`、`6=ID`、`7=restore`、`8=done`，追加 `9=clock`（不改旧编号）。
+一次 AP FIFO 请求最多约 5ms，PMIF 状态等待最多约 1ms；单次 HWCCF DONE 等待最多 10ms，AP EN 最多 200µs，CKSTA/FENC 最多 1ms。未知继承状态不清 IRQ、不做总线 reset/retry。
+失败后先把 sensor reset 拉低、断开 MCLK，再关闭自身 WL 通道并恢复电压/引脚/控制寄存器/单控制器门控，最后撤销自己增加的 CAMTG vote 并在无人使用时还原 parent。继承投票和其他通道保持；恢复失败保留 journal、锁存并明确报告，不声称资源已恢复。
+**冷 LK 基线仍可能被共享 rail/WL reset/AP timing 等前置条件挡住；这不是完整的相机冷启动或采集驱动，也不是可拍摄镜像。**
+
+### CAMTG 时钟申请和诊断
+
+按 OPPO `clk-mt6993.c` → `clk-mux.c` → `hwccf_api.c` 的 v1 AP 路径实现，不能沿用旧版的两个假设：
+
+- `CKSTA +0x330` 对应位是 **busy**，必须等它清零；实际 on/off 查 `FENC +0x270`，不把 CKSTA=1 或 CLK_CFG 的 PDN 当作时钟已运行。
+- clock 表的 HWV SET/CLR 是相对偏移。v1 `v1_raw_hwccf_voter_ctrl` 加 **XPU0 `+0x20000`**；SET 后检查 AP EN、DONE，再检查 CAMTG/UNIVPLL FENC。只写目标 bit，不直接写 PDN、PLL enable 或全局 HWCCF 初始化。
+
+| 资源 | VLP parent 字段 / UPDATE bit | AP HWV SET / CLR / EN / DONE | vote bit / CKSTA、FENC bit |
+|---|---|---|---|
+| 主 CAMTG7 | `+0x70[27:24]` / `+0x4 bit27` | `+0x20048 / +0x2004c / +0x20050 / +0x12618` | `31 / 4` |
+| 前 CAMTG1 | `+0x60[11:8]` / `+0x4 bit21` | `+0x2003c / +0x20040 / +0x20044 / +0x12614` | `15 / 10` |
+
+VLP base 为 `0x1c200000`，AP HWV base 为 `0x1c040000`。共享 UNIVPLL base `0x1c213100`，CON1 `+0x0c`、FENC `+0x34 bit4`；只读。
+probe v1 仍为 80B，把末尾四个 reserved 字用于 `hwv_vote`（入口 AP EN）、`hwv_done`、`pll_con1`、`pll_fence`；请求仍须全零。旧内核返回零，旧工具仍可读取前面字段。
+`flags & 16` 表示 voter/CAMTG/PLL FENC 检查通过，不表示实测频率、更不表示 capture READY；`cameractl` 输出 raw 证据并明确标注标称配置。
 
 ## 硬件后端接入契约
 

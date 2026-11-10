@@ -208,6 +208,17 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **失败尝试/重建**:第一次`x9-microphone-phase1-final`误在共享main目录执行,撞到另一窗口正在编辑的USB`bsd_init`引用 **`_x9_usb_start`未定义**,link exit1;没有boot成功结论,不是麦克风ABI错误。随后改为上述干净固定worktree、唯一新名字`phase1-fixed`构建成功,失败目录不交付。精确重建:在固定worktree运行`/Library/Frameworks/Python.framework/Versions/3.13/bin/python3 -I x9/build/build.py all --name <新的唯一名字> --config /Users/tosasitill/ios_plj110/.local/x9/work/microphone-20261110/local-config.json --boot-config /Users/tosasitill/ios_plj110/.local/x9/work/microphone-20261110/boot-config.json -j 8`。配置/输入/原始日志均在同一私有目录,不入git。
 - **共享树隔离/下一步**:麦克风只提交自己的文件和recipe/link-order/build/ufs改动;另一窗口扬声器9900f6b恰在提交前先入main,所以作为已提交祖先纳入固定构建,不是夹带其未提交代码。后续保持完整参数集,不为凑607B删`cpus=8`(SWEET缺该参数会退单核);当前无需激活mic诊断或连续刷探针。板级按codec读回/资源还原→DCC/MTKAIF→DMA推进/真实声学PCM→HAL/AVAudioSession录音依次验收,不能把状态节点/插件出现当成麦克风可用。
 
+## 相机活动交接(CAMERA-3,2026-11-10): CAMTG HWCCF申请/释放与AP I2C单控制器门控;仍无采集
+
+- **范围/隔离**:续做从main实际 **bc72c12** 创建 `.local/x9/worktrees/camera-clock` / `work/x9-camera-clock`。主checkout另一窗口有音频/UFS/build注册修改,本树不夹带这些未提交文件;包含117完整源码和CAMERA-2共享PMIF锁。没有主动push/设备操作/测试套件。
+- **纠正CAMERA-2的时钟假设**:OPPO `clk-mux.c::__mtk_clk_mux_set_parent_lock`明确等待CKSTA为0,它是busy位,**不是CKSTA=1表示时钟有效**。`mtk_mux_generic_hwv_ops.is_enabled`查VLP FENC(+0x270),不查CLK_CFG PDN。`hwccf_api.c::v1_raw_hwccf_voter_ctrl`还把clock表相对SET/CLR加 **XPU0 +0x20000**,EN在SET+8;MT6993 compatible明确选v1,不能写旧v0地址。上述为当前公开源调用链证据,不是本轮硬件测量。
+- **实现**:目标CAMTG7/1无其他XPU投票且FENC-off时,才按parent CLR/SET→UPDATE→CKSTA清零切parent7;已有投票只借正确parent/FENC-on。按DONE→AP SET/CLR→AP EN→DONE申请/撤销自己新增的单bit vote,继承vote/其他CAMTG保持。UNIVPLL CON1 PCW/postdiv只读,要求/104后标称24MHz±1kHz,并检查PLL FENC-on;**不重编PLL、不直写PDN、不初始化HWCCF全局/autolink**,不声称实测Hz。模糊SET在写前记journal,恢复失败或新增他方使用者时不乱改live parent,锁存明确错误。
+- **AP I2C门控**:主/前IMPE bit2/1,WL的IMPC bit0,只CLR自己原本gated的单控制器位,退出SET恢复;继承已on的门控不关闭。共享I2C_EAST/PERI的parent/FENC/CKSTA及所选MAINPLL/UNIVPLL FENC只读验证,每次transfer拒绝source变化,不改共同parent。仍要求既有timing/open-drain/非HS、四bank idle、DMAoff,不reset/retry/清继承IRQ。
+- **ABI/iOS边界**:probe v1仍80B,末尾4个reserved字现在为入口AP EN、最后DONE、UNIVPLL CON1/FENC;请求仍要求零。追加stage9=clock,旧stage0..8不变;flag16仅表示clock voter/FENC检查通过。工具/内核打印原始clock证据,mode1启动/status零硬件、mode3显式root probe、mode2安装语义与iOS双流桥保持。supported_mask/READY仍0,未注册capture,不加载厂商preview/stream-on,**仍不能拍摄**。
+- **编译里程碑**:camera桥/工具交叉编译签名exit0(117040B);最终camera单对象编译exit0,29个既有C声明/头警告、无编译错误。初次临时编译wrapper错把Builder返回True当失败,编译器本身已成功;已修正wrapper判定并对最终源码单对象编译。没有运行测试套件。私有 `.local/x9/work/camera-clock-20261110/{clock-source.txt,user-build.log,object-build.log,object-build-final.log,object-build-final.exit,local-config.json,boot-config.json,gh-runs.json}`;gh列表为空,无CI run。
+- **未完成/下一步**:共享SID3 DOVDD/SID6 AFVDD仍只读、WL GPIO203仍需已output-high,目标reset output-low/AP route仍需已配置;冷LK仍可能在这些前置条件被挡。厂商VS voter SID3 0x178a mask4在power-on前SET+1/关电后CLR+2,还调用cam-pmic wake,需要先追provider/共享ownership而非直接照抄。之后补这些供电/AP timing provider,再用户手动一次日志确认主ID→还原、前ID→还原,最后SENINF→RAW DMA/SMMU完整帧和iOS预览/落盘。没有本轮上机ID/实帧。
+- **构建待办**:本里程碑提交后冻结本树,沿用CAMERA-2完整605B配置(x9_camera=3)/32GiB manifest/插件275做唯一名字完整构建,无需mailbox。结果与代码SHA在完成后补本节,不把主目录音频WIP冒充已包含。
+
 ## 相机活动交接(CAMERA-2,2026-11-10): 有条件AP-I2C/WL28681C芯片探测;采集/冷启动资源仍缺
 
 - **续做范围/隔离**:新独立worktree `.local/x9/worktrees/camera-probe` / `work/x9-camera-probe`,创建时main另一窗口恰好提交双卡整合,实际基线为 **5ce2d93**(含117完整功能源码),不是旧phase1c树。未夹带/覆盖另一会话的暂存修改,不主动push/设备操作/测试套件。

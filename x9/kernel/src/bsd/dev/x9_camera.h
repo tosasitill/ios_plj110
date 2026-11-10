@@ -25,6 +25,7 @@ struct x9_camera_status {
 #define X9_CAM_PROBE_MATCHED 2u
 #define X9_CAM_PROBE_RESTORED 4u
 #define X9_CAM_PROBE_LATCHED 8u
+#define X9_CAM_PROBE_CLOCK 16u /* Voter/clock/PLL-fence checked, not capture or measured Hz. */
 #define X9_CAM_BLOCK_CLOCK 1u
 #define X9_CAM_BLOCK_RAIL 2u
 #define X9_CAM_BLOCK_ROUTE 4u
@@ -33,12 +34,15 @@ struct x9_camera_status {
 enum x9_camera_probe_stage { X9_CAM_STAGE_NONE, X9_CAM_STAGE_PREFLIGHT,
     X9_CAM_STAGE_PMIC, X9_CAM_STAGE_BUS, X9_CAM_STAGE_LDO,
     X9_CAM_STAGE_POWER, X9_CAM_STAGE_ID, X9_CAM_STAGE_RESTORE,
-    X9_CAM_STAGE_DONE };
+    X9_CAM_STAGE_DONE, X9_CAM_STAGE_CLOCK }; /* Append: preserve existing stage ABI. */
 struct x9_camera_probe {
     uint32_t version, sensor, flags, stage;
     uint32_t chip_id, last_errno, restore_errno, blockers;
     uint32_t wl_id, wl_enable, mclk_cfg, mclk_status;
-    uint32_t dovdd, afvdd, i2c_status[2], reserved[4];
+    uint32_t dovdd, afvdd, i2c_status[2];
+    /* Former reserved[4], same 80-byte v1 ABI; request must still be zero.
+     * AP EN is the entry snapshot; DONE/fence are last clock observations. */
+    uint32_t hwv_vote, hwv_done, pll_con1, pll_fence;
 };
 #define X9_CAMERA_GET_PROBE _IOR('C', 0x91, struct x9_camera_probe)
 #define X9_CAMERA_PROBE_SENSOR _IOWR('C', 0x92, struct x9_camera_probe)
