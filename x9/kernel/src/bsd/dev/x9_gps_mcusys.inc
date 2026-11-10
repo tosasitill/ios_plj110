@@ -102,5 +102,7 @@ static int gps_mcusys_receive(unsigned channel,const uint8_t *p,unsigned length)
  }
  /* Record actual RX regardless of whether the provider can process it.
   * These are received facts, NOT successful NV/app acknowledgements. */
+ if(!error)error=gps_nv_remote(&message);
+ else if(gps_nv.started)gps_nv_journal(error);
  gps_mcusys_journal(error);return error;
 }

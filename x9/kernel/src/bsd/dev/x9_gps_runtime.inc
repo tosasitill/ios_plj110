@@ -16,6 +16,7 @@ static LCK_MTX_DECLARE(gps_runtime_lock, &gps_group);
 /* Keep above startup macro's line distinct from sweet_x9_gps.c locks;
  * STARTUP_ARG generates a translation-unit symbol from __LINE__. */
 #include "x9_gps_mcusys.h"
+#include "x9_gps_nv.h"
 _Static_assert(__builtin_offsetof(struct x9_gps_connv2_ops,pos_clock_schematic)==64,
     "connv2 version-1 descriptor prefix");
 _Static_assert(__builtin_offsetof(struct x9_gps_connv2_ops,pos_afe)==88,
@@ -170,7 +171,7 @@ static struct {
  } secure_remap;
  uint8_t cmdbt[4096]; /* immutable registered snapshot, never on stack */
  thread_t worker;
- unsigned in_callback, out_head[2], out_count[2];
+ unsigned in_callback, in_provision, out_head[2], out_count[2];
  struct gps_runtime_packet outbox[2][2];
  struct gps_native_flow flow;
  struct {
@@ -488,6 +489,7 @@ static int gps_runtime_owned(void *ctx, uint64_t generation, int reset)
  return 0;
 }
 #include "x9_gps_flow.inc"
+#include "x9_gps_nv.inc"
 #include "x9_gps_mcusys.inc"
 static int gps_runtime_control(void *ctx,unsigned ch,uint8_t type,
     const uint8_t *p,unsigned n,uint64_t now)
@@ -512,6 +514,11 @@ static int gps_runtime_control(void *ctx,unsigned ch,uint8_t type,
  (void)ctx; gps_rt.in_callback=1;
  int e=gps_rt.ops.control(gps_rt.ops.context,ch,type,p,n,now);
  gps_rt.in_callback=0;
+ if(gps_nv.error) {
+  /* A provider must not swallow a partial NV authority/copy failure. */
+  x9_gps_hardware_fault(gps_rt.generation,gps_nv.error);
+  e=gps_nv.error;
+ }
  if(type==X9_GPS_MCUSYS_PACKET)gps_mcusys_journal(observed ? observed : e);
  return observed ? observed : e;
 }
@@ -523,6 +530,7 @@ static int gps_runtime_mnl(void *ctx,const uint8_t *p,unsigned n,uint64_t now)
  (void)ctx; gps_rt.in_callback=1;
  int e=gps_rt.ops.mnl(gps_rt.ops.context,p,n,now);
  gps_rt.in_callback=0;
+ if(gps_nv.error){x9_gps_hardware_fault(gps_rt.generation,gps_nv.error);return gps_nv.error;}
  /* The physical handler must first accept this report in its real MNL
   * session. Do not turn unsolicited event2/management traffic into READY.
   * Unknown events still require that handler; no blanket acknowledgement. */
@@ -569,7 +577,9 @@ static int gps_runtime_ccif(void *ctx,unsigned ch,uint64_t now)
 {
  (void)ctx; gps_rt.in_callback=1;
  int e=gps_rt.ops.other_ccif(gps_rt.ops.context,ch,now);
- gps_rt.in_callback=0; return e;
+ gps_rt.in_callback=0;
+ if(gps_nv.error){x9_gps_hardware_fault(gps_rt.generation,gps_nv.error);return gps_nv.error;}
+ return e;
 }
 int x9_gps_runtime_queue(uint64_t generation,unsigned ch,const void *p,unsigned n)
 {
@@ -649,8 +659,12 @@ static int gps_runtime_bringup(void)
  gps_runtime_stage(X9_GPS_PHYSICAL_RESET,0); MCU_TRY(gps_mcu_hold_reset());
  gps_runtime_stage(X9_GPS_PHYSICAL_REMAP,0); MCU_TRY(gps_mcu_remap());
  gps_runtime_stage(X9_GPS_PHYSICAL_IMAGE,0);
- MCU_TRY(gps_rt.ops.provision(gps_rt.ops.context,&gps_rt.layout,
-     gps_rt.generation,gps_rt.lease));
+ gps_rt.in_provision=1;
+ int provision=gps_rt.ops.provision(gps_rt.ops.context,&gps_rt.layout,
+     gps_rt.generation,gps_rt.lease);
+ gps_rt.in_provision=0;
+ if(gps_nv.error)return gps_nv.error;
+ if(provision)return provision;
  MCU_TRY(gps_mcu_expect(F_reset,0)); gps_rt.image=1;
  const struct x9_gps_hif_ops ops={gps_runtime_owned,gps_runtime_control,
      gps_runtime_mnl,gps_runtime_ccif,NULL};
@@ -688,6 +702,7 @@ static void gps_runtime_worker(void *unused, wait_result_t result)
  gps_rt.ops=gps_rt.provider;
  lck_mtx_unlock(&gps_runtime_lock);
  int e=gps_runtime_bringup();
+ if(gps_nv.started)gps_nv_journal(e);
  if(gps_rt.ops.version>=5)gps_flow_journal(e);
  /* Never auto-retry, clear descriptors, release power, or unmap uncertain
   * DMA. Even a pre-HIF partial power failure retains the supplier's lease. */

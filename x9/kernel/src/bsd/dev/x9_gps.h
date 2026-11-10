@@ -92,6 +92,12 @@ struct x9_gps_status {
  uint32_t mcusys_last_type,mcusys_last_id,mcusys_last_event,mcusys_scif_tick;
  uint64_t mcusys_frames,mcusys_transitions,mcusys_scif_events;
  int32_t mcusys_errno;
+ /* Native NV initialized only by an explicit cold-authority provider.
+  * No lease/ACK/readiness: dirty/claimed survive uncertain DMA failures. */
+ uint32_t nv_started,nv_prepared,nv_dirty,nv_headers,nv_claimed,nv_remote_mask;
+ uint32_t nv_last_id,nv_last_version,nv_last_size;
+ uint64_t nv_checks,nv_reads,nv_writes,nv_invalidations,nv_contentions,nv_remote_events;
+ int32_t nv_errno;
 };
 struct x9_gps_nmea {
  uint64_t sequence, generation, host_time;

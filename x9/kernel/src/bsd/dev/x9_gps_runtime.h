@@ -55,7 +55,11 @@ struct x9_gps_connv2_ops {
  /* Called with readback-confirmed MCU held reset and qualified remaps.
   * Provision/qualify an actual ROM boot image for this board. Android's
   * zero-length ROM-only load is NOT proof of a usable XNU boot image.
-  * Must not release reset, reenter HIF, or relinquish the resource lease. */
+  * Must not release reset, reenter HIF, or relinquish the resource lease.
+  * May explicitly call x9_gps_nv_prepare() (x9_gps_nv.h) with a REAL cold/
+  * live NV authority verifier. Old registration/acquire contracts alone
+  * do not opt into native NV clearing. No native NV/persistent producer
+  * or default authority verifier is installed. */
  int (*provision)(void *, const struct x9_gps_handoff *, uint64_t generation,
      uint64_t lease);
  /* Complete MCUSYS NV/sync/FSM and MNL handlers. v1..v4 also own slot/flow;

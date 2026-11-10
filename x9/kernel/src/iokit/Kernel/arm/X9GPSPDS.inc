@@ -130,6 +130,12 @@ static bool x9g_send(uint32_t local, uint32_t port, const uint8_t *req, unsigned
         s.mcusys_frames,s.mcusys_state,s.mcusys_seen_events,s.mcusys_transitions,
         s.mcusys_last_type,s.mcusys_last_id,s.mcusys_last_event,
         s.mcusys_scif_events,s.mcusys_scif_tick,s.mcusys_errno);
+   if(s.nv_started)
+    printf("X9 GPS PDS: native NV prepared %u dirty %u headers %x retained-claim %x notifications %llu/%x last id/version/size %u/%u/%u checks %llu read/write/delete %llu/%llu/%llu contention %llu errno %d (not persistent storage, app ACK or receiver readiness)\n",
+        s.nv_prepared,s.nv_dirty,s.nv_headers,s.nv_claimed,
+        s.nv_remote_events,s.nv_remote_mask,s.nv_last_id,s.nv_last_version,
+        s.nv_last_size,s.nv_checks,s.nv_reads,s.nv_writes,s.nv_invalidations,
+        s.nv_contentions,s.nv_errno);
    if(s.pvt_received)
     printf("X9 GPS PDS: native PVT reports %llu no-fix %llu rejected %llu delivered %llu retired %llu mask %x errno %d (not a readiness lease)\n",
         s.pvt_received,s.pvt_no_fix,s.pvt_rejected,s.pvt_delivered,s.pvt_retired,
