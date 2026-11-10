@@ -331,6 +331,8 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 
 - **固定源码/主线整合**：本轮源码 **e24eb540706d8b0e876cc437b60ea394e809e8d4**，单位编译见上述units4/shim2；gh固定commit查询exit0=[]，无CI run ID。main保留并发ADSP handoff及checked API，strict lookup缺节点不当absence；其它麦克风路径原baseline一致。合入使用独立index/commit-tree/CAS，备份合前HEAD/status/binary/index/NOTES，未重建main/出镜像/写设备，编译结果仅指独立固定源码。目标保持active，继续full-drain/native bootstrap/repeat与最终录音链。
 
+- **最终交接定位**：本轮固定代码 **e24eb540706d8b0e876cc437b60ea394e809e8d4**（engine平台v5/native DMA descriptor v2/PLJ binding v2，用户态ABI不变），main安全整合 **7d1ee50a2b8a3bc7a18897b9ac84c44641e88f23**；15个代码路径与本节入库，独立树同一final分支继续，非另一份镜像路线。main五个shim/ADT共享文件保留已提交`3e826fa` ADSP增量，checked符号由严格统一parser提供，原始两侧/desired及并发diff都已保存；其它10路径与固定源码相同。最新直接编译 **units4.exit0 / shim2.exit0**，此前四对象units3与六shim对象shim1均exit0；gh **exit0=[]**，无CI ID。仅源码/交接检查，不二次查已成功产物。无boot.img/全量link/上机/安装/录音验收，下一动作仍full写链drain→bootstrap→合法repeat→最终唯一all镜像，goal active。
+
 ## 麦克风活动交接(MIC-16,2026-11-10): 数字codec逐字段恢复冲突门/未写项跳过与iOS首错位置;整包已编译,真实DMA仍缺
 
 - **隔离/源码缺口**:独立`.local/x9/worktrees/microphone-rollback16` / `work/x9-microphone-rollback16`,冻结main **5ad10df86c49c79e8a4742728f89f68eb04e12ee**,不夹带working/以后main。原`digital-l→board restore→digital_stop`在partial clock初始化失败且尚未写SRC/TX时仍无条件发四项off,随后数字journal逐项盲写old;MIC12最终RW验证只在prepare,不能独自排除晚到的codec mux/clock改动。这是源码可达恢复缺口,**不是已观察PLJ110恢复冲突/声学故障**。对照OPPO mt6681.c ordinary AIFTX/UL SRC disable与本地UniXNU-sheng/HakiOS生命周期;不迁高通DSP地址/时钟或假provider,不改厂商上电/phase/DCC/RC序列。
