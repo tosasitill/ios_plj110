@@ -202,7 +202,7 @@ IPv6/SLAAC、持久/原 modem profile、auth、默认 APN 发现、autoconnect�
 | Start31 / 32 | 各 u8，3GPP / 3GPP2 profile index | 每 SIM QMI RAM 引用，非 MTK CID；只用3GPP APN拨号 |
 | Start35 CallType | u8；扩展入口总是添加；`1f1a8beb0` 的 block 写1=Embedded NAI、0=Tethering NAI | 接受1，作为普通 embedded 呼叫选择元数据；不改已有 ACT201 Internet APN/no-auth。0不支持；不是 IMS/emergency 标记 |
 | Start3e / profiledd | u64 APN type mask | 仅 Internet1；MTK ACT201 的102是 **u32**，经 `getMipcApnTypeId(0)` 也为1；其余 mask 不原样截断/照搬 |
-| profile29 QoS/SigInd | **34 B**：traffic class u8、多个 LE u32/u8 QoS 字段、末尾 signaling u8；原生填 traffic3、priority1、signaling1，其余0 | 不是 bool，也不是 IMS APN 身份。须 APN observer 的 `isImsSupported` 谓词、set3GPPParameters 扩展 bool、carrier `SupportsIMSSignalingIndication=true` 都满足；carrier 缺键默认 false。非零仍拒绝，无可信请求映射 |
+| profile29 QoS/SigInd | **34 B**：traffic class u8、多个 LE u32/u8 QoS 字段、末尾 signaling u8；新wrapper填 traffic3、priority1、signaling1，其余初始0；既有wrapper保留其他字段 | 不是 bool，也不是 IMS APN 身份。须 APN observer 的 `isImsSupported` 谓词、set3GPPParameters 扩展 bool、carrier `SupportsIMSSignalingIndication=true` 都满足；carrier 缺键默认 false，届时不添加29，不是零QoS。非零仍拒绝，无可信请求映射 |
 | profile1f / 36 | 各u8，PCSCF address via PCO / emergency support | 仅尺寸正确的0；非零不转普通 Internet |
 | profile37 / 38 / 39 | OperatorReservedPcoId u16 / MCC u16 / MNC u16+u8；37须 context 提供非零ID；38/39来自 `PcoOptions` | 是协议配置，不是可忽略 RAM 注释；未证明 MTK 下发映射，仍拒绝 |
 | profile47 PcoContainerIds | 固定 **20 B**，10个u16槽；容器列表非空且 PcoMcc/PcoMnc 均非零才追加38/39/47，超过10个截到10个 | 不把整个 QMI TLV 塞进 MTK profile-v2；未知映射仍拒绝 |
@@ -242,12 +242,12 @@ preferences；country domain、配置装载合并与实际 c7 参数仍须现场
 
 | TLV | 已加载 RIL 普通分支 | 当前适配层 | 含义与修复边界 |
 |---|---|---|---|
-| 108 `IPV4V6_FALLBACK` | `2b8764..876c` 写 **0x7f** | **0=DISABLE** | 保存P77中7f→INT_MAX→每SIM策略；init为IPv4-first，但AT EGFB可覆盖，普通APN缓存路径还会清request+a4为0。改wire7f不保证使用每SIM初值；最终family仍未证明 |
+| 108 `IPV4V6_FALLBACK` | `2b8764..876c` 写 **0x7f** | **0=DISABLE** | 原始MDDB enum已绑定0/DISABLE、1/IPV4_FIRST、2/IPV6_FIRST、7f/MAX；receiver的u8转内部0/2/3或INT_MAX。7f继承每SIM策略，不是无条件IPv4-first；EGFB可覆盖、旧省参缓存还会清request+a4。最终family/partial结果未证明 |
 | 10a `REUSE_FLAG` | 普通分支 `2b8830..8840` 写 **0=DEFAULT**；APN type2/100 特殊分支写3 | **2=NOT_REUSE** | 0允许默认复用，3为特殊REUSE_ONLY；**2既不能排除原省参缓存复用，也不保证补齐参数后fresh**。当前代码按fresh管理返回CID，但该假设尚不成立；须先补所有权资格，不能直接改0或据ACT成功自动DEACT |
 
 以上差分不是189失败原因的实跑证据：189没有 Start20/ACT201。当前保持 fallback0、NOT_REUSE2，
 也不增加未知 QoS/PCO TLV。要改复用必须先有实际 existing-call 身份、所有权和 GET/EIF 资格，
-避免清理非本次创建的 PDN；要改 fallback 必须确认 MD 的0x7f策略及对应 family/partial-success处理。
+避免清理非本次创建的 PDN；fallback哨兵策略已静态定界，修改前仍须确认当前每SIM值及对应 family/partial-success处理。
 
 **MD消费端补充（静态，不替代实跑）**：原始`modem_a.img`内置`md1_dbginfo`解出146850条
 符号，版本为`MOLY.NR17.R2.MP2.TC16.PR3.SP.V2.P77`。`mipc_data_act_call_req`→
@@ -311,6 +311,29 @@ PDPType3的原生forceDual路径是明确要求modem IPv4v6，并非“dual-capa
 ACT103/u8的RIL/MD/D2CM协议3转换静态链已追通，但dual/partial-family settings与SLAAC
 仍缺闭环；typed候选尚未主线整合，当前主线PDP3→固定ACT1仍是未解决的下发缺口。
 QoS/PCO非零、AlwaysOnPdu4e也仍须真实无线消费者和请求转换，不算联网完成。
+
+**2026-11-11合并与生命周期审核补充**：Device Overlay的matcher/逐文件merge实际来自
+CarrierBundleUtilities。model token精确匹配、同score unique insert保留先遇文件；目录数组
+经push_front反转，匹配输出再降score，逐文件后项覆盖叶值，不能称高score最终优先或字母排序。
+其local merger `1ef8312c8` 没有 `_Exclude` 指令处理；生成device字典再经
+`1005250c8..d4` 的base/device **CC `100b58cac`** 合并，后者才处理 `_Exclude`。
+二者都有dict递归/array整体替换，但不能混用特殊规则；MVNO和189有效文件仍未确认。
+
+PCO已从TCM PIC追到生成与SIB/PAM输入：PIC79只贡献IPv4 DNS仲裁默认，最终仲裁0xa才生成
+IDd/len0；SAT长报文分支会清PCOcount和AlwaysOnpresent。VGSM/smic EPCO生成已追到80头、
+ID大端/u8len/content及MCD25e5的present/len/content输入；global optionalIE mask还可删除。
+MCD25e5原始bytecode及IF/MAXBYTES已核到IEI7b＋大端16bit长度＋smic内容的静态格式。
+实际pack输出/ACT具体事件/PAM消费、QMI选项转换和网络接受仍未闭合，不提供Options encoder，不拿中间缓存/生成成功冒充真实下发。
+
+WDS正常状态机另冻结36条转移/11项发现：解绑前last_call快照及解绑后completion计数抑制
+仍漏最终统计，204/4202也不能代替TX quiescent或RX/channel release，DDS只查b.used不够。
+被拒owner候选未发布两个sameCID LIVE holder；已确认的无限Stop路径是另一uncertain操作
+永久挡全局mutation guard，不把它描述成两个已发布holder的实跑死锁。
+独立持续资格候选新增transport birth/card/DDS/client双门，单位编译exit0/33 warnings，
+**未合入、generic201/203仍封，claim不是lease、ACT0/owned仍未资格化**。
+当前证据/候选在 `.local/x9/work/cell-chain-review-20261111/`、
+`cell-chain-protocol-20261110/`、`cell-chain-modem-options-20261110/`、
+`cell-chain-state-review-20261110/`；最终验收仍以下节真实联网/重连/双卡为准。
 
 ### 5. iOS 网络最终验证
 
