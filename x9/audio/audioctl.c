@@ -9,6 +9,7 @@
 #include <signal.h>
 #include "../kernel/src/bsd/dev/x9_audio.h"
 #include "../kernel/src/bsd/dev/x9_tfa98xx.h"
+#include "../kernel/src/bsd/dev/x9_speaker_afe.h"
 static volatile sig_atomic_t interrupted;
 static void on_signal(int n) { (void)n; interrupted = 1; }
 static int status(io_connect_t c, X9AudioControl *s) {
@@ -46,16 +47,42 @@ static int dsp_status(io_connect_t c) {
 static int board_status(io_connect_t c) {
     X9AudioBoardStatus s = {0}; size_t n = sizeof(s);
     kern_return_t r = IOConnectCallStructMethod(c, X9AudioBoardStatusSelector, NULL, 0, &s, &n);
-    if (r || n != sizeof(s) || s.version != 1) { fprintf(stderr,"board status/ABI failed: 0x%x\n",r); return 1; }
-    printf("ADSP board flags=0x%x errno=%u restore=%u owned=0x%x AP=0x%x all=0x%x done=0x%x busy=0x%x\n"
+    if (r || n != sizeof(s) || s.version != X9_AUDIO_BOARD_STATUS_VERSION) { fprintf(stderr,"board status/ABI failed: 0x%x\n",r); return 1; }
+    printf("ADSP board flags=0x%x errno=%u restore=%u rollback=%u registers-valid=%u owned=0x%x AP=0x%x all=0x%x done=0x%x busy=0x%x\n"
            "  pending=0x%x sleep=0x%x DPSW=%x/%x vlogic=%x sram=%x\n"
            "  SMC op=%u a0=%llx a1=%llx a2=%llx a3=%llx calls=%llu resets=%llu timeouts=%llu\n",
-           s.flags,s.error,s.restore_error,s.owned_vote,s.ap_vote,s.all_vote,s.pd_done,s.pd_busy,
+           s.flags,s.error,s.restore_error,s.rollback_error,!!(s.flags&X9BoardRegistersValid),
+           s.owned_vote,s.ap_vote,s.all_vote,s.pd_done,s.pd_busy,
            s.pending,s.sleep,s.dpsw_req,s.dpsw_ack,s.vlogic_ack,s.sram_ack,s.smc_op,
            (unsigned long long)s.smc_result[0],(unsigned long long)s.smc_result[1],
            (unsigned long long)s.smc_result[2],(unsigned long long)s.smc_result[3],
            (unsigned long long)s.smc_calls,(unsigned long long)s.resets,(unsigned long long)s.timeouts);
     puts("Cached snapshot only. Owned AO may remain pinned; no PA unmute or speaker-ready implied.");
+    return 0;
+}
+static int afe_status(io_connect_t c) {
+    struct x9_speaker_afe_status s = {0}; size_t n = sizeof(s);
+    kern_return_t r = IOConnectCallStructMethod(c, X9AudioAFEStatusSelector, NULL, 0, &s, &n);
+    if (r || n != sizeof(s) || s.version != X9_SPEAKER_AFE_STATUS_VERSION) {
+        fprintf(stderr,"AFE status/ABI failed: 0x%x\n",r); return 1;
+    }
+    printf("AFE registered=%u leased=%u prepared=%u running=%u poisoned=%u errno=%u restore=%u\n"
+           "  dirty=0x%x uncertain=0x%x partial-copy=%u mute=%u disable=%u quiesce=%u\n"
+           "  played=%llu submitted=%llu cursor=%u cached-DL24=%x cached-OUT4=%x\n"
+           "  low-water-stops=%llu late-polls=%llu\n",
+           s.registered,s.leased,s.prepared,s.running,s.poisoned,s.error,s.restore_error,
+           s.dirty_mask,s.uncertain_mask,s.copy_pending,s.mute_error,s.disable_error,s.quiesce_error,
+           (unsigned long long)s.played,(unsigned long long)s.submitted,s.cursor,s.dl24,s.out4,
+           (unsigned long long)s.low_water_stops,(unsigned long long)s.late_polls);
+    puts("Cached only; absent provider is expected. Watchdog scheduling is not a hardware no-replay guarantee.");
+    return 0;
+}
+static int stream_status(io_connect_t c) {
+    X9AudioStreamStatus s = {0}; size_t n = sizeof(s);
+    kern_return_t r = IOConnectCallStructMethod(c, X9AudioStreamStatusSelector, NULL, 0, &s, &n);
+    if (r || n != sizeof(s) || s.version != 1) { fprintf(stderr,"stream status/ABI failed: 0x%x\n",r); return 1; }
+    printf("Physical backend lease=%u last-stop-errno=%u (Running=0 alone does not prove DMA/PA stopped)\n",
+           s.backend_held,s.stop_error);
     return 0;
 }
 static int inspect_container(const char *path,const char *profile) {
@@ -134,16 +161,19 @@ int main(int argc, char **argv) {
     int booting = argc == 2 && !strcmp(argv[1], "dsp-boot");
     int stopping = argc == 2 && !strcmp(argv[1], "dsp-stop");
     int board = argc == 2 && !strcmp(argv[1], "board-status");
+    int afe = argc == 2 && !strcmp(argv[1], "afe-status");
+    int stream = argc == 2 && !strcmp(argv[1], "stream-status");
+    int stream_stop = argc == 2 && !strcmp(argv[1], "stream-stop");
     int playing = argc == 3 && !strcmp(argv[1], "play");
     int dsp = argc == 2 && !strcmp(argv[1], "dsp-status");
-    if (!playing && !dsp && !board && !booting && !stopping && !(argc == 2 && !strcmp(argv[1], "status"))) {
-        fprintf(stderr, "usage: audioctl status | dsp-status | board-status | dsp-boot | dsp-stop |\n  play <S16LE stereo 48000Hz raw PCM> | amp-inspect <local.cnt> <exact-profile>\n"); return 2;
+    if (!playing && !dsp && !board && !afe && !stream && !stream_stop && !booting && !stopping && !(argc == 2 && !strcmp(argv[1], "status"))) {
+        fprintf(stderr, "usage: audioctl status | stream-status | stream-stop | afe-status | dsp-status | board-status | dsp-boot | dsp-stop |\n  play <S16LE stereo 48000Hz raw PCM> | amp-inspect <local.cnt> <exact-profile>\n"); return 2;
     }
     FILE *f = playing ? fopen(argv[2], "rb") : NULL;
     if (playing && !f) { perror(argv[2]); return 1; }
     io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching(X9_AUDIO_CLASS));
-    if (!service) { fprintf(stderr, "X9Audio absent (requires x9_audio=1)\n"); if (f) fclose(f); return 1; }
-    io_connect_t c = 0; kern_return_t r = IOServiceOpen(service, mach_task_self(), (booting || stopping) ? 2 : playing ? 1 : 0, &c);
+    if (!service) { fprintf(stderr, "X9Audio absent (requires x9_audio=1 or 2)\n"); if (f) fclose(f); return 1; }
+    io_connect_t c = 0; kern_return_t r = IOServiceOpen(service, mach_task_self(), (booting || stopping || stream_stop) ? 2 : playing ? 1 : 0, &c);
     IOObjectRelease(service);
     if (r) { fprintf(stderr, "open failed: 0x%x\n", r); if (f) fclose(f); return 1; }
     X9AudioControl s; int rc = status(c, &s);
@@ -151,6 +181,13 @@ int main(int argc, char **argv) {
         print_status(&s);
         if (dsp) rc = dsp_status(c);
         if (board) rc = board_status(c);
+        if (afe) rc = afe_status(c);
+        if (stream) rc = stream_status(c);
+        if (stream_stop) {
+            kern_return_t op = call(c, X9AudioStop);
+            if (op) fprintf(stderr,"physical stop still failed: 0x%x; resources retained\n",op);
+            int sr = stream_status(c); rc = op || sr;
+        }
         if (booting || stopping) {
             kern_return_t op=call(c,booting?X9AudioDSPBootSelector:X9AudioDSPStopSelector);
             if(op)fprintf(stderr,"board operation failed: 0x%x; no retry/reset loop\n",op);

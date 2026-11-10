@@ -142,10 +142,12 @@ static int mute_both(const struct x9_tfa_bus *b,struct x9_tfa_status *s)
     int first=0;s->muted=0;
     for(unsigned i=0;i<2;i++) {
         /* Never write unknown silicon even on the failure cleanup path. */
-        if(s->revision[i]!=b->expected_revision[i]){if(!first)first=ENXIO;continue;}
+        if(!(s->revision_verified&(1u<<i)) || s->revision[i]!=b->expected_revision[i]) {
+            if(!first)first=ENXIO;continue;
+        }
         int e=mute_one(b,i);if(!e)s->muted|=1u<<i;else if(!first)first=e;
     }
-    s->mute_error=(uint32_t)first;return first;
+    s->mute_error=(uint32_t)first;if(first)s->poisoned=1;return first;
 }
 int x9_tfa_probe_and_mute(const struct x9_tfa_bus *b,struct x9_tfa_status *s)
 {
@@ -154,6 +156,7 @@ int x9_tfa_probe_and_mute(const struct x9_tfa_bus *b,struct x9_tfa_status *s)
     for(unsigned i=0;i<2;i++) {
         int r=b->read16(b->context,(uint8_t)(0x34+i),3,&s->revision[i]);
         if(!r && s->revision[i]!=b->expected_revision[i])r=ENXIO;
+        if(!r)s->revision_verified|=1u<<i;
         if(r && !first)first=r;
     }
     int muted=mute_both(b,s);e=first?first:muted;s->error=(uint32_t)e;return e;
@@ -182,10 +185,13 @@ static int prefix(const struct x9_tfa_bus *b,const struct image *c,unsigned i,ui
         e=b->allow_patch(b->context,b->expected_revision[i],reg,mask,value);if(e)return e;
         if(apply) {
             uint16_t old,check;e=b->read16(b->context,(uint8_t)(0x34+i),reg,&old);
-            if(!e)e=b->write16(b->context,(uint8_t)(0x34+i),reg,(uint16_t)((old&~mask)|(value&mask)));
+            if(!e) {
+                s->write_attempts[i]++; /* timed-out write may have landed */
+                e=b->write16(b->context,(uint8_t)(0x34+i),reg,(uint16_t)((old&~mask)|(value&mask)));
+            }
             if(!e)e=b->read16(b->context,(uint8_t)(0x34+i),reg,&check);
             if(!e && (check&mask)!=(value&mask))e=EIO;
-            if(e)return e;s->applied[i]++;
+            if(e){s->poisoned=1;return e;}s->applied[i]++;
         }
     }
     return 0;

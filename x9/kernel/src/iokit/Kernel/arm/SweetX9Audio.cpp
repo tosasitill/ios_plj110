@@ -14,6 +14,7 @@
 #include "../../../bsd/dev/x9_audio.h"
 #include "../../../bsd/dev/x9_adsp_transport.h"
 #include "../../../bsd/dev/x9_adsp_mt6993.h"
+#include "../../../bsd/dev/x9_speaker_afe.h"
 #if defined(ARM64_BOARD_CONFIG_SWEET)
 extern "C" int sweet_early_is_x9(void);
 extern "C" int sweet_x9_arg(const char *, int);
@@ -25,16 +26,25 @@ static X9AudioProducer *producer;
 static int16_t *output;
 static x9_audio_backend backend;
 static bool haveBackend, haveWorker;
+static bool backendHeld;
+static int stopError;
 static int16_t period[X9_AUDIO_PERIOD * X9_AUDIO_CHANNELS];
 static void beginUpdate() { __atomic_add_fetch(&control->seq, 1, __ATOMIC_SEQ_CST); }
 static void endUpdate() { __atomic_add_fetch(&control->seq, 1, __ATOMIC_SEQ_CST); }
-static void stopState(X9AudioControl *s, int error)
+static int stopState(X9AudioControl *s, int error)
 {
     int stopped = 0;
-    if (s->state & X9AudioRunning) { stopped = backend.stop(backend.context); s->stops++; }
+    /* Keep ownership independent of UI Running. A failed stop must still be
+     * called on explicit Stop/close; it cannot become a successful no-op. */
+    if (backendHeld) {
+        stopped = backend.stop(backend.context); s->stops++; stopError = stopped;
+        if (!stopped) backendHeld = false;
+    }
     s->state &= ~X9AudioRunning;
-    s->error = error ? error : stopped;
+    if (error) s->error = error;
+    else if (!s->error) s->error = stopped;
     if (s->error) s->state = X9AudioFault;
+    return stopped;
 }
 /* Do not leave seq odd across mailbox/DMA operations: the realtime HAL must
  * never wait for a physical driver. Only the bounded publication is bracketed. */
@@ -211,6 +221,12 @@ bool X9AudioUserClient::start(IOService *p)
         if (!p->open(this)) return false;
         exclusive = true;
         lck_mtx_lock(&audioLock);
+        if (backendHeld) {
+            /* A root control-only session may finish a retained stop, but it
+             * must neither replace old pages nor reopen PCM for a new writer. */
+            if (boardController) { lck_mtx_unlock(&audioLock); return true; }
+            lck_mtx_unlock(&audioLock); p->close(this); exclusive = false; return false;
+        }
         /* New session gets new writable pages. Explicitly closing a connection
          * without unmapping cannot let an old writer corrupt its successor. */
         IOBufferMemoryDescriptor *newProducer = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
@@ -245,7 +261,7 @@ IOReturn X9AudioUserClient::clientMemoryForType(UInt32 type, IOOptionBits *optio
 {
     if (!out || !options || type > X9AudioOutputMemory) return kIOReturnBadArgument;
     *out = nullptr;
-    if (isInactive() || !exclusive) return kIOReturnNotPermitted;
+    if (isInactive() || !exclusive || boardController) return kIOReturnNotPermitted;
     *options = type == X9AudioControlMemory ? kIOMapReadOnly : 0;
     lck_mtx_lock(&audioLock); memory[type]->retain(); *out = memory[type]; lck_mtx_unlock(&audioLock);
     return kIOReturnSuccess;
@@ -255,6 +271,22 @@ IOReturn X9AudioUserClient::externalMethod(uint32_t sel, IOExternalMethodArgumen
 {
     (void)dispatch; (void)target; (void)reference;
     if (!a || isInactive() || !control) return kIOReturnNotReady;
+    if (sel == X9AudioAFEStatusSelector || sel == X9AudioStreamStatusSelector) {
+        size_t size = sel == X9AudioAFEStatusSelector ? sizeof(struct x9_speaker_afe_status) : sizeof(X9AudioStreamStatus);
+        if (a->structureInputDescriptor || a->structureOutputDescriptor || a->asyncWakePort ||
+            a->scalarInputCount || a->scalarOutputCount || a->structureInputSize ||
+            !a->structureOutput || a->structureOutputSize < size) return kIOReturnBadArgument;
+        if (sel == X9AudioAFEStatusSelector) {
+            struct x9_speaker_afe_status s; int e = x9_speaker_afe_status(&s);
+            if (e) return result(e);
+            memcpy(a->structureOutput, &s, sizeof(s));
+        } else {
+            lck_mtx_lock(&audioLock);
+            X9AudioStreamStatus s = {1, backendHeld ? 1u : 0u, (uint32_t)stopError, 0};
+            memcpy(a->structureOutput, &s, sizeof(s)); lck_mtx_unlock(&audioLock);
+        }
+        a->structureOutputSize = (uint32_t)size; return kIOReturnSuccess;
+    }
     if (sel == X9AudioBoardStatusSelector) {
         if (a->structureInputDescriptor || a->structureOutputDescriptor || a->asyncWakePort ||
             a->scalarInputCount || a->scalarOutputCount || a->structureInputSize ||
@@ -297,24 +329,26 @@ IOReturn X9AudioUserClient::externalMethod(uint32_t sel, IOExternalMethodArgumen
     if (a->structureOutputSize) return kIOReturnBadArgument;
     if (sel != X9AudioStart && sel != X9AudioStop) return kIOReturnUnsupported;
     if (!exclusive) return kIOReturnNotPrivileged;
+    if (sel == X9AudioStart && boardController) return kIOReturnNotPermitted;
     lck_mtx_lock(&audioLock); X9AudioControl s = *control;
     int e = 0;
-    if (sel == X9AudioStop) { stopState(&s, 0); e = s.error; }
+    if (sel == X9AudioStop) { e = stopState(&s, 0); }
     else if (s.state & X9AudioRunning) { /* idempotent Start */ }
     else if (!haveBackend || !haveWorker || s.blockers || (s.state & X9AudioFault)) e = ENXIO;
     else {
         bzero(output, X9_AUDIO_RING_BYTES); __atomic_store_n(&producer->written, 0, __ATOMIC_RELEASE);
         uint64_t anchor = 0;
+        backendHeld = true; stopError = 0; /* start failure may own resources */
         e = backend.start(backend.context, &anchor);
         if (!e && !anchor) e = EIO;
-        if (e) { backend.stop(backend.context); s.state = X9AudioFault; }
+        if (e) { stopState(&s, e); s.state = X9AudioFault; }
         else {
             s.generation++; s.out_anchor_host = anchor;
             s.out_frames = s.out_queued = s.underruns = 0;
             s.state = X9AudioReady | X9AudioRunning; s.starts++;
         }
     }
-    if (sel == X9AudioStart) s.error = e;
+    if (sel == X9AudioStart && !(s.state & X9AudioFault)) s.error = e;
     publish(s); lck_mtx_unlock(&audioLock); return result(e);
 }
 #endif

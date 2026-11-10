@@ -43,10 +43,14 @@ static void snapshot(void)
 {
     status.ap_vote=rd(hwv,PD_EN);status.pd_done=rd(hwv,PD_DONE);
     status.all_vote=rd(hwv,PD_ALL);status.pd_busy=rd(hwv,PD_BUSY);
+    status.flags&=~X9BoardRegistersValid;
+    status.pending=status.sleep=status.dpsw_req=status.dpsw_ack=UINT32_MAX;
+    status.vlogic_ack=status.sram_ack=UINT32_MAX;
     if(exclusive && (status.all_vote&CHAIN)==CHAIN && !(status.pd_busy&CHAIN)) {
         status.pending=rd(cfg,0x15c);status.sleep=rd(cfg,0x158);
         status.dpsw_req=rd(cfg,0x590);status.dpsw_ack=rd(cfg,0x594);
         status.vlogic_ack=rd(cfg2,0x50);status.sram_ack=rd(cfg2,0x54);
+        status.flags|=X9BoardRegistersValid;
     }
 }
 /* CCF_XPU(0)=0x20000. DONE/global regs have NO XPU offset. Own a SET
@@ -77,6 +81,7 @@ static int chain_on(void)
 }
 static int chain_off(void)
 {
+    status.rollback_error=0;
     /* Silicon sw_ver is not yet proven. Keep an owned AO vote for the boot
      * lifetime, covering the vendor A0 erratum without guessing chip tags. */
     const uint32_t bits[]={TOP,INFRA};int e=0;
@@ -86,10 +91,10 @@ static int chain_off(void)
         /* Restore accessibility after a partial withdraw. Do not release any
          * remaining resource on error. Both primary and rollback errors live
          * in status. Transport v2 retains this lease for explicit recovery. */
-        int restore=chain_on();status.restore_error=(uint32_t)restore;
+        int restore=chain_on();status.rollback_error=(uint32_t)restore;
         status.owned_vote|=owned & rd(hwv,PD_EN);
     }
-    return e;
+    status.restore_error=(uint32_t)e;return e;
 }
 static int smc(uint32_t op,uint32_t value)
 {
@@ -170,7 +175,8 @@ static int wake_lock(void *unused)
          * old infracfg/IPIC/semaphore protocol or interpret firmware RSV as
          * Linux state enum. Pinned, nonsuspended domain + DPSW off is required.
          * A sleeping/changed domain is a hard error, not fake wake success. */
-        if((status.all_vote&CHAIN)!=CHAIN || (status.pd_busy&CHAIN) ||
+        if(!(status.flags&X9BoardRegistersValid) ||
+           (status.all_vote&CHAIN)!=CHAIN || (status.pd_busy&CHAIN) ||
            (status.dpsw_req&1) || (status.dpsw_ack&1))e=ENXIO;
     }
     if(!e){wake=true;status.flags|=X9BoardWake;}
@@ -204,7 +210,7 @@ int x9_adsp_mt6993_init(void)
                     .core_start=core_start,.wake_lock=wake_lock,.wake_unlock=wake_unlock,
                     .power_held=power_held};
                 e=x9_adsp_register_transport(&p);
-                if(!e){registered=true;status.version=1;status.flags=X9BoardRegistered;}
+                if(!e){registered=true;status.version=X9_AUDIO_BOARD_STATUS_VERSION;status.flags=X9BoardRegistered;}
             }
         }
     }
@@ -221,6 +227,6 @@ int x9_adsp_mt6993_control(uint32_t op)
 int x9_adsp_mt6993_status(X9AudioBoardStatus *s)
 {
     if(!s)return EINVAL;
-    lck_mtx_lock(&board_lock);*s=status;s->version=1;
+    lck_mtx_lock(&board_lock);*s=status;s->version=X9_AUDIO_BOARD_STATUS_VERSION;
     lck_mtx_unlock(&board_lock);return 0; /* cached only: no off-domain reads */
 }

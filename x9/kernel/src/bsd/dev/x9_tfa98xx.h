@@ -29,6 +29,7 @@ struct x9_tfa_bus {
 #define X9_TFA_BUS_REQUIRED 7u /* real I2C/rail/reset lease + fresh reset + trusted patch policy */
 struct x9_tfa_status {
     uint16_t revision[2];uint32_t muted, applied[2], error, mute_error;
+    uint32_t revision_verified, poisoned, write_attempts[2];
 };
 int x9_tfa_probe_and_mute(const struct x9_tfa_bus *,struct x9_tfa_status *);
 int x9_tfa_apply_register_prefix(const struct x9_tfa_bus *,const void *,uint32_t,

@@ -11,7 +11,8 @@
 #define X9_AUDIO_RING 65536u
 #define X9_AUDIO_RING_BYTES (X9_AUDIO_RING * X9_AUDIO_CHANNELS * 2u)
 enum { X9AudioStatus, X9AudioStart, X9AudioStop, X9AudioDSPStatusSelector,
-       X9AudioBoardStatusSelector, X9AudioDSPBootSelector, X9AudioDSPStopSelector };
+       X9AudioBoardStatusSelector, X9AudioDSPBootSelector, X9AudioDSPStopSelector,
+       X9AudioAFEStatusSelector, X9AudioStreamStatusSelector };
 enum { X9AudioControlMemory, X9AudioProducerMemory, X9AudioOutputMemory };
 enum { X9AudioReady = 1u, X9AudioRunning = 2u, X9AudioFault = 4u };
 enum {
@@ -49,13 +50,20 @@ typedef struct {
  * Version separate from PCM ABI. Raw SMC returns and DPSW ack are diagnostics,
  * NOT a firmware revision, physical voltage reading, or speaker-ready bit. */
 enum { X9BoardRegistered=1, X9BoardExclusive=2, X9BoardPowered=4,
-       X9BoardStarted=8, X9BoardWake=16 };
+       X9BoardStarted=8, X9BoardWake=16, X9BoardRegistersValid=32 };
+#define X9_AUDIO_BOARD_STATUS_VERSION 2u
 typedef struct {
     uint32_t version, flags, error, restore_error;
     uint32_t owned_vote, ap_vote, all_vote, pd_done, pd_busy;
     uint32_t pending, sleep, dpsw_req, dpsw_ack, vlogic_ack, sram_ack, smc_op;
     uint64_t smc_result[4], smc_calls, resets, timeouts;
+    uint32_t rollback_error, reserved;
 } X9AudioBoardStatus;
+/* selector 8 preserves PCM ABI v1 while exposing failed stop ownership.
+ * A cleared Running flag is not proof that stop released physical DMA/PA. */
+typedef struct {
+    uint32_t version, backend_held, stop_error, reserved;
+} X9AudioStreamStatus;
 #if defined(KERNEL)
 #ifdef __cplusplus
 extern "C" {

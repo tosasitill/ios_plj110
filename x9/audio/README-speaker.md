@@ -4,6 +4,8 @@
 没有 MT6993 物理 backend 注册者；`Ready=0`，`Start` 返回
 `kIOReturnNotReady`。不访问 off-domain MMIO、不自动起 DSP、不写功放／root，
 没有自动安装 HAL。麦克风是另一套接口，不在此输出设备中虚报输入流。
+PCM ABI 仍为 v1；**board-status 已升级为 v2**，需配套本轮 `audioctl`，旧工具会拒绝
+新版结构。新增 AFE/stream 状态 selector 只返回缓存，不申请硬件资源。
 
 ## 构建
 
@@ -29,6 +31,8 @@
 
 ```sh
 audioctl status
+audioctl stream-status
+audioctl afe-status
 audioctl dsp-status
 audioctl play /var/tmp/stereo-48000-s16le.pcm
 ```
@@ -49,7 +53,9 @@ staging 必须单独确认、走项目 extent 写入流程；本构建器不安�
 | 服务 | `X9Audio`，IOResources 上注册 |
 | open type 0 | 只读 status；不能 start、stop 或映射 PCM |
 | open type 1 | root／指定音频 daemon 的独占 writer |
+| open type 2 | mode2 的 root 控制会话；不能映射 PCM 或 start 播放，可完成失败后保留的 stop |
 | selector 0/1/2 | status / start / stop；拒绝 async、descriptor 和额外参数 |
+| selector 7/8 | cached AFE status v2 / stream lease status v1；只读，不做 MMIO |
 | memory 0 | 只读 kernel control，带 seqlock、generation、真实 played/queued |
 | memory 1 | 可写 producer end-frame，release 发布，kernel 检查窗口 |
 | memory 2 | 65536-frame S16LE stereo PCM 环，256 KiB |
@@ -60,6 +66,13 @@ DMA 并发修改。多 IO context 的混音尚未实现。时基取实际 XNU ti
 时间戳 sample cursor 来自 backend，而不是把墙钟前进冒充硬件播放。
 关闭／进程退出触发 stop；新 writer 获得新可写页，旧 mapping 不能污染下一会话。
 物理回调错误保留 fault，不能在不重新确认硬件状态时返回 ready。
+物理 lease 与 `Running` 独立：start 失败也必须执行 stop；stop 失败继续保留 lease、
+首错和独立 stop errno，不会因为 `Running=0` 把后续 stop 变为假成功。
+旧 writer 退出后，普通新 writer 不能接管该 lease；root 可在 mode2 下显式执行一次
+`audioctl stream-stop` 完成已有资源的 mute/quiesce/restore，不 reset DSP、不播放或解静音。
+Stop 返回0只说明这次资源清理成功，历史 Fault 不自动清除，不能据此重新宣布 Ready。
+HAL 的 StopIO 保留失败状态，后续 StopIO 仍执行必要清理；活动流已经 fault 时，新的
+StartIO client 不会仅因 IO user 计数非零而获得虚假的启动成功。
 
 ## MTK DSP ABI 与物理后端
 
@@ -145,7 +158,9 @@ AP HWCCF 在 `0x1c040000`，SET/CLR/EN 为 `0x20700/704/708`，DONE 为
 transport v2 的 `power_held` 确保回滚失败的资源仍可显式停机／恢复。
 **sw_ver 未确证，自己取得的 AO vote 保留到本次 boot 结束**，不猜 A0 erratum
 已不适用；继承 AO 不撤销。SMC 为 `0xc200052b`，magic 为 `0xad5bad5b`，
-a0..a3 原值和首错／恢复错写入日志和 cached board status；只有零返回被接受。
+a0..a3 原值和首错／撤票错／恢复电源链错分别保存在 cached board status v2；只有零返回被接受。
+`registers-valid=0` 时域内 pending/DPSW/ACK 数据标记为 `UINT32_MAX`，不是旧的正常读数；
+wake 必须有本次有效域内快照，不能以未刷新字段授权访问。
 SMC 本身依赖 secure monitor 返回，AP 不能为一个不返回的 monitor 实现抢占超时。
 
 v3 没有旧 prelock/IPIC 回调。当前不发送 runtime suspend IPI，域持续 pinned；
@@ -157,7 +172,7 @@ wake lease 验证全电源链稳定且 DPSW req/ack bit0 均为0，不把 WFI �
 
 | 文件／入口 | 已实现 | 仍需实际板级提供者 |
 |---|---|---|
-| `x9_speaker_afe.{c,h}` | DL24/OUT4 masked journal、32-bit I2S slots/S16、48k、CONN116/117 DL24 route；prefill 后 DMA start、period copy/cache、稳定 CUR、高低地址/半环歧义检查；mute/disable/quiesce/restore | AUDIO/VLP APLL2、pad/共享资源 lease、DMA bus/EMI/cache、双 PA mute、权威 DMA quiesce |
+| `x9_speaker_afe.{c,h}` | DL24/OUT4 逐字段写入/不确定/恢复 journal、32-bit I2S slots/S16、48k、CONN116/117 DL24 route；prefill 后 DMA start、period copy/cache、稳定 CUR、高低地址/半环歧义检查；独立低水位 watcher、mute/disable/quiesce/restore | AUDIO/VLP APLL2、pad/共享资源 lease、DMA bus/EMI/cache、双 PA mute、权威 DMA quiesce |
 | `x9_tfa98xx.{c,h}` | PM container total-size/CRC、双 I2C 类型（container bus=0）的地址、明确名字的两侧 profile、descriptor 边界；真实 reg03 revision 比对、AMPE=0 且读回；双侧预检白名单 register/bitfield prefix | 实际完整 revision、immutable container、per-revision 白名单、I2C6/reset/rails 互斥；Probus DSP file/patch/校准/boost 未执行 |
 
 AFE start 必须预填至少960帧后才使能 DMA；PA 始终由外部 board 维持 muted。
@@ -168,13 +183,32 @@ ON 清零不是全部 outstanding AXI DMA 已结束的证据，必须有真实 `
 也不与麦克风 VUL1/ADDA 争寄存器。captured DT 的 OUT4 是2ch/sync0/mclk0、
 `etdm-vlp[4]=1`，不能把普通非VLP APLL2 回调充当已接通的板级资源。
 
+AFE register 时才建立 boot-lifetime watcher；空闲时睡眠，运行时每2ms检查真实 CUR。
+剩余已提交PCM低于或等于480帧（10ms），或 AP 观察/硬件进度超过剩余安全预算，
+即停流，保留主错与 mute/disable/quiesce/restore 各阶段错误。**这是软件保护，不是
+硬件不重放保证**：AP 调度超时可能晚于deadline，仍须真实硬件资源与物理静音验收。
+watcher不会 unmute PA，也不会注册 speaker backend。
+未注册、重复 prepare 等 admission 错误不再污染现有状态；实际部分写入只恢复 touched
+字段，已恢复字段不重写。跨环 copy/cache sync 失败保留 `copy_pending`，不能报告
+EAGAIN“没有消费”；失败 stop 的 lease/poison 保留，只有完整 quiesce/restore/release
+后才能进行新的 prepare。
+
 **container 的 `bus` 不是 Linux I2C adapter号**：厂商 `tfaRunStartup` 对
 `dev->bus != 0` 跳过I2C初始化，所以 parser要求bus=0；I2C6由board lease选择，
 不能把DT的adapter6硬塞到container字段。
 
 功放 reset 的 DT phandle `0x25` 已解析为 **MT6661-3 PMIC pinctrl** 的 GPIO10/11，
-不是 AP GPIO10/11。不能直接写 AP GPIO来“解除 reset”。真实 I2C6 gate、
-MT6661-3 reset/rail 控制与芯片 revision 尚未获得；本轮没有在线采集或 PA 写操作。
+不是 AP GPIO10/11。不能直接写 AP GPIO来“解除 reset”。进一步确认的源码/DT资源为：
+MT6661-3 SID3 reset，MT6661-5 SID5 **LNC0_8** 为左 PA 的 `tfa98xx_vdd-supply`，
+二者均由 `spmi-dev-mask=0x55a8` 路由到 **PMIF-P 0x1c018000**。厂商设置VDD为1.8V，
+reset动作是高5ms→低5ms，不能套用麦克风 GPIO9 的低→高使能流程。
+AP I2C6 的 imps gate 是 `0x129d0e00` bit2（CLR +4 / SET +8），SCL/SDA为AP GPIO114/115；
+这些是源码资源定位，不是已获取共享所有权、实测电压、复位极性或芯片 revision。
+本轮没有在线采集、PA写操作或完整板级 I2C/rail/reset provider。
+
+TFA 只有 reg03 **成功读取且完整revision匹配**才设置 `revision_verified`；
+失败回调即便填写了相同值，也不能授权cleanup写该芯片。prefix记录write attempts与
+applied次数，失败写入/读回置poison，后续双侧mute成功不抹掉部分配置的不确定性。
 
 `audioctl` 还可仅离线检查本地 container（不需要 X9Audio 服务、不加载到功放）：
 

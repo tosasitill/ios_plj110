@@ -25,6 +25,7 @@ static atomic_uint gRefs = 1;
 static uint32_t gVolumeBits = 0x3f800000;
 static uint32_t gStreamActive = 1;
 static UInt32 gIoUsers;
+static int gStopFailed;
 static io_connect_t gConnect;
 static X9AudioControl *gControl;
 static X9AudioProducer *gProducer;
@@ -363,10 +364,15 @@ static OSStatus StartIO(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 cl
     pthread_mutex_lock(&gLock);
     OSStatus r = 0;
     if (!gIoUsers) {
-        if (connectService() || call(X9AudioStart)) r = kAudioHardwareNotRunningError;
+        if (gStopFailed || connectService() || call(X9AudioStart)) r = kAudioHardwareNotRunningError;
         else { X9AudioControl s;
-            if (snapshot(&s) || !(s.state & X9AudioRunning)) { call(X9AudioStop); r = kAudioHardwareNotRunningError; }
+            if (snapshot(&s) || !(s.state & X9AudioRunning) || (s.state & X9AudioFault)) {
+                gStopFailed = call(X9AudioStop) != 0; r = kAudioHardwareNotRunningError;
+            }
         }
+    } else {
+        X9AudioControl s;
+        if (snapshot(&s) || !(s.state & X9AudioRunning) || (s.state & X9AudioFault)) r = kAudioHardwareNotRunningError;
     }
     if (!r) gIoUsers++;
     pthread_mutex_unlock(&gLock); return r;
@@ -375,7 +381,9 @@ static OSStatus StopIO(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 cli
     (void)d; (void)client;
     if (o != kDevice) return kAudioHardwareBadObjectError;
     pthread_mutex_lock(&gLock);
-    kern_return_t r = gIoUsers && !--gIoUsers ? call(X9AudioStop) : 0;
+    if (gIoUsers) gIoUsers--;
+    kern_return_t r = !gIoUsers && (gStopFailed || gConnect) ? call(X9AudioStop) : 0;
+    if (!gIoUsers) gStopFailed = r != 0;
     pthread_mutex_unlock(&gLock); return r ? kAudioHardwareUnspecifiedError : 0;
 }
 static OSStatus GetZeroTimeStamp(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 client,
