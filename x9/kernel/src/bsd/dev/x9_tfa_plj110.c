@@ -8,7 +8,9 @@
  * the diagnostic never writes a PA register value. The native suffix can
  * perform validated full-revision AMPE-off and read paired factory shadows
  * through its actual I2C6 child, separately from this probe. Neither is
- * x9_tfa_bus verified=7 or a calibration/profile/playback grant.
+ * x9_tfa_bus verified=7 or a calibration/profile/playback grant. Explicit
+ * native Re25 programming below separately requires actual profile/MTP and
+ * whole-SmartPA exclusion suppliers; no diagnostic invokes it.
  */
 #include <sys/param.h>
 #include <sys/systm.h>

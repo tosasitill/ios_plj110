@@ -30,6 +30,7 @@ x9_pa_native_revision_supported(uint16_t revision)
     }
 }
 #if defined(KERNEL)
+#include "x9_tfa_re25.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -69,6 +70,53 @@ struct x9_pa_re25_snapshot {
 }; /* 48B native observation; no serialized trust/user ABI. */
 int x9_pa_native_re25_read(uint64_t ticket,uint64_t i2c6_lease,
     struct x9_pa_re25_snapshot *);
+enum { X9PARe25Admission=1u,X9PARe25Factory,X9PARe25Set,
+       X9PARe25SetConsumed,X9PARe25Read,X9PARe25Complete };
+#define X9_PA_RE25_PROGRAM_POLICY_VERSION 1u
+struct x9_pa_re25_program_policy {
+    uint32_t version,generation,wire_packing,read_form;
+    uint64_t ticket,i2c6_lease,reset_epoch;
+    struct x9_tfa_re25_limits side_limits; /* Native side0/1, not DSP words. */
+    uint32_t word_side[2],set_selector,read_selector;
+    void *context;
+    /* Mandatory ACTUAL same-epoch factory/profile/PA protection/MTP engine
+     * and whole SET->read-command->GET exclusion of ALL SmartPA writers,
+     * not just the I2C mutex. Prove wire mode/selectors and side->DSP word
+     * mapping; bounds from THIS board/profile authority, no defaults.
+     * Admission has NULL snapshot/reply; Factory onwards has fresh native
+     * snapshot, Complete also has decoded actual GET. Stage is our journal,
+     * NOT acceptance, calibration-done or protected-output proof. Complete
+     * must independently establish the actual result identity and required
+     * DSP calibration/protection state; equality of Q16 alone is inadequate.
+     * Never consume sticky STATUS/IRQ/GetStatusChange as a readonly probe.
+     * Runs under I2C6 mutex: bounded, immutable, no mutation or reentry into
+     * I2C/PA/AFE/clock/transport/status/IPI, no reset/SMC/unmute. Exclusion
+     * continues through faults/physical halt; no default supplier. Borrowed
+     * policy/snapshot/reply pointers are private stack values; never retain
+     * them. The actual context/resource lifetime is caller-owned. */
+    int (*validate)(void *,const struct x9_pa_re25_program_policy *,
+        const struct x9_pa_re25_snapshot *,const struct x9_tfa_re25_pair *,
+        uint32_t stage);
+}; /* 88B private kernel policy, not user-provided authorization. */
+struct x9_pa_re25_program_result {
+    struct x9_pa_re25_snapshot factory;
+    struct x9_tfa_re25_pair requested,observed;
+}; /* 96B observation only, not backend/Ready/unmute authorization. */
+/* Production canonical batch SET -> explicitly framed readonly GetRe25C
+ * exchange -> exact two-word Q16 comparison and independent final supplier.
+ * SAME I2C6 mutex over the whole call pins controller/reset/power parents;
+ * IPI supplier must exclude every other SmartPA writer across SET AND GET.
+ * One attempt per actual READY/reset epoch, no parameter replay/retry, power
+ * changes, status/IRQ reads, automatic release/reset, backend/Ready/unmute.
+ * IPI must already be acquired/registered on this ticket/generation. Failure
+ * retains native error/parents, including after successful SET or GET. Safe
+ * cleanup remains the existing mute/drain/halt/release chain. Policy/output
+ * pinned kernel spans, disjoint virtual/physical bytes, immutable policy.
+ * Caller also keeps output disjoint from its authority context/resources;
+ * this API cannot infer the extent of that opaque external context.
+ * Lock: AFE -> I2C6 -> IPI/transport -> board/AP; suppliers never reverse it. */
+int x9_pa_native_re25_program(const struct x9_pa_re25_program_policy *,
+    struct x9_pa_re25_program_result *);
 #ifdef __cplusplus
 }
 #endif

@@ -1,13 +1,16 @@
 /* Included after x9_i2c6_native.inc in x9_tfa_plj110.c. Use that actual
  * controller/mutex/state, never a fabricated x9_tfa_bus.verified. */
 #include "x9_pa_native.h"
+#include "x9_ipi_dma.h"
 _Static_assert(sizeof(X9AudioPANativeStatus)==64,"native PA cached v1");
 _Static_assert(sizeof(struct x9_pa_re25_snapshot)==48,"native Re25 observation48");
+_Static_assert(sizeof(struct x9_pa_re25_program_policy)==88,"native Re25 policy88");
+_Static_assert(sizeof(struct x9_pa_re25_program_result)==96,"native Re25 result96");
 static struct {
     X9AudioPANativeStatus status;
     uint64_t ticket,lease,epoch;
     uint32_t attempted_identity;
-    bool bound,re25_attempted;
+    bool bound,re25_attempted,re25_program_attempted;
 } np;
 static int np_fault(unsigned side,int e)
 {
@@ -32,7 +35,7 @@ static int np_parent(uint64_t ticket,uint64_t lease,bool create)
         memset(&np.status,0,sizeof(np.status));np.status.version=X9_PA_NATIVE_STATUS_VERSION;
         np.status.generation=ni.policy.generation;np.ticket=ticket;np.lease=lease;
         np.epoch=ni.policy.reset_epoch;np.attempted_identity=0;
-        np.re25_attempted=false;np.bound=true;
+        np.re25_attempted=np.re25_program_attempted=false;np.bound=true;
     } else if(np.epoch!=ni.policy.reset_epoch||np.status.generation!=ni.policy.generation)return ESTALE;
     if(np.status.checks!=UINT64_MAX)np.status.checks++;
     return 0;
@@ -156,23 +159,23 @@ static int np_output_disjoint(const void *out,uint32_t bytes,const void *object,
     }
     return 0;
 }
-static int np_re25_output(const struct x9_pa_re25_snapshot *out)
+static int np_re25_span(const void *out,uint32_t size)
 {
-    if(!out || ((uintptr_t)out&7u) || (uintptr_t)out>UINTPTR_MAX-sizeof(*out) || PAGE_SIZE!=0x4000)return EINVAL;
-    int e=np_output_disjoint(out,sizeof(*out),&np,sizeof(np));
-    if(!e)e=np_output_disjoint(out,sizeof(*out),&ni,sizeof(ni));
-    if(!e)e=np_output_disjoint(out,sizeof(*out),&j,sizeof(j));
-    if(!e)e=np_output_disjoint(out,sizeof(*out),&s,sizeof(s));
-    if(!e)e=np_output_disjoint(out,sizeof(*out),&native_bus_held,sizeof(native_bus_held));
-    if(!e)e=np_output_disjoint(out,sizeof(*out),&i2c6_lock,sizeof(i2c6_lock));
+    if(!out || !size || ((uintptr_t)out&7u) || (uintptr_t)out>UINTPTR_MAX-size || PAGE_SIZE!=0x4000)return EINVAL;
+    int e=np_output_disjoint(out,size,&np,sizeof(np));
+    if(!e)e=np_output_disjoint(out,size,&ni,sizeof(ni));
+    if(!e)e=np_output_disjoint(out,size,&j,sizeof(j));
+    if(!e)e=np_output_disjoint(out,size,&s,sizeof(s));
+    if(!e)e=np_output_disjoint(out,size,&native_bus_held,sizeof(native_bus_held));
+    if(!e)e=np_output_disjoint(out,size,&i2c6_lock,sizeof(i2c6_lock));
     if(e)return e;
     const uint64_t base[]={0x1002c000,0x129d0000,0x16640000,0x12990000,
         0x16410000,0x1c210000,0x1c018000};
     const uint32_t bytes[]={0x4000,0x4000,0x4000,0x20000,0x10000,0x4000,0x4000};
-    for(uint32_t a=0;a<sizeof(*out);) {
+    for(uint32_t a=0;a<size;) {
         addr64_t va=(addr64_t)(uintptr_t)out+a;
         ppnum_t pp=pmap_find_phys(kernel_pmap,va);if(!pp)return EFAULT;
-        uint32_t n=(uint32_t)(PAGE_SIZE-(va&PAGE_MASK));if(n>sizeof(*out)-a)n=(uint32_t)sizeof(*out)-a;
+        uint32_t n=(uint32_t)(PAGE_SIZE-(va&PAGE_MASK));if(n>size-a)n=size-a;
         uint64_t pa=ptoa_64(pp)+(va&PAGE_MASK);
         for(unsigned i=0;i<sizeof(base)/sizeof(base[0]);i++)
             if(np_bytes_overlap(pa,n,base[i],bytes[i]))return EINVAL;
@@ -180,10 +183,10 @@ static int np_re25_output(const struct x9_pa_re25_snapshot *out)
     }
     return 0;
 }
-int x9_pa_native_re25_read(uint64_t ticket,uint64_t lease,struct x9_pa_re25_snapshot *out)
+static int np_re25_read_locked(uint64_t ticket,uint64_t lease,struct x9_pa_re25_snapshot *out)
 {
-    lck_mtx_lock(&i2c6_lock);int e=n_match(ticket,lease);
-    if(!e)e=np_re25_output(out); /* BEFORE any PA read or epoch mutation */
+    int e=n_match(ticket,lease);
+    if(!e)e=np_re25_span(out,sizeof(*out)); /* BEFORE any PA read or epoch mutation */
     if(!e)e=np_parent(ticket,lease,false);
     if(!e && (np.status.error || ni.error || np.status.mute_uncertain ||
        np.status.revision_verified!=3 || np.status.muted!=3 || np.re25_attempted))e=EBUSY;
@@ -218,11 +221,105 @@ int x9_pa_native_re25_read(uint64_t ticket,uint64_t lease,struct x9_pa_re25_snap
         }
         if(!e)side=2; /* Remaining errors concern the whole binding/output. */
         if(!e)e=n_online();if(!e)e=n_idle(false);
-        if(!e)e=np_re25_output(out);
+        if(!e)e=np_re25_span(out,sizeof(*out));
     }
     /* Wrong-ticket/output/preflight rejection does not poison another
      * binding; errors from actual transfers still use n_fault above. */
     if(e && observed)e=np_fault(side,e);
     if(!e)*out=snapshot;
+    return e;
+}
+int x9_pa_native_re25_read(uint64_t ticket,uint64_t lease,struct x9_pa_re25_snapshot *out)
+{
+    lck_mtx_lock(&i2c6_lock);int e=np_re25_read_locked(ticket,lease,out);
+    lck_mtx_unlock(&i2c6_lock);return e;
+}
+static int np_program_validate(const struct x9_pa_re25_program_policy *p,
+    const struct x9_pa_re25_program_result *r,uint32_t stage)
+{
+    int e=np_parent(p->ticket,p->i2c6_lease,false);
+    if(!e && (np.status.error || ni.error || np.status.mute_uncertain ||
+       np.status.revision_verified!=3 || np.status.muted!=3 ||
+       np.epoch!=p->reset_epoch || np.status.generation!=p->generation))e=ESTALE;
+    if(!e)e=n_online();
+    if(!e && r)for(unsigned i=0;!e && i<2;i++) {
+        if(np.status.revision[i]!=r->factory.revision[i])e=ESTALE;
+        else e=np_read_mute(i,true,r->factory.sysctrl[i]);
+        if(e)e=np_fault(i,e);
+    }
+    if(!e)e=p->validate(p->context,p,r?&r->factory:NULL,
+        stage==X9PARe25Complete?&r->observed:NULL,stage);
+    /* The callback is not permitted to mutate these parents or the policy. */
+    if(!e)e=np_parent(p->ticket,p->i2c6_lease,false);
+    if(!e)e=n_online();return e;
+}
+int x9_pa_native_re25_program(const struct x9_pa_re25_program_policy *policy,
+    struct x9_pa_re25_program_result *out)
+{
+    lck_mtx_lock(&i2c6_lock);
+    int e=np_re25_span(policy,sizeof(*policy));
+    if(!e)e=np_re25_span(out,sizeof(*out));
+    if(!e)e=np_output_disjoint(out,sizeof(*out),policy,sizeof(*policy));
+    struct x9_pa_re25_program_policy p={0};
+    if(!e) {
+        p=*policy;
+        if(p.version!=X9_PA_RE25_PROGRAM_POLICY_VERSION || !p.validate ||
+           !p.ticket || !p.i2c6_lease || !p.generation || !p.reset_epoch ||
+           (p.wire_packing!=X9TFABE24 && p.wire_packing!=X9TFALE32) ||
+           (p.read_form!=X9TFARe25Command && p.read_form!=X9TFARe25Batch) ||
+           p.word_side[0]>1 || p.word_side[1]>1 || p.word_side[0]==p.word_side[1] ||
+           p.set_selector>UINT8_MAX || p.read_selector>UINT8_MAX)e=EINVAL;
+    }
+    for(unsigned i=0;!e && i<2;i++)
+        if(!p.side_limits.minimum_mohm[i] ||
+           p.side_limits.minimum_mohm[i]>p.side_limits.maximum_mohm[i] ||
+           p.side_limits.maximum_mohm[i]>65534u)e=ERANGE;
+    if(!e)e=n_match(p.ticket,p.i2c6_lease);
+    if(!e)e=np_parent(p.ticket,p.i2c6_lease,false);
+    if(!e && (np.re25_program_attempted || np.re25_attempted))e=EBUSY;
+    if(!e)e=np_program_validate(&p,NULL,X9PARe25Admission);
+    struct x9_pa_re25_program_result result={0};bool attempted=false;
+    if(!e) {
+        /* BEFORE factory reads or any SET attempt: no replacement object
+         * or successful partial SET can license a second program attempt. */
+        np.re25_program_attempted=true;attempted=true;
+        e=np_re25_read_locked(p.ticket,p.i2c6_lease,&result.factory);
+    }
+    if(!e && (result.factory.generation!=p.generation ||
+       result.factory.reset_epoch!=p.reset_epoch))e=ESTALE;
+    if(!e)e=np_program_validate(&p,&result,X9PARe25Factory);
+    uint32_t mohms[2]={0,0};struct x9_tfa_re25_limits word_limits={0};
+    for(unsigned i=0;!e && i<2;i++) {
+        unsigned side=p.word_side[i];mohms[i]=result.factory.r25c_mohm[side];
+        word_limits.minimum_mohm[i]=p.side_limits.minimum_mohm[side];
+        word_limits.maximum_mohm[i]=p.side_limits.maximum_mohm[side];
+    }
+    uint8_t set[24]={0},read_command[16]={0},reply[8]={0};
+    uint32_t set_bytes=0,read_bytes=0,reply_bytes=0;
+    uint32_t w=p.wire_packing==X9TFABE24?3u:4u;
+    if(!e)e=x9_tfa_re25_encode(mohms,&word_limits,p.wire_packing,X9TFARe25Batch,
+        (uint8_t)p.set_selector,set,sizeof(set),&set_bytes);
+    if(!e)e=x9_tfa_re25_decode(set+3u*w,2u*w,p.wire_packing,&word_limits,&result.requested);
+    if(!e)e=x9_tfa_re25_read_request(p.wire_packing,p.read_form,
+        (uint8_t)p.read_selector,read_command,sizeof(read_command),&read_bytes);
+    if(!e)e=np_program_validate(&p,&result,X9PARe25Set);
+    /* Actual existing SET applies its OWN trusted-parameter/ACK/consume
+     * suppliers. Our host phase/equality never substitute for that proof. */
+    if(!e)e=x9_ipi_dma_set(p.ticket,p.generation,set,set_bytes,p.wire_packing);
+    if(!e)e=np_program_validate(&p,&result,X9PARe25SetConsumed);
+    if(!e)e=np_program_validate(&p,&result,X9PARe25Read);
+    if(!e)e=x9_ipi_dma_exchange(p.ticket,p.generation,read_command,read_bytes,
+        p.read_form==X9TFARe25Command?X9IPIReadWarmWord:X9IPIReadColdBatch,
+        reply,2u*w,&reply_bytes);
+    if(!e && reply_bytes!=2u*w)e=EPROTO;
+    if(!e)e=x9_tfa_re25_decode(reply,reply_bytes,p.wire_packing,&word_limits,&result.observed);
+    for(unsigned i=0;!e && i<2;i++)
+        if(result.requested.q16[i]!=result.observed.q16[i])e=EIO;
+    if(!e)e=np_program_validate(&p,&result,X9PARe25Complete);
+    if(!e)e=np_re25_span(out,sizeof(*out));
+    if(!e)e=np_output_disjoint(out,sizeof(*out),policy,sizeof(*policy));
+    if(e && attempted)e=np_fault(2,e);
+    if(!e)*out=result; /* Whole result published only after independent final proof. */
+    /* No release, reset, sticky read, automatic retry or unmute on any exit. */
     lck_mtx_unlock(&i2c6_lock);return e;
 }

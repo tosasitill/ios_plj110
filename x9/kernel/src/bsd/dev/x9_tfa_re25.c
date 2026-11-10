@@ -87,3 +87,20 @@ int x9_tfa_re25_decode(const void *data,uint32_t bytes,uint32_t packing,
     }
     *out=pair;return 0;
 }
+int x9_tfa_re25_read_request(uint32_t packing,uint32_t form,uint8_t selector,
+    void *dest,uint32_t capacity,uint32_t *written_bytes)
+{
+    uint32_t w=re_word_bytes(packing);
+    if(!w || (form!=X9TFARe25Command && form!=X9TFARe25Batch) ||
+       !re_span(dest,capacity) || !re_span(written_bytes,sizeof(*written_bytes)) ||
+       re_overlap(dest,capacity,written_bytes,sizeof(*written_bytes)))return EINVAL;
+    uint32_t n=(form==X9TFARe25Batch?4u:1u)*w,off=0;
+    if(capacity<n)return ENOSPC;
+    uint8_t *p=dest;
+    if(form==X9TFARe25Batch) {
+        re_put(p,packing,X9_TFA_MULTIMSG_COMMAND);re_put(p+w,packing,1u);off=2u*w;
+    }
+    re_put(p+off,packing,((uint32_t)selector<<16)|0x8185u);
+    if(form==X9TFARe25Batch)re_put(p+off+w,packing,0);
+    *written_bytes=n;return 0;
+}

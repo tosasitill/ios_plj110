@@ -1210,6 +1210,34 @@ alias／长度／capacity失败均不改output/size。
 `audio/build.py` 的实际audioctl源码列表和kernel recipe/link-order均已加入codec，
 但单位编译通过不等于HAL bundle/signing/router或实体扬声器验收。
 
+### 将双侧 factory 值送入 DSP 并配对读取
+
+**生产事务代码已接真实 IPI 入口，但 mandatory factory/profile/MTP 和全 SmartPA
+writer supplier 尚未实现／注册，未执行参数发送，不能授予扬声器 Ready。**
+`x9_pa_native_re25_program(policy, &result)` 不是用户 selector，也不把离线数值
+或 codec 成功当作校准授权。
+
+| 顺序 | 实际调用与约束 |
+|---|---|
+| 准入 | private policy88B：同ticket／I2C6 lease／实际READY generation/reset epoch，明确wire packing、Set/Get selector、read command/batch形态及互异的side→word排列；独立board/profile bounds，无默认值。mandatory validate须证明MTP engine／完整PA保护及整个SET→command→GET、失败后到halt的所有writer排他 |
+| factory | 同I2C6 mutex内调用原生双shadow读取；每实际epoch只允许一次program attempt，standalone读取后不能再program。fresh双revision／SYSCTRL与controller/reset/power资格贯穿后续阶段 |
+| SET | 按明确side→word排列生成canonical SetRe25C batch，进入真实`x9_ipi_dma_set`，保留其trusted parameters／ACK及actual read_idx消费校验；host SetConsumed阶段不代替DSP实际接受或校准完成 |
+| command→GET | 共享GetRe25C codec只生成selector/81/85：显式single-word 3/4B或canonical batch12/16B，不猜cold/warm／selector4或改instance。真实`x9_ipi_dma_exchange`串行read-command SET→actual consume→GET→真实完成supplier；只接exact两个raw reply word |
+| 比较与发布 | 独立bounds／canonical positive signed24 decode后逐word比较requested/observed **Q16**，不是floor-mOhm或容忍范围。mandatory Complete callback仍独立证明回复身份和实际所需校准／保护状态；最终fresh parent/output资格后才发布96B观察result |
+| 错误 | factory/SET/GET之后任何失败保留native首错／attempt及parents；不自动重试参数、撤回索引、释放、reset或unmute。按既有mute→AFE disable/drain→真实halt→IPI/I2C/PA等显式release退休 |
+
+整段持有**I2C6 mutex**，排除自身controller释放／PA操作，并pin reset/power parents。
+SET与exchange各自使用现有IPI mutex，二者之间的全SmartPA写者排他必须由真实
+supplier长期持有，不能仅凭“I2C锁已持有”证明。callback有界、不可变、不反向重入
+I2C/PA/AFE/clock/transport/status/IPI，不保留私有stack policy/snapshot/reply地址。
+observed result不是Ready／unmute token；既有IPI五个supplier仍独立mandatory。
+
+不能用统一“MTPB只读”替代上述真实MTP engine证明：OPPO fieldnames的TFA9873
+MTPB=0x1070，所在0x10还含clear-on-read OCP/OTP/UVP/clock位；TFA9874
+MTPB=0x11c0，所在0x11也有sticky clear-on-read DCDCA。vendor `get_mtpb`
+最终读取整寄存器，不是只读一个无副作用bit。此事务**不新增status/IRQ/MTP busy
+读取或GetStatusChange**；不能为了资格检查擦掉故障证据，也不从缺callback返回0。
+
 ### 解析真实 TFA 参数批消息
 
 `tfa98xx_{device,music,ringtone,voice}.bin` 是另一种输入，**不能交给 PM `.cnt`

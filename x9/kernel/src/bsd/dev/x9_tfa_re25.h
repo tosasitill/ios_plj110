@@ -40,6 +40,13 @@ int x9_tfa_re25_encode(const uint32_t mohms[2],
  * Input and limits immutable/pinned; output disjoint, unchanged on error. */
 int x9_tfa_re25_decode(const void *,uint32_t bytes,uint32_t packing,
     const struct x9_tfa_re25_limits *,struct x9_tfa_re25_pair *);
+/* Explicit family-2 GetRe25C selector/81/85: one command word (3/4B),
+ * or canonical one-word batch (12/16B). No single-device selector4 fallback,
+ * auto instance OR, inferred mode or GET execution. Two-word reply identity
+ * still requires the native exchange's actual suppliers. No alias/output
+ * mutation on error; dest and written_bytes disjoint and pinned. */
+int x9_tfa_re25_read_request(uint32_t packing,uint32_t form,uint8_t selector,
+    void *dest,uint32_t capacity,uint32_t *written_bytes);
 #ifdef __cplusplus
 }
 #endif
