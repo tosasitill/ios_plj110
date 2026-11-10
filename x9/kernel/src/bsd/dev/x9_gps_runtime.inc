@@ -615,16 +615,63 @@ int x9_gps_runtime_queue(uint64_t generation,unsigned ch,const void *p,unsigned 
  packet->length=n; packet->time=mach_absolute_time(); memcpy(packet->bytes,p,n);
  gps_rt.out_count[c]++; return 0;
 }
+static int gps_runtime_mnl_clock(uint64_t generation,struct x9_gps_mnl_clock *clock)
+{
+ int error;
+ if(current_thread()!=gps_rt.worker || !gps_rt.in_callback)return EPERM;
+ if(!generation || generation!=gps_rt.generation || gps_rt.hif.fault)return ESTALE;
+ /* v1 has no native POS schematic authority. v5/v6 stay disabled even
+  * if this path is reached accidentally; do not revive their secure ABI. */
+ if(gps_rt.ops.version<2 || gps_rt.ops.version>4)return ENOTSUP;
+ if(!gps_rt.pos_complete || !gps_rt.hif.prepared || !gps_rt.booted)return ENXIO;
+ error=gps_runtime_owned(NULL,generation,0);
+ if(error)return error;
+ return x9_gps_mnl_clock_profile(gps_rt.ops.pos_clock_schematic,clock);
+}
+static int gps_runtime_mnl_init_clock(uint64_t generation,void *payload,unsigned length)
+{
+ struct x9_gps_mnl_clock clock;
+ uint8_t *p=payload;
+ int error;
+ if(current_thread()!=gps_rt.worker || !gps_rt.in_callback)return EPERM;
+ /* Validate the caller's complete existing init object; never turn an
+  * empty/zero object into a supposedly qualified board configuration. */
+ error=x9_gps_mnl_command_validate(X9_GPS_MNL_INIT_CONFIG,payload,length);
+ if(error)return error;
+ error=gps_runtime_mnl_clock(generation,&clock);if(error)return error;
+ /* The original26M paths change ONLY source after NV import. Do not
+  * destroy a non-nominal calibrated frequency or invent a missing one.
+  * The52M branch's override is explicit in mnld6dc24..6dc3c, not inferred
+  * from the enum. All failure paths precede the first payload mutation. */
+ if(clock.driver_flag!=0x51 && !(p[0x18]|p[0x19]|p[0x1a]|p[0x1b]))return ENXIO;
+ p[0x13]=(uint8_t)clock.receiver_source;
+ if(clock.driver_flag==0x51)
+  for(unsigned i=0;i<4;i++)p[0x18+i]=(uint8_t)(clock.nominal_hz>>(8*i));
+ return 0;
+}
 int x9_gps_runtime_mnl_command(uint64_t generation,uint8_t slot_seq,
     uint32_t command,const void *payload,unsigned length)
 {
+ uint8_t init[X9_MNL_INIT_CONFIG_BYTES];
+ uint8_t frame[X9_MNL_PACKET_MAX+7];
+ unsigned bytes=0,channel=0;
+ int error;
  /* Reject calls outside the owner callback before reading configuration
   * bytes. Do not let QRTR/set_state/IRQ feed the physical outbox directly. */
  if(current_thread()!=gps_rt.worker || !gps_rt.in_callback)return EPERM;
  if(!generation || generation!=gps_rt.generation || gps_rt.hif.fault)return ESTALE;
- uint8_t frame[X9_MNL_PACKET_MAX+7];
- unsigned bytes=0,channel=0;
- int error=x9_gps_mcudl_make_mnl_control(frame,sizeof(frame),slot_seq,
+ if(command==X9_GPS_MNL_INIT_CONFIG && gps_rt.ops.version>=2) {
+  error=x9_gps_mnl_command_validate(command,payload,length);
+  if(error)return error;
+  /* Operate on a private snapshot, never the caller's board/NV object.
+   * Source is intentionally applied AFTER NV, as in mnld6eca4. This
+   * producer is actually called here, not an uninstalled supplier hook. */
+  memcpy(init,payload,sizeof(init));
+  error=gps_runtime_mnl_init_clock(generation,init,sizeof(init));
+  if(error)return error;
+  payload=init;
+ }
+ error=x9_gps_mcudl_make_mnl_control(frame,sizeof(frame),slot_seq,
      command,payload,length,&bytes,&channel);
  if(error)return error;
  /* runtime_queue rechecks the revoked hardware epoch/fault and snapshots

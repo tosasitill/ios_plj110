@@ -198,7 +198,16 @@ int x9_gps_runtime_queue(uint64_t generation, unsigned channel,
  * reserve/refund supplier credit. Native v5/v6 are still unregistrable.
  * generation is the physical epoch. Caller must separately prove the
  * application session, config/NV authority and command order; there is no
- * request matcher here. Success is only a copied local outbox reservation,
+ * request matcher here. INIT on v2..v4 snapshots the caller's136B payload
+ * and applies original post-NV precedence under the current booted lease:
+ * measured POS schematic -> +0x13 source, and52M Hz ONLY on52M CoTMS.
+ * The26M frequency stays unchanged and must be nonzero; it is NOT
+ * validated as calibration here. +0x14/+0x24/+0x3c..4b and all other
+ * fields stay unchanged. Schematic3 is ENOTSUP, not mislabeled26M.
+ * v1 has no such POS contract and retains its caller-owned configuration.
+ * No empty-config builder, guessed drift, driver metadata or NV authority.
+ * The caller's payload is never modified, including on enqueue failure.
+ * Success is only a copied local outbox reservation,
  * not TX completion, OPEN/STOP_DONE, receiver READY or a PDS transition.
  * Inputs may be released after return; on error no outbox entry is added. */
 int x9_gps_runtime_mnl_command(uint64_t generation, uint8_t slot_seq,

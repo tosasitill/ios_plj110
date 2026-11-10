@@ -83,6 +83,23 @@ x9_gps_mnl_receive(struct x9_gps_mnl_stream *s, const void *packet,
 }
 
 int
+x9_gps_mnl_clock_profile(unsigned schematic,struct x9_gps_mnl_clock *output)
+{
+ struct x9_gps_mnl_clock clock;
+ if(!output)return EINVAL;
+ switch(schematic) {
+ case 0:clock.nominal_hz=26000000;clock.driver_flag=0x21;
+  clock.receiver_source=0xfe;break;
+ case 1:clock.nominal_hz=52000000;clock.driver_flag=0x51;
+  clock.receiver_source=0xfe;break;
+ case 2:clock.nominal_hz=26000000;clock.driver_flag=0;
+  clock.receiver_source=0xff;break;
+ default:return ENOTSUP;
+ }
+ *output=clock;return 0;
+}
+
+int
 x9_gps_mnl_command_validate(uint32_t command, const void *payload,
     unsigned length)
 {

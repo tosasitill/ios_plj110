@@ -17,6 +17,12 @@ enum x9_gps_mnl_command {
 };
 #define X9_MNL_INIT_CONFIG_BYTES 136u
 #define X9_MNL_DRIVER_CONFIG_BYTES 216u
+/* Three DIFFERENT representations of the same qualified clock schematic.
+ * driver_flag is the Linux IOCTL11 value, NOT the MNL init+0x13 byte.
+ * This describes configuration only, never a running clock/power lease. */
+struct x9_gps_mnl_clock {
+ uint32_t nominal_hz, driver_flag, receiver_source;
+};
 /* The vendor dispatch rejects a negative signed16 assembled length. */
 #define X9_MNL_MESSAGE_MAX 32767u
 /* Actual MCU event IDs in libmnl's 7055a0 dispatch table. Event0 calls
@@ -77,6 +83,16 @@ int x9_gps_mnl_control_decode(const void *body, unsigned body_bytes,
  * copy an Android process object, synthesize metadata or send an XML file. */
 int x9_gps_mnl_command_validate(uint32_t command, const void *payload,
     unsigned payload_bytes);
+/* Original gps_drv_dl_v062.ko62b0 maps schematic0/1/2 to driver flags
+ * 21/51/00; mnld6db10..6de34 maps those to MNL sourcefe/fe/ff and
+ * nominal26M/52M/26M. This is NOT a calibrated input frequency: mnld
+ * imports AP NV+0 into init+18 before applying this source, and ONLY
+ * driver51 subsequently overwrites init+18 with52M. The26M paths retain
+ * their existing frequency. Schematic3 (52M EXTCXO) is deliberately ENOTSUP:
+ * the original driver's default maps it to26M CoTMS, not its real clock.
+ * No enum-as-Hz/flag-as-source conversion, and no unknown fallback.
+ * Errors leave output untouched. This alone cannot qualify board inputs. */
+int x9_gps_mnl_clock_profile(unsigned schematic, struct x9_gps_mnl_clock *);
 /* Strict event2 BODY -> 105B PDS partial translation, no publication/READY.
  * Qualified fields include degree lat/lon, independent GPS calendar,
  * circular horizontal/vertical uncertainty, speed/speed uncertainty,
