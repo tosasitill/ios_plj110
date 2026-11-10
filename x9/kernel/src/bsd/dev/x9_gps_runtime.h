@@ -205,8 +205,15 @@ int x9_gps_runtime_queue(uint64_t generation, unsigned channel,
  * validated as calibration here. +0x14/+0x24/+0x3c..4b and all other
  * fields stay unchanged. Schematic3 is ENOTSUP, not mislabeled26M.
  * v1 has no such POS contract and retains its caller-owned configuration.
- * No empty-config builder, guessed drift, driver metadata or NV authority.
+ * No empty INIT builder, guessed drift or NV authority.
  * The caller's payload is never modified, including on enqueue failure.
+ * DRIVER3 may instead use NULL/0 on v2..v4: the worker produces the
+ * original MCU's216B default prefix, including its real version/footer.
+ * It omits the1256B host tail, disables Android logfile/HW-suspend/resume
+ * and optional aiding, and requires a current booted/POS/HIF owned lease.
+ * This is the known baseline driver policy, NOT complete board tuning,
+ * calibration, NV authority or permission to bypass INIT/session ordering.
+ * v1 has no native-default contract and rejects NULL/0 for DRIVER3.
  * HOST_TIME7 and BOOT_TIME15 instead require NULL/0 input: this worker
  * generates the real XNU calendar seconds / continuous boot nanoseconds
  * and raw CNTVCT pair immediately before serialization. No caller-made

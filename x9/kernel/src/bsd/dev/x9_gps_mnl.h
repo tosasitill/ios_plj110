@@ -87,7 +87,10 @@ int x9_gps_mnl_control_decode(const void *body, unsigned body_bytes,
  * This does NOT validate the remaining board configuration, calibration,
  * file descriptors, pointers, NV authority, session or receiver readiness.
  * A caller must supply wire bytes from a qualified native producer, NEVER
- * copy an Android process object, synthesize metadata or send an XML file. */
+ * copy an Android process object, use metadata alone to qualify arbitrary
+ * contents or send an XML file. The runtime's NULL/0 DRIVER3 producer
+ * constructs the proved MCU default prefix, without host paths/logging,
+ * calibrated aiding or a guessed INIT136. */
 int x9_gps_mnl_command_validate(uint32_t command, const void *payload,
     unsigned payload_bytes);
 /* Original gps_drv_dl_v062.ko62b0 maps schematic0/1/2 to driver flags

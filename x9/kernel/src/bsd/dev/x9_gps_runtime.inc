@@ -651,6 +651,49 @@ static int gps_runtime_mnl_init_clock(uint64_t generation,void *payload,unsigned
   for(unsigned i=0;i<4;i++)p[0x18+i]=(uint8_t)(clock.nominal_hz>>(8*i));
  return 0;
 }
+static void gps_runtime_config_le(uint8_t *p,unsigned bytes,uint32_t value)
+{
+ for(unsigned i=0;i<bytes;i++)p[i]=(uint8_t)(value>>(8*i));
+}
+static int gps_runtime_mnl_driver_defaults(uint64_t generation,uint8_t *p)
+{
+ int error;
+ if(current_thread()!=gps_rt.worker || !gps_rt.in_callback)return EPERM;
+ if(!generation || generation!=gps_rt.generation || gps_rt.hif.fault)return ESTALE;
+ if(gps_rt.ops.version<2 || gps_rt.ops.version>4)return ENOTSUP;
+ if(!gps_rt.pos_complete || !gps_rt.hif.prepared || !gps_rt.booted)return ENXIO;
+ error=gps_runtime_owned(NULL,generation,0);if(error)return error;
+ /* Original GNSS MCU payload: the pure default factory at
+  * ebe20..ec152 clears the1256B driver, then supplies these prefix fields.
+  * The216B receive branch ecb7c..ecba2 copies to F06BA5D8, and ec4b4
+  * applies the separate136B init. Copy only the proved216B prefix here:
+  * none of the Android path strings starting at driver+d8 belongs on wire.
+  * This is a real config producer, not metadata pasted onto an opaque
+  * zero object. It carries only original defaults, no AP/MD calibration,
+  * sensor/TSX assistance, invented pointers, file descriptors or policies.
+  * Untouched defaults are zero exactly as in that original clear. */
+ bzero(p,X9_MNL_DRIVER_CONFIG_BYTES);
+ gps_runtime_config_le(p+0x1c,4,0x03000000u);
+ gps_runtime_config_le(p+0x20,4,0x20000000u);
+ gps_runtime_config_le(p+0x24,4,7000u);
+ gps_runtime_config_le(p+0x28,2,0x30u);
+ /* The original ec066 copies seven bytes from F0319E04; byte+4d stays
+  * zero. This is the default version text, NOT a pointer into that image. */
+ memcpy(p+0x46,"12_1.01",7);
+ gps_runtime_config_le(p+0xd0,2,210u);
+ gps_runtime_config_le(p+0xd2,2,6u);
+ gps_runtime_config_le(p+0xd4,2,0xaa55u);
+ gps_runtime_config_le(p+0xd6,2,0x0102u);
+ /* Original ebcde/ebce4 sets this default after the common factory.
+  * Do NOT copy ebcea's c0=1: mnld6e7b0..6e7d8 sets c0 from a real
+  * log-path length; MCU ec6b8..ec6d2 treats it as a boolean. Native has
+  * no Android logfile, so leave the original disabled default c0=0.
+  * HW suspend+6d/resume+6e and optional aiding parameters also retain
+  * the factory's disabled values, not an unproved board capability. */
+ p[4]=0x17;
+ return x9_gps_mnl_command_validate(X9_GPS_MNL_DRIVER_CONFIG,p,
+     X9_MNL_DRIVER_CONFIG_BYTES);
+}
 static void gps_runtime_time_le64(uint8_t *p,uint64_t value)
 {
  for(unsigned i=0;i<8;i++)p[i]=(uint8_t)(value>>(8*i));
@@ -696,6 +739,7 @@ int x9_gps_runtime_mnl_command(uint64_t generation,uint8_t slot_seq,
     uint32_t command,const void *payload,unsigned length)
 {
  uint8_t init[X9_MNL_INIT_CONFIG_BYTES];
+ uint8_t driver[X9_MNL_DRIVER_CONFIG_BYTES];
  uint8_t host_time[X9_MNL_BOOT_TIME_BYTES];
  uint8_t frame[X9_MNL_PACKET_MAX+7];
  unsigned bytes=0,channel=0;
@@ -704,6 +748,15 @@ int x9_gps_runtime_mnl_command(uint64_t generation,uint8_t slot_seq,
   * bytes. Do not let QRTR/set_state/IRQ feed the physical outbox directly. */
  if(current_thread()!=gps_rt.worker || !gps_rt.in_callback)return EPERM;
  if(!generation || generation!=gps_rt.generation || gps_rt.hif.fault)return ESTALE;
+ if(command==X9_GPS_MNL_DRIVER_CONFIG && !payload) {
+  if(length)return EINVAL;
+  /* Native default production runs on the same actual command path,
+   * under the current physical lease, not via a new uninstalled supplier.
+   * Caller-provided qualified216B configs still take their original path. */
+  error=gps_runtime_mnl_driver_defaults(generation,driver);
+  if(error)return error;
+  payload=driver;length=sizeof(driver);
+ }
  if(command==X9_GPS_MNL_HOST_TIME || command==X9_GPS_MNL_BOOT_TIME) {
   /* The actual producer executes here; no uninstalled timing supplier,
    * caller placeholders or stale serialized timestamps enter this path. */
