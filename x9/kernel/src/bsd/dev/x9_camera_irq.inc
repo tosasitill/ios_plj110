@@ -10,7 +10,8 @@
  * then normal CMOS/FLUSH/VF. It binds FBC, then enables the actual fixed
  * PHY/MAC/AFIFO path and commits OUTMUX DL. CQ stays off. Core 0100
  * commands then use the same owned AP FIFO and immutable request journal.
- * Close stops only this input-inactive path and TG before receive/GIC,
+ * Close stops the inactive arm, or the same streamed request after its
+ * private actual OFF/DONE/CPU/worker/GIC receipt, before receive/GIC,
  * never declaring frame/RAW/AXI/map retirement.
  * Before source-on it also binds that exact accepted FBC state. The actual
  * SOF/DONE filter records ordinary FBC counters; the worker requires two
@@ -216,6 +217,7 @@ static int cam_irq_credit_guard_locked(uint64_t epoch)
 #include "x9_camera_source.inc"
 #include "x9_camera_irq_fbc.inc"
 #include "x9_camera_stream.inc"
+#include "x9_camera_stream_stop.inc"
 /* Under spin, after actual IAR and only while accepting. Ordinary FIRST/FH
  * reads select exactly the vendor bank. No multi-tag fallback or status sweep. */
 static void cam_irq_sample(unsigned role,struct cam_irq_event *ev)
@@ -582,12 +584,14 @@ static int cam_irq_close_locked(uint64_t epoch)
     if(!cam_irq.prepared)return 0;
     lck_mtx_lock(&camera_irq_lock);
     if(epoch!=cam_irq.epoch||cam_irq.close_attempted){lck_mtx_unlock(&camera_irq_lock);return ESTALE;}
-    /* Retire this inactive receive arm's source enables before GIC masking.
-     * This does NOT revoke credit/finish RAW or authorize dropping mappings.
-     * A partial/foreign/active arm is retained, never fixed by blind disables. */
-    e=cam_source_quiesce_locked(epoch);
+    /* Stop only an inactive arm or the privately qualified streamed request.
+     * OFF/DONE/CPU/worker/GIC is necessary for the latter, not AXI drain.
+     * No credit revocation/map release or repair of uncertain/foreign input. */
+    if(session.stream)e=cam_stream_close_begin_locked(epoch);
+    if(!e)e=cam_source_quiesce_locked(epoch);
     if(!e)e=cam_sv_gate_quiesce_locked(epoch);
     if(!e)e=cam_sv_receive_quiesce_locked(epoch);
+    if(!e && session.stream)e=cam_stream_close_controls_locked(epoch);
     cam_irq.close_attempted=true;
     old=cam_irq_spin_take();cam_irq.accepting=false;owns=cam_irq.owns;
     if(owns)cam_irq_mask_all();cam_irq_spin_drop(old);
@@ -597,7 +601,7 @@ static int cam_irq_close_locked(uint64_t epoch)
         bool pending;
         old=cam_irq_spin_take();pending=cam_irq.busy||cam_irq.count;
         if(!pending){cam_irq_spin_drop(old);break;}
-        if(mach_absolute_time()>=end){cam_irq_spin_drop(old);e=ETIMEDOUT;break;}
+        if(mach_absolute_time()>=end){cam_irq_spin_drop(old);if(!e)e=ETIMEDOUT;break;}
         assert_wait_deadline((event_t)&cam_irq.busy,THREAD_UNINT,end);
         cam_irq_spin_drop(old);thread_block(THREAD_CONTINUE_NULL);
     }

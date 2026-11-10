@@ -176,10 +176,8 @@ static int cam_sv_gate_transition_locked(uint64_t epoch,bool off)
         cam_sv_gate.prior[7]=cam_sv_gate.target[3];cam_sv_gate.target[7]=cam_sv_gate.target[3]&~CAM_SV_GATE_CMOS;
     }
     e=cam_sv_request_guard_locked(epoch,cam_sv.request_slot);if(e)return e;
-    e=cam_irq_credit_guard_locked(epoch);if(e)return e;
-    lck_mtx_lock(&camera_camsv_lock);
-    e=cam_sv.request_slot->state==X9_CAMSV_ARMED?0:ESTALE;
-    lck_mtx_unlock(&camera_camsv_lock);if(e)return e;
+    e=cam_irq_control_guard_locked(epoch,off && session.stream);if(e)return e;
+    e=cam_irq_slot_guard_locked(off && session.stream);if(e)return e;
     nanoseconds_to_absolutetime(10000000,&span);end=mach_absolute_time()+span;
     cam_sv_gate.phase=off?X9_CAM_SV_GATE_STOPPING:X9_CAM_SV_GATE_PENDING;
     for(unsigned step=first;step<last;step++) {
@@ -189,7 +187,7 @@ static int cam_sv_gate_transition_locked(uint64_t epoch,bool off)
         bool complete=false;
         if(mach_absolute_time()>=end){e=ETIMEDOUT;break;}
         e=cam_sv_request_guard_locked(epoch,cam_sv.request_slot);if(e)break;
-        e=cam_irq_credit_guard_locked(epoch);if(e)break;
+        e=cam_irq_control_guard_locked(epoch,off && session.stream);if(e)break;
         if(cam_sv_gate.issued&bit || cam_sv.expected[0][reg]!=cam_sv_gate.prior[step] ||
            cam_sv.expected[1][reg]!=cam_sv_gate.prior[step]){e=ESTALE;break;}
         cam_sv_gate.pending=step;cam_sv_gate.samples=0;
@@ -201,7 +199,7 @@ static int cam_sv_gate_transition_locked(uint64_t epoch,bool off)
             bool match=true;
             if(mach_absolute_time()>=end){e=ETIMEDOUT;break;}
             e=cam_sv_request_guard_locked(epoch,cam_sv.request_slot);if(e)break;
-            e=cam_irq_credit_guard_locked(epoch);if(e)break;
+            e=cam_irq_control_guard_locked(epoch,off && session.stream);if(e)break;
             for(unsigned bank=0;bank<2;bank++) {
                 if(cam_sv.status.gate_after[bank][field]!=next)match=false;
                 else cam_sv_gate.seen[bank]|=bit; /* also records actual no-op observation */
@@ -218,7 +216,7 @@ static int cam_sv_gate_transition_locked(uint64_t epoch,bool off)
     if(!e) {
         cam_sv_gate.phase=off?X9_CAM_SV_GATE_STOPPED:X9_CAM_SV_GATE_ARMED;
         e=cam_sv_request_guard_locked(epoch,cam_sv.request_slot);
-        if(!e)e=cam_irq_credit_guard_locked(epoch);
+        if(!e)e=cam_irq_control_guard_locked(epoch,off && session.stream);
         if(!e && mach_absolute_time()>=end)e=ETIMEDOUT;
     }
     if(e){cam_sv.terminal=true;cam_sv_fault(e);}
@@ -237,7 +235,8 @@ static int cam_sv_gate_quiesce_locked(uint64_t epoch)
 {
     if(cam_sv_gate.phase==X9_CAM_SV_GATE_IDLE)return 0;
     /* An uncertain TG/DB phase cannot be canceled by a blind VF/CMOS off,
-     * a reset or replay. This is the still-input-inactive gate only. */
+     * a reset or replay. A streamed gate also requires the private actual
+     * OFF/DONE/worker/GIC receipt at every transition guard. */
     if(cam_sv_gate.phase!=X9_CAM_SV_GATE_ARMED)return cam_sv.error?cam_sv.error:ESTALE;
     return cam_sv_gate_transition_locked(epoch,true);
 }

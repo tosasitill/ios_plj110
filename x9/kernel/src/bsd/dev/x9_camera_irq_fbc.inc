@@ -128,7 +128,16 @@ static int cam_irq_fbc_live_sample(uint64_t epoch,unsigned bank,vm_offset_t view
         if(bank>=2 || !cam_irq_fbc.bound || epoch!=cam_irq_fbc.epoch || epoch!=cam_irq.epoch ||
            view!=cam_irq.view[bank] || accepted!=cam_irq_fbc.before[bank] ||
            memcmp(r,&cam_irq_fbc.request,sizeof(*r)))e=ESTALE;
-        if(!e)e=cam_irq_power();if(!e)e=cam_irq_config(true);
+        if(!e)e=cam_irq_power();
+        if(!e && cam_irq.close_attempted) {
+            /* The qualified control stop precedes route/priority unwind.
+             * Compare the exact original dirty/uncertain journal here, not
+             * the all-published target after OUR first prior restoration.
+             * No generic close flag or masked line grants this exception. */
+            if(!cam_stream_close_restore_ready())e=ESTALE;
+            if(!e)e=cam_irq_controller_impl(true);
+            if(!e)e=cam_irq_partial_config();
+        } else if(!e)e=cam_irq_config(true);
         if(!e) {
             control=cam_irq_rd(view,0x540);*value=cam_irq_rd(view,0x544);
             e=cam_irq_fbc_note_locked(bank,control,*value);

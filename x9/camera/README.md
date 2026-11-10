@@ -746,7 +746,7 @@ begin 在 accepted FBC bind 后，直接执行一次以下固定正常字段序�
 
 独立 source ledger 为每项保存 immutable prior/target、issued 与每 bank seen；先留 issued，再唯一 masked ordinary RW store，保留其它 controls。每次 receiver/MAC/PHY/OUTMUX 实际采样在下一读之前记目标，目标不能退回 prior；仅当前已发字段允许 exact prior/target 的历史比较跨度，第三值与任何真实回退锁存。非 OUTMUX 字段需两次完整实际 target，DL 先确认 outer 两次，然后**复用现有 `cam_out_commit`**：独立唯一 `+1c`，fresh WCLR-qualified CFG_DONE 与全 inner target，再单 bit W1C 退休，最后两次完整 both-bank target。不写 inner DL/tag/route、不扫历史或重触发。嵌套 commit/ack 的每次 full guard 也检查同一 native request 与 actual input-inactive GIC，callback 不在 spin。10ms 总 deadline 包含嵌套 commit 和最终 guard。
 
-close 在 TG/receive/GIC 之前，限定逆序关闭同一**完整** ARMED path：DL0及其 fresh commit → PHY/AFIFO → MAC lanes → mux，再原 TG stop/receive quiesce。失败的部分 arm、未知 commit、sampled input、自然计数变化或 owner 冲突均保留原 slot/backing/映射/供电，不补 enable/off/reset/RCNT。core 的 `session.stream` 在 `0100=1` **发出前**已记录，任何该 attempt 都禁止这个 inactive close，即使尚无 SOF 服务；它不是 caller drained boolean。source ledger 不修改 PHY cold owned bits，也不授予 credit 取消、RAW/AXI/map 退休或合法 repeat。日志 `X9 CAMERA RX PATH` 记录 epoch/request/sensor/off/phase/issued/pending/errno。
+close 在 TG/receive/GIC 之前，限定逆序关闭同一**完整** ARMED path：DL0及其 fresh commit → PHY/AFIFO → MAC lanes → mux，再原 TG stop/receive quiesce。失败的部分 arm、未知 commit、sampled input、自然计数变化或 owner 冲突均保留原 slot/backing/映射/供电，不补 enable/off/reset/RCNT。core 的 `session.stream` 在 `0100=1` **发出前**已记录，任何该 attempt 都禁止直接套用这个 inactive close，即使尚无 SOF 服务；下面新增的 streamed-stop 分支还要求独立实际 OFF/owned DONE/CPU/worker/GIC receipt，不是 caller drained boolean。source ledger 不修改 PHY cold owned bits，也不授予 credit 取消、RAW/AXI/map 退休或合法 repeat。日志 `X9 CAMERA RX PATH` 记录 epoch/request/sensor/off/phase/issued/pending/errno。
 
 真实 sensor source publication 与 live immutable FBC 观察已按下一节接线，仍必须完成 actual source-on 后 stop、full RAW/AXI/IRQ/worker/map 退休及 repeat、normal NS/prior-preserving SID80、持续 rate/MMQoS、native owner/capture caller 和 iOS 前后实帧预览/照片。现有对象编译不能替代这些，完整链就绪后才构建唯一最终镜像。
 
@@ -759,4 +759,13 @@ close 在 TG/receive/GIC 之前，限定逆序关闭同一**完整** ARMED path�
 
 source ON 真正 issued 后，原单 credit 的 CNT0/WCNT+1 可先于 SOF 服务被观察；没有 source issue 时仍严格原 accepted 值。control guard 和实际 IAR 均在同一 IRQ spin 内读取并立即记录 FBC0/FBC1，避免旧 counter sample 排到新 IAR sample 后造成假回退。所有 native owner/cache/PTE callback 在 spin 外；不更改原 accepted baseline 或 SV expected control。DONE/CPU 必须同时有 source ON ACK 与真实 owned SOF/DONE；计数不能制造 IRQ。CPU slot RETIRED 后继续观察同一 live credit，以便停流资格检查，但不能取消 credit 或授权释放。
 
-0100-off 不确定时 core 不再调用 capture-off/power-off；原45 inactive close 明确拒绝任何 stream attempt，不把 STOPPED/FF 当作该路径的豁免。完整 source-on 后控制停流、全写链退休、normal NS SID80、持续 rate/MMQoS、native provider 注册及前后 iOS 实帧预览/照片继续实现；链完整后才出唯一最终镜像。
+0100-off 不确定时 core 不再调用 capture-off/power-off；原45 inactive close 不因 STOPPED/FF 获得豁免；下面的独立实际 streamed-stop receipt 接通完整已完成请求的控制停流。全写链退休、normal NS SID80、持续 rate/MMQoS、native provider 注册及前后 iOS 实帧预览/照片继续实现；链完整后才出唯一最终镜像。
+
+
+### 停止已经 stream-on 且真实完成的同一请求
+
+**这是实际 source/TG/receive 控制停流，不是 AXI/map drain，仍无 native provider/实机结果。** `cam_irq_close_locked` 对 recorded stream attempt 先调用新 `cam_stream_close_begin_locked`，不得直接使用45 inactive资格。只在原 ON/OFF issued+ACK+target observations、sensor STOPPED、真实 owned SOF/DONE、两bank原单credit WCNT+1/CNT0、原slot CPU RETIRED、worker pin已排空及实际GIC enable/pending/active全0、同一native `.check`/request/mapping/power/config都成立后允许进入。两个fresh AP样本再要求0100=0、0104=0、0005=FF；等待worker和AP共享一个500ms总deadline，等待时释放IRQ mutex，不能拿着worker所需的锁等待它。无SOF/DONE、早停/被取消的未完成slot或外来pending都保留，不清历史制造成功。
+
+实际关闭顺序仍是唯一逆序 source **DL0+fresh CFG_DONE→PHY/AFIFO→MAC lanes→mux**，然后正常 **TG_MODE_OFF→VF0→TG DB down/up→CMOS0**，再原 restricted **DONE/ERR/SOF→IMG0A DMA0**。每一store、嵌套OUTMUX commit/W1C以及目标poll仍核同一独立receipt和实际counter，native callback不在spin，不写inner/RESET/新RCNT、不改变immutable accepted baseline。new receipt的checking不是publication，只有两次fresh观察完成才admitted；partial或首次错误不可重试。cold/on分支仍原credit/ARMED/no-input门，不按off布尔或CPU RETIRED独自放宽。
+
+controls完成后才标 `X9 CAMERA STREAM CONTROLS` 的stopped并继续原GIC/worker关闭；**原issued credit、S1 backing、namespace及所有supplier保留**，`cam_sv_close` 继续拒绝issued credit，不能恢复地址、unmap、撤电或repeat。原close后续worker timeout不覆盖更早的source/control首错。GIC route/priority逆序恢复期间，live FBC只在controls完整receipt后改用原dirty/uncertain精确journal比较，不能因本次已合法恢复第一项prior就用旧all-target门拒绝自己；普通close标志或masked line没有该豁免。下一必须接真正DMA/下游AXI退休并消费原credit，再合法复用和native/iOS实帧闭环；不要把此receipt当全链STOP成功，不制作中间镜像。

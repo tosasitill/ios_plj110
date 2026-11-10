@@ -858,7 +858,8 @@ static int cam_sv_credit_issue_locked(uint64_t epoch,struct x9_camera_camsv_slot
  * Four single ordinary RW stores, NOT CQ/DB/RCNT commands. This
  * does not turn an unqualified DMA lease or GIC topology into native authority.
  * off is a private control action, not a caller-supplied drained assertion:
- * only the same inactive receive arm can be quiesced here. Accepted credit,
+ * only the same inactive arm, or a streamed arm with the private actual
+ * OFF/DONE/CPU/worker/GIC receipt, can be quiesced here. Accepted credit,
  * backing and history are preserved, so this NEVER authorizes RAW reuse,
  * unmap, dependency release or normal producer retirement after a frame. */
 static int cam_sv_receive_transition_locked(uint64_t epoch,bool off)
@@ -872,10 +873,8 @@ static int cam_sv_receive_transition_locked(uint64_t epoch,bool off)
     if(off && !cam_sv_gate_off_ready())return EBUSY;
     if(cam_sv.commit_pending || cam_sv.pending_slot<=CAM_SV_FIELDS)return EBUSY;
     e=cam_sv_request_guard_locked(epoch,cam_sv.request_slot);if(e)return e;
-    e=cam_irq_credit_guard_locked(epoch);if(e)return e;
-    lck_mtx_lock(&camera_camsv_lock);
-    e=cam_sv.request_slot->state==X9_CAMSV_ARMED?0:ESTALE;
-    lck_mtx_unlock(&camera_camsv_lock);if(e)return e;
+    e=cam_irq_control_guard_locked(epoch,off && session.stream);if(e)return e;
+    e=cam_irq_slot_guard_locked(off && session.stream);if(e)return e;
     for(unsigned i=0;i<X9_CAM_SV_RECEIVE_FIELDS;i++) {
         unsigned reg=cam_sv_find(cam_sv_receive_fields[i].offset);
         uint32_t expected=off?cam_sv_receive_fields[i].target:0;
@@ -892,7 +891,7 @@ static int cam_sv_receive_transition_locked(uint64_t epoch,bool off)
         bool complete=false;
         if(mach_absolute_time()>=end){e=ETIMEDOUT;break;}
         e=cam_sv_request_guard_locked(epoch,cam_sv.request_slot);if(e)break;
-        e=cam_irq_credit_guard_locked(epoch);if(e)break;
+        e=cam_irq_control_guard_locked(epoch,off && session.stream);if(e)break;
         if(off) {
             if(cam_sv.receive_off_issued&bit){e=ESTALE;break;}
             cam_sv.receive_off_issued|=bit;
@@ -906,7 +905,7 @@ static int cam_sv_receive_transition_locked(uint64_t epoch,bool off)
             bool match=true;
             if(mach_absolute_time()>=end){e=ETIMEDOUT;break;}
             e=cam_sv_request_guard_locked(epoch,cam_sv.request_slot);if(e)break;
-            e=cam_irq_credit_guard_locked(epoch);if(e)break;
+            e=cam_irq_control_guard_locked(epoch,off && session.stream);if(e)break;
             for(unsigned bank=0;bank<2;bank++)
                 if(cam_sv.status.receive_after[bank][i]!=next)match=false;
             if(mach_absolute_time()>=end){e=ETIMEDOUT;break;}
@@ -920,7 +919,7 @@ static int cam_sv_receive_transition_locked(uint64_t epoch,bool off)
     if(!e) {
         cam_sv.receive_phase=off?X9_CAM_SV_RECEIVE_QUIESCENT:X9_CAM_SV_RECEIVE_ARMED;
         e=cam_sv_request_guard_locked(epoch,cam_sv.request_slot);
-        if(!e)e=cam_irq_credit_guard_locked(epoch);
+        if(!e)e=cam_irq_control_guard_locked(epoch,off && session.stream);
         if(!e && mach_absolute_time()>=end)e=ETIMEDOUT;
     }
     if(e){cam_sv.terminal=true;cam_sv_fault(e);}

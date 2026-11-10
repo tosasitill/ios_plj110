@@ -1,7 +1,8 @@
 /* ISP8s PHY3.0 normal receive path, NOT sensor stream publication.
  * csirx_mac_top_setting -> mac_csi_setting -> dphy/cphy_setting;
  * route::outmux_switch_config writes DL before trigger_cfg_done.
- * Sole control + IRQ mutex owner, input still inactive throughout. This
+ * Sole control + IRQ mutex owner. Arm requires input inactive; stop after
+ * a stream additionally needs the private owned OFF/DONE/worker receipt. This
  * ledger is separate from cold MAC/PHY writers and never grants native
  * SID80/rate authority, frame completion or RAW/AXI/map retirement.
  * No inner route writes, FLUSH_FLAG_CLEAR, reset or command replay.
@@ -108,7 +109,7 @@ static uint32_t cam_source_busy_exemption(vm_offset_t view,unsigned offset)
 }
 /* OUTMUX's existing engine can poll/ack between source-loop callbacks.
  * Fence its every full guard (including before CFG_DONE and W1C) with the
- * same native request and actual input-inactive GIC evidence. Deliberately
+ * same native request and cold GIC or actual streamed-stop receipt. Deliberately
  * no SV/OUTMUX recursion and no callback under spin. Cold commits unchanged. */
 static int cam_source_commit_guard(void)
 {
@@ -117,9 +118,9 @@ static int cam_source_commit_guard(void)
     if(!cam_source.captured || p>=2*cam_source.count ||
        cam_source.field[cam_source.step[p].field].kind!=CAM_SOURCE_OUT)return 0;
     if(cam_source.error)return cam_source.error;
-    if(session.stream || cam_source.epoch!=cam_irq.epoch)return cam_source_fault(ESTALE);
+    if(cam_source.epoch!=cam_irq.epoch)return cam_source_fault(ESTALE);
     e=cam_sv_request_authority();
-    if(!e)e=cam_irq_credit_guard_locked(cam_source.epoch);
+    if(!e)e=cam_irq_control_guard_locked(cam_source.epoch,session.stream);
     return e?cam_source_fault(e):0;
 }
 static int cam_source_add(unsigned kind,unsigned bank,unsigned offset,uint32_t mask,uint32_t value)
@@ -212,14 +213,12 @@ static int cam_source_guard_locked(uint64_t epoch)
 {
     int e;
     if(!cam_source.captured || cam_source.epoch!=epoch || cam_source.error ||
-       cam_sensor_live.epoch!=epoch || session.stream ||
+       cam_sensor_live.epoch!=epoch ||
        cam_sv_gate.phase!=X9_CAM_SV_GATE_ARMED || cam_sv_gate.error ||
        cam_sv.receive_phase!=X9_CAM_SV_RECEIVE_ARMED)return cam_source.error?cam_source.error:ESTALE;
     e=cam_sv_request_guard_locked(epoch,cam_irq.slot);if(e)return e;
-    e=cam_irq_credit_guard_locked(epoch);if(e)return e;
-    lck_mtx_lock(&camera_camsv_lock);
-    e=cam_irq.slot->state==X9_CAMSV_ARMED?0:ESTALE;
-    lck_mtx_unlock(&camera_camsv_lock);return e;
+    e=cam_irq_control_guard_locked(epoch,session.stream);if(e)return e;
+    return cam_irq_slot_guard_locked(session.stream);
 }
 static int cam_source_wait_locked(uint64_t epoch,uint64_t end,bool outer_only)
 {
@@ -300,12 +299,16 @@ static int cam_source_quiesce_locked(uint64_t epoch)
     if(!cam_source.captured)return 0;
     if(cam_source.epoch!=epoch)return ESTALE;
     if(cam_source.error)return cam_source.error;
-    if(session.stream)return EBUSY;
+    if(session.stream) {
+        int e=cam_stream_close_guard_locked(epoch);if(e)return e;
+    }
     if(cam_source.phase==CAM_SOURCE_IDLE || cam_source.phase==CAM_SOURCE_STOPPED)return 0;
     /* Core sets session.stream BEFORE issuing 0100=1 and keeps it through
      * stop/drain uncertainty. Refuse even if no SOF has yet been serviced.
-     * A partial arm, sampled input, changed counter or unknown commit
-     * cannot be canceled by a reverse write. No source-on path uses this. */
+     * A partial arm, unqualified input/counter or unknown commit cannot be
+     * canceled by a reverse write. A streamed request additionally
+     * needs the private actual OFF/owned DONE/worker/GIC stop receipt;
+     * session.stream or a sensor OFF bit alone never grants this branch. */
     if(cam_source.phase!=CAM_SOURCE_ARMED)return ESTALE;
     return cam_source_transition_locked(epoch,true);
 }
