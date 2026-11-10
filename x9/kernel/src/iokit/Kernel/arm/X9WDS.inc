@@ -4,7 +4,7 @@
  * -> GET_CALL205 + actual EIF4302/IFUP -> bind.
  * Native decodeDataCallProfile reads ID100 separately from IF125;
  * ccci_dpmaif_com writes channel_id=ccmni_idx. Never use CID-1 as a route.
- * Explicit or network-default APN, IPv4, no-auth only; no profiles/IMS/IPv6 SLAAC translation.
+ * Explicit, RAM-profile or network-default APN, IPv4, no-auth only; no IMS/IPv6 SLAAC translation.
  * Old MIPC headers differ from this RIL at tags128..12b: TRANS_ID is NOT a
  * subnet mask. Missing gateway/netmask is omitted, not invented. APN/IP stays
  * in RAM, never diagnostics. Sent activation survives host timeout/DEL_CLIENT
@@ -133,6 +133,7 @@ static bool x9w_apn(const uint8_t *p,unsigned n){
  }return label&&p[n-1]!='-';
 }
 #include "X9AttachAPN.inc"
+#include "X9WDSProfiles.inc"
 static unsigned x9w_args(const uint8_t *p,unsigned n,unsigned family){
  if(family!=4)return X9Q_UNSUPPORTED; // native IPv6 uses netagent/SLAAC, no guessed prefix
  x9q_view apn=x9q_tlv(p,n,0x14);if(!x9w_apn(apn.p,apn.n))return X9Q_ARG;
@@ -142,6 +143,8 @@ static unsigned x9w_args(const uint8_t *p,unsigned n,unsigned family){
   case 0x14:break;
   case 0x19:if(k!=1||v[0]!=family)return X9Q_ARG;break;
   case 0x30:if(k!=1||(v[0]!=0&&v[0]!=1))return X9Q_UNSUPPORTED;break; // automatic or 3GPP
+  case 0x31:case 0x32:if(k!=1||!v[0])return X9Q_ARG;break;
+  case 0x3e:if(k!=8||x9q_u32(v)!=1||x9q_u32(v+4))return X9Q_UNSUPPORTED;break; // Internet APN type
   case 0x16:case 0x33:if(k!=1||v[0])return X9Q_UNSUPPORTED;break;
   default:return X9Q_UNSUPPORTED;
   }
@@ -385,8 +388,9 @@ static void x9w_poll(){
 }
 static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned n){
  unsigned slot=local-CBQ_PORT_BASE,id=x9q_u16(req+3);x9w_client &c=x9w_clients[slot];
+ if(x9p_request(local,port,req,n,c.sim_slot))return true;
  if(id==0xc8){x9a_request(local,port,req,n);return true;}
- if(id!=1&&id!=0x20&&id!=0x21&&id!=0x22&&id!=0x24&&id!=0x2d&&id!=0x30&&id!=0x37&&id!=0x44&&id!=0x4d&&id!=0x86&&id!=0xa2&&id!=0xaf&&id!=0xb0&&id!=0x5569)return false;
+ if(id!=1&&id!=0x20&&id!=0xd0&&id!=0x21&&id!=0x22&&id!=0x24&&id!=0x2d&&id!=0x30&&id!=0x37&&id!=0x44&&id!=0x4d&&id!=0x86&&id!=0xa2&&id!=0xaf&&id!=0xb0&&id!=0x5569)return false;
  if(!c.family)c.family=4;x9w_bearer *own=nullptr;
  for(x9w_bearer &b:x9w_bearers)if(b.used&&b.slot==slot&&b.generation==x9q_clients[slot].generation)own=&b;
  unsigned error=0;
@@ -484,24 +488,30 @@ static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
   }
  }else{
   x9q_view f=x9q_tlv(req,n,0x19);unsigned family=f.p&&f.n==1?f.p[0]:c.family;
+  char selected_apn[101]={};
   x9q_view start_apn=x9q_tlv(req,n,0x14);
-  printf("X9 WDS: Start SIM%u mux %u family %u APN length %u native-ready %u session-ready %u\n",
-   c.sim_slot+1,c.mux,family,start_apn.n,x9d_ready(),x9w_session_ready);
+  printf("X9 WDS: Start msg 0x%04x SIM%u mux %u family %u APN length %u native-ready %u session-ready %u\n",
+   id,c.sim_slot+1,c.mux,family,start_apn.n,x9d_ready(),x9w_session_ready);
   if(!cbp_mux_ok(c.mux))error=X9Q_ARG;
   else if(!x9ds_data_ready(c.sim_slot))error=X9Q_NOT_READY;
   else if(c.starting||own||x9w_bearers[c.mux-1].used||x9a_busy())error=X9Q_BUSY;
   else if((error=x9w_args(req,n,family))!=0){}
+  else if((error=x9p_start(req,n,c.sim_slot,family,selected_apn))!=0){}
   else if(!x9d_ready()||!x9_md_mipc_online()||!x9w_session_ready)error=X9Q_NOT_READY;
   else{
    x9w_bearer &b=x9w_bearers[c.mux-1];bzero(&b,sizeof(b));b.used=b.pending=true;
    b.slot=slot;b.sim_slot=c.sim_slot;b.generation=x9q_clients[slot].generation;b.len=n;memcpy(b.req,req,n);
-   x9q_view apn=x9q_tlv(req,n,0x14);if(apn.n)memcpy(b.apn,apn.p,apn.n);c.starting=true;
+   x9q_view apn=x9q_tlv(req,n,0x14);
+   if(x9q_tlv(req,n,0x31).p)memcpy(b.apn,selected_apn,sizeof(b.apn));
+   else if(apn.n)memcpy(b.apn,apn.p,apn.n);c.starting=true;
+   bzero(selected_apn,sizeof(selected_apn));
    x9w_frame query(0x219,1u<<b.sim_slot);
    if(!x9w_send(b,query,X9W_DISC,10000)){x9w_error(b,X9Q_BUSY);x9w_clear(b,c.mux);}return true;
   }
+  bzero(selected_apn,sizeof(selected_apn));
  }
  if(error){
-  if(id==0x20||id==0x21)printf("X9 WDS: request msg 0x%04x SIM%u mux %u error %u\n",id,c.sim_slot+1,c.mux,error);
+  if(id==0x20||id==0xd0||id==0x21)printf("X9 WDS: request msg 0x%04x SIM%u mux %u error %u\n",id,c.sim_slot+1,c.mux,error);
   x9bb_reply_error(local,port,req,n,(uint16_t)error);return true;
  }
  x9q_packet reply(req);reply.send(local,port);return true;

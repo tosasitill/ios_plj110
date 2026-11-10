@@ -83,7 +83,8 @@ AT 正文、SIM 标识、APN、APDU 和 ch10 包正文不写 USB/pstore；仅记
 | NAS SignalStrength `0x20` | 注册/制式查询 + CSQ → RSSI | 仅默认或零 mask；未知 99 / 额外指标请求失败 |
 | NAS RegisterIndications `0x03` | 仅 serving/system 的后台快照 | SignalInfo、网络选择、band/reject/time 等未支持 |
 | DMS `0x21/22/23/25/2d/3c/43` | CGMI/CGMM/CGMR/CGSN/CFUN/CRSM ICCID/CIMI | 无伪造 IMEI/IMSI；CFUN0/4 映射 LOW_POWER，不是 RESET |
-| WDS `0xa2/4d/20/21/22/2d` | mux/family 意图；MIPC OPEN/订阅 → CID 范围 → ACT → GET + EIF/IFUP → DPMAIF bind | 只支持显式 APN/IPv4/no-auth；失败不生成 handle，不借用外部 context |
+| WDS `0x27/c7/29/2b` | 每槽 RAM-only 非持久 profile 创建、替换、删除、读取 | 不等于 MTK CID/连接；卡 epoch 隔离，索引同 boot 不复用 |
+| WDS `0xa2/4d/20/d0/21/22/2d` | mux/family 意图；MIPC OPEN/订阅 → CID 范围 → ACT → GET + EIF/IFUP → DPMAIF bind | 显式/非持久 profile/网络默认 APN、IPv4/no-auth；失败不生成 handle，不借用外部 context |
 | WDA/DPM | 明确 NOT_SUPPORTED；X9 native backend 不创建内部 IPA 配置 client | 不打开假 IPA endpoint，不套 Qualcomm QMAP 映射 |
 
 UIM 读请求仅接受 empty-AID primaryGW 的 current USIM（`3F007FFF`），或 card1 的 MF
@@ -168,7 +169,11 @@ MIPC 使用 16 B header、8 B padded TLV；实际库的部分 tag 已不同于�
 
 1. `OPEN301`（SIM mask ff，version2/USIR）→实际 `302` version 回读。
 2. `REGISTER_IND307` 分别订阅 DEACT4202 和 EIF4302，等待各自真实 `308` result0；之前不拨号。
-3. Start 校验显式 APN、IPv4、no-auth、DPMAIF ready；`GET_PDP_CID219/21a` 获取真实 CID 范围。
+3. `CreateProfile27` 接受原生空 profile（Type0/1、Persistence0），返回实际分配的 type/index；
+   `ResetAndModifyProfileSettings c7` 原子替换 RAM 配置，`29/2b` 删除/读取同槽对象。
+   配置对象不是 modem CID，不假成功持久写入；未知选项只存储，Start 不支持就拒绝。
+   Start20/d0 校验显式/31引用的3GPP profile APN、IPv4、no-auth、DPMAIF ready；32仅验证
+   配套3GPP2引用，不替代3GPP Internet。`GET_PDP_CID219/21a` 获取真实 CID 范围。
 4. `ACT201/202` 明确 `NOT_REUSE=2`、fallback0；ID100 是 call ID，IF125 是独立 ccmni 索引，
    ACT12a 是 transIntfId，**不是 netmask，也不使用 CID-1 映射**。
 5. `GET_CALL205/206` 再核对同 CID/interface/IPv4/MTU；同时等待本次 ACT 后真实 `EIF4302/IFUP` 的
@@ -181,7 +186,9 @@ MIPC 使用 16 B header、8 B padded TLV；实际库的部分 tag 已不同于�
 EIPPORT 命令用于其他资源，未凭名字添加未知 MD 通知。当前仅接实际 EIF/IFUP 并建立本地 raw-IP route。
 超时/DEL_CLIENT 不丢已发 token；迟到 ACT 成功只做 owned-call 清理，不迟到回复 host success。
 partial-success/fallback cause 也清理，不冒充完整 IPv4；不明 framing/CNF 保留所有权隔离到下次 boot。
-IPv6/SLAAC、profile/auth、默认 APN 发现、autoconnect、语音/IMS 未实现；额外参数明确失败。
+IPv6/SLAAC、持久/原 modem profile、auth、默认 APN 发现、autoconnect、语音/IMS 未实现；
+非 Internet APN mask、未映射 profile/Start 扩展选项明确失败。RAM profile/Start20/d0 新接线
+仅完成源码与编译，真实 profile→ACT→IP 收发和默认数据卡切换仍须实机日志确认。
 
 ### 5. iOS 网络最终验证
 
