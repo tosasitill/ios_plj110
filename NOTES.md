@@ -418,6 +418,8 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 
 - **AUDIO access固定源码/CI**：独立代码 **a8a33ee6306b8703e42dc6723aed226a73a38bb6**，最终四mic对象`audio-ssyspm/access-gate/units2.exit0`、iOS micctl `micctl1.exit0`；gh固定commit查询`ci.exit0=[]`，无CI run ID。七源码基线逐项一致才精准整合，独立index/commit-tree/CAS保留main并发working/index/NOTES；未重建main或生成最终镜像。
 
+- **AUDIO access本轮最终交接定位**：独立七源码 **a8a33ee6306b8703e42dc6723aed226a73a38bb6**、main精准整合 **421f1499f3148e5af67a04c30f19e4180329b8c7**；main源码与固定source一致，合前后HEAD/working/index/NOTES及脚本保存在`audio-ssyspm/access-gate/`。最后编译`units2.exit0`四对象、`micctl1.exit0`arm64 iOS编译/link/签名，gh`ci.exit0=[]`无CI ID；无新boot/设备/安装/PCM结果。继续同一final树，不派子代理，不重建已成功产物，下一步仍AUDIO完整写链保护语义/ownership与实际native bootstrap，目标active、未验收，不交中间guard镜像。
+
 ## 麦克风活动交接(MIC-16,2026-11-10): 数字codec逐字段恢复冲突门/未写项跳过与iOS首错位置;整包已编译,真实DMA仍缺
 
 - **隔离/源码缺口**:独立`.local/x9/worktrees/microphone-rollback16` / `work/x9-microphone-rollback16`,冻结main **5ad10df86c49c79e8a4742728f89f68eb04e12ee**,不夹带working/以后main。原`digital-l→board restore→digital_stop`在partial clock初始化失败且尚未写SRC/TX时仍无条件发四项off,随后数字journal逐项盲写old;MIC12最终RW验证只在prepare,不能独自排除晚到的codec mux/clock改动。这是源码可达恢复缺口,**不是已观察PLJ110恢复冲突/声学故障**。对照OPPO mt6681.c ordinary AIFTX/UL SRC disable与本地UniXNU-sheng/HakiOS生命周期;不迁高通DSP地址/时钟或假provider,不改厂商上电/phase/DCC/RC序列。
