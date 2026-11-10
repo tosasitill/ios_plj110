@@ -103,7 +103,7 @@ static int manifest(void)
  return 0;
 }
 static int bopen(dev_t dev,int flags,int type,struct proc *p)
-{(void)dev;(void)type;(void)p;return !xu.ready?ENXIO:((flags&FWRITE)&&!xu.writable)?EROFS:0;}
+{(void)dev;(void)type;(void)p;return (!xu.ready||xu.failed)?ENXIO:((flags&FWRITE)&&!xu.writable)?EROFS:0;}
 static int bclose(dev_t dev,int flags,int type,struct proc *p)
 {(void)dev;(void)flags;(void)type;(void)p;return 0;}
 static void strategy(buf_t bp)
@@ -201,12 +201,16 @@ static int ioctl_common(u_long command,caddr_t data,int character)
   xu.sector=*u;return 0;
  case DKIOCGETPHYSICALBLOCKSIZE:*u=4096;return 0;
  case DKIOCGETBLOCKCOUNT:*q=xu.bytes/xu.sector;return 0;
- case DKIOCISWRITABLE:*u=xu.writable;return 0;
+ case DKIOCISWRITABLE:*u=xu.ready&&xu.writable&&!xu.failed;return 0;
  /* MT6993 UFS is solid-state: HFS must not relocate files as for rotating disks. */
  case DKIOCISSOLIDSTATE:*u=1;return 0;
  case DKIOCSYNCHRONIZE:case DKIOCSYNCHRONIZECACHE: {
-  if(!xu.writable)return 0;
-  lck_mtx_lock(&x9ufs_lock);pet();int error=x9u_sync_image(&xu.host);
+  lck_mtx_lock(&x9ufs_lock);
+  /* Late scaling can poison while a caller waits here. Never turn the
+   * revoked write gate into a successful readonly/no-op cache flush. */
+  if(!xu.ready||xu.failed){lck_mtx_unlock(&x9ufs_lock);return ENXIO;}
+  if(!xu.writable){lck_mtx_unlock(&x9ufs_lock);return 0;}
+  pet();int error=x9u_sync_image(&xu.host);
   if(xu.host.poisoned)xu.failed=true;
   lck_mtx_unlock(&x9ufs_lock);return error?EIO:0;
  }

@@ -164,6 +164,7 @@ void sweet_x9_ufs_late_high(void)
   if(e||memcmp(before,after,32)){if(!e)e=X9U_CRC;high_poison();goto done;}
   if(checked<2)memcpy(qualified[checked++],hs.after,sizeof(hs.after));
  }
+ if(high_platform_check(NULL)){e=X9U_NOT_READY;goto done;}
  xg.stage=20;e=0;
 done:;
  if(xg.top) {

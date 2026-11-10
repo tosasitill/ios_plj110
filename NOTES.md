@@ -161,7 +161,7 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
 
-## UFS活动交接(UFS-G5,2026-11-10): 已实现有条件late G4/G5路径;四对象编译通过,尚未整包/实机
+## UFS活动交接(UFS-G5,2026-11-10): 已实现有条件late G4/G5路径;首轮整包通过,最终flush失败语义修正待打包/实机
 
 - **目标/运行证据**:用户追问“为啥不提到g5”,第一轮只优化传输确实不够,不把G3当终点。最新176:443仍FASTAuto/RateB/G3/双lane;1563-1565约6.11s INIT a0=0/OPP93/SW_REQ9000/current VCORE5,与175一致。没有本轮G4/G5运行或Android G5实测;厂商请求上限G5不能代替设备能力读回。
 - **隔离/实现**:独立`.local/x9/worktrees/ufs-g5` / `work/x9-ufs-g5`,起始固定main **3c9a4eb**,没有夹带主checkout当时的USB未提交修改。`x9_ufs_high.inc`接在GPU governor的DVFSRC setup之后,共享UFS mutex排空root/log/mailbox/BBFW/modem I/O;先读取local/peer MAXRXHSGEAR和PA_LOCALVERINFO,目标=min(ug,双方cap)。只接受现有已验证G3+/RateB/双lane,不改shim早期G1→G2→G3。若真实cap4,会明确negotiatedG4,不伪报G5;陌生能力/平台前置不通过时保留未改的已验证链路。
@@ -169,6 +169,7 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **PA/一致性/失败边界**:UniPro localver≥5才允许INITIAL_ADAPT,按G4→G5逐档选择Android FAST/FAST(0x11),保持RateB/2lane。每档要求UCCS+UPMS+PWR_LOCAL1和六项PA读回。四个64KiB窗口(0/quarter/half/tail)先在旧时钟读取、切高速host clock后再比较、每档PA后再比较SHA256;root已mutable,用锁内fresh bytes而非旧manifest SHA。原G3合法I/O在late入口之前仍可正常读写,升档锁内不会有filesystem mutation,合格后才放行新档I/O。SET/clock部分变化、UIC超时、读错/校验不一致则所有共享view poison、关闭可写声明、保留DMA/票/时钟,不清未知completion、不retry/reset或猜测回滚。
 - **持续保护/参数**:所有native SCSI/management命令前后经共享platform guard检查DVFSRC请求/current/basic、PLL/fence/parent和host/link错误;丢票/时钟漂移等返回phase5并全局隔离,不是在DMA飞行时修复。单槽/统一mutex仍保留。**ug=0默认关闭;ug=4/5启用一次late协商**。新增精确`dv`短alias(原`x9_dvfsrc`优先),候选完整117/176参数只把x9_dvfsrc=1改成dv=1并追加ug=5,**603B≤607B**,未删cpus8/任何功能token;插件275/32GiB manifest不变,无需mailbox。当前入口依赖GPU governor实际启动并执行DVFSRC setup;governor关闭/未启动不升档,有pending日志,不伪成功。
 - **编译里程碑/未完成**:最终四对象sweet_x9_ufs/ufs_ro/ufs_hs/gpu_dependencies编译exit0(原有vendor/include风格warning未当Werror),没有运行额外测试脚本/测试套件、CI build、设备操作或根盘写入。首次单对象label后直接声明不兼容当前C标准失败,改done:;及shadow变量名后第二/第三轮均通过;原日志`.local/x9/work/ufs-g5-20261110/{object-build.log,object-build.exit,object-build2.log,object-build2.exit,object-build3.log,object-build3.exit,compile-selected.py,local-config.json,boot-config.json}`。本节阶段尚未完整构建,不能称G5成功或实测提速;下一步整合已提交联合树并固定构建,记录提交/boot结果,实机验收以HIGH negotiated/sample/final_status/poison及后续root I/O为准。
+- **首轮固定构建/后续源码修正**:代码原提交9f86088,整合当时main已提交USB/相机冷资源/ADSP等到 **9861d91** 后重放为 **bf35b4e**。固定bf35b4e完整 **68/68 overlay+6prebuilt、link/strip/shim/boot exit0**,构建器报告`x9-ufs-g5-late-all603/boot.img` **10006528B**,原始build.stdout.log/build.exit=0,gh run list为空。没有成功后解包/hash/反汇编或镜像二次校验。随后源码审查发现新增poison会撤销writable,旧DKIOCSYNCHRONIZE会误走readonly no-op返回0;已修为锁内先判ready/failed返回ENXIO、正常readonly才返回0,open/ISWRITABLE也排除failed,并增加最后一轮platform guard。这是新的失败语义代码修正,不是对成功镜像做重复验证;首轮镜像不交付,下一步固定修正源码用唯一新name直接构建最终包。当前仍无G4/G5实机结果。
 
 ### 前次UFS交接(UFS-OPT1,2026-11-10): G3传输/CPU优化已编译;以下是第一轮历史,不是G5实现现状
 
