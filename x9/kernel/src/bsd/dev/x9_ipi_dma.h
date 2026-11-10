@@ -112,6 +112,32 @@ int x9_ipi_dma_get(uint64_t ticket,uint32_t generation,void *,uint32_t capacity,
 int x9_ipi_dma_exchange(uint64_t ticket,uint32_t generation,const void *request,
     uint32_t request_bytes,uint32_t form,void *output,uint32_t response_bytes,
     uint32_t *data_size);
+/* Actual AP program reservation on the registered core-A owner. Fresh
+ * same-ticket/generation/wire packing, table/memory/Online and real empty
+ * read_idx==write_idx precede minting a monotonic nonzero lease. It grants
+ * only native AP writer exclusion, NEVER firmware/profile/foreign-writer
+ * authority. Token/output is pinned kernel storage, no singleton/IPI_A
+ * alias; failure leaves it unchanged. One hold per generation; no early
+ * cancel/end. Ordinary SET/GET/exchange are rejected while held, and only
+ * matching on_program calls may proceed. Lease survives success AND fault
+ * until actual Offline/halt/unmap/drop in release; no replay or new mapping.
+ * The caller retains its parent resource context through that retirement. */
+int x9_ipi_dma_program_hold(uint64_t ticket,uint32_t generation,
+    uint32_t wire_packing,uint64_t *lease);
+int x9_ipi_dma_set_on_program(uint64_t ticket,uint32_t generation,uint64_t lease,
+    const void *,uint32_t bytes,uint32_t source_packing);
+int x9_ipi_dma_exchange_on_program(uint64_t ticket,uint32_t generation,uint64_t lease,
+    const void *request,uint32_t request_bytes,uint32_t form,void *output,
+    uint32_t response_bytes,uint32_t *data_size);
+/* Central transport namespace gate, BEFORE wake/MMIO: reserved region INIT,
+ * UPDATE and AURISYS/SmartPA SET/GET require this native core-A's exact
+ * private guard function/context, not merely any caller-supplied validator.
+ * Reads no mutable owner state, takes no locks or callbacks (IPI->transport
+ * order remains one-way). Non-reserved PCM traffic is unchanged; the native
+ * guard still proves actual generation/route/region throughout execution. */
+struct x9_adsp_request_guard;
+int x9_ipi_dma_request_authorize(uint32_t core,const struct x9_dsp_message *,
+    const struct x9_adsp_request_guard *);
 /* Coordinator first mutes/drains AFE and actually halts the core. Release
  * proves same-generation physical halt again; no online-only admission or
  * historical-error gate on safe unmap/drop. No mailbox free/replay/reset.

@@ -1212,23 +1212,42 @@ alias／长度／capacity失败均不改output/size。
 
 ### 将双侧 factory 值送入 DSP 并配对读取
 
-**生产事务代码已接真实 IPI 入口，但 mandatory factory/profile/MTP 和全 SmartPA
-writer supplier 尚未实现／注册，未执行参数发送，不能授予扬声器 Ready。**
+**生产事务代码已接真实 IPI 入口及原生 AP program 排他租约，但 mandatory
+factory/profile/MTP 和其他控制路径／DSP／firmware writer supplier 尚未实现／注册，
+未执行参数发送，不能授予扬声器 Ready。**
 `x9_pa_native_re25_program(policy, &result)` 不是用户 selector，也不把离线数值
 或 codec 成功当作校准授权。
 
 | 顺序 | 实际调用与约束 |
 |---|---|
-| 准入 | private policy88B：同ticket／I2C6 lease／实际READY generation/reset epoch，明确wire packing、Set/Get selector、read command/batch形态及互异的side→word排列；独立board/profile bounds，无默认值。mandatory validate须证明MTP engine／完整PA保护及整个SET→command→GET、失败后到halt的所有writer排他 |
+| 准入 | private policy88B：同ticket／I2C6 lease／实际READY generation/reset epoch，明确wire packing、Set/Get selector、read command/batch形态及互异的side→word排列；独立board/profile bounds，无默认值。mandatory validate证明MTP engine／完整PA保护与foreign writer lifetime；真实`x9_ipi_dma_program_hold`在registered／Online／table／read_idx==write_idx后mint单调非零AP租约，之后再次fresh准入，再读factory |
 | factory | 同I2C6 mutex内调用原生双shadow读取；每实际epoch只允许一次program attempt，standalone读取后不能再program。fresh双revision／SYSCTRL与controller/reset/power资格贯穿后续阶段 |
-| SET | 按明确side→word排列生成canonical SetRe25C batch，进入真实`x9_ipi_dma_set`，保留其trusted parameters／ACK及actual read_idx消费校验；host SetConsumed阶段不代替DSP实际接受或校准完成 |
-| command→GET | 共享GetRe25C codec只生成selector/81/85：显式single-word 3/4B或canonical batch12/16B，不猜cold/warm／selector4或改instance。真实`x9_ipi_dma_exchange`串行read-command SET→actual consume→GET→真实完成supplier；只接exact两个raw reply word |
+| SET | 按明确side→word排列生成canonical SetRe25C batch，进入真实`x9_ipi_dma_set_on_program`，要求matching实际AP租约并保留原trusted parameters／ACK及actual read_idx消费校验；host SetConsumed阶段不代替DSP实际接受或校准完成 |
+| command→GET | 共享GetRe25C codec只生成selector/81/85：显式single-word 3/4B或canonical batch12/16B，不猜cold/warm／selector4或改instance。真实`x9_ipi_dma_exchange_on_program`验证同租约，串行read-command SET→actual consume→GET→真实完成supplier；只接exact两个raw reply word |
 | 比较与发布 | 独立bounds／canonical positive signed24 decode后逐word比较requested/observed **Q16**，不是floor-mOhm或容忍范围。mandatory Complete callback仍独立证明回复身份和实际所需校准／保护状态；最终fresh parent/output资格后才发布96B观察result |
 | 错误 | factory/SET/GET之后任何失败保留native首错／attempt及parents；不自动重试参数、撤回索引、释放、reset或unmute。按既有mute→AFE disable/drain→真实halt→IPI/I2C/PA等显式release退休 |
 
 整段持有**I2C6 mutex**，排除自身controller释放／PA操作，并pin reset/power parents。
 SET与exchange各自使用现有IPI mutex，二者之间的全SmartPA写者排他必须由真实
-supplier长期持有，不能仅凭“I2C锁已持有”证明。callback有界、不可变、不反向重入
+AP program租约与foreign supplier共同证明，不能仅凭“I2C锁已持有”证明。
+租约存于IPI实际singleton，不是caller布尔值：普通SET/GET/exchange在held期间
+返回EBUSY，不touch mailbox/staging或清其他pending；on_program错租约拒绝，
+原physical guard／parameter／reply／exchange supplier仍独立执行。租约在**成功
+和错误后均保留**，没有early cancel/end；仅actual同generation Offline/halt、
+memory authority、unmap和board child drop成功才清。serial不重置／不wrap，
+不能用旧epoch token或不同context绕过。scalar token输出也禁止kernel singleton
+和全部IPI_A物理别名，失败不改它；无新用户selector或Ready ABI。
+
+中央 `x9_adsp_request`/`request_guarded` 在wake/MMIO前接namespace gate：region
+INIT `0xadd0`／UPDATE `0xadd1`、AURISYS/SmartPA SET `0x204`／GET `0x205`
+仅接受native core-A的精确私有guard function/context。此前plain API虽拒绝DMA，
+却不排除PAYLOAD GET；现在plain或另一个caller的guard不能绕过原生IPI owner。
+gate只比较immutable identity，不拿IPI lock、不反向callback；原guard继续证明
+当前generation/route/table/indices。PCM `0x201..0x203` 与其他非reserved消息不变。
+这是本原生region-index AP入口的实际排他，不证明其他AP控制路径、DSP内部或
+外部firmware不会改变SmartPA；它们仍是mandatory全writer supplier的剩余范围。
+
+callback有界、不可变、不反向重入
 I2C/PA/AFE/clock/transport/status/IPI，不保留私有stack policy/snapshot/reply地址。
 observed result不是Ready／unmute token；既有IPI五个supplier仍独立mandatory。
 

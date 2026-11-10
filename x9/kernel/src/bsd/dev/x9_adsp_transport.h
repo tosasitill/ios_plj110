@@ -73,7 +73,9 @@ int x9_adsp_release(uint32_t core);
 /* MSG_ONLY/PAYLOAD only; kernel->DSP, NEED_ACK/BYPASS/DIRECT. On failure
  * after doorbell, do not retry: even a late matching ACK cannot unpoison
  * this session. reply is required only for NEED_ACK; never changed on error.
- * DSP reply param1/param2 are returned unchanged, NOT assumed to mean errno. */
+ * DSP reply param1/param2 are returned unchanged, NOT assumed to mean errno.
+ * Reserved region INIT/UPDATE and AURISYS/SmartPA SET/GET are native-IPI-only;
+ * plain/PAYLOAD/foreign-guard forms are rejected BEFORE wake/MMIO. */
 int x9_adsp_request(uint32_t core, const struct x9_dsp_message *,
                     struct x9_dsp_message *reply, uint32_t ack_timeout_ms);
 /* Private physical-DMA caller only. Caller holds its native region mutex;

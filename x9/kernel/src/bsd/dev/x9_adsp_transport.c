@@ -7,6 +7,7 @@
 #include <kern/clock.h>
 #include <kern/locks.h>
 #include "x9_adsp_transport.h"
+#include "x9_ipi_dma.h"
 extern int sweet_early_is_x9(void);
 extern int sweet_x9_arg(const char *,int);
 
@@ -343,8 +344,10 @@ static int request_common(uint32_t core,const struct x9_dsp_message *request,
     /* Own a private snapshot before locking or touching hardware. DMA is
      * region-index only and requires a fresh physical guard. */
     struct x9_dsp_message message=*request;
+    int e=x9_ipi_dma_request_authorize(core,&message,guard);
+    if(e)return e; /* Reject foreign GET/PAYLOAD/guard before wake/MMIO. */
     uint8_t wire[X9_DSP_MESSAGE_MAX]={0}; uint32_t bytes=sizeof(wire);
-    int e=x9_dsp_encode(&message,wire,&bytes); if(e)return e;
+    e=x9_dsp_encode(&message,wire,&bytes); if(e)return e;
     lck_mtx_lock(locks[core]); struct transport *t=&cores[core];
     struct x9_dsp_message answer; bool matched=false;
     if(t->status.state!=X9DSPOnline)e=ENXIO;

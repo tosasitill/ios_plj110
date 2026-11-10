@@ -8,7 +8,7 @@ _Static_assert(sizeof(struct x9_pa_re25_program_policy)==88,"native Re25 policy8
 _Static_assert(sizeof(struct x9_pa_re25_program_result)==96,"native Re25 result96");
 static struct {
     X9AudioPANativeStatus status;
-    uint64_t ticket,lease,epoch;
+    uint64_t ticket,lease,epoch,ipi_program_lease;
     uint32_t attempted_identity;
     bool bound,re25_attempted,re25_program_attempted;
 } np;
@@ -35,6 +35,7 @@ static int np_parent(uint64_t ticket,uint64_t lease,bool create)
         memset(&np.status,0,sizeof(np.status));np.status.version=X9_PA_NATIVE_STATUS_VERSION;
         np.status.generation=ni.policy.generation;np.ticket=ticket;np.lease=lease;
         np.epoch=ni.policy.reset_epoch;np.attempted_identity=0;
+        np.ipi_program_lease=0;
         np.re25_attempted=np.re25_program_attempted=false;np.bound=true;
     } else if(np.epoch!=ni.policy.reset_epoch||np.status.generation!=ni.policy.generation)return ESTALE;
     if(np.status.checks!=UINT64_MAX)np.status.checks++;
@@ -278,12 +279,16 @@ int x9_pa_native_re25_program(const struct x9_pa_re25_program_policy *policy,
     if(!e)e=np_parent(p.ticket,p.i2c6_lease,false);
     if(!e && (np.re25_program_attempted || np.re25_attempted))e=EBUSY;
     if(!e)e=np_program_validate(&p,NULL,X9PARe25Admission);
+    if(!e)e=x9_ipi_dma_program_hold(p.ticket,p.generation,p.wire_packing,&np.ipi_program_lease);
     struct x9_pa_re25_program_result result={0};bool attempted=false;
     if(!e) {
         /* BEFORE factory reads or any SET attempt: no replacement object
          * or successful partial SET can license a second program attempt. */
         np.re25_program_attempted=true;attempted=true;
-        e=np_re25_read_locked(p.ticket,p.i2c6_lease,&result.factory);
+        /* Hold now excludes native AP writers. Requalify foreign/MTP and
+         * profile state in this reserved window, not only before the hold. */
+        e=np_program_validate(&p,NULL,X9PARe25Admission);
+        if(!e)e=np_re25_read_locked(p.ticket,p.i2c6_lease,&result.factory);
     }
     if(!e && (result.factory.generation!=p.generation ||
        result.factory.reset_epoch!=p.reset_epoch))e=ESTALE;
@@ -305,10 +310,12 @@ int x9_pa_native_re25_program(const struct x9_pa_re25_program_policy *policy,
     if(!e)e=np_program_validate(&p,&result,X9PARe25Set);
     /* Actual existing SET applies its OWN trusted-parameter/ACK/consume
      * suppliers. Our host phase/equality never substitute for that proof. */
-    if(!e)e=x9_ipi_dma_set(p.ticket,p.generation,set,set_bytes,p.wire_packing);
+    if(!e)e=x9_ipi_dma_set_on_program(p.ticket,p.generation,np.ipi_program_lease,
+        set,set_bytes,p.wire_packing);
     if(!e)e=np_program_validate(&p,&result,X9PARe25SetConsumed);
     if(!e)e=np_program_validate(&p,&result,X9PARe25Read);
-    if(!e)e=x9_ipi_dma_exchange(p.ticket,p.generation,read_command,read_bytes,
+    if(!e)e=x9_ipi_dma_exchange_on_program(p.ticket,p.generation,np.ipi_program_lease,
+        read_command,read_bytes,
         p.read_form==X9TFARe25Command?X9IPIReadWarmWord:X9IPIReadColdBatch,
         reply,2u*w,&reply_bytes);
     if(!e && reply_bytes!=2u*w)e=EPROTO;

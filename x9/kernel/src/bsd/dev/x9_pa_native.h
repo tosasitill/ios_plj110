@@ -80,8 +80,12 @@ struct x9_pa_re25_program_policy {
     uint32_t word_side[2],set_selector,read_selector;
     void *context;
     /* Mandatory ACTUAL same-epoch factory/profile/PA protection/MTP engine
-     * and whole SET->read-command->GET exclusion of ALL SmartPA writers,
-     * not just the I2C mutex. Prove wire mode/selectors and side->DSP word
+     * and SmartPA writer exclusion outside these native region-index APIs
+     * (including other AP control routes and DSP/firmware) through the whole
+     * SET->read-command->GET/fault lifetime, not just the I2C mutex. Native
+     * AP region-index writers are held by a real IPI program reservation,
+     * not supplied by a boolean here. Admission is rechecked after minting
+     * that reservation. Prove wire mode/selectors and side->DSP word
      * mapping; bounds from THIS board/profile authority, no defaults.
      * Admission has NULL snapshot/reply; Factory onwards has fresh native
      * snapshot, Complete also has decoded actual GET. Stage is our journal,
@@ -105,12 +109,16 @@ struct x9_pa_re25_program_result {
 /* Production canonical batch SET -> explicitly framed readonly GetRe25C
  * exchange -> exact two-word Q16 comparison and independent final supplier.
  * SAME I2C6 mutex over the whole call pins controller/reset/power parents;
- * IPI supplier must exclude every other SmartPA writer across SET AND GET.
+ * An actual IPI program lease excludes native AP SET/GET/exchange and the
+ * central transport rejects foreign guards/plain reserved requests. Foreign
+ * AP control paths outside these region-index APIs and DSP/firmware writer
+ * proof remain independently mandatory across SET/GET.
  * One attempt per actual READY/reset epoch, no parameter replay/retry, power
  * changes, status/IRQ reads, automatic release/reset, backend/Ready/unmute.
  * IPI must already be acquired/registered on this ticket/generation. Failure
- * retains native error/parents, including after successful SET or GET. Safe
- * cleanup remains the existing mute/drain/halt/release chain. Policy/output
+ * retains native error/parents, including after successful SET or GET. The
+ * IPI program reservation survives success/failure to real halted release.
+ * Safe cleanup remains the existing mute/drain/halt/release chain. Policy/output
  * pinned kernel spans, disjoint virtual/physical bytes, immutable policy.
  * Caller also keeps output disjoint from its authority context/resources;
  * this API cannot infer the extent of that opaque external context.

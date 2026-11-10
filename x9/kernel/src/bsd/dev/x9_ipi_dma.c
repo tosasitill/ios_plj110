@@ -27,7 +27,7 @@ _Static_assert(X9_IPI_DMA_READBACK_BYTES==0x4000,"independent 16KiB writeback pa
 _Static_assert(sizeof(struct x9_ipi_dma_policy)==80,"mandatory exchange authority v3");
 static struct {
     struct x9_ipi_dma_policy policy;
-    uint64_t bus,child;
+    uint64_t bus,child,program_lease,program_serial;
     vm_offset_t map;
     uint32_t pool_bytes,map_bytes,checksum,pool_offset,ring_offset,entry,wb_offset;
     uint32_t write,read,last_generation,error;
@@ -55,6 +55,12 @@ static uint32_t index_read(uint32_t offset)
 static int matches(uint64_t ticket,uint32_t generation)
 {return !dma.attempted || !ticket || ticket!=dma.policy.ticket ||
     !generation || generation!=dma.policy.generation?EPERM:0;}
+/* No fault/cleanup for another caller's rejected lease. IPI mutex held. */
+static int program_matches(uint64_t lease)
+{
+    if(!lease)return dma.program_lease?EBUSY:0;
+    return lease!=dma.program_lease?EPERM:0;
+}
 static int fault(int e)
 {
     if(e==EAGAIN)e=EIO;
@@ -178,6 +184,18 @@ static int guarded(void *context,const struct x9_dsp_message *m)
     } else if(!e)e=EPERM;
     if(!e)e=exchange_authority();
     return e?fault(e):0;
+}
+int x9_ipi_dma_request_authorize(uint32_t core,const struct x9_dsp_message *m,
+    const struct x9_adsp_request_guard *guard)
+{
+    if(!m)return EINVAL;
+    if(m->id!=X9_IPI_DMA_INIT && m->id!=X9_IPI_DMA_UPDATE &&
+       m->id!=X9_IPI_TFA_SET && m->id!=X9_IPI_TFA_GET)return 0;
+    /* Immutable identity only: safe before/under transport lock, no reverse
+     * acquisition of IPI. Matching callers still run guarded() for all
+     * current owner/physical/generation proofs before each mailbox access. */
+    return core || !guard || guard->version!=1 || !guard->generation ||
+        guard->context!=&dma || guard->validate!=guarded?EPERM:0;
 }
 static int send(struct x9_dsp_message *m,struct x9_dsp_message *received)
 {
@@ -345,12 +363,13 @@ static int publish_set(uint32_t n)
     if(e && (dma.pending || dma.exchange_published))e=fault(e);
     return e;
 }
-int x9_ipi_dma_set(uint64_t ticket,uint32_t generation,const void *data,
-                    uint32_t bytes,uint32_t source_packing)
+static int set_common(uint64_t ticket,uint32_t generation,uint64_t lease,
+    const void *data,uint32_t bytes,uint32_t source_packing)
 {
     if(!data || !bytes || (uintptr_t)data>UINTPTR_MAX-bytes ||
        (source_packing!=X9TFABE24 && source_packing!=X9TFALE32))return EINVAL;
     lck_mtx_lock(&ipi_dma_lock);int e=matches(ticket,generation);
+    if(!e)e=program_matches(lease);
     if(e){lck_mtx_unlock(&ipi_dma_lock);return e;}
     uintptr_t a=(uintptr_t)data;
     if(!e && dma.mapped && a<dma.map+dma.map_bytes && dma.map<a+bytes)e=EINVAL;
@@ -369,6 +388,12 @@ int x9_ipi_dma_set(uint64_t ticket,uint32_t generation,const void *data,
     if(!dma.pending && !dma.exchange_active)memset(dma.staging,0,sizeof(dma.staging));
     lck_mtx_unlock(&ipi_dma_lock);return e;
 }
+int x9_ipi_dma_set(uint64_t ticket,uint32_t generation,const void *data,
+    uint32_t bytes,uint32_t source_packing)
+{return set_common(ticket,generation,0,data,bytes,source_packing);}
+int x9_ipi_dma_set_on_program(uint64_t ticket,uint32_t generation,uint64_t lease,
+    const void *data,uint32_t bytes,uint32_t source_packing)
+{return !lease?EINVAL:set_common(ticket,generation,lease,data,bytes,source_packing);}
 static bool overlap(uintptr_t a,uint32_t n,uintptr_t b,uint32_t m)
 {return a<b+m && b<a+n;}
 /* Exact physical byte ranges, not merely distinct virtual addresses. Caller
@@ -500,13 +525,14 @@ int x9_ipi_dma_get(uint64_t ticket,uint32_t generation,void *out,
 {
     int e=output_arguments(out,capacity,data_size);if(e)return e;
     lck_mtx_lock(&ipi_dma_lock);e=matches(ticket,generation);
+    if(!e)e=program_matches(0);
     if(!e && dma.exchange_active)e=EBUSY;
     if(!e)e=get_locked(out,capacity,data_size);
     lck_mtx_unlock(&ipi_dma_lock);return e;
 }
-int x9_ipi_dma_exchange(uint64_t ticket,uint32_t generation,const void *request,
-    uint32_t request_bytes,uint32_t form,void *out,uint32_t response_bytes,
-    uint32_t *data_size)
+static int exchange_common(uint64_t ticket,uint32_t generation,uint64_t lease,
+    const void *request,uint32_t request_bytes,uint32_t form,void *out,
+    uint32_t response_bytes,uint32_t *data_size)
 {
     uintptr_t c=(uintptr_t)request,a=(uintptr_t)out,b=(uintptr_t)data_size;
     if(!request || !request_bytes || request_bytes>sizeof(dma.exchange_request) ||
@@ -517,6 +543,7 @@ int x9_ipi_dma_exchange(uint64_t ticket,uint32_t generation,const void *request,
        overlap(c,request_bytes,b,sizeof(*data_size)) ||
        overlap(c,request_bytes,(uintptr_t)&dma,sizeof(dma)))return EINVAL;
     lck_mtx_lock(&ipi_dma_lock);e=matches(ticket,generation);bool started=false;
+    if(!e)e=program_matches(lease);
     if(!e && (!dma.registered || dma.pending || dma.exchange_active))e=EBUSY;
     uint32_t w=dma.policy.wire_packing==X9TFABE24?3u:4u;
     uint32_t bound=dma.policy.wire_packing==X9TFABE24?
@@ -562,6 +589,38 @@ int x9_ipi_dma_exchange(uint64_t ticket,uint32_t generation,const void *request,
     }
     lck_mtx_unlock(&ipi_dma_lock);return e;
 }
+int x9_ipi_dma_exchange(uint64_t ticket,uint32_t generation,const void *request,
+    uint32_t request_bytes,uint32_t form,void *out,uint32_t response_bytes,
+    uint32_t *data_size)
+{return exchange_common(ticket,generation,0,request,request_bytes,form,out,response_bytes,data_size);}
+int x9_ipi_dma_exchange_on_program(uint64_t ticket,uint32_t generation,uint64_t lease,
+    const void *request,uint32_t request_bytes,uint32_t form,void *out,
+    uint32_t response_bytes,uint32_t *data_size)
+{return !lease?EINVAL:exchange_common(ticket,generation,lease,request,request_bytes,form,out,response_bytes,data_size);}
+int x9_ipi_dma_program_hold(uint64_t ticket,uint32_t generation,
+    uint32_t packing,uint64_t *lease)
+{
+    uintptr_t a=(uintptr_t)lease;
+    if(!lease || (a&7u) || a>UINTPTR_MAX-sizeof(*lease) ||
+       (packing!=X9TFABE24 && packing!=X9TFALE32) ||
+       overlap(a,sizeof(*lease),(uintptr_t)&dma,sizeof(dma)))return EINVAL;
+    lck_mtx_lock(&ipi_dma_lock);int e=matches(ticket,generation);
+    if(!e && packing!=dma.policy.wire_packing)e=EINVAL;
+    if(!e && (!dma.registered || dma.pending || dma.exchange_active || dma.program_lease))e=EBUSY;
+    if(!e && dma.program_serial==UINT64_MAX)e=EOVERFLOW;
+    if(!e)e=caller_binding(a,sizeof(*lease));
+    if(!e)e=admission();
+    uint32_t r=0;if(!e)e=observed_read(&r);
+    if(!e && r!=dma.write)e=fault(EBUSY);
+    if(!e)e=admission();
+    if(!e)e=caller_binding(a,sizeof(*lease));
+    if(!e) {
+        dma.program_lease=++dma.program_serial;
+        *lease=dma.program_lease;
+    }
+    /* No partial lease, scalar mutation, mailbox publication or index reset. */
+    lck_mtx_unlock(&ipi_dma_lock);return e;
+}
 int x9_ipi_dma_release(uint64_t ticket,uint32_t generation)
 {
     lck_mtx_lock(&ipi_dma_lock);int e=matches(ticket,generation);
@@ -574,6 +633,9 @@ int x9_ipi_dma_release(uint64_t ticket,uint32_t generation)
     }
     if(!e && dma.child)e=x9_adsp_mt6993_ipi_drop(ticket,dma.child);
     if(!e) {
+        /* AP reservation outlives every success/fault and disappears ONLY
+         * after independent actual physical halt + unmap + child drop. */
+        dma.program_lease=0;
         dma.child=0;dma.attempted=dma.initialized=dma.register_attempted=dma.registered=dma.pending=false;
         dma.pending_get=false;dma.get_capacity=0;
         exchange_clear();
