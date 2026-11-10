@@ -59,6 +59,13 @@ struct chunk { uint32_t n; uint8_t bytes[X9_USB_CHUNK]; };
 struct queue { struct chunk v[QUEUE]; unsigned head, count; };
 static struct queue net_tx, raw_tx, raw_rx;
 static int channel;
+static int bus_channel;
+static struct {
+    unsigned pending, running, done, abandoned, operation;
+    uint32_t delay_ms;
+    int result;
+    uint64_t reconnect_at;
+} bus_command;
 static const uint8_t phone_mac[6] = { 0x02, 0x58, 0x39, 0x55, 0x53, 0x02 };
 
 struct gpd { uint32_t flags, next, buffer, length; };
@@ -320,6 +327,83 @@ static int reset_data(void)
     notification = suspended = 0;
     return 0;
 }
+static void bus_finish(int error)
+{
+    lck_mtx_lock(&usb_lock);
+    bus_command.result = error; bus_command.done = 1;
+    st.reserved &= ~X9_USB_BUS_CYCLING;
+    unsigned operation = bus_command.operation, generation = st.generation;
+    unsigned off = !!(st.reserved & X9_USB_BUS_FORCED_OFF);
+    if (bus_command.abandoned) bus_command.pending = 0;
+    thread_wakeup(&bus_channel);
+    lck_mtx_unlock(&usb_lock);
+    printf("X9 USB: original IOKit bus op=%u result=%d forced-off=%u generation=%u; not mux/pairing\n",
+        operation, error, off, generation);
+}
+static void bus_poll(void)
+{
+    lck_mtx_lock(&usb_lock);
+    if (!bus_command.pending || bus_command.done) { lck_mtx_unlock(&usb_lock); return; }
+    unsigned running = bus_command.running, operation = bus_command.operation;
+    uint32_t delay_ms = bus_command.delay_ms;
+    uint64_t reconnect_at = bus_command.reconnect_at;
+    bus_command.running = 1;
+    lck_mtx_unlock(&usb_lock);
+    if (failed) { bus_finish(ENXIO); return; }
+    if (running && mach_absolute_time() < reconnect_at) return;
+    int error = 0;
+    if (!running && operation != X9_USB_BUS_ON) {
+        /* The register writer remains the sole MMIO worker. First disconnect,
+         * then STOP every QMU before discarding queued data or reconnecting. */
+        W(0x2404, R(0x2404) & ~BIT(6));
+        if (R(0x2404) & BIT(6)) error = EIO;
+        if (!error) { lck_mtx_lock(&usb_lock); st.reserved |= X9_USB_BUS_FORCED_OFF; lck_mtx_unlock(&usb_lock); }
+        if (!error) error = reset_data();
+        phase = CTRL_IDLE; sent = length = wanted = 0;
+        W(0x800, R(0x800) & ~(0x7fu << 24));
+        if (error) { fault(error, 0); bus_finish(error); return; }
+        if (operation == X9_USB_BUS_OFF) { bus_finish(0); return; }
+        clock_interval_to_deadline(delay_ms, NSEC_PER_MSEC, &reconnect_at);
+        lck_mtx_lock(&usb_lock);
+        bus_command.reconnect_at = reconnect_at; st.reserved |= X9_USB_BUS_CYCLING;
+        lck_mtx_unlock(&usb_lock);
+        return;
+    }
+    W(0x2404, R(0x2404) | BIT(6));
+    if (!(R(0x2404) & BIT(6))) error = EIO;
+    if (!error) { lck_mtx_lock(&usb_lock); st.reserved &= ~X9_USB_BUS_FORCED_OFF; lck_mtx_unlock(&usb_lock); }
+    else fault(error, 0);
+    bus_finish(error);
+}
+int x9_usb_bus_command(unsigned operation, uint32_t delay_ms)
+{
+    if (operation > X9_USB_BUS_CYCLE || delay_ms > 1000 ||
+        (operation != X9_USB_BUS_CYCLE && delay_ms)) return EINVAL;
+    uint64_t deadline; clock_interval_to_deadline(2000, NSEC_PER_MSEC, &deadline);
+    lck_mtx_lock(&usb_lock);
+    if (st.state < X9_USB_READY) { lck_mtx_unlock(&usb_lock); return EAGAIN; }
+    if (failed || st.state == X9_USB_FAULT) { lck_mtx_unlock(&usb_lock); return ENXIO; }
+    if (bus_command.pending) { lck_mtx_unlock(&usb_lock); return EBUSY; }
+    /* A cycle must not override a separately requested ForceOffBusEnable.
+     * The operator must first issue ForceOffBusDisable explicitly. */
+    if (operation == X9_USB_BUS_CYCLE && (st.reserved & X9_USB_BUS_FORCED_OFF)) {
+        lck_mtx_unlock(&usb_lock); return EBUSY;
+    }
+    bzero(&bus_command, sizeof(bus_command));
+    bus_command.pending = 1; bus_command.operation = operation; bus_command.delay_ms = delay_ms;
+    while (!bus_command.done) {
+        if (mach_absolute_time() >= deadline) {
+            /* A started command retains ownership after a waiter times out.
+             * Another caller cannot overwrite it or induce a second cycle. */
+            bus_command.abandoned = 1;
+            lck_mtx_unlock(&usb_lock); return ETIMEDOUT;
+        }
+        (void)assert_wait_deadline(&bus_channel, THREAD_UNINT, deadline);
+        lck_mtx_unlock(&usb_lock); thread_block(THREAD_CONTINUE_NULL); lck_mtx_lock(&usb_lock);
+    }
+    int result = bus_command.result; bus_command.pending = 0;
+    lck_mtx_unlock(&usb_lock); return result;
+}
 static int set_configuration(unsigned value)
 {
     int error = reset_data(); if (error || !value) return error;
@@ -566,6 +650,7 @@ static void worker(void *arg, wait_result_t why)
     W(0x2404,R(0x2404)|BIT(6));
     printf("X9 USB: MTU3 USB2 ECM%s ready, GIC INTID533 polled, QMU36 version=%#x; EP0 log retained\n",st.raw_enabled?"+private bulk":"",version);
     for (;;) {
+        bus_poll(); /* completes even if the hardware was isolated */
         if (!failed) poll();
         uint64_t deadline; clock_interval_to_deadline(1,NSEC_PER_MSEC,&deadline);
         (void)assert_wait_deadline(&channel,THREAD_UNINT,deadline); thread_block(THREAD_CONTINUE_NULL);

@@ -14,6 +14,14 @@ kern_return_t x9usb_status(io_connect_t, struct x9_usb_status *);
  * never retry an ambiguous write automatically in a different generation. */
 kern_return_t x9usb_send(io_connect_t, uint32_t generation, const void *, size_t);
 kern_return_t x9usb_receive(io_connect_t, uint32_t generation, void *, size_t *);
+/* Run the original iOS IOKit controller functions with an explicitly chosen
+ * X9 service. Never impersonates the native controller or reconfigures it. */
+kern_return_t x9usb_controller_command(unsigned operation, uint32_t delay_ms);
+struct x9usb_native_status {
+    uint32_t controllers, interfaces, multiplexors;
+    bool controller_api_available;
+};
+kern_return_t x9usb_native_status(struct x9usb_native_status *);
 #ifdef __cplusplus
 }
 #endif

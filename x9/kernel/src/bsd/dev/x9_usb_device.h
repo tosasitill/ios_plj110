@@ -8,6 +8,10 @@
 enum { X9_USB_STATUS, X9_USB_SEND, X9_USB_RECEIVE };
 enum { X9_USB_OFF, X9_USB_INITIALIZING, X9_USB_READY, X9_USB_CONFIGURED,
        X9_USB_FAULT };
+/* ABI1's reserved word now reports physical bus-command state. */
+#define X9_USB_BUS_FORCED_OFF 1u
+#define X9_USB_BUS_CYCLING 2u
+enum { X9_USB_BUS_OFF, X9_USB_BUS_ON, X9_USB_BUS_CYCLE };
 struct x9_usb_status {
     uint32_t version, state;
     int32_t error;
@@ -28,6 +32,9 @@ void x9_usb_release(uint64_t);
 int x9_usb_send(uint64_t, uint32_t, const void *, uint32_t);
 int x9_usb_receive(uint64_t, uint32_t, void *, uint32_t *);
 int x9_usb_dma_alloc(void **, uint64_t *);
+/* Kernel-only, synchronous worker barrier. Cycle delay is 0..1000 ms.
+ * Timeout is ambiguous: never replay. No native-family identity is implied. */
+int x9_usb_bus_command(unsigned, uint32_t);
 int x9_mtu3_init(int);
 uint32_t x9_mtu3_read(unsigned);
 void x9_mtu3_write(unsigned, uint32_t);

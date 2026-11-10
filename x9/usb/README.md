@@ -99,6 +99,38 @@ selector0/1/2分别对应状态/发送/接收，结构为固定128字节 `x9_usb
 `kIOReturnOffline` 为未配置或硬件隔离，`NoSpace` 为输出缓冲不足。
 客户端关闭可能已发送部分旧 TX，不能撤销；不会将旧 RX 交给新 lease。
 
+### 原生 IOKit 控制入口（不等于原生 mux）
+
+`native_iokit.c` 使用 **20H392 原始 IOKit** 的
+`IOUSBDeviceControllerCreateWithService`、`ForceOffBus`、`GoOffAndOnBus`。
+显式选择自有 `X9USBDevice`，不伪造默认 `IOUSBDeviceController` 类：
+
+```text
+original IOKit -> IORegistryEntrySetCFProperties
+               -> X9USBDevice::setProperties -> sole MTU3 worker
+```
+
+已实现的命令为 `ForceOffBusEnable`、`ForceOffBusDisable`、`GoOffAndOnBus`；
+字典键为 `USBDeviceCommand` / `USBDeviceCommandParameter`。
+内核和用户端均要求 root。worker 断连后 STOP 全部 QMU、清队列、推进 generation，
+再按指定时间重连；STOP/寄存器读回失败隔离。调用同步等待真实 worker barrier，
+**不是等待 host 枚举或配对**。2秒等待超时视为歧义，保留正在执行的命令所有权，
+不能自动重放。`SetDeviceDescription`、`SetDevicePreferredConfiguration`
+仍返回 `Unsupported`，不能假存描述符并宣布成功。
+
+工具交付后，可由操作者显式调用；以下操作会断开 ECM/bulk，**不自动执行**：
+
+```sh
+usbctl --native-status       # 只读：三个原生类的数量，不等待30秒/不打开接口
+usbctl --bus-cycle 100       # root；真实断连、STOP、100ms后重连，仅发一次
+usbctl --bus-off             # root；保持断连
+usbctl --bus-on              # root；恢复软连接
+```
+
+ABI1的 `reserved` 字现定义 `X9_USB_BUS_FORCED_OFF` / `X9_USB_BUS_CYCLING`。
+原生类出现不等于 mux 流量、Trust 或 lockdown session；`native_apple_stack` 仍为0。
+本轮只完成编译及静态调用链确认，尚未上机验证这些命令。
+
 独立交叉编译，不运行设备或测试套件：
 
 ```sh
@@ -132,10 +164,36 @@ python3 -I x9/usb/build.py --out .local/x9/usb/client
 ECM或自有 UserClient 当成 lockdownd 配对。完整目标还需：
 
 1. 先验收本板一次真实 QMU OUT/IN 和断连/重接，再接 IRQ、更多在飞 GPD及吞吐优化。
-2. 恢复/分析 **20H392** IOUSBDeviceFamily、AppleUSBDeviceMux 的 controller/endpoint/
-   completion ABI，建立真实 MTU3 controller adapter，并纳入本项目 kernel 构建；
-   不能使用文章的24A446 ABI slot或伪造 DWC3 MMIO。
+2. 已恢复 **20H392** 原始 kernelcache 和三个 USB 依赖输入，但不能直接 prelink：
+   原始 `IOService` 为 **168 slots**，当前冻结的 SWEET `IOService.cpo` 为
+   **272 slots**。虽然405个内核导入地址均能找到冻结对象中的同址符号别名，
+   **导入名字齐全并不能修复虚调用 ABI**。原始 `IOUSBDeviceController` 为
+   **0x1f8 bytes / 232 slots**（含尚需恢复签名的 pure virtual 方法），不是24A446的
+   AppleUSBXDCI。需要隔离的、经过调用点确认的 ABI 适配或自有 DeviceFamily 实现；
+   不全局盲改 XNU vtable，不把 MTU3 模拟成 DWC3。
 3. 接原始 configd USBDeviceConfiguration 和 lockdownd，验证 Trust UI、配对记录及
    lockdown session；之后才按 D22 identity核验chip/board/security-domain、真实fsid和锁状态。
 4. 再实现 MT6993 XS-PHY USB3、MT6379/charger Type-C role、orientation及原生 xHCI。
    不直接移植 QMP、UCSI/GLINK或 Qualcomm SMMU 参数。
+
+### 离线准备原生栈输入
+
+`prepare_native.py` 只解析原始 Apple 输入和冻结 `MH_OBJECT`，不读取已成功的
+boot 候选做二次校验，也不装载或修补 kext。输出只能在新的 `.local/` 或
+`x9/out/` 子目录，拒绝覆盖旧证据。固定输入 SHA-256 为
+`2ec297bac95bcba01046fd0148e97e7e5885c05a6c18827f39f534ba375c1221`。
+
+```sh
+python3 -I x9/usb/prepare_native.py \
+  --kernelcache .local/x9/usb/native-20H392/kernelcache.macho \
+  --build-manifest .local/x9/usb/native-20H392/BuildManifest.plist \
+  --io-service-object .local/dxb/build/xnu.obj/DEVELOPMENT_ARM64_SWEET/iokit/DEVELOPMENT/IOService.cpo \
+  --objects-file .local/x9/usb/native-20H392/frozen-object-list.txt \
+  --out .local/x9/usb/native-prepared-new --extract --require-compatible
+```
+
+`--objects-file` 可省略；每行是一个冻结对象路径，不是构建后的镜像。
+输出 `abi.json`、`bindings.json`、三个模块的 metadata/segments 和可选原始段。
+这些仍是 **prelinked bytes，不是可装载的独立 kext**。当前
+`--require-compatible` 返回 **2** 是明确的 ABI/load-readiness 门拒绝，
+不是编译错误；不提供强行绕过该门的装载参数。

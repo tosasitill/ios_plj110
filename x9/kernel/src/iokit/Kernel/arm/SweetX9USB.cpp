@@ -6,10 +6,14 @@
 #include <IOKit/IOService.h>
 #include <IOKit/IOUserClient.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
+#include <libkern/c++/OSDictionary.h>
+#include <libkern/c++/OSString.h>
+#include <libkern/c++/OSNumber.h>
 #include <sys/errno.h>
 #include "../../../bsd/dev/x9_usb_device.h"
 extern "C" int sweet_early_is_x9(void);
 extern "C" int sweet_x9_arg(const char *, int);
+static IOReturn usb_return(int);
 
 /* Only the device worker allocates these. Keep prepared pages wired until
  * reboot even if a QMU STOP times out. No other device's carve-out is borrowed. */
@@ -37,6 +41,7 @@ class X9USBDevice : public IOService {
 public:
     IOService *probe(IOService *, SInt32 *) APPLE_KEXT_OVERRIDE;
     bool start(IOService *) APPLE_KEXT_OVERRIDE;
+    IOReturn setProperties(OSObject *) APPLE_KEXT_OVERRIDE;
 };
 OSDefineMetaClassAndStructors(X9USBDevice, IOService);
 IOService *X9USBDevice::probe(IOService *p, SInt32 *score)
@@ -55,12 +60,39 @@ bool X9USBDevice::start(IOService *p)
         !setProperty("X9USBRole", "device") ||
         !setProperty("X9USBNetworkInterface", "ue0") ||
         !setProperty("X9USBAppleNativeStack", kOSBooleanFalse) ||
+        !setProperty("X9USBControllerBusCommands", kOSBooleanTrue) ||
         !setProperty("X9USBSuperSpeed", kOSBooleanFalse)) return false;
     /* BSD starts the only MMIO worker after proc0 is ready. Service discovery
      * is not a statement that enumeration or a DMA transfer has succeeded. */
     registerService();
     IOLog("X9 USB: own ABI v1 registered; status=type0, admin bulk=type1; hardware starts at BSD init\n");
     return true;
+}
+IOReturn X9USBDevice::setProperties(OSObject *properties)
+{
+    /* Exact 20H392 IOKit property-command envelope, not an Apple C++ vtable.
+     * Original CreateWithService/ForceOffBus/GoOffAndOnBus can address this
+     * explicitly selected service. Do not publish IOUSBDeviceController or
+     * return success for an unimplemented description/mux configuration. */
+    if (IOUserClient::clientHasPrivilege(current_task(), kIOClientPrivilegeAdministrator) != kIOReturnSuccess)
+        return kIOReturnNotPrivileged;
+    auto *d = OSDynamicCast(OSDictionary, properties);
+    auto *command = d ? OSDynamicCast(OSString, d->getObject("USBDeviceCommand")) : nullptr;
+    if (!command || d->getCount() > 2) return kIOReturnBadArgument;
+    auto *parameter = d->getObject("USBDeviceCommandParameter");
+    if (d->getCount() != (parameter ? 2u : 1u)) return kIOReturnBadArgument;
+    unsigned op;
+    uint32_t delay = 0;
+    if (command->isEqualTo("ForceOffBusEnable")) op = X9_USB_BUS_OFF;
+    else if (command->isEqualTo("ForceOffBusDisable")) op = X9_USB_BUS_ON;
+    else if (command->isEqualTo("GoOffAndOnBus")) {
+        op = X9_USB_BUS_CYCLE;
+        auto *number = OSDynamicCast(OSNumber, parameter);
+        if (!number || number->unsigned64BitValue() > 1000) return kIOReturnBadArgument;
+        delay = (uint32_t)number->unsigned64BitValue();
+    } else return kIOReturnUnsupported;
+    if (op != X9_USB_BUS_CYCLE && parameter) return kIOReturnBadArgument;
+    return usb_return(x9_usb_bus_command(op, delay));
 }
 class X9USBUserClient : public IOUserClient {
     OSDeclareDefaultStructors(X9USBUserClient);
@@ -102,6 +134,7 @@ static IOReturn usb_return(int e)
     case ENXIO: return kIOReturnOffline;
     case EMSGSIZE: return kIOReturnNoSpace;
     case EBUSY: return kIOReturnExclusiveAccess;
+    case ETIMEDOUT: return kIOReturnTimeout;
     case ENOTSUP: return kIOReturnUnsupported;
     default: return kIOReturnIOError;
     }

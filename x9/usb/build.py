@@ -17,10 +17,14 @@ def main():
     ar = dev / 'Toolchains/XcodeDefault.xctoolchain/usr/bin/ar'
     a.out.mkdir(parents=True, exist_ok=True)
     common = [str(clang), '-target', 'arm64-apple-ios16.0', '-isysroot', str(sdk), '-Os', '-Wall', '-Wextra', '-Werror']
-    obj, lib, ctl = a.out / 'x9usb.o', a.out / 'libx9usb.a', a.out / 'usbctl'
-    subprocess.run(common + ['-c', str(HERE / 'x9usb.c'), '-o', str(obj)], check=True)
+    lib, ctl = a.out / 'libx9usb.a', a.out / 'usbctl'
+    objects = []
+    for source in ('x9usb.c', 'native_iokit.c'):
+        obj = a.out / (Path(source).stem + '.o')
+        subprocess.run(common + ['-c', str(HERE / source), '-o', str(obj)], check=True)
+        objects.append(str(obj))
     lib.unlink(missing_ok=True)
-    subprocess.run([str(ar), 'rcs', str(lib), str(obj)], check=True)
+    subprocess.run([str(ar), 'rcs', str(lib), *objects], check=True)
     subprocess.run(common + [str(HERE / 'usbctl.c'), str(lib), '-framework', 'CoreFoundation', '-framework', 'IOKit', '-o', str(ctl)], check=True)
     subprocess.run(['/usr/bin/codesign', '--force', '--sign', '-', '--timestamp=none', str(ctl)], check=True)
     print(f'USB iOS SDK/client built: {ctl}; not installed/hardware-verified')

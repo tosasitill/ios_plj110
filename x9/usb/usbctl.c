@@ -25,9 +25,36 @@ static void print_status(const struct x9_usb_status *s)
         (unsigned long long)s->net_tx_frames, (unsigned long long)s->net_rx_frames,
         (unsigned long long)s->raw_tx_bytes, (unsigned long long)s->raw_rx_bytes,
         (unsigned long long)s->dropped, s->native_apple_stack);
+    printf("bus forced-off=%u cycling=%u\n", !!(s->reserved & X9_USB_BUS_FORCED_OFF),
+        !!(s->reserved & X9_USB_BUS_CYCLING));
 }
 int main(int argc, char **argv)
 {
+    if (argc == 2 && !strcmp(argv[1], "--native-status")) {
+        struct x9usb_native_status s;
+        kern_return_t e = x9usb_native_status(&s);
+        if (e) { fprintf(stderr, "native registry discovery failed %#x\n", e); return 1; }
+        printf("original-IOKit-controller-API=%u controllers=%u interfaces=%u multiplexors=%u\n",
+            s.controller_api_available, s.controllers, s.interfaces, s.multiplexors);
+        puts("Registry presence is not USB enumeration, mux traffic, Trust, or a lockdown session.");
+        return 0;
+    }
+    if (argc >= 2 && (!strcmp(argv[1], "--bus-off") || !strcmp(argv[1], "--bus-on") || !strcmp(argv[1], "--bus-cycle"))) {
+        unsigned operation = !strcmp(argv[1], "--bus-off") ? X9_USB_BUS_OFF :
+            !strcmp(argv[1], "--bus-on") ? X9_USB_BUS_ON : X9_USB_BUS_CYCLE;
+        uint32_t delay = 0;
+        if (operation == X9_USB_BUS_CYCLE && argc == 3) {
+            char *end = NULL; unsigned long n = strtoul(argv[2], &end, 10);
+            if (!*argv[2] || *end || n > 1000) { fprintf(stderr, "cycle delay must be 0..1000 ms\n"); return 2; }
+            delay = (uint32_t)n;
+        } else if (operation == X9_USB_BUS_CYCLE || argc != 2) {
+            fprintf(stderr, "usage: usbctl --bus-off | --bus-on | --bus-cycle <0..1000 ms>\n"); return 2;
+        }
+        kern_return_t e = x9usb_controller_command(operation, delay);
+        if (e) { fprintf(stderr, "original IOKit bus command failed %#x; NOT retried\n", e); return 1; }
+        puts("Original IOKit command completed the MTU3 bus/STOP barrier, not native mux or pairing.");
+        return 0;
+    }
     bool echo = argc >= 2 && !strcmp(argv[1], "--echo");
     unsigned seconds = 60;
     if (echo && argc == 3) {
@@ -35,7 +62,7 @@ int main(int argc, char **argv)
         if (!*argv[2] || *end || n < 1 || n > 600) { fprintf(stderr, "duration must be 1..600 seconds\n"); return 2; }
         seconds = (unsigned)n;
     } else if ((echo && argc > 3) || (!echo && (argc > 2 || (argc == 2 && strcmp(argv[1], "--status"))))) {
-        fprintf(stderr, "usage: usbctl [--status | --echo [1..600 seconds]]\n"); return 2;
+        fprintf(stderr, "usage: usbctl [--status | --native-status | --echo [1..600 seconds] | --bus-off | --bus-on | --bus-cycle <0..1000 ms>]\n"); return 2;
     }
     io_connect_t c; kern_return_t e = x9usb_open(echo, &c);
     if (e) { fprintf(stderr, "USB open failed %#x (x9_usb=1/2; echo needs 2 + root + exclusive lease)\n", e); return 1; }
