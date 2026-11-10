@@ -73,7 +73,8 @@ X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>      # 之后再�
 
 ## 3. 当前基线镜像与参数
 
-- **最新日志175 / 新候选**:175的启动参数与`x9-cellular-data1-md`一致(完整hi + `x9_dpmaif=2 x9_mipc=1 x9_md_lte=0`),日志确认40-bit分配、INIT_DONE和真实SA→LTE;用户观察5G可显示/可上网,但该日志截至121s仍没有WDS Start或蜂窝收发,详见§7。新整合候选 **`x9/out/x9-cellular-als175-md/boot.img`**,构建器报告**13025280 B**,包含DATA+ALS及15f597b的窄范围legacy PIT状态修正,仅追加`x9_als=1`(598B),32GiB manifest/插件275不变,无需mailbox;**未上机**。以下ic/ij等为历史基线,不再代表最新日志。
+- **最新整合候选(115)**:**`x9/out/x9-cellular-als-torch175-md/boot.img`**,构建exit0、**13037568 B**。上一DATA+ALS+legacy PIT修正基线继续纳入用户指定5e06897/a4c8857;固定独立源码586184f,不包含BT/SMS。启用`x9_torch=3`,不自动点灯;仅去掉诊断`-v`以容纳606B完整参数,其余Wi-Fi/GPU/蜂窝/ALS配置不变。32GiB manifest/插件275不变,无需mailbox,**未上机**;详见§7。
+- **175日志 / 上一DATA+ALS候选**:175的启动参数与`x9-cellular-data1-md`一致(完整hi + `x9_dpmaif=2 x9_mipc=1 x9_md_lte=0`),日志确认40-bit分配、INIT_DONE和真实SA→LTE;用户观察5G可显示/可上网,但该日志截至121s仍没有WDS Start或蜂窝收发,详见§7。上一整合候选 **`x9/out/x9-cellular-als175-md/boot.img`**,构建器报告**13025280 B**,包含DATA+ALS及15f597b的窄范围legacy PIT状态修正,仅追加`x9_als=1`(598B),32GiB manifest/插件275不变,无需mailbox;**未上机**。以下ic/ij等为历史基线,不再代表最新日志。
 
 最新实测:**x9-rev252ic-md**(168,见HANDOFF102;LTE-only注册稳定,仍不拨号);再前 **x9-rev252ib-md**(167,见HANDOFF101);再前 **x9-rev252ia-md**(166,见HANDOFF100);再前 **x9-rev252hz-md**(165,见HANDOFF99);再前 **x9-rev252hy-md**(164,见HANDOFF98);再前 **x9-rev252hx-md**(163,见HANDOFF96);再前 **x9-rev252hw-md**(162,见HANDOFF95);再前 **x9-rev252hv-md**(161,见HANDOFF94;MIPC就绪、UIM读通);再前 **x9-rev252hu-md**(160,见HANDOFF93;RAM 10.0GiB生效);再前 **x9-rev252ht-md**(159,见HANDOFF92);再前 **x9-rev252hs-md**(158,见HANDOFF91;MIPC/DPMAIF在prepare/OPEN即隔离,UIM卡状态被拒);前一实测 **x9-rev252hl-md**(代码提交 **`20c64f2`**,构建交接 `0f9d983`),boot.img **12877824 B=12.28125MiB**,路径 `x9/out/x9-rev252hl-md/boot.img`。**157确认完整11文件安装成功、qdsp可读、Sahara finished并进入QMUX/QMI,握手摘要reset=0;真实iOS蜂窝尚未打通**,见HANDOFF87。独立34MiB固件与插件275不需再stage。
 最新实测:**x9-rev252ij-md**(172,见HANDOFF109;根盘已扩到32GiB,能力门已装,SA注册,界面仍无信号/5G,SIM2被MD报未插卡)。旧16GiB manifest镜像已不可用;ig/if未单独上机;更早候选 **x9-rev252hq-md**(代码`ccbad81`),boot.img12906496B;沿用hn AT→QMI,新增DPMAIF只读/分配探针和WDS前置状态查询,见HANDOFF89。hq默认`x9_dpmaif=1`,不初始化硬件或激活PDP;hn保留。最新实测仍hl;不要把候选当作SIM/蜂窝已验证。
@@ -154,12 +155,13 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
 
-## 7. 当前交接(HANDOFF 115-INTEGRATE,2026-11-10): 按用户要求继续整合两个手电筒提交
+## 7. 当前交接(HANDOFF 115-INTEGRATE,2026-11-10): 蜂窝+ALS+两个手电筒提交独立整合构建通过,未上机
 
 - **本轮范围**:用户明确“继续合:5e06897、a4c8857这两个”。它们已是main祖先,不在main重复提交源码;本轮是把这两份代码纳入上一蜂窝+ALS候选。独立树`.local/x9/worktrees/cellular-als-torch-175/`从ca4980f开始,依次cherry-pick成**d68c37b**(5e06897)、**586184f**(a4c8857),保留DMA40/PDP/WDS、single-SIM+NR能力门、ALS与legacy PIT修正;没有夹带BT/SMS等功能。
 - **合并里程碑**:代码没有冲突;只有5e06897的NOTES插入依赖已存在的ALS交接段,已在独立树采用该提交的文档版本后继续,主checkout活动交接不回退。a4c8857完整应用。源码独立固定586184f,main不切分支、不覆盖其他会话源码。
 - **参数选择**:完整上个蜂窝+ALS配置继续保留,启用**`x9_torch=3`**iOS受限writer/flash元数据/自有mediaserverd桥,**启动不自动点灯**,不选择会自动25mA脉冲的mode2。598B旧参数追加torch会达609B而超607B ABI上限;仅删除诊断`-v`,新参数**606B**,Wi-Fi校准/GPU/蜂窝/ALS开关不变。32GiB manifest、插件275不变,无需mailbox;不自动清MG缓存。
-- **构建状态**:正在独立树本地编译/打包唯一名字`x9-cellular-als-torch175-md`;原始输入/输出日志在`.local/x9/work/cellular-als-torch-175/{boot-config.json,build.stdout.log}`。当前尚未取得最终boot成功结果,不能把合并成功当作编译或实机成功。没有测试套件、CI run、push、ADB/flash/reboot/设备分区写入。
+- **构建结果**:本地iOS16 arm64桥/torchctl编译和adhoc签名通过,桥**72464 B**;55/55 overlay+6prebuilt、kernel link/strip、shim/boot打包exit0。**`x9/out/x9-cellular-als-torch175-md/boot.img`**构建器报告**13037568 B**;完整原始目录`.local/x9/worktrees/cellular-als-torch-175/x9/out/x9-cellular-als-torch175-md/`已原样复制主checkout,没有覆盖上一成功候选。编译不等于实机成功;成功后没有解包/重算hash/反汇编/二次重建。没有测试套件、CI run、push、ADB/flash/reboot/设备分区写入,无需mailbox。
+- **重建/交接**:在固定586184f独立树运行`/Library/Frameworks/Python.framework/Versions/3.13/bin/python3 -I x9/build/build.py all --name <新的唯一名字> --boot-config /Users/tosasitill/ios_plj110/.local/x9/work/cellular-als-torch-175/boot-config.json`;原始输入/日志在`.local/x9/work/cellular-als-torch-175/{boot-config.json,build.stdout.log}`。源整合里程碑已在main文档提交b0027aa,本次续补最终结果。手动启动路径`fastboot boot x9/out/x9-cellular-als-torch175-md/boot.img`,仅由用户操作;若提供新日志,看`X9 TORCH:`安装/环境与`X9 TORCH MEDIA:`hook/RPC,最终仍需实体点灯和熄灭观察。旧MG缓存可能隐藏按钮,本轮不自动清理;panic/停调度时可靠熄灭未实现。蜂窝真实收发、NR回退原因、ALS物理SCP与背光边界仍同114,本轮只整合指定提交,不扩展验收结论。
 
 ### 前次交接(HANDOFF 114-175,2026-11-10): 175真实SA→LTE;蜂窝与ALS独立整合构建通过,收发/物理光感仍未验收
 
