@@ -42,6 +42,9 @@ static int cam_irq_control_guard_locked(uint64_t,bool);
 static int cam_irq_slot_guard_locked(bool);
 static int cam_stream_close_guard_locked(uint64_t);
 static bool cam_stream_close_restore_ready(void);
+static int cam_sv_dma_stop_observe(unsigned,vm_offset_t,unsigned,uint32_t,bool *);
+static uint32_t cam_sv_dma_stop_busy_exemption(unsigned);
+static bool cam_sv_dma_stop_compare_allowed(unsigned,unsigned,uint32_t);
 /* Control-lock source ledger; actual observations precede cached comparisons. */
 static int cam_source_observe(vm_offset_t,unsigned,uint32_t,bool *);
 static uint32_t cam_source_compare_word(vm_offset_t,unsigned,uint32_t);

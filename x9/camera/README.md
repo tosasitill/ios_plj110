@@ -768,4 +768,14 @@ source ON 真正 issued 后，原单 credit 的 CNT0/WCNT+1 可先于 SOF 服务
 
 实际关闭顺序仍是唯一逆序 source **DL0+fresh CFG_DONE→PHY/AFIFO→MAC lanes→mux**，然后正常 **TG_MODE_OFF→VF0→TG DB down/up→CMOS0**，再原 restricted **DONE/ERR/SOF→IMG0A DMA0**。每一store、嵌套OUTMUX commit/W1C以及目标poll仍核同一独立receipt和实际counter，native callback不在spin，不写inner/RESET/新RCNT、不改变immutable accepted baseline。new receipt的checking不是publication，只有两次fresh观察完成才admitted；partial或首次错误不可重试。cold/on分支仍原credit/ARMED/no-input门，不按off布尔或CPU RETIRED独自放宽。
 
-controls完成后才标 `X9 CAMERA STREAM CONTROLS` 的stopped并继续原GIC/worker关闭；**原issued credit、S1 backing、namespace及所有supplier保留**，`cam_sv_close` 继续拒绝issued credit，不能恢复地址、unmap、撤电或repeat。原close后续worker timeout不覆盖更早的source/control首错。GIC route/priority逆序恢复期间，live FBC只在controls完整receipt后改用原dirty/uncertain精确journal比较，不能因本次已合法恢复第一项prior就用旧all-target门拒绝自己；普通close标志或masked line没有该豁免。下一必须接真正DMA/下游AXI退休并消费原credit，再合法复用和native/iOS实帧闭环；不要把此receipt当全链STOP成功，不制作中间镜像。
+controls完成后才标 `X9 CAMERA STREAM CONTROLS` 的stopped并进入下一节普通DMA停止观察，再原GIC/worker关闭；**原issued credit、S1 backing、namespace及所有supplier保留**，`cam_sv_close` 继续拒绝issued credit，不能恢复地址、unmap、撤电或repeat。原close后续worker timeout不覆盖更早的source/control首错。GIC route/priority逆序恢复期间，live FBC只在controls完整receipt后改用原dirty/uncertain精确journal比较，不能因本次已合法恢复第一项prior就用旧all-target门拒绝自己；普通close标志或masked line没有该豁免。下一必须完成下游AXI/SMMU退休并消费原credit，再合法复用和native/iOS实帧闭环；不要把此receipt当全链STOP成功，不制作中间镜像。
+
+### 正常 CAMSV0 DMA-top 停止与必要下游观察
+
+`x9_camera_dma_stop.inc` 已接到实际 `cam_irq_close_locked`：完整streamed-controls receipt后、GIC恢复前执行。依据普通 ISP8s `common_disable` 的 DMA DCM inhibit（outer `+7c=1`）及 `sv_reset` 的 DMA-top `+1020=1`/poll ACK bit1，不搬它后续STG/CQ/central/inner/debug reset。当前仍无实际native `.check` 注册者；接口要求独立证明exclusive CAMSV0 DMA-top stop scope，并排除其他image/LEN/CQ users，不能凭空闲CSR自授权限。
+
+首先实际核两bank原stop CSR为0、DCM prior仅0/1。outer DCM prior0时先记issued，再唯一store1并两次实际readback；prior1只borrow、不重写/释放。随后先记DMA issued，再唯一outer request1；100ms单总deadline覆盖DCM、ACK、SMI观察及最后guard。vendor只要求ACK bit1，未证明request bit0保持，所以ACK完整值2或3均合法；见ACK不得回0/1，见ACK2后bit0不得再出现。reserved/其他reset bits拒绝。inner可保持原值，不猜inner ACK或写DB/inner。actual在下一sample/比较前记录，不修改原SV expected、accepted credit或S1 range。
+
+ACK后要求实际held的同epoch L19/P0 mapping、SMI/A0、原native request/power/config；读取普通`mtk-smi.c` external `+280`、internal `+780` monitor pair，两次0及最后fresh pair0，保存raw/sample masks。每store/poll仍核同一actual source/TG/receive/PHY/MAC/OUTMUX/FBC/S1。首错/回退/timeout保留请求和依赖；不重复request、不写release0、clear/reset或补RCNT。`X9 CAMERA DMA STOP`输出issued/DCM/ACK/sample/OSTD/errno。
+
+**DMA ACK和port zeros只是必要观察，不是full downstream AXI/SMMU/EMI/map退休。** 不取消原issued credit，不释放DCM/request/S1/supplier，不允许repeat；仍必须实现完整退休、normal NS controller/prior-preserving SID80 attach、持续rate/MMQoS、actual native provider和iOS前后实帧链。只有全链完成后才构建唯一最终镜像。

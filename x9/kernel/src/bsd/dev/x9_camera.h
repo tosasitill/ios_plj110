@@ -354,6 +354,11 @@ struct x9_camera_camsv_dma {
      * retirement before FBC initialization/GIC/one-credit/source publication.
      * This includes sole normal IMG0A DMA/tag0/group0 permission, prior RAW
      * writers retired and the entire immutable legal DMA range retained.
+     * For native streamed close this ALSO proves exclusive CAMSV0 DMA-top
+     * stop-request authority (normal outer +7c DMA DCM inhibit and +1020
+     * bit0/ACK bit1), with all other image/LEN/CQ users excluded.
+     * This is not authority for central,
+     * STG, CQ, CAM_MAIN or another engine's reset, nor shared SMI protection.
      * Masked/zero registers or FBC_CNT0 are not this grant.
      * Callbacks cannot re-enter camera/CAMSV APIs. */
     int (*check)(void *, uint64_t lease, const struct x9_camera_camsv_request *);

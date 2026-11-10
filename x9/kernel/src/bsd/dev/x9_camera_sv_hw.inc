@@ -189,7 +189,8 @@ static int cam_sv_inactive(const uint32_t *v)
         0x240,0x244,0x248,0x24c,0x250,0x344,0x34c,0x35c,0x364,0x36c,
         0x1020,0x1048,0x2010,0x2014,0x2018};
     for(unsigned n=0;n<sizeof(zero)/sizeof(zero[0]);n++)
-        if(v[cam_sv_find(zero[n])]&~cam_sv_receive_busy_exemption(zero[n]))return EBUSY;
+        if(v[cam_sv_find(zero[n])]&~(cam_sv_receive_busy_exemption(zero[n])|
+            cam_sv_dma_stop_busy_exemption(zero[n])))return EBUSY;
     if((v[cam_sv_find(0x140)]&1&~cam_sv_gate_busy_exemption(0x140)) ||
        (v[cam_sv_find(0x148)]&1&~cam_sv_gate_busy_exemption(0x148)))return EBUSY;
     if(v[cam_sv.db_reg]&((1u<<16)|(1u<<26)|(1u<<31)))return EBUSY;
@@ -364,7 +365,14 @@ static int cam_sv_guard_impl(void)
     else if(cam_sv.pending_slot==CAM_SV_FIELDS)pending_reg=cam_sv.db_reg;
     for(unsigned bank=0;bank<2;bank++) {
         e=cam_sv_power_guard();if(e)return e;
-        for(unsigned n=0;n<cam_sv.count;n++)v[n]=cam_rr(cam_sv.view[bank],cam_sv.offset[n]);
+        for(unsigned n=0;n<cam_sv.count;n++) {
+            bool owned=false;
+            v[n]=cam_rr(cam_sv.view[bank],cam_sv.offset[n]);
+            /* Record the real request/ACK BEFORE another sample can hide
+             * a rollback. Cold and all other reset controls remain strict. */
+            e=cam_sv_dma_stop_observe(bank,cam_sv.view[bank],cam_sv.offset[n],v[n],&owned);
+            if(e)return e;
+        }
         cam_sv_observed(bank,v);e=cam_sv_inactive(v);if(e)return e;
         /* Keep raw command observations in status; only stable FBC control
          * is part of expected. The separate issued/seen/ack record accounts
@@ -383,6 +391,7 @@ static int cam_sv_guard_impl(void)
                !(n==pending_reg && cam_sv.expected[1][n]==cam_sv.pending_next))allowed=true;
             e=cam_sv_receive_observe_word(bank,n,v[n],&allowed);if(e)return e;
             e=cam_sv_gate_observe_word(bank,n,v[n],&allowed);if(e)return e;
+            if(cam_sv_dma_stop_compare_allowed(bank,cam_sv.offset[n],v[n]))allowed=true;
             if(!allowed)return ESTALE;
         }
         if(!bank && pending_reg<CAM_SV_MAX_REGS && v[pending_reg]==cam_sv.pending_next)

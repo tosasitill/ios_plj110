@@ -79,7 +79,13 @@
  * STOPPED retains TG_MODE_OFF/FLUSH, not the original cold profile. It does
  * not cancel credit, change RAW ownership or claim AXI/map drain.
  * Core marks stream attempted BEFORE 0100=1; that state forbids inactive
- * quiesce even before the first SOF. Live source/drain is not implemented.
+ * quiesce even before the first SOF. Core now issues actual 0100 through the
+ * same AP FIFO; live FBC observations bind that immutable issued request.
+ * Streamed close requires private owned OFF/DONE/CPU/worker/GIC evidence
+ * and fresh 0100=0/0104=0/0005=FF before reversing the same controls.
+ * It then inhibits normal DMA DCM and issues one outer DMA-top stop;
+ * actual ACK bit1 and L19/P0 external/internal monitor zeros are necessary
+ * observations, NOT whole RAW/AXI/SMMU/map retirement or reuse permission.
  * The real IRQ worker additionally binds accepted FBC at begin and requires
  * owned SOF/DONE plus actual WCNT+1/CNT0 both-bank counts before CPU read.
  * That IRQ-private count evidence does not mutate the control-locked SV

@@ -11,8 +11,10 @@
  * PHY/MAC/AFIFO path and commits OUTMUX DL. CQ stays off. Core 0100
  * commands then use the same owned AP FIFO and immutable request journal.
  * Close stops the inactive arm, or the same streamed request after its
- * private actual OFF/DONE/CPU/worker/GIC receipt, before receive/GIC,
- * never declaring frame/RAW/AXI/map retirement.
+ * private actual OFF/DONE/CPU/worker/GIC receipt, before receive/GIC.
+ * Streamed close then inhibits normal DMA DCM and issues one ordinary
+ * DMA-top stop request, observing ACK bit1 and L19/P0 monitor zeros before
+ * GIC restoration. These necessary samples never declare AXI/map retirement.
  * Before source-on it also binds that exact accepted FBC state. The actual
  * SOF/DONE filter records ordinary FBC counters; the worker requires two
  * both-bank WCNT+1/CNT0 targets before CPU access, preserving RCNT/DROP.
@@ -218,6 +220,7 @@ static int cam_irq_credit_guard_locked(uint64_t epoch)
 #include "x9_camera_irq_fbc.inc"
 #include "x9_camera_stream.inc"
 #include "x9_camera_stream_stop.inc"
+#include "x9_camera_dma_stop.inc"
 /* Under spin, after actual IAR and only while accepting. Ordinary FIRST/FH
  * reads select exactly the vendor bank. No multi-tag fallback or status sweep. */
 static void cam_irq_sample(unsigned role,struct cam_irq_event *ev)
@@ -592,6 +595,9 @@ static int cam_irq_close_locked(uint64_t epoch)
     if(!e)e=cam_sv_gate_quiesce_locked(epoch);
     if(!e)e=cam_sv_receive_quiesce_locked(epoch);
     if(!e && session.stream)e=cam_stream_close_controls_locked(epoch);
+    /* Sole normal DMA stop request; ACK/SMI zeros do not authorize map,
+     * credit or supplier release. No release write; backing stays pinned. */
+    if(!e && session.stream)e=cam_sv_dma_stop_locked(epoch);
     cam_irq.close_attempted=true;
     old=cam_irq_spin_take();cam_irq.accepting=false;owns=cam_irq.owns;
     if(owns)cam_irq_mask_all();cam_irq_spin_drop(old);
