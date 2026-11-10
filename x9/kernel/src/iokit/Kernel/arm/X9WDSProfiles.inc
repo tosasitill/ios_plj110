@@ -87,7 +87,9 @@ static unsigned x9p_start(const uint8_t *req,unsigned n,unsigned sim,unsigned fa
   if(credentials.p&&credentials.n)return X9Q_UNSUPPORTED;
  }
  // Do not silently turn an IMS/emergency/proxy profile into Internet.
- const unsigned flags[]={0x1f,0x23,0x24};
+ // Native profile tags: proxy1f, IMS QoS/SigInd29, emergency36.
+ // 23/24 are UMTS QoS settings, not the IMS/emergency flags.
+ const unsigned flags[]={0x1f,0x29,0x36};
  for(unsigned tag:flags){
   x9q_view option=x9q_tlv(p->settings,p->len,(uint8_t)tag);
   if(option.p){for(unsigned i=0;i<option.n;i++)if(option.p[i])return X9Q_UNSUPPORTED;}
@@ -98,7 +100,7 @@ static unsigned x9p_start(const uint8_t *req,unsigned n,unsigned sim,unsigned fa
   unsigned tag=p->settings[at];
   switch(tag){
    case 1:case 0x10:case 0x11:case 0x14:case 0x1b:case 0x1c:case 0x1d:
-   case 0x1f:case 0x23:case 0x24:case 0x8f:case 0xdd:break;
+   case 0x1f:case 0x29:case 0x36:case 0x8f:case 0xdd:break;
    default:
     printf("X9 PROFILE: Start SIM%u type 0 index %u unsupported configured tag %02x length %u; no dial\n",sim+1,p->index,tag,x9q_u16(p->settings+at+1));
     return X9Q_UNSUPPORTED;
