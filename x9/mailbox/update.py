@@ -3,8 +3,10 @@
 Never writes HFS metadata or boot; commit header is published last.
 """
 from pathlib import Path
-import argparse,hashlib,json,os,subprocess
-P=Path(__file__).resolve().parent;ROOT=P.parents[1];SERIAL=os.environ.get('X9_SERIAL','');TOOL='/data/local/tmp/x9-ios-pan92-20261027-1215/pinfile';DEV='/dev/block/sdc100';B=4096
+import argparse,hashlib,json,os,subprocess,sys
+P=Path(__file__).resolve().parent;ROOT=P.parents[1];SERIAL=os.environ.get('X9_SERIAL','');TOOL='/data/local/tmp/x9-ios-pan92-20261027-1215/pinfile';DEV=None;B=4096
+sys.path.insert(0,str(ROOT/'x9/tools'))
+from userdata_device import resolve_userdata
 
 def adb(c,data=None):
  p=subprocess.run(['adb','-s',SERIAL]+(['exec-out'] if data is None else ['shell','-T'])+['su','-c',c],input=data,capture_output=True,timeout=120)
@@ -29,7 +31,8 @@ def main():
   manifest=Path(cfg['root_manifest']).expanduser() if cfg.get('root_manifest') else None
   if manifest is not None and not manifest.is_absolute():manifest=ROOT/manifest
  if a.root_check is None and manifest is None:raise SystemExit('pass --root-manifest (or set root_manifest in x9/build/local.json) or --root-check')
- global TOOL
+ global TOOL,DEV
+ rm=None
  if manifest is not None:
   rm=json.loads(manifest.read_text())
   # pinfile sits next to the root image on the device
@@ -38,6 +41,10 @@ def main():
  desc=json.loads((pkg/'mailbox.json').read_text());m=json.loads((P/'mailbox-manifest.json').read_text())
  if a.root_check is not None:subprocess.run(['/bin/bash',str(a.root_check.resolve())],check=True)
  else:subprocess.run(['python3','-I',str(ROOT/'x9/tools/check_plaintext_root.py'),'--manifest',str(manifest),'--serial',SERIAL],check=True)
+ # UFS sdX letters change between Android boots. Select the same verified
+ # physical userdata route for all raw reads/writes, never a guessed sdX path.
+ DEV=resolve_userdata(lambda command:adb(command).decode(),rm)
+ print('Verified physical userdata:',DEV,flush=True)
  for f in m['files']:
   path=f['file'];status=adb(f'{TOOL} status {path}; lsattr {path}; stat -c "%i %s" {path}').decode()
   if ': pinned (GC move failures 0)' not in status or 'i' not in status.splitlines()[1].split()[0] or status.splitlines()[-1]!=f"{f['inode']} {f['bytes']}":raise ValueError('mailbox identity or protection changed: '+path)

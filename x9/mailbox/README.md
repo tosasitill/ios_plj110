@@ -36,9 +36,15 @@ The root preflight is never skipped: by default it runs
 `x9/tools/check_plaintext_root.py` against `root_manifest` from
 `x9/build/local.json` (serial, pin+immutable, inode, FIEMAP, userdata geometry,
 dm route, live HFS UUID/geometry). `--root-manifest` or `--root-check <script>`
-override it. The updater verifies mailbox identity, invalidates the commit
+override it. The preflight and updater resolve the physical partition from Android’s
+`by-name/userdata` link rather than assuming a stable UFS `sdX` letter.
+They check partition identity and the dm-default-key route; with the root
+manifest they also require the live GPT UUID and geometry to match.
+The updater verifies mailbox identity, invalidates the commit
 marker, writes only mapped slices with old-content checks and raw readback, then
 publishes the marker. It never scans the iOS root volume or writes a boot
 partition. The owner then boots the candidate's `boot.img` by hand.
 
-Current plugin revision: **275** (`X9GeneralMetal275`, `X9PanVK275`).
+Previously deployed baseline: **275** (`X9GeneralMetal275`, `X9PanVK275`).
+Current GPU candidate: **276** (`x9/out/x9-gpu276-joint125`); stage its
+mailbox package before booting its paired kernel.

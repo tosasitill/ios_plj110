@@ -11,6 +11,7 @@ import subprocess
 import sys
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 from ufs_root_manifest import load
+from userdata_device import resolve_userdata
 
 
 def main():
@@ -37,15 +38,7 @@ def main():
         raise ValueError('file is no longer pinned or has GC move failures')
     table=json.loads(read(quote(tool)+' extents '+quote(path)+' --json'))
     if table!=m['android_extents']:raise ValueError('FIEMAP changed; stale manifest rejected')
-    start=int(read('cat /sys/class/block/sdc100/start').strip());size=int(read('cat /sys/class/block/sdc100/size').strip())
-    if start!=m['partition_first']*8 or size!=m['partition_blocks']*8:raise ValueError('userdata geometry changed')
-    # Parse only required table fields; never log a raw key field.
-    raw=read('dmctl table userdata');tokens=raw.split()
-    try:i=next(i for i,x in enumerate(tokens) if x.rstrip(',')=='default-key')
-    except StopIteration:raise ValueError('unexpected dm target')
-    dev=read('cat /sys/class/block/sdc100/dev').strip()
-    if tokens[i+1]!='aes-xts-plain64' or tokens[i+3]!='0' or tokens[i+4]!=dev or tokens[i+5]!='0':
-        raise ValueError('default-key route or offsets changed')
+    device=resolve_userdata(read,m)
     if m.get('log_policy'):
         log=m['log_policy'];logpath=log['device_file'];logtool=str(Path(logpath).parent/'pinfile')
         if list(map(int,read('stat -c "%i %s" '+quote(logpath)).split()))!=[log['inode'],log['bytes']]:
@@ -66,7 +59,7 @@ def main():
         from ufs_manifest import extents
         if extents(live,m['partition_blocks'])['extents']!=fw['extents']:
             raise ValueError('external firmware raw map does not match FIEMAP')
-        report=read(quote(tool)+' rawhash '+quote(fwpath)+' /dev/block/sdc100 '+str(fw['payload_bytes']),120)
+        report=read(quote(tool)+' rawhash '+quote(fwpath)+' '+quote(device)+' '+str(fw['payload_bytes']),120)
         if not any(line.startswith(fw['sha256']+'  ') and line.endswith('first '+str(fw['payload_bytes'])+' bytes') for line in report.splitlines()):
             raise ValueError('external firmware raw payload hash mismatch')
         print('EXTERNAL BBFW PREFLIGHT VERIFIED: separate pinned+immutable file, live FIEMAP and full payload SHA256; read-only.')
@@ -86,7 +79,7 @@ def main():
     if m.get('write_policy'):
         # A writable HFS header changes at mount/sync; never compare against
         # the original full-image SHA after legitimate filesystem writes.
-        toolcmd=quote(tool)+' rawreadat '+quote(path)+' /dev/block/sdc100 0 65536 2>/dev/null'
+        toolcmd=quote(tool)+' rawreadat '+quote(path)+' '+quote(device)+' 0 65536 2>/dev/null'
         p=subprocess.run(['adb','-s',serial,'exec-out','su','-c',toolcmd],check=True,capture_output=True,timeout=40)
         header=p.stdout
         import struct
@@ -105,7 +98,7 @@ def main():
         return
     # Upstream pinfile additionally checks single slave/size, extent bounds and
     # all direct device-mapper holders before issuing this O_DIRECT raw read.
-    report=read(quote(tool)+' rawhash '+quote(path)+' /dev/block/sdc100',max(40,m['bytes']//(16*1024**2)+60))
+    report=read(quote(tool)+' rawhash '+quote(path)+' '+quote(device),max(40,m['bytes']//(16*1024**2)+60))
     if not any(line.startswith(m['sha256']+'  ') for line in report.splitlines()):raise ValueError('raw root SHA256 mismatch')
     print('ROOT PREFLIGHT VERIFIED: correct device, pinned + immutable, inode/extents unchanged, raw SHA256 matches.')
     print('Root is a plaintext image in reserved file blocks. This does not flash or reboot the device.')
