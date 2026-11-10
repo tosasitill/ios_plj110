@@ -125,7 +125,11 @@ enum { GPS_RF_BANK_COUNT=sizeof(gps_rf_bases)/sizeof(gps_rf_bases[0]) };
 static const uint32_t gps_lp_bases[]={0x4000e000,0x40012000,0x4004d000,0x1c011000};
 enum { GPS_LP_BANK_COUNT=sizeof(gps_lp_bases)/sizeof(gps_lp_bases[0]) };
 #define GPS_MCU_MT6993_VERSION 0x02050800u
-struct gps_runtime_packet { uint64_t time; unsigned length; uint8_t bytes[4096]; };
+struct gps_runtime_packet {
+ uint64_t time;
+ unsigned length,bootstrap_step;
+ uint8_t bytes[4096];
+};
 struct gps_emi_cpu_region {
  uint64_t start,end,aid_set;
  uint32_t enabled;
@@ -189,6 +193,12 @@ static struct {
   uint64_t frames,notifications,stop_done,terminations,application,time;
   int error;
  } mnl_control;
+ struct {
+  uint64_t generation;
+  unsigned active,queued,posted,completed,inflight;
+  uint32_t id;
+  int error;
+ } bootstrap;
 } gps_rt;
 static void gps_runtime_pause(unsigned us)
 {
@@ -615,7 +625,40 @@ int x9_gps_runtime_queue(uint64_t generation,unsigned ch,const void *p,unsigned 
  struct gps_runtime_packet *packet=&gps_rt.outbox[c][
      (gps_rt.out_head[c]+gps_rt.out_count[c])%2];
  packet->length=n; packet->time=mach_absolute_time(); memcpy(packet->bytes,p,n);
+ packet->bootstrap_step=0;
  gps_rt.out_count[c]++; return 0;
+}
+static void gps_runtime_bootstrap_journal(int error)
+{
+ if(error && !gps_rt.bootstrap.error)gps_rt.bootstrap.error=error;
+ lck_mtx_lock(&gps_lock);
+ st.mnl_bootstrap_active=gps_rt.bootstrap.active;
+ st.mnl_bootstrap_queued=gps_rt.bootstrap.queued;
+ st.mnl_bootstrap_posted=gps_rt.bootstrap.posted;
+ st.mnl_bootstrap_completed=gps_rt.bootstrap.completed;
+ st.mnl_bootstrap_inflight=gps_rt.bootstrap.inflight;
+ st.mnl_bootstrap_id=gps_rt.bootstrap.id;
+ st.mnl_bootstrap_hardware=gps_rt.bootstrap.generation;
+ st.mnl_bootstrap_errno=gps_rt.bootstrap.error;
+ lck_mtx_unlock(&gps_lock);
+}
+static int gps_runtime_bootstrap_complete(void)
+{
+ if(!gps_rt.bootstrap.active)return 0;
+ if(gps_rt.bootstrap.error)return gps_rt.bootstrap.error;
+ if(gps_rt.bootstrap.generation!=gps_rt.generation)return ESTALE;
+ if(!gps_rt.bootstrap.inflight)return 0;
+ /* hif.poll has validated the actual id/length/flags before clearing
+  * pending NORMAL TX2. A successful POST, management1 response or a
+  * type35 byte-credit report does not complete these commands. */
+ if(gps_rt.hif.id[2]!=gps_rt.bootstrap.id)return ESTALE;
+ if(gps_rt.hif.pending&(1u<<2))return 0;
+ if(gps_rt.hif.tx_time[X9_GPS_HIF_NORMAL] ||
+     gps_rt.bootstrap.inflight!=gps_rt.bootstrap.completed+1)return EPROTO;
+ gps_rt.bootstrap.completed=gps_rt.bootstrap.inflight;
+ gps_rt.bootstrap.inflight=0;
+ gps_runtime_bootstrap_journal(0);
+ return 0;
 }
 static int gps_runtime_mnl_clock(uint64_t generation,struct x9_gps_mnl_clock *clock)
 {
@@ -786,11 +829,31 @@ int x9_gps_runtime_mnl_command(uint64_t generation,uint8_t slot_seq,
  uint8_t host_time[X9_MNL_BOOT_TIME_BYTES];
  uint8_t frame[X9_MNL_PACKET_MAX+7];
  unsigned bytes=0,channel=0;
+ unsigned bootstrap_step=0;
  int error;
  /* Reject calls outside the owner callback before reading configuration
   * bytes. Do not let QRTR/set_state/IRQ feed the physical outbox directly. */
  if(current_thread()!=gps_rt.worker || !gps_rt.in_callback)return EPERM;
  if(!generation || generation!=gps_rt.generation || gps_rt.hif.fault)return ESTALE;
+ /* Opt in ONLY through the actual native cold INIT NULL/0 path. Existing
+  * caller-owned INITs and standalone DRIVER defaults keep their contract.
+  * Original libmnl53e4b8..4dc emits2,3,7,15 in this exact order. The
+  * caller still owns real slot/credit admission; no sequence is invented
+  * and no extra packet is staged without a caller's reserved slot_seq. */
+ if(gps_rt.bootstrap.active) {
+  static const uint32_t commands[4]={X9_GPS_MNL_INIT_CONFIG,
+      X9_GPS_MNL_DRIVER_CONFIG,X9_GPS_MNL_HOST_TIME,X9_GPS_MNL_BOOT_TIME};
+  if(gps_rt.bootstrap.error)return gps_rt.bootstrap.error;
+  if(gps_rt.bootstrap.generation!=generation)return ESTALE;
+  if(command==X9_GPS_MNL_INIT_CONFIG)return EBUSY;
+  if(gps_rt.bootstrap.queued<4) {
+   if(command!=commands[gps_rt.bootstrap.queued])return EAGAIN;
+   bootstrap_step=gps_rt.bootstrap.queued+1;
+  } else if((command==X9_GPS_MNL_OPEN || command==X9_GPS_MNL_STOP) &&
+      gps_rt.bootstrap.completed!=4)return EAGAIN;
+ } else if(command==X9_GPS_MNL_INIT_CONFIG && !payload && !length) {
+  bootstrap_step=1;
+ }
  if(command==X9_GPS_MNL_INIT_CONFIG && !payload) {
   if(length)return EINVAL;
   error=gps_runtime_mnl_init_defaults(generation,init);
@@ -830,10 +893,24 @@ int x9_gps_runtime_mnl_command(uint64_t generation,uint8_t slot_seq,
  if(error)return error;
  /* runtime_queue rechecks the revoked hardware epoch/fault and snapshots
   * all bytes; no stack pointer escapes, no HIF reentry or inline send. */
- return x9_gps_runtime_queue(generation,channel+1,frame,bytes);
+ error=x9_gps_runtime_queue(generation,channel+1,frame,bytes);
+ if(error)return error;
+ if(bootstrap_step) {
+  /* v2..v4's normal queue has snapshotted this packet. No failed producer,
+   * serializer or ENOBUFS attempt advances history or consumes a step.
+   * Sole-worker ownership prevents drain/reentry during this annotation. */
+  unsigned tail=(gps_rt.out_head[0]+gps_rt.out_count[0]-1)%2;
+  gps_rt.outbox[0][tail].bootstrap_step=bootstrap_step;
+  gps_rt.bootstrap.active=1;gps_rt.bootstrap.generation=generation;
+  gps_rt.bootstrap.queued=bootstrap_step;
+  gps_runtime_bootstrap_journal(0);
+ }
+ return 0;
 }
 static int gps_runtime_drain(void)
 {
+ int error=gps_runtime_bootstrap_complete();
+ if(error){gps_runtime_bootstrap_journal(error);return error;}
  int ack=x9_gps_hif_management_result(&gps_rt.hif,1);
  if (ack && ack!=EAGAIN) return ack;
  if(gps_rt.ops.version>=5) {
@@ -846,9 +923,25 @@ static int gps_runtime_drain(void)
   absolutetime_to_nanoseconds(now-p->time,&ns);
   if (ns>1500000000ULL) return ETIMEDOUT;
   if (ack) continue;
+  if(p->bootstrap_step && (c || !gps_rt.bootstrap.active ||
+      gps_rt.bootstrap.generation!=gps_rt.generation ||
+      gps_rt.bootstrap.inflight ||
+      p->bootstrap_step!=gps_rt.bootstrap.posted+1 ||
+      gps_rt.bootstrap.posted!=gps_rt.bootstrap.completed)) {
+   /* A still-pending previous TX must wait, not drop/refund its slot.
+    * Any other broken history stops BEFORE another physical POST. */
+   if(!c && gps_rt.bootstrap.inflight)continue;
+   gps_runtime_bootstrap_journal(EPROTO);return EPROTO;
+  }
   int e=x9_gps_hif_send(&gps_rt.hif,c+1,p->bytes,p->length,now);
   if (e==EAGAIN || e==EBUSY) continue; /* never block the other channel */
   if (e) return e;
+  if(p->bootstrap_step) {
+   gps_rt.bootstrap.posted=p->bootstrap_step;
+   gps_rt.bootstrap.inflight=p->bootstrap_step;
+   gps_rt.bootstrap.id=gps_rt.hif.id[2];
+   gps_runtime_bootstrap_journal(0);
+  }
   gps_rt.out_head[c]=(gps_rt.out_head[c]+1)%2; gps_rt.out_count[c]--;
  }
  return 0;
@@ -940,6 +1033,7 @@ static void gps_runtime_worker(void *unused, wait_result_t result)
  gps_rt.ops=gps_rt.provider;
  lck_mtx_unlock(&gps_runtime_lock);
  int e=gps_runtime_bringup();
+ if(gps_rt.bootstrap.active)gps_runtime_bootstrap_journal(e);
  if(gps_nv.started)gps_nv_journal(e);
  if(gps_rt.ops.version>=5)gps_flow_journal(e);
  /* Never auto-retry, clear descriptors, release power, or unmap uncertain

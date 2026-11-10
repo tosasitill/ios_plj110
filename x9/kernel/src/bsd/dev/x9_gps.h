@@ -108,6 +108,13 @@ struct x9_gps_status {
  int32_t mnl_notification,mnl_control_errno;
  uint64_t mnl_control_frames,mnl_notifications,mnl_stop_done,mnl_terminations;
  uint64_t mnl_control_application,mnl_control_time;
+ /* Native cold INIT2 -> DRIVER3 -> HOST_TIME7 -> BOOT_TIME15 transport
+  * progress. Queued is local storage, posted is HIF submission, completed
+  * is validated MCU descriptor retirement. None is an application ACK. */
+ uint32_t mnl_bootstrap_active,mnl_bootstrap_queued,mnl_bootstrap_posted;
+ uint32_t mnl_bootstrap_completed,mnl_bootstrap_inflight,mnl_bootstrap_id;
+ uint64_t mnl_bootstrap_hardware;
+ int32_t mnl_bootstrap_errno;
 };
 struct x9_gps_nmea {
  uint64_t sequence, generation, host_time;

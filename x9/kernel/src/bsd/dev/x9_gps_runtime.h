@@ -212,6 +212,13 @@ int x9_gps_runtime_queue(uint64_t generation, unsigned channel,
  * authority. Existing caller configurations never use this fallback.
  * Factory fields are not proof of measured board tuning or aiding.
  * v1 NULL/0 is rejected; v5/v6 remain disabled. No guessed drift.
+ * Successful native INIT NULL/0 starts a cold transport bootstrap:
+ * next caller commands MUST be DRIVER3, HOST_TIME7, BOOT_TIME15, with
+ * real supplier slot/credit reservations on every call. ENOBUFS/producer
+ * failure does not advance the step. OPEN/STOP return EAGAIN until all
+ * four validated HIF TX descriptors complete; enqueue/POST/management ACK
+ * alone cannot pass this barrier. No application ACK or readiness is
+ * granted. Existing caller INITs do not opt into this new bootstrap.
  * The caller's payload is never modified, including on enqueue failure.
  * DRIVER3 may instead use NULL/0 on v2..v4: the worker produces the
  * 216B baseline from the original AP zero-fill and MCU explicit default
