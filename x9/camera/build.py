@@ -104,8 +104,9 @@ def main():
         'bytes': len(data), 'sha256': sha.hex(), 'ios_path': path,
         'profile': '20H392 / CMCapture 45d37488-2cc7-3028-8a4d-936bce7a220b',
         'vendor_tables': bool(a.vendor_root), 'platform_adapter': False,
+        'sensor_probe_backend': 'MT6993 AP FIFO/WL28681C; inherited clock/rails only',
         'hardware_tested': False}, indent=2) + '\n')
-    print(f'X9 camera: {len(data)} bytes; platform not implemented; install only with x9_camera=2', flush=True)
+    print(f'X9 camera: {len(data)} bytes; conditional sensor probe only, no capture adapter; install only with x9_camera=2', flush=True)
 
 
 if __name__ == '__main__':

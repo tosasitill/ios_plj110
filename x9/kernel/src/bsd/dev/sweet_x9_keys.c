@@ -1,7 +1,8 @@
 /* MT6993 / MT6661 SID4 buttons. Captured DT mt6661keys power/home/home2
  * maps to Linux 116/115/114. Stock mtk-spmi-pmic.c acknowledges W1C
  * PSC_TOP_INT_STATUS0; core.h IRQ64..69 are three presses then releases.
- * Independent PMIF-M SWINF2, never touch the touch driver's PMIF-P.
+ * PMIF-M SWINF2, serialized with RTC/modem/camera through X9PMIF.
+ * Never touch the touch driver's PMIF-P.
  * No long-press reset, regulator, pinmux or global interrupt writes. */
 #include <sys/systm.h>
 #include <kern/clock.h>
@@ -12,6 +13,8 @@
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 extern int sweet_early_is_x9(void);
 extern int sweet_x9_arg(const char *name, int def);
+extern int X9PMIFAcquire(void);
+extern void X9PMIFRelease(void);
 extern void sweet_hid_key(int, int);
 extern kern_return_t thread_terminate(thread_t);
 static vm_offset_t key_pmif;
@@ -32,19 +35,22 @@ static int wait_state(unsigned state) {
 }
 static int key_read(unsigned reg,uint8_t *value) {
  if(reg!=8&&reg!=0x23&&reg!=0x90f&&reg!=0x91b)return -1;
- if(wait_state(0))return -1;
- kw(0x880,(3u<<30)|(4u<<24)|reg);
- if(wait_state(6))return -1;
- *value=(uint8_t)kr(0x894);kw(0x8a4,1);
- return wait_state(0);
+ if(X9PMIFAcquire())return -1;
+ int e=wait_state(0);
+ if(!e) {
+  kw(0x880,(3u<<30)|(4u<<24)|reg);e=wait_state(6);
+  if(!e){*value=(uint8_t)kr(0x894);kw(0x8a4,1);e=wait_state(0);}
+ }
+ X9PMIFRelease();return e;
 }
 static int key_write(unsigned reg,uint8_t value) {
  /* Only enable register RMW and the six W1C event bits. */
  if(reg!=0x90f&&reg!=0x91b)return -1;
  if(reg==0x91b&&(value&~0x3f))return -1;
- if(wait_state(0))return -1;
- kw(0x884,value);kw(0x880,(3u<<30)|(1u<<29)|(4u<<24)|reg);
- return wait_state(0);
+ if(X9PMIFAcquire())return -1;
+ int e=wait_state(0);
+ if(!e){kw(0x884,value);kw(0x880,(3u<<30)|(1u<<29)|(4u<<24)|reg);e=wait_state(0);}
+ X9PMIFRelease();return e;
 }
 static void emit(unsigned key,int down) {
  unsigned bit=1u<<key;

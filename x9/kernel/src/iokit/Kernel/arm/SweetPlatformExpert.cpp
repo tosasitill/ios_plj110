@@ -194,6 +194,8 @@ static const uint16_t rtc_tc_mask[RTC_TC_COUNT] = { 0x3f, 0x3f, 0x1f, 0x1f, 0x7,
 
 static volatile uint32_t *rtc_pmif;
 static IORecursiveLock *rtc_lock;
+extern "C" int X9PMIFAcquire(void);
+extern "C" void X9PMIFRelease(void);
 
 /* Wait for the SWINF FSM to reach IDLE, draining a stale WFVLDCLR left
  * by an aborted transfer (spmi-mtk-pmif-core.c error path). */
@@ -217,7 +219,7 @@ rtc_pmif_idle(void)
 
 /* One 2-byte PMIC register transfer over the SWINF channel. */
 static int
-rtc_pmif_xfer(uint32_t addr, uint16_t *val, bool write)
+rtc_pmif_xfer_unlocked(uint32_t addr, uint16_t *val, bool write)
 {
 	unsigned n;
 	uint32_t v;
@@ -248,6 +250,20 @@ rtc_pmif_xfer(uint32_t addr, uint16_t *val, bool write)
 		*val = (uint16_t)(v & 0xffffu);
 	}
 	return 0;
+}
+
+/* rtc_lock serializes calendar operations, not SWINF2. The same PMIF-M
+ * channel also carries keys/modem/camera; lock each complete transaction,
+ * not the IOSleep/polling calendar sequence. */
+static int
+rtc_pmif_xfer(uint32_t addr, uint16_t *val, bool write)
+{
+	if (X9PMIFAcquire()) {
+		return -1;
+	}
+	int err = rtc_pmif_xfer_unlocked(addr, val, write);
+	X9PMIFRelease();
+	return err;
 }
 
 /* Gregorian date to days since 1970-01-01 (Howard Hinnant's algorithm). */

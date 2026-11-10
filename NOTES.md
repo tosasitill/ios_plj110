@@ -167,7 +167,19 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **参考/最小推进**:本地UniXNU ae68700的壁纸脚本转PNG;hackios c84b463及hakios-xnu-kernel-g52 8851317的inject_media明确用系统VCPHEVC软件回退,未找到可直接移植的MT6993 HEIF硬后端。下一步先离线固定实际VCP固件/loaded KO和内存/IPI ABI,然后VCP READY→QUERY_CAP→一块真实512x512 Main item→线性输出→VT/CMPhoto/ImageIO消费;之后扩Main10、grid和alpha。验收要有硬件任务完成与真实像素输出,以及指定硬件decoder被选择的证据;服务出现/函数返回0/显示器名都不能代替。先不安排连续探针镜像。
 - **复查材料**:`.local/x9/work/heif-20261110/`含`replay.txt`精确命令、`heif_dis.py`/targets、`heif_boxes.py`、`arm-boxes.txt`/`arm-stream-groups.json`、VT/VCP/CMPhoto反汇编与nm、Android/175证据。反汇编复用既有macho_evidence.py和真实split cache;其raw cache常量的二次解引用注释有误配风险,结论取指令/GOT符号与box原字节,不据注释猜CF对象。本轮只有本节交接入库,无新boot.img/CI run/上机结果。
 
-## 相机活动交接(CAMERA-1,2026-11-10): 控制/RAW10/iOS双流初步移植;硬件后端未实现
+## 相机活动交接(CAMERA-2,2026-11-10): 有条件AP-I2C/WL28681C芯片探测;采集/冷启动资源仍缺
+
+- **续做范围/隔离**:新独立worktree `.local/x9/worktrees/camera-probe` / `work/x9-camera-probe`,创建时main另一窗口恰好提交双卡整合,实际基线为 **5ce2d93**(含117完整功能源码),不是旧phase1c树。未夹带/覆盖另一会话的暂存修改,不主动push/设备操作/测试套件。
+- **板级事实**:captured `.local/x9/modem/live.dts`追到WL28681C在 **i2c12/0x35**,主摄AVDD/AVDD1/DVDD是WL4/7/2,前摄AVDD/DVDD是WL3/1;DOVDD为SID3 LN60_7,主AFVDD为SID6 LDC0_3。MT6993 IMPC i2c12为bit0、IMPE i2c2/4为bit1/2;不能用mt6991 clock表的bit位置。DT没有ch-offset-i2c,实际channel0而非猜测AP+0x10000。CAMTG7/1 parent7是UNIVPLL_192M_D8。来源为OPPO公开clk-mt6993、pinctrl-mt6993、i2c-mt65xx、spmi-mtk-pmif-core、mt6661-regulator头及OPLUS WL driver,不是本轮XNU实测。
+- **实现**:`x9_camera_mt6993.inc`含AP FIFO/WRRD(每请求约5ms上限)、Sony16-bit寄存器ID读取、WL产品ID0x0d/指定通道电压/启停、reset/MCLK pinmux、失败/还原journal。无DMA/总线reset/宽泛地址扫描/重试,未知继承IRQ不清。保留第一个出错状态;独立restore_errno,还原失败锁存、不宣布资源已恢复。只改disabled-at-entry的目标WL位,其他通道保持,live通道不改电压;不重置WL共享GPIO203/187/202。
+- **重要前置/未完成**:这是**有条件的probe**,不是完整power/capture backend。只借用已运行24MHz CAMTG、已ungated且timing非零/四bank idle的AP I2C、已normal/DA-enabled的精确DOVDD1.8V(主另需AFVDD3V),不改PLL/mux/voter或共享PMICrail、不接管SCP引脚。reset必须output-low/MCLK pinoff/目标WL通道off。冷LK基线很可能不满足,将返回明确blockers而非强行上电。仍缺冷启动clock/shared-regulator ownership及SENINF/RAW DMA/SMMU,**未读到任何本轮实机ID、不能拍摄**。
+- **模式/ABI/iOS**:新增 **x9_camera=3**仅root显式PROBE_SENSOR ioctl(需FWRITE),节点root:root/0600;启动/status零MMIO、不写root/不注入iOS、不写sensor stream-on/厂商表。每sensor每boot最多成功一次,任何失败锁存。GET_PROBE保留最后证据;原status88B ABI不变,使用两reserved字传probe_mask/flags。MATCHED+RESTORED才置PROBED,**supported_mask与READY仍0**,没有假capture回调或platform注册。mode1/2原语义不变。cameractl加`probe back/front`及决定阶段/错误打印。
+- **共享PMIF必要修正**:按键与RTC实际也用PMIF-M SWINF2,此前未进入X9PMIF锁;本轮把按键完整transfer、RTC单次transfer、modem已有error-clear接入同一锁,不改变业务命令/日历/按键逻辑。RTC不持总线锁IOSleep。相机只在仍持该锁时排空自身确定的迟到读响应,解锁后不猜归属/清响应。该锁变化已编译、未实机验证。
+- **编译里程碑**:用户态camera桥/cameractl交叉编译+签名通过(桥117040B);camera、keys、SweetPlatformExpert三个对象本地编译通过。首次孤立编译gpu_dependencies被缺少尚未生成的x9_mdota.inc阻止,不是编译通过;完整构建器会先生成依赖。本轮未运行测试脚本/测试套件。原始日志 `.local/x9/work/camera-probe-20261110/{object-build.log,object-build2.log}`;gh run list为空,无CI run。
+- **待构建/输入**:继续用固定117的完整配置,唯一参数变化x9_camera=1→3,仍 **605B**/32GiB manifest/插件275不变,无需mailbox。私有 `.local/x9/work/camera-probe-20261110/{boot-config.json,local-config.json,inputs.json}`。计划唯一名`x9-camera-probe2-all117`,此处尚无完整构建/上机成功结论。
+- **下一步**:先把此独立源码完整编译、打包并更新准确结果;不要求现在刷冷启动前置未完成的镜像。之后补真正的CAMTG/PLL/voter和共享rail ownership,再在获用户操作的同一日志中确认主摄ID→恢复,然后前摄;只有真实SENINF→RAW DMA完整帧之后才推进iOS拍摄/落盘验收。
+
+### 前次相机交接(CAMERA-1,2026-11-10): 控制/RAW10/iOS双流初步移植;硬件后端未实现
 
 - **用户目标**:参考 UniXNU / hackios 做前后相机初步实现、驱动构建与 iOS 对接。当前仅代码/构建工作;没有设备操作、flash/reboot、分区写入、mailbox staging、测试套件或 CI run。
 - **上游核对**:本轮 fetch 后 UniXNU `95ad781`没有相机/MT6993 ISP实现;HakiOS `63fc2b4`的userland `camera_device.c/camera_isp.c`提供RAW10→软件ISP→FigCaptureDevice双流。其高通内核相机已迁到drivers/camera/hakios.camera.c,没有移植高通MMIO。移植保留MIT许可证;厂商寄存器表仅本地生成,保留GPL/OPLUS/MediaTek声明,不入git。

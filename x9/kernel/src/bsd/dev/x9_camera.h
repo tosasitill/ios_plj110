@@ -9,14 +9,39 @@
 #define X9_CAMERA_READY 1u
 #define X9_CAMERA_STREAMING 2u
 #define X9_CAMERA_FAULT 4u
+#define X9_CAMERA_PROBED 8u /* Sensor identity only; NEVER capture readiness. */
 #define X9_CAMERA_MAX_BYTES (16u * 1024u * 1024u)
 struct x9_camera_status {
     uint32_t version, mode, flags, supported_mask;
     uint32_t sensor, last_errno, width, height;
     uint64_t generation, frames, rejected;
-    uint32_t chip_id[2], reserved[6];
+    uint32_t chip_id[2], probe_mask, probe_flags, reserved[4];
 };
 #define X9_CAMERA_GET_STATUS _IOR('C', 0x90, struct x9_camera_status)
+/* Separate probe-only ABI. Requests carry version=1 and sensor=1/2, all
+ * other fields zero. Results preserve raw observations even on failure.
+ * mode3 + root + FWRITE only; no stream-on, vendor tables or iOS injection. */
+#define X9_CAM_PROBE_ATTEMPTED 1u
+#define X9_CAM_PROBE_MATCHED 2u
+#define X9_CAM_PROBE_RESTORED 4u
+#define X9_CAM_PROBE_LATCHED 8u
+#define X9_CAM_BLOCK_CLOCK 1u
+#define X9_CAM_BLOCK_RAIL 2u
+#define X9_CAM_BLOCK_ROUTE 4u
+#define X9_CAM_BLOCK_I2C 8u
+#define X9_CAM_BLOCK_INHERITED 16u
+enum x9_camera_probe_stage { X9_CAM_STAGE_NONE, X9_CAM_STAGE_PREFLIGHT,
+    X9_CAM_STAGE_PMIC, X9_CAM_STAGE_BUS, X9_CAM_STAGE_LDO,
+    X9_CAM_STAGE_POWER, X9_CAM_STAGE_ID, X9_CAM_STAGE_RESTORE,
+    X9_CAM_STAGE_DONE };
+struct x9_camera_probe {
+    uint32_t version, sensor, flags, stage;
+    uint32_t chip_id, last_errno, restore_errno, blockers;
+    uint32_t wl_id, wl_enable, mclk_cfg, mclk_status;
+    uint32_t dovdd, afvdd, i2c_status[2], reserved[4];
+};
+#define X9_CAMERA_GET_PROBE _IOR('C', 0x91, struct x9_camera_probe)
+#define X9_CAMERA_PROBE_SENSOR _IOWR('C', 0x92, struct x9_camera_probe)
 #ifdef KERNEL
 /* Platform adapter must own/restore only its camera resources. Calls below
  * run in thread context, serialized, and must not re-enter camera APIs.

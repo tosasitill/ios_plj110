@@ -55,6 +55,7 @@ static const struct x9_camera_sensor sensors[] = {
     {2,2,0x10,0x0615,3264,2448,0,4361,7642,65530,1,16,1024,1008,0,4,
      front_power, sizeof(front_power)/sizeof(front_power[0])}
 };
+#include "x9_camera_mt6993.inc"
 static const struct x9_camera_sensor *sensor(void) { return &sensors[st.sensor-1]; }
 static int read16(const struct x9_camera_sensor *s, uint16_t reg, uint32_t *v)
 {
@@ -188,7 +189,8 @@ static int cam_open(__unused dev_t d,int f,__unused int t,struct proc *p)
     if(f&FWRITE) {
         char name[32];proc_name(proc_pid(p),name,sizeof(name));
         uid_t uid=kauth_cred_getuid(kauth_cred_get());
-        if(st.mode!=2 || (uid && (uid!=501 || strcmp(name,"mediaserverd"))))return EPERM;
+        if(st.mode==3) { if(uid)return EPERM; }
+        else if(st.mode!=2 || (uid && (uid!=501 || strcmp(name,"mediaserverd"))))return EPERM;
     }
     lck_mtx_lock(&camera_control_lock);lck_mtx_lock(&camera_lock);
     int e=opened?EBUSY:0;if(!e)opened=true;
@@ -200,13 +202,37 @@ static int cam_close(__unused dev_t d,__unused int f,__unused int t,__unused str
     if(frame){kfree_data(frame,X9_CAMERA_MAX_BYTES);frame=NULL;}
     lck_mtx_unlock(&camera_lock);lck_mtx_unlock(&camera_control_lock);return e;
 }
-static int cam_ioctl(__unused dev_t d,u_long cmd,caddr_t data,__unused int f,__unused struct proc *p)
+static int cam_ioctl(__unused dev_t d,u_long cmd,caddr_t data,int f,__unused struct proc *p)
 {
-    if(cmd!=X9_CAMERA_GET_STATUS)return ENOTTY;
-    lck_mtx_lock(&camera_lock);memcpy(data,&st,sizeof(st));lck_mtx_unlock(&camera_lock);return 0;
+    if(cmd==X9_CAMERA_GET_STATUS) {
+        lck_mtx_lock(&camera_lock);memcpy(data,&st,sizeof(st));lck_mtx_unlock(&camera_lock);return 0;
+    }
+    if(cmd==X9_CAMERA_GET_PROBE) {
+        lck_mtx_lock(&camera_control_lock);memcpy(data,&cam_probe_last,sizeof(cam_probe_last));
+        lck_mtx_unlock(&camera_control_lock);return 0;
+    }
+    if(cmd!=X9_CAMERA_PROBE_SENSOR)return ENOTTY;
+    if(st.mode!=3 || !(f&FWRITE) || kauth_cred_getuid(kauth_cred_get()))return EPERM;
+    struct x9_camera_probe *r=(struct x9_camera_probe *)data;
+    struct x9_camera_probe request={.version=1,.sensor=r->sensor};
+    if((r->sensor!=1 && r->sensor!=2) || memcmp(r,&request,sizeof(request)))return EINVAL;
+    lck_mtx_lock(&camera_control_lock);
+    (void)cam_sensor_probe(request.sensor,r);
+    lck_mtx_lock(&camera_lock);
+    st.probe_flags=r->flags;st.last_errno=r->last_errno;
+    if((r->flags&(X9_CAM_PROBE_MATCHED|X9_CAM_PROBE_RESTORED))==
+        (X9_CAM_PROBE_MATCHED|X9_CAM_PROBE_RESTORED) && !r->last_errno) {
+        st.chip_id[r->sensor-1]=r->chip_id;st.probe_mask|=1u<<r->sensor;
+        st.flags|=X9_CAMERA_PROBED;
+    }
+    if(r->flags&X9_CAM_PROBE_LATCHED)st.flags|=X9_CAMERA_FAULT;
+    /* supported_mask and READY stay zero: a probe cannot capture. */
+    lck_mtx_unlock(&camera_lock);lck_mtx_unlock(&camera_control_lock);
+    return 0; /* operation/restore errors are in the copied-out result */
 }
 static int cam_write(__unused dev_t d,struct uio *uio,__unused int flags)
 {
+    if(st.mode!=2)return EPERM; /* probe mode has NO sensor register writer */
     struct hakios_camera_command c;if(uio_resid(uio)!=sizeof(c))return EINVAL;
     int e=uiomove((char*)&c,sizeof(c),uio);if(e)return e;if(c.bytes)return ENOTSUP;
     lck_mtx_lock(&camera_control_lock);lck_mtx_lock(&camera_lock);
@@ -264,12 +290,13 @@ static const struct cdevsw cam_cdev={.d_open=cam_open,.d_close=cam_close,.d_read
 void sweet_x9_camera_init(void)
 {
     if(!sweet_early_is_x9())return;
-    int mode=sweet_x9_arg("x9_camera",0);if(mode!=1 && mode!=2)return;
+    int mode=sweet_x9_arg("x9_camera",0);if(mode<1 || mode>3)return;
     if(st.mode)return;st.mode=mode;
     int major=cdevsw_add(-1,&cam_cdev);if(major<0){st.last_errno=ENXIO;return;}
     /* Captured 20H392 launchd plist runs mediaserverd as mobile (501:501),
      * not macOS _mediaserverd (32). The status device is
      * NOT evidence of capture capability. No MMIO or rail changes at init. */
-    if(!devfs_make_node(makedev(major,0),DEVFS_CHAR,501,501,0600,"x9-camera"))st.last_errno=ENOMEM;
+    if(!devfs_make_node(makedev(major,0),DEVFS_CHAR,mode==3?0:501,mode==3?0:501,0600,"x9-camera"))st.last_errno=ENOMEM;
     printf("X9 CAMERA: mode=%d hhmain(i2c4/1a) hhfront(i2c2/10); platform=%u, no fake frames\n",mode,hw.version);
+    if(mode==3)printf("X9 CAMERA PROBE: root ioctl only, no boot-time MMIO/power, no iOS install; inherited clock/rails required\n");
 }

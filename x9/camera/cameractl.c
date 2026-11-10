@@ -1,5 +1,6 @@
 /* Read-only status by default; explicit back/front asks for real frames. */
 #include <stdio.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
@@ -10,17 +11,32 @@
 #include "../kernel/src/bsd/dev/x9_camera.h"
 int main(int argc,char **argv)
 {
-    unsigned sensor=argc==2 && !strcmp(argv[1],"back")?1:argc==2 && !strcmp(argv[1],"front")?2:0;
-    if(argc>2 || (argc==2 && !sensor && strcmp(argv[1],"status"))) {
-        fprintf(stderr,"usage: cameractl [status|back|front]\n");return 2;
+    bool probe=argc==3 && !strcmp(argv[1],"probe");
+    const char *which=probe?argv[2]:argc==2?argv[1]:"status";
+    unsigned sensor=!strcmp(which,"back")?1:!strcmp(which,"front")?2:0;
+    if(argc>3 || (argc==3 && !probe) || (probe && !sensor) ||
+       (argc>=2 && !sensor && strcmp(which,"status"))) {
+        fprintf(stderr,"usage: cameractl [status|back|front|probe back|probe front]\n");return 2;
     }
     int fd=open(X9_CAMERA_DEVICE,(sensor?O_RDWR:O_RDONLY)|O_CLOEXEC);
     if(fd<0){perror(X9_CAMERA_DEVICE);return 1;}
     struct x9_camera_status s={0};
     if(ioctl(fd,X9_CAMERA_GET_STATUS,&s)){perror("status");close(fd);return 1;}
-    printf("version=%u mode=%u flags=%x supported=%x sensor=%u errno=%u frames=%llu rejected=%llu chips=%x/%x\n",
+    printf("version=%u mode=%u flags=%x supported=%x sensor=%u errno=%u frames=%llu rejected=%llu chips=%x/%x probe_mask=%x probe_flags=%x\n",
            s.version,s.mode,s.flags,s.supported_mask,s.sensor,s.last_errno,
-           (unsigned long long)s.frames,(unsigned long long)s.rejected,s.chip_id[0],s.chip_id[1]);
+           (unsigned long long)s.frames,(unsigned long long)s.rejected,s.chip_id[0],s.chip_id[1],s.probe_mask,s.probe_flags);
+    if(probe || !sensor) {
+        struct x9_camera_probe r={.version=1,.sensor=probe?sensor:0};
+        if(ioctl(fd,probe?X9_CAMERA_PROBE_SENSOR:X9_CAMERA_GET_PROBE,&r)) {
+            /* Older phase1 kernels have no probe ABI; status remains useful. */
+            if(probe || errno!=ENOTTY){perror("probe ioctl");close(fd);return 1;}
+        } else {
+            printf("sensor-probe sensor=%u stage=%u flags=%x blockers=%x chip=%04x errno=%u restore=%u wl=%02x/%02x mclk=%08x/%08x rails=%06x/%06x i2c=%x/%x (NOT capture ready)\n",
+                r.sensor,r.stage,r.flags,r.blockers,r.chip_id,r.last_errno,r.restore_errno,
+                r.wl_id,r.wl_enable,r.mclk_cfg,r.mclk_status,r.dovdd,r.afvdd,r.i2c_status[0],r.i2c_status[1]);
+            if(probe){close(fd);return r.last_errno?1:0;}
+        }
+    }
     if(!sensor){close(fd);return 0;}
     struct hakios_camera_command c={.command=HAKIOS_CAMERA_SENSOR,.a=sensor,.b=~0u};
     if(write(fd,&c,sizeof(c))!=sizeof(c)){perror("start");close(fd);return 1;}

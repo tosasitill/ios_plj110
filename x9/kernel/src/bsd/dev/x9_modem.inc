@@ -176,7 +176,10 @@ static int x9md_pmif_wait(vm_offset_t b,unsigned state){
 }
 /* 113.txt: after one failed PMIF-P write the error bit stayed set and every
  * later SID3/SID5 access failed. Clear it (VLDCLR) before a single retry. */
-static void x9md_pmif_clear(vm_offset_t b){x9md_wr(b,0x8a4,1);delay(10);}
+static void x9md_pmif_clear(vm_offset_t b){
+ if(!b||X9PMIFAcquire())return;
+ x9md_wr(b,0x8a4,1);delay(10);X9PMIFRelease();
+}
 static int x9md_pmic_rd(unsigned sid,unsigned addr,uint8_t *val){
  vm_offset_t b=x9md_bus(sid);int rc=-1;
  if(!b||X9PMIFAcquire())return -1;
