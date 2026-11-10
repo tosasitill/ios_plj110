@@ -62,14 +62,19 @@
  * are published, begin issues ONE RCNT and requires two actual both-bank
  * RCNT+1/CNT1/unchanged WCNT/DROP/reserved/control-clear observations.
  * It then confirms group0 SW_DONE, SRAM/tag0 ERR, tag0 SOF and IMG0A DMA_EN
- * in both banks. CMOS/VF/PHY/MAC lanes/OUTMUX DL and sensor source stay off;
- * this is an inactive receive arm, not a started producer or a real frame.
+ * in both banks, then CMOS/FLUSH/VF in normal order. PHY/MAC lanes/OUTMUX DL
+ * and sensor source stay off; this is an input-inactive consumer arm, not
+ * a complete producer or a real frame. Incompatible inherited TG profiles
+ * are refused before S1 arm, never repaired or considered native authority.
  * Cold configure_outmux still never writes an address, cookie or FBC.
  * Partial address/FBC/DB/credit/receive-enable publication retains
  * the cold epoch. No command retry/DB/reset cancels an issued credit; rearm
  * and CAMSV restore remain prohibited until real producer retirement exists.
- * Close first attempts to quiesce only this inactive receive arm's enables,
- * without canceling credit, changing RAW ownership or claiming AXI drain.
+ * Close first attempts actual TG_MODE_OFF/VF-off/TG-DB-up/down/CMOS-off,
+ * then quiesces this input-inactive receive arm. Each phase's full actual
+ * both-bank target must be observed; no replay, reset or unknown-up cancel.
+ * STOPPED retains TG_MODE_OFF/FLUSH, not the original cold profile. It does
+ * not cancel credit, change RAW ownership or claim AXI/map drain.
  * Sensor close retires GIC and queued/running worker pins BEFORE restoring
  * CAMSV/OUTMUX/PHY/MM. An unfinished RAW slot retains all
  * dependencies; this worker retirement is not full AXI/SMMU/map drain.

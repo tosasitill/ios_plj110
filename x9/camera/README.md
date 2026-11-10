@@ -20,7 +20,7 @@
 | 持久 sensor/receiver 生命周期 | kernel-private 冷会话可在 verified standby 后持有同一 MM 时钟与 CSI/secure 电源 journal；后续请求及撤销前检查完整已消费依赖与原始接收控制，先隔离 sensor reset/MCLK，再退休 MM，最后还原 sensor 供电。**无 native capture caller，不 stream-on；不是 DMA lease/drain** |
 | MAC/async 包配置 | verified standby/receiver 后，真实配置前 DPHY／后 CPHY 包格式、正常 RAW10 DT、unsplit async/CAM_MAIN AFIFO，并仅追加选定 async CG；逐控制 journal/guard/逆序恢复，保留其它端口及原 IRQ policy。**已局部编译，未运行；不启用 PHY mux/MAC lane，不是完整 PHY 或采集后端** |
 | OUTMUX 配置引擎 | 同一已持有会话可显式配置 inactive OUTMUX0 的固定 image tag0，真实 masked shadow 写入；CFG_DONE 需 fresh masked STATUSX 事件和完整实际 inner target，再单 bit W1C 退休。WCLR policy 独立 journal/恢复，不启 AP/CCU IRQ 或 DL/DMA。**已局部编译，未运行；无 GIC/PHY/rate/SMI/SID80 grant/native capture caller** |
-| CAMSV GIC/worker | 本次 LK FDT 的四 cell GIC 拓扑→SWEET Group1 分发→单次 SOF/hybrid/debug 采样→有界队列→既有逐页 cache/RAW10 finish；未启采集的配置路径只准备 dormant worker，close 先退休 GIC/worker。**已局部编译，未运行；begin 仍必须真实 normal domain/route/AP-IRQ/IMG0A lease，没有 native capture caller；仅接后文 inactive receive arm，不启 CMOS/VF/PHY/source 或置 READY** |
+| CAMSV GIC/worker | 本次 LK FDT 的四 cell GIC 拓扑→SWEET Group1 分发→单次 SOF/hybrid/debug 采样→有界队列→既有逐页 cache/RAW10 finish；未启采集的配置路径只准备 dormant worker，close 先退休 GIC/worker。**已局部编译，未运行；begin 仍必须真实 normal domain/route/AP-IRQ/IMG0A lease，没有 native capture caller；已接后文 receive/TG consumer arm，仍不启 PHY/source 或置 READY** |
 | 采集后端 | **缺失**：完整 DVFS/rate/SMI ownership、PHY 校准/速率、SENINF 路由提交、MM-SMMUv3 映射、RAW DMA 完成/排空队列 |
 
 原始 X9 DT 与 Android 启动日志确定：主摄为 i2c4/7-bit `0x1a`，ID 寄存器 `0x16/0x17` 返回 `0x9186`；前摄 i2c2/`0x10`，返回 `0x0615`。
@@ -531,7 +531,7 @@ shim 的 `camera_irq_handoff.c` 从本次 LK FDT 一次完整 capture 验证 roo
 | SOF | 659 | outer SOF `+360`、CHANNEL `+370`；同时锁存 inner FIRST/LAST、四 GROUP_TAG 与对应 FH_SPARE |
 | debug | 665 | outer COMMON `+368`、TOP `+378`、DMA FIFO_STAT `+104c`；**不重复读 CHANNEL，不写 debug selector/CCU** |
 
-正常 controller 才能调用 `cam_irq_begin_locked`（同一翻译单元、已持控制锁）或独立包装 `x9_camera_camsv_irq_begin`。该调用先经真实 `.check`/export backing 与逐页 CIVAC 绑定一个 tag0/group0 request，再发布并确认其 inactive 地址/FH metadata，以及无信用 FBC_EN 初始化（见下两节），才对这三路已 disabled/pending0/active0 的 Group1NS、level IRQ 保存/配置 route 与 priority。`.check` **还必须证明 AP 而非 CCU/他方的 IRQ/tag0 FBC policy、prior source/request 历史已实际退休**；GIC masked、拓扑正确、PM_GET、FBC_CNT0 或 all-zero 不提供此授权。每笔 prior mutation 前复核整个已消费 route/priority 集合及真实 owner，允许 unresolved posted prior/target，但 accepted target 不能回退。GIC 只写该三路 route/priority/enable/mask，不改 CTLR/IGROUP/ICFGR/redistributor/timer/IPI；每笔 begin unmask 前再次核对完整 request/地址/metadata/FBC/owner/power/GIC。三路实际 GIC publication 完成后只提交一次 RCNT 命令并确认完整计数/control 接受（见末节）；然后按末节实际确认限定的 source IRQ/IMG0A receive arm；仍不设置 CQ、CMOS/VF、PHY/MAC lanes、OUTMUX DL 或 sensor stream-on。
+正常 controller 才能调用 `cam_irq_begin_locked`（同一翻译单元、已持控制锁）或独立包装 `x9_camera_camsv_irq_begin`。该调用先经真实 `.check`/export backing 与逐页 CIVAC 绑定一个 tag0/group0 request，再发布并确认其 inactive 地址/FH metadata，以及无信用 FBC_EN 初始化（见下两节），才对这三路已 disabled/pending0/active0 的 Group1NS、level IRQ 保存/配置 route 与 priority。`.check` **还必须证明 AP 而非 CCU/他方的 IRQ/tag0 FBC policy、prior source/request 历史已实际退休**；GIC masked、拓扑正确、PM_GET、FBC_CNT0 或 all-zero 不提供此授权。每笔 prior mutation 前复核整个已消费 route/priority 集合及真实 owner，允许 unresolved posted prior/target，但 accepted target 不能回退。GIC 只写该三路 route/priority/enable/mask，不改 CTLR/IGROUP/ICFGR/redistributor/timer/IPI；每笔 begin unmask 前再次核对完整 request/地址/metadata/FBC/owner/power/GIC。三路实际 GIC publication 完成后只提交一次 RCNT 命令并确认完整计数/control 接受（见末节）；然后按末节实际确认限定的 source IRQ/IMG0A receive arm 与正常 CMOS/FLUSH/VF；仍不设置 CQ、PHY/MAC lanes、OUTMUX DL 或 sensor stream-on。
 
 SWEET `sleh.c` 保留 timer/IPI、ADSP filter、后备 `interrupt_handler` 和原来的唯一 EOI。camera filter 仅在已绑定的 actual IAR 下先 mask 对应 line，再从永久映射单次采样；不用 mutex、owner callback、缓存/PTE/RAW 访问。SOF 保持 masked 直到下一 request，hybrid 可以独立到达。DONE 只使用该 request **先前 SOF 锁存**的 group/last/inner sequence，缺 SOF 或迟到/歧义绑定直接保留，不能在 DONE 时晚读 group 猜 frame。四槽有界队列不能覆盖旧事件；溢出、错误/unknown/debug 或丢失 power/config 立即 mask 并保留。
 
@@ -673,7 +673,7 @@ AO/infra BACKUP 撤票后不要求物理 PM_ACK=0，因为 secure PM_GET 仍独�
 
 接受必须观察两次完整 outer/inner 目标：原 RCNT+1 modulo256、CNT=1，WCNT/DROP/reserved 全部不变，FBC0 回原 EN control 且 RCNT 已清。10ms 有界等待期间每次复核同一 request/lease、完整已消费配置/供电以及实际 GIC route/priority/enable，要求没有 sampled/pending/active/SOF 历史。每 bank 见目标后不许回原；已见 cleared control 后不再允许命令重现。pending 期间仅为 exact 本次 EN|RCNT 做比较 canonicalization，缓存/public 原样保留实际读值，cold admission 不受该例外影响。
 
-private credit 状态记录 EMPTY/PENDING/ACCEPTED、issued、seen/ack、complete samples、原 counter、exact target/actual control 和首错。`FBC_CREDIT=128` 仅表示实际命令接受，不代表一帧写入、完成、RAW/AXI/map drain 或 READY。timeout、未知 delta、回退或 owner/config 冲突 terminal retain 同一 slot/backing/映射及供电；不能用 EN-off、reset、DB 或 caller `consumed=true` 撤销信用。credit helper 本身不启 source IRQ/DMA；begin 随后调用下面的 inactive receive arm。实际消费/完成/stop/full drain 接通前，任何 issued credit 均禁止地址 rearm 和 CAMSV restore；CMOS/VF/CQ/PHY/MAC lanes/OUTMUX DL/sensor source 仍关闭。
+private credit 状态记录 EMPTY/PENDING/ACCEPTED、issued、seen/ack、complete samples、原 counter、exact target/actual control 和首错。`FBC_CREDIT=128` 仅表示实际命令接受，不代表一帧写入、完成、RAW/AXI/map drain 或 READY。timeout、未知 delta、回退或 owner/config 冲突 terminal retain 同一 slot/backing/映射及供电；不能用 EN-off、reset、DB 或 caller `consumed=true` 撤销信用。credit helper 本身不启 source IRQ/DMA；begin 随后调用下面的 inactive receive arm。实际消费/完成/stop/full drain 接通前，任何 issued credit 均禁止地址 rearm 和 CAMSV restore；CQ/PHY/MAC lanes/OUTMUX DL/sensor source 仍关闭；CMOS/VF 由下一节之后的 TG consumer arm 单独接通。
 
 ### 真实 source IRQ 与 IMG0A 的 inactive receive arm
 
@@ -686,10 +686,30 @@ private credit 状态记录 EMPTY/PENDING/ACCEPTED、issued、seen/ack、complet
 | `+35c SOF_STATUS_EN` | `4` | tag0 SOF |
 | `+040 DMA_EN_IMG` | `1` | IMG0A |
 
-每项先留 issued，再唯一 outer store，逐项要求两次完整 actual outer/inner target；前面三个 source IRQ 接受后才写 DMA_EN。10ms 总截止时间内持续核同一 request/lease、完整已消费 power/config、实际 GIC 与无 sampled/pending/active/SOF 历史。SOURCE enable 与相邻 read-clear STATUS 分开，不读/清历史来制造 idle；CHANNEL/COMMON/CQ/其它 tag/LEN 和 CMOS/VF 仍0，PHY/MAC lanes/OUTMUX DL/sensor source 也关闭。FBC1 必须仍为同一 accepted credit target；任何自然/未知计数变化目前都 retain，不把它假定为帧消费。
+每项先留 issued，再唯一 outer store，逐项要求两次完整 actual outer/inner target；前面三个 source IRQ 接受后才写 DMA_EN。10ms 总截止时间内持续核同一 request/lease、完整已消费 power/config、实际 GIC 与无 sampled/pending/active/SOF 历史。SOURCE enable 与相邻 read-clear STATUS 分开，不读/清历史来制造 idle；CHANNEL/COMMON/CQ/其它 tag/LEN 仍0；该 helper 不写 CMOS/VF，正常 begin 随后由 TG gate journal 写入，PHY/MAC lanes/OUTMUX DL/sensor source 仍关闭。FBC1 必须仍为同一 accepted credit target；任何自然/未知计数变化目前都 retain，不把它假定为帧消费。
 
 原 cold busy admission 不变，live 仅允许本次已 issued 的精确 source/IMG0A target。普通控制和每次实际 receiver DMA 采样都记录 per-bank target 观察，见 target 后不能回 prior，即使后来又读回 target。pending 比较可容纳合法先 prior 后 target 的历史样本，但**比较本身不授权/推进状态，不抹去实际回退**；完整 raw 缓存不变。private receive phase/issued/on-seen/off-issued/off-seen/samples/首错及四项实际值单独保存，不混入原 geometry dirty/DB/RCNT 引擎。
 
-close 在 GIC mask 前，最多一次 quiesce 这个仍未启动 source 的 receive arm：按 normal disable 的限定子集顺序 DONE→ERR→SOF→DMA，每项唯一0 store及两次完整两bank消费。partial/未知/活动 arm 不通过盲写 disable 修复，失败终止并保留依赖。`RECEIVE_ARMED=256` 只描述四项使能消费，`RECEIVE_QUIESCENT=512` 只描述四项实际关闭；**两者均不是 READY、帧、RAW/AXI/map drain**。quiesce 不修改 accepted credit/CNT、S1/cache/slot，不发 reset/DB/RCNT，不完成或撤销未完 RAW；目前 issued credit 仍禁止 rearm/CAMSV restore/释放映射。
+close 在 GIC mask 前，先完成下一节限定的实际 TG stop，再最多一次 quiesce 这个输入仍未启动的 receive arm：按 normal disable 的限定子集顺序 DONE→ERR→SOF→DMA，每项唯一0 store及两次完整两bank消费。partial/未知/活动 arm 不通过盲写 disable 修复，失败终止并保留依赖。`RECEIVE_ARMED=256` 只描述四项使能消费，`RECEIVE_QUIESCENT=512` 只描述四项实际关闭；**两者均不是 READY、帧、RAW/AXI/map drain**。quiesce 不修改 accepted credit/CNT、S1/cache/slot，不发 reset/DB/RCNT，不完成或撤销未完 RAW；目前 issued credit 仍禁止 rearm/CAMSV restore/释放映射。
 
-下一步必须实现 CMOS/VF/TG DB 与 PHY/MAC/AFIFO/OUTMUX source 的正常启停、owned SOF/DONE 与 RCNT/WCNT/CNT 因果消费，再接完整 RAW/AXI/IRQ/worker/map 退休；同时完成正常 SID80 attach、native owner/capture caller、持续 rate/MMQoS 和 iOS 实帧链。不得把 inactive arm 的局部编译或“四 enable 关闭”替代这些工作，全部采集链接通后才交唯一镜像。
+下一步必须实现 PHY/MAC/AFIFO/OUTMUX source 的正常启停、owned SOF/DONE 与 RCNT/WCNT/CNT 因果消费，再接完整 RAW/AXI/IRQ/worker/map 退休；同时完成正常 SID80 attach、native owner/capture caller、持续 rate/MMQoS 和 iOS 实帧链。不得把 inactive arm 的局部编译或“四 enable 关闭”替代这些工作，全部采集链接通后才交唯一镜像。
+
+
+### 正常 CAMSV CMOS/VF consumer gate 与 input-inactive stop
+
+**代码与相机对象编译已接通；上游输入仍关闭，没有真实帧或 native capture caller。** begin 在真实 S1/cache/address/FBC/GIC/receive arm 完整接受之后调用 `cam_sv_gate_transition_locked`。采用 ISP8s `mtk_cam_sv_central_common_enable/disable` 与 `mtk_cam_sv_toggle_tg_db` 的正常命名字段；不移植 global DMA reset、all-tag inner 清零或 stress 单帧假定。
+
+| 阶段 | outer CSR | 单次实际控制动作 |
+|---|---|---|
+| arm | `+140 SEN_MODE` | CMOS_EN=1，再 FLUSH_ALL_SRC_DIS=1 |
+| arm | `+148 VF_CON` | VFDATA_EN=1 |
+| stop | `+140 SEN_MODE` | TG_MODE_OFF=1 |
+| stop | `+148 VF_CON` | VFDATA_EN=0 |
+| stop | `+14c PATH_CFG` | SYNC_VF_EN_DB_LOAD_DIS=1，再=0 |
+| stop | `+140 SEN_MODE` | CMOS_EN=0 |
+
+每步骤保存 immutable prior/target，先记录 issued 再唯一 ordinary RW store；原 FLUSH 已1等同值仅实际观察，不再写。10ms 总 deadline 内，每步骤需两次完整实际 outer/inner target；TG DB 的1和0各自必须完整接受，不以未知1被0“取消”来收尾。每次实际采样先留 per-bank seen，再做历史比较；只当前已 issued 的精确 prior/target 允许 pending 跨度，实际见 target 后不许回 prior。重复 SEN_MODE 与 PATH_CFG 步骤独立留账，不能用旧步骤的 seen 当新步骤消费。
+
+S1 arm 之前先拒绝不兼容的 inherited SAT/MSTREAM/sub/downsample/RGBW、VF single/fr-con/delay/mux、JPG/TG DB-disable/escape 模式；不修复 inherited profile。其它 pixel/clock/timing/polarity/reserved 位原样保留且完整核对，兼容性筛查不是 native authority。持续核同一 immutable request/lease、power/config、实际 GIC publication 与无 sampled/pending/active/SOF 输入；accepted FBC1 完整值不变。未知、回退、owner/config/输入事件或超时 terminal retain，不 reset/retry/rebase。此阶段不启 PHY/MAC lanes/OUTMUX DL/sensor source。
+
+close 在 GIC mask 前最多一次 TG stop，再 receive quiesce；仅同一完整 ARMED 且输入未开始的 consumer。失败的部分 arm/DB 不能盲写 off 修复。`GATE_ARMED=1024` 只说明这些实际 controls 接受，`GATE_STOPPED=2048` 只说明 gate 实际关闭；stop 保留 TG_MODE_OFF/FLUSH，不恢复 cold profile。**均不是 READY、帧、RAW/AXI/map drain、信用取消或映射/供电释放许可**。issued credit 与 unfinished RAW slot 继续保留，真正 producer 与完整自然计数消费/全写链退休仍必须接通后才能复用或恢复。

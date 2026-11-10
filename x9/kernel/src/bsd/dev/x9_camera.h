@@ -390,8 +390,10 @@ int x9_camera_camsv_finish(struct x9_camera_camsv_slot *, const struct x9_camera
  * CNT=1, unchanged WCNT/DROP/reserved and command self-clear, twice.
  * It then writes only group0 SW_DONE, SRAM/tag0 ERR, tag0 SOF source enables
  * and IMG0A DMA_EN, each once with two complete actual both-bank observations.
- * CMOS/VF/CQ, PHY/MAC lanes/OUTMUX DL and sensor stream stay off. RECEIVE_ARMED
- * describes these four enables, not a started producer or a frame.
+ * Begin then journals CMOS_EN, FLUSH_ALL_SRC_DIS and VFDATA_EN in normal
+ * order, each with two complete actual both-bank targets. CQ, PHY/MAC lanes,
+ * OUTMUX DL and sensor stream stay off. RECEIVE_ARMED/GATE_ARMED describe
+ * accepted controls, not a started upstream producer, frame or drain.
  * EMPTY/CREDIT are not a source/AXI/map drain or native ownership grant.
  * Address/metadata/credit failure retains this slot and dependent cold epoch;
  * GIC/CPU retirement alone does not permit revoking its backing/lease.
@@ -399,8 +401,12 @@ int x9_camera_camsv_finish(struct x9_camera_camsv_slot *, const struct x9_camera
  * automatic DMA reuse. State is cache-only, not source/AXI/map drain. An
  * issued credit currently blocks rearm/restore: producer retirement is not
  * implemented and EN-off/reset is not permission to revoke that credit.
- * Close can quiesce only this inactive receive arm before masking GIC; it
- * preserves the accepted credit and does not finish/release the RAW slot.
+ * Close can stop this input-inactive TG first (TG_MODE_OFF, VF off, TG DB
+ * bit8 up/down, CMOS off), then quiesce receive enables before masking GIC.
+ * Every TG DB phase requires its own actual target; unknown up cannot be
+ * canceled by down. Cold-profile compatibility is checked before S1 arm,
+ * not treated as native authority. No reset, blind replay or counter rebase;
+ * accepted credit and RAW/lease/dependencies stay retained even after stop.
  * There is still no registered native capture caller. */
 int x9_camera_camsv_irq_begin(uint64_t, const struct x9_camera_camsv_request *,
     const struct x9_camera_camsv_dma *);

@@ -7,7 +7,8 @@
  * exactly ONE RCNT descriptor is ported after actual GIC publication. Its
  * complete counter/control acceptance is observed, not guessed from a pulse.
  * Normal source IRQ/tag0 DMA receive enables then follow with actual bank
- * consumption; CMOS/VF/PHY/OUTMUX DL/sensor source still remain off.
+ * consumption; normal CMOS/VF TG gate follows. PHY/OUTMUX DL/sensor
+ * source still remain off, so this is not yet a producing capture path.
  * camera_control_lock held. Named ordinary configuration only: no DONE,
  * SOF, ERR, COMMON, CHANNEL, VF_ST, FIFO_STAT or CQ IRQ_STATUS reads.
  * Tag0 FBC1 is sampled separately, as in the normal upstream FBC readers;
@@ -96,6 +97,13 @@ static struct {
     int error;
     struct x9_camera_sv_hw_status status;
 } cam_sv;
+static void cam_sv_gate_init(void);
+static void cam_sv_gate_capture(void);
+static void cam_sv_gate_status(void);
+static void cam_sv_gate_fault(int);
+static void cam_sv_gate_observed(unsigned,const uint32_t *);
+static int cam_sv_gate_observe_word(unsigned,unsigned,uint32_t,bool *);
+static bool cam_sv_gate_off_ready(void);
 static unsigned cam_sv_find(unsigned offset)
 {
     for(unsigned n=0;n<cam_sv.count;n++)if(cam_sv.offset[n]==offset)return n;
@@ -134,6 +142,7 @@ static void cam_sv_status(void)
     else s->flags&=~X9_CAM_SV_HW_RECEIVE_ARMED;
     if(cam_sv.receive_phase==X9_CAM_SV_RECEIVE_QUIESCENT && !cam_sv.error)s->flags|=X9_CAM_SV_HW_RECEIVE_QUIESCENT;
     else s->flags&=~X9_CAM_SV_HW_RECEIVE_QUIESCENT;
+    cam_sv_gate_status();
     if(cam_sv.request_held) {
         s->request_generation=cam_sv.request.frame.generation;
         s->request_capture_id=cam_sv.request.frame.capture_id;
@@ -159,6 +168,7 @@ static int cam_sv_fault(int e)
             cam_sv.status.receive_errno=e;
     }
     if(e==ESTALE || e==EACCES || e==EBUSY || e==EOVERFLOW)cam_sv.terminal=true;
+    cam_sv_gate_fault(e);
     cam_sv_status();return e;
 }
 /* No OUTMUX or receiver recursion here. The real MM and optional SMI
@@ -180,7 +190,8 @@ static int cam_sv_inactive(const uint32_t *v)
         0x1020,0x1048,0x2010,0x2014,0x2018};
     for(unsigned n=0;n<sizeof(zero)/sizeof(zero[0]);n++)
         if(v[cam_sv_find(zero[n])]&~cam_sv_receive_busy_exemption(zero[n]))return EBUSY;
-    if((v[cam_sv_find(0x140)]|v[cam_sv_find(0x148)])&1)return EBUSY;
+    if((v[cam_sv_find(0x140)]&1&~cam_sv_gate_busy_exemption(0x140)) ||
+       (v[cam_sv_find(0x148)]&1&~cam_sv_gate_busy_exemption(0x148)))return EBUSY;
     if(v[cam_sv.db_reg]&((1u<<16)|(1u<<26)|(1u<<31)))return EBUSY;
     if(v[cam_sv_find(0x1024)]&0x11)return EBUSY; /* no pseudo/FPGA DMA */
     if(v[cam_sv_find(0x2140)]&1)return EBUSY; /* CQ SUB_THR0 enable */
@@ -315,6 +326,7 @@ static void cam_sv_observed(unsigned bank,const uint32_t *v)
     for(unsigned slot=0;slot<CAM_SV_FIELDS;slot++)s->after[bank][slot]=v[cam_sv.field[slot]];
     for(unsigned i=0;i<X9_CAM_SV_RECEIVE_FIELDS;i++)
         s->receive_after[bank][i]=v[cam_sv_find(cam_sv_receive_fields[i].offset)];
+    cam_sv_gate_observed(bank,v);
 }
 /* The original receiver evidence never changes. Only actual bank values
  * accepted by this journal are published, including live-through inner
@@ -360,6 +372,7 @@ static int cam_sv_guard_impl(void)
             if(bank && v[n]==cam_sv.expected[0][n] &&
                !(n==pending_reg && cam_sv.expected[1][n]==cam_sv.pending_next))allowed=true;
             e=cam_sv_receive_observe_word(bank,n,v[n],&allowed);if(e)return e;
+            e=cam_sv_gate_observe_word(bank,n,v[n],&allowed);if(e)return e;
             if(!allowed)return ESTALE;
         }
         if(!bank && pending_reg<CAM_SV_MAX_REGS && v[pending_reg]==cam_sv.pending_next)
@@ -561,6 +574,7 @@ static int cam_sv_open_locked(uint64_t epoch)
     cam_sv.receive_issued=cam_sv.receive_off_issued=cam_sv.receive_samples=0;
     memset(cam_sv.receive_seen,0,sizeof(cam_sv.receive_seen));
     memset(cam_sv.receive_off_seen,0,sizeof(cam_sv.receive_off_seen));
+    cam_sv_gate_init();
     memset(&cam_sv.request,0,sizeof(cam_sv.request));
     memset(&cam_sv.request_dma,0,sizeof(cam_sv.request_dma));
     cam_sv.commit_pending=cam_sv.pending_seen=cam_sv.db_issued=false;cam_sv.db_phase=CAM_SV_DB_IDLE;
@@ -585,6 +599,7 @@ static int cam_sv_open_locked(uint64_t epoch)
         cam_sv.status.receive_before[i]=cam_sv.before[0][cam_sv_find(cam_sv_receive_fields[i].offset)];
         cam_sv.status.receive_target[i]=cam_sv_receive_fields[i].target;
     }
+    cam_sv_gate_capture();
     cam_sv.status.flags|=X9_CAM_SV_HW_SNAPSHOT;cam_sv.held=true;
     cam_sv.target[0]=plan.grab_pixels;cam_sv.target[1]=plan.grab_lines;
     cam_sv.target[2]=plan.format;cam_sv.target[3]=plan.dma_basic;
@@ -827,8 +842,10 @@ static int cam_sv_credit_issue_locked(uint64_t epoch,struct x9_camera_camsv_slot
         cam_sv.status.fbc_after[0],cam_sv.status.fbc_after[1],cam_sv.credit_target[0],cam_sv.credit_target[1]);
     return e;
 }
-/* Actual post-credit receive arm, still with CMOS/VF/PHY/OUTMUX DL and sensor
- * source OFF. Four single ordinary RW stores, NOT CQ/DB/RCNT commands. This
+#include "x9_camera_sv_gate.inc"
+/* Actual post-credit receive arm, before CMOS/VF arm on start and after
+ * actual TG stop on close. PHY/OUTMUX DL and sensor source remain OFF.
+ * Four single ordinary RW stores, NOT CQ/DB/RCNT commands. This
  * does not turn an unqualified DMA lease or GIC topology into native authority.
  * off is a private control action, not a caller-supplied drained assertion:
  * only the same inactive receive arm can be quiesced here. Accepted credit,
@@ -842,6 +859,7 @@ static int cam_sv_receive_transition_locked(uint64_t epoch,bool off)
        !cam_sv.request_ready || !cam_sv.fbc_ready ||
        cam_sv.credit_phase!=X9_CAM_SV_CREDIT_ACCEPTED)return ESTALE;
     if(cam_sv.receive_phase!=(off?X9_CAM_SV_RECEIVE_ARMED:X9_CAM_SV_RECEIVE_IDLE))return EBUSY;
+    if(off && !cam_sv_gate_off_ready())return EBUSY;
     if(cam_sv.commit_pending || cam_sv.pending_slot<=CAM_SV_FIELDS)return EBUSY;
     e=cam_sv_request_guard_locked(epoch,cam_sv.request_slot);if(e)return e;
     e=cam_irq_credit_guard_locked(epoch);if(e)return e;

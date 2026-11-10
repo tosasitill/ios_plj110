@@ -1,4 +1,4 @@
-/* Kernel-private ISP8s CAMSV0 configuration/receive-arm journal; never a DMA lease. */
+/* Kernel-private ISP8s CAMSV0 configuration/receive/TG journal; never a DMA lease. */
 #ifndef X9_CAMERA_SV_HW_H
 #define X9_CAMERA_SV_HW_H
 #ifdef KERNEL
@@ -13,6 +13,8 @@
 #define X9_CAM_SV_HW_FBC_CREDIT 128u
 #define X9_CAM_SV_HW_RECEIVE_ARMED 256u
 #define X9_CAM_SV_HW_RECEIVE_QUIESCENT 512u
+#define X9_CAM_SV_HW_GATE_ARMED 1024u
+#define X9_CAM_SV_HW_GATE_STOPPED 2048u
 #define X9_CAM_SV_CREDIT_EMPTY 0u
 #define X9_CAM_SV_CREDIT_PENDING 1u
 #define X9_CAM_SV_CREDIT_ACCEPTED 2u
@@ -22,6 +24,13 @@
 #define X9_CAM_SV_RECEIVE_QUIESCING 3u
 #define X9_CAM_SV_RECEIVE_QUIESCENT 4u
 #define X9_CAM_SV_RECEIVE_FIELDS 4u
+#define X9_CAM_SV_GATE_IDLE 0u
+#define X9_CAM_SV_GATE_PENDING 1u
+#define X9_CAM_SV_GATE_ARMED 2u
+#define X9_CAM_SV_GATE_STOPPING 3u
+#define X9_CAM_SV_GATE_STOPPED 4u
+#define X9_CAM_SV_GATE_FIELDS 3u
+#define X9_CAM_SV_GATE_STEPS 8u
 #define X9_CAM_SV_HW_CONFIG_FIELDS 10u
 /* Geometry fields0..9 followed by A0 base low/high, tag0 FH_SPARE and FBC0.
  * This result is kernel-private, not the userspace frame/ioctl ABI. */
@@ -42,6 +51,9 @@ struct x9_camera_sv_hw_status {
     uint32_t receive_seen[2], receive_off_seen[2], receive_samples, receive_errno;
     uint32_t receive_before[X9_CAM_SV_RECEIVE_FIELDS], receive_target[X9_CAM_SV_RECEIVE_FIELDS];
     uint32_t receive_after[2][X9_CAM_SV_RECEIVE_FIELDS];
+    uint32_t gate_phase, gate_pending, gate_issued, gate_seen[2], gate_samples, gate_errno;
+    uint32_t gate_before[X9_CAM_SV_GATE_FIELDS], gate_after[2][X9_CAM_SV_GATE_FIELDS];
+    uint32_t gate_prior[X9_CAM_SV_GATE_STEPS], gate_target[X9_CAM_SV_GATE_STEPS];
 };
 /* configure_outmux invokes the real locked engine after OUTMUX consumption.
  * It writes only tag0 packed RAW10 geometry, A0 stride/burst, group0 and
@@ -67,9 +79,16 @@ struct x9_camera_sv_hw_status {
  * leaves source/DMA off. Begin next journals four normal RW receive enables:
  * SW_DONE group0, SRAM/tag0 ERR, tag0 SOF and IMG0A DMA, with complete actual
  * both-bank targets twice for each single store, no DB/RCNT/reset/CQ write.
- * CMOS/VF/PHY/MAC lanes/OUTMUX DL/sensor source remain off; FBC1 remains at
- * the accepted credit target. RECEIVE_ARMED is not a started producer/frame.
- * Close can quiesce this same inactive receive arm only, before GIC masking.
+ * Begin next journals normal CMOS_EN, FLUSH_ALL_SRC_DIS and VFDATA_EN.
+ * PHY/MAC lanes/OUTMUX DL/sensor source remain off; FBC1 remains at the
+ * accepted credit target. RECEIVE/GATE_ARMED are not producer/frame/drain.
+ * Close first stops only this input-inactive TG: TG_MODE_OFF, VF off, TG DB
+ * bit8 up/down and CMOS off, then receive enables, all before GIC masking.
+ * Every step needs two complete actual both-bank targets, including BOTH
+ * TG DB phases. Same-value ordinary controls are only observed, not written;
+ * issued stores are never repeated or canceled using the original value.
+ * STOPPED describes actual gate stop (TG_MODE_OFF/FLUSH retained), not cold
+ * restoration, credit revocation, dependency release or RAW/AXI/map drain.
  * Per-bank target observations never regress; raw receiver observations are
  * journaled before historical comparisons, not adopted by canonicalization.
  * QUIESCENT describes four actual disabled controls only, not RAW/AXI/map
