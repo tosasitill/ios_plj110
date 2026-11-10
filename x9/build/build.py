@@ -292,6 +292,11 @@ class Builder:
         self.run_or_exit([sys.executable, '-I', str(X9 / 'audio/build-microphone.py'),
                           '--developer-dir', self.cfg['developer_dir'],
                           '--out', str(self.out / 'audio')], ROOT, label='audio/build-microphone.py')
+        # Complete own-code output HAL, independent of Metal/mailbox. Embedding
+        # is not installation: PID1 publication requires a separate opt-in.
+        self.run_or_exit([sys.executable, '-I', str(X9 / 'audio/build.py'),
+                          '--developer-dir', self.cfg['developer_dir'], '--embed',
+                          '--out', str(self.out / 'audio')], ROOT, label='audio/build.py')
         self.run_or_exit([sys.executable, '-I', str(X9 / 'haptic/build.py'),
                           '--developer-dir', self.cfg['developer_dir'],
                           '--out', str(self.out / 'haptic')], ROOT, label='haptic/build.py')

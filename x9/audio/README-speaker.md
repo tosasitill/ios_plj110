@@ -11,7 +11,8 @@ XNU 入口计算、内核复制、RAM map、GPU/SCP/GPS/Wi-Fi 交接不变；内
 **当前是可编译的输出链路基础实现，不是已经出声的驱动。**
 没有 MT6993 物理 backend 注册者；`Ready=0`，`Start` 返回
 `kIOReturnNotReady`。不访问 off-domain MMIO、不自动起 DSP、不写功放／root，
-没有自动安装 HAL。麦克风是另一套接口，不在此输出设备中虚报输入流。
+默认没有自动安装 HAL；新增独立的发布 opt-in 只用于获确认后的最终部署。
+麦克风是另一套接口，不在此输出设备中虚报输入流。
 PCM ABI 仍为 v1；**board-status v3／160B、dsp-status v2／128B、stream-status v2**，
 需配套本轮 `audioctl`，旧工具会拒绝
 新版结构。私有 kernel backend 回调也升级为 v2（start 增加预填输入）；不能继续注册
@@ -28,18 +29,25 @@ AFE/stream/resource 状态 selector 只返回缓存，不申请硬件资源。
 
 ## 构建
 
-仓库根目录，输出目录必须是新的：
+仓库根目录，输出目录必须是新的。当前完整物理接线尚未齐，按单镜像目标
+**暂不执行以下 bundle 构建／签名或完整 kernel 构建命令**；开发阶段只直接 `-c` 编译。
+以下保留为接线齐后最终构建的入口：
 
 ```sh
 /Library/Frameworks/Python.framework/Versions/3.13/bin/python3 -I \
-  x9/audio/build.py --out x9/out/speaker-local/audio
+  x9/audio/build.py --out x9/out/speaker-hal-only/audio
 
+# 完整 kernel 构建会自行构建、签名并嵌入 speaker HAL，无需先执行上一条。
 /Library/Frameworks/Python.framework/Versions/3.13/bin/python3 -I \
-  x9/build/build.py kernel --name speaker-local
+  x9/build/build.py kernel --name speaker-final
 ```
 
 输出 `audio/X9Audio.driver`、`audio/audioctl`（iOS 16 arm64、adhoc 签名）
-和 `kernel.development.sweet`。这不会重建 Metal 插件或修改设备。
+和 `kernel.development.sweet`。独立 HAL 构建只有显式 `--embed` 才生成资源；
+完整 kernel 入口自动传入该参数，嵌入的是当次构建签名后的完整四文件 bundle，
+不是旧缓存中的单个 Mach-O。`audioctl` 不嵌入镜像；
+`audio/speaker-build.json` 记录内容身份和文件摘要，不推断 runtime backend 已注册。
+这不会重建 Metal 插件或修改设备。
 启动参数 `x9_audio=1` 仅发布音频服务；`=2` 还注册板级 ADSP core0 transport，
 但不在开机时上电／SMC。默认关闭。
 打包 boot 时必须沿用最新完整参数，不能拿缺 Wi-Fi／蜂窝校准的默认配置替换。
@@ -62,10 +70,41 @@ audioctl play /var/tmp/stereo-48000-s16le.pcm
 不会等 DMA 队列耗尽才停。最后不足一个 period 的内容按 stereo frame 计数，
 残缺 stereo frame 拒绝。5 秒无进度会停流；内核独立的 10 ms 游标／低水位
 保护可能更早停流。未实现的物理后端会立即拒绝播放。
-HAL 最终位置是 `/Library/Audio/Plug-Ins/HAL/X9Audio.driver`，但首次根盘
-staging 必须单独确认、走项目 extent 写入流程；本构建器不安装、不写 root、
-不覆盖 Apple `VirtualAudio.plugin`。尚未验证 20H392 原生路由层是否选中本 HAL，
+HAL 原生发现位置是 **`/System/Library/Audio/Plug-Ins/HAL/X9Audio.driver`**，
+不是 `/Library/Audio/Plug-Ins/HAL`。首次根盘写入及启用发布必须单独确认；
+本构建器只构建／签名／嵌入，不安装、不写 root、不覆盖 Apple `VirtualAudio.plugin`。
+尚未验证 20H392 原生路由层是否选中本 HAL，
 也没有移植 Sheng 的 Thunderbolt 伪装、VirtualAudio hooks 或 shared-cache 时钟写补丁。
+
+### 最终镜像的完整 HAL 资源与受控发布（阶段40）
+
+完整 kernel 构建先生成 `kernel/generated/x9_speaker_hal.inc`（不入 git），
+再编译独立 `x9_speaker_hal.o` 资源对象。资源声明和 PID1 installer 分离；
+没有当次完整 signed manifest 时不能链接完整 kernel，不使用空资源或成功 stub。
+四个文件严格为 `Info.plist`、`LICENSE.UniXNU`、`X9Audio`、
+`_CodeSignature/CodeResources`，拒绝 symlink／额外 entry／空文件，总量上限512KiB。
+内容身份为按上述顺序拼接每项 `name ASCII + NUL + size LE64 + SHA256(file)`
+后的SHA256；完整资源以原子替换方式生成。
+
+**额外开关 `x9_speaker_hal=1` 默认0，且同时要求 `x9_audio=1` 或 `2`。**
+现有 `x9_audio` 参数不会自动安装 speaker HAL；没有修改默认 boot-config。
+获确认后，PID1才在可写原生UFS根盘上，将当次四文件写入
+`/private/var/x9/speaker/<identity>/hal/X9Audio.driver` 并只读 union 到原生发现目录。
+一 boot 仅一次发布尝试；同内容文件校验复用，不截断已有不同文件。
+首次写入前检查完整manifest／逐文件摘要／source身份及零尾；逐层目录资格检查
+拒绝非root所有权／可被其他用户写入的祖先，不在不合格目录下创建后续内容，
+也不修改共享目录权限。完整private bundle目录必须root:wheel／0755且无额外entry。
+
+发布前捕获实际可见原生 HAL（含既有MIC／haptic union），拒绝已有
+`X9Audio.driver`；发布后逐文件校验完整bundle和所有原native vnode，失败尝试
+unmount并再次检查原native view，分别记录首错和rollback结果，不自动重试。
+bindfs例外仅用于实际PID1当前线程、精确source及上述opt-in／UFS条件，不扩大
+普通进程的entitlement。发布不boot DSP、不解静音、不注册backend或设置Ready。
+
+本阶段只直接编译实际 `kern_exec.o`／`bind_vfsops.o` 和arm64声明布局，
+Python builder只做语法解析。**未执行HAL bundle build／codesign／资源生成／
+资源定义对象编译／joint link／安装或20H392最终路由验证**；完整物理后端和唯一
+最终镜像仍待完成，不能把默认关闭的发布链称为实体出声。
 
 ## 内核／HAL 契约
 

@@ -1,6 +1,6 @@
 /* Snapshot the actual native HAL view, not an assumed vendor bundle name.
  * Keep every visible vnode across publication, including earlier union layers.
- * Only PID1's sequential MIC/haptic installers use these bounded helpers. */
+ * Only PID1's sequential MIC/haptic/speaker installers use these bounded helpers. */
 #ifndef X9_NATIVE_HAL_VIEW_INC
 #define X9_NATIVE_HAL_VIEW_INC
 #include <sys/dirent.h>

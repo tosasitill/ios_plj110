@@ -31,6 +31,7 @@ x9/kernel/generated/x9_torch_bridge.inc
 x9/kernel/generated/x9_camera_bridge.inc
 x9/kernel/generated/x9_microphone_hal.inc
 x9/kernel/generated/x9_haptic_hal.inc
+x9/kernel/generated/x9_speaker_hal.inc
 x9/kernel/generated/x9_camera_sensor_tables.inc
 
 # Local dependency snapshots, Apple inputs and private device state
