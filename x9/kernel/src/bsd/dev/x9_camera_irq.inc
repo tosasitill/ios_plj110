@@ -8,13 +8,15 @@
  * no automatic rearm, no credit cancellation by EN-off/reset or CPU RETIRED.
  * It then confirms three restricted source IRQ enables and IMG0A DMA_EN;
  * then normal CMOS/FLUSH/VF. It binds FBC, then enables the actual fixed
- * PHY/MAC/AFIFO path and commits OUTMUX DL. CQ/sensor input stay off.
+ * PHY/MAC/AFIFO path and commits OUTMUX DL. CQ stays off. Core 0100
+ * commands then use the same owned AP FIFO and immutable request journal.
  * Close stops only this input-inactive path and TG before receive/GIC,
  * never declaring frame/RAW/AXI/map retirement.
  * Before source-on it also binds that exact accepted FBC state. The actual
  * SOF/DONE filter records ordinary FBC counters; the worker requires two
  * both-bank WCNT+1/CNT0 targets before CPU access, preserving RCNT/DROP.
- * Count evidence never changes SV's cold guard or grants credit/map reuse.
+ * After real source issue SV guards sample the original live credit under
+ * IRQ spin; count evidence never grants credit/map reuse.
  * It is not a capture provider registration.
  * Lock order: camera_control_lock -> camera_irq_lock -> camera_camsv_lock.
  * Worker NEVER acquires camera_control_lock; close can drain its pin there.
@@ -213,6 +215,7 @@ static int cam_irq_credit_guard_locked(uint64_t epoch)
 }
 #include "x9_camera_source.inc"
 #include "x9_camera_irq_fbc.inc"
+#include "x9_camera_stream.inc"
 /* Under spin, after actual IAR and only while accepting. Ordinary FIRST/FH
  * reads select exactly the vendor bank. No multi-tag fallback or status sweep. */
 static void cam_irq_sample(unsigned role,struct cam_irq_event *ev)

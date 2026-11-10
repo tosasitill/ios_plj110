@@ -10,12 +10,22 @@
  */
 #define CAM_IRQ_FBC_WCNT 0x0000ff00u
 #define CAM_IRQ_FBC_CNT  0x000f0000u
+enum { CAM_STREAM_IDLE, CAM_STREAM_ON_PENDING, CAM_STREAM_RUNNING,
+    CAM_STREAM_OFF_PENDING, CAM_STREAM_STOPPED };
+#define CAM_STREAM_ON 1u
+#define CAM_STREAM_OFF 2u
 static struct {
     uint64_t epoch;
     struct x9_camera_camsv_request request;
     struct x9_camera_camsv_irq done;
     uint32_t control[2],before[2],target[2],after_control[2],after[2],seen[2],samples;
     bool bound,done_seen,attempted,count_accepted;
+    /* Immutable FBC/request binding above also owns these actual AP stream
+     * commands. All fields protected by IRQ spin; never caller consumed. */
+    uint32_t source_phase,source_issued,source_ack,source_seen,source_samples,source_sampled;
+    uint8_t source_control,source_frame_count,source_prior_control;
+    uint64_t source_on_time,source_off_time;
+    int source_error;
     int error;
 } cam_irq_fbc;
 static int cam_irq_fbc_fault_locked(int e)
@@ -74,7 +84,9 @@ static int cam_irq_fbc_bind_locked(uint64_t epoch)
 /* Called ONLY on actual sampled values, under spin, before another sample.
  * Preserve RCNT/DROP/reserved exactly. The two allowed transitions are each
  * one-way; neither a later return to target nor stable unknown values repair
- * a regression. Without the actual owned SOF binding all counts stay prior.
+ * a regression. Without an actually issued bound sensor source command all
+ * counts stay prior. After issue CNT/WCNT can change BEFORE SOF service;
+ * this count evidence does not manufacture SOF or permit CPU delivery.
  */
 static int cam_irq_fbc_note_locked(unsigned bank,uint32_t control,uint32_t counter)
 {
@@ -83,19 +95,47 @@ static int cam_irq_fbc_note_locked(unsigned bank,uint32_t control,uint32_t count
     if(!cam_irq_fbc.bound || cam_irq_fbc.epoch!=cam_irq.epoch || cam_irq_fbc.error ||
        memcmp(&cam_irq_fbc.request,&cam_irq.request,sizeof(cam_irq.request)))
         return cam_irq_fbc_fault_locked(ESTALE);
+    if(cam_irq_fbc.source_error)return cam_irq_fbc.source_error;
     prior=cam_irq_fbc.before[bank];want=cam_irq_fbc.target[bank];
     wcnt=counter&CAM_IRQ_FBC_WCNT;cnt=counter&CAM_IRQ_FBC_CNT;
     if(control!=cam_irq_fbc.control[bank] ||
        ((counter^prior)&~(CAM_IRQ_FBC_WCNT|CAM_IRQ_FBC_CNT)) ||
        (wcnt!=(prior&CAM_IRQ_FBC_WCNT) && wcnt!=(want&CAM_IRQ_FBC_WCNT)) ||
-       (cnt && cnt!=0x10000u) || (!cam_irq.sof_seen && counter!=prior) ||
+       (cnt && cnt!=0x10000u) || (!(cam_irq_fbc.source_issued&CAM_STREAM_ON) && counter!=prior) ||
        ((cam_irq_fbc.seen[bank]&1u) && wcnt!=(want&CAM_IRQ_FBC_WCNT)) ||
        ((cam_irq_fbc.seen[bank]&2u) && cnt))return cam_irq_fbc_fault_locked(ESTALE);
-    if(cam_irq.sof_seen) {
+    if(cam_irq_fbc.source_issued&CAM_STREAM_ON) {
         if(wcnt==(want&CAM_IRQ_FBC_WCNT))cam_irq_fbc.seen[bank]|=1u;
         if(!cnt)cam_irq_fbc.seen[bank]|=2u;
     }
     return 0;
+}
+/* Thread/control guard, read and record under the SAME spin as actual IAR
+ * samples. It never updates immutable accepted credit or any SV expected
+ * control, never calls a native owner/cache/PTE API under spin, and does
+ * not require IRQ accepting after CPU retirement. Whole bus/map retention
+ * still holds. Cold/no-source samples retain the original strict guard. */
+static int cam_irq_fbc_live_sample(uint64_t epoch,unsigned bank,vm_offset_t view,
+    const struct x9_camera_camsv_request *r,uint32_t accepted,uint32_t *value,bool *live)
+{
+    boolean_t old;
+    int e=0;
+    *live=false;
+    old=cam_irq_spin_take();
+    if(cam_irq_fbc.source_issued&CAM_STREAM_ON) {
+        uint32_t control;
+        *live=true;
+        if(bank>=2 || !cam_irq_fbc.bound || epoch!=cam_irq_fbc.epoch || epoch!=cam_irq.epoch ||
+           view!=cam_irq.view[bank] || accepted!=cam_irq_fbc.before[bank] ||
+           memcmp(r,&cam_irq_fbc.request,sizeof(*r)))e=ESTALE;
+        if(!e)e=cam_irq_power();if(!e)e=cam_irq_config(true);
+        if(!e) {
+            control=cam_irq_rd(view,0x540);*value=cam_irq_rd(view,0x544);
+            e=cam_irq_fbc_note_locked(bank,control,*value);
+        }
+        if(e && !cam_irq_fbc.error)e=cam_irq_fbc_fault_locked(e);
+    }
+    cam_irq_spin_drop(old);return e;
 }
 /* Actual IAR path, spin held. No callback, PTE/cache/RAW access, mutex,
  * status reread/ack, or counter write. The queue retains the raw evidence.
@@ -105,7 +145,8 @@ static void cam_irq_fbc_event_locked(struct cam_irq_event *ev)
 {
     const struct x9_camera_camsv_irq *f=&ev->frame;
     bool done=ev->role==X9_CAM_IRQ_HYBRID && (f->done_status&0x000f0000u);
-    if(!cam_irq_fbc.bound || cam_irq_fbc.epoch!=cam_irq.epoch ||
+    if(!cam_irq_fbc.bound || !(cam_irq_fbc.source_issued&CAM_STREAM_ON) ||
+       cam_irq_fbc.epoch!=cam_irq.epoch ||
        f->generation!=cam_irq_fbc.request.frame.generation ||
        f->capture_id!=cam_irq_fbc.request.frame.capture_id || f->first_tag!=1 ||
        f->inner_sequence!=cam_irq_fbc.request.inner_sequence ||
@@ -131,8 +172,8 @@ static void cam_irq_fbc_event_locked(struct cam_irq_event *ev)
 }
 /* The real worker, IRQ mutex held, BEFORE x9_camera_camsv_finish performs
  * CIVAC/CPU copy. No control mutex (stop may drain this worker there), and no
- * SV journal mutation. Counter acceptance stays IRQ-private; cold SV guard
- * still refuses natural producer changes until its live source chain exists.
+ * SV journal mutation. Counter acceptance remains in the IRQ-private ledger;
+ * control guards use its bound live sample only after actual source issue.
  * Sole 10ms read-only observation of the original DONE/credit; no retry/reset,
  * credit return, source disable, CQ/DB write or inference of AXI retirement.
  */
@@ -146,7 +187,9 @@ static int cam_irq_fbc_done_locked(const struct cam_irq_event *ev)
     int e;
     old=cam_irq_spin_take();
     e=cam_irq_fbc.error;
-    if(!e && (!cam_irq_fbc.bound || !cam_irq_fbc.done_seen || cam_irq_fbc.attempted ||
+    if(!e)e=cam_irq_fbc.source_error;
+    if(!e && (!cam_irq_fbc.bound || !(cam_irq_fbc.source_ack&CAM_STREAM_ON) ||
+       !cam_irq_fbc.done_seen || cam_irq_fbc.attempted ||
        cam_irq_fbc.epoch!=cam_irq.epoch || ev->role!=X9_CAM_IRQ_HYBRID || ev->error || ev->fbc_sampled!=3u ||
        memcmp(&cam_irq_fbc.done,&ev->frame,sizeof(ev->frame))))e=ESTALE;
     if(!e)cam_irq_fbc.attempted=true;

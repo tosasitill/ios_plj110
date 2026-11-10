@@ -89,9 +89,16 @@ static int read16(const struct x9_camera_sensor *s, uint16_t reg, uint32_t *v)
     uint8_t hi,lo; int e=hw.read8(s,reg,&hi);
     if(!e)e=hw.read8(s,reg+1,&lo); if(!e)*v=((uint32_t)hi<<8)|lo; return e;
 }
+/* Defined after the IRQ/FBC binding; control mutex is already held. */
+static int cam_stream_set_locked(const struct x9_camera_sensor *,uint8_t);
 static int write8(const struct x9_camera_sensor *s, uint16_t reg, uint8_t v)
 {
-    int e=hw.write8(s,reg,v); uint8_t back;
+    int e;
+    uint8_t back;
+    /* Stream commands belong to the bound native AP/request journal, not
+     * an arbitrary platform write callback or the generated sensor tables. */
+    if(reg==0x0100)return cam_stream_set_locked(s,v);
+    e=hw.write8(s,reg,v);
     if(!e)e=hw.read8(s,reg,&back); return e?e:back==v?0:EIO;
 }
 static int write16(const struct x9_camera_sensor *s, uint16_t reg, uint32_t v)
@@ -127,7 +134,11 @@ static int stop(void)
     if(session.power || session.capture || session.stream) {
         lck_mtx_unlock(&camera_lock);
         if(session.stream)e=write8(s,0x0100,0);
-        if(session.capture)a=hw.capture(s,0,session.generation);
+        /* An uncertain source-off is not permission for a later callback
+         * to report capture retired or remove power. Retain the same
+         * attempted capture/source even if no SOF has reached the worker. */
+        if(e)a=e;
+        else if(session.capture)a=hw.capture(s,0,session.generation);
         /* Publish confirmed capture retirement before power(false). Native
          * sensor unwind must still see capture=true after failed/partial
          * drain; it cannot rely on a caller-supplied "drained" boolean. */

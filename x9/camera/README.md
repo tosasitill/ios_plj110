@@ -577,7 +577,7 @@ FBC 的信用限制与全链停写仍须完成：厂商 `mtk_cam_sv_check_fbc_cn
 4. 注册会分别上电读 ID 并恢复，只有两枚真实 ID 相符才发布 READY。调用发生在线程上下文；所有回调都不可重入相机 API。
 5. provider.version 必须为 `X9_CAMERA_PLATFORM_VERSION`（2）；version1 不接受。DMA worker 在真实 completion/slot/metadata 绑定及缓存同步后调用 `x9_camera_deliver(&completed)`，其中 completed 为 version2 的 `x9_camera_completed_frame`；不得在硬中断调用。generation 来自本次 `capture(on)`，time 为帧完成的 `mach_absolute_time`，capture_id 为该代已资格化 owned-request 标识。record/raw 直到返回都保持不变；EBUSY 丢帧并释放硬件 slot，不重放。记录验证不能代替 provider 的硬件、映射或控制生效证明。
 
-控制层在调用 power/capture/stream 前记录 attempted 阶段及原始 generation；半途错误只清理实际尝试过的阶段。stop 先失效 generation/唤醒读者，再退出帧锁等待 capture(off)，因此完成 worker 不会被 start/stop 持帧锁堵住。**capture(off) 非零时不调用 power(false)**，保持映射/时钟/供电依赖并置 FAULT/RETAINED；power(false) 失败也保留 journal。后续 close 不重试硬件清理、不释放保留的 staging buffer、不切换另一 sensor。注册时的 ID 供电恢复失败同样锁存。非零返回不是已经恢复或可以重新开始，只有明确 drain 成功后才能撤依赖。
+控制层在调用 power/capture/stream 前记录 attempted 阶段及原始 generation；半途错误只清理实际尝试过的阶段。stop 先失效 generation/唤醒读者，再退出帧锁等待 capture(off)，因此完成 worker 不会被 start/stop 持帧锁堵住。**sensor 0100-off 或 capture(off) 非零时不调用 power(false)**；0100-off 不确定时也不调用后续 capture(off)，保持映射/时钟/供电依赖并置 FAULT/RETAINED；power(false) 失败也保留 journal。后续 close 不重试硬件清理、不释放保留的 staging buffer、不切换另一 sensor。注册时的 ID 供电恢复失败同样锁存。非零返回不是已经恢复或可以重新开始，只有明确 drain 成功后才能撤依赖。
 
 下一阶段不能绕过 regulator/SMMU 所有权或从 LK framebuffer carve-out 偷分配相机 DMA。
 先证明一枚芯片的上电→I2C ID→还原，再证明 SENINF 包→RAW DMA 完整帧，最后验收前后切换、预览和落盘照片。
@@ -725,7 +725,7 @@ close 在 GIC mask 前先关闭后述 input-inactive receive path，再最多一
 
 实际 IRQ worker 在 `cam_irq_core_ready` 的真实 STREAMING 发布后、`x9_camera_camsv_finish` 的 CIVAC/CPU copy **之前**，调用 `cam_irq_fbc_done_locked`。仅一次10ms、10000poll上限的 readonly 两bank观察；每次 native `.check` 在 spin 外，真实 power/GIC/config 与 counters 在安全资格内检查，要求两次完整 final targets，最后 owner check 后再实际核 final controls/counters 与 deadline。超时/unknown/回退/冲突保留同一slot/backing/映射/依赖，不重试命令、补 RCNT、reset、取消信用或使用 caller consumed boolean。原 IRQ 日志输出 raw FBC/control/sampled，`X9 CAMERA DONE FBC` 输出 actual/seen/samples/count_accepted/errno。
 
-锁序仍 control→IRQ→slot；新的 record 由 IRQ spin 保护，worker **不取得 control mutex、不修改 SV journal**，避免 stop 持control锁 drain worker 的死锁。**count_accepted 仅表示该 DONE 的计数观察，不是 RAW/AXI/map drain，不能复用或撤 backing。** control-locked SV 的原 accepted-credit strict guard 暂不放宽；实际 sensor source publication/live counter state、自然消费后 stop/full bus/map retirement 与合法 repeat 仍须接通。下述 PHY/MAC/OUTMUX input-inactive 通路不补 normal NS SID80 attach、持续 rate/MMQoS、native capture caller 或 iOS 实帧链，因此不出中间镜像、不声称已拍摄。
+锁序仍 control→IRQ→slot；新的 record 由 IRQ spin 保护，worker **不取得 control mutex、不修改 SV journal**，避免 stop 持control锁 drain worker 的死锁。**count_accepted 仅表示该 DONE 的计数观察，不是 RAW/AXI/map drain，不能复用或撤 backing。** control-locked SV 的 cold/no-source strict guard 保持；实际 source issue 后按下一节在同一 IRQ spin 内读取并记录 immutable live credit。自然消费后 stop/full bus/map retirement 与合法 repeat 仍须接通。下述 PHY/MAC/OUTMUX input-inactive 通路不补 normal NS SID80 attach、持续 rate/MMQoS、native capture caller 或 iOS 实帧链，因此不出中间镜像、不声称已拍摄。
 
 ### 实际 PHY/MAC/OUTMUX 接收通路与 input-inactive 关闭
 
@@ -748,4 +748,15 @@ begin 在 accepted FBC bind 后，直接执行一次以下固定正常字段序�
 
 close 在 TG/receive/GIC 之前，限定逆序关闭同一**完整** ARMED path：DL0及其 fresh commit → PHY/AFIFO → MAC lanes → mux，再原 TG stop/receive quiesce。失败的部分 arm、未知 commit、sampled input、自然计数变化或 owner 冲突均保留原 slot/backing/映射/供电，不补 enable/off/reset/RCNT。core 的 `session.stream` 在 `0100=1` **发出前**已记录，任何该 attempt 都禁止这个 inactive close，即使尚无 SOF 服务；它不是 caller drained boolean。source ledger 不修改 PHY cold owned bits，也不授予 credit 取消、RAW/AXI/map 退休或合法 repeat。日志 `X9 CAMERA RX PATH` 记录 epoch/request/sensor/off/phase/issued/pending/errno。
 
-后续仍必须接真实 sensor source publication 与 live immutable FBC 观察（首帧计数可先于 SOF 服务），实际 CPU copy/full RAW/AXI/IRQ/worker/map 退休及 repeat、normal NS/prior-preserving SID80、持续 rate/MMQoS、native owner/capture caller 和 iOS 前后实帧预览/照片。现有对象编译不能替代这些，完整链就绪后才构建唯一最终镜像。
+真实 sensor source publication 与 live immutable FBC 观察已按下一节接线，仍必须完成 actual source-on 后 stop、full RAW/AXI/IRQ/worker/map 退休及 repeat、normal NS/prior-preserving SID80、持续 rate/MMQoS、native owner/capture caller 和 iOS 前后实帧预览/照片。现有对象编译不能替代这些，完整链就绪后才构建唯一最终镜像。
+
+
+### 通过同一 AP/request 发出 sensor stream 命令
+
+**代码接线和局部对象编译，不是 native capture provider 已注册或相机可用。** core `write8(0100)` 现在调用 `cam_stream_set_locked`；只有同一 configured sensor epoch、完整 source path、原 S1/request/generation/FBC credit 和 actual power/GIC/config 资格才能进入。生成表的 generic writer 仍禁止 0100/hold/reset，不借任意 backend 的 write8 返回值发命令。实际使用既有 `cam_bus_transfer` 发 `{01,00,01}` 或 `{01,00,00}`，ON/OFF issued 各只留一次且在 AP START 前留账。
+
+命令前实际读取两次 0100 prior、0104 hold0；ON 另读 0005=FF。正常 ISP8s `adaptor-subdrv-ctrl.c:4295,4360..4415` 的 stop sentinel 为 0005=FF，hhmain/hhfront 也明确 stream register0100、frame count0005。命令后一个500ms总deadline内读取 actual0100 prior→target，只在两次目标、hold0、最后 owner/control 检查后发布 ACK；OFF 另要求两次及最后 fresh0005=FF。见目标后回 prior、异常 control、未知 AP completion或超时都保留原请求，不用反向命令修复。日志 `X9 CAMERA SENSOR STREAM` 分开 prior/command control、frame_count、sampled、issued/ack/seen、phase 和首错；未采样零值不是实际观察。**OFF/FF 是 sensor 协议观察，不是 RAW/AXI/IRQ/worker/map drain。**
+
+source ON 真正 issued 后，原单 credit 的 CNT0/WCNT+1 可先于 SOF 服务被观察；没有 source issue 时仍严格原 accepted 值。control guard 和实际 IAR 均在同一 IRQ spin 内读取并立即记录 FBC0/FBC1，避免旧 counter sample 排到新 IAR sample 后造成假回退。所有 native owner/cache/PTE callback 在 spin 外；不更改原 accepted baseline 或 SV expected control。DONE/CPU 必须同时有 source ON ACK 与真实 owned SOF/DONE；计数不能制造 IRQ。CPU slot RETIRED 后继续观察同一 live credit，以便停流资格检查，但不能取消 credit 或授权释放。
+
+0100-off 不确定时 core 不再调用 capture-off/power-off；原45 inactive close 明确拒绝任何 stream attempt，不把 STOPPED/FF 当作该路径的豁免。完整 source-on 后控制停流、全写链退休、normal NS SID80、持续 rate/MMQoS、native provider 注册及前后 iOS 实帧预览/照片继续实现；链完整后才出唯一最终镜像。

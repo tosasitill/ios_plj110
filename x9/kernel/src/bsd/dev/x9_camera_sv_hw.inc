@@ -304,7 +304,17 @@ static int cam_sv_fbc_counters_guard(void)
     int e;
     if(!cam_sv.fbc_sampled)return 0;
     for(unsigned bank=0;bank<2;bank++) {
+        bool live=false;
         e=cam_sv_power_guard();if(e)return e;
+        if(cam_sv.credit_phase==X9_CAM_SV_CREDIT_ACCEPTED) {
+            /* Natural single-credit consumption is qualified by the SAME
+             * issued sensor command/request ledger as the IAR owner. Read
+             * under IRQ spin, not before taking it (which could reorder an
+             * older sample after a newer hard-IRQ target observation). */
+            e=cam_irq_fbc_live_sample(cam_sv.epoch,bank,cam_sv.view[bank],&cam_sv.request,
+                cam_sv.credit_target[bank],&value,&live);if(e)return e;
+            if(live){cam_sv.status.fbc_after[bank]=value;continue;}
+        }
         value=cam_rr(cam_sv.view[bank],0x544);
         cam_sv.status.fbc_after[bank]=value;
         if(cam_sv.credit_phase==X9_CAM_SV_CREDIT_EMPTY) {
