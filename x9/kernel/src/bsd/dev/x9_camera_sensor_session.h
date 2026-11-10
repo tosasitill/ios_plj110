@@ -2,6 +2,7 @@
 #ifndef X9_CAMERA_SENSOR_SESSION_H
 #define X9_CAMERA_SENSOR_SESSION_H
 #include "x9_camera.h"
+#include "x9_camera_outmux.h"
 #ifdef KERNEL
 /* Thread context, standalone callers: these acquire camera_control_lock.
  * A platform callback already holding that mutex must use the internal
@@ -20,6 +21,10 @@
  * through the sensor epoch, after configured standby. It samples disabled
  * receiver controls, but neither writes PHY/route/DMA nor grants ownership.
  * Failed admitted preparation also remains tied to this ONE sensor close.
+ * Optional configure_outmux then applies only the fixed inactive OUTMUX0
+ * image route and confirms real shadow/inner consumption, still DL/IRQ off.
+ * Its journal restores BEFORE dropping receiver/MM; a pending trigger has
+ * no cancellation proof and blocks all dependent teardown.
  * Sensor close first isolates reset/MCLK, then qualifies/retires that MM
  * lifetime, then restores sensor supplies. A receiver conflict retains both.
  * No standalone receiver-drop or caller-supplied drain assertion is exposed.

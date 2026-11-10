@@ -18,6 +18,7 @@
 | MM 寄存器时钟事务 | 显式 AO/infra0/VMM BACKUP 引用、CAM_VCORE/MAIN/MRAW 域、CAM autolink FENC、CAMTM/SENINF voter、CAM/CAMSV 寄存器 CG 申请/逆序恢复。**未上机；不改共享 AVS/CVFS/PLL，不申请 SMI larb，不证明采集速率** |
 | 接收寄存器预检 | 持有完整 MM 寄存器时钟链时，读取目标 MAC、async/AFIFO、outmux0 outer/inner、CAMSV0 central/DMA/CQ 控制，双采样验证稳定及使能位关闭。**只读，不提交配置，不证明 ownership 或 DMA 排空** |
 | 持久 sensor/receiver 生命周期 | kernel-private 冷会话可在 verified standby 后持有同一 MM 时钟与 CSI/secure 电源 journal；后续请求及撤销前检查完整已消费依赖与原始接收控制，先隔离 sensor reset/MCLK，再退休 MM，最后还原 sensor 供电。**无 native capture caller，不 stream-on；不是 DMA lease/drain** |
+| OUTMUX 配置引擎 | 同一已持有会话可显式配置 inactive OUTMUX0 的固定 image tag0，真实 masked shadow 写入、CFG_DONE、完整 inner 消费确认及逆序恢复。保留其它 tags/端口及 IRQ policy，DL/IRQ/DMA 关闭。**已局部编译，未运行；无 PHY/rate/SMI/SID80 grant/native capture caller** |
 | 采集后端 | **缺失**：完整 DVFS/rate/SMI ownership、PHY 校准/速率、SENINF 路由提交、MM-SMMUv3 映射、RAW DMA 完成/排空队列 |
 
 原始 X9 DT 与 Android 启动日志确定：主摄为 i2c4/7-bit `0x1a`，ID 寄存器 `0x16/0x17` 返回 `0x9186`；前摄 i2c2/`0x10`，返回 `0x0615`。
@@ -320,6 +321,7 @@ cameractl pipeline front
 - tag0 的 outmux VCDT `+0x100=(0x2b<<16)|(vc<<8)|1`，主摄 `vc=1`、前摄 `vc=0`；首次 `_config_outmux → SET_TAG` 预期尺寸 `+0x104=((height-1)<<16)|(width/4*5-1)`。
   HSIZE 是 packed RAW10 **字节数减1**，不是像素数；后续 apply-v2 路径的 HSIZE 语义不同，不混用。
   候选 CAMSV0 base `0x3a600000`，DMA bank `+0x1000`：地址 low/high `+0x200/+0x204`，basic `+0x210=(stride<<16)|0x10`；不是旧 unit-test 的 TG 寄存器布局。
+- OUTMUX 的 tag block 步长为 **`0x1c`**，不是 CAMSV 的 `0x40`；格式在 tag base `+0x14`（tag0 `+0x114`），`+0x108/+0x10c` 是 crop，`+0x110` 是 debug。主 preview 的 `SOURCE_CONFIG0` reference/last VC 为 **1/3**，前摄为 **0/0**；tag0 的图像 VC 与整个 sensor 的最后帧边界 VC 不混用。
 - shared `mm_smmu_cam` 是 MM-SMMUv3 `0x30800000` 的 **SID0x80**、35-bit DMA mask，但 DT camera dma-range 只有16GiB。
   `mtk_collect_smmu_dma_regions → invert_dma_regions` 将 `mm_common` 的两段**允许范围**取补集作为保留区：`[0,0xfc910000)` 和 `[0xfffff000,0x400000000)` 可用于分配，间隙 `[0xfc910000,0xfffff000)` 不可用于相机 IOVA。第二段还要按 domain granule 对齐（16KiB 时首个完整页在 `0x100000000`），并避开零页和现有分配。**这些范围不是现成空闲池或映射租约**；不能把 CPU PA 当相机 IOVA，也不能套 GPU 专用 SMMU bypass。
 - 当前 `blockers`：1=该 sensor ID 未匹配且还原，2=MM power/clock ownership，4=PHY，8=路由申请/提交，16=DMA映射，32=完成/排空。
@@ -377,7 +379,7 @@ captured DT 区分 normal camera **SID80**、protected camera **SID89**、displa
 ### 持有冷传感器与接收时钟
 
 `kernel/src/bsd/dev/x9_camera_sensor_session.h` 的 kernel-private 调用顺序为：
-`open → configure → prepare_receiver → read8 → close`。`prepare_receiver` 可省略，原 probe/standby 不因此增加 MM 操作。
+`open → configure → prepare_receiver → read8 → close`。`prepare_receiver` 可省略，原 probe/standby 不因此增加 MM 操作。准备 receiver 后还可显式调用 kernel-private `x9_camera_sensor_session_configure_outmux`；原诊断不会自动进行 OUTMUX 写入。
 
 - standalone 入口取得 `camera_control_lock`；同 TU 的 native 回调已经持锁，必须使用内部 `_locked` helper，不重入公开入口。
 - `open` 返回的非零 epoch（包括错误返回）代表已准入 journal，必须安排一次 close；旧 epoch、重复 prepare/close 不做 MMIO。成功 prepare 不撤销 MM votes，不设置 READY，不返回 IOVA。
@@ -385,7 +387,13 @@ captured DT 区分 normal camera **SID80**、protected camera **SID89**、displa
 - 每次后续 sensor 请求检查 held receiver/MM；close 将新采样与**最初消费的**配置比较，而非只验证两次当前读数相等。共享 async/AFIFO 只比较选定端口字段，不接管其它 AOV/SCP 端口；不读取 read-clear IRQ/DONE。
 - 一旦依赖丢失、接收控制被修改/使能、或 close 失败，保持 epoch 和尚未退休依赖，整 boot 锁存。接收检测失败不会继续撤 sensor rails；sensor 隔离失败也不会撤 MM。没有单独 receiver-drop 或外部 `drained=true` 参数。
 
-这套生命周期只持有**未编程的接收器**及寄存器时钟。尚未申请 LARB/SMI 数据通路、测定速率、编程 PHY/OUTMUX、安装 SID80 或启动 DMA；稳定 disabled 状态不是总线排空或硬件独占证明。
+OUTMUX 引擎只接受选定 bank 的 TOP CG 原为 off、当前 IRQ policy 为 AP/VM0 且其它 VM 未选中、DL/ready/reset/IRQ 与所有 tag filters 关闭、无 crop、所有已知 shadow/inner 配置一致且双采样稳定。拒绝继承的 staged difference，不替其它 owner 发布配置，也不修改 VM routing。它保留所有 8 个 tag 的完整已知控制，只改普通 pixel mode、unsplit source、reference/last VC、tag0 VC/RAW10 format/word-count size/filter 的固定字段，并只追加 TOP outmux0 CG bit。
+
+`CFG_DONE` 写出前记录 pending；只有在 10 ms deadline/10000 次上限内 status idle 且**全部已知 inner 配置与 shadow 完全一致**才报告 CONSUMED，不把 posted trigger、标称时序或同值读回当帧。close 先恢复 owned shadow 字段并确认原 inner，再撤本次 CG；未提交的 shadow failure 只还原 shadow，已 posted 的失败 commit 不 reset/cancel/retry，保持全部依赖。初始 snapshot 保留，持续 receiver guard 的 expected 仅随本 journal 的真实确认更新。
+
+`RESTORED` 只描述配置与 CG。CFG_DONE 可能留下 masked IRQ status；本服务不读/ack IRQ_STATUS，也不声称 IRQ/event drain。未来 native 唯一 IRQ owner 必须在 unmask 前资格化并退休该配置命令历史，不能把它当作图像完成。
+
+这套生命周期不启用 PHY、SENINF DL、IRQ 或 DMA。CG/VM0/稳定 disabled 条件只是配置准入，不证明独占 AP/SCP、采集速率、包接收、全写链 drain 或 IOVA 授权；共享 CG 的 masked RMW 与检查也不是跨固件的原子 lease/ABA 检测。LARB/SMI 数据通路、PHY 校准、正常 SID80 attach 与真正采集仍缺失。
 
 ### 接通采集回调
 

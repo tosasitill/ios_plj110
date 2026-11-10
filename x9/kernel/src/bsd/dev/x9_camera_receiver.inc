@@ -3,13 +3,16 @@
  * outmux0 outer 3a200000 / inner 3a208000; CAMSV id0 3a600000,
  * DMA +1000 / CQ +2000 / inner +8000. CSI MAC-top is port base+4000.
  * Only documented configuration CSR reads. Do NOT read interrupt/status
- * banks: upstream enables read-clear on several of them. No receiver CSR
- * writes, no shared async CG/IRQ setup (AOV/SCP races), no eFuse/PHY guesses.
+ * banks: upstream enables read-clear on several of them. Probe/prepare does
+ * not write receiver CSR. The separately requested OUTMUX engine below
+ * journals real shadow/commit/restore; no async/IRQ/all-port setup or PHY guesses.
  * DISABLED is not ownership, queue drain or a mapping lease.
  */
 _Static_assert(sizeof(struct x9_camera_receiver)==1192,"camera receiver ABI");
 static struct x9_camera_receiver cam_rx_last={.version=1};
 static bool cam_rx_attempted;
+static int cam_out_guard(void);
+static int cam_out_close_locked(uint64_t);
 static const unsigned cam_rx_out_offsets[X9_CAM_RX_OUT_WORDS]={
     0x000,0x004,0x008,0x00c,0x010,0x014,0x018,0x020,
     0x02c,0x034,0x038,0x100,0x104,0x108
@@ -26,6 +29,7 @@ static struct {
     bool close_attempted;
     int error;
     struct x9_camera_receiver status;
+    struct x9_camera_receiver_sample expected;
 } cam_rx_live;
 static int cam_rx_sample(const struct cam_rx_maps *m,struct x9_camera_receiver_sample *s)
 {
@@ -143,13 +147,16 @@ static int cam_rx_session_open(unsigned sensor,uint64_t sensor_epoch,struct x9_c
     r->flags=X9_CAM_RX_ATTEMPTED;r->stage=X9_CAM_RX_STAGE_MM;
     if(!e)e=cam_rx_inspect(r);
     cam_rx_live.status=*r;
+    cam_rx_live.expected=r->before;
     if(e)cam_rx_session_fault(e);
     else cam_rx_last=*r;
     *r=cam_rx_live.status;
     return e;
 }
-/* Check against the ORIGINAL consumed controls, not just two equally
- * redirected current samples. Never touch read-clear DONE/IRQ/fault banks.
+/* Check against consumed controls plus ONLY our confirmed journal writes,
+ * not just two equally redirected current samples. Initial status.before
+ * remains evidence; expected is updated by the real OUTMUX engine only.
+ * Never touch read-clear DONE/IRQ/fault banks.
  * Disabled/stable controls are only prerequisites for dropping this
  * unprogrammed lifetime; they do not prove bus/DMA/worker drain. */
 static int cam_rx_session_guard(void)
@@ -166,8 +173,8 @@ static int cam_rx_session_guard(void)
     delay(10);
     e=cam_rx_sample(m,&b);if(e)return e;
     busy=cam_rx_busy(&a,port)|cam_rx_busy(&b,port);
-    changed=cam_rx_changed(&a,&b,port)|cam_rx_changed(&r->before,&a,port)|
-        cam_rx_changed(&r->before,&b,port);
+    changed=cam_rx_changed(&a,&b,port)|cam_rx_changed(&cam_rx_live.expected,&a,port)|
+        cam_rx_changed(&cam_rx_live.expected,&b,port);
     r->after=b;r->busy|=busy;r->changed|=changed;
     if(changed)return ESTALE;
     return busy?EBUSY:0;
@@ -180,8 +187,10 @@ static int cam_rx_session_close(struct x9_camera_receiver *r)
     cam_rx_live.close_attempted=true;
     /* An incomplete MM take cannot safely sample receiver registers. It
      * has not issued any receiver writes; unwind only its consumed slots.
-     * A complete take must still match the captured disabled controls. */
-    off=cam_mm.active?cam_rx_session_guard():0;
+     * A complete take first restores our optional OUTMUX journal, then must
+     * still match the initially captured disabled controls. */
+    off=cam_out_close_locked(cam_rx_live.sensor_epoch);
+    if(!off)off=cam_mm.active?cam_rx_session_guard():0;
     if(!off)off=cam_mm_session_close(cam_rx_live.epoch,&cam_rx_live.status.mm);
     else cam_mm_session_retain(cam_rx_live.epoch,off);
     if(off)cam_rx_session_fault(off);
@@ -209,6 +218,7 @@ static int cam_rx_sensor_guard_locked(uint64_t epoch)
     if(!cam_rx_sensor_held_locked(epoch) || cam_rx_live.close_attempted)return ESTALE;
     e=cam_mm_session_check(cam_rx_live.epoch);
     if(!e)e=cam_rx_session_guard();
+    if(!e)e=cam_out_guard();
     return e?cam_rx_session_fault(e):0;
 }
 static int cam_rx_sensor_close_locked(uint64_t epoch)
@@ -219,10 +229,11 @@ static int cam_rx_sensor_close_locked(uint64_t epoch)
     off=cam_rx_session_close(&r);
     cam_mm_log(r.sensor,&r.mm);
     printf("X9 CAMERA RX LIFETIME: sensor=%u sensor_epoch=%llu flags=%x errno=%u restore=%u "
-        "retained=%x busy=%x changed=%x (unprogrammed receiver, NOT DMA drain)\n",
+        "retained=%x busy=%x changed=%x (CSI/DL/DMA never enabled, NOT DMA drain)\n",
         r.sensor,epoch,r.flags,r.last_errno,r.mm.restore_errno,r.mm.retained,r.busy,r.changed);
     return off;
 }
+#include "x9_camera_outmux.inc"
 static int cam_rx_probe(unsigned sensor,struct x9_camera_receiver *r)
 {
     int e,off=0;
