@@ -33,6 +33,7 @@ extern "C" {
  * an active playback lease. This cycle does NOT register an AFE/backend. */
 int x9_speaker_mt6993_clock_probe(void);
 int x9_speaker_mt6993_clock_status(X9AudioClockStatus *);
+int x9_speaker_mt6993_pll_probe(void);
 #ifdef __cplusplus
 }
 #endif

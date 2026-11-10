@@ -1,6 +1,7 @@
 /* PLJ110 cold AUDIO/26M register-clock -> disabled OUT4 -> reverse restore.
  * OPPO mt6993-afe-clk.c, clk-mt6993{,-pd,-adsp}.c and captured live DT.
- * No APLL/pad/PA/DMA writes, no engine enable or fabricated physical backend.
+ * Optional preconfigured APLL2/meter cycle; no pad/PA/DMA writes or engine
+ * enable, and no fabricated physical backend.
  * Separate board mutex -> short AP resource leaf; no callbacks to IOService.
  */
 #include <sys/param.h>
@@ -11,6 +12,7 @@
 #include <mach/vm_types.h>
 #include "x9_audio_resources.h"
 #include "x9_speaker_mt6993.h"
+#include "x9_speaker_pll.h"
 #include "x9_speaker_out4.h"
 #include "x9_mic_mt6993_regs.h"
 extern vm_offset_t ml_io_map(vm_offset_t,vm_size_t);
@@ -75,7 +77,7 @@ static int access(void)
     if(!e)e=refuse(j.hwv,0x13700,2,0);
     if(!e)e=refuse(j.hwv,0x13704,13,0);
     if(!e)e=refuse(j.hwv,0x1132c,13,13);
-    if(!e)e=refuse(j.vlp,0x90,0x8383,0);
+    if(!e)e=refuse(j.vlp,0x90,0x8383,j.mux_expected[0]|j.mux_expected[1]);
     if(!e)e=refuse(j.vlp,0x274,0xc0000000,0xc0000000);
     if(!e && foreign())e=EBUSY;
     if(e)j.stuck=true;return e;
@@ -177,7 +179,8 @@ static void afe_snapshot(bool configured)
         if(configured)s.out_configured[n]=v;else s.out_after[n]=v;
     }
 }
-static int take(void)
+#include "x9_speaker_mt6993_pll.inc"
+static int take(bool with_pll)
 {
     s.stage=X9ClockMap;
     j.hwv=ml_io_map(0x1c040000,0x75000);j.vlp=ml_io_map(0x1c200000,0x1000);
@@ -197,6 +200,7 @@ static int take(void)
     const unsigned apll_regs[]={8,0xc,0x14,0x34,0x38,0x3c,0x40};
     for(unsigned n=0;n<7;n++)s.apll[n]=rd(j.apll,apll_regs[n]);
     s.flags|=X9ClockAPLLCaptured;
+    if(with_pll){e=pll_cold();if(e)return e;}
     s.stage=X9ClockInit;s.flags|=X9ClockInitIssued;e=smc(0,0);if(e)return e;
     s.stage=X9ClockDomains;
     const unsigned bits[]={8,4,1};
@@ -220,6 +224,7 @@ static int take(void)
     j.captured=true;s.flags|=X9ClockAFECaptured;
     s.stage=X9ClockGates;e=change(0,0);if(e)return e;
     s.stage=X9ClockSidebands;s.flags|=X9ClockSidebandsIssued;e=smc(7,1);if(e)return e;
+    if(with_pll){e=pll_take();if(e)return e;}
     s.stage=X9ClockI2S;
     for(unsigned n=1;!e && n<FIELD_COUNT;n++)e=change(n,fields[n].value);
     if(e)return e;
@@ -269,7 +274,7 @@ static int restore(void)
     if(s.owned_vote&8){s.parked_vote|=8;s.owned_vote&=~8u;}
     return 0;
 }
-int x9_speaker_mt6993_clock_probe(void)
+static int run_probe(bool with_pll)
 {
     if(!sweet_early_is_x9() || sweet_x9_arg("x9_audio",0)!=2)return ENXIO;
     lck_mtx_lock(&x9_speaker_clock_lock);
@@ -277,20 +282,38 @@ int x9_speaker_mt6993_clock_probe(void)
     uint64_t ticket=0;int e=x9_audio_resources_claim(X9AudioResourceSpeaker,&ticket);
     if(e){lck_mtx_unlock(&x9_speaker_clock_lock);return e;} /* no attempt consumption */
     s.ticket=ticket;s.flags=X9ClockAttempted|X9ClockHeld;
+    if(with_pll){pll_s.flags=X9PLLAttempted|X9PLLHeld;pll_s.ticket=ticket;}
     s.smc_result[0]=s.smc_result[1]=INT64_MIN;
-    e=take();s.error=(uint32_t)e;
+    e=take(with_pll);s.error=(uint32_t)e;
     unsigned failure_stage=s.stage,failure_register=s.last_register,failure_value=s.last_value;
-    s.stage=X9ClockRestore;int off=restore();ao_snapshot();
+    unsigned pll_failure_stage=pll_s.stage,pll_failure_register=pll_s.last_register,pll_failure_value=pll_s.last_value;
+    s.stage=X9ClockRestore;if(with_pll)pll_s.stage=X9PLLRestore;
+    int off=with_pll?pll_restore():0;
+    if(!off)off=restore();ao_snapshot();
     if(!off)off=x9_audio_resources_release(X9AudioResourceSpeaker,ticket);
     s.restore_error=(uint32_t)off;
     if(off){s.flags|=X9ClockPoisoned;x9_audio_resources_fault(X9AudioResourceSpeaker,ticket,e?e:off);}
     else {s.flags&=~X9ClockHeld;s.ticket=0;s.flags|=X9ClockRestored;}
     if(e){s.stage=failure_stage;s.last_register=failure_register;s.last_value=failure_value;}
     else if(!off)s.stage=X9ClockDone;
+    if(with_pll) {
+        pll_s.error=(uint32_t)e;pll_s.restore_error=(uint32_t)off;
+        if(off)pll_s.flags|=X9PLLPoisoned;
+        else {pll_s.flags&=~X9PLLHeld;pll_s.flags|=X9PLLRestored;pll_s.ticket=0;}
+        if(e){pll_s.stage=pll_failure_stage;pll_s.last_register=pll_failure_register;pll_s.last_value=pll_failure_value;}
+        else pll_s.stage=off?X9PLLRestore:X9PLLDone;
+    }
     lck_mtx_unlock(&x9_speaker_clock_lock);return e?e:off;
 }
+int x9_speaker_mt6993_clock_probe(void){return run_probe(false);}
+int x9_speaker_mt6993_pll_probe(void){return run_probe(true);}
 int x9_speaker_mt6993_clock_status(X9AudioClockStatus *out)
 {
     if(!out)return EINVAL;
     lck_mtx_lock(&x9_speaker_clock_lock);*out=s;lck_mtx_unlock(&x9_speaker_clock_lock);return 0;
+}
+int x9_speaker_mt6993_pll_status(X9AudioPLLStatus *out)
+{
+    if(!out)return EINVAL;
+    lck_mtx_lock(&x9_speaker_clock_lock);*out=pll_s;lck_mtx_unlock(&x9_speaker_clock_lock);return 0;
 }

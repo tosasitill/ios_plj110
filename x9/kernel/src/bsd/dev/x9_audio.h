@@ -19,7 +19,8 @@ enum { X9AudioStatus, X9AudioStart, X9AudioStop, X9AudioDSPStatusSelector,
        X9AudioAFEStatusSelector, X9AudioStreamStatusSelector,
        X9AudioAmpStatusSelector, X9AudioAmpProbeSelector,
        X9AudioResourceStatusSelector, X9AudioClockStatusSelector,
-       X9AudioClockProbeSelector };
+       X9AudioClockProbeSelector, X9AudioPLLStatusSelector,
+       X9AudioPLLProbeSelector };
 enum { X9AudioControlMemory, X9AudioProducerMemory, X9AudioOutputMemory };
 enum { X9AudioReady = 1u, X9AudioRunning = 2u, X9AudioFault = 4u };
 enum {

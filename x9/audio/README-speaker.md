@@ -10,6 +10,8 @@ PCM ABI 仍为 v1；**board-status 和 stream-status 为 v2**，需配套本轮 
 AFE/stream/resource 状态 selector 只返回缓存，不申请硬件资源。
 新增 `clock-status` 同样只读缓存；`clock-probe` 是 root／mode2 的一次
 **有电源、时钟和禁用 OUT4 寄存器写入**的显式事务，不是只读 probe，不能自动执行。
+新增 `pll-status` 只读缓存，`pll-probe` 在同一基础事务内额外启停预配置 APLL2、
+切换 VLP mux 并写硬件测频器；**与 clock-probe 共用每 boot 一次机会**，不应先运行两者之一再尝试另一个。
 
 ## 构建
 
@@ -159,10 +161,66 @@ SIDEBANDS 没有伪造 undo，若本轮添加 AO vote，按既有 ADSP 的未知
 
 `clock-status` 保留 before/configured/after、raw SMC result、dirty/uncertain、held ticket。
 APLL2 CON0/CON1/CON3/FENC/TUNER/PCW0/PCW1 仅在 cold admission 后读取 AO 快照，
-**从未写 PLL**。OPPO `clk-pll.c` 的 `mtk_pll_fenc_prepare()` 仅维护 software count，
+**clock-probe 路径不写 PLL**。OPPO `clk-pll.c` 的 `mtk_pll_fenc_prepare()` 仅维护 software count，
 `is_prepared()` 只读 FENC；FENC不是已证实的 lock/rate/所有权原语。不能依据参数
 `0x78fd5264/65`、FENC或本事务返回0设置 Ready。仍须接 VLP APLL2／全资源 ownership、
 可信双PA mute/config、pads与DMA/cache/quiesce，实体出声与 iOS HAL 路由尚未验收。
+
+### 申请预配置 APLL2 并取得硬件测频样本
+
+`pll-probe` 不是状态查询，不自动运行，不是播放 backend。它替代该 boot 的
+`clock-probe`，共用同一 AP ticket、cold AUDIO／26M／SMC INIT0＋SIDEBANDS7、
+禁用 OUT4 与恢复流程。必须由用户在配套 kernel／工具已部署且 `x9_audio=2` 的
+**iOS root shell** 中显式选择；本轮只有编译结果，以下硬件流程尚未上机执行：
+
+```sh
+audioctl pll-status
+audioctl clock-status
+audioctl resource-status
+# 若本 boot 尚未进入 clock-probe/pll-probe，且用户决定执行有写入的事务：
+audioctl pll-probe
+# 之后只读缓存；失败也不重试、不 reset、不取消未知硬件操作。
+audioctl pll-status
+audioctl clock-status
+audioctl resource-status
+```
+
+| 阶段 | 准入／操作 |
+|---|---|
+| APLL2 cold admission | `0x1c203100` 的 EN／SDM／TUNER/FENC off，test-clock bits15/17 off；PCW0/1 已为 `0x78fd5264/65`，CON1 bit31已1、postdiv0；不改PCW，不重放PCW_UPDATE |
+| non-owned consumers | TOP AUD2、MM DVO_FAVT_DP 与 VLP SW_ENGEN2 必须 gated、FENC off、UPDATE CHK无pending；TOP AUD2 parent0、MM DVO parent0也保守要求。不写TOP／MM消费者，检查只是当前快照，不是远端所有权证书 |
+| FQMTR admission | VLP selector0、独立 `0x1c201000` CON3 HW mode0、CON6 BUSY0、CON0 enable/cal-mode/trigger bits全0；不关闭已有自动测频 |
+| reference samples | 保持 intbus／audio_h 为26M，先分别测 VLP id33与34；拒绝旧counter／超时结果 |
+| PLL／mux cycle | 只开 APLL2 EN→SDM→TUNER bit0并检查FENC；ENGEN2在PDN下切parent3=APLL2/4，audio_h在PDN下切parent3=APLL2；intbus继续26M，AFE engine／OUT4 EN仍0 |
+| active samples | 三对 id30=49.152MHz／id34=196.608MHz；每次重新申请测频，非自有消费者、可访问性与AFE idle重查 |
+| restore | 每样本先清自己的已完成trigger、逆序恢复CON2/load/CON0/selector；总事务audio_h回26M、ENGEN2 gate与原parent、TUNER→SDM→EN逆序恢复，任何PLL位曾写入也须等FENC off，再走AUDIO-8基础恢复与AP ticket释放 |
+
+FQMTR采用 OPPO `clk-fmeter-mt6993.c::fqmtr_cal` 的 normal mode、load1023、
+divider1（divide2）、reference/source0与CON0 hi16 timeout0x410。必须观察该次
+**BUSY上升（≤20µs）→下降（≤320µs）**，不以旧count或厂商超时后算出的数值为成功。
+每次控制字段检查／恢复均只接受原值或自有预期值；CON0 bits15/12按普通RW严格readback，
+若实机显示self-clear等不同语义则保守失败，不假设已触发。未观察到完整BUSY周期的
+trigger不取消、不清除，保留所有依赖／journal／ticket。已观察完整周期后count0／
+不稳定也可仅清自己的trigger并恢复控制；不会写回保存的历史低16-bit count。
+未被接纳的baseline没有cleanup写入；late mux/FENC／未知SMC／第三值同样阻止掉电。
+
+频率计算为 `count * 26000000 * 2 / 1024`。**26MHz参考没有实测或校准**：
+±1%只做nominal路径sanity，每路三样本spread≤2只做短窗口一致性；单count约50.781kHz，
+不是audio ppm精度、PLL锁定、I²S输出／pad波形或声学时钟证明。
+本地board mutex串行该VLP测频用户，并不授权覆盖其他AP核／远端固件的测频操作。
+
+| selector／缓存 | 内容与边界 |
+|---|---|
+| 14 `pll-status` v1／264B | flags、主/restore errno、stage、last register/value、dirty/uncertain、mux-owned、ticket；PLL before/measured/after、消费者／测频器原始快照、8个count与nominal Hz，只读软件缓存 |
+| 15 `pll-probe` | root＋exclusive＋admin＋open type2，audioLock下拒绝已注册backend、backendHeld或Running；进入硬件后每boot一次，与selector13共享，不自动重试 |
+| flags | Attempted1、Baseline2、Captured4、Powered8、Measured16、Restored32、Held64、Poisoned128、MeterCaptured256、Reference512；Powered只表示启用位/FENC通过，Measured只表示8样本sanity通过 |
+| stage | 0none、1cold、2meter-admission、3reference、4PLL-power、5mux、6measure、7restore、8done；失败后保留主错stage/register，不让cleanup覆盖。共用基础事务的错误还须查看clock-status |
+
+`Restored`仍只表示可恢复配置与活动AP票cleanup，不撤borrowed票、不撤按ADSP
+erratum保留的parked AO vote、不伪造SMC undo。**此事务成功也不设置 verified／Ready，
+不注册AFE/platform/backend、不启AUDIO engine／DMA、不写SRAM／pads／routes／PA。**
+双PA右rail、实际revision/profile/校准、可信mute/config与完整AFE缓存／EMI／quiesce
+以及iOS原生HAL路由仍未接齐；DSP固件RELOAD/READY也没有新增实机验收。
 
 ### 对齐启动预填和 PCM 时间线
 
