@@ -1,6 +1,7 @@
 /* X9 native extent-backed UFS root. Media-read-only first implementation.
  * Direct-LK shim initializes MT6993; kernel only attaches to a ready, idle,
- * coherent host with existing SMMU bypass. No platform reset/power sequences.
+ * coherent host with existing SMMU bypass. Optional late scaling never resets
+ * the controller/PHY and retains its shared VCORE/high-clock prerequisites.
  * Source transport is shared with tested X9 shim, isolated from sweet_ufs.c.
  */
 #if defined(ARM64_BOARD_CONFIG_SWEET)
@@ -29,6 +30,7 @@ extern int sweet_x9_arg(const char *name, int def);
 #include <libkern/libkern.h>
 #include "x9_ufs/ufs_ro.h"
 #include "x9_ufs/ufs_hs.h"
+#include "x9_ufs/ufs_platform.h"
 #include "x9_ufs/sha256.h"
 extern ppnum_t pmap_find_phys(pmap_t,addr64_t);
 extern vm_offset_t ml_io_map(vm_offset_t,vm_size_t);
@@ -54,6 +56,7 @@ static struct {
 static LCK_GRP_DECLARE(x9ufs_grp,"x9_ufs");
 static LCK_MTX_DECLARE(x9ufs_lock,&x9ufs_grp);
 static uint8_t header_data[65536];
+static int high_platform_check(void *);
 static void pet(void){if(xu.wdt)*(volatile uint32_t *)(xu.wdt+8)=0x1971;}
 static uint32_t read32(void *ctx,unsigned off){(void)ctx;return *(volatile uint32_t *)(xu.hci+off);}
 static void write32(void *ctx,unsigned off,uint32_t value)
@@ -381,7 +384,7 @@ static int initialize(void)
  xu.dma_pa=ptoa_64(first);
  for(unsigned off=0;off<X9U_DMA_SIZE;off+=PAGE_SIZE)
   if(ptoa_64(pmap_find_phys(kernel_pmap,(addr64_t)(xu.dma+off)))!=xu.dma_pa+off)return ENOMEM;
- struct x9u_io io={NULL,read32,write32,sync_dma,now_us,delay_us};
+ struct x9u_io io={NULL,read32,write32,sync_dma,now_us,delay_us,high_platform_check};
  int result=x9u_open(&xu.host,&io,(void *)xu.dma,xu.dma_pa,1);
  if(result){printf("X9 UFS: native attach failed %d\n",result);return ENXIO;}
  /* One 256 KiB PRD by default; 64 restores the previous transfer cap,
@@ -430,6 +433,9 @@ static int initialize(void)
  devfs_make_node(xu.device,DEVFS_BLOCK,UID_ROOT,GID_OPERATOR,xu.writable?0640:0440,"ufsroot0");
  devfs_make_node(makedev(xu.cmajor,0),DEVFS_CHAR,UID_ROOT,GID_OPERATOR,xu.writable?0640:0440,"rufsroot0");
  printf("X9 UFS NATIVE ROOT: LUN2, %llu MiB, %u extents, 512-byte sectors, %s; DMA=0x%llx\n",xu.bytes>>20,xu.extent_count,xu.writable?"read-write (dedicated extent copy)":"read-only",xu.dma_pa);
+ int high=sweet_x9_arg("ug",0);
+ if(high==4||high==5)printf("X9 UFS HIGH: requested G%d, pending late DVFSRC setup (shim remains G3)\n",high);
+ else if(high)printf("X9 UFS HIGH: invalid ug=%d; high scaling disabled\n",high);
  /* The legacy sweet_ufs_init path exits early on X9. Start input here,
   * once the native root has completed initialization and threads are usable. */
  extern void sweet_x9_touch_init(void);
@@ -638,3 +644,5 @@ void *sweet_x9_big_alloc(size_t bytes)
  if(kmem_alloc(kernel_map,&mem,(vm_size_t)bytes,KMA_DATA|KMA_ZERO,VM_KERN_MEMORY_IOKIT)!=KERN_SUCCESS)return NULL;
  return (void *)mem;
 }
+
+#include "x9_ufs_high.inc"

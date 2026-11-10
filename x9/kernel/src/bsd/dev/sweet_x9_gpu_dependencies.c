@@ -16,6 +16,7 @@ extern void sweet_x9_render_bootstrap(void);
 #include <pexpert/device_tree.h>
 #include <stddef.h>
 #include "gpu_shared_prefix.h"
+#include "x9_ufs/ufs_platform.h"
 extern vm_offset_t ml_io_map(vm_offset_t,vm_size_t);
 extern int sweet_early_is_x9(void);
 extern int sweet_x9_arg(const char *name, int def);
@@ -208,6 +209,48 @@ static int gov_commit(int index) {
  * (opp0 fastest), so request levels 0..9, higher = faster. Read-only unless
  * x9_ddr_level=N / x9_emi_level=N (1..15) asks for a level. */
 static vm_offset_t dvfsrc;
+static LCK_GRP_DECLARE(x9_dvfsrc_grp,"x9_dvfsrc");
+static LCK_MTX_DECLARE(x9_dvfsrc_lock,&x9_dvfsrc_grp);
+static unsigned dvfsrc_ready,ufs_vcore_floor;
+/* MT6993 regulator selectors: 575/600/650/725/825/950 mV. UFS high clocks
+ * require selector2 (650 mV). Own only SW_REQ[6:4]; preserve DRAM/EMI and any
+ * stronger inherited AP vote. A one-time high current gear is not a floor. */
+static int vcore_ok_locked(void)
+{
+ if(!dvfsrc_ready||!ufs_vcore_floor)return 0;
+ uint32_t req=rd(dvfsrc,0x18),cur=rd(dvfsrc,0x6ac),basic=rd(dvfsrc,0);
+ return basic!=0xffffffffu&&(basic&1)&&((basic>>20)&0x7f)>0&&
+  req!=0xffffffffu&&cur!=0xffffffffu&&
+  ((req>>4)&7)>=ufs_vcore_floor&&((req>>4)&7)<=5&&
+  ((cur>>8)&7)>=ufs_vcore_floor&&((cur>>8)&7)<=5;
+}
+int sweet_x9_vcore_ufs_ok(void)
+{
+ lck_mtx_lock(&x9_dvfsrc_lock);int ok=vcore_ok_locked();
+ lck_mtx_unlock(&x9_dvfsrc_lock);return ok;
+}
+int sweet_x9_vcore_ufs_hold(uint32_t snapshot[3])
+{
+ if(!snapshot)return -1;
+ lck_mtx_lock(&x9_dvfsrc_lock);int error=-1;
+ if(!dvfsrc_ready)goto done;
+ uint32_t req=rd(dvfsrc,0x18),floor=(req>>4)&7;
+ if(req==0xffffffffu||floor>5)goto done;
+ snapshot[0]=req;if(floor<2)floor=2;
+ if(floor<ufs_vcore_floor)floor=ufs_vcore_floor;
+ ufs_vcore_floor=floor; /* retain even on failure: never lower an uncertain vote */
+ wr(dvfsrc,0x18,(req&~0x70u)|(floor<<4));
+ snapshot[1]=rd(dvfsrc,0x18);
+ if(snapshot[1]!=((req&~0x70u)|(floor<<4)))goto done;
+ /* mt6989_wait_for_vcore_level: bounded current VCORE >= requested. */
+ for(unsigned i=0;i<=100;i++) {
+  snapshot[2]=rd(dvfsrc,0x6ac);
+  if(vcore_ok_locked()){error=0;break;}
+  if(i<100)delay(10);
+ }
+done:
+ lck_mtx_unlock(&x9_dvfsrc_lock);return error;
+}
 /* 110.txt (rev252db): basic=00000008 opp_count=1 level=0 gear=0 and the
  * SW_REQ write changed nothing - DVFSRC was never started. Linux brings it up
  * through TF-A: mtk_dvfsrc_probe SMC MTK_SIP_VCOREFS_CONTROL (0xC2000506,
@@ -236,10 +279,13 @@ static void dvfsrc_dump(const char *when) {
   when,basic,((basic>>20)&0x7f)+1,req,(req>>12)&0xf,req&0xf,level,gear,gear&0xf,(gear>>8)&7);
 }
 static void dvfsrc_setup(void) {
+ lck_mtx_lock(&x9_dvfsrc_lock);
  dvfsrc=ml_io_map(0x1c100000,0x1000);
- if(!dvfsrc){printf("X9 DDR: DVFSRC map failed\n");return;}
+ if(!dvfsrc){lck_mtx_unlock(&x9_dvfsrc_lock);printf("X9 DDR: DVFSRC map failed\n");return;}
  dvfsrc_dump("boot");
- uint32_t mode=0;PE_parse_boot_argn("x9_dvfsrc",&mode,sizeof(mode));
+ uint32_t mode=0;
+ /* Short alias frees boot-payload space for ug=5; legacy name takes priority. */
+ if(!PE_parse_boot_argn("x9_dvfsrc",&mode,sizeof(mode)))PE_parse_boot_argn("dv",&mode,sizeof(mode));
  if(mode==1||mode==2) {
   uint64_t a1=0,r=dvfsrc_smc(0,0,0,&a1);
   for(int i=0;i<20;i++)pause_ms();
@@ -265,6 +311,9 @@ static void dvfsrc_setup(void) {
   printf("X9 DDR: SW_REQ %08x -> %08x (x9_ddr_level=%u x9_emi_level=%u) gear now %08x (dram %u vcore %u)\n",
    req,rd(dvfsrc,0x18),ddr,emi,gear,gear&0xf,(gear>>8)&7);
  }
+ uint32_t basic=rd(dvfsrc,0);
+ dvfsrc_ready=basic!=0xffffffffu&&(basic&1)&&((basic>>20)&0x7f)>0;
+ lck_mtx_unlock(&x9_dvfsrc_lock);
 }
 static void gov_thread(void *arg,wait_result_t result) {
  (void)arg;(void)result;
@@ -274,6 +323,7 @@ static void gov_thread(void *arg,wait_result_t result) {
  printf("X9 GPU GOV: start floor=%d(%u kHz) ceiling=%d(%u kHz) slowest=%d period=50ms up>=20%% down<5%%\n",
   gov_floor,opp_khz[gov_floor],gov_ceiling,opp_khz[gov_ceiling],gov_slowest);
  dvfsrc_setup();
+ sweet_x9_ufs_late_high(); /* no DVFSRC lock held across the UFS mutex */
  for(;;) {
   gov_sleep_ms(50);
   if(channel_uncertain){printf("X9 GPU GOV: mailbox uncertain; governor stops\n");break;}

@@ -123,8 +123,8 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 
 当前主线是 **QMI→MediaTek AT控制查询 + MIPC1/WDS + DPMAIF**(§7):175确认40-bit分配与INIT_DONE、真实SA→LTE,但没有WDS Start/ACT/GET/EIF或PDP收发;41.523s因raw DL状态0x8被隔离。15f597b区分未使用legacy PIT的masked状态与真实LRO/DMA错误,已与ALS整合编译,实机效果仍未验收。下一步先追iOS为何没有Start及NR回退的真实MD/网络原因,不伪造connected、不强锁NR、不连续刷探针。下列为保留的GPU/Wi-Fi待办,不是新的硬件验证结论。
 
-1. **GPU 带宽/帧率**:avg ~17-22 fps,稳态 24 fps;job 内 GPU wait 6-15 ms。判断显存带宽受限。**DVFSRC 从未初始化**(110.txt:`basic=8 opp_count=1 gear=0`,SW_REQ 被忽略)。
-   rev252dc 加 TF-A SMC INIT:`MTK_SIP_VCOREFS_CONTROL = 0xC2000506`,cmd INIT=0(a0=0 成功,a1=dram_type)锁高 OPP,START=1(`x9_dvfsrc=2`)后自由运行。**待上机**,SMC 可能挂。
+1. **GPU 带宽/帧率**:旧110的avg ~17-22 fps/稳态24 fps/job wait6-15ms曾推测显存带宽受限,不是175/176性能验收。**DVFSRC已初始化**:175和176均确认SMC INIT a0=0、OPP93、DDR请求9后current VCORE gear5,不能再沿用110的basic8/gear0。
+   TF-A `MTK_SIP_VCOREFS_CONTROL=0xC2000506`,INIT=0锁高OPP;现有`x9_dvfsrc=1`已运行成功,START=1(`x9_dvfsrc=2`)自由运行尚无本轮验收。UFS G5需独立持久VCORE floor,不把偶然current gear5当电压所有权;见UFS-G5交接。
 2. **CSG 槽耗尽**:前 8 个 GPU 进程各占一个硬件 CSG 槽(group 创建时绑定,关设备才放);第 9 个客户端(AegirPoster)`X9RenderCreateGroup` 返回 0xe00002be,43 次失败。
    可选实现现已入库(`x9cs=1`,默认关):复用最久未用的挂起 group 槽位,保存/恢复其 suspend buffer,不经 TERMINATE 丢失 PanVK 初始化 CS 状态。入库不等于当前实机验证,仍需带明确开关的对应日志确认。
 3. **开/关 app 动画出现 4 条竖向透明马赛克线**(间距 256 px,**一直都有**,非新回归)。已证伪:CA 256 宽 tile 上传缺失(TILEPROBE 无 256 宽 CPU 上传)、swipe 旧马赛克(InPlaceWrites 未启用)。
@@ -161,7 +161,16 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
 
-## UFS活动交接(UFS-OPT1,2026-11-10): G3基线传输/CPU优化已编译;G4/G5前置尚未接通
+## UFS活动交接(UFS-G5,2026-11-10): 已实现有条件late G4/G5路径;四对象编译通过,尚未整包/实机
+
+- **目标/运行证据**:用户追问“为啥不提到g5”,第一轮只优化传输确实不够,不把G3当终点。最新176:443仍FASTAuto/RateB/G3/双lane;1563-1565约6.11s INIT a0=0/OPP93/SW_REQ9000/current VCORE5,与175一致。没有本轮G4/G5运行或Android G5实测;厂商请求上限G5不能代替设备能力读回。
+- **隔离/实现**:独立`.local/x9/worktrees/ufs-g5` / `work/x9-ufs-g5`,起始固定main **3c9a4eb**,没有夹带主checkout当时的USB未提交修改。`x9_ufs_high.inc`接在GPU governor的DVFSRC setup之后,共享UFS mutex排空root/log/mailbox/BBFW/modem I/O;先读取local/peer MAXRXHSGEAR和PA_LOCALVERINFO,目标=min(ug,双方cap)。只接受现有已验证G3+/RateB/双lane,不改shim早期G1→G2→G3。若真实cap4,会明确negotiatedG4,不伪报G5;陌生能力/平台前置不通过时保留未改的已验证链路。
+- **平台路径**:GPU dependencies新增DVFSRC mutex和整boot单调UFS floor,SW_REQ只改[6:4]、保留原DRAM/EMI和更高VCORE请求;selector2=650mV,读回请求并有界等待current≥floor。锁序UFS→DVFSRC,setup解锁后才进UFS。MT6993真实MAINPLL/UNIVPLL provider **1c213000/1c213100**,FENC+CON1按22-bit PCW/integer8/26MHz解码,仅借用已运行2184/2496MHz(±0.1%)PLL,**不编程/关PLL**;这是厂商PLL_FENC prepare只维护software reference的对应行为。先floor,仅必要时开FDE mux bit7,再SET/CLR UFS parent4/FDE parent3、UPDATE1 bit26/25,CKSTA bit5/6与TOP fence bit6/7有界确认。PLL不在这些已证明率/未运行则明确block,无猜测上电。
+- **PA/一致性/失败边界**:UniPro localver≥5才允许INITIAL_ADAPT,按G4→G5逐档选择Android FAST/FAST(0x11),保持RateB/2lane。每档要求UCCS+UPMS+PWR_LOCAL1和六项PA读回。四个64KiB窗口(0/quarter/half/tail)先在旧时钟读取、切高速host clock后再比较、每档PA后再比较SHA256;root已mutable,用锁内fresh bytes而非旧manifest SHA。原G3合法I/O在late入口之前仍可正常读写,升档锁内不会有filesystem mutation,合格后才放行新档I/O。SET/clock部分变化、UIC超时、读错/校验不一致则所有共享view poison、关闭可写声明、保留DMA/票/时钟,不清未知completion、不retry/reset或猜测回滚。
+- **持续保护/参数**:所有native SCSI/management命令前后经共享platform guard检查DVFSRC请求/current/basic、PLL/fence/parent和host/link错误;丢票/时钟漂移等返回phase5并全局隔离,不是在DMA飞行时修复。单槽/统一mutex仍保留。**ug=0默认关闭;ug=4/5启用一次late协商**。新增精确`dv`短alias(原`x9_dvfsrc`优先),候选完整117/176参数只把x9_dvfsrc=1改成dv=1并追加ug=5,**603B≤607B**,未删cpus8/任何功能token;插件275/32GiB manifest不变,无需mailbox。当前入口依赖GPU governor实际启动并执行DVFSRC setup;governor关闭/未启动不升档,有pending日志,不伪成功。
+- **编译里程碑/未完成**:最终四对象sweet_x9_ufs/ufs_ro/ufs_hs/gpu_dependencies编译exit0(原有vendor/include风格warning未当Werror),没有运行额外测试脚本/测试套件、CI build、设备操作或根盘写入。首次单对象label后直接声明不兼容当前C标准失败,改done:;及shadow变量名后第二/第三轮均通过;原日志`.local/x9/work/ufs-g5-20261110/{object-build.log,object-build.exit,object-build2.log,object-build2.exit,object-build3.log,object-build3.exit,compile-selected.py,local-config.json,boot-config.json}`。本节阶段尚未完整构建,不能称G5成功或实测提速;下一步整合已提交联合树并固定构建,记录提交/boot结果,实机验收以HIGH negotiated/sample/final_status/poison及后续root I/O为准。
+
+### 前次UFS交接(UFS-OPT1,2026-11-10): G3传输/CPU优化已编译;以下是第一轮历史,不是G5实现现状
 
 - **范围/隔离**:用户要求对照OPPO与UniXNU优化UFS。独立worktree `.local/x9/worktrees/ufs-opt` / `work/x9-ufs-opt`,固定基线 **bc72c12**(main含117+相机probe/共享PMIF修正)。主checkout同时有麦克风、USB日志等其他会话的未提交/暂存修改,本树未纳入或覆盖这些代码。无设备操作、flash/reboot/分区写入、mailbox更新或测试套件。
 - **纠正运行基线**:175:428=`X9 UFS LINK: status=0 mode=0x44 TX_G3 RX_G3 TX_lanes=2 RX_lanes=2 series=2`,174:440亦为G3。shim已有G1→G2→G3+四个64KiB窗口SHA比较,内核只读回链路;不能继续按笔记旧G1设计算法。175:18109累计1884964864B/8463208us≈212.4MiB/s、53523个root请求;该指标混合不同大小/读写/extent,不是设备顺序峰值。累计lock_us=24503969是多个请求等待之和,不能当作一次24.5s卡顿或全由console造成。

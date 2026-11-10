@@ -19,6 +19,13 @@ static void big32(uint8_t *p,uint32_t n) {for(unsigned i=0;i<4;i++)p[i]=(uint8_t
 static void big64(uint8_t *p,uint64_t n) {big32(p,(uint32_t)(n>>32));big32(p+4,(uint32_t)n);}
 static uint32_t rd(struct x9u_host *h,unsigned o) {return h->io.read32(h->io.context,o);}
 static void wr(struct x9u_host *h,unsigned o,uint32_t v) {h->io.write32(h->io.context,o,v);}
+static int platform_ok(struct x9u_host *h)
+{
+ if(h->io.platform_check&&h->io.platform_check(h->io.context)) {
+  h->poisoned=1;h->failure_phase=5;return X9U_NOT_READY;
+ }
+ return 0;
+}
 static int wait_mask(struct x9u_host *h,unsigned o,uint32_t mask,uint32_t want,uint32_t timeout)
 {
  uint64_t start=h->io.now_us(h->io.context);
@@ -130,6 +137,7 @@ static int write_range(struct x9u_host *h,unsigned lun,uint64_t lba,uint32_t cou
 static int command(struct x9u_host *h,unsigned lun,const uint8_t cdb[16],unsigned cdb_len,uint32_t bytes)
 {
  if(!h||!h->attached||h->poisoned||lun>=3||!h->data_limit||h->data_limit>X9U_DATA_SIZE||bytes>h->data_limit)return X9U_ARGUMENT;
+ if(platform_ok(h))return X9U_NOT_READY;
  int writing=0,extra=0;
 #if defined(X9U_EXTENT_WRITES)
  if((cdb[0]==0x2a&&cdb_len==10)||(cdb[0]==0x8a&&cdb_len==16)) {
@@ -178,6 +186,7 @@ static int command(struct x9u_host *h,unsigned lun,const uint8_t cdb[16],unsigne
   return X9U_TIMEOUT;
  }
  uint64_t device_us=h->io.now_us(h->io.context)-device_start;
+ if(platform_ok(h))return X9U_NOT_READY;
  /* Reclaim OCS, response and the actual transfer; unused DMA tail stays idle. */
  h->io.sync(h->io.context,0,32,1);
  h->io.sync(h->io.context,0x1200,0x200,1);
@@ -225,6 +234,7 @@ static int command(struct x9u_host *h,unsigned lun,const uint8_t cdb[16],unsigne
 static int management(struct x9u_host *h,unsigned opcode,unsigned *flag)
 {
  if(!h||!h->attached||h->poisoned||(opcode!=0&&opcode!=5&&opcode!=6))return X9U_ARGUMENT;
+ if(platform_ok(h))return X9U_NOT_READY;
  if(rd(h,0x58)||rd(h,0x78))return X9U_BUSY;
  uint8_t *tr=h->dma,*cmd=tr+0x1000,*response=tr+0x1200;
  clear(tr,32);clear(cmd,0x400+16*X9U_PRD_COUNT);
@@ -242,6 +252,7 @@ static int management(struct x9u_host *h,unsigned opcode,unsigned *flag)
   if(wait_mask(h,0x58,1,0,10000))return X9U_DMA_PENDING;
   return X9U_TIMEOUT;
  }
+ if(platform_ok(h))return X9U_NOT_READY;
  h->io.sync(h->io.context,0,32,1);
  h->io.sync(h->io.context,0x1200,0x200,1);
  h->last_is=rd(h,0x20);h->last_ocs=le32(tr+8)&255;copy(h->last_response,response,sizeof(h->last_response));

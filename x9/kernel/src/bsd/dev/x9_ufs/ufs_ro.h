@@ -30,6 +30,9 @@ struct x9u_io {
  void (*sync)(void *,unsigned,size_t,int); /* int=0 CPU->DMA, 1 DMA->CPU */
  uint64_t (*now_us)(void *);
  void (*delay_us)(void *,unsigned);
+ /* Optional native platform guard, called before and after every command.
+  * A failure poisons that view; the adapter must poison all shared views too. */
+ int (*platform_check)(void *);
 };
 struct x9u_snapshot {
  uint32_t cap,version,is,ie,hcs,hce,list_lo,list_hi,doorbell,run;
