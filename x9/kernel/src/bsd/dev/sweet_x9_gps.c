@@ -6,6 +6,7 @@
 #include <sys/errno.h>
 #include <kern/clock.h>
 #include <kern/locks.h>
+#include <pexpert/device_tree.h>
 #include "x9_gps.h"
 extern int sweet_early_is_x9(void);
 extern int sweet_x9_arg(const char *, int);
@@ -19,12 +20,42 @@ static unsigned head, count;
 static struct x9_gps_position positions[X9_GPS_POSITION_RING];
 static unsigned position_head, position_count;
 static int active;
+static struct x9_gps_handoff gps_layout;
+static void gps_copy_layout(void)
+{
+ DTEntry chosen; void *p = NULL; unsigned int size = 0;
+ struct x9_gps_handoff h;
+ if (SecureDTLookupEntry(NULL,"/chosen",&chosen) != kSuccess ||
+     SecureDTGetProperty(chosen,"x9-gps-handoff",&p,&size) != kSuccess ||
+     !p || size != sizeof(h)) return;
+ memcpy(&h,p,sizeof(h));
+ if (h.version != 1 || h.flags != X9_GPS_LAYOUT_VERIFIED || h.reserved ||
+     h.reserve_base < 0x80000000 || h.reserve_base > 0xf0000000 ||
+     (h.reserve_base & 0xffff) || h.reserve_size != 0xa00000 ||
+     h.reserve_size > 0xf0000000-h.reserve_base || h.layout_size != 0x630000 ||
+     h.legacy_offset != 0x4f0000 || h.legacy_size != 0x78000 ||
+     h.ap2mcu_offset != 0x628000 || h.mcu2ap_offset != 0x62c000 ||
+     h.region_size != 0x4000 || h.data_offset != 0x70 || h.data_size != 0x1000 ||
+     h.mcu_bus_base != 0x70000000 || h.ccif_base != 0x4003d000 || h.ccif_size != 0x100) return;
+ gps_layout=h; st.layout_valid=1;
+}
+int x9_gps_copy_handoff(struct x9_gps_handoff *out)
+{
+ if (!out) return EINVAL;
+ lck_mtx_lock(&gps_lock);
+ int error=!active ? ENXIO : !st.layout_valid ? EAGAIN : 0;
+ if (!error) *out=gps_layout;
+ lck_mtx_unlock(&gps_lock); return error;
+}
 
 void x9_gps_init(void)
 {
  lck_mtx_lock(&gps_control); lck_mtx_lock(&gps_lock);
  if (!active && sweet_early_is_x9() && sweet_x9_arg("x9_gps", (sweet_x9_arg("x9s", 0)&4) ? 1 : 0) == 1) {
   active = 1; st.generation = 1; st.interval_ms = 1000;
+  gps_copy_layout();
+  printf("X9 GPS: consys HIF layout %s; physical receiver remains unavailable\n",
+      st.layout_valid ? "qualified" : "pending");
  }
  lck_mtx_unlock(&gps_lock); lck_mtx_unlock(&gps_control);
 }
@@ -212,3 +243,4 @@ int x9_gps_next_position(uint64_t *cursor, struct x9_gps_position *out)
 #undef GPS_LE32
 
 #include "x9_gps_mcudl.inc"
+#include "x9_gps_hif.inc"

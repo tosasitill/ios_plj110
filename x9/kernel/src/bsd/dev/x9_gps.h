@@ -2,6 +2,7 @@
 #ifndef X9_GPS_H
 #define X9_GPS_H
 #include <stdint.h>
+#include "x9_gps_handoff.h"
 #define X9_GPS_NMEA_MAX 200u
 #define X9_GPS_RING 64u
 #define X9_GPS_MAX_AGE_NS 2000000000ULL
@@ -13,6 +14,7 @@ struct x9_gps_status {
  int32_t last_errno;
  uint64_t position_sequence;
  uint32_t position_supported;
+ uint32_t layout_valid;
 };
 struct x9_gps_nmea {
  uint64_t sequence, generation, host_time;
@@ -42,6 +44,7 @@ void x9_gps_init(void);
 int x9_gps_register_backend(const struct x9_gps_backend *backend);
 int x9_gps_set_state(int enable, int tracking, uint32_t interval_ms);
 void x9_gps_copy_status(struct x9_gps_status *status);
+int x9_gps_copy_handoff(struct x9_gps_handoff *);
 int x9_gps_deliver_nmea(uint64_t generation, const void *sentence,
     unsigned length, uint64_t host_time);
 /* One cursor per PDS client; cursors are not shared or consumed by others. */
