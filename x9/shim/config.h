@@ -19,6 +19,14 @@
 #define X9_DIAG_ONLY 0
 #endif
 
+/* Temporarily exclude the ADSP shared-layout walker from the pre-XNU path.
+ * Boot130 console ended immediately before this new handoff. Keep its ADT
+ * placeholder unqualified/zero; do not grant DSP memory or block cellular
+ * bring-up. Re-enable only after the loader regression has been resolved. */
+#ifndef X9_ADSP_LOADER
+#define X9_ADSP_LOADER 0
+#endif
+
 /* Bring-up aid: mirror the log into the ramoops console zone, which survives
  * the warm reset, so a boot that never reaches Android's pstore driver can
  * still be read back with adb. Off by default: this writes DRAM the running

@@ -1,5 +1,6 @@
 /* SWEETXNU v1, shared with x676c/tools/mkpayload.py; no EFI/XNUP container. */
 #include "loader.h"
+#include "config.h"
 #include "fdt.h"
 #include "hw.h"
 #include "plog.h"
@@ -156,8 +157,12 @@ static const char *boot_impl(uintptr_t dtb, const void *embedded, size_t embedde
   plog_str("X9 GPS FDT: missing/invalid ADT placeholder; GNSS remains pending\n");
  if(fdt_mic_dma_patch_adt(dtb,(void *)(uintptr_t)adt_pa,p->adt_size)<0)
   plog_str("X9 MIC DMA FDT: missing/invalid ADT placeholder; DMA remains pending\n");
+#if X9_ADSP_LOADER
  if(fdt_adsp_patch_adt(dtb,(void *)(uintptr_t)adt_pa,p->adt_size)<0)
   plog_str("X9 ADSP FDT: missing/invalid ADT placeholder; shared DRAM remains pending\n");
+#else
+ plog_str("X9 ADSP FDT: loader disabled; no shared DRAM grant\n");
+#endif
  { int wd=fdt_wifi_dump_adt(dtb,(void *)(uintptr_t)adt_pa,p->adt_size);   /* never fatal */
    plog_str(wd==0?"X9 LK DT: Wi-Fi facts copied to ADT\n":wd>0?"X9 LK DT: no ADT placeholder\n":"X9 LK DT: FDT walk refused\n"); }
  if(p->phys_base==X9_RAM_LO && p->mem_size==X9_RAM_SPAN &&
