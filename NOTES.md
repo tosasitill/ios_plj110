@@ -71,6 +71,13 @@ X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>      # 之后再�
 
 **上机流程**:用户把手机 `fastboot boot x9/out/<name>/boot.img`,跑场景,日志放 Mac `~/N.txt`,我读。永不 `fastboot getvar`。
 
+## 启动回退活动交接（BOOT-AUDIO-REMOVE，2026-11-10）
+
+- **用户要求/观察**：用户报告现在 shim 不能跳转到 XNU，要求去掉音频新增的内存交接部分。已有 BOOT130-CONSOLE 定位在 GPS FDT 返回后、ADSP handoff 前；CELL131/189 已证明只关闭 ADSP 调用即可恢复那次启动。当前 main 默认 ADSP=0，但 `7d1ee50` 后新增 MIC DMA walker 仍无条件执行于 XNU jump 前。最新家目录数字日志仍189（16:57），没有本次失败的新console，**不把历史130或189当本次根因证明**。
+- **本轮源码里程碑**：从 shim loader 调用链及 `build.py` 编译/链接列表移除 MIC DMA 和 ADSP handoff，去掉可重新启用的 `X9_ADSP_LOADER` 宏及公开入口声明；两份实现源码保留作离线参考。ADT 的 MIC64B/ADSP256B/AUDIO-IRQ32B ABI 全零placeholder保留，kernel consumers按原version/flags规则拒绝资格，不授予DMA/shared memory/IRQ topology。保留所有内核/HAL音频代码、GPU/SCP/GPS/Wi-Fi及相机交接，不改内核copy/zero、RAM范围、boot_args、entry计算或 `start.S:xnu_enter`。
+- **单位编译**：真实LLVM22/toolchain.CFLAGS、aarch64-none-elf/Wall/Wextra/Werror＋UFS native宏编译 `loader.c` **exit0，无warning，allocated ABS64=0**；`git diff --check`通过。私有 `.local/x9/work/audio-loader-removal-20261110/` 保存main-removal.patch、loader-compile.log/exit及对象。未运行测试脚本/套件、设备/ADB/fastboot/root/mailbox命令，没有本次启动成功结论。
+- **下一动作**：基于最新已有候选 haptic-native3 的固定 `4aadb83` 与原样匹配内核，只移除上述shim音频入口再打包新name；沿用其606B完整参数/真实射频/16GiB manifest/276，不混入main后续各窗口功能。完成后补记唯一镜像、构建exit/CI与实际待验证项；若用户本次启动的不是haptic-native3，需要提供镜像名及新console，不能声称这个基线覆盖未知候选。
+
 ## 振动驱动活动交接（HAPTIC-1，2026-11-10）
 
 - 独立树 `.local/x9/worktrees/haptic-final` / `work/x9-haptic-final`，固定起点 `f069ed2`；主线其他窗口修改未覆盖。用户目标仍是完整振动驱动、iOS 场景转换和最终一个镜像，不以手动振一下或 HAL 枚举代替完成。

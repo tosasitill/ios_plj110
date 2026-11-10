@@ -1,5 +1,13 @@
 # X9 扬声器 / ADSP 音频接口
 
+**2026-11-10 启动回归回退：MIC DMA 与 ADSP（含 AUDIO IRQ）的 FDT/DRAM
+交接已从 shim 的调用链及编译列表移除，不再使用 `X9_ADSP_LOADER` 开关。**
+保留实现源码供后续分析，但不会链接或执行；三个 ADT ABI placeholder 保持生成时
+的全零值，内核拒绝授予 microphone DMA / DSP shared memory / IRQ topology。
+XNU 入口计算、内核复制、RAM map、GPU/SCP/GPS/Wi-Fi 交接不变；内核及 HAL 音频
+代码未删除。恢复这条路线需要独立修复及启动验证，不能用启动参数重新打开。
+下文的 live handoff/provider 描述为该回退前的实现边界，不代表当前镜像已授予资源。
+
 **当前是可编译的输出链路基础实现，不是已经出声的驱动。**
 没有 MT6993 物理 backend 注册者；`Ready=0`，`Start` 返回
 `kIOReturnNotReady`。不访问 off-domain MMIO、不自动起 DSP、不写功放／root，
