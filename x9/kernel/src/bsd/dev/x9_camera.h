@@ -10,6 +10,7 @@
 #define X9_CAMERA_STREAMING 2u
 #define X9_CAMERA_FAULT 4u
 #define X9_CAMERA_PROBED 8u /* Sensor identity only; NEVER capture readiness. */
+#define X9_CAMERA_RETAINED 16u /* Failed drain/restore; dependencies must stay held. */
 #define X9_CAMERA_MAX_BYTES (16u * 1024u * 1024u)
 struct x9_camera_status {
     uint32_t version, mode, flags, supported_mask;
@@ -157,6 +158,44 @@ struct x9_camera_mm_status {
 };
 #define X9_CAMERA_GET_MM_CLOCKS _IOR('C', 0x96, struct x9_camera_mm_status)
 #define X9_CAMERA_PROBE_MM_CLOCKS _IOWR('C', 0x97, struct x9_camera_mm_status)
+/* Powered, read-only receiver preflight. Shares the single per-boot MM
+ * transaction with PROBE_MM_CLOCKS; use one or the other, not both.
+ * PROBE request {.version=1,.sensor=1/2}, all other bytes zero. GET is
+ * cache-only. No IRQ/status-clear reads, route commit, PHY or DMA writes.
+ * Stable disabled controls are observations, NEVER a lease or drain proof. */
+#define X9_CAM_RX_ATTEMPTED 1u
+#define X9_CAM_RX_SNAPSHOT 2u
+#define X9_CAM_RX_STABLE 4u
+#define X9_CAM_RX_DISABLED 8u
+#define X9_CAM_RX_RESTORED 16u
+#define X9_CAM_RX_LATCHED 32u
+#define X9_CAM_RX_NEED_OWNER 1u
+#define X9_CAM_RX_NEED_RATE 2u
+#define X9_CAM_RX_NEED_PHY 4u
+#define X9_CAM_RX_NEED_ROUTE 8u
+#define X9_CAM_RX_NEED_SMI 16u
+#define X9_CAM_RX_NEED_DMA_MAP 32u
+#define X9_CAM_RX_NEED_DRAIN 64u
+#define X9_CAM_RX_NEED_SNAPSHOT 128u
+enum x9_camera_receiver_stage { X9_CAM_RX_STAGE_NONE, X9_CAM_RX_STAGE_MM,
+    X9_CAM_RX_STAGE_MAP, X9_CAM_RX_STAGE_SAMPLE, X9_CAM_RX_STAGE_CHECK,
+    X9_CAM_RX_STAGE_RESTORE, X9_CAM_RX_STAGE_DONE };
+#define X9_CAM_RX_OUT_WORDS 14u
+#define X9_CAM_RX_SV_WORDS 17u
+struct x9_camera_receiver_sample {
+    uint32_t mac[4]; /* CTRL, VERSION, PHY_CTRL, PRBS_GEN */
+    uint32_t async_cfg, async_split, afifo;
+    uint32_t out[2][X9_CAM_RX_OUT_WORDS]; /* outer / inner, fixed offsets */
+    uint32_t sv[2][X9_CAM_RX_SV_WORDS]; /* outer / inner, central/DMA/CQ */
+};
+struct x9_camera_receiver {
+    uint32_t version, sensor, flags, stage, last_errno, blockers, busy, changed;
+    uint64_t mac_base, out_base, out_inner_base, sv_base;
+    struct x9_camera_receiver_sample before, after;
+    struct x9_camera_mm_status mm;
+};
+#define X9_CAMERA_GET_RECEIVER _IOR('C', 0x98, struct x9_camera_receiver)
+#define X9_CAMERA_PROBE_RECEIVER _IOWR('C', 0x99, struct x9_camera_receiver)
 #ifdef KERNEL
 /* Platform adapter must own/restore only its camera resources. Calls below
  * run in thread context, serialized, and must not re-enter camera APIs.
@@ -182,7 +221,9 @@ struct x9_camera_platform {
     int (*write8)(const struct x9_camera_sensor *, uint16_t reg, uint8_t);
     /* on: set up CSI VC0/DT0x2b, RAW10 DMA and SMMU before sensor stream-on.
      * off: stop/drain DMA before returning, even after partial init failure.
-     * generation tags every completion; old completions are rejected. */
+     * generation tags every completion; old completions are rejected.
+     * Nonzero off retains DMA mappings/clocks/rails: caller must NOT call
+     * power(false), retry cleanup, or start another sensor in this boot. */
     int (*capture)(const struct x9_camera_sensor *, int on, uint64_t generation);
 };
 int x9_camera_register_platform(const struct x9_camera_platform *);

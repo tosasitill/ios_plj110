@@ -283,7 +283,8 @@ static int cam_mm_take(struct cam_mm_journal *j,unsigned sensor,struct x9_camera
     r->flags|=X9_CAM_MM_CLOCKS;r->blockers&=~X9_CAM_MM_NEED_CLOCKS;
     j->active=true;return 0;
 }
-static int cam_mm_probe(unsigned sensor,struct x9_camera_mm_status *r)
+static int cam_mm_transaction(unsigned sensor,struct x9_camera_mm_status *r,
+    int (*inspect)(void *),void *arg)
 {
     memset(r,0,sizeof(*r));r->version=1;r->sensor=sensor;
     r->blockers=X9_CAM_MM_NEED_RECEIVE|X9_CAM_MM_NEED_POWER|X9_CAM_MM_NEED_CLOCKS|
@@ -298,6 +299,9 @@ static int cam_mm_probe(unsigned sensor,struct x9_camera_mm_status *r)
     cam_mm_attempted=true;r->flags=X9_CAM_MM_ATTEMPTED;
     struct x9_camera_resources receive={.version=1};
     int e=cam_mm_take(&cam_mm,sensor,r,&receive);
+    /* Optional receiver reads happen only with the COMPLETE register-clock
+     * chain held, never after restore. The hook cannot release the journal. */
+    if(!e && inspect)e=inspect(arg);
     unsigned stage=r->stage,slot=r->slot;
     int off=cam_mm_restore(&cam_mm,r,&receive);
     if(cam_mm.receive.csi_owned || cam_mm.receive.csi_borrowed)r->retained|=X9_CAM_MM_RETAIN_CSI;
@@ -321,4 +325,8 @@ static int cam_mm_probe(unsigned sensor,struct x9_camera_mm_status *r)
             s->before[1],s->active[1],s->after[1],s->before[2],s->active[2],s->after[2],s->sta);
     }
     return r->last_errno;
+}
+static int cam_mm_probe(unsigned sensor,struct x9_camera_mm_status *r)
+{
+    return cam_mm_transaction(sensor,r,NULL,NULL);
 }

@@ -1,6 +1,6 @@
 # X9 前后相机初步移植
 
-**已实现控制层、RAW10 帧接口、iOS 双流桥、冷启动 sensor-probe、共享接收电源与 MM 寄存器时钟事务、SENINF/CAMSV 接收计划；采集后端仍缺失，不能拍摄。**
+**已实现控制层、RAW10 帧接口、iOS 双流桥、冷启动 sensor-probe、共享接收电源与 MM 寄存器时钟事务、SENINF/CAMSV 接收计划及带供电前置的寄存器预检；采集后端仍缺失，不能拍摄。**
 没有假帧、测试图案、Android 代理或 Camera.app 成功状态伪造。默认关闭。
 
 ## 实现边界
@@ -15,6 +15,7 @@
 | SENINF/CAMSV 计划 | 零 MMIO 查询实际 CSI 端口、VC0/RAW10、候选 outmux/CAMSV、尺寸/64B stride/WDMA 打包及 SID；**不是资源申请或采集** |
 | 接收电源接口 | TF-A MM-SMMU `PM_GET/PM_PUT`、CSI_BS_RX MM HWCCF 单 bit 申请/恢复；带供电前置检查的 SMMUv3 只读快照。**代码已构建，未上机；不是完整 MM power/clock provider 或 DMA mapping** |
 | MM 寄存器时钟事务 | 显式 AO/infra0/VMM BACKUP 引用、CAM_VCORE/MAIN/MRAW 域、CAM autolink FENC、CAMTM/SENINF voter、CAM/CAMSV 寄存器 CG 申请/逆序恢复。**未上机；不改共享 AVS/CVFS/PLL，不申请 SMI larb，不证明采集速率** |
+| 接收寄存器预检 | 持有完整 MM 寄存器时钟链时，读取目标 MAC、async/AFIFO、outmux0 outer/inner、CAMSV0 central/DMA/CQ 控制，双采样验证稳定及使能位关闭。**只读，不提交配置，不证明 ownership 或 DMA 排空** |
 | 采集后端 | **缺失**：完整 DVFS/rate/SMI ownership、PHY 校准/速率、SENINF 路由提交、MM-SMMUv3 映射、RAW DMA 完成/排空队列 |
 
 原始 X9 DT 与 Android 启动日志确定：主摄为 i2c4/7-bit `0x1a`，ID 寄存器 `0x16/0x17` 返回 `0x9186`；前摄 i2c2/`0x10`，返回 `0x0615`。
@@ -142,12 +143,42 @@ cameractl pipeline front
   HSIZE 是 packed RAW10 **字节数减1**，不是像素数；后续 apply-v2 路径的 HSIZE 语义不同，不混用。
   候选 CAMSV0 base `0x3a600000`，DMA bank `+0x1000`：地址 low/high `+0x200/+0x204`，basic `+0x210=(stride<<16)|0x10`；不是旧 unit-test 的 TG 寄存器布局。
 - shared `mm_smmu_cam` 是 MM-SMMUv3 `0x30800000` 的 **SID0x80**、35-bit DMA mask，但 DT camera dma-range 只有16GiB。
-  分配还须 obey shared `mm_common` reservations；不能把 CPU PA 当相机 IOVA，也不能套 GPU 专用 SMMU bypass。
+  `mtk_collect_smmu_dma_regions → invert_dma_regions` 将 `mm_common` 的两段**允许范围**取补集作为保留区：`[0,0xfc910000)` 和 `[0xfffff000,0x400000000)` 可用于分配，间隙 `[0xfc910000,0xfffff000)` 不可用于相机 IOVA。第二段还要按 domain granule 对齐（16KiB 时首个完整页在 `0x100000000`），并避开零页和现有分配。**这些范围不是现成空闲池或映射租约**；不能把 CPU PA 当相机 IOVA，也不能套 GPU 专用 SMMU bypass。
 - 当前 `blockers`：1=该 sensor ID 未匹配且还原，2=MM power/clock ownership，4=PHY，8=路由申请/提交，16=DMA映射，32=完成/排空。
   只有1会在真实 probe 成功后清掉；其余 provider 尚未实现，不因计划生成成功变成 READY。
 - 当前驱动 `mtk_irq_camsv_hybrid()` 用 central `+0x348` 的 **SW_GP_PASS1_DONE [19:16]**，active group/tag 和 inner frame sequence 判断帧完成；SCQ `+0x2000` 的 setting-done 不是帧。
   还须错误状态检查、cache同步、timeout隔离、stop/drain 后才释放 IOVA/buffer，再交给 `x9_camera_deliver()`。
 - 尚需 port 对应 eFuse/PHY settle/速率、CKSYS_MM/CAM/SENINF/CSI_BS 的共同 provider；不从 source-only 配置推出实机已收包。
+
+## 在 MM 时钟持有期间预检接收寄存器
+
+仅 `x9_camera=3`、root、显式读写打开节点；**每 boot 选择 receiver 或 clocks 的一个事务，不先运行 clocks 再运行 receiver**：
+
+```bash
+cameractl receiver back
+# 下一次用户手动 clean boot 可选择：
+cameractl receiver front
+cameractl status                 # 只读缓存，不重新触碰硬件
+```
+
+`PROBE_RECEIVER` ioctl `0x99` / cache-only `GET_RECEIVER` `0x98` 是独立 **1192B v1** ABI，旧接口不变。输入仅 version1/sensor1或2，其余全零。
+执行 `cam_mm_take → 两次接收控制采样 → cam_mm_restore`，take 任一阶段失败便不访问接收寄存器；每次采样前再检查 PM_ACK、FENC、CG 与 parent。退出时仍逆序恢复并返回独立 MM restore_errno/retained。失败按已有共享资源规则锁存，本 boot 不重试；GET/status 不改变硬件。
+
+地址由 captured DT 的 `reg-names` 与 `mediatek,camsv-id=0` 决定：
+
+| bank | 地址 / 读取范围 |
+|---|---|
+| 目标 CSI MAC-top | 前 `0x13884000`，主 `0x1389c000`；CTRL、VERSION、PHY_CTRL、PRBS_GEN |
+| async / CAM_MAIN AFIFO | `0x3a401000 +0/+0xc`，`0x3a0107dc`；只针对目标 port 比較 test/debug/split 掩码 |
+| outmux0 | outer `0x3a200000`，inner `0x3a208000`；source、DL、ready/reset/config-done、tag0 尺寸/格式 |
+| CAMSV0 | outer `0x3a600000`，inner `+0x8000`；DMA_EN、CMOS/VFDATA、8 个 FBC 控制、WDMA address/basic、CQ 控制 |
+
+不读取中断/status-clear、帧完成、队列 producer/consumer 或 debug selector 寄存器；不写 PHY、async CG/IRQ、outmux、CAMSV、DMA/CQ/SMMU。上游 async CG/IRQ 的“always on”用于避免 AOV/SCP race，不照搬为整 bank 初始化。
+
+结果 `flags`：1=attempted、2=两次快照完整、4=目标控制稳定、8=观察到被检查的使能/触发位关闭、16=本次 MM 引用已恢复、32=失败锁存。`busy`：1=PHY/PRBS使能、2=目标test-model、4=outmux DL/ready/config-done、8=CAMSV DMA/CMOS/VF/FBC、16=CQ reset/thread enable、32=MAC/outmux reset；`changed`：1=MAC、2=目标async/AFIFO、4=outmux0、8=CAMSV0。
+**flags8不是 PHY 全部断电、独占、队列为空或 DMA 排空证明**。即使 errno0/RESTORED/retained0，owner/rate/PHY/route/SMI/map/drain 七项 blockers 仍全部保留，只有 NEED_SNAPSHOT 会清；READY/supported 不变。相机真实初始化不能在此基础上直接写配置。
+
+上游 `iommu_attach_device_ssid → arm_smmu_s1_set_dev_pasid` 需要已存在的 default domain、STE/CD、命令队列及 IOVA allocator；`mm_smmu_cam` 节点没有单独的 SSID range，因此不能猜一个私有 SSID。secure `PM_GET` 只提供电源引用，`SEC_INIT`、`AID_SID_MAP`、HYP debug SMC 不提供相机 domain 租约。本地 UniXNU ArmSmmu4K 是 SMMUv2/4KiB，不能代替 MT6993 共享 v3/16KiB 后端。
 
 ## 硬件后端接入契约
 
@@ -158,6 +189,8 @@ cameractl pipeline front
 3. `capture(on)` 在 stream-on 前完成 SENINF、VC0/DT0x2b、RAW10 DMA、SMMU 配置；`capture(off)` 在返回前停止并排空，即使初始化只做了一半。
 4. 注册会分别上电读 ID 并恢复，只有两枚真实 ID 相符才发布 READY。调用发生在线程上下文；所有回调都不可重入相机 API。
 5. DMA worker 完成缓存同步后调用 `x9_camera_deliver(sensor,generation,raw,stride,bytes,time)`；不得在硬中断调用。generation 必须来自本次 `capture(on)`，time 为帧完成的 `mach_absolute_time`。
+
+控制层在调用 power/capture/stream 前记录 attempted 阶段及原始 generation；半途错误只清理实际尝试过的阶段。stop 先失效 generation/唤醒读者，再退出帧锁等待 capture(off)，因此完成 worker 不会被 start/stop 持帧锁堵住。**capture(off) 非零时不调用 power(false)**，保持映射/时钟/供电依赖并置 FAULT/RETAINED；power(false) 失败也保留 journal。后续 close 不重试硬件清理、不释放保留的 staging buffer、不切换另一 sensor。注册时的 ID 供电恢复失败同样锁存。非零返回不是已经恢复或可以重新开始，只有明确 drain 成功后才能撤依赖。
 
 下一阶段不能绕过 regulator/SMMU 所有权或从 LK framebuffer carve-out 偷分配相机 DMA。
 先证明一枚芯片的上电→I2C ID→还原，再证明 SENINF 包→RAW DMA 完整帧，最后验收前后切换、预览和落盘照片。

@@ -10,6 +10,7 @@
 #include "hakios.camera.h"
 #include "../kernel/src/bsd/dev/x9_camera.h"
 _Static_assert(sizeof(struct x9_camera_mm_status)==576,"camera MM ABI");
+_Static_assert(sizeof(struct x9_camera_receiver)==1192,"camera receiver ABI");
 static void print_mm(const struct x9_camera_mm_status *r)
 {
     static const char *const names[X9_CAM_MM_SLOTS]={"AO","infra0","VMM","CAM_VCORE",
@@ -24,17 +25,45 @@ static void print_mm(const struct x9_camera_mm_status *r)
             s->before[1],s->active[1],s->after[1],s->before[2],s->active[2],s->after[2],s->sta);
     }
 }
+static void print_receiver(const struct x9_camera_receiver *r)
+{
+    static const unsigned out_off[X9_CAM_RX_OUT_WORDS]={0,4,8,0xc,0x10,0x14,0x18,
+        0x20,0x2c,0x34,0x38,0x100,0x104,0x108};
+    static const unsigned sv_off[X9_CAM_RX_SV_WORDS]={0x40,0x44,0x140,0x148,
+        0x540,0x580,0x5c0,0x600,0x640,0x680,0x6c0,0x700,0x1200,0x1204,0x1210,0x2100,0x2140};
+    printf("receiver sensor=%u flags=%x stage=%u errno=%u restore=%u retained=%x busy=%x changed=%x blockers=%x (read-only, NOT ownership/drain)\n",
+        r->sensor,r->flags,r->stage,r->last_errno,r->mm.restore_errno,r->mm.retained,
+        r->busy,r->changed,r->blockers);
+    if(!(r->flags&X9_CAM_RX_ATTEMPTED))return;
+    print_mm(&r->mm);
+    printf("MAC=%llx out=%llx/%llx CAMSV=%llx MAC ctrl/version/phy/prbs=%08x/%08x/%08x/%08x -> %08x/%08x/%08x/%08x\n",
+        (unsigned long long)r->mac_base,(unsigned long long)r->out_base,
+        (unsigned long long)r->out_inner_base,(unsigned long long)r->sv_base,
+        r->before.mac[0],r->before.mac[1],r->before.mac[2],r->before.mac[3],
+        r->after.mac[0],r->after.mac[1],r->after.mac[2],r->after.mac[3]);
+    printf("async CFG/SPLIT/AFIFO=%08x/%08x/%08x -> %08x/%08x/%08x\n",
+        r->before.async_cfg,r->before.async_split,r->before.afifo,
+        r->after.async_cfg,r->after.async_split,r->after.afifo);
+    for(unsigned bank=0;bank<2;bank++) {
+        const char *name=bank?"inner":"outer";
+        for(unsigned i=0;i<X9_CAM_RX_OUT_WORDS;i++)
+            printf("outmux0 %s +%04x=%08x -> %08x\n",name,out_off[i],r->before.out[bank][i],r->after.out[bank][i]);
+        for(unsigned i=0;i<X9_CAM_RX_SV_WORDS;i++)
+            printf("CAMSV0 %s +%04x=%08x -> %08x\n",name,sv_off[i],r->before.sv[bank][i],r->after.sv[bank][i]);
+    }
+}
 int main(int argc,char **argv)
 {
     bool probe=argc==3 && !strcmp(argv[1],"probe");
     bool pipeline=argc==3 && !strcmp(argv[1],"pipeline");
     bool resources=argc==2 && !strcmp(argv[1],"resources");
     bool clocks=argc==3 && !strcmp(argv[1],"clocks");
-    const char *which=(probe||pipeline||clocks)?argv[2]:argc==2?argv[1]:"status";
+    bool receiver=argc==3 && !strcmp(argv[1],"receiver");
+    const char *which=(probe||pipeline||clocks||receiver)?argv[2]:argc==2?argv[1]:"status";
     unsigned sensor=!strcmp(which,"back")?1:!strcmp(which,"front")?2:0;
-    if(argc>3 || (argc==3 && !probe && !pipeline && !clocks) || ((probe||pipeline||clocks) && !sensor) ||
+    if(argc>3 || (argc==3 && !probe && !pipeline && !clocks && !receiver) || ((probe||pipeline||clocks||receiver) && !sensor) ||
        (argc>=2 && !sensor && !resources && strcmp(which,"status"))) {
-        fprintf(stderr,"usage: cameractl [status|back|front|probe back|probe front|pipeline back|pipeline front|resources|clocks back|clocks front]\n");return 2;
+        fprintf(stderr,"usage: cameractl [status|back|front|probe back|probe front|pipeline back|pipeline front|resources|clocks back|clocks front|receiver back|receiver front]\n");return 2;
     }
     int fd=open(X9_CAMERA_DEVICE,((sensor && !pipeline)||resources?O_RDWR:O_RDONLY)|O_CLOEXEC);
     if(fd<0){perror(X9_CAMERA_DEVICE);return 1;}
@@ -43,6 +72,15 @@ int main(int argc,char **argv)
     printf("version=%u mode=%u flags=%x supported=%x sensor=%u errno=%u frames=%llu rejected=%llu chips=%x/%x probe_mask=%x probe_flags=%x\n",
            s.version,s.mode,s.flags,s.supported_mask,s.sensor,s.last_errno,
            (unsigned long long)s.frames,(unsigned long long)s.rejected,s.chip_id[0],s.chip_id[1],s.probe_mask,s.probe_flags);
+    if(receiver || !sensor) {
+        struct x9_camera_receiver r={.version=1,.sensor=receiver?sensor:0};
+        if(ioctl(fd,receiver?X9_CAMERA_PROBE_RECEIVER:X9_CAMERA_GET_RECEIVER,&r)) {
+            if(receiver || errno!=ENOTTY){perror("receiver ioctl");close(fd);return 1;}
+        } else {
+            print_receiver(&r);
+            if(receiver){close(fd);return r.last_errno?1:0;}
+        }
+    }
     if(clocks || !sensor) {
         struct x9_camera_mm_status r={.version=1,.sensor=clocks?sensor:0};
         if(ioctl(fd,clocks?X9_CAMERA_PROBE_MM_CLOCKS:X9_CAMERA_GET_MM_CLOCKS,&r)) {
