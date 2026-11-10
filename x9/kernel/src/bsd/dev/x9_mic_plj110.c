@@ -34,7 +34,8 @@ struct afe_journal;
 struct power_journal {
     vm_offset_t gpio,vlp,gipc,gate,bus,pmif;
     struct pin enable,route[2];
-    uint32_t saved[sizeof(saved_regs)/sizeof(saved_regs[0])];
+    /* One baseline journal, with the last issued ordinary CSR request. */
+    struct { uint32_t old,value;bool issued; } saved[sizeof(saved_regs)/sizeof(saved_regs[0])];
     uint8_t xo;
     bool wake_owned,awake,gate_owned,bus_owned,xo_owned;
     bool bus_stuck,pmif_stuck,enabled;
@@ -110,10 +111,52 @@ static int wake_take(struct power_journal *j)
     if(!ready)return ETIMEDOUT;
     e=update(j->vlp,0x92c,1,0);if(!e)j->awake=true;return e;
 }
+static int bus_fault(struct power_journal *j,unsigned reg,int error)
+{
+    /* A configuration/busy fault is terminal for this cold lease. It is
+     * not an ownership proof; never clear/reset/retry to mask a conflict. */
+    if(!j->status->bus_fault_errno) {
+        j->status->bus_fault_register=reg;j->status->bus_fault_errno=error;
+    }
+    j->bus_stuck=true;return error;
+}
 static int bank_idle(struct power_journal *j)
 {
-    if(rr(j->bus,START) || rr(j->bus,MASK) || rr(j->bus,STAT) || (rr(j->bus,FIFO_STAT)&31))return EBUSY;
+    const unsigned regs[]={START,MASK,STAT,FIFO_STAT};
+    for(unsigned i=0;i<4;i++)
+        if(rr(j->bus,regs[i])&(i==3?31u:UINT32_MAX))return bus_fault(j,regs[i],EBUSY);
     return 0;
+}
+static uint32_t bus_csr_mask(unsigned reg)
+{return reg==CTRL?0x3ffu:UINT32_MAX;}
+static int bus_csr_write(struct power_journal *j,unsigned reg,uint32_t value)
+{
+    unsigned n;
+    for(n=0;n<sizeof(saved_regs)/sizeof(saved_regs[0]);n++)if(saved_regs[n]==reg)break;
+    if(n==sizeof(saved_regs)/sizeof(saved_regs[0]))return EINVAL;
+    /* Record before an effective write. No extra snapshot, status/trigger,
+     * SET/CLR, FIFO data or START register is admitted to this journal. */
+    j->saved[n].value=value;j->saved[n].issued=true;
+    wr(j->bus,reg,value);uint32_t mask=bus_csr_mask(reg);
+    return (rr(j->bus,reg)&mask)==(value&mask)?0:bus_fault(j,reg,EIO);
+}
+static int bus_verify(struct power_journal *j)
+{
+    if(!j->bus_owned || j->bus_stuck)return ENXIO;
+    if(rr(j->bus,MULTI))return bus_fault(j,MULTI,EBUSY);
+    /* Only stable ordinary mode/timing controls, not FIFO/status/START or
+     * hardware transaction counters. The command fields are read back on
+     * issue, not assumed invariant across hardware execution. */
+    const unsigned regs[]={CTRL,TIMING,EXT,LTIMING,HS,SDA,DIV,IO,MIS,DELAY};
+    for(unsigned i=0;i<sizeof(regs)/sizeof(regs[0]);i++) {
+        unsigned n;
+        for(n=0;n<sizeof(saved_regs)/sizeof(saved_regs[0]);n++)if(saved_regs[n]==regs[i])break;
+        if(n==sizeof(saved_regs)/sizeof(saved_regs[0]))return bus_fault(j,regs[i],EINVAL);
+        uint32_t expected=j->saved[n].issued?j->saved[n].value:j->saved[n].old;
+        uint32_t mask=bus_csr_mask(regs[i]);
+        if((rr(j->bus,regs[i])&mask)!=(expected&mask))return bus_fault(j,regs[i],EBUSY);
+    }
+    return 0; /* non-atomic conflict checks, never a firmware ownership grant */
 }
 static bool factor(unsigned n,unsigned *sample,unsigned *step)
 {
@@ -145,9 +188,9 @@ static int bus_timing(struct power_journal *j)
     const uint32_t values[]={((hs-1)<<8)|(ht-1),(ext<<8)|1,
         ((ls-1)<<6)|(lt-1),0,0,((div-1)<<8)|(div-1),3,0,2};
     for(unsigned i=0;i<sizeof(regs)/sizeof(regs[0]);i++) {
-        wr(j->bus,regs[i],values[i]);if(rr(j->bus,regs[i])!=values[i])return EIO;
+        int e=bus_csr_write(j,regs[i],values[i]);if(e)return e;
     }
-    j->status->timing_hz=130000000u/(div*total);return 0;
+    j->status->timing_hz=130000000u/(div*total);return bus_verify(j);
 }
 static int bus_take(struct power_journal *j)
 {
@@ -166,10 +209,10 @@ static int bus_take(struct power_journal *j)
     /* Refuse DMA/IRQ selection, wrapper, shadow/hardware-trigger modes.
      * No assumption that idle alone arbitrates with a live SCP codec owner:
      * the separate GPIO9/XO cold-baseline check is mandatory. */
-    if(rr(j->bus,MULTI) || (rr(j->bus,CTRL)&(1u|(1u<<2)|(1u<<7)|(1u<<8)|(1u<<9)))) {
-        j->bus_stuck=true;return ENOTSUP;
-    }
-    for(unsigned i=0;i<sizeof(saved_regs)/sizeof(saved_regs[0]);i++)j->saved[i]=rr(j->bus,saved_regs[i]);
+    if(rr(j->bus,MULTI))return bus_fault(j,MULTI,ENOTSUP);
+    if(rr(j->bus,CTRL)&(1u|(1u<<2)|(1u<<7)|(1u<<8)|(1u<<9)))return bus_fault(j,CTRL,ENOTSUP);
+    for(unsigned i=0;i<sizeof(saved_regs)/sizeof(saved_regs[0]);i++)
+        j->saved[i].old=rr(j->bus,saved_regs[i]);
     j->bus_owned=true;
     for(unsigned i=0;i<2;i++) {
         struct pin *p=&j->route[i];
@@ -187,22 +230,26 @@ static int bus_xfer(struct power_journal *j,uint16_t reg,uint8_t *value,bool rea
        pin_mode(j,9) || !pin_bit(j,0,9) || !pin_bit(j,0x100,9) || !pin_bit(j,0x200,9) ||
        pin_mode(j,96)!=1 || pin_mode(j,97)!=1)return EBUSY;
     int e=bank_idle(j);if(e)return e;
+    e=bus_verify(j);if(e)return e;
     if(!pin_bit(j,0x200,96) || !pin_bit(j,0x200,97))return EBUSY;
-    uint32_t ctrl=(j->saved[1]&~((1u<<1)|(1u<<2)|(1u<<4)|(1u<<8)|(1u<<9)))|(1u<<3)|(1u<<5);
+    uint32_t ctrl=(j->saved[1].old&~((1u<<1)|(1u<<2)|(1u<<4)|(1u<<8)|(1u<<9)))|(1u<<3)|(1u<<5);
     if(read)ctrl|=(1u<<1)|(1u<<4);
-    wr(j->bus,CTRL,ctrl);wr(j->bus,MASK,0);wr(j->bus,ADDR,0x6bu<<1);
+    e=bus_csr_write(j,CTRL,ctrl);
+    if(!e)e=bus_csr_write(j,MASK,0);
+    if(!e)e=bus_csr_write(j,ADDR,0x6bu<<1);
+    if(e)return e;
     wr(j->bus,FIFO_CLR,4);wr(j->bus,FIFO_CLR,1); /* MCH then normal FIFO */
-    wr(j->bus,LEN,read?2:3);wr(j->bus,AUX,read?1:0);wr(j->bus,TRANS,read?2:1);
+    e=bus_csr_write(j,LEN,read?2:3);
+    if(!e)e=bus_csr_write(j,AUX,read?1:0);
+    if(!e)e=bus_csr_write(j,TRANS,read?2:1);
+    if(e)return e;
     uint8_t tx[3]={(uint8_t)(reg>>8),(uint8_t)reg,*value};
     for(unsigned i=0;i<(read?2u:3u);i++)*(volatile uint8_t *)(j->bus+DATA)=tx[i];
     __asm__ volatile("dsb sy":::"memory");
     bool filled=false;
     for(unsigned i=0;i<10;i++)if((rr(j->bus,FIFO_STAT)&31)==(read?2u:3u)){filled=true;break;}
-    if(!filled) {
-        wr(j->bus,FIFO_CLR,4);wr(j->bus,FIFO_CLR,1);
-        if(bank_idle(j))j->bus_stuck=true;
-        return EIO;
-    }
+    if(!filled)return bus_fault(j,FIFO_STAT,EIO);
+    e=bus_verify(j);if(e)return e; /* no START after a changed mode/timing */
     wr(j->bus,START,(1u<<14)|1); /* mt6991 auto_restart multi trigger */
     uint32_t status=0;uint64_t ticks;nanoseconds_to_absolutetime(5000000,&ticks);
     uint64_t deadline=mach_absolute_time()+ticks;
@@ -213,11 +260,12 @@ static int bus_xfer(struct power_journal *j,uint16_t reg,uint8_t *value,bool rea
     j->status->bus_status=status;j->status->bus_start=rr(j->bus,START);
     j->status->bus_fifo=rr(j->bus,FIFO_STAT);
     if(!status || (j->status->bus_start&1)) {
-        j->bus_stuck=true;return ETIMEDOUT; /* no cancel/reset of live request */
+        return bus_fault(j,j->status->bus_start&1?START:STAT,ETIMEDOUT);
     }
+    e=bus_verify(j);if(e)return e; /* before FIFO consumption/flag clearing */
     if(status!=1)e=EIO; /* NACK, arbitration, config and unknown are not ACK */
     if(!e && read) {
-        if((j->status->bus_fifo&31)!=1)e=EIO;
+        if((j->status->bus_fifo&31)!=1)return bus_fault(j,FIFO_STAT,EIO);
         else *value=*(volatile uint8_t *)(j->bus+DATA);
     }
     wr(j->bus,STAT,status&0x21f); /* only known flags produced by our request */
@@ -299,6 +347,9 @@ static int restore(struct power_journal *j)
     if(j->codec.afe_snapshot && (!j->cal || afe_access(j->cal)))return EBUSY;
     if(j->bus_owned && ((rr(j->gate,0xe10)&2) || !j->awake ||
        (rr(j->vlp,0x92c)&5)!=4))return EBUSY;
+    /* Detect a changed SCP controller before turning off either end or
+     * releasing GPIO9/XO/AFE/transport parents. Never restore a foreign mode. */
+    if(j->bus_owned){int guard=bank_idle(j);if(!guard)guard=bus_verify(j);if(guard)return guard;}
     /* RX/SRC off, then codec TX/SRC off while PAD_CLK is still held. Only
      * after both ends are quiescent restore digital clocks, then analog. */
     int e=j->cal?digital_afe_quiesce(j->cal):0;if(e)return e;
@@ -336,8 +387,10 @@ static int restore(struct power_journal *j)
     if(j->bus_owned) {
         e=bank_idle(j);if(e)return e;
         for(unsigned i=0;i<sizeof(saved_regs)/sizeof(saved_regs[0]);i++) {
-            wr(j->bus,saved_regs[i],j->saved[i]);
-            if(rr(j->bus,saved_regs[i])!=j->saved[i])return EIO;
+            if(!j->saved[i].issued)continue;
+            e=bus_verify(j);if(e)return e;
+            e=bus_csr_write(j,saved_regs[i],j->saved[i].old);if(e)return e;
+            j->saved[i].issued=false;
         }
         j->bus_owned=false;
     }
@@ -447,10 +500,10 @@ static int board_finish(struct power_journal *j,int e)
         s->flags|=X9_MIC_BOARD_RESTORED;h->flags&=~X9_MIC_HW_POWERED;
         if(!e){s->stage=X9_MIC_BOARD_OFF;h->stage=X9_MIC_HW_STOPPED;}
     }
-    printf("X9 MIC %s: stage=%u flags=%x errno=%u restore=%u id=%x ready=%x vaud18=%x gpio9=%x/%x bus=%x codec_reg=%x restore_stage=%u restore_reg=%x (board pipeline only)\n",
+    printf("X9 MIC %s: stage=%u flags=%x errno=%u restore=%u id=%x ready=%x vaud18=%x gpio9=%x/%x bus=%x codec_reg=%x restore_stage=%u restore_reg=%x bus_fault_errno=%u bus_fault_reg=%x (board pipeline only)\n",
         j->session?"CAPTURE-STOP":digital?"DIGITAL-L":analog?"ANALOG-L":a?"CALIBRATE":"POWER",s->stage,s->flags,s->last_errno,s->restore_errno,h->swcid,h->internal_ready,
         h->vaud18_monitor,s->gpio9_before,s->gpio9_after,s->bus_status,
-        h->last_register,h->restore_stage,h->restore_register);
+        h->last_register,h->restore_stage,h->restore_register,s->bus_fault_errno,s->bus_fault_register);
     if(j->cal)printf("X9 MIC AFE: stage=%u flags=%x errno=%u restore=%u AP=%x/%x ACK=%x/%x VLP=%x/%x phases=%d/%d cycles=%d/%d scanned=%u\n",
         a->stage,a->flags,a->last_errno,a->restore_errno,a->ap_vote_before,a->ap_vote_after,
         a->ack_before,a->ack_after,a->vlp_before,a->vlp_after,h->chosen_phase[0],h->chosen_phase[1],

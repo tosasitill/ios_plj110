@@ -27,10 +27,11 @@ static int hardware_status(int fd)
     } else if(errno!=ENOTTY){perror("hardware status");return 1;}
     struct x9_mic_board_status b={0};
     if(ioctl(fd,X9_MIC_GET_BOARD,&b)==0) {
-        printf("board v%u stage=%u flags=%#x errno=%u restore_errno=%u gpio9=%#x/%#x sleep=%#x/%#x stat=%#x/%#x gate=%#x/%#x bus=%#x start=%#x fifo=%#x reg=%#x xo=%#x/%#x nominal_i2c_hz=%u\n",
+        printf("board v%u stage=%u flags=%#x errno=%u restore_errno=%u gpio9=%#x/%#x sleep=%#x/%#x stat=%#x/%#x gate=%#x/%#x bus=%#x start=%#x fifo=%#x reg=%#x xo=%#x/%#x nominal_i2c_hz=%u bus_fault_errno=%u bus_fault_reg=%#x (SCP-I2C1 CSR offset, not codec/ownership proof)\n",
             b.version,b.stage,b.flags,b.last_errno,b.restore_errno,b.gpio9_before,b.gpio9_after,
             b.sleep_before,b.sleep_after,b.sleep_stat,b.sleep_stat2,b.gate_before,b.gate_after,
-            b.bus_status,b.bus_start,b.bus_fifo,b.last_register,b.xo_before,b.xo_after,b.timing_hz);
+            b.bus_status,b.bus_start,b.bus_fifo,b.last_register,b.xo_before,b.xo_after,b.timing_hz,
+            b.bus_fault_errno,b.bus_fault_register);
     } else if(errno!=ENOTTY){perror("board status");return 1;}
     struct x9_mic_afe_status a={0};
     if(ioctl(fd,X9_MIC_GET_AFE,&a)==0) {

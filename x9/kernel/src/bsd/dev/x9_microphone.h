@@ -80,8 +80,17 @@ struct x9_mic_board_status {
     uint32_t gpio9_before, gpio9_after, sleep_before, sleep_after;
     uint32_t sleep_stat, sleep_stat2, gate_before, gate_after;
     uint32_t bus_status, bus_start, bus_fifo, last_register;
-    uint32_t xo_before, xo_after, timing_hz, reserved[4];
+    uint32_t xo_before, xo_after, timing_hz;
+    /* Former reserved words, ABI/number unchanged. First terminal SCP-I2C1
+     * controller fault offset/errno, not codec address or ownership proof.
+     * Both zero on old kernels/untried paths; zero is not success evidence. */
+    uint32_t bus_fault_register, bus_fault_errno, reserved[2];
 };
+#ifdef __cplusplus
+static_assert(sizeof(struct x9_mic_board_status)==96,"board ABI size");
+#else
+_Static_assert(sizeof(struct x9_mic_board_status)==96,"board ABI size");
+#endif
 #define X9_MIC_GET_BOARD _IOR('M', 0x95, struct x9_mic_board_status)
 /* Shares POWER_PROBE's one-attempt budget. Real cold power + MTKAIF loopback
  * phase scan only: never enables ADC/DMA or publishes a PCM source. */
