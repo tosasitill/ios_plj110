@@ -61,10 +61,15 @@
  * in both banks before GIC publication. After all three actual GIC lines
  * are published, begin issues ONE RCNT and requires two actual both-bank
  * RCNT+1/CNT1/unchanged WCNT/DROP/reserved/control-clear observations.
- * It does not enable source/DMA; cold configure_outmux still never writes
- * an address, cookie or FBC. Partial address/FBC/DB/credit publication retains
+ * It then confirms group0 SW_DONE, SRAM/tag0 ERR, tag0 SOF and IMG0A DMA_EN
+ * in both banks. CMOS/VF/PHY/MAC lanes/OUTMUX DL and sensor source stay off;
+ * this is an inactive receive arm, not a started producer or a real frame.
+ * Cold configure_outmux still never writes an address, cookie or FBC.
+ * Partial address/FBC/DB/credit/receive-enable publication retains
  * the cold epoch. No command retry/DB/reset cancels an issued credit; rearm
  * and CAMSV restore remain prohibited until real producer retirement exists.
+ * Close first attempts to quiesce only this inactive receive arm's enables,
+ * without canceling credit, changing RAW ownership or claiming AXI drain.
  * Sensor close retires GIC and queued/running worker pins BEFORE restoring
  * CAMSV/OUTMUX/PHY/MM. An unfinished RAW slot retains all
  * dependencies; this worker retirement is not full AXI/SMMU/map drain.

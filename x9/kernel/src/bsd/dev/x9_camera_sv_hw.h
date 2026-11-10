@@ -1,4 +1,4 @@
-/* Kernel-private, inactive ISP8s CAMSV0 configuration; never a DMA lease. */
+/* Kernel-private ISP8s CAMSV0 configuration/receive-arm journal; never a DMA lease. */
 #ifndef X9_CAMERA_SV_HW_H
 #define X9_CAMERA_SV_HW_H
 #ifdef KERNEL
@@ -11,9 +11,17 @@
 #define X9_CAM_SV_HW_REQUEST 32u
 #define X9_CAM_SV_HW_FBC_EMPTY 64u
 #define X9_CAM_SV_HW_FBC_CREDIT 128u
+#define X9_CAM_SV_HW_RECEIVE_ARMED 256u
+#define X9_CAM_SV_HW_RECEIVE_QUIESCENT 512u
 #define X9_CAM_SV_CREDIT_EMPTY 0u
 #define X9_CAM_SV_CREDIT_PENDING 1u
 #define X9_CAM_SV_CREDIT_ACCEPTED 2u
+#define X9_CAM_SV_RECEIVE_IDLE 0u
+#define X9_CAM_SV_RECEIVE_PENDING 1u
+#define X9_CAM_SV_RECEIVE_ARMED 2u
+#define X9_CAM_SV_RECEIVE_QUIESCING 3u
+#define X9_CAM_SV_RECEIVE_QUIESCENT 4u
+#define X9_CAM_SV_RECEIVE_FIELDS 4u
 #define X9_CAM_SV_HW_CONFIG_FIELDS 10u
 /* Geometry fields0..9 followed by A0 base low/high, tag0 FH_SPARE and FBC0.
  * This result is kernel-private, not the userspace frame/ioctl ABI. */
@@ -30,6 +38,10 @@ struct x9_camera_sv_hw_status {
     uint32_t fbc_sampled, fbc_before[2], fbc_after[2], fbc_errno;
     uint32_t credit_phase, credit_issued, credit_seen, credit_ack, credit_samples, credit_errno;
     uint32_t credit_control[2], credit_target[2];
+    uint32_t receive_phase, receive_issued, receive_off_issued;
+    uint32_t receive_seen[2], receive_off_seen[2], receive_samples, receive_errno;
+    uint32_t receive_before[X9_CAM_SV_RECEIVE_FIELDS], receive_target[X9_CAM_SV_RECEIVE_FIELDS];
+    uint32_t receive_after[2][X9_CAM_SV_RECEIVE_FIELDS];
 };
 /* configure_outmux invokes the real locked engine after OUTMUX consumption.
  * It writes only tag0 packed RAW10 geometry, A0 stride/burst, group0 and
@@ -39,9 +51,9 @@ struct x9_camera_sv_hw_status {
  * The separate normal IRQ begin path, AFTER an actual S1 lease/RAW arm,
  * journals A0 base low/high and the frame's tag0 FH_SPARE, then initializes
  * tag0 FBC_EN without RCNT, reset, lock, subsampling or valid/sub ratio.
- * Stable empty FBC1 snapshots must remain EXACTLY unchanged in both banks;
+ * Before the single RCNT command, empty FBC1 snapshots remain EXACTLY unchanged;
  * EMPTY means no observed credit mutation, not a hardware/AXI drain grant.
- * Other tags and all source/DMA/CMOS/VF/CQ enables remain off. It checks
+ * Other tags and all source/DMA/CMOS/VF/CQ enables are off at this stage. It checks
  * the same request/lease before every store and consumes the complete
  * outer/inner target BEFORE GIC publication. REQUEST means inactive
  * address/metadata consumption, not a DMA/source/credit enable or frame.
@@ -51,7 +63,17 @@ struct x9_camera_sv_hw_status {
  * unchanged WCNT/DROP/reserved, and original EN control with RCNT cleared.
  * No DB pulse/no-op/retry can replay that command; PENDING timeout is terminal.
  * CREDIT means this observed command acceptance, not frame completion or
- * hardware's single-frame write/drain guarantee. Source/DMA remain off.
+ * hardware's single-frame write/drain guarantee. The credit helper itself
+ * leaves source/DMA off. Begin next journals four normal RW receive enables:
+ * SW_DONE group0, SRAM/tag0 ERR, tag0 SOF and IMG0A DMA, with complete actual
+ * both-bank targets twice for each single store, no DB/RCNT/reset/CQ write.
+ * CMOS/VF/PHY/MAC lanes/OUTMUX DL/sensor source remain off; FBC1 remains at
+ * the accepted credit target. RECEIVE_ARMED is not a started producer/frame.
+ * Close can quiesce this same inactive receive arm only, before GIC masking.
+ * Per-bank target observations never regress; raw receiver observations are
+ * journaled before historical comparisons, not adopted by canonicalization.
+ * QUIESCENT describes four actual disabled controls only, not RAW/AXI/map
+ * drain, prior-counter restoration, credit cancellation or dependency release.
  * An issued credit prohibits rearm/config restore until the actual producer
  * retirement chain is implemented; no caller-provided consumed boolean.
  * Sensor close retires this journal BEFORE OUTMUX/PHY/MAC/SMI/MM. Pending

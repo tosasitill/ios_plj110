@@ -352,6 +352,8 @@ struct x9_camera_camsv_dma {
      * When used with the native GIC worker, also proves sole CAMSV0 AP IRQ
      * AND tag0 FBC policy (not CCU/other owner) and prior source/request-history
      * retirement before FBC initialization/GIC/one-credit/source publication.
+     * This includes sole normal IMG0A DMA/tag0/group0 permission, prior RAW
+     * writers retired and the entire immutable legal DMA range retained.
      * Masked/zero registers or FBC_CNT0 are not this grant.
      * Callbacks cannot re-enter camera/CAMSV APIs. */
     int (*check)(void *, uint64_t lease, const struct x9_camera_camsv_request *);
@@ -386,7 +388,10 @@ int x9_camera_camsv_finish(struct x9_camera_camsv_slot *, const struct x9_camera
  * FBC_EN with unchanged empty FBC1 counters, THEN arms GIC lines and emits
  * exactly one RCNT command. It requires actual both-bank RCNT+1(mod256),
  * CNT=1, unchanged WCNT/DROP/reserved and command self-clear, twice.
- * It does not write source IRQ enables, CQ/CMOS/VF/DMA or start the sensor.
+ * It then writes only group0 SW_DONE, SRAM/tag0 ERR, tag0 SOF source enables
+ * and IMG0A DMA_EN, each once with two complete actual both-bank observations.
+ * CMOS/VF/CQ, PHY/MAC lanes/OUTMUX DL and sensor stream stay off. RECEIVE_ARMED
+ * describes these four enables, not a started producer or a frame.
  * EMPTY/CREDIT are not a source/AXI/map drain or native ownership grant.
  * Address/metadata/credit failure retains this slot and dependent cold epoch;
  * GIC/CPU retirement alone does not permit revoking its backing/lease.
@@ -394,6 +399,8 @@ int x9_camera_camsv_finish(struct x9_camera_camsv_slot *, const struct x9_camera
  * automatic DMA reuse. State is cache-only, not source/AXI/map drain. An
  * issued credit currently blocks rearm/restore: producer retirement is not
  * implemented and EN-off/reset is not permission to revoke that credit.
+ * Close can quiesce only this inactive receive arm before masking GIC; it
+ * preserves the accepted credit and does not finish/release the RAW slot.
  * There is still no registered native capture caller. */
 int x9_camera_camsv_irq_begin(uint64_t, const struct x9_camera_camsv_request *,
     const struct x9_camera_camsv_dma *);

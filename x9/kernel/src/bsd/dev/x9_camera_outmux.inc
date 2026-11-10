@@ -104,7 +104,8 @@ static int cam_out_environment(void)
      * never suppress MAC/async/AFIFO/CAMSV changes under a route commit. */
     memset(live.out,0,sizeof(live.out));memset(base.out,0,sizeof(base.out));
     if(cam_rx_changed(&base,&live,port))return ESTALE;
-    return cam_rx_busy(&live,port,cam_sv_fbc_busy_exemption())?EBUSY:0;
+    return cam_rx_busy(&live,port,cam_sv_fbc_busy_exemption(),
+        cam_sv_receive_busy_exemption(0x040))?EBUSY:0;
 }
 static int cam_out_read_bank(unsigned bank,uint32_t v[CAM_OUT_REGS])
 {

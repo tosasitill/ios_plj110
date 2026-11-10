@@ -25,6 +25,9 @@ static int cam_smi_retirement_guard(uint64_t);
 static int cam_sv_guard(void);
 static uint32_t cam_sv_fbc_busy_exemption(void);
 static uint32_t cam_sv_fbc_compare_word(unsigned,uint32_t);
+static uint32_t cam_sv_receive_busy_exemption(unsigned);
+static uint32_t cam_sv_receive_compare_word(unsigned,uint32_t);
+static int cam_sv_receive_sample_word(unsigned,vm_offset_t,uint32_t);
 static int cam_sv_open_locked(uint64_t);
 static int cam_sv_close_locked(uint64_t);
 static void cam_sv_status_copy(uint64_t,struct x9_camera_sv_hw_status *);
@@ -65,10 +68,15 @@ static int cam_rx_sample(const struct cam_rx_maps *m,struct x9_camera_receiver_s
             s->out[bank][i]=cam_rr(m->out[bank],cam_rx_out_offsets[i]);
         for(unsigned i=0;i<X9_CAM_RX_SV_WORDS;i++)
             s->sv[bank][i]=cam_rr(m->sv[bank],cam_rx_sv_offsets[i]);
+        /* Record actual DMA-enable observations BEFORE the next sample,
+         * not while comparing cached/prior evidence. A seen target cannot
+         * regress even if another read later returns to the target again. */
+        e=cam_sv_receive_sample_word(bank,m->sv[bank],s->sv[bank][0]);if(e)return e;
     }
     return 0;
 }
-static uint32_t cam_rx_busy(const struct x9_camera_receiver_sample *s,unsigned port,uint32_t fbc0_mask)
+static uint32_t cam_rx_busy(const struct x9_camera_receiver_sample *s,unsigned port,uint32_t fbc0_mask,
+    uint32_t dma0_mask)
 {
     uint32_t busy=0;
     /* PHY receiver enable or packet-pattern source, not an analog power
@@ -80,7 +88,7 @@ static uint32_t cam_rx_busy(const struct x9_camera_receiver_sample *s,unsigned p
         const uint32_t *out=s->out[bank],*sv=s->sv[bank];
         if((out[7]&(1u<<12)) || (out[8]&1) || (out[10]&1))busy|=4;
         if(out[9]&1)busy|=32;
-        if(sv[0] || sv[1] || ((sv[2]|sv[3])&1))busy|=8;
+        if((sv[0]&~dma0_mask) || sv[1] || ((sv[2]|sv[3])&1))busy|=8;
         for(unsigned tag=0;tag<8;tag++) {
             uint32_t mask=(1u<<15)|(1u<<14)|(1u<<12)|(1u<<8)|(1u<<7);
             if(!tag)mask&=~fbc0_mask;
@@ -108,6 +116,9 @@ static uint32_t cam_rx_changed(const struct x9_camera_receiver_sample *a,
          * original/cached/public samples are never overwritten or rebased. */
         if(word==4) {
             av=cam_sv_fbc_compare_word(bank,av);bv=cam_sv_fbc_compare_word(bank,bv);
+        }
+        if(!word) {
+            av=cam_sv_receive_compare_word(bank,av);bv=cam_sv_receive_compare_word(bank,bv);
         }
         if(av!=bv)changed|=8;
     }
@@ -138,7 +149,7 @@ static int cam_rx_inspect(void *arg)
     e=cam_rx_sample(m,&r->after);if(e)return e;
     r->flags|=X9_CAM_RX_SNAPSHOT;r->blockers&=~X9_CAM_RX_NEED_SNAPSHOT;
     r->stage=X9_CAM_RX_STAGE_CHECK;
-    r->busy=cam_rx_busy(&r->before,port,0)|cam_rx_busy(&r->after,port,0);
+    r->busy=cam_rx_busy(&r->before,port,0,0)|cam_rx_busy(&r->after,port,0,0);
     r->changed=cam_rx_changed(&r->before,&r->after,port);
     if(r->changed)return ESTALE;
     r->flags|=X9_CAM_RX_STABLE;
@@ -198,7 +209,7 @@ static int cam_rx_session_guard(void)
     struct x9_camera_receiver *r=&cam_rx_live.status;
     const struct cam_rx_maps *m=&cam_rx_maps[r->sensor==X9_CAMERA_BACK?0:1];
     unsigned port=r->sensor==X9_CAMERA_BACK?3:0;
-    uint32_t busy,changed,fbc0_mask;
+    uint32_t busy,changed,fbc0_mask,dma0_mask;
     int e;
     if(!cam_rx_live.epoch || cam_rx_live.epoch!=cam_mm_live.epoch)return ESTALE;
     if(!(r->flags&X9_CAM_RX_SNAPSHOT))return cam_rx_live.error?cam_rx_live.error:ENXIO;
@@ -209,7 +220,8 @@ static int cam_rx_session_guard(void)
     delay(10);
     e=cam_rx_sample(m,&b);if(e)return e;
     fbc0_mask=cam_sv_fbc_busy_exemption();
-    busy=cam_rx_busy(&a,port,fbc0_mask)|cam_rx_busy(&b,port,fbc0_mask);
+    dma0_mask=cam_sv_receive_busy_exemption(0x040);
+    busy=cam_rx_busy(&a,port,fbc0_mask,dma0_mask)|cam_rx_busy(&b,port,fbc0_mask,dma0_mask);
     changed=cam_rx_changed(&a,&b,port)|cam_rx_changed(&cam_rx_live.expected,&a,port)|
         cam_rx_changed(&cam_rx_live.expected,&b,port);
     r->after=b;r->busy|=busy;r->changed|=changed;

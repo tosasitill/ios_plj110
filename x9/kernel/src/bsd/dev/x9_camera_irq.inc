@@ -1,12 +1,14 @@
 /* Sole CAMSV0 GIC1NS IAR -> one-shot bank sample -> pinned thread worker.
  * The inactive prepare path creates only a dormant worker. begin still needs
- * the real controller's exact S1/domain/route/request lease, and enables NO
- * CAMSV source/DMA/CMOS/VF/CQ. After RAW arm it publishes the
+ * the real controller's exact S1/domain/route/request lease. After RAW arm it publishes the
  * actual S1 IOVA/tag0 FH metadata, then no-credit FBC_EN with unchanged empty
  * counters and both-bank DB consumption, before GIC changes. After all
  * three actual GIC lines are published, it issues one RCNT command and
  * requires the full both-bank counter/control acceptance twice. No replay,
  * no automatic rearm, no credit cancellation by EN-off/reset or CPU RETIRED.
+ * It then confirms three restricted source IRQ enables and IMG0A DMA_EN;
+ * CMOS/VF/CQ/PHY/OUTMUX DL/sensor source stay off. Close may quiesce these
+ * inactive receive enables only, never declare frame/RAW/AXI/map retirement.
  * It is not a capture provider registration.
  * Lock order: camera_control_lock -> camera_irq_lock -> camera_camsv_lock.
  * Worker NEVER acquires camera_control_lock; close can drain its pin there.
@@ -474,8 +476,8 @@ static int cam_irq_begin_locked(uint64_t epoch,const struct x9_camera_camsv_requ
     }
     /* Do not make a hardware source observable with stale address/cookie.
      * Both banks must consume ONLY this already-armed request's S1 IOVA
-     * and FH_SPARE, then no-credit FBC_EN. No SOURCE/DMA/CQ/CMOS/VF enable
-     * follows. The ONE credit command comes only after actual GIC publication;
+     * and FH_SPARE, then no-credit FBC_EN. No enable is written by this helper.
+     * The ONE credit command and inactive receive arm follow actual GIC publication;
      * unexpected counter changes are retained, never re-credited. */
     if(!e)e=cam_sv_request_prepare_locked(epoch,cam_irq.slot);
     if(!e&&!owns) {
@@ -521,6 +523,7 @@ static int cam_irq_begin_locked(uint64_t epoch,const struct x9_camera_camsv_requ
         }
     }
     if(!e)e=cam_sv_credit_issue_locked(epoch,cam_irq.slot);
+    if(!e)e=cam_sv_receive_transition_locked(epoch,false);
     if(e&&arm_attempted&&cam_irq.slot->state!=X9_CAMSV_EMPTY&&cam_irq.slot->state!=X9_CAMSV_RETIRED) {
         e=cam_irq_fault(e);lck_mtx_lock(&camera_camsv_lock);
         cam_camsv_retain(cam_irq.slot,e);lck_mtx_unlock(&camera_camsv_lock);
@@ -558,6 +561,10 @@ static int cam_irq_close_locked(uint64_t epoch)
     if(!cam_irq.prepared)return 0;
     lck_mtx_lock(&camera_irq_lock);
     if(epoch!=cam_irq.epoch||cam_irq.close_attempted){lck_mtx_unlock(&camera_irq_lock);return ESTALE;}
+    /* Retire this inactive receive arm's source enables before GIC masking.
+     * This does NOT revoke credit/finish RAW or authorize dropping mappings.
+     * A partial/foreign/active arm is retained, never fixed by blind disables. */
+    e=cam_sv_receive_quiesce_locked(epoch);
     cam_irq.close_attempted=true;
     old=cam_irq_spin_take();cam_irq.accepting=false;owns=cam_irq.owns;
     if(owns)cam_irq_mask_all();cam_irq_spin_drop(old);

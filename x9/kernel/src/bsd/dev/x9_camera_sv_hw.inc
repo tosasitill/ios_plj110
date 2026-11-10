@@ -6,6 +6,8 @@
  * tag*40+500) and later 8080 (5325c..535bc). EN initialization precedes GIC;
  * exactly ONE RCNT descriptor is ported after actual GIC publication. Its
  * complete counter/control acceptance is observed, not guessed from a pulse.
+ * Normal source IRQ/tag0 DMA receive enables then follow with actual bank
+ * consumption; CMOS/VF/PHY/OUTMUX DL/sensor source still remain off.
  * camera_control_lock held. Named ordinary configuration only: no DONE,
  * SOF, ERR, COMMON, CHANNEL, VF_ST, FIFO_STAT or CQ IRQ_STATUS reads.
  * Tag0 FBC1 is sampled separately, as in the normal upstream FBC readers;
@@ -25,6 +27,15 @@ enum { CAM_SV_MAX_REGS=352, CAM_SV_FIELDS=X9_CAM_SV_HW_FIELDS,
  * engine journals one issued store; it cannot be replayed by DB or restore. */
 #define CAM_SV_FBC_MASK 0xffffd180u
 #define CAM_SV_FBC_COUNT_MASK 0x000f0000u
+/* Normal composer 54530..5454c establishes central+40, then 54c48..54d0c
+ * writes DMA_IMG/+304 DONE/+30c ERR/+31c SOF. Restrict its multi-tag masks
+ * to our immutable tag0/group0 request. Only named SRAM/tag0 faults, not CQ,
+ * foreign tags, COMMON/CHANNEL routing or the vendor's all-tag TOP mask.
+ * These are ordinary RW enables, not the adjacent read-clear histories. */
+static const struct { unsigned offset; uint32_t target; }
+cam_sv_receive_fields[X9_CAM_SV_RECEIVE_FIELDS]={
+    {0x344,0x10000}, {0x34c,0x701}, {0x35c,4}, {0x040,1}
+};
 /* Absolute offsets within each three-bank view. In particular global
  * DMA SLC_CTRL is +102c, not the per-tag +123c. No holes/debug/status sweep. */
 static const unsigned cam_sv_fixed[]={
@@ -77,6 +88,8 @@ static struct {
     unsigned credit_phase;
     bool credit_issued;
     uint32_t credit_seen, credit_ack, credit_samples, credit_target[2];
+    unsigned receive_phase;
+    uint32_t receive_issued, receive_off_issued, receive_seen[2], receive_off_seen[2], receive_samples;
     struct x9_camera_camsv_slot *request_slot;
     struct x9_camera_camsv_request request;
     struct x9_camera_camsv_dma request_dma;
@@ -113,6 +126,14 @@ static void cam_sv_status(void)
     s->credit_phase=cam_sv.credit_phase;s->credit_issued=cam_sv.credit_issued;
     s->credit_seen=cam_sv.credit_seen;s->credit_ack=cam_sv.credit_ack;
     s->credit_samples=cam_sv.credit_samples;
+    s->receive_phase=cam_sv.receive_phase;s->receive_issued=cam_sv.receive_issued;
+    s->receive_off_issued=cam_sv.receive_off_issued;s->receive_samples=cam_sv.receive_samples;
+    memcpy(s->receive_seen,cam_sv.receive_seen,sizeof(s->receive_seen));
+    memcpy(s->receive_off_seen,cam_sv.receive_off_seen,sizeof(s->receive_off_seen));
+    if(cam_sv.receive_phase==X9_CAM_SV_RECEIVE_ARMED && !cam_sv.error)s->flags|=X9_CAM_SV_HW_RECEIVE_ARMED;
+    else s->flags&=~X9_CAM_SV_HW_RECEIVE_ARMED;
+    if(cam_sv.receive_phase==X9_CAM_SV_RECEIVE_QUIESCENT && !cam_sv.error)s->flags|=X9_CAM_SV_HW_RECEIVE_QUIESCENT;
+    else s->flags&=~X9_CAM_SV_HW_RECEIVE_QUIESCENT;
     if(cam_sv.request_held) {
         s->request_generation=cam_sv.request.frame.generation;
         s->request_capture_id=cam_sv.request.frame.capture_id;
@@ -134,6 +155,8 @@ static int cam_sv_fault(int e)
         if(!cam_sv.status.request_errno)cam_sv.status.request_errno=e;
         if(cam_sv.fbc_sampled && !cam_sv.status.fbc_errno)cam_sv.status.fbc_errno=e;
         if(cam_sv.credit_issued && !cam_sv.status.credit_errno)cam_sv.status.credit_errno=e;
+        if(cam_sv.receive_phase!=X9_CAM_SV_RECEIVE_IDLE && !cam_sv.status.receive_errno)
+            cam_sv.status.receive_errno=e;
     }
     if(e==ESTALE || e==EACCES || e==EBUSY || e==EOVERFLOW)cam_sv.terminal=true;
     cam_sv_status();return e;
@@ -149,13 +172,14 @@ static int cam_sv_power_guard(void)
 }
 static int cam_sv_inactive(const uint32_t *v)
 {
-    /* Commands, all IRQ enables and both DMA enables must remain off.
+    /* Commands/foreign IRQ/DMA enables remain off; only this request's exact
+     * separately issued receive-arm controls may transition below.
      * FBC_SUB_EN is bit14, RESET bit8, EN bit15, RCNT_INC bit7. */
     static const unsigned zero[]={0x040,0x044,0x1d0,0x1d4,0x1d8,0x228,
         0x240,0x244,0x248,0x24c,0x250,0x344,0x34c,0x35c,0x364,0x36c,
         0x1020,0x1048,0x2010,0x2014,0x2018};
     for(unsigned n=0;n<sizeof(zero)/sizeof(zero[0]);n++)
-        if(v[cam_sv_find(zero[n])])return EBUSY;
+        if(v[cam_sv_find(zero[n])]&~cam_sv_receive_busy_exemption(zero[n]))return EBUSY;
     if((v[cam_sv_find(0x140)]|v[cam_sv_find(0x148)])&1)return EBUSY;
     if(v[cam_sv.db_reg]&((1u<<16)|(1u<<26)|(1u<<31)))return EBUSY;
     if(v[cam_sv_find(0x1024)]&0x11)return EBUSY; /* no pseudo/FPGA DMA */
@@ -196,6 +220,73 @@ static uint32_t cam_sv_fbc_compare_word(unsigned bank,uint32_t value)
        value==(cam_sv.target[CAM_SV_FBC]|CAM_SV_FBC_RCNT))return value&~CAM_SV_FBC_RCNT;
     return value;
 }
+/* Merely an exception to the cold busy classifier, NOT authority. The full
+ * snapshot guard below still requires the exact per-bank issued transition.
+ * Source/DMA enables do not broaden the EN/RCNT exception or allow CMOS/VF. */
+static uint32_t cam_sv_receive_busy_exemption(unsigned offset)
+{
+    if(!cam_sv.held || !cam_sv.request_held || cam_sv.terminal ||
+       cam_sv.credit_phase!=X9_CAM_SV_CREDIT_ACCEPTED)return 0;
+    if(cam_sv.receive_phase!=X9_CAM_SV_RECEIVE_PENDING &&
+       cam_sv.receive_phase!=X9_CAM_SV_RECEIVE_ARMED &&
+       cam_sv.receive_phase!=X9_CAM_SV_RECEIVE_QUIESCING)return 0;
+    for(unsigned i=0;i<X9_CAM_SV_RECEIVE_FIELDS;i++) {
+        uint32_t bit=1u<<i;
+        if(cam_sv_receive_fields[i].offset==offset && (cam_sv.receive_issued&bit))
+            return cam_sv_receive_fields[i].target;
+    }
+    return 0;
+}
+/* Comparison of HISTORICAL samples may span this one posted transition.
+ * Actual samples are qualified/recorded below before any comparison, so a
+ * target->prior regression cannot be normalized away. Once no transition
+ * is pending, all comparisons are exact again. No raw evidence is changed. */
+static uint32_t cam_sv_receive_compare_word(unsigned bank,uint32_t value)
+{
+    unsigned i=X9_CAM_SV_RECEIVE_FIELDS-1;
+    uint32_t bit=1u<<i;
+    if(bank<2 && !cam_sv.terminal &&
+       cam_sv.credit_phase==X9_CAM_SV_CREDIT_ACCEPTED && (cam_sv.receive_issued&bit) &&
+       (cam_sv.receive_phase==X9_CAM_SV_RECEIVE_PENDING ||
+        cam_sv.receive_phase==X9_CAM_SV_RECEIVE_QUIESCING) &&
+       (value==0 || value==cam_sv_receive_fields[i].target))return 0;
+    return value;
+}
+static int cam_sv_receive_sample_word(unsigned bank,vm_offset_t view,uint32_t value)
+{
+    unsigned i=X9_CAM_SV_RECEIVE_FIELDS-1;
+    uint32_t bit=1u<<i,next,prior,*seen;
+    bool off;
+    if(!(cam_sv.receive_issued&bit))return 0; /* cold admission stays strict */
+    if(bank>=2 || view!=cam_sv.view[bank] || !cam_sv.held || !cam_sv.request_held ||
+       cam_sv.terminal || cam_sv.credit_phase!=X9_CAM_SV_CREDIT_ACCEPTED)
+        return cam_sv_fault(ESTALE);
+    off=(cam_sv.receive_off_issued&bit)!=0;
+    next=off?0:cam_sv_receive_fields[i].target;prior=off?cam_sv_receive_fields[i].target:0;
+    seen=off?&cam_sv.receive_off_seen[bank]:&cam_sv.receive_seen[bank];
+    cam_sv.status.receive_after[bank][i]=value;
+    if(value!=next && ((*seen&bit) || value!=prior))return cam_sv_fault(ESTALE);
+    if(value==next)*seen|=bit;
+    return 0;
+}
+static int cam_sv_receive_observe_word(unsigned bank,unsigned reg,uint32_t value,bool *allowed)
+{
+    for(unsigned i=0;i<X9_CAM_SV_RECEIVE_FIELDS;i++) {
+        uint32_t bit=1u<<i,next,prior,*seen;
+        bool off;
+        if(cam_sv.offset[reg]!=cam_sv_receive_fields[i].offset || !(cam_sv.receive_issued&bit))continue;
+        if(cam_sv.credit_phase!=X9_CAM_SV_CREDIT_ACCEPTED ||
+           cam_sv.receive_phase<X9_CAM_SV_RECEIVE_PENDING ||
+           cam_sv.receive_phase>X9_CAM_SV_RECEIVE_QUIESCENT)return ESTALE;
+        off=(cam_sv.receive_off_issued&bit)!=0;
+        next=off?0:cam_sv_receive_fields[i].target;prior=off?cam_sv_receive_fields[i].target:0;
+        seen=off?&cam_sv.receive_off_seen[bank]:&cam_sv.receive_seen[bank];
+        if(value!=next && ((*seen&bit) || value!=prior))return ESTALE;
+        *allowed=true;
+        if(value==next){*seen|=bit;cam_sv.expected[bank][reg]=value;}
+    }
+    return 0;
+}
 static int cam_sv_fbc_counters_guard(void)
 {
     uint32_t value;
@@ -222,6 +313,8 @@ static void cam_sv_observed(unsigned bank,const uint32_t *v)
     struct x9_camera_sv_hw_status *s=&cam_sv.status;
     s->sampled|=1u<<bank;s->db_after[bank]=v[cam_sv.db_reg];
     for(unsigned slot=0;slot<CAM_SV_FIELDS;slot++)s->after[bank][slot]=v[cam_sv.field[slot]];
+    for(unsigned i=0;i<X9_CAM_SV_RECEIVE_FIELDS;i++)
+        s->receive_after[bank][i]=v[cam_sv_find(cam_sv_receive_fields[i].offset)];
 }
 /* The original receiver evidence never changes. Only actual bank values
  * accepted by this journal are published, including live-through inner
@@ -266,6 +359,7 @@ static int cam_sv_guard_impl(void)
              * then an error, including if a later sample returns to target. */
             if(bank && v[n]==cam_sv.expected[0][n] &&
                !(n==pending_reg && cam_sv.expected[1][n]==cam_sv.pending_next))allowed=true;
+            e=cam_sv_receive_observe_word(bank,n,v[n],&allowed);if(e)return e;
             if(!allowed)return ESTALE;
         }
         if(!bank && pending_reg<CAM_SV_MAX_REGS && v[pending_reg]==cam_sv.pending_next)
@@ -463,6 +557,10 @@ static int cam_sv_open_locked(uint64_t epoch)
     cam_sv.credit_phase=X9_CAM_SV_CREDIT_EMPTY;cam_sv.credit_issued=false;
     cam_sv.credit_seen=cam_sv.credit_ack=cam_sv.credit_samples=0;
     memset(cam_sv.credit_target,0,sizeof(cam_sv.credit_target));
+    cam_sv.receive_phase=X9_CAM_SV_RECEIVE_IDLE;
+    cam_sv.receive_issued=cam_sv.receive_off_issued=cam_sv.receive_samples=0;
+    memset(cam_sv.receive_seen,0,sizeof(cam_sv.receive_seen));
+    memset(cam_sv.receive_off_seen,0,sizeof(cam_sv.receive_off_seen));
     memset(&cam_sv.request,0,sizeof(cam_sv.request));
     memset(&cam_sv.request_dma,0,sizeof(cam_sv.request_dma));
     cam_sv.commit_pending=cam_sv.pending_seen=cam_sv.db_issued=false;cam_sv.db_phase=CAM_SV_DB_IDLE;
@@ -483,6 +581,10 @@ static int cam_sv_open_locked(uint64_t epoch)
     memcpy(cam_sv.expected,cam_sv.before,sizeof(cam_sv.expected));
     for(unsigned slot=0;slot<CAM_SV_FIELDS;slot++)cam_sv.status.before[slot]=cam_sv.before[0][cam_sv.field[slot]];
     for(unsigned bank=0;bank<2;bank++)cam_sv.status.db_before[bank]=cam_sv.before[bank][cam_sv.db_reg];
+    for(unsigned i=0;i<X9_CAM_SV_RECEIVE_FIELDS;i++) {
+        cam_sv.status.receive_before[i]=cam_sv.before[0][cam_sv_find(cam_sv_receive_fields[i].offset)];
+        cam_sv.status.receive_target[i]=cam_sv_receive_fields[i].target;
+    }
     cam_sv.status.flags|=X9_CAM_SV_HW_SNAPSHOT;cam_sv.held=true;
     cam_sv.target[0]=plan.grab_pixels;cam_sv.target[1]=plan.grab_lines;
     cam_sv.target[2]=plan.format;cam_sv.target[3]=plan.dma_basic;
@@ -725,6 +827,96 @@ static int cam_sv_credit_issue_locked(uint64_t epoch,struct x9_camera_camsv_slot
         cam_sv.status.fbc_after[0],cam_sv.status.fbc_after[1],cam_sv.credit_target[0],cam_sv.credit_target[1]);
     return e;
 }
+/* Actual post-credit receive arm, still with CMOS/VF/PHY/OUTMUX DL and sensor
+ * source OFF. Four single ordinary RW stores, NOT CQ/DB/RCNT commands. This
+ * does not turn an unqualified DMA lease or GIC topology into native authority.
+ * off is a private control action, not a caller-supplied drained assertion:
+ * only the same inactive receive arm can be quiesced here. Accepted credit,
+ * backing and history are preserved, so this NEVER authorizes RAW reuse,
+ * unmap, dependency release or normal producer retirement after a frame. */
+static int cam_sv_receive_transition_locked(uint64_t epoch,bool off)
+{
+    uint64_t span,end;
+    int e;
+    if(!cam_sv.held || cam_sv.epoch!=epoch || !cam_sv.request_held ||
+       !cam_sv.request_ready || !cam_sv.fbc_ready ||
+       cam_sv.credit_phase!=X9_CAM_SV_CREDIT_ACCEPTED)return ESTALE;
+    if(cam_sv.receive_phase!=(off?X9_CAM_SV_RECEIVE_ARMED:X9_CAM_SV_RECEIVE_IDLE))return EBUSY;
+    if(cam_sv.commit_pending || cam_sv.pending_slot<=CAM_SV_FIELDS)return EBUSY;
+    e=cam_sv_request_guard_locked(epoch,cam_sv.request_slot);if(e)return e;
+    e=cam_irq_credit_guard_locked(epoch);if(e)return e;
+    lck_mtx_lock(&camera_camsv_lock);
+    e=cam_sv.request_slot->state==X9_CAMSV_ARMED?0:ESTALE;
+    lck_mtx_unlock(&camera_camsv_lock);if(e)return e;
+    for(unsigned i=0;i<X9_CAM_SV_RECEIVE_FIELDS;i++) {
+        unsigned reg=cam_sv_find(cam_sv_receive_fields[i].offset);
+        uint32_t expected=off?cam_sv_receive_fields[i].target:0;
+        if(reg>=cam_sv.count || cam_sv.status.receive_before[i] ||
+           cam_sv.expected[0][reg]!=expected || cam_sv.expected[1][reg]!=expected)return ESTALE;
+    }
+    nanoseconds_to_absolutetime(10000000,&span);end=mach_absolute_time()+span;
+    cam_sv.receive_phase=off?X9_CAM_SV_RECEIVE_QUIESCING:X9_CAM_SV_RECEIVE_PENDING;
+    /* DONE -> ERR -> SOF -> DMA, matching the normal disable writer's
+     * ordering for this subset. CHANNEL/COMMON remain off; no history clear.
+     * On arm, all source enables are accepted BEFORE the IMG0A DMA enable. */
+    for(unsigned i=0;i<X9_CAM_SV_RECEIVE_FIELDS;i++) {
+        uint32_t bit=1u<<i,next=off?0:cam_sv_receive_fields[i].target;
+        bool complete=false;
+        if(mach_absolute_time()>=end){e=ETIMEDOUT;break;}
+        e=cam_sv_request_guard_locked(epoch,cam_sv.request_slot);if(e)break;
+        e=cam_irq_credit_guard_locked(epoch);if(e)break;
+        if(off) {
+            if(cam_sv.receive_off_issued&bit){e=ESTALE;break;}
+            cam_sv.receive_off_issued|=bit;
+        } else {
+            if(cam_sv.receive_issued&bit){e=ESTALE;break;}
+            cam_sv.receive_issued|=bit;
+        }
+        cam_sv.receive_samples=0;cam_sv_status();
+        cam_rw(cam_sv.view[0],cam_sv_receive_fields[i].offset,next);
+        for(unsigned poll=0;poll<10000;poll++) {
+            bool match=true;
+            if(mach_absolute_time()>=end){e=ETIMEDOUT;break;}
+            e=cam_sv_request_guard_locked(epoch,cam_sv.request_slot);if(e)break;
+            e=cam_irq_credit_guard_locked(epoch);if(e)break;
+            for(unsigned bank=0;bank<2;bank++)
+                if(cam_sv.status.receive_after[bank][i]!=next)match=false;
+            if(mach_absolute_time()>=end){e=ETIMEDOUT;break;}
+            cam_sv.receive_samples=match?cam_sv.receive_samples+1:0;
+            if(cam_sv.receive_samples==2){complete=true;break;}
+            delay(1);
+        }
+        if(e)break;
+        if(!complete){e=ETIMEDOUT;break;}
+    }
+    if(!e) {
+        cam_sv.receive_phase=off?X9_CAM_SV_RECEIVE_QUIESCENT:X9_CAM_SV_RECEIVE_ARMED;
+        e=cam_sv_request_guard_locked(epoch,cam_sv.request_slot);
+        if(!e)e=cam_irq_credit_guard_locked(epoch);
+        if(!e && mach_absolute_time()>=end)e=ETIMEDOUT;
+    }
+    if(e){cam_sv.terminal=true;cam_sv_fault(e);}
+    cam_sv_status();
+    printf("X9 CAMERA RECEIVE ARM: epoch=%llu capture_id=%llu off=%u phase=%u issued=%x/%x "
+        "seen=%x/%x offseen=%x/%x samples=%u errno=%d "
+        "outer=%x/%x/%x/%x inner=%x/%x/%x/%x (CMOS/VF/PHY/sensor off; NOT frame/AXI/map drain)\n",
+        epoch,cam_sv.request.frame.capture_id,off,cam_sv.receive_phase,
+        cam_sv.receive_issued,cam_sv.receive_off_issued,cam_sv.receive_seen[0],cam_sv.receive_seen[1],
+        cam_sv.receive_off_seen[0],cam_sv.receive_off_seen[1],cam_sv.receive_samples,e,
+        cam_sv.status.receive_after[0][0],cam_sv.status.receive_after[0][1],
+        cam_sv.status.receive_after[0][2],cam_sv.status.receive_after[0][3],
+        cam_sv.status.receive_after[1][0],cam_sv.status.receive_after[1][1],
+        cam_sv.status.receive_after[1][2],cam_sv.status.receive_after[1][3]);
+    return e;
+}
+static int cam_sv_receive_quiesce_locked(uint64_t epoch)
+{
+    if(cam_sv.receive_phase==X9_CAM_SV_RECEIVE_IDLE)return 0;
+    /* Do not finish/cancel a partial failed arm on close. A late target is
+     * not permission for retries or to erase the original error evidence. */
+    if(cam_sv.receive_phase!=X9_CAM_SV_RECEIVE_ARMED)return cam_sv.error?cam_sv.error:ESTALE;
+    return cam_sv_receive_transition_locked(epoch,true);
+}
 static int cam_sv_close_locked(uint64_t epoch)
 {
     uint64_t span,deadline;
@@ -760,7 +952,7 @@ static int cam_sv_close_locked(uint64_t epoch)
         if(cam_sv.dirty&(1u<<slot))e=cam_sv_field_write(slot,cam_sv.before[0][cam_sv.field[slot]]);
     }
     if(!e)e=cam_sv.dirty?cam_sv_commit():cam_sv_target_observe();
-    /* FBC is the last field and is restored FIRST, before FH/address and
+    /* FBC is the last geometry/request field and is restored FIRST, before FH/address and
      * geometry; the original no-credit counter evidence stays pinned through
      * both-bank restore and final policy. Never invoke RCNT or RESET cleanup.
      * Return policy only AFTER complete original geometry/address/controls
