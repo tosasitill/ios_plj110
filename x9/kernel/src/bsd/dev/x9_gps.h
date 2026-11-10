@@ -115,6 +115,8 @@ struct x9_gps_status {
  uint32_t mnl_bootstrap_completed,mnl_bootstrap_inflight,mnl_bootstrap_id;
  uint64_t mnl_bootstrap_hardware;
  int32_t mnl_bootstrap_errno;
+ uint32_t mnl_bootstrap_native;
+ int32_t mnl_native_candidate_errno;
 };
 struct x9_gps_nmea {
  uint64_t sequence, generation, host_time;

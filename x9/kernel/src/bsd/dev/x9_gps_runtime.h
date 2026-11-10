@@ -62,7 +62,9 @@ struct x9_gps_connv2_ops {
   * or default authority verifier is installed. */
  int (*provision)(void *, const struct x9_gps_handoff *, uint64_t generation,
      uint64_t lease);
- /* Complete MCUSYS NV/sync/FSM and MNL handlers. v1..v4 also own slot/flow;
+ /* Complete MCUSYS NV/sync/FSM and MNL handlers. v1..v4 own slot/flow until
+  * explicit native INIT NULL/0 opts v2..v4 into the worker's one-way cold
+  * transport handover described below; afterwards NORMAL35/36 are native.
   * v5's native worker consumes NORMAL35/36 and owns NORMAL host-status7e.
   * URGENT35/36 still reach this real handler (no invented urgent ACK).
   * Stage bounded
@@ -177,7 +179,10 @@ extern "C" {
 int x9_gps_register_connv2(const struct x9_gps_connv2_ops *);
 /* Callback-only bounded outbox. Called on the sole physical worker, never
  * from QRTR/set_state/IRQ or a separate supplier thread. v1..v4 retain raw
- * at-most4096B/two entries/channel and require supplier slot/flow admission.
+ * at-most4096B/two entries/channel and require supplier slot/flow admission
+ * UNTIL successful native INIT NULL/0 on v2..v4. That path takes native
+ * slots/credit for BOTH channels; raw MNL a2/agent a3 must then use the
+ * typed command API and provider-made7e/76 is rejected. No mode reset.
  * Native v6 instead validates/reserves ONE complete MCUDL xlink envelope,
  * payload<=1800, seq00 NORMAL/20 URGENT (agent a3 only). Its real local
  * slots have64 entries/10KiB per channel, byte-credit/window accounting,
@@ -193,9 +198,11 @@ int x9_gps_runtime_queue(uint64_t generation, unsigned channel,
 /* Callback-only AP MNL command path: validated payload -> one native inner
  * packet -> MCUDL envelope -> existing bounded worker outbox. The serializer
  * uses zero-based channels; this wrapper converts them to HIF NORMAL1 /
- * URGENT2. v1..v4 callers MUST supply a slot_seq reserved under their REAL
- * slot/flow implementation; this wrapper does not invent a packet ID or
- * reserve/refund supplier credit. Native v5/v6 are still unregistrable.
+ * URGENT2. Legacy v1..v4 calls MUST supply a slot_seq reserved under their
+ * REAL supplier slot/flow implementation. After native INIT opts in,
+ * actual native rings reserve entries/bytes; slot_seq MUST be the original
+ * fixed00 NORMAL /20 agent (not a monotonic ID). No duplicate supplier
+ * reservations/host-status ACKs afterwards. Native v5/v6 stay unregistrable.
  * generation is the physical epoch. Caller must separately prove the
  * application session, config/NV authority and command order; there is no
  * request matcher here. INIT on v2..v4 snapshots the caller's136B payload
@@ -212,10 +219,23 @@ int x9_gps_runtime_queue(uint64_t generation, unsigned channel,
  * authority. Existing caller configurations never use this fallback.
  * Factory fields are not proof of measured board tuning or aiding.
  * v1 NULL/0 is rejected; v5/v6 remain disabled. No guessed drift.
- * Successful native INIT NULL/0 starts a cold transport bootstrap:
- * next caller commands MUST be DRIVER3, HOST_TIME7, BOOT_TIME15, with
- * real supplier slot/credit reservations on every call. ENOBUFS/producer
- * failure does not advance the step. OPEN/STOP return EAGAIN until all
+ * Successful native INIT NULL/0 starts a cold transport bootstrap and
+ * one-way native transport handover, only after an actually received
+ * MCUSYS controller event and empty old outboxes/completed TX descriptors.
+ * Real counters are observed from held-reset HIF prepare: every successful
+ * pre-INIT NORMAL xlink POST is counted and each valid NORMAL35 updates the
+ * same cumulative remote count. No counters reset at takeover. Previously
+ * unknown/concatenated envelopes, a2/a3 application traffic, provider7e/76
+ * or malformed/retrograde/future credit disqualify takeover without changing
+ * legacy behavior. Pending old queue/TX returns EAGAIN, not reset/refund.
+ * The existing sole worker then actually pumps DRIVER3, HOST_TIME7 and
+ * BOOT_TIME15 in order, one command per descriptor, after each prior real
+ * TX completion. NULL factory/time producers and native ring/byte-credit
+ * admission run on that call path, not a new uninstalled supplier. External
+ * config/time calls during the pump return EBUSY; OPEN/STOP EAGAIN. Failed
+ * admission/time production preserves history and has a bounded1.5s wait;
+ * no inline HIF reentry or retries of already-posted commands. INIT's
+ * serializer/admission failure does not opt in. OPEN/STOP EAGAIN until all
  * four validated HIF TX descriptors complete; enqueue/POST/management ACK
  * alone cannot pass this barrier. No application ACK or readiness is
  * granted. Existing caller INITs do not opt into this new bootstrap.
@@ -235,8 +255,8 @@ int x9_gps_runtime_queue(uint64_t generation, unsigned channel,
  * The15 pair is sampled with local IRQs disabled and then restored;
  * continuous time includes suspend. These are HOST assistance inputs,
  * not receiver measurement time, GNSS UTC/leap authority or PDS validity.
- * libmnl53e4d8/53e4dc sends7/15 after configs2/3; ordering/slot reservations
- * remain the real protocol handler's job, not inferred from local enqueue.
+ * libmnl53e4d8/53e4dc sends7/15 after configs2/3. Native cold bootstrap
+ * owns this order/admission; all legacy caller INITs retain their contract.
  * Success is only a copied local outbox reservation,
  * not TX completion, OPEN/STOP_DONE, receiver READY or a PDS transition.
  * Inputs may be released after return; on error no outbox entry is added. */

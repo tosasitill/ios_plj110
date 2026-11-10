@@ -11,7 +11,7 @@
 #define GPS_FLOW_ACK_BYTES 39u /* 6B envelope + 32B status + tail */
 struct gps_flow_entry {
  uint64_t time;
- unsigned offset, length, host_ack;
+ unsigned offset, length, host_ack, bootstrap_step;
 };
 struct gps_flow_slot {
  struct gps_flow_entry entries[GPS_FLOW_ENTRIES];
@@ -23,8 +23,8 @@ struct gps_native_flow {
  uint64_t reset_serial, completed_reset;
  uint64_t ack_total, ack_reset, completed_total, ack_completions;
  uint32_t ack_id;
- unsigned initialized, ack_queued, ack_inflight;
- int error;
+ unsigned initialized, native, ack_queued, ack_inflight;
+ int error, candidate_error; /* dormant observation cannot fault a legacy supplier */
  struct gps_flow_slot slots[2];
  uint8_t batch[GPS_FLOW_BATCH];
 };

@@ -2,7 +2,9 @@
  * actual PLJ110 v062 module. Not an application ACK or firmware emulator.
  * Included after gps_runtime_owned; every call is on the sole HIF worker.
  * No reset/rebind operation exists here. Initialize only after held-reset
- * HIF prepare. Unknown MCUSYS/NV/MNL transactions still need the supplier. */
+ * HIF prepare. v2..v4 observe dormant counters until successful native INIT
+ * explicitly opts in, then the existing worker pumps its ordered configs.
+ * Unknown MCUSYS/NV/MNL transactions still need the supplier. */
 static uint64_t gps_flow_le64(const uint8_t *p)
 {
  uint64_t v=0;for(unsigned i=0;i<8;i++)v|=(uint64_t)p[i]<<(8*i);return v;
@@ -12,7 +14,8 @@ static void gps_flow_put(uint8_t *p,uint64_t v,unsigned n)
 static int gps_flow_guard(void)
 {
  struct gps_native_flow *f=&gps_rt.flow;
- if(current_thread()!=gps_rt.worker || (gps_rt.ops.version<5 || gps_rt.ops.version>6) || !gps_rt.lease)return EPERM;
+ if(current_thread()!=gps_rt.worker || gps_rt.ops.version<2 ||
+     gps_rt.ops.version>6 || !gps_rt.lease)return EPERM;
  if(f->error)return f->error;
  if(!f->initialized || !gps_rt.hif.prepared)return ENXIO;
  struct x9_gps_status s;x9_gps_copy_status(&s);
@@ -26,6 +29,7 @@ static void gps_flow_journal(int error)
  if(error && f->initialized && !f->error)f->error=error;
  lck_mtx_lock(&gps_lock);
  st.flow_initialized=f->initialized;st.flow_errno=f->error;
+ st.mnl_bootstrap_native=f->native;st.mnl_native_candidate_errno=f->candidate_error;
  st.flow_published=f->published;st.flow_remote_received=f->remote_received;
  st.flow_processed=gps_rt.hif.stream[0].processed_bytes;
  st.flow_discarded=gps_rt.hif.stream[0].discarded_bytes;
@@ -49,6 +53,7 @@ static int gps_flow_init(void)
      s.hardware_generation!=gps_rt.generation)return ESTALE;
  bzero(&gps_rt.flow,sizeof(gps_rt.flow));
  gps_rt.flow.generation=gps_rt.generation;gps_rt.flow.initialized=1;
+ gps_rt.flow.native=gps_rt.ops.version>=5;
  gps_flow_journal(0);return 0;
 }
 static int gps_flow_control(uint8_t type,const uint8_t *p,unsigned n)
@@ -71,23 +76,29 @@ static int gps_flow_control(uint8_t type,const uint8_t *p,unsigned n)
  if(f->reset_serial==UINT64_MAX)return EOVERFLOW;
  f->reset_serial++;return 0;
 }
-static int gps_flow_queue(unsigned c,const uint8_t *p,unsigned n,unsigned host_ack)
+static int gps_flow_packet(unsigned c,const uint8_t *p,unsigned n,unsigned host_ack)
 {
- int e=gps_flow_guard();if(e)return e;
  if(c>=2 || !p || n<7 || n>X9_MCUDL_FRAME_MAX)return EINVAL;
  unsigned payload=((unsigned)p[3]<<8)|p[4];
  uint8_t sum=(uint8_t)(p[1]+p[2]+p[3]+p[4]),type=p[2];
  if(p[0]!=0xa5 || p[1]!=(uint8_t)(c<<5) || p[5]!=sum ||
      payload>X9_MCUDL_PAYLOAD_MAX || payload+7!=n || p[n-1]!=0xa3)return EBADMSG;
  if(host_ack) {
-  if(c || type!=0x7e || n!=GPS_FLOW_ACK_BYTES ||
-      gps_rt.flow.ack_queued || gps_rt.flow.ack_inflight)return EINVAL;
+  if(c || type!=0x7e || n!=GPS_FLOW_ACK_BYTES)return EINVAL;
  } else {
   /* Only known xlink types. Native flow owns 7e; disallow provider-made
    * statistics, MCU-only 35/36 and 76 (unknown counter reset/rebind). */
   if(type<0xa0 || type>0xaf)return ENOTSUP;
   if(c!=(type==0xa3 ? 1u : 0u))return EINVAL;
  }
+ return 0;
+}
+static int gps_flow_queue(unsigned c,const uint8_t *p,unsigned n,unsigned host_ack)
+{
+ int e=gps_flow_guard();if(e)return e;
+ e=gps_flow_packet(c,p,n,host_ack);if(e)return e;
+ if(host_ack && (gps_rt.flow.ack_queued || gps_rt.flow.ack_inflight))return EINVAL;
+ uint8_t type=p[2];
  struct gps_flow_slot *s=&gps_rt.flow.slots[c];
  /* v062 a0..aa are noncritical; ab..af use the default critical class.
   * All xlink a0..af still obey the independent near-full admission gate. */
@@ -97,6 +108,7 @@ static int gps_flow_queue(unsigned c,const uint8_t *p,unsigned n,unsigned host_a
  if(s->count==GPS_FLOW_ENTRIES || n+reserve>GPS_FLOW_RING_BYTES-s->used)return ENOBUFS;
  struct gps_flow_entry *entry=&s->entries[(s->head+s->count)%GPS_FLOW_ENTRIES];
  entry->offset=s->write;entry->length=n;entry->host_ack=host_ack;
+ entry->bootstrap_step=0;
  entry->time=mach_absolute_time();
  /* Local ring may wrap a packet; gather it contiguously before HIF POST.
   * Its layout is not the firmware's ring and imposes no target ABI. */
@@ -165,13 +177,26 @@ static int gps_flow_flush(unsigned c,uint64_t now)
  unsigned limit=window>GPS_FLOW_BATCH ? GPS_FLOW_BATCH : window;
  if(limit<=GPS_FLOW_MARGIN)return 0;
  limit-=GPS_FLOW_MARGIN;
- unsigned bytes=0,packets=0,ack=0;
+ unsigned bytes=0,packets=0,ack=0,bootstrap=0;
  while(packets<s->count) {
   struct gps_flow_entry *entry=&s->entries[(s->head+packets)%GPS_FLOW_ENTRIES];
+  if(entry->bootstrap_step) {
+   /* One bootstrap command gets one real descriptor. Flush preceding
+    * non-bootstrap traffic first; never coalesce it with a host-status ACK
+    * or post the next step before the prior descriptor has retired. */
+   if(packets)break;
+   if(c || !gps_rt.bootstrap.active ||
+       gps_rt.bootstrap.generation!=gps_rt.generation ||
+       entry->bootstrap_step!=gps_rt.bootstrap.posted+1)return EPROTO;
+   if(gps_rt.bootstrap.inflight ||
+       gps_rt.bootstrap.posted!=gps_rt.bootstrap.completed)return 0;
+   bootstrap=entry->bootstrap_step;
+  }
   if(entry->length>limit-bytes)break; /* preserve same-slot FIFO */
   for(unsigned i=0;i<entry->length;i++)
    f->batch[bytes+i]=s->bytes[(entry->offset+i)%GPS_FLOW_RING_BYTES];
   bytes+=entry->length;ack+=entry->host_ack;packets++;
+  if(bootstrap)break;
  }
  if(!bytes)return 0;
  if(ack>1 || (ack && (!f->ack_queued || f->ack_inflight)))return EPROTO;
@@ -182,6 +207,10 @@ static int gps_flow_flush(unsigned c,uint64_t now)
  /* Published interface bytes, not requested bytes or MCU application ACK.
   * HIF owns its own copy; local entries retire only after successful POST. */
  if(!c)f->published+=bytes;
+ if(bootstrap) {
+  gps_rt.bootstrap.posted=bootstrap;gps_rt.bootstrap.inflight=bootstrap;
+  gps_rt.bootstrap.id=gps_rt.hif.id[2];gps_runtime_bootstrap_journal(0);
+ }
  if(ack) {
   f->ack_id=gps_rt.hif.id[2];f->ack_queued=0;f->ack_inflight=1;
  }
