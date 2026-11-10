@@ -152,7 +152,16 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
 
-## 7. 当前交接(HANDOFF 109,2026-11-10): 172(ij)根盘扩容与能力门安装成功;SA注册+NR信号已送达,但界面无信号/无5G;SIM2被MD报"未插卡"
+## 7. 当前交接(HANDOFF 110,2026-11-10): 172 logd——iOS已认出5G SA(indicator=5G/NR),但SIM1被打回NotReady且bars=0;Android两卡均在;ik关双卡路由做对照
+
+- **Android(观察,adb)**:`gsm.sim.state=LOADED,LOADED`,`persist.radio.multisim.config=dsds`,`gsm.operator.numeric=46015,46000`——**卡槽2有实体卡**。172里MD对SIM2回`+CME ERROR: 10`,所以是我们的MD bring-up没让SIM2上线(热插拔/上电/多卡模式),不是用户态问题。未查。
+- **logd**:扩容后首次用新manifest拉取(`pull_ios_logs.py --paths private/var/db/diagnostics --recent-hours 2`,26文件51.8MiB,3分41秒,`.local/x9/logs/172-logd/`),说明root‖extension读取可用。`tracev3_strings.py`解出`strings.txt`(Persist 19b–19d + Special)。
+- **SpringBoard `STTelephonyStateProvider`(观察,19c=172)**:slot1 NotReady→**Ready**→(约29s,`QMIClientPool: WDS::proxy`之后)**NotReady**;之后`registered`、`dataConnectionType=5GConnection`、bars 0、operatorName ""。slot2 NotInserted(能力门生效,出现第二槽),但bars常为1(信号被记到错误槽,推断)。19b(单卡构建)slot1一直Ready/registered/lte/bars0。CommCenter侧`kSimStateReady`→`kRatNR`/`kRegisteredHome`→`kSimStateDetected`。桥这边UIM 0x32指示每10s一次、内容不变(66B,SIM1 READY)。**推断**:NotReady由双卡分槽路由引起(单卡构建不出现)。
+- **CoreTelephony(观察)**:`CTDataStatus attached=1, indicator=5G (8), radioTechnology=NR (10), reg.dataMode=NR (17)`——**5G SA已被iOS接受**。`CTSignalStrengthInfo bars=0, displayBars=0, maxDisplayBars=4`。CommCenter把0x17/0x18存入测量表(rat 4, metric 7=rsrp/6=snr÷10/8=rsrq,函数0x1f1ae9d3c起),bars映射在后续代码,未找到;ECSQ给的是rsrp −69 dBm、snr 24 dB。
+- **x9-rev252ik-md**:= ij去掉`x9_dual_sim=1`(保留`x9_md_lte=0`、ccgate、NR信号、rootgrow默认开),Mac worktree基于d58d239,boot.img 12972032B,产物`~/ios_plj110/x9/out/x9-rev252ik-md/`,日志`.local/x9/work/pdp-activation/build-ik.stdout.log`。目的:SIM保持Ready时5G图标/信号格是否出现。
+- 下一步:用户`fastboot boot x9/out/x9-rev252ik-md/boot.img`→`~/173.txt`;看完后若需要可再进Android拉logd(同上命令,把172换173)。并行待办:①MTK SIM2上线;②CommCenter bars映射(从0x1f1ae9d3c写入的测量表往下追)。
+
+### 前次交接(HANDOFF 109,2026-11-10): 172(ij)根盘扩容与能力门安装成功;SA注册+NR信号已送达,但界面无信号/无5G;SIM2被MD报"未插卡"
 
 - **172.txt**(Mac `~/172.txt`,1917688B,末112.8s,无panic)。用户:信号空、无5G、单卡。
 - **根盘(观察)**:1.27s `HFS 16384 MiB on a 32768 MiB device`;3.27s `hfs_extendfs: extended "X9iOS16Full" to 8388608 blocks`;`X9 ROOTGROW: 16384 -> 32768 MiB errno=0`。**扩容完成,旧16GiB manifest的镜像从此无法挂载。**
