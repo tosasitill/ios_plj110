@@ -96,6 +96,29 @@ static int settings(struct x9_mic_mt6681 *c,const struct setting *s,unsigned n)
 }
 #define SETTINGS(c,a) settings((c),(a),sizeof(a)/sizeof((a)[0]))
 static void first_error(int *e,int next){if(!*e && next)*e=next;}
+static int verify_codec_journal(struct x9_mic_mt6681 *c,
+    const struct x9_mic_codec_saved *saved,unsigned count,uint64_t deadline)
+{
+    if(c->poisoned || !count)return ENXIO;
+    for(unsigned i=0;i<count;i++) {
+        bool seen=false;
+        for(unsigned j=0;j<i;j++)if(saved[j].reg==saved[i].reg){seen=true;break;}
+        if(seen)continue;
+        /* Fold repeated/overlapping writes in issue order. Checking an older
+         * transient request would reject a correctly completed sequence. */
+        uint8_t mask=0,expected=0;
+        for(unsigned j=i;j<count;j++)if(saved[j].reg==saved[i].reg) {
+            expected=(expected&~saved[j].mask)|(saved[j].value&saved[j].mask);
+            mask|=saved[j].mask;
+        }
+        c->status.last_register=saved[i].reg;
+        if(mach_absolute_time()>=deadline)return ETIMEDOUT;
+        uint8_t got=0;int e=read8(c,saved[i].reg,&got);if(e)return e;
+        if((got&mask)!=(expected&mask))return EIO;
+        if(mach_absolute_time()>=deadline)return ETIMEDOUT;
+    }
+    return 0; /* bounded non-atomic RW checks, not ownership/PCM proof */
+}
 static int restore_failure(struct x9_mic_mt6681 *c,int e,uint32_t stage)
 {
     if(!e)return 0;
@@ -195,8 +218,15 @@ static int enable_vaud18(struct x9_mic_mt6681 *c)
 }
 int x9_mic_mt6681_verify_capture(struct x9_mic_mt6681 *c)
 {
-    if(!c->touched || c->poisoned || !(c->status.flags&X9_MIC_HW_CALIBRATED))return ENXIO;
-    uint8_t v=0;int e=read8(c,MT6681_AUDIO_DIG_CFG,&v);
+    if(!c->touched || c->poisoned || !(c->status.flags&X9_MIC_HW_CALIBRATED) ||
+       !c->analog_owned || !(c->analog.flags&X9_MIC_ANALOG_READBACK) ||
+       !c->digital_owned || !c->digital)return ENXIO;
+    /* Requalify the journaled active codec RW fields, not just TX and phase,
+     * after downstream preparation may have changed clocks. */
+    int e=verify_codec_journal(c,c->analog_saved,c->analog_pending,c->digital_deadline);
+    if(!e)e=verify_codec_journal(c,c->digital_saved,c->digital_pending,c->digital_deadline);
+    if(e){c->digital->last_register=c->status.last_register;return e;}
+    uint8_t v=0;e=read8(c,MT6681_AUDIO_DIG_CFG,&v);
     if(!e && v!=(uint8_t)c->status.chosen_phase[0])e=EIO;
     if(!e)e=read8(c,MT6681_AUDIO_DIG_CFG_H,&v);
     if(!e && v!=(uint8_t)c->status.chosen_phase[1])e=EIO;
@@ -207,6 +237,7 @@ int x9_mic_mt6681_verify_capture(struct x9_mic_mt6681 *c)
     if(!e && v!=0x29)e=EIO;
     if(!e)e=read8(c,MT6681_AFE_ADDA6_MTKAIFV4_TX_CFG0,&v);
     if(!e && v!=0x2b)e=EIO;
+    if(!e && mach_absolute_time()>=c->digital_deadline)e=ETIMEDOUT;
     return e;
 }
 static int run_phase(struct x9_mic_mt6681 *c,int cycle[2],uint64_t deadline)

@@ -127,6 +127,8 @@ struct x9_mic_afe_status {
 #define X9_MIC_ANALOG_RC_OK 4u
 #define X9_MIC_ANALOG_RESTORED 8u
 #define X9_MIC_ANALOG_RETAINED 16u
+/* Completed final masked RW qualification, not sound or DMA readiness. */
+#define X9_MIC_ANALOG_READBACK 32u
 enum x9_mic_analog_stage {
     X9_MIC_ANALOG_UNTRIED, X9_MIC_ANALOG_ID, X9_MIC_ANALOG_BASELINE,
     X9_MIC_ANALOG_INIT, X9_MIC_ANALOG_CLOCKS, X9_MIC_ANALOG_BIAS,

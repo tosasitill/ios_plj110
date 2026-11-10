@@ -8,13 +8,20 @@ _Static_assert(sizeof(struct x9_mic_digital_status)==192,"digital ABI");
 static int digital_update(struct x9_mic_mt6681 *c,uint16_t reg,uint8_t mask,uint8_t value)
 {
     c->digital->last_register=reg;
+    c->status.last_register=reg;
     if(mach_absolute_time()>=c->digital_deadline)return ETIMEDOUT;
     if(c->digital_pending>=64)return EOVERFLOW;
     uint8_t old=0;int e=read8(c,reg,&old);if(e)return e;
     unsigned n=c->digital_pending++;
     c->digital_saved[n].reg=reg;c->digital_saved[n].mask=mask;c->digital_saved[n].old=old&mask;
+    c->digital_saved[n].value=value&mask;
     c->digital->codec_journal_count=c->digital_pending;
-    return update8(c,reg,mask,value);
+    /* Write from the same old byte which was journaled, not a second read
+     * with a potentially different unmasked value/restore baseline. */
+    e=write8(c,reg,(old&~mask)|(value&mask));
+    uint8_t got=0;if(!e)e=read8(c,reg,&got);
+    if(!e && (got&mask)!=(value&mask))e=EIO;
+    return e;
 }
 #define DIGITAL_BYTE(reg,mask,value) do {e=digital_update(c,(reg),(mask),(value));if(e)return e;} while(0)
 static int digital_pack(struct x9_mic_mt6681 *c,const uint16_t *regs,unsigned n,uint32_t *out)
@@ -66,7 +73,9 @@ int x9_mic_mt6681_digital_stop(struct x9_mic_mt6681 *c)
 int x9_mic_mt6681_digital_l(struct x9_mic_mt6681 *c,struct x9_mic_digital_status *s)
 {
     if(!c || !s || c->digital || c->poisoned || c->io.flags!=X9_MT6681_REQUIRED ||
-       !c->analog_owned || !(c->analog.flags&X9_MIC_ANALOG_RC_OK))return EINVAL;
+       !c->analog_owned ||
+       (c->analog.flags&(X9_MIC_ANALOG_RC_OK|X9_MIC_ANALOG_READBACK))!=
+       (X9_MIC_ANALOG_RC_OK|X9_MIC_ANALOG_READBACK))return EINVAL;
     c->digital=s;s->stage=X9_MIC_DIGITAL_BASELINE;
     uint64_t ticks;nanoseconds_to_absolutetime(1000000000ULL,&ticks);
     c->digital_deadline=mach_absolute_time()+ticks;

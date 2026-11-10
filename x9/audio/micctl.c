@@ -51,10 +51,11 @@ static int hardware_status(int fd)
     } else if(errno!=ENOTTY){perror("AFE status");return 1;}
     struct x9_mic_analog_status q={0};
     if(ioctl(fd,X9_MIC_GET_ANALOG,&q)==0) {
-        printf("analog v%u stage=%u flags=%#x errno=%u restore_errno=%u HWCID=%#x/%#x AIN%u/ADC%u type=%u bias=%umV gain_x2=%u rc_sw=%u rc_monitor=%#x journal=%u/%u reg=%#x elapsed_ns=%llu\n",
+        printf("analog v%u stage=%u flags=%#x errno=%u restore_errno=%u HWCID=%#x/%#x AIN%u/ADC%u type=%u bias=%umV gain_x2=%u rc_sw=%u rc_monitor=%#x journal=%u/%u reg=%#x elapsed_ns=%llu final_rw_checked=%u (not PCM proof)\n",
             q.version,q.stage,q.flags,q.last_errno,q.restore_errno,q.hwcid_h,q.hwcid_l,
             q.ain,q.adc,q.mic_type,q.bias_mv,q.gain_x2,q.rc_sw,q.rc_monitor,
-            q.journal_restored,q.journal_count,q.last_register,q.elapsed_ns);
+            q.journal_restored,q.journal_count,q.last_register,q.elapsed_ns,
+            !!(q.flags&X9_MIC_ANALOG_READBACK));
         printf("analog active PGA/ADC/bias0/bias2/DCC=%#x/%#x/%#x/%#x/%#x CLKSQ/CKPDN=%#x/%#x; after=%#x/%#x/%#x/%#x/%#x (codec pin names, not physical microphone or PCM proof)\n",
             q.pga_active,q.adc_active,q.bias0_active,q.bias2_active,q.dcc_active,
             q.clksq_active,q.clocks_active,q.pga_after,q.adc_after,q.bias0_after,q.bias2_after,q.dcc_after);

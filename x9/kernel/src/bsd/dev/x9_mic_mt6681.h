@@ -19,6 +19,9 @@ struct x9_mic_mt6681_io {
     int (*read8)(void *, uint16_t, uint8_t *);
     int (*write8)(void *, uint16_t, uint8_t);
 };
+/* One journal for restoration and final RW qualification. value is the
+ * requested masked value, not a second snapshot or a hardware observation. */
+struct x9_mic_codec_saved { uint16_t reg; uint8_t mask, old, value; };
 struct x9_mic_mt6681 {
     struct x9_mic_mt6681_io io;
     volatile uint32_t *afe;
@@ -28,12 +31,12 @@ struct x9_mic_mt6681 {
     bool touched, audio_snapshot, afe_snapshot, poisoned;
     struct x9_mic_analog_status analog;
     /* Persistent per-write RW field journal, including a failed write. */
-    struct { uint16_t reg; uint8_t mask, old; } analog_saved[80];
+    struct x9_mic_codec_saved analog_saved[80];
     uint32_t analog_pending;
     uint64_t analog_deadline;
     bool analog_owned;
     struct x9_mic_digital_status *digital;
-    struct { uint16_t reg; uint8_t mask, old; } digital_saved[64];
+    struct x9_mic_codec_saved digital_saved[64];
     uint32_t digital_pending;
     uint64_t digital_deadline;
     bool digital_owned;

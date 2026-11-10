@@ -13,7 +13,7 @@ enum {
 };
 struct digital_afe_journal {
     struct x9_mic_digital_status *s;
-    struct { uint32_t reg, mask, old; } saved[48];
+    struct { uint32_t reg, mask, old, value; } saved[48];
     unsigned pending;
     uint64_t deadline;
     bool owned, quiesced;
@@ -134,9 +134,13 @@ static int digital_afe_update(struct afe_journal *a,unsigned reg,uint32_t mask,u
     int e=afe_access(a);if(e)return e;
     if(d->pending>=48)return EOVERFLOW;
     unsigned n=d->pending++;
-    d->saved[n].reg=reg;d->saved[n].mask=mask;d->saved[n].old=rr(a->afe,reg)&mask;
+    uint32_t old=rr(a->afe,reg);
+    d->saved[n].reg=reg;d->saved[n].mask=mask;d->saved[n].old=old&mask;
+    d->saved[n].value=value&mask;
     d->s->afe_journal_count=d->pending;
-    return update(a->afe,reg,mask,value);
+    /* The write and unwind baseline share the same old control word. */
+    wr(a->afe,reg,(old&~mask)|(value&mask));
+    return (rr(a->afe,reg)&mask)==(value&mask)?0:EIO;
 }
 #define RX(reg,mask,value) do {e=digital_afe_update(a,(reg),(mask),(value));if(e)return e;} while(0)
 static void digital_afe_snapshot(struct afe_journal *a,bool active)
@@ -151,6 +155,27 @@ static void digital_afe_snapshot(struct afe_journal *a,bool active)
         s->afe_after_pad=rr(a->afe,RX_PAD);s->afe_after_clock=rr(a->afe,RX_CLK);
         s->afe_after_gate=rr(a->afe,RX_TOP2);
     }
+}
+static int digital_afe_verify(struct afe_journal *a)
+{
+    struct digital_afe_journal *d=&digital_afe;
+    if(!d->owned || d->quiesced || !d->pending)return ENXIO;
+    for(unsigned i=0;i<d->pending;i++) {
+        bool seen=false;
+        for(unsigned j=0;j<i;j++)if(d->saved[j].reg==d->saved[i].reg){seen=true;break;}
+        if(seen)continue;
+        uint32_t mask=0,expected=0;
+        for(unsigned j=i;j<d->pending;j++)if(d->saved[j].reg==d->saved[i].reg) {
+            expected=(expected&~d->saved[j].mask)|(d->saved[j].value&d->saved[j].mask);
+            mask|=d->saved[j].mask;
+        }
+        d->s->last_register=0x80000000u|d->saved[i].reg;
+        if(mach_absolute_time()>=d->deadline)return ETIMEDOUT;
+        int e=afe_access(a);if(e)return e;
+        if((rr(a->afe,d->saved[i].reg)&mask)!=(expected&mask))return EIO;
+        if(mach_absolute_time()>=d->deadline)return ETIMEDOUT;
+    }
+    return 0; /* non-atomic controls, no new DMA or status writes */
 }
 static int digital_afe_preflight(struct afe_journal *a,struct x9_mic_digital_status *s,
     const struct x9_mic_hardware_status *h)
@@ -203,7 +228,11 @@ static int digital_afe_enable(struct afe_journal *a)
      * stale fail clear. A sync-search failure is decisive; no auto retry. */
     delay(1000);e=afe_access(a);if(e)return e;
     digital_afe_snapshot(a,true);
-    if((s->afe_monitor[0]|s->afe_monitor[1])&(1u<<21))return EIO;
+    if((s->afe_monitor[0]|s->afe_monitor[1])&(1u<<21)) {
+        s->last_register=0x80000000u|((s->afe_monitor[0]&(1u<<21))?RX_MON0:RX_MON1);
+        return EIO;
+    }
+    e=digital_afe_verify(a);if(e)return e;
     s->flags|=X9_MIC_DIGITAL_READBACK;
     return 0;
 }

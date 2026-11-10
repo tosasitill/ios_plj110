@@ -7,13 +7,15 @@ _Static_assert(sizeof(struct x9_mic_analog_status)==128,"analog ABI");
 
 static int analog_update(struct x9_mic_mt6681 *c,uint16_t reg,uint8_t mask,uint8_t value)
 {
+    c->status.last_register=reg;
     if(mach_absolute_time()>=c->analog_deadline)return ETIMEDOUT;
     if(c->analog_pending>=80)return EOVERFLOW;
     uint8_t old=0;int e=read8(c,reg,&old);if(e)return e;
     /* Journal BEFORE a potentially successful-but-timed-out transaction. */
     unsigned n=c->analog_pending++;
     c->analog_saved[n].reg=reg;c->analog_saved[n].mask=mask;
-    c->analog_saved[n].old=old&mask;c->analog.journal_count=c->analog_pending;
+    c->analog_saved[n].old=old&mask;c->analog_saved[n].value=value&mask;
+    c->analog.journal_count=c->analog_pending;
     e=write8(c,reg,(old&~mask)|(value&mask));
     uint8_t got=0;if(!e)e=read8(c,reg,&got);
     if(!e && (got&mask)!=(value&mask))e=EIO;
@@ -193,6 +195,8 @@ int x9_mic_mt6681_analog_l(struct x9_mic_mt6681 *c)
     ANALOG(MT6681_AUDENC_PMU_CON54,RG_AUDSPAREVA18_L,0);
     ANALOG(MT6681_AUDENC_PMU_CON0,RG_AUDPREAMPLDCPRECHARGE,0);
     e=analog_snapshot(c,true);
+    if(!e)e=verify_codec_journal(c,c->analog_saved,c->analog_pending,c->analog_deadline);
+    if(!e)s->flags|=X9_MIC_ANALOG_READBACK;
 failed:
     s->last_errno=e;s->last_register=c->status.last_register;
     if(e)c->status.last_errno=e;
