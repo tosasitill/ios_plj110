@@ -889,4 +889,8 @@ host的enter/guard/leave必须真实取得跨所有CPU/firmware producers的STE/
 
 当前私有原ATF的只读调查区分了服务可达性和权限：FID514在已选kernel的两种whitelist中都有registry-index分支，仍受实际phase/feature gate和运行时registry初始化约束；HYP0831在primary分支存在，在secondary拒绝。IOMMU handler op12仅对wrapper+218/+21c低8bits做配置RMW（配置值为0时可无store仍返回0），HYP0831仅PM GET/PUT(ref_id2)，均没有返回normal STRTAB/CMDQ常驻CPU映射或跨firmware排他grant。LK的`set_mm_smmu_address`实际写`mtk,iommu-dma-range`到group节点，是DMA aperture描述，**不是表/队列handoff**。不执行这些SMC/HVC、不把返回0/命名“WPCFG/硬件semaphore”视作host授权。当前normal owner、实际storage来源/serialization及full DMA链仍须实现。
 
+继续读取同一原ATF后，MM first/last reference实际走`28d48/28f08`：条件分支调用`21424(type1, group0x37, bit3)`，使用MM HWV的BACKUP1；不是返回normal表/队列的服务。`28f08`在最后引用的HWV调用后丢弃其返回值，并最终返回0，因此外层PM_PUT的0**不能排除内部HWV超时**。共享`x9_mm_power`现在在每次live资格检查及最后PUT返回0后各读两次AO `BACKUP1_STA +0x1135c` bit3（厂商`hwccf.h`亦独立定义此状态）；任一样本busy即拒绝。最后PUT已发出时busy会保留调用方软件token/依赖账本、锁存全局fault且不再GET/PUT、补偿或延长轮询；日志`X9 MM POWER PUT`保留原a0和两次完整STA。其它bits不参与bit3的判断，不读/写固件XPU3 vote bank。**保留账本不证明ATF保留旧refcount或硬件仍供电；两次idle也不是enable目标、NS所有权或DMA退休证明**。此次未观察到实际PUT故障或硬件结果。
+
+原SEC_INIT的`46048`不是只读enabled predicate：它写的是`base+0x8020`并等待`+0x8024`，会禁用secure bank；后续配置亦写`+0x8028/802c/8080/8088/8090/8098/809c/80a0/80a8/80ac`。这些精确分支不能当normal STRTAB/CMDQ bootstrap，也不能据本次已追的secure路径断言所有固件路径都不改normal bank。TEE4d走自己的opaque memory/IOVA配置，仍不提供当前normal storage映射。实际旧启动日志是EL1入口；shim存在清HCR的EL2分支、DT存在GZ/pKVM reservation均不证明本次EL2状态或授权，不能用它们造host lease。
+
 下一仍要提供实际normal host权限/当前映射来源、完整DMA→SMI/SMMU退休与credit/repeat、持续rate/MMQoS及native power/I2C/config/capture注册，最后接iOS前后实帧预览/照片。此安装算法不能冒充provider，不构建中间供测镜像。

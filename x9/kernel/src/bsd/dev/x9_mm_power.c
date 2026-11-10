@@ -16,6 +16,7 @@ LCK_MTX_DECLARE(mm_power_lock, &mm_power_group);
 #define MM_POWER_PARENTS 32u
 #define MM_POWER_CHILDREN 256u
 #define MM_INFRA_BITS ((1u << 31) | (1u << 29))
+#define MM_SMMU_BACKUP_BIT (1u << 3)
 static struct { uint64_t token; uint32_t client, children; } parents[MM_POWER_PARENTS];
 static struct { uint64_t token, parent; } children[MM_POWER_CHILDREN];
 static uint64_t next_token = 1;
@@ -60,10 +61,25 @@ static int mm_child(uint64_t parent, uint64_t token, unsigned *index)
         }
     return ESTALE;
 }
+/* Current original ATF: MM first/last PM reference -> 28d48/28f08 ->
+ * 21424(type1, group0x37, bit3). hwccf.h independently identifies +1135c
+ * as BACKUP1_STA, NOT an enable, DONE or normal-controller semaphore.
+ * In particular 28f08 discards the HWV helper's return before returning0.
+ * Sample only this transaction's bit, from AO HWV, without polling, writes,
+ * accessing firmware's XPU3 vote bank or guessing its retained refcount.
+ * An idle pair is necessary, never proof of a power-off/NS/DMA grant. */
+static int mm_backup_idle(uint32_t state[2])
+{
+    state[0] = *(volatile uint32_t *)(hwv + 0x1135c);
+    __asm__ volatile("dsb sy" : : : "memory");
+    state[1] = *(volatile uint32_t *)(hwv + 0x1135c);
+    __asm__ volatile("dsb sy" : : : "memory");
+    return ((state[0] | state[1]) & MM_SMMU_BACKUP_BIT) ? EBUSY : 0;
+}
 static int mm_live(uint64_t token, uint32_t client, unsigned *index)
 {
     int e = mm_parent(token, client, index);
-    uint32_t ack, sta, again, pending;
+    uint32_t ack, sta, again, pending, backup[2];
     if (e) return e;
     if (smc_fault || !hwv || !secure_owned || !holders) return EIO;
     /* These are AP/AO HWV registers, not a speculative SMMU/MMUP read.
@@ -76,7 +92,10 @@ static int mm_live(uint64_t token, uint32_t client, unsigned *index)
     __asm__ volatile("dsb sy" : : : "memory");
     if (((ack ^ again) & MM_INFRA_BITS) || ((sta | pending) & MM_INFRA_BITS))
         return EBUSY;
-    return (ack & MM_INFRA_BITS) == MM_INFRA_BITS ? 0 : ENXIO;
+    if ((ack & MM_INFRA_BITS) != MM_INFRA_BITS) return ENXIO;
+    /* Powered common infra alone does not qualify an in-flight SMMU
+     * backup transaction. No MMUP/SMMU access follows a busy observation. */
+    return mm_backup_idle(backup);
 }
 static bool mm_output_overlap(const void *a, size_t an, const void *b, size_t bn)
 {
@@ -194,7 +213,20 @@ int x9_mm_power_release(uint64_t *token, uint32_t client, uint32_t *a0)
         if (holders == 1) {
             *a0 = mm_secure_power(false);
             if (*a0) { smc_fault = true; e = EIO; }
-            else secure_owned = false;
+            else {
+                uint32_t backup[2];
+                e = mm_backup_idle(backup);
+                if (e) {
+                    /* The PUT was ALREADY attempted. Its outer0 can hide
+                     * a HWV timeout; do not drop the caller's journal, send
+                     * another GET/PUT or claim that firmware still holds
+                     * its old count. Fault blocks every live/pin path. */
+                    smc_fault = true;
+                    printf("X9 MM POWER PUT: client=%u a0=%x backup_sta=%x/%x "
+                        "errno=%d (attempted, retain journal, no retry)\n",
+                        client, *a0, backup[0], backup[1], e);
+                } else secure_owned = false;
+            }
         }
         if (!e) {
             parents[i].token = 0; parents[i].client = 0;
