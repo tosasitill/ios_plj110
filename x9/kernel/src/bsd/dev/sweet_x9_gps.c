@@ -222,6 +222,10 @@ static int gps_position_valid(const uint8_t *p, unsigned n)
  /* PDS defines bits0..22. A parsed position must actually contain BOTH
   * coordinates; an empty/unknown mask is not a measured receiver fix. */
  if ((mask&~0x007fffffu) || (mask&0x30u)!=0x30u) return EBADMSG;
+ /* PDS bit0 is a GPS calendar with full year/one-based month, not an
+  * unchecked UTC struct tm. Do not let invalid active dates reach Apple's
+  * consumer. Inactive calendar slots remain independent of validity. */
+ if ((mask&1u) && !gps_pds_calendar_valid(p+4)) return EBADMSG;
  uint64_t lat = gps_le64(p+27) & 0x7fffffffffffffffULL;
  uint64_t lon = gps_le64(p+35) & 0x7fffffffffffffffULL;
  /* IEEE754 magnitudes of 90.0 and 180.0 degrees. */

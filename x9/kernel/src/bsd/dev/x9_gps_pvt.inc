@@ -10,10 +10,21 @@
  * Only the documented 2D/3D grades 2/3 are accepted here. Cache-present,
  * management ACK and a finite coordinate alone are NOT fix qualification.
  *
- * This is deliberately a PARTIAL native PDS translation: only measured
- * latitude/longitude. Unproven accuracy/confidence/time/altitude semantics
- * remain INVALID, not zero-valued valid measurements. Physical MNL session
- * qualification and an explicitly capable backend are still required.
+ * get_debug529500 maps this PVT into its packed position debug structure;
+ * mnld6fc40 prints that SAME structure with named units: +18 speed m/s,
+ * +1c bearing degrees, +20 horizontal accuracy metres, +28 vertical
+ * accuracy metres and +30 speed accuracy m/s. This proves PVT offsets
+ * +50/+58/+84/+88/+8c, NOT +50/+54/+58 as an accuracy triplet. PDS
+ * 1004f09ec/1004f0fc8 consumes these at +51/+59/+63/+79/+83.
+ *
+ * This is still a PARTIAL native PDS translation. UTC/leap authority,
+ * confidence, altitude datum, ellipses and DOP are not proved here. Only
+ * independently qualified GPS calendar and named measured quantities are
+ * included; uncertain/zero precision slots stay INVALID, not fabricated
+ * measurements. Physical MNL session qualification and an explicitly
+ * capable backend are still required. No confidence value is supplied:
+ * Apple568810 uses circular uncertainty directly when confidence !=95,
+ * rather than treating our value as a measured 95-percent ellipse.
  * No floating-point/SIMD, no coordinates in logs, no vendor code execution. */
 #define GPS_PVT_BYTES 3168u
 #define GPS_PVT_PREFIX 6u
@@ -22,6 +33,19 @@ static unsigned gps_pvt_u16(const uint8_t *p)
 { return (unsigned)p[0] | (unsigned)p[1]<<8; }
 static uint32_t gps_pvt_u32(const uint8_t *p)
 { return GPS_LE32(p); }
+#include "x9_gps_pvt_calendar.inc"
+
+/* Producer clears speed/precision in several unavailable-mode paths.
+ * Keep zero inactive: this also conservatively omits stationary speed,
+ * rather than pretending an unavailable measurement is a measured zero. */
+static int gps_pvt_copy_positive(const uint8_t *p, unsigned src,
+    uint8_t *result, unsigned dst)
+{
+ uint32_t v=gps_pvt_u32(p+src);
+ if (!v || (v&0x80000000u) || (v&0x7f800000u)==0x7f800000u) return 0;
+ memcpy(result+dst,p+src,4);
+ return 1;
+}
 
 int x9_gps_mnl_position_wire(const void *body, unsigned length, void *wire,
     unsigned capacity)
@@ -44,8 +68,23 @@ int x9_gps_mnl_position_wire(const void *body, unsigned length, void *wire,
   * may overlap; an error leaves the output untouched. Inactive slots are
   * zero solely for deterministic serialization, with validity bits clear. */
  uint8_t result[X9_GPS_PDS_POSITION_BYTES]={0};
- result[0]=GPS_PVT_LAT_LON_MASK;
+ uint32_t mask=GPS_PVT_LAT_LON_MASK;
  memcpy(result+27,p+0x30,8); memcpy(result+35,p+0x38,8);
+ if (gps_pvt_gps_calendar(p,result+4)) mask|=1u;
+ if (gps_pvt_copy_positive(p,0x84,result,63)) mask|=1u<<11;
+ /* A 2D fix does not qualify vertical precision. A heading is only
+  * supplied when the vendor actually supplied nonzero ground speed. */
+ if (p[0x19]==3 && gps_pvt_copy_positive(p,0x88,result,79)) mask|=1u<<15;
+ if (gps_pvt_copy_positive(p,0x50,result,51)) {
+  mask|=1u<<8;
+  uint32_t heading=gps_pvt_u32(p+0x58);
+  if ((!(heading&0x80000000u) || !(heading&0x7fffffffu)) &&
+      (heading&0x7fffffffu)<0x43b40000u) {
+   memcpy(result+59,p+0x58,4); mask|=1u<<10;
+  }
+  if (gps_pvt_copy_positive(p,0x8c,result,83)) mask|=1u<<16;
+ }
+ for (unsigned i=0;i<4;i++) result[i]=(uint8_t)(mask>>(8*i));
  memcpy(wire,result,sizeof(result));
  return 0;
 }
