@@ -12,6 +12,12 @@ enum { VUL1_BASE_MSB=0x4d90, VUL1_BASE=0x4d94, VUL1_CUR_MSB=0x4d98,
 #define VUL1_MON_BUSY ((0xfu<<20)|(1u<<19)|(1u<<17)|(1u<<16))
 #define VUL1_MON_FULL (1u<<18)
 #define VUL1_FORMAT_MASK ((0x1fu<<8)|(1u<<6)|(1u<<5)|(1u<<4)|(1u<<3)|(1u<<2)|3u)
+/* OPPO trigger START/RESUME sets minlen=maxlen=3 (64-byte bursts) for VUL1.
+ * These are configuration fields, not write-completion/drain indicators. */
+#define VUL1_BURST_MASK ((3u<<20)|(3u<<16))
+#define VUL1_BURST_64 VUL1_BURST_MASK
+#define VUL1_CAPTURE_MASK (VUL1_FORMAT_MASK|VUL1_BURST_MASK)
+#define VUL1_CAPTURE_CONFIG ((0xau<<8)|(1u<<3)|VUL1_BURST_64)
 /* Index defines GET_DMA.active_memifs bits. 15 DL followed by 17 VUL. */
 static const unsigned x9_mic_memif_regs[]={
     0x4460,0x4490,0x44c0,0x44f0,0x4520,0x4550,0x4580,0x45b0,0x45e0,

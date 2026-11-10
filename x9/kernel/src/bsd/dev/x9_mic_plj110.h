@@ -45,14 +45,16 @@ struct x9_mic_plj110_native_dma {
     int (*quiesce)(void *);
 };
 int x9_mic_plj110_register_native_dma(const struct x9_mic_plj110_native_dma *);
-/* Internal lifecycle, called only with MT6993 control lock held. Shares the
- * explicit diagnostic cold transaction budget; one session per boot until
- * actual hardware has qualified repeatable cold restart. No memif writes. */
+/* Internal lifecycle, called only with MT6993 control lock held. Diagnostics
+ * remain one-shot. Capture can recycle only a complete successful provider
+ * STOP receipt; failed/retained/diagnostic transactions are never reset. */
 int x9_mic_plj110_capture_prepare(volatile uint32_t *,
     struct x9_mic_hardware_status *, struct x9_mic_board_status *,
     struct x9_mic_afe_status *, struct x9_mic_analog_status *,
     struct x9_mic_digital_status *, struct x9_mic_dma_status *, uint32_t memory_type);
 int x9_mic_plj110_capture_unprepare(void);
+int x9_mic_plj110_capture_restart_ready(void);
+int x9_mic_plj110_capture_rearm(void);
 void x9_mic_plj110_capture_retain(int error);
 /* Caller holds MT6993 AFE lock; cached memory only. */
 void x9_mic_plj110_get_signal(struct x9_mic_signal_status *);

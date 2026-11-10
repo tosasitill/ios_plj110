@@ -33,7 +33,7 @@ static struct x9_mic_dma_status dma_diagnostic={.version=1,
         X9_MIC_DMA_NEED_QUIESCE|X9_MIC_DMA_NEED_SOURCE_ID};
 static bool dma_issued;
 static uint32_t cursor,old_regs[7],expected_regs[7],written;
-static const uint32_t reg_masks[]={VUL1_FORMAT_MASK,0x1ff,0xfffffff0,
+static const uint32_t reg_masks[]={VUL1_CAPTURE_MASK,0x1ff,0xfffffff0,
     0x1ff,0xfffffff0,UINT32_MAX,UINT32_MAX};
 static const uint32_t save_regs[]={VUL1_CON0,VUL1_BASE_MSB,VUL1_BASE,
     VUL1_END_MSB,VUL1_END,CONN020,CONN021};
@@ -103,6 +103,12 @@ static int stop_locked(void)
     }
     e=prepared?hw.unprepare():0;
     if(!e){prepared=false;diagnostic.flags&=~X9_MIC_HW_CAPTURE;}
+    /* Do not leave userspace READY after a nominally successful STOP unless
+     * the actual full-stop receipt is eligible for another cold START. Failed
+     * prepare remains terminal without recycling its transaction evidence. */
+    if(!e && hw.prepare==x9_mic_plj110_capture_prepare &&
+       !diagnostic.last_errno && (dma_diagnostic.flags&X9_MIC_DMA_STARTED))
+        e=x9_mic_plj110_capture_restart_ready();
     if(!e && resource_ticket) {
         e=x9_audio_resources_release(X9AudioResourceMic,resource_ticket);
         if(!e)resource_ticket=0;
@@ -152,6 +158,14 @@ static int afe_start(uint64_t g)
     lck_mtx_lock(&afe_mic_lock);int e=0;
     if(armed || active || prepared || dma_stuck || resource_ticket || (diagnostic.flags&X9_MIC_HW_RESTORE_FAILED))e=EBUSY;
     else {
+        /* Previous published DMA/codec status belongs to the completed
+         * transaction. Recycle it BEFORE bzero or marking prepared, so a
+         * rejected restart cannot erase evidence or tear down an old lease. */
+        if(hw.prepare==x9_mic_plj110_capture_prepare &&
+           (board_diagnostic.flags&X9_MIC_BOARD_ATTEMPTED)) {
+            e=hw.rearm();
+            if(e){lck_mtx_unlock(&afe_mic_lock);return e;}
+        }
         /* PLJ110 claims once inside its board pipeline and keeps that lease
          * across VUL1 polling/drain. A nested engine claim is nonrecursive
          * and would always fail. Other providers use the engine's lease. */
@@ -209,9 +223,10 @@ static int afe_start(uint64_t g)
             if(!e)e=program_reg(2,(uint32_t)base);
             if(!e)e=program_reg(3,(uint32_t)(end>>32));
             if(!e)e=program_reg(4,(uint32_t)end);
-            /* stereo, signed packed S16, normal SRAM, fs=0xa (48k).
-             * Burst/domain fields remain board-qualified prepare values. */
-            if(!e)e=program_reg(0,(0xau<<8)|(1u<<3));
+            /* stereo, signed packed S16, normal mode, fs=0xa (48k),
+             * vendor VUL1 min/max=64 bytes. Journal also restores burst
+             * fields; do not inherit unqualified bootloader settings. */
+            if(!e)e=program_reg(0,VUL1_CAPTURE_CONFIG);
             if(!e)e=program_reg(5,1u<<16);
             if(!e)e=program_reg(6,1u<<17);
             if(e)goto start_failed;
@@ -319,12 +334,14 @@ static void afe_worker(__unused void *arg,__unused wait_result_t result)
 }
 int x9_mic_mt6993_register(const struct x9_mic_mt6993_platform *p)
 {
-    if(!p || p->version!=5 || p->adc_channel>1 || !p->afe || !p->dma ||
+    if(!p || p->version!=6 || p->adc_channel>1 || !p->afe || !p->dma ||
        (p->dma_memory_type!=X9_MIC_DMA_MEMORY_SRAM && p->dma_memory_type!=X9_MIC_DMA_MEMORY_DRAM) ||
        !p->prepare || !p->unprepare || !p->copy_frames || !p->sync_for_device || !p->dma_quiesce ||
        ((uintptr_t)p->afe&3) || ((uintptr_t)p->dma&15) || (p->dma_bus_address&15) ||
        !p->dma_bus_address || p->dma_bytes<65536 || p->dma_bytes>131072 || (p->dma_bytes&15) ||
        p->dma_bus_address>((1ULL<<41)-p->dma_bytes))return EINVAL;
+    if(p->prepare==x9_mic_plj110_capture_prepare &&
+       p->rearm!=x9_mic_plj110_capture_rearm)return EINVAL;
     lck_mtx_lock(&afe_mic_lock);
     if(registered || (board_diagnostic.flags&X9_MIC_BOARD_RETAINED)) {
         lck_mtx_unlock(&afe_mic_lock);return EBUSY;
@@ -342,7 +359,10 @@ int x9_mic_mt6993_register(const struct x9_mic_mt6993_platform *p)
         } else {thread_deallocate(t);worker_created=true;}
     }
     const struct x9_mic_backend backend={.version=3,
-        .flags=p->prepare==x9_mic_plj110_capture_prepare?X9_MIC_BACKEND_COLD_ONESHOT:0,
+        /* PLJ110's actual full-drain provider remains required by binding.
+         * Rearm checks a completed STOP, then repeats real cold calibration;
+         * there is no spent one-shot READY latch for this lifecycle. */
+        .flags=0,
         .start=afe_start,.commit=afe_commit,.stop=afe_stop};
     if(!e)e=x9_mic_register_backend(&backend);
     if(!e){registered=true;dma_diagnostic.blockers=0;dma_diagnostic.flags|=X9_MIC_DMA_BOUND;}
@@ -355,11 +375,12 @@ int x9_mic_plj110_register_dma(const struct x9_mic_plj110_dma *p)
     /* This supplies real PLJ110 lifecycle callbacks, not stub DMA/owner
      * callbacks. AFE SRAM SMC/idle/board XML cannot satisfy p's contract. */
     const struct x9_mic_mt6993_platform platform={
-        .version=5,.adc_channel=0,.afe=p->afe,.dma=p->ring,
+        .version=6,.adc_channel=0,.afe=p->afe,.dma=p->ring,
         .dma_bus_address=p->bus_address,.dma_bytes=p->ring_bytes,
         .dma_memory_type=p->memory_type,
         .prepare=x9_mic_plj110_capture_prepare,
         .unprepare=x9_mic_plj110_capture_unprepare,
+        .rearm=x9_mic_plj110_capture_rearm,
         .dma_quiesce=p->quiesce,.copy_frames=p->copy_frames,
         .sync_for_device=p->sync_for_device};
     return x9_mic_mt6993_register(&platform);

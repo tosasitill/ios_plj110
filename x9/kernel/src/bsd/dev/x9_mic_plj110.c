@@ -51,6 +51,31 @@ struct power_journal {
     int finish_errno;
 };
 static struct power_journal board;
+/* ml_io_map allocates permanent I/O VA, not a reusable per-session mapping.
+ * Keep successful mappings outside the cold transaction journal. All callers
+ * hold afe_mic_lock; every session still takes new live baseline snapshots.
+ * A failed map is not retried, and caching VA conveys no power/owner lease. */
+enum { MIC_MAP_GPIO, MIC_MAP_SLEEP, MIC_MAP_GIPC, MIC_MAP_GATE, MIC_MAP_BUS,
+    MIC_MAP_PMIF, MIC_MAP_HWV, MIC_MAP_CLOCK, MIC_MAP_AFE, MIC_MAP_IOC0,
+    MIC_MAP_IOC1, MIC_MAP_COUNT };
+static const struct { vm_offset_t physical; vm_size_t bytes; } mic_map_ranges[]={
+    {0x1002d000,0x1000},{0x1c001000,0x1000},{0x1df50000,0x1000},
+    {0x1da00000,0x1000},{0x1d860000,0x1000},{0x1c01a000,0x2000},
+    {0x1c040000,0x75000},{0x1c200000,0x1000},{0x1a110000,0x10000},
+    {0x12840000,0x1000},{0x12860000,0x1000}
+};
+_Static_assert(sizeof(mic_map_ranges)/sizeof(mic_map_ranges[0])==MIC_MAP_COUNT,"MMIO map slots");
+static vm_offset_t mic_map_addresses[MIC_MAP_COUNT];
+static uint32_t mic_map_attempted;
+static vm_offset_t mic_map_once(unsigned slot)
+{
+    if(slot>=MIC_MAP_COUNT)return 0;
+    if(!(mic_map_attempted&(1u<<slot))) {
+        mic_map_attempted|=1u<<slot;
+        mic_map_addresses[slot]=ml_io_map(mic_map_ranges[slot].physical,mic_map_ranges[slot].bytes);
+    }
+    return mic_map_addresses[slot];
+}
 static uint32_t rr(vm_offset_t b,unsigned r)
 {
     uint32_t v=*(volatile uint32_t *)(b+r);
@@ -560,10 +585,10 @@ static int board_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_stat
     struct power_journal *j=&board;bzero(j,sizeof(*j));j->status=s;
     j->hardware=h;j->analog=analog;j->digital=digital;j->dma=dma;
     j->started=start;j->session=hold;j->resource_ticket=ticket;
-    j->gpio=ml_io_map(0x1002d000,0x1000);j->vlp=ml_io_map(0x1c001000,0x1000);
-    j->gipc=ml_io_map(0x1df50000,0x1000);if(j->gipc)j->gipc+=0x40;
-    j->gate=ml_io_map(0x1da00000,0x1000);j->bus=ml_io_map(0x1d860000,0x1000);
-    j->pmif=ml_io_map(0x1c01a000,0x2000);
+    j->gpio=mic_map_once(MIC_MAP_GPIO);j->vlp=mic_map_once(MIC_MAP_SLEEP);
+    j->gipc=mic_map_once(MIC_MAP_GIPC);if(j->gipc)j->gipc+=0x40;
+    j->gate=mic_map_once(MIC_MAP_GATE);j->bus=mic_map_once(MIC_MAP_BUS);
+    j->pmif=mic_map_once(MIC_MAP_PMIF);
     int e=0;
     if(!j->gpio || !j->vlp || !j->gipc || !j->gate || !j->bus || !j->pmif)e=ENOMEM;
     if(!e) {
@@ -654,6 +679,55 @@ int x9_mic_plj110_capture_unprepare(void)
 {
     if(!board.session)return 0;
     return board_finish(&board,board.status->last_errno);
+}
+
+int x9_mic_plj110_capture_restart_ready(void)
+{
+    /* This is not a reset or a substitute for hardware drain. Only the
+     * engine that already called the real provider and restored addresses
+     * may consume a successful STOP receipt, while all old status pointers
+     * are still intact. Diagnostics and failed STARTs remain terminal. */
+    struct power_journal *j=&board;
+    if(!j->session || !j->capture_held || !j->finished || j->finish_errno ||
+       !j->status || !j->hardware || !j->analog || !j->digital || !j->dma || !j->cal)
+        return EALREADY;
+    struct x9_mic_board_status *s=j->status;
+    struct x9_mic_hardware_status *h=j->hardware;
+    struct x9_mic_dma_status *d=j->dma;
+    struct afe_journal *a=j->cal;
+    if(s->last_errno || s->restore_errno || s->bus_fault_errno ||
+       h->last_errno || h->restore_errno || j->analog->last_errno || j->analog->restore_errno ||
+       j->digital->last_errno || j->digital->restore_errno ||
+       a->s->last_errno || a->s->restore_errno || d->last_errno || d->restore_errno)
+        return EIO;
+    if((s->flags&(X9_MIC_BOARD_RESTORED|X9_MIC_BOARD_RETAINED))!=X9_MIC_BOARD_RESTORED ||
+       (a->s->flags&(X9_MIC_AFE_RESTORED|X9_MIC_AFE_RETAINED))!=X9_MIC_AFE_RESTORED ||
+       (j->analog->flags&(X9_MIC_ANALOG_RESTORED|X9_MIC_ANALOG_RETAINED))!=X9_MIC_ANALOG_RESTORED ||
+       (j->digital->flags&(X9_MIC_DIGITAL_RESTORED|X9_MIC_DIGITAL_RETAINED))!=X9_MIC_DIGITAL_RESTORED ||
+       (d->flags&(X9_MIC_DMA_STARTED|X9_MIC_DMA_DRAINED|X9_MIC_DMA_RESTORED|X9_MIC_DMA_RETAINED))!=
+            (X9_MIC_DMA_STARTED|X9_MIC_DMA_DRAINED|X9_MIC_DMA_RESTORED))return EBUSY;
+    if(j->resource_ticket || j->enabled || j->enable.owned || j->route[0].owned || j->route[1].owned ||
+       j->wake_owned || j->awake || j->gate_owned || j->bus_owned || j->xo_owned ||
+       j->bus_stuck || j->pmif_stuck || a->stuck || a->votes || a->mux_owned || a->pin_owned ||
+       a->snapshot || a->engine_owned || a->sram || a->dram_owned || a->dram_uncertain ||
+       j->codec.touched || j->codec.audio_snapshot || j->codec.afe_snapshot || j->codec.poisoned ||
+       j->codec.analog_owned || j->codec.analog_pending || j->codec.digital_owned ||
+       j->codec.digital_pending || j->codec.digital_uncertain || digital_afe.owned || digital_afe.pending ||
+       d->pending_flags || d->journal_count!=d->journal_restored)return EBUSY;
+    for(unsigned i=0;i<sizeof(saved_regs)/sizeof(saved_regs[0]);i++)
+        if(j->saved[i].issued)return EBUSY;
+    return 0;
+}
+int x9_mic_plj110_capture_rearm(void)
+{
+    int e=x9_mic_plj110_capture_restart_ready();if(e)return e;
+    struct power_journal *j=&board;
+    /* Nothing physical is sampled while AFE is off. The next board_probe
+     * obtains a NEW AP ticket and checks live AO/GPIO/I2C/codec baselines,
+     * then repeats power-on/phase/RC/SRC/RX; it never borrows old calibration. */
+    j->session=j->capture_held=false;
+    j->status->flags&=~X9_MIC_BOARD_ATTEMPTED;
+    return 0;
 }
 
 void x9_mic_plj110_capture_retain(int error)

@@ -9,13 +9,13 @@
 #define X9_MIC_AFE_PHYS 0x1a110000ULL
 #define X9_MIC_AFE_BYTES 0x10000u
 struct x9_mic_mt6993_platform {
-    uint32_t version, adc_channel; /* version=5; verified board mic mapping */
+    uint32_t version, adc_channel; /* version=6; verified board mic mapping */
     volatile uint32_t *afe;       /* device mapping of X9_MIC_AFE_PHYS */
     void *dma;                    /* exclusively owned stereo S16 ring */
     uint64_t dma_bus_address;    /* AFE-visible, NOT a guessed CPU physical address */
     uint32_t dma_bytes;          /* 16-byte aligned, 64..128 KiB */
     uint32_t dma_memory_type;    /* SRAM/DRAM; DRAM also requires APSRC/DDREN */
-    /* v5: one board-owned journal for cold power, MTKAIF calibration,
+    /* v6: one board-owned journal for cold power, MTKAIF calibration,
      * ADC RC, codec SRC/TX and AFE RX. prepare leaves real capture active,
      * but never writes memif/IRQ/DMA. No second engine-owned codec journal.
      * Status pointers remain valid until unprepare; callbacks hold the AFE
@@ -27,6 +27,10 @@ struct x9_mic_mt6993_platform {
         struct x9_mic_analog_status *, struct x9_mic_digital_status *,
         struct x9_mic_dma_status *, uint32_t dma_memory_type);
     int (*unprepare)(void);
+    /* Before clearing prior status/journal storage. A successful full STOP
+     * receipt permits another cold transaction; a diagnostic/failed/retained
+     * transaction must never be recycled. Memory-only, with AFE lock held. */
+    int (*rearm)(void);
     /* Called after ON clear/readback, including partial start. Must prove
      * the entire write path has drained, NOT just ON=0, stable CUR or the
      * local VUL1 MON0. Failure pins journal/buffer/clocks/transport for boot.

@@ -15,6 +15,10 @@ struct afe_journal {
     bool dram_owned, dram_uncertain;
 };
 static struct afe_journal calibration;
+/* Vendor INIT is a device-probe operation, not a runtime-resume operation.
+ * Once successful it remains installed for this boot; repeated cold capture
+ * must not replay global secure initialization. A failed INIT is terminal. */
+static bool afe_init_attempted,afe_init_ready;
 static const unsigned afe_regs[]={0x10,0,0x60,0x4380,0x14};
 static const uint32_t afe_masks[]={3,1u<<25,4,1,1};
 static const unsigned cal_pins[]={98,100,101,102,103};
@@ -195,9 +199,9 @@ static int afe_take(struct afe_journal *a,vm_offset_t gpio,struct x9_mic_afe_sta
     bzero(a,sizeof(*a));bzero(s,sizeof(*s));a->s=s;a->gpio=gpio;
     s->version=1;s->stage=X9_MIC_AFE_BASELINE;s->flags=X9_MIC_AFE_ATTEMPTED;
     for(unsigned i=0;i<4;i++)s->smc_result[i]=INT64_MIN; /* not issued */
-    a->hwv=ml_io_map(0x1c040000,0x75000);a->vlp=ml_io_map(0x1c200000,0x1000);
-    a->afe=mapped_afe?(vm_offset_t)mapped_afe:ml_io_map(0x1a110000,0x10000);
-    a->ioc[0]=ml_io_map(0x12840000,0x1000);a->ioc[1]=ml_io_map(0x12860000,0x1000);
+    a->hwv=mic_map_once(MIC_MAP_HWV);a->vlp=mic_map_once(MIC_MAP_CLOCK);
+    a->afe=mapped_afe?(vm_offset_t)mapped_afe:mic_map_once(MIC_MAP_AFE);
+    a->ioc[0]=mic_map_once(MIC_MAP_IOC0);a->ioc[1]=mic_map_once(MIC_MAP_IOC1);
     if(!a->hwv || !a->vlp || !a->afe || !a->ioc[0] || !a->ioc[1])return ENOMEM;
     s->ap_vote_before=rr(a->hwv,0x20708);s->all_vote_before=rr(a->hwv,0x13700);
     s->ack_before=rr(a->hwv,0x12900);s->done=rr(a->hwv,0x1132c);
@@ -206,8 +210,14 @@ static int afe_take(struct afe_journal *a,vm_offset_t gpio,struct x9_mic_afe_sta
     if(s->foreign_vote_before || ((s->ap_vote_before|s->all_vote_before|s->ack_before|
        rr(a->hwv,0x1131c)|rr(a->hwv,0x13704))&1))return EBUSY;
     if((s->vlp_before&0x8080)!=0x8080 || (s->fenc_before&0xc0000000))return EBUSY;
-    s->stage=X9_MIC_AFE_SMC_INIT;s->flags|=X9_MIC_AFE_INIT_ISSUED;
-    int e=afe_smc(a,0,0);if(e)return e;
+    s->stage=X9_MIC_AFE_SMC_INIT;
+    int e=0;
+    if(!afe_init_ready) {
+        if(afe_init_attempted)return EIO;
+        afe_init_attempted=true;s->flags|=X9_MIC_AFE_INIT_ISSUED;
+        e=afe_smc(a,0,0);if(e)return e;
+        afe_init_ready=true;
+    }
     s->stage=X9_MIC_AFE_DOMAINS;
     static const uint32_t bits[]={8,4,1}; /* AO -> infra -> AUDIO */
     for(unsigned i=0;i<3;i++) {
