@@ -12,6 +12,8 @@
 #include <math.h>
 #include <string.h>
 #include <stddef.h>
+#include <stdbool.h>
+#include <dispatch/dispatch.h>
 #include "../kernel/src/bsd/dev/x9_audio.h"
 _Static_assert(sizeof(X9AudioControl) == 112, "PCM ABI v1 size");
 
@@ -27,6 +29,15 @@ static uint32_t gVolumeBits = 0x3f800000;
 static uint32_t gStreamActive = 1;
 static UInt32 gIoUsers;
 static int gStopFailed;
+static bool gReady, gIOFault, gControlDirty;
+static uint32_t gGeneration;
+static uint64_t gActiveAnchor, gActiveTicks;
+static uint32_t gLeadFrames = X9_AUDIO_PREFILL_MIN;
+#define X9_AUDIO_HAL_CLIENTS 64u
+static struct { UInt32 id; bool used, running; } gClients[X9_AUDIO_HAL_CLIENTS];
+static dispatch_source_t gControlTimer;
+static void refreshControlState(void *);
+static OSStatus stopClient(unsigned);
 static io_connect_t gConnect;
 static X9AudioControl *gControl;
 static X9AudioProducer *gProducer;
@@ -45,55 +56,94 @@ static int snapshot(X9AudioControl *s) {
     if (seq & 1) return -1;
     memcpy(s, gControl, sizeof(*s));
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
-    return seq == __atomic_load_n(&gControl->seq, __ATOMIC_ACQUIRE) ? 0 : -1;
+    return s->seq == seq && seq == __atomic_load_n(&gControl->seq, __ATOMIC_ACQUIRE) ? 0 : -1;
+}
+static bool controlValid(const X9AudioControl *s) {
+    return s->magic == X9_AUDIO_MAGIC && s->version == X9_AUDIO_VERSION &&
+        s->rate == X9_AUDIO_RATE && s->channels == X9_AUDIO_CHANNELS &&
+        s->ring_frames == X9_AUDIO_RING && s->period_frames == X9_AUDIO_PERIOD &&
+        s->ticks_per_frame_q32 && s->lead_frames >= X9_AUDIO_PREFILL_MIN &&
+        s->lead_frames <= X9_AUDIO_PREFILL_MAX && !(s->lead_frames % X9_AUDIO_PERIOD) &&
+        !(s->state & ~(X9AudioReady | X9AudioRunning | X9AudioFault)) &&
+        !(s->seq & 1) && s->out_frames <= s->out_queued;
+}
+static bool controlReady(const X9AudioControl *s) {
+    return controlValid(s) && (s->state & X9AudioReady) && !(s->state & X9AudioFault) &&
+        !s->blockers && !s->error;
+}
+/* Passive discovery and explicit StartIO's capability check open type0.
+ * Neither maps PCM or acquires the writer; NOWAIT cannot call hardware. */
+static kern_return_t probeControl(X9AudioControl *s) {
+    io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching(X9_AUDIO_CLASS));
+    if (!service) return kIOReturnNotReady;
+    io_connect_t connection = 0;
+    kern_return_t e = IOServiceOpen(service, mach_task_self(), 0, &connection);
+    IOObjectRelease(service);
+    if (e) return e;
+    size_t n = sizeof(*s);
+    e = IOConnectCallStructMethod(connection, X9AudioStatusNowaitSelector, NULL, 0, s, &n);
+    kern_return_t closed = IOServiceClose(connection);
+    if (!e && n != sizeof(*s)) e = kIOReturnBadArgument;
+    return e ? e : closed;
+}
+static int streamSnapshot(X9AudioControl *s) {
+    if (!gIoUsers || gStopFailed || gIOFault || snapshot(s)) return -1;
+    if (!controlReady(s) || !(s->state & X9AudioRunning) || s->generation != gGeneration ||
+        s->out_anchor_host != gActiveAnchor || s->ticks_per_frame_q32 != gActiveTicks ||
+        s->out_frames > 9007199254740991ULL) {
+        gIOFault = true; gReady = false; gControlDirty = true; return -1;
+    }
+    return 0;
 }
 static UInt32 alive(void) {
     pthread_mutex_lock(&gLock); X9AudioControl s;
-    UInt32 r = !snapshot(&s) && (s.state & X9AudioReady) && !s.blockers;
+    UInt32 r = !gIOFault && !gStopFailed && (gControl ? !snapshot(&s) && controlReady(&s) : gReady);
     pthread_mutex_unlock(&gLock); return r;
 }
 static UInt32 running(void) {
     pthread_mutex_lock(&gLock); X9AudioControl s;
-    UInt32 r = !snapshot(&s) && (s.state & X9AudioRunning);
+    UInt32 r = !streamSnapshot(&s);
     pthread_mutex_unlock(&gLock); return r;
 }
 static UInt32 leadFrames(void) {
     pthread_mutex_lock(&gLock); X9AudioControl s;
-    UInt32 r = !snapshot(&s) ? s.lead_frames : X9_AUDIO_PERIOD * 2;
+    UInt32 r = !snapshot(&s) && controlValid(&s) ? s.lead_frames : gLeadFrames;
     pthread_mutex_unlock(&gLock); return r;
 }
 static kern_return_t call(uint32_t sel) {
     return gConnect ? IOConnectCallScalarMethod(gConnect, sel, NULL, 0, NULL, NULL) : KERN_FAILURE;
 }
-static void disconnect(void) {
+static int disconnect(void) {
     gControl = NULL; gProducer = NULL; gOut = NULL;
+    int e = 0;
     for (unsigned i = 0; i < 3; i++) {
-        if (gMaps[i]) IOConnectUnmapMemory64(gConnect, i, mach_task_self(), gMaps[i]);
-        gMaps[i] = 0; gSizes[i] = 0;
+        if (gMaps[i] && IOConnectUnmapMemory64(gConnect, i, mach_task_self(), gMaps[i])) e = -1;
+        else { gMaps[i] = 0; gSizes[i] = 0; }
     }
-    if (gConnect) IOServiceClose(gConnect);
-    gConnect = 0;
+    if (e) return e;
+    if (gConnect && IOServiceClose(gConnect)) return -1;
+    gConnect = 0; return 0;
 }
 static int connectService(void) {
     if (gControl) return 0;
     io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching(X9_AUDIO_CLASS));
     if (!service) return -1;
-    kern_return_t r = IOServiceOpen(service, mach_task_self(), 1, &gConnect);
+    io_connect_t connection = 0;
+    kern_return_t r = IOServiceOpen(service, mach_task_self(), 1, &connection);
     IOObjectRelease(service);
     if (r) return -1;
+    gConnect = connection;
     const uint64_t minSizes[] = { sizeof(X9AudioControl), sizeof(X9AudioProducer), X9_AUDIO_RING_BYTES };
     for (unsigned i = 0; i < 3; i++) {
         r = IOConnectMapMemory64(gConnect, i, mach_task_self(), &gMaps[i], &gSizes[i],
                                 kIOMapAnywhere | (i == 0 ? kIOMapReadOnly : 0));
-        if (r || gSizes[i] < minSizes[i]) { disconnect(); return -1; }
+        if (r || gSizes[i] < minSizes[i]) { gStopFailed = disconnect() != 0; return -1; }
     }
     X9AudioControl s; size_t n = sizeof(s);
     r = IOConnectCallStructMethod(gConnect, X9AudioStatus, NULL, 0, &s, &n);
-    if (r || n != sizeof(s) || s.magic != X9_AUDIO_MAGIC || s.version != X9_AUDIO_VERSION ||
-        s.rate != X9_AUDIO_RATE || s.channels != X9_AUDIO_CHANNELS ||
-        s.ring_frames != X9_AUDIO_RING || s.period_frames != X9_AUDIO_PERIOD ||
-        !s.ticks_per_frame_q32 || s.lead_frames < X9_AUDIO_PREFILL_MIN ||
-        s.lead_frames > X9_AUDIO_PREFILL_MAX || s.lead_frames % X9_AUDIO_PERIOD) { disconnect(); return -1; }
+    if (r || n != sizeof(s) || !controlReady(&s) || (s.state & X9AudioRunning)) {
+        gStopFailed = disconnect() != 0; return -1;
+    }
     gControl = (void *)(uintptr_t)gMaps[0]; gProducer = (void *)(uintptr_t)gMaps[1]; gOut = (void *)(uintptr_t)gMaps[2];
     return 0;
 }
@@ -101,20 +151,66 @@ static HRESULT QueryInterface(void *, REFIID, LPVOID *);
 static ULONG AddRef(void *self) { (void)self; return atomic_fetch_add(&gRefs, 1) + 1; }
 static ULONG Release(void *self) {
     (void)self; unsigned refs = atomic_load(&gRefs);
-    while (refs && !atomic_compare_exchange_weak(&gRefs, &refs, refs - 1)) {}
-    return refs ? refs - 1 : 0;
+    /* The static driver/control observer have one process-lifetime reference,
+     * like the microphone HAL. Never advertise unload while timer code lives. */
+    while (refs > 1 && !atomic_compare_exchange_weak(&gRefs, &refs, refs - 1)) {}
+    return refs > 1 ? refs - 1 : refs;
 }
 static OSStatus Initialize(AudioServerPlugInDriverRef d, AudioServerPlugInHostRef host) {
-    (void)d; gHost = host; pthread_mutex_lock(&gLock); connectService(); pthread_mutex_unlock(&gLock); return 0;
+    (void)d;
+    if (!host || !host->PropertiesChanged) return kAudioHardwareIllegalOperationError;
+    pthread_mutex_lock(&gLock);
+    if (gHost) {
+        OSStatus e = gHost == host ? 0 : kAudioHardwareIllegalOperationError;
+        pthread_mutex_unlock(&gLock); return e;
+    }
+    dispatch_queue_t queue = dispatch_queue_create("org.ios-sweet.x9.audio.status", NULL);
+    if (!queue) { pthread_mutex_unlock(&gLock); return kAudioHardwareUnspecifiedError; }
+    gControlTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, queue);
+    if (!gControlTimer) {
+        dispatch_release(queue); pthread_mutex_unlock(&gLock); return kAudioHardwareUnspecifiedError;
+    }
+    X9AudioControl s;
+    gReady = !probeControl(&s) && controlReady(&s) && !(s.state & X9AudioRunning);
+    if (gReady) gLeadFrames = s.lead_frames;
+    gHost = host;
+    dispatch_source_set_event_handler_f(gControlTimer, refreshControlState);
+    dispatch_source_set_timer(gControlTimer, dispatch_time(DISPATCH_TIME_NOW, 500 * NSEC_PER_MSEC),
+                             500 * NSEC_PER_MSEC, 50 * NSEC_PER_MSEC);
+    pthread_mutex_unlock(&gLock);
+    dispatch_resume(gControlTimer); dispatch_release(queue); return 0;
 }
 static OSStatus CreateDevice(AudioServerPlugInDriverRef d, CFDictionaryRef x, const AudioServerPlugInClientInfo *c, AudioObjectID *o)
 { (void)d; (void)x; (void)c; (void)o; return kAudioHardwareUnsupportedOperationError; }
 static OSStatus DestroyDevice(AudioServerPlugInDriverRef d, AudioObjectID o)
 { (void)d; (void)o; return kAudioHardwareUnsupportedOperationError; }
-static OSStatus AddDeviceClient(AudioServerPlugInDriverRef d, AudioObjectID o, const AudioServerPlugInClientInfo *c)
-{ (void)d; (void)c; return o == kDevice ? 0 : kAudioHardwareBadObjectError; }
-static OSStatus RemoveDeviceClient(AudioServerPlugInDriverRef d, AudioObjectID o, const AudioServerPlugInClientInfo *c)
-{ return AddDeviceClient(d, o, c); }
+static unsigned findClient(UInt32 id) {
+    for (unsigned i = 0; i < X9_AUDIO_HAL_CLIENTS; i++)
+        if (gClients[i].used && gClients[i].id == id) return i;
+    return X9_AUDIO_HAL_CLIENTS;
+}
+static OSStatus AddDeviceClient(AudioServerPlugInDriverRef d, AudioObjectID o, const AudioServerPlugInClientInfo *c) {
+    (void)d;
+    if (o != kDevice || !c) return kAudioHardwareBadObjectError;
+    pthread_mutex_lock(&gLock);
+    unsigned slot = findClient(c->mClientID);
+    OSStatus e = 0;
+    if (slot == X9_AUDIO_HAL_CLIENTS) {
+        for (slot = 0; slot < X9_AUDIO_HAL_CLIENTS && gClients[slot].used; slot++) {}
+        if (slot == X9_AUDIO_HAL_CLIENTS) e = kAudioHardwareIllegalOperationError;
+        else { gClients[slot].id = c->mClientID; gClients[slot].used = true; gClients[slot].running = false; }
+    }
+    pthread_mutex_unlock(&gLock); return e;
+}
+static OSStatus RemoveDeviceClient(AudioServerPlugInDriverRef d, AudioObjectID o, const AudioServerPlugInClientInfo *c) {
+    (void)d;
+    if (o != kDevice || !c) return kAudioHardwareBadObjectError;
+    pthread_mutex_lock(&gLock);
+    unsigned slot = findClient(c->mClientID);
+    OSStatus e = slot == X9_AUDIO_HAL_CLIENTS ? kAudioHardwareBadObjectError : stopClient(slot);
+    if (slot != X9_AUDIO_HAL_CLIENTS && !e) gClients[slot].used = false;
+    pthread_mutex_unlock(&gLock); return e;
+}
 static OSStatus PerformDeviceConfigurationChange(AudioServerPlugInDriverRef d, AudioObjectID o, UInt64 a, void *i)
 { (void)d; (void)o; (void)a; (void)i; return kAudioHardwareUnsupportedOperationError; }
 static OSStatus AbortDeviceConfigurationChange(AudioServerPlugInDriverRef d, AudioObjectID o, UInt64 a, void *i)
@@ -208,6 +304,7 @@ static OSStatus GetPropertyDataSize(AudioServerPlugInDriverRef d, AudioObjectID 
 
 static UInt32 objects(AudioObjectID o, AudioObjectPropertyScope scope, AudioObjectID *list) {
     UInt32 n = 0;
+    if (!alive()) return 0;
     if (o == kPlugIn) list[n++] = kDevice;
     else if (o == kDevice) {
         if (scope != kAudioObjectPropertyScopeInput) list[n++] = kOutStream;
@@ -234,12 +331,13 @@ static OSStatus propertyData(AudioObjectID o, const AudioObjectPropertyAddress *
         case kAudioObjectPropertyManufacturer: REPLY_STR("ios-sweet");
         case kAudioObjectPropertyOwnedObjects:
         case kAudioPlugInPropertyDeviceList: {
-            if (inDataSize < sizeof(AudioObjectID)) {*outDataSize = 0; return 0;}
+            if (!alive() || inDataSize < sizeof(AudioObjectID)) {*outDataSize = 0; return 0;}
             ((AudioObjectID *)outData)[0] = kDevice; *outDataSize = sizeof(AudioObjectID); return 0;
         }
         case kAudioPlugInPropertyTranslateUIDToDevice: {
             CFStringRef uid = qs >= sizeof(CFStringRef) ? *(const CFStringRef *)q : NULL;
-            REPLY(AudioObjectID, uid && CFStringCompare(uid, CFSTR(kDeviceUID), 0) == kCFCompareEqualTo ? kDevice : kAudioObjectUnknown);
+            REPLY(AudioObjectID, alive() && uid && CFGetTypeID(uid) == CFStringGetTypeID() &&
+                CFStringCompare(uid, CFSTR(kDeviceUID), 0) == kCFCompareEqualTo ? kDevice : kAudioObjectUnknown);
         }
         case kAudioPlugInPropertyResourceBundle: REPLY_STR("");
         default: return kAudioHardwareUnknownPropertyError;
@@ -317,7 +415,7 @@ static OSStatus propertyData(AudioObjectID o, const AudioObjectPropertyAddress *
         case kAudioObjectPropertyOwner: REPLY(AudioObjectID, kDevice);
         case kAudioObjectPropertyName: if (o == kOutStream) REPLY_STR("X9 Speaker"); REPLY_STR("Microphone");
         case kAudioObjectPropertyOwnedObjects: *outDataSize = 0; return 0;
-        case kAudioStreamPropertyIsActive: REPLY(UInt32, __atomic_load_n(&gStreamActive, __ATOMIC_ACQUIRE));
+        case kAudioStreamPropertyIsActive: REPLY(UInt32, alive() && __atomic_load_n(&gStreamActive, __ATOMIC_ACQUIRE));
         case kAudioStreamPropertyDirection: REPLY(UInt32, 0);
         case kAudioStreamPropertyTerminalType: REPLY(UInt32, o == kOutStream ? kAudioStreamTerminalTypeSpeaker : kAudioStreamTerminalTypeMicrophone);
         case kAudioStreamPropertyStartingChannel: REPLY(UInt32, 1);
@@ -360,41 +458,124 @@ static OSStatus GetPropertyData(AudioServerPlugInDriverRef d, AudioObjectID o, p
     UInt32 qs, const void *q, UInt32 capacity, UInt32 *size, void *out) {
     (void)d; (void)pid; return propertyData(o, a, qs, q, capacity, size, out);
 }
+static void refreshControlState(void *context) {
+    (void)context;
+    /* No lifecycle call or writer connection on this queue. Do not wait for
+     * realtime/control callbacks holding gLock, or kernel physical work. */
+    if (pthread_mutex_trylock(&gLock)) return;
+    bool wasReady = gReady;
+    uint32_t wasLead = gLeadFrames;
+    X9AudioControl s;
+    kern_return_t e = gControl ? (snapshot(&s) ? kIOReturnBusy : 0) : probeControl(&s);
+    if (e != kIOReturnBusy) {
+        gReady = !e && controlReady(&s) && !gStopFailed && !gIOFault &&
+            (gIoUsers ? (s.state & X9AudioRunning) && s.generation == gGeneration &&
+                s.out_anchor_host == gActiveAnchor && s.ticks_per_frame_q32 == gActiveTicks &&
+                s.out_frames <= 9007199254740991ULL : !(s.state & X9AudioRunning));
+        if (gIoUsers && !gReady) gIOFault = true;
+        if (gReady) gLeadFrames = s.lead_frames;
+    }
+    bool changed = wasReady != gReady || wasLead != gLeadFrames || gControlDirty;
+    gControlDirty = false;
+    AudioServerPlugInHostRef host = gHost;
+    pthread_mutex_unlock(&gLock);
+    if (!changed || !host) return;
+    /* Notify only from the non-realtime control queue, outside HAL lock.
+     * Publish the containing list before the device/stream properties. */
+    const AudioObjectPropertyAddress plugin[] = {
+        {kAudioPlugInPropertyDeviceList, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain},
+        {kAudioObjectPropertyOwnedObjects, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain}};
+    const AudioObjectPropertyAddress device[] = {
+        {kAudioDevicePropertyDeviceIsAlive, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain},
+        {kAudioDevicePropertyDeviceIsRunning, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain},
+        {kAudioDevicePropertyClockIsStable, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain},
+        {kAudioDevicePropertyDeviceCanBeDefaultDevice, kAudioObjectPropertyScopeOutput, kAudioObjectPropertyElementMain},
+        {kAudioDevicePropertyDeviceCanBeDefaultSystemDevice, kAudioObjectPropertyScopeOutput, kAudioObjectPropertyElementMain},
+        {kAudioDevicePropertyLatency, kAudioObjectPropertyScopeOutput, kAudioObjectPropertyElementMain},
+        {kAudioDevicePropertySafetyOffset, kAudioObjectPropertyScopeOutput, kAudioObjectPropertyElementMain}};
+    AudioObjectPropertyAddress stream = {kAudioStreamPropertyIsActive, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
+    host->PropertiesChanged(host, kPlugIn, 2, plugin);
+    host->PropertiesChanged(host, kDevice, 7, device);
+    host->PropertiesChanged(host, kOutStream, 1, &stream);
+}
+static OSStatus stopDevice(void) {
+    if (!gConnect) return gStopFailed ? kAudioHardwareUnspecifiedError : 0;
+    /* STOP success must be verified at the authoritative physical-held
+     * surface. Running=0 or a decremented HAL refcount is not cleanup. */
+    X9AudioStreamStatus lease = {0}; X9AudioControl before, s;
+    size_t n = sizeof(lease), bytes = sizeof(s);
+    bool baseline = !IOConnectCallStructMethod(gConnect, X9AudioStatus, NULL, 0, &before, &bytes) &&
+        bytes == sizeof(before) && controlValid(&before);
+    bytes = sizeof(s);
+    bool stopped = !call(X9AudioStop); /* attempt even if baseline could not be read */
+    stopped = stopped && baseline &&
+        !IOConnectCallStructMethod(gConnect, X9AudioStreamStatusSelector, NULL, 0, &lease, &n) &&
+        n == sizeof(lease) && lease.version == X9_AUDIO_STREAM_STATUS_VERSION &&
+        !lease.backend_held && !lease.stop_error &&
+        !IOConnectCallStructMethod(gConnect, X9AudioStatus, NULL, 0, &s, &bytes) &&
+        bytes == sizeof(s) && controlValid(&s) && s.generation == before.generation && !(s.state & X9AudioRunning);
+    if (!stopped) {
+        gStopFailed = 1; gIOFault = true; gReady = false; gControlDirty = true;
+        return kAudioHardwareUnspecifiedError; /* retain original maps/connection */
+    }
+    gStopFailed = disconnect() != 0;
+    gReady = !gStopFailed && controlReady(&s);
+    gIOFault = !gReady; gControlDirty = true;
+    return gStopFailed ? kAudioHardwareUnspecifiedError : 0;
+}
+static OSStatus stopClient(unsigned slot) {
+    if (gClients[slot].running) {
+        gClients[slot].running = false; gIoUsers--; gControlDirty = true;
+    }
+    return !gIoUsers ? stopDevice() : 0;
+}
 static OSStatus StartIO(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 client) {
-    (void)d; (void)client;
+    (void)d;
     if (o != kDevice) return kAudioHardwareBadObjectError;
     pthread_mutex_lock(&gLock);
     OSStatus r = 0;
-    if (!gIoUsers) {
-        if (gStopFailed || connectService() || call(X9AudioStart)) r = kAudioHardwareNotRunningError;
-        else { X9AudioControl s;
-            if (snapshot(&s) || !(s.state & X9AudioRunning) || (s.state & X9AudioFault)) {
-                gStopFailed = call(X9AudioStop) != 0; r = kAudioHardwareNotRunningError;
-            }
+    unsigned slot = findClient(client);
+    if (slot == X9_AUDIO_HAL_CLIENTS) r = kAudioHardwareBadObjectError;
+    else if (!gIoUsers) {
+        X9AudioControl before, after;
+        if (gStopFailed || probeControl(&before) || !controlReady(&before) ||
+            (before.state & X9AudioRunning) || before.generation == UINT32_MAX || connectService()) r = kAudioHardwareNotRunningError;
+        else if (snapshot(&before) || !controlReady(&before) || (before.state & X9AudioRunning) ||
+                 before.generation == UINT32_MAX || call(X9AudioStart) || snapshot(&after) || !controlReady(&after) ||
+                 !(after.state & X9AudioRunning) || after.generation != before.generation + 1 ||
+                 !after.out_anchor_host || after.ticks_per_frame_q32 != before.ticks_per_frame_q32 ||
+                 after.lead_frames != before.lead_frames) {
+            r = kAudioHardwareNotRunningError;
+        } else {
+            gGeneration = after.generation; gActiveAnchor = after.out_anchor_host;
+            gActiveTicks = after.ticks_per_frame_q32; gLeadFrames = after.lead_frames;
+            gIOFault = false; gReady = true;
         }
+        if (r) { gReady = false; gControlDirty = true; if (gConnect) stopDevice(); }
     } else {
         X9AudioControl s;
-        if (snapshot(&s) || !(s.state & X9AudioRunning) || (s.state & X9AudioFault)) r = kAudioHardwareNotRunningError;
+        if (streamSnapshot(&s)) r = kAudioHardwareNotRunningError;
     }
-    if (!r) gIoUsers++;
+    if (!r && !gClients[slot].running) { gClients[slot].running = true; gIoUsers++; gControlDirty = true; }
     pthread_mutex_unlock(&gLock); return r;
 }
 static OSStatus StopIO(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 client) {
-    (void)d; (void)client;
+    (void)d;
     if (o != kDevice) return kAudioHardwareBadObjectError;
     pthread_mutex_lock(&gLock);
-    if (gIoUsers) gIoUsers--;
-    kern_return_t r = !gIoUsers && (gStopFailed || gConnect) ? call(X9AudioStop) : 0;
-    if (!gIoUsers) gStopFailed = r != 0;
-    pthread_mutex_unlock(&gLock); return r ? kAudioHardwareUnspecifiedError : 0;
+    unsigned slot = findClient(client);
+    OSStatus r = slot == X9_AUDIO_HAL_CLIENTS ? kAudioHardwareBadObjectError : stopClient(slot);
+    pthread_mutex_unlock(&gLock); return r;
 }
 static OSStatus GetZeroTimeStamp(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 client,
     Float64 *sample, UInt64 *host, UInt64 *seed) {
-    (void)d; (void)client;
+    (void)d;
     if (o != kDevice || !sample || !host || !seed) return kAudioHardwareBadObjectError;
-    pthread_mutex_lock(&gLock); X9AudioControl s;
+    if (pthread_mutex_trylock(&gLock)) return kAudioHardwareNotRunningError;
+    X9AudioControl s;
     OSStatus r = kAudioHardwareNotRunningError;
-    if (!snapshot(&s) && (s.state & X9AudioRunning)) {
+    unsigned slot = findClient(client);
+    if (slot != X9_AUDIO_HAL_CLIENTS && gClients[slot].running && !streamSnapshot(&s)) {
         uint64_t frame = s.out_frames / kZeroPeriod * kZeroPeriod;
         __uint128_t ticks = ((__uint128_t)frame * s.ticks_per_frame_q32) >> 32;
         if (ticks <= UINT64_MAX - s.out_anchor_host) {
@@ -418,15 +599,19 @@ static int16_t quantize(float v) {
 }
 static OSStatus DoIOOperation(AudioServerPlugInDriverRef d, AudioObjectID o, AudioObjectID stream, UInt32 c, UInt32 op,
     UInt32 frames, const AudioServerPlugInIOCycleInfo *info, void *main, void *secondary) {
-    (void)d; (void)c; (void)secondary;
+    (void)d; (void)secondary;
     if (o != kDevice || stream != kOutStream) return kAudioHardwareBadObjectError;
     if (op != kAudioServerPlugInIOOperationWriteMix) return kAudioHardwareUnsupportedOperationError;
-    if (!info || !main || frames > X9_AUDIO_RING) return kAudioHardwareIllegalOperationError;
+    if (!info || (!main && frames) || frames > X9_AUDIO_RING ||
+        !(info->mOutputTime.mFlags & kAudioTimeStampSampleTimeValid)) return kAudioHardwareIllegalOperationError;
     double t = info->mOutputTime.mSampleTime;
-    if (!isfinite(t) || t < 0 || t >= (double)UINT64_MAX || t != floor(t)) return kAudioHardwareIllegalOperationError;
-    pthread_mutex_lock(&gLock); X9AudioControl s;
+    if (!isfinite(t) || t < 0 || t > 9007199254740991.0 || t != floor(t)) return kAudioHardwareIllegalOperationError;
+    if (pthread_mutex_trylock(&gLock)) return kAudioHardwareNotRunningError;
+    X9AudioControl s;
     OSStatus r = kAudioHardwareNotRunningError;
-    if (!snapshot(&s) && (s.state & X9AudioRunning)) {
+    unsigned clientSlot = findClient(c);
+    if (clientSlot != X9_AUDIO_HAL_CLIENTS && gClients[clientSlot].running && !streamSnapshot(&s)) {
+        if (!frames) { pthread_mutex_unlock(&gLock); return 0; }
         uint64_t start = (uint64_t)t, written = __atomic_load_n(&gProducer->written, __ATOMIC_ACQUIRE);
         /* Do not overwrite a queued slot or alias a slot in a future ring turn.
          * Explicit zeroing of gaps prevents stale PCM replay after wrap. */

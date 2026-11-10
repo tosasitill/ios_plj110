@@ -83,6 +83,7 @@ staging 必须单独确认、走项目 extent 写入流程；本构建器不安�
 | selector 11 | cached AP resource lease status v1／64B；没有 claim/release 用户接口 |
 | selector 12/13 | cached clock status v1／216B / root type2 显式 cold register-clock＋disabled OUT4 配置／恢复 |
 | selector 19 | cached LEFT VDD status v1／64B；只读内存，不申请电源或执行 PMIF |
+| selector 20 | 同 selector0 的112B PCM缓存，`audioLock`忙时立即返回`kIOReturnBusy`；不触发物理callback、不等待DSP或PA操作 |
 | memory 0 | 只读 kernel control，带 seqlock、generation、真实 played/queued |
 | memory 1 | 可写 producer end-frame，release 发布，kernel 检查窗口 |
 | memory 2 | 65536-frame S16LE stereo PCM 环，256 KiB |
@@ -100,6 +101,31 @@ DMA 并发修改。多 IO context 的混音尚未实现。时基取实际 XNU ti
 Stop 返回0只说明这次资源清理成功，历史 Fault 不自动清除，不能据此重新宣布 Ready。
 HAL 的 StopIO 保留失败状态，后续 StopIO 仍执行必要清理；活动流已经 fault 时，新的
 StartIO client 不会仅因 IO user 计数非零而获得虚假的启动成功。
+
+### 被动发现与真实播放会话（阶段39）
+
+HAL `Initialize` 不再申请 type1 独占 writer、映射PCM或阻挡 `audioctl`。
+私有control队列每500ms通过type0读取selector20；缺少服务、旧kernel不支持该
+selector或Ready资格不满足时，不提供device／owned-object／stream／control列表，
+UID翻译返回unknown，default-device资格与stream-active为0。空列表允许NULL／0B
+输出。Busy只跳过本次观察，不回退到阻塞status，也不获取播放权限。
+真正Ready迟到或故障时，队列在HAL锁外通知包含列表、Alive／Running、默认输出资格、
+ClockIsStable／latency与stream-active；这只是原生HAL发现接点，**不是20H392路由已验收**。
+
+只有显式 `StartIO` 通过被动能力检查和当前Ready后才申请writer／映射PCM，并核对
+真实START前后同一控制记录的严格generation+1、格式、时基与anchor。
+每个已登记client独立记录running（最多64个），重复START／STOP不增减其他client的
+引用，未知client不能播放，remove会停止自己的引用；不新增混音或重叠周期成功路径。
+timestamp与WriteMix使用trylock及本次generation／anchor／时基，不等待observer或
+物理START／STOP；失去资格显式失败，不发布PCM／时间戳或以墙钟推进游标。
+WriteMix要求sample-time-valid、整数且不超过Float64精确整数范围。
+
+最后一个client STOP之后，必须在同generation的真实kernel缓存确认Running=0、
+`backend_held=0`与`stop_error=0`，才unmap／close writer；失败保留原连接和maps供
+显式STOP再次收尾，remove失败也保留client。历史Fault不会靠observer清除。
+内核拒绝generation溢出后再调用物理START，PCM ABI仍v1／112B、已有selectors不变。
+这些代码仅直接`-c`编译，未执行HAL、播放、安装、provider或设备操作；完整board／
+firmware／双PA／AFE combined backend仍无生产注册者，Ready门没有放宽。
 
 ### 避免不同音频驱动撤销彼此的电源链
 

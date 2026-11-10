@@ -22,7 +22,11 @@ enum { X9AudioStatus, X9AudioStart, X9AudioStop, X9AudioDSPStatusSelector,
        X9AudioClockProbeSelector, X9AudioPLLStatusSelector,
        X9AudioPLLProbeSelector, X9AudioPathStatusSelector,
        X9AudioPathProbeSelector, X9AudioI2C6StatusSelector,
-       X9AudioLeftVDDStatusSelector };
+       X9AudioLeftVDDStatusSelector, X9AudioStatusNowaitSelector };
+/* Selector20: same 112B PCM control snapshot as selector0, but returns
+ * kIOReturnBusy without waiting for the service's physical lifecycle lock.
+ * No fallback to selector0 in the passive HAL observer; no MMIO/callback,
+ * writer acquisition, mapping, START/STOP or readiness mutation. */
 enum { X9AudioControlMemory, X9AudioProducerMemory, X9AudioOutputMemory };
 enum { X9AudioReady = 1u, X9AudioRunning = 2u, X9AudioFault = 4u };
 enum {

@@ -481,9 +481,12 @@ IOReturn X9AudioUserClient::externalMethod(uint32_t sel, IOExternalMethodArgumen
     }
     if (a->structureInputDescriptor || a->structureOutputDescriptor || a->asyncWakePort ||
         a->scalarInputCount || a->scalarOutputCount || a->structureInputSize) return kIOReturnBadArgument;
-    if (sel == X9AudioStatus) {
+    if (sel == X9AudioStatus || sel == X9AudioStatusNowaitSelector) {
         if (!a->structureOutput || a->structureOutputSize < sizeof(X9AudioControl)) return kIOReturnBadArgument;
-        lck_mtx_lock(&audioLock); memcpy(a->structureOutput, control, sizeof(*control)); lck_mtx_unlock(&audioLock);
+        if (sel == X9AudioStatusNowaitSelector) {
+            if (!lck_mtx_try_lock(&audioLock)) return kIOReturnBusy;
+        } else lck_mtx_lock(&audioLock);
+        memcpy(a->structureOutput, control, sizeof(*control)); lck_mtx_unlock(&audioLock);
         a->structureOutputSize = sizeof(*control); return kIOReturnSuccess;
     }
     if (a->structureOutputSize) return kIOReturnBadArgument;
@@ -495,6 +498,7 @@ IOReturn X9AudioUserClient::externalMethod(uint32_t sel, IOExternalMethodArgumen
     if (sel == X9AudioStop) { e = stopState(&s, 0); }
     else if (s.state & X9AudioRunning) { /* idempotent Start */ }
     else if (!haveBackend || !haveWorker || s.blockers || (s.state & X9AudioFault)) e = ENXIO;
+    else if (s.generation == UINT32_MAX) e = EOVERFLOW;
     else {
         bzero(output, X9_AUDIO_RING_BYTES); __atomic_store_n(&producer->written, 0, __ATOMIC_RELEASE);
         uint64_t anchor = 0;
