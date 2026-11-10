@@ -1,19 +1,19 @@
-/* MT6993 DL24 -> OUT4 engine. Does not manufacture an audio backend. */
+/* MT6993 DL24 / DL_24CH -> OUT4 engine. No fabricated audio backend. */
 #ifndef X9_SPEAKER_AFE_H
 #define X9_SPEAKER_AFE_H
 #include <stdbool.h>
 #include <stdint.h>
 /* Cached diagnostic ABI; reading it never touches an off-domain register. */
-#define X9_SPEAKER_AFE_STATUS_VERSION 4u
+#define X9_SPEAKER_AFE_STATUS_VERSION 5u
 enum { X9AFEGuardNone, X9AFEGuardPrepare, X9AFEGuardStart, X9AFEGuardCopy,
        X9AFEGuardPoll, X9AFEGuardDisable, X9AFEGuardRestore };
 struct x9_speaker_afe_status {
     uint32_t version, prepared, running, error, restore_error;
-    uint32_t cursor, dl24, out4;
+    uint32_t cursor, dl24, out4; /* dl24 slot = selected memif CON0 in v5 */
     uint64_t played, submitted, anchor;
     uint32_t registered, leased, dirty_mask, uncertain_mask;
     uint32_t poisoned, copy_pending, mute_error, disable_error, quiesce_error;
-    uint32_t reserved;
+    uint32_t memif; /* v5: explicit C enum10 or14; formerly reserved */
     uint64_t low_water_stops, late_polls;
     uint32_t lease_error, config_error, guard_stage, guard_reg;
     uint32_t guard_expected, guard_actual;
@@ -29,10 +29,10 @@ struct x9_speaker_afe_status {
 extern "C" {
 #endif
 /* The platform must coordinate with mic/ADSP: acquire owns AUDIO domain,
- * APLL2 VLP/48k clock path (captured etdm-vlp[4]=1), ETDM4 pads and DL24/OUT4 route registers.
+ * APLL2 VLP/48k clock path (captured etdm-vlp[4]=1), ETDM4 pads and selected memif/OUT4 route registers.
  * It must establish safe PA mute before returning; never an empty callback.
  * DMA bus mapping/cache attributes are verified independently of a CPU VA.
- * Private platform v4: held is a cached boot-lifetime ownership predicate,
+ * Private platform v5: explicit memif10/14 (no default); held is a cached boot-lifetime ownership predicate,
  * not a fresh MMIO read. acquire may partially fail; held MUST stay true
  * until mute/quiesce/restore/release authoritatively finish. acquire never
  * enables DMA. release returning zero must also leave held false. The engine
@@ -41,7 +41,7 @@ extern "C" {
  * checks before any domain MMIO, and the original pad/route and DMA/cache
  * binding. It does not acquire/reset/reparent, mutate readiness or return 0
  * from a cached held flag alone. It validates ownership/accessibility, not
- * an idle-only register image: engine-owned OUT4/DL24 may be running. Return
+ * an idle-only register image: engine-owned OUT4/selected memif may be running. Return
  * a positive errno on failure (EAGAIN is fatal here, not a cursor retry).
  * Failure leaves mappings/resources pinned.
  * DMA VA/bus/cache bindings cannot change or be unmapped during the lease.
@@ -49,20 +49,20 @@ extern "C" {
  * mute/quiesce independently qualify their own hardware paths; even after
  * validate fails they may be called for safe cleanup, or must fail without
  * accessing an off-domain/unowned CSR. No engine AFE access follows failure. */
-#define X9_SPEAKER_AFE_PLATFORM_VERSION 4u
+#define X9_SPEAKER_AFE_PLATFORM_VERSION 5u
 struct x9_speaker_afe_platform {
-    uint32_t version, verified, dma_bytes;
+    uint32_t version, verified, dma_bytes, memif; /* replaces old alignment padding */
     volatile uint32_t *afe;
     void *dma, *context;
     uint64_t dma_bus;
     int (*acquire)(void *);
     int (*release)(void *);
     int (*mute)(void *); /* both physical PAs, on every stop/fault */
-    int (*quiesce)(void *); /* authoritative no-outstanding-DL24 DMA, bounded */
+    int (*quiesce)(void *); /* authoritative no-outstanding-SELECTED memif DMA, bounded */
     int (*sync_device)(void *,uint32_t offset,uint32_t bytes);
     bool (*held)(void *);
     int (*validate)(void *);
-    /* Required for a borrowed/combined ticket. After DL24 drain and before
+    /* Required for a borrowed/combined ticket. After SELECTED memif drain and before
      * ANY journal/clock/mapping restoration, halt the real DSP producer and
      * discard its queue while retaining its parents. Independently qualify
      * that hardware path; no cached Off/STOP-message success substitute.
@@ -72,7 +72,7 @@ struct x9_speaker_afe_platform {
 };
 #define X9_SPEAKER_AFE_RESOURCES 15u /* power/VLP clock + pads/route + DMA/cache + dual PA mute */
 int x9_speaker_afe_register(const struct x9_speaker_afe_platform *);
-int x9_speaker_afe_prepare(void); /* configure with DL24/OUT4 disabled */
+int x9_speaker_afe_prepare(void); /* configure with selected memif/OUT4 disabled */
 /* Borrow the combined backend's live Speaker ticket; no recursive claim and
  * no release of that ticket by this engine, including fault/watchdog cleanup.
  * Context must already describe the same immutable lease. After AFE stop,

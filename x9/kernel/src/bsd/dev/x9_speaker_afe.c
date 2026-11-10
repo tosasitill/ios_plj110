@@ -14,12 +14,14 @@
 #include "x9_audio_resources.h"
 #include "x9_speaker_out4.h"
 #include "x9_speaker_dl24.h"
+#include "x9_speaker_memif.h"
 extern int sweet_x9_arg(const char *,int);
 extern int sweet_early_is_x9(void);
 LCK_GRP_DECLARE(speaker_afe_group,"x9-speaker-afe");
 LCK_MTX_DECLARE(speaker_afe_lock,&speaker_afe_group);
 static struct x9_speaker_afe_platform hw;
 static struct x9_speaker_afe_status state;
+static struct x9_speaker_memif_layout memif;
 static bool registered,leased,journaled;
 static uint64_t last_poll,last_progress;
 static uint64_t resource_ticket;
@@ -32,24 +34,22 @@ enum { STOP_MARGIN_FRAMES=480, WATCHDOG_MS=2 };
 static void watchdog(void *,wait_result_t);
 struct patch {uint32_t off,mask,value,saved,expected;};
 /* OUT4 S16 in 32-bit I2S slots matches get_etdm_wlen(S16_LE)=31, valid
- * width=15. ETDM FS=5, relatch=10; DL24 FS=10. No IN4 feedback programming.
+ * width=15. ETDM FS=5, relatch=10; memif FS=10. No IN4 feedback programming.
  * Pad/master/slave/format are AP-master I2S, synchronous sharing OFF.
  * Cowork OUT4->IN4 master choice=0 only configures the inactive selector. */
 static struct patch config[]={
     X9_SPEAKER_OUT4_DISABLED_CONFIG,
     X9_SPEAKER_OUT4_COWORK_DISABLED,
     {0x0098,(1u<<5)|(1u<<20),1u<<5,0,0},
-    {0x46b0,UINT32_MAX,0,0,0},{0x46b4,UINT32_MAX,0,0,0},
-    {0x46c0,UINT32_MAX,0,0,0},{0x46c4,UINT32_MAX,0,0,0},
-    X9_SPEAKER_DL24_DISABLED_FORMAT,
-    X9_SPEAKER_DL24_DISABLED_ROUTES,
+    {0,0,0,0,0},{0,0,0,0,0},{0,0,0,0,0},{0,0,0,0,0},
+    {0,0,0,0,0},{0,0,0,0,0},{0,0,0,0,0}, /* explicit layout installed at register */
 };
 #define COUNT ((unsigned)(sizeof(config)/sizeof(config[0])))
 /* Separate from shared five-word descriptors. saved is the lease baseline;
  * prior is the observed value immediately before the LAST attempted write. */
 static uint32_t prior[COUNT];
-_Static_assert(COUNT==13, "DL24 journal index10 and route indices11/12");
-_Static_assert(sizeof(struct x9_speaker_afe_status)==184,"AFE cached status v4 size");
+_Static_assert(COUNT==13, "memif journal index10 and route indices11/12");
+_Static_assert(sizeof(struct x9_speaker_afe_status)==184,"AFE cached status v5 size");
 static int guard_error(unsigned stage,int e,bool configuration,uint32_t off,
                        uint32_t expected,uint32_t actual)
 {
@@ -103,7 +103,7 @@ static int check_lease(unsigned stage)
 static uint32_t rd(uint32_t off)
 {
     uint32_t v=hw.afe[off/4];__asm__ volatile("dmb oshld":::"memory");
-    if(off==0x46d0)state.dl24=v;else if(off==0x1580)state.out4=v;
+    if(off==memif.con)state.dl24=v;else if(off==0x1580)state.out4=v;
     return v;
 }
 static void wr(uint32_t off,uint32_t value)
@@ -118,10 +118,10 @@ static int change(unsigned i,uint32_t value,unsigned stage)
     bool recovering=stage==X9AFEGuardDisable || stage==X9AFEGuardRestore;
     if(!known_value(i,old&p->mask,recovering))
         return journal_error(stage,EBUSY,i,p->expected&p->mask,old&p->mask);
-    if(p->off==X9_SPEAKER_DL24_CON0 && (old&(X9_SPEAKER_DL24_INACTIVE_MASK&~(1u<<28))))
-        return guard_error(stage,EBUSY,true,p->off,0,old&(X9_SPEAKER_DL24_INACTIVE_MASK&~(1u<<28)));
+    if(p->off==memif.con && (old&(memif.inactive&~memif.enable)))
+        return guard_error(stage,EBUSY,true,p->off,0,old&(memif.inactive&~memif.enable));
     uint32_t next=(old&~p->mask)|(value&p->mask);
-    if(p->off==X9_SPEAKER_DL24_CON0)next&=~X9_SPEAKER_DL24_CLEAR_MASK;
+    if(p->off==memif.con)next&=~memif.clear;
     if((next&p->mask)==(old&p->mask)) {
         if((state.uncertain_mask&bit) && state.no_write_reconciliations!=UINT64_MAX)
             state.no_write_reconciliations++;
@@ -132,6 +132,7 @@ static int change(unsigned i,uint32_t value,unsigned stage)
     prior[i]=old;
     state.dirty_mask|=bit;state.uncertain_mask|=bit;
     p->expected=next;wr(p->off,next);
+    e=check_lease(stage);if(e)return e; /* keep uncertain after revoked access */
     uint32_t actual=rd(p->off)&p->mask;
     if(actual!=(next&p->mask))return journal_error(stage,EIO,i,next&p->mask,actual);
     state.uncertain_mask&=~bit;return 0;
@@ -156,15 +157,20 @@ static int verify_config(bool saved,unsigned stage)
 static int unowned_routes_idle(bool running,unsigned stage)
 {
     int e=check_lease(stage);if(e)return e;
-    const unsigned banks[]={0,4,16,20,24,28};
-    for(unsigned ch=0;ch<2;ch++)for(unsigned n=0;n<6;n++) {
+    const unsigned banks[]={0,4,8,16,20,24,28};
+    for(unsigned ch=0;ch<2;ch++)for(unsigned n=0;n<7;n++) {
         unsigned off=0x2f00+ch*32+banks[n];uint32_t value=rd(off);
+        if(off==memif.route[ch])continue; /* selected bank verified by journal */
         if(value)return guard_error(stage,EBUSY,true,off,0,value);
     }
-    uint32_t mask=X9_SPEAKER_DL24_INACTIVE_MASK;
-    if(running)mask&=~(1u<<28);
-    uint32_t value=rd(X9_SPEAKER_DL24_CON0)&mask;
-    return value?guard_error(stage,EBUSY,true,X9_SPEAKER_DL24_CON0,0,value):0;
+    uint32_t other=memif.id==X9_SPEAKER_DL24_MEMIF?0x4640:X9_SPEAKER_DL24_CON0;
+    uint32_t other_on=memif.id==X9_SPEAKER_DL24_MEMIF?1u<<31:1u<<28;
+    uint32_t value=rd(other)&other_on;
+    if(value)return guard_error(stage,EBUSY,true,other,0,value);
+    uint32_t mask=memif.inactive;
+    if(running)mask&=~memif.enable;
+    value=rd(memif.con)&mask;
+    return value?guard_error(stage,EBUSY,true,memif.con,0,value):0;
 }
 static int restore(void)
 {
@@ -183,18 +189,18 @@ static int disable(void)
 {
     /* Do not RMW an untouched or previously restored register. */
     int e=check_lease(X9AFEGuardDisable);if(e)return e;
-    if(state.dirty_mask&(1u<<10))e=change(10,config[10].expected&~(1u<<28),X9AFEGuardDisable);
+    if(state.dirty_mask&(1u<<10))e=change(10,config[10].expected&~memif.enable,X9AFEGuardDisable);
     if(e)return e; /* no second write/qualification after a failed disable */
     uint64_t ticks;nanoseconds_to_absolutetime(1000000,&ticks);
     uint64_t end=mach_absolute_time()+ticks;
     for(unsigned n=0;!e && (state.dirty_mask&(1u<<10)) && n<500;n++) {
         e=check_lease(X9AFEGuardDisable);if(e)break;
-        if(!(rd(0x46d0)&(1u<<28)))break;
+        if(!(rd(memif.con)&memif.enable))break;
         if(mach_absolute_time()>=end){e=ETIMEDOUT;break;}delay(2);
     }
     if(!e && (state.dirty_mask&(1u<<10))) {
         e=check_lease(X9AFEGuardDisable);
-        if(!e && (rd(0x46d0)&(1u<<28)))e=ETIMEDOUT;
+        if(!e && (rd(memif.con)&memif.enable))e=ETIMEDOUT;
     }
     if(e)return e;
     if(state.dirty_mask&1)e=change(0,config[0].expected&~1u,X9AFEGuardDisable);
@@ -253,15 +259,23 @@ int x9_speaker_afe_register(const struct x9_speaker_afe_platform *p)
        ((uintptr_t)p->afe&3) || ((uintptr_t)p->dma&63) || (p->dma_bus&63) ||
        !p->dma_bus || p->dma_bytes<65536 || p->dma_bytes>131072 || (p->dma_bytes&63) ||
        p->dma_bus>(1ULL<<41)-p->dma_bytes)return EINVAL;
+    struct x9_speaker_memif_layout layout;
+    if(!x9_speaker_memif_layout(p->memif,&layout))return EINVAL;
     lck_mtx_lock(&speaker_afe_lock);int e=registered?EBUSY:0;
     if(!e) {
-        hw=*p;
+        hw=*p;memif=layout;
+        config[6]=(struct patch){memif.base_msb,X9_SPEAKER_MEMIF_ADDR_MSB_MASK,0,0,0};
+        config[7]=(struct patch){memif.base,X9_SPEAKER_MEMIF_ADDR_LOW_MASK,0,0,0};
+        config[8]=(struct patch){memif.end_msb,X9_SPEAKER_MEMIF_ADDR_MSB_MASK,0,0,0};
+        config[9]=(struct patch){memif.end,X9_SPEAKER_MEMIF_ADDR_LOW_MASK,0,0,0};
+        config[10]=(struct patch){memif.con,memif.format_mask,memif.format_value,0,0};
+        for(unsigned i=0;i<2;i++)config[11+i]=(struct patch){memif.route[i],UINT32_MAX,memif.source[i],0,0};
         /* Independent boot-lifetime watcher, not user/HAL position polling.
          * Scheduler latency is not a hardware deadline guarantee. No PA is
          * unmuted by this engine; a final provider still needs that proof. */
         thread_t thread;
         if(kernel_thread_start(watchdog,NULL,&thread)!=KERN_SUCCESS)e=ENOMEM;
-        else {thread_deallocate(thread);registered=true;state.version=X9_SPEAKER_AFE_STATUS_VERSION;}
+        else {thread_deallocate(thread);registered=true;state.version=X9_SPEAKER_AFE_STATUS_VERSION;state.memif=memif.id;}
         if(e)bzero(&hw,sizeof(hw));
     }
     lck_mtx_unlock(&speaker_afe_lock);return e;
@@ -291,10 +305,11 @@ static int prepare(uint64_t borrowed)
         e=hw.mute(hw.context);
         if(!e)e=check_lease(X9AFEGuardPrepare);
         if(!e) {
-            uint32_t value=rd(X9_SPEAKER_DL24_CON0)&X9_SPEAKER_DL24_INACTIVE_MASK;
-            if(value)e=guard_error(X9AFEGuardPrepare,EBUSY,true,X9_SPEAKER_DL24_CON0,0,value);
+            uint32_t value=rd(memif.con)&memif.inactive;
+            if(value)e=guard_error(X9AFEGuardPrepare,EBUSY,true,memif.con,0,value);
             else if((value=rd(0x1580)&1))e=guard_error(X9AFEGuardPrepare,EBUSY,true,0x1580,0,value);
         }
+        if(!e)e=unowned_routes_idle(false,X9AFEGuardPrepare);
         /* Reject other enabled mixer sources. There is no CONN116_3 in this
          * SoC table. Do not clear a foreign route to make our source work. */
         const unsigned banks[]={0,4,8,16,20,24,28};
@@ -314,7 +329,7 @@ static int prepare(uint64_t borrowed)
         }
         if(!e)e=verify_config(false,X9AFEGuardPrepare);
         if(!e)e=unowned_routes_idle(false,X9AFEGuardPrepare);
-        if(!e){state.prepared=1;state.dl24=rd(0x46d0);state.out4=rd(0x1580);}
+        if(!e){state.prepared=1;state.dl24=rd(memif.con);state.out4=rd(0x1580);}
     }
     if(e){int off=stop_locked();if(off)state.restore_error=(uint32_t)off;}
     /* Admission errors returned above did not alter the prior stream.
@@ -379,7 +394,7 @@ int x9_speaker_afe_start(const int16_t *pcm,uint32_t frames,uint64_t *anchor)
         if(!e)e=unowned_routes_idle(false,X9AFEGuardStart);
         if(!e) {
             uint64_t enabled_at=mach_absolute_time();
-            e=change(10,config[10].expected|(1u<<28),X9AFEGuardStart);
+            e=change(10,config[10].expected|memif.enable,X9AFEGuardStart);
             if(!e)e=verify_config(false,X9AFEGuardStart);
             if(!e)e=unowned_routes_idle(true,X9AFEGuardStart);
             if(!e) {
@@ -413,7 +428,9 @@ static int position_locked(void)
     uint32_t high=0,low=0;bool stable=false;
     e=check_lease(X9AFEGuardPoll);if(e)return e;
     for(unsigned n=0;n<3;n++) {
-        high=rd(0x46b8);low=rd(0x46bc);if(high==rd(0x46b8)){stable=true;break;}
+        high=rd(memif.cur_msb)&X9_SPEAKER_MEMIF_ADDR_MSB_MASK;
+        low=rd(memif.cur);
+        if(high==(rd(memif.cur_msb)&X9_SPEAKER_MEMIF_ADDR_MSB_MASK)){stable=true;break;}
     }
     if(!stable)return EAGAIN;
     uint64_t ptr=((uint64_t)high<<32)|low;

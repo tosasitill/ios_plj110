@@ -10,6 +10,7 @@
 #if defined(KERNEL)
 struct x9_dsp_shared_policy {
     uint32_t version,generation,task_scene,daemon_scene;
+    uint32_t afe_memif,reserved; /* immutable explicit C memif10/14, reserved=0 */
     uint64_t ticket;
     void *context;
     /* Mandatory live authority, NOT a boolean provided by userspace. Prove
@@ -24,23 +25,24 @@ struct x9_dsp_shared_policy {
      * alone cannot supply this authority. Never re-enter this module. */
     int (*validate_memory)(void *,uint64_t ticket,uint32_t generation,
         uint32_t task_scene,uint32_t daemon_scene,uint64_t pool_bus,
-        uint32_t pool_bytes,uint64_t map_bus,uint32_t map_bytes);
+        uint32_t pool_bytes,uint64_t map_bus,uint32_t map_bytes,uint32_t afe_memif);
     /* Mandatory actual firmware/AFE route supplier, not a second boolean
      * for validate_memory. Shared validates the exact dedicated AFE region;
      * this supplier additionally proves the current task's hardware DL
      * memif, IRQ usage/ownership, format and period contract. No mutation,
-     * allocation or re-entry. A named DL24 is C enum10, NOT DL_24CH enum14
-     * or scene32; old FDT playback MEMDL14 is not DL24 authority. The route
+     * allocation or re-entry. DL24 C enum10 and DL_24CH enum14 are separate
+     * supported layouts; scene32 is neither. Prove policy.afe_memif, never
+     * silently substitute the other; old FDT playback14 is not DL24 proof. The route
      * must remain pinned through all faults, halt, and final unmap. */
     int (*validate_afe_route)(void *,uint64_t ticket,uint32_t generation,
         uint32_t task_scene,const struct x9_dsp_pcm_buffer *);
-    /* Mandatory independent authoritative DL24 drain/no DMA access proof
+    /* Mandatory independent authoritative SELECTED memif drain/no DMA proof
      * before unmap. Not a cached AFE leased/running flag. Qualify its own
      * power/clock/register path and do not re-enter AFE/shared engines. */
     int (*validate_drained)(void *,uint64_t ticket,uint32_t generation,
-        uint64_t afe_bus,uint32_t afe_bytes);
+        uint64_t afe_bus,uint32_t afe_bytes,uint32_t afe_memif);
 };
-#define X9_DSP_SHARED_POLICY_VERSION 2u
+#define X9_DSP_SHARED_POLICY_VERSION 3u
 #ifdef __cplusplus
 extern "C" {
 #endif

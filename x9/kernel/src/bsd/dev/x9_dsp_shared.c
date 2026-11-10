@@ -12,7 +12,7 @@
 #include "x9_dsp_shared.h"
 #include "x9_adsp_mt6993.h"
 #include "x9_audio_resources.h"
-#include "x9_speaker_dl24.h"
+#include "x9_speaker_memif.h"
 /* Frozen BSD exports omit these native declarations, as for UFS/MIC.
  * Signatures from arm/pmap.h, vm/pmap.h and arm/machine_routines.h. */
 extern ppnum_t pmap_find_phys(pmap_t,addr64_t);
@@ -52,7 +52,7 @@ static int authority(bool online)
     if(!e)e=shared.policy.validate_memory(shared.policy.context,
         shared.policy.ticket,shared.policy.generation,shared.policy.task_scene,
         shared.policy.daemon_scene,shared.pool_bus,shared.pool_bytes,
-        shared.map_bus,X9_DSP_SHARED_MAP_BYTES);
+        shared.map_bus,X9_DSP_SHARED_MAP_BYTES,shared.policy.afe_memif);
     X9AudioDSPStatus ds={0};
     if(!e)e=x9_adsp_status(0,&ds);
     if(!e && (ds.generation!=shared.policy.generation ||
@@ -127,7 +127,8 @@ static int pcm_validate_afe(void *context,const struct x9_dsp_pcm_buffer *buffer
     lck_mtx_lock(&shared_lock);int e=shared.registered?qualify():ENXIO;
     const struct x9_dsp_pcm_region *r=&shared.region[SharedAFE];
     if(!e && (b.base!=r->bus || b.bytes!=r->bytes || b.hardware!=1 ||
-       b.memif!=X9_SPEAKER_DL24_MEMIF || b.memory!=1 || b.format!=2 ||
+       b.memif!=shared.policy.afe_memif ||
+       b.memory!=1 || b.format!=2 ||
        b.rate!=48000 || b.channels!=2 || b.direction!=1 ||
        (b.read&3) || (b.write&3) || (b.count&3) || b.count>b.bytes ||
        !b.period_frames || !b.periods ||
@@ -157,6 +158,8 @@ int x9_dsp_shared_acquire(const struct x9_dsp_shared_policy *p)
 {
     if(!p || p->version!=X9_DSP_SHARED_POLICY_VERSION || !p->ticket ||
        !p->generation || !p->validate_memory || !p->validate_afe_route || !p->validate_drained ||
+       p->reserved || (p->afe_memif!=X9_SPEAKER_DL24_MEMIF &&
+                       p->afe_memif!=X9_SPEAKER_DL_24CH_MEMIF) ||
        (p->task_scene!=7 && p->task_scene!=32) || p->daemon_scene<=41 ||
        p->daemon_scene>=64)return EINVAL;
     lck_mtx_lock(&shared_lock);
@@ -342,7 +345,7 @@ int x9_dsp_shared_release(void)
     if(!e)e=authority(false);
     if(!e)e=x9_adsp_mt6993_speaker_halted_validate(shared.policy.ticket);
     if(!e)e=shared.policy.validate_drained(shared.policy.context,shared.policy.ticket,
-        shared.policy.generation,shared.map_bus+0x24000,X9_DSP_SHARED_RING_BYTES);
+        shared.policy.generation,shared.map_bus+0x24000,X9_DSP_SHARED_RING_BYTES,shared.policy.afe_memif);
     if(!e && shared.mapped)e=cache_binding(true);
     if(!e) {
         if(shared.mapped)ml_io_unmap(shared.map,X9_DSP_SHARED_MAP_BYTES);
