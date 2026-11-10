@@ -1,6 +1,6 @@
 # X9 前后相机初步移植
 
-**已实现控制层、RAW10 帧接口、iOS 双流桥、冷启动 sensor-probe、接收电源资源接口与 SENINF/CAMSV 接收计划；采集后端仍缺失，不能拍摄。**
+**已实现控制层、RAW10 帧接口、iOS 双流桥、冷启动 sensor-probe、共享接收电源与 MM 寄存器时钟事务、SENINF/CAMSV 接收计划；采集后端仍缺失，不能拍摄。**
 没有假帧、测试图案、Android 代理或 Camera.app 成功状态伪造。默认关闭。
 
 ## 实现边界
@@ -14,7 +14,8 @@
 | sensor-probe | MT6993 CAMTG voter/parent 申请与释放、AP I2C 单控制器门控/FIFO/WRRD；WL28681C 指定通道电压/启停；reset/MCLK pinmux；真实 ID 检查与恢复日志。闲置 AP timing 初始化、禁用共享 rail 的申请/还原、GPIO203 局部唤醒。**仍要求共享时钟/HWCCF provider 已就绪，未上机验证** |
 | SENINF/CAMSV 计划 | 零 MMIO 查询实际 CSI 端口、VC0/RAW10、候选 outmux/CAMSV、尺寸/64B stride/WDMA 打包及 SID；**不是资源申请或采集** |
 | 接收电源接口 | TF-A MM-SMMU `PM_GET/PM_PUT`、CSI_BS_RX MM HWCCF 单 bit 申请/恢复；带供电前置检查的 SMMUv3 只读快照。**代码已构建，未上机；不是完整 MM power/clock provider 或 DMA mapping** |
-| 采集后端 | **缺失**：CAM_MAIN/CAM_MRAW/VMM/完整 MM clock ownership、PHY 校准/速率、SENINF 路由提交、MM-SMMUv3 映射、RAW DMA 完成/排空队列 |
+| MM 寄存器时钟事务 | 显式 AO/infra0/VMM BACKUP 引用、CAM_VCORE/MAIN/MRAW 域、CAM autolink FENC、CAMTM/SENINF voter、CAM/CAMSV 寄存器 CG 申请/逆序恢复。**未上机；不改共享 AVS/CVFS/PLL，不申请 SMI larb，不证明采集速率** |
+| 采集后端 | **缺失**：完整 DVFS/rate/SMI ownership、PHY 校准/速率、SENINF 路由提交、MM-SMMUv3 映射、RAW DMA 完成/排空队列 |
 
 原始 X9 DT 与 Android 启动日志确定：主摄为 i2c4/7-bit `0x1a`，ID 寄存器 `0x16/0x17` 返回 `0x9186`；前摄 i2c2/`0x10`，返回 `0x0615`。
 不把厂商宏中加了 offset 的软件 sensor ID 当成芯片读数。
@@ -55,7 +56,7 @@ python3 -I x9/camera/build.py \
 | 不传 / `x9_camera=0` | 不创建设备节点，不安装/注入桥 |
 | `x9_camera=1` | 创建设备节点，只能查询状态；不访问 MMIO/I2C、电源，不安装桥 |
 | `x9_camera=2` | 允许硬件后端注册和控制；在 iOS 根盘创建 hash-addressed 自有 dylib，并为 mediaserverd 注入；**当前仍没有硬件后端** |
-| `x9_camera=3` | probe-only，节点 root:root/0600；启动与状态查询不访问 MMIO、不上电、不安装桥；只有 root 的显式 sensor/resource probe ioctl 才访问硬件 |
+| `x9_camera=3` | probe-only，节点 root:root/0600；启动与状态查询不访问 MMIO、不上电、不安装桥；只有 root 的显式 sensor/resource/MM-clocks probe ioctl 才访问硬件 |
 
 模式 2 的首次设备运行涉及根盘写入，需要先确认；本模块没有自动 staging/flash/boot。
 安装只创建 `/private/var/x9/camera/libx9-camera-<hash>.dylib`，校验内容与属性，不覆盖 Apple 文件、symlink、不同内容文件或 launchd plist。
@@ -198,5 +199,50 @@ cameractl status       # 读取缓存的资源快照，不再访问 MMIO
 MM-SMMU 的 `QUIESCENT` 只说明稳定 NS 配置为空且 GBPA.ABORT 生效，**不证明独占**；`INHERITED` 表示存在/无法排除继承配置。
 MT6993 上游启用 SEC/HYP，显示与相机共享实例，因此两种状态都保留 `NEED_SMMU_OWNER/NEED_DMA_MAP`。
 本接口不 SEC_INIT/reset，不改 CR0/GBPA、wrapper、stream/CD/page table 或 CMDQ，不将 CPU PA 用作 IOVA，也不套用 GPU bypass。
-CAM_MAIN/CAM_MRAW 时钟、VMM、PHY/eFuse/速率、async/outmux、真实 RAW DMA 完成与排空仍需实现；`pipeline` 的 MM power blocker 不会因这个窄资源请求被清除。
+上述 224B 接口不申请 CAM_MAIN/CAM_MRAW/VMM。下一节是独立的 MM 寄存器时钟事务；完整 PHY/eFuse/速率、async/outmux、真实 RAW DMA 完成与排空仍需实现，`pipeline` 的 MM power blocker 不会因历史探测成功被清除。
 **资源 probe 返回 0 也不注册 platform、不置 READY/supported、不注入 iOS 桥、不产生帧。**
+
+## 申请并还原 MM 域与寄存器时钟
+
+仅 root、mode3、显式调用。**每次启动最多执行一条前或后相机事务；不是前后各一次。**
+
+```bash
+cameractl clocks back  # 主摄 SENINF3；另一次干净启动可选 clocks front（SENINF0）
+cameractl status       # GET_MM_CLOCKS 只读缓存，没有 MMIO/SMC
+```
+
+独立 576B `PROBE_MM_CLOCKS(0x97)` 请求只含 version1/sensor1或2；`GET_MM_CLOCKS(0x96)` 返回最后结果。旧 ABI/命令不改。
+先调用共享 receive provider，取得 secure MM-SMMU/CSI 引用并证明 AO/infra0 ready；**PM_GET 或共同 infra 尚未就绪时仍会失败，不绕过这个冷启动依赖**。
+随后按下表顺序执行实际 HWV 事务，成功后逆序释放，最后才 CSI unvote/secure PM_PUT。
+
+| slot | 资源 | HWV AP SET / aggregate EN / STA | effect 的判据 |
+|---|---|---|---|
+| 0/1 | AO / infra0，BACKUP_GRP0 bits0/1 | `20724 / 11358 / 1135c` | PM_ACK bank0 bits31/29=1 |
+| 2 | VMM BUCK_SWITCH/AP bits10/11 | 同上 | backup STA bits10/11=0；**不是电压/OPP测量** |
+| 3/4/5 | CAM_VCORE/MAIN/MRAW，bank0 bits16/15/8 | `20700 / 11318 / 1131c` | 对应 PM_ACK=1 |
+| 6 | CAM autolink，mux bit2 | **不写 AP SET/CLR** | CKSYS_MM FENC bit18=1，CKSTA bit18=0 |
+| 7 | CAMTM，mux bit3 | `20600 / 12330 / 12030` | FENC bit17=1，CKSTA bit17=0 |
+| 8 | SENINF3（主）/0（前），mux bit20/17 | 同上 | FENC/CKSTA bit11/14 |
+| 9 | CAM CG22 bits1/6/7 | `20108 / 12258 / 11858` | `3a010000` CG_STA 对应位=0 |
+| 10 | CAMSV CG34 bits12/13/14 | `20198 / 12288 / 11888` | `3a680000` CG_STA 对应位=0 |
+
+HWV base `31c00000`，CKSYS_MM base `10040000`，FENC `+270`、CKSTA `+330`。
+CAM 的上游 `mtk_mux_generic_hwv_al_ops` 没有 enable/disable callback，因此不得把它当普通 mux 投 AP vote；域/CG 的真实 autolink 必须产生 FENC，否则有界失败。
+CAMTM/对应 SENINF 的 selector 只检查有效范围和前后一致，**不改 parent/PLL/PDN/全局 autolink 表，不宣称 Hz 或 DVFS 已正确**。
+
+MM raw voter 采用 `STA0 → FSM idle → SET → AP EN → aggregate EN → STA0`，BACKUP IRQ voter按上游不套 raw FSM 前置，均先在已持 secure 依赖时 dummy-read MMUP。
+DONE 不是完成判据。CG 在 raw vote/FSM 检查后只对原 gated 目标做 `CG_CLR`，再读实际 CG_STA；不修复已投票但 gated 的继承状态，不接管未投票却 ungated 的直接 owner。
+
+恢复只撤新增 AP mask，部分继承 mask 原样保留。CG 恢复只依赖 HWV last-unvote 的真实 gate readback，**不强写 CG_SET**；新 owner 阻止恢复时保留低层依赖并锁存。
+最后 VMM bits10..13 unvote前按上游等 bank0 PM_ACK mask`10004`、bank1 mask`2`关闭；10ms 超时不降压、不撤 infra/secure。
+AO/infra BACKUP 撤票后不要求物理 PM_ACK=0，因为 secure PM_GET 仍独立持有共同 infra。
+每个 slot 保存完整 AP/aggregate/effect 的 before/active/after 和最后 STA；`retained`低11位标依赖 journal，bit30/31标 CSI/secure未释放。
+`POWER/CLOCKS` 是本次持有期间的历史观察，`RESTORED` 表示自己的事务已还原，**不是返回后仍有采集资源**。
+
+任何失败将 sensor/resources/clocks 全部锁存；重复 clocks 返回 `EALREADY`（失败则 EIO），不再访问硬件。
+`X9 CAMERA MM:` / `X9 CAMERA MM SLOT:` / `X9 CAMERA MM RESTORE:` 保留决定 stage/slot 与恢复错误。
+工具应确认 errno0、restore0、RESTORED、retained0，但 supported/READY 仍须0。
+
+后续采集仍要求 VMM/DVFS与实际 rate 所有权、SMI larb/公共保留区、共享 SMMUv3 SID80/SSID/map/unmap、PHY/eFuse/settle、async/outmux、SW_PASS1_DONE与cache/timeout/drain。
+当前不会开启 larb19/14/29、sensor stream-on 或 CAMSV DMA；不会因 NS SMMU 空配置抢占显示的实例，也不使用 UniXNU 的 SMMUv2/4KiB kit 替代 MT6993 的 SMMUv3/16KiB。
+没有这次真实运行电源/ID/CSI包/DMA帧证据，**仍不能拍摄**。

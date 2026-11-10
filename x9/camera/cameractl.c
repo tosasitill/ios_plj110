@@ -9,16 +9,32 @@
 #include <sys/ioctl.h>
 #include "hakios.camera.h"
 #include "../kernel/src/bsd/dev/x9_camera.h"
+_Static_assert(sizeof(struct x9_camera_mm_status)==576,"camera MM ABI");
+static void print_mm(const struct x9_camera_mm_status *r)
+{
+    static const char *const names[X9_CAM_MM_SLOTS]={"AO","infra0","VMM","CAM_VCORE",
+        "CAM_MAIN","CAM_MRAW","CAM-AL","CAMTM","SENINF","CAM-CG","CAMSV-CG"};
+    printf("MM register-clocks sensor=%u flags=%x stage/slot=%u/%u errno=%u restore=%u blockers=%x retained=%x cfg=%x/%x/%x (NOT capture ready)\n",
+        r->sensor,r->flags,r->stage,r->slot,r->last_errno,r->restore_errno,r->blockers,r->retained,
+        r->cfg[0],r->cfg[1],r->cfg[2]);
+    for(unsigned i=0;i<X9_CAM_MM_SLOTS;i++)if(r->sample[i].flags) {
+        const struct x9_camera_mm_sample *s=&r->sample[i];
+        printf("MM %u/%s mask=%08x flags=%x AP=%08x/%08x/%08x global=%08x/%08x/%08x effect=%08x/%08x/%08x STA=%08x\n",
+            i,names[i],s->mask,s->flags,s->before[0],s->active[0],s->after[0],
+            s->before[1],s->active[1],s->after[1],s->before[2],s->active[2],s->after[2],s->sta);
+    }
+}
 int main(int argc,char **argv)
 {
     bool probe=argc==3 && !strcmp(argv[1],"probe");
     bool pipeline=argc==3 && !strcmp(argv[1],"pipeline");
     bool resources=argc==2 && !strcmp(argv[1],"resources");
-    const char *which=(probe||pipeline)?argv[2]:argc==2?argv[1]:"status";
+    bool clocks=argc==3 && !strcmp(argv[1],"clocks");
+    const char *which=(probe||pipeline||clocks)?argv[2]:argc==2?argv[1]:"status";
     unsigned sensor=!strcmp(which,"back")?1:!strcmp(which,"front")?2:0;
-    if(argc>3 || (argc==3 && !probe && !pipeline) || ((probe||pipeline) && !sensor) ||
+    if(argc>3 || (argc==3 && !probe && !pipeline && !clocks) || ((probe||pipeline||clocks) && !sensor) ||
        (argc>=2 && !sensor && !resources && strcmp(which,"status"))) {
-        fprintf(stderr,"usage: cameractl [status|back|front|probe back|probe front|pipeline back|pipeline front|resources]\n");return 2;
+        fprintf(stderr,"usage: cameractl [status|back|front|probe back|probe front|pipeline back|pipeline front|resources|clocks back|clocks front]\n");return 2;
     }
     int fd=open(X9_CAMERA_DEVICE,((sensor && !pipeline)||resources?O_RDWR:O_RDONLY)|O_CLOEXEC);
     if(fd<0){perror(X9_CAMERA_DEVICE);return 1;}
@@ -27,6 +43,15 @@ int main(int argc,char **argv)
     printf("version=%u mode=%u flags=%x supported=%x sensor=%u errno=%u frames=%llu rejected=%llu chips=%x/%x probe_mask=%x probe_flags=%x\n",
            s.version,s.mode,s.flags,s.supported_mask,s.sensor,s.last_errno,
            (unsigned long long)s.frames,(unsigned long long)s.rejected,s.chip_id[0],s.chip_id[1],s.probe_mask,s.probe_flags);
+    if(clocks || !sensor) {
+        struct x9_camera_mm_status r={.version=1,.sensor=clocks?sensor:0};
+        if(ioctl(fd,clocks?X9_CAMERA_PROBE_MM_CLOCKS:X9_CAMERA_GET_MM_CLOCKS,&r)) {
+            if(clocks || errno!=ENOTTY){perror("MM clocks ioctl");close(fd);return 1;}
+        } else {
+            print_mm(&r);
+            if(clocks){close(fd);return r.last_errno?1:0;}
+        }
+    }
     if(resources || !sensor) {
         struct x9_camera_resources r={.version=1};
         if(ioctl(fd,resources?X9_CAMERA_PROBE_RESOURCES:X9_CAMERA_GET_RESOURCES,&r)) {

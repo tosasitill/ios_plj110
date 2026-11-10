@@ -108,6 +108,55 @@ struct x9_camera_resources {
 };
 #define X9_CAMERA_GET_RESOURCES _IOR('C', 0x94, struct x9_camera_resources)
 #define X9_CAMERA_PROBE_RESOURCES _IOWR('C', 0x95, struct x9_camera_resources)
+/* Explicit MM clock/domain transaction, NOT capture. Independent 576-byte
+ * ABI: PROBE request {.version=1,.sensor=1/2}, all other bytes zero; GET
+ * returns the cached result without MMIO. Once per boot, mode3/root/FWRITE.
+ * effects are PM_ACK (domains/infra), FENC (muxes), CG_STA (gates), or
+ * backup STA (VMM). All values are full register words; mask selects our
+ * AP/aggregate vote bits. Effect bits follow the fixed slot resource table.
+ * Neither source-rate/DVFS ownership nor SMI/SMMU mapping is established. */
+#define X9_CAM_MM_SLOTS 11u
+enum x9_camera_mm_slot { X9_CAM_MM_AO, X9_CAM_MM_INFRA0, X9_CAM_MM_VMM,
+    X9_CAM_MM_VCORE, X9_CAM_MM_MAIN, X9_CAM_MM_MRAW, X9_CAM_MM_CAM_MUX,
+    X9_CAM_MM_CAMTM_MUX, X9_CAM_MM_SENINF_MUX, X9_CAM_MM_CAM_GATE,
+    X9_CAM_MM_SV_GATE };
+#define X9_CAM_MM_ATTEMPTED 1u
+#define X9_CAM_MM_POWER 2u
+#define X9_CAM_MM_CLOCKS 4u
+#define X9_CAM_MM_RESTORED 8u
+#define X9_CAM_MM_LATCHED 16u
+#define X9_CAM_MM_SLOT_SEEN 1u
+#define X9_CAM_MM_SLOT_OWNED 2u
+#define X9_CAM_MM_SLOT_BORROWED 4u
+#define X9_CAM_MM_SLOT_ACTIVE 8u
+#define X9_CAM_MM_SLOT_RESTORED 16u
+#define X9_CAM_MM_SLOT_RETAINED 32u
+#define X9_CAM_MM_NEED_RECEIVE 1u
+#define X9_CAM_MM_NEED_POWER 2u
+#define X9_CAM_MM_NEED_CLOCKS 4u
+#define X9_CAM_MM_NEED_RATE 8u
+#define X9_CAM_MM_NEED_SMI 16u
+#define X9_CAM_MM_NEED_DMA_MAP 32u
+#define X9_CAM_MM_NEED_PHY 64u
+#define X9_CAM_MM_NEED_ROUTE 128u
+#define X9_CAM_MM_NEED_DRAIN 256u
+#define X9_CAM_MM_RETAIN_CSI (1u<<30)
+#define X9_CAM_MM_RETAIN_SECURE (1u<<31)
+enum x9_camera_mm_stage { X9_CAM_MM_STAGE_NONE, X9_CAM_MM_STAGE_RECEIVE,
+    X9_CAM_MM_STAGE_MAP, X9_CAM_MM_STAGE_TAKE, X9_CAM_MM_STAGE_RESTORE,
+    X9_CAM_MM_STAGE_DONE };
+struct x9_camera_mm_sample {
+    uint32_t mask, flags;
+    uint32_t before[3], active[3], after[3]; /* AP EN, aggregate EN, effect */
+    uint32_t sta; /* Last observed HWV transaction status; NOT DONE. */
+};
+struct x9_camera_mm_status {
+    uint32_t version, sensor, flags, stage, slot, last_errno, restore_errno, blockers;
+    uint32_t cfg[3], retained; /* CAM/CAMTM byte, SENINF byte; slots + CSI30/secure31 */
+    struct x9_camera_mm_sample sample[X9_CAM_MM_SLOTS];
+};
+#define X9_CAMERA_GET_MM_CLOCKS _IOR('C', 0x96, struct x9_camera_mm_status)
+#define X9_CAMERA_PROBE_MM_CLOCKS _IOWR('C', 0x97, struct x9_camera_mm_status)
 #ifdef KERNEL
 /* Platform adapter must own/restore only its camera resources. Calls below
  * run in thread context, serialized, and must not re-enter camera APIs.
