@@ -1,4 +1,4 @@
-/* Explicit local capture diagnostic: no recording unless 'record' is asked. */
+/* Explicit diagnostics: power never records; only 'record' starts PCM. */
 #include "../kernel/src/bsd/dev/x9_microphone.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -9,6 +9,25 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
+_Static_assert(sizeof(struct x9_mic_board_status)==96,"board ABI size");
+static int hardware_status(int fd)
+{
+    struct x9_mic_hardware_status h={0};
+    if(ioctl(fd,X9_MIC_GET_HARDWARE,&h)==0) {
+        printf("hardware v%u stage=%u flags=%#x errno=%u restore_errno=%u swcid=%#x ready=%#x phases=%u chosen=%d/%d cycles=%d/%d monitor=%#x reg=%#x calibration_ns=%llu vaud18=%#x\n",
+            h.version,h.stage,h.flags,h.last_errno,h.restore_errno,h.swcid,h.internal_ready,
+            h.scanned_phases,h.chosen_phase[0],h.chosen_phase[1],h.cycle[0],h.cycle[1],
+            h.monitor,h.last_register,h.calibration_ns,h.vaud18_monitor);
+    } else if(errno!=ENOTTY){perror("hardware status");return 1;}
+    struct x9_mic_board_status b={0};
+    if(ioctl(fd,X9_MIC_GET_BOARD,&b)==0) {
+        printf("board v%u stage=%u flags=%#x errno=%u restore_errno=%u gpio9=%#x/%#x sleep=%#x/%#x stat=%#x/%#x gate=%#x/%#x bus=%#x start=%#x fifo=%#x reg=%#x xo=%#x/%#x nominal_i2c_hz=%u\n",
+            b.version,b.stage,b.flags,b.last_errno,b.restore_errno,b.gpio9_before,b.gpio9_after,
+            b.sleep_before,b.sleep_after,b.sleep_stat,b.sleep_stat2,b.gate_before,b.gate_after,
+            b.bus_status,b.bus_start,b.bus_fifo,b.last_register,b.xo_before,b.xo_after,b.timing_hz);
+    } else if(errno!=ENOTTY){perror("board status");return 1;}
+    return 0;
+}
 static uint64_t ns(void)
 {
     mach_timebase_info_data_t t;mach_timebase_info(&t);
@@ -17,8 +36,9 @@ static uint64_t ns(void)
 int main(int argc,char **argv)
 {
     bool record=argc==4 && !strcmp(argv[1],"record");
-    if(!record && !(argc==2 && !strcmp(argv[1],"status"))) {
-        fprintf(stderr,"usage: micctl status | micctl record <seconds:1..30> <new.pcm>\n");return 2;
+    bool power=argc==2 && !strcmp(argv[1],"power");
+    if(!record && !power && !(argc==2 && !strcmp(argv[1],"status"))) {
+        fprintf(stderr,"usage: micctl status | micctl power | micctl record <seconds:1..30> <new.pcm>\n");return 2;
     }
     int fd=open(record?X9_MIC_DEVICE:X9_MIC_STATUS_DEVICE,O_RDONLY|O_NONBLOCK|O_CLOEXEC);
     if(fd<0){perror("open microphone");return 1;}
@@ -28,14 +48,18 @@ int main(int argc,char **argv)
         s.version,s.mode,s.flags,s.supported_sources,s.rate,s.channels,s.sample_bits,s.last_errno,
         s.generation,s.captured_frames,s.read_frames,s.dropped_frames,s.queued_frames);
     if(!record) {
-        struct x9_mic_hardware_status h={0};
-        if(ioctl(fd,X9_MIC_GET_HARDWARE,&h)==0) {
-            printf("hardware v%u stage=%u flags=%#x errno=%u restore_errno=%u swcid=%#x ready=%#x phases=%u chosen=%d/%d cycles=%d/%d monitor=%#x reg=%#x calibration_ns=%llu vaud18=%#x\n",
-                h.version,h.stage,h.flags,h.last_errno,h.restore_errno,h.swcid,h.internal_ready,
-                h.scanned_phases,h.chosen_phase[0],h.chosen_phase[1],h.cycle[0],h.cycle[1],
-                h.monitor,h.last_register,h.calibration_ns,h.vaud18_monitor);
-        } else if(errno!=ENOTTY){perror("hardware status");close(fd);return 1;}
-        close(fd);return 0;
+        int result=0;
+        if(power) {
+            if(geteuid()!=0 || s.version!=1 || s.mode!=2) {
+                fprintf(stderr,"power requires root and x9_mic=2; no hardware request issued\n");
+                close(fd);return 1;
+            }
+            printf("explicit cold power/ID/VAUD18 probe, one attempt per boot; no AFE/ADC/DMA or recording\n");
+            if(ioctl(fd,X9_MIC_POWER_PROBE)<0){perror("cold power probe");result=1;}
+            /* Even on failure retrieve the decisive stage and retained journal. */
+        }
+        result|=hardware_status(fd);
+        close(fd);return result;
     }
     char *end;long seconds=strtol(argv[2],&end,10);
     if(*end || seconds<1 || seconds>30){close(fd);return 2;}

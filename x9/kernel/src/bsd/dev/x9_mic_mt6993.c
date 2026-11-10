@@ -11,6 +11,7 @@
 #include <kern/thread.h>
 #include <kern/sched_prim.h>
 #include "x9_mic_mt6993.h"
+#include "x9_mic_plj110.h"
 
 enum {VUL1_BASE_MSB=0x4d90,VUL1_BASE=0x4d94,VUL1_CUR_MSB=0x4d98,
     VUL1_CUR=0x4d9c,VUL1_END_MSB=0x4da0,VUL1_END=0x4da4,VUL1_CON0=0x4db0,
@@ -24,6 +25,7 @@ static bool codec_prepared, capture_prepared;
 static struct x9_mic_mt6681 codec;
 static struct x9_mic_hardware_status diagnostic={.version=1,
     .chosen_phase={-1,-1},.cycle={-1,-1}};
+static struct x9_mic_board_status board_diagnostic={.version=1};
 static uint64_t generation,last_poll,last_progress;
 static uint32_t cursor,old_regs[9];
 static const uint32_t save_regs[]={VUL1_CON0,VUL1_BASE_MSB,VUL1_BASE,
@@ -201,7 +203,9 @@ int x9_mic_mt6993_register(const struct x9_mic_mt6993_platform *p)
        !p->dma_bus_address || p->dma_bytes<65536 || p->dma_bytes>131072 || (p->dma_bytes&15) ||
        p->dma_bus_address>((1ULL<<41)-p->dma_bytes))return EINVAL;
     lck_mtx_lock(&afe_mic_lock);
-    if(registered){lck_mtx_unlock(&afe_mic_lock);return EBUSY;}
+    if(registered || (board_diagnostic.flags&X9_MIC_BOARD_RETAINED)) {
+        lck_mtx_unlock(&afe_mic_lock);return EBUSY;
+    }
     hw=*p;
     int e=0;
     if(!worker_created) {
@@ -218,4 +222,15 @@ int x9_mic_mt6993_register(const struct x9_mic_mt6993_platform *p)
 void x9_mic_mt6993_get_hardware(struct x9_mic_hardware_status *s)
 {
     lck_mtx_lock(&afe_mic_lock);*s=diagnostic;lck_mtx_unlock(&afe_mic_lock);
+}
+int x9_mic_mt6993_power_probe(void)
+{
+    lck_mtx_lock(&afe_mic_lock);
+    int e=(registered || prepared || active || dma_stuck)?EBUSY:
+        x9_mic_plj110_power_probe(&diagnostic,&board_diagnostic);
+    lck_mtx_unlock(&afe_mic_lock);return e;
+}
+void x9_mic_mt6993_get_board(struct x9_mic_board_status *s)
+{
+    lck_mtx_lock(&afe_mic_lock);*s=board_diagnostic;lck_mtx_unlock(&afe_mic_lock);
 }

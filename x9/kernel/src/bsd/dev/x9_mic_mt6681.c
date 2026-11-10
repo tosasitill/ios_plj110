@@ -263,13 +263,13 @@ static int calibrate(struct x9_mic_mt6681 *c)
     absolutetime_to_nanoseconds(mach_absolute_time()-start,&c->status.calibration_ns);
     return e;
 }
-int x9_mic_mt6681_power_calibrate(struct x9_mic_mt6681 *c,
-    const struct x9_mic_mt6681_io *io,volatile uint32_t *afe)
+int x9_mic_mt6681_power_on(struct x9_mic_mt6681 *c,
+    const struct x9_mic_mt6681_io *io)
 {
-    if(!c || !io || io->version!=1 || io->flags!=X9_MT6681_REQUIRED ||
-       !io->read8 || !io->write8 || !afe || ((uintptr_t)afe&3))return EINVAL;
+    if(!c || !io || io->version!=1 || !(io->flags&X9_MT6681_COLD_OWNED) ||
+       (io->flags&~X9_MT6681_REQUIRED) || !io->read8 || !io->write8)return EINVAL;
     if(c->touched || c->poisoned)return EBUSY;
-    bzero(c,sizeof(*c));c->io=*io;c->afe=afe;c->status.version=1;
+    bzero(c,sizeof(*c));c->io=*io;c->status.version=1;
     c->status.stage=X9_MIC_HW_ID;
     c->status.chosen_phase[0]=c->status.chosen_phase[1]=-1;
     c->status.cycle[0]=c->status.cycle[1]=-1;
@@ -301,14 +301,28 @@ int x9_mic_mt6681_power_calibrate(struct x9_mic_mt6681 *c,
             uint8_t v=0;e=read8(c,idle[i],&v);
             if(!e && (v&(i<2?1:0x80)))e=EBUSY;
         }
-        c->old_pad=afe_read(c,PAD_CFG);c->old_test=afe_read(c,TEST_CFG);
-        if(!e && ((c->old_pad&1) || (c->old_test&1)))e=EBUSY;
         for(unsigned i=0;i<11 && !e;i++)e=read8(c,audio_regs[i],&c->audio_saved[i]);
-        if(!e){c->audio_snapshot=c->afe_snapshot=true;}
+        if(!e)c->audio_snapshot=true;
     }
     if(!e)e=enable_vaud18(c);
+    if(!e)c->status.flags|=X9_MIC_HW_POWERED;
+    if(e) {
+        c->status.last_errno=e;uint32_t r=c->status.last_register;
+        (void)x9_mic_mt6681_unprepare(c);c->status.last_register=r;
+    }
+    return e;
+}
+int x9_mic_mt6681_power_calibrate(struct x9_mic_mt6681 *c,
+    const struct x9_mic_mt6681_io *io,volatile uint32_t *afe)
+{
+    if(!io || io->flags!=X9_MT6681_REQUIRED || !afe || ((uintptr_t)afe&3))return EINVAL;
+    int e=x9_mic_mt6681_power_on(c,io);if(e)return e;
+    c->afe=afe;
+    c->old_pad=afe_read(c,PAD_CFG);c->old_test=afe_read(c,TEST_CFG);
+    if((c->old_pad&1) || (c->old_test&1))e=EBUSY;
+    if(!e)c->afe_snapshot=true;
     if(!e) {
-        c->status.flags|=X9_MIC_HW_POWERED;c->status.stage=X9_MIC_HW_CALIBRATION;
+        c->status.stage=X9_MIC_HW_CALIBRATION;
         e=calibrate(c);
     }
     if(e) {

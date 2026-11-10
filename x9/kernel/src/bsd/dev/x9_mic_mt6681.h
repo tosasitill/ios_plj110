@@ -4,7 +4,7 @@
 #include "x9_microphone.h"
 #ifdef KERNEL
 /* The board must prove exclusive codec ownership and a fresh reset, acquire
- * SCP wake/bus arbitration, enable GPIO9 and MT6685 DCXO, and hold AFE clocks
+ * SCP wake/bus arbitration, enable GPIO9 and MT6687 DCXO, and hold AFE clocks
  * and MOSI/MISO pads before calling this code. Every start is cold-owned;
  * borrowed Android/SCP/other audio state is NOT supported. read/write use
  * address 0x6b, 16-bit BIG-ENDIAN register, 8-bit value; positive BSD errno.
@@ -33,6 +33,11 @@ struct x9_mic_mt6681 {
  * Analog routing, DCC micbias/ADC RC tune and ADDA remain board responsibilities. */
 int x9_mic_mt6681_power_calibrate(struct x9_mic_mt6681 *,
     const struct x9_mic_mt6681_io *, volatile uint32_t *afe);
+/* Real cold init + VAUD18 monitor, without touching AFE/pads/loopback/ADC.
+ * Requires COLD_OWNED; unlike power_calibrate it does not claim MTKAIF pads.
+ * Caller must unprepare, then return GPIO9 to the proven off baseline. */
+int x9_mic_mt6681_power_on(struct x9_mic_mt6681 *,
+    const struct x9_mic_mt6681_io *);
 /* Call only after DMA/ADC are stopped, while transport/XO are still held.
  * On error retain resources; caller must NOT power down an unquiesced codec.
  * Success still requires board unprepare to return GPIO9/rails to off baseline:

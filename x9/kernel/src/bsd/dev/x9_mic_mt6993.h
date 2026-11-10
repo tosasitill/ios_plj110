@@ -15,7 +15,7 @@ struct x9_mic_mt6993_platform {
     uint64_t dma_bus_address;    /* AFE-visible, NOT a guessed CPU physical address */
     uint32_t dma_bytes;          /* 16-byte aligned, 64..128 KiB */
     /* Claim exclusive VUL1/ADDA/codec, SCP wake+I2C arbitration, GPIO9 fresh
-     * codec power, MT6685 DCXO, APLL2/48k-family clocks, aud_ul0 and pads.
+     * codec power, MT6687 DCXO, APLL2/48k-family clocks, aud_ul0 and pads.
      * prepare does NOT start ADC/TX/DMA. Codec init/calibration run centrally
      * after prepare succeeds. No borrowed active codec or dummy success.
      * unprepare handles partial resource prepare; after codec/ADC/DMA stop
@@ -41,5 +41,7 @@ struct x9_mic_mt6993_platform {
  * contract have been verified. There is NO board caller in the current tree. */
 int x9_mic_mt6993_register(const struct x9_mic_mt6993_platform *);
 void x9_mic_mt6993_get_hardware(struct x9_mic_hardware_status *);
+int x9_mic_mt6993_power_probe(void);
+void x9_mic_mt6993_get_board(struct x9_mic_board_status *);
 #endif
 #endif

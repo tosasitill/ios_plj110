@@ -45,6 +45,27 @@ struct x9_mic_hardware_status {
     uint32_t vaud18_monitor, reserved[3];
 };
 #define X9_MIC_GET_HARDWARE _IOR('M', 0x93, struct x9_mic_hardware_status)
+/* Explicit root-only cold power diagnostic. Never starts ADC, calibration
+ * loopback or DMA; no READY/source publication. One attempt per boot.
+ * GET_BOARD is a snapshot only, including after a failed ioctl. */
+#define X9_MIC_POWER_PROBE _IO('M', 0x94)
+#define X9_MIC_BOARD_ATTEMPTED 1u
+#define X9_MIC_BOARD_POWER_OK 2u
+#define X9_MIC_BOARD_RESTORED 4u
+#define X9_MIC_BOARD_RETAINED 8u
+enum x9_mic_board_stage {
+    X9_MIC_BOARD_UNTRIED, X9_MIC_BOARD_BASELINE, X9_MIC_BOARD_WAKE,
+    X9_MIC_BOARD_BUS, X9_MIC_BOARD_XO, X9_MIC_BOARD_CODEC,
+    X9_MIC_BOARD_RESTORE, X9_MIC_BOARD_OFF
+};
+struct x9_mic_board_status {
+    uint32_t version, stage, flags, last_errno, restore_errno;
+    uint32_t gpio9_before, gpio9_after, sleep_before, sleep_after;
+    uint32_t sleep_stat, sleep_stat2, gate_before, gate_after;
+    uint32_t bus_status, bus_start, bus_fifo, last_register;
+    uint32_t xo_before, xo_after, timing_hz, reserved[4];
+};
+#define X9_MIC_GET_BOARD _IOR('M', 0x95, struct x9_mic_board_status)
 #ifdef KERNEL
 #include <stdbool.h>
 /* Thread context only. start/stop are serialized and called WITHOUT the PCM

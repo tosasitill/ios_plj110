@@ -364,6 +364,7 @@ x9:sweet_x9_camera.o
 x9:sweet_x9_microphone.o
 x9:x9_mic_mt6993.o
 x9:x9_mic_mt6681.o
+x9:x9_mic_plj110.o
 x9:sweet_x9_gps.o
 x9:sweet_x9_barometer.o
 x9:sweet_x9_als.o
