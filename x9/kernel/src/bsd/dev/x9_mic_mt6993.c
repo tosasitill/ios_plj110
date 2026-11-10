@@ -12,6 +12,7 @@
 #include <kern/sched_prim.h>
 #include "x9_mic_mt6993.h"
 #include "x9_mic_plj110.h"
+#include "x9_audio_resources.h"
 
 #include "x9_mic_mt6993_regs.h"
 _Static_assert(sizeof(struct x9_mic_dma_status)==192,"DMA ABI size");
@@ -25,6 +26,7 @@ static struct x9_mic_hardware_status diagnostic={.version=1,
     .chosen_phase={-1,-1},.cycle={-1,-1}};
 static struct x9_mic_board_status board_diagnostic={.version=1};
 static uint64_t generation,last_poll,last_progress;
+static uint64_t resource_ticket;
 static struct x9_mic_dma_status dma_diagnostic={.version=1,
     .blockers=X9_MIC_DMA_NEED_MAP|X9_MIC_DMA_NEED_OWNER|X9_MIC_DMA_NEED_COPY|
         X9_MIC_DMA_NEED_QUIESCE|X9_MIC_DMA_NEED_SOURCE_ID};
@@ -108,6 +110,10 @@ static int stop_locked(void)
     }
     e=prepared?hw.unprepare():0;
     if(!e)prepared=false;
+    if(!e && resource_ticket) {
+        e=x9_audio_resources_release(X9AudioResourceMic,resource_ticket);
+        if(!e)resource_ticket=0;
+    }
     if(!e){
         dma_diagnostic.flags|=X9_MIC_DMA_RESTORED;dma_diagnostic.stage=X9_MIC_DMA_OFF;
         if(!diagnostic.last_errno)diagnostic.stage=X9_MIC_HW_STOPPED;
@@ -117,6 +123,7 @@ static int stop_locked(void)
 dma_failed:
     dma_stuck=true;
 failed:
+    if(resource_ticket)x9_audio_resources_fault(X9AudioResourceMic,resource_ticket,e);
     dma_diagnostic.restore_register=dma_diagnostic.last_register;
     if(!dma_diagnostic.restore_errno)dma_diagnostic.restore_errno=e;
     dma_diagnostic.flags|=X9_MIC_DMA_RETAINED;
@@ -131,8 +138,10 @@ static int afe_stop(void)
 static int afe_start(uint64_t g)
 {
     lck_mtx_lock(&afe_mic_lock);int e=0;
-    if(active || prepared || dma_stuck || (diagnostic.flags&X9_MIC_HW_RESTORE_FAILED))e=EBUSY;
+    if(active || prepared || dma_stuck || resource_ticket || (diagnostic.flags&X9_MIC_HW_RESTORE_FAILED))e=EBUSY;
     else {
+        e=x9_audio_resources_claim(X9AudioResourceMic,&resource_ticket);
+        if(e){lck_mtx_unlock(&afe_mic_lock);return e;}
         bzero(&dma_diagnostic,sizeof(dma_diagnostic));dma_diagnostic.version=1;
         dma_diagnostic.flags=X9_MIC_DMA_ATTEMPTED|X9_MIC_DMA_BOUND;
         dma_diagnostic.adc_channel=hw.adc_channel;dma_diagnostic.ring_bytes=hw.dma_bytes;

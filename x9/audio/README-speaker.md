@@ -6,7 +6,8 @@
 没有自动安装 HAL。麦克风是另一套接口，不在此输出设备中虚报输入流。
 PCM ABI 仍为 v1；**board-status 和 stream-status 为 v2**，需配套本轮 `audioctl`，旧工具会拒绝
 新版结构。私有 kernel backend 回调也升级为 v2（start 增加预填输入）；不能继续注册
-旧版 start 回调。AFE/stream 状态 selector 只返回缓存，不申请硬件资源。
+旧版 start 回调。私有 AFE platform 为 v2（新增 cached `held` 回调，保留部分申请失败的资源）。
+AFE/stream/resource 状态 selector 只返回缓存，不申请硬件资源。
 
 ## 构建
 
@@ -32,6 +33,7 @@ PCM ABI 仍为 v1；**board-status 和 stream-status 为 v2**，需配套本轮 
 
 ```sh
 audioctl status
+audioctl resource-status
 audioctl stream-status
 audioctl afe-status
 audioctl dsp-status
@@ -61,6 +63,7 @@ staging 必须单独确认、走项目 extent 写入流程；本构建器不安�
 | selector 0/1/2 | status / start / stop；拒绝 async、descriptor 和额外参数 |
 | selector 7/8 | cached AFE status v2 / stream lease + physical cursor status v2；只读，不做 MMIO |
 | selector 9/10 | cached PA status v1 / root type2 显式双 PA reg03 probe；不写 PA 值 |
+| selector 11 | cached AP resource lease status v1／64B；没有 claim/release 用户接口 |
 | memory 0 | 只读 kernel control，带 seqlock、generation、真实 played/queued |
 | memory 1 | 可写 producer end-frame，release 发布，kernel 检查窗口 |
 | memory 2 | 65536-frame S16LE stereo PCM 环，256 KiB |
@@ -78,6 +81,39 @@ DMA 并发修改。多 IO context 的混音尚未实现。时基取实际 XNU ti
 Stop 返回0只说明这次资源清理成功，历史 Fault 不自动清除，不能据此重新宣布 Ready。
 HAL 的 StopIO 保留失败状态，后续 StopIO 仍执行必要清理；活动流已经 fault 时，新的
 StartIO client 不会仅因 IO user 计数非零而获得虚假的启动成功。
+
+### 避免不同音频驱动撤销彼此的电源链
+
+OPPO `mt6993-afe-clk.c` 的 AFE clock 路径依赖 ADSP INFRA／AUDIO，当前板级
+麦克风会借用已开启的 AO／INFRA AP vote，而 ADSP stop 会撤自己的 INFRA vote。
+以前两者只有独立的 `afe_mic_lock`／`board_lock`，无法互相串行化这个借票→撤票窗口。
+`x9_audio_resources.{c,h}` 现在提供同一把**短叶锁＋跨回调 ticket lease**，接在
+ADSP power_on、麦克风 cold probe／VUL1 start 和 speaker AFE acquire 之前。
+
+| 结果 | 行为 |
+|---|---|
+| 已有 owner | 新 claim 立即 EBUSY，不等待、不递归、不进入新的 MMIO／SMC 事务 |
+| claim 成功 | ticket 单调且不复用；保持到物理 stop／restore／release 完成 |
+| 物理回滚失败 | 保留 owner/ticket/首个 held_error，别的 AP 音频 owner 不能拆该电源链 |
+| 旧 ticket／其他 owner 释放 | EPERM，只计拒绝，不清当前所有权 |
+| `resource-status` | 返回 owner、ticket、held errno、历史 errno、claim/release/refusal 计数；不读寄存器 |
+
+叶锁中没有硬件操作、等待或外部 callback；顺序为 consumer lock→resource leaf lock，
+状态查询不反向拿 consumer lock。麦克风资源冲突发生在一次诊断的 attempt 锁存之前；
+真正开始后的失败／回滚仍沿用每 boot 一次及 retained journal 规则。
+ADSP 正常 stop 后有意保留的 AO erratum vote 不当作活动播放 lease，下一次硬件
+admission 仍须重新核对。当前独立 DSP／mic／speaker owner 保守互斥；未来同一
+DSP＋AFE 播放后端必须统一一次资源 lease，不能递归申请两个独立 owner。
+
+AFE platform v2 的 `held(context)` 必须是缓存所有权谓词，不做 MMIO；部分 acquire
+失败仍 held 时执行 mute/release，只有物理恢复成功才撤 ticket。没有物理 lease 且
+无 AFE journal 时不调用 off-domain mute/restore；journal 尚未恢复却丢 lease、
+或 release 返回0但仍 held，均隔离并保留 ticket。所有 callback 仍须有界并处理
+部分资源，`held` 本身不替代可访问性／quiesce 证明。
+
+这仅互斥已接入的本地 AP 音频 owner，**不是 clock provider，也不是物理资源证明**。
+foreign XPU、HWV/PMACK、APLL2、pad、PA、EMI/cache 和 DMA quiesce 检查没有移除。
+`owner=none` 不代表所有电源 vote 已撤或功放已静音；禁止据此设置 speaker Ready。
 
 ### 对齐启动预填和 PCM 时间线
 
@@ -206,7 +242,7 @@ wake lease 验证全电源链稳定且 DPSW req/ack bit0 均为0，不把 WFI �
 
 | 文件／入口 | 已实现 | 仍需实际板级提供者 |
 |---|---|---|
-| `x9_speaker_afe.{c,h}` | DL24/OUT4 逐字段写入/不确定/恢复 journal、32-bit I2S slots/S16、48k、CONN116/117 DL24 route；prefill 后 DMA start、period copy/cache、稳定 CUR、高低地址/半环歧义检查；独立低水位 watcher、mute/disable/quiesce/restore | AUDIO/VLP APLL2、pad/共享资源 lease、DMA bus/EMI/cache、双 PA mute、权威 DMA quiesce |
+| `x9_speaker_afe.{c,h}` | DL24/OUT4 逐字段写入/不确定/恢复 journal、32-bit I2S slots/S16、48k、CONN116/117 DL24 route；AP transition ticket、platform v2 部分失败 ownership；prefill 后 DMA start、period copy/cache、稳定 CUR、高低地址/半环歧义检查；独立低水位 watcher、mute/disable/quiesce/restore | AUDIO/VLP APLL2、pad/物理共享资源 lease、DMA bus/EMI/cache、双 PA mute、权威 DMA quiesce |
 | `x9_tfa_plj110.{c,h}` | root 显式只读 reg03；PMIF-P SID3 reset/SID5 左供电快照，已开启 I²C6/共享 DMA clock 与 pads 校验、2 CSR bank/1 DMA idle、FIFO WRRD 1+2 BE、逐字段总线恢复 | 不具备双侧供电/reset/write lease；右 rail、真实 binding/profile/校准仍待确认 |
 | `x9_tfa98xx.{c,h}` | PM container total-size/CRC、双 I2C 类型（container bus=0）的地址、明确名字的两侧 profile、descriptor 边界；真实 reg03 revision 比对、AMPE=0 且读回；双侧预检白名单 register/bitfield prefix | 实际完整 revision、immutable container、per-revision 白名单、I2C6/reset/rails 互斥；Probus DSP file/patch/校准/boost 未执行 |
 

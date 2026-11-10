@@ -17,6 +17,7 @@
 #include "../../../bsd/dev/x9_adsp_mt6993.h"
 #include "../../../bsd/dev/x9_speaker_afe.h"
 #include "../../../bsd/dev/x9_tfa_plj110.h"
+#include "../../../bsd/dev/x9_audio_resources.h"
 #if defined(ARM64_BOARD_CONFIG_SWEET)
 extern "C" int sweet_early_is_x9(void);
 extern "C" int sweet_x9_arg(const char *, int);
@@ -331,6 +332,15 @@ IOReturn X9AudioUserClient::externalMethod(uint32_t sel, IOExternalMethodArgumen
 {
     (void)dispatch; (void)target; (void)reference;
     if (!a || isInactive() || !control) return kIOReturnNotReady;
+    if (sel == X9AudioResourceStatusSelector) {
+        if (a->structureInputDescriptor || a->structureOutputDescriptor || a->asyncWakePort ||
+            a->scalarInputCount || a->scalarOutputCount || a->structureInputSize ||
+            !a->structureOutput || a->structureOutputSize < sizeof(X9AudioResourceStatus)) return kIOReturnBadArgument;
+        X9AudioResourceStatus s; int e = x9_audio_resources_status(&s);
+        if (e) return result(e);
+        memcpy(a->structureOutput, &s, sizeof(s));
+        a->structureOutputSize = sizeof(s); return kIOReturnSuccess;
+    }
     if (sel == X9AudioAFEStatusSelector || sel == X9AudioStreamStatusSelector) {
         size_t size = sel == X9AudioAFEStatusSelector ? sizeof(struct x9_speaker_afe_status) : sizeof(X9AudioStreamStatus);
         if (a->structureInputDescriptor || a->structureOutputDescriptor || a->asyncWakePort ||

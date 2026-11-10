@@ -17,6 +17,7 @@
 #include <kern/clock.h>
 #include "x9_mic_plj110.h"
 #include "x9_mic_mt6993_regs.h"
+#include "x9_audio_resources.h"
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 extern int X9PMIFAcquire(void);
 extern void X9PMIFRelease(void);
@@ -39,6 +40,7 @@ struct power_journal {
     struct x9_mic_mt6681 codec;
     struct x9_mic_board_status *status;
     struct afe_journal *cal;
+    uint64_t resource_ticket;
 };
 static struct power_journal board;
 static uint32_t rr(vm_offset_t b,unsigned r)
@@ -354,6 +356,9 @@ static int board_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_stat
     struct x9_mic_digital_status *digital,struct x9_mic_dma_status *dma)
 {
     if(s->flags&X9_MIC_BOARD_ATTEMPTED)return EALREADY;
+    uint64_t ticket=0;
+    int admission=x9_audio_resources_claim(X9AudioResourceMic,&ticket);
+    if(admission)return admission; /* no MMIO, journal reset or attempt consumed */
     uint64_t start=mach_absolute_time();
     /* Static journals may never outlive their persistent status surfaces. */
     bzero(&digital_afe,sizeof(digital_afe));
@@ -363,7 +368,7 @@ static int board_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_stat
     bzero(s,sizeof(*s));s->version=1;s->flags=X9_MIC_BOARD_ATTEMPTED;s->stage=X9_MIC_BOARD_BASELINE;
     bzero(h,sizeof(*h));h->version=1;h->stage=X9_MIC_HW_RESOURCES;
     h->chosen_phase[0]=h->chosen_phase[1]=h->cycle[0]=h->cycle[1]=-1;
-    struct power_journal *j=&board;bzero(j,sizeof(*j));j->status=s;
+    struct power_journal *j=&board;bzero(j,sizeof(*j));j->status=s;j->resource_ticket=ticket;
     j->gpio=ml_io_map(0x1002d000,0x1000);j->vlp=ml_io_map(0x1c001000,0x1000);
     j->gipc=ml_io_map(0x1df50000,0x1000);if(j->gipc)j->gipc+=0x40;
     j->gate=ml_io_map(0x1da00000,0x1000);j->bus=ml_io_map(0x1d860000,0x1000);
@@ -429,6 +434,18 @@ static int board_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_stat
     if(!e)s->stage=X9_MIC_BOARD_RESTORE;
     if(digital && !e)digital->stage=X9_MIC_DIGITAL_RESTORE;
     int off=restore(j);
+    if(j->cal)afe_ao_snapshot(j->cal);
+    /* Finish snapshots while still owning the transition lease. A failed
+     * physical restore pins the ticket for this boot, preventing an ADSP
+     * start/stop or speaker acquisition from dismantling retained parents. */
+    if(j->gpio)s->gpio9_after=pin_state(j,9);
+    if(j->vlp)s->sleep_after=rr(j->vlp,0x92c);
+    if(j->gate)s->gate_after=rr(j->gate,0xe10);
+    if(!off) {
+        off=x9_audio_resources_release(X9AudioResourceMic,j->resource_ticket);
+        if(!off)j->resource_ticket=0;
+    }
+    if(off)x9_audio_resources_fault(X9AudioResourceMic,j->resource_ticket,off);
     if(dma) {
         dma->last_errno=e;
         absolutetime_to_nanoseconds(mach_absolute_time()-start,&dma->elapsed_ns);
@@ -455,7 +472,6 @@ static int board_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_stat
         }
     }
     if(j->cal) {
-        afe_ao_snapshot(j->cal);
         if(off && !(a->flags&X9_MIC_AFE_RESTORED)) {
             a->flags|=X9_MIC_AFE_RETAINED;
             if(!a->restore_errno)a->restore_errno=off;
@@ -470,9 +486,6 @@ static int board_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_stat
         s->flags|=X9_MIC_BOARD_RESTORED;h->flags&=~X9_MIC_HW_POWERED;
         if(!e){s->stage=X9_MIC_BOARD_OFF;h->stage=X9_MIC_HW_STOPPED;}
     }
-    if(j->gpio)s->gpio9_after=pin_state(j,9);
-    if(j->vlp)s->sleep_after=rr(j->vlp,0x92c);
-    if(j->gate)s->gate_after=rr(j->gate,0xe10);
     printf("X9 MIC %s: stage=%u flags=%x errno=%u restore=%u id=%x ready=%x vaud18=%x gpio9=%x/%x bus=%x (no PCM/DMA)\n",
         digital?"DIGITAL-L":analog?"ANALOG-L":a?"CALIBRATE":"POWER",s->stage,s->flags,s->last_errno,s->restore_errno,h->swcid,h->internal_ready,
         h->vaud18_monitor,s->gpio9_before,s->gpio9_after,s->bus_status);

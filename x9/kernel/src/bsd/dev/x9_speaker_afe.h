@@ -21,7 +21,12 @@ extern "C" {
  * APLL2 VLP/48k clock path (captured etdm-vlp[4]=1), ETDM4 pads and DL24/OUT4 route registers.
  * It must establish safe PA mute before returning; never an empty callback.
  * DMA bus mapping/cache attributes are verified independently of a CPU VA.
- * acquire failure fully unwinds; release failure retains the resources. */
+ * Private platform v2: held is a cached boot-lifetime ownership predicate,
+ * not a fresh MMIO read. acquire may partially fail; held MUST stay true
+ * until mute/quiesce/restore/release authoritatively finish. acquire never
+ * enables DMA. release returning zero must also leave held false. The engine
+ * owns a shared AP transition ticket until physical cleanup finishes. */
+#define X9_SPEAKER_AFE_PLATFORM_VERSION 2u
 struct x9_speaker_afe_platform {
     uint32_t version, verified, dma_bytes;
     volatile uint32_t *afe;
@@ -32,6 +37,7 @@ struct x9_speaker_afe_platform {
     int (*mute)(void *); /* both physical PAs, on every stop/fault */
     int (*quiesce)(void *); /* authoritative no-outstanding-DL24 DMA, bounded */
     int (*sync_device)(void *,uint32_t offset,uint32_t bytes);
+    bool (*held)(void *);
 };
 #define X9_SPEAKER_AFE_RESOURCES 15u /* power/VLP clock + pads/route + DMA/cache + dual PA mute */
 int x9_speaker_afe_register(const struct x9_speaker_afe_platform *);

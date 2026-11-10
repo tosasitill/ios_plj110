@@ -6500,6 +6500,11 @@
    "template": "bsd-c-11"
   },
   {
+   "name": "x9_audio_resources.o",
+   "source": "bsd/dev/x9_audio_resources.c",
+   "template": "bsd-c-11"
+  },
+  {
    "name": "x9_adsp_mt6993.o",
    "source": "bsd/dev/x9_adsp_mt6993.c",
    "template": "bsd-c-11"

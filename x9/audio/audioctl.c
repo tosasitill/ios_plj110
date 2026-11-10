@@ -11,6 +11,7 @@
 #include "../kernel/src/bsd/dev/x9_tfa98xx.h"
 #include "../kernel/src/bsd/dev/x9_speaker_afe.h"
 #include "../kernel/src/bsd/dev/x9_tfa_plj110.h"
+#include "../kernel/src/bsd/dev/x9_audio_resources.h"
 static volatile sig_atomic_t interrupted;
 static void on_signal(int n) { (void)n; interrupted = 1; }
 static int status(io_connect_t c, X9AudioControl *s) {
@@ -89,6 +90,22 @@ static int stream_status(io_connect_t c) {
            s.prefill_frames,s.prefill_committed,(unsigned long long)s.physical_played,
            (unsigned long long)s.physical_queued,(unsigned long long)s.physical_anchor,s.position_retries);
     puts("Raw cursor includes hidden prefill; PCM played/queued exclude it. Prefill is not audible-output proof.");
+    return 0;
+}
+static int resource_status(io_connect_t c) {
+    _Static_assert(sizeof(X9AudioResourceStatus) == 64, "resource status v1 size");
+    X9AudioResourceStatus s = {0}; size_t n = sizeof(s);
+    kern_return_t r = IOConnectCallStructMethod(c, X9AudioResourceStatusSelector, NULL, 0, &s, &n);
+    if (r || n != sizeof(s) || s.version != X9_AUDIO_RESOURCE_STATUS_VERSION ||
+        s.owner > X9AudioResourceSpeaker || s.last_owner > X9AudioResourceSpeaker) {
+        fprintf(stderr,"resource status/ABI failed: 0x%x\n",r); return 1;
+    }
+    const char *owners[] = { "none", "ADSP", "microphone", "speaker AFE" };
+    printf("AP audio resource owner=%s ticket=%llu retained-errno=%u last-owner=%s last-errno=%u release-errno=%u\n"
+           "  claims=%llu releases=%llu refusals=%u rejected-releases=%llu\n",
+           owners[s.owner],(unsigned long long)s.ticket,s.held_error,owners[s.last_owner],s.last_error,s.release_error,
+           (unsigned long long)s.claims,(unsigned long long)s.releases,s.refusals,(unsigned long long)s.rejected_releases);
+    puts("Software AP transition lease only; not a clock/rail/DMA readiness proof. No user claim/release or MMIO.");
     return 0;
 }
 static int amp_status(io_connect_t c) {
@@ -207,12 +224,13 @@ int main(int argc, char **argv) {
     int stopping = argc == 2 && !strcmp(argv[1], "dsp-stop");
     int board = argc == 2 && !strcmp(argv[1], "board-status");
     int afe = argc == 2 && !strcmp(argv[1], "afe-status");
+    int resources = argc == 2 && !strcmp(argv[1], "resource-status");
     int stream = argc == 2 && !strcmp(argv[1], "stream-status");
     int stream_stop = argc == 2 && !strcmp(argv[1], "stream-stop");
     int playing = argc == 3 && !strcmp(argv[1], "play");
     int dsp = argc == 2 && !strcmp(argv[1], "dsp-status");
-    if (!amp && !probing && !playing && !dsp && !board && !afe && !stream && !stream_stop && !booting && !stopping && !(argc == 2 && !strcmp(argv[1], "status"))) {
-        fprintf(stderr, "usage: audioctl amp-status | amp-probe | status | stream-status | stream-stop | afe-status | dsp-status | board-status | dsp-boot | dsp-stop |\n  play <S16LE stereo 48000Hz raw PCM> | amp-inspect <local.cnt> <exact-profile>\n"); return 2;
+    if (!amp && !probing && !playing && !dsp && !board && !afe && !resources && !stream && !stream_stop && !booting && !stopping && !(argc == 2 && !strcmp(argv[1], "status"))) {
+        fprintf(stderr, "usage: audioctl amp-status | amp-probe | status | resource-status | stream-status | stream-stop | afe-status | dsp-status | board-status | dsp-boot | dsp-stop |\n  play <S16LE stereo 48000Hz raw PCM> | amp-inspect <local.cnt> <exact-profile>\n"); return 2;
     }
     FILE *f = playing ? fopen(argv[2], "rb") : NULL;
     if (playing && !f) { perror(argv[2]); return 1; }
@@ -233,6 +251,7 @@ int main(int argc, char **argv) {
         if (dsp) rc = dsp_status(c);
         if (board) rc = board_status(c);
         if (afe) rc = afe_status(c);
+        if (resources) rc = resource_status(c);
         if (stream) rc = stream_status(c);
         if (stream_stop) {
             kern_return_t op = call(c, X9AudioStop);

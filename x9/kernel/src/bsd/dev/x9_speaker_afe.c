@@ -11,6 +11,7 @@
 #include <kern/thread.h>
 #include <kern/sched_prim.h>
 #include "x9_speaker_afe.h"
+#include "x9_audio_resources.h"
 extern int sweet_x9_arg(const char *,int);
 extern int sweet_early_is_x9(void);
 LCK_GRP_DECLARE(speaker_afe_group,"x9-speaker-afe");
@@ -19,6 +20,7 @@ static struct x9_speaker_afe_platform hw;
 static struct x9_speaker_afe_status state;
 static bool registered,leased,journaled;
 static uint64_t last_poll,last_progress;
+static uint64_t resource_ticket;
 enum { STOP_MARGIN_FRAMES=480, WATCHDOG_MS=2 };
 static void watchdog(void *,wait_result_t);
 struct patch {uint32_t off,mask,value,saved,expected;};
@@ -99,6 +101,16 @@ static int stop_locked(void)
 {
     if(!leased)return 0;
     state.prepared=0; /* retained resources never authorize another start */
+    if(!hw.held(hw.context)) {
+        /* No off-domain mute/AFE read after successful or empty unwind.
+         * Losing the physical lease BEFORE restoring our AFE journal is
+         * inconsistent and must keep the transition ticket quarantined. */
+        int e=journaled?EIO:x9_audio_resources_release(X9AudioResourceSpeaker,resource_ticket);
+        state.restore_error=(uint32_t)e;
+        if(!e){resource_ticket=0;leased=false;state.poisoned=0;}
+        else {state.poisoned=1;x9_audio_resources_fault(X9AudioResourceSpeaker,resource_ticket,e);}
+        return e;
+    }
     /* Still stop DMA if mute fails. A failed mute never authorizes releasing
      * clocks/I2C/rails or declaring the PA safely off. */
     int muted=hw.mute(hw.context);state.mute_error=(uint32_t)muted;
@@ -107,16 +119,18 @@ static int stop_locked(void)
     int e=disabled?disabled:quiet?quiet:muted;
     if(!e && journaled)e=restore();
     if(!e)e=hw.release(hw.context);
+    if(!e && hw.held(hw.context))e=EIO; /* callback success alone is not released ownership */
+    if(!e)e=x9_audio_resources_release(X9AudioResourceSpeaker,resource_ticket);
     state.restore_error=(uint32_t)e;
-    if(!e){leased=false;state.poisoned=0;}
-    else state.poisoned=1;
+    if(!e){resource_ticket=0;leased=false;state.poisoned=0;}
+    else {state.poisoned=1;x9_audio_resources_fault(X9AudioResourceSpeaker,resource_ticket,e);}
     return e;
 }
 int x9_speaker_afe_register(const struct x9_speaker_afe_platform *p)
 {
     if(!sweet_early_is_x9() || sweet_x9_arg("x9_audio",0)!=2)return ENXIO;
-    if(!p || p->version!=1 || p->verified!=X9_SPEAKER_AFE_RESOURCES || !p->afe ||
-       !p->dma || !p->acquire || !p->release || !p->mute || !p->quiesce || !p->sync_device ||
+    if(!p || p->version!=X9_SPEAKER_AFE_PLATFORM_VERSION || p->verified!=X9_SPEAKER_AFE_RESOURCES || !p->afe ||
+       !p->dma || !p->acquire || !p->release || !p->mute || !p->quiesce || !p->sync_device || !p->held ||
        ((uintptr_t)p->afe&3) || ((uintptr_t)p->dma&63) || (p->dma_bus&63) ||
        !p->dma_bus || p->dma_bytes<65536 || p->dma_bytes>131072 || (p->dma_bytes&63) ||
        p->dma_bus>(1ULL<<41)-p->dma_bytes)return EINVAL;
@@ -138,10 +152,13 @@ int x9_speaker_afe_prepare(void)
     lck_mtx_lock(&speaker_afe_lock);int e=registered?0:ENXIO;
     if(!e && (leased || state.poisoned))e=EBUSY;
     if(e){lck_mtx_unlock(&speaker_afe_lock);return e;}
+    e=x9_audio_resources_claim(X9AudioResourceSpeaker,&resource_ticket);
+    if(e){lck_mtx_unlock(&speaker_afe_lock);return e;}
+    leased=true;state.error=state.restore_error=state.copy_pending=0;
+    state.mute_error=state.disable_error=state.quiesce_error=0;
     e=hw.acquire(hw.context);
+    if(!e && !hw.held(hw.context))e=EIO;
     if(!e) {
-        leased=true;state.error=state.restore_error=state.copy_pending=0;
-        state.mute_error=state.disable_error=state.quiesce_error=0;
         e=hw.mute(hw.context);
         if(!e && ((rd(0x46d0)&(1u<<28)) || (rd(0x1580)&1)))e=EBUSY;
         /* Reject other enabled mixer sources. There is no CONN116_3 in this
@@ -159,10 +176,10 @@ int x9_speaker_afe_prepare(void)
             for(unsigned i=0;!e && i<COUNT;i++)e=change(i,config[i].value);
         }
         if(!e){state.prepared=1;state.dl24=rd(0x46d0);state.out4=rd(0x1580);}
-        else {int off=stop_locked();if(off)state.restore_error=(uint32_t)off;}
     }
-    /* Admission errors must not poison a current stream or late provider.
-     * A real failed acquire may be retried under its full-unwind contract. */
+    if(e){int off=stop_locked();if(off)state.restore_error=(uint32_t)off;}
+    /* Admission errors returned above did not alter the prior stream.
+     * Retained physical or transition ownership prevents a new prepare. */
     if(!leased || !state.running)state.error=(uint32_t)e;
     lck_mtx_unlock(&speaker_afe_lock);return e;
 }

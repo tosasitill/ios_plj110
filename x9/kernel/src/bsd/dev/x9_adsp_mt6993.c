@@ -13,6 +13,7 @@
 #include <mach/vm_types.h>
 #include "x9_adsp_mt6993.h"
 #include "x9_adsp_transport.h"
+#include "x9_audio_resources.h"
 extern vm_offset_t ml_io_map(vm_offset_t,vm_size_t);
 extern int sweet_early_is_x9(void);
 extern int sweet_x9_arg(const char *,int);
@@ -21,6 +22,7 @@ LCK_MTX_DECLARE(board_control_lock,&board_group);
 LCK_MTX_DECLARE(board_lock,&board_group);
 static volatile uint32_t *hwv,*cfg,*cfg2;
 static bool registered,exclusive,reset_done,started,wake;
+static uint64_t resource_ticket;
 static X9AudioBoardStatus status;
 enum { PD_SET=0x20700,PD_CLR=0x20704,PD_EN=0x20708,PD_DONE=0x1132c,
        PD_ALL=0x13700,PD_BUSY=0x13704,TOP=2,INFRA=4,AO=8,CHAIN=14,
@@ -111,14 +113,17 @@ static int smc(uint32_t op,uint32_t value)
     return x0==0?0:ENXIO;
 }
 static bool power_held(void *unused)
-{ (void)unused;lck_mtx_lock(&board_lock);bool held=exclusive;lck_mtx_unlock(&board_lock);return held; }
+{ (void)unused;lck_mtx_lock(&board_lock);bool held=exclusive || resource_ticket;lck_mtx_unlock(&board_lock);return held; }
 static int power_on(void *unused)
 {
     (void)unused;lck_mtx_lock(&board_lock);int e=0;
-    if(exclusive)e=EBUSY;
+    if(exclusive || resource_ticket)e=EBUSY;
     else {
-        snapshot();
-        e=wait_bits(hwv,PD_DONE,CHAIN,CHAIN,10000);
+        /* Claim before even observing a cold baseline; retain until all
+         * owned parent transitions settle, not merely until start returns. */
+        e=x9_audio_resources_claim(X9AudioResourceADSP,&resource_ticket);
+        if(e){status.error=(uint32_t)e;lck_mtx_unlock(&board_lock);return e;}
+        snapshot();e=wait_bits(hwv,PD_DONE,CHAIN,CHAIN,10000);
         if(!e && ((rd(hwv,PD_EN)|rd(hwv,PD_ALL)|rd(hwv,PD_BUSY))&(TOP|INFRA)))e=EBUSY;
         if(!e) {
             /* Proven off TOP+INFRA means neither core is executing. The
@@ -132,6 +137,12 @@ static int power_on(void *unused)
             }
         }
         if(!e)status.flags|=X9BoardPowered;
+        if(e && !exclusive && resource_ticket) {
+            int released=x9_audio_resources_release(X9AudioResourceADSP,resource_ticket);
+            if(!released)resource_ticket=0;
+            else status.restore_error=(uint32_t)released;
+        }
+        if(e && resource_ticket)x9_audio_resources_fault(X9AudioResourceADSP,resource_ticket,e);
     }
     status.error=(uint32_t)e;snapshot();lck_mtx_unlock(&board_lock);return e;
 }
@@ -164,6 +175,11 @@ static int power_off(void *unused)
         e=chain_off();
         if(!e){exclusive=reset_done=false;status.flags&=~(X9BoardPowered|X9BoardExclusive);}
     }
+    if(!e && !exclusive && resource_ticket) {
+        e=x9_audio_resources_release(X9AudioResourceADSP,resource_ticket);
+        if(!e)resource_ticket=0;
+    }
+    if(e && resource_ticket)x9_audio_resources_fault(X9AudioResourceADSP,resource_ticket,e);
     status.error=(uint32_t)e;snapshot();lck_mtx_unlock(&board_lock);return e;
 }
 static int wake_lock(void *unused)
