@@ -55,9 +55,16 @@ static struct x9_usb_status st = { .version = X9_USB_ABI };
 static ifnet_t netif;
 static unsigned started, packet_filter, suspended, failed;
 static uint64_t lease, next_lease;
-struct chunk { uint32_t n; uint8_t bytes[X9_USB_CHUNK]; };
+struct chunk {
+    uint32_t n, generation;
+    uint64_t owner, request_id;
+    uint8_t bytes[X9_USB_CHUNK];
+};
 struct queue { struct chunk v[QUEUE]; unsigned head, count; };
 static struct queue net_tx, raw_tx, raw_rx;
+static struct x9_usb_tx_result tx_results[QUEUE];
+static uint64_t next_request;
+_Static_assert(sizeof(struct x9_usb_tx_result) == 64, "TX result ABI");
 static int channel;
 static int bus_channel;
 enum { COMMAND_DESCRIPTION = X9_USB_BUS_CYCLE + 1 };
@@ -85,7 +92,7 @@ struct endpoint {
     unsigned number, in, interrupt, enabled, busy, slot, requested, halted;
     uint8_t *va;
     uint64_t pa;
-    uint64_t owner;
+    uint64_t owner, request_id;
 };
 /* One pinned 16-KiB allocation per endpoint. Never freed while DMA may own it.
  * Ring entries occupy separate cache lines; data is in a separate 4-KiB span. */
@@ -117,10 +124,24 @@ static void cache(void *p, unsigned n, int invalidate)
     __asm__ volatile("dsb sy" ::: "memory");
 }
 static void count_drop(void) { lck_mtx_lock(&usb_lock); st.dropped++; lck_mtx_unlock(&usb_lock); }
+/* usb_lock held. Terminal records are never silently overwritten. */
+static void tx_finish(uint64_t id, unsigned state, int error, unsigned actual)
+{
+    if (!id) return;
+    for (unsigned i = 0; i < QUEUE; i++) if (tx_results[i].request_id == id &&
+        tx_results[i].state <= X9_USB_TX_ACTIVE) {
+        tx_results[i].state = state; tx_results[i].error = error;
+        tx_results[i].actual = actual;
+        return;
+    }
+}
 static void clear_queues(void)
 {
     lck_mtx_lock(&usb_lock);
     st.dropped += net_tx.count + raw_tx.count + raw_rx.count;
+    for (unsigned i = 0; i < raw_tx.count; i++)
+        tx_finish(raw_tx.v[(raw_tx.head + i) % QUEUE].request_id,
+                  X9_USB_TX_CANCELLED, ECANCELED, 0);
     net_tx.head = net_tx.count = raw_tx.head = raw_tx.count = raw_rx.head = raw_rx.count = 0;
     lck_mtx_unlock(&usb_lock);
 }
@@ -155,8 +176,16 @@ static int stop_endpoint(struct endpoint *e)
 static int disable_endpoint(struct endpoint *e)
 {
     if (!e->enabled) return 0;
+    unsigned was_busy = e->busy;
     int error = stop_endpoint(e);
     if (error) return error; /* retain allocation and all descriptor contents */
+    if (was_busy && e->request_id) {
+        /* STOP proves DMA ownership has ended, not that zero bytes escaped. */
+        lck_mtx_lock(&usb_lock);
+        tx_finish(e->request_id, X9_USB_TX_CANCELLED, ECANCELED, 0);
+        lck_mtx_unlock(&usb_lock);
+    }
+    e->request_id = 0;
     uint32_t bit = BIT(e->number + (e->in ? 16 : 0));
     W(0x804, bit); W(0x804, 0);
     W(csr0(e), 0); W(csr0(e) + 4, 0); W(csr0(e) + 8, 0);
@@ -170,6 +199,14 @@ static void fault(int error, uint32_t detail)
     /* A stop timeout quarantines buffers for the remainder of this boot. No
      * automatic reset/retry can convert uncertain ownership into safe reuse. */
     for (unsigned i = 0; i < 5; i++) if (eps[i].enabled) (void)stop_endpoint(&eps[i]);
+    lck_mtx_lock(&usb_lock);
+    for (unsigned i = 0; i < QUEUE; i++) {
+        if (tx_results[i].state == X9_USB_TX_ACTIVE)
+            tx_finish(tx_results[i].request_id, X9_USB_TX_UNCERTAIN, error, 0);
+        else if (tx_results[i].state == X9_USB_TX_QUEUED)
+            tx_finish(tx_results[i].request_id, X9_USB_TX_CANCELLED, ECANCELED, 0);
+    }
+    lck_mtx_unlock(&usb_lock);
     clear_queues();
     lck_mtx_lock(&usb_lock); st.state = X9_USB_FAULT; st.error = error;
     st.qmu_error = detail; st.dma_errors++; st.generation++; lck_mtx_unlock(&usb_lock);
@@ -189,7 +226,8 @@ static int configure_endpoint(struct endpoint *e, unsigned fifo)
     e->enabled = 1; e->busy = e->halted = 0; e->slot = 0;
     return 0;
 }
-static int submit(struct endpoint *e, const void *bytes, unsigned n)
+static int submit(struct endpoint *e, const void *bytes, unsigned n,
+                  uint64_t owner, uint64_t id, uint32_t generation)
 {
     if (!e->enabled || e->busy || e->halted || failed || n > DMA_BUFFER) return EINVAL;
     int error = stop_endpoint(e); if (error) return error;
@@ -212,15 +250,28 @@ static int submit(struct endpoint *e, const void *bytes, unsigned n)
     cache(e->va + DMA_BUFFER, DMA_BUFFER, 0);
     cache(terminator, DESC_STRIDE, 0);
     cache(g, DESC_STRIDE, 0);
-    g->flags |= HWO | BIT(7); cache(g, DESC_STRIDE, 0); /* publish HWO last */
-    e->requested = n; e->busy = 1;
+    /* Serialize lease validation with the actual DMA publication. A client
+     * close AFTER this point may leave a partially transmitted old request,
+     * but a dequeued old chunk can never acquire a successor's owner. */
     if (e->number == 3) {
-        lck_mtx_lock(&usb_lock); e->owner = lease; lck_mtx_unlock(&usb_lock);
+        lck_mtx_lock(&usb_lock);
+        if (!owner || owner != lease || owner != raw_owner ||
+            (st.reserved & X9_USB_RAW_DRAINING) || generation != st.generation) {
+            tx_finish(id, X9_USB_TX_CANCELLED, ECANCELED, 0);
+            lck_mtx_unlock(&usb_lock); return ESTALE;
+        }
+    }
+    g->flags |= HWO | BIT(7); cache(g, DESC_STRIDE, 0); /* publish HWO last */
+    e->requested = n; e->busy = 1; e->owner = owner; e->request_id = id;
+    if (id) {
+        for (unsigned i = 0; i < QUEUE; i++) if (tx_results[i].request_id == id)
+            tx_results[i].state = X9_USB_TX_ACTIVE;
     }
     uint64_t start = e->pa + e->slot * DESC_STRIDE;
     W(qcsr(e) + 4, (uint32_t)start);
     W(qhi(e), (R(qhi(e)) & ~15u) | (uint32_t)(start >> 32));
     W(qcsr(e), BIT(0));
+    if (e->number == 3) lck_mtx_unlock(&usb_lock);
     return 0;
 }
 static void net_receive(const uint8_t *p, unsigned n)
@@ -259,6 +310,8 @@ static int complete(struct endpoint *e)
     int error = stop_endpoint(e); if (error) return error;
     e->slot ^= 1;
     lck_mtx_lock(&usb_lock); st.dma_completions++;
+    tx_finish(e->request_id, X9_USB_TX_COMPLETE, 0, n);
+    e->request_id = 0;
     if (e->in && !e->interrupt) {
         if (e->number == 1) st.net_tx_frames++; else st.raw_tx_bytes += n;
     }
@@ -286,15 +339,22 @@ static int kick_tx(struct endpoint *e, struct queue *q)
     if (!q->count) { lck_mtx_unlock(&usb_lock); return 0; }
     struct chunk *v = &q->v[q->head];
     memcpy(e->va + DMA_BUFFER, v->bytes, v->n); unsigned n = v->n;
+    uint64_t owner = v->owner, id = v->request_id;
+    uint32_t generation = v->generation;
     q->head = (q->head + 1) % QUEUE; q->count--;
     lck_mtx_unlock(&usb_lock);
     /* submit copies this same, worker-owned buffer; no external queue lock */
-    return submit(e, e->va + DMA_BUFFER, n);
+    int error = submit(e, e->va + DMA_BUFFER, n, owner, id, generation);
+    /* Lease close/reset is a pre-HWO rejection, not a hardware fault. */
+    return error == ESTALE ? 0 : error;
 }
 static void data_poll(void)
 {
-    lck_mtx_lock(&usb_lock); uint64_t owner = lease; lck_mtx_unlock(&usb_lock);
-    if (owner != raw_owner) {
+    lck_mtx_lock(&usb_lock); uint64_t owner = lease;
+    unsigned drain = (st.reserved & X9_USB_RAW_DRAINING) || owner != raw_owner;
+    if (drain) st.reserved |= X9_USB_RAW_DRAINING;
+    lck_mtx_unlock(&usb_lock);
+    if (drain) {
         /* Closing a client cannot hand its in-flight RX or old FIFO contents
          * to a successor. Only this worker may drain/reset DMA ownership. */
         int error = disable_endpoint(&eps[3]);
@@ -303,7 +363,12 @@ static void data_poll(void)
         if (st.configuration && st.raw_enabled) {
             configure_endpoint(&eps[3], 512); configure_endpoint(&eps[4], 1024);
         }
+        lck_mtx_lock(&usb_lock);
         raw_owner = owner;
+        /* A second close/open during STOP requires another drain. Don't let
+         * that successor enqueue against endpoints initialized for owner. */
+        if (lease == owner) st.reserved &= ~X9_USB_RAW_DRAINING;
+        lck_mtx_unlock(&usb_lock);
     }
     uint32_t txerr = R(0x780), rxerr = R(0x790), zlperr = R(0x7a0);
     uint32_t errors = (txerr & 0xe000eu) | (rxerr & 0xa000au) | (zlperr & 0xa0000u);
@@ -314,26 +379,36 @@ static void data_poll(void)
     }
     int error = 0;
     if (st.configuration && st.data_alt && !suspended) {
-        if (!eps[0].busy && !eps[0].halted) error = submit(&eps[0], NULL, 2048);
+        if (!eps[0].busy && !eps[0].halted) error = submit(&eps[0], NULL, 2048, 0, 0, 0);
         if (!error) error = kick_tx(&eps[1], &net_tx);
     }
     if (!error && st.configuration && st.raw_enabled && !suspended) {
-        lck_mtx_lock(&usb_lock); unsigned ready = lease && raw_rx.count < QUEUE; lck_mtx_unlock(&usb_lock);
-        if (ready && !eps[3].busy && !eps[3].halted) error = submit(&eps[3], NULL, 512);
+        lck_mtx_lock(&usb_lock);
+        owner = lease; uint32_t generation = st.generation;
+        unsigned ready = owner && owner == raw_owner &&
+            !(st.reserved & X9_USB_RAW_DRAINING) && raw_rx.count < QUEUE;
+        lck_mtx_unlock(&usb_lock);
+        if (ready && !eps[3].busy && !eps[3].halted) {
+            error = submit(&eps[3], NULL, 512, owner, 0, generation);
+            if (error == ESTALE) error = 0;
+        }
         if (!error) error = kick_tx(&eps[4], &raw_tx);
     }
     if (!error && notification && eps[2].enabled && !eps[2].busy && !eps[2].halted && !suspended) {
         uint8_t n[8] = { 0xa1, 0, (uint8_t)st.link, 0, 0, 0, 0, 0 };
-        error = submit(&eps[2], n, sizeof(n)); notification = 0;
+        error = submit(&eps[2], n, sizeof(n), 0, 0, 0); notification = 0;
     }
     if (error) fault(error, 0);
 }
 static int reset_data(void)
 {
-    post_link(0); clear_queues();
-    for (unsigned i = 0; i < 5; i++) { int e = disable_endpoint(&eps[i]); if (e) return e; }
+    /* Close the enqueue gate BEFORE clearing queues/STOP. Otherwise a sender
+     * can insert an old-generation chunk between clear_queues and the final
+     * generation bump, leaving a tracked request stranded across reset. */
     lck_mtx_lock(&usb_lock); st.configuration = st.data_alt = 0;
     st.generation++; st.state = X9_USB_READY; lck_mtx_unlock(&usb_lock);
+    post_link(0); clear_queues();
+    for (unsigned i = 0; i < 5; i++) { int e = disable_endpoint(&eps[i]); if (e) return e; }
     lck_mtx_lock(&usb_lock); packet_filter = 0; lck_mtx_unlock(&usb_lock);
     notification = suspended = 0;
     return 0;
@@ -553,7 +628,14 @@ static struct endpoint *find_endpoint(unsigned address)
 }
 static int halt_endpoint(struct endpoint *e, unsigned halt)
 {
+    unsigned was_busy = e->busy;
     int error = stop_endpoint(e); if (error) return error;
+    if (was_busy && e->request_id) {
+        lck_mtx_lock(&usb_lock);
+        tx_finish(e->request_id, X9_USB_TX_CANCELLED, ECANCELED, 0);
+        lck_mtx_unlock(&usb_lock);
+    }
+    e->request_id = 0;
     uint32_t reset = BIT(e->number + (e->in ? 16 : 0));
     if (!halt) { W(0x804, reset); W(0x804, 0); }
     uint32_t value = R(csr0(e)) & ~(BIT(22) | BIT(21) | (e->in ? 0 : BIT(16)));
@@ -758,27 +840,79 @@ void x9_usb_get_status(struct x9_usb_status *out)
 }
 int x9_usb_claim(uint64_t *token)
 {
+    if (!token) return EINVAL;
+    *token = 0;
     lck_mtx_lock(&usb_lock); int error=0;
     if (!st.raw_enabled) error=ENOTSUP;
     else if (lease) error=EBUSY;
-    else { lease=++next_lease; if (!lease) lease=++next_lease; *token=lease; }
+    else if (next_lease == UINT64_MAX) error=EOVERFLOW;
+    else { lease=++next_lease; st.reserved |= X9_USB_RAW_DRAINING; *token=lease; }
     lck_mtx_unlock(&usb_lock); return error;
 }
 void x9_usb_release(uint64_t token)
 {
     lck_mtx_lock(&usb_lock);
-    if (lease==token && token) { lease=0; raw_tx.head=raw_tx.count=raw_rx.head=raw_rx.count=0; }
+    if (lease==token && token) {
+        lease=0; st.reserved |= X9_USB_RAW_DRAINING;
+        st.dropped += raw_tx.count + raw_rx.count;
+        raw_tx.head=raw_tx.count=raw_rx.head=raw_rx.count=0;
+        bzero(tx_results, sizeof(tx_results));
+    }
     lck_mtx_unlock(&usb_lock);
 }
-int x9_usb_send(uint64_t token, uint32_t generation, const void *bytes, uint32_t n)
+static int enqueue_raw(uint64_t token, uint32_t generation, const void *bytes, uint32_t n,
+                       uint64_t *request)
 {
-    if (!n || n>X9_USB_CHUNK) return EINVAL;
+    if (!bytes || !n || n>X9_USB_CHUNK) return EINVAL;
     lck_mtx_lock(&usb_lock); int error=0;
+    struct x9_usb_tx_result *record = NULL;
+    if (request) for (unsigned i = 0; i < QUEUE; i++)
+        if (!tx_results[i].request_id) { record = &tx_results[i]; break; }
     if (!token || token!=lease) error=EPERM;
     else if (generation!=st.generation) error=ESTALE;
     else if (st.state!=X9_USB_CONFIGURED || failed) error=ENXIO;
+    else if (lease != raw_owner || (st.reserved & X9_USB_RAW_DRAINING)) error=EAGAIN;
     else if (raw_tx.count==QUEUE) error=EAGAIN;
-    else { struct chunk *v=&raw_tx.v[(raw_tx.head+raw_tx.count)%QUEUE]; v->n=n; memcpy(v->bytes,bytes,n); raw_tx.count++; }
+    else if (request && !record) error=EAGAIN;
+    else if (request && next_request == UINT64_MAX) error=EOVERFLOW;
+    else {
+        struct chunk *v=&raw_tx.v[(raw_tx.head+raw_tx.count)%QUEUE];
+        v->n=n; v->owner=token; v->generation=generation;
+        v->request_id = request ? ++next_request : 0;
+        if (record) {
+            bzero(record, sizeof(*record)); record->version=X9_USB_TX_ABI;
+            record->generation=generation; record->state=X9_USB_TX_QUEUED;
+            record->request_id=v->request_id; record->requested=n;
+            *request=v->request_id;
+        }
+        memcpy(v->bytes,bytes,n); raw_tx.count++;
+    }
+    lck_mtx_unlock(&usb_lock); return error;
+}
+int x9_usb_send(uint64_t token, uint32_t generation, const void *bytes, uint32_t n)
+{ return enqueue_raw(token, generation, bytes, n, NULL); }
+int x9_usb_send_tracked(uint64_t token, uint32_t generation, const void *bytes,
+                        uint32_t n, uint64_t *request)
+{
+    if (!request) return EINVAL;
+    *request = 0;
+    return enqueue_raw(token, generation, bytes, n, request);
+}
+int x9_usb_get_tx_result(uint64_t token, uint32_t generation, uint64_t request,
+                          unsigned consume, struct x9_usb_tx_result *out)
+{
+    if (!out || !request || consume > 1) return EINVAL;
+    lck_mtx_lock(&usb_lock); int error = ENOENT;
+    if (!token || token != lease) error = EPERM;
+    else for (unsigned i = 0; i < QUEUE; i++) if (tx_results[i].request_id == request) {
+        if (tx_results[i].generation != generation) error = ESTALE;
+        else {
+            *out = tx_results[i]; error = 0;
+            if (consume && out->state >= X9_USB_TX_COMPLETE)
+                bzero(&tx_results[i], sizeof(tx_results[i]));
+        }
+        break;
+    }
     lck_mtx_unlock(&usb_lock); return error;
 }
 int x9_usb_receive(uint64_t token, uint32_t generation, void *bytes, uint32_t *n)
@@ -787,6 +921,7 @@ int x9_usb_receive(uint64_t token, uint32_t generation, void *bytes, uint32_t *n
     if (!token || token!=lease) error=EPERM;
     else if (generation!=st.generation) error=ESTALE;
     else if (st.state!=X9_USB_CONFIGURED || failed) error=ENXIO;
+    else if (lease != raw_owner || (st.reserved & X9_USB_RAW_DRAINING)) error=EAGAIN;
     else if (!raw_rx.count) error=EAGAIN;
     else {
         struct chunk *v=&raw_rx.v[raw_rx.head];

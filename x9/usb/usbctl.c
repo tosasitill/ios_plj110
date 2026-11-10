@@ -25,8 +25,8 @@ static void print_status(const struct x9_usb_status *s)
         (unsigned long long)s->net_tx_frames, (unsigned long long)s->net_rx_frames,
         (unsigned long long)s->raw_tx_bytes, (unsigned long long)s->raw_rx_bytes,
         (unsigned long long)s->dropped, s->native_apple_stack);
-    printf("bus forced-off=%u cycling=%u\n", !!(s->reserved & X9_USB_BUS_FORCED_OFF),
-        !!(s->reserved & X9_USB_BUS_CYCLING));
+    printf("bus forced-off=%u cycling=%u raw-draining=%u\n", !!(s->reserved & X9_USB_BUS_FORCED_OFF),
+        !!(s->reserved & X9_USB_BUS_CYCLING), !!(s->reserved & X9_USB_RAW_DRAINING));
 }
 int main(int argc, char **argv)
 {
@@ -84,14 +84,15 @@ int main(int argc, char **argv)
             "Original IOKit command completed the MTU3 bus/STOP barrier (native cycle=50ms), not mux or pairing.");
         return 0;
     }
-    bool echo = argc >= 2 && !strcmp(argv[1], "--echo");
+    bool tracked = argc >= 2 && !strcmp(argv[1], "--echo-tracked");
+    bool echo = tracked || (argc >= 2 && !strcmp(argv[1], "--echo"));
     unsigned seconds = 60;
     if (echo && argc == 3) {
         char *end = NULL; unsigned long n = strtoul(argv[2], &end, 10);
         if (!*argv[2] || *end || n < 1 || n > 600) { fprintf(stderr, "duration must be 1..600 seconds\n"); return 2; }
         seconds = (unsigned)n;
     } else if ((echo && argc > 3) || (!echo && (argc > 2 || (argc == 2 && strcmp(argv[1], "--status"))))) {
-        fprintf(stderr, "usage: usbctl [--status | --native-status | --description | --set-product <ASCII> | --echo [1..600 seconds] | --bus-off | --bus-on | --bus-cycle | --bus-cycle-delay <0..1000 ms>]\n"); return 2;
+        fprintf(stderr, "usage: usbctl [--status | --native-status | --description | --set-product <ASCII> | --echo [1..600 seconds] | --echo-tracked [1..600 seconds] | --bus-off | --bus-on | --bus-cycle | --bus-cycle-delay <0..1000 ms>]\n"); return 2;
     }
     io_connect_t c; kern_return_t e = x9usb_open(echo, &c);
     if (e) { fprintf(stderr, "USB open failed %#x (x9_usb=1/2; echo needs 2 + root + exclusive lease)\n", e); return 1; }
@@ -105,6 +106,7 @@ int main(int argc, char **argv)
         unsigned generation = s.generation;
         double deadline = now() + seconds;
         unsigned long long bytes = 0;
+        unsigned long long completed = 0;
         while (!stop && now() < deadline) {
             uint8_t data[X9_USB_CHUNK]; size_t n = sizeof(data);
             e = x9usb_receive(c, generation, data, &n);
@@ -119,12 +121,32 @@ int main(int argc, char **argv)
             if (e) { fprintf(stderr, "receive failed %#x; stop at generation %u\n", e, generation); result = 1; break; }
             /* EAGAIN is a proven pre-enqueue rejection. All other errors are
              * terminal; a reset must not echo stale data to a successor bus. */
-            do { e = x9usb_send(c, generation, data, n); if (e == kIOReturnNotReady) usleep(1000); }
+            uint64_t request = 0;
+            do {
+                e = tracked ? x9usb_send_tracked(c, generation, data, n, &request) :
+                    x9usb_send(c, generation, data, n);
+                if (e == kIOReturnNotReady) usleep(1000);
+            }
             while (e == kIOReturnNotReady && !stop && now() < deadline);
             if (e) { fprintf(stderr, "enqueue failed %#x\n", e); result = 1; break; }
             bytes += n;
+            if (tracked) {
+                struct x9_usb_tx_result tx = {0};
+                while (!stop && now() < deadline) {
+                    e = x9usb_tx_result(c, generation, request, true, &tx);
+                    if (e || tx.state >= X9_USB_TX_COMPLETE) break;
+                    usleep(1000);
+                }
+                if (e || tx.state != X9_USB_TX_COMPLETE || tx.error || tx.actual != n) {
+                    fprintf(stderr, "TX request=%llu result=%#x state=%u errno=%d; NOT replayed (cancel/timeout may be partial)\n",
+                        (unsigned long long)request, e, tx.state, tx.error);
+                    result = 1; break;
+                }
+                completed += tx.actual;
+            }
         }
         fprintf(stderr, "echo queued %llu bytes; this is not a hardware completion count\n", bytes);
+        if (tracked) fprintf(stderr, "echo QMU-completed %llu bytes (HWO/CPR + STOP); host readback still required\n", completed);
         if (!x9usb_status(c, &s)) print_status(&s);
     }
     IOServiceClose(c); return result;

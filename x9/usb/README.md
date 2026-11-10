@@ -10,6 +10,10 @@
 语法不再接受。新的描述符 metadata 支持只影响当前 ECM/private bulk profile，
 不会使 Apple mux 自动绑定。
 
+**USB-4 新增**：`--echo-tracked` 按请求等待真实 QMU TX completion；旧 `--echo`
+仍只统计入队。lease 切换先 STOP/drain，新的客户端在屏障完成前得到 NotReady。
+新增接口向后兼容，不改变旧128B status；旧内核返回 Unsupported，工具不会降级重放。
+
 ## 开启与回退
 
 | Boot arg | 行为 |
@@ -84,6 +88,11 @@ USB wire ACK；状态的 DMA completions/byte counters 取真实 HWO 与 QCPR。
 raw 接口是**字节块流，不是消息/文件/RPC/Apple mux 协议**；RX512字节块、
 TX最多4096字节，可短包/ZLP。上层需要自定 framing 和确认协议。
 
+需要区分入队与 DMA 完成时，在 iOS 用 `usbctl --echo-tracked 60` 替代 `--echo`，
+host 命令不变。`echo QMU-completed ...` 必须来自 HWO 清零、CPR 到达 terminator、
+STOP 确认 ACTIVE 清零和长度一致四个条件；**仍须 host 完整读回才算 wire 链验收**。
+超时、取消或故障均终止，不重新发送；STOP 成功的取消也可能已传出部分字节。
+
 ## iOS API
 
 `x9usb.h` + `libx9usb.a` 链接 CoreFoundation/IOKit，无需修改系统 daemon。
@@ -95,6 +104,8 @@ TX最多4096字节，可短包/ZLP。上层需要自定 framing 和确认协议�
 | `x9usb_status(connection, &status)` | ABI1、状态/errno、真实 speed、generation、计数 |
 | `x9usb_send(connection, generation, bytes, n)` | 非阻塞入队，1..4096字节 |
 | `x9usb_receive(connection, generation, bytes, &n)` | 非阻塞取块，不够容量不消费 |
+| `x9usb_send_tracked(connection, generation, bytes, n, &id)` | 单次入队并返回请求ID，不等于完成 |
+| `x9usb_tx_result(connection, original_generation, id, consume, &result)` | 只读轮询；consume只移除终态记录 |
 | `x9usb_get_description(connection, &snapshot)` | selector3，只读240B，旧内核返回Unsupported |
 | `x9usb_set_description(&description)` | 原始IOKit SetDescription，显式bus-off后受控更新224B metadata |
 | `IOServiceClose(connection)` | 撤销 lease；worker 停止/重置 raw DMA，防跨客户端 RX |
@@ -105,6 +116,28 @@ selector0/1/2分别对应状态/发送/接收，结构为固定128字节 `x9_usb
 `kIOReturnAborted` 是 reset/configuration 后旧 generation，不能重放旧写；
 `kIOReturnOffline` 为未配置或硬件隔离，`NoSpace` 为输出缓冲不足。
 客户端关闭可能已发送部分旧 TX，不能撤销；不会将旧 RX 交给新 lease。
+
+### 获取单次 TX 的权威结果
+
+selector4 是 tracked send（一个generation标量、1..4096B inband、一个ID标量输出）；
+selector5 是结果查询（三个标量：original generation、ID、consume 0/1，64B结构输出）。
+结果ABI1保存requested/actual、state和errno，没有用户DMA指针或异步回调地址。
+最多16条记录，终态须消费才释放槽；满时 NotReady 是**未入队**，不能覆盖旧结果。
+
+| state | 含义 |
+|---|---|
+| QUEUED | 尚未发布 HWO |
+| ACTIVE | 已交给 QMU，不能把查询超时当成未发送 |
+| COMPLETE | HWO/CPR/STOP及完整长度通过，actual才是已确认字节数 |
+| CANCELLED | reset/halt后STOP成功，或发布前撤销；可能已部分发送，不可重放 |
+| UNCERTAIN | 故障隔离，DMA/传输结论不足，保留prepared页，不可重放 |
+
+reset后用**原generation**取取消结果，不用新generation冒认旧请求；结果读取不要求
+bus仍配置。lease关闭清理其结果，新客户端看不到旧记录；ID不回绕。
+`actual=0` 在非COMPLETE状态只表示没有确认字节计数，**不证明零字节上wire**。
+NotFound表示ID未知/已消费，不等于未传输。`X9_USB_RAW_DRAINING` 仅报告worker屏障，
+不是host枚举状态。old chunk的owner/generation从入队固定，HWO与QSTART前再次在锁内
+验证；close之后可留下旧在飞TX，但不会给它重新标记成新lease。
 
 ### 原生 IOKit 控制入口（不等于原生 mux）
 
@@ -250,3 +283,22 @@ python3 -I x9/usb/prepare_native.py \
 这些仍是 **prelinked bytes，不是可装载的独立 kext**。当前
 `--require-compatible` 返回 **2** 是明确的 ABI/load-readiness 门拒绝，
 不是编译错误；不提供强行绕过该门的装载参数。
+
+### 复现端点与 completion 的原始调用契约
+
+`recover_contract.py` 对同一固定原始输入做有界反汇编，检查15处关键指令并输出
+`contract.json` 和七段 `.dis`。这是静态分析命令，不是测试套件或原生驱动装载器：
+
+```sh
+python3 -I x9/usb/recover_contract.py \
+  --kernelcache .local/x9/usb/native-20H392/kernelcache.macho \
+  --out .local/x9/usb/endpoint-contract-new
+```
+
+需要 `capstone`。输入须是原始20H392 Mach-O，输出须是新私有目录，不分析已成功
+boot候选。确认创建pipe的settings输入是**5×32-bit word**，不是wire descriptor；
+hardware endpoint创建是**slot173→187**（slot169是外层gate），销毁是slot174→188。
+completion在`flag@0x30`为0时取32-bit count，否则取64-bit；回调依次为target、
+parameter、32-bit status、count。`flag@0x31`控制回调后的buffer release/recycle。
+尚未确认count是actual还是remaining，也未恢复所有pure virtual、request生命周期、
+timeout/IRQ契约；输出保持 `runtime_loadable=false`，不生成可执行C++ ABI。

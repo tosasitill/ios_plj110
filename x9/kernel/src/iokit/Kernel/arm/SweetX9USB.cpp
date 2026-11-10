@@ -63,6 +63,7 @@ bool X9USBDevice::start(IOService *p)
         !setProperty("X9USBAppleNativeStack", kOSBooleanFalse) ||
         !setProperty("X9USBControllerBusCommands", kOSBooleanTrue) ||
         !setProperty("X9USBDescriptionMetadata", kOSBooleanTrue) ||
+        !setProperty("X9USBTrackedTXABIVersion", X9_USB_TX_ABI, 32) ||
         !setProperty("X9USBSuperSpeed", kOSBooleanFalse)) return false;
     /* BSD starts the only MMIO worker after proc0 is ready. Service discovery
      * is not a statement that enumeration or a DMA transfer has succeeded. */
@@ -205,6 +206,8 @@ static IOReturn usb_return(int e)
     case EBUSY: return kIOReturnExclusiveAccess;
     case ETIMEDOUT: return kIOReturnTimeout;
     case ENOTSUP: return kIOReturnUnsupported;
+    case ENOENT: return kIOReturnNotFound;
+    case EOVERFLOW: return kIOReturnNoResources;
     default: return kIOReturnIOError;
     }
 }
@@ -214,7 +217,8 @@ IOReturn X9USBUserClient::externalMethod(uint32_t sel, IOExternalMethodArguments
     (void)dispatch; (void)target; (void)reference;
     if (!a || isInactive()) return kIOReturnNotReady;
     if (a->structureInputDescriptor || a->structureOutputDescriptor || a->asyncWakePort ||
-        a->scalarOutputCount) return kIOReturnBadArgument;
+        (a->scalarOutputCount && (sel != X9_USB_SEND_TRACKED ||
+         a->scalarOutputCount != 1 || !a->scalarOutput))) return kIOReturnBadArgument;
     if (sel == X9_USB_STATUS) {
         if (a->scalarInputCount || a->structureInputSize || !a->structureOutput ||
             a->structureOutputSize < sizeof(x9_usb_status)) return kIOReturnBadArgument;
@@ -230,7 +234,30 @@ IOReturn X9USBUserClient::externalMethod(uint32_t sel, IOExternalMethodArguments
         return kIOReturnSuccess;
     }
     if (!raw || !token) return kIOReturnNotPrivileged;
+    if (sel == X9_USB_TX_RESULT) {
+        if (a->scalarInputCount != 3 || a->scalarInput[0] > UINT32_MAX ||
+            !a->scalarInput[1] || a->scalarInput[2] > 1 || a->structureInputSize ||
+            !a->structureOutput || a->structureOutputSize < sizeof(x9_usb_tx_result))
+            return kIOReturnBadArgument;
+        x9_usb_tx_result result = {};
+        int error = x9_usb_get_tx_result(token, (uint32_t)a->scalarInput[0],
+            a->scalarInput[1], (unsigned)a->scalarInput[2], &result);
+        if (error) { a->structureOutputSize = 0; return usb_return(error); }
+        memcpy(a->structureOutput, &result, sizeof(result));
+        a->structureOutputSize = sizeof(result);
+        return kIOReturnSuccess;
+    }
     if (a->scalarInputCount != 1 || a->scalarInput[0] > UINT32_MAX) return kIOReturnBadArgument;
+    if (sel == X9_USB_SEND_TRACKED) {
+        if (!a->structureInput || !a->structureInputSize || a->structureInputSize > X9_USB_CHUNK ||
+            a->structureOutputSize || a->scalarOutputCount != 1 || !a->scalarOutput)
+            return kIOReturnBadArgument;
+        uint64_t request = 0;
+        int error = x9_usb_send_tracked(token, (uint32_t)a->scalarInput[0], a->structureInput,
+            (uint32_t)a->structureInputSize, &request);
+        a->scalarOutput[0] = request;
+        return usb_return(error);
+    }
     if (sel == X9_USB_SEND) {
         if (!a->structureInput || !a->structureInputSize || a->structureInputSize > X9_USB_CHUNK ||
             a->structureOutputSize) return kIOReturnBadArgument;

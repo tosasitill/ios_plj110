@@ -5,12 +5,14 @@
 #define X9_USB_ABI 1u
 #define X9_USB_CHUNK 4096u
 #define X9_USB_SERVICE "X9USBDevice"
-enum { X9_USB_STATUS, X9_USB_SEND, X9_USB_RECEIVE, X9_USB_GET_DESCRIPTION };
+enum { X9_USB_STATUS, X9_USB_SEND, X9_USB_RECEIVE, X9_USB_GET_DESCRIPTION,
+       X9_USB_SEND_TRACKED, X9_USB_TX_RESULT };
 enum { X9_USB_OFF, X9_USB_INITIALIZING, X9_USB_READY, X9_USB_CONFIGURED,
        X9_USB_FAULT };
 /* ABI1's reserved word now reports physical bus-command state. */
 #define X9_USB_BUS_FORCED_OFF 1u
 #define X9_USB_BUS_CYCLING 2u
+#define X9_USB_RAW_DRAINING 4u
 enum { X9_USB_BUS_OFF, X9_USB_BUS_ON, X9_USB_BUS_CYCLE };
 #define X9_USB_NATIVE_CYCLE_MS 50u
 #define X9_USB_DESCRIPTION_ABI 1u
@@ -27,6 +29,19 @@ struct x9_usb_description {
 struct x9_usb_description_status {
     uint32_t version, revision, mode, forced_off;
     struct x9_usb_description description;
+};
+#define X9_USB_TX_ABI 1u
+enum { X9_USB_TX_QUEUED = 1, X9_USB_TX_ACTIVE, X9_USB_TX_COMPLETE,
+       X9_USB_TX_CANCELLED, X9_USB_TX_UNCERTAIN };
+/* Request IDs belong to one lease; completion is HWO/CPR + STOP, not enqueue.
+ * A reset result remains readable with its ORIGINAL generation. Terminal
+ * records occupy a bounded slot until explicitly consumed or lease close. */
+struct x9_usb_tx_result {
+    uint32_t version, generation, state;
+    int32_t error;
+    uint64_t request_id;
+    uint32_t requested, actual;
+    uint64_t reserved[4];
 };
 struct x9_usb_status {
     uint32_t version, state;
@@ -47,6 +62,8 @@ int x9_usb_claim(uint64_t *);
 void x9_usb_release(uint64_t);
 int x9_usb_send(uint64_t, uint32_t, const void *, uint32_t);
 int x9_usb_receive(uint64_t, uint32_t, void *, uint32_t *);
+int x9_usb_send_tracked(uint64_t, uint32_t, const void *, uint32_t, uint64_t *);
+int x9_usb_get_tx_result(uint64_t, uint32_t, uint64_t, unsigned, struct x9_usb_tx_result *);
 int x9_usb_dma_alloc(void **, uint64_t *);
 /* Kernel-only, synchronous worker barrier. Cycle delay is 0..1000 ms.
  * Timeout is ambiguous: never replay. No native-family identity is implied. */

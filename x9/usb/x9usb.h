@@ -14,6 +14,13 @@ kern_return_t x9usb_status(io_connect_t, struct x9_usb_status *);
  * never retry an ambiguous write automatically in a different generation. */
 kern_return_t x9usb_send(io_connect_t, uint32_t generation, const void *, size_t);
 kern_return_t x9usb_receive(io_connect_t, uint32_t generation, void *, size_t *);
+/* Opt-in tracked TX; enqueue happens once and returns a lease-local ID.
+ * Poll using that ORIGINAL generation even after a bus reset. consume=true
+ * removes only a terminal record. CANCELLED/UNCERTAIN may already have put
+ * bytes on the wire; neither permits replay. Old kernels return Unsupported. */
+kern_return_t x9usb_send_tracked(io_connect_t, uint32_t generation, const void *, size_t, uint64_t *);
+kern_return_t x9usb_tx_result(io_connect_t, uint32_t generation, uint64_t request,
+                            bool consume, struct x9_usb_tx_result *);
 /* Run the original iOS IOKit controller functions with an explicitly chosen
  * X9 service. Never impersonates the native controller or reconfigures it. */
 kern_return_t x9usb_controller_command(unsigned operation, uint32_t delay_ms);
