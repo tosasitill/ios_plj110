@@ -6453,6 +6453,16 @@
    "name": "SweetX9Bluetooth.o",
    "source": "iokit/Kernel/arm/SweetX9Bluetooth.cpp",
    "template": "iokit-cxx-3"
+  },
+  {
+   "name": "x9_audio_dsp.o",
+   "source": "bsd/dev/x9_audio_dsp.c",
+   "template": "bsd-c-11"
+  },
+  {
+   "name": "SweetX9Audio.o",
+   "source": "iokit/Kernel/arm/SweetX9Audio.cpp",
+   "template": "iokit-cxx-3"
   }
  ],
  "link": {

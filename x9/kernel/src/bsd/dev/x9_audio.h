@@ -1,0 +1,62 @@
+/* X9 output-only audio ABI. No Apple firmware or board calibration data. */
+#ifndef X9_AUDIO_H
+#define X9_AUDIO_H
+#include <stdint.h>
+#define X9_AUDIO_CLASS "X9Audio"
+#define X9_AUDIO_MAGIC 0x58394155u
+#define X9_AUDIO_VERSION 1u
+#define X9_AUDIO_RATE 48000u
+#define X9_AUDIO_CHANNELS 2u
+#define X9_AUDIO_PERIOD 480u
+#define X9_AUDIO_RING 65536u
+#define X9_AUDIO_RING_BYTES (X9_AUDIO_RING * X9_AUDIO_CHANNELS * 2u)
+enum { X9AudioStatus, X9AudioStart, X9AudioStop };
+enum { X9AudioControlMemory, X9AudioProducerMemory, X9AudioOutputMemory };
+enum { X9AudioReady = 1u, X9AudioRunning = 2u, X9AudioFault = 4u };
+enum {
+    X9AudioNeedPower = 1u, X9AudioNeedFirmware = 2u,
+    X9AudioNeedMailbox = 4u, X9AudioNeedMemory = 8u,
+    X9AudioNeedAFE = 16u, X9AudioNeedAmplifier = 32u,
+    X9AudioNeedRoute = 64u, X9AudioNeedBackend = 128u
+};
+#define X9_AUDIO_REQUIRED 255u
+/* Memory 0 is read-only in the client. seq brackets kernel updates; an odd
+ * seq must not be spun on by a realtime thread: return NotRunning and retry.
+ * out_frames is the hardware play cursor, NOT an elapsed-time estimate.
+ * out_queued is the first frame not yet copied to the physical backend. */
+typedef struct {
+    uint32_t magic, version, rate, channels, period_frames, ring_frames;
+    uint32_t lead_frames, state, blockers, error, seq, generation;
+    uint64_t ticks_per_frame_q32, out_anchor_host, out_frames, out_queued;
+    uint64_t underruns, bad_producer, starts, stops;
+} X9AudioControl;
+/* Memory 1 is writable. Release-store written after PCM writes. It is the
+ * end sample time on the current timeline, NOT a byte count or DMA address.
+ * Every kernel read is range checked. Memory 2 holds LE interleaved S16. */
+typedef struct { uint64_t written; } X9AudioProducer;
+#if defined(KERNEL)
+#ifdef __cplusplus
+extern "C" {
+#endif
+/* A physical driver registers only after owning clocks, firmware/mailboxes,
+ * EMI/cache policy, AFE, actual PA model+calibration and speaker routing.
+ * All callbacks are serialized by the service. submit must copy a complete
+ * period before returning 0; EAGAIN consumes nothing. position returns a real
+ * monotonic cursor <= submitted and an absolute underrun count. start returns
+ * the hardware sample-0 host anchor. No user VA/PA reaches these callbacks.
+ * stop MUST mute/quiesce DMA even when returning an error. Registration is
+ * boot-lifetime; there is intentionally no untested/null backend. */
+struct x9_audio_backend {
+    uint32_t version, verified, lead_frames;
+    void *context;
+    int (*start)(void *, uint64_t *anchor);
+    int (*stop)(void *);
+    int (*submit)(void *, const int16_t *, uint32_t frames);
+    int (*position)(void *, uint64_t *frames, uint64_t *underruns);
+};
+int x9_audio_register_backend(const struct x9_audio_backend *);
+#ifdef __cplusplus
+}
+#endif
+#endif
+#endif
