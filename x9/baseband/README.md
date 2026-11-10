@@ -286,13 +286,23 @@ ACT913d5fc2..603e将同缓存entry转39B D2CM结构，含4B hex-string ID、31B 
 QoS、编码/转换后写FIC+36c/32B、cnf755成功；不是QMI29/34B raw copy。仍缺QMI29/37/38/39/47
 转换及最终无线PCO encoder闭环，MD默认另有SBP33/TD-SCDMA条件，**非零未知继续拒绝**。
 
-**carrier文件来源（接口绑定与现场仍待确认）**：kMatchBundle响应kCarrierFilePathName→
+**carrier文件来源（接口静态绑定已闭合，现场仍待确认）**：kMatchBundle响应kCarrierFilePathName→
 MatchedBundle+b0/map node+d8→perSIM Carrier1/2 domain→CarrierSettings+38 reload；
 kPrefFile另存+c0。原carrier.plist路径可由kOverlayBundle响应替换；设备overlay链按
 RadioPersonality hardware config找文件→base/device递归merge→写生成路径；overlay+c8
 等于嵌入结构+40的filename+88，10052539c..3a4→100633454复制回reply、编码新filename。
-但handler this+50初始化/RTTI绑定、具体匹配/文件顺序/MVNO overlay未全证；不能称189已加载
-D22特定override。下一步仍须有效perSIM filename/preferences及实际c7/Start证据。
+Server ctor100df35a4将sret设为this+50，Factory+20（具体vtable1015bd378）调用1009ae04c→
+100516d80→100516e90，构造Manager并安装vtable101572ff0；handler读Server+50后调用+58，
+确为100520ce0 Device Overlay。主agent独立重放该绑定；具体匹配/文件顺序/MVNO overlay
+仍未全证，不能称189已加载D22特定override。仍须有效perSIM filename/preferences及实际c7/Start证据。
+
+**全链路候选当前验收边界**：RX216/TX217→session26→UART42→MIPC usr1静态链已追到，
+但secondary duplicate ACT分支913d789a取旧node creatorusr、写temp request+150，
+reuse_data_call_info在913d4ee6..4efc按该usr增加引用；不能将ACT0一概认作本次usr1贡献。
+因此ownership候选暂不采纳，normal203不是单操作减引用，也不夸大成必然摧毁foreign PDN。
+单boot transport资格候选的两个真实单位编译通过，但generic201/203封门必须与已验收typed WDS
+原子整合，尚未合入。DPMAIF目前used_channel同boot不重用，重连/切卡返回的release/drain屏障
+仍待实现；QoS/PCO非零、AlwaysOnPdu4e及PDP-family策略仍须真实映射，不算联网完成。
 
 ### 5. iOS 网络最终验证
 
