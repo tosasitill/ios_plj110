@@ -53,9 +53,15 @@ struct cam_probe_board {
     uint32_t clk_off, clk_shift, clk_status_bit, clk_update_bit, clk_group;
     vm_offset_t drive_base;
 };
+enum { CAM_PIN_MODE, CAM_PIN_DIR, CAM_PIN_DOUT, CAM_PIN_FIELDS };
 struct cam_probe_pin {
     uint32_t pin, mode, dir, dout;
-    bool owned;
+    uint32_t expected[CAM_PIN_FIELDS], prior[CAM_PIN_FIELDS], dirty, uncertain;
+    bool valid, taken, owned, conflict;
+};
+struct cam_probe_drive {
+    uint32_t saved, expected, prior, dirty;
+    bool valid, taken, uncertain, conflict;
 };
 struct cam_probe_rail {
     unsigned sid, sel_reg, en_reg, da_reg, hw_reg, eint_reg;
@@ -72,12 +78,12 @@ struct cam_probe_journal {
     uint32_t clk_saved, clk_expected, clk_prior, pll_saved;
     bool clock_seen, clock_active, clock_conflict, mux_uncertain, mux_update_pending;
     bool vote_expected, vote_prior, vote_uncertain;
-    uint32_t drive, mode, dir, dout;
+    struct cam_probe_drive drive;
     uint8_t wl_enable, wl_voltage[3];
     uint8_t wl_programmed, wl_enabled;
     uint8_t wl_enable_expected, wl_enable_prior, wl_enable_uncertain;
     bool wl_tracking, wl_conflict;
-    struct cam_probe_pin route[4], wake;
+    struct cam_probe_pin route[4], wake, reset, mclk;
     struct cam_probe_rail dovdd, afvdd;
     bool vs_owned, pmif_fault;
     bool pins_owned, wl_owned, mux_owned, vote_owned;
@@ -95,11 +101,6 @@ static void cam_rw(vm_offset_t base, unsigned off, uint32_t value)
 {
     *(volatile uint32_t *)(base+off)=value;
     __asm__ volatile("dsb sy" ::: "memory");
-}
-static int cam_update(vm_offset_t base, unsigned off, uint32_t mask, uint32_t value)
-{
-    cam_rw(base,off,(cam_rr(base,off)&~mask)|(value&mask));
-    return (cam_rr(base,off)&mask)==(value&mask)?0:EIO;
 }
 static int cam_wait_bits(vm_offset_t base, unsigned off, uint32_t mask,
                          uint32_t value, unsigned limit)
@@ -133,7 +134,13 @@ static bool cam_pll_compatible(uint32_t con1)
 static uint32_t cam_pin_mode(vm_offset_t gpio, unsigned pin)
 { return (cam_rr(gpio,0x300+(pin/4)*16)>>((pin%4)*8))&31; }
 static int cam_pin_mux(vm_offset_t gpio, unsigned pin, unsigned mode)
-{ return cam_update(gpio,0x300+(pin/4)*16,31u<<((pin%4)*8),mode<<((pin%4)*8)); }
+{
+    if(mode>15)return EINVAL;
+    /* MT6993 FLAG_RACE_FREE_ACCESS: MODE MWR, bit4 is modify-enable.
+     * No full-word RMW or transient CLR of another pin's mode. */
+    cam_rw(gpio,0x300+(pin/4)*16+12,(16u|mode)<<((pin%4)*8));
+    return cam_pin_mode(gpio,pin)==mode?0:EIO;
+}
 static int cam_pin_bit(vm_offset_t gpio, unsigned bank, unsigned pin, unsigned value)
 {
     unsigned off=bank+(pin/32)*16; uint32_t bit=1u<<(pin%32);
@@ -142,48 +149,7 @@ static int cam_pin_bit(vm_offset_t gpio, unsigned bank, unsigned pin, unsigned v
 }
 static unsigned cam_pin_get(vm_offset_t gpio, unsigned bank, unsigned pin)
 { return (cam_rr(gpio,bank+(pin/32)*16)>>(pin%32))&1; }
-static void cam_pin_snapshot(struct cam_probe_journal *j, struct cam_probe_pin *p, unsigned pin)
-{
-    p->pin=pin;p->mode=cam_pin_mode(j->gpio,pin);
-    p->dir=cam_pin_get(j->gpio,0,pin);p->dout=cam_pin_get(j->gpio,0x100,pin);
-}
-static int cam_routes_take(struct cam_probe_journal *j)
-{
-    for(unsigned i=0;i<4;i++) {
-        struct cam_probe_pin *p=&j->route[i];
-        if(cam_pin_mode(j->gpio,p->pin)!=p->mode || cam_pin_get(j->gpio,0,p->pin)!=p->dir)return EBUSY;
-        if(p->mode==1)continue;
-        if(p->mode || p->dir)return EBUSY; /* never take mode2/SCP or GPIO output */
-        p->owned=true;int e=cam_pin_mux(j->gpio,p->pin,1);if(e)return e;
-    }
-    return 0;
-}
-static int cam_routes_restore(struct cam_probe_journal *j)
-{
-    int first=0;
-    for(unsigned i=4;i>0;i--) {
-        struct cam_probe_pin *p=&j->route[i-1];if(!p->owned)continue;
-        unsigned mode=cam_pin_mode(j->gpio,p->pin);
-        int e=(mode!=1 && mode!=p->mode)?EBUSY:cam_pin_mux(j->gpio,p->pin,p->mode);
-        if(e && !first)first=e;if(!e)p->owned=false;
-    }
-    return first;
-}
-static int cam_wake_take(struct cam_probe_journal *j)
-{
-    struct cam_probe_pin *p=&j->wake;
-    if(cam_pin_mode(j->gpio,p->pin)!=p->mode || cam_pin_get(j->gpio,0,p->pin)!=p->dir ||
-       cam_pin_get(j->gpio,0x100,p->pin)!=p->dout)return EBUSY;
-    if(p->mode)return EBUSY;
-    if(p->dir && p->dout)return 0; /* inherited high: borrow, never reset */
-    if(!p->dir && cam_pin_get(j->gpio,0x200,p->pin))return EBUSY;
-    p->owned=true;
-    int e=cam_pin_bit(j->gpio,0x100,p->pin,0);
-    if(!e)e=cam_pin_bit(j->gpio,0,p->pin,1);
-    if(!e)e=cam_pin_bit(j->gpio,0x100,p->pin,1);
-    if(!e)delay(1000); /* wl28681c probe reset_high -> 1ms -> ID */
-    return e;
-}
+#include "x9_camera_pins.inc"
 static int cam_bus_idle(struct cam_probe_bus *b)
 {
     /* This DT has no ch-offset-i2c: use channel0, not guessed AP+0x10000.
@@ -215,7 +181,8 @@ static int cam_bus_controls(struct cam_probe_bus *b, bool restoring)
 {
     if(b->conflict)return EBUSY;
     if(!restoring && b->uncertain)return EIO;
-    int e=cam_clock_check(&cam_journal,restoring,cam_journal.clock_active);if(e)return e;
+    int e=cam_pins_guard(&cam_journal,restoring);if(e)return e;
+    e=cam_clock_check(&cam_journal,restoring,cam_journal.clock_active);if(e)return e;
     e=cam_bus_clock(b);if(e)return e;
     if(cam_rr(b->gate,0xe00)&b->gate_bit)return EBUSY;
     uint32_t multi=cam_rr(b->base,CAM_I2C_MULTI);
@@ -382,8 +349,9 @@ static int cam_pmic_w(struct cam_probe_journal *j, unsigned sid, unsigned reg, u
 static int cam_vs_vote(struct cam_probe_journal *j, bool on)
 {
     if(!on && !j->vs_owned)return 0;
+    int e=cam_pins_guard(j,!on);if(e)return e;
     if(X9PMIFAcquire())return EBUSY;
-    uint8_t en=0;int e=cam_pmic_r(j,3,0x178a,&en);
+    uint8_t en=0;e=cam_pmic_r(j,3,0x178a,&en);
     if(!e && (on?!(en&4):true)) {
         if(on)j->vs_owned=true;
         e=cam_pmic_w(j,3,on?0x178b:0x178c,4);
@@ -414,20 +382,24 @@ static int cam_wl_restore_channel(struct cam_probe_journal *j, unsigned i)
 }
 static int cam_wake_restore(struct cam_probe_journal *j)
 {
-    struct cam_probe_pin *p=&j->wake;if(!p->owned)return 0;
-    uint8_t enable=0;int e=cam_wl_read(j,3,&enable);if(e)return e;
-    if(enable || j->wl_owned)return EBUSY; /* ALL channels, not only our mask */
-    if(cam_pin_mode(j->gpio,p->pin)!=0)return EBUSY;
-    e=cam_pin_bit(j->gpio,0x100,p->pin,0);
-    if(!e)e=cam_pin_bit(j->gpio,0,p->pin,p->dir);
-    if(!e)e=cam_pin_bit(j->gpio,0x100,p->pin,p->dout);
-    if(!e)p->owned=false;
-    return e;
+    struct cam_probe_pin *p=&j->wake;
+    if(!p->taken && !p->owned && !p->conflict)return 0;
+    int e=cam_pins_guard(j,true);if(e)return e;
+    /* Borrowed output-high never receives a write and does not require
+     * unrelated WL channels to be off just to retire a reference. */
+    if(p->owned || p->dirty) {
+        uint8_t enable=0;e=cam_wl_read(j,3,&enable);if(e)return e;
+        if(enable || j->wl_owned)return EBUSY; /* ALL channels, not only our mask */
+    }
+    return cam_pin_restore(j,p);
 }
+static bool cam_pin_retained(const struct cam_probe_pin *p)
+{ return p->taken || p->owned || p->dirty || p->uncertain || p->conflict; }
 static uint32_t cam_cold_retained(const struct cam_probe_journal *j)
 {
     uint32_t mask=0;
-    if(j->pins_owned)mask|=X9_CAM_COLD_PINS;
+    if(j->pins_owned || cam_pin_retained(&j->reset) || cam_pin_retained(&j->mclk) ||
+       j->drive.taken || j->drive.dirty || j->drive.uncertain || j->drive.conflict)mask|=X9_CAM_COLD_PINS;
     if(j->mux_owned || j->vote_owned || j->clock_conflict || j->mux_uncertain ||
        j->vote_uncertain || j->mux_update_pending)mask|=X9_CAM_COLD_MCLK;
     if(j->sensor.owned || j->sensor.gate_owned || cam_bus_unretired(&j->sensor))mask|=X9_CAM_COLD_SENSOR_BUS;
@@ -436,8 +408,8 @@ static uint32_t cam_cold_retained(const struct cam_probe_journal *j)
     if(j->dovdd.taken || j->dovdd.enable_owned || j->dovdd.voltage_owned)mask|=X9_CAM_COLD_DOVDD;
     if(j->afvdd.taken || j->afvdd.enable_owned || j->afvdd.voltage_owned)mask|=X9_CAM_COLD_AFVDD;
     if(j->vs_owned)mask|=X9_CAM_COLD_VS;
-    if(j->wake.owned)mask|=X9_CAM_COLD_WAKE;
-    for(unsigned i=0;i<4;i++)if(j->route[i].owned)mask|=X9_CAM_COLD_ROUTES;
+    if(cam_pin_retained(&j->wake))mask|=X9_CAM_COLD_WAKE;
+    for(unsigned i=0;i<4;i++)if(cam_pin_retained(&j->route[i]))mask|=X9_CAM_COLD_ROUTES;
     if(j->pmif_fault || j->pmif_pending)mask|=X9_CAM_COLD_PMIF;
     if(j->sensor.parent_owned)mask|=X9_CAM_COLD_SENSOR_PARENT;
     if(j->ldo.parent_owned)mask|=X9_CAM_COLD_WL_PARENT;
@@ -451,15 +423,12 @@ static int cam_restore_failed(struct cam_probe_journal *j, int e)
 }
 static int cam_restore(struct cam_probe_journal *j)
 {
-    int e,pin_error=0;j->restore_channel=0;j->restore_step=X9_CAM_COLD_QUIESCE;
-    if(j->pins_owned) {
-        /* Try both local isolation actions, but NEVER lower a supply or
-         * release prerequisites when reset-low/MCLK-off was not confirmed. */
-        e=cam_pin_bit(j->gpio,0x100,j->board.reset,0);if(e)pin_error=e;
-        e=cam_pin_mux(j->gpio,j->board.mclk,0);if(e && !pin_error)pin_error=e;
-        delay(1000);
-    }
-    if(pin_error)return cam_restore_failed(j,pin_error);
+    int e;j->restore_channel=0;j->restore_step=X9_CAM_COLD_QUIESCE;
+    e=cam_pins_isolate(j);if(e)return cam_restore_failed(j,e);
+    /* Includes borrowed routes/wake and the selected drive field. A low
+     * DOUT latch alone never proves an output reset after DIR changed. */
+    j->restore_step=X9_CAM_COLD_RESTORE_PINS;
+    e=cam_pins_guard(j,true);if(e)return cam_restore_failed(j,e);
     /* After releasing PMIF lock never clear a later response as ours. */
     if(j->pmif_pending || j->pmif_fault) {
         j->restore_step=X9_CAM_COLD_RESTORE_PMIF;return cam_restore_failed(j,EIO);
@@ -508,16 +477,8 @@ static int cam_restore(struct cam_probe_journal *j)
     }
     j->restore_step=X9_CAM_COLD_RESTORE_WAKE;
     e=cam_wake_restore(j);if(e)return cam_restore_failed(j,e);
-    if(j->pins_owned) {
-        j->restore_step=X9_CAM_COLD_RESTORE_PINS;
-        e=cam_update(j->board.drive_base,0,7,j->drive);if(e)return cam_restore_failed(j,e);
-        /* Restore input direction BEFORE a possibly high inherited DOUT
-         * latch. Otherwise cleanup would pulse reset high on an input pin. */
-        e=cam_pin_bit(j->gpio,0,j->board.reset,j->dir);if(e)return cam_restore_failed(j,e);
-        e=cam_pin_bit(j->gpio,0x100,j->board.reset,j->dout);if(e)return cam_restore_failed(j,e);
-        e=cam_pin_mux(j->gpio,j->board.reset,j->mode);if(e)return cam_restore_failed(j,e);
-        j->pins_owned=false;
-    }
+    j->restore_step=X9_CAM_COLD_RESTORE_PINS;
+    e=cam_pins_restore(j);if(e)return cam_restore_failed(j,e);
     j->restore_step=X9_CAM_COLD_RESTORE_SENSOR_BUS;
     e=cam_bus_restore(&j->sensor);if(e)return cam_restore_failed(j,e);
     /* A failed WL shutdown retains its bus gate/timing/pins for diagnostics;
@@ -588,14 +549,20 @@ static int cam_board_prepare(struct cam_probe_journal *j, uint32_t which,
         cam_pin_snapshot(j,&j->route[i],route[i]);
         if(j->route[i].mode!=1 && (j->route[i].mode || j->route[i].dir))r->blockers|=X9_CAM_BLOCK_ROUTE;
     }
-    j->mode=cam_pin_mode(j->gpio,j->board.reset);
-    j->dir=(cam_rr(j->gpio,(j->board.reset/32)*16)>>(j->board.reset%32))&1;
-    j->dout=(cam_rr(j->gpio,0x100+(j->board.reset/32)*16)>>(j->board.reset%32))&1;
-    j->drive=cam_rr(j->board.drive_base,0)&7;
+    cam_pin_snapshot(j,&j->reset,j->board.reset);
+    cam_pin_snapshot(j,&j->mclk,j->board.mclk);
+    j->drive.saved=j->drive.expected=j->drive.prior=cam_rr(j->board.drive_base,0)&7;
+    j->drive.valid=true;
     cam_pin_snapshot(j,&j->wake,203);
-    if(j->mode || (j->dir?j->dout:cam_pin_get(j->gpio,0x200,j->board.reset)) ||
-       cam_pin_mode(j->gpio,j->board.mclk) || j->wake.mode ||
+    if(j->reset.mode || (j->reset.dir?j->reset.dout:cam_pin_get(j->gpio,0x200,j->board.reset)) ||
+       j->mclk.mode || j->wake.mode ||
        (!j->wake.dir && cam_pin_get(j->gpio,0x200,203)))r->blockers|=X9_CAM_BLOCK_INHERITED;
+    struct cam_probe_pin *pins[]={&j->reset,&j->mclk,&j->wake,
+        &j->route[0],&j->route[1],&j->route[2],&j->route[3]};
+    for(unsigned i=0;i<sizeof(pins)/sizeof(pins[0]);i++) {
+        if(cam_pin_check(j,pins[i],false))r->blockers|=i<3?X9_CAM_BLOCK_INHERITED:X9_CAM_BLOCK_ROUTE;
+    }
+    if(cam_drive_check(j,false))r->blockers|=X9_CAM_BLOCK_INHERITED;
     if(r->blockers)return ENOTSUP;
     r->stage=X9_CAM_STAGE_PMIC;
     int e=cam_shared_rails(j,r);if(e)return e;
@@ -642,12 +609,10 @@ static int cam_sensor_transaction(uint32_t which, struct x9_camera_probe *r,
     }
     if(!e) {
         r->stage=X9_CAM_STAGE_POWER;
-        e=cam_clock_check(j,false,true);
+        e=cam_pins_guard(j,false);
+        if(!e)e=cam_clock_check(j,false,true);
         if(!e && which==X9_CAMERA_BACK)e=cam_vs_vote(j,true);
-        if(!e)j->pins_owned=true;
-        if(!e)e=cam_pin_bit(j->gpio,0x100,j->board.reset,0);
-        if(!e)e=cam_pin_mux(j->gpio,j->board.reset,0);
-        if(!e)e=cam_pin_bit(j->gpio,0,j->board.reset,1);
+        if(!e)e=cam_pins_take(j);
         delay(1000);
         /* Journal before writes: an ambiguous write must still be unwound. */
         for(unsigned i=0;i<j->board.wl_count && !e;i++) {
@@ -671,13 +636,15 @@ static int cam_sensor_transaction(uint32_t which, struct x9_camera_probe *r,
         }
         if(!e)e=cam_wl_guard(j,false,&v);
         if(!e)e=cam_clock_check(j,false,true);
-        if(!e)e=cam_update(j->board.drive_base,0,7,1); /* DT encoded 4mA */
+        if(!e)e=cam_drive_write(j,1,false); /* DT encoded 4mA */
         if(!e)e=cam_clock_check(j,false,true);
-        if(!e)e=cam_pin_mux(j->gpio,j->board.mclk,1);
+        if(!e)e=cam_pins_guard(j,false);
+        if(!e)e=cam_pin_write(j,&j->mclk,CAM_PIN_MODE,1,false);
         if(!e)delay(which==X9_CAMERA_BACK?6000:1000);
         if(!e)e=cam_wl_guard(j,false,&v);
         if(!e)e=cam_clock_check(j,false,true);
-        if(!e)e=cam_pin_bit(j->gpio,0x100,j->board.reset,1);
+        if(!e)e=cam_pins_guard(j,false);
+        if(!e)e=cam_pin_write(j,&j->reset,CAM_PIN_DOUT,1,false);
         if(!e)delay(4000);
         if(!e)e=cam_wl_guard(j,false,&v); /* after reset settle, before the first sensor request */
     }
@@ -736,6 +703,21 @@ static int cam_sensor_transaction(uint32_t which, struct x9_camera_probe *r,
         j->clock_seen,j->clock_active,j->clk_saved,j->clk_expected,j->clk_prior,
         j->vote_expected,j->vote_prior,j->mux_uncertain,j->vote_uncertain,
         j->mux_update_pending,j->clock_conflict,j->mux_owned,j->vote_owned);
+    const struct cam_probe_pin *pins[]={&j->reset,&j->mclk,&j->wake,
+        &j->route[0],&j->route[1],&j->route[2],&j->route[3]};
+    for(unsigned i=0;i<sizeof(pins)/sizeof(pins[0]);i++) {
+        const struct cam_probe_pin *p=pins[i];
+        printf("X9 CAMERA COLD PIN: pin=%u taken=%u owned=%u expected=%x/%x/%x "
+            "prior=%x/%x/%x dirty=%x uncertain=%x conflict=%u "
+            "(journal, NOT live readback or lease)\n",p->pin,p->taken,p->owned,
+            p->expected[CAM_PIN_MODE],p->expected[CAM_PIN_DIR],p->expected[CAM_PIN_DOUT],
+            p->prior[CAM_PIN_MODE],p->prior[CAM_PIN_DIR],p->prior[CAM_PIN_DOUT],
+            p->dirty,p->uncertain,p->conflict);
+    }
+    printf("X9 CAMERA COLD DRIVE: taken=%u entry=%x expected=%x prior=%x dirty=%x "
+        "uncertain=%u conflict=%u (journal, NOT live readback or lease)\n",
+        j->drive.taken,j->drive.saved,j->drive.expected,j->drive.prior,j->drive.dirty,
+        j->drive.uncertain,j->drive.conflict);
     return r->last_errno;
 }
 static int cam_sensor_probe(uint32_t which, struct x9_camera_probe *r)

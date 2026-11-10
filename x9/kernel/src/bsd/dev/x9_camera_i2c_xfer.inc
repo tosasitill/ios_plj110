@@ -56,6 +56,7 @@ static int cam_bus_transfer(struct cam_probe_bus *b,uint8_t slave,
     if(!e)e=cam_bus_control_write(b,CAM_I2C_AUX,rx?1:0,false);
     if(!e)e=cam_bus_control_write(b,CAM_I2C_TRANS,rx?2:1,false);
     if(!e)e=cam_bus_idle(b); /* no newly active channel before FIFO clear */
+    if(!e)e=cam_bus_controls(b,false); /* fresh pin/clock/CSR guard before FIFO mutation */
     if(e)return e;
     b->fifo_owned=true; /* BEFORE first possibly ambiguous FIFO mutation */
     cam_rw(b->base,CAM_I2C_FIFO_CLR,1);

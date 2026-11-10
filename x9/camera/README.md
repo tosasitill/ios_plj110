@@ -111,6 +111,18 @@ cameractl probe front
 GET_STATUS 仍为 **88B**，原 reserved 前两字现为 `cold_retained/cold_restore_step`；旧工具和 ioctl 尺寸兼容。它们是最后冷事务的**软件 journal 缓存，不是实际硬件状态或 lease**。保留 mask：`1=pins`、`2=MCLK mux/vote`、`4=sensor bus/gate`、`8=WL bus/gate`、`16=WL rails`、`32=DOVDD`、`64=AFVDD`、`128=VS`、`256=WL wake`、`512=AP routes`、`1024=PMIF fault/pending`、`2048=sensor I2C parent`、`4096=WL I2C parent`。restore_step：1=quiesce、2=DOVDD、3=WL（日志另给 channel）、4=AFVDD、5=wake、6=pins、7=sensor bus、8=WL bus、9=routes、10=clock、11=VS、13=PMIF、14=WL I2C parent、15=sensor I2C parent；成功时缓存 step=0。失败看 `X9 CAMERA COLD RESTORE`，不在同一 boot 重试。
 **这补齐了冷启动供电/AP timing 的局部 ownership 和有条件 I2C 父时钟开启，但 HWCCF autolink/所选 PLL 仍要求已就绪；未知 HW/EINT 用户或 SCP owner 会拒绝。没有本轮实机 ID，不能宣称冷 LK 已全部打通，更不是可拍摄镜像。**
 
+### 冷引脚按字段确认，不用入口状态覆盖后来的使用者
+
+`x9_camera_pins.inc` 已接入真实 `probe/standby` 的 reset/MCLK、四枚 AP route、GPIO203 wake 与目标 MCLK drive。MODE/DIR/DOUT 分别记录 expected/prior/dirty/uncertain；每次写入前记 journal，读回确认后立即取消该字段的 prior 例外。只有尚未确认写的精确 prior 可供 cleanup 使用，第三值锁存冲突；确认后又变回入口值不再视为合法。借用 mode1 route、output-high wake 也检查三个字段，但没有 dirty 的字段不写恢复。
+
+MT6993 厂商 `FLAG_RACE_FREE_ACCESS` 路径使用 MODE `+0xc` MWR（每 pin 的 bit4 为修改使能），不再整字 RMW；DIR/DOUT 与 IOCFG drive 使用 masked `+4/+8` SET/CLR。drive 仅处理目标 pin 的低三位，SET 单笔确认后才从新读数计算 CLR，模糊 SET 后不继续另一笔写，也不在 MCLK mode1 时调 drive。邻接字段保持，仍不是硬件原子 lease 或 ABA 保护。
+
+POWER、每次 AP control/FIFO/START/完成收尾、WL guard 及 PMIC rail 变更前检查已消费 pin/drive。隔离分别尝试已知的 reset-low 和 MCLK mode0：一枚冲突不会阻止隔离另一枚已知 pin，未知字段不会被覆盖。reset 必须 MODE0/DIR-output/DOUT0 都可确认才允许撤任何供电；DIR 未确认为 output 不重新申请或补写来制造“隔离成功”。隔离失败停在 quiesce；其他 pin/drive 冲突在任何撤电前停于原 pins step6，保留依赖。
+
+恢复只处理 dirty 字段；reset/wake 先保持低，再恢复输入 DIR，最后恢复可能为高的入口 DOUT latch，避免在输出状态恢复高 latch 形成脉冲。自己拉高的 wake 仍要求整个 WL ENABLE 为零后才恢复；借用高 wake 只核对并退休，不脉冲，也不要求无关通道关闭。旧 `cold_retained` 的 pins/wake/routes 位涵盖 borrowed references、dirty/uncertain/conflict，88B ABI 不扩展。`X9 CAMERA PIN CONFLICT/DRIVE CONFLICT` 记录决定差异，结束后的 `X9 CAMERA COLD PIN/DRIVE` 只输出软件 journal，不补读已撤电硬件。
+
+源码反例（未运行测试，也非实机故障证据）：已确认 reset DIR1 后被改为 DIR0，旧 restore 直接写 DOUT0 并读回成功，不能证明输入 pin 实际拉低；mode1 route 确认后被改回入口 mode0，旧 restore 仍可当作入口例外。现在拒绝上述变化并保留供电/clock/bus，不盲写恢复。**没有本轮实机 ID/standby 或合法 SID80 mapping/RAW10，不能据此宣称冷启动或拍摄完成。**
+
 ### I2C 父时钟遵循厂商 PDN/FENC 路径，不冒领 CAMTG voter
 
 `x9_camera_i2c_clock.inc` 接在现有 `probe/standby → cam_board_prepare → cam_bus_take`，不是等待注册的后端。厂商 A0/B0 两表均把这两个 mux 定义为 `MUX_GATE_FENC_CLR_SET_UPD_CHK`，实际 enable/disable 只写 CKSYS `+0x118/+0x114` 的 PDN 位：EAST bit23、PERI bit7。**不发 UPDATE、不 reparent、不伪造 HWV vote、不写 PLL。** FENC `+0x278` 的 bit29/31 是 on，CKSTA `+0x338` 的 bit27/29 是 busy。

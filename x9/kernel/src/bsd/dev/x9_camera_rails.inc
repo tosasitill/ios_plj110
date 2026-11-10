@@ -90,6 +90,7 @@ static int cam_shared_rails(struct cam_probe_journal *j, struct x9_camera_probe 
 }
 static int cam_rails_guard_locked(struct cam_probe_journal *j,bool cleanup)
 {
+    int guard=cam_pins_guard(j,cleanup);if(guard)return guard;
     struct cam_probe_rail *rails[]={&j->dovdd,&j->afvdd};
     for(unsigned i=0;i<2;i++) {
         struct cam_probe_rail *p=rails[i];
@@ -121,6 +122,7 @@ static int cam_rail_selector_write(struct cam_probe_journal *j,struct cam_probe_
     uint8_t sel=0,en=0,da=0;
     int e=cam_rail_check_locked(j,p,cleanup,&sel,&en,&da);if(e)return e;
     if((en&1) || (da&1))return EBUSY; /* never retune an enabled supply */
+    e=cam_pins_guard(j,cleanup);if(e)return e;
     if(sel!=value) {
         p->voltage_owned=true;p->selector_prior=sel;p->selector_expected=value;
         p->selector_uncertain=true; /* BEFORE an ambiguous write */
@@ -139,6 +141,7 @@ static int cam_rail_take_locked(struct cam_probe_journal *j,struct cam_probe_rai
     if(en&1){p->taken=true;return 0;} /* precise live rail is borrowed, not owned */
     if(sel!=p->target)e=cam_rail_selector_write(j,p,p->target,false);
     if(!e)e=cam_rail_check_locked(j,p,false,&sel,&en,&da);
+    if(!e)e=cam_pins_guard(j,false);
     if(e)return e;
     p->enable_owned=true;p->enable_prior=en;p->enable_expected=en|1;
     p->enable_uncertain=true; /* BEFORE possibly ambiguous SET */
@@ -164,6 +167,7 @@ static int cam_rail_restore_locked(struct cam_probe_journal *j,struct cam_probe_
 {
     uint8_t sel=0,en=0,da=0;
     int e=cam_rail_check_locked(j,p,true,&sel,&en,&da);if(e)return e;
+    e=cam_pins_guard(j,true);if(e)return e;
     if(p->enable_owned) {
         if(en&1) {
             p->enable_prior=en;p->enable_expected=p->enable;
@@ -192,5 +196,6 @@ static int cam_rail_restore(struct cam_probe_journal *j,struct cam_probe_rail *p
     if(X9PMIFAcquire())return EBUSY;
     int e=cam_rails_guard_locked(j,true);
     if(!e)e=cam_rail_restore_locked(j,p);
+    if(!e)e=cam_pins_guard(j,true);
     X9PMIFRelease();return e;
 }

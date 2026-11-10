@@ -31,7 +31,8 @@ static int cam_wl_guard(struct cam_probe_journal *j,bool cleanup,uint8_t *enable
 {
     if(!j->wl_tracking)return ENXIO;
     if(j->wl_conflict)return EBUSY;
-    int e=cam_wl_read(j,3,enable);if(e)return e;
+    int e=cam_pins_guard(j,cleanup);if(e)return e;
+    e=cam_wl_read(j,3,enable);if(e)return e;
     e=cam_wl_enable_check(j,*enable,cleanup);if(e)return e;
     /* Never turn off an enabled channel after its selector was changed.
      * Check all our potentially enabled channels before dropping any
@@ -51,7 +52,8 @@ static int cam_wl_guard(struct cam_probe_journal *j,bool cleanup,uint8_t *enable
     /* Selector/PMIC reads take real transactions. Re-read ENABLE after them,
      * preserving non-camera bits from this fresh byte, not the entry value. */
     e=cam_wl_read(j,3,enable);if(e)return e;
-    return cam_wl_enable_check(j,*enable,cleanup);
+    e=cam_wl_enable_check(j,*enable,cleanup);if(e)return e;
+    return cam_pins_guard(j,cleanup);
 }
 static int cam_wl_enable_change(struct cam_probe_journal *j,unsigned i,bool on)
 {
