@@ -20,6 +20,7 @@ static int cam_phy_retirement_guard(uint64_t);
 static int cam_phy_close_locked(uint64_t);
 static int cam_smi_clock_guard(void);
 static int cam_smi_clocks_close_locked(uint64_t);
+static int cam_smi_retirement_guard(uint64_t);
 static const unsigned cam_rx_out_offsets[X9_CAM_RX_OUT_WORDS]={
     0x000,0x004,0x008,0x00c,0x010,0x014,0x018,0x020,
     0x02c,0x034,0x038,0x100,0x104,0x108
@@ -200,7 +201,8 @@ static int cam_rx_session_close(struct x9_camera_receiver *r)
      * restores MAC/async, then optional SMI clocks. The receiver must still
      * match the initially captured disabled controls. Unconsumed SMI clock
      * requests or new owners retain the MM and sensor dependencies too. */
-    off=cam_phy_retirement_guard(cam_rx_live.sensor_epoch);
+    off=cam_smi_retirement_guard(cam_rx_live.sensor_epoch);
+    if(!off)off=cam_phy_retirement_guard(cam_rx_live.sensor_epoch);
     if(!off)off=cam_out_close_locked(cam_rx_live.sensor_epoch);
     if(!off)off=cam_phy_close_locked(cam_rx_live.sensor_epoch);
     if(!off)off=cam_mac_close_locked(cam_rx_live.sensor_epoch);

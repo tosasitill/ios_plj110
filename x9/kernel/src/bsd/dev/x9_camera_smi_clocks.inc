@@ -30,6 +30,13 @@ static struct {
 static int cam_smi_a0_guard(void);
 static int cam_smi_a0_open_locked(void);
 static int cam_smi_a0_close_locked(void);
+static int cam_smi_a0_pending_retire(void);
+static int cam_smi_shared_capture_locked(void);
+static int cam_smi_shared_voter_guard(void);
+static int cam_smi_shared_control_guard(bool);
+static int cam_smi_shared_open_locked(void);
+static int cam_smi_shared_close_locked(void);
+static int cam_smi_shared_retirement_guard(uint64_t);
 static bool cam_smi_clocks_held(void) { return cam_smi.held; }
 static void cam_smi_status(void)
 {
@@ -83,6 +90,7 @@ static int cam_smi_clock_only_guard(void)
     if(cam_smi.epoch!=cam_rx_live.sensor_epoch || cam_rx_live.epoch!=cam_mm_live.epoch)
         return ESTALE;
     e=cam_smi_parent_guard();if(e)return e;
+    e=cam_smi_shared_voter_guard();if(e)return e;
     for(unsigned n=0;n<CAM_SMI_SLOTS;n++)if(cam_smi.seen&(1u<<n)) {
         const struct cam_smi_gate *g=&cam_smi.gate[n];uint32_t v[3];
         e=cam_smi_slot_idle(n);if(e)return e;
@@ -104,6 +112,7 @@ static int cam_smi_clock_only_guard(void)
 static int cam_smi_clock_guard(void)
 {
     int e=cam_smi_clock_only_guard();
+    if(!e)e=cam_smi_shared_control_guard(false);
     return e?e:cam_smi_a0_guard();
 }
 static int cam_smi_slot_take(unsigned n)
@@ -192,6 +201,7 @@ static int cam_smi_clocks_close_locked(uint64_t epoch)
     /* Port controls retire while BOTH supplier and consumer clocks remain
      * held. A pending A0 write is qualified by its own sole close below. */
     if(!e)e=cam_smi_a0_close_locked();
+    if(!e)e=cam_smi_shared_close_locked();
     if(!e)e=cam_smi_clock_guard();
     if(!e)e=cam_rx_session_guard();
     if(!e)e=cam_smi_larb_idle();
@@ -219,10 +229,11 @@ static int cam_smi_clocks_close_locked(uint64_t epoch)
     else cam_smi_fault(e);
     cam_smi.status.restore_errno=e;cam_smi_status();
     printf("X9 CAMERA SMI CLOCK CLOSE: sensor=%u flags=%x errno=%u restore=%d pending=%u seen=%x "
-        "a0=%x/%x/%u (inactive port/clock restoration; NOT SMI/AXI/worker drain)\n",
+        "a0=%x/%x/%u shared=%x/%x/%u (inactive control/clock restoration; NOT SMI/AXI/worker drain)\n",
         cam_smi.status.sensor,cam_smi.status.flags,cam_smi.status.last_errno,e,
         cam_smi.pending,cam_smi.seen,cam_smi.status.a0.flags,cam_smi.status.a0.owned,
-        cam_smi.status.a0.pending);
+        cam_smi.status.a0.pending,cam_smi.status.shared.flags,cam_smi.status.shared.owned,
+        cam_smi.status.shared.pending);
     return e;
 }
 static int cam_smi_clocks_open_locked(uint64_t epoch,unsigned sensor)
@@ -248,17 +259,32 @@ static int cam_smi_clocks_open_locked(uint64_t epoch,unsigned sensor)
     cam_smi.status.flags=X9_CAM_SMI_CLOCKS_ATTEMPTED;
     cam_smi.held=true;cam_smi.status.stage=1;
     e=cam_smi_parent_guard();
+    if(!e)e=cam_smi_shared_capture_locked();
     for(unsigned n=0;n<CAM_SMI_SLOTS&&!e;n++) {
         cam_smi.status.stage=2+n;e=cam_smi_slot_take(n);
     }
     if(!e)e=cam_smi_larb_idle();
     if(!e) {cam_smi.status.stage=4;cam_smi.status.flags|=X9_CAM_SMI_CLOCKS_CONFIGURED;}
-    if(!e) {cam_smi.status.stage=5;e=cam_smi_a0_open_locked();}
-    if(!e)cam_smi.status.stage=6;
+    if(!e) {cam_smi.status.stage=5;e=cam_smi_shared_open_locked();}
+    if(!e) {cam_smi.status.stage=6;e=cam_smi_a0_open_locked();}
+    if(!e)cam_smi.status.stage=7;
     else cam_smi_fault(e);
     cam_smi_status();return e;
 }
+#include "x9_camera_smi_shared.inc"
 #include "x9_camera_smi_a0.inc"
+static int cam_smi_retirement_guard(uint64_t epoch)
+{
+    int e;
+    if(!cam_smi.held)return 0;
+    if(epoch!=cam_smi.epoch)return ESTALE;
+    /* First qualify posted controls at their actual TARGET while every
+     * dependent component is still powered. This is not DMA drain. */
+    e=cam_smi_pending_retire();
+    if(!e)e=cam_smi_shared_retirement_guard(epoch);
+    if(!e)e=cam_smi_a0_pending_retire();
+    return e?cam_smi_fault(e):cam_smi_clock_guard();
+}
 int x9_camera_sensor_session_prepare_smi_clocks(uint64_t epoch,struct x9_camera_smi_clock_status *s)
 {
     struct cam_sensor_ap ap;uint8_t byte=0;int e;

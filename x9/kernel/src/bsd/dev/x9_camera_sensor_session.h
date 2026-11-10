@@ -52,13 +52,17 @@
  * no cancellation proof and blocks all dependent teardown.
  * Optional prepare_smi_clocks AFTER prepare_receiver and BEFORE MAC/PHY/
  * OUTMUX takes only CAMSV0's deduplicated subcomm1/2/3 and larb19/14/29
- * clocks. Then it qualifies shared COMM33/L19 misc without changing them
- * and journals only CAMSV A0 L19/P0's default OSTD and initial SRT controls.
+ * clocks. Before votes it captures all ten relevant XPU banks; only cold
+ * gated/unvoted COMM33/L19 with unchanged L27/RAW_C sibling paths may have
+ * their five misc controls initialized. Existing shared owners must match,
+ * never have their profile replaced. Then it journals only CAMSV A0 L19/P0's
+ * default OSTD and initial SRT controls.
  * All other ports, common BW/routing, MMU/bank/SID fields stay untouched.
  * Supplier/consumer effects, port controls and MMINFRA AL parent are checked
  * before dependent samples; no full SMI/QoS/IOVA or shared-common grant.
- * Close restores the owned P0 fields BEFORE these clocks, AFTER MAC/PHY/
- * OUTMUX and BEFORE MM/supplies. Posted target must be observed, not prior;
+ * Close qualifies pending SMI targets BEFORE OUTMUX/PHY/MAC retirement;
+ * then restores owned P0 and misc fields BEFORE these clocks, AFTER MAC/
+ * PHY/OUTMUX and BEFORE MM/supplies. Posted target must be observed, not prior;
  * unconsumed clock requests and new owners retain dependencies. No DMA
  * producer is started, and zero LARB STAT/internal STAT is NOT full drain.
  * Sensor close first isolates reset/MCLK, then qualifies/retires that MM

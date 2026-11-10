@@ -388,11 +388,37 @@ captured DT 区分 normal camera **SID80**、protected camera **SID89**、displa
 
 每组独立保存 before/expected/owned/borrowed 与 posted SET/CG_CLR/CLR pending；拒绝 voted-but-gated 修复和 unvoted direct-clock 接管。原 borrowed AP/global/effect 必须保持，失败不能重发原请求或以 prior 控制值证明消费。pending 只有确认 target/effect 与 voter STA0 才允许唯一 close 继续；仍未知时保留所有依赖。receiver/PHY/AP 的既有 guard 现在也检查该 optional lifetime；原 MM close 在 SMI held 时拒绝卸依赖。关闭顺序 OUTMUX→PHY→MAC/async→SMI consumer→supplier→MM/sensor rails，只撤新增 AP bit，physical gate 由最后 aggregate vote 恢复，不强制 CG_SET。新 owner 保持原 gated 位时拒绝继续撤低层依赖。
 
-准入完成及撤 clock 前双采样三路 LARB 的普通 RO `STAT+0` / internal `STAT+500` 必须0；失败部分仍 gated 的 larb 不读。它仅是当前未启 producer 的必要 clock-unvote 条件，**不是完整 AXI/IRQ/cache/worker drain**。没有 IRQ/R-C 读取、SID80/path/MMU/common 配置写入、native capture caller 或实机证据；因此 **NEED_SMI/NEED_RATE/NEED_DMA_MAP/NEED_DRAIN 均不清除**，`SMI_CLOCKS_CONFIGURED` 只表示时钟控制读回，不造 READY。
+准入完成及撤 clock 前双采样三路 LARB 的普通 RO `STAT+0` / internal `STAT+500` 必须0；失败部分仍 gated 的 larb 不读。它仅是当前未启 producer 的必要 clock-unvote 条件，**不是完整 AXI/IRQ/cache/worker drain**。没有 IRQ/R-C 读取、SID80/path/MMU 写入、native capture caller 或实机证据；因此 **NEED_SMI/NEED_RATE/NEED_DMA_MAP/NEED_DRAIN 均不清除**，`SMI_CLOCKS_CONFIGURED` 只表示时钟控制读回，不造 READY。
+
+#### 初始化冷启动的共享 SMI misc
+
+`x9_camera_smi_shared.inc` 在同一个准备入口中，先于 SMI clock votes 捕获共享资格，clock 消费后才初始化 misc。**这不是以新增 AP clock 冒充全局独占：已有共享 owner 的不匹配配置仍返回 `EOPNOTSUPP`，不接管、不 reset。** Captured COMM33 不只供应 L19，还供应 **L27/CAM_MAIN 和 L44/RAW_C**；L44 的两路 SMI clock 实际为 RAW_C larbx bit0、cam bit1，不能只检查 L19。
+
+资格与守护覆盖以下真实 RO 状态：
+
+| 路径 | 准备前条件 / 后续检查 |
+|---|---|
+| COMM33 | CG35 bit15，准备前 AP/global0、physical gated；全部十个 XPU 同位0 |
+| L19 | CG34 bit2，准备前 AP/global0、physical gated；全部十个 XPU 同位0 |
+| L27 | CG22 bit0 global/XPU0且 CAM_MAIN 实际 gate0=1，不启用它来检查 |
+| L44/RAW_C | CG30 bits0/1 global/XPU0，RAW_C domain11 AP/global/PM_ACK和十个 XPU0；不读断电 RAW_C 的物理 CG |
+
+十个 XPU 的 v1 EN 地址来自 `hwccf.h::CCF_XPU`：0..4 为 `20000+n*10000`，5..9 为 `70000+(n-5)*1000`，CG EN 为 `base+cg*0xc+8`。原 AP-only MM_HWV mapping 不足以读非 AP bank，因此单独映射实际 DT resource 内 `0x31c30000/0x45000`；不访问 history/IRQ，也不写非 AP bank。投票快照跨阶段保持，只有本 journal 消费的两个 AP bit允许变为自身 expected；新增外部投票即使被现有 aggregate 隐藏也会拒绝后续写入。
+
+COMM33 的 scoped cold 条件还要求 L19/L27/L44 全部上述条件成立；L19-wide misc 的 cold 条件只针对准备前 L19 gated/unvoted。通过后双采样真实 misc，仅写下表五个配置 CSR：
+
+| bank | 顺序 / 配置 |
+|---|---|
+| COMM33 `3c808000` | `L1LEN+100=a → PREULTRA_MASK1+244=4146 → DUMMY+444=1` |
+| L19 `3a01b000` | `CMD_THRT_CON+24=370456 → SW_FLAG+40=1` |
+
+顺序取自 MT6993 misc 与 supplier-first 路径；先 journal before/expected/owned，再 posted write、完整 target 读回与依赖验证。已经匹配的字段不写也不恢复，旧共享 owner 仅可匹配使用。保留全部 L1ARB、BUS_SEL、其它端口、其它 common、路由/MMU/SID 和 reserved padding；没有 `offset0/value0` 的盲循环。`shared.before/after/target` 分别是初始采样、实际控制读数、未必消费的目标，pending 不伪装成 observed。
+
+关闭前先资格化 SMI/共享/A0 pending 的真实 target，再执行 OUTMUX→PHY→MAC→A0。之后以唯一逆序 journal 恢复 L19 misc→COMM33 misc，再撤 consumer/supplier clocks和 MM/supplies。任何控制/投票变化、未消费 target 或 busy 都保持尚未退休依赖；不以 prior 值重发、cancel/reset 或 late retry。此处的 scoped cold 初始化没有建立持续 bandwidth/rate、IRQ/worker 或 DMA authority，**不是完整 SMI drain 或 READY**。
 
 #### 准备 CAMSV A0 的默认 SMI 端口
 
-**共享 common/misc 缺少合法初始化 owner 时仍明确失败，不拿时钟引用冒充授权。** 时钟成功后，`x9_camera_smi_a0.inc` 在同一会话里检查 COMM33 `0x3c808000` 的 `L1LEN=a / PREULTRA_MASK1=4146 / DUMMY=1`，以及 L19 的 `CMD_THRT_CON=370456 / SW_FLAG=1`。这些共享字段必须已匹配，缺失返回 `EOPNOTSUPP`，不 bulk restore。所有八个 L1ARB、BUS_SEL 及五个合法 L19 端口的 NONSEC/OSTD 都按最初快照持续检查；不把 MT6993 mutable common BW 表初始全0当成覆盖其它 masters 的授权。
+共享引擎消费冷写入或确认继承配置后，`x9_camera_smi_a0.inc` 在同一会话里再次检查 COMM33 `0x3c808000` 的 `L1LEN=a / PREULTRA_MASK1=4146 / DUMMY=1`，以及 L19 的 `CMD_THRT_CON=370456 / SW_FLAG=1`。A0 本身不修复共享字段。所有八个 L1ARB、BUS_SEL 及五个合法 L19 端口的 NONSEC/OSTD 都按最初消费快照持续检查；不把 MT6993 mutable common BW 表初始全0当成覆盖其它 masters 的授权。
 
 只有 **L19/P0=`CAMSV_TOP_A0`，AXID `0x260`** 的三个字段可写：
 
@@ -406,7 +432,7 @@ DT 的 `larb-port-real-time-type=0` 是 `ALWAYS_HRT`，但 **不等于启动时�
 
 每次写前检查 receiver/MM/SMI/共享快照，逐字段保存 before/expected/owned mask，并在 posted write 前记 pending。读回必须达到完整 target；失败后的唯一 close 只接受两次真实 target，不以 prior 值、重发或 reset 退休。关闭先在 supplier/consumer clocks 仍持有时按 `NONSEC → DISABLE_ULTRA → OSTD` 恢复本次改变的字段，再撤 consumer/supplier；原本已为目标值的字段不写也不恢复。任何共享字段变化、仍有 outstanding 或未消费写入都保留低层依赖。
 
-private `smi_clock_status.a0` 返回快照、owned/pending、配置与恢复结果，不改变公开 ioctl ABI。`A0_CONFIGURED` 仅表示 inactive A0 default 配置，**不是完整 common/port 初始化、MMQoS/rate lease、SID80 mapping 或 READY**。完整 cold common/misc owner、持续 bandwidth/rate、native SMMUv3、IRQ、DMA 与 iOS 采集仍须接完，原诊断不自动调用此 preparation。
+private `smi_clock_status.a0/shared` 返回快照、owned/pending、配置与恢复结果，不改变公开 ioctl ABI。`A0_CONFIGURED` 仅表示 inactive A0 default 配置，**不是全部 common/port 初始化、MMQoS/rate lease、SID80 mapping 或 READY**。其它实际使用的 common/port、持续 bandwidth/rate、native SMMUv3、IRQ、DMA 与 iOS 采集仍须接完，原诊断不自动调用此 preparation。
 
 - standalone 入口取得 `camera_control_lock`；同 TU 的 native 回调已经持锁，必须使用内部 `_locked` helper，不重入公开入口。
 - `open` 返回的非零 epoch（包括错误返回）代表已准入 journal，必须安排一次 close；旧 epoch、重复 prepare/close 不做 MMIO。成功 prepare 不撤销 MM votes，不设置 READY，不返回 IOVA。

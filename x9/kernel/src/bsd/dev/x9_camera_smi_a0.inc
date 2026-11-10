@@ -183,10 +183,9 @@ static int cam_smi_a0_open_locked(void)
     memcpy(cam_smi.status.a0.common_before,c,sizeof(c));
     cam_smi_a0.held=true;cam_smi_a0.epoch=cam_smi.epoch;
     cam_smi.status.a0.flags|=X9_CAM_SMI_A0_SNAPSHOT;cam_smi.status.a0.stage=2;
-    /* These controls are shared with B1/CQI/STG or other CAM masters.
-     * Clock ownership is not a whole-common/misc lease: borrow a matching
-     * profile or fail without altering it. Missing cold common authority
-     * remains explicit; no reset-value adoption or bulk vendor restore. */
+    /* The shared engine must have consumed its scoped cold writes, or
+     * qualified a matching inherited profile, BEFORE taking this snapshot.
+     * A0 never acquires whole-common authority or repairs that profile. */
     if(a[CAM_SMI_A0_CMD]!=0x370456 || a[CAM_SMI_A0_FLAG]!=1 ||
         c[0]!=0xa || c[10]!=0x4146 || c[11]!=1)return cam_smi_a0_fault(EOPNOTSUPP);
     if((a[CAM_SMI_A0_FORCE]|a[CAM_SMI_A0_PRE])&1)return cam_smi_a0_fault(EBUSY);
