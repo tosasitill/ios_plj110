@@ -387,6 +387,9 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 
 - **SSPM offline handoff commit**: `fd59a42` on `work/x9-microphone-final`; no new boot image or runtime result.
 
+- **SSPM descriptor后续窄追踪**：已继续读取helper **0x695e**，它先调用**0x29f2c**的逐字节load，再经尚未解的vendor位运算/乘加索引访问**DM0x30510**表；原固件这块32×12B条目全为0，不能将raw0作合法HWV base或据exact DWORD缺失认定没有运行时映射。保守常量xref为**0x734/0x692c/0x697c/0x6e42**，下一步追这些writer/init及数据来源，不再重复扫相同exact DWORD。`hwv-descriptor-v2.asm`、`hwv-runtime-base-table-v2.json`、`unaligned-load-v2.asm`和`hwv-registration-v2.asm`已保存同一私有目录；0x8a8e/8af2在现有标准流中只是0x30082020等CSR与RAM之间保存/恢复，不把这两个函数叫AUDIO保护配置。unknown条件、索引/shift-or语义仍未正式解出；没有新增supplier、bootstrap/READY、编译/CI/镜像/设备结果，goal仍active。
+
+
 ## 麦克风活动交接(MIC-16,2026-11-10): 数字codec逐字段恢复冲突门/未写项跳过与iOS首错位置;整包已编译,真实DMA仍缺
 
 - **隔离/源码缺口**:独立`.local/x9/worktrees/microphone-rollback16` / `work/x9-microphone-rollback16`,冻结main **5ad10df86c49c79e8a4742728f89f68eb04e12ee**,不夹带working/以后main。原`digital-l→board restore→digital_stop`在partial clock初始化失败且尚未写SRC/TX时仍无条件发四项off,随后数字journal逐项盲写old;MIC12最终RW验证只在prepare,不能独自排除晚到的codec mux/clock改动。这是源码可达恢复缺口,**不是已观察PLJ110恢复冲突/声学故障**。对照OPPO mt6681.c ordinary AIFTX/UL SRC disable与本地UniXNU-sheng/HakiOS生命周期;不迁高通DSP地址/时钟或假provider,不改厂商上电/phase/DCC/RC序列。
