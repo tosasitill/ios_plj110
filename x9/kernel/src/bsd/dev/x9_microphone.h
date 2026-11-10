@@ -217,6 +217,10 @@ struct x9_mic_signal_status {
     uint32_t reserved[8];
 };
 #define X9_MIC_GET_SIGNAL _IOR('M', 0x9d, struct x9_mic_signal_status)
+/* Same status ABI, non-waiting PCM-lock snapshot for real-time HAL callers.
+ * EAGAIN means contention, not hardware failure. No MMIO, consumption,
+ * readiness assertion or fallback to an older cached stream generation. */
+#define X9_MIC_GET_STATUS_NOWAIT _IOR('M', 0x9e, struct x9_mic_status)
 #ifdef KERNEL
 #include <stdbool.h>
 /* Thread context only. start/commit/stop are serialized WITHOUT the PCM
@@ -233,7 +237,9 @@ struct x9_mic_backend {
 };
 int x9_mic_register_backend(const struct x9_mic_backend *);
 /* Only real, cache-synchronized PCM. No IRQ-context calls or test patterns.
- * last_host_time is the monotonic host time of the last sample in this block. */
+ * last_host_time is the monotonic host time of the last sample in this block.
+ * ENOBUFS rejects the entire block without overwriting queued PCM; backend
+ * must stop/fault on a delivery error, not silently skip/rebase and resume. */
 int x9_mic_deliver(uint64_t generation, const int16_t *, uint32_t frames,
                    uint64_t last_host_time);
 void x9_mic_backend_fault(uint64_t generation, int error);

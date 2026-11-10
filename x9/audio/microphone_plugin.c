@@ -17,6 +17,7 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 #include <limits.h>
+_Static_assert(sizeof(struct x9_mic_status)==104,"PCM status ABI size");
 
 enum {PLUGIN=1,CODEC=2,INPUT=3,SOURCE=4};
 #define MIC_SOURCE 'imic'
@@ -30,8 +31,9 @@ static AudioServerPlugInHostRef host;
 static unsigned running;
 static int mic=-1;
 static bool ready,io_fault,stop_failed;
-static UInt64 capture_generation,last_real_host;
+static UInt64 capture_generation,start_host;
 static UInt64 anchor,seed=1,received,underrun;
+static bool clock_valid;
 static int16_t cycle_pcm[MAX_IO_FRAMES];
 static Float64 cycle_sample;
 static UInt64 cycle_seed;
@@ -39,6 +41,38 @@ static UInt32 cycle_frames;
 static bool cycle_valid;
 static Float64 ticks_per_frame;
 static OSStatus bad_object= '!obj', unavailable= 'nope';
+/* Called with HAL lock held. Only control callbacks perform blocking STOP;
+ * the IO path revokes cached PCM/clock state and returns an explicit error. */
+static OSStatus stream_fault(void)
+{
+    if(!io_fault)++seed;
+    io_fault=true;ready=false;cycle_valid=clock_valid=false;
+    memset(cycle_pcm,0,sizeof(cycle_pcm));return unavailable;
+}
+static OSStatus stream_status(struct x9_mic_status *s)
+{
+    memset(s,0,sizeof(*s));
+    if(mic<0 || !running || !ready || io_fault || stop_failed)return unavailable;
+    if(ioctl(mic,X9_MIC_GET_STATUS_NOWAIT,s)<0) {
+        /* Never fall back to a blocking GET or a stale cached snapshot.
+         * A busy PCM lock is transient, not a permanent hardware fault. */
+        return errno==EAGAIN?unavailable:stream_fault();
+    }
+    UInt64 now=mach_absolute_time();
+    if(s->version!=1 || s->mode!=2 ||
+       (s->flags&(X9_MIC_RUNNING|X9_MIC_READY|X9_MIC_FAULT))!=(X9_MIC_RUNNING|X9_MIC_READY) ||
+       s->generation!=capture_generation || s->source!=X9_MIC_SOURCE_INTERNAL ||
+       !(s->supported_sources&X9_MIC_SOURCE_INTERNAL) || s->rate!=X9_MIC_RATE ||
+       s->channels!=1 || s->sample_bits!=16 || s->last_errno || s->dropped_frames ||
+       s->read_frames!=received || s->read_frames>s->captured_frames ||
+       s->queued_frames>X9_MIC_RING_FRAMES || s->queued_frames>s->captured_frames-s->read_frames ||
+       s->captured_frames>9007199254740991ULL || /* exact Float64 frame indexing */
+       (!!s->captured_frames!=!!s->last_host_time) || s->last_host_time>now ||
+       !isfinite(ticks_per_frame) || ticks_per_frame<=0)return stream_fault();
+    UInt64 progress=s->last_host_time?s->last_host_time:start_host;
+    if(progress>now || (double)(now-progress)>=ticks_per_frame*(X9_MIC_RATE/4))return stream_fault();
+    return 0;
+}
 static AudioStreamBasicDescription pcm_format(void)
 {
     return (AudioStreamBasicDescription){.mSampleRate=X9_MIC_RATE,.mFormatID=kAudioFormatLinearPCM,
@@ -49,7 +83,9 @@ static bool probe_ready(void)
 {
     struct x9_mic_status s={0};int fd=open(X9_MIC_STATUS_DEVICE,O_RDONLY|O_CLOEXEC);
     if(fd<0)return false;
-    bool ok=ioctl(fd,X9_MIC_GET_STATUS,&s)==0 && s.version==1 && s.mode==2 &&
+    /* Require the matching kernel's NOWAIT capability before spending a
+     * one-shot START. Old kernels cannot supply the real-time freshness gate. */
+    bool ok=ioctl(fd,X9_MIC_GET_STATUS_NOWAIT,&s)==0 && s.version==1 && s.mode==2 &&
         (s.flags&X9_MIC_READY) && !(s.flags&X9_MIC_FAULT) &&
         (s.supported_sources&X9_MIC_SOURCE_INTERNAL) && s.rate==X9_MIC_RATE && s.channels==1 && s.sample_bits==16;
     close(fd);return ok;
@@ -103,7 +139,7 @@ static OSStatus stop_device(void)
     if(!confirmed) {
         /* Keep the control fd for a later StopIO. Never replace it with a
          * new recording after an unacknowledged drain/resource restore. */
-        stop_failed=io_fault=true;ready=false;cycle_valid=false;
+        stop_failed=io_fault=true;ready=false;cycle_valid=clock_valid=false;
         memset(cycle_pcm,0,sizeof(cycle_pcm));++seed;
         return unavailable;
     }
@@ -120,14 +156,30 @@ static OSStatus stop_client(struct client *c)
     if(c->running) {
         c->running=false;
         if(--running==0) {
-            memset(cycle_pcm,0,sizeof(cycle_pcm));cycle_valid=false;
+            memset(cycle_pcm,0,sizeof(cycle_pcm));cycle_valid=clock_valid=false;
             ++seed;
-            fprintf(stderr,"X9 MIC HAL: stopped real_frames=%llu underrun_frames=%llu\n",received,underrun);
+            fprintf(stderr,"X9 MIC HAL: stopped dequeued_frames=%llu underrun_frames=%llu\n",received,underrun);
         }
     }
     /* A prior failed StopIO must not become success just because this
      * client's running bit and the HAL user count were already cleared. */
     return !running?stop_device():0;
+}
+static void notify_control_state(void)
+{
+    /* Only control callbacks, after releasing HAL lock. Host notifications
+     * must not block or reenter us from the real-time read/timestamp path. */
+    if(!host)return;
+    const AudioObjectPropertyAddress device[]={
+        {kAudioDevicePropertyDeviceIsRunning,kAudioObjectPropertyScopeGlobal,0},
+        {kAudioDevicePropertyDeviceIsAlive,kAudioObjectPropertyScopeGlobal,0}};
+    const AudioObjectPropertyAddress plugin[]={
+        {kAudioPlugInPropertyDeviceList,kAudioObjectPropertyScopeGlobal,0},
+        {kAudioObjectPropertyOwnedObjects,kAudioObjectPropertyScopeGlobal,0}};
+    AudioObjectPropertyAddress input={kAudioStreamPropertyIsActive,kAudioObjectPropertyScopeGlobal,0};
+    host->PropertiesChanged(host,CODEC,2,device);
+    host->PropertiesChanged(host,INPUT,1,&input);
+    host->PropertiesChanged(host,PLUGIN,2,plugin);
 }
 static OSStatus remove_client(__unused AudioServerPlugInDriverRef d,AudioObjectID o,const AudioServerPlugInClientInfo *c)
 {
@@ -135,7 +187,7 @@ static OSStatus remove_client(__unused AudioServerPlugInDriverRef d,AudioObjectI
     pthread_mutex_lock(&lock);struct client *slot=find_client(c->mClientID);
     OSStatus e=slot?stop_client(slot):0;
     if(slot)memset(slot,0,sizeof(*slot));
-    pthread_mutex_unlock(&lock);return e;
+    pthread_mutex_unlock(&lock);notify_control_state();return e;
 }
 static OSStatus configuration(__unused AudioServerPlugInDriverRef d,AudioObjectID o,
     __unused UInt64 action,__unused void *info){return o==CODEC?0:bad_object;}
@@ -282,7 +334,7 @@ static OSStatus start_io(__unused AudioServerPlugInDriverRef d,AudioObjectID o,U
         struct x9_mic_status s={0};
         if(mic<0 || ioctl(mic,X9_MIC_GET_STATUS,&s)<0 || s.version!=1 ||
            (s.flags&(X9_MIC_RUNNING|X9_MIC_READY|X9_MIC_FAULT))!=(X9_MIC_RUNNING|X9_MIC_READY) ||
-           s.generation!=capture_generation) {io_fault=true;ready=false;cycle_valid=false;e=unavailable;}
+           s.generation!=capture_generation || s.dropped_frames) {e=stream_fault();}
         else if(!c->running){c->running=true;++running;}
     }
     else if(!c->running) {
@@ -296,20 +348,18 @@ static OSStatus start_io(__unused AudioServerPlugInDriverRef d,AudioObjectID o,U
                 } else {
                     struct x9_mic_status s={0};
                     if(ioctl(mic,X9_MIC_GET_STATUS,&s)<0 || s.version!=1 ||
-                       (s.flags&(X9_MIC_RUNNING|X9_MIC_READY|X9_MIC_FAULT))!=(X9_MIC_RUNNING|X9_MIC_READY)) {
+                       (s.flags&(X9_MIC_RUNNING|X9_MIC_READY|X9_MIC_FAULT))!=(X9_MIC_RUNNING|X9_MIC_READY) ||
+                       s.read_frames || s.dropped_frames || s.last_errno) {
                         io_fault=true;ready=false;(void)stop_device();e=unavailable;
-                    } else {capture_generation=s.generation;anchor=last_real_host=mach_absolute_time();
-                        ++seed;received=underrun=0;cycle_valid=false;}
+                    } else {capture_generation=s.generation;start_host=mach_absolute_time();anchor=0;
+                        ++seed;received=underrun=0;cycle_valid=clock_valid=false;}
                 }
             }
         }
         if(!e){c->running=true;++running;}
     }
     pthread_mutex_unlock(&lock);
-    if(!e && host) {
-        AudioObjectPropertyAddress a={kAudioDevicePropertyDeviceIsRunning,kAudioObjectPropertyScopeGlobal,0};
-        host->PropertiesChanged(host,CODEC,1,&a);
-    }
+    notify_control_state();
     return e;
 }
 static OSStatus stop_io(__unused AudioServerPlugInDriverRef d,AudioObjectID o,UInt32 id)
@@ -317,21 +367,35 @@ static OSStatus stop_io(__unused AudioServerPlugInDriverRef d,AudioObjectID o,UI
     if(o!=CODEC)return bad_object;
     pthread_mutex_lock(&lock);struct client *c=find_client(id);
     OSStatus e=c?stop_client(c):bad_object;pthread_mutex_unlock(&lock);
-    if(host) {
-        AudioObjectPropertyAddress a={kAudioDevicePropertyDeviceIsRunning,kAudioObjectPropertyScopeGlobal,0};
-        host->PropertiesChanged(host,CODEC,1,&a);
-    }
+    notify_control_state();
     return e;
 }
-static OSStatus timestamp(__unused AudioServerPlugInDriverRef d,AudioObjectID o,__unused UInt32 id,
+static OSStatus timestamp(__unused AudioServerPlugInDriverRef d,AudioObjectID o,UInt32 id,
     Float64 *sample,UInt64 *time,UInt64 *out_seed)
 {
     if(o!=CODEC || !sample || !time || !out_seed)return bad_object;
     if(pthread_mutex_trylock(&lock))return unavailable;
-    OSStatus e=running && ready && !io_fault && !stop_failed?0:unavailable;
+    struct client *c=find_client(id);struct x9_mic_status s;
+    OSStatus e=c && c->running?stream_status(&s):unavailable;
     if(!e) {
-        UInt64 now=mach_absolute_time();double periods=floor((now-anchor)/(ticks_per_frame*PERIOD));
-        *sample=periods*PERIOD;*time=anchor+(UInt64)(*sample*ticks_per_frame);*out_seed=seed;
+        /* No first-data success and no wall-clock-only frame advancement.
+         * Backend host time is its real delivered block's estimate, not a
+         * measured hardware clock. Use nominal 48k interpolation only after
+         * that evidence and clamp the timeline to produced PCM frames. */
+        if(!s.captured_frames)e=unavailable;
+        else {
+            if(!clock_valid) {
+                long double span=(long double)(s.captured_frames-1)*ticks_per_frame;
+                if(span>=(long double)s.last_host_time)e=stream_fault();
+                else {anchor=s.last_host_time-(UInt64)span;clock_valid=true;}
+            }
+            if(!e) {
+                Float64 frame=(Float64)(((s.captured_frames-1)/PERIOD)*PERIOD);
+                long double offset=(long double)frame*ticks_per_frame;
+                if(offset>(long double)(UINT64_MAX-anchor))e=stream_fault();
+                else {*sample=frame;*time=anchor+(UInt64)offset;*out_seed=seed;}
+            }
+        }
     }
     pthread_mutex_unlock(&lock);return e;
 }
@@ -358,29 +422,41 @@ static OSStatus do_io(__unused AudioServerPlugInDriverRef d,AudioObjectID o,Audi
     if(!c || !c->running || mic<0 || !ready || io_fault || stop_failed) {
         pthread_mutex_unlock(&lock);return unavailable;
     }
-    bool timed=cycle && (cycle->mInputTime.mFlags&kAudioTimeStampSampleTimeValid) && isfinite(cycle->mInputTime.mSampleTime);
+    bool timed=cycle && (cycle->mInputTime.mFlags&kAudioTimeStampSampleTimeValid) &&
+        isfinite(cycle->mInputTime.mSampleTime) && cycle->mInputTime.mSampleTime>=0 &&
+        cycle->mInputTime.mSampleTime<=9007199254740991.0 &&
+        floor(cycle->mInputTime.mSampleTime)==cycle->mInputTime.mSampleTime;
+    if(!timed){pthread_mutex_unlock(&lock);return '!dat';}
+    struct x9_mic_status before,after;
+    e=stream_status(&before);
+    if(e){pthread_mutex_unlock(&lock);return e;}
     if(c && c->running && ready && !io_fault && !stop_failed && timed && cycle_valid && cycle_seed==seed && cycle_frames==frames &&
        cycle_sample==cycle->mInputTime.mSampleTime) {
         /* Multiple HAL clients asking for the same input cycle must hear
          * the same samples, not advance the physical microphone twice. */
         memcpy(buffer,cycle_pcm,(size_t)frames*2);pthread_mutex_unlock(&lock);return 0;
     }
+    if(cycle_valid && cycle->mInputTime.mSampleTime<cycle_sample+cycle_frames) {
+        /* Reject an old/overlapping cycle or same start with a new length;
+         * never consume fresh PCM in response to a replayed input cycle. */
+        pthread_mutex_unlock(&lock);return '!dat';
+    }
     while(have<frames) {
         ssize_t n=read(mic,(int16_t *)buffer+have,(size_t)(frames-have)*2);
-        if(n>0 && !(n&1)){have+=(UInt32)n/2;continue;}
+        if(n>0 && !(n&1) && (size_t)n<=(size_t)(frames-have)*2){have+=(UInt32)n/2;continue;}
         if(n<0 && (errno==EAGAIN || errno==EWOULDBLOCK))break;
-        e=unavailable;ready=false;break;
-    }
-    UInt64 now=mach_absolute_time();
-    if(have)last_real_host=now;
-    /* Match the backend's bounded 250ms stall contract. EAGAIN may pad a
-     * transient cycle, not an unlimited successful stream of silence. */
-    if(!e && (double)(now-last_real_host)>ticks_per_frame*(X9_MIC_RATE/4))e=unavailable;
-    if(e) {
-        io_fault=true;ready=false;cycle_valid=false;++seed;
-        memset(cycle_pcm,0,sizeof(cycle_pcm));memset(buffer,0,(size_t)frames*2);
+        e=stream_fault();break;
     }
     received+=have;underrun+=frames-have;
+    /* A dequeue of stale backlog is not producer progress. Recheck actual
+     * kernel generation/drops/producer host time after all nonblocking reads
+     * and before publishing a new fan-out cache. */
+    if(!e)e=stream_status(&after);
+    if(!e && !received)e=unavailable; /* no successful first cycle of padded silence */
+    if(e) {
+        cycle_valid=false;
+        memset(cycle_pcm,0,sizeof(cycle_pcm));memset(buffer,0,(size_t)frames*2);
+    }
     cycle_valid=!e && timed;
     if(cycle_valid) {
         memcpy(cycle_pcm,buffer,(size_t)frames*2);cycle_sample=cycle->mInputTime.mSampleTime;

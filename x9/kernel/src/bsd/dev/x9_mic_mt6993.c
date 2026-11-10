@@ -267,14 +267,14 @@ static int poll_locked(void)
     dma_diagnostic.cur_after=ptr;
     uint32_t next=(uint32_t)(ptr-base);
     /* A pointer alone cannot distinguish a full wrap. If the worker was
-     * delayed >=100ms (ring >=341ms), discard ambiguous pending bytes instead
-     * of delivering stale or overwritten PCM as a successful recording. */
+     * delayed >=100ms (ring >=341ms), report the estimated discontinuity
+     * then stop/fault. Do not silently rebase and resume a continuous stream.
+     * This estimate is not a hardware frame counter or measured sample rate. */
     if(elapsed>=100000000) {
         uint64_t frames=elapsed*X9_MIC_RATE/1000000000;
         x9_mic_backend_drop(generation,(uint32_t)MIN(frames,UINT32_MAX));
         dma_diagnostic.dropped_frames+=(uint32_t)MIN(frames,UINT32_MAX);
-        if(next!=cursor)last_progress=now;
-        cursor=next;last_poll=now;return 0;
+        return EOVERFLOW;
     }
     uint32_t bytes=(next+hw.dma_bytes-cursor)%hw.dma_bytes;
     if(!bytes){last_poll=now;return 0;}

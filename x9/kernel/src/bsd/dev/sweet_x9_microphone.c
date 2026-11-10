@@ -15,6 +15,7 @@
 #include <pexpert/device_tree.h>
 #include "x9_microphone.h"
 #include "x9_mic_mt6993.h"
+_Static_assert(sizeof(struct x9_mic_status)==104,"PCM status ABI size");
 
 extern int sweet_early_is_x9(void);
 extern int sweet_x9_arg(const char *, int);
@@ -73,9 +74,13 @@ int x9_mic_deliver(uint64_t generation,const int16_t *pcm,uint32_t frames,uint64
     lck_mtx_lock(&mic_lock);int e=0;
     if(!(st.flags&X9_MIC_RUNNING) || generation!=st.generation)e=ESTALE;
     else if(time<=st.last_host_time || time>mach_absolute_time())e=EINVAL;
+    else if(count+frames>X9_MIC_RING_FRAMES) {
+        /* Refuse an entire incoming block rather than overwrite old PCM
+         * and let a consumer present the gap as continuous audio. The
+         * backend must stop/fault on this error; drops are visible first. */
+        st.dropped_frames+=frames;e=ENOBUFS;
+    }
     else {
-        uint32_t lost=count+frames>X9_MIC_RING_FRAMES?count+frames-X9_MIC_RING_FRAMES:0;
-        head=(head+lost)%X9_MIC_RING_FRAMES;count-=lost;st.dropped_frames+=lost;
         uint32_t tail=(head+count)%X9_MIC_RING_FRAMES;
         uint32_t n=MIN(frames,X9_MIC_RING_FRAMES-tail);
         memcpy(ring+tail,pcm,n*2);memcpy(ring,pcm+n,(frames-n)*2);
@@ -152,8 +157,11 @@ static int mic_ioctl(dev_t d,u_long cmd,caddr_t data,__unused int f,struct proc 
         if(cmd==X9_MIC_ANALOG_L)return x9_mic_mt6993_analog_l();
         return cmd==X9_MIC_CALIBRATE?x9_mic_mt6993_calibrate():x9_mic_mt6993_power_probe();
     }
-    if(cmd==X9_MIC_GET_STATUS) {
-        lck_mtx_lock(&mic_lock);st.queued_frames=count;
+    if(cmd==X9_MIC_GET_STATUS || cmd==X9_MIC_GET_STATUS_NOWAIT) {
+        if(cmd==X9_MIC_GET_STATUS_NOWAIT) {
+            if(!lck_mtx_try_lock(&mic_lock))return EAGAIN;
+        } else lck_mtx_lock(&mic_lock);
+        st.queued_frames=count;
         memcpy(data,&st,sizeof(st));lck_mtx_unlock(&mic_lock);return 0;
     }
     if(cmd!=X9_MIC_START && cmd!=X9_MIC_STOP)return ENOTTY;
