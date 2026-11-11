@@ -1375,7 +1375,15 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **不能称为全部USB完成**:本轮暂无枚举/DMA/ue0 ping/bulk回环实机结果,live EMI/MPU允许普通XNU DMA页也未证明。`native_apple_stack=0`,没有冒充IOUSBDeviceController或AppleUSBDeviceMux;原始configd USBDeviceConfiguration/lockdownd、Finder/iTunes Trust/配对/照片同步仍缺20H392 controller adapter及kext构建接入。USB3 XS-PHY/retimer、charger Type-C role与原生xHCI也未完成。参考文章chip/board/security-domain/fsid/锁状态条件要到原生栈接通后才验证,不先改身份/配对状态制造成功。
 - **下一步/验收**:先在用户手动启动的单一候选核对`CAP_EPINFO/TXFIFO/RXFIFO/MISC`→config1/alt1→真实QMU OUT/IN→ue0 ping,再用iOS `usbctl --echo`+host单次echo证明host→iOS→host字节相同。保留EP0日志,无需重建Metal插件/mailbox。接口/回退/构建说明在`x9/usb/README.md`;不要求用户现在连续刷试探镜像。
 
-## 蜂窝当前交接(CELL135-DUALSTACK,2026-11-11): 191证实MD ACT成功、桥自己拒双栈PDP3；cell135接受PDP3并加IPv6客户端挂接，未上机
+## 蜂窝当前交接(CELL136-MTU,2026-11-11): 192仍在ACT成功后回error16；cell136放宽网络MTU/第4个DNS并打印失败字段，未上机
+
+- **192.txt**(cell135，24201行，末121s)。用户：仍无法上网；开始两卡都有信号，后来广电信号空。**观察**：与191相同模式——219→ACT201 `CNF 0x0202 result 0`→ccmni IFUP→桥`error 16`→DEACT，20轮；v4 Start 168次，148次BUSY。v6挂接按设计等待后随v4失败回201(168次)。两卡28s前后SA注册(C5GREG1/AcT11)，SIM1 55.8s、SIM2 66.6s回落LTE(AcT7)，与ACT/DEACT循环同期——**推断**广电信号变空与此有关，未证实；哪个槽是广电未核对。
+- **新发现(MD静态)**：`mipc_data_act_call_cnf` 91327822只有+0x2c8标志为真才加v4 MTU 0x123；DNS计数913275ec封顶4。我们在ACT(要求0x123)、GET(要求MTU相等且dns≤3)、EIF(要求MTU 68..)、发布(EIF MTU==ACT MTU)四处都要求网络MTU。复用默认承载时网络常不带MTU→这是cell135仍失败的最可能原因(**推断**；192无字段日志)。
+- **修复 main `65c7179`**：MTU缺省/0视为未指定，路由MTU取EIF/GET有效值(都有取小)否则1500(v6下限1280)；活动路由只在地址变化时拆；DNS接受4个；ACT CNF被拒打印`X9 WDS: ACT CNF rejected: cid.. type.. count.. v6count.. dns.. channel.. trans%100.. mtu.. ip-len.. gone.. abandoned.. dpmaif..`，GET205/发布失败也各打一行(均无地址值)。单编exit0。
+- **候选 `x9/out/x9-cell136-mtu-md/boot.img`**(worktree `d9252cc`=cell135+上述)，三命令exit0，Image 29982720B、boot 13529088B，参数同131，插件276，**无需mailbox**。记录`.local/x9/work/cell136-mtu/`。
+- **下一步**：用户boot cell136→`~/193.txt`，关Wi-Fi用蜂窝上网。先grep `PDP activated`；若无，看`ACT CNF rejected`/`GET205 ... `/`publish failed`那一行定位剩余的门。
+
+## 蜂窝前次交接(CELL135-DUALSTACK,2026-11-11): 191证实MD ACT成功、桥自己拒双栈PDP3；cell135接受PDP3并加IPv6客户端挂接，未上机
 
 - **191.txt**(Mac `~/191.txt`，34777行，cell134)。用户：仍无网络，设置>关于本机>网络"不可用"。**观察**：Profile27/c7不再被94拒（`X9 PROFILE: create/configure ... RAM-only`）；iOS发出WDS Start20，v4客户端(0x4133)和v6客户端(0x4132)同一mux1几乎同时。v6被固定回CALL_FAILED 210。v4走到真实MD：219→`MIPC CNF 0x021a result 0`→ACT201→**`CNF 0x0202 result 0`**、`EIF/IFST ccmni1 command 0`(IFUP)——**MD侧拨号成功**；但桥随即`response msg 0x0020 error 16`并`deactivate owned call`→`0x0204 result 0`。这样循环14次(第15次ACT回result 1314635)，iOS共重试约1544次，其余1529次因上一次拆除未完被回BUSY(error 2)。无GET205、无`PDP activated`、TX/RX=0。
 - **根因(静态+日志，推断强)**：保存MD `mipc_data_act_call_cnf` 913273b6..913273e2：v4与v6地址都存在时0x102=**3(IPv4v6)**，仅v4为1、仅v6为2。我们请求APN为空+REUSE2，MD复用attach默认承载(双栈)→CNF类型3。`x9w_settings`要求`type==1`→NOT_READY(16)+DEACT。同类硬性门还在`x9wr_decode_get`(期望1)、EIF IFUP(要求v6计数0且无v6地址)、`x9wr_ipv4_facts`(modem_pdp==1)。CNF各TLV长度(0x123/0x125/0x12a=4B,0x102/0x103/0x10d=1B)与解析一致，排除格式问题。
