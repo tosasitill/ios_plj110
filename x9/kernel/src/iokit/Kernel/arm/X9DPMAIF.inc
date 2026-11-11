@@ -74,7 +74,7 @@ struct x9d_state {
     uint32_t last_ul, last_dl; bool legacy_pit_reported;
     uint64_t tx_packets, tx_done, rx_packets, rx_dropped, rejected, flow_events,next_lifetime;
     // TX progress watch (vendor drv3_dump_register subset on a stall).
-    uint64_t tx_progress_ms, tx_seen_done, stale_completions, bind_ms; unsigned stall_dumps, rx_dumps; bool stall_reported, at_seen;
+    uint64_t tx_progress_ms, tx_seen_done, stale_completions, bind_ms; unsigned stall_dumps, rx_dumps, tx_diag; bool stall_reported, at_seen;
     int (*receiver)(uint32_t, const uint8_t *, uint32_t, uint32_t, uint64_t);
 };
 static x9d_state x9d;
@@ -415,7 +415,7 @@ static bool x9d_bind(unsigned mux, unsigned channel, unsigned families, unsigned
     r.epoch++; r.lifetime = ++x9d.next_lifetime; r.channel = (uint8_t)channel; r.families = (uint8_t)families; r.mtu = mtu; r.bound = true;
     bzero(&r.stats, sizeof(r.stats));
     x9d.rx_account[channel].lifetime = r.lifetime; // unused channel only; no RX ledger reset
-    x9d.used_channel[channel] = true; x9d.bind_ms = x9d_ms(); x9d.rx_dumps = 0;
+    x9d.used_channel[channel] = true; x9d.bind_ms = x9d_ms(); x9d.rx_dumps = 0; x9d.tx_diag = 0;
     lifetime = r.lifetime; IOLockUnlock(x9d.lock); return true;
 }
 static void x9d_unbind(unsigned mux) {
@@ -552,6 +552,16 @@ static bool x9d_tx_poll() {
         IOLockUnlock(x9d.lock); if (!valid) { bzero(&t, sizeof(t)); continue; }
         unsigned index = x9d.tx_wr, pool = index / 2 * X9D_TX_SIZE;
         memcpy(x9d.txpool.va + pool, t.ip, t.size); x9d_sync(x9d.txpool, pool, t.size);
+        if (x9d.tx_diag < 12 && t.size >= 20 && (t.ip[0] >> 4) == 4) {
+            // UL sanity after each bind: header checksum, addresses, L4 port.
+            x9d.tx_diag++; const uint8_t *h = t.ip; unsigned ihl = (h[0] & 15) * 4, sum = 0;
+            for (unsigned i = 0; i < ihl && i + 1 < t.size; i += 2) sum += (unsigned)h[i] << 8 | h[i + 1];
+            while (sum >> 16) sum = (sum & 0xffff) + (sum >> 16);
+            unsigned port = (h[9] == 6 || h[9] == 17) && t.size >= ihl + 4 ? ((unsigned)h[ihl + 2] << 8 | h[ihl + 3]) : 0;
+            printf("X9 DPMAIF: UL[%u] ch %u v4 proto %u len %u ttl %u hdrsum %s %u.%u.%u.%u -> %u.%u.%u.%u port %u\n",
+                x9d.tx_diag, channel, h[9], t.size, h[8], sum == 0xffff ? "ok" : "BAD",
+                h[12], h[13], h[14], h[15], h[16], h[17], h[18], h[19], port);
+        }
         uint64_t pa = x9d.txpool.pa + pool;
         uint32_t *d = reinterpret_cast<uint32_t *>(x9d.drb.va + index * 8);
         d[0] = 1 | 4 | ((uint32_t)t.size << 16); d[1] = (uint32_t)channel << 16; // MSG dtype=1/cbit=1

@@ -369,15 +369,19 @@ static void x9w_handle_reply(x9w_bearer &b){
 // token table so no MIPC slot is leaked when a bearer is cleared.
 struct x9w_side { uint64_t token,deadline; uint8_t cmd,sim; uint32_t trans; };
 static x9w_side x9w_sides[8];
-static void x9w_ifst(unsigned sim,uint32_t trans,unsigned cmd,unsigned type){
+static const char *x9w_eif_name(unsigned cmd){return cmd==0?"ifst up":cmd==1?"ifst down":cmd==2?"ipupdate v4":"?";}
+static void x9w_ifst(unsigned sim,uint32_t trans,unsigned cmd,unsigned type,const uint8_t *v4=nullptr){
  x9w_side *slot=nullptr;for(x9w_side &e:x9w_sides)if(!e.token){slot=&e;break;}
- if(!slot||!x9_md_mipc_online()){printf("X9 WDS: EIF ifst %s ccmni%u not sent (no slot/MIPC)\n",cmd?"down":"up",trans%100);return;}
+ if(!slot||!x9_md_mipc_online()){printf("X9 WDS: EIF %s ccmni%u not sent (no slot/MIPC)\n",x9w_eif_name(cmd),trans%100);return;}
  x9w_frame f(0x313,1u<<sim);f.word(0x100,trans);f.byte(0x101,(uint8_t)cmd);
  if(!cmd)f.byte(0x104,(uint8_t)type);
+ if(cmd==2){ // NEW_ADDR 0x8102: MD reads exactly 0x20 B, u32 len @0, addr @4
+  uint8_t a[32]={4,0,0,0};if(v4)memcpy(a+4,v4,4);f.tlv(0x8102,a,sizeof(a));
+ }
  uint64_t token=f.submit();
- if(!token){printf("X9 WDS: EIF ifst %s ccmni%u submit failed\n",cmd?"down":"up",trans%100);return;}
+ if(!token){printf("X9 WDS: EIF %s ccmni%u submit failed\n",x9w_eif_name(cmd),trans%100);return;}
  *slot={token,x9q_ms()+30000,(uint8_t)cmd,(uint8_t)sim,trans};
- printf("X9 WDS: SIM%u EIF ifst %s ccmni%u type %u sent to MD\n",sim+1,cmd?"down":"up",trans%100,type);
+ printf("X9 WDS: SIM%u EIF %s ccmni%u type %u sent to MD\n",sim+1,x9w_eif_name(cmd),trans%100,type);
 }
 static void x9w_side_poll(){
  static uint8_t response[X9_MIPC_FRAME_MAX];
@@ -385,7 +389,7 @@ static void x9w_side_poll(){
   unsigned n=0;int ready=x9_md_mipc_take(e.token,response,sizeof(response),&n);
   if(ready==1){
    unsigned result=~0u;bool good=x9w_wire(response,n)&&x9q_u16(response+10)==0x314&&x9w_word(response,n,0,result);
-   printf("X9 WDS: SIM%u EIF ifst %s ccmni%u CNF %s result %u\n",e.sim+1,e.cmd?"down":"up",e.trans%100,good?"valid":"malformed",result);
+   printf("X9 WDS: SIM%u EIF %s ccmni%u CNF %s result %u\n",e.sim+1,x9w_eif_name(e.cmd),e.trans%100,good?"valid":"malformed",result);
    bzero(response,sizeof(response));bzero(&e,sizeof(e));continue;
   }
   if(e.deadline&&x9q_ms()>=e.deadline){printf("X9 WDS: EIF ifst ccmni%u CNF late; still draining\n",e.trans%100);e.deadline=0;}
@@ -428,7 +432,11 @@ static void x9w_publish(x9w_bearer &b,unsigned mux){
  connected.send(CBQ_PORT_BASE+b.slot,X9BB_PORT_BASE+1,true,0x22);
  // DPMAIF route is bound and the host has the address: report the AP
  // interface up, typed like the verified PDN (EIF_ADDRESS_TYPE 1 or 3).
+ printf("X9 WDS: call %u address %u.%u.%u.%u dns0 %u.%u.%u.%u dns_count %u (UL source must match)\n",b.cid,
+  b.ip[0],b.ip[1],b.ip[2],b.ip[3],b.dns[0][0],b.dns[0][1],b.dns[0][2],b.dns[0][3],b.dns_count);
  x9w_ifst(b.sim_slot,b.trans_id,0,runtime.modem_pdp==3?3:1);
+ // netagent then reports the configured address (AT+EIF=<id>,"ipupdate",1,a.b.c.d).
+ x9w_ifst(b.sim_slot,b.trans_id,2,0,b.ip);
 }
 static void x9w_result(x9w_bearer &b,unsigned mux,const uint8_t *p,unsigned n){
  x9w_host_expire(b,mux,x9q_ms()); // late ready1 cannot restore host success
