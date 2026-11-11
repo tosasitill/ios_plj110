@@ -8,14 +8,18 @@
  * all DMA memory until reboot; no reset, modem assertion or recovery loop.
  */
 namespace {
-// Android live dump: BAT rings 16384 entries (0x00414000) with ~2000
-// credited, LRO PIT rings 0x8000. Buffers: X9D_POOL per kind, slot = bid %
-// X9D_POOL; a bid is posted only after the bid one lap earlier was released.
+// Android live dump: BAT rings 16384 entries with ~2000 credited, PIT 0x8000.
+// Each BID owns a stable buffer, allocated in bounded chunks on first use.
+// Never change a live BID's address/modulus when MD requests more buffers.
 constexpr unsigned X9D_DRB = 2048, X9D_BAT = 16384, X9D_PIT = 0x8000;
-constexpr unsigned X9D_POOL = 2048, X9D_CREDIT = 2000;
+constexpr unsigned X9D_BUF_CHUNK = 256, X9D_POOL_CHUNKS = X9D_BAT / X9D_BUF_CHUNK;
+constexpr unsigned X9D_CREDIT = 2000;
 constexpr unsigned X9D_TX_SIZE = 3072, X9D_PKT_SIZE = 1664, X9D_FRG_SIZE = 1920;
 constexpr unsigned X9D_MAIL = 128, X9D_BUDGET = 128, X9D_TX_BUDGET = 32;
 constexpr uint64_t X9D_DMA_LIMIT = 1ULL << 40;
+constexpr uint32_t X9D_BAT_HINT_PENDING = 1u << 15;
+constexpr unsigned X9D_BAT_HINT_MAX = 0xffff;
+static_assert(X9D_BAT % X9D_BUF_CHUNK == 0 && X9D_CREDIT < X9D_BAT, "BAT geometry");
 constexpr uint32_t X9D_BUSY_BIT = 0x80000000u;
 constexpr uint32_t X9D_UL_FLOW = (31u << 5) | (31u << 10) | (31u << 15);
 constexpr uint32_t X9D_UL_ERROR = 31u << 20;
@@ -65,11 +69,16 @@ struct x9d_rx {
 struct x9d_state {
     IOLock *lock;
     uintptr_t ao, pd, md_misc, infra, sram1;
-    x9d_dma drb, txpool, pit[2], bat[2], pool[2];
+    x9d_dma drb, txpool, pit[2], bat[2], pool[2][X9D_POOL_CHUNKS];
     x9d_dma drbq[3]; // TXQ1..3: started like dpmaif_txqs_start (DPMAIF_TXQ_NUM 4), never fed
     bool posted[2][X9D_BAT];
     bool used_channel[20]; // bound/retiring routes only; released when retirement finishes
     unsigned bat_wr[2], tx_wr, tx_rd, head, count;
+    unsigned bat_hint, bat_target, bat_credit[2], bat_backing[2], bat_owned[2];
+    unsigned bat_hint_reports, bat_alloc_failures[2], bat_alloc_reports;
+    uint64_t bat_hint_events, bat_invalid_hints, bat_retry_ms[2];
+    uint64_t rx_wire_bytes, bat_rate_ms, bat_rate_bytes;
+    bool bat_high_rate;
     x9d_tx mail[X9D_MAIL]; x9d_route route[CBP_INTERFACES]; x9d_rx rx[2];
     x9d_completion completion[X9D_DRB / 2];
     x9d_rx_account rx_account[20];
@@ -233,8 +242,35 @@ static const char *x9d_l4_sanity(const uint8_t *ip, unsigned n) {
     while (sum >> 16) sum = (sum & 65535u) + (sum >> 16);
     return sum == 65535u ? "ok" : "BAD";
 }
+static unsigned x9d_buffer_offset(unsigned kind, unsigned bid) {
+    return (bid % X9D_BUF_CHUNK) * (kind ? X9D_FRG_SIZE : X9D_PKT_SIZE);
+}
+static x9d_dma &x9d_buffer(unsigned kind, unsigned bid) {
+    return x9d.pool[kind][bid / X9D_BUF_CHUNK];
+}
+static bool x9d_buffer_ensure(unsigned kind, unsigned bid) {
+    x9d_dma &m = x9d_buffer(kind, bid);
+    if (m.va) return true;
+    uint64_t now = x9d_ms();
+    if (now < x9d.bat_retry_ms[kind]) return false;
+    x9d_dma fresh = {};
+    if (!x9d_alloc(fresh, X9D_BUF_CHUNK * (kind ? X9D_FRG_SIZE : X9D_PKT_SIZE))) {
+        // This fresh chunk has NEVER appeared in a BAT descriptor. Published
+        // chunks are retained, even if an unrelated allocation later fails.
+        if (fresh.md) fresh.md->release();
+        if (x9d.bat_alloc_failures[kind] < 5) x9d.bat_alloc_failures[kind]++;
+        x9d.bat_retry_ms[kind] = now + (1000u << (x9d.bat_alloc_failures[kind] - 1));
+        if (x9d.bat_alloc_reports++ < 8)
+            printf("X9 DPMAIF: BAT%u allocation deferred at BID %u; target %u credit %u backing %u, no fictitious credit\n",
+                kind, bid, x9d.bat_target, x9d.bat_credit[kind], x9d.bat_backing[kind]);
+        return false;
+    }
+    m = fresh; x9d.bat_backing[kind] += X9D_BUF_CHUNK;
+    x9d.bat_alloc_failures[kind] = 0; x9d.bat_retry_ms[kind] = 0;
+    return true;
+}
 static void x9d_bat_entry(unsigned kind, unsigned bid) {
-    uint64_t pa = x9d.pool[kind].pa + (bid % X9D_POOL) * (kind ? X9D_FRG_SIZE : X9D_PKT_SIZE);
+    uint64_t pa = x9d_buffer(kind, bid).pa + x9d_buffer_offset(kind, bid);
     uint32_t *d = reinterpret_cast<uint32_t *>(x9d.bat[kind].va + bid * 8);
     d[0] = (uint32_t)pa; d[1] = (uint32_t)(pa >> 32) & 255;
 }
@@ -358,7 +394,7 @@ static bool x9d_hw_init() {
     }
     printf("X9 DPMAIF: BAT enable after credit (vendor order), CON1 0x%x\n", x9d_rd(dl, 0x0c));
     x9d_phase("TXQ0/SRAM-sync");
-    // One TX queue initially, others explicitly disabled. DRB size is WORDS.
+    // Feed TXQ0; all four queues are initialized below. DRB size is WORDS.
     x9d_wr(x9d.ao, 0x1c, 0);
     x9d_wr(uls, 0x10, (uint32_t)x9d.drb.pa); x9d_wr(uls, 0x14, X9D_DRB * 2);
     x9d_wr(uls, 0x18, (uint32_t)(x9d.drb.pa >> 32)); // 6993 UL_DRBSIZE_ADDRH_n_1
@@ -406,6 +442,7 @@ static void x9d_prepare() {
     x9d.lock = IOLockAlloc();
     if (!x9d.lock) { x9d.failed = true; return; }
     if (!x9d.mode) { printf("X9 DPMAIF: disabled\n"); return; }
+    x9d.bat_target = X9D_CREDIT;
     // Map only actively used DT windows. reg2 is MD misc, not old DL config.
     x9d.ao = ml_io_map(0x14117000, 0x1000); x9d.pd = ml_io_map(0x1410d000, 0x1000);
     x9d.md_misc = ml_io_map(0x1410c000, 0x1000); x9d.sram1 = ml_io_map(0x14100000, 0x1000);
@@ -422,14 +459,15 @@ static void x9d_prepare() {
     for (unsigned q = 0; q < 3; q++)
         if (!x9d_alloc(x9d.drbq[q], X9D_DRB * 8)) { x9d_fail("private TXQ1..3 DRB allocation/range"); return; }
     for (unsigned kind = 0; kind < 2; kind++) {
-        if (!x9d_alloc(x9d.pit[kind], X9D_PIT * 16) || !x9d_alloc(x9d.bat[kind], X9D_BAT * 8) ||
-            !x9d_alloc(x9d.pool[kind], X9D_POOL * (kind ? X9D_FRG_SIZE : X9D_PKT_SIZE))) {
+        if (!x9d_alloc(x9d.pit[kind], X9D_PIT * 16) || !x9d_alloc(x9d.bat[kind], X9D_BAT * 8)) {
             x9d_fail("private RX DMA allocation/range"); return;
         }
         for (unsigned bid = 0; bid < X9D_CREDIT; bid++) {
+            if (!x9d_buffer_ensure(kind, bid)) { x9d_fail("initial BAT buffer allocation"); return; }
             x9d_bat_entry(kind, bid); x9d.posted[kind][bid] = true;
         }
         x9d.bat_wr[kind] = X9D_CREDIT;
+        x9d.bat_owned[kind] = X9D_CREDIT; x9d.bat_credit[kind] = X9D_CREDIT;
         x9d_sync(x9d.bat[kind], 0, X9D_BAT * 8);
         // Each slot must differ from ITS expected first-lap sequence, including
         // slots 255/511/etc. A fixed 0xff poison would match those descriptors.
@@ -437,7 +475,7 @@ static void x9d_prepare() {
         for (unsigned i = 0; i < X9D_PIT; i++) pit[i * 4 + 3] = (i ^ 128u) & 255u;
         x9d_sync(x9d.pit[kind], 0, X9D_PIT * 16);
     }
-    printf("X9 DPMAIF: private 40-bit DMA allocated, DRB high 0x%x PIT high 0x%x/0x%x BAT high 0x%x/0x%x, TX 2048/BAT 16384 (2000 credited, 2048 buffers)/PIT 0x8000x2; %s\n",
+    printf("X9 DPMAIF: cell158 private 40-bit DMA allocated, DRB high 0x%x PIT high 0x%x/0x%x BAT high 0x%x/0x%x, TX 2048/BAT 16384 (2000 credited, stable BID chunks)/PIT 0x8000x2; %s\n",
         (unsigned)(x9d.drb.pa >> 32), (unsigned)(x9d.pit[0].pa >> 32), (unsigned)(x9d.pit[1].pa >> 32),
         (unsigned)(x9d.bat[0].pa >> 32), (unsigned)(x9d.bat[1].pa >> 32),
         x9d.mode == 1 ? "probe only, no descriptors published" : "experimental initialization requested");
@@ -673,8 +711,10 @@ static bool x9d_rx_item(unsigned q, const uint32_t *d) {
     if (bid >= X9D_BAT || !x9d.posted[kind][bid] || (!kind && r.normal) || (kind && !r.normal)) {
         x9d_fail("RX BID ownership or unexpected aggregation"); return false;
     }
-    unsigned stride = kind ? X9D_FRG_SIZE : X9D_PKT_SIZE, off = (bid % X9D_POOL) * stride;
-    uint64_t addr = d[1] | ((uint64_t)d[2] << 32), base = x9d.pool[kind].pa + off;
+    const x9d_dma &buffer = x9d_buffer(kind, bid);
+    if (!buffer.va || !x9d.bat_owned[kind]) { x9d_fail("RX missing BAT backing"); return false; }
+    unsigned stride = kind ? X9D_FRG_SIZE : X9D_PKT_SIZE, off = x9d_buffer_offset(kind, bid);
+    uint64_t addr = d[1] | ((uint64_t)d[2] << 32), base = buffer.pa + off;
     // Buffer address is observed in PIT but vendor treats BAT as authoritative.
     // Reject out-of-buffer addresses; do not follow arbitrary physical pointers.
     if (!len || len > stride || hoff > stride - len || addr < base || addr >= base + stride) {
@@ -683,10 +723,12 @@ static bool x9d_rx_item(unsigned q, const uint32_t *d) {
     if (kind && hoff) { x9d_fail("fragment header offset"); return false; }
     unsigned bytes = len + (kind ? 0 : hoff);
     if (bytes > sizeof(r.ip) - r.bytes) { x9d_fail("RX packet exceeds bounded MTU"); return false; }
-    x9d_sync(x9d.pool[kind], off, stride);
-    memcpy(r.ip + r.bytes, x9d.pool[kind].va + off, bytes); r.bytes += bytes; r.normal = true;
+    x9d_sync(buffer, off, stride);
+    memcpy(r.ip + r.bytes, buffer.va + off, bytes); r.bytes += bytes; r.normal = true;
     x9d.posted[kind][bid] = false; // CPU copy complete; global BAT replenisher owns reuse
+    x9d.bat_owned[kind]--;
     if (!(a & 2)) {
+        x9d.rx_wire_bytes += r.bytes; // completed copies, including drops; NOT successful delivery
         unsigned mux = 0; int (*receiver)(uint32_t, const uint8_t *, uint32_t, uint32_t, uint64_t);
         IOLockLock(x9d.lock);
         for (unsigned i = 0; i < CBP_INTERFACES; i++) if (x9d.route[i].bound && x9d.route[i].channel == r.channel &&
@@ -728,7 +770,7 @@ static bool x9d_rx_poll(unsigned q) {
         if (!x9d_rx_item(q, item)) return false;
         r.rd = (r.rd + 1) % X9D_PIT; r.seq++; consumed++;
         if (!(r.rd & 3)) {
-            // Eight-bit sequence wraps eight times in a 2048-entry PIT ring:
+            // Eight-bit sequence wraps 128 times in this 32768-entry PIT ring:
             // after a whole lap the old sequence could equal the new one.
             // Poison each fully consumed cache line BEFORE returning credits.
             // Never dirty a line containing a neighboring in-flight DMA PIT.
@@ -744,22 +786,59 @@ static bool x9d_rx_poll(unsigned q) {
     // command register. The 1..3 remaining entries have not been credited yet.
     return !released || x9d_command(x9d.pd + 0x900, 0x10, X9D_BUSY_BIT | (q << 20) | released);
 }
+static void x9d_bat_policy() {
+    // MT6993 dpmaif_updata_max_bat_skb_cnt runs even when no PIT is ready.
+    // CODA is an ordinary R/W mailbox, not W1C. Acknowledgement means the
+    // notification was consumed, never that any allocation/credit succeeded.
+    const uintptr_t misc = x9d.pd + 0x400;
+    uint32_t raw = x9d_rd(misc, 0x6c);
+    if (raw & X9D_BAT_HINT_PENDING) {
+        unsigned hint = raw >> 16;
+        if (hint >= X9D_CREDIT) x9d.bat_hint = hint;
+        else x9d.bat_invalid_hints++; // vendor ignores invalid small values
+        x9d.bat_hint_events++;
+        x9d_wr(misc, 0x6c, raw & ~X9D_BAT_HINT_PENDING);
+        // Do not demand an exact readback: MD may publish another update.
+        if (x9d.bat_hint_reports++ < 12)
+            printf("X9 DPMAIF: BAT hint 0x%x count %u %s; consumed notification, capacity/delivery not acknowledged\n",
+                raw, hint, hint < X9D_CREDIT ? "ignored-invalid" : hint == X9D_BAT_HINT_MAX ? "max-request" : "adaptive");
+    }
+    uint64_t now = x9d_ms();
+    if (!x9d.bat_rate_ms) { x9d.bat_rate_ms = now; x9d.bat_rate_bytes = x9d.rx_wire_bytes; }
+    uint64_t elapsed = now - x9d.bat_rate_ms;
+    if (elapsed >= 1000) {
+        // Same 150 Mbit/s low/high boundary as the phone driver's allocation
+        // policy; finite hints are not mandatory preload counts or hard caps.
+        uint64_t bytes = x9d.rx_wire_bytes - x9d.bat_rate_bytes;
+        x9d.bat_high_rate = bytes > elapsed * 18750;
+        x9d.bat_rate_ms = now; x9d.bat_rate_bytes = x9d.rx_wire_bytes;
+    }
+    x9d.bat_target = x9d.bat_hint == X9D_BAT_HINT_MAX || x9d.bat_high_rate ? X9D_BAT - 1 : X9D_CREDIT;
+}
 static bool x9d_replenish(unsigned kind) {
     const uintptr_t dls = x9d.pd + 0xc00;
     unsigned rd = x9d_rd(dls, kind ? 0x78 : 0xd8) & 65535;
     if (rd >= X9D_BAT) { x9d_fail("BAT hardware read index"); return false; }
     unsigned n = 0, w = x9d.bat_wr[kind], stride = kind ? X9D_FRG_SIZE : X9D_PKT_SIZE;
+    unsigned credit = (w + X9D_BAT - rd) % X9D_BAT;
+    x9d.bat_credit[kind] = credit;
+    if (credit >= x9d.bat_target) return true; // never revoke a published BID on a lower target
+    unsigned demand = x9d.bat_target - credit;
     // Keep one entry empty; require BOTH hardware consumption and CPU release.
     // A BID held by either RX queue stops the contiguous refill, never overwrites.
-    while ((w + 1) % X9D_BAT != rd && n < X9D_BUDGET && !x9d.posted[kind][w] && !x9d.posted[kind][(w + 1) % X9D_BAT] &&
-           !x9d.posted[kind][(w + X9D_BAT - X9D_POOL) % X9D_BAT]) { // buffer slot still held one lap back
-        x9d_sync(x9d.pool[kind], (w % X9D_POOL) * stride, stride); x9d_bat_entry(kind, w);
+    while ((w + 1) % X9D_BAT != rd && n < demand && n < X9D_BUDGET &&
+           !x9d.posted[kind][w] && !x9d.posted[kind][(w + 1) % X9D_BAT]) {
+        if (!x9d_buffer_ensure(kind, w)) break; // retain progress, retry later; no invented credits
+        x9d_sync(x9d_buffer(kind, w), x9d_buffer_offset(kind, w), stride); x9d_bat_entry(kind, w);
         x9d_sync(x9d.bat[kind], w * 8, 8); x9d.posted[kind][w] = true;
+        x9d.bat_owned[kind]++;
         w = (w + 1) % X9D_BAT; n++;
     }
     if (!n) return true;
     x9d.bat_wr[kind] = w;
-    return x9d_command(x9d.pd + 0x100, 4, X9D_BUSY_BIT | (kind << 16) | n);
+    if (!x9d_command(x9d.pd + 0x100, 4, X9D_BUSY_BIT | (kind << 16) | n)) return false;
+    x9d.bat_credit[kind] += n;
+    return true;
 }
 static void x9d_poll() {
     if (x9d.mode == 2 && !x9d.hw_attempted && !x9d.failed && x9_md_at_online()) {
@@ -798,6 +877,7 @@ static void x9d_poll() {
         printf("X9 DPMAIF: polled IRQ 0x%x/0x%x, flow 0x%x/0x%x\n", ul, dl, ul & X9D_UL_FLOW, dl & X9D_DL_EMPTY);
     }
     x9d.last_ul = ul; x9d.last_dl = dl;
+    x9d_bat_policy(); // notification must not depend on a nonzero PIT producer
     if (!x9d_tx_poll() || !x9d_rx_poll(0) || !x9d_rx_poll(1) || !x9d_replenish(0) || !x9d_replenish(1)) return;
     uint64_t now = x9d_ms();
     if (x9d.tx_done != x9d.tx_seen_done || x9d.tx_done == x9d.tx_packets) {
@@ -821,6 +901,10 @@ static void x9d_poll() {
 static void x9d_report(unsigned second) {
     if (!x9d.lock || !x9d.mode) return;
     IOLockLock(x9d.lock); uint64_t rejected = x9d.rejected; unsigned queued = x9d.count; IOLockUnlock(x9d.lock);
+    printf("X9 DPMAIF: BAT policy hint %u events %llu invalid %llu target %u credit %u/%u owned %u/%u backing %u/%u max %u per kind\n",
+        x9d.bat_hint, x9d.bat_hint_events, x9d.bat_invalid_hints, x9d.bat_target,
+        x9d.bat_credit[0], x9d.bat_credit[1], x9d.bat_owned[0], x9d.bat_owned[1],
+        x9d.bat_backing[0], x9d.bat_backing[1], X9D_BAT - 1);
     printf("X9 DPMAIF: %u s mode %u ready %u quarantined %u published %u TX submitted %llu completed %llu RX delivered %llu dropped %llu queued %u rejected %llu flow %llu phase %s\n",
         second, x9d.mode, x9d.ready, x9d.failed, x9d.published, x9d.tx_packets, x9d.tx_done, x9d.rx_packets, x9d.rx_dropped, queued, rejected, x9d.flow_events,
         x9d.phase ? x9d.phase : "prepare");
