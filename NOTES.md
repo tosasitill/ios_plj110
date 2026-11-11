@@ -6,6 +6,15 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## IMS／短信流程复核交接（IMS-SMS218，2026-11-11）：旧候选仍阻断；发送已有真实接受，最新277已带短信修复但未实跑
+
+- **范围／结论**：用户要求“看看 ims 和短信流程是否正常”。只读现有`~/211.txt`至`~/218.txt`、当前源码、冻结候选源码及已有构建记录，基线文档提交`8391abb`；没有主动发送短信／ACK／IMS配置、ADB、设备写入、flash/reboot、mailbox、编译／测试套件／CI／push。结论是**IMS仍缺实际启用适配；GSM发送已有部分真实成功，接收和完整交付未验收**，不是“两项正常”，也不是“短信完全不通”。
+- **218当前运行证据**：原LF7864/7987/8012/8014/17140/17141共**6次**NAS33/TLV33=`02`（原Apple合同为WithVoLTE）被error94拒绝。短信原LF7548/7554，两个WMS client的SetEventReport01均error`0x30`；58.204–58.206s重新建client后又拒两次（16925/16935），全日志共**4次**。SIM1原LF7376真实host-ready成功；SIM2原LF7567=`init stage 8 rejected`，前一条0602为mask2，**没有记录MD具体result，不能猜错误原因码**。Routes32接受不代表事件订阅成功或Messages收到。
+- **发送链新增证据（补充旧SMS交接，不能再说全无发送运行证据）**：211/214/215/217分别**1/2/2/2次**`SIM2 send CNF accepted by modem`，共**7次**，均有匹配channel/client/txn的WMS20 to-host error0。217原LF16036→16039→16214/16215：56.243s iOS RawSend txn17→56.244s MIPC0605/txn433物理transport0→56.981s真实MD接受并回iOS error0；第二条58.217→58.740s同样成功。**MD接受／iOS收到成功响应不等于对端送达**，日志无可验证的接收端确认。214另有RawSend txn17回error3及txn18/19回error94，不能把所有发送都算成功或在未取得请求TLV时猜拒绝字段。
+- **接收／IMS证据边界**：上述日志没有`incoming GSM message/status report`、WMS37 host ACK或`X9 IMS:`真实注册快照的观察；多数通用QMI request计数达到400预算，MIPC等日志也有限额，**不能将没有日志断言成MD从未收到短信／实时一定未注册**。当前短信接收至少有可达的事件订阅拒绝断点。源码`X9Messages.inc`仍明确拒IMS-only RawSend、type4/8105 ACK及GetServices；NAS33启用和NAS72状态回传仍没有适配，不能拿IMSA0a04查询替代真实注册、IMS专用承载/P-CSCF/AKA/SIP与服务验收，也未证明IMS缺失导致Internet RX0。
+- **候选来源已区分**：218对应冻结cell163=`c91ffc0`，`X9Messages.inc`最后修改仍`fa83fbf`；`git merge-base --is-ancestor 7db91cc HEAD`在该树exit1、与main短信源码实际不同，旧日志签名相符。故218失败**不能证明7db91cc修复无效**。最新独立`.local/x9/worktrees/latest277-noaudio-20261111`固定`58ba960`包含`7db91cc`（ancestor检查exit0，短信源码与main相同），已有`full-build2.exit=0`。其联合交付`x9/out/x9-latest277-noaudio-loader-20261111-r2/boot.img`已带按SIM modem-ready门、MT＋MWI订阅、真实host队列准入及ACK生命周期修复；**尚无该候选的新运行日志，不新增／二次检查镜像**。当前mailbox277，不能直接回218的旧276镜像；准确启动入口以GPU277最新联合交接为准。
+- **重放／下一步**：私有`.local/x9/work/ims-sms-audit-20261111/`内`collect.py`、`results.json`、`summary.txt`、`218-events.txt`保存原LF、脱敏元数据、发送请求/响应配对及源码来源；根目录`python3 .local/x9/work/ims-sms-audit-20261111/collect.py`仅离线重放、已exit0，不输出号码/PDU/身份。待用户手动启动最新联合镜像，先验每SIM`modem SMS readiness 1 → real host-ready CNF after modem-ready`及`event subscription MT 1 MWI 1`，再由用户两卡各发／收一条、对端确认、Messages显示/存储、同token ACK物理TX及真实状态报告。IMS继续上一`IMS214-CONTRACT`所有权／状态合同调查，不默认写MD NVRAM。本轮仅更新本节交接，未改运行代码。
+
 ## HelioDarwin重复输入合并与剩余占用（2026-11-11）
 
 - 用户要求比较`~/HelioDarwin`与`~/ios_plj110`，重复只留一份。先对两边非Git对象库的≥1MiB普通文件按大小/首尾筛选，再完整SHA-256比对：旧侧310个、新侧4876个，旧侧86个有完全相同匹配（按旧文件块数约7.82GiB）。进一步完整比较Apple输入10个文件及dxb两棵树，不按同名判重，也没有整删旧项目或独立源码。
