@@ -1375,7 +1375,14 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **不能称为全部USB完成**:本轮暂无枚举/DMA/ue0 ping/bulk回环实机结果,live EMI/MPU允许普通XNU DMA页也未证明。`native_apple_stack=0`,没有冒充IOUSBDeviceController或AppleUSBDeviceMux;原始configd USBDeviceConfiguration/lockdownd、Finder/iTunes Trust/配对/照片同步仍缺20H392 controller adapter及kext构建接入。USB3 XS-PHY/retimer、charger Type-C role与原生xHCI也未完成。参考文章chip/board/security-domain/fsid/锁状态条件要到原生栈接通后才验证,不先改身份/配对状态制造成功。
 - **下一步/验收**:先在用户手动启动的单一候选核对`CAP_EPINFO/TXFIFO/RXFIFO/MISC`→config1/alt1→真实QMU OUT/IN→ue0 ping,再用iOS `usbctl --echo`+host单次echo证明host→iOS→host字节相同。保留EP0日志,无需重建Metal插件/mailbox。接口/回退/构建说明在`x9/usb/README.md`;不要求用户现在连续刷试探镜像。
 
-## 蜂窝当前交接(CELL152-RILALL,2026-11-11): 用户要求一次对齐Android全部差异；cell152包含cell151全部改动+剩余RIL请求+DPMAIF环大小，未上机
+## 蜂窝当前交接(CELL152-RESULT,2026-11-11): 209(cell152)所有"开数据后"RIL消息与DPMAIF环大小已对齐，仍无下行；下一步抓Android开机阶段RIL MIPC序列
+
+- **208.txt实为cell151**(DPMAIF行仍`BAT 1024/PIT 2048x2`，无RETRY_TIMER；文件时间早于cell152构建)：首呼PDP3成功，3个UL，iOS 6.5s后Stop(2000)，二次ACT被MD拒`result 1316613(0x141705)`；日志只到45s。
+- **209.txt(cell152确认)**：`BAT 16384 (2000 credited, 2048 buffers)/PIT 0x8000x2`、`CON1 0x414000`；`DATA_RETRY_TIMER/DATA_SET_CONFIG/GET_5GQOS/GET_URSP_ROUTE_PROFILE/GET_MD_DATA_CALL_LIST`全部CNF 0；ACT 808B→CNF 0、PDP3、v6挂接；仅3个UL(无v4 UL诊断行→推断为v6包)，iOS 5s后Stop(type3/2000，推断数据停滞)；二次ACT 9ms即被拒0x141705；RX 0，LRO PIT写指针0，BAT已信用0x800，legacy PIT由MD配置。日志到51s。
+- **结论**：开/关移动数据窗口内RIL的全部MIPC消息、ACT逐字段、DPMAIF初始化/环大小均已对齐，MD仍不向AP下发DL。未对齐：IMS PDN、RIL SYS_AT_REQ(日志掩码)、ACK→TXQ1、以及**开机阶段RIL的MIPC初始化序列(从未抓取)**。
+- **下一步(需用户)**：Android重启，开机完成并有蜂窝数据后立即`logcat -b all -d`(radio缓冲足够保留开机MIPC)，用scratch `mipcparse.py`解析全部SEND，与我们开机后发的MIPC逐条对比(APN profile/IA、DATA_ALLOW、NW/SYS配置等)。同时尝试取未掩码的SYS_AT内容(看RIL是否有属性可关闭掩码)。0x141705二次ACT拒绝码待查MD。
+
+## 蜂窝前次交接(CELL152-RILALL,2026-11-11): 用户要求一次对齐Android全部差异；cell152包含cell151全部改动+剩余RIL请求+DPMAIF环大小，未上机
 
 - **cell152 = cell151(无EIF_REQ/统计) + main `00053d8`**：
   - ACT前顺序同RIL：`DATA_SET_CONFIG{1,1,0}` → **`DATA_RETRY_TIMER_REQ{mode 1, apn}`(0x21b)** → ACT(808B RIL同形)。
