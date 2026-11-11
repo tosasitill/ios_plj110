@@ -6,6 +6,14 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 228 DPMAIF新窗口对照（CELL228-DPDUMP，2026-11-11）：RDMA/WDMA配置一致；MD握手时写的DL SRAM1分区不同
+
+- **身份**：`~/228.txt` 1213094B，末48s，无panic。ACT 28.49s/30.00s(第二拨) result0，rx-none dump 38.0s：TX3/3、RX0（同前）。注意：Mac BSD grep对整文件抓rx-none行会漏（疑似中途有异常字节），用 `sed -n 12500,12700p` 截段再grep。
+- **RDMA**（pd+0x200）：CON0–CON5 与Android一致；0x218/0x220（Android 0x261 vs 我们3，随流量增长）、0x298–0x2c0（DBG/地址/状态）均为计数或状态。
+- **WDMA**（pd+0x300）：0x300–0x314 配置一致；仅 +0x30 bit3（Android 00040008/我们00040000，pre-init起就静态）、+0x54 bit0（0x11/0x10）、+0x58 bit17（随流量）、+0x5c bit8（0/0x100，静态）。vendor头文件无名字，AP驱动不写。
+- **DL SRAM1 +0xa0..0xac（关键新差异，观察）**：Android `0x00000fee 0x0fee1000 0x10001dee 0x1dee1e00`，我们 `0x00000f1e 0x0f1e1000 0x10001d1e 0x1d1e1e00`。pre-init全0、**at-online（MD握手后）才出现** → 由**MD**写入。形状像两组16位边界：[0,X) [X,0x1000) [0x1000,0x1000+X) [..,0x1e00)，Android X=0xfee（第二段0x12），我们X=0xf1e（第二段0xe2）。vendor AP驱动不写、头文件无名字。**推断**：MD按握手输入（AP runtime data 特性/能力）选了不同的DPMAIF SRAM分区，说明MD侧DPMAIF配置与Android不同——这是目前唯一一个由MD决定且与Android不同的数据面参数，未证明与RX0因果相关。
+- **下一步**：对照我们S2 AP runtime data（912B，`X9 MODEM: S2 AP runtime data`）与Android的58个feature逐项（Android本次ccci_dump只打印了feature0，需要另取完整runtime data：Android下 ccci debug/`/sys/kernel/ccci`或fsm日志级别），找出影响MD DPMAIF配置（LRO/HPC/队列/MTU类）的feature；也可逆向MD里写SRAM1+0xa0的代码看取值来源。
+
 ## 227结果＋DPMAIF对齐结论（CELL227-HPC / CELL-DPDUMP，2026-11-11；dpdump已构建，未启动）
 
 - **227（HPC_CNTL 0x10da）**：`rx-none dl_sram+0x020`第7字=`000010da`（写入生效）；RX仍0、PIT不动、TX 205/205、EIF5仍无前缀。**HPC_CNTL排除**。
