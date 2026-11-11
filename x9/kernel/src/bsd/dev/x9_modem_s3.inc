@@ -323,14 +323,15 @@ static void x9md_rpc_dispatch(uint32_t op,uint32_t para,const struct x9md_lv *lv
   * MD LHIF (lhifcore_task_main, msg 0x6b39 PDN bind) calls IPC_RPC_Wrapper(0x400d) and only answers IPC's bind
   * (0x6b3a, +0x71 success) if this RPC succeeds. Answering -1 here made every PDN bind fail: IPC got result 0x1103,
   * ipc_on_pdn_bind_bot deleted the session, and UL hit "no session" in ipc_check_and_fill_session_info (232 MD log).
-  * port_rpc.c: ccci_rpc_remap_queue() only picks the AP UL HW queue for that ccmni (Q0 normal, Q1 IMS); reply 0,0. */
+  * port_rpc.c: ccci_rpc_remap_queue() only picks the AP UL HW queue for that ccmni; lhif_q enum (port_rpc.h):
+  * 0 SW_DL, 1 SW_UL, 2 AP_UL_Q0 (normal), 3 AP_UL_Q1 (IMS), 4 DIRECT_DL. 233 saw 2 for internet. Reply 0,0. */
   static unsigned logged;
   if(para!=1||lv[0].len<8){
    if(logged<32){logged++;printf("X9 MODEM: RPC LHIF_MAPPING bad para %u len %u -> FS_PARAM_ERROR\n",para,para?lv[0].len:0);}
    x9md_rep_u32(r,(uint32_t)-2);x9md_rep_u32(r,(uint32_t)-2);break;
   }
   uint32_t net_if=x9md_ld32(lv[0].p),q=x9md_ld32(lv[0].p+4);
-  if(logged<32){logged++;printf("X9 MODEM: RPC LHIF_MAPPING ccmni%u -> lhif UL queue %u (%s); reply OK\n",net_if,q,q==0?"normal":q==1?"IMS":"unknown");}
+  if(logged<32){logged++;printf("X9 MODEM: RPC LHIF_MAPPING ccmni%u -> lhif UL queue %u (%s); reply OK\n",net_if,q,q==2?"AP UL Q0 normal":q==3?"AP UL Q1 IMS":"other");}
   x9md_rep_u32(r,0);x9md_rep_u32(r,0);break;}
  default: {     /* port_rpc.c default branch: FS_NO_OP */
   static unsigned unk;

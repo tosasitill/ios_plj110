@@ -728,8 +728,22 @@ static bool x9d_rx_item(unsigned q, const uint32_t *d) {
     if (!r.message) { x9d_fail("RX payload without message"); return false; }
     unsigned kind = (a >> 2) & 1, bid = ((a >> 3) & 8191) | (((d[3] >> 8) & 7) << 13);
     unsigned len = a >> 16, hoff = ((d[3] >> 19) & 31) * 4;
-    if (bid >= X9D_BAT || !x9d.posted[kind][bid] || (!kind && r.normal) || (kind && !r.normal)) {
-        x9d_fail("RX BID ownership or unexpected aggregation"); return false;
+    if (bid >= X9D_BAT || !x9d.posted[kind][bid]) {
+        // Memory safety: never copy from a buffer this CPU has not posted. Print the
+        // exact PIT so a BID bookkeeping mismatch can be told apart (233 quarantined here).
+        printf("X9 DPMAIF: RX BID not owned q %u kind %u bid %u posted %d len %u hoff %u have %u normal %d pit %08x %08x %08x %08x bat_wr %u/%u owned %u/%u\n",
+            q, kind, bid, bid < X9D_BAT ? (int)x9d.posted[kind][bid] : -1, len, hoff, r.bytes, (int)r.normal,
+            d[0], d[1], d[2], d[3], x9d.bat_wr[0], x9d.bat_wr[1], x9d.bat_owned[0], x9d.bat_owned[1]);
+        x9d_fail("RX BID ownership"); return false;
+    }
+    if ((!kind && r.normal) || (kind && !r.normal)) {
+        // A packet spread over several BAT buffers (normal+normal or fragment-first) is not
+        // proof of LRO: concatenate within the bounded r.ip; x9d_ip() still validates the
+        // result, so a real multi-packet aggregate is dropped, not delivered.
+        static unsigned multi;
+        if (multi < 16) { multi++;
+            printf("X9 DPMAIF: RX multi-buffer packet q %u kind %u bid %u len %u hoff %u have %u normal %d pit %08x %08x; concatenating\n",
+                q, kind, bid, len, hoff, r.bytes, (int)r.normal, d[0], d[3]); }
     }
     const x9d_dma &buffer = x9d_buffer(kind, bid);
     if (!buffer.va || !x9d.bat_owned[kind]) { x9d_fail("RX missing BAT backing"); return false; }
