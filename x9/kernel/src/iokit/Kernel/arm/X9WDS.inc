@@ -394,6 +394,16 @@ static void x9w_side_poll(){
 static void x9w_publish(x9w_bearer &b,unsigned mux){
  x9w_host_expire(b,mux,x9q_ms()); // every publication entry owns its deadline gate
  if(b.abandoned||b.hold||!b.pending)return;
+ // The MD may deliver EIF IFUP before the ACT CNF (191.txt) in modem
+ // interface form; adopt it for the host IF_ID once trans_id is known.
+ if(!x9w_interfaces[b.sim_slot][b.channel].valid)
+  for(unsigned i=0;i<20;i++){x9w_interface &m=x9w_interfaces[b.sim_slot][i];
+   if(i!=b.channel&&m.valid&&m.cmd==0&&m.serial>b.if_floor&&m.trans_id/100==b.trans_id/100){
+    x9w_interface &h=x9w_interfaces[b.sim_slot][b.channel];h=m;h.trans_id=b.trans_id;
+    h.facts.trans_id=b.trans_id;h.facts.channel=b.channel;bzero(&m,sizeof(m));
+    printf("X9 WDS: early EIF IFUP on modem interface %u adopted for host interface %u\n",i,b.channel);break;
+   }
+  }
  const x9w_interface &in=x9w_interfaces[b.sim_slot][b.channel];
  if(!in.valid||in.serial<=b.if_floor||in.trans_id!=b.trans_id||in.cmd!=0)return;
  x9wr_identity current={b.generation,b.result_epoch,b.if_floor,b.sim_slot,b.cid,4,0};
@@ -450,9 +460,15 @@ static void x9w_result(x9w_bearer &b,unsigned mux,const uint8_t *p,unsigned n){
   f.tlv(0x8106,no_credentials,sizeof(no_credentials));
   f.tlv(0x8107,no_credentials,sizeof(no_credentials));
   f.byte(0x108,0);f.byte(0x10a,2);
+  // DATA_ACT_CALL_REQ IF_ID 0x110 (u8, 0..19): the host-assigned AP interface.
+  // Android RIL always supplies it (internet PDN on ccmni3, cid 303); the MD
+  // then returns "Host interface ID" in ACT CNF 0x125 and tags EIF with it.
+  // Without it the MD treats the PDN as modem-owned and 202.txt delivered
+  // no downlink at all. mux1 -> ccmni3 like Android, mux2 -> 4, ...
+  f.byte(0x110,(uint8_t)(2+mux));
   b.if_floor=x9w_if_serial;
   if(!x9w_send(b,f,X9W_ACT,120000)){x9w_error(b,X9Q_BUSY);x9w_clear(b,mux);}
-  else printf("X9 WDS: requesting IPv4 call mux %u, explicit no-auth, reuse flag 2 fallback 0 (not a fresh-CID guarantee)\n",mux);return;
+  else printf("X9 WDS: requesting IPv4 call mux %u, explicit no-auth, reuse flag 2 fallback 0, host IF_ID %u\n",mux,2+mux);return;
  }
  if(op==X9W_ACT){
   unsigned cid;
@@ -518,6 +534,16 @@ static bool x9w_interface_event(const uint8_t *p,unsigned n,unsigned sim){
  unsigned trans,cmd;
  if(!x9w_word(p,n,0x100,trans)||!x9w_byte(p,n,0x101,cmd))return false;
  if(trans%100>=20)return true; // not a supported/owned ccmni route
+ // Host IF_ID calls: mipc_internal_eif_ind (913368e8..) and the ACT CNF both
+ // build host_trans = modem_trans - modem_trans%100 + host_if. A client the
+ // MD does not treat as sAP still receives the modem_trans form, so map an
+ // event whose hundreds match an owned call but whose interface differs.
+ bool remapped=false;
+ for(const x9w_bearer &b:x9w_bearers)
+  if(b.used&&b.owned&&b.sim_slot==sim&&b.trans_id&&b.trans_id!=trans&&b.trans_id/100==trans/100){
+   printf("X9 WDS: EIF modem interface %u mapped to host interface %u (call %u)\n",trans%100,b.trans_id%100,b.cid);
+   trans=b.trans_id;remapped=true;break;
+  }
  // Only IFUP(0)/IFDOWN(1) change interface state. 193.txt: command 5 came
  // 9.6 s after IFUP and the real IFDOWN(1) only 42 s later, yet the old code
  // tore the call down on it. Other commands (change/RA/state updates) are
@@ -532,6 +558,7 @@ static bool x9w_interface_event(const uint8_t *p,unsigned n,unsigned sim){
   // carries both halves; the v4 half is required for our route, the v6 half
   // is only used after it matches GET205. No tag103 fallback MTU.
   if(x9wr_decode_ifup(p,n,sim,x9a_epoch,in.serial,in.facts)&&in.facts.v4.address_present){
+   if(remapped){in.facts.trans_id=trans;in.facts.channel=trans%100;}
    in.mtu=in.facts.v4.mtu;memcpy(in.ip,in.facts.v4.address,4);
    in.valid=true; // MTU may be 0/unspecified; x9wr_match_family picks it
   }
