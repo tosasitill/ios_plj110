@@ -438,14 +438,11 @@ static void x9w_ril_post_act(unsigned sim,unsigned cid){
 // the MD's DATA_IFUP_PACKET_ROUTE_IND 0x4220 {app_id 3,...}, DATA_IFUP_
 // PACKET_ROUTE_REQ 0x261 {0x100 u8 3}; the MD hands the value to l5updn as
 // the packet route. We never sent either, so the PDN had no AP route.
-static void x9w_packet_route(unsigned sim,unsigned app){
- {x9w_frame f(0x25f,1u<<sim);f.byte(0x100,(uint8_t)app);x9w_side_send(f,sim,0x260,"DATA_ACT_PACKET_ROUTE");}
- {x9w_frame f(0x261,1u<<sim);f.byte(0x100,(uint8_t)app);x9w_side_send(f,sim,0x262,"DATA_IFUP_PACKET_ROUTE");}
-}
 static void x9w_side_poll(){
  if(x9w_packet_route_pending&&x9w_session_ready&&x9_md_mipc_online()){
-  x9w_packet_route_pending=false;x9w_packet_route(0,3); // SIM1 = data SIM, value 3 as captured
-  printf("X9 WDS: SIM1 packet route 3 requested (ACT + IFUP, as subsys_daemon at boot)\n");
+  x9w_packet_route_pending=false; // SIM1 = data SIM, value 3 as captured: ACT once; IFUP follows each IND
+  {x9w_frame f(0x25f,1);f.byte(0x100,3);x9w_side_send(f,0,0x260,"DATA_ACT_PACKET_ROUTE");}
+  printf("X9 WDS: SIM1 ACT packet route 3 requested (as subsys_daemon at boot); IFUP answers each 4220\n");
  }
  if(x9w_stats_next&&x9q_ms()>=x9w_stats_next)x9w_stats(false);
  static uint8_t response[X9_MIPC_FRAME_MAX];
@@ -772,7 +769,10 @@ static void x9w_poll(){
    unsigned app=0,a1=0,a2=0,a3=0;x9w_byte(response,n,0x100,app);x9w_byte(response,n,0x101,a1);x9w_byte(response,n,0x102,a2);x9w_byte(response,n,0x103,a3);
    for(unsigned sim=0;sim<x9_md_sim_count();sim++)if(response[8]&(1u<<sim)){
     printf("X9 WDS: SIM%u DATA_IFUP_PACKET_ROUTE_IND app %u (%u %u %u); answering like subsys_daemon\n",sim+1,app,a1,a2,a3);
-    x9w_packet_route(sim,app);
+    // 210.txt: re-sending ACT_PACKET_ROUTE on every IND made the MD raise
+    // the IND again (1016 round trips). subsys_daemon answers an IND with
+    // DATA_IFUP_PACKET_ROUTE only; ACT_PACKET_ROUTE is sent once at start.
+    {x9w_frame f(0x261,1u<<sim);f.byte(0x100,(uint8_t)app);x9w_side_send(f,sim,0x262,"DATA_IFUP_PACKET_ROUTE");}
    }
   }
   else if(x9q_u16(response+10)==0x4202&&x9w_byte(response,n,0x100,cid)){
