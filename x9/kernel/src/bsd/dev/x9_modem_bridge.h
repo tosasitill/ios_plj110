@@ -42,6 +42,9 @@ int x9_md_mipc_message_reply_take(uint32_t token, int *result);
  * MIPC 0003/0004 (8100 string); NEVER falls back to ttyC0 for SIM2.
  * Same nonreused wire token space as MIPC. Cancelled sent queries drain CNF. */
 unsigned x9_md_sim_count(void);
+/* MD DHL (CCB user 0) observation: read-only headers, consumes pages so the
+ * MD ring never stalls. Called periodically from the QMI owner thread. */
+void x9_md_log_poll(void);
 uint64_t x9_md_sim_at_submit(unsigned sim, const char *command);
 int x9_md_sim_at_take(uint64_t token, char *response, uint32_t capacity, int *result);
 void x9_md_sim_at_cancel(uint64_t token);

@@ -1075,6 +1075,7 @@ static void x9w_poll(){
   printf("X9 CELL CONTROL: online %u stage %u token %llu hold %u control-ready %u session-ready %u dpmaif-ready %u init-wait-left-ms %llu; MD-internal unobserved\n",
    x9_md_mipc_online(),x9w_init_stage,x9w_init_token,x9w_init_hold,x9w_control_ready,x9w_session_ready,x9d_ready(),
    x9w_init_deadline>now?x9w_init_deadline-now:0);
+  x9_md_log_poll();
  }}
  x9a_poll(response,sizeof(response));
  for(unsigned i=0;i<8;i++){

@@ -933,3 +933,47 @@ static void x9_modem_start(void) {
  thread_t t;
  if(kernel_thread_start(x9md_thread,(void *)(uintptr_t)mode,&t)==KERN_SUCCESS)thread_deallocate(t);
 }
+
+/* ---- MD DHL log observation (stage 1) ------------------------------------
+ * libccci_util ccci_ccb_register/read_get/read_done (Android vendor lib,
+ * disassembled 2026-11-11, .local/x9/work/mdlog-20261111/ccb.dis):
+ *  ctrl header per CCB buffer = 64 B in nc smem (regs[4]): DL half +0x00,
+ *  UL half +0x20; +0x08 release idx, +0x0c read idx, +0x10 write idx,
+ *  +0x14 page size, +0x18 buffer size, +0x1c magic 0x1100ffee.
+ *  Data: CCB data region (c smem regs[1], first 0xDF000) holds, per buffer in
+ *  table order, DL then UL. Page = {u32 0x22222222, u32 len, payload}.
+ *  DHL entries 0..3 = ctrl / exception / BUF(PS) log / CMD.
+ * Stage 1 only reports whether the MD produces DHL output by itself and
+ * consumes it (read = release = write), like read_get+read_done. No UL/command
+ * is written to the MD. */
+void x9_md_log_poll(void){
+ static const uint32_t dl[4]={1024*16,1024*20*6,512*296,512*8},ul[4]={1024*16,128,1024*32,128};
+ static uint32_t last_wr[4],seen[4];static uint64_t pages[4];static unsigned polls;
+ struct x9md_reg *cc=&x9md_regs[4];
+ if(!x9md_nc||!cc->in_lk||cc->ap_off+4*64>X9MD_NC_SIZE)return;
+ volatile uint32_t *data=NULL;
+ for(unsigned k=0;k<x9md_ncr;k++)if(x9md_crs[k].id==1)data=x9md_cmap[k]; /* last id-1 c region = md 42200000, the CCB data base given to the MD (rt case 15) */
+ polls++;
+ uint32_t base=0;
+ for(unsigned e=0;e<4;e++){
+  uint32_t h=cc->ap_off+e*64;
+  uint32_t rel=x9md_m32(h+8),rd=x9md_m32(h+0xc),wr=x9md_m32(h+0x10),pg=x9md_m32(h+0x14),bs=x9md_m32(h+0x18),mg=x9md_m32(h+0x1c);
+  uint32_t urd=x9md_m32(h+0x2c),uwr=x9md_m32(h+0x30);
+  uint32_t n=pg?bs/pg:0;
+  int ok=mg==0x1100ffeeu&&pg&&bs==dl[e]&&n;
+  if(!seen[e]||wr!=last_wr[e]||!(polls%20))
+   printf("X9 MDLOG: DHL%u DL rel %u rd %u wr %u page %u buf %u magic %08x UL rd %u wr %u pages-consumed %llu%s\n",
+    e,rel,rd,wr,pg,bs,mg,urd,uwr,pages[e],ok?"":" (header not as configured)");
+  seen[e]=1;last_wr[e]=wr;
+  if(ok&&data&&wr<n&&rd<n&&wr!=rd&&base+bs<=0x100000){
+   uint32_t o=base+rd*pg,m=data[o/4],len=data[o/4+1];
+   uint32_t w[12];for(unsigned i=0;i<12;i++)w[i]=(o+8+i*4+4<=base+bs)?data[o/4+2+i]:0;
+   printf("X9 MDLOG: DHL%u page %u magic %08x len %u: %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x\n",
+    e,rd,m,len,w[0],w[1],w[2],w[3],w[4],w[5],w[6],w[7],w[8],w[9],w[10],w[11]);
+   pages[e]+=(wr+n-rd)%n;
+   x9md_w32(h+0xc,wr);x9md_w32(h+8,wr);
+   __asm__ volatile("dsb sy":::"memory");
+  }
+  base+=dl[e]+ul[e];
+ }
+}
