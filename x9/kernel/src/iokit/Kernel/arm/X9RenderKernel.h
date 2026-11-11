@@ -71,6 +71,16 @@ struct X9RenderContext {
  void *engine_private;
  bool exposed,disabled,engine_open;
  bool scope_only;   /* type-1 connection: X9RenderScope only, no engine context */
+ /* Service-owned intrusive retirement lists. Only used after IOUserClient
+  * free transfers its sole context reference; no allocation can lose it. */
+ X9RenderContext *retire_next;
+ uint64_t retire_at;
+ uint32_t retire_attempts;
+};
+enum X9RenderCloseResult {
+ X9RenderCloseDone,       /* all GPU state detached; backing memory may go */
+ X9RenderCloseRetry,      /* safe pre-transaction busy refusal; defer */
+ X9RenderCloseRetained    /* fault/uncertain DMA; quarantine, no reset/retry */
 };
 /* Frontend cache scope (SweetX9RenderService.cpp). A snapshot of one task's ranges,
  * taken once per submission; hold=true when anything pins all ranges or the
@@ -85,10 +95,12 @@ void x9_render_scope_stats(uint64_t out[6]);
  * hardware caps and resource/stream/heap support. NULL methods stay refused. */
 struct X9RenderEngine {
  bool (*caps)(X9RenderCaps *);
- /* Failed open must unwind privately. close must detach all GPU mappings,
-  * groups and page tables before returning true, even when no job ran. */
+ /* Failed open must unwind privately. close is called WITHOUT c->lock or
+  * submit_lock; it drains first, then takes c->lock -> owner. Only Done may
+  * release backing memory, after all groups/mappings/page tables detach.
+  * Retry is solely a safe busy refusal, never an uncertain DMA handshake. */
  IOReturn (*context_open)(X9RenderContext *);
- bool (*context_close)(X9RenderContext *);
+ X9RenderCloseResult (*context_close)(X9RenderContext *);
  /* Map/unmap success includes hardware translation visibility. On uncertain
   * rollback the engine sets disabled/exposed and retains all backing memory. */
  IOReturn (*map)(X9RenderContext *,const X9RenderVMEntry *);

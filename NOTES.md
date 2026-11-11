@@ -6,10 +6,12 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
-## 顶点补齐回退与事务退休修复（GPU-SNAPSHOT-OWNER，2026-11-11；源码进行中）
+## 顶点补齐回退与事务退休修复（GPU-SNAPSHOT-OWNER，2026-11-11；源码编译通过，278构建／部署进行中）
 
-- **用户决策／补齐里程碑**：新索引方式没有实测性能收益或220像素验收；切换动机只是避免CPU snapshot读取GPU生成／延迟更新数据，不能证明indexed重复ID等价于旧non-indexed真实尾部record。`NativeBridgeMetalFrontend.mm`已恢复**默认mode1 CPU snapshot**；`x9p0`仍关闭，`x9p1`仍强制snapshot，mode2只允许显式`x9p2`实验。保留完整triangle、布局／属性宽度／stride／预算、vertex无副作用及fill／rasterization资格门、CB资源持有与绑定恢复；不宣称旧snapshot支持private／GPU生成或编码后修改。真实iOS16／arm64前端单对象编译 **exit0**，无运行／测试套件。现有277包与boot仍是原二进制，不含本次源码，不能覆盖原277identity。
-- **进行中／边界**：正将非递归owner从publish内移至同步事务／整个异步pair，并补出队失败任务的pending完成记账；close在无锁drain后join `c->lock → owner`。退休接口与intrusive队列区分safe busy重试与uncertain隔离，队列叶锁不跨drain／context／owner／释放，避免唯一指针丢失；关键kernel对象编译尚未完成，未称220故障或顶点像素已修复。私有准确命令／原始编译日志 `.local/x9/work/gpu-snapshot-owner-20261111/{frontend-command.json,frontend-build.log,frontend-build.exit}`，没有设备／mailbox／root写入、完整镜像构建或CI run。
+- **用户决策／补齐**：新索引方式没有实测性能收益或220像素验收；动机只是避免CPU snapshot读取GPU生成／延迟更新数据，不能证明indexed重复ID等价于旧non-indexed尾部record。前端提交 **`e6e3528`** 恢复**默认mode1 CPU snapshot**；`x9p0`关闭，`x9p1`强制snapshot，mode2仅显式`x9p2`实验。保留triangle、布局／属性宽度／stride／预算、vertex无副作用及fill／rasterization资格、CB资源持有／绑定恢复；不宣称snapshot支持private／GPU生成或编码后修改。
+- **锁／退休源码修复**：publish/reap显式接收同一个不可复制`RenderOwner`，移除publish内非递归嵌套；同步完整事务／异步完整pair均持owner。已出队任务在disabled／async_failed分支也完成pending记账，避免失败后drain永久等空队列；close在无锁drain后join `c->lock → owner`，避免pending0时worker尚持锁便释放context／锁。内核内部close结果区分Done／safe-busy Retry／uncertain Retained；失败context转移到service自有intrusive队列，不分配新节点、不丢唯一指针。队列叶锁不跨drain／context／owner／MMIO／释放；safe busy按250ms→1s→5s延后，真实fault／不确定DMA只隔离保留且可追踪，不reset／清AS1／强抢槽。没有修改public ABI。
+- **准确本地编译结果**：前端iOS16／arm64 **exit0／2条已有capture类型告警**；初轮四kernel对象exit0，随后发现旧单参数publish/reap前置声明造成unused overload，修正声明并给新永久worker标noreturn后，两变更对象再次真实编译 **exit0**：SweetX9CSF24warnings、SweetX9RenderService12warnings；X9RenderMemory／PageTable各10条头文件warnings，均exit0。无执行／测试套件／完整镜像二次检查。私有命令／源码patch／原始日志 `.local/x9/work/gpu-snapshot-owner-20261111/`：`compile-kernel-units.py`、`frontend-command.json`、`frontend-build.log/exit`、`kernel-units.log/exit`、`kernel-fixed-units.log/exit`、`kernel-source-final.patch`。旧277包／boot不含本次源码，不能覆盖其identity。
+- **用户追加授权／下一步**：用户现已明确“adb已连接，直接更新”。按同一7b72659（kernel基底58ba960）／完整603B／32GiB／ug5／cpus8配置冻结新 **278**，只叠本次前端＋engine／service／internal header；保留无MIC／ADSP／相机／GPS pre-XNU walkers。完成新GeneralMetal278、同PanVK代码版本化、匹配allowlist／kernel／boot后，使用现成mailbox updater（不跳root／pin／inode／FIEMAP preflight，compare-before-write／逐范围读回、header最后提交）部署。**目前尚未生成／部署278，无实机修复验收**；不自动flash／reboot／启动，用户手动fastboot boot。源码引用不等于确认220顶点或CSG故障已消失。
 
 ## 276／277差分交接（GPU-VERSION-DIFF，2026-11-11）：插件修复与整机最新main更新是两层，不是一次单变量升级
 

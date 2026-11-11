@@ -59,6 +59,8 @@ struct RenderOwner {
  bool locked;
  RenderOwner():locked(sweet_x9_render_owner_enter()){}
  ~RenderOwner(){if(locked)sweet_x9_render_owner_leave();}
+ RenderOwner(const RenderOwner &)=delete;
+ RenderOwner &operator=(const RenderOwner &)=delete;
 };
 static bool render_ready() {
  return render_engine_installed&&resident&&resident->ready&&!resident->uncertain&&no_faults(resident->gpu);
@@ -667,8 +669,8 @@ struct RenderJobState {
  uint64_t end,next_sync;
  uint64_t gts_ring,gts_seen;   /* x9gt: GPU TIMESTAMP after the doorbell / when the fence was seen */
 };
-static IOReturn render_submit_publish(RenderJobState *st);
-static IOReturn render_submit_reap(RenderJobState *st);
+static IOReturn render_submit_publish(RenderJobState *st,const RenderOwner &owner);
+static IOReturn render_submit_reap(RenderJobState *st,const RenderOwner &owner);
 /*
  * x9gt=1: split the per-job fence wait (111.txt: wait_us ~5 ms/job at DDR
  * gear 9) into firmware pickup (doorbell -> GPU timestamp before the client
@@ -774,10 +776,13 @@ static void render_dirty_stage(RenderKernelContext *p,uint64_t submission_id) {
  p->dirty_count=0;p->dirty_overflow=false;
  IOLockUnlock(p->dirty_lock);
 }
-static IOReturn render_submit_publish(RenderJobState *st) {
+/* Caller owns c->lock, then this NON-recursive global lock, continuously
+ * through publish -> reap (both jobs for a pipeline pair). Never acquire it
+ * inside either phase: close/map/another submit must not see an in-flight AS1
+ * without its owner, and nesting the IOLock would deadlock. */
+static IOReturn render_submit_publish(RenderJobState *st,const RenderOwner &owner) {
  X9RenderContext *c=st->c;const X9RenderSubmission *request=st->request;
- st->times[0]=mach_absolute_time();
- RenderOwner owner;if(!owner.locked||!render_ready()||!c||!request||!st->reply)return kIOReturnNotReady;
+ if(!owner.locked||!render_ready()||!c||!request||!st->reply)return kIOReturnNotReady;
  st->times[1]=mach_absolute_time();
  auto *g=render_group(c,request->group);if(!g||c->disabled)return kIOReturnBadArgument;
  st->g=g;
@@ -1046,7 +1051,8 @@ static IOReturn render_submit_publish(RenderJobState *st) {
  st->times[4]=mach_absolute_time();
  return kIOReturnSuccess;
 }
-static IOReturn render_submit_reap(RenderJobState *st) {
+static IOReturn render_submit_reap(RenderJobState *st,const RenderOwner &owner) {
+ if(!owner.locked)return kIOReturnNotReady;
  X9RenderContext *c=st->c;RenderKernelGroup *g=st->g;const X9RenderSubmission *request=st->request;
  auto &slot=resident->slots[g->slot];X9CSFQueueIO io=x9_csf_queue_access_io(&slot.access);
  auto *kernel_context=(RenderKernelContext *)c->engine_private;
@@ -1305,9 +1311,10 @@ static IOReturn render_submit(X9RenderContext *c,const X9RenderSubmission *reque
  RenderJobState st={};
  st.c=c;st.request=request;st.reply=reply;st.fence_slot=0;st.pipeline=false;
  if(render_dirty_enabled())render_dirty_stage((RenderKernelContext *)c->engine_private,request->submission_id);
- IOReturn kr=render_submit_publish(&st);
+ st.times[0]=mach_absolute_time();RenderOwner owner;
+ IOReturn kr=render_submit_publish(&st,owner);
  if(kr!=kIOReturnSuccess)return kr;
- return render_submit_reap(&st);
+ return render_submit_reap(&st,owner);
 }
 static IOReturn render_wait(X9RenderContext *c,const X9RenderWaitRequest *request,X9RenderCompletion *reply) {
  RenderOwner owner;if(!owner.locked||!render_ready()||!c||!request||!reply||!c->engine_private)return kIOReturnNotReady;
@@ -1315,16 +1322,38 @@ static IOReturn render_wait(X9RenderContext *c,const X9RenderWaitRequest *reques
  for(const auto &r:p->history)if(r.group==request->group&&r.submission_id==request->submission_id){*reply=r;return kIOReturnSuccess;}
  return kIOReturnNotFound;
 }
-static bool render_close(X9RenderContext *c) {
- if(c)render_async_drain_unlocked((RenderKernelContext *)c->engine_private);   /* before the owner lock */
- RenderOwner owner;if(!owner.locked||!c||!render_ready())return false;
- if(!render_park_release_for(c,"close")){IOLog("X9 RENDER CLOSE: own parked group retire failed\n");return false;}
- if(c->exposed){IOLog("X9 RENDER CLOSE: context still exposed;retain\n");return false;}
- auto *p=(RenderKernelContext *)c->engine_private;if(!p)return x9_render_memory_close(c);
- for(auto *g:p->groups)if(g&&render_destroy_locked(c,g)!=kIOReturnSuccess)return false;
- if(!x9_render_memory_close(c))return false;
+static X9RenderCloseResult render_close(X9RenderContext *c) {
+ if(!c)return X9RenderCloseRetained;
+ render_async_drain_unlocked((RenderKernelContext *)c->engine_private);   /* before either lock */
+ /* pending reaches zero before the worker drops its locks. Join that final
+  * c->lock epilogue too, before destroying groups or freeing the lock itself. */
+ struct CloseContextLock {
+  IOLock *lock;
+  CloseContextLock(IOLock *l):lock(l){IOLockLock(lock);}
+  ~CloseContextLock(){IOLockUnlock(lock);}
+ } context_lock(c->lock);
+ RenderOwner owner;
+ if(!owner.locked)return X9RenderCloseRetry;
+ /* A fault, exposed DMA or failed hardware handshake is NOT a retryable
+  * busy gate. Keep the context tracked but never reset/replay its teardown. */
+ if(!render_ready())return X9RenderCloseRetained;
+ if(!render_park_release_for(c,"close")){IOLog("X9 RENDER CLOSE: own parked group retire failed\n");return X9RenderCloseRetained;}
+ if(c->exposed){IOLog("X9 RENDER CLOSE: context still exposed;retain\n");return X9RenderCloseRetained;}
+ auto *p=(RenderKernelContext *)c->engine_private;
+ if(!p)return x9_render_memory_close(c)?X9RenderCloseDone:X9RenderCloseRetained;
+ for(auto *g:p->groups)if(g) {
+  IOReturn kr=render_destroy_locked(c,g);
+  if(kr==kIOReturnSuccess)continue;
+  /* Only refusals BEFORE a hardware transaction may be deferred. A safe
+   * suspended group can become closable after another owner detaches AS1.
+   * Recheck the session here in case retiring another group faulted it. */
+  if((kr==kIOReturnNotReady||kr==kIOReturnBusy)&&render_ready()&&!c->disabled&&!c->exposed&&
+     !g->control.uncertain&&!g->control.running)return X9RenderCloseRetry;
+  return X9RenderCloseRetained;
+ }
+ if(!x9_render_memory_close(c))return X9RenderCloseRetained;
  if(p->dirty_lock)IOLockFree(p->dirty_lock);
- IOFree(p,sizeof(*p));c->engine_private=nullptr;return true;
+ IOFree(p,sizeof(*p));c->engine_private=nullptr;return X9RenderCloseDone;
 }
 static IOReturn render_timestamp(uint64_t *value) {
  RenderOwner owner;if(!owner.locked||!value||!render_ready())return kIOReturnNotReady;
@@ -1416,14 +1445,22 @@ static void render_async_worker(void *,wait_result_t) {
    * map/unmap and the v1 selectors keep their "never mid-job" guarantee, and
    * the x9dc record path is the only client op that stays lock-free. */
   IOLockLock(c->lock);
+  {
+  const uint64_t owner_begin=mach_absolute_time();RenderOwner owner;
   bool failed;
   IOLockLock(render_async_lock);failed=p->async_failed;IOLockUnlock(render_async_lock);
-  if(c->disabled||failed)kr=kIOReturnNotReady;
+  if(!owner.locked||c->disabled||failed) {
+   kr=kIOReturnNotReady;
+   /* Every popped job must discharge async_pending, even after an earlier
+    * failure; otherwise close/drain sleeps forever on a queue already empty. */
+   render_async_complete(p,job,kr,reply);render_async_metrics(job,kr);
+  }
   else {
    RenderJobState *st=&states[0];
    *st=RenderJobState{};
    st->c=c;st->request=&job.req;st->reply=&reply;st->fence_slot=0;st->pipeline=false;
-   kr=render_submit_publish(st);
+   st->times[0]=owner_begin;
+   kr=render_submit_publish(st,owner);
    RenderAsyncJob job2={};bool pair=false;
    if(kr==kIOReturnSuccess&&render_pipeline_enabled()&&render_park_enabled()) {
     /* Pair with the next FIFO job when it is the same context and group:
@@ -1445,9 +1482,10 @@ static void render_async_worker(void *,wait_result_t) {
     *s2=RenderJobState{};
     X9RenderCompletion reply2={};
     s2->c=c;s2->request=&job2.req;s2->reply=&reply2;s2->fence_slot=1;s2->pipeline=true;
+    s2->times[0]=mach_absolute_time();
     render_parked={c,st->g,st->root};   /* arm the resume detection for job 2 */
-    IOReturn kr2=render_submit_publish(s2);
-    IOReturn kr1=render_submit_reap(st);
+    IOReturn kr2=render_submit_publish(s2,owner);
+    IOReturn kr1=render_submit_reap(st,owner);
     if(kr1!=kIOReturnSuccess) {
      IOLog("X9 RENDER ASYNC: submission failed group=%u id=%llu kr=%x exposed=%u\n",job.req.group,job.req.submission_id,kr1,c->exposed);
      if(c->exposed)c->disabled=true;   /* DMA lifetime unresolved: no retry, as the sync selector */
@@ -1456,7 +1494,7 @@ static void render_async_worker(void *,wait_result_t) {
     render_async_metrics(job,kr1);
     /* Job 2: a failed publish keeps its own error; a failed job 1 reap leaves
      * the session uncertain, so job 2 completes as an error without reaping. */
-    IOReturn krj2=kr2!=kIOReturnSuccess?kr2:(kr1!=kIOReturnSuccess?kIOReturnIOError:render_submit_reap(s2));
+    IOReturn krj2=kr2!=kIOReturnSuccess?kr2:(kr1!=kIOReturnSuccess?kIOReturnIOError:render_submit_reap(s2,owner));
     if(krj2!=kIOReturnSuccess) {
      IOLog("X9 RENDER ASYNC: submission failed group=%u id=%llu kr=%x exposed=%u\n",job2.req.group,job2.req.submission_id,krj2,c->exposed);
      if(c->exposed)c->disabled=true;
@@ -1464,7 +1502,7 @@ static void render_async_worker(void *,wait_result_t) {
     render_async_complete(p,job2,krj2,reply2);
     render_async_metrics(job2,krj2);
    }else {
-    if(kr==kIOReturnSuccess)kr=render_submit_reap(st);
+    if(kr==kIOReturnSuccess)kr=render_submit_reap(st,owner);
     if(kr!=kIOReturnSuccess) {
      IOLog("X9 RENDER ASYNC: submission failed group=%u id=%llu kr=%x exposed=%u\n",job.req.group,job.req.submission_id,kr,c->exposed);
      if(c->exposed)c->disabled=true;   /* DMA lifetime unresolved: no retry, as the sync selector */
@@ -1473,6 +1511,7 @@ static void render_async_worker(void *,wait_result_t) {
     render_async_metrics(job,kr);
    }
   }
+  } /* release owner BEFORE c->lock; never drain a worker while owning it */
   IOLockUnlock(c->lock);
   if(render_async_stats[0]<=4||render_async_stats[0]%600==0)
    IOLog("X9 RENDER ASYNC: jobs=%llu failed=%llu queue_full_waits=%llu drain_waits=%llu enqueued=%llu completed=%llu\n",

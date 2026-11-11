@@ -5,6 +5,7 @@
 #include <IOKit/IOService.h>
 #include <IOKit/IOLib.h>
 #include <kern/task.h>
+#include <kern/thread.h>
 extern "C" int sweet_x9_arg(const char *name, int def);
 #include <kern/clock.h>
 #include <mach/mach_vm.h>
@@ -45,6 +46,86 @@ static bool render_wc_scrub(IOMemoryDescriptor *m,uint64_t bytes) {
 static const X9RenderEngine *render_engine;
 static bool render_published;
 extern "C" { int sweet_x9_render_payload_ready=0; }
+/* Teardown ownership: live userclient -> retry queue/worker -> released OR
+ * quarantine. Lists use the context itself, so allocation failure in free()
+ * cannot discard its only pointer. The leaf queue lock is NEVER held across
+ * drain, c->lock, owner, MMIO, or resource release. An uncertain context stays
+ * reachable in quarantine for this boot and is never blindly retried. */
+static IOLock *render_retire_lock;
+static X9RenderContext *render_retire_queue,*render_retire_quarantine;
+static uint64_t render_retire_pending,render_retire_held,render_retire_released;
+static bool render_retire_running;
+static void render_context_release(X9RenderContext *c) {
+ for(auto &r:c->resources)if(r.memory) {
+  if(r.cache_mapping){r.cache_mapping->release();r.cache_mapping=nullptr;}
+  if(r.prepared)r.memory->complete(r.memory->getDirection());
+  r.memory->release();
+ }
+ if(c->owner)task_deallocate(c->owner);
+ if(c->lock)IOLockFree(c->lock);
+ if(c->submit_lock)IOLockFree(c->submit_lock);
+ IOFree(c,sizeof(*c));
+}
+static void render_context_defer(X9RenderContext *c,X9RenderCloseResult result) {
+ /* Initialized before service registration; free of a partially initialized
+  * client without engine_open uses direct release and needs no queue. */
+ const int pid=c->owner?pid_from_task(c->owner):-1;
+ const uint32_t attempts=c->retire_attempts;
+ uint64_t pending,held;
+ IOLockLock(render_retire_lock);
+ if(result==X9RenderCloseRetry) {
+  const uint32_t delay=attempts<4?250:attempts<8?1000:5000;
+  clock_interval_to_deadline(delay,NSEC_PER_MSEC,&c->retire_at);
+  c->retire_next=render_retire_queue;render_retire_queue=c;render_retire_pending++;
+  IOLockWakeup(render_retire_lock,&render_retire_queue,false);
+ }else {
+  c->retire_next=render_retire_quarantine;render_retire_quarantine=c;render_retire_held++;
+ }
+ pending=render_retire_pending;held=render_retire_held;
+ IOLockUnlock(render_retire_lock);
+ /* The queue owns c now; even logging must use only captured scalars. */
+ if(result!=X9RenderCloseRetry||attempts<=1||!(attempts%64))
+  IOLog("X9 RENDER RETIRE: pid=%d %s attempts=%u pending=%llu quarantine=%llu;context/prepared resources tracked,no reset\n",
+   pid,result==X9RenderCloseRetry?"deferred safe busy":"quarantined uncertain",attempts,pending,held);
+}
+[[noreturn]] static void render_retire_worker(void *,wait_result_t) {
+ for(;;) {
+  IOLockLock(render_retire_lock);
+  X9RenderContext *c=nullptr;
+  for(;;) {
+   X9RenderContext **next=nullptr;
+   for(auto **p=&render_retire_queue;*p;p=&(*p)->retire_next)
+    if(!next||(*p)->retire_at<(*next)->retire_at)next=p;
+   if(!next){IOLockSleep(render_retire_lock,&render_retire_queue,THREAD_UNINT);continue;}
+   if((*next)->retire_at>mach_absolute_time()) {
+    IOLockSleepDeadline(render_retire_lock,&render_retire_queue,(*next)->retire_at,THREAD_UNINT);continue;
+   }
+   c=*next;*next=c->retire_next;c->retire_next=nullptr;render_retire_pending--;break;
+  }
+  IOLockUnlock(render_retire_lock);
+  /* No queue/context/owner lock while waiting for the async worker. close
+   * internally joins c->lock after drain, then owns the whole teardown. */
+  if(c->retire_attempts!=UINT32_MAX)c->retire_attempts++;
+  X9RenderCloseResult result=render_engine->context_close(c);
+  if(result!=X9RenderCloseDone){render_context_defer(c,result);continue;}
+  const int pid=c->owner?pid_from_task(c->owner):-1;
+  const uint32_t attempts=c->retire_attempts;
+  render_context_release(c);
+  IOLockLock(render_retire_lock);const uint64_t released=++render_retire_released;IOLockUnlock(render_retire_lock);
+  IOLog("X9 RENDER RETIRE: pid=%d released attempts=%u total=%llu;CSG/AS detached before resource release\n",pid,attempts,released);
+ }
+}
+static bool render_retire_start() {
+ if(render_retire_running)return true;
+ render_retire_lock=IOLockAlloc();if(!render_retire_lock)return false;
+ thread_t thread;
+ if(kernel_thread_start(render_retire_worker,nullptr,&thread)!=KERN_SUCCESS) {
+  IOLockFree(render_retire_lock);render_retire_lock=nullptr;return false;
+ }
+ thread_deallocate(thread);render_retire_running=true;
+ IOLog("X9 RENDER RETIRE: worker ready;safe busy retry,uncertain quarantine,no lost context pointers\n");
+ return true;
+}
 /* Frontend cache scope (rev252bx/by, X9RenderScope). One entry per (task,
  * host address): regs counts registrations (the import is frontend-tracked),
  * refs counts pending command buffers (Acquire) or HoldAll (address 0).
@@ -566,20 +647,14 @@ public:
  void free(void) APPLE_KEXT_OVERRIDE {
   if(context&&context->scope_only) {
    render_scope_task_gone(context->owner);
-   if(context->owner)task_deallocate(context->owner);if(context->lock)IOLockFree(context->lock);
-   if(context->submit_lock)IOLockFree(context->submit_lock);
-   IOFree(context,sizeof(*context));context=nullptr;
+   render_context_release(context);context=nullptr;
   }
   if(context) {
    footprint("close");
-   if(context->engine_open&&!render_engine->context_close(context)) {
-    IOLog("X9 RENDER: unresolved client teardown;prepared resources/context retained,no reset\n");context=nullptr;
-   }else {
-    for(auto &r:context->resources)if(r.memory){if(r.cache_mapping){r.cache_mapping->release();r.cache_mapping=nullptr;}if(r.prepared)r.memory->complete(r.memory->getDirection());r.memory->release();}
-    if(context->owner)task_deallocate(context->owner);if(context->lock)IOLockFree(context->lock);
-    if(context->submit_lock)IOLockFree(context->submit_lock);
-    IOFree(context,sizeof(*context));context=nullptr;
-   }
+   X9RenderCloseResult result=context->engine_open?render_engine->context_close(context):X9RenderCloseDone;
+   if(result==X9RenderCloseDone)render_context_release(context);
+   else render_context_defer(context,result);
+   context=nullptr;   /* released, or ownership transferred to a tracked list */
   }
   IOUserClient::free();
  }
@@ -717,6 +792,7 @@ OSDefineMetaClassAndStructors(SweetX9Render,IOService);
 extern "C" void sweet_x9_render_install(const X9RenderEngine *engine) {if(!render_engine&&!render_published)render_engine=engine;}
 extern "C" void sweet_x9_render_publish(void) {
  if(render_published)return;X9RenderCaps caps;if(!render_caps_ready(&caps))return;
+ if(!render_retire_start()){IOLog("X9 RENDER SERVICE: retirement worker unavailable;not publishing\n");return;}
  auto *service=new SweetX9Render;IOService *root=IOService::getServiceRoot();
  if(!service||!root||!service->init()||!service->attach(root)||!service->start(root)) {
   if(service){if(service->getProvider()==root)service->detach(root);service->release();}return;
