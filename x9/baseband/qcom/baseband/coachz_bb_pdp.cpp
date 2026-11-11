@@ -22,7 +22,13 @@ extern struct udpstat udpstat;
 }
 
 extern "C" int coachz_modem_data_send(uint32_t, const uint8_t *, uint32_t);
+#if COACHZ_NATIVE_DPMAIF
+// The native owner supplies the immutable route epoch. Return only the actual
+// ifnet_input result, not a void handoff or protocol/application acceptance.
+extern "C" void coachz_modem_data_receiver_counted(int (*)(uint32_t, const uint8_t *, uint32_t, uint32_t, uint64_t));
+#else
 extern "C" void coachz_modem_data_receiver(void (*)(uint32_t, const uint8_t *, uint32_t, uint32_t));
+#endif
 #if COACHZ_NATIVE_DPMAIF
 extern "C" uint32_t coachz_modem_data_state(uint32_t, uint32_t *, uint64_t *);
 static const unsigned BB_PDP_MAX_MTU = 3072;
@@ -106,27 +112,53 @@ static errno_t bb_pdp_output(ifnet_t ifp, mbuf_t m)
   IOLockUnlock(bb_pdp_lock);
   return 0;
 }
-static void bb_pdp_receive(uint32_t mux, const uint8_t *ip, uint32_t n, uint32_t version)
+static int bb_pdp_receive_error(bb_pdp_if *p, int error)
 {
-  if (!bb_pdp_lock || !cbp_mux_ok(mux) || !n || (version != 4 && version != 6)) return;
+  IOLockLock(bb_pdp_lock); p->dropped++; ifnet_t ifp = p->ifp; IOLockUnlock(bb_pdp_lock);
+  if (ifp) ifnet_stat_increment_in(ifp, 0, 0, 1);
+  return error;
+}
+static int bb_pdp_receive_counted(uint32_t mux, const uint8_t *ip, uint32_t n,
+    uint32_t version, uint64_t epoch)
+{
+  if (!bb_pdp_lock || !cbp_mux_ok(mux) || !ip || !n || (version != 4 && version != 6)) return EINVAL;
   auto *p = &bb_pdp_ifaces[mux - 1u];
   IOLockLock(bb_pdp_lock);
-  const bool usable = p->ifp && (p->families & cbp_family_bit(version)) && !p->blocked;
-  if (!usable) p->dropped++;
+  ifnet_t ifp = p->ifp;
+  const bool usable = ifp && (p->families & cbp_family_bit(version)) && !p->blocked
+#if COACHZ_NATIVE_DPMAIF
+    && epoch && p->epoch == epoch
+#endif
+    ;
   IOLockUnlock(bb_pdp_lock);
-  if (!usable || !(ifnet_flags(p->ifp) & IFF_UP)) return;
+#if !COACHZ_NATIVE_DPMAIF
+  (void)epoch;
+#endif
+  if (!usable || !(ifnet_flags(ifp) & IFF_UP)) return bb_pdp_receive_error(p, ENETDOWN);
+  if (n > ifnet_mtu(ifp)) return bb_pdp_receive_error(p, EMSGSIZE);
   mbuf_t m = nullptr;
-  if (mbuf_allocpacket(MBUF_DONTWAIT, n, nullptr, &m) || !m) return;
-  if (mbuf_copyback(m, 0, n, ip, MBUF_DONTWAIT)) { mbuf_freem(m); return; }
-  mbuf_pkthdr_setrcvif(m, p->ifp);
+  errno_t error = mbuf_allocpacket(MBUF_DONTWAIT, n, nullptr, &m);
+  if (error || !m) return bb_pdp_receive_error(p, error ? error : ENOBUFS);
+  error = mbuf_copyback(m, 0, n, ip, MBUF_DONTWAIT);
+  if (error) { mbuf_freem(m); return bb_pdp_receive_error(p, error); }
+  mbuf_pkthdr_setrcvif(m, ifp);
   mbuf_pkthdr_setheader(m, nullptr);
-  bpf_tap_in(p->ifp, DLT_RAW, m, nullptr, 0);
+  bpf_tap_in(ifp, DLT_RAW, m, nullptr, 0);
   ifnet_stat_increment_param inc = {};
   inc.packets_in = 1; inc.bytes_in = n;
-  const errno_t error = ifnet_input(p->ifp, m, &inc);
-  if (error) mbuf_freem(m);
-  else p->rx++;
+  // XNU ifnet_input consumes the mbuf on BOTH success and failure (including
+  // a detached interface). Do not double-free its failed input here.
+  error = ifnet_input(ifp, m, &inc);
+  if (error) return bb_pdp_receive_error(p, error);
+  IOLockLock(bb_pdp_lock); p->rx++; IOLockUnlock(bb_pdp_lock);
+  return 0;
 }
+#if !COACHZ_NATIVE_DPMAIF
+static void bb_pdp_receive(uint32_t mux, const uint8_t *ip, uint32_t n, uint32_t version)
+{
+  (void)bb_pdp_receive_counted(mux, ip, n, version, 0);
+}
+#endif
 // The helper can be opened before modem READY. Prepare only its traffic-gate
 // lock here; do not attach interfaces or announce a usable data transport.
 // The board serializes this before starting the bridge worker.
@@ -171,7 +203,11 @@ static void bb_pdp_init()
     }
     printf("COACHZ pdp: pdp_ip%u mux %u registered result %d (initially down)\n", i, i + 1u, error);
   }
+#if COACHZ_NATIVE_DPMAIF
+  coachz_modem_data_receiver_counted(bb_pdp_receive_counted);
+#else
   coachz_modem_data_receiver(bb_pdp_receive);
+#endif
   bb_pdp_initialized = 1;
 }
 // Wi-Fi thread only; never hold bb_lock while calling the network stack or ringing GSI.

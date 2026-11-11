@@ -15,6 +15,10 @@ void coachz_baseband_report(unsigned second);
 /* Implemented by the board data adapter; called on the QRTR/IPA owner thread. */
 int coachz_modem_data_send(uint32_t mux, const uint8_t *ip, uint32_t length);
 void coachz_modem_data_receiver(void (*receiver)(uint32_t mux, const uint8_t *ip, uint32_t length, uint32_t ip_version));
+/* Native DPMAIF adapter: epoch identifies the original route; zero means the
+ * network input KPI accepted the mbuf, not IP/protocol/application delivery.
+ * Legacy IPA adapters retain the void callback above. */
+void coachz_modem_data_receiver_counted(int (*receiver)(uint32_t mux, const uint8_t *ip, uint32_t length, uint32_t ip_version, uint64_t epoch));
 #ifdef __cplusplus
 }
 #endif

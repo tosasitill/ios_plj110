@@ -57,7 +57,7 @@ struct x9d_state {
     const char *phase;
     uint32_t last_ul, last_dl; bool legacy_pit_reported;
     uint64_t tx_packets, tx_done, rx_packets, rx_dropped, rejected, flow_events;
-    void (*receiver)(uint32_t, const uint8_t *, uint32_t, uint32_t);
+    int (*receiver)(uint32_t, const uint8_t *, uint32_t, uint32_t, uint64_t);
 };
 static x9d_state x9d;
 static uint64_t x9d_ms() { uint64_t ns; absolutetime_to_nanoseconds(mach_absolute_time(), &ns); return ns / 1000000; }
@@ -450,20 +450,24 @@ static bool x9d_rx_item(unsigned q, const uint32_t *d) {
     memcpy(r.ip + r.bytes, x9d.pool[kind].va + off, bytes); r.bytes += bytes; r.normal = true;
     x9d.posted[kind][bid] = false; // CPU copy complete; global BAT replenisher owns reuse
     if (!(a & 2)) {
-        unsigned mux = 0; void (*receiver)(uint32_t, const uint8_t *, uint32_t, uint32_t);
+        unsigned mux = 0; int (*receiver)(uint32_t, const uint8_t *, uint32_t, uint32_t, uint64_t);
         IOLockLock(x9d.lock);
         for (unsigned i = 0; i < CBP_INTERFACES; i++) if (x9d.route[i].bound && x9d.route[i].channel == r.channel &&
             i + 1 == r.mux && x9d.route[i].epoch == r.epoch && r.bytes <= x9d.route[i].mtu &&
             (x9d.route[i].families & cbp_family_bit(r.ip[0] >> 4))) mux = i + 1;
         receiver = x9d.receiver; IOLockUnlock(x9d.lock);
         bool valid = !r.drop && mux && receiver && x9d_ip(r.ip, r.bytes);
+        // No route lock across the network KPI. Bind/unbind and this RX path
+        // run on the same board owner thread; the helper separately validates
+        // its family gate and the immutable epoch carried by this packet.
+        bool accepted = valid && receiver(mux, r.ip, r.bytes, r.ip[0] >> 4, r.epoch) == 0;
         IOLockLock(x9d.lock);
         if (cbp_mux_ok(r.mux) && x9d.route[r.mux - 1].epoch == r.epoch) {
             x9d_stats &s = x9d.route[r.mux - 1].stats;
-            if (valid) { s.rx_packets++; s.rx_bytes += r.bytes; } else s.rx_dropped++;
+            if (accepted) { s.rx_packets++; s.rx_bytes += r.bytes; } else s.rx_dropped++;
         }
         IOLockUnlock(x9d.lock);
-        if (valid) { receiver(mux, r.ip, r.bytes, r.ip[0] >> 4); x9d.rx_packets++; }
+        if (accepted) x9d.rx_packets++;
         else x9d.rx_dropped++;
         bzero(r.ip, r.bytes); r.bytes = 0; r.message = r.normal = false;
     }
@@ -577,7 +581,7 @@ extern "C" uint32_t coachz_modem_data_state(uint32_t mux, uint32_t *mtu, uint64_
     if (epoch) *epoch = r.epoch;
     IOLockUnlock(x9d.lock); return families;
 }
-extern "C" void coachz_modem_data_receiver(void (*cb)(uint32_t, const uint8_t *, uint32_t, uint32_t)) {
+extern "C" void coachz_modem_data_receiver_counted(int (*cb)(uint32_t, const uint8_t *, uint32_t, uint32_t, uint64_t)) {
     // Registration can precede x9d_prepare but is performed by the bridge owner.
     if (x9d.lock) IOLockLock(x9d.lock); x9d.receiver = cb; if (x9d.lock) IOLockUnlock(x9d.lock);
 }
