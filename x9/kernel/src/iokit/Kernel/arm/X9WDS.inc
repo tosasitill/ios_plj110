@@ -20,20 +20,6 @@ struct x9w_client {
 };
 static x9w_client x9w_clients[CBQ_MAX_CLIENTS];
 enum { X9W_DISC=1, X9W_ACT, X9W_CHECK, X9W_DEACT, X9W_IFWAIT };
-struct x9w_bearer {
- bool used,owned,active,abandoned,pending,hold,gone;
- unsigned slot,op,min_cid,max_cid,channel,mtu,dns_count;
- uint64_t generation,token,deadline,reply_deadline,next,if_floor;
- uint32_t handle,len,trans_id;
- uint8_t cid,sim_slot,req[X9Q_REQ],ip[4],dns[2][4];
- char apn[101];
-};
-static x9w_bearer x9w_bearers[CBP_INTERFACES];
-static uint32_t x9w_next_handle;
-// Latest MD interface state, not Android's local netdev state. The floor and
-// never-reused DPMAIF channel prevent accepting a pre-ACT/previous bearer event.
-struct x9w_interface { uint64_t serial; uint32_t trans_id,mtu; unsigned cmd; bool valid; uint8_t ip[4]; };
-static x9w_interface x9w_interfaces[2][20];
 static uint64_t x9w_if_serial,x9w_init_token,x9w_init_deadline;
 static unsigned x9w_init_stage;
 static bool x9w_control_ready,x9w_session_ready,x9w_init_hold;
@@ -84,6 +70,22 @@ static bool x9w_byte(const uint8_t *p,unsigned n,unsigned tag,unsigned &v){
 static bool x9w_word(const uint8_t *p,unsigned n,unsigned tag,unsigned &v){
  x9q_view t=x9w_tlv(p,n,tag);if(!t.p||t.n!=4)return false;v=x9q_u32(t.p);return true;
 }
+#include "X9WDSResult.inc"
+struct x9w_bearer {
+ bool used,owned,active,abandoned,pending,hold,gone;
+ unsigned slot,op,min_cid,max_cid,channel,mtu,dns_count;
+ uint64_t generation,token,deadline,reply_deadline,next,if_floor,result_epoch;
+ uint32_t handle,len,trans_id;
+ uint8_t cid,sim_slot,req[X9Q_REQ],ip[4],dns[2][4];
+ char apn[101];
+ x9wr_identity query; x9wr_get get_result; x9wr_settings runtime;
+};
+static x9w_bearer x9w_bearers[CBP_INTERFACES];
+static uint32_t x9w_next_handle;
+// Latest MD interface state, not Android's local netdev state. The floor and
+// never-reused DPMAIF channel prevent accepting a pre-ACT/previous bearer event.
+struct x9w_interface { uint64_t serial; uint32_t trans_id,mtu; unsigned cmd; bool valid; uint8_t ip[4]; x9wr_ifup facts; };
+static x9w_interface x9w_interfaces[2][20];
 static void x9w_init_poll(uint8_t *response,unsigned room){
  bool transport_ok=x9_md_mipc_online();
  if(!transport_ok){
@@ -203,7 +205,7 @@ static void x9w_error(x9w_bearer &b,unsigned error){
 static void x9w_disconnect(x9w_bearer &b,unsigned mux){
  bool was=b.active;
  if(was&&x9w_live(b))x9d_account(mux,x9w_clients[b.slot].last_call);
- b.active=false;x9d_unbind(mux);
+ b.active=false;bzero(&b.runtime,sizeof(b.runtime));x9d_unbind(mux);
  if(was&&x9w_live(b)){
   uint8_t req[7]={0,0,0,0x22,0,0,0};x9q_packet p(req);uint8_t status[2]={1,0},family=4;
   p.tlv(1,status,2);p.tlv(0x12,&family,1);p.send(CBQ_PORT_BASE+b.slot,X9BB_PORT_BASE+1,true,0x22);
@@ -223,12 +225,32 @@ static bool x9w_send(x9w_bearer &b,x9w_frame &f,unsigned op,unsigned timeout){
 }
 static bool x9w_deactivate(x9w_bearer &b,unsigned mux){
  x9w_disconnect(b,mux);
+ // A token/old CID is not authority to mutate the replacement card epoch.
+ if(b.result_epoch!=x9a_epoch){b.hold=true;return false;}
  if(!b.owned||b.token||b.hold||!x9_md_mipc_online())return false;
  x9w_frame f(0x203,1u<<b.sim_slot);f.byte(0x101,b.cid);f.byte(0x102,1); // normal, never FORCE_LOCAL
  if(!x9w_send(b,f,X9W_DEACT,60000))return false;
  printf("X9 WDS: deactivate owned call %u mux %u (await real CNF)\n",b.cid,mux);return true;
 }
-static bool x9w_check(x9w_bearer &b){x9w_frame f(0x205,1u<<b.sim_slot);f.byte(0x101,b.cid);return x9w_send(b,f,X9W_CHECK,30000);}
+static bool x9w_check(x9w_bearer &b){
+ // Frozen once per actual GET205 token. Neither a CNF header mask nor a
+ // later client incarnation can rewrite the token's originating identity.
+ if(b.result_epoch!=x9a_epoch){b.hold=true;return false;}
+ if(!x9w_live(b))return false;
+ x9wr_identity query={b.generation,b.result_epoch,b.if_floor,b.sim_slot,b.cid,4,0};
+ x9w_frame f(0x205,1u<<b.sim_slot);f.byte(0x101,b.cid);
+ if(!x9w_send(b,f,X9W_CHECK,30000))return false;
+ b.query=query;return true;
+}
+static bool x9w_get_settings(x9w_bearer &b,const uint8_t *p,unsigned n){
+ x9wr_identity current={b.generation,b.result_epoch,b.if_floor,b.sim_slot,b.cid,4,0};
+ x9wr_get get={};
+ if(b.result_epoch!=x9a_epoch||!x9w_live(b)||!x9wr_same_identity(b.query,current)||
+    !x9wr_decode_get(p,n,b.query,get)||get.channel!=b.channel||get.trans_id!=b.trans_id||
+    !get.v4.mtu_present||get.v4.mtu!=b.mtu||memcmp(get.v4.address,b.ip,4))return false;
+ // Still corroborate the earlier ACT facts; do not retarget a live route.
+ b.get_result=get;return true;
+}
 static bool x9w_settings(x9w_bearer &b,const uint8_t *p,unsigned n){
  unsigned cid,type,channel,mtu,count,dns;
  if(!x9w_byte(p,n,0x100,cid)||cid!=b.cid||!x9w_byte(p,n,0x102,type)||type!=1||
@@ -242,7 +264,6 @@ static bool x9w_settings(x9w_bearer &b,const uint8_t *p,unsigned n){
  b.channel=channel;b.mtu=mtu;memcpy(b.ip,ip.p,4);b.dns_count=dns>2?2:dns;memcpy(b.dns,addresses,sizeof(addresses));
  return true; // no gateway/netmask derived from stale versioned tags
 }
-static void x9w_ip_tlv(x9q_packet &p,unsigned tag,const uint8_t *ip){uint8_t le[4]={ip[3],ip[2],ip[1],ip[0]};p.tlv((uint8_t)tag,le,4);}
 static void x9w_handle_reply(x9w_bearer &b){
  uint32_t h=b.handle;uint8_t bytes[4]={(uint8_t)h,(uint8_t)(h>>8),(uint8_t)(h>>16),(uint8_t)(h>>24)};
  x9q_packet p(b.req);p.tlv(1,bytes,4);p.send(CBQ_PORT_BASE+b.slot,X9BB_PORT_BASE+1);x9w_pending_done(b);
@@ -252,11 +273,14 @@ static void x9w_publish(x9w_bearer &b,unsigned mux){
  if(b.abandoned||b.hold||!b.pending)return;
  const x9w_interface &in=x9w_interfaces[b.sim_slot][b.channel];
  if(!in.valid||in.serial<=b.if_floor||in.trans_id!=b.trans_id||in.cmd!=0)return;
- if(in.mtu!=b.mtu||memcmp(in.ip,b.ip,4)||!b.pending||!x9w_live(b)||
+ x9wr_identity current={b.generation,b.result_epoch,b.if_floor,b.sim_slot,b.cid,4,0};
+ x9wr_settings runtime={};
+ if(b.result_epoch!=x9a_epoch||!x9wr_match_settings(b.get_result,in.facts,current,runtime)||
+    !x9wr_ipv4_facts(runtime)||in.mtu!=b.mtu||memcmp(in.ip,b.ip,4)||!b.pending||!x9w_live(b)||
     x9w_next_handle>=0xfffffffeu||!x9d_bind(mux,b.channel,1,b.mtu)){
   b.abandoned=true;x9w_error(b,X9Q_NOT_READY);x9w_deactivate(b,mux);return;
  }
- b.handle=++x9w_next_handle;b.active=true;b.op=0;b.next=x9q_ms()+10000;
+ b.runtime=runtime;b.handle=++x9w_next_handle;b.active=true;b.op=0;b.next=x9q_ms()+10000;
  x9w_client &c=x9w_clients[b.slot];bzero(&c.baseline,sizeof(c.baseline));c.report_next=0;c.last_rat=0;
  printf("X9 WDS: SIM%u PDP activated call %u -> ccmni%u -> mux %u IPv4 MTU %u, ACT+GET+EIF/IFUP verified, DPMAIF bound\n",b.sim_slot+1,b.cid,b.channel,mux,b.mtu);
  x9w_handle_reply(b);
@@ -272,6 +296,11 @@ static void x9w_result(x9w_bearer &b,unsigned mux,const uint8_t *p,unsigned n){
  if(!x9w_wire(p,n)||x9q_u16(p+10)!=expected||!x9w_word(p,n,0,result)){
   b.hold=true;b.abandoned=true;x9w_disconnect(b,mux);x9w_error(b,X9Q_INTERNAL);
   printf("X9 WDS: malformed CNF op %u; quarantined until boot\n",op);return;
+ }
+ // The actual take consumed this token, but a CNF from the retired card
+ // epoch cannot authorize an old ACT continuation, cleanup203 or success.
+ if(b.result_epoch!=x9a_epoch){
+  b.hold=true;b.abandoned=true;x9w_disconnect(b,mux);x9w_error(b,X9Q_NOT_READY);return;
  }
  b.hold=false; // late valid CNF restores cleanup ability, NEVER host success
  printf("X9 WDS: MIPC CNF msg 0x%04x result %u mux %u\n",expected,result,mux);
@@ -318,12 +347,18 @@ static void x9w_result(x9w_bearer &b,unsigned mux,const uint8_t *p,unsigned n){
  if(op==X9W_CHECK){
   if(b.gone){x9w_clear(b,mux);return;}
   if(b.abandoned){x9w_deactivate(b,mux);return;}
-  if(result||!x9w_settings(b,p,n)||!x9d_ready()){
+  if(result||!x9w_get_settings(b,p,n)||!x9d_ready()){
    b.abandoned=true;x9w_disconnect(b,mux);x9w_error(b,X9Q_NOT_READY);x9w_deactivate(b,mux);return;
   }
   if(!b.active){
    b.op=X9W_IFWAIT;b.deadline=x9q_ms()+30000;x9w_publish(b,mux);return;
-  }b.next=x9q_ms()+10000;return;
+  }
+  const x9w_interface &in=x9w_interfaces[b.sim_slot][b.channel];x9wr_settings runtime={};
+  if(!in.valid||in.cmd!=0||!x9wr_match_settings(b.get_result,in.facts,b.query,runtime)||
+     !x9wr_ipv4_facts(runtime)){
+   b.abandoned=true;x9w_disconnect(b,mux);x9w_error(b,X9Q_NOT_READY);x9w_deactivate(b,mux);return;
+  }
+  b.runtime=runtime;b.next=x9q_ms()+10000;return;
  }
  unsigned cid;
  if(result||!x9w_byte(p,n,0x100,cid)||cid!=b.cid){
@@ -351,13 +386,12 @@ static bool x9w_interface_event(const uint8_t *p,unsigned n,unsigned sim){
  x9w_interface &in=x9w_interfaces[sim][trans%100];bzero(&in,sizeof(in));
  in.serial=++x9w_if_serial;in.trans_id=trans;in.cmd=cmd;
  if(cmd==0){
-  unsigned v4,v6;
-  x9q_view a=x9w_tlv(p,n,0x8105);
-  // Current MipcEventHandler copies v4_full_addr's +4 IPv4 and +0 MTU.
-  // No fabricated mask and no unimplemented multi-address/IPv6 conversion.
-  if(x9w_byte(p,n,0x104,v4)&&v4==1&&x9w_byte(p,n,0x106,v6)&&!v6&&a.p&&a.n==12){
-   in.mtu=x9q_u32(a.p);if(!in.mtu)x9w_word(p,n,0x103,in.mtu);
-   memcpy(in.ip,a.p+4,4);in.valid=in.mtu&&in.ip[0]&&in.ip[0]<224&&in.ip[0]!=127;
+  // Preserve the actual typed EIF facts, including the capture card epoch.
+  // IPv6 remains unsupported; no fulladdr tail or tag103 fallback MTU.
+  if(x9wr_decode_ifup(p,n,sim,x9a_epoch,in.serial,in.facts)&&
+     in.facts.v4.address_present&&!in.facts.v6.address_present){
+   in.mtu=in.facts.v4.mtu;memcpy(in.ip,in.facts.v4.address,4);
+   in.valid=in.mtu>=68&&in.mtu<=X9D_TX_SIZE;
   }
   // Foreign IMS/IPv6 events do not poison the IPv4 dialler. An owned route
   // with an unsupported IFUP remains disconnected and is cleaned up.
@@ -398,7 +432,8 @@ static void x9w_poll(){
  uint64_t now=x9q_ms();bool online=x9_md_mipc_online();
  for(unsigned i=0;i<CBP_INTERFACES;i++){x9w_bearer &b=x9w_bearers[i];if(!b.used)continue;
   x9w_host_expire(b,i+1,now);
-  if(!x9w_live(b)||!online||!x9d_ready()){b.abandoned=true;x9w_disconnect(b,i+1);x9w_error(b,X9Q_NOT_READY);}
+  if(b.result_epoch!=x9a_epoch)b.hold=true; // retain/drain token, never old-epoch203
+  if(!x9w_live(b)||!online||!x9d_ready()||b.result_epoch!=x9a_epoch){b.abandoned=true;x9w_disconnect(b,i+1);x9w_error(b,X9Q_NOT_READY);}
   if(b.token){
    // Deadline precedes take, including a ready1 first observed after expiry.
    // Keep the original token on pending/error and drain it even while held.
@@ -521,10 +556,11 @@ static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
   if(!mask.p||mask.n!=4||n!=14)error=X9Q_ARG;
   else if(!own||!own->active||!x9d_ready()||!x9_md_mipc_online())error=15;
   else{
-   x9q_packet p(req);uint8_t family=4,type=0;p.tlv(0x11,&type,1);p.tlv(0x14,own->apn,(unsigned)strlen(own->apn));
-   x9w_ip_tlv(p,0x1e,own->ip);for(unsigned i=0;i<own->dns_count;i++)x9w_ip_tlv(p,0x15+i,own->dns[i]);
-   unsigned mtu=own->mtu;uint8_t le[4]={(uint8_t)mtu,(uint8_t)(mtu>>8),(uint8_t)(mtu>>16),(uint8_t)(mtu>>24)};
-   p.tlv(0x29,le,4);p.tlv(0x2b,&family,1);p.send(local,port);return true;
+   x9wr_identity current={own->generation,own->result_epoch,own->if_floor,own->sim_slot,own->cid,4,0};
+   x9q_packet p(req);uint8_t type=0;p.tlv(0x11,&type,1);p.tlv(0x14,own->apn,(unsigned)strlen(own->apn));
+   if(own->result_epoch!=x9a_epoch||!x9w_live(*own)||
+      !x9wr_same_identity(own->runtime.identity,current)||!x9wr_serialize_ipv4(own->runtime,p))error=X9Q_NOT_READY;
+   else{p.send(local,port);return true;}
   }
  }else if(id==0x21){
   x9q_view h=x9q_tlv(req,n,1);
@@ -551,7 +587,7 @@ static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
   else if(!x9d_ready()||!x9_md_mipc_online()||!x9w_session_ready)error=X9Q_NOT_READY;
   else{
    x9w_bearer &b=x9w_bearers[c.mux-1];bzero(&b,sizeof(b));b.used=b.pending=true;
-   b.slot=slot;b.sim_slot=c.sim_slot;b.generation=x9q_clients[slot].generation;b.len=n;memcpy(b.req,req,n);
+   b.slot=slot;b.sim_slot=c.sim_slot;b.generation=x9q_clients[slot].generation;b.result_epoch=x9a_epoch;b.len=n;memcpy(b.req,req,n);
    b.reply_deadline=x9q_ms()+200000; // DISC10 + ACT120 + GET30 + IFWAIT30
    x9q_view apn=x9q_tlv(req,n,0x14);
    if(x9q_tlv(req,n,0x31).p)memcpy(b.apn,selected_apn,sizeof(b.apn));
