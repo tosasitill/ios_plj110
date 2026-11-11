@@ -35,6 +35,8 @@ const void *nmb_function_constant_air(size_t *length);
 /* loader: a library exporting vkGetInstanceProcAddr (Turnip on the tablet). cache: a writable directory for translated shaders. */
 NmbDevice *nmb_device_open(const char *loader, const char *cache);
 void nmb_device_release(NmbDevice *);
+/* Release only unreferenced parked objects/spare blocks; never live resources. */
+uint64_t nmb_device_release_kept_memory(const NmbDevice *);
 size_t nmb_device_name(const NmbDevice *, char *out, size_t size);
 uint64_t nmb_device_max_buffer_length(const NmbDevice *);
 // Pipeline makings (count, total us, longest us, waited us, failed), sink messages (info, warning+), shader cache hits/misses/writes.
@@ -160,6 +162,8 @@ bool nmb_binary_archive_add_render(NmbBinaryArchive *, const struct NmbRenderPip
 bool nmb_binary_archive_add_compute(NmbBinaryArchive *, NmbFunction *);
 bool nmb_binary_archive_add_compute_descriptor(NmbBinaryArchive *, const struct NmbComputePipelineDescriptor *);
 void nmb_render_pipeline_release(NmbRenderPipeline *);
+/* Compiled shader analysis, not merely a read-only binding declaration. */
+bool nmb_render_pipeline_vertex_readonly(const NmbRenderPipeline *);
 
 typedef struct NmbReflection NmbReflection;
 NmbReflection *nmb_render_pipeline_reflection(const struct NmbRenderPipelineDescriptor *);

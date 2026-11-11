@@ -929,7 +929,14 @@ static IOReturn render_submit_publish(RenderJobState *st) {
    if(bytes>bound)return kIOReturnBadArgument;
    st->holes_saved[0]+=bound-bytes;
    if(r.imported){st->import_bytes[0]+=bytes;st->full_import_bytes[0]+=r.bytes;}
-   if(lc_linked){sweet_surface_gpu_cleaned(r.surface_id,lc_seed);st->lc_bytes[0]+=bytes;}
+   if(lc_linked){
+    /* The seed qualifies the WHOLE IOSurface. A reachability plan can clean
+     * only a subset (or nothing), even for a whole-surface import. Do not let
+     * that partial pass suppress the next alias/plane's maintenance. Spans
+     * are disjoint, bounded by r.bytes, so equality proves complete coverage. */
+    if(bytes==r.bytes)sweet_surface_gpu_cleaned(r.surface_id,lc_seed);
+    st->lc_bytes[0]+=bytes;
+   }
   }else {
    bytes=r.bytes;st->initial_bytes+=bytes;
    if(!bytes)continue;

@@ -7,7 +7,7 @@ Clones https://github.com/steelbrain/metal2vulkan (blob filter) into DIR (defaul
 .local/x9/work/x9-metal-render/metal2vulkan-963f-source) at 963f0e64f103d2e682cd0cc454a8fe50f52c8cbb (development,
 2026-11-05). build-general-metal.py then applies x9/build/third_party/metal2vulkan-963f: AdrenoMetal ce63701's
 translator patches (MIT, see adrenometal-ce63701/LICENSE; the series UniXNU 642c4fef pins) and
-0100-x9-local-changes.patch (our pan194-pan205 Mali/PanVK changes, x9_timing, raw shadows, vertex capture, sample
+adrenometal-20be9f9's portable 0031..0034 updates, then 0100-x9-local-changes.patch (our pan194-pan205 Mali/PanVK changes, x9_timing, raw shadows, vertex capture, sample
 replay, re-ported onto that series), and records them in DIR/.x9-patches-applied.
 """
 import argparse

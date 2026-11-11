@@ -1,5 +1,49 @@
 # PanVK / metal2vulkan 补丁与诊断令牌参考
 
+## GPU277: portable upstream cache fixes and vertex padding (2026-11-11)
+
+Runtime stays pinned to metal2vulkan `963f0e64`; the original ce63701 series,
+`adrenometal-20be9f9/SERIES` (0031–0034), then `0100-x9-local-changes.patch`
+are applied in that order. The build stamp includes every patch. Re-prepare to
+a **new** runtime directory when the stamp changes; do not overwrite the old
+276 source/bundles. A pristine checkout is identified by its commit, not
+`stage_trace.rs` (that file is itself introduced by the patches).
+
+From AdrenoMetal `20be9f966a0b947238f80dec22a91bf6c9dfc0a0`: memory-kind
+accounting, stop retrying cache atime updates after EPERM/EACCES, age parked
+buffers/images and kept empty blocks even when no further allocation happens,
+and protect the room thread's Vulkan calls with the exit guard. The frontend
+also adapts `46fdc91`'s process-lifetime memory-pressure dispatch source; its
+callback releases idle runtime blocks and our index cache, not live resources.
+
+Padding defaults to an immutable UInt32 index stream `0..count-1` followed by
+copies of `count-1`, with `baseVertex=vertexStart`, unchanged vertex bindings
+and instances. This preserves `vertex_id` / `base_vertex`, including procedural
+positions, without a CPU snapshot of GPU-produced or late-written vertices.
+Cache: at most 32 streams / 1 MiB, each held by its pending command buffers;
+64 extra allocated tail bytes also leave room for existing PanVK IB widening.
+Only complete triangle lists up to 65536 vertices, signed-safe base/range,
+rasterization enabled, fill mode and compiled vertex stages **without**
+memory writes/atomics qualify. Application indexed/indirect draws are unchanged.
+Tokens: default = indices; `x9p1` = legacy snapshot; `x9p0` = no padding
+(takes precedence). Logs: `X9 PAD: mode=2`, `indexed=`, hits/misses/coverage.
+The old hardware replay proved snapshot padding, **not this new index path**;
+pixel correctness and performance still require a matched on-device scene.
+
+`x9lc` only links an import of the entire IOSurface mapping, and publishes the
+whole-surface clean seed only after complete cache-span coverage. Subrange or
+plane imports retain ordinary explicit maintenance. A failed CPU-acquire
+mapping no longer consumes the GPU-dirty flag. No coherent-memory assumption,
+InPlaceWrites, cache deletion, new page size or new hardware cache bypass.
+
+Also reviewed UniXNU-sheng `c73f9c0` and Adreno740 `a7c83cf`: their low DRAM
+bank adoption, A740 pool/CP/ring switching, synchronized context BO exclusion,
+and Turnip `gmem,nocb` policy are not Mali CSF/PanVK implementations. Do not
+port their MMIO, 4 KiB assumptions, or macOS framebuffer/flush changes. X9
+already keeps never-exposed private BOs and WC pages out of redundant cache
+passes; cached IOSurfaces are not equivalent to those synchronized BOs.
+
+
 > 从 BUILD.md 拆出(原「Local migration status」)。记录构建时打的补丁和 boot-arg A/B 令牌;补丁文件在 `x9/build/third_party/`。
 > 提到的 pan2xx 验证产物是迁移当时(2026-11-01)的,已过时。
 
@@ -30,8 +74,8 @@ and the venv; copying Meson caches is not a portable installation method.
 User-space plugins are built through `build.py` (see "Metal/PanVK plugins"
 below); the individual entrypoints in `build/scripts/` remain callable.
 
-Metal defaults to the retained pan205 runtime and enables the latest runtime
-bridge macros. `--runtime-source` and `--source-library` options from the old
+Metal defaults to pinned 963f0e64 plus the tracked patch series and enables the latest runtime
+bridge macros; pan205 below is historical. `--runtime-source` and `--source-library` options from the old
 workspace are preserved. Rust's old `general-target` cache was discarded;
 its next build will regenerate it. Mesa/AIR and PanVK source trees serve
 different purposes and must not be collapsed into one “newest Mesa” tree.
@@ -48,8 +92,8 @@ retained X9 integration. It enables modifier image layouts and accepts only
 the linear modifier for host-pointer imports; fd sharing stays disabled.
 The Metal build applies `0025-host-pointer-linear-textures.patch`, which
 negotiates the modifier extension independently of dma-buf support. The X9
-bridge opts into direct rendering to host textures, following AdrenoMetal's
-`InPlaceWrites` policy. Format, usage, explicit pitch, memory type, alignment
+bridge defaults to the `InPlace` shadow-write policy; `x9h1` explicitly selects
+`InPlaceWrites` (known swipe-mosaic risk). Format, usage, explicit pitch, memory type, alignment
 and allocation bounds are checked before binding; unsupported textures keep
 their shadow path. `X9 TEXTURE routes` logs direct imports, explicit-pitch
 images and fallback counters at the existing sampled surface-log cadence.

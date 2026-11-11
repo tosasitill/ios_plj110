@@ -18,12 +18,16 @@ source=opts.runtime_source.resolve() if opts.runtime_source else w/'metal2vulkan
 # local source snapshot. Accept an already-applied patch; refuse other drift.
 patch_dir=Path(__file__).resolve().parents[1]/'third_party/metal2vulkan-pan205'
 series963=Path(__file__).resolve().parents[1]/'third_party/metal2vulkan-963f'
-if (source/'crates/metal2vulkan-runtime/src/stage_trace.rs').exists():
- # metal2vulkan 963f0e64 (x9/build/scripts/prepare-metal2vulkan-963f.py): AdrenoMetal ce63701's 25 patches in
+# stage_trace.rs is introduced by the series, so it cannot identify a pristine checkout.
+source_head=subprocess.run(['git','rev-parse','HEAD'],cwd=source,text=True,capture_output=True).stdout.strip()
+if source_head=='963f0e64f103d2e682cd0cc454a8fe50f52c8cbb' or (source/'crates/metal2vulkan-runtime/src/stage_trace.rs').exists():
+ # metal2vulkan 963f0e64: AdrenoMetal ce63701 plus portable 20be9f9 updates in
  # their order, then ours. Later patches change earlier ones' context, so a per-patch reverse check cannot tell
  # an applied series; a stamp of the applied patches' SHA-256 does. A stamp mismatch with a non-pristine tree stops.
  import hashlib
  patches=[series963/'adrenometal-ce63701'/(n+'.patch') for n in (series963/'adrenometal-ce63701'/'SERIES').read_text().split()]
+ updates=series963/'adrenometal-20be9f9'
+ patches.extend(updates/(n+'.patch') for n in (updates/'SERIES').read_text().split())
  patches.append(series963/'0100-x9-local-changes.patch')
  want=''.join(hashlib.sha256(q.read_bytes()).hexdigest()+' '+q.name+'\n' for q in patches)
  stamp=source/'.x9-patches-applied'

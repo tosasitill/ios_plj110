@@ -262,6 +262,15 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
 
+## GPU活动交接（GPU277，2026-11-11）：可移植上游缓存修复＋索引补齐；构建中
+
+- **运行基线纠正**：只读 `~/210.txt`，3.110s verified allowlist实际active **276**，30.234s旧`padded=1 last=6->12`已命中；用户仍报告三角形/渲染错误。因此GPU-PAD-1“276从未上机”已过期，不以failed0或补齐计数代替像素验收。未取得与三角形对应的新截图/帧回读。
+- **固定范围/引用**：从main **695cdae**独立`work/gpu-upstream277` / `.local/x9/worktrees/gpu-upstream277`，不夹带其它窗口蜂窝未提交改动。三个仓库新clone固定AdrenoMetal **20be9f966a0b947238f80dec22a91bf6c9dfc0a0**、UniXNU-sheng **c73f9c0**、Adreno740 **a7c83cf**，原件与210窄GPU日志在`.local/x9/work/gpu-upstream-20261111/`。保留963f译码器基线与已有安全InPlace，不移植Turnip GMEM/CP/4KiB/DRAM pool/macOS无flush。X9 private/WC已避开冗余维护，不能把A740 synchronized BO规则套到cached IOSurface。
+- **实际合入**：AdrenoMetal 0031..0034原补丁＋LICENSE/顺序，补齐内存类型计数、shader cache atime权限拒绝只尝试一次、room线程exit guard、空闲parked image/buffer与empty block定时退休；前端适配46fdc91持久memory-pressure source，回收idle runtime与最多32项/1MiB自有索引cache，pending CB资源仍持有，不清用户缓存/不丢活跃surface。
+- **顶点修复**：默认用`0..n-1, n-1…`UInt32索引补到12倍数，baseVertex=start，原顶点绑定/vertex_id/base_vertex/instance保持，不再编码时CPU拷贝应用顶点。索引不可变、CB持有、额外64B真实尾部供现有IB widen；支持旧layout为空/顶点由GPU写或raw buffer读取的直绘路径。仅完整triangle list、count≤65536、signed-safe base/range、fill＋rasterization且**编译后vertex_writes_memory=false**才补齐，副作用/线框/partial primitive原样。应用indexed/indirect不改；`x9p1`旧snapshot对照、`x9p0`完全关闭。原rev240/241证明的是旧snapshot，不把新索引路径说成已硬件证实。
+- **确定缓存缺口**：旧`mapping_id`接受plane/subrange，render span可能仅清部分甚至0B，却发布整张surface的clean seed，别的alias/plane同seed便跳过。现在仅整张mapping可挂x9lc，且bytes==resource.bytes才发布seed；局部import走普通cache plan。CPU acquire映射失败保留dirty，成功使用atomic exchange，仍依赖原有CPU/GPU所有权协议，没有放宽coherent或全局跳过。
+- **构建里程碑/边界**：初版前端arm64-iOS16单位编译exit0、两条既有capture协议warning；随后补副作用准入，待完整插件覆盖。fresh963f首次被旧builder按stage_trace文件误判为pan205，补丁门exit1、无编译；该文件来自补丁本身，现增加精确git pin识别，新私有源码回到pristine后30patch全应用成功，Rust release正在编译。原276源码/镜像/allowlist未动；没有测试套件/设备/ADB/mailbox/root写入/成功产物二次校验。下一步完成277插件、匹配allowlist与固定kernel/boot，再只由用户stage/启动和同场景验收。
+
 ## GPU活动交接(GPU-PAD-1,2026-11-10): 顶点补齐覆盖/绑定恢复与真实资源barrier修正;276联合候选已构建,未上机
 
 - **本轮用户观察/运行证据**:用户仍观察少量三角形闪烁、渲染/显示错误,文字多时明显。只读`~/181.txt`确认32.718s `X9 PAD padded=1 skipped=0 last=6->12`,82.458s padded16384;捕获内ASYNC窗口failed均0,且IB WIDEN实际命中。**提交成功不等于像素正确**;旧skipped没有统计start非零/实例/超过96等入口排除,不能据skipped0证明文字批次已受保护。此轮没有新的设备测试/截图/像素回读。

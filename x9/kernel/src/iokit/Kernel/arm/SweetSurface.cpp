@@ -203,7 +203,7 @@ sweet_surface_seed(SweetSurface *s)
 /*
  * x9lc pixel-mapping table: {task, user range, surface id} for every client
  * mapping of a non-wrapped, cacheable surface, so the render service can tell
- * that an ImportHost range is exactly an IOSurface's pixels. Under
+ * that an ImportHost range covers ALL of an IOSurface's pixels. Under
  * sweet_surface_lock. A full table only means no linkage (full maintenance).
  */
 struct SweetSurfaceMapping { task_t task; IOMemoryMap *map; uint64_t base, length; uint32_t id; };
@@ -246,7 +246,10 @@ sweet_surface_mapping_id(task_t task, uint64_t addr, uint64_t bytes)
 	IOLockLock(sweet_surface_lock);
 	for (unsigned i = 0; i < sweet_surface_map_count; i++) {
 		const SweetSurfaceMapping &m = sweet_surface_maps[i];
-		if (m.task == task && addr >= m.base && addr + bytes <= m.base + m.length) {
+		/* gpuCleanSeed belongs to the entire surface, not this import. A
+		 * plane/subrange clean must never qualify other, untouched planes or
+		 * aliases for the same seed. Partial imports keep ordinary maintenance. */
+		if (m.task == task && addr == m.base && bytes == m.length) {
 			id = m.id;
 			break;
 		}
@@ -265,7 +268,8 @@ sweet_surface_gpu_needs_clean(uint32_t id, uint32_t *seed)
 	if (seed) {
 		*seed = now;
 	}
-	const bool needs = !s->gpuCleanValid || s->gpuCleanSeed != now;
+	const bool needs = !__atomic_load_n(&s->gpuCleanValid, __ATOMIC_ACQUIRE) ||
+	    __atomic_load_n(&s->gpuCleanSeed, __ATOMIC_RELAXED) != now;
 	s->release();
 	return needs;
 }
@@ -276,7 +280,7 @@ sweet_surface_gpu_cleaned(uint32_t id, uint32_t seed)
 	if (s == NULL) {
 		return;
 	}
-	s->gpuCleanSeed = seed;
+	__atomic_store_n(&s->gpuCleanSeed, seed, __ATOMIC_RELAXED);
 	__atomic_store_n(&s->gpuCleanValid, true, __ATOMIC_RELEASE);
 	s->release();
 }
@@ -296,10 +300,15 @@ sweet_surface_cpu_acquire(SweetSurface *s)
 	if (s == NULL || !__atomic_load_n(&s->gpuDirty, __ATOMIC_ACQUIRE)) {
 		return;
 	}
-	__atomic_store_n(&s->gpuDirty, false, __ATOMIC_RELEASE);
 	const uintptr_t va = s->kernelAddress();
 	const uint64_t length = s->memory != NULL ? s->memory->getLength() : 0;
 	if (va == 0 || length == 0) {
+		return;
+	}
+	/* Failed mapping must leave the acquire pending. An exchange consumes
+	 * only the observed write; a subsequent producer can set it again. The
+	 * caller still owes the IOSurface CPU/GPU ownership protocol. */
+	if (!__atomic_exchange_n(&s->gpuDirty, false, __ATOMIC_ACQ_REL)) {
 		return;
 	}
 	/* Clean+invalidate (PIPT: every alias): drops the CPU's stale copies of

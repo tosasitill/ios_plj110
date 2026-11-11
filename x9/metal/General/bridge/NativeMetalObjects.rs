@@ -402,6 +402,11 @@ pub extern "C" fn nmb_device_release(device: *mut NmbDevice) {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn nmb_device_release_kept_memory(device: *const NmbDevice) -> u64 {
+    guard(0, || Ok(get(device)?.0.release_kept_memory() as u64))
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn nmb_device_name(device: *const NmbDevice, out: *mut c_char, size: usize) -> usize {
     guard(0, || Ok(copy_out(get(device)?.0.name(), out, size)))
 }
@@ -1396,6 +1401,16 @@ fn render_descriptor(descriptor: *const NmbRenderPipelineDescriptor) -> Result<R
 #[unsafe(no_mangle)]
 pub extern "C" fn nmb_render_pipeline_release(pipeline: *mut NmbRenderPipeline) {
     release(pipeline)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_render_pipeline_vertex_readonly(pipeline: *const NmbRenderPipeline) -> bool {
+    guard(false, || {
+        #[cfg(x9_runtime_latest)]
+        { Ok(!get(pipeline)?.0.vertex_writes_memory()) }
+        #[cfg(not(x9_runtime_latest))]
+        { let _ = get(pipeline)?; Ok(false) }
+    })
 }
 
 // ---- pipeline reflection ----

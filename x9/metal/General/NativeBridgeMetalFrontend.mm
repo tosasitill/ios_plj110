@@ -653,6 +653,7 @@ static void x9LogFunctionConstants(id function,NSString *name,const std::vector<
 @property(nonatomic) uint64_t traceVertexID,traceFragmentID;
 @property(nonatomic,strong) MTLVertexDescriptor *traceLayout;
 @property(nonatomic,strong) MTLVertexDescriptor *padLayout;   // always kept: x9PadDraw
+@property(nonatomic) BOOL padRasterization;
 @property(nonatomic,copy) NSString *traceBlend;
 @property(nonatomic,strong) NSArray *traceWriteMasks;   // per colour attachment, MTLColorWriteMask
 @end
@@ -989,29 +990,84 @@ static void waitForResource(id resource) {
 - (void)setBlendColorRed:(float)r green:(float)g blue:(float)b alpha:(float)a {
  const float c[4]={r,g,b,a};[self check:nmb_render_set_blend_color(self.handle,c) what:"setBlendColor"];
 }
-// Partial final IDVS vertex group workaround (default on; boot-arg token x9p0
-// disables it). rev240/241 replays: in non-indexed triangle lists whose vertex
+// Partial final IDVS vertex group workaround (x9p0 disables, x9p1 selects the
+// legacy CPU snapshot for comparison). rev240/241 replays: in non-indexed triangle lists whose vertex
 // count is not a multiple of 4, the LAST vertex is intermittently placed wrong
 // (Control Center card diagonal split); the same draw padded with copies of its
 // last vertex to 12/24/48 vertices was exact and deterministic every time.
-// Pads to a multiple of 12 (3 and 4) through inline bytes or a CB-owned scratch
+// Default: an immutable index stream 0..n-1, then copies of n-1, baseVertex=start.
+// Both vertex_id and base_vertex stay the same, and all appended corners name
+// the SAME vertex (even when positions come from vertex_id or raw buffers).
+// Never snapshot the application's vertex memory on the CPU: it can be private,
+// produced by an earlier GPU encoder, or legitimately updated before commit.
+// The old snapshot mode pads through inline bytes or a CB-owned scratch
 // buffer, then restores the app's bindings. Preserve the prefix for nonzero vertexStart: rebasing the
 // draw to zero would change vertex_id and raw shader buffer addressing.
-// Anything it cannot copy exactly takes the original path. Indexed draws and
-// GPU-generated vertices are not solved by this CPU snapshot workaround.
-static bool x9PadEnabled() {
- static const bool enabled=[] {
-  int off=0;char args[4096]={};size_t bytes=sizeof(args)-1;
+// The legacy mode falls back for anything it cannot copy exactly. Application
+// indexed/indirect draws remain unchanged in both modes. Compiled vertex-stage
+// stores/atomics, rasterization-disabled draws and wireframe are never padded.
+static unsigned x9PadMode() {
+ static const unsigned mode=[] {
+  bool off=false,legacy=false;char args[4096]={};size_t bytes=sizeof(args)-1;
   if(!sysctlbyname("kern.bootargs",args,&bytes,nullptr,0)) {
    args[sizeof(args)-1]=0;
-   for(const char *p=args;*p;){while(*p&&(unsigned char)*p<=32)++p;const char *e=p;while(*e&&(unsigned char)*e>32)++e;if(e-p==4&&!memcmp(p,"x9p0",4))off=1;p=e;}
+   for(const char *p=args;*p;){while(*p&&(unsigned char)*p<=32)++p;const char *e=p;while(*e&&(unsigned char)*e>32)++e;
+    if(e-p==4&&!memcmp(p,"x9p0",4))off=true;
+    if(e-p==4&&!memcmp(p,"x9p1",4))legacy=true;p=e;}
   }
-  NSLog(@"X9 PAD: partial vertex group padding %s (x9p0 disables)",off?"off":"on");
-  return !off;
+  const unsigned out=off?0:legacy?1:2;
+  NSLog(@"X9 PAD: mode=%u (%s);x9p0=off x9p1=legacy snapshot",out,out==2?"immutable indices":out==1?"CPU snapshot":"off");
+  return out;
  }();
- return enabled;
+ return mode;
 }
 static std::atomic<uint64_t> gPadDone{0},gPadSkipped{0},gPadLarge{0},gPadStarted{0},gPadInstanced{0};
+static std::atomic<uint64_t> gPadIndexHits{0},gPadIndexMisses{0};
+static NSUInteger gPadIndexCacheBytes; // under @synchronized(cache)
+static NSMutableDictionary<NSNumber *,NBBuffer *> *x9PadIndexCache() {
+ static NSMutableDictionary<NSNumber *,NBBuffer *> *cache;
+ static dispatch_once_t once;dispatch_once(&once,^{cache=[NSMutableDictionary new];});
+ return cache;
+}
+static NBBuffer *x9PadIndices(NSUInteger n,NSUInteger padded) {
+ auto *cache=x9PadIndexCache();NSNumber *key=@(n);
+ @synchronized(cache){NBBuffer *found=cache[key];if(found){gPadIndexHits++;return found;}}
+ // Real allocation tail as well as draw-count padding: PanVK's IB widening
+ // must not end exactly at the last fetched group. Tail is never drawn.
+ const NSUInteger bytes=(padded+16)*sizeof(uint32_t);
+ NSMutableData *data=[NSMutableData dataWithLength:bytes];
+ if(!data)return nil;
+ auto *indices=(uint32_t *)data.mutableBytes;
+ for(NSUInteger k=0;k<padded+16;k++)indices[k]=(uint32_t)std::min(k,n-1);
+ NBBuffer *buffer=(NBBuffer *)[gDeviceObject newBufferWithBytes:indices length:bytes options:MTLResourceStorageModeShared];
+ if(!buffer)return nil;
+ gPadIndexMisses++;
+ // No mutations after publication. CB ownership outlives cache eviction, so
+ // overlapping command buffers never overwrite an in-flight index stream.
+ @synchronized(cache){
+  NBBuffer *found=cache[key];if(found)return found;
+  if(cache.count<32&&bytes<=1024*1024-gPadIndexCacheBytes){cache[key]=buffer;gPadIndexCacheBytes+=bytes;}
+ }
+ return buffer;
+}
+// AdrenoMetal 46fdc91: keep the ARC dispatch source alive, not a block-local
+// variable. We keep no strong IOSurface import pool; only idle runtime objects
+// and this small immutable index cache are eligible, never pending resources.
+static void x9WatchMemoryPressure() {
+ static dispatch_once_t once;static dispatch_source_t source;
+ dispatch_once(&once,^{
+  source=dispatch_source_create(DISPATCH_SOURCE_TYPE_MEMORYPRESSURE,0,
+   DISPATCH_MEMORYPRESSURE_WARN|DISPATCH_MEMORYPRESSURE_CRITICAL,dispatch_get_global_queue(QOS_CLASS_UTILITY,0));
+  if(!source)return;
+  dispatch_source_set_event_handler(source,^{
+   auto *cache=x9PadIndexCache();
+   @synchronized(cache){[cache removeAllObjects];gPadIndexCacheBytes=0;}
+   const uint64_t freed=nmb_device_release_kept_memory(gDevice);
+   NSLog(@"X9 METAL pressure: events=%lu released_blocks=%llu",dispatch_source_get_data(source),(unsigned long long)freed);
+  });
+  dispatch_activate(source);
+ });
+}
 // Byte widths of Metal vertex formats, not their Vulkan converted formats.
 // Unknown formats must not let an attribute extend past the copied record.
 static NSUInteger x9PadAttributeBytes(MTLVertexFormat format) {
@@ -1028,7 +1084,27 @@ static NSUInteger x9PadAttributeBytes(MTLVertexFormat format) {
 - (bool)x9PadDraw:(MTLPrimitiveType)t start:(NSUInteger)s count:(NSUInteger)n instances:(NSUInteger)i baseInstance:(NSUInteger)b {
  // A partial primitive must stay discarded, not become a real triangle when
  // copies of its last vertex are added. Bound arithmetic before multiplying.
- if(t!=MTLPrimitiveTypeTriangle||n<3||n%12==0||!i||!x9PadEnabled())return false;
+ if(t!=MTLPrimitiveTypeTriangle||n<3||n%12==0||!i||!x9PadMode())return false;
+ if(!self.padPipeline.padRasterization||[objc_getAssociatedObject(self,"fill") unsignedIntegerValue]!=MTLTriangleFillModeFill){gPadSkipped++;return false;}
+ if(x9PadMode()==2) {
+  // Metal's non-indexed base_vertex is vertexStart. Vulkan indexed baseVertex
+  // is signed: leave overflow/unsupported ranges and partial primitives alone.
+  if(n%3||n>65536||s>INT32_MAX||n-1>INT32_MAX-s||i>UINT32_MAX||b>UINT32_MAX){gPadSkipped++;return false;}
+  const NSUInteger padded=(n+11)/12*12;
+  NBBuffer *indices=x9PadIndices(n,padded);
+  if(!indices){gPadSkipped++;return false;}
+  [self.commandBuffer.resourceOwners addObject:indices];
+  if(![self check:nmb_render_draw_indexed(self.handle,t,(uint32_t)padded,MTLIndexTypeUInt32,indices.handle,0,
+     (uint32_t)i,(int32_t)s,(uint32_t)b) what:"drawPrimitives (index padded)"])return true;
+  const uint64_t done=++gPadDone;
+  const bool large=n>96&&++gPadLarge==1,started=s&&++gPadStarted==1,instanced=i>1&&++gPadInstanced==1;
+  if(done==1||!(done&16383)||large||started||instanced)
+   NSLog(@"X9 PAD: indexed=%llu skipped=%llu large=%llu started=%llu instanced=%llu hits=%llu misses=%llu last=%llu->%llu start=%llu instances=%llu",
+    (unsigned long long)done,(unsigned long long)gPadSkipped.load(),(unsigned long long)gPadLarge.load(),
+    (unsigned long long)gPadStarted.load(),(unsigned long long)gPadInstanced.load(),(unsigned long long)gPadIndexHits.load(),
+    (unsigned long long)gPadIndexMisses.load(),(unsigned long long)n,(unsigned long long)padded,(unsigned long long)s,(unsigned long long)i);
+  return true;
+ }
  constexpr NSUInteger scratchLimit=1024*1024; // total per draw, not per slot
  if(n%3||n>65536||s>65536){gPadSkipped++;return false;}
  MTLVertexDescriptor *layout=self.padPipeline.padLayout;
@@ -2134,6 +2210,7 @@ static bool pipelineArchives(NSArray *list,std::vector<NmbBinaryArchive *> &arch
  if(!handle)return failWith<id<MTLRenderPipelineState>>(error,@"render pipeline",nil);
  NBRenderPipeline *state=[NBRenderPipeline new];state.handle=handle;
  state.padLayout=[d.vertexDescriptor copy];
+ state.padRasterization=d.rasterizationEnabled&&nmb_render_pipeline_vertex_readonly(handle);
  if(captureOptions().inputs||captureOptions().tracksGeometry()) {
  state.traceVertex=d.vertexFunction.name;state.traceFragment=d.fragmentFunction.name;
  state.traceVertexID=x9FrameObjectID(d.vertexFunction);state.traceFragmentID=x9FrameObjectID(d.fragmentFunction);
@@ -2316,6 +2393,7 @@ extern "C" id native_bridge_metal_open(const char *loader,const char *cache,uint
  }
  objc_registerClassPair(cls);
  gDeviceObject=[cls new];
+ x9WatchMemoryPressure();
  return gDeviceObject;
 }
 

@@ -64,7 +64,7 @@ SweetSurface *sweet_surface_copy(uint32_t id);
 /*
  * x9lc: CPU cache maintenance of GPU-imported IOSurfaces by the IOSurface lock
  * protocol instead of on every GPU job. sweet_surface_mapping_id: the surface
- * whose (non-wrapped, cacheable) pixel mapping in task contains [addr, addr+bytes),
+ * whose entire (non-wrapped, cacheable) pixel mapping in task equals [addr, addr+bytes),
  * or 0. gpu_needs_clean: whether the CPU may have written since the last GPU-side
  * clean (seed changed on a write unlock, or never cleaned); the seed to record.
  * gpu_wrote: the GPU may have written; the next CPU acquire (IOSurfaceLock or a
