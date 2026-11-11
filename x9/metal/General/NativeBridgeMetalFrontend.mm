@@ -990,33 +990,36 @@ static void waitForResource(id resource) {
 - (void)setBlendColorRed:(float)r green:(float)g blue:(float)b alpha:(float)a {
  const float c[4]={r,g,b,a};[self check:nmb_render_set_blend_color(self.handle,c) what:"setBlendColor"];
 }
-// Partial final IDVS vertex group workaround (x9p0 disables, x9p1 selects the
-// legacy CPU snapshot for comparison). rev240/241 replays: in non-indexed triangle lists whose vertex
+// Partial final IDVS vertex group workaround (CPU snapshot by default,
+// x9p0 disables, x9p2 explicitly opts into experimental indices).
+// rev240/241 replays: in non-indexed triangle lists whose vertex
 // count is not a multiple of 4, the LAST vertex is intermittently placed wrong
 // (Control Center card diagonal split); the same draw padded with copies of its
 // last vertex to 12/24/48 vertices was exact and deterministic every time.
-// Default: an immutable index stream 0..n-1, then copies of n-1, baseVertex=start.
-// Both vertex_id and base_vertex stay the same, and all appended corners name
-// the SAME vertex (even when positions come from vertex_id or raw buffers).
-// Never snapshot the application's vertex memory on the CPU: it can be private,
-// produced by an earlier GPU encoder, or legitimately updated before commit.
-// The old snapshot mode pads through inline bytes or a CB-owned scratch
+// Snapshot mode pads through inline bytes or a CB-owned scratch
 // buffer, then restores the app's bindings. Preserve the prefix for nonzero vertexStart: rebasing the
 // draw to zero would change vertex_id and raw shader buffer addressing.
-// The legacy mode falls back for anything it cannot copy exactly. Application
+// It falls back for anything it cannot copy exactly. CPU snapshots do not
+// support private/GPU-produced data or preserve updates after encoding.
+// The experimental immutable index stream avoids that copy, but changes the
+// hardware path to indexed drawing: repeated indices are not proof of real
+// tail-lane execution. 220 showed no pixel acceptance or measured speedup;
+// keep it opt-in, not a replacement for the non-indexed replay workaround.
+// Application
 // indexed/indirect draws remain unchanged in both modes. Compiled vertex-stage
 // stores/atomics, rasterization-disabled draws and wireframe are never padded.
 static unsigned x9PadMode() {
  static const unsigned mode=[] {
-  bool off=false,legacy=false;char args[4096]={};size_t bytes=sizeof(args)-1;
+  bool off=false,legacy=false,indices=false;char args[4096]={};size_t bytes=sizeof(args)-1;
   if(!sysctlbyname("kern.bootargs",args,&bytes,nullptr,0)) {
    args[sizeof(args)-1]=0;
    for(const char *p=args;*p;){while(*p&&(unsigned char)*p<=32)++p;const char *e=p;while(*e&&(unsigned char)*e>32)++e;
     if(e-p==4&&!memcmp(p,"x9p0",4))off=true;
-    if(e-p==4&&!memcmp(p,"x9p1",4))legacy=true;p=e;}
+    if(e-p==4&&!memcmp(p,"x9p1",4))legacy=true;
+    if(e-p==4&&!memcmp(p,"x9p2",4))indices=true;p=e;}
   }
-  const unsigned out=off?0:legacy?1:2;
-  NSLog(@"X9 PAD: mode=%u (%s);x9p0=off x9p1=legacy snapshot",out,out==2?"immutable indices":out==1?"CPU snapshot":"off");
+  const unsigned out=off?0:legacy?1:indices?2:1;
+  NSLog(@"X9 PAD: mode=%u (%s);default=CPU snapshot x9p0=off x9p1=snapshot x9p2=experimental indices",out,out==2?"experimental indices":out==1?"CPU snapshot":"off");
   return out;
  }();
  return mode;

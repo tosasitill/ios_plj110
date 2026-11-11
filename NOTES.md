@@ -6,6 +6,11 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 顶点补齐回退与事务退休修复（GPU-SNAPSHOT-OWNER，2026-11-11；源码进行中）
+
+- **用户决策／补齐里程碑**：新索引方式没有实测性能收益或220像素验收；切换动机只是避免CPU snapshot读取GPU生成／延迟更新数据，不能证明indexed重复ID等价于旧non-indexed真实尾部record。`NativeBridgeMetalFrontend.mm`已恢复**默认mode1 CPU snapshot**；`x9p0`仍关闭，`x9p1`仍强制snapshot，mode2只允许显式`x9p2`实验。保留完整triangle、布局／属性宽度／stride／预算、vertex无副作用及fill／rasterization资格门、CB资源持有与绑定恢复；不宣称旧snapshot支持private／GPU生成或编码后修改。真实iOS16／arm64前端单对象编译 **exit0**，无运行／测试套件。现有277包与boot仍是原二进制，不含本次源码，不能覆盖原277identity。
+- **进行中／边界**：正将非递归owner从publish内移至同步事务／整个异步pair，并补出队失败任务的pending完成记账；close在无锁drain后join `c->lock → owner`。退休接口与intrusive队列区分safe busy重试与uncertain隔离，队列叶锁不跨drain／context／owner／释放，避免唯一指针丢失；关键kernel对象编译尚未完成，未称220故障或顶点像素已修复。私有准确命令／原始编译日志 `.local/x9/work/gpu-snapshot-owner-20261111/{frontend-command.json,frontend-build.log,frontend-build.exit}`，没有设备／mailbox／root写入、完整镜像构建或CI run。
+
 ## 276／277差分交接（GPU-VERSION-DIFF，2026-11-11）：插件修复与整机最新main更新是两层，不是一次单变量升级
 
 - **范围／来源**：用户要求“看看277和276之间到底更新了什么”。只读Git源码、冻结输入／打包日志及已记录manifest，不重新解包／hash／反汇编成功镜像，不编译／测试／CI／push／设备操作。插件276来源`4a140a9`，原始277`14a033f`，核心GPU源码提交`f307fda`（main对应`ef0b4b6`）；六个前端／bridge／surface关键文件在276与277起点`695cdae`的Git内容完全相同，故GPU核心差分可准确归到该提交，而非只据版本号或文档猜测。
