@@ -6,6 +6,11 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## dpmaif_drv_ccci_datapath_notify（MD-DATAPATH-NOTIFY，2026-11-11）：死桩，排除
+
+- `dpmaif_drv_ccci_datapath_notify@90661ef0`（22B）仅加载 `driver/dpmaif/src/dpmaif_dev.c`、行0x15f后 `BREAK 5`——被调用即断言。全ROM扫：无BC/BALC直接调用、无32位函数指针（解码器用kal_take_spinlock验证得628处调用，工具可靠；脚本本会话scratch `ref.py`）。**此MD版本不存在AP→MD“数据通路通知”入口，排除**。
+- 同批符号里与UL丢包直接相关的候选：`sdap_ul_data_req_handler@901a3036`(932B)、`sdap_ul_drop_data_req@902cb21a`、`lhif_upcm_drv_query_pdn@90351d14`、`l5updn_dpmaif_assign_ap_interface_id@913d48ee`、`nim_dpmaif_set_mapping@9141be78`。下一步按NR SA UL链 LHIF→UPCM→SDAP→PDCP 查丢弃条件。
+
 ## MD固件里SRAM1+0xa0的写入者（MD-SRAM1-RE，2026-11-11）：是MD内存remap窗口边界，不是数据面配置
 
 - **MD视角地址**：`dpmaif_drv_en_ul_arb@903b5b48` 写 `LI 0xC411701C`（=AP `0x14117000`+0x1c UL_CHNL_ARB0），故 **MD地址 = AP物理 + 0xB0000000**；SRAM1+0xa0 → `0xC41000A0`。全ROM扫LI48立即数 0xC4100000–0xC41000FF：仅 `lhifcore_task_init`（+0x04/+0x08/+0xa0/+0xc0）与 `ipc_set_netif_mapping`/`ipc_del_netif_mapping`（+0x68/+0x70）。工具 `cell189-md-consumer-20261110/md-dis.py`，扫描脚本在本会话scratch `scan.py`。
