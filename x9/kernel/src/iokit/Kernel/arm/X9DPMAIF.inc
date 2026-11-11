@@ -269,17 +269,28 @@ static bool x9d_hw_init() {
         printf("X9 DPMAIF: PIT%u INIT command complete (DMA reachability not yet proven)\n", q);
     }
     x9d_phase("BAT-init/credit");
+    // ccci_dpmaif_bat_start order: dpmaif_bat_hw_init programs each BAT with
+    // BAT_EN (CON1 bit16) CLEAR and BAT_INIT ALLSET (normal, then frag), then
+    // add frag count, add normal count, and only then
+    // ccci_drv_dl_all_frg_queue_en / all_queue_en: CON1 |= EN and BAT_INIT
+    // with only the enable bit (bit0 = 0) | INIT_EN (| FRG_INIT for frag).
     for (unsigned kind = 0; kind < 2; kind++) {
         x9d_wr(dl, 0x08, (uint32_t)x9d.bat[kind].pa);
         x9d_wr(dl, 0x50, (uint32_t)(x9d.bat[kind].pa >> 32)); // 6993 BAT INIT_CON3
-        x9d_wr(dl, 0x0c, X9D_BAT | (1u << 16) | (1u << 22));
+        x9d_wr(dl, 0x0c, X9D_BAT | (1u << 22)); // BAT_EN clear during ALLSET
         x9d_wr(dl, 0x10, 0); // INIT_CON2: initial indices
         if (!x9d_expect(dl, 0x08, ~0u, (uint32_t)x9d.bat[kind].pa) ||
             !x9d_expect(dl, 0x50, ~0u, (uint32_t)(x9d.bat[kind].pa >> 32)) ||
-            !x9d_expect(dl, 0x0c, 0x0041ffff, X9D_BAT | (1u << 16) | (1u << 22))) return false;
+            !x9d_expect(dl, 0x0c, 0x0041ffff, X9D_BAT | (1u << 22))) return false;
         if (!x9d_command(dl, 0, X9D_BUSY_BIT | 1 | (kind << 16))) return false;
-        if (!x9d_command(dl, 4, X9D_BUSY_BIT | (X9D_BAT - 1) | (kind << 16))) return false;
     }
+    for (unsigned kind = 2; kind-- > 0;) // frag first, then normal
+        if (!x9d_command(dl, 4, X9D_BUSY_BIT | (X9D_BAT - 1) | (kind << 16))) return false;
+    for (unsigned kind = 2; kind-- > 0;) {
+        x9d_wr(dl, 0x0c, x9d_rd(dl, 0x0c) | (1u << 16));
+        if (!x9d_command(dl, 0, X9D_BUSY_BIT | (kind << 16))) return false; // only-enable update
+    }
+    printf("X9 DPMAIF: BAT enable after credit (vendor order), CON1 0x%x\n", x9d_rd(dl, 0x0c));
     x9d_phase("TXQ0/SRAM-sync");
     // One TX queue initially, others explicitly disabled. DRB size is WORDS.
     x9d_wr(x9d.ao, 0x1c, 0);
