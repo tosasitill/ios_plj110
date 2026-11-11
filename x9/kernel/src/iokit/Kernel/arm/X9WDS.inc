@@ -85,17 +85,25 @@ static bool x9w_word(const uint8_t *p,unsigned n,unsigned tag,unsigned &v){
  x9q_view t=x9w_tlv(p,n,tag);if(!t.p||t.n!=4)return false;v=x9q_u32(t.p);return true;
 }
 static void x9w_init_poll(uint8_t *response,unsigned room){
- if(!x9_md_mipc_online()){x9w_control_ready=x9w_session_ready=false;return;}
- if(x9w_init_hold||x9w_session_ready)return;
+ bool transport_ok=x9_md_mipc_online();
+ if(!transport_ok){
+  x9w_control_ready=x9w_session_ready=false;
+  // Initial offline wait may precede OPEN. Once this handshake has started,
+  // transport loss can only drain its original token, never restart/advance.
+  if(x9w_init_stage||x9w_init_token)x9w_init_hold=true;
+ }
  if(x9w_init_token){
-  unsigned n=0;int ready=x9_md_mipc_take(x9w_init_token,response,room,&n);
-  if(ready!=1){
-   if(x9q_ms()>=x9w_init_deadline){x9w_init_hold=true;printf("X9 MIPC: handshake stage %u timeout; no retry until boot\n",x9w_init_stage);}
-   return;
+  // The original stage/SIM mask stays fixed while its token exists. Detect
+  // timeout before take: even an already-arrived late CNF cannot grant ready.
+  unsigned stage=x9w_init_stage;
+  if(!x9w_init_hold&&x9q_ms()>=x9w_init_deadline){
+   x9w_init_hold=true;printf("X9 MIPC: handshake stage %u timeout; drain original token, no retry until boot\n",stage);
   }
-  x9w_init_token=0;unsigned result=2,version=0,mask=x9w_init_stage==1?0xff:1u<<((x9w_init_stage-2)/2);
-  bool good=x9w_wire(response,n,mask)&&x9q_u16(response+10)==(x9w_init_stage==1?0x302:0x308);
-  if(x9w_init_stage==1){
+  unsigned n=0;int ready=x9_md_mipc_take(x9w_init_token,response,room,&n);
+  if(ready!=1)return; // keep token on pending/error; no cancel or replacement
+  x9w_init_token=0;unsigned result=2,version=0,mask=stage==1?0xff:1u<<((stage-2)/2);
+  bool good=x9w_wire(response,n,mask)&&x9q_u16(response+10)==(stage==1?0x302:0x308);
+  if(stage==1){
    // libmipc mipc_init (0x133a0) only LOGS VERSION100 (default -1) and
    // TIMEOUT101 (default 300000) and succeeds once the CNF arrives. 160.txt:
    // this MD answers result 0, VERSION 0, TIMEOUT 300000. Keep a non-zero
@@ -111,15 +119,19 @@ static void x9w_init_poll(uint8_t *response,unsigned room){
    for(unsigned at=16;at+4<=n&&w+24<sizeof(t);){unsigned tag=x9q_u16(response+at),k=x9q_u16(response+at+2);
     w+=(unsigned)snprintf(t+w,sizeof(t)-w,k==4&&at+8<=n?" %04x=%u":" %04x/%u",tag,k==4&&at+8<=n?x9q_u32(response+at+4):k);
     at+=k?((k+11)&~7u):16;}
-   printf("X9 MIPC: handshake stage %u reply id 0x%04x len %u tlvs%s\n",x9w_init_stage,n>=12?x9q_u16(response+10):0,n,w?t:" none");
+   printf("X9 MIPC: handshake stage %u reply id 0x%04x len %u tlvs%s\n",stage,n>=12?x9q_u16(response+10):0,n,w?t:" none");
   }
   bzero(response,room);
-  if(!good){x9w_init_hold=true;printf("X9 MIPC: handshake stage %u rejected/malformed; no dial\n",x9w_init_stage);return;}
-  printf("X9 MIPC: handshake stage %u confirmed\n",x9w_init_stage);
-  if(x9w_init_stage==1)x9w_control_ready=true; // AT queries need OPEN, not PDP event registration
-  if(x9w_init_stage==1+2*x9_md_sim_count()){
-   x9w_session_ready=true;printf("X9 MIPC: v2 OPEN + DEACT/EIF subscriptions confirmed for %u SIM(s), IPv4 dialler ready\n",x9_md_sim_count());return;}
+  if(x9w_init_hold||!transport_ok){
+   printf("X9 MIPC: held handshake stage %u original CNF drained (%s); no stage advance or ready grant\n",stage,good?"valid":"rejected/malformed");return;
+  }
+  if(!good){x9w_init_hold=true;printf("X9 MIPC: handshake stage %u rejected/malformed; no dial\n",stage);return;}
+  printf("X9 MIPC: handshake stage %u confirmed\n",stage);
+  if(stage==1)x9w_control_ready=true; // AT queries need OPEN, not PDP event registration
+  if(stage==1+2*x9_md_sim_count()){
+   x9w_session_ready=true;printf("X9 MIPC: v2 OPEN + DEACT/EIF subscriptions confirmed for %u SIM(s); CID ownership unqualified\n",x9_md_sim_count());return;}
  }
+ if(!transport_ok||x9w_init_hold||x9w_session_ready)return;
  unsigned stage=x9w_init_stage+1;
  x9w_frame f(stage==1?0x301:0x307,stage==1?0xff:1u<<((stage-2)/2));
  if(stage==1){static const char name[]="X9WDS";f.word(0x100,2);f.tlv(0x101,name,sizeof(name));f.byte(0x102,1);}
