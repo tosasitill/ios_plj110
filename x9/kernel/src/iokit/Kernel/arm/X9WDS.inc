@@ -49,7 +49,7 @@ static uint64_t x9w_if_serial,x9w_init_token,x9w_init_deadline;
 static unsigned x9w_init_stage;
 static bool x9w_control_ready,x9w_session_ready,x9w_init_hold;
 struct x9w_frame {
- uint8_t p[512];unsigned n;bool good;
+ uint8_t p[1024];unsigned n;bool good; // ACT carries a 672-byte URSP traffic descriptor
  x9w_frame(unsigned id,unsigned mask=1):n(16),good(true){
   bzero(p,sizeof(p));p[0]=0x84;p[1]=0x19;p[2]=0x54;p[3]=0x24;p[8]=(uint8_t)mask;
   p[10]=(uint8_t)id;p[11]=(uint8_t)(id>>8);
@@ -117,6 +117,7 @@ struct x9w_bearer {
  x9wr_identity query; x9wr_get get_result; x9wr_settings runtime;
 };
 static x9w_bearer x9w_bearers[CBP_INTERFACES];
+static char x9w_last_dnn[2][101]; // APN the MD reported in the last ACT CNF (RAM only)
 static uint32_t x9w_next_handle;
 // Latest MD interface state, not Android's local netdev state. The floor and
 // never-reused DPMAIF channel prevent accepting a pre-ACT/previous bearer event.
@@ -501,21 +502,32 @@ static void x9w_result(x9w_bearer &b,unsigned mux,const uint8_t *p,unsigned n){
   }
   if(!x9d_ready()||!x9_md_mipc_online()){x9w_error(b,X9Q_NOT_READY);x9w_clear(b,mux);return;}
   x9w_data_config(b.sim_slot); // RIL order: DATA_SET_CONFIG(MOBILE_DATA on) before every ACT
-  x9w_frame f(0x201,1u<<b.sim_slot);f.tlv(0x101,b.apn,(unsigned)strlen(b.apn)+1);
-  f.word(0x102,1);f.byte(0x103,1);f.byte(0x104,1);f.byte(0x105,0);
-  // Loaded RIL 2b8740/8750 sends strlen+1 credentials even for no-auth.
-  // MD 91326e0e..e44 requires both TLVs PRESENT to set full-parameters +98.
-  // Omitting them lets its APN cache replace protocol/auth/fallback. These
-  // are explicit empty strings, not zero-length TLVs or invented credentials.
+  x9w_frame f(0x201,1u<<b.sim_slot);
+  // Field-for-field the Android RIL DATA_ACT_CALL_REQ (datacycle.log
+  // 14:02:21): USERID/PASSWORD empty, 0x11e {0f,0..}, URSP_EVAL_FLAG 0,
+  // fallback 0x7f, APN, BEARER_BITMASK 0x7ffdffff, APN_TYPE 1, REUSE 0,
+  // PDP 3 (v4v6), APN_INDEX 0, ROAMING 3, URSP_TRAFFIC_DESC (672 B), no
+  // AUTH_TYPE and no IF_ID. On 5G SA the UE routes traffic to a PDU session
+  // through URSP; without a traffic descriptor nothing matched our session.
   static const char no_credentials[]="";
+  static const uint8_t r11e[8]={0x0f,0,0,0,0,0,0,0};
   f.tlv(0x8106,no_credentials,sizeof(no_credentials));
+  f.tlv(0x11e,r11e,sizeof(r11e));f.word(0x10f,0);
   f.tlv(0x8107,no_credentials,sizeof(no_credentials));
-  // Android RIL capture (14:02:21 DATA_ACT_CALL_REQ): REUSE 0x10a = 0
-  // (DEFAULT), no IF_ID (the MD assigns the interface: 0x125 = 4).
-  f.byte(0x108,0);f.byte(0x10a,0);
+  f.byte(0x108,0x7f);
+  f.tlv(0x101,b.apn,(unsigned)strlen(b.apn)+1);
+  f.word(0x109,0x7ffdffff);f.word(0x102,1);f.byte(0x10a,0);f.byte(0x103,3);f.word(0x10c,0);f.byte(0x104,3);
+  { // mipc_ursp_traffic_desc_struct_struct4: is_match_all@0 dnn_len@1 dnn@4
+    // ... prot_id_next_hdr@414 (0xff = unspecified) dst_fqdn_len@415.
+    static uint8_t td[672];bzero(td,sizeof(td));
+    const char *dnn=b.apn[0]?b.apn:x9w_last_dnn[b.sim_slot];unsigned dl=(unsigned)strnlen(dnn,100);
+    if(dl){td[0]=0;td[1]=(uint8_t)dl;memcpy(td+4,dnn,dl);}else td[0]=1; // no DNN known: match all
+    td[414]=0xff;f.tlv(0x10d,td,sizeof(td));
+    printf("X9 WDS: ACT URSP traffic descriptor %s (dnn length %u; APN stays private)\n",dl?"dnn":"match-all",dl);
+  }
   b.if_floor=x9w_if_serial;
   if(!x9w_send(b,f,X9W_ACT,120000)){x9w_error(b,X9Q_BUSY);x9w_clear(b,mux);}
-  else printf("X9 WDS: requesting IPv4 call mux %u, explicit no-auth, reuse 0 (default) fallback 0, after MOBILE_DATA on\n",mux);return;
+  else printf("X9 WDS: requesting v4v6 call mux %u (RIL-shaped ACT: pdp 3, reuse 0, fallback 0x7f, URSP desc), frame %u B\n",mux,f.n);return;
  }
  if(op==X9W_ACT){
   unsigned cid;
@@ -530,6 +542,9 @@ static void x9w_result(x9w_bearer &b,unsigned mux,const uint8_t *p,unsigned n){
    b.hold=true;b.abandoned=true;x9w_error(b,X9Q_INTERNAL);return; // don't deactivate sibling
   }
   b.cid=(uint8_t)cid;b.owned=true;
+  { x9q_view a=x9w_tlv(p,n,0x101); // CNF APN actually used: the URSP DNN for later ACTs
+    if(!result&&a.p&&a.n>1&&a.n<=101){unsigned l=(unsigned)strnlen((const char *)a.p,a.n);
+     if(l&&l<sizeof(x9w_last_dnn[0])){memcpy(x9w_last_dnn[b.sim_slot],a.p,l);x9w_last_dnn[b.sim_slot][l]=0;}}}
   // Actual RIL treats 150202/150204 as partial success and decodes 150203's
   // partial profile. This IPv4-only dialler cleans up instead of falling back.
   if(result||b.gone||b.abandoned||!x9w_settings(b,p,n)||
