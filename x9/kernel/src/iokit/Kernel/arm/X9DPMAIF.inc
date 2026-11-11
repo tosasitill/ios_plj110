@@ -61,6 +61,7 @@ struct x9d_state {
     IOLock *lock;
     uintptr_t ao, pd, md_misc, infra, sram1;
     x9d_dma drb, txpool, pit[2], bat[2], pool[2];
+    x9d_dma drbq[3]; // TXQ1..3: started like dpmaif_txqs_start (DPMAIF_TXQ_NUM 4), never fed
     bool posted[2][X9D_BAT];
     bool used_channel[20]; // bound/retiring routes only; released when retirement finishes
     unsigned bat_wr[2], tx_wr, tx_rd, head, count;
@@ -311,7 +312,15 @@ static bool x9d_hw_init() {
     x9d_wr(x9d.ao, 0x1c, 0);
     x9d_wr(uls, 0x10, (uint32_t)x9d.drb.pa); x9d_wr(uls, 0x14, X9D_DRB * 2);
     x9d_wr(uls, 0x18, (uint32_t)(x9d.drb.pa >> 32)); // 6993 UL_DRBSIZE_ADDRH_n_1
-    x9d_wr(x9d.ao, 0x1c, 1 | (1u << 8));
+    // Android ccci_dump: "dpmaif-txq: 0-3(status=0xf)[2048]" - all four TX
+    // queues started (drv3_txq_hw_init: DRB base/size, rdy + arb per queue).
+    for (unsigned q = 1; q < 4; q++) {
+        const x9d_dma &m = x9d.drbq[q - 1];
+        x9d_wr(uls, 0x10 + 0x10 * q, (uint32_t)m.pa);
+        x9d_wr(uls, 0x14 + 0x10 * q, (x9d_rd(uls, 0x14 + 0x10 * q) & ~65535u) | (X9D_DRB * 2));
+        x9d_wr(uls, 0x18 + 0x10 * q, (uint32_t)(m.pa >> 32));
+    }
+    x9d_wr(x9d.ao, 0x1c, 15u | (15u << 8));
     // Mark buffers published BEFORE any INIT_DONE makes them DMA reachable.
     x9d.published = true;
     x9d_wr(misc, 0x90, x9d_rd(misc, 0x90) | 1);
@@ -323,7 +332,7 @@ static bool x9d_hw_init() {
     if (!x9d_expect(uls, 0x10, ~0u, (uint32_t)x9d.drb.pa) ||
         !x9d_expect(uls, 0x14, 65535, X9D_DRB * 2) ||
         !x9d_expect(uls, 0x18, ~0u, (uint32_t)(x9d.drb.pa >> 32)) ||
-        !x9d_expect(x9d.ao, 0x1c, 0x1f1f, 0x101) ||
+        !x9d_expect(x9d.ao, 0x1c, 0x1f1f, 0xf0f) ||
         !x9d_expect(uls, 0xe0, ~0u, 0) ||
         !x9d_expect(dls, 0xa4, 0x3ffff, 0) || !x9d_expect(dls, 0xc4, 0x3ffff, 0) ||
         !x9d_expect(dls, 0xd8, 65535, 0) || !x9d_expect(dls, 0x78, 65535, 0) ||
@@ -360,6 +369,8 @@ static void x9d_prepare() {
     if (!x9d_alloc(x9d.drb, X9D_DRB * 8) || !x9d_alloc(x9d.txpool, X9D_DRB / 2 * X9D_TX_SIZE)) {
         x9d_fail("private TX DMA allocation/range"); return;
     }
+    for (unsigned q = 0; q < 3; q++)
+        if (!x9d_alloc(x9d.drbq[q], X9D_DRB * 8)) { x9d_fail("private TXQ1..3 DRB allocation/range"); return; }
     for (unsigned kind = 0; kind < 2; kind++) {
         if (!x9d_alloc(x9d.pit[kind], X9D_PIT * 16) || !x9d_alloc(x9d.bat[kind], X9D_BAT * 8) ||
             !x9d_alloc(x9d.pool[kind], X9D_BAT * (kind ? X9D_FRG_SIZE : X9D_PKT_SIZE))) {
