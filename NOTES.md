@@ -6,6 +6,21 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 夜间静态审计：按vendor参考对齐DPMAIF RX/ISR与RPC（CELL-RXVENDOR，2026-11-12；rxvendor2已构建，未启动）
+
+用户睡前要求“继续静态检查后续类似错误，记得看参考”。参考＝\`~/HelioDarwin/oppo-source/.../eccci/hif/ccci_dpmaif_com.c\`、\`ccci_dpmaif_drv_v3.c\`、\`ccci_dpmaif_reg_*.h\`、\`port/port_rpc.c\`、\`port_sysmsg.c\`。本轮只构建，无设备操作、无push。
+
+- **PIT字段核对**（与vendor结构体逐位一致）：MSG PIT check_sum b2-3、error b4、channel b16-23、dp b31；normal PIT buffer_type b2、buffer_id b3-15、data_len b16-31，d3 pit_seq b0-7、h_bid b8-10、ig b16、bi_f b17-18、header_offset b19-23（×4）。v3下vendor不处理ig（仅ver2），我们也不处理——一致。normal包＝缓冲起点 data_len+header_offset 字节（vendor skb_put），与我们一致。
+- **LRO（vendor dpmaif_rxq_lro_end）**：每个normal缓冲是带头部的完整包，后续成员以hof跳过头部GRO合并；全部合并时**首包头部保持不变（HW已写入聚合长度）**，部分合并才由 dpmaif_lro_update_gro_info 重写tot_len/payload_len。→ 234的拼接会把第二个头部塞进payload（TCP校验丢包）；lrolist逐包交付后首包仍会因tot_len=聚合长度被x9d_ip拒。**修复**：LRO成员交付前把IPv4 tot_len/IPv6 payload_len改为自身长度（IPv4重算头校验），前8个打印 \`RX LRO member v.. header-len a -> b l4 ok/BAD\`（若l4 BAD说明HW也改了TCP校验，需改方案）。
+- **把vendor不会停队列的情形从“隔离”改为“记录并继续”**（\`x9d_rx_note\` 前16次，\`x9d_rx_release\` 把未拷贝的BID还给补充器，避免连续补充被卡）：上一包未结束又来MSG PIT（丢弃半包）、MSG无continuation、无MSG的payload（丢弃并释放BID）、frag带header_offset（忽略hoff）、PIT地址不在BAT缓冲内（BAT为准，我们按BID拷贝不按地址）、长度超出缓冲/r.ip（丢包不隔离）。**仍致命**：BID非我们posted、缺BAT backing（内存安全）、HW写指针越界。
+- **PIT序号**：vendor dpmaif_rxq_check_pit_seq 不符时记录并保持rd、下次重试，从不停队列；我们原20ms超时即隔离 → 改为持续等待、每秒打印一次。
+- **L2状态位**：vendor drv3_isr0/1 + ccci_irq_rx_lenerr_handler 对SKB/MTU/BAT/PIT长度错误、UL长度错误只打印并ack；我们原“任何error/未知位→隔离” → 改为计数＋前16次打印（周期统计行 \`RX LRO members split N, L2 status errors M\`），由原ack路径清除。
+- **RPC**：0x4016 RF_ECID_DATA_OP 按vendor回0,0；0x4017 AFC_UFC_IO_BLOCK_OP 仅在 CONFIG_SCSI_UFS_MEDIATEK_DBG 下存在，否则vendor也是FS_NO_OP（保持）。**sysmsg**：vendor仅 MD_GET_BATTERY_INFO 需回复（我们已有），其余为AP回调通知；234无未应答sysmsg。
+- **记录未改**：233里绑定后7ms的IPv6 RA因host（CommCenter经bb_pdp_block）把接口置blocked而被拒（reason 2/ENETDOWN）；MD自身解析RA并经EIF5把前缀交给我们的WDS→CommCenter，非同类错误，未改。
+- **提交**：main \`ae35aab\`(LRO逐包) → \`ffec02d\`(LRO头长度＋vendor容忍＋序号＋状态位) → \`fb675e7\`(RPC 0x4016)。worktree \`.local/x9/worktrees/cell-rxvendor-gpu278-20261112\`（= lrolist树 + c7b45c0 + e87aadf）。
+- **镜像（醒来后用这个）**：**\`x9/out/x9-cell-rxvendor2-gpu278-20261112/boot.img\`**，exit0，278插件不变无需mailbox staging；仍含MDLOG(128MiB/ACT+5s)与ATCTX。（中间产物 \`x9-cell-rxvendor-gpu278-20261112\` 不含0x4016，可忽略；\`x9-cell-lrolist-…\` 不含头长度修正。）
+- **验收看点**：无 \`quarantined\`；\`RX LRO member … l4 ok\`；RX持续增长；\`L2 status errors\` 与各 \`vendor-tolerant\` 记录出现频率；Safari/应用实际可用；状态栏表现。
+
 ## 234：持续真实下行（498包/427KB），因HW LRO包列表被当成单包拼接而越界隔离；修为逐包交付（CELL234-RXMULTI / CELL-LROLIST，2026-11-11；lrolist已构建，未启动）
 
 - **234观察（rxmulti镜像）**：\`~/234.txt\` 5398204B，末88.5s，无panic。28.227s LHIF_MAPPING ccmni1（UL Q0）→ 第1拨期间只收到1包；55.891s ccmni2 后大量下行，日志出现应用 \`connectx()\` 活动。63.9s **TX 607/607、RX delivered 498 / 427477B、PIT 1040**，route 8、input-error 9。
