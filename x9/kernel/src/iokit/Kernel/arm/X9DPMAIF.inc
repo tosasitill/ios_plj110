@@ -188,6 +188,11 @@ static void x9d_dump(const char *label, bool dl) {
     x9d_dump_window(label, "ao_dl", x9d.ao + 0x400, 0x00, 0x100);
     x9d_dump_window(label, "hpc", x9d.pd + 0x600, 0x00, 0xa0); // vendor pd_mmw_hpc_base
     x9d_dump_window(label, "ao_misc_sram", x9d.pd + 0xe00, 0x00, 0x90);
+    // Windows the Android drv3_dump_register shows that were never compared:
+    // RDMA/WDMA (pd_dl_base+0x100/+0x200) and AO DL SRAM1. Read-only.
+    x9d_dump_window(label, "rdma", x9d.pd + 0x200, 0x00, 0xe0);
+    x9d_dump_window(label, "wdma", x9d.pd + 0x300, 0x00, 0x60);
+    x9d_dump_window(label, "dl_sram1", x9d.sram1, 0x00, 0x100);
 }
 static void x9d_fail(const char *reason) {
     if (x9d.failed) return;
