@@ -185,7 +185,7 @@ static void bb_trace_frame(const char *dir, uint32_t channel, const uint8_t *fra
   if (len >= CBQ_HDR + 7u && frame[0] == 1u) bb_trace(dir, channel, frame[4], frame[5], frame + CBQ_HDR, len - CBQ_HDR);
 }
 
-static void bb_push(uint32_t channel, const uint8_t *data, uint32_t len)
+static bool bb_push(uint32_t channel, const uint8_t *data, uint32_t len)
 {
   if (channel == CBH_QMUX1 || channel == CBH_QMUX2) bb_trace_frame("to-host", channel == CBH_QMUX1 ? 1u : 2u, data, len);
   bb_channel *c = &bb_ch[channel];
@@ -198,7 +198,7 @@ static void bb_push(uint32_t channel, const uint8_t *data, uint32_t len)
              copy ? "queue full" : "no memory", c->count, len, len > 4 ? data[4] : 0u, len > CBQ_HDR ? data[CBQ_HDR] : 0u,
              len > CBQ_HDR + 4 ? (uint32_t)(data[CBQ_HDR + 3] | data[CBQ_HDR + 4] << 8) : 0u);
     c->frames_dropped++;
-    return;
+    return false;
   }
   memcpy(copy, data, len);
   c->frames[(c->head + c->count++) % BB_QUEUE] = { len, copy };
@@ -206,6 +206,7 @@ static void bb_push(uint32_t channel, const uint8_t *data, uint32_t len)
   c->bytes_out += len;
   IOLockWakeup(bb_lock, c, false);
   if (c->reads_waiting && bb_complete_call) thread_call_enter(bb_complete_call);
+  return true;
 }
 
 static bb_frame bb_pop(uint32_t channel)
@@ -1421,6 +1422,28 @@ extern "C" int coachz_baseband_qrtr(uint32_t dst_port, uint32_t src_node, uint32
   IOLockUnlock(bb_lock);
   return 1;
 }
+
+#ifdef COACHZ_NATIVE_DPMAIF
+// Unlike coachz_baseband_qrtr's "port recognized" result, this is an actual
+// host-queue admission receipt. An X9 SMS must keep its PDU on queue/OOM loss;
+// admission is still NOT the host's WMS ACK or durable Messages storage.
+static bool bb_x9_sms_event(uint32_t dst_port, uint32_t src_node, const uint8_t *sdu, uint32_t size)
+{
+  const uint32_t slot = dst_port - CBQ_PORT_BASE;
+  if (!bb_lock || dst_port < CBQ_PORT_BASE || slot >= CBQ_MAX_CLIENTS || size < 7 ||
+      sdu[0] != CBQ_QMI_INDICATION || cbq_rd16(sdu + 3) != 1 || cbq_rd16(sdu + 5) != size - 7) return false;
+  IOLockLock(bb_lock);
+  const cbq_client &c = bb_qmux.client[slot];
+  bool admitted = false;
+  if (c.used && !c.release_pending && c.service == 5 && c.channel < 2) {
+    const cbq_result r = cbq_from_modem(&bb_qmux, dst_port, src_node, sdu, size, bb_out, sizeof bb_out);
+    if (r.kind == CBQ_TO_HOST && r.service == 5)
+      admitted = bb_push(r.channel == 0 ? CBH_QMUX1 : CBH_QMUX2, bb_out, r.len);
+  }
+  IOLockUnlock(bb_lock);
+  return admitted;
+}
+#endif
 
 // On the Wi-Fi thread: QMI requests for the modem, then DEL_CLIENT for released clients.
 extern "C" void coachz_baseband_poll(void)
