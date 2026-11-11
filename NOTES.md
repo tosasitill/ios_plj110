@@ -6,6 +6,15 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## Android模拟器与项目外缓存清理（2026-11-11；已执行）
+
+- 用户明确要求“安卓模拟器全删了，这些缓存也都删了”。本轮已删除全部已发现的AVD（`~/.android/avd/Pixel_6a.avd`及注册ini，含用户数据/应用/QuickBoot快照）、SDK全部`system-images`及`emulator`程序；分别约 **14.94/8.16/1.15GiB**。先使用Android Studio自带Java调用`avdmanager delete avd -n Pixel_6a`、`sdkmanager --sdk_root=… --uninstall 'system-images;android-37.1;google_apis_playstore_ps16k;arm64-v8a' emulator`，均 **exit0**，再清空残余空目录；没有启动模拟器或调用adb/fastboot。管理工具有旧脚本整数判断及SDK XML v3/v4兼容警告，但最终包路径与AVD注册已不存在，保留包元数据未变。
+- 同时删除明确批准的缓存：`~/.gradle/caches` **7.16GiB**、`~/.npm/_cacache` **1.83GiB**、`~/.npm/_npx` **0.80GiB**、`~/Library/Caches/com.microsoft.VSCode.ShipIt` **1.61GiB**、`~/Library/Caches/Homebrew` **0.60GiB**。缓存之后会重新下载/编译；没有清Gradle wrapper/配置、npm配置/全局包、Homebrew已安装软件、VS Code用户配置或其他应用缓存。**保留Android Studio、NDK、adb/platform-tools、build-tools、platforms、cmdline-tools及licenses**，SDK剩余约 **4.51GiB**；VMware Fusion、游戏资料、根盘clone和项目构建产物本轮不动。
+- VS Code编辑器全程保留运行；仅处理正在等待安装的ShipIt更新助手。普通SIGTERM后被launchd重新拉起，因此改用`launchctl bootout gui/$(id -u)/com.microsoft.VSCode.ShipIt`移除该次动态提交任务，确认无目标打开占用后删除更新缓存。**取消本次待安装更新，未永久禁用自动更新**，之后可重新下载；编辑器应用plist/主程序元数据未变。未强杀编辑器、未卸载应用。
+- **结果**：8个批准根目录均不存在；缓存清理脚本unlink **158465个文件**、rmdir **81294个目录**，另500条初始目录/文件记录已由官方Android工具删除。按白名单逐项校验inode/大小/mtime，symlink只删本体不跟随，rmdir不清未知新内容。**76825个保留文件的存在性/inode/大小/mtime/类型未变**；SDK包manifest只在已记录范围内少了指定的emulator和系统镜像。`sources/android-37.0`原本不在保留元数据快照范围，后查manifest创建/修改时间均为2026-09-08，上一轮盘点也已有该目录，不能把它误报成本轮新增包。
+- **空间**：删除前后`df`可用 **154273672→192252296KiB**，实际增加约 **36.22GiB**，最终约 **183.35GiB可用**。目录块合计约36.25GiB，仅作盘点口径；实际差值包含本轮证据文件及少量并发变化。未编译/测试/CI、未操作设备或根盘、未push。仅本节交接入Git，不夹带其他窗口提交。
+- 私有清单、原始日志及结果：**`.local/x9/work/android-external-cache-cleanup-20261111/`** 中`approved-roots.json`、`delete-inventory.json`、`executed-inventory.json`、`removed.jsonl`、`uninstall-android.py`、`delete-caches.py`、卸载日志、`shipit-stop.json`、`retained-files.json`、`verification.json`和`df-immediately-before.txt`/`df-after.txt`。复核空间用`df -h /System/Volumes/Data`；删除已完成，不要为验证重复运行卸载/删除脚本。
+
 ## 项目外虚拟机/模拟器盘点（2026-11-11；仅查看，未删除）
 
 - 用户要求查看项目外大占用，尤其虚拟机。本轮只读配置/文件元数据、`du`、进程和`lsof`、Spotlight及指定目录文件名搜索；没有启动/删除虚拟机、清快照、卸载应用、调用设备或运行编译/测试。目录分配块不等于保证可回收量。
