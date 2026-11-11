@@ -56,11 +56,6 @@ int fdt_gpu_patch_adt(uintptr_t,void *,size_t);
 /* 1 layout qualified, 0 FDT mismatch, -1 missing/invalid ADT placeholder.
  * All are nonfatal to boot. No hardware access or readiness implied. */
 int fdt_scp_patch_adt(uintptr_t,void *,size_t);
-int fdt_gps_patch_adt(uintptr_t,void *,size_t);
-/* Current LK devinfo provenance only; no efuse MMIO or hardware grant. */
-int fdt_camera_calibration_patch_adt(uintptr_t,void *,size_t);
-/* GIC4 topology only, independent of calibration and DMA authority. */
-int fdt_camera_irq_patch_adt(uintptr_t,void *,size_t);
 
 /* Read-only Wi-Fi DT facts into /chosen/x9-lk-wifi-dt: 0 written, 1 no placeholder, -1 FDT unusable. */
 int fdt_wifi_dump_adt(uintptr_t,void *,size_t);

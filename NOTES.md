@@ -6,6 +6,11 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 当前启动候选（BOOT277-NOCAMGPS，2026-11-11）：用户要求移除相机/GPS pre-XNU部分，新shim构建中
+
+- **明确范围/源码里程碑**：用户要求“去掉相机和 gps 部分编译新版”。在已移除MIC/ADSP的基础上，从`loader.c`移除GPS、camera calibration、camera IRQ三调用，从`shim/build.py::SOURCES`移除对应三对象，`fdt.h`移除公开loader入口；实现源码保留作离线参考，不新设可重新启用的boot开关。新增 **`X9 CAMERA/GPS FDT: loader handoffs removed; no hardware grant`** 日志。`mkadt`原GPS64B、相机校准32B、IRQ64B零placeholder保留，kernel consumers继续拒绝未资格化metadata，不改内核相机/GPS模块、真实UFS/保护/32GiB几何、GPU/SCP/Wi-Fi/RAM、copy/zero、boot_args或XNU entry。main同三文件同步修改，独立detached **`.local/x9/worktrees/shim277-no-camera-gps-20261111/`** 从58ba960仅此差分固定 **7b726599fe5c59a8cae89d377421605ccebd7178**。
+- **固定构建输入/待补结果**：**原样复用**上一联合r2的58ba960已链接277 kernel，不重编kernel/HAL/插件；新唯一name **`x9-shim277-no-camera-gps-20261111`**，复制原kernel及BBFW/CBN metadata作新输入，沿用原local/boot配置 **603B/cpus8/ug5/dv1/32GiB/完整外置BBFW/277**。独立树执行 Framework Python3.13 **`-I x9/build/build.py boot --name x9-shim277-no-camera-gps-20261111 --kernel <新out>/kernel.development.sweet --config <私有目录>/local-config.json --boot-config <私有目录>/boot-config.json`**，只编shim/打包，结果待补。原失败r2保留，不原样重试。私有输入与准确差分 **`.local/x9/work/shim277-no-camera-gps-20261111/{build-inputs.json,shim-removal.patch,local-config.json,boot-config.json}`**；本轮未操作设备/ADB/mailbox/root/flash/reboot，277仍沿用19:41已commit同identity。没有测试套件/CI build/push/成功产物二次检查，不能先称已恢复开机。
+
 ## 当前启动失败复核（BOOT277-HANDOFF，2026-11-11）：用户报告shim仍无法引导XNU；缺本次console，停止重复旧候选
 
 - **用户现场／证据边界**：在最新277无音频loader联合镜像交付后，用户报告“shim还是无法引导xnu”，要求重读handoff。将 `x9-latest277-noaudio-loader-20261111-r2` 作为待定位失败候选，不再建议原样重试；尚无包含该次身份/最后阶段的console，不能把历史130/173或218拼接成本次证据。家目录 **`219.txt=0B`（mtime19:52:19+0800）**，最新非空仍218、对应旧cell163/276。只读 `adb devices` 为 **0台ready**，未访问设备文件/分区，未重采旧pstore、未拉根盘、未重启或修改mailbox。其他窗口既有CELL219-MDSTATIC的219是分析目录号，不是本次启动日志。

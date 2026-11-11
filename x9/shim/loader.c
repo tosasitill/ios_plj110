@@ -153,16 +153,13 @@ static const char *boot_impl(uintptr_t dtb, const void *embedded, size_t embedde
   return "GPU ADT handoff placeholder invalid";
  if(fdt_scp_patch_adt(dtb,(void *)(uintptr_t)adt_pa,p->adt_size)<0)
   plog_str("X9 SCP FDT: missing/invalid ADT placeholder; sensors remain pending\n");
- if(fdt_gps_patch_adt(dtb,(void *)(uintptr_t)adt_pa,p->adt_size)<0)
-  plog_str("X9 GPS FDT: missing/invalid ADT placeholder; GNSS remains pending\n");
  /* Audio topology walkers must not run before the XNU jump. Keep the
   * generated MIC/ADSP/IRQ placeholders zero, so kernel consumers fail
   * closed without granting DMA or shared DRAM. No boot-arg can undo this. */
  plog_str("X9 AUDIO FDT: loader handoffs removed; no DMA/shared DRAM grant\n");
- if(fdt_camera_calibration_patch_adt(dtb,(void *)(uintptr_t)adt_pa,p->adt_size)<0)
-  plog_str("X9 CAMERA CAL FDT: missing/invalid ADT placeholder; PHY calibration pending\n");
- if(fdt_camera_irq_patch_adt(dtb,(void *)(uintptr_t)adt_pa,p->adt_size)<0)
-  plog_str("X9 CAMERA IRQ FDT: missing/invalid ADT placeholder; IRQ topology pending\n");
+ /* Camera/GNSS walkers are also excluded during boot bring-up. Preserve
+  * their zero ADT placeholders: no topology, calibration or hardware grant. */
+ plog_str("X9 CAMERA/GPS FDT: loader handoffs removed; no hardware grant\n");
  { int wd=fdt_wifi_dump_adt(dtb,(void *)(uintptr_t)adt_pa,p->adt_size);   /* never fatal */
    plog_str(wd==0?"X9 LK DT: Wi-Fi facts copied to ADT\n":wd>0?"X9 LK DT: no ADT placeholder\n":"X9 LK DT: FDT walk refused\n"); }
  if(p->phys_base==X9_RAM_LO && p->mem_size==X9_RAM_SPAN &&
