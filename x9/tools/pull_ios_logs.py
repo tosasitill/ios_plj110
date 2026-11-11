@@ -299,7 +299,11 @@ def main():
         ent = fs.lookup(p)
         if not ent:
             print('%s: not found' % p); continue
-        files = [(r, e) for r, e in fs.walk(ent) if e['type'] == 'file']
+        if ent['type'] == 'file':  # a single file path copies just that file
+            ent = fs.resolve(ent)
+            files = [('', ent)]
+        else:
+            files = [(r, e) for r, e in fs.walk(ent) if e['type'] == 'file']
         if a.recent_hours is not None:
             logs = [e['mtime'] for r, e in files if r.endswith('.tracev3')]
             if logs:
@@ -315,7 +319,7 @@ def main():
         if a.out:
             base = a.out / Path(p).name
             for r, e in files:
-                dst = base / r
+                dst = base / r if r else base
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 dst.write_bytes(fs.read_fork(e['data'], cnid=e['id']))
             print('  copied to %s (%d raw reads so far)' % (base, raw.reads))
