@@ -4,12 +4,9 @@
  * GET identity is frozen by the owner when submitting GET205, and supplied
  * ONLY after consuming that exact token. CNF byte8 is not SIM provenance.
  * epoch is the existing card-pair epoch (x9a_epoch), not a CID ownership proof.
- * effective_pdp_type uses profile enum0/1/3 for the effective ACT expectation;
- * it does NOT attest the original RAM profile (main still lowers3 toACT1).
- * MD result PDP1/2/3 is a distinct enum. An IPv4 request may come back as
- * PDP3 (IPv4v6): REUSE2 with the network-default APN returns the attach PDN
- * (191.txt: ACT result0, then refused here). Its v4 half is used by the v4
- * client and its v6 half, when GET and EIF agree, by the v6 client.
+ * family0/effective3 describes a physical dual-capable call, not its
+ * initiating QMI client. MD may negotiate PDP1/2/3. Each host family is
+ * qualified independently; no IPv4 owner is required for an IPv6 lease.
  * EIF4302 facts carry the dispatch SIM, card epoch and monotonic event serial.
  * No helper binds DPMAIF, changes an ACT lease, sends QMI, or claims host-ready.
  */
@@ -68,9 +65,9 @@ static inline bool x9wr_get_family(const uint8_t *p,unsigned n,unsigned bytes,
   if(!address.p||address.n!=bytes||!x9wr_address(address.p,bytes))return false;
   out.address_present=true;memcpy(out.address,address.p,bytes);
  }else if(address.p)return false;
- for(unsigned i=0;i<3;i++){
+ for(unsigned i=0;i<4;i++){
   x9q_view d=x9w_tlv(p,n,dns_tag+i);
-  if(i<dns){if(!d.p||d.n!=bytes)return false;memcpy(out.dns[i],d.p,bytes);}
+  if(i<dns){if(!d.p||d.n!=bytes)return false;if(i<3)memcpy(out.dns[i],d.p,bytes);}
   else if(d.p)return false;
  }
  out.dns_count=(uint8_t)(dns>3?3:dns); // a 4th server is not used
@@ -82,16 +79,15 @@ static inline bool x9wr_get_family(const uint8_t *p,unsigned n,unsigned bytes,
 static inline bool x9wr_decode_get(const uint8_t *p,unsigned n,
  const x9wr_identity &query,x9wr_get &output){
  bzero(&output,sizeof(output));x9wr_get out={};unsigned result,cid,type,channel,trans;
- if(query.sim>=2||(query.family!=4&&query.family!=6)||
+ if(query.sim>=2||(query.family!=0&&query.family!=4&&query.family!=6)||
     (query.effective_pdp_type!=0&&query.effective_pdp_type!=1&&query.effective_pdp_type!=3)||
     !p||!x9w_wire(p,n)||x9q_u16(p+10)!=0x206||
     !x9w_word(p,n,0,result)||result||!x9w_byte(p,n,0x100,cid)||cid!=query.cid||
     !x9w_byte(p,n,0x102,type)||!x9w_word(p,n,0x125,channel)||channel>=20||
     !x9w_word(p,n,0x129,trans)||trans%100!=channel)return false;
- unsigned expected=query.effective_pdp_type==0?1:query.effective_pdp_type==1?2:3;
- // mipc_data_act_call_cnf 913273d6: PDP3 whenever both families are present.
- if(query.family==4&&expected==1&&type==3)expected=3;
- if(type!=expected||(query.family==4&&type==2)||(query.family==6&&type==1))return false;
+ // Physical call always requests PDP3, but each host family has its own lease.
+ // Accept the MD's negotiated PDP1/2/3; family qualification happens separately.
+ if(type<1||type>3)return false;
  out.identity=query;out.channel=channel;out.trans_id=trans;out.modem_pdp=(uint8_t)type;
  if(!x9wr_get_family(p,n,4,0x103,0x8104,0x10d,0x810e,0x123,type!=2,out.v4)||
     !x9wr_get_family(p,n,16,0x108,0x8109,0x112,0x8113,0x124,type!=1,out.v6))return false;
@@ -129,6 +125,9 @@ static inline bool x9wr_match_family(const x9wr_family &get,const x9wr_family &e
  // EIF MTU word is 0). Use whichever valid value exists (the smaller if both),
  // else 1500, the Android default for a PDN without a network MTU.
  const uint32_t low=bytes==4?68u:1280u;
+ // An explicit invalid cap is not an absent cap; never enlarge it to 1500.
+ if((eif.mtu_present&&eif.mtu&&(eif.mtu<low||eif.mtu>X9D_TX_SIZE))||
+    (get.mtu_present&&get.mtu&&(get.mtu<low||get.mtu>X9D_TX_SIZE)))return false;
  bool e=eif.mtu_present&&eif.mtu>=low&&eif.mtu<=X9D_TX_SIZE,g=get.mtu_present&&get.mtu>=low&&get.mtu<=X9D_TX_SIZE;
  uint32_t mtu=e&&g?(eif.mtu<get.mtu?eif.mtu:get.mtu):e?eif.mtu:g?get.mtu:1500u;
  out=get;out.mtu=mtu;out.mtu_present=true;return true;
@@ -141,18 +140,14 @@ static inline bool x9wr_match_settings(const x9wr_get &get,const x9wr_ifup &eif,
     eif.trans_id!=get.trans_id||eif.channel!=get.channel)return false;
  out.identity=current;out.if_serial=eif.serial;out.channel=get.channel;
  out.trans_id=get.trans_id;out.modem_pdp=get.modem_pdp;
- if(!x9wr_match_family(get.v4,eif.v4,4,out.v4))return false;
- if(!x9wr_match_family(get.v6,eif.v6,16,out.v6)){
-  // The v4 call never depends on the v6 half; an unmatched v6 half is
-  // dropped (v6 Start is then refused), never trusted.
-  if(current.family!=4)return false;
-  bzero(&out.v6,sizeof(out.v6));
- }
+ if(!x9wr_match_family(get.v4,eif.v4,4,out.v4))bzero(&out.v4,sizeof(out.v4));
+ if(!x9wr_match_family(get.v6,eif.v6,16,out.v6))bzero(&out.v6,sizeof(out.v6));
+ if(!out.v4.address_present&&!out.v6.address_present)return false;
  out.matched=true;output=out;return true;
 }
 static inline bool x9wr_ipv4_facts(const x9wr_settings &settings){
- return settings.matched&&settings.identity.family==4&&(settings.modem_pdp==1||settings.modem_pdp==3)&&
-  settings.identity.effective_pdp_type==0&&settings.channel<20&&settings.trans_id%100==settings.channel&&
+ return settings.matched&&(settings.modem_pdp==1||settings.modem_pdp==3)&&
+  settings.channel<20&&settings.trans_id%100==settings.channel&&
   settings.if_serial>settings.identity.if_floor&&settings.v4.address_present&&
   x9wr_address(settings.v4.address,4)&&settings.v4.mtu_present&&
   settings.v4.mtu>=68&&settings.v4.mtu<=X9D_TX_SIZE&&settings.v4.dns_count<=3;
@@ -169,12 +164,14 @@ static inline bool x9wr_serialize_ipv4(const x9wr_settings &settings,x9q_packet 
  p.tlv(0x29,le,4);p.tlv(0x2b,&family,1);
  return p.good; // No gateway/netmask or host-ready/route/DNS acceptance claim.
 }
-/* v6 half of a dual-stack (PDP3) call, verified by matched GET205+EIF4302.
+/* v6 half of a PDP2/3 call, verified by matched GET205+EIF4302.
  * iOS treats the modem address as the interface identifier and configures the
  * global address itself from the network RA (pdp_ip SLAAC), like a Qualcomm
  * modem's runtime settings. No prefix is invented here. */
 static inline bool x9wr_ipv6_attach_ready(const x9wr_settings &settings){
- return x9wr_ipv4_facts(settings)&&settings.modem_pdp==3&&settings.v6.address_present&&
+ return settings.matched&&(settings.modem_pdp==2||settings.modem_pdp==3)&&
+  settings.channel<20&&settings.trans_id%100==settings.channel&&
+  settings.if_serial>settings.identity.if_floor&&settings.v6.address_present&&
   x9wr_address(settings.v6.address,16)&&settings.v6.mtu_present&&
   settings.v6.mtu>=1280&&settings.v6.mtu<=X9D_TX_SIZE&&settings.v6.dns_count<=3;
 }

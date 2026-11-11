@@ -51,7 +51,7 @@ struct x9d_stats {
 };
 // Admission epoch changes on unbind. Accounting lifetime does not: payloads
 // already published must retire into their original call's ledger.
-struct x9d_route { uint64_t epoch,lifetime; unsigned mtu; uint8_t channel, families; bool bound,retiring; x9d_stats stats; };
+struct x9d_route { uint64_t epoch,lifetime; unsigned mtu4,mtu6; uint8_t channel, families; bool bound,retiring; x9d_stats stats; };
 struct x9d_completion { uint64_t lifetime; uint16_t size; uint8_t mux; };
 struct x9d_tx { uint64_t epoch,lifetime; uint16_t size; uint8_t mux; uint8_t ip[X9D_TX_SIZE]; };
 // Channel tombstones are never reused. RX accounting stays independent of
@@ -450,15 +450,41 @@ static bool x9d_ready() { return x9d.ready && !x9d.failed; } // owner only
 // other threads to publish, retire completion records or mutate lifetimes.
 // Called only AFTER native MIPC has proved call ID -> interface/ccmni binding.
 // Neither mux nor QMI client id is a physical ccmni channel.
-static bool x9d_bind(unsigned mux, unsigned channel, unsigned families, unsigned mtu,uint64_t &lifetime) {
-    if (!x9d_ready() || !cbp_mux_ok(mux) || channel >= 20 || !families || (families & ~3u) || mtu < 68 || mtu > X9D_TX_SIZE) return false;
+static unsigned x9d_cap(const x9d_route &r,unsigned family) { return family==4?r.mtu4:family==6?r.mtu6:0; }
+static bool x9d_caps(unsigned families,unsigned mtu4,unsigned mtu6) {
+    return !(families&~3u) && (!(families&1)||(mtu4>=68&&mtu4<=X9D_TX_SIZE)) &&
+        (!(families&2)||(mtu6>=1280&&mtu6<=X9D_TX_SIZE));
+}
+// Admission changes do NOT retire the physical call or its DMA ledger.
+// Invalidate unpublished traffic under the producer lock; already published
+// payloads keep their original lifetime and are accounted at completion.
+static bool x9d_update(unsigned mux,uint64_t lifetime,unsigned families,unsigned mtu4,unsigned mtu6) {
+    if(!x9d.lock||!cbp_mux_ok(mux)||!x9d_caps(families,mtu4,mtu6))return false;
+    IOLockLock(x9d.lock);x9d_route &r=x9d.route[mux-1];
+    if(!r.bound||r.lifetime!=lifetime){IOLockUnlock(x9d.lock);return false;}
+    if(r.families!=families||r.mtu4!=mtu4||r.mtu6!=mtu6){
+        r.families=(uint8_t)families;r.mtu4=mtu4;r.mtu6=mtu6;r.epoch++;
+        unsigned kept=0,old=x9d.count;
+        for(unsigned i=0;i<old;i++){
+            unsigned from=(x9d.head+i)%X9D_MAIL;
+            if(x9d.mail[from].mux==mux){if(x9d.mail[from].lifetime==r.lifetime)r.stats.tx_dropped++;continue;}
+            unsigned to=(x9d.head+kept++)%X9D_MAIL;
+            if(to!=from)memcpy(&x9d.mail[to],&x9d.mail[from],sizeof(x9d_tx));
+        }
+        for(unsigned i=kept;i<old;i++)bzero(&x9d.mail[(x9d.head+i)%X9D_MAIL],sizeof(x9d_tx));
+        x9d.count=kept;
+    }
+    IOLockUnlock(x9d.lock);return true;
+}
+static bool x9d_bind(unsigned mux, unsigned channel, unsigned families, unsigned mtu4,unsigned mtu6,uint64_t &lifetime) {
+    if (!x9d_ready() || !cbp_mux_ok(mux) || channel >= 20 || !families || !x9d_caps(families,mtu4,mtu6)) return false;
     IOLockLock(x9d.lock);
     x9d_route &r = x9d.route[mux - 1];
     if (x9d.used_channel[channel] || r.bound || r.retiring || x9d.next_lifetime == ~0ULL) { IOLockUnlock(x9d.lock); return false; }
     for (unsigned i = 0; i < CBP_INTERFACES; i++) if (i != mux - 1 && x9d.route[i].bound && x9d.route[i].channel == channel) {
         IOLockUnlock(x9d.lock); return false;
     }
-    r.epoch++; r.lifetime = ++x9d.next_lifetime; r.channel = (uint8_t)channel; r.families = (uint8_t)families; r.mtu = mtu; r.bound = true;
+    r.epoch++; r.lifetime = ++x9d.next_lifetime; r.channel = (uint8_t)channel; r.families = (uint8_t)families; r.mtu4 = mtu4; r.mtu6 = mtu6; r.bound = true;
     bzero(&r.stats, sizeof(r.stats));
     x9d.rx_account[channel].lifetime = r.lifetime; // unused channel only; no RX ledger reset
     x9d.used_channel[channel] = true; x9d.bind_ms = x9d_ms(); x9d.rx_dumps = 0; x9d.tx_diag = x9d.tx_diag6 = 0;
@@ -552,13 +578,13 @@ static bool x9d_retiring() {
     for (const x9d_route &r : x9d.route) if (r.retiring) pending = true;
     IOLockUnlock(x9d.lock); return pending;
 }
-static int x9d_send(unsigned mux, const uint8_t *ip, unsigned n) {
+static int x9d_send(unsigned mux, const uint8_t *ip, unsigned n,uint64_t epoch) {
     if (!x9d.lock || !cbp_mux_ok(mux)) return ENETDOWN;
     if (!x9d_ip(ip, n)) return EINVAL;
     IOLockLock(x9d.lock); x9d_route &r = x9d.route[mux - 1];
-    if (!x9d.ready || x9d.failed || !r.bound || !(r.families & cbp_family_bit(ip[0] >> 4)) || n > r.mtu) {
+    if (!x9d.ready || x9d.failed || !r.bound || !epoch || r.epoch!=epoch || !(r.families & cbp_family_bit(ip[0] >> 4)) || n > x9d_cap(r,ip[0]>>4)) {
         // Post-unbind unversioned producers do not belong to the old TX ledger.
-        x9d.rejected++; if (r.bound) r.stats.tx_dropped++; IOLockUnlock(x9d.lock); return n > r.mtu ? EMSGSIZE : ENETDOWN;
+        x9d.rejected++; if (r.bound) r.stats.tx_dropped++; IOLockUnlock(x9d.lock); return n > x9d_cap(r,ip[0]>>4) ? EMSGSIZE : ENETDOWN;
     }
     // Backpressure is retryable; don't count a retained packet as dropped.
     if (x9d.count == X9D_MAIL) { IOLockUnlock(x9d.lock); return EBUSY; }
@@ -593,8 +619,9 @@ static bool x9d_tx_poll() {
         IOLockLock(x9d.lock);
         if (!x9d.count) { IOLockUnlock(x9d.lock); break; }
         t = x9d.mail[x9d.head]; x9d.head = (x9d.head + 1) % X9D_MAIL; x9d.count--;
-        const x9d_route &r = x9d.route[t.mux - 1];
-        bool valid = r.bound && r.epoch == t.epoch && r.lifetime == t.lifetime && (r.families & cbp_family_bit(t.ip[0] >> 4)); channel = r.channel;
+        x9d_route &r = x9d.route[t.mux - 1];
+        bool valid = r.bound && r.epoch == t.epoch && r.lifetime == t.lifetime && (r.families & cbp_family_bit(t.ip[0] >> 4)) && t.size<=x9d_cap(r,t.ip[0]>>4);
+        if(!valid&&r.lifetime==t.lifetime)r.stats.tx_dropped++; channel = r.channel;
         IOLockUnlock(x9d.lock); if (!valid) { bzero(&t, sizeof(t)); continue; }
         unsigned index = x9d.tx_wr, pool = index / 2 * X9D_TX_SIZE;
         memcpy(x9d.txpool.va + pool, t.ip, t.size); x9d_sync(x9d.txpool, pool, t.size);
@@ -663,7 +690,7 @@ static bool x9d_rx_item(unsigned q, const uint32_t *d) {
         unsigned mux = 0; int (*receiver)(uint32_t, const uint8_t *, uint32_t, uint32_t, uint64_t);
         IOLockLock(x9d.lock);
         for (unsigned i = 0; i < CBP_INTERFACES; i++) if (x9d.route[i].bound && x9d.route[i].channel == r.channel &&
-            i + 1 == r.mux && x9d.route[i].epoch == r.epoch && x9d.route[i].lifetime == r.lifetime && r.bytes <= x9d.route[i].mtu &&
+            i + 1 == r.mux && x9d.route[i].epoch == r.epoch && x9d.route[i].lifetime == r.lifetime && r.bytes <= x9d_cap(x9d.route[i],r.ip[0]>>4) &&
             (x9d.route[i].families & cbp_family_bit(r.ip[0] >> 4))) mux = i + 1;
         receiver = x9d.receiver; IOLockUnlock(x9d.lock);
         bool valid = !r.drop && mux && receiver && x9d_ip(r.ip, r.bytes);
@@ -799,14 +826,17 @@ static void x9d_report(unsigned second) {
         x9d.phase ? x9d.phase : "prepare");
 }
 } // namespace
-extern "C" int coachz_modem_data_send(uint32_t mux, const uint8_t *ip, uint32_t n) { return x9d_send(mux, ip, n); }
+// Native producers must carry the epoch observed before dequeue, not borrow
+// the current route's epoch after a reconnect.
+extern "C" int coachz_modem_data_send_epoch(uint32_t mux, const uint8_t *ip, uint32_t n,uint64_t epoch) { return x9d_send(mux, ip, n,epoch); }
+extern "C" int coachz_modem_data_send(uint32_t, const uint8_t *, uint32_t) { return ENETDOWN; }
 // Network gate uses the real MIPC-confirmed route, never IPA/QMAP setup.
 // Return epoch too: reconnects with the same family must discard old mbufs.
 extern "C" uint32_t coachz_modem_data_state(uint32_t mux, uint32_t *mtu, uint64_t *epoch) {
     if (!x9d.lock || !cbp_mux_ok(mux)) return 0;
     IOLockLock(x9d.lock); const x9d_route &r = x9d.route[mux - 1];
     uint32_t families = x9d.ready && !x9d.failed && r.bound ? r.families : 0;
-    if (mtu) *mtu = families ? r.mtu : 0;
+    if (mtu) *mtu = families==3 ? (r.mtu4<r.mtu6?r.mtu4:r.mtu6) : families==1?r.mtu4:families==2?r.mtu6:0;
     if (epoch) *epoch = r.epoch;
     IOLockUnlock(x9d.lock); return families;
 }

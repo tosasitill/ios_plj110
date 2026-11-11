@@ -81,9 +81,9 @@ static unsigned x9p_start(const uint8_t *req,unsigned n,unsigned sim,unsigned fa
  // Native creates both types even on a 3GPP-only SIM. Validate the secondary
  // reference but never choose a CDMA profile as the fallback Internet APN.
  if(secondary.p&&!x9p_find(sim,1,secondary.p[0]))return 10;
- if(!p||family!=4)return X9Q_UNSUPPORTED;
+ if(!p||(family!=4&&family!=6))return X9Q_UNSUPPORTED;
  x9q_view pdp=x9q_tlv(p->settings,p->len,0x11),auth=x9q_tlv(p->settings,p->len,0x1d);
- if(pdp.p&&(pdp.n!=1||(pdp.p[0]!=0&&pdp.p[0]!=3)))return X9Q_UNSUPPORTED; // IPv4 or dual-capable
+ if(pdp.p&&(pdp.n!=1||(pdp.p[0]!=(family==4?0:1)&&pdp.p[0]!=3)))return X9Q_UNSUPPORTED; // IPv4 or dual-capable
  if(auth.p&&(auth.n!=1||auth.p[0]))return X9Q_UNSUPPORTED;
  for(unsigned tag=0x1b;tag<=0x1c;tag++){
   x9q_view credentials=x9q_tlv(p->settings,p->len,(uint8_t)tag);

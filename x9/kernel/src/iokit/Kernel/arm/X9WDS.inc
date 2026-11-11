@@ -1,25 +1,15 @@
-/* Native WDS dialler, single QMI/DPMAIF owner (NOT the AT job queue).
- * Runtime: libmtkmipc-ril + libmipc, ttyCMIPC1/RX216/TX217.
- * OPEN301/register307 -> GET_PDP_CID219 -> CONFIG211/CNF -> RETRY21b/CNF
- * -> no-auth ACT201 (PDP3, REUSE=0, fallback=0x7f, captured URSP descriptor)
- * -> GET_CALL205 + actual EIF4302/IFUP -> bind.
- * Native decodeDataCallProfile reads ID100 separately from IF125;
- * ccci_dpmaif_com writes channel_id=ccmni_idx. Never use CID-1 as a route.
- * Explicit, RAM-profile or network-default APN, no-auth only. The MD call is
- * requested as IPv4v6; when it returns PDP3 the v6 client's Start attaches
- * to that same CID/channel (x9w_v6_*).
- * Old MIPC headers differ from this RIL at tags128..12b: TRANS_ID is NOT a
- * subnet mask. Missing gateway/netmask is omitted, not invented. APN/IP stays
- * in RAM, never diagnostics. Sent activation survives host timeout/DEL_CLIENT
- * until its late CNF and cleanup. The ACT reuse flag does not prove a fresh CID:
- * saved P77 can reuse same-APN calls, and normal DEACT clears the MD user's
- * entire reference slot. User/CID lifetime still needs qualification before
- * treating this dialler as ready for a new boot candidate. No cancel/reset.
+/* Native WDS owner: OPEN/subscriptions -> DISC/CONFIG/retry -> ACT(PDP3)
+ * -> token-scoped GET + EIF -> physical DPMAIF route -> independent leases.
+ * IPv4/IPv6 Starts may arrive in either order. Only the last host reference
+ * releases the physical call; client deletion never cancels a wire token.
+ * Updated settings require current CID/channel/trans + corroborating MD
+ * facts. Native WDS22 requests IP reconfiguration; WDS8c is IMS-only on
+ * 20H392. ACT/bind/DRB completion do not establish end-to-end connectivity.
  */
 struct x9w_client {
  uint8_t mux, family, sim_slot, stats_interval; bool starting,bearer_report,last_call_bytes_valid;
- // IPv6 attachment to the dual-stack bearer on this mux (no MD call of its own).
- bool v6_pending,v6_active;uint32_t v6_handle,v6_len;uint64_t v6_lifetime,v6_deadline;uint8_t v6_req[64];
+ // Symmetric host leases; physical control generation is independent of QMI slot reuse.
+ bool lease_pending,lease_active;uint32_t lease_handle,lease_len;uint64_t lease_generation,lease_deadline;uint64_t client_generation;uint8_t lease_req[X9Q_REQ];bool reconfigure;uint64_t reconfigure_deadline;
  uint32_t stats_mask,last_rat;uint64_t report_next;
  x9d_stats baseline,last_call;
 };
@@ -28,10 +18,10 @@ enum { X9W_DISC=1, X9W_ACT, X9W_CHECK, X9W_DEACT, X9W_IFWAIT, X9W_CONFIG, X9W_RE
  X9W_RETRY_QUERY, X9W_RETRY_WAIT };
 // AP accounting outlives the control bearer and client.204/4202 may consume
 // control state, but cannot erase a published payload's original ledger.
-struct x9w_retirement { uint64_t lifetime,generation; unsigned slot; bool pending; };
+struct x9w_retirement { uint64_t lifetime,control_generation,generations[CBQ_MAX_CLIENTS]; bool members[CBQ_MAX_CLIENTS],pending; };
 static x9w_retirement x9w_retirements[CBP_INTERFACES];
 static bool x9w_retiring_client(unsigned slot,uint64_t generation){
- for(const x9w_retirement &r:x9w_retirements)if(r.pending&&r.slot==slot&&r.generation==generation)return true;
+ for(const x9w_retirement &r:x9w_retirements)if(r.pending&&slot<CBQ_MAX_CLIENTS&&r.members[slot]&&r.generations[slot]==generation)return true;
  return false;
 }
 static bool x9w_accounting_pending(){
@@ -41,8 +31,8 @@ static bool x9w_accounting_pending(){
 static void x9w_retire_poll(){
  for(unsigned i=0;i<CBP_INTERFACES;i++){x9w_retirement &r=x9w_retirements[i];if(!r.pending)continue;
   x9d_stats stats={};if(!x9d_retire_finish(i+1,r.lifetime,stats))continue;
-  if(r.slot<CBQ_MAX_CLIENTS&&x9q_clients[r.slot].generation==r.generation){
-   x9w_clients[r.slot].last_call=stats;x9w_clients[r.slot].last_call_bytes_valid=true;
+  for(unsigned slot=0;slot<CBQ_MAX_CLIENTS;slot++)if(r.members[slot]&&x9q_clients[slot].generation==r.generations[slot]&&x9w_clients[slot].lease_generation==r.control_generation){
+   x9w_clients[slot].last_call=stats;x9w_clients[slot].last_call_bytes_valid=true;
   }
   bzero(&r,sizeof(r));
  }
@@ -111,13 +101,15 @@ struct x9w_bearer {
  bool md_down;
  unsigned slot,op,min_cid,max_cid,channel,mtu,dns_count;
  uint64_t generation,token,deadline,reply_deadline,next,if_floor,result_epoch,route_lifetime;
+ uint64_t host_generation,setup_deadline,change_serial,query_serial;
+ uint64_t account_generations[CBQ_MAX_CLIENTS];bool account_members[CBQ_MAX_CLIENTS];unsigned reconfigure_mask,refresh_mask;
  // MTU from ACT 0x123; 0 = network gave none (MD adds 0x123 only when its
  // +0x2c8 flag is set, 913277822). mtu is the effective route MTU.
  unsigned md_mtu;
- uint32_t handle,len,trans_id,failure_result;
+ uint32_t len,trans_id,failure_result;
  uint8_t cid,sim_slot,req[X9Q_REQ],ip[4],dns[2][4];
  char apn[101];
- // Raw Start selection (APN14 bytes, profile31) for matching the v6 Start.
+ // Frozen Start selection: sibling leases must match this physical call.
  uint8_t start_apn[101],start_apn_n;int start_profile;
  x9wr_identity query; x9wr_get get_result; x9wr_settings runtime;
 };
@@ -136,6 +128,7 @@ static bool x9w_retry_same(const x9w_bearer &b){
 }
 static bool x9w_netagent_req; // boot-arg x9_eif_req=1: send EIF ifst/ipupdate + statistics (not done by Android)
 static uint32_t x9w_next_handle;
+static uint64_t x9w_next_generation;
 // Latest MD interface state, not Android's local netdev state. The floor and
 // never-reused DPMAIF channel prevent accepting a pre-ACT/previous bearer event.
 struct x9w_interface { uint64_t serial; uint32_t trans_id,mtu; unsigned cmd; bool valid; uint8_t ip[4]; x9wr_ifup facts; };
@@ -157,7 +150,7 @@ static void x9w_init_poll(uint8_t *response,unsigned room){
   }
   unsigned n=0;int ready=x9_md_mipc_take(x9w_init_token,response,room,&n);
   if(ready!=1)return; // keep token on pending/error; no cancel or replacement
-  x9w_init_token=0;unsigned result=2,version=0,mask=stage==1?0xff:1u<<((stage-2)/3);
+  x9w_init_token=0;unsigned result=2,version=0,mask=stage==1?0xff:1u<<((stage-2)/4);
   bool good=x9w_wire(response,n,mask)&&x9q_u16(response+10)==(stage==1?0x302:0x308);
   if(stage==1){
    // libmipc mipc_init (0x133a0) only LOGS VERSION100 (default -1) and
@@ -184,19 +177,18 @@ static void x9w_init_poll(uint8_t *response,unsigned room){
   if(!good){x9w_init_hold=true;printf("X9 MIPC: handshake stage %u rejected/malformed; no dial\n",stage);return;}
   printf("X9 MIPC: handshake stage %u confirmed\n",stage);
   if(stage==1)x9w_control_ready=true; // AT queries need OPEN, not PDP event registration
-  if(stage==1+3*x9_md_sim_count()){
+  if(stage==1+4*x9_md_sim_count()){
    {int v=0;PE_parse_boot_argn("x9_eif_req",&v,sizeof(v));x9w_netagent_req=v!=0;}
    {int v=0;PE_parse_boot_argn("x9_ims_proute",&v,sizeof(v));x9w_packet_route_enabled=v==1;}
    x9w_packet_route_pending=x9w_packet_route_enabled;
-   x9w_session_ready=true;printf("X9 MIPC: v2 OPEN + DEACT/EIF subscriptions confirmed for %u SIM(s); CID ownership unqualified\n",x9_md_sim_count());return;}
+   x9w_session_ready=true;printf("X9 MIPC: v2 OPEN + DEACT/EIF/MOD subscriptions confirmed for %u SIM(s); CID ownership unqualified\n",x9_md_sim_count());return;}
  }
  if(!transport_ok||x9w_init_hold||x9w_session_ready)return;
  unsigned stage=x9w_init_stage+1;
- x9w_frame f(stage==1?0x301:0x307,stage==1?0xff:1u<<((stage-2)/3));
+ x9w_frame f(stage==1?0x301:0x307,stage==1?0xff:1u<<((stage-2)/4));
  if(stage==1){static const char name[]="X9WDS";f.word(0x100,2);f.tlv(0x101,name,sizeof(name));f.byte(0x102,1);}
- // Per SIM: DEACT 4202, EIF 4302 and DATA_IFUP_PACKET_ROUTE_IND 4220 (the
- // MD asks the AP for the packet route; subsys_daemon registers and answers).
- else{static const unsigned ids[3]={0x4202,0x4302,0x4220};unsigned id=ids[(stage-2)%3];
+ // Per SIM: DEACT4202, EIF4302, optional packet-route4220, DATA_MOD4203.
+ else{static const unsigned ids[4]={0x4202,0x4302,0x4220,0x4203};unsigned id=ids[(stage-2)%4];
   uint8_t bytes[2]={(uint8_t)id,(uint8_t)(id>>8)};f.tlv(0x100,bytes,2);}
  uint64_t token=f.submit();if(token){x9w_init_token=token;x9w_init_stage=stage;x9w_init_deadline=x9q_ms()+30000;}
 }
@@ -212,7 +204,7 @@ static bool x9w_apn(const uint8_t *p,unsigned n){
 #include "X9AttachAPN.inc"
 #include "X9WDSProfiles.inc"
 static unsigned x9w_args(const uint8_t *p,unsigned n,unsigned family){
- if(family!=4)return X9Q_UNSUPPORTED; // native IPv6 uses netagent/SLAAC, no guessed prefix
+ if(family!=4&&family!=6)return X9Q_UNSUPPORTED;
  x9q_view apn=x9q_tlv(p,n,0x14);if(!x9w_apn(apn.p,apn.n))return X9Q_ARG;
  for(unsigned at=7;at<n;at+=3+x9q_u16(p+at+1)){
   unsigned k=x9q_u16(p+at+1);const uint8_t *v=p+at+3;
@@ -234,7 +226,24 @@ static unsigned x9w_args(const uint8_t *p,unsigned n,unsigned family){
   }
  }return 0;
 }
-static bool x9w_live(const x9w_bearer &b){return b.slot<CBQ_MAX_CLIENTS&&x9q_clients[b.slot].generation==b.generation;}
+// Physical control liveness never depends on whichever host client started first.
+static bool x9w_live(const x9w_bearer &b){return b.used&&b.generation;}
+static bool x9w_reply_live(const x9w_bearer &b){return b.slot<CBQ_MAX_CLIENTS&&x9q_clients[b.slot].generation==b.host_generation;}
+static bool x9w_member(unsigned slot,const x9w_bearer &b){
+ const x9w_client &c=x9w_clients[slot];
+ return b.used&&c.client_generation==x9q_clients[slot].generation&&c.lease_generation==b.generation&&
+  cbp_mux_ok(c.mux)&&(&x9w_bearers[c.mux-1]==&b)&&c.sim_slot==b.sim_slot&&(c.lease_pending||c.lease_active);
+}
+static unsigned x9w_refs(const x9w_bearer &b,bool pending=true){
+ unsigned mask=0;for(unsigned slot=0;slot<CBQ_MAX_CLIENTS;slot++)
+  if(x9w_member(slot,b)&&(x9w_clients[slot].lease_active||pending))mask|=cbp_family_bit(x9w_clients[slot].family);
+ return mask;
+}
+static unsigned x9w_families(const x9wr_settings &r){return (x9wr_ipv4_facts(r)?1u:0u)|(x9wr_ipv6_attach_ready(r)?2u:0u);}
+static bool x9w_sync_route(x9w_bearer &b,unsigned mux){
+ b.reconfigure_mask &= x9w_refs(b,false);
+ return !b.active||x9d_update(mux,b.route_lifetime,x9w_refs(b,false)&x9w_families(b.runtime)&~(b.reconfigure_mask|b.refresh_mask),b.runtime.v4.mtu,b.runtime.v6.mtu);
+}
 // Requests can run before the next bearer poll observes a changed card pair.
 // A retained handle or accounting ledger never grants current-call success.
 static bool x9w_data_ready(const x9w_bearer &b){
@@ -248,7 +257,7 @@ static bool x9w_data_ready(const x9w_bearer &b){
 // error gives it no reason to tell a v4-only PDN apart from a failed call.
 enum : uint16_t { X9W_END_UNSPECIFIED=1,X9W_END_CLIENT=2 };
 enum : uint16_t { X9W_VERBOSE_INTERNAL=2,X9W_VERBOSE_CM=3 };
-enum : uint16_t { X9W_INTERNAL_ERROR=201,X9W_INTERNAL_NW_TERMINATION=206,
+enum : uint16_t { X9W_INTERNAL_ERROR=201,X9W_INTERNAL_NW_TERMINATION=206,X9W_INTERNAL_IPV4_DISALLOWED=208,
  X9W_INTERNAL_IPV6_DISALLOWED=210,X9W_CM_CLIENT_END=2000 };
 static void x9w_end_reason(x9q_packet &p,uint16_t reason,uint16_t type,uint16_t verbose){
  uint8_t r[2]={(uint8_t)reason,(uint8_t)(reason>>8)};p.tlv(0x10,r,2);
@@ -276,51 +285,42 @@ static void x9w_rat_tlv(x9q_packet &p,unsigned tag,unsigned rat){
  p.tlv((uint8_t)tag,value,sizeof(value)); // 3GPP, real LTE/NR RAT mask, SO unknown
 }
 static void x9w_pending_done(x9w_bearer &b){
- if(b.pending&&x9w_live(b))x9w_clients[b.slot].starting=false;b.pending=false;b.reply_deadline=0;b.len=0;bzero(b.req,sizeof(b.req));
+ if(b.pending&&x9w_reply_live(b))x9w_clients[b.slot].starting=false;b.pending=false;b.reply_deadline=0;b.len=0;bzero(b.req,sizeof(b.req));
 }
-static void x9w_v6_fail(unsigned slot,uint16_t verbose);
+static void x9w_lease_fail(unsigned slot,uint16_t verbose);
+static void x9w_lease_status(unsigned slot,bool connected,uint16_t type,uint16_t verbose,bool reconfigure=false);
 static void x9w_error(x9w_bearer &b,unsigned error){
- if(b.pending&&x9w_live(b)){
-  x9q_packet p(b.req,(uint16_t)error);
-  if(error==14&&x9q_u16(b.req+3)==0x20){
-   // A proprietary MIPC error is not a QMI/3GPP cause. Report unspecified
-   // internal failure, not a fabricated network cause or a bare CALL_FAILED.
-   x9w_end_reason(p,X9W_END_UNSPECIFIED,X9W_VERBOSE_INTERNAL,X9W_INTERNAL_ERROR);
-   for(unsigned i=0;i<CBQ_MAX_CLIENTS;i++){
-    const x9w_client &c=x9w_clients[i];
-    if(c.v6_pending&&c.sim_slot==b.sim_slot&&c.mux==x9w_clients[b.slot].mux)
-     x9w_v6_fail(i,X9W_INTERNAL_ERROR);
-   }
-  }
-  p.send(CBQ_PORT_BASE+b.slot,X9BB_PORT_BASE+1);
+ for(unsigned i=0;i<CBQ_MAX_CLIENTS;i++)if(x9w_member(i,b)&&x9w_clients[i].lease_pending)x9w_lease_fail(i,X9W_INTERNAL_ERROR);
+ if(b.pending&&x9w_reply_live(b)){
+  x9q_packet p(b.req,(uint16_t)error);p.send(CBQ_PORT_BASE+b.slot,X9BB_PORT_BASE+1);
   printf("X9 WDS: response msg 0x%04x error %u; ownership retained %u op %u\n",x9q_u16(b.req+3),error,b.owned,b.op);
  }x9w_pending_done(b);
 }
 static void x9w_disconnect(x9w_bearer &b,unsigned mux){
- bool was=b.active;
  if(b.route_lifetime&&cbp_mux_ok(mux)){
   x9w_retirement &r=x9w_retirements[mux-1];
-  if(!r.pending){r.lifetime=b.route_lifetime;r.generation=b.generation;r.slot=b.slot;r.pending=true;}
+  if(!r.pending){r.lifetime=b.route_lifetime;r.control_generation=b.generation;memcpy(r.generations,b.account_generations,sizeof(r.generations));memcpy(r.members,b.account_members,sizeof(r.members));r.pending=true;}
   else if(r.lifetime!=b.route_lifetime)x9d_fail("WDS retirement ledger collision");
-  b.route_lifetime=0; // ownership transferred once, including after DEL_CLIENT
+  b.route_lifetime=0;
  }
  b.active=false;bzero(&b.runtime,sizeof(b.runtime));x9d_unbind(mux);
- if(was&&x9w_live(b)){
-  uint8_t req[7]={0,0,0,0x22,0,0,0};x9q_packet p(req);uint8_t status[2]={1,0},family=4;
-  p.tlv(1,status,2);
-  if(b.end_type==X9W_VERBOSE_CM)x9w_end_reason(p,X9W_END_CLIENT,X9W_VERBOSE_CM,b.end_verbose);
-  else x9w_end_reason(p,X9W_END_UNSPECIFIED,X9W_VERBOSE_INTERNAL,b.end_type?b.end_verbose:X9W_INTERNAL_ERROR);
-  p.tlv(0x12,&family,1);p.send(CBQ_PORT_BASE+b.slot,X9BB_PORT_BASE+1,true,0x22);
-  printf("X9 WDS: disconnected indication mux %u verbose type %u reason %u\n",mux,b.end_type?b.end_type:X9W_VERBOSE_INTERNAL,b.end_type?b.end_verbose:X9W_INTERNAL_ERROR);
+ for(unsigned slot=0;slot<CBQ_MAX_CLIENTS;slot++)if(x9w_member(slot,b)&&x9w_clients[slot].lease_active){
+  x9w_client &c=x9w_clients[slot];c.lease_active=false;c.lease_handle=0;c.reconfigure=false;
+  x9w_lease_status(slot,false,b.end_type?b.end_type:X9W_VERBOSE_INTERNAL,b.end_type?b.end_verbose:X9W_INTERNAL_ERROR);
  }
 }
 static void x9w_host_expire(x9w_bearer &b,unsigned mux,uint64_t now){
+ for(unsigned slot=0;slot<CBQ_MAX_CLIENTS;slot++)if(x9w_member(slot,b)){
+  x9w_client &c=x9w_clients[slot];
+  if(c.lease_pending&&now>=c.lease_deadline)x9w_lease_fail(slot,X9W_INTERNAL_ERROR);
+ }
+ if(!b.active&&b.setup_deadline&&now>=b.setup_deadline&&!b.abandoned){
+  b.abandoned=true;x9w_disconnect(b,mux);x9w_error(b,X9Q_NOT_READY);
+ }
+ if(!x9w_refs(b)&&!b.abandoned){b.abandoned=true;x9w_disconnect(b,mux);}
  if(!b.pending||!b.reply_deadline||now<b.reply_deadline)return;
- // Host reply lifetime is independent of any wire token or release gate.
- // Close admission once; pending_done only retires the request bytes, not
- // the bearer, original token, CID reservation or in-flight DPMAIF records.
  b.abandoned=true;x9w_disconnect(b,mux);x9w_error(b,X9Q_NOT_READY);
- printf("X9 WDS: host reply deadline mux %u; original control/data retirement retained\n",mux);
+ printf("X9 WDS: host Stop deadline mux %u; original control/data retirement retained\n",mux);
 }
 static void x9w_clear(x9w_bearer &b,unsigned mux){x9w_disconnect(b,mux);x9w_pending_done(b);bzero(&b,sizeof(b));}
 static bool x9w_send(x9w_bearer &b,x9w_frame &f,unsigned op,unsigned timeout){
@@ -334,7 +334,7 @@ static bool x9w_deactivate(x9w_bearer &b,unsigned mux){
   // No positive evidence the CID is still ours: release locally. At worst
   // one usr1 ref byte stays; a later same-APN ACT reuses it and any 203 on
   // that PDN zeroes the whole byte (913d839e), so nothing leaks for good.
-  if(b.pending&&x9q_u16(b.req+3)==0x21&&x9w_live(b)){x9q_packet r(b.req);r.send(CBQ_PORT_BASE+b.slot,X9BB_PORT_BASE+1);}
+  if(b.pending&&x9q_u16(b.req+3)==0x21&&x9w_reply_live(b)){x9q_packet r(b.req);r.send(CBQ_PORT_BASE+b.slot,X9BB_PORT_BASE+1);}
   else x9w_error(b,X9Q_NOT_READY);
   printf("X9 WDS: call %u mux %u already down at MD or unconfirmed; local release, no 203\n",b.cid,mux);
   x9w_clear(b,mux);return true;
@@ -349,22 +349,20 @@ static bool x9w_check(x9w_bearer &b){
  // later client incarnation can rewrite the token's originating identity.
  if(b.result_epoch!=x9a_epoch){b.hold=true;return false;}
  if(!x9w_live(b))return false;
- x9wr_identity query={b.generation,b.result_epoch,b.if_floor,b.sim_slot,b.cid,4,0};
+ x9wr_identity query={b.generation,b.result_epoch,b.if_floor,b.sim_slot,b.cid,0,3};
  x9w_frame f(0x205,1u<<b.sim_slot);f.byte(0x101,b.cid);
  if(!x9w_send(b,f,X9W_CHECK,30000))return false;
- b.query=query;return true;
+ b.query=query;b.query_serial=b.change_serial;return true;
 }
 static bool x9w_get_settings(x9w_bearer &b,const uint8_t *p,unsigned n){
- x9wr_identity current={b.generation,b.result_epoch,b.if_floor,b.sim_slot,b.cid,4,0};
+ x9wr_identity current={b.generation,b.result_epoch,b.if_floor,b.sim_slot,b.cid,0,3};
  x9wr_get get={};unsigned dns=0;
- if(!x9w_byte(p,n,0x10d,dns)||dns>4||b.result_epoch!=x9a_epoch||!x9w_live(b)||!x9wr_same_identity(b.query,current)){
+ if(!x9wr_optional_byte(p,n,0x10d,dns)||dns>4||b.result_epoch!=x9a_epoch||!x9w_live(b)||!x9wr_same_identity(b.query,current)){
   printf("X9 WDS: GET205 identity/dns gate failed (dns %u)\n",dns);return false;}
  if(!x9wr_decode_get(p,n,b.query,get)){printf("X9 WDS: GET205 decode failed\n");return false;}
- if(get.channel!=b.channel||get.trans_id!=b.trans_id||
-    (get.v4.mtu_present&&get.v4.mtu&&b.md_mtu&&get.v4.mtu!=b.md_mtu)||memcmp(get.v4.address,b.ip,4)){
-  printf("X9 WDS: GET205 differs from ACT (channel %u/%u trans %u/%u mtu %u/%u addr-same %u)\n",get.channel,b.channel,
-   get.trans_id%100,b.trans_id%100,get.v4.mtu_present?get.v4.mtu:0,b.md_mtu,!memcmp(get.v4.address,b.ip,4));return false;}
- // Still corroborate the earlier ACT facts; do not retarget a live route.
+ // CID/channel/trans remain the immutable physical identity. Addresses/DNS/
+ // MTU are mutable settings, not proof that a different call owns this CID.
+ if(get.channel!=b.channel||get.trans_id!=b.trans_id)return false;
  b.get_result=get;return true;
 }
 // One non-private line naming the ACT CNF fields our gate saw.
@@ -377,23 +375,16 @@ static void x9w_act_diag(const x9w_bearer &b,const uint8_t *p,unsigned n){
   cid,b.min_cid,b.max_cid,type,count,v6,dns,channel,trans==999?999:trans%100,has_mtu?"":"absent ",mtu,ip.p?ip.n:0,b.gone,b.abandoned,x9d_ready());
 }
 static bool x9w_settings(x9w_bearer &b,const uint8_t *p,unsigned n){
- unsigned cid,type,channel,mtu=0,count,dns;
- if(!x9w_byte(p,n,0x100,cid)||cid!=b.cid||!x9w_byte(p,n,0x102,type)||(type!=1&&type!=3)||
-  !x9w_word(p,n,0x125,channel)||channel>=20||
-  !x9w_byte(p,n,0x103,count)||count!=1||!x9w_byte(p,n,0x10d,dns)||dns>4)return false;
- x9q_view m=x9w_tlv(p,n,0x123);
- if(m.p&&(m.n!=4||((mtu=x9q_u32(m.p))!=0&&(mtu<68||mtu>X9D_TX_SIZE))))return false; // absent/0 = unspecified
- x9q_view ip=x9w_tlv(p,n,0x8104);
- if(!ip.p||ip.n!=4||!ip.p[0]||ip.p[0]>=224||ip.p[0]==127)return false;
- uint8_t addresses[2][4]={};
- for(unsigned i=0;i<dns;i++){x9q_view d=x9w_tlv(p,n,0x810e + i);if(!d.p||d.n!=4)return false;if(i<2)memcpy(addresses[i],d.p,4);}
- if(b.ip[0]&&(channel!=b.channel||mtu!=b.md_mtu||memcmp(b.ip,ip.p,4)))return false; // no live retargeting
- b.channel=channel;b.md_mtu=mtu;memcpy(b.ip,ip.p,4);b.dns_count=dns>2?2:dns;memcpy(b.dns,addresses,sizeof(addresses));
- return true; // no gateway/netmask derived from stale versioned tags
-}
-static void x9w_handle_reply(x9w_bearer &b){
- uint32_t h=b.handle;uint8_t bytes[4]={(uint8_t)h,(uint8_t)(h>>8),(uint8_t)(h>>16),(uint8_t)(h>>24)};
- x9q_packet p(b.req);p.tlv(1,bytes,4);p.send(CBQ_PORT_BASE+b.slot,X9BB_PORT_BASE+1);x9w_pending_done(b);
+ unsigned cid,type,channel;
+ if(!x9w_byte(p,n,0x100,cid)||cid!=b.cid||!x9w_byte(p,n,0x102,type)||type<1||type>3||
+    !x9w_word(p,n,0x125,channel)||channel>=20)return false;
+ x9wr_family v4={},v6={};
+ if(!x9wr_get_family(p,n,4,0x103,0x8104,0x10d,0x810e,0x123,type!=2,v4)||
+    !x9wr_get_family(p,n,16,0x108,0x8109,0x112,0x8113,0x124,type!=1,v6))return false;
+ b.channel=channel;b.md_mtu=v4.mtu;memcpy(b.ip,v4.address,4);
+ b.dns_count=v4.dns_count>2?2:v4.dns_count;
+ for(unsigned i=0;i<b.dns_count;i++)memcpy(b.dns[i],v4.dns[i],4);
+ return true;
 }
 // ---- AP interface state to the MD (netagent role) ---------------------
 // mipc_msg_tlv_const.h: INTERNAL_EIF_REQ = 0x313 / CNF 0x314; TRANSID100
@@ -499,7 +490,8 @@ static void x9w_side_poll(){
 }
 static void x9w_publish(x9w_bearer &b,unsigned mux){
  x9w_host_expire(b,mux,x9q_ms()); // every publication entry owns its deadline gate
- if(b.abandoned||b.hold||!b.pending)return;
+ if(b.abandoned||b.hold||!x9w_refs(b))return;
+ if(b.query_serial!=b.change_serial){if(!b.token)x9w_check(b);return;}
  // The MD may deliver EIF IFUP before the ACT CNF (191.txt) in modem
  // interface form; adopt it for the host IF_ID once trans_id is known.
  if(!x9w_interfaces[b.sim_slot][b.channel].valid)
@@ -512,26 +504,24 @@ static void x9w_publish(x9w_bearer &b,unsigned mux){
   }
  const x9w_interface &in=x9w_interfaces[b.sim_slot][b.channel];
  if(!in.valid||in.serial<=b.if_floor||in.trans_id!=b.trans_id||in.cmd!=0)return;
- x9wr_identity current={b.generation,b.result_epoch,b.if_floor,b.sim_slot,b.cid,4,0};
+ x9wr_identity current={b.generation,b.result_epoch,b.if_floor,b.sim_slot,b.cid,0,3};
  x9wr_settings runtime={};
- if(b.result_epoch!=x9a_epoch||!x9wr_match_settings(b.get_result,in.facts,current,runtime)||
-    !x9wr_ipv4_facts(runtime)||memcmp(in.ip,b.ip,4)||!b.pending||!x9w_live(b)||
+ bool matched=b.result_epoch==x9a_epoch&&x9wr_match_settings(b.get_result,in.facts,current,runtime);
+ if(matched){
+  for(unsigned slot=0;slot<CBQ_MAX_CLIENTS;slot++)if(x9w_member(slot,b)&&x9w_clients[slot].lease_pending&&
+    !(x9w_families(runtime)&cbp_family_bit(x9w_clients[slot].family)))
+   x9w_lease_fail(slot,x9w_clients[slot].family==4?X9W_INTERNAL_IPV4_DISALLOWED:X9W_INTERNAL_IPV6_DISALLOWED);
+ }
+ if(!matched||!(x9w_families(runtime)&x9w_refs(b))||!x9w_live(b)||
     x9w_next_handle>=0xfffffffeu||x9w_retirements[mux-1].pending||
-    !x9d_bind(mux,b.channel,x9wr_ipv6_attach_ready(runtime)?3:1,runtime.v4.mtu,b.route_lifetime)){
+    !x9d_bind(mux,b.channel,x9w_families(runtime)&x9w_refs(b),runtime.v4.mtu,runtime.v6.mtu,b.route_lifetime)){
   printf("X9 WDS: publish failed mux %u (match %u v4 %u addr-same %u retire %u)\n",mux,runtime.matched,x9wr_ipv4_facts(runtime),
    !memcmp(in.ip,b.ip,4),x9w_retirements[mux-1].pending);
   b.abandoned=true;x9w_error(b,X9Q_NOT_READY);x9w_deactivate(b,mux);return;
  }
- b.mtu=runtime.v4.mtu;b.runtime=runtime;b.handle=++x9w_next_handle;b.active=true;b.op=0;b.next=x9q_ms()+10000;
- x9w_client &c=x9w_clients[b.slot];bzero(&c.baseline,sizeof(c.baseline));c.report_next=0;c.last_rat=0;
- c.last_call_bytes_valid=false;bzero(&c.last_call,sizeof(c.last_call));
- printf("X9 WDS: SIM%u PDP activated call %u -> ccmni%u -> mux %u IPv4 MTU %u PDP%u v6-ready %u, ACT+GET+EIF/IFUP verified, DPMAIF bound\n",
-  b.sim_slot+1,b.cid,b.channel,mux,b.mtu,runtime.modem_pdp,x9wr_ipv6_attach_ready(runtime));
- x9w_handle_reply(b);
- // Connection notification is emitted only AFTER real bind; not CGATT alone.
- uint8_t req[7]={};x9q_packet connected(req);uint8_t status[2]={2,0},family=4;
- connected.tlv(1,status,2);connected.tlv(0x12,&family,1);
- connected.send(CBQ_PORT_BASE+b.slot,X9BB_PORT_BASE+1,true,0x22);
+ b.mtu=runtime.v4.mtu;b.runtime=runtime;b.refresh_mask=0;b.active=true;b.op=0;b.next=x9q_ms()+10000;b.setup_deadline=0;
+ printf("X9 WDS: cell157 SIM%u physical call %u -> ccmni%u -> mux %u PDP%u verified families %u MTU4/6 %u/%u; independent leases\n",
+  b.sim_slot+1,b.cid,b.channel,mux,runtime.modem_pdp,x9w_families(runtime),runtime.v4.mtu,runtime.v6.mtu);
  // DPMAIF route is bound and the host has the address: report the AP
  // interface up, typed like the verified PDN (EIF_ADDRESS_TYPE 1 or 3).
  x9w_ril_post_act(b.sim_slot,b.cid);
@@ -540,7 +530,7 @@ static void x9w_publish(x9w_bearer &b,unsigned mux){
  // Android capture: the RIL/NetAgentService never sends INTERNAL_EIF_REQ
  // (no 0x313 in the MIPC log); it only consumes EIF indications. The
  // ifst/ipupdate/statistics requests stay available but are off by default.
- if(x9w_netagent_req)x9w_ifst(b.sim_slot,b.trans_id,0,runtime.modem_pdp==3?3:1);
+ if(x9w_netagent_req)x9w_ifst(b.sim_slot,b.trans_id,0,runtime.modem_pdp);
  // netagent then reports the configured address (AT+EIF=<id>,"ipupdate",1,a.b.c.d).
  if(x9w_netagent_req)x9w_ifst(b.sim_slot,b.trans_id,2,0,b.ip);
  if(x9w_netagent_req)x9w_stats(true);
@@ -607,6 +597,50 @@ static void x9w_start_next(x9w_bearer &b,unsigned mux){
  }
  b.if_floor=x9w_if_serial;
  if(x9w_send(b,f,X9W_ACT,120000))printf("X9 WDS: requesting v4v6 call mux %u (RIL-shaped ACT: pdp 3, reuse 0, fallback 0x7f, URSP desc), frame %u B\n",mux,f.n);
+}
+// Settings events never replace a pending GET token. The query serial freezes
+// the event horizon; a CNF predating a newer event is drained then re-queried.
+static void x9w_dirty(x9w_bearer &b,uint64_t serial,unsigned close_mask=0){
+ if(b.abandoned||b.hold||b.result_epoch!=x9a_epoch)return;
+ if(serial>b.change_serial)b.change_serial=serial;
+ b.refresh_mask|=close_mask;
+ if(b.active&&!x9w_sync_route(b,(unsigned)(&b-x9w_bearers)+1)){b.abandoned=true;x9w_disconnect(b,(unsigned)(&b-x9w_bearers)+1);}
+ b.next=0;
+}
+static bool x9w_family_equal(const x9wr_family &a,const x9wr_family &b,unsigned bytes){
+ if(a.address_present!=b.address_present)return false;
+ if(!a.address_present)return true;
+ if(a.mtu!=b.mtu||a.dns_count!=b.dns_count||memcmp(a.address,b.address,bytes))return false;
+ for(unsigned i=0;i<a.dns_count;i++)if(memcmp(a.dns[i],b.dns[i],bytes))return false;
+ return true;
+}
+static void x9w_reconfigure(x9w_bearer &b,unsigned mux,unsigned mask){
+ mask&=x9w_refs(b,false);b.reconfigure_mask|=mask;
+ // Admission closes BEFORE the host notification. The 20H392 WDS22
+ // reconfigurationRequired consumer tears IP down and issues family Stop.
+ // WDS8c would only refresh PCSCF/PCO, not these address/DNS/MTU settings.
+ if(!x9w_sync_route(b,mux)){b.abandoned=true;x9w_disconnect(b,mux);return;}
+ for(unsigned slot=0;slot<CBQ_MAX_CLIENTS;slot++)if(x9w_member(slot,b)){
+  x9w_client &c=x9w_clients[slot];
+  if(c.lease_active&&!c.reconfigure&&(mask&cbp_family_bit(c.family))){
+   c.reconfigure=true;c.reconfigure_deadline=x9q_ms()+60000;
+   x9w_lease_status(slot,true,0,0,true);
+   printf("X9 WDS: family%u mux %u configuration changed; admission closed, native IP reconfigure requested\n",c.family,mux);
+  }
+ }
+}
+static void x9w_refresh(x9w_bearer &b,unsigned mux){
+ if(b.query_serial!=b.change_serial){b.next=0;return;}
+ const x9w_interface &in=x9w_interfaces[b.sim_slot][b.channel];x9wr_settings runtime={};
+ if(in.valid&&in.cmd==0)x9wr_match_settings(b.get_result,in.facts,b.query,runtime);
+ unsigned changed=0;
+ if(!x9w_family_equal(b.runtime.v4,runtime.v4,4))changed|=1;
+ if(!x9w_family_equal(b.runtime.v6,runtime.v6,16))changed|=2;
+ // Only GET + current scoped IFUP/MOD facts publish new settings. An
+ // uncorroborated family is closed, never replaced with guessed addresses.
+ b.runtime=runtime;b.mtu=runtime.v4.mtu;b.refresh_mask=0;
+ x9w_reconfigure(b,mux,changed);
+ b.next=x9q_ms()+10000;
 }
 static void x9w_result(x9w_bearer &b,unsigned mux,const uint8_t *p,unsigned n){
  x9w_host_expire(b,mux,x9q_ms()); // late ready1 cannot restore host success
@@ -686,8 +720,8 @@ static void x9w_result(x9w_bearer &b,unsigned mux,const uint8_t *p,unsigned n){
     if(!result&&a.p&&a.n>1&&a.n<=101){unsigned l=(unsigned)strnlen((const char *)a.p,a.n);
      if(l+1==a.n&&x9w_apn(a.p,l)){memcpy(x9w_last_dnn[b.sim_slot],a.p,l);x9w_last_dnn[b.sim_slot][l]=0;}}}
   // Actual RIL treats 150202/150204 as partial success and decodes 150203's
-  // partial profile. This IPv4-only dialler cleans up instead of falling back.
-  if(result||b.gone||b.abandoned||!x9w_settings(b,p,n)||
+  // partial profile. Qualify each negotiated family; never claim the missing one.
+  if(b.gone||b.abandoned||!x9w_settings(b,p,n)||
      !x9w_word(p,n,0x12a,b.trans_id)||b.trans_id%100!=b.channel||!x9d_ready()){
    x9w_act_diag(b,p,n);b.abandoned=true;x9w_error(b,X9Q_NOT_READY);x9w_deactivate(b,mux);return;
   }
@@ -695,7 +729,13 @@ static void x9w_result(x9w_bearer &b,unsigned mux,const uint8_t *p,unsigned n){
  }
  if(op==X9W_CHECK){
   if(b.gone){x9w_clear(b,mux);return;}
-  if(b.abandoned){x9w_deactivate(b,mux);return;}
+  if(b.abandoned){
+   // A Stop can arrive while CHECK is in flight. Drain that reply and still
+   // honor evidence that the CID was removed/reassigned before sending 203.
+   x9wr_get still={};
+   if(result||!x9wr_decode_get(p,n,b.query,still)||still.channel!=b.channel||still.trans_id!=b.trans_id)b.md_down=true;
+   x9w_deactivate(b,mux);return;
+  }
   if(result||!x9w_get_settings(b,p,n)||!x9d_ready()){
    printf("X9 WDS: GET205 result %u rejected mux %u\n",result,mux);
    // Keep 203 only if this reply proves the CID still maps to our route.
@@ -703,27 +743,34 @@ static void x9w_result(x9w_bearer &b,unsigned mux,const uint8_t *p,unsigned n){
    if(result||!x9wr_decode_get(p,n,b.query,still)||still.channel!=b.channel||still.trans_id!=b.trans_id)b.md_down=true;
    b.abandoned=true;x9w_disconnect(b,mux);x9w_error(b,X9Q_NOT_READY);x9w_deactivate(b,mux);return;
   }
+  if(b.query_serial!=b.change_serial){
+   b.next=0;
+   if(!b.active){b.op=X9W_IFWAIT;b.deadline=x9q_ms()+30000;}
+   return;
+  }
   if(!b.active){
    b.op=X9W_IFWAIT;b.deadline=x9q_ms()+30000;x9w_publish(b,mux);return;
   }
-  const x9w_interface &in=x9w_interfaces[b.sim_slot][b.channel];x9wr_settings runtime={};
-  if(!in.valid||in.cmd!=0||!x9wr_match_settings(b.get_result,in.facts,b.query,runtime)||
-     !x9wr_ipv4_facts(runtime)){
-   b.abandoned=true;x9w_disconnect(b,mux);x9w_error(b,X9Q_NOT_READY);x9w_deactivate(b,mux);return;
-  }
-  b.runtime=runtime;b.next=x9q_ms()+10000;return;
+  x9w_refresh(b,mux);return;
  }
  unsigned cid;
  if(result||!x9w_byte(p,n,0x100,cid)||cid!=b.cid){
   b.hold=true;x9w_error(b,X9Q_NOT_READY);printf("X9 WDS: deactivation unconfirmed, reserved mux %u until boot\n",mux);return;
  }
- if(b.pending&&x9w_live(b)){x9q_packet reply(b.req);reply.send(CBQ_PORT_BASE+b.slot,X9BB_PORT_BASE+1);}
+ if(b.pending&&x9w_reply_live(b)){x9q_packet reply(b.req);reply.send(CBQ_PORT_BASE+b.slot,X9BB_PORT_BASE+1);}
  printf("X9 WDS: owned call %u deactivation confirmed mux %u\n",b.cid,mux);x9w_clear(b,mux);
 }
 static void x9w_del(unsigned slot){
  x9a_del(slot);
  for(unsigned i=0;i<CBP_INTERFACES;i++){x9w_bearer &b=x9w_bearers[i];
-  if(b.used&&b.slot==slot&&b.generation==x9q_clients[slot].generation){b.abandoned=true;x9w_pending_done(b);x9w_disconnect(b,i+1);}
+  if(!b.used)continue;
+  bool member=x9w_member(slot,b);
+  if(b.pending&&b.slot==slot&&x9w_reply_live(b))x9w_pending_done(b);
+  if(member){
+   x9w_clients[slot].lease_active=x9w_clients[slot].lease_pending=false;
+   if(!x9w_refs(b)){b.abandoned=true;x9w_disconnect(b,i+1);}
+   else x9w_sync_route(b,i+1);
+  }
  }bzero(&x9w_clients[slot],sizeof(x9w_clients[slot]));
 }
 static void x9w_bad_event(){
@@ -746,31 +793,54 @@ static bool x9w_interface_event(const uint8_t *p,unsigned n,unsigned sim){
    printf("X9 WDS: EIF modem interface %u mapped to host interface %u (call %u)\n",trans%100,b.trans_id%100,b.cid);
    trans=b.trans_id;remapped=true;break;
   }
- // Only IFUP(0)/IFDOWN(1) change interface state. 193.txt: command 5 came
- // 9.6 s after IFUP and the real IFDOWN(1) only 42 s later, yet the old code
- // tore the call down on it. Other commands (change/RA/state updates) are
- // logged; an address change is still caught by the periodic GET205 check.
+ // wire5 maps to configureInterfaceChange/configureIpv6Mtu in the RIL,
+ // NOT to a full IFUP or a netlink global-address update. Preserve all old
+ // address facts; consume only the proved MTU word from the optional v6 item.
+ if(cmd==5){
+  uint64_t serial=++x9w_if_serial;unsigned count=0;
+  if(!x9wr_optional_byte(p,n,0x106,count)||count>1)return false;
+  x9q_view item=x9w_tlv(p,n,0x8107);
+  if((count&&(!item.p||item.n!=24))||(!count&&item.p))return false;
+  x9w_interface &in=x9w_interfaces[sim][trans%100];
+  for(unsigned m=0;m<CBP_INTERFACES;m++){x9w_bearer &b=x9w_bearers[m];
+   if(!b.used||!b.owned||b.result_epoch!=x9a_epoch||b.sim_slot!=sim||b.trans_id!=trans)continue;
+   if(in.valid&&in.cmd==0&&in.trans_id==trans&&in.facts.epoch==b.result_epoch&&in.serial>b.if_floor&&count){
+    in.facts.v6.mtu_present=true;in.facts.v6.mtu=x9q_u32(item.p);
+   }
+   unsigned cap=count?x9q_u32(item.p):0;
+   x9w_dirty(b,serial,cap&&cap<b.runtime.v6.mtu?2u:0u);
+  }
+  printf("X9 WDS: EIF5 SIM%u ccmni%u incremental v6 MTU present %u; coalesced GET refresh\n",sim+1,trans%100,count);
+  return true;
+ }
  if(cmd!=0&&cmd!=1){
-  printf("X9 WDS: MD SIM%u EIF ccmni%u command %u (not IFUP/IFDOWN; state kept)\n",sim+1,trans%100,cmd);return true;
+  printf("X9 WDS: MD SIM%u EIF ccmni%u unhandled command %u; no state mutation\n",sim+1,trans%100,cmd);return true;
  }
  x9w_interface &in=x9w_interfaces[sim][trans%100];bzero(&in,sizeof(in));
  in.serial=++x9w_if_serial;in.trans_id=trans;in.cmd=cmd;
  if(cmd==0){
   // Typed EIF facts including the capture card epoch. A dual-stack IFUP
-  // carries both halves; the v4 half is required for our route, the v6 half
-  // is only used after it matches GET205. No tag103 fallback MTU.
-  if(x9wr_decode_ifup(p,n,sim,x9a_epoch,in.serial,in.facts)&&in.facts.v4.address_present){
+  // carries either/both halves, qualified independently against GET205.
+  // No tag103 fallback MTU.
+  if(x9wr_decode_ifup(p,n,sim,x9a_epoch,in.serial,in.facts)){
    if(remapped){in.facts.trans_id=trans;in.facts.channel=trans%100;}
    in.mtu=in.facts.v4.mtu;memcpy(in.ip,in.facts.v4.address,4);
    in.valid=true; // MTU may be 0/unspecified; x9wr_match_family picks it
   }
-  // Foreign IMS/IPv6 events do not poison the IPv4 dialler. An owned route
-  // with an unsupported IFUP remains disconnected and is cleaned up.
+  // Foreign interface events do not grant a host lease.
  }else in.valid=true;
  printf("X9 WDS: MD SIM%u EIF/IFST ccmni%u command %u (payload private)\n",sim+1,trans%100,cmd);
  for(unsigned m=0;m<CBP_INTERFACES;m++){x9w_bearer &b=x9w_bearers[m];
   if(b.used&&b.owned&&b.result_epoch==x9a_epoch&&b.sim_slot==sim&&b.trans_id==trans&&in.serial>b.if_floor&&
-     (cmd!=0||!in.valid||(b.active&&memcmp(in.ip,b.ip,4)))){
+     (cmd!=0||!in.valid||b.active)){
+   if(cmd==0&&in.valid){
+    unsigned mask=0;
+    if(in.facts.v4.address_present!=b.runtime.v4.address_present||memcmp(in.facts.v4.address,b.runtime.v4.address,4)||
+       (in.facts.v4.mtu&&in.facts.v4.mtu<b.runtime.v4.mtu))mask|=1;
+    if(in.facts.v6.address_present!=b.runtime.v6.address_present||memcmp(in.facts.v6.address,b.runtime.v6.address,16)||
+       (in.facts.v6.mtu&&in.facts.v6.mtu<b.runtime.v6.mtu))mask|=2;
+    x9w_dirty(b,in.serial,mask);continue;
+   }
    if(cmd!=0){b.md_down=true;if(x9w_netagent_req)x9w_ifst(sim,trans,1,0);} // MD ifdown precedes its logical CID removal
    x9w_host_expire(b,m+1,x9q_ms());
    // 212: expected IFDOWN arrived just before our 204/result0 and incorrectly
@@ -778,7 +848,7 @@ static bool x9w_interface_event(const uint8_t *p,unsigned n,unsigned sim){
    // leave the original 203 token and host deadline intact. IFDOWN is NOT a
    // successful DEACT CNF; a timeout/bad CNF must still fail the Stop.
    if(cmd==1&&b.op==X9W_DEACT&&b.token&&!b.hold&&b.pending&&
-      x9q_u16(b.req+3)==0x21&&x9w_live(b)){
+      x9q_u16(b.req+3)==0x21&&x9w_reply_live(b)){
     x9w_disconnect(b,m+1);
     printf("X9 WDS: expected IFDOWN during Stop mux %u; await original DEACT CNF, deadline unchanged\n",m+1);
     continue;
@@ -787,75 +857,95 @@ static bool x9w_interface_event(const uint8_t *p,unsigned n,unsigned sim){
   }
  }return true;
 }
-// ---- IPv6 half of a dual-stack call -------------------------------------
-// iOS opens separate v4 and v6 WDS clients on the same mux (191.txt: both
-// Starts within 1 ms). The MD call is the v4 client's; the v6 client attaches
-// to it when the verified call is PDP3 and its Start asks for the same
-// APN/profile. Stop/teardown of the v6 half never touches the MD call.
+static bool x9w_modified_event(const uint8_t *p,unsigned n,unsigned sim){
+ unsigned cid,channel,trans,type,result;
+ if(!x9w_byte(p,n,0x100,cid))return false;
+ bool full_result=x9w_word(p,n,0,result)&&result==0;
+ for(unsigned m=0;m<CBP_INTERFACES;m++){x9w_bearer &b=x9w_bearers[m];
+  if(!b.used||!b.owned||b.result_epoch!=x9a_epoch||b.sim_slot!=sim||b.cid!=cid||b.abandoned)continue;
+  uint64_t serial=++x9w_if_serial;
+  // DATA_MOD (Android capture): IF125/u32, TRANS126/u32. Never use
+  // GET129 or ACT12a here; CID-only/partial updates merely schedule GET.
+  if(!x9w_word(p,n,0x125,channel)||!x9w_word(p,n,0x126,trans)){x9w_dirty(b,serial);continue;}
+  if(channel!=b.channel||trans!=b.trans_id)continue;
+  x9w_dirty(b,serial);
+  x9wr_family v4={},v6={};
+  if(!full_result||!x9w_byte(p,n,0x102,type)||type<1||type>3||
+     !x9wr_get_family(p,n,4,0x103,0x8104,0x10d,0x810e,0x123,type!=2,v4)||
+     !x9wr_get_family(p,n,16,0x108,0x8109,0x112,0x8113,0x124,type!=1,v6))continue;
+  x9w_interface &in=x9w_interfaces[sim][channel];
+  // Require the original real IFUP for this physical lifetime first.
+  if(!in.valid||in.cmd!=0||in.trans_id!=trans||in.facts.epoch!=b.result_epoch||in.serial<=b.if_floor)continue;
+  // MOD is not an EIF cap update. Preserve the independently tracked EIF cap; GET supplies the current MD cap.
+  if(in.facts.v4.mtu_present){v4.mtu=in.facts.v4.mtu;v4.mtu_present=true;}
+  if(in.facts.v6.mtu_present){v6.mtu=in.facts.v6.mtu;v6.mtu_present=true;}
+  in.serial=serial;in.facts.serial=serial;in.facts.v4=v4;in.facts.v6=v6;
+  unsigned mask=0;
+  if(v4.address_present!=b.runtime.v4.address_present||memcmp(v4.address,b.runtime.v4.address,4))mask|=1;
+  if(v6.address_present!=b.runtime.v6.address_present||memcmp(v6.address,b.runtime.v6.address,16))mask|=2;
+  x9w_dirty(b,serial,mask);
+  printf("X9 WDS: DATA_MOD4203 SIM%u call %u ccmni%u scoped facts; GET scheduled, not yet published\n",sim+1,cid,channel);
+ }
+ return true;
+}
+// ---- Symmetric family leases on a physical PDN -------------------------
 static void x9w_selection(const uint8_t *req,unsigned n,uint8_t *apn,uint8_t &apn_n,int &profile){
  x9q_view a=x9q_tlv(req,n,0x14),pr=x9q_tlv(req,n,0x31);
  apn_n=(uint8_t)(a.p&&a.n<=100?a.n:0);if(apn_n)memcpy(apn,a.p,apn_n);
  profile=pr.p&&pr.n==1?pr.p[0]:-1;
 }
-static x9w_bearer *x9w_v6_bearer(const x9w_client &c){
- if(!cbp_mux_ok(c.mux))return nullptr;x9w_bearer &b=x9w_bearers[c.mux-1];
- return b.used&&b.sim_slot==c.sim_slot?&b:nullptr;
+static x9w_bearer *x9w_lease_bearer(unsigned slot){
+ const x9w_client &c=x9w_clients[slot];if(!cbp_mux_ok(c.mux))return nullptr;
+ x9w_bearer &b=x9w_bearers[c.mux-1];return x9w_member(slot,b)?&b:nullptr;
 }
-static bool x9w_v6_valid(unsigned slot){
- const x9w_client &c=x9w_clients[slot];const x9w_bearer *b=x9w_v6_bearer(c);
- return c.v6_active&&b&&x9w_data_ready(*b)&&b->route_lifetime==c.v6_lifetime&&
-  x9wr_ipv6_attach_ready(b->runtime);
+static bool x9w_lease_valid(unsigned slot){
+ const x9w_client &c=x9w_clients[slot];const x9w_bearer *b=x9w_lease_bearer(slot);
+ return c.lease_active&&b&&x9w_data_ready(*b)&&!c.reconfigure&&!(b->refresh_mask&cbp_family_bit(c.family))&&
+  (x9w_families(b->runtime)&cbp_family_bit(c.family));
 }
-static void x9w_v6_status(unsigned slot,bool connected,uint16_t type,uint16_t verbose){
- uint8_t req[7]={};x9q_packet p(req);uint8_t status[2]={(uint8_t)(connected?2:1),0},family=6;
+static void x9w_lease_status(unsigned slot,bool connected,uint16_t type,uint16_t verbose,bool reconfigure){
+ uint8_t req[7]={};x9q_packet p(req);uint8_t status[2]={(uint8_t)(connected?2:1),(uint8_t)reconfigure},family=x9w_clients[slot].family;
  p.tlv(1,status,2);
  if(!connected)x9w_end_reason(p,type==X9W_VERBOSE_CM?X9W_END_CLIENT:X9W_END_UNSPECIFIED,type,verbose);
  p.tlv(0x12,&family,1);p.send(CBQ_PORT_BASE+slot,X9BB_PORT_BASE+1,true,0x22);
 }
-static void x9w_v6_fail(unsigned slot,uint16_t verbose){
+static void x9w_lease_fail(unsigned slot,uint16_t verbose){
  x9w_client &c=x9w_clients[slot];
- if(c.v6_pending&&c.v6_len){x9q_packet p(c.v6_req,14);x9w_end_reason(p,X9W_END_UNSPECIFIED,X9W_VERBOSE_INTERNAL,verbose);
-  p.send(CBQ_PORT_BASE+slot,X9BB_PORT_BASE+1);}
- printf("X9 WDS: v6 Start client %u mux %u failed: internal %u\n",slot,c.mux,verbose);
- c.v6_pending=false;c.v6_len=0;bzero(c.v6_req,sizeof(c.v6_req));
+ if(c.lease_pending&&c.lease_len&&c.client_generation==x9q_clients[slot].generation){
+  x9q_packet p(c.lease_req,14);x9w_end_reason(p,X9W_END_UNSPECIFIED,X9W_VERBOSE_INTERNAL,verbose);p.send(CBQ_PORT_BASE+slot,X9BB_PORT_BASE+1);
+ }
+ printf("X9 WDS: family%u Start client %u mux %u failed: internal %u\n",c.family,slot,c.mux,verbose);
+ c.starting=c.lease_pending=false;c.lease_len=0;bzero(c.lease_req,sizeof(c.lease_req));
 }
-// Returns true once the pending Start has been answered (success or failure).
-static bool x9w_v6_try(unsigned slot){
- x9w_client &c=x9w_clients[slot];x9w_bearer *b=x9w_v6_bearer(c);
+static bool x9w_lease_try(unsigned slot){
+ x9w_client &c=x9w_clients[slot];x9w_bearer *b=x9w_lease_bearer(slot);
  if(!b||!x9w_data_ready(*b))return false;
- uint8_t apn[101];uint8_t apn_n=0;int profile=-1;x9w_selection(c.v6_req,c.v6_len,apn,apn_n,profile);
- if(apn_n!=b->start_apn_n||memcmp(apn,b->start_apn,apn_n)||profile!=b->start_profile){
-  x9w_v6_fail(slot,X9W_INTERNAL_IPV6_DISALLOWED);printf("X9 WDS: v6 Start selection differs from the live call; not attached\n");return true;
+ unsigned bit=cbp_family_bit(c.family);
+ if(b->refresh_mask&bit)return false;
+ if(!(x9w_families(b->runtime)&bit)||(b->reconfigure_mask&bit)||x9w_next_handle>=0xfffffffeu){
+  x9w_lease_fail(slot,c.family==4?X9W_INTERNAL_IPV4_DISALLOWED:X9W_INTERNAL_IPV6_DISALLOWED);return true;
  }
- if(!x9wr_ipv6_attach_ready(b->runtime)||x9w_next_handle>=0xfffffffeu){
-  x9w_v6_fail(slot,X9W_INTERNAL_IPV6_DISALLOWED); // v4-only PDN: host keeps its v4 call
-  return true;
- }
- c.v6_handle=++x9w_next_handle;c.v6_lifetime=b->route_lifetime;c.v6_active=true;c.v6_pending=false;
- uint32_t h=c.v6_handle;uint8_t bytes[4]={(uint8_t)h,(uint8_t)(h>>8),(uint8_t)(h>>16),(uint8_t)(h>>24)};
- x9q_packet p(c.v6_req);p.tlv(1,bytes,4);p.send(CBQ_PORT_BASE+slot,X9BB_PORT_BASE+1);
- c.v6_len=0;bzero(c.v6_req,sizeof(c.v6_req));
- x9w_v6_status(slot,true,0,0);
- printf("X9 WDS: SIM%u v6 client %u attached to call %u mux %u (PDP3, MTU %u, DNS %u, MD address %s)\n",
-  b->sim_slot+1,slot,b->cid,c.mux,b->runtime.v6.mtu,b->runtime.v6.dns_count,
-  b->runtime.v6.address[0]==0xfe&&(b->runtime.v6.address[1]&0xc0)==0x80?"link-local":"global");
+ c.lease_handle=++x9w_next_handle;c.lease_active=true;c.lease_pending=c.starting=false;c.reconfigure=false;
+ b->account_generations[slot]=c.client_generation;b->account_members[slot]=true;
+ bzero(&c.baseline,sizeof(c.baseline));bzero(&c.last_call,sizeof(c.last_call));c.last_call_bytes_valid=false;c.report_next=0;c.last_rat=0;
+ if(!x9w_sync_route(*b,c.mux)){c.lease_active=false;c.lease_pending=true;x9w_lease_fail(slot,X9W_INTERNAL_ERROR);return true;}
+ uint32_t h=c.lease_handle;uint8_t bytes[4]={(uint8_t)h,(uint8_t)(h>>8),(uint8_t)(h>>16),(uint8_t)(h>>24)};
+ x9q_packet p(c.lease_req);p.tlv(1,bytes,4);p.send(CBQ_PORT_BASE+slot,X9BB_PORT_BASE+1);
+ c.lease_len=0;bzero(c.lease_req,sizeof(c.lease_req));x9w_lease_status(slot,true,0,0);
+ printf("X9 WDS: family%u client %u leased call %u mux %u control generation %llu\n",c.family,slot,b->cid,c.mux,b->generation);
  return true;
 }
-static void x9w_v6_poll(){
+static void x9w_lease_poll(){
  uint64_t now=x9q_ms();
- for(unsigned slot=0;slot<CBQ_MAX_CLIENTS;slot++){x9w_client &c=x9w_clients[slot];
-  if(c.v6_active&&!x9w_v6_valid(slot)){
-   const x9w_bearer *b=x9w_v6_bearer(c);
-   uint16_t type=b&&b->end_type?b->end_type:X9W_VERBOSE_INTERNAL,verbose=b&&b->end_type?b->end_verbose:X9W_INTERNAL_ERROR;
-   c.v6_active=false;c.v6_handle=0;c.v6_lifetime=0;x9w_v6_status(slot,false,type,verbose);
-   printf("X9 WDS: v6 client %u mux %u disconnected with its call (type %u reason %u)\n",slot,c.mux,type,verbose);
+ for(unsigned slot=0;slot<CBQ_MAX_CLIENTS;slot++){
+  x9w_client &c=x9w_clients[slot];x9w_bearer *b=x9w_lease_bearer(slot);
+  if(b&&c.lease_active&&c.reconfigure&&now>=c.reconfigure_deadline){
+   c.lease_active=false;c.lease_handle=0;c.reconfigure=false;
+   x9w_lease_status(slot,false,X9W_VERBOSE_INTERNAL,X9W_INTERNAL_ERROR);x9w_sync_route(*b,c.mux);
   }
-  if(!c.v6_pending)continue;
-  if(x9w_v6_try(slot))continue;
-  const x9w_bearer *b=x9w_v6_bearer(c);
-  if(b&&(b->abandoned||b->hold))x9w_v6_fail(slot,X9W_INTERNAL_ERROR); // v4 call failed
-  else if(b)c.v6_deadline=now+30000; // v4 call still being set up
-  else if(now>=c.v6_deadline)x9w_v6_fail(slot,X9W_INTERNAL_ERROR);   // no v4 call on this mux
+  if(!c.lease_pending)continue;
+  if(now>=c.lease_deadline||!b||b->abandoned||b->hold)x9w_lease_fail(slot,X9W_INTERNAL_ERROR);
+  else x9w_lease_try(slot);
  }
 }
 static void x9w_poll(){
@@ -869,6 +959,10 @@ static void x9w_poll(){
   else if(x9q_u16(response+10)==0x4302){
    for(unsigned sim=0;sim<x9_md_sim_count();sim++)if(response[8]&(1u<<sim))
     if(!x9w_interface_event(response,n,sim))x9w_bad_event();
+  }
+  else if(x9q_u16(response+10)==0x4203){
+   for(unsigned sim=0;sim<x9_md_sim_count();sim++)if(response[8]&(1u<<sim))
+    if(!x9w_modified_event(response,n,sim))x9w_bad_event();
   }
   else if(x9q_u16(response+10)==0x4220){
    unsigned app=0,a1=0,a2=0,a3=0;
@@ -891,7 +985,7 @@ static void x9w_poll(){
      x9w_set_end(b,X9W_VERBOSE_INTERNAL,X9W_INTERNAL_NW_TERMINATION); // MD-side end, cause not exported
      x9w_host_expire(b,m+1,x9q_ms()); // bound unsolicited Stop completion too
      b.gone=true;b.owned=false;b.abandoned=true;x9w_disconnect(b,m+1);
-     if(b.pending&&x9q_u16(b.req+3)==0x21&&x9w_live(b)){x9q_packet p(b.req);p.send(CBQ_PORT_BASE+b.slot,X9BB_PORT_BASE+1);}
+     if(b.pending&&x9q_u16(b.req+3)==0x21&&x9w_reply_live(b)){x9q_packet p(b.req);p.send(CBQ_PORT_BASE+b.slot,X9BB_PORT_BASE+1);}
      else x9w_error(b,X9Q_NOT_READY);
      x9w_pending_done(b);if(!b.token)x9w_clear(b,m+1);
      printf("X9 WDS: MD deactivation indication for owned call %u mux %u\n",cid,m+1);
@@ -901,7 +995,7 @@ static void x9w_poll(){
   bzero(response,sizeof(response));
  }
  uint64_t now=x9q_ms();bool online=x9_md_mipc_online();
- x9w_v6_poll();
+ x9w_lease_poll();
  for(unsigned i=0;i<CBP_INTERFACES;i++){x9w_bearer &b=x9w_bearers[i];if(!b.used)continue;
   x9w_host_expire(b,i+1,now);
   if(b.result_epoch!=x9a_epoch)b.hold=true; // retain/drain token, never old-epoch203
@@ -927,20 +1021,22 @@ static void x9w_poll(){
    continue;
   }
   if(b.active&&!b.hold){
-   x9w_client &c=x9w_clients[b.slot];unsigned rat=x9w_rat(c);
+   for(unsigned slot=0;slot<CBQ_MAX_CLIENTS;slot++){if(!x9w_member(slot,b)||!x9w_lease_valid(slot))continue;
+   x9w_client &c=x9w_clients[slot];unsigned rat=x9w_rat(c);
    bool stats_due=c.stats_interval&&c.stats_mask&&now>=c.report_next;
    bool rat_changed=c.bearer_report&&rat&&rat!=c.last_rat;
    if(stats_due||rat_changed){
     uint8_t req[7]={};x9q_packet report(req);x9d_stats stats={};
     if(stats_due&&x9d_account(i+1,b.route_lifetime,stats))x9w_statistics(report,stats,c.baseline,c.stats_mask);
     if(rat_changed){x9w_rat_tlv(report,0x1d,rat);c.last_rat=rat;}
-    report.send(CBQ_PORT_BASE+b.slot,X9BB_PORT_BASE+1,true,1);
+    report.send(CBQ_PORT_BASE+slot,X9BB_PORT_BASE+1,true,1);
     c.report_next=now+uint64_t(c.stats_interval)*1000;
+   }
    }
    if(now>=b.next&& !x9w_check(b))b.next=now+10000;
   }
  }
- x9w_v6_poll();
+ x9w_lease_poll();
  x9w_side_poll();
  x9w_retire_poll();
 }
@@ -952,10 +1048,9 @@ static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
  // d0 is passed to getTLV<HandOverIPv6Prefix>, NOT a request constructor.
  // Never interpret a message with that unrelated ID as a data activation.
  if(id!=1&&id!=0x20&&id!=0x21&&id!=0x22&&id!=0x24&&id!=0x2d&&id!=0x30&&id!=0x37&&id!=0x44&&id!=0x4d&&id!=0x86&&id!=0xa2&&id!=0xaf&&id!=0xb0&&id!=0x5569)return false;
- if(!c.family)c.family=4;x9w_bearer *own=nullptr;
- for(x9w_bearer &b:x9w_bearers)if(b.used&&b.slot==slot&&b.generation==x9q_clients[slot].generation)own=&b;
- // Read-only queries from an attached v6 client see the shared call.
- bool v6=!own&&x9w_v6_valid(slot);x9w_bearer *view=own?own:v6?x9w_v6_bearer(c):nullptr;
+ if(!c.family)c.family=4;
+ x9w_bearer *own=x9w_lease_bearer(slot);
+ x9w_bearer *view=x9w_lease_valid(slot)?own:nullptr;
  unsigned error=0;
  if(id==1){
   x9q_view stats=x9q_tlv(req,n,0x11),bearer=x9q_tlv(req,n,0x15);
@@ -1005,7 +1100,7 @@ static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
   unsigned value=sub.p&&sub.n==1?sub.p[0]:0;
   if(n!=15||!value||value>x9_md_sim_count()||!reason.p||reason.n!=1||reason.p[0]<1||reason.p[0]>3)error=X9Q_ARG;
   else if(!x9ds_data_ready(value-1))error=X9Q_NOT_READY;
-  else if(c.sim_slot!=value-1&&(c.starting||own||c.v6_pending||c.v6_active||x9a_client_busy(slot)))error=X9Q_BUSY;
+  else if(c.sim_slot!=value-1&&(c.starting||own||c.lease_pending||c.lease_active||x9a_client_busy(slot)))error=X9Q_BUSY;
   else{c.sim_slot=(uint8_t)(value-1);x9q_clients[slot].sim_slot=c.sim_slot;
    printf("X9 DDS: WDS 5569 client 0x%x routes confirmed default SIM%u reason %u\n",local,value,reason.p[0]);}
  }else if(id==0xaf){
@@ -1013,13 +1108,13 @@ static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
    * need DDS semantics, so reject them rather than silently selecting SIM1. */
   x9q_view sub=x9q_tlv(req,n,1);unsigned value=sub.p&&sub.n==4?x9q_u32(sub.p):0;
   if(n!=14||!value||value>x9_md_sim_count())error=X9Q_ARG;
-  else if(c.sim_slot!=value-1&&(c.starting||own||c.v6_pending||c.v6_active||x9a_client_busy(slot)))error=X9Q_BUSY;
+  else if(c.sim_slot!=value-1&&(c.starting||own||c.lease_pending||c.lease_active||x9a_client_busy(slot)))error=X9Q_BUSY;
   else{c.sim_slot=(uint8_t)(value-1);x9q_clients[slot].sim_slot=c.sim_slot;printf("X9 DUALSIM: WDS client 0x%x bound to SIM%u (not DDS)\n",local,value);}
  }else if(id==0xb0){
   if(n!=7)error=X9Q_ARG;
   else{x9q_packet p(req);uint8_t sub[4]={(uint8_t)(c.sim_slot+1),0,0,0};p.tlv(0x10,sub,4);p.send(local,port);return true;}
  }else if(id==0xa2||id==0x4d){
-  if(c.starting||own||c.v6_pending||c.v6_active)error=X9Q_BUSY;
+  if(c.starting||own||c.lease_pending||c.lease_active)error=X9Q_BUSY;
   else if(id==0x4d){x9q_view f=x9q_tlv(req,n,1);
    if(!f.p||f.n!=1||n!=11||!cbp_family_bit(f.p[0]))error=X9Q_ARG;else c.family=f.p[0];
   }else{
@@ -1035,34 +1130,29 @@ static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
  }else if(id==0x2d){
   x9q_view mask=x9q_tlv(req,n,0x10);
   if(!mask.p||mask.n!=4||n!=14)error=X9Q_ARG;
-  else if(v6){
-   x9w_bearer &b=*view;x9q_packet p(req);uint8_t type=0;p.tlv(0x11,&type,1);p.tlv(0x14,b.apn,(unsigned)strlen(b.apn));
-   if(!x9wr_serialize_ipv6(b.runtime,p))error=X9Q_NOT_READY;else{p.send(local,port);return true;}
-  }
-  else if(!own||!x9w_data_ready(*own))error=15;
+  else if(!view)error=15;
   else{
-   x9wr_identity current={own->generation,own->result_epoch,own->if_floor,own->sim_slot,own->cid,4,0};
-   x9q_packet p(req);uint8_t type=0;p.tlv(0x11,&type,1);p.tlv(0x14,own->apn,(unsigned)strlen(own->apn));
-   if(own->result_epoch!=x9a_epoch||!x9w_live(*own)||
-      !x9wr_same_identity(own->runtime.identity,current)||!x9wr_serialize_ipv4(own->runtime,p))error=X9Q_NOT_READY;
-   else{p.send(local,port);return true;}
+   x9q_packet p(req);uint8_t type=0;p.tlv(0x11,&type,1);p.tlv(0x14,view->apn,(unsigned)strlen(view->apn));
+   bool encoded=c.family==6?x9wr_serialize_ipv6(view->runtime,p):x9wr_serialize_ipv4(view->runtime,p);
+   if(!encoded)error=X9Q_NOT_READY;else{p.send(local,port);return true;}
   }
  }else if(id==0x21){
   x9q_view h=x9q_tlv(req,n,1);
   if(!h.p||h.n!=4||n!=14)error=X9Q_ARG;
-  else if(!own&&c.v6_active&&x9q_u32(h.p)==c.v6_handle){
-   // Detach only: the MD call belongs to the v4 client.
-   c.v6_active=false;c.v6_handle=0;c.v6_lifetime=0;
-   x9q_packet reply(req);reply.send(local,port);x9w_v6_status(slot,false,X9W_VERBOSE_CM,X9W_CM_CLIENT_END);
-   printf("X9 WDS: v6 client %u mux %u detached by Stop\n",slot,c.mux);return true;
-  }
-  else if(!own||!own->handle||x9q_u32(h.p)!=own->handle)error=9;
+  else if(!own||!c.lease_active||!c.lease_handle||x9q_u32(h.p)!=c.lease_handle)error=9;
   else if(own->pending||own->hold||(own->token&&own->op!=X9W_CHECK))error=X9Q_BUSY;
-  else{own->pending=true;own->reply_deadline=x9q_ms()+60000;own->len=n;memcpy(own->req,req,n);own->abandoned=true;c.starting=true;
+  else{
+   c.lease_active=false;c.lease_handle=0;c.reconfigure=false;
+   if(x9w_refs(*own)){
+    x9w_sync_route(*own,c.mux);x9q_packet reply(req);reply.send(local,port);
+    x9w_lease_status(slot,false,X9W_VERBOSE_CM,X9W_CM_CLIENT_END);
+    printf("X9 WDS: family%u Stop mux %u retained physical call %u for sibling lease\n",c.family,c.mux,own->cid);return true;
+   }
+   own->slot=slot;own->host_generation=x9q_clients[slot].generation;
+   own->pending=true;own->reply_deadline=x9q_ms()+60000;own->len=n;memcpy(own->req,req,n);own->abandoned=true;c.starting=true;
    x9w_set_end(*own,X9W_VERBOSE_CM,X9W_CM_CLIENT_END);
-   // Established before GET drain/DEACT submission: no-token release denial
-   // cannot leave an accepted Stop waiting forever or extend its host budget.
-   if(own->token){x9w_disconnect(*own,c.mux);return true;} // drain periodic GET, then real DEACT
+   x9w_lease_status(slot,false,X9W_VERBOSE_CM,X9W_CM_CLIENT_END);
+   if(own->token){x9w_disconnect(*own,c.mux);return true;}
    if(!x9w_deactivate(*own,c.mux))x9w_error(*own,X9Q_NOT_READY);return true;
   }
  }else{
@@ -1071,42 +1161,40 @@ static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
   x9q_view start_apn=x9q_tlv(req,n,0x14);
   printf("X9 WDS: Start msg 0x%04x SIM%u mux %u family %u APN length %u native-ready %u session-ready %u\n",
    id,c.sim_slot+1,c.mux,family,start_apn.n,x9d_ready(),x9w_session_ready);
-  if(!cbp_mux_ok(c.mux))error=X9Q_ARG;
-  else if(family==6){
-   // Attach to the dual-stack call on this mux, now or once the v4 client's
-   // call is verified. A v4-only PDN answers CALL_FAILED 210 IPV6_DISALLOWED
-   // so the host keeps its v4 call. No MD request is sent for the v6 half.
-   if(c.starting||own||c.v6_pending||c.v6_active)error=X9Q_BUSY;
-   else if(n>sizeof(c.v6_req))error=X9Q_ARG;
-   else{
-    c.v6_pending=true;c.v6_len=n;memcpy(c.v6_req,req,n);c.v6_deadline=x9q_ms()+30000;
-    if(!x9w_v6_try(slot))printf("X9 WDS: v6 Start client %u mux %u waiting for the v4 call\n",slot,c.mux);
-    return true;
-   }
-  }
+  if(!cbp_mux_ok(c.mux)||n>sizeof(c.lease_req))error=X9Q_ARG;
   else if(!x9ds_data_ready(c.sim_slot))error=X9Q_NOT_READY;
-  else if(c.starting||own||x9w_bearers[c.mux-1].used||x9w_retirements[c.mux-1].pending||
+  else if(c.starting||own||x9w_retirements[c.mux-1].pending||
           x9w_retiring_client(slot,x9q_clients[slot].generation)||x9a_busy())error=X9Q_BUSY;
   else if((error=x9w_args(req,n,family))!=0){}
   else if((error=x9p_start(req,n,c.sim_slot,family,selected_apn))!=0){}
   else if(!x9d_ready()||!x9_md_mipc_online()||!x9w_session_ready)error=X9Q_NOT_READY;
   else{
-   x9w_bearer &b=x9w_bearers[c.mux-1];bzero(&b,sizeof(b));b.used=b.pending=true;
-   b.slot=slot;b.sim_slot=c.sim_slot;b.generation=x9q_clients[slot].generation;b.result_epoch=x9a_epoch;b.len=n;memcpy(b.req,req,n);
-   b.reply_deadline=x9q_ms()+200000; // total host bound includes CONFIG/RETRY; stages never extend it
-   x9w_selection(req,n,b.start_apn,b.start_apn_n,b.start_profile);
-   x9q_view apn=x9q_tlv(req,n,0x14);
-   if(x9q_tlv(req,n,0x31).p)memcpy(b.apn,selected_apn,sizeof(b.apn));
-   else if(apn.n)memcpy(b.apn,apn.p,apn.n);c.starting=true;
-   bzero(selected_apn,sizeof(selected_apn));
-   if(x9w_reset_epoch[b.sim_slot]==b.result_epoch||
-      (x9w_retries[b.sim_slot].valid&&x9w_retries[b.sim_slot].epoch==b.result_epoch)){
-    const x9w_retry_policy &r=x9w_retries[b.sim_slot];
-    b.next=r.valid&&r.epoch==b.result_epoch?(x9w_retry_same(b)?r.after:r.floor):0;
-    b.op=X9W_RETRY_WAIT;
-    printf("X9 WDS: SIM%u retry Start retained under original host deadline; no immediate ACT/BUSY loop\n",b.sim_slot+1);
-   }else b.op=X9W_DISC;
-   x9w_start_next(b,c.mux);return true;
+   x9w_bearer &b=x9w_bearers[c.mux-1];
+   if(!x9q_tlv(req,n,0x31).p&&start_apn.n)memcpy(selected_apn,start_apn.p,start_apn.n);
+   uint8_t apn[101]={},apn_n=0;int profile=-1;x9w_selection(req,n,apn,apn_n,profile);
+   if(b.used&&(b.sim_slot!=c.sim_slot||b.result_epoch!=x9a_epoch||b.abandoned||b.hold||
+      apn_n!=b.start_apn_n||memcmp(apn,b.start_apn,apn_n)||profile!=b.start_profile||strcasecmp(selected_apn,b.apn)))error=X9Q_BUSY;
+   else if(!b.used&&x9w_next_generation==~0ULL)error=X9Q_INTERNAL;
+   else{
+    bool fresh=!b.used;
+    if(fresh){
+     bzero(&b,sizeof(b));b.used=true;b.slot=CBQ_MAX_CLIENTS;b.sim_slot=c.sim_slot;
+     b.generation=++x9w_next_generation;b.result_epoch=x9a_epoch;b.setup_deadline=x9q_ms()+200000;
+     memcpy(b.apn,selected_apn,sizeof(b.apn));memcpy(b.start_apn,apn,apn_n);b.start_apn_n=apn_n;b.start_profile=profile;
+    }
+    c.family=(uint8_t)family;c.lease_pending=c.starting=true;c.lease_len=n;memcpy(c.lease_req,req,n);
+    c.client_generation=x9q_clients[slot].generation;c.lease_generation=b.generation;
+    c.lease_deadline=b.active?x9q_ms()+30000:b.setup_deadline;
+    bzero(selected_apn,sizeof(selected_apn));
+    if(!fresh){x9w_lease_try(slot);return true;}
+    if(x9w_reset_epoch[b.sim_slot]==b.result_epoch||
+       (x9w_retries[b.sim_slot].valid&&x9w_retries[b.sim_slot].epoch==b.result_epoch)){
+     const x9w_retry_policy &r=x9w_retries[b.sim_slot];
+     b.next=r.valid&&r.epoch==b.result_epoch?(x9w_retry_same(b)?r.after:r.floor):0;b.op=X9W_RETRY_WAIT;
+     printf("X9 WDS: SIM%u retry Start retained under original host deadline; no immediate ACT/BUSY loop\n",b.sim_slot+1);
+    }else b.op=X9W_DISC;
+    x9w_start_next(b,c.mux);return true;
+   }
   }
   bzero(selected_apn,sizeof(selected_apn));
  }

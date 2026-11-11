@@ -304,7 +304,7 @@ static void x9mi_rx(const uint8_t *p,unsigned n){
    if(i==X9_MI_SLOTS)printf("X9 MIPC: CNF id 0x%04x txn %u has no owner, dropped\n",id,tx);
   }else if(kind==1){
    x9mm_rx(x9_mi_stream,need,id,tx);
-   if((id==0x4202||id==0x4302||id==0x4220)&&(x9_mi_stream[8]&((1u<<x9_md_sim_count())-1))){
+   if((id==0x4202||id==0x4203||id==0x4302||id==0x4220)&&(x9_mi_stream[8]&((1u<<x9_md_sim_count())-1))){
     if(x9_mi_count==X9_MI_EVENTS){x9mi_poison("event queue overflow");break;}
     unsigned at=(x9_mi_head+x9_mi_count++)%X9_MI_EVENTS;
     x9_mi_events[at].len=need;memcpy(x9_mi_events[at].frame,x9_mi_stream,need);

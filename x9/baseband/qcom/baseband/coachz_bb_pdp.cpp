@@ -30,6 +30,7 @@ extern "C" void coachz_modem_data_receiver_counted(int (*)(uint32_t, const uint8
 extern "C" void coachz_modem_data_receiver(void (*)(uint32_t, const uint8_t *, uint32_t, uint32_t));
 #endif
 #if COACHZ_NATIVE_DPMAIF
+extern "C" int coachz_modem_data_send_epoch(uint32_t,const uint8_t *,uint32_t,uint64_t);
 extern "C" uint32_t coachz_modem_data_state(uint32_t, uint32_t *, uint64_t *);
 extern "C" uint32_t coachz_modem_data_room(uint32_t);
 static const unsigned BB_PDP_MAX_MTU = 3072;
@@ -42,7 +43,7 @@ struct bb_pdp_if {
   ifnet_t ifp;
   IOLock *drain; // orders dequeue+send between start thread and bridge thread
   mbuf_t head, tail; // EBUSY holdover only; the queue itself is the ifclassq
-  uint32_t queued, families, blocked;
+  uint32_t queued, families, blocked, host_mtu;
   uint64_t tx, rx, dropped, busy, requested;
   uint64_t epoch;
 };
@@ -86,8 +87,27 @@ static errno_t bb_pdp_ioctl(ifnet_t ifp, unsigned long cmd, void *data)
   switch (cmd) {
     case SIOCSIFMTU: {
       const int mtu = static_cast<ifreq *>(data)->ifr_mtu;
+#if COACHZ_NATIVE_DPMAIF
+      // Host policy owns if_mtu. Only the normal ioctl path changes it, so
+      // XNU's caller performs route/nd6/classq/KEV updates. The MD cap is an
+      // independent, epoch-scoped TX/RX gate (never a poll-time assignment).
+      uint32_t cap=0;uint64_t epoch=0;
+      uint32_t families=coachz_modem_data_state(ifnet_unit(ifp)+1,&cap,&epoch);
+      if(mtu<((families&2)?1280:68)||mtu>static_cast<int>(BB_PDP_MAX_MTU))return EINVAL;
+      uint32_t effective=families&&cap&&cap<static_cast<uint32_t>(mtu)?cap:static_cast<uint32_t>(mtu);
+      if((families&2)&&effective<1280)return EINVAL; // cannot represent this dual-family link MTU
+      auto *p=static_cast<bb_pdp_if *>(ifnet_softc(ifp));
+      if(!p||!p->drain)return ENXIO;
+      IOLockLock(p->drain);
+      p->host_mtu=static_cast<uint32_t>(mtu); // preserve intent, never poll-restore to the MD default
+      errno_t error=ifnet_set_mtu(ifp,effective);
+      IOLockUnlock(p->drain);
+      return error; // XNU's surrounding ioctl observes the effective change
+
+#else
       if (mtu < 1280 || mtu > static_cast<int>(BB_PDP_MAX_MTU)) return EINVAL;
       return ifnet_set_mtu(ifp, static_cast<uint32_t>(mtu));
+#endif
     }
     case SIOCSIFFLAGS: case SIOCSIFADDR: case SIOCSIFDSTADDR: return 0;
     default:
@@ -185,7 +205,13 @@ static void bb_pdp_drain(bb_pdp_if *p)
       const uint32_t n = static_cast<uint32_t>(mbuf_pkthdr_len(m));
       int error = ENETDOWN;
       if (n && n <= sizeof(ip) && n <= ifnet_mtu(p->ifp) && !mbuf_copydata(m, 0, n, ip) &&
-          (families & cbp_family_bit(ip[0] >> 4))) error = coachz_modem_data_send(i + 1u, ip, n);
+          (families & cbp_family_bit(ip[0] >> 4))) {
+#if COACHZ_NATIVE_DPMAIF
+        error = coachz_modem_data_send_epoch(i + 1u, ip, n,epoch);
+#else
+        error = coachz_modem_data_send(i + 1u, ip, n);
+#endif
+      }
       if (error == EBUSY) {
         // Keep order: this packet and the rest of the chain go back in front.
         mbuf_setnextpkt(m, next);
@@ -295,8 +321,8 @@ static void bb_pdp_poll()
     uint32_t mtu = 0;
     // Never acquire the native route lock while holding bb_lock/pdp_lock.
     active[i] &= coachz_modem_data_state(i + 1u, &mtu, &epoch);
-    if (active[i] && mtu >= 68 && mtu <= BB_PDP_MAX_MTU && ifnet_mtu(p->ifp) != mtu)
-      ifnet_set_mtu(p->ifp, mtu);
+    // No ifnet_set_mtu here: poll must not overwrite carrier/host policy or
+    // bypass the surrounding XNU ioctl notifications. MD caps gate DPMAIF.
 #endif
     // Serialize with bb_pdp_drain: no chain taken under the old epoch may be
     // sent after the route changes.
