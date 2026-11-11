@@ -62,7 +62,7 @@ struct x9d_tx { uint64_t epoch,lifetime; uint16_t size; uint8_t mux; uint8_t ip[
 // TX retirement: an already-associated RX partial can still finish/drop.
 struct x9d_rx_account { uint64_t lifetime,packets,bytes,errors,overflows,dropped; };
 struct x9d_rx {
-    unsigned rd, bytes; uint8_t seq, channel; bool message, normal, drop;
+    unsigned rd, bytes; uint8_t seq, channel; bool message, normal, drop, lro;
     uint64_t seq_wait, epoch,lifetime; unsigned mux;
     uint8_t ip[X9D_TX_SIZE];
 };
@@ -72,7 +72,7 @@ struct x9d_state {
     x9d_dma drb, txpool, pit[2], bat[2], pool[2][X9D_POOL_CHUNKS];
     x9d_dma drbq[3]; // TXQ1..3: started like dpmaif_txqs_start (DPMAIF_TXQ_NUM 4), never fed
     bool posted[2][X9D_BAT];
-    uint64_t lro_split;
+    uint64_t lro_split, status_errors; unsigned status_error_reports;
     bool used_channel[20]; // bound/retiring routes only; released when retirement finishes
     unsigned bat_wr[2], tx_wr, tx_rd, head, count;
     unsigned bat_hint, bat_target, bat_credit[2], bat_backing[2], bat_owned[2];
@@ -716,6 +716,29 @@ static bool x9d_tx_poll() {
 // end of a message, and before each further normal buffer of an LRO packet list.
 static void x9d_rx_deliver(unsigned q) {
     x9d_rx &r = x9d.rx[q];
+    if (r.lro && r.bytes >= 20) {
+        // Vendor dpmaif_rxq_lro_end merges the list and leaves the FIRST header
+        // untouched when all members merge, i.e. HW wrote the aggregate length there;
+        // dpmaif_lro_update_gro_info rewrites tot_len/payload_len otherwise. We deliver
+        // members separately, so give each header its own length (IPv4: recompute the
+        // header checksum). TCP/UDP checksums are left alone and reported below.
+        uint8_t *ip = r.ip; unsigned before = 0, v = ip[0] >> 4;
+        if (v == 4 && (ip[0] & 15) >= 5 && (ip[0] & 15) * 4u <= r.bytes) {
+            before = (unsigned)ip[2] << 8 | ip[3];
+            if (before != r.bytes) {
+                ip[2] = (uint8_t)(r.bytes >> 8); ip[3] = (uint8_t)r.bytes; ip[10] = ip[11] = 0;
+                unsigned sum = x9d_sum(ip, (ip[0] & 15) * 4u);
+                while (sum >> 16) sum = (sum & 65535u) + (sum >> 16);
+                sum = ~sum & 65535u; ip[10] = (uint8_t)(sum >> 8); ip[11] = (uint8_t)sum;
+            }
+        } else if (v == 6 && r.bytes >= 40) {
+            before = ((unsigned)ip[4] << 8 | ip[5]) + 40;
+            if (before != r.bytes) { ip[4] = (uint8_t)((r.bytes - 40) >> 8); ip[5] = (uint8_t)(r.bytes - 40); }
+        }
+        static unsigned shown;
+        if (shown < 8) { shown++;
+            printf("X9 DPMAIF: RX LRO member v%u bytes %u header-len %u -> %u l4 %s\n", v, r.bytes, before, r.bytes, x9d_l4_sanity(ip, r.bytes)); }
+    }
         x9d.rx_wire_bytes += r.bytes; // completed copies, including drops; NOT successful delivery
         unsigned mux = 0; int (*receiver)(uint32_t, const uint8_t *, uint32_t, uint32_t, uint64_t);
         IOLockLock(x9d.lock);
@@ -744,12 +767,28 @@ static void x9d_rx_deliver(unsigned q) {
         else x9d.rx_dropped++;
         bzero(r.ip, r.bytes); r.bytes = 0;
 }
+// Vendor (ccci_dpmaif_com.c dpmaif_rxq_handle_msg_pit / handle_normal_pit) never stops
+// the queue for these shapes: a MSG PIT just resets the per-packet state, a normal PIT
+// uses the last channel, a fragment ignores header_offset and the BAT (not the PIT
+// address) is authoritative. Only the BID ownership check stays fatal (memory safety).
+static void x9d_rx_note(const char *what, unsigned q, const uint32_t *d) {
+    static unsigned n;
+    if (n < 16) { n++; printf("X9 DPMAIF: RX %s q %u pit %08x %08x %08x %08x; vendor-tolerant\n", what, q, d[0], d[1], d[2], d[3]); }
+}
+static void x9d_rx_release(unsigned kind, unsigned bid) {
+    // A BID consumed by hardware but not copied: return it to the replenisher so the
+    // contiguous BAT refill (which stops at any still-posted BID) is not blocked.
+    x9d.posted[kind][bid] = false; if (x9d.bat_owned[kind]) x9d.bat_owned[kind]--;
+}
 static bool x9d_rx_item(unsigned q, const uint32_t *d) {
     x9d_rx &r = x9d.rx[q]; uint32_t a = d[0];
     if (a & 1) { // MSG PIT, channel bits16..23, drop bit31
-        if (r.message) { x9d_fail("interleaved RX message"); return false; }
-        if (!(a & 2)) { x9d_fail("message PIT without continuation"); return false; }
-        r.message = true; r.normal = false; r.bytes = 0; r.channel = (uint8_t)(a >> 16);
+        if (r.message) {
+            x9d_rx_note("message PIT before previous packet ended", q, d);
+            if (r.bytes) { x9d.rx_dropped++; bzero(r.ip, r.bytes); r.bytes = 0; }
+        }
+        if (!(a & 2)) x9d_rx_note("message PIT without continuation", q, d);
+        r.message = true; r.normal = false; r.lro = false; r.bytes = 0; r.channel = (uint8_t)(a >> 16);
         r.mux = 0; r.epoch = 0; r.lifetime = 0;
         IOLockLock(x9d.lock);
         for (unsigned i = 0; i < CBP_INTERFACES; i++) if (x9d.route[i].bound && x9d.route[i].channel == r.channel) {
@@ -758,9 +797,13 @@ static bool x9d_rx_item(unsigned q, const uint32_t *d) {
         IOLockUnlock(x9d.lock);
         r.drop = (a & (1u << 31)) || (a & (1u << 4)); return true;
     }
-    if (!r.message) { x9d_fail("RX payload without message"); return false; }
     unsigned kind = (a >> 2) & 1, bid = ((a >> 3) & 8191) | (((d[3] >> 8) & 7) << 13);
     unsigned len = a >> 16, hoff = ((d[3] >> 19) & 31) * 4;
+    if (!r.message) {
+        x9d_rx_note("payload without message (dropped)", q, d);
+        if (bid < X9D_BAT && x9d.posted[kind][bid]) x9d_rx_release(kind, bid);
+        x9d.rx_dropped++; return true;
+    }
     if (bid >= X9D_BAT || !x9d.posted[kind][bid]) {
         // Memory safety: never copy from a buffer this CPU has not posted. Print the
         // exact PIT so a BID bookkeeping mismatch can be told apart (233 quarantined here).
@@ -779,7 +822,7 @@ static bool x9d_rx_item(unsigned q, const uint32_t *d) {
             printf("X9 DPMAIF: RX LRO list q %u bid %u len %u hoff %u prev %u pit %08x %08x; delivering separately\n",
                 q, bid, len, hoff, r.bytes, d[0], d[3]); }
         x9d.lro_split++;
-        x9d_rx_deliver(q); r.normal = false;
+        r.lro = true; x9d_rx_deliver(q); r.normal = false;
     } else if (kind && !r.normal) {
         static unsigned frg;
         if (frg < 8) { frg++;
@@ -791,12 +834,16 @@ static bool x9d_rx_item(unsigned q, const uint32_t *d) {
     uint64_t addr = d[1] | ((uint64_t)d[2] << 32), base = buffer.pa + off;
     // Buffer address is observed in PIT but vendor treats BAT as authoritative.
     // Reject out-of-buffer addresses; do not follow arbitrary physical pointers.
-    if (!len || len > stride || hoff > stride - len || addr < base || addr >= base + stride) {
-        x9d_fail("RX DMA address/length"); return false;
-    }
-    if (kind && hoff) { x9d_fail("fragment header offset"); return false; }
+    if (addr < base || addr >= base + stride) x9d_rx_note("PIT address outside BAT buffer (BAT authoritative)", q, d);
+    if (kind && hoff) { x9d_rx_note("fragment header_offset ignored", q, d); hoff = 0; }
     unsigned bytes = len + (kind ? 0 : hoff);
-    if (bytes > sizeof(r.ip) - r.bytes) { x9d_fail("RX packet exceeds bounded MTU"); return false; }
+    if (!len || bytes > stride || bytes > sizeof(r.ip) - r.bytes) {
+        // Never read past our buffer or r.ip: drop this packet, keep the queue running.
+        x9d_rx_note("length beyond buffer/bound (packet dropped)", q, d);
+        x9d_rx_release(kind, bid); r.drop = true;
+        if (!(a & 2)) { x9d_rx_deliver(q); r.message = r.normal = false; }
+        return true;
+    }
     x9d_sync(buffer, off, stride);
     memcpy(r.ip + r.bytes, buffer.va + off, bytes); r.bytes += bytes; r.normal = true;
     x9d.posted[kind][bid] = false; // CPU copy complete; global BAT replenisher owns reuse
@@ -823,7 +870,15 @@ static bool x9d_rx_poll(unsigned q) {
             // Producer index can become visible before DMA data. Bounded defer,
             // not a busy loop and not acceptance of a stale/poison descriptor.
             if (!r.seq_wait) { r.seq_wait = x9d_ms(); x9d_rx_probe(q, raw, "sequence-wait", true); }
-            else if (x9d_ms() - r.seq_wait >= 20) { x9d_rx_probe(q, raw, "sequence-timeout", true); x9d_fail("RX sequence deadline"); }
+            else if (x9d_ms() - r.seq_wait >= 20) {
+                // Vendor dpmaif_rxq_check_pit_seq: log, keep pit_rd_idx, retry on the next
+                // pass (never stops the queue). Report once per second while waiting.
+                static uint64_t last_ms;
+                if (x9d_ms() - last_ms >= 1000) { last_ms = x9d_ms();
+                    x9d_rx_probe(q, raw, "sequence-wait-long", true);
+                    printf("X9 DPMAIF: RX q %u pit_seq expected %u got %u at rd %u for %llu ms; waiting (vendor behaviour)\n",
+                        q, r.seq, item[3] & 255, r.rd, x9d_ms() - r.seq_wait); }
+            }
             break;
         }
         r.seq_wait = 0;
@@ -931,9 +986,15 @@ static void x9d_poll() {
     // EMPTY / MD-not-ready / power-not-ready are flow control, not DMA length
     // faults (native drv3_isr masks PWR_NOTRDY until subsequent TX_DONE).
     // Do not ACK unknown/error bits or reset the modem to hide the evidence.
+    // Vendor drv3_isr0/1 + ccci_irq_rx_lenerr_handler only LOG these (SKB/MTU length,
+    // BAT/PIT count, UL length errors) and ack them; nothing in L2 status stops the
+    // queues. Count/log them here and let the normal ack path below clear them.
     if ((ul & (X9D_UL_ERROR | ~(15u | X9D_UL_FLOW | X9D_UL_ERROR))) ||
         (checked_dl & (X9D_DL_ERROR | ~(X9D_DL_DONE | X9D_DL_EMPTY | X9D_DL_ERROR)))) {
-        x9d_fail("hardware interrupt error/unknown status"); return;
+        x9d.status_errors++;
+        if (x9d.status_error_reports < 16) { x9d.status_error_reports++;
+            printf("X9 DPMAIF: L2 status error/unknown UL 0x%x DL 0x%x (checked 0x%x); logged and acked like vendor ISR, #%llu\n",
+                ul, dl, checked_dl, x9d.status_errors); }
     }
     if ((ul & X9D_UL_FLOW) || (dl & X9D_DL_EMPTY)) x9d.flow_events++;
     if ((ul != x9d.last_ul || dl != x9d.last_dl) && (ul || dl) && x9d.irq_reports < 8) {
@@ -972,6 +1033,7 @@ static void x9d_report(unsigned second) {
     printf("X9 DPMAIF: %u s mode %u ready %u quarantined %u published %u TX submitted %llu completed %llu RX delivered %llu dropped %llu queued %u rejected %llu flow %llu phase %s\n",
         second, x9d.mode, x9d.ready, x9d.failed, x9d.published, x9d.tx_packets, x9d.tx_done, x9d.rx_packets, x9d.rx_dropped, queued, rejected, x9d.flow_events,
         x9d.phase ? x9d.phase : "prepare");
+    printf("X9 DPMAIF: RX LRO members split %llu, L2 status errors %llu (logged/acked, not fatal)\n", x9d.lro_split, x9d.status_errors);
     uint64_t counts[9]; for (unsigned i = 0; i < 9; i++) counts[i] = __atomic_load_n(&x9d.tx_admit[i], __ATOMIC_RELAXED);
     printf("X9 CELL TX: mailbox accept %llu argument %llu bad-ip %llu offline %llu unbound %llu epoch %llu family %llu mtu %llu full %llu; completion-not-air\n",
         counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], counts[6], counts[7], counts[8]);
