@@ -13,6 +13,7 @@
 #include <sys/errno.h>
 #include "../../../bsd/dev/x9_usb_device.h"
 #include "X9USBRequestOwner.inc"
+#include "X9USBRequestBridge.inc"
 extern "C" int sweet_early_is_x9(void);
 extern "C" int sweet_x9_arg(const char *, int);
 static IOReturn usb_return(int);

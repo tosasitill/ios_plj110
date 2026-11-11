@@ -396,7 +396,8 @@ python3 -I x9/usb/native_bridge.py \
    虚表。iso／reusable flags必须透传，非零拒绝；requested超过32-bit也明确拒绝。
    owner额外retain descriptor；非零长度执行prepare，失败只撤自己的retain，
    原始Family producer仍处理gated reject，不发completion。
-2. accept成功后先完成原始gated-submit的成功返回，再允许worker drain。
+2. 最终native callback必须与原始gated-submit串行；使用下述USB-NATIVE9 bridge时，
+   worker只调用不释放request的queue hook，真实callback交给同一workloop gate。
    `beginChunk()`向worker的已pin bounce填USB IN数据，最大4096B；
    `publishChunk()`成功后立即发布HWO，不插入其他owner调用。
    Staged未发布可以`rejectUnpublished()`；发布后只能走真实STOP／retirement。
@@ -424,6 +425,49 @@ abort partial计数、EP0 native data stage、Family completion双向ABI及模�
 仍未接通；当前ECM/private transport路径没有调用此组件，行为不变。
 仅生产`SweetX9USB.o`本地arm64交叉编译通过，未运行测试套件、kernel链接、boot构建
 或实机DMA／Trust／Pair／TLS验收，不能据此启用原生栈或交付Finder boot。
+
+### USB-NATIVE9：原生 gate／唯一 worker／完成事件源交接
+
+`X9USBRequestBridge.h/.inc`与生产`SweetX9USB.o`一起编译，C侧唯一worker已调用
+`x9_usb_native_worker_poll()`。**当前registry为空，没有install调用者、MTU3 native
+endpoint backend或Family completion adapter**；mode0仍是EP0日志worker，mode1/2
+仍走原ECM/private路径。`native_apple_stack=0`、原生service与USB identity未改变。
+这不是“原生栈已经能加载”的开关。
+
+未来必须在current-layout原生controller workloop、逐endpoint backend及ABI全部资格化
+后才能`install()`，且真实backend的`validateEndpoint/poll`两项均必须提供；不填成功stub。
+registry持有bridge/workloop/event source到本次boot结束，backend/context与callback
+context也必须保证该寿命。opaque request/context不被猜成OSObject，安装不启用native mode。
+
+窄流实现如下：
+
+1. 原生gate内`submit()`复制输入到16个有界exchange entries，并独立retain descriptor。
+   worker未绑定则立即NotReady；同request/descriptor重用拒绝；不把调用方stack指针
+   留给worker。**2秒timeout只可撤未claim的Queued**，锁内撤销后才能返回Timeout。
+2. worker先Claimed，再在exchange锁外validate endpoint／owner.accept／prepare。
+   一旦Claimed，调用方无deadline地等真实accept/reject，不能将已接受request误当reject
+   返回错误交给Family释放。prepare长期阻塞会阻塞worker／等待方：本轮没有可取消prepare
+   或watchdog恢复合同，不用返回模糊timeout掩盖这个约束。
+3. admission result与completion result分字段。调用方读到真实success才ack；scheduler
+   经`workerNext()`按serial取一次acknowledged request，再交真实MTU3 backend执行
+   begin／publish／STOP／retire。ticket和descriptor保留到最终完成，不能复用accepted槽。
+4. worker完成hook只记录CompletionQueued并signal事件源，不同步进入原生gate。
+   `checkForWork()`在**同一IOWorkLoop gate**内detach有界batch，再执行真正Family adapter；
+   descriptor的exchange retain延续到该callback返回之后，避免owner队列hook返回就释放
+   最后内存引用。回调新提交能再次等worker，因为worker并未等待原生callback；递归
+   completion drain拒绝，当前Delivering槽在callback结束前不可复用。
+5. complete失败被latched并可由`workerFailure()`读到，原请求仍隔离／保留；bus-on不自动
+   清理quarantine或reopen。跨代、重复completion及非唯一worker调用不会被算作正常完成。
+
+同20H392原件新资格证据：`submit_normal`在`5cf10dc`成功直接branch到`5cf135c`，
+之后只有状态／栈／寄存器返回尾声，**没有再次解引用request**。`recover_contract.py`
+现在检查该branch及全部epilogue指令并记录`accepted_return`。这仅证明这个普通producer，
+不是所有上层caller／native gate字段／completion receiver都已资格化；仍不可加载旧vtable。
+
+**尚缺**：installer与真正native controller、endpoint FIFO/QMU backend、原生abort gate
+命令、在bus/reset/fault之前完成native quiesce及generation映射、descriptor/layout/
+Family callback adapter和bootstrap。当前poll hook不能代替这些硬件／生命周期合同。
+只完成两份生产对象交叉编译与固定原件静态资格，无kernel link、新boot或设备请求。
 
 ### 真实主机配对入口（依赖原生内核路由）
 

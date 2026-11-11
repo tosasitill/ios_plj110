@@ -820,6 +820,12 @@ static void worker(void *arg, wait_result_t why)
         bus_poll(); /* completes even if the hardware was isolated */
         lck_mtx_lock(&usb_lock); unsigned off = st.reserved & X9_USB_BUS_FORCED_OFF; lck_mtx_unlock(&usb_lock);
         if (!failed && !off) poll();
+        lck_mtx_lock(&usb_lock);
+        unsigned native_available = st.native_apple_stack && !failed && !off &&
+            st.state >= X9_USB_READY && st.state != X9_USB_FAULT;
+        lck_mtx_unlock(&usb_lock);
+        uint64_t now_ns; absolutetime_to_nanoseconds(mach_absolute_time(), &now_ns);
+        x9_usb_native_worker_poll(native_available, now_ns);
         uint64_t deadline; clock_interval_to_deadline(1,NSEC_PER_MSEC,&deadline);
         (void)assert_wait_deadline(&channel,THREAD_UNINT,deadline); thread_block(THREAD_CONTINUE_NULL);
     }

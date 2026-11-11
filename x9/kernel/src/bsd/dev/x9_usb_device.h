@@ -65,6 +65,10 @@ int x9_usb_receive(uint64_t, uint32_t, void *, uint32_t *);
 int x9_usb_send_tracked(uint64_t, uint32_t, const void *, uint32_t, uint64_t *);
 int x9_usb_get_tx_result(uint64_t, uint32_t, uint64_t, unsigned, struct x9_usb_tx_result *);
 int x9_usb_dma_alloc(void **, uint64_t *);
+/* Sole device worker only. Registry empty by default; no native backend is
+ * installed today. available requires native_apple_stack AND a live bus.
+ * Does not enable native mode, change identity or accept a user callback. */
+void x9_usb_native_worker_poll(unsigned available, uint64_t now_ns);
 /* Kernel-only, synchronous worker barrier. Cycle delay is 0..1000 ms.
  * Timeout is ambiguous: never replay. No native-family identity is implied. */
 int x9_usb_bus_command(unsigned, uint32_t);

@@ -16,7 +16,9 @@ public:
                                 Delivering, Quarantined };
     /* Ordinary requests only. The eventual ABI-qualified Family adapter owns
      * nativeRequest and calls Family completion (including release/free).
-     * This owner holds an EXTRA descriptor retain through that callback.
+     * This owner holds an EXTRA descriptor retain through this hook. A
+     * nonblocking deferred hook must have its OWN retain and retain/pin the
+     * request/context until the actual native callback (as RequestBridge does).
      * Never cast nativeRequest to OSObject. Iso payloads are frame pointers,
      * not byte counts; flag31/reusable requests are not supported here.
      */
@@ -51,7 +53,9 @@ public:
      * only; an unadapted stock descriptor vptr must NEVER reach this API.
      * Success: completion obligation
      * transfers here, but callbacks only run in explicit drainCompletions().
-     * Caller must finish returning gated-submit success before that drain.
+     * Final native callback must serialize after the submitting gate action.
+     * A deferred bridge queue hook may run earlier: it cannot free request,
+     * and the same workloop gate serializes the actual native callback later.
      */
     IOReturn accept(const Input &, Ticket *);
     /* Prepare one bounce chunk BEFORE QMU publication. Caller keeps its pinned
