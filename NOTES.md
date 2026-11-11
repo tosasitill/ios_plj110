@@ -1375,7 +1375,16 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **不能称为全部USB完成**:本轮暂无枚举/DMA/ue0 ping/bulk回环实机结果,live EMI/MPU允许普通XNU DMA页也未证明。`native_apple_stack=0`,没有冒充IOUSBDeviceController或AppleUSBDeviceMux;原始configd USBDeviceConfiguration/lockdownd、Finder/iTunes Trust/配对/照片同步仍缺20H392 controller adapter及kext构建接入。USB3 XS-PHY/retimer、charger Type-C role与原生xHCI也未完成。参考文章chip/board/security-domain/fsid/锁状态条件要到原生栈接通后才验证,不先改身份/配对状态制造成功。
 - **下一步/验收**:先在用户手动启动的单一候选核对`CAP_EPINFO/TXFIFO/RXFIFO/MISC`→config1/alt1→真实QMU OUT/IN→ue0 ping,再用iOS `usbctl --echo`+host单次echo证明host→iOS→host字节相同。保留EP0日志,无需重建Metal插件/mailbox。接口/回退/构建说明在`x9/usb/README.md`;不要求用户现在连续刷试探镜像。
 
-## 蜂窝当前交接(CELL150-URSP,2026-11-11): 206中MOBILE_DATA已开但仍无下行；cell150按RIL逐字段构造ACT(含URSP流量描述)，未上机
+## 蜂窝当前交接(CELL151-NOEIF,2026-11-11): 207中ACT已与RIL同形(808B/PDP3/DNN/URSP)仍无下行；cell151去掉Android从不发送的EIF_REQ与统计请求，未上机
+
+- **207.txt**(cell150)：`ACT URSP traffic descriptor dnn (length 5)`、`frame 808 B`(与RIL同长)、CNF 0、`PDP3 v6-ready 1`、v6客户端挂接(MD地址link-local)，UL完成、RX 0；MD的IFCHANGE(带RA学到的v6全局地址)在IFUP后约14s才到。
+- **新对照**：Android datacycle.log中**没有任何INTERNAL_EIF_REQ(0x313)**；NetAgentService在mtkfusionrild内，只消费EIF IND(`invokeCallback interfaceId=4 reason=1/2`、`updateGlobalIpv6Address`)；Android IFUP→IFCHANGE仅37ms。我们cell138起的ifst up/down、cell147的ipupdate、cell148的统计请求都是原厂栈不会发的额外MIPC。
+- **寄存器全量对比**(`/tmp/regdiff.py`思路：Android proc_ccci_dump2 vs 207 rx-none)：剩余差异多为地址/索引/状态(DL_STA13/14=legacy PIT计数、HPC计数器、CODA上位)；DPMAIF DL中断状态始终0→MD从未向DPMAIF下行引擎送包。
+- **修复 main `7c130bb`**：EIF ifst/ipupdate与统计请求默认关闭，boot-arg `x9_eif_req=1`可恢复(参数未加入默认集)。单编True。
+- **候选 `x9/out/x9-cell151-noeif-md/boot.img`**(worktree `e726bf4`)，三命令exit0，boot 13537280B，参数同131，插件276，**无需mailbox**。
+- **下一步**：用户boot cell151→`~/208.txt`。看IFCHANGE相对IFUP的时间(是否接近Android的几十ms)、RX。若仍无下行：剩余未对齐项=RIL在ACT后的查询序列(GET_5GQOS/GET_CALL/URSP_ROUTE_PROFILE/GET_MD_DATA_CALL_LIST)与DATA_RETRY_TIMER、MD侧IMS PDN缺失。
+
+## 蜂窝前次交接(CELL150-URSP,2026-11-11): 206中MOBILE_DATA已开但仍无下行；cell150按RIL逐字段构造ACT(含URSP流量描述)，未上机
 
 - **206.txt**(cell149)：`DATA_SET_CONFIG ... CNF valid result 0`；ACT CNF 0，MD自分配ccmni1/ccmni2；UL DNS包正确且全完成，RX 0；IFCHANGE(5)后约11s MD IFDOWN，iOS重拨同样。MOBILE_DATA不是(唯一)原因。
 - **分析**：设备驻留5G SA；SA下UE按URSP把流量映射到PDU会话。RIL的ACT带`URSP_TRAFFIC_DESC 0x10d`(672B，`mipc_ursp_traffic_desc_struct_struct4`：is_match_all@0、dnn_len@1、dnn@4、os_id、app_id、v4/v6、端口、prot_id_next_hdr@414、dst_fqdn)、`0x11e {0f,0..}`、`URSP_EVAL_FLAG 0x10f=0`等，我们从未带。
