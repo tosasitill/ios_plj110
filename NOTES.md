@@ -1375,7 +1375,15 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **不能称为全部USB完成**:本轮暂无枚举/DMA/ue0 ping/bulk回环实机结果,live EMI/MPU允许普通XNU DMA页也未证明。`native_apple_stack=0`,没有冒充IOUSBDeviceController或AppleUSBDeviceMux;原始configd USBDeviceConfiguration/lockdownd、Finder/iTunes Trust/配对/照片同步仍缺20H392 controller adapter及kext构建接入。USB3 XS-PHY/retimer、charger Type-C role与原生xHCI也未完成。参考文章chip/board/security-domain/fsid/锁状态条件要到原生栈接通后才验证,不先改身份/配对状态制造成功。
 - **下一步/验收**:先在用户手动启动的单一候选核对`CAP_EPINFO/TXFIFO/RXFIFO/MISC`→config1/alt1→真实QMU OUT/IN→ue0 ping,再用iOS `usbctl --echo`+host单次echo证明host→iOS→host字节相同。保留EP0日志,无需重建Metal插件/mailbox。接口/回退/构建说明在`x9/usb/README.md`;不要求用户现在连续刷试探镜像。
 
-## 蜂窝当前交接(CELL140-BATORDER,2026-11-11): 196中ifst已被MD接受(CNF 0)但UL仍只完成首批；cell140按原厂顺序启用DL BAT，未上机
+## 蜂窝当前交接(CELL141-L2MASK,2026-11-11): 197按原厂顺序启用BAT仍首批即停；cell141改用原厂L2中断屏蔽并只清未屏蔽状态，未上机
+
+- **197.txt**(cell140，末53s)。**观察**：`BAT enable after credit (vendor order), CON1 0x410400`、未隔离、`EIF ifst up ... CNF valid result 0`；30.749s首个UL状态`0x21`(q0 DONE+DRB EMPTY)后即停：`TX stalled: hardware read index 2, 1 of 14`，RX 0。BAT顺序不是原因。
+- **差异(原厂drv3_intr_hw_init/drv3_isr)**：原厂UL只解屏蔽QDONE/ERR/PWR_NOTREADY(EMPTY 5..9、MD_NOTREADY 10..14保持屏蔽)，DL解屏蔽LRO0/1 QDONE(掩码位8/9)+MTU_ERR6；ISR只写回`status & ~mask`，从不清EMPTY/MD_NOTREADY；每次ISR清IP busy。我们全屏蔽(TIMSR0=~0)并把整个状态写回(清了EMPTY)。每轮都恰在第一次0x21被清之后停住(**推断**相关)。
+- **修复 main `a4ec092`**：L2掩码同原厂(UL TIMCR0 0x84/TIMSR0 0x88，DL APDL TIMCR0 0x94/TIMSR0 0x98)，GIC SPI 846/847仍不注册(CPU仍轮询)；只确认未屏蔽UL状态与按`mapping_rx_reg_from_mask_to_sts`换算的未屏蔽DL状态；每轮W1C IP busy。单编True。
+- **候选 `x9/out/x9-cell141-l2mask-md/boot.img`**(worktree `eefc7c6`)，三命令exit0，boot 13533184B，参数同131，插件276，**无需mailbox**。记录`.local/x9/work/cell141-l2mask/`。
+- **下一步**：用户boot cell141→`~/198.txt`。先确认初始化无`readback`/`quarantined`(新增掩码期望检查)，再看UL completed、RX。仍首批即停则剩下DRB预取/MD LHIF UL门控两个方向。
+
+## 蜂窝前次交接(CELL140-BATORDER,2026-11-11): 196中ifst已被MD接受(CNF 0)但UL仍只完成首批；cell140按原厂顺序启用DL BAT，未上机
 
 - **196.txt**(cell139，末46.9s)。**观察**：`EIF ifst up ccmniN type 1 sent to MD`→`CNF valid result 0`(26.5s/28.1s)；`ifst down ... CNF valid result 0`。UL仍`TX stalled: hardware read index 4, 2 of 20`，RX 0，`EIF ccmni2 command 5`=IFCHANGE(已忽略)。dump：DBG_STA5=DRB基址+0x20(第3个DRB)、DBG_STA7=txpool基址+0xC00(第2包payload)；ul_sram+0xf4高16位=软件wr。**规律**：每轮完成数=首次取描述符前已发布的包数(193/194/196=2，195=1)。
 - **分析**：MD侧LHIF(`lhifcore_task_main`)同一任务处理UL/DL；`lhif_drv_data_chk_dpmaif_resource`(9012f41a)读AP DL SRAM的BAT/PIT寄存器(MD地址0xc410dc64/dcd8/dcdc/dcec↔AP dl_sram+0x64/0xd8/0xdc/0xec)算DL资源。**推断**：DL资源无效→LHIF数据路径停→UL只走完首批缓冲。原厂DL对照：LRO PIT(base/size/CON3 EN/chknum/INIT)、HPC/agg/hash/timeout与我们一致；**差异**：`ccci_dpmaif_bat_start`在BAT_EN=0下ALLSET初始化(普通→frag)，先加frag计数再加普通计数，最后`dl_all_frg_queue_en`/`dl_all_queue_en`置CON1 BAT_EN并发仅使能的BAT_INIT(EN|FRG / EN)；我们在ALLSET时就置EN且从未发仅使能INIT。
