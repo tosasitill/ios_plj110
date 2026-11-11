@@ -1375,7 +1375,15 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **不能称为全部USB完成**:本轮暂无枚举/DMA/ue0 ping/bulk回环实机结果,live EMI/MPU允许普通XNU DMA页也未证明。`native_apple_stack=0`,没有冒充IOUSBDeviceController或AppleUSBDeviceMux;原始configd USBDeviceConfiguration/lockdownd、Finder/iTunes Trust/配对/照片同步仍缺20H392 controller adapter及kext构建接入。USB3 XS-PHY/retimer、charger Type-C role与原生xHCI也未完成。参考文章chip/board/security-domain/fsid/锁状态条件要到原生栈接通后才验证,不先改身份/配对状态制造成功。
 - **下一步/验收**:先在用户手动启动的单一候选核对`CAP_EPINFO/TXFIFO/RXFIFO/MISC`→config1/alt1→真实QMU OUT/IN→ue0 ping,再用iOS `usbctl --echo`+host单次echo证明host→iOS→host字节相同。保留EP0日志,无需重建Metal插件/mailbox。接口/回退/构建说明在`x9/usb/README.md`;不要求用户现在连续刷试探镜像。
 
-## 蜂窝当前交接(CELL146-IFID,2026-11-11): 202上行仍全通、下行仍0；cell146按Android RIL在ACT中带AP接口ID(IF_ID 0x110)，未上机
+## 蜂窝当前交接(CELL147-IPUPDATE,2026-11-11): 203中MD接受IF_ID 3、上行全通、仍无下行；cell147补EIF IPUPDATE v4并记录上行包内容，未上机
+
+- **203.txt**(cell146)。**观察**：`requesting IPv4 call ... host IF_ID 3`→`CNF 0x0202 result 0`，EIF直接是ccmni3(无需映射)，`PDP activated ... ccmni3`，`ifst up CNF 0`，UL 148/148，GET205周期正常，RX 0(无下行)。IF_ID不是(唯一)原因。
+- **ccmni源码对照**(`drivers/misc/mediatek/ccmni/ccmni.c:701-703`)：`count_l = (skb->mark & APP_VIP_MARK) ? 0x1000 : 0`；`network_type = ccmni->net_type`(用户态SIOCSNETTYPE，Android dmesg仅ccmni19设为5，ccmni3为0)；`hw_qno = queue_mapping`(普通为MD_HW_NORMAL_Q)。我们的DRB MSG(count_l 0、network_type 0、q0)与原厂一致。
+- **修复 main `85b96bc`**：ifst up后再发`INTERNAL_EIF_REQ IPUPDATE(cmd 2)`+`NEW_ADDR 0x8102`(0x20B：len 4、IPv4地址、零尾)=netagent `"ipupdate",1,"a.b.c.d"`；MIPC桥只放行这一种72字节帧。新增诊断：每次绑定后前12个UL IPv4包(proto/len/ttl/头校验和/源→目的/端口)，发布时打印分配的地址与dns0(对照源地址)。两对象单编True。
+- **候选 `x9/out/x9-cell147-ipupdate-md/boot.img`**(worktree `13e9115`)，三命令exit0，boot 13537280B，参数同131，插件276，**无需mailbox**。记录`.local/x9/work/cell147-ipupdate/`。
+- **下一步**：用户boot cell147→`~/204.txt`。看`EIF ipupdate v4 ... CNF result`、`UL[n] ... hdrsum ok/BAD src->dst port`与`call .. address`是否一致、RX。若UL包正确且MD接受ipupdate仍无下行：需要在Android上开ccci DPMAIF调试标志或抓RIL/netagent的MIPC交互对比。
+
+## 蜂窝前次交接(CELL146-IFID,2026-11-11): 202上行仍全通、下行仍0；cell146按Android RIL在ACT中带AP接口ID(IF_ID 0x110)，未上机
 
 - **202.txt**(cell145)。**观察**：UL 84/84完成；IP busy解屏蔽、RDY_CHK_THRES=0x80be2000(与Android一致)；RX 0，LRO PIT0写指针与legacy PIT索引仍0——MD不下发。新增`hpc`(pd+0x600)窗口与Android差异是**状态/计数器**(HPC_ENTRY_STS/CI_CO/HASH，原厂头文件)，是有下行流量的结果，不是配置；`ao_misc_sram`与Android基本一致。
 - **新差异**：旧Android logcat(`.local/x9/android-pull-20261106-132120/logcat-all.txt`)：上网PDN `dnn cbnet`、IPV4V6、`ifname ccmni3`、`cid 303`(IMS为ccmni2 cid 202)。原厂MIPC头：`DATA_ACT_CALL_REQ` TLV `0x110 IF_ID`(u8,0..19)；`0x10A REUSE_FLAG` 2=NOT_REUSE。MD ACT CNF有"Return Host interface ID"分支；`mipc_internal_eif_ind`区分"Send AP interface ID"/"Host did not act this call before"/"sAP or modem user"。我们从未发IF_ID→**推断**MD把PDN视为modem用户，不向AP下发DL。
