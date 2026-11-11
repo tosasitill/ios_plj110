@@ -250,6 +250,39 @@ static bool x9w_data_ready(const x9w_bearer &b){
  return b.used&&b.active&&!b.abandoned&&!b.hold&&b.result_epoch==x9a_epoch&&
   x9w_live(b)&&x9d_ready()&&x9_md_mipc_online();
 }
+// Owner-only, value-only probes. All outcomes are eligible; first two and
+// bounded transitions print immediately, repeated outcomes get a 3s heartbeat.
+enum { X9WP_SEND, X9WP_CNF, X9WP_GET, X9WP_PUBLISH, X9WP_STATE, X9WP_TAKE, X9WP_ERROR, X9WP_COUNT };
+struct x9w_probe_rate { uint64_t generation,next,seen; unsigned emitted; int value; const char *reason; };
+static x9w_probe_rate x9w_probe_rates[CBP_INTERFACES][X9WP_COUNT];
+static void x9w_probe(const x9w_bearer &b,unsigned site,const char *reason,int value,const x9wr_settings *candidate=nullptr){
+ unsigned mux=(unsigned)(&b-x9w_bearers)+1;if(!cbp_mux_ok(mux)||site>=X9WP_COUNT)return;
+ x9w_probe_rate &r=x9w_probe_rates[mux-1][site];uint64_t now=x9q_ms();
+ if(r.generation!=b.generation){bzero(&r,sizeof(r));r.generation=b.generation;}
+ bool changed=r.reason!=reason||r.value!=value;r.seen++;
+ if(r.seen>2&&!(changed&&r.emitted<16)&&now<r.next)return;
+ r.reason=reason;r.value=value;r.emitted++;r.next=now+3000;
+ const x9w_interface *in=b.sim_slot<2&&b.channel<20?&x9w_interfaces[b.sim_slot][b.channel]:nullptr;
+ const x9wr_settings &settings=candidate?*candidate:b.runtime;
+ printf("X9 CELL WDS: site %u why %s value %d seen %llu SIM%u mux %u gen %llu epoch %llu/%llu op %u token %llu flags %u%u%u%u%u refs %u cid %u channel %u trans %u floor %llu EIF %u/%u/%llu/%u GET %u/%u/%u candidate %u matched %u families %u route %llu serial %llu/%llu retire %u handle-room %u wait-left-ms %llu setup-left-ms %llu MD-session unobserved\n",
+  site,reason,value,r.seen,b.sim_slot+1,mux,b.generation,b.result_epoch,x9a_epoch,b.op,b.token,
+  b.used,b.owned,b.active,b.abandoned,b.hold,x9w_refs(b),b.cid,b.channel,b.trans_id,b.if_floor,
+  in?in->valid:0,in?in->cmd:0,in?in->serial:0,in?in->trans_id:0,
+  b.get_result.identity.cid,b.get_result.channel,b.get_result.trans_id,candidate!=nullptr,settings.matched,x9w_families(settings),b.route_lifetime,
+  b.query_serial,b.change_serial,x9w_retirements[mux-1].pending,x9w_next_handle<0xfffffffeu,
+  b.deadline>now?b.deadline-now:0,b.setup_deadline>now?b.setup_deadline-now:0);
+}
+static void x9w_wire_probe(const x9w_bearer &b,const uint8_t *p,unsigned n,unsigned id){
+ // Called only after the actual CNF wire/result gate, never on malformed TLVs.
+ unsigned cid=~0u,type=~0u,channel=~0u,trans=~0u,v4=~0u,v6=~0u,mtu4=0,mtu6=0;
+ unsigned result=~0u;x9w_word(p,n,0,result);x9w_byte(p,n,0x100,cid);x9w_byte(p,n,0x102,type);
+ x9w_word(p,n,0x125,channel);x9w_word(p,n,id==0x202?0x12a:0x129,trans);
+ x9w_byte(p,n,0x103,v4);x9w_byte(p,n,0x108,v6);
+ bool m4=x9w_word(p,n,0x123,mtu4),m6=x9w_word(p,n,0x124,mtu6);
+ printf("X9 CELL CNF: SIM%u mux %u gen %llu id %04x result %u CID %u expected %u range %u-%u PDP %u channel %u/%u trans %u/%u v4/v6-count %u/%u MTU-present %u/%u MTU %u/%u; AP-fields-not-MD-session\n",
+  b.sim_slot+1,(unsigned)(&b-x9w_bearers)+1,b.generation,id,result,cid,b.cid,b.min_cid,b.max_cid,
+  type,channel,b.channel,trans,b.trans_id,v4,v6,m4,m6,mtu4,mtu6);
+}
 // QMI WDS call end reasons (libqmi qmi-enums-wds.h). The 20H392 driver
 // names the internal block 201.. as INTERNAL_ERROR, CALL_ENDED, ..., 206
 // NW_INITIATED_TERMINATION, 208 IPV4_CALL_DISALLOWED, 210 IPV6_DISALLOWED and
@@ -290,6 +323,7 @@ static void x9w_pending_done(x9w_bearer &b){
 static void x9w_lease_fail(unsigned slot,uint16_t verbose);
 static void x9w_lease_status(unsigned slot,bool connected,uint16_t type,uint16_t verbose,bool reconfigure=false);
 static void x9w_error(x9w_bearer &b,unsigned error){
+ x9w_probe(b,X9WP_ERROR,"host-error",(int)error);
  for(unsigned i=0;i<CBQ_MAX_CLIENTS;i++)if(x9w_member(i,b)&&x9w_clients[i].lease_pending)x9w_lease_fail(i,X9W_INTERNAL_ERROR);
  if(b.pending&&x9w_reply_live(b)){
   x9q_packet p(b.req,(uint16_t)error);p.send(CBQ_PORT_BASE+b.slot,X9BB_PORT_BASE+1);
@@ -324,7 +358,8 @@ static void x9w_host_expire(x9w_bearer &b,unsigned mux,uint64_t now){
 }
 static void x9w_clear(x9w_bearer &b,unsigned mux){x9w_disconnect(b,mux);x9w_pending_done(b);bzero(&b,sizeof(b));}
 static bool x9w_send(x9w_bearer &b,x9w_frame &f,unsigned op,unsigned timeout){
- b.token=f.submit();if(!b.token)return false;b.op=op;b.deadline=x9q_ms()+timeout;return true;
+ b.token=f.submit();if(!b.token){x9w_probe(b,X9WP_SEND,"enqueue-failed",(int)op);return false;}
+ b.op=op;b.deadline=x9q_ms()+timeout;x9w_probe(b,X9WP_SEND,"enqueued",(int)op);return true;
 }
 static bool x9w_deactivate(x9w_bearer &b,unsigned mux){
  x9w_disconnect(b,mux);
@@ -358,12 +393,13 @@ static bool x9w_get_settings(x9w_bearer &b,const uint8_t *p,unsigned n){
  x9wr_identity current={b.generation,b.result_epoch,b.if_floor,b.sim_slot,b.cid,0,3};
  x9wr_get get={};unsigned dns=0;
  if(!x9wr_optional_byte(p,n,0x10d,dns)||dns>4||b.result_epoch!=x9a_epoch||!x9w_live(b)||!x9wr_same_identity(b.query,current)){
+  x9w_probe(b,X9WP_GET,"identity-or-dns-reject",(int)dns);
   printf("X9 WDS: GET205 identity/dns gate failed (dns %u)\n",dns);return false;}
- if(!x9wr_decode_get(p,n,b.query,get)){printf("X9 WDS: GET205 decode failed\n");return false;}
+ if(!x9wr_decode_get(p,n,b.query,get)){x9w_probe(b,X9WP_GET,"decode-reject",0);printf("X9 WDS: GET205 decode failed\n");return false;}
  // CID/channel/trans remain the immutable physical identity. Addresses/DNS/
  // MTU are mutable settings, not proof that a different call owns this CID.
- if(get.channel!=b.channel||get.trans_id!=b.trans_id)return false;
- b.get_result=get;return true;
+ if(get.channel!=b.channel||get.trans_id!=b.trans_id){x9w_probe(b,X9WP_GET,"channel-or-trans-reject",0);return false;}
+ b.get_result=get;x9w_probe(b,X9WP_GET,"identity-pass",1);return true;
 }
 // One non-private line naming the ACT CNF fields our gate saw.
 static void x9w_act_diag(const x9w_bearer &b,const uint8_t *p,unsigned n){
@@ -427,8 +463,14 @@ static void x9w_stats(bool start){
 // These are diagnostic queries only; CONFIG/RETRY_RESET belong to the bearer.
 static bool x9w_side_send(x9w_frame &f,unsigned sim,uint16_t cnf,const char *what,bool quiet=false){
  x9w_side *slot=nullptr;for(x9w_side &e:x9w_sides)if(!e.token){slot=&e;break;}
- if(!slot||!x9_md_mipc_online()){if(!quiet)printf("X9 WDS: %s not sent (no slot/MIPC)\n",what);return false;}
- uint64_t token=f.submit();if(!token){if(!quiet)printf("X9 WDS: %s submit failed\n",what);return false;}
+ // quiet used to hide failed RRC probes. Preserve the send decision, not silence.
+ (void)quiet;static uint64_t blocked_count[8],blocked_next[8];
+ unsigned key=(sim<2?sim:0)*4+(cnf==0x308?0:cnf==0x1152?1:cnf==0x4c8?2:3);
+ uint64_t &blocked=blocked_count[key],&next=blocked_next[key];
+ if(!slot||!x9_md_mipc_online()){
+  blocked++;if(blocked<=2||x9q_ms()>=next){next=x9q_ms()+3000;printf("X9 CELL SIDE: SIM%u %s blocked slot %u online %u seen %llu\n",sim+1,what,slot!=nullptr,x9_md_mipc_online(),blocked);}return false;}
+ uint64_t token=f.submit();if(!token){
+  blocked++;if(blocked<=2||x9q_ms()>=next){next=x9q_ms()+3000;printf("X9 CELL SIDE: SIM%u %s enqueue-failed seen %llu\n",sim+1,what,blocked);}return false;}
  *slot={token,x9q_ms()+30000,0xa0,(uint8_t)sim,0,cnf,what};
  return true;
 }
@@ -470,6 +512,14 @@ static void x9w_side_poll(){
  static uint8_t response[X9_MIPC_FRAME_MAX];
  for(x9w_side &e:x9w_sides){if(!e.token)continue;
   unsigned n=0;int ready=x9_md_mipc_take(e.token,response,sizeof(response),&n);
+  if(ready!=1){
+   static uint64_t tokens[8],next[8];unsigned index=(unsigned)(&e-x9w_sides);uint64_t now=x9q_ms();
+   if(tokens[index]!=e.token||now>=next[index]){
+    tokens[index]=e.token;next[index]=now+3000;
+    printf("X9 CELL SIDE: SIM%u %s token %llu expected %04x take %d late %u wait-left-ms %llu\n",
+     e.sim+1,e.what?e.what:"EIF/statistics",e.token,e.cnf,ready,!e.deadline||now>=e.deadline,e.deadline>now?e.deadline-now:0);
+   }
+  }
   if(ready==1&&e.cmd==0xa0){
    unsigned result=~0u;bool good=x9w_wire(response,n)&&x9q_u16(response+10)==e.cnf&&x9w_word(response,n,0,result);
    if(good&&(e.cnf==0x260||e.cnf==0x262)){unsigned app=0;good=x9w_byte(response,n,0x100,app)&&app==3;}
@@ -517,8 +567,8 @@ static void x9w_side_poll(){
 }
 static void x9w_publish(x9w_bearer &b,unsigned mux){
  x9w_host_expire(b,mux,x9q_ms()); // every publication entry owns its deadline gate
- if(b.abandoned||b.hold||!x9w_refs(b))return;
- if(b.query_serial!=b.change_serial){if(!b.token)x9w_check(b);return;}
+ if(b.abandoned||b.hold||!x9w_refs(b)){x9w_probe(b,X9WP_PUBLISH,"host-gate",0);return;}
+ if(b.query_serial!=b.change_serial){x9w_probe(b,X9WP_PUBLISH,"newer-event-wait",0);if(!b.token)x9w_check(b);return;}
  // The MD may deliver EIF IFUP before the ACT CNF (191.txt) in modem
  // interface form; adopt it for the host IF_ID once trans_id is known.
  if(!x9w_interfaces[b.sim_slot][b.channel].valid)
@@ -530,7 +580,7 @@ static void x9w_publish(x9w_bearer &b,unsigned mux){
    }
   }
  const x9w_interface &in=x9w_interfaces[b.sim_slot][b.channel];
- if(!in.valid||in.serial<=b.if_floor||in.trans_id!=b.trans_id||in.cmd!=0)return;
+ if(!in.valid||in.serial<=b.if_floor||in.trans_id!=b.trans_id||in.cmd!=0){x9w_probe(b,X9WP_PUBLISH,"EIF-wait-or-mismatch",0);return;}
  x9wr_identity current={b.generation,b.result_epoch,b.if_floor,b.sim_slot,b.cid,0,3};
  x9wr_settings runtime={};
  bool matched=b.result_epoch==x9a_epoch&&x9wr_match_settings(b.get_result,in.facts,current,runtime);
@@ -542,11 +592,14 @@ static void x9w_publish(x9w_bearer &b,unsigned mux){
  if(!matched||!(x9w_families(runtime)&x9w_refs(b))||!x9w_live(b)||
     x9w_next_handle>=0xfffffffeu||x9w_retirements[mux-1].pending||
     !x9d_bind(mux,b.channel,x9w_families(runtime)&x9w_refs(b),runtime.v4.mtu,runtime.v6.mtu,b.route_lifetime)){
+  x9w_probe(b,X9WP_PUBLISH,!matched?"GET-EIF-mismatch":!(x9w_families(runtime)&x9w_refs(b))?"family-disallowed":
+   x9w_retirements[mux-1].pending?"AP-retirement-pending":"route-bind-or-owner-reject",0,&runtime);
   printf("X9 WDS: publish failed mux %u (match %u v4 %u addr-same %u retire %u)\n",mux,runtime.matched,x9wr_ipv4_facts(runtime),
    !memcmp(in.ip,b.ip,4),x9w_retirements[mux-1].pending);
   b.abandoned=true;x9w_error(b,X9Q_NOT_READY);x9w_deactivate(b,mux);return;
  }
  b.mtu=runtime.v4.mtu;b.runtime=runtime;b.refresh_mask=0;b.active=true;b.op=0;b.next=x9q_ms()+10000;b.setup_deadline=0;
+ x9w_probe(b,X9WP_PUBLISH,"published",1);
  printf("X9 WDS: cell157 SIM%u physical call %u -> ccmni%u -> mux %u PDP%u verified families %u MTU4/6 %u/%u; independent leases\n",
   b.sim_slot+1,b.cid,b.channel,mux,runtime.modem_pdp,x9w_families(runtime),runtime.v4.mtu,runtime.v6.mtu);
  // DPMAIF route is bound and the host has the address: report the AP
@@ -682,16 +735,20 @@ static void x9w_result(x9w_bearer &b,unsigned mux,const uint8_t *p,unsigned n){
  unsigned expected=op==X9W_DISC?0x21a:op==X9W_CONFIG?0x212:(op==X9W_RETRY_RESET||op==X9W_RETRY_QUERY)?0x21c:
   op==X9W_ACT?0x202:op==X9W_CHECK?0x206:0x204;
  if(!x9w_wire(p,n)||x9q_u16(p+10)!=expected||!x9w_word(p,n,0,result)){
+  x9w_probe(b,X9WP_CNF,"wire-reject",(int)op);
   b.hold=true;b.abandoned=true;x9w_disconnect(b,mux);x9w_error(b,X9Q_INTERNAL);
   printf("X9 WDS: malformed CNF op %u; quarantined until boot\n",op);return;
  }
  // The actual take consumed this token, but a CNF from the retired card
  // epoch cannot authorize an old ACT continuation, cleanup203 or success.
  if(b.result_epoch!=x9a_epoch){
+  x9w_probe(b,X9WP_CNF,"epoch-reject",(int)op);
   b.hold=true;b.abandoned=true;x9w_disconnect(b,mux);x9w_error(b,X9Q_NOT_READY);return;
  }
  b.hold=false; // late valid CNF restores cleanup ability, NEVER host success
  printf("X9 WDS: MIPC CNF msg 0x%04x result %u mux %u\n",expected,result,mux);
+ x9w_probe(b,X9WP_CNF,"wire-result",(int)result);
+ if(op==X9W_ACT||op==X9W_CHECK)x9w_wire_probe(b,p,n,expected);
  if(op==X9W_RETRY_QUERY){
   unsigned mode=~0u,seconds=0;
   bool good=!result&&x9w_byte(p,n,0x100,mode)&&mode<=2&&
@@ -757,8 +814,10 @@ static void x9w_result(x9w_bearer &b,unsigned mux,const uint8_t *p,unsigned n){
   // partial profile. Qualify each negotiated family; never claim the missing one.
   if(b.gone||b.abandoned||!x9w_settings(b,p,n)||
      !x9w_word(p,n,0x12a,b.trans_id)||b.trans_id%100!=b.channel||!x9d_ready()){
+   x9w_probe(b,X9WP_CNF,"ACT-settings-reject",0);
    x9w_act_diag(b,p,n);b.abandoned=true;x9w_error(b,X9Q_NOT_READY);x9w_deactivate(b,mux);return;
   }
+  x9w_probe(b,X9WP_CNF,"ACT-settings-pass",1);
   if(!x9w_check(b)){b.abandoned=true;x9w_error(b,X9Q_BUSY);x9w_deactivate(b,mux);}return;
  }
  if(op==X9W_CHECK){
@@ -1005,6 +1064,11 @@ static void x9w_poll(){
  x9w_retire_poll();
  static uint8_t response[X9_MIPC_FRAME_MAX];unsigned n=0;
  x9w_init_poll(response,sizeof(response));
+ {static uint64_t next;uint64_t now=x9q_ms();if(now>=next){next=now+3000;
+  printf("X9 CELL CONTROL: online %u stage %u token %llu hold %u control-ready %u session-ready %u dpmaif-ready %u init-wait-left-ms %llu; MD-internal unobserved\n",
+   x9_md_mipc_online(),x9w_init_stage,x9w_init_token,x9w_init_hold,x9w_control_ready,x9w_session_ready,x9d_ready(),
+   x9w_init_deadline>now?x9w_init_deadline-now:0);
+ }}
  x9a_poll(response,sizeof(response));
  for(unsigned i=0;i<8;i++){
   int event=x9_md_mipc_event(response,sizeof(response),&n);if(event<=0)break;unsigned cid;
@@ -1051,6 +1115,7 @@ static void x9w_poll(){
  uint64_t now=x9q_ms();bool online=x9_md_mipc_online();
  x9w_lease_poll();
  for(unsigned i=0;i<CBP_INTERFACES;i++){x9w_bearer &b=x9w_bearers[i];if(!b.used)continue;
+  x9w_probe(b,X9WP_STATE,"heartbeat",(int)b.op);
   x9w_host_expire(b,i+1,now);
   if(b.result_epoch!=x9a_epoch)b.hold=true; // retain/drain token, never old-epoch203
   if(!x9w_live(b)||!online||!x9d_ready()||b.result_epoch!=x9a_epoch){b.abandoned=true;x9w_disconnect(b,i+1);x9w_error(b,X9Q_NOT_READY);}
@@ -1062,6 +1127,7 @@ static void x9w_poll(){
     printf("X9 WDS: op %u timed out mux %u; retain token for late CNF, no retry\n",b.op,i+1);
    }
    int ready=x9_md_mipc_take(b.token,response,sizeof(response),&n);
+   x9w_probe(b,X9WP_TAKE,ready==1?"reply-ready":ready==0?"reply-pending":"take-error",ready);
    if(ready==1){b.token=0;x9w_result(b,i+1,response,n);bzero(response,sizeof(response));continue;}
    continue;
   }

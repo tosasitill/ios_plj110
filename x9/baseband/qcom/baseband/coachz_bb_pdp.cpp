@@ -67,7 +67,16 @@ static errno_t bb_pdp_del_proto(ifnet_t ifp, protocol_family_t family)
 }
 static errno_t bb_pdp_input(ifnet_t ifp, protocol_family_t f, mbuf_t m, char *)
 {
-  if (proto_input(f, m)) { mbuf_freem(m); ifnet_stat_increment_in(ifp, 0, 0, 1); }
+  // proto_input is a separate, possibly asynchronous gate after ifnet_input.
+  // Capture metadata before handing over the mbuf; never access it afterwards.
+  const uint32_t n = static_cast<uint32_t>(mbuf_pkthdr_len(m));
+  const errno_t error = proto_input(f, m);
+  if (error) { mbuf_freem(m); ifnet_stat_increment_in(ifp, 0, 0, 1); }
+  static uint64_t counts[2];
+  const uint64_t seen = __atomic_add_fetch(&counts[error != 0], uint64_t(1), __ATOMIC_RELAXED);
+  if (seen <= 4 || !(seen & (seen - 1)))
+    printf("X9 CELL PROTO: unit %u family %u bytes %u seen %llu error %d accepted %u; not-socket-delivery\n",
+      ifnet_unit(ifp), f, n, seen, error, error == 0);
   return 0;
 }
 static errno_t bb_pdp_pre_output(ifnet_t, protocol_family_t, mbuf_t *, const sockaddr *, void *, char *, char *)
@@ -115,6 +124,22 @@ static errno_t bb_pdp_ioctl(ifnet_t ifp, unsigned long cmd, void *data)
       return EOPNOTSUPP;
   }
 }
+// Outcome probes do not count as traffic or alter the receiver result. No IP
+// contents. First four and powers of two bound hot-path success/error logging.
+static void bb_pdp_rx_probe(bb_pdp_if *p,uint32_t mux,uint32_t n,uint32_t version,
+    uint64_t epoch,unsigned reason,int error)
+{
+  static uint64_t counts[7]; uint64_t seen=__atomic_add_fetch(&counts[reason],uint64_t(1),__ATOMIC_RELAXED);
+  if(seen>4&&(seen&(seen-1)))return;
+  uint32_t families=0,blocked=0,flags=0,mtu=0;uint64_t current_epoch=0;bool present=false;
+  if(p&&bb_pdp_lock){
+    IOLockLock(bb_pdp_lock);ifnet_t ifp=p->ifp;families=p->families;blocked=p->blocked;current_epoch=p->epoch;
+    IOLockUnlock(bb_pdp_lock);present=ifp!=nullptr;
+    if(ifp){flags=ifnet_flags(ifp);mtu=ifnet_mtu(ifp);}
+  }
+  printf("X9 CELL INPUT: reason %u seen %llu mux %u version %u bytes %u epoch %llu/%llu ifp %u flags 0x%x families %u blocked %u MTU %u error %d accepted %u\n",
+    reason,seen,mux,version,n,epoch,current_epoch,present,flags,families,blocked,mtu,error,reason==0);
+}
 static int bb_pdp_receive_error(bb_pdp_if *p, int error)
 {
   IOLockLock(bb_pdp_lock); p->dropped++; ifnet_t ifp = p->ifp; IOLockUnlock(bb_pdp_lock);
@@ -124,7 +149,9 @@ static int bb_pdp_receive_error(bb_pdp_if *p, int error)
 static int bb_pdp_receive_counted(uint32_t mux, const uint8_t *ip, uint32_t n,
     uint32_t version, uint64_t epoch)
 {
-  if (!bb_pdp_lock || !cbp_mux_ok(mux) || !ip || !n || (version != 4 && version != 6)) return EINVAL;
+  if (!bb_pdp_lock || !cbp_mux_ok(mux) || !ip || !n || (version != 4 && version != 6)) {
+    bb_pdp_rx_probe(nullptr,mux,n,version,epoch,1,EINVAL);return EINVAL;
+  }
   auto *p = &bb_pdp_ifaces[mux - 1u];
   IOLockLock(bb_pdp_lock);
   ifnet_t ifp = p->ifp;
@@ -137,13 +164,19 @@ static int bb_pdp_receive_counted(uint32_t mux, const uint8_t *ip, uint32_t n,
 #if !COACHZ_NATIVE_DPMAIF
   (void)epoch;
 #endif
-  if (!usable || !(ifnet_flags(ifp) & IFF_UP)) return bb_pdp_receive_error(p, ENETDOWN);
-  if (n > ifnet_mtu(ifp)) return bb_pdp_receive_error(p, EMSGSIZE);
+  if (!usable || !(ifnet_flags(ifp) & IFF_UP)) {
+    bb_pdp_rx_probe(p,mux,n,version,epoch,2,ENETDOWN);return bb_pdp_receive_error(p, ENETDOWN);
+  }
+  if (n > ifnet_mtu(ifp)) {
+    bb_pdp_rx_probe(p,mux,n,version,epoch,3,EMSGSIZE);return bb_pdp_receive_error(p, EMSGSIZE);
+  }
   mbuf_t m = nullptr;
   errno_t error = mbuf_allocpacket(MBUF_DONTWAIT, n, nullptr, &m);
-  if (error || !m) return bb_pdp_receive_error(p, error ? error : ENOBUFS);
+  if (error || !m) {
+    bb_pdp_rx_probe(p,mux,n,version,epoch,4,error?error:ENOBUFS);return bb_pdp_receive_error(p, error ? error : ENOBUFS);
+  }
   error = mbuf_copyback(m, 0, n, ip, MBUF_DONTWAIT);
-  if (error) { mbuf_freem(m); return bb_pdp_receive_error(p, error); }
+  if (error) { mbuf_freem(m);bb_pdp_rx_probe(p,mux,n,version,epoch,5,error);return bb_pdp_receive_error(p, error); }
   mbuf_pkthdr_setrcvif(m, ifp);
   mbuf_pkthdr_setheader(m, nullptr);
   bpf_tap_in(ifp, DLT_RAW, m, nullptr, 0);
@@ -152,8 +185,9 @@ static int bb_pdp_receive_counted(uint32_t mux, const uint8_t *ip, uint32_t n,
   // XNU ifnet_input consumes the mbuf on BOTH success and failure (including
   // a detached interface). Do not double-free its failed input here.
   error = ifnet_input(ifp, m, &inc);
-  if (error) return bb_pdp_receive_error(p, error);
+  if (error) { bb_pdp_rx_probe(p,mux,n,version,epoch,6,error);return bb_pdp_receive_error(p, error); }
   IOLockLock(bb_pdp_lock); p->rx++; IOLockUnlock(bb_pdp_lock);
+  bb_pdp_rx_probe(p,mux,n,version,epoch,0,0);
   return 0;
 }
 #if !COACHZ_NATIVE_DPMAIF

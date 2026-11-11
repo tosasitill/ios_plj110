@@ -90,8 +90,16 @@ struct x9d_state {
     // TX progress watch (vendor drv3_dump_register subset on a stall).
     uint64_t tx_progress_ms, tx_seen_done, stale_completions, bind_ms; unsigned stall_dumps, rx_dumps, tx_diag, tx_diag6; bool stall_reported, at_seen;
     int (*receiver)(uint32_t, const uint8_t *, uint32_t, uint32_t, uint64_t);
+    // Diagnostic ledgers only. Network producers use atomic increments;
+    // report/RX probes run on the existing bridge owner. No packet contents.
+    uint64_t tx_admit[9], pit_consumed[2], rx_probe_next[2], rx_disposition[6];
 };
 static x9d_state x9d;
+enum { X9DP_TX_ACCEPT, X9DP_TX_ARGUMENT, X9DP_TX_IP, X9DP_TX_OFFLINE,
+    X9DP_TX_ROUTE, X9DP_TX_EPOCH, X9DP_TX_FAMILY, X9DP_TX_MTU, X9DP_TX_FULL };
+static void x9d_tx_count(unsigned why) {
+    __atomic_fetch_add(&x9d.tx_admit[why], uint64_t(1), __ATOMIC_RELAXED);
+}
 static uint64_t x9d_ms() { uint64_t ns; absolutetime_to_nanoseconds(mach_absolute_time(), &ns); return ns / 1000000; }
 static uint32_t x9d_rd(uintptr_t base, unsigned off) {
     uint32_t v = *reinterpret_cast<volatile uint32_t *>(base + off);
@@ -617,17 +625,22 @@ static bool x9d_retiring() {
     IOLockUnlock(x9d.lock); return pending;
 }
 static int x9d_send(unsigned mux, const uint8_t *ip, unsigned n,uint64_t epoch) {
-    if (!x9d.lock || !cbp_mux_ok(mux)) return ENETDOWN;
-    if (!x9d_ip(ip, n)) return EINVAL;
+    if (!x9d.lock || !cbp_mux_ok(mux)) { x9d_tx_count(X9DP_TX_ARGUMENT); return ENETDOWN; }
+    if (!x9d_ip(ip, n)) { x9d_tx_count(X9DP_TX_IP); return EINVAL; }
     IOLockLock(x9d.lock); x9d_route &r = x9d.route[mux - 1];
     if (!x9d.ready || x9d.failed || !r.bound || !epoch || r.epoch!=epoch || !(r.families & cbp_family_bit(ip[0] >> 4)) || n > x9d_cap(r,ip[0]>>4)) {
+        // Classify the first failing predicate without changing the original errno.
+        x9d_tx_count(!x9d.ready || x9d.failed ? X9DP_TX_OFFLINE : !r.bound ? X9DP_TX_ROUTE :
+            !epoch || r.epoch != epoch ? X9DP_TX_EPOCH :
+            !(r.families & cbp_family_bit(ip[0] >> 4)) ? X9DP_TX_FAMILY : X9DP_TX_MTU);
         // Post-unbind unversioned producers do not belong to the old TX ledger.
         x9d.rejected++; if (r.bound) r.stats.tx_dropped++; IOLockUnlock(x9d.lock); return n > x9d_cap(r,ip[0]>>4) ? EMSGSIZE : ENETDOWN;
     }
     // Backpressure is retryable; don't count a retained packet as dropped.
-    if (x9d.count == X9D_MAIL) { IOLockUnlock(x9d.lock); return EBUSY; }
+    if (x9d.count == X9D_MAIL) { x9d_tx_count(X9DP_TX_FULL); IOLockUnlock(x9d.lock); return EBUSY; }
     x9d_tx &t = x9d.mail[(x9d.head + x9d.count) % X9D_MAIL];
     t.epoch = r.epoch; t.lifetime = r.lifetime; t.size = (uint16_t)n; t.mux = (uint8_t)mux; memcpy(t.ip, ip, n); x9d.count++;
+    x9d_tx_count(X9DP_TX_ACCEPT);
     IOLockUnlock(x9d.lock); return 0; // accepted into bounded mailbox, NOT completion
 }
 static bool x9d_tx_poll() {
@@ -739,7 +752,13 @@ static bool x9d_rx_item(unsigned q, const uint32_t *d) {
         // No route lock across the network KPI. Bind/unbind and this RX path
         // run on the same board owner thread; the helper separately validates
         // its family gate and the immutable epoch carried by this packet.
-        bool accepted = valid && receiver(mux, r.ip, r.bytes, r.ip[0] >> 4, r.epoch) == 0;
+        int input_error = valid ? receiver(mux, r.ip, r.bytes, r.ip[0] >> 4, r.epoch) : 0;
+        bool accepted = valid && input_error == 0;
+        unsigned disposition = r.drop ? 1u : !mux ? 2u : !receiver ? 3u : !valid ? 4u : !accepted ? 5u : 0u;
+        uint64_t seen = ++x9d.rx_disposition[disposition];
+        if (seen <= 4 || !(seen & (seen - 1)))
+            printf("X9 CELL RX: q %u disposition %u seen %llu mux %u channel %u epoch %llu lifetime %llu bytes %u input-error %d accepted %u\n",
+                q, disposition, seen, r.mux, r.channel, r.epoch, r.lifetime, r.bytes, input_error, accepted);
         IOLockLock(x9d.lock);
         if (cbp_mux_ok(r.mux) && r.channel < 20 && r.lifetime && x9d.rx_account[r.channel].lifetime == r.lifetime) {
             x9d_rx_account &s = x9d.rx_account[r.channel];
@@ -752,9 +771,17 @@ static bool x9d_rx_item(unsigned q, const uint32_t *d) {
     }
     return true;
 }
+static void x9d_rx_probe(unsigned q, uint32_t raw, const char *status, bool force = false) {
+    uint64_t now = x9d_ms(); if (!force && now < x9d.rx_probe_next[q]) return;
+    x9d.rx_probe_next[q] = now + 3000; const x9d_rx &r = x9d.rx[q];
+    printf("X9 CELL PIT: q %u status %s raw-wr 0x%x wr %u rd %u consumed %llu seq %u wait-ms %llu partial %u/%u bytes %u channel %u mux %u epoch %llu lifetime %llu\n",
+        q, status, raw, raw & 0x3ffff, r.rd, x9d.pit_consumed[q], r.seq,
+        r.seq_wait ? now - r.seq_wait : 0, r.message, r.normal, r.bytes, r.channel, r.mux, r.epoch, r.lifetime);
+}
 static bool x9d_rx_poll(unsigned q) {
-    x9d_rx &r = x9d.rx[q]; unsigned wr = x9d_rd(x9d.pd + 0xc00, q ? 0xc4 : 0xa4) & 0x3ffff;
-    if (wr >= X9D_PIT) { x9d_fail("RX hardware write index"); return false; }
+    x9d_rx &r = x9d.rx[q]; uint32_t raw = x9d_rd(x9d.pd + 0xc00, q ? 0xc4 : 0xa4);
+    unsigned wr = raw & 0x3ffff;
+    if (wr >= X9D_PIT) { x9d_rx_probe(q, raw, "bad-producer", true); x9d_fail("RX hardware write index"); return false; }
     unsigned consumed = 0, released = 0;
     while (r.rd != wr && consumed < X9D_BUDGET) {
         x9d_sync(x9d.pit[q], r.rd * 16, 16);
@@ -762,13 +789,14 @@ static bool x9d_rx_poll(unsigned q) {
         if ((item[3] & 255) != r.seq) {
             // Producer index can become visible before DMA data. Bounded defer,
             // not a busy loop and not acceptance of a stale/poison descriptor.
-            if (!r.seq_wait) r.seq_wait = x9d_ms();
-            else if (x9d_ms() - r.seq_wait >= 20) x9d_fail("RX sequence deadline");
+            if (!r.seq_wait) { r.seq_wait = x9d_ms(); x9d_rx_probe(q, raw, "sequence-wait", true); }
+            else if (x9d_ms() - r.seq_wait >= 20) { x9d_rx_probe(q, raw, "sequence-timeout", true); x9d_fail("RX sequence deadline"); }
             break;
         }
         r.seq_wait = 0;
-        if (!x9d_rx_item(q, item)) return false;
+        if (!x9d_rx_item(q, item)) { x9d_rx_probe(q, raw, "item-rejected", true); return false; }
         r.rd = (r.rd + 1) % X9D_PIT; r.seq++; consumed++;
+        x9d.pit_consumed[q]++;
         if (!(r.rd & 3)) {
             // Eight-bit sequence wraps 128 times in this 32768-entry PIT ring:
             // after a whole lap the old sequence could equal the new one.
@@ -784,7 +812,10 @@ static bool x9d_rx_poll(unsigned q) {
     if (x9d.failed) return false;
     // Return only fully consumed/poisoned cache-line groups; serialized shared
     // command register. The 1..3 remaining entries have not been credited yet.
-    return !released || x9d_command(x9d.pd + 0x900, 0x10, X9D_BUSY_BIT | (q << 20) | released);
+    bool ok = !released || x9d_command(x9d.pd + 0x900, 0x10, X9D_BUSY_BIT | (q << 20) | released);
+    x9d_rx_probe(q, raw, !ok ? "credit-failed" : r.seq_wait ? "sequence-wait" :
+        r.rd != wr ? "budget-pending" : consumed ? "consumed" : "empty", !ok);
+    return ok;
 }
 static void x9d_bat_policy() {
     // MT6993 dpmaif_updata_max_bat_skb_cnt runs even when no PIT is ready.
@@ -908,6 +939,19 @@ static void x9d_report(unsigned second) {
     printf("X9 DPMAIF: %u s mode %u ready %u quarantined %u published %u TX submitted %llu completed %llu RX delivered %llu dropped %llu queued %u rejected %llu flow %llu phase %s\n",
         second, x9d.mode, x9d.ready, x9d.failed, x9d.published, x9d.tx_packets, x9d.tx_done, x9d.rx_packets, x9d.rx_dropped, queued, rejected, x9d.flow_events,
         x9d.phase ? x9d.phase : "prepare");
+    uint64_t counts[9]; for (unsigned i = 0; i < 9; i++) counts[i] = __atomic_load_n(&x9d.tx_admit[i], __ATOMIC_RELAXED);
+    printf("X9 CELL TX: mailbox accept %llu argument %llu bad-ip %llu offline %llu unbound %llu epoch %llu family %llu mtu %llu full %llu; completion-not-air\n",
+        counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], counts[6], counts[7], counts[8]);
+    printf("X9 CELL RX: totals accepted %llu descriptor-drop %llu route %llu no-receiver %llu bad-ip %llu input-error %llu copied-bytes %llu PIT-consumed %llu/%llu\n",
+        x9d.rx_disposition[0], x9d.rx_disposition[1], x9d.rx_disposition[2], x9d.rx_disposition[3],
+        x9d.rx_disposition[4], x9d.rx_disposition[5], x9d.rx_wire_bytes, x9d.pit_consumed[0], x9d.pit_consumed[1]);
+    for (unsigned i = 0; i < CBP_INTERFACES; i++) {
+        IOLockLock(x9d.lock); x9d_route route = x9d.route[i]; x9d_stats s = {};
+        x9d_stats_locked(route, s); IOLockUnlock(x9d.lock);
+        printf("X9 CELL ROUTE: mux %u bound %u retiring %u channel %u families %u epoch %llu lifetime %llu MTU %u/%u TX %llu/%lluB RX %llu/%lluB drop %llu/%llu\n",
+            i + 1, route.bound, route.retiring, route.channel, route.families, route.epoch, route.lifetime,
+            route.mtu4, route.mtu6, s.tx_packets, s.tx_bytes, s.rx_packets, s.rx_bytes, s.tx_dropped, s.rx_dropped);
+    }
 }
 } // namespace
 // Native producers must carry the epoch observed before dequeue, not borrow
