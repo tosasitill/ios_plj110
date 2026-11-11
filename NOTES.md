@@ -6,6 +6,15 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 项目目录清理交接（2026-11-11；已执行）
+
+- 用户明确要求清理 `~/ios_plj110` 中不用的内容。本轮限定项目目录：**138个11月11日之前的已完成构建目录**中删除可再生的 `payload.bin`、`shim/{Image,shim.elf,shim-boot.img,*.o}` 及部分 `kernel-objects/*.{o,d}`，另清空共享Rust target的两处 `release/incremental`。共删除 **23861个文件**，没有删除整个worktree、分支、源码、未提交修改或任何设备数据；11月11日生成的构建目录不动。没有设备/挂载操作、编译、测试套件、镜像二次解包/hash或CI，本轮不push。
+- **实际占用**：同口径 `du -x -k -s` 项目 **147.79→127.15GiB**（约减少20.64GiB）；`x9/out` **26.95→16.98GiB**，`.local/x9/worktrees` **32.84→23.86GiB**，`x9-metal-render` **14.59→13.01GiB**。删除期间 `df` 可用 **92013804→110565028KiB**，即实际增加 **17.69GiB**、达到约105.44GiB。逐文件块数相加约21.08GiB，受硬链接计数、APFS共享块及并发变化影响，不当成实际回收量，也不与父子目录重复相加。
+- **完整保留**：全部 `boot.img`、有/无符号内核、匹配plugin-package、`shim/embedded-payload.bin`（历史启动参数恢复入口）、ADT、BBFW/CBN/root元数据、生成头文件、源码/补丁/原始日志/配置；冻结`.local/dxb`、Apple输入、Mesa/PanVK环境、Rust release库/deps/fingerprints不动。`x9-rootpull`的原始根盘与工作克隆、pan172回滚根盘和分区/固件备份保留；观察到`/private/tmp/x9root`及`x9pan172root`仍挂载，**不能把这两组大镜像当缓存删除**。Rust增量缓存之后会自动重建，首次相关编译会变慢。
+- **删除前约束与结果**：检查205个项目内worktree，其中22个有改动/未跟踪内容，跳过这些树；所有worktree登记与分支均保留。按精确白名单逐文件核对路径边界、无symlink穿越、inode/大小/时间未变、无已跟踪out文件，并检查构建进程、打开文件、配置/脚本及软链接引用；额外保留历史单对象relink脚本引用的objects。清理后 **28121个保留输出文件的存在性/inode/大小/mtime均未变**、删除清单无残留，主构建工具链/根盘manifest/BBFW/dxb/Mesa/Rust库输入存在，主工作区源码干净。上述仅文件元数据检查，不是重新验证镜像功能。
+- **恢复/后续边界**：旧目录的`kernel-link.filelist`作为历史记录仍保留，但其中已清掉的objects不能直接拿来重新链接；需要时在对应冻结源码树、原私有config/boot-config下用**新唯一name**正常`build.py all`重建，或保留内核走`build.py boot --kernel <保留内核>`重新生成shim。不要自动重建已成功镜像来验证这次清理，也不要把仍保留的根盘/活跃worktree整体删掉。
+- 私有精确清单/执行脚本/前后数据：**`.local/x9/work/project-cleanup-20261111/`** 的`approved-plan.json`、`removed.jsonl`、`clean.py`、`references.json`、`worktree-statuses-before.json`、`verification.json`、`sizes-{before,after}.tsv`与`df-immediately-{before,after}.txt`。仅本节交接入Git；清理前主HEAD为`292b015`（另窗口CELL156交付记录），其提交/产物未修改。
+
 ## 磁盘大项盘点（2026-11-11；仅统计，未清理）
 
 - 用户要求继续查看系统大占用。本轮仅目录块占用统计、应用元数据识别、进程观察、ccache统计及 **`brew cleanup --dry-run`**，没有删除/清缓存/卸载，也没有编译、测试、CI或设备操作。数据卷约 **343GiB已用/88GiB可用**；`du -x -k`不跟随软链接、不过其他挂载点，部分受保护目录不可读（首轮807条错误），且APFS克隆/共享块使目录数字不等于最终可回收容量；父子目录数字不能相加。
