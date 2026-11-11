@@ -6,6 +6,13 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## MD DHL日志通道 第1阶段（CELL-MDLOG1，2026-11-11；已构建，未启动）
+
+- **安卓侧协议（静态，来自已拉取的 `.local/x9/android-ccci-20261109-125536/libccci_util.so`；反汇编 `.local/x9/work/mdlog-20261111/ccb.dis`）**：内核 `ccci_ccb_dhl` 只是SMEM映射＋CCIF唤醒(AP_MD_CCB_WAKEUP)，环格式全在用户态。每个CCB buffer 64B头（nc smem regs[4]，我们已在S2初始化）：DL半+0x00、UL半+0x20；+0x08 release、+0x0c read、+0x10 write、+0x14 page、+0x18 buf、+0x1c 0x1100ffee。数据区=CCB数据（c smem id1 md 0x42200000，前0xDF000），按表顺序每buffer DL后UL；页={0x22222222,len,payload}。`read_get`: wr≠rd取页并rd++；`read_done`: rel++。`register`时rd=wr丢旧。DHL表(1M)：0 ctrl、1 exception、2 BUF/PS log、3 CMD。emdlogger本体尚未拉取（手机当时不在安卓），**启动MD日志/过滤器的命令协议仍未知**（可能经 ccci_md_log_ctrl=UART1通道 或 CCB CMD/ctrl的UL方向）。
+- **实现**：main **`6df831f`**：`x9_modem.inc` 新增 `x9_md_log_poll()`（bridge声明），由 `X9WDS.inc` 3s CONTROL心跳调用。只读打印DHL0–3头（变化或每20次），有新页时打印首页magic/len/前48B，然后 rd=rel=wr 消费（防MD环满）。不写MD的UL/命令方向。注意c smem有两个id=1区（md 42140000/0xc0000 与 42200000/0xb00000），取后者＝rt case15给MD的CCB数据基址。
+- **镜像**：worktree `.local/x9/worktrees/cell-mdlog1-gpu278-20261111/` = dpdump树(`52179da`)+cherry-pick(`ace3adc`)，配置同dpdump，exit0，boot13885440B → **`x9/out/x9-cell-mdlog1-gpu278-20261111/boot.img`**。
+- **读法/下一步**：`rg -n "X9 MDLOG" <log>`。若DHL2 wr在无命令时就增长→MD默认在打日志，下一阶段实现整流落盘＋mddb解码；若始终不动→需安卓上拉emdlogger并抓其对 ccci_md_log_ctrl / CCB UL 的写入，复现启动命令。
+
 ## MD SDAP上行静态查看（MD-SDAP-UL，2026-11-11）：静态无法定出实际丢包分支，建议改取MD自身DHL日志
 
 - `sdap_ul_drop_data_req@902cb21a`：遍历3个队列（表0x92cb8d7c）调用 `enpdcp_ulproc_disc_qsi`——是PDCP队列整体discard（flush），不是逐包“无映射”判定。
