@@ -6,6 +6,14 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 磁盘大项盘点（2026-11-11；仅统计，未清理）
+
+- 用户要求继续查看系统大占用。本轮仅目录块占用统计、应用元数据识别、进程观察、ccache统计及 **`brew cleanup --dry-run`**，没有删除/清缓存/卸载，也没有编译、测试、CI或设备操作。数据卷约 **343GiB已用/88GiB可用**；`du -x -k`不跟随软链接、不过其他挂载点，部分受保护目录不可读（首轮807条错误），且APFS克隆/共享块使目录数字不等于最终可回收容量；父子目录数字不能相加。
+- **最大项目占用**：仓库约 **147.17GiB**，其中`x9/out` **26.64GiB**、`.local/x9/worktrees` **32.56GiB**、`.local/x9/work` **77.29GiB**；work内`x9-rootpull` **33.53GiB**、`x9-metal-install-pan172` **16.00GiB**、`x9-metal-render` **14.59GiB**。根盘/备份/构建输入不得凭大小删除；out与worktree也须先核对最新候选、活跃窗口、未提交修改及Git引用，不能把全部当缓存。
+- **项目外大项**：Android `~/.android/avd/Pixel_6a.avd` **14.94GiB**，SDK的`system-images/android-37.1` **8.16GiB**（两者约23.10GiB）；完整Android SDK **13.81GiB**还含NDK2.78GiB、emulator1.15GiB，不能一起误删。`~/Library/Application Support/Fever/FeverApps/party_mac` **17.10GiB**，应用plist对应网易发烧游戏/蛋仔派对，属于游戏资源而非可直接清空的缓存。DaVinci Resolve约8.55GiB、Anaconda约5.31GiB、Android Studio约3.24GiB，是否卸载由用户确认。
+- **可优先评估的缓存/临时项**：Gradle总8.23GiB（`caches` **7.16GiB**、wrapper1.01GiB）；npm总 **2.63GiB**（`_cacache`1.83GiB、`_npx`0.80GiB）；用户Library/Caches总 **8.33GiB**，包括微信1.94GiB、Google1.86GiB、VSCode.ShipIt更新缓存1.61GiB、ccache1.18GiB、Homebrew0.60GiB和ZCode更新缓存0.56GiB。缓存可重建但应避开运行中的写入，清ccache会失去编译加速；`.cache/codex-runtimes`1.79GiB是运行时，不能仅因在.cache下就删除。`/private/tmp` **5.97GiB**，其中m219/chkb/chk约1.64/1.23/0.62GiB、目录时间11月7日；未见相关进程不等于可删，仍须核对任务与引用。Homebrew dry-run仅预估 **426.9MB**，有多个“最新版未安装，跳过”提示，不是批准升级或强制清理LLVM旧版。`tmutil`未列出Time Machine本地快照，不代表已排除所有APFS快照；swap由系统管理，不手删。
+- 私有尺寸表/错误日志/预览：**`.local/x9/work/disk-usage-audit-20261111/`** 内`top-level.tsv`、`detail.tsv`、`large-items.tsv`、对应`*-errors.log`、`ccache-stats.txt`、`brew-cleanup-dry-run.txt`。可用`du -x -k -d 1 <目标目录>`复核；下一步需用户选定清理范围，优先可重建缓存或明确不用的模拟器，不自动动游戏资料、系统组件及项目根盘/备份。
+
 ## 系统 Xcode 删除交接（2026-11-11）
 
 - 用户继续要求检查系统安装的 Xcode，不需要则删除。**`/Applications/Xcode.app`（27.1 / 27A9275）已删除**，临时隔离副本也已删除；原实际占用 **3813128KiB（3.64GiB）**。删除前后全卷可用空间增加3857944KiB（约3.68GiB，可能含并发变化），本轮没有清理其他应用、系统共享开发组件或项目数据。
