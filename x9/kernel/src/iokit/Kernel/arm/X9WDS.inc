@@ -23,7 +23,7 @@ enum { X9W_DISC=1, X9W_ACT, X9W_CHECK, X9W_DEACT, X9W_IFWAIT };
 struct x9w_bearer {
  bool used,owned,active,abandoned,pending,hold,gone;
  unsigned slot,op,min_cid,max_cid,channel,mtu,dns_count;
- uint64_t generation,token,deadline,next,if_floor;
+ uint64_t generation,token,deadline,reply_deadline,next,if_floor;
  uint32_t handle,len,trans_id;
  uint8_t cid,sim_slot,req[X9Q_REQ],ip[4],dns[2][4];
  char apn[101];
@@ -192,7 +192,7 @@ static void x9w_rat_tlv(x9q_packet &p,unsigned tag,unsigned rat){
  p.tlv((uint8_t)tag,value,sizeof(value)); // 3GPP, real LTE/NR RAT mask, SO unknown
 }
 static void x9w_pending_done(x9w_bearer &b){
- if(b.pending&&x9w_live(b))x9w_clients[b.slot].starting=false;b.pending=false;b.len=0;bzero(b.req,sizeof(b.req));
+ if(b.pending&&x9w_live(b))x9w_clients[b.slot].starting=false;b.pending=false;b.reply_deadline=0;b.len=0;bzero(b.req,sizeof(b.req));
 }
 static void x9w_error(x9w_bearer &b,unsigned error){
  if(b.pending&&x9w_live(b)){
@@ -208,6 +208,14 @@ static void x9w_disconnect(x9w_bearer &b,unsigned mux){
   uint8_t req[7]={0,0,0,0x22,0,0,0};x9q_packet p(req);uint8_t status[2]={1,0},family=4;
   p.tlv(1,status,2);p.tlv(0x12,&family,1);p.send(CBQ_PORT_BASE+b.slot,X9BB_PORT_BASE+1,true,0x22);
  }
+}
+static void x9w_host_expire(x9w_bearer &b,unsigned mux,uint64_t now){
+ if(!b.pending||!b.reply_deadline||now<b.reply_deadline)return;
+ // Host reply lifetime is independent of any wire token or release gate.
+ // Close admission once; pending_done only retires the request bytes, not
+ // the bearer, original token, CID reservation or in-flight DPMAIF records.
+ b.abandoned=true;x9w_disconnect(b,mux);x9w_error(b,X9Q_NOT_READY);
+ printf("X9 WDS: host reply deadline mux %u; original control/data retirement retained\n",mux);
 }
 static void x9w_clear(x9w_bearer &b,unsigned mux){x9w_disconnect(b,mux);x9w_pending_done(b);bzero(&b,sizeof(b));}
 static bool x9w_send(x9w_bearer &b,x9w_frame &f,unsigned op,unsigned timeout){
@@ -256,6 +264,7 @@ static void x9w_publish(x9w_bearer &b,unsigned mux){
  connected.send(CBQ_PORT_BASE+b.slot,X9BB_PORT_BASE+1,true,0x22);
 }
 static void x9w_result(x9w_bearer &b,unsigned mux,const uint8_t *p,unsigned n){
+ x9w_host_expire(b,mux,x9q_ms()); // late ready1 cannot restore host success
  unsigned op=b.op;b.op=0;unsigned result;
  unsigned expected=op==X9W_DISC?0x21a:op==X9W_ACT?0x202:op==X9W_CHECK?0x206:0x204;
  if(!x9w_wire(p,n)||x9q_u16(p+10)!=expected||!x9w_word(p,n,0,result)){
@@ -373,6 +382,7 @@ static void x9w_poll(){
   else if(x9q_u16(response+10)==0x4202&&x9w_byte(response,n,0x100,cid)){
    for(unsigned m=0;m<CBP_INTERFACES;m++){x9w_bearer &b=x9w_bearers[m];
     if(b.used&&b.owned&&b.cid==cid&&(response[8]&(1u<<b.sim_slot))){
+     x9w_host_expire(b,m+1,x9q_ms()); // bound unsolicited Stop completion too
      b.gone=true;b.owned=false;b.abandoned=true;x9w_disconnect(b,m+1);
      if(b.pending&&x9q_u16(b.req+3)==0x21&&x9w_live(b)){x9q_packet p(b.req);p.send(CBQ_PORT_BASE+b.slot,X9BB_PORT_BASE+1);}
      else x9w_error(b,X9Q_NOT_READY);
@@ -385,14 +395,18 @@ static void x9w_poll(){
  }
  uint64_t now=x9q_ms();bool online=x9_md_mipc_online();
  for(unsigned i=0;i<CBP_INTERFACES;i++){x9w_bearer &b=x9w_bearers[i];if(!b.used)continue;
+  x9w_host_expire(b,i+1,now);
   if(!x9w_live(b)||!online||!x9d_ready()){b.abandoned=true;x9w_disconnect(b,i+1);x9w_error(b,X9Q_NOT_READY);}
   if(b.token){
-   int ready=x9_md_mipc_take(b.token,response,sizeof(response),&n);
-   if(ready==1){b.token=0;x9w_result(b,i+1,response,n);bzero(response,sizeof(response));continue;}
-   if(!b.hold&&now>=b.deadline){
+   // Deadline precedes take, including a ready1 first observed after expiry.
+   // Keep the original token on pending/error and drain it even while held.
+   if(!b.hold&&x9q_ms()>=b.deadline){
     b.abandoned=true;x9w_disconnect(b,i+1);x9w_error(b,X9Q_NOT_READY);b.hold=true;
     printf("X9 WDS: op %u timed out mux %u; retain token for late CNF, no retry\n",b.op,i+1);
-   }continue;
+   }
+   int ready=x9_md_mipc_take(b.token,response,sizeof(response),&n);
+   if(ready==1){b.token=0;x9w_result(b,i+1,response,n);bzero(response,sizeof(response));continue;}
+   continue;
   }
   if(b.gone){x9w_clear(b,i+1);continue;}
   if(b.abandoned){if(b.owned&&!b.hold)x9w_deactivate(b,i+1);else if(!b.owned&&!b.hold)x9w_clear(b,i+1);continue;}
@@ -515,7 +529,9 @@ static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
   if(!h.p||h.n!=4||n!=14)error=X9Q_ARG;
   else if(!own||!own->handle||x9q_u32(h.p)!=own->handle)error=9;
   else if(own->pending||own->hold||(own->token&&own->op!=X9W_CHECK))error=X9Q_BUSY;
-  else{own->pending=true;own->len=n;memcpy(own->req,req,n);own->abandoned=true;c.starting=true;
+  else{own->pending=true;own->reply_deadline=x9q_ms()+60000;own->len=n;memcpy(own->req,req,n);own->abandoned=true;c.starting=true;
+   // Established before GET drain/DEACT submission: no-token release denial
+   // cannot leave an accepted Stop waiting forever or extend its host budget.
    if(own->token){x9w_disconnect(*own,c.mux);return true;} // drain periodic GET, then real DEACT
    if(!x9w_deactivate(*own,c.mux))x9w_error(*own,X9Q_NOT_READY);return true;
   }
@@ -534,6 +550,7 @@ static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
   else{
    x9w_bearer &b=x9w_bearers[c.mux-1];bzero(&b,sizeof(b));b.used=b.pending=true;
    b.slot=slot;b.sim_slot=c.sim_slot;b.generation=x9q_clients[slot].generation;b.len=n;memcpy(b.req,req,n);
+   b.reply_deadline=x9q_ms()+200000; // DISC10 + ACT120 + GET30 + IFWAIT30
    x9q_view apn=x9q_tlv(req,n,0x14);
    if(x9q_tlv(req,n,0x31).p)memcpy(b.apn,selected_apn,sizeof(b.apn));
    else if(apn.n)memcpy(b.apn,apn.p,apn.n);c.starting=true;
