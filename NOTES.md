@@ -6,6 +6,14 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 230 MDLOG第2阶段结果＋第3阶段（CELL230-MDLOG2 / CELL-MDLOG3，2026-11-11；mdlog3已构建，未启动）
+
+- **230（mdlog2）观察**：\`~/230.txt\` 末72.96s、无panic。16.68s起四条SPLM全部 \`-> 0\`，MD逐条回 dir=01 应答（0x05/0x0f/0x00/0x20），0x00后MD回 **"[DHL][EBS] Logging mode change to 1"**，之后持续 "[DHL][DEBUG] page req count"；filter帧 \`-> 0\`。**MD接受了内核写入的UL页与CCIF ch7门铃。** buf2页 39.56s前3945页、bad0、full-seen0（2ms排空足够）；ACT 29.559s mark=296616；39.559s保存692172B → \`save -> 0\`。
+- **取回**：Android下 \`x9/tools/pull_ios_logs.py --manifest .local/x9/root-extension/20261110-16g/root-manifest.json --out .local/x9/work/mdlog230 --paths private/var/x9-mdlog.bin\`（工具已修：\`--paths\`可指单文件，提交 \`06c909e\`）→ 692172B与日志一致。
+- **发现**：文件90%为0、无≥8字节非零段——**buf2页是描述符**，正文在RAW DHL。三处独立位置一致：嵌入的DHL帧头(\`acca ef10\`|len|flags|ck)前 -0x4c=type1、-0x48=RAW偏移、-0x28=len(=帧头len)、-0x08=0x10；相邻偏移按len+0x10递进；另有len=8的内联小帧。
+- **第3阶段**：main **\`9c5eb70\`**（仅 x9_modem.inc）：\`ml_io_map_unmappable\`（进kernel_map，不占8MiB io submap）映射RAW DHL（AP pa = CCB c区pa+1MiB = 0xf0300000，size regs[5]=0xa00000）；释放每个buf2页之前解析描述符，把 \`帧头16B + RAW[off..off+len]\`（或内联小帧整帧）写入64MiB环；报告desc/raw/inline/badent并打印前6个正文首16B。镜像 **\`x9/out/x9-cell-mdlog3-gpu278-20261111/boot.img\`**（worktree \`cell-mdlog3-gpu278-20261111\` = mdlog2树+cherry-pick），exit0。保存路径/时机同mdlog2。
+- **待验证**：RAW偏移基准（假定相对RAW区起点）、正文是否非零/可解码；若raw速率高，64MiB窗口变短。解码用MDDB。
+
 ## MD DHL日志采集 第2阶段（CELL-MDLOG2，2026-11-11；已构建，未启动）
 
 - **源码**：main **\`1b44fdf\`**（x9_modem.inc / x9_modem_bridge.h / X9WDS.inc / x9_baseband_firmware.inc）。用户选择**RAM环＋短窗口**。
