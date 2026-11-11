@@ -7,6 +7,7 @@
  * across SIM/card epoch. IDs are not reused before reboot; DEL_CLIENT does
  * not erase another client's profile or an already copied bearer config.
  */
+#include "X9WDSOptions.inc"
 struct x9p_profile {
  bool used,configured;uint8_t sim,type,index;uint64_t epoch;
  unsigned len;uint8_t settings[X9Q_REQ];
@@ -47,7 +48,9 @@ static bool x9p_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
  else if(!(p=x9p_find(sim,key.p[0],key.p[1])))error=10; // INVALID_PROFILE
  else if(id==0xc7){
   x9q_view persist=x9q_tlv(req,n,0x8f);
+  x9o_profile_options options={};
   if(persist.p&&(persist.n!=1||persist.p[0]))error=X9Q_UNSUPPORTED;
+  else if((error=x9o_decode_profile(req,n,options))!=0){}
   else{
    // Atomic replacement, not a modem write. Opaque options are retained,
    // not silently executed; Start validates what this dialler can apply.
@@ -86,15 +89,21 @@ static unsigned x9p_start(const uint8_t *req,unsigned n,unsigned sim,unsigned fa
   x9q_view credentials=x9q_tlv(p->settings,p->len,(uint8_t)tag);
   if(credentials.p&&credentials.n)return X9Q_UNSUPPORTED;
  }
+ x9o_profile_options options={};unsigned option_error=x9o_decode_profile(p->settings,p->len,options);
+ if(option_error)return option_error;
+ x9o_modem_plan plan=x9o_make_plan(options);
+ if((option_error=x9o_start_route(plan))!=0){
+  printf("X9 PROFILE: Start SIM%u index %u present option %02x plan %u lacks qualified before-ACT route; no dial\n",sim+1,p->index,plan.blocked_tag,plan.kind);
+  return option_error;
+ }
  // These options affect modem configuration, not just QMI RAM metadata.
- // 29 is a packed 34-byte UMTS requested QoS + signaling indication,
- // not a boolean or an IMS APN selector. Native can add it when carrier
- // SupportsIMSSignalingIndication is true. No ACT201/profile-v2 mapping
- // for that request has been established; do not silently discard it.
+ // 29/37/38/39/47/4e are decoded/planned above. Any present29, including
+ // subscribed/all-zero29, needs a real setter: TCM SET_EQOS sets the
+ // requested-QoS marker and overwrites FIC QoS, unlike an absent request.
  // 1f is PCSCF address via PCO, 36 is emergency support; both are u8.
- const unsigned flags[]={0x1f,0x29,0x36};
- const unsigned sizes[]={1,34,1};
- for(unsigned j=0;j<3;j++){
+ const unsigned flags[]={0x1f,0x36};
+ const unsigned sizes[]={1,1};
+ for(unsigned j=0;j<2;j++){
   unsigned tag=flags[j];
   x9q_view option=x9q_tlv(p->settings,p->len,(uint8_t)tag);
   if(!option.p)continue;

@@ -203,7 +203,7 @@ IPv6/SLAAC、持久/原 modem profile、auth、默认 APN 发现、autoconnect�
 | Start31 / 32 | 各 u8，3GPP / 3GPP2 profile index | 每 SIM QMI RAM 引用，非 MTK CID；只用3GPP APN拨号 |
 | Start35 CallType | u8；扩展入口总是添加；`1f1a8beb0` 的 block 写1=Embedded NAI、0=Tethering NAI | 接受1，作为普通 embedded 呼叫选择元数据；不改已有 ACT201 Internet APN/no-auth。0不支持；不是 IMS/emergency 标记 |
 | Start3e / profiledd | u64 APN type mask | 仅 Internet1；MTK ACT201 的102是 **u32**，经 `getMipcApnTypeId(0)` 也为1；其余 mask 不原样截断/照搬 |
-| profile29 QoS/SigInd | **34 B**：traffic class u8、多个 LE u32/u8 QoS 字段、末尾 signaling u8；新wrapper填 traffic3、priority1、signaling1，其余初始0；既有wrapper保留其他字段 | 不是 bool，也不是 IMS APN 身份。须 APN observer 的 `isImsSupported` 谓词、set3GPPParameters 扩展 bool、carrier `SupportsIMSSignalingIndication=true` 都满足；carrier 缺键默认 false，届时不添加29，不是零QoS。非零仍拒绝，无可信请求映射 |
+| profile29 QoS/SigInd | **34 B**：traffic class u8、多个 LE u32/u8 QoS 字段、末尾 signaling u8；新wrapper填 traffic3、priority1、signaling1，其余初始0；既有wrapper保留其他字段 | 不是 bool，也不是 IMS APN 身份。须 APN observer 的 `isImsSupported` 谓词、set3GPPParameters 扩展 bool、carrier `SupportsIMSSignalingIndication=true` 都满足；carrier 缺键默认 false，届时不添加29，不是零QoS。c7逐字段校验；任何present29（含全零）在Start明确unsupported，未绑定真实before-ACT设置事务 |
 | profile1f / 36 | 各u8，PCSCF address via PCO / emergency support | 仅尺寸正确的0；非零不转普通 Internet |
 | profile37 / 38 / 39 | OperatorReservedPcoId u16 / MCC u16 / MNC u16+u8；37须 context 提供非零ID；38/39来自 `PcoOptions` | 是协议配置，不是可忽略 RAM 注释；未证明 MTK 下发映射，仍拒绝 |
 | profile47 PcoContainerIds | 固定 **20 B**，10个u16槽；容器列表非空且 PcoMcc/PcoMnc 均非零才追加38/39/47，超过10个截到10个 | 不把整个 QMI TLV 塞进 MTK profile-v2；未知映射仍拒绝 |
@@ -217,6 +217,23 @@ MT6993 **已加载的** `libmtkmipc-ril.so` 中，`fillMipcApnItem@2c94c0` 填�
 `requestSetupDataCall@2b6af0` 的 ACT builder 中确认上述 requested QoS / operator PCO 下发字段。
 `updateEpsQos@2ccea0` 是发送 **221/GetQoS**、读回网络已分配 QoS；不能把它当作设置请求 QoS。
 `onPcoInfoNotify@2a4910` 是读取 PCO count/内容的 indication 路径，也不证明 operator/container 请求已发出。
+
+`X9WDSOptions.inc` 提供值类型选项契约：29按packed offset逐字段读取，37/38各u16、
+39为u16+u8、47为10个u16、4e为u8；保存presence，拒绝已知选项重复或长度错误。
+c7先解析再原子替换RAM；Start重新解析并生成具名计划，不在异步调用里持有profile指针。
+缺少这些选项时原普通Internet路径不变。present29全零也不是缺省不请求：
+P77 `tcm_l4ctcm_set_eqos_info_req_hdlr@912c0eca` 在requested模式设置is_cgqreq、
+清/填QoS并覆盖FIC+36c；不能以“值均零”为由静默略过setter。
+
+fresh限定的`x9o_encode_cgeqreq_candidate`只格式化候选SYS_AT3/TLV8100字符串，**不发送**：
+Interactive3→AT2→MD encoded3、priority1，其他rate/SDU/delay数值零；所有参数显式，
+避免MD缓存的omitted-field继承。真实ROM的`+CGEQREQ`表项92987910选择
+`atp_d2at_cgeqreq_hdlr@9142ab7a`，发b116；D2表928b37e4再选
+`cgeqreq_req_hdlr@90a88fee`。不是只凭DDM wrapper名字认定实际AT入口。
+候选仍待相同AT/D2CID→PSCID的before-ACT归属、setup/confirm与失败归还绑定；
+普通ACT201目前不携带这个选项请求，格式化成功不表示设置/无线成功。
+非fresh QoS的物理单位/范围、37/38/39/47/4e转换继续unsupported，
+**SET_PCO101/u32是optional APNindex，不是QMI37/u16 operator container ID**。
 
 **默认值与查询路径不能混为一谈：**
 
