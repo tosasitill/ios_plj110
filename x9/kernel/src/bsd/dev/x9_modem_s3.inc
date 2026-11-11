@@ -333,6 +333,11 @@ static void x9md_rpc_dispatch(uint32_t op,uint32_t para,const struct x9md_lv *lv
   uint32_t net_if=x9md_ld32(lv[0].p),q=x9md_ld32(lv[0].p+4);
   if(logged<32){logged++;printf("X9 MODEM: RPC LHIF_MAPPING ccmni%u -> lhif UL queue %u (%s); reply OK\n",net_if,q,q==2?"AP UL Q0 normal":q==3?"AP UL Q1 IMS":"other");}
   x9md_rep_u32(r,0);x9md_rep_u32(r,0);break;}
+ case 0x4016:   /* IPC_RPC_RF_ECID_DATA_OP: vendor only saves/prints the ECID debug blob (CONFIG_MTK_ECCCI_DEBUG_LOG), replies 0,0 */
+  if(para!=1){x9md_rep_u32(r,(uint32_t)-2);x9md_rep_u32(r,(uint32_t)-2);break;}
+  x9md_rep_u32(r,0);x9md_rep_u32(r,0);break;
+  /* 0x4017 AFC_UFC_IO_BLOCK_OP exists only with CONFIG_SCSI_UFS_MEDIATEK_DBG; otherwise the vendor default
+   * (FS_NO_OP) applies, as below. */
  default: {     /* port_rpc.c default branch: FS_NO_OP */
   static unsigned unk;
   if(unk<32){unk++;printf("X9 MODEM: RPC op %04x para %u unhandled -> FS_NO_OP\n",op,para);}
