@@ -1508,6 +1508,13 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **不能称为全部USB完成**:本轮暂无枚举/DMA/ue0 ping/bulk回环实机结果,live EMI/MPU允许普通XNU DMA页也未证明。`native_apple_stack=0`,没有冒充IOUSBDeviceController或AppleUSBDeviceMux;原始configd USBDeviceConfiguration/lockdownd、Finder/iTunes Trust/配对/照片同步仍缺20H392 controller adapter及kext构建接入。USB3 XS-PHY/retimer、charger Type-C role与原生xHCI也未完成。参考文章chip/board/security-domain/fsid/锁状态条件要到原生栈接通后才验证,不先改身份/配对状态制造成功。
 - **下一步/验收**:先在用户手动启动的单一候选核对`CAP_EPINFO/TXFIFO/RXFIFO/MISC`→config1/alt1→真实QMU OUT/IN→ue0 ping,再用iOS `usbctl --echo`+host单次echo证明host→iOS→host字节相同。保留EP0日志,无需重建Metal插件/mailbox。接口/回退/构建说明在`x9/usb/README.md`;不要求用户现在连续刷试探镜像。
 
+## 蜂窝设置取值交接(ABOUT-NETWORK214，2026-11-11)：网络“不可用”判定为运营商名称为空；NAS44实际未实现，与IMS/Internet验收分开
+
+- **原生显示逻辑已确认**：20H392 `PSGAboutDataSource._loadValues@207455b4c`，按每个subscription/slot读取 `PSUICoreTelephonyRegistrationCache.localizedOperatorName:`（207455cb4）；207455cc8..ccc判断length，nil/空串→`NO_NETWORK`，Preferences原Localizable.loctable的zh_CN值为“不可用”。不是Internet探测，不直接查IMS、PDP、IP、DNS或RX；reject code2/3/6仅额外提供详情入口。Carrier54.x来自独立CarrierBundleCache，IMS状态也有独立`_IMSStatusString:`，不能相互代替。
+- **当前实际名称链断点**：`~/214.txt`原LF8328/8339等共**10条NAS0x0044拒绝，error94**（约30.988–99.018s，6条另有request格式摘要，不能误算只有6次）。原Apple `QMINetworkRegistrationDriver::getPlmnName@1f1afe400`确实构建0x44；callback@1f1b0ad74非零error直接跳收尾，跳过`OperatorNameUpdate`。当前`X9QMIAT.inc:626..630/724`不支持NAS44，与214源码0e3681b无diff；COPS numeric仅解析PLMN/AcT，不等于回传网络名称。**确认实际缺口，但没有设备Preferences最终NSString采样或穷尽CC名称回退，不能把该断点说成已经动态证明所有名称来源均空。**
+- **后续**：从真实MTK按SIM/PLMN/RAT名称接口补NAS44的文本、编码、来源及生命周期，并触发原生更新/缓存失效；不硬编码运营商、不把修名称当修RX0。RegistrationCache按slot缓存，首次字典不存在才抓取，operatorNameChanged后重新本地化；修好底层仍需新鲜缓存验证。IMS按下一节继续独立核对，未证明其缺失导致这行或Internet RX0。
+- **成果与重放**：报告提交 **`8aec2d3`**，`docs/network/about-network-20H392.md`；私有 `.local/x9/work/about-network-20261111/` 含trace.py、collect-runtime.py、10段汇编、image-provenance/range-verification/runtime-evidence.json、constants/localization.json及脱敏定点摘录。根目录运行`python3 .local/x9/work/about-network-20261111/trace.py`与`python3 .local/x9/work/about-network-20261111/collect-runtime.py`重放；10段函数字节与现有根盘快照cache全部相同（不是设备内存采样）。只读原Apple输入/快照/已有日志及源码，**无运行代码改动、编译/新镜像/CI run/测试套件/push/设备操作**；仅报告和本节交接入Git，保留并发IMS交接。
+
 ## 蜂窝当前分析交接(IMS214-NATIVE，2026-11-11)：确认iOS实际IMS启用入口被拒绝；不是继续堆IMSA查询，尚未改运行代码
 
 - **用户最新要求**：“有人提醒我们要先修复IMS你看看怎么弄”。已转查IMS，暂不全构建cell158。**确定存在IMS缺口，但尚未证明它是普通Internet RX0的前置原因**；不能把提醒、通常网络架构或已有注册查询当本机因果证据。最新实测仍214/cell157的TX242/242、RX0；BAT源码修复保留，未上机。
