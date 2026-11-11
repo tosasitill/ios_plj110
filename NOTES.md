@@ -1375,7 +1375,15 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **不能称为全部USB完成**:本轮暂无枚举/DMA/ue0 ping/bulk回环实机结果,live EMI/MPU允许普通XNU DMA页也未证明。`native_apple_stack=0`,没有冒充IOUSBDeviceController或AppleUSBDeviceMux;原始configd USBDeviceConfiguration/lockdownd、Finder/iTunes Trust/配对/照片同步仍缺20H392 controller adapter及kext构建接入。USB3 XS-PHY/retimer、charger Type-C role与原生xHCI也未完成。参考文章chip/board/security-domain/fsid/锁状态条件要到原生栈接通后才验证,不先改身份/配对状态制造成功。
 - **下一步/验收**:先在用户手动启动的单一候选核对`CAP_EPINFO/TXFIFO/RXFIFO/MISC`→config1/alt1→真实QMU OUT/IN→ue0 ping,再用iOS `usbctl --echo`+host单次echo证明host→iOS→host字节相同。保留EP0日志,无需重建Metal插件/mailbox。接口/回退/构建说明在`x9/usb/README.md`;不要求用户现在连续刷试探镜像。
 
-## 蜂窝当前交接(CELL145-IPBUSY,2026-11-11): 201上行已通(提交=完成)，MD已配置自身DPMAIF部分；下行仍0(MD未下发)；cell145取消IP busy屏蔽+开DL校验和，未上机
+## 蜂窝当前交接(CELL146-IFID,2026-11-11): 202上行仍全通、下行仍0；cell146按Android RIL在ACT中带AP接口ID(IF_ID 0x110)，未上机
+
+- **202.txt**(cell145)。**观察**：UL 84/84完成；IP busy解屏蔽、RDY_CHK_THRES=0x80be2000(与Android一致)；RX 0，LRO PIT0写指针与legacy PIT索引仍0——MD不下发。新增`hpc`(pd+0x600)窗口与Android差异是**状态/计数器**(HPC_ENTRY_STS/CI_CO/HASH，原厂头文件)，是有下行流量的结果，不是配置；`ao_misc_sram`与Android基本一致。
+- **新差异**：旧Android logcat(`.local/x9/android-pull-20261106-132120/logcat-all.txt`)：上网PDN `dnn cbnet`、IPV4V6、`ifname ccmni3`、`cid 303`(IMS为ccmni2 cid 202)。原厂MIPC头：`DATA_ACT_CALL_REQ` TLV `0x110 IF_ID`(u8,0..19)；`0x10A REUSE_FLAG` 2=NOT_REUSE。MD ACT CNF有"Return Host interface ID"分支；`mipc_internal_eif_ind`区分"Send AP interface ID"/"Host did not act this call before"/"sAP or modem user"。我们从未发IF_ID→**推断**MD把PDN视为modem用户，不向AP下发DL。
+- **修复 main `bd20f13`**：ACT201带`IF_ID = 2+mux`(mux1→ccmni3同Android)；MD两种trans满足`host = modem - modem%100 + host_if`：EIF百位相同而个位不同则映射到host接口(日志`EIF modem interface X mapped to host interface Y`)；ACT CNF前到达的IFUP在发布时被认领(`early EIF IFUP ... adopted`)。单编True。
+- **候选 `x9/out/x9-cell146-ifid-md/boot.img`**(worktree `f09ab43`)，三命令exit0，boot 13533184B，参数同131，插件276，**无需mailbox**。记录`.local/x9/work/cell146-ifid/`。
+- **下一步**：用户boot cell146→`~/203.txt`。看`requesting IPv4 call ... host IF_ID 3`后的`MIPC CNF msg 0x0202 result`(MD是否接受IF_ID)、`PDP activated ... ccmni3`、mapped/adopted日志、`GET205 differs`(GET是否返回host接口)、RX。若MD拒绝IF_ID或GET不一致，按日志调整。
+
+## 蜂窝前次交接(CELL145-IPBUSY,2026-11-11): 201上行已通(提交=完成)，MD已配置自身DPMAIF部分；下行仍0(MD未下发)；cell145取消IP busy屏蔽+开DL校验和，未上机
 
 - **201.txt**(cell144)。**观察**：5.05s DPMAIF在HS1前启动，14.17s READY，21.36s AT上线dump：`dl_sram+0xe4=0x696f8000`、`pd_dl+0x28=0x696f8000`(legacy PIT已由MD配置)、PKTINFO_CON0 0x10460/CON2 0x7c100d00/TIMEOUT0 1与Android一致——**确认根因：DPMAIF启动过晚导致MD未完成自身配置**。29.749s PDP activated后**UL全部完成**(72/72、163/163，首批卡死消失)。**RX仍0**：LRO PIT0写指针(`dl_sram+0x98`低位)、legacy PIT索引(+0xec/+0x60/+0x64)均为0——MD没有下发任何下行(Android分别为0x2A7与0x5A8)。
 - **剩余差异**：HPC_CNTL仍0x10D2(Android 0x10DA，add mode2由MD写)、PIT_SEQ_END 0x1ff0ffff(Android 0x0ff0ff00)、RDY_CHK_THRES bit31(DL checksum，原厂bat_start置位)、AP_DL_UL_IP_BUSY_MASK(原厂drv3_intr_hw_init末尾=0不屏蔽，我们~0)。BAT 1024/PIT 2048 vs Android 16384/32768(Android实际只信用约2000个BAT)。
