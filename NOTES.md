@@ -1375,7 +1375,16 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **不能称为全部USB完成**:本轮暂无枚举/DMA/ue0 ping/bulk回环实机结果,live EMI/MPU允许普通XNU DMA页也未证明。`native_apple_stack=0`,没有冒充IOUSBDeviceController或AppleUSBDeviceMux;原始configd USBDeviceConfiguration/lockdownd、Finder/iTunes Trust/配对/照片同步仍缺20H392 controller adapter及kext构建接入。USB3 XS-PHY/retimer、charger Type-C role与原生xHCI也未完成。参考文章chip/board/security-domain/fsid/锁状态条件要到原生栈接通后才验证,不先改身份/配对状态制造成功。
 - **下一步/验收**:先在用户手动启动的单一候选核对`CAP_EPINFO/TXFIFO/RXFIFO/MISC`→config1/alt1→真实QMU OUT/IN→ue0 ping,再用iOS `usbctl --echo`+host单次echo证明host→iOS→host字节相同。保留EP0日志,无需重建Metal插件/mailbox。接口/回退/构建说明在`x9/usb/README.md`;不要求用户现在连续刷试探镜像。
 
-## 蜂窝当前交接(CELL142-TXQ4,2026-11-11): 198用原厂L2掩码仍首批即停；cell142按Android实况启动全部4个TX队列，未上机
+## 蜂窝当前交接(CELL143-HS1,2026-11-11): Android实机寄存器对照找到根因候选——MD侧DPMAIF配置缺失(我们在READY后才启动DPMAIF)；cell143改在BOOT_WAITING_FOR_HS1启动，未上机
+
+- **199.txt**(cell142)：4个TXQ已启动(flow计数因q1..3空队列EMPTY常置而持续增长，预期)，UL仍只完成首批(1)，RX 0。
+- **Android对照采集**(用户进Android，蜂窝数据正常；adb在Mac `/opt/homebrew/bin/adb`，`su -c`可用，SELinux Enforcing，无/dev/mem)：`echo dpmaif > /sys/kernel/ccci/mdsys/dump`触发原厂`drv3_dump_register`，结果在`/proc/ccci_dump`(**不要读/proc/ccci_log，会阻塞**)。保存`.local/x9/android-dpmaif-20261111/proc_ccci_dump2.txt`(不入git)。`ping 223.5.5.5`通，数据走ccmni3(MTU1410)，`dpmaif-txq: 0-3(status=0xf)`。
+- **对比结论**：UL SRAM布局/DRB大小0x1000字/高位地址=1与我们一致(Android DMA也在4GiB以上，地址不是问题)。**DL差异**：Android `dl_sram+0xe4/+0xe8/+0xec/+0x60/+0x64`(legacy PIT_STA0..4)=0x696F8000/0x60000/0x5A8/0x5A8/0x5A8且在用，`pd_dl+0x28/0x2c PIT_INIT_CON0/1`=0x696F8000/0x20000；HPC_CNTL 0x10DA(add mode2)；PKTINFO_CON0 0x10460、CON2 0x7C100D00、+0x0c 0x80BE2000、TIMEOUT0 1、PIT_SEQ_END 0x0FF0FF00；BAT 16384项、LRO PIT0 0x8000。我们legacy PIT全0、HPC 0x10D2。原厂AP驱动在support_2rxq下**只配LRO PIT**(dpmaif_rxq_hw_init)，所以legacy PIT/HPC add mode2是**MD配置的**；MD LHIF `lhif_drv_data_chk_dpmaif_resource`读的正是dl_sram+0x64/+0xec。原厂`ccci_hif_state_notification(BOOT_WAITING_FOR_HS1)`在放行MD后、HS1前就`ccci_hif_start(DPMAIF)`；我们在READY+AT上线后(~20s)才初始化→**推断**MD启动时看不到AP侧DPMAIF，从未完成自身那一半，导致UL只走首批、RX 0。
+- **修复 main `06adfe2`**：`x9_modem.inc`在`x9md_power_on()`成功后、`x9md_wait_hs1()`前调用新`x9_dpmaif_boot_start()`(X9Baseband.cpp：x9d_prepare+x9d_hw_init，桥线程尚未启动，单owner)；日志`X9 DPMAIF: starting at BOOT_WAITING_FOR_HS1 (vendor order)`。两对象单编True。
+- **候选 `x9/out/x9-cell143-hs1-md/boot.img`**(worktree `937bdb2`)，三命令exit0，boot 13533184B，内核含新字符串；参数同131，插件276，**无需mailbox**。记录`.local/x9/work/cell143-hs1/`。
+- **下一步**：用户boot cell143→`~/200.txt`。看DPMAIF初始化时间(应在~4s HS1前)、是否隔离、MD能否正常HS1/READY；pre-init/tx-stall dump里legacy PIT(`dl_sram+0xe4`)是否变为非0；UL completed/RX。若MD启动受影响(无HS1/READY)，回退方法：去掉该调用即回到cell142行为。
+
+## 蜂窝前次交接(CELL142-TXQ4,2026-11-11): 198用原厂L2掩码仍首批即停；cell142按Android实况启动全部4个TX队列，未上机
 
 - **198.txt**(cell141，末64s)。**观察**：初始化通过(`masks 0x7ff0/0x1cbf`，无readback失败/隔离)，`ifst up ... CNF valid result 0`；30.627s首个UL状态0x1(仅DONE)后停：`TX stalled: hardware read index 4, 2 of 14`，RX 0；63.45s重拨ccmni2也同样。L2掩码/只清未屏蔽位不是原因。至此"完成数=首批"在193-198六次稳定(2,2,1,2,1,2)。
 - **Android实况基准**(`.local/x9/modem/ccci_dump.txt`)：`dpmaif-txq: 0-3(status=0xf)[2048]`，`w/r/rel=(330)(264)(0)(20)`——原厂`dpmaif_txqs_start`启动DPMAIF_TXQ_NUM=4个队列，流量在q0/q1/q3；`dpmaif-rxq0 received:342`、rxq1 0(只用LRO0)。我们只启动q0(ARB 0x101)。
