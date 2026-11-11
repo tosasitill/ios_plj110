@@ -15,6 +15,12 @@
 - **恢复/后续边界**：旧目录的`kernel-link.filelist`作为历史记录仍保留，但其中已清掉的objects不能直接拿来重新链接；需要时在对应冻结源码树、原私有config/boot-config下用**新唯一name**正常`build.py all`重建，或保留内核走`build.py boot --kernel <保留内核>`重新生成shim。不要自动重建已成功镜像来验证这次清理，也不要把仍保留的根盘/活跃worktree整体删掉。
 - 私有精确清单/执行脚本/前后数据：**`.local/x9/work/project-cleanup-20261111/`** 的`approved-plan.json`、`removed.jsonl`、`clean.py`、`references.json`、`worktree-statuses-before.json`、`verification.json`、`sizes-{before,after}.tsv`与`df-immediately-{before,after}.txt`。仅本节交接入Git；清理前主HEAD为`292b015`（另窗口CELL156交付记录），其提交/产物未修改。
 
+### 占用细分与挂载确认（2026-11-11；只读补查）
+
+- 纠正目录称呼：`x9-metal-render`的13.01GiB不是纯源码；项目自有`x9/metal`仅 **836KiB**。大头为Rust `general-target` **5.424GiB**、**74份GeneralMetal＋72份PanVK版本bundle合计3.523GiB**、`metal2vulkan-963f-source`1.788GiB（其中validation corpus **1.455GiB**）、两份Mesa源码0.816GiB及三份PanVK构建目录0.650GiB。私有`followup-metal.tsv`保留明细；没有因本次问询进一步删除。
+- `.local/x9/worktrees`登记 **203个**worktree，总23.865GiB；它们共享主`.git`对象库，不是每份完整克隆Git历史。`cell132-profile`5.584GiB中 **5.556GiB是22份构建输出/boot**，剩余源码等约29MiB；`gpu-upstream277`2.046GiB中1.707GiB是独立`.local`依赖、0.309GiB是out。前次保留当天新构建与最终交付，因此这里并未清空；不是每个worktree的源码都几GiB。
+- **以本轮`hdiutil info -plist`及`mount`实时映射为准**：`x9-metal-install-pan172/edited-root.hfs` → **`/dev/disk8`、`/private/tmp/x9pan172root`、只读**；`x9-rootpull/root-20261109.clone.hfs` → **`/dev/disk10`、`/private/tmp/x9root`、读写**（两源路径均在`.local/x9/work/`下）。原始`root-20261109.hfs`本身未挂载。这是Mac上的离线旧镜像/工作克隆，**不是手机当前实时根盘**；挂载状态本身也不证明某进程正在使用。未卸载、未改镜像、未触设备。依据`hdiutil-info-followup.plist`及`followup-{metal,worktrees,cell132,gpu277}.tsv`均在本节私有清理目录。
+
 ## 磁盘大项盘点（2026-11-11；仅统计，未清理）
 
 - 用户要求继续查看系统大占用。本轮仅目录块占用统计、应用元数据识别、进程观察、ccache统计及 **`brew cleanup --dry-run`**，没有删除/清缓存/卸载，也没有编译、测试、CI或设备操作。数据卷约 **343GiB已用/88GiB可用**；`du -x -k`不跟随软链接、不过其他挂载点，部分受保护目录不可读（首轮807条错误），且APFS克隆/共享块使目录数字不等于最终可回收容量；父子目录数字不能相加。
