@@ -99,6 +99,19 @@ uint64_t x9_md_mipc_submit(const uint8_t *p,uint32_t n){
  }
  else if(id==0x30b||id==0x601||id==0x605||id==0xa04){if(!x9mm_request(p,n,id))return 0;}
  else if(id==0x101){if(!x9mi_attach_request(p,n))return 0;}
+ /* Read-only per-SIM provider-name query. MD 91345dbc/91345e9e:
+  * 0429 -> 042a; exact PLMN ASCII + NUL, LAC0 (MD current area), OPTION1.
+  * This is not permission for other NW controls or an arbitrary AT query. */
+ else if(id==0x429){
+  if((p[8]!=1&&(p[8]!=2||x9_md_sim_count()!=2))||n!=48||
+     x9mi_u16(p+16)!=0x100||(x9mi_u16(p+18)!=6&&x9mi_u16(p+18)!=7))return 0;
+  unsigned k=x9mi_u16(p+18);
+  for(unsigned i=0;i<k-1;i++)if(p[20+i]<'0'||p[20+i]>'9')return 0;
+  if((p[20]=='0'&&p[21]=='0'&&p[22]=='0')||p[20+k-1])return 0;
+  for(unsigned i=20+k;i<32;i++)if(p[i])return 0;
+  if(x9mi_u16(p+32)!=0x101||x9mi_u16(p+34)!=4||p[36]||p[37]||p[38]||p[39]||
+     x9mi_u16(p+40)!=0x102||x9mi_u16(p+42)!=1||p[44]!=1||p[45]||p[46]||p[47])return 0;
+ }
  /* PLJ110 2d19d8..2d1a34: PS-only attach/detach, not combined CS/PS
   * 0403 and not RESET/CFUN. Only exact two raw u8 TLVs, original single
   * SIM route, zero padding. WDS attach owner retains each token. */

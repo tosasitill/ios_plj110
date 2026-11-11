@@ -637,6 +637,7 @@ static bool x9q_enqueue(uint32_t local,uint32_t port,const uint8_t *req,unsigned
  }return false;
 }
 #include "X9WDS.inc"
+#include "X9NetworkName.inc"
 #include "X9Messages.inc"
 static void x9q_reject(uint32_t,uint32_t,const uint8_t *,unsigned,uint16_t);
 #include "X9DSDS.inc"
@@ -659,6 +660,7 @@ static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *r
   x9q_reject(local,port,req,len,X9Q_BAD);return;
  }
  x9q_client &c=x9q_clients[slot];
+ if(x9n_request(local,port,req,len))return;
  if(x9g_send(local,port,req,len))return;
  if(x9m_request(local,port,req,len))return;
  if(service==1&&x9w_request(local,port,req,len))return;
@@ -671,6 +673,7 @@ static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *r
   unsigned route=nas?value:value-1;
   if(!sub.p||sub.n!=(nas?1u:4u)||len!=(nas?11u:14u)||route>=x9_md_sim_count()){
    x9q_reject(local,port,req,len,X9Q_ARG);return;}
+  if(c.sim_slot!=route&&x9n_binding_busy(slot)){x9q_reject(local,port,req,len,X9Q_BUSY);return;}
   if(c.sim_slot!=route)for(const x9q_job &j:x9q_jobs)if(j.used&&!j.probe&&j.local==local){x9q_reject(local,port,req,len,X9Q_BUSY);return;}
   c.sim_slot=(uint8_t)route;c.next=0;x9q_packet p(req);p.send(local,port);
   printf("X9 DUALSIM: service %u client 0x%x bound to SIM%u (queries route, not DDS)\n",service,local,c.sim_slot+1);return;
@@ -739,6 +742,7 @@ static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *r
 static void x9q_del(uint32_t local){
  unsigned slot=local-CBQ_PORT_BASE;if(local<CBQ_PORT_BASE||slot>=CBQ_MAX_CLIENTS)return;
  x9g_del(slot);
+ x9n_del(slot);
  x9w_del(slot);
  x9m_del(slot);
  x9ds_del(slot);
@@ -751,6 +755,7 @@ static void x9q_del(uint32_t local){
 static void x9q_poll(){
  x9g_poll();
  x9w_poll();
+ x9n_poll();
  x9m_poll();
  x9ds_poll();
  /* One bounded read-only pass even when D22 never creates a SIM2 client.
