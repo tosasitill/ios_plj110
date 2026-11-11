@@ -248,6 +248,8 @@ static void x9w_handle_reply(x9w_bearer &b){
  x9q_packet p(b.req);p.tlv(1,bytes,4);p.send(CBQ_PORT_BASE+b.slot,X9BB_PORT_BASE+1);x9w_pending_done(b);
 }
 static void x9w_publish(x9w_bearer &b,unsigned mux){
+ x9w_host_expire(b,mux,x9q_ms()); // every publication entry owns its deadline gate
+ if(b.abandoned||b.hold||!b.pending)return;
  const x9w_interface &in=x9w_interfaces[b.sim_slot][b.channel];
  if(!in.valid||in.serial<=b.if_floor||in.trans_id!=b.trans_id||in.cmd!=0)return;
  if(in.mtu!=b.mtu||memcmp(in.ip,b.ip,4)||!b.pending||!x9w_live(b)||
