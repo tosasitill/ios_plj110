@@ -6,6 +6,12 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## HPC_CNTL对齐Android（CELL-HPC，2026-11-11；已构建，未启动）
+
+- **源码**：main **`41cb424`**：`X9DPMAIF.inc` AO DL SRAM `HPC_CNTL`(pd+0xc38) 由 vendor源码公式 0x10d2 改为 Android实测 **0x10da**（只多 add_mode=2，bits3:2；path2/prime0xd/16不变；887行legacy检查只看&3）。
+- **镜像**：worktree `.local/x9/worktrees/cell-hpc-gpu278-20261111/` = `ff1b83a`（ATCTX）+ cherry-pick（`3d754df`），配置同ATCTX（278，无需mailbox staging）。`build.py all` exit0，boot13881344B → **`x9/out/x9-cell-hpc-gpu278-20261111/boot.img`**；仍含ATCTX探针。
+- **验收**：`rx-none` dump 的 `dl_sram+0x020`第7字(pd+0xc38)应为`000010da`；看PIT raw-wr是否离开0、RX delivered、EIF5是否带全球v6前缀。单变量实验，未上机。
+
 ## DPMAIF寄存器对照（DPMAIF-REG-CMP，2026-11-11）：AP侧配置与Android基本一致，差异集中在状态/计数
 
 - **方法**：Android真实流量下 `android-atci-20261111/cap/ccci_dump_up.txt`（vendor drv3_dump_register）对 `~/226.txt` 的 `X9 DPMAIF: rx-none …` 窗口（ACT后），按vendor基址对齐（pd+0x000/0x100/0x400/0x600/0xc00/0xd00/0xe00、ao+0x400）逐字比较；脚本 `android-atci-20261111/dpmaif-cmp.py`。名字取自vendor `ccci_dpmaif_reg_com.h/_v3.h`。
