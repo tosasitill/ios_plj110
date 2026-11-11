@@ -6,6 +6,15 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 项目外虚拟机/模拟器盘点（2026-11-11；仅查看，未删除）
+
+- 用户要求查看项目外大占用，尤其虚拟机。本轮只读配置/文件元数据、`du`、进程和`lsof`、Spotlight及指定目录文件名搜索；没有启动/删除虚拟机、清快照、卸载应用、调用设备或运行编译/测试。目录分配块不等于保证可回收量。
+- **最大可评估项是Android模拟器**：`~/.android/avd/Pixel_6a.avd` **14.937GiB**，其中`userdata-qemu.img.qcow2` **10.386GiB**、`snapshots/default_boot/ram.bin` **3.934GiB**、sdcard0.500GiB；配置为Pixel6a/arm64/2GiB RAM/10G data/QuickBoot，引用`system-images/android-37.1/google_apis_playstore_ps16k/arm64-v8a/`。配套系统镜像目录 **8.161GiB**（system.img8.011GiB），两者约 **23.10GiB**。当前未见模拟器进程，两关键AVD文件无lsof占用；这不说明里面的应用/数据不重要，整台删除仍需用户明确选择。仅清QuickBoot快照也会失去保存的运行态，需要冷启动。
+- Android SDK总 **13.814GiB**还包括NDK **2.777GiB**、emulator程序 **1.147GiB**及build-tools/platforms等；不能为了清8.161GiB系统镜像把SDK整体删掉。Android Studio应用 **3.235GiB**，与模拟器数据分开；本轮未卸载。
+- **VMware Fusion**应用 **1.143GiB**，`~/Virtual Machines.localized`目前几乎空；vmInventory登记的Windows11 ARM `.vmwarevm/.vmx`路径实际不存在。未见VMware虚拟机进程。常见VM目录与Downloads/Documents/Desktop/Virtual Machines.localized/Users Shared内针对vmdk/vdi/qcow2/vhdx/pvm/utm等的文件名搜索无额外磁盘，Spotlight也无结果；只说明本轮检查范围内未发现，不证明所有自定义路径都没有。未安装/未发现UTM、Parallels、VirtualBox的常见应用/磁盘路径。
+- **iOS CoreSimulator**用户数据几乎为空，系统侧约5MiB，无大runtime。Docker常规container目录几乎空，未见backend进程或Docker.raw；但`~/Library/Group Containers/group.com.docker`受系统隐私权限限制（Operation not permitted），**不能据此宣称Docker所有存储为空**，没有绕过权限或删除该目录。
+- 另复核项目外缓存：`~/.gradle/caches` **7.163GiB**、npm `_cacache` **1.829GiB**＋`_npx` **0.798GiB**、VSCode.ShipIt更新缓存 **1.606GiB**、Homebrew缓存 **0.605GiB**。这些可再评估清理，但本轮全部未动；缓存删后可能重新下载/编译。私有数据在 **`.local/x9/work/vm-storage-audit-20261111/`**：`summary.json`、`usage-*.tsv/err`、`vmware-disks.tsv`、`large-android-files.json`、`scoped-vm-search.json`、`vm-processes.json`、`android-open-files.txt`与`other-cache-sizes.json`。
+
 ## 编译缓存追加清理（2026-11-11；最新空间数据）
 
 - 用户要求继续寻找可删除项。本轮仅清理两组Rust target内部可再生缓存：`.local/x9/work/x9-metal-render/general-target/{release,aarch64-apple-ios/release}/{deps,build,.fingerprint,incremental}`及`.local/analysis-shaders/m2v-target/release/{deps,build,.fingerprint,incremental}`，共 **16818个文件**。**这更新了上一轮“Rust deps/fingerprints保留”的状态**，但没有删当前成品静态库、着色器分析工具、源码、今天的boot/插件、根盘/备份、Apple输入或系统目录。
