@@ -128,10 +128,11 @@ uint64_t x9_md_mipc_submit(const uint8_t *p,uint32_t n){
      x9mi_u16(p+32)!=0x103||x9mi_u16(p+34)!=1||p[36]||p[37]||p[38]||p[39])return 0;
  }
  /* RIL-mirror data requests (Android datacycle capture), exact shapes only:
-  * 021b RETRY_TIMER {MODE100 u8 1, APN101 NUL-terminated string <=101},
+  * 021b RETRY_TIMER {MODE100 u8 0/1, APN101 NUL-terminated string <=101},
   * 022d GET_5GQOS {ID100 u8}, 0233 GET_URSP_ROUTE_PROFILE {CID100 u32},
   * 020f GET_MD_DATA_CALL_LIST {}. 021b MODE1 mutates retry-count state
-  * (requestResetMdDataRetryCount); the other three are read-only queries. */
+  * (requestResetMdDataRetryCount); MODE0 reads the retry advice and the
+  * other three are read-only queries. Never use MODE1 to bypass a failure. */
  /* DATA_ACT_PACKET_ROUTE 025f / DATA_IFUP_PACKET_ROUTE 0261: exactly one
   * ROUTE100/u8 (subsys_daemon sends value 3), 24 bytes. */
  else if(id==0x25f||id==0x261){
@@ -143,7 +144,7 @@ uint64_t x9_md_mipc_submit(const uint8_t *p,uint32_t n){
   else if(id==0x22d){if(n!=24||x9mi_u16(p+16)!=0x100||x9mi_u16(p+18)!=1||p[21]||p[22]||p[23])return 0;}
   else if(id==0x233){if(n!=24||x9mi_u16(p+16)!=0x100||x9mi_u16(p+18)!=4)return 0;}
   else{
-   if(n<32||x9mi_u16(p+16)!=0x100||x9mi_u16(p+18)!=1||p[20]!=1||p[21]||p[22]||p[23]||x9mi_u16(p+24)!=0x101)return 0;
+   if(n<32||x9mi_u16(p+16)!=0x100||x9mi_u16(p+18)!=1||p[20]>1||p[21]||p[22]||p[23]||x9mi_u16(p+24)!=0x101)return 0;
    unsigned k=x9mi_u16(p+26);
    if(!k||k>101||n!=24+((k+11)&~7u)||p[28+k-1]||strnlen((const char *)p+28,k)!=k-1)return 0;
    for(unsigned i=28+k;i<n;i++)if(p[i])return 0;

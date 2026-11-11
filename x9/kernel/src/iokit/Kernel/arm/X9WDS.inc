@@ -24,7 +24,8 @@ struct x9w_client {
  x9d_stats baseline,last_call;
 };
 static x9w_client x9w_clients[CBQ_MAX_CLIENTS];
-enum { X9W_DISC=1, X9W_ACT, X9W_CHECK, X9W_DEACT, X9W_IFWAIT, X9W_CONFIG, X9W_RETRY_RESET };
+enum { X9W_DISC=1, X9W_ACT, X9W_CHECK, X9W_DEACT, X9W_IFWAIT, X9W_CONFIG, X9W_RETRY_RESET,
+ X9W_RETRY_QUERY, X9W_RETRY_WAIT };
 // AP accounting outlives the control bearer and client.204/4202 may consume
 // control state, but cannot erase a published payload's original ledger.
 struct x9w_retirement { uint64_t lifetime,generation; unsigned slot; bool pending; };
@@ -113,7 +114,7 @@ struct x9w_bearer {
  // MTU from ACT 0x123; 0 = network gave none (MD adds 0x123 only when its
  // +0x2c8 flag is set, 913277822). mtu is the effective route MTU.
  unsigned md_mtu;
- uint32_t handle,len,trans_id;
+ uint32_t handle,len,trans_id,failure_result;
  uint8_t cid,sim_slot,req[X9Q_REQ],ip[4],dns[2][4];
  char apn[101];
  // Raw Start selection (APN14 bytes, profile31) for matching the v6 Start.
@@ -122,6 +123,17 @@ struct x9w_bearer {
 };
 static x9w_bearer x9w_bearers[CBP_INTERFACES];
 static char x9w_last_dnn[2][101]; // APN the MD reported in the last ACT CNF (RAM only)
+// Retain the latest internet APN's advice plus a per-SIM local churn floor.
+// Every later Start still queries the MD, including a changed/uncached APN;
+// a cached network timer is never applied to a different APN. Epoch tags
+// prevent either a delay or a reset grant leaking across cards.
+struct x9w_retry_policy { uint64_t epoch,after,floor; bool valid; char apn[101]; };
+static x9w_retry_policy x9w_retries[2];
+static uint64_t x9w_reset_epoch[2];
+static bool x9w_retry_same(const x9w_bearer &b){
+ const x9w_retry_policy &r=x9w_retries[b.sim_slot];
+ return r.valid&&r.epoch==b.result_epoch&&!strcasecmp(r.apn,b.apn);
+}
 static bool x9w_netagent_req; // boot-arg x9_eif_req=1: send EIF ifst/ipupdate + statistics (not done by Android)
 static uint32_t x9w_next_handle;
 // Latest MD interface state, not Android's local netdev state. The floor and
@@ -266,9 +278,21 @@ static void x9w_rat_tlv(x9q_packet &p,unsigned tag,unsigned rat){
 static void x9w_pending_done(x9w_bearer &b){
  if(b.pending&&x9w_live(b))x9w_clients[b.slot].starting=false;b.pending=false;b.reply_deadline=0;b.len=0;bzero(b.req,sizeof(b.req));
 }
+static void x9w_v6_fail(unsigned slot,uint16_t verbose);
 static void x9w_error(x9w_bearer &b,unsigned error){
  if(b.pending&&x9w_live(b)){
-  x9q_packet p(b.req,(uint16_t)error);p.send(CBQ_PORT_BASE+b.slot,X9BB_PORT_BASE+1);
+  x9q_packet p(b.req,(uint16_t)error);
+  if(error==14&&x9q_u16(b.req+3)==0x20){
+   // A proprietary MIPC error is not a QMI/3GPP cause. Report unspecified
+   // internal failure, not a fabricated network cause or a bare CALL_FAILED.
+   x9w_end_reason(p,X9W_END_UNSPECIFIED,X9W_VERBOSE_INTERNAL,X9W_INTERNAL_ERROR);
+   for(unsigned i=0;i<CBQ_MAX_CLIENTS;i++){
+    const x9w_client &c=x9w_clients[i];
+    if(c.v6_pending&&c.sim_slot==b.sim_slot&&c.mux==x9w_clients[b.slot].mux)
+     x9w_v6_fail(i,X9W_INTERNAL_ERROR);
+   }
+  }
+  p.send(CBQ_PORT_BASE+b.slot,X9BB_PORT_BASE+1);
   printf("X9 WDS: response msg 0x%04x error %u; ownership retained %u op %u\n",x9q_u16(b.req+3),error,b.owned,b.op);
  }x9w_pending_done(b);
 }
@@ -532,6 +556,21 @@ static void x9w_start_next(x9w_bearer &b,unsigned mux){
  if(b.token||b.owned||b.hold||b.abandoned||!x9w_live(b)||b.result_epoch!=x9a_epoch||
     !x9d_ready()||!x9_md_mipc_online())return;
  x9w_host_expire(b,mux,x9q_ms());if(b.abandoned)return;
+ if(b.op==X9W_RETRY_WAIT){
+  if(x9q_ms()<b.next)return;
+  b.op=X9W_RETRY_QUERY; // read back the MD timer, never reset it on a retry
+ }
+ if(b.op==X9W_RETRY_QUERY){
+  // Android getModemSuggestedRetryTime (2b6790): mode0 + requested APN.
+  // The empty/network-default APN is kept empty; do not guess a carrier DNN.
+  x9w_frame f(0x21b,1u<<b.sim_slot);f.byte(0x100,0);
+  f.tlv(0x101,b.apn,(unsigned)strlen(b.apn)+1);
+  if(x9w_send(b,f,X9W_RETRY_QUERY,30000))printf("X9 WDS: SIM%u retry advice mode0 queued (%s); no counter reset\n",b.sim_slot+1,b.failure_result?"ACT failed":"retry admission");
+  return;
+ }
+ if(b.op==X9W_DISC){
+  x9w_frame f(0x219,1u<<b.sim_slot);x9w_send(b,f,X9W_DISC,10000);return;
+ }
  if(b.op==X9W_CONFIG){
   x9w_frame f(0x211,1u<<b.sim_slot);f.byte(0x100,1);f.byte(0x101,1);f.byte(0x103,0);
   if(x9w_send(b,f,X9W_CONFIG,30000))printf("X9 WDS: SIM%u DATA_SET_CONFIG queued; await 0212 before RETRY_TIMER/ACT\n",b.sim_slot+1);
@@ -572,7 +611,7 @@ static void x9w_start_next(x9w_bearer &b,unsigned mux){
 static void x9w_result(x9w_bearer &b,unsigned mux,const uint8_t *p,unsigned n){
  x9w_host_expire(b,mux,x9q_ms()); // late ready1 cannot restore host success
  unsigned op=b.op;b.op=0;unsigned result;
- unsigned expected=op==X9W_DISC?0x21a:op==X9W_CONFIG?0x212:op==X9W_RETRY_RESET?0x21c:
+ unsigned expected=op==X9W_DISC?0x21a:op==X9W_CONFIG?0x212:(op==X9W_RETRY_RESET||op==X9W_RETRY_QUERY)?0x21c:
   op==X9W_ACT?0x202:op==X9W_CHECK?0x206:0x204;
  if(!x9w_wire(p,n)||x9q_u16(p+10)!=expected||!x9w_word(p,n,0,result)){
   b.hold=true;b.abandoned=true;x9w_disconnect(b,mux);x9w_error(b,X9Q_INTERNAL);
@@ -585,6 +624,28 @@ static void x9w_result(x9w_bearer &b,unsigned mux,const uint8_t *p,unsigned n){
  }
  b.hold=false; // late valid CNF restores cleanup ability, NEVER host success
  printf("X9 WDS: MIPC CNF msg 0x%04x result %u mux %u\n",expected,result,mux);
+ if(op==X9W_RETRY_QUERY){
+  unsigned mode=~0u,seconds=0;
+  bool good=!result&&x9w_byte(p,n,0x100,mode)&&mode<=2&&
+   (mode!=2||(x9w_word(p,n,0x101,seconds)&&seconds<=0x7fffffffu));
+  uint64_t now=x9q_ms(),after=now+30000;
+  // Local 30s floor bounds host churn; it is NOT a claimed network timer.
+  // MD seconds are widened before multiplication, and are never shortened.
+  if(good&&mode!=1){after=mode==2?now+uint64_t(seconds)*1000:now;}
+  x9w_retry_policy &policy=x9w_retries[b.sim_slot];
+  if(!policy.valid||policy.epoch!=b.result_epoch)bzero(&policy,sizeof(policy));
+  if(!good||mode==1)policy.floor=now+30000;
+  if(policy.floor>after)after=policy.floor;
+  if(x9w_retry_same(b)&&policy.after>after)after=policy.after;
+  policy.valid=true;policy.epoch=b.result_epoch;policy.after=after;memcpy(policy.apn,b.apn,sizeof(policy.apn));
+  printf("X9 WDS: SIM%u retry advice valid %u mode %u seconds %u wait-ms %llu; raw ACT result 0x%x\n",
+   b.sim_slot+1,good,mode,seconds,after-now,b.failure_result);
+  if(b.failure_result||b.abandoned||!good||mode==1){
+   x9w_error(b,14);x9w_clear(b,mux);return;
+  }
+  if(after>now){b.next=after;b.op=X9W_RETRY_WAIT;return;}
+  b.op=X9W_DISC;x9w_start_next(b,mux);return;
+ }
  if(op==X9W_DISC){
   if(result||b.abandoned||!x9w_byte(p,n,0x100,b.min_cid)||!x9w_byte(p,n,0x101,b.max_cid)||b.min_cid>b.max_cid||b.max_cid>=255){
    x9w_error(b,result==1?X9Q_BUSY:X9Q_NOT_READY);x9w_clear(b,mux);return;
@@ -593,18 +654,28 @@ static void x9w_result(x9w_bearer &b,unsigned mux,const uint8_t *p,unsigned n){
   b.op=X9W_CONFIG;x9w_start_next(b,mux);return;
  }
  if(op==X9W_CONFIG||op==X9W_RETRY_RESET){
+  if(op==X9W_RETRY_RESET&&!result)x9w_reset_epoch[b.sim_slot]=b.result_epoch;
   if(result||b.abandoned||!x9d_ready()||!x9_md_mipc_online()){
    x9w_error(b,result==1?X9Q_BUSY:X9Q_NOT_READY);x9w_clear(b,mux);return;
   }
-  b.op=op==X9W_CONFIG?X9W_RETRY_RESET:X9W_ACT;x9w_start_next(b,mux);return;
+  b.op=op==X9W_CONFIG&&x9w_reset_epoch[b.sim_slot]!=b.result_epoch?X9W_RETRY_RESET:X9W_ACT;
+  x9w_start_next(b,mux);return;
  }
  if(op==X9W_ACT){
   unsigned cid;
   if(result&&result!=0x150202&&result!=0x150203&&result!=0x150204){
-   // Ordinary failure has no owned call. An unexpected call ID on that failure
-   // is ambiguous: reserve it without deactivating a possibly foreign call.
-   if(x9w_byte(p,n,0x100,cid)&&cid>=b.min_cid&&cid<=b.max_cid){b.hold=true;b.abandoned=true;x9w_error(b,14);}
-   else{x9w_error(b,result==1?X9Q_BUSY:14);x9w_clear(b,mux);}return;
+   // P77 mipc_data_act_call_cnf 913274ea..91327500 also emits tag100
+   // on ordinary FAILURE whenever its input CID is nonnegative. It is a
+   // diagnostic hint, NOT an owned call or a reason to reserve the host mux
+   // forever (211: 510 BUSY replies). Never bind or issue 203 for this hint.
+   bool hint=x9w_byte(p,n,0x100,cid);
+   printf("X9 WDS: ACT rejected 0x%x mux %u CID-hint %u; no ownership/203, query retry policy\n",result,mux,hint);
+   x9w_retry_policy &r=x9w_retries[b.sim_slot];
+   r.valid=true;r.epoch=b.result_epoch;r.floor=x9q_ms()+30000;r.after=r.floor;
+   memcpy(r.apn,b.apn,sizeof(r.apn));
+   b.failure_result=result;
+   if(b.abandoned){x9w_error(b,14);x9w_clear(b,mux);return;}
+   b.op=X9W_RETRY_QUERY;x9w_start_next(b,mux);return;
   }
   if(!x9w_byte(p,n,0x100,cid)||cid<b.min_cid||cid>b.max_cid){b.hold=true;b.abandoned=true;x9w_error(b,X9Q_INTERNAL);return;}
   for(const x9w_bearer &other:x9w_bearers)if(&other!=&b&&other.used&&other.owned&&other.sim_slot==b.sim_slot&&other.cid==cid){
@@ -837,7 +908,8 @@ static void x9w_poll(){
   }
   if(b.gone){x9w_clear(b,i+1);continue;}
   if(b.abandoned){if(b.owned&&!b.hold)x9w_deactivate(b,i+1);else if(!b.owned&&!b.hold)x9w_clear(b,i+1);continue;}
-  if(!b.hold&&(b.op==X9W_CONFIG||b.op==X9W_RETRY_RESET||b.op==X9W_ACT)){x9w_start_next(b,i+1);continue;}
+  if(!b.hold&&(b.op==X9W_DISC||b.op==X9W_CONFIG||b.op==X9W_RETRY_RESET||b.op==X9W_ACT||
+              b.op==X9W_RETRY_QUERY||b.op==X9W_RETRY_WAIT)){x9w_start_next(b,i+1);continue;}
   if(b.op==X9W_IFWAIT){
    x9w_publish(b,i+1);
    if(!b.active&&!b.abandoned&&now>=b.deadline){b.abandoned=true;x9w_error(b,X9Q_NOT_READY);x9w_deactivate(b,i+1);printf("X9 WDS: owned call has no matching EIF/IFUP; no host success\n");}
@@ -1016,8 +1088,14 @@ static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
    if(x9q_tlv(req,n,0x31).p)memcpy(b.apn,selected_apn,sizeof(b.apn));
    else if(apn.n)memcpy(b.apn,apn.p,apn.n);c.starting=true;
    bzero(selected_apn,sizeof(selected_apn));
-   x9w_frame query(0x219,1u<<b.sim_slot);
-   if(!x9w_send(b,query,X9W_DISC,10000)){x9w_error(b,X9Q_BUSY);x9w_clear(b,c.mux);}return true;
+   if(x9w_reset_epoch[b.sim_slot]==b.result_epoch||
+      (x9w_retries[b.sim_slot].valid&&x9w_retries[b.sim_slot].epoch==b.result_epoch)){
+    const x9w_retry_policy &r=x9w_retries[b.sim_slot];
+    b.next=r.valid&&r.epoch==b.result_epoch?(x9w_retry_same(b)?r.after:r.floor):0;
+    b.op=X9W_RETRY_WAIT;
+    printf("X9 WDS: SIM%u retry Start retained under original host deadline; no immediate ACT/BUSY loop\n",b.sim_slot+1);
+   }else b.op=X9W_DISC;
+   x9w_start_next(b,c.mux);return true;
   }
   bzero(selected_apn,sizeof(selected_apn));
  }
