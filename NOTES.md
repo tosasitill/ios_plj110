@@ -158,7 +158,7 @@ python3 x9/build/prepare-local.py                                               
 X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>      # 之后再让用户 fastboot boot x9/out/<name>/boot.img
 ```
 纯内核重编(插件号不变,allowlist 头不变)**不需要**重新 stage,上机前只要说"无需 mailbox"。插件重建非确定,allowlist 头要随该 revision 一起提交。
-当前主线allowlist插件:**277**（GPU277候选；210实机仍276，新277必须mailbox）;旧125起多份候选为276、旧124及更早仍275，各套mailbox与内核不能混用。
+当前主线allowlist插件:**277**（GPU277候选；2026-11-11 19:41 Android侧mailbox已stage并提交277，尚未启动验收；210实跑仍是276）;旧125起多份候选为276、旧124及更早仍275，各套mailbox与内核不能混用。
 
 **上机流程**:用户把手机 `fastboot boot x9/out/<name>/boot.img`,跑场景,日志放 Mac `~/N.txt`,我读。永不 `fastboot getvar`。
 
@@ -364,6 +364,9 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **下一决定性证据/重放**：先取得同一次开/关App的原图或短视频＋对应编号完整日志，至少两帧不同缩放，确认缝随层/纹理还是屏幕移动；捕获需保留原分辨率横向像素（含alpha）及producer/consumer/最终present的同帧ID，不用32×32或startup纹理日志代替。若source已有坏列再查shadow/layout/cache；source正常、draw output漏覆盖再查几何/采样/补齐；GPU output正常才查CPU present/scanout。只读派生可重放`python3 .local/x9/work/gpu-seams-20261111/extract-evidence.py`；反汇编命令见同目录`commands.txt`。本轮仅修注释/文档，**没有运行代码修复、编译/新镜像/测试套件/CI/设备/mailbox/root操作，也未宣称根因已定位**；未夹带其它窗口蜂窝修改。
 
 ## GPU候选交接（GPU277，2026-11-11）：可移植上游缓存修复＋索引补齐；277完整候选已构建，待用户上机
+
+- **当前活动交接：277 mailbox已更新（2026-11-11 19:41 +0800）**：用户明确要求“adb 已连接 更新 277 插件包”。只发现一台ready设备，Android normal、root可用，无残留updater/preflight进程。沿用现存完整候选 **`.local/x9/worktrees/gpu-upstream277/x9/out/x9-gpu277-indices-cache/`**，运行 `X9_SERIAL=<serial> python3 -u x9/mailbox/update.py .local/x9/worktrees/gpu-upstream277/x9/out/x9-gpu277-indices-cache`，**exit0**。默认读取当前 `x9/build/local.json` 的私有 `.local/x9/root-extension/20261110-16g/root-manifest.json`；外置BBFW完整payload SHA256、root extension pin/immutable/FIEMAP、mutable-root设备/分区/保护/UUID预检均通过，实时HFS为已扩展 **34359738368B（32GiB）**。mailbox原inode/大小/pin/immutable/FIEMAP也通过；按manifest专用slice先清commit标记、分段旧hash比较写入并回读、最后发布，输出 **`Mailbox committed: 53321728 bytes; each written range read back`**。随后仅定点读首块 **4096B**，观察 **`X9UPD001`**＋identity **`548520a1ef45281eec6469fe336760d9de1174a2eb92d96cf112aa9892c589ab`** 与277包一致，保留区为0，userdata路由未变。不是重新拉根盘、不是重算boot hash，也不是iOS运行验收。
+- **后续/范围**：手机仍Android，未flash/reboot/fastboot/getvar，未改root内容、分区表、boot、modem/persist/备份或解除任何pin/immutable；只按用户请求更新专用mailbox extent。未重建插件/内核/boot、无测试套件/CI run/推送；镜像源码仍固定 **14a033f**，不得用本次main文档提交冒充新镜像。用户下一步手动 **`fastboot boot .local/x9/worktrees/gpu-upstream277/x9/out/x9-gpu277-indices-cache/boot.img`**（从仓库根执行），本277候选不需重复stage。新日志确认active277和实际像素/三角形/竖缝表现后才验收；当前不声称渲染修好。若回旧276内核必须配套恢复276 mailbox。私有原始记录 **`.local/x9/work/mailbox-277-20261111/`**：`update-inputs.json`、`update.log`、`update-result.json`、`committed-header.bin/json`及设备身份记录，不入Git。只提交本次NOTES交接；确切提交号由本次commit输出与 `git log -1 --oneline -- NOTES.md` 获取。
 
 - **277路径实时复核（2026-11-11，用户查询插件位置）**：主目录`x9/out/x9-gpu277-indices-cache`当前不存在；仍存在的完整配套目录为 **`.local/x9/worktrees/gpu-upstream277/x9/out/x9-gpu277-indices-cache/`**，内有`boot.img`和`plugin-package/{X9GeneralMetal277.bundle,X9PanVK277.bundle,mailbox.json,manifest.json,SHA256SUMS,install-on-ios.sh}`。下方历史上机命令的candidate/boot路径须改用此现存目录，不再直接沿用主out旧路径。本轮仅查看目录/文件元数据，未校验内容、构建、CI或操作设备；不据此声称277已实机验收。
 
