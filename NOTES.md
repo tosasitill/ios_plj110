@@ -6,6 +6,14 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 蜂窝短交接（CELL-DATA-SUMMARY，2026-11-11）：续接先读短报告；设置流量总量不等于收到回包
+
+- **入口**：`docs/network/2026-11-11_cellular-data-report.md` 汇总实测、已排除方向、MD当前静态边界、IMS副作用及可复制的新会话提示；不再整份输出本文件。保留其他窗口交接，不删历史。`daybreak`未在本次检索的项目文档及选定私有文本日志中命中，缺报错全文；不能认定是基带错误或已定位工具故障。当前NOTES约1.59MB，全量读取确实截断，但与daybreak是否同因未知。
+- **本轮新核对的运行证据**：专门探针218/cell163/c91ffc0/276仍为TX303/303、RX0；较新的真实`~/220.txt`（不是cell220离线目录）两次ACT0在LF8884/17079，末次LF21335／121.587s **TX241/241、RX delivered/dropped/queued/rejected全0**，LF1413 active plugin277。同次LF21320／121.586s `pdp_ip0`的unit0也tx241/rx0/drop0；两次rx-none的dl_sram+a4/c4 producer均0，是定点快照而非连续观测。双卡名称已有真实result0，不再只称cell159未上机；Settings最终UI仍需用户确认。220未观察到蜂窝恢复，也不能把218的具体MD状态直接套入220。
+- **用户新观察与解释边界**：用户在iOS设置看到二百多KB，尚缺页面/方向/周期/同次关联。`coachz_bb_pdp.cpp`在TX mailbox接受后即`ifnet_stat_increment_out`；`X9DPMAIF.inc::x9d_tx_poll`在PAYLOAD退休后计WDS tx_bytes，RX则由receiver→ifnet_input成功才加。总量可来自上传/重试或历史，不能证明下载；**未追到Settings最终取数对象，不声称已证明那二百多KB来自某ledger**。可有iOS适配配置错误使MD停包；目前不支持“回包已到pdp_ip后统一被IP栈丢”，仍不能排除RX队列/寄存器读取适配错误。下一步先看明确接收增量再决定是否转RX→ifnet→socket，不必先清统计、重启或重跑旧镜像。
+- **继续逆向**：现有`cell220-md-act-ul`仍未闭合pending b234入Q/external-PDN callback→本次NIM bind及同IFID/CID；普通TFT/EPSB→RATDM/RRC与MD现场命中也未完成。MD VA不是AP物理地址，test-mode位图不是普通dataallow，对象state与业务state不同；IMS未证明是RX0前置，EXIMS配置可能持久写NV且GET缓存不能保证回滚。没有新RX0修复或可上机候选，不重复三种失败DRB探针、不混276/277/278配套。
+- **成果/边界**：私有`.local/x9/work/cellular-summary-20261111/`含scope/timeline、`verify.py/verification.json`及原stdout/stderr/exit；本轮只读既有214..218/220日志、13个私有路径与MD派生JSON，**verify exit0**，不是设备测试/联网验收。本轮无设备/ADB/fastboot/mailbox/NV/分区操作、运行代码修改、编译/boot/测试套件/CI run/push，仅报告与本节入Git；提交号见对应文档提交。
+
 ## 顶点补齐回退与事务退休修复（GPU-SNAPSHOT-OWNER，2026-11-11；278已构建并由ADB提交mailbox；实机启动／像素待验）
 
 - **用户决策／补齐**：新索引方式没有实测性能收益或220像素验收；动机只是避免CPU snapshot读取GPU生成／延迟更新数据，不能证明indexed重复ID等价于旧non-indexed尾部record。前端提交 **`e6e3528`** 恢复**默认mode1 CPU snapshot**；`x9p0`关闭，`x9p1`强制snapshot，mode2仅显式`x9p2`实验。保留triangle、布局／属性宽度／stride／预算、vertex无副作用及fill／rasterization资格、CB资源持有／绑定恢复；不宣称snapshot支持private／GPU生成或编码后修改。
