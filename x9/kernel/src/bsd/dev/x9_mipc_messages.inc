@@ -47,6 +47,18 @@ static int x9mm_request(const uint8_t *p,unsigned n,unsigned id){
   return (n==40&&x9mm_one(p,n,0x100,0)&&x9mm_one(p,n,0x105,1)&&x9mm_one(p,n,0x106,2))||
    (n==24&&x9mm_one(p,n,0x102,1));
  }
+ if(id==0x607){
+  /* MD 913677c6 + 91408c60/9140702a/91407060. GSM storage:
+   * flag0..4 enumerate, flag5 reads a NONZERO native index; 103=1 preserves
+   * tags (CMGL/CMGR ...,1). Only indexed CMGR may use 103=0 to mark MT read.
+   * Explicit SIM/ME storage, no current-store guess or whole-store mutation. */
+  if(!x9mm_one(p,n,0x100,3)||
+   !x9mm_find(p,n,0x104,&v,&k)||!v||k!=1||v[0]>1||
+   !x9mm_find(p,n,0x101,&v,&k)||!v||k!=1||v[0]>5)return 0;
+  if(v[0]<5)return n==48&&x9mm_one(p,n,0x103,1);
+  return n==56&&(x9mm_one(p,n,0x103,1)||x9mm_one(p,n,0x103,0))&&
+   x9mm_find(p,n,0x102,&v,&k)&&v&&k==2&&x9mi_u16(v)!=0;
+ }
  if(id!=0x605||!x9mm_one(p,n,0x100,0)||!x9mm_find(p,n,0x8101,&v,&k)||!v||k<2||k>255)return 0;
  unsigned full=k,smsc=v[0];
  if(smsc>12||smsc+1>=full)return 0;
@@ -102,7 +114,7 @@ int x9_md_mipc_message_reply(uint32_t token,unsigned success,uint8_t cause){
  for(unsigned i=0;i<X9_MM_SLOTS;i++){
   struct x9_mm_slot *s=&x9_mm_slots[i];if(!s->state||s->token!=token)continue;
   if(s->state!=2)break;
-  /* Only the audited CS GSM variants. IMS8105 needs a different adapter;
+  /* Only the audited CS GSM variants. Non-CS type4/8105 needs its own adapter;
    * do not allow a caller to success-ACK it with a guessed CS response. */
   if(s->id==0x8601&&!x9mm_one(s->frame,s->len,0x100,3))break;
   if(s->id==0x8603){
@@ -125,7 +137,11 @@ int x9_md_mipc_message_reply_take(uint32_t token,int *result){
  int rc=-1;lck_mtx_lock(&x9_mi_lock);
  for(unsigned i=0;i<X9_MM_SLOTS;i++){
   struct x9_mm_slot *s=&x9_mm_slots[i];if(!s->state||s->token!=token)continue;
-  rc=0;if(s->state==5){*result=s->result;rc=1;bzero(s,sizeof(*s));}break;
+  rc=0;if(s->state==5){*result=s->result;rc=1;
+   /* TX failure is not retirement. Deliver that result once but keep the
+    * original command id/txid/mask owned; never recycle/retry its ACK. */
+   if(s->result)s->state=6;else bzero(s,sizeof(*s));
+  }break;
  }
  lck_mtx_unlock(&x9_mi_lock);return rc;
 }

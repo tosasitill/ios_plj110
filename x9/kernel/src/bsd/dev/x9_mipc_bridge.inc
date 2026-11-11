@@ -97,7 +97,7 @@ uint64_t x9_md_mipc_submit(const uint8_t *p,uint32_t n){
      k<3||k>X9_AT_COMMAND_MAX||n!=16+((k+11)&~7u)||p[20+k-1]||
      strnlen((const char *)p+20,k)!=k-1||!x9mi_at_read((const char *)p+20))return 0;
  }
- else if(id==0x30b||id==0x601||id==0x605||id==0xa04){if(!x9mm_request(p,n,id))return 0;}
+ else if(id==0x30b||id==0x601||id==0x605||id==0x607||id==0xa04){if(!x9mm_request(p,n,id))return 0;}
  else if(id==0x101){if(!x9mi_attach_request(p,n))return 0;}
  /* Read-only per-SIM provider-name query. MD 91345dbc/91345e9e:
   * 0429 -> 042a; exact PLMN ASCII + NUL, LAC0 (MD current area), OPTION1.

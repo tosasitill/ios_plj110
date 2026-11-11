@@ -29,6 +29,8 @@ int x9_md_mipc_online(void);
  * event: 1 frame, 0 empty, -1 unavailable. INDs return token 0.
  * reply: 1 queued, 0 unavailable, -1 invalid/already replied.
  * reply_take: 1 physical TX completed (result 0 success), 0 pending, -1 invalid.
+ * A failed TX result is returned once; the MD command remains quarantined
+ * until boot, without ACK retry or recycling its original wire identity.
  * An ACK only confirms the command response transport, NOT SMS delivery. */
 int x9_md_mipc_message_event(uint8_t *frame, uint32_t capacity, uint32_t *length, uint32_t *token);
 int x9_md_mipc_message_reply(uint32_t token, unsigned success, uint8_t cause);

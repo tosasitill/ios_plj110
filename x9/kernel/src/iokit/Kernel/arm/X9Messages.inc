@@ -2,15 +2,18 @@
  * Apple wire contracts, checked in the actual driver: WMS47 indication
  * registration (13=service-ready), 4c BindSubscription (01/u8, 0/1),
  * 5c ready response (11/u8: 1=3GPP, NOT 2), 5d ready IND (10/u8),
- * RawSend20/SendAck37. Standard WMS transfer-route TLVs are byte encoded.
+ * RawSend20/SendAck37, ListMessages31/RawRead22/ModifyTag23 (MT read only).
+ * Standard WMS transfer-route TLVs are byte encoded. RawRead preserves tags;
+ * ModifyTag pre-reads, marks one MT message read, then verifies by readback.
  * MTK: GSM send605/606, SMS host-ready601/602, CMD8601/8603 with
  * ORIGINAL txid ACK8602/8604. Independent from the PDP/DPMAIF state.
  * IMSA exposes only proven registration a04/a05 and 4a01 snapshots.
  * No guessed IMS service capabilities/configuration or CS fallback for an
- * IMS-only send. SIP, IMS PDU8105 and VoLTE are NOT implemented here.
+ * IMS-only send. SIP, non-CS type4/8105 and VoLTE are NOT implemented here.
+ * MD maps type4 to C2K; the RIL event consumer is not yet reconciled.
  */
-constexpr unsigned X9M_JOBS=8, X9M_INCOMING=16;
-enum { X9M_SEND=1, X9M_ACK, X9M_REG, X9M_SMSC };
+constexpr unsigned X9M_JOBS=32, X9M_INCOMING=16;
+enum { X9M_SEND=1, X9M_ACK, X9M_REG, X9M_SMSC, X9M_LIST, X9M_READ, X9M_TAG };
 struct x9m_client {
  bool events,mwi_events,ready_ind,ims_ind,routes,status_reports;
  uint8_t route[6],route_mask; uint64_t reg_next;
@@ -18,12 +21,15 @@ struct x9m_client {
 static x9m_client x9m_clients[CBQ_MAX_CLIENTS];
 struct x9m_job {
  unsigned op,slot,sim,len; uint64_t generation,token,deadline;
- bool answered,background,hold; uint8_t req[X9Q_REQ];
+ bool answered,background,hold,follow; uint8_t req[X9Q_REQ];
+ unsigned step,stored_len; uint64_t store_order; uint8_t stored_pdu[200];
 };
 static x9m_job x9m_jobs[X9M_JOBS];
+static uint64_t x9m_store_order;
+static bool x9m_storage(unsigned op){return op==X9M_LIST||op==X9M_READ||op==X9M_TAG;}
 struct x9m_incoming {
  uint32_t token; unsigned sim,len,slot; uint64_t generation,next_delivery;
- bool delivered,replying; uint8_t pdu[255];
+ bool delivered,replying,held; uint64_t ack_wait; uint8_t pdu[255];
 };
 static x9m_incoming x9m_incoming_sms[X9M_INCOMING];
 enum { X9M_CFG_IND=0, X9M_IMS_IND, X9M_READY_QUERY, X9M_WAIT_READY, X9M_HOST_READY, X9M_INIT_DONE };
@@ -102,6 +108,44 @@ static unsigned x9m_class(const uint8_t *p,unsigned n){
  if(addr>20||dcs>=n)return 6;
  unsigned v=p[dcs];
  return (((v&0xc0)==0&&(v&0x10))||(v&0xf0)==0xf0)?v&3:4;
+}
+/* MD 91367a2a: 0608/103 is the count, 8104 is count * 264 bytes.
+ * Each record is native index/u16, TPDU length/u8, AT storage tag/u8,
+ * class/u8, reserved[3], SMSC+TPDU. Never publish a partial/truncated list.
+ * AT tags 0/1/2/3 = unread/read/unsent/sent; WMS = read/unread/sent/unsent.
+ * Indices are opaque native storage IDs, not assumed zero-based offsets. */
+static bool x9m_stored(const uint8_t *p,unsigned n,x9q_view &records,unsigned &count){
+ x9q_view c=x9w_tlv(p,n,0x103);records=x9w_tlv(p,n,0x8104);
+ if(!c.p||c.n!=2)return false;
+ count=x9q_u16(c.p);
+ if(!count)return !records.p||records.n==0;
+ if(!records.p||count>X9_MIPC_FRAME_MAX/264||records.n!=count*264)return false;
+ for(unsigned i=0;i<count;i++){
+  const uint8_t *r=records.p+264*i;unsigned index=x9q_u16(r);
+  if(!index||r[3]>3||r[8]>12)return false;
+  unsigned full=1u+r[8]+r[2],mti=r[9+r[8]]&3;
+  if(full>200||!x9m_pdu(r+8,full,mti)||(r[3]<2?(mti!=0&&mti!=2):mti!=1))return false;
+  for(unsigned prev=0;prev<i;prev++)if(x9q_u16(records.p+264*prev)==index)return false;
+ }
+ return true;
+}
+/* One native 0607 transaction per SIM, including the entire tag mutation.
+ * Apple fans out RawRead for a list: accept bounded queued work instead of
+ * returning BUSY for every message after the first. Never replay a sent token. */
+static bool x9m_store_blocked(const x9m_job &j){
+ for(const x9m_job &other:x9m_jobs)if(&other!=&j&&x9m_storage(other.op)&&other.sim==j.sim&&
+  (other.hold||other.token||other.store_order<j.store_order))return true;
+ return false;
+}
+static uint64_t x9m_store_submit(const x9m_job &j){
+ x9q_view storage=x9q_tlv(j.req,j.len,1);unsigned flag=5;
+ if(j.op==X9M_LIST){x9q_view tag=x9q_tlv(j.req,j.len,0x11);
+  const uint8_t flags[4]={2,1,3,4};flag=tag.p?flags[tag.p[0]]:0;}
+ x9w_frame f(0x607,1u<<j.sim);f.byte(0x100,3);f.byte(0x101,(uint8_t)flag);
+ if(j.op!=X9M_LIST)f.tlv(0x102,storage.p+1,2);
+ /* 103=0 is permitted ONLY for a single indexed CMGR in ModifyTag step1;
+  * never mark an entire CMGL enumeration read. CPMS is always explicit. */
+ f.byte(0x103,j.op==X9M_TAG&&j.step==1?0:1);f.byte(0x104,storage.p[0]);return f.submit();
 }
 static void x9m_init_poll(uint8_t *response,unsigned room){
  bool wanted=false;for(unsigned sim=0;sim<x9_md_sim_count();sim++)wanted|=x9m_sims[sim].wanted;
@@ -207,7 +251,8 @@ static void x9m_deliver(x9m_incoming &in,unsigned mti){
   bool admitted=p.good&&bb_x9_sms_event(CBQ_PORT_BASE+i,X9BB_NODE,p.p,p.n);
   bzero(v,sizeof(v));bzero(p.p,sizeof(p.p));
   if(!admitted){in.next_delivery=x9q_ms()+100;return;}
-  in.delivered=true;in.slot=i;in.generation=x9q_clients[i].generation;bzero(in.pdu,sizeof(in.pdu));
+  in.delivered=true;in.slot=i;in.generation=x9q_clients[i].generation;in.ack_wait=x9q_ms()+30000;
+  bzero(in.pdu,sizeof(in.pdu));
   printf("X9 SMS: incoming GSM %s SIM%u command token %u; waiting for host ACK\n",mti==2?"status report":"message",in.sim+1,in.token);
   return;
  }
@@ -232,7 +277,7 @@ static void x9m_event(uint8_t *p,unsigned n,uint32_t token){
  x9q_view v={nullptr,0};unsigned mti=id==0x8601?0:2;
  if(id==0x8601){
   unsigned type;if(!x9w_byte(p,n,0x100,type)||type!=3){
-   static unsigned once;if(!once++)printf("X9 SMS: non-CS command retained; IMS8105 encoding/ACK not yet mapped\n");return;}
+   static unsigned once;if(!once++)printf("X9 SMS: non-CS command retained; type4/8105 encoding and ACK not mapped\n");return;}
   v=x9w_tlv(p,n,0x8104);
   if(!v.p||v.n<11)return;
   unsigned full=1u+v.p[8]+v.p[2];
@@ -314,6 +359,36 @@ static bool x9m_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
  }else if(service==5&&id==0x30&&len==7){
   if(!x9m_sims[sim].ready)err=X9Q_NOT_READY;
   else{x9q_packet p(req);x9m_number(p,1,1,1);p.send(local,port);return true;}
+ }else if(service==5&&(id==0x31||id==0x22||id==0x23)){
+  bool list=id==0x31,modify=id==0x23;
+  x9q_view storage=x9q_tlv(req,len,1),tag=x9q_tlv(req,len,0x11),mode=x9q_tlv(req,len,list?0x12:0x10);
+  unsigned index=0;
+  if(!storage.p||storage.n!=(list?1u:modify?6u:5u)||storage.p[0]>1)err=X9Q_ARG;
+  if(mode.p&&(mode.n!=1||mode.p[0]!=1))err=X9Q_UNSUPPORTED;
+  for(unsigned at=7;at<len;at+=3+x9q_u16(req+at+1)){
+   unsigned t=req[at];
+   if(t!=1&&t!=(list?0x12u:0x10u)&&(modify||t!=0x11))err=X9Q_UNSUPPORTED;
+  }
+  if(list){
+   /* 607 flags: 0 -> CMGL ALL, 1/2/3/4 -> unread/read/sent/unsent.
+    * Flag5 is CMGR by index, NOT an ALL enumeration. */
+   if(tag.p&&(tag.n!=1||tag.p[0]>3))err=X9Q_ARG;
+  }else{
+   if(!modify&&tag.p&&(tag.n!=1||tag.p[0]))err=X9Q_UNSUPPORTED; // SMS-on-IMS, not a storage tag.
+   if(!err){index=x9q_u32(storage.p+1);if(!index||index>65535)err=X9Q_ARG;}
+   if(!err&&modify&&storage.p[5]!=0)err=X9Q_UNSUPPORTED; // Only MT -> read, not invented MO/tag setters.
+  }
+  if(!err&&(!x9m_sims[sim].ready||!x9_md_mipc_online()))err=X9Q_NOT_READY;
+  if(x9m_store_order==~0ull)err=X9Q_BUSY;
+  if(!err){
+   x9m_job *j=x9m_new(list?X9M_LIST:modify?X9M_TAG:X9M_READ,slot,sim,req,len);
+   if(!j)err=X9Q_BUSY;
+   else{
+    j->store_order=++x9m_store_order;j->follow=true;
+    printf("X9 SMS: SIM%u stored %s queued QMI txn %u; native per-SIM serialization\n",
+     sim+1,list?"list":modify?"mark-read":"read",x9q_u16(req+1));return true;
+   }
+  }
  }else if(service==5&&id==0x20){
   x9q_view raw=x9q_tlv(req,len,1),ims=x9q_tlv(req,len,0x13);
   if(!raw.p||raw.n<6||raw.p[0]!=6||x9q_u16(raw.p+1)!=raw.n-3||!x9m_pdu(raw.p+3,raw.n-3,1))err=X9Q_ARG;
@@ -356,12 +431,16 @@ static bool x9m_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
   if(!err)for(x9m_incoming &in:x9m_incoming_sms)if(in.token==x9q_u32(info.p)&&in.delivered&&
    in.sim==sim&&in.slot==slot&&in.generation==x9q_clients[slot].generation)owner=&in;
   if(!err&&(!owner||owner->replying))err=X9Q_ARG;
+  printf("X9 SMS: host ACK SIM%u txn %u owner %u validation %u; no payload logged\n",
+   sim+1,x9q_u16(req+1),owner?1:0,err);
   if(!err){
    x9m_job *j=x9m_new(X9M_ACK,slot,sim,req,len);
    if(!j)err=X9Q_BUSY;
    else{
     int rc=x9_md_mipc_message_reply(owner->token,info.p[5],cause);
-    if(rc==1){j->token=owner->token;owner->replying=true;return true;}
+    if(rc==1){j->token=owner->token;owner->replying=true;
+     printf("X9 SMS: SIM%u command token %u host %s queued; waiting for physical ACK TX\n",
+      sim+1,owner->token,info.p[5]?"ACK":"NACK");return true;}
     bzero(j,sizeof(*j));err=rc<0?X9Q_ARG:X9Q_NOT_READY;
    }
   }
@@ -384,9 +463,10 @@ static bool x9m_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
 }
 static void x9m_job_done(x9m_job &j,const uint8_t *p,unsigned n){
  unsigned result=1;
- bool known=x9w_wire(p,n)&&x9q_u16(p+10)==(j.op==X9M_SEND?0x606:j.op==X9M_REG?0xa05:0x602)&&
-  x9w_word(p,n,0,result);
- if(!known||result){j.hold=j.op==X9M_SEND&&!known;
+ bool stored=x9m_storage(j.op);
+ bool known=x9w_wire(p,n)&&x9q_u16(p+10)==(stored?0x608:j.op==X9M_SEND?0x606:j.op==X9M_REG?0xa05:0x602)&&
+  p[8]==(1u<<j.sim)&&x9w_word(p,n,0,result);
+ if(!known||result){j.hold=(j.op==X9M_SEND&&!known)||(j.op==X9M_TAG&&j.step!=0);
   printf("X9 SMS/IMS: operation %u SIM%u CNF known %u result %u\n",j.op,j.sim+1,known?1:0,result);
   x9m_error(j,X9Q_INTERNAL);return;}
  x9q_packet response(j.req);
@@ -401,6 +481,46 @@ static void x9m_job_done(x9m_job &j,const uint8_t *p,unsigned n){
    * from a numeric similarity to IMSA. State 1 remains unclassified. */
   if(state==1){x9m_sims[j.sim].reg_valid=false;x9m_error(j,X9Q_NOT_READY);return;}
   unsigned reg=state==2?2:0;x9m_reg(j.sim,reg);x9m_number(response,0x12,reg);
+ }else if(stored){
+  x9q_view records={nullptr,0};unsigned count=0,type=0;
+  if(!x9m_stored(p,n,records,count)||
+   (count&&(!x9w_byte(p,n,0x100,type)||type!=3))){j.hold=j.op==X9M_TAG&&j.step!=0;x9m_error(j,X9Q_INTERNAL);return;}
+  if(j.op==X9M_LIST){
+   /* Bounded by the native frame, not a guessed SIM capacity. */
+   uint8_t values[4+5*(X9_MIPC_FRAME_MAX/264)]={};values[0]=(uint8_t)count;
+   x9q_view tag=x9q_tlv(j.req,j.len,0x11);
+   for(unsigned i=0;i<count;i++){
+    const uint8_t *r=records.p+264*i;unsigned at=4+5*i;
+    if(tag.p&&(r[3]^1u)!=tag.p[0]){bzero(values,sizeof(values));x9m_error(j,X9Q_INTERNAL);return;}
+    values[at]=r[0];values[at+1]=r[1];values[at+4]=r[3]^1u;
+   }
+   response.tlv(1,values,4+5*count);bzero(values,sizeof(values));
+   printf("X9 SMS: SIM%u real stored list CNF count %u; no synthetic empty list\n",j.sim+1,count);
+  }else{
+   x9q_view storage=x9q_tlv(j.req,j.len,1);
+   if(count!=1||x9q_u16(records.p)!=x9q_u32(storage.p+1)){
+    j.hold=j.op==X9M_TAG&&j.step!=0;x9m_error(j,X9Q_INTERNAL);return;}
+   const uint8_t *r=records.p;unsigned full=1u+r[8]+r[2];uint8_t value[4+200]={};
+   if(j.op==X9M_TAG){
+    if(r[3]>1){j.hold=j.step!=0;x9m_error(j,X9Q_UNSUPPORTED);return;}
+    if(j.step==0){
+     if(r[3]==0){
+      if(j.answered||!x9m_live(j.slot,j.generation)||x9q_ms()>=j.deadline){x9m_error(j,X9Q_NOT_READY);return;}
+      j.stored_len=full;memcpy(j.stored_pdu,r+8,full);j.step=1;j.follow=true;j.token=0;return;
+     } // Already read: the requested tag is confirmed by a real native read.
+    }else{
+     if(full!=j.stored_len||memcmp(j.stored_pdu,r+8,full)||(j.step==2&&r[3]!=1)){
+      j.hold=true;x9m_error(j,X9Q_INTERNAL);return;
+     }
+     if(j.step==1){j.step=2;j.follow=true;j.token=0;return;}
+    }
+    printf("X9 SMS: SIM%u stored MT read tag verified by native readback; not application persistence proof\n",j.sim+1);
+   }else{
+    value[0]=r[3]^1u;value[1]=6;value[2]=(uint8_t)full;memcpy(value+4,r+8,full);
+    response.tlv(1,value,4+full);bzero(value,sizeof(value));
+    printf("X9 SMS: SIM%u real stored read CNF; read tag unchanged\n",j.sim+1);
+   }
+  }
  }else{
   x9q_view text=x9w_tlv(p,n,0x8101);
   if(!text.p||text.n<2||text.n>23||text.p[text.n-1]||strnlen((const char *)text.p,text.n)!=text.n-1){x9m_error(j,X9Q_INTERNAL);return;}
@@ -428,6 +548,19 @@ static void x9m_poll(){
  }
  for(x9m_job &j:x9m_jobs)if(j.op){
   if(j.hold)continue;
+  if(x9m_storage(j.op)&&!j.token){
+   if(!j.follow||now>=j.deadline||j.answered||!x9m_live(j.slot,j.generation)){
+    x9m_error(j,X9Q_NOT_READY);
+    if(j.op==X9M_TAG&&j.step==2){j.hold=true;bzero(j.stored_pdu,sizeof(j.stored_pdu));}
+    else bzero(&j,sizeof(j));
+    continue; // A lost/expired client may not start a delayed mutation.
+   }
+   if(x9m_store_blocked(j)||!x9m_sims[j.sim].ready||!x9_md_mipc_online())continue;
+   j.token=x9m_store_submit(j);
+   if(!j.token)continue;
+   j.follow=false;
+   printf("X9 SMS: SIM%u stored op %u step %u submitted QMI txn %u\n",j.sim+1,j.op,j.step,x9q_u16(j.req+1));
+  }
   if(j.op==X9M_SMSC&&!j.token){
    if(j.answered||now>=j.deadline){x9m_error(j,X9Q_NOT_READY);bzero(&j,sizeof(j));continue;}
    if(x9m_sims[j.sim].ready&&x9_md_mipc_online()){
@@ -440,13 +573,18 @@ static void x9m_poll(){
    int result=0,rc=x9_md_mipc_message_reply_take((uint32_t)j.token,&result);
    if(rc==1){
     x9m_error(j,result?X9Q_NOT_READY:0);
-    for(x9m_incoming &in:x9m_incoming_sms)if(in.token==j.token)bzero(&in,sizeof(in));
+    printf("X9 SMS: SIM%u command token %u ACK physical TX result %d; not durable storage proof\n",
+     j.sim+1,(unsigned)j.token,result);
+    for(x9m_incoming &in:x9m_incoming_sms)if(in.token==j.token){
+     if(result)in.held=true;else bzero(&in,sizeof(in));
+    }
     bzero(&j,sizeof(j));continue;
    }
   }else if(x9_md_mipc_take(j.token,p,sizeof(p),&n)==1){
    x9m_job_done(j,p,n);bzero(p,sizeof(p));
-   if(j.hold){bzero(j.req+7,sizeof(j.req)-7);
-    printf("X9 SMS: SIM%u ambiguous send CNF; no new send until boot, payload erased\n",j.sim+1);}
+   if(j.hold){bzero(j.req+7,sizeof(j.req)-7);bzero(j.stored_pdu,sizeof(j.stored_pdu));
+    printf("X9 SMS: SIM%u ambiguous operation %u CNF; owner retained until boot, payload erased\n",j.sim+1,j.op);}
+   else if(j.follow)continue;
    else bzero(&j,sizeof(j));continue;
   }
   if(!j.answered&&now>=j.deadline){x9m_error(j,X9Q_NOT_READY);
@@ -457,8 +595,14 @@ static void x9m_poll(){
   if(rc!=1)break;x9m_event(p,n,token);bzero(p,sizeof(p));
  }
  x9m_init_poll(p,sizeof(p)); // Consume pending readiness INDs before submitting config.
- for(x9m_incoming &in:x9m_incoming_sms)if(in.token&&!in.delivered){
-  if(in.replying){int result=0;if(x9_md_mipc_message_reply_take(in.token,&result)==1)bzero(&in,sizeof(in));}
+ for(x9m_incoming &in:x9m_incoming_sms)if(in.token&&!in.held){
+  if(in.delivered){
+   if(!in.replying&&in.ack_wait&&now>=in.ack_wait){in.ack_wait=0;
+    printf("X9 SMS: SIM%u command token %u host ACK still absent after 30s client-live %u; ownership retained\n",
+     in.sim+1,in.token,x9m_live(in.slot,in.generation)?1:0);}
+  }else if(in.replying){int result=0;if(x9_md_mipc_message_reply_take(in.token,&result)==1){
+   if(result){in.held=true;printf("X9 SMS: SIM%u command token %u discard ACK TX failed; retained without retry\n",in.sim+1,in.token);}
+   else bzero(&in,sizeof(in));}}
   else x9m_deliver(in,in.pdu[in.pdu[0]+1]&3);
  }
  for(unsigned slot=0;slot<CBQ_MAX_CLIENTS;slot++)if(x9m_clients[slot].ims_ind&&now>=x9m_clients[slot].reg_next&&x9w_control_ready&&x9_md_mipc_online()){
