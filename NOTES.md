@@ -1375,7 +1375,13 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **不能称为全部USB完成**:本轮暂无枚举/DMA/ue0 ping/bulk回环实机结果,live EMI/MPU允许普通XNU DMA页也未证明。`native_apple_stack=0`,没有冒充IOUSBDeviceController或AppleUSBDeviceMux;原始configd USBDeviceConfiguration/lockdownd、Finder/iTunes Trust/配对/照片同步仍缺20H392 controller adapter及kext构建接入。USB3 XS-PHY/retimer、charger Type-C role与原生xHCI也未完成。参考文章chip/board/security-domain/fsid/锁状态条件要到原生栈接通后才验证,不先改身份/配对状态制造成功。
 - **下一步/验收**:先在用户手动启动的单一候选核对`CAP_EPINFO/TXFIFO/RXFIFO/MISC`→config1/alt1→真实QMU OUT/IN→ue0 ping,再用iOS `usbctl --echo`+host单次echo证明host→iOS→host字节相同。保留EP0日志,无需重建Metal插件/mailbox。接口/回退/构建说明在`x9/usb/README.md`;不要求用户现在连续刷试探镜像。
 
-## 蜂窝当前交接(CELL148-STATS,2026-11-11): 204上行包内容正确(DNS查询、源地址=PDP地址、校验和OK)但无回包；cell148读取MD空口收发计数，未上机
+## 蜂窝当前交接(CELL148-RESULT,2026-11-11): 205证实MD空口TX=0(上行包到MD后被内部丢弃)；MD端口/接口ID路径分析，下一步需Android对照
+
+- **205.txt**(cell148)。**观察**：`MD statistics start/read CNF valid result 0: air TX 0 B RX 0 B`(30.5s起每10s)，同期DPMAIF UL 46→165全部完成、RX 0。**结论**：AP→DPMAIF→MD交付成功，但MD没把上行发上空口(或统计口径不含此路径——统计接口在Android上未做基准验证)。
+- **MD静态分析(材料`.local/x9/work/cell-eif-20261111/`)**：`nim_dpmaif_set_mapping`(9141be78)仅当首参(呼叫节点`+0x9d8`=请求`+0x151`=MIPC端口配置`+0x25`)非0且`ap_if_id!=-1`才`ipc_set_netif_mapping`；`l5mipc_init_uarts`跳转表：l5io端口0..14 `+0x25=0`，15..23 `=1`；`l5io_fwk_mipc_io_map_uart`表0x9298e708：io0..9→UART41..50(=ttyCMIPC0..9，我们MIPC1=io1→非sAP)，io15→51、16..23→75..82(推断为外部主机端口)。→手机AP走非sAP端口是常态，"主机接口映射"路径不适用；IF_ID 3被MD接受但不改变空口TX=0。`SET_RESERVED_IF_ID`(0x239)在MD只是排除名单。MIPC头另有`SET_PACKET_FILTER`(0x207)、`SET_CONFIG`(0x211)未用。
+- **下一步(需用户进Android)**：①在Android蜂窝工作时从空闲端口(如/dev/ttyCMIPC2，root写入)发`SYS_CONNECTIVITY_STATISTICS`(0x4b START/READ)，验证统计口径；②`setprop`开mtkfusionrild/libmipc日志后开关移动数据，抓logcat radio缓冲区，得到RIL建立数据的完整MIPC消息序列与我们逐条对照；③同时`echo dpmaif > /sys/kernel/ccci/mdsys/dump`再抓一次寄存器。
+
+## 蜂窝前次交接(CELL148-STATS,2026-11-11): 204上行包内容正确(DNS查询、源地址=PDP地址、校验和OK)但无回包；cell148读取MD空口收发计数，未上机
 
 - **204.txt**(cell147)。**观察**：每次激活得到新地址(10.5.50.35→10.4.33.77，非复用)；`ifst up`与`ipupdate v4` CNF均0；`UL[1..12] ch 3 v4 proto 17 ... hdrsum ok 10.4.33.77 -> 43.239.172.1 port 53`(DNS服务器同Android cbnet)；UL 142/142完成，RX 0。
 - **待区分**：MD未把UL发上空口 vs 回包到MD但未下发AP。
