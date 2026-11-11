@@ -19,6 +19,8 @@ static struct { unsigned len; uint8_t frame[X9_MIPC_FRAME_MAX]; } x9_mi_events[X
 static unsigned x9_mi_head,x9_mi_count,x9_mi_next,x9_mi_online,x9_mi_poisoned;
 static uint8_t x9_mi_stream[X9_MIPC_FRAME_MAX];
 static unsigned x9_mi_bytes;
+static unsigned x9_mi_sms_skip;
+static uint64_t x9_mi_sms_skip_token;
 static unsigned x9mi_u16(const uint8_t *p){return p[0]|((unsigned)p[1]<<8);}
 static int x9mi_enabled(void){return x9_at_enabled()&&sweet_x9_arg("x9_mipc",1);}
 unsigned x9_md_sim_count(void){return sweet_x9_arg("x9_dual_sim",0)==1?2:1;}
@@ -221,6 +223,9 @@ int x9_md_mipc_take(uint64_t token,uint8_t *out,uint32_t room,uint32_t *len){
   if(s->state==3){
    if(s->len<=room){memcpy(out,s->frame,s->len);*len=s->len;found=1;bzero(s,sizeof(*s));}
    else found=-1;
+  }else if(s->state==5){
+   /* A complete oversized SMS CNF was drained, not synthesized/truncated. */
+   *len=0;found=-2;bzero(s,sizeof(*s));
   }break;
  }
  lck_mtx_unlock(&x9_mi_lock);return found;
@@ -289,6 +294,20 @@ static void x9mi_poison(const char *why){
  x9_mi_poisoned=1;printf("X9 MIPC: quarantined (%s); no bearer reuse\n",why);
  if(x9_mi_bytes>=16)x9mi_hdr_log("offending",x9_mi_stream);
 }
+/* Lock held. CMGL ALL may exceed 15 native records. Drain ONLY a proven
+ * owned 0608 header; no length guess, resync scan, partial/synthetic CNF. */
+static int x9mi_sms_oversize(unsigned need){
+ if(x9_mi_bytes!=16||x9mi_u16(x9_mi_stream+10)!=0x608||
+  x9_mi_stream[0]!=0x84||x9_mi_stream[1]!=0x19||x9_mi_stream[2]!=0x54||x9_mi_stream[3]!=0x24)return 0;
+ for(unsigned i=0;i<X9_MI_SLOTS;i++){
+  struct x9_mi_slot *s=&x9_mi_slots[i];
+  if(s->state!=2||s->id!=0x607||s->txid!=x9mi_u16(x9_mi_stream+12)||s->mask!=x9_mi_stream[8])continue;
+  x9_mi_sms_skip=need-16;x9_mi_sms_skip_token=s->token;s->state=4;s->len=0;bzero(s->frame,sizeof(s->frame));
+  printf("X9 SMS: owned stored reply txn %u bytes %u exceeds capacity; draining exactly, WDS unchanged\n",s->txid,need);
+  bzero(x9_mi_stream,sizeof(x9_mi_stream));x9_mi_bytes=0;return 1;
+ }
+ return 0;
+}
 /* Framing follows the device's libmipc RX loop (mipc_init+0x4c0, 158.txt analysis):
  * READCOM(16), then READCOM(len@14); no check of magic, byte 9 (flag) or the SIM
  * mask on CNFs. Dispatch is msg_id>>14: 0 = CNF matched by txid, 1 = IND fanned
@@ -299,13 +318,29 @@ static void x9mi_rx(const uint8_t *p,unsigned n){
  lck_mtx_lock(&x9_mi_lock);
  if(!x9mi_enabled()||x9_mi_poisoned){lck_mtx_unlock(&x9_mi_lock);return;}
  while(n&&!x9_mi_poisoned){
+  if(x9_mi_sms_skip){
+   unsigned k=n<x9_mi_sms_skip?n:x9_mi_sms_skip;
+   p+=k;n-=k;x9_mi_sms_skip-=k;
+   if(!x9_mi_sms_skip){
+    for(unsigned i=0;i<X9_MI_SLOTS;i++)if(x9_mi_slots[i].state==4&&x9_mi_slots[i].token==x9_mi_sms_skip_token)
+     x9_mi_slots[i].state=5;
+    x9_mi_sms_skip_token=0;
+   }
+   continue;
+  }
   unsigned need=x9_mi_bytes<16?16:16+x9mi_u16(x9_mi_stream+14);
-  if(need>X9_MIPC_FRAME_MAX){x9mi_poison("oversized frame");break;}
+  if(need>X9_MIPC_FRAME_MAX){
+   if(x9mi_sms_oversize(need))continue;
+   x9mi_poison("oversized frame");break;
+  }
   unsigned k=need-x9_mi_bytes;if(k>n)k=n;
   memcpy(x9_mi_stream+x9_mi_bytes,p,k);x9_mi_bytes+=k;p+=k;n-=k;
   if(x9_mi_bytes<16)continue;
   need=16+x9mi_u16(x9_mi_stream+14);
-  if(need>X9_MIPC_FRAME_MAX){x9mi_poison("oversized frame");break;}
+  if(need>X9_MIPC_FRAME_MAX){
+   if(x9mi_sms_oversize(need))continue;
+   x9mi_poison("oversized frame");break;
+  }
   if(x9_mi_bytes<need)continue;
   unsigned id=x9mi_u16(x9_mi_stream+10),tx=x9mi_u16(x9_mi_stream+12),kind=id>>14;
   if(rx_logged<64){rx_logged++;x9mi_hdr_log("RX",x9_mi_stream);}

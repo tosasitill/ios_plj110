@@ -20,6 +20,9 @@ int x9_md_at_online(void);
  * timeout/client deletion and consume late CNF before releasing ownership. */
 #define X9_MIPC_FRAME_MAX 4096u
 uint64_t x9_md_mipc_submit(const uint8_t *frame, uint32_t length);
+/* take: 1 complete frame, 0 pending, -1 unavailable/capacity, -2 an owned
+ * oversized SMS0608 has been fully drained. -2 consumes that token once;
+ * no partial/synthetic CNF is returned and other MIPC services stay online. */
 int x9_md_mipc_take(uint64_t token, uint8_t *frame, uint32_t capacity, uint32_t *length);
 int x9_md_mipc_event(uint8_t *frame, uint32_t capacity, uint32_t *length);
 int x9_md_mipc_online(void);

@@ -580,12 +580,22 @@ static void x9m_poll(){
     }
     bzero(&j,sizeof(j));continue;
    }
-  }else if(x9_md_mipc_take(j.token,p,sizeof(p),&n)==1){
-   x9m_job_done(j,p,n);bzero(p,sizeof(p));
-   if(j.hold){bzero(j.req+7,sizeof(j.req)-7);bzero(j.stored_pdu,sizeof(j.stored_pdu));
-    printf("X9 SMS: SIM%u ambiguous operation %u CNF; owner retained until boot, payload erased\n",j.sim+1,j.op);}
-   else if(j.follow)continue;
-   else bzero(&j,sizeof(j));continue;
+  }else{
+   int taken=x9_md_mipc_take(j.token,p,sizeof(p),&n);
+   if(taken==-2){
+    x9m_error(j,X9Q_INTERNAL);
+    printf("X9 SMS: SIM%u operation %u oversized CNF fully drained; no partial list\n",j.sim+1,j.op);
+    if(j.op==X9M_TAG&&j.step!=0){j.hold=true;bzero(j.stored_pdu,sizeof(j.stored_pdu));}
+    else bzero(&j,sizeof(j));
+    continue;
+   }
+   if(taken==1){
+    x9m_job_done(j,p,n);bzero(p,sizeof(p));
+    if(j.hold){bzero(j.req+7,sizeof(j.req)-7);bzero(j.stored_pdu,sizeof(j.stored_pdu));
+     printf("X9 SMS: SIM%u ambiguous operation %u CNF; owner retained until boot, payload erased\n",j.sim+1,j.op);}
+    else if(j.follow)continue;
+    else bzero(&j,sizeof(j));continue;
+   }
   }
   if(!j.answered&&now>=j.deadline){x9m_error(j,X9Q_NOT_READY);
    printf("X9 SMS/IMS: operation %u SIM%u timed out; sent token retained, no resend\n",j.op,j.sim+1);}
