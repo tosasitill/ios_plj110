@@ -1525,6 +1525,17 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **后续**：从真实MTK按SIM/PLMN/RAT名称接口补NAS44的文本、编码、来源及生命周期，并触发原生更新/缓存失效；不硬编码运营商、不把修名称当修RX0。RegistrationCache按slot缓存，首次字典不存在才抓取，operatorNameChanged后重新本地化；修好底层仍需新鲜缓存验证。IMS按下一节继续独立核对，未证明其缺失导致这行或Internet RX0。
 - **成果与重放**：报告提交 **`8aec2d3`**，`docs/network/about-network-20H392.md`；私有 `.local/x9/work/about-network-20261111/` 含trace.py、collect-runtime.py、10段汇编、image-provenance/range-verification/runtime-evidence.json、constants/localization.json及脱敏定点摘录。根目录运行`python3 .local/x9/work/about-network-20261111/trace.py`与`python3 .local/x9/work/about-network-20261111/collect-runtime.py`重放；10段函数字节与现有根盘快照cache全部相同（不是设备内存采样）。只读原Apple输入/快照/已有日志及源码，**无运行代码改动、编译/新镜像/CI run/测试套件/push/设备操作**；仅报告和本节交接入Git，保留并发IMS交接。
 
+## 蜂窝当前实测交接(CELL217-ULDROP，2026-11-11)：cell162实跑，BAT提示已消费但仍RX0；LTE空闲时AP上行包不触发RRC连接；尚无修复、未出新镜像
+
+- **217观察(cell162，`~/217.txt` 19062行)**：`BAT hint 0x200080ff count 8192`(30.514s，bind后20ms)与`0x300080ff count 12288`(34.482s)两次被消费，`BAT policy hint 12288 events 2`；**RX仍全0**(61.1s TX146/146)。→ BAT提示消费与RX0无关(观察到修复生效而结果不变)。
+- **5G→LTE重复出现**：ACT 30.490s；36.580s NR释放→36.620s LTE空闲→37.197s LTE连接；EIF5 37.092s、4203 37.094s起。四份日志中“首次ACT→掉LTE/EIF5”间隔：214约5.9s、215 6.8s、216 7.7s、217 6.1s，均以首次数据拨号为起点(拨号前NR连接态可保持≥8s)。
+- **新的关键观察**：第二次拨号59.348s(ccmni2/trans202，ACT result0)时SIM1为LTE空闲`00 ff 03 00`，此后59.355/62.356/65.355/68.354/71.353s五次轮询**始终空闲**，而同期AP上行从90增至146+(DNS等)且DRB全部被硬件回收。正常情况下空闲态有上行数据应触发业务请求进入连接态。→ **AP经DPMAIF交给MD的上行包没有到达无线侧，在MD内部被丢弃/未被转发**(推断，依据是RRC未连接；未取得MD内部丢弃点的直接证据)。这与旧静态追踪的`ipc_on_process_ul_meta_table→ipc_find_netif→ipc_get_pdn_id_from_netif`无netif/无session分支相容，但未证实走的就是该分支。
+- **Android DRB环实物对照(观察)**：`android-dpmaif-20261111/proc_ccci_dump2.txt:6595起`含4个TXQ的DRB环原始内容。internet流量MSG字1=`0x30030000`(channel 3=ccmni3，bit28 ipv4/bit29 l4校验卸载标志置位)或`0x20030000`(v6)；各ccmni的RS(len 0x30)为`0x000N0000`无标志。PD字`len<<16|ext<<8`+低32位地址，ext出现0/1/2。**与我们的DRB编码(`channel<<16`、无校验标志)格式一致**；差异仅为我们不置校验卸载标志(Android无标志的RS同样存在)，不能据此解释丢包。Android数据包也在4GiB以上/以下混用，地址范围不是差异。
+- **本轮排除**：UL寄存器块0x60..0x6c无具名配置寄存器(仅状态)；MIPC客户端端口已是RIL所用ttyCMIPC1(桥文件头)，Android抓到的0301来自MBDataCenter(/dev/ttyCMIPC10)，RIL自身OPEN未被抓到。
+- **未知**：MD为何丢弃上行；5G→LTE是RLF、带重定向释放还是MD禁用N1；两者是否同因。
+- **候选下一步(未做，待用户选择)**：A) 以CSCON为判据做上行探针：LTE空闲时逐项改变DRB字段(校验标志、TXQ号、channel=N-1)各发一批，看哪种让RRC进入连接态——纯AP侧、一两个镜像可出结果；B) IMS方向(IMS214-NATIVE节)，工作量大，且不能直接解释LTE空闲不触发RRC；C) 继续MD静态逆向UL丢弃条件(netif state2/session绑定由谁建立)；D) Android关VoLTE对照是否掉4G(用户手动，几分钟)。本助手建议先A后C。
+- **本轮状态**：仅读日志与Android既有抓取、写交接；无代码修改、无构建、无设备操作。cell162是已失败候选。
+
 ## 蜂窝当前候选交接(CELL162-BAT／216结果，2026-11-11)：216发现拨号后约7.7s从5G SA掉到LTE；cell162=cell161＋BAT提示消费，已构建待上机
 
 - **216观察(cell161，`~/216.txt` 17896行)**：REGISTER_IND 4409/4419四条均result0。SIM1 CSCON(TLV100四字节=mode,state,access,core；TLV101)：22.673s `01 08 05 01`/8(与Android健康值相同，按+CSCON解读为NR/5GC已连接)，ACT成功30.847s后轮询30.855/33.851/36.853s仍为该值；**38.596s `00 ff 05 01`(释放)→38.630s `00 ff 04 00`/4(34ms后已在LTE空闲)→39.201s `01 07 03 00`(LTE已连接)**，42.8–51.8s轮询保持，53.652s转空闲。04c8/4419首记录RAT字段同步由`0080`变`0010`。SIM2在42.48s也到LTE。X9 NAME的RAT由12变8。38.3–38.6s间AP未发任何MIPC/AT切网请求。EIF5(39.088s)与4203(39.090s起)紧随LTE连接之后。DPMAIF：50.88s TX72/72、RX0；60.735s host Stop。
