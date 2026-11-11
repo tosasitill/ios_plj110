@@ -8,6 +8,68 @@ XNU 入口计算、内核复制、RAM map、GPU/SCP/GPS/Wi-Fi 交接不变；内
 代码未删除。恢复这条路线需要独立修复及启动验证，不能用启动参数重新打开。
 下文的 live handoff/provider 描述为该回退前的实现边界，不代表当前镜像已授予资源。
 
+<a id="audio-loader-fdt"></a>
+
+## 待处理：音频 loader 的 FDT 扫描优化
+
+**2026-11-11：用户要求先记录，稍后处理。以下仅为设计方案，未实现，
+不恢复 MIC／ADSP loader，也不决定重新采用 pre-XNU 音频 metadata 路线。**
+
+### 已知问题与证据边界
+
+- 130 console 停在 GPS FDT 返回后，冻结源码 `0cbd413` 下一步是 ADSP handoff；
+  131 复用同一内核，只跳过 ADSP 调用后，`~/189.txt:13` 已进入 Darwin。
+  这收窄了故障范围，但没有具体 fault PC。
+- 旧 ADSP 成功路径调用60次完整 FDT lookup。130 的 `SCTLR_EL1` 表明 MMU／
+  D-cache 关闭；parser 使用字节读取，且连续 handoff 路径没有 watchdog 服务点。
+  **长时间扫描耗尽 watchdog 预算是待验证假设，不是已经证实的复位原因。**
+  该函数不启动 DSP、不等待 READY，也不访问 shared pool 或音频 MMIO。
+- 重复扫描来自接口：`fdt_property_lookup()` 将全树校验与单字段查询绑定；
+  每次查属性都重新检查直到合法 END。`named_reg()` 反复获取同一节点的
+  `reg`／`reg-names`，schema 与 phandle 唯一性检查也各自扫树。
+  必须完整验证一次，不等于每取一个字段都必须重新完整验证。
+- `56e7b9a` 的 capture 只优化基础 ADSP 布局；I2S4／PA 等后续查询仍重复扫描。
+  不能把它当作整个音频 handoff 已完成 single-pass 优化。
+
+### 推荐设计：固定一至两遍，随后只查本次启动的小表
+
+1. **分离校验／收集与查询。** 先列出 ADSP、I2S4、PA、MIC 的完整节点／属性需求，
+   一遍校验结构并收集目标属性、直接子节点数和 schema 信息；required／optional
+   分开记录。完整 END／尾部验证成功前，不发布部分结果或硬件访问资格。
+2. **集中检查 phandle。** 优先第一遍收集待核对引用，第二遍统一检查全局唯一性，
+   避免每个引用单独扫全树。也可用有界全局索引做到一遍，但不为追求一遍增加
+   无界内存或复杂度。保留现有重复 alias 拒绝规则；最终 handoff 在全部必需检查后
+   才能发布，optional 失败只撤对应能力。
+3. **复用一次解码的结果。** 同一节点的 `reg`／`reg-names` 一次解出全部寄存器；
+   pinctrl schema 一次校验。ADT 可单独一次定位全部 handoff slot，校验后分别填写。
+4. **使用有界、短生命周期上下文。** 当前 capture 上限为16节点／128属性，不能
+   直接扩大栈数组。先统计完整需求，再选择 caller-owned 工作区和相对 offset；
+   绑定本次调用的同一份只读 FDT，不跨修改或启动复用。只缓存 metadata，
+   不替代真实电源、EMI、DMA、IRQ 和 firmware lease 校验。
+5. **提供进展服务及总预算。** 仅在扫描确实推进时定期服务 watchdog／USB，
+   同时限制总工作量／时间并记录 CNT 阶段耗时。喂狗不是性能优化，不能把死循环
+   永久喂住；底层服务不得修改正在解析的 FDT 或重入 parser。
+6. **最后再做读取层优化。** 对已证明4字节对齐的 token／cell 使用32-bit标量读取
+   并转换字节序，字符串仍按字节处理；不引入未证明对齐的64-bit或向量访问。
+
+不采用“找到属性立即返回”、删除重复／尾部校验、关闭 watchdog 或贸然开启
+MMU／D-cache 来掩盖问题。目标是减少整棵树的重复工作，不预先承诺启动加速倍数。
+
+### 稍后恢复工作的顺序
+
+先统计完整查询／工作区需求，确定 metadata 路线，再实现有界收集与本地查询。
+按项目规则先直接单位编译；将扫描次数、CNT 耗时与预算拒绝位置纳入最小可观测性。
+后续获确认的启动验证保持内核和参数一致、一次改变一个变量，由用户手动启动；
+验收必须看到 ADSP 返回／明确不授权退路 → boot_args／jump → Darwin。
+没有新的上机证据前，不标记 loader 回归已修或音频可用。
+
+完整证据和编译边界见 [NOTES.md 的 BOOT-AUDIO-AUDIT](../../NOTES.md#音频-loader-原因复核boot-audio-audit2026-11-11)。
+原始日志仍在私有 `.local/x9/work/dual-sim-187/boot130-disk-20261110-164549/`；
+只读统计／冻结源码单位对象分析在 `.local/x9/work/audio-loader-audit-20261111/`，不入 git。
+本次仅补文档，无代码修改、构建、CI、测试套件或设备操作。
+
+## 当前输出链路状态
+
 **当前是可编译的输出链路基础实现，不是已经出声的驱动。**
 没有 MT6993 物理 backend 注册者；`Ready=0`，`Start` 返回
 `kIOReturnNotReady`。不访问 off-domain MMIO、不自动起 DSP、不写功放／root，
