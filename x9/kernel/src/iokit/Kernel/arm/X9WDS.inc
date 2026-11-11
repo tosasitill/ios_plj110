@@ -94,6 +94,7 @@ static bool x9w_word(const uint8_t *p,unsigned n,unsigned tag,unsigned &v){
 #include "X9WDSResult.inc"
 struct x9w_bearer {
  bool used,owned,active,abandoned,pending,hold,gone;
+ uint16_t end_type,end_verbose; // first known disconnect cause; 0 = local failure
  unsigned slot,op,min_cid,max_cid,channel,mtu,dns_count;
  uint64_t generation,token,deadline,reply_deadline,next,if_floor,result_epoch,route_lifetime;
  uint32_t handle,len,trans_id;
@@ -202,6 +203,22 @@ static bool x9w_data_ready(const x9w_bearer &b){
  return b.used&&b.active&&!b.abandoned&&!b.hold&&b.result_epoch==x9a_epoch&&
   x9w_live(b)&&x9d_ready()&&x9_md_mipc_online();
 }
+// QMI WDS call end reasons (libqmi qmi-enums-wds.h). The 20H392 driver
+// names the internal block 201.. as INTERNAL_ERROR, CALL_ENDED, ..., 206
+// NW_INITIATED_TERMINATION, 208 IPV4_CALL_DISALLOWED, 210 IPV6_DISALLOWED and
+// logs Start failures as reason/verboseReasonType/verboseReason. A bare
+// error gives it no reason to tell a v4-only PDN apart from a failed call.
+enum : uint16_t { X9W_END_UNSPECIFIED=1,X9W_END_CLIENT=2 };
+enum : uint16_t { X9W_VERBOSE_INTERNAL=2,X9W_VERBOSE_CM=3 };
+enum : uint16_t { X9W_INTERNAL_ERROR=201,X9W_INTERNAL_NW_TERMINATION=206,
+ X9W_INTERNAL_IPV6_DISALLOWED=210,X9W_CM_CLIENT_END=2000 };
+static void x9w_end_reason(x9q_packet &p,uint16_t reason,uint16_t type,uint16_t verbose){
+ uint8_t r[2]={(uint8_t)reason,(uint8_t)(reason>>8)};p.tlv(0x10,r,2);
+ uint8_t v[4]={(uint8_t)type,(uint8_t)(type>>8),(uint8_t)verbose,(uint8_t)(verbose>>8)};p.tlv(0x11,v,4);
+}
+static void x9w_set_end(x9w_bearer &b,uint16_t type,uint16_t verbose){
+ if(!b.end_type){b.end_type=type;b.end_verbose=verbose;} // first cause wins
+}
 static void x9w_integer(x9q_packet &p,unsigned tag,uint64_t value,unsigned bytes){
  uint8_t le[8];for(unsigned i=0;i<bytes;i++){le[i]=(uint8_t)value;value>>=8;}p.tlv((uint8_t)tag,le,bytes);
 }
@@ -240,7 +257,11 @@ static void x9w_disconnect(x9w_bearer &b,unsigned mux){
  b.active=false;bzero(&b.runtime,sizeof(b.runtime));x9d_unbind(mux);
  if(was&&x9w_live(b)){
   uint8_t req[7]={0,0,0,0x22,0,0,0};x9q_packet p(req);uint8_t status[2]={1,0},family=4;
-  p.tlv(1,status,2);p.tlv(0x12,&family,1);p.send(CBQ_PORT_BASE+b.slot,X9BB_PORT_BASE+1,true,0x22);
+  p.tlv(1,status,2);
+  if(b.end_type==X9W_VERBOSE_CM)x9w_end_reason(p,X9W_END_CLIENT,X9W_VERBOSE_CM,b.end_verbose);
+  else x9w_end_reason(p,X9W_END_UNSPECIFIED,X9W_VERBOSE_INTERNAL,b.end_type?b.end_verbose:X9W_INTERNAL_ERROR);
+  p.tlv(0x12,&family,1);p.send(CBQ_PORT_BASE+b.slot,X9BB_PORT_BASE+1,true,0x22);
+  printf("X9 WDS: disconnected indication mux %u verbose type %u reason %u\n",mux,b.end_type?b.end_type:X9W_VERBOSE_INTERNAL,b.end_type?b.end_verbose:X9W_INTERNAL_ERROR);
  }
 }
 static void x9w_host_expire(x9w_bearer &b,unsigned mux,uint64_t now){
@@ -456,6 +477,7 @@ static void x9w_poll(){
     // Event delivery precedes the bearer epoch sweep below. A replacement
     // card's same-CID event is not proof that this original call was released.
     if(b.used&&b.owned&&b.result_epoch==x9a_epoch&&b.cid==cid&&(response[8]&(1u<<b.sim_slot))){
+     x9w_set_end(b,X9W_VERBOSE_INTERNAL,X9W_INTERNAL_NW_TERMINATION); // MD-side end, cause not exported
      x9w_host_expire(b,m+1,x9q_ms()); // bound unsolicited Stop completion too
      b.gone=true;b.owned=false;b.abandoned=true;x9w_disconnect(b,m+1);
      if(b.pending&&x9q_u16(b.req+3)==0x21&&x9w_live(b)){x9q_packet p(b.req);p.send(CBQ_PORT_BASE+b.slot,X9BB_PORT_BASE+1);}
@@ -609,6 +631,7 @@ static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
   else if(!own||!own->handle||x9q_u32(h.p)!=own->handle)error=9;
   else if(own->pending||own->hold||(own->token&&own->op!=X9W_CHECK))error=X9Q_BUSY;
   else{own->pending=true;own->reply_deadline=x9q_ms()+60000;own->len=n;memcpy(own->req,req,n);own->abandoned=true;c.starting=true;
+   x9w_set_end(*own,X9W_VERBOSE_CM,X9W_CM_CLIENT_END);
    // Established before GET drain/DEACT submission: no-token release denial
    // cannot leave an accepted Stop waiting forever or extend its host budget.
    if(own->token){x9w_disconnect(*own,c.mux);return true;} // drain periodic GET, then real DEACT
@@ -621,6 +644,16 @@ static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
   printf("X9 WDS: Start msg 0x%04x SIM%u mux %u family %u APN length %u native-ready %u session-ready %u\n",
    id,c.sim_slot+1,c.mux,family,start_apn.n,x9d_ready(),x9w_session_ready);
   if(!cbp_mux_ok(c.mux))error=X9Q_ARG;
+  else if(family==6){
+   // Only the IPv4 dialler exists (no prefix/RA/DAD path). Answer like a
+   // modem that disallows IPv6 on this PDN so the host keeps its IPv4 call
+   // instead of seeing an unexplained failure. No MD request is sent.
+   x9q_packet p(req,14); // CALL_FAILED
+   x9w_end_reason(p,X9W_END_UNSPECIFIED,X9W_VERBOSE_INTERNAL,X9W_INTERNAL_IPV6_DISALLOWED);
+   p.send(local,port);
+   printf("X9 WDS: Start SIM%u mux %u IPv6 refused: CALL_FAILED internal 210 IPV6_DISALLOWED (IPv4-only dialler)\n",c.sim_slot+1,c.mux);
+   return true;
+  }
   else if(!x9ds_data_ready(c.sim_slot))error=X9Q_NOT_READY;
   else if(c.starting||own||x9w_bearers[c.mux-1].used||x9w_retirements[c.mux-1].pending||
           x9w_retiring_client(slot,x9q_clients[slot].generation)||x9a_busy())error=X9Q_BUSY;
