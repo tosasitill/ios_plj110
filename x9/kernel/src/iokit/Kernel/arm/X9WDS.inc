@@ -244,8 +244,8 @@ static bool x9w_check(x9w_bearer &b){
 }
 static bool x9w_get_settings(x9w_bearer &b,const uint8_t *p,unsigned n){
  x9wr_identity current={b.generation,b.result_epoch,b.if_floor,b.sim_slot,b.cid,4,0};
- x9wr_get get={};
- if(b.result_epoch!=x9a_epoch||!x9w_live(b)||!x9wr_same_identity(b.query,current)||
+ x9wr_get get={};unsigned dns=0;
+ if(!x9w_byte(p,n,0x10d,dns)||dns>3||b.result_epoch!=x9a_epoch||!x9w_live(b)||!x9wr_same_identity(b.query,current)||
     !x9wr_decode_get(p,n,b.query,get)||get.channel!=b.channel||get.trans_id!=b.trans_id||
     !get.v4.mtu_present||get.v4.mtu!=b.mtu||memcmp(get.v4.address,b.ip,4))return false;
  // Still corroborate the earlier ACT facts; do not retarget a live route.
@@ -386,9 +386,11 @@ static bool x9w_interface_event(const uint8_t *p,unsigned n,unsigned sim){
  x9w_interface &in=x9w_interfaces[sim][trans%100];bzero(&in,sizeof(in));
  in.serial=++x9w_if_serial;in.trans_id=trans;in.cmd=cmd;
  if(cmd==0){
-  // Preserve the actual typed EIF facts, including the capture card epoch.
+  unsigned v6=0;
+  // Preserve the old explicit IPv6-count-zero gate, then the typed EIF facts
+  // including the capture card epoch. Optional metadata is not new readiness.
   // IPv6 remains unsupported; no fulladdr tail or tag103 fallback MTU.
-  if(x9wr_decode_ifup(p,n,sim,x9a_epoch,in.serial,in.facts)&&
+  if(x9w_byte(p,n,0x106,v6)&&!v6&&x9wr_decode_ifup(p,n,sim,x9a_epoch,in.serial,in.facts)&&
      in.facts.v4.address_present&&!in.facts.v6.address_present){
    in.mtu=in.facts.v4.mtu;memcpy(in.ip,in.facts.v4.address,4);
    in.valid=in.mtu>=68&&in.mtu<=X9D_TX_SIZE;
