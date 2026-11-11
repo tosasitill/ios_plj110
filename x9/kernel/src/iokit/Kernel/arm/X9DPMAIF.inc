@@ -23,6 +23,15 @@ constexpr uint32_t X9D_DL_ERROR = (7u << 1) | (1u << 6) | (7u << 8);
 // drv3_isr0 filters this masked bit out before its length-error handler.
 // Do NOT confuse it with the real LRO PIT count errors at status bits 8/9.
 constexpr uint32_t X9D_DL_LEGACY_PIT = 1u << 3;
+// drv3_intr_hw_init: L2 enable masks (mask-register positions). UL leaves
+// EMPTY(5..9) and MD_NOTREADY(10..14) MASKED; DL LRO = MTU_ERR6 | LRO0/1 8/9.
+constexpr uint32_t X9D_UL_L2_EN = (31u << 20) | (31u << 15) | 15u;
+constexpr uint32_t X9D_DL_L2_EN = (1u << 6) | (1u << 8) | (1u << 9);
+// mapping_rx_reg_from_mask_to_sts: mask bit8/9 -> status 13/14, 10..12 -> 8..10.
+static inline uint32_t x9d_dl_mask_to_sts(uint32_t m) {
+    return (m & 255u) | ((m >> 8 & 1u) << 13) | ((m >> 9 & 1u) << 14) | ((m >> 10 & 1u) << 8) |
+        ((m >> 11 & 1u) << 9) | ((m >> 12 & 1u) << 10);
+}
 struct x9d_dma {
     IOBufferMemoryDescriptor *md;
     uint8_t *va;
@@ -221,9 +230,15 @@ static bool x9d_hw_init() {
     // MT6993 bus remap belongs to MD. Do not write the older AP remap.
     x9d_wr(x9d.ao, 0x8c, (1u << 9) | (1u << 10) | (1u << 15) | (1u << 16) | (1u << 24));
     // Polled bring-up: do not register or unmask SPI 846/847 (GIC 878/879).
-    x9d_wr(x9d.ao, 0x88, ~0u); x9d_wr(x9d.ao, 0x98, ~0u);
-    if (!x9d_expect(x9d.ao, 0x80, 15 | X9D_UL_FLOW | X9D_UL_ERROR, 15 | X9D_UL_FLOW | X9D_UL_ERROR) ||
-        !x9d_expect(x9d.ao, 0x90, 0x1fff, 0x1fff)) return false;
+    // Vendor L2 masks (drv3_intr_hw_init): TIMCR0 = enable, TIMSR0 = ~enable.
+    // The CPU still takes no interrupt (SPI 846/847 stay unregistered), but the
+    // hardware sees the same mask state as with the vendor driver.
+    x9d_wr(misc, 0, ~0u); // clear dummy UL status first, as vendor step 1
+    x9d_wr(x9d.ao, 0x84, X9D_UL_L2_EN); x9d_wr(x9d.ao, 0x88, ~X9D_UL_L2_EN);
+    x9d_wr(misc, 0x50, ~0u);
+    x9d_wr(x9d.ao, 0x94, X9D_DL_L2_EN); x9d_wr(x9d.ao, 0x98, ~X9D_DL_L2_EN);
+    if (!x9d_expect(x9d.ao, 0x80, X9D_UL_L2_EN | X9D_UL_FLOW, X9D_UL_FLOW & ~X9D_UL_L2_EN) ||
+        !x9d_expect(x9d.ao, 0x90, X9D_DL_L2_EN | X9D_DL_LEGACY_PIT, X9D_DL_LEGACY_PIT)) return false;
     // Clear inherited dummy status before our queues exist; later fatal status
     // is preserved. IP-busy IRQ remains masked for the polled-only candidate.
     x9d_wr(misc, 0, ~0u); x9d_wr(misc, 0x50, ~0u);
@@ -689,8 +704,12 @@ static void x9d_poll() {
         x9d.rx_dumps++; printf("X9 DPMAIF: no downlink 8 s after bind with %llu uplink completed\n", x9d.tx_done);
         x9d_dump("rx-none", true);
     }
-    if (ul) x9d_wr(x9d.pd + 0x400, 0, ul);
-    if (dl) x9d_wr(x9d.pd + 0x400, 0x50, dl);
+    // drv3_isr: acknowledge only UNMASKED status (UL EMPTY/MD_NOTREADY and
+    // masked DL sources are never written back), and clear IP busy each pass.
+    uint32_t ul_ack = ul & ~x9d_rd(x9d.ao, 0x80), dl_ack = dl & ~x9d_dl_mask_to_sts(x9d_rd(x9d.ao, 0x90));
+    if (ul_ack) x9d_wr(x9d.pd + 0x400, 0, ul_ack);
+    if (dl_ack) x9d_wr(x9d.pd + 0x400, 0x50, dl_ack);
+    { uint32_t busy = x9d_rd(x9d.pd + 0x400, 0x60); if (busy) x9d_wr(x9d.pd + 0x400, 0x60, busy); }
 }
 static void x9d_report(unsigned second) {
     if (!x9d.lock || !x9d.mode) return;
