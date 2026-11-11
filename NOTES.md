@@ -6,6 +6,12 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## MD会话用户面AT探针（CELL-ATCTX，2026-11-11；已构建，未启动）
+
+- **源码**：main **`ff1b83a`**（`X9QMIAT.inc`＋`x9_mipc_bridge.inc`）。每个新激活的bearer generation在 **+1/+6/+15/+40s** 各排一轮（全boot最多24轮，同时只排一个），经现有每SIM MIPC AT通道（msg3/TLV8100）依次发只读27.007查询：`AT+CGACT?`、`AT+CGDCONT?`、`AT+CGPADDR`、`AT+CGCONTRDP`、`AT+C5GQOSRDP`、`AT+CGEQOSRDP`、`AT+CGTFTRDP`、`AT+CSCON?`；这8个精确字符串加入MIPC只读allowlist（无set形式、无参数）。原始回复以 `X9 CELL ATCTX: SIM<n> round <r> <cmd> result <code> part i/n "<文本>"` 按80字符分段打印（换行→`|`），ERROR/超时也打印并继续下一条；不解析、不据此改变任何行为。注意回复含运营商分配的IP/DNS，日志不入git。
+- **镜像**：worktree `.local/x9/worktrees/cell-atctx-gpu278-20261111/` = `38ddc58`（WDSFIX）+ cherry-pick ff1b83a，配置同WDSFIX（278 allowlist，插件不变，**无需mailbox staging**）。`build.py all` **exit0**，Image30576640B／boot13881344B，ditto到 **`x9/out/x9-cell-atctx-gpu278-20261111/boot.img`**；kernel strings含`X9 CELL ATCTX`与`AT+C5GQOSRDP`。记录 `.local/x9/work/cell-atctx-20261111/`。
+- **读法**：`rg -n "X9 CELL ATCTX" <log>`。C5GQOSRDP/CGEQOSRDP有本CID的QFI/5QI（或QCI）→网络给了用户面资源，问题在MD内部netif↔会话路由；为空/ERROR→网络侧无UP资源，回到ACT前流程差异（IMS PDN、SET_IA、NW_SET_RAT、041f）。MTK可能不支持部分命令（ERROR本身也是结果）。**未上机**。
+
 ## 225实跑（CELL225-WDSFIX，2026-11-11）：探针panic已消失；卡点仍是ACT成功后MD用户面双向不通，MD内部原因未观测
 
 - **身份**：`~/225.txt` 2083141B，末104.1s，**无panic**（WDSFIX生效，拆分后的四行WDS探针正常输出）。plugin278 active。
