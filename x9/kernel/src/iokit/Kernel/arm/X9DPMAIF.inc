@@ -340,7 +340,9 @@ static bool x9d_hw_init() {
     // Explicitly disable all 16 aggregation bits.
     // Multiple normal buffers in one packet are an unexpected-LRO fault below,
     // never silently concatenated or reported as a successful received packet.
-    x9d_wr(dls, 0x38, 2 | (13u << 4) | (16u << 8));
+    // HPC_CNTL: Android live dump (android-atci-20261111) reads 0x10da, i.e.
+    // add_mode=2 (bits 3:2) on top of the vendor-source 0x10d2. Match it.
+    x9d_wr(dls, 0x38, 2 | (2u << 2) | (13u << 4) | (16u << 8));
     x9d_wr(dls, 0x20, 65535 | (50u << 16)); x9d_wr(dls, 0x24, 100);
     for (unsigned i = 0; i < 4; i++) {
         x9d_wr(dls, 0x28 + 4 * i, 100 | (100u << 16));
