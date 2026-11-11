@@ -6,6 +6,15 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 233：0x400d修复生效，首次真实下行；随后RX因BID/多缓冲检查自我隔离（CELL233-LHIFRPC / CELL-RXMULTI，2026-11-11；rxmulti已构建，未启动）
+
+- **233观察（lhifrpc镜像）**：\`~/233.txt\` 5840567B，末97.6s，无panic。**30.012s \`RPC LHIF_MAPPING ccmni1 -> lhif UL queue 2\`、31.724s ccmni2 同**，回OK；随后 ACT0202 result0、EIF5 现在带MTU（\`MTU present 1\`）。**32.459s起真实IPv4下行进入协议栈**（X9 CELL INPUT/PROTO accepted 1：167B、52B×3、40B、176B…，即DNS回包/TCP段）；37.1s **RX delivered 39 / 24495B，PIT consumed 88**，route drop 3、input-error 1。31.743s 一个v6 88B因族未开(blocked 1, error 50)被拒。**→ 根因（0x400d）确认，MD用户面已通。**
+- **新阻塞**：**33.454s \`X9 DPMAIF: quarantined (RX BID ownership or unexpected aggregation)\`**（我们自己的严格检查，无重置），此后TX停在63、RX停在39。失败快照：BAT rd 0x2e/wr 0x7fb，FRG 0/0x7d0（frag未用），PIT0 wr 0x5b。四个条件之一：bid≥BAT / !posted / 同包第二个normal缓冲 / 无normal的frag。
+- **lhif_q枚举**（port_rpc.h）：0 SW_DL、1 SW_UL、**2 AP_UL_Q0（普通）**、3 AP_UL_Q1（IMS）、4 DIRECT_DL → 233报的2即普通队列，与我们走TXQ0一致。另：RPC 0x4016=IPC_RPC_RF_ECID_DATA_OP（开机1次，未处理，无关数据面）。
+- **修复**：main **\`3d319d1\`**（X9DPMAIF.inc / x9_modem_s3.inc）：拆分该检查——**未持有BID仍隔离**但先打印 \`RX BID not owned … pit d0..d3 bat_wr/owned\`；**多缓冲包（normal+normal或frag起始）改为在有界r.ip内拼接**并打印前16次 \`RX multi-buffer packet …; concatenating\`，结果仍经 x9d_ip() 校验（真LRO聚合会被丢弃）。LHIF_MAPPING日志标签改为 AP UL Q0/Q1。
+- **镜像**：**\`x9/out/x9-cell-rxmulti-gpu278-20261111/boot.img\`**（worktree cell-rxmulti = lhifrpc树+cherry-pick，仍含MDLOG/ATCTX），exit0。
+- **验收**：不再隔离或看到具体BID不匹配日志；RX持续增长；iOS实际上网（Safari/ping）；若出现 multi-buffer 日志说明MD确实跨缓冲发包。
+
 ## 根因定位：MD RPC 0x400d（IPC_RPC_CCCI_LHIF_MAPPING）未应答 → PDN bind失败 → MD删除session（CELL-LHIFRPC，2026-11-11；修复镜像已构建，未启动）
 
 - **证据链（232 MD DHL日志＋MD固件静态，均可复核）**：
