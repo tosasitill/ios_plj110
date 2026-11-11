@@ -383,10 +383,34 @@ static void x9w_ifst(unsigned sim,uint32_t trans,unsigned cmd,unsigned type,cons
  *slot={token,x9q_ms()+30000,(uint8_t)cmd,(uint8_t)sim,trans};
  printf("X9 WDS: SIM%u EIF %s ccmni%u type %u sent to MD\n",sim+1,x9w_eif_name(cmd),trans%100,type);
 }
+// SYS_CONNECTIVITY_STATISTICS_REQ 0x004b (vendor header): START101 resets
+// and starts the MD counters, READ_FLAG100 returns them in the CNF.
+static uint64_t x9w_stats_next;
+static void x9w_stats(bool start){
+ x9w_side *slot=nullptr;for(x9w_side &e:x9w_sides)if(!e.token){slot=&e;break;}
+ if(!slot||!x9_md_mipc_online())return;
+ x9w_frame f(0x4b,1);f.byte(start?0x101:0x100,1);
+ uint64_t token=f.submit();if(!token){printf("X9 WDS: MD statistics submit failed\n");return;}
+ *slot={token,x9q_ms()+30000,(uint8_t)(start?0x80:0x81),0,0};
+ x9w_stats_next=x9q_ms()+10000;
+}
 static void x9w_side_poll(){
+ if(x9w_stats_next&&x9q_ms()>=x9w_stats_next)x9w_stats(false);
  static uint8_t response[X9_MIPC_FRAME_MAX];
  for(x9w_side &e:x9w_sides){if(!e.token)continue;
   unsigned n=0;int ready=x9_md_mipc_take(e.token,response,sizeof(response),&n);
+  if(ready==1&&e.cmd>=0x80){
+   // SYS_CONNECTIVITY_STATISTICS_CNF 0x004c: MD-side air-interface totals.
+   unsigned result=~0u,kb_tx=0,kb_rx=0;bool good=x9w_wire(response,n)&&x9q_u16(response+10)==0x4c&&x9w_word(response,n,0,result);
+   x9q_view tx=x9w_tlv(response,n,0x107),rx=x9w_tlv(response,n,0x108);
+   x9w_word(response,n,0x102,kb_tx);x9w_word(response,n,0x103,kb_rx);
+   uint64_t btx=0,brx=0;
+   if(tx.p&&tx.n==8)for(unsigned i=0;i<8;i++)btx|=(uint64_t)tx.p[i]<<(8*i);
+   if(rx.p&&rx.n==8)for(unsigned i=0;i<8;i++)brx|=(uint64_t)rx.p[i]<<(8*i);
+   printf("X9 WDS: MD statistics %s CNF %s result %u: air TX %llu B (%u KB) RX %llu B (%u KB)\n",
+    e.cmd==0x80?"start":"read",good?"valid":"malformed",result,btx,kb_tx,brx,kb_rx);
+   bzero(response,sizeof(response));bzero(&e,sizeof(e));continue;
+  }
   if(ready==1){
    unsigned result=~0u;bool good=x9w_wire(response,n)&&x9q_u16(response+10)==0x314&&x9w_word(response,n,0,result);
    printf("X9 WDS: SIM%u EIF %s ccmni%u CNF %s result %u\n",e.sim+1,x9w_eif_name(e.cmd),e.trans%100,good?"valid":"malformed",result);
@@ -437,6 +461,7 @@ static void x9w_publish(x9w_bearer &b,unsigned mux){
  x9w_ifst(b.sim_slot,b.trans_id,0,runtime.modem_pdp==3?3:1);
  // netagent then reports the configured address (AT+EIF=<id>,"ipupdate",1,a.b.c.d).
  x9w_ifst(b.sim_slot,b.trans_id,2,0,b.ip);
+ x9w_stats(true);
 }
 static void x9w_result(x9w_bearer &b,unsigned mux,const uint8_t *p,unsigned n){
  x9w_host_expire(b,mux,x9q_ms()); // late ready1 cannot restore host success

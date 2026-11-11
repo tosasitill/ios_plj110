@@ -117,6 +117,11 @@ uint64_t x9_md_mipc_submit(const uint8_t *p,uint32_t n){
   * ADDRESS_TYPE104/u8 1..3, in that order with zero padding; IPUPDATE(2)
   * carries exactly one IPv4 NEW_ADDR8102 (0x20 B: len u32 4, address, zero
   * tail) = AT+EIF=<id>,"ipupdate",1,"a.b.c.d". No IPv6/IPCHG/IPDEL. */
+ /* SYS_CONNECTIVITY_STATISTICS_REQ 0x004b: read-only counters; exactly one
+  * u8 TLV, START101 (reset+start) or READ_FLAG100, mask SIM1, 24 bytes. */
+ else if(id==0x4b){
+  if(p[8]!=1||n!=24||(x9mi_u16(p+16)!=0x100&&x9mi_u16(p+16)!=0x101)||x9mi_u16(p+18)!=1||p[20]!=1||p[21]||p[22]||p[23])return 0;
+ }
  else if(id==0x313){
   if((p[8]!=1&&(p[8]!=2||x9_md_sim_count()!=2))||(n!=32&&n!=40&&n!=72)||
      x9mi_u16(p+16)!=0x100||x9mi_u16(p+18)!=4||
