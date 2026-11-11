@@ -164,6 +164,8 @@ static void x9d_dump(const char *label, bool dl) {
     x9d_dump_window(label, "dl_sram", x9d.pd + 0xc00, 0x00, 0x100);
     x9d_dump_window(label, "lro", x9d.pd + 0x900, 0x00, 0x60);
     x9d_dump_window(label, "ao_dl", x9d.ao + 0x400, 0x00, 0x100);
+    x9d_dump_window(label, "hpc", x9d.pd + 0x600, 0x00, 0xa0); // vendor pd_mmw_hpc_base
+    x9d_dump_window(label, "ao_misc_sram", x9d.pd + 0xe00, 0x00, 0x90);
 }
 static void x9d_fail(const char *reason) {
     if (x9d.failed) return;
@@ -243,13 +245,15 @@ static bool x9d_hw_init() {
     // Clear inherited dummy status before our queues exist; later fatal status
     // is preserved. IP-busy IRQ remains masked for the polled-only candidate.
     x9d_wr(misc, 0, ~0u); x9d_wr(misc, 0x50, ~0u);
-    x9d_wr(x9d.ao, 0x9c, ~0u); x9d_wr(misc, 0x60, ~0u);
+    // drv3_intr_hw_init tail: clear AP IP busy, then UNMASK it (mask 0).
+    x9d_wr(misc, 0x60, ~0u); x9d_wr(x9d.ao, 0x9c, 0);
     x9d_wr(misc, 0x6c, 0xff);
     x9d_wr(dls, 0x00, 64 | (4u << 8) | (1u << 16)); // 64B remain / 1 packet per BAT
     x9d_wr(dls, 0x04, 3080);
     x9d_wr(dls, 0x08, (124u << 24) | (13u << 8)); // PIT threshold / 1664B
     uint32_t cfg = x9d_rd(dls, 0x0c); // RDY_CHK_THRES (not FRG_THRES)
-    cfg = (cfg & ~((3u << 22) | (63u << 16) | (1u << 31))) | (1u << 23) | (1u << 13) | (62u << 16);
+    cfg = (cfg & ~((3u << 22) | (63u << 16) | (1u << 31))) | (1u << 23) | (1u << 13) | (62u << 16) |
+        (1u << 31); // ccci_dpmaif_bat_start: ccci_drv3_dl_set_ao_chksum_en(true); Android 0x80be2000
     x9d_wr(dls, 0x0c, cfg);
     x9d_wr(dls, 0x10, (1u << 28) | (15u << 8) | 62); // fragment BAT, 1920B
     // Initialize both PIT rings, preserving native HPC path mode2 (RX0 only).
