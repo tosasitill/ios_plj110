@@ -6,6 +6,13 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## DPMAIF寄存器对照（DPMAIF-REG-CMP，2026-11-11）：AP侧配置与Android基本一致，差异集中在状态/计数
+
+- **方法**：Android真实流量下 `android-atci-20261111/cap/ccci_dump_up.txt`（vendor drv3_dump_register）对 `~/226.txt` 的 `X9 DPMAIF: rx-none …` 窗口（ACT后），按vendor基址对齐（pd+0x000/0x100/0x400/0x600/0xc00/0xd00/0xe00、ao+0x400）逐字比较；脚本 `android-atci-20261111/dpmaif-cmp.py`。名字取自vendor `ccci_dpmaif_reg_com.h/_v3.h`。
+- **结果（观察）**：差异绝大多数是**状态/调试/计数器**（DL_STA*/DBG_STA*、UL_DBG_STA*、BAT_ADD最后写值、PIT/BAT/DRB读写指针、L2TISAR、HPC运行时entry/hash、AO DL SRAM的PIT/BAT_STA含0x5ac包长）——只说明Android有流量，不是配置差。DMA基址不同（Android 0x1_2FDxxxxx专用resv区，我们0x1_0Axxxxxx）；AO MISC SRAM REMAP_BANK0 字段 0x12 vs 0x0a——**用户确认内存区域不影响，此方向放弃**。
+- **剩余小的配置样差异（未证明相关）**：AO DL SRAM `HPC_CNTL`(pd+0xc38) Android 0x10da vs 我们0x10d2（我们=vendor源码公式 path2/add0/prime0xd/16；Android bit3=add_mode2，可能OPPO二进制与源码不同）；UL+0x64 我们多bit11(0x800)；DL+0x44 我们0x00140014、Android 0；AO MISC SRAM +0x70 0xb0 vs 0x30、+0x84 e0010001 vs 00010001、+0x88 0x300ff vs 0x81；CODA_VER高位 0x2 vs 0x3；CG_EN Android读0、我们0x7f（vendor init也写0x7f）。Android未dump而我们没写的：AO DL SRAM1(0x45000)的LRO timeout/AGG扩展、dma_rd/dma_wr(pd+0x200/0x300)。
+- **结论**：没有找到能解释“MD从不写PIT、UL不触发连接”的AP侧DPMAIF配置缺失；数据面问题更可能在MD侧（MD认为该会话/通道未就绪），或在上面这些小差异里（需逐个验证）。
+
 ## Android正常上网基线（ANDROID-ATCI-BASELINE，2026-11-11）：AT层空结果、ACT帧、IMS缺失都排除；卡点收窄到MD↔AP数据面/MD用户面
 
 - **采集**（全部在 `.local/x9/android-atci-20261111/`，不入git）：Android下 `/dev/socket/rild-atci`（mtkfusionrild的RilAtciClient）接受**4字节大端长度+AT文本**，返回MD原始回复，默认SIM1（数据卡，中国广电46015，NR_SA）。`cap/`：数据在线两轮、关数据、重连三轮的16条只读AT（`at_*.txt`），ping结果，`state_*`（ip/route/ccmni计数），`logcat_before/cycle`（含RIL MIPC SEND/RECV完整DUMP，截断到约478B），dmesg，`ccci_dump_up.txt`（DPMAIF寄存器/队列dump，真实流量下）。`cap/ims/`：关IMS→重连→开IMS实验。脚本 `cap.sh`/`ims.sh` 在本会话scratch，读法见下。Wi-Fi本来关；IMS实验后已 `cmd phone ims enable -s 0` 恢复，22:11:21核对CGDCONT重新出现`ims`。
