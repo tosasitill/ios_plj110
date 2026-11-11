@@ -6,6 +6,14 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## MD固件里SRAM1+0xa0的写入者（MD-SRAM1-RE，2026-11-11）：是MD内存remap窗口边界，不是数据面配置
+
+- **MD视角地址**：`dpmaif_drv_en_ul_arb@903b5b48` 写 `LI 0xC411701C`（=AP `0x14117000`+0x1c UL_CHNL_ARB0），故 **MD地址 = AP物理 + 0xB0000000**；SRAM1+0xa0 → `0xC41000A0`。全ROM扫LI48立即数 0xC4100000–0xC41000FF：仅 `lhifcore_task_init`（+0x04/+0x08/+0xa0/+0xc0）与 `ipc_set_netif_mapping`/`ipc_del_netif_mapping`（+0x68/+0x70）。工具 `cell189-md-consumer-20261110/md-dis.py`，扫描脚本在本会话scratch `scan.py`。
+- **`lhifcore_task_init` 0x90331690–0x903317d0**：遍历内存区域描述表（s6，含区域base/size），对每个窗口把remap项写入 `0xC410DE0C`（=AO MISC SRAM `REMAP_BANK0_MAP0_2`，即先前0x121e vs 0x0a1e那组）或溢出到 `0xC41000C0`，并在 `0xC41000A0+4*i` 写 `start>>16 | end>>16<<16`（64KB单位边界）。随后固定写 `0xC410DE04=0x000706EE`、`0xC410DE34=0x000105DE`（与Android ao_misc_sram+0x04/+0x34一致）。**结论：SRAM1+0xa0..0xac 差异=MD内存remap窗口边界，属用户已排除的内存布局，不是DPMAIF数据面参数。**
+- **`ipc_set_netif_mapping`**：16项软件表＋硬件表：SRAM1+0x68为按slot使能位(bit slot / bit 16+slot，RMW)，SRAM1+0x70+2*slot存映射字节。Android正常上网时这两处也全0 → 两边都未用硬件netif映射，无差异。
+- **ccmni编号**：Android关IMS时internet在 **ccmni2**（interfaceId2）上照常可用；我们第二拨也是ccmni2仍RX0 → 接口号不是原因。
+- **总结**：AP侧DPMAIF所有可比窗口（pd_ul/dl、misc、ao_ul/dl、ul/dl_sram、sram1、hpc、rdma/wdma、lro）在“配置”层面与Android一致，差异只剩流量状态与MD内存remap。**数据面差异不在DPMAIF寄存器**。下一步候选：MD侧UL处理链（`ipc_on_process_ul_meta_table`→`ipc_find_netif`→`nim_dpmaif_set_mapping`/`l5updn_dpmaif_assign_ap_interface_id`）以及 `dpmaif_drv_ccci_datapath_notify@90661ef0`——查是否有Android会发、我们没发的AP→MD数据通路通知（CCCI控制消息）。
+
 ## 228 DPMAIF新窗口对照（CELL228-DPDUMP，2026-11-11）：RDMA/WDMA配置一致；MD握手时写的DL SRAM1分区不同
 
 - **身份**：`~/228.txt` 1213094B，末48s，无panic。ACT 28.49s/30.00s(第二拨) result0，rx-none dump 38.0s：TX3/3、RX0（同前）。注意：Mac BSD grep对整文件抓rx-none行会漏（疑似中途有异常字节），用 `sed -n 12500,12700p` 截段再grep。
