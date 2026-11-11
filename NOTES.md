@@ -1525,6 +1525,16 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **后续**：从真实MTK按SIM/PLMN/RAT名称接口补NAS44的文本、编码、来源及生命周期，并触发原生更新/缓存失效；不硬编码运营商、不把修名称当修RX0。RegistrationCache按slot缓存，首次字典不存在才抓取，operatorNameChanged后重新本地化；修好底层仍需新鲜缓存验证。IMS按下一节继续独立核对，未证明其缺失导致这行或Internet RX0。
 - **成果与重放**：报告提交 **`8aec2d3`**，`docs/network/about-network-20H392.md`；私有 `.local/x9/work/about-network-20261111/` 含trace.py、collect-runtime.py、10段汇编、image-provenance/range-verification/runtime-evidence.json、constants/localization.json及脱敏定点摘录。根目录运行`python3 .local/x9/work/about-network-20261111/trace.py`与`python3 .local/x9/work/about-network-20261111/collect-runtime.py`重放；10段函数字节与现有根盘快照cache全部相同（不是设备内存采样）。只读原Apple输入/快照/已有日志及源码，**无运行代码改动、编译/新镜像/CI run/测试套件/push/设备操作**；仅报告和本节交接入Git，保留并发IMS交接。
 
+## 蜂窝当前候选交接(CELL162-BAT／216结果，2026-11-11)：216发现拨号后约7.7s从5G SA掉到LTE；cell162=cell161＋BAT提示消费，已构建待上机
+
+- **216观察(cell161，`~/216.txt` 17896行)**：REGISTER_IND 4409/4419四条均result0。SIM1 CSCON(TLV100四字节=mode,state,access,core；TLV101)：22.673s `01 08 05 01`/8(与Android健康值相同，按+CSCON解读为NR/5GC已连接)，ACT成功30.847s后轮询30.855/33.851/36.853s仍为该值；**38.596s `00 ff 05 01`(释放)→38.630s `00 ff 04 00`/4(34ms后已在LTE空闲)→39.201s `01 07 03 00`(LTE已连接)**，42.8–51.8s轮询保持，53.652s转空闲。04c8/4419首记录RAT字段同步由`0080`变`0010`。SIM2在42.48s也到LTE。X9 NAME的RAT由12变8。38.3–38.6s间AP未发任何MIPC/AT切网请求。EIF5(39.088s)与4203(39.090s起)紧随LTE连接之后。DPMAIF：50.88s TX72/72、RX0；60.735s host Stop。
+- **216其他**：`DATA_SET_CONFIG default-data-SIM CNF valid result 0`(30.285s)但结果不变。`X9 NAME` SIM1(46015)/SIM2(46000)多次`result 0 (real MD)`；UI是否显示待用户确认。
+- **更正**：此前把不带v6的EIF5猜为“RA等待超时”不成立；它跟随5G→LTE系统间变化出现。“MD未获全球v6前缀、v4/v6均无回包”的观察不变，且NR连接态7.7s与LTE连接态十余秒内都RX0，掉LTE本身不能解释RX0。
+- **推测(无证据)**：34ms即落LTE像带重定向的释放或MD主动禁用N1；语音优先终端无IMS注册是常见诱因(与用户转述的“先修IMS”相符)。Android是否在关VoLTE后同样掉4G可作低成本对照，未做。
+- **cell162**：`.local/x9/worktrees/cell162-bat`(分支`work/cell162-bat`)= cell161 `34d3827` ＋cherry-pick cell158 BAT `bed5850` → **`bd9227d`**。即网络名称＋全部诊断＋默认数据卡配置＋PD_MISC+0x6c提示消费/稳定BID缓冲(该修复此前仅单位编译、从未上机)。216里CODA仍为pending形态；该修复能否改变RX0**未知**。
+- **构建(观察)**：`.local/x9/work/cell162-bat/run-build.py` 三命令exit0，`full-build.exit=0`；无测试套件／CI／push／设备操作。交付 **`x9/out/x9-cell162-bat-md/boot.img`**，276 plugin-package复制自cell157，已装276无需mailbox。
+- **下一步**：用户`fastboot boot x9/out/x9-cell162-bat-md/boot.img`，关Wi-Fi用蜂窝约2分钟。看`X9 DPMAIF: BAT hint … consumed`是否出现、其后`RX delivered`与`dl_sram` PIT wr是否变化；CSCON是否仍在数秒后掉LTE。若仍RX0且仍掉LTE→优先做IMS方向(NOTES IMS214-NATIVE节的实施顺序)和Android关VoLTE对照；BAT修复即可判为与RX0无关。
+
 ## 蜂窝当前候选交接(CELL161-UPSTATE，2026-11-11)：网络名称＋EIF诊断＋MD用户面状态轮询＋RIL默认数据卡配置；已构建，待用户上机
 
 - **用户要求**：“两条都做，带上网络名称修复编新镜像”。独立树`.local/x9/worktrees/cell161-upstate`(分支`work/cell161-upstate`)= **cell159网络名称`a8ffef7`** ＋cell160诊断(cherry-pick 255c70b)＋本轮提交 **`34d3827`**。不含cell158 BAT改动，不混main其他窗口。
