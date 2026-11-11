@@ -6,6 +6,14 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 221卡logo核对（BOOT221-GPU278，2026-11-11；插件配套通过，日志仅28.652s且截断）
+
+- **实际运行／身份**：用户指定 `~/221.txt`；本次原件 **741121B／7342个LF段**（原bytes decode后split LF，不把嵌入CR再算行），已保存私有 `.local/x9/work/boot221-gpu278-20261111/221-original.txt`，不覆盖源。LF13已Darwin；LF929／3.585s明确 **active plugin=X9GeneralMetal278 from verified allowlist**，LF930／3.590s **exact signed Metal/PanVK files verified on root volume; native discovery armed**。LF3593／14.318s实际backboardd加载 **X9GeneralMetal278／X9PanVK278**，LF3978／15.458s其factory成功返回 **X9GeneralMetalDevice**；mediaserverd也在LF4140／16.039s factory成功。LF1821／6.945s新retirement worker ready及本轮X9 CELL探针均出现；按用户本次启动上下文／603B参数关联新CELL164候选，不能把每个相同参数shim当唯一identity。**此前“未启动”已由这次实跑取代，但像素／联网修复仍未验收。**
+- **显示与GPU的决定性区别**：LF5113／20.963s、LF5169／21.003s、LF5381／21.470s三次swap，22.278s counters **swaps3/presents3/drop0**，fresh TE3／timeout0；只证明显示提交／软件copy与TE进展，不证明物理面板像素正确。24.286／26.286／28.286s窗口 **swaps0/presents0、gpu_defer0/lk_defer0**，显示tick仍约240/2s；LF6881／28.286s **shown_gpu_seq77、gpu_enqueued83/gpu_completed83**，已入队GPU任务没有残留。三ASYNC window jobs **9+69+2、failed0**；没有本次已输出panic、backboardd/SpringBoard crash、PanVK FAILED或no CSG slot。不能用这些计数排除渲染逻辑／像素bug，但**不支持“插件版本／签名配错、没加载”或已证明GPU fence卡死**。SpringBoard到28.644s仍有IOKit活动。
+- **最早不确定处／不要误判**：最后完整时间 **28.652s**，文件结尾半行 **`[    28`** 且无newline，故不是完整卡死时刻／持续状态证据，也不能据截断认定内核挂死或USB坏。旧220在LF5764／24.598s swap后，28.347／30.355／32.355／34.356s同样零swap／present且无GPU defer，至LF10228／34.655s又开始连续swap，PAD首次35.003s。启动场景和GPU版本不同，不把旧220时长作为本次一定会好的承诺；它足以说明221这七秒静止不能单独判卡死。221 `X9 PAD`未出现只表示还没看到该可打印draw，不据此断言snapshot没加载。FitnessWidget／PosterBoard的type0 init refused在220也有；源码init可因foreground资格、基类、分配、caps/memlimit/context-open返回false，**当前没记录实际拒绝谓词，不猜成slot耗尽或所有Metal失效**。
+- **蜂窝／下一步**：26.948s CONTROL online1/stage9/token0/hold0/control-ready1/session-ready1/dpmaif-ready1，四route均unbound、TX/RX0；本段无ACT202，不是已建立数据会话后的RX0复现。先保持**本次**启动继续捕获60–90s及USB host stderr，确认新swap/heartbeat是否继续，若logo持续才沿SpringBoard/backboardd启动或合成提交等待追，不先换插件／刷mailbox／重跑旧镜像。本轮只读本次与220对照日志、现有源码/allowlist，没有设备／NV／根盘／mailbox操作、源码修复、build／CI run／push、测试套件或成功镜像二次校验。
+- **可重放证据**：本节私有目录含原221／原220对照、`capture.json`、`events.json`及分类LF摘录、`220-comparison-events.json`、`decisive-events.json`；最后者记录实际loader/factory/显示队列与failure匹配。根目录可只读 `rg -n 'X9 RENDER EXTERNAL:|X9 GENERAL METAL: (begin|factory)|X9 METRICS (frames|join)|X9 DISPLAY cadence:|SWEET FB: swap |X9 CELL CONTROL:' <本次原日志>`。保留其他交接，无新增过程报告。
+
 ## 蜂窝探针新镜像交接（CELL164-BUILD278，2026-11-11；完整构建／交付exit0，未启动）
 
 - **授权／冻结源码**：用户明确要求“构建新镜像”；本轮仅Mac本地构建，无mailbox／启动／分区操作。独立冻结树 `.local/x9/worktrees/cell164-observe-gpu278-20261111/` 从当前278实际kernel/shim **`f8af77d`** 只cherry-pick三文件探针提交 `a26b2e0`，运行源码 **`2266e037a2eb63b85bbfd24fe0739591d7075575`**；源差分确为WDS／DPMAIF／PDP三文件，不混主线新增USB pairing工具或其他窗口修改。冻结里程碑main交接提交 **`f6e2024`**。
