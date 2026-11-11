@@ -1375,7 +1375,14 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **不能称为全部USB完成**:本轮暂无枚举/DMA/ue0 ping/bulk回环实机结果,live EMI/MPU允许普通XNU DMA页也未证明。`native_apple_stack=0`,没有冒充IOUSBDeviceController或AppleUSBDeviceMux;原始configd USBDeviceConfiguration/lockdownd、Finder/iTunes Trust/配对/照片同步仍缺20H392 controller adapter及kext构建接入。USB3 XS-PHY/retimer、charger Type-C role与原生xHCI也未完成。参考文章chip/board/security-domain/fsid/锁状态条件要到原生栈接通后才验证,不先改身份/配对状态制造成功。
 - **下一步/验收**:先在用户手动启动的单一候选核对`CAP_EPINFO/TXFIFO/RXFIFO/MISC`→config1/alt1→真实QMU OUT/IN→ue0 ping,再用iOS `usbctl --echo`+host单次echo证明host→iOS→host字节相同。保留EP0日志,无需重建Metal插件/mailbox。接口/回退/构建说明在`x9/usb/README.md`;不要求用户现在连续刷试探镜像。
 
-## 蜂窝当前交接(CELL143-HS1,2026-11-11): Android实机寄存器对照找到根因候选——MD侧DPMAIF配置缺失(我们在READY后才启动DPMAIF)；cell143改在BOOT_WAITING_FOR_HS1启动，未上机
+## 蜂窝当前交接(CELL144-ATGATE,2026-11-11): 200中DPMAIF已在HS1前初始化且MD正常READY，但桥首轮因AT未上线把它隔离；cell144改为等待AT，未上机
+
+- **200.txt**(cell143)。**观察**：5.181s `starting at BOOT_WAITING_FOR_HS1`，5.709s initialized(无readback失败)，5.715s HS1正常，15.659s HS2→READY——提前启动不影响MD启动。16.028s桥首轮`quarantined (MD/AT offline)`，之后DPMAIF不可用(TX 0)，所以200未能验证UL/RX。原因：`x9d_poll`假设DPMAIF就绪必然AT已在线。
+- **修复 main `902ebb1`**：AT未上线时跳过本轮；仅"曾上线后掉线"才隔离；AT首次上线时dump一次全部窗口(`at-online`)，看MD是否已配置legacy PIT(`dl_sram+0xe4`等)和HPC(+0x38)。单编True。
+- **候选 `x9/out/x9-cell144-atgate-md/boot.img`**(worktree `67965a6`)，三命令exit0，boot 13533184B，参数同131，插件276，**无需mailbox**。记录`.local/x9/work/cell144-atgate/`。
+- **下一步**：用户boot cell144→`~/201.txt`。看`at-online dl_sram+0x0e0`行(+0xe4非0即MD已配置)、`dl_sram+0x020`行(+0x38 HPC)，以及UL completed/RX。
+
+## 蜂窝前次交接(CELL143-HS1,2026-11-11): Android实机寄存器对照找到根因候选——MD侧DPMAIF配置缺失(我们在READY后才启动DPMAIF)；cell143改在BOOT_WAITING_FOR_HS1启动，未上机
 
 - **199.txt**(cell142)：4个TXQ已启动(flow计数因q1..3空队列EMPTY常置而持续增长，预期)，UL仍只完成首批(1)，RX 0。
 - **Android对照采集**(用户进Android，蜂窝数据正常；adb在Mac `/opt/homebrew/bin/adb`，`su -c`可用，SELinux Enforcing，无/dev/mem)：`echo dpmaif > /sys/kernel/ccci/mdsys/dump`触发原厂`drv3_dump_register`，结果在`/proc/ccci_dump`(**不要读/proc/ccci_log，会阻塞**)。保存`.local/x9/android-dpmaif-20261111/proc_ccci_dump2.txt`(不入git)。`ping 223.5.5.5`通，数据走ccmni3(MTU1410)，`dpmaif-txq: 0-3(status=0xf)`。
