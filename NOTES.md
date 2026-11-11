@@ -365,6 +365,8 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 
 ## GPU候选交接（GPU277，2026-11-11）：可移植上游缓存修复＋索引补齐；277完整候选已构建，待用户上机
 
+- **277路径实时复核（2026-11-11，用户查询插件位置）**：主目录`x9/out/x9-gpu277-indices-cache`当前不存在；仍存在的完整配套目录为 **`.local/x9/worktrees/gpu-upstream277/x9/out/x9-gpu277-indices-cache/`**，内有`boot.img`和`plugin-package/{X9GeneralMetal277.bundle,X9PanVK277.bundle,mailbox.json,manifest.json,SHA256SUMS,install-on-ios.sh}`。下方历史上机命令的candidate/boot路径须改用此现存目录，不再直接沿用主out旧路径。本轮仅查看目录/文件元数据，未校验内容、构建、CI或操作设备；不据此声称277已实机验收。
+
 - **运行基线纠正**：只读 `~/210.txt`，3.110s verified allowlist实际active **276**，30.234s旧`padded=1 last=6->12`已命中；用户仍报告三角形/渲染错误。因此GPU-PAD-1“276从未上机”已过期，不以failed0或补齐计数代替像素验收。未取得与三角形对应的新截图/帧回读。
 - **固定范围/引用**：从main **695cdae**独立`work/gpu-upstream277` / `.local/x9/worktrees/gpu-upstream277`，不夹带其它窗口蜂窝未提交改动。三个仓库新clone固定AdrenoMetal **20be9f966a0b947238f80dec22a91bf6c9dfc0a0**、UniXNU-sheng **c73f9c0**、Adreno740 **a7c83cf**，原件与210窄GPU日志在`.local/x9/work/gpu-upstream-20261111/`。保留963f译码器基线与已有安全InPlace，不移植Turnip GMEM/CP/4KiB/DRAM pool/macOS无flush。X9 private/WC已避开冗余维护，不能把A740 synchronized BO规则套到cached IOSurface。
 - **实际合入**：AdrenoMetal 0031..0034原补丁＋LICENSE/顺序，补齐内存类型计数、shader cache atime权限拒绝只尝试一次、room线程exit guard、空闲parked image/buffer与empty block定时退休；前端适配46fdc91持久memory-pressure source，回收idle runtime与最多32项/1MiB自有索引cache，pending CB资源仍持有，不清用户缓存/不丢活跃surface。
