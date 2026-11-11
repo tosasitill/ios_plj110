@@ -382,6 +382,49 @@ python3 -I x9/usb/native_bridge.py \
 `callable=false`、`runtime_loadable=false`，`--require-loadable`退出**2**。
 不输出/装载修改后的Apple段，不启用原生controller或USB mode，不提供绕过门开关。
 
+### USB-NATIVE8：设备端请求所有权组件（已编译，尚未接入原生后端）
+
+`X9USBRequestOwner.h/.inc`由`SweetX9USB.cpp`编译，是真正的kernel C++组件，
+不是新的ABI统计脚本；**目前没有实例或运行调用者**，不注册原生controller，
+`X9USBAppleNativeStack`仍为false。它只解决普通request的内存／完成所有权，
+不等于MTU3原生端点后端、Apple模块装载或Finder配对已完成。
+
+后续**唯一USB worker**上的调用顺序：
+
+1. 一份长期存活的owner执行`bindWorker()`。ABI-qualified adapter将普通native
+   request作为opaque pointer传入`accept()`；descriptor必须已适配current XNU
+   虚表。iso／reusable flags必须透传，非零拒绝；requested超过32-bit也明确拒绝。
+   owner额外retain descriptor；非零长度执行prepare，失败只撤自己的retain，
+   原始Family producer仍处理gated reject，不发completion。
+2. accept成功后先完成原始gated-submit的成功返回，再允许worker drain。
+   `beginChunk()`向worker的已pin bounce填USB IN数据，最大4096B；
+   `publishChunk()`成功后立即发布HWO，不插入其他owner调用。
+   Staged未发布可以`rejectUnpublished()`；发布后只能走真实STOP／retirement。
+3. worker用单调ns调用`expire()`，或显式`cancel()/close()`。
+   Active只改Stopping，不发回调、不complete、不重试；Ready／Staged才可以安全退休。
+   timeout从首chunk发布开始，跨chunk保持同一deadline；0禁用，不猜stock的5000ms条件。
+4. `retire()`只接收worker实采证据，不是poll/IRQ本身。正常完成需HWO clear、CPR
+   到terminator、STOP inactive、actual可信；abort也必须有STOP＋独立可信partial
+   actual。OUT先在worker失效bounce cache，再交字节拷回descriptor；actual始终是
+   wire bytes而非remaining或拷贝成功长度。0-byte请求也需要真实ZLP退休证据。
+5. `drainCompletions()`先detach有界batch，complete成功后才交给**尚待实现／资格化的
+   Family completion adapter**，该adapter负责原始callback及release/free。
+   owner只在adapter返回后release自己的额外descriptor retain，不再解引用request。
+   回调新提交／取消只进入下一批，递归drain拒绝；同一descriptor在当前回调结束前
+   不能复用。完成失败返回真实error；STOP／actual／complete不确定会永久隔离request、
+   保留memory及完成义务并关准入门，worker也必须保留其QMU allocation。
+
+ticket包含generation和不重用serial，chunk另有serial；重复或旧代事件不能完成新请求。
+`close()`先关门，再要求workerSTOP所有Active；旧代只能退休。只有全部slot（包括
+回调及quarantine）为空才能`reopen()`换代，无自动reset或quarantine清理入口。
+
+**边界**：这些是本组件的显式保守合同，不宣称已复刻stock OTG全部时序。
+原生IOCommandGate到唯一worker的同步交接、逐endpoint队列、QMU publication绑定／
+abort partial计数、EP0 native data stage、Family completion双向ABI及模块bootstrap
+仍未接通；当前ECM/private transport路径没有调用此组件，行为不变。
+仅生产`SweetX9USB.o`本地arm64交叉编译通过，未运行测试套件、kernel链接、boot构建
+或实机DMA／Trust／Pair／TLS验收，不能据此启用原生栈或交付Finder boot。
+
 新增`pairing.py`走**系统原生usbmuxd、真实lockdownd**，不使用旧自有mux草稿，
 不改守护进程或信任状态。它是主机端代码，不是缺失的DeviceFamily驱动。
 仅`--list`的原生daemon发现已实跑；其余操作当前没有X9原生USB入口，**未实跑**。
