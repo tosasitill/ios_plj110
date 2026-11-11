@@ -6,7 +6,16 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
-## 222重启／旧USB对照（USB-LEGACY222，2026-11-11；完整构建／交付exit0，实机待用户启动）
+## Android只读磁盘日志／探针panic定位（DISKLOG-LEGACY222，2026-11-11；采集完成，确认221的日志编码panic，最新失败身份待核）
+
+- **用户现场／授权**：用户报告“还是不行，我进安卓了，读硬盘日志”。本轮仅授权范围内ADB只读：1台目标ready，用现有 `x9/tools/pull_disk_log.py --manifest .local/x9/root-extension/20261110-16g/root-manifest.json --serial <目标> --out <本轮私有>/disk` 捕获，**exit0**。工具先核对serial、专用log inode／8MiB尺寸、immutable／pinfile保护及完整extent equality，再从专用extent rawread。未写设备文件／分区／NV／mailbox，未重启／flash／构建／测试套件；未执行会copy／chmod的x9capture.sh。
+- **最新磁盘已提交范围**：私有 **`.local/x9/work/disklog-legacy222-20261111-212637/`** 保存原8MiB `disk.raw`、803657B `disk.payload.raw`及decode log／JSON。header **CRC有效、first0／total803657／sequence20**，无ring回卷或UTF8 replacement，末尾完整LF **7993／29.335s**。其中launchd真实时间 **21:24:42.146367**；LF109／0.212s旧通用EP0 ready，**没有 `X9 USB LEGACY` identity**，不能仅凭用户报告把它认定为0b80f653对照版。LF6746／28.300s GPU入队18／完成18，三次swap后静止，无已提交panic／disk-log stopped。payload不带CRC，不宣称全payload完整性校验。header以外tail有旧29.387→379.970s内容，属于未提交／历史残留，**不得拼接为最新运行进展**。
+- **另取得真实panic，明确来源是221而非最新磁盘**：只读 `/sys/fs/pstore/console-ramoops-0` **exit0／909375B**，保存独立raw。其boot-args时间 **21:04:35.164060**、USB0.217s、plugin3.585s及GPU26.286／28.286s等完整行与原 **`~/221.txt`** 一致，匹配的是221的后续RAM记录；222时间21:13:13、最新磁盘21:24:42不同。pstore **LF9933／29.467s** WDS首次SIM1 IPv4 Start，LF9935新 **`X9 CELL WDS: site 0 why enqueued ...`** 后紧接 **`log_encode.c:121 Assertion failed: log_fits_cmd(ctx, cmd_sz)`**，LF9936 **`panic(cpu 0 caller 0xfffffe00086b7b60)`**，LF9937 `handshake structure not initialized`。因此**221确有内核panic，不是只凭USB半行猜卡死；panic落在日志编码器，不是已证明USB或Metal硬件故障**。该pstore不是最新测试的panic证明，不能混成一份日志。
+- **具体源码因果**：新探针 `X9WDS.inc:x9w_probe` 单次printf包含 **38个format参数**，仅metadata／数值commands就需 **276B**（尚不含location／hdr／字符串payload），而本地冻结XNU `libkern/os/log.h` 的kernel buffer仅 **256B**。`osfmk/kern/printf.c:vprintf_internal`先console输出，再把原fmt＋va_list送os_log；`log_encode.c:log_add_arg`预检查只算arg_size，`log_add_cmd`还算2B cmd header，存在边界不一致。4B location时静态算到 **第35个`%u`、off244／capacity250**：预检查250通过，真实assert需求252触发，吻合上述panic。保留 `wds-encoder-analysis.json`，这是源码／格式静态算术，不是执行测试或实机复现。该探针仍存在于2266e037及旧USB0b80f653，**USB回退不会移除这条可确认的panic路径**；但最新失败是否命中仍缺最新panic／身份。
+- **补充只读／边界**：当前Android `ro.boot.bootreason=reboot`、`sys.boot.reason=bootloader`、last同bootloader，不能作为WDT或XNU故障原因；pstore当前文件mtime21:26只是Android导出时刻，不代表里面21:04日志为最新运行。`/data/local/tmp/x9boot`也有备份，未覆盖／删除；本轮只拉当前pstore，不重采旧备份。私有目录保存精确capture／android-read／pstore命令和exit、raw hashes、`analysis.json`／分类events、`log-provenance-comparison.json`／`uncommitted-tail.json`。不新增过程报告，不把身份、日志、hash对应原件入Git。
+- **未完成／下一步**：先核对用户刚才实际`fastboot boot`路径，最新磁盘缺旧USBmarker不能宣布旧USB对照验收；不要让用户原样重复失败候选。已有明确应修项是**拆分38参数探针成多条有界printf并保留mux/gen/site关联与所有状态，审计本轮其他新probe的参数预算**，不盲目继续回退USB、不删assert或假造WDS成功。此轮用户只要求读取日志，**尚未改运行源码／构建新修复镜像**；修复后仍需完整启动与数据会话验收，RX0／logo不因找到panic就算解决。
+
+## 222重启／旧USB对照（USB-LEGACY222，2026-11-11；完整构建／交付exit0，用户报告仍失败，运行身份见上节）
 
 - **本次证据**：用户指定 `~/222.txt`，报告随后重启且一段时间无法读USB日志；私有原件 `.local/x9/work/usb-legacy222-20261111/222-original.txt` **722839B**，最后完整时间 **29.029s**。仅见shim日志ready和 **0.214s EP0 batch4096/poll1ms worker**；278插件校验成功，28.278s GPU入队84／完成84。捕获不含重启原因、panic或host stderr，不能区分USB先断还是整机先异常，不宣称已找到根因。
 - **纠正源码归因**：交付CELL164运行源码 `2266e037` 与220对应 `58ba960` 的USB runtime／shim／logger定点差分为空；不含main后来 `816f327` 的request-owner代码。`f425aee`只增加host工具／README，不能据此把222重启归因于新request-owner。
