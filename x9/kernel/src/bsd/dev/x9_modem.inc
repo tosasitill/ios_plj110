@@ -1008,6 +1008,48 @@ static uint8_t *x9mdl_ring;static uint64_t x9mdl_total,x9mdl_pages[4],x9mdl_bad,
 static uint64_t x9mdl_mark_ms,x9mdl_saved_total;static int x9mdl_saved,x9mdl_save_err=-1,x9mdl_frozen;
 static unsigned x9mdl_token,x9mdl_splm_rx,x9mdl_ul_err;
 static volatile uint32_t *x9mdl_data;
+/* Stage 3: buf2 DL pages are descriptors; the trace bodies stay in RAW DHL
+ * (regs[5]: md 0x42300000, AP pa = CCB c-region pa + 1 MiB, 10 MiB). 230's
+ * capture showed each entry 0x4c bytes before an embedded DHL frame header
+ * {0x10efcaac, len, flags, ck}: hdr-0x4c type 1, hdr-0x48 RAW offset,
+ * hdr-0x28 len (== header len), hdr-0x08 0x10. Small frames carry their body
+ * inline after the header. Records written to the ring = header + body. */
+static volatile uint8_t *x9mdl_raw;static uint32_t x9mdl_raw_size;
+static uint64_t x9mdl_desc,x9mdl_inline,x9mdl_rawbytes,x9mdl_badent;static unsigned x9mdl_shown;
+extern vm_offset_t ml_io_map_unmappable(vm_offset_t phys_addr,vm_size_t size,unsigned int flags);
+static void x9mdl_put(const volatile uint8_t *p,uint32_t n,int vol){
+ if(x9mdl_frozen||!x9mdl_ring)return;
+ for(uint32_t i=0;i<n;i++)x9mdl_ring[(x9mdl_total+i)%X9MDL_RING]=vol?p[i]:((const uint8_t *)(uintptr_t)p)[i];
+ x9mdl_total+=n;
+}
+static void x9mdl_page2(volatile uint32_t *w,uint32_t len){
+ uint8_t pg[512];if(len>sizeof(pg))len=sizeof(pg);
+ for(uint32_t i=0;i<len;i+=4){uint32_t v=w[2+i/4];for(unsigned k=0;k<4&&i+k<len;k++)pg[i+k]=(uint8_t)(v>>(8*k));}
+ for(uint32_t p=0;p+16<=len;){
+  uint32_t m=pg[p]|pg[p+1]<<8|pg[p+2]<<16|(uint32_t)pg[p+3]<<24;
+  if(m!=0x10efcaacu){p+=4;continue;}
+  uint32_t fl=pg[p+4]|pg[p+5]<<8|pg[p+6]<<16|(uint32_t)pg[p+7]<<24;
+  if(p>=0x4c){
+   const uint8_t *e=pg+p-0x4c;
+   uint32_t ty=e[0]|e[1]<<8|e[2]<<16|(uint32_t)e[3]<<24,off=e[4]|e[5]<<8|e[6]<<16|(uint32_t)e[7]<<24;
+   uint32_t ln=e[0x24]|e[0x25]<<8|e[0x26]<<16|(uint32_t)e[0x27]<<24;
+   if(ty==1&&ln==fl&&ln){
+    if(x9mdl_raw&&off<x9mdl_raw_size&&ln<=x9mdl_raw_size){
+     x9mdl_put(pg+p,16,0);
+     uint32_t a=x9mdl_raw_size-off<ln?x9mdl_raw_size-off:ln;
+     x9mdl_put(x9mdl_raw+off,a,1);if(a<ln)x9mdl_put(x9mdl_raw,ln-a,1);
+     x9mdl_desc++;x9mdl_rawbytes+=ln;
+     if(x9mdl_shown<6){x9mdl_shown++;volatile const uint8_t *b=x9mdl_raw+off;
+      printf("X9 MDLOG: desc off %x len %x flags %02x%02x%02x%02x body %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",off,ln,pg[p+11],pg[p+10],pg[p+9],pg[p+8],
+       b[0],b[1],b[2],b[3],b[4],b[5],b[6],b[7],b[8],b[9],b[10],b[11],b[12],b[13],b[14],b[15]);}
+    }else x9mdl_badent++;
+    p+=16;continue;
+   }
+  }
+  if(fl<=len-p-16){x9mdl_put(pg+p,16+fl,0);x9mdl_inline++;p+=16+fl;continue;}
+  x9mdl_badent++;p+=16;
+ }
+}
 extern int x9_mdlog_save(const char *path,const void *a,uint64_t an,const void *b,uint64_t bn);
 static uint64_t x9mdl_ms(void){uint64_t ns;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);return ns/1000000;}
 static uint32_t x9mdl_base(unsigned e,int ul){uint32_t b=0;for(unsigned i=0;i<e;i++)b+=x9mdl_dl[i]+x9mdl_ul[i];return b+(ul?x9mdl_dl[e]:0);}
@@ -1044,13 +1086,7 @@ static void x9mdl_drain(unsigned e){
  while(rd!=wr){
   volatile uint32_t *w=x9mdl_data+(base+rd*pg)/4;uint32_t m=w[0],len=w[1];
   if(m!=0x22222222u||len>pg-8){x9mdl_bad++;}
-  else if(e==2){
-   if(!x9mdl_frozen&&x9mdl_ring){
-    for(uint32_t i=0;i<len;i+=4){uint32_t v=w[2+i/4];
-     for(unsigned k=0;k<4&&i+k<len;k++)x9mdl_ring[(x9mdl_total+i+k)%X9MDL_RING]=(uint8_t)(v>>(8*k));}
-    x9mdl_total+=len;
-   }
-  }else if(e==0&&x9mdl_splm_rx<60&&len>=12){
+  else if(e==2)x9mdl_page2(w,len);else if(e==0&&x9mdl_splm_rx<60&&len>=12){
    uint32_t w0=w[0+2],w1=w[1+2],w2=w[2+2];char t[49];unsigned tl=0;
    for(uint32_t i=12;i<len&&tl<48;i++){uint8_t c=(uint8_t)(w[2+i/4]>>(8*(i%4)));t[tl++]=(c>=32&&c<127)?(char)c:'.';}
    t[tl]=0;x9mdl_splm_rx++;
@@ -1092,18 +1128,24 @@ void x9mdl_start(void){
  for(unsigned k=0;k<x9md_ncr;k++)if(x9md_crs[k].id==1)x9mdl_data=x9md_cmap[k];
  if(!x9mdl_data)return;
  uint32_t h=cc->ap_off;
+ uint64_t rawpa=0;for(unsigned k=0;k<x9md_ncr;k++)if(x9md_crs[k].id==1&&x9md_crs[k].sz>0x100000)rawpa=x9md_crs[k].pa+0x100000;
  if(x9md_m32(h+0x20)!=0xddbbccaau||x9md_m32(h+0x1c)!=0x1100ffeeu)return; /* MD has not claimed the CCB yet */
  tried=1;
  vm_offset_t va=0;
  if(kmem_alloc(kernel_map,&va,X9MDL_RING,KMA_DATA|KMA_ZERO,VM_KERN_MEMORY_IOKIT)!=KERN_SUCCESS){printf("X9 MDLOG: ring alloc failed\n");return;}
  x9mdl_ring=(uint8_t *)va;
+ if(rawpa&&x9md_regs[5].size){
+  x9mdl_raw=(volatile uint8_t *)ml_io_map_unmappable((vm_offset_t)rawpa,x9md_regs[5].size,0x6u /* VM_WIMG_WCOMB */);
+  x9mdl_raw_size=x9mdl_raw?x9md_regs[5].size:0;
+ }
+ printf("X9 MDLOG: RAW DHL pa %llx size %x mapped %d\n",rawpa,x9md_regs[5].size,x9mdl_raw!=NULL);
  thread_t t;
  if(kernel_thread_start(x9mdl_thread,NULL,&t)==KERN_SUCCESS){thread_deallocate(t);x9mdl_running=1;}
 }
 void x9mdl_report(void){
  static unsigned n;if((n++%3))return; /* every ~9 s */
- printf("X9 MDLOG: captured %llu bytes pages %llu/%llu/%llu/%llu bad %llu full-seen %llu splm-rx %u ul-err %u mark %llu saved %d err %d\n",
-  x9mdl_total,x9mdl_pages[0],x9mdl_pages[1],x9mdl_pages[2],x9mdl_pages[3],x9mdl_bad,x9mdl_full,x9mdl_splm_rx,x9mdl_ul_err,x9mdl_mark_total,x9mdl_saved,x9mdl_save_err);
+ printf("X9 MDLOG: captured %llu bytes (desc %llu raw %llu inline %llu badent %llu) pages %llu/%llu/%llu/%llu bad %llu full-seen %llu splm-rx %u ul-err %u mark %llu saved %d err %d\n",
+  x9mdl_total,x9mdl_desc,x9mdl_rawbytes,x9mdl_inline,x9mdl_badent,x9mdl_pages[0],x9mdl_pages[1],x9mdl_pages[2],x9mdl_pages[3],x9mdl_bad,x9mdl_full,x9mdl_splm_rx,x9mdl_ul_err,x9mdl_mark_total,x9mdl_saved,x9mdl_save_err);
 }
 void x9_md_log_mark(const char *what){
  if(!x9mdl_running||x9mdl_mark_ms)return;
