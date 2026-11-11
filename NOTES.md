@@ -6,6 +6,20 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 根因定位：MD RPC 0x400d（IPC_RPC_CCCI_LHIF_MAPPING）未应答 → PDN bind失败 → MD删除session（CELL-LHIFRPC，2026-11-11；修复镜像已构建，未启动）
+
+- **证据链（232 MD DHL日志＋MD固件静态，均可复核）**：
+  1. 每次ACT，IPC都创建session并走bind：232里两次（PDN 0x18/netif1@ACT+2.55MB、PDN 0x19/netif2@ACT+20.63MB）出现同一序列：\`4c500025/2d\` ipc_new_session_internal → \`4c50003f..4e\` ipc_update_session_state（netif 0x28b95ae8/0x28b95b38 = netif表0x28b95a98+0x50·n）→ **\`4c500032\` ipc_del_session_internal（PDN,3,0）** → \`4c500020\` → \`4c50002a/2c\` 参数 **0x1103**。正常bind trace \`4c500011\` 从未出现。
+  2. \`ipc_on_pdn_bind_bot@90736664(a0,a1,msg,a3=result)\`：a3==0x1100 正常bind（config_pdn_info_v4/v6）；**a3==0x1103 → find_session_by_context → update_session_state(1) → ipc_del_session → trace 0x20**。
+  3. \`ipc_on_ilm@902bbd2a\` 消息 **0x6b3a**（switch基0x6b1f，表0x9260a80a，idx27 → 0x902bc370）：取local para +0x64/+0x68，**+0x71==0 → a3=0x1103**，否则0x1100（无trace的静默路径；0x4c500022/23/24均未出现，确认走此路）。
+  4. 0x6b3a 由 LHIF 发出：\`lhifcore_task_main\`（模块0x549，Default下不记录）处理 **0x6b39（PDN bind）**：netdev(+0x6c)为空或index≥0x20 → 失败；否则 **\`IPC_RPC_Wrapper(0x400d,8,…)\`，<0 → 失败**；成功才 +0x71=1，msg_send 0x6b3a（src 0x549→dst 0x4c5）。（0x6b18/0x6b19 → lhif_net_device_state(dev,6/5)。）
+  5. vendor \`port_rpc.h\`：**0x400D = IPC_RPC_CCCI_LHIF_MAPPING**，\`port_rpc.c\`：pkt_num==1，\`struct ccci_rpc_queue_mapping{u32 net_if; u32 lhif_q}\` → \`ccci_rpc_remap_queue\`（仅选AP UL HW队列：Q0普通/Q1 IMS）→ 回复两个u32 0。
+  6. 我们 \`x9_modem_s3.inc:x9md_rpc_dispatch\` **没有0x400d分支，走default回 -1(FS_NO_OP)**。X9MD_LOG预算1500在~12s前耗尽，所以日志里看不到这次RPC（无日志≠没发生）。
+  7. 结果：session被删 → UL在 \`ipc_check_and_fill_session_info\` 查到session id -1（trace \`4c500052\`，232里1次）；DL无session可交付（RA/DNS回包不到AP、MD也拿不到前缀）——与214–232全部现象一致（ACT成功、地址/DNS有、UL不触发连接、RX0）。
+- **修复**：main **\`2d5db93\`**（\`x9_modem_s3.inc\`）：新增 case 0x400d：校验 para==1 且 lv[0]≥8B，解析 net_if/lhif_q，回 0,0，打印 \`X9 MODEM: RPC LHIF_MAPPING ccmniN -> lhif UL queue Q (...); reply OK\`（前32次，不受预算限制）；default分支对未处理op也无条件打印前32次 \`RPC op XXXX … unhandled -> FS_NO_OP\`。
+- **镜像**：**\`x9/out/x9-cell-lhifrpc-gpu278-20261111/boot.img\`**（worktree \`cell-lhifrpc-gpu278-20261111\` = mdlog4树+cherry-pick，仍含MDLOG 128MiB/ACT+5s采集与ATCTX），exit0。插件278不变，无需mailbox staging。
+- **验收**：①日志出现 \`RPC LHIF_MAPPING ccmniN …\`；②RX delivered>0 / PIT raw-wr离开0 / EIF5带全球v6前缀 / DNS有回包；③MD日志里应出现 \`4c500011\`（正常bind），不再有 \`4c500032\`/\`4c500052\`；④若q==1（IMS队列）需看AP是否要改用UL HW queue1。
+
 ## 232 MDLOG解码（CELL232-MDLOG4，2026-11-11）：MD UL入口报“该netif/IP族无session”；Android ACT后MIPC无额外绑定消息
 
 - **232采集**：\`~/232.txt\` 末50.4s、无panic，原件 \`.local/x9/work/mdlog232/232-original.txt\`。128MiB环；15.68s起采集；ACT 28.794s mark=82663550；33.809s保存**全流 0..121565902B**（含ACT前13s/后5s），\`save -> 0 in 173 ms\`；取回 \`.local/x9/work/mdlog232/x9-mdlog.bin\`。
