@@ -6,6 +6,12 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 229 MDLOG第1阶段结果（CELL229-MDLOG1，2026-11-11）：MD默认不写DHL
+
+- `~/229.txt` 1445875B，末42.66s，无panic；ACT 28.80s result0，TX16/16 RX0（同前）。
+- 16.09s首次轮询：DHL0–3头均为我们初始化的值（page/buf/magic 0x1100ffee正确），DL/UL rd=wr=rel=0；此后到42.6s（含ACT后14s）**无任何变化行** → **MD在没有AP命令时不往DHL写日志**。头格式/位置判断无误（MD认可的配置）。
+- **下一步**：手机进安卓，拉emdlogger及相关库（/system_ext或/vendor的emdlogger、libmdlogger*、mdlogger配置），抓其启动时对 `/dev/ccci_md_log_ctrl` 的写入及CCB UL/ctrl的变化（strace或对比CCB头UL wr），复现“开始记录＋过滤器”命令。
+
 ## MD DHL日志通道 第1阶段（CELL-MDLOG1，2026-11-11；已构建，未启动）
 
 - **安卓侧协议（静态，来自已拉取的 `.local/x9/android-ccci-20261109-125536/libccci_util.so`；反汇编 `.local/x9/work/mdlog-20261111/ccb.dis`）**：内核 `ccci_ccb_dhl` 只是SMEM映射＋CCIF唤醒(AP_MD_CCB_WAKEUP)，环格式全在用户态。每个CCB buffer 64B头（nc smem regs[4]，我们已在S2初始化）：DL半+0x00、UL半+0x20；+0x08 release、+0x0c read、+0x10 write、+0x14 page、+0x18 buf、+0x1c 0x1100ffee。数据区=CCB数据（c smem id1 md 0x42200000，前0xDF000），按表顺序每buffer DL后UL；页={0x22222222,len,payload}。`read_get`: wr≠rd取页并rd++；`read_done`: rel++。`register`时rd=wr丢旧。DHL表(1M)：0 ctrl、1 exception、2 BUF/PS log、3 CMD。emdlogger本体尚未拉取（手机当时不在安卓），**启动MD日志/过滤器的命令协议仍未知**（可能经 ccci_md_log_ctrl=UART1通道 或 CCB CMD/ctrl的UL方向）。
