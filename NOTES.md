@@ -6,6 +6,14 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 234：持续真实下行（498包/427KB），因HW LRO包列表被当成单包拼接而越界隔离；修为逐包交付（CELL234-RXMULTI / CELL-LROLIST，2026-11-11；lrolist已构建，未启动）
+
+- **234观察（rxmulti镜像）**：\`~/234.txt\` 5398204B，末88.5s，无panic。28.227s LHIF_MAPPING ccmni1（UL Q0）→ 第1拨期间只收到1包；55.891s ccmni2 后大量下行，日志出现应用 \`connectx()\` 活动。63.9s **TX 607/607、RX delivered 498 / 427477B、PIT 1040**，route 8、input-error 9。
+- **多缓冲日志全部是 len 1380+hoff 40=1420 或 1300+60=1360**：每个后续normal缓冲本身就是带头部的完整TCP段 → **MD的HW LRO“包列表”**（同一PIT message串多个同流完整包）。rxmulti把它们拼成一个大包；57.639s 拼到2840+1380 → \`quarantined (RX packet exceeds bounded MTU)\`，随后停止。无 \`RX BID not owned\`（BID记账没问题）。
+- **修复**：main **\`ae35aab\`**（X9DPMAIF.inc）：把逐包交付块抽成 \`x9d_rx_deliver(q)\`；同一message内遇到后续normal缓冲时**先交付上一包、再从该缓冲开始新包**（每包仍经 x9d_ip() 与路由/epoch/族检查），前8次打印 \`RX LRO list … delivering separately\`；frag起始仍追加并打印；未持有BID仍隔离。
+- **镜像**：**\`x9/out/x9-cell-lrolist-gpu278-20261111/boot.img\`**（worktree cell-lrolist = rxmulti树+cherry-pick），exit0。
+- **验收**：不再隔离；RX持续增长；Safari/应用实际可用；观察 \`LRO list\` 日志与input-error是否下降。
+
 ## 233：0x400d修复生效，首次真实下行；随后RX因BID/多缓冲检查自我隔离（CELL233-LHIFRPC / CELL-RXMULTI，2026-11-11；rxmulti已构建，未启动）
 
 - **233观察（lhifrpc镜像）**：\`~/233.txt\` 5840567B，末97.6s，无panic。**30.012s \`RPC LHIF_MAPPING ccmni1 -> lhif UL queue 2\`、31.724s ccmni2 同**，回OK；随后 ACT0202 result0、EIF5 现在带MTU（\`MTU present 1\`）。**32.459s起真实IPv4下行进入协议栈**（X9 CELL INPUT/PROTO accepted 1：167B、52B×3、40B、176B…，即DNS回包/TCP段）；37.1s **RX delivered 39 / 24495B，PIT consumed 88**，route drop 3、input-error 1。31.743s 一个v6 88B因族未开(blocked 1, error 50)被拒。**→ 根因（0x400d）确认，MD用户面已通。**
