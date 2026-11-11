@@ -328,3 +328,48 @@ slot226/227 的默认实现是分配/释放，不应沿用“request recycle poo
 `abi_compatible=false` / `runtime_loadable=false`，不生成可执行C++ ABI。
 本里程碑没有改运行内核、重建成功候选、安装工具或操作设备；USB-5是交接号，
 不表示新的USB协议版本。
+
+### 原生 ABI 与真实配对会话入口（尚不使原生内核栈可装载）
+
+`native_abi.py` 从同一20H392原始cache与冻结`IOService.cpo`恢复**双向、精确符号**
+映射，不使用统一`+104`偏移。无名/歧义槽保留未映射；三个USB模块中的相邻
+`ldr/blr`仅是虚调用候选，receiver类型未确认就不生成补丁。结果保留
+`abi_compatible=false/runtime_loadable=false`；仍需逐类几何、override反向调用、
+request timeout/DMA所有权、原生MTU3后端及模块注册，不可直接加载原始kext。
+
+```sh
+python3 -I x9/usb/native_abi.py \
+  --kernelcache .local/x9/usb/native-20H392/kernelcache.macho \
+  --io-service-object .local/dxb/build/xnu.obj/DEVELOPMENT_ARM64_SWEET/iokit/DEVELOPMENT/IOService.cpo \
+  --out .local/x9/usb/native-abi-new
+```
+
+新增`pairing.py`走**系统原生usbmuxd、真实lockdownd**，不使用旧自有mux草稿，
+不改守护进程或信任状态。它是主机端代码，不是缺失的DeviceFamily驱动。
+仅`--list`的原生daemon发现已实跑；其余操作当前没有X9原生USB入口，**未实跑**。
+
+```sh
+# 当前可只读执行；设备不在原生列表就停止，不自动选择别的设备
+python3 -I x9/usb/pairing.py --list
+# 原生栈接通后，显式选择上一步的USB设备ID
+python3 -I x9/usb/pairing.py --query-type --device-id <ID>
+```
+
+首次配对必须由操作者明确选择执行，依赖Python `cryptography`：
+
+```sh
+python3 -I x9/usb/pairing.py --pair --device-id <ID> \
+  --record .local/x9/usb/pairing/private-record.plist
+# 仅收到真实PairingDialogResponsePending时，用户在设备解锁/接受原始Trust UI后，
+# 才可手动再次执行同一命令；不自动轮询/重发，不把pending或denied算成功。
+# Pair真实接受并保存主机record之后，独立验证会话：
+python3 -I x9/usb/pairing.py --session --device-id <ID>
+```
+
+`--pair`读取原生BUID/设备公钥，生成真实RSA证书，发送原始Pair请求；接受后才
+保存主机pair record。不清旧记录、不Unpair、不修改设备USB限制。私有record只可在
+`.local`下，0600/原子落盘；Pair或Save超时留in-flight状态，禁止下一次隐式重放。
+`--session`只读取所选设备的原生记录：StartSession→按原始响应升级TLS→验证根CA
+并精确pin已配对DeviceCertificate→会话内QueryType→StopSession。没有关闭证书
+验证或自动降级TLS/密钥长度。普通QueryType、Pair接受、会话成功分别报告，不互相
+冒充。证书、私钥、BUID、设备标识与SessionID不打印、不入git。
