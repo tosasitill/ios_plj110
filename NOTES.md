@@ -6,6 +6,14 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 当前启动失败复核（BOOT277-HANDOFF，2026-11-11）：用户报告shim仍无法引导XNU；缺本次console，停止重复旧候选
+
+- **用户现场／证据边界**：在最新277无音频loader联合镜像交付后，用户报告“shim还是无法引导xnu”，要求重读handoff。将 `x9-latest277-noaudio-loader-20261111-r2` 作为待定位失败候选，不再建议原样重试；尚无包含该次身份/最后阶段的console，不能把历史130/173或218拼接成本次证据。家目录 **`219.txt=0B`（mtime19:52:19+0800）**，最新非空仍218、对应旧cell163/276。只读 `adb devices` 为 **0台ready**，未访问设备文件/分区，未重采旧pstore、未拉根盘、未重启或修改mailbox。其他窗口既有CELL219-MDSTATIC的219是分析目录号，不是本次启动日志。
+- **上一轮核对遗漏／源码确定事实**：我上一轮仅确认MIC/ADSP已移除及277配套、构建成功，没有把全量最新main的pre-XNU链与已实测131逐项比较；“无音频loader”不是“所有新增FDT工作已撤回”。固定编译源码仍 **58ba960**；其原始link命令确实**没有**`mic_dma_handoff.o/adsp_handoff.o`，但**有**新增`camera_calibration.o/camera_irq_handoff.o`，位置是GPS返回→audio removed日志→相机校准→相机IRQ→Wi-Fi/RAM→boot_args/jump；与131 **3430b74**相比，main.c/start.S/实际xnu_enter未改，GPS新增SMPU qualifier，通用fdt_property parser及相机两项有实际变化。不能把新回归归因直接叫“旧ADSP又打开”。
+- **handoff关键约束已重新对齐**：BOOT130-CONSOLE原件最后是GPS非fatal refusal、无jump/EXCEPTION；CELL131只gate ADSP＋复用130内核才在189恢复，不能把131之后main新增代码也当已启动验证。BOOT-AUDIO-AUDIT强调MMU/D-cache关闭、连续完整FDT扫描无watchdog/USB服务，长时间扫描预算耗尽**是假设，不是已证实WDT根因**；不关watchdog、不贸然开MMU/cache、不删资格校验或改XNU entry来掩盖。当前新相机校准成功路径可到 **22次complete-tree查询**，IRQ为capture＋全局phandle检查 **2遍**，两函数及通用parser仍无wdt进展点；这些是源码分支上限，不是本次实际命中次数/耗时，也不能据此宣称已定位相机导致reset。
+- **173几何旧坑的范围**：HANDOFF111明确旧ij/ik等shim仍16GiB；当前固定源码的`ufs_root_manifest.header()`和`add_native_adt()`都用`device(root||extension)`，记录的输入为16GiB＋16GiB＝**34359738368B**，native mutable verifier接受HFS≤device；不是沿用HANDOFF111前那套16GiB生成逻辑。这里只读source/既有输入和日志，没有二次读取/解包/hash/反汇编成功镜像，且无本次live UFS状态，仍须console先判断是否header/geometry/quiesce拒绝。277插件检查在XNU/PID1，不是shim复制／跳转的前置阶段；19:41已commit同277不会证明本次已进入XNU。
+- **下一决定性动作／本轮范围**：先由用户给本次shim最后几行/屏幕照片，或恢复Android、ADB连上后只读采集本次pstore并核对时间和阶段；不把旧sidecar长期iOS日志当新启动。按`UFS NATIVE HANDOFF READY`→RAM/payload→GPU/SCP/GPS→audio removed→CAM CAL/IRQ→Wi-Fi/RAM→boot_args/jump→entering XNU定位最早未知点，若已到jump再看实际XNU入口/异常。取得证据后才选同一277 kernel/参数下的最小shim单变量修复；不追赶其它窗口功能、不直接撤全部handoff或刷旧276。私有读取输入与源码差分在 **`.local/x9/work/latest277-boot-review-20261111/`**。本轮无运行代码修改、编译/新镜像/测试套件/CI/push/设备写入；仅提交本节交接，保留其他窗口未提交NOTES。
+
 ## IMS／短信流程复核交接（IMS-SMS218，2026-11-11）：旧候选仍阻断；发送已有真实接受，最新277已带短信修复但未实跑
 
 - **范围／结论**：用户要求“看看 ims 和短信流程是否正常”。只读现有`~/211.txt`至`~/218.txt`、当前源码、冻结候选源码及已有构建记录，基线文档提交`8391abb`；没有主动发送短信／ACK／IMS配置、ADB、设备写入、flash/reboot、mailbox、编译／测试套件／CI／push。结论是**IMS仍缺实际启用适配；GSM发送已有部分真实成功，接收和完整交付未验收**，不是“两项正常”，也不是“短信完全不通”。
