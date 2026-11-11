@@ -6,6 +6,14 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 本机 Xcode 精简交接（2026-11-11）
+
+- 用户要求从 `~/Downloads` 的 Xcode 提取项目所需工具并删除其余内容。原 **Xcode15.0.1 / 15A507** 已提取至 **`~/Library/Developer/X9-Xcode-15.0.1.app`**；`~/Downloads/Xcode.app` 改为指向该目录的兼容软链接，`developer_dir`、历史构建脚本与现有 `xcode-select` 路径无需修改。这是项目命令行工具集，**不是完整可启动的 Xcode IDE**；`/Applications/Xcode.app`（27.1）、系统 CommandLineTools、Homebrew LLVM/Rust、项目输入与设备未动。
+- 保留原版 clang15/C/C++/Objective-C、iig（DriverKit286）、MIG、ld/ld-classic、归档/符号工具、Metal/AIR 工具及运行库、完整 **iPhoneOS17.0 / MacOSX14.0 SDK**、Git/Make/Python/LLDB 与实际加载依赖。`xcrun` 查询 SDK 会调用 `xcodebuild`，因此保留其 dylib/framework 闭包、构建规格及 iOS/macOS 支持插件；不能把这些全当 IDE 垃圾删掉。删除 IDE 前端、非目标平台/模拟器 SDK、DeviceSupport、安装包资源、Swift 编译器/包管理工具及未被保留的内容；原包先隔离，编译通过后已真正删除，不留同体积备份。
+- **占用/删除结果**：`du -sk` 原 **5086432KiB（4.85GiB）**，保留 **2056864KiB（1.96GiB）**，减少 **3029568KiB（2.89GiB）**。删除前后 `df` 可用空间增加3160772KiB（约3.01GiB，仅当时全卷观测，可能含并发变化）。保留文件清单45492个普通文件；9项关键工具/SDK元数据与原件SHA256一致，无悬空链接或指向隔离原包的依赖。没有裁切Mach-O架构或修改Apple二进制。
+- **实际验证**：切换旧路径后 macOS C++ 编译链接通过；iOS16/arm64 Objective-C++动态库/静态归档、Metal→AIR→metallib、`x9/audio/build.py`（未传`--embed`，HAL与audioctl编译签名、不安装）均通过。冻结短信源码 `7db91cc` 的真实 Builder 编译 **X9Baseband.cpp.o exit0/33既有warnings**，明确关闭ccache。首轮自写编译源误引iOS SDK本就没有的公开IOSurface头而失败，仅修正本地编译源后续编译exit0，未改项目源码/SDK。原包删除后的无缓存SDK/iig查询、clang与Git查询exit0；Xcode15与系统新版DVTDownloads重复类提示在未精简原版已存在，未因此修改系统库。无测试套件、完整内核链接、boot镜像、CI或设备操作。
+- 私有清单/日志/命令集中 **`.local/x9/work/xcode-trim-20261111/`**：`selection.json`、`dependency-selection.jsonl`、`retained-files.jsonl`、`retained-fingerprints.json`、`cleanup-result.json`、`compile*.sh/log/exit`、`kernel-result.json`、`post-cleanup.log/exit`。可用 `DEVELOPER_DIR="$HOME/Downloads/Xcode.app/Contents/Developer" xcrun --no-cache --sdk iphoneos --show-sdk-path` 确认旧入口解析到保留目录；重复编译需使用新输出目录，不覆盖本轮结果。仅本节交接入Git，所有提取的Apple文件仍在Git外。
+
 ## 主线推送交接（2026-11-11）
 
 - 用户要求先推送现有提交。`git fetch origin` 后确认 `main...origin/main` 为 **560/0**；已用普通 `git push origin main` 成功将远端从 **`3865453`** 快进到 **`e395f10`**，包含短信源码 `7db91cc` 及交接 `a1dc2c8`。没有 force、rebase、reset，也没有发布其他实验分支。
