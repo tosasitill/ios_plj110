@@ -1375,7 +1375,14 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **不能称为全部USB完成**:本轮暂无枚举/DMA/ue0 ping/bulk回环实机结果,live EMI/MPU允许普通XNU DMA页也未证明。`native_apple_stack=0`,没有冒充IOUSBDeviceController或AppleUSBDeviceMux;原始configd USBDeviceConfiguration/lockdownd、Finder/iTunes Trust/配对/照片同步仍缺20H392 controller adapter及kext构建接入。USB3 XS-PHY/retimer、charger Type-C role与原生xHCI也未完成。参考文章chip/board/security-domain/fsid/锁状态条件要到原生栈接通后才验证,不先改身份/配对状态制造成功。
 - **下一步/验收**:先在用户手动启动的单一候选核对`CAP_EPINFO/TXFIFO/RXFIFO/MISC`→config1/alt1→真实QMU OUT/IN→ue0 ping,再用iOS `usbctl --echo`+host单次echo证明host→iOS→host字节相同。保留EP0日志,无需重建Metal插件/mailbox。接口/回退/构建说明在`x9/usb/README.md`;不要求用户现在连续刷试探镜像。
 
-## 蜂窝当前交接(CELL138-IFST,2026-11-11): 194确认UL写指针前进而MD不消费；补上netagent的EIF_REQ ifst up/down，未上机
+## 蜂窝当前交接(CELL139-IFST,2026-11-11): 195里ifst被MIPC桥白名单拦下(submit failed)；cell139放行精确格式的0x313，未上机
+
+- **195.txt**(cell138，末64s)。**观察**：所有`EIF ifst up/down ccmniN submit failed`——`x9_mipc_bridge.inc`的`x9_md_mipc_submit`白名单只放OPEN/AT/attach/DDS/WDS几个ID，注释明确拒绝"speculative EIF"。所以cell138的ifst从未到MD，195不能用来判断ifst是否有效。其余同194：重拨正常，UL完成1/提交173，RX0。191-195无`MD command id ... ignored`(MD没有等AP回RSP的命令)。
+- **修复 main `29e690b`**：白名单只放行精确的0x313：SIM1/SIM2掩码，`TRANSID100/u32`后接`CMD101/u8`(0或1)，IFUP时恰一个`ADDRESS_TYPE104/u8`(1..3)，零填充，总长40(IFUP)/32(IFDOWN)。CNF 0x314由现有id+1槽位匹配。`X9Baseband.cpp.o`与`sweet_x9_gpu_dependencies.o`单编True。
+- **候选 `x9/out/x9-cell139-ifst-md/boot.img`**(worktree `481bfe9`)，三命令exit0，boot 13529088B，内核字符串含`EIF ifst %s ccmni%u type %u sent to MD`；参数同131，插件276，**无需mailbox**。记录`.local/x9/work/cell139-ifst/`。
+- **下一步**：用户boot cell139→`~/196.txt`。看`EIF ifst up ... sent to MD`、`CNF valid result N`、DPMAIF completed是否增长、RX>0。若CNF result非0：看MD `atp_d2at_eif_req`对ifst的前置条件；若CNF 0但UL仍卡：补IPUPDATE(cmd2+NEW_ADDR 0x20B)并查MD UL消费侧。
+
+## 蜂窝前次交接(CELL138-IFST,2026-11-11): 194确认UL写指针前进而MD不消费；补上netagent的EIF_REQ ifst up/down，未上机
 
 - **194.txt**(cell137，末108s)。**观察**：重拨已能用(27.1/28.8/55.1s多次`PDP activated`，ccmni1/ccmni2交替，iOS自己Stop后重拨)；`EIF ccmni2 command 5 (not IFUP/IFDOWN; state kept)`不再拆；`mux 1 retiring with 131 TX descriptors stalled`后退休成功。UL仍只完成2包(TX submitted 331 completed 2，RX 0)。tx-stall dump：`ul_sram+0x0e0=0x00080038`(硬件wr=0x38字随ADD_DESC前进，rd停在8字=2包)，`pd_ul DBG_STA5=0x09808020`(DRB基址+0x20即第3包)——描述符提交有效，**卡在MD不消费**。UL硬件配置与原厂一致(原厂不写CACHE_CON0/RDMA_CFG0；SRAM清零表/MD_RDY阈值相同)。
 - **找到缺失链路**：原厂MIPC头(`~/HelioDarwin/oppo-source/modules/vendor/oplus/kernel/network/linkpower_module/heartbeat_proxy/mediatek/mipc_msg_tlv_const.h`)：`INTERNAL_EIF_REQ=0x313`/`CNF=0x314`，TLV `0x100 TRANSID u32`、`0x101 CMD u8`(0 IFUP,1 IFDOWN,2 IPUPDATE,3 IFQUERY,4/5 NO_RA_INITIAL/REFRESH,6 IPADD,7 IPDEL,8 IPCHG)、`0x8102/0x8103 NEW/OLD_ADDR`(MD要求恰好0x20B：u32 len@0、addr@4、prefix@0x1c)、`0x104 ADDRESS_TYPE`(1 v4,2 v6,3 v4v6)。IND命令：0 IFUP,1 IFDOWN,4 IPCHG,**5 IFCHANGE**,6 MTU。MD `mipc_internal_eif_req`(91335d2a)把IFUP转成`AT+EIF=<id>,"ifst","up",<type>`(格式串在0x92460f74等，材料`.local/x9/work/cell-eif-20261111/`)。Android netagent在配好ccmni后发ifst up；我们从未发。**推断**：MD在收到AP接口up前只缓冲极少UL包。
