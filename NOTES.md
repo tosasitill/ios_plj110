@@ -6,11 +6,14 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
-## 蜂窝探针镜像施工交接（CELL164-BUILD278，2026-11-11；冻结完成，完整构建待执行）
+## 蜂窝探针新镜像交接（CELL164-BUILD278，2026-11-11；完整构建／交付exit0，未启动）
 
-- 用户明确要求“构建新镜像”；本轮授权仅Mac本地构建，无mailbox／启动／分区操作。新独立冻结树 `.local/x9/worktrees/cell164-observe-gpu278-20261111/` 从当前278实际kernel/shim **`f8af77d`** 只cherry-pick三文件探针提交 `a26b2e0`，冻结源码 **`2266e037a2eb63b85bbfd24fe0739591d7075575`**；源差分确为WDS／DPMAIF／PDP三文件，不混主线新增USB pairing工具或其他窗口修改。
-- 原278 `local-config.json`／`boot-config.json`原样复制至私有 `.local/x9/work/cell164-build-gpu278-20261111/`，保留完整603B／32GiB／cpus8／ug5／dv1／外置完整BBFW／CBN及no-MIC/ADSP/no-camera/GPS pre-XNU walkers；这指shim walker基线，未删除已有kernel/HAL功能。沿用同278 allowlist和已部署插件，不重新构建／版本化GPU，不重写278 mailbox。
-- 新唯一候选name **`x9-cell164-observe-gpu278-20261111`**；下一步在冻结树执行 `python3 -I x9/build/build.py all --name x9-cell164-observe-gpu278-20261111 --config <本轮私有>/local-config.json --boot-config <本轮私有>/boot-config.json -j8`（无`--revision`，只kernel+boot）。成功后原样复制到main `x9/out/`，不二次hash／解包／反汇编／测试；尚未生成新boot，不能当作可启动成果。准确冻结／cherry-pick命令和exit0、`build-inputs.json`及三文件`source.patch`均保留私有；无CI run／push。保留全部其他交接。
+- **授权／冻结源码**：用户明确要求“构建新镜像”；本轮仅Mac本地构建，无mailbox／启动／分区操作。独立冻结树 `.local/x9/worktrees/cell164-observe-gpu278-20261111/` 从当前278实际kernel/shim **`f8af77d`** 只cherry-pick三文件探针提交 `a26b2e0`，运行源码 **`2266e037a2eb63b85bbfd24fe0739591d7075575`**；源差分确为WDS／DPMAIF／PDP三文件，不混主线新增USB pairing工具或其他窗口修改。冻结里程碑main交接提交 **`f6e2024`**。
+- **配套／输入不变**：原278 `local-config.json`／`boot-config.json`原样复制至私有 `.local/x9/work/cell164-build-gpu278-20261111/`，保留完整 **603B／32GiB／cpus8／ug5／dv1／外置完整BBFW／CBN** 及no-MIC/ADSP/no-camera/GPS pre-XNU walkers；这是shim walker基线，未删除已有kernel/HAL功能。沿用同 **278 allowlist和此前已部署插件**，无GPU重新构建／版本化、不重写278 mailbox；新候选无需另配279或重部署插件，不能混旧276/277。
+- **准确构建结果**：在冻结树以Xcode15／LLVM22、已有ccache执行 **`build.py all --name x9-cell164-observe-gpu278-20261111 --config <本轮私有>/local-config.json --boot-config <本轮私有>/boot-config.json -j8`**，无`--revision`（只kernel+boot），**exit0／20.275s**；包含相关对象完整编译／链接／shim／ADT／打包，非仅先前两对象unit compile。构建有非零warnings，不称零告警；builder报告 **Image30560256B／boot13873152B**，正常内置准入通过。成功后 `/usr/bin/ditto <冻结out> <mainout>` **exit0**，没有成功镜像二次hash／解包／反汇编／重建检查或额外测试套件。冻结树和main源码工作区干净；`gh run list --commit 2266e037...` **exit0=[]**，无CI run／push。
+- **唯一新交付**：仓库根 **`x9/out/x9-cell164-observe-gpu278-20261111/boot.img`**。原278候选／插件／Android／保护分区／备份保留。用户手动 **`fastboot boot x9/out/x9-cell164-observe-gpu278-20261111/boot.img`**；本轮未执行该命令或ADB、getvar、reboot、flash、mailbox、根盘／NV写。旧镜像不含本轮探针；不要重复写已经提交的278 mailbox。
+- **日志验收／未完成**：预期同278 allowlist active、GPU mode1 CPU snapshot／retirement worker，加上 `X9 CELL CONTROL/WDS/CNF/SIDE/TX/ROUTE/PIT/RX/INPUT/PROTO`。等待状态心跳／reason/site读法见下方CELL164-OBSERVE，不把CONTROL session-ready当MD内部会话状态，不把TX完成或INPUT/PROTO接受当空口／socket成功。保留本次原始日志和host stderr，按SIM/mux/gen/epoch/lifetime与producer／consumed／错误增量划界。**当前仅构建交付成功，未实机启动／联网／像素验收，RX0未被证明修复**；MD内部普通UL路径仍未观测。
+- **必要私有记录**：本轮目录保留 `setup-commands.json`／worktree与cherry-pick原log/exit、`source.patch`、`build-inputs.json`／两份原配置、`build164.py`／`build-command.json`、`all-build.log/exit`、`output-copy-command.json`／copy log/exit、`build-result.json`与gh原stdout/stderr/exit；不入Git，无新增过程报告／timeline。若需重建使用新唯一name，勿覆盖已成功候选；其他窗口交接原样保留。
 
 ## IMS与普通数据因果续查（IMS-INTERNET-CAUSALITY，2026-11-11）：确认配置会影响驻留／能力；仍未证明是本次RX0根因
 
