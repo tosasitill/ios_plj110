@@ -443,7 +443,29 @@ static void x9w_ril_post_act(unsigned sim,unsigned cid){
 // PACKET_ROUTE_REQ 0x261 {0x100 u8 3}. The surrounding runtime log identifies
 // ImsRtpRedunDataController -> syncImsRtpRedunDataPathConfig. Temporal order
 // does NOT make this an internet-PDN dependency; disabled unless requested.
+// cell161 diagnostic (Android RIL sends all of these): register the RRC
+// CSCON 4409 and physical-channel 4419 indications once per SIM, then while a
+// call is owned read NW_GET_CSCON_STATE 1151 and NW_GET_PHYSICAL_CHANNEL_
+// CONFIGS 04c7 every 3 s. Read-only; they do not change admission.
+static void x9w_up_diag(){
+ static unsigned reg;static uint64_t next;static unsigned polls;
+ if(!x9w_session_ready||!x9_md_mipc_online())return;
+ if(reg<2*x9_md_sim_count()){
+  unsigned sim=reg/2,id=reg&1?0x4419:0x4409;uint8_t bytes[2]={(uint8_t)id,(uint8_t)(id>>8)};
+  x9w_frame f(0x307,1u<<sim);f.tlv(0x100,bytes,2);
+  if(x9w_side_send(f,sim,0x308,reg&1?"REGISTER_IND 4419":"REGISTER_IND 4409",true))reg++;
+  return;
+ }
+ if(polls>=80||x9q_ms()<next)return;
+ for(const x9w_bearer &b:x9w_bearers)if(b.used&&b.owned&&!b.abandoned){
+  next=x9q_ms()+3000;polls++;
+  {x9w_frame f(0x1151,1u<<b.sim_slot);x9w_side_send(f,b.sim_slot,0x1152,"NW_GET_CSCON_STATE",true);}
+  {x9w_frame f(0x4c7,1u<<b.sim_slot);x9w_side_send(f,b.sim_slot,0x4c8,"NW_GET_PHYSICAL_CHANNEL_CONFIGS",true);}
+  break;
+ }
+}
 static void x9w_side_poll(){
+ x9w_up_diag();
  if(x9w_stats_next&&x9q_ms()>=x9w_stats_next)x9w_stats(false);
  static uint8_t response[X9_MIPC_FRAME_MAX];
  for(x9w_side &e:x9w_sides){if(!e.token)continue;
@@ -452,6 +474,11 @@ static void x9w_side_poll(){
    unsigned result=~0u;bool good=x9w_wire(response,n)&&x9q_u16(response+10)==e.cnf&&x9w_word(response,n,0,result);
    if(good&&(e.cnf==0x260||e.cnf==0x262)){unsigned app=0;good=x9w_byte(response,n,0x100,app)&&app==3;}
    printf("X9 WDS: SIM%u %s CNF %s result %u (%u B)\n",e.sim+1,e.what,good?"valid":"malformed",result,n);
+   if(e.cnf==0x1152||e.cnf==0x4c8){ // cell161 diagnostic: raw RRC-connection / physical-channel state (no identities)
+    char h[2*112+1];unsigned o=0,m=n<16+112?n:16+112;h[0]=0;
+    for(unsigned j=16;j<m;j++)o+=(unsigned)snprintf(h+o,sizeof(h)-o,"%02x",response[j]);
+    printf("X9 WDS UP: +%llu ms SIM%u %s payload %s\n",(unsigned long long)x9q_ms(),e.sim+1,e.what,h);
+   }
    bzero(response,sizeof(response));bzero(&e,sizeof(e));continue;
   }
   if(ready==1&&e.cmd>=0x80){
@@ -562,6 +589,13 @@ static void x9w_start_next(x9w_bearer &b,unsigned mux){
   x9w_frame f(0x219,1u<<b.sim_slot);x9w_send(b,f,X9W_DISC,10000);return;
  }
  if(b.op==X9W_CONFIG){
+  // Android RIL (boot_logcat 14:30:08.543) sends the data SIM a second
+  // DATA_SET_CONFIG {DEFAULT_DATA_SIM_CARD106=1, IMS_TEST_MODE103=0} next to
+  // the MOBILE_DATA one; 215 never sent it. Queued first so it precedes ACT.
+  static uint64_t dds_cfg_ms[2];
+  if(b.sim_slot<2&&x9q_ms()-dds_cfg_ms[b.sim_slot]>=5000)
+  {x9w_frame g(0x211,1u<<b.sim_slot);g.byte(0x106,1);g.byte(0x103,0);dds_cfg_ms[b.sim_slot]=x9q_ms();
+   if(x9w_side_send(g,b.sim_slot,0x212,"DATA_SET_CONFIG default-data-SIM"))printf("X9 WDS: SIM%u DATA_SET_CONFIG default-data-SIM queued\n",b.sim_slot+1);}
   x9w_frame f(0x211,1u<<b.sim_slot);f.byte(0x100,1);f.byte(0x101,1);f.byte(0x103,0);
   if(x9w_send(b,f,X9W_CONFIG,30000))printf("X9 WDS: SIM%u DATA_SET_CONFIG queued; await 0212 before RETRY_TIMER/ACT\n",b.sim_slot+1);
   return;
