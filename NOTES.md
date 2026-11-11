@@ -1515,6 +1515,14 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **后续**：从真实MTK按SIM/PLMN/RAT名称接口补NAS44的文本、编码、来源及生命周期，并触发原生更新/缓存失效；不硬编码运营商、不把修名称当修RX0。RegistrationCache按slot缓存，首次字典不存在才抓取，operatorNameChanged后重新本地化；修好底层仍需新鲜缓存验证。IMS按下一节继续独立核对，未证明其缺失导致这行或Internet RX0。
 - **成果与重放**：报告提交 **`8aec2d3`**，`docs/network/about-network-20H392.md`；私有 `.local/x9/work/about-network-20261111/` 含trace.py、collect-runtime.py、10段汇编、image-provenance/range-verification/runtime-evidence.json、constants/localization.json及脱敏定点摘录。根目录运行`python3 .local/x9/work/about-network-20261111/trace.py`与`python3 .local/x9/work/about-network-20261111/collect-runtime.py`重放；10段函数字节与现有根盘快照cache全部相同（不是设备内存采样）。只读原Apple输入/快照/已有日志及源码，**无运行代码改动、编译/新镜像/CI run/测试套件/push/设备操作**；仅报告和本节交接入Git，保留并发IMS交接。
 
+## 蜂窝当前候选交接(CELL160-EIFDIAG，2026-11-11)：仅加诊断打印的新镜像已构建，待用户上机
+
+- **内容**：`.local/x9/worktrees/cell160-eifdiag`(分支`work/cell160-eifdiag`)= cell157固定源码`0e3681b`＋诊断提交 **`255c70b`**，**不含cell158 BAT改动**(保持与214相同运行行为，只多打印)，不混main其他窗口改动。①`X9WDS.inc` `x9w_diag`：每条EIF 4302／DATA_MOD 4203到达即打印`X9 WDS DIAG: +ms IND id cmd/cid trans v4count v6count v6head(8B) tlvs…`(上限200条)；②`x9_mipc_bridge.inc`：若MD送来CSCON 4409／物理信道4419则打印`X9 MIPC DIAG`(上限80条；我们未必订阅，**没出现不代表RRC状态**)。
+- **更正上一节**：4203处理函数`x9w_modified_event`在字段不匹配时静默continue，214里EIF5后有两次GET(txn348/349，一次原因未知)，所以“214从未出现4203”**不成立**，可能来过但未打印。仍成立的观察：214唯一的EIF5不带v6项且晚到+4.04s(Android为+36/38ms且tag106=1)。
+- **构建(观察)**：Framework Python3.13经`.local/x9/work/cell160-eifdiag/run-build.py`(build-inputs.json同cell157，仅换树/名字)audio/bluetooth/all三命令全部exit0；Image 30019584B／boot 13553664B。原始输出`full-build.stdout.log`、`build-results.json`、`full-build.exit=0`。无CI run、无push、无测试套件、未上机。
+- **交付**：**`x9/out/x9-cell160-eifdiag-md/boot.img`**(ditto到主checkout)，276 plugin-package从cell157原样复制；**已装276则无需mailbox**，不要与277插件混用。
+- **下一步**：用户`fastboot boot x9/out/x9-cell160-eifdiag-md/boot.img`，关Wi-Fi用蜂窝约2分钟，取新编号日志。`grep "X9 WDS DIAG\|X9 MIPC DIAG\|X9 WDS: cell157\|RX delivered"`：看ACT后是否出现cmd5且v6count1(及v6head是否为全球前缀而非fe80)、4203何时到。若始终v6count0→问题在MD↔网络用户面(见CELL214-RA-BOUNDARY的②)；若出现v6count1而RX仍0→回到DPMAIF DL，上cell158 BAT修复。
+
 ## 蜂窝当前分析交接(CELL214-RA-BOUNDARY，2026-11-11)：对照Android全流程，下行缺失在MD内部就已可见(MD自己也没收到RA)；仅分析，未改代码
 
 - **用户问题**：“根据安卓数据上网全流程来看我们的iOS端为什么一直收不到下载包，看214”。本轮只读214与既有Android抓取，没有新构建／设备操作。
