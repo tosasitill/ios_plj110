@@ -6,6 +6,12 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 蜂窝探针镜像施工交接（CELL164-BUILD278，2026-11-11；冻结完成，完整构建待执行）
+
+- 用户明确要求“构建新镜像”；本轮授权仅Mac本地构建，无mailbox／启动／分区操作。新独立冻结树 `.local/x9/worktrees/cell164-observe-gpu278-20261111/` 从当前278实际kernel/shim **`f8af77d`** 只cherry-pick三文件探针提交 `a26b2e0`，冻结源码 **`2266e037a2eb63b85bbfd24fe0739591d7075575`**；源差分确为WDS／DPMAIF／PDP三文件，不混主线新增USB pairing工具或其他窗口修改。
+- 原278 `local-config.json`／`boot-config.json`原样复制至私有 `.local/x9/work/cell164-build-gpu278-20261111/`，保留完整603B／32GiB／cpus8／ug5／dv1／外置完整BBFW／CBN及no-MIC/ADSP/no-camera/GPS pre-XNU walkers；这指shim walker基线，未删除已有kernel/HAL功能。沿用同278 allowlist和已部署插件，不重新构建／版本化GPU，不重写278 mailbox。
+- 新唯一候选name **`x9-cell164-observe-gpu278-20261111`**；下一步在冻结树执行 `python3 -I x9/build/build.py all --name x9-cell164-observe-gpu278-20261111 --config <本轮私有>/local-config.json --boot-config <本轮私有>/boot-config.json -j8`（无`--revision`，只kernel+boot）。成功后原样复制到main `x9/out/`，不二次hash／解包／反汇编／测试；尚未生成新boot，不能当作可启动成果。准确冻结／cherry-pick命令和exit0、`build-inputs.json`及三文件`source.patch`均保留私有；无CI run／push。保留全部其他交接。
+
 ## IMS与普通数据因果续查（IMS-INTERNET-CAUSALITY，2026-11-11）：确认配置会影响驻留／能力；仍未证明是本次RX0根因
 
 - **本次真实日志**：用户怀疑IMS导致数据链路不起，定点只读`~/220.txt`并对照218，原LF按`split('\n')`。220 **6次NAS33/TLV33=`02`被error94拒绝**，LF8098/8173/8199/8201及16325/16326；第一次30.532s、末两次57.902s。其后普通ACT202分别在 **LF8884／31.427s、LF17079／59.360s result0**；末次LF21335／121.587s **TX241/241、RX四计数全0**。218同为6次拒绝、两次ACT0、最终TX303/303/RX0。两份日志的QMI request打印都正好400条，预算内IMSA/NAS72为0，**不证明预算后的请求不存在，也不证明MD实时IMS已关闭／未注册**。220仍是277运行，不把278已部署当运行。
