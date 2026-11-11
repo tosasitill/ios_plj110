@@ -95,6 +95,11 @@ static bool x9w_word(const uint8_t *p,unsigned n,unsigned tag,unsigned &v){
 struct x9w_bearer {
  bool used,owned,active,abandoned,pending,hold,gone;
  uint16_t end_type,end_verbose; // first known disconnect cause; 0 = local failure
+ // MD already took this route down, or the latest GET205 could not confirm
+ // the CID still carries our channel/trans_id. Saved P77 L5 DEACT handler
+ // 913d8396->913d842a sends B238 to D2CM even when the CID has no L5 node,
+ // so a stale 203 could end a foreign PDN (IMS/attach) now owning that CID.
+ bool md_down;
  unsigned slot,op,min_cid,max_cid,channel,mtu,dns_count;
  uint64_t generation,token,deadline,reply_deadline,next,if_floor,result_epoch,route_lifetime;
  uint32_t handle,len,trans_id;
@@ -280,6 +285,15 @@ static bool x9w_deactivate(x9w_bearer &b,unsigned mux){
  x9w_disconnect(b,mux);
  // A token/old CID is not authority to mutate the replacement card epoch.
  if(b.result_epoch!=x9a_epoch){b.hold=true;return false;}
+ if(b.md_down&&b.owned&&!b.token&&!b.hold){
+  // No positive evidence the CID is still ours: release locally. At worst
+  // one usr1 ref byte stays; a later same-APN ACT reuses it and any 203 on
+  // that PDN zeroes the whole byte (913d839e), so nothing leaks for good.
+  if(b.pending&&x9q_u16(b.req+3)==0x21&&x9w_live(b)){x9q_packet r(b.req);r.send(CBQ_PORT_BASE+b.slot,X9BB_PORT_BASE+1);}
+  else x9w_error(b,X9Q_NOT_READY);
+  printf("X9 WDS: call %u mux %u already down at MD or unconfirmed; local release, no 203\n",b.cid,mux);
+  x9w_clear(b,mux);return true;
+ }
  if(!b.owned||b.token||b.hold||!x9_md_mipc_online())return false;
  x9w_frame f(0x203,1u<<b.sim_slot);f.byte(0x101,b.cid);f.byte(0x102,1); // normal, never FORCE_LOCAL
  if(!x9w_send(b,f,X9W_DEACT,60000))return false;
@@ -402,6 +416,9 @@ static void x9w_result(x9w_bearer &b,unsigned mux,const uint8_t *p,unsigned n){
   if(b.gone){x9w_clear(b,mux);return;}
   if(b.abandoned){x9w_deactivate(b,mux);return;}
   if(result||!x9w_get_settings(b,p,n)||!x9d_ready()){
+   // Keep 203 only if this reply proves the CID still maps to our route.
+   x9wr_get still={};
+   if(result||!x9wr_decode_get(p,n,b.query,still)||still.channel!=b.channel||still.trans_id!=b.trans_id)b.md_down=true;
    b.abandoned=true;x9w_disconnect(b,mux);x9w_error(b,X9Q_NOT_READY);x9w_deactivate(b,mux);return;
   }
   if(!b.active){
@@ -456,6 +473,7 @@ static bool x9w_interface_event(const uint8_t *p,unsigned n,unsigned sim){
  for(unsigned m=0;m<CBP_INTERFACES;m++){x9w_bearer &b=x9w_bearers[m];
   if(b.used&&b.owned&&b.sim_slot==sim&&b.trans_id==trans&&in.serial>b.if_floor&&
      (cmd!=0||!in.valid||(b.active&&(in.mtu!=b.mtu||memcmp(in.ip,b.ip,4))))){
+   if(cmd!=0)b.md_down=true; // MD ifdown precedes its logical CID removal
    b.abandoned=true;x9w_disconnect(b,m+1);x9w_error(b,X9Q_NOT_READY);
   }
  }return true;
