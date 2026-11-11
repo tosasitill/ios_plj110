@@ -1375,7 +1375,17 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **不能称为全部USB完成**:本轮暂无枚举/DMA/ue0 ping/bulk回环实机结果,live EMI/MPU允许普通XNU DMA页也未证明。`native_apple_stack=0`,没有冒充IOUSBDeviceController或AppleUSBDeviceMux;原始configd USBDeviceConfiguration/lockdownd、Finder/iTunes Trust/配对/照片同步仍缺20H392 controller adapter及kext构建接入。USB3 XS-PHY/retimer、charger Type-C role与原生xHCI也未完成。参考文章chip/board/security-domain/fsid/锁状态条件要到原生栈接通后才验证,不先改身份/配对状态制造成功。
 - **下一步/验收**:先在用户手动启动的单一候选核对`CAP_EPINFO/TXFIFO/RXFIFO/MISC`→config1/alt1→真实QMU OUT/IN→ue0 ping,再用iOS `usbctl --echo`+host单次echo证明host→iOS→host字节相同。保留EP0日志,无需重建Metal插件/mailbox。接口/回退/构建说明在`x9/usb/README.md`;不要求用户现在连续刷试探镜像。
 
-## 蜂窝当前交接(CELL152-RESULT,2026-11-11): 209(cell152)所有"开数据后"RIL消息与DPMAIF环大小已对齐，仍无下行；下一步抓Android开机阶段RIL MIPC序列
+## 蜂窝当前交接(CELL153-PKTROUTE,2026-11-11): Android开机MIPC抓取发现MD的包路由握手(PACKET_ROUTE)，我们从未参与；cell153补上，未上机
+
+- **Android开机采集**(用户重启进Android，开机20s即`logcat -b all -d`；`.local/x9/android-boot-20261111/`，不入git；注意合并去重不能按时间戳，会丢同毫秒行)：
+  - RIL(mtkfusionrild)开机MIPC：NW_GET_REGISTER_STATE、NW_GET_PROVIDER_NAME、SYS_AT(掩码)、NTN、DATA_SET_CONFIG、UNREGISTER_IND、LBS、**APN_ADD_PROFILE_LIST**(1320/1640/2600B，logcat截断无法照抄)、APN_SET_IA、DATA_ACT_CALL(SIM2 ims；SIM1 cbnet同前)、GET_CALL、URSP、NW_SET_RAT、SMS_CFG、THERMAL等。
+  - **subsys_daemon(`/odm/bin/hw/subsys_daemon -l libmtk-radio-service.so`，ttyCMIPC8)**：08.480 `getDataActPacketRoute`→**`DATA_ACT_PACKET_ROUTE_REQ 0x25f {0x100=3}`→CNF 0x260 {3}**；08.483 MD发**`DATA_IFUP_PACKET_ROUTE_IND 0x4220 {0x100 app_id 3,0x101 5,0x102 0x13,0x103 3}`**(RIL也收到：`vodc handleDchDataIfupPacketRouteInd, app_id:3`)→subsys_daemon两次**`DATA_IFUP_PACKET_ROUTE_REQ 0x261 {0x100=3}`**→CNF 0x262 {3}；之后09.655才发上网ACT。开关移动数据(datacycle)时不再出现→开机一次性配置。
+  - MD：`mipc_data_ifup/act_packet_route_req`把u8交给l5updn作为包路由(l5updn_data_*_packet_route_req_handle)；IND 0x4220由`mipc_data_ifup_packet_route_ind`发出，只发给注册过的客户端——我们只注册了4202/4302。
+- **修复 main `e0fe65b`**：握手每SIM注册4202/4302/**4220**(阶段数1+3×SIM)；MIPC桥把4220放入事件队列；会话就绪后主动向SIM1发ACT+IFUP_PACKET_ROUTE{3}(日志`packet route 3 requested`)；之后每个4220按app_id回应(日志`DATA_IFUP_PACKET_ROUTE_IND app ...`)；桥只放行24B的025f/0261。两对象单编True。
+- **候选 `x9/out/x9-cell153-pktroute-md/boot.img`**(worktree `0716728`)，三命令exit0，boot 13541376B，参数同131，插件276，**无需mailbox**。
+- **下一步**：用户boot cell153→`~/210.txt`(录满2分钟)。看握手是否到`confirmed for 2 SIM(s)`(新增4220注册)、`DATA_ACT/IFUP_PACKET_ROUTE CNF result`、是否收到4220、RX。
+
+## 蜂窝前次交接(CELL152-RESULT,2026-11-11): 209(cell152)所有"开数据后"RIL消息与DPMAIF环大小已对齐，仍无下行；下一步抓Android开机阶段RIL MIPC序列
 
 - **208.txt实为cell151**(DPMAIF行仍`BAT 1024/PIT 2048x2`，无RETRY_TIMER；文件时间早于cell152构建)：首呼PDP3成功，3个UL，iOS 6.5s后Stop(2000)，二次ACT被MD拒`result 1316613(0x141705)`；日志只到45s。
 - **209.txt(cell152确认)**：`BAT 16384 (2000 credited, 2048 buffers)/PIT 0x8000x2`、`CON1 0x414000`；`DATA_RETRY_TIMER/DATA_SET_CONFIG/GET_5GQOS/GET_URSP_ROUTE_PROFILE/GET_MD_DATA_CALL_LIST`全部CNF 0；ACT 808B→CNF 0、PDP3、v6挂接；仅3个UL(无v4 UL诊断行→推断为v6包)，iOS 5s后Stop(type3/2000，推断数据停滞)；二次ACT 9ms即被拒0x141705；RX 0，LRO PIT写指针0，BAT已信用0x800，legacy PIT由MD配置。日志到51s。
