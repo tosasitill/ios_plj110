@@ -196,6 +196,12 @@ static unsigned x9w_args(const uint8_t *p,unsigned n,unsigned family){
  }return 0;
 }
 static bool x9w_live(const x9w_bearer &b){return b.slot<CBQ_MAX_CLIENTS&&x9q_clients[b.slot].generation==b.generation;}
+// Requests can run before the next bearer poll observes a changed card pair.
+// A retained handle or accounting ledger never grants current-call success.
+static bool x9w_data_ready(const x9w_bearer &b){
+ return b.used&&b.active&&!b.abandoned&&!b.hold&&b.result_epoch==x9a_epoch&&
+  x9w_live(b)&&x9d_ready()&&x9_md_mipc_online();
+}
 static void x9w_integer(x9q_packet &p,unsigned tag,uint64_t value,unsigned bytes){
  uint8_t le[8];for(unsigned i=0;i<bytes;i++){le[i]=(uint8_t)value;value>>=8;}p.tlv((uint8_t)tag,le,bytes);
 }
@@ -447,7 +453,9 @@ static void x9w_poll(){
   }
   else if(x9q_u16(response+10)==0x4202&&x9w_byte(response,n,0x100,cid)){
    for(unsigned m=0;m<CBP_INTERFACES;m++){x9w_bearer &b=x9w_bearers[m];
-    if(b.used&&b.owned&&b.cid==cid&&(response[8]&(1u<<b.sim_slot))){
+    // Event delivery precedes the bearer epoch sweep below. A replacement
+    // card's same-CID event is not proof that this original call was released.
+    if(b.used&&b.owned&&b.result_epoch==x9a_epoch&&b.cid==cid&&(response[8]&(1u<<b.sim_slot))){
      x9w_host_expire(b,m+1,x9q_ms()); // bound unsolicited Stop completion too
      b.gone=true;b.owned=false;b.abandoned=true;x9w_disconnect(b,m+1);
      if(b.pending&&x9q_u16(b.req+3)==0x21&&x9w_live(b)){x9q_packet p(b.req);p.send(CBQ_PORT_BASE+b.slot,X9BB_PORT_BASE+1);}
@@ -526,7 +534,7 @@ static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
  }else if(id==0x24||id==0x86){
   x9q_view mask=x9q_tlv(req,n,1);unsigned bits=mask.p&&mask.n==4?x9q_u32(mask.p):0;
   if((id==0x24&&(!mask.p||mask.n!=4||n!=14||(bits&~0x3ffu)))||(id==0x86&&n!=7))error=X9Q_ARG;
-  else if(!own||!own->active||!x9d_ready()||!x9_md_mipc_online()){
+  else if(!own||!x9w_data_ready(*own)){
    x9q_packet p(req,15); // OUT_OF_CALL: only retained last-call totals are valid.
    if(c.last_call_bytes_valid){x9w_integer(p,0x1b,c.last_call.tx_bytes,8);x9w_integer(p,0x1c,c.last_call.rx_bytes,8);}
    p.send(local,port);return true;
@@ -539,7 +547,7 @@ static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
  }else if(id==0x44||id==0x37){
   unsigned rat=x9w_rat(c);
   if(n!=7)error=X9Q_ARG;
-  else if(!own||!own->active||!x9d_ready()||!x9_md_mipc_online())error=15;
+  else if(!own||!x9w_data_ready(*own))error=15;
   else if(!rat)error=X9Q_NOT_READY;
   else{
    x9q_packet p(req);
@@ -583,11 +591,11 @@ static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
   }
  }else if(id==0x22){
   if(n!=7)error=X9Q_ARG;
-  else{x9q_packet p(req);uint8_t status=own&&own->active&&x9d_ready()&&x9_md_mipc_online()?2:1;p.tlv(1,&status,1);p.send(local,port);return true;}
+  else{x9q_packet p(req);uint8_t status=own&&x9w_data_ready(*own)?2:1;p.tlv(1,&status,1);p.send(local,port);return true;}
  }else if(id==0x2d){
   x9q_view mask=x9q_tlv(req,n,0x10);
   if(!mask.p||mask.n!=4||n!=14)error=X9Q_ARG;
-  else if(!own||!own->active||!x9d_ready()||!x9_md_mipc_online())error=15;
+  else if(!own||!x9w_data_ready(*own))error=15;
   else{
    x9wr_identity current={own->generation,own->result_epoch,own->if_floor,own->sim_slot,own->cid,4,0};
    x9q_packet p(req);uint8_t type=0;p.tlv(0x11,&type,1);p.tlv(0x14,own->apn,(unsigned)strlen(own->apn));
