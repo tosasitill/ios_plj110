@@ -394,11 +394,28 @@ static void x9w_stats(bool start){
  *slot={token,x9q_ms()+30000,(uint8_t)(start?0x80:0x81),0,0};
  x9w_stats_next=x9q_ms()+10000;
 }
+// DATA_SET_CONFIG_REQ 0x0211: MOBILE_DATA100, DATA_ROAMING101, IMS_TEST_MODE103.
+// The Android RIL sends {1,1,0} before every DATA_ACT_CALL_REQ and {0,1,0}
+// when mobile data is turned off; we never sent it, so the MD kept mobile
+// data disabled while still activating PDNs.
+static void x9w_data_config(unsigned sim){
+ x9w_side *slot=nullptr;for(x9w_side &e:x9w_sides)if(!e.token){slot=&e;break;}
+ if(!slot||!x9_md_mipc_online()){printf("X9 WDS: DATA_SET_CONFIG not sent (no slot/MIPC)\n");return;}
+ x9w_frame f(0x211,1u<<sim);f.byte(0x100,1);f.byte(0x101,1);f.byte(0x103,0);
+ uint64_t token=f.submit();if(!token){printf("X9 WDS: DATA_SET_CONFIG submit failed\n");return;}
+ *slot={token,x9q_ms()+30000,0x90,(uint8_t)sim,0};
+ printf("X9 WDS: SIM%u DATA_SET_CONFIG mobile data on, roaming on, ims test off\n",sim+1);
+}
 static void x9w_side_poll(){
  if(x9w_stats_next&&x9q_ms()>=x9w_stats_next)x9w_stats(false);
  static uint8_t response[X9_MIPC_FRAME_MAX];
  for(x9w_side &e:x9w_sides){if(!e.token)continue;
   unsigned n=0;int ready=x9_md_mipc_take(e.token,response,sizeof(response),&n);
+  if(ready==1&&e.cmd==0x90){
+   unsigned result=~0u;bool good=x9w_wire(response,n)&&x9q_u16(response+10)==0x212&&x9w_word(response,n,0,result);
+   printf("X9 WDS: SIM%u DATA_SET_CONFIG CNF %s result %u\n",e.sim+1,good?"valid":"malformed",result);
+   bzero(response,sizeof(response));bzero(&e,sizeof(e));continue;
+  }
   if(ready==1&&e.cmd>=0x80){
    // SYS_CONNECTIVITY_STATISTICS_CNF 0x004c: MD-side air-interface totals.
    unsigned result=~0u,kb_tx=0,kb_rx=0;bool good=x9w_wire(response,n)&&x9q_u16(response+10)==0x4c&&x9w_word(response,n,0,result);
@@ -483,6 +500,7 @@ static void x9w_result(x9w_bearer &b,unsigned mux,const uint8_t *p,unsigned n){
    x9w_error(b,result==1?X9Q_BUSY:X9Q_NOT_READY);x9w_clear(b,mux);return;
   }
   if(!x9d_ready()||!x9_md_mipc_online()){x9w_error(b,X9Q_NOT_READY);x9w_clear(b,mux);return;}
+  x9w_data_config(b.sim_slot); // RIL order: DATA_SET_CONFIG(MOBILE_DATA on) before every ACT
   x9w_frame f(0x201,1u<<b.sim_slot);f.tlv(0x101,b.apn,(unsigned)strlen(b.apn)+1);
   f.word(0x102,1);f.byte(0x103,1);f.byte(0x104,1);f.byte(0x105,0);
   // Loaded RIL 2b8740/8750 sends strlen+1 credentials even for no-auth.
@@ -492,16 +510,12 @@ static void x9w_result(x9w_bearer &b,unsigned mux,const uint8_t *p,unsigned n){
   static const char no_credentials[]="";
   f.tlv(0x8106,no_credentials,sizeof(no_credentials));
   f.tlv(0x8107,no_credentials,sizeof(no_credentials));
-  f.byte(0x108,0);f.byte(0x10a,2);
-  // DATA_ACT_CALL_REQ IF_ID 0x110 (u8, 0..19): the host-assigned AP interface.
-  // Android RIL always supplies it (internet PDN on ccmni3, cid 303); the MD
-  // then returns "Host interface ID" in ACT CNF 0x125 and tags EIF with it.
-  // Without it the MD treats the PDN as modem-owned and 202.txt delivered
-  // no downlink at all. mux1 -> ccmni3 like Android, mux2 -> 4, ...
-  f.byte(0x110,(uint8_t)(2+mux));
+  // Android RIL capture (14:02:21 DATA_ACT_CALL_REQ): REUSE 0x10a = 0
+  // (DEFAULT), no IF_ID (the MD assigns the interface: 0x125 = 4).
+  f.byte(0x108,0);f.byte(0x10a,0);
   b.if_floor=x9w_if_serial;
   if(!x9w_send(b,f,X9W_ACT,120000)){x9w_error(b,X9Q_BUSY);x9w_clear(b,mux);}
-  else printf("X9 WDS: requesting IPv4 call mux %u, explicit no-auth, reuse flag 2 fallback 0, host IF_ID %u\n",mux,2+mux);return;
+  else printf("X9 WDS: requesting IPv4 call mux %u, explicit no-auth, reuse 0 (default) fallback 0, after MOBILE_DATA on\n",mux);return;
  }
  if(op==X9W_ACT){
   unsigned cid;

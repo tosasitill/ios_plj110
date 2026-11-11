@@ -119,6 +119,14 @@ uint64_t x9_md_mipc_submit(const uint8_t *p,uint32_t n){
   * tail) = AT+EIF=<id>,"ipupdate",1,"a.b.c.d". No IPv6/IPCHG/IPDEL. */
  /* SYS_CONNECTIVITY_STATISTICS_REQ 0x004b: read-only counters; exactly one
   * u8 TLV, START101 (reset+start) or READ_FLAG100, mask SIM1, 24 bytes. */
+ /* DATA_SET_CONFIG_REQ 0x0211, the exact RIL frame: MOBILE_DATA100 u8 0|1,
+  * DATA_ROAMING101 u8 0|1, IMS_TEST_MODE103 u8 0, in that order, 40 B. */
+ else if(id==0x211){
+  if((p[8]!=1&&(p[8]!=2||x9_md_sim_count()!=2))||n!=40||
+     x9mi_u16(p+16)!=0x100||x9mi_u16(p+18)!=1||p[20]>1||p[21]||p[22]||p[23]||
+     x9mi_u16(p+24)!=0x101||x9mi_u16(p+26)!=1||p[28]>1||p[29]||p[30]||p[31]||
+     x9mi_u16(p+32)!=0x103||x9mi_u16(p+34)!=1||p[36]||p[37]||p[38]||p[39])return 0;
+ }
  else if(id==0x4b){
   if(p[8]!=1||n!=24||(x9mi_u16(p+16)!=0x100&&x9mi_u16(p+16)!=0x101)||x9mi_u16(p+18)!=1||p[20]!=1||p[21]||p[22]||p[23])return 0;
  }
