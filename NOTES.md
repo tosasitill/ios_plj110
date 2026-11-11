@@ -1375,7 +1375,17 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **不能称为全部USB完成**:本轮暂无枚举/DMA/ue0 ping/bulk回环实机结果,live EMI/MPU允许普通XNU DMA页也未证明。`native_apple_stack=0`,没有冒充IOUSBDeviceController或AppleUSBDeviceMux;原始configd USBDeviceConfiguration/lockdownd、Finder/iTunes Trust/配对/照片同步仍缺20H392 controller adapter及kext构建接入。USB3 XS-PHY/retimer、charger Type-C role与原生xHCI也未完成。参考文章chip/board/security-domain/fsid/锁状态条件要到原生栈接通后才验证,不先改身份/配对状态制造成功。
 - **下一步/验收**:先在用户手动启动的单一候选核对`CAP_EPINFO/TXFIFO/RXFIFO/MISC`→config1/alt1→真实QMU OUT/IN→ue0 ping,再用iOS `usbctl --echo`+host单次echo证明host→iOS→host字节相同。保留EP0日志,无需重建Metal插件/mailbox。接口/回退/构建说明在`x9/usb/README.md`;不要求用户现在连续刷试探镜像。
 
-## 蜂窝当前交接(CELL151-NOEIF,2026-11-11): 207中ACT已与RIL同形(808B/PDP3/DNN/URSP)仍无下行；cell151去掉Android从不发送的EIF_REQ与统计请求，未上机
+## 蜂窝当前交接(CELL152-RILALL,2026-11-11): 用户要求一次对齐Android全部差异；cell152包含cell151全部改动+剩余RIL请求+DPMAIF环大小，未上机
+
+- **cell152 = cell151(无EIF_REQ/统计) + main `00053d8`**：
+  - ACT前顺序同RIL：`DATA_SET_CONFIG{1,1,0}` → **`DATA_RETRY_TIMER_REQ{mode 1, apn}`(0x21b)** → ACT(808B RIL同形)。
+  - ACT CNF后同RIL查询：**`DATA_GET_5GQOS{cid}`(0x22d)、`DATA_GET_URSP_ROUTE_PROFILE{u32 cid}`(0x233)、`DATA_GET_MD_DATA_CALL_LIST{}`(0x20f)**(GET_CALL 205已有)；回复只记日志。MIPC桥只放行这四种精确帧。
+  - DPMAIF DL环同Android：**BAT 16384项**(CON1 0x00414000)、初始信用2000(Android约2000)、**LRO PIT 0x8000**；缓冲每类2048，槽位=bid%2048，仅当上一圈同槽bid已释放才投放新bid(无在途共用)。
+- **刻意未对齐(原因)**：IMS PDN(需要iOS侧IMS栈，VoLTE非数据前提)；RIL的SYS_AT_REQ(日志中内容被掩码，无法得知)；ccmni ACK→TXQ1优先级(仅QoS，MD已在消费TXQ0)。EIF_REQ/统计默认关(Android不发；`x9_eif_req=1`可开)。
+- 两对象单编True(无新增警告)；三命令exit0；`x9/out/x9-cell152-rilall-md/boot.img` 13537280B，worktree `53a81e3`；参数同131，插件276，**无需mailbox**。
+- **下一步**：用户boot cell152→`~/208.txt`(或下一个编号)。看DPMAIF初始化(新环大小回读是否通过、无quarantine)、`DATA_RETRY_TIMER/GET_* CNF result`、IFCHANGE相对IFUP的时间、RX。
+
+## 蜂窝前次交接(CELL151-NOEIF,2026-11-11): 207中ACT已与RIL同形(808B/PDP3/DNN/URSP)仍无下行；cell151去掉Android从不发送的EIF_REQ与统计请求，未上机
 
 - **207.txt**(cell150)：`ACT URSP traffic descriptor dnn (length 5)`、`frame 808 B`(与RIL同长)、CNF 0、`PDP3 v6-ready 1`、v6客户端挂接(MD地址link-local)，UL完成、RX 0；MD的IFCHANGE(带RA学到的v6全局地址)在IFUP后约14s才到。
 - **新对照**：Android datacycle.log中**没有任何INTERNAL_EIF_REQ(0x313)**；NetAgentService在mtkfusionrild内，只消费EIF IND(`invokeCallback interfaceId=4 reason=1/2`、`updateGlobalIpv6Address`)；Android IFUP→IFCHANGE仅37ms。我们cell138起的ifst up/down、cell147的ipupdate、cell148的统计请求都是原厂栈不会发的额外MIPC。
