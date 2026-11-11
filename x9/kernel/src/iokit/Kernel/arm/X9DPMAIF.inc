@@ -79,7 +79,7 @@ struct x9d_state {
     uint32_t last_ul, last_dl; bool legacy_pit_reported;
     uint64_t tx_packets, tx_done, rx_packets, rx_dropped, rejected, flow_events,next_lifetime;
     // TX progress watch (vendor drv3_dump_register subset on a stall).
-    uint64_t tx_progress_ms, tx_seen_done, stale_completions, bind_ms; unsigned stall_dumps, rx_dumps, tx_diag; bool stall_reported, at_seen;
+    uint64_t tx_progress_ms, tx_seen_done, stale_completions, bind_ms; unsigned stall_dumps, rx_dumps, tx_diag, tx_diag6; bool stall_reported, at_seen;
     int (*receiver)(uint32_t, const uint8_t *, uint32_t, uint32_t, uint64_t);
 };
 static x9d_state x9d;
@@ -203,6 +203,36 @@ static bool x9d_ip(const uint8_t *p, unsigned n) {
     if (p[0] >> 4 == 4) return (p[0] & 15) >= 5 && (p[0] & 15) * 4u <= n && ((unsigned)p[2] << 8 | p[3]) == n;
     return p[0] >> 4 == 6 && n >= 40 && ((unsigned)p[4] << 8 | p[5]) + 40 == n;
 }
+static unsigned x9d_sum(const uint8_t *p, unsigned n) {
+    unsigned sum = 0;
+    for (; n >= 2; p += 2, n -= 2) sum += (unsigned)p[0] << 8 | p[1];
+    if (n) sum += (unsigned)p[0] << 8;
+    return sum;
+}
+static const char *x9d_l4_sanity(const uint8_t *ip, unsigned n) {
+    // Read-only, bounded diagnostics at the actual DMA submission boundary.
+    // No checksum repair/offload, and no claim that MD or the network got it.
+    if (!x9d_ip(ip, n)) return "bad-ip";
+    bool v4 = (ip[0] >> 4) == 4;
+    unsigned hdr = v4 ? (ip[0] & 15) * 4u : 40u, proto = ip[v4 ? 9 : 6];
+    if (v4 && (((unsigned)ip[6] << 8 | ip[7]) & 0x3fff)) return "fragment-unchecked";
+    // IPv6 extension headers need their own walk; do not call them bad.
+    if (proto != 6 && proto != 17 && !(v4 && proto == 1) && !(!v4 && proto == 58)) return "unchecked";
+    const uint8_t *p = ip + hdr; unsigned len = n - hdr;
+    if (proto == 17) {
+        if (len < 8) return "bad-length";
+        unsigned udp = (unsigned)p[4] << 8 | p[5];
+        if (udp < 8 || udp > len) return "bad-length";
+        if (!p[6] && !p[7]) return v4 ? "v4-udp-disabled" : "BAD-zero-v6";
+        len = udp;
+    } else if (proto == 6) {
+        if (len < 20 || (p[12] >> 4) < 5 || (p[12] >> 4) * 4u > len) return "bad-length";
+    } else if (len < 4) return "bad-length";
+    unsigned sum = x9d_sum(p, len);
+    if (!(v4 && proto == 1)) sum += x9d_sum(ip + (v4 ? 12 : 8), v4 ? 8 : 32) + proto + len;
+    while (sum >> 16) sum = (sum & 65535u) + (sum >> 16);
+    return sum == 65535u ? "ok" : "BAD";
+}
 static void x9d_bat_entry(unsigned kind, unsigned bid) {
     uint64_t pa = x9d.pool[kind].pa + (bid % X9D_POOL) * (kind ? X9D_FRG_SIZE : X9D_PKT_SIZE);
     uint32_t *d = reinterpret_cast<uint32_t *>(x9d.bat[kind].va + bid * 8);
@@ -277,6 +307,19 @@ static bool x9d_hw_init() {
     if (!x9d_expect(x9d.sram1, 0x04, 65535, 0) ||
         !x9d_expect(dls, 0x04, ~0u, 3080)) return false;
     x9d_phase("PIT-init");
+    // drv3_dl_set_ao_lro_pit_chknum reads the AO configuration view, then
+    // writes DL SRAM. Reading back the SRAM-clear template instead retained
+    // 0x100000ff in 212 (1ff0ffff vs Android's 0ff0ff00). Both fresh rings
+    // use CHK_NUM=ff; take the non-CHK bits from AO, NOT the SRAM template.
+    // This runs only before INIT_DONE/MD HS1, never on a live RX ring.
+    const uint32_t seq_mask = (255u << 8) | (255u << 20);
+    const uint32_t seq_ao = x9d_rd(x9d.ao + 0x400, 0x40);
+    const uint32_t seq_before = x9d_rd(dls, 0x40);
+    const uint32_t seq_config = (seq_ao & ~seq_mask) | seq_mask;
+    x9d_wr(dls, 0x40, seq_config);
+    if (!x9d_expect(dls, 0x40, ~0u, seq_config)) return false;
+    printf("X9 DPMAIF: fresh PIT sequence AO 0x%x SRAM-before 0x%x configured 0x%x (not RX proof)\n",
+        seq_ao, seq_before, seq_config);
     for (unsigned q = 0; q < 2; q++) {
         x9d_wr(lro, 0x14, (uint32_t)x9d.pit[q].pa);
         // drv3_dl_set_lro_pit_base_addr uses CON1[31:24], including on 6993.
@@ -284,8 +327,6 @@ static bool x9d_hw_init() {
         x9d_wr(lro, 0x1c, 0); // reset INIT_CON2; do not inherit queue state
         x9d_wr(lro, 0x20, 1u << 20);
         x9d_wr(lro, 0x24, 0); // Not the high address register for the LRO PIT path.
-        uint32_t seq = x9d_rd(dls, 0x40), shift = q ? 20 : 8;
-        x9d_wr(dls, 0x40, (seq & ~(255u << shift)) | (255u << shift));
         if (!x9d_expect(lro, 0x14, ~0u, (uint32_t)x9d.pit[q].pa) ||
             !x9d_expect(lro, 0x18, 0xff03ffff, X9D_PIT | (uint32_t)(x9d.pit[q].pa >> 32) << 24) ||
             !x9d_expect(lro, 0x20, 1u << 20, 1u << 20)) return false;
@@ -420,7 +461,7 @@ static bool x9d_bind(unsigned mux, unsigned channel, unsigned families, unsigned
     r.epoch++; r.lifetime = ++x9d.next_lifetime; r.channel = (uint8_t)channel; r.families = (uint8_t)families; r.mtu = mtu; r.bound = true;
     bzero(&r.stats, sizeof(r.stats));
     x9d.rx_account[channel].lifetime = r.lifetime; // unused channel only; no RX ledger reset
-    x9d.used_channel[channel] = true; x9d.bind_ms = x9d_ms(); x9d.rx_dumps = 0; x9d.tx_diag = 0;
+    x9d.used_channel[channel] = true; x9d.bind_ms = x9d_ms(); x9d.rx_dumps = 0; x9d.tx_diag = x9d.tx_diag6 = 0;
     lifetime = r.lifetime; IOLockUnlock(x9d.lock); return true;
 }
 static void x9d_unbind(unsigned mux) {
@@ -563,9 +604,15 @@ static bool x9d_tx_poll() {
             for (unsigned i = 0; i < ihl && i + 1 < t.size; i += 2) sum += (unsigned)h[i] << 8 | h[i + 1];
             while (sum >> 16) sum = (sum & 0xffff) + (sum >> 16);
             unsigned port = (h[9] == 6 || h[9] == 17) && t.size >= ihl + 4 ? ((unsigned)h[ihl + 2] << 8 | h[ihl + 3]) : 0;
-            printf("X9 DPMAIF: UL[%u] ch %u v4 proto %u len %u ttl %u hdrsum %s %u.%u.%u.%u -> %u.%u.%u.%u port %u\n",
+            printf("X9 DPMAIF: UL[%u] ch %u v4 proto %u len %u ttl %u hdrsum %s l4sum %s %u.%u.%u.%u -> %u.%u.%u.%u port %u\n",
                 x9d.tx_diag, channel, h[9], t.size, h[8], sum == 0xffff ? "ok" : "BAD",
+                x9d_l4_sanity(h, t.size),
                 h[12], h[13], h[14], h[15], h[16], h[17], h[18], h[19], port);
+        }
+        if (x9d.tx_diag6 < 3 && t.size >= 40 && (t.ip[0] >> 4) == 6) {
+            x9d.tx_diag6++;
+            printf("X9 DPMAIF: UL6[%u] ch %u next-header %u len %u hop-limit %u l4sum %s\n",
+                x9d.tx_diag6, channel, t.ip[6], t.size, t.ip[7], x9d_l4_sanity(t.ip, t.size));
         }
         uint64_t pa = x9d.txpool.pa + pool;
         uint32_t *d = reinterpret_cast<uint32_t *>(x9d.drb.va + index * 8);

@@ -742,7 +742,7 @@ static bool x9w_interface_event(const uint8_t *p,unsigned n,unsigned sim){
  // event whose hundreds match an owned call but whose interface differs.
  bool remapped=false;
  for(const x9w_bearer &b:x9w_bearers)
-  if(b.used&&b.owned&&b.sim_slot==sim&&b.trans_id&&b.trans_id!=trans&&b.trans_id/100==trans/100){
+  if(b.used&&b.owned&&b.result_epoch==x9a_epoch&&b.sim_slot==sim&&b.trans_id&&b.trans_id!=trans&&b.trans_id/100==trans/100){
    printf("X9 WDS: EIF modem interface %u mapped to host interface %u (call %u)\n",trans%100,b.trans_id%100,b.cid);
    trans=b.trans_id;remapped=true;break;
   }
@@ -769,9 +769,20 @@ static bool x9w_interface_event(const uint8_t *p,unsigned n,unsigned sim){
  }else in.valid=true;
  printf("X9 WDS: MD SIM%u EIF/IFST ccmni%u command %u (payload private)\n",sim+1,trans%100,cmd);
  for(unsigned m=0;m<CBP_INTERFACES;m++){x9w_bearer &b=x9w_bearers[m];
-  if(b.used&&b.owned&&b.sim_slot==sim&&b.trans_id==trans&&in.serial>b.if_floor&&
+  if(b.used&&b.owned&&b.result_epoch==x9a_epoch&&b.sim_slot==sim&&b.trans_id==trans&&in.serial>b.if_floor&&
      (cmd!=0||!in.valid||(b.active&&memcmp(in.ip,b.ip,4)))){
    if(cmd!=0){b.md_down=true;if(x9w_netagent_req)x9w_ifst(sim,trans,1,0);} // MD ifdown precedes its logical CID removal
+   x9w_host_expire(b,m+1,x9q_ms());
+   // 212: expected IFDOWN arrived just before our 204/result0 and incorrectly
+   // consumed the pending Stop with error16. Revoke data admission now, but
+   // leave the original 203 token and host deadline intact. IFDOWN is NOT a
+   // successful DEACT CNF; a timeout/bad CNF must still fail the Stop.
+   if(cmd==1&&b.op==X9W_DEACT&&b.token&&!b.hold&&b.pending&&
+      x9q_u16(b.req+3)==0x21&&x9w_live(b)){
+    x9w_disconnect(b,m+1);
+    printf("X9 WDS: expected IFDOWN during Stop mux %u; await original DEACT CNF, deadline unchanged\n",m+1);
+    continue;
+   }
    b.abandoned=true;x9w_disconnect(b,m+1);x9w_error(b,X9Q_NOT_READY);
   }
  }return true;
