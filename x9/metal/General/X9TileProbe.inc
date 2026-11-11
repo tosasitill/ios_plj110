@@ -1,16 +1,20 @@
 // SPDX-License-Identifier: MIT
 // x9tile=1: app open/close seam diagnostic, included by NativeBridgeMetalFrontend.mm.
 //
-// USER photo (2026-11-08): opening/closing an app shows 4 vertical see-through
-// mosaic seams exactly 256 px apart, from the zooming layer's left edge.
-// 20H392 QuartzCore: CA::Render::Image::get_tiled_texture_size cuts images
-// wider than 255 px into 256-px tiles, and TiledImageGeometry binds each tile
-// with TextureEdgeMode 0 = MTLSamplerAddressModeClampToEdge (MetalContext::draw).
-// ClampToEdge between abutting tiles cannot show the background on a correct
-// GPU, so either the tiles' edge texels are bad (upload) or the quads leave a
-// gap. This logs, for textures 250..270 px wide only, how they are created and
-// every CPU/blit upload into them (region, pitch, result), plus each distinct
-// sampler state. Read-only: every call keeps its original behaviour.
+// Historical photo estimate (2026-11-08): four see-through seams roughly
+// 256 screen pixels apart during app transitions. This is not a measured
+// texture-space pitch or proof of a 1024-byte memory/cache boundary.
+// 20H392 QuartzCore's get_tiled_texture_size starts wide, tall images at
+// 256x256 (then adjusts for short images); TiledImageGeometry binds them
+// with TextureEdgeMode 0 = ClampToEdge. Neither proves this scene took that
+// path. ClampToEdge does not repair transparent edge texels or missing quads.
+// This logs creation and explicit CPU/blit uploads for textures whose width
+// OR height is 250..270, plus distinct samplers. It does NOT observe render/
+// compute writes, texture-view creation, draw bindings or geometry; there is
+// a shared 600-line process budget and no scene trigger or exhaustion marker.
+// Thus absence of uploads is not evidence excluding GPU-generated tiles,
+// atlas subrects or draws after the logging budget was spent.
+// Read-only: every call keeps its original behaviour.
 #include <stdarg.h>
 #include <fcntl.h>
 #include <unistd.h>

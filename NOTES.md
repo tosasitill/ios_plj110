@@ -243,8 +243,8 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
    TF-A `MTK_SIP_VCOREFS_CONTROL=0xC2000506`,INIT=0锁高OPP;现有`x9_dvfsrc=1`已运行成功,START=1(`x9_dvfsrc=2`)自由运行尚无本轮验收。UFS G5需独立持久VCORE floor,不把偶然current gear5当电压所有权;见UFS-G5交接。
 2. **CSG 槽耗尽**:前 8 个 GPU 进程各占一个硬件 CSG 槽(group 创建时绑定,关设备才放);第 9 个客户端(AegirPoster)`X9RenderCreateGroup` 返回 0xe00002be,43 次失败。
    可选实现现已入库(`x9cs=1`,默认关):复用最久未用的挂起 group 槽位,保存/恢复其 suspend buffer,不经 TERMINATE 丢失 PanVK 初始化 CS 状态。入库不等于当前实机验证,仍需带明确开关的对应日志确认。
-3. **开/关 app 动画出现 4 条竖向透明马赛克线**(间距 256 px,**一直都有**,非新回归)。已证伪:CA 256 宽 tile 上传缺失(TILEPROBE 无 256 宽 CPU 上传)、swipe 旧马赛克(InPlaceWrites 未启用)。
-   现线索:缝位置 ≈ 层原点 + 256·k,即每行 **1024 B 边界**,指向某个渲染目标/IOSurface 每 1 KiB 处像素坏(缓存/内存类),不是绘制拆分。需要一份含开关 app 时刻的完整日志;x9vf 帧抓取只按固定 uptime 触发(参数上限 607 B),需改成按 transition 触发。
+3. **开/关 app 动画出现 4 条竖向透明马赛克线**(**一直都有**,非新回归)。旧照片估计屏幕空间间距约256px，但未与同帧纹理坐标/缩放对齐，**不能直接断言每行1024B损坏或排除绘制拆分**。TILEPROBE只覆盖部分尺寸的创建/CPU/blit上传，不覆盖GPU生成、view、draw；旧“CA分块已证伪”结论收回。InPlaceWrites未启用仍有运行证据。
+   现有大图回读仅32×32采样，无法定位窄缝；需同一次transition的原分辨率像素行/条带、source/output和几何对齐。x9vf只有固定uptime三窗口，不是transition触发；详见GPU-SEAM-AUDIT活动交接。
 4. **Wi-Fi**:WPA2 阶段 2(4-way、INSTALL_KEY_V3、受保护收发)**rev252cm6 已构建、从未上机**;captive portal 弹窗不出现(探测 `captive.apple.com` 从未发出,疑 configd/CNS 的 SC 状态缺失);
    RUC-Mobile(802.1X)EAP 投递 ioctl 待映射;DBDC 重加入偶有无响应。
 5. 硬件 vsync/帧节奏、背光控制(无 `backlight-control` 服务)、modem/WirelessRadioMan 噪声、部分 daemon 反复崩(locationd/speech、mediaserverd/AegirPoster、syncdefaultsd、CommCenter)、
@@ -277,7 +277,16 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
 
-## GPU活动交接（GPU277，2026-11-11）：可移植上游缓存修复＋索引补齐；277完整候选已构建，待用户上机
+## 竖缝活动交接（GPU-SEAM-AUDIT，2026-11-11）：纠正256px→1KiB归因，仍缺同帧原分辨率证据；未改运行路径
+
+- **本轮范围/运行基线**：用户要求先继续找竖缝来源。本轮只读最新`~/211.txt`：4.534s active **X9GeneralMetal276**，backboardd/SpringBoard均`InPlace`；35.719s旧snapshot `last=6->12`。原件/窄过滤在`.local/x9/work/gpu-seams-20261111/{211-original.txt,211-gpu-focused.txt,counts.json}`。211有146条WSI pitch拒绝，但**TILEPROBE、FRAME CB、PIXEL DATA均0**，没有能与竖缝照片对应的捕获；277仍无此次运行验收，不能据211否定/确认277。
+- **撤回过度推断**：`git show 636edc2:NOTES.md`保存的原线索是103日志结束后拍摄的`/tmp/IMG_1729.HEIC`，估计缝x≈329/585/841/1097、层左缘≈77；原照片本机该路径已不存在。本轮没有重新量图，不能将旧估计“exact256”升级为原像素测量。缩放中的screen-x不是source-x；缺当帧变换、format、offset/pitch和坏像素坐标时，256屏幕像素≠已证实1KiB内存边界。旧TILEPROBE没有CPU上传只限制它实际覆盖的范围，不能推出“不是绘制拆分/全部CA tiled-image已证伪”。
+- **探针盲区已按实现核对**：`X9TileProbe.inc`筛width或height250..270，只有创建/replaceRegion/显式blit/sampler、每进程共600行；没有render/compute写、view创建、draw绑定、scene触发或预算耗尽标记。已有`analysis-blur212/pixels-latest/manifest.json`共26张，其中11张大图只32×32网格（其余15张小图是原尺寸）；1256×2760 source/output也只是网格，不能当无竖缝证据。`X9RenderPixelCapture.inc`的全图FNV不包含可还原的像素。`X9FrameCapture.inc`当前实际60/80/100s三触发各3CB，不是文档旧写的四触发；已纠正文档及当前603B参数不能直接追加x9vf的限制。
+- **窄链源码结果，不是硬件排除**：211开机present的surface3/4明确1242×2760、BGRA、row5120、offset0；`SweetFramebuffer.cpp`→`X9DisplayBackend.inc::row/scaled`按完整行/逐像素处理，没有256列丢弃分支。raw-shadow为64线程一组、`div_ceil(width,64)`＋逐texel bounds，地址为base+offset+y·row+x·texel；未见每四组漏列的算术。PanVK线性pitch不合时返回创建拒绝，runtime可退回shadow，不是“部分列导入”；146条错误本身不证明像素丢失。cache spans按256**字节**资格、CTR cache-line和64KiB有界run维护，未找到“每1024B漏维护”循环。277整surface seed资格缺口是已修源码问题，但仍未与竖缝关联。
+- **QuartzCore/tiling复核**：从本地20H392提取的QuartzCore仅做地址范围静态反汇编，`quartz-{tile-size,should-tile,draw-tiles,tile-downsample}.asm`与symbols保留私有。`Image::get_tiled_texture_size` **0x1884aed14** 对宽≥256且高≥256初选256×256，短图还会宽翻倍/高减半；不能简化成所有宽图固定256列。`should_tile_image` **0x188339e58**检最大边/特定type行距，不能仅因函数存在断言该场景进入；`draw_tiles` **0x18851b234**能走lanczos再bind，**0x18851b820**传edge mode0。另核本地Mesa：U-interleaved是16×16像素（BGRA整块1024B，不是横向256px）；INTERLEAVED_64K的R8/R16宽256、RGBA8宽128；FBD的1024B是tile分配对齐。没有对应出错纹理的实际modifier/format，均不能据数字相同归因。
+- **下一决定性证据/重放**：先取得同一次开/关App的原图或短视频＋对应编号完整日志，至少两帧不同缩放，确认缝随层/纹理还是屏幕移动；捕获需保留原分辨率横向像素（含alpha）及producer/consumer/最终present的同帧ID，不用32×32或startup纹理日志代替。若source已有坏列再查shadow/layout/cache；source正常、draw output漏覆盖再查几何/采样/补齐；GPU output正常才查CPU present/scanout。只读派生可重放`python3 .local/x9/work/gpu-seams-20261111/extract-evidence.py`；反汇编命令见同目录`commands.txt`。本轮仅修注释/文档，**没有运行代码修复、编译/新镜像/测试套件/CI/设备/mailbox/root操作，也未宣称根因已定位**；未夹带其它窗口蜂窝修改。
+
+## GPU候选交接（GPU277，2026-11-11）：可移植上游缓存修复＋索引补齐；277完整候选已构建，待用户上机
 
 - **运行基线纠正**：只读 `~/210.txt`，3.110s verified allowlist实际active **276**，30.234s旧`padded=1 last=6->12`已命中；用户仍报告三角形/渲染错误。因此GPU-PAD-1“276从未上机”已过期，不以failed0或补齐计数代替像素验收。未取得与三角形对应的新截图/帧回读。
 - **固定范围/引用**：从main **695cdae**独立`work/gpu-upstream277` / `.local/x9/worktrees/gpu-upstream277`，不夹带其它窗口蜂窝未提交改动。三个仓库新clone固定AdrenoMetal **20be9f966a0b947238f80dec22a91bf6c9dfc0a0**、UniXNU-sheng **c73f9c0**、Adreno740 **a7c83cf**，原件与210窄GPU日志在`.local/x9/work/gpu-upstream-20261111/`。保留963f译码器基线与已有安全InPlace，不移植Turnip GMEM/CP/4KiB/DRAM pool/macOS无flush。X9 private/WC已避开冗余维护，不能把A740 synchronized BO规则套到cached IOSurface。

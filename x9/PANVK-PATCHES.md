@@ -128,7 +128,7 @@ topology/index-size/restart/instancing kinds (`X9 PANVK IDX KIND`) and totals
 every 65536 indexed draws. No state change.
 
 `x9vf` (exact boot-arg token, frontend) captures whole backboardd command
-buffers: at uptime 60/80/100/120 s (or `x9_metal_geometry_start=` + k*20 s) the
+buffers: at uptime 60/80/100 s (or `x9_metal_geometry_start=` + k*20 s, k=0..2) the
 next three command buffers, at most 160 draws each. Per draw: shaders, blend
 and write masks, pass attachments, viewport/scissor, raster, index buffer
 identity/offset/length, effective vertex ids (up to 96), decoded attribute 0/1
@@ -138,8 +138,21 @@ each draw fetches are snapshotted at encode and copied again by a GPU blit
 appended at commit; after completion `X9 FRAME GPU CHECK` reports differing
 bytes (GPU copy vs encode snapshot) and CPU bytes changed since encode, with up
 to 24 `X9 FRAME GPU DIFF` rows. The blit is extra work after the original
-passes; original draws/state are unchanged. Use the normal boot.json plus
-`--boot-arg x9vf` (fills the 607-byte bound, so no x9h* token together).
+passes; original draws/state are unchanged. These are uptime windows, not app
+transition triggers. The current GPU277 full input is 603 bytes: appending a
+space and `x9vf` would be 608, past the 607-byte bound. Preserve the complete
+hardware/root arguments and plan equivalent compaction before a capture build;
+the old 602-byte examples are not the current input.
+
+`x9tile=1` only observes texture creation and explicit CPU/blit uploads for a
+width **or height** of 250..270, plus samplers (600 lines per process). It does
+not observe render/compute writes, views or draw geometry; no upload record
+does not exclude GPU-generated tiles or atlas subrects. `X9RenderPixelCapture`
+preserves small images up to 128x128, but emits only a 32x32 grid for larger
+ones. Its full-image hash is not a full-image pixel dump: neither the grid nor
+the hash can locate a narrow seam. A transition capture needs native-resolution
+rows/strips and matching source/output/geometry identities before attributing
+screen-space spacing to a texture layout or cache boundary.
 
 `06-panvk-widen-index-range.patch` (common panvk_vX_cmd_draw.c): when an index
 buffer is bound with an explicit size (metal2vulkan's maintenance5 path binds
