@@ -948,6 +948,25 @@ static void x9w_lease_poll(){
   else x9w_lease_try(slot);
  }
 }
+// cell160 diagnostic only: every EIF(4302)/DATA_MOD(4203) indication with its
+// arrival time and TLV shape. Android shows EIF5 with tag106=1 + 4203 about
+// 36 ms after ACT (the MD has the network RA); 214 never showed that form.
+// Values stay private except the first 8 bytes of the v6 item (MTU word and
+// the top of the address: tells link-local from a global prefix).
+static void x9w_diag(const uint8_t *p,unsigned n){
+ static unsigned shown;if(shown>=200||n<16)return;shown++;
+ unsigned id=x9q_u16(p+10),trans=0,cmd=0xff,c4=0xff,c6=0xff;char tl[200];unsigned o=0;tl[0]=0;
+ x9w_word(p,n,id==0x4302?0x100:0x126,trans);
+ if(id==0x4302){x9w_byte(p,n,0x101,cmd);x9w_byte(p,n,0x104,c4);x9w_byte(p,n,0x106,c6);}
+ else{x9w_byte(p,n,0x100,cmd);x9w_byte(p,n,0x103,c4);x9w_byte(p,n,0x108,c6);}
+ for(unsigned i=16;i+4<=n&&o+12<sizeof(tl);){unsigned t=x9q_u16(p+i),l=x9q_u16(p+i+2);
+  o+=(unsigned)snprintf(tl+o,sizeof(tl)-o," %x/%u",t,l);i+=4+((l+3)&~3u);}
+ x9q_view v6=x9w_tlv(p,n,id==0x4302?0x8107:0x8109);
+ printf("X9 WDS DIAG: +%llu ms IND %04x simmask %u bytes %u %s %u trans %u v4count %u v6count %u v6head %02x%02x%02x%02x %02x%02x%02x%02x tlvs%s\n",
+  (unsigned long long)x9q_ms(),id,p[8],n,id==0x4302?"cmd":"cid",cmd,trans,c4,c6,
+  v6.p&&v6.n>=8?v6.p[0]:0,v6.p&&v6.n>=8?v6.p[1]:0,v6.p&&v6.n>=8?v6.p[2]:0,v6.p&&v6.n>=8?v6.p[3]:0,
+  v6.p&&v6.n>=8?v6.p[4]:0,v6.p&&v6.n>=8?v6.p[5]:0,v6.p&&v6.n>=8?v6.p[6]:0,v6.p&&v6.n>=8?v6.p[7]:0,tl);
+}
 static void x9w_poll(){
  x9w_retire_poll();
  static uint8_t response[X9_MIPC_FRAME_MAX];unsigned n=0;
@@ -956,6 +975,7 @@ static void x9w_poll(){
  for(unsigned i=0;i<8;i++){
   int event=x9_md_mipc_event(response,sizeof(response),&n);if(event<=0)break;unsigned cid;
   if(!x9w_wire(response,n)){x9w_bad_event();}
+  else if(x9w_diag(response,n),false){}
   else if(x9q_u16(response+10)==0x4302){
    for(unsigned sim=0;sim<x9_md_sim_count();sim++)if(response[8]&(1u<<sim))
     if(!x9w_interface_event(response,n,sim))x9w_bad_event();

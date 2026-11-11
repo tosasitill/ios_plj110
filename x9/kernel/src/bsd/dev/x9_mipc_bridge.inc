@@ -304,6 +304,11 @@ static void x9mi_rx(const uint8_t *p,unsigned n){
    if(i==X9_MI_SLOTS)printf("X9 MIPC: CNF id 0x%04x txn %u has no owner, dropped\n",id,tx);
   }else if(kind==1){
    x9mm_rx(x9_mi_stream,need,id,tx);
+   if(id==0x4409||id==0x4419){ // cell160 diagnostic: RRC connection / physical channel indications, if the MD sends them
+    static unsigned shown;if(shown<80){shown++;const uint8_t *q=x9_mi_stream;unsigned m=need<40?need:40;char h[90];unsigned o=0;h[0]=0;
+     for(unsigned j=16;j<m;j++)o+=(unsigned)snprintf(h+o,sizeof(h)-o,"%02x",q[j]);
+     printf("X9 MIPC DIAG: IND %04x simmask %u bytes %u payload %s\n",id,q[8],need,h);}
+   }
    if((id==0x4202||id==0x4203||id==0x4302||id==0x4220)&&(x9_mi_stream[8]&((1u<<x9_md_sim_count())-1))){
     if(x9_mi_count==X9_MI_EVENTS){x9mi_poison("event queue overflow");break;}
     unsigned at=(x9_mi_head+x9_mi_count++)%X9_MI_EVENTS;
