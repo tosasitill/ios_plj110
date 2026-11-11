@@ -32,7 +32,10 @@ unsigned x9_md_sim_count(void){return sweet_x9_arg("x9_dual_sim",0)==1?2:1;}
 static int x9mi_at_read(const char *cmd){
  static const char *const reads[]={"AT+CPIN?","AT+CREG?","AT+CEREG?","AT+C5GREG?",
   "AT+CGATT?","AT+COPS?","AT+CSQ","AT+ECSQ","AT+CIMI","AT+CGSN",
-  "AT+CGMI","AT+CGMM","AT+CGMR","AT+CFUN?"};
+  "AT+CGMI","AT+CGMM","AT+CGMR","AT+CFUN?",
+  /* CELL225 user-plane probe: 27.007 read/execute forms only, list all CIDs. */
+  "AT+CGACT?","AT+CGDCONT?","AT+CGPADDR","AT+CGCONTRDP","AT+C5GQOSRDP",
+  "AT+CGEQOSRDP","AT+CGTFTRDP","AT+CSCON?"};
  for(unsigned i=0;i<sizeof(reads)/sizeof(reads[0]);i++)if(!strcmp(cmd,reads[i]))return 1;
  /* CRSM 176 READ BINARY, 178 READ RECORD, 192 GET RESPONSE. Only printable
   * decimal/hex/path punctuation, one command, no data field or AT chaining. */

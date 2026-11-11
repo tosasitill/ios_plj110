@@ -51,7 +51,7 @@ static void x9ds_apps(bool ready);
 static void x9ds_cards(const uint8_t *first,const uint8_t *second,bool ready);
 static bool x9ds_data_ready(unsigned slot);
 struct x9q_job {
- bool used,background,probe,mipc;uint32_t local,port,len;uint64_t generation,order,deadline,token,token_deadline;
+ bool used,background,probe,mipc,ctx;uint32_t local,port,len;uint64_t generation,order,deadline,token,token_deadline;
  uint8_t req[X9Q_REQ];uint16_t id;unsigned stage;
  char command[X9_AT_COMMAND_MAX];
  int sim; /* 0 unknown, 1 ready, 2 PIN, 3 PUK */
@@ -446,7 +446,39 @@ static void x9q_siginfo(x9q_job &j,const char *r){
  }
  x9q_finish(j,p,0x51);
 }
+/* CELL225: after ACT the MD has addresses but no user plane in either
+ * direction. Read the MD's own PDP/PDU session, QoS flow and TFT state with
+ * read-only 27.007 queries so a missing QFI/5QI (no network UP resources) can
+ * be told apart from an MD-internal netif<->session routing failure.
+ * Raw text is printed in bounded chunks; nothing is parsed or acted on. */
+static const char *const x9ctx_cmds[]={"AT+CGACT?\r","AT+CGDCONT?\r","AT+CGPADDR\r","AT+CGCONTRDP\r",
+ "AT+C5GQOSRDP\r","AT+CGEQOSRDP\r","AT+CGTFTRDP\r","AT+CSCON?\r"};
+#define X9CTX_STAGE 80u
+#define X9CTX_COUNT (sizeof(x9ctx_cmds)/sizeof(x9ctx_cmds[0]))
+static void x9ctx_result(x9q_job &j,const char *r,int result){
+ unsigned k=j.stage-X9CTX_STAGE;
+ char cmd[20];strlcpy(cmd,k<X9CTX_COUNT?x9ctx_cmds[k]:"?",sizeof(cmd));
+ size_t cl=strlen(cmd);if(cl&&cmd[cl-1]=='\r')cmd[cl-1]=0;
+ static char flat[X9_AT_RESPONSE_MAX];unsigned n=0;
+ for(const char *p=r?r:"";*p&&n+1<sizeof(flat);p++){
+  char c=*p;if(c=='\r')continue;if(c=='\n'){if(n&&flat[n-1]!='|')flat[n++]='|';continue;}
+  flat[n++]=(c<32||c>126)?'.':c;
+ }
+ while(n&&flat[n-1]=='|')n--;flat[n]=0;
+ enum{CH=80};unsigned parts=n?(n+CH-1)/CH:1;
+ for(unsigned i=0;i<parts&&i<16;i++){
+  char chunk[CH+1];unsigned o=i*CH,m=n-o<CH?n-o:CH;if(!n)m=0;
+  memcpy(chunk,flat+o,m);chunk[m]=0;
+  printf("X9 CELL ATCTX: SIM%u round %u %s result %d part %u/%u \"%s\"\n",
+   j.sim_slot+1,j.record,cmd,result,i+1,parts,chunk);
+ }
+ bzero(flat,sizeof(flat));
+ if(k+1<X9CTX_COUNT){x9q_command(j,x9ctx_cmds[k+1],X9CTX_STAGE+k+1);return;}
+ printf("X9 CELL ATCTX: SIM%u round %u done (%u read-only queries)\n",j.sim_slot+1,j.record,(unsigned)X9CTX_COUNT);
+ bzero(&j,sizeof(j));x9q_active=-1;
+}
 static void x9q_start(x9q_job &j){
+ if(j.ctx){x9q_command(j,x9ctx_cmds[0],X9CTX_STAGE);return;}
  unsigned service=j.port-X9BB_PORT_BASE;
  if(service==1){x9q_error(j,X9Q_UNSUPPORTED);
  }else if(service==0x0b||(service==2&&j.id==0x3c)){
@@ -488,6 +520,7 @@ static bool x9q_plain(const char *s,char *out,unsigned cap,bool digits){
  }return found;
 }
 static void x9q_result(x9q_job &j,const char *r,int result){
+ if(j.ctx){x9ctx_result(j,r,result);return;}
  unsigned service=j.port-X9BB_PORT_BASE;bool ok=result==X9_AT_OK;
  if(result==X9_AT_TIMEOUT||result==X9_AT_OFFLINE){x9q_error(j,X9Q_NOT_READY);return;}
  if(result==X9_AT_OVERFLOW){x9q_error(j,X9Q_INTERNAL);return;}
@@ -771,6 +804,26 @@ static void x9q_poll(){
   }
  }
  uint64_t now=x9q_ms();
+ /* CELL225 user-plane probe: rounds at +1/+6/+15/+40 s after each newly
+  * active bearer generation, at most 24 rounds per boot, one queued at a time. */
+ {static uint64_t seen_gen[CBP_INTERFACES],t0[CBP_INTERFACES];static unsigned round[CBP_INTERFACES],total;
+  static const uint64_t at_ms[]={1000,6000,15000,40000};
+  bool queued=false;for(const x9q_job &q:x9q_jobs)if(q.used&&q.ctx)queued=true;
+  for(unsigned i=0;i<CBP_INTERFACES&&!queued&&total<24;i++){
+   const x9w_bearer &b=x9w_bearers[i];
+   if(!b.used||!b.active)continue;
+   if(b.generation!=seen_gen[i]){seen_gen[i]=b.generation;t0[i]=now;round[i]=0;}
+   if(round[i]>=4||now<t0[i]+at_ms[round[i]])continue;
+   for(x9q_job &j:x9q_jobs)if(!j.used){
+    bzero(&j,sizeof(j));j.used=j.probe=j.background=j.ctx=true;j.local=CBQ_PORT_BASE;
+    j.port=X9BB_PORT_BASE+0x01;j.sim_slot=b.sim_slot;j.record=++total;j.len=7;
+    j.order=++x9q_order;j.deadline=now+90000;
+    printf("X9 CELL ATCTX: SIM%u round %u queued mux %u gen %llu +%llu ms cid %u channel %u\n",
+     b.sim_slot+1,j.record,i+1,b.generation,now-t0[i],b.cid,b.channel);
+    round[i]++;queued=true;break;
+   }
+  }
+ }
  for(unsigned i=0;i<X9Q_JOBS;i++)if(x9q_jobs[i].used&&now>=x9q_jobs[i].deadline){
   int active=x9q_active;x9q_error(x9q_jobs[i],X9Q_NOT_READY);if(active!=(int)i)x9q_active=active;
  }
