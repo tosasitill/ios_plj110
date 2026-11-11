@@ -131,6 +131,11 @@ uint64_t x9_md_mipc_submit(const uint8_t *p,uint32_t n){
   * 021b RETRY_TIMER {MODE100 u8 1, APN101 NUL-terminated string <=101},
   * 022d GET_5GQOS {ID100 u8}, 0233 GET_URSP_ROUTE_PROFILE {CID100 u32},
   * 020f GET_MD_DATA_CALL_LIST {}. Read-only toward the MD data state. */
+ /* DATA_ACT_PACKET_ROUTE 025f / DATA_IFUP_PACKET_ROUTE 0261: exactly one
+  * ROUTE100/u8 (subsys_daemon sends value 3), 24 bytes. */
+ else if(id==0x25f||id==0x261){
+  if((p[8]!=1&&(p[8]!=2||x9_md_sim_count()!=2))||n!=24||x9mi_u16(p+16)!=0x100||x9mi_u16(p+18)!=1||p[21]||p[22]||p[23])return 0;
+ }
  else if(id==0x21b||id==0x22d||id==0x233||id==0x20f){
   if(p[8]!=1&&(p[8]!=2||x9_md_sim_count()!=2))return 0;
   if(id==0x20f){if(n!=16)return 0;}
@@ -297,7 +302,7 @@ static void x9mi_rx(const uint8_t *p,unsigned n){
    if(i==X9_MI_SLOTS)printf("X9 MIPC: CNF id 0x%04x txn %u has no owner, dropped\n",id,tx);
   }else if(kind==1){
    x9mm_rx(x9_mi_stream,need,id,tx);
-   if((id==0x4202||id==0x4302)&&(x9_mi_stream[8]&((1u<<x9_md_sim_count())-1))){
+   if((id==0x4202||id==0x4302||id==0x4220)&&(x9_mi_stream[8]&((1u<<x9_md_sim_count())-1))){
     if(x9_mi_count==X9_MI_EVENTS){x9mi_poison("event queue overflow");break;}
     unsigned at=(x9_mi_head+x9_mi_count++)%X9_MI_EVENTS;
     x9_mi_events[at].len=need;memcpy(x9_mi_events[at].frame,x9_mi_stream,need);

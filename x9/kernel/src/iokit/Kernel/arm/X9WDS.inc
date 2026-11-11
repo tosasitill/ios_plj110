@@ -48,6 +48,7 @@ static void x9w_retire_poll(){
 static uint64_t x9w_if_serial,x9w_init_token,x9w_init_deadline;
 static unsigned x9w_init_stage;
 static bool x9w_control_ready,x9w_session_ready,x9w_init_hold;
+static bool x9w_packet_route_pending; // send ACT/IFUP_PACKET_ROUTE once the session is ready
 struct x9w_frame {
  uint8_t p[1024];unsigned n;bool good; // ACT carries a 672-byte URSP traffic descriptor
  x9w_frame(unsigned id,unsigned mask=1):n(16),good(true){
@@ -141,7 +142,7 @@ static void x9w_init_poll(uint8_t *response,unsigned room){
   }
   unsigned n=0;int ready=x9_md_mipc_take(x9w_init_token,response,room,&n);
   if(ready!=1)return; // keep token on pending/error; no cancel or replacement
-  x9w_init_token=0;unsigned result=2,version=0,mask=stage==1?0xff:1u<<((stage-2)/2);
+  x9w_init_token=0;unsigned result=2,version=0,mask=stage==1?0xff:1u<<((stage-2)/3);
   bool good=x9w_wire(response,n,mask)&&x9q_u16(response+10)==(stage==1?0x302:0x308);
   if(stage==1){
    // libmipc mipc_init (0x133a0) only LOGS VERSION100 (default -1) and
@@ -168,15 +169,19 @@ static void x9w_init_poll(uint8_t *response,unsigned room){
   if(!good){x9w_init_hold=true;printf("X9 MIPC: handshake stage %u rejected/malformed; no dial\n",stage);return;}
   printf("X9 MIPC: handshake stage %u confirmed\n",stage);
   if(stage==1)x9w_control_ready=true; // AT queries need OPEN, not PDP event registration
-  if(stage==1+2*x9_md_sim_count()){
+  if(stage==1+3*x9_md_sim_count()){
    {int v=0;PE_parse_boot_argn("x9_eif_req",&v,sizeof(v));x9w_netagent_req=v!=0;}
+   x9w_packet_route_pending=true; // subsys_daemon sends ACT/IFUP_PACKET_ROUTE {3} at boot
    x9w_session_ready=true;printf("X9 MIPC: v2 OPEN + DEACT/EIF subscriptions confirmed for %u SIM(s); CID ownership unqualified\n",x9_md_sim_count());return;}
  }
  if(!transport_ok||x9w_init_hold||x9w_session_ready)return;
  unsigned stage=x9w_init_stage+1;
- x9w_frame f(stage==1?0x301:0x307,stage==1?0xff:1u<<((stage-2)/2));
+ x9w_frame f(stage==1?0x301:0x307,stage==1?0xff:1u<<((stage-2)/3));
  if(stage==1){static const char name[]="X9WDS";f.word(0x100,2);f.tlv(0x101,name,sizeof(name));f.byte(0x102,1);}
- else{unsigned id=stage%2==0?0x4202:0x4302;uint8_t bytes[2]={(uint8_t)id,(uint8_t)(id>>8)};f.tlv(0x100,bytes,2);}
+ // Per SIM: DEACT 4202, EIF 4302 and DATA_IFUP_PACKET_ROUTE_IND 4220 (the
+ // MD asks the AP for the packet route; subsys_daemon registers and answers).
+ else{static const unsigned ids[3]={0x4202,0x4302,0x4220};unsigned id=ids[(stage-2)%3];
+  uint8_t bytes[2]={(uint8_t)id,(uint8_t)(id>>8)};f.tlv(0x100,bytes,2);}
  uint64_t token=f.submit();if(token){x9w_init_token=token;x9w_init_stage=stage;x9w_init_deadline=x9q_ms()+30000;}
 }
 static bool x9w_apn(const uint8_t *p,unsigned n){
@@ -428,7 +433,20 @@ static void x9w_ril_post_act(unsigned sim,unsigned cid){
  {x9w_frame f(0x233,1u<<sim);f.word(0x100,cid);x9w_side_send(f,sim,0x234,"DATA_GET_URSP_ROUTE_PROFILE");}
  {x9w_frame f(0x20f,1u<<sim);x9w_side_send(f,sim,0x210,"DATA_GET_MD_DATA_CALL_LIST");}
 }
+// Android boot capture (subsys_daemon, libmtk-radio-service): before the
+// internet ACT it sends DATA_ACT_PACKET_ROUTE_REQ 0x25f {0x100 u8 3} and, on
+// the MD's DATA_IFUP_PACKET_ROUTE_IND 0x4220 {app_id 3,...}, DATA_IFUP_
+// PACKET_ROUTE_REQ 0x261 {0x100 u8 3}; the MD hands the value to l5updn as
+// the packet route. We never sent either, so the PDN had no AP route.
+static void x9w_packet_route(unsigned sim,unsigned app){
+ {x9w_frame f(0x25f,1u<<sim);f.byte(0x100,(uint8_t)app);x9w_side_send(f,sim,0x260,"DATA_ACT_PACKET_ROUTE");}
+ {x9w_frame f(0x261,1u<<sim);f.byte(0x100,(uint8_t)app);x9w_side_send(f,sim,0x262,"DATA_IFUP_PACKET_ROUTE");}
+}
 static void x9w_side_poll(){
+ if(x9w_packet_route_pending&&x9w_session_ready&&x9_md_mipc_online()){
+  x9w_packet_route_pending=false;x9w_packet_route(0,3); // SIM1 = data SIM, value 3 as captured
+  printf("X9 WDS: SIM1 packet route 3 requested (ACT + IFUP, as subsys_daemon at boot)\n");
+ }
  if(x9w_stats_next&&x9q_ms()>=x9w_stats_next)x9w_stats(false);
  static uint8_t response[X9_MIPC_FRAME_MAX];
  for(x9w_side &e:x9w_sides){if(!e.token)continue;
@@ -749,6 +767,13 @@ static void x9w_poll(){
   else if(x9q_u16(response+10)==0x4302){
    for(unsigned sim=0;sim<x9_md_sim_count();sim++)if(response[8]&(1u<<sim))
     if(!x9w_interface_event(response,n,sim))x9w_bad_event();
+  }
+  else if(x9q_u16(response+10)==0x4220){
+   unsigned app=0,a1=0,a2=0,a3=0;x9w_byte(response,n,0x100,app);x9w_byte(response,n,0x101,a1);x9w_byte(response,n,0x102,a2);x9w_byte(response,n,0x103,a3);
+   for(unsigned sim=0;sim<x9_md_sim_count();sim++)if(response[8]&(1u<<sim)){
+    printf("X9 WDS: SIM%u DATA_IFUP_PACKET_ROUTE_IND app %u (%u %u %u); answering like subsys_daemon\n",sim+1,app,a1,a2,a3);
+    x9w_packet_route(sim,app);
+   }
   }
   else if(x9q_u16(response+10)==0x4202&&x9w_byte(response,n,0x100,cid)){
    for(unsigned m=0;m<CBP_INTERFACES;m++){x9w_bearer &b=x9w_bearers[m];
