@@ -31,6 +31,7 @@ extern "C" void coachz_modem_data_receiver(void (*)(uint32_t, const uint8_t *, u
 #endif
 #if COACHZ_NATIVE_DPMAIF
 extern "C" uint32_t coachz_modem_data_state(uint32_t, uint32_t *, uint64_t *);
+extern "C" uint32_t coachz_modem_data_room(uint32_t);
 static const unsigned BB_PDP_MAX_MTU = 3072;
 #else
 static const unsigned BB_PDP_MAX_MTU = 1492;
@@ -39,7 +40,8 @@ static const unsigned BB_PDP_MAX_MTU = 1492;
 namespace {
 struct bb_pdp_if {
   ifnet_t ifp;
-  mbuf_t head, tail;
+  IOLock *drain; // orders dequeue+send between start thread and bridge thread
+  mbuf_t head, tail; // EBUSY holdover only; the queue itself is the ifclassq
   uint32_t queued, families, blocked;
   uint64_t tx, rx, dropped, busy, requested;
   uint64_t epoch;
@@ -93,25 +95,6 @@ static errno_t bb_pdp_ioctl(ifnet_t ifp, unsigned long cmd, void *data)
       return EOPNOTSUPP;
   }
 }
-static errno_t bb_pdp_output(ifnet_t ifp, mbuf_t m)
-{
-  auto *p = static_cast<bb_pdp_if *>(ifnet_softc(ifp));
-  __atomic_fetch_add(&p->requested, 1u, __ATOMIC_RELAXED);
-  const size_t len = mbuf_pkthdr_len(m);
-  uint8_t first = 0;
-  if (!len || len > ifnet_mtu(ifp) || mbuf_copydata(m, 0, 1, &first)) { mbuf_freem(m); return EMSGSIZE; }
-  const uint32_t bit = cbp_family_bit(first >> 4);
-  IOLockLock(bb_pdp_lock);
-  if (!bit || !(p->families & bit) || p->blocked || p->queued == 64u || !(ifnet_flags(ifp) & IFF_UP)) {
-    const errno_t error = p->queued == 64u ? ENOBUFS : ENETDOWN;
-    p->dropped++; IOLockUnlock(bb_pdp_lock); ifnet_stat_increment_out(ifp, 0, 0, 1); mbuf_freem(m); return error;
-  }
-  mbuf_setnextpkt(m, nullptr);
-  if (p->tail) mbuf_setnextpkt(p->tail, m); else p->head = m;
-  p->tail = m; p->queued++;
-  IOLockUnlock(bb_pdp_lock);
-  return 0;
-}
 static int bb_pdp_receive_error(bb_pdp_if *p, int error)
 {
   IOLockLock(bb_pdp_lock); p->dropped++; ifnet_t ifp = p->ifp; IOLockUnlock(bb_pdp_lock);
@@ -159,6 +142,75 @@ static void bb_pdp_receive(uint32_t mux, const uint8_t *ip, uint32_t n, uint32_t
   (void)bb_pdp_receive_counted(mux, ip, n, version, 0);
 }
 #endif
+static uint32_t bb_pdp_room(uint32_t i)
+{
+#if COACHZ_NATIVE_DPMAIF
+  return coachz_modem_data_room(i + 1u);
+#else
+  (void)i; return 16; // IPA backend reports EBUSY; holdover covers the rest
+#endif
+}
+static void bb_pdp_free_chain(mbuf_t m)
+{
+  while (m) { mbuf_t next = mbuf_nextpkt(m); mbuf_setnextpkt(m, nullptr); mbuf_freem(m); m = next; }
+}
+// Pull packets from the ifclassq (or the EBUSY holdover) only as far as the
+// modem path has room. Called from the ifnet start thread and every bridge
+// pass, so freed room is used within one poll. One drain at a time keeps
+// per-flow order. Never holds bb_lock or bb_pdp_lock across a send.
+static void bb_pdp_drain(bb_pdp_if *p)
+{
+  if (!p->ifp || !p->drain) return;
+  const uint32_t i = uint32_t(p - bb_pdp_ifaces);
+  IOLockLock(p->drain);
+  for (unsigned pass = 0; pass < 8; pass++) {
+    IOLockLock(bb_pdp_lock);
+    const uint32_t families = p->blocked ? 0 : p->families;
+    const uint64_t epoch = p->epoch;
+    mbuf_t m = p->head; p->head = p->tail = nullptr; p->queued = 0;
+    IOLockUnlock(bb_pdp_lock);
+    if (!families || !(ifnet_flags(p->ifp) & IFF_UP)) {
+      bb_pdp_free_chain(m); ifnet_purge(p->ifp); break;
+    }
+    if (!m) {
+      const uint32_t room = bb_pdp_room(i);
+      uint32_t count = 0;
+      if (!room || ifnet_dequeue_multi(p->ifp, room, &m, nullptr, &count, nullptr) || !m) break;
+      __atomic_fetch_add(&p->requested, uint64_t(count), __ATOMIC_RELAXED);
+    }
+    bool stalled = false;
+    while (m) {
+      mbuf_t next = mbuf_nextpkt(m); mbuf_setnextpkt(m, nullptr);
+      uint8_t ip[BB_PDP_MAX_MTU];
+      const uint32_t n = static_cast<uint32_t>(mbuf_pkthdr_len(m));
+      int error = ENETDOWN;
+      if (n && n <= sizeof(ip) && n <= ifnet_mtu(p->ifp) && !mbuf_copydata(m, 0, n, ip) &&
+          (families & cbp_family_bit(ip[0] >> 4))) error = coachz_modem_data_send(i + 1u, ip, n);
+      if (error == EBUSY) {
+        // Keep order: this packet and the rest of the chain go back in front.
+        mbuf_setnextpkt(m, next);
+        unsigned held = 0; mbuf_t last = m;
+        for (mbuf_t t = m; t; t = mbuf_nextpkt(t)) { held++; last = t; }
+        IOLockLock(bb_pdp_lock);
+        const bool same = p->families == families && p->epoch == epoch && !p->blocked && !p->head;
+        if (same) { p->head = m; p->tail = last; p->queued = held; p->busy++; }
+        IOLockUnlock(bb_pdp_lock);
+        if (!same) bb_pdp_free_chain(m); // route changed: never send old-call packets
+        stalled = true; break;
+      }
+      if (!error) { bpf_tap_out(p->ifp, DLT_RAW, m, nullptr, 0); p->tx++; ifnet_stat_increment_out(p->ifp, 1, n, 0); }
+      else { p->dropped++; ifnet_stat_increment_out(p->ifp, 0, 0, 1); }
+      mbuf_freem(m); m = next;
+    }
+    if (stalled) break;
+  }
+  IOLockUnlock(p->drain);
+}
+static void bb_pdp_start(ifnet_t ifp)
+{
+  auto *p = static_cast<bb_pdp_if *>(ifnet_softc(ifp));
+  if (p) bb_pdp_drain(p);
+}
 // The helper can be opened before modem READY. Prepare only its traffic-gate
 // lock here; do not attach interfaces or announce a usable data transport.
 // The board serializes this before starting the bridge worker.
@@ -178,10 +230,16 @@ static void bb_pdp_init()
     auto *p = &bb_pdp_ifaces[i];
     ifnet_init_eparams init = {};
     init.ver = IFNET_INIT_CURRENT_VERSION; init.len = sizeof init;
-    init.flags = IFNET_INIT_LEGACY | IFNET_INIT_NX_NOAUTO;
+    // Start model: the stack queues in ifclassq (FQ-CoDel) and the driver pulls
+    // only what the modem path can take. The legacy output path had to drop
+    // with ENOBUFS at 64 queued packets, which XNU TCP answers by cutting cwnd.
+    init.flags = IFNET_INIT_NX_NOAUTO;
+    init.start = bb_pdp_start; init.output_sched_model = IFNET_SCHED_MODEL_NORMAL;
+    init.sndq_maxlen = 512;
+    if (!p->drain) p->drain = IOLockAlloc();
     init.name = "pdp_ip"; init.unit = i;
     init.family = IFNET_FAMILY_CELLULAR; init.type = IFT_CELLULAR; init.softc = p;
-    init.output = bb_pdp_output; init.demux = bb_pdp_demux;
+    init.demux = bb_pdp_demux;
     init.add_proto = bb_pdp_add_proto; init.del_proto = bb_pdp_del_proto; init.ioctl = bb_pdp_ioctl;
     errno_t error = ifnet_allocate_extended(&init, &p->ifp);
     if (!error) {
@@ -240,6 +298,9 @@ static void bb_pdp_poll()
     if (active[i] && mtu >= 68 && mtu <= BB_PDP_MAX_MTU && ifnet_mtu(p->ifp) != mtu)
       ifnet_set_mtu(p->ifp, mtu);
 #endif
+    // Serialize with bb_pdp_drain: no chain taken under the old epoch may be
+    // sent after the route changes.
+    if (p->drain) IOLockLock(p->drain);
     IOLockLock(bb_pdp_lock);
     const bool changed = p->families != active[i] || p->epoch != epoch;
     mbuf_t stale = nullptr;
@@ -257,29 +318,9 @@ static void bb_pdp_poll()
       ifnet_set_flags(p->ifp, active[i] ? IFF_RUNNING : 0, IFF_RUNNING);
       printf("COACHZ pdp: pdp_ip%u active families %u\n", i, active[i]);
     }
-    for (unsigned batch = 0; batch < 16; batch++) {
-      IOLockLock(bb_pdp_lock);
-      mbuf_t m = p->head;
-      if (m) { p->head = mbuf_nextpkt(m); if (!p->head) p->tail = nullptr; p->queued--; mbuf_setnextpkt(m, nullptr); }
-      const bool usable = p->families && !p->blocked;
-      IOLockUnlock(bb_pdp_lock);
-      if (!m) break;
-      uint8_t ip[BB_PDP_MAX_MTU];
-      const uint32_t n = static_cast<uint32_t>(mbuf_pkthdr_len(m));
-      int error = ENETDOWN;
-      if (usable && n <= sizeof(ip) && n <= ifnet_mtu(p->ifp) && (ifnet_flags(p->ifp) & IFF_UP) && !mbuf_copydata(m, 0, n, ip) &&
-          (active[i] & cbp_family_bit(ip[0] >> 4))) error = coachz_modem_data_send(i + 1u, ip, n);
-      if (error == EBUSY) {
-        IOLockLock(bb_pdp_lock);
-        if (p->queued >= 64u) { p->dropped++; IOLockUnlock(bb_pdp_lock); mbuf_freem(m); break; }
-        mbuf_setnextpkt(m, p->head); p->head = m; if (!p->tail) p->tail = m; p->queued++; p->busy++;
-        IOLockUnlock(bb_pdp_lock);
-        break;
-      }
-      if (!error) { bpf_tap_out(p->ifp, DLT_RAW, m, nullptr, 0); p->tx++; ifnet_stat_increment_out(p->ifp, 1, n, 0); }
-      else { p->dropped++; ifnet_stat_increment_out(p->ifp, 0, 0, 1); }
-      mbuf_freem(m);
-    }
+    if (changed) ifnet_purge(p->ifp); // new call epoch or down: queued packets are not its traffic
+    if (p->drain) IOLockUnlock(p->drain);
+    bb_pdp_drain(p);
   }
 }
 static IOReturn bb_pdp_block(uint32_t unit, uint32_t blocked)
@@ -291,6 +332,7 @@ static IOReturn bb_pdp_block(uint32_t unit, uint32_t blocked)
   IOLockUnlock(bb_pdp_lock);
   while (stale) { mbuf_t next = mbuf_nextpkt(stale); mbuf_setnextpkt(stale, nullptr); mbuf_freem(stale); stale = next; }
   if (discarded && p->ifp) ifnet_stat_increment_out(p->ifp, 0, 0, discarded);
+  if (blocked && p->ifp) ifnet_purge(p->ifp);
   return kIOReturnSuccess;
 }
 static void bb_pdp_report(unsigned second)

@@ -10,7 +10,7 @@
 namespace {
 constexpr unsigned X9D_DRB = 2048, X9D_BAT = 1024, X9D_PIT = 2048;
 constexpr unsigned X9D_TX_SIZE = 3072, X9D_PKT_SIZE = 1664, X9D_FRG_SIZE = 1920;
-constexpr unsigned X9D_MAIL = 64, X9D_BUDGET = 128;
+constexpr unsigned X9D_MAIL = 128, X9D_BUDGET = 128, X9D_TX_BUDGET = 32;
 constexpr uint64_t X9D_DMA_LIMIT = 1ULL << 40;
 constexpr uint32_t X9D_BUSY_BIT = 0x80000000u;
 constexpr uint32_t X9D_UL_FLOW = (31u << 5) | (31u << 10) | (31u << 15);
@@ -457,7 +457,7 @@ static bool x9d_tx_poll() {
         bzero(&c, sizeof(c)); x9d.tx_done++;
     }
     x9d.tx_rd = rd;
-    for (unsigned budget = 0; budget < 16; budget++) {
+    for (unsigned budget = 0; budget < X9D_TX_BUDGET; budget++) {
         unsigned free = X9D_DRB - 1 - (x9d.tx_wr + X9D_DRB - x9d.tx_rd) % X9D_DRB;
         if (free < 2) break;
         static x9d_tx t; uint8_t channel;
@@ -645,6 +645,15 @@ extern "C" uint32_t coachz_modem_data_state(uint32_t mux, uint32_t *mtu, uint64_
     if (mtu) *mtu = families ? r.mtu : 0;
     if (epoch) *epoch = r.epoch;
     IOLockUnlock(x9d.lock); return families;
+}
+// Free mailbox slots for a bound route: the ifnet start-model drain dequeues
+// only this many, so congestion stays in the stack AQM queue (no local drop
+// and no ENOBUFS, which XNU TCP treats as a reason to collapse cwnd).
+extern "C" uint32_t coachz_modem_data_room(uint32_t mux) {
+    if (!x9d.lock || !cbp_mux_ok(mux)) return 0;
+    IOLockLock(x9d.lock); const x9d_route &r = x9d.route[mux - 1];
+    uint32_t room = x9d.ready && !x9d.failed && r.bound ? X9D_MAIL - x9d.count : 0;
+    IOLockUnlock(x9d.lock); return room;
 }
 extern "C" void coachz_modem_data_receiver_counted(int (*cb)(uint32_t, const uint8_t *, uint32_t, uint32_t, uint64_t)) {
     // Registration can precede x9d_prepare but is performed by the bridge owner.
