@@ -6,6 +6,12 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## MD SDAP上行静态查看（MD-SDAP-UL，2026-11-11）：静态无法定出实际丢包分支，建议改取MD自身DHL日志
+
+- `sdap_ul_drop_data_req@902cb21a`：遍历3个队列（表0x92cb8d7c）调用 `enpdcp_ulproc_disc_qsi`——是PDCP队列整体discard（flush），不是逐包“无映射”判定。
+- `sdap_ul_data_req_handler@901a3036`(932B)：取 `enpdcp_get_db`，按会话/QFI字段多处早退到公共尾 0x901a3138（同表0x92cb8d7c），主路径调用 `enpdcp_ulproc_data_req_handler@901984e2`，失败路径 `enpdcp_ulproc_send_rollback_ind`、断言串 `protocol/enl2/pdcp/common/src/sdap_proc.c`。分支条件依赖运行时PDCP/SDAP DB内容，**不知道实际状态就无法静态判定我们的包走哪条**。
+- **结论/建议**：MD每步都打 `_dhl_index_trace`（例如ipc_set_netif_mapping里 0x4C5001D7..DD）；仓库已有解出的 `md1_mddb`（cell189目录 mddb-*.decoded）可把索引还原成文字。若能在iOS侧收MD的DHL日志（Android是emdlogger经 /dev/ccci_md_log_ctrl + DHL CCB通道），即可直接看到UL包在 LHIF/UPCM/SDAP/PDCP 哪一步被丢、以及DL为何不下发。这是比继续盲目静态逆向更确定的路线，需要实现MD log通道接收与mddb解码。
+
 ## dpmaif_drv_ccci_datapath_notify（MD-DATAPATH-NOTIFY，2026-11-11）：死桩，排除
 
 - `dpmaif_drv_ccci_datapath_notify@90661ef0`（22B）仅加载 `driver/dpmaif/src/dpmaif_dev.c`、行0x15f后 `BREAK 5`——被调用即断言。全ROM扫：无BC/BALC直接调用、无32位函数指针（解码器用kal_take_spinlock验证得628处调用，工具可靠；脚本本会话scratch `ref.py`）。**此MD版本不存在AP→MD“数据通路通知”入口，排除**。
