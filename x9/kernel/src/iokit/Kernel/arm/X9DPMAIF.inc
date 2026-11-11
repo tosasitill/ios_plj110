@@ -72,6 +72,7 @@ struct x9d_state {
     x9d_dma drb, txpool, pit[2], bat[2], pool[2][X9D_POOL_CHUNKS];
     x9d_dma drbq[3]; // TXQ1..3: started like dpmaif_txqs_start (DPMAIF_TXQ_NUM 4), never fed
     bool posted[2][X9D_BAT];
+    uint64_t lro_split;
     bool used_channel[20]; // bound/retiring routes only; released when retirement finishes
     unsigned bat_wr[2], tx_wr, tx_rd, head, count;
     unsigned bat_hint, bat_target, bat_credit[2], bat_backing[2], bat_owned[2];
@@ -711,57 +712,10 @@ static bool x9d_tx_poll() {
     }
     return true;
 }
-static bool x9d_rx_item(unsigned q, const uint32_t *d) {
-    x9d_rx &r = x9d.rx[q]; uint32_t a = d[0];
-    if (a & 1) { // MSG PIT, channel bits16..23, drop bit31
-        if (r.message) { x9d_fail("interleaved RX message"); return false; }
-        if (!(a & 2)) { x9d_fail("message PIT without continuation"); return false; }
-        r.message = true; r.normal = false; r.bytes = 0; r.channel = (uint8_t)(a >> 16);
-        r.mux = 0; r.epoch = 0; r.lifetime = 0;
-        IOLockLock(x9d.lock);
-        for (unsigned i = 0; i < CBP_INTERFACES; i++) if (x9d.route[i].bound && x9d.route[i].channel == r.channel) {
-            r.mux = i + 1; r.epoch = x9d.route[i].epoch; r.lifetime = x9d.route[i].lifetime;
-        }
-        IOLockUnlock(x9d.lock);
-        r.drop = (a & (1u << 31)) || (a & (1u << 4)); return true;
-    }
-    if (!r.message) { x9d_fail("RX payload without message"); return false; }
-    unsigned kind = (a >> 2) & 1, bid = ((a >> 3) & 8191) | (((d[3] >> 8) & 7) << 13);
-    unsigned len = a >> 16, hoff = ((d[3] >> 19) & 31) * 4;
-    if (bid >= X9D_BAT || !x9d.posted[kind][bid]) {
-        // Memory safety: never copy from a buffer this CPU has not posted. Print the
-        // exact PIT so a BID bookkeeping mismatch can be told apart (233 quarantined here).
-        printf("X9 DPMAIF: RX BID not owned q %u kind %u bid %u posted %d len %u hoff %u have %u normal %d pit %08x %08x %08x %08x bat_wr %u/%u owned %u/%u\n",
-            q, kind, bid, bid < X9D_BAT ? (int)x9d.posted[kind][bid] : -1, len, hoff, r.bytes, (int)r.normal,
-            d[0], d[1], d[2], d[3], x9d.bat_wr[0], x9d.bat_wr[1], x9d.bat_owned[0], x9d.bat_owned[1]);
-        x9d_fail("RX BID ownership"); return false;
-    }
-    if ((!kind && r.normal) || (kind && !r.normal)) {
-        // A packet spread over several BAT buffers (normal+normal or fragment-first) is not
-        // proof of LRO: concatenate within the bounded r.ip; x9d_ip() still validates the
-        // result, so a real multi-packet aggregate is dropped, not delivered.
-        static unsigned multi;
-        if (multi < 16) { multi++;
-            printf("X9 DPMAIF: RX multi-buffer packet q %u kind %u bid %u len %u hoff %u have %u normal %d pit %08x %08x; concatenating\n",
-                q, kind, bid, len, hoff, r.bytes, (int)r.normal, d[0], d[3]); }
-    }
-    const x9d_dma &buffer = x9d_buffer(kind, bid);
-    if (!buffer.va || !x9d.bat_owned[kind]) { x9d_fail("RX missing BAT backing"); return false; }
-    unsigned stride = kind ? X9D_FRG_SIZE : X9D_PKT_SIZE, off = x9d_buffer_offset(kind, bid);
-    uint64_t addr = d[1] | ((uint64_t)d[2] << 32), base = buffer.pa + off;
-    // Buffer address is observed in PIT but vendor treats BAT as authoritative.
-    // Reject out-of-buffer addresses; do not follow arbitrary physical pointers.
-    if (!len || len > stride || hoff > stride - len || addr < base || addr >= base + stride) {
-        x9d_fail("RX DMA address/length"); return false;
-    }
-    if (kind && hoff) { x9d_fail("fragment header offset"); return false; }
-    unsigned bytes = len + (kind ? 0 : hoff);
-    if (bytes > sizeof(r.ip) - r.bytes) { x9d_fail("RX packet exceeds bounded MTU"); return false; }
-    x9d_sync(buffer, off, stride);
-    memcpy(r.ip + r.bytes, buffer.va + off, bytes); r.bytes += bytes; r.normal = true;
-    x9d.posted[kind][bid] = false; // CPU copy complete; global BAT replenisher owns reuse
-    x9d.bat_owned[kind]--;
-    if (!(a & 2)) {
+// Deliver the IP packet accumulated in r.ip (one PIT buffer chain). Called at the
+// end of a message, and before each further normal buffer of an LRO packet list.
+static void x9d_rx_deliver(unsigned q) {
+    x9d_rx &r = x9d.rx[q];
         x9d.rx_wire_bytes += r.bytes; // completed copies, including drops; NOT successful delivery
         unsigned mux = 0; int (*receiver)(uint32_t, const uint8_t *, uint32_t, uint32_t, uint64_t);
         IOLockLock(x9d.lock);
@@ -788,8 +742,66 @@ static bool x9d_rx_item(unsigned q, const uint32_t *d) {
         IOLockUnlock(x9d.lock);
         if (accepted) x9d.rx_packets++;
         else x9d.rx_dropped++;
-        bzero(r.ip, r.bytes); r.bytes = 0; r.message = r.normal = false;
+        bzero(r.ip, r.bytes); r.bytes = 0;
+}
+static bool x9d_rx_item(unsigned q, const uint32_t *d) {
+    x9d_rx &r = x9d.rx[q]; uint32_t a = d[0];
+    if (a & 1) { // MSG PIT, channel bits16..23, drop bit31
+        if (r.message) { x9d_fail("interleaved RX message"); return false; }
+        if (!(a & 2)) { x9d_fail("message PIT without continuation"); return false; }
+        r.message = true; r.normal = false; r.bytes = 0; r.channel = (uint8_t)(a >> 16);
+        r.mux = 0; r.epoch = 0; r.lifetime = 0;
+        IOLockLock(x9d.lock);
+        for (unsigned i = 0; i < CBP_INTERFACES; i++) if (x9d.route[i].bound && x9d.route[i].channel == r.channel) {
+            r.mux = i + 1; r.epoch = x9d.route[i].epoch; r.lifetime = x9d.route[i].lifetime;
+        }
+        IOLockUnlock(x9d.lock);
+        r.drop = (a & (1u << 31)) || (a & (1u << 4)); return true;
     }
+    if (!r.message) { x9d_fail("RX payload without message"); return false; }
+    unsigned kind = (a >> 2) & 1, bid = ((a >> 3) & 8191) | (((d[3] >> 8) & 7) << 13);
+    unsigned len = a >> 16, hoff = ((d[3] >> 19) & 31) * 4;
+    if (bid >= X9D_BAT || !x9d.posted[kind][bid]) {
+        // Memory safety: never copy from a buffer this CPU has not posted. Print the
+        // exact PIT so a BID bookkeeping mismatch can be told apart (233 quarantined here).
+        printf("X9 DPMAIF: RX BID not owned q %u kind %u bid %u posted %d len %u hoff %u have %u normal %d pit %08x %08x %08x %08x bat_wr %u/%u owned %u/%u\n",
+            q, kind, bid, bid < X9D_BAT ? (int)x9d.posted[kind][bid] : -1, len, hoff, r.bytes, (int)r.normal,
+            d[0], d[1], d[2], d[3], x9d.bat_wr[0], x9d.bat_wr[1], x9d.bat_owned[0], x9d.bat_owned[1]);
+        x9d_fail("RX BID ownership"); return false;
+    }
+    if (!kind && r.normal) {
+        // HW LRO "packet list" (234): each further normal buffer of one PIT message holds a
+        // complete IP packet (e.g. len 1380 + hoff 40 = one 1420 B TCP segment, header
+        // included). Deliver the previous packet and start a new one on the same message;
+        // every packet is still validated by x9d_ip() and the route/epoch checks.
+        static unsigned lro;
+        if (lro < 8) { lro++;
+            printf("X9 DPMAIF: RX LRO list q %u bid %u len %u hoff %u prev %u pit %08x %08x; delivering separately\n",
+                q, bid, len, hoff, r.bytes, d[0], d[3]); }
+        x9d.lro_split++;
+        x9d_rx_deliver(q); r.normal = false;
+    } else if (kind && !r.normal) {
+        static unsigned frg;
+        if (frg < 8) { frg++;
+            printf("X9 DPMAIF: RX fragment without normal buffer q %u bid %u len %u pit %08x %08x; appended\n", q, bid, len, d[0], d[3]); }
+    }
+    const x9d_dma &buffer = x9d_buffer(kind, bid);
+    if (!buffer.va || !x9d.bat_owned[kind]) { x9d_fail("RX missing BAT backing"); return false; }
+    unsigned stride = kind ? X9D_FRG_SIZE : X9D_PKT_SIZE, off = x9d_buffer_offset(kind, bid);
+    uint64_t addr = d[1] | ((uint64_t)d[2] << 32), base = buffer.pa + off;
+    // Buffer address is observed in PIT but vendor treats BAT as authoritative.
+    // Reject out-of-buffer addresses; do not follow arbitrary physical pointers.
+    if (!len || len > stride || hoff > stride - len || addr < base || addr >= base + stride) {
+        x9d_fail("RX DMA address/length"); return false;
+    }
+    if (kind && hoff) { x9d_fail("fragment header offset"); return false; }
+    unsigned bytes = len + (kind ? 0 : hoff);
+    if (bytes > sizeof(r.ip) - r.bytes) { x9d_fail("RX packet exceeds bounded MTU"); return false; }
+    x9d_sync(buffer, off, stride);
+    memcpy(r.ip + r.bytes, buffer.va + off, bytes); r.bytes += bytes; r.normal = true;
+    x9d.posted[kind][bid] = false; // CPU copy complete; global BAT replenisher owns reuse
+    x9d.bat_owned[kind]--;
+    if (!(a & 2)) { x9d_rx_deliver(q); r.message = r.normal = false; }
     return true;
 }
 static void x9d_rx_probe(unsigned q, uint32_t raw, const char *status, bool force = false) {
