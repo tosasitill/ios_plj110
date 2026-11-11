@@ -6,6 +6,17 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## MD DHL日志采集 第2阶段（CELL-MDLOG2，2026-11-11；已构建，未启动）
+
+- **源码**：main **\`1b44fdf\`**（x9_modem.inc / x9_modem_bridge.h / X9WDS.inc / x9_baseband_firmware.inc）。用户选择**RAM环＋短窗口**。
+  - 启动：MD认领CCB（buf0 UL guard 0xddbbccaa）后，3s心跳里 \`x9mdl_start()\` 分配64MiB环、起采集线程；按Android实测最小序列写 buf0 UL SPLM：0x05{03000000}→0x0f{00000000}→0x00{01000000}→0x20{01 03}（各间隔20ms并打印MD应答），再把292B \`Default\` filter帧原样写 buf2 UL；每页按libccci write_alloc/done提交（0x11111111→len/payload→0x22222222，+4 alloc/+0x10 write），CCIF ch7门铃（BUSY/TCHNUM，同md_ccif_send）。
+  - 采集：线程每2ms排空DHL DL buf0–3；buf2（PS trace）进64MiB环（约17s@3.7MB/s），buf0 SPLM应答打印（前60条）。
+  - 保存：WDS首个ACT CNF result0 时 \`x9_md_log_mark("ACT")\`；10s后冻结环，按时间顺序写 **\`/private/var/x9-mdlog.bin\`**（\`x9_mdlog_save\`，kern_exec.c TU，vnode_open+vn_rdwr+FSYNC），只写一次。\`x9_mdlog=0\` 关闭（退回第1阶段观察）。
+  - 日志：\`X9 MDLOG: SPLM tx/rx …\`、\`filter frame … -> 0\`、每~9s \`captured … pages … full-seen … mark … saved … err\`、\`mark ACT at stream offset\`、\`saving … bytes (stream offset a..b, ACT mark at m)\`、\`save -> 0 in N ms\`。
+- **镜像**：worktree \`.local/x9/worktrees/cell-mdlog2-gpu278-20261111/\` = \`ace3adc\`(mdlog1)+cherry-pick(\`7d9cc34\`)，配置同mdlog1，exit0，boot13889536B → **\`x9/out/x9-cell-mdlog2-gpu278-20261111/boot.img\`**。插件278不变，无需mailbox staging。
+- **取回/解码**：进Android后 \`x9/tools/pull_ios_logs.py --manifest <root manifest> --out <dir> --paths private/var/x9-mdlog.bin\`。文件是buf2 DL页payload按序拼接（\`accaef10\` DHL帧）。解码：MDDB（设备 /data/mdlog/MDDB_PHONE_unlwtg_n.EDB 与 DbgInfo；cell189已有md1_mddb解出）。
+- **风险/未知**：未验证MD接受我们写的UL页（看SPLM rx是否有0x05/0x0f/0x00/0x20的dir=01应答、是否出现“[DHL][EBS] Logging mode change to 1”）；若 full-seen 增长说明2ms仍不够快或MD速率更高；64MiB保存需数秒HFS写。
+
 ## emdlogger启动协议（ANDROID-MDLOG-START，2026-11-11）：已完整抓到
 
 - **采集**（全部在 `.local/x9/android-mdlog-20261111/`，不入git）：emdlogger/libccci_util_sys/libmdloggerrecycle 二进制；emdlogger 控制口是抽象socket `@com.mediatek.mdlogger.socket1`，文本命令 `deep_start,2`(SD模式) / `deep_pause`，自写静态客户端 `mdlc`（源码在会话scratch `mdlc.c`）。`/proc/pid/mem` 读不到CCB（VM_IO/PFNMAP）、`ccci_ccb_dhl` 独占（ccb_ctrl可多开）→ 用 **LD_PRELOAD shim** `ccbhook.so`（`hook.c`，链设备libdl.so）包 `ccci_ccb_write_done`(全部UL) 与 `ccci_ccb_read_get`(DL buf0/3)，手动启动一次emdlogger后恢复init服务（已恢复，Running=0）。原始 `ccbhook.bin`、解析 `ccbhook.txt`（`hookparse.py`）。另有 ccci_lib logcat 证明：SPLM都写 **user58(DHL) buffer0 UL**，filter写 **buffer2 UL**。filter来自modem分区 `md1_filter` 镜像（`files/catcher_filter_unlwtg_n.bin` 300B）；emdlogger同时恢复 `MDDB_PHONE_unlwtg_n.EDB`(10.5MB)、`DbgInfo_MDDB_unlwtg_n.EDB.xz`（在设备 /data/mdlog，尚未拉取）。
