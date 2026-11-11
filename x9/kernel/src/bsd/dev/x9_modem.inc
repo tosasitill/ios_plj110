@@ -798,6 +798,7 @@ static void x9md_send_ch(unsigned ch){
 static int x9md_serve,x9md_clk_released;
 extern void x9_baseband_start(void);
 extern void x9_baseband_prepare(void);
+extern void x9_dpmaif_boot_start(void);
 #include "x9_modem_s3.inc"
 
 /* Poll RCHNUM, drain rings, log every packet; HS2 -> READY, then keep
@@ -908,7 +909,14 @@ static void x9md_thread(void *arg,wait_result_t wr) {
  if(mode>=2){
   if(x9md_serve)x9fs_preload();
   if(x9md_serve)x9md_sim_pinmux();
-  if(x9md_power_on()==0&&x9md_wait_hs1()==0&&mode>=3)x9md_stage2();
+  /* ccci_hif_state_notification(BOOT_WAITING_FOR_HS1): Android starts the
+   * DPMAIF HIF right after the MD is released and before HS1, so the MD's
+   * own DPMAIF setup sees a ready AP side (Android live dump: MD-programmed
+   * legacy PIT/HPC mode; ours were 0 when DPMAIF started after READY). */
+  if(x9md_power_on()==0){
+   if(x9md_serve)x9_dpmaif_boot_start();
+   if(x9md_wait_hs1()==0&&mode>=3)x9md_stage2();
+  }
   if(!x9md_clk_released)x9md_smc(X9MD_CCIF_CLK_RELEASE,0,0,NULL);
  }
 out:

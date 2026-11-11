@@ -101,6 +101,20 @@ void x9bb_thread(void *, wait_result_t)
 }
 }
 
+// Called from the MD worker between let-MD-go and HS1, before the bridge
+// thread exists (single owner): vendor ccci_hif_state_notification starts
+// DPMAIF at BOOT_WAITING_FOR_HS1. The bridge poll then finds it ready.
+extern "C" void x9_dpmaif_boot_start(void)
+{
+  if (!coachz_baseband_enabled()) return;
+  x9d_prepare();
+  if (x9d.mode == 2 && !x9d.hw_attempted && !x9d.failed) {
+    x9d.hw_attempted = true;
+    printf("X9 DPMAIF: starting at BOOT_WAITING_FOR_HS1 (vendor order)\n");
+    (void)x9d_hw_init();
+  }
+}
+
 extern "C" void x9_baseband_start(void)
 {
   static int started;
