@@ -67,7 +67,7 @@ python3 x9/build/prepare-local.py                                               
 X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>      # 之后再让用户 fastboot boot x9/out/<name>/boot.img
 ```
 纯内核重编(插件号不变,allowlist 头不变)**不需要**重新 stage,上机前只要说"无需 mailbox"。插件重建非确定,allowlist 头要随该 revision 一起提交。
-当前主线插件:**276**;旧124及更早候选仍275,两套mailbox与内核不能混用。
+当前主线allowlist插件:**277**（GPU277候选；210实机仍276，新277必须mailbox）;旧125起多份候选为276、旧124及更早仍275，各套mailbox与内核不能混用。
 
 **上机流程**:用户把手机 `fastboot boot x9/out/<name>/boot.img`,跑场景,日志放 Mac `~/N.txt`,我读。永不 `fastboot getvar`。
 
@@ -131,7 +131,7 @@ X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>      # 之后再�
 
 - **上一蜂窝183 fixed-slots完整联合候选(126)**:`x9/out/x9-all126-cell183-fixedslots-cbn-md/boot.img`,固定完整 **1ed00de**(蜂窝源码1333bfc),**75/75overlay+6prebuilt、kernel link/strip/iOS工具/shim/boot全部exit0**,构建器报告**13414400B**。沿原603B参数/32GiB manifest/真实MDOTA784文件、Wi-Fi/NVRAM与官方CBN原IPCC+26文件,冻结时已提交CAMERA11/MIC9/AUDIO8/GPU276/BT/torch/ALS/GPS/USB/UFS保持,默认off功能不额外打开。唯一蜂窝行为差分为native evaluator固定物理两槽(+1f8=0,+171 DDS仍1),旧state4可迁移为完整state5,不假确认remap/连接/5G。**插件276**,配套成功125既有plugin-package原样复制;若仍275,需先更新276mailbox,不能说无需mailbox。**185已上机:用户确认双卡保持/卡2正常,卡1仍Carrier54/无条但有LTE、默认卡1无PDP**,真实切换/广电最终名称/5G与mode4 reset仍未验收,详见185交接;旧124已183实测失败。
 
-- **最新GPU文字/资源同步联合候选(125)**:`x9/out/x9-gpu276-joint125/boot.img`,固定完整 **4a140a9**,**74/74 overlay+6prebuilt、kernel link/strip/iOS工具/shim/boot全部exit0**,构建器报告**13393920B**。沿123/124完整603B参数/32GiB manifest/真实MDOTA、Wi-Fi/NVRAM/CBN输入,含冻结时已提交蜂窝182、AUDIO7/MIC7/camera fab9等;不额外开默认off功能。新增3b13365大批次/非零start/实例顶点padding与真实resource barrier。**插件改为276,必须先更新mailbox再用户fastboot boot**;PanVK只对已实跑275 ICD重新版本化,未换Mesa。**未上机,文字闪烁/像素与性能未验收**,indexed/indirect/GPU-produced顶点及256px竖缝仍有边界,详见GPU-PAD-1。
+- **上一GPU文字/资源同步联合候选(125；最新看GPU277)**:`x9/out/x9-gpu276-joint125/boot.img`,固定完整 **4a140a9**,**74/74 overlay+6prebuilt、kernel link/strip/iOS工具/shim/boot全部exit0**,构建器报告**13393920B**。沿123/124完整603B参数/32GiB manifest/真实MDOTA、Wi-Fi/NVRAM/CBN输入,含冻结时已提交蜂窝182、AUDIO7/MIC7/camera fab9等;不额外开默认off功能。新增3b13365大批次/非零start/实例顶点padding与真实resource barrier。**插件改为276,必须先更新mailbox再用户fastboot boot**;PanVK只对已实跑275 ICD重新版本化,未换Mesa。**未上机,文字闪烁/像素与性能未验收**,indexed/indirect/GPU-produced顶点及256px竖缝仍有边界,详见GPU-PAD-1。
 
 - **最新蜂窝182会话/误清卡修正联合候选(124)**:`x9/out/x9-all124-cell182-uim-session-cbn-md/boot.img`,固定完整**db205e1**,**74/74 overlay+6prebuilt、kernel link/strip/iOS工具/shim/boot全部exit0**,构建器报告**13393920B**。沿603B完整123参数、32GiB manifest/插件275,**无需mailbox**。保留已出现菜单的native factory/DDS成功确认链,接入原生独立可选UIM6e entries,单槽busy/查询失败不再误清双卡;不确定apps仍阻止data/切卡,真实CME10无卡保持。冻结时包含相机7258af4/545b6b3、BT/torch/ALS、音频255b5c7/ca820a2、USB b416daf、GNSS ceac199及UFS默认G5等已提交主线,不额外启用默认off功能。官方CBN54.1.0原IPCC+完整26文件与真实MDOTA/Wi-Fi输入保持。**183已上机:单字段UIM6e primary1成功,随后primary2仍被94拒绝、广电短显后退出/移动无PDP;掉卡消失、最终广电名称、真实切卡/语音/PDP/5G仍未验收**,不以编译通过宣称双卡可用,只交这一份新候选。
 
@@ -263,16 +263,22 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
   键盘/MG 缓存:`x9_mgwipe` 只在验证时开一次。keybag 绕过用 `-apfs_shared_datavolume`,cache loader 用 `launchd_unsecure_cache=1`(均来自 UniXNU/hackios/dali 的现成修复)。
   **遇到 XNU/iOS 兼容问题先查本地 UniXNU / hackios-xnu-kernel 的现成修复**(`work/references/…`),再自行设计。
 
-## GPU活动交接（GPU277，2026-11-11）：可移植上游缓存修复＋索引补齐；构建中
+## GPU活动交接（GPU277，2026-11-11）：可移植上游缓存修复＋索引补齐；277完整候选已构建，待用户上机
 
 - **运行基线纠正**：只读 `~/210.txt`，3.110s verified allowlist实际active **276**，30.234s旧`padded=1 last=6->12`已命中；用户仍报告三角形/渲染错误。因此GPU-PAD-1“276从未上机”已过期，不以failed0或补齐计数代替像素验收。未取得与三角形对应的新截图/帧回读。
 - **固定范围/引用**：从main **695cdae**独立`work/gpu-upstream277` / `.local/x9/worktrees/gpu-upstream277`，不夹带其它窗口蜂窝未提交改动。三个仓库新clone固定AdrenoMetal **20be9f966a0b947238f80dec22a91bf6c9dfc0a0**、UniXNU-sheng **c73f9c0**、Adreno740 **a7c83cf**，原件与210窄GPU日志在`.local/x9/work/gpu-upstream-20261111/`。保留963f译码器基线与已有安全InPlace，不移植Turnip GMEM/CP/4KiB/DRAM pool/macOS无flush。X9 private/WC已避开冗余维护，不能把A740 synchronized BO规则套到cached IOSurface。
 - **实际合入**：AdrenoMetal 0031..0034原补丁＋LICENSE/顺序，补齐内存类型计数、shader cache atime权限拒绝只尝试一次、room线程exit guard、空闲parked image/buffer与empty block定时退休；前端适配46fdc91持久memory-pressure source，回收idle runtime与最多32项/1MiB自有索引cache，pending CB资源仍持有，不清用户缓存/不丢活跃surface。
 - **顶点修复**：默认用`0..n-1, n-1…`UInt32索引补到12倍数，baseVertex=start，原顶点绑定/vertex_id/base_vertex/instance保持，不再编码时CPU拷贝应用顶点。索引不可变、CB持有、额外64B真实尾部供现有IB widen；支持旧layout为空/顶点由GPU写或raw buffer读取的直绘路径。仅完整triangle list、count≤65536、signed-safe base/range、fill＋rasterization且**编译后vertex_writes_memory=false**才补齐，副作用/线框/partial primitive原样。应用indexed/indirect不改；`x9p1`旧snapshot对照、`x9p0`完全关闭。原rev240/241证明的是旧snapshot，不把新索引路径说成已硬件证实。
 - **确定缓存缺口**：旧`mapping_id`接受plane/subrange，render span可能仅清部分甚至0B，却发布整张surface的clean seed，别的alias/plane同seed便跳过。现在仅整张mapping可挂x9lc，且bytes==resource.bytes才发布seed；局部import走普通cache plan。CPU acquire映射失败保留dirty，成功使用atomic exchange，仍依赖原有CPU/GPU所有权协议，没有放宽coherent或全局跳过。
-- **构建里程碑/边界**：初版前端arm64-iOS16单位编译exit0、两条既有capture协议warning；随后补副作用准入，待完整插件覆盖。fresh963f首次被旧builder按stage_trace文件误判为pan205，补丁门exit1、无编译；该文件来自补丁本身，现增加精确git pin识别，新私有源码回到pristine后30patch全应用成功，Rust release正在编译。原276源码/镜像/allowlist未动；没有测试套件/设备/ADB/mailbox/root写入/成功产物二次校验。下一步完成277插件、匹配allowlist与固定kernel/boot，再只由用户stage/启动和同场景验收。
+- **早期构建记录（最终结果以下为准）**：初版前端arm64-iOS16单位编译exit0、两条既有capture协议warning；随后补副作用准入，待完整插件覆盖。fresh963f首次被旧builder按stage_trace文件误判为pan205，补丁门exit1、无编译；该文件来自补丁本身，现增加精确git pin识别，新私有源码回到pristine后30patch全应用成功，Rust release正在编译。原276源码/镜像/allowlist未动；没有测试套件/设备/ADB/mailbox/root写入/成功产物二次校验。下一步完成277插件、匹配allowlist与固定kernel/boot，再只由用户stage/启动和同场景验收。
+- **插件完成/固定源码**：独立源码 **f307fda**，已精确合入main **ef0b4b6**（其余窗口NOTES/蜂窝工作未覆盖、未夹带暂存）。`plugin-build2.exit=0`：30patch从pristine成功，Rust release **7m48s**、最终ObjC++/C/链接/签名全通过，仅两条既有capture协议warning；最终编译包含vertex_writes_memory准入。`kernel-units.exit=0`，SweetSurface/SweetX9RenderService真实模板编译均true，共24条既有warnings。PanVK仅重新版本化实跑276 ICD，无Mesa代码变化，panvk-package.exit0。新277包10文件、payload **53321728B**，plugins-package.exit0，allowlist与包配套入库；旧276源码/包保持，不替换默认旧runtime目录。`gh run list`对f307fda/ef0b4b6均exit0=[]，无CI run，无push。
+- **固定构建输入（已完成）**：继续固定独立树，`build.py all --name x9-gpu277-indices-cache --config /Users/tosasitill/ios_plj110/.local/x9/work/dual-sim-180/cbn-local-config.json --boot-config /Users/tosasitill/ios_plj110/.local/x9/work/dual-sim-180/full-boot-config.json -j 8`；不传--revision，不重复已成功插件。603B完整参数/32GiB root/真实radio/CBN输入不变，不添加其它默认off开关。最终kernel/boot结果见下一条，仍无新上机结论。
 
-## GPU活动交接(GPU-PAD-1,2026-11-10): 顶点补齐覆盖/绑定恢复与真实资源barrier修正;276联合候选已构建,未上机
+- **最终交付**：完整源码/allowlist固定独立 **14a033f**，`all-build.exit=0`，**89/89 overlay＋5prebuilt、kernel link/strip、own-code工具/HAL、shim编译链接及boot内置准入全部成功**。构建器报告 **Image30539776B、boot13852672B（约13.21MiB）**。唯一新候选 **`x9/out/x9-gpu277-indices-cache/boot.img`**，同目录含完整277 plugin-package，输出一次ditto到主目录，output-copy.exit0；没有再解包/hash/反汇编/重建或额外测试。`gh run list --commit 14a033f`为[]/exit0，无CI run；源码已合入main ef0b4b6，allowlist/最终交接随后独立提交，无push。镜像只包含695cdae祖先及本轮GPU修复，**不包含冻结之后并发SMS/蜂窝f01ba21等提交**；不会拿最新main提交冒充镜像源码。
+- **准确上机步骤/验收**：Android连接时用户执行 `X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/x9-gpu277-indices-cache`（自带root preflight），成功出现Mailbox committed后用户手动 `fastboot boot x9/out/x9-gpu277-indices-cache/boot.img`。**必须先stage277，不可留276 mailbox直接boot**。同一文字密集列表/滚动、控制中心、开关app场景保存截图/录像及新的`~/N.txt`；检查 `rg -n 'active plugin=|X9 PAD:|X9 RENDER ASYNC window|X9 METAL pressure:' ~/N.txt`，应active277＋mode2＋indexed命中，再以实际三角形/文字/像素验证，命中/failed0不代替正确。只改一个变量时boot-token `x9p1`对照旧snapshot、`x9p0`关闭；当前输入实际603B，加空格＋4B token会到608B、超过607B门；如需对照镜像须先记录等价参数压缩，不能直接追加或丢功能参数，本轮未另打对照包。回滚276必须配套恢复276包＋旧276boot。
+- **交接/剩余**：本轮没有设备命令/实际mailbox/分区/root写入，未确认三角形消失、竖向256px接缝修复、fps提升或内存压力回收实跑。原始/解码日志、compile命令、失败/成功exit、upstream-pins及build-inputs均在私有`.local/x9/work/gpu-upstream-20261111/`。旧默认`.local/x9/work/x9-metal-render/metal2vulkan-963f-source`保留276 stamp，未来main重建插件须 `prepare-metal2vulkan-963f.py --dest <新的目录>` 后 `build-general-metal.py --revision <新号> --runtime-source <新目录>`；不要往旧stamp强行叠补丁或覆写原包。现成277包可直接stage，无需重编。
+
+## GPU前次交接(GPU-PAD-1,2026-11-10): 顶点补齐覆盖/绑定恢复与真实资源barrier修正;276联合候选已构建,未上机
 
 - **本轮用户观察/运行证据**:用户仍观察少量三角形闪烁、渲染/显示错误,文字多时明显。只读`~/181.txt`确认32.718s `X9 PAD padded=1 skipped=0 last=6->12`,82.458s padded16384;捕获内ASYNC窗口failed均0,且IB WIDEN实际命中。**提交成功不等于像素正确**;旧skipped没有统计start非零/实例/超过96等入口排除,不能据skipped0证明文字批次已受保护。此轮没有新的设备测试/截图/像素回读。
 - **参考/确定差异**:只读本地UniXNU GPU parity引用及新取`UniXNU/AdrenoMetal`固定HEAD **da7aedd827dfdb581eac041615c45cc1cd5e71db**,没有将A740/Turnip硬件修复混入Mali。继续保留现有963f+ce63701译码器与PanVK275代码;没有证据要求换整个translator。实际执行的pinned runtime `argument_table.rs`明确offset setter会使inline bytes失效(即使offset0),自己的pad镜像却保留旧bytes并在pad后恢复;`fence.rs`真实resources barrier会`barrier_orders_loads_of`,旧前端改成buffers|textures scope时漏掉这个分支。**这两个API差异已静态确认,不是181文字闪烁根因已实机确认**。
