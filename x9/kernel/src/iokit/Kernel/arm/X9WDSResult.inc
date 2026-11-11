@@ -60,7 +60,7 @@ static inline bool x9wr_get_family(const uint8_t *p,unsigned n,unsigned bytes,
  unsigned mtu_tag,bool requested,x9wr_family &out){
  unsigned count=0,dns=0;
  if(!x9wr_optional_byte(p,n,count_tag,count)||count>1||
-    !x9wr_optional_byte(p,n,dns_count_tag,dns)||dns>3)return false;
+    !x9wr_optional_byte(p,n,dns_count_tag,dns)||dns>4)return false; // MD caps at 4 (913275ec)
  if(requested&&count!=1)return false;
  if(!requested&&(count||dns))return false;
  x9q_view address=x9w_tlv(p,n,address_tag);
@@ -73,7 +73,7 @@ static inline bool x9wr_get_family(const uint8_t *p,unsigned n,unsigned bytes,
   if(i<dns){if(!d.p||d.n!=bytes)return false;memcpy(out.dns[i],d.p,bytes);}
   else if(d.p)return false;
  }
- out.dns_count=(uint8_t)dns;
+ out.dns_count=(uint8_t)(dns>3?3:dns); // a 4th server is not used
  x9q_view mtu=x9w_tlv(p,n,mtu_tag);
  if(mtu.p){if(mtu.n!=4)return false;out.mtu_present=true;out.mtu=x9q_u32(mtu.p);}
  /* Zero remains unspecified: no invented 1500/1280 or cross-family copy. */
@@ -124,10 +124,14 @@ static inline bool x9wr_decode_ifup(const uint8_t *p,unsigned n,unsigned sim,
 static inline bool x9wr_match_family(const x9wr_family &get,const x9wr_family &eif,
  unsigned bytes,x9wr_family &out){
  if(!get.address_present)return !eif.address_present;
- if(!eif.address_present||memcmp(get.address,eif.address,bytes)||!eif.mtu_present||
-    eif.mtu<(bytes==4?68u:1280u)||eif.mtu>X9D_TX_SIZE||
-    (get.mtu_present&&get.mtu&&get.mtu!=eif.mtu))return false;
- out=get;out.mtu=eif.mtu;out.mtu_present=true;return true;
+ if(!eif.address_present||memcmp(get.address,eif.address,bytes))return false;
+ // The network may give no MTU (MD then omits ACT/GET 0x123/0x124 and the
+ // EIF MTU word is 0). Use whichever valid value exists (the smaller if both),
+ // else 1500, the Android default for a PDN without a network MTU.
+ const uint32_t low=bytes==4?68u:1280u;
+ bool e=eif.mtu_present&&eif.mtu>=low&&eif.mtu<=X9D_TX_SIZE,g=get.mtu_present&&get.mtu>=low&&get.mtu<=X9D_TX_SIZE;
+ uint32_t mtu=e&&g?(eif.mtu<get.mtu?eif.mtu:get.mtu):e?eif.mtu:g?get.mtu:1500u;
+ out=get;out.mtu=mtu;out.mtu_present=true;return true;
 }
 static inline bool x9wr_match_settings(const x9wr_get &get,const x9wr_ifup &eif,
  const x9wr_identity &current,x9wr_settings &output){

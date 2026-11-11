@@ -106,6 +106,9 @@ struct x9w_bearer {
  bool md_down;
  unsigned slot,op,min_cid,max_cid,channel,mtu,dns_count;
  uint64_t generation,token,deadline,reply_deadline,next,if_floor,result_epoch,route_lifetime;
+ // MTU from ACT 0x123; 0 = network gave none (MD adds 0x123 only when its
+ // +0x2c8 flag is set, 913277822). mtu is the effective route MTU.
+ unsigned md_mtu;
  uint32_t handle,len,trans_id;
  uint8_t cid,sim_slot,req[X9Q_REQ],ip[4],dns[2][4];
  char apn[101];
@@ -318,23 +321,38 @@ static bool x9w_check(x9w_bearer &b){
 static bool x9w_get_settings(x9w_bearer &b,const uint8_t *p,unsigned n){
  x9wr_identity current={b.generation,b.result_epoch,b.if_floor,b.sim_slot,b.cid,4,0};
  x9wr_get get={};unsigned dns=0;
- if(!x9w_byte(p,n,0x10d,dns)||dns>3||b.result_epoch!=x9a_epoch||!x9w_live(b)||!x9wr_same_identity(b.query,current)||
-    !x9wr_decode_get(p,n,b.query,get)||get.channel!=b.channel||get.trans_id!=b.trans_id||
-    !get.v4.mtu_present||get.v4.mtu!=b.mtu||memcmp(get.v4.address,b.ip,4))return false;
+ if(!x9w_byte(p,n,0x10d,dns)||dns>4||b.result_epoch!=x9a_epoch||!x9w_live(b)||!x9wr_same_identity(b.query,current)){
+  printf("X9 WDS: GET205 identity/dns gate failed (dns %u)\n",dns);return false;}
+ if(!x9wr_decode_get(p,n,b.query,get)){printf("X9 WDS: GET205 decode failed\n");return false;}
+ if(get.channel!=b.channel||get.trans_id!=b.trans_id||
+    (get.v4.mtu_present&&get.v4.mtu&&b.md_mtu&&get.v4.mtu!=b.md_mtu)||memcmp(get.v4.address,b.ip,4)){
+  printf("X9 WDS: GET205 differs from ACT (channel %u/%u trans %u/%u mtu %u/%u addr-same %u)\n",get.channel,b.channel,
+   get.trans_id%100,b.trans_id%100,get.v4.mtu_present?get.v4.mtu:0,b.md_mtu,!memcmp(get.v4.address,b.ip,4));return false;}
  // Still corroborate the earlier ACT facts; do not retarget a live route.
  b.get_result=get;return true;
 }
+// One non-private line naming the ACT CNF fields our gate saw.
+static void x9w_act_diag(const x9w_bearer &b,const uint8_t *p,unsigned n){
+ unsigned cid=999,type=999,channel=999,trans=999,mtu=0,count=999,dns=999,v6=0;
+ x9w_byte(p,n,0x100,cid);x9w_byte(p,n,0x102,type);x9w_word(p,n,0x125,channel);x9w_word(p,n,0x12a,trans);
+ bool has_mtu=x9w_word(p,n,0x123,mtu);x9w_byte(p,n,0x103,count);x9w_byte(p,n,0x10d,dns);x9w_byte(p,n,0x108,v6);
+ x9q_view ip=x9w_tlv(p,n,0x8104);
+ printf("X9 WDS: ACT CNF rejected: cid %u/%u-%u type %u count %u v6count %u dns %u channel %u trans%%100 %u mtu %s%u ip-len %u gone %u abandoned %u dpmaif %u\n",
+  cid,b.min_cid,b.max_cid,type,count,v6,dns,channel,trans==999?999:trans%100,has_mtu?"":"absent ",mtu,ip.p?ip.n:0,b.gone,b.abandoned,x9d_ready());
+}
 static bool x9w_settings(x9w_bearer &b,const uint8_t *p,unsigned n){
- unsigned cid,type,channel,mtu,count,dns;
+ unsigned cid,type,channel,mtu=0,count,dns;
  if(!x9w_byte(p,n,0x100,cid)||cid!=b.cid||!x9w_byte(p,n,0x102,type)||(type!=1&&type!=3)||
-  !x9w_word(p,n,0x125,channel)||channel>=20||!x9w_word(p,n,0x123,mtu)||mtu<68||mtu>X9D_TX_SIZE||
+  !x9w_word(p,n,0x125,channel)||channel>=20||
   !x9w_byte(p,n,0x103,count)||count!=1||!x9w_byte(p,n,0x10d,dns)||dns>4)return false;
+ x9q_view m=x9w_tlv(p,n,0x123);
+ if(m.p&&(m.n!=4||((mtu=x9q_u32(m.p))!=0&&(mtu<68||mtu>X9D_TX_SIZE))))return false; // absent/0 = unspecified
  x9q_view ip=x9w_tlv(p,n,0x8104);
  if(!ip.p||ip.n!=4||!ip.p[0]||ip.p[0]>=224||ip.p[0]==127)return false;
  uint8_t addresses[2][4]={};
  for(unsigned i=0;i<dns;i++){x9q_view d=x9w_tlv(p,n,0x810e + i);if(!d.p||d.n!=4)return false;if(i<2)memcpy(addresses[i],d.p,4);}
- if(b.mtu&&(channel!=b.channel||mtu!=b.mtu||memcmp(b.ip,ip.p,4)))return false; // no live retargeting
- b.channel=channel;b.mtu=mtu;memcpy(b.ip,ip.p,4);b.dns_count=dns>2?2:dns;memcpy(b.dns,addresses,sizeof(addresses));
+ if(b.ip[0]&&(channel!=b.channel||mtu!=b.md_mtu||memcmp(b.ip,ip.p,4)))return false; // no live retargeting
+ b.channel=channel;b.md_mtu=mtu;memcpy(b.ip,ip.p,4);b.dns_count=dns>2?2:dns;memcpy(b.dns,addresses,sizeof(addresses));
  return true; // no gateway/netmask derived from stale versioned tags
 }
 static void x9w_handle_reply(x9w_bearer &b){
@@ -349,11 +367,14 @@ static void x9w_publish(x9w_bearer &b,unsigned mux){
  x9wr_identity current={b.generation,b.result_epoch,b.if_floor,b.sim_slot,b.cid,4,0};
  x9wr_settings runtime={};
  if(b.result_epoch!=x9a_epoch||!x9wr_match_settings(b.get_result,in.facts,current,runtime)||
-    !x9wr_ipv4_facts(runtime)||in.mtu!=b.mtu||memcmp(in.ip,b.ip,4)||!b.pending||!x9w_live(b)||
-    x9w_next_handle>=0xfffffffeu||x9w_retirements[mux-1].pending||!x9d_bind(mux,b.channel,x9wr_ipv6_attach_ready(runtime)?3:1,b.mtu,b.route_lifetime)){
+    !x9wr_ipv4_facts(runtime)||memcmp(in.ip,b.ip,4)||!b.pending||!x9w_live(b)||
+    x9w_next_handle>=0xfffffffeu||x9w_retirements[mux-1].pending||
+    !x9d_bind(mux,b.channel,x9wr_ipv6_attach_ready(runtime)?3:1,runtime.v4.mtu,b.route_lifetime)){
+  printf("X9 WDS: publish failed mux %u (match %u v4 %u addr-same %u retire %u)\n",mux,runtime.matched,x9wr_ipv4_facts(runtime),
+   !memcmp(in.ip,b.ip,4),x9w_retirements[mux-1].pending);
   b.abandoned=true;x9w_error(b,X9Q_NOT_READY);x9w_deactivate(b,mux);return;
  }
- b.runtime=runtime;b.handle=++x9w_next_handle;b.active=true;b.op=0;b.next=x9q_ms()+10000;
+ b.mtu=runtime.v4.mtu;b.runtime=runtime;b.handle=++x9w_next_handle;b.active=true;b.op=0;b.next=x9q_ms()+10000;
  x9w_client &c=x9w_clients[b.slot];bzero(&c.baseline,sizeof(c.baseline));c.report_next=0;c.last_rat=0;
  c.last_call_bytes_valid=false;bzero(&c.last_call,sizeof(c.last_call));
  printf("X9 WDS: SIM%u PDP activated call %u -> ccmni%u -> mux %u IPv4 MTU %u PDP%u v6-ready %u, ACT+GET+EIF/IFUP verified, DPMAIF bound\n",
@@ -415,7 +436,7 @@ static void x9w_result(x9w_bearer &b,unsigned mux,const uint8_t *p,unsigned n){
   // partial profile. This IPv4-only dialler cleans up instead of falling back.
   if(result||b.gone||b.abandoned||!x9w_settings(b,p,n)||
      !x9w_word(p,n,0x12a,b.trans_id)||b.trans_id%100!=b.channel||!x9d_ready()){
-   b.abandoned=true;x9w_error(b,X9Q_NOT_READY);x9w_deactivate(b,mux);return;
+   x9w_act_diag(b,p,n);b.abandoned=true;x9w_error(b,X9Q_NOT_READY);x9w_deactivate(b,mux);return;
   }
   if(!x9w_check(b)){b.abandoned=true;x9w_error(b,X9Q_BUSY);x9w_deactivate(b,mux);}return;
  }
@@ -423,6 +444,7 @@ static void x9w_result(x9w_bearer &b,unsigned mux,const uint8_t *p,unsigned n){
   if(b.gone){x9w_clear(b,mux);return;}
   if(b.abandoned){x9w_deactivate(b,mux);return;}
   if(result||!x9w_get_settings(b,p,n)||!x9d_ready()){
+   printf("X9 WDS: GET205 result %u rejected mux %u\n",result,mux);
    // Keep 203 only if this reply proves the CID still maps to our route.
    x9wr_get still={};
    if(result||!x9wr_decode_get(p,n,b.query,still)||still.channel!=b.channel||still.trans_id!=b.trans_id)b.md_down=true;
@@ -469,7 +491,7 @@ static bool x9w_interface_event(const uint8_t *p,unsigned n,unsigned sim){
   // is only used after it matches GET205. No tag103 fallback MTU.
   if(x9wr_decode_ifup(p,n,sim,x9a_epoch,in.serial,in.facts)&&in.facts.v4.address_present){
    in.mtu=in.facts.v4.mtu;memcpy(in.ip,in.facts.v4.address,4);
-   in.valid=in.mtu>=68&&in.mtu<=X9D_TX_SIZE;
+   in.valid=true; // MTU may be 0/unspecified; x9wr_match_family picks it
   }
   // Foreign IMS/IPv6 events do not poison the IPv4 dialler. An owned route
   // with an unsupported IFUP remains disconnected and is cleaned up.
@@ -477,7 +499,7 @@ static bool x9w_interface_event(const uint8_t *p,unsigned n,unsigned sim){
  printf("X9 WDS: MD SIM%u EIF/IFST ccmni%u command %u (payload private)\n",sim+1,trans%100,cmd);
  for(unsigned m=0;m<CBP_INTERFACES;m++){x9w_bearer &b=x9w_bearers[m];
   if(b.used&&b.owned&&b.sim_slot==sim&&b.trans_id==trans&&in.serial>b.if_floor&&
-     (cmd!=0||!in.valid||(b.active&&(in.mtu!=b.mtu||memcmp(in.ip,b.ip,4))))){
+     (cmd!=0||!in.valid||(b.active&&memcmp(in.ip,b.ip,4)))){
    if(cmd!=0)b.md_down=true; // MD ifdown precedes its logical CID removal
    b.abandoned=true;x9w_disconnect(b,m+1);x9w_error(b,X9Q_NOT_READY);
   }
