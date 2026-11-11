@@ -74,7 +74,7 @@ struct x9d_state {
     uint32_t last_ul, last_dl; bool legacy_pit_reported;
     uint64_t tx_packets, tx_done, rx_packets, rx_dropped, rejected, flow_events,next_lifetime;
     // TX progress watch (vendor drv3_dump_register subset on a stall).
-    uint64_t tx_progress_ms, tx_seen_done, stale_completions, bind_ms; unsigned stall_dumps, rx_dumps; bool stall_reported;
+    uint64_t tx_progress_ms, tx_seen_done, stale_completions, bind_ms; unsigned stall_dumps, rx_dumps; bool stall_reported, at_seen;
     int (*receiver)(uint32_t, const uint8_t *, uint32_t, uint32_t, uint64_t);
 };
 static x9d_state x9d;
@@ -672,7 +672,10 @@ static void x9d_poll() {
         x9d.hw_attempted = true; (void)x9d_hw_init();
     }
     if (!x9d_ready()) return;
-    if (!x9_md_at_online()) { x9d_fail("MD/AT offline"); return; }
+    // DPMAIF now starts at BOOT_WAITING_FOR_HS1, before the AT/MIPC transport
+    // is online. Only a transport that went DOWN after being up is fatal.
+    if (!x9_md_at_online()) { if (x9d.at_seen) x9d_fail("MD/AT offline"); return; }
+    if (!x9d.at_seen) { x9d.at_seen = true; x9d_dump("at-online", true); }
     if (x9d_rd(x9d.infra, 0xd20) & 12) { x9d_fail("clock gated while active"); return; }
     uint32_t ul = x9d_rd(x9d.pd + 0x400, 0), dl = x9d_rd(x9d.pd + 0x400, 0x50);
     uint32_t checked_dl = dl;
