@@ -1375,7 +1375,16 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **不能称为全部USB完成**:本轮暂无枚举/DMA/ue0 ping/bulk回环实机结果,live EMI/MPU允许普通XNU DMA页也未证明。`native_apple_stack=0`,没有冒充IOUSBDeviceController或AppleUSBDeviceMux;原始configd USBDeviceConfiguration/lockdownd、Finder/iTunes Trust/配对/照片同步仍缺20H392 controller adapter及kext构建接入。USB3 XS-PHY/retimer、charger Type-C role与原生xHCI也未完成。参考文章chip/board/security-domain/fsid/锁状态条件要到原生栈接通后才验证,不先改身份/配对状态制造成功。
 - **下一步/验收**:先在用户手动启动的单一候选核对`CAP_EPINFO/TXFIFO/RXFIFO/MISC`→config1/alt1→真实QMU OUT/IN→ue0 ping,再用iOS `usbctl --echo`+host单次echo证明host→iOS→host字节相同。保留EP0日志,无需重建Metal插件/mailbox。接口/回退/构建说明在`x9/usb/README.md`;不要求用户现在连续刷试探镜像。
 
-## 蜂窝当前交接(CELL149-MOBILEDATA,2026-11-11): Android MIPC基准找到差异——RIL在ACT前发DATA_SET_CONFIG(MOBILE_DATA=1)，我们从未发；cell149补上，未上机
+## 蜂窝当前交接(CELL150-URSP,2026-11-11): 206中MOBILE_DATA已开但仍无下行；cell150按RIL逐字段构造ACT(含URSP流量描述)，未上机
+
+- **206.txt**(cell149)：`DATA_SET_CONFIG ... CNF valid result 0`；ACT CNF 0，MD自分配ccmni1/ccmni2；UL DNS包正确且全完成，RX 0；IFCHANGE(5)后约11s MD IFDOWN，iOS重拨同样。MOBILE_DATA不是(唯一)原因。
+- **分析**：设备驻留5G SA；SA下UE按URSP把流量映射到PDU会话。RIL的ACT带`URSP_TRAFFIC_DESC 0x10d`(672B，`mipc_ursp_traffic_desc_struct_struct4`：is_match_all@0、dnn_len@1、dnn@4、os_id、app_id、v4/v6、端口、prot_id_next_hdr@414、dst_fqdn)、`0x11e {0f,0..}`、`URSP_EVAL_FLAG 0x10f=0`等，我们从未带。
+- **修复 main `89d35a6`**：ACT逐字段同RIL：USERID/PASSWORD空、0x11e、0x10f=0、fallback 0x7f、APN、BEARER_BITMASK 0x7ffdffff、APN_TYPE 1、REUSE 0、PDP 3、APN_INDEX 0、ROAMING 3、URSP描述(DNN=请求APN→否则上次ACT CNF报回的APN(仅内存)→否则is_match_all=1；prot_id 0xff)；去掉AUTH_TYPE/IF_ID；`x9w_frame`缓冲512→1024。日志只打DNN长度，不打APN。单编True。
+- **过程注意**：本轮第一次提交漏了`x9w_frame f(0x201,...)`一行导致编译失败，命令链未按编译结果中止而照常提交并启动构建；已中止构建、补行、amend两个提交、删除残留输出目录后重建。以后构建前须以单编结果为门。
+- **候选 `x9/out/x9-cell150-ursp-md/boot.img`**(worktree `8de65e7`)，三命令exit0，boot 13537280B，内核含新字符串；参数同131，插件276，**无需mailbox**。
+- **下一步**：用户boot cell150→`~/207.txt`。看`ACT URSP traffic descriptor match-all/dnn`、ACT CNF(PDP应为3)、`PDP3 v6-ready`、RX。首次ACT若为match-all且失败/无下行，第二次ACT会带上CNF报回的DNN。
+
+## 蜂窝前次交接(CELL149-MOBILEDATA,2026-11-11): Android MIPC基准找到差异——RIL在ACT前发DATA_SET_CONFIG(MOBILE_DATA=1)，我们从未发；cell149补上，未上机
 
 - **Android采集**(用户进Android，蜂窝正常；产物`.local/x9/android-dpmaif-20261111/`，不入git)：
   - 端口占用：`mtkfusionrild`用ttyCMIPC1(与我们相同)，ttyCMIPC2/3/4/6空闲。ccci MIPC字符设备独占打开，读写须同一fd(`exec 3<>`)。
