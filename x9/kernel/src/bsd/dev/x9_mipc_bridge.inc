@@ -111,6 +111,18 @@ uint64_t x9_md_mipc_submit(const uint8_t *p,uint32_t n){
   * 020d has no TLVs; the target is the header SIM mask. Only the DDS
   * owner may issue this operation, retaining its token through late 020e. */
  else if(id==0x20d){if(x9_md_sim_count()!=2||(p[8]!=1&&p[8]!=2)||n!=16)return 0;}
+ /* INTERNAL_EIF_REQ (vendor mipc_msg_tlv_const.h 0x313): the netagent
+  * report of the AP interface state for an MD-owned ccmni. Only
+  * TRANSID100/u32 + CMD101/u8 IFUP(0)|IFDOWN(1), and for IFUP the
+  * ADDRESS_TYPE104/u8 1..3, in that order with zero padding. No address,
+  * IPUPDATE/IPCHG or other netagent commands. */
+ else if(id==0x313){
+  if((p[8]!=1&&(p[8]!=2||x9_md_sim_count()!=2))||(n!=32&&n!=40)||
+     x9mi_u16(p+16)!=0x100||x9mi_u16(p+18)!=4||
+     x9mi_u16(p+24)!=0x101||x9mi_u16(p+26)!=1||p[28]>1||p[29]||p[30]||p[31])return 0;
+  if(n==40&&(p[28]!=0||x9mi_u16(p+32)!=0x104||x9mi_u16(p+34)!=1||p[36]<1||p[36]>3||p[37]||p[38]||p[39]))return 0;
+  if(n==32&&p[28]==0)return 0; // IFUP always carries its address type
+ }
  else if((p[8]!=1&&(p[8]!=2||x9_md_sim_count()!=2))||
     (id!=0x201&&id!=0x203&&id!=0x205&&id!=0x219&&id!=0x307))return 0;
  uint64_t token=0;lck_mtx_lock(&x9_mi_lock);
