@@ -45,6 +45,8 @@ unsigned x9_md_sim_count(void);
 /* MD DHL (CCB user 0) observation: read-only headers, consumes pages so the
  * MD ring never stalls. Called periodically from the QMI owner thread. */
 void x9_md_log_poll(void);
+/* First call starts the 10 s post-event save window of the MD DHL capture. */
+void x9_md_log_mark(const char *what);
 uint64_t x9_md_sim_at_submit(unsigned sim, const char *command);
 int x9_md_sim_at_take(uint64_t token, char *response, uint32_t capacity, int *result);
 void x9_md_sim_at_cancel(uint64_t token);

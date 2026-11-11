@@ -321,3 +321,20 @@ release_pack:
  return result;
 #endif
 }
+
+/* X9 MD DHL capture: write the RAM ring (two segments, oldest first) to a new
+ * file once. Called from the modem capture thread (x9_modem.inc). */
+int x9_mdlog_save(const char *path,const void *a,uint64_t an,const void *b,uint64_t bn);
+int x9_mdlog_save(const char *path,const void *a,uint64_t an,const void *b,uint64_t bn)
+{
+ vnode_t vp=NULLVP;vfs_context_t ctx=vfs_context_kernel();
+ int error=vnode_open(path,O_CREAT|O_TRUNC|FWRITE|O_NOFOLLOW,0644,0,&vp,ctx);if(error)return error;
+ off_t off=0;const void *seg[2]={a,b};uint64_t len[2]={an,bn};
+ for(unsigned s=0;s<2&&!error;s++)for(uint64_t d=0;d<len[s]&&!error;){
+  int n=(int)((len[s]-d)>(1u<<20)?(1u<<20):(len[s]-d)),resid=0;
+  error=vn_rdwr(UIO_WRITE,vp,(caddr_t)((const uint8_t *)seg[s]+d),n,off,UIO_SYSSPACE,0,vfs_context_ucred(ctx),&resid,current_proc());
+  if(!error&&resid)error=EIO;d+=(uint64_t)n;off+=n;
+ }
+ int e2=VNOP_FSYNC(vp,MNT_WAIT,ctx);if(!error)error=e2;
+ vnode_close(vp,FWRITE,ctx);return error;
+}

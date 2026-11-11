@@ -946,7 +946,16 @@ static void x9_modem_start(void) {
  * Stage 1 only reports whether the MD produces DHL output by itself and
  * consumes it (read = release = write), like read_get+read_done. No UL/command
  * is written to the MD. */
+static int x9mdl_running;
+static void x9mdl_poll_stage1(void);
 void x9_md_log_poll(void){
+ if(sweet_x9_arg("x9_mdlog",1)&&!x9mdl_running){
+  extern void x9mdl_start(void);x9mdl_start();
+ }
+ if(!x9mdl_running)x9mdl_poll_stage1();
+ else {extern void x9mdl_report(void);x9mdl_report();}
+}
+static void x9mdl_poll_stage1(void){
  static const uint32_t dl[4]={1024*16,1024*20*6,512*296,512*8},ul[4]={1024*16,128,1024*32,128};
  static uint32_t last_wr[4],seen[4];static uint64_t pages[4];static unsigned polls;
  struct x9md_reg *cc=&x9md_regs[4];
@@ -976,4 +985,128 @@ void x9_md_log_poll(void){
   }
   base+=dl[e]+ul[e];
  }
+}
+
+/* ---- MD DHL log capture (stage 2) -----------------------------------------
+ * Start protocol replayed from the Android emdlogger capture (LD_PRELOAD on
+ * ccci_ccb_write_done/read_get, .local/x9/android-mdlog-20261111/ccbhook.txt):
+ * SPLM frames on DHL buf0 UL: 59 00 | u16 len | u32 param | dir | id | token |
+ * xor(b0..b10) + payload. Minimal start = 0x05{03000000} RESET_SPLM_STATE,
+ * 0x0f{00000000}, 0x00{01000000} AP_LOGGING_IS_READY, 0x20{01 03} configure,
+ * then the 292 B filter DHL frame on buf2 UL. UL ring (libccci write_alloc /
+ * write_done): hdr+0x20: +0 guard 0xddbbccaa (MD), +4 alloc, +8 MD release,
+ * +0x10 write; page = {0x22222222, len, payload}; doorbell = CCIF ch7
+ * (AP_MD_CCB_WAKEUP) via BUSY/TCHNUM like md_ccif_send.
+ * The MD then streams ~3.7 MB/s into buf2 DL (148 KB ring = ~40 ms), so a
+ * dedicated thread drains every 2 ms into a 64 MiB RAM ring; 10 s after the
+ * first ACT (x9_md_log_mark) the ring is written once, oldest first, to
+ * /private/var/x9-mdlog.bin (pull_ios_logs.py --paths private/var/x9-mdlog.bin). */
+static const uint8_t x9mdl_filter[292]={0xac,0xca,0xef,0x10,0x14,0x01,0x00,0x00,0x10,0xa0,0x00,0x00,0xa8,0x6b,0xef,0x10,0x17,0x08,0x00,0x00,0xac,0xdb,0xcf,0xe5,0x16,0x0c,0x01,0x00,0x00,0x37,0x00,0x37,0x44,0x65,0x66,0x61,0x75,0x6c,0x74,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xbd,0xdb,0x33,0x03};
+static const uint32_t x9mdl_dl[4]={1024*16,1024*20*6,512*296,512*8},x9mdl_ul[4]={1024*16,128,1024*32,128};
+#define X9MDL_RING (64u<<20)
+static uint8_t *x9mdl_ring;static uint64_t x9mdl_total,x9mdl_pages[4],x9mdl_bad,x9mdl_full,x9mdl_mark_total;
+static uint64_t x9mdl_mark_ms,x9mdl_saved_total;static int x9mdl_saved,x9mdl_save_err=-1,x9mdl_frozen;
+static unsigned x9mdl_token,x9mdl_splm_rx,x9mdl_ul_err;
+static volatile uint32_t *x9mdl_data;
+extern int x9_mdlog_save(const char *path,const void *a,uint64_t an,const void *b,uint64_t bn);
+static uint64_t x9mdl_ms(void){uint64_t ns;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);return ns/1000000;}
+static uint32_t x9mdl_base(unsigned e,int ul){uint32_t b=0;for(unsigned i=0;i<e;i++)b+=x9mdl_dl[i]+x9mdl_ul[i];return b+(ul?x9mdl_dl[e]:0);}
+static int x9mdl_ul_put(unsigned e,const uint8_t *p,uint32_t len){
+ uint32_t h=x9md_regs[4].ap_off+e*64+0x20;
+ uint32_t guard=x9md_m32(h),a=x9md_m32(h+4),rel=x9md_m32(h+8),pg=x9md_m32(h+0x14),bs=x9md_m32(h+0x18),mg=x9md_m32(h+0x1c);
+ if(guard!=0xddbbccaau||mg!=0x1100ffeeu||!pg||bs!=x9mdl_ul[e]||len+8>pg)return -1;
+ uint32_t n=bs/pg;if(a>=n||((a+1)%n)==rel)return -2;
+ uint32_t o=x9mdl_base(e,1)+a*pg;
+ volatile uint32_t *w=x9mdl_data+o/4;w[0]=0x11111111u;
+ for(uint32_t i=0;i<(len+3)/4;i++){uint32_t v=0;for(unsigned k=0;k<4&&i*4+k<len;k++)v|=(uint32_t)p[i*4+k]<<(8*k);w[2+i]=v;}
+ w[1]=len;__asm__ volatile("dsb sy":::"memory");w[0]=0x22222222u;__asm__ volatile("dsb sy":::"memory");
+ x9md_w32(h+4,(a+1)%n);x9md_w32(h+0x10,(a+1)%n);__asm__ volatile("dsb sy":::"memory");
+ if(!(x9md_rd(x9md_ap,X9MD_BUSY)&(1u<<7))){x9md_wr(x9md_ap,X9MD_BUSY,1u<<7);x9md_wr(x9md_ap,X9MD_TCHNUM,7);}
+ return 0;
+}
+static int x9mdl_splm(uint8_t id,uint32_t param,const uint8_t *pl,uint16_t n){
+ uint8_t f[64];if(n>52)return -3;
+ f[0]=0x59;f[1]=0;f[2]=(uint8_t)n;f[3]=(uint8_t)(n>>8);f[4]=(uint8_t)param;f[5]=(uint8_t)(param>>8);f[6]=(uint8_t)(param>>16);f[7]=(uint8_t)(param>>24);
+ f[8]=0;f[9]=id;f[10]=(uint8_t)(++x9mdl_token);f[11]=0;for(unsigned i=0;i<11;i++)f[11]^=f[i];
+ for(unsigned i=0;i<n;i++)f[12+i]=pl[i];
+ int r=x9mdl_ul_put(0,f,12u+n);
+ printf("X9 MDLOG: SPLM tx id 0x%02x param %u len %u token %u -> %d\n",id,param,n,x9mdl_token,r);
+ if(r)x9mdl_ul_err++;
+ return r;
+}
+static void x9mdl_drain(unsigned e){
+ uint32_t h=x9md_regs[4].ap_off+e*64;
+ uint32_t rd=x9md_m32(h+0xc),wr=x9md_m32(h+0x10),pg=x9md_m32(h+0x14),bs=x9md_m32(h+0x18);
+ if(!pg||bs!=x9mdl_dl[e])return;
+ uint32_t n=bs/pg;if(rd>=n||wr>=n||rd==wr)return;
+ if(((wr+1)%n)==rd)x9mdl_full++;
+ uint32_t base=x9mdl_base(e,0);
+ while(rd!=wr){
+  volatile uint32_t *w=x9mdl_data+(base+rd*pg)/4;uint32_t m=w[0],len=w[1];
+  if(m!=0x22222222u||len>pg-8){x9mdl_bad++;}
+  else if(e==2){
+   if(!x9mdl_frozen&&x9mdl_ring){
+    for(uint32_t i=0;i<len;i+=4){uint32_t v=w[2+i/4];
+     for(unsigned k=0;k<4&&i+k<len;k++)x9mdl_ring[(x9mdl_total+i+k)%X9MDL_RING]=(uint8_t)(v>>(8*k));}
+    x9mdl_total+=len;
+   }
+  }else if(e==0&&x9mdl_splm_rx<60&&len>=12){
+   uint32_t w0=w[0+2],w1=w[1+2],w2=w[2+2];char t[49];unsigned tl=0;
+   for(uint32_t i=12;i<len&&tl<48;i++){uint8_t c=(uint8_t)(w[2+i/4]>>(8*(i%4)));t[tl++]=(c>=32&&c<127)?(char)c:'.';}
+   t[tl]=0;x9mdl_splm_rx++;
+   printf("X9 MDLOG: SPLM rx len %u hdr %08x %08x %08x \"%s\"\n",len,w0,w1,w2,t);
+  }
+  x9mdl_pages[e]++;rd=(rd+1)%n;
+ }
+ x9md_w32(h+0xc,rd);x9md_w32(h+8,rd);__asm__ volatile("dsb sy":::"memory");
+}
+static void x9mdl_thread(void *arg,wait_result_t wr){
+ (void)arg;(void)wr;
+ printf("X9 MDLOG: capture thread started, ring %u MiB\n",X9MDL_RING>>20);
+ static const uint8_t p05[4]={3,0,0,0},p0f[4]={0,0,0,0},p00[4]={1,0,0,0},p20[2]={1,3};
+ int r=x9mdl_splm(0x05,0,p05,4);delay(20000);x9mdl_drain(0);
+ r|=x9mdl_splm(0x0f,0,p0f,4);delay(20000);x9mdl_drain(0);
+ r|=x9mdl_splm(0x00,0,p00,4);delay(20000);x9mdl_drain(0);
+ r|=x9mdl_splm(0x20,0,p20,2);delay(20000);x9mdl_drain(0);
+ int fr=x9mdl_ul_put(2,x9mdl_filter,sizeof(x9mdl_filter));
+ printf("X9 MDLOG: filter frame (292 B) on buf2 UL -> %d; start sequence %s\n",fr,(r||fr)?"had errors":"sent");
+ for(;;){
+  for(unsigned e=0;e<4;e++)x9mdl_drain(e);
+  uint64_t now=x9mdl_ms();
+  if(x9mdl_mark_ms&&!x9mdl_saved&&now>=x9mdl_mark_ms+10000){
+   x9mdl_frozen=1;uint64_t tot=x9mdl_total,keep=tot<X9MDL_RING?tot:X9MDL_RING,start=tot-keep,so=start%X9MDL_RING;
+   uint64_t an=keep<X9MDL_RING-so?keep:X9MDL_RING-so;
+   printf("X9 MDLOG: saving %llu bytes (stream offset %llu..%llu, ACT mark at %llu) to /private/var/x9-mdlog.bin\n",keep,start,tot,x9mdl_mark_total);
+   uint64_t t0=x9mdl_ms();
+   x9mdl_save_err=x9_mdlog_save("/private/var/x9-mdlog.bin",x9mdl_ring+so,an,x9mdl_ring,keep-an);
+   x9mdl_saved=1;x9mdl_saved_total=tot;
+   printf("X9 MDLOG: save -> %d in %llu ms\n",x9mdl_save_err,x9mdl_ms()-t0);
+  }
+  delay(2000);
+ }
+}
+void x9mdl_start(void){
+ static int tried;
+ struct x9md_reg *cc=&x9md_regs[4];
+ if(tried||!x9md_nc||!x9md_ap||!cc->in_lk||cc->ap_off+4*64>X9MD_NC_SIZE)return;
+ for(unsigned k=0;k<x9md_ncr;k++)if(x9md_crs[k].id==1)x9mdl_data=x9md_cmap[k];
+ if(!x9mdl_data)return;
+ uint32_t h=cc->ap_off;
+ if(x9md_m32(h+0x20)!=0xddbbccaau||x9md_m32(h+0x1c)!=0x1100ffeeu)return; /* MD has not claimed the CCB yet */
+ tried=1;
+ vm_offset_t va=0;
+ if(kmem_alloc(kernel_map,&va,X9MDL_RING,KMA_DATA|KMA_ZERO,VM_KERN_MEMORY_IOKIT)!=KERN_SUCCESS){printf("X9 MDLOG: ring alloc failed\n");return;}
+ x9mdl_ring=(uint8_t *)va;
+ thread_t t;
+ if(kernel_thread_start(x9mdl_thread,NULL,&t)==KERN_SUCCESS){thread_deallocate(t);x9mdl_running=1;}
+}
+void x9mdl_report(void){
+ static unsigned n;if((n++%3))return; /* every ~9 s */
+ printf("X9 MDLOG: captured %llu bytes pages %llu/%llu/%llu/%llu bad %llu full-seen %llu splm-rx %u ul-err %u mark %llu saved %d err %d\n",
+  x9mdl_total,x9mdl_pages[0],x9mdl_pages[1],x9mdl_pages[2],x9mdl_pages[3],x9mdl_bad,x9mdl_full,x9mdl_splm_rx,x9mdl_ul_err,x9mdl_mark_total,x9mdl_saved,x9mdl_save_err);
+}
+void x9_md_log_mark(const char *what){
+ if(!x9mdl_running||x9mdl_mark_ms)return;
+ x9mdl_mark_ms=x9mdl_ms();x9mdl_mark_total=x9mdl_total;
+ printf("X9 MDLOG: mark %s at stream offset %llu\n",what,x9mdl_total);
 }

@@ -755,6 +755,7 @@ static void x9w_result(x9w_bearer &b,unsigned mux,const uint8_t *p,unsigned n){
  b.hold=false; // late valid CNF restores cleanup ability, NEVER host success
  printf("X9 WDS: MIPC CNF msg 0x%04x result %u mux %u\n",expected,result,mux);
  x9w_probe(b,X9WP_CNF,"wire-result",(int)result);
+ if(op==X9W_ACT&&result==0)x9_md_log_mark("ACT");
  if(op==X9W_ACT||op==X9W_CHECK)x9w_wire_probe(b,p,n,expected);
  if(op==X9W_RETRY_QUERY){
   unsigned mode=~0u,seconds=0;
