@@ -6,6 +6,15 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## Android正常上网基线（ANDROID-ATCI-BASELINE，2026-11-11）：AT层空结果、ACT帧、IMS缺失都排除；卡点收窄到MD↔AP数据面/MD用户面
+
+- **采集**（全部在 `.local/x9/android-atci-20261111/`，不入git）：Android下 `/dev/socket/rild-atci`（mtkfusionrild的RilAtciClient）接受**4字节大端长度+AT文本**，返回MD原始回复，默认SIM1（数据卡，中国广电46015，NR_SA）。`cap/`：数据在线两轮、关数据、重连三轮的16条只读AT（`at_*.txt`），ping结果，`state_*`（ip/route/ccmni计数），`logcat_before/cycle`（含RIL MIPC SEND/RECV完整DUMP，截断到约478B），dmesg，`ccci_dump_up.txt`（DPMAIF寄存器/队列dump，真实流量下）。`cap/ims/`：关IMS→重连→开IMS实验。脚本 `cap.sh`/`ims.sh` 在本会话scratch，读法见下。Wi-Fi本来关；IMS实验后已 `cmd phone ims enable -s 0` 恢复，22:11:21核对CGDCONT重新出现`ims`。
+- **排除1：AT层“空”是MTK常态**。Android正常上网（ping v4 223.5.5.5、v6 2400:3200::1 均0%丢包）时：`CGACT?`只有OK、`CGPADDR`=ERROR、`CGCONTRDP`本地地址/网关为空、`C5GQOSRDP/CGEQOSRDP/CGTFTRDP/C5GQOS?/CGEQOS?/CGTFT?/CGDSCONT?`全空——与226完全相同。**226节的“L4C未激活”推断作废**。
+- **排除2：ACT帧**。Android重连序列 0211 DATA_SET_CONFIG{100=1,101=1,103=0} → 021b RETRY_TIMER{mode1,"cbnet"} → 0201 ACT（808B），与我们顺序/形状相同。0201逐TLV解码：8106/11e{0f..}/10f 0/8107/108 7f/101 "cbnet"/109 7ffdffff/102 1/10a 0/103 3/10c 0/104 3/10d 672B(match_all0,dnn"cbnet")——**与`X9WDS.inc`构造逐项一致，唯一差别是我们首拨APN 0x101为空、TD match_all=1**（MD仍选cbnet）。
+- **排除3：IMS PDN缺失**。Android `cmd phone ims disable -s 0` 后IMS PDN被DEACT，重连后internet落在**CID1/PSI6、无IMS PDN（与我们布局相同）**，v4/v6 ping仍全通。
+- **仍成立的差异（观察）**：Android ACT CNF后**23ms**收到`4302 EIF reason=2 globalIpv6Count=1`，且ccmni上全球v6是内核SLAAC（`dynamic mngtmpaddr`）——即网络RA经DPMAIF DL送到AP，MD也同时看到；我们MD从未得到前缀、PIT写指针永远0。Android CSCON空闲时（`0,0,255,5,1`）重连/ping正常，说明空闲态UL会触发连接；我们不会。Android DPMAIF用txq0/1/3（179/138/8包）、rxq0 PIT 693。
+- **结论/下一步**：控制面（ACT、会话、IMS、AT视图）已与Android对齐，差异只剩**数据面**：MD要么没把AP的UL/网络DL接进该会话的用户面，要么因AP侧DPMAIF状态（DL ready/BAT/PIT/AO寄存器、MD侧握手）而不收不发。下一步用 `cap/ccci_dump_up.txt` 中真实流量下的 pd_ul/ao_ul/pd_dl/ao_dl/misc/SRAM 寄存器，逐项对照我们DPMAIF初始化写入与运行时回读（特别是DL侧与AO DL SRAM、UL ch→PDN相关寄存器）。
+
 ## 226 ATCTX结果（CELL226-ATCTX，2026-11-11）：MD有PDU会话(PSI1/QFI1/S-NSSAI1)和DNS，但27.007层CGACT无条目、无本地地址、无QoS/TFT
 
 - **身份**：`~/226.txt` 1961789B，末61.5s，无panic。27.273s ACT0202 result0（ccmni1，IPv4 10.2.11.244）；56.25s第二拨ccmni2。52.0s DPMAIF TX129/129、RX全0、PIT不动（同225）。
