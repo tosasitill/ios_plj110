@@ -118,6 +118,7 @@ struct x9w_bearer {
 };
 static x9w_bearer x9w_bearers[CBP_INTERFACES];
 static char x9w_last_dnn[2][101]; // APN the MD reported in the last ACT CNF (RAM only)
+static bool x9w_netagent_req; // boot-arg x9_eif_req=1: send EIF ifst/ipupdate + statistics (not done by Android)
 static uint32_t x9w_next_handle;
 // Latest MD interface state, not Android's local netdev state. The floor and
 // never-reused DPMAIF channel prevent accepting a pre-ACT/previous bearer event.
@@ -168,6 +169,7 @@ static void x9w_init_poll(uint8_t *response,unsigned room){
   printf("X9 MIPC: handshake stage %u confirmed\n",stage);
   if(stage==1)x9w_control_ready=true; // AT queries need OPEN, not PDP event registration
   if(stage==1+2*x9_md_sim_count()){
+   {int v=0;PE_parse_boot_argn("x9_eif_req",&v,sizeof(v));x9w_netagent_req=v!=0;}
    x9w_session_ready=true;printf("X9 MIPC: v2 OPEN + DEACT/EIF subscriptions confirmed for %u SIM(s); CID ownership unqualified\n",x9_md_sim_count());return;}
  }
  if(!transport_ok||x9w_init_hold||x9w_session_ready)return;
@@ -476,10 +478,13 @@ static void x9w_publish(x9w_bearer &b,unsigned mux){
  // interface up, typed like the verified PDN (EIF_ADDRESS_TYPE 1 or 3).
  printf("X9 WDS: call %u address %u.%u.%u.%u dns0 %u.%u.%u.%u dns_count %u (UL source must match)\n",b.cid,
   b.ip[0],b.ip[1],b.ip[2],b.ip[3],b.dns[0][0],b.dns[0][1],b.dns[0][2],b.dns[0][3],b.dns_count);
- x9w_ifst(b.sim_slot,b.trans_id,0,runtime.modem_pdp==3?3:1);
+ // Android capture: the RIL/NetAgentService never sends INTERNAL_EIF_REQ
+ // (no 0x313 in the MIPC log); it only consumes EIF indications. The
+ // ifst/ipupdate/statistics requests stay available but are off by default.
+ if(x9w_netagent_req)x9w_ifst(b.sim_slot,b.trans_id,0,runtime.modem_pdp==3?3:1);
  // netagent then reports the configured address (AT+EIF=<id>,"ipupdate",1,a.b.c.d).
- x9w_ifst(b.sim_slot,b.trans_id,2,0,b.ip);
- x9w_stats(true);
+ if(x9w_netagent_req)x9w_ifst(b.sim_slot,b.trans_id,2,0,b.ip);
+ if(x9w_netagent_req)x9w_stats(true);
 }
 static void x9w_result(x9w_bearer &b,unsigned mux,const uint8_t *p,unsigned n){
  x9w_host_expire(b,mux,x9q_ms()); // late ready1 cannot restore host success
@@ -631,7 +636,7 @@ static bool x9w_interface_event(const uint8_t *p,unsigned n,unsigned sim){
  for(unsigned m=0;m<CBP_INTERFACES;m++){x9w_bearer &b=x9w_bearers[m];
   if(b.used&&b.owned&&b.sim_slot==sim&&b.trans_id==trans&&in.serial>b.if_floor&&
      (cmd!=0||!in.valid||(b.active&&memcmp(in.ip,b.ip,4)))){
-   if(cmd!=0){b.md_down=true;x9w_ifst(sim,trans,1,0);} // MD ifdown precedes its logical CID removal; ack like netagent
+   if(cmd!=0){b.md_down=true;if(x9w_netagent_req)x9w_ifst(sim,trans,1,0);} // MD ifdown precedes its logical CID removal
    b.abandoned=true;x9w_disconnect(b,m+1);x9w_error(b,X9Q_NOT_READY);
   }
  }return true;
