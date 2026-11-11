@@ -6,6 +6,15 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 编译缓存追加清理（2026-11-11；最新空间数据）
+
+- 用户要求继续寻找可删除项。本轮仅清理两组Rust target内部可再生缓存：`.local/x9/work/x9-metal-render/general-target/{release,aarch64-apple-ios/release}/{deps,build,.fingerprint,incremental}`及`.local/analysis-shaders/m2v-target/release/{deps,build,.fingerprint,incremental}`，共 **16818个文件**。**这更新了上一轮“Rust deps/fingerprints保留”的状态**，但没有删当前成品静态库、着色器分析工具、源码、今天的boot/插件、根盘/备份、Apple输入或系统目录。
+- **保留与代价**：Metal最终`general-target/aarch64-apple-ios/release/libx9_general_metal_bridge.a`（约390MiB）及`.d`、analysis的`release/metal2vulkan`与`.d`、Cargo.toml/lock均保留。下次正常Metal/analysis Cargo构建会重新编译Rust依赖，耗时增加且缓存会再次增长；删缓存不等于删当前可交付插件。没有为了证明可重建而再次编译/运行测试，也没有操作手机或卸载root clone。
+- **空间**：项目 **70.80→65.51GiB**；Metal工作目录 **9.44→4.40GiB**，其中general-target **5.424→0.381GiB**；analysis目录 **0.268→0.013GiB**。`df`可用 **149252324→154392748KiB**，实际释放 **4.90GiB**，当前约 **147.24GiB可用**。目录减少/逐文件块数与实际回收量不同，仍按APFS共享块/硬链接口径区分。
+- **依据与边界**：源码确认Metal先Cargo构建、随后只链接保留的最终`.a`，analysis工具`otool -L`仅依赖系统libSystem/libiconv，不依赖待删缓存。无指向缓存内部的项目软链接、无非本轮清单的直接任务脚本引用、无打开文件/活跃编译器；清理期间对三处release的现有Cargo锁取非阻塞独占锁，按精确清单校验路径/inode/大小/mtime后unlink。6项保留成品/入口元数据未变，今日cell156/GPU277镜像与匹配包、dxb与第三方源码存在，clone仍挂在`/private/tmp/x9root`。未改source/index，另窗口原有NOTES内容保持；其后该窗口自行提交`95b695b`，未夹带本次内容。
+- 剩余大项多数是仍保留的根盘克隆/日志17.53GiB、worktrees13.90GiB（含今天输出与源码）、Apple输入7.17GiB、主out6.51GiB、legacy-import4.06GiB、dyld分析输入2.92GiB及参考源码2.48GiB；不能仅凭大小当缓存清空。本轮没有进一步删除源码里的测试语料、旧迁移备份或worktree。
+- 私有清单/命令/结果：**`.local/x9/work/cache-cleanup-20261111/`** 下`plan.json`、`removed.jsonl`、`clean.py`、`retained-files.json`、`verification.json`、`analysis-tool-dependencies.txt`、`sizes-after.tsv`与`df-{before,after}.txt`。无新build/CI run/设备结果、无push；只提交本节交接。
+
 ## 指定旧根盘、旧构建和历史插件删除（2026-11-11；最新清理状态）
 
 - 用户进一步明确要求删除pan172的`edited-root.hfs`、原始`root-20261109.hfs`、今天之前的构建成果，并追加删除全部 **74份GeneralMetal＋72份PanVK历史插件包**。这些已实际删除，**本节取代下方早期“全部boot/插件/原始根盘保留”的清理结论**。后续不要再让用户直接启动已删除的旧候选，也不要把历史NOTES里的旧路径当成仍然存在。
