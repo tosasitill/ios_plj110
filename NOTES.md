@@ -6,6 +6,12 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## WDS探针日志编码panic修复（WDSFIX-221，2026-11-11；已构建，未启动）
+
+- **修复**：main提交 **`0d3da82`** 把 `X9WDS.inc:x9w_probe` 的38参数单条printf拆成4条（≤17参数、约≤130B参数编码、各一个或零个`%s`），字段不变，后三条以 `X9 CELL WDS:  mux %u site %u seen %llu` 开头便于与第一条（`site/why/value/seen/SIM/mux/gen/epoch/op/token`）关联。XNU `log_encode.c` 未改（不在仓库里）。扫描 `x9/kernel/src` 其余printf/IOLog（静态估算，不含字符串payload）：最大约154B（X9WifiNet.inc:1556，25参数）、无其他超200B。
+- **镜像**：独立worktree `.local/x9/worktrees/sms-wdsfix-gpu278-20261111/` = SMS最终冻结 `cea4fd2` + cherry-pick（`38ddc58`，仅X9WDS.inc），配置原样复制自 `sms-native-20261111/final-build`（278 allowlist，插件不变，**无需mailbox staging**）。`build.py all` **exit0**，Image30576640B／boot13881344B；已ditto到 **`x9/out/x9-sms-wdsfix-gpu278-20261111/boot.img`**。`strings kernel.development.sweet` 确认含新的拆分格式串、不含旧38参数串。记录在 `.local/x9/work/sms-wdsfix-20261111/`。
+- **未完成**：未上机。用户 `fastboot boot x9/out/x9-sms-wdsfix-gpu278-20261111/boot.img` 后，预期首次SIM1 IPv4 Start（约29s）不再出现 `log_fits_cmd` 断言；继续用WDS/CNF/RX探针定位数据面。
+
 ## Android只读磁盘日志／探针panic定位（DISKLOG-LEGACY222，2026-11-11；采集完成，确认221的日志编码panic，最新失败身份待核）
 
 - **用户现场／授权**：用户报告“还是不行，我进安卓了，读硬盘日志”。本轮仅授权范围内ADB只读：1台目标ready，用现有 `x9/tools/pull_disk_log.py --manifest .local/x9/root-extension/20261110-16g/root-manifest.json --serial <目标> --out <本轮私有>/disk` 捕获，**exit0**。工具先核对serial、专用log inode／8MiB尺寸、immutable／pinfile保护及完整extent equality，再从专用extent rawread。未写设备文件／分区／NV／mailbox，未重启／flash／构建／测试套件；未执行会copy／chmod的x9capture.sh。
