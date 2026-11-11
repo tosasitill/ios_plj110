@@ -6,6 +6,13 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 227结果＋DPMAIF对齐结论（CELL227-HPC / CELL-DPDUMP，2026-11-11；dpdump已构建，未启动）
+
+- **227（HPC_CNTL 0x10da）**：`rx-none dl_sram+0x020`第7字=`000010da`（写入生效）；RX仍0、PIT不动、TX 205/205、EIF5仍无前缀。**HPC_CNTL排除**。
+- **“能对齐的”已全部对齐（核对结论）**：vendor AP驱动（drv3）写的DPMAIF寄存器——IRQ masks、PKTINFO/RDY_CHK/FRG、HPC_CNTL、LRO AGG(SRAM1+0x04低16=0)/LRO timeouts(0x00640064)、BAT/PIT/DRB初始化、TXQ/ARB、CG_EN 0x7f、CODA_VER 0xff——与Android实测一致。剩余差异按pre-init/at-online/rx-none分类：HPC entry/CI_CO/hash/OPT_IDX、DL STA/DBG、PIT/BAT_STA(0x5ac)、UL+0x64 bit11、AO MISC SRAM +0x70/84/88、misc 0x400/430/450 都是**流量驱动的状态或MD/HW所有**，vendor AP不写，我们也不该盲写；**DL+0x44差异无效**（Android该窗口dump长度68B=0x100..0x143，0x144那行是填充）。CODA_VER高位、CG_EN读回值为HW行为。
+- **CELL-DPDUMP镜像**：main **`d5d2b17`**（`X9DPMAIF.inc` x9d_dump追加只读窗口 `rdma` pd+0x200/0xe0、`wdma` pd+0x300/0x60、`dl_sram1` sram1/0x100）；worktree `.local/x9/worktrees/cell-dpdump-gpu278-20261111/` = `3d754df`(HPC)+cherry-pick，配置同HPC，exit0，**`x9/out/x9-cell-dpdump-gpu278-20261111/boot.img`**。读法：`python3 .local/x9/android-atci-20261111/dpmaif-cmp.py`（已加三窗口映射；需把脚本里的and_dump/our_dump换成本次文件）。
+- **下一步**：若RDMA/WDMA/SRAM1也一致，AP侧DPMAIF可整体排除，转向MD侧通道就绪（MD为何从不往该会话写DL/不接受UL）。
+
 ## HPC_CNTL对齐Android（CELL-HPC，2026-11-11；已构建，未启动）
 
 - **源码**：main **`41cb424`**：`X9DPMAIF.inc` AO DL SRAM `HPC_CNTL`(pd+0xc38) 由 vendor源码公式 0x10d2 改为 Android实测 **0x10da**（只多 add_mode=2，bits3:2；path2/prime0xd/16不变；887行legacy检查只看&3）。
