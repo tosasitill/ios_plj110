@@ -6,6 +6,16 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 指定旧根盘、旧构建和历史插件删除（2026-11-11；最新清理状态）
+
+- 用户进一步明确要求删除pan172的`edited-root.hfs`、原始`root-20261109.hfs`、今天之前的构建成果，并追加删除全部 **74份GeneralMetal＋72份PanVK历史插件包**。这些已实际删除，**本节取代下方早期“全部boot/插件/原始根盘保留”的清理结论**。后续不要再让用户直接启动已删除的旧候选，也不要把历史NOTES里的旧路径当成仍然存在。
+- 根盘操作限定Mac本地两文件：`.local/x9/work/x9-metal-install-pan172/edited-root.hfs`先正常`hdiutil detach /dev/disk8` **exit0**，确认解除挂载后删除；`.local/x9/work/x9-rootpull/root-20261109.hfs`确认未挂载后删除，两文件各16GiB。**保留 `.local/x9/work/x9-rootpull/root-20261109.clone.hfs`**（inode不变），最终实时映射仍为`/dev/disk10`→`/private/tmp/x9root`、读写挂载；项目已无pan172挂载。未force卸载、未操作手机/分区或改变clone挂载，原始根盘备份确已不存在。
+- 构建清理边界为 **Asia/Shanghai 2026-11-11 00:00**：检查主`x9/out`、项目内worktree的`x9/out`及旧迁移`pan220`输出，按目录中文件最新mtime筛选，**222个旧输出目录**的编译/链接/打包产物已删（含142份旧`boot.img`），另删`x9-native-ufs`/`x9-decmpfs`/Metal native-kernel里的6个旧内核文件。旧目录中的日志、配置、源码快照、生成头文件、firmware/根盘manifest等记录与输入保留，目录可能因此仍存在；不等于旧镜像仍在。**52个今天的输出完整保留**，包括cell156的276配套包与gpu277的277配套包；worktree/分支/未提交源代码均未删除。
+- 历史插件删除范围是`.local/x9/work/x9-metal-render/`顶层全部 **146个`X9GeneralMetal*.bundle`/`X9PanVK*.bundle`**，含未编号的旧包；目录已全部消失，约3.523GiB。不是删除今天交付目录中的独立配套包。共享源码、Rust release库/deps、PanVK当前链接库/构建环境、冻结dxb、Apple原始输入和工具链保持。以后需要新插件时正常先构建再打包，不能直接调用`package-plugins.py`读取这些已删历史包；切回旧版本需从对应源码重新构建，不自动重建验证本次清理。
+- **结果**：共删除 **15374个文件、1345个空目录**。同口径目录块占用：项目 **127.18→70.79GiB**，主`x9/out` **16.98→6.51GiB**，worktrees **23.86→13.90GiB**，Metal工作目录 **13.01→9.44GiB**，rootpull **33.53→17.53GiB**。`df`可用 **110556916→149269724KiB**，实际释放 **36.92GiB**、最终约 **142.35GiB可用**；APFS克隆/共享块及硬链接使目录减少量不等于实际回收量，删除原始root不会释放clone仍占用的共享块。
+- 删除前检查无目标打开占用、无活跃编译/链接器、无tracked删除路径、无指向待删文件/历史bundle的项目软链接；逐文件按原inode/大小/时间校验后unlink，只rmdir空目录，不递归清未知内容。清理后 **13937个保留文件的存在性/inode/大小/mtime未变**，清单无残留，全部146历史bundle不存在，当前toolchain/dxb/Mesa/Rust/PanVK/BBFW/root-manifest输入存在；主工作区原有另一窗口NOTES修改与index均原样保持。没有测试套件、编译、镜像hash/解包/功能二次验证、CI或push。
+- 私有精确证据在 **`.local/x9/work/old-artifacts-cleanup-20261111/`**：`inventory.json`、`executed-plan.json`、`removed.jsonl`、`delete.py`、`detach-pan172.json`、`mounts-final.plist`、`verification.json`、`sizes-{before,after}.tsv`、`df-immediately-{before,after}.txt`。只提交本节交接，其他窗口的NOTES修改不夹带。
+
 ## 项目目录清理交接（2026-11-11；已执行）
 
 - 用户明确要求清理 `~/ios_plj110` 中不用的内容。本轮限定项目目录：**138个11月11日之前的已完成构建目录**中删除可再生的 `payload.bin`、`shim/{Image,shim.elf,shim-boot.img,*.o}` 及部分 `kernel-objects/*.{o,d}`，另清空共享Rust target的两处 `release/incremental`。共删除 **23861个文件**，没有删除整个worktree、分支、源码、未提交修改或任何设备数据；11月11日生成的构建目录不动。没有设备/挂载操作、编译、测试套件、镜像二次解包/hash或CI，本轮不push。
