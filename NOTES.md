@@ -106,7 +106,7 @@ X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>      # 之后再�
 
 ## 3. 当前基线镜像与参数
 
-- **最新蜂窝profile候选(133，未上机；取代132)**：`x9/out/x9-cell133-profile-md/boot.img`＝131树＋7个蜂窝文件（2e8874a，含f6302fa call end reason），603B参数/插件276不变，无需mailbox；见CELL132-PROFILE。
+- **最新蜂窝profile候选(134，未上机；取代132/133)**：`x9/out/x9-cell134-profile-md/boot.img`＝131树＋7个蜂窝文件（5e1cbd3，含f6302fa/604df1c/b1f57e1），603B参数/插件276不变，无需mailbox；见CELL132-PROFILE。
 
 - **当前蜂窝测试候选(131，ADSP loader关闭)**：`x9/out/x9-cell131-noadsp-loader-md/boot.img`。**原样复用130内核0cbd413**，只有shim3430b74的ADSP调用默认关闭（main对应11e192e）；未混入之后camera/MIC DMA/GPS17等并发改动。正常shim编译/boot打包exit0，构建器报告**13508608B**，原603B/32GiB/真实MDOTA/CBN/Wi-Fi及蜂窝b122b7a保持。**插件276、无需mailbox；189已实测启动恢复／两卡信号和5G出现，但PDP/切卡仍失败**；不是关闭全部音频内核/HAL。详见CELL189-PROFILE及CELL131-NOADSP。
 
@@ -1375,7 +1375,7 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **不能称为全部USB完成**:本轮暂无枚举/DMA/ue0 ping/bulk回环实机结果,live EMI/MPU允许普通XNU DMA页也未证明。`native_apple_stack=0`,没有冒充IOUSBDeviceController或AppleUSBDeviceMux;原始configd USBDeviceConfiguration/lockdownd、Finder/iTunes Trust/配对/照片同步仍缺20H392 controller adapter及kext构建接入。USB3 XS-PHY/retimer、charger Type-C role与原生xHCI也未完成。参考文章chip/board/security-domain/fsid/锁状态条件要到原生栈接通后才验证,不先改身份/配对状态制造成功。
 - **下一步/验收**:先在用户手动启动的单一候选核对`CAP_EPINFO/TXFIFO/RXFIFO/MISC`→config1/alt1→真实QMU OUT/IN→ue0 ping,再用iOS `usbctl --echo`+host单次echo证明host→iOS→host字节相同。保留EP0日志,无需重建Metal插件/mailbox。接口/回退/构建说明在`x9/usb/README.md`;不要求用户现在连续刷试探镜像。
 
-## 蜂窝当前交接(CELL132/133-PROFILE,2026-11-11): 131启动基线＋蜂窝7文件；当前候选cell133（含call end reason），未上机
+## 蜂窝当前交接(CELL132/133/134-PROFILE,2026-11-11): 131启动基线＋蜂窝7文件；当前候选cell134（call end reason＋DEACT证据门＋start模型），未上机
 
 - **WDS资格门入库**：原未提交X9WDS.inc改动提交为main **4f28340**：0x24/0x86/0x44/0x37/0x22/0x2d统一用`x9w_data_ready()`（active、非abandoned/hold、当前x9a_epoch、client generation存活、DPMAIF ready、MIPC online）；0x4202同CID断开只退休当前epoch的bearer。X9Baseband.cpp.o编译exit0（`.local/x9/work/cell-wds-eligibility-20261111/`）。
 - **候选源码**：worktree `.local/x9/worktrees/cell132-profile`，提交 **3379a566**＝131冻结树3430b74＋main 4f28340的7个蜂窝文件（X9WDS.inc、X9WDSProfiles.inc、X9WDSOptions.inc、X9WDSResult.inc、X9DPMAIF.inc、baseband/qcom QcomBaseband.h、coachz_bb_pdp.cpp），其余与131完全相同（不含camera/MIC/GPS/ADSP等其他窗口改动）。注意：第一次只取5个.inc时链接失败（`_coachz_modem_data_receiver`改名为`_counted`，定义在x9/baseband/qcom），已补齐。
@@ -1383,7 +1383,11 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **为什么现在上机**：189的唯一数据阻断是本地对CreateProfile27返回94（142次），之后从未出现Start20/ACT201/GET205/EIF4302。132里27按189两种形状（01=00/01 + 8f=00）RAM创建profile，c7配置、29删除、2b读取；Start20走profile选择，任何被拒原因都打印`X9 PROFILE: ... no dial`（未映射QoS29/PCO、非IPv4、凭据、未知tag等）。所以132能回答：iOS是否发出Start20、被哪条门拒绝，或MD对ACT201怎么回复。静态“闭合”项（CID lease、QoS/PCO before-ACT、IPv6/DAD、TX退休/channel重用）仍未完成，132不宣称能联网。
 - **更新（同日，cell133取代未上机的132）**：main **f6302fa** 给WDS补QMI call end reason：family6 Start不再裸UNSUPPORTED，改回CALL_FAILED14＋0x10=1＋0x11={internal2,210 PDN_IPV6_CALL_DISALLOWED}，不发MD请求（本拨号器只有IPv4）；20H392 libCommCenterMCommandDrivers的internal名表201..顺序对上（208 IPV4_CALL_DISALLOWED、210 IPV6_DISALLOWED），并有`Error activating reason/verboseReasonType/verboseReason`日志，故iOS会读该TLV（它是否因此只保留v4是推断，待上机）。0x22断开指示带0x10/0x11：客户端Stop=CLIENT_END2/CM2000，MD 0x4202=internal206（MD原因未导出），本地放弃=internal201；首个原因优先，4202在host_deadline前记原因。MD ACT201失败仍裸14（无MIPC result→3GPP cause证据）。单对象编译`.local/x9/work/cell-wds-end-reason-20261111/`。
   候选 **`x9/out/x9-cell133-profile-md/boot.img`**（worktree提交2e8874a＝132＋此X9WDS.inc），这次完整三命令一次exit0（PATH预置Framework python＋llvm@22），Image 29966336B/boot 13524992B，参数同131，插件276，无需mailbox，记录`.local/x9/work/cell133-profile/`。**测133，不测132。**上机后还要grep `IPv6 refused`、`disconnected indication`，以及iOS的`Error activating`/`startDataCall ... allowed`判断v6拒绝后v4是否保留。
-- **下一步**：用户手动`fastboot boot x9/out/x9-cell133-profile-md/boot.img`，日志`~/191.txt`（或下一个编号）。先确认进系统，再grep `X9 PROFILE`、WDS 0x27/0xc7/0x20、ACT201/GET205/EIF4302、DPMAIF TX/RX。若停在`no dial`，按打印的tag决定补哪条映射；若MD拒ACT，看原因码。
+- **更新（同日，cell134取代未上机的133）**：
+  - **所有权静态分析(604df1c)**：保存P77 `l5updn_deact_data_call_req_handler`：CID无L5 node时913d8396→913d842a仍向D2CM发B238，不拒绝；有node则整usr字节清0(913d839e)再由check_deact_or_not决定。两条MD拆除路径都先发EIF ifdown再删逻辑CID，而旧驱动在ifdown/GET失败后立即发203，可能打到已删除/已被IMS或attach PDN复用的CID。现规则：只有在没收到ifdown、且最近一次GET205证明CID仍对应我们的channel/trans_id时才发203；否则只做本地释放（Stop照常回复）。最坏留一个usr1引用字节，下次同APN ACT会复用，任何203也会整字节清零，不会永久占用。另确认`mipc_data_deact_call_ind_criteria_checker`恒返回1（只清ANBR过滤），0x4202按注册投递，借用调用(0x16d7次分支，引用记在原creator)也能收到。已知：usr1仅本传输使用(RX216/TX217→UART42)，IMS等内部用户为usr29..37。未闭合：iOS Internet APN与attach APN相同时实际走哪条分支（推断0x16d7次分支，attach PDN由D2保护），需上机看ACT结果。
+  - **速率/体验(b1f57e1)**：LTE/NR默认承载速率由网络定(QCI/5QI+APN-AMBR)，ACT201不带QoS、iOS Internet不发QMI29，UE侧无可协商项，瓶颈在AP数据路径。原legacy ifnet输出在私有64包FIFO满时丢包回ENOBUFS，XNU tcp_output会因此收缩cwnd（上行突发>64包即掉速，且无AQM）。现pdp_ip改为start模型(IFNET_SCHED_MODEL_NORMAL, sndq512, FQ-CoDel)，bb_pdp_drain按DPMAIF空位`coachz_modem_data_room()`用ifnet_dequeue_multi取包，start回调和每次bridge循环(~1ms)都会调用，每接口drain锁保证顺序；EBUSY把剩余链放回队首；路由/epoch变化、block、down时ifnet_purge，poll持drain锁防旧呼叫包发到新呼叫。DPMAIF邮箱64→128、每次轮询TX发布16→32。下行：每轮询最多128 PIT、BAT1024、PIT2048，每包ifnet_input，暂不改。bridge线程上没有睡眠（modem的x9md_sleep_ms只在x9md_thread）。
+  - 候选 **`x9/out/x9-cell134-profile-md/boot.img`**（worktree 5e1cbd3＝131树＋main b1f57e1的7个蜂窝文件），完整三命令exit0，Image 29966336B/boot 13524992B，参数同131，插件276，无需mailbox，记录`.local/x9/work/cell134-profile/`。各改动单对象编译记录：cell-wds-deact-evidence-20261111、cell-pdp-startmodel-20261111。**测134，不测132/133。**上机额外看`COACHZ pdp`的tx/drop/busy、`already down at MD`、测速与上传。
+- **下一步**：用户手动`fastboot boot x9/out/x9-cell134-profile-md/boot.img`，日志`~/191.txt`（或下一个编号）。先确认进系统，再grep `X9 PROFILE`、WDS 0x27/0xc7/0x20、ACT201/GET205/EIF4302、DPMAIF TX/RX。若停在`no dial`，按打印的tag决定补哪条映射；若MD拒ACT，看原因码。
 
 ## 蜂窝前次交接(CELL-CHAIN-CODE,2026-11-11): 三子agent续接；主线握手/WDS/DDS期限与真实RX接受计账已合，结果/选项接线继续
 
