@@ -6,6 +6,13 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## emdlogger启动协议（ANDROID-MDLOG-START，2026-11-11）：已完整抓到
+
+- **采集**（全部在 `.local/x9/android-mdlog-20261111/`，不入git）：emdlogger/libccci_util_sys/libmdloggerrecycle 二进制；emdlogger 控制口是抽象socket `@com.mediatek.mdlogger.socket1`，文本命令 `deep_start,2`(SD模式) / `deep_pause`，自写静态客户端 `mdlc`（源码在会话scratch `mdlc.c`）。`/proc/pid/mem` 读不到CCB（VM_IO/PFNMAP）、`ccci_ccb_dhl` 独占（ccb_ctrl可多开）→ 用 **LD_PRELOAD shim** `ccbhook.so`（`hook.c`，链设备libdl.so）包 `ccci_ccb_write_done`(全部UL) 与 `ccci_ccb_read_get`(DL buf0/3)，手动启动一次emdlogger后恢复init服务（已恢复，Running=0）。原始 `ccbhook.bin`、解析 `ccbhook.txt`（`hookparse.py`）。另有 ccci_lib logcat 证明：SPLM都写 **user58(DHL) buffer0 UL**，filter写 **buffer2 UL**。filter来自modem分区 `md1_filter` 镜像（`files/catcher_filter_unlwtg_n.bin` 300B）；emdlogger同时恢复 `MDDB_PHONE_unlwtg_n.EDB`(10.5MB)、`DbgInfo_MDDB_unlwtg_n.EDB.xz`（在设备 /data/mdlog，尚未拉取）。
+- **SPLM帧**：`59 00 | u16 payload_len | 00000000 | dir(00 AP请求/01 MD应答/03 不支持) | msg_id | token(递增) | XOR(byte0..10)` + payload；校验在全部SPLM帧上验证通过。
+- **实测启动序列（AP→MD，token递增）**：0x05 payload `03000000`（RESET_SPLM_STATE）→ 0x0e 无payload（查MD版本，应答含MOLY版本串）→ 0x28（查logging capability，MD回03不支持）→ 0x0f payload `00000000` → 0x11（QueryMDInfo，应答524B）→ 0x10（QueryMDTime，应答4B）→ 0x13（save location，hdr+4=0001）→ 再 0x05 `03000000`、0x0f `00000000` → **0x00 payload `01000000`（AP_LOGGING_IS_READY；MD回“[DHL][EBS] Logging mode change to 1”）** → **0x20 payload `0103`（configure）** → **buffer2 UL 292B filter帧**（`accaef10` DHL帧头，内含"Default"）。0x22为AP调试文本注入MD日志，可省略。之后MD以约 **3.7 MB/s** 往DL buf2写日志，buf0周期回 `[DHL][DEBUG] page req count`，buf3 周期发MD版本/平台串（`accaef10` DHL帧）。停止：0x00? 实测pause发 SPLM_A2M_AP_LOGGING_STOP（见ccbhook.txt末尾）。
+- **下一步（实现第2阶段）**：内核按上面最小序列（0x05→0x0f→0x00→0x20→filter原样重放）写UL页并唤醒MD，消费DL buf2整流。难点是3.7MB/s数据量：不能printf，需落盘（内核vnode写iOS根盘文件，再从Android侧用pull_ios_logs读）或只在ACT前后短窗采集；解码用MDDB（cell189已有md1_mddb解码；设备上也有原厂 .EDB）。
+
 ## 229 MDLOG第1阶段结果（CELL229-MDLOG1，2026-11-11）：MD默认不写DHL
 
 - `~/229.txt` 1445875B，末42.66s，无panic；ACT 28.80s result0，TX16/16 RX0（同前）。
