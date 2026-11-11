@@ -6,6 +6,14 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 231 MDLOG第3阶段结果（CELL231-MDLOG3，2026-11-11）：真实MD日志64MiB已取回；解码需逆向ELT编码，且默认filter可能关掉PS trace
+
+- **231观察**：\`~/231.txt\` 末53.9s、无panic；原件副本 \`.local/x9/work/mdlog231/231-original.txt\`。RAW DHL \`pa f0300000 size a00000 mapped 1\`；SPLM序列与filter同230全部成功。前6个描述符正文非零（如 off 0x14c len 0x7faec body \`15100000 0005f8fd 010109fe…\`），badent 0，full-seen 0。**我们这边MD约9 MB/s**（34.5s已110MB），64MiB≈7s。ACT 27.503s mark=51956544；37.503s保存 stream 59747594..126856458（**不含ACT时刻，覆盖约ACT+0.9s～+10s**），\`save -> 0 in 112 ms\`。
+- **取回**：\`.local/x9/work/mdlog231/x9-mdlog.bin\`（67108864B，pull_ios_logs \`--paths private/var/x9-mdlog.bin\`）。
+- **结构**：DHL帧 \`{0x10efcaac, len, flags, ck}+body\` 从首个帧头起顺序遍历 **1080帧、0次重同步**。flags低16位类型：0x0010（311帧/24.9MB，body以 \`15 10 00 00 00 05 f8 fd\` 开头，高16位为序号）、0x9610（270/30.1MB）、0x9a10（342/7.1MB）、0xa910（157/5.0MB）。
+- **解码现状**：已知trace id（0x4ca00008、0x4C5001D7..DD）**原样不出现** → ELT记录是打包编码。\`_dhl_index_trace@9006c8b2\`(60B)：先 \`dhl_is_ps_filter_off(..,3)\`，通过才调 \`dhl_internal_trace_impl@9006ca30\`(150B)。我们重放的是Android默认"Default" filter（几乎全0位），**PS层trace（IPC/UPCM/SDAP/NIM）很可能被过滤**，9MB/s可能主要是L1/HW日志（未证实）。MDDB(md1_mddb.raw)是RocksDB(sst)格式，cell189只解了部分。
+- **下一步**：①逆向 \`dhl_internal_trace_impl\` 与 \`dhl_is_ps_filter_off\`：得到ELT记录编码（id/时间戳/参数）与filter位图布局；②据此构造只开 IPC/UPCM/SDAP/PDCP/NIM 模块的filter替换Default（降低速率、拉长窗口）；③保存点提前到ACT+5s或环加大到128MiB，使窗口包含ACT；④解码器把trace id映射到MD符号/MDDB字符串。
+
 ## 230 MDLOG第2阶段结果＋第3阶段（CELL230-MDLOG2 / CELL-MDLOG3，2026-11-11；mdlog3已构建，未启动）
 
 - **230（mdlog2）观察**：\`~/230.txt\` 末72.96s、无panic。16.68s起四条SPLM全部 \`-> 0\`，MD逐条回 dir=01 应答（0x05/0x0f/0x00/0x20），0x00后MD回 **"[DHL][EBS] Logging mode change to 1"**，之后持续 "[DHL][DEBUG] page req count"；filter帧 \`-> 0\`。**MD接受了内核写入的UL页与CCIF ch7门铃。** buf2页 39.56s前3945页、bad0、full-seen0（2ms排空足够）；ACT 29.559s mark=296616；39.559s保存692172B → \`save -> 0\`。
