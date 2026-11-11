@@ -1375,7 +1375,16 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **不能称为全部USB完成**:本轮暂无枚举/DMA/ue0 ping/bulk回环实机结果,live EMI/MPU允许普通XNU DMA页也未证明。`native_apple_stack=0`,没有冒充IOUSBDeviceController或AppleUSBDeviceMux;原始configd USBDeviceConfiguration/lockdownd、Finder/iTunes Trust/配对/照片同步仍缺20H392 controller adapter及kext构建接入。USB3 XS-PHY/retimer、charger Type-C role与原生xHCI也未完成。参考文章chip/board/security-domain/fsid/锁状态条件要到原生栈接通后才验证,不先改身份/配对状态制造成功。
 - **下一步/验收**:先在用户手动启动的单一候选核对`CAP_EPINFO/TXFIFO/RXFIFO/MISC`→config1/alt1→真实QMU OUT/IN→ue0 ping,再用iOS `usbctl --echo`+host单次echo证明host→iOS→host字节相同。保留EP0日志,无需重建Metal插件/mailbox。接口/回退/构建说明在`x9/usb/README.md`;不要求用户现在连续刷试探镜像。
 
-## 蜂窝当前交接(CELL141-L2MASK,2026-11-11): 197按原厂顺序启用BAT仍首批即停；cell141改用原厂L2中断屏蔽并只清未屏蔽状态，未上机
+## 蜂窝当前交接(CELL142-TXQ4,2026-11-11): 198用原厂L2掩码仍首批即停；cell142按Android实况启动全部4个TX队列，未上机
+
+- **198.txt**(cell141，末64s)。**观察**：初始化通过(`masks 0x7ff0/0x1cbf`，无readback失败/隔离)，`ifst up ... CNF valid result 0`；30.627s首个UL状态0x1(仅DONE)后停：`TX stalled: hardware read index 4, 2 of 14`，RX 0；63.45s重拨ccmni2也同样。L2掩码/只清未屏蔽位不是原因。至此"完成数=首批"在193-198六次稳定(2,2,1,2,1,2)。
+- **Android实况基准**(`.local/x9/modem/ccci_dump.txt`)：`dpmaif-txq: 0-3(status=0xf)[2048]`，`w/r/rel=(330)(264)(0)(20)`——原厂`dpmaif_txqs_start`启动DPMAIF_TXQ_NUM=4个队列，流量在q0/q1/q3；`dpmaif-rxq0 received:342`、rxq1 0(只用LRO0)。我们只启动q0(ARB 0x101)。
+- **修复 main `d4823f5`**：再分配3个2048项DRB环，写CHNL1..3 CON0/1/2(步长0x10)，CHNL_ARB0=0xf|0xf<<8(回读期望0xf0f)；数据仍走q0。单编True。
+- **候选 `x9/out/x9-cell142-txq4-md/boot.img`**(worktree `f5fa6d6`)，三命令exit0，boot 13533184B，参数同131，插件276，**无需mailbox**。记录`.local/x9/work/cell142-txq4/`。
+- **MD侧线索(未验证)**：MD LHIF `lhif_drv_ul_enable`(由`lhif_drv_ap_dip_callback`、`lhif_drv_meta_table_polling`调用)和`upcm_ul_flow_control_handling`会使能/关闭MD侧UL队列0(`lhif_drv_en_dpmaif_ulq0_que`)；材料在`.local/x9/work/cell-eif-20261111/`。
+- **下一步**：用户boot cell142→`~/199.txt`。若仍首批即停：建议进Android用adb抓数据工作时的DPMAIF寄存器/ccci_dpmaif状态做逐寄存器对比(需su)，比继续静态猜更快。
+
+## 蜂窝前次交接(CELL141-L2MASK,2026-11-11): 197按原厂顺序启用BAT仍首批即停；cell141改用原厂L2中断屏蔽并只清未屏蔽状态，未上机
 
 - **197.txt**(cell140，末53s)。**观察**：`BAT enable after credit (vendor order), CON1 0x410400`、未隔离、`EIF ifst up ... CNF valid result 0`；30.749s首个UL状态`0x21`(q0 DONE+DRB EMPTY)后即停：`TX stalled: hardware read index 2, 1 of 14`，RX 0。BAT顺序不是原因。
 - **差异(原厂drv3_intr_hw_init/drv3_isr)**：原厂UL只解屏蔽QDONE/ERR/PWR_NOTREADY(EMPTY 5..9、MD_NOTREADY 10..14保持屏蔽)，DL解屏蔽LRO0/1 QDONE(掩码位8/9)+MTU_ERR6；ISR只写回`status & ~mask`，从不清EMPTY/MD_NOTREADY；每次ISR清IP busy。我们全屏蔽(TIMSR0=~0)并把整个状态写回(清了EMPTY)。每轮都恰在第一次0x21被清之后停住(**推断**相关)。
