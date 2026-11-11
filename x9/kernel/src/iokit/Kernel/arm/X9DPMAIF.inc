@@ -53,7 +53,7 @@ struct x9d_state {
     uintptr_t ao, pd, md_misc, infra, sram1;
     x9d_dma drb, txpool, pit[2], bat[2], pool[2];
     bool posted[2][X9D_BAT];
-    bool used_channel[20]; // no ambiguous delayed old-bearer RX after channel reuse
+    bool used_channel[20]; // bound/retiring routes only; released when retirement finishes
     unsigned bat_wr[2], tx_wr, tx_rd, head, count;
     x9d_tx mail[X9D_MAIL]; x9d_route route[CBP_INTERFACES]; x9d_rx rx[2];
     x9d_completion completion[X9D_DRB / 2];
@@ -63,6 +63,8 @@ struct x9d_state {
     const char *phase;
     uint32_t last_ul, last_dl; bool legacy_pit_reported;
     uint64_t tx_packets, tx_done, rx_packets, rx_dropped, rejected, flow_events,next_lifetime;
+    // TX progress watch (vendor drv3_dump_register subset on a stall).
+    uint64_t tx_progress_ms, tx_seen_done, stale_completions, bind_ms; unsigned stall_dumps, rx_dumps; bool stall_reported;
     int (*receiver)(uint32_t, const uint8_t *, uint32_t, uint32_t, uint64_t);
 };
 static x9d_state x9d;
@@ -128,6 +130,30 @@ static void x9d_snapshot(const char *label) {
 }
 static void x9d_phase(const char *phase) {
     x9d.phase = phase; printf("X9 DPMAIF: init phase %s\n", phase);
+}
+// Raw register windows named by vendor drv3_dump_register (pd_ul ADD_DESC..
+// DBG_STA9/ADD_DESC_CH, UL SRAM channel status 0xe0 = rd<<16|wr, AO UL,
+// PD MISC L2TISAR0..CODA, DL pdn/SRAM, LRO). Register values only.
+static void x9d_dump_window(const char *label, const char *name, uintptr_t base, unsigned off, unsigned bytes) {
+    for (unsigned at = off; at < off + bytes; at += 32) {
+        uint32_t v[8]; for (unsigned i = 0; i < 8; i++) v[i] = x9d_rd(base, at + 4 * i);
+        printf("X9 DPMAIF: %s %s+0x%03x %08x %08x %08x %08x %08x %08x %08x %08x\n", label, name, at,
+            v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]);
+    }
+}
+static void x9d_dump(const char *label, bool dl) {
+    if (!x9d.clocks_live || (x9d_rd(x9d.infra, 0xd20) & 12)) return;
+    printf("X9 DPMAIF: %s dump: sw tx_wr %u tx_rd %u submitted %llu completed %llu rx %llu\n", label,
+        x9d.tx_wr, x9d.tx_rd, x9d.tx_packets, x9d.tx_done, x9d.rx_packets);
+    x9d_dump_window(label, "pd_ul", x9d.pd, 0x00, 0xc0);
+    x9d_dump_window(label, "ul_sram", x9d.pd + 0xd00, 0x00, 0x100);
+    x9d_dump_window(label, "ao_ul", x9d.ao, 0x00, 0x100);
+    x9d_dump_window(label, "misc", x9d.pd + 0x400, 0x00, 0x100);
+    if (!dl) return;
+    x9d_dump_window(label, "pd_dl", x9d.pd + 0x100, 0x00, 0x100);
+    x9d_dump_window(label, "dl_sram", x9d.pd + 0xc00, 0x00, 0x100);
+    x9d_dump_window(label, "lro", x9d.pd + 0x900, 0x00, 0x60);
+    x9d_dump_window(label, "ao_dl", x9d.ao + 0x400, 0x00, 0x100);
 }
 static void x9d_fail(const char *reason) {
     if (x9d.failed) return;
@@ -278,7 +304,10 @@ static bool x9d_hw_init() {
         !x9d_expect(dls, 0xdc, 65535, X9D_BAT - 1) ||
         !x9d_expect(x9d.sram1, 0x04, 65535, 0)) return false;
     x9d_phase("INIT_DONE");
+    x9d_dump("pre-init-done", true);
     x9d_wr(x9d.ao, 0, 1); x9d_wr(x9d.ao + 0x400, 0, 1);
+    // dpmaif_start: hw_init_done, then ccci_drv_clear_ip_busy (W1C misc+0x60).
+    { uint32_t busy = x9d_rd(misc, 0x60); if (busy) x9d_wr(misc, 0x60, busy); }
     x9d_snapshot("enabled");
     IOLockLock(x9d.lock); x9d.ready = true; IOLockUnlock(x9d.lock);
     x9d.phase = "poll";
@@ -345,7 +374,7 @@ static bool x9d_bind(unsigned mux, unsigned channel, unsigned families, unsigned
     r.epoch++; r.lifetime = ++x9d.next_lifetime; r.channel = (uint8_t)channel; r.families = (uint8_t)families; r.mtu = mtu; r.bound = true;
     bzero(&r.stats, sizeof(r.stats));
     x9d.rx_account[channel].lifetime = r.lifetime; // unused channel only; no RX ledger reset
-    x9d.used_channel[channel] = true;
+    x9d.used_channel[channel] = true; x9d.bind_ms = x9d_ms(); x9d.rx_dumps = 0;
     lifetime = r.lifetime; IOLockUnlock(x9d.lock); return true;
 }
 static void x9d_unbind(unsigned mux) {
@@ -386,9 +415,17 @@ static bool x9d_tx_quiescent(unsigned mux) {
     }
     // Only this owner mutates completion[] or publishes DRBs. Network
     // producers hold lock and cannot enqueue after the unbind above.
+    unsigned inflight = 0;
     for (unsigned i = 0; idle && i < X9D_DRB / 2; i++)
-        if (x9d.completion[i].mux == mux && x9d.completion[i].size) idle = false;
+        if (x9d.completion[i].mux == mux && x9d.completion[i].size) inflight++;
     IOLockUnlock(x9d.lock);
+    // A stalled UL engine (no read-index progress for 5 s) must not hold the
+    // mux forever (193.txt: 64 DRBs never completed, every later Start BUSY).
+    // Late completions of the old lifetime are then dropped, not fatal.
+    if (idle && inflight) {
+        if (x9d_ms() - x9d.tx_progress_ms < 5000) return false;
+        printf("X9 DPMAIF: mux %u retiring with %u TX descriptors stalled in hardware\n", mux, inflight);
+    }
     return idle;
 }
 static void x9d_stats_locked(const x9d_route &r,x9d_stats &stats) {
@@ -414,7 +451,12 @@ static bool x9d_retire_finish(unsigned mux,uint64_t lifetime,x9d_stats &stats) {
     if (!lifetime || !x9d_tx_quiescent(mux)) return false;
     IOLockLock(x9d.lock); x9d_route &r = x9d.route[mux - 1];
     bool valid = r.retiring && r.lifetime == lifetime;
-    if (valid) { x9d_stats_locked(r,stats); r.retiring = false; }
+    if (valid) {
+        x9d_stats_locked(r,stats); r.retiring = false;
+        bool other = false;
+        for (unsigned i = 0; i < CBP_INTERFACES; i++) if (i != mux - 1 && (x9d.route[i].bound || x9d.route[i].retiring) && x9d.route[i].channel == r.channel) other = true;
+        if (!other) x9d.used_channel[r.channel] = false; // ccmni channels are reused by the MD/vendor driver
+    }
     IOLockUnlock(x9d.lock); return valid;
 }
 static bool x9d_retiring() {
@@ -453,7 +495,7 @@ static bool x9d_tx_poll() {
         bool valid = c.lifetime && r.lifetime == c.lifetime;
         if (valid) { r.stats.tx_packets++; r.stats.tx_bytes += c.size; }
         IOLockUnlock(x9d.lock);
-        if (!valid) { x9d_fail("TX accounting lifetime mismatch"); return false; }
+        if (!valid) x9d.stale_completions++; // retired after a stall; no ledger left to credit
         bzero(&c, sizeof(c)); x9d.tx_done++;
     }
     x9d.tx_rd = rd;
@@ -624,6 +666,18 @@ static void x9d_poll() {
     }
     x9d.last_ul = ul; x9d.last_dl = dl;
     if (!x9d_tx_poll() || !x9d_rx_poll(0) || !x9d_rx_poll(1) || !x9d_replenish(0) || !x9d_replenish(1)) return;
+    uint64_t now = x9d_ms();
+    if (x9d.tx_done != x9d.tx_seen_done || x9d.tx_done == x9d.tx_packets) {
+        x9d.tx_seen_done = x9d.tx_done; x9d.tx_progress_ms = now; x9d.stall_reported = false;
+    } else if (now - x9d.tx_progress_ms >= 1000 && !x9d.stall_reported && x9d.stall_dumps < 3) {
+        x9d.stall_dumps++; x9d.stall_reported = true; // one dump per stall
+        printf("X9 DPMAIF: TX stalled: hardware read index %u, %llu of %llu payloads completed\n", x9d.tx_rd, x9d.tx_done, x9d.tx_packets);
+        x9d_dump("tx-stall", true);
+    }
+    if (x9d.bind_ms && now - x9d.bind_ms >= 8000 && !x9d.rx_packets && x9d.tx_done && x9d.rx_dumps < 1) {
+        x9d.rx_dumps++; printf("X9 DPMAIF: no downlink 8 s after bind with %llu uplink completed\n", x9d.tx_done);
+        x9d_dump("rx-none", true);
+    }
     if (ul) x9d_wr(x9d.pd + 0x400, 0, ul);
     if (dl) x9d_wr(x9d.pd + 0x400, 0x50, dl);
 }

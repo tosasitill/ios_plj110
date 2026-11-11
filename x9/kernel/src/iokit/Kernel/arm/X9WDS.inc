@@ -483,6 +483,13 @@ static bool x9w_interface_event(const uint8_t *p,unsigned n,unsigned sim){
  unsigned trans,cmd;
  if(!x9w_word(p,n,0x100,trans)||!x9w_byte(p,n,0x101,cmd))return false;
  if(trans%100>=20)return true; // not a supported/owned ccmni route
+ // Only IFUP(0)/IFDOWN(1) change interface state. 193.txt: command 5 came
+ // 9.6 s after IFUP and the real IFDOWN(1) only 42 s later, yet the old code
+ // tore the call down on it. Other commands (change/RA/state updates) are
+ // logged; an address change is still caught by the periodic GET205 check.
+ if(cmd!=0&&cmd!=1){
+  printf("X9 WDS: MD SIM%u EIF ccmni%u command %u (not IFUP/IFDOWN; state kept)\n",sim+1,trans%100,cmd);return true;
+ }
  x9w_interface &in=x9w_interfaces[sim][trans%100];bzero(&in,sizeof(in));
  in.serial=++x9w_if_serial;in.trans_id=trans;in.cmd=cmd;
  if(cmd==0){
