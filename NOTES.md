@@ -71,6 +71,15 @@ X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>      # 之后再�
 
 **上机流程**:用户把手机 `fastboot boot x9/out/<name>/boot.img`,跑场景,日志放 Mac `~/N.txt`,我读。永不 `fastboot getvar`。
 
+## 音频 loader 原因复核（BOOT-AUDIO-AUDIT，2026-11-11）
+
+- **范围／权威运行证据**：本轮用户要求查音频 loader 为什么阻塞 shim→XNU。重读 BOOT130 原始派生 console（`.local/x9/work/dual-sim-187/boot130-disk-20261110-164549/pstore-console.log`），最后仍是 GPS FDT refusal，无 ADSP／boot_args／jump／EXCEPTION；冻结 `0cbd413` 在此之后调用 ADSP。核对 `3430b74` 差分确实只 gate ADSP 并打印 skip，131 复用130内核，`~/189.txt:13` 已有 Darwin。这把已留证回归收窄到新增 ADSP pre-XNU 路径，但不是具体 fault PC。最新数字日志现为 `~/210.txt`（第1行 Darwin），190亦已进入XNU；**没有用户指定的另一个新失败镜像／新console，不能把130归因直接套到所有后续候选**。
+- **本轮新增机制证据／首要假设**：130 console 的 `sctlr=0x30d01980`，M/C均0、I=1；冻结 parser 的实际新编译汇编对 FDT 使用 `ldrb`，完整树验证直到 END 才返回，不能找到属性就提前结束。旧 ADSP 成功路径60次全树 lookup，且 parser／ADSP／普通 `plog_str` 均不喂狗；loader 在 ADT copy 后连续执行 GPU→SCP→GPS→ADSP→Wi-Fi/RAM，前几项耗时也累加，没有每项的 watchdog 服务点。**最值得验证的是无D-cache条件下长时间扫描耗尽LK继承的watchdog预算**，不是DSP READY等待：此函数不启动DSP、不访问shared pool或音频MMIO，只有FDT读取／ADT metadata写入。没有本次WDT enable/timeout/reset-status或CNT计时，**watchdog仍是假设，未证实唯一根因**；USB poll也随 `wdt_kick()` 停顿，但pstore末行不是仅USB刷新遗漏。
+- **离线成本只作结构统计**：读取旧 `.local/x9/modem/live.dtb`（不是130那次LK FDT），949567B／structure828632B、3466node／20258property。60遍对应 **1,631,460 token、1,215,480 property、16,941,540字节属性名扫描**（另有节点名／路径比较／栈访问）。旧交接的49,717,920B是structure跨度×60，**不是实际DRAM读取字节量**，属性payload会被跳过。不能把主机解析耗时或这些数字当设备耗时／watchdog证明。
+- **冻结源码排除项／直接单位编译**：私有 `.local/x9/work/audio-loader-audit-20261111/frozen130/` 由 `git show 0cbd413:<path>` 保存原版source/header，不读取或检查成功boot镜像。LLVM22＋原toolchain.CFLAGS＋UFS native宏编7对象，第二轮 **compile2.exit0、零warning、allocated ABS64均0**；第一轮仅漏拷SCP header而exit1，失败保留，补齐SCP/GPS header及runtime后通过。`.su`为ADSP912B／parser704B／named-reg80B／wrapper16B，基础lookup峰值约1712B（不含上层），ADT node每层48B／深度有界，未见64KiB栈超限解释。compiler-emitted memcpy/memset实际链接支持源码为volatile byte loop，新对象汇编无递归／SIMD／非对齐批量访问；没有因此证明现场绝无访存异常或完整link问题。
+- **当前安全状态／恢复门槛**：main `799f4fb` 已将MIC/ADSP两入口从loader和SOURCES移除，零placeholder保持，**本轮不恢复入口、不改运行代码／XNU entry／根盘／蜂窝并发修改**。`56e7b9a` 的single-pass只优化基础ADSP capture，当前保留源码的I2S4／PA reset／phandle等仍多次完整扫描且无watchdog进展服务；不能称整个audio handoff已single-pass或回归已修。后续先对齐用户实际失败候选；若恢复音频，先在独立候选加持久阶段／CNT与有界扫描进展点，保留所有资格校验和失败不授权；在同一内核、参数下单变量比较，最终必须ADSP返回→boot_args/jump→Darwin。若仍停住，用最后阶段／WDT原因回到最早不确定点，不继续猜XNU/DMA或直接打开旧入口。
+- **复核／交付边界**：`python3 .local/x9/work/audio-loader-audit-20261111/fdt-cost.py .local/x9/modem/live.dtb` 重放只读统计；`compile-frozen2.py`／`compile2-commands.json`记录准确编译（复跑需新out目录），`units130-2/*.{su,asm}`是本轮新单位对象分析，`compile2-results.json`记录ABS64。没有全kernel／HAL／shim link／boot构建、测试套件、CI触发、push或设备／ADB／fastboot／mailbox操作，无新镜像或启动修复验收。本轮仅本节交接入库，源码基线读取时为`695cdae`，原始日志与全部派生产物均留gitignored路径。
+
 ## 启动回退活动交接（BOOT-AUDIO-REMOVE，2026-11-10）
 
 - **用户要求/观察**：用户报告现在 shim 不能跳转到 XNU，要求去掉音频新增的内存交接部分。已有 BOOT130-CONSOLE 定位在 GPS FDT 返回后、ADSP handoff 前；CELL131/189 已证明只关闭 ADSP 调用即可恢复那次启动。修改前 main 默认 ADSP=0，但 `7d1ee50` 后新增 MIC DMA walker 仍无条件执行于 XNU jump 前。最新家目录数字日志仍189（16:57），没有本次失败的新console，**不把历史130或189当本次根因证明**。
