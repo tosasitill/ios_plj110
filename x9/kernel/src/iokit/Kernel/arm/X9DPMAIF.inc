@@ -35,12 +35,17 @@ struct x9d_stats {
     uint64_t tx_packets, rx_packets, tx_errors, rx_errors, tx_overflows, rx_overflows;
     uint64_t tx_bytes, rx_bytes, tx_dropped, rx_dropped;
 };
-struct x9d_route { uint64_t epoch; unsigned mtu; uint8_t channel, families; bool bound; x9d_stats stats; };
-struct x9d_completion { uint64_t epoch; uint16_t size; uint8_t mux; };
-struct x9d_tx { uint64_t epoch; uint16_t size; uint8_t mux; uint8_t ip[X9D_TX_SIZE]; };
+// Admission epoch changes on unbind. Accounting lifetime does not: payloads
+// already published must retire into their original call's ledger.
+struct x9d_route { uint64_t epoch,lifetime; unsigned mtu; uint8_t channel, families; bool bound,retiring; x9d_stats stats; };
+struct x9d_completion { uint64_t lifetime; uint16_t size; uint8_t mux; };
+struct x9d_tx { uint64_t epoch,lifetime; uint16_t size; uint8_t mux; uint8_t ip[X9D_TX_SIZE]; };
+// Channel tombstones are never reused. RX accounting stays independent of
+// TX retirement: an already-associated RX partial can still finish/drop.
+struct x9d_rx_account { uint64_t lifetime,packets,bytes,errors,overflows,dropped; };
 struct x9d_rx {
     unsigned rd, bytes; uint8_t seq, channel; bool message, normal, drop;
-    uint64_t seq_wait, epoch; unsigned mux;
+    uint64_t seq_wait, epoch,lifetime; unsigned mux;
     uint8_t ip[X9D_TX_SIZE];
 };
 struct x9d_state {
@@ -52,11 +57,12 @@ struct x9d_state {
     unsigned bat_wr[2], tx_wr, tx_rd, head, count;
     x9d_tx mail[X9D_MAIL]; x9d_route route[CBP_INTERFACES]; x9d_rx rx[2];
     x9d_completion completion[X9D_DRB / 2];
+    x9d_rx_account rx_account[20];
     unsigned mode; bool prepared, ready, failed, published, hw_attempted, clocks_live;
     unsigned irq_reports;
     const char *phase;
     uint32_t last_ul, last_dl; bool legacy_pit_reported;
-    uint64_t tx_packets, tx_done, rx_packets, rx_dropped, rejected, flow_events;
+    uint64_t tx_packets, tx_done, rx_packets, rx_dropped, rejected, flow_events,next_lifetime;
     int (*receiver)(uint32_t, const uint8_t *, uint32_t, uint32_t, uint64_t);
 };
 static x9d_state x9d;
@@ -126,7 +132,7 @@ static void x9d_phase(const char *phase) {
 static void x9d_fail(const char *reason) {
     if (x9d.failed) return;
     IOLockLock(x9d.lock); x9d.failed = true; x9d.ready = false;
-    for (x9d_route &r : x9d.route) { r.bound = false; r.families = 0; r.epoch++; }
+    for (x9d_route &r : x9d.route) { if (r.bound) r.retiring = true; r.bound = false; r.families = 0; r.epoch++; }
     x9d.count = 0; IOLockUnlock(x9d.lock);
     printf("X9 DPMAIF: quarantined (%s), phase %s; DMA retained, no reset/retry\n",
         reason, x9d.phase ? x9d.phase : "prepare");
@@ -323,24 +329,29 @@ static void x9d_prepare() {
     // Active initialization is deferred until the MD owner is actually online.
 }
 static bool x9d_ready() { return x9d.ready && !x9d.failed; } // owner only
+// bind/unbind/account/retirement APIs run only on the serialized bridge owner.
+// The lock synchronizes network mailbox producers; it does not authorize
+// other threads to publish, retire completion records or mutate lifetimes.
 // Called only AFTER native MIPC has proved call ID -> interface/ccmni binding.
 // Neither mux nor QMI client id is a physical ccmni channel.
-static bool x9d_bind(unsigned mux, unsigned channel, unsigned families, unsigned mtu) {
+static bool x9d_bind(unsigned mux, unsigned channel, unsigned families, unsigned mtu,uint64_t &lifetime) {
     if (!x9d_ready() || !cbp_mux_ok(mux) || channel >= 20 || !families || (families & ~3u) || mtu < 68 || mtu > X9D_TX_SIZE) return false;
     IOLockLock(x9d.lock);
-    if (x9d.used_channel[channel]) { IOLockUnlock(x9d.lock); return false; }
+    x9d_route &r = x9d.route[mux - 1];
+    if (x9d.used_channel[channel] || r.bound || r.retiring || x9d.next_lifetime == ~0ULL) { IOLockUnlock(x9d.lock); return false; }
     for (unsigned i = 0; i < CBP_INTERFACES; i++) if (i != mux - 1 && x9d.route[i].bound && x9d.route[i].channel == channel) {
         IOLockUnlock(x9d.lock); return false;
     }
-    x9d_route &r = x9d.route[mux - 1]; r.epoch++; r.channel = (uint8_t)channel; r.families = (uint8_t)families; r.mtu = mtu; r.bound = true;
+    r.epoch++; r.lifetime = ++x9d.next_lifetime; r.channel = (uint8_t)channel; r.families = (uint8_t)families; r.mtu = mtu; r.bound = true;
     bzero(&r.stats, sizeof(r.stats));
+    x9d.rx_account[channel].lifetime = r.lifetime; // unused channel only; no RX ledger reset
     x9d.used_channel[channel] = true;
-    IOLockUnlock(x9d.lock); return true;
+    lifetime = r.lifetime; IOLockUnlock(x9d.lock); return true;
 }
 static void x9d_unbind(unsigned mux) {
     if (!x9d.lock || !cbp_mux_ok(mux)) return;
     IOLockLock(x9d.lock); x9d_route &r = x9d.route[mux - 1];
-    if (r.bound) { r.bound = false; r.families = 0; r.epoch++; }
+    if (r.bound) { r.retiring = true; r.bound = false; r.families = 0; r.epoch++; }
     // An unbound mux cannot admit new packets under this same lock. Retire
     // its unpublished mailbox entries now, even when a full DRB ring keeps
     // tx_poll from dequeuing. Preserve every other mux's FIFO order. Never
@@ -348,7 +359,10 @@ static void x9d_unbind(unsigned mux) {
     unsigned kept = 0, old_count = x9d.count;
     for (unsigned i = 0; i < old_count; i++) {
         unsigned from = (x9d.head + i) % X9D_MAIL;
-        if (x9d.mail[from].mux == mux) { r.stats.tx_dropped++; continue; }
+        if (x9d.mail[from].mux == mux) {
+            if (x9d.mail[from].lifetime == r.lifetime) r.stats.tx_dropped++;
+            continue;
+        }
         unsigned to = (x9d.head + kept++) % X9D_MAIL;
         if (to != from) memcpy(&x9d.mail[to], &x9d.mail[from], sizeof(x9d_tx));
     }
@@ -357,22 +371,70 @@ static void x9d_unbind(unsigned mux) {
     x9d.count = kept;
     IOLockUnlock(x9d.lock);
 }
-static bool x9d_account(unsigned mux, x9d_stats &stats) {
-    if (!x9d.lock || !cbp_mux_ok(mux)) return false;
-    IOLockLock(x9d.lock); stats = x9d.route[mux - 1].stats; IOLockUnlock(x9d.lock);
-    return true;
+// Bridge-owner only: after unbind closes admission, wait for every queued
+// or hardware-published payload before final AP TX accounting handoff.
+// Completion records are retired only at the payload's even DRB boundary,
+// not when its MSG descriptor has been read. This does not prove RX drain,
+// MD channel release, or authorize used_channel reuse by itself.
+static bool x9d_tx_quiescent(unsigned mux) {
+    if (!x9d.lock || !cbp_mux_ok(mux) || !x9d_ready()) return false;
+    IOLockLock(x9d.lock);
+    bool idle = !x9d.route[mux - 1].bound;
+    for (unsigned i = 0; idle && i < x9d.count; i++) {
+        const x9d_tx &t = x9d.mail[(x9d.head + i) % X9D_MAIL];
+        if (t.mux == mux) idle = false;
+    }
+    // Only this owner mutates completion[] or publishes DRBs. Network
+    // producers hold lock and cannot enqueue after the unbind above.
+    for (unsigned i = 0; idle && i < X9D_DRB / 2; i++)
+        if (x9d.completion[i].mux == mux && x9d.completion[i].size) idle = false;
+    IOLockUnlock(x9d.lock);
+    return idle;
+}
+static void x9d_stats_locked(const x9d_route &r,x9d_stats &stats) {
+    stats = r.stats;
+    const x9d_rx_account &rx = x9d.rx_account[r.channel];
+    if (rx.lifetime == r.lifetime) {
+        stats.rx_packets = rx.packets; stats.rx_bytes = rx.bytes;
+        stats.rx_errors = rx.errors; stats.rx_overflows = rx.overflows; stats.rx_dropped = rx.dropped;
+    }
+}
+static bool x9d_account(unsigned mux,uint64_t lifetime,x9d_stats &stats) {
+    if (!x9d.lock || !cbp_mux_ok(mux) || !lifetime) return false;
+    IOLockLock(x9d.lock); const x9d_route &r = x9d.route[mux - 1];
+    bool valid = r.lifetime == lifetime;
+    if (valid) x9d_stats_locked(r,stats);
+    IOLockUnlock(x9d.lock); return valid;
+}
+// Owner-only final TX accounting handoff. A retained ledger prevents a new
+// bind on this mux until every original published PAYLOAD has retired. RX
+// delivery bytes stop at admission closure; RX drop totals remain a snapshot
+// of the independent retained RX ledger. This is NOT a final RX/MD flush.
+static bool x9d_retire_finish(unsigned mux,uint64_t lifetime,x9d_stats &stats) {
+    if (!lifetime || !x9d_tx_quiescent(mux)) return false;
+    IOLockLock(x9d.lock); x9d_route &r = x9d.route[mux - 1];
+    bool valid = r.retiring && r.lifetime == lifetime;
+    if (valid) { x9d_stats_locked(r,stats); r.retiring = false; }
+    IOLockUnlock(x9d.lock); return valid;
+}
+static bool x9d_retiring() {
+    if (!x9d.lock) return false;
+    IOLockLock(x9d.lock); bool pending = false;
+    for (const x9d_route &r : x9d.route) if (r.retiring) pending = true;
+    IOLockUnlock(x9d.lock); return pending;
 }
 static int x9d_send(unsigned mux, const uint8_t *ip, unsigned n) {
     if (!x9d.lock || !cbp_mux_ok(mux)) return ENETDOWN;
     if (!x9d_ip(ip, n)) return EINVAL;
     IOLockLock(x9d.lock); x9d_route &r = x9d.route[mux - 1];
     if (!x9d.ready || x9d.failed || !r.bound || !(r.families & cbp_family_bit(ip[0] >> 4)) || n > r.mtu) {
-        x9d.rejected++; r.stats.tx_dropped++; IOLockUnlock(x9d.lock); return n > r.mtu ? EMSGSIZE : ENETDOWN;
+        // Post-unbind unversioned producers do not belong to the old TX ledger.
+        x9d.rejected++; if (r.bound) r.stats.tx_dropped++; IOLockUnlock(x9d.lock); return n > r.mtu ? EMSGSIZE : ENETDOWN;
     }
     // Backpressure is retryable; don't count a retained packet as dropped.
     if (x9d.count == X9D_MAIL) { IOLockUnlock(x9d.lock); return EBUSY; }
     x9d_tx &t = x9d.mail[(x9d.head + x9d.count) % X9D_MAIL];
-    t.epoch = r.epoch; t.size = (uint16_t)n; t.mux = (uint8_t)mux; memcpy(t.ip, ip, n); x9d.count++;
+    t.epoch = r.epoch; t.lifetime = r.lifetime; t.size = (uint16_t)n; t.mux = (uint8_t)mux; memcpy(t.ip, ip, n); x9d.count++;
     IOLockUnlock(x9d.lock); return 0; // accepted into bounded mailbox, NOT completion
 }
 static bool x9d_tx_poll() {
@@ -388,8 +450,11 @@ static bool x9d_tx_poll() {
         x9d_completion &c = x9d.completion[at / 2];
         if (!cbp_mux_ok(c.mux) || !c.size) { x9d_fail("TX completion ownership"); return false; }
         IOLockLock(x9d.lock); x9d_route &r = x9d.route[c.mux - 1];
-        if (r.bound && r.epoch == c.epoch) { r.stats.tx_packets++; r.stats.tx_bytes += c.size; }
-        IOLockUnlock(x9d.lock); bzero(&c, sizeof(c)); x9d.tx_done++;
+        bool valid = c.lifetime && r.lifetime == c.lifetime;
+        if (valid) { r.stats.tx_packets++; r.stats.tx_bytes += c.size; }
+        IOLockUnlock(x9d.lock);
+        if (!valid) { x9d_fail("TX accounting lifetime mismatch"); return false; }
+        bzero(&c, sizeof(c)); x9d.tx_done++;
     }
     x9d.tx_rd = rd;
     for (unsigned budget = 0; budget < 16; budget++) {
@@ -400,7 +465,7 @@ static bool x9d_tx_poll() {
         if (!x9d.count) { IOLockUnlock(x9d.lock); break; }
         t = x9d.mail[x9d.head]; x9d.head = (x9d.head + 1) % X9D_MAIL; x9d.count--;
         const x9d_route &r = x9d.route[t.mux - 1];
-        bool valid = r.bound && r.epoch == t.epoch && (r.families & cbp_family_bit(t.ip[0] >> 4)); channel = r.channel;
+        bool valid = r.bound && r.epoch == t.epoch && r.lifetime == t.lifetime && (r.families & cbp_family_bit(t.ip[0] >> 4)); channel = r.channel;
         IOLockUnlock(x9d.lock); if (!valid) { bzero(&t, sizeof(t)); continue; }
         unsigned index = x9d.tx_wr, pool = index / 2 * X9D_TX_SIZE;
         memcpy(x9d.txpool.va + pool, t.ip, t.size); x9d_sync(x9d.txpool, pool, t.size);
@@ -409,7 +474,7 @@ static bool x9d_tx_poll() {
         d[0] = 1 | 4 | ((uint32_t)t.size << 16); d[1] = (uint32_t)channel << 16; // MSG dtype=1/cbit=1
         d[2] = ((uint32_t)(pa >> 32) << 8) | ((uint32_t)t.size << 16); d[3] = (uint32_t)pa; // PD dtype=0/cbit=0
         x9d_sync(x9d.drb, index * 8, 16);
-        x9d.completion[index / 2] = {t.epoch, t.size, t.mux};
+        x9d.completion[index / 2] = {t.lifetime, t.size, t.mux};
         // No checksum offloads advertised by PDP; stack supplies IP/L4 checksums.
         x9d.tx_wr = (index + 2) % X9D_DRB; x9d.tx_packets++; bzero(&t, sizeof(t));
         if (!x9d_command(x9d.pd, 0xb0, X9D_BUSY_BIT | 4)) return false; // two 8B DRBs -> four WORDS
@@ -422,10 +487,10 @@ static bool x9d_rx_item(unsigned q, const uint32_t *d) {
         if (r.message) { x9d_fail("interleaved RX message"); return false; }
         if (!(a & 2)) { x9d_fail("message PIT without continuation"); return false; }
         r.message = true; r.normal = false; r.bytes = 0; r.channel = (uint8_t)(a >> 16);
-        r.mux = 0; r.epoch = 0;
+        r.mux = 0; r.epoch = 0; r.lifetime = 0;
         IOLockLock(x9d.lock);
         for (unsigned i = 0; i < CBP_INTERFACES; i++) if (x9d.route[i].bound && x9d.route[i].channel == r.channel) {
-            r.mux = i + 1; r.epoch = x9d.route[i].epoch;
+            r.mux = i + 1; r.epoch = x9d.route[i].epoch; r.lifetime = x9d.route[i].lifetime;
         }
         IOLockUnlock(x9d.lock);
         r.drop = (a & (1u << 31)) || (a & (1u << 4)); return true;
@@ -453,7 +518,7 @@ static bool x9d_rx_item(unsigned q, const uint32_t *d) {
         unsigned mux = 0; int (*receiver)(uint32_t, const uint8_t *, uint32_t, uint32_t, uint64_t);
         IOLockLock(x9d.lock);
         for (unsigned i = 0; i < CBP_INTERFACES; i++) if (x9d.route[i].bound && x9d.route[i].channel == r.channel &&
-            i + 1 == r.mux && x9d.route[i].epoch == r.epoch && r.bytes <= x9d.route[i].mtu &&
+            i + 1 == r.mux && x9d.route[i].epoch == r.epoch && x9d.route[i].lifetime == r.lifetime && r.bytes <= x9d.route[i].mtu &&
             (x9d.route[i].families & cbp_family_bit(r.ip[0] >> 4))) mux = i + 1;
         receiver = x9d.receiver; IOLockUnlock(x9d.lock);
         bool valid = !r.drop && mux && receiver && x9d_ip(r.ip, r.bytes);
@@ -462,9 +527,9 @@ static bool x9d_rx_item(unsigned q, const uint32_t *d) {
         // its family gate and the immutable epoch carried by this packet.
         bool accepted = valid && receiver(mux, r.ip, r.bytes, r.ip[0] >> 4, r.epoch) == 0;
         IOLockLock(x9d.lock);
-        if (cbp_mux_ok(r.mux) && x9d.route[r.mux - 1].epoch == r.epoch) {
-            x9d_stats &s = x9d.route[r.mux - 1].stats;
-            if (accepted) { s.rx_packets++; s.rx_bytes += r.bytes; } else s.rx_dropped++;
+        if (cbp_mux_ok(r.mux) && r.channel < 20 && r.lifetime && x9d.rx_account[r.channel].lifetime == r.lifetime) {
+            x9d_rx_account &s = x9d.rx_account[r.channel];
+            if (accepted) { s.packets++; s.bytes += r.bytes; } else s.dropped++;
         }
         IOLockUnlock(x9d.lock);
         if (accepted) x9d.rx_packets++;

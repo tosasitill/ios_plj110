@@ -101,7 +101,9 @@ static bool x9ds_drain(){
   // send a default-SIM mutation while a previous call is still owned.
   b.abandoned=true;x9w_disconnect(b,i+1);x9w_error(b,X9Q_NOT_READY);
  }
- return empty;
+ // AP final TX accounting is an additional prerequisite only, not a proof
+ // that the MD user slot was released or RX/channel reuse is ordered.
+ return empty&&!x9w_accounting_pending();
 }
 static void x9ds_expire(uint64_t now){
  if(!x9ds_op.used||x9ds_op.timed_out||now<x9ds_op.deadline)return;

@@ -14,12 +14,33 @@
  * treating this dialler as ready for a new boot candidate. No cancel/reset.
  */
 struct x9w_client {
- uint8_t mux, family, sim_slot, stats_interval; bool starting,bearer_report;
+ uint8_t mux, family, sim_slot, stats_interval; bool starting,bearer_report,last_call_bytes_valid;
  uint32_t stats_mask,last_rat;uint64_t report_next;
  x9d_stats baseline,last_call;
 };
 static x9w_client x9w_clients[CBQ_MAX_CLIENTS];
 enum { X9W_DISC=1, X9W_ACT, X9W_CHECK, X9W_DEACT, X9W_IFWAIT };
+// AP accounting outlives the control bearer and client.204/4202 may consume
+// control state, but cannot erase a published payload's original ledger.
+struct x9w_retirement { uint64_t lifetime,generation; unsigned slot; bool pending; };
+static x9w_retirement x9w_retirements[CBP_INTERFACES];
+static bool x9w_retiring_client(unsigned slot,uint64_t generation){
+ for(const x9w_retirement &r:x9w_retirements)if(r.pending&&r.slot==slot&&r.generation==generation)return true;
+ return false;
+}
+static bool x9w_accounting_pending(){
+ for(const x9w_retirement &r:x9w_retirements)if(r.pending)return true;
+ return x9d_retiring(); // AP-only; never proves MD release or RX drain
+}
+static void x9w_retire_poll(){
+ for(unsigned i=0;i<CBP_INTERFACES;i++){x9w_retirement &r=x9w_retirements[i];if(!r.pending)continue;
+  x9d_stats stats={};if(!x9d_retire_finish(i+1,r.lifetime,stats))continue;
+  if(r.slot<CBQ_MAX_CLIENTS&&x9q_clients[r.slot].generation==r.generation){
+   x9w_clients[r.slot].last_call=stats;x9w_clients[r.slot].last_call_bytes_valid=true;
+  }
+  bzero(&r,sizeof(r));
+ }
+}
 static uint64_t x9w_if_serial,x9w_init_token,x9w_init_deadline;
 static unsigned x9w_init_stage;
 static bool x9w_control_ready,x9w_session_ready,x9w_init_hold;
@@ -74,7 +95,7 @@ static bool x9w_word(const uint8_t *p,unsigned n,unsigned tag,unsigned &v){
 struct x9w_bearer {
  bool used,owned,active,abandoned,pending,hold,gone;
  unsigned slot,op,min_cid,max_cid,channel,mtu,dns_count;
- uint64_t generation,token,deadline,reply_deadline,next,if_floor,result_epoch;
+ uint64_t generation,token,deadline,reply_deadline,next,if_floor,result_epoch,route_lifetime;
  uint32_t handle,len,trans_id;
  uint8_t cid,sim_slot,req[X9Q_REQ],ip[4],dns[2][4];
  char apn[101];
@@ -204,7 +225,12 @@ static void x9w_error(x9w_bearer &b,unsigned error){
 }
 static void x9w_disconnect(x9w_bearer &b,unsigned mux){
  bool was=b.active;
- if(was&&x9w_live(b))x9d_account(mux,x9w_clients[b.slot].last_call);
+ if(b.route_lifetime&&cbp_mux_ok(mux)){
+  x9w_retirement &r=x9w_retirements[mux-1];
+  if(!r.pending){r.lifetime=b.route_lifetime;r.generation=b.generation;r.slot=b.slot;r.pending=true;}
+  else if(r.lifetime!=b.route_lifetime)x9d_fail("WDS retirement ledger collision");
+  b.route_lifetime=0; // ownership transferred once, including after DEL_CLIENT
+ }
  b.active=false;bzero(&b.runtime,sizeof(b.runtime));x9d_unbind(mux);
  if(was&&x9w_live(b)){
   uint8_t req[7]={0,0,0,0x22,0,0,0};x9q_packet p(req);uint8_t status[2]={1,0},family=4;
@@ -277,11 +303,12 @@ static void x9w_publish(x9w_bearer &b,unsigned mux){
  x9wr_settings runtime={};
  if(b.result_epoch!=x9a_epoch||!x9wr_match_settings(b.get_result,in.facts,current,runtime)||
     !x9wr_ipv4_facts(runtime)||in.mtu!=b.mtu||memcmp(in.ip,b.ip,4)||!b.pending||!x9w_live(b)||
-    x9w_next_handle>=0xfffffffeu||!x9d_bind(mux,b.channel,1,b.mtu)){
+    x9w_next_handle>=0xfffffffeu||x9w_retirements[mux-1].pending||!x9d_bind(mux,b.channel,1,b.mtu,b.route_lifetime)){
   b.abandoned=true;x9w_error(b,X9Q_NOT_READY);x9w_deactivate(b,mux);return;
  }
  b.runtime=runtime;b.handle=++x9w_next_handle;b.active=true;b.op=0;b.next=x9q_ms()+10000;
  x9w_client &c=x9w_clients[b.slot];bzero(&c.baseline,sizeof(c.baseline));c.report_next=0;c.last_rat=0;
+ c.last_call_bytes_valid=false;bzero(&c.last_call,sizeof(c.last_call));
  printf("X9 WDS: SIM%u PDP activated call %u -> ccmni%u -> mux %u IPv4 MTU %u, ACT+GET+EIF/IFUP verified, DPMAIF bound\n",b.sim_slot+1,b.cid,b.channel,mux,b.mtu);
  x9w_handle_reply(b);
  // Connection notification is emitted only AFTER real bind; not CGATT alone.
@@ -407,6 +434,7 @@ static bool x9w_interface_event(const uint8_t *p,unsigned n,unsigned sim){
  }return true;
 }
 static void x9w_poll(){
+ x9w_retire_poll();
  static uint8_t response[X9_MIPC_FRAME_MAX];unsigned n=0;
  x9w_init_poll(response,sizeof(response));
  x9a_poll(response,sizeof(response));
@@ -460,7 +488,7 @@ static void x9w_poll(){
    bool rat_changed=c.bearer_report&&rat&&rat!=c.last_rat;
    if(stats_due||rat_changed){
     uint8_t req[7]={};x9q_packet report(req);x9d_stats stats={};
-    if(stats_due&&x9d_account(i+1,stats))x9w_statistics(report,stats,c.baseline,c.stats_mask);
+    if(stats_due&&x9d_account(i+1,b.route_lifetime,stats))x9w_statistics(report,stats,c.baseline,c.stats_mask);
     if(rat_changed){x9w_rat_tlv(report,0x1d,rat);c.last_rat=rat;}
     report.send(CBQ_PORT_BASE+b.slot,X9BB_PORT_BASE+1,true,1);
     c.report_next=now+uint64_t(c.stats_interval)*1000;
@@ -468,6 +496,7 @@ static void x9w_poll(){
    if(now>=b.next&& !x9w_check(b))b.next=now+10000;
   }
  }
+ x9w_retire_poll();
 }
 static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned n){
  unsigned slot=local-CBQ_PORT_BASE,id=x9q_u16(req+3);x9w_client &c=x9w_clients[slot];
@@ -499,9 +528,11 @@ static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
   if((id==0x24&&(!mask.p||mask.n!=4||n!=14||(bits&~0x3ffu)))||(id==0x86&&n!=7))error=X9Q_ARG;
   else if(!own||!own->active||!x9d_ready()||!x9_md_mipc_online()){
    x9q_packet p(req,15); // OUT_OF_CALL: only retained last-call totals are valid.
-   x9w_integer(p,0x1b,c.last_call.tx_bytes,8);x9w_integer(p,0x1c,c.last_call.rx_bytes,8);p.send(local,port);return true;
+   if(c.last_call_bytes_valid){x9w_integer(p,0x1b,c.last_call.tx_bytes,8);x9w_integer(p,0x1c,c.last_call.rx_bytes,8);}
+   p.send(local,port);return true;
   }else{
-   x9d_stats s={};x9d_account(c.mux,s);x9q_packet p(req);
+   x9d_stats s={};if(!x9d_account(c.mux,own->route_lifetime,s)){x9q_packet p(req,X9Q_NOT_READY);p.send(local,port);return true;}
+   x9q_packet p(req);
    if(id==0x86)c.baseline=s;else x9w_statistics(p,s,c.baseline,bits);
    p.send(local,port);return true;
   }
@@ -583,7 +614,8 @@ static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
    id,c.sim_slot+1,c.mux,family,start_apn.n,x9d_ready(),x9w_session_ready);
   if(!cbp_mux_ok(c.mux))error=X9Q_ARG;
   else if(!x9ds_data_ready(c.sim_slot))error=X9Q_NOT_READY;
-  else if(c.starting||own||x9w_bearers[c.mux-1].used||x9a_busy())error=X9Q_BUSY;
+  else if(c.starting||own||x9w_bearers[c.mux-1].used||x9w_retirements[c.mux-1].pending||
+          x9w_retiring_client(slot,x9q_clients[slot].generation)||x9a_busy())error=X9Q_BUSY;
   else if((error=x9w_args(req,n,family))!=0){}
   else if((error=x9p_start(req,n,c.sim_slot,family,selected_apn))!=0){}
   else if(!x9d_ready()||!x9_md_mipc_online()||!x9w_session_ready)error=X9Q_NOT_READY;
