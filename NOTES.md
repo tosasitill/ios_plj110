@@ -1515,6 +1515,14 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **后续**：从真实MTK按SIM/PLMN/RAT名称接口补NAS44的文本、编码、来源及生命周期，并触发原生更新/缓存失效；不硬编码运营商、不把修名称当修RX0。RegistrationCache按slot缓存，首次字典不存在才抓取，operatorNameChanged后重新本地化；修好底层仍需新鲜缓存验证。IMS按下一节继续独立核对，未证明其缺失导致这行或Internet RX0。
 - **成果与重放**：报告提交 **`8aec2d3`**，`docs/network/about-network-20H392.md`；私有 `.local/x9/work/about-network-20261111/` 含trace.py、collect-runtime.py、10段汇编、image-provenance/range-verification/runtime-evidence.json、constants/localization.json及脱敏定点摘录。根目录运行`python3 .local/x9/work/about-network-20261111/trace.py`与`python3 .local/x9/work/about-network-20261111/collect-runtime.py`重放；10段函数字节与现有根盘快照cache全部相同（不是设备内存采样）。只读原Apple输入/快照/已有日志及源码，**无运行代码改动、编译/新镜像/CI run/测试套件/push/设备操作**；仅报告和本节交接入Git，保留并发IMS交接。
 
+## 蜂窝当前分析交接(CELL214-RA-BOUNDARY，2026-11-11)：对照Android全流程，下行缺失在MD内部就已可见(MD自己也没收到RA)；仅分析，未改代码
+
+- **用户问题**：“根据安卓数据上网全流程来看我们的iOS端为什么一直收不到下载包，看214”。本轮只读214与既有Android抓取，没有新构建／设备操作。
+- **新观察(控制面，两份Android样本一致)**：Android internet ACT成功后MD很快主动上报**EIF cmd5且tag106=1、8107=24B**，紧跟**DATA_MOD_IND 4203**：`android-boot-20261111/boot_logcat2.txt` 0202@14:30:10.367→EIF5@10.403(+36ms)→4203@10.406；`android-dpmaif-20261111/datacycle.log` 0202@14:02:21.922→EIF5@21.960(+38ms)→4203@21.961。此间AP没有发任何与之相关的请求(只有GET_5GQOS/GET_CALL)，随后ccmni3即有全球IPv6。214(cell157)第二拨：EIF up 33.483s，65秒内**只有一次EIF5且tag106=0(37.526s，+4.04s)，从未出现count1的EIF5，也从未出现4203**。重放：`python3 -I .local/x9/work/cell214-ra-boundary/eifdec.py <log>.(私有，未入库；帧头16B后逐TLV、4字节对齐)。
+- **据此的推断(不是已证实根因)**：Android上MD在PDU会话建立后几十毫秒内就拿到了网络RA(下行用户面包)并更新v6；我们的MD 65秒内没有拿到。即**下行缺失在MD内部(NIM)就已成立，位于AP侧DPMAIF RX环之前**；“AP收不到下载包”更可能是MD与网络之间的用户面没有下行(或MD内部DL在到NIM前就停)，而不是AP的BAT/PIT接收实现问题。+4.04s的count0 EIF5形状像RA等待超时通知，但只有一个样本(第三拨在日志结束前+5.2s内未见)，**仅为猜测**。
+- **本轮顺带核对、未发现差异的项(观察)**：214 rx-none dump与健康Android `proc_ccci_dump2.txt`逐块比较，AO DL SRAM配置字(0x00..0x40)、BAT/PIT环配置、UL SRAM、pd_dl配置形态一致；`0x696f8000/00020000/00060000`在Android同样存在，不是MD下行痕迹。区别只有运行态：我们BAT rd恒0、PIT wr恒0。UL硬件统计ul_sram+0x90/+0xa0=3包/0xa0字节，正好等于我们发的64+48+48，说明DPMAIF硬件能正确读到我们4GiB以上的DRB内存。Android环在DT保留内存(`ccci-dpmaif-cache/nocache-memory`，动态分配，实测同为高位1地址)，不构成差异。未解释的小差异：PD_MISC+0x30(EMI_BUS_STATUS0) Android `FC90001C`／我们`FC10001C`(bit23)，是状态寄存器，含义未查，不当根因。DRB MSG/PD位域、count_l=0、network_type=0再次与原厂`ccci_dpmaif_com.c:2400..2460`一致。
+- **下一具体动作(建议)**：①在WDS里把EIF5/EIF0的tag106与8107原始24B、以及任何4203到达时间打印出来(不解释地址也要打印计数与时刻)，并在ACT后每秒记录一次“是否收到count1 EIF5”；这是不依赖DPMAIF的MD下行判据，下一镜像先看它。②若仍无count1：问题在MD↔网络用户面，优先对照ACT前的注册/会话参数差异(Android在internet ACT之前已完成IMS PDN、APN_ADD_PROFILE_LIST/SET_IA、NW_SET_RAT；我们的URSP描述符/空DNN首拨/双栈请求)，以及用MD侧可读状态(如NW_GET_PHYSICAL_CHANNEL_CONFIGS 04c7/04c8、CSCON 4409)确认拨号后RRC是否保持连接、是否有DRB。③若出现count1而AP仍RX0，才回到DPMAIF DL(届时cell158的BAT提示消费有意义)。
+
 ## 蜂窝当前分析交接(IMS214-NATIVE，2026-11-11)：确认iOS实际IMS启用入口被拒绝；不是继续堆IMSA查询，尚未改运行代码
 
 - **用户最新要求**：“有人提醒我们要先修复IMS你看看怎么弄”。已转查IMS，暂不全构建cell158。**确定存在IMS缺口，但尚未证明它是普通Internet RX0的前置原因**；不能把提醒、通常网络架构或已有注册查询当本机因果证据。最新实测仍214/cell157的TX242/242、RX0；BAT源码修复保留，未上机。
