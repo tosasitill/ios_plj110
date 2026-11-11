@@ -1375,7 +1375,17 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **不能称为全部USB完成**:本轮暂无枚举/DMA/ue0 ping/bulk回环实机结果,live EMI/MPU允许普通XNU DMA页也未证明。`native_apple_stack=0`,没有冒充IOUSBDeviceController或AppleUSBDeviceMux;原始configd USBDeviceConfiguration/lockdownd、Finder/iTunes Trust/配对/照片同步仍缺20H392 controller adapter及kext构建接入。USB3 XS-PHY/retimer、charger Type-C role与原生xHCI也未完成。参考文章chip/board/security-domain/fsid/锁状态条件要到原生栈接通后才验证,不先改身份/配对状态制造成功。
 - **下一步/验收**:先在用户手动启动的单一候选核对`CAP_EPINFO/TXFIFO/RXFIFO/MISC`→config1/alt1→真实QMU OUT/IN→ue0 ping,再用iOS `usbctl --echo`+host单次echo证明host→iOS→host字节相同。保留EP0日志,无需重建Metal插件/mailbox。接口/回退/构建说明在`x9/usb/README.md`;不要求用户现在连续刷试探镜像。
 
-## 蜂窝当前交接(CELL148-RESULT,2026-11-11): 205证实MD空口TX=0(上行包到MD后被内部丢弃)；MD端口/接口ID路径分析，下一步需Android对照
+## 蜂窝当前交接(CELL149-MOBILEDATA,2026-11-11): Android MIPC基准找到差异——RIL在ACT前发DATA_SET_CONFIG(MOBILE_DATA=1)，我们从未发；cell149补上，未上机
+
+- **Android采集**(用户进Android，蜂窝正常；产物`.local/x9/android-dpmaif-20261111/`，不入git)：
+  - 端口占用：`mtkfusionrild`用ttyCMIPC1(与我们相同)，ttyCMIPC2/3/4/6空闲。ccci MIPC字符设备独占打开，读写须同一fd(`exec 3<>`)。
+  - **统计口径更正**：从ttyCMIPC2发`SYS_CONNECTIVITY_STATISTICS`(OPEN→START→30个1000B ping→READ)，Android数据正常时也全0→该统计不覆盖DPMAIF数据路径，**205的"空口TX=0"不是证据**。
+  - **RIL MIPC序列**(logcat标签`AT`，`SEND/RECV MSGID=... DUMP=<hex>`可完整解析，脚本scratch `mipcparse.py`；`datacycle.log`为`svc data disable/enable`前后)：关数据`DATA_SET_CONFIG{0x100=0,0x101=1,0x103=0}`→DEACT；开数据**`DATA_SET_CONFIG{0x100=1,0x101=1,0x103=0}`**→`DATA_RETRY_TIMER_REQ{sim,cbnet}`→`DATA_ACT_CALL_REQ`(USERID/PASSWORD、0x11e 8B、URSP_EVAL 0、fallback 0x7f、APN cbnet、BEARER_BITMASK 0x7ffdffff、APN_TYPE 1、**REUSE 0**、PDP 3、APN_INDEX 0、ROAMING 3、URSP流量描述672B；**无IF_ID**)→CNF接口4(0x125=4,0x12a=404)→EIF IFUP/IFCHANGE→GET_CALL/5GQOS/URSP查询。头文件：0x100=MOBILE_DATA、0x101=DATA_ROAMING、0x103=IMS_TEST_MODE。
+- **修复 main `1932e87`**：每次ACT前发`DATA_SET_CONFIG{1,1,0}`(与RIL逐字节一致，日志`DATA_SET_CONFIG mobile data on ... CNF`)；ACT REUSE改0、去掉IF_ID(同RIL)；MIPC桥只放行该40B帧。两对象单编True。
+- **候选 `x9/out/x9-cell149-mobiledata-md/boot.img`**(worktree `2ca3599`)，三命令exit0，boot 13537280B，参数同131，插件276，**无需mailbox**。
+- **下一步**：用户boot cell149→`~/206.txt`。看`DATA_SET_CONFIG CNF result`、PDP activated(接口应为MD分配)、RX是否>0/能否上网。若仍无下行：继续向RIL对齐ACT(APN cbnet、PDP 3、fallback 0x7f、bearer bitmask、roaming 3)。
+
+## 蜂窝前次交接(CELL148-RESULT,2026-11-11): 205证实MD空口TX=0(上行包到MD后被内部丢弃)；MD端口/接口ID路径分析，下一步需Android对照
 
 - **205.txt**(cell148)。**观察**：`MD statistics start/read CNF valid result 0: air TX 0 B RX 0 B`(30.5s起每10s)，同期DPMAIF UL 46→165全部完成、RX 0。**结论**：AP→DPMAIF→MD交付成功，但MD没把上行发上空口(或统计口径不含此路径——统计接口在Android上未做基准验证)。
 - **MD静态分析(材料`.local/x9/work/cell-eif-20261111/`)**：`nim_dpmaif_set_mapping`(9141be78)仅当首参(呼叫节点`+0x9d8`=请求`+0x151`=MIPC端口配置`+0x25`)非0且`ap_if_id!=-1`才`ipc_set_netif_mapping`；`l5mipc_init_uarts`跳转表：l5io端口0..14 `+0x25=0`，15..23 `=1`；`l5io_fwk_mipc_io_map_uart`表0x9298e708：io0..9→UART41..50(=ttyCMIPC0..9，我们MIPC1=io1→非sAP)，io15→51、16..23→75..82(推断为外部主机端口)。→手机AP走非sAP端口是常态，"主机接口映射"路径不适用；IF_ID 3被MD接受但不改变空口TX=0。`SET_RESERVED_IF_ID`(0x239)在MD只是排除名单。MIPC头另有`SET_PACKET_FILTER`(0x207)、`SET_CONFIG`(0x211)未用。
