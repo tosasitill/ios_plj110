@@ -6,6 +6,19 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 226 ATCTX结果（CELL226-ATCTX，2026-11-11）：MD有PDU会话(PSI1/QFI1/S-NSSAI1)和DNS，但27.007层CGACT无条目、无本地地址、无QoS/TFT
+
+- **身份**：`~/226.txt` 1961789B，末61.5s，无panic。27.273s ACT0202 result0（ccmni1，IPv4 10.2.11.244）；56.25s第二拨ccmni2。52.0s DPMAIF TX129/129、RX全0、PIT不动（同225）。
+- **ATCTX原文（4轮，SIM1，+1/+6/+15s gen1、+1s gen2）**：
+  - `AT+CGACT?` → 仅`OK`，**没有任何`+CGACT:`行**（虽然CGDCONT定义了CID1）。
+  - `AT+CGDCONT?` → `1,"IPV4V6","cbnet","",0,0,0,2,0,0,,0,1,0`（四轮不变）。
+  - `AT+CGPADDR` → **`+CME ERROR: 100`**（四轮）。
+  - `AT+CGCONTRDP` → CID1两行(v4/v6)，**local_addr/subnet与gw均为空**；DNS v4 43.239.172.1/.2、v6 2409:8080:2000:3::1/::2；IPv4 MTU 0。NR连接期(28.3/33.3s)：bearer_id空、**PDU_session_id 1、QFI 1、SSC 0、S-NSSAI "1"、access 0、RQ 65535**；掉LTE后(42.3/57.3s)：**bearer_id 5**、PSI1、QFI空。
+  - `AT+C5GQOSRDP`、`AT+CGEQOSRDP`、`AT+CGTFTRDP` → 四轮都只`OK`（**无任何5QI/QCI/TFT**，包括LTE下EBI5时）。
+  - `AT+CSCON?` → `0,1,8,5,1`（NR SA连接）→42.3s `0,0,255,4,0`（LTE空闲）→57.3s `0,1,7,4,0`。
+- **解读（推断，需Android基线确认）**：网络侧NAS会话确实存在（PSI1+QFI1+S-NSSAI，LTE下有EBI5，网络下发DNS），所以“网络完全没给会话”不成立；但MD的27.007/L4C上下文层不认为CID1已激活（CGACT无条目、CGPADDR报100、CGCONTRDP无本地地址），也没有任何QoS/TFT记录。MIPC ACT成功、EIF绑定ccmni1，与L4C“未激活”状态不一致——最可能的卡点是**MIPC建立的会话没有走完L4C/PDN上下文激活→用户面(UPCM/QoS flow→netif)绑定**，导致UL被丢、DL(含RA)不交付。无法排除MTK对MIPC会话本来就不在CGACT中列出。
+- **下一步**：①Android正常上网时对同一SIM跑相同8条只读AT作基线（关键看CGACT?是否有`1,1`、CGCONTRDP是否有本地地址、C5GQOSRDP是否有5QI）。②若Android有而我们没有：对照Android ACT前后的MIPC序列(0101/0113 APN profile、SET_IA、DATA_SET_CONFIG形状、ACT TLV差异)。
+
 ## MD会话用户面AT探针（CELL-ATCTX，2026-11-11；已构建，未启动）
 
 - **源码**：main **`0ae6a27`**（`X9QMIAT.inc`＋`x9_mipc_bridge.inc`）。每个新激活的bearer generation在 **+1/+6/+15/+40s** 各排一轮（全boot最多24轮，同时只排一个），经现有每SIM MIPC AT通道（msg3/TLV8100）依次发只读27.007查询：`AT+CGACT?`、`AT+CGDCONT?`、`AT+CGPADDR`、`AT+CGCONTRDP`、`AT+C5GQOSRDP`、`AT+CGEQOSRDP`、`AT+CGTFTRDP`、`AT+CSCON?`；这8个精确字符串加入MIPC只读allowlist（无set形式、无参数）。原始回复以 `X9 CELL ATCTX: SIM<n> round <r> <cmd> result <code> part i/n "<文本>"` 按80字符分段打印（换行→`|`），ERROR/超时也打印并继续下一条；不解析、不据此改变任何行为。注意回复含运营商分配的IP/DNS，日志不入git。
