@@ -127,14 +127,15 @@ uint64_t x9_md_mipc_submit(const uint8_t *p,uint32_t n){
      x9mi_u16(p+24)!=0x101||x9mi_u16(p+26)!=1||p[28]>1||p[29]||p[30]||p[31]||
      x9mi_u16(p+32)!=0x103||x9mi_u16(p+34)!=1||p[36]||p[37]||p[38]||p[39])return 0;
  }
- /* RIL-mirror data queries (Android datacycle capture), exact shapes only:
+ /* RIL-mirror data requests (Android datacycle capture), exact shapes only:
   * 021b RETRY_TIMER {MODE100 u8 1, APN101 NUL-terminated string <=101},
   * 022d GET_5GQOS {ID100 u8}, 0233 GET_URSP_ROUTE_PROFILE {CID100 u32},
-  * 020f GET_MD_DATA_CALL_LIST {}. Read-only toward the MD data state. */
+  * 020f GET_MD_DATA_CALL_LIST {}. 021b MODE1 mutates retry-count state
+  * (requestResetMdDataRetryCount); the other three are read-only queries. */
  /* DATA_ACT_PACKET_ROUTE 025f / DATA_IFUP_PACKET_ROUTE 0261: exactly one
   * ROUTE100/u8 (subsys_daemon sends value 3), 24 bytes. */
  else if(id==0x25f||id==0x261){
-  if((p[8]!=1&&(p[8]!=2||x9_md_sim_count()!=2))||n!=24||x9mi_u16(p+16)!=0x100||x9mi_u16(p+18)!=1||p[21]||p[22]||p[23])return 0;
+  if((p[8]!=1&&(p[8]!=2||x9_md_sim_count()!=2))||n!=24||x9mi_u16(p+16)!=0x100||x9mi_u16(p+18)!=1||p[20]!=3||p[21]||p[22]||p[23])return 0;
  }
  else if(id==0x21b||id==0x22d||id==0x233||id==0x20f){
   if(p[8]!=1&&(p[8]!=2||x9_md_sim_count()!=2))return 0;
@@ -319,8 +320,14 @@ static void x9mi_tick(void){
  lck_mtx_lock(&x9_mi_lock);
  uint32_t reply_token=0;
  if(x9_mi_online&&!x9_mi_poisoned)reply_token=x9mm_tx(frame,&len);
- if(x9_mi_online&&!x9_mi_poisoned&&!reply_token)for(unsigned i=0;i<X9_MI_SLOTS;i++)if(x9_mi_slots[i].state==1){
-  struct x9_mi_slot *s=&x9_mi_slots[i];s->state=2;len=s->len;id=s->id;tx=s->txid;memcpy(frame,s->frame,len);break;
+ if(x9_mi_online&&!x9_mi_poisoned&&!reply_token){
+  // Slots are recycled independently of enqueue order. Scanning by slot
+  // index let newer requests overtake older ones (210: txn36 before txn19).
+  // Tokens never wrap in this session; preserve FIFO among unsent requests.
+  struct x9_mi_slot *s=NULL;
+  for(unsigned i=0;i<X9_MI_SLOTS;i++)if(x9_mi_slots[i].state==1&&
+     (!s||x9_mi_slots[i].token<s->token))s=&x9_mi_slots[i];
+  if(s){s->state=2;len=s->len;id=s->id;tx=s->txid;memcpy(frame,s->frame,len);}
  }
  lck_mtx_unlock(&x9_mi_lock);if(!len)return;
  if(reply_token){id=x9mi_u16(frame+10);tx=x9mi_u16(frame+12);}

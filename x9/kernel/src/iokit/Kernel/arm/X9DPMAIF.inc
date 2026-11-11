@@ -27,6 +27,7 @@ constexpr uint32_t X9D_DL_ERROR = (7u << 1) | (1u << 6) | (7u << 8);
 // drv3_isr0 filters this masked bit out before its length-error handler.
 // Do NOT confuse it with the real LRO PIT count errors at status bits 8/9.
 constexpr uint32_t X9D_DL_LEGACY_PIT = 1u << 3;
+constexpr uint32_t X9D_DL_LEGACY_DONE = 1u; // masked QDONE of the non-LRO path
 // drv3_intr_hw_init: L2 enable masks (mask-register positions). UL leaves
 // EMPTY(5..9) and MD_NOTREADY(10..14) MASKED; DL LRO = MTU_ERR6 | LRO0/1 8/9.
 constexpr uint32_t X9D_UL_L2_EN = (31u << 20) | (31u << 15) | 15u;
@@ -698,17 +699,16 @@ static void x9d_poll() {
     if (x9d_rd(x9d.infra, 0xd20) & 12) { x9d_fail("clock gated while active"); return; }
     uint32_t ul = x9d_rd(x9d.pd + 0x400, 0), dl = x9d_rd(x9d.pd + 0x400, 0x50);
     uint32_t checked_dl = dl;
-    if ((dl & X9D_DL_LEGACY_PIT) &&
-        (x9d_rd(x9d.ao, 0x90) & X9D_DL_LEGACY_PIT) &&
-        (x9d_rd(x9d.pd + 0xc00, 0x38) & 3u) == 2u) {
-        // 175.txt: raw 0x8 with both LRO rings untouched, legacy PIT absent.
-        // A polled owner cannot filter by the entire interrupt mask (all IRQs
-        // are masked here). Exempt ONLY this inactive legacy source, and only
-        // while its mask and path2 selection still match our configuration.
-        checked_dl &= ~X9D_DL_LEGACY_PIT;
+    const uint32_t legacy = dl & (X9D_DL_LEGACY_PIT | X9D_DL_LEGACY_DONE) & x9d_rd(x9d.ao, 0x90);
+    if (legacy && (x9d_rd(x9d.pd + 0xc00, 0x38) & 3u) == 2u) {
+        // 175: masked count bit3; Android live proc_ccci_dump2: masked QDONE
+        // bit0 with working LRO RX. drv3_isr0 filters both before handling.
+        // Neither is an unknown LRO error. Keep ALL LRO/DMA errors fatal;
+        // do not W1C either masked legacy bit or mask a newly unmasked source.
+        checked_dl &= ~legacy;
         if (!x9d.legacy_pit_reported) {
             x9d.legacy_pit_reported = true;
-            printf("X9 DPMAIF: masked legacy PIT count status 0x8 in LRO path2; LRO/DMA errors remain fatal\n");
+            printf("X9 DPMAIF: masked legacy status 0x%x in LRO path2; LRO/DMA errors remain fatal\n", legacy);
         }
     }
     // EMPTY / MD-not-ready / power-not-ready are flow control, not DMA length

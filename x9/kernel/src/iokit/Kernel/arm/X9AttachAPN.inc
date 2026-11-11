@@ -44,6 +44,7 @@ static bool x9a_waiter(unsigned slot,const uint8_t *req){
 }
 static void x9a_cards_changed(){
  ++x9a_epoch;
+ bzero(x9w_last_dnn,sizeof(x9w_last_dnn)); // learned DNN belongs to the old card pair
  if(x9a_op.used)x9a_reply(X9Q_NOT_READY); // late old-card CNF cannot ACK a new card
 }
 static unsigned x9a_args(const uint8_t *req,unsigned n,x9w_frame &f,const char *&why){

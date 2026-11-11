@@ -1394,7 +1394,23 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **不能称为全部USB完成**:本轮暂无枚举/DMA/ue0 ping/bulk回环实机结果,live EMI/MPU允许普通XNU DMA页也未证明。`native_apple_stack=0`,没有冒充IOUSBDeviceController或AppleUSBDeviceMux;原始configd USBDeviceConfiguration/lockdownd、Finder/iTunes Trust/配对/照片同步仍缺20H392 controller adapter及kext构建接入。USB3 XS-PHY/retimer、charger Type-C role与原生xHCI也未完成。参考文章chip/board/security-domain/fsid/锁状态条件要到原生栈接通后才验证,不先改身份/配对状态制造成功。
 - **下一步/验收**:先在用户手动启动的单一候选核对`CAP_EPINFO/TXFIFO/RXFIFO/MISC`→config1/alt1→真实QMU OUT/IN→ue0 ping,再用iOS `usbctl --echo`+host单次echo证明host→iOS→host字节相同。保留EP0日志,无需重建Metal插件/mailbox。接口/回退/构建说明在`x9/usb/README.md`;不要求用户现在连续刷试探镜像。
 
-## 蜂窝当前交接(CELL153-PKTROUTE,2026-11-11): Android开机MIPC抓取发现MD的包路由握手(PACKET_ROUTE)，我们从未参与；cell153补上，未上机
+## 蜂窝当前交接(CELL154-AUDIT，2026-11-11)：210包路由循环修正；Android全链审核收尾，最终候选待编译
+
+- **本轮范围／权威结果**：用户要求修完handoff问题后，继续对照Android数据网络全流程审核，再编最终镜像；不出中间boot。`~/210.txt`实跑cell153，记录025f TX1016次／4220通知1016次／0261 TX1001次／IFUP入队失败16次；最后DPMAIF ready1、quarantined0、UL78/78、RX0。main已有 **`695cdae`** 将每次IND的ACT改为只回IFUP，但尚无修后实跑。当前仍**没有联网成功结论**；MD统计全0早在CELL149被Android对照证明不能代表DPMAIF空口流量，禁止复用旧错误归因。
+- **推翻旧PACKET_ROUTE推断**：原始`android-boot-20261111/boot_logcat.txt:15312–15398`明确为`ImsRtpRedunDataController_0 → syncImsRtpRedunDataPathConfig`，app3是IMS RTP冗余路径；先于internet ACT出现不是普通PDN依赖证明。原始boot为两次025f／两次0261，不是合并时间戳去重后的一次。默认普通拨号不再发025f/0261；保留默认关闭`x9_ims_proute=1`诊断，开启时ACT只入队一次、每SIM完整app3 IND只回IFUP，先drain再重试**未入队**请求；已发送token绝不重放。桥只允许app3形状。
+- **本轮源码修复**：①WDS由bearer唯一token串行确认 `0211 CONFIG → 0212 result0 → 021b mode1 → 021c result0 → 0201 ACT`，入队失败保留未发stage，原200s host deadline不延长，迟到token只drain、不复活成功；②MIPC按最小未发token发送，修复按槽位扫描导致的新请求越过旧请求（210 txn36先于19）；SMS ACK既有优先级不变；③DPMAIF只在LRO path2且实际masked时豁免legacy QDONE bit0／PIT count bit3，Android健康dump rawDL=1，原厂ISR也先过滤mask；LRO/DMA及其他unknown仍fatal、不W1C masked位，**不是证明210 RX0根因**；④learned DNN仅接受准确NUL结尾的合法ACT APN，card-pair epoch变化清空，不跨卡沿用。
+- **RETRY语义复核**：原厂`libmtkmipc-ril.so`中`requestResetMdDataRetryCount` **2ca5cc–2ca610**构造mode1，响应handler **2d1d34**只检查result；`getModemSuggestedRetryTime` **2b6790**用的是mode0（状态0/1/2对应无建议／不重试／秒数）。所以本候选mode1是**重置重试计数的mutation，不是只读计时查询**，CNF `101/u32=255`不作255秒延时。保留捕获的单次显式Start序列，不自动循环ACT；完整网络退避策略仍未实现。
+- **全流程审核结论**：当前是有真实确认和所有权门控的**internet/no-auth/IPv4承载＋同PDN IPv6附件子集**，不是完整Android RIL替代品。已逐层核对如下，区分已接线、已观察和剩余边界：
+  - 启动：原厂HS1前DPMAIF准备；我们已同序，210 READY和UL消费正常。40bit DMA、4个TX环、LRO双PIT、BAT/PIT尺寸／信用、DRB/PIT字段、seq0xff、header_offset／BID布局及cache-credit规则与官方MT6993驱动核对，未发现新的确定格式错误解释RX0。
+  - SIM／注册／DDS：按真实SIM/PS/RAT和DDS020d/020e确认准入，不用单纯CGATT伪造数据。固定cell153树缺main已提交的DDS deadline-before-take（`feb41b7`）及AP accounting drain（`cd3106e`中DDS hunk），最终独立树只补这两项，**不混入main新音频／相机／GPS**。切卡、掉网和恢复仍待实跑。
+  - APN／IA：RAM profile、typed IA0101/0102、显式APN/URSP均已有；Android APN_ADD_PROFILE_LIST有截断、SYS_AT有掩码，不能抄未知字段。空APN首拨仍是network-default／match-all；DNN学习不是完整carrier provisioning，不添加未知IMS/PCO/auth能力。
+  - 激活：本轮补足真实CONFIG/RESET/ACT顺序；ACT后GET205、EIF4302/IFUP及CID/channel/trans/epoch交叉匹配后才bind和回复connected；5GQOS/URSP/call-list只是旁路查询，不作为已能收发的证据。Android实捕没有313，EIF_REQ/MD统计仍默认关闭。
+  - IP用户态：QMI runtime settings→CommCenter→pdp_ip raw-IP ifnet，software checksum、ifclassq背压、实际DPMAIF channel/lifetime、RX→ifnet_input已接线；地址、DNS、默认路由由iOS消费，**最终DNS/TCP/网页尚未证明**。Android当前carrier把MTU下调1410；MD零MTU时我们的默认1500不是该carrier策略的完整等价。
+  - IPv6：仅依附已验证PDP3，GET和IFUP匹配；未实现独立IPv6-only PDN、完整IFCHANGE(cmd5)地址更新及重通知。现有cmd5不误当IFDOWN，后续GET不匹配会撤v6资格而保留v4；不能声称RA/SLAAC已成功，更不能伪造RA。尚缺TCP ACK→TXQ1优化、完整LRO／IRQ与休眠恢复。
+  - 释放／切换：host超时／DEL_CLIENT保留原mutation token；MD DEACT确认或真实4202、AP TX retirement分别管理，不把一个当另一个；未知CID不随意203。单WDS Stop不等于全SIM移动数据关闭，不能擅自发全局CONFIG off影响其他bearer/IMS；原生mobile-data/roaming策略尚非完整实现。
+- **私有复现材料／进度**：`.local/x9/work/cell154-pktroute-fix/`保留210原件/聚焦输出、`decode-captures.py`、`{boot,cycle}-mipc.json`、message-inventory/register-diff、vendor官方6份源码及`retry-{consumer,reset}.asm`。重放离线帧解码：`python3 .local/x9/work/cell154-pktroute-fix/decode-captures.py`；保留完整行去重，不按时间戳丢消息。独立`.local/x9/worktrees/cell154-audited`已从0716728加695cdae＋本轮四文件＋上述DDS补丁。`X9Baseband.cpp.o`第一轮True；`sweet_x9_gpu_dependencies.o`第一轮因新树缺生成输入`x9_mdota.inc`失败，补正常`md_ota_pack.py --required`后第二轮True／exit0（日志`compile-selected{,2}.log/.exit`，失败保留，未带失败对象进入全编）。有既有C90/unused等warning，不称零warning；`git diff --check`通过。随后只构建一个最终候选，不跑测试套件。另一窗口短信7db91cc和其NOTES改动不纳入此固定候选。
+
+## 蜂窝前次交接(CELL153-PKTROUTE,2026-11-11): Android开机MIPC抓取发现MD的包路由握手(PACKET_ROUTE)，我们从未参与；cell153补上，未上机
 
 - **Android开机采集**(用户重启进Android，开机20s即`logcat -b all -d`；`.local/x9/android-boot-20261111/`，不入git；注意合并去重不能按时间戳，会丢同毫秒行)：
   - RIL(mtkfusionrild)开机MIPC：NW_GET_REGISTER_STATE、NW_GET_PROVIDER_NAME、SYS_AT(掩码)、NTN、DATA_SET_CONFIG、UNREGISTER_IND、LBS、**APN_ADD_PROFILE_LIST**(1320/1640/2600B，logcat截断无法照抄)、APN_SET_IA、DATA_ACT_CALL(SIM2 ims；SIM1 cbnet同前)、GET_CALL、URSP、NW_SET_RAT、SMS_CFG、THERMAL等。

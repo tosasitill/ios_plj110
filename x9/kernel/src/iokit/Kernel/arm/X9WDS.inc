@@ -1,16 +1,17 @@
-/* Native IPv4 WDS dialler, single QMI/DPMAIF owner (NOT the AT job queue).
+/* Native WDS dialler, single QMI/DPMAIF owner (NOT the AT job queue).
  * Runtime: libmtkmipc-ril + libmipc, ttyCMIPC1/RX216/TX217.
- * OPEN301/register307 -> GET_PDP_CID219 -> explicit no-auth ACT201 (REUSE=2, fallback=0)
+ * OPEN301/register307 -> GET_PDP_CID219 -> CONFIG211/CNF -> RETRY21b/CNF
+ * -> no-auth ACT201 (PDP3, REUSE=0, fallback=0x7f, captured URSP descriptor)
  * -> GET_CALL205 + actual EIF4302/IFUP -> bind.
  * Native decodeDataCallProfile reads ID100 separately from IF125;
  * ccci_dpmaif_com writes channel_id=ccmni_idx. Never use CID-1 as a route.
  * Explicit, RAM-profile or network-default APN, no-auth only. The MD call is
- * requested as IPv4; when it returns PDP3 (dual stack, e.g. the reused attach
- * PDN) the v6 client's Start attaches to that same CID/channel (x9w_v6_*).
+ * requested as IPv4v6; when it returns PDP3 the v6 client's Start attaches
+ * to that same CID/channel (x9w_v6_*).
  * Old MIPC headers differ from this RIL at tags128..12b: TRANS_ID is NOT a
  * subnet mask. Missing gateway/netmask is omitted, not invented. APN/IP stays
  * in RAM, never diagnostics. Sent activation survives host timeout/DEL_CLIENT
- * until its late CNF and cleanup. REUSE=2 does not prove a globally fresh CID:
+ * until its late CNF and cleanup. The ACT reuse flag does not prove a fresh CID:
  * saved P77 can reuse same-APN calls, and normal DEACT clears the MD user's
  * entire reference slot. User/CID lifetime still needs qualification before
  * treating this dialler as ready for a new boot candidate. No cancel/reset.
@@ -23,7 +24,7 @@ struct x9w_client {
  x9d_stats baseline,last_call;
 };
 static x9w_client x9w_clients[CBQ_MAX_CLIENTS];
-enum { X9W_DISC=1, X9W_ACT, X9W_CHECK, X9W_DEACT, X9W_IFWAIT };
+enum { X9W_DISC=1, X9W_ACT, X9W_CHECK, X9W_DEACT, X9W_IFWAIT, X9W_CONFIG, X9W_RETRY_RESET };
 // AP accounting outlives the control bearer and client.204/4202 may consume
 // control state, but cannot erase a published payload's original ledger.
 struct x9w_retirement { uint64_t lifetime,generation; unsigned slot; bool pending; };
@@ -48,7 +49,9 @@ static void x9w_retire_poll(){
 static uint64_t x9w_if_serial,x9w_init_token,x9w_init_deadline;
 static unsigned x9w_init_stage;
 static bool x9w_control_ready,x9w_session_ready,x9w_init_hold;
-static bool x9w_packet_route_pending; // send ACT/IFUP_PACKET_ROUTE once the session is ready
+// app3 belongs to Android's ImsRtpRedunDataController, NOT the internet PDN.
+// Optional diagnostic only; never a WDS readiness condition.
+static bool x9w_packet_route_enabled,x9w_packet_route_pending,x9w_ifup_pending[2];
 struct x9w_frame {
  uint8_t p[1024];unsigned n;bool good; // ACT carries a 672-byte URSP traffic descriptor
  x9w_frame(unsigned id,unsigned mask=1):n(16),good(true){
@@ -171,7 +174,8 @@ static void x9w_init_poll(uint8_t *response,unsigned room){
   if(stage==1)x9w_control_ready=true; // AT queries need OPEN, not PDP event registration
   if(stage==1+3*x9_md_sim_count()){
    {int v=0;PE_parse_boot_argn("x9_eif_req",&v,sizeof(v));x9w_netagent_req=v!=0;}
-   x9w_packet_route_pending=true; // subsys_daemon sends ACT/IFUP_PACKET_ROUTE {3} at boot
+   {int v=0;PE_parse_boot_argn("x9_ims_proute",&v,sizeof(v));x9w_packet_route_enabled=v==1;}
+   x9w_packet_route_pending=x9w_packet_route_enabled;
    x9w_session_ready=true;printf("X9 MIPC: v2 OPEN + DEACT/EIF subscriptions confirmed for %u SIM(s); CID ownership unqualified\n",x9_md_sim_count());return;}
  }
  if(!transport_ok||x9w_init_hold||x9w_session_ready)return;
@@ -402,31 +406,16 @@ static void x9w_stats(bool start){
  *slot={token,x9q_ms()+30000,(uint8_t)(start?0x80:0x81),0,0,0,nullptr};
  x9w_stats_next=x9q_ms()+10000;
 }
-// DATA_SET_CONFIG_REQ 0x0211: MOBILE_DATA100, DATA_ROAMING101, IMS_TEST_MODE103.
-// The Android RIL sends {1,1,0} before every DATA_ACT_CALL_REQ and {0,1,0}
-// when mobile data is turned off; we never sent it, so the MD kept mobile
-// data disabled while still activating PDNs.
-static void x9w_data_config(unsigned sim){
- x9w_side *slot=nullptr;for(x9w_side &e:x9w_sides)if(!e.token){slot=&e;break;}
- if(!slot||!x9_md_mipc_online()){printf("X9 WDS: DATA_SET_CONFIG not sent (no slot/MIPC)\n");return;}
- x9w_frame f(0x211,1u<<sim);f.byte(0x100,1);f.byte(0x101,1);f.byte(0x103,0);
- uint64_t token=f.submit();if(!token){printf("X9 WDS: DATA_SET_CONFIG submit failed\n");return;}
- *slot={token,x9q_ms()+30000,0x90,(uint8_t)sim,0,0,nullptr};
- printf("X9 WDS: SIM%u DATA_SET_CONFIG mobile data on, roaming on, ims test off\n",sim+1);
-}
 // Mirror of the Android RIL requests around a data call (datacycle.log):
-// before ACT DATA_RETRY_TIMER_REQ {mode 1, apn}; after the ACT CNF
-// DATA_GET_5GQOS_REQ {cid}, DATA_GET_URSP_ROUTE_PROFILE_REQ {u32 cid},
-// DATA_GET_MD_DATA_CALL_LIST_REQ {}. Replies are logged, never acted on.
-static void x9w_side_send(x9w_frame &f,unsigned sim,uint16_t cnf,const char *what){
+// After the ACT CNF: DATA_GET_5GQOS_REQ {cid},
+// DATA_GET_URSP_ROUTE_PROFILE_REQ {u32 cid}, DATA_GET_MD_DATA_CALL_LIST_REQ {}.
+// These are diagnostic queries only; CONFIG/RETRY_RESET belong to the bearer.
+static bool x9w_side_send(x9w_frame &f,unsigned sim,uint16_t cnf,const char *what,bool quiet=false){
  x9w_side *slot=nullptr;for(x9w_side &e:x9w_sides)if(!e.token){slot=&e;break;}
- if(!slot||!x9_md_mipc_online()){printf("X9 WDS: %s not sent (no slot/MIPC)\n",what);return;}
- uint64_t token=f.submit();if(!token){printf("X9 WDS: %s submit failed\n",what);return;}
+ if(!slot||!x9_md_mipc_online()){if(!quiet)printf("X9 WDS: %s not sent (no slot/MIPC)\n",what);return false;}
+ uint64_t token=f.submit();if(!token){if(!quiet)printf("X9 WDS: %s submit failed\n",what);return false;}
  *slot={token,x9q_ms()+30000,0xa0,(uint8_t)sim,0,cnf,what};
-}
-static void x9w_ril_retry_timer(unsigned sim,const char *apn){
- x9w_frame f(0x21b,1u<<sim);f.byte(0x100,1);f.tlv(0x101,apn,(unsigned)strnlen(apn,100)+1);
- x9w_side_send(f,sim,0x21c,"DATA_RETRY_TIMER");
+ return true;
 }
 static void x9w_ril_post_act(unsigned sim,unsigned cid){
  {x9w_frame f(0x22d,1u<<sim);f.byte(0x100,(uint8_t)cid);x9w_side_send(f,sim,0x22e,"DATA_GET_5GQOS");}
@@ -436,26 +425,18 @@ static void x9w_ril_post_act(unsigned sim,unsigned cid){
 // Android boot capture (subsys_daemon, libmtk-radio-service): before the
 // internet ACT it sends DATA_ACT_PACKET_ROUTE_REQ 0x25f {0x100 u8 3} and, on
 // the MD's DATA_IFUP_PACKET_ROUTE_IND 0x4220 {app_id 3,...}, DATA_IFUP_
-// PACKET_ROUTE_REQ 0x261 {0x100 u8 3}; the MD hands the value to l5updn as
-// the packet route. We never sent either, so the PDN had no AP route.
+// PACKET_ROUTE_REQ 0x261 {0x100 u8 3}. The surrounding runtime log identifies
+// ImsRtpRedunDataController -> syncImsRtpRedunDataPathConfig. Temporal order
+// does NOT make this an internet-PDN dependency; disabled unless requested.
 static void x9w_side_poll(){
- if(x9w_packet_route_pending&&x9w_session_ready&&x9_md_mipc_online()){
-  x9w_packet_route_pending=false; // SIM1 = data SIM, value 3 as captured: ACT once; IFUP follows each IND
-  {x9w_frame f(0x25f,1);f.byte(0x100,3);x9w_side_send(f,0,0x260,"DATA_ACT_PACKET_ROUTE");}
-  printf("X9 WDS: SIM1 ACT packet route 3 requested (as subsys_daemon at boot); IFUP answers each 4220\n");
- }
  if(x9w_stats_next&&x9q_ms()>=x9w_stats_next)x9w_stats(false);
  static uint8_t response[X9_MIPC_FRAME_MAX];
  for(x9w_side &e:x9w_sides){if(!e.token)continue;
   unsigned n=0;int ready=x9_md_mipc_take(e.token,response,sizeof(response),&n);
   if(ready==1&&e.cmd==0xa0){
    unsigned result=~0u;bool good=x9w_wire(response,n)&&x9q_u16(response+10)==e.cnf&&x9w_word(response,n,0,result);
+   if(good&&(e.cnf==0x260||e.cnf==0x262)){unsigned app=0;good=x9w_byte(response,n,0x100,app)&&app==3;}
    printf("X9 WDS: SIM%u %s CNF %s result %u (%u B)\n",e.sim+1,e.what,good?"valid":"malformed",result,n);
-   bzero(response,sizeof(response));bzero(&e,sizeof(e));continue;
-  }
-  if(ready==1&&e.cmd==0x90){
-   unsigned result=~0u;bool good=x9w_wire(response,n)&&x9q_u16(response+10)==0x212&&x9w_word(response,n,0,result);
-   printf("X9 WDS: SIM%u DATA_SET_CONFIG CNF %s result %u\n",e.sim+1,good?"valid":"malformed",result);
    bzero(response,sizeof(response));bzero(&e,sizeof(e));continue;
   }
   if(ready==1&&e.cmd>=0x80){
@@ -475,7 +456,21 @@ static void x9w_side_poll(){
    printf("X9 WDS: SIM%u EIF %s ccmni%u CNF %s result %u\n",e.sim+1,x9w_eif_name(e.cmd),e.trans%100,good?"valid":"malformed",result);
    bzero(response,sizeof(response));bzero(&e,sizeof(e));continue;
   }
-  if(e.deadline&&x9q_ms()>=e.deadline){printf("X9 WDS: EIF ifst ccmni%u CNF late; still draining\n",e.trans%100);e.deadline=0;}
+  if(e.deadline&&x9q_ms()>=e.deadline){printf("X9 WDS: %s CNF late; still draining\n",e.what?e.what:"EIF/statistics");e.deadline=0;}
+ }
+ // Drain first; retry only enqueue failures, never a sent request. 210 lost
+ // 16 IFUP submissions when the shared MIPC mailbox was full.
+ if(!x9w_packet_route_enabled||!x9w_session_ready||!x9_md_mipc_online())return;
+ if(x9w_packet_route_pending){
+  x9w_frame f(0x25f,1);f.byte(0x100,3);
+  if(x9w_side_send(f,0,0x260,"DATA_ACT_PACKET_ROUTE",true)){
+   x9w_packet_route_pending=false;
+   printf("X9 WDS: IMS diagnostic ACT packet route app3 queued once; not an internet route\n");
+  }
+ }
+ for(unsigned sim=0;sim<x9_md_sim_count();sim++)if(x9w_ifup_pending[sim]){
+  x9w_frame f(0x261,1u<<sim);f.byte(0x100,3);
+  if(x9w_side_send(f,sim,0x262,"DATA_IFUP_PACKET_ROUTE",true))x9w_ifup_pending[sim]=false;
  }
 }
 static void x9w_publish(x9w_bearer &b,unsigned mux){
@@ -526,10 +521,59 @@ static void x9w_publish(x9w_bearer &b,unsigned mux){
  if(x9w_netagent_req)x9w_ifst(b.sim_slot,b.trans_id,2,0,b.ip);
  if(x9w_netagent_req)x9w_stats(true);
 }
+// Android datacycle: 0211 -> successful 0212 -> 021b -> successful 021c
+// -> 0201. These are bearer-owned prerequisites, not best-effort side queries.
+// mode1 is requestResetMdDataRetryCount (RIL 2ca5cc..2ca610), NOT the
+// mode0 getModemSuggestedRetryTime query (2b6790). Its response consumer
+// checks result only (2d1d34); CNF tag101=255 is not a delay to sleep.
+// A full mailbox leaves an UNSENT stage pending under the original host
+// deadline. Once submitted, its sole token must be drained before advancing.
+static void x9w_start_next(x9w_bearer &b,unsigned mux){
+ if(b.token||b.owned||b.hold||b.abandoned||!x9w_live(b)||b.result_epoch!=x9a_epoch||
+    !x9d_ready()||!x9_md_mipc_online())return;
+ x9w_host_expire(b,mux,x9q_ms());if(b.abandoned)return;
+ if(b.op==X9W_CONFIG){
+  x9w_frame f(0x211,1u<<b.sim_slot);f.byte(0x100,1);f.byte(0x101,1);f.byte(0x103,0);
+  if(x9w_send(b,f,X9W_CONFIG,30000))printf("X9 WDS: SIM%u DATA_SET_CONFIG queued; await 0212 before RETRY_TIMER/ACT\n",b.sim_slot+1);
+  return;
+ }
+ if(b.op==X9W_RETRY_RESET){
+  const char *apn=b.apn[0]?b.apn:x9w_last_dnn[b.sim_slot];
+  x9w_frame f(0x21b,1u<<b.sim_slot);f.byte(0x100,1);f.tlv(0x101,apn,(unsigned)strnlen(apn,100)+1);
+  if(x9w_send(b,f,X9W_RETRY_RESET,30000))printf("X9 WDS: SIM%u DATA_RETRY_TIMER reset mode1 queued; await 021c before ACT\n",b.sim_slot+1);
+  return;
+ }
+ if(b.op!=X9W_ACT)return;
+ x9w_frame f(0x201,1u<<b.sim_slot);
+ // Field-for-field the Android RIL DATA_ACT_CALL_REQ (datacycle.log
+ // 14:02:21): USERID/PASSWORD empty, 0x11e {0f,0..}, URSP_EVAL_FLAG 0,
+ // fallback 0x7f, APN, BEARER_BITMASK 0x7ffdffff, APN_TYPE 1, REUSE 0,
+ // PDP 3 (v4v6), APN_INDEX 0, ROAMING 3, URSP_TRAFFIC_DESC (672 B), no
+ // AUTH_TYPE and no IF_ID. On 5G SA the UE routes traffic to a PDU session
+ // through URSP; matching the captured request is not proof of data delivery.
+ static const char no_credentials[]="";
+ static const uint8_t r11e[8]={0x0f,0,0,0,0,0,0,0};
+ f.tlv(0x8106,no_credentials,sizeof(no_credentials));
+ f.tlv(0x11e,r11e,sizeof(r11e));f.word(0x10f,0);
+ f.tlv(0x8107,no_credentials,sizeof(no_credentials));
+ f.byte(0x108,0x7f);
+ f.tlv(0x101,b.apn,(unsigned)strlen(b.apn)+1);
+ f.word(0x109,0x7ffdffff);f.word(0x102,1);f.byte(0x10a,0);f.byte(0x103,3);f.word(0x10c,0);f.byte(0x104,3);
+ { // mipc_ursp_traffic_desc_struct_struct4: is_match_all@0 dnn_len@1 dnn@4
+   // ... prot_id_next_hdr@414 (0xff = unspecified) dst_fqdn_len@415.
+   static uint8_t td[672];bzero(td,sizeof(td));
+   const char *dnn=b.apn[0]?b.apn:x9w_last_dnn[b.sim_slot];unsigned dl=(unsigned)strnlen(dnn,100);
+   if(dl){td[0]=0;td[1]=(uint8_t)dl;memcpy(td+4,dnn,dl);}else td[0]=1; // no DNN known: match all
+   td[414]=0xff;f.tlv(0x10d,td,sizeof(td));
+ }
+ b.if_floor=x9w_if_serial;
+ if(x9w_send(b,f,X9W_ACT,120000))printf("X9 WDS: requesting v4v6 call mux %u (RIL-shaped ACT: pdp 3, reuse 0, fallback 0x7f, URSP desc), frame %u B\n",mux,f.n);
+}
 static void x9w_result(x9w_bearer &b,unsigned mux,const uint8_t *p,unsigned n){
  x9w_host_expire(b,mux,x9q_ms()); // late ready1 cannot restore host success
  unsigned op=b.op;b.op=0;unsigned result;
- unsigned expected=op==X9W_DISC?0x21a:op==X9W_ACT?0x202:op==X9W_CHECK?0x206:0x204;
+ unsigned expected=op==X9W_DISC?0x21a:op==X9W_CONFIG?0x212:op==X9W_RETRY_RESET?0x21c:
+  op==X9W_ACT?0x202:op==X9W_CHECK?0x206:0x204;
  if(!x9w_wire(p,n)||x9q_u16(p+10)!=expected||!x9w_word(p,n,0,result)){
   b.hold=true;b.abandoned=true;x9w_disconnect(b,mux);x9w_error(b,X9Q_INTERNAL);
   printf("X9 WDS: malformed CNF op %u; quarantined until boot\n",op);return;
@@ -546,34 +590,13 @@ static void x9w_result(x9w_bearer &b,unsigned mux,const uint8_t *p,unsigned n){
    x9w_error(b,result==1?X9Q_BUSY:X9Q_NOT_READY);x9w_clear(b,mux);return;
   }
   if(!x9d_ready()||!x9_md_mipc_online()){x9w_error(b,X9Q_NOT_READY);x9w_clear(b,mux);return;}
-  x9w_data_config(b.sim_slot); // RIL order: DATA_SET_CONFIG(MOBILE_DATA on), DATA_RETRY_TIMER, ACT
-  x9w_ril_retry_timer(b.sim_slot,b.apn[0]?b.apn:x9w_last_dnn[b.sim_slot]);
-  x9w_frame f(0x201,1u<<b.sim_slot);
-  // Field-for-field the Android RIL DATA_ACT_CALL_REQ (datacycle.log
-  // 14:02:21): USERID/PASSWORD empty, 0x11e {0f,0..}, URSP_EVAL_FLAG 0,
-  // fallback 0x7f, APN, BEARER_BITMASK 0x7ffdffff, APN_TYPE 1, REUSE 0,
-  // PDP 3 (v4v6), APN_INDEX 0, ROAMING 3, URSP_TRAFFIC_DESC (672 B), no
-  // AUTH_TYPE and no IF_ID. On 5G SA the UE routes traffic to a PDU session
-  // through URSP; without a traffic descriptor nothing matched our session.
-  static const char no_credentials[]="";
-  static const uint8_t r11e[8]={0x0f,0,0,0,0,0,0,0};
-  f.tlv(0x8106,no_credentials,sizeof(no_credentials));
-  f.tlv(0x11e,r11e,sizeof(r11e));f.word(0x10f,0);
-  f.tlv(0x8107,no_credentials,sizeof(no_credentials));
-  f.byte(0x108,0x7f);
-  f.tlv(0x101,b.apn,(unsigned)strlen(b.apn)+1);
-  f.word(0x109,0x7ffdffff);f.word(0x102,1);f.byte(0x10a,0);f.byte(0x103,3);f.word(0x10c,0);f.byte(0x104,3);
-  { // mipc_ursp_traffic_desc_struct_struct4: is_match_all@0 dnn_len@1 dnn@4
-    // ... prot_id_next_hdr@414 (0xff = unspecified) dst_fqdn_len@415.
-    static uint8_t td[672];bzero(td,sizeof(td));
-    const char *dnn=b.apn[0]?b.apn:x9w_last_dnn[b.sim_slot];unsigned dl=(unsigned)strnlen(dnn,100);
-    if(dl){td[0]=0;td[1]=(uint8_t)dl;memcpy(td+4,dnn,dl);}else td[0]=1; // no DNN known: match all
-    td[414]=0xff;f.tlv(0x10d,td,sizeof(td));
-    printf("X9 WDS: ACT URSP traffic descriptor %s (dnn length %u; APN stays private)\n",dl?"dnn":"match-all",dl);
+  b.op=X9W_CONFIG;x9w_start_next(b,mux);return;
+ }
+ if(op==X9W_CONFIG||op==X9W_RETRY_RESET){
+  if(result||b.abandoned||!x9d_ready()||!x9_md_mipc_online()){
+   x9w_error(b,result==1?X9Q_BUSY:X9Q_NOT_READY);x9w_clear(b,mux);return;
   }
-  b.if_floor=x9w_if_serial;
-  if(!x9w_send(b,f,X9W_ACT,120000)){x9w_error(b,X9Q_BUSY);x9w_clear(b,mux);}
-  else printf("X9 WDS: requesting v4v6 call mux %u (RIL-shaped ACT: pdp 3, reuse 0, fallback 0x7f, URSP desc), frame %u B\n",mux,f.n);return;
+  b.op=op==X9W_CONFIG?X9W_RETRY_RESET:X9W_ACT;x9w_start_next(b,mux);return;
  }
  if(op==X9W_ACT){
   unsigned cid;
@@ -590,7 +613,7 @@ static void x9w_result(x9w_bearer &b,unsigned mux,const uint8_t *p,unsigned n){
   b.cid=(uint8_t)cid;b.owned=true;
   { x9q_view a=x9w_tlv(p,n,0x101); // CNF APN actually used: the URSP DNN for later ACTs
     if(!result&&a.p&&a.n>1&&a.n<=101){unsigned l=(unsigned)strnlen((const char *)a.p,a.n);
-     if(l&&l<sizeof(x9w_last_dnn[0])){memcpy(x9w_last_dnn[b.sim_slot],a.p,l);x9w_last_dnn[b.sim_slot][l]=0;}}}
+     if(l+1==a.n&&x9w_apn(a.p,l)){memcpy(x9w_last_dnn[b.sim_slot],a.p,l);x9w_last_dnn[b.sim_slot][l]=0;}}}
   // Actual RIL treats 150202/150204 as partial success and decodes 150203's
   // partial profile. This IPv4-only dialler cleans up instead of falling back.
   if(result||b.gone||b.abandoned||!x9w_settings(b,p,n)||
@@ -766,13 +789,16 @@ static void x9w_poll(){
     if(!x9w_interface_event(response,n,sim))x9w_bad_event();
   }
   else if(x9q_u16(response+10)==0x4220){
-   unsigned app=0,a1=0,a2=0,a3=0;x9w_byte(response,n,0x100,app);x9w_byte(response,n,0x101,a1);x9w_byte(response,n,0x102,a2);x9w_byte(response,n,0x103,a3);
-   for(unsigned sim=0;sim<x9_md_sim_count();sim++)if(response[8]&(1u<<sim)){
-    printf("X9 WDS: SIM%u DATA_IFUP_PACKET_ROUTE_IND app %u (%u %u %u); answering like subsys_daemon\n",sim+1,app,a1,a2,a3);
+   unsigned app=0,a1=0,a2=0,a3=0;
+   bool valid=x9w_byte(response,n,0x100,app)&&app==3&&x9w_byte(response,n,0x101,a1)&&
+    x9w_byte(response,n,0x102,a2)&&x9w_byte(response,n,0x103,a3);
+   if(x9w_packet_route_enabled&&valid&&(response[8]==1||(response[8]==2&&x9_md_sim_count()==2))){
+    unsigned sim=response[8]==1?0:1;
+    printf("X9 WDS: SIM%u IMS DATA_IFUP_PACKET_ROUTE_IND app %u (%u %u %u); queue IFUP only\n",sim+1,app,a1,a2,a3);
     // 210.txt: re-sending ACT_PACKET_ROUTE on every IND made the MD raise
     // the IND again (1016 round trips). subsys_daemon answers an IND with
     // DATA_IFUP_PACKET_ROUTE only; ACT_PACKET_ROUTE is sent once at start.
-    {x9w_frame f(0x261,1u<<sim);f.byte(0x100,(uint8_t)app);x9w_side_send(f,sim,0x262,"DATA_IFUP_PACKET_ROUTE");}
+    x9w_ifup_pending[sim]=true;
    }
   }
   else if(x9q_u16(response+10)==0x4202&&x9w_byte(response,n,0x100,cid)){
@@ -811,6 +837,7 @@ static void x9w_poll(){
   }
   if(b.gone){x9w_clear(b,i+1);continue;}
   if(b.abandoned){if(b.owned&&!b.hold)x9w_deactivate(b,i+1);else if(!b.owned&&!b.hold)x9w_clear(b,i+1);continue;}
+  if(!b.hold&&(b.op==X9W_CONFIG||b.op==X9W_RETRY_RESET||b.op==X9W_ACT)){x9w_start_next(b,i+1);continue;}
   if(b.op==X9W_IFWAIT){
    x9w_publish(b,i+1);
    if(!b.active&&!b.abandoned&&now>=b.deadline){b.abandoned=true;x9w_error(b,X9Q_NOT_READY);x9w_deactivate(b,i+1);printf("X9 WDS: owned call has no matching EIF/IFUP; no host success\n");}
@@ -983,7 +1010,7 @@ static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
   else{
    x9w_bearer &b=x9w_bearers[c.mux-1];bzero(&b,sizeof(b));b.used=b.pending=true;
    b.slot=slot;b.sim_slot=c.sim_slot;b.generation=x9q_clients[slot].generation;b.result_epoch=x9a_epoch;b.len=n;memcpy(b.req,req,n);
-   b.reply_deadline=x9q_ms()+200000; // DISC10 + ACT120 + GET30 + IFWAIT30
+   b.reply_deadline=x9q_ms()+200000; // total host bound includes CONFIG/RETRY; stages never extend it
    x9w_selection(req,n,b.start_apn,b.start_apn_n,b.start_profile);
    x9q_view apn=x9q_tlv(req,n,0x14);
    if(x9q_tlv(req,n,0x31).p)memcpy(b.apn,selected_apn,sizeof(b.apn));
