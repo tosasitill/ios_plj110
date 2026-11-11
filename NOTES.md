@@ -1375,7 +1375,15 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **不能称为全部USB完成**:本轮暂无枚举/DMA/ue0 ping/bulk回环实机结果,live EMI/MPU允许普通XNU DMA页也未证明。`native_apple_stack=0`,没有冒充IOUSBDeviceController或AppleUSBDeviceMux;原始configd USBDeviceConfiguration/lockdownd、Finder/iTunes Trust/配对/照片同步仍缺20H392 controller adapter及kext构建接入。USB3 XS-PHY/retimer、charger Type-C role与原生xHCI也未完成。参考文章chip/board/security-domain/fsid/锁状态条件要到原生栈接通后才验证,不先改身份/配对状态制造成功。
 - **下一步/验收**:先在用户手动启动的单一候选核对`CAP_EPINFO/TXFIFO/RXFIFO/MISC`→config1/alt1→真实QMU OUT/IN→ue0 ping,再用iOS `usbctl --echo`+host单次echo证明host→iOS→host字节相同。保留EP0日志,无需重建Metal插件/mailbox。接口/回退/构建说明在`x9/usb/README.md`;不要求用户现在连续刷试探镜像。
 
-## 蜂窝当前交接(CELL139-IFST,2026-11-11): 195里ifst被MIPC桥白名单拦下(submit failed)；cell139放行精确格式的0x313，未上机
+## 蜂窝当前交接(CELL140-BATORDER,2026-11-11): 196中ifst已被MD接受(CNF 0)但UL仍只完成首批；cell140按原厂顺序启用DL BAT，未上机
+
+- **196.txt**(cell139，末46.9s)。**观察**：`EIF ifst up ccmniN type 1 sent to MD`→`CNF valid result 0`(26.5s/28.1s)；`ifst down ... CNF valid result 0`。UL仍`TX stalled: hardware read index 4, 2 of 20`，RX 0，`EIF ccmni2 command 5`=IFCHANGE(已忽略)。dump：DBG_STA5=DRB基址+0x20(第3个DRB)、DBG_STA7=txpool基址+0xC00(第2包payload)；ul_sram+0xf4高16位=软件wr。**规律**：每轮完成数=首次取描述符前已发布的包数(193/194/196=2，195=1)。
+- **分析**：MD侧LHIF(`lhifcore_task_main`)同一任务处理UL/DL；`lhif_drv_data_chk_dpmaif_resource`(9012f41a)读AP DL SRAM的BAT/PIT寄存器(MD地址0xc410dc64/dcd8/dcdc/dcec↔AP dl_sram+0x64/0xd8/0xdc/0xec)算DL资源。**推断**：DL资源无效→LHIF数据路径停→UL只走完首批缓冲。原厂DL对照：LRO PIT(base/size/CON3 EN/chknum/INIT)、HPC/agg/hash/timeout与我们一致；**差异**：`ccci_dpmaif_bat_start`在BAT_EN=0下ALLSET初始化(普通→frag)，先加frag计数再加普通计数，最后`dl_all_frg_queue_en`/`dl_all_queue_en`置CON1 BAT_EN并发仅使能的BAT_INIT(EN|FRG / EN)；我们在ALLSET时就置EN且从未发仅使能INIT。
+- **修复 main `7664b34`**：按原厂顺序初始化/加信用/启用BAT，日志`X9 DPMAIF: BAT enable after credit (vendor order), CON1 0x...`。单编True。
+- **候选 `x9/out/x9-cell140-batorder-md/boot.img`**(worktree `08f2f4b`)，三命令exit0，boot 13533184B，内核含新字符串；参数同131，插件276，**无需mailbox**。记录`.local/x9/work/cell140-batorder/`。
+- **下一步**：用户boot cell140→`~/197.txt`。先确认DPMAIF初始化没有被隔离(`quarantined`)且有`BAT enable after credit`，再看UL completed、RX。若仍首批即停：怀疑UL DRB预取缓存了未写描述符(看能否改为每次ADD前批量发布/对齐到32B组)，或继续查MD LHIF UL元表(`lhif_drv_meta_table_polling`)门控。
+
+## 蜂窝前次交接(CELL139-IFST,2026-11-11): 195里ifst被MIPC桥白名单拦下(submit failed)；cell139放行精确格式的0x313，未上机
 
 - **195.txt**(cell138，末64s)。**观察**：所有`EIF ifst up/down ccmniN submit failed`——`x9_mipc_bridge.inc`的`x9_md_mipc_submit`白名单只放OPEN/AT/attach/DDS/WDS几个ID，注释明确拒绝"speculative EIF"。所以cell138的ifst从未到MD，195不能用来判断ifst是否有效。其余同194：重拨正常，UL完成1/提交173，RX0。191-195无`MD command id ... ignored`(MD没有等AP回RSP的命令)。
 - **修复 main `29e690b`**：白名单只放行精确的0x313：SIM1/SIM2掩码，`TRANSID100/u32`后接`CMD101/u8`(0或1)，IFUP时恰一个`ADDRESS_TYPE104/u8`(1..3)，零填充，总长40(IFUP)/32(IFDOWN)。CNF 0x314由现有id+1槽位匹配。`X9Baseband.cpp.o`与`sweet_x9_gpu_dependencies.o`单编True。
