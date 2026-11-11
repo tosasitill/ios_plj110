@@ -359,6 +359,38 @@ static void x9w_handle_reply(x9w_bearer &b){
  uint32_t h=b.handle;uint8_t bytes[4]={(uint8_t)h,(uint8_t)(h>>8),(uint8_t)(h>>16),(uint8_t)(h>>24)};
  x9q_packet p(b.req);p.tlv(1,bytes,4);p.send(CBQ_PORT_BASE+b.slot,X9BB_PORT_BASE+1);x9w_pending_done(b);
 }
+// ---- AP interface state to the MD (netagent role) ---------------------
+// mipc_msg_tlv_const.h: INTERNAL_EIF_REQ = 0x313 / CNF 0x314; TRANSID100
+// u32, CMD101 u8 (0 IFUP, 1 IFDOWN, 2 IPUPDATE...), ADDRESS_TYPE104 u8
+// (1 v4, 2 v6, 3 v4v6). MD mipc_internal_eif_req (91335d2a) turns IFUP into
+// AT+EIF=<id>,"ifst","up",<type>. On Android the netagent sends it after it
+// has configured the ccmni for the MD's EIF IFUP; 193/194.txt never sent it
+// and the UL engine stopped after 2 packets. CNFs are drained by their own
+// token table so no MIPC slot is leaked when a bearer is cleared.
+struct x9w_side { uint64_t token,deadline; uint8_t cmd,sim; uint32_t trans; };
+static x9w_side x9w_sides[8];
+static void x9w_ifst(unsigned sim,uint32_t trans,unsigned cmd,unsigned type){
+ x9w_side *slot=nullptr;for(x9w_side &e:x9w_sides)if(!e.token){slot=&e;break;}
+ if(!slot||!x9_md_mipc_online()){printf("X9 WDS: EIF ifst %s ccmni%u not sent (no slot/MIPC)\n",cmd?"down":"up",trans%100);return;}
+ x9w_frame f(0x313,1u<<sim);f.word(0x100,trans);f.byte(0x101,(uint8_t)cmd);
+ if(!cmd)f.byte(0x104,(uint8_t)type);
+ uint64_t token=f.submit();
+ if(!token){printf("X9 WDS: EIF ifst %s ccmni%u submit failed\n",cmd?"down":"up",trans%100);return;}
+ *slot={token,x9q_ms()+30000,(uint8_t)cmd,(uint8_t)sim,trans};
+ printf("X9 WDS: SIM%u EIF ifst %s ccmni%u type %u sent to MD\n",sim+1,cmd?"down":"up",trans%100,type);
+}
+static void x9w_side_poll(){
+ static uint8_t response[X9_MIPC_FRAME_MAX];
+ for(x9w_side &e:x9w_sides){if(!e.token)continue;
+  unsigned n=0;int ready=x9_md_mipc_take(e.token,response,sizeof(response),&n);
+  if(ready==1){
+   unsigned result=~0u;bool good=x9w_wire(response,n)&&x9q_u16(response+10)==0x314&&x9w_word(response,n,0,result);
+   printf("X9 WDS: SIM%u EIF ifst %s ccmni%u CNF %s result %u\n",e.sim+1,e.cmd?"down":"up",e.trans%100,good?"valid":"malformed",result);
+   bzero(response,sizeof(response));bzero(&e,sizeof(e));continue;
+  }
+  if(e.deadline&&x9q_ms()>=e.deadline){printf("X9 WDS: EIF ifst ccmni%u CNF late; still draining\n",e.trans%100);e.deadline=0;}
+ }
+}
 static void x9w_publish(x9w_bearer &b,unsigned mux){
  x9w_host_expire(b,mux,x9q_ms()); // every publication entry owns its deadline gate
  if(b.abandoned||b.hold||!b.pending)return;
@@ -384,6 +416,9 @@ static void x9w_publish(x9w_bearer &b,unsigned mux){
  uint8_t req[7]={};x9q_packet connected(req);uint8_t status[2]={2,0},family=4;
  connected.tlv(1,status,2);connected.tlv(0x12,&family,1);
  connected.send(CBQ_PORT_BASE+b.slot,X9BB_PORT_BASE+1,true,0x22);
+ // DPMAIF route is bound and the host has the address: report the AP
+ // interface up, typed like the verified PDN (EIF_ADDRESS_TYPE 1 or 3).
+ x9w_ifst(b.sim_slot,b.trans_id,0,runtime.modem_pdp==3?3:1);
 }
 static void x9w_result(x9w_bearer &b,unsigned mux,const uint8_t *p,unsigned n){
  x9w_host_expire(b,mux,x9q_ms()); // late ready1 cannot restore host success
@@ -507,7 +542,7 @@ static bool x9w_interface_event(const uint8_t *p,unsigned n,unsigned sim){
  for(unsigned m=0;m<CBP_INTERFACES;m++){x9w_bearer &b=x9w_bearers[m];
   if(b.used&&b.owned&&b.sim_slot==sim&&b.trans_id==trans&&in.serial>b.if_floor&&
      (cmd!=0||!in.valid||(b.active&&memcmp(in.ip,b.ip,4)))){
-   if(cmd!=0)b.md_down=true; // MD ifdown precedes its logical CID removal
+   if(cmd!=0){b.md_down=true;x9w_ifst(sim,trans,1,0);} // MD ifdown precedes its logical CID removal; ack like netagent
    b.abandoned=true;x9w_disconnect(b,m+1);x9w_error(b,X9Q_NOT_READY);
   }
  }return true;
@@ -651,6 +686,7 @@ static void x9w_poll(){
   }
  }
  x9w_v6_poll();
+ x9w_side_poll();
  x9w_retire_poll();
 }
 static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned n){
