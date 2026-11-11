@@ -5,7 +5,7 @@ CELL131 已进入系统，两卡信号/5G/attach 有证据，但 CreateProfile27
 没有 Start20、ACT201、GET205、EIF4302，PDP TX/RX=0。已提交 RAM profiles、CallType35
 及后续 ACT/队列修正尚无新蜂窝运行验收；typed transport、持续资格和退休账本仍是独立候选。
 **没有新的可交付蜂窝 boot.img；不以固件可读、5G图标、静态链或单位编译代替联网成功。**
-当前决定与产物以仓库根 `NOTES.md` 的 CELL-CHAIN-REVIEW 为准；下文旧构建命令仅供历史追溯。
+当前决定与产物以仓库根 `NOTES.md` 的 CELL-CHAIN-CODE 为准；下文旧构建命令仅供历史追溯。
 
 `qcom/` 引入 UniXNU/QcomBaseband（BSD-2-Clause，HoshinoYumeka / chiba233；上游提交见
 `qcom/UPSTREAM.json`）。只使用 portable `baseband/`：AppleBaseband IOKit、QMUX/QRTR、
@@ -346,6 +346,13 @@ unbound TX拒绝只计global；TXfinish只释放AP占位，不清channel、不�
 RX bytes仅DPMAIF交void receiver计数，不能代表ifnet_input接受；本候选仍未合主线。
 IPv6另核到DataContextInterface virtual-base/thunk实际偏移及保留x1的driver+128调用，
 但ActivatorModel的实际对象producer、driver factory绑定和DAD/settings资格尚未闭合。
+**2026-11-11 main更新**：握手/WDS/DDS先锁期限再消费原token，hold/offline仍drain；
+Start/Stop host预算独立于控制token，publication入口自守。不以晚CNF恢复过期host reply。
+native receiver带原route epoch并返回实际`ifnet_input`错误，RX packets/bytes仅return0后记账；
+KPI接受不代表IP/应用成功。XNU input错误已消费mbuf，helper不再次free。
+注意实际main仍允许generic201/203且ACT0仍置owned；上段“仍封”只指冻结候选，
+MD usr-slot/secondary引用未资格化，不能说main已有正lease。新代码尚无整包/上机结果。
+
 当前证据/候选在 `.local/x9/work/cell-chain-review-20261111/`、
 `cell-chain-protocol-20261110/`、`cell-chain-modem-options-20261110/`、
 `cell-chain-state-review-20261110/`；最终验收仍以下节真实联网/重连/双卡为准。
