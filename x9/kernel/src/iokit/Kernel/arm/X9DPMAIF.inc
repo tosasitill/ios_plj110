@@ -8,7 +8,11 @@
  * all DMA memory until reboot; no reset, modem assertion or recovery loop.
  */
 namespace {
-constexpr unsigned X9D_DRB = 2048, X9D_BAT = 1024, X9D_PIT = 2048;
+// Android live dump: BAT rings 16384 entries (0x00414000) with ~2000
+// credited, LRO PIT rings 0x8000. Buffers: X9D_POOL per kind, slot = bid %
+// X9D_POOL; a bid is posted only after the bid one lap earlier was released.
+constexpr unsigned X9D_DRB = 2048, X9D_BAT = 16384, X9D_PIT = 0x8000;
+constexpr unsigned X9D_POOL = 2048, X9D_CREDIT = 2000;
 constexpr unsigned X9D_TX_SIZE = 3072, X9D_PKT_SIZE = 1664, X9D_FRG_SIZE = 1920;
 constexpr unsigned X9D_MAIL = 128, X9D_BUDGET = 128, X9D_TX_BUDGET = 32;
 constexpr uint64_t X9D_DMA_LIMIT = 1ULL << 40;
@@ -199,7 +203,7 @@ static bool x9d_ip(const uint8_t *p, unsigned n) {
     return p[0] >> 4 == 6 && n >= 40 && ((unsigned)p[4] << 8 | p[5]) + 40 == n;
 }
 static void x9d_bat_entry(unsigned kind, unsigned bid) {
-    uint64_t pa = x9d.pool[kind].pa + bid * (kind ? X9D_FRG_SIZE : X9D_PKT_SIZE);
+    uint64_t pa = x9d.pool[kind].pa + (bid % X9D_POOL) * (kind ? X9D_FRG_SIZE : X9D_PKT_SIZE);
     uint32_t *d = reinterpret_cast<uint32_t *>(x9d.bat[kind].va + bid * 8);
     d[0] = (uint32_t)pa; d[1] = (uint32_t)(pa >> 32) & 255;
 }
@@ -305,7 +309,7 @@ static bool x9d_hw_init() {
         if (!x9d_command(dl, 0, X9D_BUSY_BIT | 1 | (kind << 16))) return false;
     }
     for (unsigned kind = 2; kind-- > 0;) // frag first, then normal
-        if (!x9d_command(dl, 4, X9D_BUSY_BIT | (X9D_BAT - 1) | (kind << 16))) return false;
+        if (!x9d_command(dl, 4, X9D_BUSY_BIT | X9D_CREDIT | (kind << 16))) return false;
     for (unsigned kind = 2; kind-- > 0;) {
         x9d_wr(dl, 0x0c, x9d_rd(dl, 0x0c) | (1u << 16));
         if (!x9d_command(dl, 0, X9D_BUSY_BIT | (kind << 16))) return false; // only-enable update
@@ -340,7 +344,7 @@ static bool x9d_hw_init() {
         !x9d_expect(uls, 0xe0, ~0u, 0) ||
         !x9d_expect(dls, 0xa4, 0x3ffff, 0) || !x9d_expect(dls, 0xc4, 0x3ffff, 0) ||
         !x9d_expect(dls, 0xd8, 65535, 0) || !x9d_expect(dls, 0x78, 65535, 0) ||
-        !x9d_expect(dls, 0xdc, 65535, X9D_BAT - 1) ||
+        !x9d_expect(dls, 0xdc, 65535, X9D_CREDIT) ||
         !x9d_expect(x9d.sram1, 0x04, 65535, 0)) return false;
     x9d_phase("INIT_DONE");
     x9d_dump("pre-init-done", true);
@@ -377,13 +381,13 @@ static void x9d_prepare() {
         if (!x9d_alloc(x9d.drbq[q], X9D_DRB * 8)) { x9d_fail("private TXQ1..3 DRB allocation/range"); return; }
     for (unsigned kind = 0; kind < 2; kind++) {
         if (!x9d_alloc(x9d.pit[kind], X9D_PIT * 16) || !x9d_alloc(x9d.bat[kind], X9D_BAT * 8) ||
-            !x9d_alloc(x9d.pool[kind], X9D_BAT * (kind ? X9D_FRG_SIZE : X9D_PKT_SIZE))) {
+            !x9d_alloc(x9d.pool[kind], X9D_POOL * (kind ? X9D_FRG_SIZE : X9D_PKT_SIZE))) {
             x9d_fail("private RX DMA allocation/range"); return;
         }
-        for (unsigned bid = 0; bid < X9D_BAT; bid++) {
-            x9d_bat_entry(kind, bid); x9d.posted[kind][bid] = bid != X9D_BAT - 1;
+        for (unsigned bid = 0; bid < X9D_CREDIT; bid++) {
+            x9d_bat_entry(kind, bid); x9d.posted[kind][bid] = true;
         }
-        x9d.bat_wr[kind] = X9D_BAT - 1;
+        x9d.bat_wr[kind] = X9D_CREDIT;
         x9d_sync(x9d.bat[kind], 0, X9D_BAT * 8);
         // Each slot must differ from ITS expected first-lap sequence, including
         // slots 255/511/etc. A fixed 0xff poison would match those descriptors.
@@ -391,7 +395,7 @@ static void x9d_prepare() {
         for (unsigned i = 0; i < X9D_PIT; i++) pit[i * 4 + 3] = (i ^ 128u) & 255u;
         x9d_sync(x9d.pit[kind], 0, X9D_PIT * 16);
     }
-    printf("X9 DPMAIF: private 40-bit DMA allocated, DRB high 0x%x PIT high 0x%x/0x%x BAT high 0x%x/0x%x, TX 2048/BAT 1024/PIT 2048x2; %s\n",
+    printf("X9 DPMAIF: private 40-bit DMA allocated, DRB high 0x%x PIT high 0x%x/0x%x BAT high 0x%x/0x%x, TX 2048/BAT 16384 (2000 credited, 2048 buffers)/PIT 0x8000x2; %s\n",
         (unsigned)(x9d.drb.pa >> 32), (unsigned)(x9d.pit[0].pa >> 32), (unsigned)(x9d.pit[1].pa >> 32),
         (unsigned)(x9d.bat[0].pa >> 32), (unsigned)(x9d.bat[1].pa >> 32),
         x9d.mode == 1 ? "probe only, no descriptors published" : "experimental initialization requested");
@@ -594,7 +598,7 @@ static bool x9d_rx_item(unsigned q, const uint32_t *d) {
     if (bid >= X9D_BAT || !x9d.posted[kind][bid] || (!kind && r.normal) || (kind && !r.normal)) {
         x9d_fail("RX BID ownership or unexpected aggregation"); return false;
     }
-    unsigned stride = kind ? X9D_FRG_SIZE : X9D_PKT_SIZE, off = bid * stride;
+    unsigned stride = kind ? X9D_FRG_SIZE : X9D_PKT_SIZE, off = (bid % X9D_POOL) * stride;
     uint64_t addr = d[1] | ((uint64_t)d[2] << 32), base = x9d.pool[kind].pa + off;
     // Buffer address is observed in PIT but vendor treats BAT as authoritative.
     // Reject out-of-buffer addresses; do not follow arbitrary physical pointers.
@@ -672,8 +676,9 @@ static bool x9d_replenish(unsigned kind) {
     unsigned n = 0, w = x9d.bat_wr[kind], stride = kind ? X9D_FRG_SIZE : X9D_PKT_SIZE;
     // Keep one entry empty; require BOTH hardware consumption and CPU release.
     // A BID held by either RX queue stops the contiguous refill, never overwrites.
-    while ((w + 1) % X9D_BAT != rd && n < X9D_BUDGET && !x9d.posted[kind][w] && !x9d.posted[kind][(w + 1) % X9D_BAT]) {
-        x9d_sync(x9d.pool[kind], w * stride, stride); x9d_bat_entry(kind, w);
+    while ((w + 1) % X9D_BAT != rd && n < X9D_BUDGET && !x9d.posted[kind][w] && !x9d.posted[kind][(w + 1) % X9D_BAT] &&
+           !x9d.posted[kind][(w + X9D_BAT - X9D_POOL) % X9D_BAT]) { // buffer slot still held one lap back
+        x9d_sync(x9d.pool[kind], (w % X9D_POOL) * stride, stride); x9d_bat_entry(kind, w);
         x9d_sync(x9d.bat[kind], w * 8, 8); x9d.posted[kind][w] = true;
         w = (w + 1) % X9D_BAT; n++;
     }
