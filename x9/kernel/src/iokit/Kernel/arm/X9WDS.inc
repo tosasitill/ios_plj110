@@ -264,12 +264,19 @@ static void x9w_probe(const x9w_bearer &b,unsigned site,const char *reason,int v
  r.reason=reason;r.value=value;r.emitted++;r.next=now+3000;
  const x9w_interface *in=b.sim_slot<2&&b.channel<20?&x9w_interfaces[b.sim_slot][b.channel]:nullptr;
  const x9wr_settings &settings=candidate?*candidate:b.runtime;
- printf("X9 CELL WDS: site %u why %s value %d seen %llu SIM%u mux %u gen %llu epoch %llu/%llu op %u token %llu flags %u%u%u%u%u refs %u cid %u channel %u trans %u floor %llu EIF %u/%u/%llu/%u GET %u/%u/%u candidate %u matched %u families %u route %llu serial %llu/%llu retire %u handle-room %u wait-left-ms %llu setup-left-ms %llu MD-session unobserved\n",
-  site,reason,value,r.seen,b.sim_slot+1,mux,b.generation,b.result_epoch,x9a_epoch,b.op,b.token,
-  b.used,b.owned,b.active,b.abandoned,b.hold,x9w_refs(b),b.cid,b.channel,b.trans_id,b.if_floor,
-  in?in->valid:0,in?in->cmd:0,in?in->serial:0,in?in->trans_id:0,
-  b.get_result.identity.cid,b.get_result.channel,b.get_result.trans_id,candidate!=nullptr,settings.matched,x9w_families(settings),b.route_lifetime,
-  b.query_serial,b.change_serial,x9w_retirements[mux-1].pending,x9w_next_handle<0xfffffffeu,
+ // XNU's kernel os_log buffer is 256B and log_encode.c asserts (instead of
+ // dropping) near the limit, so 38 args in one printf panicked (221). Keep
+ // each line under ~130B of args (<=17, one string), tagged mux/site/seen.
+ printf("X9 CELL WDS: site %u why %s value %d seen %llu SIM%u mux %u gen %llu epoch %llu/%llu op %u token %llu\n",
+  site,reason,value,r.seen,b.sim_slot+1,mux,b.generation,b.result_epoch,x9a_epoch,b.op,b.token);
+ printf("X9 CELL WDS:  mux %u site %u seen %llu flags %u%u%u%u%u refs %u cid %u channel %u trans %u floor %llu EIF %u/%u/%llu/%u\n",
+  mux,site,r.seen,b.used,b.owned,b.active,b.abandoned,b.hold,x9w_refs(b),b.cid,b.channel,b.trans_id,b.if_floor,
+  in?in->valid:0,in?in->cmd:0,in?in->serial:0,in?in->trans_id:0);
+ printf("X9 CELL WDS:  mux %u site %u seen %llu GET %u/%u/%u candidate %u matched %u families %u route %llu serial %llu/%llu\n",
+  mux,site,r.seen,b.get_result.identity.cid,b.get_result.channel,b.get_result.trans_id,candidate!=nullptr,settings.matched,
+  x9w_families(settings),b.route_lifetime,b.query_serial,b.change_serial);
+ printf("X9 CELL WDS:  mux %u site %u seen %llu retire %u handle-room %u wait-left-ms %llu setup-left-ms %llu MD-session unobserved\n",
+  mux,site,r.seen,x9w_retirements[mux-1].pending,x9w_next_handle<0xfffffffeu,
   b.deadline>now?b.deadline-now:0,b.setup_deadline>now?b.setup_deadline-now:0);
 }
 static void x9w_wire_probe(const x9w_bearer &b,const uint8_t *p,unsigned n,unsigned id){
