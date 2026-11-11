@@ -6,6 +6,15 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## DHL ELT/过滤器逆向＋mdlog4（MD-ELT-FILTER / CELL-MDLOG4，2026-11-11；mdlog4已构建，未启动）
+
+- **trace记录格式（dhl_encode_index_trace/_with_ra）**：\`0x15 | len24 | b4 | b5 class | 0xf8 | b7 type\`；type 0xf9=index trace（id在+8），0xfd=带RA（RA在+8、id在+0xc），其后 +0xc/+0xd/+0x10.. 小字段；0xfc/0xfe/0xff为其他记录。trace id 原样u32，**模块=id>>20**（如0x4C5001D9→0x4c5）。\`mdlog231/recparse.py\`：0x10帧内22721条记录，index trace 21426条/940个id；出现的模块 0x237/0x582/0x3ec/0x3f0/0x06b/0x3ee/0x011/0x1bf…；**IPC 0x4c5、dispatcher 0x4ca 未出现**。0x9610/0x9a10/0xa910帧不是0x15记录流（推断为L1/HW日志）。
+- **记录生成链**：\`_dhl_index_trace(class,module,id,…)\` → \`dhl_is_ps_filter_off(class,&module,3)\` → \`dhl_internal_trace_impl\`（\`serialize_trace_data\` 参数打包＋经RAM函数指针 0x274a7b94 生成头）→ \`dhl_ps_send_dentry_array\`。
+- **过滤判定**：logging mode字节(0x2786bfb8+1)≥2；module 0 恒放行；>0x950 关；模块位图 0x27097258（299B=0x12b，bit=module）为0 → 关(4)；flags bit1 时再查每模块64位class位图（0x270971d8+module*8+0xac5）。\`dhl_filter_set_module_filter(src,len==0x12b)\` 直接memcpy到模块位图。
+- **AP过滤命令**：\`dhl_cmd_run_cmd_normal\`（cmd id分派，jump表 0x92609c12）。**0x37 → dhl_filter_set_by_scenario**（我们的"Default"帧 \`16 0c 01 00 | 00 37 00 37 | name…\`）；但 \`dhl_custom_set_filter_by_scenario_only\` 返回1时，除0x07/0x26/0x37外的过滤命令都打印 "[DHL filter] Failed to set filter by command! Only support set filter by scenario." → **本MD版本只接受按场景设置，自定义模块位图大概率被拒**（模块位图命令id在第二张jump表 0x92609c96，未展开）。MD里不存在 DATA_PROTOCOL/ALL_PROTOCOL 等场景名字符串。
+- **用户决定**：直接调大内存环、拨号5s后存。main **\`9064126\`**：环 **128MiB**（分配失败退回64MiB），保存点 ACT+5s（≈覆盖ACT−9s～+5s @9MB/s）。镜像 **\`x9/out/x9-cell-mdlog4-gpu278-20261111/boot.img\`**（worktree cell-mdlog4 = mdlog3树+cherry-pick），exit0。
+- **局限**：Default场景下IPC/dispatcher模块的trace不输出，窗口再大也看不到这些模块；能看到的是已开启模块（含0x237/0x582/0x3ec等，名字待MDDB映射）在ACT前后的行为。
+
 ## 231 MDLOG第3阶段结果（CELL231-MDLOG3，2026-11-11）：真实MD日志64MiB已取回；解码需逆向ELT编码，且默认filter可能关掉PS trace
 
 - **231观察**：\`~/231.txt\` 末53.9s、无panic；原件副本 \`.local/x9/work/mdlog231/231-original.txt\`。RAW DHL \`pa f0300000 size a00000 mapped 1\`；SPLM序列与filter同230全部成功。前6个描述符正文非零（如 off 0x14c len 0x7faec body \`15100000 0005f8fd 010109fe…\`），badent 0，full-seen 0。**我们这边MD约9 MB/s**（34.5s已110MB），64MiB≈7s。ACT 27.503s mark=51956544；37.503s保存 stream 59747594..126856458（**不含ACT时刻，覆盖约ACT+0.9s～+10s**），\`save -> 0 in 112 ms\`。
