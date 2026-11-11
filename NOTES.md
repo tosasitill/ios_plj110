@@ -6,6 +6,16 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 232 MDLOG解码（CELL232-MDLOG4，2026-11-11）：MD UL入口报“该netif/IP族无session”；Android ACT后MIPC无额外绑定消息
+
+- **232采集**：\`~/232.txt\` 末50.4s、无panic，原件 \`.local/x9/work/mdlog232/232-original.txt\`。128MiB环；15.68s起采集；ACT 28.794s mark=82663550；33.809s保存**全流 0..121565902B**（含ACT前13s/后5s），\`save -> 0 in 173 ms\`；取回 \`.local/x9/work/mdlog232/x9-mdlog.bin\`。
+- **解码工具**（同目录）：\`tidmap.py\`（扫ROM LI48立即数→trace id到调用函数，\`li48map.pkl\` 134754项；142154条index trace中136821条可映射）、\`around.py\`（ACT前后函数统计）、\`seq.py\`（会话相关时间序）。参数可读（字符串原样，如 l4bpdn_uinfo 带 "cbnet"、d2rm_brief_dump_cid_status 带 "RDY"）。\`FDD_PdcpUpdateSendSN\` 是大符号吞并的误归属。
+- **模块**：IPC(0x4c5)、NIM(0x1ea)、L5UPDN(0x1cc)、L4BPDN(0x136)等**在Default场景下是开启的**；dispatcher(0x4ca)关闭。IPC/NIM只有开机初始化trace（ipc_task_init/filter_init/attach×34/query_netif_list×34、nim_if_init）。ACT时刻无IPC/NIM trace（\`ipc_set_netif_mapping\` 的trace只在错误分支，成功路径无trace，故不能据此判定未绑定）。
+- **关键观察**：\`ipc_on_process_ul_meta_table@901c1376\` 内8个trace中**只有 0x4c500052 出现1次**（ACT+23.39MB≈ACT+3.0s≈31.8s，按7.76MB/s估算），字符串参数 "ipc_check_and_fill_session_info"，RA 0x901c2da6，参数 \`02 04 00 00 00 | 3c233902(meta ptr) | …\`。代码：0x901c2cfc 按包IP族字节(sp+0x5c: 1/2/其他)选 sp+0x9c/0xa0/0xa4 的**每族session id**，**==-1 时跳0x901c2d78打此trace**，否则写入meta word bits24-31。→ **MD对这个UL包查不到该netif+IP族的session**。时间上最可能对应 30.789s ccmni2 上的两个ICMPv6 RS（v4 DNS在40.8s，已出保存窗口）。只出现1次：其余包可能更早被（未开启的）dispatcher丢弃或另有路径，未证实。
+- **232另一个现象**：CommCenter在第1拨ACT（28.795s ccmni1）后读完 WDS 0x2d runtime settings **16ms即Stop两族**（reason 2/code 2000），30.761s第2拨落ccmni2。225无此现象；属iOS侧决定。
+- **Android对照**：ACT CNF后RIL只发 DATA_GET_5GQOS/GET_CALL/GET_URSP_ROUTE_PROFILE/GET_MD_DATA_CALL_LIST 查询（与我们相同），第2个 INTERNAL_EIF_IND（全球v6）22ms后自动到——**没有额外的“绑定”MIPC消息**。
+- **下一步**：①解码0x4c500052参数（netif id/IP族/meta）并用0xfc时间记录精确对时；②追 session id 来源：sp+0x9c/a0/a4 由谁填（ipc_get_pdn_id_from_netif → netif对象 +0x44(v4)/+0x40(v6) → 由哪个ILM/函数在PDN激活时写入），对比该写入路径在我们这边为何没走；③下一版保存窗口覆盖v4 DNS（ACT+12s）以看v4族是否同样-1。
+
 ## DHL ELT/过滤器逆向＋mdlog4（MD-ELT-FILTER / CELL-MDLOG4，2026-11-11；mdlog4已构建，未启动）
 
 - **trace记录格式（dhl_encode_index_trace/_with_ra）**：\`0x15 | len24 | b4 | b5 class | 0xf8 | b7 type\`；type 0xf9=index trace（id在+8），0xfd=带RA（RA在+8、id在+0xc），其后 +0xc/+0xd/+0x10.. 小字段；0xfc/0xfe/0xff为其他记录。trace id 原样u32，**模块=id>>20**（如0x4C5001D9→0x4c5）。\`mdlog231/recparse.py\`：0x10帧内22721条记录，index trace 21426条/940个id；出现的模块 0x237/0x582/0x3ec/0x3f0/0x06b/0x3ee/0x011/0x1bf…；**IPC 0x4c5、dispatcher 0x4ca 未出现**。0x9610/0x9a10/0xa910帧不是0x15记录流（推断为L1/HW日志）。
