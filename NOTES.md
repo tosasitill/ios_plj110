@@ -1525,6 +1525,15 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **后续**：从真实MTK按SIM/PLMN/RAT名称接口补NAS44的文本、编码、来源及生命周期，并触发原生更新/缓存失效；不硬编码运营商、不把修名称当修RX0。RegistrationCache按slot缓存，首次字典不存在才抓取，operatorNameChanged后重新本地化；修好底层仍需新鲜缓存验证。IMS按下一节继续独立核对，未证明其缺失导致这行或Internet RX0。
 - **成果与重放**：报告提交 **`8aec2d3`**，`docs/network/about-network-20H392.md`；私有 `.local/x9/work/about-network-20261111/` 含trace.py、collect-runtime.py、10段汇编、image-provenance/range-verification/runtime-evidence.json、constants/localization.json及脱敏定点摘录。根目录运行`python3 .local/x9/work/about-network-20261111/trace.py`与`python3 .local/x9/work/about-network-20261111/collect-runtime.py`重放；10段函数字节与现有根盘快照cache全部相同（不是设备内存采样）。只读原Apple输入/快照/已有日志及源码，**无运行代码改动、编译/新镜像/CI run/测试套件/push/设备操作**；仅报告和本节交接入Git，保留并发IMS交接。
 
+## 蜂窝当前候选交接(CELL161-UPSTATE，2026-11-11)：网络名称＋EIF诊断＋MD用户面状态轮询＋RIL默认数据卡配置；已构建，待用户上机
+
+- **用户要求**：“两条都做，带上网络名称修复编新镜像”。独立树`.local/x9/worktrees/cell161-upstate`(分支`work/cell161-upstate`)= **cell159网络名称`a8ffef7`** ＋cell160诊断(cherry-pick 255c70b)＋本轮提交 **`34d3827`**。不含cell158 BAT改动，不混main其他窗口。
+- **本轮源码(X9WDS.inc／x9_mipc_bridge.inc)**：①`x9w_up_diag`：会话就绪后每SIM用0307注册CSCON **4409**与物理信道 **4419**通知(桥已打印`X9 MIPC DIAG`)；有owned call时每3s只读查询 **NW_GET_CSCON_STATE 1151→1152** 与 **NW_GET_PHYSICAL_CHANNEL_CONFIGS 04c7→04c8**(空请求16B，同Android)，打印`X9 WDS UP: +ms SIMn <名字> payload <前112B hex>`，上限80轮。②CONFIG阶段先补发Android RIL的第二条 **DATA_SET_CONFIG {DEFAULT_DATA_SIM_CARD 0x106=1, IMS_TEST_MODE 0x103=0}**(32B，`boot_logcat.txt` 14:30:08.543 SIM1 tx0301/0303…逐字节相同；TLV名取自`mipc_msg_tlv_const.h:4368..4386`)，5s内不重复，CNF以side查询方式打印`DATA_SET_CONFIG default-data-SIM CNF`。③桥白名单新增上述三种精确形状。
+- **对照结论(观察)**：Android开机SEND而215从未TX的MIPC：0211第二形态(106)、**041f NW_SET_IDLE_HINT**(status2带两参数×4、status3)、**0427 NW_SET_RAT**、0101/0113(APN IA/profile，215的TX列表里没有这两个id，与旧交接“typed IA已有”不符，待查是否走AT)、047b、049b、0a00/0a18/0a1c(IMS)、1151、04c7、040d。本轮只补了形状完全确定的106；Android没有发过020d，我们的DDS走020d(RIL 0x2cb1a0有此路径)。**106是否为RX0原因无证据**。
+- **构建(观察)**：`.local/x9/work/cell161-upstate/run-build.py`，audio/bluetooth/all三命令exit0；Image 30035968B／boot 13561856B；日志`full-build.stdout.log`、`build-results.json`、`full-build.exit=0`。无单独单位编译步骤(全构建已覆盖)、无测试套件、无CI run、无push、未上机。
+- **交付**：**`x9/out/x9-cell161-upstate-md/boot.img`**，276 plugin-package原样复制自cell157；已装276无需mailbox。
+- **下一步**：用户`fastboot boot x9/out/x9-cell161-upstate-md/boot.img`，关Wi-Fi用蜂窝约2分钟并看“关于本机”两卡网络名。日志`grep "X9 WDS UP\|X9 MIPC DIAG\|X9 WDS DIAG\|default-data-SIM\|X9 NAME\|RX delivered"`。判读：Android健康时1152为`100/4=01 08 05 01`、`101=8`(含义未解，作对照基线)，04c8含多条信道记录；若我们拨号后CSCON显示未连接或04c8无记录→RRC/DRB层没起来；若连接且有信道而仍无RA→继续查041f/0427/IA等剩余差异与MD数据面依赖。
+
 ## 蜂窝当前实测交接(CELL215-NORA，2026-11-11)：cell160诊断已实跑，MD始终只有fe80、从未拿到全球IPv6前缀；仍RX0；尚无修复
 
 - **用户报告**：215(cell160-eifdiag)仍不行。**用户要求：下一个镜像必须带上网络名称修复**(cell159，独立树提交`a8ffef7`／main `5de8e6e`，`X9NetworkName.inc`＋桥白名单＋`X9QMIAT.inc`)；下次候选应以cell159树为基线再加改动，不要再从裸cell157出。
