@@ -332,10 +332,14 @@ slot226/227 的默认实现是分配/释放，不应沿用“request recycle poo
 ### 原生 ABI 与真实配对会话入口（尚不使原生内核栈可装载）
 
 `native_abi.py` 从同一20H392原始cache与冻结`IOService.cpo`恢复**双向、精确符号**
-映射，不使用统一`+104`偏移。无名/歧义槽保留未映射；三个USB模块中的相邻
+映射，不使用统一`+104`偏移。没有资格证据的无名/歧义槽保留未映射；三个USB模块中的相邻
 `ldr/blr`仅是虚调用候选，receiver类型未确认就不生成补丁。结果保留
 `abi_compatible=false/runtime_loadable=false`；仍需逐类几何、override反向调用、
 request timeout/DMA所有权、原生MTU3后端及模块注册，不可直接加载原始kext。
+
+**USB-NATIVE7**：`IOService` slot0已通过原始非释放析构→D0 typed-delete及冻结
+D1/D2/D0的真实branch relocation确认其角色，映射到current slot0；仍是
+**167个精确符号 + 1个析构角色**，不伪造原始D1符号或称字节等价。
 
 ```sh
 python3 -I x9/usb/native_abi.py \
@@ -343,6 +347,40 @@ python3 -I x9/usb/native_abi.py \
   --io-service-object .local/dxb/build/xnu.obj/DEVELOPMENT_ARM64_SWEET/iokit/DEVELOPMENT/IOService.cpo \
   --out .local/x9/usb/native-abi-new
 ```
+
+`native_bridge.py`继续内核侧局部ABI施工，恢复19个原生类的metaclass initializer、
+父类、allocation size及实例vtable；7种父类的原始/冻结allocation size均相同，
+**不代表字段布局或构造/析构兼容已经证明**。生成symbolic expanded-vtable模板：
+从current parent defaults建立新表，再按精确映射覆盖native override/tail，从而
+同时描述native→current及current→native dispatch，不修改全局XNU虚表。
+
+| 原生类 | stock slots | 局部模板 slots（尚不可调用） |
+|---|---:|---:|
+| `IOUSBDeviceController` | 232 | 336 |
+| `IOUSBDeviceInterface` | 199 | 303 |
+| `AppleUSBDeviceMux` | 168 | 272 |
+| `IOUSBDevicePipe` | 29 | 53 |
+
+有界must-dataflow跟踪vtable origin与实际x0，分支合流只保留一致事实，调用丢弃
+caller-saved provenance；高半区ARM64地址须从Capstone signed immediate归一化，
+不能漏掉taken branch。另分别处理实例vptr与含两字头部的`__ZTV`导入，避免将
+DMA的super `clear/prepare/complete`错移两槽。当前386个调用receiver已静态确认，
+其中284个有不同的load编码计划；它们覆盖instance与super/header dispatch，
+**不是旧451个相邻候选全部完成，也不是补丁已应用**。未知间接调用还包括callback，
+不把其数量当成全部未知虚调用数。
+
+```sh
+python3 -I x9/usb/native_bridge.py \
+  --kernelcache .local/x9/usb/native-20H392/kernelcache.macho \
+  --object-root .local/dxb/build/xnu.obj/DEVELOPMENT_ARM64_SWEET \
+  --out .local/x9/usb/native-bridge-new --require-loadable
+```
+
+输出private `bridge-plan.json`保存模板、before/after instruction word及固定输入。
+只有receiver证明，**没有逐load全部consumer证明、完整父类field layout、metaclass
+虚表、DMA/timeout/abort及relocation/bootstrap**，故`instruction_patch_qualified=false`、
+`callable=false`、`runtime_loadable=false`，`--require-loadable`退出**2**。
+不输出/装载修改后的Apple段，不启用原生controller或USB mode，不提供绕过门开关。
 
 新增`pairing.py`走**系统原生usbmuxd、真实lockdownd**，不使用旧自有mux草稿，
 不改守护进程或信任状态。它是主机端代码，不是缺失的DeviceFamily驱动。
