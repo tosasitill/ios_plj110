@@ -6,6 +6,13 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 222重启／旧USB对照（USB-LEGACY222，2026-11-11；源码冻结，完整构建待执行）
+
+- **本次证据**：用户指定 `~/222.txt`，报告随后重启且一段时间无法读USB日志；私有原件 `.local/x9/work/usb-legacy222-20261111/222-original.txt` **722839B**，最后完整时间 **29.029s**。仅见shim日志ready和 **0.214s EP0 batch4096/poll1ms worker**；278插件校验成功，28.278s GPU入队84／完成84。捕获不含重启原因、panic或host stderr，不能区分USB先断还是整机先异常，不宣称已找到根因。
+- **纠正源码归因**：交付CELL164运行源码 `2266e037` 与220对应 `58ba960` 的USB runtime／shim／logger定点差分为空；不含main后来 `816f327` 的request-owner代码。`f425aee`只增加host工具／README，不能据此把222重启归因于新request-owner。
+- **按用户要求冻结更彻底旧USB对照**：独立树 `.local/x9/worktrees/usb-legacy222-gpu278-20261111/` 从 **`2266e037a2eb63b85bbfd24fe0739591d7075575`** 仅改四USB相关文件，源码提交 **`0b80f653df90ca4eb7d363b4291a078564083f0c`**。`x9_usb_log.c`恢复 **`9f29ff1546930663d07bce0e4852ffbf2106bd50`** 的pre-ECM原EP0实现；bsd_init只启动旧logger，增加 `X9 USB LEGACY: EP0-only build; no ECM/QMU/native device objects` identity；recipe／link-order精确移除 **`x9_usb_device.o`／`SweetX9USB.o`**，不是回退整份recipe。shim、host抓日志协议与脚本不变。
+- **构建输入／边界**：沿用原278 allowlist、CELL164蜂窝探针及原样复制 **603B／32GiB／cpus8／ug5／dv1／完整外置BBFW／CBN** 配置，保留no-audio/camera/GPS pre-XNU基线；不混其他窗口短信改动。唯一新name **`x9-cell164-usb-legacy-gpu278-20261111`**。私有输入JSON的name曾误写为object名，启动构建前已纠正；源码冻结不变。尚未完整构建或启动，待执行本地 `build.py all -j8`，无`--revision`，不重建GPU／更新mailbox，不自动ADB／fastboot／NV／分区操作，不跑测试套件或成功镜像二次检查。
+
 ## 原生短信接入（SMS-NATIVE，2026-11-11；源码和两生产对象已完成，镜像／实机待续）
 
 - **纠正真实基线**：`~/220.txt`是277运行，不是278。LF7503/7508两SIM modem-ready、LF7511/7579真实host-ready CNF、LF7688/7691 MT/MWI订阅；SIM2两次MO在LF15302→15539及16522→16790获得MD接受。**LF18836/18837／76.559s已收到真实GSM来信并准入host事件队列，token1等host ACK**，不是完全没有MT。没有本次Messages显示／持久存储／对端收信证据；通用QMI打印预算400已耗尽，不能凭后续无WMS37打印证明host没发ACK。221是278，但捕获止于28.652s，不替代短信验收。
