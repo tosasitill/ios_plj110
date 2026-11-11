@@ -1375,7 +1375,15 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **不能称为全部USB完成**:本轮暂无枚举/DMA/ue0 ping/bulk回环实机结果,live EMI/MPU允许普通XNU DMA页也未证明。`native_apple_stack=0`,没有冒充IOUSBDeviceController或AppleUSBDeviceMux;原始configd USBDeviceConfiguration/lockdownd、Finder/iTunes Trust/配对/照片同步仍缺20H392 controller adapter及kext构建接入。USB3 XS-PHY/retimer、charger Type-C role与原生xHCI也未完成。参考文章chip/board/security-domain/fsid/锁状态条件要到原生栈接通后才验证,不先改身份/配对状态制造成功。
 - **下一步/验收**:先在用户手动启动的单一候选核对`CAP_EPINFO/TXFIFO/RXFIFO/MISC`→config1/alt1→真实QMU OUT/IN→ue0 ping,再用iOS `usbctl --echo`+host单次echo证明host→iOS→host字节相同。保留EP0日志,无需重建Metal插件/mailbox。接口/回退/构建说明在`x9/usb/README.md`;不要求用户现在连续刷试探镜像。
 
-## 蜂窝当前交接(CELL147-IPUPDATE,2026-11-11): 203中MD接受IF_ID 3、上行全通、仍无下行；cell147补EIF IPUPDATE v4并记录上行包内容，未上机
+## 蜂窝当前交接(CELL148-STATS,2026-11-11): 204上行包内容正确(DNS查询、源地址=PDP地址、校验和OK)但无回包；cell148读取MD空口收发计数，未上机
+
+- **204.txt**(cell147)。**观察**：每次激活得到新地址(10.5.50.35→10.4.33.77，非复用)；`ifst up`与`ipupdate v4` CNF均0；`UL[1..12] ch 3 v4 proto 17 ... hdrsum ok 10.4.33.77 -> 43.239.172.1 port 53`(DNS服务器同Android cbnet)；UL 142/142完成，RX 0。
+- **待区分**：MD未把UL发上空口 vs 回包到MD但未下发AP。
+- **新增(main `3fb7e83`)**：原厂MIPC `SYS_CONNECTIVITY_STATISTICS_REQ 0x004b/CNF 0x004c`：发布时START(复位+开始)，之后每10s READ，打印`X9 WDS: MD statistics read CNF ... air TX N B (KB) RX N B (KB)`(TLV 0x107/0x108 8字节、0x102/0x103 KB)。MIPC桥只放行两种24字节帧。两对象单编True。
+- **候选 `x9/out/x9-cell148-stats-md/boot.img`**(worktree `327f164`)，三命令exit0，参数同131，插件276，**无需mailbox**。记录`.local/x9/work/cell148-stats/`(构建改为Mac后台nohup，防隧道断开)。
+- **下一步**：用户boot cell148→`~/205.txt`。TX>0且RX>0→MD收到回包但未下发AP(查MD DL路由/LHIF)；TX>0、RX=0→空口无回包(核对APN/路由)；TX=0→MD未发送UL(查MD UL→PDN绑定)。
+
+## 蜂窝前次交接(CELL147-IPUPDATE,2026-11-11): 203中MD接受IF_ID 3、上行全通、仍无下行；cell147补EIF IPUPDATE v4并记录上行包内容，未上机
 
 - **203.txt**(cell146)。**观察**：`requesting IPv4 call ... host IF_ID 3`→`CNF 0x0202 result 0`，EIF直接是ccmni3(无需映射)，`PDP activated ... ccmni3`，`ifst up CNF 0`，UL 148/148，GET205周期正常，RX 0(无下行)。IF_ID不是(唯一)原因。
 - **ccmni源码对照**(`drivers/misc/mediatek/ccmni/ccmni.c:701-703`)：`count_l = (skb->mark & APP_VIP_MARK) ? 0x1000 : 0`；`network_type = ccmni->net_type`(用户态SIOCSNETTYPE，Android dmesg仅ccmni19设为5，ccmni3为0)；`hw_qno = queue_mapping`(普通为MD_HW_NORMAL_Q)。我们的DRB MSG(count_l 0、network_type 0、q0)与原厂一致。
