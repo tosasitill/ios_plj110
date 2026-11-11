@@ -1525,6 +1525,14 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **后续**：从真实MTK按SIM/PLMN/RAT名称接口补NAS44的文本、编码、来源及生命周期，并触发原生更新/缓存失效；不硬编码运营商、不把修名称当修RX0。RegistrationCache按slot缓存，首次字典不存在才抓取，operatorNameChanged后重新本地化；修好底层仍需新鲜缓存验证。IMS按下一节继续独立核对，未证明其缺失导致这行或Internet RX0。
 - **成果与重放**：报告提交 **`8aec2d3`**，`docs/network/about-network-20H392.md`；私有 `.local/x9/work/about-network-20261111/` 含trace.py、collect-runtime.py、10段汇编、image-provenance/range-verification/runtime-evidence.json、constants/localization.json及脱敏定点摘录。根目录运行`python3 .local/x9/work/about-network-20261111/trace.py`与`python3 .local/x9/work/about-network-20261111/collect-runtime.py`重放；10段函数字节与现有根盘快照cache全部相同（不是设备内存采样）。只读原Apple输入/快照/已有日志及源码，**无运行代码改动、编译/新镜像/CI run/测试套件/push/设备操作**；仅报告和本节交接入Git，保留并发IMS交接。
 
+## 蜂窝当前候选交接(CELL163-ULPROBE，2026-11-11)：上行DRB轮换探针＋每秒CSCON；已构建，待用户上机
+
+- **用户选择**：方案A(以RRC状态为判据的上行探针)。独立树`.local/x9/worktrees/cell163-ulprobe`(分支`work/cell163-ulprobe`)= cell162 `bd9227d`(网络名称＋诊断＋默认数据卡配置＋BAT) ＋ **`c91ffc0`**。
+- **探针(X9DPMAIF.inc TX编码处)**：bind后按`(now-bind_ms)/8000%3`轮换MSG DRB字1：**A flags**=`channel<<16 | 0x30000000`(v4)／`0x20000000`(v6)，即Android internet包形态；**B chan-1**=`(channel-1)<<16`；**C base**=原样。切换时打印`X9 DPMAIF PROBE: +ms variant … begins (sent so far A/B/C)`。bootarg `x9_ul_probe=0`关闭(恒C)、`1/2/3`固定A/B/C；默认轮换。**未做TXQ变体**(Android internet包同样主要走TXQ0，非差异)。A段置校验卸载位后MD硬件可能改写校验和，包是否被对端接受不保证；本探针只看RRC是否连接/RX是否出现。
+- **轮询**：`x9w_up_diag`改为每1s查1151(上限400次)，去掉周期04c7(4419通知仍打印)。
+- **构建(观察)**：`.local/x9/work/cell163-ulprobe/run-build.py` 三命令exit0、`full-build.exit=0`；无测试套件／CI／push／设备操作。交付 **`x9/out/x9-cell163-ulprobe-md/boot.img`**，276 plugin-package复制自cell157，已装276无需mailbox。
+- **下一步**：用户`fastboot boot x9/out/x9-cell163-ulprobe-md/boot.img`，关Wi-Fi，蜂窝下持续刷网页**至少2分钟**(需覆盖掉LTE后空闲阶段的多个8s段)。`grep "X9 DPMAIF PROBE\|IND 4409 simmask 1\|X9 WDS UP\|RX delivered\|X9 WDS: cell157\|MIPC CNF msg 0x020[24]"`：把CSCON空闲→连接(`00 ff ..`→`01 ..`)与RX增量对齐到A/B/C段。某段稳定触发连接/RX→该字段即缺口，下一版固定它；三段都不触发→DRB字段方向排除，转方案C(MD静态逆向UL丢弃条件)。
+
 ## 蜂窝当前实测交接(CELL217-ULDROP，2026-11-11)：cell162实跑，BAT提示已消费但仍RX0；LTE空闲时AP上行包不触发RRC连接；尚无修复、未出新镜像
 
 - **217观察(cell162，`~/217.txt` 19062行)**：`BAT hint 0x200080ff count 8192`(30.514s，bind后20ms)与`0x300080ff count 12288`(34.482s)两次被消费，`BAT policy hint 12288 events 2`；**RX仍全0**(61.1s TX146/146)。→ BAT提示消费与RX0无关(观察到修复生效而结果不变)。
