@@ -1525,6 +1525,14 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **后续**：从真实MTK按SIM/PLMN/RAT名称接口补NAS44的文本、编码、来源及生命周期，并触发原生更新/缓存失效；不硬编码运营商、不把修名称当修RX0。RegistrationCache按slot缓存，首次字典不存在才抓取，operatorNameChanged后重新本地化；修好底层仍需新鲜缓存验证。IMS按下一节继续独立核对，未证明其缺失导致这行或Internet RX0。
 - **成果与重放**：报告提交 **`8aec2d3`**，`docs/network/about-network-20H392.md`；私有 `.local/x9/work/about-network-20261111/` 含trace.py、collect-runtime.py、10段汇编、image-provenance/range-verification/runtime-evidence.json、constants/localization.json及脱敏定点摘录。根目录运行`python3 .local/x9/work/about-network-20261111/trace.py`与`python3 .local/x9/work/about-network-20261111/collect-runtime.py`重放；10段函数字节与现有根盘快照cache全部相同（不是设备内存采样）。只读原Apple输入/快照/已有日志及源码，**无运行代码改动、编译/新镜像/CI run/测试套件/push/设备操作**；仅报告和本节交接入Git，保留并发IMS交接。
 
+## 蜂窝当前实测交接(CELL218-PROBE-NEG，2026-11-11)：cell163探针三种DRB形态均不触发RRC；DRB字段方向排除，已开始方案C(MD静态逆向)，无新镜像
+
+- **218观察(cell163，`~/218.txt` 27716行)**：首拨30.035s(ccmni1)，36.693s NR释放→36.736s LTE空闲→37.339s LTE连接…**52.302s转LTE空闲后直至日志结束(约150s)SIM1再无任何4409通知**。期间探针完整轮换多轮(累计发送A flags 70、B chan-1 90、C base 143包；第二拨59.947s ccmni2)，DPMAIF 144.7s TX303/303、**RX0**。→ 置校验卸载位、channel减一、原样三种MSG DRB形态**都不能**让空闲态MD发起RRC连接，也都无下行。DRB这三个字段不是缺口(观察)。5G→LTE仍在首拨后6.7s出现。
+- **顺带确认**：MIPC `0x20d`在厂商头中名为 **DATA_SET_DATA_ALLOW_REQ**(`mipc_msg_tlv_const.h` DATA_REQ_BEGIN+13)，即我们“DDS 020d”实为数据允许开关，已result0；头文件中没有按PDN读取收发字节的查询，无法用MIPC直接区分“IPCore丢弃”与“之后丢弃”。
+- **方案C起步(仅反汇编，未得结论)**：用既有`cell189-md-consumer-20261110/md-dis.py`导出11个函数到私有 **`.local/x9/work/cell218-md-ul/`**：`ipc_on_process_ul_meta_table`(2449行)、`ipc_meta_uplink`、`ipc_get_netif_id_from_meta`、`ipc_find_netif`、`ipc_attach`、`ipc_send_ul_pkt_by_netif_id`、`ipc_update_session_state`、`ipc_new_session_internal`、`ipc_on_ipcore_up_rsp`、`ipc_set_netif_mapping`、`ipc_notify_netif_link_change`。已读到：`901c1ef0..1efa`从meta字0取network_type[26:24]/channel[23:16]→`ipc_get_netif_id_from_meta`→`ipc_find_netif`(失败走`901c1fda`三项-1)→`ipc_get_pdn_id_from_netif`；随后`901c1f5e..1f70`按**meta字3的bits[10:8]**查跳表`0x9260a7b4`分支(值4、5/6有专门出口)。meta表来自`lhif_net_query_meta_table`(MD侧硬件/LHIF生成，非AP直接填写)；路径上有`dpcopro_rbuf_release`/`copro_vrb_release`/`ipc_get_packet_info`/`ipc_meta_do_filter`，即MD经协处理器环形缓冲读取包内容后再分类。另有`ipc_is_ul_queue_allowed_to_send`(`9011862c`，读全局`0x2787b6xx/0x2788f388`的上行节流/允许标志)尚未追调用者。**哪条分支丢了我们的包未确定。**
+- **下一具体动作(C的继续)**：①解`0x9260a7b4`跳表各case与meta字3 bits[10:8]语义(疑为硬件解析出的包类型/错误码)，找出“丢弃且不送UPCM”的全部出口及其条件；②追`ipc_is_ul_queue_allowed_to_send`调用者与写这些全局标志的函数(谁在什么事件下允许上行)；③追netif记录state=2与session绑定(+0x40/+0x44)的建立者(`ipc_attach`/`ipc_new_session_internal`/`ipc_on_ipcore_up_rsp`)，对照我们是否缺AP侧触发。并行低成本项：用户在Android关VoLTE看是否掉4G(未做)；“关于本机”网络名称UI是否正常(用户未答)。
+- **本轮状态**：读日志＋离线反汇编＋写交接；无代码修改／构建／设备操作。cell163为已失败的探针候选(探针默认开启，不宜作为日常镜像)。
+
 ## 蜂窝当前候选交接(CELL163-ULPROBE，2026-11-11)：上行DRB轮换探针＋每秒CSCON；已构建，待用户上机
 
 - **用户选择**：方案A(以RRC状态为判据的上行探针)。独立树`.local/x9/worktrees/cell163-ulprobe`(分支`work/cell163-ulprobe`)= cell162 `bd9227d`(网络名称＋诊断＋默认数据卡配置＋BAT) ＋ **`c91ffc0`**。
