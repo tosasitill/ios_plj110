@@ -1375,7 +1375,15 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **不能称为全部USB完成**:本轮暂无枚举/DMA/ue0 ping/bulk回环实机结果,live EMI/MPU允许普通XNU DMA页也未证明。`native_apple_stack=0`,没有冒充IOUSBDeviceController或AppleUSBDeviceMux;原始configd USBDeviceConfiguration/lockdownd、Finder/iTunes Trust/配对/照片同步仍缺20H392 controller adapter及kext构建接入。USB3 XS-PHY/retimer、charger Type-C role与原生xHCI也未完成。参考文章chip/board/security-domain/fsid/锁状态条件要到原生栈接通后才验证,不先改身份/配对状态制造成功。
 - **下一步/验收**:先在用户手动启动的单一候选核对`CAP_EPINFO/TXFIFO/RXFIFO/MISC`→config1/alt1→真实QMU OUT/IN→ue0 ping,再用iOS `usbctl --echo`+host单次echo证明host→iOS→host字节相同。保留EP0日志,无需重建Metal插件/mailbox。接口/回退/构建说明在`x9/usb/README.md`;不要求用户现在连续刷试探镜像。
 
-## 蜂窝当前交接(CELL136-MTU,2026-11-11): 192仍在ACT成功后回error16；cell136放宽网络MTU/第4个DNS并打印失败字段，未上机
+## 蜂窝当前交接(CELL137-ULSTALL,2026-11-11): 193首次PDP激活成功但UL只完成2包、RX0；cell137补通道复用/卡死退休/EIF过滤并加原厂寄存器dump，未上机
+
+- **193.txt**(cell136，末91.6s)。**观察**：28.237s `SIM1 PDP activated call 1 -> ccmni1 -> mux 1 IPv4 MTU 1500 PDP1 v6-ready 0, ACT+GET+EIF/IFUP verified, DPMAIF bound`(网络未给MTU→1500；这次MD回PDP1非双栈，v6回210)、iOS拿到0x2d、`pdp_ip0 active families 1`。之后`DPMAIF ... TX submitted 66 completed 2 RX delivered 0 ... flow 1`；28.482s唯一一次UL状态0x21=q0 DONE+DRB_EMPTY(原厂reg_v3:DONE bit0..,EMPTY bit5..)，此后硬件读指针不再前进。37.842s `EIF ccmni1 command 5`被当断开→disconnected 201、`already down ... no 203`；80.0s才有真ifdown(command 1)。此后pdp `blocked 1`，Start全部BUSY(retirement等TX完成永不结束)。
+- **原厂对照**(`~/HelioDarwin/oppo-source/modules/kernel/kernel_device_modules-6.12/drivers/misc/mediatek/eccci/hif/`)：DRB MSG/PD位域(ccci_dpmaif_com.h:317/327)、DES_DTYP MSG=1/PD=0、`ccci_drv_ul_add_wcnt`(ADD_DESC_CH0=pd_ul+0xB0,bit31握手,计数=字)、读指针6993用`pd_ul+0xD00+0xE0`>>16、DRB size字=条数*2、`drv3_start`(glitch off/P2/SRAM/CG 0x7F/L1TIMR0/CODA 0xFF)、`hw_init_done`(SRAM sync→UL/DL INIT_DONE)均与我们一致。差异：原厂`clear_ip_busy`在INIT_DONE后(我们在前)、原厂开全部5个TXQ+中断(我们只q0、轮询)、MSG的count_l/network_type由ccmni填(ccmni源码不在本地，我们填0)。**UL卡死根因未定**。
+- **修复 main `0e87322`**：①`used_channel`永不释放→任何ccmni只能绑一次(确定缺陷)；改为退休完成且无其他路由占用时释放。②TX 5s无进展时允许退休，旧lifetime迟到完成只计数不隔离。③EIF只认0=IFUP/1=IFDOWN，其余记录`(not IFUP/IFDOWN; state kept)`。④clear_ip_busy移到INIT_DONE后。⑤按`drv3_dump_register`打印原始寄存器窗口：INIT_DONE前、TX卡住>1s(最多3次)、绑定后8s无下行，各窗口`pd_ul/ul_sram/ao_ul/misc/pd_dl/dl_sram/lro/ao_dl`。单编exit0。
+- **候选 `x9/out/x9-cell137-ulstall-md/boot.img`**(worktree `665592b`)，三命令exit0，Image 29999104B、boot 13529088B，参数同131，插件276，**无需mailbox**。记录`.local/x9/work/cell137-ulstall/`。
+- **下一步**：用户boot cell137→`~/194.txt`，关Wi-Fi用蜂窝上网≥1分钟。看`TX stalled`后的`ul_sram+0x0e0`(高16位rd、低16位wr字数)：wr随提交前进而rd不动=DMA/MD侧卡住(查DBG_STA/MD IP busy)；wr也不动=add-desc未生效。另看`rx-none`的DL窗口、断开后能否重新`PDP activated`。
+
+## 蜂窝前次交接(CELL136-MTU,2026-11-11): 192仍在ACT成功后回error16；cell136放宽网络MTU/第4个DNS并打印失败字段，未上机
 
 - **192.txt**(cell135，24201行，末121s)。用户：仍无法上网；开始两卡都有信号，后来广电信号空。**观察**：与191相同模式——219→ACT201 `CNF 0x0202 result 0`→ccmni IFUP→桥`error 16`→DEACT，20轮；v4 Start 168次，148次BUSY。v6挂接按设计等待后随v4失败回201(168次)。两卡28s前后SA注册(C5GREG1/AcT11)，SIM1 55.8s、SIM2 66.6s回落LTE(AcT7)，与ACT/DEACT循环同期——**推断**广电信号变空与此有关，未证实；哪个槽是广电未核对。
 - **新发现(MD静态)**：`mipc_data_act_call_cnf` 91327822只有+0x2c8标志为真才加v4 MTU 0x123；DNS计数913275ec封顶4。我们在ACT(要求0x123)、GET(要求MTU相等且dns≤3)、EIF(要求MTU 68..)、发布(EIF MTU==ACT MTU)四处都要求网络MTU。复用默认承载时网络常不带MTU→这是cell135仍失败的最可能原因(**推断**；192无字段日志)。
