@@ -6,6 +6,16 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## HelioDarwin重复输入合并与剩余占用（2026-11-11）
+
+- 用户要求比较`~/HelioDarwin`与`~/ios_plj110`，重复只留一份。先对两边非Git对象库的≥1MiB普通文件按大小/首尾筛选，再完整SHA-256比对：旧侧310个、新侧4876个，旧侧86个有完全相同匹配（按旧文件块数约7.82GiB）。进一步完整比较Apple输入10个文件及dxb两棵树，不按同名判重，也没有整删旧项目或独立源码。
+- **已合并最大完整重复项**：两边`ios16-20H392`的10个文件（约 **7.170GiB**）完整内容、权限/flags均一致。保留 **`~/HelioDarwin/work/ios16-20H392/`** 为唯一普通文件原件，删除新项目那10个重复普通文件，将 **`.local/heliodarwin/work/ios16-20H392 -> ../../../../HelioDarwin/work/ios16-20H392`** 改为相对兼容链接。**以后不能把HelioDarwin这组原件再当重复副本清掉**；移动/删除旧项目须先迁移原件并改链接。两边仅`com.apple.provenance`扩展属性有差异（新副本有、旧原件无），已记入私有元数据，不改原件的checksum或其他属性。
+- **保留旧侧原件的依据是实时挂载**：`SystemOS.dmg`仍经disk4/disk5挂在`/private/tmp/sysos20H392`，`OS.dmg`仍经disk6/disk7挂在`/private/tmp/os20H392`；root clone仍为disk10→`/private/tmp/x9root`。只删除确认未挂载、无打开占用的新项目副本；10个原件的inode/大小/mtime/flags未变，三组映射前后完全相同。没有detach、重挂、设备操作或重新构建/测试镜像。
+- **空间不能重复计算**：新项目目录统计 **65.74→58.59GiB**，旧项目仍 **12.408GiB**。`df`可用 **192185020→192181408KiB**（记录/并发使净变化约 **-3.53MiB**），**没有实际回收出7.17GiB**，最终约 **183.28GiB可用**；数据卷`diskutil apfs listSnapshots`显示无快照。观察与APFS克隆共享数据块相符，不能把逻辑目录减少宣称实际释放量；未直接查询每个文件的物理extent。
+- **未合并的边界**：两边dxb有 **260处差异**（build249、venv8、xnu3，含`libkern/crypto/sweet_aes.c`实际源码差异及新增header），且旧项目及两套dxb都有既有修改/未跟踪内容，不能整树替换或把独立可写源码/对象互相链接。`~/HelioDarwin/oppo-source` **3.084GiB**仍是当前`x9/EXTERNAL-DEPENDENCIES.md`声明的厂商参考，主项目只有部分摘录，不是完整重复副本。旧项目Git状态前后完全一致；其Git历史约0.856GiB、dxb约0.992GiB和UEFI参考等仍保留。只完成上述完整重复输入的合并，不声称所有相同源码片段均已删掉。
+- 本轮前一阶段只读复核的其他大项：Fever/蛋仔派对 **17.10GiB**、DaVinci Resolve **8.55GiB**、Homebrew LLVM三版本 **5.18GiB**＋llvm@22 **1.49GiB**、Anaconda **5.31GiB**（pkgs4.08GiB，但顶层无`.conda`/`.tar.bz2`下载包，不能把整个pkgs当4GiB可保证回收缓存）、Android Studio **3.24GiB**、腾讯应用宝资源 **2.15GiB**；缓存里微信Sparkle安装更新 **1.94GiB**、Google **1.86GiB**、ccache **1.19GiB**、ZCode更新 **0.56GiB**。`/private/tmp/chkb/target`1.23GiB和`chk/target`0.62GiB是编译输出，m219的1.64GiB主要是源码/validation语料；均未删除，继续清理需核对活跃任务和用户选择。只读数据在`.local/x9/work/remaining-storage-audit-20261111/`，不可读目录错误保留，未绕过TCC。
+- 本次私有比对、操作及验证：**`.local/x9/work/heliodarwin-dedup-20261111/`** 下`large-identical.json`、`apple-tree-comparison.json`、`dxb-tree-comparison.json`、`apple-xattrs.json`、`dedup-apple.py`、`removed.jsonl`、`verification.json`、挂载/df记录。复核入口：`readlink .local/heliodarwin/work/ios16-20H392`、`hdiutil info`、`df -h /System/Volumes/Data`；去重脚本已执行，不重复运行。仅本节交接提交，无push/CI，其他窗口修改不夹带。
+
 ## Android模拟器与项目外缓存清理（2026-11-11；已执行）
 
 - 用户明确要求“安卓模拟器全删了，这些缓存也都删了”。本轮已删除全部已发现的AVD（`~/.android/avd/Pixel_6a.avd`及注册ini，含用户数据/应用/QuickBoot快照）、SDK全部`system-images`及`emulator`程序；分别约 **14.94/8.16/1.15GiB**。先使用Android Studio自带Java调用`avdmanager delete avd -n Pixel_6a`、`sdkmanager --sdk_root=… --uninstall 'system-images;android-37.1;google_apis_playstore_ps16k;arm64-v8a' emulator`，均 **exit0**，再清空残余空目录；没有启动模拟器或调用adb/fastboot。管理工具有旧脚本整数判断及SDK XML v3/v4兼容警告，但最终包路径与AVD注册已不存在，保留包元数据未变。
