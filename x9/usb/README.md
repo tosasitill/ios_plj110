@@ -425,6 +425,8 @@ abort partial计数、EP0 native data stage、Family completion双向ABI及模�
 仅生产`SweetX9USB.o`本地arm64交叉编译通过，未运行测试套件、kernel链接、boot构建
 或实机DMA／Trust／Pair／TLS验收，不能据此启用原生栈或交付Finder boot。
 
+### 真实主机配对入口（依赖原生内核路由）
+
 新增`pairing.py`走**系统原生usbmuxd、真实lockdownd**，不使用旧自有mux草稿，
 不改守护进程或信任状态。它是主机端代码，不是缺失的DeviceFamily驱动。
 仅`--list`的原生daemon发现已实跑；其余操作当前没有X9原生USB入口，**未实跑**。
