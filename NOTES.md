@@ -6,6 +6,13 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 225实跑（CELL225-WDSFIX，2026-11-11）：探针panic已消失；卡点仍是ACT成功后MD用户面双向不通，MD内部原因未观测
+
+- **身份**：`~/225.txt` 2083141B，末104.1s，**无panic**（WDSFIX生效，拆分后的四行WDS探针正常输出）。plugin278 active。
+- **时间线（观察）**：27.22s SIM1 C5GREG1/CGATT1/COPS-AcT11（NR SA）；28.198s ACT0202 result0、`ccmni1`、v4/v6 count 1/1，IPv4 10.5.11.102；CSCON `01 08 05 01`（NR连接）。28.219/32.224s两次ICMPv6 RS（ch1，校验ok）**无RA**；38.330s起DNS→43.239.172.1:53（校验ok）。38.331s DPMAIF L2TISAR0 `0x8020/0x8021`=bit15 **MD_PWR_NOTREADY(q0)**+EMPTY（Android v3驱动对此仅mask，不能单独当错误）；38.411s NR释放→38.459s LTE空闲→38.891s EIF5 incremental **v6count255、head全0**（仍无全球前缀）→39.0s LTE连接→39.7s LTE空闲。ROUTE mux1 bound/MTU1500/families3，TX持续增长（98.7s DPMAIF TX 209/209完成），**两条PIT队列raw-wr始终0x0，RX全0**。52.71s是**CommCenter自己**发WDS Stop(0x22)两族→55.8s第二拨`ccmni2` ACT0，现象相同。
+- **结论边界**：AP侧WDS/路由/DPMAIF UL形状都通过；MD在NR连接态10s内既没把AP上行送到网络（无RA/无DNS回包、空闲态UL不触发service request，同217/218），自身NIM也没收到网络RA（同214/215）。卡点在**MD内部 PDU会话用户面（netif↔PDU session/QoS flow绑定或网络侧UP资源）**，AP日志无法区分哪一侧；所有探针仍是`MD-session unobserved`。
+- **下一步候选**：ACT后用MD真实AT读会话用户面状态（`AT+CGCONTRDP`／`AT+C5GQOSRDP`／`AT+CGEQOSRDP`／`AT+CGTFTRDP`／`AT+CGPADDR`），区分“网络给了QFI/5QI/DRB但MD内部没路由”与“没有UP资源”；或打开MD自身日志通道。未实施。
+
 ## WDS探针日志编码panic修复（WDSFIX-221，2026-11-11；已构建，未启动）
 
 - **修复**：main提交 **`0d3da82`** 把 `X9WDS.inc:x9w_probe` 的38参数单条printf拆成4条（≤17参数、约≤130B参数编码、各一个或零个`%s`），字段不变，后三条以 `X9 CELL WDS:  mux %u site %u seen %llu` 开头便于与第一条（`site/why/value/seen/SIM/mux/gen/epoch/op/token`）关联。XNU `log_encode.c` 未改（不在仓库里）。扫描 `x9/kernel/src` 其余printf/IOLog（静态估算，不含字符串payload）：最大约154B（X9WifiNet.inc:1556，25参数）、无其他超200B。
