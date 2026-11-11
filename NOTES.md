@@ -6,6 +6,15 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 276／277差分交接（GPU-VERSION-DIFF，2026-11-11）：插件修复与整机最新main更新是两层，不是一次单变量升级
+
+- **范围／来源**：用户要求“看看277和276之间到底更新了什么”。只读Git源码、冻结输入／打包日志及已记录manifest，不重新解包／hash／反汇编成功镜像，不编译／测试／CI／push／设备操作。插件276来源`4a140a9`，原始277`14a033f`，核心GPU源码提交`f307fda`（main对应`ef0b4b6`）；六个前端／bridge／surface关键文件在276与277起点`695cdae`的Git内容完全相同，故GPU核心差分可准确归到该提交，而非只据版本号或文档猜测。
+- **插件／配套内核实际差异**：①默认顶点补齐由CPU snapshot变不可变UInt32索引`0..n-1,n-1…`，补到12倍数、baseVertex=start、64B实际尾部、CB持有；仅完整triangle list／count≤65536／signed-safe／fill／rasterization／编译后vertex无stores或atomics时采用，保留原绑定与vertex_id／base_vertex／instance，不改应用indexed/indirect；x9p1留旧snapshot、x9p0关闭。②x9lc整surface clean seed只允许完整mapping及实际全bytes覆盖发布，partial plane/range保持普通cache维护；CPU映射失败不清gpuDirty，成功atomic exchange。③加入AdrenoMetal0031..0034：内存类型按大小计数、shader cache atime权限拒绝后不反复尝试、room worker exit guard、parked对象和空pool按时间退休；前端持久memory-pressure source只回收idle runtime和最多32项／1MiB自有索引cache，pending CB资源保留。④builder按精确963f Git pin识别pristine源树并加入四补丁／stamp，基底仍963f0e64，不是换译码器大版本。
+- **没有变化／打包差异**：PanVK使用原276 ICD，经install_name_tool／strip／adhoc重新签名和277目录版本化，**没有Mesa代码升级**；可执行文件不能因签名hash不同就说驱动算法已换。已提交allowlist记录GeneralMetal为34746192→34800208B（+54016B），PanVK均18423984B；仅引用原manifest元数据，不新读二进制校验。更新了277路径、版本／签名与配套内核allowlist，276和277 mailbox不能混用。未证明三角形／竖缝已消失、fps提高、IMS或Internet已修好。
+- **整机镜像必须另算**：218实跑276是`cell163/c91ffc0`，最新277联合kernel固定`58ba960`；二者源树净差异**206文件（含文档，不等于206项新增功能）**，含SMS`7db91cc`、speaker/HAL与共享DSP、haptic、camera/GPS多模块及recipe／构建接线。DPMAIF具体差分是去掉cell163的A/B/C轮换探针，WDS诊断恢复3s／80轮并查04c7，不能说是新RX0修复；NAS33启用／IMS8105／GetServices仍不支持。原始GPU277`14a033f`不含冻结后短信修复，不能与最新联合277混称一套源码。
+- **启动层／当前候选**：最新277 r2已去掉MIC/ADSP pre-XNU walkers，但相较实跑131仍有通用FDT parser、GPS SMPU及相机calibration/IRQ两walker变化；用户报告r2无法引导、无有效本次console，不能确认根因。之后的当前boot`x9-shim277-no-camera-gps-20261111`只以shim`7b72659`去掉GPS／相机三walker，复用同一`58ba960`kernel和同277插件；并非再升级277 GPU。插件在XNU/PID1阶段校验／加载，不能直接用其版本解释jump前失败，也不能据此排除同期shim／kernel更新。当前新shim仅构建成功、开机待验。
+- **重放／私有证据**：`.local/x9/work/gpu276-277-diff-20261111/`保存`comparison.json`、`gpu-source.diff`、`cell163-to-latest277.numstat`、`boot-and-cellular.diff`及`latest-shim-removal.diff`。最小复核：`git show f307fda -- x9/metal/General x9/kernel/src/iokit/Kernel/arm/SweetSurface.cpp x9/kernel/src/iokit/Kernel/arm/SweetX9RenderEngine.inc`；整机文件差分`git diff --numstat c91ffc0 58ba960`；最后shim差分`git diff 58ba960 7b72659 -- x9/shim`。本轮只有此交接提交，运行代码与现有候选不改，保留其它窗口内容。
+
 ## 当前启动候选（BOOT277-NOCAMGPS，2026-11-11）：相机/GPS pre-XNU部分已移除，新shim/boot已构建，待用户启动
 
 - **明确范围/源码里程碑**：用户要求“去掉相机和 gps 部分编译新版”。在已移除MIC/ADSP的基础上，从`loader.c`移除GPS、camera calibration、camera IRQ三调用，从`shim/build.py::SOURCES`移除对应三对象，`fdt.h`移除公开loader入口；实现源码保留作离线参考，不新设可重新启用的boot开关。新增 **`X9 CAMERA/GPS FDT: loader handoffs removed; no hardware grant`** 日志。`mkadt`原GPS64B、相机校准32B、IRQ64B零placeholder保留，kernel consumers继续拒绝未资格化metadata，不改内核相机/GPS模块、真实UFS/保护/32GiB几何、GPU/SCP/Wi-Fi/RAM、copy/zero、boot_args或XNU entry。main同三文件同步修改，独立detached **`.local/x9/worktrees/shim277-no-camera-gps-20261111/`** 从58ba960仅此差分固定 **7b726599fe5c59a8cae89d377421605ccebd7178**。
