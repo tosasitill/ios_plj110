@@ -6,6 +6,13 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 系统 Xcode 删除交接（2026-11-11）
+
+- 用户继续要求检查系统安装的 Xcode，不需要则删除。**`/Applications/Xcode.app`（27.1 / 27A9275）已删除**，临时隔离副本也已删除；原实际占用 **3813128KiB（3.64GiB）**。删除前后全卷可用空间增加3857944KiB（约3.68GiB，可能含并发变化），本轮没有清理其他应用、系统共享开发组件或项目数据。
+- 删除依据：`xcode-select` 仍指向 `~/Downloads/Xcode.app/Contents/Developer`，实际解析至上节保留的Xcode15精简工具链；381份项目构建配置无使用系统Xcode的`developer_dir`，保留工具链/CommandLineTools/共享框架/Homebrew入口的软链接无指向系统Xcode，可见进程及`lsof`无其文件占用。源码中的`/Applications/Xcode.app`是被本机配置覆盖的默认值或CI路径，不是当前实际工具选择。**保留 `~/Library/Developer/X9-Xcode-15.0.1.app`、Downloads兼容链接、`/Library/Developer/CommandLineTools`及`/Library/Developer`共享框架/组件**，没有把系统`simdiskimaged`服务误当成正在使用Xcode.app而操作它。
+- 先将系统Xcode移至私有隔离目录，清除进程级`DEVELOPER_DIR/SDKROOT/TOOLCHAINS`后，系统`xcodebuild -version`仍正确返回15.0.1，iOS/macOS SDK及iig/metal/metallib无缓存查询、clang/Git/Make/Python查询均通过；实际`X9RenderTransport.c`按iOS16/arm64、`-Wall -Wextra -Werror`编译并归档 **exit0，无编译告警**。通过后才删除隔离原件，删除后入口/版本/Git查询及原件不存在检查 **exit0**。没有执行编译出的代码、测试套件、完整内核/boot构建、CI或设备操作；原有DVTDownloads重复类提示仍在，没有因此删除共享框架。
+- 私有依据：**`.local/x9/work/system-xcode-cleanup-20261111/`** 下的 `project-developer-configs.json`、`dependent-symlinks.json`、`open-files.txt`、`isolation-success.json`、`isolated-tools-compile.log/exit`、`cleanup-result.json`、`post-cleanup.log/exit`。复核可执行 `env -u DEVELOPER_DIR -u SDKROOT -u TOOLCHAINS /usr/bin/xcodebuild -version`（应为15.0.1），或同环境`xcrun --no-cache --sdk iphoneos --show-sdk-path`。今后若需要完整IDE/模拟器/Swift开发，须重新安装对应Xcode，不把当前精简目录当完整IDE。
+
 ## 本机 Xcode 精简交接（2026-11-11）
 
 - 用户要求从 `~/Downloads` 的 Xcode 提取项目所需工具并删除其余内容。原 **Xcode15.0.1 / 15A507** 已提取至 **`~/Library/Developer/X9-Xcode-15.0.1.app`**；`~/Downloads/Xcode.app` 改为指向该目录的兼容软链接，`developer_dir`、历史构建脚本与现有 `xcode-select` 路径无需修改。这是项目命令行工具集，**不是完整可启动的 Xcode IDE**；`/Applications/Xcode.app`（27.1）、系统 CommandLineTools、Homebrew LLVM/Rust、项目输入与设备未动。
