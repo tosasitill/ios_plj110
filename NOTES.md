@@ -1508,7 +1508,14 @@ x9_wifi_xo0..xo6=<校准字> x9_cache_scope=1 x9kbdhook=1 x9pl=1 x9sl=1 x9lc=1 x
 - **不能称为全部USB完成**:本轮暂无枚举/DMA/ue0 ping/bulk回环实机结果,live EMI/MPU允许普通XNU DMA页也未证明。`native_apple_stack=0`,没有冒充IOUSBDeviceController或AppleUSBDeviceMux;原始configd USBDeviceConfiguration/lockdownd、Finder/iTunes Trust/配对/照片同步仍缺20H392 controller adapter及kext构建接入。USB3 XS-PHY/retimer、charger Type-C role与原生xHCI也未完成。参考文章chip/board/security-domain/fsid/锁状态条件要到原生栈接通后才验证,不先改身份/配对状态制造成功。
 - **下一步/验收**:先在用户手动启动的单一候选核对`CAP_EPINFO/TXFIFO/RXFIFO/MISC`→config1/alt1→真实QMU OUT/IN→ue0 ping,再用iOS `usbctl --echo`+host单次echo证明host→iOS→host字节相同。保留EP0日志,无需重建Metal插件/mailbox。接口/回退/构建说明在`x9/usb/README.md`;不要求用户现在连续刷试探镜像。
 
-## 蜂窝当前交接(CELL214-RXZERO，2026-11-11)：cell157已实跑仍RX0；MTU1450保留／EIF5刷新生效，继续定位MD session与下行交AP边界
+## 蜂窝新增源码交接(CELL158-BAT，2026-11-11)：消费CODA提示与稳定BID缓冲；仅单位编译，用户转查IMS
+
+- **已完成源码**：从cell157固定源码`0e3681b`建立`.local/x9/worktrees/cell158-bat-policy`／`work/cell158-bat-policy`，提交 **`bed5850`**，精准cherry-pick进main为 **`975313d`**；仅`X9DPMAIF.inc`，不混main插件277。PIT读取前消费`PD_MISC+0x6c` bit15/高16位BAT提示（普通R/W清pending，不当W1C）；有限提示沿vendor自适应，默认2000，ffff或实测copy速率>150Mbps目标16383；不把目标当实际credit或网络交付。
+- **资源与所有权**：替换固定2048缓冲取模别名为每BID稳定地址，normal/frag各按256项惰性分块；已发布地址不移动／不回收，实际读写指针与posted所有权约束补充，每kind每poll最多128项、保留空槽。分配失败保留已发布资源与进度，1/2/4/8/16秒退避；仅释放未发布失败块。初始约7MiB，游标即使低速历经全环后也可保留最多 **56MiB** backing（另加描述符），不是只有高速才达到上限。日志区分hint、target、credit、owned、backing。
+- **准确构建状态**：Framework Python3.13 `-I .local/x9/work/cell158-bat-policy/compile-selected.py`真实单编`X9Baseband.cpp.o=True`，exit0，33条既有warnings；`git diff --check`通过。私有目录保留`compile-selected.log/.exit`、`final-object-results.json`、`objects-final/`、`source.patch`。**尚未全构建、无cell158新镜像、无新CI run／push／设备操作**，更没有联网成功结论。
+- **用户最新方向**：“有人提醒我们要先修复IMS”。暂停将BAT候选作为最终交付，先从214原始日志、现有SMS/IMS桥及同机Android启用／配置／专用承载链核对。既有桥只支持真实注册查询／通知，不能宣称完整IMS；目前也未证明IMS缺失导致Internet RX0。保留已提交BAT修复，不重新猜app3、伪造注册／服务能力或硬编码APN。后续候选继续276／603B既有输入。
+
+## 蜂窝当前实测交接(CELL214-RXZERO，2026-11-11)：cell157已实跑仍RX0；MTU1450保留／EIF5刷新生效，继续定位MD session与下行交AP边界
 
 - **214权威运行结果**：用户明确报告仍不行，`~/214.txt`（2041617B、按原始LF切分20456行）确认实际运行cell157与276插件，不推测没启动。21.163s九阶段握手及两SIM订阅确认，25.821s DDS020e result0／SIM1／epoch1。三次GET＋EIF资格化成功：**31.653s→ccmni1、33.488s→ccmni2、100.325s→ccmni1**，均physical call1/mux1/PDP3/双family、MTU4/6=1500/1500，control generation1/2/3。第二拨从33.488s维持到98.398s；**95.964s LF18186 TX submitted242/completed242，RX delivered/dropped/queued/rejected全0，ready1、quarantined0**。这仍是失败，不是完整联网或完成验收。
 - **cell157哪些实际生效**：36.976s LF11107 host接口MTU **1450**，48.817／60.585／72.361／84.151／95.963s始终1450；没有再被MD cap1500覆盖。37.526s LF11189 **EIF5/count0→GET205 txn348／206成功**，随后txn349也成功，没有因此拆线。周期GET继续成功至96.967s。**未见4203 scoped-consumption／configuration changed／原生重配日志**，不能把订阅成功当更新重配链已实跑；两个近邻GET的event-serial原因未打印，不凭空归因。反向“v4先Stop、v6保留”、独立v6 PDN、RA/SLAAC、真实RX仍未验收。
