@@ -103,6 +103,14 @@ static bool x9ds_drain(){
  }
  return empty;
 }
+static void x9ds_expire(uint64_t now){
+ if(!x9ds_op.used||x9ds_op.timed_out||now<x9ds_op.deadline)return;
+ // Retire the original host reply before take or submission. A late valid
+ // 020e may still record actual current DDS, but never revive this reply.
+ x9ds_op.timed_out=true;x9ds_result(X9Q_NOT_READY);
+ if(!x9ds_op.token&&!x9ds_op.hold)bzero(&x9ds_op,sizeof(x9ds_op));
+ else printf("X9 DDS: timeout; retain mutation owner, no repeated 020d\n");
+}
 static void x9ds_poll(){
  uint64_t now=x9q_ms();bool online=x9_md_mipc_online();
  if(!online)x9ds_known=false;
@@ -114,9 +122,11 @@ static void x9ds_poll(){
    printf("X9 DDS: boot policy explicitly selects SIM%d via MD 020d (not native readback)\n",initial);
   }else printf("X9 DDS: boot selection disabled; current unknown until an explicit switch succeeds\n");
  }
+ x9ds_expire(x9q_ms()); // ready1 first observed after deadline is still late
  if(x9ds_op.used){
   if(x9ds_op.token){
    uint8_t response[X9_MIPC_FRAME_MAX];unsigned n=0,result=2;
+   x9ds_expire(x9q_ms()); // latch before consuming the original token
    int done=x9_md_mipc_take(x9ds_op.token,response,sizeof(response),&n);
    if(done==1){
     bool wire=x9w_wire(response,n)&&x9q_u16(response+10)==0x20e&&x9w_word(response,n,0,result);
@@ -137,15 +147,13 @@ static void x9ds_poll(){
    if(!x9ds_pair||x9ds_epoch!=x9ds_op.epoch||!online||(!x9ds_op.host&&!x9ds_live())){
     x9ds_result(X9Q_NOT_READY);bzero(&x9ds_op,sizeof(x9ds_op));
    }else if(x9ds_drain()){
-    x9w_frame f(0x20d,1u<<x9ds_op.target);x9ds_op.token=f.submit();
-    if(x9ds_op.token){x9ds_op.deadline=now+60000;x9ds_known=false;x9ds_boot_attempted=true;
-     printf("X9 DDS: 020d queued mask %u; await transaction-matched 020e\n",1u<<x9ds_op.target);}
+    x9ds_expire(x9q_ms()); // AP drain cannot extend an already expired wait
+    if(x9ds_op.used&&!x9ds_op.timed_out){
+     x9w_frame f(0x20d,1u<<x9ds_op.target);x9ds_op.token=f.submit();
+     if(x9ds_op.token){x9ds_op.deadline=x9q_ms()+60000;x9ds_known=false;x9ds_boot_attempted=true;
+      printf("X9 DDS: 020d queued mask %u; await transaction-matched 020e\n",1u<<x9ds_op.target);}
+    }
    }
-  }
-  if(x9ds_op.used&&!x9ds_op.timed_out&&now>=x9ds_op.deadline){
-   x9ds_op.timed_out=true;x9ds_result(X9Q_NOT_READY);
-   if(!x9ds_op.token&&!x9ds_op.hold)bzero(&x9ds_op,sizeof(x9ds_op));
-   else printf("X9 DDS: timeout; retain mutation owner, no repeated 020d\n");
   }
  }
  for(unsigned i=0;i<CBQ_MAX_CLIENTS;i++){
