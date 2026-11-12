@@ -6,6 +6,17 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 242结果（ceus上机，2026-11-12）：SIM1(data centric)经RRC释放仍留在SA；SIM2对照照旧回落
+
+- **观察**：无panic，日志到181s。init脚本(CFUN=4)：`+CEUS: 0`(MD默认voice centric) → `AT+CEUS=1` OK → 回读 `+CEUS: 1`；`AT+EIMSCFG?` 只回 `OK`(没有内容)。
+- **SIM1(CEUS=1)**：28.8注册SA(C5GREG 1，AcT 11)，到181s **一直没回落**。63.400 NR RRC释放(idle, access5 cn1)，**132ms后63.532在NR上重新连接**(state8 access5 cn1)；整个日志只有这一次释放。
+- **SIM2(默认，对照)**：39.098 NR idle → 45.226 LTE idle(access4 cn0) → LTE，与241相同；176.47又回到NR(C5GREG 1)。
+- **结论(推断，证据较强但样本只有一次释放)**：SA→LTE回落是MD按voice-centric UE、5GS无IMS语音时关掉N1 mode；改成data centric后SIM1在释放后留在SA。还需要更长、带空闲的测试确认。
+- **即时indication**：SIM2 49.882 回落时 `registration change -> 2 client(s) indicate now`，同一时刻发出LTE SysInfo(domain 3)。
+- **63.1 CommCenter动作串**(与240的53.06完全相同；之前没有QMI请求或触摸触发)：0xeb、0x5567、0x3b、0x33(TLV 0x31=01,0xa0=01)、0x5566(均被拒94) → 63.171 v4 Stop + 0x5569/0x5568 + DMS SetOperatingMode 4(被拒94) → 66.88以新IP 10.2.58.118重拨(SIM1，仍是NR)。**重拨后数据正常**：到160s TX 66440包/32.5MB、RX 90960包/120.9MB；Safari/WebKit NECP `sat 1 routed 6`。推断是CommCenter开机后的设置推送(首选PLMN/数据卡)，现在无害。
+- **ATCTX里的CEUS?/EIMSCFG?没有结果**：MIPC按SIM的AT只许白名单里的读命令(x9_mipc_bridge.inc x9mi_at_read)，这两条不在名单里，被拒后该轮静默结束(没有 `done` 行)。要按SIM读就加进白名单。
+- **下一步候选**：(1)把CEUS?/EIMSCFG?加进x9mi_at_read白名单；(2)SIM2也设CEUS=1(需要按SIM的写命令；init脚本端口只对应SIM1)；(3)跑一次更长的测试，中间空闲几分钟，确认SIM1多次释放后仍在SA；(4)长期看：给iOS提供IMS/VoNR，才是voice centric下留在SA的正解。
+
 ## CEUS + 即时indication（2026-11-12；x9-cell-ceus 已构建，未启动）
 
 - **b55cdaa**(worktree 64622f2，基于necp镜像)：
