@@ -1,0 +1,44 @@
+diff --git a/libkern/c++/OSKext.cpp b/libkern/c++/OSKext.cpp
+index 9c2731a..2a7a8c9 100644
+--- a/libkern/c++/OSKext.cpp
++++ b/libkern/c++/OSKext.cpp
+@@ -6671,6 +6671,7 @@ loaded:
+ 				    kOSKextLogErrorLevel | kOSKextLogLoadFlag,
+ 				    "Kext %s start failed (result 0x%x).",
+ 				    getIdentifierCString(), result);
++				printf("X9 KEXT: start %s failed 0x%x\n", getIdentifierCString(), result);
+ 				result = kOSKextReturnStartStopError;
+ 			}
+ 		}
+@@ -6693,6 +6694,7 @@ finish:
+ 		    kOSKextLogLoadFlag,
+ 		    "Kext %s failed to load (0x%x).",
+ 		    getIdentifierCString(), (int)result);
++		printf("X9 KEXT: load %s failed 0x%x\n", getIdentifierCString(), (int)result);
+ 	} else if (!alreadyLoaded) {
+ 		OSKextLog(this,
+ 		    kOSKextLogProgressLevel |
+@@ -7093,6 +7095,14 @@ OSKext::loadExecutable()
+ #endif //(__x86_64__) || defined(__i386__)
+ 
+ 	if (isPrelinked()) {
++		/* X9: a prelinked kext whose earlier load failed has had kmod_info
++		 * cleared; loading it again would write through NULL. */
++		if (!kmod_info && !isInterface()) {
++			printf("X9 KEXT: %s prelinked but kmod_info is NULL (earlier load failed); refusing\n",
++			    getIdentifierCString());
++			result = kOSKextReturnInternalError;
++			goto finish;
++		}
+ 		goto register_kmod;
+ 	}
+ 
+@@ -7431,6 +7441,8 @@ finish:
+ 		    kOSKextLogLoadFlag,
+ 		    "Failed to load executable for kext %s.",
+ 		    getIdentifierCString());
++		printf("X9 KEXT: loadExecutable %s failed 0x%x (kmod_info %p prelinked %d)\n",
++		    getIdentifierCString(), result, kmod_info, isPrelinked());
+ 
+ 		if (kmod_info && kmod_info->reference_list) {
+ 			kfree_type(kmod_reference_t, num_kmod_refs,
