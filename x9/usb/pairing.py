@@ -118,8 +118,10 @@ class Usbmux:
             raise ProtocolError('invalid pair-record identity from usbmuxd')
         return serial
 
-    def tunnel(self, device_id):
-        r = self.request('Connect', DeviceID=device_id, PortNumber=socket.htons(62078))
+    def tunnel(self, device_id, port=62078):
+        if type(port) is not int or not 1 <= port <= 65535:
+            raise ProtocolError('invalid native service port')
+        r = self.request('Connect', DeviceID=device_id, PortNumber=socket.htons(port))
         if r.get('MessageType') != 'Result' or r.get('Number') != 0:
             raise ProtocolError('lockdown connection not accepted')
         return self.sock
@@ -215,7 +217,7 @@ def save_private(path, data):
         tmp.unlink(missing_ok=True)
 
 
-def verified_session(lockdown, pair):
+def verified_session(lockdown, pair, operation=None):
     for k in ('HostID', 'SystemBUID'):
         if not isinstance(pair.get(k), str) or not 1 <= len(pair[k]) <= 256:
             raise ProtocolError(f'pair record missing {k}')
@@ -243,6 +245,10 @@ def verified_session(lockdown, pair):
                 if lockdown.sock.getpeercert(binary_form=True) != expected:
                     raise ProtocolError('device certificate pin mismatch')
             lockdown.query_type()  # Verify a complete response over the actual session transport.
+            if operation is not None:
+                # Callers may start original native services within this real
+                # session. Reuse its verified/pinned TLS context, never downgrade.
+                operation(lockdown, ctx, expected)
             lockdown.request('StopSession', SessionID=session)
             return r['EnableSessionSSL']
         finally:

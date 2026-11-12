@@ -1,5 +1,45 @@
 # X9 USB2 device 开发
 
+## AppSync / 原生 IPA 安装入口（2026-11-12，未实机验收）
+
+`../appsync/` 现在提供独立的 iOS16 arm64 安装/FrontBoard hooks、递归 ldid
+签名器及离线 runtime；不改 Apple executables。构建成功不代表运行库已经
+staging，或 x9 原生 Apple USB backend 已经完成。
+
+`install.py` 使用真正的系统 usbmuxd/lockdownd：现有 Pair record → verified
+session → StartService(AFC/installation_proxy) → 唯一新目录上传 → 单次 Install
+→ 指定 bundle/version 的权威 Lookup。服务要求 TLS 时验证 RootCA 并 pin
+DeviceCertificate。不使用 private bulk/self-made mux，不替换 daemon。
+协议布局参照 libimobiledevice `src/afc.c` 和 `src/installation_proxy.c`。
+
+**以下是原生 backend/Trust/TLS 已验收后的操作者步骤，不要现在选别的设备
+代替 X9 测试，也不要重复启动旧失败的 USB 候选：**
+
+```sh
+python3 -I x9/usb/pairing.py --list
+# 仅当列表中确有 X9，使用那次明确的 device-id；Trust 由用户在原 UI 接受
+python3 -I x9/usb/pairing.py --pair --device-id ID --record .local/x9/pair-NEW.plist
+python3 -I x9/usb/pairing.py --session --device-id ID
+# 必须先部署 AppSync runtime 并确认三个目标进程 hook 活跃
+python3 -I x9/usb/install.py --install /path/to/Example.ipa --device-id ID \
+  --receipt .local/x9/install-NEW.plist
+```
+
+IPA 输入不被消费；拒绝 ZIP path traversal/重复 entry、symlink、加密 archive、
+非 thin-arm64 或 FairPlay-encrypted main executable。未知 nested code 最终由
+设备签名器/原校验器决定；不是任意 IPA 都兼容。已安装同 bundle 的应用必须
+显式 `--replace-existing`，默认不覆盖。任何上传/安装歧义均保留 0600 receipt
+并停止，不删 staging、不重放、不打印设备身份/证书。
+
+```sh
+# 只核对之前的那一个 bundle/version，禁止把超时自动变成第二次 Install
+python3 -I x9/usb/install.py --verify --device-id ID --receipt .local/x9/install-NEW.plist
+```
+
+receipt绑定原生设备 identity 的SHA256。Lookup只证明该bundle/version当前
+在原生用户安装路径上，不证明未知的上次Install成功、实际启动或跨重启持久性。
+**这不是新增的可Finder配对boot；NATIVE9的registry/backend仍为空。**
+
 **当前是已实现的 USB2 CDC-ECM + 自有 bulk 传输候选，不是已验收的完整 iPhone USB 栈。**
 尚无本版本实机枚举、DMA、网络或配对结果。USB3、Type-C 双角色、原生
 `IOUSBDeviceFamily → AppleUSBDeviceMux → lockdownd` 尚未实现；Finder/iTunes

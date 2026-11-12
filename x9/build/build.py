@@ -57,7 +57,7 @@ def load_config(path):
     missing = [k for k in REQUIRED if not cfg.get(k)]
     if missing:
         sys.exit(f'{path}: missing {", ".join(missing)}')
-    for key in ('dxb', 'root_manifest', 'wifi_firmware', 'bluetooth_firmware', 'gps_firmware', 'wifi_nvram', 'mdota_source', 'carrier_cbn_ipcc'):
+    for key in ('dxb', 'root_manifest', 'wifi_firmware', 'bluetooth_firmware', 'gps_firmware', 'wifi_nvram', 'mdota_source', 'carrier_cbn_ipcc', 'appsync_runtime'):
         if cfg.get(key):
             path = Path(cfg[key]).expanduser()
             cfg[key] = str(path if path.is_absolute() else ROOT / path)
@@ -223,6 +223,22 @@ class Builder:
         return True
 
     def compile(self, boot_args=()):
+        # AppSync is opt-in. Its seed is built/staged separately; never embed
+        # executable bytes or silently publish a candidate without hash metadata.
+        appsync = 0
+        for arg in boot_args:
+            key, sep, value = arg.partition('=')
+            if key == 'appsync':
+                if sep and value not in ('0', '1'):
+                    sys.exit('appsync requires 0 or 1')
+                appsync = int(value) if sep else 1
+        runtime = self.cfg.get('appsync_runtime')
+        if appsync and not runtime:
+            sys.exit('appsync=1 needs appsync_runtime (offline runtime.json); staging still requires consent')
+        self.run_or_exit([sys.executable, '-I', str(X9 / 'appsync/manifest.py'),
+                          '--out', str(KERNEL / 'generated/x9_appsync_runtime.inc')] +
+                         (['--runtime', runtime] if runtime else []), ROOT,
+                         label='appsync/manifest.py')
         if not self.dry_run:
             self.objdir.mkdir(parents=True, exist_ok=True)
         real_wifi = radio_arg(boot_args, 'x9_wifi_real') == 1

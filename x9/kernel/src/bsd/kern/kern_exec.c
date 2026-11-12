@@ -391,6 +391,8 @@ static void exec_port_actions_destroy(struct exec_port_actions *port_actions);
 #if defined(ARM64_BOARD_CONFIG_SWEET)
 static int x9_torch_exec_env(struct image_params *, int);
 static int x9_camera_exec_env(struct image_params *, int);
+#include "x9_appsync_exec.inc"
+static int x9_appsync_exec_env(struct image_params *, int);
 #endif
 
 /*
@@ -1745,7 +1747,14 @@ grade:
 	 * execs platform -- both the task flag and the proc cs_flags that
 	 * csops reports -- regardless of load_result.platform_binary.
 	 */
-	(void)load_result.platform_binary;
+	bool x9_appsync_user = false;
+#if defined(ARM64_BOARD_CONFIG_SWEET)
+	x9_appsync_user = x9_appsync_user_exec(imgp);
+#endif
+	if (x9_appsync_user) {
+		load_result.platform_binary = FALSE;
+		imgp->ip_csflags &= ~(CS_PLATFORM_BINARY | CS_PLATFORM_PATH);
+	}
 	if (cs_debug) {
 		printf("setting platform binary on task: pid = %d\n", proc_getpid(p));
 	}
@@ -1753,8 +1762,13 @@ grade:
 	 * We must use 'task' here because the proc's task has not yet been
 	 * switched to the new one.
 	 */
-	task_set_platform_binary(task, TRUE);
-	proc_csflags_set(p, CS_PLATFORM_BINARY);
+	task_set_platform_binary(task, !x9_appsync_user);
+	if (!x9_appsync_user) {
+		proc_csflags_set(p, CS_PLATFORM_BINARY);
+	} else {
+		proc_csflags_clear(p, CS_PLATFORM_BINARY | CS_PLATFORM_PATH);
+		printf("X9 APPSYNC: pid %d user bundle exec; no platform promotion\n", proc_getpid(p));
+	}
 
 	/*
 	 * Set starting EXC_GUARD and control port behavior for task now that
@@ -5825,6 +5839,8 @@ exec_extract_strings(struct image_params *imgp)
 	if (error) goto bad;
 	error = x9_camera_exec_env(imgp, new_ptr_size);
 	if (error) goto bad;
+	error = x9_appsync_exec_env(imgp, new_ptr_size);
+	if (error) goto bad;
 #endif
 	if (imgp->ip_argspace < new_ptr_size) {
 		error = E2BIG;
@@ -6967,6 +6983,7 @@ sweet_x9_prepare_wallpaper_collections(proc_t p,user_addr_t scratch,user_addr_t 
 #include "x9_carrier_cbn_install.inc"
 #include "x9_torch_install.inc"
 #include "x9_camera_install.inc"
+#include "x9_appsync_env.inc"
 #include "x9_microphone_install.inc"
 #include "x9_haptic_install.inc"
 #include "x9_speaker_install.inc"

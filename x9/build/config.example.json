@@ -6,5 +6,6 @@
  "lld": "/opt/homebrew/opt/lld@22/bin/ld.lld",
  "root_manifest": ".local/x9/x9/out/pan220-batched-cache-ranges/root-manifest.json",
  "compiler_launcher": "ccache",
- "homebrew": "/opt/homebrew"
+ "homebrew": "/opt/homebrew",
+ "appsync_runtime": null
 }

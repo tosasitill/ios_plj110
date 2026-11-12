@@ -6,6 +6,18 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## USB/AppSync 接入（2026-11-12；离线 runtime 成功，原生 USB／完整 bootstrap 仍未完成）
+
+- **用户要求**：参考 UniXNU-sheng，X9 USB 支持 Mac 配对、AppSync 安装 App，并加越狱环境。本轮从 `32aa992` 开始；期间其它窗口合入 GPU/HEIF/279，当前集成基线 `011b7d6`。未启动子代理，保留其它窗口提交。**不能称为三目标已完成，也没有新的可Finder配对boot**。
+- **固定参考**：`.local/x9/work/references/UniXNU-sheng-20261112`=`e8937177309d88c93b305a57bad147fd5fac8a86`；`UniXNU-appsync-20261112`=`0e2fb2bcdf11b104d28b0d4aae4f77a7945e3de5`。sheng 的 AppleUSBXDCI/DWC3、iOS27/arm64e、SPTM/trust-cache-v2、原始Apple executable改写及全局vtable不移植。只将 GPLv3 AppSync hook/Signing/appinst 与 pinned ldid library builder 引入 `x9/appsync/vendor`，许可/来源一起入库；Apple产物/下载源码包在`.local`。
+- **源码实现**：iOS16 arm64 runtime（installd/Helper `MICodeSigningVerifier` + SpringBoard FrontBoard hook，逐method encoding准入；原校验失败后才对安装副本递归ad-hoc repair，再走原校验）；私有前缀 `/private/var/x9/jailbreak/20H392`。`appsync=1`下Data `.app`主程序不再被系统兼容路径一律升为platform；未改现有AMFI/Sandbox策略/VM校验。exec只对三个目标进程注入，先核对两个runtime库的size/SHA；既有DYLD链不覆盖，缺库/不匹配不注入。**内核不写入runtime文件**。正常builder的`appsync_runtime`配置只生成哈希header；开启appsync而无manifest拒绝。
+- **原生主机安装客户端**：`x9/usb/install.py`，复用实际系统usbmuxd/真实Pair record及pinned TLS session；StartService→AFC唯一目录→单次Install→指定bundle/version/path的原生Lookup。已安装同bundle默认拒更新；上传/Install前持久化0600 receipt，身份SHA绑定，歧义不重放/清理，只允许`--verify`定点Lookup。未执行任何设备查询/配对/安装。本工具不实现DeviceFamily；NATIVE9 registry/backend仍无安装者，`native_apple_stack=0`不变。
+- **已构建runtime**：`.local/x9/appsync/runtime-20261112-v3/{root,runtime.json,signer.json}` **exit0**；4个签名arm64二进制共3245712B：AppSync73936、ldid3050800、appinst70640、只读jbctl50336。v1失败=Framework Python缺CA（已用系统CA保留验证）；v2失败=jbctl syscall deprecated，改用原始`__mac_syscall`后v3成功。源码后续仅builder默认cache路径/manifest排版改变，不改变这4个runtime源的语义。依赖许可在seed，LGPL relink objects在`.local/x9/appsync-signer`。**未staging**。
+- **编译观察**：`kernel-unit-5`的production kern_exec.o（有runtime hash路径）exit0；单元初次只编失败因输出子目录未建/既有HAL generated输入缺失，随后运行原HAL生产builder补齐。两次主目录kernel构建exit0/90/90 overlay+5prebuilt；第一份用了普通local config的CBN stub，第二份使用原54.1.0/27文件CBN且real-radio准入，恢复了主目录generated CBN。**两份目录名称带gpu278，但期间279并发合入，不能据目录名认定配套或当固定来源上机候选**；下一步冻结源码后编译，不检查/重算这些成功镜像。
+- **ABI证据边界**：20H392 extracted InstalledContentLibrary/FrontBoardServices里确认存在目标selector字符串；`otool -ov`不能直接解shared-cache编码指针，私有跨image解析草稿仍有method-selector解码错误，**没有因此声称encoding已经离线资格化**；运行库坚持实际ObjC encoding检查失败即inactive。原件/解码/compile/配置在`.local/x9/work/usb-appsync-20261112/`，无测试套件或成功产物二次检查。
+- **越狱范围**：原SWEET non-enforcing环境保留，新增AppSync+签名器+appinst+只读status。**未包含dpkg/APT/Sileo/Cydia、通用tweak注入器、SSH/shell控制通道**，不设root默认密码；不能称完整bootstrap。下一步先MTU3 native endpoints/Family双向ABI/加载→原生USB枚举→Trust/Pair/TLS，再用户确认独立runtime staging与兼容bootstrap；不能直接运行palera1n的APFS/postinst流程。
+- **设备／交付约束**：本轮无ADB/flash/reboot/root/分区/mailbox写入，主目录local.json和boot.json未改；没有boot.img。已有603B启动参数不能直接追加`appsync=1`越过607B门；未来boot需等价压缩和严格配套。其它窗口279插件/allowlist原样保留，其mailbox要求仍以GPU279交接为准，本USB工作不代替它。源码提交及固定构建结果见后续追加。
+
 ## GPU 279：PanVK顶点补齐守卫 + UniXNU/AdrenoMetal复查（2026-11-12；x9-gpu279-padguard 已构建，未上机，需mailbox staging）
 
 - **cfc5c2e**(worktree 0966601) `x9/build/third_party/13-panvk-pad-guard.patch`(已加入build-panvk-incremental.py)：
