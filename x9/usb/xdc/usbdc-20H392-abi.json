@@ -1,0 +1,523 @@
+{
+ "source": "KDK_13.5_22G74 IOUSBDeviceFamily + 20H392 kernelcache",
+ "kc_vtable": "0xfffffff006e11200",
+ "prelinked_vtable": "0xfffffe000c449200",
+ "pure_virtual_kc": "0xfffffff00770ace4",
+ "slots": 232,
+ "first": 168,
+ "instance_size": 504,
+ "rows": [
+  {
+   "slot": 168,
+   "mangled": "__ZN21IOUSBDeviceController10createPipeER21tCreatePipeParameters",
+   "name": "IOUSBDeviceController::createPipe(tCreatePipeParameters&)",
+   "pure": false,
+   "kc": "0xfffffff005cf03e8",
+   "prelinked": "0xfffffe000b3283e8"
+  },
+  {
+   "slot": 169,
+   "mangled": "__ZN21IOUSBDeviceController12activatePipeEP15IOUSBDevicePipe",
+   "name": "IOUSBDeviceController::activatePipe(IOUSBDevicePipe*)",
+   "pure": false,
+   "kc": "0xfffffff005cf047c",
+   "prelinked": "0xfffffe000b32847c"
+  },
+  {
+   "slot": 170,
+   "mangled": "__ZN21IOUSBDeviceController14deactivatePipeEP15IOUSBDevicePipe",
+   "name": "IOUSBDeviceController::deactivatePipe(IOUSBDevicePipe*)",
+   "pure": false,
+   "kc": "0xfffffff005cf054c",
+   "prelinked": "0xfffffe000b32854c"
+  },
+  {
+   "slot": 171,
+   "mangled": "__ZNK21IOUSBDeviceController10getAddressEv",
+   "name": "IOUSBDeviceController::getAddress() const",
+   "pure": false,
+   "kc": "0xfffffff005cf05d0",
+   "prelinked": "0xfffffe000b3285d0"
+  },
+  {
+   "slot": 172,
+   "mangled": "__ZN21IOUSBDeviceController15createPipeGatedER21tCreatePipeParametersRP15IOUSBDevicePipe",
+   "name": "IOUSBDeviceController::createPipeGated(tCreatePipeParameters&, IOUSBDevicePipe*&)",
+   "pure": false,
+   "kc": "0xfffffff005cf0438",
+   "prelinked": "0xfffffe000b328438"
+  },
+  {
+   "slot": 173,
+   "mangled": "__ZN21IOUSBDeviceController17activatePipeGatedEP15IOUSBDevicePipe",
+   "name": "IOUSBDeviceController::activatePipeGated(IOUSBDevicePipe*)",
+   "pure": false,
+   "kc": "0xfffffff005cf04c4",
+   "prelinked": "0xfffffe000b3284c4"
+  },
+  {
+   "slot": 174,
+   "mangled": "__ZN21IOUSBDeviceController19deactivatePipeGatedEP15IOUSBDevicePipe",
+   "name": "IOUSBDeviceController::deactivatePipeGated(IOUSBDevicePipe*)",
+   "pure": false,
+   "kc": "0xfffffff005cf0594",
+   "prelinked": "0xfffffe000b328594"
+  },
+  {
+   "slot": 175,
+   "mangled": null,
+   "name": "IOUSBDeviceController::softDisconnect(IOUSBDeviceController::IOUSBDeviceControllerSoftDisconnectReason)",
+   "pure": true,
+   "kc": "0xfffffff00770ace4",
+   "prelinked": "0xfffffe000cd42ce4"
+  },
+  {
+   "slot": 176,
+   "mangled": "__ZN21IOUSBDeviceController15endpointTimeoutEi",
+   "name": "IOUSBDeviceController::endpointTimeout(int)",
+   "pure": false,
+   "kc": "0xfffffff005cf1804",
+   "prelinked": "0xfffffe000b329804"
+  },
+  {
+   "slot": 177,
+   "mangled": null,
+   "name": "IOUSBDeviceController::goOnBus(bool)",
+   "pure": true,
+   "kc": "0xfffffff00770ace4",
+   "prelinked": "0xfffffe000cd42ce4"
+  },
+  {
+   "slot": 178,
+   "mangled": "__ZN21IOUSBDeviceController21handleUserlandCommandEP8OSStringP8OSObject",
+   "name": "IOUSBDeviceController::handleUserlandCommand(OSString*, OSObject*)",
+   "pure": false,
+   "kc": "0xfffffff005cee630",
+   "prelinked": "0xfffffe000b326630"
+  },
+  {
+   "slot": 179,
+   "mangled": null,
+   "name": "IOUSBDeviceController::connectedWithAccessoryCable()",
+   "pure": true,
+   "kc": "0xfffffff00770ace4",
+   "prelinked": "0xfffffe000cd42ce4"
+  },
+  {
+   "slot": 180,
+   "mangled": null,
+   "name": "IOUSBDeviceController::handleStallEndpoint(int, bool)",
+   "pure": true,
+   "kc": "0xfffffff00770ace4",
+   "prelinked": "0xfffffe000cd42ce4"
+  },
+  {
+   "slot": 181,
+   "mangled": null,
+   "name": "IOUSBDeviceController::handleAbortEndpoint(int)",
+   "pure": true,
+   "kc": "0xfffffff00770ace4",
+   "prelinked": "0xfffffe000cd42ce4"
+  },
+  {
+   "slot": 182,
+   "mangled": null,
+   "name": "IOUSBDeviceController::handleSetAddressPreStatusPhase(int)",
+   "pure": true,
+   "kc": "0xfffffff00770ace4",
+   "prelinked": "0xfffffe000cd42ce4"
+  },
+  {
+   "slot": 183,
+   "mangled": null,
+   "name": "IOUSBDeviceController::handleSetAddressPostStatusPhase(int)",
+   "pure": true,
+   "kc": "0xfffffff00770ace4",
+   "prelinked": "0xfffffe000cd42ce4"
+  },
+  {
+   "slot": 184,
+   "mangled": null,
+   "name": "IOUSBDeviceController::getConnectionSpeed()",
+   "pure": true,
+   "kc": "0xfffffff00770ace4",
+   "prelinked": "0xfffffe000cd42ce4"
+  },
+  {
+   "slot": 185,
+   "mangled": null,
+   "name": "IOUSBDeviceController::provideEndpointIDsForConfiguration(OSArray*, unsigned char*)",
+   "pure": true,
+   "kc": "0xfffffff00770ace4",
+   "prelinked": "0xfffffe000cd42ce4"
+  },
+  {
+   "slot": 186,
+   "mangled": null,
+   "name": "IOUSBDeviceController::prepareConfiguration(OSArray*)",
+   "pure": true,
+   "kc": "0xfffffff00770ace4",
+   "prelinked": "0xfffffe000cd42ce4"
+  },
+  {
+   "slot": 187,
+   "mangled": null,
+   "name": "IOUSBDeviceController::activateEndpoint(int, int, int, int, tIOUSBDeviceInterfacePipeProperty)",
+   "pure": true,
+   "kc": "0xfffffff00770ace4",
+   "prelinked": "0xfffffe000cd42ce4"
+  },
+  {
+   "slot": 188,
+   "mangled": null,
+   "name": "IOUSBDeviceController::deactivateEndpoint(int)",
+   "pure": true,
+   "kc": "0xfffffff00770ace4",
+   "prelinked": "0xfffffe000cd42ce4"
+  },
+  {
+   "slot": 189,
+   "mangled": null,
+   "name": "IOUSBDeviceController::createIOBuffer(unsigned int, unsigned long long)",
+   "pure": true,
+   "kc": "0xfffffff00770ace4",
+   "prelinked": "0xfffffe000cd42ce4"
+  },
+  {
+   "slot": 190,
+   "mangled": "__ZN21IOUSBDeviceController15setCurrentLimitEj",
+   "name": "IOUSBDeviceController::setCurrentLimit(unsigned int)",
+   "pure": false,
+   "kc": "0xfffffff005cf2ec4",
+   "prelinked": "0xfffffe000b32aec4"
+  },
+  {
+   "slot": 191,
+   "mangled": "__ZN21IOUSBDeviceController15getCurrentLimitEj",
+   "name": "IOUSBDeviceController::getCurrentLimit(unsigned int)",
+   "pure": false,
+   "kc": "0xfffffff005cf3074",
+   "prelinked": "0xfffffe000b32b074"
+  },
+  {
+   "slot": 192,
+   "mangled": null,
+   "name": "IOUSBDeviceController::isEndpointStalled(int)",
+   "pure": true,
+   "kc": "0xfffffff00770ace4",
+   "prelinked": "0xfffffe000cd42ce4"
+  },
+  {
+   "slot": 193,
+   "mangled": null,
+   "name": "IOUSBDeviceController::resetEndpointDataToggle(int)",
+   "pure": true,
+   "kc": "0xfffffff00770ace4",
+   "prelinked": "0xfffffe000cd42ce4"
+  },
+  {
+   "slot": 194,
+   "mangled": "__ZN21IOUSBDeviceController14handleTestModeEh",
+   "name": "IOUSBDeviceController::handleTestMode(unsigned char)",
+   "pure": false,
+   "kc": "0xfffffff005cf0914",
+   "prelinked": "0xfffffe000b328914"
+  },
+  {
+   "slot": 195,
+   "mangled": "__ZN21IOUSBDeviceController16handleUSBSuspendEv",
+   "name": "IOUSBDeviceController::handleUSBSuspend()",
+   "pure": false,
+   "kc": "0xfffffff005cf44d8",
+   "prelinked": "0xfffffe000b32c4d8"
+  },
+  {
+   "slot": 196,
+   "mangled": "__ZN21IOUSBDeviceController14handleUSBResetEv",
+   "name": "IOUSBDeviceController::handleUSBReset()",
+   "pure": false,
+   "kc": "0xfffffff005cf46d4",
+   "prelinked": "0xfffffe000b32c6d4"
+  },
+  {
+   "slot": 197,
+   "mangled": "__ZN21IOUSBDeviceController15handleUSBResumeEv",
+   "name": "IOUSBDeviceController::handleUSBResume()",
+   "pure": false,
+   "kc": "0xfffffff005cf494c",
+   "prelinked": "0xfffffe000b32c94c"
+  },
+  {
+   "slot": 198,
+   "mangled": null,
+   "name": "IOUSBDeviceController::forceReEnumeration()",
+   "pure": true,
+   "kc": "0xfffffff00770ace4",
+   "prelinked": "0xfffffe000cd42ce4"
+  },
+  {
+   "slot": 199,
+   "mangled": "__ZN21IOUSBDeviceController21forceControllerReinitEv",
+   "name": "IOUSBDeviceController::forceControllerReinit()",
+   "pure": false,
+   "kc": "0xfffffff005cf0d58",
+   "prelinked": "0xfffffe000b328d58"
+  },
+  {
+   "slot": 200,
+   "mangled": "__ZN21IOUSBDeviceController22handleSetConfigurationEj",
+   "name": "IOUSBDeviceController::handleSetConfiguration(unsigned int)",
+   "pure": false,
+   "kc": "0xfffffff005cfa48c",
+   "prelinked": "0xfffffe000b33248c"
+  },
+  {
+   "slot": 201,
+   "mangled": null,
+   "name": "IOUSBDeviceController::doRemoteWakeGated()",
+   "pure": true,
+   "kc": "0xfffffff00770ace4",
+   "prelinked": "0xfffffe000cd42ce4"
+  },
+  {
+   "slot": 202,
+   "mangled": "__ZN21IOUSBDeviceController25doFunctionRemoteWakeGatedEi",
+   "name": "IOUSBDeviceController::doFunctionRemoteWakeGated(int)",
+   "pure": false,
+   "kc": "0xfffffff005cfacc8",
+   "prelinked": "0xfffffe000b332cc8"
+  },
+  {
+   "slot": 203,
+   "mangled": "__ZN21IOUSBDeviceController21handleUSBCableConnectEv",
+   "name": "IOUSBDeviceController::handleUSBCableConnect()",
+   "pure": false,
+   "kc": "0xfffffff005cf4a74",
+   "prelinked": "0xfffffe000b32ca74"
+  },
+  {
+   "slot": 204,
+   "mangled": "__ZN21IOUSBDeviceController24handleUSBCableDisconnectEv",
+   "name": "IOUSBDeviceController::handleUSBCableDisconnect()",
+   "pure": false,
+   "kc": "0xfffffff005cf4658",
+   "prelinked": "0xfffffe000b32c658"
+  },
+  {
+   "slot": 205,
+   "mangled": "__ZN21IOUSBDeviceController23handleUSBSoftDisconnectEv",
+   "name": "IOUSBDeviceController::handleUSBSoftDisconnect()",
+   "pure": false,
+   "kc": "0xfffffff005cf45a4",
+   "prelinked": "0xfffffe000b32c5a4"
+  },
+  {
+   "slot": 206,
+   "mangled": "__ZN21IOUSBDeviceController21getMaxSpeedCapabilityEv",
+   "name": "IOUSBDeviceController::getMaxSpeedCapability()",
+   "pure": false,
+   "kc": "0xfffffff005cf093c",
+   "prelinked": "0xfffffe000b32893c"
+  },
+  {
+   "slot": 207,
+   "mangled": "__ZN21IOUSBDeviceController16getDeviceAddressEv",
+   "name": "IOUSBDeviceController::getDeviceAddress()",
+   "pure": false,
+   "kc": "0xfffffff005cf0ef8",
+   "prelinked": "0xfffffe000b328ef8"
+  },
+  {
+   "slot": 208,
+   "mangled": "__ZN21IOUSBDeviceController18enablePacketFilterEPFvPS_P24_IOUSBDeviceIORequestTag38tAppleUSBDevicePacketFilterRequestTypeiE",
+   "name": "IOUSBDeviceController::enablePacketFilter(void (*)(IOUSBDeviceController*, _IOUSBDeviceIORequestTag*, tAppleUSBDevicePacketFilterRequestType, int))",
+   "pure": false,
+   "kc": "0xfffffff005cf0f00",
+   "prelinked": "0xfffffe000b328f00"
+  },
+  {
+   "slot": 209,
+   "mangled": "__ZN21IOUSBDeviceController19disablePacketFilterEv",
+   "name": "IOUSBDeviceController::disablePacketFilter()",
+   "pure": false,
+   "kc": "0xfffffff005cf0f40",
+   "prelinked": "0xfffffe000b328f40"
+  },
+  {
+   "slot": 210,
+   "mangled": "__ZN21IOUSBDeviceController12filterPacketEP24_IOUSBDeviceIORequestTag38tAppleUSBDevicePacketFilterRequestTypei",
+   "name": "IOUSBDeviceController::filterPacket(_IOUSBDeviceIORequestTag*, tAppleUSBDevicePacketFilterRequestType, int)",
+   "pure": false,
+   "kc": "0xfffffff005cf0f74",
+   "prelinked": "0xfffffe000b328f74"
+  },
+  {
+   "slot": 211,
+   "mangled": "__ZN21IOUSBDeviceController27addDevCapabilityDescriptorsEv",
+   "name": "IOUSBDeviceController::addDevCapabilityDescriptors()",
+   "pure": false,
+   "kc": "0xfffffff005cf0944",
+   "prelinked": "0xfffffe000b328944"
+  },
+  {
+   "slot": 212,
+   "mangled": "__ZN21IOUSBDeviceController17hardwareExceptionEiPKc",
+   "name": "IOUSBDeviceController::hardwareException(int, char const*)",
+   "pure": false,
+   "kc": "0xfffffff005cf0eb8",
+   "prelinked": "0xfffffe000b328eb8"
+  },
+  {
+   "slot": 213,
+   "mangled": "__ZN21IOUSBDeviceController31handleControlRequestStateChangeEN25IOUSBDeviceControlRequest20tControlRequestStateES1_",
+   "name": "IOUSBDeviceController::handleControlRequestStateChange(IOUSBDeviceControlRequest::tControlRequestState, IOUSBDeviceControlRequest::tControlRequestState)",
+   "pure": false,
+   "kc": "0xfffffff005cf0ef4",
+   "prelinked": "0xfffffe000b328ef4"
+  },
+  {
+   "slot": 214,
+   "mangled": "__ZN21IOUSBDeviceController16gotoPoweredStateEv",
+   "name": "IOUSBDeviceController::gotoPoweredState()",
+   "pure": false,
+   "kc": "0xfffffff005cf3260",
+   "prelinked": "0xfffffe000b32b260"
+  },
+  {
+   "slot": 215,
+   "mangled": "__ZN21IOUSBDeviceController16gotoDefaultStateEv",
+   "name": "IOUSBDeviceController::gotoDefaultState()",
+   "pure": false,
+   "kc": "0xfffffff005cf32b0",
+   "prelinked": "0xfffffe000b32b2b0"
+  },
+  {
+   "slot": 216,
+   "mangled": "__ZN21IOUSBDeviceController19gotoConfiguredStateEi",
+   "name": "IOUSBDeviceController::gotoConfiguredState(int)",
+   "pure": false,
+   "kc": "0xfffffff005cf3528",
+   "prelinked": "0xfffffe000b32b528"
+  },
+  {
+   "slot": 217,
+   "mangled": "__ZN21IOUSBDeviceController21gotoDisconnectedStateEv",
+   "name": "IOUSBDeviceController::gotoDisconnectedState()",
+   "pure": false,
+   "kc": "0xfffffff005cf3428",
+   "prelinked": "0xfffffe000b32b428"
+  },
+  {
+   "slot": 218,
+   "mangled": "__ZN21IOUSBDeviceController15gotoDeviceStateENS_12kDeviceStateE",
+   "name": "IOUSBDeviceController::gotoDeviceState(IOUSBDeviceController::kDeviceState)",
+   "pure": false,
+   "kc": "0xfffffff005cf36b4",
+   "prelinked": "0xfffffe000b32b6b4"
+  },
+  {
+   "slot": 219,
+   "mangled": "__ZN21IOUSBDeviceController13startUSBStackEv",
+   "name": "IOUSBDeviceController::startUSBStack()",
+   "pure": false,
+   "kc": "0xfffffff005cf3df8",
+   "prelinked": "0xfffffe000b32bdf8"
+  },
+  {
+   "slot": 220,
+   "mangled": "__ZN21IOUSBDeviceController18setupDriverRequestEv",
+   "name": "IOUSBDeviceController::setupDriverRequest()",
+   "pure": false,
+   "kc": "0xfffffff005cf8190",
+   "prelinked": "0xfffffe000b330190"
+  },
+  {
+   "slot": 221,
+   "mangled": "__ZN21IOUSBDeviceController27createControlRequestTrackerEv",
+   "name": "IOUSBDeviceController::createControlRequestTracker()",
+   "pure": false,
+   "kc": "0xfffffff005cf0ff8",
+   "prelinked": "0xfffffe000b328ff8"
+  },
+  {
+   "slot": 222,
+   "mangled": "__ZN21IOUSBDeviceController22systemPowerDownHandlerEPvjP9IOServiceS0_m",
+   "name": "IOUSBDeviceController::systemPowerDownHandler(void*, unsigned int, IOService*, void*, unsigned long)",
+   "pure": false,
+   "kc": "0xfffffff005cee818",
+   "prelinked": "0xfffffe000b326818"
+  },
+  {
+   "slot": 223,
+   "mangled": "__ZN21IOUSBDeviceController2ioEiP18IOMemoryDescriptoryP21IOUSBDeviceCompletionPyj",
+   "name": "IOUSBDeviceController::io(int, IOMemoryDescriptor*, unsigned long long, IOUSBDeviceCompletion*, unsigned long long*, unsigned int)",
+   "pure": false,
+   "kc": "0xfffffff005cf1008",
+   "prelinked": "0xfffffe000b329008"
+  },
+  {
+   "slot": 224,
+   "mangled": "__ZN21IOUSBDeviceController2ioEiP18IOMemoryDescriptorjP20IOUSBDeviceIsocFrameP25IOUSBDeviceIsocCompletion",
+   "name": "IOUSBDeviceController::io(int, IOMemoryDescriptor*, unsigned int, IOUSBDeviceIsocFrame*, IOUSBDeviceIsocCompletion*)",
+   "pure": false,
+   "kc": "0xfffffff005cf137c",
+   "prelinked": "0xfffffe000b32937c"
+  },
+  {
+   "slot": 225,
+   "mangled": null,
+   "name": "IOUSBDeviceController::ioGated(_IOUSBDeviceIORequestTag*)",
+   "pure": true,
+   "kc": "0xfffffff00770ace4",
+   "prelinked": "0xfffffe000cd42ce4"
+  },
+  {
+   "slot": 226,
+   "mangled": "__ZN21IOUSBDeviceController15allocateRequestEv",
+   "name": "IOUSBDeviceController::allocateRequest()",
+   "pure": false,
+   "kc": "0xfffffff005cf15d4",
+   "prelinked": "0xfffffe000b3295d4"
+  },
+  {
+   "slot": 227,
+   "mangled": "__ZN21IOUSBDeviceController11freeRequestEP24_IOUSBDeviceIORequestTag",
+   "name": "IOUSBDeviceController::freeRequest(_IOUSBDeviceIORequestTag*)",
+   "pure": false,
+   "kc": "0xfffffff005cf1604",
+   "prelinked": "0xfffffe000b329604"
+  },
+  {
+   "slot": 228,
+   "mangled": "__ZN21IOUSBDeviceController13getDMACommandEv",
+   "name": "IOUSBDeviceController::getDMACommand()",
+   "pure": false,
+   "kc": "0xfffffff005cf1610",
+   "prelinked": "0xfffffe000b329610"
+  },
+  {
+   "slot": 229,
+   "mangled": "__ZN21IOUSBDeviceController23setupDeviceSetIsocDelayEv",
+   "name": "IOUSBDeviceController::setupDeviceSetIsocDelay()",
+   "pure": false,
+   "kc": "0xfffffff005cfa174",
+   "prelinked": "0xfffffe000b332174"
+  },
+  {
+   "slot": 230,
+   "mangled": "__ZN21IOUSBDeviceController15updateLPMPolicyEN17IOUSBDeviceFamily25tUSBDeviceConnectionSpeedE13tUSBLinkState",
+   "name": "IOUSBDeviceController::updateLPMPolicy(IOUSBDeviceFamily::tUSBDeviceConnectionSpeed, tUSBLinkState)",
+   "pure": false,
+   "kc": "0xfffffff005cfacbc",
+   "prelinked": "0xfffffe000b332cbc"
+  },
+  {
+   "slot": 231,
+   "mangled": "__ZN21IOUSBDeviceController16getBufferOptionsERj",
+   "name": "IOUSBDeviceController::getBufferOptions(unsigned int&)",
+   "pure": false,
+   "kc": "0xfffffff005cf17f0",
+   "prelinked": "0xfffffe000b3297f0"
+  }
+ ]
+}
