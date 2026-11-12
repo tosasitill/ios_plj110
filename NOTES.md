@@ -6,7 +6,14 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
-## X9 eUICC／eSIM 查询交接（2026-11-12；国行未发现可用内置 eUICC，未尝试启用）
+## X9 eUICC／eSIM 实机当前交接（2026-11-12；ADB 只读确认未枚举内置 eUICC）
+
+- **新采集／范围**：用户连接 ADB 后读取当前 PLJ110／OP5E17L1／`PLJ110_17.0.0.101(CN01)`／CN；shell 可用、`su -c id` 确认 KSU root 可只读。新目录 **`.local/x9/work/euicc-live-20261112-141928/`** 保存各命令原始输出／stderr、`capture.json` 与脱敏 `decoded.json`。采集前后 boot_id 一致，未重启、安装／启动 eSIM 页面、发送 APDU、调用 GPIO／HAL 设置、修改属性／NV／profile／分区；没有构建、CI、测试套件或子代理。
+- **决定性运行状态**：普通 `dumpsys phone` 仅有 PhoneGlobals／IMS 信息，不能拿它当完整 UICC dump；实际入口 **`adb shell dumpsys activity service com.android.phone/.TelephonyDebugService`** 成功取得当前 PhoneFactory 状态（约686KiB）。`:3314–3320` 为 `mHasBuiltInEuicc=false`、`mHasActiveBuiltInEuicc=false`、`mDefaultEuiccCardId=-2`、`mPhoneIdToSlotId=[0, 1]`、**`mUiccSlots: size=2`**；`:3323–3331,3469–3477` 两槽均 `mIsEuicc=false`、`mIsRemovable=true`、EID为空、`mSupportedMepMode=NONE`，两卡为 PRESENT／LOADED。`-2` 是未初始化的默认 eUICC card ID，不写成“HAL不支持”的返回码。`dumpsys isub` 两份当前订阅均 `isEmbedded=0`。
+- **功能／服务／静态配置**：`pm list features` 无 `android.hardware.telephony.euicc`／`.euicc.mep`；当前完整 Binder 服务表无 `euicc`／`IEuicc*`／`IOplusEsim`；`cmd package query-services --brief -a android.service.euicc.EuiccService` 为 **No services found**。`com.android.phone` 确有 EuiccUiDispatcherActivity／EsimSettingsActivity／EsimGpioActivity，未打开它们；VINTF 扫描仅在 system **compatibility_matrix.device.xml** 找到 IOplusEsim 条目，非已注册 vendor manifest／运行 HAL。页面组件和兼容矩阵不能当作真实 eUICC 或 LPA 已存在；`se1/se2` radio／SIM1/SIM2 secure-element 服务名字也不据此解成内置 eSIM。
+- **结论／剩余边界／重放**：新证据比11-11缓存更强：**当前国行系统与 modem 的完整已枚举卡路径没有可用内置 eUICC，不是仅隐藏设置入口；没有已证的改开关即可启用路线。** 仍不能通过这份状态排除主板上另有被固件禁用／未路由的芯片；本 dump 未输出 ATR 原始字节，radio/config native dumps为空、当前过滤日志无匹配，不伪称做了直接 EID/APDU／硬件资格检查。继续追隐藏硬件需当前 Phone APK 的板级 eSIM/GPIO 准入逻辑与主板/BOM 证据，仍不能先盲改 GPIO/NV。离线重放 `python3 -I .local/x9/work/euicc-live-20261112-141928/decode.py`；在线重放用上条 TelephonyDebugService＋`pm list features`／服务查询，并另建新目录。原始含设备/卡信息资料不入git；本节单独提交（`git log --grep='record live X9 UICC and eSIM state'`），无CI run ID／boot结果。
+
+## X9 eUICC／eSIM 初查交接（2026-11-12；离线缓存与区域规格，已由上节实机补齐）
 
 - **范围／当前连接**：用户问 X9 是否有 eUICC 硬件、能否打开 eSIM。本轮仅离线读取既有 Android 采集和官方规格；`adb devices -l` 列表为空，没有新实机采集。未安装应用、修改属性／NV／SIM profile、写分区、flash／reboot、构建或 CI；并发 USB 未提交源码不动。本节单独提交，提交定位 `git log --grep='record X9 eUICC capability assessment'`。
 - **机型／地区（观察）**：`.local/x9/android-cap-20261111/getprop.txt:2520,2931,2936,3279` 为 `PLJ110_17.0.0.101(CN01)`／`OP5E17L1`／`PLJ110`／`CN`。OPPO 官方国行 `https://www.oppo.com/cn/smartphones/series-find-x/find-x9/specs/` 同样标 PLJ110，SIM 类型为 Nano-SIM／Nano-USIM；海外 `https://www.oppo.com/en/smartphones/series-find-x/find-x9/specs/` 标 **CPH2797** 且明确 `eSIM Supported`。两页 HTTP200，不把海外版能力套给 PLJ110；国行页面未列 eSIM 本身不是主板缺芯片证明。
