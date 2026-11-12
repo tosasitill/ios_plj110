@@ -8265,12 +8265,10 @@ x9_jobs_write(proc_t p, user_addr_t path, user_addr_t data, const char *src,
  * a test that wants the full sheng cycle passes them through
  * x9_disable_jobs= explicitly. Boot-arg gated, non-fatal. */
 static int
-sweet_x9_seed_disabled_jobs(proc_t p, user_addr_t scratch, user_addr_t end)
+sweet_x9_seed_disabled_domain(proc_t p, user_addr_t scratch, user_addr_t end,
+    const char *target, const char *backup, const char *temp)
 {
 	static const char directory[] = "/private/var/db/com.apple.xpc.launchd";
-	static const char target[] = "/private/var/db/com.apple.xpc.launchd/disabled.plist";
-	static const char backup[] = "/private/var/db/com.apple.xpc.launchd/disabled.x9-orig.plist";
-	static const char temp[] = "/private/var/db/com.apple.xpc.launchd/disabled.x9-temp.plist";
 	static const char marker[] = "/private/var/db/com.apple.xpc.launchd/disabled.migrated";
 	static const char header[] =
 	    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
@@ -8280,48 +8278,54 @@ sweet_x9_seed_disabled_jobs(proc_t p, user_addr_t scratch, user_addr_t end)
 	static const char lite[] =
 	    "com.apple.locationd,com.apple.photoanalysisd,com.apple.mediaanalysisd,com.apple.coreduetd,"
 	    "com.apple.mobile.obliteration,com.apple.assistantd,com.apple.sirittsd";
+	/* fairplayd.H2 exits at once without FairPlayIOKit while its Mach services
+	 * stay registered, so AirFair/lockdownd callers wait forever (Settings >
+	 * Storage watchdog). Disabled by default; x9_fairplay=1 keeps it. */
+	static const char fairplay[] = "com.apple.fairplayd.H2";
 	static char base[4096], body[10240], list[512], jobs[512];
 	char label[128], tag[160];
 	extern boolean_t sweet_x9_ufs_root_writable(void);
-	int lite_flag, error = 0, added = 0, kept = 0, have_target = 0;
+	int lite_flag, fp_flag, error = 0, added = 0, kept = 0, have_target = 0;
 	size_t base_len = 0, bn, kn = 0, keyoff;
 	int32_t rv = 0;
 	user_addr_t t, b, tp, mk, d, data;
 
 	lite_flag = sweet_x9_arg("x9_lite", 0) == 1;
+	fp_flag = sweet_x9_arg("x9_fairplay", 0) != 1;
 	jobs[0] = '\0';
 	if (PE_parse_boot_argn("x9_disable_jobs", jobs, sizeof(jobs)) == FALSE) {
 		jobs[0] = '\0';
 	}
 	jobs[sizeof(jobs) - 1] = '\0';
-	if (jobs[0] == 0 && !lite_flag) {
+	if (jobs[0] == 0 && !lite_flag && !fp_flag) {
 		return 0;
 	}
 	if (!sweet_x9_ufs_root_writable()) {
 		return EROFS;
 	}
 	if (!proc_is64bit(p) || scratch > end ||
-	    sizeof(target) + sizeof(backup) + sizeof(temp) + sizeof(marker) +
+	    strlen(target) + strlen(backup) + strlen(temp) + 3 + sizeof(marker) +
 	    sizeof(directory) + 1024 > end - scratch) {
 		return E2BIG;
 	}
 	t = scratch;
-	b = t + sizeof(target);
-	tp = b + sizeof(backup);
-	mk = tp + sizeof(temp);
+	b = t + strlen(target) + 1;
+	tp = b + strlen(backup) + 1;
+	mk = tp + strlen(temp) + 1;
 	d = mk + sizeof(marker);
 	data = d + sizeof(directory);
-	error = copyout(target, t, sizeof(target));
-	if (error == 0) error = copyout(backup, b, sizeof(backup));
-	if (error == 0) error = copyout(temp, tp, sizeof(temp));
+	error = copyout(target, t, strlen(target) + 1);
+	if (error == 0) error = copyout(backup, b, strlen(backup) + 1);
+	if (error == 0) error = copyout(temp, tp, strlen(temp) + 1);
 	if (error == 0) error = copyout(marker, mk, sizeof(marker));
 	if (error == 0) error = copyout(directory, d, sizeof(directory));
 	if (error) {
 		return error;
 	}
 	list[0] = '\0';
-	for (int s = 0; s < 2; s++) {
-		const char *c = s == 0 ? (lite_flag ? lite : NULL) : jobs;
+	for (int s = 0; s < 3; s++) {
+		const char *c = s == 0 ? (lite_flag ? lite : NULL) :
+		    s == 1 ? (fp_flag ? fairplay : NULL) : jobs;
 
 		if (c == NULL) {
 			continue;
@@ -8374,8 +8378,8 @@ sweet_x9_seed_disabled_jobs(proc_t p, user_addr_t scratch, user_addr_t end)
 			c = e + 1;
 		}
 		if (have_target && present == total) {
-			printf("X9 JOBS: already disable=%d lite=%d size=%d\n",
-			    total, lite_flag, (int)base_len);
+			printf("X9 JOBS: %s already disable=%d lite=%d size=%d\n",
+			    target, total, lite_flag, (int)base_len);
 			return 0;
 		}
 	}
@@ -8390,7 +8394,7 @@ sweet_x9_seed_disabled_jobs(proc_t p, user_addr_t scratch, user_addr_t end)
 			return berr;
 		} else if (have_target) {
 			error = x9_jobs_write(p, b, data, base, base_len, 0644);
-			printf("X9 JOBS: original kept as disabled.x9-orig.plist errno=%d\n", error);
+			printf("X9 JOBS: original kept as %s errno=%d\n", backup, error);
 			if (error) {
 				return error;
 			}
@@ -8468,7 +8472,7 @@ sweet_x9_seed_disabled_jobs(proc_t p, user_addr_t scratch, user_addr_t end)
 		struct unlink_args u = { .path = tp };
 
 		(void)unlink(p, &u, &rv);
-		printf("X9 JOBS: disabled.plist not replaced errno=%d\n", error);
+		printf("X9 JOBS: %s not replaced errno=%d\n", target, error);
 		return error;
 	}
 	{
@@ -8500,11 +8504,27 @@ sweet_x9_seed_disabled_jobs(proc_t p, user_addr_t scratch, user_addr_t end)
 		} else {
 			bad++;
 		}
-		printf("X9 JOBS: disable=%d lite=%d added=%d kept=%d size=%d errno=%d\n",
-		    added + kept, lite_flag, added, kept, (int)bn, rerr);
+		printf("X9 JOBS: %s disable=%d lite=%d added=%d kept=%d size=%d errno=%d\n",
+		    target, added + kept, lite_flag, added, kept, (int)bn, rerr);
 		printf("X9 JOBS: readback mismatches=%d\n", bad);
 	}
 	return 0;
+}
+
+/* Mobile-user daemons such as fairplayd.H2 run in launchd's user/501 domain,
+ * whose overrides live in disabled.501.plist; write the same labels to both. */
+static int
+sweet_x9_seed_disabled_jobs(proc_t p, user_addr_t scratch, user_addr_t end)
+{
+	int e1 = sweet_x9_seed_disabled_domain(p, scratch, end,
+	    "/private/var/db/com.apple.xpc.launchd/disabled.plist",
+	    "/private/var/db/com.apple.xpc.launchd/disabled.x9-orig.plist",
+	    "/private/var/db/com.apple.xpc.launchd/disabled.x9-temp.plist");
+	int e2 = sweet_x9_seed_disabled_domain(p, scratch, end,
+	    "/private/var/db/com.apple.xpc.launchd/disabled.501.plist",
+	    "/private/var/db/com.apple.xpc.launchd/disabled.501.x9-orig.plist",
+	    "/private/var/db/com.apple.xpc.launchd/disabled.501.x9-temp.plist");
+	return e1 ? e1 : e2;
 }
 
 /*
