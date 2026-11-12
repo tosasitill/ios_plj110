@@ -6,6 +6,17 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 243 截图／相册失败分析（2026-11-12）：CSG 创建失败，非已证实的照片丢失
+
+- **范围／证据**：只读 `~/243.txt`，捕获约274–670s，缺开机及早期槽位分配；调用的插件路径为278。原始副本与带行号摘录保存 `.local/x9/work/243-photo-analysis/{243.original.txt,evidence.txt}`，不入git。本轮不构建／不访问设备／不改图形代码。
+- **截图直接失败链（观察）**：ScreenshotServicesService在 **380.301 / 580.050 / 584.853s** 均 `X9 PANVK CALL: op=7 ... IOKit=0xe00002be` → factory `device=nil` → **380.310 / 580.053 / 584.857s** SIGSEGV，三次均 `pc=0 far=0`。因此截图服务在Metal初始化阶段就崩溃，不是已生成图片后保存相册失败。
+- **相册直接失败链（观察）**：MobileSlideShow(pid509) **327.282s** 同样op7/0xe00002be，**327.284s** factory `device=nil`。相册本身也没有成功初始化Metal设备，能解释显示异常；不能据此认定图库数据库是空的或原有照片被删。
+- **根因解释**：ABI `x9/metal/General/X9RenderABI.h` 定义 **op7=CreateGroup**；0xe00002be=`kIOReturnNoResources`。**369.877s运行日志明确** `no CSG slot for a new group (steals=0 steal_fail=0 x9cs=0)`；`SweetX9RenderEngine.inc:render_create_group` 在拿不到槽时返回同错。当前8槽分配策略、禁用槽复用是确认的阻塞点；捕获内37次op7同错(33次AegirPoster＋1次相册＋3次截图)。该段有6次正常STOP/TERMINATE ACK、没有unresolved teardown；**不能仅凭这份晚段日志断言是哪一进程泄漏了槽**。
+- **第二个图形故障（观察／未定分支）**：同时有517次IOSurface创建 `0xe00002bd`(`kIOReturnNoMemory`)，涉及backboardd/WebKit/SpringBoard等。源码有全局 **1536MiB wired预算**，超过预算和实际内存分配失败都回该错；日志没有ledger值，不能定为物理RAM耗尽或预算耗尽。此错与CSG no-resources分开处理，开x9cs不保证同时消除它。
+- **图库证据边界**：捕获无assetsd/photolibraryd/tccd/DCIM记录，不支持图库损坏、权限拒绝或磁盘满的结论。截图没生成可解释“没有新截图”；若指原有照片也不见，需独立只读核对DCIM、Photos.sqlite及assetsd日志。
+- **下一步（尚未执行）**：以当前能启动的278基线单变量启用已有 `x9cs=1`(先处理603B/607B启动参数上限，不盲追加)；先验证slot steal/rebind、两类factory不再nil、截图服务不崩，再确认截图真实落盘并在相册可见。若仍有IOSurface NoMemory，加最小预算/实际分配首错观测后再决定修复；不清图库/TCC或盲改内存上限。修复尚未构建、未清基线上机验收。
+- **复查命令**：`rg -n 'MobileSlideShow|ScreenshotServicesService|CRASH ScreenshotServic|X9 RENDER SLOT:|X9 PANVK CALL:' ~/243.txt`。本节为分析交接，提交信息见 `git log --grep='243 screenshot'`。
+
 ## 信号检查 + SIM2 绑定/CEUS（2026-11-12；x9-cell-sim2bind 已构建，未启动）
 
 - **用户(242后)**：广电卡(SIM1)没信号格，移动卡(SIM2)只有一格。
