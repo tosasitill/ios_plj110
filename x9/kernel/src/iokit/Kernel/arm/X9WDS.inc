@@ -701,6 +701,15 @@ static void x9w_dirty(x9w_bearer &b,uint64_t serial,unsigned close_mask=0){
  if(b.active&&!x9w_sync_route(b,(unsigned)(&b-x9w_bearers)+1)){b.abandoned=true;x9w_disconnect(b,(unsigned)(&b-x9w_bearers)+1);}
  b.next=0;
 }
+// 236: IFUP publishes fe80::IID; after the RA, EIF5/MOD4203/GET report
+// prefix::IID for the same interface (SLAAC). The host forms its global
+// address from the RA itself, so this is not an address change. Treating it
+// as one closed v6 admission and sent WDS22, and CommCenter stopped IPv6.
+static bool x9w_v6_slaac(const x9wr_family &published,const x9wr_family &now){
+ const uint8_t *o=published.address,*n=now.address;
+ return published.address_present&&now.address_present&&o[0]==0xfe&&(o[1]&0xc0)==0x80&&
+  !(n[0]==0xfe&&(n[1]&0xc0)==0x80)&&!memcmp(o+8,n+8,8);
+}
 static bool x9w_family_equal(const x9wr_family &a,const x9wr_family &b,unsigned bytes,bool ignore_mtu=false){
  if(a.address_present!=b.address_present)return false;
  if(!a.address_present)return true;
@@ -727,6 +736,18 @@ static void x9w_refresh(x9w_bearer &b,unsigned mux){
  if(b.query_serial!=b.change_serial){b.next=0;return;}
  const x9w_interface &in=x9w_interfaces[b.sim_slot][b.channel];x9wr_settings runtime={};
  if(in.valid&&in.cmd==0)x9wr_match_settings(b.get_result,in.facts,b.query,runtime);
+ if(runtime.matched||!b.runtime.v4.address_present){ // unmatched: only a v6-only call may keep its old facts
+  const x9wr_family &now=runtime.v6.address_present?runtime.v6:b.get_result.v6;
+  if(x9w_v6_slaac(b.runtime.v6,now)){
+   x9wr_family keep=b.runtime.v6;
+   if(now.mtu_present&&now.mtu>=1280&&now.mtu<keep.mtu)keep.mtu=now.mtu;
+   // Published address and DNS stay as the host has them (v4 DNS carries resolution).
+   if(!runtime.matched)runtime=b.runtime;
+   runtime.v6=keep;
+   static unsigned slaac_logs;if(slaac_logs<8){slaac_logs++;
+    printf("X9 WDS: mux %u v6 fe80::IID -> global prefix (same IID, SLAAC); published v6 kept, no host reconfigure\n",mux);}
+  }
+ }
  unsigned changed=0,mtu_only=0;
  if(!x9w_family_equal(b.runtime.v4,runtime.v4,4,true))changed|=1;
  else if(!x9w_family_equal(b.runtime.v4,runtime.v4,4))mtu_only|=1;
@@ -953,8 +974,8 @@ static bool x9w_interface_event(const uint8_t *p,unsigned n,unsigned sim){
     unsigned mask=0;
     if(in.facts.v4.address_present!=b.runtime.v4.address_present||memcmp(in.facts.v4.address,b.runtime.v4.address,4)||
        (in.facts.v4.mtu&&in.facts.v4.mtu<b.runtime.v4.mtu))mask|=1;
-    if(in.facts.v6.address_present!=b.runtime.v6.address_present||memcmp(in.facts.v6.address,b.runtime.v6.address,16)||
-       (in.facts.v6.mtu&&in.facts.v6.mtu<b.runtime.v6.mtu))mask|=2;
+    if(((in.facts.v6.address_present!=b.runtime.v6.address_present||memcmp(in.facts.v6.address,b.runtime.v6.address,16))&&
+        !x9w_v6_slaac(b.runtime.v6,in.facts.v6))||(in.facts.v6.mtu&&in.facts.v6.mtu<1280))mask|=2;
     x9w_dirty(b,in.serial,mask);continue;
    }
    if(cmd!=0){b.md_down=true;if(x9w_netagent_req)x9w_ifst(sim,trans,1,0);} // MD ifdown precedes its logical CID removal
@@ -998,7 +1019,7 @@ static bool x9w_modified_event(const uint8_t *p,unsigned n,unsigned sim){
   in.serial=serial;in.facts.serial=serial;in.facts.v4=v4;in.facts.v6=v6;
   unsigned mask=0;
   if(v4.address_present!=b.runtime.v4.address_present||memcmp(v4.address,b.runtime.v4.address,4))mask|=1;
-  if(v6.address_present!=b.runtime.v6.address_present||memcmp(v6.address,b.runtime.v6.address,16))mask|=2;
+  if((v6.address_present!=b.runtime.v6.address_present||memcmp(v6.address,b.runtime.v6.address,16))&&!x9w_v6_slaac(b.runtime.v6,v6))mask|=2;
   x9w_dirty(b,serial,mask);
   printf("X9 WDS: DATA_MOD4203 SIM%u call %u ccmni%u scoped facts; GET scheduled, not yet published\n",sim+1,cid,channel);
  }

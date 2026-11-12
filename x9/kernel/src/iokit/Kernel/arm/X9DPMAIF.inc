@@ -72,7 +72,7 @@ struct x9d_state {
     x9d_dma drb, txpool, pit[2], bat[2], pool[2][X9D_POOL_CHUNKS];
     x9d_dma drbq[3]; // TXQ1..3: started like dpmaif_txqs_start (DPMAIF_TXQ_NUM 4), never fed
     bool posted[2][X9D_BAT];
-    uint64_t lro_split, status_errors; unsigned status_error_reports;
+    uint64_t lro_split, status_errors, lro_l4_fixed; unsigned status_error_reports;
     bool used_channel[20]; // bound/retiring routes only; released when retirement finishes
     unsigned bat_wr[2], tx_wr, tx_rd, head, count;
     unsigned bat_hint, bat_target, bat_credit[2], bat_backing[2], bat_owned[2];
@@ -738,15 +738,38 @@ static void x9d_rx_deliver(unsigned q) {
             before = ((unsigned)ip[4] << 8 | ip[5]) + 40;
             if (before != r.bytes) { ip[4] = (uint8_t)((r.bytes - 40) >> 8); ip[5] = (uint8_t)(r.bytes - 40); }
         }
+        // 236: the rewritten FIRST member reported l4 BAD every time (later members ok):
+        // HW also folded the aggregate into its TCP/UDP checksum. Vendor hands the merged
+        // skb up as HW-verified; LRO only merges checksum-valid segments, so recomputing
+        // the L4 checksum of this member is the per-packet equivalent. Others untouched.
+        const char *l4before = nullptr;
+        if (before && before != r.bytes && x9d_ip(ip, r.bytes) &&
+            !(v == 4 && (((unsigned)ip[6] << 8 | ip[7]) & 0x3fff))) {
+            unsigned hdr = v == 4 ? (ip[0] & 15) * 4u : 40u, proto = ip[v == 4 ? 9 : 6], len = r.bytes - hdr;
+            uint8_t *l4 = ip + hdr; unsigned off = proto == 6 ? 16u : proto == 17 ? 6u : 0u;
+            if (off && len >= (proto == 6 ? 20u : 8u) && !(proto == 17 && v == 4 && !l4[6] && !l4[7])) {
+                l4before = x9d_l4_sanity(ip, r.bytes);
+                if (proto == 17) { l4[4] = (uint8_t)(len >> 8); l4[5] = (uint8_t)len; }
+                l4[off] = l4[off + 1] = 0;
+                unsigned sum = x9d_sum(l4, len) + x9d_sum(ip + (v == 4 ? 12 : 8), v == 4 ? 8 : 32) + proto + len;
+                while (sum >> 16) sum = (sum & 65535u) + (sum >> 16);
+                sum = ~sum & 65535u; if (proto == 17 && !sum) sum = 65535u;
+                l4[off] = (uint8_t)(sum >> 8); l4[off + 1] = (uint8_t)sum;
+                x9d.lro_l4_fixed++;
+            }
+        }
         static unsigned shown;
         if (shown < 8) { shown++;
-            printf("X9 DPMAIF: RX LRO member v%u bytes %u header-len %u -> %u l4 %s\n", v, r.bytes, before, r.bytes, x9d_l4_sanity(ip, r.bytes)); }
+            printf("X9 DPMAIF: RX LRO member v%u bytes %u header-len %u -> %u l4 %s%s%s\n", v, r.bytes, before, r.bytes,
+                l4before ? l4before : "", l4before ? " -> recomputed " : "", x9d_l4_sanity(ip, r.bytes)); }
     }
         x9d.rx_wire_bytes += r.bytes; // completed copies, including drops; NOT successful delivery
         unsigned mux = 0; int (*receiver)(uint32_t, const uint8_t *, uint32_t, uint32_t, uint64_t);
         IOLockLock(x9d.lock);
         for (unsigned i = 0; i < CBP_INTERFACES; i++) if (x9d.route[i].bound && x9d.route[i].channel == r.channel &&
-            i + 1 == r.mux && x9d.route[i].epoch == r.epoch && x9d.route[i].lifetime == r.lifetime && r.bytes <= x9d_cap(x9d.route[i],r.ip[0]>>4) &&
+            // RX is bounded by x9d_ip (<= X9D_TX_SIZE), not the route TX cap: an RA MTU
+            // (1450) narrows what we send, while the network still delivers 1500 B.
+            i + 1 == r.mux && x9d.route[i].epoch == r.epoch && x9d.route[i].lifetime == r.lifetime &&
             (x9d.route[i].families & cbp_family_bit(r.ip[0] >> 4))) mux = i + 1;
         receiver = x9d.receiver; IOLockUnlock(x9d.lock);
         bool valid = !r.drop && mux && receiver && x9d_ip(r.ip, r.bytes);
@@ -1036,7 +1059,7 @@ static void x9d_report(unsigned second) {
     printf("X9 DPMAIF: %u s mode %u ready %u quarantined %u published %u TX submitted %llu completed %llu RX delivered %llu dropped %llu queued %u rejected %llu flow %llu phase %s\n",
         second, x9d.mode, x9d.ready, x9d.failed, x9d.published, x9d.tx_packets, x9d.tx_done, x9d.rx_packets, x9d.rx_dropped, queued, rejected, x9d.flow_events,
         x9d.phase ? x9d.phase : "prepare");
-    printf("X9 DPMAIF: RX LRO members split %llu, L2 status errors %llu (logged/acked, not fatal)\n", x9d.lro_split, x9d.status_errors);
+    printf("X9 DPMAIF: RX LRO members split %llu, first-member L4 recomputed %llu, L2 status errors %llu (logged/acked, not fatal)\n", x9d.lro_split, x9d.lro_l4_fixed, x9d.status_errors);
     uint64_t counts[9]; for (unsigned i = 0; i < 9; i++) counts[i] = __atomic_load_n(&x9d.tx_admit[i], __ATOMIC_RELAXED);
     printf("X9 CELL TX: mailbox accept %llu argument %llu bad-ip %llu offline %llu unbound %llu epoch %llu family %llu mtu %llu full %llu; completion-not-air\n",
         counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], counts[6], counts[7], counts[8]);

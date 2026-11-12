@@ -167,7 +167,10 @@ static int bb_pdp_receive_counted(uint32_t mux, const uint8_t *ip, uint32_t n,
   if (!usable || !(ifnet_flags(ifp) & IFF_UP)) {
     bb_pdp_rx_probe(p,mux,n,version,epoch,2,ENETDOWN);return bb_pdp_receive_error(p, ENETDOWN);
   }
-  if (n > ifnet_mtu(ifp)) {
+  // 236: 1500 B downlink was refused (EMSGSIZE) because CommCenter set if_mtu
+  // 1450 from the RA. MTU bounds what we SEND; XNU/Linux/ccmni accept larger
+  // inbound packets. Bound RX by the receive buffer (MRU) only.
+  if (n > BB_PDP_MAX_MTU) {
     bb_pdp_rx_probe(p,mux,n,version,epoch,3,EMSGSIZE);return bb_pdp_receive_error(p, EMSGSIZE);
   }
   mbuf_t m = nullptr;
