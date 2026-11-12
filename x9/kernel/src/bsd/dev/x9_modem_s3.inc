@@ -1101,6 +1101,13 @@ static const struct x9at_step x9at_script[]={
   * index = ERAT rat, [3]=0x84000). Sent in CFUN=4. NV writes stay in our RAM
   * overlay, so Android's setting is untouched. x9_md_lte=0 skips it. */
  {"AT+ERAT=3\r",0,10000},
+ /* 241: both SIMs leave NR SA at their first RRC release (NR idle -> E-UTRA
+  * idle in 56 ms) and never return; Android enables IMS (AT+EIMSCFG=3,3,0,0,1,1)
+  * and registers IMS over NR, we have no IMS. Hypothesis: voice-centric UE
+  * without IMS voice in 5GS disables N1 mode (TS 24.501). Set 27.007 UE usage
+  * setting to data centric while still in CFUN=4 (this port = SIM1; SIM2 keeps
+  * the default as a control). x9_md_ceus=0 skips the set; the reads stay. */
+ {"AT+CEUS?\r",0,5000},{"AT+CEUS=1\r",0,5000},{"AT+CEUS?\r",0,5000},{"AT+EIMSCFG?\r",0,5000},
  {"AT+ESIMS?\r",1000,5000},{"AT+CPIN?\r",300,10000},
  {"AT+EUSIM?\r",300,5000},{"AT+CREG=2\r",0,5000},{"AT+CEREG=2\r",0,5000},{"AT+C5GREG=2\r",0,5000},
  {"AT+CFUN=1\r",500,60000},{"AT+CPIN?\r",5000,10000},{"AT+CFUN?\r",0,5000},{"AT+COPS?\r",5000,10000},{"AT+CREG?\r",0,5000},
@@ -1110,8 +1117,20 @@ static const struct x9at_step x9at_script[]={
 /* PLJ110 libmtk-ril bootupSetRadioPower (ELF 0x397020) enables the
  * per-SIM radio mask with EFUN, not CFUN. Two enabled slots -> mask 3,
  * independent of the major-SIM remapping. Keep the single-slot path. */
+/* Steps found by command, not by index (241 inserted the CEUS steps). */
+static int x9at_is_flight(unsigned idx){return !strcmp(x9at_script[idx].cmd,"AT+CFUN=4\r");}
+static int x9at_is_radio_on(unsigned idx){return !strcmp(x9at_script[idx].cmd,"AT+CFUN=1\r");}
+static void x9at_print_reply(const char *cmd,int ok){
+ char flat[160];unsigned n=0;
+ for(const char *p=x9at_buf;*p&&n+1<sizeof(flat);p++){
+  char c=*p;if(c=='\r')continue;if(c=='\n'){if(n&&flat[n-1]!='|')flat[n++]='|';continue;}
+  flat[n++]=(c<32||c>126)?'.':c;
+ }
+ while(n&&flat[n-1]=='|')n--;flat[n]=0;
+ printf("X9 MODEM: usage-setting %.16s -> %s \"%s\"\n",cmd,ok?"OK":"ERROR/overflow",flat);
+}
 static const char *x9at_step_command(unsigned idx){
- return idx==10&&x9_md_sim_count()==2?"AT+EFUN=3\r":x9at_script[idx].cmd;
+ return x9at_is_radio_on(idx)&&x9_md_sim_count()==2?"AT+EFUN=3\r":x9at_script[idx].cmd;
 }
 static void x9at_engine(unsigned ms){
  static unsigned idx,sent_ms,free_ms,started;
@@ -1126,11 +1145,12 @@ static void x9at_engine(unsigned ms){
    const char *cmd=x9at_step_command(idx);
    int ok=x9at_done>0&&!x9at_overflow;
    X9MD_LOG("X9 MODEM: AT step %u '%.20s' -> %s after %u ms\n",idx,cmd,ok?"OK":"ERROR/overflow",ms-sent_ms);
-   if(idx==2||idx==10){
+   if(!strncmp(cmd,"AT+CEUS",7)||!strncmp(cmd,"AT+EIMSCFG",10))x9at_print_reply(cmd,ok);
+   if(x9at_is_flight(idx)||x9at_is_radio_on(idx)){
     if(!ok)radio_failed=1;
-    else if(idx==10)radio_ready=1;
+    else if(x9at_is_radio_on(idx))radio_ready=1;
     printf("X9 MODEM: SIM radio %s slots %u final %s; bridge-ready %u\n",
-     idx==2?"flight":"enable",x9_md_sim_count(),ok?"OK":"ERROR/overflow",radio_ready);
+     x9at_is_flight(idx)?"flight":"enable",x9_md_sim_count(),ok?"OK":"ERROR/overflow",radio_ready);
    }
    if(!strncmp(x9at_script[idx].cmd,"AT+ERAT=",8))
     printf("X9 MODEM: LTE-only AT+ERAT=3 -> %s after %u ms\n",x9at_done>0?"OK":"ERROR",ms-sent_ms);
@@ -1147,6 +1167,8 @@ static void x9at_engine(unsigned ms){
   return;
  }
  if(ms-free_ms<x9at_script[idx].wait_ms+200)return;
+ if(!strcmp(x9at_script[idx].cmd,"AT+CEUS=1\r")&&!sweet_x9_arg("x9_md_ceus",1)){
+  printf("X9 MODEM: x9_md_ceus=0, UE usage setting left as the MD default\n");idx++;free_ms=ms;return;}
  if(!strncmp(x9at_script[idx].cmd,"AT+ERAT=",8)&&!sweet_x9_arg("x9_md_lte",1)){
   printf("X9 MODEM: x9_md_lte=0, RAT left as the MD default\n");idx++;free_ms=ms;return;}
  x9at_reset();x9at_pending=1;sent_ms=ms;

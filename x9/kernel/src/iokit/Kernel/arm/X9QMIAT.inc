@@ -284,7 +284,14 @@ static void x9q_nas(x9q_job &j){
   * whenever they change (stat values / CGATT / COPS AcT only, no identities). */
  {static int last[2][5]={{-9,-9,-9,-9,-9},{-9,-9,-9,-9,-9}};int now[5]={j.reg[0],j.reg[1],j.reg[2],j.attached,j.act};
   if(memcmp(last[j.sim_slot],now,sizeof(now))){memcpy(last[j.sim_slot],now,sizeof(now));
-   printf("X9 QMI AT: NAS SIM%u registration CREG %d CEREG %d C5GREG %d CGATT %d COPS-AcT %d\n",j.sim_slot+1,now[0],now[1],now[2],now[3],now[4]);}}
+   printf("X9 QMI AT: NAS SIM%u registration CREG %d CEREG %d C5GREG %d CGATT %d COPS-AcT %d\n",j.sim_slot+1,now[0],now[1],now[2],now[3],now[4]);
+   /* 240: a foreground read (GetCellInfo) saw NR->LTE at 39.565 but the
+    * SysInfo/DSD indications only follow the 10 s background cycle, so
+    * CommCenter kept NR until 49.47 and demoted/redialed at 53 s. Pull the
+    * next background cycle of every client on this SIM forward. */
+   unsigned pulled=0;
+   for(x9q_client &c:x9q_clients)if(c.sim_slot==j.sim_slot&&(c.serving||c.system||c.dsd_system)&&c.next){c.next=0;pulled++;}
+   static unsigned pull_logs;if(pulled&&pull_logs<16){pull_logs++;printf("X9 QMI AT: NAS SIM%u registration change -> %u client(s) indicate now\n",j.sim_slot+1,pulled);}}}
  if(j.reg[0]<0&&j.reg[1]<0&&j.reg[2]<0){x9q_error(j,X9Q_NOT_READY);return;}
  int best=x9q_registered(j.reg[2])?j.reg[2]:x9q_registered(j.reg[1])?j.reg[1]:j.reg[0]>=0?j.reg[0]:j.reg[1];
  uint8_t radio=x9q_radio(j.act);
@@ -474,7 +481,7 @@ static void x9q_siginfo(x9q_job &j,const char *r){
  * be told apart from an MD-internal netif<->session routing failure.
  * Raw text is printed in bounded chunks; nothing is parsed or acted on. */
 static const char *const x9ctx_cmds[]={"AT+CGACT?\r","AT+CGDCONT?\r","AT+CGPADDR\r","AT+CGCONTRDP\r",
- "AT+C5GQOSRDP\r","AT+CGEQOSRDP\r","AT+CGTFTRDP\r","AT+CSCON?\r"};
+ "AT+C5GQOSRDP\r","AT+CGEQOSRDP\r","AT+CGTFTRDP\r","AT+CSCON?\r","AT+CEUS?\r","AT+EIMSCFG?\r"};
 #define X9CTX_STAGE 80u
 #define X9CTX_COUNT (sizeof(x9ctx_cmds)/sizeof(x9ctx_cmds[0]))
 static void x9ctx_result(x9q_job &j,const char *r,int result){
