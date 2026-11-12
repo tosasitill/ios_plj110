@@ -12,9 +12,13 @@
 
 Every input is under the repository; outputs: x9/out/<name>-kernel (native kernel),
 x9/out/<name>-prelink (prelinked kernel, logs), x9/out/<name> (boot.img).
-XnuPrelink places __PRELINK_INFO 4K-aligned right after __LINKEDIT; XNU's
-16K-page arm_vm_init and the shim validator need 16K, so it is moved to the
-next free 16K slot (its XML holds no self-references). No device operations.
+XnuPrelink places __PRELINK_INFO 4K-aligned right after __LINKEDIT. It is moved
+above every other segment, 16K-aligned (its XML holds no self-references):
+XNU's 16K-page arm_vm_init and the shim validator need the alignment, and for a
+non-fileset kernel arm_vm_init sets vm_kernel_slid_top = vm_prelink_einfo, so
+__PRELINK_INFO must end above all kext segments or ml_static_slide() returns 0
+for them and every kext start fails "pointer is outside of kext range"
+(prelink5, 2026-11-12). No device operations.
 """
 import json
 import os
@@ -48,13 +52,10 @@ def align_prelink_info(path):
     d = bytearray(path.read_bytes())
     segs = segments(d)
     name, off, va, vs = next(s for s in segs if s[0] == '__PRELINK_INFO')
-    if va % PAGE == 0:
+    top = max(ova + ovs for other, _, ova, ovs in segs if other != name and ovs)
+    new = (top + PAGE - 1) & ~(PAGE - 1)
+    if va == new:
         return va
-    new = (va + PAGE - 1) & ~(PAGE - 1)
-    size = (vs + PAGE - 1) & ~(PAGE - 1)
-    for other, _, ova, ovs in segs:
-        if other != name and ovs and new < ova + ovs and ova < new + size:
-            sys.exit(f'cannot move __PRELINK_INFO to {new:#x}: collides with {other}')
     nsects, = struct.unpack_from('<I', d, off + 64)
     struct.pack_into('<Q', d, off + 24, new)
     for i in range(nsects):
