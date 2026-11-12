@@ -138,6 +138,7 @@ def build_installer(root, install, flags, run):
         'CFBundleSupportedPlatforms': ['iPhoneOS'], 'MinimumOSVersion': '16.0', 'DTPlatformName': 'iphoneos',
         'LSRequiresIPhoneOS': True, 'UIDeviceFamily': [1], 'UIRequiredDeviceCapabilities': ['arm64'],
         'UILaunchScreen': {}, 'UISupportedInterfaceOrientations': ['UIInterfaceOrientationPortrait'],
+        'NSAppTransportSecurity': {'NSAllowsArbitraryLoads': True},  # IPA links are often plain http
         'UIFileSharingEnabled': True, 'LSSupportsOpeningDocumentsInPlace': False,
         'CFBundleIcons': {'CFBundlePrimaryIcon': {'CFBundleIconFiles': ['AppIcon60x60'], 'CFBundleIconName': 'AppIcon'}},
         'CFBundleDocumentTypes': [{'CFBundleTypeName': 'iOS App', 'CFBundleTypeRole': 'Viewer',

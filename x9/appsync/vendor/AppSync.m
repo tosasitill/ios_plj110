@@ -84,9 +84,21 @@ static NSUInteger trustState(id self, SEL command, id application) {
 - (BOOL)applicationIsInstalled:(NSString *)bundleID;
 @end
 
+static int runJbctl(const char *verb, const char *arg) {
+    pid_t pid = 0;
+    const char *argv[] = {AS_JBCTL_PATH, verb, arg, NULL};
+    int e = posix_spawn(&pid, AS_JBCTL_PATH, NULL, NULL, (char *const *)argv, environ);
+    int st = 0;
+    if (!e) waitpid(pid, &st, 0);
+    NSLog(@"[UniXNU AppSync] x9-jbctl %s %s spawn=%d exit=%d", verb, arg, e, WIFEXITED(st) ? WEXITSTATUS(st) : -1);
+    return e ? -1 : (WIFEXITED(st) ? WEXITSTATUS(st) : -1);
+}
+
 static void registerX9Apps(void) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 8 * NSEC_PER_SEC),
                    dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        // MobileSafari's record lacks its data container on this root; jbctl re-registers it only then.
+        runJbctl("--repair-container", "com.apple.mobilesafari");
         static const char *app = "/Applications/X9Installer.app";
         char info[256];
         snprintf(info, sizeof(info), "%s/Info.plist", app);
@@ -98,12 +110,8 @@ static void registerX9Apps(void) {
             NSLog(@"[UniXNU AppSync] X9Installer already registered");
             return;
         }
-        pid_t pid = 0;
-        const char *argv[] = {AS_JBCTL_PATH, "--register", app, NULL};
-        int e = posix_spawn(&pid, AS_JBCTL_PATH, NULL, NULL, (char *const *)argv, environ);
-        int st = 0;
-        if (!e) waitpid(pid, &st, 0);
-        NSLog(@"[UniXNU AppSync] X9Installer registration spawn=%d exit=%d", e, WIFEXITED(st) ? WEXITSTATUS(st) : -1);
+        int r = runJbctl("--register", app);
+        NSLog(@"[UniXNU AppSync] X9Installer registration exit=%d", r);
     });
 }
 #endif

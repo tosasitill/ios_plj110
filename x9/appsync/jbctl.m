@@ -16,6 +16,10 @@ extern int __mac_syscall(const char *, int, void *);
 - (BOOL)registerApplicationDictionary:(NSDictionary *)dict;
 - (BOOL)unregisterApplication:(NSURL *)url;
 - (BOOL)applicationIsInstalled:(NSString *)bundleID;
+- (BOOL)registerApplication:(NSURL *)url;
++ (id)applicationProxyForIdentifier:(NSString *)bundleID;
+- (NSURL *)dataContainerURL;
+- (NSURL *)bundleURL;
 @end
 
 static const char *const kPrefix = "/private/var/x9/jailbreak/20H392";
@@ -95,11 +99,49 @@ static int registerApp(NSString *path) {
     return ok ? 0 : 1;
 }
 
+// An Apple app under /Applications whose LaunchServices record has no data
+// container (MobileSafari here: SafariCore then builds a URL from nil and
+// aborts, so downloads report "storage not available") is registered again
+// from its bundle, as uicache does; LaunchServices then asks containermanagerd
+// for the container. Does nothing when the record already has one.
+static int repairContainer(NSString *bundleID) {
+    if (![bundleID hasPrefix:@"com.apple."]) {
+        fprintf(stderr, "x9-jbctl: refusing %s (only com.apple.* apps)\n", bundleID.UTF8String);
+        return 2;
+    }
+    id ws = workspace();
+    Class proxyClass = objc_getClass("LSApplicationProxy");
+    if (![proxyClass respondsToSelector:@selector(applicationProxyForIdentifier:)] ||
+        ![ws respondsToSelector:@selector(registerApplication:)]) {
+        fprintf(stderr, "x9-jbctl: LaunchServices proxy/registration API unavailable\n");
+        return 3;
+    }
+    id proxy = [proxyClass applicationProxyForIdentifier:bundleID];
+    NSURL *container = [proxy respondsToSelector:@selector(dataContainerURL)] ? [proxy dataContainerURL] : nil;
+    NSURL *bundle = [proxy respondsToSelector:@selector(bundleURL)] ? [proxy bundleURL] : nil;
+    printf("x9-jbctl: %s bundle=%s container=%s\n", bundleID.UTF8String,
+           bundle.path.UTF8String ?: "(none)", container.path.UTF8String ?: "(none)");
+    if (container) return 0;
+    NSString *path = bundle.path.stringByStandardizingPath;
+    if (![path hasPrefix:@"/Applications/"] || path.pathComponents.count != 3) {
+        fprintf(stderr, "x9-jbctl: %s is not /Applications/<Name>.app; not re-registered\n", path.UTF8String ?: "(none)");
+        return 2;
+    }
+    BOOL ok = [ws registerApplication:[NSURL fileURLWithPath:path]];
+    id after = [proxyClass applicationProxyForIdentifier:bundleID];
+    NSURL *now = [after respondsToSelector:@selector(dataContainerURL)] ? [after dataContainerURL] : nil;
+    printf("x9-jbctl: re-register %s -> %s, container=%s\n", path.UTF8String, ok ? "ok" : "failed",
+           now.path.UTF8String ?: "(none)");
+    NSLog(@"[X9 JBCTL] repair-container %@ register=%d container=%@", bundleID, ok, now.path);
+    return now ? 0 : 1;
+}
+
 int main(int argc, const char **argv) {
     @autoreleasepool {
         if (argc == 2 && !strcmp(argv[1], "--status")) return status();
         if (argc == 3 && !strcmp(argv[1], "--register")) return registerApp(@(argv[2]));
-        fprintf(stderr, "usage: x9-jbctl --status | --register /Applications/<Name>.app\n");
+        if (argc == 3 && !strcmp(argv[1], "--repair-container")) return repairContainer(@(argv[2]));
+        fprintf(stderr, "usage: x9-jbctl --status | --register /Applications/<Name>.app | --repair-container com.apple.<id>\n");
         return 2;
     }
 }
