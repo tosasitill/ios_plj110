@@ -23,6 +23,9 @@ public:
     // terminal events still go to the loader's qualified control-object glue.
     static bool event(void *controller, const x9_usb_ep0_event &);
     static IOReturn rearmReady(void *controller);
+    // Exact gate, boot-long failure. Keep accepted/prepared request obligations
+    // when the qualified control glue observes an invalid native transition.
+    static IOReturn isolate(void *controller, IOReturn reason);
 private:
     enum class Phase : uint8_t { Free, Preparing, Accepted, Delivering, Quarantined };
     enum class Kind : uint8_t { Data, ZLP, Status };
@@ -40,7 +43,7 @@ private:
     void *controller = nullptr;
     FamilyComplete familyComplete = nullptr;
     uint64_t ticket = 0;
-    uint32_t wireLength = 0;
+    uint32_t wireLength = 0, outProgress = 0;
     bool usbIn = false, needsZLP = false, inOperation = false;
     IOReturn failure = kIOReturnSuccess;
     static X9USBNativeControlAdapter instance;

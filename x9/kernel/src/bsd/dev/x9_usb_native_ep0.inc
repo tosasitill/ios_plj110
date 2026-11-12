@@ -5,15 +5,16 @@
  */
 enum native_ep0_phase { NE_IDLE, NE_REPLY, NE_IN, NE_IN_LAST, NE_OUT,
                         NE_OUT_REPLY, NE_STATUS, NE_TERMINAL,
-                        NE_IN_DATA_REPLY, NE_IN_ZLP, NE_IN_ZLP_REPLY };
+                        NE_IN_DATA_REPLY, NE_IN_ZLP, NE_IN_ZLP_REPLY, NE_OUT_PACKET_REPLY };
 static struct {
     enum native_ep0_phase phase;
     uint64_t serial, sequence, deadline;
     struct x9_usb_ep0_event event;
     unsigned claimed, pending, reply, interrupted;
-    unsigned native_requests, needs_zlp, zlp_queued;
+    unsigned native_requests, needs_zlp, zlp_queued, packet_out;
     int interruption;
     uint32_t wire_length, in_length, actual, in_flight;
+    uint32_t packet_offset, packet_length, packet_final;
     uint8_t setup[8], bytes[X9_USB_EP0_CAPACITY];
 } native_ep0;
 
@@ -39,6 +40,11 @@ static void ne_event(unsigned kind, int error, unsigned qualified, unsigned stat
         .kind = kind, .actual = native_ep0.actual,
         .actual_qualified = qualified, .status_complete = status, .error = error
     };
+    if (kind == X9_EP0_OUT_PACKET) {
+        native_ep0.event.packet_offset = native_ep0.packet_offset;
+        native_ep0.event.packet_length = native_ep0.packet_length;
+        native_ep0.event.packet_final = native_ep0.packet_final;
+    }
     memcpy(native_ep0.event.setup, native_ep0.setup, 8);
     native_ep0.pending = 1;
 }
@@ -60,12 +66,15 @@ int x9_usb_native_ep0_claim(struct x9_usb_ep0_event *event, void *bytes, uint32_
     lck_mtx_lock(&usb_lock);
     int error = 0;
     if (!native_ep0.pending || native_ep0.claimed) error = EAGAIN;
-    else if (native_ep0.event.kind == X9_EP0_OUT_DATA &&
-        (!bytes || capacity < native_ep0.actual)) error = EMSGSIZE;
+    else if ((native_ep0.event.kind == X9_EP0_OUT_DATA || native_ep0.event.kind == X9_EP0_OUT_PACKET) &&
+        (!bytes || capacity < (native_ep0.event.kind == X9_EP0_OUT_PACKET ?
+         native_ep0.event.packet_length : native_ep0.actual))) error = EMSGSIZE;
     else {
         *event = native_ep0.event;
         if (event->kind == X9_EP0_OUT_DATA)
             memcpy(bytes, native_ep0.bytes, event->actual);
+        else if (event->kind == X9_EP0_OUT_PACKET && event->packet_length)
+            memcpy(bytes, native_ep0.bytes, event->packet_length);
         native_ep0.claimed = 1;
     }
     lck_mtx_unlock(&usb_lock); return error;
@@ -81,13 +90,17 @@ int x9_usb_native_ep0_ack(uint64_t sequence)
 }
 int x9_usb_native_ep0_reply(uint64_t ticket, unsigned kind, const void *bytes, uint32_t n)
 {
-    if (!ticket || kind < X9_EP0_SEND_IN || kind > X9_EP0_SEND_IN_ZLP ||
+    if (!ticket || kind < X9_EP0_SEND_IN || kind > X9_EP0_CONTINUE_OUT ||
         n > X9_USB_EP0_CAPACITY || (n && !bytes) ||
         (kind != X9_EP0_SEND_IN && kind != X9_EP0_SEND_IN_REQUEST && n)) return EINVAL;
     lck_mtx_lock(&usb_lock);
     int error = 0;
     if (ticket != native_ep0.serial || native_ep0.interrupted || failed ||
         !st.native_apple_stack) error = ESTALE;
+    else if (kind == X9_EP0_STALL) {
+        if (native_ep0.phase == NE_IDLE || native_ep0.phase == NE_TERMINAL) error = ESTALE;
+        else native_ep0.reply = X9_EP0_STALL; // revoke publication, not request ownership
+    }
     else if (kind == X9_EP0_SEND_IN_ZLP) {
         /* The stock Family queues this second ordinary request immediately
          * after data admission, possibly before SETUP callback returns. It
@@ -97,15 +110,22 @@ int x9_usb_native_ep0_reply(uint64_t ticket, unsigned kind, const void *bytes, u
              native_ep0.phase != NE_IN_LAST && native_ep0.phase != NE_IN_DATA_REPLY)) error = EBUSY;
         else native_ep0.zlp_queued = 1;
     }
-    else if ((native_ep0.phase != NE_REPLY && native_ep0.phase != NE_OUT_REPLY) ||
+    else if ((native_ep0.phase != NE_REPLY && native_ep0.phase != NE_OUT_REPLY &&
+              native_ep0.phase != NE_OUT_PACKET_REPLY) ||
         native_ep0.reply || (native_ep0.pending && !native_ep0.claimed)) error = EBUSY;
     else if ((kind == X9_EP0_SEND_IN || kind == X9_EP0_SEND_IN_REQUEST) && (native_ep0.phase != NE_REPLY ||
         !(native_ep0.setup[0] & 0x80) || !native_ep0.wire_length ||
         n > native_ep0.wire_length)) error = EINVAL;
-    else if (kind == X9_EP0_RECEIVE_OUT && (native_ep0.phase != NE_REPLY ||
+    else if ((kind == X9_EP0_RECEIVE_OUT || kind == X9_EP0_RECEIVE_OUT_PACKETS) && (native_ep0.phase != NE_REPLY ||
         (native_ep0.setup[0] & 0x80) || !native_ep0.wire_length)) error = EINVAL;
+    else if (kind == X9_EP0_CONTINUE_OUT && (native_ep0.phase != NE_OUT_PACKET_REPLY ||
+        !native_ep0.packet_out || native_ep0.packet_final)) error = EINVAL;
     else if (kind == X9_EP0_STATUS && native_ep0.phase == NE_REPLY &&
         native_ep0.wire_length) error = EINVAL;
+    else if (kind == X9_EP0_STATUS && native_ep0.phase == NE_OUT_PACKET_REPLY &&
+        !native_ep0.packet_final) error = EINVAL;
+    else if ((kind == X9_EP0_SEND_IN || kind == X9_EP0_SEND_IN_REQUEST || kind == X9_EP0_RECEIVE_OUT ||
+              kind == X9_EP0_RECEIVE_OUT_PACKETS) && native_ep0.phase != NE_REPLY) error = EINVAL;
     else {
         if (kind == X9_EP0_SEND_IN || kind == X9_EP0_SEND_IN_REQUEST) {
             if (n) memcpy(native_ep0.bytes, bytes, n);
@@ -197,6 +217,7 @@ void x9_usb_native_ep0_poll(unsigned available)
         x9_mtu3_fifo_read(native_ep0.setup, 8);
         native_ep0.serial++; native_ep0.actual = native_ep0.in_length = 0;
         native_ep0.native_requests = native_ep0.needs_zlp = native_ep0.zlp_queued = 0;
+        native_ep0.packet_out = native_ep0.packet_offset = native_ep0.packet_length = native_ep0.packet_final = 0;
         native_ep0.wire_length = native_ep0.setup[6] | ((uint32_t)native_ep0.setup[7] << 8);
         clock_interval_to_deadline(5000, NSEC_PER_MSEC, &native_ep0.deadline);
         if (native_ep0.wire_length) {
@@ -211,6 +232,13 @@ void x9_usb_native_ep0_poll(unsigned available)
     if (mach_absolute_time() >= native_ep0.deadline) {
         W(EP0, ne_csr() | STALL | ((csr & SETUP) ? SETUP : 0));
         ne_finish(ETIMEDOUT, !native_ep0.in_flight, 0); goto out;
+    }
+    if (native_ep0.reply == X9_EP0_STALL) {
+        // Exact gate request, handled only after snapshot/callback ack and
+        // reset/new-SETUP checks. An in-flight packet makes actual unqualified;
+        // do not replace it with zero or release its original native request.
+        W(EP0, ne_csr() | STALL | ((csr & SETUP) ? SETUP : 0));
+        ne_finish(EPIPE, !native_ep0.in_flight, 0); goto out;
     }
     if (native_ep0.phase == NE_IN_DATA_REPLY || native_ep0.phase == NE_IN_ZLP_REPLY) {
         /* Event already acked: original Family data/ZLP callback and the
@@ -227,15 +255,19 @@ void x9_usb_native_ep0_poll(unsigned available)
     }
     if (native_ep0.reply) {
         unsigned reply = native_ep0.reply; native_ep0.reply = 0;
-        if (reply == X9_EP0_STALL) {
-            W(EP0, ne_csr() | STALL | ((csr & SETUP) ? SETUP : 0));
-            ne_finish(EPIPE, 1, 0);
-        } else if (reply == X9_EP0_SEND_IN || reply == X9_EP0_SEND_IN_REQUEST) {
+        if (reply == X9_EP0_SEND_IN || reply == X9_EP0_SEND_IN_REQUEST) {
             if (csr & (TX | BIT(23))) {
                 native_ep0.reply = reply; goto out; /* don't overwrite busy FIFO */
             }
             ne_transmit();
-        } else if (reply == X9_EP0_RECEIVE_OUT) native_ep0.phase = NE_OUT;
+        } else if (reply == X9_EP0_RECEIVE_OUT || reply == X9_EP0_RECEIVE_OUT_PACKETS) {
+            native_ep0.packet_out = reply == X9_EP0_RECEIVE_OUT_PACKETS;
+            native_ep0.phase = NE_OUT;
+        } else if (reply == X9_EP0_CONTINUE_OUT) {
+            // Original inputDataPacket + descriptor write + state notification
+            // returned in the gate, and this exact event was acknowledged.
+            W(EP0, ne_csr() | RX); native_ep0.phase = NE_OUT;
+        }
         else {
             /* OPPO programs DEV_ADDR before arming status. Preserve that
              * register order; the live address latch is not yet verified.
@@ -244,7 +276,8 @@ void x9_usb_native_ep0_poll(unsigned available)
                 !native_ep0.wire_length && !native_ep0.setup[3] &&
                 !native_ep0.setup[4] && !native_ep0.setup[5] && native_ep0.setup[2] <= 127)
                 W(0x800, (R(0x800) & ~(0x7fu << 24)) | ((uint32_t)native_ep0.setup[2] << 24));
-            W(EP0, ne_csr() | DATAEND | (native_ep0.phase == NE_OUT_REPLY ? RX : SETUP));
+            W(EP0, ne_csr() | DATAEND | ((native_ep0.phase == NE_OUT_REPLY ||
+                native_ep0.phase == NE_OUT_PACKET_REPLY) ? RX : SETUP));
             native_ep0.phase = NE_STATUS;
         }
         goto out; /* current ISR predates this publication, cannot retire it */
@@ -266,9 +299,16 @@ void x9_usb_native_ep0_poll(unsigned available)
         if (n > 64 || n > native_ep0.wire_length - native_ep0.actual) {
             W(EP0, ne_csr() | STALL | RX); ne_finish(EOVERFLOW, 0, 0); goto out;
         }
-        if (n) x9_mtu3_fifo_read(native_ep0.bytes + native_ep0.actual, n);
+        uint32_t offset = native_ep0.actual;
+        if (n) x9_mtu3_fifo_read(native_ep0.bytes + (native_ep0.packet_out ? 0 : offset), n);
         native_ep0.actual += n;
-        if (n < 64 || native_ep0.actual == native_ep0.wire_length) {
+        if (native_ep0.packet_out) {
+            native_ep0.packet_offset = offset; native_ep0.packet_length = n;
+            native_ep0.packet_final = n < 64 || native_ep0.actual == native_ep0.wire_length;
+            // Keep EVERY packet's RX asserted, including the terminating zero.
+            native_ep0.phase = NE_OUT_PACKET_REPLY;
+            ne_event(X9_EP0_OUT_PACKET, 0, 1, 0);
+        } else if (n < 64 || native_ep0.actual == native_ep0.wire_length) {
             /* Hold final RX until the actual gate handler accepts status. */
             native_ep0.phase = NE_OUT_REPLY;
             ne_event(X9_EP0_OUT_DATA, 0, 1, 0);

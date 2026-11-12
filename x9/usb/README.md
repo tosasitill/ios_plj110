@@ -328,8 +328,8 @@ python3 -I x9/usb/prepare_native.py \
 
 ### 复现端点与 request 的原始调用契约
 
-`recover_contract.py` 对同一固定原始输入做有界反汇编，当前检查216处关键指令、request
-分配类型及具体 controller 的虚表/import，输出 `contract.json` 和50段 `.dis`。
+`recover_contract.py` 对同一固定原始输入做有界反汇编，当前检查266处关键指令、request
+分配类型及具体 controller 的虚表/import，输出 `contract.json` 和63段 `.dis`。
 这是静态分析命令，不是测试套件或原生驱动装载器：
 
 ```sh
@@ -679,6 +679,44 @@ inputDataPacket/final callback。错误还需原 control 的终态清理。
 这些接口没有调用者、没有 native controller installer，不设置 native flag；
 typed abort 仍只覆盖 bulk，不是原 AbortPipe ABI。原生枚举／配对、AppSync staging
 与完整越狱 bootstrap 的缺口未因本适配器消失。
+
+### USB-NATIVE15：逐包 OUT 与原 control 方法接线（无模块 installer）
+
+原 `inputDataPacket` 的状态跳表确认 **state4 会 panic，state5/6 才接收数据**。
+先由 `receiveControlOutData` retain/prepare descriptor 并通知 state5/6，才能启用
+PIO RX。聚合 payload 不等价于 packet：64B 数据＋最后一个 zero 短包必须是两个
+调用，不能把 actual64 当成整个短响应。原 slot210 接收的 packet-report 是临时
+零填充 **0x68B stack record**，不是可以放进普通 adapter 的 heap request。
+当前分析为266条指令／63个region，另资格化packet/reset跳表与inputData/reset import。
+
+- `RECEIVE_OUT_PACKETS` → 每个真实RX（包括zero）生成独立`OUT_PACKET`，带本包
+  offset/length/final及累计wire actual。每包RX保持到gate返回、exact ack与显式
+  `CONTINUE_OUT`；final只能走原status request，不能continue或提前发送status。
+  `RECEIVE_OUT`聚合模式仍留给原独立handler，不是原Family packet入口。
+- `X9USBNativeControlGlue::install` 将真正的handler接到同gate bridge及普通EP0
+  adapter。未来loader必须提供**已资格化**的inspect/inputSetup/processSetup/
+  inputData/reset leaf thunks并boot-pin所有目标，不能把opaque control转成当前
+  OSObject或硬编码原件地址。安装失败不让永久bridge成为半活的实现。
+- SETUP8 → 原inputSetup（匹配slot210 event12的真实stack记录）→ state2 → 原
+  processSetup。原controller slot213 thunk接`stateChanged`，OUT只有已prepared
+  state5/6才启用逐包PIO；随后每包进入原inputData，本包descriptor write/progress/
+  event11/state通知返回后才继续。当前仅接受native receive requested==setup.wLength，
+  不冒充已支持“调用者更小的receive buffer＋原drop/clipping”合同。
+- IN COMPLETE只在真实status退休及state8后调用原inputData(nullptr,0)，执行原
+  final callback/clear/state1；OUT/no-data status callback已由普通adapter执行，不
+  合成第二次。known error且所有普通请求已settled才调原reset；unknown actual、
+  native几何/状态错误或任何quarantine保留原对象/descriptor直到boot结束，不清隔离。
+- 原stallSetupRequest对OUT0/IN80的两个halt-on调用和state9，由同gate
+  `requestStall`幂等复制到worker；callback返回前不MMIO。可撤未发布命令但不撤
+  accepted request的完成义务，in-flight actual不猜。bridge在adapter callback前
+  观察terminal error，native错误回调里的stall不再发布新包；clear-halt/非EP0不映射。
+  rearm现在同时核对glue原对象state1/无data memory、adapter及worker全部idle。
+
+**仍无Apple模块loader／native controller实例或profile开关。** 新handler有接线实现，
+但没有提供以上原件leaf thunks／controller slot210/213/halt入口的安装者；父类字段、
+逐load全部consumer、expanded/metaclass vtables、其它pure virtual、endpoint配置／
+bus事件和模块relocation/bootstrap必须先资格化，`native_apple_stack`仍为0。
+不能把这份生产编译当作Finder枚举、Pair/TLS或AppSync安装已成功。
 
 ### 真实主机配对入口（依赖原生内核路由）
 

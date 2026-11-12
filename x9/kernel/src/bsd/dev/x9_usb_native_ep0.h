@@ -4,13 +4,17 @@
 #include <stdint.h>
 #define X9_USB_EP0_CAPACITY 65535u
 enum x9_usb_ep0_event_kind { X9_EP0_SETUP = 1, X9_EP0_OUT_DATA, X9_EP0_COMPLETE,
-                           X9_EP0_IN_DATA, X9_EP0_IN_ZLP };
+                           X9_EP0_IN_DATA, X9_EP0_IN_ZLP, X9_EP0_OUT_PACKET };
 enum x9_usb_ep0_reply_kind { X9_EP0_SEND_IN = 1, X9_EP0_RECEIVE_OUT,
                            X9_EP0_STATUS, X9_EP0_STALL,
-                           X9_EP0_SEND_IN_REQUEST, X9_EP0_SEND_IN_ZLP };
+                           X9_EP0_SEND_IN_REQUEST, X9_EP0_SEND_IN_ZLP,
+                           X9_EP0_RECEIVE_OUT_PACKETS, X9_EP0_CONTINUE_OUT };
 struct x9_usb_ep0_event {
     uint64_t ticket, sequence;
     uint32_t kind, actual, actual_qualified, status_complete;
+    // OUT_PACKET only: actual is cumulative wire bytes, bytes contains JUST
+    // this packet. A final zero packet has packet_length=0, not "no event".
+    uint32_t packet_offset, packet_length, packet_final;
     int error;
     uint8_t setup[8];
 };

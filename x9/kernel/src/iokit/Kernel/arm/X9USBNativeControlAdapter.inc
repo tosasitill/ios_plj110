@@ -51,6 +51,18 @@ IOReturn X9USBNativeControlAdapter::rearmReady(void *controller)
     for (const auto &e : a.entries) if (e.phase != Phase::Free) return kIOReturnBusy;
     return kIOReturnSuccess;
 }
+IOReturn X9USBNativeControlAdapter::isolate(void *controller, IOReturn reason)
+{
+    auto &a = instance;
+    IOReturn status = a.check(controller);
+    if (status != kIOReturnSuccess) return status;
+    if (reason == kIOReturnSuccess) return kIOReturnBadArgument;
+    if (a.failure == kIOReturnSuccess) a.failure = reason;
+    for (auto &e : a.entries)
+        if (e.phase == Phase::Accepted || e.phase == Phase::Preparing) e.phase = Phase::Quarantined;
+    (void)X9USBControlBridge::cancel(a.ticket, EIO);
+    return kIOReturnSuccess;
+}
 void X9USBNativeControlAdapter::quarantine(Entry &e, IOReturn reason)
 {
     e.phase = Phase::Quarantined;
@@ -168,6 +180,7 @@ bool X9USBNativeControlAdapter::process(const x9_usb_ep0_event &event)
             panic("X9 USB: new EP0 setup before original request callbacks returned");
         ticket = event.ticket;
         wireLength = event.setup[6] | ((uint32_t)event.setup[7] << 8);
+        outProgress = 0;
         usbIn = (event.setup[0] & 0x80) != 0; needsZLP = false;
         stage = usbIn && wireLength ? Stage::WaitData : wireLength ? Stage::WaitOut : Stage::WaitStatus;
         return false; // qualified loader still delivers actual setup to Family
@@ -176,6 +189,17 @@ bool X9USBNativeControlAdapter::process(const x9_usb_ep0_event &event)
     if (event.kind == X9_EP0_OUT_DATA) {
         if (usbIn || stage != Stage::WaitOut) panic("X9 USB: EP0 OUT event state");
         stage = Stage::WaitStatus; return false; // Family inputDataPacket can queue IN status
+    }
+    if (event.kind == X9_EP0_OUT_PACKET) {
+        if (usbIn || stage != Stage::WaitOut || !event.actual_qualified || event.error ||
+            event.status_complete || event.packet_offset != outProgress || event.packet_length > 64 ||
+            event.packet_length > wireLength - outProgress ||
+            event.actual != outProgress + event.packet_length ||
+            event.packet_final != (event.packet_length < 64 || event.actual == wireLength))
+            panic("X9 USB: EP0 OUT packet geometry/progress");
+        outProgress = event.actual;
+        if (event.packet_final) stage = Stage::WaitStatus;
+        return false; // original Family sees each actual packet, not aggregate
     }
     if (event.kind == X9_EP0_IN_DATA || event.kind == X9_EP0_IN_ZLP) {
         unsigned index = event.kind == X9_EP0_IN_DATA ? 0 : 1;

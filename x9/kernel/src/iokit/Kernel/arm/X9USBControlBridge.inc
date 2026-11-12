@@ -1,5 +1,6 @@
 #include "X9USBControlBridge.h"
 #include "X9USBNativeControlAdapter.h"
+#include "X9USBNativeControlGlue.h"
 #include <IOKit/IOEventSource.h>
 static LCK_GRP_DECLARE(x9_usb_control_group, "x9_usb_control");
 static LCK_MTX_DECLARE(x9_usb_control_lock, &x9_usb_control_group);
@@ -35,9 +36,11 @@ IOReturn X9USBControlBridge::controlReady(IOWorkLoop *loop, bool rearm)
     if (!b) return kIOReturnSuccess;
     if (b->loop != loop) return kIOReturnNotReady;
     if (b->draining) return kIOReturnBusy;
-    return rearm ? X9USBNativeControlAdapter::rearmReady(b->controller) : kIOReturnSuccess;
+    if (!rearm) return kIOReturnSuccess;
+    IOReturn result = X9USBNativeControlAdapter::rearmReady(b->controller);
+    return result == kIOReturnSuccess && b->ready ? b->ready(b->controller) : result;
 }
-IOReturn X9USBControlBridge::install(IOWorkLoop *loop, void *controller, Handler handler)
+IOReturn X9USBControlBridge::install(IOWorkLoop *loop, void *controller, Handler handler, Ready ready)
 {
     if (!loop || !controller || !handler) return kIOReturnBadArgument;
     if (!loop->inGate()) return kIOReturnNotPermitted;
@@ -51,7 +54,7 @@ IOReturn X9USBControlBridge::install(IOWorkLoop *loop, void *controller, Handler
     auto *b = new X9USBControlBridge;
     IOReturn result = kIOReturnNoMemory;
     if (b && b->init()) {
-        b->loop = loop; loop->retain(); b->controller = controller; b->handler = handler;
+        b->loop = loop; loop->retain(); b->controller = controller; b->handler = handler; b->ready = ready;
         b->source = new X9USBControlSource;
         if (b->source && b->source->initWithBridge(b)) result = loop->addEventSource(b->source);
     }
@@ -92,8 +95,9 @@ bool X9USBControlBridge::drain()
     draining = true;
     /* Neither usb_lock nor registry lock held. Snapshot remains pinned until
      * this callback returns, including reentrant gate calls and reset races. */
+    X9USBNativeControlGlue::observe(controller, event);
     if (!X9USBNativeControlAdapter::event(controller, event))
-        handler(controller, event, event.kind == X9_EP0_OUT_DATA ? out : nullptr);
+        handler(controller, event, (event.kind == X9_EP0_OUT_DATA || event.kind == X9_EP0_OUT_PACKET) ? out : nullptr);
     if (x9_usb_native_ep0_ack(event.sequence)) panic("X9 USB: lost EP0 gate event");
     draining = false;
     return x9_usb_native_ep0_pending() != 0;

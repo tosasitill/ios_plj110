@@ -67,6 +67,19 @@ REGIONS = {
     'control_status_completion': (0xfffffff005ceabdc, 0xfffffff005ceac30),
     'control_status_state_notify': (0xfffffff005cead60, 0xfffffff005cead88),
     'control_in_status_final_callback': (0xfffffff005ce9ce8, 0xfffffff005ce9d18),
+    'control_receive_out_arm': (0xfffffff005ce91f8, 0xfffffff005ce9300),
+    'control_packet_dispatch': (0xfffffff005ce94e4, 0xfffffff005ce9634),
+    'control_packet_write': (0xfffffff005ce987c, 0xfffffff005ce98d8),
+    'control_packet_short': (0xfffffff005ce9a88, 0xfffffff005ce9abc),
+    'control_out_data_callback_status': (0xfffffff005ce9b94, 0xfffffff005ce9bec),
+    'control_packet_next_state': (0xfffffff005ce9df8, 0xfffffff005ce9ed4),
+    'control_packet_report': (0xfffffff005ce8f00, 0xfffffff005ce8fb4),
+    'control_reset_clear': (0xfffffff005ce82b8, 0xfffffff005ce8324),
+    'control_reset_dispatch': (0xfffffff005ce83d0, 0xfffffff005ce8410),
+    'control_reset_ready': (0xfffffff005ce8698, 0xfffffff005ce86b0),
+    'control_reset_notify': (0xfffffff005ce8788, 0xfffffff005ce87b0),
+    'control_stall_endpoints_state': (0xfffffff005cea284, 0xfffffff005cea2b0),
+    'control_stall_state_notify': (0xfffffff005cea388, 0xfffffff005cea3a0),
 }
 # Assertions are source-qualification checks, not claims of runtime success.
 OBSERVED = {
@@ -286,6 +299,56 @@ OBSERVED = {
     0xfffffff005ce9cf4: ('ldr', 'x1, [x19, #0x58]'),
     0xfffffff005ce9cfc: ('mov', 'w3, #0'),
     0xfffffff005ce9d00: ('blr', 'x8'),
+    0xfffffff005ce9214: ('cmp', 'w8, #4'),
+    0xfffffff005ce9278: ('csel', 'x8, x8, x21, lo'),
+    0xfffffff005ce927c: ('stp', 'x8, xzr, [x22, #-0x10]'),
+    0xfffffff005ce92e8: ('cmp', 'w21, w20'),
+    0xfffffff005ce92ec: ('mov', 'w8, #5'),
+    0xfffffff005ce92f0: ('cinc', 'w8, w8, hs'),
+    0xfffffff005ce92f8: ('str', 'w8, [x19, #0xc]'),
+    0xfffffff005ce94fc: ('mov', 'x20, x2'),
+    0xfffffff005ce9500: ('mov', 'x21, x1'),
+    0xfffffff005ce95dc: ('sub', 'w8, w8, #3'),
+    0xfffffff005ce95f4: ('ldrsw', 'x11, [x9, x8, lsl #2]'),
+    0xfffffff005ce9618: ('bl', '#0xfffffff005ce8f00'),
+    0xfffffff005ce9884: ('ldr', 'x1, [x19, #0x20]'),
+    0xfffffff005ce988c: ('ldr', 'x8, [x8, #0xd0]'),
+    0xfffffff005ce9894: ('mov', 'x3, x22'),
+    0xfffffff005ce9898: ('blr', 'x8'),
+    0xfffffff005ce98a4: ('str', 'x8, [x19, #0x20]'),
+    0xfffffff005ce98ac: ('b.eq', '#0xfffffff005ce9a94'),
+    0xfffffff005ce9a8c: ('cmp', 'x22, x8'),
+    0xfffffff005ce9a90: ('b.hs', '#0xfffffff005ce9bec'),
+    0xfffffff005ce9ab0: ('mov', 'w8, #7'),
+    0xfffffff005ce9ab4: ('str', 'w8, [x19, #0xc]'),
+    0xfffffff005ce9bc4: ('blr', 'x8'),
+    0xfffffff005ce9bd0: ('cmp', 'w0, w8'),
+    0xfffffff005ce9bd4: ('b.eq', '#0xfffffff005ce9c20'),
+    0xfffffff005ce9be4: ('bl', '#0xfffffff005ce9eec'),
+    0xfffffff005ce9e08: ('mov', 'w8, #6'),
+    0xfffffff005ce9e0c: ('str', 'w8, [x19, #0xc]'),
+    0xfffffff005ce9eb0: ('ldr', 'x3, [x8, #0x6a8]'),
+    0xfffffff005ce9ed0: ('bl', '#0xfffffff005cfb9fc'),
+    0xfffffff005ce8f20: ('str', 'xzr, [sp, #0x60]'),
+    0xfffffff005ce8f30: ('str', 'w1, [sp]'),
+    0xfffffff005ce8f6c: ('stp', 'x8, x22, [sp, #0x40]'),
+    0xfffffff005ce8f70: ('str', 'w19, [sp, #0x28]'),
+    0xfffffff005ce8f74: ('str', 'x21, [sp, #0x18]'),
+    0xfffffff005ce8f80: ('mov', 'w8, #0xb'),
+    0xfffffff005ce8f84: ('cinc', 'w2, w8, ne'),
+    0xfffffff005ce8f8c: ('ldr', 'x8, [x8, #0x690]'),
+    0xfffffff005ce8f90: ('mov', 'x1, sp'),
+    0xfffffff005ce8f94: ('mov', 'x3, x19'),
+    0xfffffff005ce82d0: ('stp', 'xzr, xzr, [x20, #-0x10]'),
+    0xfffffff005ce82fc: ('str', 'xzr, [x19, #0x10]'),
+    0xfffffff005ce86a4: ('mov', 'w8, #1'),
+    0xfffffff005ce86a8: ('str', 'w8, [x19, #0xc]'),
+    0xfffffff005ce8794: ('ldr', 'x3, [x8, #0x6a8]'),
+    0xfffffff005cea28c: ('bl', '#0xfffffff005cf0660'),
+    0xfffffff005cea29c: ('bl', '#0xfffffff005cf0660'),
+    0xfffffff005cea2a4: ('mov', 'w8, #9'),
+    0xfffffff005cea2a8: ('str', 'w8, [x19, #0xc]'),
+    0xfffffff005cea394: ('ldr', 'x8, [x8, #0x6a8]'),
 }
 
 OTG_VPTR = 0xfffffff006e7b188
@@ -345,6 +408,8 @@ def recover(data):
     for name, cell, expected in (
         ('input_setup', 0xfffffff006e7a790, REGIONS['control_input_setup'][0]),
         ('process_setup', 0xfffffff006e7a798, REGIONS['control_process_setup'][0]),
+        ('input_data', 0xfffffff006e7a788, REGIONS['control_packet_dispatch'][0]),
+        ('reset', 0xfffffff006e7a7a0, REGIONS['control_reset_dispatch'][0]),
     ):
         target, = struct.unpack('<Q', cache.read(cell, 8))
         if target != expected:
@@ -357,6 +422,22 @@ def recover(data):
         target, = struct.unpack('<Q', cache.read(control_vptr + slot * 8, 8))
         if target != expected:
             raise ValueError(f'Unqualified control slot {slot}: {target:#x}')
+    control_tables = {}
+    for name, start, base, expected in (
+        ('packet', 0xfffffff005ce9ed4, 0xfffffff005ce95f0,
+         [0xfffffff005ce968c, 0xfffffff005ce9ed0, 0xfffffff005ce9600,
+          0xfffffff005ce9600, 0xfffffff005ce9704, 0xfffffff005ce9780]),
+        ('reset', 0xfffffff005ce8830, 0xfffffff005ce8400,
+         [0xfffffff005ce85a8, 0xfffffff005ce8698, 0xfffffff005ce8468,
+          0xfffffff005ce85bc, 0xfffffff005ce8410, 0xfffffff005ce8410,
+          0xfffffff005ce8468, 0xfffffff005ce8410, 0xfffffff005ce8698]),
+    ):
+        delta = struct.unpack('<' + 'i' * len(expected), cache.read(start, 4 * len(expected)))
+        targets = [base + n for n in delta]
+        if targets != expected:
+            raise ValueError(f'Unqualified control {name} jump table: {targets}')
+        control_tables[name] = dict(address=start, relative_base=base, targets=targets,
+                                   first_state=3 if name == 'packet' else 1)
     result = dict(
         build='20H392', identity='d22ap', kernelcache_sha256=SHA256,
         qualification='bounded static observations; NOT executable ABI',
@@ -384,6 +465,20 @@ def recover(data):
             in_status_out_final_callback_offsets=[0x48, 0x50, 0x58],
             out_status_in_callback=0xfffffff005ceabdc, out_status_returns_state=1,
             warning='EP0 plain requests need distinct PIO stage callbacks, not bulk owner. Family speed enum/flags, control object glue and memory vptr/layout are still unqualified'),
+        control_packets=dict(
+            input_entry=REGIONS['control_packet_dispatch'][0], imports=control_imports,
+            jump_tables=control_tables,
+            receive_arm_entry=REGIONS['control_receive_out_arm'][0], ready_out_states=[5, 6],
+            unarmed_state4_is_panic=True, data_count_width=8, max_usb2_packet=64,
+            out_completion='progress reaches native requested OR this clipped packet count < maxpacket; aggregate length cannot represent a terminating zero',
+            out_data_callback_delayed_status=0xe00040a0,
+            stack_packet_report=dict(bytes=0x68, controller_slot=210, data_event=11, setup_event=12,
+                                     endpoint_offset=0, packet_pointer_offset=0x18,
+                                     status_offset=0x28, maxpacket_offset=0x40, actual_offset=0x48,
+                                     not_heap_request=True, never_release_or_submit=True),
+            state_notification_slot=213, stalled_state=9,
+            reset_entry=REGIONS['control_reset_dispatch'][0], reset_returns_state=1,
+            warning='typed glue still needs qualified inspect/method/controller thunks and current parent/descriptor ABI; no native installer or callable addresses emitted'),
         original_pipe_size=0x70,
         settings_input=dict(bytes_read=20, words=5, word_width=4,
                             gate=0xfffffff005cf0438,
