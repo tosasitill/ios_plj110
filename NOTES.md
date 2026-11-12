@@ -6,6 +6,12 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## HEIF硬解续接定位（2026-11-12；NATIVE34最终输入链／NATIVE35 BS路由，仍未接通）
+
+- **唯一活动源码与编译**：`.local/x9/worktrees/heif-resume-20261111`／`work/heif-resume-20261111`。NATIVE34源码 **`3443d181a5b429e2097b391a7ac423fcf659fe10`** 已修`vmem_take_token`误名为真实`vdma_take_token`，input-compile-4仅production sweet_x9_vdec.o **exit0／17既有warnings**；native PRIVATE input slice→记录handle→复制Annex-B→真实PoC发布extent→typed hardware owner→reserved a001/b001链已接线，但VSI/layout/cache/clock/IRQ真实owner仍缺。清理节所述“三个未提交文件／compile-3失败”是当时历史状态，现已由本里程碑替代；未把视频源码merge到main或修改旧heif-vdec合并现场。
+- **新增原厂静态定位／可重放**：NATIVE35源码 **`0ea75468f0aa5c001d6f356f1f0544416ae7c9c4`**，捕获模块full-file／Build ID gate下8个BS路由span／12条RELA，`bs-route-parse-1` exit0/profile_match=true／loaded note匹配文件。主IO设备有1／2／ACP7三个条件路由；non-ACP只在支持＋enable1＋debug非零＋io-device1存在时另attach-map，否则显式0，不是主IOVA的镜像或NS授权。normal SMMU share alternatives／动态HVC证据及全部边界见活动树顶部NOTES。原始compile／static parse／源码patch与全SHA在main `.local/x9/work/heif-native{34,35}-20261112/`；两个源码gh查询最终均exit0=[]，无CI run ID／push。
+- **剩余与操作边界**：仍缺normal MM共享controller/storage/ASID/CMDQ、cold clock/firmware与最高层bus/arena/shared/bind/start caller、当前路由VSI发布、WAITISR/c006/真正completion、linear NV12/P010/CPU释放、VT→CMPhoto/ImageIO/Main10/grid/alpha与最新main整合。默认x9_vdec0、READY/profiles0，不交缺后端中间boot；本轮无测试脚本/套件、设备/ADB/root/mailbox/分区操作、full link/boot或成功产物二次检查。完整目标保持未完成，以活动树交接续做，不复跑已成功对象或旧过期worktree路径。
+
 ## GPU 280：Volatile 资源丢弃（移植 AdrenoMetal 86fd95c；2026-11-12；已构建，未上机）
 
 - **改了什么**：`6ca7449` 把 UniXNU/AdrenoMetal `86fd95c` 的 purgeable 丢弃移植到 GeneralMetal。新文件 `x9/metal/General/bridge/NativeMetalPurge.rs`（去掉了他们依赖 bridge patch 0035 的 YCbCr light forms）。由 device 创建的 buffer/texture/heap 现在是 `Resource` cell。sweep 只在以下条件同时满足时释放 runtime 对象：状态为 Volatile/Empty；没有命令缓冲 hold；没有 tie（view、buffer 上的 texture、heap placement）；从未交出 CPU 指针/GPU 地址/`gpuResourceID`/argument-buffer 条目（这些会 pin）；且没有调用正在使用它。之后 NonVolatile 会重新分配并按 Metal 约定回 Empty。no-copy、surface texture、view、heap 内资源保持 fixed。
