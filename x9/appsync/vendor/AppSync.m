@@ -5,6 +5,10 @@
 #import <objc/runtime.h>
 #import <dlfcn.h>
 #import "Signing.h"
+#import <spawn.h>
+#import <sys/wait.h>
+#import <unistd.h>
+extern char **environ;
 
 #ifdef AS_HOST_TEST
 #define AS_VERIFIER "ASFixtureVerifier"
@@ -72,6 +76,38 @@ static NSUInteger trustState(id self, SEL command, id application) {
     return userBundle([application bundleURL]) ? 8 : state;
 }
 
+#ifndef AS_HOST_TEST
+// X9: SpringBoard registers X9's own system apps with LaunchServices once
+// (uicache through x9-jbctl, which carries the registration entitlements).
+@interface NSObject (X9Workspace)
++ (id)defaultWorkspace;
+- (BOOL)applicationIsInstalled:(NSString *)bundleID;
+@end
+
+static void registerX9Apps(void) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 8 * NSEC_PER_SEC),
+                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        static const char *app = "/Applications/X9Installer.app";
+        char info[256];
+        snprintf(info, sizeof(info), "%s/Info.plist", app);
+        if (access(info, R_OK)) return;
+        dlopen("/System/Library/Frameworks/CoreServices.framework/CoreServices", RTLD_NOW);
+        Class cls = objc_getClass("LSApplicationWorkspace");
+        id ws = [cls respondsToSelector:@selector(defaultWorkspace)] ? [cls defaultWorkspace] : nil;
+        if ([ws respondsToSelector:@selector(applicationIsInstalled:)] && [ws applicationIsInstalled:@"org.x9.installer"]) {
+            NSLog(@"[UniXNU AppSync] X9Installer already registered");
+            return;
+        }
+        pid_t pid = 0;
+        const char *argv[] = {AS_JBCTL_PATH, "--register", app, NULL};
+        int e = posix_spawn(&pid, AS_JBCTL_PATH, NULL, NULL, (char *const *)argv, environ);
+        int st = 0;
+        if (!e) waitpid(pid, &st, 0);
+        NSLog(@"[UniXNU AppSync] X9Installer registration spawn=%d exit=%d", e, WIFEXITED(st) ? WEXITSTATUS(st) : -1);
+    });
+}
+#endif
+
 static BOOL signature(Method method, const char *result, unsigned count, const char **args) {
     if (!method || method_getNumberOfArguments(method) != count + 2) return NO;
     char type[64];
@@ -112,6 +148,7 @@ __attribute__((constructor)) static void start(void) {
         } else if ([process isEqual:@"SpringBoard"]) {
 #ifndef AS_HOST_TEST
             dlopen("/System/Library/PrivateFrameworks/FrontBoardServices.framework/FrontBoardServices", RTLD_NOW);
+            registerX9Apps();
 #endif
             Method method = class_getInstanceMethod(objc_getClass(AS_TRUST),
                 @selector(trustStateForApplication:));
