@@ -78,6 +78,7 @@
 #include <sys/syslog.h>
 #include <sys/mcache.h>
 #include <kern/locks.h>
+#include <kern/thread_call.h>
 #include <sys/codesign.h>
 
 #include <net/if.h>
@@ -2380,8 +2381,12 @@ x9_route_probe_one(struct sockaddr *dst, unsigned v)
 	printf("X9 ROUTE: unscoped lookup v%u -> %s%u ifindex %u flags 0x%x\n", v, name, unit, index, flags);
 	rtfree(rt);
 }
-void
-x9_route_probe(void)
+/* 238 panicked with a kernel stack overflow: rtalloc1 (which may clone a
+ * host route through the full routing path) ran on the already deep baseband
+ * bridge thread. Run the lookup on its own thread_call stack instead; the
+ * bridge only enqueues it. */
+static void
+x9_route_probe_tc(thread_call_param_t p0 __unused, thread_call_param_t p1 __unused)
 {
 	struct sockaddr_in sin;
 	bzero(&sin, sizeof(sin));
@@ -2393,5 +2398,17 @@ x9_route_probe(void)
 	sin6.sin6_len = sizeof(sin6); sin6.sin6_family = AF_INET6;
 	sin6.sin6_addr.s6_addr[0] = 0x24; sin6.sin6_addr.s6_addr[2] = 0x32; sin6.sin6_addr.s6_addr[15] = 1; /* 2400:3200::1 */
 	x9_route_probe_one((struct sockaddr *)&sin6, 6);
+}
+void
+x9_route_probe(void)
+{
+	static thread_call_t call;
+	if (call == NULL) {
+		call = thread_call_allocate_with_options(x9_route_probe_tc, NULL, THREAD_CALL_PRIORITY_LOW, 0);
+		if (call == NULL) {
+			return;
+		}
+	}
+	(void) thread_call_enter(call); /* coalesces if the previous lookup is still queued */
 }
 #endif
