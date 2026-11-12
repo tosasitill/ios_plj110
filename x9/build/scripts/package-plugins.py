@@ -15,6 +15,16 @@ mode 0755 for the two executables, identity = SHA-256 of the sorted-key
 compact JSON file list. No device access; mailbox/update.py stages it.
 --from-mailbox only rewrites the kernel allowlist from an existing package
 (e.g. to return to an installed revision).
+
+    python3 -I x9/build/scripts/package-plugins.py --base-package x9/out/<old>/plugin-package \
+        --extra-root .local/x9/appsync/runtime-NEW/root --out x9/out/<name>
+
+reuses an existing package byte for byte (plugin rebuilds are not reproducible,
+and the installed revision must keep matching) and appends every file under
+--extra-root at its absolute path (e.g. the AppSync runtime and
+/Applications/X9Installer.app). Mode 0755 for Mach-O files, 0644 otherwise.
+The kernel creates every listed ancestor directory (mkdir is one level) and
+never replaces an existing file that differs.
 """
 import argparse
 import hashlib
@@ -93,6 +103,59 @@ echo "Installed versioned Metal and PanVK bundles. Restart XNU to verify exact p
     return pkg, len(files), offset
 
 
+def layout(pkg, files):
+    offset = 4096
+    for f in files:
+        f['offset'] = offset
+        offset = (offset + f['bytes'] + 4095) & ~4095
+    capacity = json.loads(MAILBOX.read_text())['logical_blocks'] * 4096
+    if offset > capacity:
+        sys.exit(f'payload {offset} bytes exceeds the mailbox ({capacity} bytes)')
+    identity = hashlib.sha256(json.dumps(files, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    (pkg / 'mailbox.json').write_text(json.dumps({'identity': identity, 'files': files, 'payload_end': offset}, indent=2) + '\n')
+    (pkg / 'manifest.json').write_text(json.dumps({'files': files,
+        'destination': 'iOS writable native HFS root; never Android F2FS plaintext view',
+        'no_probe_or_test_program': True}, indent=2) + '\n')
+    (pkg / 'SHA256SUMS').write_text(''.join(f"{f['sha256']}  {f['source']}\n" for f in files))
+    write_header(files, identity)
+    return offset
+
+
+def package_extra(base, extra, out):
+    desc = json.loads((base / 'mailbox.json').read_text())
+    pkg = out / 'plugin-package'
+    if pkg.exists():
+        shutil.rmtree(pkg)
+    pkg.mkdir(parents=True)
+    files = []
+    for f in desc['files']:
+        src = base / f['source']
+        data = src.read_bytes()
+        if len(data) != f['bytes'] or hashlib.sha256(data).hexdigest() != f['sha256']:
+            sys.exit(f'{src} does not match {base}/mailbox.json')
+        (pkg / f['source']).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, pkg / f['source'])
+        files.append({k: f[k] for k in ('path', 'source', 'bytes', 'sha256', 'mode')})
+    known = {f['path'] for f in files}
+    for p in sorted(extra.rglob('*')):
+        if p.is_symlink():
+            sys.exit(f'symlink not supported: {p}')
+        if not p.is_file():
+            continue
+        path = '/' + p.relative_to(extra).as_posix()
+        if path in known or len(path) > 400:
+            sys.exit(f'bad or duplicate path {path}')
+        data = p.read_bytes()
+        source = 'extra' + path
+        (pkg / source).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(p, pkg / source)
+        files.append({'path': path, 'source': source, 'bytes': len(data),
+                      'sha256': hashlib.sha256(data).hexdigest(),
+                      'mode': 0o755 if data[:4] == b'\xcf\xfa\xed\xfe' else 0o644})
+    end = layout(pkg, files)
+    return pkg, len(files), end
+
+
 def write_header(files, identity):
     def digest(hexstr):
         return ','.join('0x' + hexstr[i:i + 2] for i in range(0, 64, 2))
@@ -100,7 +163,8 @@ def write_header(files, identity):
              'struct X9ExternalFile {const char *path;uint64_t bytes;unsigned char sha256[32];uint64_t offset;int mode;};',
              'static const struct X9ExternalFile x9_external_files[]={']
     lines += [f'{{{json.dumps(f["path"])},{f["bytes"]},{{{digest(f["sha256"])}}},{f["offset"]},{f["mode"]}}},' for f in files]
-    dirs = sorted({str(Path(f['path']).parent) for f in files}, key=lambda d: (d.count('/'), d))
+    dirs = sorted({str(a) for f in files for a in Path(f['path']).parents if str(a) != '/'},
+                  key=lambda d: (d.count('/'), d))
     lines += ['};', f'static const unsigned char x9_update_identity[32]={{{digest(identity)}}};',
               'static const char *const x9_update_dirs[]={'] + [json.dumps(d) + ',' for d in dirs] + ['};']
     HEADER.write_text('\n'.join(lines) + '\n')
@@ -112,7 +176,15 @@ def main():
     ap.add_argument('--out', type=Path)
     ap.add_argument('--work', type=Path, default=WORK, help='directory holding the built bundles')
     ap.add_argument('--from-mailbox', type=Path, help="only regenerate the allowlist from this package's mailbox.json")
+    ap.add_argument('--base-package', type=Path, help='existing plugin-package to reuse byte for byte')
+    ap.add_argument('--extra-root', type=Path, help='directory tree appended at absolute paths')
     a = ap.parse_args()
+    if a.base_package or a.extra_root:
+        if not (a.base_package and a.extra_root and a.out):
+            ap.error('--base-package, --extra-root and --out go together')
+        pkg, count, end = package_extra(a.base_package.resolve(), a.extra_root.resolve(), a.out.resolve())
+        print(f'{pkg}: {count} files, payload {end} bytes; kernel allowlist {HEADER} updated')
+        return
     if a.from_mailbox:
         desc = json.loads(a.from_mailbox.read_text())
         write_header(desc['files'], desc['identity'])

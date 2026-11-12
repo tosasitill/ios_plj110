@@ -45,6 +45,7 @@ def build(out, developer):
     dylib = lib / 'UniXNUAppSync.dylib'
     run(flags + ['-dynamiclib', HERE / 'vendor/AppSync.m', HERE / 'vendor/Signing.m',
                  '-DAS_SIGNER_PATH="' + PREFIX + '/lib/' + signer.LIBRARY + '"',
+                 '-DAS_JBCTL_PATH="' + PREFIX + '/bin/x9-jbctl"',
                  '-install_name', PREFIX + '/lib/UniXNUAppSync.dylib', '-o', dylib])
     # Full in-process recursive signer; installd need not fork or execute ldid.
     run([sys.executable, '-I', HERE / 'vendor/signer.py', '--output', lib / signer.LIBRARY,
@@ -59,16 +60,19 @@ def build(out, developer):
         'com.apple.private.mobileinstall.allowedSPI': ['Install', 'InstallForLaunchServices'],
         'com.apple.security.exception.mach-lookup.global-name': ['com.apple.mobile.installd'],
     }))
+    ctl_entitlements = out / 'jbctl-entitlements.plist'
+    ctl_entitlements.write_bytes(plistlib.dumps({
+        'platform-application': True,
+        'com.apple.lsapplicationworkspace.rebuildappdatabases': True,
+        'com.apple.private.MobileContainerManager.allowed': True,
+        'com.apple.private.security.no-sandbox': True,
+    }))
     for binary in (dylib, lib / signer.LIBRARY, appinst, ctl):
-        extra = ['--entitlements', entitlements] if binary == appinst else []
+        extra = (['--entitlements', entitlements] if binary == appinst else
+                 ['--entitlements', ctl_entitlements] if binary == ctl else [])
         run(['/usr/bin/codesign', '--force', '--sign', '-', '--timestamp=none', *extra, binary])
         binary.chmod(0o755)
-    # This is build metadata, not device or post-build image verification.
-    files = {}
-    for binary in (dylib, lib / signer.LIBRARY, appinst, ctl):
-        data = binary.read_bytes()
-        files['/' + binary.relative_to(root).as_posix()] = {
-            'size': len(data), 'sha256': hashlib.sha256(data).hexdigest(), 'mode': '0755'}
+    build_installer(root, install, flags, run)
     license_dir = install / 'licenses'
     license_dir.mkdir()
     import shutil
@@ -80,12 +84,83 @@ def build(out, developer):
         raise ValueError('signer target/path mismatch')
     cache = Path(value['cache'])
     shutil.copytree(cache / 'licenses', license_dir / 'signer')
+    # This is build metadata, not device or post-build image verification.
+    files = {}
+    for path in sorted(root.rglob('*')):
+        if path.is_file() and not path.is_symlink():
+            data = path.read_bytes()
+            files['/' + path.relative_to(root).as_posix()] = {
+                'size': len(data), 'sha256': hashlib.sha256(data).hexdigest(),
+                'mode': '0755' if data[:4] == b'\xcf\xfa\xed\xfe' else '0644'}
     files_manifest = dict(abi=1, build='20H392', target='arm64-apple-ios16.0', prefix=PREFIX,
         files=files, hardware_verified=False, installed=False,
         native_usb_complete=False, bootstrap_included=False,
         signer_relink_objects=str(cache), activation='appsync=1 after explicit extent staging')
     (out / 'runtime.json').write_text(json.dumps(files_manifest, indent=2) + '\n')
     print(f'Built offline AppSync runtime: {out}; NOT staged or hardware verified', flush=True)
+
+
+def png(size):
+    """A plain app icon: rounded-free dark square with a green "X9" bar mark."""
+    import struct
+    import zlib
+    rows = []
+    for y in range(size):
+        row = bytearray([0])
+        for x in range(size):
+            u, v = x / size, y / size
+            r, g, b = 24, 26, 32
+            if 0.22 < v < 0.78 and (abs((u - 0.22) - (v - 0.22)) < 0.07 or abs((u - 0.22) - (0.78 - v)) < 0.07) and u < 0.5:
+                r, g, b = 80, 220, 120          # X
+            if 0.55 < u < 0.78 and 0.22 < v < 0.78 and (u > 0.71 or v < 0.29 or 0.47 < v < 0.54 or (u < 0.62 and v < 0.54)):
+                r, g, b = 80, 220, 120          # 9
+            row += bytes((r, g, b))
+        rows.append(bytes(row))
+    raw = zlib.compress(b''.join(rows), 9)
+    chunk = lambda t, d: struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t + d) & 0xffffffff)
+    return (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', size, size, 8, 2, 0, 0, 0)) +
+            chunk(b'IDAT', raw) + chunk(b'IEND', b''))
+
+
+def build_installer(root, install, flags, run):
+    """/Applications/X9Installer.app: a non-containerized system app registered
+    by SpringBoard through x9-jbctl --register (see installer/main.m)."""
+    app = root / 'Applications/X9Installer.app'
+    app.mkdir(parents=True)
+    run(flags + ['-framework', 'UIKit', '-framework', 'UniformTypeIdentifiers', HERE / 'installer/main.m', '-o', app / 'X9Installer'])
+    for scale in (2, 3):
+        (app / f'AppIcon60x60@{scale}x.png').write_bytes(png(60 * scale))
+    info = {
+        'CFBundleIdentifier': 'org.x9.installer', 'CFBundleExecutable': 'X9Installer',
+        'CFBundleName': 'X9Installer', 'CFBundleDisplayName': 'X9 安装器',
+        'CFBundlePackageType': 'APPL', 'CFBundleVersion': '1', 'CFBundleShortVersionString': '1.0',
+        'CFBundleInfoDictionaryVersion': '6.0', 'CFBundleDevelopmentRegion': 'zh_CN',
+        'CFBundleSupportedPlatforms': ['iPhoneOS'], 'MinimumOSVersion': '16.0', 'DTPlatformName': 'iphoneos',
+        'LSRequiresIPhoneOS': True, 'UIDeviceFamily': [1], 'UIRequiredDeviceCapabilities': ['arm64'],
+        'UILaunchScreen': {}, 'UISupportedInterfaceOrientations': ['UIInterfaceOrientationPortrait'],
+        'UIFileSharingEnabled': True, 'LSSupportsOpeningDocumentsInPlace': False,
+        'CFBundleIcons': {'CFBundlePrimaryIcon': {'CFBundleIconFiles': ['AppIcon60x60'], 'CFBundleIconName': 'AppIcon'}},
+        'CFBundleDocumentTypes': [{'CFBundleTypeName': 'iOS App', 'CFBundleTypeRole': 'Viewer',
+                                   'LSHandlerRank': 'Owner', 'LSItemContentTypes': ['com.apple.itunes.ipa']}],
+        'UTImportedTypeDeclarations': [{'UTTypeIdentifier': 'com.apple.itunes.ipa', 'UTTypeDescription': 'iOS App',
+                                        'UTTypeConformsTo': ['public.zip-archive', 'public.data'],
+                                        'UTTypeTagSpecification': {'public.filename-extension': ['ipa']}}],
+    }
+    (app / 'Info.plist').write_bytes(plistlib.dumps(info, fmt=plistlib.FMT_BINARY))
+    (app / 'PkgInfo').write_bytes(b'APPL????')
+    ents = {
+        'application-identifier': 'org.x9.installer', 'platform-application': True,
+        'com.apple.private.mobileinstall.allowedSPI': ['Install', 'InstallForLaunchServices'],
+        'com.apple.security.exception.mach-lookup.global-name': ['com.apple.mobile.installd'],
+        'com.apple.private.security.no-container': True,
+        'com.apple.private.security.no-sandbox': True,
+    }
+    share = install / 'share'
+    share.mkdir(exist_ok=True)
+    (share / 'X9Installer.entitlements').write_bytes(plistlib.dumps(ents))
+    run(['/usr/bin/codesign', '--force', '--sign', '-', '--timestamp=none',
+         '--entitlements', share / 'X9Installer.entitlements', app])
+    (app / 'X9Installer').chmod(0o755)
 
 
 def main():

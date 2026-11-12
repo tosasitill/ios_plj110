@@ -6,6 +6,7 @@
  */
 extern int sweet_early_is_x9(void);
 extern int sweet_x9_arg(const char *, int);
+static int x9_appsync_enabled(void);   /* x9_appsync_env.inc */
 static bool
 x9_appsync_user_path(const char *path)
 {
@@ -29,7 +30,7 @@ x9_appsync_user_path(const char *path)
 static bool
 x9_appsync_user_exec(struct image_params *imgp)
 {
-    if (!sweet_early_is_x9() || sweet_x9_arg("appsync", 0) != 1 || !imgp->ip_vp) return false;
+    if (!x9_appsync_enabled() || !imgp->ip_vp) return false;
     int length = MAXPATHLEN;
     char *path = kalloc_data(MAXPATHLEN, Z_WAITOK);
     if (!path) return false;
