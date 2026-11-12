@@ -302,6 +302,35 @@ static struct pr_usrreqs route_usrreqs = {
 	.pru_soreceive =        soreceive,
 };
 
+#if defined(ARM64_BOARD_CONFIG_SWEET)
+/* 238: Safari/Weather reported "not connected" (path: No network route)
+ * while system flows bound to pdp_ip0 worked. Log default-route
+ * add/delete/change (v4 0.0.0.0, v6 ::) with the caller and ifscope,
+ * bounded. noinline: route_output must not grow its frame for logging. */
+__attribute__((noinline)) static int
+x9_rt_trace_default(const struct rt_msghdr *rtm, const struct sockaddr *dsa,
+    const struct sockaddr *gsa, unsigned int ifscope)
+{
+	static int x9_def_logged;
+	if (dsa == NULL || x9_def_logged >= 64 ||
+	    !(rtm->rtm_type == RTM_ADD || rtm->rtm_type == RTM_DELETE || rtm->rtm_type == RTM_CHANGE)) {
+		return 0;
+	}
+	if (!((dsa->sa_family == AF_INET && SIN(dsa)->sin_addr.s_addr == INADDR_ANY) ||
+	    (dsa->sa_family == AF_INET6 && IN6_IS_ADDR_UNSPECIFIED(&SIN6(dsa)->sin6_addr)))) {
+		return 0;
+	}
+	x9_def_logged++;
+	const uint8_t *g = (gsa != NULL && gsa->sa_family == AF_INET) ? (const uint8_t *)&SIN(gsa)->sin_addr : NULL;
+	printf("X9 ROUTE: pid %d default v%u %s gw-family %u gw %u.%u.%u.%u ifindex %u ifscope %u flags 0x%x\n",
+	    proc_selfpid(), dsa->sa_family == AF_INET ? 4 : 6,
+	    rtm->rtm_type == RTM_ADD ? "add" : rtm->rtm_type == RTM_DELETE ? "delete" : "change",
+	    gsa != NULL ? gsa->sa_family : 0, g ? g[0] : 0, g ? g[1] : 0, g ? g[2] : 0, g ? g[3] : 0,
+	    rtm->rtm_index, ifscope, rtm->rtm_flags);
+	return 1;
+}
+#endif
+
 /*ARGSUSED*/
 static int
 route_output(struct mbuf *m, struct socket *so)
@@ -517,27 +546,9 @@ route_output(struct mbuf *m, struct socket *so)
 	}
 
 #if defined(ARM64_BOARD_CONFIG_SWEET)
-	/* 238: Safari/Weather reported "not connected" (path: No network route)
-	 * while system flows bound to pdp_ip0 worked. Always log default-route
-	 * add/delete/change (v4 0.0.0.0, v6 ::) with the caller, ifscope and
-	 * the kernel result, bounded. */
-	if ((rtm->rtm_type == RTM_ADD || rtm->rtm_type == RTM_DELETE || rtm->rtm_type == RTM_CHANGE) &&
-	    info.rti_info[RTAX_DST] != NULL) {
-		const struct sockaddr *dsa = info.rti_info[RTAX_DST];
-		boolean_t def = (dsa->sa_family == AF_INET && SIN(dsa)->sin_addr.s_addr == INADDR_ANY) ||
-		    (dsa->sa_family == AF_INET6 && IN6_IS_ADDR_UNSPECIFIED(&SIN6(dsa)->sin6_addr));
-		static int x9_def_logged;
-		if (def && x9_def_logged < 64) {
-			x9_def_logged++; x9_default_rt = 1;
-			char pname[20]; proc_selfname(pname, sizeof(pname));
-			const struct sockaddr *gsa = info.rti_info[RTAX_GATEWAY];
-			const uint8_t *g = (gsa != NULL && gsa->sa_family == AF_INET) ? (const uint8_t *)&SIN(gsa)->sin_addr : NULL;
-			printf("X9 ROUTE: %s default v%u %s gw-family %u gw %u.%u.%u.%u ifindex %u ifscope %u flags 0x%x\n", pname,
-			    dsa->sa_family == AF_INET ? 4 : 6,
-			    rtm->rtm_type == RTM_ADD ? "add" : rtm->rtm_type == RTM_DELETE ? "delete" : "change",
-			    gsa != NULL ? gsa->sa_family : 0, g ? g[0] : 0, g ? g[1] : 0, g ? g[2] : 0, g ? g[3] : 0,
-			    rtm->rtm_index, ifscope, rtm->rtm_flags);
-		}
+	/* 238: default-route trace, out of line (no locals in route_output). */
+	if (x9_rt_trace_default(rtm, info.rti_info[RTAX_DST], info.rti_info[RTAX_GATEWAY], ifscope)) {
+		x9_default_rt = 1;
 	}
 	/* SWEET: which process changes IPv4 routes (network bring-up). */
 	uint32_t x9_net_trace=0;
@@ -2353,6 +2364,22 @@ route_dinit(struct domain *dp)
 /* 238: unscoped (IFSCOPE_NONE) route lookups, the same kind of lookup an
  * unbound app socket gets. Called from the DPMAIF 10 s stats; read-only. */
 void x9_route_probe(void);
+__attribute__((noinline)) static void
+x9_route_probe_one(struct sockaddr *dst, unsigned v)
+{
+	struct rtentry *rt = rtalloc1(dst, 0, 0);
+	if (rt == NULL) {
+		printf("X9 ROUTE: unscoped lookup v%u -> none\n", v);
+		return;
+	}
+	RT_LOCK(rt);
+	struct ifnet *ifp = rt->rt_ifp;
+	unsigned index = ifp ? ifp->if_index : 0, unit = ifp ? ifp->if_unit : 0, flags = (unsigned)rt->rt_flags;
+	const char *name = ifp ? ifp->if_name : "?";
+	RT_UNLOCK(rt);
+	printf("X9 ROUTE: unscoped lookup v%u -> %s%u ifindex %u flags 0x%x\n", v, name, unit, index, flags);
+	rtfree(rt);
+}
 void
 x9_route_probe(void)
 {
@@ -2360,29 +2387,11 @@ x9_route_probe(void)
 	bzero(&sin, sizeof(sin));
 	sin.sin_len = sizeof(sin); sin.sin_family = AF_INET;
 	sin.sin_addr.s_addr = htonl(0x72727272); /* 114.114.114.114 */
-	struct rtentry *rt = rtalloc1((struct sockaddr *)&sin, 0, 0);
-	char v4[64] = "none";
-	if (rt != NULL) {
-		RT_LOCK(rt);
-		struct ifnet *ifp = rt->rt_ifp;
-		snprintf(v4, sizeof(v4), "%s%d flags 0x%x", ifp ? ifp->if_name : "?", ifp ? ifp->if_unit : -1, rt->rt_flags);
-		RT_UNLOCK(rt);
-		rtfree(rt);
-	}
+	x9_route_probe_one((struct sockaddr *)&sin, 4);
 	struct sockaddr_in6 sin6;
 	bzero(&sin6, sizeof(sin6));
 	sin6.sin6_len = sizeof(sin6); sin6.sin6_family = AF_INET6;
-	sin6.sin6_addr.s6_addr[0] = 0x24; sin6.sin6_addr.s6_addr[1] = 0x00; /* 2400:3200::1 */
-	sin6.sin6_addr.s6_addr[2] = 0x32; sin6.sin6_addr.s6_addr[15] = 1;
-	rt = rtalloc1((struct sockaddr *)&sin6, 0, 0);
-	char v6[64] = "none";
-	if (rt != NULL) {
-		RT_LOCK(rt);
-		struct ifnet *ifp = rt->rt_ifp;
-		snprintf(v6, sizeof(v6), "%s%d flags 0x%x", ifp ? ifp->if_name : "?", ifp ? ifp->if_unit : -1, rt->rt_flags);
-		RT_UNLOCK(rt);
-		rtfree(rt);
-	}
-	printf("X9 ROUTE: unscoped lookup v4 114.114.114.114 -> %s; v6 2400:3200::1 -> %s\n", v4, v6);
+	sin6.sin6_addr.s6_addr[0] = 0x24; sin6.sin6_addr.s6_addr[2] = 0x32; sin6.sin6_addr.s6_addr[15] = 1; /* 2400:3200::1 */
+	x9_route_probe_one((struct sockaddr *)&sin6, 6);
 }
 #endif
