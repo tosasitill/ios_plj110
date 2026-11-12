@@ -49,6 +49,7 @@ public:
 	uint32_t                  gpuCleanSeed; /* surface seed at the last GPU-side CPU clean */
 	bool                      gpuCleanValid;
 	bool                      gpuDirty;     /* GPU may have written since the last CPU acquire */
+	char                      creator[17];  /* 244 budget audit: process that first published it */
 
 	bool init() APPLE_KEXT_OVERRIDE { scanoutPhys = 0; scanoutSlot = -1; values = NULL; purgeable = 0; wrapDelta = 0; wrapped = false;
 		gpuCleanSeed = 0; gpuCleanValid = false; gpuDirty = false; return OSObject::init(); }

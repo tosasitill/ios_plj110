@@ -226,7 +226,10 @@ static void render_slot_giveback(unsigned s,bool reuse) {
 static uint64_t render_steals,render_rebinds,render_steal_fail;
 static bool render_steal_enabled() {
  static int mode=-1;
- if(mode<0){mode=sweet_x9_arg("x9cs",0)==1?1:0;IOLog("X9 RENDER SLOT: CSG slot steal %s (x9cs)\n",mode?"ON":"off");}
+ /* 244: default ON. 243: eight groups held all CSG slots; AegirPoster,
+  * Photos and ScreenshotServices got op7 0xe00002be -> device=nil and
+  * AegirPoster crash-looped every ~12 s. x9cs=0 restores the fixed slots. */
+ if(mode<0){mode=sweet_x9_arg("x9cs",1)==1?1:0;IOLog("X9 RENDER SLOT: CSG slot steal %s (x9cs)\n",mode?"ON":"off");}
  return mode==1;
 }
 static bool render_group_save(RenderKernelGroup *v) {

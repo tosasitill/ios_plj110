@@ -335,6 +335,9 @@ sweet_surface_insert_locked(SweetSurface *s)
 		sweet_surface_next_id = id + 1 < SWEET_SURFACE_MAX_ID ? id + 1 : 1;
 		if (sweet_surface_table[id] == NULL) {
 			s->id = id;
+			if (s->creator[0] == 0) {
+				proc_selfname(s->creator, sizeof(s->creator));
+			}
 			s->retain();
 			sweet_surface_table[id] = s;
 			sweet_surface_users[id] = 1;
@@ -343,6 +346,66 @@ sweet_surface_insert_locked(SweetSurface *s)
 		}
 	}
 	return false;
+}
+
+/*
+ * 244: 243 had 517 IOSurface creates fail with kIOReturnNoMemory, down to a
+ * 4x4 (16 KiB) surface, i.e. the 1536 MiB wired budget was used up. Nothing
+ * said who held it. When the budget check refuses (first 4, then every 64th),
+ * sum the table: live wired buffers, the part marked purgeable-volatile (real
+ * IOSurface reclaims those; we only record the state), bytes alive but no
+ * longer in the table (held by mappings/GPU imports only), and the top
+ * creators. Observation only; no purge, no limit change.
+ */
+static void
+sweet_surface_budget_audit(uint32_t want)
+{
+	static uint32_t refused;
+	uint32_t n = ++refused;
+	if (n > 4 && n % 64) {
+		return;
+	}
+	struct { char name[17]; uint64_t bytes; uint32_t count; } top[12];
+	bzero(top, sizeof(top));
+	uint64_t table = 0, vol = 0, empty = 0;
+	uint32_t live = 0, other = 0;
+	IOLockLock(sweet_surface_lock);
+	for (uint32_t id = 1; id < SWEET_SURFACE_MAX_ID; id++) {
+		SweetSurface *s = sweet_surface_table[id];
+		if (s == NULL || OSDynamicCast(IOBufferMemoryDescriptor, s->memory) == NULL) {
+			continue;
+		}
+		live++;
+		table += s->allocSize;
+		if (s->purgeable == 1) {
+			vol += s->allocSize;
+		} else if (s->purgeable == 2) {
+			empty += s->allocSize;
+		}
+		unsigned k;
+		for (k = 0; k < 12 && top[k].bytes && strncmp(top[k].name, s->creator, sizeof(top[k].name)); k++) {
+		}
+		if (k < 12) {
+			if (!top[k].bytes) {
+				strlcpy(top[k].name, s->creator[0] ? s->creator : "?", sizeof(top[k].name));
+			}
+			top[k].bytes += s->allocSize;
+			top[k].count++;
+		} else {
+			other++;
+		}
+	}
+	IOLockUnlock(sweet_surface_lock);
+	uint64_t wired = sweet_surface_wired;
+	IOLog("SWEET SURF BUDGET: refused #%u want %u wired %llu MiB of %llu; table %u surfaces %llu MiB (volatile %llu MiB, empty %llu MiB); outside table %lld MiB\n",
+	    n, want, wired >> 20, SWEET_SURFACE_WIRED_MAX >> 20, live, table >> 20, vol >> 20, empty >> 20,
+	    ((long long)wired - (long long)table) / (1 << 20));
+	for (unsigned k = 0; k < 12 && top[k].bytes; k++) {
+		IOLog("SWEET SURF BUDGET:   %s %u surfaces %llu MiB\n", top[k].name, top[k].count, top[k].bytes >> 20);
+	}
+	if (other) {
+		IOLog("SWEET SURF BUDGET:   (%u surfaces from more creators)\n", other);
+	}
 }
 
 /* Add a user to a surface that may have left the table (port lookups). */
@@ -480,6 +543,8 @@ sweet_surface_create_buffer(uint32_t width, uint32_t height,
 	    s->allocSize <= SWEET_SURFACE_WIRED_MAX) {
 		memory = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
 		    kIODirectionInOut | kIOMemoryKernelUserShared, s->allocSize, page_size);
+	} else {
+		sweet_surface_budget_audit(s->allocSize);
 	}
 	if (!memory) {
 		OSAddAtomic64(-(SInt64)s->allocSize, (volatile SInt64 *)&sweet_surface_wired);
@@ -1046,6 +1111,8 @@ IOSurfaceRootUserClient::create(IOExternalMethodArguments *args)
 		    s->allocSize <= SWEET_SURFACE_WIRED_MAX) {
 			mem = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
 			    kIODirectionInOut | kIOMemoryKernelUserShared, s->allocSize, page_size);
+		} else {
+			sweet_surface_budget_audit(s->allocSize);
 		}
 		if (mem == NULL) {
 			OSAddAtomic64(-(SInt64)s->allocSize, (volatile SInt64 *)&sweet_surface_wired);
