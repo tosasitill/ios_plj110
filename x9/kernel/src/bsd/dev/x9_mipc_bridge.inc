@@ -35,7 +35,14 @@ static int x9mi_at_read(const char *cmd){
   "AT+CGMI","AT+CGMM","AT+CGMR","AT+CFUN?",
   /* CELL225 user-plane probe: 27.007 read/execute forms only, list all CIDs. */
   "AT+CGACT?","AT+CGDCONT?","AT+CGPADDR","AT+CGCONTRDP","AT+C5GQOSRDP",
-  "AT+CGEQOSRDP","AT+CGTFTRDP","AT+CSCON?"};
+  "AT+CGEQOSRDP","AT+CGTFTRDP","AT+CSCON?",
+  /* 242: 27.007 UE usage setting / MTK IMS config reads per SIM. */
+  "AT+CEUS?","AT+EIMSCFG?",
+  /* The ONLY write on this entrypoint (243): UE usage setting = data centric,
+   * so a SIM without IMS voice keeps N1 mode (242: SIM1 stayed on NR SA
+   * across an RRC release, the voice-centric SIM2 fell back to LTE). Gated by
+   * x9_md_ceus in the caller. Not a SIM/NV/PIN mutation. */
+  "AT+CEUS=1"};
  for(unsigned i=0;i<sizeof(reads)/sizeof(reads[0]);i++)if(!strcmp(cmd,reads[i]))return 1;
  /* CRSM 176 READ BINARY, 178 READ RECORD, 192 GET RESPONSE. Only printable
   * decimal/hex/path punctuation, one command, no data field or AT chaining. */

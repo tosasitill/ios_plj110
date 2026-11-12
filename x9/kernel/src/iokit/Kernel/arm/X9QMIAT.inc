@@ -51,7 +51,7 @@ static void x9ds_apps(bool ready);
 static void x9ds_cards(const uint8_t *first,const uint8_t *second,bool ready);
 static bool x9ds_data_ready(unsigned slot);
 struct x9q_job {
- bool used,background,probe,mipc,ctx;uint32_t local,port,len;uint64_t generation,order,deadline,token,token_deadline;
+ bool used,background,probe,mipc,ctx,usage;uint32_t local,port,len;uint64_t generation,order,deadline,token,token_deadline;
  uint8_t req[X9Q_REQ];uint16_t id;unsigned stage;
  char command[X9_AT_COMMAND_MAX];
  int sim; /* 0 unknown, 1 ready, 2 PIN, 3 PUK */
@@ -453,8 +453,10 @@ static void x9q_siginfo(x9q_job &j,const char *r){
   nr_rsrp=pr/4;nr_sinr=ps*5/2;nr_ok=true;
   if((unsigned)iq<nn&&N[iq]!=0x7fff&&N[iq]>=-43*4&&N[iq]<=20*4&&N[iq]!=0){nr_rsrq=N[iq]/4;nr_rsrq_ok=true;}
  }
- static unsigned logged[2];
- if(j.sim_slot<2&&logged[j.sim_slot]<8){logged[j.sim_slot]++;char raw[220];unsigned w=0;
+ static unsigned logged[2],samples[2];
+ if(j.sim_slot<2)samples[j.sim_slot]++;
+ /* 243: first 8 per SIM, then every 30th sample, so later bar inputs show. */
+ if(j.sim_slot<2&&(logged[j.sim_slot]<8||samples[j.sim_slot]%30==0)){logged[j.sim_slot]++;char raw[220];unsigned w=0;
   for(const char *q=r;*q&&w+2<sizeof(raw);q++)raw[w++]=*q=='\r'?'|':*q=='\n'?'/':((unsigned char)*q<32||(unsigned char)*q>126)?'?':*q;
   raw[w]=0;
   printf("X9 QMI AT: ECSQ SIM%u client 0x%x generation %llu background %u lte %d (rsrp_q %d rsrq_q %d sinr_q %d) nr %d (rsrp %d rsrq %d%s snr*10 %d) raw \"%s\"\n",
@@ -506,7 +508,41 @@ static void x9ctx_result(x9q_job &j,const char *r,int result){
  printf("X9 CELL ATCTX: SIM%u round %u done (%u read-only queries)\n",j.sim_slot+1,j.record,(unsigned)X9CTX_COUNT);
  bzero(&j,sizeof(j));x9q_active=-1;
 }
+/* 243: per-SIM UE usage setting over MIPC once the MD is online (MIPC opens
+ * right after radio enable, ~4 s before SA registration). SIM1 only reads
+ * (its init-port CEUS=1 is verified here); SIM2 reads, sets data centric
+ * (x9_md_ceus, default 1), reads back, and reads EIMSCFG. */
+static const char *const x9u_cmds[]={"AT+CEUS?\r","AT+CEUS=1\r","AT+CEUS?\r","AT+EIMSCFG?\r"};
+#define X9U_STAGE 70u
+#define X9U_COUNT (sizeof(x9u_cmds)/sizeof(x9u_cmds[0]))
+static bool x9u_done[2];static unsigned x9u_tries[2];
+static unsigned x9u_next(const x9q_job &j,unsigned k){
+ for(;k<X9U_COUNT;k++){
+  bool write=k==1||k==2;
+  if(write&&(j.sim_slot==0||!sweet_x9_arg("x9_md_ceus",1)))continue;
+  return k;
+ }
+ return X9U_COUNT;
+}
+static void __attribute__((noinline)) x9u_result(x9q_job &j,const char *r,int result){
+ unsigned k=j.stage-X9U_STAGE;
+ static char flat[120];unsigned n=0; // bridge thread: no stack buffer (238)
+ for(const char *p=r?r:"";*p&&n+1<sizeof(flat);p++){
+  char c=*p;if(c=='\r')continue;if(c=='\n'){if(n&&flat[n-1]!='|')flat[n++]='|';continue;}
+  flat[n++]=(c<32||c>126)?'.':c;
+ }
+ while(n&&flat[n-1]=='|')n--;flat[n]=0;
+ char cmd[16];strlcpy(cmd,k<X9U_COUNT?x9u_cmds[k]:"?",sizeof(cmd));
+ size_t cl=strlen(cmd);if(cl&&cmd[cl-1]=='\r')cmd[cl-1]=0;
+ printf("X9 CELL USAGE: SIM%u %s result %d \"%s\"\n",j.sim_slot+1,cmd,result,flat);
+ unsigned next=x9u_next(j,k+1);
+ if(next<X9U_COUNT){x9q_command(j,x9u_cmds[next],X9U_STAGE+next);return;}
+ if(j.sim_slot<2)x9u_done[j.sim_slot]=true;
+ printf("X9 CELL USAGE: SIM%u done\n",j.sim_slot+1);
+ bzero(&j,sizeof(j));x9q_active=-1;
+}
 static void x9q_start(x9q_job &j){
+ if(j.usage){unsigned k=x9u_next(j,0);x9q_command(j,x9u_cmds[k],X9U_STAGE+k);return;}
  if(j.ctx){x9q_command(j,x9ctx_cmds[0],X9CTX_STAGE);return;}
  unsigned service=j.port-X9BB_PORT_BASE;
  if(service==1){x9q_error(j,X9Q_UNSUPPORTED);
@@ -549,6 +585,7 @@ static bool x9q_plain(const char *s,char *out,unsigned cap,bool digits){
  }return found;
 }
 static void x9q_result(x9q_job &j,const char *r,int result){
+ if(j.usage){x9u_result(j,r,result);return;}
  if(j.ctx){x9ctx_result(j,r,result);return;}
  unsigned service=j.port-X9BB_PORT_BASE;bool ok=result==X9_AT_OK;
  if(result==X9_AT_TIMEOUT||result==X9_AT_OFFLINE){x9q_error(j,X9Q_NOT_READY);return;}
@@ -736,9 +773,15 @@ static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *r
   if(!sub.p||sub.n!=(nas?1u:4u)||len!=(nas?11u:14u)||route>=x9_md_sim_count()){
    x9q_reject(local,port,req,len,X9Q_ARG);return;}
   if(c.sim_slot!=route&&x9n_binding_busy(slot)){x9q_reject(local,port,req,len,X9Q_BUSY);return;}
-  if(c.sim_slot!=route)for(const x9q_job &j:x9q_jobs)if(j.used&&!j.probe&&j.local==local){x9q_reject(local,port,req,len,X9Q_BUSY);return;}
+  /* 239-242: CommCenter's SIM2 NAS signal client sent Bind right after three
+   * GetSigInfo requests; the old "pending jobs -> BUSY" rule rejected it every
+   * boot, so both signal clients stayed on SIM1. Jobs already snapshot
+   * sim_slot at creation (x9q_enqueue), so queued replies still answer for the
+   * SIM they were asked on; only later requests follow the new binding. */
+  unsigned pending=0;
+  if(c.sim_slot!=route)for(const x9q_job &j:x9q_jobs)if(j.used&&!j.probe&&j.local==local)pending++;
   c.sim_slot=(uint8_t)route;c.next=0;x9q_packet p(req);p.send(local,port);
-  printf("X9 DUALSIM: service %u client 0x%x bound to SIM%u (queries route, not DDS)\n",service,local,c.sim_slot+1);return;
+  printf("X9 DUALSIM: service %u client 0x%x bound to SIM%u (queries route, not DDS; %u queued for previous SIM)\n",service,local,c.sim_slot+1,pending);return;
  }
  if(service==0x2a){x9ds_request(local,port,req,len);return;}
  if(service==0x0b&&id==0x6e){x9ds_map(local,port,req,len);return;}
@@ -833,6 +876,21 @@ static void x9q_poll(){
   }
  }
  uint64_t now=x9q_ms();
+ /* 243 per-SIM usage-setting job: dual SIM only, one queued at a time,
+  * at most 3 attempts per SIM (a refused/timeout attempt is retried). */
+ if(x9_md_sim_count()==2&&x9_md_at_online()){
+  bool queued=false;for(const x9q_job &q:x9q_jobs)if(q.used&&q.usage)queued=true;
+  for(unsigned s=0;s<2&&!queued;s++){
+   if(x9u_done[s]||x9u_tries[s]>=3)continue;
+   for(x9q_job &j:x9q_jobs)if(!j.used){
+    bzero(&j,sizeof(j));j.used=j.probe=j.background=j.usage=true;j.local=CBQ_PORT_BASE;
+    j.port=X9BB_PORT_BASE+0x03;j.sim_slot=(uint8_t)s;j.len=7;
+    j.order=++x9q_order;j.deadline=now+60000;x9u_tries[s]++;
+    printf("X9 CELL USAGE: SIM%u queued attempt %u\n",s+1,x9u_tries[s]);
+    queued=true;break;
+   }
+  }
+ }
  /* CELL225 user-plane probe: rounds at +1/+6/+15/+40 s after each newly
   * active bearer generation, at most 24 rounds per boot, one queued at a time. */
  {static uint64_t seen_gen[CBP_INTERFACES],t0[CBP_INTERFACES];static unsigned round[CBP_INTERFACES],total;
