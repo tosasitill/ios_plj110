@@ -6,6 +6,16 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## GPU：x9cs默认开 + IOSurface预算审计；顶点补齐方案评估（2026-11-12；x9-gpu-cs-audit 已构建，未启动）
+
+- **243补充观察**：AegirPoster在274-670s崩溃33次(每次4行CRASH)：`factory device=nil`(op7 no CSG slot) -> 3.5MB IOSurface `0xe00002bd` -> SIGABRT，约每12s一次。两种资源耗尽驱动同一个崩溃循环，也是卡顿的可信来源(持续重启/拆除)。IOSurface连4x4(16KiB)也失败，说明1536MiB预算已用满，不是单个大分配。预算加减在源码里成对(free()/失败路径)，暂无记账泄漏证据。另有syncdefaultsd 14次、mediaserverd 6次、ScreenshotServices 3次崩溃。
+- **4c98f5d**(worktree 71be3df，叠在sim2bind上，含278插件，仅改内核)：
+  - `x9cs` 默认=1(`x9cs=0`恢复固定槽)；不占启动参数长度。沿用已有steal：只取bound/空闲/touched/非parked/非uncertain的group，并保存suspend状态。
+  - SweetSurface记录creator；预算拒绝时(前4次，之后每64次)打印 `SWEET SURF BUDGET: refused #n want wired/预算 table数量与MiB (volatile/empty) outside table` 及前12个creator。只观测，不purge、不改上限。
+- **镜像** `x9/out/x9-gpu-cs-audit-gpu278-20261112/boot.img` exit0；278插件不变，无需mailbox staging。
+- **顶点(评估，未实现)**：(1)缓存行假设已排除：PanVK cache_request(起点向下/终点向上对齐)、内核render_cache_defer(要求对齐)、x9_gpu_clean(起点按行对齐循环到end)三层都正确。(2)v14路径是上游PanVK原样：非索引draw `INDEX_COUNT=vertexCount` + RUN_IDVS2(EARLY)。(3)mode2(索引补齐)在220变差可解释为：重复索引被后变换缓存去重，着色的唯一顶点数仍是6，最后的部分顶点组没被补满(推断)。(4)用户补充的两个缺口成立：snapshot补的是数据不是vertex_id(按ID算位置的shader会画出非退化三角形)；编码时拷贝看不到之后的CPU/GPU写。(5)**建议方案**：在PanVK里做(插件279)：非索引三角形draw把INDEX_COUNT补到12的倍数，并加一个sysval `vs.x9_real_count`(默认UINT32_MAX)；NIR pass把整个VS主体包进 `if (vertex_id_zero_base < real_count)`，else分支只写position=vec4(0)。不拷数据(去掉CPU memcpy)、不依赖vertex_id语义、读取发生在GPU执行时、额外lane不越界读也不写内存。
+- **验收看点**：`X9 RENDER SLOT: CSG slot steal ON`、`steal #`/`rebind #`；无 `no CSG slot`；AegirPoster/截图/相册不再device=nil；有 `SWEET SURF BUDGET` 时看volatile与creator分布(volatile大->实现purge；outside table大->查GPU导入/保留context)。需要从开机开始的完整日志。
+
 ## 243 截图／相册失败分析（2026-11-12）：CSG 创建失败，非已证实的照片丢失
 
 - **范围／证据**：只读 `~/243.txt`，捕获约274–670s，缺开机及早期槽位分配；调用的插件路径为278。原始副本与带行号摘录保存 `.local/x9/work/243-photo-analysis/{243.original.txt,evidence.txt}`，不入git。本轮不构建／不访问设备／不改图形代码。
