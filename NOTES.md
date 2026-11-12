@@ -6,6 +6,15 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 过期 worktree 清理（2026-11-12；已执行，当前共20棵）
+
+- **用户要求／结果**：按“把不用的和过期的全清了”清理本仓库工作树。登记 **238→20棵**；`.local` 内 **235→19棵**，全部剩余私有树位于`.local/x9/worktrees/`。已删除 **218棵**，包括旧`ios_plj110-wt-if`、`ios_plj110-wt-wifi`和`.local/x9/work/ios_plj110-nrsa`；未使用`--force`、reset、merge abort、branch deletion或gc。
+- **保留理由**：主树＋5棵当前冻结／依赖树（`heif-resume-20261111`、`appsync-20261112`、`cell-rxvendor-gpu278-20261112`、`gpu-snapshot278-20261111`、`gpu-upstream277`），另 **14棵有未提交源码或进行中合并**的树。`heif-vdec`原MERGE_HEAD与冲突保持，HEIF续接树HEAD仍`b98b99f`；这些未完成工作没有丢弃。完整保留名单见私有`verification.json`；其非主树HEAD与status相对清理前均未变。
+- **提交可恢复**：每棵被删树的HEAD保留在 **`refs/archive/worktrees/20261112/<原目录名>`**，共218个引用；原本的分支也未删除。恢复源码：`git worktree add --detach <恢复目录> refs/archive/worktrees/20261112/<原目录名>`。**历史交接里的旧树绝对路径现在可能已不存在**，不能直接运行旧命令；须先恢复对应冻结源码、补回保存的私有输入并选新唯一构建输出名，不为清理复核重建成功产物。
+- **文件边界**：删除旧树源码副本、generated、Python缓存与旧树内的过期编译二进制。真实私有`.local`固件包、`local.json`及旧构建输入／日志等移至 **`.local/x9/work/worktree-cleanup-20261112/preserved/<原目录名>/`**（约1.5GiB）；符号链接只记录／移除链接自身，未跟随它们删除主目录共享内容。主树当前`x9/out`、设备备份、原始日志／转储、根盘、Apple原件和参考仓库未清理；未检查成功镜像的内容/hash。
+- **空间观察**：`.local/x9/worktrees`目录块数约 **27→8.2GiB**；`df`前后可用量净增加 **12.77GiB**，清理后约 **175.80GiB可用**。目录逻辑减少与实际回收不同，存在APFS共享块及并发写入，不能把18.8GiB目录减少说成全部物理释放。
+- **执行／复核／交接**：私有`.local/x9/work/worktree-cleanup-20261112/`保存`inventory-before.json`、`plan.json`、一次性`cleanup.py`、`actions.jsonl`、`result.json`、`verification.json`及df/open-files/mounts原始记录。执行exit0、218删除／0跳过；只读核对218个归档HEAD匹配、删除目录无残留、保留非主树状态无变化，错误列表为空。没有构建、CI、测试或设备操作。主树并发USB QMU源码改动原样保留，本节单独提交（`git log --grep='cleanup obsolete worktrees'`），不夹带其它窗口源码。
+
 ## USB/AppSync 接入（2026-11-12；离线 runtime 成功，原生 USB／完整 bootstrap 仍未完成）
 
 - **用户要求**：参考 UniXNU-sheng，X9 USB 支持 Mac 配对、AppSync 安装 App，并加越狱环境。本轮从 `32aa992` 开始；期间其它窗口合入 GPU/HEIF/279，当前集成基线 `011b7d6`。未启动子代理，保留其它窗口提交。**不能称为三目标已完成，也没有新的可Finder配对boot**。
