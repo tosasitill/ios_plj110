@@ -14,7 +14,6 @@
 - **结论／边界**：现有证据确认这台国行机的已枚举 SIM 路径没有识别到可用 eUICC，当前原生 eSIM 没有可启用的已证路径；**尚不能判定主板上绝对没有一个被禁用／未路由的 eUICC**，缺新 EID／完整 slot-HAL 状态及主板 BOM／芯片证据。`persist.sys.oost.esim_*` 四个通用开关存在且为0，仅是软件属性，不作为隐藏硬件或改成1即可成功的依据。不建议为此盲刷海外 ROM／改 NV；外置可编程 eUICC 卡是另添硬件、占实体卡槽，尚未在 X9 验证，与打开内置 eSIM 不同。
 - **原始资料／重放／下一步**：私有 `.local/x9/work/euicc-20261112/` 保存两页原始 gzip response、解压 HTML／文本、`official-fetch.json` 和脱敏 `evidence.json`（23项窄证据）。离线重放：`python3 -I .local/x9/work/euicc-20261112/extract.py`，不访问设备。下一步用户将手机置于 Android 并连接 ADB 后，只读 `pm list features`、`dumpsys -l` 定位 eUICC 服务并读取其 dump、保存 `dumpsys phone` 核对全部 slot／EID／ATR；若固件仍未枚举则需 BOM／主板硬件证据，不通过假 EID／改 flag 宣称 eSIM 成功。交接仅本 NOTES，不另建过程报告／timeline。
 
-
 ## 过期 worktree／缓存清理（2026-11-12；最新清理后共17棵／.local内16棵）
 
 - **最新一轮／实际数量**：用户再次要求“把不用的和过期的全清了”。开始盘点时另一窗口已新增NATIVE11／NATIVE12，实际21棵／`.local`20棵。本轮删除`usb-native11-20261112`、`cell-rxvendor-gpu278-20261112`、`gpu-snapshot278-20261111`、`gpu-upstream277`四棵已替代冻结树，**exit0／4删除／0跳过，清理后17棵／`.local`16棵，累计224棵归档删除**。主树＋唯一HEIF续接树＋最新NATIVE12树保留，另14棵未提交源码／合并中树不丢弃；`heif-vdec`不abort/reset。本条取代下方“当前19棵／3棵依赖树保留”的历史数量与保留结论；其它窗口后续仍可能新增树。
@@ -30,7 +29,14 @@
 - **空间观察**：`.local/x9/worktrees`目录块数约 **27→8.2GiB**；`df`前后可用量净增加 **12.77GiB**，清理后约 **175.80GiB可用**。目录逻辑减少与实际回收不同，存在APFS共享块及并发写入，不能把18.8GiB目录减少说成全部物理释放。
 - **执行／复核／交接**：私有`.local/x9/work/worktree-cleanup-20261112/`保存`inventory-before.json`、`plan.json`、一次性`cleanup.py`、`actions.jsonl`、`result.json`、`verification.json`及df/open-files/mounts原始记录。执行exit0、218删除／0跳过；只读核对218个归档HEAD匹配、删除目录无残留、保留非主树状态无变化，错误列表为空。没有构建、CI、测试或设备操作。主树并发USB QMU源码改动原样保留，本节单独提交（`git log --grep='cleanup obsolete worktrees'`），不夹带其它窗口源码。
 
-## USB-NATIVE12 当前交接（2026-11-12；原始request提交／完成适配器已补，未绑定／未上机）
+## USB-NATIVE13 当前交接（2026-11-12；EP0 PIO／同gate事件已补，未安装／未上机）
+
+- **原件观察**：从原OTG SETUP producer追到`IOUSBDeviceControlRequest::inputSetupPacket`（`0xfffffff005ce8854`），其setup8@10／state@c=2；`processSetupPacket`（`0xfffffff005ce8fb4`）区分IN3/OUT有data4/OUT无data7，经controller@68 slot213通知，再调`0xfffffff005cf9080`。不是普通0x68B request。`recover_contract.py`补26条checked instructions／5窄region及2个import cell资格，固定原件恢复exit0：**136 observations／35 regions**，`abi_compatible=false/runtime_loadable=false`。私有`.local/x9/work/usb-native13-20261112/`保存3份必要窄dis及`request-contract/`／`recover.*`；未检查成功产物。
+- **源码接线**：`x9_usb_native_ep0.h/.inc`在现有唯一USB worker接native EP0 PIO；SETUP8B、64B data包／真实短响应ZLP、逐包OUT上限、最终RX等handler接受status。同gate `X9USBControlBridge.h/.inc`仅允许已经安装request bridge的精确workloop一次安装；boot-static复制快照，ticket＋sequence保护事件到callback返回及ack，native代码不在worker或锁内执行。回复入槽不等于完成；IN只在TX ISR＋TX/FIFOFULL clear推进，status另poll核DATAEND及packet/stall/fifo bits全清且无reset/offline才success。SET_ADDRESS沿OPPO寄存器顺序，真实latch未验证；不改configuration/启用端点。reset/bus-off/fault/new SETUP先旧ticket失败，保留claimed快照与未知IN actual；suspend不清掉TX ISR、不提交。5s是自有watchdog，不猜原timeout。
+- **生产编译**：初版单编`SweetX9USB.o`因OSMetaClass的16KiB对象上限拒绝64KiB实例数组，C对象exit0；原始失败log保留。改为boot-static双缓冲后两对象v2 **exit0，C++10既有header override／C59 warning（含既有及新增C99声明风格）**；`compile-unit-v2.py`／`unit-build-v2.{log,exit}`／`unit-build-v2/result.json`。其后源码加同gate install、最终status STALL/FIFOFULL检查与实际speed读取资格；最终源码尚待固定提交完整构建，不将v2当最终构建结果。未跑测试套件、无设备/root/mailbox/push操作，不启动子代理。
+- **未完成／下一步**：registry无installer、control handler未绑定，`native_apple_stack=0`不变。还缺原始control object及响应/完成双向ABI、独立bus events、configuration/alt/endpoint路由、父类字段／descriptor／全部load consumers／metaclass/relocation/bootstrap；之后才实际枚举→Trust/Pair/TLS→用户确认runtime staging→App安装/启动/持久性。AppSync runtime未部署，完整越狱bootstrap未提供；603B/607B boot参数及GPU279配套mailbox约束照旧。不能称Mac配对已可用，目标继续active。
+
+## USB-NATIVE12 交接（2026-11-12；原始request提交／完成适配器已补，未绑定／未上机）
 
 - **范围／证据**：继续原始DeviceFamily接线，不重复NATIVE11成功产物构建。先读已保存原20H392 slot223 wrapper/plain allocator/Family completion及sheng `UsbProbe.cpp`／原始XDCI ABI生成段；确认sheng是DWC3、依赖原模块加载与metaclass注册，不迁其寄存器／iOS27 opaque签名。本轮Mach-O静态分析按macos-reverse流程；项目交接仍只写本NOTES，不新增过程报告／timeline。`.local/x9/work/usb-native12-20261112/`保留两份sheng源码摘录与原始OTG请求初始化窄dis，未分析成功kernel或boot。
 - **原件新增资格**：`recover_contract.py`补普通callback四参数、原Family尾调用free、allocator全0、OTG DMA@10／next@20／status@28的实际producer检查。固定原始cache的静态恢复 **exit0，110条checked observations／30 bounded regions**；`request-contract/contract.json`列adapter字段和native completion entry，并保持`abi_compatible=false/runtime_loadable=false`。0x68B是plain request，不是OSObject；actual@48不是residual；opaque字段不解成另一SDK结构。

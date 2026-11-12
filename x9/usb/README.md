@@ -328,7 +328,7 @@ python3 -I x9/usb/prepare_native.py \
 
 ### 复现端点与 request 的原始调用契约
 
-`recover_contract.py` 对同一固定原始输入做有界反汇编，当前检查110处关键指令、request
+`recover_contract.py` 对同一固定原始输入做有界反汇编，当前检查136处关键指令、request
 分配类型及具体 controller 的虚表/import，输出 `contract.json` 和30段 `.dis`。
 这是静态分析命令，不是测试套件或原生驱动装载器：
 
@@ -608,6 +608,38 @@ Family completion的读写；没有对request做OSObject cast或猜虚表。
 当前**没有bind/submit调用者，也没有native controller/bootstrap**；`native_apple_stack`
 仍为0。本组件缩短了原始普通请求到worker的接线缺口，但不解决原始AbortPipe ABI、
 EP0/配置事件、全部pure-virtual、descriptor/class-local双向ABI和模块加载。
+
+### USB-NATIVE13：独立 EP0 PIO／同 gate 控制事件（未安装／未实机验收）
+
+原件的`inputSetupPacket`把8字节写到独立的`IOUSBDeviceControlRequest+0x10`，
+state@0xc置2；`processSetupPacket`区分IN=3、OUT有data=4、OUT无data=7，经controller
+slot213通知，再到原始controller setup dispatcher。原OTG先从其memory对象取得
+SETUP输入；这不是0x68B普通bulk request，不复用普通request adapter或其callback。
+静态恢复现在包含35个窄region和两条原始import cell校验；仍非callable ABI。
+
+- `x9_usb_native_ep0.h/.inc`在**原有唯一USB worker**中处理native EP0（目前flag
+  仍0）。只读8B SETUP；按OPPO MTU3的W1C和DPHTX方向序列进入data stage。
+  USB2 EP0固定64B packet，最多65535B复制式PIO，IN短响应的64B整数倍补真实ZLP。
+  FIFO写入／TXPKTRDY置位不增加actual；实际TX ISR＋TX/FIFOFULL清零才推进。
+  OUT逐包按剩余容量校验，最终RX保持到真正gate handler接受status。
+- `X9USBControlBridge`必须在已经安装request bridge的**同一workloop gate**一次安装。
+  SETUP／OUT_DATA／COMPLETE带boot-unique ticket和exact sequence；event source
+  在原gate调用未来资格化handler，不在worker、usb_lock或registry锁内调Apple代码。
+  数据在两份boot-static缓冲间复制，不让64KiB数组进入16KiB metaclass allocation
+  或线程栈；不retain未知native object/descriptor，也不把函数非空当ABI证明。
+- 回复成功只表示命令入槽；worker等callback返回及精确ack后才消费，不使用native
+  指针/调用者栈。status发布后另一次poll观察DATAEND及TX/RX/SETUP/STALL/FIFOFULL
+  清零、无reset/SETUPEND/offline，才给success/status_complete。SET_ADDRESS沿OPPO
+  的DEV_ADDR-before-status寄存器顺序，**实机地址锁存尚未验证**；不提前写配置状态。
+- reset/bus-off/fault/new SETUP保留claimed快照，撤销旧reply，先给旧ticket失败终态
+  再处理新SETUP；未知pending IN actual不伪造0。5s是自有控制watchdog，不冒充原生
+  timeout语义。suspend时保留TX ISR到resume，不发布数据；离线无新的FIFO/MMIO提交。
+
+**没有installer或handler调用者，native_apple_stack=0，不能枚举/配对。**
+还须原始control object/response/completion双向glue、独立bus reset/suspend/resume事件、
+configuration/alternate/endpoint生命周期、全部父类/descriptor/metaclass/load consumers
+和模块bootstrap；不能仅凭PIO状态机启用native flag。AppSync runtime未staging，
+完整越狱bootstrap和实际Trust/Pair/TLS/安装/启动/持久性验收仍未完成。
 不得把`bind`、单编／完整构建或原件资格统计当成原生配对／App安装成功。
 
 ### 真实主机配对入口（依赖原生内核路由）

@@ -27,6 +27,7 @@
 #include "x9_usb_device.h"
 #include "x9_usb_log_protocol.h"
 #include "x9_usb_native_qmu.h"
+#include "x9_usb_native_ep0.h"
 
 extern int sweet_x9_arg(const char *, int);
 extern uint32_t sweet_log_copy(uint64_t *, char *, uint32_t);
@@ -196,6 +197,7 @@ static int disable_endpoint(struct endpoint *e)
 }
 static void fault(int error, uint32_t detail)
 {
+    x9_usb_native_ep0_invalidate(error ? error : EIO);
     lck_mtx_lock(&usb_lock); failed = 1; lck_mtx_unlock(&usb_lock); post_link(0);
     W(0x2404, R(0x2404) & ~BIT(6));
     uint64_t now_ns; absolutetime_to_nanoseconds(mach_absolute_time(), &now_ns);
@@ -264,6 +266,7 @@ static void publish_gpd(struct endpoint *e)
     W(qcsr(e), BIT(0));
 }
 #include "x9_usb_native_qmu.inc"
+#include "x9_usb_native_ep0.inc"
 static int submit(struct endpoint *e, const void *bytes, unsigned n,
                   uint64_t owner, uint64_t id, uint32_t generation)
 {
@@ -419,6 +422,7 @@ static void data_poll(void)
 }
 static int reset_data(void)
 {
+    x9_usb_native_ep0_invalidate(ECANCELED);
     uint64_t now_ns; absolutetime_to_nanoseconds(mach_absolute_time(), &now_ns);
     int native_error = x9_usb_native_worker_quiesce(now_ns);
     if (!native_error) native_error = x9_usb_native_qmu_barrier();
@@ -732,8 +736,8 @@ static void poll(void)
     /* Speed can settle after RESET; read the controller's result, not cable labels. */
     unsigned speed=R(0x800)&7;
     if (speed==1 || speed==3) { lck_mtx_lock(&usb_lock); st.speed=speed; lck_mtx_unlock(&usb_lock); maxpacket=speed==3 ? 512:64; }
-    /* No legacy SET_INTERFACE/halt/descriptor route may touch a native-owned
-     * endpoint. Native EP0/event dispatch is a separate unfinished obligation. */
+    /* Native PIO EP0 is dispatched later in this SAME worker, never through
+     * legacy descriptor/SET_INTERFACE/halt routes or bulk request ownership. */
     if (st.native_apple_stack) return;
     uint32_t isr=R(0x80);
     if (isr & 0x10001u) {
@@ -851,7 +855,12 @@ static void worker(void *arg, wait_result_t why)
             st.state >= X9_USB_READY && st.state != X9_USB_FAULT;
         lck_mtx_unlock(&usb_lock);
         uint64_t now_ns; absolutetime_to_nanoseconds(mach_absolute_time(), &now_ns);
+        unsigned control_speed = native_available ? R(0x800) & 7 : 0;
+        unsigned control_available = native_available && (R(0x2404) & BIT(6)) &&
+            (control_speed == 1 || control_speed == 3);
+        x9_usb_native_ep0_poll(control_available);
         x9_usb_native_worker_poll(native_available, now_ns);
+        x9_usb_native_control_notify();
         uint64_t deadline; clock_interval_to_deadline(1,NSEC_PER_MSEC,&deadline);
         (void)assert_wait_deadline(&channel,THREAD_UNINT,deadline); thread_block(THREAD_CONTINUE_NULL);
     }

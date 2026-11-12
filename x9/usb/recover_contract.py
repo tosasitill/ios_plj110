@@ -47,6 +47,11 @@ REGIONS = {
     'otg_submit_transfer_kind': (0xfffffff00606c72c, 0xfffffff00606c73c),
     'otg_out_retire': (0xfffffff006070e5c, 0xfffffff006070fcc),
     'otg_completion_drain': (0xfffffff006067974, 0xfffffff0060679d4),
+    'control_input_setup': (0xfffffff005ce8854, 0xfffffff005ce8ed4),
+    'control_process_setup': (0xfffffff005ce8fb4, 0xfffffff005ce91f8),
+    'controller_setup_dispatch': (0xfffffff005cf9080, 0xfffffff005cf91d8),
+    'otg_setup_producer': (0xfffffff00607030c, 0xfffffff00607032c),
+    'otg_process_setup': (0xfffffff00606ffe0, 0xfffffff00606fff4),
 }
 # Assertions are source-qualification checks, not claims of runtime success.
 OBSERVED = {
@@ -160,6 +165,32 @@ OBSERVED = {
     0xfffffff006067998: ('stp', 'xzr, xzr, [x21, #0x40]'),
     0xfffffff0060679bc: ('ldr', 'x8, [x8, #0x7e0]'),
     0xfffffff0060679c4: ('mov', 'x1, x22'),
+    0xfffffff00607030c: ('ldr', 'x20, [x19, #0x1b8]'),
+    0xfffffff006070310: ('ldr', 'x0, [x19, #0x288]'),
+    0xfffffff006070318: ('ldr', 'x8, [x8, #0x148]'),
+    0xfffffff006070320: ('mov', 'x1, x0'),
+    0xfffffff006070324: ('mov', 'x0, x20'),
+    0xfffffff006070328: ('bl', '#0xfffffff006074330'),
+    0xfffffff005ce8c70: ('ldr', 'x8, [x20]'),
+    0xfffffff005ce8c78: ('str', 'x8, [x20, #0x10]!'),
+    0xfffffff005ce8dac: ('mov', 'w8, #2'),
+    0xfffffff005ce8db0: ('str', 'w8, [x19, #0xc]'),
+    0xfffffff005ce8e90: ('ldr', 'x0, [x19, #0x68]'),
+    0xfffffff005ce8e9c: ('ldr', 'x3, [x8, #0x6a8]'),
+    0xfffffff00606ffe0: ('ldr', 'x0, [x19, #0x1b8]'),
+    0xfffffff00606ffe4: ('bl', '#0xfffffff00607433c'),
+    0xfffffff005ce8fcc: ('ldr', 'w8, [x0, #0xc]'),
+    0xfffffff005ce8fd0: ('cmp', 'w8, #2'),
+    0xfffffff005ce8fd8: ('ldrsb', 'w8, [x19, #0x10]'),
+    0xfffffff005ce8fe0: ('ldrh', 'w8, [x19, #0x16]'),
+    0xfffffff005ce9058: ('mov', 'w8, #3'),
+    0xfffffff005ce905c: ('str', 'w8, [x19, #0xc]'),
+    0xfffffff005ce91bc: ('ldr', 'x0, [x19, #0x68]'),
+    0xfffffff005ce91c8: ('ldr', 'x8, [x8, #0x6a8]'),
+    0xfffffff005ce91cc: ('mov', 'w1, #2'),
+    0xfffffff005ce91d8: ('bl', '#0xfffffff005cf9080'),
+    0xfffffff005cf9080: ('ldr', 'x8, [x0, #0x1b8]'),
+    0xfffffff005cf90f0: ('ldr', 'x1, [x8, #0x6e0]'),
 }
 
 OTG_VPTR = 0xfffffff006e7b188
@@ -215,9 +246,27 @@ def recover(data):
     completion_import, = struct.unpack('<Q', cache.read(0xfffffff006e7a750, 8))
     if completion_import != REGIONS['complete_request'][0]:
         raise ValueError('OTG completion import does not target the family completion')
+    control_imports = {}
+    for name, cell, expected in (
+        ('input_setup', 0xfffffff006e7a790, REGIONS['control_input_setup'][0]),
+        ('process_setup', 0xfffffff006e7a798, REGIONS['control_process_setup'][0]),
+    ):
+        target, = struct.unpack('<Q', cache.read(cell, 8))
+        if target != expected:
+            raise ValueError(f'Unqualified control import {name}: {target:#x}')
+        control_imports[name] = target
     result = dict(
         build='20H392', identity='d22ap', kernelcache_sha256=SHA256,
         qualification='bounded static observations; NOT executable ABI',
+        control_setup=dict(
+            type='IOUSBDeviceControlRequest', not_ordinary_bulk_request=True,
+            input_entry=REGIONS['control_input_setup'][0], imports=control_imports,
+            setup_offset=0x10, setup_bytes=8, state_offset=0x0c,
+            controller_offset=0x68, controller_control_object_offset=0x1b8,
+            ready_state=2, control_in_state=3, control_out_state=4, no_data_out_state=7,
+            state_notification_slot=213, setup_dispatch=REGIONS['controller_setup_dispatch'][0],
+            class_vendor_slot=220,
+            warning='state observation is NOT native bootstrap/current-layout qualification; MTU3 PIO is separate, no hardcoded Apple callable address'),
         original_pipe_size=0x70,
         settings_input=dict(bytes_read=20, words=5, word_width=4,
                             gate=0xfffffff005cf0438,
@@ -338,6 +387,7 @@ def main():
     print(f'20H392: {len(OBSERVED)} checked observations; settings=5x32, create=slot173->187')
     print(f'Request: 0x68B; {len(REGIONS)} bounded regions; ordinary callback count=actual bytes')
     print('Slot224 wide callback payload is a frame-array pointer, NOT a 64-bit byte count')
+    print('Control SETUP: distinct IOUSBDeviceControlRequest; setup8@10, ready=2, controller notification=slot213')
     print('Native ABI/runtime loading and timeout/cancel contracts remain unqualified')
 
 

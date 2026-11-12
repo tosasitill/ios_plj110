@@ -20,6 +20,7 @@ extern "C" int sweet_x9_arg(const char *, int);
 static IOReturn usb_return(int);
 #include "X9USBMTU3Backend.inc"
 #include "X9USBNativeRequestAdapter.inc"
+#include "X9USBControlBridge.inc"
 
 /* Only the device worker allocates these. Keep prepared pages wired until
  * reboot even if a QMU STOP times out. No other device's carve-out is borrowed. */
