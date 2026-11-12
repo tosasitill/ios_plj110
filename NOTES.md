@@ -6,6 +6,15 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## X9 eUICC／eSIM 查询交接（2026-11-12；国行未发现可用内置 eUICC，未尝试启用）
+
+- **范围／当前连接**：用户问 X9 是否有 eUICC 硬件、能否打开 eSIM。本轮仅离线读取既有 Android 采集和官方规格；`adb devices -l` 列表为空，没有新实机采集。未安装应用、修改属性／NV／SIM profile、写分区、flash／reboot、构建或 CI；并发 USB 未提交源码不动。本节单独提交，提交定位 `git log --grep='record X9 eUICC capability assessment'`。
+- **机型／地区（观察）**：`.local/x9/android-cap-20261111/getprop.txt:2520,2931,2936,3279` 为 `PLJ110_17.0.0.101(CN01)`／`OP5E17L1`／`PLJ110`／`CN`。OPPO 官方国行 `https://www.oppo.com/cn/smartphones/series-find-x/find-x9/specs/` 同样标 PLJ110，SIM 类型为 Nano-SIM／Nano-USIM；海外 `https://www.oppo.com/en/smartphones/series-find-x/find-x9/specs/` 标 **CPH2797** 且明确 `eSIM Supported`。两页 HTTP200，不把海外版能力套给 PLJ110；国行页面未列 eSIM 本身不是主板缺芯片证明。
+- **实际 Android 运行记录（观察）**：`.local/x9/android-boot-20261111/boot_logcat2.txt:4611–4612,4940–4941` 在两卡 LOADED 后列出 phone0／phone1 的两个 active UiccSlot，均 **`mIsEuicc=false, MEP=false, mEid=, mSupportedMepMode=NONE`**；`:4682,5088` 的两份 subscription 均 `isEmbedded=0`。`.local/x9/android-atci-20261111/cap/dmesg_before.txt:9329` 显示 `vendor.oplus.hardware.esim.IOplusEsim/default` 未在 VINTF 声明；11-06 采集也有相同服务缺失。服务缺失是当前固件能力证据，不独立证明硬件未焊。
+- **结论／边界**：现有证据确认这台国行机的已枚举 SIM 路径没有识别到可用 eUICC，当前原生 eSIM 没有可启用的已证路径；**尚不能判定主板上绝对没有一个被禁用／未路由的 eUICC**，缺新 EID／完整 slot-HAL 状态及主板 BOM／芯片证据。`persist.sys.oost.esim_*` 四个通用开关存在且为0，仅是软件属性，不作为隐藏硬件或改成1即可成功的依据。不建议为此盲刷海外 ROM／改 NV；外置可编程 eUICC 卡是另添硬件、占实体卡槽，尚未在 X9 验证，与打开内置 eSIM 不同。
+- **原始资料／重放／下一步**：私有 `.local/x9/work/euicc-20261112/` 保存两页原始 gzip response、解压 HTML／文本、`official-fetch.json` 和脱敏 `evidence.json`（23项窄证据）。离线重放：`python3 -I .local/x9/work/euicc-20261112/extract.py`，不访问设备。下一步用户将手机置于 Android 并连接 ADB 后，只读 `pm list features`、`dumpsys -l` 定位 eUICC 服务并读取其 dump、保存 `dumpsys phone` 核对全部 slot／EID／ATR；若固件仍未枚举则需 BOM／主板硬件证据，不通过假 EID／改 flag 宣称 eSIM 成功。交接仅本 NOTES，不另建过程报告／timeline。
+
+
 ## 过期 worktree／缓存清理（2026-11-12；最新清理后共17棵／.local内16棵）
 
 - **最新一轮／实际数量**：用户再次要求“把不用的和过期的全清了”。开始盘点时另一窗口已新增NATIVE11／NATIVE12，实际21棵／`.local`20棵。本轮删除`usb-native11-20261112`、`cell-rxvendor-gpu278-20261112`、`gpu-snapshot278-20261111`、`gpu-upstream277`四棵已替代冻结树，**exit0／4删除／0跳过，清理后17棵／`.local`16棵，累计224棵归档删除**。主树＋唯一HEIF续接树＋最新NATIVE12树保留，另14棵未提交源码／合并中树不丢弃；`heif-vdec`不abort/reset。本条取代下方“当前19棵／3棵依赖树保留”的历史数量与保留结论；其它窗口后续仍可能新增树。
