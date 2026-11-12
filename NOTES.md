@@ -6,6 +6,13 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 238 panic 与修正（2026-11-12；route3 已构建，未启动）
+
+- **观察**：238 USB日志止于26.722s(半行)；Android只读 pstore(`.local/x9/work/pstore-238/console-ramoops-0.raw`，launchd 10:33:45=238)：27.775 `X9 ROUTE: unscoped lookup … none … none`(探针执行正常)，28.908 v4 lease 的 `COACHZ pdp: WDS type 4 … family 4 active 1` 之后、本应的 `COACHZ qmi: to-host` 之前 **panic: Invalid kernel stack pointer (probable overflow)**，esr 0x96000047 写 sp+8 撞保护页，pc在IRQ向量。无backtrace。
+- 核对：x9w_request/x9w_poll/x9w_lease_status 等帧大小 237/238/修后完全相同(0x760/0x7d0/0x620)，WDS日志未使桥接帧变大。
+- **修正**：224cc00 所有238日志改为 noinline、无栈缓冲区(route_output 内仅调用外置 `x9_rt_trace_default`)；36cd589 `rtalloc1` 查询改在独立 thread_call 栈执行(桥接线程仅 enqueue)。**推断**：溢出来自桥接线程深栈上的 rtalloc1/路由路径或 route_output 内日志；未有backtrace证实。
+- 镜像 **`x9/out/x9-cell-route3-gpu278-20261112/boot.img`** exit0；worktree= cell-slaac + 7873b27 + c58e2cd + 1591199。boot-args 不变(未加 x9_net_trace，603B/607B上限)。
+
 ## 238 探针镜像（CELL-ROUTE，2026-11-12；已构建，未启动）
 
 - **补充观察(237内核日志)**：41.169s MD真实从SA回落LTE(`CEREG 1 C5GREG 0 COPS-AcT 7`)，此后我们发 `NAS SysInfo LTE registered`；4G图标是真实的。CommCenter `dataBearerTechnology=NR` 未随之更新：整个237无任何WDS 0x01事件报告(仅当客户端订阅TLV 0x15时发)。
