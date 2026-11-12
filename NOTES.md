@@ -6,10 +6,11 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
-## 过期 worktree 清理（2026-11-12；已执行，当前共20棵）
+## 过期 worktree 清理（2026-11-12；已执行，当前共19棵／.local内18棵）
 
-- **用户要求／结果**：按“把不用的和过期的全清了”清理本仓库工作树。登记 **238→20棵**；`.local` 内 **235→19棵**，全部剩余私有树位于`.local/x9/worktrees/`。已删除 **218棵**，包括旧`ios_plj110-wt-if`、`ios_plj110-wt-wifi`和`.local/x9/work/ios_plj110-nrsa`；未使用`--force`、reset、merge abort、branch deletion或gc。
-- **保留理由**：主树＋5棵当前冻结／依赖树（`heif-resume-20261111`、`appsync-20261112`、`cell-rxvendor-gpu278-20261112`、`gpu-snapshot278-20261111`、`gpu-upstream277`），另 **14棵有未提交源码或进行中合并**的树。`heif-vdec`原MERGE_HEAD与冲突保持，HEIF续接树HEAD仍`b98b99f`；这些未完成工作没有丢弃。完整保留名单见私有`verification.json`；其非主树HEAD与status相对清理前均未变。
+- **本次补清／当前数量**：上一轮后新增`usb-native10-20261112`，实时登记为21棵／`.local`20棵。本次删除已经复制交付到主树`x9/out`、无未提交代码／Git操作／打开文件／挂载的`appsync-20261112`和`usb-native10-20261112`冻结副本，执行exit0、2删除／0跳过；**当前19棵，`.local`18棵，累计删除220棵**。这两棵HEAD分别`ec0a4f6d45c3b800efa010dd93012afbf4bb513d`／`5a5daeda214681639fc48e5a487974858f1acec0`，均新增同名`refs/archive/worktrees/20261112/`引用；可按下条恢复。两份主树交付kernel、共享`.local`实际输入与runtime不动，私有构建日志／元数据移到`.local/x9/work/worktree-cleanup-20261112-followup/preserved/`，仅删除冗余源码／过期编译副本。**当前保留主树＋HEIF活动树＋蜂窝/GPU的3棵依赖树＋14棵未提交／合并中树**；不把有独立改动的旧树仅凭日期当垃圾，不abort/reset `heif-vdec`。私有`inventory-before.json`、`plan.json`、`actions.jsonl`、`result.json`和`verification.json`在该followup目录：保留非主树HEAD/status不变、2个归档引用匹配／目录无残留，errors=[]。df净增64556KiB（约63MiB，受并发/APFS影响）；无构建、测试、CI/push或设备操作，主树6个USB未提交文件原样保留。本节单独提交（`git log --grep='remove superseded frozen worktrees'`）。
+- **上一轮用户要求／结果**：按“把不用的和过期的全清了”清理本仓库工作树。登记 **238→20棵**；`.local` 内 **235→19棵**，全部剩余私有树位于`.local/x9/worktrees/`。删除 **218棵**，包括旧`ios_plj110-wt-if`、`ios_plj110-wt-wifi`和`.local/x9/work/ios_plj110-nrsa`；未使用`--force`、reset、merge abort、branch deletion或gc。
+- **上一轮保留理由**：主树＋5棵当时冻结／依赖树（`heif-resume-20261111`、`appsync-20261112`、`cell-rxvendor-gpu278-20261112`、`gpu-snapshot278-20261111`、`gpu-upstream277`），另 **14棵有未提交源码或进行中合并**的树。`heif-vdec`原MERGE_HEAD与冲突保持，HEIF续接树HEAD仍`b98b99f`；这些未完成工作没有丢弃。该轮完整保留名单见私有`verification.json`；其非主树HEAD与status相对清理前均未变。
 - **提交可恢复**：每棵被删树的HEAD保留在 **`refs/archive/worktrees/20261112/<原目录名>`**，共218个引用；原本的分支也未删除。恢复源码：`git worktree add --detach <恢复目录> refs/archive/worktrees/20261112/<原目录名>`。**历史交接里的旧树绝对路径现在可能已不存在**，不能直接运行旧命令；须先恢复对应冻结源码、补回保存的私有输入并选新唯一构建输出名，不为清理复核重建成功产物。
 - **文件边界**：删除旧树源码副本、generated、Python缓存与旧树内的过期编译二进制。真实私有`.local`固件包、`local.json`及旧构建输入／日志等移至 **`.local/x9/work/worktree-cleanup-20261112/preserved/<原目录名>/`**（约1.5GiB）；符号链接只记录／移除链接自身，未跟随它们删除主目录共享内容。主树当前`x9/out`、设备备份、原始日志／转储、根盘、Apple原件和参考仓库未清理；未检查成功镜像的内容/hash。
 - **空间观察**：`.local/x9/worktrees`目录块数约 **27→8.2GiB**；`df`前后可用量净增加 **12.77GiB**，清理后约 **175.80GiB可用**。目录逻辑减少与实际回收不同，存在APFS共享块及并发写入，不能把18.8GiB目录减少说成全部物理释放。
