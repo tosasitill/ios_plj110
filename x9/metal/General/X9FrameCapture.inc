@@ -317,7 +317,7 @@ static void x9FrameFlush(NBCommandBuffer *cb) {
  NBBuffer *readback=[NBBuffer new];readback.handle=raw;readback.options=MTLResourceStorageModeShared;
  NmbEncoder *blit=nmb_blit_encoder_new(cb.handle);
  if(!blit){NSLog(@"X9 FRAME GPU SKIP: f=%u reason=blit %@",f,lastError());return;}
- [cb.resourceOwners addObject:readback];
+ [cb own:readback];
  NSMutableArray *placed=[NSMutableArray array];uint64_t at=0;
  for(NSDictionary *c in copies) {
   NSMutableDictionary *m=[c mutableCopy];
@@ -325,7 +325,7 @@ static void x9FrameFlush(NBCommandBuffer *cb) {
    NBBuffer *src=c[[k stringByAppendingString:@"buf"]];
    const uint64_t len=[c[[k stringByAppendingString:@"len"]] unsignedLongLongValue],from=[c[[k stringByAppendingString:@"start"]] unsignedLongLongValue];
    if(!src||!len)continue;
-   [cb.resourceOwners addObject:src];
+   [cb own:src];
    if(!nmb_blit_copy_buffer(blit,src.handle,from,raw,at,len)) {
     NSString *reason=lastError();nmb_encoder_discard(blit);
     NSLog(@"X9 FRAME GPU SKIP: f=%u reason=copy %@",f,reason);return;

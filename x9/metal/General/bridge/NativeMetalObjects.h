@@ -37,6 +37,19 @@ NmbDevice *nmb_device_open(const char *loader, const char *cache);
 void nmb_device_release(NmbDevice *);
 /* Release only unreferenced parked objects/spare blocks; never live resources. */
 uint64_t nmb_device_release_kept_memory(const NmbDevice *);
+// Purgeable discard (NativeMetalPurge.rs, plugin 280): cause 0 memory pressure (all idle Volatile/Empty), 1 age (idle for idle_ms).
+// Returns the bytes discarded. A setPurgeableState answer carries NMB_PURGE_AGAIN_FAILED where placing a discarded resource again failed.
+#define NMB_PURGE_AGAIN_FAILED (1ull<<8)
+uint64_t nmb_device_purge(const NmbDevice *, uint32_t cause, uint64_t idle_ms);
+uint64_t nmb_device_purge_pending(const NmbDevice *);
+uint64_t nmb_purge_age_ms(void);
+bool nmb_device_purge_counts(const NmbDevice *, uint64_t out[16]);
+bool nmb_buffer_hold(const NmbBuffer *);
+void nmb_buffer_unhold(const NmbBuffer *);
+bool nmb_texture_hold(const NmbTexture *);
+void nmb_texture_unhold(const NmbTexture *);
+bool nmb_heap_hold(const NmbHeap *);
+void nmb_heap_unhold(const NmbHeap *);
 size_t nmb_device_name(const NmbDevice *, char *out, size_t size);
 uint64_t nmb_device_max_buffer_length(const NmbDevice *);
 // Pipeline makings (count, total us, longest us, waited us, failed), sink messages (info, warning+), shader cache hits/misses/writes.

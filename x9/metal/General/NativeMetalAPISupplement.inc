@@ -96,13 +96,13 @@
  if([resource isKindOfClass:[NBBuffer class]])b=[(NBBuffer *)resource handle];
  else if([resource isKindOfClass:[NBTexture class]])t=[(NBTexture *)resource handle];
  else{[self.commandBuffer refuse:@"foreign resource residency"];return;}
- [self.commandBuffer.resourceOwners addObject:resource];
+ [self.commandBuffer own:resource];
  if(t&&[(NBTexture *)resource surface])[self.commandBuffer.surfaces addObject:resource];
  [self check:nmb_encoder_use_resource(self.handle,b,t,usage,stages) what:"useResource"];
 }
 - (void)residentHeap:(id)heap stages:(MTLRenderStages)stages {
  if(![heap isKindOfClass:[NBHeap class]]){[self.commandBuffer refuse:@"foreign heap residency"];return;}
- [self.commandBuffer.resourceOwners addObject:heap];[self check:nmb_encoder_use_heap(self.handle,[(NBHeap *)heap handle],stages) what:"useHeap"];
+ [self.commandBuffer own:heap];[self check:nmb_encoder_use_heap(self.handle,[(NBHeap *)heap handle],stages) what:"useHeap"];
 }
 @end
 @implementation NBComputeEncoder (X9BindingAPI)
@@ -111,13 +111,13 @@
 }
 - (void)dispatchThreadgroupsWithIndirectBuffer:(id<MTLBuffer>)buffer indirectBufferOffset:(NSUInteger)offset threadsPerThreadgroup:(MTLSize)threads {
  if(![(id)buffer isKindOfClass:[NBBuffer class]]){[self.commandBuffer refuse:@"foreign indirect dispatch buffer"];return;}
- [self.commandBuffer.resourceOwners addObject:buffer];const uint64_t t[3]={threads.width,threads.height,threads.depth};
+ [self.commandBuffer own:buffer];const uint64_t t[3]={threads.width,threads.height,threads.depth};
  [self check:nmb_compute_dispatch_indirect(self.handle,[(NBBuffer *)buffer handle],offset,t) what:"dispatchThreadgroupsIndirect"];
 }
 - (void)setStageInRegion:(MTLRegion)region {const uint64_t r[6]={region.origin.x,region.origin.y,region.origin.z,region.size.width,region.size.height,region.size.depth};[self check:nmb_compute_stage_in(self.handle,r,nullptr,0) what:"setStageInRegion"];}
 - (void)setStageInRegionWithIndirectBuffer:(id<MTLBuffer>)buffer indirectBufferOffset:(NSUInteger)offset {
  if(![(id)buffer isKindOfClass:[NBBuffer class]]){[self.commandBuffer refuse:@"foreign stage-in buffer"];return;}
- [self.commandBuffer.resourceOwners addObject:buffer];[self check:nmb_compute_stage_in(self.handle,nullptr,[(NBBuffer *)buffer handle],offset) what:"setStageInRegionIndirect"];
+ [self.commandBuffer own:buffer];[self check:nmb_compute_stage_in(self.handle,nullptr,[(NBBuffer *)buffer handle],offset) what:"setStageInRegionIndirect"];
 }
 - (void)setImageblockWidth:(NSUInteger)width height:(NSUInteger)height {[self check:nmb_compute_imageblock(self.handle,width,height) what:"setImageblockSize"];}
 - (void)useResources:(const id<MTLResource> __unsafe_unretained [])resources count:(NSUInteger)count usage:(MTLResourceUsage)usage {
@@ -164,7 +164,7 @@
 - (void)synchronizeTexture:(id<MTLTexture>)texture slice:(NSUInteger)slice level:(NSUInteger)level {[self textureHint:texture operation:0 slice:slice level:level];}
 - (void)textureHint:(id<MTLTexture>)texture operation:(uint32_t)operation slice:(NSUInteger)slice level:(NSUInteger)level {
  if(![(id)texture isKindOfClass:[NBTexture class]]){[self.commandBuffer refuse:@"foreign texture hint"];return;}
- [self.commandBuffer.resourceOwners addObject:texture];[self check:nmb_blit_texture_hint(self.handle,[(NBTexture *)texture handle],operation,slice,level) what:"texture synchronization/optimization"];
+ [self.commandBuffer own:texture];[self check:nmb_blit_texture_hint(self.handle,[(NBTexture *)texture handle],operation,slice,level) what:"texture synchronization/optimization"];
 }
 - (void)optimizeContentsForGPUAccess:(id<MTLTexture>)texture {[self textureHint:texture operation:1 slice:0 level:0];}
 - (void)optimizeContentsForGPUAccess:(id<MTLTexture>)texture slice:(NSUInteger)slice level:(NSUInteger)level {[self textureHint:texture operation:2 slice:slice level:level];}
@@ -189,7 +189,7 @@
 - (void)sampler:(id<MTLSamplerState>)sampler min:(float)min max:(float)max index:(NSUInteger)index stage:(uint32_t)stage {
  if(captureOptions().inputs)graphSampler(self,sampler,index,stage,[NSString stringWithFormat:@"override=%g,%g",min,max]);
  if(sampler&&![(id)sampler isKindOfClass:[NBSampler class]]){[self.commandBuffer refuse:@"foreign sampler"];return;}
- if(sampler)[self.commandBuffer.resourceOwners addObject:sampler];
+ if(sampler)[self.commandBuffer own:sampler];
  [self check:nmb_encoder_sampler_lod(self.handle,stage,sampler?[(NBSampler *)sampler handle]:nullptr,min,max,(uint32_t)index) what:"sampler LOD clamps"];
 }
 @end
@@ -221,7 +221,7 @@
   refs.push_back(ref);
  }
  for(NSUInteger k=0;k<count;k++) {
-  [self.commandBuffer.resourceOwners addObject:resources[k]];
+  [self.commandBuffer own:resources[k]];
   if(refs[k].texture&&[(NBTexture *)resources[k] surface])[self.commandBuffer.surfaces addObject:resources[k]];
  }
  // A resource barrier is not a fabricated read/write use of every resource.
@@ -231,12 +231,12 @@
 }
 - (void)drawPrimitives:(MTLPrimitiveType)primitive indirectBuffer:(id<MTLBuffer>)indirect indirectBufferOffset:(NSUInteger)offset {
  if(![(id)indirect isKindOfClass:[NBBuffer class]]){[self.commandBuffer refuse:@"foreign indirect buffer"];return;}
- [self.commandBuffer.resourceOwners addObject:indirect];gDraws++;self.commandBuffer->encodedWork.draws++;
+ [self.commandBuffer own:indirect];gDraws++;self.commandBuffer->encodedWork.draws++;
  [self check:nmb_render_indirect(self.handle,primitive,[(NBBuffer *)indirect handle],offset,nullptr,0,0) what:"drawPrimitivesIndirect"];
 }
 - (void)drawIndexedPrimitives:(MTLPrimitiveType)primitive indexType:(MTLIndexType)type indexBuffer:(id<MTLBuffer>)indices indexBufferOffset:(NSUInteger)indexOffset indirectBuffer:(id<MTLBuffer>)indirect indirectBufferOffset:(NSUInteger)offset {
  if(![(id)indirect isKindOfClass:[NBBuffer class]]||![(id)indices isKindOfClass:[NBBuffer class]]){[self.commandBuffer refuse:@"foreign indirect/index buffer"];return;}
- [self.commandBuffer.resourceOwners addObject:indirect];[self.commandBuffer.resourceOwners addObject:indices];gDraws++;self.commandBuffer->encodedWork.draws++;
+ [self.commandBuffer own:indirect];[self.commandBuffer own:indices];gDraws++;self.commandBuffer->encodedWork.draws++;
  [self check:nmb_render_indirect(self.handle,primitive,[(NBBuffer *)indirect handle],offset,[(NBBuffer *)indices handle],type,indexOffset) what:"drawIndexedPrimitivesIndirect"];
 }
 @end
@@ -339,7 +339,7 @@ static id<MTLVisibleFunctionTable> x9VisibleTable(NmbComputePipeline *compute,Nm
 @implementation NBEncoder (X9FunctionTables)
 - (void)visibleTable:(id<MTLVisibleFunctionTable>)table index:(NSUInteger)index stage:(uint32_t)stage {
  if(table&&![(id)table isKindOfClass:[NBVisibleFunctionTable class]]){[self.commandBuffer refuse:@"foreign visible function table"];return;}
- if(table)[self.commandBuffer.resourceOwners addObject:table];
+ if(table)[self.commandBuffer own:table];
  [self check:nmb_encoder_visible_table(self.handle,stage,table?[(NBVisibleFunctionTable *)table handle]:nullptr,(uint32_t)index) what:"setVisibleFunctionTable"];
 }
 @end

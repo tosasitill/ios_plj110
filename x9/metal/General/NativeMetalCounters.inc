@@ -38,13 +38,13 @@
 @implementation NBEncoder (X9CounterSampling)
 - (void)sampleCountersInBuffer:(id<MTLCounterSampleBuffer>)buffer atSampleIndex:(NSUInteger)index withBarrier:(BOOL)barrier {
  if(![(id)buffer isKindOfClass:[NBCounterSampleBuffer class]]||index>=buffer.sampleCount){[self.commandBuffer refuse:@"invalid counter sample target"];return;}
- [self.commandBuffer.resourceOwners addObject:buffer];[self check:nmb_counter_sample(self.handle,[(NBCounterSampleBuffer *)buffer handle],index,barrier) what:"sample GPU timestamp"];
+ [self.commandBuffer own:buffer];[self check:nmb_counter_sample(self.handle,[(NBCounterSampleBuffer *)buffer handle],index,barrier) what:"sample GPU timestamp"];
 }
 @end
 @implementation NBBlitEncoder (X9CounterResolve)
 - (void)resolveCounters:(id<MTLCounterSampleBuffer>)counters inRange:(NSRange)range destinationBuffer:(id<MTLBuffer>)destination destinationOffset:(NSUInteger)offset {
  if(![(id)counters isKindOfClass:[NBCounterSampleBuffer class]]||![(id)destination isKindOfClass:[NBBuffer class]]){[self.commandBuffer refuse:@"foreign counter resolve resource"];return;}
- [self.commandBuffer.resourceOwners addObject:counters];[self.commandBuffer.resourceOwners addObject:destination];
+ [self.commandBuffer own:counters];[self.commandBuffer own:destination];
  [self check:nmb_counter_gpu_resolve(self.handle,[(NBCounterSampleBuffer *)counters handle],range.location,range.length,[(NBBuffer *)destination handle],offset) what:"resolve GPU timestamps"];
 }
 @end

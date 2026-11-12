@@ -38,7 +38,7 @@
  NBBuffer *buffer=[NBBuffer new];buffer.handle=raw;buffer.options=MTLResourceStorageModeShared;
  NmbEncoder *blit=nmb_blit_encoder_new(cb.handle);
  if(!blit){[cb refuse:[@"pixel capture blit: " stringByAppendingString:lastError()]];return;}
- [cb.resourceOwners addObject:buffer];[cb.resourceOwners addObject:texture];
+ [cb own:buffer];[cb own:texture];
  if(texture.surface)[cb.surfaces addObject:texture];
  const uint64_t origin[3]={0,0,0},size[3]={w,h,1};
  const bool copied=nmb_blit_texture_to_buffer(blit,texture.handle,0,0,origin,size,raw,0,row,length);
