@@ -1,0 +1,194 @@
+diff --git a/src/panfrost/vulkan/panvk_shader.h b/src/panfrost/vulkan/panvk_shader.h
+--- a/src/panfrost/vulkan/panvk_shader.h
++++ b/src/panfrost/vulkan/panvk_shader.h
+@@ -157,6 +157,8 @@
+       int32_t first_vertex;
+       int32_t base_instance;
+       uint32_t noperspective_varyings;
++      /* X9: absolute vertex-ID limit of a padded draw (UINT32_MAX = none). */
++      uint32_t x9_vertex_limit;
+    } vs;
+ 
+    struct {
+diff --git a/src/panfrost/vulkan/panvk_cmd_draw.h b/src/panfrost/vulkan/panvk_cmd_draw.h
+--- a/src/panfrost/vulkan/panvk_cmd_draw.h
++++ b/src/panfrost/vulkan/panvk_cmd_draw.h
+@@ -444,6 +444,9 @@
+ 
+    enum mesa_prim prim;
+ 
++   /* X9: non-zero when vertex.count was padded; the real vertex count. */
++   uint32_t x9_real_count;
++
+ #if PAN_ARCH < 9
+    uint32_t layer_id;
+ #endif
+diff --git a/src/panfrost/vulkan/panvk_vX_cmd_draw.c b/src/panfrost/vulkan/panvk_vX_cmd_draw.c
+--- a/src/panfrost/vulkan/panvk_vX_cmd_draw.c
++++ b/src/panfrost/vulkan/panvk_vX_cmd_draw.c
+@@ -910,6 +910,12 @@
+                   noperspective_varyings);
+    set_gfx_sysval(cmdbuf, dirty_sysvals, vs.first_vertex, info->vertex.base);
+    set_gfx_sysval(cmdbuf, dirty_sysvals, vs.base_instance, info->instance.base);
++   /* X9: vertex shaders compiled with the pad guard run their body only for
++    * vertex IDs below this limit; every unpadded draw sets "no limit". */
++   set_gfx_sysval(cmdbuf, dirty_sysvals, vs.x9_vertex_limit,
++                  info->x9_real_count ?
++                     (uint32_t)info->vertex.base + info->x9_real_count :
++                     UINT32_MAX);
+ 
+ #if PAN_ARCH < 9
+    set_gfx_sysval(cmdbuf, dirty_sysvals, vs.raw_vertex_offset,
+diff --git a/src/panfrost/vulkan/panvk_vX_shader.c b/src/panfrost/vulkan/panvk_vX_shader.c
+--- a/src/panfrost/vulkan/panvk_vX_shader.c
++++ b/src/panfrost/vulkan/panvk_vX_shader.c
+@@ -995,6 +995,63 @@
+    pan_nir_lower_mediump_io(nir);
+ }
+ 
++#if PAN_ARCH >= 9 && defined(X9_NATIVE_KMOD)
++/* X9 pad guard. On v14 a non-indexed triangle-list draw whose vertex count is
++ * not a multiple of 12 misplaces vertices of its last, partial vertex group
++ * (rev240/241: 9-vertex Control Center draws exact once padded to 12). The
++ * Metal frontend used to pad by copying the last vertex record at encode
++ * time, which (a) does not neutralise shaders that derive positions from
++ * vertex_id and (b) misses later CPU/GPU writes to the buffer. Instead the
++ * draw is padded here and every vertex shader runs its whole body only for
++ * vertex_id < vs.x9_vertex_limit; extra lanes load nothing, store nothing
++ * and write position = 0 (zero-area, w = 0). On Valhall malloc-IDVS,
++ * load_vertex_id is the absolute ID (firstVertex + i). */
++static bool
++x9_pad_guard_vs(nir_shader *nir)
++{
++   if (nir->info.stage != MESA_SHADER_VERTEX)
++      return false;
++   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
++   nir_intrinsic_instr *pos = NULL;
++   nir_foreach_block(block, impl) {
++      nir_foreach_instr(instr, block) {
++         if (instr->type != nir_instr_type_intrinsic)
++            continue;
++         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
++         if (intr->intrinsic == nir_intrinsic_load_push_constant &&
++             nir_intrinsic_base(intr) == SYSVALS_PUSH_CONST_BASE &&
++             nir_src_is_const(intr->src[0]) &&
++             nir_src_as_uint(intr->src[0]) ==
++                sysval_offset(graphics, vs.x9_vertex_limit))
++            return false; /* already guarded */
++         if (!pos && intr->intrinsic == nir_intrinsic_store_output &&
++             nir_intrinsic_io_semantics(intr).location == VARYING_SLOT_POS)
++            pos = intr;
++      }
++   }
++   if (!pos)
++      return false;
++   const unsigned base = nir_intrinsic_base(pos);
++   const nir_alu_type type = nir_intrinsic_src_type(pos);
++   const nir_io_semantics sem = nir_intrinsic_io_semantics(pos);
++
++   nir_cf_list body;
++   nir_cf_extract(&body, nir_before_impl(impl), nir_after_impl(impl));
++   nir_builder b = nir_builder_at(nir_before_impl(impl));
++   nir_def *vid = nir_load_vertex_id(&b);
++   nir_def *limit = load_sysval(&b, graphics, 32, vs.x9_vertex_limit);
++   nir_if *nif = nir_push_if(&b, nir_ult(&b, vid, limit));
++   nir_cf_reinsert(&body, b.cursor);
++   nir_push_else(&b, nif);
++   nir_def *zero = nir_imm_zero(&b, 4, nir_alu_type_get_type_size(type));
++   nir_store_output(&b, zero, nir_imm_int(&b, 0), .base = base,
++                    .component = 0, .write_mask = 0xf, .src_type = type,
++                    .io_semantics = sem);
++   nir_pop_if(&b, nif);
++   return nir_progress(true, impl, nir_metadata_none);
++}
++#endif
++
+ static VkResult
+ panvk_compile_nir(struct panvk_device *dev, nir_shader *nir,
+                   VkShaderCreateFlagsEXT shader_flags,
+@@ -1009,6 +1066,10 @@
+ 
+    /* We're going to modify this so make our own copy to be nicer to callers */
+    struct pan_compile_inputs input = *compile_input;
++
++#if PAN_ARCH >= 9 && defined(X9_NATIVE_KMOD)
++   NIR_PASS(_, nir, x9_pad_guard_vs);
++#endif
+ 
+    pan_postprocess_nir(nir, &input, &shader->info);
+ 
+diff --git a/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c b/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c
+--- a/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c
++++ b/src/panfrost/vulkan/csf/panvk_vX_cmd_draw.c
+@@ -3488,7 +3488,8 @@
+          poly_compact_prim(cmdbuf->state.gfx.idvs.prim));
+    } else {
+       uint32_t prims_per_instance = u_decomposed_prims_for_vertices(
+-         cmdbuf->state.gfx.idvs.prim, draw->vertex.count);
++         cmdbuf->state.gfx.idvs.prim,
++         draw->x9_real_count ? draw->x9_real_count : draw->vertex.count);
+       uint32_t prims_generated =
+          prims_per_instance * draw->instance.count * view_count;
+ 
+@@ -3983,6 +3984,38 @@
+    return prepare_oq(primary);
+ }
+ 
++/* X9 pad guard (vertex shaders, panvk_vX_shader.c): pad non-indexed
++ * triangle-list draws to a multiple of 12. Default on; boot-arg token x9g0
++ * keeps upstream counts (the Metal frontend snapshot padding is separate). */
++static int __attribute__((unused))
++x9_pad_guard_mode(void)
++{
++   static int mode = -1;
++   int m = __atomic_load_n(&mode, __ATOMIC_RELAXED);
++   if (m >= 0)
++      return m;
++   m = 1;
++   char args[4096] = {0};
++   size_t bytes = sizeof(args) - 1;
++   if (!sysctlbyname("kern.bootargs", args, &bytes, NULL, 0)) {
++      args[sizeof(args) - 1] = 0;
++      for (const char *p = args; *p;) {
++         while (*p && (unsigned char)*p <= 32)
++            p++;
++         const char *end = p;
++         while (*end && (unsigned char)*end > 32)
++            end++;
++         if (end - p == 4 && !memcmp(p, "x9g0", 4))
++            m = 0;
++         p = end;
++      }
++   }
++   __atomic_store_n(&mode, m, __ATOMIC_RELAXED);
++   x9_panvk_log("X9 PAD GUARD: proc=%s mode=%d;1=pad non-indexed triangle lists to 12 with VS vertex-id guard 0=off (x9g0)",
++                getprogname(), m);
++   return m;
++}
++
+ VKAPI_ATTR void VKAPI_CALL
+ panvk_per_arch(CmdDraw)(VkCommandBuffer commandBuffer, uint32_t vertexCount,
+                         uint32_t instanceCount, uint32_t firstVertex,
+@@ -4009,6 +4042,22 @@
+       .prim = panvk_get_client_prim(cmdbuf),
+    };
+ 
++#ifdef X9_NATIVE_KMOD
++   if (draw.prim == MESA_PRIM_TRIANGLES && (vertexCount % 12) &&
++       vertexCount <= UINT32_MAX - 12 &&
++       (uint64_t)firstVertex + vertexCount + 12 <= UINT32_MAX &&
++       x9_pad_guard_mode()) {
++      draw.x9_real_count = vertexCount;
++      draw.vertex.count = vertexCount + 12 - (vertexCount % 12);
++      static uint64_t padded;
++      uint64_t n = __atomic_add_fetch(&padded, 1, __ATOMIC_RELAXED);
++      if (n == 1 || !(n & (n - 1)) || !(n % 65536))
++         x9_panvk_log("X9 PAD GUARD: draw #%llu count %u -> %u first %u instances %u",
++                      (unsigned long long)n, vertexCount, draw.vertex.count,
++                      firstVertex, instanceCount);
++   }
++#endif
++
+    panvk_cmd_draw(cmdbuf, draw);
+ }
+ 

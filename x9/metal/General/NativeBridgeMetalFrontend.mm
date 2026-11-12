@@ -1008,18 +1008,25 @@ static void waitForResource(id resource) {
 // Application
 // indexed/indirect draws remain unchanged in both modes. Compiled vertex-stage
 // stores/atomics, rasterization-disabled draws and wireframe are never padded.
+// 279: PanVK now pads these draws itself (13-panvk-pad-guard.patch: count
+// rounded up to 12, every vertex shader runs its body only below the real
+// vertex-ID limit), which also covers vertex_id-derived positions and
+// buffers written after encoding. The frontend therefore defaults to off;
+// it falls back to the CPU snapshot only when the PanVK guard is disabled
+// with x9g0. x9p1/x9p2 still force snapshot/indices for comparison.
 static unsigned x9PadMode() {
  static const unsigned mode=[] {
-  bool off=false,legacy=false,indices=false;char args[4096]={};size_t bytes=sizeof(args)-1;
+  bool off=false,legacy=false,indices=false,guard_off=false;char args[4096]={};size_t bytes=sizeof(args)-1;
   if(!sysctlbyname("kern.bootargs",args,&bytes,nullptr,0)) {
    args[sizeof(args)-1]=0;
    for(const char *p=args;*p;){while(*p&&(unsigned char)*p<=32)++p;const char *e=p;while(*e&&(unsigned char)*e>32)++e;
     if(e-p==4&&!memcmp(p,"x9p0",4))off=true;
     if(e-p==4&&!memcmp(p,"x9p1",4))legacy=true;
-    if(e-p==4&&!memcmp(p,"x9p2",4))indices=true;p=e;}
+    if(e-p==4&&!memcmp(p,"x9p2",4))indices=true;
+    if(e-p==4&&!memcmp(p,"x9g0",4))guard_off=true;p=e;}
   }
-  const unsigned out=off?0:legacy?1:indices?2:1;
-  NSLog(@"X9 PAD: mode=%u (%s);default=CPU snapshot x9p0=off x9p1=snapshot x9p2=experimental indices",out,out==2?"experimental indices":out==1?"CPU snapshot":"off");
+  const unsigned out=off?0:legacy?1:indices?2:guard_off?1:0;
+  NSLog(@"X9 PAD: mode=%u (%s);default=off (PanVK pad guard; x9g0 -> CPU snapshot) x9p0=off x9p1=snapshot x9p2=experimental indices",out,out==2?"experimental indices":out==1?"CPU snapshot":"off");
   return out;
  }();
  return mode;
