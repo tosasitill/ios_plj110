@@ -1,0 +1,29 @@
+diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
+index 179aee3..bc24b13 100644
+--- a/osfmk/arm64/machine_routines.c
++++ b/osfmk/arm64/machine_routines.c
+@@ -56,6 +56,7 @@
+ #include <vm/vm_map.h>
+ #include <sys/codesign.h>
+ #include <sys/kdebug.h>
++#include <libkern/OSDebug.h>
+ #if defined(SWEET)
+ #include <arm64/sweet_early.h>
+ #endif
+@@ -1794,6 +1795,16 @@ ml_static_mfree(
+ 		return;
+ 	}
+ 
++	/*
++	 * X9 diagnostic (0004): an unaligned free panicked at the assert below
++	 * with no backtrace while the sparse prelink kexts were loading. Report
++	 * the caller and keep the memory instead (a leak, never a wrong free).
++	 */
++	if (vaddr & (PAGE_SIZE - 1)) {
++		OSReportWithBacktrace("X9 MFREE: unaligned ml_static_mfree vaddr=%p size=0x%lx lr=%p; skipped",
++		    (void *)vaddr, (unsigned long)size, __builtin_return_address(0));
++		return;
++	}
+ 	assert((vaddr & (PAGE_SIZE - 1)) == 0); /* must be page aligned */
+ 
+ 	for (vaddr_cur = vaddr;

@@ -6,7 +6,8 @@
 #   macos  -> .local/dxb          macOS kext C++ ABI (vtable padding); the tree
 #                                 every proven boot image so far was linked against
 #   ios    -> .local/dxb-iosabi   iOS kext C++ ABI (0002) + sparse-prelink kext memory
-#                                 (0003); needed for the original 20H392 kexts
+#                                 (0003) + unaligned ml_static_mfree report (0004, diagnostic);
+#                                 needed for the original 20H392 kexts
 #
 # --setup creates the tree from scratch (network): blacktop/darwin-xnu-build at
 # the pinned commit + dxb-build.sh.patch, apple-oss xnu at xnu-8796.141.3 + the
@@ -32,7 +33,7 @@ XNU_REPO=https://github.com/apple-oss-distributions/xnu.git
 XNU_TAG=xnu-8796.141.3
 case $ABI in
   macos) D=$ROOT/.local/dxb; PATCHES="$P/0001-x9-sweet-xnu-8796.141.3.patch" ;;
-  ios)   D=$ROOT/.local/dxb-iosabi; PATCHES="$P/0001-x9-sweet-xnu-8796.141.3.patch $P/0002-x9-ios-kext-cxx-abi.patch $P/0003-x9-sparse-prelink-kext-memory.patch" ;;
+  ios)   D=$ROOT/.local/dxb-iosabi; PATCHES="$P/0001-x9-sweet-xnu-8796.141.3.patch $P/0002-x9-ios-kext-cxx-abi.patch $P/0003-x9-sparse-prelink-kext-memory.patch $P/0004-x9-diag-unaligned-static-mfree.patch" ;;
   *) echo "usage: $0 [macos|ios] [--setup]" >&2; exit 2 ;;
 esac
 
@@ -68,7 +69,7 @@ if [ $SETUP = 1 ]; then
              libfirehose_kernel.sym libsyscall.obj libsyscall.sym xnu-hdrs.obj; do
       [ -e "$ROOT/.local/dxb/build/$b" ] && cp -c -R "$ROOT/.local/dxb/build/$b" "$D/build/$b"
     done
-    git -C "$D/xnu" apply "$P/0002-x9-ios-kext-cxx-abi.patch" "$P/0003-x9-sparse-prelink-kext-memory.patch"
+    git -C "$D/xnu" apply "$P/0002-x9-ios-kext-cxx-abi.patch" "$P/0003-x9-sparse-prelink-kext-memory.patch" "$P/0004-x9-diag-unaligned-static-mfree.patch"
   else
     git clone "$DXB_REPO" "$D"
     git -C "$D" checkout -q "$DXB_COMMIT"
