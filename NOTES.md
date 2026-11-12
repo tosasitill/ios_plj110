@@ -6,6 +6,13 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 本次增量清理（2026-11-12；当前共5棵／.local内4棵）
+
+- **准确数量／保留理由**：上一轮旧草稿已经移除，本轮开始和结束均为 **5棵／`.local`4棵**，没有新增或删除worktree。保留main（USB EP0/control/glue正有未提交修改）、唯一活动`heif-resume-20261111`（29bb386）、旧`heif-vdec`未完成合并现场（6e33990）、最新`usb-native14-20261112`固定树（52d69a0）、最新`gpu280-purge-20261112`固定构建树（1eda803）。下方“当前4棵”清理节已改标历史；归档refs不是额外worktree，不删除独有源码或原合并状态。
+- **实际删除／依赖边界**：GPU280构建后共享`general-target/{release,aarch64-apple-ios/release}/{deps,build,.fingerprint,incremental}`重新产生缓存，本轮删除 **3325个文件／4308583426逻辑bytes（约4.01GiB）**；没有删除最终kernel/boot/插件或源码。本轮全部20261112主out候选、最新GPU279/280、sim2bind/AppSync及既有ALS relink输入保留；`.local/dxb/build/xnu.obj`由当前`prepare-local.py`明确要求，是构建输入而非无用缓存，未清。设备备份、root clone、Apple原件、原始日志／HEIF捕获与归档源码保留。
+- **执行／核对／并发**：执行前无可见编译器、候选打开文件或外部symlink消费者，执行时持有现有Cargo三类锁并逐文件核inode/size/mtime后删除；**exit0，3140项保留文件元数据未变，errors=[]**，不是产物内容或设备功能验证。四棵非主树HEAD/status/合并标记未变；主树原7项USB源码patch未变，期间另一窗口新增`x9/usb/recover_contract.py`修改，首次整体状态核对差异原样保留并单独记录为并发变化，没有修改／暂存／夹带其源码。
+- **空间／证据／交接**：df可用191616252→194926384KiB，净增3310132KiB，约 **3.16GiB**（APFS共享块／并发写入影响，不能用逻辑大小当物理回收）。私有case **`.local/x9/work/unused-cleanup-20261112-152342/`** 保存新的一次性cleaner、cache-plan／removed／result、raw plan/execute输出与exit、保留元数据、worktree状态、前后patch和`verification{,-first}.json`。本轮仅清理及NOTES交接，提交定位`git log --grep='record incremental cache cleanup and five retained worktrees'`；无构建／测试套件／CI／push／设备动作，无CI run ID或boot结果。HEIF仍未接通，源码进展仍以下节NATIVE34/35和活动树为准，不把清理当硬解完成。
+
 ## HEIF硬解续接定位（2026-11-12；NATIVE34最终输入链／NATIVE35 BS路由，仍未接通）
 
 - **唯一活动源码与编译**：`.local/x9/worktrees/heif-resume-20261111`／`work/heif-resume-20261111`。NATIVE34源码 **`3443d181a5b429e2097b391a7ac423fcf659fe10`** 已修`vmem_take_token`误名为真实`vdma_take_token`，input-compile-4仅production sweet_x9_vdec.o **exit0／17既有warnings**；native PRIVATE input slice→记录handle→复制Annex-B→真实PoC发布extent→typed hardware owner→reserved a001/b001链已接线，但VSI/layout/cache/clock/IRQ真实owner仍缺。清理节所述“三个未提交文件／compile-3失败”是当时历史状态，现已由本里程碑替代；未把视频源码merge到main或修改旧heif-vdec合并现场。
@@ -35,7 +42,7 @@
 - **结论／边界**：现有证据确认这台国行机的已枚举 SIM 路径没有识别到可用 eUICC，当前原生 eSIM 没有可启用的已证路径；**尚不能判定主板上绝对没有一个被禁用／未路由的 eUICC**，缺新 EID／完整 slot-HAL 状态及主板 BOM／芯片证据。`persist.sys.oost.esim_*` 四个通用开关存在且为0，仅是软件属性，不作为隐藏硬件或改成1即可成功的依据。不建议为此盲刷海外 ROM／改 NV；外置可编程 eUICC 卡是另添硬件、占实体卡槽，尚未在 X9 验证，与打开内置 eSIM 不同。
 - **原始资料／重放／下一步**：私有 `.local/x9/work/euicc-20261112/` 保存两页原始 gzip response、解压 HTML／文本、`official-fetch.json` 和脱敏 `evidence.json`（23项窄证据）。离线重放：`python3 -I .local/x9/work/euicc-20261112/extract.py`，不访问设备。下一步用户将手机置于 Android 并连接 ADB 后，只读 `pm list features`、`dumpsys -l` 定位 eUICC 服务并读取其 dump、保存 `dumpsys phone` 核对全部 slot／EID／ATR；若固件仍未枚举则需 BOM／主板硬件证据，不通过假 EID／改 flag 宣称 eSIM 成功。交接仅本 NOTES，不另建过程报告／timeline。
 
-## 过期 worktree／缓存清理（2026-11-12；当前共4棵／.local内3棵）
+## 前次过期 worktree／缓存清理（历史：2026-11-12；当时共4棵／.local内3棵）
 
 - **本轮结果／准确数量**：用户再次要求“把不用的和过期的全清了”。实际开始为18棵／`.local`17棵；先归档并删除13棵旧蓝牙／蜂窝／USB草稿及NATIVE12冻结树，期间另一窗口新增并完成NATIVE14，随后删除已被替代的NATIVE13冻结树。**共15删除／0跳过，最终4棵／`.local`3棵；累计239棵HEAD归档删除**。当前仅保留主树、`heif-resume-20261111`活动硬解树、`heif-vdec`原合并现场、`usb-native14-20261112`最新固定树。下方17／19等均为历史观测，不再是当前数量；后续窗口仍可能新增。
 - **未提交源码完整保留**：13棵旧草稿不是“全部已合入main”，也未丢弃独有修改。每棵原HEAD保留`refs/archive/worktrees/20261112/<名称>`；另外14棵首批树（含clean NATIVE12）有`refs/archive/wip-worktrees/20261112/<名称>`，通过独立临时index保存tracked＋明确列出的untracked源码，13份WIP commit不是运行代码交付／功能完成声明。实际删除前核对临时index与工作文件无差异；原index、staged／unstaged binary patches、原HEAD／状态及untracked名单保存于私有case的`source-state/<名称>/`。只对已归档且无打开文件／Git操作／当前配置依赖的旧草稿使用`git worktree remove --force`；clean NATIVE12／13普通remove。没有reset／restore／abort、删除分支或gc；活动HEIF与原MERGE_HEAD／200项合并状态未变。
