@@ -6,6 +6,15 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## CEUS + 即时indication（2026-11-12；x9-cell-ceus 已构建，未启动）
+
+- **b55cdaa**(worktree 64622f2，基于necp镜像)：
+  - init AT脚本在CFUN=4(开射频前)、ERAT之后加 `AT+CEUS?` → `AT+CEUS=1`(27.007 UE usage setting=data centric) → `AT+CEUS?` → `AT+EIMSCFG?`，回复打印 `X9 MODEM: usage-setting <cmd> -> OK|ERROR "<text>"`。该端口是SIM1的，**SIM2保持默认作对照**。`x9_md_ceus=0`可跳过设置(读仍执行)。CFUN=4/CFUN=1(EFUN)步骤改为按命令识别，不再用硬编码下标2/10。
+  - ATCTX每轮多读 `AT+CEUS?`、`AT+EIMSCFG?`(两卡各自，经MIPC)。
+  - X9QMIAT x9q_nas：注册状态变化时把该SIM的serving/system/DSD客户端 `next` 清零，下一后台周期立即发SysInfo/DSD indication，日志 `X9 QMI AT: NAS SIMn registration change -> N client(s) indicate now`(240竞态修正)。
+- **镜像** `x9/out/x9-cell-ceus-gpu278-20261112/boot.img` exit0；278插件不变无需mailbox staging；仍含NECP探针。
+- **验收看点**：usage-setting行(CEUS回读是否1；EIMSCFG?是否支持)；IND 4409/`NAS SIM1 registration` 中SIM1在NR释放后是否留在SA(access5 cn1)而SIM2照旧回落；回落时 `indicate now` 后约百毫秒内出现LTE SysInfo，无53s式降级重拨；Safari。日志请跑够90s以上，期间正常用网让RRC有几次释放。
+
 ## 241结果（necp上机，2026-11-12）：4G正常上网；SA→LTE回落分析
 
 - **观察**：用户确认4G可正常上网。无panic；31s后无降级/无Stop重拨；到135s TX 23268包/9.1MB、RX 35503包/41.6MB。NECP：WebKit.Networking/MobileSafari/SafeBrowsing `sat 1 routed 5`。早期UNSAT(14–16s，routed 0、rt none)是承载起来前的正常情况。
