@@ -6,6 +6,13 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 238 探针镜像（CELL-ROUTE，2026-11-12；已构建，未启动）
+
+- **补充观察(237内核日志)**：41.169s MD真实从SA回落LTE(`CEREG 1 C5GREG 0 COPS-AcT 7`)，此后我们发 `NAS SysInfo LTE registered`；4G图标是真实的。CommCenter `dataBearerTechnology=NR` 未随之更新：整个237无任何WDS 0x01事件报告(仅当客户端订阅TLV 0x15时发)。
+- **16f05f7**：rtsock.c 默认路由(v4 0.0.0.0 / v6 ::)增删改一律记录(进程、ifindex、ifscope、结果)`X9 ROUTE: … default …`/`default request result N`(上限64)；DPMAIF每10s统计行后 `X9 ROUTE: unscoped lookup v4 114.114.114.114 -> <if> ; v6 2400:3200::1 -> <if>`(rtalloc1, IFSCOPE_NONE)；WDS记录 `SetEventReport tlvs`、`bearer-tech query 0x44/0x37 … rat mask`、`bearer-tech report`。
+- **镜像**：**`x9/out/x9-cell-route-gpu278-20261112/boot.img`** exit0；worktree= cell-slaac + 7873b27(同16f05f7)，不含USB 816f327；278插件不变无需mailbox staging。
+- **看点**：unscoped lookup 是否 `none`(=没有默认路由→Safari离线根因在configd/路由)还是 `pdp_ip0`(路由在→问题在前台策略/cellularDataPossible)；configd是否发过 default add 及其结果；CommCenter订阅的WDS事件TLV。Safari测试时间点请记一下(开机后约多少秒)。
+
 ## 237 CommCenter os_log 分析（2026-11-12，用户：Safari/天气“未连接到互联网”，状态栏先无标志→两卡有信号→仅移动卡有信号+4G）
 
 - 拉取：`.local/x9/logs/237-logd/`（raw + strings.txt，b237.txt=214.tracev3+Special）。USB每1–2s重新枚举，pull_ios_logs 已加 adb 重试/wait-for-device。
