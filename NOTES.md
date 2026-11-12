@@ -6,6 +6,14 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 241结果（necp上机，2026-11-12）：4G正常上网；SA→LTE回落分析
+
+- **观察**：用户确认4G可正常上网。无panic；31s后无降级/无Stop重拨；到135s TX 23268包/9.1MB、RX 35503包/41.6MB。NECP：WebKit.Networking/MobileSafari/SafeBrowsing `sat 1 routed 5`。早期UNSAT(14–16s，routed 0、rt none)是承载起来前的正常情况。
+- **240与241的差别(观察+推断)**：241的回落(40.077)恰好由周期后台读到，LTE SysInfo 117ms后发出；240的回落先被CommCenter的GetCellInfo前台请求读到(39.565，回复了LTE)，但NAS/DSD indication **只按每客户端10s周期发**(X9QMIAT.inc x9q后台调度)，LTE SysInfo晚到49.47，53.07 CommCenter降级+重拨，之后只有后台流量。**推断**：240不能上网是这段约10s不一致引起的竞态；建议修正：registration变化(x9q_nas的change检测)时把所有客户端 `c.next` 清零，立即发indication。未实现。
+- **SA回落时序(观察，MIPC IND 4409 = +CSCON 字段 mode/state/access/cn)**：两卡都在**第一次NR RRC释放**时离开SA：SIM1 38.059 NR idle(access5 cn1/5GC) → **56ms后** 38.115 LTE idle(access4 cn0/EPC) → 38.609 LTE connected；SIM2 35.905 NR idle → 42.292 LTE。到136s都没回NR。239/240也在首个承载后约10–20s回落。
+- **Android对照(android-boot-20261111 logcat)**：RIL对两卡发 `AT+EIMSCFG=3,3,0,0,1,1`，IMS注册在NR(`getImsRegistrationTechnology=3`)；E5GOPT=7。我们iOS侧从不发EIMSCFG、无IMS PDN/注册。
+- **推断(未证实)**：MD按voice-centric UE行为(TS 24.501：5GS无IMS语音时禁用N1 mode)在空闲时重选到LTE；56ms切换和两卡一致回落更像UE侧决定，而非覆盖问题。网络RRCRelease重定向也会这样，没有MDLOG解码分不清。验证候选：(1)ATCTX加 `AT+CEUS?`、`AT+EIMSCFG?` 查询；(2)试 `AT+CEUS=1`(data centric)看是否留在SA；(3)按Android发EIMSCFG(需要IMS注册，工作量大)。
+
 ## 240结果 + NECP探针（2026-11-12；x9-cell-necp 已构建，未启动）
 
 - **240观察(cellinfo)**：无panic。GetCellInfo按预期回复(SA时0xe2，39.565 SIM1回落LTE后0xbc)。时间线与239相同：28.7首次承载有流量(到50.8s TX 811/RX 987包)；39.5 MD回落LTE，但我们的NAS SysInfo仍报NR，**49.47才发LTE SysInfo**；53.057 CommCenter连发0x5567/0x3b/0x33/0x5566(均被拒94)，53.073 configd把unscoped default降为scoped，53.087 CC对v4 Stop并重拨，56.2恢复、56.396恢复unscoped default。之后每10s unscoped lookup v4/v6 都是pdp_ip0，但流量只剩后台(62→158s TX 97→391包)。**GetCellInfo没有消除降级/重拨。**
