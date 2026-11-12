@@ -26,6 +26,7 @@
 #include <netinet/in.h>
 #include "x9_usb_device.h"
 #include "x9_usb_log_protocol.h"
+#include "x9_usb_native_qmu.h"
 
 extern int sweet_x9_arg(const char *, int);
 extern uint32_t sweet_log_copy(uint64_t *, char *, uint32_t);
@@ -54,6 +55,7 @@ static LCK_MTX_DECLARE(usb_lock, &usb_group);
 static struct x9_usb_status st = { .version = X9_USB_ABI };
 static ifnet_t netif;
 static unsigned started, packet_filter, suspended, failed;
+static thread_t usb_worker = THREAD_NULL;
 static uint64_t lease, next_lease;
 struct chunk {
     uint32_t n, generation;
@@ -196,6 +198,8 @@ static void fault(int error, uint32_t detail)
 {
     lck_mtx_lock(&usb_lock); failed = 1; lck_mtx_unlock(&usb_lock); post_link(0);
     W(0x2404, R(0x2404) & ~BIT(6));
+    uint64_t now_ns; absolutetime_to_nanoseconds(mach_absolute_time(), &now_ns);
+    (void)x9_usb_native_worker_quiesce(now_ns);
     /* A stop timeout quarantines buffers for the remainder of this boot. No
      * automatic reset/retry can convert uncertain ownership into safe reuse. */
     for (unsigned i = 0; i < 5; i++) if (eps[i].enabled) (void)stop_endpoint(&eps[i]);
@@ -226,11 +230,11 @@ static int configure_endpoint(struct endpoint *e, unsigned fifo)
     e->enabled = 1; e->busy = e->halted = 0; e->slot = 0;
     return 0;
 }
-static int submit(struct endpoint *e, const void *bytes, unsigned n,
-                  uint64_t owner, uint64_t id, uint32_t generation)
+/* Common GPD format/cache publication used by private transport AND the
+ * default-uninstalled native backend. Caller has already stopped the queue. */
+static void prepare_gpd(struct endpoint *e, const void *bytes, unsigned n,
+                        unsigned append_zlp)
 {
-    if (!e->enabled || e->busy || e->halted || failed || n > DMA_BUFFER) return EINVAL;
-    int error = stop_endpoint(e); if (error) return error;
     unsigned next = e->slot ^ 1;
     struct gpd *g = descriptor(e, e->slot), *terminator = descriptor(e, next);
     bzero(g, sizeof(*g)); bzero(terminator, sizeof(*terminator));
@@ -241,15 +245,31 @@ static int submit(struct endpoint *e, const void *bytes, unsigned n,
     if (e->in) {
         if (n && bytes != e->va + DMA_BUFFER) memcpy(e->va + DMA_BUFFER, bytes, n);
         g->flags = ext; g->length = n;
-        if (!e->interrupt && n && !(n % maxpacket)) {
+        if (append_zlp) {
             if (gen2) g->flags |= BIT(6); else g->length |= BIT(29);
         }
     } else {
         g->flags = n << (gen2 ? 12 : 16); g->length = ext;
     }
     cache(e->va + DMA_BUFFER, DMA_BUFFER, 0);
-    cache(terminator, DESC_STRIDE, 0);
-    cache(g, DESC_STRIDE, 0);
+    cache(terminator, DESC_STRIDE, 0); cache(g, DESC_STRIDE, 0);
+}
+static void publish_gpd(struct endpoint *e)
+{
+    struct gpd *g = descriptor(e, e->slot);
+    g->flags |= HWO | BIT(7); cache(g, DESC_STRIDE, 0);
+    uint64_t start = e->pa + e->slot * DESC_STRIDE;
+    W(qcsr(e) + 4, (uint32_t)start);
+    W(qhi(e), (R(qhi(e)) & ~15u) | (uint32_t)(start >> 32));
+    W(qcsr(e), BIT(0));
+}
+#include "x9_usb_native_qmu.inc"
+static int submit(struct endpoint *e, const void *bytes, unsigned n,
+                  uint64_t owner, uint64_t id, uint32_t generation)
+{
+    if (!e->enabled || e->busy || e->halted || failed || n > DMA_BUFFER) return EINVAL;
+    int error = stop_endpoint(e); if (error) return error;
+    prepare_gpd(e, bytes, n, e->in && !e->interrupt && n && !(n % maxpacket));
     /* Serialize lease validation with the actual DMA publication. A client
      * close AFTER this point may leave a partially transmitted old request,
      * but a dequeued old chunk can never acquire a successor's owner. */
@@ -261,16 +281,12 @@ static int submit(struct endpoint *e, const void *bytes, unsigned n,
             lck_mtx_unlock(&usb_lock); return ESTALE;
         }
     }
-    g->flags |= HWO | BIT(7); cache(g, DESC_STRIDE, 0); /* publish HWO last */
     e->requested = n; e->busy = 1; e->owner = owner; e->request_id = id;
     if (id) {
         for (unsigned i = 0; i < QUEUE; i++) if (tx_results[i].request_id == id)
             tx_results[i].state = X9_USB_TX_ACTIVE;
     }
-    uint64_t start = e->pa + e->slot * DESC_STRIDE;
-    W(qcsr(e) + 4, (uint32_t)start);
-    W(qhi(e), (R(qhi(e)) & ~15u) | (uint32_t)(start >> 32));
-    W(qcsr(e), BIT(0));
+    publish_gpd(e); /* HWO last, no rejectable operation follows */
     if (e->number == 3) lck_mtx_unlock(&usb_lock);
     return 0;
 }
@@ -350,6 +366,7 @@ static int kick_tx(struct endpoint *e, struct queue *q)
 }
 static void data_poll(void)
 {
+    if (st.native_apple_stack) return; /* no private/native endpoint sharing */
     lck_mtx_lock(&usb_lock); uint64_t owner = lease;
     unsigned drain = (st.reserved & X9_USB_RAW_DRAINING) || owner != raw_owner;
     if (drain) st.reserved |= X9_USB_RAW_DRAINING;
@@ -402,6 +419,10 @@ static void data_poll(void)
 }
 static int reset_data(void)
 {
+    uint64_t now_ns; absolutetime_to_nanoseconds(mach_absolute_time(), &now_ns);
+    int native_error = x9_usb_native_worker_quiesce(now_ns);
+    if (!native_error) native_error = x9_usb_native_qmu_barrier();
+    if (native_error) return native_error; /* never reset uncertain native GPD */
     /* Close the enqueue gate BEFORE clearing queues/STOP. Otherwise a sender
      * can insert an old-generation chunk between clear_queues and the final
      * generation bump, leaving a tracked request stranded across reset. */
@@ -561,6 +582,7 @@ void x9_usb_get_description(struct x9_usb_description_status *out)
 }
 static int set_configuration(unsigned value)
 {
+    if (st.native_apple_stack) return ENOTSUP; /* future native EP0 owns this */
     int error = reset_data(); if (error || !value) return error;
     /* MTU3 with a USB3 IP has separate EP0/TX/RX FIFOs even at USB2 speed.
      * Validate capacity at init, then assign 512 bytes per endpoint. */
@@ -710,6 +732,9 @@ static void poll(void)
     /* Speed can settle after RESET; read the controller's result, not cable labels. */
     unsigned speed=R(0x800)&7;
     if (speed==1 || speed==3) { lck_mtx_lock(&usb_lock); st.speed=speed; lck_mtx_unlock(&usb_lock); maxpacket=speed==3 ? 512:64; }
+    /* No legacy SET_INTERFACE/halt/descriptor route may touch a native-owned
+     * endpoint. Native EP0/event dispatch is a separate unfinished obligation. */
+    if (st.native_apple_stack) return;
     uint32_t isr=R(0x80);
     if (isr & 0x10001u) {
         W(0x80,isr & 0x10001u); uint32_t csr=R(EP0);
@@ -785,6 +810,7 @@ static int create_network(void)
 static void worker(void *arg, wait_result_t why)
 {
     (void)arg; (void)why;
+    usb_worker = current_thread();
     int error=x9_mtu3_init(0);
     if (error) { lck_mtx_lock(&usb_lock); st.state=X9_USB_FAULT; st.error=error; lck_mtx_unlock(&usb_lock);
         printf("X9 USB: inherited PHY/clock bring-up failed %d\n",error); thread_terminate_self(); return; }

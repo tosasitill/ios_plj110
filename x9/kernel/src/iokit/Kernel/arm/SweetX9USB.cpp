@@ -12,11 +12,13 @@
 #include <libkern/c++/OSArray.h>
 #include <sys/errno.h>
 #include "../../../bsd/dev/x9_usb_device.h"
+#include "../../../bsd/dev/x9_usb_native_qmu.h"
 #include "X9USBRequestOwner.inc"
 #include "X9USBRequestBridge.inc"
 extern "C" int sweet_early_is_x9(void);
 extern "C" int sweet_x9_arg(const char *, int);
 static IOReturn usb_return(int);
+#include "X9USBMTU3Backend.inc"
 
 /* Only the device worker allocates these. Keep prepared pages wired until
  * reboot even if a QMU STOP times out. No other device's carve-out is borrowed. */

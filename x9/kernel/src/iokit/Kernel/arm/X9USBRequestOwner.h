@@ -87,6 +87,7 @@ public:
     IOReturn close(IOReturn reason);
     IOReturn reopen(); // only with no slots, including callbacks/quarantine
     IOReturn drainCompletions(); // bounded batch; returns first complete failure
+    IOReturn failure() const; // latched quarantine (including retire, not just complete)
     bool empty() const;
 
 private:
@@ -102,6 +103,7 @@ private:
     Slot slots[Capacity] = {};
     thread_t worker = THREAD_NULL;
     uint64_t generation = 1, nextSerial = 0;
+    IOReturn firstFailure = kIOReturnSuccess;
     bool closed = true, inOperation = false, draining = false;
     X9USBRequestOwner(const X9USBRequestOwner &) = delete;
     X9USBRequestOwner &operator=(const X9USBRequestOwner &) = delete;

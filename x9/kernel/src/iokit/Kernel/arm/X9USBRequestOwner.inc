@@ -46,6 +46,7 @@ void X9USBRequestOwner::terminal(Slot &s, IOReturn status)
 void X9USBRequestOwner::quarantine(Slot &s, IOReturn status)
 {
     s.status = status == kIOReturnSuccess ? kIOReturnIOError : status;
+    if (firstFailure == kIOReturnSuccess) firstFailure = s.status;
     s.deadlineNS = 0;
     s.state = State::Quarantined;
     closed = true;
@@ -236,6 +237,8 @@ bool X9USBRequestOwner::empty() const
     for (const auto &s : slots) if (s.state != State::Free) return false;
     return true;
 }
+IOReturn X9USBRequestOwner::failure() const
+{ return onWorker() ? firstFailure : kIOReturnNotPermitted; }
 IOReturn X9USBRequestOwner::reopen()
 {
     if (!onWorker()) return kIOReturnNotPermitted;

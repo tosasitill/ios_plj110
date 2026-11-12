@@ -12,7 +12,8 @@ public:
     struct Backend {
         void *context;
         // Must qualify the actual endpoint before descriptor prepare/admission.
-        IOReturn (*validateEndpoint)(void *, uint32_t endpoint, bool usbIn);
+        IOReturn (*validateEndpoint)(void *, uint32_t endpoint,
+                                    const X9USBRequestOwner::Input &);
         // Sole worker only. available=false permits drain/STOP, never publish.
         // A real MTU3 endpoint backend must implement this, not a success stub.
         void (*poll)(void *, X9USBRequestBridge &, X9USBRequestOwner &,
@@ -22,7 +23,7 @@ public:
      * qualify (workloop must use current XNU layout/ABI). Backend/context and
      * callback contexts must be pinned for this boot; opaque native pointers
      * are NOT cast to OSObject or automatically retained. No current
-     * caller/backend exists. Installation DOES NOT enable
+     * caller exists; MTU3 bulk backend remains dormant. Installation DOES NOT enable
      * native mode, change the USB profile or set native_apple_stack.
      * The registry retains this object/workloop/event source for this boot.
      */

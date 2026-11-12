@@ -40,7 +40,7 @@ receipt绑定原生设备 identity 的SHA256。Lookup只证明该bundle/version�
 在原生用户安装路径上，不证明未知的上次Install成功、实际启动或跨重启持久性。
 Lookup缺少LookupResult不当成“未安装”；receipt在首次上传前用O_EXCL原子占有，
 同receipt的两个并发调用不能互相覆盖in-flight状态后重复Install。
-**这不是新增的可Finder配对boot；NATIVE9的registry/backend仍为空。**
+**这不是新增的可Finder配对boot；registry仍为空，NATIVE10的bulk backend未安装。**
 
 **当前是已实现的 USB2 CDC-ECM + 自有 bulk 传输候选，不是已验收的完整 iPhone USB 栈。**
 尚无本版本实机枚举、DMA、网络或配对结果。USB3、Type-C 双角色、原生
@@ -474,6 +474,7 @@ abort partial计数、EP0 native data stage、Family completion双向ABI及模�
 `x9_usb_native_worker_poll()`。**当前registry为空，没有install调用者、MTU3 native
 endpoint backend或Family completion adapter**；mode0仍是EP0日志worker，mode1/2
 仍走原ECM/private路径。`native_apple_stack=0`、原生service与USB identity未改变。
+后续NATIVE10补充了未安装的bulk backend；本节记录NATIVE9交接合同。
 这不是“原生栈已经能加载”的开关。
 
 未来必须在current-layout原生controller workloop、逐endpoint backend及ABI全部资格化
@@ -510,6 +511,38 @@ context也必须保证该寿命。opaque request/context不被猜成OSObject，�
 命令、在bus/reset/fault之前完成native quiesce及generation映射、descriptor/layout/
 Family callback adapter和bootstrap。当前poll hook不能代替这些硬件／生命周期合同。
 只完成两份生产对象交叉编译与固定原件静态资格，无kernel link、新boot或设备请求。
+
+### USB-NATIVE10：MTU3 ordinary bulk 后端（未安装／未实机验收）
+
+`X9USBMTU3Backend.h/.inc`提供boot-static `operations()`，可交给未来资格化的
+controller installer。C侧`x9_usb_native_qmu.h/.inc`与现有私有传输共用
+`prepare_gpd/publish_gpd`，实际写MTU3 GPD/HWO/SAR/QCSR，不实现成功stub。
+**没有installer或native profile/state setter**；`native_apple_stack`仍0，原生
+enable/validate/stage均拒绝，不会接管现有mode0/1/2或冒充原生Apple类。
+
+- 只接受USB地址`01/81/03/83`、普通非零bulk；direction必须与地址一致。
+  endpoint须由未来native控制面先独占enable；不能与legacy已启用端点共享。
+  FIFO用经capacity检查的固定非重叠512B槽，复用原五份16KiB boot-pinned分配。
+- 16-entry scheduler按同endpoint owner serial排队，一方向一次一chunk、每poll
+  一chunk（最多4096B）。`beginChunk`拷入bounce，C先stage/cache所有可拒绝输入，
+  最后调用owner `publishChunk`并立即发布HWO。不在4096B分块间插入ZLP。
+- Probe只看当前serial/descriptor的HWO、CPR、STOP和长度；IN还要求**STOP/flush
+  之前**TX_FIFOEMPTY=1且TX_TXPKTRDY=0，避免把DMA写入FIFO当成已经发上wire。
+  OUT失效bounce cache后才拷回current-layout descriptor。成功实际字节累计后交
+  原workloop gate的completion，worker不进入Family callback。
+- Timeout/offline/reset只会STOP并采样；HWO/CPR未退休的partial actual没有证明，
+  不能报0或用IN programmed length。owner和physical记录一起quarantine并断开，
+  保留descriptor/DMA到本次boot结束。quarantine错误现在latched，包括retire失败。
+- `reset_data`先关闭native准入、drain/STOP，再检查physical barrier；不确定记录
+  阻止reset/重用。fault也先native quiesce，legacy EP0/data不会处理native端点。
+  offline completion早于submit ack时，ack重新signal事件源，不丢完成通知。
+
+**仍缺**：native controller installer、exclusive profile/configuration/event状态
+路由、EP0 SETUP/data/status、gen2 TX ZLP的BMU/length-error路径、显式worker
+rearm/generation合同、abort gate命令、Family request flags/descriptor/object geometry
+和completion双向ABI、模块relocation/bootstrap。当前普通bulk合同不够装载原始
+DeviceFamily；不能启用native flag、声称Finder/Trust/Pair/TLS/App安装完成。
+编译及固定源码结果见`NOTES.md`活动交接；本轮无设备操作或额外测试套件。
 
 ### 真实主机配对入口（依赖原生内核路由）
 

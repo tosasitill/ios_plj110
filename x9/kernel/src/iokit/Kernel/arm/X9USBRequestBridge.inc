@@ -128,9 +128,11 @@ IOReturn X9USBRequestBridge::enqueueRequest(uint32_t endpoint,
     if (result == kIOReturnSuccess) {
         *ticket = room->ticket;
         room->acknowledged = true;
+        bool completionPending = room->phase == Phase::CompletionQueued;
         // Worker may now schedule DMA. Native completion source remains
         // blocked by this caller's original workloop gate until action returns.
         IOLockUnlock(lock);
+        if (completionPending) source->notify(); // offline completion may predate ack
     } else {
         *room = {};
         IOLockUnlock(lock); input.memory->release();
@@ -198,7 +200,7 @@ void X9USBRequestBridge::workerPoll(bool available, uint64_t nowNS)
         IOLockUnlock(lock);
         // validate/prepare can sleep, but never while holding exchange lock.
         IOReturn result = available ? backend.validateEndpoint(backend.context,
-            endpoint, input.usbIn) : kIOReturnOffline;
+            endpoint, input) : kIOReturnOffline;
         X9USBRequestOwner::Ticket ticket = {};
         if (result == kIOReturnSuccess) {
             input.context = e; input.completion = completed;
@@ -217,6 +219,7 @@ void X9USBRequestBridge::workerPoll(bool available, uint64_t nowNS)
     IOReturn error = requests.drainCompletions(); // only queues workloop completions
     if (error != kIOReturnSuccess && completionFailure == kIOReturnSuccess)
         completionFailure = error; // native request remains retained/quarantined
+    if (completionFailure == kIOReturnSuccess) completionFailure = requests.failure();
 }
 bool X9USBRequestBridge::drainNativeCompletions()
 {
@@ -252,4 +255,11 @@ bool X9USBRequestBridge::drainNativeCompletions()
 extern "C" void x9_usb_native_worker_poll(unsigned available, uint64_t nowNS)
 {
     if (X9USBRequestBridge *b = usb_native_registry()) b->workerPoll(available != 0, nowNS);
+}
+extern "C" int x9_usb_native_worker_quiesce(uint64_t nowNS)
+{
+    X9USBRequestBridge *b = usb_native_registry();
+    if (!b) return 0;
+    b->workerPoll(false, nowNS); // close admission, physical STOP before reset
+    return b->workerFailure() == kIOReturnSuccess ? 0 : EIO;
 }

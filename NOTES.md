@@ -15,6 +15,15 @@
 - **空间观察**：`.local/x9/worktrees`目录块数约 **27→8.2GiB**；`df`前后可用量净增加 **12.77GiB**，清理后约 **175.80GiB可用**。目录逻辑减少与实际回收不同，存在APFS共享块及并发写入，不能把18.8GiB目录减少说成全部物理释放。
 - **执行／复核／交接**：私有`.local/x9/work/worktree-cleanup-20261112/`保存`inventory-before.json`、`plan.json`、一次性`cleanup.py`、`actions.jsonl`、`result.json`、`verification.json`及df/open-files/mounts原始记录。执行exit0、218删除／0跳过；只读核对218个归档HEAD匹配、删除目录无残留、保留非主树状态无变化，错误列表为空。没有构建、CI、测试或设备操作。主树并发USB QMU源码改动原样保留，本节单独提交（`git log --grep='cleanup obsolete worktrees'`），不夹带其它窗口源码。
 
+## USB-NATIVE10 当前交接（2026-11-12；bulk 后端源码已补，未安装／未上机）
+
+- **续接范围**：用户“继续”后优先推进MT6993原生USB。读取当前交接、`x9/AGENTS.md`、NATIVE9 owner/bridge与OPPO `kernel_device_modules-6.12/drivers/usb/mtu3/{mtu3_qmu.c,mtu3_hw_regs.h}`；不启动子代理、不访问设备、不改root/mailbox/boot config。期间另窗提交`0fb46b4`清理worktree，保留其提交。
+- **新增源码**：`bsd/dev/x9_usb_native_qmu.h/.inc` + `iokit/Kernel/arm/X9USBMTU3Backend.h/.inc`。boot-static bulk operations、16-entry逐endpoint FIFO、4096B bounce，与既有私有传输共用实际GPD/cache/HWO/SAR/QCSR提交函数。只接受01/81/03/83普通非零bulk，固定非重叠FIFO且检查capacity、direction与exclusive endpoint ownership；native状态未启用时拒绝，不发布假的Apple类。
+- **完成／故障合同**：C publish在所有硬件检查后调用owner publish并立即HWO，不在4KiB分块间插ZLP；HWO-clear/CPR-end/STOP + actual准入，IN另核对**flush之前**FIFOEMPTY/无TXPKTRDY。无独立partial计数时STOP不足以报0或programmed length，owner/physical一起quarantine、断开、保留到boot结束；retire的隔离错误也latched。reset先close/STOP/drain及physical barrier，失败禁止重用；fault先quiesce；legacy EP0/data拒碰native端点。submit ack补signal防offline completion通知丢失。
+- **编译观察**：初版两份production对象`SweetX9USB.o/x9_usb_device.o`单文件arm64交叉编译exit0；日志`.local/x9/work/usb-native10-20261112/unit-build.log`。仅C99声明风格warning和新quiesce原型include顺序warning，后者源码已修；后续补了legacy EP0 guard与故障第二轮STOP，最终源码待固定完整构建，不把初版unit结果说成最终链接结果。无额外测试套件／成功产物二次检查。
+- **仍未接通／下一步**：bridge registry没有installer；`native_apple_stack=0`不变，没有native profile/state setter。仍缺native controller/EP0与配置事件路由、显式worker rearm/generation及abort gate、gen2 TX零包BMU路径、Family flags/descriptor/object geometry/completion双向ABI、模块relocation/bootstrap。此bulk后端不足以装原始DeviceFamily，**不能说Mac/Finder配对、App安装或完整越狱完成**。AppSync runtime仍未staging，上一节固定kernel和279 mailbox/603B参数约束不变。
+- **交付待补**：本轮源码提交、固定worktree kernel build/CI状态在下一条追加；不打boot、不部署。所有本轮原始编译输入和日志在`.local/x9/work/usb-native10-20261112/`。
+
 ## USB/AppSync 接入（2026-11-12；离线 runtime 成功，原生 USB／完整 bootstrap 仍未完成）
 
 - **用户要求**：参考 UniXNU-sheng，X9 USB 支持 Mac 配对、AppSync 安装 App，并加越狱环境。本轮从 `32aa992` 开始；期间其它窗口合入 GPU/HEIF/279，当前集成基线 `011b7d6`。未启动子代理，保留其它窗口提交。**不能称为三目标已完成，也没有新的可Finder配对boot**。
