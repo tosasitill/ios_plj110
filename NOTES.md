@@ -6,6 +6,15 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## CELLINFO（2026-11-12；x9-cell-cellinfo 已构建，未启动）
+
+- **DSD核对(20H392 dsd::asString)**：Technology 0=k3GPP/1=k3GPP2/2=kWLAN；RAT 0=NULL_BEARER,1=WCDMA,2=GERAN,3=LTE,4=TDSCDMA,5=WLAN,6=5G；SOMask 0=kUnspecified、1=LTE_FDD、bit43=5G_NSA。我们LTE发(0,3,0)、SA发(0,6,bit44)格式正确，**DSD无需修改**。
+- **被拒NAS身份(libCommCenterMCommandDrivers MOVZ立即数)**：0x5566 sendPreferredPlmnList、0x5567 sendPreferredPlmnCRC、0x5569 sendSmartDataMode(及同ID updateCurrentDataSIM)、0x5556 **GetCellInfo**(QMICellMonitorCommandDriver)、0x3b GetPlmnModeBit；0xeb未定。
+- **GetCellInfo格式**：LteCellInformation V1/V2/V3/V4 = TLV 0xbb/0xbc/0xd2/0xd3，NrCellInformation V2/V3 = 0xe2/0xe4；都是count u8+条目；LteCell_V2 28B(u16,MCC,MNC,u8,u16,u32,u32,u16,u32,u32,u8)，NrCell_V2 41B(u16,MCC,MNC,u16,u32,u64,u32,u16,u32,u32,u16,u8,u32)；process*CellV2 用字段1/2构造MCC/MNC。回复回调对各版本都applyTlv。
+- **ee77f95**：NAS 0x5556 由真实AT注册状态回复：NR(C5GREG注册+AcT11)发0xe2、LTE发0xbc，只填COPS PLMN，TAC/小区ID/频点为0；未注册则空成功。日志 `X9 QMI AT: NAS GetCellInfo SIM… NR tlv 0xe2|LTE tlv 0xbc …`。缓冲为static(桥接线程)。
+- 帧大小与239相同；注意 `x9q_poll` 帧 **0x1a10(≈6.7KB)**，桥接线程16KB栈余量小(238栈溢出背景)，后续宜削减。
+- **镜像** `x9/out/x9-cell-cellinfo-gpu278-20261112/boot.img` exit0；worktree= route3 + 1077d93。验收看点：CommCenter 日志 MCC 不再为空/无 kInvalidNetworkMCC(需logd)、回落LTE后是否仍降级重拨、Safari。
+
 ## 239结果（route3上机，2026-11-12）：正常启动；内核默认路由存在
 
 - **观察**：无panic。configd(pid36) 28.018 加 scoped default(ifscope6)，28.188 改为 **unscoped default gw 10.5.150.190**；之后每10s `unscoped lookup v4/v6 -> pdp_ip0`。所以“No network route”/Safari离线**不是内核缺默认路由**，在iOS上层策略。
