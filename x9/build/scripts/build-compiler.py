@@ -13,7 +13,7 @@ w=Path(__file__).resolve().parents[3] / '.local/x9/work/x9-metal-render'
 root=w.parents[1]
 src=w/'mesa-source'
 air=src/'src/compiler/air'
-if not air.exists():shutil.copytree(root/'work/references/hackios-xnu-kernel/tools/mesa/air',air)
+if not air.exists():shutil.copytree(w.parents[2]/'references/hackios-xnu-kernel/tools/mesa/air',air)
 for f in air.glob('*.[ch]'):
  text=f.read_text().replace('gl_shader_stage','mesa_shader_stage')
  text=text.replace('bool was_exact = c->b.exact;','uint32_t was_fp_ctrl = c->b.fp_math_ctrl;')

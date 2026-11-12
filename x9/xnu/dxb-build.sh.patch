@@ -1,0 +1,37 @@
+diff --git a/build.sh b/build.sh
+index fb34415..73d2ce5 100755
+--- a/build.sh
++++ b/build.sh
+@@ -69,8 +69,8 @@ function setup_xcode_toolchain() {
+     export PATH="${XCODE_TOOLCHAIN}:${XCODE_USR_BIN}:${SYSTEM_PATHS}${HOMEBREW_PATHS}"
+ 
+     # Explicitly set compiler variables to Xcode's tools
+-    export CC="$(xcrun -find clang)"
+-    export CXX="$(xcrun -find clang++)"
++    export CC="$CCACHE_WRAP/clang"
++    export CXX="$CCACHE_WRAP/clang++"
+     export LD="$(xcrun -find ld)"
+     export AR="$(xcrun -find ar)"
+     export RANLIB="$(xcrun -find ranlib)"
+@@ -617,7 +617,7 @@ build_libdispatch() {
+         sed -i '' 's|$(SDKROOT)/usr/local/include|$(FAKEROOT_DIR)/usr/local/include|g' "${SRCROOT}/xcodeconfig/libfirehose_kernel.xcconfig"
+         cd "${SRCROOT}"
+         env LD="$(xcrun -find clang)" LDPLUSPLUS="$(xcrun -find clang++)" \
+-            xcodebuild install -target libfirehose_kernel -sdk macosx ARCHS="x86_64 arm64e" VALID_ARCHS="x86_64 arm64e" OBJROOT="${OBJROOT}" SYMROOT="${SYMROOT}" DSTROOT="${DSTROOT}" FAKEROOT_DIR="${FAKEROOT_DIR}"
++            xcodebuild install -target libfirehose_kernel -sdk macosx ARCHS="arm64" VALID_ARCHS="arm64" OTHER_CFLAGS="-mkernel -nostdinc -Wno-packed -mcpu=cortex-a53" OBJROOT="${OBJROOT}" SYMROOT="${SYMROOT}" DSTROOT="${DSTROOT}" FAKEROOT_DIR="${FAKEROOT_DIR}"
+         cd "${WORK_DIR}"
+         mv "${FAKEROOT_DIR}/usr/local/lib/kernel/liblibfirehose_kernel.a" "${FAKEROOT_DIR}/usr/local/lib/kernel/libfirehose_kernel.a"
+     fi
+@@ -856,6 +856,12 @@ main() {
+     choose_xnu
+     get_xnu
+     patches
++    if [ -n "${XNU_POST_PATCH_HOOK:-}" ]; then
++        # Local diagnostic builds: adjust the applied tree after patching (e.g.
++        # flip the X9 checkpoint stage) and hard-verify that numbered patches
++        # actually applied -- build.sh only warns when a patch is skipped.
++        bash "${XNU_POST_PATCH_HOOK}"
++    fi
+     venv
+     build_bootstrap_cmds
+     build_dtrace

@@ -13,7 +13,7 @@ def function(source,needle):
  return source[start:end]
 class NVRAMProxyTests(unittest.TestCase):
  def test_exact_reference_layout_and_adt(self):
-  ref=ROOT/'work/references/data-a-live/tools/mkadt_pandora.py'
+  ref=ROOT/'.local/references/data-a-live/tools/mkadt_pandora.py'
   if ref.exists():
    module=ast.parse(ref.read_text());fn=next(n for n in module.body if isinstance(n,ast.FunctionDef) and n.name=='empty_nvram_proxy')
    env={'struct':struct,'zlib':zlib,'u32':lambda *v:struct.pack('<'+'I'*len(v),*v)}

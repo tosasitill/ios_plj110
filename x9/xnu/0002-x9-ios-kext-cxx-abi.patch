@@ -1,0 +1,24 @@
+diff --git a/libkern/libkern/c++/OSMetaClass.h b/libkern/libkern/c++/OSMetaClass.h
+index 78315a2..0c44cb8 100644
+--- a/libkern/libkern/c++/OSMetaClass.h
++++ b/libkern/libkern/c++/OSMetaClass.h
+@@ -162,7 +162,9 @@ class OSInterface
+ 
+ #ifdef XNU_KERNEL_PRIVATE
+ 
+-#if !XNU_TARGET_OS_OSX
++/* X9: original iOS 16 kexts (IOUSBDeviceFamily etc.) use the iOS C++ ABI:
++ * no reserved vtable padding and no aligned containers. */
++#if !XNU_TARGET_OS_OSX || defined(ARM64_BOARD_CONFIG_SWEET)
+ #define APPLE_KEXT_VTABLE_PADDING   0
+ #else /* !XNU_TARGET_OS_OSX */
+ #define APPLE_KEXT_VTABLE_PADDING   1
+@@ -182,7 +184,7 @@ class OSInterface
+ #endif /* XNU_KERNEL_PRIVATE */
+ 
+ #ifdef XNU_KERNEL_PRIVATE
+-#if XNU_TARGET_OS_OSX && defined(__arm64__)
++#if XNU_TARGET_OS_OSX && defined(__arm64__) && !defined(ARM64_BOARD_CONFIG_SWEET)
+ #define APPLE_KEXT_ALIGN_CONTAINERS      1
+ #else /* XNU_TARGET_OS_OSX && defined(__arm64__) */
+ #define APPLE_KEXT_ALIGN_CONTAINERS     (0 == APPLE_KEXT_VTABLE_PADDING)

@@ -57,7 +57,8 @@ def load_config(path):
     missing = [k for k in REQUIRED if not cfg.get(k)]
     if missing:
         sys.exit(f'{path}: missing {", ".join(missing)}')
-    for key in ('dxb', 'root_manifest', 'wifi_firmware', 'bluetooth_firmware', 'gps_firmware', 'wifi_nvram', 'mdota_source', 'carrier_cbn_ipcc', 'appsync_runtime'):
+    for key in ('dxb', 'root_manifest', 'wifi_firmware', 'bluetooth_firmware', 'gps_firmware', 'wifi_nvram', 'mdota_source', 'carrier_cbn_ipcc', 'appsync_runtime',
+                'camera_vendor_root', 'baseband_firmware'):
         if cfg.get(key):
             path = Path(cfg[key]).expanduser()
             cfg[key] = str(path if path.is_absolute() else ROOT / path)

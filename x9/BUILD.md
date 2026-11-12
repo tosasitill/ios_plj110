@@ -32,7 +32,7 @@ plugins means regenerating that header.
 One command, on the build Mac:
 
 ```bash
-cp x9/build/config.example.json x9/build/local.json   # once; edit the paths
+cp x9/build/config.example.json x9/build/local.json   # once; repo-relative inputs, edit tool paths
 python3 -I x9/build/build.py                           # kernel + boot.img
 ```
 
@@ -41,7 +41,7 @@ python3 -I x9/build/build.py                           # kernel + boot.img
 | Key | Meaning |
 | --- | --- |
 | `developer_dir` | Xcode 15 `Contents/Developer` (Apple clang 15.0.0, MacOSX14.0 SDK) |
-| `dxb` | XNU build directory `.../xnu/build-dxb/dxb`: frozen object tree, `EXPORT_HDRS`, `fakeroot`, `dxb/xnu` |
+| `dxb` | XNU build tree: `.local/dxb` (macOS kext ABI) or `.local/dxb-iosabi` (iOS kext ABI); built by `xnu/build-xnu.sh` |
 | `llvm_clang`, `lld` | LLVM/lld 22 for the bare-metal shim |
 | `root_manifest` | the device's `root-manifest.json` (holds the serial and extent map; never commit it) |
 | `compiler_launcher` | optional, e.g. `ccache`: prefixes every kernel compile, so a new output directory (every commit gets one) reuses earlier compiles |
@@ -72,9 +72,9 @@ options live in `build/boot.json`. To change the kernel, edit `kernel/src/`;
 to add an object, add its source, a template and an entry in
 `kernel/recipe.json`, and its place in `kernel/link-order.txt`.
 
-The frozen XNU object tree is built from `xnu-8796.141.3` plus the sweet/topaz
-patch lineage through 0185 and is an external input for now. `xnu-patches/`
-documents how the X9 sources evolved; the build does not apply it.
+The XNU object tree is built from apple-oss `xnu-8796.141.3` plus the patches in
+`xnu/` (`0001` = the complete X9 source delta, `0002` = iOS kext C++ ABI) by
+`xnu/build-xnu.sh macos|ios [--setup]`; see `../NOTES.md` section 3.1.
 
 `build/scripts/collect-build-inputs.py` gathers a candidate directory's real
 build inputs from the build Mac; it produced the current `kernel/` import.

@@ -58,3 +58,6 @@ id_ecdsa*
 ssh.debug.log
 auth-status*.json
 acp-*.jsonl
+
+# feature worktrees (git worktree add .worktrees/<topic>)
+.worktrees/

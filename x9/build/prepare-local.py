@@ -32,7 +32,12 @@ def main():
     ap.add_argument('--check', action='store_true', help='Validate paths without changing files')
     a = ap.parse_args()
     required = [LOCAL / 'dxb/build/xnu.obj', LOCAL / 'dxb/xnu',
-                LOCAL / 'x9/x9/out/pan220-batched-cache-ranges/root-manifest.json',
+                LOCAL / 'dxb-iosabi/build/xnu.obj',
+                LOCAL / 'x9/root-extension/20261110-16g/root-manifest.json',
+                LOCAL / 'x9/baseband/Mav17-9.00.02.Release.bbfw', LOCAL / 'x9/wifi-fw',
+                LOCAL / 'x9/wifi-nvram/WIFI', LOCAL / 'x9/modem/mdota', LOCAL / 'x9/carrier/CBN_cn_iPhone.ipcc',
+                LOCAL / 'x9/usb/native-20H392/kernelcache.macho', LOCAL / 'references/XnuPrelink/emit_prelink.py',
+                LOCAL / 'vendor/oppo-camera-imgsensor-common', LOCAL / 'apple/ios16-20H392',
                 WORK / 'mesa-source', WORK / 'mesa-render-source',
                 WORK / 'metal2vulkan-pan205-source', WORK / 'libdrm-2.4.133']
     missing = [str(p.relative_to(ROOT)) for p in required if not p.exists()]
