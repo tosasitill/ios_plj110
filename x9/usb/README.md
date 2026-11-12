@@ -642,6 +642,44 @@ configuration/alternate/endpoint生命周期、全部父类/descriptor/metaclass
 完整越狱bootstrap和实际Trust/Pair/TLS/安装/启动/持久性验收仍未完成。
 不得把`bind`、单编／完整构建或原件资格统计当成原生配对／App安装成功。
 
+### USB-NATIVE14：EP0 普通请求的分阶段完成（未绑定）
+
+原件 `sendControlInDataGated` 在首个 EP80 data request **入队成功后立即**另排
+一个 zero request，条件是非零短响应、整 packet 倍数、control+88 bit0 清零。
+这不是 status：data callback 为 `dataStageWriteCompletion`，zero callback 为
+`zlpCompletion`；后者忽略 error 参数并直接宣布 state8。OUT/no-data 的 IN
+status 则是另一个 zero request，callback 为 `statusStageWriteCompletion`。
+`recover_contract.py` 已记录 **216 observations／50 bounded regions**，包括
+原 control 的独立 descriptor retain/prepare(direction0)/complete/release 配对。
+这些仍是静态证据，`abi_compatible=false/runtime_loadable=false`。
+
+- `X9USBNativeControlAdapter` 独立持有两条 EP80 普通 request 记录，保留原始
+  callback record／Family cleanup。绑定必须与普通 adapter 的 controller、
+  workloop、completion thunk **全部一致**，并另资格化 packet64／flags bit0=0；
+  原 Family speed>2 用512，不能直接传 MTU3 raw speed3。
+- native-request PIO mode **不自动补**短响应 ZLP。第二 zero request 可在 SETUP
+  callback 返回前排入独立命令，不覆盖 data。真实 TX 退休 → 同 gate data callback
+  返回并 ack → 唯一真实 ZLP → zero callback 返回并 ack → status；旧 standalone
+  `SEND_IN` 的自动补包行为保留。
+- descriptor 由 adapter 额外 retain、独立 nested prepare(kIODirectionOut)、复制到
+  boot-static buffer；原 Family 的 prepare/complete 责任不转移。data callback 前
+  先 complete 本次额外 prepare，original request 可在 Family callback 内释放；
+  此后仅释放额外 descriptor retain。不把 DATAEND／入队／FIFO write 当完成。
+  data 和 zero 允许共享原 fallback descriptor（zero 不 prepare），不释放它的原始引用。
+- unknown actual／descriptor complete 失败明确隔离并保留 request；failed ZLP
+  不调用忽略 error 的原 callback，避免暂时宣布成功。failure latch 拒新 SETUP，
+  新 ticket 仅用于取消，不能清掉旧隔离。typed cancel 不触碰 MMIO 或伪造计数。
+- bulk rearm 现在也检查 control callback／adapter／PIO 全部 idle；同 gate 的
+  EP0 或 bulk callback 内 abort/rearm 返回 Busy，worker 二次检查 pending SETUP
+  和真实 EP0 packet/status bits，防止绕过控制请求责任。
+
+**通用 COMPLETE handler 仍待 loader 实现**：OUT/no-data status callback 已由
+adapter 完成，不能再合成第二次；IN 只用真实 status OUT 证据进入原 control
+inputDataPacket/final callback。错误还需原 control 的终态清理。
+这些接口没有调用者、没有 native controller installer，不设置 native flag；
+typed abort 仍只覆盖 bulk，不是原 AbortPipe ABI。原生枚举／配对、AppSync staging
+与完整越狱 bootstrap 的缺口未因本适配器消失。
+
 ### 真实主机配对入口（依赖原生内核路由）
 
 新增`pairing.py`走**系统原生usbmuxd、真实lockdownd**，不使用旧自有mux草稿，

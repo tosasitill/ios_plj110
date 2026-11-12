@@ -3,6 +3,7 @@
  * Default registry is empty; existing ECM/log/private paths remain unchanged.
  */
 #include "X9USBRequestBridge.h"
+#include "X9USBControlBridge.h"
 #include <IOKit/IOEventSource.h>
 #include <kern/clock.h>
 #include <kern/locks.h>
@@ -101,6 +102,9 @@ IOReturn X9USBRequestBridge::enqueueControl(ControlOp operation,
     X9USBRequestOwner::Ticket ticket, AbortResult *result)
 {
     if (!loop->inGate()) return kIOReturnNotPermitted;
+    if (draining) return kIOReturnBusy;
+    IOReturn controlStatus = X9USBControlBridge::controlReady(loop, operation == ControlOp::Rearm);
+    if (controlStatus != kIOReturnSuccess) return controlStatus;
     uint64_t deadline; clock_interval_to_deadline(2000, NSEC_PER_MSEC, &deadline);
     IOLockLock(lock);
     if (worker == THREAD_NULL) { IOLockUnlock(lock); return kIOReturnNotReady; }

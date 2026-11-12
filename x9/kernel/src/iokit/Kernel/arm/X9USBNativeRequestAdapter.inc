@@ -1,4 +1,5 @@
 #include "X9USBNativeRequestAdapter.h"
+#include "X9USBNativeControlAdapter.h"
 #include <stddef.h>
 #include <kern/locks.h>
 #include <sys/systm.h>
@@ -32,6 +33,14 @@ static_assert(offsetof(X9USBStockRequest20H392, parameter) == 0x60, "stock compl
 X9USBNativeRequestAdapter X9USBNativeRequestAdapter::instance;
 static LCK_GRP_DECLARE(x9_usb_adapter_group, "x9_usb_adapter");
 static LCK_MTX_DECLARE(x9_usb_adapter_binding_lock, &x9_usb_adapter_group);
+bool X9USBNativeRequestAdapter::boundFor(IOWorkLoop *loop, void *controller, FamilyComplete complete)
+{
+    lck_mtx_lock(&x9_usb_adapter_binding_lock);
+    const auto &a = instance;
+    bool result = loop && controller && complete && a.loop == loop &&
+        a.controller == controller && a.familyComplete == complete;
+    lck_mtx_unlock(&x9_usb_adapter_binding_lock); return result;
+}
 IOReturn X9USBNativeRequestAdapter::bind(IOWorkLoop *loop, void *controller,
                                         FamilyComplete complete)
 {
@@ -71,6 +80,10 @@ IOReturn X9USBNativeRequestAdapter::submit(void *controller, void *request,
 IOReturn X9USBNativeRequestAdapter::enqueue(void *request, IOMemoryDescriptor *memory)
 {
     if (!request || !memory) return kIOReturnBadArgument;
+    X9USBStockRequest20H392 routing;
+    memcpy(&routing, request, sizeof(routing));
+    if (routing.endpoint == 0x80)
+        return X9USBNativeControlAdapter::submit(controller, request, memory);
     Entry *room = nullptr;
     for (auto &e : entries) {
         if (e.phase == Phase::Free) { if (!room) room = &e; }

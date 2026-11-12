@@ -15,6 +15,7 @@ public:
      * Bridge must already be installed on EXACTLY this workloop.
      */
     static IOReturn bind(IOWorkLoop *, void *controller, FamilyComplete);
+    static bool boundFor(IOWorkLoop *, void *controller, FamilyComplete);
     /* Called by the qualified native ioGated glue. request must be the live
      * 0x68-byte plain allocation from stock slot223/226, not arbitrary bytes.
      * memory must ALREADY have a qualified current-layout descriptor vptr and

@@ -1,4 +1,5 @@
 #include "X9USBControlBridge.h"
+#include "X9USBNativeControlAdapter.h"
 #include <IOKit/IOEventSource.h>
 static LCK_GRP_DECLARE(x9_usb_control_group, "x9_usb_control");
 static LCK_MTX_DECLARE(x9_usb_control_lock, &x9_usb_control_group);
@@ -22,6 +23,20 @@ public:
 };
 OSDefineMetaClassAndStructors(X9USBControlSource, IOEventSource);
 OSDefineMetaClassAndStructors(X9USBControlBridge, OSObject);
+bool X9USBControlBridge::installedFor(IOWorkLoop *loop, void *controller)
+{
+    auto *b = usb_control_registry();
+    return loop && controller && b && b->loop == loop && b->controller == controller;
+}
+IOReturn X9USBControlBridge::controlReady(IOWorkLoop *loop, bool rearm)
+{
+    if (!loop || !loop->inGate()) return kIOReturnNotPermitted;
+    auto *b = usb_control_registry();
+    if (!b) return kIOReturnSuccess;
+    if (b->loop != loop) return kIOReturnNotReady;
+    if (b->draining) return kIOReturnBusy;
+    return rearm ? X9USBNativeControlAdapter::rearmReady(b->controller) : kIOReturnSuccess;
+}
 IOReturn X9USBControlBridge::install(IOWorkLoop *loop, void *controller, Handler handler)
 {
     if (!loop || !controller || !handler) return kIOReturnBadArgument;
@@ -61,6 +76,13 @@ IOReturn X9USBControlBridge::reply(uint64_t ticket, unsigned kind, const void *b
     if (!b->loop->inGate()) return kIOReturnNotPermitted;
     return usb_return(x9_usb_native_ep0_reply(ticket, kind, bytes, n));
 }
+IOReturn X9USBControlBridge::cancel(uint64_t ticket, int error)
+{
+    auto *b = usb_control_registry();
+    if (!b) return kIOReturnNotReady;
+    if (!b->loop->inGate()) return kIOReturnNotPermitted;
+    return usb_return(x9_usb_native_ep0_cancel(ticket, error));
+}
 bool X9USBControlBridge::drain()
 {
     if (!loop->inGate()) panic("X9 USB: EP0 callback outside controller gate");
@@ -70,7 +92,8 @@ bool X9USBControlBridge::drain()
     draining = true;
     /* Neither usb_lock nor registry lock held. Snapshot remains pinned until
      * this callback returns, including reentrant gate calls and reset races. */
-    handler(controller, event, event.kind == X9_EP0_OUT_DATA ? out : nullptr);
+    if (!X9USBNativeControlAdapter::event(controller, event))
+        handler(controller, event, event.kind == X9_EP0_OUT_DATA ? out : nullptr);
     if (x9_usb_native_ep0_ack(event.sequence)) panic("X9 USB: lost EP0 gate event");
     draining = false;
     return x9_usb_native_ep0_pending() != 0;

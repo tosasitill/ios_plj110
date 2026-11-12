@@ -222,6 +222,8 @@ int x9_usb_native_qmu_barrier(void)
 int x9_usb_native_qmu_rearm_ready(void)
 {
     if (usb_worker != current_thread()) return EPERM;
+    int control_error = x9_usb_native_ep0_rearm_ready();
+    if (control_error) return control_error;
     if (!st.native_apple_stack || failed || suspended || !st.configuration ||
         (st.reserved & (X9_USB_BUS_FORCED_OFF | X9_USB_BUS_CYCLING))) return ENXIO;
     if (!(R(0x2404) & BIT(6)) || (R(0x800) & 7) != st.speed ||
