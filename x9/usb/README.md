@@ -425,11 +425,21 @@ NATIVE16另按**同一load而不是同一个call**进行有界may-taint分析：
 边界；`load_consumers_qualified`只说明这个局部CFG内没有额外使用，**不等于所有
 producer/入口已证明或可以改指令**。原件中`0059cc6c8`载入的函数先存`[sp,#8]`、
 `0059cc6d4`调用，随后`0059cc72c`重取并在`0059cc740`尾调用，旧单call receiver
-分析漏了后者；新分析在stack spill即拒绝，不把第一次调用的证明用于整个load。
+分析漏了后者；NATIVE16在stack spill即拒绝（NATIVE17起按下段资格化），不把第一次调用的证明用于整个load。
 尚缺完整父类field layout、metaclass虚表、DMA/timeout/abort及relocation/bootstrap，
 故`producer_entries_qualified=false`、`instruction_patch_qualified=false`、
 `callable=false`、`runtime_loadable=false`，`--require-loadable`退出**2**。
 不输出/装载修改后的Apple段，不启用原生controller或USB mode，不提供绕过门开关。
+NATIVE17补两类被保守拒绝的情形。其一是own-frame spill：只跟踪本方法自有、从未逃逸的
+栈帧中精确偏移的64位X槽（`@frame:<offset>`），整槽X重取才重新带taint；窄/部分访问、
+地址传给调用或存入非帧内存、合流丢失精确栈地址事实、不在建模内的栈访问，以及出口时
+仍在活帧内的槽一律拒绝。据此`0059cc6c8`的两次`IOCommandPool::getCommand(bool)`调用
+（`0059cc6d4`／重取后`0059cc740`）均为receiver-qualified，并且同一load闭合。
+其二是派发目标同时是参数寄存器（`blr x1`/`br x2`）：只有当每个receiver的原方法符号经
+c++filt解析后得到的AAPCS64整数参数**上界**（this＋指针/引用/整数各1、浮点0、其它按值
+类型2）不超过该寄存器号时，才把目标寄存器排除在“传参”检查之外。返回类型不在mangled名中，
+x8间接结果仍单独拒绝。无导出符号的native tail slot记为
+`dispatch-target-in-argument-register-signature-unknown`，需由controller/installer ABI另行证明。
 
 ### USB-NATIVE8：设备端请求所有权组件（已编译，尚未接入原生后端）
 

@@ -285,8 +285,266 @@ def templates(classes, parents):
     return result
 
 
+INTEGRAL = {'bool', 'char', 'signed char', 'unsigned char', 'wchar_t', 'char8_t',
+            'char16_t', 'char32_t', 'short', 'unsigned short', 'int', 'unsigned int',
+            'long', 'unsigned long', 'long long', 'unsigned long long'}
+FLOATING = {'float', 'double', 'long double'}
+
+
+def demangle(names):
+    """Batch demangle through the host c++filt; empty result fails closed."""
+    import shutil
+    import subprocess
+    tool = shutil.which('llvm-cxxfilt') or shutil.which('c++filt')
+    if not tool or not names:
+        return {}
+    plain = [n[1:] if n.startswith('__Z') else n for n in names]
+    out = subprocess.run([tool], input='\n'.join(plain)+'\n', capture_output=True,
+                         text=True, check=True).stdout.splitlines()
+    if len(out) != len(names):
+        return {}
+    return {n: d for n, d in zip(names, out) if d != n and d != n[1:]}
+
+
+def split_top(text):
+    parts, depth, start = [], 0, 0
+    for j, ch in enumerate(text):
+        if ch in '<([':
+            depth += 1
+        elif ch in '>)]':
+            depth -= 1
+            if depth < 0:
+                return None
+        elif ch == ',' and depth == 0:
+            parts.append(text[start:j].strip())
+            start = j+1
+    if depth:
+        return None
+    parts.append(text[start:].strip())
+    return parts
+
+
+def gpr_argument_bound(demangled):
+    """UPPER bound of AAPCS64 integer argument registers for a non-static
+    member function, including this. Pointer/reference/integral = 1, floating
+    = 0, any other by-value named type = 2 (an aggregate <=16B uses at most
+    two GPRs; a larger one is passed by one pointer). Variadic, function or
+    array by value and unparsable declarations return None (unqualified).
+    The return type is not mangled for these names, so an x8 indirect-result
+    escape is NOT covered by this bound and stays separately rejected.
+    """
+    text = demangled.strip()
+    for suffix in (' const', ' volatile', ' &&', ' &'):
+        while text.endswith(suffix):
+            text = text[:-len(suffix)].rstrip()
+    if not text.endswith(')'):
+        return None
+    depth = 0
+    for j in range(len(text)-1, -1, -1):
+        if text[j] == ')':
+            depth += 1
+        elif text[j] == '(':
+            depth -= 1
+            if depth == 0:
+                break
+    else:
+        return None
+    if '::' not in text[:j]:
+        return None
+    params = text[j+1:-1].strip()
+    if params in ('', 'void'):
+        return 1
+    parts = split_top(params)
+    if parts is None:
+        return None
+    bound = 1
+    for p in parts:
+        core = re.sub(r'\b(const|volatile)\b', '', p).strip()
+        core = re.sub(r'\s+', ' ', core)
+        if not core or core == '...' or core.endswith(']'):
+            return None
+        if core.endswith(('*', '&')) or re.search(r'\((\*|&)+\)', core):
+            bound += 1
+        elif core in INTEGRAL:
+            bound += 1
+        elif core in FLOATING:
+            pass
+        elif core in ('__int128', 'unsigned __int128'):
+            bound += 2
+        elif re.fullmatch(r'[A-Za-z_][\w:<>, ]*', core) and '(' not in core:
+            bound += 2
+        else:
+            return None
+    return bound
+
+
+def dispatch_signatures(classes, parents, calls, cache):
+    """Attach the original method symbol and its GPR bound to every row.
+
+    Parent dispatch uses the imported parent's stock slot symbol. A native
+    vptr slot inside the parent range has the parent's (overridden) slot
+    signature; a native tail slot needs its own exported symbol. Ambiguous or
+    missing symbols leave gpr_argument_bound=None.
+    """
+    exports = cache.exports()
+    byname = {c['name']: c for c in classes}
+
+    def named(address):
+        names = sorted({n for n in exports.get(address, []) if n.startswith('__Z')})
+        return names[0] if len(names) == 1 else None
+
+    wanted = {}
+    for row in calls:
+        symbols = set()
+        if row['dispatch_kind'] == 'parent-function':
+            p = parents[byname[row['receiver_classes'][0]]['parent']]
+            symbols.add(named(p['stock_targets'][row['stock_slot']]))
+        else:
+            for name in row['receiver_classes']:
+                c = byname[name]
+                p = parents[c['parent']]
+                if row['stock_slot'] < len(p['stock_targets']):
+                    symbols.add(named(p['stock_targets'][row['stock_slot']]))
+                else:
+                    symbols.add(named(c['targets'][row['stock_slot']]))
+        wanted[id(row)] = symbols
+    table = demangle(sorted({s for v in wanted.values() for s in v if s}))
+    for row in calls:
+        symbols = wanted[id(row)]
+        bounds = {gpr_argument_bound(table[s]) if s in table else None for s in symbols}
+        row['dispatch_symbols'] = sorted(s for s in symbols if s)
+        row['dispatch_demangled'] = sorted(table[s] for s in symbols if s in table)
+        row['gpr_argument_bound'] = (next(iter(bounds)) if len(bounds) == 1 and None not in symbols
+                                     else None)
+        row['signature_qualified'] = row['gpr_argument_bound'] is not None
+    return calls
+
+
+def register(name):
+    if name in ('fp', 'lr'):
+        return {'fp': 'x29', 'lr': 'x30'}[name]
+    return 'x'+name[1:] if name.startswith('w') else name
+
+
+def frame_key(offset):
+    return '@frame:'+str(offset)
+
+
+def frame_transfer(i, before, after):
+    """Exact own-frame accesses only; no caller stack, indexed addressing or
+    pointer-escaped frame recovery. Values are 8-byte GPR spills, not arbitrary
+    native objects. The same access description drives may-consumer analysis.
+    """
+    from capstone.arm64 import ARM64_OP_REG, ARM64_OP_MEM, ARM64_OP_IMM
+    ops = i.operands
+    info = dict(accesses=[], invalidate=False, escaped=False)
+    safe = '@frame-safe' in before
+    modeled = False
+    # SP/FP aliases are entry-SP-relative MUST facts. Do not resurrect an
+    # unknown frame after a CFG join or an unmodeled stack-pointer operation.
+    if (i.mnemonic in ('add', 'sub') and len(ops) == 3 and
+            ops[0].type == ARM64_OP_REG and ops[1].type == ARM64_OP_REG and
+            ops[2].type == ARM64_OP_IMM and not ops[2].shift.value):
+        src = before.get(register(i.reg_name(ops[1].reg)))
+        if src and src[0] == 'stack':
+            delta = ops[2].imm * (-1 if i.mnemonic == 'sub' else 1)
+            after[register(i.reg_name(ops[0].reg))] = ('stack', src[1]+delta)
+            modeled = True
+    elif (i.mnemonic == 'mov' and len(ops) == 2 and
+          all(o.type == ARM64_OP_REG for o in ops)):
+        src = before.get(register(i.reg_name(ops[1].reg)))
+        if src and src[0] == 'stack' and not i.reg_name(ops[0].reg).startswith('w'):
+            after[register(i.reg_name(ops[0].reg))] = src
+            modeled = True
+    mems = [(j,o) for j,o in enumerate(ops) if o.type == ARM64_OP_MEM]
+    store = i.mnemonic.startswith('st')
+    load = i.mnemonic.startswith('ld')
+    if mems:
+        j, mem = mems[0]
+        base = register(i.reg_name(mem.mem.base))
+        origin = before.get(base)
+        if len(mems) == 1 and origin and origin[0] == 'stack' and not mem.mem.index:
+            offset = origin[1]+mem.mem.disp
+            if i.writeback:
+                delta = ops[-1].imm if i.post_index and ops[-1].type == ARM64_OP_IMM else mem.mem.disp
+                after[base] = ('stack', origin[1]+delta)
+            sp = before.get('sp')
+            next_sp = after.get('sp', sp)
+            low = min(sp[1], next_sp[1]) if sp and next_sp and sp[0] == next_sp[0] == 'stack' else None
+            # Both ordinary and pair accesses; SIMD/narrow stores invalidate
+            # overlaps but are never treated as pointer provenance.
+            sizes = {'b':1, 'h':2, 'w':4, 's':4, 'x':8, 'd':8, 'q':16}
+            regs = [o for o in ops[:j] if o.type == ARM64_OP_REG]
+            widths = [sizes.get(register(i.reg_name(o.reg))[0]) for o in regs]
+            if i.mnemonic in ('strb','sturb','ldrb','ldurb'): widths = [1]*len(regs)
+            if i.mnemonic in ('strh','sturh','ldrh','ldurh'): widths = [2]*len(regs)
+            # register() normalizes W to X for alias-killing, not byte width.
+            widths = [4 if i.reg_name(o.reg).startswith('w') and w == 8 else w
+                      for o,w in zip(regs,widths)]
+            accepted = i.mnemonic in ('str','stur','stp','strb','sturb','strh','sturh',
+                                      'ldr','ldur','ldp','ldrb','ldurb','ldrh','ldurh')
+            if (safe and accepted and regs and all(widths) and low is not None and
+                    -16384 <= low <= offset and offset+sum(widths) <= 0):
+                modeled = True
+                for op,width in zip(regs,widths):
+                    name = i.reg_name(op.reg)
+                    key = frame_key(offset)
+                    pointer = width == 8 and (name.startswith('x') or name in ('fp','lr'))
+                    info['accesses'].append(dict(offset=offset, size=width, reg=register(name),
+                                                 store=store, pointer=pointer))
+                    if store:
+                        for k in list(after):
+                            if k.startswith('@frame:') and int(k[7:]) < offset+width and int(k[7:])+8 > offset:
+                                after.pop(k)
+                        if pointer and register(name) in before:
+                            after[key] = before[register(name)]
+                    elif load and pointer and key in before:
+                        after[register(name)] = before[key]
+                    offset += width
+            else:
+                info['invalidate'] = True
+        elif store:
+            info['invalidate'] = True
+        # A local stack address stored outside the proven frame can escape.
+        if store and (not modeled or not info['accesses']) and any(
+                before.get(register(i.reg_name(o.reg)), ('',))[0] == 'stack'
+                for o in ops[:j] if o.type == ARM64_OP_REG):
+            info['escaped'] = True
+    if i.mnemonic in ('bl','blr','br') and any(
+            before.get('x'+str(n), ('',))[0] == 'stack' for n in range(9)):
+        info['escaped'] = True
+    # Unknown arithmetic/stack alias operations cannot silently hide an
+    # address that an intervening call may use to modify a saved function.
+    read_ids, _ = i.regs_access()
+    if not modeled and not mems and i.mnemonic not in ('ret','bl','blr','br') and any(
+            before.get(register(i.reg_name(r)), ('',))[0] == 'stack' for r in read_ids):
+        info['escaped'] = True
+    info['safe'] = safe
+    info['sp'] = after.get('sp')
+    if info['escaped']:
+        after.pop('@frame-safe', None)
+    if info['escaped'] or info['invalidate']:
+        for k in list(after):
+            if k.startswith('@frame:'): after.pop(k)
+    return info
+
+
+def merge_state(old, new):
+    """Must-join. If a join loses an exact stack-address fact, an untracked
+    register may now alias the frame, so frame recovery stops (fail closed)."""
+    common = {k:v for k,v in old.items() if new.get(k) == v}
+    lost = [k for k,v in list(old.items())+list(new.items())
+            if not k.startswith('@') and v and v[0] == 'stack' and common.get(k) != v]
+    if lost:
+        common.pop('@frame-safe', None)
+        for k in list(common):
+            if k.startswith('@frame:'): common.pop(k)
+    return common
+
+
 def qualify_calls(classes, parents, instructions, cache):
-    """Must-dataflow only. No argument/return type guesses, no stack recovery.
+    """Must-dataflow only. No argument/return type guesses. Exact private-frame
+    64-bit spills may be recovered; pointer-escaped/unknown frames are rejected.
 
     A vtable origin AND x0 must agree on every reaching path. Unsupported
     writes kill provenance, calls kill caller-saved registers, merges keep
@@ -302,12 +560,12 @@ def qualify_calls(classes, parents, instructions, cache):
             if target in instructions:
                 seeds.setdefault(target, set()).add(c['name'])
     starts = sorted(seeds)
-    qualified, uncertain = {}, set()
+    qualified, uncertain, frames = {}, set(), {}
     for entry, names in seeds.items():
         nxt = bisect_right(starts, entry)
         high = min(entry+16384, starts[nxt] if nxt < len(starts) else entry+16384)
         origins = tuple(sorted(names))
-        incoming = {entry: {'x0': ('object', origins)}}
+        incoming = {entry: {'x0': ('object', origins), 'sp': ('stack', 0), '@frame-safe': ('safe',)}}
         work = deque([entry])
         while work:
             pc = work.popleft()
@@ -319,27 +577,26 @@ def qualify_calls(classes, parents, instructions, cache):
             ops = i.operands
             _, written = i.regs_access()
             for r in written:
-                n = i.reg_name(r)
-                after.pop('x'+n[1:] if n.startswith('w') else n, None)
+                after.pop(register(i.reg_name(r)), None)
             if i.mnemonic == 'mov' and len(ops) == 2 and all(o.type == ARM64_OP_REG for o in ops):
-                dst, src = (i.reg_name(o.reg) for o in ops)
-                if dst.startswith('x') and src in before:
+                dst, src = (register(i.reg_name(o.reg)) for o in ops)
+                if dst.startswith('x') and not i.reg_name(ops[0].reg).startswith('w') and src in before:
                     after[dst] = before[src]
             if i.mnemonic == 'adrp' and len(ops) == 2 and ops[1].type == ARM64_OP_IMM:
                 # Capstone detail exposes high-half kernel VAs as signed
                 # immediates, while .address/cache VAs are unsigned. Normalize
                 # BOTH constants and CFG edges, never drop taken branches.
-                after[i.reg_name(ops[0].reg)] = ('constant', ops[1].imm & ((1 << 64)-1))
+                after[register(i.reg_name(ops[0].reg))] = ('constant', ops[1].imm & ((1 << 64)-1))
             if (i.mnemonic == 'add' and len(ops) == 3 and ops[0].type == ARM64_OP_REG
                     and ops[1].type == ARM64_OP_REG and ops[2].type == ARM64_OP_IMM
                     and not ops[2].shift.value):
-                source = before.get(i.reg_name(ops[1].reg))
+                source = before.get(register(i.reg_name(ops[1].reg)))
                 if source and source[0] == 'constant':
-                    after[i.reg_name(ops[0].reg)] = ('constant', source[1]+ops[2].imm)
+                    after[register(i.reg_name(ops[0].reg))] = ('constant', source[1]+ops[2].imm)
             if (i.mnemonic == 'ldr' and len(ops) == 2 and ops[0].type == ARM64_OP_REG
                     and ops[1].type == ARM64_OP_MEM and not ops[1].mem.index and not i.writeback):
-                dst = i.reg_name(ops[0].reg)
-                origin = before.get(i.reg_name(ops[1].mem.base))
+                dst = register(i.reg_name(ops[0].reg))
+                origin = before.get(register(i.reg_name(ops[1].mem.base)))
                 offset = ops[1].mem.disp
                 if dst.startswith('x') and origin:
                     if origin[0] == 'object' and offset == 0:
@@ -359,7 +616,7 @@ def qualify_calls(classes, parents, instructions, cache):
                         # maps super clear/prepare to the wrong methods.
                         after[dst] = ('parent-function', origin[1], offset//8-2, pc)
             if i.mnemonic in ('blr', 'br') and ops[0].type == ARM64_OP_REG:
-                fn = before.get(i.reg_name(ops[0].reg))
+                fn = before.get(register(i.reg_name(ops[0].reg)))
                 receiver = before.get('x0')
                 compatible = False
                 header_words = 0
@@ -397,6 +654,7 @@ def qualify_calls(classes, parents, instructions, cache):
                         uncertain.add(pc)
                 else:
                     uncertain.add(pc)
+            frame_transfer(i, before, after)
             if i.mnemonic in ('bl', 'blr'):
                 for r in range(19):
                     after.pop('x'+str(r), None)
@@ -418,7 +676,7 @@ def qualify_calls(classes, parents, instructions, cache):
                     incoming[succ] = after
                     work.append(succ)
                 else:
-                    common = {k:v for k,v in incoming[succ].items() if after.get(k) == v}
+                    common = merge_state(incoming[succ], after)
                     if common != incoming[succ]:
                         incoming[succ] = common
                         work.append(succ)
@@ -429,21 +687,30 @@ def qualify_calls(classes, parents, instructions, cache):
                 continue
             state = incoming.get(row['call_pc'], {})
             ins = instructions[row['call_pc']]
-            fn = state.get(ins.reg_name(ins.operands[0].reg))
+            fn = state.get(register(ins.reg_name(ins.operands[0].reg)))
             if (fn, state.get('x0')) != expectations[key]:
                 del qualified[key]
                 uncertain.add(row['call_pc'])
+        for pc,state in incoming.items():
+            frames[pc] = frame_transfer(instructions[pc], state, dict(state))
     qualified_pcs = {r['call_pc'] for r in qualified.values()}
     return (sorted(qualified.values(), key=lambda r:r['load_pc']),
-            sorted(uncertain-qualified_pcs), len(seeds))
+            sorted(uncertain-qualified_pcs), len(seeds), frames)
 
 
-def qualify_load_consumers(calls, instructions):
+def qualify_load_consumers(calls, instructions, frames):
     """Audit the ENTIRE loaded value, not just one receiver-qualified BLR.
 
     A single changed LDR can feed aliases, a second call or a stored/returned
     function pointer. May-taint joins by UNION (unlike receiver must-facts).
-    Unknown uses, stack spills and live values at unbounded exits fail closed.
+    Unknown uses and live values at unbounded exits fail closed. A 64-bit
+    spill to an exact slot of the method's own, never-escaped frame is
+    tracked as '@frame:<offset>' and a whole-slot X reload re-taints the
+    register; narrow/partial accesses, escaped or imprecise frames and slots
+    still live at exits are rejected. A dispatch target that is also an
+    argument register (blr x1/x2) is excluded from the argument check only
+    when every receiver's original method symbol bounds its integer
+    arguments below that register.
     This proves only local consumer closure; it does NOT prove every possible
     producer/entry, parent fields, relocation or that an instruction is safe to
     apply. In particular instruction_patch_qualified stays false.
@@ -467,6 +734,9 @@ def qualify_load_consumers(calls, instructions):
             raise ValueError('one load has conflicting method/encoding contexts')
         entry, high = next(iter(contexts))
         expected = {r['call_pc'] for r in rows}
+        bounds = {}
+        for r in rows:
+            bounds.setdefault(r['call_pc'], set()).add(r.get('gpr_argument_bound'))
         seen, problems = set(), set()
         incoming = {load_pc: frozenset()}
         work = deque([load_pc])
@@ -484,6 +754,27 @@ def qualify_load_consumers(calls, instructions):
             after = set(before)-writes
             used = set(before) & reads
             ops = i.operands
+            f = frames.get(pc)
+            slots = {k for k in before if k.startswith('@frame:')}
+            if slots and (f is None or f['invalidate'] or f['escaped'] or not f['safe']):
+                problems.add((pc, 'tainted-frame-slot-unprovable'))
+            for a in (f['accesses'] if f else []):
+                key = frame_key(a['offset'])
+                overlap = {k for k in after if k.startswith('@frame:') and
+                           int(k[7:]) < a['offset']+a['size'] and int(k[7:])+8 > a['offset']}
+                if a['store']:
+                    after -= overlap
+                    if a['reg'] in before:
+                        used.discard(a['reg'])
+                        if a['pointer'] and a['size'] == 8:
+                            after.add(key)
+                        else:
+                            problems.add((pc, 'narrow-frame-store-of-function-pointer'))
+                elif overlap:
+                    if a['pointer'] and a['size'] == 8 and overlap == {key}:
+                        after.add(a['reg'])
+                    else:
+                        problems.add((pc, 'partial-frame-reload-of-function-pointer'))
             alias = (i.mnemonic == 'mov' and len(ops) == 2 and
                      all(o.type == ARM64_OP_REG for o in ops) and
                      all(canonical(i.reg_name(o.reg)).startswith('x') and
@@ -517,12 +808,28 @@ def qualify_load_consumers(calls, instructions):
                 # load-x8/blr-x8 idiom cannot simultaneously supply a separate
                 # result-storage pointer. Signatures still need their own ABI
                 # proof; consumer closure is not that proof.
-                if set(before) & {'x'+str(r) for r in range(8)} or (
-                        'x8' in before and target != 'x8'):
+                args = set(before) & {'x'+str(r) for r in range(8)}
+                b = bounds.get(pc, {None})
+                if (indirect and target in args and pc in expected and None not in b
+                        and int(target[1:]) >= max(b)):
+                    args.discard(target)
+                if indirect and target in args and pc in expected and None in b:
+                    # Native tail slots have no exported symbol; their
+                    # arity comes from the controller/installer ABI, not here.
+                    problems.add((pc, 'dispatch-target-in-argument-register-signature-unknown'))
+                    args.discard(target)
+                if args or ('x8' in before and target != 'x8'):
                     problems.add((pc, 'function-pointer-passed-as-argument'))
                 if i.mnemonic in ('bl', 'blr'):
                     after -= {'x'+str(r) for r in range(19)}
             successors = []
+            if i.mnemonic in ('ret', 'br'):
+                sp = f and f.get('sp')
+                live = [k for k in before if k.startswith('@frame:') and
+                        not (sp and sp[0] == 'stack' and int(k[7:])+8 <= sp[1])]
+                if live:
+                    problems.add((pc, 'tainted-frame-slot-live-at-exit'))
+                before = frozenset(k for k in before if not k.startswith('@frame:'))
             if i.mnemonic == 'ret':
                 # x0/x1 may return values. Callee-saved registers must have
                 # been restored, not leak a changed load to an outer caller.
@@ -592,8 +899,9 @@ def main():
     classes, instructions, other_inits = recover_classes(cs, cache, modules, base['components'])
     parents = parent_maps(cs, cache, a.object_root, classes)
     tables = templates(classes, parents)
-    calls, uncertain, methods = qualify_calls(classes, parents, instructions, cache)
-    loads = qualify_load_consumers(calls, instructions)
+    calls, uncertain, methods, frames = qualify_calls(classes, parents, instructions, cache)
+    dispatch_signatures(classes, parents, calls, cache)
+    loads = qualify_load_consumers(calls, instructions, frames)
     result = dict(build='20H392', identity='d22ap', source_sha256=SHA256,
                   classes=classes, parents=parents, other_initializers=other_inits,
                   expanded_vtable_templates=tables,
@@ -603,6 +911,7 @@ def main():
                   abi_compatible=False, runtime_loadable=False, patches_applied=False,
                   blockers=['field-by-field parent layout/OSMetaClass allocation',
                             'unqualified producer entries/receivers, static helpers and escaped load consumers',
+                            'dispatch return types (x8 indirect result) are not mangled; signature bound covers arguments only',
                             'metaclass vtables and unqualified non-IOService destructors',
                             'request timer/abort/descriptor prepare-complete ownership',
                             'MTU3 native endpoints/EP0 and original module relocation/bootstrap',
@@ -612,6 +921,7 @@ def main():
     print(f'Native classes: {len(classes)}; class-local vtable templates: {len(tables)}')
     print(f'Receiver-qualified calls: {len(calls)}; changed load plans: '
           f'{sum(r["before_word"] != r["after_word"] for r in calls)}')
+    print(f'Signature-bounded calls: {sum(r["signature_qualified"] for r in calls)}/{len(calls)}')
     print(f'Consumer-closed loads: {sum(r["load_consumers_qualified"] for r in loads)}/{len(loads)}; '
           'producer/entry and runtime qualification still blocked')
     print('Plans only; no executable bytes modified, no runtime load-readiness claim')
