@@ -6,6 +6,14 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## GPU 280：Volatile 资源丢弃（移植 AdrenoMetal 86fd95c；2026-11-12；已构建，未上机）
+
+- **改了什么**：`6ca7449` 把 UniXNU/AdrenoMetal `86fd95c` 的 purgeable 丢弃移植到 GeneralMetal。新文件 `x9/metal/General/bridge/NativeMetalPurge.rs`（去掉了他们依赖 bridge patch 0035 的 YCbCr light forms）。由 device 创建的 buffer/texture/heap 现在是 `Resource` cell。sweep 只在以下条件同时满足时释放 runtime 对象：状态为 Volatile/Empty；没有命令缓冲 hold；没有 tie（view、buffer 上的 texture、heap placement）；从未交出 CPU 指针/GPU 地址/`gpuResourceID`/argument-buffer 条目（这些会 pin）；且没有调用正在使用它。之后 NonVolatile 会重新分配并按 Metal 约定回 Empty。no-copy、surface texture、view、heap 内资源保持 fixed。
+- **前端**：所有 `resourceOwners addObject:` 改为 `-own:`（hold），`finish` 的 safeRelease 路径和 `dealloc` 里调用 `-disown`（unhold）。ownership 不确定而被保留的失败命令不会 unhold，资源永不丢弃。触发方式：age 定时器（runtime spare age，每半个 age 跑一次）和内存压力 source（先 purge，再 `release_kept_memory`）。日志：启动时 `X9 PURGE: on|off age=…ms`；有丢弃的 pass 输出 `X9 PURGE: …K by age|pressure | out= … again req= use= … pinned= … left used/tied/young … fail= pending=`（age 最多每 10 s 一行）；pressure 行变为 `X9 METAL pressure: … purged=…K`。**boot token `x9v0` = 关闭**（设 `NATIVE_METAL_PURGE=0`，同一镜像 A/B）。
+- **构建**：原 cell/GPU worktree 已被另一窗口的清理删除。新 worktree `.local/x9/worktrees/gpu280-purge-20261112`（分支 `work/gpu280-purge-20261112`）基于 279 HEAD `abedbeb`。插件源码按原样经 `.local/x9/MaliMetal/X9/General` 软链读取 main 的 `x9/metal/General`。recipe 为 `.local/x9/work/gpu280-purge-20261112/build280.py`，全部步骤 exit 0，只有两个原有的 FrameCapture 警告。allowlist 在 worktree 是 `1eda803`，在 main 是 `2fa45e9`。镜像 **`x9/out/x9-gpu280-purge-20261112`**（已 ditto 到 main）。插件二进制含 `nmb_device_purge`/`nmb_*_hold` 符号和 `X9 PURGE` 字符串。注意：main 的 render allowlist 现在钉在 280，之后从 main 构建的镜像需要打包 280 插件。
+- **上机前**：Android+adb 下先 `python3 x9/mailbox/update.py x9/out/x9-gpu280-purge-20261112`（有新 plugin-package），再 `fastboot boot`。sim2bind / gpu-cs-audit / 279 / 280 都尚未上机验证。
+- **要看的（推断，待验证）**：`X9 PURGE` 是否出现，以及 `out=`/`pinned=` 的规模（如果大部分 buffer 都被 `contents` pin 住，收益主要来自 texture/heap）；`again use=` 不为 0 说明调用方未先设 NonVolatile 就使用了资源（内容被清零，可能出现闪烁或残缺）；`fail=`；SWEET SURF BUDGET / NoMemory 是否减少。出问题先用 `x9v0` 对比。
+
 ## X9 eUICC／eSIM 实机当前交接（2026-11-12；ADB 只读确认未枚举内置 eUICC）
 
 - **新采集／范围**：用户连接 ADB 后读取当前 PLJ110／OP5E17L1／`PLJ110_17.0.0.101(CN01)`／CN；shell 可用、`su -c id` 确认 KSU root 可只读。新目录 **`.local/x9/work/euicc-live-20261112-141928/`** 保存各命令原始输出／stderr、`capture.json` 与脱敏 `decoded.json`。采集前后 boot_id 一致，未重启、安装／启动 eSIM 页面、发送 APDU、调用 GPIO／HAL 设置、修改属性／NV／profile／分区；没有构建、CI、测试套件或子代理。
