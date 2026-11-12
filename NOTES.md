@@ -6,6 +6,16 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 235结果 + EIF5 MTU修正（CELL-MTU，2026-11-12；x9-cell-mtu已构建，未启动）
+
+- **235观察(rxvendor2)**：无quarantined、无L2 status error、无vendor-tolerant记录、LRO split 0（**没流量所以夜审改动都没被触发，未验证**）。LHIF_MAPPING ccmni1/ccmni2 正常，MDLOG 99.6MB已存(ACT mark 58103515)。整段(到81s截止)只有 TX 2(两包ICMPv6) / RX delivered 1 / dropped 5，IPv4 零流量。
+- **定位(观察)**：每次承载发布后约7–9ms MD送 EIF5(wire5, RA的v6 MTU 1450，GET是1500)→ `x9w_refresh` 把**仅MTU不同**当作family变化→WDS22 reconfigurationRequired→CommCenter约2ms内 family6 Stop→只剩v4的承载上iOS完全不发包。234里第一次承载同样如此(TX 0持续25s)；**234唯一有流量的第二次承载恰好EIF5在发布前到达**(55.898 < 发布55.922)，v6没被拆，于是有流量。235两次承载都是EIF5在发布后到达。
+- 另：EIF5 cap<当前v6 MTU 时原代码关v6 admission(close_mask)→route families变化/epoch 8→9→紧随的RA(88B)被 disposition 2 丢弃。
+- **修正 3e5ca5d**：x9w_refresh 对仅MTU差异只更新route不通知host(对齐RIL configureIpv6Mtu)；EIF5 直接把runtime v6 MTU收窄而不关admission；x9d_update 仅MTU变化时不bump epoch不清TX队列(出队/RX仍按cap校验)。新日志 `X9 WDS: mux N MTU-only change … applied to route; no host reconfigure`。
+- `flow` 计数每秒+1000：UL状态 0x20(DRB empty q0) 锁存未清，按1ms poll计数；非错误，暂未改。
+- **镜像**：**`x9/out/x9-cell-mtu-gpu278-20261112/boot.img`**(13897728B, exit0)，worktree cell-rxvendor-gpu278-20261112 = rxvendor2 + d109b24(同3e5ca5d)；**不含**main上的USB 816f327(与之前cell镜像一致)。278插件不变，无需mailbox staging。仍含MDLOG/ATCTX。
+- **验收看点**：出现MTU-only日志且**无** `family6 mux 1 configuration changed`；`pdp_ip0 active families` 保持3；随后v4/v6 TX/RX增长；再看LRO member l4 ok/BAD、L2 status、vendor-tolerant、Safari。日志请跑够90s以上。
+
 ## 夜间静态审计：按vendor参考对齐DPMAIF RX/ISR与RPC（CELL-RXVENDOR，2026-11-12；rxvendor2已构建，未启动）
 
 用户睡前要求“继续静态检查后续类似错误，记得看参考”。参考＝\`~/HelioDarwin/oppo-source/.../eccci/hif/ccci_dpmaif_com.c\`、\`ccci_dpmaif_drv_v3.c\`、\`ccci_dpmaif_reg_*.h\`、\`port/port_rpc.c\`、\`port_sysmsg.c\`。本轮只构建，无设备操作、无push。
