@@ -67,7 +67,7 @@ xnu:osfmk/DEVELOPMENT/ipc_kobject.o
 xnu:osfmk/DEVELOPMENT/ipc_mig.o
 xnu:osfmk/DEVELOPMENT/ipc_misc.o
 xnu:osfmk/DEVELOPMENT/ipc_tt.o
-xnu:osfmk/DEVELOPMENT/kalloc.o
+x9:kalloc.o
 xnu:osfmk/DEVELOPMENT/kern_apfs_reflock.o
 xnu:osfmk/DEVELOPMENT/ktrace_background_notify.o
 xnu:osfmk/DEVELOPMENT/ledger.o
@@ -1062,6 +1062,7 @@ xnu:iokit/DEVELOPMENT/IONVRAMController.cpo
 xnu:iokit/DEVELOPMENT/IOPMrootDomain.cpo
 xnu:iokit/DEVELOPMENT/AppleARMSMP.cpo
 x9:SweetPlatformExpert.cpo
+x9:X9NativeUsbProbe.cpo
 x9:SweetCPU.cpo
 xnu:iokit/DEVELOPMENT/TopazModem.cpo
 xnu:iokit/DEVELOPMENT/SweetBusy.cpo

@@ -6304,8 +6304,7 @@
   {
    "name": "IOKitBSDInit.o",
    "source": "iokit/bsddev/IOKitBSDInit.cpp",
-   "prebuilt": "prebuilt/IOKitBSDInit.o",
-   "prebuilt_sha256": "4e7ef1a749bb3392ed37dac1fa7e1004c4e36f51a7dfe7518fbcf4a092249ceb"
+   "template": "iokit-cxx-2"
   },
   {
    "name": "SweetPlatformExpert.cpo",
@@ -6315,8 +6314,7 @@
   {
    "name": "SweetCPU.cpo",
    "source": "iokit/Kernel/arm/SweetCPU.cpp",
-   "prebuilt": "prebuilt/SweetCPU.cpo",
-   "prebuilt_sha256": "65bc82d6bf36f7820722105446d0da926593983ebdd16c9123f6fc5264b059c7"
+   "template": "iokit-cxx-2"
   },
   {
    "name": "SweetKeyStore.o",
@@ -6607,6 +6605,16 @@
    "name": "SweetX9Audio.o",
    "source": "iokit/Kernel/arm/SweetX9Audio.cpp",
    "template": "iokit-cxx-3"
+  },
+  {
+   "name": "kalloc.o",
+   "source": "osfmk/kern/kalloc.c",
+   "template": "osfmk-c-1"
+  },
+  {
+   "name": "X9NativeUsbProbe.cpo",
+   "source": "iokit/Kernel/arm/X9NativeUsbProbe.cpp",
+   "template": "iokit-cxx-2"
   }
  ],
  "link": {

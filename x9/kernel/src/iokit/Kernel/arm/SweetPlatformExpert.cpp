@@ -14,6 +14,7 @@
 #include <libkern/c++/OSString.h>
 
 extern "C" int sweet_early_is_x9(void);
+extern "C" void x9_native_usb_probe_schedule(void);
 #include <arm64/sweet_early.h>
 extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 
@@ -55,6 +56,7 @@ SweetPlatformExpert::start(IOService *provider)
 		    model ? (int)model->getLength() : 0, model ? (const char *)model->getBytesNoCopy() : "");
 		OSSafeReleaseNULL(entry);
 	}
+	x9_native_usb_probe_schedule();
 	IOLog("SWEET: platform expert registered\n");
 	return true;
 }
