@@ -6,6 +6,22 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 信号检查 + SIM2 绑定/CEUS（2026-11-12；x9-cell-sim2bind 已构建，未启动）
+
+- **用户(242后)**：广电卡(SIM1)没信号格，移动卡(SIM2)只有一格。
+- **转换核对(观察)**：242 SIM1 NR `+ECSQ: 65,62,-333,1,1,-44,-377,32768,74,41,32767×3` → rsrp -94 / rsrq -11 / snr*10 185(SS组无效，用第二组)。Android同址CMCC SA n41：`ssRsrp=-94 ssRsrq=-11 ssSinr=20 level=1`。**数值转换与Android一致**；-94 dBm在Android上也只算1格。
+- **真正的bug(观察)**：239–242每次开机，CommCenter的SIM2 NAS信号客户端(242=0x411c/cid 9)在3个GetSigInfo排队时发BindSubscription(0x45，值1)，被“客户端有排队job→BUSY(2)”规则拒绝(`reject service 0x3 msg 0x0045 error 2 tlvs 01/1=01`)；两个信号客户端都停在SIM1，SIM2从未查过自己的ECSQ。
+- **更正**：之前以为0x51 indication在28s后停了，其实是COACHZ每种svc/msg只记16条(n 16)，是日志上限，不是丢失。
+- **ATCTX里的CEUS?失败已确认**：`response service 0x1 ... error 2 SIM1 probe 1 stage 88`(MIPC白名单拒绝提交)。
+- **b91f89f**(worktree e39d7be，基于ceus镜像)：
+  - 绑定：去掉“有排队job→BUSY”(job创建时已快照sim_slot，旧回复仍答旧SIM)；保留network-name job的busy检查。日志 `bound to SIMn (...; N queued for previous SIM)`。
+  - MIPC白名单加 `AT+CEUS?`、`AT+EIMSCFG?`和唯一写命令 `AT+CEUS=1`。
+  - 按SIM的usage job(MIPC在开射频后约24.9s才开，早于SA注册约4s)：SIM1读CEUS?/EIMSCFG?(核对init端口设置落在哪张卡)；SIM2 CEUS? → CEUS=1(受x9_md_ceus控制) → CEUS? → EIMSCFG?；最多3次。日志 `X9 CELL USAGE: SIMn ...`。
+  - ECSQ日志：前8条后每30个样本再记一条/每卡。
+  - x9q_poll栈帧 0x1a10→0x1690，其他桥接帧不变。
+- **镜像** `x9/out/x9-cell-sim2bind-gpu278-20261112/boot.img` exit0；278插件不变，无需mailbox staging。
+- **验收看点**：0x45 值1不再被拒、出现SIM2的 `bound to SIM2`；`X9 QMI AT: ECSQ SIM2 ...` 出现(移动卡LTE/NR数值)；`X9 CELL USAGE` 两卡CEUS回读=1；SIM2释放后是否也留在SA；状态栏两卡格数(对照ECSQ值，-94 dBm约1格属正常)。
+
 ## 242结果（ceus上机，2026-11-12）：SIM1(data centric)经RRC释放仍留在SA；SIM2对照照旧回落
 
 - **观察**：无panic，日志到181s。init脚本(CFUN=4)：`+CEUS: 0`(MD默认voice centric) → `AT+CEUS=1` OK → 回读 `+CEUS: 1`；`AT+EIMSCFG?` 只回 `OK`(没有内容)。
