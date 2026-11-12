@@ -6,6 +6,16 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 236结果 + SLAAC/LRO校验/MRU修正（CELL-SLAAC，2026-11-12；x9-cell-slaac已构建，未启动）
+
+- **236观察(cell-mtu)**：**第二次承载(ccmni2, 55.2s起)持续有数据**：到76.7s TX 2883包/509KB、RX 4442包/5.0MB，families 3保持，无quarantined、无L2 status error、无vendor-tolerant、无TX stall。LRO split 35。
+- 第一次承载仍被拆(观察)：IFUP v6=fe80::IID → RA后EIF5/MOD4203(v6head 240a4280…)/GET给 prefix::IID(同IID) → MOD按地址变化关v6 admission(27.729 families 1) → GET不匹配IFUP → WDS22 → CC family6 Stop(27.745)；v4单独存活24s零流量，51.9s CC停v4后重拨才通。MTU-only日志未出现(差异不只MTU)。
+- LRO首包：`header-len 2660 -> 1360 l4 BAD`，后续成员均ok(观察)→推断HW把整组也算进了首包TCP/UDP校验。
+- 丢的42包=`CELL INPUT reason 3 error 40`：1500B下行被 if_mtu 1450(CC按RA设)拒收(EMSGSIZE)。
+- **修正 f89c7f2**：同IID的 fe80→全局前缀视为SLAAC非变化(MOD/IFUP重报/refresh三处)，已发布v6地址/DNS不变、无WDS22，日志`v6 fe80::IID -> global prefix (same IID, SLAAC)`；仅对长度被改写的LRO成员重算TCP/UDP校验(UDP同时改长度)，统计行加`first-member L4 recomputed`；RX上限改为MRU(pdp BB_PDP_MAX_MTU 3072、DPMAIF x9d_ip)，不再用发送MTU/route cap。
+- **镜像**：**`x9/out/x9-cell-slaac-gpu278-20261112/boot.img`**(exit0)，worktree= cell-mtu + 0fe2c2f(同f89c7f2)，仍不含USB 816f327；278插件不变无需mailbox staging；仍含MDLOG/ATCTX。
+- **验收看点**：第一次承载即出现SLAAC日志、无`configuration changed`、families保持3且立刻有流量；LRO行`l4 BAD -> recomputed ok`；无`CELL INPUT reason 3`；Safari实际可用、状态栏。
+
 ## 235结果 + EIF5 MTU修正（CELL-MTU，2026-11-12；x9-cell-mtu已构建，未启动）
 
 - **235观察(rxvendor2)**：无quarantined、无L2 status error、无vendor-tolerant记录、LRO split 0（**没流量所以夜审改动都没被触发，未验证**）。LHIF_MAPPING ccmni1/ccmni2 正常，MDLOG 99.6MB已存(ACT mark 58103515)。整段(到81s截止)只有 TX 2(两包ICMPv6) / RX delivered 1 / dropped 5，IPv4 零流量。
