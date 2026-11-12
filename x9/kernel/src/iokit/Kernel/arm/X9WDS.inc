@@ -1193,7 +1193,8 @@ static void x9w_poll(){
    if(stats_due||rat_changed){
     uint8_t req[7]={};x9q_packet report(req);x9d_stats stats={};
     if(stats_due&&x9d_account(i+1,b.route_lifetime,stats))x9w_statistics(report,stats,c.baseline,c.stats_mask);
-    if(rat_changed){x9w_rat_tlv(report,0x1d,rat);c.last_rat=rat;}
+    if(rat_changed){x9w_rat_tlv(report,0x1d,rat);c.last_rat=rat;
+     printf("X9 WDS: client slot %u bearer-tech report rat mask 0x%x\n",slot,rat);}
     report.send(CBQ_PORT_BASE+slot,X9BB_PORT_BASE+1,true,1);
     c.report_next=now+uint64_t(c.stats_interval)*1000;
    }
@@ -1221,6 +1222,13 @@ static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
   x9q_view stats=x9q_tlv(req,n,0x11),bearer=x9q_tlv(req,n,0x15);
   if(stats.p&&(stats.n!=5||(x9q_u32(stats.p+1)&~0x3ffu)))error=X9Q_ARG;
   if(bearer.p&&(bearer.n!=1||bearer.p[0]>1))error=X9Q_ARG;
+  { // 238: bearer tech went NR->LTE at 41 s but no WDS 0x01 report was ever sent;
+    // record which event TLVs CommCenter actually subscribes.
+   static unsigned logged;if(logged<12){logged++;char t[64];unsigned w=0;t[0]=0;
+    for(unsigned at=7;at+3<=n&&w+8<sizeof(t);at+=3+x9q_u16(req+at+1)){unsigned k=x9q_u16(req+at+1);
+     w+=(unsigned)snprintf(t+w,sizeof(t)-w," %02x/%u=%02x",req[at],k,k&&at+3<n?req[at+3]:0);}
+    printf("X9 WDS: client 0x%x SetEventReport tlvs%s\n",local,w?t:" none");}
+  }
   if(!error){
    if(stats.p){c.stats_interval=stats.p[0];c.stats_mask=x9q_u32(stats.p+1);c.report_next=0;}
    if(bearer.p){c.bearer_report=bearer.p[0]!=0;c.last_rat=0;}
@@ -1251,6 +1259,7 @@ static bool x9w_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
   else if(!rat)error=X9Q_NOT_READY;
   else{
    x9q_packet p(req);
+   {static unsigned logged;if(logged<16){logged++;printf("X9 WDS: client 0x%x bearer-tech query 0x%02x SIM%u rat mask 0x%x\n",local,id,c.sim_slot+1,rat);}}
    if(id==0x44)x9w_rat_tlv(p,1,rat);
    else{uint8_t legacy=rat==(1u<<5)?10:0xff;p.tlv(1,&legacy,1);} // Legacy enum has no NR; never relabel it LTE.
    p.send(local,port);return true;

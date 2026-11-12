@@ -14,6 +14,7 @@ namespace {
 constexpr unsigned X9D_DRB = 2048, X9D_BAT = 16384, X9D_PIT = 0x8000;
 constexpr unsigned X9D_BUF_CHUNK = 256, X9D_POOL_CHUNKS = X9D_BAT / X9D_BUF_CHUNK;
 constexpr unsigned X9D_CREDIT = 2000;
+extern "C" void x9_route_probe(void); // bsd/net/rtsock.c (238)
 constexpr unsigned X9D_TX_SIZE = 3072, X9D_PKT_SIZE = 1664, X9D_FRG_SIZE = 1920;
 constexpr unsigned X9D_MAIL = 128, X9D_BUDGET = 128, X9D_TX_BUDGET = 32;
 constexpr uint64_t X9D_DMA_LIMIT = 1ULL << 40;
@@ -1059,6 +1060,7 @@ static void x9d_report(unsigned second) {
     printf("X9 DPMAIF: %u s mode %u ready %u quarantined %u published %u TX submitted %llu completed %llu RX delivered %llu dropped %llu queued %u rejected %llu flow %llu phase %s\n",
         second, x9d.mode, x9d.ready, x9d.failed, x9d.published, x9d.tx_packets, x9d.tx_done, x9d.rx_packets, x9d.rx_dropped, queued, rejected, x9d.flow_events,
         x9d.phase ? x9d.phase : "prepare");
+    x9_route_probe();
     printf("X9 DPMAIF: RX LRO members split %llu, first-member L4 recomputed %llu, L2 status errors %llu (logged/acked, not fatal)\n", x9d.lro_split, x9d.lro_l4_fixed, x9d.status_errors);
     uint64_t counts[9]; for (unsigned i = 0; i < 9; i++) counts[i] = __atomic_load_n(&x9d.tx_admit[i], __ATOMIC_RELAXED);
     printf("X9 CELL TX: mailbox accept %llu argument %llu bad-ip %llu offline %llu unbound %llu epoch %llu family %llu mtu %llu full %llu; completion-not-air\n",
