@@ -380,7 +380,7 @@ def qualify_calls(classes, parents, instructions, cache):
                         new = next(iter(slots))
                         if new+header_words <= 4095:
                             patched = (word & ~(0xfff << 10)) | ((new+header_words) << 10)
-                            row = dict(load_pc=fn[3], call_pc=pc, method_entry=entry,
+                            row = dict(load_pc=fn[3], call_pc=pc, method_entry=entry, method_limit=high,
                                        receiver_classes=list(receiver[1]), stock_slot=fn[2],
                                        current_slot=new, before_word=word, after_word=patched,
                                        dispatch_kind=fn[0], vtable_header_words=header_words,
@@ -438,6 +438,138 @@ def qualify_calls(classes, parents, instructions, cache):
             sorted(uncertain-qualified_pcs), len(seeds))
 
 
+def qualify_load_consumers(calls, instructions):
+    """Audit the ENTIRE loaded value, not just one receiver-qualified BLR.
+
+    A single changed LDR can feed aliases, a second call or a stored/returned
+    function pointer. May-taint joins by UNION (unlike receiver must-facts).
+    Unknown uses, stack spills and live values at unbounded exits fail closed.
+    This proves only local consumer closure; it does NOT prove every possible
+    producer/entry, parent fields, relocation or that an instruction is safe to
+    apply. In particular instruction_patch_qualified stays false.
+    """
+    from capstone.arm64 import ARM64_OP_REG, ARM64_OP_IMM
+    groups = {}
+    for row in calls:
+        groups.setdefault(row['load_pc'], []).append(row)
+
+    def canonical(name):
+        # A 32-bit read of a loaded pointer is also a consumer, not an alias.
+        if name in ('fp', 'lr'):
+            return {'fp': 'x29', 'lr': 'x30'}[name]
+        return 'x'+name[1:] if name.startswith('w') else name
+
+    plans = []
+    for load_pc, rows in sorted(groups.items()):
+        contexts = {(r['method_entry'], r['method_limit']) for r in rows}
+        encodings = {(r['before_word'], r['after_word']) for r in rows}
+        if len(contexts) != 1 or len(encodings) != 1:
+            raise ValueError('one load has conflicting method/encoding contexts')
+        entry, high = next(iter(contexts))
+        expected = {r['call_pc'] for r in rows}
+        seen, problems = set(), set()
+        incoming = {load_pc: frozenset()}
+        work = deque([load_pc])
+        while work:
+            pc = work.popleft()
+            before = incoming[pc]
+            i = instructions.get(pc)
+            if i is None or not entry <= pc < high:
+                if before:
+                    problems.add((pc, 'live-value-outside-bounded-method'))
+                continue
+            read_ids, written_ids = i.regs_access()
+            reads = {canonical(i.reg_name(r)) for r in read_ids}
+            writes = {canonical(i.reg_name(r)) for r in written_ids}
+            after = set(before)-writes
+            used = set(before) & reads
+            ops = i.operands
+            alias = (i.mnemonic == 'mov' and len(ops) == 2 and
+                     all(o.type == ARM64_OP_REG for o in ops) and
+                     all(canonical(i.reg_name(o.reg)).startswith('x') and
+                         not i.reg_name(o.reg).startswith('w') for o in ops))
+            indirect = (i.mnemonic in ('blr', 'br') and len(ops) == 1 and
+                        ops[0].type == ARM64_OP_REG)
+            target = canonical(i.reg_name(ops[0].reg)) if indirect else None
+            if pc == load_pc:
+                # Re-execution in a loop generates the same changed value.
+                # An earlier alias used as this load's address is NOT safe.
+                if used:
+                    problems.add((pc, 'loaded-function-reused-as-load-address'))
+                after.add(canonical(i.reg_name(ops[0].reg)))
+            elif alias:
+                dst, src = (canonical(i.reg_name(o.reg)) for o in ops)
+                if src in before:
+                    after.add(dst)
+            elif indirect and target in before:
+                if pc not in expected:
+                    problems.add((pc, 'unqualified-indirect-consumer'))
+                else:
+                    seen.add(pc)
+                if used-{target}:
+                    problems.add((pc, 'indirect-call-has-other-pointer-use'))
+            elif used:
+                problems.add((pc, 'unmodeled-pointer-use:'+i.mnemonic))
+            if i.mnemonic in ('bl', 'blr') or indirect:
+                # x0..x7 are argument registers even when ALSO the indirect
+                # target (e.g. blr x1). Treat x8 as a possible hidden-result
+                # escape unless it is this exact dispatch target: that common
+                # load-x8/blr-x8 idiom cannot simultaneously supply a separate
+                # result-storage pointer. Signatures still need their own ABI
+                # proof; consumer closure is not that proof.
+                if set(before) & {'x'+str(r) for r in range(8)} or (
+                        'x8' in before and target != 'x8'):
+                    problems.add((pc, 'function-pointer-passed-as-argument'))
+                if i.mnemonic in ('bl', 'blr'):
+                    after -= {'x'+str(r) for r in range(19)}
+            successors = []
+            if i.mnemonic == 'ret':
+                # x0/x1 may return values. Callee-saved registers must have
+                # been restored, not leak a changed load to an outer caller.
+                if set(before) & ({'x0', 'x1', 'x8'} |
+                                  {'x'+str(r) for r in range(19, 31)}):
+                    problems.add((pc, 'function-pointer-at-return-boundary'))
+            elif i.mnemonic == 'br':
+                if before and (target not in before or pc not in expected):
+                    problems.add((pc, 'live-value-at-unqualified-indirect-exit'))
+                if set(before) & {'x'+str(r) for r in range(19, 31)}:
+                    problems.add((pc, 'function-pointer-at-tail-preserved-boundary'))
+            elif i.mnemonic == 'b':
+                successors.append(ops[0].imm & ((1 << 64)-1))
+            elif i.mnemonic.startswith('b.') or i.mnemonic in ('cbz','cbnz','tbz','tbnz'):
+                if ops[-1].type != ARM64_OP_IMM:
+                    raise ValueError('unqualified consumer CFG edge')
+                successors.extend((pc+4, ops[-1].imm & ((1 << 64)-1)))
+            elif i.mnemonic in ('svc','hvc','smc','eret','drps','brk'):
+                if before:
+                    problems.add((pc, 'unmodeled-exception-boundary'))
+            else:
+                successors.append(pc+4)
+            for succ in successors:
+                if not entry <= succ < high or succ not in instructions:
+                    if after:
+                        problems.add((pc, 'live-value-leaves-bounded-CFG'))
+                    continue
+                # The join must keep either path's possible loaded value.
+                joined = incoming.get(succ, frozenset()) | frozenset(after)
+                if succ not in incoming or joined != incoming[succ]:
+                    incoming[succ] = joined
+                    work.append(succ)
+        for pc in expected-seen:
+            problems.add((pc, 'qualified-call-not-reached-by-loaded-value'))
+        qualified = bool(seen) and not problems
+        for row in rows:
+            row['load_consumers_qualified'] = qualified
+        plans.append(dict(load_pc=load_pc, method_entry=entry, method_limit=high,
+                          before_word=rows[0]['before_word'], after_word=rows[0]['after_word'],
+                          qualified_indirect_consumers=sorted(seen),
+                          consumer_issues=[dict(pc=pc, reason=reason) for pc,reason in sorted(problems)],
+                          visited_instructions=len(incoming), load_consumers_qualified=qualified,
+                          producer_entries_qualified=False, instruction_patch_qualified=False,
+                          applied=False))
+    return plans
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--kernelcache', type=Path, required=True)
@@ -461,14 +593,16 @@ def main():
     parents = parent_maps(cs, cache, a.object_root, classes)
     tables = templates(classes, parents)
     calls, uncertain, methods = qualify_calls(classes, parents, instructions, cache)
+    loads = qualify_load_consumers(calls, instructions)
     result = dict(build='20H392', identity='d22ap', source_sha256=SHA256,
                   classes=classes, parents=parents, other_initializers=other_inits,
                   expanded_vtable_templates=tables,
                   receiver_qualified_calls=calls, visited_native_methods=methods,
+                  load_consumer_plans=loads,
                   unqualified_visited_calls=uncertain,
                   abi_compatible=False, runtime_loadable=False, patches_applied=False,
                   blockers=['field-by-field parent layout/OSMetaClass allocation',
-                            'unqualified receivers, static helpers and nonadjacent dispatch',
+                            'unqualified producer entries/receivers, static helpers and escaped load consumers',
                             'metaclass vtables and unqualified non-IOService destructors',
                             'request timer/abort/descriptor prepare-complete ownership',
                             'MTU3 native endpoints/EP0 and original module relocation/bootstrap',
@@ -478,6 +612,8 @@ def main():
     print(f'Native classes: {len(classes)}; class-local vtable templates: {len(tables)}')
     print(f'Receiver-qualified calls: {len(calls)}; changed load plans: '
           f'{sum(r["before_word"] != r["after_word"] for r in calls)}')
+    print(f'Consumer-closed loads: {sum(r["load_consumers_qualified"] for r in loads)}/{len(loads)}; '
+          'producer/entry and runtime qualification still blocked')
     print('Plans only; no executable bytes modified, no runtime load-readiness claim')
     return 2 if a.require_loadable else 0
 

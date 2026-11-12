@@ -419,8 +419,15 @@ python3 -I x9/usb/native_bridge.py \
 ```
 
 输出private `bridge-plan.json`保存模板、before/after instruction word及固定输入。
-只有receiver证明，**没有逐load全部consumer证明、完整父类field layout、metaclass
-虚表、DMA/timeout/abort及relocation/bootstrap**，故`instruction_patch_qualified=false`、
+NATIVE16另按**同一load而不是同一个call**进行有界may-taint分析：寄存器别名传播、
+分支合流取并集，逐一核对全部间接consumer；存储、未知使用、可能传参/返回或带值
+越出CFG都拒绝。`load_consumer_plans`保留每个load的消费者、失败PC/原因与method
+边界；`load_consumers_qualified`只说明这个局部CFG内没有额外使用，**不等于所有
+producer/入口已证明或可以改指令**。原件中`0059cc6c8`载入的函数先存`[sp,#8]`、
+`0059cc6d4`调用，随后`0059cc72c`重取并在`0059cc740`尾调用，旧单call receiver
+分析漏了后者；新分析在stack spill即拒绝，不把第一次调用的证明用于整个load。
+尚缺完整父类field layout、metaclass虚表、DMA/timeout/abort及relocation/bootstrap，
+故`producer_entries_qualified=false`、`instruction_patch_qualified=false`、
 `callable=false`、`runtime_loadable=false`，`--require-loadable`退出**2**。
 不输出/装载修改后的Apple段，不启用原生controller或USB mode，不提供绕过门开关。
 
