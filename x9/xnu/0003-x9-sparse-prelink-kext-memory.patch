@@ -1,0 +1,77 @@
+diff --git a/libkern/c++/OSKext.cpp b/libkern/c++/OSKext.cpp
+index 82661cf..9c2731a 100644
+--- a/libkern/c++/OSKext.cpp
++++ b/libkern/c++/OSKext.cpp
+@@ -570,9 +570,39 @@ osdata_kmem_free(void * ptr, unsigned int length)
+ 	return;
+ }
+ 
++/*
++ * X9: a sparse native prelink (XnuPrelink, __PRELINK_TEXT,__macho_list index)
++ * keeps the original kernelcache's coalesced segments and packs component
++ * headers/segments inside them without page alignment. Like a fileset KC,
++ * individual kext executables there must never go back to the VM:
++ * ml_static_mfree() asserts page alignment, and an aligned one would free
++ * pages shared with neighbouring components.
++ */
++static bool
++x9_sparse_prelink_memory(vm_offset_t addr)
++{
++	static const char *const segs[] = {
++		"__PRELINK_TEXT", "__PLK_TEXT_EXEC", "__PLK_DATA_CONST", "__PRELINK_DATA",
++		"__PLK_LINKEDIT", "__PLK_LLVM_COV",
++	};
++	if (getsectbynamefromheader(&_mh_execute_header, "__PRELINK_TEXT", "__macho_list") == NULL) {
++		return false;
++	}
++	for (unsigned int i = 0; i < sizeof(segs) / sizeof(segs[0]); i++) {
++		kernel_segment_command_t *seg = getsegbynamefromheader(&_mh_execute_header, segs[i]);
++		if (seg != NULL && seg->vmsize && addr >= seg->vmaddr && addr - seg->vmaddr < seg->vmsize) {
++			return true;
++		}
++	}
++	return false;
++}
++
+ void
+ osdata_phys_free(void * ptr, unsigned int length)
+ {
++	if (x9_sparse_prelink_memory((vm_offset_t)ptr)) {
++		return;
++	}
+ 	ml_static_mfree((vm_offset_t)ptr, length);
+ 	return;
+ }
+@@ -6975,7 +7005,9 @@ OSKext::slidePrelinkedExecutable(bool doCoalescedSlides)
+ #if VM_MAPPED_KEXTS
+ 					kext_free(new_endofkext, (endofkext - new_endofkext));
+ #else
+-					ml_static_mfree(new_endofkext, (endofkext - new_endofkext));
++					if (!x9_sparse_prelink_memory(new_endofkext)) {
++						ml_static_mfree(new_endofkext, (endofkext - new_endofkext));
++					}
+ #endif
+ 				}
+ 			}
+@@ -7539,7 +7571,9 @@ OSKext::jettisonLinkeditSegment(void)
+ #if VM_MAPPED_KEXTS
+ 	kext_free(start, linkeditsize);
+ #else
+-	ml_static_mfree(start, linkeditsize);
++	if (!x9_sparse_prelink_memory(start)) {
++		ml_static_mfree(start, linkeditsize);
++	}
+ #endif
+ 
+ finish:
+@@ -7603,7 +7637,9 @@ OSKext::jettisonDATASegmentPadding(void)
+ #if VM_MAPPED_KEXTS
+ 		kext_free(lastSecEnd, padSize);
+ #else
+-		ml_static_mfree(lastSecEnd, padSize);
++		if (!x9_sparse_prelink_memory(lastSecEnd)) {
++			ml_static_mfree(lastSecEnd, padSize);
++		}
+ #endif
+ 	}
+ }

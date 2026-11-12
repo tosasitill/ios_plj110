@@ -5,8 +5,8 @@
 #
 #   macos  -> .local/dxb          macOS kext C++ ABI (vtable padding); the tree
 #                                 every proven boot image so far was linked against
-#   ios    -> .local/dxb-iosabi   iOS kext C++ ABI (0002 patch); needed to link the
-#                                 original 20H392 kexts (IOUSBDeviceFamily, ...)
+#   ios    -> .local/dxb-iosabi   iOS kext C++ ABI (0002) + sparse-prelink kext memory
+#                                 (0003); needed for the original 20H392 kexts
 #
 # --setup creates the tree from scratch (network): blacktop/darwin-xnu-build at
 # the pinned commit + dxb-build.sh.patch, apple-oss xnu at xnu-8796.141.3 + the
@@ -32,7 +32,7 @@ XNU_REPO=https://github.com/apple-oss-distributions/xnu.git
 XNU_TAG=xnu-8796.141.3
 case $ABI in
   macos) D=$ROOT/.local/dxb; PATCHES="$P/0001-x9-sweet-xnu-8796.141.3.patch" ;;
-  ios)   D=$ROOT/.local/dxb-iosabi; PATCHES="$P/0001-x9-sweet-xnu-8796.141.3.patch $P/0002-x9-ios-kext-cxx-abi.patch" ;;
+  ios)   D=$ROOT/.local/dxb-iosabi; PATCHES="$P/0001-x9-sweet-xnu-8796.141.3.patch $P/0002-x9-ios-kext-cxx-abi.patch $P/0003-x9-sparse-prelink-kext-memory.patch" ;;
   *) echo "usage: $0 [macos|ios] [--setup]" >&2; exit 2 ;;
 esac
 
@@ -68,7 +68,7 @@ if [ $SETUP = 1 ]; then
              libfirehose_kernel.sym libsyscall.obj libsyscall.sym xnu-hdrs.obj; do
       [ -e "$ROOT/.local/dxb/build/$b" ] && cp -c -R "$ROOT/.local/dxb/build/$b" "$D/build/$b"
     done
-    git -C "$D/xnu" apply "$P/0002-x9-ios-kext-cxx-abi.patch"
+    git -C "$D/xnu" apply "$P/0002-x9-ios-kext-cxx-abi.patch" "$P/0003-x9-sparse-prelink-kext-memory.patch"
   else
     git clone "$DXB_REPO" "$D"
     git -C "$D" checkout -q "$DXB_COMMIT"
@@ -94,14 +94,23 @@ export LD="$(xcrun -find ld)" AR="$(xcrun -find ar)" RANLIB="$(xcrun -find ranli
 # Reproduce the banner of the 20H392-era kernel the userspace expects.
 export KERNEL_BUILD_DATE="Mon Aug 14 05:06:07 UTC 2023" KERNEL_BUILD_OBJROOT="xnu-8796.141.3"
 cd "$D/xnu"
-# make exits non-zero only for the lldbmacros dSYM install; the kernel objects
-# are complete when build/xnu.obj/DEVELOPMENT_ARM64_SWEET/kernel.development.sweet exists.
+# make exits non-zero for the lldbmacros dSYM install even on success, so the
+# result is judged by the kernel being relinked by this run and no compile/link
+# "No rule"/error lines. A moved tree has stale absolute paths in its .d files:
+# rewrite them first (perl -pi -e 's#<old>/#<new>/#g' on build/ text files).
+STAMP=$(mktemp /tmp/x9xnu-stamp.XXXX)
+LOG=$(mktemp /tmp/x9xnu-make.XXXX)
 make install -j8 VERBOSE=YES \
   CTFCONVERT=$D/fakeroot/usr/local/bin/ctfconvert CTFMERGE=$D/fakeroot/usr/local/bin/ctfmerge CTFDUMP=$D/fakeroot/usr/local/bin/ctfdump \
   SDKROOT=macosx TARGET_CONFIGS="DEVELOPMENT ARM64 SWEET" CONCISE=0 LOGCOLORS=n BUILD_WERROR=0 BUILD_LTO=0 \
   SRCROOT="$D/xnu" OBJROOT="$D/build/xnu.obj" SYMROOT="$D/build/xnu.sym" DSTROOT="$D/fakeroot" FAKEROOT_DIR="$D/fakeroot" \
   KDKROOT="$KDK" TIGHTBEAMC=tightbeamc-not-supported RC_DARWIN_KERNEL_VERSION=22.6.0 \
   MEMORY_SIZE=$(sysctl -n hw.memsize) SYSCTL_HW_PHYSICALCPU=$(sysctl -n hw.physicalcpu) \
-  SYSCTL_HW_LOGICALCPU=$(sysctl -n hw.logicalcpu) KERNEL_BUILDS_IN_PARALLEL=1 || true
-test -f "$D/build/xnu.obj/DEVELOPMENT_ARM64_SWEET/kernel.development.sweet"
+  SYSCTL_HW_LOGICALCPU=$(sysctl -n hw.logicalcpu) KERNEL_BUILDS_IN_PARALLEL=1 2>&1 | tee "$LOG" || true
+K=$D/build/xnu.obj/DEVELOPMENT_ARM64_SWEET/kernel.development.sweet
+if grep -q -E "No rule to make target|error:|\*\*\* \[build_all" "$LOG" || [ ! "$K" -nt "$STAMP" ]; then
+  echo "error: XNU build failed (kernel not relinked or compile errors); see $LOG" >&2
+  rm -f "$STAMP"; exit 1
+fi
+rm -f "$STAMP" "$LOG"
 echo "XNU object tree ready: $D/build/xnu.obj/DEVELOPMENT_ARM64_SWEET"
