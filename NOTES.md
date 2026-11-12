@@ -6,6 +6,16 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 240结果 + NECP探针（2026-11-12；x9-cell-necp 已构建，未启动）
+
+- **240观察(cellinfo)**：无panic。GetCellInfo按预期回复(SA时0xe2，39.565 SIM1回落LTE后0xbc)。时间线与239相同：28.7首次承载有流量(到50.8s TX 811/RX 987包)；39.5 MD回落LTE，但我们的NAS SysInfo仍报NR，**49.47才发LTE SysInfo**；53.057 CommCenter连发0x5567/0x3b/0x33/0x5566(均被拒94)，53.073 configd把unscoped default降为scoped，53.087 CC对v4 Stop并重拨，56.2恢复、56.396恢复unscoped default。之后每10s unscoped lookup v4/v6 都是pdp_ip0，但流量只剩后台(62→158s TX 97→391包)。**GetCellInfo没有消除降级/重拨。**
+- 用户约151s打开Safari(MobileSafari AKS、WebKit.GPU出现)，仍上不了网。
+- `connectx() - failed necp_set_socket_domain_attributes`(240里19次，236/237也有)：soconnectxlock里只打印、不中断连接(tracker域名属性)，**不是原因**。
+- 237 logd里Safari类失败为`_NSURLErrorNWPathKey=unsatisfied (No network route)`；xnu necp_update_client_result在routed_interface_index==0且无reason时得到这个结果(scoped rtalloc1失败/CLAT46/本地地址不在路由接口)，内核unscoped路由存在说明是按客户端参数的判定。
+- **cf75e13**(worktree 1e00e99)：overlay `bsd/net/necp_client.c`(上游原样+探针，recipe bsd-c-5，link-order改x9:necp_client.o)。每个不同的未满足/DROP判定，以及Safari/WebKit/Weather/nsurlsessiond的满足判定，打印 `X9 NECP: UNSAT|DROP|ok pid name epid ename sat result routed reason policy req-if req-type proh-type cflags valid remote af ip local af tc rt-scoped rt-unscoped`，去重，上限600行。
+- **镜像** `x9/out/x9-cell-necp-gpu278-20261112/boot.img`(13901824B，exit0，90/90 overlay)；worktree= cellinfo + 1e00e99；278插件不变，无需mailbox staging。
+- **验收看点**：打开Safari后grep `X9 NECP:.*Safari\|WebKit`：routed 0时看req-if/req-type/proh-type/cflags与rt-scoped；result=DROP时看policy id(NECP策略来源)；reason 3=cellular denied。
+
 ## CELLINFO（2026-11-12；x9-cell-cellinfo 已构建，未启动）
 
 - **DSD核对(20H392 dsd::asString)**：Technology 0=k3GPP/1=k3GPP2/2=kWLAN；RAT 0=NULL_BEARER,1=WCDMA,2=GERAN,3=LTE,4=TDSCDMA,5=WLAN,6=5G；SOMask 0=kUnspecified、1=LTE_FDD、bit43=5G_NSA。我们LTE发(0,3,0)、SA发(0,6,bit44)格式正确，**DSD无需修改**。
