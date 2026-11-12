@@ -304,6 +304,28 @@ static void x9q_nas(x9q_job &j){
   for(unsigned k=0;k<8;k++)systems[9+k]=(uint8_t)(so>>(8*k));
   p.tlv(0x10,systems,rat?17:1);x9q_finish(j,p,0x24);return;
  }
+ if(j.id==0x5556){
+  /* 237/239 logd: CellMonitor kept "[RAT: kRatUnknown ... MCC: , MNC: ]" and
+   * roaming evaluation reported kInvalidNetworkMCC because this request was
+   * rejected (94) on every system change. 20H392 QMICellMonitorCommandDriver:
+   * RespInd<0x5556>; applyTlv LteCellInformation_V2 = TLV 0xbc, NrCellInformation_V2
+   * = TLV 0xe2, each count u8 + cells. parseField(LteCell_V2) wire 28 B:
+   * u16,MCC u16,MNC u16,u8,u16,u32,u32,u16,u32,u32,u8; NrCell_V2 41 B:
+   * u16,MCC u16,MNC u16,u16,u32,u64,u32,u16,u32,u32,u16,u8,u32 (process*CellV2:
+   * fields 1/2 -> MCC(u16)/MNC(u16,MCC)). Only the serving cell's real PLMN from
+   * COPS; TAC/cell id/channel are not reported by AT and stay 0, never invented. */
+  const bool nr=x9q_registered(j.reg[2])&&j.act==11;
+  const bool lte=!nr&&x9q_registered(j.reg[1])&&(j.act==7||j.act==9||j.act==13);
+  if(j.mnc_digits&&(nr||lte)){
+   static uint8_t cell[1+41];bzero(cell,sizeof(cell));cell[0]=1; // bridge thread only; no stack growth (238)
+   cell[3]=(uint8_t)j.mcc;cell[4]=(uint8_t)(j.mcc>>8);cell[5]=(uint8_t)j.mnc;cell[6]=(uint8_t)(j.mnc>>8);
+   p.tlv(nr?0xe2:0xbc,cell,nr?1+41:1+28);
+  }
+  static unsigned logged;
+  if(logged<8){logged++;printf("X9 QMI AT: NAS GetCellInfo SIM%u %s PLMN %s (TAC/cell id/channel not reported)\n",
+   j.sim_slot+1,nr?"NR tlv 0xe2":lte?"LTE tlv 0xbc":"no serving cell",j.mnc_digits?"from COPS":"unknown");}
+  x9q_finish(j,p,0x5556);return;
+ }
  if(j.id==0x20){
   if(j.csq<0||j.csq>31||!radio){x9q_error(j,X9Q_NOT_READY);return;}
   uint8_t strength[2]={(uint8_t)(int8_t)(-113+2*j.csq),radio};p.tlv(1,strength,2);
@@ -659,7 +681,7 @@ static void x9q_result(x9q_job &j,const char *r,int result){
 static bool x9q_supported(unsigned service,unsigned id){
  return (service==0x0b&&(id==0x20||id==0x21||id==0x24||id==0x2f||id==0x47))||
   (service==2&&(id==0x21||id==0x22||id==0x23||id==0x25||id==0x2d||id==0x2e||id==0x3c||id==0x43))||
-  (service==3&&(id==0x20||id==0x24||id==0x4d||id==0x4f));
+  (service==3&&(id==0x20||id==0x24||id==0x4d||id==0x4f||id==0x5556));
 }
 static bool x9q_enqueue(uint32_t local,uint32_t port,const uint8_t *req,unsigned len,bool background=false){
  unsigned slot=local-CBQ_PORT_BASE;if(local<CBQ_PORT_BASE||slot>=CBQ_MAX_CLIENTS)return false;
