@@ -6,6 +6,25 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## GPU 279：PanVK顶点补齐守卫 + UniXNU/AdrenoMetal复查（2026-11-12；x9-gpu279-padguard 已构建，未上机，需mailbox staging）
+
+- **cfc5c2e**(worktree 0966601) `x9/build/third_party/13-panvk-pad-guard.patch`(已加入build-panvk-incremental.py)：
+  - vkCmdDraw：非索引 MESA_PRIM_TRIANGLES 且count%12!=0 时把count补到12的倍数，记录 `draw.x9_real_count`；prims-generated查询仍用真实count。启动参数token `x9g0` 关闭。日志 `X9 PAD GUARD: proc=.. mode=..`、`X9 PAD GUARD: draw #n count a -> b first f instances i`(1、2的幂、每65536)。
+  - 新graphics sysval `vs.x9_vertex_limit` = firstVertex+真实count；未补齐的draw一律UINT32_MAX(在cmd_prepare_draw_sysvals里每个draw设置)。
+  - 每个VS编译时(panvk_compile_nir开头，pan_postprocess_nir/IDVS拆分之前)整个主体包进 `if (load_vertex_id < limit)`，else只写position=vec4(0)；幂等(已有该sysval load就跳过)。Valhall malloc-IDVS的load_vertex_id是绝对值。
+  - 前端 x9PadMode 默认改为0(off)；`x9g0` 时回落CPU snapshot；x9p1/x9p2仍可强制。去掉每draw CPU拷贝。
+- **构建**：PanVK增量构建exit0(02..13补丁全部匹配；首次把helper放在HSR区导致04反向上下文失配，已移到CmdDraw前重生成)，dylib含 `X9 PAD GUARD`，新代码无warning。`.local/x9/work/gpu279-padguard-20261112/build279.py`：panvk-package/plugin-build/plugins-package/allowlist/all-build全exit0；plugin-package 10 files payload 53301248B；Image 30613504B/boot 13905920B，90/90 overlay。allowlist提交worktree abedbeb，已am到main **f4f0fc3**。镜像 `x9/out/x9-gpu279-padguard-20261112/boot.img`(叠在sim2bind + gpu-cs-audit之上)。
+- **注意(观察)**：cell worktree的 `.local` 是指向main `.local` 的符号链接。为279复制278 worktree的metal2vulkan-963f-source/general-build-inputs时实际写进了main的同名目录：metal2vulkan-963f-source与278副本内容一致(同HEAD 963f0e64，只多一个旧.rej)；general-build-inputs现为278构建的中间产物(build-general-metal会重新生成)。
+- **上机前必须**：mailbox staging(有新plugin-package)：Android+adb下 `python3 x9/mailbox/update.py x9/out/x9-gpu279-padguard-20261112`，出现 `Mailbox committed` 后再 `fastboot boot`。
+- **验收看点**：`X9 PAD: mode=0 (off)`、`X9 PAD GUARD: proc=... mode=1` 和draw计数；控制中心卡片/之前出怪三角形的界面；有无新的GPU fault/device lost；卡顿是否减轻。
+- **UniXNU/AdrenoMetal复查(上次同步点20be9f9之后11个提交，clone在 `.local/x9/work/unixnu-review-20261112/AdrenoMetal`)**：
+  - 5beb6b5：runtime从963f整体换到metal2vulkan development 555b13d5(0040补丁3354行替代0026-0036)。译码器升级，需单独评估，不顺手合入。
+  - 9c09d41(metal-flow位：lowering线程/commit提交/warm pipeline)：我们的bridge已经无条件开启三项，无新内容。
+  - c135133(在请求线程上创建pipeline)：只对栈≥2MiB的线程生效；iOS主线程约1MiB，基本不会触发；降低阈值有backboardd编译栈溢出风险，不移植。
+  - dfb5edc：RelaxedPrecision半精度等，在555b13d5的0040补丁里，依赖升级。
+  - 51b7003(tile pipeline/tile dispatch)：963f runtime已有pipeline/tile.rs，可在bridge/前端层移植(~270行)，暂无对应症状。
+  - **86fd95c(同步点之前，我们没有)**：setPurgeableState真正丢弃Volatile/Empty的buffer/texture/heap(条件：无在途CB、无view/子资源、未交出CPU指针/GPU地址等)。我们的nmb_*_set_purgeable_state只转给runtime记录状态，从不丢弃；提交说明称RenderBox每进程最多保持64MiB buffer+128MiB texture+128MiB heap为Volatile。GPU内存在本机同样wired，**建议作为下一个移植项**(bridge/NativeMetalPurge.rs 643行+purge_host.mm 626行+Objects改动)。
+
 ## GPU：x9cs默认开 + IOSurface预算审计；顶点补齐方案评估（2026-11-12；x9-gpu-cs-audit 已构建，未启动）
 
 - **243补充观察**：AegirPoster在274-670s崩溃33次(每次4行CRASH)：`factory device=nil`(op7 no CSG slot) -> 3.5MB IOSurface `0xe00002bd` -> SIGABRT，约每12s一次。两种资源耗尽驱动同一个崩溃循环，也是卡顿的可信来源(持续重启/拆除)。IOSurface连4x4(16KiB)也失败，说明1536MiB预算已用满，不是单个大分配。预算加减在源码里成对(free()/失败路径)，暂无记账泄漏证据。另有syncdefaultsd 14次、mediaserverd 6次、ScreenshotServices 3次崩溃。
