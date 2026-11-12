@@ -6257,6 +6257,11 @@
    "template": "bsd-c-5"
   },
   {
+   "name": "necp_client.o",
+   "source": "bsd/net/necp_client.c",
+   "template": "bsd-c-5"
+  },
+  {
    "name": "in.o",
    "source": "bsd/netinet/in.c",
    "template": "bsd-c-5"

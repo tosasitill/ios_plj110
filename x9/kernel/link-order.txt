@@ -456,7 +456,7 @@ xnu:bsd/DEVELOPMENT/net_str_id.o
 xnu:bsd/DEVELOPMENT/if_utun.o
 xnu:bsd/DEVELOPMENT/if_ipsec.o
 xnu:bsd/DEVELOPMENT/necp.o
-xnu:bsd/DEVELOPMENT/necp_client.o
+x9:necp_client.o
 xnu:bsd/DEVELOPMENT/network_agent.o
 xnu:bsd/DEVELOPMENT/bloom_filter.o
 xnu:bsd/DEVELOPMENT/if_pflog.o
