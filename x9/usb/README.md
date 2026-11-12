@@ -38,6 +38,8 @@ python3 -I x9/usb/install.py --verify --device-id ID --receipt .local/x9/install
 
 receipt绑定原生设备 identity 的SHA256。Lookup只证明该bundle/version当前
 在原生用户安装路径上，不证明未知的上次Install成功、实际启动或跨重启持久性。
+Lookup缺少LookupResult不当成“未安装”；receipt在首次上传前用O_EXCL原子占有，
+同receipt的两个并发调用不能互相覆盖in-flight状态后重复Install。
 **这不是新增的可Finder配对boot；NATIVE9的registry/backend仍为空。**
 
 **当前是已实现的 USB2 CDC-ECM + 自有 bulk 传输候选，不是已验收的完整 iPhone USB 栈。**

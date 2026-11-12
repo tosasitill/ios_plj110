@@ -109,14 +109,21 @@ class PlistService:
             'ReturnAttributes': ['CFBundleIdentifier', 'CFBundleVersion', 'Path', 'ApplicationType']}))
         deadline = time.monotonic() + 30
         result = {}
+        saw_result = False
         for _ in range(256):
             reply = self.receive(deadline)
             if 'LookupResult' in reply:
                 found = reply['LookupResult']
                 if not isinstance(found, dict) or set(found) - {bundle}:
                     raise ProtocolError('unexpected unbounded Lookup result')
+                if bundle in found and (not isinstance(found[bundle], dict)
+                        or found[bundle].get('CFBundleIdentifier') != bundle):
+                    raise ProtocolError('malformed Lookup application identity')
+                saw_result = True
                 result.update(found)
             if reply.get('Status') == 'Complete':
+                if not saw_result:
+                    raise ProtocolError('Lookup Complete without LookupResult is not evidence of absence')
                 return result.get(bundle)
         raise ProtocolError('Lookup response count exceeded')
 
@@ -275,7 +282,15 @@ def main():
                 remote = 'PublicStaging/x9-' + secrets.token_hex(16) + '/install.ipa'
                 state = dict(IPA=expected, DeviceIdentitySHA256=identity,
                              RemotePath=remote, State='upload-in-flight')
-                save_private(receipt, state)
+                # Atomically claim the new receipt before the first file write.
+                # Two concurrent invocations with the same receipt must not both
+                # pass an exists() precheck and replace each other's in-flight state.
+                receipt.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                fd = os.open(receipt, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                with os.fdopen(fd, 'wb') as stream:
+                    stream.write(plistlib.dumps(state, fmt=plistlib.FMT_BINARY))
+                    stream.flush()
+                    os.fsync(stream.fileno())
                 afc_sock = service(ld, ctx, pin, a, serial, 'com.apple.afc')
                 try:
                     AFC(afc_sock).upload(a.install, remote, expected)
