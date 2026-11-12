@@ -131,7 +131,7 @@ python3 -I x9/build/scripts/build-usb-prelink.py <name>
 ```
 用 `.local/dxb-iosabi` 编内核 → `.local/references/XnuPrelink/emit_prelink.py` 把 20H392 的 AppleUSBCommon / IOUSBDeviceFamily /
 AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a400000-0xfffffff004dc8000`）→ `build.py boot`。
-产物 `x9/out/<name>-kernel/`、`<name>-prelink/`、`<name>/`。**当前停在第 3 步**（见 §5）。
+产物 `x9/out/<name>-kernel/`、`<name>-prelink/`、`<name>/`。XnuPrelink 把 `__PRELINK_INFO` 按 4K 放在 `__LINKEDIT` 之后，脚本会把它挪到下一个空闲 16K 位置（shim 校验和 XNU 16K 页的 `arm_vm_init` 都要求 16K 对齐；其 XML 无自引用）。
 
 ### 3.5 上机
 
@@ -180,18 +180,24 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
   vtable 与原件逐槽一致（OSObject 15、IOService 168、IOUserClient 186、IOCommand 15、IOCommandPool 21、IODMACommand 31、
   IOEventSource 27），实例大小相同。所以用 iOS ABI 的 XNU（0002）+ XnuPrelink 直接链接**未修改的 20H392 USB kext**，
   与 UniXNU QcomDwc3 的做法一致（Apple IOUSBDeviceFamily / AppleUSBDeviceMux / configd / lockdownd 原样运行）。
-- **已完成（观察）**：`dxb-iosabi` 构建通过；`build-usb-prelink.py x9-usb-iosabi-20261112` 的 kernel、prelink 两步 exit 0
-  （3 个组件，1818 个 kernel 指针 + 591 个组件指针）。
-- **阻塞**：第 3 步 shim `validate_payload` 报 `ValueError: bad segment address or size`。推断：shim loader 按
-  `phys_base + (vmaddr - virt_base)` 复制 `p->segs`，而 prelink 段位于 `__LINKEDIT` 之上的 `0xfffffe000a400000`，总跨度约 67 MB，
-  超出 validator 的地址/大小约束。尚未看 `x9/shim/validate.c` 的具体判据。
-- **下一步**：
-  1. 读 `x9/shim/validate.c`/`loader.c` 和 `x9/tools/mkpayload.py`，让 payload 接受 prelink 段（或把 prelink base 放到紧挨内核的位置，
-     减少跨度；注意 RAM window 与 `--max-image-size 0x7b80000`）。
-  2. 出 boot.img 上机，确认 `X9 NATIVE USB:` 日志里三件 kext 加载和类注册。
-  3. 写 `X9Mtu3Xdci : IOUSBDeviceController`（参照 UniXNU QcomDwc3 / linux-mtu3 / oppo-mt6993-usb）接 MTU3 控制器。
-  4. Mac 识别 → Trust/配对/lockdown → `x9/usb/install.py` 装 IPA；AppSync runtime（`.local/x9/appsync/runtime-20261112-v3`）经
-     mailbox 安装器（allowlist 普通文件）部署；Procursus rootless bootstrap 到 `/var/jb`，SSH 仅 ue0。每个设备写入步骤先征得用户同意。
+- **已完成（观察）**：`dxb-iosabi` 构建通过；`build-usb-prelink.py x9-usb-prelink2-20261112` 三步全部 exit 0（分支
+  `feat/usb-prelink-shim`）。之前 shim 报 `bad segment address or size` 的唯一原因是 `__PRELINK_INFO` va `0xfffffe000a20d000`
+  只有 4K 对齐；挪到 `0xfffffe000a210000` 后通过校验。镜像 **`x9/out/x9-usb-prelink2-20261112/boot.img`**（Image 68096000 B，
+  boot 14176256 B；内核跨度 0xfffffe0007004000..0xfffffe000d1f4000，prelink 段为保持统一 slide 保留原 coalesced 尺寸，主要是零）。
+- **静态核对（推断，未上机）**：XNU 8796 `arm_vm_init` 支持新式 `__PLK_*` 段；prelink 位于 xnu `__TEXT` 之上时 `segLOWEST` 仍是
+  `__TEXT`，`end_kern`=最高段末尾=payload `kernel_end`；`__PRELINK_TEXT` 0x7c4000 < 0x3000000 断言。segmented8g 第一段连续
+  RAM 0x100000000..0x13CC00000 足够容纳内核+ADT+boot_args。Image 68 MB < `--max-image-size 0x7b80000`；LK 实际装载地址未知，
+  若与内核目标重叠 shim 会在复制前停下并打印 `payload or shim overlaps kernel destination`（不会写坏内存）。
+  XnuPrelink 普通路径只需 sparse-index 补丁（已在 overlay kalloc.c）。
+- **上机步骤**：main/本分支 allowlist 是 280，设备上是 277，必须先（Android、用户给序列号）
+  `X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/x9-gpu280-purge-20261112`，再由用户
+  `fastboot boot x9/out/x9-usb-prelink2-20261112/boot.img`。
+- **要看的**：shim 日志到 `X9: entering XNU`；XNU 早期是否在 `arm_vm_init`/`OSKext::readPrelinkedExtensions` panic；
+  `X9 NATIVE USB:` 行里 AppleUSBCommon / IOUSBDeviceFamily / AppleUSBDeviceMux 的 load 结果与 IOUSBDeviceController、IOUSBDevice、
+  IOUSBDeviceInterface(UserClient)、AppleUSBDeviceMux 的类注册/大小。若黑屏无日志先断电重启再判定（见记忆：黑屏先 power cycle）。
+- **下一步**：上机结果后：写 `X9Mtu3Xdci : IOUSBDeviceController`（参照 UniXNU QcomDwc3 / linux-mtu3 / oppo-mt6993-usb）接 MTU3；
+  Mac 识别 → Trust/配对/lockdown → `x9/usb/install.py` 装 IPA；AppSync runtime 经 mailbox 安装器部署；Procursus rootless 到 `/var/jb`，
+  SSH 仅 ue0。每个设备写入步骤先征得用户同意。
 - AppSync 已有：runtime v3（AppSync/ldid/appinst/jbctl 4 个签名 arm64 二进制）、内核 `x9_appsync_env.inc` 按哈希只对
   installd/SpringBoard/MI helper 注入 `DYLD_INSERT_LIBRARIES`、主机端 `x9/usb/install.py`。未 staging、未实机。
 

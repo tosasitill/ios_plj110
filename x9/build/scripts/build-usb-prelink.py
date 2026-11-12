@@ -12,9 +12,9 @@
 
 Every input is under the repository; outputs: x9/out/<name>-kernel (native kernel),
 x9/out/<name>-prelink (prelinked kernel, logs), x9/out/<name> (boot.img).
-Status 2026-11-12: step 3 fails in the shim payload validator
-("bad segment address or size") - the shim does not yet accept the prelinked
-layout (segments above __LINKEDIT, 67 MB span). No device operations.
+XnuPrelink places __PRELINK_INFO 4K-aligned right after __LINKEDIT; XNU's
+16K-page arm_vm_init and the shim validator need 16K, so it is moved to the
+next free 16K slot (its XML holds no self-references). No device operations.
 """
 import json
 import os
@@ -27,6 +27,42 @@ ROOT = Path(__file__).resolve().parents[3]
 LOCAL = ROOT / '.local'
 PRELINK_BASE = 0xfffffe000a400000   # where the kexts land (above the native kernel)
 KC_BASE = 0xfffffff004dc8000        # unslid base of the 20H392 kernelcache
+PAGE = 0x4000
+
+
+def segments(d):
+    """(name, command offset, vmaddr, vmsize) for every LC_SEGMENT_64."""
+    ncmds, = struct.unpack_from('<I', d, 16)
+    off, out = 32, []
+    for _ in range(ncmds):
+        cmd, size = struct.unpack_from('<II', d, off)
+        if cmd == 0x19:
+            name = d[off + 8:off + 24].rstrip(b'\0').decode()
+            va, vs = struct.unpack_from('<QQ', d, off + 24)
+            out.append((name, off, va, vs))
+        off += size
+    return out
+
+
+def align_prelink_info(path):
+    d = bytearray(path.read_bytes())
+    segs = segments(d)
+    name, off, va, vs = next(s for s in segs if s[0] == '__PRELINK_INFO')
+    if va % PAGE == 0:
+        return va
+    new = (va + PAGE - 1) & ~(PAGE - 1)
+    size = (vs + PAGE - 1) & ~(PAGE - 1)
+    for other, _, ova, ovs in segs:
+        if other != name and ovs and new < ova + ovs and ova < new + size:
+            sys.exit(f'cannot move __PRELINK_INFO to {new:#x}: collides with {other}')
+    nsects, = struct.unpack_from('<I', d, off + 64)
+    struct.pack_into('<Q', d, off + 24, new)
+    for i in range(nsects):
+        sect = off + 72 + i * 80
+        addr, = struct.unpack_from('<Q', d, sect + 32)
+        struct.pack_into('<Q', d, sect + 32, addr - va + new)
+    path.write_bytes(d)
+    return new
 
 
 def main():
@@ -54,16 +90,7 @@ def main():
     kname = name + '-kernel'
     run('kernel', [py, '-I', 'x9/build/build.py', 'kernel', '--name', kname, '--config', str(cfg_path), '-j', '8'])
     kernel = ROOT / 'x9/out' / kname / 'kernel.development.sweet'
-    d = kernel.read_bytes()
-    ncmds, = struct.unpack_from('<I', d, 16)
-    off, end = 32, 0
-    for _ in range(ncmds):
-        cmd, size = struct.unpack_from('<II', d, off)
-        if cmd == 0x19:  # LC_SEGMENT_64
-            va, vs = struct.unpack_from('<QQ', d, off + 24)
-            if vs:
-                end = max(end, va + vs)
-        off += size
+    end = max(va + vs for _, _, va, vs in segments(kernel.read_bytes()) if vs)
     if end + 0x40000 > PRELINK_BASE:
         sys.exit(f'native kernel ends at {end:#x}, too close to the prelink base {PRELINK_BASE:#x}')
     prelinked = out / 'kernel.prelinked'
@@ -71,6 +98,7 @@ def main():
                     '--prelinked', str(LOCAL / 'x9/usb/native-20H392/kernelcache.macho'),
                     '--root', 'com.apple.iokit.IOUSBDeviceFamily', '--root', 'com.apple.driver.AppleUSBDeviceMux',
                     f'--slide={hex(PRELINK_BASE - KC_BASE)}', '--output', str(prelinked)])
+    print('__PRELINK_INFO at', hex(align_prelink_info(prelinked)), flush=True)
     # build.py boot expects the kernel output's sidecar metadata next to the kernel.
     for p in (ROOT / 'x9/out' / kname).glob('*.json'):
         (out / p.name).write_bytes(p.read_bytes())
