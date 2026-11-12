@@ -136,12 +136,55 @@ static int repairContainer(NSString *bundleID) {
     return now ? 0 : 1;
 }
 
+// "On My iPhone" is the Files local-storage provider's root: the app group
+// container group.com.apple.FileProvider.LocalStorage, folder "File Provider
+// Storage". On this root the group exists without that folder, so Files cannot
+// open "On My iPhone" and Safari, whose default download folder is
+// "On My iPhone/Downloads", reports "storage not available". Create both as
+// the mobile user; existing folders are left alone.
+static int ensureLocalStorage(void) {
+    static NSString *const groups = @"/private/var/mobile/Containers/Shared/AppGroup";
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *found = nil;
+    for (NSString *name in [fm contentsOfDirectoryAtPath:groups error:NULL]) {
+        NSString *dir = [groups stringByAppendingPathComponent:name];
+        NSDictionary *meta = [NSDictionary dictionaryWithContentsOfFile:
+            [dir stringByAppendingPathComponent:@".com.apple.mobile_container_manager.metadata.plist"]];
+        if ([meta[@"MCMMetadataIdentifier"] isEqual:@"group.com.apple.FileProvider.LocalStorage"]) { found = dir; break; }
+    }
+    if (!found) {
+        fprintf(stderr, "x9-jbctl: group.com.apple.FileProvider.LocalStorage container not found\n");
+        return 1;
+    }
+    if (getuid() != 501) {
+        fprintf(stderr, "x9-jbctl: local storage must be created as mobile (uid %u)\n", getuid());
+        return 2;
+    }
+    int created = 0, failed = 0;
+    for (NSString *sub in @[@"File Provider Storage", @"File Provider Storage/Downloads"]) {
+        NSString *path = [found stringByAppendingPathComponent:sub];
+        BOOL isDir = NO;
+        if ([fm fileExistsAtPath:path isDirectory:&isDir]) {
+            if (!isDir) { fprintf(stderr, "x9-jbctl: %s exists and is not a folder\n", path.UTF8String); failed++; }
+            continue;
+        }
+        NSError *error = nil;
+        if ([fm createDirectoryAtPath:path withIntermediateDirectories:NO
+                           attributes:@{NSFilePosixPermissions: @0755} error:&error]) created++;
+        else { fprintf(stderr, "x9-jbctl: mkdir %s: %s\n", path.UTF8String, error.localizedDescription.UTF8String); failed++; }
+    }
+    printf("x9-jbctl: local storage %s created=%d failed=%d\n", found.UTF8String, created, failed);
+    NSLog(@"[X9 JBCTL] local storage %@ created=%d failed=%d", found, created, failed);
+    return failed ? 1 : 0;
+}
+
 int main(int argc, const char **argv) {
     @autoreleasepool {
         if (argc == 2 && !strcmp(argv[1], "--status")) return status();
         if (argc == 3 && !strcmp(argv[1], "--register")) return registerApp(@(argv[2]));
         if (argc == 3 && !strcmp(argv[1], "--repair-container")) return repairContainer(@(argv[2]));
-        fprintf(stderr, "usage: x9-jbctl --status | --register /Applications/<Name>.app | --repair-container com.apple.<id>\n");
+        if (argc == 2 && !strcmp(argv[1], "--ensure-local-storage")) return ensureLocalStorage();
+        fprintf(stderr, "usage: x9-jbctl --status | --register /Applications/<Name>.app | --repair-container com.apple.<id> | --ensure-local-storage\n");
         return 2;
     }
 }

@@ -90,7 +90,7 @@ static int runJbctl(const char *verb, const char *arg) {
     int e = posix_spawn(&pid, AS_JBCTL_PATH, NULL, NULL, (char *const *)argv, environ);
     int st = 0;
     if (!e) waitpid(pid, &st, 0);
-    NSLog(@"[UniXNU AppSync] x9-jbctl %s %s spawn=%d exit=%d", verb, arg, e, WIFEXITED(st) ? WEXITSTATUS(st) : -1);
+    NSLog(@"[UniXNU AppSync] x9-jbctl %s %s spawn=%d exit=%d", verb, arg ?: "", e, WIFEXITED(st) ? WEXITSTATUS(st) : -1);
     return e ? -1 : (WIFEXITED(st) ? WEXITSTATUS(st) : -1);
 }
 
@@ -99,6 +99,8 @@ static void registerX9Apps(void) {
                    dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         // MobileSafari's record lacks its data container on this root; jbctl re-registers it only then.
         runJbctl("--repair-container", "com.apple.mobilesafari");
+        // Files "On My iPhone" root (Safari downloads go there); see x9-jbctl.
+        runJbctl("--ensure-local-storage", NULL);
         static const char *app = "/Applications/X9Installer.app";
         char info[256];
         snprintf(info, sizeof(info), "%s/Info.plist", app);
