@@ -516,7 +516,10 @@ static bool x9d_update(unsigned mux,uint64_t lifetime,unsigned families,unsigned
     if(!x9d.lock||!cbp_mux_ok(mux)||!x9d_caps(families,mtu4,mtu6))return false;
     IOLockLock(x9d.lock);x9d_route &r=x9d.route[mux-1];
     if(!r.bound||r.lifetime!=lifetime){IOLockUnlock(x9d.lock);return false;}
-    if(r.families!=families||r.mtu4!=mtu4||r.mtu6!=mtu6){
+    // MTU-only (RA/EIF5 configureIpv6Mtu) is not a reconnect: keep the epoch
+    // and queue; dequeue (x9d_tx_poll) and RX delivery recheck size vs cap.
+    if(r.families==families&&(r.mtu4!=mtu4||r.mtu6!=mtu6)){r.mtu4=mtu4;r.mtu6=mtu6;}
+    else if(r.families!=families){
         r.families=(uint8_t)families;r.mtu4=mtu4;r.mtu6=mtu6;r.epoch++;
         unsigned kept=0,old=x9d.count;
         for(unsigned i=0;i<old;i++){

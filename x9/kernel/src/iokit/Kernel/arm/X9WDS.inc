@@ -701,10 +701,10 @@ static void x9w_dirty(x9w_bearer &b,uint64_t serial,unsigned close_mask=0){
  if(b.active&&!x9w_sync_route(b,(unsigned)(&b-x9w_bearers)+1)){b.abandoned=true;x9w_disconnect(b,(unsigned)(&b-x9w_bearers)+1);}
  b.next=0;
 }
-static bool x9w_family_equal(const x9wr_family &a,const x9wr_family &b,unsigned bytes){
+static bool x9w_family_equal(const x9wr_family &a,const x9wr_family &b,unsigned bytes,bool ignore_mtu=false){
  if(a.address_present!=b.address_present)return false;
  if(!a.address_present)return true;
- if(a.mtu!=b.mtu||a.dns_count!=b.dns_count||memcmp(a.address,b.address,bytes))return false;
+ if((!ignore_mtu&&a.mtu!=b.mtu)||a.dns_count!=b.dns_count||memcmp(a.address,b.address,bytes))return false;
  for(unsigned i=0;i<a.dns_count;i++)if(memcmp(a.dns[i],b.dns[i],bytes))return false;
  return true;
 }
@@ -727,13 +727,24 @@ static void x9w_refresh(x9w_bearer &b,unsigned mux){
  if(b.query_serial!=b.change_serial){b.next=0;return;}
  const x9w_interface &in=x9w_interfaces[b.sim_slot][b.channel];x9wr_settings runtime={};
  if(in.valid&&in.cmd==0)x9wr_match_settings(b.get_result,in.facts,b.query,runtime);
- unsigned changed=0;
- if(!x9w_family_equal(b.runtime.v4,runtime.v4,4))changed|=1;
- if(!x9w_family_equal(b.runtime.v6,runtime.v6,16))changed|=2;
+ unsigned changed=0,mtu_only=0;
+ if(!x9w_family_equal(b.runtime.v4,runtime.v4,4,true))changed|=1;
+ else if(!x9w_family_equal(b.runtime.v4,runtime.v4,4))mtu_only|=1;
+ if(!x9w_family_equal(b.runtime.v6,runtime.v6,16,true))changed|=2;
+ else if(!x9w_family_equal(b.runtime.v6,runtime.v6,16))mtu_only|=2;
+ // 235/234: EIF5 (RA MTU, 1500->1450) landing after publish went through
+ // WDS22 reconfigurationRequired; CommCenter answered with family6 Stop in
+ // ~2 ms and the bearer then carried no traffic. The Android RIL maps EIF5
+ // to configureIpv6Mtu (netd interface MTU only, no teardown). An MTU-only
+ // difference is applied to the route silently; the RA itself reaches the
+ // host ND6 path. Address/DNS changes still close admission + reconfigure.
+ if(mtu_only&&!changed)printf("X9 WDS: mux %u MTU-only change v4 %u->%u v6 %u->%u applied to route; no host reconfigure (RIL configureIpv6Mtu)\n",
+  mux,b.runtime.v4.mtu,runtime.v4.mtu,b.runtime.v6.mtu,runtime.v6.mtu);
  // Only GET + current scoped IFUP/MOD facts publish new settings. An
  // uncorroborated family is closed, never replaced with guessed addresses.
  b.runtime=runtime;b.mtu=runtime.v4.mtu;b.refresh_mask=0;
- x9w_reconfigure(b,mux,changed);
+ if(!changed){if(!x9w_sync_route(b,mux)){b.abandoned=true;x9w_disconnect(b,mux);return;}}
+ else x9w_reconfigure(b,mux,changed);
  b.next=x9q_ms()+10000;
 }
 static void x9w_result(x9w_bearer &b,unsigned mux,const uint8_t *p,unsigned n){
@@ -908,8 +919,12 @@ static bool x9w_interface_event(const uint8_t *p,unsigned n,unsigned sim){
    if(in.valid&&in.cmd==0&&in.trans_id==trans&&in.facts.epoch==b.result_epoch&&in.serial>b.if_floor&&count){
     in.facts.v6.mtu_present=true;in.facts.v6.mtu=x9q_u32(item.p);
    }
+   // A smaller RA MTU narrows the route in place (RIL configureIpv6Mtu).
+   // Closing v6 admission here bumped the route epoch and dropped the RA
+   // that followed 4 ms later (235); vendor never gates the PDN on wire5.
    unsigned cap=count?x9q_u32(item.p):0;
-   x9w_dirty(b,serial,cap&&cap<b.runtime.v6.mtu?2u:0u);
+   if(cap>=1280&&cap<b.runtime.v6.mtu)b.runtime.v6.mtu=cap;
+   x9w_dirty(b,serial,cap&&cap<1280?2u:0u);
   }
   printf("X9 WDS: EIF5 SIM%u ccmni%u incremental v6 MTU present %u; coalesced GET refresh\n",sim+1,trans%100,count);
   return true;
