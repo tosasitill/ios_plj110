@@ -6,6 +6,13 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 239结果（route3上机，2026-11-12）：正常启动；内核默认路由存在
+
+- **观察**：无panic。configd(pid36) 28.018 加 scoped default(ifscope6)，28.188 改为 **unscoped default gw 10.5.150.190**；之后每10s `unscoped lookup v4/v6 -> pdp_ip0`。所以“No network route”/Safari离线**不是内核缺默认路由**，在iOS上层策略。
+- 48.486 MD 回落 LTE(`CEREG 1 C5GREG 0 AcT 7`)；52.353 configd 删 unscoped default、只留 scoped(蜂窝被降为非主)，18ms后 52.371 CommCenter 对 v4/v6 Stop 重拨；55.660 unscoped default 恢复。重拨后流量几乎停止(62.9→74.8s TX 1558→1568, RX 2507→2518)。
+- CommCenter WDS SetEventReport 只订阅 TLV 0x13 与 0xa1(无0x15)，故我们的 WDS 承载制式报告从不发送；承载制式应来自 DSD system status(0x24 indication，每10s已发；LTE时 rat=3、SOMask=0)。
+- 下一步候选：核对 Apple DSD DataSystemStatus 的 LTE rat/SOMask 解析(为何 CommCenter 保持 dataBearerTechnology=NR)，以及被拒的 NAS 0x5567/0x3b/0xeb 是否参与 52s 的降级决策。
+
 ## 238 panic 与修正（2026-11-12；route3 已构建，未启动）
 
 - **观察**：238 USB日志止于26.722s(半行)；Android只读 pstore(`.local/x9/work/pstore-238/console-ramoops-0.raw`，launchd 10:33:45=238)：27.775 `X9 ROUTE: unscoped lookup … none … none`(探针执行正常)，28.908 v4 lease 的 `COACHZ pdp: WDS type 4 … family 4 active 1` 之后、本应的 `COACHZ qmi: to-host` 之前 **panic: Invalid kernel stack pointer (probable overflow)**，esr 0x96000047 写 sp+8 撞保护页，pc在IRQ向量。无backtrace。
