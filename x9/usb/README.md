@@ -328,8 +328,8 @@ python3 -I x9/usb/prepare_native.py \
 
 ### 复现端点与 request 的原始调用契约
 
-`recover_contract.py` 对同一固定原始输入做有界反汇编，检查87处关键指令、request
-分配类型及具体 controller 的虚表/import，输出 `contract.json` 和28段 `.dis`。
+`recover_contract.py` 对同一固定原始输入做有界反汇编，当前检查110处关键指令、request
+分配类型及具体 controller 的虚表/import，输出 `contract.json` 和30段 `.dis`。
 这是静态分析命令，不是测试套件或原生驱动装载器：
 
 ```sh
@@ -579,6 +579,36 @@ registry仍无installer、`native_apple_stack=0`；没有DeviceFamily装载或Ma
 仍需native controller、EP0 SETUP/data/status与configuration/event路由、原生字段／
 flags／descriptor／Family双向dispatch与completion、模块relocation/bootstrap，再验
 真实枚举/Trust/Pair/TLS/安装。编译和源码来源见`NOTES.md`活动交接。
+
+### USB-NATIVE12：原始普通 request 提交／完成适配器（未绑定）
+
+`X9USBNativeRequestAdapter.h/.inc`作为生产kernel C++组件编入`SweetX9USB.cpp`。
+它沿原20H392 slot223→225请求到`X9USBRequestBridge`，不是Apple类声明或加载器。
+0x68B请求字段宽度及offset均有编译断言，来源是原始wrapper、plain allocator和
+Family completion的读写；没有对request做OSObject cast或猜虚表。
+
+- `bind(loop, controller, familyComplete)`只可在已安装bridge的**同一**workloop gate
+  调用一次。binding加锁发布，loop保留到boot结束；controller及原Family completion
+  thunk必须由后续loader先资格化并pin。函数指针非空本身不证明ABI正确。
+- `submit(controller, request, memory)`要求live原始plain allocation，且`memory`
+  **已具备current-layout descriptor几何／dispatch资格**、与request+8为同一对象。
+  适配器不从raw+8盲转指针；原`ioGated`还须有资格化glue来取得这个typed memory。
+  只接01/81/03/83普通bulk；flag30/31、旧DMA@10、next@20、非零status/actual及
+  超32位长度均拒绝，不清掉旧所有权。timeout按原word32传递，不擅加5000ms。
+- 成功后保持16-entry adapter记录直到原gate实际回调结束。backend真实退休并且
+  descriptor complete成功后才写原request status32@28和actual64@48，再调用
+  **原Family completion**；原callback record不替换，原Family负责callback及其
+  original descriptor release/free。调用后不再读取request；bridge随后仅释放
+  自己额外持有的current-layout descriptor。完成前的身份／字段被非法修改会触发
+  明确ownership panic，不调用可能已经变成另一个对象的callback。
+- reject不修改、release/free或回调原request；定点abort仅按已记录ticket，不读取
+  任意raw对象。同批Delivering时Busy；任意abort返回不授权caller free/re-submit。
+  Rearm要求adapter与bridge记录、callback都已退干净，仍不启用native mode。
+
+当前**没有bind/submit调用者，也没有native controller/bootstrap**；`native_apple_stack`
+仍为0。本组件缩短了原始普通请求到worker的接线缺口，但不解决原始AbortPipe ABI、
+EP0/配置事件、全部pure-virtual、descriptor/class-local双向ABI和模块加载。
+不得把`bind`、单编／完整构建或原件资格统计当成原生配对／App安装成功。
 
 ### 真实主机配对入口（依赖原生内核路由）
 

@@ -36,6 +36,11 @@ static X9USBRequestBridge *usb_native_registry()
     lck_mtx_unlock(&x9_usb_native_registry_lock);
     return b; // successful installation owns a permanent registry reference
 }
+bool X9USBRequestBridge::installedOn(IOWorkLoop *workloop)
+{
+    X9USBRequestBridge *b = usb_native_registry();
+    return workloop && b && b->loop == workloop;
+}
 IOReturn X9USBRequestBridge::install(IOWorkLoop *workloop, const Backend &ops)
 {
     if (!workloop || !ops.validateEndpoint || !ops.poll || !ops.rearm)

@@ -16,7 +16,16 @@
 - **空间观察**：`.local/x9/worktrees`目录块数约 **27→8.2GiB**；`df`前后可用量净增加 **12.77GiB**，清理后约 **175.80GiB可用**。目录逻辑减少与实际回收不同，存在APFS共享块及并发写入，不能把18.8GiB目录减少说成全部物理释放。
 - **执行／复核／交接**：私有`.local/x9/work/worktree-cleanup-20261112/`保存`inventory-before.json`、`plan.json`、一次性`cleanup.py`、`actions.jsonl`、`result.json`、`verification.json`及df/open-files/mounts原始记录。执行exit0、218删除／0跳过；只读核对218个归档HEAD匹配、删除目录无残留、保留非主树状态无变化，错误列表为空。没有构建、CI、测试或设备操作。主树并发USB QMU源码改动原样保留，本节单独提交（`git log --grep='cleanup obsolete worktrees'`），不夹带其它窗口源码。
 
-## USB-NATIVE11 当前交接（2026-11-12；显式控制与IN ZLP已补，未安装／未上机）
+## USB-NATIVE12 当前交接（2026-11-12；原始request提交／完成适配器已补，未绑定／未上机）
+
+- **范围／证据**：继续原始DeviceFamily接线，不重复NATIVE11成功产物构建。先读已保存原20H392 slot223 wrapper/plain allocator/Family completion及sheng `UsbProbe.cpp`／原始XDCI ABI生成段；确认sheng是DWC3、依赖原模块加载与metaclass注册，不迁其寄存器／iOS27 opaque签名。本轮Mach-O静态分析按macos-reverse流程；项目交接仍只写本NOTES，不新增过程报告／timeline。`.local/x9/work/usb-native12-20261112/`保留两份sheng源码摘录与原始OTG请求初始化窄dis，未分析成功kernel或boot。
+- **原件新增资格**：`recover_contract.py`补普通callback四参数、原Family尾调用free、allocator全0、OTG DMA@10／next@20／status@28的实际producer检查。固定原始cache的静态恢复 **exit0，110条checked observations／30 bounded regions**；`request-contract/contract.json`列adapter字段和native completion entry，并保持`abi_compatible=false/runtime_loadable=false`。0x68B是plain request，不是OSObject；actual@48不是residual；opaque字段不解成另一SDK结构。
+- **源码适配器**：`X9USBNativeRequestAdapter.h/.inc`编入`SweetX9USB.cpp`；一次bind必须精确匹配已装bridge的controller workloop，binding加锁发布／loop保留，controller/Family thunk由未来loader资格化并pin。submit接受原普通01/81/03/83请求且typed memory必须已具备current-layout几何／dispatch、等于raw+8；不盲转raw descriptor。flag30/31、旧DMA/next、非零status/actual、超32位长度等先拒绝且不改原所有权，timeout只转word32。
+- **生命周期／完成**：16-entry adapter记录到真正Family callback结束。真实QMU退休＋descriptor complete后检查请求身份／不可变字段，再写原status32@28／actual64@48，调用原Family completion负责原callback和original release/free；不替换原callback record、调用后不读request。reject无写入／release/free／callback；定点abort使用记录ticket，Delivering Busy，返回不授权free/re-submit；rearm要adapter／bridge／native callbacks全空。非法完成状态／被改请求明确ownership panic，不回调错误对象。
+- **编译／当前边界**：新增adapter生产`SweetX9USB.o`单文件交叉编译 **exit0／10条既有header override warnings**，`unit-build.log`与`unit-build/result.json`保存原始结果。后续只补显式include，最终固定完整构建待补。没有bind/submit调用者、native controller/EP0/configuration/event及模块bootstrap，`native_apple_stack=0`不变；不是原始AbortPipe映射或所有Family ABI已资格化。AppSync runtime未staging、完整bootstrap未提供、603B/607B与GPU279 mailbox约束照旧；本轮不碰设备／root／mailbox，不启动子代理、不跑测试套件。
+- **下一步**：先提交固定adapter源码并完整生产构建；随后沿原始控制面补EP0 SETUP/data/status与configuration/event的双向门，继续descriptor／父类fields／metaclass／全部load consumers及module bootstrap资格，再接实际native controller installer。实际枚举/Trust/Pair/TLS/App安装/启动与完整越狱仍是最终验收，不将本轮typed glue当成成功。
+
+## USB-NATIVE11 交接（2026-11-12；显式控制与IN ZLP已补，未安装／未上机）
 
 - **本轮范围／参考**：用户继续后，沿NATIVE10补请求生命周期，不新增主机配对工具。确认offline轮询会close而没有显式reopen入口，补同gate rearm/abort；另外读OPPO `kernel_device_modules-6.12/drivers/usb/mtu3/mtu3_qmu.c:430–478`与寄存器定义，补真实普通IN ZLP路径。参考摘录`.local/x9/work/usb-native11-20261112/reference-zlp.txt`。另窗`755fe0b`删除已经交付的两棵旧冻结树，保留其提交；本轮不用已删路径构建，不启动子代理、不碰设备／root／mailbox。
 - **Rearm源码**：同controller gate的单槽control exchange；worker核对exchange完全Free（含native callbacks）、owner无live/quarantine、scheduler空、physical空/QMU inactive、真实bus/speed/config正常且独占完整bulk pair，才`owner.reopen()`换generation。无自动bus-on/retry/reset/config/native flag setter；安装backend现在必须提供rearm函数，不能靠成功stub准入。

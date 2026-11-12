@@ -31,6 +31,8 @@ public:
      * The registry retains this object/workloop/event source for this boot.
      */
     static IOReturn install(IOWorkLoop *, const Backend &);
+    // Identity check for the ABI adapter, not a USB readiness/profile setter.
+    static bool installedOn(IOWorkLoop *);
     /* Must be called with the SAME native controller workloop gate held.
      * Timeout cancels only an unclaimed Queued entry. Once worker claims it,
      * wait uninterruptibly for definitive accept/reject; NEVER return timeout
