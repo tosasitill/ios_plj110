@@ -18,6 +18,9 @@ public:
         // A real MTU3 endpoint backend must implement this, not a success stub.
         void (*poll)(void *, X9USBRequestBridge &, X9USBRequestOwner &,
                      bool available, uint64_t nowNS);
+        // Explicit gate command only, with ALL exchange callbacks finished.
+        // Qualify real endpoint readiness, then owner.reopen. Never enable USB.
+        IOReturn (*rearm)(void *, X9USBRequestOwner &);
     };
     /* Install once AFTER native ABI, endpoint backend and controller workloop
      * qualify (workloop must use current XNU layout/ABI). Backend/context and
@@ -35,6 +38,24 @@ public:
      */
     static IOReturn submit(uint32_t endpoint, const X9USBRequestOwner::Input &,
                            X9USBRequestOwner::Ticket *);
+    struct AbortResult {
+        IOReturn completionStatus = kIOReturnNotReady;
+        uint32_t actual = 0;
+        bool actualQualified = false, completionQueued = false;
+    };
+    /* Same controller gate, never worker. A claimed abort waits for descriptor
+     * complete + queued Family completion OR definitive quarantine. Every
+     * return preserves the accepted request's original completion obligation:
+     * caller MUST NOT free/release/re-submit it on abort error. Success does
+     * not mean callback ran; this gate still excludes callback execution.
+     * Timeout only retracts a command the worker has not claimed. This is our
+     * typed contract, NOT a qualified stock Family AbortPipe signature.
+     */
+    static IOReturn abort(X9USBRequestOwner::Ticket, AbortResult *);
+    /* Requires no Queued/Accepted/Delivering/CompletionQueued entries, including
+     * native callbacks and exchange descriptor release. Not an automatic
+     * bus-on/reset recovery or a way to clear quarantine. */
+    static IOReturn rearm();
     // Scheduler transfers each acknowledged request to backend exactly once.
     IOReturn workerNext(uint32_t *, X9USBRequestOwner::Ticket *,
                         X9USBRequestOwner::Input *);
@@ -57,6 +78,15 @@ private:
         bool admissionDone, acknowledged, scheduled;
     };
     Entry entries[X9USBRequestOwner::Capacity] = {};
+    enum class ControlOp : uint8_t { Abort, Rearm };
+    enum class ControlPhase : uint8_t { Free, Queued, Claimed, Done };
+    struct Control {
+        ControlPhase phase;
+        ControlOp operation;
+        X9USBRequestOwner::Ticket ticket;
+        IOReturn result;
+        AbortResult abortResult;
+    } control = {};
     X9USBRequestOwner requests;
     IOWorkLoop *loop = nullptr;
     X9USBCompletionSource *source = nullptr;
@@ -68,6 +98,10 @@ private:
     bool registered = false, draining = false;
     IOReturn enqueueRequest(uint32_t, const X9USBRequestOwner::Input &,
                      X9USBRequestOwner::Ticket *);
+    IOReturn enqueueControl(ControlOp, X9USBRequestOwner::Ticket, AbortResult *);
+    void startControl(bool available);
+    void resolveAbort();
+    void finishControl(IOReturn, const AbortResult &);
     static void completed(void *, void *, IOReturn, uint32_t);
 };
 #endif

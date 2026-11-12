@@ -2,15 +2,24 @@
 
 X9USBMTU3Backend X9USBMTU3Backend::instance;
 X9USBRequestBridge::Backend X9USBMTU3Backend::operations()
-{ return { &instance, validate, poll }; }
+{ return { &instance, validate, poll, rearm }; }
+IOReturn X9USBMTU3Backend::rearm(void *parameter, X9USBRequestOwner &owner)
+{
+    auto &b = *static_cast<X9USBMTU3Backend *>(parameter);
+    if (owner.failure() != kIOReturnSuccess) return owner.failure();
+    if (!owner.empty()) return kIOReturnBusy;
+    for (const auto &e : b.entries) if (e.occupied) return kIOReturnBusy;
+    int error = x9_usb_native_qmu_rearm_ready();
+    return error == EBUSY ? kIOReturnBusy : error ? usb_return(error) : owner.reopen();
+}
 IOReturn X9USBMTU3Backend::validate(void *, uint32_t endpoint,
                                   const X9USBRequestOwner::Input &input)
 {
-    /* No qualified EP0/zero-packet/BMU or iso/reusable contract yet. Refuse
-     * before prepare/accept, rather than accepting a request we cannot send.
+    /* No qualified EP0, zero-length OUT or iso/reusable contract yet. Refuse
+     * before prepare/accept, rather than accepting a request we cannot receive.
      * The future Family adapter must separately qualify native request flags;
-     * this contract implements ordinary bulk with no implicit appended ZLP. */
-    if (!input.requested || input.isochronous || input.reusable)
+     * ordinary IN ZLP uses the real GPD/BMU path. No implicit appended ZLP. */
+    if ((!input.requested && !input.usbIn) || input.isochronous || input.reusable)
         return kIOReturnUnsupported;
     return usb_return(x9_usb_native_qmu_validate(endpoint, input.usbIn));
 }

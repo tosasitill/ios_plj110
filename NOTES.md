@@ -16,7 +16,16 @@
 - **空间观察**：`.local/x9/worktrees`目录块数约 **27→8.2GiB**；`df`前后可用量净增加 **12.77GiB**，清理后约 **175.80GiB可用**。目录逻辑减少与实际回收不同，存在APFS共享块及并发写入，不能把18.8GiB目录减少说成全部物理释放。
 - **执行／复核／交接**：私有`.local/x9/work/worktree-cleanup-20261112/`保存`inventory-before.json`、`plan.json`、一次性`cleanup.py`、`actions.jsonl`、`result.json`、`verification.json`及df/open-files/mounts原始记录。执行exit0、218删除／0跳过；只读核对218个归档HEAD匹配、删除目录无残留、保留非主树状态无变化，错误列表为空。没有构建、CI、测试或设备操作。主树并发USB QMU源码改动原样保留，本节单独提交（`git log --grep='cleanup obsolete worktrees'`），不夹带其它窗口源码。
 
-## USB-NATIVE10 当前交接（2026-11-12；bulk 后端源码已补，未安装／未上机）
+## USB-NATIVE11 当前交接（2026-11-12；显式控制与IN ZLP已补，未安装／未上机）
+
+- **本轮范围／参考**：用户继续后，沿NATIVE10补请求生命周期，不新增主机配对工具。确认offline轮询会close而没有显式reopen入口，补同gate rearm/abort；另外读OPPO `kernel_device_modules-6.12/drivers/usb/mtu3/mtu3_qmu.c:430–478`与寄存器定义，补真实普通IN ZLP路径。参考摘录`.local/x9/work/usb-native11-20261112/reference-zlp.txt`。另窗`755fe0b`删除已经交付的两棵旧冻结树，保留其提交；本轮不用已删路径构建，不启动子代理、不碰设备／root／mailbox。
+- **Rearm源码**：同controller gate的单槽control exchange；worker核对exchange完全Free（含native callbacks）、owner无live/quarantine、scheduler空、physical空/QMU inactive、真实bus/speed/config正常且独占完整bulk pair，才`owner.reopen()`换generation。无自动bus-on/retry/reset/config/native flag setter；安装backend现在必须提供rearm函数，不能靠成功stub准入。
+- **Abort源码**：按owner generation+serial定点cancel；Claimed后等worker STOP/retire和descriptor complete，只有原gate CompletionQueued才success，result带completionStatus/actual与资格位。未知计数/complete失败保留并隔离，不报0已发送；任意abort返回都不授权caller释放/重交accepted request。gate仍持有时不等待Family callback；同批Delivering回调内abort/rearm直接Busy。2秒timeout仅可撤未Claimed控制命令，Claimed等待真实结果而非模糊超时。
+- **IN ZLP源码**：普通0-byte IN先发布真实zero GPD；仅当前ticket/GPD＋sole TX_LEN_ERR＋idle FIFO按OPPO顺序DMAREQEN-off→TXPKTRDY→GPD BPS/HWO→DMAREQEN-on→RESUME。只ack当前端点观察到的LEN_ERR，同ticket不二次发包；返回EAGAIN继续等HWO/CPR/STOP/flush前FIFO drained，BMU发布不算完成。最终静态审阅发现外层worker available不包含suspend/configuration，BMU前新增实际native endpoint/suspend/configuration、SOFT_CONN/speed与bus-cycling只读资格检查，失败转原STOP/隔离而非延迟重放。stop/timeout/offline不新增包；zero OUT、EP0、iso/reusable仍拒绝。没有制造HWO/CPR/actual成功证据。
+- **编译观察**：rearm/abort初版两份生产对象交叉编译exit0，日志`.local/x9/work/usb-native11-20261112/unit-build.log`；新增C代码只有C99声明风格warning，C++无新warning。后续IN ZLP及AbortResult默认NotReady／资格位清零为新源码，待固定完整构建，不把初版unit当最终结果；不跑额外测试套件、不检查成功镜像。
+- **剩余边界／下一步**：这不是原始AbortPipe ABI，也不是native controller实现；registry无installer，`native_apple_stack=0`不变。仍缺controller/EP0/configuration/event路由、原生flags/descriptor/object geometry/Family双向ABI与completion、模块relocation/bootstrap，继而真实枚举/Trust/Pair/TLS/App安装。AppSync runtime未staging，完整bootstrap未提供，603B/607B参数与GPU279 mailbox配套约束照旧。源码提交／最终构建在下一条补；无boot或部署。
+
+## USB-NATIVE10 交接（2026-11-12；bulk 后端源码已补，未安装／未上机）
 
 - **续接范围**：用户“继续”后优先推进MT6993原生USB。读取当前交接、`x9/AGENTS.md`、NATIVE9 owner/bridge与OPPO `kernel_device_modules-6.12/drivers/usb/mtu3/{mtu3_qmu.c,mtu3_hw_regs.h}`；不启动子代理、不访问设备、不改root/mailbox/boot config。期间另窗提交`0fb46b4`清理worktree，保留其提交。
 - **新增源码**：`bsd/dev/x9_usb_native_qmu.h/.inc` + `iokit/Kernel/arm/X9USBMTU3Backend.h/.inc`。boot-static bulk operations、16-entry逐endpoint FIFO、4096B bounce，与既有私有传输共用实际GPD/cache/HWO/SAR/QCSR提交函数。只接受01/81/03/83普通非零bulk，固定非重叠FIFO且检查capacity、direction与exclusive endpoint ownership；native状态未启用时拒绝，不发布假的Apple类。

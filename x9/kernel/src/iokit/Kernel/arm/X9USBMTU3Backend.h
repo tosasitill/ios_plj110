@@ -27,6 +27,7 @@ private:
     static int commit(void *);
     static IOReturn validate(void *, uint32_t, const X9USBRequestOwner::Input &);
     static void poll(void *, X9USBRequestBridge &, X9USBRequestOwner &, bool, uint64_t);
+    static IOReturn rearm(void *, X9USBRequestOwner &);
     void run(X9USBRequestBridge &, X9USBRequestOwner &, bool, uint64_t);
 };
 #endif

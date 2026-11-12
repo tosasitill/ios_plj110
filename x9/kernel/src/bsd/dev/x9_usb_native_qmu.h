@@ -34,6 +34,9 @@ int x9_usb_native_qmu_probe(struct x9_usb_qmu_ticket, unsigned stop,
                           struct x9_usb_qmu_evidence *);
 int x9_usb_native_qmu_finish(struct x9_usb_qmu_ticket, unsigned quarantine);
 int x9_usb_native_qmu_barrier(void);
+/* Readiness only: no endpoint/reset/identity/MMIO write. Requires a live,
+ * configured native bulk pair, empty physical records and inactive queues. */
+int x9_usb_native_qmu_rearm_ready(void);
 void x9_usb_native_qmu_isolate(void);
 int x9_usb_native_worker_quiesce(uint64_t now_ns);
 #ifdef __cplusplus

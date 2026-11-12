@@ -478,7 +478,7 @@ endpoint backend或Family completion adapter**；mode0仍是EP0日志worker，mo
 这不是“原生栈已经能加载”的开关。
 
 未来必须在current-layout原生controller workloop、逐endpoint backend及ABI全部资格化
-后才能`install()`，且真实backend的`validateEndpoint/poll`两项均必须提供；不填成功stub。
+后才能`install()`；当前真实backend必须提供`validateEndpoint/poll/rearm`，不填成功stub。
 registry持有bridge/workloop/event source到本次boot结束，backend/context与callback
 context也必须保证该寿命。opaque request/context不被猜成OSObject，安装不启用native mode。
 
@@ -514,6 +514,8 @@ Family callback adapter和bootstrap。当前poll hook不能代替这些硬件／
 
 ### USB-NATIVE10：MTU3 ordinary bulk 后端（未安装／未实机验收）
 
+本节保留NATIVE10已提交合同；当前NATIVE11增加显式控制命令和IN ZLP，见下一节。
+
 `X9USBMTU3Backend.h/.inc`提供boot-static `operations()`，可交给未来资格化的
 controller installer。C侧`x9_usb_native_qmu.h/.inc`与现有私有传输共用
 `prepare_gpd/publish_gpd`，实际写MTU3 GPD/HWO/SAR/QCSR，不实现成功stub。
@@ -543,6 +545,40 @@ rearm/generation合同、abort gate命令、Family request flags/descriptor/obje
 和completion双向ABI、模块relocation/bootstrap。当前普通bulk合同不够装载原始
 DeviceFamily；不能启用native flag、声称Finder/Trust/Pair/TLS/App安装完成。
 编译及固定源码结果见`NOTES.md`活动交接；本轮无设备操作或额外测试套件。
+
+### USB-NATIVE11：显式 rearm／定点 abort／普通 IN ZLP（未安装）
+
+`X9USBRequestBridge::rearm()`和`abort(ticket, &result)`只允许在同一current-layout
+controller workloop gate内调用，没有新的用户态selector、自动执行入口或native flag。
+单个有界control槽复制参数；2秒deadline只可撤回尚未Claimed命令。Claimed后等待
+真实worker结果，不在STOP/complete期间返回模糊timeout。
+
+- **Rearm**：exchange必须完全Free（包括尚未deliver及Delivering回调）、owner空且
+  无latched failure、scheduler空、physical records空、QMU inactive、真实bus连接／
+  speed／configuration正常，且独占bulk IN/OUT成对enable。只有这些条件通过才
+  `owner.reopen()`换64-bit generation。不会connect、configure、reset端点、改身份或
+  清quarantine；offline/reset恢复必须另行显式请求，bus-on不自动rearm。
+- **Abort**：target须匹配generation+serial，只有Accepted或已CompletionQueued请求
+  可处理。取消Ready可安全终结；Active先Stopping，再由原backend STOP/retire；
+  worker等到descriptor complete成功且完成事件已入原gate队列，才返回success和
+  `completionStatus/actual/actualQualified/completionQueued`。回调尚未执行；其原始
+  完成义务及exchange retain保留。未知actual／quarantine返回error且资格位为false。
+  **任意abort返回都不授权调用方free/release/re-submit accepted request**。native回调
+  内对同批Delivering请求abort、或rearm，直接Busy而不是等待自己的gate。
+- **IN ZLP**：发布真实0-length GPD，仍须HWO-clear/CPR-terminator/STOP/flush前FIFO
+  drained证明后才能成功。仅在当前ticket、当前GPD、普通IN requested=0、sole TX
+  LEN_ERR、idle FIFO全部匹配时，按OPPO `qmu_tx_zlp_error_handler`的DMAREQEN off →
+  TXPKTRDY → GPD BPS/HWO → DMAREQEN on → RESUME顺序发BMU ZLP。只ack这个观察到
+  的LEN_ERR，同ticket只可发一次；该轮返回EAGAIN，不把BMU publication当成完成。
+  BMU前另核native endpoint、suspend/configuration、SOFT_CONN/speed和bus-cycling，
+  不能仅信外层worker的coarse available；失败转STOP/隔离，不延迟重放。
+  timeout/abort/offline时不新增ZLP。普通0-length OUT／EP0、iso和reusable仍拒绝。
+
+这些是当前组件的typed控制合同，**不是已证明的原始AbortPipe虚方法ABI**。
+registry仍无installer、`native_apple_stack=0`；没有DeviceFamily装载或Mac配对。
+仍需native controller、EP0 SETUP/data/status与configuration/event路由、原生字段／
+flags／descriptor／Family双向dispatch与completion、模块relocation/bootstrap，再验
+真实枚举/Trust/Pair/TLS/安装。编译和源码来源见`NOTES.md`活动交接。
 
 ### 真实主机配对入口（依赖原生内核路由）
 

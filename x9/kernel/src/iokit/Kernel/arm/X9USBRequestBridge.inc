@@ -38,7 +38,8 @@ static X9USBRequestBridge *usb_native_registry()
 }
 IOReturn X9USBRequestBridge::install(IOWorkLoop *workloop, const Backend &ops)
 {
-    if (!workloop || !ops.validateEndpoint || !ops.poll) return kIOReturnBadArgument;
+    if (!workloop || !ops.validateEndpoint || !ops.poll || !ops.rearm)
+        return kIOReturnBadArgument;
     lck_mtx_lock(&x9_usb_native_registry_lock);
     if (x9_usb_native_bridge || x9_usb_native_installing) {
         lck_mtx_unlock(&x9_usb_native_registry_lock); return kIOReturnExclusiveAccess;
@@ -77,6 +78,130 @@ IOReturn X9USBRequestBridge::submit(uint32_t endpoint,
 {
     X9USBRequestBridge *b = usb_native_registry();
     return b ? b->enqueueRequest(endpoint, input, ticket) : kIOReturnNotReady;
+}
+IOReturn X9USBRequestBridge::abort(X9USBRequestOwner::Ticket ticket, AbortResult *result)
+{
+    if (!result) return kIOReturnBadArgument;
+    *result = {}; // actualQualified=false, never assert zero wire on error
+    if (!ticket.generation || !ticket.serial) return kIOReturnBadArgument;
+    X9USBRequestBridge *b = usb_native_registry();
+    return b ? b->enqueueControl(ControlOp::Abort, ticket, result) : kIOReturnNotReady;
+}
+IOReturn X9USBRequestBridge::rearm()
+{
+    X9USBRequestBridge *b = usb_native_registry();
+    return b ? b->enqueueControl(ControlOp::Rearm, {}, nullptr) : kIOReturnNotReady;
+}
+IOReturn X9USBRequestBridge::enqueueControl(ControlOp operation,
+    X9USBRequestOwner::Ticket ticket, AbortResult *result)
+{
+    if (!loop->inGate()) return kIOReturnNotPermitted;
+    uint64_t deadline; clock_interval_to_deadline(2000, NSEC_PER_MSEC, &deadline);
+    IOLockLock(lock);
+    if (worker == THREAD_NULL) { IOLockUnlock(lock); return kIOReturnNotReady; }
+    if (current_thread() == worker) { IOLockUnlock(lock); return kIOReturnNotPermitted; }
+    if (control.phase != ControlPhase::Free) { IOLockUnlock(lock); return kIOReturnBusy; }
+    control = {}; control.operation = operation; control.ticket = ticket;
+    control.phase = ControlPhase::Queued;
+    while (control.phase != ControlPhase::Done) {
+        if (control.phase == ControlPhase::Queued) {
+            if (mach_absolute_time() >= deadline) {
+                control = {}; // lock proves no cancellation/reopen reached worker
+                IOLockUnlock(lock); return kIOReturnTimeout;
+            }
+            (void)IOLockSleepDeadline(lock, &control, deadline, THREAD_UNINT);
+        } else {
+            // Once claimed, a deadline cannot revoke STOP/complete/reopen.
+            // No caller stack pointer or native callback is retained by C.
+            (void)IOLockSleep(lock, &control, THREAD_UNINT);
+        }
+    }
+    IOReturn status = control.result;
+    if (result) *result = control.abortResult;
+    control = {};
+    IOLockUnlock(lock);
+    return status;
+}
+void X9USBRequestBridge::finishControl(IOReturn status, const AbortResult &result)
+{
+    IOLockLock(lock);
+    if (control.phase != ControlPhase::Claimed)
+        panic("X9 USB: native control finished without worker claim");
+    control.result = status; control.abortResult = result;
+    control.phase = ControlPhase::Done;
+    IOLockWakeup(lock, &control, false);
+    IOLockUnlock(lock);
+}
+void X9USBRequestBridge::startControl(bool available)
+{
+    IOLockLock(lock);
+    if (control.phase != ControlPhase::Queued) { IOLockUnlock(lock); return; }
+    control.phase = ControlPhase::Claimed;
+    ControlOp operation = control.operation;
+    auto ticket = control.ticket;
+    bool emptyExchange = true;
+    Entry *target = nullptr;
+    for (auto &e : entries) {
+        if (e.phase != Phase::Free) emptyExchange = false;
+        if (e.phase != Phase::Free && e.ticket.generation == ticket.generation &&
+            e.ticket.serial == ticket.serial) target = &e;
+    }
+    Phase phase = target ? target->phase : Phase::Free;
+    bool acknowledged = target && target->acknowledged;
+    IOLockUnlock(lock);
+    if (operation == ControlOp::Rearm) {
+        IOReturn status = completionFailure != kIOReturnSuccess ? completionFailure :
+            !available ? kIOReturnOffline : !emptyExchange ? kIOReturnBusy :
+            backend.rearm(backend.context, requests);
+        finishControl(status, {});
+        return;
+    }
+    if (phase == Phase::CompletionQueued) { resolveAbort(); return; }
+    if (phase != Phase::Accepted || !acknowledged) {
+        finishControl(phase == Phase::Free ? kIOReturnNotFound : kIOReturnBusy, {});
+        return;
+    }
+    X9USBRequestOwner::State state; IOReturn reason;
+    IOReturn status = requests.inspect(ticket, &state, &reason);
+    if (status != kIOReturnSuccess) { finishControl(status, {}); return; }
+    if (state == X9USBRequestOwner::State::Quarantined) {
+        finishControl(requests.failure(), {}); return;
+    }
+    if (state != X9USBRequestOwner::State::Terminal &&
+        state != X9USBRequestOwner::State::Stopping) {
+        status = requests.cancel(ticket, kIOReturnAborted);
+        if (status != kIOReturnSuccess) { finishControl(status, {}); return; }
+    }
+    // Claimed remains pinned until backend STOP/retire and descriptor complete.
+    // The matching native completion still runs only after this gate returns.
+}
+void X9USBRequestBridge::resolveAbort()
+{
+    IOLockLock(lock);
+    if (control.phase != ControlPhase::Claimed || control.operation != ControlOp::Abort) {
+        IOLockUnlock(lock); return;
+    }
+    auto ticket = control.ticket;
+    Entry *target = nullptr;
+    for (auto &e : entries)
+        if (e.phase != Phase::Free && e.ticket.generation == ticket.generation &&
+            e.ticket.serial == ticket.serial) target = &e;
+    Phase phase = target ? target->phase : Phase::Free;
+    AbortResult result = {};
+    if (phase == Phase::CompletionQueued)
+        result = { target->completionResult, target->actual, true, true };
+    IOLockUnlock(lock);
+    if (phase == Phase::CompletionQueued) { finishControl(kIOReturnSuccess, result); return; }
+    if (phase != Phase::Accepted) {
+        finishControl(phase == Phase::Free ? kIOReturnNotFound : kIOReturnBusy, {}); return;
+    }
+    X9USBRequestOwner::State state; IOReturn reason;
+    IOReturn status = requests.inspect(ticket, &state, &reason);
+    if (status != kIOReturnSuccess) { finishControl(status, {}); return; }
+    if (state == X9USBRequestOwner::State::Quarantined)
+        finishControl(requests.failure(), {});
+    // Terminal but no completion (e.g. complete still pending) is NOT success.
+    // Wait for the next bounded worker poll, not for a callback on this gate.
 }
 IOReturn X9USBRequestBridge::enqueueRequest(uint32_t endpoint,
     const X9USBRequestOwner::Input &input, X9USBRequestOwner::Ticket *ticket)
@@ -187,7 +312,8 @@ void X9USBRequestBridge::workerPoll(bool available, uint64_t nowNS)
         panic("X9 USB: native request worker binding failed");
     if (completionFailure != kIOReturnSuccess) available = false;
     if (!available) (void)requests.close(kIOReturnOffline);
-    // Reopening is explicit backend work; a bus-on cannot clear quarantine.
+    // Explicit control command only; a bus-on cannot clear quarantine/reopen.
+    startControl(available);
     for (unsigned n = 0; n < X9USBRequestOwner::Capacity; n++) {
         IOLockLock(lock);
         Entry *e = nullptr;
@@ -220,6 +346,7 @@ void X9USBRequestBridge::workerPoll(bool available, uint64_t nowNS)
     if (error != kIOReturnSuccess && completionFailure == kIOReturnSuccess)
         completionFailure = error; // native request remains retained/quarantined
     if (completionFailure == kIOReturnSuccess) completionFailure = requests.failure();
+    resolveAbort(); // only after descriptor complete/latched quarantine
 }
 bool X9USBRequestBridge::drainNativeCompletions()
 {
