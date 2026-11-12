@@ -6,6 +6,14 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 237 CommCenter os_log 分析（2026-11-12，用户：Safari/天气“未连接到互联网”，状态栏先无标志→两卡有信号→仅移动卡有信号+4G）
+
+- 拉取：`.local/x9/logs/237-logd/`（raw + strings.txt，b237.txt=214.tracev3+Special）。USB每1–2s重新枚举，pull_ios_logs 已加 adb 重试/wait-for-device。
+- **观察**：CommCenter 首次激活后设 `kSCNetworkServicePrimaryRankDefault`、`PrimaryNetwork changed: Cellular WAN: pdp_ip0`、IPv4 服务 Router=自身地址、DNS 43.239.172.1/2；系统进程(imagent/CommCenterMobileHelper/mobileassetd…)确有 `satisfied … interface: pdp_ip0` 连接，与内核 TCP/QUIC 握手吻合。日志中 `PrimaryRank = Scoped` 那几处是 IDS utun 的 IPv6 字典，非蜂窝(此前怀疑已撤回)。`prohibited by parameters` 均为 mobileassetd/findmy 等“no cellular”后台任务，正常。
+- **Safari 与天气没有任何 nw_connection 记录**(bundle id 列表中无 mobilesafari/weather)，即前台 App 在发起连接前就判定离线；`-1009 … No network route` 446 次(进程未明)。
+- CommCenter 数据状态矛盾：起初 `indicator=5G radioTechnology=NR cellularDataPossible=1`，后变为 `indicator=4G radioTechnology=LTE reg.dataMode=LTE dataBearerTechnology=NR cellularDataPossible=0`；`inHomeCountry` 0/1 来回，`Roaming results … kInvalidNetworkMCC`，注册字典 `kCTRegistrationDataStatusInternationalRoaming = 1`(roamAllowed=1)。我们从未发 NAS LTE SysInfo(内核无 `NAS SysInfo LTE registered`)，LTE 来源未定。
+- **推断/待证**：前台 App 离线可能来自 cellularDataPossible=0 / 漫游/本国判定导致的前台数据策略，或默认路由实际未装入内核。下一步：内核加默认路由探针(周期查 0.0.0.0 非限定路由出口接口)，并查 CommCenter 的 LTE/MCC 来源(NAS 0x44/0x3b/0x5566 等被拒请求)。
+
 ## 237结果（cell-slaac上机，2026-11-12）：首次承载即通，数据面无丢包
 
 - **观察**：第一次承载(ccmni1, 30.7s)即有流量；SLAAC日志出现、无`configuration changed`、families保持3；LRO首包`l4 BAD -> recomputed ok`(27次)，后续成员ok；RX dropped 0、input-error 0、route 0；无quarantined/L2 status error/vendor-tolerant/TX stall。到61.6s累计TX 1429包、RX 2051包/2.15MB。

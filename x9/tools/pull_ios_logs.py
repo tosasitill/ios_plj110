@@ -35,9 +35,22 @@ class Raw:
         self.serial = serial
         self.reads = 0
 
-    def _adb(self, cmd, timeout=120):
+    def _adb(self, cmd, timeout=120, expect=None):
+        # A flaky USB link re-enumerates adb every few seconds (transport_id keeps
+        # climbing); reads are idempotent, so wait for the device and retry.
         args = ['adb'] + (['-s', self.serial] if self.serial else []) + ['exec-out', 'su', '-c', cmd]
-        return subprocess.run(args, check=True, capture_output=True, timeout=timeout).stdout
+        for attempt in range(40):
+            try:
+                out = subprocess.run(args, check=True, capture_output=True, timeout=timeout).stdout
+                if expect is None or len(out) == expect:
+                    return out
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                if attempt == 39:
+                    raise
+            subprocess.run(['adb'] + (['-s', self.serial] if self.serial else []) + ['wait-for-device'],
+                           capture_output=True, timeout=60)
+            self.retries = getattr(self, 'retries', 0) + 1
+        return out
 
     def read(self, off, n):
         if off < 0 or n < 0 or off + n > self.size:
@@ -60,7 +73,7 @@ class Raw:
             take = min(CHUNK, ((off + n + 4095) & ~4095) - a)
             q = shlex.quote
             data = self._adb(q(self.tool) + ' rawreadat ' + q(path) + ' ' + DEVICE +
-                             ' %d %d 2>/dev/null' % (a, take))
+                             ' %d %d 2>/dev/null' % (a, take), expect=take)
             self.reads += 1
             if len(data) != take:
                 raise IOError('short raw read at %#x: %d of %d' % (a, len(data), take))
