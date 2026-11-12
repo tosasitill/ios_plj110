@@ -6,6 +6,12 @@
 > 本文件只留:目标、环境与命令、当前基线、已验证/未解决、关键结论、下一步。
 > 约定(AGENTS.md):每个里程碑后更新「当前交接」;区分**观察**与**推断**;不把序列号/设备转储/Apple 产物放进 git。
 
+## 237结果（cell-slaac上机，2026-11-12）：首次承载即通，数据面无丢包
+
+- **观察**：第一次承载(ccmni1, 30.7s)即有流量；SLAAC日志出现、无`configuration changed`、families保持3；LRO首包`l4 BAD -> recomputed ok`(27次)，后续成员ok；RX dropped 0、input-error 0、route 0；无quarantined/L2 status error/vendor-tolerant/TX stall。到61.6s累计TX 1429包、RX 2051包/2.15MB。
+- **剩余现象**：55.0s CommCenter自己对v4、v6发Stop(0x21，code 2000=client stop)后重拨，ccmni2 3秒内恢复且继续有流量。234(52.8s)/236(51.9s)也在约52–55s出现同样的主动Stop。前面只有NAS 0x4d/0x3b等查询(部分被我们按94拒绝)和carrier bundle overrides读取，内核侧无触发事件(推断：CommCenter内部策略/重评估；需CommCenter os_log确认)。
+- 下一步：问用户Safari/状态栏实际表现；必要时用pull_ios_logs+tracev3_strings看55s Stop的CommCenter原因。
+
 ## 236结果 + SLAAC/LRO校验/MRU修正（CELL-SLAAC，2026-11-12；x9-cell-slaac已构建，未启动）
 
 - **236观察(cell-mtu)**：**第二次承载(ccmni2, 55.2s起)持续有数据**：到76.7s TX 2883包/509KB、RX 4442包/5.0MB，families 3保持，无quarantined、无L2 status error、无vendor-tolerant、无TX stall。LRO split 35。
