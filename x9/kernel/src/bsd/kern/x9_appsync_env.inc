@@ -14,6 +14,41 @@ x9_appsync_enabled(void)
     return sweet_early_is_x9() && sweet_x9_arg("appsync", X9_APPSYNC_RUNTIME_READY) == 1;
 }
 
+#if X9_APPSYNC_RUNTIME_READY
+/* Like x9_bbfw_equal (size + SHA256, regular file, root:wheel) but the runtime
+ * ships executables and dylibs as 0755, so only group/other write is refused
+ * instead of demanding exactly 0644. */
+static int
+x9_appsync_file_equal(const char *path, const uint8_t digest[32], uint32_t size)
+{
+    vnode_t vp = NULLVP;
+    vfs_context_t ctx = vfs_context_kernel();
+    int error = vnode_lookup(path, VNODE_LOOKUP_NOFOLLOW, &vp, ctx);
+    if (error) return error;
+    if (!vnode_isreg(vp)) { vnode_put(vp); return EEXIST; }
+    struct vnode_attr va;
+    VATTR_INIT(&va);
+    VATTR_WANTED(&va, va_data_size); VATTR_WANTED(&va, va_mode);
+    VATTR_WANTED(&va, va_uid); VATTR_WANTED(&va, va_gid);
+    error = vnode_getattr(vp, &va, ctx);
+    if (!error && (va.va_data_size != size || (va.va_mode & 07022) || va.va_uid || va.va_gid)) error = EPERM;
+    SHA256_CTX hash; uint8_t buffer[4096], sum[32];
+    SHA256_Init(&hash);
+    for (uint32_t off = 0; !error && off < size;) {
+        int n = (int)((size - off) < sizeof(buffer) ? size - off : sizeof(buffer)), resid = 0;
+        error = vn_rdwr(UIO_READ, vp, (caddr_t)buffer, n, off, UIO_SYSSPACE, 0, vfs_context_ucred(ctx), &resid, current_proc());
+        if (!error && resid) error = EIO;
+        if (!error) SHA256_Update(&hash, buffer, n);
+        off += (uint32_t)n;
+    }
+    SHA256_Final(sum, &hash);
+    if (!error && memcmp(sum, digest, 32)) error = EEXIST;
+    vnode_put(vp);
+    return error;
+}
+
+#endif
+
 static int
 x9_appsync_exec_env(struct image_params *imgp, int ptr_size)
 {
@@ -33,8 +68,9 @@ x9_appsync_exec_env(struct image_params *imgp, int ptr_size)
 #if X9_APPSYNC_RUNTIME_READY
     for (size_t i = 0; i < sizeof(x9_appsync_files)/sizeof(x9_appsync_files[0]); ++i) {
         const struct x9_appsync_file *f = &x9_appsync_files[i];
-        if (x9_bbfw_equal(f->path, f->sha, f->size)) {
-            printf("X9 APPSYNC: runtime missing/changed; %s left unmodified\n", executable);
+        int ferr = x9_appsync_file_equal(f->path, f->sha, f->size);
+        if (ferr) {
+            printf("X9 APPSYNC: runtime missing/changed (%s errno=%d); %s left unmodified\n", f->path, ferr, executable);
             return 0;
         }
     }
