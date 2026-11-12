@@ -328,8 +328,8 @@ python3 -I x9/usb/prepare_native.py \
 
 ### 复现端点与 request 的原始调用契约
 
-`recover_contract.py` 对同一固定原始输入做有界反汇编，当前检查136处关键指令、request
-分配类型及具体 controller 的虚表/import，输出 `contract.json` 和30段 `.dis`。
+`recover_contract.py` 对同一固定原始输入做有界反汇编，当前检查216处关键指令、request
+分配类型及具体 controller 的虚表/import，输出 `contract.json` 和50段 `.dis`。
 这是静态分析命令，不是测试套件或原生驱动装载器：
 
 ```sh
