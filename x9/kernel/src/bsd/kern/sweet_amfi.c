@@ -410,6 +410,8 @@ sweet_sandbox_op_log(struct proc *p, int call, int ret)
 	    call, ret, (unsigned long)sweet_sandbox_container_len);
 }
 
+extern int sweet_x9_arg(const char *name, int def);
+
 static int
 sweet_sandbox_container_path(user_addr_t arg)
 {
@@ -493,6 +495,17 @@ sweet_sandbox_container_path(user_addr_t arg)
 		}
 	}
 	kmem_free(kernel_map, strings, strings_size);
+	/* No CFFIXED_USER_HOME: the process has no container. Answer that like
+	 * the real Sandbox does instead of "success, buffer untouched": SafariCore
+	 * (_safari_getMobileSafariContainerDirectoryURL) trusts a zero return and
+	 * builds a URL from the uninitialised buffer, so every Safari service
+	 * aborted on initFileURLWithPath:nil and downloads said "storage not
+	 * available"; on error it asks LaunchServices instead. x9_sbcont=0 keeps
+	 * the old answer. */
+	if (error == 0 && sweet_sandbox_container_len == 0 &&
+	    sweet_x9_arg("x9_sbcont", 1) == 1) {
+		error = ENOENT;
+	}
 	return error;
 }
 
