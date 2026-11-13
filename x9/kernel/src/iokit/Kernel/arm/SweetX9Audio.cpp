@@ -169,6 +169,13 @@ static int ensureWorker()
  * `audioctl dsp-boot` <N> s after start, for images without an iOS shell.
  * Same lock order and busy checks as the admin selector (audio -> transport
  * -> board); no retry, no automatic stop. Board/DSP state is logged after. */
+/* x9_dsp_probe=<1..600> with x9_audio=2: read-only inherited-state report
+ * at start and once more after <N> s. Never boots, votes or resets. */
+static void dspProbeOnce(void *arg, wait_result_t)
+{
+    IOSleep((uint32_t)(uintptr_t)arg * 1000);
+    x9_adsp_mt6993_inherited_report("delayed");
+}
 static void dspBootOnce(void *arg, wait_result_t)
 {
     uint32_t delay = (uint32_t)(uintptr_t)arg;
@@ -271,6 +278,16 @@ bool X9Audio::start(IOService *p)
     if (sweet_x9_arg("x9_audio", 0) == 2) {
         int boardError = x9_adsp_mt6993_init();
         setProperty("X9AudioBoardInitError", boardError, 32);
+        int probeDelay = sweet_x9_arg("x9_dsp_probe", 0);
+        if (probeDelay) {
+            x9_adsp_mt6993_inherited_report("start");
+            thread_t t;
+            bool armed = !boardError && probeDelay > 0 && probeDelay <= 600 &&
+                kernel_thread_start(dspProbeOnce, (void *)(uintptr_t)probeDelay, &t) == KERN_SUCCESS;
+            if (armed) thread_deallocate(t);
+            IOLog("X9 ADSP PROBE: delayed read-only report %s (x9_dsp_probe=%d board_init=%d)\n",
+                  armed ? "armed" : "NOT armed", probeDelay, boardError);
+        }
         int dspDelay = sweet_x9_arg("x9_dsp_boot", 0);
         if (dspDelay) {
             thread_t t;

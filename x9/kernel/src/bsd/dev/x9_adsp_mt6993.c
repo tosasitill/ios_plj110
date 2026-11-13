@@ -586,6 +586,32 @@ int x9_adsp_mt6993_init(void)
     }
     lck_mtx_unlock(&board_control_lock);return e;
 }
+/* READ-ONLY report of an inherited ADSP power state (dspboot1, log 249:
+ * TOP/INFRA/AO already voted by the AP before XNU). No vote, SMC, reset,
+ * mailbox or shared-DRAM access; cfg/cfg2 are read only while HWV shows
+ * TOP+INFRA globally ON, done and not busy (otherwise the bus may hang).
+ * Only registers whose use already exists in this file are read. */
+void x9_adsp_mt6993_inherited_report(const char *when)
+{
+    if(sweet_x9_arg("x9_audio",0)!=2)return;
+    lck_mtx_lock(&board_control_lock);lck_mtx_lock(&board_lock);
+    if(!registered || !hwv || !cfg || !cfg2) {
+        printf("X9 ADSP PROBE %s: not registered; no reads\n",when);
+        lck_mtx_unlock(&board_lock);lck_mtx_unlock(&board_control_lock);return;
+    }
+    uint32_t en=rd(hwv,PD_EN),done=rd(hwv,PD_DONE),all=rd(hwv,PD_ALL),busy=rd(hwv,PD_BUSY);
+    bool on=(all&(TOP|INFRA))==(TOP|INFRA) && (done&CHAIN)==CHAIN && !(busy&CHAIN);
+    printf("X9 ADSP PROBE %s: hwv ap=%x(TOP%d INFRA%d AO%d) all=%x(TOP%d INFRA%d AO%d) done=%x busy=%x owned=%x exclusive=%d started=%d -> %s\n",
+        when,en,!!(en&TOP),!!(en&INFRA),!!(en&AO),all,!!(all&TOP),!!(all&INFRA),!!(all&AO),done,busy,
+        status.owned_vote,exclusive,started,on?"domains ON, reading cfg":"domains not proven ON; no cfg reads");
+    if(on) {
+        uint32_t sleep=rd(cfg,0x158),pending=rd(cfg,0x15c),dreq=rd(cfg,0x590),dack=rd(cfg,0x594);
+        uint32_t sem=rd(cfg,AUDIO_SEM_REG),vlogic=rd(cfg2,0x50),sram=rd(cfg2,0x54);
+        printf("X9 ADSP PROBE %s: cfg sleep(0x158)=%x pending(0x15c)=%x dpsw_req(0x590)=%x dpsw_ack(0x594)=%x sem(0x64)=%x audio_sem=%d vlogic_ack=%x sram_ack=%x\n",
+            when,sleep,pending,dreq,dack,sem,!!(sem&AUDIO_SEM_BIT),vlogic,sram);
+    }
+    lck_mtx_unlock(&board_lock);lck_mtx_unlock(&board_control_lock);
+}
 int x9_adsp_mt6993_control(uint32_t op)
 {
     if(sweet_x9_arg("x9_audio",0)!=2)return ENXIO;
