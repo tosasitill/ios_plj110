@@ -15,6 +15,8 @@
 #include "x9_adsp_mt6993.h"
 #include "x9_adsp_transport.h"
 #include "x9_audio_resources.h"
+#include "x9_adsp_audio_irq.h"
+#include "x9_mic_dma_handoff.h"
 extern vm_offset_t ml_io_map(vm_offset_t,vm_size_t);
 extern int sweet_early_is_x9(void);
 extern int sweet_x9_arg(const char *,int);
@@ -629,6 +631,43 @@ int x9_adsp_mt6993_copy_handoff(struct x9_adsp_handoff *h)
     lck_mtx_lock(&board_lock);int e=x9_adsp_handoff_valid(&layout)?0:ENXIO;
     if(!e)*h=layout;
     lck_mtx_unlock(&board_lock);return e;
+}
+/* Read-only boot report of the shim's three /chosen audio slots. The shim
+ * log after "LK display" never reaches the USB receiver (XNU takes over the
+ * gadget), so this line is the per-boot evidence of the bounded FDT result.
+ * Same checks as the consumers; no hardware access, no lock, no grant. */
+static const char *slot_state(DTEntry chosen,const char *key,unsigned want,const void **out)
+{
+    const void *p=NULL;unsigned int n=0;*out=NULL;
+    if(SecureDTGetProperty(chosen,key,&p,&n)!=kSuccess || !p)return "absent";
+    if(n!=want)return "badsize";
+    for(unsigned i=0;i<n;i++)if(((const uint8_t *)p)[i]){*out=p;return "set";}
+    return "zero";
+}
+void x9_audio_handoff_report(void)
+{
+    if(!sweet_early_is_x9())return;
+    DTEntry chosen;
+    if(SecureDTLookupEntry(NULL,"/chosen",&chosen)!=kSuccess){printf("X9 AUDIO HANDOFF: /chosen missing\n");return;}
+    const void *pa,*pq,*pm;
+    struct x9_adsp_handoff h={0};struct x9_adsp_audio_irq_layout q={0};struct x9_mic_dma_handoff m={0};
+    const char *sa=slot_state(chosen,"x9-adsp-handoff",sizeof(h),&pa);
+    const char *sq=slot_state(chosen,"x9-adsp-audio-irq",sizeof(q),&pq);
+    const char *sm=slot_state(chosen,"x9-mic-dma-handoff",sizeof(m),&pm);
+    if(pa)memcpy(&h,pa,sizeof(h));
+    if(pq)memcpy(&q,pq,sizeof(q));
+    if(pm)memcpy(&m,pm,sizeof(m));
+    int va=pa && x9_adsp_handoff_valid(&h);
+    int vq=pq && va && x9_adsp_audio_irq_layout_valid(&q) && q.cfg_base==h.cfg_base[0];
+    int vm=pm && m.version==1 && m.flags==X9_MIC_DMA_HANDOFF_FLAGS && !m.cpu_start && !m.dma_start &&
+        m.window_bytes==0x1000000000ULL && m.afe_base==0x1a110000 && m.afe_bytes==0x10000 &&
+        !m.reserved[0] && !m.reserved[1] && !m.reserved[2] && !m.reserved[3];
+    printf("X9 AUDIO HANDOFF: adsp=%s valid=%d flags=%x(layout%s%s%s) reserve=%llx+%llx alloc=%x"
+        " irq=%s valid=%d intid=%u mic=%s valid=%d flags=%x window=%llx (metadata only; no grant)\n",
+        sa,va,h.flags,(h.flags&X9_ADSP_I2S4_VERIFIED)?",i2s4":"",
+        (h.flags&X9_ADSP_PA_RESET_VERIFIED)?",pa_reset":"",(h.flags&X9_ADSP_PA_LEFT_VDD_VERIFIED)?",left_vdd":"",
+        (unsigned long long)h.reserve_base,(unsigned long long)h.reserve_bytes,h.allocated_bytes,
+        sq,vq,q.intid,sm,vm,m.flags,(unsigned long long)m.window_bytes);
 }
 int x9_adsp_mt6993_status(X9AudioBoardStatus *s)
 {

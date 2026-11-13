@@ -8810,6 +8810,8 @@ load_init_program_at_path(proc_t p, user_addr_t scratch_addr, const char* path)
 	init_exec_args.envp = USER_ADDR_NULL;
 #if defined(ARM64_BOARD_CONFIG_SWEET)
 	{
+	 extern void x9_audio_handoff_report(void);
+	 x9_audio_handoff_report();
 	 int cbn_error=x9_cbn_install(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	 if(cbn_error)printf("X9 CBN: carrier bundle unavailable errno=%d; continuing boot\n",cbn_error);
 	 int torch_error=x9_torch_install(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
