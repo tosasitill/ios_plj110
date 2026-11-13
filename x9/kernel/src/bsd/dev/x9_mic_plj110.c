@@ -26,7 +26,7 @@ extern void X9PMIFRelease(void);
 enum { DATA=0, MASK=8, STAT=0xc, CTRL=0x10, LEN=0x14, TRANS=0x18,
     DELAY=0x1c, TIMING=0x20, START=0x24, EXT=0x28, LTIMING=0x2c,
     HS=0x30, IO=0x34, FIFO_CLR=0x38, SDA=0x3c, AUX=0x44, DIV=0x48,
-    MULTI=0x8c, MIS=0x90, ADDR=0x94, FIFO_STAT=0xf4 };
+    SOFTRESET=0x50, MULTI=0x8c, MIS=0x90, ADDR=0x94, FIFO_STAT=0xf4 };
 static const unsigned saved_regs[]={MASK,CTRL,LEN,TRANS,DELAY,AUX,ADDR,
     TIMING,EXT,LTIMING,HS,SDA,DIV,IO,MIS};
 struct pin {unsigned n,mode,dir,dout;bool owned;};
@@ -306,7 +306,19 @@ static int bus_xfer(struct power_journal *j,uint16_t reg,uint8_t *value,bool rea
         else *value=*(volatile uint8_t *)(j->bus+DATA);
     }
     wr(j->bus,STAT,status&0x21f); /* only known flags produced by our request */
-    wr(j->bus,FIFO_CLR,4);wr(j->bus,FIFO_CLR,1);wr(j->bus,START,0);
+    wr(j->bus,FIFO_CLR,4);wr(j->bus,FIFO_CLR,1);
+    if(status&6) {
+        /* Log 266: after the codec NACKed (STAT=3) START never returned to
+         * 0 and the bank was declared stuck. OPPO i2c-mt65xx answers
+         * ACKERR/HS_NACKERR with mtk_i2c_init_hw(): SOFTRESET(0x50)=1 and a
+         * full reprogram. Do the same, rewriting every journaled register to
+         * its current expected value (ours if issued, else the found one). */
+        wr(j->bus,SOFTRESET,1);delay(10);
+        for(unsigned n=0;n<sizeof(saved_regs)/sizeof(saved_regs[0]);n++)
+            wr(j->bus,saved_regs[n],j->saved[n].issued?j->saved[n].value:j->saved[n].old);
+        j->status->bus_start=rr(j->bus,START);
+    }
+    wr(j->bus,START,0);
     if(bank_idle(j)){j->bus_stuck=true;if(!e)e=EIO;}
     return e;
 }
@@ -371,6 +383,15 @@ static int xo_take(struct power_journal *j)
 static int codec_enable(struct power_journal *j)
 {
     struct pin *p=&j->enable;
+    /* Log 266: after a 1 ms reset pulse the codec NACKed its first read.
+     * OPPO mt6681-core probes the codec LK left enabled without toggling
+     * codec-en (it resets only after ID retries fail). Do the same: adopt
+     * the live output-high pin, not owned, never driven low on restore. */
+    if(!p->mode && p->dir && p->dout && pin_mode(j,9)==0 && pin_bit(j,0,9) &&
+       pin_bit(j,0x100,9) && pin_bit(j,0x200,9)) {
+        printf("X9 MIC: codec-en adopted live (no reset pulse)\n");
+        j->enabled=true;return 0;
+    }
     /* Input reads high only for the inherited output-high case (log 261). */
     if(pin_mode(j,9)!=p->mode || pin_bit(j,0,9)!=p->dir ||
        pin_bit(j,0x100,9)!=p->dout || pin_bit(j,0x200,9)!=(p->dir && p->dout))return EBUSY;
@@ -410,7 +431,7 @@ static int restore(struct power_journal *j)
         e=set_bit(j,0,9,j->enable.dir);if(e)return e;
         e=set_bit(j,0x100,9,j->enable.dout);if(e)return e;
         j->enable.owned=false;
-    }
+    } else j->enabled=false; /* adopted live codec-en: left as found */
     if(j->xo_owned) {
         if(X9PMIFAcquire())return EBUSY;
         uint8_t v=0;e=xo_xfer_locked(j,&v,false);
@@ -618,7 +639,7 @@ static int board_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_stat
          * cold reset of the inherited codec; restore() returns it to the
          * found output-high. Any other non-cold state is still refused. */
         bool inherited_high=!j->enable.mode && j->enable.dir && j->enable.dout && pin_bit(j,0x200,9);
-        if(inherited_high)printf("X9 MIC: GPIO9 inherited output-high; codec gets a cold reset pulse\n");
+        if(inherited_high)printf("X9 MIC: GPIO9 inherited output-high (codec live)\n");
         else if(j->enable.mode || j->enable.dout || pin_bit(j,0x200,9))e=EBUSY;
         for(unsigned i=0;i<2 && !e;i++) {
             struct pin *p=&j->route[i];if(p->mode!=1 && (p->mode || p->dir))e=EBUSY;

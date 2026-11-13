@@ -346,7 +346,9 @@ int x9_mic_mt6681_power_on(struct x9_mic_mt6681 *c,
     uint64_t deadline=mach_absolute_time()+ticks;
     uint8_t ready=0,id=0;int e=0;
     for(unsigned i=0;i<500;i++) {
-        e=read8(c,MT6681_ACDIF_MON0,&ready);if(e || (ready&2))break;
+        /* OPPO mt6681_retry_wait keeps polling through failed reads for
+         * 50 ms; a NACK (EIO, bus recovered) is retried, other errors stop. */
+        e=read8(c,MT6681_ACDIF_MON0,&ready);if((e && e!=EIO) || (!e && (ready&2)))break;
         if(mach_absolute_time()>=deadline)break;delay(100);
     }
     c->status.internal_ready=ready;
