@@ -10,6 +10,7 @@ extern "C" {
 int x9_adsp_mt6993_init(void); /* maps/registers only, NO MMIO/SMC */
 int x9_adsp_mt6993_control(uint32_t operation); /* 0 boot, 1 stop; mode 2 only */
 void x9_adsp_mt6993_inherited_report(const char *when); /* read-only, mode 2 */
+void x9_audio_handoff_report(void); /* read-only boot report of /chosen audio slots */
 /* Cold exclusive takeover (TOP+INFRA freshly globally OFF) has never issued
  * RELOAD/START: reset qualifies pending-idle then SYS_CLEAR without an invalid
  * STOP of secure configured state. Once RELOAD or START was attempted, even

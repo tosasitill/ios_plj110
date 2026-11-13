@@ -197,6 +197,26 @@ static void dspBootOnce(void *arg, wait_result_t)
     IOLog("X9 AUDIO DSPBOOT: dsp_err=%d state=%u error=%u gen=%u ready=%llu sent=%llu recv=%llu acks=%llu stray=%llu timeouts=%llu wake_err=%llu primary=%u cleanup=%u lease=%u guard=%u\n",
           de, d.state, d.error, d.generation, d.ready_count, d.sent, d.received, d.matched_acks,
           d.stray_acks, d.timeouts, d.wake_errors, d.primary_error, d.cleanup_error, d.lease_error, d.guard_stage);
+    if (e || de || d.state != X9DSPOnline) return;
+    /* One IPI round trip after READY: OPPO audio_controller_msg_id.h
+     * AUD_CTL_MSG_A2D_IPI_TEST (0xADC0) to TASK_SCENE_AUDIO_CONTROLLER_HIFI3_A
+     * (42 in the phone build: every #if in audio_task.h is an automotive
+     * config), KERNEL -> DSP, MSG_ONLY, NEED_ACK. Mailbox only; a missing ACK
+     * quarantines the session (no retry). */
+    IOSleep(500);
+    struct x9_dsp_message m; bzero(&m, sizeof(m));
+    m.scene = 42; m.source = 1; m.target = 2; m.type = X9DSPOnly; m.ack = X9DSPNeedAck;
+    m.id = 0xADC0; m.param1 = 0x58390001u; m.param2 = 0;
+    struct x9_dsp_message r; bzero(&r, sizeof(r));
+    lck_mtx_lock(&audioLock);
+    int ie = haveBackend || (control && (control->state & X9AudioRunning)) ? EBUSY : x9_adsp_request(0, &m, &r, 250);
+    lck_mtx_unlock(&audioLock);
+    bzero(&d, sizeof(d)); de = x9_adsp_status(0, &d);
+    IOLog("X9 AUDIO IPI: test scene=42 id=0xadc0 NEED_ACK -> result=%d reply scene=%u src=%u dst=%u type=%u ack=%u id=0x%x p1=0x%x p2=0x%x\n",
+          ie, r.scene, r.source, r.target, r.type, r.ack, r.id, r.param1, r.param2);
+    IOLog("X9 AUDIO IPI: dsp_err=%d state=%u error=%u sent=%llu recv=%llu acks=%llu stray=%llu malformed=%llu timeouts=%llu wake_err=%llu last_ipi=%u last_msg=0x%x primary=%u guard=%u\n",
+          de, d.state, d.error, d.sent, d.received, d.matched_acks, d.stray_acks, d.malformed,
+          d.timeouts, d.wake_errors, d.last_ipi, d.last_message, d.primary_error, d.guard_stage);
 }
 extern "C" int x9_audio_register_backend(const x9_audio_backend *b)
 {
