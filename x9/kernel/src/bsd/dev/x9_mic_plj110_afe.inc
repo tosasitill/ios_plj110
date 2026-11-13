@@ -233,15 +233,29 @@ static int afe_take(struct afe_journal *a,vm_offset_t gpio,struct x9_mic_afe_sta
     s->ack_before=rr(a->hwv,0x12900);s->done=rr(a->hwv,0x1132c);
     s->vlp_before=rr(a->vlp,0x90);s->fenc_before=rr(a->vlp,0x274);
     s->foreign_vote_before=afe_foreign_votes(a);
-    if(s->foreign_vote_before || ((s->ap_vote_before|s->all_vote_before|s->ack_before|
-       rr(a->hwv,0x1131c)|rr(a->hwv,0x13704))&1))return EBUSY;
-    /* No AFE access even for baseline inspection while AUDIO is inherited on.
-     * Protection bits in the cold state are not used as a DMA drain receipt.
-     */
-    if(rr(a->spm_pbus,AUDIO_SSYSPM_PBUS_OFFSET)&AUDIO_SSYSPM_PWR_ACK) {
-        s->last_register=X9_MIC_AFE_REGISTER_SPM|0x903cu;return EBUSY;
+    /* Log 270: LK leaves AUDIO AP-voted/on (AP=3ce0f) and both VLP muxes
+     * enabled (0x90=02020301, PDN bits clear). Adopt exactly those complete
+     * states as borrowed (never changed or withdrawn); refuse partial ones. */
+    bool audio_inherited=!s->foreign_vote_before &&
+        (s->ap_vote_before&s->all_vote_before&s->ack_before&1) && !(rr(a->hwv,0x13704)&1);
+    if(!audio_inherited) {
+        if(s->foreign_vote_before || ((s->ap_vote_before|s->all_vote_before|s->ack_before|
+           rr(a->hwv,0x1131c)|rr(a->hwv,0x13704))&1))return EBUSY;
+        /* No AFE access even for baseline inspection while AUDIO is inherited on.
+         * Protection bits in the cold state are not used as a DMA drain receipt. */
+        if(rr(a->spm_pbus,AUDIO_SSYSPM_PBUS_OFFSET)&AUDIO_SSYSPM_PWR_ACK) {
+            s->last_register=X9_MIC_AFE_REGISTER_SPM|0x903cu;return EBUSY;
+        }
     }
-    if((s->vlp_before&0x8080)!=0x8080 || (s->fenc_before&0xc0000000))return EBUSY;
+    uint32_t mux_borrowed=0;
+    for(unsigned i=0;i<2;i++) {
+        uint32_t pdn=1u<<(7+i*8),fenc=1u<<(31-i);
+        if((s->vlp_before&pdn) && !(s->fenc_before&fenc))continue;      /* cold: take */
+        if(!(s->vlp_before&pdn) && (s->fenc_before&fenc))mux_borrowed|=1u<<i;
+        else return EBUSY;
+    }
+    printf("X9 MIC AFE: audio %s, mux borrowed=%x (vlp=%x fenc=%x)\n",
+        audio_inherited?"inherited on (borrowed)":"cold",mux_borrowed,s->vlp_before,s->fenc_before);
     s->stage=X9_MIC_AFE_SMC_INIT;
     int e=0;
     if(!afe_init_ready) {
@@ -253,6 +267,14 @@ static int afe_take(struct afe_journal *a,vm_offset_t gpio,struct x9_mic_afe_sta
     s->stage=X9_MIC_AFE_DOMAINS;
     static const uint32_t bits[]={8,4,1}; /* AO -> infra -> AUDIO */
     for(unsigned i=0;i<3;i++) {
+        if(bits[i]==1 && audio_inherited) {
+            if((rr(a->hwv,0x20708)&rr(a->hwv,0x13700)&rr(a->hwv,0x12900)&1)!=1 ||
+               (rr(a->hwv,0x13704)&1) || afe_foreign_votes(a)){a->stuck=true;return EBUSY;}
+            a->borrowed|=1;
+            e=afe_spm_wait(a,AUDIO_SSYSPM_PWR_ACK|AUDIO_SSYSPM_PROTECT,AUDIO_SSYSPM_PWR_ACK);
+            if(e)return e;
+            continue;
+        }
         if(bits[i]==1 && (((rr(a->hwv,0x13700)|rr(a->hwv,0x12900))&1) || afe_foreign_votes(a))) {
             a->stuck=true;return EBUSY;
         }
@@ -267,7 +289,7 @@ static int afe_take(struct afe_journal *a,vm_offset_t gpio,struct x9_mic_afe_sta
         }
     }
     s->stage=X9_MIC_AFE_MUX;
-    for(unsigned i=0;i<2;i++){e=afe_mux_take(a,i);if(e)return e;}
+    for(unsigned i=0;i<2;i++){if(mux_borrowed&(1u<<i))continue;e=afe_mux_take(a,i);if(e)return e;}
     /* This is now the first AFE access. Preserve unrelated top clocks. */
     e=afe_idle(a,false);if(e){a->stuck=true;return e;}
     for(unsigned i=0;i<5;i++)a->saved[i]=rr(a->afe,afe_regs[i]);

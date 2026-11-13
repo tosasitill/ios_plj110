@@ -268,8 +268,20 @@ static int take(bool with_pll,bool with_path)
         trace=false;CLKSTEP("adsp speaker_validate");trace=true;
         int lease=x9_adsp_mt6993_speaker_validate(s.ticket);if(lease){trace=false;return lease;}
     }
-    int e=refuse(j.vlp,0x90,0x8080,0x8080);
-    if(!e)e=refuse(j.vlp,0x274,0xc0000000,0);
+    /* Log 270: both VLP muxes may be left enabled by LK (PDN clear, FENC
+     * set). Adopt each complete enabled mux as-is (expected = observed,
+     * never restored); cold ones are taken; anything else is refused. */
+    int e=0;uint32_t mux_borrowed=0;
+    {
+        uint32_t v90=rd(j.vlp,0x90),v274=rd(j.vlp,0x274);
+        for(unsigned n=0;n<2 && !e;n++) {
+            uint32_t pdn=1u<<(7+n*8),fenc=1u<<(31-n);
+            if((v90&pdn) && !(v274&fenc))continue;
+            if(j.combined && !(v90&pdn) && (v274&fenc)) {
+                mux_borrowed|=1u<<n;j.mux_expected[n]=v90&(3u<<(n*8));
+            } else e=EBUSY;
+        }
+    }
     if(e){trace=false;return e;}
     trace=false;
     CLKSTEP("APLL capture");
@@ -303,7 +315,8 @@ static int take(bool with_pll,bool with_path)
     }
     CLKSTEP("mux take");
     s.stage=X9ClockMux;
-    for(unsigned n=0;n<2;n++){e=mux_take(n);if(e)return e;}
+    for(unsigned n=0;n<2;n++){if(mux_borrowed&(1u<<n))continue;e=mux_take(n);if(e)return e;}
+    if(mux_borrowed)printf("X9 SPK CLK: VLP mux borrowed=%x expected=%x/%x\n",mux_borrowed,j.mux_expected[0],j.mux_expected[1]);
     CLKSTEP("first AFE reads (idle)");
     s.stage=X9ClockIdle;e=idle();if(e)return e; /* FIRST AFE reads */
     for(unsigned n=0;n<field_count();n++)field_prior[n]=fields[n].saved=fields[n].expected=rd(j.afe,fields[n].off);
