@@ -356,15 +356,16 @@ int x9_speaker_bringup_run(void)
     /* Keep the ring fed while waiting. */
     if(!e){for(unsigned n=0;!e && n<5;n++){fill(pcm,960,&phase,-1);e=x9_speaker_afe_submit(pcm,960);if(!e)submitted+=960;}}
     if(!e)pa_report("powered");
-    for(unsigned i=0;!e && i<2;i++){e=bf_set(i,0x0030,1);b.pa_on[i]=!e;} /* OPERATING: AMPE=1 */
-    if(!e)pa_report("operating");
+    /* User request (2026-11-13): no audible output. Stop at INIT_CF with
+     * the amplifier OFF (AMPE stays 0); the AFE streams silence only. */
+    printf("X9 SPK: quiet run: AMPE stays 0, silence only\n");
     /* -24 dB (>>4) 1 kHz for ~2 s, refilled from the hardware cursor. */
     phase=0;unsigned tone_frames=2u*RATE,sent=0;
     uint64_t start=mach_absolute_time(),limit;nanoseconds_to_absolutetime(4000000000ULL,&limit);
     while(!e && sent<tone_frames) {
         e=x9_speaker_afe_position(&played);if(e)break;
         if(submitted-played<9600) {
-            fill(pcm,960,&phase,4);e=x9_speaker_afe_submit(pcm,960);
+            fill(pcm,960,&phase,-1);e=x9_speaker_afe_submit(pcm,960);
             if(!e){submitted+=960;sent+=960;}else if(e==EAGAIN)e=0;
         } else delay(5000);
         if(mach_absolute_time()-start>limit){e=ETIMEDOUT;break;}

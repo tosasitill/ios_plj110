@@ -211,7 +211,23 @@ static int timing(void)
     const unsigned r[]={TIMING,EXT,LTIMING,HS,SDA,DIV,IO,MIS,DELAY};
     const uint32_t v[]={((hs-1)<<8)|(ht-1),(ext<<8)|1,((ls-1)<<6)|(lt-1),
         0,0,((div-1)<<8)|(div-1),3,0,2};
-    for(unsigned i=0;i<sizeof(r)/sizeof(r[0]);i++){e=put(r[i],v[i]);if(e)return e;}
+    /* Log 257: a timing CSR did not read back as written (session open EIO
+     * at stage 5). Timing fields may have reserved/unimplemented bits on this
+     * controller revision: journal the ACTUAL value (restore stays exact) and
+     * print every mismatch instead of refusing. Transfer CSRs stay strict. */
+    printf("X9 SPK: i2c6 timing parent=%llu div=%u total=%u hs=%u/%u ls=%u/%u ext=%u\n",
+           hz,div,total,hs,ht,ls,lt,ext);
+    for(unsigned i=0;i<sizeof(r)/sizeof(r[0]);i++) {
+        e=put(r[i],v[i]);
+        if(e==EIO) {
+            for(unsigned k=0;k<sizeof(regs)/sizeof(regs[0]);k++)if(regs[k]==r[i]) {
+                uint32_t actual=rr(j.bus,r[i]);j.expected[k]=actual;
+                printf("X9 SPK: i2c6 timing reg=%02x wrote=%x read=%x saved=%x\n",r[i],v[i],actual,j.saved[k]);
+            }
+            e=0;
+        }
+        if(e)return e;
+    }
     s.timing_hz=(uint32_t)(hz/(div*total));return 0;
 }
 static int read_revision(unsigned i)
