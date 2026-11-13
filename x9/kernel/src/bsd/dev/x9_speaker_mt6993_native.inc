@@ -299,7 +299,7 @@ static int native_restored_ao(void)
     if(!e)e=refuse(j.vlp,0x274,0xc0000000,s.fenc_before&0xc0000000);
     if(!e && (pll_s.flags&X9PLLCaptured)) {
         e=refuse(j.vlp,0x80,0x8300,pll_s.consumers[0]&0x8300);
-        if(!e)e=refuse(j.vlp,0x270,4,0);
+        if(!e)e=refuse(j.vlp,0x270,4,pll_s.consumers[1]&4); /* borrowed ENGEN2 FENC stays on */
         for(unsigned n=0;!e && n<7;n++)e=refuse(j.apll,pll_regs[n],
             n==3?16:UINT32_MAX,pll_s.pll_before[n]&(n==3?16:UINT32_MAX));
     }
@@ -317,7 +317,11 @@ int x9_speaker_mt6993_clock_release(uint64_t ticket)
     if(!e)e=x9_adsp_mt6993_speaker_halted_validate(ticket);
     /* This mandatory callback proves DMA stopped independently; idle() below
      * is only an enable-image check, not an authoritative drain substitute. */
-    if(!e && !native_clock.clocks_restored)e=native_clock.policy.validate_drained(
+    /* Log 276: acquisition failed (pll cold EBUSY) before configured, so the
+     * AFE pointer was never handed out (clock_afe requires configured) and no
+     * producer can exist; the drain callback then returned ENXIO and release
+     * kept the lease, blocking the mic. Drain is required only once handed out. */
+    if(!e && !native_clock.clocks_restored && native_clock.configured)e=native_clock.policy.validate_drained(
         native_clock.policy.context,ticket,0x1a110000,0x10000);
     if(!e && !native_clock.clocks_restored) {
         if(j.stuck || pj.stuck)e=EIO; /* unknown request: keep parents */

@@ -8,7 +8,7 @@ static X9AudioPLLStatus pll_s={.version=X9_AUDIO_PLL_STATUS_VERSION};
 static struct {
     vm_offset_t meter,top,mm;
     uint32_t gen_expected,gen_fenc;
-    bool captured,stuck,pll_written,trigger_issued,meter_done;
+    bool captured,stuck,pll_written,trigger_issued,meter_done,borrowed;
 } pj;
 struct pll_field {vm_offset_t base;unsigned off;uint32_t mask,saved,expected;};
 static struct pll_field pf[7];
@@ -77,8 +77,29 @@ static int pll_idle(void)
 {
     int e=idle();if(e){pll_s.last_register=s.last_register;pll_s.last_value=s.last_value;}return e;
 }
+/* Log 276: LK leaves APLL2 running with exactly the target topology:
+ * aud_engen2 enabled on parent 3, audio_h enabled on parent 3 (apll2),
+ * vlp 0x80=0x20303. Borrow that complete state as-is: no PLL enable, PCW,
+ * mux or gate write, never withdrawn; only the fmeter is used to measure. */
+static int pll_borrowed_ok(void)
+{
+    int e=pll_refuse(j.apll,8,1,1);
+    if(!e)e=pll_refuse(j.apll,0x14,1,1);
+    if(!e)e=pll_refuse(j.apll,0x38,1,1);
+    if(!e)e=pll_refuse(j.apll,0x34,16,16);
+    if(!e)e=pll_refuse(j.apll,0x3c,UINT32_MAX,0x78fd5264);
+    if(!e)e=pll_refuse(j.apll,0x40,UINT32_MAX,0x78fd5265);
+    if(!e)e=pll_refuse(j.apll,0xc,0x87000000,0x80000000);
+    if(!e)e=pll_refuse(j.vlp,0x80,0x8300,0x300);
+    if(!e)e=pll_refuse(j.vlp,0x270,4,4);
+    if(!e)e=pll_refuse(j.vlp,0x330,4,0);
+    if(!e)e=pll_refuse(j.vlp,0x90,0x8300,0x300);
+    if(!e)e=pll_refuse(j.vlp,0x274,1u<<30,1u<<30);
+    return e;
+}
 static int pll_consumers(void)
 {
+    if(pj.borrowed)return pll_borrowed_ok();
     int e=pll_unowned_consumers();
     if(!e)e=pll_refuse(j.vlp,0x80,0x8300,pj.gen_expected);
     if(!e)e=pll_refuse(j.vlp,0x270,4,pj.gen_fenc);
@@ -168,13 +189,20 @@ static int pll_cold(void)
     pll_s.consumers[0]=rd(j.vlp,0x80);pll_s.consumers[1]=rd(j.vlp,0x270);
     pll_s.consumers[2]=rd(pj.top,0xa0);pll_s.consumers[3]=rd(pj.top,0x274);
     pll_s.consumers[4]=rd(pj.mm,0x40);pll_s.consumers[5]=rd(pj.mm,0x270);
-    int e=pll_refuse(j.vlp,0x80,0x8000,0x8000);
-    if(!e)e=pll_consumers();
-    if(!e)e=pll_refuse(j.apll,8,1u|(1u<<15)|(1u<<17),0);
-    if(!e)e=pll_refuse(j.apll,0x14,1,0);
-    if(!e)e=pll_refuse(j.apll,0x38,1,0);
-    if(!e)e=pll_refuse(j.apll,0x34,16,0);
-    if(e)return e;
+    pj.borrowed=false;
+    int e=pll_borrowed_ok();
+    if(!e) {
+        pj.borrowed=true;pll_s.last_register=0;pll_s.last_value=0;
+        printf("X9 SPK PLL: APLL2 inherited running (engen2/audio_h on apll2): borrowed, measure only\n");
+    } else {
+        e=pll_refuse(j.vlp,0x80,0x8000,0x8000);
+        if(!e)e=pll_consumers();
+        if(!e)e=pll_refuse(j.apll,8,1u|(1u<<15)|(1u<<17),0);
+        if(!e)e=pll_refuse(j.apll,0x14,1,0);
+        if(!e)e=pll_refuse(j.apll,0x38,1,0);
+        if(!e)e=pll_refuse(j.apll,0x34,16,0);
+        if(e)return e;
+    }
     pll_s.stage=X9PLLMeter;e=meter_idle();
     if(!e)e=pll_refuse(pj.meter,0,0x9110,0);
     if(!e)e=pll_refuse(j.vlp,0x344,0x7f0000,0);
@@ -206,6 +234,10 @@ static int pll_gen_parent(uint32_t parent)
 static int pll_take(void)
 {
     int e=pll_idle();if(!e)e=pll_consumers();if(e)return e;
+    if(pj.borrowed) {
+        e=meter_sample(33,0,26000000);if(e)return e;pll_s.flags|=X9PLLReference;
+        goto measure;
+    }
     e=meter_sample(33,0,26000000);if(!e)e=meter_sample(34,1,26000000);
     if(e)return e;pll_s.flags|=X9PLLReference;
     pll_s.stage=X9PLLPower;
@@ -220,6 +252,7 @@ static int pll_take(void)
     if(e)return e;pj.gen_expected=0x300;
     e=pll_consumers();if(e)return e;
     pll_s.mux_owned|=2;e=pll_h_parent(3);if(e)return e;
+measure:
     for(unsigned n=0;n<3;n++) {
         e=pll_idle();if(!e)e=pll_consumers();if(e)return e;
         e=meter_sample(30,2+n*2,49152000);
