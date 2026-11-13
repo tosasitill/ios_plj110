@@ -85,17 +85,6 @@ static int cnt_device(unsigned slave,uint32_t *dev)
     }
     return ENOENT;
 }
-static int cnt_string_is(uint32_t d,const char *name)
-{
-    const uint8_t *p=x9_tfa_container;uint32_t o=d&0xffffff;
-    if((d>>24)!=3)return 0;
-    for(unsigned i=0;i<64;i++) {
-        if(!cnt_ok(o+i,1))return 0;
-        if(p[o+i]!=(uint8_t)name[i])return 0;
-        if(!name[i])return 1;
-    }
-    return 0;
-}
 static int write_item(unsigned i,uint32_t d)
 {
     const uint8_t *p=x9_tfa_container;uint32_t t=d>>24,o=d&0xffffff;
@@ -122,15 +111,20 @@ static int write_device_regs(unsigned i,unsigned *count)
     }
     return 0;
 }
-static int write_profile_regs(unsigned i,const char *name,unsigned *count)
+/* OPPO/NXP select a profile by INDEX, the same index on every device (log
+ * 259: profile 0 is "speaker" on 0x34 but "speakerR" on 0x35). */
+static int write_profile_regs(unsigned i,unsigned index,unsigned *count)
 {
     uint32_t dev;int e=cnt_device(slaves[i],&dev);if(e)return e;
-    const uint8_t *p=x9_tfa_container;*count=0;
+    const uint8_t *p=x9_tfa_container;*count=0;unsigned seen=0;
     for(unsigned k=0;k<p[dev];k++) {
         uint32_t d=le32(p+dev+12+k*4),po=d&0xffffff;
         if((d>>24)!=1)continue;
+        if(seen++!=index)continue;
         if(!cnt_ok(po,8) || le16(p+po+2)!=0x1234 || !p[po])return EINVAL;
-        if(!cnt_string_is(le32(p+po+4),name))continue;
+        char name[33]={0};uint32_t no=le32(p+po+4)&0xffffff;
+        for(unsigned c=0;c<32 && cnt_ok(no+c,1) && p[no+c];c++)name[c]=(char)p[no+c];
+        printf("X9 SPK: PA%x profile %u = %s\n",slaves[i],index,name);
         unsigned items=p[po]-1u;if(!cnt_ok(po+8,items*4))return EINVAL;
         for(unsigned n=0;n<items;n++) {
             uint32_t pd=le32(p+po+8+n*4),t=pd>>24;
@@ -192,7 +186,7 @@ static int tfa_init_one(unsigned i)
     if(!e)e=bf_set(i,0x0256,fract);
     unsigned nd=0,np=0;
     if(!e)e=write_device_regs(i,&nd);
-    if(!e)e=write_profile_regs(i,"speaker",&np);
+    if(!e)e=write_profile_regs(i,0,&np);
     printf("X9 SPK: PA%x init result=%d device_items=%u profile_items=%u\n",slaves[i],e,nd,np);
     return e;
 }
