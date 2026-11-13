@@ -17,6 +17,13 @@ import sys
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def su_line(command):
+    # ONE remote argument: adb 37 escapes each argv element itself, so a
+    # separately pre-quoted '-c' argument reached KernelSU su as a literal
+    # quoted program name ("id -u: inaccessible or not found").
+    return 'su -c ' + shlex.quote(command)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--serial', default=os.environ.get('X9_SERIAL'))
@@ -32,7 +39,7 @@ def main():
     # capture that could be mistaken for evidence from a connected device.
     try:
         subprocess.run(adb + ['get-state'], check=True, capture_output=True, timeout=10)
-        root = subprocess.run(adb + ['exec-out', 'su', '-c', shlex.quote('id -u')],
+        root = subprocess.run(adb + ['exec-out', su_line('id -u')],
                               check=True, capture_output=True, timeout=15)
         if root.stdout.strip() != b'0':
             raise RuntimeError('root read access unavailable')
@@ -50,7 +57,7 @@ def main():
             os.chmod(out / name, 0o600)
             os.chmod(out / (name + '.stderr'), 0o600)
             try:
-                r = subprocess.run(adb + ['exec-out', 'su', '-c', shlex.quote(command)],
+                r = subprocess.run(adb + ['exec-out', su_line(command)],
                                    stdout=data, stderr=err, timeout=30)
                 code = r.returncode
             except subprocess.TimeoutExpired:
