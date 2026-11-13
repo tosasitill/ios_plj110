@@ -68,9 +68,13 @@ static int qualify_audio_irq(struct audio_fdt *a,struct x9_adsp_audio_irq_layout
        !get(a,AN_GIC,"reg",&p,&n) || n!=32 ||
        be(p) || be(p+4)!=0x06800000 || be(p+8) || be(p+12)!=0x40000 ||
        be(p+16) || be(p+20)!=0x06880000 || be(p+24) || be(p+28)!=0x200000)return 0;
-    /* Root and soc use the same parent; a core-local override must agree. */
-    for(unsigned i=AN_ROOT;i<=AN_SOC;i++)
-        if(!value(a,i,"interrupt-parent",ph) || get(a,i,"interrupt-map",&p,&n))return 0;
+    /* The root names the GIC. /soc has no interrupt-parent in the live LK
+     * FDT (log 247: AUDIO IRQ refused with ADSP/MIC qualified) and inherits
+     * the root's per the DT spec; an explicit /soc or core override must
+     * agree. No interrupt-map anywhere on the path. */
+    if(!value(a,AN_ROOT,"interrupt-parent",ph) || get(a,AN_ROOT,"interrupt-map",&p,&n))return 0;
+    if(get(a,AN_SOC,"interrupt-parent",&p,&n) && (n!=4 || be(p)!=ph))return 0;
+    if(get(a,AN_SOC,"interrupt-map",&p,&n))return 0;
     if(get(a,AN_CORE0,"interrupt-parent",&p,&n) && (n!=4 || be(p)!=ph))return 0;
     if(get(a,AN_CORE0,"interrupts-extended",&p,&n) ||
        !get(a,AN_CORE0,"interrupt-names",&p,&n))return 0;
