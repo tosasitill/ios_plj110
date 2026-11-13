@@ -90,6 +90,6 @@ int x9_mic_bringup_run(unsigned ms)
     printf("X9 MIC: pcm min=%d max=%d mean=%lld rms=%llu first=%d,%d,%d,%d,%d,%d,%d,%d\n",
         r.min,r.max,mean,rms,r.first[0],r.first[1],r.first[2],r.first[3],
         r.first[4],r.first[5],r.first[6],r.first[7]);
-    report();IOSleep(500);
+    report();IOSleep(2000);
     return e;
 }

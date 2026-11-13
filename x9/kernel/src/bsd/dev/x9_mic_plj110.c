@@ -230,7 +230,14 @@ static int bus_take(struct power_journal *j)
         int e=wait_bits(j->gate,0xe10,2,0,1000);
         if(e){j->bus_stuck=true;return e;}
     }
-    int e=bank_idle(j);if(e){j->bus_stuck=true;return e;}
+    /* Log 263: LK leaves SCP-I2C1 INTR_MASK set with the bank otherwise
+     * idle (same as I2C6 in log 256). Accept only that: START/STAT/FIFO
+     * must be idle; MASK is journaled, cleared below and restored after. */
+    uint32_t stale_mask=rr(j->bus,MASK);
+    int e=0;
+    if(stale_mask) {
+        if(rr(j->bus,START)||rr(j->bus,STAT)||(rr(j->bus,FIFO_STAT)&31)){j->bus_stuck=true;return bus_fault(j,START,EBUSY);}
+    } else {e=bank_idle(j);if(e){j->bus_stuck=true;return e;}}
     /* Refuse DMA/IRQ selection, wrapper, shadow/hardware-trigger modes.
      * No assumption that idle alone arbitrates with a live SCP codec owner:
      * the separate GPIO9/XO cold-baseline check is mandatory. */
@@ -239,6 +246,11 @@ static int bus_take(struct power_journal *j)
     for(unsigned i=0;i<sizeof(saved_regs)/sizeof(saved_regs[0]);i++)
         j->saved[i].old=rr(j->bus,saved_regs[i]);
     j->bus_owned=true;
+    if(stale_mask) {
+        e=bus_csr_write(j,MASK,0);
+        printf("X9 MIC: scp-i2c1 stale INTR_MASK=%x cleared -> %d (restored on release)\n",stale_mask,e);
+        if(e)return e;
+    }
     for(unsigned i=0;i<2;i++) {
         struct pin *p=&j->route[i];
         if(pin_mode(j,p->n)!=p->mode || pin_bit(j,0,p->n)!=p->dir)return EBUSY;
