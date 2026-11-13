@@ -147,9 +147,14 @@ static int bus_fault(struct power_journal *j,unsigned reg,int error)
 }
 static int bank_idle(struct power_journal *j)
 {
+    /* Log 267: after an ACKed transfer and START=0, START still read
+     * non-zero (the auto-restart configuration bit14 is not cleared by the
+     * write) while bit0, the in-flight trigger, was already 0. Only bit0
+     * means a transaction is running. */
     const unsigned regs[]={START,MASK,STAT,FIFO_STAT};
+    const uint32_t masks[]={1u,UINT32_MAX,UINT32_MAX,31u};
     for(unsigned i=0;i<4;i++)
-        if(rr(j->bus,regs[i])&(i==3?31u:UINT32_MAX))return bus_fault(j,regs[i],EBUSY);
+        if(rr(j->bus,regs[i])&masks[i])return bus_fault(j,regs[i],EBUSY);
     return 0;
 }
 static uint32_t bus_csr_mask(unsigned reg)
@@ -319,6 +324,8 @@ static int bus_xfer(struct power_journal *j,uint16_t reg,uint8_t *value,bool rea
         j->status->bus_start=rr(j->bus,START);
     }
     wr(j->bus,START,0);
+    {static unsigned shown;if(shown<2){shown++;printf("X9 MIC: scp-i2c1 xfer reg=%x status=%x start after clear=%x fifo=%x\n",
+        reg,status,rr(j->bus,START),rr(j->bus,FIFO_STAT));}}
     if(bank_idle(j)){j->bus_stuck=true;if(!e)e=EIO;}
     return e;
 }
