@@ -42,6 +42,26 @@ static uint64_t deadline(uint32_t milliseconds)
     return mach_absolute_time()+ticks;
 }
 static void pause_poll(void) { delay_for_interval(1,1000*NSEC_PER_USEC); }
+/* Bounded raw evidence for AUDIO_IPI and malformed RX (first 16 per boot). */
+static uint32_t raw_logs;
+static void raw_log(const char *why,uint32_t core,uint32_t pending,uint32_t id,uint32_t len,const uint8_t *d)
+{
+    if(raw_logs>=16)return; raw_logs++;
+    uint32_t w[4]={0,0,0,0};
+    for(unsigned i=0;d && i<16 && i<len;i++)w[i/4]|=(uint32_t)d[i]<<((i%4)*8);
+    printf("X9 ADSP RX: %s core=%u pending=%x ipi=%u len=%u hdr=%08x %08x %08x %08x\n",
+           why,core,pending,id,len,w[0],w[1],w[2],w[3]);
+}
+/* OPPO check_msg_format: the slot may be longer than the message; only a
+ * SHORTER slot is an error. Trim to header+payload before strict decode. */
+static uint32_t audio_bytes(const uint8_t *p,uint32_t n)
+{
+    if(n<16)return n;
+    uint32_t size=p[4]==1?((uint32_t)p[8]|((uint32_t)p[9]<<8)|((uint32_t)p[10]<<16)|((uint32_t)p[11]<<24)):
+                  p[4]==2?X9_DSP_DMA_INFO_BYTES:0;
+    if(size>X9_DSP_PAYLOAD_MAX)return n;
+    return n>=16+size?16+size:n;
+}
 static int poison(struct transport *t,int error)
 {
     if(!t->status.primary_error)t->status.primary_error=(uint32_t)error;
@@ -80,11 +100,12 @@ static int receive(struct transport *t,struct x9_adsp_event *e,uint32_t stage)
     int error=qualify(t,stage);if(error)return error;
     uint32_t pending=rd(t->hw.rx+CLR);
     if(!pending)return EAGAIN;
-    if(pending!=1) {t->status.malformed++; return poison(t,EPROTO);} /* never clear another pin */
+    if(pending!=1) {raw_log("pending",t->hw.core,pending,0,0,NULL);t->status.malformed++; return poison(t,EPROTO);} /* never clear another pin */
     uint32_t id=rd(t->hw.rx),len=rd(t->hw.rx+1);
     /* options/reserved are not validated on RX: OPPO's RX handler ignores
      * them and no captured firmware reply proves an echo requirement. */
     if(id>=IPI_COUNT || len>X9_ADSP_EVENT_BYTES) {
+        raw_log("size",t->hw.core,pending,id,len,NULL);
         wr(t->hw.rx+CLR,1); t->status.malformed++; return poison(t,EMSGSIZE);
     }
     bzero(e,sizeof(*e)); e->id=id; e->length=len; e->generation=t->status.generation;
@@ -106,6 +127,7 @@ static int dispatch(struct transport *t,const struct x9_adsp_event *e,
     if(e->id==WDT_IPI)return poison(t,EIO);
     if(e->id==READY_IPI) {
         if(e->length!=4 || get32(e->data)!=t->hw.core) {
+            raw_log("ready",t->hw.core,1,e->id,e->length,e->data);
             t->status.malformed++; return poison(t,EPROTO);
         }
         /* A READY while running is an unrequested DSP restart, not recovery
@@ -115,10 +137,14 @@ static int dispatch(struct transport *t,const struct x9_adsp_event *e,
     }
     if(e->id==AUDIO_IPI) {
         struct x9_dsp_message m;
-        int error=x9_dsp_decode(e->data,e->length,&m);
-        if(error || m.source!=2 || m.target!=1) {
+        int error=x9_dsp_decode(e->data,audio_bytes(e->data,e->length),&m);
+        raw_log(error?"audio-bad":"audio",t->hw.core,1,e->id,e->length,e->data);
+        /* FROM_DSP to KERNEL or HAL are both legal (OPPO forwards TO_HAL
+         * messages to the HAL path); only TO_KERNEL can complete a request. */
+        if(error || m.source!=2 || m.target>1) {
             t->status.malformed++; return poison(t,error?error:EPROTO);
         }
+        if(m.target==0)return queue_event(t,e);
         if(m.ack==X9DSPAckBack) {
             if(!request || !x9_dsp_ack_matches(request,&m) || *matched) {
                 t->status.stray_acks++; return poison(t,ESTALE);

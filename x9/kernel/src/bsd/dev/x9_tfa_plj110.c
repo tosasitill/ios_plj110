@@ -101,12 +101,20 @@ static int pmic_admit(void)
      * MT6661-3 GPIO10/11 must be digital SW outputs, deasserted HIGH
      * with physical DI HIGH. The captured output-low pinctrl is asserted
      * reset, not PA readiness; this probe never deasserts it itself. */
-    if((s.reset[0]&12)!=12 || (s.reset[1]&12)!=12 || (s.reset[2]&12)!=12 ||
-       (s.reset[3]&63) || (s.reset[4]&12)!=12 || (s.reset[5]&12)!=12)return EBUSY;
+    /* Log 254: LK leaves GPIO10/11 as INPUTS reading HIGH (DIR=1 DO=1
+     * DI=d), i.e. the reset line is externally held deasserted. Accept either
+     * driven-HIGH output or input-HIGH; never accept a LOW level. */
+    if((s.reset[2]&12)!=12 || (s.reset[3]&63) || (s.reset[4]&12)!=12 || (s.reset[5]&12)!=12)return EBUSY;
+    for(unsigned b=4;b<=8;b<<=1)
+        if((s.reset[0]&b) && !(s.reset[1]&b))return EBUSY; /* driven LOW */
+    if((s.reset[0]&12)!=12)s.flags|=X9PAResetInput;
     /* Only the LEFT supply is described by DT. Require stable explicit SW
      * 1.8V/on/non-LP/no-HW votes; keep full DA byte as evidence, not a guessed
      * all-rails-ready predicate. Successful I2C ACK is not right-rail proof. */
-    if(s.supply[0]!=0xd0 || (s.supply[1]&3)!=1 || s.supply[3])return ENXIO;
+    /* HW_OP_EN0 (254: 0x80) is an extra hardware ON vote, not an off state;
+     * recorded, not required to be zero for a read-only reg03 access. */
+    if(s.supply[0]!=0xd0 || (s.supply[1]&3)!=1)return ENXIO;
+    if(s.supply[3])s.flags|=X9PASupplyHWVote;
     return 0;
 }
 static uint32_t pin_state(unsigned n)
