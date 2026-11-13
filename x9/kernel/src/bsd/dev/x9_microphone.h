@@ -303,5 +303,17 @@ int x9_mic_deliver(uint64_t generation, const int16_t *, uint32_t frames,
 void x9_mic_backend_fault(uint64_t generation, int error);
 void x9_mic_backend_drop(uint64_t generation, uint32_t frames);
 void sweet_x9_microphone_init(void);
+/* Boot-time capture check (x9_mic_boot): the same START/commit/STOP path as
+ * the ioctl, PCM drained in-kernel for statistics only. Nothing is stored,
+ * written to disk or played back. Holds the device open for its duration. */
+struct x9_mic_capture_result {
+    int start_errno, run_errno, stop_errno, last_errno;
+    uint64_t frames, captured, dropped, zeros;
+    int64_t sum;
+    uint64_t sum_squares;
+    int32_t min, max;
+    int16_t first[8];
+};
+int x9_mic_kernel_capture(uint32_t ms, struct x9_mic_capture_result *);
 #endif
 #endif

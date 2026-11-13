@@ -18,6 +18,7 @@
 #include "../../../bsd/dev/x9_speaker_afe.h"
 #include "../../../bsd/dev/x9_tfa_plj110.h"
 #include "../../../bsd/dev/x9_speaker_bringup.h"
+#include "../../../bsd/dev/x9_mic_bringup.h"
 #include "../../../bsd/dev/x9_i2c6.h"
 #include "../../../bsd/dev/x9_pa_vdd_left.h"
 #include "../../../bsd/dev/x9_audio_resources.h"
@@ -181,7 +182,12 @@ static void dspBootOnce(void *arg, wait_result_t)
 {
     uint32_t delay = (uint32_t)(uintptr_t)arg;
     IOSleep(delay * 1000);
-    IOLog("X9 AUDIO DSPBOOT: speaker bring-up (combined DSP boot, clocks, pads, AFE, TFA9865, tone)\n");
+    /* Microphone first: a speaker-path failure must not hide its result.
+     * The two paths share the exclusive audio resource lease, never overlap. */
+    int micMs = sweet_x9_arg("x9_mic_boot", 0);
+    if (micMs > 0) IOLog("X9 AUDIO DSPBOOT: mic capture result=%d\n", x9_mic_bringup_run((unsigned)micMs));
+    if (!sweet_x9_arg("x9_spk_boot", 1)) { IOLog("X9 AUDIO DSPBOOT: speaker bring-up skipped (x9_spk_boot=0)\n"); return; }
+    IOLog("X9 AUDIO DSPBOOT: speaker bring-up (combined DSP boot, clocks, pads, AFE, TFA9865; AMPE stays 0, silence only)\n");
     lck_mtx_lock(&audioLock);
     int e = haveBackend || (control && (control->state & X9AudioRunning)) ? EBUSY : x9_speaker_bringup_run();
     lck_mtx_unlock(&audioLock);

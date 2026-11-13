@@ -171,11 +171,14 @@ static int tfa_init_one(unsigned i)
          * 0x13a65 keeps its generated table; anything else is refused. */
         if(!e && revid!=0x13a65 && revid!=0x19865)e=ENOTSUP;
     }
-    if(!e)e=x9_tfa_plj110_write16(slaves[i],0x0f,0x5a6b); /* unhide keys */
-    if(!e)e=x9_tfa_plj110_read16(slaves[i],0xfb,&x);
-    if(!e)e=x9_tfa_plj110_write16(slaves[i],0xa0,(uint16_t)(x^0x005a));
+    /* Log 260: the whole system stopped right after the rev line (screen
+     * black, USB gone). Mark each key-unlock access so the next stop shows
+     * which transfer it was. */
+    if(!e){printf("X9 SPK: PA%x unlock 0f\n",slaves[i]);e=x9_tfa_plj110_write16(slaves[i],0x0f,0x5a6b);} /* unhide keys */
+    if(!e){printf("X9 SPK: PA%x unlock read fb\n",slaves[i]);e=x9_tfa_plj110_read16(slaves[i],0xfb,&x);}
+    if(!e){printf("X9 SPK: PA%x unlock a0 (fb=%04x)\n",slaves[i],x);e=x9_tfa_plj110_write16(slaves[i],0xa0,(uint16_t)(x^0x005a));}
     if(!e)e=x9_tfa_plj110_write16(slaves[i],0x0f,0x5a6b);
-    if(!e)e=x9_tfa_plj110_write16(slaves[i],0xa1,0x005a); /* key2 unlock */
+    if(!e){printf("X9 SPK: PA%x unlock a1\n",slaves[i]);e=x9_tfa_plj110_write16(slaves[i],0xa1,0x005a);} /* key2 unlock */
     if(!e && revid==0x13a65)
         for(unsigned k=0;!e && k<sizeof(init_reg);k++)e=x9_tfa_plj110_write16(slaves[i],init_reg[k],init_val[k]);
     else if(!e)printf("X9 SPK: PA%x revid %x: OPPO default branch, no chip table\n",slaves[i],revid);

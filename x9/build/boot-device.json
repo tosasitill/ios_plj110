@@ -28,7 +28,6 @@
     "x9_wifi_power=6",
     "x9_wifi_real=1",
     "x9_gpu_khz=1716000",
-    "x9_gpu_floor_khz=1716000",
     "x9_wifi_xo0=0xca9f0019",
     "x9_wifi_xo1=0x95bf",
     "x9_wifi_xo2=0",

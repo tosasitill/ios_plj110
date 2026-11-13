@@ -268,3 +268,56 @@ void sweet_x9_microphone_init(void)
        !devfs_make_node(makedev(major,1),DEVFS_CHAR,501,501,0600,"x9-mic"))st.last_errno=ENOMEM;
     printf("X9 MIC: mode=%d PCM=48000/mono/S16; backend=%u; no synthetic samples\n",mode,hw.version);
 }
+static void capture_account(struct x9_mic_capture_result *r)
+{
+    while(count) {
+        int16_t v=ring[head];head=(head+1)%X9_MIC_RING_FRAMES;count--;
+        if(r->frames<8)r->first[r->frames]=v;
+        if(!r->frames || v<r->min)r->min=v;
+        if(!r->frames || v>r->max)r->max=v;
+        if(!v)r->zeros++;
+        r->sum+=v;r->sum_squares+=(uint64_t)((int32_t)v*(int32_t)v);r->frames++;
+    }
+}
+int x9_mic_kernel_capture(uint32_t ms,struct x9_mic_capture_result *r)
+{
+    if(!r)return EINVAL;
+    bzero(r,sizeof(*r));
+    if(ms<100 || ms>5000)return EINVAL;
+    lck_mtx_lock(&mic_control_lock);lck_mtx_lock(&mic_lock);
+    int e=opened?EBUSY:(st.mode!=2 || !(st.flags&X9_MIC_READY) || (st.flags&X9_MIC_FAULT))?ENXIO:
+        (st.flags&X9_MIC_RUNNING)?EBUSY:0;
+    if(e){r->start_errno=e;lck_mtx_unlock(&mic_lock);lck_mtx_unlock(&mic_control_lock);return e;}
+    opened=true; /* userspace cannot open/steal the stream meanwhile */
+    head=count=0;++st.generation;st.last_host_time=0;
+    st.captured_frames=st.read_frames=st.dropped_frames=0;st.last_errno=0;
+    uint64_t generation=st.generation;
+    hardware_active=true;
+    lck_mtx_unlock(&mic_lock);e=hw.start(generation);lck_mtx_lock(&mic_lock);
+    if(!e && generation==st.generation && !(st.flags&X9_MIC_FAULT)) {
+        st.flags|=X9_MIC_RUNNING;
+        lck_mtx_unlock(&mic_lock);e=hw.commit(generation);lck_mtx_lock(&mic_lock);
+    }
+    if(!e && (generation!=st.generation || (st.flags&X9_MIC_FAULT)))e=st.last_errno?st.last_errno:EIO;
+    r->start_errno=e;
+    if(!e) {
+        uint64_t end,now=mach_absolute_time();
+        nanoseconds_to_absolutetime((uint64_t)ms*1000000ull,&end);end+=now;
+        while(now<end) {
+            capture_account(r);
+            if(generation!=st.generation || !(st.flags&X9_MIC_RUNNING)) {
+                r->run_errno=st.last_errno?st.last_errno:EIO;break;
+            }
+            struct timespec t={0,20000000};
+            (void)msleep(&count,&mic_lock,0,"x9-mic-boot",&t);
+            now=mach_absolute_time();
+        }
+        if(generation==st.generation)capture_account(r);
+    }
+    r->captured=st.captured_frames;r->dropped=st.dropped_frames;r->last_errno=st.last_errno;
+    if(e){st.flags|=X9_MIC_FAULT;st.flags&=~X9_MIC_READY;st.last_errno=e;}
+    r->stop_errno=stop_locked();
+    opened=false;
+    lck_mtx_unlock(&mic_lock);lck_mtx_unlock(&mic_control_lock);
+    return e?e:r->run_errno?r->run_errno:r->stop_errno;
+}
