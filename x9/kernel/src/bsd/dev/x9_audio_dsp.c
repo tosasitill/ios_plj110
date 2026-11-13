@@ -53,9 +53,10 @@ int x9_dsp_decode(const void *in, uint32_t n, struct x9_dsp_message *out)
 }
 int x9_dsp_ack_matches(const struct x9_dsp_message *a, const struct x9_dsp_message *b)
 {
+    /* OPPO audio_ipi_queue.c check_ack_msg_valid: task_scene + msg_id only.
+     * Log 255: the DSP echoes the request header (layers 0x21 unswapped). */
     return a && b && a->ack == X9DSPNeedAck && b->ack == X9DSPAckBack &&
-        a->scene == b->scene && a->id == b->id &&
-        a->source == b->target && a->target == b->source;
+        a->scene == b->scene && a->id == b->id;
 }
 int x9_dsp_readback_encode(uint64_t bus,uint32_t capacity,void *out,uint32_t bytes)
 {

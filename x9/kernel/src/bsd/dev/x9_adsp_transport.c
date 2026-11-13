@@ -141,10 +141,12 @@ static int dispatch(struct transport *t,const struct x9_adsp_event *e,
         raw_log(error?"audio-bad":"audio",t->hw.core,1,e->id,e->length,e->data);
         /* FROM_DSP to KERNEL or HAL are both legal (OPPO forwards TO_HAL
          * messages to the HAL path); only TO_KERNEL can complete a request. */
-        if(error || m.source!=2 || m.target>1) {
+        /* An ACK_BACK echoes the request's layers; any other DSP message
+         * must be FROM_DSP to KERNEL or HAL. */
+        if(error || (m.ack!=X9DSPAckBack && (m.source!=2 || m.target>1))) {
             t->status.malformed++; return poison(t,error?error:EPROTO);
         }
-        if(m.target==0)return queue_event(t,e);
+        if(m.ack!=X9DSPAckBack && m.target==0)return queue_event(t,e);
         if(m.ack==X9DSPAckBack) {
             if(!request || !x9_dsp_ack_matches(request,&m) || *matched) {
                 t->status.stray_acks++; return poison(t,ESTALE);

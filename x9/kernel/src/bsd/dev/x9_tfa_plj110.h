@@ -5,7 +5,8 @@
 #define X9_TFA_BOARD_STATUS_VERSION 1u
 enum { X9PAProbeAttempted=1u, X9PAPMICCaptured=2u, X9PABusCaptured=4u,
     X9PAPMICStable=8u, X9PAProbeComplete=16u, X9PAJournalHeld=32u,
-    X9PAPoisoned=64u, X9PAResetInput=128u, X9PASupplyHWVote=256u };
+    X9PAPoisoned=64u, X9PAResetInput=128u, X9PASupplyHWVote=256u,
+    X9PAClockUngated=512u, X9PAClockRegated=1024u };
 enum { X9PAStageMap=1, X9PAStagePMIC, X9PAStageClock, X9PAStageIdle,
     X9PAStageTiming, X9PAStageLeft, X9PAStageRight, X9PAStageRecheck,
     X9PAStageRestore, X9PAStageDone };

@@ -288,7 +288,20 @@ int x9_tfa_plj110_probe(void)
     if(!e){s.flags|=X9PAPMICCaptured;e=pmic_admit();}
     /* Hold the shared PMIF mutex from live snapshot through FIFO restore;
      * this prevents XNU rail/reset changes, not unknown remote ownership. */
-    if(!e){s.stage=X9PAStageClock;e=clock_check();}
+    /* Log 255: LK leaves imps_i2c6 gated (STA 0x129d0e00=0x1e). Ungate ONLY
+     * bit2 via CLR 0xE04 (OPPO clk-mt6993-peri imps_cg_regs) for this probe
+     * and gate it again via SET 0xE08 after the controller is restored. No
+     * mux/PLL/APDMA write; a gated parent still fails clock_check. */
+    bool ungated=false;
+    if(!e) {
+        s.stage=X9PAStageClock;
+        if(rr(j.gate,0xe00)&4) {
+            wr(j.gate,0xe04,4);delay(10);
+            if(rr(j.gate,0xe00)&4)e=ENXIO;
+            else {ungated=true;s.flags|=X9PAClockUngated;}
+        }
+    }
+    if(!e){e=clock_check();}
     if(!e){s.stage=X9PAStageIdle;e=idle();}
     if(!e) {
         for(unsigned i=0;i<sizeof(regs)/sizeof(regs[0]);i++)j.saved[i]=rr(j.bus,regs[i]);
@@ -307,6 +320,12 @@ int x9_tfa_plj110_probe(void)
     if(!e && s.restore_error)s.stage=X9PAStageRestore;
     if(!s.dirty_mask)s.flags&=~X9PAJournalHeld;
     if(j.pmif_stuck || j.bus_stuck || s.restore_error)s.flags|=X9PAPoisoned;
+    /* Re-gate only after a clean controller restore; a stuck/dirty bus keeps
+     * its clock so nothing is left mid-transfer without a clock. */
+    if(ungated && !j.bus_stuck && !s.restore_error && !s.dirty_mask) {
+        wr(j.gate,0xe08,4);delay(10);
+        if(rr(j.gate,0xe00)&4)s.flags|=X9PAClockRegated;
+    }
     if(locked)X9PMIFRelease();
     if(!e && !s.restore_error){s.flags|=X9PAProbeComplete;s.stage=X9PAStageDone;}
     int result=e?e:(int)s.restore_error;
