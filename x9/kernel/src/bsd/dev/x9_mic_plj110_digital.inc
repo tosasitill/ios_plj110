@@ -6,7 +6,7 @@
 enum {
     RX_TOP2=0x4, RX_ENGEN=0x14, RX_UL0=0xbd0, RX_UL1=0xc50,
     RX_FIFO=0xbd4, RX_COEF=0xbec, RX_CFG0=0x1190, RX_CFG1=0x11f0,
-    RX_DATA0=0x1198, RX_DATA1=0x11f8, RX_DELAY=0x11a0,
+    RX_DATA0=0x1198, RX_DATA1=0x11f8, RX_DELAY=0x11a0, RX_DELAY1=0x1200,
     RX_PAD=0x1204, RX_CLK=0x1280, RX0=0x1288, RX1=0x1290,
     RX_MON0=0x12a0, RX_MON1=0x12a8,
     UL_SHADOW0=0xbe4, UL_SHADOW1=0xbe8
@@ -17,6 +17,7 @@ struct digital_afe_journal {
     unsigned pending;
     uint64_t deadline, restore_deadline;
     bool owned, quiesced, uncertain, poisoned;
+    uint32_t delay1; /* OPPO MTKAIF1_RX_CFG2 value from phase_cycle[2]=0 */
 };
 static struct digital_afe_journal digital_afe;
 _Static_assert(sizeof(struct x9_mic_signal_status)==192,"signal ABI size");
@@ -52,9 +53,7 @@ static int digital_signal_observe(struct afe_journal *a)
         uint32_t sync0=rr(a->afe,RX_MON0),sync1=rr(a->afe,RX_MON1);
         s->sync_last[0]=sync0;s->sync_last[1]=sync1;
         if(!i){s->sync_first[0]=sync0;s->sync_first[1]=sync1;}
-        if((sync0|sync1)&(1u<<21)) {
-            s->last_register=(sync0&(1u<<21))?RX_MON0:RX_MON1;e=EIO;break;
-        }
+        /* RXIF search-fail (bit21) is only dumped by OPPO, never gated. */
         /* Known control fields: SRC on, ordinary voice48k3, no loopback.
          * Do not interpret SDM bit30 or SLT debug counter as PCM/drain. */
         if((s->ul_control&((7u<<17)|5u))!=((3u<<17)|1u)){e=EIO;break;}
@@ -68,14 +67,15 @@ static int digital_signal_observe(struct afe_journal *a)
         /* Recheck search failure after the non-atomic pair. No retry or
          * clearing sticky hardware status to force a successful witness. */
         s->sync_last[0]=rr(a->afe,RX_MON0);s->sync_last[1]=rr(a->afe,RX_MON1);
-        if((s->sync_last[0]|s->sync_last[1])&(1u<<21)) {
-            s->last_register=(s->sync_last[0]&(1u<<21))?RX_MON0:RX_MON1;e=EIO;break;
-        }
         if(mach_absolute_time()>=deadline){e=ETIMEDOUT;break;}
         s->rejected_read=0;
         if(i+1<s->target_reads)delay(s->interval_us);
     }
     absolutetime_to_nanoseconds(mach_absolute_time()-start,&s->elapsed_ns);
+    printf("X9 MIC SIGNAL: reads=%u err=%d MON first=%x/%x last=%x/%x UL raw first=%x/%x last=%x/%x changes=%u/%u\n",
+        s->reads,e,s->sync_first[0],s->sync_first[1],s->sync_last[0],s->sync_last[1],
+        s->channel[0].raw_first,s->channel[1].raw_first,s->channel[0].raw_last,s->channel[1].raw_last,
+        s->channel[0].changes,s->channel[1].changes);
     s->last_errno=e;
     if(s->channel[0].changes)s->flags|=X9_MIC_SIGNAL_CH1_CHANGED;
     if(s->channel[1].changes)s->flags|=X9_MIC_SIGNAL_CH2_CHANGED;
@@ -193,6 +193,9 @@ static int digital_afe_preflight(struct afe_journal *a,struct x9_mic_digital_sta
     uint32_t diff=h->cycle[0]>=h->cycle[1]?(uint32_t)(h->cycle[0]-h->cycle[1]):(uint32_t)(h->cycle[1]-h->cycle[0]);
     if(diff>15)return ERANGE; /* RG_MTKAIF0_RXIF_DELAY_CYCLE is four bits */
     s->delay_cycle=diff;s->delay_data=h->cycle[0]>=h->cycle[1]?0:1;
+    /* mtk_adda_mtkaif_cfg_event: MTKAIF1 aligns ch3 (phase_cycle[2], never
+     * calibrated, zero from kzalloc) with ch2 (phase_cycle[1]). */
+    digital_afe.delay1=h->cycle[1]>0?(((uint32_t)h->cycle[1]<<12)|(1u<<8)):0;
     return 0;
 }
 static int digital_afe_enable(struct afe_journal *a)
@@ -203,10 +206,12 @@ static int digital_afe_enable(struct afe_journal *a)
     d->deadline=mach_absolute_time()+ticks;d->owned=true;
     s->stage=X9_MIC_DIGITAL_AFE_CONFIG;int e=0;
     RX(RX_TOP2,1u<<23,0); /* regular UL0 ADC gate; leave hires/APLL gates alone */
-    /* protocol2+inverted calibration latch; preserve other fields, no reset */
-    RX(RX_CFG0,(1u<<31)|(1u<<17)|(1u<<16),(1u<<31)|(1u<<16));
-    RX(RX_CFG1,(1u<<31)|(1u<<17)|(1u<<16),(1u<<31)|(1u<<16));
+    /* OPPO PROTOCOL_2_CLK_P2: regmap_write(CFG0/CFG1,0x10000) then CLKINV.
+     * Full word as OPPO: clears stale TX2RX loopback/8to5/bypass fields. */
+    RX(RX_CFG0,UINT32_MAX,(1u<<31)|(1u<<16));
+    RX(RX_CFG1,UINT32_MAX,(1u<<31)|(1u<<16));
     RX(RX_DELAY,0xf100,(s->delay_cycle<<12)|(s->delay_data<<8));
+    RX(RX_DELAY1,0xf100,d->delay1);
     RX(RX_DATA0,1,0);RX(RX_DATA1,1,0); /* AMIC */
     /* R-MISO1 RX0=2ch, RX1=4ch, rate code5, enable-select1.
      * Only UL1_CH1 codec data is duplicated; no ADC_R/UL1 engine. */
@@ -226,14 +231,16 @@ static int digital_afe_enable(struct afe_journal *a)
     RX(RX0,1,1);RX(RX1,1,1);
     RX(RX_UL0,1,1);
     s->flags|=X9_MIC_DIGITAL_AFE_ON;s->stage=X9_MIC_DIGITAL_OBSERVE;
-    /* Bounded observation only. No spinning for nonzero samples/PCM and no
-     * stale fail clear. A sync-search failure is decisive; no auto retry. */
+    /* Bounded observation only. OPPO never gates on RXIF search-fail
+     * (bit21); it only dumps MON0/MON1. Record it, do not fail on it. */
     delay(1000);e=afe_access(a);if(e)return e;
     digital_afe_snapshot(a,true);
-    if((s->afe_monitor[0]|s->afe_monitor[1])&(1u<<21)) {
-        s->last_register=0x80000000u|((s->afe_monitor[0]&(1u<<21))?RX_MON0:RX_MON1);
-        return EIO;
-    }
+    printf("X9 MIC MTKAIF: CFG=%x/%x RXCFG2=%x/%x DATA=%x/%x TX=%x RX=%x/%x PAD=%x UL=%x/%x ENGEN=%x TOP=%x/%x/%x/%x/%x MON=%x/%x\n",
+        rr(a->afe,RX_CFG0),rr(a->afe,RX_CFG1),rr(a->afe,RX_DELAY),rr(a->afe,RX_DELAY1),
+        rr(a->afe,RX_DATA0),rr(a->afe,RX_DATA1),rr(a->afe,RX_CLK),rr(a->afe,RX0),rr(a->afe,RX1),
+        rr(a->afe,RX_PAD),rr(a->afe,RX_UL0),rr(a->afe,RX_FIFO),rr(a->afe,RX_ENGEN),
+        rr(a->afe,0x0),rr(a->afe,0x4),rr(a->afe,0x8),rr(a->afe,0xc),rr(a->afe,0x10),
+        s->afe_monitor[0],s->afe_monitor[1]);
     e=digital_afe_verify(a);if(e)return e;
     s->flags|=X9_MIC_DIGITAL_READBACK;
     return 0;

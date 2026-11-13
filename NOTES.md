@@ -732,3 +732,31 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 - **log 277 / mic17 (2026-11-13)**: the SoC hung 0.35 s after the ADSP launch (dsp boot -> 0) with no mic run and no AP ADSP access (inside the SPKLOG sleep). Survey: every boot that launched the ADSP (253-256, 264, 265, 268, 272, 275, 277) died 0.4-25 s later; only 269 and 276, which halted the DSP after 7-10 s, survived. The 272/275 mic-AFE-init theory is withdrawn, and 264/265/268 also fit this pattern. OPPO adsp_system_bootup additionally does feature registration, after_bootup (SLB release loop, awake unlock), the SLB_INIT IPI handler, the WDT IRQ, the logger init message and the suspend flow; none of that is implemented here. mic17: speaker bring-up (which launches the DSP) is opt-in (x9_spk_boot default 0); the mic runs alone to exercise the calibration fix.
 - **log 278 / mic18 (2026-11-13)**: no hang (the user stopped capture; mic only, no DSP launch), so the ADSP warm launch theory stands. MTKAIF calibration completed: 43 phases, chosen 3/4, cycles 3/3, AFE err=0. Analog reached the RC stage (HWCID 81/10) and failed closed on rc_tune_l=0x1f (AUDENC_PMU_CON32). OPPO mt6681.c toggles RG_AUDADCLPWRUP once on 0/0x1f, re-reads and continues regardless. mic18 does the same; digital requires PREPARED|READBACK (RC_OK stays diagnostic).
 - **log 279 / mic19 (2026-11-13)**: no hang. Analog completed (stage 11, err 0; rc_tune_l stays 1f after the OPPO reset, continued). The digital DMA preflight refused with EBUSY at VUL1_MON0 (0x4db4): VUL1 is off (CON0=0x100048, CUR=0, no memif on) but MON0=0x100000. Its bit 20 mirrors CON0 MINLEN=1; OPPO gives MON0 no fields and our BUSY mask (0xf<<20) was a guess. mic19: VUL1_MON_ACTIVE discounts exactly the configured MAXLEN/MINLEN bits (CON0&0x330000) in preflight, start check, drain and quiesce.
+
+### mic20 (2026-11-13) — static review vs OPPO after log 280
+
+Log 280: digital stage 8 EIO on MTKAIFV4_MON0=0x200008 (bit21 RXIF search fail,
+same on ADDA6 MON0). Calibration (43 phases, 3/4, cycles 3/3) and analog ok.
+
+Statically checked against OPPO mt6993-dai-adda.c / mt6993-mt6681.c / afe-pcm.c:
+- AUDIO_TOP gates (clk-mt6993-adsp.c): 0x0=CON0 (MTKAIFV4 bit25), 0x4 UL ADC,
+  0x8 ETDM, 0xc ASRC, 0x10 F26M/APLL. No memif/VUL1 gate exists; ours opens
+  bit25, UL0_ADC bit23, 0x10 bits0-1. OK.
+- TX_CFG0 OUT_EN_SEL: OPPO sets it only in the playback hw_params; capture only
+  raises AFE_ON via AUD_PAD_CLK. Ours (0x0851) matches capture. No change.
+- Board DT: both aud-dat-miso0-on (GPIO102) and miso1-on (GPIO103) exist, so
+  both need calibration and no SYNC_WORD disable. Matches.
+- VUL1: regs, ON bit28, fs 0xa, NORMAL_MODE bit3, min/max 64B (3/3), S16
+  stereo. Matches (WR_SIGN is never touched by OPPO; ours clears it, S16 only).
+- UL0_SRC_CON1 FIFO_SOFT_RST: OPPO uses it only on the AP-DMIC route.
+Fixed in mic20:
+1. MTKAIF0/1_CFG0: full write 0x80010000 (OPPO regmap_write 0x10000 + CLKINV),
+   not a masked update.
+2. MTKAIF1_RX_CFG2 (0x1200) was never written. OPPO aligns ch3 (phase_cycle[2],
+   never calibrated, so 0) with ch2, giving DELAY_DATA=MISO2(1) and
+   cycle=phase_cycle[1]. Now written (0x3100 for cycle 3).
+3. RXIF search-fail bit21 is no longer fatal in digital_afe_enable or
+   signal_observe. OPPO only dumps MON0/MON1.
+4. New prints: "X9 MIC MTKAIF:" (CFG/RXCFG2/DATA/TX/RX/PAD/UL/ENGEN/TOP0-4/MON)
+   and "X9 MIC SIGNAL:" (MON first/last, UL raw, change counts).
+Image: x9/out/x9-mic20-20261113/boot.img (same boot args as mic19).
