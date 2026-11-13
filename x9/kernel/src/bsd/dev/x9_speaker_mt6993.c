@@ -22,6 +22,10 @@
 extern vm_offset_t ml_io_map(vm_offset_t,vm_size_t);
 extern int sweet_early_is_x9(void);
 extern int sweet_x9_arg(const char *,int);
+extern void IOSleep(unsigned int);
+/* Log 264: the SoC stopped inside clock acquire. Each step's line is
+ * followed by a pause so the USB console drains before the next access. */
+#define CLKSTEP(name) do{printf("X9 SPK CLK: %s\n",name);IOSleep(600);}while(0)
 LCK_GRP_DECLARE(x9_speaker_clock_group,"x9-speaker-clock");
 LCK_MTX_DECLARE(x9_speaker_clock_lock,&x9_speaker_clock_group);
 static X9AudioClockStatus s={.version=X9_AUDIO_CLOCK_STATUS_VERSION};
@@ -220,6 +224,7 @@ static int take(bool with_pll,bool with_path)
     if(!j.apll)j.apll=ml_io_map(0x1c203100,0x100);
     if(!j.hwv || !j.vlp || !j.afe || !j.apll)return ENOMEM;
     if(j.combined){int mapping=native_mapping();if(mapping)return mapping;}
+    CLKSTEP("map done, AO snapshot");
     s.flags|=X9ClockAOCaptured;ao_snapshot();
     s.ap_before=s.ap_after;s.all_before=s.all_after;s.ack_before=s.ack_after;
     s.foreign_before=s.foreign_after;s.vlp_before=s.vlp_after;s.fenc_before=s.fenc_after;
@@ -234,11 +239,14 @@ static int take(bool with_pll,bool with_path)
     int e=refuse(j.vlp,0x90,0x8080,0x8080);
     if(!e)e=refuse(j.vlp,0x274,0xc0000000,0);
     if(e)return e;
+    CLKSTEP("APLL capture");
     const unsigned apll_regs[]={8,0xc,0x14,0x34,0x38,0x3c,0x40};
     for(unsigned n=0;n<7;n++)s.apll[n]=rd(j.apll,apll_regs[n]);
     s.flags|=X9ClockAPLLCaptured;
-    if(with_pll){e=pll_cold();if(e)return e;}
+    if(with_pll){CLKSTEP("pll cold");e=pll_cold();if(e)return e;}
+    CLKSTEP("smc 0 (AFE init)");
     s.stage=X9ClockInit;s.flags|=X9ClockInitIssued;e=smc(0,0);if(e)return e;
+    CLKSTEP("domain votes");
     s.stage=X9ClockDomains;
     const unsigned bits[]={8,4,1};
     /* ADSP owner retains TOP/INFRA/AO. Native child MUST NOT vote/recover
@@ -255,8 +263,10 @@ static int take(bool with_pll,bool with_path)
         } else e=vote(bits[n],true);
         if(e)return e;
     }
+    CLKSTEP("mux take");
     s.stage=X9ClockMux;
     for(unsigned n=0;n<2;n++){e=mux_take(n);if(e)return e;}
+    CLKSTEP("first AFE reads (idle)");
     s.stage=X9ClockIdle;e=idle();if(e)return e; /* FIRST AFE reads */
     for(unsigned n=0;n<field_count();n++)field_prior[n]=fields[n].saved=fields[n].expected=rd(j.afe,fields[n].off);
     s.top_before=fields[0].saved;
@@ -265,14 +275,18 @@ static int take(bool with_pll,bool with_path)
     j.captured=true;s.flags|=X9ClockAFECaptured;
     /* Keep native APLL2/TUNER2 leaf gates off until PLL settling/meter
      * qualification completes; open HOPPING/F26M first for register access. */
+    CLKSTEP("AFE gates");
     s.stage=X9ClockGates;e=change(0,j.combined?fields[0].saved&0x1018:0);if(e)return e;
+    CLKSTEP("smc 7 (sidebands)");
     s.stage=X9ClockSidebands;s.flags|=X9ClockSidebandsIssued;e=smc(7,1);if(e)return e;
-    if(with_pll){e=pll_take();if(e)return e;}
-    if(j.combined){e=native_tuner_take();if(e)return e;}
+    if(with_pll){CLKSTEP("pll take");e=pll_take();if(e)return e;}
+    if(j.combined){CLKSTEP("tuner take");e=native_tuner_take();if(e)return e;}
+    CLKSTEP("I2S fields");
     s.stage=X9ClockI2S;
     for(unsigned n=1;!e && n<field_count();n++)e=change(n,fields[n].value);
     if(e)return e;
     if(with_path){e=path_take();if(e)return e;}
+    CLKSTEP("recheck");
     s.stage=X9ClockRecheck;e=idle();if(!e)e=verify_fields(false);if(e)return e;
     afe_snapshot(true);s.flags|=X9ClockConfigured;return 0;
 }

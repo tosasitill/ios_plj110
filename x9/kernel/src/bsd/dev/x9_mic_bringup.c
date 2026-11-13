@@ -52,6 +52,7 @@ static void report(void)
     x9_mic_mt6993_get_hardware(&h);x9_mic_mt6993_get_board(&b);x9_mic_mt6993_get_afe(&a);
     x9_mic_mt6993_get_analog(&an);x9_mic_mt6993_get_digital(&d);x9_mic_mt6993_get_dma(&m);
     x9_mic_mt6993_get_signal(&s);
+    printf("X9 MIC: board xo=%x/%x sleep=%x/%x gate=%x/%x\n",b.xo_before,b.xo_after,b.sleep_before,b.sleep_after,b.gate_before,b.gate_after);
     printf("X9 MIC: board stage=%u flags=%x err=%u restore=%u reg=%x bus_fault=%x/%u | codec stage=%u flags=%x err=%u restore=%u reg=%x\n",
         b.stage,b.flags,b.last_errno,b.restore_errno,b.last_register,b.bus_fault_register,b.bus_fault_errno,
         h.stage,h.flags,h.last_errno,h.restore_errno,h.last_register);

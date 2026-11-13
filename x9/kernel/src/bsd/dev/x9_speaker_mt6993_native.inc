@@ -183,10 +183,11 @@ int x9_speaker_mt6993_clock_acquire(const struct x9_speaker_clock_policy *p)
         /* Recheck AFTER pinning the parent: a changed/resetting transport
          * between the first status read and child acquisition grants nothing.
          * Do not issue AUDIO SMC/votes before this second live admission. */
+        CLKSTEP("native board");
         e=native_board();if(!e)e=x9_adsp_status(0,&ds);
         if(!e && (ds.state!=X9DSPOnline || ds.error || ds.generation!=p->generation))e=ESTALE;
         if(!e)e=take(true,false);
-        if(!e)e=native_mapping();
+        if(!e){CLKSTEP("native mapping");e=native_mapping();}
         if(!e){native_clock.configured=true;e=native_validate_locked(p->ticket);}
         if(e)e=native_fault(e); /* retained child; no automatic unwind */
     }
