@@ -261,7 +261,18 @@ static int take(bool with_pll,bool with_path)
      * voter. It is borrowed (never withdrawn); anything partial is refused. */
     bool audio_inherited=j.combined && (s.ap_before&1) && (s.all_before&1) &&
         (s.ack_before&1) && !(rd(j.hwv,0x13704)&1) && !s.foreign_before;
-    if(audio_inherited){trace=false;CLKSTEP("AUDIO domain inherited on: borrowed");trace=true;}
+    if(audio_inherited) {
+        /* Log 272: LK leaves AUDIO powered but with SSYS bus protection on
+         * (SPM 0x903c=80f0100c, PROTECT_EN|RDY). The AFE is unreachable then;
+         * refuse before any AFE access instead of borrowing it. */
+        static vm_offset_t spm_pbus;
+        if(!spm_pbus)spm_pbus=ml_io_map(0x1c00d000,0x1000);
+        uint32_t pb=spm_pbus?*(volatile uint32_t *)(spm_pbus+0x3c):0;
+        trace=false;
+        printf("X9 SPK CLK: inherited AUDIO SSYSPM 0x903c=%x\n",pb);
+        if((pb&(0x80000000u|0xcu))!=0x80000000u){CLKSTEP("AUDIO inherited but bus-protected: refused (EBUSY)");return EBUSY;}
+        CLKSTEP("AUDIO domain inherited on: borrowed");trace=true;
+    }
     else if((s.ap_before|s.all_before|s.ack_before|rd(j.hwv,0x1131c)|rd(j.hwv,0x13704))&(j.combined?1:3) ||
        s.foreign_before){trace=false;CLKSTEP("cold check refused (EBUSY)");return EBUSY;}
     if(j.combined) {

@@ -279,9 +279,29 @@ static int afe_take(struct afe_journal *a,vm_offset_t gpio,struct x9_mic_afe_sta
             uint32_t pb=rr(a->spm_pbus,AUDIO_SSYSPM_PBUS_OFFSET);
             printf("X9 MIC AFE: inherited AUDIO SSYSPM 0x903c=%x (ack=%u prot_en=%u prot_rdy=%u sram=%u/%u pwr=%u)\n",
                 pb,pb>>31,(pb>>2)&1,(pb>>3)&1,pb&1,(pb>>1)&1,(pb>>4)&1);
-            if((pb&(AUDIO_SSYSPM_PWR_ACK|AUDIO_SSYSPM_PROTECT))!=AUDIO_SSYSPM_PWR_ACK) {
+            if((pb&(AUDIO_SSYSPM_PWR_ACK|AUDIO_SSYSPM_PROTECT))==AUDIO_SSYSPM_PWR_ACK)continue;
+            /* Log 272: 0x903c=80f0100c, LK left AUDIO powered with SSYS bus
+             * protection enabled and ready, so the AFE is unreachable. Follow
+             * the Linux flow (genpd turns off the unused domain, AFE probe
+             * powers it back on via HWV, which releases protection): withdraw
+             * the sole AP vote, wait for full off, then the normal cold vote.
+             * Only with no foreign voter and no busy flag; restore later
+             * withdraws our own vote, leaving AUDIO off as Linux does. */
+            if(!(pb&AUDIO_SSYSPM_PWR_ACK) || afe_foreign_votes(a) || (rr(a->hwv,0x13704)&1)) {
                 s->last_register=X9_MIC_AFE_REGISTER_SPM|0x903cu;return EBUSY;
             }
+            printf("X9 MIC AFE: inherited AUDIO bus-protected: cycling AP vote (off, then HWV power-on)\n");
+            a->borrowed&=~1u;
+            e=afe_vote(a,1,false);
+            if(!e)e=wait_bits(a->hwv,0x12900,1,0,10000);
+            if(!e && ((rr(a->hwv,0x13700)&1) || afe_foreign_votes(a)))e=EBUSY;
+            if(!e)e=afe_spm_wait(a,AUDIO_SSYSPM_PWR_ACK,0);
+            if(e){a->stuck=true;return e;}
+            printf("X9 MIC AFE: AUDIO off, 0x903c=%x\n",rr(a->spm_pbus,AUDIO_SSYSPM_PBUS_OFFSET));
+            e=afe_vote(a,1,true);if(e)return e;
+            e=afe_spm_wait(a,AUDIO_SSYSPM_PWR_ACK|AUDIO_SSYSPM_PROTECT,AUDIO_SSYSPM_PWR_ACK);
+            printf("X9 MIC AFE: AUDIO re-powered -> %d, 0x903c=%x\n",e,rr(a->spm_pbus,AUDIO_SSYSPM_PBUS_OFFSET));
+            if(e)return e;
             continue;
         }
         if(bits[i]==1 && (((rr(a->hwv,0x13700)|rr(a->hwv,0x12900))&1) || afe_foreign_votes(a))) {
