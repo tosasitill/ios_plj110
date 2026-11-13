@@ -690,6 +690,7 @@ static int board_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_stat
         if(!e){e=x9_mic_mt6681_verify_capture(&j->codec);
             if(e)digital->last_register=j->codec.status.last_register;}
         if(!e)e=digital_signal_observe(j->cal);
+        if(j->codec.digital_owned)x9_mic_mt6681_dump(&j->codec); /* diagnostic, read-only */
         *h=j->codec.status;
     }
     if(digital)digital->last_errno=e;

@@ -42,7 +42,7 @@ static int digital_signal_observe(struct afe_journal *a)
     s->flags=X9_MIC_SIGNAL_ATTEMPTED;s->target_reads=64;s->interval_us=125;
     uint64_t start=mach_absolute_time(),ticks;
     nanoseconds_to_absolutetime(20000000,&ticks);uint64_t deadline=start+ticks;
-    int e=0;
+    int e=0;unsigned sdin[2]={0,0};
     for(unsigned i=0;i<s->target_reads;i++) {
         s->rejected_read=i+1;s->last_register=RX_UL0;
         if(mach_absolute_time()>=deadline){e=ETIMEDOUT;break;}
@@ -53,6 +53,7 @@ static int digital_signal_observe(struct afe_journal *a)
         uint32_t sync0=rr(a->afe,RX_MON0),sync1=rr(a->afe,RX_MON1);
         s->sync_last[0]=sync0;s->sync_last[1]=sync1;
         if(!i){s->sync_first[0]=sync0;s->sync_first[1]=sync1;}
+        sdin[0]+=(sync0>>22)&1;sdin[1]+=(sync1>>22)&1; /* RXIF_SDATA_IN line sample */
         /* RXIF search-fail (bit21) is only dumped by OPPO, never gated. */
         /* Known control fields: SRC on, ordinary voice48k3, no loopback.
          * Do not interpret SDM bit30 or SLT debug counter as PCM/drain. */
@@ -72,8 +73,8 @@ static int digital_signal_observe(struct afe_journal *a)
         if(i+1<s->target_reads)delay(s->interval_us);
     }
     absolutetime_to_nanoseconds(mach_absolute_time()-start,&s->elapsed_ns);
-    printf("X9 MIC SIGNAL: reads=%u err=%d MON first=%x/%x last=%x/%x UL raw first=%x/%x last=%x/%x changes=%u/%u\n",
-        s->reads,e,s->sync_first[0],s->sync_first[1],s->sync_last[0],s->sync_last[1],
+    printf("X9 MIC SIGNAL: sdata_in_high=%u/%u reads=%u err=%d MON first=%x/%x last=%x/%x UL raw first=%x/%x last=%x/%x changes=%u/%u\n",
+        sdin[0],sdin[1],s->reads,e,s->sync_first[0],s->sync_first[1],s->sync_last[0],s->sync_last[1],
         s->channel[0].raw_first,s->channel[1].raw_first,s->channel[0].raw_last,s->channel[1].raw_last,
         s->channel[0].changes,s->channel[1].changes);
     s->last_errno=e;

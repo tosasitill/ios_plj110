@@ -236,6 +236,37 @@ static int enable_vaud18(struct x9_mic_mt6681 *c)
     vaud18_dump(c);
     return ETIMEDOUT;
 }
+void x9_mic_mt6681_dump(struct x9_mic_mt6681 *c)
+{
+    if(!c || c->poisoned || !c->touched)return;
+    uint32_t saved_register=c->status.last_register;
+    /* OPPO mt6681_final_dump set, MT6681 addresses from mfd/mt6681-private.h */
+    static const uint16_t regs[]={
+        0x2c87,0x2c88,0x2c89,0x232b,0x2509,0x238b,      /* TX_CFG0 x2, TX_CFG, PAD, UL_DL, AFE_TOP */
+        0x2387,0x2388,0x2389,0x238a,0x230b,0x2311,0x990, /* AUDIO_TOP0-3, CKPDN, CKSEL, CLKSQ */
+        0x2390,0x238f,0x238e,                            /* MTKAIF_MUX_CFG, _M, _H */
+        0x250a,0x250b,0x250c,0x250d,0x258a,              /* UL_SRC_CON0_3..0, ADDA6 UL_SRC_CON0_0 */
+        0x2332,0x2333,0x2334,0x2335,0x2336,0x2337,      /* DCCLK1/2 CFG0-2 */
+        0xaf,0xb2,0xb5,0x2328,0x2329,0x232a,             /* GPIO MODE2-4, DIG_CFG, _H, CFG1 */
+        0x1c08,0x9a4,0x1b87,0x1b8a};                     /* VD105, STRUP_ELR_1, VAUD18 CON0/MON */
+    uint8_t v[sizeof(regs)/sizeof(regs[0])];int e=0;
+    for(unsigned i=0;i<sizeof(regs)/sizeof(regs[0]);i++){v[i]=0xee;int r=read8(c,regs[i],&v[i]);if(r && !e)e=r;}
+    printf("X9 MIC CODEC: err=%d TX=%02x/%02x TXCFG=%02x PAD=%02x ULDL=%02x AFETOP=%02x ATOP=%02x/%02x/%02x/%02x CKPDN=%02x CKSEL=%02x CLKSQ=%02x MUX=%02x/%02x/%02x\n",
+        e,v[0],v[1],v[2],v[3],v[4],v[5],v[6],v[7],v[8],v[9],v[10],v[11],v[12],v[13],v[14],v[15]);
+    printf("X9 MIC CODEC: ULSRC=%02x%02x%02x%02x ADDA6UL=%02x DCCLK=%02x/%02x/%02x %02x/%02x/%02x GPIO=%02x/%02x/%02x DIG=%02x/%02x/%02x VD105=%02x ELR1=%02x VAUD18=%02x/%02x\n",
+        v[16],v[17],v[18],v[19],v[20],v[21],v[22],v[23],v[24],v[25],v[26],v[27],v[28],v[29],v[30],v[31],v[32],v[33],v[34],v[35],v[36]);
+    /* UL_SRC_MON0 (0x256a..d) = codec ADC/SRC output; MTKAIFV4_MON0 (0x2c9d)
+     * bit6 TXIF_SDATA_OUT, ADDA6 MON0 0x2ca3. Toggling = codec TX is live. */
+    static const uint16_t mon[]={0x256a,0x256b,0x256c,0x256d,0x2c9d,0x2c9e,0x2ca3,0x2ca4};
+    for(unsigned k=0;k<6;k++) {
+        uint8_t m[8];e=0;
+        for(unsigned i=0;i<8;i++){m[i]=0xee;int r=read8(c,mon[i],&m[i]);if(r && !e)e=r;}
+        printf("X9 MIC CODEC MON[%u]: err=%d ULMON=%02x%02x%02x%02x AIF=%02x/%02x AIF6=%02x/%02x\n",
+            k,e,m[0],m[1],m[2],m[3],m[4],m[5],m[6],m[7]);
+        delay(200);
+    }
+    c->status.last_register=saved_register;
+}
 int x9_mic_mt6681_verify_capture(struct x9_mic_mt6681 *c)
 {
     if(!c->touched || c->poisoned || !(c->status.flags&X9_MIC_HW_CALIBRATED) ||

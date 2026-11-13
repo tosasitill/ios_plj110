@@ -69,5 +69,8 @@ int x9_mic_mt6681_digital_stop(struct x9_mic_mt6681 *);
 /* Read-only bounded check before either end's shutdown. A conflict poisons
  * this transaction; this is not global codec ownership or a DMA drain. */
 int x9_mic_mt6681_digital_restore_guard(struct x9_mic_mt6681 *);
+/* Read-only print of the registers OPPO mt6681_final_dump shows, plus
+ * repeated samples of codec UL SRC output and MTKAIF TX monitor. */
+void x9_mic_mt6681_dump(struct x9_mic_mt6681 *);
 #endif
 #endif

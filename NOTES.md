@@ -760,3 +760,28 @@ Fixed in mic20:
 4. New prints: "X9 MIC MTKAIF:" (CFG/RXCFG2/DATA/TX/RX/PAD/UL/ENGEN/TOP0-4/MON)
    and "X9 MIC SIGNAL:" (MON first/last, UL raw, change counts).
 Image: x9/out/x9-mic20-20261113/boot.img (same boot args as mic19).
+
+### mic21 (2026-11-13) — log 281: DMA runs, data all zero
+
+Log 281 (mic20): first time VUL1 DMA ran. CUR moved, 48160 frames in 1 s,
+capture -> 0. All samples 0. AP UL0 shadow raw stays c0000000/60000000 (SRC on,
+data 0). MTKAIFV4 MON0 and ADDA6 MON0 = 0x200008 (search fail) throughout.
+MTKAIF dump: CFG 80010000/80010000, RXCFG2 6300000/6303100, TOP0=0 TOP1=555000.
+The dma err=70 (ESTALE) is benign: the worker delivered one 16-frame chunk after
+the 1 s window closed (x9_mic_deliver rejects once RUNNING is cleared).
+Statically confirmed:
+- live DT: audio-r-miso1-enable=<1>, accdet-efuse-check=<0>, so R_MISO1.
+- AP pins 98/100/101/102/103 func1 match live DT.
+- Codec AIFTX_Supply chain (CLKSQ+AUDENC, CKPDN AUDIF/AUD, SRAM, AUDIO_TOP0-3
+  dbf/00/c1, AFE_ON, UL_DL AFE_ON, TX 0x29/0x2b, PAD 0x39, GPIO MODE4 MISO1)
+  matches OPPO.
+- Calibration uses codec dat_miso_loopback, so it proves the pad/line and clock,
+  not codec TX.
+Changed in mic21:
+1. Codec UL_SRC_CON0_1: IIR_ON=1 (OPPO mt6681_set_ul_src), not bypass.
+2. New x9_mic_mt6681_dump(): the OPPO final_dump register set ("X9 MIC CODEC:")
+   plus 6 samples of codec UL_SRC_MON0 (0x256a-d) and codec MTKAIFV4_MON0
+   0x2c9d/0x2c9e (bit6 TXIF_SDATA_OUT) / ADDA6 0x2ca3/4 ("X9 MIC CODEC MON[k]").
+3. AP SIGNAL line now counts the RXIF_SDATA_IN (bit22) high samples.
+How to read it: codec ULMON changing means the ADC works; AIF bit6 toggling
+means codec TX is live; sdata_in_high>0 means the AP pad sees the line.
