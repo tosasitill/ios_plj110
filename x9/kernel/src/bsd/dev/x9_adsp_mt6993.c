@@ -37,6 +37,12 @@ static int access_error; /* reset only by a new explicit control operation */
 static bool new_control;
 static X9AudioBoardStatus status;
 static struct x9_adsp_handoff layout;
+/* AP HWV votes LK left set and we adopted (warm takeover, logs 249-251).
+ * Counted as our lease like owned_vote but NEVER withdrawn by chain_off. */
+static uint32_t inherited_vote;
+/* OPPO adsp_system_bootup starts the LK-loaded image with SYS_CLEAR +
+ * CORE_START only; RELOAD belongs to recovery after a launch (adsp_reset). */
+static bool reload_needed;
 enum { AudioSemIdle, AudioSemAcquireUncertain, AudioSemHeld,
        AudioSemReleaseUncertain, AudioSemLost };
 static uint32_t audio_sem_state;
@@ -107,7 +113,7 @@ static void snapshot(void)
      * only using AO HWV/arbiter before touching either domain mapping. */
     bool held=exclusive && resource_ticket && !access_error &&
         !x9_audio_resources_status(&ticket) && ticket.owner==resource_owner &&
-        ticket.ticket==resource_ticket && (status.owned_vote&(TOP|INFRA))==(TOP|INFRA) &&
+        ticket.ticket==resource_ticket && ((status.owned_vote|inherited_vote)&(TOP|INFRA))==(TOP|INFRA) &&
         (status.ap_vote&CHAIN)==CHAIN && (status.pd_done&CHAIN)==CHAIN &&
         (status.all_vote&CHAIN)==CHAIN && !(status.pd_busy&CHAIN);
     if(held) {
@@ -134,8 +140,8 @@ static int qualify(void)
         X9AudioResourceStatus ticket;x9_audio_resources_status(&ticket);
         if(!exclusive || !resource_ticket || ticket.owner!=resource_owner || ticket.ticket!=resource_ticket)
             return guard_failure(X9BoardGuardLease,UINT32_MAX,resource_owner,ticket.owner,ENXIO);
-        if((status.owned_vote&(TOP|INFRA))!=(TOP|INFRA))
-            return guard_failure(X9BoardGuardLease,UINT32_MAX,TOP|INFRA,status.owned_vote&(TOP|INFRA),ENXIO);
+        if(((status.owned_vote|inherited_vote)&(TOP|INFRA))!=(TOP|INFRA))
+            return guard_failure(X9BoardGuardLease,UINT32_MAX,TOP|INFRA,(status.owned_vote|inherited_vote)&(TOP|INFRA),ENXIO);
         if((status.ap_vote&CHAIN)!=CHAIN)
             return guard_failure(X9BoardGuardHWV,PD_EN,CHAIN,status.ap_vote&CHAIN,ENXIO);
         if((status.pd_done&CHAIN)!=CHAIN)
@@ -146,8 +152,10 @@ static int qualify(void)
     }
     /* WFI, firmware RSV, VLOGIC/SRAM diagnostic values are not guessed
      * wake semantics. The pinned v3 path never initiates runtime suspend. */
+    /* DPSW ack is diagnostic only (OPPO v3 prints it in sysfs dpsw_info and
+     * never gates on it); req=0/ack=1 is the static idle value (logs 250/251).
+     * An outstanding request still blocks. */
     if(status.dpsw_req&1)return guard_failure(X9BoardGuardCFG,0x590,0,status.dpsw_req&1,EBUSY);
-    if(status.dpsw_ack&1)return guard_failure(X9BoardGuardCFG,0x594,0,status.dpsw_ack&1,EBUSY);
     return 0;
 }
 static int validate(void *unused)
@@ -432,6 +440,28 @@ static void begin_control(void)
      * A waiting admin operation must not clear a running poll's failure. */
     if(new_control){new_control=false;access_error=0;}
 }
+/* board_lock held. Warm takeover of LK's AP votes only with the full idle
+ * proof seen in logs 250/251: chain voted/ON/done/not busy, no firmware
+ * status, both WDTs off, AXI pending == mt6993 axibus_idle_val (0), no DPSW
+ * request, AUDIO semaphore free. Reads only; cfg is touched after HWV proves
+ * the domains on. Anything else stays a refusal (never reset a live system). */
+static int adopt_inherited(void)
+{
+    uint32_t en=rd(hwv,PD_EN),all=rd(hwv,PD_ALL),busy=rd(hwv,PD_BUSY),done=rd(hwv,PD_DONE);
+    if(status.owned_vote || inherited_vote || (en&CHAIN)!=CHAIN || (all&CHAIN)!=CHAIN ||
+       (done&CHAIN)!=CHAIN || (busy&CHAIN)) {
+        printf("X9 ADSP ADOPT: refused, hwv ap=%x all=%x done=%x busy=%x owned=%x\n",en,all,done,busy,status.owned_vote);
+        return guard_failure(X9BoardGuardHWV,PD_EN,CHAIN,en&CHAIN,EBUSY);
+    }
+    uint32_t sysA=rd(cfg,0x8c),sysB=rd(cfg,0x90),wdtA=rd(cfg,0x7c),wdtB=rd(cfg,0x68);
+    uint32_t pend=rd(cfg,0x15c),dreq=rd(cfg,0x590),sem=rd(cfg,AUDIO_SEM_REG);
+    bool idle=!sysA && !sysB && !(wdtA&0x80000000u) && !(wdtB&0x80000000u) && !pend &&
+        !(dreq&1) && !(sem&AUDIO_SEM_BIT);
+    printf("X9 ADSP ADOPT: %s LK AP votes ap=%x; sys A=%x B=%x wdt A=%x B=%x pending=%x dpsw_req=%x sem=%x\n",
+        idle?"adopting":"refused, not idle:",en&CHAIN,sysA,sysB,wdtA,wdtB,pend,dreq,sem);
+    if(!idle)return guard_failure(X9BoardGuardCFG,0x8c,0,sysA|sysB,EBUSY);
+    inherited_vote=en&CHAIN;return 0;
+}
 static int power_on(void *unused)
 {
     (void)unused;lck_mtx_lock(&board_lock);int e=0;
@@ -449,15 +479,15 @@ static int power_on(void *unused)
         } else e=x9_audio_resources_claim(X9AudioResourceADSP,&resource_ticket);
         if(e){status.error=(uint32_t)e;lck_mtx_unlock(&board_lock);return e;}
         snapshot();e=wait_bits(hwv,PD_DONE,CHAIN,CHAIN,10000);
-        if(!e && ((rd(hwv,PD_EN)|rd(hwv,PD_ALL)|rd(hwv,PD_BUSY))&(TOP|INFRA)))e=EBUSY;
+        if(!e && ((rd(hwv,PD_EN)|rd(hwv,PD_ALL)|rd(hwv,PD_BUSY))&(TOP|INFRA)))e=adopt_inherited();
         if(!e) {
-            /* Proven off TOP+INFRA means neither core is executing. The
-             * built-in provider owns both reset domains but starts only A. */
+            /* Proven off TOP+INFRA, or adopted idle LK votes: neither core is
+             * executing. The provider owns both reset domains, starts only A. */
             exclusive=true;status.flags|=X9BoardExclusive;
             e=chain_on();
             if(e) {
                 int off=chain_off();status.restore_error=(uint32_t)off;
-                if(!off){exclusive=false;status.flags&=~X9BoardExclusive;}
+                if(!off){exclusive=false;inherited_vote=0;status.flags&=~X9BoardExclusive;}
                 else status.flags|=X9BoardPowered;
             }
         }
@@ -513,7 +543,10 @@ static int core_start(void *unused)
         /* Revoke the cold shortcut BEFORE entering secure firmware loading.
          * An error, or a lost lease after success, cannot retire these effects
          * using only our old reset_done/started snapshots. */
-        launch_issued=true;reset_done=false;e=smc(SMC_RELOAD,0xad5bad5b);
+        launch_issued=true;reset_done=false;
+        if(reload_needed)e=smc(SMC_RELOAD,0xad5bad5b);
+        else printf("X9 ADSP: first launch of the LK-loaded image, no RELOAD (OPPO adsp_system_bootup)\n");
+        reload_needed=true;
     }
     if(!e)e=qualify();
     if(!e) {
@@ -533,7 +566,7 @@ static int power_off(void *unused)
         e=qualify();
         if(!e && (rd(cfg,AUDIO_SEM_REG)&AUDIO_SEM_BIT))e=EBUSY;
         if(!e)e=chain_off();
-        if(!e){exclusive=reset_done=false;status.flags&=~(X9BoardPowered|X9BoardExclusive);}
+        if(!e){exclusive=reset_done=false;inherited_vote=0;status.flags&=~(X9BoardPowered|X9BoardExclusive);}
     }
     if(!e && !exclusive && resource_ticket) {
         /* The combined caller owns other children. Clearing our association
