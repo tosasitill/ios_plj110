@@ -33,6 +33,11 @@ extern "C" {
  * cached only; neither call registers a provider or automatically probes. */
 int x9_tfa_plj110_probe(void);
 int x9_tfa_plj110_status(X9AudioAmpStatus *);
+/* Bring-up session: probe admission, then reg8/value16 BE to 0x34/0x35. */
+int x9_tfa_plj110_session_open(void);
+int x9_tfa_plj110_read16(unsigned slave,uint8_t reg,uint16_t *);
+int x9_tfa_plj110_write16(unsigned slave,uint8_t reg,uint16_t);
+int x9_tfa_plj110_session_close(void);
 #ifdef __cplusplus
 }
 #endif

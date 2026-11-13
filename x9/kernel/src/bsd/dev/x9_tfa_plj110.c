@@ -347,3 +347,125 @@ int x9_tfa_plj110_status(X9AudioAmpStatus *out)
 /* Separate state: diagnostic observations never authorize native writes. */
 #include "x9_i2c6_native.inc"
 #include "x9_pa_native.inc"
+
+/* ---- Speaker bring-up session (x9_dsp_boot test path only) ----
+ * Same admission as the probe (PMIC reset/supply snapshot, already-on
+ * parents, stale INTR_MASK, journaled CSRs), then arbitrary reg8/value16
+ * big-endian transfers to 0x34/0x35 until close restores the controller
+ * and gates imps_i2c6 again. PMIF is released right after the snapshot:
+ * the session never touches PMIC. One session per boot; excludes the probe. */
+static bool session_open,session_ungated;
+static int xfer(unsigned slave,uint8_t reg,bool write,uint16_t value,uint16_t *out)
+{
+    if(slave!=0x34 && slave!=0x35)return EINVAL;
+    if(j.bus_stuck)return EIO;
+    int e=idle();if(e)return e;
+    const unsigned r[]={CTRL,ADDR,LEN,AUX,TRANS};
+    uint32_t base=j.saved[0]&~(2u|4u|16u|256u|512u);
+    const uint32_t v[]={write?base|8u|32u:base|2u|8u|16u|32u, slave<<1,
+        write?3u:1u, write?0u:2u, write?1u:2u};
+    for(unsigned k=0;k<5;k++){e=put(r[k],v[k]);if(e)return e;}
+    s.last_slave=slave;wr(j.bus,FIFO_CLR,1);
+    *(volatile uint8_t *)(j.bus+DATA)=reg;
+    if(write) {
+        *(volatile uint8_t *)(j.bus+DATA)=(uint8_t)(value>>8);
+        *(volatile uint8_t *)(j.bus+DATA)=(uint8_t)value;
+    }
+    __asm__ volatile("dsb sy":::"memory");
+    if((rr(j.bus,FIFO_STATUS)&31)!=(write?3u:1u)) {
+        wr(j.bus,FIFO_CLR,1);if(idle())j.bus_stuck=true;return EIO;
+    }
+    wr(j.bus,START,write?1u:((1u<<14)|1u));
+    uint64_t ticks;nanoseconds_to_absolutetime(5000000,&ticks);
+    uint64_t end=mach_absolute_time()+ticks;uint32_t status=0;
+    for(unsigned n=0;n<1000;n++) {
+        status=rr(j.bus,STAT);if(status)break;
+        if(mach_absolute_time()>=end)break;delay(5);
+    }
+    s.request_status=status;s.request_start=rr(j.bus,START);s.request_fifo=rr(j.bus,FIFO_STATUS);
+    if(!status || (s.request_start&1)) {j.bus_stuck=true;return ETIMEDOUT;}
+    if(status&~7u) {j.bus_stuck=true;return EIO;}
+    if(status!=1)e=EIO; /* NACK */
+    if(!e && !write) {
+        if((s.request_fifo&31)!=2)e=EIO;
+        else {
+            uint16_t x=(uint16_t)((unsigned)*(volatile uint8_t *)(j.bus+DATA)<<8);
+            x|=*(volatile uint8_t *)(j.bus+DATA);*out=x;
+        }
+    }
+    wr(j.bus,STAT,status);wr(j.bus,FIFO_CLR,1);wr(j.bus,START,0);
+    if(idle()){j.bus_stuck=true;if(!e)e=EIO;}return e;
+}
+int x9_tfa_plj110_session_open(void)
+{
+    lck_mtx_lock(&i2c6_lock);
+    if(native_bus_held || (s.flags&X9PAProbeAttempted)){lck_mtx_unlock(&i2c6_lock);return EBUSY;}
+    s.flags=X9PAProbeAttempted;s.stage=X9PAStageMap;
+    j.pmif=ml_io_map(0x1c018000,0x2000);j.gpio=ml_io_map(0x1002d000,0x1000);
+    j.gate=ml_io_map(0x129d0000,0x1000);j.perao=ml_io_map(0x16640000,0x1000);
+    j.bus=ml_io_map(0x12990000,0x20000);j.dma=ml_io_map(0x16410000,0x10000);
+    j.top=ml_io_map(0x1c210000,0x1000);
+    j.mainpll=ml_io_map(0x1c213000,0x100);j.univpll=ml_io_map(0x1c213100,0x100);
+    int e=0;
+    if(!j.pmif || !j.gpio || !j.gate || !j.perao || !j.bus || !j.dma ||
+       !j.top || !j.mainpll || !j.univpll)e=ENOMEM;
+    if(!e){s.stage=X9PAStagePMIC;e=X9PMIFAcquire()?EBUSY:0;}
+    if(!e) {
+        e=pmic_snapshot(s.reset,s.supply);
+        if(!e){s.flags|=X9PAPMICCaptured;e=pmic_admit();}
+        X9PMIFRelease();
+    }
+    session_ungated=false;
+    if(!e) {
+        s.stage=X9PAStageClock;
+        if(rr(j.gate,0xe00)&4) {
+            wr(j.gate,0xe04,4);delay(10);
+            if(rr(j.gate,0xe00)&4)e=ENXIO;
+            else {session_ungated=true;j.stale_mask=true;s.flags|=X9PAClockUngated;}
+        }
+    }
+    if(!e)e=clock_check();
+    if(!e){s.stage=X9PAStageIdle;e=idle();}
+    if(!e) {
+        for(unsigned i=0;i<sizeof(regs)/sizeof(regs[0]);i++)j.saved[i]=rr(j.bus,regs[i]);
+        s.flags|=X9PABusCaptured|X9PAJournalHeld;
+        if(j.saved[MASK_SLOT]){e=put(MASK,0);if(!e)s.flags|=X9PAMaskCleared;}
+        j.stale_mask=false;
+        s.stage=X9PAStageTiming;if(!e)e=timing();
+    }
+    s.error=(uint32_t)e;
+    if(!e){session_open=true;s.stage=X9PAStageLeft;}
+    else {
+        s.restore_error=(uint32_t)restore();
+        if(session_ungated && !j.bus_stuck && !s.restore_error && !s.dirty_mask)wr(j.gate,0xe08,4);
+    }
+    lck_mtx_unlock(&i2c6_lock);return e;
+}
+int x9_tfa_plj110_read16(unsigned slave,uint8_t reg,uint16_t *out)
+{
+    if(!out)return EINVAL;
+    lck_mtx_lock(&i2c6_lock);int e=session_open?xfer(slave,reg,false,0,out):ENXIO;
+    lck_mtx_unlock(&i2c6_lock);return e;
+}
+int x9_tfa_plj110_write16(unsigned slave,uint8_t reg,uint16_t value)
+{
+    lck_mtx_lock(&i2c6_lock);int e=session_open?xfer(slave,reg,true,value,NULL):ENXIO;
+    if(!e)s.revision_read++; /* reused as a write counter in session mode */
+    lck_mtx_unlock(&i2c6_lock);return e;
+}
+int x9_tfa_plj110_session_close(void)
+{
+    lck_mtx_lock(&i2c6_lock);int e=session_open?0:ENXIO;
+    if(!e) {
+        session_open=false;
+        s.restore_error=(uint32_t)restore();e=(int)s.restore_error;
+        if(!s.dirty_mask)s.flags&=~X9PAJournalHeld;
+        if(j.bus_stuck || s.restore_error)s.flags|=X9PAPoisoned;
+        if(session_ungated && !j.bus_stuck && !s.restore_error && !s.dirty_mask) {
+            wr(j.gate,0xe08,4);delay(10);
+            if(rr(j.gate,0xe00)&4)s.flags|=X9PAClockRegated;
+        }
+        if(!e)s.stage=X9PAStageDone;
+    }
+    lck_mtx_unlock(&i2c6_lock);return e;
+}

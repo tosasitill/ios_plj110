@@ -6562,6 +6562,11 @@
    "template": "bsd-c-11"
   },
   {
+   "name": "x9_speaker_bringup.o",
+   "source": "bsd/dev/x9_speaker_bringup.c",
+   "template": "bsd-c-11"
+  },
+  {
    "name": "x9_pa_reset.o",
    "source": "bsd/dev/x9_pa_reset.c",
    "template": "bsd-c-11"

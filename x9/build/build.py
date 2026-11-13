@@ -272,6 +272,12 @@ class Builder:
         self.run_or_exit([sys.executable, '-I', str(X9 / 'tools/md_ota_pack.py'), '--src', str(mdota)] +
                          (['--required'] if real_modem or self.cfg.get('mdota_source') else []), ROOT,
                          label='md_ota_pack.py')
+        # Board TFA98xx container -> generated/x9_tfa_container.inc (gitignored; stub when absent)
+        tfa = Path(self.cfg.get('tfa_container') or
+                   ROOT / '.local/x9/work/speaker-20261113/odm-tfa98xx.cnt').expanduser()
+        self.run_or_exit([sys.executable, '-I', str(X9 / 'tools/tfa_container.py'), '--src', str(tfa)] +
+                         (['--required'] if self.cfg.get('tfa_container') else []), ROOT,
+                         label='tfa_container.py')
         cbn = [sys.executable, '-I', str(X9 / 'tools/carrier_cbn_pack.py'), '--metadata', str(self.out / 'carrier-cbn.json')]
         if self.cfg.get('carrier_cbn_ipcc'):
             cbn += ['--src', self.cfg['carrier_cbn_ipcc'], '--expected-sha1', self.cfg.get('carrier_cbn_sha1', '')]
