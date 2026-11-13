@@ -43,6 +43,41 @@ struct fdt_captured_property {
 int fdt_capture_nodes(uintptr_t,const char (*)[FDT_CAPTURE_PATH_BYTES],unsigned,
                      struct fdt_captured_property *,unsigned,unsigned *);
 
+/* Bounded multi-node collection (fdt_collect.c): the same complete-tree
+ * validation as fdt_property_lookup, run ONCE to record every property and
+ * the direct child count of up to 32 wanted nodes, plus ONCE more to check a
+ * batch of phandles. For boot-critical consumers that need many fields
+ * (audio); the per-field lookups above remain for small single-use callers.
+ * The struct is ~6 KiB: callers keep it in static storage, not the stack.
+ * Records are offsets into the caller's FDT, valid only for this call chain. */
+#define FDT_COLLECT_MAX_NODES 32u
+#define FDT_COLLECT_MAX_PROPERTIES 384u
+#define FDT_COLLECT_MAX_HANDLES 24u
+struct fdt_collected { uint16_t node,reserved; uint32_t key,value,bytes; };
+struct fdt_collect {
+    uintptr_t fdt;
+    const char (*paths)[FDT_CAPTURE_PATH_BYTES];
+    unsigned path_count,count,kicks,passes;
+    uint32_t required,present,strings;
+    uint64_t ticks;   /* CNT ticks spent in completed passes */
+    uint16_t children[FDT_COLLECT_MAX_NODES];
+    struct fdt_collected prop[FDT_COLLECT_MAX_PROPERTIES];
+};
+/* PRESENT: valid tree, every required node unique; c->present has the found
+ * (optional) nodes. NODE_MISSING/INVALID publish nothing. */
+int fdt_collect(struct fdt_collect *,uintptr_t,const char (*)[FDT_CAPTURE_PATH_BYTES],unsigned,uint32_t);
+/* Second pass: *ok bit i set iff handles[i] occurs exactly once as a
+ * phandle/linux,phandle, at collected node owners[i]. */
+int fdt_collect_phandles(struct fdt_collect *,const uint32_t *,const uint8_t *,unsigned,uint32_t *);
+/* 1 found, 0 absent from a collected node, -1 node not collected/present. */
+int fdt_collect_get(const struct fdt_collect *,unsigned,const char *,const uint8_t **,size_t *);
+/* fdt_node_schema semantics on a collected node (unknown key -> INVALID). */
+int fdt_collect_schema(const struct fdt_collect *,unsigned,const char (*)[32],unsigned,
+                       struct fdt_node_property *,uint32_t *,unsigned *);
+/* All pre-XNU audio handoffs (ADSP layout/IRQ/I2S4/PA, microphone DMA) from
+ * one collection. -1 ADT placeholders invalid, 0 nothing qualified, 1 some. */
+int fdt_audio_patch_adt(uintptr_t,void *,size_t);
+
 /* Bounded metadata from the last RAM check, for USB/pstore failure logs. */
 const char *fdt_ram_failure(uint64_t *,uint64_t *,uint64_t *,uint64_t *);
 int fdt_ram_memory_tuple(unsigned,uint64_t *,uint64_t *);
