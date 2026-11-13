@@ -39,13 +39,15 @@ enum { DATA=0, MASK=8, STAT=0xc, CTRL=0x10, LEN=0x14, TRANS=0x18,
     HS=0x30, IO=0x34, FIFO_CLR=0x38, SDA=0x3c, AUX=0x44, DIV=0x48,
     MULTI=0x8c, MIS=0x90, ADDR=0x94, FIFO_STATUS=0xf4 };
 static const unsigned regs[]={CTRL,LEN,TRANS,DELAY,AUX,ADDR,
-    TIMING,EXT,LTIMING,HS,SDA,DIV,IO,MIS};
+    TIMING,EXT,LTIMING,HS,SDA,DIV,IO,MIS,MASK};
+enum { MASK_SLOT=sizeof(regs)/sizeof(regs[0])-1 };
 static const unsigned reset_regs[]={0x8b,0xa3,0xa7,0xb9,0xd5,0xd6};
 static const unsigned supply_regs[]={0x24b,0x2087,0x20a2,0x20af};
 struct journal {
     vm_offset_t pmif,gpio,gate,perao,bus,dma,top,mainpll,univpll;
     uint32_t saved[sizeof(regs)/sizeof(regs[0])], expected[sizeof(regs)/sizeof(regs[0])];
     bool bus_stuck,pmif_stuck,clock_saved;
+    bool stale_mask; /* only while WE ungated a gated clock: no live owner */
 };
 static struct journal j;
 static X9AudioAmpStatus s={.version=X9_TFA_BOARD_STATUS_VERSION};
@@ -167,7 +169,7 @@ static int idle(void)
         vm_offset_t b=j.bus+i*0x10000;
         s.bank_start[i]=rr(b,START);s.bank_mask[i]=rr(b,MASK);
         s.bank_status[i]=rr(b,STAT);s.bank_fifo[i]=rr(b,FIFO_STATUS);
-        if(s.bank_start[i] || s.bank_mask[i] || s.bank_status[i] ||
+        if(s.bank_start[i] || (s.bank_mask[i] && !(i==0 && j.stale_mask)) || s.bank_status[i] ||
            (s.bank_fifo[i]&31) || rr(b,MULTI) ||
            (rr(b,CTRL)&(1u|4u|128u|256u|512u)))return EBUSY;
     }
@@ -298,14 +300,20 @@ int x9_tfa_plj110_probe(void)
         if(rr(j.gate,0xe00)&4) {
             wr(j.gate,0xe04,4);delay(10);
             if(rr(j.gate,0xe00)&4)e=ENXIO;
-            else {ungated=true;s.flags|=X9PAClockUngated;}
+            else {ungated=true;j.stale_mask=true;s.flags|=X9PAClockUngated;}
         }
     }
     if(!e){e=clock_check();}
     if(!e){s.stage=X9PAStageIdle;e=idle();}
     if(!e) {
         for(unsigned i=0;i<sizeof(regs)/sizeof(regs[0]);i++)j.saved[i]=rr(j.bus,regs[i]);
-        s.flags|=X9PABusCaptured|X9PAJournalHeld;s.stage=X9PAStageTiming;e=timing();
+        s.flags|=X9PABusCaptured|X9PAJournalHeld;
+        /* Log 256: LK leaves INTR_MASK=0x3f8 with START/STAT/FIFO idle. Clear
+         * it (journaled, restored) so no completion IRQ reaches an SPI XNU
+         * does not service; then idle again requires MASK=0. */
+        if(j.saved[MASK_SLOT]){e=put(MASK,0);if(!e)s.flags|=X9PAMaskCleared;}
+        j.stale_mask=false;
+        s.stage=X9PAStageTiming;if(!e)e=timing();
     }
     if(!e){s.stage=X9PAStageLeft;e=read_revision(0);}
     if(!e){s.stage=X9PAStageRight;e=read_revision(1);}
