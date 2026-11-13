@@ -225,7 +225,12 @@ static int enable_vaud18(struct x9_mic_mt6681 *c)
         c->status.vaud18_monitor=v;if(e)return e;
         /* Both bandgap and LDO report actual enable and stable, not just the
          * software request. Do not change VOSEL/VOCAL or copy efuse defaults. */
-        if((v&0x1b)==0x1b)return 0;
+        /* Log 269: MON stayed 0x03 with EN0 set. Per mt6681-private.h
+         * bit0/1 are DA_VAUD18_B_EN/B_STB (the main LDO stage) and bits3/4
+         * DA_VAUD18_L_EN/L_STB (its low-power stage, LP mode only), not a
+         * bandgap+LDO pair; OPPO's regulator path never polls MON. Main
+         * stage enabled and stable means VAUD18 is up. */
+        if((v&3)==3)return 0;
         if(mach_absolute_time()>=deadline)break;delay(100);
     }
     vaud18_dump(c);

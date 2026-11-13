@@ -285,8 +285,14 @@ static int native_restored_ao(void)
     if(!j.hwv || !j.vlp || !j.apll)return ENXIO;
     /* No AFE read after AUDIO power removal. Fresh AO proofs protect a
      * drop retry, not the cached clocks_restored boolean alone. */
+    /* A borrowed (LK-inherited, log 269) AUDIO domain must still be on as
+     * found, never busy; an owned one must be fully off. */
     const unsigned audio_off[]={0x20708,0x12900,0x13700,0x13704,0x1131c};
-    for(unsigned n=0;!e && n<5;n++)e=refuse(j.hwv,audio_off[n],1,0);
+    const bool borrowed=s.borrowed_vote&1;
+    for(unsigned n=0;!e && n<5;n++) {
+        if(borrowed && n==4)continue; /* power status follows the inherited on state */
+        e=refuse(j.hwv,audio_off[n],1,borrowed && n<3?1:0);
+    }
     if(!e)e=refuse(j.vlp,0x90,0x8383,s.vlp_before&0x8383);
     if(!e)e=refuse(j.vlp,0x274,0xc0000000,s.fenc_before&0xc0000000);
     if(!e && (pll_s.flags&X9PLLCaptured)) {

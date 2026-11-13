@@ -55,7 +55,12 @@ static void trace_access(const char *op,vm_offset_t b,unsigned r,uint32_t v)
     printf("X9 SPK CLK %s %s+%x (%lx) %x\n",op,n,r,phys+r,v);IOSleep(300);
 }
 static uint32_t rd(vm_offset_t b,unsigned r)
-{if(trace)trace_access("rd",b,r,0);uint32_t v=*(volatile uint32_t *)(b+r);__asm__ volatile("dmb oshld":::"memory");return v;}
+{
+    if(trace)trace_access("rd",b,r,0);
+    uint32_t v=*(volatile uint32_t *)(b+r);__asm__ volatile("dmb oshld":::"memory");
+    if(trace)printf("X9 SPK CLK    = %x\n",v);
+    return v;
+}
 static void wr(vm_offset_t b,unsigned r,uint32_t v)
 {if(trace)trace_access("wr",b,r,v);*(volatile uint32_t *)(b+r)=v;__asm__ volatile("dsb sy":::"memory");}
 static int wait_bits(vm_offset_t b,unsigned r,uint32_t mask,uint32_t value,unsigned us)
@@ -250,7 +255,14 @@ static int take(bool with_pll,bool with_path)
     s.stage=X9ClockCold;
     /* AUDIO and ADSP TOP must be globally off. INFRA/AO AP votes may be
      * borrowed under the same AP lease; foreign XPU votes are never reset. */
-    if((s.ap_before|s.all_before|s.ack_before|rd(j.hwv,0x1131c)|rd(j.hwv,0x13704))&(j.combined?1:3) ||
+    /* Log 269: LK leaves the AUDIO domain AP-voted and on (ap=3ce0f, still
+     * set after our full teardown, so not ours). In combined mode adopt
+     * exactly that: AP EN, PD_ALL and PM ACK bit0 set, not busy, no foreign
+     * voter. It is borrowed (never withdrawn); anything partial is refused. */
+    bool audio_inherited=j.combined && (s.ap_before&1) && (s.all_before&1) &&
+        (s.ack_before&1) && !(rd(j.hwv,0x13704)&1) && !s.foreign_before;
+    if(audio_inherited){trace=false;CLKSTEP("AUDIO domain inherited on: borrowed");trace=true;}
+    else if((s.ap_before|s.all_before|s.ack_before|rd(j.hwv,0x1131c)|rd(j.hwv,0x13704))&(j.combined?1:3) ||
        s.foreign_before){trace=false;CLKSTEP("cold check refused (EBUSY)");return EBUSY;}
     if(j.combined) {
         trace=false;CLKSTEP("adsp speaker_validate");trace=true;
@@ -274,6 +286,11 @@ static int take(bool with_pll,bool with_path)
      * those dependencies itself; it owns only AUDIO bit0. */
     for(unsigned n=j.combined?2:0;n<3;n++) {
         if(j.combined){e=x9_adsp_mt6993_speaker_validate(s.ticket);if(e){j.stuck=true;return e;}}
+        if(bits[n]==1 && audio_inherited) {
+            if((rd(j.hwv,0x20708)&rd(j.hwv,0x13700)&rd(j.hwv,0x12900)&1)!=1 ||
+               (rd(j.hwv,0x13704)&1) || foreign()){j.stuck=true;return EBUSY;}
+            s.borrowed_vote|=1;continue;
+        }
         if(bits[n]==1 && ((rd(j.hwv,0x13700)|rd(j.hwv,0x12900)|rd(j.hwv,0x13704))&(j.combined?1:3) || foreign())) {
             j.stuck=true;return EBUSY;
         }
