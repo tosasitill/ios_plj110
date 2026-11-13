@@ -190,7 +190,12 @@ static void dspBootOnce(void *arg, wait_result_t)
     int micMs = sweet_x9_arg("x9_mic_boot", 0);
     bool spkFirst = sweet_x9_arg("x9_spk_first", 1) != 0;
     if (micMs > 0 && !spkFirst) IOLog("X9 AUDIO DSPBOOT: mic capture result=%d\n", x9_mic_bringup_run((unsigned)micMs));
-    if (!sweet_x9_arg("x9_spk_boot", 1)) {
+    /* Logs 253-277: every boot that launched the ADSP (warm takeover) hung
+     * the SoC 0.4-25 s later unless the DSP was halted first (269, 276); 277
+     * hung 0.35 s after launch with no AP access and no mic run. The AP-side
+     * ADSP runtime protocol (SLB init, awake, feature/suspend) is missing.
+     * Speaker (which launches the DSP) is opt-in until that exists. */
+    if (!sweet_x9_arg("x9_spk_boot", 0)) {
         IOLog("X9 AUDIO DSPBOOT: speaker bring-up skipped (x9_spk_boot=0)\n");
         if (micMs > 0 && spkFirst) IOLog("X9 AUDIO DSPBOOT: mic capture result=%d\n", x9_mic_bringup_run((unsigned)micMs));
         return;
