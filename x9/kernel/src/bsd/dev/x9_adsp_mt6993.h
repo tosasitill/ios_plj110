@@ -24,6 +24,14 @@ void x9_audio_handoff_report(void); /* read-only boot report of /chosen audio sl
  * Boot must precede AFE parent acquisition; neither op1 nor op2 may be issued
  * while DSP-output DMA is active. These calls never grant speaker Ready. */
 int x9_adsp_mt6993_speaker_control(uint32_t operation,uint64_t ticket);
+/* operation 3: AP-only hold (adopt/vote the chain, exclusive, borrowed
+ * ticket; never SYS_CLEAR/RELOAD/CORE_START). 4: release that hold after
+ * AFE/pad/clock teardown. 1/2 refuse an AP-only hold; 4 refuses a DSP boot. */
+/* Same-ticket board validation plus liveness: the AP-only generation when
+ * held that way, else transport Online with this generation. */
+int x9_adsp_mt6993_speaker_online(uint64_t ticket,uint32_t generation);
+int x9_adsp_mt6993_speaker_ap_only(void);
+uint32_t x9_adsp_mt6993_speaker_generation(uint64_t ticket); /* 0 unless AP-only */
 /* Fresh same-ticket board validation, not READY or an EMI grant. */
 int x9_adsp_mt6993_speaker_validate(uint64_t ticket);
 int x9_adsp_mt6993_speaker_halted_validate(uint64_t ticket);

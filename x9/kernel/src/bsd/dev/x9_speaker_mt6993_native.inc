@@ -11,24 +11,35 @@ static int restore(void);
 static struct {
     struct x9_speaker_clock_policy policy;
     uint64_t child,pad_child,pa_child,rail_child,leaf_serial;
-    uint32_t last_generation,error,dirty,uncertain,prior[3];
+    uint32_t last_generation,error,dirty,uncertain,prior[5];
     bool active,configured,tuner_captured,clocks_restored;
 } native_clock;
+/* OPPO mt6993_afe_runtime_resume (SPM 26M request, CBIP, ENGEN bit0
+ * AUDIO_26M_EN_ON = "enable AFE") + mt6993_apll2_enable (tuner, bit3), the
+ * same engine bits the mic owns (x9_mic_plj110_afe.inc). Without bit0 the
+ * memif/ETDM never run. Restored in reverse; ENGEN off waits MON 0x7c. */
+enum { NT_SPM, NT_CBIP, NT_TUNER, NT_ENGEN, NT_CG, NT_COUNT };
 static struct field native_tuner[]={
+    /* AFE_SPM_CONTROL_REQ: SRCCLKENA bit2 (resume) + mt6993_afe_dram_request
+     * APSRC bit3/DDREN bit6/DDREN_URG bit7, needed by the DRAM-backed DL24
+     * (the mic's VUL1 sets the same three). Held until after the drain. */
+    {0x60,0xcc,0xcc,0,0},
+    {0x4380,1,1,0,0},       /* AFE_CBIP_CFG0 bit0 */
     {0x38,0xfff7,0x375,0,0}, /* AFE_APLL2_TUNER_CFG, source 0x374 + EN */
-    {0x14,8,8,0,0},         /* AUDIO_ENGEN_CON0 APLL2_EN_ON bit3 */
+    {0x14,9,9,0,0},         /* AUDIO_ENGEN_CON0 26M_EN_ON bit0 + APLL2_EN_ON bit3 */
     {0x08,1u<<17,0,0,0},    /* bank3 ETDM_OUT4 clock CG only, NOT engine EN */
 };
+_Static_assert(sizeof(native_tuner)/sizeof(native_tuner[0])==NT_COUNT,"native tuner journal");
 static uint32_t native_engen_expected(void)
-{return native_clock.tuner_captured?native_tuner[1].expected&15:0;}
+{return native_clock.tuner_captured?native_tuner[NT_ENGEN].expected&15:0;}
 static int native_engen_idle(void)
 {
     uint32_t value=rd(j.afe,0x14)&15;
     if(value==native_engen_expected())return 0;
     /* Cleanup of the LAST uncertain ENGEN write accepts only its observed
      * prior, not a generic inactive value or the generation's old baseline. */
-    if(native_clock.tuner_captured && (native_clock.uncertain&2) &&
-       value==(native_clock.prior[1]&15))return 0;
+    if(native_clock.tuner_captured && (native_clock.uncertain&(1u<<NT_ENGEN)) &&
+       value==(native_clock.prior[NT_ENGEN]&15))return 0;
     s.last_register=0x14;s.last_value=value;return EBUSY;
 }
 _Static_assert(sizeof(X9AudioClockStatus)==216,"clock diagnostic ABI unchanged");
@@ -43,6 +54,9 @@ static int native_fault(int e)
 }
 static int native_board(void)
 {
+    /* AP-only hold: no transport exists; board lease + generation only. */
+    if(x9_adsp_mt6993_speaker_ap_only())
+        return x9_adsp_mt6993_speaker_online(s.ticket,native_clock.policy.generation);
     int e=x9_adsp_mt6993_speaker_validate(s.ticket);
     X9AudioDSPStatus ds={0};if(!e)e=x9_adsp_status(0,&ds);
     /* Transport quarantine is NOT loss of this physical child. In particular
@@ -95,7 +109,7 @@ static int native_tuner_verify(bool saved,bool recovering)
 {
     if(!native_clock.tuner_captured)return 0;
     int e=native_board();if(!e)e=access();if(e)return e;
-    for(unsigned n=0;n<3;n++) {
+    for(unsigned n=0;n<NT_COUNT;n++) {
         struct field *p=&native_tuner[n];uint32_t v=rd(j.afe,p->off)&p->mask;
         uint32_t expected=(saved?p->saved:p->expected)&p->mask;
         if(v!=expected && !(recovering && !saved && (native_clock.uncertain&(1u<<n)) &&
@@ -110,22 +124,34 @@ static int native_tuner_take(void)
     int e=native_board();if(!e)e=idle();if(!e)e=pll_consumers();if(e)return e;
     /* All memifs/engines were proved inactive, but APLL clocks have their
      * own enable register. Do not borrow an inherited active generator. */
-    e=refuse(j.afe,0x14,15,0);if(!e)e=refuse(j.afe,0x38,1,0);
-    if(!e)e=refuse(j.afe,8,1u<<17,1u<<17);if(e)return e;
-    for(unsigned n=0;n<3;n++)native_clock.prior[n]=native_tuner[n].saved=
+    e=refuse(j.afe,0x14,15,0);if(e)return e;
+    /* A tuner already enabled is accepted only in exactly our image (then
+     * the write is a no-op and restore keeps it). Log 281: TOP_CON2 (0x8)
+     * reads 0, i.e. LK left the ETDM clocks ungated; ungated is the target,
+     * so both 0 and 1 are accepted (restore returns the observed value). */
+    uint32_t tuner=rd(j.afe,0x38);
+    if((tuner&1) && (tuner&0xfff7)!=0x375){s.last_register=0x38;s.last_value=tuner;return EBUSY;}
+    printf("X9 SPK CLK: inherited spm=%x cbip=%x tuner=%x engen=%x top2=%x top4=%x\n",
+        rd(j.afe,0x60),rd(j.afe,0x4380),tuner,rd(j.afe,0x14),rd(j.afe,8),rd(j.afe,0x10));
+    for(unsigned n=0;n<NT_COUNT;n++)native_clock.prior[n]=native_tuner[n].saved=
         native_tuner[n].expected=rd(j.afe,native_tuner[n].off);
     native_clock.tuner_captured=true;
     e=change(0,0); /* HOPPING/F26M/APLL2/H208M/TUNER2 bits0/1/3/4/12 only */
-    for(unsigned n=0;!e && n<3;n++)e=native_tuner_change(n,native_tuner[n].value);
+    for(unsigned n=0;!e && n<NT_COUNT;n++)e=native_tuner_change(n,native_tuner[n].value);
     if(!e)e=native_tuner_verify(false,false);return e;
 }
 static int native_tuner_restore(void)
 {
     if(!native_clock.tuner_captured)return 0;
     int e=native_tuner_verify(false,true);if(e)return e;
-    for(unsigned n=3;n>0;n--)if(native_clock.dirty&(1u<<(n-1))) {
+    for(unsigned n=NT_COUNT;n>0;n--)if(native_clock.dirty&(1u<<(n-1))) {
         e=native_tuner_change(n-1,native_tuner[n-1].saved);if(e)return e;
         native_clock.dirty&=~(1u<<(n-1));
+        /* As the mic and OPPO disable path: AFE off must settle (MON 0)
+         * before the tuner/CBIP/SPM request below it is withdrawn. */
+        if(n-1==NT_ENGEN && !(native_tuner[NT_ENGEN].saved&1)) {
+            e=wait_bits(j.afe,0x7c,UINT32_MAX,0,10000);if(e)return e;
+        }
     }
     e=native_tuner_verify(true,false);if(e)return e;
     /* Gate APLL2/H208M/TUNER2 before dropping their source, but keep register
@@ -161,9 +187,7 @@ int x9_speaker_mt6993_clock_acquire(const struct x9_speaker_clock_policy *p)
     int e=native_clock.active || (s.flags&X9ClockHeld) ||
         ((s.flags&X9ClockAttempted) && !j.combined) ||
         p->generation<=native_clock.last_generation?EBUSY:0;
-    if(!e)e=x9_adsp_mt6993_speaker_validate(p->ticket);
-    X9AudioDSPStatus ds={0};if(!e)e=x9_adsp_status(0,&ds);
-    if(!e && (ds.state!=X9DSPOnline || ds.error || ds.generation!=p->generation))e=ESTALE;
+    if(!e)e=x9_adsp_mt6993_speaker_online(p->ticket,p->generation);
     uint64_t child=0;if(!e)e=x9_adsp_mt6993_clock_hold(p->ticket,&child);
     if(!e) {
         native_clock.policy=*p;native_clock.child=child;native_clock.active=true;
@@ -186,8 +210,7 @@ int x9_speaker_mt6993_clock_acquire(const struct x9_speaker_clock_policy *p)
         CLKSTEP("native board");
         e=native_board();
         printf("X9 SPK CLK: native board -> %d\n",e);IOSleep(600);
-        if(!e)e=x9_adsp_status(0,&ds);
-        if(!e && (ds.state!=X9DSPOnline || ds.error || ds.generation!=p->generation))e=ESTALE;
+        if(!e)e=x9_adsp_mt6993_speaker_online(p->ticket,p->generation);
         if(!e)e=take(true,false);
         if(!e){CLKSTEP("native mapping");e=native_mapping();}
         if(!e){native_clock.configured=true;e=native_validate_locked(p->ticket);}
@@ -219,9 +242,8 @@ static int native_leaf_hold(uint64_t ticket,uint64_t *lease,uint64_t *child)
     lck_mtx_lock(&x9_speaker_clock_lock);
     int e=*child?EBUSY:native_validate_locked(ticket);
     if(!e&&child==&native_clock.rail_child&&native_clock.pa_child)e=EBUSY;
-    X9AudioDSPStatus ds={0};if(!e)e=x9_adsp_status(0,&ds);
-    if(!e && (native_clock.error || ds.error || ds.state!=X9DSPOnline ||
-       ds.generation!=native_clock.policy.generation))e=ESTALE;
+    if(!e && native_clock.error)e=ESTALE;
+    if(!e)e=x9_adsp_mt6993_speaker_online(ticket,native_clock.policy.generation);
     if(!e && native_clock.leaf_serial==UINT64_MAX)e=EOVERFLOW;
     if(!e)*lease=*child=++native_clock.leaf_serial;
     lck_mtx_unlock(&x9_speaker_clock_lock);return e;

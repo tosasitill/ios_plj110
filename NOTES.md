@@ -785,3 +785,47 @@ Changed in mic21:
 3. AP SIGNAL line now counts the RXIF_SDATA_IN (bit22) high samples.
 How to read it: codec ULMON changing means the ADC works; AIF bit6 toggling
 means codec TX is live; sdata_in_high>0 means the AP pad sees the line.
+
+### spk22 (2026-11-13) — speaker without launching the ADSP (mic21 + speaker)
+
+Why: every ADSP launch hung the SoC (logs 253-277). DL24 -> ETDM OUT4 -> TFA9865
+is AP-programmed and does not need the DSP, so the board is now held "AP-only".
+Statically checked against OPPO mt6993-dai-i2s.c / afe-pcm.c / afe-clk.c / reg.h:
+- OUT4 CON0 0x1580 (I2S fmt0, bit_len 15, word_len 31, ch 2, relatch APLL 1),
+  CON1 init_count 5 / init_point 6 / LRCK_RESET bit15, CON2 in2latch 6 (BCK
+  < 11.2896M), CON4 FS 5 / clk src APLL bit6 / relatch_en 10 at bit24. Match.
+- Cowork 0x1690 OUT4_SLAVE_SEL bits8-11 = ETDMIN4_MASTER 0. Match.
+- Pad-top (OUT4 is_etdm_in_pad_top): AFE 0x98 bit5 CK_EN=1, bit20=0. Present in
+  x9_speaker_afe.c config.
+- DL24 BASE/CUR/END(+MSB) 0x46b0-0x46c4, CON0 0x46d0 (ON 28, MINLEN 20, MAXLEN
+  16, FS 8, PBUF 5, MONO 4, NORMAL 3), routes CONN116_2/117_2 bits16/17
+  (I_DL24_CH1/2 = 80/81-64, in mtk_i2sout4_ch1/ch2_mix). Match.
+Found and fixed (would have failed for sure):
+1. AUDIO_ENGEN_CON0 bit0 (AUDIO_26M_EN_ON, OPPO runtime_resume "enable AFE")
+   was never set by the speaker; only bit3 (APLL2). Now 0x14 mask 9.
+2. AFE_SPM_CONTROL_REQ: SRCCLKENA bit2 + DRAM request bits 3/6/7 (OPPO
+   afe_dram_request; the mic's VUL1 needs the same) were never set. Now 0xcc.
+   AFE_CBIP_CFG0 bit0 also set (resume). All in the native clock journal,
+   restored in reverse; ENGEN off waits MON 0x7c==0 (as the mic).
+3. TOP_CON2 0x8 reads 0 (log 281 mic dump): LK leaves ETDM clocks ungated, but
+   native_tuner_take required bit17=1 -> EBUSY. 0 and 1 are both accepted now.
+   An already-enabled APLL2 tuner is accepted only in exactly our image 0x375.
+Changes:
+- x9_adsp_mt6993: speaker_control op 3 = AP-only hold (power_on only: adopt LK
+  votes, exclusive, borrowed ticket; never SYS_CLEAR/RELOAD/CORE_START), op 4 =
+  release (withdraws only TOP/INFRA votes we set). clock_hold and halted
+  qualification accept the AP-only hold. New speaker_online(ticket,gen),
+  speaker_ap_only(), speaker_generation(ticket) (minted per op 3).
+- Clock child, leaf holds and pads use speaker_online instead of transport
+  Online. Pads accept each pin mode0 or already mode5 (DIR output only if all
+  four are mode5). AFE baselines inherited O116/O117 inputs (our bank must be 0).
+- Bringup: op 3 -> gen -> clock -> pads -> AFE -> PA INIT_CF -> silence; teardown
+  uses op 4 (no halt). AMPE stays 0, silence only.
+- SweetX9Audio defaults: x9_spk_boot=1, x9_spk_first=0 (mic first, 1 s gap,
+  then speaker).
+New log lines: "X9 ADSP AP-ONLY: hold", "X9 SPK: board gen=.. online",
+"X9 SPK CLK: inherited spm/cbip/tuner/engen/top2/top4", "X9 SPK PLL: APLL2
+inherited running", "X9 SPK PADS: inherited", "X9 SPK AFE: inherited O116".
+Untested on hardware past log 276's pll cold: borrowed-APLL2 meter, smc 0/7,
+tuner, pads, AFE start, PA CLKS.
+Image: x9/out/x9-spk22-20261113/boot.img (same boot args as mic21).

@@ -27,6 +27,10 @@ static uint64_t last_poll,last_progress;
 static uint64_t resource_ticket;
 static bool ticket_owned;
 static uint32_t last_output_generation;
+/* Inherited O116/O117 mixer inputs other than our bank (LK may leave a route
+ * whose source memif is off: it contributes silence). Captured at prepare,
+ * must stay exactly unchanged; our own bank must start empty. */
+static uint32_t route_base[2][7];
 /* Per-operation accessibility failure: fault cleanup may mute/quiesce via
  * independently qualified callbacks, but must not retry AFE/DMA access.
  * A later explicit stop starts a new qualification attempt. */
@@ -162,7 +166,7 @@ static int unowned_routes_idle(bool running,unsigned stage)
     for(unsigned ch=0;ch<2;ch++)for(unsigned n=0;n<7;n++) {
         unsigned off=0x2f00+ch*32+banks[n];uint32_t value=rd(off);
         if(off==memif.route[ch])continue; /* selected bank verified by journal */
-        if(value)return guard_error(stage,EBUSY,true,off,0,value);
+        if(value!=route_base[ch][n])return guard_error(stage,EBUSY,true,off,route_base[ch][n],value);
     }
     uint32_t other=memif.id==X9_SPEAKER_DL24_MEMIF?0x4640:X9_SPEAKER_DL24_CON0;
     uint32_t other_on=memif.id==X9_SPEAKER_DL24_MEMIF?1u<<31:1u<<28;
@@ -343,13 +347,19 @@ static int prepare(uint64_t borrowed)
             if(value)e=guard_error(X9AFEGuardPrepare,EBUSY,true,memif.con,0,value);
             else if((value=rd(0x1580)&1))e=guard_error(X9AFEGuardPrepare,EBUSY,true,0x1580,0,value);
         }
-        if(!e)e=unowned_routes_idle(false,X9AFEGuardPrepare);
-        /* Reject other enabled mixer sources. There is no CONN116_3 in this
-         * SoC table. Do not clear a foreign route to make our source work. */
+        /* There is no CONN116_3 in this SoC table. Never clear a foreign
+         * route; our own bank must start empty, others are baselined. */
         const unsigned banks[]={0,4,8,16,20,24,28};
-        for(unsigned ch=0;!e && ch<2;ch++)for(unsigned b=0;b<7;b++)
-            {unsigned off=0x2f00+ch*32+banks[b];uint32_t value=rd(off);
-             if(value){e=guard_error(X9AFEGuardPrepare,EBUSY,true,off,0,value);break;}}
+        bool any=false;
+        for(unsigned ch=0;!e && ch<2;ch++)for(unsigned b=0;b<7;b++) {
+            unsigned off=0x2f00+ch*32+banks[b];uint32_t value=rd(off);
+            route_base[ch][b]=off==memif.route[ch]?0:value;if(value)any=true;
+            if(off==memif.route[ch] && value){e=guard_error(X9AFEGuardPrepare,EBUSY,true,off,0,value);break;}
+        }
+        if(any)printf("X9 SPK AFE: inherited O116 %x/%x/%x/%x/%x/%x/%x O117 %x/%x/%x/%x/%x/%x/%x\n",
+            route_base[0][0],route_base[0][1],route_base[0][2],route_base[0][3],route_base[0][4],route_base[0][5],route_base[0][6],
+            route_base[1][0],route_base[1][1],route_base[1][2],route_base[1][3],route_base[1][4],route_base[1][5],route_base[1][6]);
+        if(!e)e=unowned_routes_idle(false,X9AFEGuardPrepare);
         if(!e) {
             uint64_t base=hw.dma_bus,end=base+hw.dma_bytes-1;
             config[6].value=(uint32_t)(base>>32);config[7].value=(uint32_t)base;

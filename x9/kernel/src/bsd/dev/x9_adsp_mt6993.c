@@ -52,6 +52,14 @@ static uint64_t ipi_child_lease,ipi_child_serial;
 static uint64_t clock_child_lease,clock_child_serial;
 static uint64_t irq_child_lease,irq_child_serial;
 static bool irq_child_quiesced;
+/* AP-only speaker mode (logs 253-277: any ADSP launch hangs the SoC; the
+ * AP runtime protocol is missing). The board is held exactly like a warm
+ * takeover (LK votes adopted or chain voted, exclusive, borrowed Speaker
+ * ticket) but NEVER reset (SYS_CLEAR) or started. DL24 -> ETDM OUT4 is
+ * AP-programmed and needs no DSP. ap_generation stands in for the transport
+ * generation consumers bind to; it is minted once per op 3. */
+static bool ap_only;
+static uint32_t ap_generation,ap_serial=0x40000000u;
 enum { AUDIO_SEM_REG=0x64,AUDIO_SEM_BIT=1u<<(4*3+2),AUDIO_SEM_RETRIES=5000 };
 _Static_assert(sizeof(X9AudioBoardStatus)==160,"ADSP board status v3 size");
 enum { PD_SET=0x20700,PD_CLR=0x20704,PD_EN=0x20708,PD_DONE=0x1132c,
@@ -181,7 +189,7 @@ int x9_adsp_mt6993_speaker_validate(uint64_t ticket)
 static int speaker_halted_qualify(uint64_t ticket)
 {
     int e=speaker_qualify(ticket);
-    if(!e && (!reset_done || started || launch_issued || wake || status.pending ||
+    if(!e && (!(reset_done || ap_only) || started || launch_issued || wake || status.pending ||
        audio_sem_state!=AudioSemIdle))e=EBUSY;
     if(!e && (rd(cfg,AUDIO_SEM_REG)&AUDIO_SEM_BIT))e=EBUSY;
     return e;
@@ -190,6 +198,26 @@ int x9_adsp_mt6993_speaker_halted_validate(uint64_t ticket)
 {
     lck_mtx_lock(&board_lock);int e=speaker_halted_qualify(ticket);
     lck_mtx_unlock(&board_lock);return e;
+}
+int x9_adsp_mt6993_speaker_online(uint64_t ticket,uint32_t generation)
+{
+    lck_mtx_lock(&board_lock);int e=speaker_qualify(ticket);
+    bool ap=ap_only;uint32_t g=ap_generation;lck_mtx_unlock(&board_lock);
+    if(e)return e;
+    if(ap)return generation && generation==g?0:ESTALE;
+    X9AudioDSPStatus ds={0};e=x9_adsp_status(0,&ds);
+    if(!e && (ds.state!=X9DSPOnline || ds.error || ds.generation!=generation))e=ESTALE;
+    return e;
+}
+int x9_adsp_mt6993_speaker_ap_only(void)
+{
+    lck_mtx_lock(&board_lock);int ap=ap_only;lck_mtx_unlock(&board_lock);return ap;
+}
+uint32_t x9_adsp_mt6993_speaker_generation(uint64_t ticket)
+{
+    lck_mtx_lock(&board_lock);
+    uint32_t g=ap_only && ticket && borrowed_ticket==ticket?ap_generation:0;
+    lck_mtx_unlock(&board_lock);return g;
 }
 int x9_adsp_mt6993_shared_hold(uint64_t ticket,uint64_t *lease)
 {
@@ -211,7 +239,7 @@ int x9_adsp_mt6993_clock_hold(uint64_t ticket,uint64_t *lease)
 {
     if(!lease)return EINVAL;
     *lease=0;lck_mtx_lock(&board_lock);int e=speaker_qualify(ticket);
-    if(!e && (!started || clock_child_lease))e=EBUSY;
+    if(!e && (!(started || ap_only) || clock_child_lease))e=EBUSY;
     if(!e && clock_child_serial==UINT64_MAX)e=EOVERFLOW;
     if(!e){clock_child_lease=++clock_child_serial;*lease=clock_child_lease;}
     lck_mtx_unlock(&board_lock);return e;
@@ -664,24 +692,63 @@ int x9_adsp_mt6993_control(uint32_t op)
     if(!e)e=op?x9_adsp_shutdown(0):x9_adsp_boot(0);
     lck_mtx_unlock(&board_control_lock);return e;
 }
+/* op 3: AP-only hold (power_on only: adopt LK votes / vote chain, exclusive;
+ * no SYS_CLEAR, RELOAD or CORE_START). op 4: release it after AFE/pad/clock
+ * teardown; withdraws only TOP/INFRA votes this driver itself set. */
+static int speaker_ap_release(uint64_t ticket)
+{
+    lck_mtx_lock(&board_lock);int e=ap_only && borrowed_ticket==ticket?0:EPERM;
+    if(!e && (started || launch_issued || wake || audio_sem_state!=AudioSemIdle || shared_child_lease ||
+       ipi_child_lease || clock_child_lease || irq_child_lease))e=EBUSY;
+    if(!e && exclusive) {
+        if(status.owned_vote&(TOP|INFRA)) {
+            e=qualify();
+            if(!e && (rd(cfg,AUDIO_SEM_REG)&AUDIO_SEM_BIT))e=EBUSY;
+            if(!e)e=chain_off();
+        }
+        if(!e){exclusive=false;inherited_vote=0;status.flags&=~(X9BoardPowered|X9BoardExclusive);}
+    }
+    if(!e) {
+        resource_ticket=0;borrowed_ticket=0;resource_owner=X9AudioResourceADSP;
+        ap_only=false;ap_generation=0;
+    }
+    status.error=(uint32_t)e;snapshot();lck_mtx_unlock(&board_lock);return e;
+}
+static int speaker_ap_hold(void)
+{
+    int e=power_on(NULL);
+    lck_mtx_lock(&board_lock);
+    if(!e && (!exclusive || resource_ticket!=borrowed_ticket || started || launch_issued))e=EIO;
+    if(!e){ap_only=true;ap_generation=++ap_serial;}
+    else if(!exclusive && !resource_ticket){borrowed_ticket=0;resource_owner=X9AudioResourceADSP;}
+    else ap_only=true; /* retained physical hold: only op 4 may release it */
+    printf("X9 ADSP AP-ONLY: hold -> %d exclusive=%d owned=%x inherited=%x gen=%x (no reset/start)\n",
+        e,exclusive,status.owned_vote,inherited_vote,ap_generation);
+    lck_mtx_unlock(&board_lock);return e;
+}
 int x9_adsp_mt6993_speaker_control(uint32_t op,uint64_t ticket)
 {
     if(sweet_x9_arg("x9_audio",0)!=2)return ENXIO;
-    if(op>2 || !ticket)return EINVAL;
+    if(op>4 || !ticket)return EINVAL;
     lck_mtx_lock(&board_control_lock);lck_mtx_lock(&board_lock);
     X9AudioResourceStatus t;int e=!registered?ENXIO:x9_audio_resources_status(&t);
     if(!e && (t.owner!=X9AudioResourceSpeaker || t.ticket!=ticket))e=EPERM;
-    if(!e && !op && (borrowed_ticket || resource_ticket || exclusive))e=EBUSY;
-    if(!e && op && borrowed_ticket!=ticket)e=EPERM;
+    bool first=!op || op==3;
+    if(!e && first && (borrowed_ticket || resource_ticket || exclusive || started || launch_issued || ap_only))e=EBUSY;
+    if(!e && !first && borrowed_ticket!=ticket)e=EPERM;
+    /* The AP-only hold and a launched DSP never mix. */
+    if(!e && (op==1 || op==2) && ap_only)e=EPERM;
+    if(!e && op==4 && !ap_only)e=EPERM;
     if(!e) {
-        if(!op){borrowed_ticket=ticket;resource_owner=X9AudioResourceSpeaker;}
+        if(first){borrowed_ticket=ticket;resource_owner=X9AudioResourceSpeaker;}
         /* Only boot/halt can clear the board's per-operation access gate,
          * once serialized by the transport. release does not repair it. */
-        if(op!=2)new_control=true;
+        if(op!=2 && op!=4)new_control=true;
     }
     lck_mtx_unlock(&board_lock);
     bool attempted=!e;
-    if(!e)e=!op?x9_adsp_boot(0):op==1?x9_adsp_halt(0):x9_adsp_release(0);
+    if(!e)e=!op?x9_adsp_boot(0):op==1?x9_adsp_halt(0):op==2?x9_adsp_release(0):
+        op==3?speaker_ap_hold():speaker_ap_release(ticket);
     if(!e && op==2) {
         lck_mtx_lock(&board_lock);
         if(exclusive || resource_ticket || started || launch_issued || wake || audio_sem_state!=AudioSemIdle || shared_child_lease || ipi_child_lease || clock_child_lease || irq_child_lease)e=EIO;

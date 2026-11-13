@@ -1,7 +1,8 @@
 /* One-shot PLJ110 speaker bring-up for the x9_dsp_boot test path (mode2).
  * Composes the existing combined-mode components in their documented lock
  * order instead of the unsupplied production lease providers:
- *   Speaker ticket -> ADSP boot (speaker_control 0) -> AUDIO/APLL2 clock
+ *   Speaker ticket -> ADSP AP-only hold (speaker_control 3: board votes
+ *   adopted, NO DSP reset/launch; logs 253-277) -> AUDIO/APLL2 clock
  *   sublease -> I2S4 pads -> AFE DL24->OUT4 (CPU producer) -> both TFA9865
  *   started per OPPO tfa98xx_v6.14.2 (tfa986x_specific, tfaRunStartup,
  *   tfa_dev_set_state) from the board's own container -> AMPE=1 -> a short
@@ -291,10 +292,10 @@ static void teardown(void)
         }
     }
     if(b.afe_prepared){e=x9_speaker_afe_stop();printf("X9 SPK: afe stop -> %d\n",e);if(!e)b.afe_prepared=false;}
-    if(b.dsp){e=x9_adsp_mt6993_speaker_control(1,b.ticket);printf("X9 SPK: dsp halt -> %d\n",e);}
+    /* AP-only hold: the DSP never ran, so there is no halt (op 1 refuses). */
     if(b.pads){e=x9_speaker_pads_release(b.ticket);printf("X9 SPK: pads release -> %d\n",e);if(!e)b.pads=false;}
     if(b.clock && !b.pads){e=x9_speaker_mt6993_clock_release(b.ticket);printf("X9 SPK: clock release -> %d\n",e);if(!e)b.clock=false;}
-    if(b.dsp && !b.clock){e=x9_adsp_mt6993_speaker_control(2,b.ticket);printf("X9 SPK: dsp release -> %d\n",e);if(!e)b.dsp=false;}
+    if(b.dsp && !b.clock){e=x9_adsp_mt6993_speaker_control(4,b.ticket);printf("X9 SPK: board AP-only release -> %d\n",e);if(!e)b.dsp=false;}
     if(b.tfa){e=x9_tfa_plj110_session_close();printf("X9 SPK: i2c6 session close -> %d\n",e);b.tfa=false;}
     if(b.ticket && !b.dsp && !b.clock && !b.pads && !b.afe_prepared) {
         e=x9_audio_resources_release(X9AudioResourceSpeaker,b.ticket);
@@ -323,11 +324,12 @@ int x9_speaker_bringup_run(void)
     if(!e){e=x9_tfa_plj110_session_open();b.tfa=!e;SPKLOG("X9 SPK: i2c6 session -> %d\n",e);}
     if(!e)pa_report("inherited");
     for(unsigned i=0;!e && i<2;i++)e=tfa_init_one(i); /* ends in PWDN=1: amplifier off */
-    if(!e)SPKLOG("X9 SPK: dsp boot begin (warm takeover)\n");
-    if(!e){e=x9_adsp_mt6993_speaker_control(0,b.ticket);b.dsp=true;SPKLOG("X9 SPK: dsp boot -> %d\n",e);}
-    X9AudioDSPStatus ds={0};
-    if(!e){e=x9_adsp_status(0,&ds);if(!e && ds.state!=X9DSPOnline)e=ESTALE;b.generation=ds.generation;
-           SPKLOG("X9 SPK: dsp state=%u gen=%u -> %d\n",ds.state,ds.generation,e);}
+    if(!e)SPKLOG("X9 SPK: board AP-only hold begin (no DSP reset/launch)\n");
+    if(!e){e=x9_adsp_mt6993_speaker_control(3,b.ticket);b.dsp=!e || x9_adsp_mt6993_speaker_ap_only();SPKLOG("X9 SPK: board AP-only hold -> %d\n",e);}
+    if(!e){b.generation=x9_adsp_mt6993_speaker_generation(b.ticket);
+           if(!b.generation)e=ESTALE;
+           if(!e)e=x9_adsp_mt6993_speaker_online(b.ticket,b.generation);
+           SPKLOG("X9 SPK: board gen=%x online -> %d\n",b.generation,e);}
     if(!e) {
         struct x9_speaker_clock_policy cp={X9_SPEAKER_CLOCK_POLICY_VERSION,b.generation,b.ticket,NULL,dl24_drained};
         SPKLOG("X9 SPK: clock acquire begin\n");

@@ -117,12 +117,23 @@ static int change(unsigned i,uint32_t value)
     }
     return EIO;
 }
+/* Each pin is GPIO mode0 (no owner) or already I2S mode5, the live DT
+ * i2sin4/i2sout4 function, i.e. LK left our own target. Output direction
+ * is accepted only while every pin is mode5 (the function drives, DIR is
+ * ignored); a GPIO-mode output stays a refusal. */
+static bool inherited_ok(uint32_t mode,uint32_t dir)
+{
+    bool all5=true;
+    for(unsigned n=0;n<4;n++) {
+        uint32_t m=(mode>>(n*8))&0x1f;
+        if(m!=0 && m!=5)return false;
+        if(m!=5)all5=false;
+    }
+    return !(dir&0xf000) || all5;
+}
 static int online(uint64_t ticket,uint32_t generation)
 {
-    X9AudioDSPStatus ds={0};int e=x9_adsp_mt6993_speaker_validate(ticket);
-    if(!e)e=x9_adsp_status(0,&ds);
-    if(!e&&(ds.state!=X9DSPOnline||ds.error||ds.generation!=generation))e=ESTALE;
-    return e;
+    return x9_adsp_mt6993_speaker_online(ticket,generation);
 }
 int x9_speaker_pads_acquire(const struct x9_speaker_pads_policy *p)
 {
@@ -145,8 +156,9 @@ int x9_speaker_pads_acquire(const struct x9_speaker_pads_policy *p)
             if(!pads.ioc)pads.ioc=ml_io_map(0x12860000,0x1000);
             e=access();
         }
-        if(!e&&(rd(0,0x4b0)&0x1f1f1f1f))e=EBUSY; /* inherited alternate owner */
-        if(!e&&(rd(0,0x30)&0xf000))e=EBUSY;        /* inherited output */
+        if(!e)printf("X9 SPK PADS: inherited mode=%x dir=%x pu=%x pd=%x smt=%x\n",rd(0,0x4b0),
+            rd(0,0x30),rd(1,0xb0),rd(1,0xa0),rd(1,0xe0));
+        if(!e&&!inherited_ok(rd(0,0x4b0),rd(0,0x30)))e=EBUSY;
         if(!e) {
             for(unsigned i=0;i<5;i++)fields[i].prior=fields[i].saved=fields[i].expected=rd(fields[i].bank,fields[i].off);
             for(unsigned i=0;i<4;i++)observed[i].saved=rd(observed[i].bank,observed[i].off);
@@ -154,7 +166,7 @@ int x9_speaker_pads_acquire(const struct x9_speaker_pads_policy *p)
             /* The saved image itself must STILL be the safe baseline;
              * an alternate owner appearing between refusal and capture
              * cannot be silently converted into our restorable baseline. */
-            if((fields[0].saved&0x1f1f1f1f)||(fields[1].saved&0xf000))e=EBUSY;
+            if(!inherited_ok(fields[0].saved,fields[1].saved))e=EBUSY;
             if(!e)e=verify(false,false);
             /* Electrical state while in safe mode0; mux mode5 LAST. */
             for(unsigned i=1;!e&&i<5;i++)e=change(i,fields[i].target);
