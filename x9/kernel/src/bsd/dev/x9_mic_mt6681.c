@@ -201,12 +201,26 @@ static int set_phases(struct x9_mic_mt6681 *c,int p0,int p1)
     if(!e)e=update8(c,MT6681_AUDIO_DIG_CFG1,0x7f,0); /* no third MISO */
     return e;
 }
+static void vaud18_dump(struct x9_mic_mt6681 *c)
+{
+    static const uint16_t r[]={0x1b87,0x1b88,0x1b89,0x1b8a,0x1b8b,0x1b8e,0x1b91,0x1b94,
+        MT6681_MTC_CTL0,MT6681_DA_INTF_STTING3};
+    uint8_t v[sizeof(r)/sizeof(r[0])]={0};
+    for(unsigned i=0;i<sizeof(r)/sizeof(r[0]);i++)(void)c->io.read8(c->io.cookie,r[i],&v[i]);
+    printf("X9 MIC VAUD18: con0=%02x con1=%02x con2=%02x mon=%02x op_en0=%02x op_en1=%02x op_cfg0=%02x op_cfg1=%02x mtc=%02x intf3=%02x\n",
+        v[0],v[1],v[2],v[3],v[4],v[5],v[6],v[7],v[8],v[9]);
+}
 static int enable_vaud18(struct x9_mic_mt6681 *c)
 {
-    int e=update8(c,MT6681_LDO_VAUD18_CON0,1,1);if(e)return e;
-    uint64_t ticks;nanoseconds_to_absolutetime(10000000,&ticks);
+    /* Log 268: EN0 set but MON=0x03, bandgap enabled/stable, LDO EN/STB
+     * (bits3/4) never rose within 10 ms. OPPO mt_vaud18_event PRE_PMU also
+     * sets LDO_VAUD18_OP_EN1 HW14 (0x1b8f SET, bit6) before EN0 and never
+     * clears it; do the same, wait up to 50 ms and dump the LDO on timeout. */
+    int e=write8(c,0x1b8f,0x40);if(e)return e;
+    e=update8(c,MT6681_LDO_VAUD18_CON0,1,1);if(e)return e;
+    uint64_t ticks;nanoseconds_to_absolutetime(50000000,&ticks);
     uint64_t deadline=mach_absolute_time()+ticks;
-    for(unsigned i=0;i<100;i++) {
+    for(unsigned i=0;i<500;i++) {
         uint8_t v=0;e=read8(c,MT6681_LDO_VAUD18_MON,&v);
         c->status.vaud18_monitor=v;if(e)return e;
         /* Both bandgap and LDO report actual enable and stable, not just the
@@ -214,6 +228,7 @@ static int enable_vaud18(struct x9_mic_mt6681 *c)
         if((v&0x1b)==0x1b)return 0;
         if(mach_absolute_time()>=deadline)break;delay(100);
     }
+    vaud18_dump(c);
     return ETIMEDOUT;
 }
 int x9_mic_mt6681_verify_capture(struct x9_mic_mt6681 *c)

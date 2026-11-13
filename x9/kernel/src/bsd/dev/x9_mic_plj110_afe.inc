@@ -43,12 +43,9 @@ static int afe_spm_wait(struct afe_journal *a,uint32_t mask,uint32_t expected)
 }
 static uint32_t afe_foreign_votes(struct afe_journal *a)
 {
-    uint32_t v=0;
-    for(unsigned i=1;i<=9;i++) {
-        unsigned base=i<5?0x20000+i*0x10000:0x70000+(i-5)*0x1000;
-        if(rr(a->hwv,base+0x708)&1)v|=1u<<i;
-    }
-    return v;
+    /* Log 268: per-XPU offsets on ap_hwv hang the SoC (they are mm_hwv's).
+     * Foreign AUDIO vote = PD_ALL bit0 not explained by our AP EN bit0. */
+    return (rr(a->hwv,0x13700)&~rr(a->hwv,0x20708))&1;
 }
 static unsigned pin_reg(unsigned i,unsigned field)
 {

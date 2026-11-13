@@ -74,14 +74,14 @@ static int refuse(vm_offset_t b,unsigned r,uint32_t mask,uint32_t wanted)
     if((v&mask)==wanted)return 0;
     s.last_register=r;s.last_value=v;return EBUSY;
 }
+/* Log 268: reading 0x1c080708 (ap_hwv + 0x40708, the old "XPU2 EN") stopped
+ * the SoC. Those per-XPU offsets belong to mm_hwv (0x31c00000, as the camera
+ * driver uses them), not ap_hwv. Derive foreign votes from the aggregate:
+ * PD_ALL (0x13700, OR of every voter) minus our AP EN (0x20708), both
+ * already read safely by the ADSP path. Same AUDIO/TOP/INFRA mask as before. */
 static uint32_t foreign(void)
 {
-    uint32_t bits=0;
-    for(unsigned n=1;n<=9;n++) {
-        unsigned base=n<5?0x20000+n*0x10000:0x70000+(n-5)*0x1000;
-        if(rd(j.hwv,base+0x708)&7)bits|=1u<<n;
-    }
-    return bits;
+    return (rd(j.hwv,0x13700)&~rd(j.hwv,0x20708))&7;
 }
 static const char *trace_name(vm_offset_t b,unsigned long *phys)
 {
