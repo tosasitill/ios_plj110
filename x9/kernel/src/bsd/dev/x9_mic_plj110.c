@@ -353,8 +353,9 @@ static int xo_take(struct power_journal *j)
 static int codec_enable(struct power_journal *j)
 {
     struct pin *p=&j->enable;
+    /* Input reads high only for the inherited output-high case (log 261). */
     if(pin_mode(j,9)!=p->mode || pin_bit(j,0,9)!=p->dir ||
-       pin_bit(j,0x100,9)!=p->dout || pin_bit(j,0x200,9))return EBUSY;
+       pin_bit(j,0x100,9)!=p->dout || pin_bit(j,0x200,9)!=(p->dir && p->dout))return EBUSY;
     p->owned=true;int e=set_bit(j,0x100,9,0);
     if(!e)e=set_bit(j,0,9,1);
     if(!e)delay(1000); /* minimum cold-low dwell, not a chip-ready assertion */
@@ -594,7 +595,13 @@ static int board_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_stat
     if(!e) {
         save_pin(j,&j->enable,9);save_pin(j,&j->route[0],96);save_pin(j,&j->route[1],97);
         s->gpio9_before=pin_state(j,9);
-        if(j->enable.mode || j->enable.dout || pin_bit(j,0x200,9))e=EBUSY;
+        /* Log 261: LK leaves codec-en GPIO9 as output-high (state 0x700).
+         * codec_enable() drives it low for 1 ms before raising it, i.e. a
+         * cold reset of the inherited codec; restore() returns it to the
+         * found output-high. Any other non-cold state is still refused. */
+        bool inherited_high=!j->enable.mode && j->enable.dir && j->enable.dout && pin_bit(j,0x200,9);
+        if(inherited_high)printf("X9 MIC: GPIO9 inherited output-high; codec gets a cold reset pulse\n");
+        else if(j->enable.mode || j->enable.dout || pin_bit(j,0x200,9))e=EBUSY;
         for(unsigned i=0;i<2 && !e;i++) {
             struct pin *p=&j->route[i];if(p->mode!=1 && (p->mode || p->dir))e=EBUSY;
         }

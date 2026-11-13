@@ -28,6 +28,13 @@
 #include "x9_tfa_plj110.h"
 #include "x9_speaker_bringup.h"
 #include "../../../generated/x9_tfa_container.inc"
+extern void IOSleep(unsigned int);
+/* Logs 260/261: the SoC stopped (black screen, keys and USB dead) and the
+ * last ~1 KiB of console never left the device; pstore has no console and
+ * the UFS sidecar lags further. Sleep after each bring-up step's line so the
+ * USB console drains before the next hardware step. Not used after the AFE
+ * starts streaming (a 250 ms gap would underrun the 20 ms prefill). */
+#define SPKLOG(...) do{printf(__VA_ARGS__);IOSleep(250);}while(0)
 extern int sweet_x9_arg(const char *,int);
 extern int sweet_early_is_x9(void);
 extern ppnum_t pmap_find_phys(pmap_t,addr64_t);
@@ -145,6 +152,7 @@ static int tfa_init_one(unsigned i)
     if(!e && (rev&0xff)!=0x66)e=ENOTSUP;
     if(!e)e=bf_get(i,0x0203,&audfs);
     if(!e)e=bf_get(i,0x0256,&fract);
+    SPKLOG("X9 SPK: PA%x I2CR + leave powerdown\n",slaves[i]);
     if(!e)e=x9_tfa_plj110_write16(slaves[i],0x00,0x0002); /* I2CR */
     if(!e){delay(2000);e=bf_set(i,0x0000,0);}             /* PWDN=0 */
     if(!e)e=bf_set(i,0x0460,0);                           /* MANAOOSC=0 */
@@ -163,7 +171,7 @@ static int tfa_init_one(unsigned i)
             }
             revid+=(uint32_t)(dev&3)*0x100000u;
         }
-        printf("X9 SPK: PA%x rev=%04x revid=%x type_sel=%u lpm=%u dcdc=%u devrev=%u audfs=%u fractdel=%u\n",
+        SPKLOG("X9 SPK: PA%x rev=%04x revid=%x type_sel=%u lpm=%u dcdc=%u devrev=%u audfs=%u fractdel=%u\n",
                slaves[i],rev,revid,ts,lpm,dcdc,dev&3,audfs,fract);
         /* Log 258: both PAs read reg03=0x9866 -> revid 0x19865, absent from
          * OPPO tfa986x_specific's table: the vendor driver takes `default`
@@ -174,14 +182,15 @@ static int tfa_init_one(unsigned i)
     /* Log 260: the whole system stopped right after the rev line (screen
      * black, USB gone). Mark each key-unlock access so the next stop shows
      * which transfer it was. */
-    if(!e){printf("X9 SPK: PA%x unlock 0f\n",slaves[i]);e=x9_tfa_plj110_write16(slaves[i],0x0f,0x5a6b);} /* unhide keys */
-    if(!e){printf("X9 SPK: PA%x unlock read fb\n",slaves[i]);e=x9_tfa_plj110_read16(slaves[i],0xfb,&x);}
-    if(!e){printf("X9 SPK: PA%x unlock a0 (fb=%04x)\n",slaves[i],x);e=x9_tfa_plj110_write16(slaves[i],0xa0,(uint16_t)(x^0x005a));}
+    if(!e){SPKLOG("X9 SPK: PA%x unlock 0f\n",slaves[i]);e=x9_tfa_plj110_write16(slaves[i],0x0f,0x5a6b);} /* unhide keys */
+    if(!e){SPKLOG("X9 SPK: PA%x unlock read fb\n",slaves[i]);e=x9_tfa_plj110_read16(slaves[i],0xfb,&x);}
+    if(!e){SPKLOG("X9 SPK: PA%x unlock a0 (fb=%04x)\n",slaves[i],x);e=x9_tfa_plj110_write16(slaves[i],0xa0,(uint16_t)(x^0x005a));}
     if(!e)e=x9_tfa_plj110_write16(slaves[i],0x0f,0x5a6b);
-    if(!e){printf("X9 SPK: PA%x unlock a1\n",slaves[i]);e=x9_tfa_plj110_write16(slaves[i],0xa1,0x005a);} /* key2 unlock */
+    if(!e){SPKLOG("X9 SPK: PA%x unlock a1\n",slaves[i]);e=x9_tfa_plj110_write16(slaves[i],0xa1,0x005a);} /* key2 unlock */
     if(!e && revid==0x13a65)
         for(unsigned k=0;!e && k<sizeof(init_reg);k++)e=x9_tfa_plj110_write16(slaves[i],init_reg[k],init_val[k]);
-    else if(!e)printf("X9 SPK: PA%x revid %x: OPPO default branch, no chip table\n",slaves[i],revid);
+    else if(!e)SPKLOG("X9 SPK: PA%x revid %x: OPPO default branch, no chip table\n",slaves[i],revid);
+    if(!e)SPKLOG("X9 SPK: PA%x powerdown + container\n",slaves[i]);
     if(!e)e=bf_set(i,0x0000,1);                           /* PWDN=1 */
     if(!e)e=wait_bf(i,0x1203,0,50);                       /* MANSTATE=0 */
     if(!e)e=bf_set(i,0x0460,1);                           /* MANAOOSC=1 */
@@ -190,7 +199,7 @@ static int tfa_init_one(unsigned i)
     unsigned nd=0,np=0;
     if(!e)e=write_device_regs(i,&nd);
     if(!e)e=write_profile_regs(i,0,&np);
-    printf("X9 SPK: PA%x init result=%d device_items=%u profile_items=%u\n",slaves[i],e,nd,np);
+    SPKLOG("X9 SPK: PA%x init result=%d device_items=%u profile_items=%u\n",slaves[i],e,nd,np);
     return e;
 }
 static int pa_mute(void *ctx,uint64_t ticket)
@@ -296,10 +305,10 @@ static void teardown(void)
 int x9_speaker_bringup_run(void)
 {
     if(!sweet_early_is_x9() || sweet_x9_arg("x9_audio",0)!=2)return ENXIO;
-    printf("X9 SPK: start container=%u bytes\n",x9_tfa_container_bytes);
+    SPKLOG("X9 SPK: start container=%u bytes\n",x9_tfa_container_bytes);
     uint32_t probe;int e=x9_tfa_container_bytes?cnt_device(0x34,&probe):ENOENT;
     if(!e)e=cnt_device(0x35,&probe);
-    if(e){printf("X9 SPK: container refused %d (no hardware touched)\n",e);return e;}
+    if(e){SPKLOG("X9 SPK: container refused %d (no hardware touched)\n",e);return e;}
     e=kmem_alloc_contig(kernel_map,&b.dma,DMA_BYTES,PAGE_MASK,0,0,
         KMA_DATA|KMA_ZERO|KMA_PERMANENT,VM_KERN_MEMORY_IOKIT)==KERN_SUCCESS?0:ENOMEM;
     if(!e) {
@@ -309,26 +318,29 @@ int x9_speaker_bringup_run(void)
             if(ptoa_64(pmap_find_phys(kernel_pmap,(addr64_t)(b.dma+off)))!=b.dma_bus+off)e=ENOMEM;
         if(!e)afe_sync(NULL,0,DMA_BYTES);
     }
-    printf("X9 SPK: dma va=%lx bus=%llx -> %d\n",(unsigned long)b.dma,b.dma_bus,e);
-    if(!e){e=x9_audio_resources_claim(X9AudioResourceSpeaker,&b.ticket);printf("X9 SPK: ticket=%llu -> %d\n",b.ticket,e);}
-    if(!e){e=x9_tfa_plj110_session_open();b.tfa=!e;printf("X9 SPK: i2c6 session -> %d\n",e);}
+    SPKLOG("X9 SPK: dma va=%lx bus=%llx -> %d\n",(unsigned long)b.dma,b.dma_bus,e);
+    if(!e){e=x9_audio_resources_claim(X9AudioResourceSpeaker,&b.ticket);SPKLOG("X9 SPK: ticket=%llu -> %d\n",b.ticket,e);}
+    if(!e){e=x9_tfa_plj110_session_open();b.tfa=!e;SPKLOG("X9 SPK: i2c6 session -> %d\n",e);}
     if(!e)pa_report("inherited");
     for(unsigned i=0;!e && i<2;i++)e=tfa_init_one(i); /* ends in PWDN=1: amplifier off */
-    if(!e){e=x9_adsp_mt6993_speaker_control(0,b.ticket);b.dsp=true;printf("X9 SPK: dsp boot -> %d\n",e);}
+    if(!e)SPKLOG("X9 SPK: dsp boot begin (warm takeover)\n");
+    if(!e){e=x9_adsp_mt6993_speaker_control(0,b.ticket);b.dsp=true;SPKLOG("X9 SPK: dsp boot -> %d\n",e);}
     X9AudioDSPStatus ds={0};
     if(!e){e=x9_adsp_status(0,&ds);if(!e && ds.state!=X9DSPOnline)e=ESTALE;b.generation=ds.generation;
-           printf("X9 SPK: dsp state=%u gen=%u -> %d\n",ds.state,ds.generation,e);}
+           SPKLOG("X9 SPK: dsp state=%u gen=%u -> %d\n",ds.state,ds.generation,e);}
     if(!e) {
         struct x9_speaker_clock_policy cp={X9_SPEAKER_CLOCK_POLICY_VERSION,b.generation,b.ticket,NULL,dl24_drained};
+        SPKLOG("X9 SPK: clock acquire begin\n");
         e=x9_speaker_mt6993_clock_acquire(&cp);b.clock=true;
         X9AudioClockStatus cs;bzero(&cs,sizeof(cs));x9_speaker_mt6993_clock_status(&cs);
-        printf("X9 SPK: clock acquire -> %d flags=%x stage=%u error=%u reg=%x val=%x\n",
+        SPKLOG("X9 SPK: clock acquire -> %d flags=%x stage=%u error=%u reg=%x val=%x\n",
                e,cs.flags,cs.stage,cs.error,cs.last_register,cs.last_value);
     }
-    if(!e)e=x9_speaker_mt6993_clock_afe(b.ticket,&b.afe);
+    if(!e){e=x9_speaker_mt6993_clock_afe(b.ticket,&b.afe);SPKLOG("X9 SPK: clock afe -> %d\n",e);}
     if(!e) {
         struct x9_speaker_pads_policy pp={X9_SPEAKER_PADS_POLICY_VERSION,b.generation,b.ticket,NULL,pa_mute,dl24_drained};
-        e=x9_speaker_pads_acquire(&pp);b.pads=true;printf("X9 SPK: pads acquire -> %d\n",e);
+        SPKLOG("X9 SPK: pads acquire begin\n");
+        e=x9_speaker_pads_acquire(&pp);b.pads=true;SPKLOG("X9 SPK: pads acquire -> %d\n",e);
     }
     if(!e) {
         struct x9_speaker_afe_platform ap={0};
@@ -338,10 +350,11 @@ int x9_speaker_bringup_run(void)
         ap.acquire=afe_acquire;ap.release=afe_release;ap.mute=afe_mute;ap.quiesce=afe_quiesce;
         ap.sync_device=afe_sync;ap.held=afe_held;ap.validate=afe_validate;ap.halt_producer=afe_halt;
         ap.producer=X9AFEProducerCPU;ap.generation=0;
-        e=x9_speaker_afe_register(&ap);printf("X9 SPK: afe register -> %d\n",e);
-        if(!e){e=x9_speaker_afe_prepare_on_ticket(b.ticket);b.afe_prepared=true;printf("X9 SPK: afe prepare -> %d\n",e);}
+        e=x9_speaker_afe_register(&ap);SPKLOG("X9 SPK: afe register -> %d\n",e);
+        if(!e){e=x9_speaker_afe_prepare_on_ticket(b.ticket);b.afe_prepared=true;SPKLOG("X9 SPK: afe prepare -> %d\n",e);}
     }
     static int16_t pcm[960*2];uint32_t phase=0;uint64_t anchor=0;
+    if(!e)SPKLOG("X9 SPK: afe start begin\n");
     if(!e){fill(pcm,960,&phase,-1);e=x9_speaker_afe_start(pcm,960,&anchor);printf("X9 SPK: afe start (silence) -> %d\n",e);}
     /* Keep ~100 ms of silence queued while both PAs leave powerdown: their
      * PLL locks to BCK/WS (CLKS). */

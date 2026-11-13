@@ -15,6 +15,7 @@
 #include "x9_mic_bringup.h"
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 extern int sweet_x9_microphone_mode(void);
+extern void IOSleep(unsigned int); /* let the USB console drain (logs 260/261) */
 static volatile uint32_t *afe;
 static bool bound;
 /* Called by the memory provider after VUL1 ON was cleared and read back, with
@@ -66,7 +67,7 @@ static void report(void)
 }
 int x9_mic_bringup_run(unsigned ms)
 {
-    printf("X9 MIC: boot capture %u ms (record only; statistics, nothing stored or played)\n",ms);
+    printf("X9 MIC: boot capture %u ms (record only; statistics, nothing stored or played)\n",ms);IOSleep(250);
     if(sweet_x9_microphone_mode()!=2){printf("X9 MIC: x9_mic mode %d, need 2\n",sweet_x9_microphone_mode());return ENXIO;}
     int e=0;
     if(!bound) {
@@ -76,7 +77,7 @@ int x9_mic_bringup_run(unsigned ms)
             .flags=X9_MIC_PLJ110_AIN0_VERIFIED|X9_MIC_PLJ110_DMA_DRAIN_VERIFIED,
             .afe=afe,.ring_bytes=65536,.context=NULL,.quiesce=vul1_quiesce};
         e=x9_mic_plj110_register_native_dma(&p);
-        printf("X9 MIC: native DMA bind -> %d\n",e);
+        printf("X9 MIC: native DMA bind -> %d\n",e);IOSleep(250);
         if(e){report();return e;}
         bound=true;
     }
@@ -89,6 +90,6 @@ int x9_mic_bringup_run(unsigned ms)
     printf("X9 MIC: pcm min=%d max=%d mean=%lld rms=%llu first=%d,%d,%d,%d,%d,%d,%d,%d\n",
         r.min,r.max,mean,rms,r.first[0],r.first[1],r.first[2],r.first[3],
         r.first[4],r.first[5],r.first[6],r.first[7]);
-    report();
+    report();IOSleep(500);
     return e;
 }
