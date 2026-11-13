@@ -36,6 +36,8 @@ static int afe_spm_wait(struct afe_journal *a,uint32_t mask,uint32_t expected)
 {
     int e=wait_bits(a->spm_pbus,AUDIO_SSYSPM_PBUS_OFFSET,mask,expected,10000);
     if(e) {
+        printf("X9 MIC AFE: SSYSPM 0x903c=%x (want %x under %x)\n",
+            rr(a->spm_pbus,AUDIO_SSYSPM_PBUS_OFFSET),expected,mask);
         a->s->last_register=X9_MIC_AFE_REGISTER_SPM|0x903cu;
         a->stuck=true;
     }
@@ -271,8 +273,15 @@ static int afe_take(struct afe_journal *a,vm_offset_t gpio,struct x9_mic_afe_sta
             if((rr(a->hwv,0x20708)&rr(a->hwv,0x13700)&rr(a->hwv,0x12900)&1)!=1 ||
                (rr(a->hwv,0x13704)&1) || afe_foreign_votes(a)){a->stuck=true;return EBUSY;}
             a->borrowed|=1;
-            e=afe_spm_wait(a,AUDIO_SSYSPM_PWR_ACK|AUDIO_SSYSPM_PROTECT,AUDIO_SSYSPM_PWR_ACK);
-            if(e)return e;
+            /* Log 271: this read-only wait timed out on the borrowed domain.
+             * Nothing was written to AUDIO, so a refusal here is not stuck:
+             * restore unwinds only our own AO/infra votes and frees the lease. */
+            uint32_t pb=rr(a->spm_pbus,AUDIO_SSYSPM_PBUS_OFFSET);
+            printf("X9 MIC AFE: inherited AUDIO SSYSPM 0x903c=%x (ack=%u prot_en=%u prot_rdy=%u sram=%u/%u pwr=%u)\n",
+                pb,pb>>31,(pb>>2)&1,(pb>>3)&1,pb&1,(pb>>1)&1,(pb>>4)&1);
+            if((pb&(AUDIO_SSYSPM_PWR_ACK|AUDIO_SSYSPM_PROTECT))!=AUDIO_SSYSPM_PWR_ACK) {
+                s->last_register=X9_MIC_AFE_REGISTER_SPM|0x903cu;return EBUSY;
+            }
             continue;
         }
         if(bits[i]==1 && (((rr(a->hwv,0x13700)|rr(a->hwv,0x12900))&1) || afe_foreign_votes(a))) {
