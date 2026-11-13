@@ -44,10 +44,20 @@ static uint32_t field_prior[FIELD_COUNT];
 static unsigned field_count(void){return j.combined?1:FIELD_COUNT;}
 static uint32_t native_engen_expected(void);
 static int native_engen_idle(void);
+/* Log 265: the SoC stopped between "map done, AO snapshot" and "APLL
+ * capture". While `trace` is set every access is printed (physical address)
+ * BEFORE it is issued, then paced, so the last line names the access. */
+static bool trace;
+static const char *trace_name(vm_offset_t b,unsigned long *phys);
+static void trace_access(const char *op,vm_offset_t b,unsigned r,uint32_t v)
+{
+    unsigned long phys=0;const char *n=trace_name(b,&phys);
+    printf("X9 SPK CLK %s %s+%x (%lx) %x\n",op,n,r,phys+r,v);IOSleep(300);
+}
 static uint32_t rd(vm_offset_t b,unsigned r)
-{uint32_t v=*(volatile uint32_t *)(b+r);__asm__ volatile("dmb oshld":::"memory");return v;}
+{if(trace)trace_access("rd",b,r,0);uint32_t v=*(volatile uint32_t *)(b+r);__asm__ volatile("dmb oshld":::"memory");return v;}
 static void wr(vm_offset_t b,unsigned r,uint32_t v)
-{*(volatile uint32_t *)(b+r)=v;__asm__ volatile("dsb sy":::"memory");}
+{if(trace)trace_access("wr",b,r,v);*(volatile uint32_t *)(b+r)=v;__asm__ volatile("dsb sy":::"memory");}
 static int wait_bits(vm_offset_t b,unsigned r,uint32_t mask,uint32_t value,unsigned us)
 {
     uint64_t ticks;nanoseconds_to_absolutetime((uint64_t)us*1000,&ticks);
@@ -72,6 +82,14 @@ static uint32_t foreign(void)
         if(rd(j.hwv,base+0x708)&7)bits|=1u<<n;
     }
     return bits;
+}
+static const char *trace_name(vm_offset_t b,unsigned long *phys)
+{
+    if(b==j.hwv){*phys=0x1c040000;return "hwv";}
+    if(b==j.vlp){*phys=0x1c200000;return "vlp";}
+    if(b==j.afe){*phys=0x1a110000;return "afe";}
+    if(b==j.apll){*phys=0x1c203100;return "apll";}
+    *phys=0;return "?";
 }
 static void ao_snapshot(void)
 {
@@ -224,7 +242,8 @@ static int take(bool with_pll,bool with_path)
     if(!j.apll)j.apll=ml_io_map(0x1c203100,0x100);
     if(!j.hwv || !j.vlp || !j.afe || !j.apll)return ENOMEM;
     if(j.combined){int mapping=native_mapping();if(mapping)return mapping;}
-    CLKSTEP("map done, AO snapshot");
+    CLKSTEP("map done, AO snapshot (tracing accesses)");
+    trace=true;
     s.flags|=X9ClockAOCaptured;ao_snapshot();
     s.ap_before=s.ap_after;s.all_before=s.all_after;s.ack_before=s.ack_after;
     s.foreign_before=s.foreign_after;s.vlp_before=s.vlp_after;s.fenc_before=s.fenc_after;
@@ -232,13 +251,15 @@ static int take(bool with_pll,bool with_path)
     /* AUDIO and ADSP TOP must be globally off. INFRA/AO AP votes may be
      * borrowed under the same AP lease; foreign XPU votes are never reset. */
     if((s.ap_before|s.all_before|s.ack_before|rd(j.hwv,0x1131c)|rd(j.hwv,0x13704))&(j.combined?1:3) ||
-       s.foreign_before)return EBUSY;
+       s.foreign_before){trace=false;CLKSTEP("cold check refused (EBUSY)");return EBUSY;}
     if(j.combined) {
-        int lease=x9_adsp_mt6993_speaker_validate(s.ticket);if(lease)return lease;
+        trace=false;CLKSTEP("adsp speaker_validate");trace=true;
+        int lease=x9_adsp_mt6993_speaker_validate(s.ticket);if(lease){trace=false;return lease;}
     }
     int e=refuse(j.vlp,0x90,0x8080,0x8080);
     if(!e)e=refuse(j.vlp,0x274,0xc0000000,0);
-    if(e)return e;
+    if(e){trace=false;return e;}
+    trace=false;
     CLKSTEP("APLL capture");
     const unsigned apll_regs[]={8,0xc,0x14,0x34,0x38,0x3c,0x40};
     for(unsigned n=0;n<7;n++)s.apll[n]=rd(j.apll,apll_regs[n]);

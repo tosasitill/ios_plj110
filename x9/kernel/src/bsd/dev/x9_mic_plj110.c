@@ -355,7 +355,9 @@ static int xo_take(struct power_journal *j)
         /* Log 264: with the codec left powered by LK, BBCK5 is already
          * software-enabled. Borrow exactly that state (not owned, never
          * withdrawn on restore); any hardware-controlled mode is refused. */
-        if((v&7)==4){printf("X9 MIC: BBCK5 already on (xo=%02x), borrowed\n",v);X9PMIFRelease();return 0;}
+        /* Log 265: xo=0x11, i.e. BBCK5 under hardware (SRCLKEN) control with
+         * the codec live. Borrow it too; nothing is written or withdrawn. */
+        if((v&7)==4 || (v&7)==1){printf("X9 MIC: BBCK5 already on (xo=%02x), borrowed\n",v);X9PMIFRelease();return 0;}
         if(v&7){printf("X9 MIC: BBCK5 xo=%02x not cold/software-on, refused\n",v);e=EBUSY;}
     }
     if(!e) {
