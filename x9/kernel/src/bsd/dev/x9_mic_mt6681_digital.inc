@@ -163,8 +163,10 @@ int x9_mic_mt6681_digital_l(struct x9_mic_mt6681 *c,struct x9_mic_digital_status
 {
     if(!c || !s || c->digital || c->poisoned || c->io.flags!=X9_MT6681_REQUIRED ||
        !c->analog_owned ||
-       (c->analog.flags&(X9_MIC_ANALOG_RC_OK|X9_MIC_ANALOG_READBACK))!=
-       (X9_MIC_ANALOG_RC_OK|X9_MIC_ANALOG_READBACK))return EINVAL;
+       /* RC tune is diagnostic in OPPO mt6681.c (log 278); require the
+        * prepared analog path and its journal readback, not RC_OK. */
+       (c->analog.flags&(X9_MIC_ANALOG_PREPARED|X9_MIC_ANALOG_READBACK))!=
+       (X9_MIC_ANALOG_PREPARED|X9_MIC_ANALOG_READBACK))return EINVAL;
     c->digital=s;s->stage=X9_MIC_DIGITAL_BASELINE;
     uint64_t ticks;nanoseconds_to_absolutetime(1000000000ULL,&ticks);
     c->digital_deadline=mach_absolute_time()+ticks;

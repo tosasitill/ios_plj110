@@ -188,10 +188,18 @@ int x9_mic_mt6681_analog_l(struct x9_mic_mt6681 *c)
     ANALOG(MT6681_AUDENC_PMU_CON1,RG_AUDADCLPWRUP,1);delay(500);
     s->flags|=X9_MIC_ANALOG_PREPARED;s->stage=X9_MIC_ANALOG_RC;
     e=analog_read(c,MT6681_AUDENC_PMU_CON32,&s->rc_monitor);if(e)goto failed;
-    /* Vendor retries a 0/31 result once. Fail closed instead of resetting.
-     * Ordinary mode keeps SW tune=4; monitor is not a PCM success signal. */
-    if((s->rc_monitor&31)==0 || (s->rc_monitor&31)==31){e=EIO;goto failed;}
-    s->flags|=X9_MIC_ANALOG_RC_OK;
+    /* Log 278: rc_monitor=1f failed closed here. OPPO mt6681.c (adc reset
+     * mechanism): on 0/0x1f toggle RG_AUDADCLPWRUP off/on once, wait 500us,
+     * re-read, and continue regardless (diagnostic only; SW tune=4 stays).
+     * RC_OK is set only for an in-range value. */
+    if((s->rc_monitor&31)==0 || (s->rc_monitor&31)==31) {
+        uint32_t first=s->rc_monitor;
+        ANALOG(MT6681_AUDENC_PMU_CON1,RG_AUDADCLPWRUP,0);
+        ANALOG(MT6681_AUDENC_PMU_CON1,RG_AUDADCLPWRUP,1);delay(500);
+        e=analog_read(c,MT6681_AUDENC_PMU_CON32,&s->rc_monitor);if(e)goto failed;
+        printf("X9 MIC ANALOG: rc_tune_l %x -> after ADC reset %x (continuing as OPPO)\n",first,s->rc_monitor);
+    }
+    if((s->rc_monitor&31)!=0 && (s->rc_monitor&31)!=31)s->flags|=X9_MIC_ANALOG_RC_OK;
     ANALOG(MT6681_AUDENC_PMU_CON54,RG_AUDSPAREVA18_L,0);
     ANALOG(MT6681_AUDENC_PMU_CON0,RG_AUDPREAMPLDCPRECHARGE,0);
     e=analog_snapshot(c,true);
