@@ -9,7 +9,7 @@
 struct afe_journal {
     vm_offset_t hwv, vlp, afe, gpio, ioc[2], spm_pbus;
     struct x9_mic_afe_status *s;
-    uint32_t votes, borrowed, mux_owned, pin_owned;
+    uint32_t votes, borrowed, mux_owned, pin_owned, mux_borrowed;
     uint32_t saved[5];
     bool snapshot, engine_owned, sram, stuck, pins_saved;
     bool dram_owned, dram_uncertain;
@@ -110,11 +110,23 @@ static int afe_mux_take(struct afe_journal *a,unsigned i)
     if(e)a->stuck=true;
     return e;
 }
+/* Log 274: LK leaves aud_intbus on parent 1 (vlp_clksq) and audio_h on
+ * parent 3 (apll2). A borrowed mux must keep exactly its observed parent
+ * (PDN clear); a mux we took ourselves is on parent 0. */
+static uint32_t afe_mux_expected(struct afe_journal *a)
+{
+    uint32_t v=0;
+    for(unsigned i=0;i<2;i++)if(a->mux_borrowed&(1u<<i))v|=a->s->vlp_before&(3u<<(i*8));
+    return v;
+}
 static int afe_access(struct afe_journal *a)
 {
     if((rr(a->hwv,0x12900)&0xd)!=0xd || !(rr(a->hwv,0x20708)&1) ||
-       (rr(a->vlp,0x90)&0x8383) || (rr(a->vlp,0x274)&0xc0000000)!=0xc0000000 ||
+       (rr(a->vlp,0x90)&0x8383)!=afe_mux_expected(a) || (rr(a->vlp,0x274)&0xc0000000)!=0xc0000000 ||
        afe_foreign_votes(a)) {
+        printf("X9 MIC AFE: access refused ack=%x ap=%x vlp=%x want=%x fenc=%x foreign=%x\n",
+            rr(a->hwv,0x12900),rr(a->hwv,0x20708),rr(a->vlp,0x90),afe_mux_expected(a),
+            rr(a->vlp,0x274),afe_foreign_votes(a));
         a->stuck=true;return EBUSY;
     }
     /* Last AO-only qualification before reading/writing the powered domain.
@@ -260,6 +272,7 @@ static int afe_take(struct afe_journal *a,vm_offset_t gpio,struct x9_mic_afe_sta
         if(!(s->vlp_before&pdn) && (s->fenc_before&fenc))mux_borrowed|=1u<<i;
         else return EBUSY;
     }
+    a->mux_borrowed=mux_borrowed;
     printf("X9 MIC AFE: audio %s, mux borrowed=%x (vlp=%x fenc=%x)\n",
         audio_inherited?"inherited on (borrowed)":"cold",mux_borrowed,s->vlp_before,s->fenc_before);
     s->stage=X9_MIC_AFE_SMC_INIT;
