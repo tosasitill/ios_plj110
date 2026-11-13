@@ -171,14 +171,20 @@ static int tfa_init_one(unsigned i)
         }
         printf("X9 SPK: PA%x rev=%04x revid=%x type_sel=%u lpm=%u dcdc=%u devrev=%u audfs=%u fractdel=%u\n",
                slaves[i],rev,revid,ts,lpm,dcdc,dev&3,audfs,fract);
-        if(!e && revid!=0x13a65)e=ENOTSUP; /* container is TFA9865MN1A3 only */
+        /* Log 258: both PAs read reg03=0x9866 -> revid 0x19865, absent from
+         * OPPO tfa986x_specific's table: the vendor driver takes `default`
+         * (warning only, NO chip table) and Android starts it that way.
+         * 0x13a65 keeps its generated table; anything else is refused. */
+        if(!e && revid!=0x13a65 && revid!=0x19865)e=ENOTSUP;
     }
     if(!e)e=x9_tfa_plj110_write16(slaves[i],0x0f,0x5a6b); /* unhide keys */
     if(!e)e=x9_tfa_plj110_read16(slaves[i],0xfb,&x);
     if(!e)e=x9_tfa_plj110_write16(slaves[i],0xa0,(uint16_t)(x^0x005a));
     if(!e)e=x9_tfa_plj110_write16(slaves[i],0x0f,0x5a6b);
     if(!e)e=x9_tfa_plj110_write16(slaves[i],0xa1,0x005a); /* key2 unlock */
-    for(unsigned k=0;!e && k<sizeof(init_reg);k++)e=x9_tfa_plj110_write16(slaves[i],init_reg[k],init_val[k]);
+    if(!e && revid==0x13a65)
+        for(unsigned k=0;!e && k<sizeof(init_reg);k++)e=x9_tfa_plj110_write16(slaves[i],init_reg[k],init_val[k]);
+    else if(!e)printf("X9 SPK: PA%x revid %x: OPPO default branch, no chip table\n",slaves[i],revid);
     if(!e)e=bf_set(i,0x0000,1);                           /* PWDN=1 */
     if(!e)e=wait_bf(i,0x1203,0,50);                       /* MANSTATE=0 */
     if(!e)e=bf_set(i,0x0460,1);                           /* MANAOOSC=1 */
