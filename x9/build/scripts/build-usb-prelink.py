@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """iOS-ABI X9 kernel + XnuPrelink of the original 20H392 USB device kexts + boot.img.
 
-    python3 -I x9/build/scripts/build-usb-prelink.py <name>
+    python3 -I x9/build/scripts/build-usb-prelink.py <name> [--boot-arg TOKEN ...]
 
 1. build.py kernel against .local/dxb-iosabi (iOS kext C++ ABI; x9/xnu/build-xnu.sh ios)
 2. .local/references/XnuPrelink/emit_prelink.py links IOUSBDeviceFamily and
@@ -67,9 +67,14 @@ def align_prelink_info(path):
 
 
 def main():
-    if len(sys.argv) != 2:
-        sys.exit(__doc__)
-    name = sys.argv[1]
+    import argparse
+    ap = argparse.ArgumentParser(usage=__doc__)
+    ap.add_argument('name')
+    ap.add_argument('--boot-arg', action='append', default=[], metavar='TOKEN',
+                    help='extra boot-arg token for this image (repeatable), passed to build.py kernel and boot')
+    a = ap.parse_args()
+    name = a.name
+    extra = [x for t in a.boot_arg for x in ('--boot-arg', t)]
     out = ROOT / 'x9/out' / (name + '-prelink')
     out.mkdir(parents=True, exist_ok=True)
     cfg = json.loads((ROOT / 'x9/build/local.json').read_text())
@@ -89,7 +94,7 @@ def main():
             sys.exit(f'{label} failed, see {out / (label + ".log")}')
 
     kname = name + '-kernel'
-    run('kernel', [py, '-I', 'x9/build/build.py', 'kernel', '--name', kname, '--config', str(cfg_path), '-j', '8'])
+    run('kernel', [py, '-I', 'x9/build/build.py', 'kernel', '--name', kname, '--config', str(cfg_path), '-j', '8'] + extra)
     kernel = ROOT / 'x9/out' / kname / 'kernel.development.sweet'
     end = max(va + vs for _, _, va, vs in segments(kernel.read_bytes()) if vs)
     if end + 0x40000 > PRELINK_BASE:
@@ -104,7 +109,7 @@ def main():
     for p in (ROOT / 'x9/out' / kname).glob('*.json'):
         (out / p.name).write_bytes(p.read_bytes())
     run('boot', [py, '-I', 'x9/build/build.py', 'boot', '--kernel', str(prelinked), '--name', name,
-                 '--config', str(cfg_path), '--boot-config', str(ROOT / 'x9/build/boot-device.json')])
+                 '--config', str(cfg_path), '--boot-config', str(ROOT / 'x9/build/boot-device.json')] + extra)
     print('done', out, flush=True)
 
 

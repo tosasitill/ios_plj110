@@ -165,6 +165,32 @@ static int ensureWorker()
     if (kernel_thread_start(worker, nullptr, &thread) != KERN_SUCCESS) return ENOMEM;
     thread_deallocate(thread); haveWorker = true; return 0;
 }
+/* x9_dsp_boot=<1..600> with x9_audio=2: ONE unattended equivalent of
+ * `audioctl dsp-boot` <N> s after start, for images without an iOS shell.
+ * Same lock order and busy checks as the admin selector (audio -> transport
+ * -> board); no retry, no automatic stop. Board/DSP state is logged after. */
+static void dspBootOnce(void *arg, wait_result_t)
+{
+    uint32_t delay = (uint32_t)(uintptr_t)arg;
+    IOSleep(delay * 1000);
+    IOLog("X9 AUDIO DSPBOOT: issuing one dsp-boot (power/reset/RELOAD/CORE_START0 -> READY)\n");
+    lck_mtx_lock(&audioLock);
+    int e = haveBackend || (control && (control->state & X9AudioRunning)) ? EBUSY : x9_adsp_mt6993_control(0);
+    lck_mtx_unlock(&audioLock);
+    X9AudioBoardStatus b; bzero(&b, sizeof(b)); int be = x9_adsp_mt6993_status(&b);
+    X9AudioDSPStatus d; bzero(&d, sizeof(d)); int de = x9_adsp_status(0, &d);
+    IOLog("X9 AUDIO DSPBOOT: result=%d board_err=%d flags=%x error=%u restore=%u rollback=%u lease=%u\n",
+          e, be, b.flags, b.error, b.restore_error, b.rollback_error, b.lease_error);
+    IOLog("X9 AUDIO DSPBOOT: votes owned=%x ap=%x all=%x pd_done=%x pd_busy=%x pending=%x sleep=%x dpsw=%x/%x vlogic=%x sram=%x\n",
+          b.owned_vote, b.ap_vote, b.all_vote, b.pd_done, b.pd_busy, b.pending, b.sleep,
+          b.dpsw_req, b.dpsw_ack, b.vlogic_ack, b.sram_ack);
+    IOLog("X9 AUDIO DSPBOOT: smc op=%u ret=%llx/%llx/%llx/%llx calls=%llu resets=%llu timeouts=%llu guard=%u reg=%x exp=%x act=%x\n",
+          b.smc_op, b.smc_result[0], b.smc_result[1], b.smc_result[2], b.smc_result[3],
+          b.smc_calls, b.resets, b.timeouts, b.guard_space, b.guard_reg, b.guard_expected, b.guard_actual);
+    IOLog("X9 AUDIO DSPBOOT: dsp_err=%d state=%u error=%u gen=%u ready=%llu sent=%llu recv=%llu acks=%llu stray=%llu timeouts=%llu wake_err=%llu primary=%u cleanup=%u lease=%u guard=%u\n",
+          de, d.state, d.error, d.generation, d.ready_count, d.sent, d.received, d.matched_acks,
+          d.stray_acks, d.timeouts, d.wake_errors, d.primary_error, d.cleanup_error, d.lease_error, d.guard_stage);
+}
 extern "C" int x9_audio_register_backend(const x9_audio_backend *b)
 {
     if (!sweet_early_is_x9() || (sweet_x9_arg("x9_audio", 0) != 1 && sweet_x9_arg("x9_audio", 0) != 2)) return ENXIO;
@@ -245,6 +271,15 @@ bool X9Audio::start(IOService *p)
     if (sweet_x9_arg("x9_audio", 0) == 2) {
         int boardError = x9_adsp_mt6993_init();
         setProperty("X9AudioBoardInitError", boardError, 32);
+        int dspDelay = sweet_x9_arg("x9_dsp_boot", 0);
+        if (dspDelay) {
+            thread_t t;
+            bool armed = !boardError && dspDelay > 0 && dspDelay <= 600 &&
+                kernel_thread_start(dspBootOnce, (void *)(uintptr_t)dspDelay, &t) == KERN_SUCCESS;
+            if (armed) thread_deallocate(t);
+            IOLog("X9 AUDIO DSPBOOT: %s (x9_dsp_boot=%d board_init=%d)\n",
+                  armed ? "armed, one dsp-boot after delay" : "NOT armed", dspDelay, boardError);
+        }
     }
     registerService();
     IOLog("X9 AUDIO: ABI v%u output 48000/S16/stereo; physical backend=%u, no automatic PA/DSP writes\n",

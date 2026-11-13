@@ -99,7 +99,7 @@ static void render_park_retire_note(const char *why) {
 }
 static bool render_park_enabled() {
  static int mode=-1;
- if(mode<0){mode=sweet_x9_arg("x9_gpu_park",0)==1?1:0;IOLog("X9 RENDER PARK: resident group between submits %s (x9_gpu_park)\n",mode?"ON":"off");}
+ if(mode<0){mode=sweet_x9_arg("x9_gpu_park",1)==1?1:0;IOLog("X9 RENDER PARK: resident group between submits %s (x9_gpu_park)\n",mode?"ON":"off");}
  return mode==1;
 }
 static bool render_retire_parked(const char *why) {
@@ -1626,7 +1626,7 @@ static void render_drain(X9RenderContext *c) {
 extern "C" kern_return_t kernel_thread_start_priority(thread_continue_t,void *,integer_t,thread_t *);
 static bool render_async_start() {
  if(render_async_running)return true;
- if(sweet_x9_arg("x9_submit_async",0)!=1)return false;
+ if(sweet_x9_arg("x9_submit_async",1)!=1)return false;
  render_async_lock=IOLockAlloc();if(!render_async_lock)return false;
  thread_t thread;
  if(kernel_thread_start_priority(render_async_worker,nullptr,92 /* BASEPRI_PREEMPT (kern/sched.h, not exported to iokit) */,&thread)!=KERN_SUCCESS) {
