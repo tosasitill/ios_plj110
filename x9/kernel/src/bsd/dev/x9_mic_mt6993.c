@@ -92,7 +92,7 @@ static int stop_locked(void)
             e=capture_access();if(e)goto dma_failed;
             dma_diagnostic.monitor_after=rd(VUL1_MON0);
             dma_diagnostic.last_register=VUL1_MON0;
-            if(dma_diagnostic.monitor_after&VUL1_MON_BUSY){e=EIO;goto dma_failed;}
+            if(VUL1_MON_ACTIVE(dma_diagnostic.monitor_after,rd(VUL1_CON0))){e=EIO;goto dma_failed;}
             dma_diagnostic.flags|=X9_MIC_DMA_DRAINED;dma_issued=false;
         }
         dma_diagnostic.stage=X9_MIC_DMA_RESTORE;
@@ -215,7 +215,8 @@ static int afe_start(uint64_t g)
             if(dma_diagnostic.active_memifs)e=EBUSY;
             if(dma_diagnostic.memif_con0&4){dma_diagnostic.last_register=MEMIF_CON0;e=EBUSY;}
             if(dma_diagnostic.con0_before&(VUL1_ON|(1u<<7)))e=EBUSY;
-            if(dma_diagnostic.monitor_before&(VUL1_MON_BUSY|VUL1_MON_FULL))e=EBUSY;
+            if(VUL1_MON_ACTIVE(dma_diagnostic.monitor_before,dma_diagnostic.con0_before) ||
+               (dma_diagnostic.monitor_before&VUL1_MON_FULL))e=EBUSY;
             /* Every actual routing word must be empty; word3 is reserved.
              * Reject before saving/writing: failure must not restore foreign
              * routes or untouched address registers. */

@@ -112,7 +112,7 @@ static int digital_dma_snapshot(struct afe_journal *a,struct x9_mic_dma_status *
     uint64_t cur=((uint64_t)hi<<32)|lo;
     if(after){s->cur_after=cur;return 0;}
     s->cur_before=cur;s->flags|=X9_MIC_DMA_REGISTERS_VALID;
-    if(!s->active_memifs && !(s->monitor_before&(VUL1_MON_BUSY|VUL1_MON_FULL)))s->flags|=X9_MIC_DMA_IDLE;
+    if(!s->active_memifs && !VUL1_MON_ACTIVE(s->monitor_before,s->con0_before) && !(s->monitor_before&VUL1_MON_FULL))s->flags|=X9_MIC_DMA_IDLE;
     bool empty=true;
     for(unsigned c=0;c<2;c++)for(unsigned w=0;w<7;w++)if(s->route[c][w])empty=false;
     if(empty)s->flags|=X9_MIC_DMA_ROUTE_EMPTY;

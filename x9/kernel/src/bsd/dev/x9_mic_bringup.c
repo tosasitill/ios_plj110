@@ -31,7 +31,7 @@ static int vul1_quiesce(void *context)
         delay(1000);
         uint32_t con=afe[VUL1_CON0/4],mon=afe[VUL1_MON0/4],cur=afe[VUL1_CUR/4];
         if(con&VUL1_ON)return EBUSY;
-        stable=(cur==prev && !(mon&VUL1_MON_BUSY))?stable+1:0;
+        stable=(cur==prev && !VUL1_MON_ACTIVE(mon,con))?stable+1:0;
         prev=cur;
         if(stable>=2)return 0;
     }

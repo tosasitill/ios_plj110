@@ -11,6 +11,10 @@ enum { VUL1_BASE_MSB=0x4d90, VUL1_BASE=0x4d94, VUL1_CUR_MSB=0x4d98,
 #define VUL1_ON (1u<<28)
 #define VUL1_MON_BUSY ((0xfu<<20)|(1u<<19)|(1u<<17)|(1u<<16))
 #define VUL1_MON_FULL (1u<<18)
+/* Log 279: VUL1 off (CON0=0x100048, CUR=0, no memif on) reads MON0=0x100000:
+ * MON0 bits 16-17/20-21 mirror CON0 MAXLEN/MINLEN (OPPO mt6993-reg.h gives
+ * MON0 no fields). Discount exactly the configured length bits. */
+#define VUL1_MON_ACTIVE(mon,con) ((mon)&VUL1_MON_BUSY&~((con)&(0x33u<<16)))
 #define VUL1_FORMAT_MASK ((0x1fu<<8)|(1u<<6)|(1u<<5)|(1u<<4)|(1u<<3)|(1u<<2)|3u)
 /* OPPO trigger START/RESUME sets minlen=maxlen=3 (64-byte bursts) for VUL1.
  * These are configuration fields, not write-completion/drain indicators. */
