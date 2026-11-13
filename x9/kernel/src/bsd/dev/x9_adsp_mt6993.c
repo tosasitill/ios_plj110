@@ -609,6 +609,13 @@ void x9_adsp_mt6993_inherited_report(const char *when)
         uint32_t sem=rd(cfg,AUDIO_SEM_REG),vlogic=rd(cfg2,0x50),sram=rd(cfg2,0x54);
         printf("X9 ADSP PROBE %s: cfg sleep(0x158)=%x pending(0x15c)=%x dpsw_req(0x590)=%x dpsw_ack(0x594)=%x sem(0x64)=%x audio_sem=%d vlogic_ack=%x sram_ack=%x\n",
             when,sleep,pending,dreq,dack,sem,!!(sem&AUDIO_SEM_BIT),vlogic,sram);
+        /* OPPO adsp/v3/adsp_reg.h: CFGREG_RSV_RW_REG0/1 = firmware-written
+         * per-core system status (adsp_mt_read_adsp_sys_status); A/B WDT
+         * bit31 = WDT_EN. Plain status/config reads, no side effects. */
+        uint32_t sysA=rd(cfg,0x8c),sysB=rd(cfg,0x90),wdtA=rd(cfg,0x7c),wdtB=rd(cfg,0x68);
+        printf("X9 ADSP PROBE %s: fw sys_status A(0x8c)=%x B(0x90)=%x wdt A(0x7c)=%x en=%d B(0x68)=%x en=%d wfi A=%d B=%d axi_idle=%d\n",
+            when,sysA,sysB,wdtA,!!(wdtA&0x80000000u),wdtB,!!(wdtB&0x80000000u),
+            !!(sleep&1),!!(sleep&2),!!(sleep&4));
     }
     lck_mtx_unlock(&board_lock);lck_mtx_unlock(&board_control_lock);
 }
