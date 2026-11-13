@@ -176,6 +176,8 @@ static void dspProbeOnce(void *arg, wait_result_t)
     IOSleep((uint32_t)(uintptr_t)arg * 1000);
     x9_adsp_mt6993_inherited_report("delayed");
 }
+static void dspAmpProbe(void);
+static void dspIpiTest(void);
 static void dspBootOnce(void *arg, wait_result_t)
 {
     uint32_t delay = (uint32_t)(uintptr_t)arg;
@@ -197,7 +199,39 @@ static void dspBootOnce(void *arg, wait_result_t)
     IOLog("X9 AUDIO DSPBOOT: dsp_err=%d state=%u error=%u gen=%u ready=%llu sent=%llu recv=%llu acks=%llu stray=%llu timeouts=%llu wake_err=%llu primary=%u cleanup=%u lease=%u guard=%u\n",
           de, d.state, d.error, d.generation, d.ready_count, d.sent, d.received, d.matched_acks,
           d.stray_acks, d.timeouts, d.wake_errors, d.primary_error, d.cleanup_error, d.lease_error, d.guard_stage);
-    if (e || de || d.state != X9DSPOnline) return;
+    if (!e && !de && d.state == X9DSPOnline) dspIpiTest();
+    dspAmpProbe();
+}
+/* PA stage: first I2C6 contact with both TFA98xx (0x34 left, 0x35 right).
+ * x9_tfa_plj110_probe borrows already-on clocks/pads, holds PMIF, reads only
+ * reg03 (revision) and restores the controller CSRs; it never writes a PA
+ * register, power/reset rail or PLL. Independent of the DSP outcome. */
+static void dspAmpProbe(void)
+{
+    IOSleep(200);
+    lck_mtx_lock(&audioLock);
+    int pe = haveBackend || (control && (control->state & X9AudioRunning)) ? EBUSY : x9_tfa_plj110_probe();
+    lck_mtx_unlock(&audioLock);
+    X9AudioAmpStatus a; bzero(&a, sizeof(a)); int ae = x9_tfa_plj110_status(&a);
+    IOLog("X9 AUDIO PA: probe=%d status_err=%d flags=%x stage=%u error=%u restore=%u dirty=%x rev=%04x/%04x read=%x family=%x slave=%x req=%x/%x/%x\n",
+          pe, ae, a.flags, a.stage, a.error, a.restore_error, a.dirty_mask, a.revision[0], a.revision[1],
+          a.revision_read, a.known_family, a.last_slave, a.request_status, a.request_start, a.request_fifo);
+    IOLog("X9 AUDIO PA: reset=%x,%x,%x,%x,%x,%x supply=%x,%x,%x,%x after reset=%x,%x,%x,%x,%x,%x supply=%x,%x,%x,%x\n",
+          a.reset[0], a.reset[1], a.reset[2], a.reset[3], a.reset[4], a.reset[5],
+          a.supply[0], a.supply[1], a.supply[2], a.supply[3],
+          a.reset_after[0], a.reset_after[1], a.reset_after[2], a.reset_after[3], a.reset_after[4], a.reset_after[5],
+          a.supply_after[0], a.supply_after[1], a.supply_after[2], a.supply_after[3]);
+    IOLog("X9 AUDIO PA: pmif=%x gate=%x dma_gate=%x dma_en=%x pin=%x/%x parent=%x pll1=%x nominal=%u timing=%u dma_parent=%x/%x bank start=%x/%x mask=%x/%x stat=%x/%x fifo=%x/%x\n",
+          a.pmif_status, a.gate, a.dma_gate, a.dma_enable, a.pin[0], a.pin[1], a.parent, a.pll_con1,
+          a.nominal_parent_hz, a.timing_hz, a.dma_parent, a.dma_pll_con1, a.bank_start[0], a.bank_start[1],
+          a.bank_mask[0], a.bank_mask[1], a.bank_status[0], a.bank_status[1], a.bank_fifo[0], a.bank_fifo[1]);
+    X9AudioI2C6Status i; bzero(&i, sizeof(i)); int ie = x9_i2c6_status(&i);
+    IOLog("X9 AUDIO PA: i2c6 err=%d flags=%x error=%u requests=%llu completed=%llu writes=%llu\n",
+          ie, i.flags, i.error, i.requests, i.completed, i.write_attempts);
+}
+static void dspIpiTest(void)
+{
+    X9AudioDSPStatus d; int de;
     /* One IPI round trip after READY: OPPO audio_controller_msg_id.h
      * AUD_CTL_MSG_A2D_IPI_TEST (0xADC0) to TASK_SCENE_AUDIO_CONTROLLER_HIFI3_A
      * (42 in the phone build: every #if in audio_task.h is an automotive
