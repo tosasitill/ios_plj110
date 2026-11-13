@@ -268,13 +268,14 @@ static int run_phase(struct x9_mic_mt6681 *c,int cycle[2],uint64_t deadline)
     /* Never accept leftover DONE from the previous test. Hardware must retire
      * it after TEST_ON=0. A platform with different semantics needs evidence,
      * not a success fallback. Both iteration and wall-time bounds apply. */
+    /* Log 275: phase 1 got EIO here; DONE stays latched after TEST_ON=0.
+     * OPPO mt6993-mt6681.c never waits for it to retire: it raises TEST_ON
+     * again and polls (the rising edge restarts the test). Observe briefly,
+     * record, and continue the same way. */
     unsigned i;
-    for(i=0;i<500;i++) {
-        if(!(afe_read(c,TEST_MON)&(3u<<28)))break;
-        if(mach_absolute_time()>=deadline)return ETIMEDOUT;
-        delay(2);
-    }
-    if(i==500)return EIO;
+    for(i=0;i<5;i++){if(!(afe_read(c,TEST_MON)&(3u<<28)))break;delay(2);}
+    if(i==5 && c->status.scanned_phases==1)
+        printf("X9 MIC CAL: DONE latched after TEST_ON=0 (mon=%x), continuing as OPPO\n",afe_read(c,TEST_MON));
     e=afe_write(c,TEST_CFG,off|1u);if(e)return e;
     for(i=0;i<2500;i++) {
         uint32_t m=afe_read(c,TEST_MON);c->status.monitor=m;

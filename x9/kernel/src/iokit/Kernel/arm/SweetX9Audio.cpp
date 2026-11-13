@@ -184,9 +184,17 @@ static void dspBootOnce(void *arg, wait_result_t)
     IOSleep(delay * 1000);
     /* Microphone first: a speaker-path failure must not hide its result.
      * The two paths share the exclusive audio resource lease, never overlap. */
+    /* Logs 272/275: with the mic's AFE init SMC issued first, the SoC hung
+     * 2-3 s after the ADSP launch (269, no mic AFE init: none in 7 s).
+     * Speaker first by default (x9_spk_first=0 restores mic first). */
     int micMs = sweet_x9_arg("x9_mic_boot", 0);
-    if (micMs > 0) IOLog("X9 AUDIO DSPBOOT: mic capture result=%d\n", x9_mic_bringup_run((unsigned)micMs));
-    if (!sweet_x9_arg("x9_spk_boot", 1)) { IOLog("X9 AUDIO DSPBOOT: speaker bring-up skipped (x9_spk_boot=0)\n"); return; }
+    bool spkFirst = sweet_x9_arg("x9_spk_first", 1) != 0;
+    if (micMs > 0 && !spkFirst) IOLog("X9 AUDIO DSPBOOT: mic capture result=%d\n", x9_mic_bringup_run((unsigned)micMs));
+    if (!sweet_x9_arg("x9_spk_boot", 1)) {
+        IOLog("X9 AUDIO DSPBOOT: speaker bring-up skipped (x9_spk_boot=0)\n");
+        if (micMs > 0 && spkFirst) IOLog("X9 AUDIO DSPBOOT: mic capture result=%d\n", x9_mic_bringup_run((unsigned)micMs));
+        return;
+    }
     IOLog("X9 AUDIO DSPBOOT: speaker bring-up (combined DSP boot, clocks, pads, AFE, TFA9865; AMPE stays 0, silence only)\n");
     lck_mtx_lock(&audioLock);
     int e = haveBackend || (control && (control->state & X9AudioRunning)) ? EBUSY : x9_speaker_bringup_run();
@@ -204,6 +212,10 @@ static void dspBootOnce(void *arg, wait_result_t)
     IOLog("X9 AUDIO DSPBOOT: dsp_err=%d state=%u error=%u gen=%u ready=%llu sent=%llu recv=%llu acks=%llu stray=%llu timeouts=%llu wake_err=%llu primary=%u cleanup=%u lease=%u guard=%u\n",
           de, d.state, d.error, d.generation, d.ready_count, d.sent, d.received, d.matched_acks,
           d.stray_acks, d.timeouts, d.wake_errors, d.primary_error, d.cleanup_error, d.lease_error, d.guard_stage);
+    if (micMs > 0 && spkFirst) {
+        IOSleep(1000);
+        IOLog("X9 AUDIO DSPBOOT: mic capture (after speaker) result=%d\n", x9_mic_bringup_run((unsigned)micMs));
+    }
 }
 extern "C" int x9_audio_register_backend(const x9_audio_backend *b)
 {
