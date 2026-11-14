@@ -853,32 +853,49 @@ means the order theory holds, and the speaker clock path gets its first test
 past 276's pll cold (follow the spk22 checklist above). A hang at the same point
 means the AP-only path hangs without the mic as well.
 
-### log 283 / spk24 (2026-11-14) — static audit after log 283 (WIP, not for hardware yet)
+### log 283 / spk24 (2026-11-14) — static audit of the whole speaker path
 
 log 283 (spk23, speaker first): no hang (as 276). The speaker passed PA init,
 AP-only hold, native board, the AO snapshot, the AUDIO borrow (0x903c=80f0100c)
 and adsp validate. Then `pll cold` failed with `clock acquire -> 16 reg=80
-val=20303`, which is the same value as 276. `clock release -> 16` kept the
-lease and the mic got EBUSY.
-Static audit against OPPO clk-pll.c / clk-mt6993.c (PLL_FENC apll2):
-1. pll_borrowed_ok (mic16) could never pass on a running 196.608 MHz APLL2.
-   It required CON0 bit0 and CON3 bit0 (FENC PLLs: mtk_pll_fenc_ops never
-   writes them; APLL2 has no pwr_reg), 0x38 bit0 (TUNER_CON0 holds pcw+1, its
-   enable is bit31), 0x40==0x78fd5265 (that is the mt6991 TUNER value; on 6993
-   TUNER is 0x38) and CON1 postdiv 0 (196.608 MHz from PCW 0x78fd5264 needs
-   postdiv 4, /16). The constants came from mt6991-afe-clk.c. Neither 276 nor
-   283 ever printed the APLL registers.
+val=20303` (the same value as 276). `clock release -> 16` kept the lease and
+the mic got EBUSY.
+Audit against OPPO mt6993-afe-clk.c, clk-mt6993.c, clk-pll.c, clk-mux.c,
+clk-fmeter-mt6993.c, pinctrl-mt6993.c and tfa98xx_v6.14.2 (tfa986x):
+1. Borrowed-APLL2 check: CON0/CON1 bit31/CON3/TUNER bit0 and PCW_CON0/1 =
+   0x78fd5264/5 are OPPO's own mt6993 apll_init/apll_enable values (an
+   intermediate spk24 commit wrongly called them mt6991 leftovers; corrected
+   here). The unproven part is postdiv: the check required CON1 bits24-26 = 0,
+   but engen2 = apll2_d4 = 49.152M means apll2 = 196.608M, which needs /16
+   (postdiv 4) with that PCW. LK also need not follow OPPO's enable sequence.
+   Neither 276 nor 283 printed any APLL register.
 2. On a borrow refusal pll_cold fell into the cold path, whose first check
-   (vlp+0x80 bit15) must fail on LK's 0x20303, overwriting the real reason.
-3. take() set s.borrowed_vote only at the domain-vote step, so any failure
+   (vlp+0x80 bit15) must fail on LK's 0x20303, so it overwrote the real reason.
+3. take() recorded s.borrowed_vote only at the domain-vote step, so a failure
    before it made native_restored_ao demand AUDIO off -> release EBUSY ->
    lease held -> mic EBUSY.
-4. The AFE 0x10 0x1018 gate check returned EBUSY without last_register.
-spk24 fixes (compiled, x9-spk24wip-20261114; not committed as a test image):
-borrow = FENC 0x34 bit4 + PCW/postdiv rate 196.608 MHz (+-0.01%) + the
-unchanged VLP topology; the cold path uses the same rate check instead of the
-0x3c/0x40/0xc images; pll_cold prints the APLL2 registers and rate, and a
-borrow refusal is returned as-is when the engen2 mux is enabled; the borrow is
-recorded when AUDIO is adopted; the 0x10 check reports its register.
-Next: audit the later stages (smc 0/7, AFE 0x10 gate expectation, tuner take,
-pads, AFE start, PA CLKS) before handing out a hardware image.
+4. AFE 0x10 (AUDIO_TOP_CON4) bits 3/4/12 (CG_APLL2, CG_H208M, PDN_TUNER2) were
+   required gated; LK's value was never logged, and the refusal set no
+   last_register.
+Verified OK (no change): VLP mux parents (engen2 idx3 = apll2_d4, audio_h idx3
+= apll2_ck), FENC bits (0x270 b2, 0x274 b30/b31), CKSTA busy semantics (0x330
+b2, 0x334 b29/30 must be 0), fmeter ids 30/33/34 with 49152/26000/196608 kHz,
+SMC 0 = INIT (OPPO probe) and 7 = DOMAIN_SIDEBANDS (runtime resume), native
+tuner list (SPM 0xcc, CBIP, TUNER 0x375 = OPPO 0x374|EN, ENGEN bits 0/3,
+OUT4 CG), LK ENGEN_CON0 low bits are 0 (mic afe_idle passed in 282), I2S4
+pads GPIO108-111 (mode 0x4b0, dir 0x30, IOC base 9 = 0x12860000, PU/PD/SMT/
+IES bits 4/6/5/8 = 0x170, DRV), TFA986x MANSCONF 0x0120 / PWDN 0x0000 /
+CLKS 0x1100 and OPPO's INIT_CF order.
+spk24 fixes: borrow = FENC 0x34 bit4 + PCW_CON0 0x78fd5264 + the unchanged VLP
+topology (CON0/CON1/CON3/TUNER/PCW_CON1 and the postdiv-derived rate are
+printed, not required; the fmeter measures engen2/audio_h). The cold path is
+unchanged. pll_cold prints `X9 SPK PLL: apll2 ...`, and a borrow refusal is
+returned as-is (`X9 SPK PLL: borrow refused reg= val=`) when the engen2 mux is
+enabled. The AUDIO borrow is recorded when it is adopted. AFE 0x10 is accepted
+in any inherited state (journaled and restored) and printed with top0/engen/
+spm (`X9 SPK CLK: inherited top4=`).
+Reading the spk24 log: `SPK PLL: apll2 ...` gives the real APLL2 registers;
+then `APLL2 inherited running ... borrowed`, `pll take`, `tuner take`
+(`inherited spm=...`), `clock acquire -> 0`, `SPK PADS: inherited ...`,
+`pads acquire -> 0`, `afe start (silence) -> 0`, `PA34/PA35 clocks -> 0`,
+`tone ... played=` growing, then the mic runs (no EBUSY).

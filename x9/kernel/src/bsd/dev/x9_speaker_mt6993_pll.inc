@@ -51,27 +51,19 @@ static int pll_wait(vm_offset_t b,unsigned off,uint32_t mask,uint32_t wanted,uns
 }
 static void pll_snapshot(uint32_t out[7])
 {for(unsigned n=0;n<7;n++)out[n]=rd(j.apll,pll_regs[n]);}
-/* OPPO clk-mt6993.c PLL_FENC(apll2): CON0 0x8, FENC status 0x34 bit4,
- * postdiv CON1 0xc bits24-26, PCW PCW_CON0 0x3c (32 bits, 8 integer bits);
- * clk-pll.c recalc: rate = 26M * pcw / 2^24 >> postdiv. mtk_pll_fenc_ops
- * never writes CON0/CON3 (no EN/PWR_ON semantics), TUNER_CON0 is 0x38 (not
- * PCW_CON1 0x40), CON1 bit31 is PCW_CHG. 0x78fd5264 with postdiv 4 (/16) is
- * 196.608 MHz (VCO 3145.7 MHz, OPPO range 1500-3800). The earlier exact
- * images (CON0/CON3/0x38 bit0, 0x40=0x78fd5265, postdiv 0) came from mt6991
- * register names and could not match a running 196.608 MHz APLL2. */
+/* OPPO mt6993-afe-clk.c: apll_init writes PCW_CON0 0x3c=0x78fd5264 and
+ * PCW_CON1 0x40=0x78fd5265; apll_enable sets CON0 0x8 bit0, CON1 0xc bit31
+ * (PCW toggle), CON3 0x14 bit0 (SDM on), TUNER_CON0 0x38 bit0.
+ * clk-mt6993.c PLL_FENC(apll2): running = FENC status 0x34 bit4, postdiv
+ * CON1 bits24-26; engen2 = apll2_d4 (49.152M) so apll2 is 196.608M after
+ * postdiv. LK need not use the OPPO enable sequence, and the old borrow
+ * image also demanded postdiv 0 (unproven; 0x78fd5264 gives 196.608M only
+ * with /16), so those bits are logged, not required. The fmeter measures
+ * engen2 and audio_h before anything uses them. */
 static uint64_t apll2_rate(void)
 {
     uint32_t pcw=rd(j.apll,0x3c),pd=(rd(j.apll,0xc)>>24)&7;
     return ((26000000ULL*pcw)>>24)>>pd;
-}
-static int apll2_rate_ok(void)
-{
-    /* PCW/postdiv image only, 0.01%; the fmeter measures the real output. */
-    uint64_t hz=apll2_rate();
-    if(hz+19661<196608000ULL || hz>196608000ULL+19661) {
-        pll_s.last_register=0xc;pll_s.last_value=rd(j.apll,0xc);return ERANGE;
-    }
-    return 0;
 }
 static int pll_unowned_consumers(void)
 {
@@ -87,9 +79,11 @@ static int pll_unowned_consumers(void)
     if(!e)e=pll_refuse(j.vlp,0x80,0x80000000,0x80000000); /* SW_ENGEN2 */
     if(!e)e=pll_refuse(j.vlp,0x270,1,0);
     if(!e)e=pll_refuse(j.vlp,0x334,1u<<31,0);
-    /* PCW and postdiv are immutable throughout this cycle and must already
-     * give 196.608 MHz. Never retune an inherited PLL or replay PCW_CHG. */
-    if(!e)e=apll2_rate_ok();
+    /* PCW, postdiv and update latch are immutable throughout this cycle.
+     * Never retune an inherited PLL or replay its PCW_UPDATE trigger. */
+    if(!e)e=pll_refuse(j.apll,0x3c,UINT32_MAX,0x78fd5264);
+    if(!e)e=pll_refuse(j.apll,0x40,UINT32_MAX,0x78fd5265);
+    if(!e)e=pll_refuse(j.apll,0xc,0x87000000,0x80000000);
     for(unsigned n=0;!e && n<3;n++)e=pll_refuse(pf[n].base,pf[n].off,~pf[n].mask,pf[n].saved&~pf[n].mask);
     return e;
 }
@@ -103,9 +97,9 @@ static int pll_idle(void)
  * mux or gate write, never withdrawn; only the fmeter is used to measure. */
 static int pll_borrowed_ok(void)
 {
-    /* Running = FENC status (mtk_pll_fenc_is_prepared), at 196.608 MHz. */
+    /* Running = FENC status (mtk_pll_fenc_is_prepared) with OPPO's PCW. */
     int e=pll_refuse(j.apll,0x34,16,16);
-    if(!e)e=apll2_rate_ok();
+    if(!e)e=pll_refuse(j.apll,0x3c,UINT32_MAX,0x78fd5264);
     if(!e)e=pll_refuse(j.vlp,0x80,0x8300,0x300);
     if(!e)e=pll_refuse(j.vlp,0x270,4,4);
     if(!e)e=pll_refuse(j.vlp,0x330,4,0);

@@ -337,9 +337,13 @@ static int take(bool with_pll,bool with_path)
     for(unsigned n=0;n<field_count();n++)field_prior[n]=fields[n].saved=fields[n].expected=rd(j.afe,fields[n].off);
     s.top_before=fields[0].saved;
     if(!j.combined)for(unsigned n=0;n<4;n++)s.out_before[n]=fields[n+1].saved;
-    if(j.combined && (fields[0].saved&0x1018)!=0x1018) {
-        s.last_register=fields[0].off;s.last_value=fields[0].saved;return EBUSY;
-    }
+    /* AUDIO_TOP_CON4 (OPPO mt6993-reg.h): bit3 CG_APLL2, bit4 CG_H208M,
+     * bit12 PDN_APLL_TUNER2. These used to be required gated (1), but LK's
+     * state was never logged, and with a borrowed running APLL2 there is
+     * nothing to settle. Any inherited value is journaled (saved) and
+     * restored by restore(); the tuner take below opens them as OPPO does. */
+    if(j.combined)printf("X9 SPK CLK: inherited top4=%x top0=%x engen=%x spm=%x\n",
+        fields[0].saved,rd(j.afe,0),rd(j.afe,0x14),rd(j.afe,0x60));
     j.captured=true;s.flags|=X9ClockAFECaptured;
     /* Keep native APLL2/TUNER2 leaf gates off until PLL settling/meter
      * qualification completes; open HOPPING/F26M first for register access. */
