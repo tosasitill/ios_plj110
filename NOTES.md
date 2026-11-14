@@ -1529,3 +1529,8 @@ Model now (as Android, one shared AFE, one owner per shared bit):
 - speaker native_engen_idle masks bit1 (mic ADDA). native_tuner_verify
   already masked 0x14 to 9. Speaker 0x98 writes bit5 only (the mic checks bit0).
 - the codec register dump runs once per boot (it added ~1.5 s to every START).
+- MTKAIF calibration wrote AFE 0x98 (AUD_TOP_CFG_VLP_RG) as `(old&~0xffff)|4`,
+  clearing bit5 RG_I2S4_PAD_TOP_CK_EN (the speaker's I2S4 pad clock) and the
+  I2S4/5 latch bits. With a shared AFE that would cut a running speaker. All
+  calibration writes to 0x98 are now RMW on TEST_TYPE/SW_RESET/TEST_ON
+  (bits 2:0) only, including the restore and the phase loop.

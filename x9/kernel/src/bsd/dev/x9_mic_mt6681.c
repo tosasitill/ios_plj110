@@ -160,7 +160,7 @@ static int restore_audio(struct x9_mic_mt6681 *c)
     if(c->afe_snapshot) {
         e=afe_write(c,PAD_CFG,c->old_pad);
         if(e)return restore_failure(c,e,X9_MIC_HW_RESTORE_AFE_PADS);
-        e=afe_write(c,TEST_CFG,c->old_test);
+        e=afe_write(c,TEST_CFG,(afe_read(c,TEST_CFG)&~7u)|(c->old_test&7u)); /* audio46: test bits only */
         if(e)return restore_failure(c,e,X9_MIC_HW_RESTORE_TEST);
     }
     if(c->audio_snapshot) {
@@ -353,7 +353,7 @@ static int run_phase(struct x9_mic_mt6681 *c,int cycle[2],uint64_t deadline)
     for(i=0;i<5;i++){if(!(afe_read(c,TEST_MON)&(3u<<28)))break;delay(2);}
     if(i==5 && c->status.scanned_phases==1)
         printf("X9 MIC CAL: DONE latched after TEST_ON=0 (mon=%x), continuing as OPPO\n",afe_read(c,TEST_MON));
-    e=afe_write(c,TEST_CFG,off|1u);if(e)return e;
+    e=afe_write(c,TEST_CFG,afe_read(c,TEST_CFG)|1u);if(e)return e; /* RMW: shared 0x98 */
     for(i=0;i<2500;i++) {
         uint32_t m=afe_read(c,TEST_MON);c->status.monitor=m;
         if((m&(3u<<28))==(3u<<28)) {
@@ -365,7 +365,7 @@ static int run_phase(struct x9_mic_mt6681 *c,int cycle[2],uint64_t deadline)
     }
     if(i==2500)e=ETIMEDOUT;
     uint32_t failed_register=c->status.last_register;
-    int stop=afe_write(c,TEST_CFG,off);
+    int stop=afe_write(c,TEST_CFG,afe_read(c,TEST_CFG)&~1u);
     if(stop)(void)restore_failure(c,stop,X9_MIC_HW_RESTORE_TEST);
     if(e)c->status.last_register=failed_register;
     return e?e:stop;
@@ -391,7 +391,11 @@ static int calibrate(struct x9_mic_mt6681 *c)
     if(!e)e=update8(c,MT6681_AUDIO_DIG_CFG1,0x80,0x80);
     if(!e)e=afe_write(c,PAD_CFG,(c->old_pad&~0xffu)|0xb8);
     if(!e)e=afe_write(c,PAD_CFG,(c->old_pad&~0xffu)|0xb9);
-    if(!e)e=afe_write(c,TEST_CFG,(c->old_test&~0xffffu)|4);
+    /* audio46: 0x98 = AUD_TOP_CFG_VLP_RG (OPPO mt6993-reg.h): bit5 is
+     * RG_I2S4_PAD_TOP_CK_EN (speaker I2S4, x9_speaker_in4.h) plus I2S4/5
+     * latch bits. Calibration owns only TEST_TYPE(2)/SW_RESET(1)/TEST_ON(0);
+     * replacing the low 16 bits cut a running speaker's I2S4 clock. */
+    if(!e)e=afe_write(c,TEST_CFG,(afe_read(c,TEST_CFG)&~7u)|4);
     int previous[2]={-1,-1};
     for(int phase=0;phase<=42 && !e;phase++) {
         if(mach_absolute_time()>=deadline){e=ETIMEDOUT;break;}
