@@ -1092,3 +1092,44 @@ Android recording: TOP_CON2=03, STS0=7f, STS2=01, VCC=03. mic29 ports it in
 power_on (before VAUD18) with `X9 MIC MODE:` before/after lines, and the
 codec dump adds a non-zero sweep `X9 MIC REGS:` of the ranges compared with
 the Android regmap, so the next log can be diffed register-for-register.
+
+### logs 290/291 / audio30 (2026-11-14) — built-in Puffin route, HiFi mic, one image
+
+290 (spk29): only mediaserverd type0 probes, never a type1 open or START: iOS
+routing never picked the HAL device (it reported BuiltIn transport with an
+unknown UID). User wants internal audio, not an external device.
+Static RE of iOS 16 (20H392) `/Library/Audio/Plug-Ins/HAL/VirtualAudio.plugin`:
+DeviceFactory_Aspen (0x21ebc8) compares the HAL **device UID** (log `Creating
+Device ID: %u with UID: %@`) against a CFString table: ... `PuffinInput`,
+`PuffinOutput`, `Digital Mic`/`DigitalMic`/`Mic` ... (cfstrings 0x62e870/890/
+8d0). `PuffinOutput` -> Device_Puffin (vtable 0x614e10), whose output port is
+type 'pspk' (built-in speaker). No ProductID gate in the factory. vphone-cli
+PR 555 uses the same names for its iPhone guest audio. The HAL speaker-
+protection gate (0x2857fc, "HAL Speaker Protection is missing") only fails
+when the route has 'pspk' AND predicate 0x29234c is true (product enum list
+0x11/0x12/0x24/0x25/0x4a/0x4b/0x5e/0x5f + feature flag VirtualAudio/
+siri_ducking_for_speaker); our identity is D22AP (iPhone10,3), assumed not in
+that list (product enum mapping 0x5026c not decoded: unverified).
+audio30 speaker: X9AudioPlugIn UID `PuffinOutput`, device always listed/alive
+(StartIO returns NotRunning until the kernel is Ready), and the Sheng host
+clock fix: the plugin decodes adrp+ldr of AudioGetHostClockFrequency and
+calls new selector 21 (X9AudioSetHostClockSelector, writer type1 only); the
+kernel rewrites the 24 MHz double on the shared-cache page via pmap_find_pa+
+phystokv to the timebase frequency (1 GHz) and logs `X9 AUDIO CLOCK: host
+clock addr= code= pa= seen= -> hz= r=`.
+291 (mic29) vs Android recording regmap (scratchpad codec17 = during
+recording, codec18 = after): ours ran OPPO's low-power branch; Android records
+in mic_hifi_mode. RC tune read 1f (Android 09), UL MON 0 (Android df ff a2
+38). audio30 mic = OPPO mic_hifi_mode for ADC_L: offset cal/trim 0, preamp
+modes 0, FLASHIDDTEST 1, SPAREPGA1 0xc, IDAC 1, RINOHM 2, FFCAPVREF 1, RCTUNE
+7, CLKSEL 1, DACMODE 0, LPEN 0, ADCLMODE 0, NMDAC cal on/3, EXTCAPP/EXTCAP on
++ preset pulse after PWRUP (all match codec17). Not changed: MTKAIF phase
+(our scan 4, Android 3), CH2 mux, ADDA6 UL (Android runs 4 ADCs).
+Coexistence: the 282/284/287 second-subsystem hang is still unexplained, so
+audio30 registers the speaker backend lazily (x9_spk_lazy=1 default): the
+boot runs the mic test first (x9_mic_boot=1000), then registers the backend
+without touching hardware; the first iOS START does the full hold (`X9 SPK
+BACKEND: first start, taking the speaker chain now (lazy hold)`). If playback
+hangs right after that line, it is the known mic-then-speaker hang.
+Build: `x9/out/x9-audio30-20261114-prelink`, boot args x9_audio=2
+x9_dsp_boot=75 x9_mic=2 x9_mic_boot=1000.

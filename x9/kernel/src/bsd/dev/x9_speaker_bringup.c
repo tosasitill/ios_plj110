@@ -50,7 +50,8 @@ static struct {
     vm_offset_t dma;
     uint64_t dma_bus;
     bool tfa,afe_held,afe_prepared,pads,clock,dsp,pa_on[2];
-    bool held; /* backend mode: whole chain held for the boot */
+    bool held; /* backend mode: whole chain held from first start to reboot */
+    bool lazy; /* backend registered, hardware taken on the first start */
 } b;
 
 /* ---------------- TFA9865 (two slaves, same sequence) ---------------- */
@@ -330,7 +331,8 @@ static int bringup_hold(bool prepare)
     uint32_t probe;int e=x9_tfa_container_bytes?cnt_device(0x34,&probe):ENOENT;
     if(!e)e=cnt_device(0x35,&probe);
     if(e){SPKLOG("X9 SPK: container refused %d (no hardware touched)\n",e);return e;}
-    e=kmem_alloc_contig(kernel_map,&b.dma,DMA_BYTES,PAGE_MASK,0,0,
+    /* KMA_PERMANENT: a retried lazy hold reuses the first buffer. */
+    e=b.dma?0:kmem_alloc_contig(kernel_map,&b.dma,DMA_BYTES,PAGE_MASK,0,0,
         KMA_DATA|KMA_ZERO|KMA_PERMANENT,VM_KERN_MEMORY_IOKIT)==KERN_SUCCESS?0:ENOMEM;
     if(!e) {
         ppnum_t first=pmap_find_phys(kernel_pmap,(addr64_t)b.dma);
@@ -497,7 +499,18 @@ static int be_stop(void *ctx)
 static int be_start(void *ctx,const int16_t *prefill,uint32_t frames,uint64_t *anchor)
 {
     (void)ctx;
-    if(!b.held || b.afe_prepared || pa.state!=PaIdle)return EBUSY;
+    if(b.afe_prepared || pa.state!=PaIdle)return EBUSY;
+    if(!b.held) {
+        /* Lazy hold (combined spk+mic image): the boot mic test ran first and
+         * released the lease; take the chain now, on the first iOS start.
+         * Logs 282/284/287 hung when a second audio subsystem started after
+         * the first, so this line marks where to look if playback hangs. */
+        printf("X9 SPK BACKEND: first start, taking the speaker chain now (lazy hold)\n");
+        if(!b.lazy)return ENXIO;
+        int h=bringup_hold(false);
+        if(h){teardown();printf("X9 SPK BACKEND: lazy hold -> %d\n",h);return h;}
+        b.held=true;printf("X9 SPK BACKEND: lazy hold -> 0\n");
+    }
     int e=x9_speaker_afe_prepare_on_ticket(b.ticket);b.afe_prepared=true;
     if(!e)e=x9_speaker_afe_start(prefill,frames,anchor);
     if(!e){pa.state=PaPower0;pa.t0=mach_absolute_time();}
@@ -523,6 +536,11 @@ int x9_speaker_bringup_run(void)
 {
     if(!sweet_early_is_x9() || sweet_x9_arg("x9_audio",0)!=2)return ENXIO;
     if(!sweet_x9_arg("x9_spk_backend",1))return bringup_oneshot();
+    if(sweet_x9_arg("x9_spk_lazy",1)) {
+        b.lazy=true;
+        printf("X9 SPK: backend registered lazily: no speaker hardware until the first X9Audio start\n");
+        return 0;
+    }
     int e=bringup_hold(false);
     if(e){teardown();printf("X9 SPK: backend hold failed -> %d\n",e);return e;}
     b.held=true;
@@ -531,11 +549,11 @@ int x9_speaker_bringup_run(void)
 }
 int x9_speaker_backend_register(void)
 {
-    if(!b.held)return ENXIO;
+    if(!b.held && !b.lazy)return ENXIO;
     static const struct x9_audio_backend be={X9_AUDIO_BACKEND_VERSION,X9_AUDIO_REQUIRED,
         BE_LEAD_FRAMES,NULL,be_start,be_stop,be_submit,be_position};
     int e=x9_audio_register_backend(&be);
     printf("X9 SPK: X9Audio backend register lead=%u -> %d\n",BE_LEAD_FRAMES,e);
-    if(e){b.held=false;teardown();}
+    if(e){if(b.held)teardown();b.held=b.lazy=false;}
     return e;
 }

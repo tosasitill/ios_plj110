@@ -198,10 +198,18 @@ static void dspBootOnce(void *arg, wait_result_t)
     /* x9_mic_boot set = a mic test boot: run the mic ALONE (boot-args have no
      * room for x9_spk_boot=0). x9_spk_backend=0 restores the old one-shot
      * speaker + mic ordering. */
+    /* Combined image (user, after logs 290/291): the speaker backend is lazy
+     * by default (x9_spk_lazy=1): registering it touches no hardware, and the
+     * chain is taken on the first iOS StartIO. So the boot mic test runs
+     * first and releases the lease, then the backend registers. */
+    bool spkLazy = sweet_x9_arg("x9_spk_lazy", 1) != 0;
     if (spkBackend && micMs > 0) {
-        IOLog("X9 AUDIO DSPBOOT: x9_mic_boot set: mic alone, speaker backend not started this boot\n");
+        IOLog("X9 AUDIO DSPBOOT: mic test first (%s)\n", spkLazy ? "speaker backend registers lazily after it" :
+              "x9_spk_lazy=0: mic alone, speaker backend not started this boot");
         IOLog("X9 AUDIO DSPBOOT: mic capture result=%d\n", x9_mic_bringup_run((unsigned)micMs));
-        return;
+        if (!spkLazy) return;
+        IOSleep(1000);
+        micMs = 0; /* done: never run it again below */
     }
     if (micMs > 0 && !spkFirst) IOLog("X9 AUDIO DSPBOOT: mic capture result=%d\n", x9_mic_bringup_run((unsigned)micMs));
     /* Logs 253-277: every boot that launched the ADSP (warm takeover) hung
@@ -352,6 +360,7 @@ bool X9Audio::start(IOService *p)
 class X9AudioUserClient : public IOUserClient {
     OSDeclareDefaultStructors(X9AudioUserClient);
     bool writer = false, administrator = false, boardController = false, exclusive = false;
+    task_t owner = nullptr;
 public:
     bool initWithTask(task_t, void *, UInt32, OSDictionary *) APPLE_KEXT_OVERRIDE;
     bool start(IOService *) APPLE_KEXT_OVERRIDE;
@@ -373,6 +382,7 @@ bool X9AudioUserClient::initWithTask(task_t task, void *id, UInt32 type, OSDicti
     if (type == 2 && (!administrator || sweet_x9_arg("x9_audio", 0) != 2)) return false;
     boardController = type == 2;
     writer = type == 1 || type == 2;
+    owner = task;
     /* spk28/log 288: backend registered but no Start ever arrived. Show who
      * opens the service (the HAL probes type0 every 500 ms: first 8 only). */
     static uint32_t opens;
@@ -441,11 +451,54 @@ IOReturn X9AudioUserClient::clientMemoryForType(UInt32 type, IOOptionBits *optio
     lck_mtx_lock(&audioLock); memory[type]->retain(); *out = memory[type]; lck_mtx_unlock(&audioLock);
     return kIOReturnSuccess;
 }
+/* CoreAudio takes the host clock to be 24 MHz; X9's timer is 1 GHz. The
+ * constant sits on a dyld shared-cache page (code + const), so the HAL cannot
+ * write it: rewrite it through the physical aperture, once for every
+ * process, only when it still holds 24 MHz (or already our value). Ported
+ * from UniXNU-sheng ShengAudioService.cpp setHostClock (BSD-2-Clause-Patent). */
+/* Private names bound to the kernel symbols: no clash with XNU prototypes. */
+extern "C" uint64_t x9_pmap_find_pa(void *pmap, uint64_t va) __asm__("_pmap_find_pa");
+extern "C" void *x9_get_task_pmap(task_t task) __asm__("_get_task_pmap");
+extern "C" uint64_t x9_phystokv(uint64_t pa) __asm__("_phystokv");
+extern "C" int x9_copyin(uint64_t uaddr, void *kaddr, size_t len) __asm__("_copyin");
+static IOReturn setHostClock(task_t task, uint64_t address, uint64_t words)
+{
+    constexpr uint64_t kApple = 0x4176e36000000000ULL; /* 24000000.0 */
+    mach_timebase_info_data_t tb; clock_timebase_info(&tb);
+    const uint64_t hz = 1000000000ULL * tb.denom / tb.numer;
+    const unsigned top = 63 - (unsigned)__builtin_clzll(hz);
+    const uint64_t bits = (uint64_t)(1023 + top) << 52 | ((hz << (52 - top)) & ((1ULL << 52) - 1));
+    IOReturn r = kIOReturnBadArgument; uint64_t seen = 0, pa = 0;
+    if (task && !(address & 7) && address >= 0x180000000ULL && address < 0x400000000ULL) {
+        IOMemoryDescriptor *m = IOMemoryDescriptor::withAddressRange(address, 8, kIODirectionOut, task);
+        r = m ? m->prepare() : kIOReturnNoMemory;
+        if (r == kIOReturnSuccess) {
+            r = x9_copyin(address, &seen, 8) ? kIOReturnNotReadable : kIOReturnUnsupported;
+            if (r == kIOReturnUnsupported) pa = x9_pmap_find_pa(x9_get_task_pmap(task), address);
+            if (pa) {
+                volatile uint64_t *value = (volatile uint64_t *)x9_phystokv(pa);
+                if (*value == seen && (seen == kApple || seen == bits)) {
+                    *value = bits; __asm__ volatile("dsb sy" ::: "memory"); r = kIOReturnSuccess;
+                }
+            }
+            m->complete();
+        }
+        if (m) m->release();
+    }
+    IOLog("X9 AUDIO CLOCK: host clock addr=%llx code=%llx pa=%llx seen=%llx -> %llx hz=%llu r=%x\n",
+          address, words, pa, seen, r == kIOReturnSuccess ? bits : seen, hz, r);
+    return r;
+}
 IOReturn X9AudioUserClient::externalMethod(uint32_t sel, IOExternalMethodArguments *a,
     IOExternalMethodDispatch *dispatch, OSObject *target, void *reference)
 {
     (void)dispatch; (void)target; (void)reference;
     if (!a || isInactive() || !control) return kIOReturnNotReady;
+    if (sel == X9AudioSetHostClockSelector) {
+        if (!writer || boardController || a->scalarInputCount != 2 || a->structureInputSize ||
+            a->structureInputDescriptor || a->structureOutputDescriptor || a->scalarOutputCount) return kIOReturnBadArgument;
+        return setHostClock(owner, a->scalarInput[0], a->scalarInput[1]);
+    }
     if (sel == X9AudioLeftVDDStatusSelector) {
         if (a->structureInputDescriptor || a->structureOutputDescriptor || a->asyncWakePort ||
             a->scalarInputCount || a->scalarOutputCount || a->structureInputSize ||

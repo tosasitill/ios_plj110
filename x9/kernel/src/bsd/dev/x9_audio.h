@@ -22,7 +22,12 @@ enum { X9AudioStatus, X9AudioStart, X9AudioStop, X9AudioDSPStatusSelector,
        X9AudioClockProbeSelector, X9AudioPLLStatusSelector,
        X9AudioPLLProbeSelector, X9AudioPathStatusSelector,
        X9AudioPathProbeSelector, X9AudioI2C6StatusSelector,
-       X9AudioLeftVDDStatusSelector, X9AudioStatusNowaitSelector };
+       X9AudioLeftVDDStatusSelector, X9AudioStatusNowaitSelector,
+       X9AudioSetHostClockSelector };
+/* Selector21 (writer type 1 only): scalar[0] = the caller's address of
+ * CoreAudio's 24 MHz host clock constant (0 if not found), scalar[1] = the
+ * two decoded instruction words for the log. The kernel rewrites that
+ * shared-cache double to the real timer frequency (UniXNU-sheng). */
 /* Selector20: same 112B PCM control snapshot as selector0, but returns
  * kIOReturnBusy without waiting for the service's physical lifecycle lock.
  * No fallback to selector0 in the passive HAL observer; no MMIO/callback,

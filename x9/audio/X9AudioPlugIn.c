@@ -14,11 +14,16 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include <dispatch/dispatch.h>
+#include <dlfcn.h>
 #include "../kernel/src/bsd/dev/x9_audio.h"
 _Static_assert(sizeof(X9AudioControl) == 112, "PCM ABI v1 size");
 
 enum { kPlugIn = kAudioObjectPlugInObject, kDevice = 2, kOutStream = 3, kVolume = 5 };
-#define kDeviceUID "X9SpeakerDevice"
+/* iOS 16 VirtualAudio (DeviceFactory_Aspen) picks the device class by HAL
+ * device UID: "PuffinOutput" becomes Device_Puffin, whose output port is the
+ * built-in speaker ('pspk'), so iOS routes to it as internal audio, not an
+ * external (Thunderbolt/USB) device. Same mechanism as vphone-cli PR 555. */
+#define kDeviceUID "PuffinOutput"
 #define kModelUID "MT6993Speaker"
 static const Float64 kRate = X9_AUDIO_RATE;
 static const UInt32 kZeroPeriod = X9_AUDIO_RING;
@@ -95,11 +100,6 @@ static int streamSnapshot(X9AudioControl *s) {
     }
     return 0;
 }
-static UInt32 alive(void) {
-    pthread_mutex_lock(&gLock); X9AudioControl s;
-    UInt32 r = !gIOFault && !gStopFailed && (gControl ? !snapshot(&s) && controlReady(&s) : gReady);
-    pthread_mutex_unlock(&gLock); return r;
-}
 static UInt32 running(void) {
     pthread_mutex_lock(&gLock); X9AudioControl s;
     UInt32 r = !streamSnapshot(&s);
@@ -124,6 +124,7 @@ static int disconnect(void) {
     if (gConnect && IOServiceClose(gConnect)) return -1;
     gConnect = 0; return 0;
 }
+static void setHostClock(void);
 static int connectService(void) {
     if (gControl) return 0;
     io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching(X9_AUDIO_CLASS));
@@ -145,7 +146,30 @@ static int connectService(void) {
         gStopFailed = disconnect() != 0; return -1;
     }
     gControl = (void *)(uintptr_t)gMaps[0]; gProducer = (void *)(uintptr_t)gMaps[1]; gOut = (void *)(uintptr_t)gMaps[2];
+    setHostClock(); /* each session: the shared page may be re-read from disk */
     return 0;
+}
+/* CoreAudio assumes a 24 MHz host clock (AudioGetHostClockFrequency loads a
+ * constant with adrp+ldr d0 from the shared cache); X9's timer is 1 GHz, so
+ * the IO thread's cycle timing would be off by ~42x. The constant lives on a
+ * shared-cache page this process cannot write: pass its address to the
+ * kernel, which rewrites it (UniXNU-sheng ShengAudioSetHostClock). The second
+ * scalar carries the two instruction words so the kernel log explains a
+ * pattern mismatch (address 0). Caller holds gLock with gConnect open. */
+static void setHostClock(void) {
+    if (!gConnect) return;
+    const uintptr_t symbol = (uintptr_t)dlsym(RTLD_DEFAULT, "AudioGetHostClockFrequency") & (((uintptr_t)1 << 47) - 1);
+    uint64_t in[2] = {0, 0};
+    if (symbol) {
+        const uint32_t *code = (const uint32_t *)symbol, adrp = code[0], ldr = code[1];
+        in[1] = (uint64_t)ldr << 32 | adrp;
+        if ((adrp & 0x9f000000u) == 0x90000000u && (ldr & 0xffc00000u) == 0xfd400000u && ((ldr >> 5) & 31) == (adrp & 31)) {
+            int64_t page = (int64_t)(((adrp >> 5) & 0x7ffffu) << 2 | ((adrp >> 29) & 3u));
+            if (page & (1 << 20)) page -= 1 << 21;
+            in[0] = ((uintptr_t)code & ~(uintptr_t)0xfff) + (uint64_t)(page << 12) + ((ldr >> 10) & 0xfffu) * 8;
+        }
+    }
+    (void)IOConnectCallScalarMethod(gConnect, X9AudioSetHostClockSelector, in, 2, NULL, NULL);
 }
 static HRESULT QueryInterface(void *, REFIID, LPVOID *);
 static ULONG AddRef(void *self) { (void)self; return atomic_fetch_add(&gRefs, 1) + 1; }
@@ -304,7 +328,8 @@ static OSStatus GetPropertyDataSize(AudioServerPlugInDriverRef d, AudioObjectID 
 
 static UInt32 objects(AudioObjectID o, AudioObjectPropertyScope scope, AudioObjectID *list) {
     UInt32 n = 0;
-    if (!alive()) return 0;
+    /* Always listed (Sheng): VirtualAudio builds the Puffin port when the
+     * device appears; StartIO reports NotRunning until the kernel is Ready. */
     if (o == kPlugIn) list[n++] = kDevice;
     else if (o == kDevice) {
         if (scope != kAudioObjectPropertyScopeInput) list[n++] = kOutStream;
@@ -331,12 +356,12 @@ static OSStatus propertyData(AudioObjectID o, const AudioObjectPropertyAddress *
         case kAudioObjectPropertyManufacturer: REPLY_STR("ios-sweet");
         case kAudioObjectPropertyOwnedObjects:
         case kAudioPlugInPropertyDeviceList: {
-            if (!alive() || inDataSize < sizeof(AudioObjectID)) {*outDataSize = 0; return 0;}
+            if (inDataSize < sizeof(AudioObjectID)) {*outDataSize = 0; return 0;}
             ((AudioObjectID *)outData)[0] = kDevice; *outDataSize = sizeof(AudioObjectID); return 0;
         }
         case kAudioPlugInPropertyTranslateUIDToDevice: {
             CFStringRef uid = qs >= sizeof(CFStringRef) ? *(const CFStringRef *)q : NULL;
-            REPLY(AudioObjectID, alive() && uid && CFGetTypeID(uid) == CFStringGetTypeID() &&
+            REPLY(AudioObjectID, uid && CFGetTypeID(uid) == CFStringGetTypeID() &&
                 CFStringCompare(uid, CFSTR(kDeviceUID), 0) == kCFCompareEqualTo ? kDevice : kAudioObjectUnknown);
         }
         case kAudioPlugInPropertyResourceBundle: REPLY_STR("");
@@ -362,17 +387,17 @@ static OSStatus propertyData(AudioObjectID o, const AudioObjectPropertyAddress *
         case kAudioDevicePropertyTransportType: REPLY(UInt32, kAudioDeviceTransportTypeBuiltIn);
         case kAudioDevicePropertyRelatedDevices: REPLY(AudioObjectID, kDevice);
         case kAudioDevicePropertyClockDomain: REPLY(UInt32, 0);
-        case kAudioDevicePropertyDeviceIsAlive: REPLY(UInt32, alive());
+        case kAudioDevicePropertyDeviceIsAlive: REPLY(UInt32, 1);
         case kAudioDevicePropertyDeviceIsRunning: REPLY(UInt32, running());
-        case kAudioDevicePropertyDeviceCanBeDefaultDevice: REPLY(UInt32, alive() && a->mScope != kAudioObjectPropertyScopeInput);
-        case kAudioDevicePropertyDeviceCanBeDefaultSystemDevice: REPLY(UInt32, alive() && a->mScope != kAudioObjectPropertyScopeInput);
+        case kAudioDevicePropertyDeviceCanBeDefaultDevice: REPLY(UInt32, a->mScope != kAudioObjectPropertyScopeInput);
+        case kAudioDevicePropertyDeviceCanBeDefaultSystemDevice: REPLY(UInt32, a->mScope != kAudioObjectPropertyScopeInput);
         case kAudioDevicePropertyLatency: REPLY(UInt32, latencyFrames());
         case kAudioDevicePropertySafetyOffset: REPLY(UInt32, latencyFrames() + 2 * X9_AUDIO_PERIOD);
         case kAudioDevicePropertyNominalSampleRate: REPLY(Float64, kRate);
         case kAudioDevicePropertyAvailableNominalSampleRates: REPLY(AudioValueRange, ((AudioValueRange){kRate, kRate}));
         case kAudioDevicePropertyIsHidden: REPLY(UInt32, 0);
         case kAudioDevicePropertyZeroTimeStampPeriod: REPLY(UInt32, kZeroPeriod);
-        case kAudioDevicePropertyClockIsStable: REPLY(UInt32, alive());
+        case kAudioDevicePropertyClockIsStable: REPLY(UInt32, 1);
         case kAudioDevicePropertyClockAlgorithm: REPLY(UInt32, kAudioDeviceClockAlgorithmRaw);
         case kAudioDevicePropertyPreferredChannelsForStereo: {
             if (inDataSize < 2 * sizeof(UInt32)) return kAudioHardwareBadPropertySizeError;
@@ -415,7 +440,7 @@ static OSStatus propertyData(AudioObjectID o, const AudioObjectPropertyAddress *
         case kAudioObjectPropertyOwner: REPLY(AudioObjectID, kDevice);
         case kAudioObjectPropertyName: if (o == kOutStream) REPLY_STR("X9 Speaker"); REPLY_STR("Microphone");
         case kAudioObjectPropertyOwnedObjects: *outDataSize = 0; return 0;
-        case kAudioStreamPropertyIsActive: REPLY(UInt32, alive() && __atomic_load_n(&gStreamActive, __ATOMIC_ACQUIRE));
+        case kAudioStreamPropertyIsActive: REPLY(UInt32, __atomic_load_n(&gStreamActive, __ATOMIC_ACQUIRE));
         case kAudioStreamPropertyDirection: REPLY(UInt32, 0);
         case kAudioStreamPropertyTerminalType: REPLY(UInt32, o == kOutStream ? kAudioStreamTerminalTypeSpeaker : kAudioStreamTerminalTypeMicrophone);
         case kAudioStreamPropertyStartingChannel: REPLY(UInt32, 1);
