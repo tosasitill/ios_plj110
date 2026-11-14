@@ -1219,3 +1219,27 @@ Changed in X9AudioPlugIn.c:
 - CanBeDefault 1 in every scope; no 'accs'/'auto' answers, as in HakiOS.
 The kernel speaker path is unchanged. The audio32 mic fixes are included.
 Build: `x9/out/x9-audio33-20261114/boot.img`, same boot args as audio30.
+
+### log 294 / audio34 (2026-11-14) — mic works; speaker routed but second-subsystem hang
+
+Log 294 (audio33):
+- Mic WORKS. BBCK5 xo=11 -> OPPO mode0+EN_M. RC tune 09 (= Android).
+  Codec ULMON live (c0ffe707...). pcm min -135 max 108 rms 18, zeros
+  5798/48176. Confirms the BBCK5 root cause (audio32/33).
+- Speaker HAL: VirtualAudio now adds a client to Speaker and to Hawking, and
+  iOS volume works. StartIO 31-74 s -> why=3 (blockers ff): the lazy backend
+  only registers at 82 s, after the boot mic test (76 s). At 92.8 s the first
+  type1 START -> lazy hold. PA34/PA35 init 0, board hold/online 0, then the
+  SoC hangs about 0.3 s after `X9 SPK CLK: native board -> 0` (109.1 s).
+  Same point as log 282 (speaker after mic). 284/287 are the mirror case
+  (mic after speaker hangs at its board step). Root cause still open.
+- Also: a lazy hold inside StartIO takes about 33 s (SPKLOG/CLKSTEP 600 ms
+  pacing; 288: 76.1 -> 109.0 s), far too long for an IO start.
+audio34 = boot args only: x9_audio=2 x9_dsp_boot=75 x9_spk_lazy=0 x9_mic=2,
+no x9_mic_boot. The speaker chain is held at boot, as in 288 (no hang when
+the speaker is the only subsystem), so StartIO is immediate. The mic stays
+untouched until the coexistence hang is fixed.
+Mi 10 repo survey: calls/SMS are "Not yet" there too. Its media injection is
+for its camera pipeline. Vibration: its aw8692x driver (same Awinic family
+as our AW8693XS, NOTES 5.1 "190 EBUSY") is the useful reference.
+Build: `x9/out/x9-audio34-20261114/boot.img`.
