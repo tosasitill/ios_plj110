@@ -1292,3 +1292,24 @@ speaker watchdog act only while running; ADSP IRQ worker only when armed),
 so the async actor is outside these threads (ADSP firmware after power_on,
 or a hardware master). Still open.
 Build: `x9/out/x9-audio36-20261114/boot.img` (supersedes audio35).
+
+### log 296 / audio37 (2026-11-14) — order-dependent hang, pstore ring
+
+296 (audio36): haptic init at 1.47 s rejected stage=12 errno=16 (I2C5 bank
+busy), then the speaker hung after "CLK native board -> 0" with NO mic run.
+Order table 282..296: the speaker passes whenever it is the first subsystem
+initialized (283/284/285/286/287/288/295); it hangs at the same step when the
+mic (282/294) or the haptic init (296) ran first; the mic hangs after DMA bind
+when the speaker ran first (284/287). Not intermittent, not mic-specific:
+the second subsystem dies. Haptic writes (GPIO30 reset DIR/DOUT, GPIO178/179
+MWR mode, IOCFG idx6 0x12300000 PD/PU/IES/RSEL, I2C5 gate) all match OPPO
+pinctrl-mt6993.c / mt6993.dts / oplus_misc reset-gpio 30.
+Why no tail was ever captured: pstore console continued the previous boot's
+size and never wrapped (sweet_log_reserve). 294 filled 2 MiB at 68 s; 295
+and 296 wrote nothing. UFS sidecar lags (296 ended 91.4 s); USB loses ~1 KiB.
+audio37:
+1. pstore console is a ring (ramoops start/size), newest 2 MiB survive.
+2. Speaker log pacing (CLKSTEP/SPKLOG/trace IOSleep) only with x9_spk_pace=1.
+3. x9_dsp_boot=65 (60 overlapped the modem S2 timer in 260).
+4. x9_haptic back off by default (296: its init alone kills the speaker).
+Build: `x9/out/x9-audio37-20261114/boot.img`.

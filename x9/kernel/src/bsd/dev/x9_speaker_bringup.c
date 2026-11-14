@@ -36,8 +36,8 @@ extern void IOSleep(unsigned int);
  * the UFS sidecar lags further. Sleep after each bring-up step's line so the
  * USB console drains before the next hardware step. Not used after the AFE
  * starts streaming (a 250 ms gap would underrun the 20 ms prefill). */
-#define SPKLOG(...) do{printf(__VA_ARGS__);IOSleep(600);}while(0)
 extern int sweet_x9_arg(const char *,int);
+#define SPKLOG(...) do{printf(__VA_ARGS__);if(sweet_x9_arg("x9_spk_pace",0))IOSleep(600);}while(0)
 extern int sweet_early_is_x9(void);
 extern ppnum_t pmap_find_phys(pmap_t,addr64_t);
 

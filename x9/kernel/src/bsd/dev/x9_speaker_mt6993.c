@@ -25,7 +25,10 @@ extern int sweet_x9_arg(const char *,int);
 extern void IOSleep(unsigned int);
 /* Log 264: the SoC stopped inside clock acquire. Each step's line is
  * followed by a pause so the USB console drains before the next access. */
-#define CLKSTEP(name) do{printf("X9 SPK CLK: %s\n",name);IOSleep(600);}while(0)
+/* Pacing only with x9_spk_pace=1: since pstore became a per-boot ring
+ * (audio37) the last console line survives a hang without USB draining. */
+static void spk_pace(unsigned ms){if(sweet_x9_arg("x9_spk_pace",0))IOSleep(ms);}
+#define CLKSTEP(name) do{printf("X9 SPK CLK: %s\n",name);spk_pace(600);}while(0)
 LCK_GRP_DECLARE(x9_speaker_clock_group,"x9-speaker-clock");
 LCK_MTX_DECLARE(x9_speaker_clock_lock,&x9_speaker_clock_group);
 static X9AudioClockStatus s={.version=X9_AUDIO_CLOCK_STATUS_VERSION};
@@ -52,7 +55,7 @@ static const char *trace_name(vm_offset_t b,unsigned long *phys);
 static void trace_access(const char *op,vm_offset_t b,unsigned r,uint32_t v)
 {
     unsigned long phys=0;const char *n=trace_name(b,&phys);
-    printf("X9 SPK CLK %s %s+%x (%lx) %x\n",op,n,r,phys+r,v);IOSleep(300);
+    printf("X9 SPK CLK %s %s+%x (%lx) %x\n",op,n,r,phys+r,v);spk_pace(300);
 }
 static uint32_t rd(vm_offset_t b,unsigned r)
 {

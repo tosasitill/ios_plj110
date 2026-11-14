@@ -209,7 +209,7 @@ int x9_speaker_mt6993_clock_acquire(const struct x9_speaker_clock_policy *p)
          * Do not issue AUDIO SMC/votes before this second live admission. */
         CLKSTEP("native board");
         e=native_board();
-        printf("X9 SPK CLK: native board -> %d\n",e);IOSleep(600);
+        printf("X9 SPK CLK: native board -> %d\n",e);spk_pace(600);
         if(!e)e=x9_adsp_mt6993_speaker_online(p->ticket,p->generation);
         if(!e)e=take(true,false);
         if(!e){CLKSTEP("native mapping");e=native_mapping();}

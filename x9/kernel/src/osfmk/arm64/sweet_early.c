@@ -43,7 +43,13 @@ static const char x9_kernel_tag[] __attribute__((used)) = "HelioDarwin-X9-0186\n
 #define PSTORE_HDR 12u
 #define EARLY_LOG_CAP 0x4000u
 static volatile uint32_t *pstore;
-static uint32_t pstore_cap, pstore_next;
+static uint32_t pstore_cap;
+/* Ring cursors (audio37). pstore_pos counts every byte ever reserved; the
+ * header is republished from pstore_pub, the highest completed end. The old
+ * non-wrapping cursor continued the previous boot's size and stopped at the
+ * 2 MiB cap: log 294 filled it at 68 s and 295/296 wrote NOTHING, so no hang
+ * tail ever reached ramoops. Now the newest 2 MiB always survive. */
+static uint64_t pstore_pos, pstore_pub;
 /*
  * Declared up here, not with the console state: once set, sweet_early_mark()
  * writes nothing at all, so checkpoints need to consult it to leave a record.
@@ -264,27 +270,35 @@ sweet_pstore_append(const char *buf, int len)
 		}
 		return;
 	}
-	uint32_t at = sweet_log_reserve(&pstore_next, pstore_cap, &n);
-	volatile char *data = (volatile char *)hdr + PSTORE_HDR;
-	for (uint32_t i = 0; i < n; i++) {
-		data[at + i] = buf[i];
+	uint32_t cap = pstore_cap;
+	if (n > cap) {
+		buf += n - cap;
+		n = cap;
 	}
-	if (!n) {
-		return;
+	uint64_t pos = __atomic_fetch_add(&pstore_pos, n, __ATOMIC_RELAXED);
+	volatile char *data = (volatile char *)hdr + PSTORE_HDR;
+	uint32_t at = (uint32_t)(pos % cap);
+	for (uint32_t i = 0; i < n; i++) {
+		data[at] = buf[i];
+		if (++at == cap) {
+			at = 0;
+		}
 	}
 	/* Normal-NC mapping: atomics here must not target Device memory. */
-	uint32_t end = at + n;
-	uint32_t old_size = __atomic_load_n((uint32_t *)&hdr[2], __ATOMIC_RELAXED);
-	while (old_size < end && !__atomic_compare_exchange_n((uint32_t *)&hdr[2],
-	    &old_size, end, 0, __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {
+	uint64_t end = pos + n;
+	uint64_t pub = __atomic_load_n(&pstore_pub, __ATOMIC_RELAXED);
+	while (pub < end && !__atomic_compare_exchange_n(&pstore_pub, &pub, end,
+	    0, __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {
 	}
+	/* ramoops layout: size = valid bytes, start = next write offset (oldest
+	 * byte once wrapped). Rewrite until no newer end raced past us. */
 	for (;;) {
-		uint32_t size = __atomic_load_n((uint32_t *)&hdr[2], __ATOMIC_ACQUIRE);
-		uint32_t start = size == pstore_cap ? 0 : size;
-		uint32_t old_start = __atomic_load_n((uint32_t *)&hdr[1], __ATOMIC_RELAXED);
-		if ((old_start == start || __atomic_compare_exchange_n((uint32_t *)&hdr[1],
-		    &old_start, start, 0, __ATOMIC_RELEASE, __ATOMIC_RELAXED)) &&
-		    __atomic_load_n((uint32_t *)&hdr[2], __ATOMIC_ACQUIRE) == size) {
+		uint64_t e = __atomic_load_n(&pstore_pub, __ATOMIC_ACQUIRE);
+		uint32_t size = e >= cap ? cap : (uint32_t)e;
+		uint32_t start = e >= cap ? (uint32_t)(e % cap) : (uint32_t)e;
+		__atomic_store_n((uint32_t *)&hdr[2], size, __ATOMIC_RELEASE);
+		__atomic_store_n((uint32_t *)&hdr[1], start, __ATOMIC_RELEASE);
+		if (__atomic_load_n(&pstore_pub, __ATOMIC_ACQUIRE) == e) {
 			break;
 		}
 	}
@@ -568,7 +582,10 @@ sweet_early_late_init(void)
 	if (hdr[2] == pstore_cap && hdr[1] >= pstore_cap) {
 		hdr[1] = 0;
 	}
-	pstore_next = hdr[2];
+	/* Continue the existing record as a ring: unwrapped -> append after it;
+	 * full -> the next write overwrites the oldest byte at start. */
+	pstore_pos = hdr[2] < pstore_cap ? hdr[2] : (uint64_t)pstore_cap + hdr[1];
+	pstore_pub = pstore_pos;
 	__atomic_store_n(&pstore, hdr, __ATOMIC_RELEASE);
 	sweet_diag_pmsg_init(pa, size);
 	/* Called on the boot CPU with interrupts masked, before SMP startup. */
