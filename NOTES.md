@@ -1194,3 +1194,28 @@ Changed in audio32:
 2. Digital stage (journaled/restored): SMT_CON0 |= 0xf0, DRV_CON2 = 0x89,
    GPIO_MODE3 = 0x10.
 Build: `x9/out/x9-audio32-20261114/boot.img`, same boot args as audio30.
+
+### audio33 (2026-11-14) — HakiOS D22 speaker device model (supersedes audio32)
+
+Reference: xm6661885/hakios-xnu-kernel-umi-fixes 05f7477 (HakiOS on Mi 10,
+iOS 16.5, same D22AP identity), userland/src/audio_plugin.c (MIT). It is a
+pure HAL plugin; mediaserverd is not patched for audio. What it says
+VirtualAudio needs for the iPhone X speaker route:
+- device UID "Speaker": stereo output plus a stereo input (the amplifier
+  feedback; silent), with a volume control;
+- a device "Hawking" with one silent input: the mandatory 'vhaw' companion
+  of the D22 routing tables. "Without it everything stays on the null port".
+  That matches log 293 (PuffinOutput enumerated, never a client);
+- "Codec" with an input data source 'imic' for the built-in mic. Our
+  microphone_plugin.c already does this.
+All four UIDs exist in our 20H392 VirtualAudio (Hawking 0x596709 sits next
+to PuffinInput/PuffinOutput in the factory table; Speaker 0x5b53ec; Codec;
+Actuator). /Library/Audio/Tunings/D22 is present.
+Changed in X9AudioPlugIn.c:
+- UID/Name/ModelUID "Speaker" (was PuffinOutput);
+- Speaker gets an input stream 4 (2ch, silent ReadInput);
+- new device 6 "Hawking" + input stream 7 (1ch, silent), on the host clock
+  from its first StartIO;
+- CanBeDefault 1 in every scope; no 'accs'/'auto' answers, as in HakiOS.
+The kernel speaker path is unchanged. The audio32 mic fixes are included.
+Build: `x9/out/x9-audio33-20261114/boot.img`, same boot args as audio30.

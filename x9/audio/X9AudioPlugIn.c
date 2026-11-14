@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // Copyright (c) 2026, UniXNU contributors. All rights reserved.
 // Property/interface scaffold adapted from UniXNU-sheng 08cde20, LICENSE.UniXNU.
+// D22 device model ("Speaker" with a silent stereo input, plus the silent
+// "Hawking" companion) follows HakiOS userland/src/audio_plugin.c
+// (xm6661885/hakios-xnu-kernel-umi-fixes 05f7477, MIT, LICENSE.hakios).
 // X9: output-only, split RO control/RW producer, bounded seqlock snapshots,
 // hardware readiness, explicit unmapping, no shared-cache patches or hooks.
 #include <CoreAudio/AudioServerPlugIn.h>
@@ -20,13 +23,19 @@
 #include "../kernel/src/bsd/dev/x9_audio.h"
 _Static_assert(sizeof(X9AudioControl) == 112, "PCM ABI v1 size");
 
-enum { kPlugIn = kAudioObjectPlugInObject, kDevice = 2, kOutStream = 3, kVolume = 5 };
+enum { kPlugIn = kAudioObjectPlugInObject, kDevice = 2, kOutStream = 3, kInStream = 4, kVolume = 5,
+       kHawking = 6, kHawkingIn = 7, kLastObject = kHawkingIn };
 /* iOS 16 VirtualAudio (DeviceFactory_Aspen) picks the device class by HAL
- * device UID: "PuffinOutput" becomes Device_Puffin, whose output port is the
- * built-in speaker ('pspk'), so iOS routes to it as internal audio, not an
- * external (Thunderbolt/USB) device. Same mechanism as vphone-cli PR 555. */
-#define kDeviceUID "PuffinOutput"
-#define kModelUID "MT6993Speaker"
+ * device UID. Under our D22AP identity it builds the iPhone X speaker route
+ * from "Speaker" (stereo output + stereo input, the amplifier feedback on a
+ * real iPhone: silent here) and refuses it without the mandatory 'vhaw'
+ * companion, whose only port is the input of a device "Hawking"; otherwise
+ * everything stays on the null port (HakiOS, D22 on iOS 16.5, tested). Log
+ * 293 with "PuffinOutput": enumerated, never a client. Both UIDs are in
+ * 20H392 VirtualAudio's UID table (0x596709 "Hawking", "Speaker"). */
+#define kDeviceUID "Speaker"
+#define kModelUID "Speaker"
+#define kHawkingUID "Hawking"
 static const Float64 kRate = X9_AUDIO_RATE;
 static const UInt32 kZeroPeriod = X9_AUDIO_RING;
 static AudioServerPlugInHostRef gHost;
@@ -43,6 +52,10 @@ static uint32_t gLeadFrames = X9_AUDIO_PREFILL_MIN;
 #define X9_AUDIO_HAL_CLIENTS 64u
 static struct { UInt32 id; bool used, running; } gClients[X9_AUDIO_HAL_CLIENTS];
 static dispatch_source_t gControlTimer;
+/* Hawking has no hardware: its clock is the host's, from its first StartIO. */
+static UInt32 gHawkUsers;
+static uint64_t gHawkAnchor;
+static double gHostTicksPerFrame;
 static void refreshControlState(void *);
 static OSStatus stopClient(unsigned);
 static io_connect_t gConnect;
@@ -276,7 +289,9 @@ static OSStatus Initialize(AudioServerPlugInDriverRef d, AudioServerPlugInHostRe
     X9AudioControl s;
     kern_return_t pe = probeControl(&s);
     gReady = !pe && controlReady(&s) && !(s.state & X9AudioRunning);
-    halLog("init uid=%s probe=%x ready=%d state=%x lead=%u", kDeviceUID, pe, gReady, pe ? 0 : s.state, pe ? 0 : s.lead_frames);
+    { mach_timebase_info_data_t tb; mach_timebase_info(&tb);
+      gHostTicksPerFrame = 1e9 * (double)tb.denom / (double)tb.numer / kRate; }
+    halLog("init uid=%s+" kHawkingUID " probe=%x ready=%d state=%x lead=%u", kDeviceUID, pe, gReady, pe ? 0 : s.state, pe ? 0 : s.lead_frames);
     if (gReady) gLeadFrames = s.lead_frames;
     gHost = host;
     dispatch_source_set_event_handler_f(gControlTimer, refreshControlState);
@@ -296,6 +311,7 @@ static unsigned findClient(UInt32 id) {
 }
 static OSStatus AddDeviceClient(AudioServerPlugInDriverRef d, AudioObjectID o, const AudioServerPlugInClientInfo *c) {
     (void)d;
+    if (o == kHawking && c) { halLog("add client %u to Hawking", (unsigned)c->mClientID); return 0; }
     if (o != kDevice || !c) return kAudioHardwareBadObjectError;
     pthread_mutex_lock(&gLock);
     unsigned slot = findClient(c->mClientID);
@@ -313,6 +329,7 @@ static OSStatus AddDeviceClient(AudioServerPlugInDriverRef d, AudioObjectID o, c
 }
 static OSStatus RemoveDeviceClient(AudioServerPlugInDriverRef d, AudioObjectID o, const AudioServerPlugInClientInfo *c) {
     (void)d;
+    if (o == kHawking && c) return 0;
     if (o != kDevice || !c) return kAudioHardwareBadObjectError;
     pthread_mutex_lock(&gLock);
     unsigned slot = findClient(c->mClientID);
@@ -349,9 +366,9 @@ static OSStatus IsPropertySettable(AudioServerPlugInDriverRef d, AudioObjectID o
     (void)d; (void)pid;
     if (!out || !a) return kAudioHardwareIllegalOperationError;
     *out = (o == kVolume && (a->mSelector == kAudioLevelControlPropertyScalarValue || a->mSelector == kAudioLevelControlPropertyDecibelValue)) ||
-           ((o == kOutStream) && (a->mSelector == kAudioStreamPropertyVirtualFormat || a->mSelector == kAudioStreamPropertyPhysicalFormat ||
+           ((o == kOutStream || o == kInStream || o == kHawkingIn) && (a->mSelector == kAudioStreamPropertyVirtualFormat || a->mSelector == kAudioStreamPropertyPhysicalFormat ||
                                                      a->mSelector == kAudioStreamPropertyIsActive)) ||
-           (o == kDevice && a->mSelector == kAudioDevicePropertyNominalSampleRate);
+           ((o == kDevice || o == kHawking) && a->mSelector == kAudioDevicePropertyNominalSampleRate);
     return HasProperty(d, o, pid, a) ? 0 : kAudioHardwareUnknownPropertyError;
 }
 
@@ -372,21 +389,24 @@ static OSStatus setProperty(AudioObjectID o, const AudioObjectPropertyAddress *a
         if (gHost) gHost->PropertiesChanged(gHost, kVolume, 2, changed);
         return 0;
     }
-    if ((o == kOutStream) && (a->mSelector == kAudioStreamPropertyVirtualFormat || a->mSelector == kAudioStreamPropertyPhysicalFormat)) {
+    if ((o == kOutStream || o == kInStream || o == kHawkingIn) &&
+        (a->mSelector == kAudioStreamPropertyVirtualFormat || a->mSelector == kAudioStreamPropertyPhysicalFormat)) {
         const AudioStreamBasicDescription *f = data;
         if (size < sizeof(*f)) return kAudioHardwareBadPropertySizeError;
-        AudioStreamBasicDescription expected = format(X9_AUDIO_CHANNELS);
+        AudioStreamBasicDescription expected = format(o == kHawkingIn ? 1 : X9_AUDIO_CHANNELS);
         return f->mSampleRate == expected.mSampleRate && f->mFormatID == expected.mFormatID &&
             f->mFormatFlags == expected.mFormatFlags && f->mChannelsPerFrame == expected.mChannelsPerFrame &&
             f->mBytesPerFrame == expected.mBytesPerFrame && f->mBitsPerChannel == expected.mBitsPerChannel &&
             f->mFramesPerPacket == 1 && f->mBytesPerPacket == expected.mBytesPerPacket ? 0 : kAudioDeviceUnsupportedFormatError;
     }
-    if (o == kDevice && a->mSelector == kAudioDevicePropertyNominalSampleRate)
+    if ((o == kDevice || o == kHawking) && a->mSelector == kAudioDevicePropertyNominalSampleRate)
         return size >= sizeof(Float64) && *(const Float64 *)data == kRate ? 0 : kAudioDeviceUnsupportedFormatError;
     if (o == kOutStream && a->mSelector == kAudioStreamPropertyIsActive) {
         if (size < sizeof(UInt32)) return kAudioHardwareBadPropertySizeError;
         __atomic_store_n(&gStreamActive, !!*(const UInt32 *)data, __ATOMIC_RELEASE); return 0;
     }
+    if ((o == kInStream || o == kHawkingIn) && a->mSelector == kAudioStreamPropertyIsActive)
+        return size < sizeof(UInt32) ? kAudioHardwareBadPropertySizeError : 0; /* silent either way */
     return kAudioHardwareUnknownPropertyError;
 }
 
@@ -418,10 +438,13 @@ static UInt32 objects(AudioObjectID o, AudioObjectPropertyScope scope, AudioObje
     UInt32 n = 0;
     /* Always listed (Sheng): VirtualAudio builds the Puffin port when the
      * device appears; StartIO reports NotRunning until the kernel is Ready. */
-    if (o == kPlugIn) list[n++] = kDevice;
+    if (o == kPlugIn) { list[n++] = kDevice; list[n++] = kHawking; }
     else if (o == kDevice) {
         if (scope != kAudioObjectPropertyScopeInput) list[n++] = kOutStream;
+        if (scope != kAudioObjectPropertyScopeOutput) list[n++] = kInStream;
         if (scope != kAudioObjectPropertyScopeInput) list[n++] = kVolume;
+    } else if (o == kHawking) {
+        if (scope != kAudioObjectPropertyScopeOutput) list[n++] = kHawkingIn;
     }
     return n;
 }
@@ -430,8 +453,9 @@ static OSStatus propertyData(AudioObjectID o, const AudioObjectPropertyAddress *
                              UInt32 *outDataSize, void *outData) {
     if (!a || !outDataSize || (!outData && inDataSize) || (!q && qs)) return kAudioHardwareIllegalOperationError;
     const AudioObjectPropertySelector s = a->mSelector;
-    if (o <= kVolume && (s == kAudioObjectPropertyCustomPropertyInfoList || ((s == kAudioPlugInPropertyBoxList ||
-        s == kAudioPlugInPropertyClockDeviceList) && o == kPlugIn) || ((s == 'taps') && (o == kOutStream)))) {
+    if (o <= kLastObject && (s == kAudioObjectPropertyCustomPropertyInfoList || ((s == kAudioPlugInPropertyBoxList ||
+        s == kAudioPlugInPropertyClockDeviceList) && o == kPlugIn) ||
+        ((s == 'taps') && (o == kOutStream || o == kInStream || o == kHawkingIn)))) {
         *outDataSize = 0;
         return 0;
     }
@@ -444,13 +468,16 @@ static OSStatus propertyData(AudioObjectID o, const AudioObjectPropertyAddress *
         case kAudioObjectPropertyManufacturer: REPLY_STR("ios-sweet");
         case kAudioObjectPropertyOwnedObjects:
         case kAudioPlugInPropertyDeviceList: {
-            if (inDataSize < sizeof(AudioObjectID)) {*outDataSize = 0; return 0;}
-            ((AudioObjectID *)outData)[0] = kDevice; *outDataSize = sizeof(AudioObjectID); return 0;
+            AudioObjectID list[2]; UInt32 n = objects(kPlugIn, a->mScope, list), out = 0;
+            for (UInt32 i = 0; i < n && (out + 1) * sizeof(AudioObjectID) <= inDataSize; i++)
+                ((AudioObjectID *)outData)[out++] = list[i];
+            *outDataSize = out * (UInt32)sizeof(AudioObjectID); return 0;
         }
         case kAudioPlugInPropertyTranslateUIDToDevice: {
             CFStringRef uid = qs >= sizeof(CFStringRef) ? *(const CFStringRef *)q : NULL;
-            REPLY(AudioObjectID, uid && CFGetTypeID(uid) == CFStringGetTypeID() &&
-                CFStringCompare(uid, CFSTR(kDeviceUID), 0) == kCFCompareEqualTo ? kDevice : kAudioObjectUnknown);
+            bool str = uid && CFGetTypeID(uid) == CFStringGetTypeID();
+            REPLY(AudioObjectID, str && CFStringCompare(uid, CFSTR(kDeviceUID), 0) == kCFCompareEqualTo ? kDevice :
+                  str && CFStringCompare(uid, CFSTR(kHawkingUID), 0) == kCFCompareEqualTo ? kHawking : kAudioObjectUnknown);
         }
         case kAudioPlugInPropertyResourceBundle: REPLY_STR("");
         default: return kAudioHardwareUnknownPropertyError;
@@ -460,16 +487,14 @@ static OSStatus propertyData(AudioObjectID o, const AudioObjectPropertyAddress *
         case kAudioObjectPropertyBaseClass: REPLY(AudioClassID, kAudioObjectClassID);
         case kAudioObjectPropertyClass: REPLY(AudioClassID, kAudioDeviceClassID);
         case kAudioObjectPropertyOwner: REPLY(AudioObjectID, kPlugIn);
-        case kAudioObjectPropertyName: REPLY_STR("X9 Speaker");
+        case kAudioObjectPropertyName: REPLY_STR(kDeviceUID);
         case kAudioObjectPropertyManufacturer: REPLY_STR("ios-sweet");
         case kAudioDevicePropertyDeviceUID: REPLY_STR(kDeviceUID);
         case kAudioDevicePropertyModelUID: REPLY_STR(kModelUID);
-        case kAudioObjectPropertyModelName: REPLY_STR("X9 Speaker");
+        case kAudioObjectPropertyModelName: REPLY_STR(kDeviceUID);
         case kAudioObjectPropertySerialNumber: REPLY_STR("0001");
         case kAudioObjectPropertyFirmwareVersion: REPLY_STR("1.0");
         case kAudioObjectPropertyIdentify: REPLY(UInt32, 0);
-        case 'accs': REPLY(UInt32, 0);
-        case 'auto': REPLY(UInt32, 0);
         case kAudioObjectPropertyElementName: REPLY_STR("");
         case kAudioDevicePropertyConfigurationApplication: REPLY_STR("com.apple.Preferences");
         case kAudioDevicePropertyTransportType: REPLY(UInt32, kAudioDeviceTransportTypeBuiltIn);
@@ -477,8 +502,9 @@ static OSStatus propertyData(AudioObjectID o, const AudioObjectPropertyAddress *
         case kAudioDevicePropertyClockDomain: REPLY(UInt32, 0);
         case kAudioDevicePropertyDeviceIsAlive: REPLY(UInt32, 1);
         case kAudioDevicePropertyDeviceIsRunning: REPLY(UInt32, running());
-        case kAudioDevicePropertyDeviceCanBeDefaultDevice: REPLY(UInt32, a->mScope != kAudioObjectPropertyScopeInput);
-        case kAudioDevicePropertyDeviceCanBeDefaultSystemDevice: REPLY(UInt32, a->mScope != kAudioObjectPropertyScopeInput);
+        /* HakiOS (tested D22): 1 in every scope for a device with an output. */
+        case kAudioDevicePropertyDeviceCanBeDefaultDevice: REPLY(UInt32, 1);
+        case kAudioDevicePropertyDeviceCanBeDefaultSystemDevice: REPLY(UInt32, 1);
         case kAudioDevicePropertyLatency: REPLY(UInt32, latencyFrames());
         case kAudioDevicePropertySafetyOffset: REPLY(UInt32, latencyFrames() + 2 * X9_AUDIO_PERIOD);
         case kAudioDevicePropertyNominalSampleRate: REPLY(Float64, kRate);
@@ -489,11 +515,11 @@ static OSStatus propertyData(AudioObjectID o, const AudioObjectPropertyAddress *
         case kAudioDevicePropertyClockAlgorithm: REPLY(UInt32, kAudioDeviceClockAlgorithmRaw);
         case kAudioDevicePropertyPreferredChannelsForStereo: {
             if (inDataSize < 2 * sizeof(UInt32)) return kAudioHardwareBadPropertySizeError;
-            ((UInt32 *)outData)[0] = 1; ((UInt32 *)outData)[1] = a->mScope == kAudioObjectPropertyScopeInput ? 1 : 2;
+            ((UInt32 *)outData)[0] = 1; ((UInt32 *)outData)[1] = 2;
             *outDataSize = 2 * sizeof(UInt32); return 0;
         }
         case kAudioDevicePropertyPreferredChannelLayout: {
-            const UInt32 channels = a->mScope == kAudioObjectPropertyScopeInput ? 0 : X9_AUDIO_CHANNELS;
+            const UInt32 channels = X9_AUDIO_CHANNELS;
             const UInt32 bytes = (UInt32)(offsetof(AudioChannelLayout, mChannelDescriptions) + channels * sizeof(AudioChannelDescription));
             if (inDataSize < bytes) return kAudioHardwareBadPropertySizeError;
             AudioChannelLayout *l = outData;
@@ -507,7 +533,7 @@ static OSStatus propertyData(AudioObjectID o, const AudioObjectPropertyAddress *
         case kAudioObjectPropertyOwnedObjects:
         case kAudioDevicePropertyStreams:
         case kAudioObjectPropertyControlList: {
-            AudioObjectID list[3];
+            AudioObjectID list[4];
             UInt32 n = objects(kDevice, a->mScope, list), out = 0;
             for (UInt32 i = 0; i < n; ++i) {
                 if (s == kAudioDevicePropertyStreams && list[i] == kVolume) continue;
@@ -519,18 +545,58 @@ static OSStatus propertyData(AudioObjectID o, const AudioObjectPropertyAddress *
         }
         default: return kAudioHardwareUnknownPropertyError;
         }
+    case kHawking:
+        switch (s) {
+        case kAudioObjectPropertyBaseClass: REPLY(AudioClassID, kAudioObjectClassID);
+        case kAudioObjectPropertyClass: REPLY(AudioClassID, kAudioDeviceClassID);
+        case kAudioObjectPropertyOwner: REPLY(AudioObjectID, kPlugIn);
+        case kAudioObjectPropertyName: REPLY_STR(kHawkingUID);
+        case kAudioObjectPropertyManufacturer: REPLY_STR("ios-sweet");
+        case kAudioDevicePropertyDeviceUID: REPLY_STR(kHawkingUID);
+        case kAudioDevicePropertyModelUID: REPLY_STR(kHawkingUID);
+        case kAudioDevicePropertyTransportType: REPLY(UInt32, kAudioDeviceTransportTypeBuiltIn);
+        case kAudioDevicePropertyRelatedDevices: REPLY(AudioObjectID, kHawking);
+        case kAudioDevicePropertyClockDomain: REPLY(UInt32, 0);
+        case kAudioDevicePropertyDeviceIsAlive: REPLY(UInt32, 1);
+        case kAudioDevicePropertyDeviceIsRunning: REPLY(UInt32, __atomic_load_n(&gHawkUsers, __ATOMIC_ACQUIRE) != 0);
+        case kAudioDevicePropertyDeviceCanBeDefaultDevice: REPLY(UInt32, 0);
+        case kAudioDevicePropertyDeviceCanBeDefaultSystemDevice: REPLY(UInt32, 0);
+        case kAudioDevicePropertyLatency: REPLY(UInt32, 0);
+        case kAudioDevicePropertySafetyOffset: REPLY(UInt32, 0);
+        case kAudioDevicePropertyNominalSampleRate: REPLY(Float64, kRate);
+        case kAudioDevicePropertyAvailableNominalSampleRates: REPLY(AudioValueRange, ((AudioValueRange){kRate, kRate}));
+        case kAudioDevicePropertyIsHidden: REPLY(UInt32, 0);
+        case kAudioDevicePropertyZeroTimeStampPeriod: REPLY(UInt32, kZeroPeriod);
+        case kAudioDevicePropertyPreferredChannelsForStereo: {
+            if (inDataSize < 2 * sizeof(UInt32)) return kAudioHardwareBadPropertySizeError;
+            ((UInt32 *)outData)[0] = 1; ((UInt32 *)outData)[1] = 2;
+            *outDataSize = 2 * sizeof(UInt32); return 0;
+        }
+        case kAudioObjectPropertyOwnedObjects:
+        case kAudioDevicePropertyStreams: {
+            AudioObjectID list[1]; UInt32 n = objects(kHawking, a->mScope, list);
+            if (n && inDataSize >= sizeof(AudioObjectID)) {((AudioObjectID *)outData)[0] = list[0]; *outDataSize = sizeof(AudioObjectID);}
+            else *outDataSize = 0;
+            return 0;
+        }
+        case kAudioObjectPropertyControlList: *outDataSize = 0; return 0;
+        default: return kAudioHardwareUnknownPropertyError;
+        }
     case kOutStream:
+    case kInStream:
+    case kHawkingIn:
     {
-        const UInt32 channels = X9_AUDIO_CHANNELS;
+        const UInt32 channels = o == kHawkingIn ? 1 : X9_AUDIO_CHANNELS;
+        const bool input = o != kOutStream;
         switch (s) {
         case kAudioObjectPropertyBaseClass: REPLY(AudioClassID, kAudioObjectClassID);
         case kAudioObjectPropertyClass: REPLY(AudioClassID, kAudioStreamClassID);
-        case kAudioObjectPropertyOwner: REPLY(AudioObjectID, kDevice);
-        case kAudioObjectPropertyName: if (o == kOutStream) REPLY_STR("X9 Speaker"); REPLY_STR("Microphone");
+        case kAudioObjectPropertyOwner: REPLY(AudioObjectID, o == kHawkingIn ? kHawking : kDevice);
+        case kAudioObjectPropertyName: if (o == kOutStream) REPLY_STR("Speaker"); REPLY_STR("Feedback");
         case kAudioObjectPropertyOwnedObjects: *outDataSize = 0; return 0;
-        case kAudioStreamPropertyIsActive: REPLY(UInt32, __atomic_load_n(&gStreamActive, __ATOMIC_ACQUIRE));
-        case kAudioStreamPropertyDirection: REPLY(UInt32, 0);
-        case kAudioStreamPropertyTerminalType: REPLY(UInt32, o == kOutStream ? kAudioStreamTerminalTypeSpeaker : kAudioStreamTerminalTypeMicrophone);
+        case kAudioStreamPropertyIsActive: REPLY(UInt32, input ? 1 : __atomic_load_n(&gStreamActive, __ATOMIC_ACQUIRE));
+        case kAudioStreamPropertyDirection: REPLY(UInt32, input);
+        case kAudioStreamPropertyTerminalType: REPLY(UInt32, input ? kAudioStreamTerminalTypeMicrophone : kAudioStreamTerminalTypeSpeaker);
         case kAudioStreamPropertyStartingChannel: REPLY(UInt32, 1);
         case kAudioStreamPropertyLatency: REPLY(UInt32, 0);
         case kAudioStreamPropertyVirtualFormat:
@@ -649,6 +715,14 @@ static OSStatus stopClient(unsigned slot) {
 }
 static OSStatus StartIO(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 client) {
     (void)d;
+    if (o == kHawking) {
+        pthread_mutex_lock(&gLock);
+        if (!gHawkUsers) gHawkAnchor = mach_absolute_time();
+        __atomic_store_n(&gHawkUsers, gHawkUsers + 1, __ATOMIC_RELEASE);
+        pthread_mutex_unlock(&gLock);
+        halLog("StartIO Hawking client %u", (unsigned)client);
+        return 0;
+    }
     if (o != kDevice) return kAudioHardwareBadObjectError;
     pthread_mutex_lock(&gLock);
     OSStatus r = 0;
@@ -688,6 +762,12 @@ static OSStatus StartIO(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 cl
 }
 static OSStatus StopIO(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 client) {
     (void)d;
+    if (o == kHawking) {
+        pthread_mutex_lock(&gLock);
+        if (gHawkUsers) __atomic_store_n(&gHawkUsers, gHawkUsers - 1, __ATOMIC_RELEASE);
+        pthread_mutex_unlock(&gLock);
+        return 0;
+    }
     if (o != kDevice) return kAudioHardwareBadObjectError;
     pthread_mutex_lock(&gLock);
     unsigned slot = findClient(client);
@@ -699,6 +779,16 @@ static OSStatus StopIO(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 cli
 static OSStatus GetZeroTimeStamp(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 client,
     Float64 *sample, UInt64 *host, UInt64 *seed) {
     (void)d;
+    if (o == kHawking && sample && host && seed) {
+        (void)client;
+        if (!__atomic_load_n(&gHawkUsers, __ATOMIC_ACQUIRE) || gHostTicksPerFrame <= 0) return kAudioHardwareNotRunningError;
+        uint64_t now = mach_absolute_time(), anchor = gHawkAnchor;
+        uint64_t frames = now > anchor ? (uint64_t)((double)(now - anchor) / gHostTicksPerFrame) : 0;
+        uint64_t period = frames / kZeroPeriod * kZeroPeriod;
+        *sample = (Float64)period;
+        *host = anchor + (uint64_t)((double)period * gHostTicksPerFrame);
+        *seed = 1; return 0;
+    }
     if (o != kDevice || !sample || !host || !seed) return kAudioHardwareBadObjectError;
     if (pthread_mutex_trylock(&gLock)) return kAudioHardwareNotRunningError;
     X9AudioControl s;
@@ -717,8 +807,10 @@ static OSStatus GetZeroTimeStamp(AudioServerPlugInDriverRef d, AudioObjectID o, 
 }
 static OSStatus WillDoIOOperation(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 c, UInt32 op, Boolean *will, Boolean *inPlace) {
     (void)d; (void)c;
-    if (o != kDevice || !will || !inPlace) return kAudioHardwareBadObjectError;
-    *will = op == kAudioServerPlugInIOOperationWriteMix; *inPlace = true; return 0;
+    if ((o != kDevice && o != kHawking) || !will || !inPlace) return kAudioHardwareBadObjectError;
+    *will = op == kAudioServerPlugInIOOperationReadInput ||
+            (o == kDevice && op == kAudioServerPlugInIOOperationWriteMix);
+    *inPlace = true; return 0;
 }
 static OSStatus BeginIOOperation(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 c, UInt32 op, UInt32 n, const AudioServerPlugInIOCycleInfo *i)
 { (void)d; (void)o; (void)c; (void)op; (void)n; (void)i; return 0; }
@@ -729,6 +821,13 @@ static int16_t quantize(float v) {
 static OSStatus DoIOOperation(AudioServerPlugInDriverRef d, AudioObjectID o, AudioObjectID stream, UInt32 c, UInt32 op,
     UInt32 frames, const AudioServerPlugInIOCycleInfo *info, void *main, void *secondary) {
     (void)d; (void)secondary;
+    /* Speaker's feedback input and Hawking's input: silence. */
+    if ((o == kDevice && stream == kInStream) || (o == kHawking && stream == kHawkingIn)) {
+        if (op != kAudioServerPlugInIOOperationReadInput) return kAudioHardwareUnsupportedOperationError;
+        if (frames > X9_AUDIO_RING || (!main && frames)) return kAudioHardwareIllegalOperationError;
+        if (frames) memset(main, 0, (size_t)frames * (stream == kHawkingIn ? 1 : X9_AUDIO_CHANNELS) * sizeof(Float32));
+        return 0;
+    }
     if (o != kDevice || stream != kOutStream) return kAudioHardwareBadObjectError;
     if (op != kAudioServerPlugInIOOperationWriteMix) return kAudioHardwareUnsupportedOperationError;
     if (!info || (!main && frames) || frames > X9_AUDIO_RING ||
