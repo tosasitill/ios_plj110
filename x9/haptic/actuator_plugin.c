@@ -196,13 +196,13 @@ static struct value property(AudioObjectID o,const AudioObjectPropertyAddress *a
             v.exists=true;v.size=offsetof(AudioChannelLayout,mChannelDescriptions);
             v.data.layout.mChannelLayoutTag=output?kAudioChannelLayoutTag_Mono:kAudioChannelLayoutTag_UseChannelDescriptions;break;
         case kAudioDevicePropertyDeviceUID:STR("Actuator");break;
-        case kAudioDevicePropertyModelUID:STR("X9-AW8693XS-Actuator");break;
+        case kAudioDevicePropertyModelUID:STR("Actuator");break; /* HakiOS D22: VirtualAudio keys d22_actuator_general on UID==ModelUID */
         case kAudioDevicePropertyTransportType:WORD(kAudioDeviceTransportTypeBuiltIn);break;
         case kAudioDevicePropertyRelatedDevices:WORD(ACTUATOR);break;
         case kAudioDevicePropertyClockDomain:WORD(0);break;
         case kAudioDevicePropertyDeviceIsAlive:WORD(ready);break;
         case kAudioDevicePropertyDeviceIsRunning:WORD(running && !fault && !stop_failed);break;
-        case kAudioDevicePropertyDeviceCanBeDefaultDevice:case kAudioDevicePropertyDeviceCanBeDefaultSystemDevice:WORD(0);break;
+        case kAudioDevicePropertyDeviceCanBeDefaultDevice:case kAudioDevicePropertyDeviceCanBeDefaultSystemDevice:WORD(output);break; /* HakiOS: output devices answer 1 */
         case kAudioDevicePropertyIsHidden:WORD(0);break;
         case kAudioDevicePropertyLatency:WORD(480);break;
         case kAudioDevicePropertySafetyOffset:WORD(240);break;

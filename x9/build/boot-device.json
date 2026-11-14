@@ -51,7 +51,8 @@
     "x9_bt=1",
     "x9_camera=1",
     "x9_dual_sim=1",
-    "ug=5"
+    "ug=5",
+    "x9_haptic=2"
   ],
   "_comment_defaults": "Proven kernel feature switches are default-on (sweet_x9_arg); pass name=0 to disable. x9_submit_async/x9_gpu_park became default-on 2026-11-13 (freed 32 B for per-image tokens). x9_metal_render=1 stays because X9GeneralMetal reads kern.bootargs. dv=1 is the x9_dvfsrc=1 alias; ug=5 negotiates UFS max<=G5."
 }

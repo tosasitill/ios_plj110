@@ -1268,3 +1268,27 @@ its board hold 1.4 s earlier. Every boot that had both the speaker's AP-only
 board hold (power_on) and a mic run hung; boots with only one never did.
 Investigation continues (async trigger, not the step that printed last).
 Build: `x9/out/x9-audio35-20261114/boot.img` (audio34 boot args).
+
+### audio36 (2026-11-14) — audio35 + vibration enabled by default
+
+Vibration root cause, from existing logs: no boot since 190 ran the haptic
+driver. `x9_haptic` defaults to 0 and boot-device.json never passed
+`x9_haptic=2`, so 280..296 have no `X9 HAPTIC` line, no Actuator HAL install
+and no /product/haptics closed-loop node (mkadt adds it only for the literal
+`x9_haptic=2`). The post-190 reset/HAL fixes (7954777) were never booted.
+Changes:
+1. boot-device.json: `x9_haptic=2` default-on (cmdline now 607/607 bytes
+   with the four audio args; no room left for more tokens).
+2. Actuator HAL: ModelUID "Actuator" (== UID, as HakiOS D22 and as the
+   Speaker fix in audio33) instead of "X9-AW8693XS-Actuator"; CanBeDefault
+   answers 1 for output scope like HakiOS.
+No hardware collision with audio: haptic uses I2C @0x12350000 (east gate
+0x12650000 bit0), TFA uses 0x129d0000, mic uses PMIF/GPIO only. Camera shares
+the east I2C parent mux; camera use may reparent it and make haptic EBUSY.
+Expected log: `X9 HAPTIC: chip=93x1 ... native I2C5 ready`, else
+`init rejected stage=N errno=E` names the failing step.
+Coexistence hang: no idle poller exists in our code (mic afe_worker and
+speaker watchdog act only while running; ADSP IRQ worker only when armed),
+so the async actor is outside these threads (ADSP firmware after power_on,
+or a hardware master). Still open.
+Build: `x9/out/x9-audio36-20261114/boot.img` (supersedes audio35).
