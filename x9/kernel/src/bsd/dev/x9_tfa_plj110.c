@@ -415,7 +415,12 @@ static int xfer(unsigned slave,uint8_t reg,bool write,uint16_t value,uint16_t *o
 int x9_tfa_plj110_session_open(void)
 {
     lck_mtx_lock(&i2c6_lock);
-    if(native_bus_held || (s.flags&X9PAProbeAttempted)){lck_mtx_unlock(&i2c6_lock);return EBUSY;}
+    /* audio43: a session cleanly closed by session_close (journal restored,
+     * not poisoned, stage Done) may be reopened for a speaker re-hold after
+     * the mic borrowed the lease. A failed/held/poisoned bus stays refused. */
+    bool reopen=(s.flags&X9PAProbeAttempted) && !session_open && s.stage==X9PAStageDone &&
+        !(s.flags&(X9PAPoisoned|X9PAJournalHeld)) && !s.dirty_mask && !j.bus_stuck;
+    if(native_bus_held || session_open || ((s.flags&X9PAProbeAttempted) && !reopen)){lck_mtx_unlock(&i2c6_lock);return EBUSY;}
     s.flags=X9PAProbeAttempted;s.stage=X9PAStageMap;
     j.pmif=ml_io_map(0x1c018000,0x2000);j.gpio=ml_io_map(0x1002d000,0x1000);
     j.gate=ml_io_map(0x129d0000,0x1000);j.perao=ml_io_map(0x16640000,0x1000);

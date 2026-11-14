@@ -418,8 +418,16 @@ static OSStatus start_io(__unused AudioServerPlugInDriverRef d,AudioObjectID o,U
             else {
                 mic=open(X9_MIC_DEVICE,O_RDONLY|O_NONBLOCK|O_CLOEXEC);
                 struct x9_mic_config config={.version=1,.rate=X9_MIC_RATE,.channels=1,.sample_bits=16,.source=X9_MIC_SOURCE_INTERNAL};
-                if(mic<0 || ioctl(mic,X9_MIC_START,&config)<0) {
-                    io_fault=true;ready=false;(void)stop_device();e=unavailable;
+                int start_errno=mic<0?errno:(ioctl(mic,X9_MIC_START,&config)<0?errno:0);
+                if(mic<0 || start_errno) {
+                    /* audio43: EBUSY = the speaker currently owns the shared
+                     * audio lease (playing). The kernel keeps READY for that
+                     * refusal, so do not latch io_fault: a later StartIO
+                     * retries instead of the input dying until reboot. */
+                    bool busy=mic>=0 && start_errno==EBUSY;
+                    fprintf(stderr,"X9 MIC HAL: START -> %d%s\n",start_errno,busy?" (busy, retry allowed)":"");
+                    if(!busy)io_fault=true;
+                    ready=false;(void)stop_device();e=unavailable;
                 } else {
                     struct x9_mic_status s={0};
                     if(ioctl(mic,X9_MIC_GET_STATUS,&s)<0 || s.version!=1 ||

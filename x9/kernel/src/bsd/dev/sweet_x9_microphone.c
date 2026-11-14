@@ -198,9 +198,20 @@ static int mic_ioctl(dev_t d,u_long cmd,caddr_t data,__unused int f,struct proc 
             if(!e && (generation!=st.generation || (st.flags&X9_MIC_FAULT)))
                 e=st.last_errno?st.last_errno:EIO;
             if(e) {
-                st.flags|=X9_MIC_FAULT;st.flags&=~X9_MIC_READY;st.last_errno=e;
-                (void)stop_locked();
-            }
+                /* audio43: EBUSY = shared audio lease/AFE owned by the speaker
+                 * (or a refused admission before any capture state). The
+                 * backend's own guards (dma_stuck, RESTORE_FAILED) stay
+                 * sticky inside it, so only a clean stop may keep READY. */
+                bool busy=e==EBUSY;
+                if(!busy){st.flags|=X9_MIC_FAULT;st.flags&=~X9_MIC_READY;}
+                st.last_errno=e;
+                int off=stop_locked();
+                if(busy && off){st.flags|=X9_MIC_FAULT;st.flags&=~X9_MIC_READY;}
+                /* The HAL's readiness gate requires last_errno==0. */
+                if(busy && !off)st.last_errno=0;
+                printf("X9 MIC: START refused -> %d stop=%d (%s)\n",e,off,
+                    busy && !off?"busy, READY kept, retry allowed":"FAULT for this boot");
+            } else printf("X9 MIC: START -> 0 gen=%llu\n",(unsigned long long)st.generation);
         }
     }
     lck_mtx_unlock(&mic_lock);lck_mtx_unlock(&mic_control_lock);return e;

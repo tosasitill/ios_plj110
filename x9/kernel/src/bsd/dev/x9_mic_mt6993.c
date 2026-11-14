@@ -323,6 +323,11 @@ static int poll_locked(void)
         if(t>behind)t-=behind;
         int e=x9_mic_deliver(generation,mono,n,t);
         bzero(mono,sizeof(mono));
+        /* audio43: ESTALE = the consumer's STOP already ended this stream and
+         * is waiting on afe_mic_lock to drain it. That is not a DMA fault.
+         * Log 301: recording it as err=70 made restart_ready refuse (EIO) and
+         * every later X9_MIC_START from the HAL failed for the whole boot. */
+        if(e==ESTALE)return EAGAIN;
         if(e)return e; /* never silently advance past rejected PCM */
         cursor=(cursor+n*4)%hw.dma_bytes;bytes-=n*4;
     }

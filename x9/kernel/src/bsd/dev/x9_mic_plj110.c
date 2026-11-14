@@ -19,6 +19,7 @@
 #include "x9_mic_plj110.h"
 #include "x9_mic_mt6993_regs.h"
 #include "x9_audio_resources.h"
+#include "x9_speaker_bringup.h"
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 extern int X9PMIFAcquire(void);
 extern void X9PMIFRelease(void);
@@ -591,7 +592,7 @@ static int board_finish(struct power_journal *j,int e)
         a->stage,a->flags,a->last_errno,a->restore_errno,a->ap_vote_before,a->ap_vote_after,
         a->ack_before,a->ack_after,a->vlp_before,a->vlp_after,h->chosen_phase[0],h->chosen_phase[1],
         h->cycle[0],h->cycle[1],h->scanned_phases);
-    if(analog)printf("X9 MIC ANALOG: stage=%u flags=%x errno=%u restore=%u HWCID=%x/%x AIN0/ADC_L DCC 2700mV 6dB RC=%x journal=%u/%u (not physical mic/PCM proof)\n",
+    if(analog)printf("X9 MIC ANALOG: stage=%u flags=%x errno=%u restore=%u HWCID=%x/%x AIN2/ADC_L DCC 2700mV 6dB RC=%x journal=%u/%u (not physical mic/PCM proof)\n",
         analog->stage,analog->flags,analog->last_errno,analog->restore_errno,
         analog->hwcid_h,analog->hwcid_l,analog->rc_monitor,
         analog->journal_restored,analog->journal_count);
@@ -627,6 +628,16 @@ static int board_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_stat
     if(s->flags&X9_MIC_BOARD_ATTEMPTED)return EALREADY;
     uint64_t ticket=0;
     int admission=x9_audio_resources_claim(X9AudioResourceMic,&ticket);
+    if(admission==EBUSY && hold) {
+        /* audio43 (log 301): the speaker backend kept the lease after its
+         * first start, so iOS recording never reached the codec. Ask an
+         * idle speaker to hand the chain back, then claim once more. */
+        X9AudioResourceStatus t={0};
+        if(!x9_audio_resources_status(&t) && t.owner==X9AudioResourceSpeaker &&
+           !x9_speaker_backend_yield())
+            admission=x9_audio_resources_claim(X9AudioResourceMic,&ticket);
+        if(admission)printf("X9 MIC: lease busy (owner=%u) -> %d\n",t.owner,admission);
+    }
     if(admission)return admission; /* no MMIO/reset/attempt consumed */
     uint64_t start=mach_absolute_time();
     /* Static journals may never outlive their persistent status surfaces. */

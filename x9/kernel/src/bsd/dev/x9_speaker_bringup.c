@@ -16,6 +16,7 @@
 #include <sys/errno.h>
 #include <kern/clock.h>
 #include <kern/thread.h>
+#include <kern/locks.h>
 #include <machine/machine_routines.h>
 #include <vm/pmap.h>
 #include <vm/vm_kern.h>
@@ -50,9 +51,15 @@ static struct {
     vm_offset_t dma;
     uint64_t dma_bus;
     bool tfa,afe_held,afe_prepared,pads,clock,dsp,pa_on[2];
-    bool held; /* backend mode: whole chain held from first start to reboot */
+    bool held; /* backend mode: chain held from a start until the mic asks for it */
     bool lazy; /* backend registered, hardware taken on the first start */
+    bool afe_registered; /* x9_speaker_afe has no unregister: register once */
+    bool broken; /* a yield teardown did not complete: never re-hold */
 } b;
+/* audio43: serializes be_start/be_stop (service lock) against the mic's
+ * yield request (mic ioctl thread). Takes no mic lock. */
+LCK_GRP_DECLARE(spk_be_group,"x9-spk-backend");
+LCK_MTX_DECLARE(spk_be_lock,&spk_be_group);
 
 /* ---------------- TFA9865 (two slaves, same sequence) ---------------- */
 static const uint8_t slaves[2]={0x34,0x35};
@@ -374,7 +381,12 @@ static int bringup_hold(bool prepare)
         ap.acquire=afe_acquire;ap.release=afe_release;ap.mute=afe_mute;ap.quiesce=afe_quiesce;
         ap.sync_device=afe_sync;ap.held=afe_held;ap.validate=afe_validate;ap.halt_producer=afe_halt;
         ap.producer=X9AFEProducerCPU;ap.generation=0;
-        e=x9_speaker_afe_register(&ap);SPKLOG("X9 SPK: afe register -> %d\n",e);
+        /* audio43 re-hold after a mic yield: the AFE engine stays registered
+         * (same permanent AFE mapping and DMA buffer, callbacks read b.*). */
+        static volatile uint32_t *registered_afe;
+        if(b.afe_registered)e=registered_afe==b.afe?0:EIO;
+        else {e=x9_speaker_afe_register(&ap);if(!e){b.afe_registered=true;registered_afe=b.afe;}}
+        SPKLOG("X9 SPK: afe register -> %d%s\n",e,b.afe_registered?" (registered once per boot)":"");
         if(!e && prepare){e=x9_speaker_afe_prepare_on_ticket(b.ticket);b.afe_prepared=true;SPKLOG("X9 SPK: afe prepare -> %d\n",e);}
     }
     return e;
@@ -487,9 +499,9 @@ static int be_pa_step(void)
     if(e){printf("X9 SPK BACKEND: PA step %u -> %d\n",pa.state,e);pa_report("backend-fault");}
     return e;
 }
-static int be_stop(void *ctx)
+static int be_stop_locked(void)
 {
-    (void)ctx;int first=0,e;
+    int first=0,e;
     if(b.tfa) {
         e=pa_mute(NULL,b.ticket);if(e && !first)first=e;
         for(unsigned i=0;i<2;i++){e=bf_set(i,0x0000,1);if(e && !first)first=e;b.pa_on[i]=false;}
@@ -499,19 +511,59 @@ static int be_stop(void *ctx)
     printf("X9 SPK BACKEND: stop -> %d\n",first);
     return first;
 }
+static int be_stop(void *ctx)
+{
+    (void)ctx;lck_mtx_lock(&spk_be_lock);int e=be_stop_locked();
+    lck_mtx_unlock(&spk_be_lock);return e;
+}
+static int be_start_locked(const int16_t *prefill,uint32_t frames,uint64_t *anchor);
 static int be_start(void *ctx,const int16_t *prefill,uint32_t frames,uint64_t *anchor)
 {
-    (void)ctx;
+    (void)ctx;lck_mtx_lock(&spk_be_lock);int e=be_start_locked(prefill,frames,anchor);
+    lck_mtx_unlock(&spk_be_lock);return e;
+}
+/* audio43 (log 301): the speaker kept the shared audio lease from its first
+ * start until reboot, so every later mic START got EBUSY. Android runs both
+ * through one AFE; here the lease is exclusive, so an IDLE speaker (no AFE
+ * stream, PA state idle) hands the whole chain back on the mic's request,
+ * exactly the teardown the one-shot path uses, and re-takes it lazily on
+ * its next start. A playing speaker refuses (mic START returns EBUSY and
+ * may retry). Called from the mic board admission without speaker locks. */
+int x9_speaker_backend_yield(void)
+{
+    lck_mtx_lock(&spk_be_lock);int e=0;
+    if(!b.held)e=b.ticket?EBUSY:0;
+    else if(!b.lazy || b.broken)e=EBUSY;
+    else if(b.afe_prepared || pa.state!=PaIdle)e=EBUSY;
+    else {
+        teardown();
+        if(b.ticket || b.dsp || b.clock || b.pads || b.tfa || b.afe_prepared){b.broken=true;e=EIO;}
+        else b.held=false;
+    }
+    printf("X9 SPK BACKEND: yield chain to mic -> %d%s\n",e,
+        e==EBUSY?" (speaker busy)":e?" (teardown incomplete, speaker retired)":" (re-taken on next start)");
+    lck_mtx_unlock(&spk_be_lock);return e;
+}
+static int be_start_locked(const int16_t *prefill,uint32_t frames,uint64_t *anchor)
+{
     if(b.afe_prepared || pa.state!=PaIdle)return EBUSY;
+    if(b.broken)return EIO;
     if(!b.held) {
         /* Lazy hold (combined spk+mic image): the boot mic test ran first and
          * released the lease; take the chain now, on the first iOS start.
          * Logs 282/284/287 hung when a second audio subsystem started after
          * the first, so this line marks where to look if playback hangs. */
-        printf("X9 SPK BACKEND: first start, taking the speaker chain now (lazy hold)\n");
+        printf("X9 SPK BACKEND: start, taking the speaker chain now (lazy hold)\n");
         if(!b.lazy)return ENXIO;
         int h=bringup_hold(false);
-        if(h){teardown();printf("X9 SPK BACKEND: lazy hold -> %d\n",h);return h;}
+        if(h) {
+            teardown();
+            if(b.ticket || b.dsp || b.clock || b.pads || b.tfa)b.broken=true;
+            /* EBUSY = the mic owns the lease (recording): the service clears
+             * it on STOP and the next start retries. */
+            printf("X9 SPK BACKEND: lazy hold -> %d%s\n",h,b.broken?" (teardown incomplete)":"");
+            return h;
+        }
         b.held=true;printf("X9 SPK BACKEND: lazy hold -> 0\n");
     }
     int e=x9_speaker_afe_prepare_on_ticket(b.ticket);b.afe_prepared=true;

@@ -701,7 +701,9 @@ IOReturn X9AudioUserClient::externalMethod(uint32_t sel, IOExternalMethodArgumen
          * really stopped is recoverable: the next START gets a fresh stream.
          * Hardware/ownership faults stay sticky. */
         if (!e && !backendHeld && !s.blockers && haveBackend &&
-            (s.error == EPIPE || s.error == ETIMEDOUT)) {
+            (s.error == EPIPE || s.error == ETIMEDOUT || s.error == EBUSY)) {
+            /* audio43: EBUSY = the mic held the shared audio lease at START
+             * (recording); the backend acquired nothing, retry is safe. */
             IOLog("X9 AUDIO UC: stream fault %d cleared by STOP (silence fills %llu)\n", s.error,
                   (unsigned long long)silenceFills);
             s.error = 0; s.state = X9AudioReady;

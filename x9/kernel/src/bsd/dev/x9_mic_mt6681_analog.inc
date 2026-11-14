@@ -170,7 +170,12 @@ int x9_mic_mt6681_analog_l(struct x9_mic_mt6681 *c)
     ANALOG(MT6681_AFE_DCCLK1_CFG0,DCCLK1_REF_CK_SEL,0);
     ANALOG(MT6681_AFE_DCCLK1_CFG2,DCCLK1_RESYNC_BYPASS,1);
     s->stage=X9_MIC_ANALOG_PGA;
-    ANALOG(MT6681_AUDENC_PMU_CON0,RG_AUDPREAMPLINPUTSEL,0);
+    /* audio43: as Android recording (record-regmap 3488=83, 3489=5e):
+     * PGA L Select = AIN2 (mt_pga_l_event: DEVICE_MIC2, MIC_TYPE_2), and
+     * CON1[3:0] RG_AUDPREAMPLGAIN=0xe written by OPPO mt6681_adc_init on
+     * every codec power-up (before any capture route). */
+    ANALOG(MT6681_AUDENC_PMU_CON1,RG_AUDPREAMPLGAIN,0xe);
+    ANALOG(MT6681_AUDENC_PMU_CON0,RG_AUDPREAMPLINPUTSEL,2);
     ANALOG(MT6681_AUDENC_PMU_CON1,RG_AUDADCLINPUTSEL,2);
     /* mt_pga_l_event PRE_PMU, HiFi: SC res swap on, SPAREPGA1=0xc. */
     ANALOG(MT6681_AUDENC_PMU_CON17,RG_AUDRADCFLASHIDDTEST,1);

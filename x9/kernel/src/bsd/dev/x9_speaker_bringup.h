@@ -8,6 +8,9 @@ extern "C" {
 int x9_speaker_bringup_run(void);
 /* Backend mode (x9_spk_backend, default 1): call WITHOUT the X9Audio lock. */
 int x9_speaker_backend_register(void);
+/* audio43: the mic asks an IDLE speaker backend to hand back the shared
+ * audio lease (full teardown, re-taken on the next start). 0 = released. */
+int x9_speaker_backend_yield(void);
 #ifdef __cplusplus
 }
 #endif

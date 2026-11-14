@@ -1437,3 +1437,39 @@ one line `config as OPPO: sysst before/after, readback diffs=N reg=w/r`.
 Not-standby (0x3f) still refuses; runtime fault checks unchanged.
 Args: x9_audio=2 x9_dsp_boot=10 x9_mic=2 x9_mic_boot=1000.
 Build: `x9/out/x9-audio42-20261114/boot.img`.
+
+### audio43 (2026-11-14) — iOS recording blocked twice after the boot capture (log 301)
+
+Log 301: haptic ok, speaker ok; boot mic capture rms 1, then nothing when the
+user records. There is no `X9 MIC` line after boot at all. Static audit found two independent
+blockers on the HAL path (X9Microphone StartIO -> X9_MIC_START -> afe_start):
+
+1. **Stop race poisoned restart.** The boot capture's stop (sweet layer clears
+   RUNNING, bumps generation, then waits on afe_mic_lock) raced the 5 ms
+   worker: its `x9_mic_deliver` got ESTALE and the worker recorded it as a DMA
+   fault (`codec err=70`, `dma err=70` in 301). `capture_restart_ready()`
+   then refused (EIO), so every later START failed. The kernel marked the
+   mic FAULT and the HAL latched io_fault, both silently. Fix: ESTALE from deliver
+   = consumer stop in progress -> EAGAIN (afe_stop does the drain).
+2. **Speaker kept the shared lease until reboot** (lazy hold at the first
+   X9Audio start, 31.75 s in 301), so the mic admission got EBUSY. Fix: the
+   mic asks an idle speaker backend (`x9_speaker_backend_yield`: no AFE
+   stream, PA idle) to run the one-shot teardown and hand the lease back.
+   The speaker re-takes the chain on its next start: the AFE engine registers
+   once per boot, the TFA I2C6 session reopens after a clean close, and the
+   ADSP re-adopts the LK votes (release only withdraws owned votes; 301 owned=0).
+   The clocks/pads need a new generation, which comes from the ADSP serial.
+   A playing speaker refuses. The mic START then returns EBUSY, which is now
+   non-sticky in the kernel (READY kept, last_errno 0) and in the HAL (no
+   io_fault). A speaker START refused because the mic records is EBUSY and is
+   cleared by STOP like EPIPE/ETIMEDOUT.
+3. Analog as Android recording (record-regmap 3488=83, 3489=5e): PGA L =
+   AIN2 (OPPO mt_pga_l_event: DEVICE_MIC2), CON1[3:0] RG_AUDPREAMPLGAIN=0xe
+   (OPPO mt6681_adc_init on every power-up).
+
+New lines: `X9 MIC: START -> 0` / `START refused`, `X9 MIC: lease busy`,
+`X9 SPK BACKEND: yield chain to mic`, HAL stderr `X9 MIC HAL: START`.
+Expected: recording works while nothing plays. The first sound after
+recording re-takes the speaker (~140 ms lazy hold). Playback during a
+recording is refused for now (exclusive lease; the Android-style shared AFE
+is the next step).
