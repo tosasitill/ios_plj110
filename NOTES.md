@@ -1408,3 +1408,32 @@ normal stops). Haptic passed stage 12 (stale STAT cleared). Fixes:
    Transfer CSRs stay strict. Bus stays ≤390 kHz (Android DT: 1 MHz FM+).
 Args: x9_audio=2 x9_dsp_boot=10 x9_mic=2 x9_mic_boot=1000.
 Build: `x9/out/x9-audio41-20261114/boot.img`.
+
+### audio42 (2026-11-14) — log 300: speaker at 18 s; mic still silent; haptic stage 15
+
+Log 300 (audio41): speaker backend registered at 17.9 s, HAL ready 18.7 s.
+Mic still rms 2. **Correction:** Android's recording dump also reads the codec
+MTKAIF monitors 0x2c9d..0x2ca4 = 00 and the AP `AFE_ADDA_UL0_SRC_MON0/1` =
+c0000000/60000000 — neither "AIF6=00" nor "UL raw constant" means no data;
+audio41's TX2 conclusion rested on that. ADDA6 UL SRC stays on (Android has it).
+Android SoC dump vs ours, capture path:
+| reg | Android | ours |
+| --- | --- | --- |
+| ADDA_MTKAIFV4_RX_CFG0 / ADDA6 | 31051 / 1053 | same |
+| MTKAIF0/1_CFG0, RX_CFG0/2 | 80010000, 730, 6300000/6303100 | same |
+| AUD_PAD_TOP_CFG0 | b9 | same |
+| ADDA_UL0_SRC_CON0 | 60401 | same |
+| **ADDA_UL0_SRC_CON1** | **7fff0412** | 7fff0402 |
+| VUL CON0 | 100048 | same |
+Bit4 = FIFO_SOFT_RST. OPPO's "ADDA_FIFO" supply is inverted and routed only
+to "AP DMIC Capture"; MTKAIF AMIC never powers it, so it stays 1. We cleared
+it ("release FIFO reset"). Now kept at 1 like OPPO/Android.
+Android takes I_ADDA_UL_CH1..4 (CONN048..051 into CM1); our slot mux carries
+ADC_L in every slot that can reach CH1.
+Haptic stage 15 EIO: our hconfigure gated on its own strict readback of every
+write and on SYSST fault bits; OPPO aw8693xs.c (i2c_w_bytes/w_bits, TMCFG
+0x7d/0x00 lock writes) does neither. Now OPPO-style: only I2C errors fail;
+one line `config as OPPO: sysst before/after, readback diffs=N reg=w/r`.
+Not-standby (0x3f) still refuses; runtime fault checks unchanged.
+Args: x9_audio=2 x9_dsp_boot=10 x9_mic=2 x9_mic_boot=1000.
+Build: `x9/out/x9-audio42-20261114/boot.img`.

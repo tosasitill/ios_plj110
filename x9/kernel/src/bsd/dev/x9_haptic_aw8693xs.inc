@@ -203,6 +203,31 @@ static int hbits(uint8_t reg,uint8_t mask,uint8_t value)
     uint8_t v;int e=hget(reg,&v);if(e)return e;
     return hset(reg,(v&~mask)|(value&mask));
 }
+/* Configuration writes as OPPO aw8693xs.c (i2c_w_bytes/i2c_w_bits): no
+ * readback gate. Log 300 stage 15 EIO came from our own strict readback /
+ * SYSST gate, neither of which OPPO has. Differences are recorded and logged
+ * once; only I2C transfer errors fail. */
+static unsigned hcfg_diffs;static char hcfg_log[96];static unsigned hcfg_len;
+static int hcfg(uint8_t reg,uint8_t value)
+{
+    uint8_t tx[]={reg,value},back=0;int e=htransfer(tx,2,NULL);
+    if(!e)e=hget(reg,&back);
+    if(!e && back!=value) {
+        if(hcfg_len+12<sizeof(hcfg_log)) {
+            int n=snprintf(hcfg_log+hcfg_len,sizeof(hcfg_log)-hcfg_len," %02x=%02x/%02x",reg,value,back);
+            if(n>0)hcfg_len+=(unsigned)n;
+        }
+        hcfg_diffs++;
+    }
+    return e;
+}
+static int hcfg_bits(uint8_t reg,uint8_t mask,uint8_t value)
+{
+    uint8_t v;int e=hget(reg,&v);if(e)return e;
+    return hcfg(reg,(v&~mask)|(value&mask));
+}
+static int hcfg_raw(uint8_t reg,uint8_t value)
+{uint8_t tx[]={reg,value};return htransfer(tx,2,NULL);} /* TMCFG lock/unlock */
 static int hcommand(uint8_t value)
 {uint8_t tx[]={9,value};return htransfer(tx,2,NULL); /* command bits self-clear */}
 static int hstate(void)
@@ -255,7 +280,11 @@ static int hconfigure(void)
     if(e)return e;hs.chip_id=(uint32_t)hi<<8|lo;
     if(hs.chip_id!=0x9371 && hs.chip_id!=0x9381)return ENODEV;
     if((e=hget(0x67,&q)))return e;if(!(q&128))return ENODEV;
-    if((e=hstate()))return e;if(hs.hw_state)return EBUSY;
+    hcfg_diffs=hcfg_len=0;hcfg_log[0]=0;
+    /* OPPO never gates init on SYSST (0x01); record it, keep only the
+     * not-standby check (0x3f) so we never reconfigure a playing chip. */
+    e=hstate();if(e && e!=EIO)return e;
+    uint8_t sysst_before=(uint8_t)hs.hw_fault;if(hs.hw_state)return EBUSY;
     /* Readback each documented configuration. No trigger input: IRQ29
      * stays untouched; triggers off, broadcast uses our sole slave address.
      * 12k signed RTP uses Android's observed base2048/AE1024/AF1536
@@ -268,21 +297,23 @@ static int hconfigure(void)
         0xbf,8,6,0x4a,0x24,0xa7,0x44};
     /* pro1=7V/4A, pro2=6V/2.5A; UVLO=2.9/2.6/2.3V;
      * DT vmax0x11, software signed peak96, hardware gain0x60. */
-    if((e=hbits(0x45,4,4)))return e;delay(600); /* RAMINIT while programming FIFO */
-    for(unsigned i=0;i<sizeof(regs);i++)if((e=hset(regs[i],vals[i])))return e;
-    if((e=hset(0x4b,0x32)) || (e=hbits(0x48,0x80,0)) ||
-       (e=hbits(0x4c,0x7f,0x34)) || (e=hbits(0x4d,0xf0,0x20)) ||
-       (e=hbits(0x45,0x3c,0)) ||
-       (e=hbits(0x46,0xe3,0xc1)) || /* INT pin, 12k, vendor gain bypass, DLL off */
-       (e=hbits(6,0x3f,0x31)) || (e=hbits(8,0x47,0x05)) ||
-       (e=hbits(0x52,1,0)) || /* I2S disabled */
-       (e=hbits(0x54,0x7f,0x5a)) || /* VBAT protect + half gain */
-       (e=hset(0x5d,0x7d)))return e;
+    if((e=hcfg_bits(0x45,4,4)))return e;delay(600); /* RAMINIT while programming FIFO */
+    for(unsigned i=0;i<sizeof(regs);i++)if((e=hcfg(regs[i],vals[i])))return e;
+    if((e=hcfg(0x4b,0x32)) || (e=hcfg_bits(0x48,0x80,0)) ||
+       (e=hcfg_bits(0x4c,0x7f,0x34)) || (e=hcfg_bits(0x4d,0xf0,0x20)) ||
+       (e=hcfg_bits(0x45,0x3c,0)) ||
+       (e=hcfg_bits(0x46,0xe3,0xc1)) || /* INT pin, 12k, vendor gain bypass, DLL off */
+       (e=hcfg_bits(6,0x3f,0x31)) || (e=hcfg_bits(8,0x47,0x05)) ||
+       (e=hcfg_bits(0x52,1,0)) || /* I2S disabled */
+       (e=hcfg_bits(0x54,0x7f,0x5a)) || /* VBAT protect + half gain */
+       (e=hcfg_raw(0x5d,0x7d)))return e; /* aw8693xs_reg_unlock(true) */
     /* Analog defaults and oscillator source are behind the chip's lock. */
-    e=hset(0x7c,0x14);if(!e)e=hset(0x7f,0x41);
-    if(!e)e=hbits(0x60,0x20,0);int lock=hset(0x5d,0);
+    e=hcfg(0x7c,0x14);if(!e)e=hcfg(0x7f,0x41);
+    if(!e)e=hcfg_bits(0x60,0x20,0);int lock=hcfg_raw(0x5d,0); /* reg_unlock(false) */
     if(e || lock)return e?e:lock;
-    if((e=hstate()))return e;if(hs.hw_state)return EBUSY;
+    e=hstate();if(e && e!=EIO)return e;if(hs.hw_state)return EBUSY;
+    printf("X9 HAPTIC: config as OPPO: sysst before=%02x after=%02x readback diffs=%u%s\n",
+        sysst_before,(unsigned)hs.hw_fault,hcfg_diffs,hcfg_log);
     hb.configured=true;hs.gain=0x60;
     printf("X9 HAPTIC: chip=%04x RTP=12000 fifo=2048 f0=%u mHz gain=60 native I2C5 ready\n",
         hs.chip_id,hs.f0_millihz);

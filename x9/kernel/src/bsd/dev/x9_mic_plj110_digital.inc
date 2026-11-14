@@ -223,8 +223,12 @@ static int digital_afe_enable(struct afe_journal *a)
     /* voice48k3, IIR mode0/on, AMIC/non-VOW/non-loopback/DCXO.
      * Clear alternate APLL/DMIC/ULCF selectors without touching gain fields. */
     RX(RX_UL0,0xffffc7ff,(3u<<17)|(1u<<10));
-    /* Release the vendor ADDA FIFO reset field; no reset pulse. */
-    RX(RX_FIFO,1u<<4,0);
+    /* UL0_SRC_CON1 bit4 FIFO_SOFT_RST: OPPO's "ADDA_FIFO" supply is
+     * inverted (invert=1) and routed ONLY to "AP DMIC Capture"; MTKAIF AMIC
+     * capture never powers it, so the bit stays 1. Android recording dump:
+     * AFE_ADDA_UL0_SRC_CON1 = 0x7fff0412 (ours was 0x7fff0402 because this
+     * line cleared it, logs 298-300). Keep OPPO's AMIC state. */
+    RX(RX_FIFO,1u<<4,1u<<4);
     s->stage=X9_MIC_DIGITAL_AFE_ENABLE;
     RX(RX_ENGEN,2,2); /* ADDA 3.25M, independent of existing 26M bit0 */
     RX(RX_CLK,0x1ff3,0x0851); /* MTKAIFv4/PAD_CLK 48k; DL SRC stays off */
