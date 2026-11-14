@@ -29,6 +29,7 @@ struct x9_mic_mt6681 {
     uint32_t old_pad, old_test;
     uint8_t audio_saved[11];
     bool touched, audio_snapshot, afe_snapshot, poisoned;
+    bool normal_mode; /* sw_normal_mode(true) ran: undo on unprepare */
     struct x9_mic_analog_status analog;
     /* Persistent per-write RW field journal, including a failed write. */
     struct x9_mic_codec_saved analog_saved[80];

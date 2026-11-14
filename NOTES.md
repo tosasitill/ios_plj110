@@ -1072,3 +1072,23 @@ backend register lead=1920 -> 0`, and per playback `X9 SPK BACKEND: start`,
 (+ x9_mic_boot=1000): mic alone with the clockgen fix.
 Note: an underrun (HAL stops feeding while Running) faults the service and it
 stays Fault until reboot (existing service design).
+
+### logs 288/289 / spk29 + mic29 (2026-11-14)
+
+288 (spk28): the whole speaker chain held and `X9Audio backend register
+lead=1920 -> 0` at 109 s; X9 SPEAKER HAL union visible at 2.39 s (created=4).
+But no `X9 SPK BACKEND: start` ever: iOS never called X9AudioStart. User: no
+sound. Kernel side is not reached; whether audiomxd loads the HAL / routes the
+built-in speaker to it (the unported Sheng VirtualAudio/route pieces) is not
+visible in the kernel log. spk29 adds `X9 AUDIO UC: open #n by <proc> type=`
+(first 8 opens, all type1/2) and `X9 AUDIO UC: START|STOP -> e`.
+289 (mic28, mic alone): CLKGEN now 2e/28 as intended, but RC still 1f and
+ULMON 0 (UL_SRC_ON_MON=0). So the clockgen bug was real but not sufficient.
+Found (static): OPPO's FIRST AIFTX supply SCP_REQ runs mt6681_sw_normal_mode:
+if MTC_STS0!=7f / STS2!=1 / VCC_STS0 bit1=0 it forces SW normal mode
+(TOP_CON2 3,1,200us,0,200us,1,2ms; then MTC_CTL1=8 if still bad), and on
+power-down restores MTC_CTL1=0/TOP_CON2=3 if TOP_CON2==1. Never ported.
+Android recording: TOP_CON2=03, STS0=7f, STS2=01, VCC=03. mic29 ports it in
+power_on (before VAUD18) with `X9 MIC MODE:` before/after lines, and the
+codec dump adds a non-zero sweep `X9 MIC REGS:` of the ranges compared with
+the Android regmap, so the next log can be diffed register-for-register.

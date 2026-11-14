@@ -372,7 +372,13 @@ bool X9AudioUserClient::initWithTask(task_t task, void *id, UInt32 type, OSDicti
     if (type == 1 && !permitted) return false;
     if (type == 2 && (!administrator || sweet_x9_arg("x9_audio", 0) != 2)) return false;
     boardController = type == 2;
-    writer = type == 1 || type == 2; return true;
+    writer = type == 1 || type == 2;
+    /* spk28/log 288: backend registered but no Start ever arrived. Show who
+     * opens the service (the HAL probes type0 every 500 ms: first 8 only). */
+    static uint32_t opens;
+    uint32_t n = __atomic_add_fetch(&opens, 1, __ATOMIC_RELAXED);
+    if (n <= 8 || type) IOLog("X9 AUDIO UC: open #%u by %s type=%u admin=%d\n", n, name, type, administrator);
+    return true;
 }
 bool X9AudioUserClient::start(IOService *p)
 {
@@ -623,6 +629,8 @@ IOReturn X9AudioUserClient::externalMethod(uint32_t sel, IOExternalMethodArgumen
         }
     }
     if (sel == X9AudioStart && !(s.state & X9AudioFault)) s.error = e;
-    publish(s); lck_mtx_unlock(&audioLock); return result(e);
+    publish(s); lck_mtx_unlock(&audioLock);
+    IOLog("X9 AUDIO UC: %s -> %d state=%x gen=%u\n", sel == X9AudioStart ? "START" : "STOP", e, s.state, s.generation);
+    return result(e);
 }
 #endif

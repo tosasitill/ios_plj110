@@ -119,6 +119,7 @@ static int verify_codec_journal(struct x9_mic_mt6681 *c,
     }
     return 0; /* bounded non-atomic RW checks, not ownership/PCM proof */
 }
+static int sw_normal_restore(struct x9_mic_mt6681 *c);
 static int restore_failure(struct x9_mic_mt6681 *c,int e,uint32_t stage)
 {
     if(!e)return 0;
@@ -185,6 +186,8 @@ int x9_mic_mt6681_unprepare(struct x9_mic_mt6681 *c)
     if(e)return restore_failure(c,e,X9_MIC_HW_RESTORE_ANALOG);
     /* Do not cut transport/clocks after an uncertain analog shutdown. */
     e=restore_audio(c);if(e)return e;
+    e=sw_normal_restore(c);
+    if(e)return restore_failure(c,e,X9_MIC_HW_RESTORE_KEYS);
     /* Actual protection keys, NOT vendor's misleading keylock_set name. */
     for(unsigned i=0;i<sizeof(keys)/sizeof(keys[0]);i++) {
         e=write8(c,keys[i].reg,0);
@@ -261,6 +264,19 @@ void x9_mic_mt6681_dump(struct x9_mic_mt6681 *c)
     for(unsigned i=0;i<8;i++){a[i]=0xee;int r=read8(c,ana[i],&a[i]);if(r && !e)e=r;}
     printf("X9 MIC CODEC: err=%d PGA=%02x ADC=%02x CLKGEN=%02x/%02x CLKMODE=%02x RC=%02x GAIN=%02x CARA=%02x\n",
         e,a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7]);
+    /* One read-only non-zero sweep of the ranges compared against the Android
+     * recording regmap (x9/out/android-audio-ref), 8 entries per line. */
+    static const uint16_t sweep[][2]={{0x000c,0x000d},{0x01af,0x01b9},{0x01d9,0x01d9},
+        {0x0990,0x0991},{0x1b87,0x1b97},{0x2300,0x23b0},{0x2500,0x2516},
+        {0x2560,0x2572},{0x2580,0x258d},{0x2c87,0x2c94},{0x3480,0x3570},{0x35b0,0x35d0}};
+    char line[160];unsigned used=0,n=0;
+    for(unsigned k=0;k<sizeof(sweep)/sizeof(sweep[0]);k++)
+        for(uint32_t r=sweep[k][0];r<=sweep[k][1];r++) {
+            uint8_t b=0;if(read8(c,(uint16_t)r,&b) || !b)continue;
+            used+=(unsigned)snprintf(line+used,sizeof(line)-used," %04x=%02x",r,b);
+            if(++n==8){printf("X9 MIC REGS:%s\n",line);used=n=0;}
+        }
+    if(n)printf("X9 MIC REGS:%s\n",line);
     /* UL_SRC_MON0 (0x256a..d) = codec ADC/SRC output; MTKAIFV4_MON0 (0x2c9d)
      * bit6 TXIF_SDATA_OUT, ADDA6 MON0 0x2ca3. Toggling = codec TX is live. */
     static const uint16_t mon[]={0x256a,0x256b,0x256c,0x256d,0x2c9d,0x2c9e,0x2ca3,0x2ca4};
@@ -390,6 +406,46 @@ static int calibrate(struct x9_mic_mt6681 *c)
     absolutetime_to_nanoseconds(mach_absolute_time()-start,&c->status.calibration_ns);
     return e;
 }
+/* OPPO mt6681.c mt6681_sw_normal_mode, called from the SCP_REQ supply, the
+ * FIRST AIFTX supply (spk28/log 289: never ported; CLKGEN fixed but RC still
+ * 0x1f and UL SRC ON_MON 0). Android recording reads TOP_CON2=03 (HW mode,
+ * SRCLKEN0) with MTC_STS0=7f STS2=01 VCC_STS0=03: all codec power islands on.
+ * If the islands are not all on, force SW normal mode exactly as OPPO. */
+static int mode_status(struct x9_mic_mt6681 *c,uint8_t *s0,uint8_t *s2,uint8_t *vcc,uint8_t *top)
+{
+    int e=read8(c,MT6681_MTC_STS0,s0);
+    if(!e)e=read8(c,MT6681_MTC_STS2,s2);
+    if(!e)e=read8(c,MT6681_VCC_STS0,vcc);
+    if(!e)e=read8(c,MT6681_TOP_CON2,top);
+    return e;
+}
+static int sw_normal_mode(struct x9_mic_mt6681 *c)
+{
+    uint8_t s0=0,s2=0,vcc=0,top=0;int e=mode_status(c,&s0,&s2,&vcc,&top);
+    printf("X9 MIC MODE: top_con2=%02x mtc_sts0=%02x sts2=%02x vcc_sts0=%02x (Android 03/7f/01/03) -> %d\n",top,s0,s2,vcc,e);
+    if(e || (s0==0x7f && s2==1 && (vcc&2)))return e;
+    c->normal_mode=true; /* the writes below must be undone on unprepare */
+    e=write8(c,MT6681_TOP_CON2,3);
+    if(!e)e=write8(c,MT6681_TOP_CON2,1);
+    if(!e){delay(200);e=write8(c,MT6681_TOP_CON2,0);}
+    if(!e){delay(200);e=write8(c,MT6681_TOP_CON2,1);}
+    if(!e){delay(2000);e=mode_status(c,&s0,&s2,&vcc,&top);}
+    if(!e && !(s0==0x7f && s2==1 && (vcc&2))){e=write8(c,MT6681_MTC_CTL1,8);delay(750);
+        if(!e)e=mode_status(c,&s0,&s2,&vcc,&top);}
+    printf("X9 MIC MODE: forced SW normal: top_con2=%02x mtc_sts0=%02x sts2=%02x vcc_sts0=%02x -> %d\n",top,s0,s2,vcc,e);
+    return e;
+}
+static int sw_normal_restore(struct x9_mic_mt6681 *c)
+{
+    if(!c->normal_mode)return 0;
+    uint8_t top=0;int e=read8(c,MT6681_TOP_CON2,&top);
+    if(!e && top==1) {           /* OPPO: restore counter, back to HW mode */
+        e=write8(c,MT6681_MTC_CTL1,0);
+        if(!e)e=write8(c,MT6681_TOP_CON2,3);
+    }
+    if(!e)c->normal_mode=false;
+    return e;
+}
 int x9_mic_mt6681_power_on(struct x9_mic_mt6681 *c,
     const struct x9_mic_mt6681_io *io)
 {
@@ -433,6 +489,7 @@ int x9_mic_mt6681_power_on(struct x9_mic_mt6681 *c,
         for(unsigned i=0;i<11 && !e;i++)e=read8(c,audio_regs[i],&c->audio_saved[i]);
         if(!e)c->audio_snapshot=true;
     }
+    if(!e)e=sw_normal_mode(c); /* SCP_REQ precedes LDO_VAUD18 in OPPO */
     if(!e)e=enable_vaud18(c);
     if(!e)c->status.flags|=X9_MIC_HW_POWERED;
     if(e) {
