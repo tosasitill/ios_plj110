@@ -27,7 +27,7 @@ static struct x9_mic_board_status board_diagnostic={.version=1};
 static struct x9_mic_afe_status afe_diagnostic={.version=1};
 static struct x9_mic_analog_status analog_diagnostic={.version=1};
 static struct x9_mic_digital_status digital_diagnostic={.version=1};
-static uint64_t generation,last_poll,last_progress;
+static uint64_t generation,last_poll,last_progress,delivered_time;
 static uint64_t resource_ticket;
 static struct x9_mic_dma_status dma_diagnostic={.version=1,
     .blockers=X9_MIC_DMA_NEED_MAP|X9_MIC_DMA_NEED_OWNER|X9_MIC_DMA_NEED_COPY|
@@ -255,7 +255,7 @@ static int afe_start(uint64_t g)
             dma_diagnostic.flags|=X9_MIC_DMA_STARTED;
             wr(VUL1_CON0,rd(VUL1_CON0)|VUL1_ON);
             if(!(rd(VUL1_CON0)&VUL1_ON))e=EIO;
-            else {generation=g;cursor=0;last_progress=last_poll=mach_absolute_time();armed=true;
+            else {generation=g;cursor=0;delivered_time=0;last_progress=last_poll=mach_absolute_time();armed=true;
                 diagnostic.flags|=X9_MIC_HW_CAPTURE;}
         }
 start_failed:
@@ -326,7 +326,15 @@ static int poll_locked(void)
         uint64_t behind,t=now;
         nanoseconds_to_absolutetime((uint64_t)(bytes-n*4)/4*1000000000/X9_MIC_RATE,&behind);
         if(t>behind)t-=behind;
+        /* audio46b (log 305): the back-computed time of a late poll's first
+         * chunk could fall at/before the previous poll's last sample, and the
+         * PCM ring rejects a non-increasing time (EINVAL) -> stream fault
+         * after ~1.3 s once the speaker ran alongside. The burst/FIFO jitter
+         * of the cursor is not a real gap: keep time strictly increasing. */
+        if(t<=delivered_time)t=delivered_time+1;
+        if(t>now)t=now;
         int e=x9_mic_deliver(generation,mono,n,t);
+        if(!e)delivered_time=t;
         bzero(mono,sizeof(mono));
         /* audio43: ESTALE = the consumer's STOP already ended this stream and
          * is waiting on afe_mic_lock to drain it. That is not a DMA fault.
