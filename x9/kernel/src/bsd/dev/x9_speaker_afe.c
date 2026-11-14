@@ -529,7 +529,11 @@ static int position_locked(void)
     /* A delayed AP poll cannot prove the DMA did not run out between reads.
      * Fail closed instead of extending the deadline from a stale cursor. */
     uint64_t budget=(pending-STOP_MARGIN_FRAMES)*1000000000/48000;
-    if(elapsed>=budget || stalled>=MIN(budget,10000000ULL)) {
+    /* Log 298: a fixed 10 ms stall cap faulted every stream 40-150 ms after
+     * START under normal scheduler load with 30+ ms still queued. A cursor
+     * that has not moved for as long as the queued audio lasts is stuck (or
+     * may have run dry); anything shorter is only a late observation. */
+    if(elapsed>=budget || stalled>=budget) {
         state.late_polls++;return ETIMEDOUT;
     }
     if(hw.producer==X9AFEProducerDSP) {
@@ -539,7 +543,7 @@ static int position_locked(void)
         absolutetime_to_nanoseconds(now-last_progress,&stalled);
         /* A late publication cannot retroactively prove old PCM survived.
          * Keep the OLD confirmed-prefix deadline across supplier latency. */
-        if(elapsed>=budget || stalled>=MIN(budget,10000000ULL)) {
+        if(elapsed>=budget || stalled>=budget) {
             state.late_polls++;return ETIMEDOUT;
         }
     }
@@ -554,7 +558,7 @@ static int position_locked(void)
     }
     if(!stable)return EAGAIN;
     uint64_t ptr=((uint64_t)high<<32)|low;
-    if(!ptr)return stalled<10000000?EAGAIN:ETIMEDOUT;
+    if(!ptr)return stalled<MIN(budget,50000000ULL)?EAGAIN:ETIMEDOUT;
     if(ptr<hw.dma_bus || ptr>=hw.dma_bus+hw.dma_bytes || (ptr&3))return EIO;
     uint32_t next=(uint32_t)(ptr-hw.dma_bus);
     uint32_t bytes=(next+hw.dma_bytes-state.cursor)%hw.dma_bytes;
@@ -566,6 +570,16 @@ static int position_locked(void)
 }
 static void fault_locked(int e)
 {
+    if(!state.error) {
+        uint64_t now=mach_absolute_time(),el=0,st=0;
+        absolutetime_to_nanoseconds(now-last_poll,&el);
+        absolutetime_to_nanoseconds(now-last_progress,&st);
+        printf("X9 SPK AFE: fault %d submitted=%llu played=%llu since_poll=%lluus since_progress=%lluus "
+               "late_polls=%llu low_water=%llu\n",e,(unsigned long long)state.submitted,
+               (unsigned long long)state.played,(unsigned long long)(el/1000),
+               (unsigned long long)(st/1000),(unsigned long long)state.late_polls,
+               (unsigned long long)state.low_water_stops);
+    }
     if(!state.error)state.error=(uint32_t)e;
     state.poisoned=1;(void)stop_locked();
 }

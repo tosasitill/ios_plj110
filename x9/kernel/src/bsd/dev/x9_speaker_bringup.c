@@ -454,7 +454,10 @@ static int bringup_oneshot(void)
  * this is held (it returns EBUSY before any MMIO). */
 enum { PaIdle, PaPower0, PaPower1, PaClocks, PaOn };
 static struct { unsigned state; uint64_t t0; } pa;
-#define BE_LEAD_FRAMES (X9_AUDIO_PERIOD*4u)
+/* audio40: 80 ms lead (PREFILL_MAX). The service keeps the device queue at
+ * this depth with silence while the HAL is behind, so it is also the
+ * scheduling-hiccup tolerance (log 298: 40 ms + 10 ms caps faulted). */
+#define BE_LEAD_FRAMES (X9_AUDIO_PERIOD*8u)
 static int be_pa_step(void)
 {
     int e=0;

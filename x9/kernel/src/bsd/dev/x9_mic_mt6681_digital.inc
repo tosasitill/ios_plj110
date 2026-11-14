@@ -219,8 +219,21 @@ int x9_mic_mt6681_digital_l(struct x9_mic_mt6681 *c,struct x9_mic_digital_status
      * MISO0 stays GPIO (Android recording MODE3=0x10, ours was 0x11). */
     DIGITAL_BYTE(MT6681_GPIO_MODE3,0x77,0x10);
     DIGITAL_BYTE(MT6681_GPIO_MODE4,0x70,0x20);
-    DIGITAL_BYTE(MT6681_AFE_MTKAIF_MUX_CFG,RG_ADDA_CH1_SEL_MASK_SFT|RG_ADDA_CH2_SEL_MASK_SFT,0);
-    DIGITAL_BYTE(MT6681_AFE_MTKAIF_MUX_CFG_H,RG_ADDA7_CH1_SEL_MASK_SFT|RG_ADDA7_CH2_SEL_MASK_SFT,0);
+    /* MISO slot muxes (OPPO mt_ul_gpio_event; values MISO_MUX_UL1_CH1=0,
+     * UL1_CH2=1, UL2_CH1=2, UL2_CH2=3).  With audio_r_miso1_enable=1 the
+     * MISO0 pad stays GPIO, so codec ADDA TX (2ch, MUX_CFG) never leaves the
+     * chip; the MISO1 pad carries ADDA6 TX 4ch (mt6681_mtkaif_tx_enable),
+     * whose slots are MUX_CFG_M ch1/ch2 then MUX_CFG_H ch1/ch2, and the AP
+     * takes UL ch1/ch2 from ADDA6_MTKAIFV4_RX (FOUR_CH=1, EN_SEL=1).
+     * MUX_CFG_M resets to 0x5a = UL2_CH1/UL2_CH2, i.e. ADDA6 UL SRC + PGA3/4,
+     * which we leave off: log 298 showed MUX=00/5a/80, MISO1 high 4/64,
+     * AP UL raw constant and PCM rms 1 while ULMON moved.  Android only got
+     * data there because it records 4 mics (348c/348e on, ADDA6 UL on).
+     * Route our ADC_L (UL1_CH1) into both AP-visible slots instead.  EN_SEL
+     * bits [7:6] are left as they are (00/01/10, same as Android). */
+    DIGITAL_BYTE(MT6681_AFE_MTKAIF_MUX_CFG,RG_ADDA_CH1_SEL_MASK_SFT|RG_ADDA_CH2_SEL_MASK_SFT,0x08);
+    DIGITAL_BYTE(MT6681_AFE_MTKAIF_MUX_CFG_M,RG_ADDA6_CH1_SEL_MASK_SFT|RG_ADDA6_CH2_SEL_MASK_SFT,0);
+    DIGITAL_BYTE(MT6681_AFE_MTKAIF_MUX_CFG_H,RG_ADDA7_CH1_SEL_MASK_SFT|RG_ADDA7_CH2_SEL_MASK_SFT,0x08);
     s->stage=X9_MIC_DIGITAL_CODEC_SRC;
     DIGITAL_BYTE(MT6681_AFE_ADDA_UL_SRC_CON0_3,ADDA_ULCF_CFG_EN_CTL_MASK_SFT,0);
     DIGITAL_BYTE(MT6681_AFE_ADDA_UL_SRC_CON0_2,0x1f,3); /* AMIC / voice48k */

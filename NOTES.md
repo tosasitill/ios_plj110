@@ -1354,3 +1354,33 @@ Args: x9_audio=2 x9_dsp_boot=65 x9_mic=2 x9_mic_boot=1000 (599/607 bytes):
 mic at 65 s, then lazy speaker on first StartIO, haptic at boot — the exact
 282/294/296/297 hang orders.
 Build: `x9/out/x9-audio39-20261114/boot.img`.
+
+### audio40 (2026-11-14) — log 298: no hang; speaker cut, mic silent, haptic STAT
+
+Log 298 (audio39): no hang (`X9 IOMAP` ~7 MiB of 64). Three static fixes:
+1. **Mic silent (MISO slot mux).** OPPO r_miso1 (`audio_r_miso1_enable=1`):
+   MISO0 pad stays GPIO, so codec ADDA TX (2ch, `MUX_CFG` 0x2390) never leaves
+   the chip; the MISO1 pad carries **ADDA6 TX 4ch** (`mt6681_mtkaif_tx_enable`
+   tx2), slots = `MUX_CFG_M` (0x238f) ch1/ch2 then `MUX_CFG_H` (0x238e);
+   AP takes UL ch1/ch2 from `ADDA6_MTKAIFV4_RX` (FOUR_CH=1, EN_SEL=1,
+   `UL_CH1CH2_IN_EN_SEL`). `MUX_CFG_M` = 0x5a = UL2_CH1/UL2_CH2 (ADDA6 UL
+   SRC + PGA3/4), which we never power; Android had data there only because
+   it records 4 mics (348c/348e on, ADDA6 UL SRC 0x2588..a = 23/08/01).
+   298: MUX=00/5a/80, MISO1 high 4/64, AP UL raw constant, PCM rms 1 while
+   codec ULMON moved. Now `MUX_CFG_M` ch1=ch2=UL1_CH1 (our ADC_L/AIN0),
+   `MUX_CFG`/`MUX_CFG_H` = Android's 08/88 selects. EN_SEL bits untouched.
+2. **Speaker cut ~150 ms after every START.** Each START ended in
+   `stream fault 60` (ETIMEDOUT) 40–312 ms in (gen 3 before the PA even
+   locked) with audio still queued. Both layers capped the no-progress
+   window at 10 ms (`MIN(budget,10ms)` in `x9_speaker_afe.c`, `safe` clamp
+   in SweetX9Audio), polled by 2 ms kernel threads on a busy system (GPU,
+   cell, PA I2C step inside the position callback). Now both budgets are the
+   audio actually queued (AFE: pending−margin; service: pending−1 period),
+   zero-CUR grace 50 ms, and the backend lead is 8 periods (80 ms, PREFILL_MAX)
+   with silence fill keeping the queue at the lead (was >3 periods), so HAL
+   frame 0 stays aligned. One fault-detail line per fault (AFE and service).
+3. **Haptic stage 12:** after the MASK clear, bank 0 `INTR_STAT=1` (LK's
+   unacked TRANSAC_COMP). Same preconditions (we ungated, START 0, bank 0
+   only, other regs/banks idle): W1C it, re-check idle.
+Args unchanged (x9_audio=2 x9_dsp_boot=65 x9_mic=2 x9_mic_boot=1000).
+Build: `x9/out/x9-audio40-20261114/boot.img`.

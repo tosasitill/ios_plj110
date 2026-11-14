@@ -359,6 +359,17 @@ static int hboard_init(void)
         e=hrr(hb.bus,H_MASK)?EIO:hidle(false);
         printf("X9 HAPTIC: i2c5 stale INTR_MASK=%x cleared -> %d\n",stale,e);
     }
+    if(e==EBUSY && ungated && hbusy_bank==0 && hbusy_reg==H_STAT &&
+       !(hbusy_val&~0x1ffu)) {
+        /* Log 298: after the MASK clear, bank 0 INTR_STAT=1 (TRANSAC_COMP of
+         * LK's last transfer, never acked). MTK I2C INTR_STAT is W1C (our
+         * own hxfer acks it the same way). Same preconditions as above:
+         * we ungated it, START was already 0 (checked first by hidle), and
+         * FIFO/MULTI/CTRL plus all other banks must still pass afterwards. */
+        uint32_t stale=hbusy_val;hwr(hb.bus,H_STAT,stale);
+        e=hrr(hb.bus,H_STAT)?EIO:hidle(false);
+        printf("X9 HAPTIC: i2c5 stale INTR_STAT=%x cleared -> %d\n",stale,e);
+    }
     if(e) {
         if(e==EBUSY)printf("X9 HAPTIC: i2c5 busy bank=%u reg=%x val=%x\n",hbusy_bank,hbusy_reg,hbusy_val);
         return hinit_fail(e,12);

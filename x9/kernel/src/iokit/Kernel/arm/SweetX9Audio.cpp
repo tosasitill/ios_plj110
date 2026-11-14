@@ -95,9 +95,12 @@ static bool positionBudgetExpired()
     uint64_t pending = physicalQueued - physicalPlayed;
     if (pending <= X9_AUDIO_PERIOD) return true;
     /* Clamp in frames BEFORE multiplication: submitted is a lifetime cursor,
-     * not a bounded DMA-ring size. One period is the 10 ms observation cap. */
+     * not a bounded DMA-ring size. Log 298: the old fixed 10 ms cap turned
+     * any scheduling hiccup (GPU/cell load, PA I2C step inside position)
+     * into ETIMEDOUT 40-150 ms after every START although audio was still
+     * queued. The real bound is the audio actually queued, at most one ring. */
     uint64_t safe = pending - X9_AUDIO_PERIOD;
-    if (safe > X9_AUDIO_PERIOD) safe = X9_AUDIO_PERIOD;
+    if (safe > X9_AUDIO_RING / 2) safe = X9_AUDIO_RING / 2;
     uint64_t budget = safe * 1000000000ULL / X9_AUDIO_RATE;
     uint64_t now = mach_absolute_time(), elapsed, stalled;
     absolutetime_to_nanoseconds(now - lastPosition, &elapsed);
@@ -154,7 +157,9 @@ static void worker(void *, wait_result_t)
          * frame, so the HAL's late writes are rejected as late, not misplaced). */
         for (unsigned n = 0; !e && !retry && n < 8; n++) {
             bool data = written > s.out_queued && written - s.out_queued >= X9_AUDIO_PERIOD;
-            if (!data && physicalQueued - physicalPlayed > 3 * X9_AUDIO_PERIOD) break;
+            /* Keep the device queue at the backend lead (HAL frame 0 sits one
+             * lead after the anchor, so out_queued stays at out_frames). */
+            if (!data && physicalQueued - physicalPlayed >= prefillFrames) break;
             if (s.out_queued > UINT64_MAX - prefillFrames - X9_AUDIO_PERIOD) { e = EOVERFLOW; break; }
             uint64_t start = s.out_queued;
             if (!data) {
@@ -168,7 +173,18 @@ static void worker(void *, wait_result_t)
             if (e == EAGAIN) { e = 0; break; }
             if (!e) { s.out_queued += X9_AUDIO_PERIOD; physicalQueued += X9_AUDIO_PERIOD; }
         }
-        if (e) stopState(&s, e);
+        if (e) {
+            uint64_t now = mach_absolute_time(), el = 0, st = 0;
+            absolutetime_to_nanoseconds(now - lastPosition, &el);
+            absolutetime_to_nanoseconds(now - lastProgress, &st);
+            IOLog("X9 AUDIO: stream fault %d gen=%u played=%llu queued=%llu written=%llu out_queued=%llu "
+                  "since_poll=%lluus since_progress=%lluus fills=%llu retries=%u\n", e, s.generation,
+                  (unsigned long long)physicalPlayed, (unsigned long long)physicalQueued,
+                  (unsigned long long)written, (unsigned long long)s.out_queued,
+                  (unsigned long long)(el / 1000), (unsigned long long)(st / 1000),
+                  (unsigned long long)silenceFills, positionRetries);
+            stopState(&s, e);
+        }
         publish(s);
         lck_mtx_unlock(&audioLock);
         delay_for_interval(2, 1000 * NSEC_PER_USEC);
