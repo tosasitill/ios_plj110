@@ -25,7 +25,10 @@ static int digital_update(struct x9_mic_mt6681 *c,uint16_t reg,uint8_t mask,uint
     if(!e)c->digital_uncertain=false;
     return e;
 }
-#define DIGITAL_BYTE(reg,mask,value) do {e=digital_update(c,(reg),(mask),(value));if(e)return e;} while(0)
+#define DIGITAL_BYTE(reg,mask,value) do { \
+    _Static_assert(((unsigned)(value)&~(unsigned)(mask))==0,"digital value outside mask"); \
+    e=digital_update(c,(reg),(mask),(value));if(e)return e; \
+} while(0)
 static int digital_pack(struct x9_mic_mt6681 *c,const uint16_t *regs,unsigned n,uint32_t *out)
 {
     uint32_t v=0;

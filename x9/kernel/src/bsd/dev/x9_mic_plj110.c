@@ -582,7 +582,7 @@ static int board_finish(struct power_journal *j,int e)
         a->stage,a->flags,a->last_errno,a->restore_errno,a->ap_vote_before,a->ap_vote_after,
         a->ack_before,a->ack_after,a->vlp_before,a->vlp_after,h->chosen_phase[0],h->chosen_phase[1],
         h->cycle[0],h->cycle[1],h->scanned_phases);
-    if(analog)printf("X9 MIC ANALOG: stage=%u flags=%x errno=%u restore=%u HWCID=%x/%x AIN0/ADC_L DCC 2700mV 0dB RC=%x journal=%u/%u (not physical mic/PCM proof)\n",
+    if(analog)printf("X9 MIC ANALOG: stage=%u flags=%x errno=%u restore=%u HWCID=%x/%x AIN0/ADC_L DCC 2700mV 6dB RC=%x journal=%u/%u (not physical mic/PCM proof)\n",
         analog->stage,analog->flags,analog->last_errno,analog->restore_errno,
         analog->hwcid_h,analog->hwcid_l,analog->rc_monitor,
         analog->journal_restored,analog->journal_count);

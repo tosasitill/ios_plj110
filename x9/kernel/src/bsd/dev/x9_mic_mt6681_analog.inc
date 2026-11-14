@@ -21,7 +21,12 @@ static int analog_update(struct x9_mic_mt6681 *c,uint16_t reg,uint8_t mask,uint8
     if(!e && (got&mask)!=(value&mask))e=EIO;
     return e;
 }
+/* Log 282/Android regmap: a value wider than its field is silently masked
+ * (CLKSOURCE=5 lost CLKGENMODE). Every ANALOG() value must be a constant
+ * that fits its field; overflow is a compile error. */
 #define ANALOG(reg,field,value) do { \
+    _Static_assert(((((unsigned)(value))<<field##_SFT)&~(unsigned)field##_MASK_SFT)==0, \
+        #field " value overflows field"); \
     e=analog_update(c,(reg),field##_MASK_SFT,(value)<<field##_SFT); \
     if(e)goto failed; \
 } while(0)
@@ -84,7 +89,7 @@ int x9_mic_mt6681_analog_l(struct x9_mic_mt6681 *c)
     struct x9_mic_analog_status *s=&c->analog;
     *s=(struct x9_mic_analog_status){.version=1,.stage=X9_MIC_ANALOG_ID,
         .flags=X9_MIC_ANALOG_ATTEMPTED,.ain=0,.adc=0,.mic_type=3,
-        .bias_mv=2700,.gain_x2=0,.rc_sw=4};
+        .bias_mv=2700,.gain_x2=12,.rc_sw=4};
     uint64_t start=mach_absolute_time(),ticks;
     nanoseconds_to_absolutetime(2000000000ULL,&ticks);c->analog_deadline=start+ticks;
     c->status.stage=X9_MIC_HW_ADC;
@@ -125,12 +130,18 @@ int x9_mic_mt6681_analog_l(struct x9_mic_mt6681 *c)
     ANALOG(MT6681_CLKSQ_PMU_CON0,RG_CLKSQ_EN,1);
     ANALOG(MT6681_CLKSQ_PMU_CON0,RG_CLKSQ_AUDENC_EN,1);
     /* Follow the shared LR clockgen supply, but never power ADC_R/PGA_R. */
+    /* OPPO mt_adc_lr_clk_gen_event writes 0x5<<CLKSOURCE_SFT under the
+     * combined CLKGENMODE|CLKSOURCE mask: GENMODE(bit5)=1, SOURCE(bits3-4)=1.
+     * spk27 and earlier split it into GENMODE=0/SOURCE=5&3=1, leaving the
+     * ADC L/R clockgen off: RC tune stuck at 0x1f (log 278-282), UL SRC
+     * ON_MON/COMB all zero although UL_SRC_ON=1 (the AMIC FIFO/UL SRC clock
+     * is the ADC_L clock). Android recording reads CON18/19 = 0x2a. */
     ANALOG(MT6681_AUDENC_PMU_CON12,RG_AUDPREAMPLMODE,2);
-    ANALOG(MT6681_AUDENC_PMU_CON18,RG_AUDADCLCLKGENMODE,0);
-    ANALOG(MT6681_AUDENC_PMU_CON18,RG_AUDADCLCLKSOURCE,5);
+    ANALOG(MT6681_AUDENC_PMU_CON18,RG_AUDADCLCLKGENMODE,1);
+    ANALOG(MT6681_AUDENC_PMU_CON18,RG_AUDADCLCLKSOURCE,1);
     ANALOG(MT6681_AUDENC_PMU_CON12,RG_AUDPREAMPRMODE,2);
-    ANALOG(MT6681_AUDENC_PMU_CON19,RG_AUDADCRCLKGENMODE,0);
-    ANALOG(MT6681_AUDENC_PMU_CON19,RG_AUDADCRCLKSOURCE,5);
+    ANALOG(MT6681_AUDENC_PMU_CON19,RG_AUDADCRCLKGENMODE,1);
+    ANALOG(MT6681_AUDENC_PMU_CON19,RG_AUDADCRCLKSOURCE,1);
     ANALOG(MT6681_AUDENC_PMU_CON81,RG_ADCL_CLKMODE,1);
     ANALOG(MT6681_AUDENC_PMU_CON81,RG_ADCR_CLKMODE,1);
     ANALOG(MT6681_AUD_TOP_CKPDN_CON0,RG_AUDIF_CK_PDN,0);
@@ -162,8 +173,9 @@ int x9_mic_mt6681_analog_l(struct x9_mic_mt6681 *c)
     ANALOG(MT6681_AUDENC_PMU_CON22,RG_AUDSPAREPGA1,0);
     ANALOG(MT6681_AUDENC_PMU_CON0,RG_AUDPREAMPLDCPRECHARGE,1);
     ANALOG(MT6681_AUDENC_PMU_CON54,RG_AUDSPAREVA18_L,1);
-    ANALOG(MT6681_AUDENC_2_2_PMU_CON0,RG_AUDPREAMPLGAIN_1P5,0);
-    ANALOG_BYTE(MT6681_AUDENC_2_2_PMU_CON7,0);
+    /* Android recording: GAIN_1P5=4 (6 dB), mt6681_get_cara(4)=0x02. */
+    ANALOG(MT6681_AUDENC_2_2_PMU_CON0,RG_AUDPREAMPLGAIN_1P5,4);
+    ANALOG_BYTE(MT6681_AUDENC_2_2_PMU_CON7,0x02);
     ANALOG(MT6681_AUDENC_PMU_CON0,RG_AUDPREAMPLON,1);delay(1000);
     s->stage=X9_MIC_ANALOG_ADC;
     ANALOG(MT6681_AUDENC_2_2_PMU_CON16,RG_AUDLDAC_IDAC_SEL,0);
@@ -174,7 +186,8 @@ int x9_mic_mt6681_analog_l(struct x9_mic_mt6681 *c)
     ANALOG(MT6681_AUDENC_PMU_CON45,RG_AUDADCLRINOHM,4);
     ANALOG(MT6681_AUDENC_2_PMU_CON39,RG_VCML_PGA_LPM_SEL,9);
     ANALOG(MT6681_AUDENC_2_PMU_CON36,RG_VCML_PGA_HIFI_SEL,8);
-    ANALOG(MT6681_AUDENC_2_PMU_CON42,RG_AUDLADCFLASHFFCAPVREF_SEL,s->hwcid_h==3?3:1);
+    if(s->hwcid_h==3)ANALOG(MT6681_AUDENC_2_PMU_CON42,RG_AUDLADCFLASHFFCAPVREF_SEL,3);
+    else ANALOG(MT6681_AUDENC_2_PMU_CON42,RG_AUDLADCFLASHFFCAPVREF_SEL,1);
     ANALOG(MT6681_AUDENC_PMU_CON50,RG_AUDADCLFLASHVREFRES_LPM,0);
     ANALOG(MT6681_AUDENC_PMU_CON50,RG_AUDADCLFLASHVREFRES_LPM2,0);
     ANALOG(MT6681_AUDENC_PMU_CON28,RG_AUDRCTUNEL,4);

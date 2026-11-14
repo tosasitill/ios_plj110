@@ -190,6 +190,19 @@ static void dspBootOnce(void *arg, wait_result_t)
      * restores mic first. */
     int micMs = sweet_x9_arg("x9_mic_boot", 0);
     bool spkFirst = sweet_x9_arg("x9_spk_first", 1) != 0;
+    /* spk28: the speaker is the X9Audio backend by default and holds the
+     * shared audio lease for the boot, so a mic run would only get EBUSY.
+     * Mic tests use x9_spk_boot=0 (mic alone; logs 282/284/287 hung when a
+     * second audio subsystem started after the first). */
+    bool spkBackend = sweet_x9_arg("x9_spk_boot", 1) && sweet_x9_arg("x9_spk_backend", 1);
+    /* x9_mic_boot set = a mic test boot: run the mic ALONE (boot-args have no
+     * room for x9_spk_boot=0). x9_spk_backend=0 restores the old one-shot
+     * speaker + mic ordering. */
+    if (spkBackend && micMs > 0) {
+        IOLog("X9 AUDIO DSPBOOT: x9_mic_boot set: mic alone, speaker backend not started this boot\n");
+        IOLog("X9 AUDIO DSPBOOT: mic capture result=%d\n", x9_mic_bringup_run((unsigned)micMs));
+        return;
+    }
     if (micMs > 0 && !spkFirst) IOLog("X9 AUDIO DSPBOOT: mic capture result=%d\n", x9_mic_bringup_run((unsigned)micMs));
     /* Logs 253-277: every boot that launched the ADSP (warm takeover) hung
      * the SoC 0.4-25 s later unless the DSP was halted first (269, 276); 277
@@ -203,10 +216,16 @@ static void dspBootOnce(void *arg, wait_result_t)
         return;
     }
     if (micMs > 0 && !spkFirst) IOSleep(1000);
-    IOLog("X9 AUDIO DSPBOOT: speaker bring-up (AP-only board hold, no DSP launch; clocks, pads, AFE, TFA9865; AMPE stays 0, silence only)\n");
+    IOLog("X9 AUDIO DSPBOOT: speaker bring-up (AP-only board hold, no DSP launch; clocks, pads, AFE, TFA9865; %s)\n",
+          spkBackend ? "X9Audio backend, no boot tone" : "one-shot");
     lck_mtx_lock(&audioLock);
     int e = haveBackend || (control && (control->state & X9AudioRunning)) ? EBUSY : x9_speaker_bringup_run();
     lck_mtx_unlock(&audioLock);
+    /* register_backend takes audioLock itself: never call it while held. */
+    if (!e && spkBackend) {
+        e = x9_speaker_backend_register();
+        IOLog("X9 AUDIO DSPBOOT: speaker backend register -> %d\n", e);
+    }
     X9AudioBoardStatus b; bzero(&b, sizeof(b)); int be = x9_adsp_mt6993_status(&b);
     X9AudioDSPStatus d; bzero(&d, sizeof(d)); int de = x9_adsp_status(0, &d);
     IOLog("X9 AUDIO DSPBOOT: result=%d board_err=%d flags=%x error=%u restore=%u rollback=%u lease=%u\n",

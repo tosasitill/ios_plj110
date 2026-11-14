@@ -28,6 +28,7 @@
 #include "x9_speaker_dl24.h"
 #include "x9_tfa_plj110.h"
 #include "x9_speaker_bringup.h"
+#include "x9_audio.h"
 #include "../../../generated/x9_tfa_container.inc"
 extern void IOSleep(unsigned int);
 /* Logs 260/261: the SoC stopped (black screen, keys and USB dead) and the
@@ -49,6 +50,7 @@ static struct {
     vm_offset_t dma;
     uint64_t dma_bus;
     bool tfa,afe_held,afe_prepared,pads,clock,dsp,pa_on[2];
+    bool held; /* backend mode: whole chain held for the boot */
 } b;
 
 /* ---------------- TFA9865 (two slaves, same sequence) ---------------- */
@@ -321,7 +323,7 @@ static void teardown(void)
     }
 }
 
-int x9_speaker_bringup_run(void)
+static int bringup_hold(bool prepare)
 {
     if(!sweet_early_is_x9() || sweet_x9_arg("x9_audio",0)!=2)return ENXIO;
     SPKLOG("X9 SPK: start container=%u bytes\n",x9_tfa_container_bytes);
@@ -371,8 +373,13 @@ int x9_speaker_bringup_run(void)
         ap.sync_device=afe_sync;ap.held=afe_held;ap.validate=afe_validate;ap.halt_producer=afe_halt;
         ap.producer=X9AFEProducerCPU;ap.generation=0;
         e=x9_speaker_afe_register(&ap);SPKLOG("X9 SPK: afe register -> %d\n",e);
-        if(!e){e=x9_speaker_afe_prepare_on_ticket(b.ticket);b.afe_prepared=true;SPKLOG("X9 SPK: afe prepare -> %d\n",e);}
+        if(!e && prepare){e=x9_speaker_afe_prepare_on_ticket(b.ticket);b.afe_prepared=true;SPKLOG("X9 SPK: afe prepare -> %d\n",e);}
     }
+    return e;
+}
+static int bringup_oneshot(void)
+{
+    int e=bringup_hold(true);
     static int16_t pcm[960*2];uint32_t phase=0;uint64_t anchor=0;
     if(!e)SPKLOG("X9 SPK: afe start begin\n");
     if(!e){fill(pcm,960,&phase,-1);e=x9_speaker_afe_start(pcm,960,&anchor);printf("X9 SPK: afe start (silence) -> %d\n",e);}
@@ -397,7 +404,7 @@ int x9_speaker_bringup_run(void)
      * probus device: OPPO tfa_dev_set_state(OPERATING) and unmute both just
      * set AMPE=1 (set_mute is tfa_set_mute_nodsp), mute is AMPE=0.
      * x9_spk_tone=0 keeps the old silent run (AMPE forced 0). */
-    bool tone=sweet_x9_arg("x9_spk_tone",1)!=0;
+    bool tone=sweet_x9_arg("x9_spk_tone",0)!=0; /* user 287: no boot beep */
     for(unsigned i=0;!e && i<2;i++) {
         e=bf_set(i,0x0030,tone?1:0);
         uint16_t v=tone?0:1;if(!e)e=bf_get(i,0x0030,&v);
@@ -426,5 +433,109 @@ int x9_speaker_bringup_run(void)
     X9AudioAmpStatus as;bzero(&as,sizeof(as));x9_tfa_plj110_status(&as);
     printf("X9 SPK: done result=%d i2c flags=%x stage=%u error=%u restore=%u writes=%u req=%x\n",
            e,as.flags,as.stage,as.error,as.restore_error,as.revision_read,as.request_status);
+    return e;
+}
+
+/* ---------------- X9Audio backend (CoreAudio output) ----------------
+ * User request after log 287: no boot beep, connect the speaker to iOS.
+ * Boot holds ticket -> TFA init (PWDN=1) -> board AP-only hold -> clocks ->
+ * pads -> AFE register for the whole boot. Each X9Audio session:
+ *   start:    AFE prepare (borrowed ticket) + start with the service prefill
+ *   position: AFE cursor, then a non-blocking PA state machine in OPPO order:
+ *             MANSCONF=1/PWDN=0 (one PA per call), wait CLKS on both (log
+ *             286/287: ~6 ms), then AMPE=1 with readback. 200 ms limit.
+ *   submit:   fixed -18 dB headroom (user: -24 dBFS tone was too loud; iOS
+ *             volume is applied in the HAL on top), then AFE copy.
+ *   stop:     AMPE=0, PWDN=1 (OPPO tfa_dev_stop before clocks go), AFE stop.
+ * The service serializes callbacks under its lock; the AFE watchdog mutes
+ * via pa_mute on its own faults. The mic cannot claim the shared lease while
+ * this is held (it returns EBUSY before any MMIO). */
+enum { PaIdle, PaPower0, PaPower1, PaClocks, PaOn };
+static struct { unsigned state; uint64_t t0; } pa;
+#define BE_LEAD_FRAMES (X9_AUDIO_PERIOD*4u)
+static int be_pa_step(void)
+{
+    int e=0;
+    switch(pa.state) {
+    case PaPower0: case PaPower1: {
+        unsigned i=pa.state==PaPower0?0:1;
+        e=bf_set(i,0x0120,1);if(!e)e=bf_set(i,0x0000,0); /* INIT_CF: MANSCONF=1 PWDN=0 */
+        if(!e)pa.state++;
+        break;
+    }
+    case PaClocks: {
+        uint16_t c0=0,c1=0;e=bf_get(0,0x1100,&c0);if(!e)e=bf_get(1,0x1100,&c1);
+        if(!e && c0==1 && c1==1) {
+            for(unsigned i=0;!e && i<2;i++) {
+                e=bf_set(i,0x0030,1);uint16_t v=0;if(!e)e=bf_get(i,0x0030,&v);
+                if(!e && v!=1)e=EIO;if(!e)b.pa_on[i]=true;
+            }
+            if(!e){pa.state=PaOn;printf("X9 SPK BACKEND: PA clocks locked, AMPE=1\n");}
+        } else if(!e) {
+            uint64_t lim;nanoseconds_to_absolutetime(200000000ULL,&lim);
+            if(mach_absolute_time()-pa.t0>lim)e=ETIMEDOUT;
+        }
+        break;
+    }
+    default: break;
+    }
+    if(e){printf("X9 SPK BACKEND: PA step %u -> %d\n",pa.state,e);pa_report("backend-fault");}
+    return e;
+}
+static int be_stop(void *ctx)
+{
+    (void)ctx;int first=0,e;
+    if(b.tfa) {
+        e=pa_mute(NULL,b.ticket);if(e && !first)first=e;
+        for(unsigned i=0;i<2;i++){e=bf_set(i,0x0000,1);if(e && !first)first=e;b.pa_on[i]=false;}
+    }
+    pa.state=PaIdle;
+    if(b.afe_prepared){e=x9_speaker_afe_stop();if(!e)b.afe_prepared=false;else if(!first)first=e;}
+    printf("X9 SPK BACKEND: stop -> %d\n",first);
+    return first;
+}
+static int be_start(void *ctx,const int16_t *prefill,uint32_t frames,uint64_t *anchor)
+{
+    (void)ctx;
+    if(!b.held || b.afe_prepared || pa.state!=PaIdle)return EBUSY;
+    int e=x9_speaker_afe_prepare_on_ticket(b.ticket);b.afe_prepared=true;
+    if(!e)e=x9_speaker_afe_start(prefill,frames,anchor);
+    if(!e){pa.state=PaPower0;pa.t0=mach_absolute_time();}
+    printf("X9 SPK BACKEND: start frames=%u -> %d\n",frames,e);
+    return e; /* on error the service calls stop (backendHeld) */
+}
+static int be_submit(void *ctx,const int16_t *pcm,uint32_t frames)
+{
+    (void)ctx;
+    static int16_t scaled[X9_AUDIO_PERIOD*X9_AUDIO_CHANNELS];
+    if(!pcm || frames!=X9_AUDIO_PERIOD)return EINVAL;
+    for(uint32_t n=0;n<frames*X9_AUDIO_CHANNELS;n++)scaled[n]=(int16_t)(pcm[n]>>3); /* -18 dB */
+    return x9_speaker_afe_submit(scaled,frames);
+}
+static int be_position(void *ctx,uint64_t *frames,uint64_t *underruns)
+{
+    (void)ctx;
+    int e=x9_speaker_afe_position(frames);
+    if(!e){*underruns=0;if(pa.state!=PaOn)e=be_pa_step();}
+    return e;
+}
+int x9_speaker_bringup_run(void)
+{
+    if(!sweet_early_is_x9() || sweet_x9_arg("x9_audio",0)!=2)return ENXIO;
+    if(!sweet_x9_arg("x9_spk_backend",1))return bringup_oneshot();
+    int e=bringup_hold(false);
+    if(e){teardown();printf("X9 SPK: backend hold failed -> %d\n",e);return e;}
+    b.held=true;
+    printf("X9 SPK: backend chain held (PA PWDN=1, AFE idle); waiting for X9Audio start\n");
+    return 0;
+}
+int x9_speaker_backend_register(void)
+{
+    if(!b.held)return ENXIO;
+    static const struct x9_audio_backend be={X9_AUDIO_BACKEND_VERSION,X9_AUDIO_REQUIRED,
+        BE_LEAD_FRAMES,NULL,be_start,be_stop,be_submit,be_position};
+    int e=x9_audio_register_backend(&be);
+    printf("X9 SPK: X9Audio backend register lead=%u -> %d\n",BE_LEAD_FRAMES,e);
+    if(e){b.held=false;teardown();}
     return e;
 }

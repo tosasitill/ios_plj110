@@ -255,6 +255,12 @@ void x9_mic_mt6681_dump(struct x9_mic_mt6681 *c)
         e,v[0],v[1],v[2],v[3],v[4],v[5],v[6],v[7],v[8],v[9],v[10],v[11],v[12],v[13],v[14],v[15]);
     printf("X9 MIC CODEC: ULSRC=%02x%02x%02x%02x ADDA6UL=%02x DCCLK=%02x/%02x/%02x %02x/%02x/%02x GPIO=%02x/%02x/%02x DIG=%02x/%02x/%02x VD105=%02x ELR1=%02x VAUD18=%02x/%02x\n",
         v[16],v[17],v[18],v[19],v[20],v[21],v[22],v[23],v[24],v[25],v[26],v[27],v[28],v[29],v[30],v[31],v[32],v[33],v[34],v[35],v[36]);
+    /* ADC clockgen (Android recording: CON18/19=2a, RC read 0x08-0x09). */
+    static const uint16_t ana[]={0x3488,0x3489,0x349a,0x349b,0x34d9,0x34a8,0x3550,0x3557};
+    uint8_t a[8];e=0;
+    for(unsigned i=0;i<8;i++){a[i]=0xee;int r=read8(c,ana[i],&a[i]);if(r && !e)e=r;}
+    printf("X9 MIC CODEC: err=%d PGA=%02x ADC=%02x CLKGEN=%02x/%02x CLKMODE=%02x RC=%02x GAIN=%02x CARA=%02x\n",
+        e,a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7]);
     /* UL_SRC_MON0 (0x256a..d) = codec ADC/SRC output; MTKAIFV4_MON0 (0x2c9d)
      * bit6 TXIF_SDATA_OUT, ADDA6 MON0 0x2ca3. Toggling = codec TX is live. */
     static const uint16_t mon[]={0x256a,0x256b,0x256c,0x256d,0x2c9d,0x2c9e,0x2ca3,0x2ca4};

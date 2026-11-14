@@ -1,5 +1,5 @@
-/* Own-code signed output HAL publication. Default OFF, separately opted in
- * after root-write confirmation; x9_audio=1/2 alone never installs a bundle.
+/* Own-code signed output HAL publication. spk28: default ON with x9_audio=1/2
+ * (user 2026-11-14: "好的功能直接默认开启"); x9_speaker_hal=0 disables it.
  * No Apple replacement, DYLD injection, mailbox or hardware activation.
  * Included after MIC/haptic: x9_microphone_directory is the existing generic
  * bounded exact-directory checker, with no microphone state or operations. */
@@ -12,7 +12,7 @@ static int x9_speaker_hal_mode(void)
 {
     int mode=sweet_x9_arg("x9_audio",0);
     return sweet_early_is_x9() && (mode==1 || mode==2) &&
-        sweet_x9_arg("x9_speaker_hal",0)==1;
+        sweet_x9_arg("x9_speaker_hal",1)==1;
 }
 int sweet_x9_speaker_boot_mount_allowed(const char *source);
 int sweet_x9_speaker_boot_mount_allowed(const char *source)

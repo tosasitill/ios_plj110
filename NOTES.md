@@ -1024,3 +1024,51 @@ spk27: `x9/out/x9-spk27-20261114/boot.img`, boot args x9_audio=2
 x9_dsp_boot=75 x9_mic=2 x9_mic_boot=1000 (speaker first, mic 1 s after).
 If it hangs again, the USB console loses about 1 KiB at the end, so also pull
 the UFS sidecar `x9-bootlog-*/console.bin` for the tail.
+
+### log 287 + Android regmap / spk28 + mic28 (2026-11-14) — mic ADC clock bug; speaker is the iOS output
+
+log 287 (spk27): the 1 kHz tone played (user: too loud at -24 dBFS). Release
+all 0. The mic then hung ~0.2 s after `native DMA bind -> 0`, same as 284.
+Android reference (read only via adb root: debugfs regmap 15-006b during two
+recordings; captures under x9/out/android-audio-ref/, not committed):
+Android records in OPPO `mic_hifi_mode` with 4 PGAs (L=AIN2, R=AIN0, 3, 4),
+GAIN_1P5=4/CARA=2, CON18/19=0x2a, RC read 0x08-0x09, UL_SRC_MON0=df ff a2 38
+(ON_MON=1, COMB live). Codec digital (UL SRC, TOP, PAD, TX, CLKSQ) matches ours.
+**Mic root cause (static, OPPO mt6681.c mt_adc_lr_clk_gen_event):** OPPO writes
+`0x5 << RG_AUDADCLCLKSOURCE_SFT` under the COMBINED CLKGENMODE|CLKSOURCE mask,
+i.e. GENMODE(bit5)=1 SOURCE(bits3-4)=1. Our port split it into two fields:
+GENMODE=0 and SOURCE=5 masked to 1, so the ADC L/R clockgen never ran. That
+matches every symptom: RC tune 0x1f even after the ADC reset (278-282), and
+ULMON all zero INCLUDING UL_SRC_ON_MON although UL_SRC_ON=1 (the AMIC FIFO/UL
+SRC clock is the ADC_L clock; OPPO: "amic fifo ch1/2 clk from ADC_L").
+Fixed (both L and R), gain set to Android's 6 dB (GAIN_1P5=4, CARA 0x02), and
+ANALOG()/DIGITAL_BYTE() now `_Static_assert` that every value fits its field
+(the one runtime value, FFCAPVREF by hwcid, became an if/else). New dump line
+`X9 MIC CODEC: PGA= ADC= CLKGEN= CLKMODE= RC= GAIN= CARA=` (expect CLKGEN=2a/2a,
+RC not 00/1f, ULMON non-zero). Android's MTKAIF MON (0x2c9d) is 0 too, so the
+AIF= field is not a liveness signal. Our normal (non-HiFi) OPPO branch is kept.
+
+**Speaker -> iOS (spk28, user: no more beeps, connect to iOS, default on):**
+x9_speaker_bringup.c backend mode (`x9_spk_backend`, default 1): boot holds
+ticket, TFA init (ends PWDN=1), board AP-only hold, clocks, pads, AFE register
+for the whole boot, then `x9_speaker_backend_register()` (called from
+dspBootOnce AFTER dropping audioLock: register takes it). X9Audio callbacks:
+start = AFE prepare_on_ticket + start(prefill, lead 1920 frames); position =
+AFE cursor + a non-blocking PA state machine (MANSCONF=1/PWDN=0 per PA, CLKS
+on both, AMPE=1 with readback, 200 ms limit); submit = fixed -18 dB (>>3)
+headroom, then AFE copy (iOS volume is applied in the HAL on top); stop =
+AMPE=0, PWDN=1, AFE stop. No boot tone (`x9_spk_tone` default 0, only in the
+old one-shot path `x9_spk_backend=0`). `x9_speaker_hal` (PID1 HAL publish into
+/private/var/x9/speaker/<id>/hal, union onto /System/Library/Audio/Plug-Ins/HAL)
+now defaults to 1 with x9_audio=1/2 (user: "好的功能直接默认开启"); =0 disables.
+While the backend holds the shared audio lease the mic would get EBUSY, so in
+backend mode a boot with x9_mic_boot runs the mic ALONE and does not start the
+speaker (boot-args had no room for x9_spk_boot=0, 599/607 B).
+This also avoids the still-unexplained second-subsystem hang (282/284/287).
+Images: spk28 `x9/out/x9-spk28-20261114/boot.img` (x9_audio=2 x9_dsp_boot=75
+x9_mic=2): speaker backend; expect `X9 SPK: backend chain held`, `X9Audio
+backend register lead=1920 -> 0`, and per playback `X9 SPK BACKEND: start`,
+`PA clocks locked, AMPE=1`, `stop -> 0`. mic28 `x9/out/x9-mic28-20261114/boot.img`
+(+ x9_mic_boot=1000): mic alone with the clockgen fix.
+Note: an underrun (HAL stops feeding while Running) faults the service and it
+stays Fault until reboot (existing service design).
