@@ -13,6 +13,7 @@
 #include "x9_mic_mt6993.h"
 #include "x9_mic_plj110.h"
 #include "x9_audio_resources.h"
+#include "x9_speaker_bringup.h"
 
 #include "x9_mic_mt6993_regs.h"
 _Static_assert(sizeof(struct x9_mic_dma_status)==192,"DMA ABI size");
@@ -212,7 +213,11 @@ static int afe_start(uint64_t g)
             dma_diagnostic.active_memifs=0;
             for(unsigned i=0;i<32;i++)if(rd(x9_mic_memif_regs[i])&VUL1_ON)
                 dma_diagnostic.active_memifs|=1u<<i;
-            if(dma_diagnostic.active_memifs)e=EBUSY;
+            /* audio46: DL24 (index 12) is the speaker's own stream on the
+             * shared AFE base, as in Android; any other memif still refuses. */
+            uint32_t foreign=dma_diagnostic.active_memifs;
+            if(x9_speaker_backend_base_held())foreign&=~(1u<<12);
+            if(foreign)e=EBUSY;
             if(dma_diagnostic.memif_con0&4){dma_diagnostic.last_register=MEMIF_CON0;e=EBUSY;}
             if(dma_diagnostic.con0_before&(VUL1_ON|(1u<<7)))e=EBUSY;
             if(VUL1_MON_ACTIVE(dma_diagnostic.monitor_before,dma_diagnostic.con0_before) ||

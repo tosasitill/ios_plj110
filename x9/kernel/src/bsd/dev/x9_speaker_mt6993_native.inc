@@ -34,7 +34,9 @@ static uint32_t native_engen_expected(void)
 {return native_clock.tuner_captured?native_tuner[NT_ENGEN].expected&15:0;}
 static int native_engen_idle(void)
 {
-    uint32_t value=rd(j.afe,0x14)&15;
+    /* audio46: bit1 = ADDA 3.25M, owned by a concurrent mic capture
+     * (x9_mic_plj110_digital RX_ENGEN); never a speaker generator. */
+    uint32_t value=rd(j.afe,0x14)&13;
     if(value==native_engen_expected())return 0;
     /* Cleanup of the LAST uncertain ENGEN write accepts only its observed
      * prior, not a generic inactive value or the generation's old baseline. */

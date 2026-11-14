@@ -13,7 +13,14 @@ struct afe_journal {
     uint32_t saved[5];
     bool snapshot, engine_owned, sram, stuck, pins_saved;
     bool dram_owned, dram_uncertain;
+    bool shared; /* audio46: speaker AFE base held; borrow, never own, its bits */
 };
+/* audio46: bits the held speaker base owns (x9_speaker_mt6993_native.inc
+ * native_tuner): ENGEN 26M bit0 + APLL2 bit3, CBIP bit0, SPM SRCCLKENA bit2
+ * + DRAM APSRC/DDREN/URG, TOP_CON4 bits0-1 cleared. The mic adds only its own
+ * ENGEN bit1 (ADDA) through the digital journal. DL24 = memif index 12. */
+#define AFE_SHARED_ENGEN 9u
+#define AFE_SPEAKER_DL24_MEMIF 12u
 static struct afe_journal calibration;
 /* Vendor INIT is a device-probe operation, not a runtime-resume operation.
  * Once successful it remains installed for this boot; repeated cold capture
@@ -160,6 +167,11 @@ static int afe_dram_take(struct afe_journal *a)
     if(!a || !a->snapshot || a->dram_owned)return EINVAL;
     int e=afe_access(a);if(e)return e;
     a->s->last_register=0x60;uint32_t v=rr(a->afe,0x60);
+    if(a->shared) {
+        /* The speaker base holds the same DRAM request until reboot. */
+        if((v&AFE_MIC_DRAM_REQ)!=AFE_MIC_DRAM_REQ)return EBUSY;
+        return 0; /* borrowed: dram_owned stays false, nothing released */
+    }
     if(v&AFE_MIC_DRAM_REQ)return EBUSY;
     a->dram_owned=a->dram_uncertain=true; /* before possibly effective request */
     wr(a->afe,0x60,v|AFE_MIC_DRAM_REQ);
@@ -184,15 +196,17 @@ static int afe_idle(struct afe_journal *a,bool engine_on)
     /* Reject inherited/live engines, UL SRC, phase clocks, test, pad TX,
      * sine and every DL/VUL memif in the selected register family. */
     static const unsigned engines[]={0x14,0x18,0x1c};
-    for(unsigned i=0;i<3;i++)if((rr(a->afe,engines[i])&15)!=(i==0 && engine_on?1u:0u)) {
-        a->s->last_register=engines[i];return EBUSY;
+    for(unsigned i=0;i<3;i++) {
+        uint32_t want=i?0u:a->shared?AFE_SHARED_ENGEN:(engine_on?1u:0u);
+        if((rr(a->afe,engines[i])&15)!=want){a->s->last_register=engines[i];return EBUSY;}
     }
     static const unsigned src[]={0xbd0,0xc50,0xcd0,0x98,0x1204};
     for(unsigned i=0;i<5;i++)if(rr(a->afe,src[i])&1){a->s->last_register=src[i];return EBUSY;}
     if(rr(a->afe,0xf14)&0xfff){a->s->last_register=0xf14;return EBUSY;}
     if(rr(a->afe,0x20)&(1u<<26)){a->s->last_register=0x20;return EBUSY;}
-    for(unsigned i=0;i<sizeof(x9_mic_memif_regs)/sizeof(x9_mic_memif_regs[0]);i++)if(rr(a->afe,x9_mic_memif_regs[i])&VUL1_ON) {
-        a->s->last_register=x9_mic_memif_regs[i];return EBUSY;
+    for(unsigned i=0;i<sizeof(x9_mic_memif_regs)/sizeof(x9_mic_memif_regs[0]);i++) {
+        if(a->shared && i==AFE_SPEAKER_DL24_MEMIF)continue; /* speaker's own stream */
+        if(rr(a->afe,x9_mic_memif_regs[i])&VUL1_ON){a->s->last_register=x9_mic_memif_regs[i];return EBUSY;}
     }
     return 0;
 }
@@ -240,6 +254,7 @@ static int afe_take(struct afe_journal *a,vm_offset_t gpio,struct x9_mic_afe_sta
     volatile uint32_t *mapped_afe)
 {
     bzero(a,sizeof(*a));bzero(s,sizeof(*s));a->s=s;a->gpio=gpio;
+    a->shared=x9_speaker_backend_base_held()!=0;
     s->version=1;s->stage=X9_MIC_AFE_BASELINE;s->flags=X9_MIC_AFE_ATTEMPTED;
     for(unsigned i=0;i<4;i++)s->smc_result[i]=INT64_MIN; /* not issued */
     a->hwv=mic_map_once(MIC_MAP_HWV);a->vlp=mic_map_once(MIC_MAP_CLOCK);
@@ -273,8 +288,9 @@ static int afe_take(struct afe_journal *a,vm_offset_t gpio,struct x9_mic_afe_sta
         else return EBUSY;
     }
     a->mux_borrowed=mux_borrowed;
-    printf("X9 MIC AFE: audio %s, mux borrowed=%x (vlp=%x fenc=%x)\n",
-        audio_inherited?"inherited on (borrowed)":"cold",mux_borrowed,s->vlp_before,s->fenc_before);
+    printf("X9 MIC AFE: audio %s, mux borrowed=%x (vlp=%x fenc=%x)%s\n",
+        audio_inherited?"inherited on (borrowed)":"cold",mux_borrowed,s->vlp_before,s->fenc_before,
+        a->shared?", engine borrowed from held speaker base":"");
     s->stage=X9_MIC_AFE_SMC_INIT;
     int e=0;
     if(!afe_init_ready) {
@@ -327,17 +343,29 @@ static int afe_take(struct afe_journal *a,vm_offset_t gpio,struct x9_mic_afe_sta
     s->top4_before=a->saved[0];s->top0_before=a->saved[1];s->spm_before=a->saved[2];
     s->cbip_before=a->saved[3];s->engine_before=a->saved[4];a->snapshot=true;
     s->stage=X9_MIC_AFE_GATES;
-    e=update(a->afe,0x10,3,0);
-    if(!e) {s->flags|=X9_MIC_AFE_SIDEBANDS_ISSUED;e=afe_smc(a,7,1);}
-    if(e)return e;
+    if(a->shared) {
+        /* Speaker base already cleared TOP_CON4[1:0] and issued sidebands. */
+        if(rr(a->afe,0x10)&3){s->last_register=0x10;return EBUSY;}
+    } else {
+        e=update(a->afe,0x10,3,0);
+        if(!e) {s->flags|=X9_MIC_AFE_SIDEBANDS_ISSUED;e=afe_smc(a,7,1);}
+        if(e)return e;
+    }
     s->stage=X9_MIC_AFE_SMC_SRAM;
     a->sram=true;s->flags|=X9_MIC_AFE_SRAM_HELD; /* request may mutate even on error */
     e=afe_smc(a,3,2);if(e){a->stuck=true;return e;}
     s->stage=X9_MIC_AFE_ENGINE;
-    e=update(a->afe,0x60,4,4);
-    if(!e)e=update(a->afe,0,1u<<25,0);
-    if(!e)e=update(a->afe,0x4380,1,1);
-    if(!e){a->engine_owned=true;e=update(a->afe,0x14,1,1);}
+    if(a->shared) {
+        /* Borrow exactly the held speaker image; write nothing shared. */
+        static const unsigned r[]={0x60,0,0x4380,0x14};
+        static const uint32_t m[]={4,1u<<25,1,AFE_SHARED_ENGEN},v[]={4,0,1,AFE_SHARED_ENGEN};
+        for(unsigned i=0;i<4 && !e;i++)if((rr(a->afe,r[i])&m[i])!=v[i]){s->last_register=r[i];e=EBUSY;}
+    } else {
+        e=update(a->afe,0x60,4,4);
+        if(!e)e=update(a->afe,0,1u<<25,0);
+        if(!e)e=update(a->afe,0x4380,1,1);
+        if(!e){a->engine_owned=true;e=update(a->afe,0x14,1,1);}
+    }
     if(!e){s->stage=X9_MIC_AFE_PADS;e=afe_pins_take(a);}
     if(!e)s->flags|=X9_MIC_AFE_ACQUIRED;
     return e;
@@ -361,13 +389,15 @@ static int afe_restore(struct afe_journal *a)
             if(!e && cal_pin_state(a,k)!=old)e=EIO;
             if(e)return e;a->pin_owned&=~(1u<<k);
         }
-        e=update(a->afe,0x14,1,a->saved[4]);
-        if(!e && a->engine_owned)e=wait_bits(a->afe,0x7c,UINT32_MAX,0,10000);
-        if(e)return e;a->engine_owned=false;
-        /* Narrow symmetric runtime_suspend: no IRQ toggles/sine reset. */
-        for(unsigned i=4;i>0;i--) {
-            unsigned k=i-1;e=update(a->afe,afe_regs[k],afe_masks[k],a->saved[k]);if(e)return e;
-        }
+        if(!a->shared) {
+            e=update(a->afe,0x14,1,a->saved[4]);
+            if(!e && a->engine_owned)e=wait_bits(a->afe,0x7c,UINT32_MAX,0,10000);
+            if(e)return e;a->engine_owned=false;
+            /* Narrow symmetric runtime_suspend: no IRQ toggles/sine reset. */
+            for(unsigned i=4;i>0;i--) {
+                unsigned k=i-1;e=update(a->afe,afe_regs[k],afe_masks[k],a->saved[k]);if(e)return e;
+            }
+        } /* shared: every shared bit belongs to the still-held speaker base */
         afe_reg_snapshot(a);if(a->stuck)return EIO;
         a->snapshot=false;
     }

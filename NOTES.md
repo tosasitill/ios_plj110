@@ -1506,3 +1506,26 @@ The immediate retry returned EALREADY (37) -> FAULT: restart_ready accepted only
 completed capture. Now a failed START whose board_finish fully unwound (finish_errno 0,
 board RESTORED, nothing retained/owned/pending, DMA never started) is
 re-armable. Retained or uncertain unwinds stay terminal.
+
+### audio46 (2026-11-14) — speaker and mic run together on one AFE (log 304)
+
+304: the mic itself works now (12x `X9 MIC: START -> 0`), but iOS recording and
+Voice Memos playback start input AND output together. With the exclusive
+lease, the second side got EBUSY (`lazy hold -> 16`), iOS aborted the session,
+and the mic stopped, in a loop. That is why both "speaker" and "mic" looked dead.
+Taking turns (audio43 yield) can never satisfy a PlayAndRecord session.
+Model now (as Android, one shared AFE, one owner per shared bit):
+- lease: the mic has its own slot beside the speaker; exclusive only vs ADSP and a
+  second mic.
+- before a mic START (lazy backend registered, i.e. not the boot capture)
+  the speaker chain is taken (PA PWDN=1) and kept for the boot again; the
+  mic never tears it down (yield no longer called).
+- mic afe_take in shared mode borrows the speaker base and writes nothing
+  shared: requires TOP_CON4[1:0]=0, 0x60 bit2 + DRAM bits, CBIP bit0,
+  ENGEN[3:0]=9; no sidebands/engine/0x60 writes or restores; DRAM request
+  borrowed. afe_idle expects ENGEN=9 and skips the DL24 memif (idx 12); mic DMA
+  admission ignores DL24 while the base is held. The mic still owns its SRAM smc 3/4,
+  UL/RX/MTKAIF journal, ENGEN bit1 (ADDA), VUL1, codec, scp-i2c1, pins.
+- speaker native_engen_idle masks bit1 (mic ADDA). native_tuner_verify
+  already masked 0x14 to 9. Speaker 0x98 writes bit5 only (the mic checks bit0).
+- the codec register dump runs once per boot (it added ~1.5 s to every START).

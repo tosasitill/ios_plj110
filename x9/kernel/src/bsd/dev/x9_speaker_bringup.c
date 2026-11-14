@@ -544,6 +544,32 @@ int x9_speaker_backend_yield(void)
         e==EBUSY?" (speaker busy)":e?" (teardown incomplete, speaker retired)":" (re-taken on next start)");
     lck_mtx_unlock(&spk_be_lock);return e;
 }
+/* audio46: the mic borrows the speaker's AFE base (ENGEN 26M/APLL2, CBIP,
+ * SPM/DRAM request, sidebands) instead of owning it, exactly one owner per
+ * shared bit. So before a mic START the idle speaker chain is taken (PA stays
+ * PWDN=1) and then kept for the boot, as before audio43; it is never torn
+ * down under a running mic. Called without mic locks held by speaker code. */
+int x9_speaker_backend_hold_for_mic(void)
+{
+    lck_mtx_lock(&spk_be_lock);int e=0;
+    if(!b.lazy && !b.held)e=ENXIO;
+    else if(b.broken)e=EIO;
+    else if(!b.held) {
+        e=bringup_hold(false);
+        if(e) {
+            teardown();
+            if(b.ticket || b.dsp || b.clock || b.pads || b.tfa)b.broken=true;
+        } else b.held=true;
+        printf("X9 SPK BACKEND: chain taken for mic (AFE base shared) -> %d\n",e);
+    }
+    lck_mtx_unlock(&spk_be_lock);return e;
+}
+int x9_speaker_backend_base_held(void)
+{
+    lck_mtx_lock(&spk_be_lock);
+    int held=b.held && !b.broken && b.clock && b.pads && b.ticket;
+    lck_mtx_unlock(&spk_be_lock);return held;
+}
 static int be_start_locked(const int16_t *prefill,uint32_t frames,uint64_t *anchor)
 {
     if(b.afe_prepared || pa.state!=PaIdle)return EBUSY;

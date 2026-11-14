@@ -11,6 +11,10 @@ int x9_speaker_backend_register(void);
 /* audio43: the mic asks an IDLE speaker backend to hand back the shared
  * audio lease (full teardown, re-taken on the next start). 0 = released. */
 int x9_speaker_backend_yield(void);
+/* audio46: take (and keep) the speaker AFE base so the mic can borrow it;
+ * base_held reports whether that base is currently held. */
+int x9_speaker_backend_hold_for_mic(void);
+int x9_speaker_backend_base_held(void);
 #ifdef __cplusplus
 }
 #endif

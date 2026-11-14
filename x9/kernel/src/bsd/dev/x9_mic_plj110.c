@@ -644,17 +644,15 @@ static int board_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_stat
 {
     if(s->flags&X9_MIC_BOARD_ATTEMPTED)return EALREADY;
     uint64_t ticket=0;
-    int admission=x9_audio_resources_claim(X9AudioResourceMic,&ticket);
-    if(admission==EBUSY && hold) {
-        /* audio43 (log 301): the speaker backend kept the lease after its
-         * first start, so iOS recording never reached the codec. Ask an
-         * idle speaker to hand the chain back, then claim once more. */
-        X9AudioResourceStatus t={0};
-        if(!x9_audio_resources_status(&t) && t.owner==X9AudioResourceSpeaker &&
-           !x9_speaker_backend_yield())
-            admission=x9_audio_resources_claim(X9AudioResourceMic,&ticket);
-        if(admission)printf("X9 MIC: lease busy (owner=%u) -> %d\n",t.owner,admission);
+    /* audio46 (log 304): iOS starts input and output together. The speaker
+     * AFE base is taken FIRST (registered lazy backend only, i.e. not the
+     * boot capture) and the mic borrows it; the mic has its own lease slot. */
+    if(hold) {
+        int base=x9_speaker_backend_hold_for_mic();
+        if(base && base!=ENXIO)printf("X9 MIC: speaker AFE base unavailable -> %d (mic owns AFE alone)\n",base);
     }
+    int admission=x9_audio_resources_claim(X9AudioResourceMic,&ticket);
+    if(admission)printf("X9 MIC: lease busy -> %d\n",admission);
     if(admission)return admission; /* no MMIO/reset/attempt consumed */
     uint64_t start=mach_absolute_time();
     /* Static journals may never outlive their persistent status surfaces. */
@@ -727,7 +725,9 @@ static int board_probe(struct x9_mic_hardware_status *h,struct x9_mic_board_stat
         if(!e){e=x9_mic_mt6681_verify_capture(&j->codec);
             if(e)digital->last_register=j->codec.status.last_register;}
         if(!e)e=digital_signal_observe(j->cal);
-        if(j->codec.digital_owned)x9_mic_mt6681_dump(&j->codec); /* diagnostic, read-only */
+        /* audio46: read-only dump once per boot; at every iOS START it added
+         * ~1.5 s (log 304: 59.19 -> 61.01 s) before the stream began. */
+        {static bool dumped;if(j->codec.digital_owned && !dumped){dumped=true;x9_mic_mt6681_dump(&j->codec);}}
         *h=j->codec.status;
     }
     if(digital)digital->last_errno=e;

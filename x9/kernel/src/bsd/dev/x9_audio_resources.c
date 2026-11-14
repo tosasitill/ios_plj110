@@ -8,6 +8,11 @@ extern int sweet_early_is_x9(void);
 LCK_GRP_DECLARE(resource_group,"x9-audio-resources");
 LCK_MTX_DECLARE(resource_lock,&resource_group);
 static X9AudioResourceStatus state;
+/* audio46 (log 304): iOS recording/Voice Memos run output and input at the
+ * same time, as Android does on one AFE. The mic therefore has its own slot
+ * beside the speaker; it is exclusive only against the ADSP owner and a
+ * second mic. The speaker AFE base is held first and the mic borrows it. */
+static struct { uint64_t ticket; uint32_t held_error; } mic;
 _Static_assert(sizeof(X9AudioResourceStatus)==64,"resource status v1 size");
 int x9_audio_resources_claim(uint32_t owner,uint64_t *ticket)
 {
@@ -17,7 +22,14 @@ int x9_audio_resources_claim(uint32_t owner,uint64_t *ticket)
     if(owner<X9AudioResourceADSP || owner>X9AudioResourceSpeaker)return EINVAL;
     lck_mtx_lock(&resource_lock);
     int e=0;
-    if(state.owner) {
+    if(owner==X9AudioResourceMic) {
+        if(mic.ticket || state.owner==X9AudioResourceADSP)e=EBUSY;
+        else if(state.claims==UINT64_MAX)e=EOVERFLOW;
+        else {mic.ticket=*ticket=++state.claims;mic.held_error=0;}
+        if(e==EBUSY && state.refusals!=UINT32_MAX)state.refusals++;
+        lck_mtx_unlock(&resource_lock);return e;
+    }
+    if(state.owner || (owner==X9AudioResourceADSP && mic.ticket)) {
         if(state.refusals!=UINT32_MAX)state.refusals++;
         e=EBUSY;
     } else if(state.claims==UINT64_MAX)e=EOVERFLOW; /* never reuse a ticket */
@@ -31,6 +43,13 @@ int x9_audio_resources_release(uint32_t owner,uint64_t ticket)
 {
     lck_mtx_lock(&resource_lock);
     int e=0;
+    if(owner==X9AudioResourceMic) {
+        if(!ticket || ticket!=mic.ticket) {
+            if(state.rejected_releases!=UINT64_MAX)state.rejected_releases++;
+            e=EPERM;
+        } else {mic.ticket=0;mic.held_error=0;state.releases++;}
+        lck_mtx_unlock(&resource_lock);return e;
+    }
     if(!ticket || !state.owner || owner!=state.owner || ticket!=state.ticket) {
         if(state.rejected_releases!=UINT64_MAX)state.rejected_releases++;
         state.release_error=EPERM;e=EPERM; /* stale/foreign release changes no ownership */
@@ -44,7 +63,9 @@ void x9_audio_resources_fault(uint32_t owner,uint64_t ticket,int error)
 {
     if(!error)return;
     lck_mtx_lock(&resource_lock);
-    if(ticket && owner==state.owner && ticket==state.ticket) {
+    if(owner==X9AudioResourceMic) {
+        if(ticket && ticket==mic.ticket && !mic.held_error){mic.held_error=(uint32_t)error;state.last_error=(uint32_t)error;}
+    } else if(ticket && owner==state.owner && ticket==state.ticket) {
         if(!state.held_error)state.held_error=state.last_error=(uint32_t)error;
     }
     lck_mtx_unlock(&resource_lock);
