@@ -494,6 +494,19 @@ IOReturn X9AudioUserClient::externalMethod(uint32_t sel, IOExternalMethodArgumen
 {
     (void)dispatch; (void)target; (void)reference;
     if (!a || isInactive() || !control) return kIOReturnNotReady;
+    if (sel == X9AudioHalLogSelector) {
+        if (a->scalarInputCount || a->scalarOutputCount || a->structureInputDescriptor ||
+            a->structureOutputDescriptor || !a->structureInput || !a->structureInputSize ||
+            a->structureInputSize > 240) return kIOReturnBadArgument;
+        static uint32_t lines;
+        if (__atomic_add_fetch(&lines, 1, __ATOMIC_RELAXED) > 800) return kIOReturnNoSpace;
+        char text[241]; uint32_t n = a->structureInputSize;
+        const char *in = (const char *)a->structureInput;
+        for (uint32_t i = 0; i < n; i++) text[i] = in[i] >= 0x20 && in[i] < 0x7f ? in[i] : '.';
+        text[n] = 0;
+        IOLog("X9 HAL: %s\n", text);
+        return kIOReturnSuccess;
+    }
     if (sel == X9AudioSetHostClockSelector) {
         if (!writer || boardController || a->scalarInputCount != 2 || a->structureInputSize ||
             a->structureInputDescriptor || a->structureOutputDescriptor || a->scalarOutputCount) return kIOReturnBadArgument;

@@ -277,6 +277,30 @@ void x9_mic_mt6681_dump(struct x9_mic_mt6681 *c)
             if(++n==8){printf("X9 MIC REGS:%s\n",line);used=n=0;}
         }
     if(n)printf("X9 MIC REGS:%s\n",line);
+#if __has_include("../../../generated/x9_mic_android_ref.inc")
+    /* Full diff against the Android recording regmap (log 292: HiFi values
+     * matched in the swept ranges but RC stayed 1f). Only registers Android
+     * dumped as non-zero (recording or after) on the audio/top/LDO pages;
+     * prints ours/android for each mismatch. Local gitignored table. */
+    {
+#include "../../../generated/x9_mic_android_ref.inc"
+        unsigned diffs=0,fails=0;used=n=0;
+        for(unsigned i=0;i<sizeof(x9_mic_android_ref)/sizeof(x9_mic_android_ref[0]);i++) {
+            uint8_t b=0;
+            if(read8(c,x9_mic_android_ref[i].reg,&b)){fails++;continue;}
+            if(b==x9_mic_android_ref[i].android)continue;
+            diffs++;
+            used+=(unsigned)snprintf(line+used,sizeof(line)-used," %04x=%02x/%02x",
+                x9_mic_android_ref[i].reg,b,x9_mic_android_ref[i].android);
+            if(++n==8){printf("X9 MIC DIFF:%s\n",line);used=n=0;}
+        }
+        if(n)printf("X9 MIC DIFF:%s\n",line);
+        printf("X9 MIC DIFF: done %u/%u differ (ours/android), %u read errors\n",diffs,
+            (unsigned)(sizeof(x9_mic_android_ref)/sizeof(x9_mic_android_ref[0])),fails);
+    }
+#else
+    printf("X9 MIC DIFF: no local Android reference table in this build\n");
+#endif
     /* UL_SRC_MON0 (0x256a..d) = codec ADC/SRC output; MTKAIFV4_MON0 (0x2c9d)
      * bit6 TXIF_SDATA_OUT, ADDA6 MON0 0x2ca3. Toggling = codec TX is live. */
     static const uint16_t mon[]={0x256a,0x256b,0x256c,0x256d,0x2c9d,0x2c9e,0x2ca3,0x2ca4};

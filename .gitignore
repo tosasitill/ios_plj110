@@ -27,6 +27,7 @@ x9/kernel/generated/x9_wifi_nvram.inc
 x9/kernel/generated/x9_mdota.inc
 x9/kernel/generated/x9_baseband_firmware.inc
 x9/kernel/generated/x9_carrier_cbn.inc
+x9/kernel/generated/x9_mic_android_ref.inc
 x9/kernel/generated/x9_torch_bridge.inc
 x9/kernel/generated/x9_camera_bridge.inc
 x9/kernel/generated/x9_microphone_hal.inc

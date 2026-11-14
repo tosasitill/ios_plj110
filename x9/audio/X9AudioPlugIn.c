@@ -13,6 +13,8 @@
 #include <string.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <dispatch/dispatch.h>
 #include <dlfcn.h>
 #include "../kernel/src/bsd/dev/x9_audio.h"
@@ -50,6 +52,83 @@ static int16_t *gOut;
 static mach_vm_address_t gMaps[3];
 static mach_vm_size_t gSizes[3];
 static uint32_t floatBits(float x) { uint32_t v; memcpy(&v, &x, 4); return v; }
+/* ---- Diagnostics into the kernel log (log 292: iOS never opened the
+ * writer and the unified log is not visible). Lines are queued here and
+ * flushed by the 500 ms status timer through selector 22 on a short type0
+ * connection. Never called from the IO path. */
+static pthread_mutex_t gDiagLock = PTHREAD_MUTEX_INITIALIZER;
+#define DIAG_LINES 48u
+static char gDiag[DIAG_LINES][240];
+static unsigned gDiagHead, gDiagCount, gDiagDropped;
+static void halLog(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void halLog(const char *fmt, ...) {
+    char line[240]; va_list ap; va_start(ap, fmt); vsnprintf(line, sizeof line, fmt, ap); va_end(ap);
+    pthread_mutex_lock(&gDiagLock);
+    if (gDiagCount == DIAG_LINES) gDiagDropped++;
+    else { memcpy(gDiag[(gDiagHead + gDiagCount) % DIAG_LINES], line, sizeof line); gDiagCount++; }
+    pthread_mutex_unlock(&gDiagLock);
+}
+static void flushDiag(void) {
+    pthread_mutex_lock(&gDiagLock); unsigned pending = gDiagCount; pthread_mutex_unlock(&gDiagLock);
+    if (!pending) return;
+    io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching(X9_AUDIO_CLASS));
+    if (!service) return;
+    io_connect_t connection = 0;
+    kern_return_t e = IOServiceOpen(service, mach_task_self(), 0, &connection);
+    IOObjectRelease(service);
+    if (e) return;
+    for (;;) {
+        char line[240];
+        pthread_mutex_lock(&gDiagLock);
+        if (!gDiagCount) { pthread_mutex_unlock(&gDiagLock); break; }
+        memcpy(line, gDiag[gDiagHead], sizeof line); gDiagHead = (gDiagHead + 1) % DIAG_LINES; gDiagCount--;
+        unsigned dropped = gDiagDropped; gDiagDropped = 0;
+        pthread_mutex_unlock(&gDiagLock);
+        if (dropped) { char d[64]; int n = snprintf(d, sizeof d, "(%u lines dropped)", dropped);
+            IOConnectCallStructMethod(connection, X9AudioHalLogSelector, d, (size_t)n, NULL, NULL); }
+        size_t n = strnlen(line, sizeof line);
+        if (n && IOConnectCallStructMethod(connection, X9AudioHalLogSelector, line, n, NULL, NULL)) break;
+    }
+    IOServiceClose(connection);
+}
+static void fourcc(UInt32 v, char out[5]) {
+    for (int i = 0; i < 4; i++) { char ch = (char)(v >> (24 - 8 * i)); out[i] = ch >= 0x20 && ch < 0x7f ? ch : '?'; }
+    out[4] = 0;
+}
+/* Distinct property accesses (object, selector, scope, kind, result), in
+ * the order the audio server made them, packed several per line. */
+#define TRACE_MAX 400u
+static struct { UInt32 sel, scope; AudioObjectID obj; UInt8 kind; OSStatus r; } gTrace[TRACE_MAX];
+static unsigned gTraceCount;
+static char gTraceLine[200]; static unsigned gTraceUsed;
+static void traceProperty(AudioObjectID o, const AudioObjectPropertyAddress *a, UInt8 kind, OSStatus r) {
+    if (!a) return;
+    pthread_mutex_lock(&gDiagLock);
+    bool seen = false;
+    for (unsigned i = 0; i < gTraceCount && !seen; i++)
+        seen = gTrace[i].sel == a->mSelector && gTrace[i].scope == a->mScope && gTrace[i].obj == o &&
+               gTrace[i].kind == kind && (gTrace[i].r == 0) == (r == 0);
+    if (!seen && gTraceCount < TRACE_MAX) {
+        gTrace[gTraceCount].sel = a->mSelector; gTrace[gTraceCount].scope = a->mScope; gTrace[gTraceCount].obj = o;
+        gTrace[gTraceCount].kind = kind; gTrace[gTraceCount].r = r; gTraceCount++;
+        char sel[5], sc[5]; fourcc(a->mSelector, sel); fourcc(a->mScope, sc);
+        int n = snprintf(gTraceLine + gTraceUsed, sizeof gTraceLine - gTraceUsed, " %u%s:%s/%s%s",
+                         (unsigned)o, kind ? "S" : "", sel, sc, r ? (r == kAudioHardwareUnknownPropertyError ? "?" : "!") : "");
+        if (n > 0) gTraceUsed += (unsigned)n;
+        if (gTraceUsed > 150) {
+            pthread_mutex_unlock(&gDiagLock); halLog("Q%s", gTraceLine); pthread_mutex_lock(&gDiagLock);
+            gTraceUsed = 0; gTraceLine[0] = 0;
+        }
+    }
+    pthread_mutex_unlock(&gDiagLock);
+}
+static void traceFlushLine(void) {
+    pthread_mutex_lock(&gDiagLock);
+    char line[200]; bool have = gTraceUsed > 0;
+    if (have) { memcpy(line, gTraceLine, sizeof line); gTraceUsed = 0; gTraceLine[0] = 0; }
+    pthread_mutex_unlock(&gDiagLock);
+    if (have) halLog("Q%s", line);
+}
 static Float32 volume(void) {
     uint32_t v = __atomic_load_n(&gVolumeBits, __ATOMIC_ACQUIRE);
     Float32 f; memcpy(&f, &v, 4); return f;
@@ -195,7 +274,9 @@ static OSStatus Initialize(AudioServerPlugInDriverRef d, AudioServerPlugInHostRe
         dispatch_release(queue); pthread_mutex_unlock(&gLock); return kAudioHardwareUnspecifiedError;
     }
     X9AudioControl s;
-    gReady = !probeControl(&s) && controlReady(&s) && !(s.state & X9AudioRunning);
+    kern_return_t pe = probeControl(&s);
+    gReady = !pe && controlReady(&s) && !(s.state & X9AudioRunning);
+    halLog("init uid=%s probe=%x ready=%d state=%x lead=%u", kDeviceUID, pe, gReady, pe ? 0 : s.state, pe ? 0 : s.lead_frames);
     if (gReady) gLeadFrames = s.lead_frames;
     gHost = host;
     dispatch_source_set_event_handler_f(gControlTimer, refreshControlState);
@@ -224,7 +305,11 @@ static OSStatus AddDeviceClient(AudioServerPlugInDriverRef d, AudioObjectID o, c
         if (slot == X9_AUDIO_HAL_CLIENTS) e = kAudioHardwareIllegalOperationError;
         else { gClients[slot].id = c->mClientID; gClients[slot].used = true; gClients[slot].running = false; }
     }
-    pthread_mutex_unlock(&gLock); return e;
+    pthread_mutex_unlock(&gLock);
+    char bundle[96] = "";
+    if (c->mBundleID) CFStringGetCString(c->mBundleID, bundle, sizeof bundle, kCFStringEncodingUTF8);
+    halLog("add client %u pid=%d bundle=%s -> %d", (unsigned)c->mClientID, (int)c->mProcessID, bundle, (int)e);
+    return e;
 }
 static OSStatus RemoveDeviceClient(AudioServerPlugInDriverRef d, AudioObjectID o, const AudioServerPlugInClientInfo *c) {
     (void)d;
@@ -233,7 +318,9 @@ static OSStatus RemoveDeviceClient(AudioServerPlugInDriverRef d, AudioObjectID o
     unsigned slot = findClient(c->mClientID);
     OSStatus e = slot == X9_AUDIO_HAL_CLIENTS ? kAudioHardwareBadObjectError : stopClient(slot);
     if (slot != X9_AUDIO_HAL_CLIENTS && !e) gClients[slot].used = false;
-    pthread_mutex_unlock(&gLock); return e;
+    pthread_mutex_unlock(&gLock);
+    halLog("remove client %u -> %d", (unsigned)c->mClientID, (int)e);
+    return e;
 }
 static OSStatus PerformDeviceConfigurationChange(AudioServerPlugInDriverRef d, AudioObjectID o, UInt64 a, void *i)
 { (void)d; (void)o; (void)a; (void)i; return kAudioHardwareUnsupportedOperationError; }
@@ -308,6 +395,7 @@ static OSStatus SetPropertyData(AudioServerPlugInDriverRef d, AudioObjectID o, p
     (void)d; (void)pid; (void)qs; (void)q;
     if (!a || !data) return kAudioHardwareIllegalOperationError;
     const OSStatus r = setProperty(o, a, size, data);
+    traceProperty(o, a, 1, r);
     return r;
 }
 
@@ -481,10 +569,14 @@ static OSStatus propertyData(AudioObjectID o, const AudioObjectPropertyAddress *
 
 static OSStatus GetPropertyData(AudioServerPlugInDriverRef d, AudioObjectID o, pid_t pid, const AudioObjectPropertyAddress *a,
     UInt32 qs, const void *q, UInt32 capacity, UInt32 *size, void *out) {
-    (void)d; (void)pid; return propertyData(o, a, qs, q, capacity, size, out);
+    (void)d; (void)pid;
+    OSStatus r = propertyData(o, a, qs, q, capacity, size, out);
+    traceProperty(o, a, 0, r);
+    return r;
 }
 static void refreshControlState(void *context) {
     (void)context;
+    traceFlushLine(); flushDiag(); /* diagnostics first: never behind gLock */
     /* No lifecycle call or writer connection on this queue. Do not wait for
      * realtime/control callbacks holding gLock, or kernel physical work. */
     if (pthread_mutex_trylock(&gLock)) return;
@@ -501,6 +593,7 @@ static void refreshControlState(void *context) {
         if (gReady) gLeadFrames = s.lead_frames;
     }
     bool changed = wasReady != gReady || wasLead != gLeadFrames || gControlDirty;
+    if (wasReady != gReady) halLog("kernel ready %d -> %d (probe=%x io=%u fault=%d stopfail=%d)", wasReady, gReady, e, gIoUsers, gIOFault, gStopFailed);
     gControlDirty = false;
     AudioServerPlugInHostRef host = gHost;
     pthread_mutex_unlock(&gLock);
@@ -560,16 +653,25 @@ static OSStatus StartIO(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 cl
     pthread_mutex_lock(&gLock);
     OSStatus r = 0;
     unsigned slot = findClient(client);
-    if (slot == X9_AUDIO_HAL_CLIENTS) r = kAudioHardwareBadObjectError;
+    if (slot == X9_AUDIO_HAL_CLIENTS) { r = kAudioHardwareBadObjectError; halLog("StartIO client %u: not added", (unsigned)client); }
     else if (!gIoUsers) {
-        X9AudioControl before, after;
-        if (gStopFailed || probeControl(&before) || !controlReady(&before) ||
-            (before.state & X9AudioRunning) || before.generation == UINT32_MAX || connectService()) r = kAudioHardwareNotRunningError;
-        else if (snapshot(&before) || !controlReady(&before) || (before.state & X9AudioRunning) ||
-                 before.generation == UINT32_MAX || call(X9AudioStart) || snapshot(&after) || !controlReady(&after) ||
-                 !(after.state & X9AudioRunning) || after.generation != before.generation + 1 ||
-                 !after.out_anchor_host || after.ticks_per_frame_q32 != before.ticks_per_frame_q32 ||
-                 after.lead_frames != before.lead_frames) {
+        X9AudioControl before, after; memset(&before, 0, sizeof before); memset(&after, 0, sizeof after);
+        kern_return_t pe = 0, se = 0; int why = 0;
+        if (gStopFailed) why = 1;
+        else if ((pe = probeControl(&before))) why = 2;
+        else if (!controlReady(&before)) why = 3;
+        else if (before.state & X9AudioRunning) why = 4;
+        else if (before.generation == UINT32_MAX) why = 5;
+        else if (connectService()) why = 6;
+        else if (snapshot(&before) || !controlReady(&before) || (before.state & X9AudioRunning)) why = 7;
+        else if ((se = call(X9AudioStart))) why = 8;
+        else if (snapshot(&after) || !controlReady(&after) || !(after.state & X9AudioRunning)) why = 9;
+        else if (after.generation != before.generation + 1 || !after.out_anchor_host ||
+                 after.ticks_per_frame_q32 != before.ticks_per_frame_q32 || after.lead_frames != before.lead_frames) why = 10;
+        halLog("StartIO client %u: why=%d probe=%x start=%x state=%x->%x blockers=%x error=%u gen=%u->%u",
+               (unsigned)client, why, pe, se, before.state, after.state, before.blockers, before.error,
+               before.generation, after.generation);
+        if (why) {
             r = kAudioHardwareNotRunningError;
         } else {
             gGeneration = after.generation; gActiveAnchor = after.out_anchor_host;
@@ -590,7 +692,9 @@ static OSStatus StopIO(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 cli
     pthread_mutex_lock(&gLock);
     unsigned slot = findClient(client);
     OSStatus r = slot == X9_AUDIO_HAL_CLIENTS ? kAudioHardwareBadObjectError : stopClient(slot);
-    pthread_mutex_unlock(&gLock); return r;
+    pthread_mutex_unlock(&gLock);
+    halLog("StopIO client %u -> %d", (unsigned)client, (int)r);
+    return r;
 }
 static OSStatus GetZeroTimeStamp(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 client,
     Float64 *sample, UInt64 *host, UInt64 *seed) {

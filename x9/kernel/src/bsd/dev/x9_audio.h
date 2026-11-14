@@ -23,7 +23,10 @@ enum { X9AudioStatus, X9AudioStart, X9AudioStop, X9AudioDSPStatusSelector,
        X9AudioPLLProbeSelector, X9AudioPathStatusSelector,
        X9AudioPathProbeSelector, X9AudioI2C6StatusSelector,
        X9AudioLeftVDDStatusSelector, X9AudioStatusNowaitSelector,
-       X9AudioSetHostClockSelector };
+       X9AudioSetHostClockSelector, X9AudioHalLogSelector };
+/* Selector22 (any opener, incl. the type0 probe): structure input = one
+ * printable diagnostic line from the HAL plug-in (<=240 bytes), printed as
+ * `X9 HAL: ...`; the kernel caps it at 800 lines per boot. */
 /* Selector21 (writer type 1 only): scalar[0] = the caller's address of
  * CoreAudio's 24 MHz host clock constant (0 if not found), scalar[1] = the
  * two decoded instruction words for the log. The kernel rewrites that

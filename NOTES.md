@@ -1133,3 +1133,27 @@ BACKEND: first start, taking the speaker chain now (lazy hold)`). If playback
 hangs right after that line, it is the known mic-then-speaker hang.
 Build: `x9/out/x9-audio30-20261114-prelink`, boot args x9_audio=2
 x9_dsp_boot=75 x9_mic=2 x9_mic_boot=1000.
+
+### log 292 / audio31 (2026-11-14) — no hang; diagnostics for the HAL and a full codec diff
+
+292 (audio30): no hang. Mic ran first (HiFi values applied, journal 76/76,
+CLKGEN 2a/28) but RC still 1f, ULMON 0, 32760 captured frames all zero
+(capture -> 22). Lazy speaker backend registered at 81.6 s with no hardware.
+Speaker: only the usual mediaserverd type0 probes; no type1 open, no START,
+no `X9 AUDIO CLOCK` (that runs only on the writer connect). The user did not
+report playback results; the log ends at 147 s. Userland is invisible.
+audio31 adds:
+- Kernel selector 22 X9AudioHalLogSelector: the HAL queues lines and the
+  500 ms timer flushes them as `X9 HAL: ...` (800 lines/boot cap). Lines:
+  `init uid=PuffinOutput probe= ready=`, `kernel ready a -> b`, `add client
+  N pid= bundle=`, `remove client`, `StartIO client N: why=<1 stopfail,2
+  probe,3 not ready,4 running,5 gen,6 connect,7 snapshot,8 START err,9 not
+  running after,10 timeline>`, `StopIO`, and `Q ...` = every distinct
+  property access as `<obj>[S]:<selector>/<scope>` (`?` unknown property,
+  `!` other error). Shows whether VirtualAudio queries the Puffin device.
+- `X9 MIC DIFF:` reads every register Android's recording regmap has
+  non-zero (pages 00/01/09/1b/1c/23-36, 1299 regs) and prints ours/android
+  for mismatches, then `X9 MIC DIFF: done N/1299`. The table is the local
+  gitignored x9/kernel/generated/x9_mic_android_ref.inc (generated from the
+  Android capture; absent -> "no local Android reference table").
+Build: `x9/out/x9-audio31-20261114/boot.img`, same boot args as audio30.
