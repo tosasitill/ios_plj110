@@ -76,16 +76,24 @@ static int hcontrols(void)
         if(hrr(hb.bus,h_regs[i])!=hb.expected[i])return EBUSY;
     return 0;
 }
+/* First refused bank/register/value of the last hidle(), for the log. */
+static uint32_t hbusy_bank,hbusy_reg,hbusy_val;
+static int hbusy(unsigned bank,unsigned reg,uint32_t v)
+{hbusy_bank=bank;hbusy_reg=reg;hbusy_val=v;return EBUSY;}
 static int hidle(bool own)
 {
+    hbusy_bank=hbusy_reg=UINT32_MAX;hbusy_val=0; /* EBUSY from clocks/pins */
     int e=hcontrols();if(e)return e;
     /* DT exposes eight channel banks, no polling of unrelated buses. */
     for(unsigned i=0;i<8;i++) {
-        vm_offset_t b=hb.bus+i*0x10000;
+        vm_offset_t b=hb.bus+i*0x10000;uint32_t v;
         if(i==0 && own)continue;
-        if(hrr(b,H_START) || hrr(b,H_MASK) || hrr(b,H_STAT) ||
-           (hrr(b,H_FIFO)&31) || hrr(b,H_MULTI) ||
-           (hrr(b,H_CTRL)&(1u|4u|128u|256u|512u)))return EBUSY;
+        if((v=hrr(b,H_START)))return hbusy(i,H_START,v);
+        if((v=hrr(b,H_MASK)))return hbusy(i,H_MASK,v);
+        if((v=hrr(b,H_STAT)))return hbusy(i,H_STAT,v);
+        if((v=hrr(b,H_FIFO))&31)return hbusy(i,H_FIFO,v);
+        if((v=hrr(b,H_MULTI)))return hbusy(i,H_MULTI,v);
+        if((v=hrr(b,H_CTRL))&(1u|4u|128u|256u|512u))return hbusy(i,H_CTRL,v);
     }
     /* Never enable the shared APDMA clock just to read it. A gated DMA
      * block is not a proof that its shadow registers are zero. Require
@@ -318,6 +326,8 @@ static int hboard_init(void)
         cfg&=127;
     }
     hb.parent_byte=cfg;
+    /* Gated before us = no live owner of this controller (as I2C6 log 255). */
+    bool ungated=(hrr(hb.gate,0xe00)&1)!=0;
     hwr(hb.gate,0xe04,1);int e=hwait(hb.gate,0xe00,1,0,1000);if(e)return hinit_fail(e,7);
     /* GPIO30 is the dedicated DT haptic reset, including a warm LK entry.
      * Like OPPO hw_reset, reset it low 5ms then high; no bus reset. DOUT low
@@ -338,7 +348,21 @@ static int hboard_init(void)
     if((e=hmode_route(178,1)) || (e=hmode_route(179,1)))return hinit_fail(e,9);
     uint64_t hz;if((e=hbus_clock(&hz)))return hinit_fail(e,10);
     if((e=hwait(hb.gpio,0x250,3u<<18,3u<<18,1000)))return hinit_fail(e,11); /* DI178/179 */
-    if((e=hidle(false)))return hinit_fail(e,12);
+    e=hidle(false);
+    if(e==EBUSY && ungated && hbusy_bank==0 && hbusy_reg==H_MASK) {
+        /* Logs 256/263: LK leaves INTR_MASK set on an otherwise idle bank
+         * (I2C6 0x3f8, SCP-I2C1 0x3ff). Only after WE ungated a gated
+         * controller, and only bank 0's MASK: clear it so no completion
+         * IRQ reaches an SPI XNU does not service; START/STAT/FIFO/MULTI/
+         * CTRL and all other banks must still be idle. */
+        uint32_t stale=hbusy_val;hwr(hb.bus,H_MASK,0);
+        e=hrr(hb.bus,H_MASK)?EIO:hidle(false);
+        printf("X9 HAPTIC: i2c5 stale INTR_MASK=%x cleared -> %d\n",stale,e);
+    }
+    if(e) {
+        if(e==EBUSY)printf("X9 HAPTIC: i2c5 busy bank=%u reg=%x val=%x\n",hbusy_bank,hbusy_reg,hbusy_val);
+        return hinit_fail(e,12);
+    }
     for(unsigned i=0;i<14;i++)hb.expected[i]=hrr(hb.bus,h_regs[i]);hb.controls=true;
     if((e=htiming(hz)))return hinit_fail(e,13);
     /* OPPO hw_reset waits 8000..8500us after releasing the reset, not the

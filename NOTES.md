@@ -1318,3 +1318,39 @@ x9_mic_boot=1000 (mic capture at 65 s, then lazy speaker on first StartIO;
 same order as 282/294). After a hang the user boots Android; pull
 /sys/fs/pstore/console-ramoops-0 for the exact last line.
 Build: `x9/out/x9-audio38-20261114/boot.img`.
+
+### audio39 (2026-11-14) — ROOT CAUSE of the coexistence hang: io_submap exhaustion
+
+Static audit, no new test. xnu-8796 `osfmk/arm/io_map.c`: every post-KMEM
+`ml_io_map()` is `kmem_alloc(io_submap, KMA_NOFAIL|KMA_PERMANENT)` from a
+fixed **8 MiB** submap; exhaustion = `__kmem_failed_panic`. On X9 that panic
+is invisible: the USB and UFS consoles are threads, which never run again.
+Proof from existing logs (VM layout + Wi-Fi's 64 KiB NC map at ~21.8 s):
+| log | io_submap offset of the Wi-Fi map |
+| --- | --- |
+| 294/295/297 | 0x694000 (6.58 MiB used) |
+| 296 (haptic init at 1.5 s) | 0x744000 (+0xb0000 = haptic 0x80000+0x10000+pages) |
+So ~1.36 MiB was left (0.66 MiB with haptic). Each audio subsystem's first
+session maps its own copy of HWV 0x1c040000+0x75000 (480 KiB at 16 KiB pages)
+plus AFE/VLP/GPIO/bus pages: speaker take() ~0.6 MiB (+ADSP HWV), mic
+board_probe ~0.8 MiB. The first subsystem fits, the second runs out,
+regardless of order. The hang windows match the second subsystem's first
+`ml_io_map` exactly: speaker after "native board -> 0" = take()'s four maps;
+mic after "native DMA bind" = board_probe's mic_map_once(); 297 = the
+speaker backend registering ~2 s after the mic. 260 (61 s) likely the same.
+Camera `cam_board_prepare` re-maps ~1.7 MiB on EVERY cold open (never
+unmapped), so camera use would eventually exhaust any fixed size too.
+audio39:
+1. Overlay `x9/kernel/src/osfmk/arm/io_map.c` (replaces the frozen
+   io_map.o; recipe.json + link-order.txt): IO_MAP_SIZE 64 MiB, and identical
+   permanent mappings (same flags/prot, range covered) share one VA (512-entry
+   table; permanent maps are never freed, so sharing is safe; unmappable maps
+   untouched). Logs `X9 IOMAP: io_submap used N KiB of 65536 KiB` per MiB.
+2. Haptic default-on in code (x9_haptic=2 default; boot-xnu.py ADT haptics
+   follows unless x9_haptic!=2). Stage 12 now logs the busy bank/reg/value and,
+   only after we ungated a gated I2C5 and only for bank 0 MASK with the bank
+   otherwise idle, clears the stale LK INTR_MASK (as I2C6 256 / SCP-I2C1 263).
+Args: x9_audio=2 x9_dsp_boot=65 x9_mic=2 x9_mic_boot=1000 (599/607 bytes):
+mic at 65 s, then lazy speaker on first StartIO, haptic at boot — the exact
+282/294/296/297 hang orders.
+Build: `x9/out/x9-audio39-20261114/boot.img`.

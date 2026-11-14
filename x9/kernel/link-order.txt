@@ -284,7 +284,7 @@ xnu:osfmk/DEVELOPMENT/arm_init.o
 xnu:osfmk/DEVELOPMENT/arm_vm_init.o
 x9:sweet_early.o
 xnu:osfmk/DEVELOPMENT/arm64_hypercall.o
-xnu:osfmk/DEVELOPMENT/io_map.o
+x9:io_map.o
 xnu:osfmk/DEVELOPMENT/loose_ends.o
 xnu:osfmk/DEVELOPMENT/locks_arm.o
 xnu:osfmk/DEVELOPMENT/locore.o

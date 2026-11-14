@@ -91,7 +91,7 @@ def main():
                        wlan=any(x in a.boot_args.split() for x in ('x9_wifi_fake=1', 'x9_wifi_real=1')),
                        baseband='x9_bb=1' in a.boot_args.split(),
                        torch='x9_torch=3' in a.boot_args.split(),
-                       haptic='x9_haptic=2' in a.boot_args.split())
+                       haptic=([t.split('=', 1)[1] for t in a.boot_args.split() if t.startswith('x9_haptic=')] or ['2'])[-1] == '2')  # kernel default 2
     if a.microphone_mode is not None:
         chosen = next(n for n in tree.children if n.prop('name') == b'chosen\0')
         chosen.props.append(('x9-microphone-mode', 0, a.microphone_mode.to_bytes(4, 'little')))

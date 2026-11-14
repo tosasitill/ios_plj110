@@ -1,0 +1,195 @@
+/*
+ * Copyright (c) 2007 Apple Inc. All rights reserved.
+ *
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
+ *
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
+ *
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ *
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
+ * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
+ *
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
+ */
+/*
+ * @OSF_COPYRIGHT@
+ */
+/*
+ * Mach Operating System Copyright (c) 1991,1990 Carnegie Mellon University
+ * All Rights Reserved.
+ *
+ * Permission to use, copy, modify and distribute this software and its
+ * documentation is hereby granted, provided that both the copyright notice
+ * and this permission notice appear in all copies of the software,
+ * derivative works or modified versions, and any portions thereof, and that
+ * both notices appear in supporting documentation.
+ *
+ * CARNEGIE MELLON ALLOWS FREE USE OF THIS SOFTWARE IN ITS "AS IS" CONDITION.
+ * CARNEGIE MELLON DISCLAIMS ANY LIABILITY OF ANY KIND FOR ANY DAMAGES
+ * WHATSOEVER RESULTING FROM THE USE OF THIS SOFTWARE.
+ *
+ * Carnegie Mellon requests users of this software to return to
+ *
+ * Software Distribution Coordinator  or  Software.Distribution@CS.CMU.EDU
+ * School of Computer Science Carnegie Mellon University Pittsburgh PA
+ * 15213-3890
+ *
+ * any improvements or extensions that they make and grant Carnegie Mellon the
+ * rights to redistribute these changes.
+ */
+/*
+ */
+
+#include <mach/vm_param.h>
+#include <vm/vm_kern.h>
+#include <vm/vm_map.h>
+#include <arm/pmap.h>
+#include <san/kasan.h>
+#include <kern/locks.h>
+#include <kern/misc_protos.h>
+
+extern vm_offset_t virtual_space_start;     /* Next available kernel VA */
+
+/*
+ * X9: upstream reserves 8 MiB. Every post-KMEM ml_io_map() is a permanent
+ * KMA_NOFAIL allocation from this submap, so running out is a panic, and on
+ * X9 that panic is silent (USB/UFS consoles are threads). By 21.8 s the X9
+ * drivers had already used 6.6 MiB; the second audio subsystem (mic,
+ * speaker or haptic, whichever came second) then exhausted it (logs
+ * 282-297). Reserve 64 MiB and share identical permanent mappings below.
+ */
+#define IO_MAP_SIZE            (64ul << 20)
+
+/*
+ * Permanent (non-unmappable) mappings are never freed, so a later request
+ * for a range already covered with the same cache attributes and protection
+ * can reuse the existing VA. Drivers that re-map their registers per session
+ * (camera cold open, mic/speaker/GPS sharing the HWV block) then stop
+ * consuming the submap. A full table only disables sharing.
+ */
+#define IO_MAP_SHARED_MAX      512
+static struct {
+	vm_map_offset_t phys;
+	vm_offset_t     size, va;
+	unsigned int    flags;
+	vm_prot_t       prot;
+} io_map_shared[IO_MAP_SHARED_MAX];
+static unsigned int io_map_shared_count;
+static vm_offset_t io_map_used;
+static LCK_GRP_DECLARE(io_map_lck_grp, "io_map");
+static LCK_MTX_DECLARE(io_map_lock, &io_map_lck_grp);
+
+__startup_data static struct mach_vm_range io_range;
+static SECURITY_READ_ONLY_LATE(vm_map_t) io_submap;
+KMEM_RANGE_REGISTER_STATIC(io_submap, &io_range, IO_MAP_SIZE);
+
+__startup_func
+static void
+io_map_init(void)
+{
+	vm_map_will_allocate_early_map(&io_submap);
+	io_submap = kmem_suballoc(kernel_map, &io_range.min_address, IO_MAP_SIZE,
+	    VM_MAP_CREATE_NEVER_FAULTS | VM_MAP_CREATE_DISABLE_HOLELIST,
+	    VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, KMS_PERMANENT | KMS_NOFAIL,
+	    VM_KERN_MEMORY_IOKIT).kmr_submap;
+}
+STARTUP(KMEM, STARTUP_RANK_LAST, io_map_init);
+
+/*
+ * Allocate and map memory for devices that may need to be mapped before
+ * Mach VM is running. Allows caller to specify mapping protection
+ */
+vm_offset_t
+io_map(
+	vm_map_offset_t         phys_addr,
+	vm_size_t               size,
+	unsigned int            flags,
+	vm_prot_t               prot,
+	bool                    unmappable)
+{
+	vm_offset_t start_offset = phys_addr - trunc_page(phys_addr);
+	vm_offset_t alloc_size   = round_page(size + start_offset);
+	vm_offset_t start;
+
+	phys_addr = trunc_page(phys_addr);
+
+	if (startup_phase < STARTUP_SUB_KMEM) {
+		/*
+		 * VM is not initialized.  Grab memory.
+		 */
+		start = virtual_space_start;
+		virtual_space_start += round_page(size);
+
+		assert(flags == VM_WIMG_WCOMB || flags == VM_WIMG_IO);
+
+		if (flags == VM_WIMG_WCOMB) {
+			pmap_map_bd_with_options(start, phys_addr,
+			    phys_addr + alloc_size, prot, PMAP_MAP_BD_WCOMB);
+		} else {
+			pmap_map_bd(start, phys_addr, phys_addr + alloc_size, prot);
+		}
+#if KASAN
+		kasan_notify_address(start + start_offset, size);
+#endif
+	} else {
+		kma_flags_t kmaflags = KMA_NOFAIL | KMA_PAGEABLE;
+
+		if (unmappable) {
+			kmaflags |= KMA_DATA;
+			kmem_alloc(kernel_map, &start, alloc_size, kmaflags,
+			    VM_KERN_MEMORY_IOKIT);
+			pmap_map(start, phys_addr, phys_addr + alloc_size, prot, flags);
+			return start + start_offset;
+		}
+		kmaflags |= KMA_PERMANENT;
+
+		/* STARTUP_SUB_LOCKS precedes STARTUP_SUB_KMEM: the mutex is ready. */
+		lck_mtx_lock(&io_map_lock);
+		for (unsigned int i = 0; i < io_map_shared_count; i++) {
+			if (io_map_shared[i].flags == flags &&
+			    io_map_shared[i].prot == prot &&
+			    phys_addr >= io_map_shared[i].phys &&
+			    phys_addr + alloc_size <=
+			    io_map_shared[i].phys + io_map_shared[i].size) {
+				start = io_map_shared[i].va +
+				    (phys_addr - io_map_shared[i].phys);
+				lck_mtx_unlock(&io_map_lock);
+				return start + start_offset;
+			}
+		}
+		kmem_alloc(io_submap, &start, alloc_size, kmaflags,
+		    VM_KERN_MEMORY_IOKIT);
+		pmap_map(start, phys_addr, phys_addr + alloc_size, prot, flags);
+		io_map_used += alloc_size;
+		if (io_map_shared_count < IO_MAP_SHARED_MAX) {
+			io_map_shared[io_map_shared_count].phys = phys_addr;
+			io_map_shared[io_map_shared_count].size = alloc_size;
+			io_map_shared[io_map_shared_count].va = start;
+			io_map_shared[io_map_shared_count].flags = flags;
+			io_map_shared[io_map_shared_count].prot = prot;
+			io_map_shared_count++;
+		}
+		/* Report each further MiB so headroom is visible in boot logs. */
+		if ((io_map_used >> 20) != ((io_map_used - alloc_size) >> 20)) {
+			printf("X9 IOMAP: io_submap used %lu KiB of %lu KiB (%u shared ranges)\n",
+			    (unsigned long)(io_map_used >> 10),
+			    (unsigned long)(IO_MAP_SIZE >> 10), io_map_shared_count);
+		}
+		lck_mtx_unlock(&io_map_lock);
+	}
+	return start + start_offset;
+}
