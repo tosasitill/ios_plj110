@@ -965,3 +965,27 @@ Clock/pads validators do not check IN4/0x1690/0x98 (checked statically);
 clock idle() requires 0x13c0 bit0=0 only at release, after AFE disable.
 spk26 build: `x9/out/x9-spk26-20261114/boot.img` (speaker only, boot args
 x9_audio=2 x9_dsp_boot=75 x9_mic=2). The speaker+mic hang is still open.
+
+### log 286 (spk26, 2026-11-14) — PA clocks lock; full speaker path runs
+
+First complete speaker run, no hang (mic not run), done result=0, every
+release step 0. `X9 SPK AFE: inherited in4 9ff800/800984a5/410c062/1f80000/
+100/40004000/1000 cowork=81b2a908 pad=0` (LK left IN4 configured, disabled;
+cowork OUT4 sel 9 / IN4 sel 1), `enabled -> 0 in4=109f7803 out4=109f7801
+in4mon=346f0220 cowork=88b2a008 pad=20`. `PA34 clocks -> 0`, `PA35 clocks
+-> 0` within ~6 ms each. The DMA ran at the right rate: 97952 frames played
+in about 2.04 s, tone loop result 0 (the PCM was all zero).
+PA status after power-up (both PAs identical): stat11=0e89 means CLKS=1,
+PLLS=1, AREFS=1, SWS=1, AMPS=1, LPMS=1, TDMERR=0, TDMLUTER=0. stat12=0929
+means MANSTATE=9, AMPSTE=2, TDMSTAT=1. flags10=7eaf: NOCLK sticky (set
+before the clocks came), no OCP/OTP/UVP/OVP, CLKOOR=0.
+Observation: sysctrl went from f670 (285, no clocks) to **f678**, so AMPE
+(0x0030) read back as 1 and the amplifier was engaged. Our code writes
+register 0 only through pa_mute (AMPE=0, read back 0 at AFE acquire) and the
+PWDN=0 RMW. Nothing touched the TFA between the CLKS wait and the `powered`
+read. So the amplifier engaged on its own once the clocks arrived (guess:
+the TFA986x manager with MANSCONF=1; OPPO sets AMPE itself in
+TFA_STATE_OPERATING). spk26 therefore did NOT keep "AMPE stays 0": it played
+digital silence through an engaged amplifier for about 2 s. Teardown still
+wrote AMPE=0 PWDN=1. Next step: either force AMPE=0 again after CLKS and
+read it back for a truly quiet run, or proceed to the low-level tone.
