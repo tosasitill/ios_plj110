@@ -51,6 +51,28 @@ static int pll_wait(vm_offset_t b,unsigned off,uint32_t mask,uint32_t wanted,uns
 }
 static void pll_snapshot(uint32_t out[7])
 {for(unsigned n=0;n<7;n++)out[n]=rd(j.apll,pll_regs[n]);}
+/* OPPO clk-mt6993.c PLL_FENC(apll2): CON0 0x8, FENC status 0x34 bit4,
+ * postdiv CON1 0xc bits24-26, PCW PCW_CON0 0x3c (32 bits, 8 integer bits);
+ * clk-pll.c recalc: rate = 26M * pcw / 2^24 >> postdiv. mtk_pll_fenc_ops
+ * never writes CON0/CON3 (no EN/PWR_ON semantics), TUNER_CON0 is 0x38 (not
+ * PCW_CON1 0x40), CON1 bit31 is PCW_CHG. 0x78fd5264 with postdiv 4 (/16) is
+ * 196.608 MHz (VCO 3145.7 MHz, OPPO range 1500-3800). The earlier exact
+ * images (CON0/CON3/0x38 bit0, 0x40=0x78fd5265, postdiv 0) came from mt6991
+ * register names and could not match a running 196.608 MHz APLL2. */
+static uint64_t apll2_rate(void)
+{
+    uint32_t pcw=rd(j.apll,0x3c),pd=(rd(j.apll,0xc)>>24)&7;
+    return ((26000000ULL*pcw)>>24)>>pd;
+}
+static int apll2_rate_ok(void)
+{
+    /* PCW/postdiv image only, 0.01%; the fmeter measures the real output. */
+    uint64_t hz=apll2_rate();
+    if(hz+19661<196608000ULL || hz>196608000ULL+19661) {
+        pll_s.last_register=0xc;pll_s.last_value=rd(j.apll,0xc);return ERANGE;
+    }
+    return 0;
+}
 static int pll_unowned_consumers(void)
 {
     /* CKSYS_MM is PD_NULL in OPPO clkchk. Read its AO clock controller,
@@ -65,11 +87,9 @@ static int pll_unowned_consumers(void)
     if(!e)e=pll_refuse(j.vlp,0x80,0x80000000,0x80000000); /* SW_ENGEN2 */
     if(!e)e=pll_refuse(j.vlp,0x270,1,0);
     if(!e)e=pll_refuse(j.vlp,0x334,1u<<31,0);
-    /* PCW, postdiv and update latch are immutable throughout this cycle.
-     * Never retune an inherited PLL or replay its PCW_UPDATE trigger. */
-    if(!e)e=pll_refuse(j.apll,0x3c,UINT32_MAX,0x78fd5264);
-    if(!e)e=pll_refuse(j.apll,0x40,UINT32_MAX,0x78fd5265);
-    if(!e)e=pll_refuse(j.apll,0xc,0x87000000,0x80000000);
+    /* PCW and postdiv are immutable throughout this cycle and must already
+     * give 196.608 MHz. Never retune an inherited PLL or replay PCW_CHG. */
+    if(!e)e=apll2_rate_ok();
     for(unsigned n=0;!e && n<3;n++)e=pll_refuse(pf[n].base,pf[n].off,~pf[n].mask,pf[n].saved&~pf[n].mask);
     return e;
 }
@@ -83,13 +103,9 @@ static int pll_idle(void)
  * mux or gate write, never withdrawn; only the fmeter is used to measure. */
 static int pll_borrowed_ok(void)
 {
-    int e=pll_refuse(j.apll,8,1,1);
-    if(!e)e=pll_refuse(j.apll,0x14,1,1);
-    if(!e)e=pll_refuse(j.apll,0x38,1,1);
-    if(!e)e=pll_refuse(j.apll,0x34,16,16);
-    if(!e)e=pll_refuse(j.apll,0x3c,UINT32_MAX,0x78fd5264);
-    if(!e)e=pll_refuse(j.apll,0x40,UINT32_MAX,0x78fd5265);
-    if(!e)e=pll_refuse(j.apll,0xc,0x87000000,0x80000000);
+    /* Running = FENC status (mtk_pll_fenc_is_prepared), at 196.608 MHz. */
+    int e=pll_refuse(j.apll,0x34,16,16);
+    if(!e)e=apll2_rate_ok();
     if(!e)e=pll_refuse(j.vlp,0x80,0x8300,0x300);
     if(!e)e=pll_refuse(j.vlp,0x270,4,4);
     if(!e)e=pll_refuse(j.vlp,0x330,4,0);
@@ -189,12 +205,22 @@ static int pll_cold(void)
     pll_s.consumers[0]=rd(j.vlp,0x80);pll_s.consumers[1]=rd(j.vlp,0x270);
     pll_s.consumers[2]=rd(pj.top,0xa0);pll_s.consumers[3]=rd(pj.top,0x274);
     pll_s.consumers[4]=rd(pj.mm,0x40);pll_s.consumers[5]=rd(pj.mm,0x270);
+    uint64_t hz=apll2_rate();
+    printf("X9 SPK PLL: apll2 con0=%x con1=%x con3=%x fenc=%x tuner=%x pcw=%x/%x rate=%llu vlp80=%x 270=%x 330=%x\n",
+        pll_s.pll_before[0],pll_s.pll_before[1],pll_s.pll_before[2],pll_s.pll_before[3],
+        pll_s.pll_before[4],pll_s.pll_before[5],pll_s.pll_before[6],hz,
+        rd(j.vlp,0x80),rd(j.vlp,0x270),rd(j.vlp,0x330));
     pj.borrowed=false;
     int e=pll_borrowed_ok();
     if(!e) {
         pj.borrowed=true;pll_s.last_register=0;pll_s.last_value=0;
         printf("X9 SPK PLL: APLL2 inherited running (engen2/audio_h on apll2): borrowed, measure only\n");
     } else {
+        printf("X9 SPK PLL: borrow refused reg=%x val=%x\n",pll_s.last_register,pll_s.last_value);
+        /* Logs 276/283: with the engen2 mux enabled (PDN clear) the cold
+         * path below can never pass; report the borrow refusal itself
+         * instead of overwriting it with the cold check's vlp+0x80. */
+        if(!(rd(j.vlp,0x80)&0x8000))return e;
         e=pll_refuse(j.vlp,0x80,0x8000,0x8000);
         if(!e)e=pll_consumers();
         if(!e)e=pll_refuse(j.apll,8,1u|(1u<<15)|(1u<<17),0);

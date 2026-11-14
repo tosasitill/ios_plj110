@@ -270,6 +270,11 @@ static int take(bool with_pll,bool with_path)
         printf("X9 SPK CLK: inherited AUDIO SSYSPM 0x903c=%x\n",pb);
         /* Log 273: bits 2/3 stay set off and on in HWV mode; PWR_ACK only. */
         if(!(pb&0x80000000u)){CLKSTEP("AUDIO inherited but SSYS PWR_ACK clear: refused (EBUSY)");return EBUSY;}
+        /* Log 283: record the borrow now, not at the later domain-vote
+         * step. A failure before that step (pll cold) otherwise made
+         * native_restored_ao demand AUDIO off, so release returned EBUSY,
+         * the lease stayed held and the mic got EBUSY. */
+        s.borrowed_vote|=1;
         CLKSTEP("AUDIO domain inherited on: borrowed");trace=true;
     }
     else if((s.ap_before|s.all_before|s.ack_before|rd(j.hwv,0x1131c)|rd(j.hwv,0x13704))&(j.combined?1:3) ||
@@ -332,7 +337,9 @@ static int take(bool with_pll,bool with_path)
     for(unsigned n=0;n<field_count();n++)field_prior[n]=fields[n].saved=fields[n].expected=rd(j.afe,fields[n].off);
     s.top_before=fields[0].saved;
     if(!j.combined)for(unsigned n=0;n<4;n++)s.out_before[n]=fields[n+1].saved;
-    if(j.combined && (fields[0].saved&0x1018)!=0x1018)return EBUSY;
+    if(j.combined && (fields[0].saved&0x1018)!=0x1018) {
+        s.last_register=fields[0].off;s.last_value=fields[0].saved;return EBUSY;
+    }
     j.captured=true;s.flags|=X9ClockAFECaptured;
     /* Keep native APLL2/TUNER2 leaf gates off until PLL settling/meter
      * qualification completes; open HOPPING/F26M first for register access. */

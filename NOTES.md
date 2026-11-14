@@ -852,3 +852,33 @@ Reading the log: no hang plus `SPK PLL: APLL2 inherited running ... borrowed`
 means the order theory holds, and the speaker clock path gets its first test
 past 276's pll cold (follow the spk22 checklist above). A hang at the same point
 means the AP-only path hangs without the mic as well.
+
+### log 283 / spk24 (2026-11-14) — static audit after log 283 (WIP, not for hardware yet)
+
+log 283 (spk23, speaker first): no hang (as 276). The speaker passed PA init,
+AP-only hold, native board, the AO snapshot, the AUDIO borrow (0x903c=80f0100c)
+and adsp validate. Then `pll cold` failed with `clock acquire -> 16 reg=80
+val=20303`, which is the same value as 276. `clock release -> 16` kept the
+lease and the mic got EBUSY.
+Static audit against OPPO clk-pll.c / clk-mt6993.c (PLL_FENC apll2):
+1. pll_borrowed_ok (mic16) could never pass on a running 196.608 MHz APLL2.
+   It required CON0 bit0 and CON3 bit0 (FENC PLLs: mtk_pll_fenc_ops never
+   writes them; APLL2 has no pwr_reg), 0x38 bit0 (TUNER_CON0 holds pcw+1, its
+   enable is bit31), 0x40==0x78fd5265 (that is the mt6991 TUNER value; on 6993
+   TUNER is 0x38) and CON1 postdiv 0 (196.608 MHz from PCW 0x78fd5264 needs
+   postdiv 4, /16). The constants came from mt6991-afe-clk.c. Neither 276 nor
+   283 ever printed the APLL registers.
+2. On a borrow refusal pll_cold fell into the cold path, whose first check
+   (vlp+0x80 bit15) must fail on LK's 0x20303, overwriting the real reason.
+3. take() set s.borrowed_vote only at the domain-vote step, so any failure
+   before it made native_restored_ao demand AUDIO off -> release EBUSY ->
+   lease held -> mic EBUSY.
+4. The AFE 0x10 0x1018 gate check returned EBUSY without last_register.
+spk24 fixes (compiled, x9-spk24wip-20261114; not committed as a test image):
+borrow = FENC 0x34 bit4 + PCW/postdiv rate 196.608 MHz (+-0.01%) + the
+unchanged VLP topology; the cold path uses the same rate check instead of the
+0x3c/0x40/0xc images; pll_cold prints the APLL2 registers and rate, and a
+borrow refusal is returned as-is when the engen2 mux is enabled; the borrow is
+recorded when AUDIO is adopted; the 0x10 check reports its register.
+Next: audit the later stages (smc 0/7, AFE 0x10 gate expectation, tuner take,
+pads, AFE start, PA CLKS) before handing out a hardware image.
