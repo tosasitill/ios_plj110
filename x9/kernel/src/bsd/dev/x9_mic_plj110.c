@@ -783,31 +783,49 @@ int x9_mic_plj110_capture_restart_ready(void)
     /* This is not a reset or a substitute for hardware drain. Only the
      * engine that already called the real provider and restored addresses
      * may consume a successful STOP receipt, while all old status pointers
-     * are still intact. Diagnostics and failed STARTs remain terminal. */
+     * are still intact. audio45 (log 303): a START that failed inside the
+     * board pipeline and whose board_finish fully unwound (finish_errno 0,
+     * RESTORED, nothing retained/owned) is also re-armable; before, the
+     * retry returned EALREADY and the mic was FAULT for the whole boot.
+     * Diagnostics and any retained/uncertain unwind remain terminal. */
     struct power_journal *j=&board;
-    if(!j->session || !j->capture_held || !j->finished || j->finish_errno ||
-       !j->status || !j->hardware || !j->analog || !j->digital || !j->dma || !j->cal)
+    if(!j->session || !j->finished || j->finish_errno ||
+       !j->status || !j->hardware || !j->analog || !j->digital || !j->dma)
         return EALREADY;
     struct x9_mic_board_status *s=j->status;
     struct x9_mic_hardware_status *h=j->hardware;
     struct x9_mic_dma_status *d=j->dma;
     struct afe_journal *a=j->cal;
-    if(s->last_errno || s->restore_errno || s->bus_fault_errno ||
-       h->last_errno || h->restore_errno || j->analog->last_errno || j->analog->restore_errno ||
-       j->digital->last_errno || j->digital->restore_errno ||
-       j->digital->codec_restore_errno || j->digital->afe_restore_errno ||
-       a->s->last_errno || a->s->restore_errno || d->last_errno || d->restore_errno)
-        return EIO;
-    if((s->flags&(X9_MIC_BOARD_RESTORED|X9_MIC_BOARD_RETAINED))!=X9_MIC_BOARD_RESTORED ||
-       (a->s->flags&(X9_MIC_AFE_RESTORED|X9_MIC_AFE_RETAINED))!=X9_MIC_AFE_RESTORED ||
-       (j->analog->flags&(X9_MIC_ANALOG_RESTORED|X9_MIC_ANALOG_RETAINED))!=X9_MIC_ANALOG_RESTORED ||
-       (j->digital->flags&(X9_MIC_DIGITAL_RESTORED|X9_MIC_DIGITAL_RETAINED))!=X9_MIC_DIGITAL_RESTORED ||
-       (d->flags&(X9_MIC_DMA_STARTED|X9_MIC_DMA_DRAINED|X9_MIC_DMA_RESTORED|X9_MIC_DMA_RETAINED))!=
-            (X9_MIC_DMA_STARTED|X9_MIC_DMA_DRAINED|X9_MIC_DMA_RESTORED))return EBUSY;
+    if(j->capture_held) {
+        if(!a)return EALREADY;
+        if(s->last_errno || s->restore_errno || s->bus_fault_errno ||
+           h->last_errno || h->restore_errno || j->analog->last_errno || j->analog->restore_errno ||
+           j->digital->last_errno || j->digital->restore_errno ||
+           j->digital->codec_restore_errno || j->digital->afe_restore_errno ||
+           a->s->last_errno || a->s->restore_errno || d->last_errno || d->restore_errno)
+            return EIO;
+        if((a->s->flags&(X9_MIC_AFE_RESTORED|X9_MIC_AFE_RETAINED))!=X9_MIC_AFE_RESTORED ||
+           (j->analog->flags&(X9_MIC_ANALOG_RESTORED|X9_MIC_ANALOG_RETAINED))!=X9_MIC_ANALOG_RESTORED ||
+           (j->digital->flags&(X9_MIC_DIGITAL_RESTORED|X9_MIC_DIGITAL_RETAINED))!=X9_MIC_DIGITAL_RESTORED ||
+           (d->flags&(X9_MIC_DMA_STARTED|X9_MIC_DMA_DRAINED|X9_MIC_DMA_RESTORED|X9_MIC_DMA_RETAINED))!=
+                (X9_MIC_DMA_STARTED|X9_MIC_DMA_DRAINED|X9_MIC_DMA_RESTORED))return EBUSY;
+    } else {
+        /* Failed START: its own input error is expected; every unwind must
+         * be clean and nothing may be retained. */
+        if(s->restore_errno || h->restore_errno || j->analog->restore_errno ||
+           j->digital->restore_errno || j->digital->codec_restore_errno ||
+           j->digital->afe_restore_errno || d->restore_errno || (a && a->s->restore_errno))
+            return EIO;
+        if((a && (a->s->flags&X9_MIC_AFE_RETAINED)) || (j->analog->flags&X9_MIC_ANALOG_RETAINED) ||
+           (j->digital->flags&X9_MIC_DIGITAL_RETAINED) || (d->flags&(X9_MIC_DMA_RETAINED|X9_MIC_DMA_STARTED)) ||
+           (h->flags&X9_MIC_HW_RESTORE_FAILED))return EBUSY;
+    }
+    if((s->flags&(X9_MIC_BOARD_RESTORED|X9_MIC_BOARD_RETAINED))!=X9_MIC_BOARD_RESTORED)return EBUSY;
     if(j->resource_ticket || j->enabled || j->enable.owned || j->route[0].owned || j->route[1].owned ||
        j->wake_owned || j->awake || j->gate_owned || j->bus_owned || j->xo_owned ||
-       j->bus_stuck || j->pmif_stuck || a->stuck || a->votes || a->mux_owned || a->pin_owned ||
-       a->snapshot || a->engine_owned || a->sram || a->dram_owned || a->dram_uncertain ||
+       j->bus_stuck || j->pmif_stuck ||
+       (a && (a->stuck || a->votes || a->mux_owned || a->pin_owned || a->snapshot ||
+              a->engine_owned || a->sram || a->dram_owned || a->dram_uncertain)) ||
        j->codec.touched || j->codec.audio_snapshot || j->codec.afe_snapshot || j->codec.poisoned ||
        j->codec.analog_owned || j->codec.analog_pending || j->codec.digital_owned ||
        j->codec.digital_pending || j->codec.digital_uncertain || digital_afe.owned || digital_afe.pending ||

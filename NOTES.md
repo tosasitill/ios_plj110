@@ -1491,3 +1491,18 @@ Audit of the rest of the second session: the journal bzero resets codec.touched,
 and GPIO9/XO/wake/routes are restored to their found state (same adopt paths
 as the first session). The speaker clock release restores 0x14/0x60/VLP muxes
 before afe_take. The speaker re-hold path has still not run on hardware.
+
+### audio45 (2026-11-14) — second mic session: latched VUL1 MON0 and a terminal failed START (log 303)
+
+303: the speaker works, including re-taking its chain after the mic (122 s
+lazy hold -> 0). The mic's second session passed bus, codec, AFE cal and
+analog (AIN2), then got EBUSY at digital stage 2: the VUL1 baseline saw
+MON0=0x300000 with CON0=0x100048. In every log (298-303), MON0 after a clean
+stop reads 0x300000 (burst lengths of the last run stay latched), while before
+the first run it reads 0x100000 (Android idle dump: 0x100000). The idle macro
+only discounted the length bits that the current CON0 also had set. Fix:
+bits 16-17/20-21 are never activity.
+The immediate retry returned EALREADY (37) -> FAULT: restart_ready accepted only a
+completed capture. Now a failed START whose board_finish fully unwound (finish_errno 0,
+board RESTORED, nothing retained/owned/pending, DMA never started) is
+re-armable. Retained or uncertain unwinds stay terminal.
