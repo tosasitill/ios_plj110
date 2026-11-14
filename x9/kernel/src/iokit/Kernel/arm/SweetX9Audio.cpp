@@ -182,15 +182,14 @@ static void dspBootOnce(void *arg, wait_result_t)
 {
     uint32_t delay = (uint32_t)(uintptr_t)arg;
     IOSleep(delay * 1000);
-    /* Microphone first: a speaker-path failure must not hide its result.
-     * The two paths share the exclusive audio resource lease, never overlap. */
-    /* Logs 272/275: with the mic's AFE init SMC issued first, the SoC hung
-     * 2-3 s after the ADSP launch (269, no mic AFE init: none in 7 s).
-     * Speaker first was withdrawn with that theory (log 277). Mic first by
-     * default now (x9_spk_first=1 restores speaker first): its result
-     * survives a speaker failure. */
+    /* The two paths share the exclusive audio resource lease, never overlap.
+     * Logs 272/275/282: with the mic's AFE work first, the SoC hung right
+     * after the speaker's "CLK native board -> 0" (282 with NO ADSP launch,
+     * so this is separate from the 277 launch hang). 276, speaker first,
+     * did not hang. Speaker first by default again (spk23); x9_spk_first=0
+     * restores mic first. */
     int micMs = sweet_x9_arg("x9_mic_boot", 0);
-    bool spkFirst = sweet_x9_arg("x9_spk_first", 0) != 0;
+    bool spkFirst = sweet_x9_arg("x9_spk_first", 1) != 0;
     if (micMs > 0 && !spkFirst) IOLog("X9 AUDIO DSPBOOT: mic capture result=%d\n", x9_mic_bringup_run((unsigned)micMs));
     /* Logs 253-277: every boot that launched the ADSP (warm takeover) hung
      * the SoC 0.4-25 s later unless the DSP was halted first (269, 276); 277

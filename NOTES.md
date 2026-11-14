@@ -829,3 +829,26 @@ inherited running", "X9 SPK PADS: inherited", "X9 SPK AFE: inherited O116".
 Untested on hardware past log 276's pll cold: borrowed-APLL2 meter, smc 0/7,
 tuner, pads, AFE start, PA CLKS.
 Image: x9/out/x9-spk22-20261113/boot.img (same boot args as mic21).
+
+### log 282 / spk23 (2026-11-14) — speaker first again
+
+log 282 (spk22, `~/282.txt` on the Mac): the mic ran first and finished
+(result=0, 80.5 s). The speaker then passed PA34/PA35 init, `ADSP AP-ONLY:
+hold -> 0` (adopted LK votes inherited=e, so chain_on wrote nothing), `board
+gen=40000001 online -> 0`, `clock acquire begin` and `CLK native board -> 0`
+(97.894 s). After that the whole SoC hung: the 2 s GPU GOV and DISPLAY cadence
+lines (due at 98.33/98.50) never came. `SPK PLL: APLL2 ... borrowed` never
+printed, so take() never got past its map step. Remember that the last ~1 KiB
+of console is lost on a hang (log 260), so the real stop is somewhere from
+97.9 s to roughly the start of take().
+Observation: this is the same apparent stop as 272 and 275, which were also
+mic first. 282 did NOT launch the ADSP, so 272/275/282 are not explained by
+the 277 launch hang. Inference (unproven): mic AFE work followed by the
+speaker path hangs the SoC; 276 (speaker first) did not hang.
+spk23: the only change is the default `x9_spk_first` 0 -> 1 (speaker first,
+mic 1 s after it; `x9_spk_first=0` gives mic first). Same boot args as spk22.
+If the speaker fails and keeps its lease, the mic gets EBUSY (as in 276).
+Reading the log: no hang plus `SPK PLL: APLL2 inherited running ... borrowed`
+means the order theory holds, and the speaker clock path gets its first test
+past 276's pll cold (follow the spk22 checklist above). A hang at the same point
+means the AP-only path hangs without the mic as well.
