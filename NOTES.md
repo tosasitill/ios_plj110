@@ -1313,3 +1313,8 @@ audio37:
 3. x9_dsp_boot=65 (60 overlapped the modem S2 timer in 260).
 4. x9_haptic back off by default (296: its init alone kills the speaker).
 Build: `x9/out/x9-audio37-20261114/boot.img`.
+audio38 = audio37 code, coexistence test: x9_audio=2 x9_dsp_boot=65 x9_mic=2
+x9_mic_boot=1000 (mic capture at 65 s, then lazy speaker on first StartIO;
+same order as 282/294). After a hang the user boots Android; pull
+/sys/fs/pstore/console-ramoops-0 for the exact last line.
+Build: `x9/out/x9-audio38-20261114/boot.img`.
