@@ -390,19 +390,30 @@ int x9_speaker_bringup_run(void)
         printf("X9 SPK: PA%x clocks -> %d\n",slaves[i],e);
         if(e==ETIMEDOUT)pa_report("no-clks");
     }
-    /* Keep the ring fed while waiting. */
-    if(!e){for(unsigned n=0;!e && n<5;n++){fill(pcm,960,&phase,-1);e=x9_speaker_afe_submit(pcm,960);if(!e)submitted+=960;}}
+    /* The CLKS wait kept the ring fed; no unconditional extra submit (it
+     * could exceed the ring and fail with EAGAIN). */
     if(!e)pa_report("powered");
-    /* User request (2026-11-13): no audible output. Stop at INIT_CF with
-     * the amplifier OFF (AMPE stays 0); the AFE streams silence only. */
-    printf("X9 SPK: quiet run: AMPE stays 0, silence only\n");
+    /* User request (2026-11-14, log 286): a quiet 1 kHz test. TFA986x is a
+     * probus device: OPPO tfa_dev_set_state(OPERATING) and unmute both just
+     * set AMPE=1 (set_mute is tfa_set_mute_nodsp), mute is AMPE=0.
+     * x9_spk_tone=0 keeps the old silent run (AMPE forced 0). */
+    bool tone=sweet_x9_arg("x9_spk_tone",1)!=0;
+    for(unsigned i=0;!e && i<2;i++) {
+        e=bf_set(i,0x0030,tone?1:0);
+        uint16_t v=tone?0:1;if(!e)e=bf_get(i,0x0030,&v);
+        if(!e && v!=(tone?1:0))e=EIO;
+        if(!e)b.pa_on[i]=tone;
+        printf("X9 SPK: PA%x AMPE=%u -> %d\n",slaves[i],tone?1:0,e);
+    }
+    if(!e)pa_report(tone?"amp-on":"amp-off");
+    printf("X9 SPK: %s\n",tone?"tone run: 1 kHz at -24 dB for 2 s":"quiet run: AMPE=0, silence only");
     /* -24 dB (>>4) 1 kHz for ~2 s, refilled from the hardware cursor. */
     phase=0;unsigned tone_frames=2u*RATE,sent=0;
     uint64_t start=mach_absolute_time(),limit;nanoseconds_to_absolutetime(4000000000ULL,&limit);
     while(!e && sent<tone_frames) {
         e=x9_speaker_afe_position(&played);if(e)break;
         if(submitted-played<9600) {
-            fill(pcm,960,&phase,-1);e=x9_speaker_afe_submit(pcm,960);
+            fill(pcm,960,&phase,tone?4:-1);e=x9_speaker_afe_submit(pcm,960);
             if(!e){submitted+=960;sent+=960;}else if(e==EAGAIN)e=0;
         } else delay(5000);
         if(mach_absolute_time()-start>limit){e=ETIMEDOUT;break;}

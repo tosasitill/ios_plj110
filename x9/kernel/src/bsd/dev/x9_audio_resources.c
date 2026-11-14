@@ -49,6 +49,21 @@ void x9_audio_resources_fault(uint32_t owner,uint64_t ticket,int error)
     }
     lck_mtx_unlock(&resource_lock);
 }
+static enum {AfeInitNone,AfeInitIssuing,AfeInitDone,AfeInitFailed} afe_init;
+int x9_audio_afe_init_begin(void)
+{
+    lck_mtx_lock(&resource_lock);
+    int e=afe_init==AfeInitDone?EALREADY:afe_init==AfeInitFailed?EIO:
+          afe_init==AfeInitIssuing?EBUSY:0;
+    if(!e)afe_init=AfeInitIssuing;
+    lck_mtx_unlock(&resource_lock);return e;
+}
+void x9_audio_afe_init_end(int error)
+{
+    lck_mtx_lock(&resource_lock);
+    if(afe_init==AfeInitIssuing)afe_init=error?AfeInitFailed:AfeInitDone;
+    lck_mtx_unlock(&resource_lock);
+}
 int x9_audio_resources_status(X9AudioResourceStatus *s)
 {
     if(!s)return EINVAL;

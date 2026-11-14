@@ -305,7 +305,15 @@ static int take(bool with_pll,bool with_path)
     s.flags|=X9ClockAPLLCaptured;
     if(with_pll){CLKSTEP("pll cold");e=pll_cold();if(e)return e;}
     CLKSTEP("smc 0 (AFE init)");
-    s.stage=X9ClockInit;s.flags|=X9ClockInitIssued;e=smc(0,0);if(e)return e;
+    s.stage=X9ClockInit;
+    /* Boot-wide once (shared with the mic): a replayed secure INIT is not a
+     * runtime-resume step in OPPO and must not run per stream. */
+    int ib=x9_audio_afe_init_begin();
+    if(ib==EALREADY)printf("X9 SPK CLK: AFE init already done this boot, not replayed\n");
+    else if(ib)return ib;
+    else {
+        s.flags|=X9ClockInitIssued;e=smc(0,0);x9_audio_afe_init_end(e);if(e)return e;
+    }
     CLKSTEP("domain votes");
     s.stage=X9ClockDomains;
     const unsigned bits[]={8,4,1};

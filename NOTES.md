@@ -989,3 +989,38 @@ TFA_STATE_OPERATING). spk26 therefore did NOT keep "AMPE stays 0": it played
 digital silence through an engaged amplifier for about 2 s. Teardown still
 wrote AMPE=0 PWDN=1. Next step: either force AMPE=0 again after CLKS and
 read it back for a truly quiet run, or proceed to the low-level tone.
+
+### spk27 (2026-11-14) — quiet 1 kHz tone, then the mic full flow
+
+Static audit before combining speaker + mic again (the 282/284 hangs):
+- Found: MTK_AUDIO_SMC_OP_INIT (op 0) is issued by OPPO only once, in
+  mt6993_afe_pcm_dev_probe. The mic guarded it with a private
+  afe_init_ready flag, but the speaker clock child issued `smc 0` on every
+  acquire, so a full speaker run followed by the mic replayed the secure INIT.
+  Fixed: x9_audio_afe_init_begin/end (x9_audio_resources.c) is one boot-wide
+  state shared by both. A second user prints `... AFE init already done this
+  boot, not replayed`. Ops 7 (DOMAIN_SIDEBANDS, every OPPO enable_clock) and
+  3/4 (SRAM request/release, runtime resume/suspend) may repeat, as in OPPO.
+- This does NOT explain 282/284 (both hangs come before any second smc 0:
+  in 284 the speaker failed in pll cold, before its smc 0; in 282 the hang
+  is in the IOSleep(600) right after `native board -> 0`, about 3 s before
+  the speaker's smc 0). In both, every audio thread was sleeping when the SoC
+  stopped. Background agents checked: mic afe_worker (idle unless active),
+  speaker AFE watchdog (blocks unless running), SPI570 IRQ worker (DSP
+  playback only, not on this path); mic DMA bind does no MMIO. Root cause is
+  still unknown.
+- Hand-off state checked for mic after speaker: the speaker release restores
+  AFE 0x10/0x14/0x60/0x4380, IN4/OUT4 CON, cowork 0x1690 and pad 0x98 to the
+  LK values, which is what mic afe_idle/afe_dram_take/afe_access require.
+  VLP muxes stay borrowed by both, the pins are disjoint (mic 98/100-103,
+  speaker 108-111), and the mic needs no APLL.
+Tone (TFA986x rev 0x66 is a probus device: OPPO OPERATING and unmute set
+AMPE=1, set_mute is tfa_set_mute_nodsp, so mute = AMPE=0): after CLKS both
+PAs get AMPE=1 with readback (`X9 SPK: PA34 AMPE=1 -> 0`,
+`PA.. amp-on ...`), then 1 kHz at -24 dB (>>4) for 2 s, mute (AMPE=0), stop.
+`x9_spk_tone=0` keeps the silent run. Removed the unconditional 5x960 submit
+after CLKS (it could overfill the ring and return EAGAIN).
+spk27: `x9/out/x9-spk27-20261114/boot.img`, boot args x9_audio=2
+x9_dsp_boot=75 x9_mic=2 x9_mic_boot=1000 (speaker first, mic 1 s after).
+If it hangs again, the USB console loses about 1 KiB at the end, so also pull
+the UFS sidecar `x9-bootlog-*/console.bin` for the tail.

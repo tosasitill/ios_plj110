@@ -18,7 +18,7 @@ static struct afe_journal calibration;
 /* Vendor INIT is a device-probe operation, not a runtime-resume operation.
  * Once successful it remains installed for this boot; repeated cold capture
  * must not replay global secure initialization. A failed INIT is terminal. */
-static bool afe_init_attempted,afe_init_ready;
+static bool afe_init_ready;
 static const unsigned afe_regs[]={0x10,0,0x60,0x4380,0x14};
 static const uint32_t afe_masks[]={3,1u<<25,4,1,1};
 static const unsigned cal_pins[]={98,100,101,102,103};
@@ -278,10 +278,15 @@ static int afe_take(struct afe_journal *a,vm_offset_t gpio,struct x9_mic_afe_sta
     s->stage=X9_MIC_AFE_SMC_INIT;
     int e=0;
     if(!afe_init_ready) {
-        if(afe_init_attempted)return EIO;
-        afe_init_attempted=true;s->flags|=X9_MIC_AFE_INIT_ISSUED;
-        e=afe_smc(a,0,0);if(e)return e;
-        afe_init_ready=true;
+        /* Boot-wide once, shared with the speaker clock child. */
+        int ib=x9_audio_afe_init_begin();
+        if(ib==EALREADY){afe_init_ready=true;printf("X9 MIC AFE: AFE init already done this boot, not replayed\n");}
+        else if(ib)return ib;
+        else {
+            s->flags|=X9_MIC_AFE_INIT_ISSUED;
+            e=afe_smc(a,0,0);x9_audio_afe_init_end(e);if(e)return e;
+            afe_init_ready=true;
+        }
     }
     s->stage=X9_MIC_AFE_DOMAINS;
     static const uint32_t bits[]={8,4,1}; /* AO -> infra -> AUDIO */
