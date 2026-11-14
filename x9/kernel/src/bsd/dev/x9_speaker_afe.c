@@ -13,6 +13,7 @@
 #include "x9_speaker_afe.h"
 #include "x9_audio_resources.h"
 #include "x9_speaker_out4.h"
+#include "x9_speaker_in4.h"
 #include "x9_speaker_dl24.h"
 #include "x9_speaker_memif.h"
 extern int sweet_x9_arg(const char *,int);
@@ -39,21 +40,26 @@ enum { STOP_MARGIN_FRAMES=480, WATCHDOG_MS=2 };
 static void watchdog(void *,wait_result_t);
 struct patch {uint32_t off,mask,value,saved,expected;};
 /* OUT4 S16 in 32-bit I2S slots matches get_etdm_wlen(S16_LE)=31, valid
- * width=15. ETDM FS=5, relatch=10; memif FS=10. No IN4 feedback programming.
- * Pad/master/slave/format are AP-master I2S, synchronous sharing OFF.
- * Cowork OUT4->IN4 master choice=0 only configures the inactive selector. */
+ * width=15. ETDM FS=5, relatch=10; memif FS=10. As in OPPO (OUT4 shares
+ * IN4), IN4 is the pad-top BCK/LRCK master synced to OUT4: cowork
+ * OUT4<-IN4_MASTER(0), IN4<-OUT4_MASTER(8). Enable IN4 then OUT4 (DAPM
+ * supply order by register), disable in reverse. */
+enum {
+    P_OUT4=0,P_COWORK=4,P_PAD=5,P_ADDR=6,P_MEMIF=10,P_ROUTE=11,P_IN4=13,
+};
 static struct patch config[]={
     X9_SPEAKER_OUT4_DISABLED_CONFIG,
-    X9_SPEAKER_OUT4_COWORK_DISABLED,
-    {0x0098,(1u<<5)|(1u<<20),1u<<5,0,0},
+    X9_SPEAKER_I2S4_COWORK,
+    X9_SPEAKER_I2S4_PAD_TOP,
     {0,0,0,0,0},{0,0,0,0,0},{0,0,0,0,0},{0,0,0,0,0},
     {0,0,0,0,0},{0,0,0,0,0},{0,0,0,0,0}, /* explicit layout installed at register */
+    X9_SPEAKER_IN4_DISABLED_CONFIG,
 };
 #define COUNT ((unsigned)(sizeof(config)/sizeof(config[0])))
 /* Separate from shared five-word descriptors. saved is the lease baseline;
  * prior is the observed value immediately before the LAST attempted write. */
 static uint32_t prior[COUNT];
-_Static_assert(COUNT==13, "memif journal index10 and route indices11/12");
+_Static_assert(COUNT==20 && COUNT<=32, "OUT4 0-3, cowork4, pad5, addr6-9, memif10, routes11/12, IN4 13-19");
 _Static_assert(sizeof(struct x9_speaker_afe_status)==192,"AFE cached status v6 size");
 static int guard_error(unsigned stage,int e,bool configuration,uint32_t off,
                        uint32_t expected,uint32_t actual)
@@ -108,7 +114,7 @@ static int check_lease(unsigned stage)
 static uint32_t rd(uint32_t off)
 {
     uint32_t v=hw.afe[off/4];__asm__ volatile("dmb oshld":::"memory");
-    if(off==memif.con)state.dl24=v;else if(off==0x1580)state.out4=v;
+    if(off==memif.con)state.dl24=v;else if(off==config[P_OUT4].off)state.out4=v;
     return v;
 }
 static void wr(uint32_t off,uint32_t value)
@@ -194,21 +200,23 @@ static int disable(void)
 {
     /* Do not RMW an untouched or previously restored register. */
     int e=check_lease(X9AFEGuardDisable);if(e)return e;
-    if(state.dirty_mask&(1u<<10))e=change(10,config[10].expected&~memif.enable,X9AFEGuardDisable);
+    if(state.dirty_mask&(1u<<P_MEMIF))e=change(P_MEMIF,config[P_MEMIF].expected&~memif.enable,X9AFEGuardDisable);
     if(e)return e; /* no second write/qualification after a failed disable */
     uint64_t ticks;nanoseconds_to_absolutetime(1000000,&ticks);
     uint64_t end=mach_absolute_time()+ticks;
-    for(unsigned n=0;!e && (state.dirty_mask&(1u<<10)) && n<500;n++) {
+    for(unsigned n=0;!e && (state.dirty_mask&(1u<<P_MEMIF)) && n<500;n++) {
         e=check_lease(X9AFEGuardDisable);if(e)break;
         if(!(rd(memif.con)&memif.enable))break;
         if(mach_absolute_time()>=end){e=ETIMEDOUT;break;}delay(2);
     }
-    if(!e && (state.dirty_mask&(1u<<10))) {
+    if(!e && (state.dirty_mask&(1u<<P_MEMIF))) {
         e=check_lease(X9AFEGuardDisable);
         if(!e && (rd(memif.con)&memif.enable))e=ETIMEDOUT;
     }
     if(e)return e;
-    if(state.dirty_mask&1)e=change(0,config[0].expected&~1u,X9AFEGuardDisable);
+    /* DAPM power-down is the reverse of power-up: OUT4 EN, then IN4 EN. */
+    if(state.dirty_mask&(1u<<P_OUT4))e=change(P_OUT4,config[P_OUT4].expected&~1u,X9AFEGuardDisable);
+    if(!e && (state.dirty_mask&(1u<<P_IN4)))e=change(P_IN4,config[P_IN4].expected&~1u,X9AFEGuardDisable);
     if(!e)state.running=0;
     return e;
 }
@@ -276,12 +284,12 @@ static void install_platform(const struct x9_speaker_afe_platform *p,
                              const struct x9_speaker_memif_layout *layout)
 {
     hw=*p;memif=*layout;
-    config[6]=(struct patch){memif.base_msb,X9_SPEAKER_MEMIF_ADDR_MSB_MASK,0,0,0};
-    config[7]=(struct patch){memif.base,X9_SPEAKER_MEMIF_ADDR_LOW_MASK,0,0,0};
-    config[8]=(struct patch){memif.end_msb,X9_SPEAKER_MEMIF_ADDR_MSB_MASK,0,0,0};
-    config[9]=(struct patch){memif.end,X9_SPEAKER_MEMIF_ADDR_LOW_MASK,0,0,0};
-    config[10]=(struct patch){memif.con,memif.format_mask,memif.format_value,0,0};
-    for(unsigned i=0;i<2;i++)config[11+i]=(struct patch){memif.route[i],UINT32_MAX,memif.source[i],0,0};
+    config[P_ADDR+0]=(struct patch){memif.base_msb,X9_SPEAKER_MEMIF_ADDR_MSB_MASK,0,0,0};
+    config[P_ADDR+1]=(struct patch){memif.base,X9_SPEAKER_MEMIF_ADDR_LOW_MASK,0,0,0};
+    config[P_ADDR+2]=(struct patch){memif.end_msb,X9_SPEAKER_MEMIF_ADDR_MSB_MASK,0,0,0};
+    config[P_ADDR+3]=(struct patch){memif.end,X9_SPEAKER_MEMIF_ADDR_LOW_MASK,0,0,0};
+    config[P_MEMIF]=(struct patch){memif.con,memif.format_mask,memif.format_value,0,0};
+    for(unsigned i=0;i<2;i++)config[P_ROUTE+i]=(struct patch){memif.route[i],UINT32_MAX,memif.source[i],0,0};
     state.version=X9_SPEAKER_AFE_STATUS_VERSION;state.memif=memif.id;
     state.producer=hw.producer;state.generation=hw.generation;
 }
@@ -345,7 +353,8 @@ static int prepare(uint64_t borrowed)
         if(!e) {
             uint32_t value=rd(memif.con)&memif.inactive;
             if(value)e=guard_error(X9AFEGuardPrepare,EBUSY,true,memif.con,0,value);
-            else if((value=rd(0x1580)&1))e=guard_error(X9AFEGuardPrepare,EBUSY,true,0x1580,0,value);
+            else if((value=rd(config[P_OUT4].off)&1))e=guard_error(X9AFEGuardPrepare,EBUSY,true,config[P_OUT4].off,0,value);
+            else if((value=rd(X9_SPEAKER_IN4_CON0)&1))e=guard_error(X9AFEGuardPrepare,EBUSY,true,X9_SPEAKER_IN4_CON0,0,value);
         }
         /* There is no CONN116_3 in this SoC table. Never clear a foreign
          * route; our own bank must start empty, others are baselined. */
@@ -362,11 +371,15 @@ static int prepare(uint64_t borrowed)
         if(!e)e=unowned_routes_idle(false,X9AFEGuardPrepare);
         if(!e) {
             uint64_t base=hw.dma_bus,end=base+hw.dma_bytes-1;
-            config[6].value=(uint32_t)(base>>32);config[7].value=(uint32_t)base;
-            config[8].value=(uint32_t)(end>>32);config[9].value=(uint32_t)end;
+            config[P_ADDR+0].value=(uint32_t)(base>>32);config[P_ADDR+1].value=(uint32_t)base;
+            config[P_ADDR+2].value=(uint32_t)(end>>32);config[P_ADDR+3].value=(uint32_t)end;
             for(unsigned i=0;i<COUNT;i++) {
                 config[i].saved=config[i].expected=rd(config[i].off);prior[i]=config[i].saved;
             }
+            printf("X9 SPK AFE: inherited in4 %x/%x/%x/%x/%x/%x/%x cowork=%x pad=%x\n",
+                config[P_IN4].saved,config[P_IN4+1].saved,config[P_IN4+2].saved,config[P_IN4+3].saved,
+                config[P_IN4+4].saved,config[P_IN4+5].saved,config[P_IN4+6].saved,
+                config[P_COWORK].saved,config[P_PAD].saved);
             state.dirty_mask=state.uncertain_mask=0;
             journaled=true;
             for(unsigned i=0;!e && i<COUNT;i++)e=change(i,config[i].value,X9AFEGuardPrepare);
@@ -377,7 +390,7 @@ static int prepare(uint64_t borrowed)
             if(hw.producer==X9AFEProducerDSP) {
                 state.played=state.submitted=state.anchor=0;state.cursor=0;
             }
-            state.prepared=1;state.dl24=rd(memif.con);state.out4=rd(0x1580);
+            state.prepared=1;state.dl24=rd(memif.con);state.out4=rd(config[P_OUT4].off);
         }
     }
     if(e){int off=stop_locked();if(off)state.restore_error=(uint32_t)off;}
@@ -433,15 +446,22 @@ static int refresh_output(unsigned stage)
 }
 static int enable_locked(uint64_t *anchor)
 {
-    int e=change(0,config[0].expected|1,X9AFEGuardStart);
+    /* OPPO DAPM: I2SIN4_EN (ETDM_IN4_CON0) powers before I2SOUT4_EN
+     * (ETDM_OUT4_CON0); the memif is enabled later by the trigger. */
+    int e=change(P_IN4,config[P_IN4].expected|1,X9AFEGuardStart);
+    if(!e)e=change(P_OUT4,config[P_OUT4].expected|1,X9AFEGuardStart);
     if(!e)e=verify_config(false,X9AFEGuardStart);
     if(!e)e=unowned_routes_idle(false,X9AFEGuardStart);
     if(!e && hw.producer==X9AFEProducerDSP)e=refresh_output(X9AFEGuardStart);
     if(!e) {
         uint64_t enabled_at=mach_absolute_time();
-        e=change(10,config[10].expected|memif.enable,X9AFEGuardStart);
+        e=change(P_MEMIF,config[P_MEMIF].expected|memif.enable,X9AFEGuardStart);
         if(!e)e=verify_config(false,X9AFEGuardStart);
         if(!e)e=unowned_routes_idle(true,X9AFEGuardStart);
+        if(!access_error) /* never read a revoked AFE just to log */
+            printf("X9 SPK AFE: enabled -> %d in4=%x out4=%x in4mon=%x cowork=%x pad=%x memif=%x\n",e,
+                rd(X9_SPEAKER_IN4_CON0),rd(config[P_OUT4].off),rd(X9_SPEAKER_IN4_MON),
+                rd(config[P_COWORK].off),rd(config[P_PAD].off),rd(memif.con));
         if(!e) {
             state.anchor=enabled_at;
             state.running=1;last_poll=last_progress=state.anchor;*anchor=state.anchor;

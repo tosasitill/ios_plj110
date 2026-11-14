@@ -282,6 +282,24 @@ static void fill(int16_t *pcm,uint32_t frames,uint32_t *phase,int shift)
     }
 }
 
+/* CLKS wait that keeps the DL24 ring fed: a bare 200 ms poll would let the
+ * ~120 ms of queued silence drain and the AFE watchdog stop the stream. */
+static int wait_clks_fed(unsigned i,int16_t *pcm,uint32_t *phase,uint64_t *submitted)
+{
+    for(unsigned n=0;n<200;n++) {
+        uint16_t v=0;int e=bf_get(i,0x1100,&v);if(e)return e;
+        if(v==1)return 0;
+        uint64_t played=0;e=x9_speaker_afe_position(&played);
+        if(e && e!=EAGAIN)return e;
+        if(!e && *submitted-played<9600) {
+            fill(pcm,960,phase,-1);e=x9_speaker_afe_submit(pcm,960);
+            if(!e)*submitted+=960;else if(e!=EAGAIN)return e;
+        }
+        delay(1000);
+    }
+    return ETIMEDOUT;
+}
+
 static void teardown(void)
 {
     int e;
@@ -368,8 +386,9 @@ int x9_speaker_bringup_run(void)
     }
     for(unsigned i=0;!e && i<2;i++) {
         e=bf_set(i,0x0120,1);if(!e)e=bf_set(i,0x0000,0);  /* INIT_CF: MANSCONF=1 PWDN=0 */
-        if(!e)e=wait_bf(i,0x1100,1,50);                   /* CLKS */
+        if(!e)e=wait_clks_fed(i,pcm,&phase,&submitted);   /* CLKS, 200 ms */
         printf("X9 SPK: PA%x clocks -> %d\n",slaves[i],e);
+        if(e==ETIMEDOUT)pa_report("no-clks");
     }
     /* Keep the ring fed while waiting. */
     if(!e){for(unsigned n=0;!e && n<5;n++){fill(pcm,960,&phase,-1);e=x9_speaker_afe_submit(pcm,960);if(!e)submitted+=960;}}

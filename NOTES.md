@@ -931,3 +931,37 @@ CON6 busy, ids 30/33/34).
 spk25 is built WITHOUT x9_mic_boot (speaker only), so the speaker path runs
 to the end apart from the mic interaction hang. Boot args: x9_audio=2
 x9_dsp_boot=75 x9_mic=2.
+
+### log 285 / spk26 (2026-11-14) — ETDM IN4 is the I2S4 clock master
+
+log 285 (spk25, speaker only): no hang. The whole clock/pads/AFE path passed
+(`clock acquire -> 0`, `pads acquire -> 0`, `afe prepare -> 0`, `afe start
+(silence) -> 0`, DL24 consuming: played=496), then `PA34 clocks -> 60`:
+CLKS (0x1100) stayed 0 for 50 ms (stat11=0018). Teardown/release all 0.
+Cause (static, OPPO mt6993-dai-i2s.c): GPIO108/109 are I2SIN4_BCK/LRCK, so
+the bit clock and word clock on the pads come from ETDM **IN4**, and spk25
+never touched IN4. OPPO: `[DAI_I2SOUT4].share_i2s_id = MT6993_DAI_I2S_IN4`
+by default (the live DT has no `i2sout4-share`), so mtk_dai_i2s_config(OUT4)
+also runs the IN branch for IN4. The I2SOUT4 route powers `I2SIN4_GPIO`
+(en_event: ch-1, ip_mode, DT sync=1, slave 0) and `I2SIN4_EN` (share
+connect). DAPM powers supplies in register order, so IN4 EN (0x13c0) comes
+before OUT4 EN (0x1580). HD_EN is NOPM (APLL only), MCLK is off (DT mclk 0),
+and AUDIO_TOP_CON2 ETDM gates were already 0 (`top2=0`).
+spk26 IN4 profile (x9_speaker_in4.h, all from mt6993-reg.h/dai-i2s.c):
+CON0 0x13c0 sync=1 slave=0 fmt=0 bit_len=15 word_len=31 ch=1 relatch_dom=1;
+CON1 init_count=5 init_point=3 (pad top, master) lrck_reset=1; CON2 clk_src
+APLL=1, ck_en_auto=1, multi_ip=0; CON3 fs_timing=5; CON4 relatch_sel=10;
+CON8 afifo off; CON9 out2latch=6; cowork 0x1690 OUT4_SLAVE_SEL[11:8]=0
+(IN4_MASTER) + IN4_SLAVE_SEL[27:24]=8 (OUT4_MASTER); 0x98 PAD_TOP_CK_EN
+bit5=1, OUT/IN BCK_NEG_EG_LATCH bits20/21=0.
+AFE engine: journal is now 20 entries with named indices (IN4 13-19);
+prepare refuses an inherited IN4 EN; start enables IN4, OUT4, then memif;
+disable reverses (memif, OUT4, IN4); restore puts back every saved word.
+New logs: `X9 SPK AFE: inherited in4 ... cowork= pad=` and `X9 SPK AFE:
+enabled -> e in4= out4= in4mon= cowork= pad= memif=`. Bringup: the CLKS
+wait is 200 ms and keeps feeding silence (a bare wait would drain the ring
+and trip the AFE watchdog); on timeout it prints `PA.. no-clks` status.
+Clock/pads validators do not check IN4/0x1690/0x98 (checked statically);
+clock idle() requires 0x13c0 bit0=0 only at release, after AFE disable.
+spk26 build: `x9/out/x9-spk26-20261114/boot.img` (speaker only, boot args
+x9_audio=2 x9_dsp_boot=75 x9_mic=2). The speaker+mic hang is still open.
