@@ -136,9 +136,25 @@ static int htiming(uint64_t hz)
         }
     }
     if(!found)return ENOTSUP;
+    /* Values exactly as OPPO i2c-mt65xx mt6991_compat (speed_ver=1,
+     * ltiming_adjust=1) mtk_i2c_init_hw: HS=0, CLOCK_DIV=(div-1)<<8|(div-1),
+     * SCL_MIS_COMP=0, SDA_TIMING=0, IO_CONFIG open-drain 3, DELAY_LEN=2
+     * (I2C_DELAY_LEN; we wrote 0). Android never reads these back. Log 299
+     * stage 13 EIO: this controller revision reports HS with bit15 set and
+     * no upper CLOCK_DIV field (I2C6 shows the same since log 257:
+     * HS 0->8000, DIV 202->2). So, as Android/I2C6, write and journal the
+     * value the hardware holds; transfer CSRs stay strictly verified. */
     const unsigned regs[]={H_TIMING,H_LOW,H_DIV,H_EXT,H_HS,H_IO,H_SDA,H_MIS,H_DELAY};
-    const uint32_t values[]={timing,low,divreg,(ext<<8)|1,0,3,0,0,0};
-    for(unsigned i=0;i<9;i++) {int e=hput(regs[i],values[i]);if(e)return e;}
+    const uint32_t values[]={timing,low,divreg,(ext<<8)|1,0,3,0,0,2};
+    for(unsigned i=0;i<9;i++) {
+        int e=hcontrols();if(e)return e;
+        unsigned k=0;while(k<14 && h_regs[k]!=regs[i])k++;
+        if(k==14)return EINVAL;
+        hwr(hb.bus,regs[i],values[i]);
+        uint32_t got=hrr(hb.bus,regs[i]);hb.expected[k]=got;
+        if(got!=values[i])
+            printf("X9 HAPTIC: i2c5 timing reg=%x wrote=%x read=%x (kept, as I2C6)\n",regs[i],values[i],got);
+    }
     return 0;
 }
 static int htransfer(const uint8_t *tx,unsigned n,uint8_t *rx)

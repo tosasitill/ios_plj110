@@ -1384,3 +1384,27 @@ Log 298 (audio39): no hang (`X9 IOMAP` ~7 MiB of 64). Three static fixes:
    only, other regs/banks idle): W1C it, re-check idle.
 Args unchanged (x9_audio=2 x9_dsp_boot=65 x9_mic=2 x9_mic_boot=1000).
 Build: `x9/out/x9-audio40-20261114/boot.img`.
+
+### audio41 (2026-11-14) — log 299: speaker OK but late; mic TX2 idle; haptic stage 13
+
+Log 299 (audio40): no stream faults any more (12 sessions, seconds each,
+normal stops). Haptic passed stage 12 (stale STAT cleared). Fixes:
+1. **Speaker only after ~73 s** = `x9_dsp_boot=65`: the mic boot test runs
+   at 65 s and the lazy speaker backend registers after it (72.7 s); every
+   StartIO before that got `blockers=ff`. Now `x9_dsp_boot=10` (mic test
+   ~10–14 s, backend ~15 s, before mediaserverd's first StartIO ~33 s).
+2. **Mic: TX2 shifted nothing.** MUX=08/40/88 took effect, ULMON moved, but
+   the ADDA6 TX data-out monitor (0x2ca3/4) stayed 00 and MISO1 high 0/6.
+   OPPO DAPM: MISO2/3 muxes (MUX_CFG_M) hang off `UL2_SRC_MUX` →
+   `UL_SRC_34`, so an r_miso1 recording always runs `mt6681_set_ul34_src`
+   (Android 0x2588..a = 23/08/01, ours 20/00/00). Now ADDA6 UL SRC is
+   enabled in set_ul34_src order (voice 48k, IIR on, ON last), journaled
+   and restored like UL1; slots still carry UL1_CH1.
+3. **Haptic stage 13 EIO (htiming).** OPPO `mt6991_compat` (speed_ver 1,
+   ltiming_adjust 1) writes HS=0, CLOCK_DIV=(d-1)<<8|(d-1), SDA 0, MIS 0,
+   IO 3, DELAY_LEN 2, and never reads them back. This revision reads HS
+   bit15 set and no upper DIV field (I2C6 identical since 257). Timing CSRs
+   now journal the hardware value (logged), DELAY_LEN=2 as Android.
+   Transfer CSRs stay strict. Bus stays ≤390 kHz (Android DT: 1 MHz FM+).
+Args: x9_audio=2 x9_dsp_boot=10 x9_mic=2 x9_mic_boot=1000.
+Build: `x9/out/x9-audio41-20261114/boot.img`.

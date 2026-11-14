@@ -242,6 +242,19 @@ int x9_mic_mt6681_digital_l(struct x9_mic_mt6681 *c,struct x9_mic_digital_status
     DIGITAL_BYTE(MT6681_AFE_ADDA_UL_SRC_CON0_0,7,0); /* AMIC, no loopback */
     DIGITAL_BYTE(MT6681_AFE_TOP_DEBUG1,0xff,0x11);
     DIGITAL_BYTE(MT6681_AFE_ADDA_UL_SRC_CON0_0,1,1);
+    /* Log 299: MUX_CFG_M=UL1 took effect (MUX=08/40/88) but the ADDA6 TX
+     * data-out monitor (0x2ca3/4, "AIF6") stayed 00 while ULMON moved: TX2
+     * shifted nothing out. In OPPO's DAPM the MISO2/3 muxes (MUX_CFG_M) sit
+     * on UL2_SRC_MUX -> "UL_SRC_34", so an r_miso1 recording always runs
+     * mt6681_set_ul34_src: ADDA6 UL SRC = the TX2 partner. Android capture:
+     * 0x2588..a = 23/08/01; ours 20/00/00. Same order as set_ul34_src:
+     * voice 48k (mode 3P25M 0), DMIC LP 0, IIRMODE 0, IIR_ON 1, HWGAIN4
+     * bypass (TOP_DEBUG1 0x11 above), then ul_src_on. Its own ADC3/4 stay
+     * off; the slots still carry UL1_CH1 data. */
+    DIGITAL_BYTE(MT6681_AFE_ADDA6_UL_SRC_CON0_2,0x1f,3);
+    DIGITAL_BYTE(MT6681_AFE_ADDA6_UL_SRC_CON0_1,0x6f,0x08);
+    DIGITAL_BYTE(MT6681_AFE_ADDA6_UL_SRC_CON0_0,7,0);
+    DIGITAL_BYTE(MT6681_AFE_ADDA6_UL_SRC_CON0_0,1,1);
     s->stage=X9_MIC_DIGITAL_CODEC_TX;
     DIGITAL_BYTE(MT6681_AFE_AUD_PAD_TOP,0xff,0x39);
     DIGITAL_BYTE(MT6681_AFE_ADDA_MTKAIFV4_TX_CFG0,0xff,0x29);
