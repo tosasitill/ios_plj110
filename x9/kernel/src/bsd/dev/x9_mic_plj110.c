@@ -376,8 +376,17 @@ static int xo_take(struct power_journal *j)
          * withdrawn on restore); any hardware-controlled mode is refused. */
         /* Log 265: xo=0x11, i.e. BBCK5 under hardware (SRCLKEN) control with
          * the codec live. Borrow it too; nothing is written or withdrawn. */
-        if((v&7)==4 || (v&7)==1){printf("X9 MIC: BBCK5 already on (xo=%02x), borrowed\n",v);X9PMIFRelease();return 0;}
-        if(v&7){printf("X9 MIC: BBCK5 xo=%02x not cold/software-on, refused\n",v);e=EBUSY;}
+        /* Log 293 / OPPO: mt6681_codec_init_reg calls mt6685_set_dcxo_mode(0)
+         * (BBCK5 mode 00 = XO_BBCK5_EN_M register control) and the CLK_BUF
+         * DAPM supply sets EN_M=1 for every capture (mt6685-audclk.c,
+         * mt6687 data: reg 0x7d6, mode bits[1:0], EN_M bit2). Every iOS boot
+         * reads xo=11 (mode 01 = EN_BB pin, EN_M 0): borrowing that left the
+         * codec analog 26M off (RC tune 1f, UL SRC ON_MON 0, ADC clock dead)
+         * while the AP-clocked MTKAIF calibration passed. Take EN_BB mode
+         * to OPPO's software-on state; restore puts the original mode back. */
+        if((v&7)==4){printf("X9 MIC: BBCK5 already software-on (xo=%02x), borrowed\n",v);X9PMIFRelease();return 0;}
+        if((v&7)==1){printf("X9 MIC: BBCK5 xo=%02x is EN_BB mode, switching to OPPO mode0+EN_M\n",v);v&=~7u;}
+        else if(v&7){printf("X9 MIC: BBCK5 xo=%02x not cold/EN_BB/software-on, refused\n",v);e=EBUSY;}
     }
     if(!e) {
         j->xo_owned=true;v|=4;e=xo_xfer_locked(j,&v,true);

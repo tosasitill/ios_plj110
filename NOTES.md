@@ -1157,3 +1157,40 @@ audio31 adds:
   gitignored x9/kernel/generated/x9_mic_android_ref.inc (generated from the
   Android capture; absent -> "no local Android reference table").
 Build: `x9/out/x9-audio31-20261114/boot.img`, same boot args as audio30.
+
+### log 293 / audio32 (2026-11-14) — static analysis only; BBCK5 clock fix
+
+Log 293 (audio31) read statically. No probe image this round.
+Mic:
+- 123/1299 codec registers differ from the Android recording. The digital
+  AIFTX/UL SRC config (UL_SRC_CON0, AUDIO_TOP0-3, CLKSQ 0x06, DCCLK1, CLKGEN
+  0x2a) matches. But codec UL_SRC_MON0 ON_MON=0 (Android 1, COMB data live)
+  and RC tune read 1f (Android 09). The AP-clocked MTKAIF calibration passes.
+  So the codec analog/ADC 26M domain is dead while the digital side is clocked.
+- OPPO mt6681_codec_init_reg -> mt6685_set_dcxo_mode(0) and the CLK_BUF DAPM
+  supply -> mt6685_set_dcxo(true): MT6687 BBCK5 0x7d6 mode bits[1:0]=0
+  (EN_M register control), EN_M bit2=1 (drivers/mfd/mt6685-audclk.c).
+  Every iOS boot (logs 280-293) reads xo=11 = mode 01 (EN_BB pin), EN_M 0,
+  and xo_take only borrowed it. That is the one clock input not covered by the
+  codec register diff.
+- Other differences: codec_init_reg never ran under iOS. SMT_CON0 lacked 0xf0
+  (Schmitt on MOSI0/1, MISO0, CLK_MOSI) and DRV_CON2 was 0x88 (OPPO 0x89).
+  GPIO_MODE3 was 0x11, but with audio_r_miso1_enable OPPO sets only CLK_MOSI
+  (Android 0x10). Android records 4 mics (L=AIN2/MIC2, R=AIN0/MIC1, ADC3/4,
+  ADDA6 UL). Our single L=AIN0 (MIC1, micbias0) is a valid OPPO route. ACCDET,
+  VOW, NLE and interrupt registers are not capture-path registers.
+Speaker:
+- The speaker-protection gate 0x2857fc is not the blocker. MGGetProductType
+  hashes IODeviceTree:/product product-id. Our D22AP product-id is table
+  index 36 = 0x669eebc5, which maps to VirtualAudio enum 0x10 (0x5126c). The
+  gate set is {0x11,0x12,0x24,0x25,0x4a,0x4b,0x5e,0x5f}, so the predicate is
+  false.
+- HAL trace: VirtualAudio enumerates PuffinOutput and reads streams, the
+  volume control and 'lcdr' (dB range). No AddDeviceClient/StartIO follows.
+  Still open: whether any playback was attempted in 293.
+Changed in audio32:
+1. x9_mic_plj110.c xo_take: xo mode 01 (EN_BB) -> write mode 0 + EN_M (OPPO).
+   Restore already writes the original low 3 bits back. 4 stays borrowed.
+2. Digital stage (journaled/restored): SMT_CON0 |= 0xf0, DRV_CON2 = 0x89,
+   GPIO_MODE3 = 0x10.
+Build: `x9/out/x9-audio32-20261114/boot.img`, same boot args as audio30.

@@ -209,8 +209,15 @@ int x9_mic_mt6681_digital_l(struct x9_mic_mt6681 *c,struct x9_mic_digital_status
     DIGITAL_BYTE(MT6681_AFE_ADDA_UL_DL_CON0_0,MT6681_ADDA_AFE_ON_MASK_SFT,1);
     /* R-MISO1 ordinary capture uses MODE4, not the calibration ch56 GPIO.
      * Keep CLK_MOSI and MOSI0/1 for the AP PAD_CLK; no third MISO. */
+    /* OPPO mt6681_codec_init_reg (never run under iOS; log 293 diff):
+     * mt6681_set_gpio_smt SMT_CON0 |= 0xf0 (Schmitt on MOSI0/1, MISO0,
+     * CLK_MOSI) and mt6681_set_gpio_driving DRV_CON2 = 0x89. */
+    DIGITAL_BYTE(MT6681_SMT_CON0,0xf0,0xf0);
+    DIGITAL_BYTE(MT6681_DRV_CON2,0xff,0x89);
     DIGITAL_BYTE(MT6681_GPIO_MODE2,0x77,0x11);
-    DIGITAL_BYTE(MT6681_GPIO_MODE3,0x77,0x11);
+    /* audio_r_miso1_enable=1: OPPO sets only CLK_MOSI (0x10) in MODE3;
+     * MISO0 stays GPIO (Android recording MODE3=0x10, ours was 0x11). */
+    DIGITAL_BYTE(MT6681_GPIO_MODE3,0x77,0x10);
     DIGITAL_BYTE(MT6681_GPIO_MODE4,0x70,0x20);
     DIGITAL_BYTE(MT6681_AFE_MTKAIF_MUX_CFG,RG_ADDA_CH1_SEL_MASK_SFT|RG_ADDA_CH2_SEL_MASK_SFT,0);
     DIGITAL_BYTE(MT6681_AFE_MTKAIF_MUX_CFG_H,RG_ADDA7_CH1_SEL_MASK_SFT|RG_ADDA7_CH2_SEL_MASK_SFT,0);
