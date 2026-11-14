@@ -146,6 +146,17 @@ static int bus_fault(struct power_journal *j,unsigned reg,int error)
     }
     j->bus_stuck=true;return error;
 }
+/* audio44: refusal BEFORE bus_owned (nothing written to the bank): record
+ * the register but do not mark the bank stuck. Log 302: a stuck flag here
+ * made restore() refuse (EIO), the mic kept the shared lease and every
+ * speaker start got EBUSY for the rest of the boot. */
+static int bus_refuse(struct power_journal *j,unsigned reg,int error)
+{
+    if(!j->status->bus_fault_errno) {
+        j->status->bus_fault_register=reg;j->status->bus_fault_errno=error;
+    }
+    return error;
+}
 static int bank_idle(struct power_journal *j)
 {
     /* Log 267: after an ACKed transfer and START=0, START still read
@@ -239,16 +250,22 @@ static int bus_take(struct power_journal *j)
     /* Log 263: LK leaves SCP-I2C1 INTR_MASK set with the bank otherwise
      * idle (same as I2C6 in log 256). Accept only that: START/STAT/FIFO
      * must be idle; MASK is journaled, cleared below and restored after. */
+    /* audio44 (log 302): after our own transfers START reads 0x4002 (bit14
+     * auto-restart config + bit1 remain after START=0, see log 267); only
+     * bit0 is an in-flight trigger, exactly as bank_idle(). The second
+     * session found the restored LK MASK=3ff plus START=4002 and refused. */
     uint32_t stale_mask=rr(j->bus,MASK);
+    if((rr(j->bus,START)&1) || rr(j->bus,STAT) || (rr(j->bus,FIFO_STAT)&31)) {
+        printf("X9 MIC: scp-i2c1 busy at admission start=%x stat=%x fifo=%x mask=%x\n",
+            rr(j->bus,START),rr(j->bus,STAT),rr(j->bus,FIFO_STAT),stale_mask);
+        return bus_refuse(j,(rr(j->bus,START)&1)?START:rr(j->bus,STAT)?STAT:FIFO_STAT,EBUSY);
+    }
     int e=0;
-    if(stale_mask) {
-        if(rr(j->bus,START)||rr(j->bus,STAT)||(rr(j->bus,FIFO_STAT)&31)){j->bus_stuck=true;return bus_fault(j,START,EBUSY);}
-    } else {e=bank_idle(j);if(e){j->bus_stuck=true;return e;}}
     /* Refuse DMA/IRQ selection, wrapper, shadow/hardware-trigger modes.
      * No assumption that idle alone arbitrates with a live SCP codec owner:
      * the separate GPIO9/XO cold-baseline check is mandatory. */
-    if(rr(j->bus,MULTI))return bus_fault(j,MULTI,ENOTSUP);
-    if(rr(j->bus,CTRL)&(1u|(1u<<2)|(1u<<7)|(1u<<8)|(1u<<9)))return bus_fault(j,CTRL,ENOTSUP);
+    if(rr(j->bus,MULTI))return bus_refuse(j,MULTI,ENOTSUP);
+    if(rr(j->bus,CTRL)&(1u|(1u<<2)|(1u<<7)|(1u<<8)|(1u<<9)))return bus_refuse(j,CTRL,ENOTSUP);
     for(unsigned i=0;i<sizeof(saved_regs)/sizeof(saved_regs[0]);i++)
         j->saved[i].old=rr(j->bus,saved_regs[i]);
     j->bus_owned=true;

@@ -1473,3 +1473,21 @@ Expected: recording works while nothing plays. The first sound after
 recording re-takes the speaker (~140 ms lazy hold). Playback during a
 recording is refused for now (exclusive lease; the Android-style shared AFE
 is the next step).
+
+### audio44 (2026-11-14) — second mic session refused by its own leftover START bits (log 302)
+
+302: the audio43 yield worked (speaker teardown all 0, ticket released at
+44.76 s). The mic START then stopped at board stage 3 (bus): `bus_fault_errno=16
+reg=0x24` (scp-i2c1 START). The boot capture restores LK's INTR_MASK=3ff, and
+after our own transfers START reads 0x4002 (log 267: bit14 auto-restart config
+plus bit1 stay set after START=0). The stale-mask admission compared the whole
+START register, so it refused (bank_idle already checked only bit0). That pre-write
+refusal also set bus_stuck, so restore() returned EIO (restore=5). The mic
+kept the shared lease, and every speaker start after that got EBUSY ("speaker
+dead"). The speaker teardown was not the cause.
+Fix: the admission checks START bit0/STAT/FIFO only, and refusals before
+bus_owned (nothing written) use bus_refuse(), which does not mark the bank stuck.
+Audit of the rest of the second session: the journal bzero resets codec.touched,
+and GPIO9/XO/wake/routes are restored to their found state (same adopt paths
+as the first session). The speaker clock release restores 0x14/0x60/VLP muxes
+before afe_take. The speaker re-hold path has still not run on hardware.
