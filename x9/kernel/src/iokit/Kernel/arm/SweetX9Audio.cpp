@@ -40,6 +40,7 @@ static bool backendHeld;
 static int stopError;
 static uint64_t physicalPlayed, physicalQueued, physicalAnchor, lastPosition, lastProgress;
 static uint32_t prefillFrames, positionRetries;
+static uint64_t silenceFills; /* periods of silence submitted while the HAL was behind */
 static bool prefillCommitted;
 /* Never pass user-writable output pages as the initial DMA prefill. */
 static int16_t prefill[X9_AUDIO_PREFILL_MAX * X9_AUDIO_CHANNELS];
@@ -138,15 +139,28 @@ static void worker(void *, wait_result_t)
             }
         }
         uint64_t written = __atomic_load_n(&producer->written, __ATOMIC_ACQUIRE);
-        if (!e && (written < s.out_queued || written - s.out_queued > X9_AUDIO_RING)) {
+        /* The HAL may be behind out_queued (silence filled below), never
+         * more than one ring ahead of it. */
+        if (!e && written > s.out_queued && written - s.out_queued > X9_AUDIO_RING) {
             s.bad_producer++; e = EINVAL;
         }
         /* No submissions against an uncertain physical cursor; EAGAIN may
-         * not authorize overwriting a consumed/replayed ring segment. */
-        for (unsigned n = 0; !e && !retry && n < 8 && written - s.out_queued >= X9_AUDIO_PERIOD; n++) {
+         * not authorize overwriting a consumed/replayed ring segment.
+         * Log 295: START plays the 40 ms prefill at once, but the HAL first
+         * writes ~260 ms later (after StartIO returns), so the queue always
+         * drained to one period -> ETIMEDOUT -> sticky Fault: no sound in any
+         * app. When the HAL has no full period and the hardware queue is down
+         * to 3 periods, submit a period of silence instead (ring slot = device
+         * frame, so the HAL's late writes are rejected as late, not misplaced). */
+        for (unsigned n = 0; !e && !retry && n < 8; n++) {
+            bool data = written > s.out_queued && written - s.out_queued >= X9_AUDIO_PERIOD;
+            if (!data && physicalQueued - physicalPlayed > 3 * X9_AUDIO_PERIOD) break;
             if (s.out_queued > UINT64_MAX - prefillFrames - X9_AUDIO_PERIOD) { e = EOVERFLOW; break; }
             uint64_t start = s.out_queued;
-            for (unsigned f = 0; f < X9_AUDIO_PERIOD; f++) {
+            if (!data) {
+                bzero(period, sizeof(period));
+                silenceFills++;
+            } else for (unsigned f = 0; f < X9_AUDIO_PERIOD; f++) {
                 unsigned slot = (unsigned)((start + f) % X9_AUDIO_RING) * X9_AUDIO_CHANNELS;
                 period[f * 2] = output[slot]; period[f * 2 + 1] = output[slot + 1];
             }
@@ -665,7 +679,18 @@ IOReturn X9AudioUserClient::externalMethod(uint32_t sel, IOExternalMethodArgumen
     if (sel == X9AudioStart && boardController) return kIOReturnNotPermitted;
     lck_mtx_lock(&audioLock); X9AudioControl s = *control;
     int e = 0;
-    if (sel == X9AudioStop) { e = stopState(&s, 0); }
+    if (sel == X9AudioStop) {
+        e = stopState(&s, 0);
+        /* A stream fault (underrun EPIPE / cursor ETIMEDOUT) whose backend
+         * really stopped is recoverable: the next START gets a fresh stream.
+         * Hardware/ownership faults stay sticky. */
+        if (!e && !backendHeld && !s.blockers && haveBackend &&
+            (s.error == EPIPE || s.error == ETIMEDOUT)) {
+            IOLog("X9 AUDIO UC: stream fault %d cleared by STOP (silence fills %llu)\n", s.error,
+                  (unsigned long long)silenceFills);
+            s.error = 0; s.state = X9AudioReady;
+        }
+    }
     else if (s.state & X9AudioRunning) { /* idempotent Start */ }
     else if (!haveBackend || !haveWorker || s.blockers || (s.state & X9AudioFault)) e = ENXIO;
     else if (s.generation == UINT32_MAX) e = EOVERFLOW;
@@ -675,7 +700,7 @@ IOReturn X9AudioUserClient::externalMethod(uint32_t sel, IOExternalMethodArgumen
         prefillFrames = backend.lead_frames;
         bzero(prefill, prefillFrames * X9_AUDIO_CHANNELS * sizeof(*prefill));
         physicalPlayed = physicalQueued = physicalAnchor = lastPosition = lastProgress = 0;
-        prefillCommitted = false; positionRetries = 0;
+        prefillCommitted = false; positionRetries = 0; silenceFills = 0;
         backendHeld = true; stopError = 0; /* start failure may own resources */
         e = backend.start(backend.context, prefill, prefillFrames, &anchor);
         if (!e) { prefillCommitted = true; physicalQueued = prefillFrames; physicalAnchor = anchor; }

@@ -1243,3 +1243,28 @@ Mi 10 repo survey: calls/SMS are "Not yet" there too. Its media injection is
 for its camera pipeline. Vibration: its aw8692x driver (same Awinic family
 as our AW8693XS, NOTES 5.1 "190 EBUSY") is the useful reference.
 Build: `x9/out/x9-audio34-20261114/boot.img`.
+
+### log 295 / audio35 (2026-11-14) — first real START; underrun killed it
+
+Log 295 (audio34, boot-held speaker, no mic test): chain held at 109 s, no
+hang. At 121.6 s the first type1 START: AFE in4/out4 enabled, PA clocks
+locked, AMPE=1. 47 ms later the kernel worker stopped the backend itself.
+Cause: START plays the 40 ms prefill immediately, but the HAL's StartIO
+returns ~260 ms later and only then writes PCM. The queue drains to one
+period -> positionBudgetExpired -> ETIMEDOUT -> Fault. Fault was sticky, so
+every later StartIO got why=3 (error 60): no sound in any app.
+audio35:
+1. SweetX9Audio worker: if the HAL has < 1 period and the hardware queue is
+   down to <= 3 periods, submit a period of silence (ring slot = device frame).
+2. STOP that really stopped the backend clears an EPIPE/ETIMEDOUT stream
+   fault back to Ready (logged "stream fault N cleared by STOP").
+3. HAL DoIO accepts out_queued > written (kernel silence fill) and zeroes
+   gaps from max(written, out_queued).
+Coexistence hang (282/284/287/294): in both directions the second subsystem's
+thread was asleep in an IOSleep log pause when the SoC died (294: within
+600 ms after "native board"; 284: within 250 ms after "native DMA bind",
+which only allocated/mapped memory). 284's speaker had failed and torn down
+its board hold 1.4 s earlier. Every boot that had both the speaker's AP-only
+board hold (power_on) and a mic run hung; boots with only one never did.
+Investigation continues (async trigger, not the step that printed last).
+Build: `x9/out/x9-audio35-20261114/boot.img` (audio34 boot args).

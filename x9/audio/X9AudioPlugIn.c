@@ -845,9 +845,11 @@ static OSStatus DoIOOperation(AudioServerPlugInDriverRef d, AudioObjectID o, Aud
          * Explicit zeroing of gaps prevents stale PCM replay after wrap. */
         if (start <= UINT64_MAX - X9_AUDIO_PREFILL_MAX - frames &&
             start >= written && start >= s.out_queued && start - s.out_queued <= X9_AUDIO_RING &&
-            frames <= X9_AUDIO_RING - (start - s.out_queued) && written >= s.out_queued &&
-            written - s.out_queued <= X9_AUDIO_RING) {
-            for (uint64_t f = written; f < start; f++) {
+            frames <= X9_AUDIO_RING - (start - s.out_queued) &&
+            (written < s.out_queued || written - s.out_queued <= X9_AUDIO_RING)) {
+            /* The kernel submits silence when we fall behind (log 295), so
+             * out_queued may pass our cursor; gaps start at whichever is later. */
+            for (uint64_t f = written > s.out_queued ? written : s.out_queued; f < start; f++) {
                 gOut[(f % X9_AUDIO_RING) * 2] = 0; gOut[(f % X9_AUDIO_RING) * 2 + 1] = 0;
             }
             const Float32 *src = main;
