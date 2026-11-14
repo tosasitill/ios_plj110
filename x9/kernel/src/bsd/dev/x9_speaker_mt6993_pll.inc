@@ -8,7 +8,8 @@ static X9AudioPLLStatus pll_s={.version=X9_AUDIO_PLL_STATUS_VERSION};
 static struct {
     vm_offset_t meter,top,mm;
     uint32_t gen_expected,gen_fenc;
-    bool captured,stuck,pll_written,trigger_issued,meter_done,borrowed;
+    uint32_t meter_con3;
+    bool captured,stuck,pll_written,trigger_issued,meter_done,borrowed,hw_cleared;
 } pj;
 struct pll_field {vm_offset_t base;unsigned off;uint32_t mask,saved,expected;};
 static struct pll_field pf[7];
@@ -117,9 +118,32 @@ static int pll_consumers(void)
     for(unsigned n=0;!e && n<3;n++)e=pll_refuse(pf[n].base,pf[n].off,pf[n].mask,pf[n].expected&pf[n].mask);
     return e;
 }
+/* OPPO clk-fmeter-mt6993.c fqmtr_cal: backup CON0-3, "Step 1: Set HW MODE
+ * to 0" (CON3 bit0), "Step 2: Wait for FQMTR to finish" (CON6 bit0), measure,
+ * then restore CON0-3. HW mode 1 is the resting state (log 284: CON3=1), so
+ * it is cleared for the cycle and put back by pll_restore, never refused. */
+static int meter_hw_off(void)
+{
+    pj.meter_con3=rd(pj.meter,0xc);
+    if(pj.meter_con3&1) {
+        pj.hw_cleared=true;wr(pj.meter,0xc,pj.meter_con3&~1u);
+        uint32_t v=rd(pj.meter,0xc);
+        if(v&1){pll_s.last_register=0xc;pll_s.last_value=v;return EIO;}
+    }
+    return pll_wait(pj.meter,0x18,1,0,320);
+}
+static int meter_hw_restore(void)
+{
+    if(!pj.hw_cleared)return 0;
+    if(pj.trigger_issued && !pj.meter_done)return EIO; /* our trigger in flight */
+    wr(pj.meter,0xc,(rd(pj.meter,0xc)&~1u)|(pj.meter_con3&1));
+    uint32_t v=rd(pj.meter,0xc);
+    if((v&1)!=(pj.meter_con3&1)){pll_s.last_register=0xc;pll_s.last_value=v;return EIO;}
+    pj.hw_cleared=false;return 0;
+}
 static int meter_idle(void)
 {
-    int e=pll_refuse(pj.meter,0xc,1,0); /* refuse autonomous HW mode */
+    int e=pll_refuse(pj.meter,0xc,1,0); /* HW mode must be off (ours) here */
     if(!e)e=pll_refuse(pj.meter,0x18,1,0);
     if(!e)e=pll_refuse(pj.meter,0,16,0);
     return e;
@@ -223,13 +247,19 @@ static int pll_cold(void)
         if(!e)e=pll_refuse(j.apll,0x34,16,0);
         if(e)return e;
     }
-    pll_s.stage=X9PLLMeter;e=meter_idle();
-    if(!e)e=pll_refuse(pj.meter,0,0x9110,0);
-    if(!e)e=pll_refuse(j.vlp,0x344,0x7f0000,0);
-    if(e)return e;
+    /* CON0 (bits 15/12/8 config, bit4 trigger) and the VLP source ID
+     * (0x344) are journaled (pf[3..6]) and restored like OPPO's backup;
+     * only an in-flight trigger/measurement is refused (meter_idle). */
+    pll_s.stage=X9PLLMeter;
+    printf("X9 SPK PLL: fmeter con0=%x con1=%x con2=%x con3=%x con6=%x vlp344=%x\n",
+        rd(pj.meter,0),rd(pj.meter,4),rd(pj.meter,8),rd(pj.meter,0xc),rd(pj.meter,0x18),rd(j.vlp,0x344));
+    e=meter_hw_off();
+    if(!e)e=meter_idle();
+    if(e){if(!pj.stuck)(void)meter_hw_restore();return e;}
+    for(unsigned n=3;n<7;n++)pll_prior[n]=pf[n].saved=pf[n].expected=rd(pf[n].base,pf[n].off);
     pll_s.meter_before[0]=rd(j.vlp,0x344);
     for(unsigned n=0;n<3;n++)pll_s.meter_before[n+1]=rd(pj.meter,n*4);
-    pll_s.meter_hw=rd(pj.meter,0xc);
+    pll_s.meter_hw=pj.meter_con3;
     pj.captured=true;pll_s.flags|=X9PLLBaseline|X9PLLMeterCaptured;return 0;
 }
 static int pll_h_parent(uint32_t parent)
@@ -292,7 +322,7 @@ static int pll_restore(void)
 {
     if(!pj.captured)return 0;
     if(pj.stuck || j.stuck)return EIO;
-    int e=meter_restore();if(!e)e=pll_consumers();if(e)return e;
+    int e=meter_restore();if(!e)e=meter_hw_restore();if(!e)e=pll_consumers();if(e)return e;
     if(pll_s.mux_owned&2){e=pll_idle();if(!e)e=pll_h_parent(0);if(e)return e;pll_s.mux_owned&=~2u;}
     if(pll_s.mux_owned&1) {
         e=pll_refuse(j.vlp,0x80,0x8300,pj.gen_expected);if(e)return e;

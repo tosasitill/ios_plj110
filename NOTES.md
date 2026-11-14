@@ -899,3 +899,35 @@ then `APLL2 inherited running ... borrowed`, `pll take`, `tuner take`
 (`inherited spm=...`), `clock acquire -> 0`, `SPK PADS: inherited ...`,
 `pads acquire -> 0`, `afe start (silence) -> 0`, `PA34/PA35 clocks -> 0`,
 `tone ... played=` growing, then the mic runs (no EBUSY).
+
+### log 284 / spk25 (2026-11-14) — fmeter HW mode, speaker-only image
+
+log 284 (spk24): the borrowed APLL2 check passed. First real APLL2 readout:
+`con0=3b10 con1=4000000 con3=80000002 fenc=3d00d731 tuner=110000
+pcw=78fd5264/78fd5265 rate=196607999 vlp80=20303 270=fff7ffff 330=0`, so
+postdiv is 4, which confirms that the old postdiv-0 requirement was wrong.
+Then `clock acquire -> 16 reg=c val=1`: meter_idle refused VLP fmeter CON3
+bit0 = 1. This time release worked (`clock release -> 0`, AP-only release 0,
+ticket release 0). The mic then started (`native DMA bind -> 0`, 101.24 s)
+and the SoC hung about 0.2-0.4 s later, inside the mic's IOSleep. The ~1 KiB
+console tail was lost.
+Hang pattern (observation): 282 (mic run, then speaker AP-only hold: hang
+2.4 s later) and 284 (speaker hold+release, then mic: hang about 0.4 s
+later). In both, both threads were sleeping. No hang when only one of them
+touched hardware: 276/283 (mic EBUSY) and 278-281 (mic only). Ruled out
+statically: SPI570 (armed only by the DSP PCM bind), mic afe_worker (polls
+only while capturing), speaker AFE watchdog (starts at afe register, not
+reached), SweetX9Audio worker (only while running), PMIF (global lock, no
+retained state), and the DSPBOOT ffffffff fields (placeholders when not
+held). Cause unknown.
+Fmeter (OPPO clk-fmeter-mt6993.c fqmtr_cal): backup CON0-3, clear CON3 bit0
+(HW mode), wait CON6 bit0, measure, restore CON0-3. So HW mode 1 is the
+resting state. spk25: meter_hw_off/meter_hw_restore (CON3 cleared for the
+cycle, restored in pll_restore); CON0 0x9110 and vlp+0x344 are no longer
+required to be 0 (journaled from the post-HW-off image and restored);
+`X9 SPK PLL: fmeter con0..con6` is printed. The meter programming itself
+matches OPPO (CON0 0x0410_9000, CON1 load 0x3ff, CON2 div1, trigger bit4,
+CON6 busy, ids 30/33/34).
+spk25 is built WITHOUT x9_mic_boot (speaker only), so the speaker path runs
+to the end apart from the mic interaction hang. Boot args: x9_audio=2
+x9_dsp_boot=75 x9_mic=2.
