@@ -165,6 +165,8 @@ static int cam_sensor_session_close_locked(uint64_t epoch,struct x9_camera_probe
 {
     int off,e=cam_sensor_session_match(epoch);
     if(e)return e; /* stale/second close has no MMIO or journal mutation */
+    e=cam_native_sensor_retirement_guard_locked(epoch);
+    if(e)return e;
     /* An independent sensor caller cannot remove supplies below a capture
      * attempt. Core stop must clear capture only after actual HW drain. */
     if(session.capture)return EBUSY;

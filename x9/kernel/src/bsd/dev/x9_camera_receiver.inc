@@ -335,6 +335,8 @@ static int cam_rx_sensor_close_locked(uint64_t epoch)
     struct x9_camera_receiver r;
     int off;
     if(!cam_rx_sensor_held_locked(epoch))return ESTALE;
+    off=cam_native_sensor_retirement_guard_locked(epoch);
+    if(off)return off;
     off=cam_rx_session_close(&r);
     cam_mm_log(r.sensor,&r.mm);
     printf("X9 CAMERA RX LIFETIME: sensor=%u sensor_epoch=%llu flags=%x errno=%u restore=%u "
