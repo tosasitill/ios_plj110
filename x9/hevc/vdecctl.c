@@ -221,7 +221,8 @@ static int heif_info(const char *path, enum x9_heif_clap_policy policy)
     x9_heif_plan_close(&plan); x9_heif_close(&d); free(data); return e ? 1 : 0;
 }
 static int decode_heif(const char *path, uint32_t id, const char *icc_path,
-    enum x9_heif_source_color_policy policy, enum x9_heif_clap_policy clap_policy,
+    enum x9_heif_source_color_policy policy, enum x9_heif_graph_color_policy graph_color,
+    enum x9_heif_clap_policy clap_policy,
     uint64_t raster_budget, const char *intermediate_path, const char *output_path, const char *info_path)
 {
     size_t bytes = 0, icc_bytes = 0, intermediate_bytes = 0;
@@ -241,7 +242,8 @@ static int decode_heif(const char *path, uint32_t id, const char *icc_path,
     working = CFDataCreateWithBytesNoCopy(NULL,icc,(CFIndex)icc_bytes,kCFAllocatorNull);
     if (intermediate_path) intermediate = CFDataCreateWithBytesNoCopy(NULL,intermediate_raw,(CFIndex)intermediate_bytes,kCFAllocatorNull);
     if (!file || !working || (intermediate_path && !intermediate)) { e = kVTAllocationFailedErr; goto done; }
-    e = X9HEIFCopyHardwareImageWithIntermediateICC(file,id,working,intermediate,policy,clap_policy,raster_budget,&pixel,&info);
+    e = X9HEIFCopyHardwareImageWithColorOptions(file,id,working,intermediate,policy,graph_color,
+        clap_policy,raster_budget,&pixel,&info);
     if (!e && (!pixel || !info)) e = kVTVideoDecoderBadDataErr;
     if (e) goto done;
     plist = CFPropertyListCreateData(NULL,info,kCFPropertyListBinaryFormat_v1_0,0,&error);
@@ -311,7 +313,7 @@ int main(int argc, char **argv)
         if (errno || !argv[3][0] || !end || *end || id > UINT32_MAX) return 2;
         return decode_vt(NULL,NULL,argv[4],argv[2],(uint32_t)id);
     }
-    if (argc >= 8 && argc <= 12 && !strcmp(argv[1],"decode-heif")) {
+    if (argc >= 8 && argc <= 13 && !strcmp(argv[1],"decode-heif")) {
         char *end = NULL;
         errno = 0; unsigned long id = strtoul(argv[3],&end,0);
         if (errno || !argv[3][0] || !end || *end || id > UINT32_MAX) return 2;
@@ -319,15 +321,16 @@ int main(int argc, char **argv)
         if (!strcmp(argv[5],"icc")) policy = X9_HEIF_USE_ICC_IF_PRESENT;
         else if (!strcmp(argv[5],"nclx")) policy = X9_HEIF_USE_NCLX;
         else return 2;
+        enum x9_heif_graph_color_policy graph_color = X9_HEIF_GRAPH_COLOR_INHERIT_IDENTICAL;
         enum x9_heif_clap_policy clap = X9_HEIF_CLAP_EXACT_SAMPLES;
         int next = 6, options_end = argc-2;
-        if (next < options_end) {
+        if (next < options_end && argv[next][0] != '-') {
             if (!strcmp(argv[next],"linear-ceil")) clap = X9_HEIF_CLAP_LINEAR_CEIL;
             else if (strcmp(argv[next],"exact")) return 2;
             next++;
         }
         uint64_t budget = clap == X9_HEIF_CLAP_LINEAR_CEIL ? UINT64_C(1024)*1024*1024 : X9_HEIF_MAX_RASTER_BYTES;
-        if (next < options_end && strcmp(argv[next],"--linear-intermediate")) {
+        if (next < options_end && argv[next][0] != '-') {
             errno = 0; end = NULL;
             unsigned long long mib = strtoull(argv[next],&end,10);
             if (errno || argv[next][0] < '0' || argv[next][0] > '9' || !end || *end || !mib ||
@@ -336,21 +339,29 @@ int main(int argc, char **argv)
             next++;
         }
         const char *intermediate_path = NULL;
-        if (next < options_end) {
-            if (clap != X9_HEIF_CLAP_LINEAR_CEIL || next+2 != options_end ||
-                strcmp(argv[next],"--linear-intermediate") || !argv[next+1][0]) return 2;
-            intermediate_path = argv[next+1]; next += 2;
+        while (next < options_end) {
+            if (!strcmp(argv[next],"--per-item-colors")) {
+                if (graph_color == X9_HEIF_GRAPH_COLOR_PER_ITEM) return 2;
+                graph_color = X9_HEIF_GRAPH_COLOR_PER_ITEM; next++;
+            } else if (!strcmp(argv[next],"--linear-intermediate")) {
+                if (clap != X9_HEIF_CLAP_LINEAR_CEIL || intermediate_path || next+1 >= options_end ||
+                    !argv[next+1][0] || !strncmp(argv[next+1],"--",2)) return 2;
+                intermediate_path = argv[next+1]; next += 2;
+            } else return 2;
         }
         if (next != options_end) return 2;
-        return decode_heif(argv[2],(uint32_t)id,argv[4],policy,clap,budget,intermediate_path,argv[argc-2],argv[argc-1]);
+        return decode_heif(argv[2],(uint32_t)id,argv[4],policy,graph_color,clap,budget,
+            intermediate_path,argv[argc-2],argv[argc-1]);
     }
     if (argc != 2 || strcmp(argv[1], "status")) {
         fprintf(stderr, "usage: %s status | decode-vt hvcC.bin access-unit.bin NEW.yuv | "
             "heif-info file.heic [exact|linear-ceil] | decode-heif-item file.heic item-id-or-0 NEW.yuv | "
             "decode-heif file.heic item-id-or-0 working-rgb.icc icc|nclx [exact|linear-ceil [raster-MiB]] "
-            "[--linear-intermediate matrix-rgb.icc] NEW.rgba16f NEW.info.plist\n"
+            "[--linear-intermediate matrix-rgb.icc] [--per-item-colors] NEW.rgba16f NEW.info.plist\n"
             "heap budget default: exact=256MiB, linear-ceil=1024MiB; not hardware capacity\n"
-            "intermediate requires linear-ceil; derives actual linear ICC, preserves final working ICC; no sRGB fallback\n", argv[0]); return 2;
+            "intermediate requires linear-ceil; derives actual linear ICC, preserves final working ICC; no sRGB fallback\n"
+            "per-item-colors explicitly normalizes own colr/SPS sources before composition; derived colr is metadata only\n",
+            argv[0]); return 2;
     }
     int fd = open(X9_VDEC_DEVICE, O_RDONLY | O_CLOEXEC);
     if (fd < 0) { perror(X9_VDEC_DEVICE); return 1; }

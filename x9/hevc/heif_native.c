@@ -18,6 +18,7 @@ struct native_context {
     int resampling;
     size_t raster_budget;
     enum x9_heif_source_color_policy policy;
+    enum x9_heif_graph_color_policy graph_color;
     CFMutableArrayRef items;
     unsigned count, frames;
     uint64_t metadata_bytes;
@@ -114,8 +115,11 @@ static int source_color(CFDictionaryRef container, const struct x9_hevc_vui *vui
 static int prepare(struct native_context *c, uint32_t id, CFDictionaryRef inherited)
 {
     /* Geometry/cycle/depth was already checked by the immutable plan. A
-     * shared coded item cannot be cached under two source interpretations. */
+     * shared coded item cannot be cached under two source interpretations.
+     * PER_ITEM always uses its immutable own colr + selected SPS, so ancestry
+     * never changes its source interpretation or the cached target ICC. */
     for (unsigned n = 0; n < c->count; n++) if (c->nodes[n].id == id) {
+        if (c->graph_color == X9_HEIF_GRAPH_COLOR_PER_ITEM) return 0;
         CFDictionaryRef effective = c->nodes[n].declared;
         if (inherited && CFDictionaryGetCount(inherited)) {
             if (CFDictionaryGetCount(effective) && !CFEqual(effective,inherited)) return ENOTSUP;
@@ -139,7 +143,8 @@ static int prepare(struct native_context *c, uint32_t id, CFDictionaryRef inheri
     }
     if (!e) e = x9_heif_copy_color_extensions(c->document,image,&explicit_color);
     CFDictionaryRef color = explicit_color;
-    if (!e && inherited && CFDictionaryGetCount(inherited)) {
+    if (!e && c->graph_color == X9_HEIF_GRAPH_COLOR_INHERIT_IDENTICAL &&
+        inherited && CFDictionaryGetCount(inherited)) {
         if (CFDictionaryGetCount(explicit_color) && !CFEqual(explicit_color,inherited)) e = ENOTSUP;
         else color = inherited;
     }
@@ -172,6 +177,11 @@ static int prepare(struct native_context *c, uint32_t id, CFDictionaryRef inheri
             if (!e) e = put_number(record,CFSTR("TransformedHeight"),geometry.height);
             if (!e) {
                 CFDictionarySetValue(record,CFSTR("EffectiveColr"),color);
+                CFDictionarySetValue(record,CFSTR("ColorInterpretation"),
+                    c->graph_color == X9_HEIF_GRAPH_COLOR_PER_ITEM ?
+                        (node->source ? CFSTR("own-colr-and-selected-sps-to-common-icc") :
+                            CFSTR("declared-derived-colr-retained-not-applied")) :
+                        CFSTR("identical-colr-inheritance-and-selected-sps"));
                 if (node->source) CFDictionarySetValue(record,CFSTR("ResolvedSourceColor"),node->source);
                 if (bitstream_info) CFDictionarySetValue(record,CFSTR("BitstreamVUI"),bitstream_info);
                 CFArrayAppendValue(c->items,record);
@@ -180,7 +190,8 @@ static int prepare(struct native_context *c, uint32_t id, CFDictionaryRef inheri
         }
     }
     if (bitstream_info) CFRelease(bitstream_info);
-    for (unsigned n = 0; n < image->derived_count && !e; n++) e = prepare(c,image->derived[n],color);
+    for (unsigned n = 0; n < image->derived_count && !e; n++)
+        e = prepare(c,image->derived[n],c->graph_color == X9_HEIF_GRAPH_COLOR_PER_ITEM ? NULL : color);
     if (explicit_color) CFRelease(explicit_color);
     if (info) CFRelease(info);
     free(image); return e;
@@ -340,9 +351,10 @@ static OSStatus export_raster(struct native_context *c, struct x9_heif_raster *r
     if (target) CVPixelBufferRelease(target);
     return e;
 }
-OSStatus X9HEIFCopyHardwareImageWithIntermediateICC(CFDataRef file, uint32_t id,
+OSStatus X9HEIFCopyHardwareImageWithColorOptions(CFDataRef file, uint32_t id,
     CFDataRef working, CFDataRef intermediate,
-    enum x9_heif_source_color_policy policy, enum x9_heif_clap_policy clap_policy,
+    enum x9_heif_source_color_policy policy, enum x9_heif_graph_color_policy graph_color,
+    enum x9_heif_clap_policy clap_policy,
     uint64_t raster_budget, CVPixelBufferRef *out, CFDictionaryRef *info_out)
 {
     if (!out || !info_out || (void *)out == (void *)info_out) return kVTParameterErr;
@@ -351,6 +363,7 @@ OSStatus X9HEIFCopyHardwareImageWithIntermediateICC(CFDataRef file, uint32_t id,
         CFDataGetLength(file) > X9_HEIF_MAX_FILE || !rgb_profile(working) ||
         (intermediate && (!rgb_profile(intermediate) || clap_policy != X9_HEIF_CLAP_LINEAR_CEIL)) ||
         (policy != X9_HEIF_USE_ICC_IF_PRESENT && policy != X9_HEIF_USE_NCLX) ||
+        (graph_color != X9_HEIF_GRAPH_COLOR_INHERIT_IDENTICAL && graph_color != X9_HEIF_GRAPH_COLOR_PER_ITEM) ||
         (clap_policy != X9_HEIF_CLAP_EXACT_SAMPLES && clap_policy != X9_HEIF_CLAP_LINEAR_CEIL) ||
         !raster_budget || raster_budget > SIZE_MAX || raster_budget > INT64_MAX) return kVTParameterErr;
     struct native_context *c = calloc(1,sizeof(*c));
@@ -360,6 +373,7 @@ OSStatus X9HEIFCopyHardwareImageWithIntermediateICC(CFDataRef file, uint32_t id,
      * use real owned byte copies, not an assumed immutable-copy allocation. */
     c->file = CFDataCreate(NULL,CFDataGetBytePtr(file),CFDataGetLength(file));
     c->working = CFDataCreate(NULL,CFDataGetBytePtr(working),CFDataGetLength(working)); c->policy = policy;
+    c->graph_color = graph_color;
     if (intermediate) c->intermediate = CFDataCreate(NULL,CFDataGetBytePtr(intermediate),CFDataGetLength(intermediate));
     c->raster_budget = (size_t)raster_budget;
     c->working_space = c->working ? CGColorSpaceCreateWithICCData(c->working) : NULL;
@@ -409,6 +423,7 @@ OSStatus X9HEIFCopyHardwareImageWithIntermediateICC(CFDataRef file, uint32_t id,
         if (!e) e = put_number(info,CFSTR("PixelFormat"),kCVPixelFormatType_64RGBAHalf);
         if (!e) e = put_number(info,CFSTR("NativeHardwareFrames"),c->frames);
         if (!e) e = put_number(info,CFSTR("SourceColorPolicy"),(uint32_t)policy);
+        if (!e) e = put_number(info,CFSTR("GraphColorPolicy"),(uint32_t)graph_color);
         if (!e) e = put_number(info,CFSTR("CleanAperturePolicy"),(uint32_t)clap_policy);
         if (!e) {
             int64_t size = (int64_t)c->raster_budget;
@@ -420,6 +435,10 @@ OSStatus X9HEIFCopyHardwareImageWithIntermediateICC(CFDataRef file, uint32_t id,
         if (!result) {
             CFDictionarySetValue(info,CFSTR("Items"),c->items);
             CFDictionarySetValue(info,CFSTR("WorkingRGBICCProfile"),c->working);
+            CFDictionarySetValue(info,CFSTR("GraphColorInterpretation"),
+                graph_color == X9_HEIF_GRAPH_COLOR_PER_ITEM ?
+                    CFSTR("explicit per-item sources; common ICC composition; derived colr retained only") :
+                    CFSTR("identical inherited colr; conflicting contexts reject"));
             CFDictionarySetValue(info,CFSTR("LinearLightResampling"),c->resampling ? kCFBooleanTrue : kCFBooleanFalse);
             CFDictionarySetValue(info,CFSTR("ExplicitResamplingIntermediateUsed"),
                 c->resampling && c->intermediate ? kCFBooleanTrue : kCFBooleanFalse);
@@ -457,6 +476,12 @@ OSStatus X9HEIFCopyHardwareImageWithIntermediateICC(CFDataRef file, uint32_t id,
     if (c->intermediate) CFRelease(c->intermediate);
     free(c); return result;
 }
+OSStatus X9HEIFCopyHardwareImageWithIntermediateICC(CFDataRef file, uint32_t id,
+    CFDataRef working, CFDataRef intermediate,
+    enum x9_heif_source_color_policy policy, enum x9_heif_clap_policy clap_policy,
+    uint64_t raster_budget, CVPixelBufferRef *out, CFDictionaryRef *info_out)
+{ return X9HEIFCopyHardwareImageWithColorOptions(file,id,working,intermediate,policy,
+    X9_HEIF_GRAPH_COLOR_INHERIT_IDENTICAL,clap_policy,raster_budget,out,info_out); }
 OSStatus X9HEIFCopyHardwareImageWithOptions(CFDataRef file, uint32_t id, CFDataRef working,
     enum x9_heif_source_color_policy policy, enum x9_heif_clap_policy clap_policy,
     uint64_t raster_budget, CVPixelBufferRef *out, CFDictionaryRef *info_out)

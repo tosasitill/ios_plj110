@@ -7,6 +7,10 @@ enum x9_heif_source_color_policy {
     X9_HEIF_USE_ICC_IF_PRESENT = 1,
     X9_HEIF_USE_NCLX = 2
 };
+enum x9_heif_graph_color_policy {
+    X9_HEIF_GRAPH_COLOR_INHERIT_IDENTICAL = 1,
+    X9_HEIF_GRAPH_COLOR_PER_ITEM = 2
+};
 /* Native coded-item decode -> explicit native pixel-transfer working RGB ->
  * derived packed composition. No default working color space: working_rgb_icc
  * must be a valid RGB ICC profile. Source policy is explicit when ICC/nclx
@@ -78,5 +82,29 @@ __attribute__((visibility("default"))) OSStatus X9HEIFCopyHardwareImageWithOptio
 __attribute__((visibility("default"))) OSStatus X9HEIFCopyHardwareImageWithIntermediateICC(
     CFDataRef file, uint32_t item_id, CFDataRef working_rgb_icc, CFDataRef intermediate_rgb_icc,
     enum x9_heif_source_color_policy, enum x9_heif_clap_policy, uint64_t raster_budget,
+    CVPixelBufferRef *image, CFDictionaryRef *info);
+/* Explicit graph color interpretation. INHERIT_IDENTICAL is EXACTLY the
+ * existing entrypoints' behavior: missing child colr inherits its ancestor,
+ * different explicit/inherited or reused-item interpretations reject.
+ * PER_ITEM is a caller-selected rendering choice, not a claim about normative
+ * HEIF derived-image inheritance or ordinary ImageIO/CMPhoto behavior:
+ * interpret each coded item using ONLY its own colr and selected PPS->SPS VUI,
+ * then actually transfer it to the common working ICC (or actual derived
+ * linear ICC for resampling) before placement/composition. Different source
+ * profiles and reuse under differently tagged ancestors are allowed without
+ * caching a source under multiple interpretations. Derived colr is retained
+ * as declared metadata, NOT applied to already-normalized composed samples;
+ * the final profile remains the caller's working_rgb_icc.
+ * Missing/unspecified own+SPS source fields still reject before hardware
+ * decode, even if an ancestor has a complete colr. No guessed default gamut,
+ * profile relabel, or fallback to the inheritance policy. Info records this
+ * choice and each node's interpretation. All hardware/aux/heap/ICC ownership
+ * gates of WithIntermediateICC remain. Runtime color/HDR support and full
+ * mixed-derived HEIF semantics are not certified by this explicit renderer.
+ * Existing exports retain their ABI and always select INHERIT_IDENTICAL. */
+__attribute__((visibility("default"))) OSStatus X9HEIFCopyHardwareImageWithColorOptions(
+    CFDataRef file, uint32_t item_id, CFDataRef working_rgb_icc, CFDataRef intermediate_rgb_icc,
+    enum x9_heif_source_color_policy, enum x9_heif_graph_color_policy,
+    enum x9_heif_clap_policy, uint64_t raster_budget,
     CVPixelBufferRef *image, CFDictionaryRef *info);
 #endif
