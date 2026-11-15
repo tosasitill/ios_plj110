@@ -152,6 +152,33 @@ RIL真实voice注册查询是`requestVoiceRegistrationState30f8f0→042f→8100/
 networkType来自value+1/u16LE，再经convertCSNetworkType进入ServiceState.voiceRat；
 独立于PS/data RAT和IMSA注册快照。此处只记录原件路径，未新增query或准入默认值。
 
+### Apple 普通号码类型不证明 IMS command context（原件架构纠错）
+
+匹配Base `CallInfo::toString1f03911dc..11f4`输出`Call Sub Type:`并读CallInfo+44/u8，
+`asString(PhoneCallSubType)1f0390818`明确Telephony1/Wifi2/VoLTE4/VoNR8/SOSCall16；
+`isCallSubTypeCellularIMS1f039230c`只接4/8。这是独立于CallInfo+40/PhoneNumberType的维度。
+所以Apple普通Call_Type0可以是普通号码，但本身不能选择Android`IMS_DIAL/cf33`。
+
+完整`EurekaCallCommandDriver::sendDialReq1f1ac1f8c`仅按号码、普通/紧急类型、CLIR、TTY、
+slot(+d8)构造VOICE20的tag1/10/11（紧急另14）、60；未直接读取+44或透传明确IMS context。
+不能把该wire中的tag10=0或IMSA registered反推出subtype4/8、选中IMS driver或真实IMS client链。
+
+根盘matching CommCenter的`CallStatusDelegate::dial101017a94..101018318`保留该subtype，
+`101018060/8078..88`取selected driver并经vtable+18 dispatch；
+`CallCommandDriverType`实际Baseband0/IMS1。真实chained pointers解码表明
+typeinfo1015fa830的字符串为`20IMSCallCommandDriver`（1011e0d8b），
+secondary address point1015fa390的slot+18指向100dcdbc8的this-=8 thunk，再进100dcd7b0。
+其subscriber/SIM call-control分支在100dcdcdc读取+44并交call-control，
+后续100dcd114/async100dcf6e8不是Eureka sendDialReq。
+
+CommCenter包装100177b88导入的`IMSStartCall`，ordinal58实际provider为
+`/System/Library/PrivateFrameworks/IPTelephony.framework/Support/libIPTelephony.dylib`。
+`IMSStartCall1b7d69208`构造XPC的`request=kCallStart`、`kCallDialedNumber`、`kCallOptions`，
+经1b7d6933c→`XpcConnectionClient::sendXpcMessage1b7ccff18`发送；实际client/connection链为空则返回0。
+**selected IMS driver、subtype4/8、live IMS transport及caller options才是已证的上游维度**；
+当前普通VOICE20内核入口没有这些来源，最终XPC接收端/SIP/MD桥及语音能力options仍待闭合。
+此处是架构边界纠错，不注入host代码、不新建QMI默认字段、不开放VOICE09。
+
 ### modem 与 Android serializer
 
 输入 `.local/x9/modem/parts/modem_a.img` 的 md1rom 是 **nanoMIPS**，不是 ARM 或普通 MIPS。

@@ -543,6 +543,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 - **严格边界**：VOICE09仍关闭；CallList offset6/真实technology/profile、iOS IMS准入、MT动作/handover身份迁移、通话专用audio和短信MT显示/持久化/物理ACK/MO对端验收未闭合，最终通话短信镜像仍未完成。不要求用户重复场景、不操作手机、不出探针镜像。
 - **集成固定源码构建**：SMS deadline/inbox代码已集成，构建开始HEAD`4e7b84a`，`python3 -I x9/build/build.py kernel --name x9-call-sms-init-20261115` **exit0、98/98 overlay（3 prebuilt）、link/strip成功**；host新集成基线严格-c也exit0。产物`x9/out/x9-call-sms-init-20261115/kernel.development.sweet`，console/exit及确切HEAD在`call-number-owner-compile/{kernel-console.log,kernel.exit,kernel-source-head.txt}`；没有boot pack/上机/构建后二次检查，人工向量未执行。构建期间sensor窗口只新增NOTES一行`057e121`，SMS无冲突rebase为deadline`fc20e86`/inbox`38b3e9e`/交接`de1402c`并已ff main/push；本项随后rebase成`b3c4bec`，x9源码未因此变化，不为docs重复构建。`gh run list`的SMS与本功能均`[]`，无CI run ID。本kernel-only仍不是最终通话短信镜像。
 
+#### 2026-11-15 IMS command context架构纠错 / 并行后续
+
+- **已合入/push**：SMS deadline`fc20e86`、inbox`38b3e9e`和CALL号码owner`b3c4bec`，集成交接`a6f63b5`已ff main并push成功。kernel-only仍为构建开始`4e7b84a`的`x9-call-sms-init-20261115`（同上述x9源码），未pack boot/上机；没有为了docs重编/二次检查产物。
+- **有意义的新原件证据**：Base CallInfo+44/u8是PhoneCallSubType：1Telephony/2Wifi/4VoLTE/8VoNR/16SOSCall，`isCallSubTypeCellularIMS1f039230c`只接4/8；独立于+40的普通号码类型。普通Eureka VOICE20 producer`1f1ac1f8c`未读取或透传+44，普通tag10=0不是IMS上下文，不能凭IMSA registered准入Android IMS_DIAL/cf33。
+- **实际Apple路径**：根盘CommCenter`CallStatusDelegate::dial101017a94..101018318`取selected driver，经vtable+18 dispatch；typeinfo1015fa830→IMSCallCommandDriver、secondary1015fa390+18→100dcdbc8(this-=8)→100dcd7b0。独立subscriber/SIM call-control在100dcdcdc读取+44；后续100dcd114/async100dcf6e8不是Eureka sendDialReq。`IMSStartCall`导入ordinal58来自libIPTelephony，1b7d69208构造XPC{request=kCallStart,kCallDialedNumber,kCallOptions}，依赖真实client/connection链再sendXpcMessage1b7ccff18。最终接收端/SIP/MD桥及voice options仍未闭合，不猜context/default。
+- **并行落实下一子项**：`feat/call-end-reason` / `.worktrees/call-end-reason`正在接成功完整ECPI133+presence+native16→Apple145的内部END metadata（Apple16实际Unknown/CSI1，145为NORMAL_CALL_CLEARING/CSI0）；无cause/非16/残帧/0910无ID不倒填。`fix/sms-mt-admission` / `.worktrees/sms-mt-admission`正在复核MD→host queue锁序后补undelivered MT原子准入；现确定缺口是SMS poison/control loss后仍可进入bb_x9_sms_event，不能仅一次getter声称全race闭合。两项未合入上述kernel，只编译、不操作设备。
+- **文件与清理**：current-metadata与number-owner两个已合功能树的所有out已迁回主checkout同名`x9/out/`，树及本地分支已清理；编译原日志绝对路径未回写。原call-status树还被只读IMS接收端分析使用，旧SMS树保存review材料，暂不删。audio/GPU/BT等其它活动树未改。
+- **完整目标未完成**：VOICE09仍关闭，没有最终通话短信boot.img；CallList offset6/完整身份生命周期、真实IMS桥/MT动作/handover迁移、通话专用audio、短信显示/重开持久化/物理ACK/对端收到均不能拿静态代码和kernel编译冒充验收。本文档子项无新增CI run/build/设备结果。
+
 ### 5.7 2026-11-13 音频：ADSP 自动 dsp-boot 镜像（分支 feat/audio-dsp-boot，worktree `.worktrees/audio-dsp-boot`）
 
 - feat/audio-bounded-fdt 已 ff 合入 main（`b25f4ca`），worktree/分支已删；`android-callsms-20261113`、`shimtest`、fdt2/3/4 的 usb-log 移到本 worktree 的 `x9/out/`。
