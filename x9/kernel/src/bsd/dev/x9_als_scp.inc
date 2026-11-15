@@ -18,6 +18,22 @@ static uint8_t als_expected_sequence, als_expected_type, als_expected_command;
 static int als_ack_pending, als_ack_received, als_reply_received, als_awake;
 static uint32_t als_wp, als_super_wp, als_data_bytes, als_super_bytes;
 static uint32_t als_old_parent;
+static uint8_t als_prox_info[X9_PROX_INFO_BYTES];
+static int als_prox_present, als_list_complete;
+static uint32_t als_prox_pending, als_prox_enabled, als_prox_interval;
+
+/* HID requests only enqueue. The one worker owns OUT29 and correlates ACKs;
+ * no second mailbox user, clock reparent, coprocessor release or awake vote. */
+static int als_prox_request(uint32_t enabled, uint32_t interval)
+{
+ lck_mtx_lock(&x9_als_lock);
+ int error = !physical_mode || !status.worker_running ? ENXIO : status.error;
+ if (!error) {
+  als_prox_pending = 1; als_prox_enabled = enabled; als_prox_interval = interval;
+ }
+ lck_mtx_unlock(&x9_als_lock); return error;
+}
+static const struct x9_prox_transport als_prox_transport = { als_prox_request };
 
 static uint64_t als_now_ns(void)
 {
@@ -44,6 +60,7 @@ static void als_fault(int error)
  if (!status.error) status.error = error;
  valid = 0; status.control_enabled = 0;
  lck_mtx_unlock(&x9_als_lock);
+ x9_prox_native_disconnect(error);
 }
 static uint32_t als_rr(volatile uint32_t *base, unsigned off) { return base[off/4]; }
 static void als_wr(volatile uint32_t *base, unsigned off, uint32_t value)
@@ -354,18 +371,31 @@ static int als_list(void)
  als_from_io(als_snapshot,als_rx,0,sizeof(als_snapshot));
  const uint8_t *p = als_snapshot, *h = p+8, *n = als_reply+8;
  uint32_t length = le32(h+8), capacity = le32(p+20), gain = 0;
+ const uint8_t *prox_info = NULL;
  if (le32(p) != 0xdeadbeef || le32(p+8192-4) != 0xdeadbeef ||
      h[1] || h[2] || h[3] || le32(h+4) || n[1] || n[2] || n[3] ||
      le32(n+4) || le32(n+8) != length || length > 4096 || length%40 ||
      length > capacity || capacity > 4096 || le32(p+4) != als_crc32(h,16+length)) return EBADMSG;
  for (unsigned i = 0; i < length; i += 40) {
   const uint8_t *info = p+24+i;
-  if (info[0] != 5) continue; /* LIGHT, not LUX_AOD / proximity */
+  if (info[0] == X9_PROX_MTK_TYPE) {
+   if (prox_info || !le32(info+4)) return EBADMSG;
+   prox_info = info; continue;
+  }
+  if (info[0] != 5) continue; /* LIGHT, not LUX_AOD / rear proximity */
   if (gain || !le32(info+4)) return EBADMSG;
   gain = le32(info+4);
   printf("X9 ALS SCP: LIGHT name=%.*s vendor=%.*s gain=%u\n",16,info+8,16,info+24,gain);
  }
- if (!gain) return ENODEV;
+ if (!gain && !prox_info) return ENODEV;
+ /* Install neither sensor from a partially validated LIST. Keep a complete
+  * type8 info snapshot so a late proximity HID can attach without a new IPI. */
+ if (prox_info) {
+  memcpy(als_prox_info,prox_info,sizeof(als_prox_info)); als_prox_present = 1;
+  printf("X9 PROX SCP: LIST name=%.*s vendor=%.*s gain=%u\n",16,prox_info+8,
+      16,prox_info+24,le32(prox_info+4));
+ }
+ als_list_complete = 1;
  lck_mtx_lock(&x9_als_lock);
  mtk_gain = status.gain = gain; last_scp_time = 0; valid = 0;
  lck_mtx_unlock(&x9_als_lock); return 0;
@@ -383,6 +413,32 @@ static int als_enable(uint32_t interval_us)
  }
  return error;
 }
+static int als_prox_service(void)
+{
+ struct x9_prox_status prox; x9_prox_copy_status(&prox);
+ if (als_list_complete && prox.mode == 3 && !prox.error && !prox.configured) {
+  if (!als_prox_present) x9_prox_native_disconnect(ENODEV);
+  else {
+   int error = x9_prox_native_configure(als_prox_info,sizeof(als_prox_info));
+   if (error && error != EAGAIN && error != ENXIO) return error;
+  }
+ }
+ uint32_t pending,enabled,interval;
+ lck_mtx_lock(&x9_als_lock);
+ pending = als_prox_pending; enabled = als_prox_enabled; interval = als_prox_interval;
+ als_prox_pending = 0;
+ lck_mtx_unlock(&x9_als_lock);
+ if (!pending) return 0;
+ /* A request can expire while the shared worker is busy with another
+  * sensor. Never send a queued control after its owner was quarantined. */
+ x9_prox_copy_status(&prox);
+ if (prox.mode != 3 || prox.error || !prox.pending) return 0;
+ uint8_t batch[16] = {0}; als_put64(batch,(uint64_t)interval*1000);
+ int error = als_control(X9_PROX_MTK_TYPE,enabled ? 1 : 0,
+     enabled ? batch : NULL,enabled ? sizeof(batch) : 0);
+ x9_prox_native_control(enabled,error);
+ return error;
+}
 static int als_drain(volatile uint32_t *base, uint32_t wp, uint32_t bytes, unsigned item_size)
 {
  uint32_t rp = als_rr(base,0);
@@ -396,7 +452,16 @@ static int als_drain(volatile uint32_t *base, uint32_t wp, uint32_t bytes, unsig
    lck_mtx_lock(&x9_als_lock); status.records++;
    if (error) status.rejected++;
    lck_mtx_unlock(&x9_als_lock);
-   if (error && error != EALREADY && error != ERANGE && error != ENOTSUP && error != ENXIO) return error;
+   /* Already queued DATA may outlive the LIGHT DISABLE ACK. It is not a
+    * transport fault, just as a type8 sample before ENABLE is not one. */
+   if (error && error != EALREADY && error != ERANGE && error != ENOTSUP &&
+       error != ENXIO && error != EAGAIN && error != EBUSY) return error;
+  }
+  if (record[0] == X9_PROX_MTK_TYPE && record[1] == 0) {
+   /* Both FIFO forms preserve the 36B prefix, including PS value[0..2]. */
+   int error = x9_prox_native_data(record,X9_PROX_DATA_BYTES);
+   if (error && error != EALREADY && error != ERANGE && error != ENOTSUP &&
+       error != ENXIO && error != EAGAIN && error != EBUSY) return error;
   }
   rp = (rp+item_size)%bytes;
   /* Finish the copy before handing this slot back to firmware. */
@@ -411,16 +476,28 @@ static void als_worker(void *arg __unused, wait_result_t result __unused)
  if (!error) error = als_share();
  if (!error) { als_stage(X9_ALS_TIMESYNC); error = als_timesync(); }
  if (!error) error = als_list();
- if (!error) error = als_enable(requested_interval_us);
+ lck_mtx_lock(&x9_als_lock); int light = ingress_claimed && mtk_gain;
+ lck_mtx_unlock(&x9_als_lock);
+ if (!error && light) error = als_enable(requested_interval_us);
+ if (!error) { als_stage(X9_ALS_STREAM); error = als_prox_service(); }
  uint64_t sync_deadline = als_now_ns()+10000000000ULL;
  while (!error && als_alive()) {
   error = als_poll();
+  if (!error) error = als_prox_service();
   if (!error) error = als_drain(als_data,als_wp,als_data_bytes,36);
   if (!error) error = als_drain(als_super,als_super_wp,als_super_bytes,76);
   lck_mtx_lock(&x9_als_lock);
   uint32_t wanted = requested_interval_us, applied = status.report_interval_us;
+  int want_light = ingress_claimed && mtk_gain, light_enabled = status.control_enabled;
   lck_mtx_unlock(&x9_als_lock);
-  if (!error && wanted != applied) error = als_enable(wanted);
+  if (!error && want_light && (!light_enabled || wanted != applied)) error = als_enable(wanted);
+  if (!error && !want_light && light_enabled) {
+   error = als_control(5,0,NULL,0);
+   if (!error) {
+    lck_mtx_lock(&x9_als_lock); status.control_enabled = valid = 0;
+    lck_mtx_unlock(&x9_als_lock);
+   }
+  }
   if (!error && als_now_ns() >= sync_deadline) {
    error = als_timesync(); sync_deadline = als_now_ns()+10000000000ULL;
   }
@@ -431,6 +508,8 @@ static void als_worker(void *arg __unused, wait_result_t result __unused)
   als_stage(X9_ALS_DISABLE);
   /* A matching ACK, not shutdown(), proves the remote accepted DISABLE. */
   error = als_control(5,0,NULL,0);
+  if (!error && als_prox_present) error = als_control(X9_PROX_MTK_TYPE,0,NULL,0);
+  if (!error) x9_prox_native_disconnect(ECANCELED);
   if (error) als_fault(error);
   else {
    lck_mtx_lock(&x9_als_lock); status.control_enabled = 0; lck_mtx_unlock(&x9_als_lock);
@@ -454,6 +533,8 @@ static void als_worker(void *arg __unused, wait_result_t result __unused)
 }
 static int als_start_worker(int shared)
 {
+ int binding = x9_prox_bind_transport(&als_prox_transport);
+ if (binding) return binding;
  lck_mtx_lock(&x9_als_lock);
  if (test_mode || (!active && !shared)) {
   lck_mtx_unlock(&x9_als_lock); return EBUSY;

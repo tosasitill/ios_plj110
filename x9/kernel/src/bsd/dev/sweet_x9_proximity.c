@@ -16,7 +16,7 @@ static LCK_MTX_DECLARE(prox_lock, &prox_group);
 static struct x9_prox_sample latest;
 static struct x9_prox_status state;
 static struct x9_prox_transport transport;
-static int active, valid;
+static int active, valid, native_error;
 static uint64_t last_scp_time, request_time;
 static uint32_t pending_enabled, pending_interval;
 #define PROX_CONTROL_TIMEOUT_NS 1000000000ULL
@@ -29,7 +29,7 @@ static void expire_locked(void)
  if (!state.pending || state.error) return;
  uint64_t ns=0; absolutetime_to_nanoseconds(mach_absolute_time()-request_time,&ns);
  if (ns>PROX_CONTROL_TIMEOUT_NS) {
-  state.error=ETIMEDOUT; state.pending=state.enabled=valid=0;
+  state.error=native_error=ETIMEDOUT; state.pending=state.enabled=valid=0;
   /* Remote state uncertain; no retry and no false "hardware off". */
  }
 }
@@ -68,7 +68,7 @@ int x9_prox_init(int mode)
  if (!error) {
   active=1; valid=0; last_scp_time=0;
   /* Keep uncertain native control across software restarts. */
-  int prior=mode==3?state.error:0; bzero(&state,sizeof(state)); state.error=prior;
+  int prior=mode==3?native_error:0; bzero(&state,sizeof(state)); state.error=prior;
   state.mode=mode; state.interval_us=200000;
  }
  lck_mtx_unlock(&prox_lock); return error;
@@ -95,7 +95,9 @@ void x9_prox_copy_status(struct x9_prox_status *out)
 {
  if (!out) return;
  lck_mtx_lock(&prox_lock); expire_locked(); *out=state;
- if (!active) out->error=ENXIO;
+ /* Worker must still send/complete the queued DISABLE after HID stop.
+  * Preserve the actual transport error, including expired pending control. */
+ if (!active && !state.pending && !out->error) out->error=ENXIO;
  lck_mtx_unlock(&prox_lock);
 }
 int x9_prox_set_enabled(uint32_t enabled, uint32_t us)
@@ -128,7 +130,7 @@ int x9_prox_set_enabled(uint32_t enabled, uint32_t us)
   error=request(enabled,us);
   /* A submission refusal is definitive: backend promised no send on error. */
   if (error) {
-   lck_mtx_lock(&prox_lock); state.pending=0; state.error=error; valid=0;
+   lck_mtx_lock(&prox_lock); state.pending=0; state.error=native_error=error; valid=0;
    lck_mtx_unlock(&prox_lock);
   }
  }
@@ -157,11 +159,13 @@ void x9_prox_native_control(uint32_t enabled, int error)
 {
  int (*request)(uint32_t,uint32_t)=NULL;
  uint32_t next=0,us=0;
- lck_mtx_lock(&prox_lock);
+ int accepted=0;
+ lck_mtx_lock(&prox_lock); expire_locked();
  /* A service stop still needs to complete its already-issued DISABLE. */
  if (state.mode==3 && state.pending) {
+  accepted=1;
   if (!error && enabled!=pending_enabled) error=EPROTO;
-  state.pending=0; state.error=error; state.enabled=error?0:enabled;
+  state.pending=0; state.error=native_error=error; state.enabled=error?0:enabled;
   if (error || !enabled) valid=0;
   if (!error && (state.desired!=enabled ||
       (enabled && state.interval_us!=pending_interval))) {
@@ -171,11 +175,11 @@ void x9_prox_native_control(uint32_t enabled, int error)
   }
  }
  lck_mtx_unlock(&prox_lock);
- printf("X9 PROX: native %s ACK errno=%d (not a DATA event)\n",enabled?"ENABLE":"DISABLE",error);
+ printf("X9 PROX: native %s ACK errno=%d accepted=%d (not a DATA event)\n",enabled?"ENABLE":"DISABLE",error,accepted);
  if (request) {
   error=request(next,us);
   if (error) {
-   lck_mtx_lock(&prox_lock); state.pending=0; state.error=error; valid=0;
+   lck_mtx_lock(&prox_lock); state.pending=0; state.error=native_error=error; valid=0;
    lck_mtx_unlock(&prox_lock);
   }
  }
@@ -183,6 +187,8 @@ void x9_prox_native_control(uint32_t enabled, int error)
 void x9_prox_native_disconnect(int error)
 {
  lck_mtx_lock(&prox_lock);
+ native_error=error;
+ if (active && state.mode!=3) { lck_mtx_unlock(&prox_lock); return; }
  valid=state.ready=state.configured=state.enabled=state.pending=0;
  state.error=error; last_scp_time=0;
  lck_mtx_unlock(&prox_lock);

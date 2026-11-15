@@ -5,6 +5,7 @@
  * at 0x10002cd48/0x10002cdd8: Receiver MASK, not ambient-light/biometric.
  * Keep native esuc ABI and original userspace untouched. */
 #include "../X9Proximity.h"
+#include "../X9ALS.h"
 #include <sys/errno.h>
 #include "IOHIDEventServiceKeys_Private.h"
 class X9Proximity : public IOHIDEventService {
@@ -16,7 +17,7 @@ public:
  UInt32 getPrimaryUsagePage() APPLE_KEXT_OVERRIDE { return 0xff00; }
  UInt32 getPrimaryUsage() APPLE_KEXT_OVERRIDE { return 8; }
  UInt32 getProductID() APPLE_KEXT_OVERRIDE { return 0x6998; }
- UInt32 getReportInterval() APPLE_KEXT_OVERRIDE { return 200000; }
+ UInt32 getReportInterval() APPLE_KEXT_OVERRIDE { return fIntervalUs; }
  IOHIDEvent *copyEvent(IOHIDEventType,IOHIDEvent *,IOOptionBits) APPLE_KEXT_OVERRIDE;
  IOHIDEvent *copyMatchingEvent(OSDictionary *) APPLE_KEXT_OVERRIDE;
  IOReturn setProperties(OSObject *) APPLE_KEXT_OVERRIDE;
@@ -55,6 +56,11 @@ bool X9Proximity::start(IOService *provider)
  setProperty("X9ProxDiagnostic",mode==2?kOSBooleanTrue:kOSBooleanFalse);
  /* Publish identity so iOS can request DetectionMode. This is NOT a claim
   * of available samples: copyEvent remains NULL until real DATA arrives. */
+ if (mode==3) {
+  int error=x9_als_start_shared_transport();
+  if (error) { x9_prox_native_disconnect(error); fError=error; }
+  setProperty("X9ProxErrno",(UInt32)error,32);
+ }
  registerService(); fTimer->setTimeoutUS(fIntervalUs);
  IOLog("X9 PROX: HID registered usage=ff00/8 Placement=1 mode=%d; OFF awaiting DetectionMode/shared SCP (no fabricated far event)\n",mode);
  return true;

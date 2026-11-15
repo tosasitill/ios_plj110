@@ -12,6 +12,7 @@
 #include <pexpert/device_tree.h>
 #include <libkern/libkern.h>
 #include "../../iokit/Kernel/arm/X9ALS.h"
+#include "../../iokit/Kernel/arm/X9Proximity.h"
 
 static LCK_GRP_DECLARE(x9_als_group, "x9_als");
 static LCK_MTX_DECLARE(x9_als_lock, &x9_als_group);
