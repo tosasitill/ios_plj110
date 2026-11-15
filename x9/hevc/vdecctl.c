@@ -14,6 +14,8 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 #include "hevc_bitstream.h"
+#include "heif_items.h"
+#include "heif_coremedia.h"
 #include "vt_decoder.h"
 #include "../kernel/src/bsd/dev/x9_vdec.h"
 static uint8_t *read_file(const char *path, size_t limit, size_t *bytes)
@@ -48,11 +50,12 @@ static int write_all(int fd, const uint8_t *p, size_t bytes)
     }
     return 0;
 }
-static int decode_vt(const char *config_path, const char *sample_path, const char *out_path)
+static int decode_vt(const char *config_path, const char *sample_path, const char *out_path,
+                     const char *heif_path, uint32_t item_id)
 {
     size_t cfg_bytes = 0, au_bytes = 0;
-    uint8_t *cfg = read_file(config_path, X9_HEVC_MAX_CONFIG, &cfg_bytes);
-    uint8_t *au = read_file(sample_path, X9_HEVC_MAX_INPUT, &au_bytes);
+    uint8_t *cfg = heif_path ? NULL : read_file(config_path, X9_HEVC_MAX_CONFIG, &cfg_bytes);
+    uint8_t *au = heif_path ? NULL : read_file(sample_path, X9_HEVC_MAX_INPUT, &au_bytes);
     struct x9_hevc_config c;
     struct result r = {0};
     CMVideoFormatDescriptionRef format = NULL;
@@ -60,13 +63,42 @@ static int decode_vt(const char *config_path, const char *sample_path, const cha
     CMSampleBufferRef sample = NULL;
     VTDecompressionSessionRef session = NULL;
     CFDictionaryRef spec = NULL;
+    CFDictionaryRef item_info = NULL;
     CFTypeRef hw = NULL;
     int fd = -1, rc = 1, created = 0;
     OSStatus e = kVTParameterErr;
+    if (heif_path) {
+        size_t file_bytes = 0;
+        uint8_t *raw = read_file(heif_path,X9_HEIF_MAX_FILE,&file_bytes);
+        if (!raw) { perror("HEIF input"); goto done; }
+        CFDataRef file = CFDataCreateWithBytesNoCopy(NULL,raw,(CFIndex)file_bytes,kCFAllocatorNull);
+        e = file ? X9HEIFCopyItemSample(file,item_id,&sample,&item_info) : kVTAllocationFailedErr;
+        if (file) CFRelease(file);
+        free(raw); /* ready sample/format/properties now own all input bytes */
+        if (e) goto done;
+        format = (CMVideoFormatDescriptionRef)CFRetain(CMSampleBufferGetFormatDescription(sample));
+        CFDictionaryRef atoms = CMFormatDescriptionGetExtension(format,
+            kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms);
+        CFDataRef hvcc = atoms && CFGetTypeID(atoms) == CFDictionaryGetTypeID() ?
+            CFDictionaryGetValue(atoms,CFSTR("hvcC")) : NULL;
+        if (!hvcc || CFGetTypeID(hvcc) != CFDataGetTypeID() || CFDataGetLength(hvcc) <= 0 ||
+            CFDataGetLength(hvcc) > X9_HEVC_MAX_CONFIG) { e = kVTVideoDecoderBadDataErr; goto done; }
+        cfg_bytes = (size_t)CFDataGetLength(hvcc);
+        CMBlockBufferRef input = CMSampleBufferGetDataBuffer(sample);
+        au_bytes = input ? CMBlockBufferGetDataLength(input) : 0;
+        if (!au_bytes || au_bytes > X9_HEVC_MAX_INPUT) { e = kVTVideoDecoderBadDataErr; goto done; }
+        cfg = malloc(cfg_bytes); au = malloc(au_bytes);
+        if (!cfg || !au) { e = kVTAllocationFailedErr; goto done; }
+        memcpy(cfg,CFDataGetBytePtr(hvcc),cfg_bytes);
+        e = CMBlockBufferCopyDataBytes(input,0,au_bytes,au);
+        if (e) goto done;
+        printf("selected coded HEIF item input; output is that raw tile, NOT a composed HEIF image\n");
+    }
     if (!cfg || !au) { perror("input"); goto done; }
     size_t needed = 0;
     if (x9_hevc_config_parse(cfg, cfg_bytes, &c) ||
         x9_hevc_idr_annexb(&c, cfg, au, au_bytes, NULL, 0, &needed)) {
+        e = kVTVideoDecoderBadDataErr;
         fprintf(stderr, "unsupported/malformed independent HEVC input (Rext alpha is not Main)\n"); goto done;
     }
     e = X9HEVCRegisterDecoder();
@@ -77,7 +109,7 @@ static int decode_vt(const char *config_path, const char *sample_path, const cha
         ps[i] = cfg + c.parameter_sets[i].offset;
         sizes[i] = c.parameter_sets[i].bytes;
     }
-    e = CMVideoFormatDescriptionCreateFromHEVCParameterSets(NULL, c.parameter_set_count, ps, sizes,
+    if (!format) e = CMVideoFormatDescriptionCreateFromHEVCParameterSets(NULL, c.parameter_set_count, ps, sizes,
                                                            (int)c.length_size, NULL, &format);
     if (e) goto done;
     CFStringRef *enable_key = dlsym(RTLD_DEFAULT,
@@ -104,12 +136,14 @@ static int decode_vt(const char *config_path, const char *sample_path, const cha
     e = VTSessionCopyProperty(session, *hardware_key, NULL, &hw);
     if (e || !hw || !CFEqual(hw, kCFBooleanTrue)) { e = kVTVideoDecoderNotAvailableNowErr; goto done; }
     /* Make a CoreMedia-owned copy. No external sample lifetime assumptions. */
-    e = CMBlockBufferCreateWithMemoryBlock(NULL, NULL, au_bytes, NULL, NULL, 0, au_bytes, 0, &block);
-    if (!e) e = CMBlockBufferReplaceDataBytes(au, block, 0, au_bytes);
-    if (e) goto done;
-    CMSampleTimingInfo timing = { .duration = CMTimeMake(1, 1), .presentationTimeStamp = kCMTimeZero,
-                                  .decodeTimeStamp = kCMTimeInvalid };
-    e = CMSampleBufferCreateReady(NULL, block, format, 1, 1, &timing, 1, &au_bytes, &sample);
+    if (!sample) {
+        e = CMBlockBufferCreateWithMemoryBlock(NULL, NULL, au_bytes, NULL, NULL, 0, au_bytes, 0, &block);
+        if (!e) e = CMBlockBufferReplaceDataBytes(au, block, 0, au_bytes);
+        if (e) goto done;
+        CMSampleTimingInfo timing = { .duration = CMTimeMake(1, 1), .presentationTimeStamp = kCMTimeZero,
+                                      .decodeTimeStamp = kCMTimeInvalid };
+        e = CMSampleBufferCreateReady(NULL, block, format, 1, 1, &timing, 1, &au_bytes, &sample);
+    }
     if (e) goto done;
     VTDecodeInfoFlags flags = 0;
     e = VTDecompressionSessionDecodeFrame(session, sample, 0, NULL, &flags);
@@ -151,6 +185,7 @@ done:
     if (r.pixel) CVPixelBufferRelease(r.pixel);
     if (hw) CFRelease(hw);
     if (spec) CFRelease(spec);
+    if (item_info) CFRelease(item_info);
     if (sample) CFRelease(sample);
     if (block) CFRelease(block);
     if (format) CFRelease(format);
@@ -158,11 +193,69 @@ done:
     free(cfg); free(au);
     return rc;
 }
+struct item_walk { uint32_t stack[32], seen[X9_HEIF_MAX_ITEMS], seen_count; };
+static int print_heif_item(const struct x9_heif_document *d, uint32_t id,
+                          unsigned depth, struct item_walk *walk)
+{
+    if (depth == 32) return E2BIG;
+    for (unsigned n = 0; n < depth; n++) if (walk->stack[n] == id) return ELOOP;
+    for (unsigned n = 0; n < walk->seen_count; n++) if (walk->seen[n] == id) return 0;
+    if (walk->seen_count == X9_HEIF_MAX_ITEMS) return ENOSPC;
+    struct x9_heif_image *image = calloc(1,sizeof(*image));
+    if (!image) return ENOMEM;
+    int e = x9_heif_get_image(d,id,image);
+    if (e) { free(image); return e; }
+    walk->stack[depth] = id; walk->seen[walk->seen_count++] = id;
+    printf("item=%u type=%c%c%c%c size=%ux%u channels=%u hidden=%u bytes=%llu grid=%ux%u children=%u\n",
+        id,(char)(image->type>>24),(char)(image->type>>16),(char)(image->type>>8),(char)image->type,
+        image->width,image->height,image->channels,image->hidden,(unsigned long long)image->item_bytes,
+        image->rows,image->columns,image->derived_count);
+    for (unsigned n = 0; n < image->property_count; n++) {
+        const struct x9_heif_property *p = &image->properties[n];
+        printf("  property[%u]=%c%c%c%c essential=%u offset=%llu bytes=%llu (not applied)\n",
+            n,(char)(p->type>>24),(char)(p->type>>16),(char)(p->type>>8),(char)p->type,p->essential,
+            (unsigned long long)p->payload.offset,(unsigned long long)p->payload.bytes);
+    }
+    for (unsigned n = 0; n < image->derived_count && !e; n++) {
+        printf("  dimg[%u]=%u\n",n,image->derived[n]);
+        e = print_heif_item(d,image->derived[n],depth+1,walk);
+    }
+    for (unsigned n = 0; n < X9_HEIF_MAX_ITEMS && !e; n++) {
+        uint32_t auxiliary = 0;
+        e = x9_heif_auxiliary(d,id,n,&auxiliary);
+        if (e == ENOENT) { e = 0; break; }
+        if (!e) { printf("  auxiliary[%u]=%u\n",n,auxiliary); e = print_heif_item(d,auxiliary,depth+1,walk); }
+    }
+    free(image); return e;
+}
+static int heif_info(const char *path)
+{
+    size_t bytes = 0;
+    uint8_t *data = read_file(path,X9_HEIF_MAX_FILE,&bytes);
+    if (!data) { perror("HEIF input"); return 1; }
+    struct x9_heif_document *d = NULL;
+    uint32_t primary = 0;
+    struct item_walk walk = {0};
+    int e = x9_heif_open(data,bytes,&d);
+    if (!e) e = x9_heif_primary(d,&primary);
+    if (!e) e = print_heif_item(d,primary,0,&walk);
+    if (e) fprintf(stderr,"HEIF item input rejected: errno=%d\n",e);
+    else puts("HEIF input graph only; no decode, transform, alpha merge or hardware success claimed");
+    x9_heif_close(&d); free(data); return e ? 1 : 0;
+}
 int main(int argc, char **argv)
 {
-    if (argc == 5 && !strcmp(argv[1], "decode-vt")) return decode_vt(argv[2], argv[3], argv[4]);
+    if (argc == 5 && !strcmp(argv[1], "decode-vt")) return decode_vt(argv[2], argv[3], argv[4],NULL,0);
+    if (argc == 3 && !strcmp(argv[1],"heif-info")) return heif_info(argv[2]);
+    if (argc == 5 && !strcmp(argv[1],"decode-heif-item")) {
+        char *end = NULL;
+        errno = 0; unsigned long id = strtoul(argv[3],&end,0);
+        if (errno || !argv[3][0] || !end || *end || id > UINT32_MAX) return 2;
+        return decode_vt(NULL,NULL,argv[4],argv[2],(uint32_t)id);
+    }
     if (argc != 2 || strcmp(argv[1], "status")) {
-        fprintf(stderr, "usage: %s status | decode-vt hvcC.bin access-unit.bin NEW.yuv\n", argv[0]); return 2;
+        fprintf(stderr, "usage: %s status | decode-vt hvcC.bin access-unit.bin NEW.yuv | "
+            "heif-info file.heic | decode-heif-item file.heic item-id-or-0 NEW.yuv\n", argv[0]); return 2;
     }
     int fd = open(X9_VDEC_DEVICE, O_RDONLY | O_CLOEXEC);
     if (fd < 0) { perror(X9_VDEC_DEVICE); return 1; }
