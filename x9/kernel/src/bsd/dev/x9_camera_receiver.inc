@@ -22,6 +22,8 @@ static int cam_phy_close_locked(uint64_t);
 static int cam_smi_clock_guard(void);
 static int cam_smi_clocks_close_locked(uint64_t);
 static int cam_smi_retirement_guard(uint64_t);
+static bool cam_repeat_cancel_admitted_locked(void);
+static int cam_repeat_cancelled_check_locked(uint64_t,const struct x9_camera_camsv_request *,void *);
 static int cam_sv_guard(void);
 static uint32_t cam_sv_fbc_busy_exemption(void);
 static uint32_t cam_sv_fbc_compare_word(unsigned,uint32_t);

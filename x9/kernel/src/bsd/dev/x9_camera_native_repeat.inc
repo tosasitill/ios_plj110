@@ -12,7 +12,7 @@
 #include "x9_camera_native_repeat.h"
 #define CAM_REPEAT_DROP 0xfe000000u
 enum { CAM_REPEAT_NONE, CAM_REPEAT_PARKED, CAM_REPEAT_PREPARING,
-    CAM_REPEAT_READY, CAM_REPEAT_POSTED, CAM_REPEAT_LIVE, CAM_REPEAT_FAULT };
+    CAM_REPEAT_READY, CAM_REPEAT_POSTED, CAM_REPEAT_LIVE, CAM_REPEAT_FAULT, CAM_REPEAT_CANCELLED };
 static struct {
     uint64_t epoch,completed,submitted,drops;
     unsigned phase;
@@ -20,6 +20,62 @@ static struct {
     uint32_t empty[2],after[2],accepted[2],ack,seen,samples;
     int error;
 } cam_repeat;
+/* Saved BEFORE arm overwrites the raw_request/slot. Old DONE is never
+ * reassigned to next: the unused next request has a separate cancellation. */
+static struct {
+    uint64_t epoch,submitted,completed_count;
+    bool captured,prior_sof,prior_raw_idle,admitted,cancelled;
+    struct x9_camera_camsv_slot prior_slot;
+    __typeof__(cam_irq_fbc) prior_fbc;
+    struct x9_camera_camsv_request next;
+    uint32_t counter[2],control[2],samples;
+    int error;
+} cam_repeat_cancel;
+/* All tests are read-only under control/IRQ or IRQ spin. No cache/lock or
+ * owner callback: source-off still owns the CURRENT next identity. */
+static bool cam_repeat_cancel_identity_locked(void)
+{
+    const struct x9_camera_camsv_request *p=&cam_repeat_cancel.prior_slot.request;
+    return cam_repeat_cancel.captured && !cam_repeat_cancel.error && !cam_repeat.error &&
+        !cam_irq.error && !cam_irq_fbc.error &&
+        cam_repeat_cancel.epoch==cam_irq.epoch && cam_repeat.epoch==cam_irq.epoch &&
+        cam_repeat.enabled && !cam_repeat.admission && cam_repeat.prior_done &&
+        cam_repeat_cancel.submitted==cam_repeat.submitted &&
+        cam_repeat_cancel.completed_count==cam_repeat.completed &&
+        cam_repeat_cancel.prior_sof && cam_repeat_cancel.prior_raw_idle &&
+        cam_repeat_cancel.prior_slot.state==X9_CAMSV_RETIRED &&
+        cam_repeat_cancel.prior_fbc.done_seen && cam_repeat_cancel.prior_fbc.count_accepted &&
+        !cam_repeat_cancel.prior_fbc.error && !cam_repeat_cancel.prior_fbc.source_error &&
+        !memcmp(p,&cam_repeat_cancel.prior_fbc.request,sizeof(*p)) &&
+        cam_repeat_cancel.prior_fbc.done.version==X9_CAMERA_CAMSV_VERSION &&
+        cam_repeat_cancel.prior_fbc.done.generation==p->frame.generation &&
+        cam_repeat_cancel.prior_fbc.done.capture_id==p->frame.capture_id &&
+        cam_repeat_cancel.prior_fbc.source_phase==CAM_STREAM_RUNNING &&
+        cam_repeat_cancel.prior_fbc.source_issued==CAM_STREAM_ON &&
+        cam_repeat_cancel.prior_fbc.source_ack==CAM_STREAM_ON &&
+        p->frame.capture_id<cam_repeat_cancel.next.frame.capture_id &&
+        p->frame.generation==cam_repeat_cancel.next.frame.generation &&
+        p->frame.sensor==cam_repeat_cancel.next.frame.sensor &&
+        !memcmp(&cam_repeat_cancel.next,&cam_irq.request,sizeof(cam_irq.request)) &&
+        !memcmp(&cam_repeat_cancel.next,&cam_irq_fbc.request,sizeof(cam_irq_fbc.request)) &&
+        !memcmp(&cam_repeat_cancel.next,&cam_sv.request,sizeof(cam_sv.request)) &&
+        !cam_irq_fbc.done_seen && !cam_irq_fbc.count_accepted && !cam_irq.sof_seen &&
+        !cam_irq.accepting && !cam_irq.busy && !cam_irq.count &&
+        (cam_repeat.phase==CAM_REPEAT_READY || cam_repeat.phase==CAM_REPEAT_CANCELLED);
+}
+static bool cam_repeat_cancel_admitted_locked(void)
+{
+    return cam_repeat_cancel.admitted && cam_repeat_cancel_identity_locked() &&
+        !cam_irq_fbc.source_error && cam_irq_fbc.source_phase==CAM_STREAM_STOPPED &&
+        cam_irq_fbc.source_issued==(CAM_STREAM_ON|CAM_STREAM_OFF) &&
+        cam_irq_fbc.source_ack==(CAM_STREAM_ON|CAM_STREAM_OFF) &&
+        !cam_irq_fbc.source_control && cam_irq_fbc.source_frame_count==0xff;
+}
+static bool cam_repeat_retirement_receipt_locked(void)
+{
+    return (cam_irq.sof_seen && cam_irq_fbc.done_seen && cam_irq_fbc.count_accepted) ||
+        cam_repeat_cancel_admitted_locked();
+}
 static int cam_repeat_fault_locked(int e)
 {
     if(!cam_repeat.error)cam_repeat.error=e;
@@ -44,9 +100,9 @@ static bool cam_repeat_identity(void)
 static bool cam_repeat_stopped_identity(void)
 {
     return cam_repeat.enabled && !cam_repeat.admission &&
-        cam_repeat.phase==CAM_REPEAT_PARKED && cam_repeat.epoch==cam_irq.epoch &&
+        (cam_repeat.phase==CAM_REPEAT_PARKED || cam_repeat_cancel_admitted_locked()) && cam_repeat.epoch==cam_irq.epoch &&
         cam_repeat.epoch==cam_sv.epoch && !cam_repeat.error && !cam_sv.error && !cam_sv.terminal &&
-        cam_irq_fbc.done_seen && cam_irq_fbc.count_accepted &&
+        cam_repeat_retirement_receipt_locked() &&
         cam_irq_fbc.source_phase==CAM_STREAM_STOPPED &&
         cam_irq_fbc.source_issued==(CAM_STREAM_ON|CAM_STREAM_OFF) &&
         cam_irq_fbc.source_ack==(CAM_STREAM_ON|CAM_STREAM_OFF) && !cam_irq_fbc.source_error;
@@ -66,7 +122,7 @@ static bool cam_repeat_done_target_locked(unsigned bank,uint32_t counter)
 {
     if(counter==cam_irq_fbc.target[bank])return true;
     return (cam_repeat_identity() || cam_repeat_stopped_identity()) &&
-        !cam_repeat.error && cam_irq_fbc.count_accepted &&
+        !cam_repeat.error && cam_repeat_retirement_receipt_locked() &&
         !((counter^cam_irq_fbc.target[bank])&~CAM_REPEAT_DROP) &&
         counter==cam_repeat.after[bank];
 }
@@ -94,7 +150,7 @@ static int cam_repeat_note_locked(unsigned bank,uint32_t control,uint32_t counte
         return cam_repeat_empty_note(bank,counter);
     }
     if(cam_repeat.phase==CAM_REPEAT_PARKED || cam_repeat.phase==CAM_REPEAT_PREPARING ||
-       cam_repeat.phase==CAM_REPEAT_READY) {
+       (cam_repeat.phase==CAM_REPEAT_READY || cam_repeat.phase==CAM_REPEAT_CANCELLED)) {
         if(control!=expected)return ESTALE;
         return cam_repeat_empty_note(bank,counter);
     }
@@ -375,6 +431,27 @@ static int cam_repeat_stopped_irqs_locked(uint64_t epoch)
 {
     uint64_t wait_span;nanoseconds_to_absolutetime(500000000,&wait_span);
     uint64_t wait_end=mach_absolute_time()+wait_span;
+    boolean_t admit_old=cam_irq_spin_take();
+    int admit_error=0;
+    if(cam_repeat.enabled && cam_repeat.phase==CAM_REPEAT_READY) {
+        if(!cam_repeat_cancel_identity_locked() || cam_irq_fbc.source_phase!=CAM_STREAM_STOPPED ||
+           cam_irq_fbc.source_issued!=(CAM_STREAM_ON|CAM_STREAM_OFF) ||
+           cam_irq_fbc.source_ack!=(CAM_STREAM_ON|CAM_STREAM_OFF))admit_error=ESTALE;
+        for(unsigned sample=0;sample<2 && !admit_error;sample++) {
+            for(unsigned b=0;b<2 && !admit_error;b++) {
+                admit_error=cam_irq_power();if(admit_error)break;
+                uint32_t ctl=cam_irq_rd(cam_irq.view[b],0x540),cnt=cam_irq_rd(cam_irq.view[b],0x544);
+                admit_error=cam_irq_fbc_note_locked(b,ctl,cnt);
+                if(!admit_error && ((cnt&CAM_IRQ_FBC_CNT) ||
+                   ((cnt^cam_repeat_cancel.prior_fbc.after[b])&~CAM_REPEAT_DROP)))admit_error=ESTALE;
+                cam_repeat_cancel.counter[b]=cnt;cam_repeat_cancel.control[b]=ctl;
+            }
+            if(!admit_error)cam_repeat_cancel.samples++;
+        }
+        if(!admit_error)cam_repeat_cancel.admitted=true;
+        else cam_repeat_cancel.error=admit_error;
+    }
+    cam_irq_spin_drop(admit_old);if(admit_error)return admit_error;
     /* A real already-issued request may finish while core STOP has
      * invalidated delivery. Leave its SOF/DONE/worker binding untouched,
      * release IRQ mutex for the worker and wait for actual CPU retirement.
@@ -388,8 +465,8 @@ static int cam_repeat_stopped_irqs_locked(uint64_t epoch)
            cam_irq_fbc.source_phase!=CAM_STREAM_STOPPED ||
            cam_irq_fbc.source_issued!=(CAM_STREAM_ON|CAM_STREAM_OFF) ||
            cam_irq_fbc.source_ack!=(CAM_STREAM_ON|CAM_STREAM_OFF)))wait_error=ESTALE;
-        bool ready=cam_repeat.phase==CAM_REPEAT_PARKED && !cam_irq.busy && !cam_irq.count;
-        if(!wait_error && (cam_repeat.phase==CAM_REPEAT_READY || cam_repeat.phase==CAM_REPEAT_PREPARING))
+        bool ready=(cam_repeat.phase==CAM_REPEAT_PARKED || cam_repeat_cancel_admitted_locked()) && !cam_irq.busy && !cam_irq.count;
+        if(!wait_error && ((cam_repeat.phase==CAM_REPEAT_READY && !cam_repeat_cancel_admitted_locked()) || cam_repeat.phase==CAM_REPEAT_PREPARING))
             wait_error=ENOTSUP; /* never-issued DEVICE slot has a different cancellation proof */
         if(!wait_error && !ready && mach_absolute_time()>=wait_end)wait_error=ETIMEDOUT;
         if(wait_error || ready){cam_irq_spin_drop(wait_old);if(wait_error)return wait_error;break;}
@@ -452,8 +529,21 @@ static int cam_irq_repeat_publish_locked(uint64_t epoch,const struct x9_camera_c
         d->context!=cam_sv.request_dma.context || d->check!=cam_sv.request_dma.check ||
         d->backing!=cam_sv.request_dma.backing))e=ESTALE;
     if(!e) {
-        old=cam_irq_spin_take();cam_repeat.phase=CAM_REPEAT_PREPARING;cam_irq_spin_drop(old);
-        if(publish)e=publish(context,r,d);
+        lck_mtx_lock(&camera_camsv_lock);lck_mtx_lock(&camera_s1_lock);
+        struct x9_camera_s1 *prior_map=cam_irq.slot->dma.backing;
+        e=cam_irq.slot->state!=X9_CAMSV_RETIRED || prior_map->raw_state!=CAM_RAW_IDLE ||
+            !cam_s1_dma_match(prior_map,cam_irq.slot)?ESTALE:0;
+        if(!e) {
+            old=cam_irq_spin_take();bzero(&cam_repeat_cancel,sizeof(cam_repeat_cancel));
+            cam_repeat_cancel.epoch=epoch;cam_repeat_cancel.submitted=cam_repeat.submitted;
+            cam_repeat_cancel.completed_count=cam_repeat.completed;
+            cam_repeat_cancel.prior_sof=cam_irq.sof_seen;cam_repeat_cancel.prior_raw_idle=true;
+            cam_repeat_cancel.prior_slot=*cam_irq.slot;cam_repeat_cancel.prior_fbc=cam_irq_fbc;
+            cam_repeat_cancel.next=*r;cam_repeat_cancel.captured=true;
+            cam_repeat.phase=CAM_REPEAT_PREPARING;cam_irq_spin_drop(old);
+        }
+        lck_mtx_unlock(&camera_s1_lock);lck_mtx_unlock(&camera_camsv_lock);
+        if(!e && publish)e=publish(context,r,d);
         if(!e)e=x9_camera_camsv_arm(cam_irq.slot,r,d);
     }
     if(!e) {
@@ -509,3 +599,5 @@ int x9_camera_native_repeat(uint64_t epoch,const struct x9_camera_camsv_request 
     int e=cam_irq_repeat_locked(epoch,r,d);
     lck_mtx_unlock(&camera_irq_lock);lck_mtx_unlock(&camera_control_lock);return e;
 }
+
+#include "x9_camera_native_cancel.inc"

@@ -217,8 +217,13 @@ static int cam_irq_credit_guard_locked(uint64_t epoch)
     return e;
 }
 #include "x9_camera_source.inc"
+static bool cam_repeat_cancel_admitted_locked(void);
+static bool cam_repeat_retirement_receipt_locked(void);
+static int cam_repeat_cancel_complete_locked(uint64_t);
+static int cam_repeat_cancelled_check_locked(uint64_t,const struct x9_camera_camsv_request *,void *);
 #include "x9_camera_irq_fbc.inc"
 static void cam_repeat_stop_locked(uint64_t);
+
 #include "x9_camera_stream.inc"
 #include "x9_camera_stream_stop.inc"
 #include "x9_camera_dma_stop.inc"
@@ -685,7 +690,9 @@ static int cam_irq_close_locked(uint64_t epoch)
      * queued callback. Two actual idle samples include PENDING/ACTIVE. Never
      * ICPENDR/ICACTIVER/EOI a source to erase unconsumed history here. */
     if(!e)e=cam_irq_wait_idle();
-    if(!e&&cam_irq.slot->state!=X9_CAMSV_EMPTY&&cam_irq.slot->state!=X9_CAMSV_RETIRED)e=EBUSY;
+    if(!e)e=cam_repeat_cancel_complete_locked(epoch);
+    if(!e&&cam_irq.slot->state!=X9_CAMSV_EMPTY&&cam_irq.slot->state!=X9_CAMSV_RETIRED&&
+       cam_irq.slot->state!=X9_CAMSV_CANCELLED)e=EBUSY;
     if(!e)e=cam_sv_environment();
     for(unsigned k=3;k&&!e;k--) {
         unsigned i=k-1;uint32_t bit=1u<<i;

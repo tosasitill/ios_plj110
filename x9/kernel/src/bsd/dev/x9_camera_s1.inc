@@ -31,7 +31,7 @@ static const uint32_t cam_s1_oas[]={32,36,40,42,44,48};
 #include "x9_camera_cache.inc"
 
 enum { CAM_RAW_PRIVATE, CAM_RAW_DEVICE, CAM_RAW_CPU, CAM_RAW_IDLE,
-    CAM_RAW_RETAINED };
+    CAM_RAW_RETAINED, CAM_RAW_CANCELLED };
 
 struct cam_s1_page { vm_offset_t va; uint64_t pa; };
 struct x9_camera_s1 {

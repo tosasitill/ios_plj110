@@ -15,6 +15,7 @@ struct cam_native_epoch_receipt {
     __typeof__(cam_irq) irq;
     __typeof__(cam_irq_fbc) fbc;
     __typeof__(cam_repeat) repeat;
+    __typeof__(cam_repeat_cancel) cancel;
     __typeof__(cam_source) source;
     __typeof__(cam_stream_close) stream_close;
     __typeof__(cam_dma_stop) dma_stop;
@@ -83,7 +84,7 @@ static int cam_native_epoch_recycle_locked(uint64_t epoch,struct x9_camera_smmu 
        cam_irq.uncertain_priority || cam_irq_fbc.error || cam_irq_fbc.source_error ||
        cam_repeat.error || cam_source.error || cam_stream_close.error || cam_dma_stop.error)e=ESTALE;
     if(!e && !m->native_unstarted_retired &&
-       (!cam_irq_fbc.bound || !cam_irq_fbc.done_seen || !cam_irq_fbc.count_accepted ||
+       (!cam_irq_fbc.bound || !cam_repeat_retirement_receipt_locked() ||
         cam_irq_fbc.epoch!=epoch || cam_irq_fbc.source_phase!=CAM_STREAM_STOPPED ||
         cam_irq_fbc.source_issued!=(CAM_STREAM_ON|CAM_STREAM_OFF) ||
         cam_irq_fbc.source_ack!=(CAM_STREAM_ON|CAM_STREAM_OFF) ||
@@ -92,7 +93,7 @@ static int cam_native_epoch_recycle_locked(uint64_t epoch,struct x9_camera_smmu 
     if(!e && m->native_unstarted_retired &&
        (cam_irq_fbc.bound || cam_irq_fbc.source_issued || cam_sv.credit_issued ||
         cam_source.captured || m->native_setup_issued))e=ESTALE;
-    if(!e) {h->irq=cam_irq;h->fbc=cam_irq_fbc;h->repeat=cam_repeat;}
+    if(!e) {h->irq=cam_irq;h->fbc=cam_irq_fbc;h->repeat=cam_repeat;h->cancel=cam_repeat_cancel;}
     cam_irq_spin_drop(old);
     /* The always-powered GIC is independently live; never sample the gated
      * camera CSR to assert idle after power removal. Prior config restoration
@@ -101,8 +102,10 @@ static int cam_native_epoch_recycle_locked(uint64_t epoch,struct x9_camera_smmu 
     if(!e){delay(1);e=cam_irq_idle();}
     lck_mtx_lock(&camera_camsv_lock);lck_mtx_lock(&camera_s1_lock);
     if(!e && (!cam_irq.slot || cam_irq.slot->last_errno || m->map->raw_errno ||
-       cam_irq.slot->state!=(m->native_unstarted_retired?X9_CAMSV_EMPTY:X9_CAMSV_RETIRED) ||
-       m->map->raw_state!=(m->native_unstarted_retired?CAM_RAW_PRIVATE:CAM_RAW_IDLE)))e=ESTALE;
+       cam_irq.slot->state!=(m->native_unstarted_retired?X9_CAMSV_EMPTY:
+           cam_repeat_cancel.cancelled?X9_CAMSV_CANCELLED:X9_CAMSV_RETIRED) ||
+       m->map->raw_state!=(m->native_unstarted_retired?CAM_RAW_PRIVATE:
+           cam_repeat_cancel.cancelled?CAM_RAW_CANCELLED:CAM_RAW_IDLE)))e=ESTALE;
     if(!e && !m->native_unstarted_retired &&
        (cam_irq.slot->dma.backing!=m->map || !cam_s1_dma_match(m->map,cam_irq.slot)))e=ESTALE;
     lck_mtx_unlock(&camera_s1_lock);lck_mtx_unlock(&camera_camsv_lock);
@@ -117,6 +120,7 @@ static int cam_native_epoch_recycle_locked(uint64_t epoch,struct x9_camera_smmu 
          * stay intact. Selected RETIRED slot is NOT made EMPTY here. */
         old=cam_irq_spin_take();
         bzero(&cam_irq_fbc,sizeof(cam_irq_fbc));bzero(&cam_repeat,sizeof(cam_repeat));
+        bzero(&cam_repeat_cancel,sizeof(cam_repeat_cancel));
         bzero(&cam_irq.request,sizeof(cam_irq.request));bzero(&cam_irq.sof_frame,sizeof(cam_irq.sof_frame));
         bzero(cam_irq.queue,sizeof(cam_irq.queue));bzero(cam_irq.deliveries,sizeof(cam_irq.deliveries));
         cam_irq.head=0;cam_irq.sof_seen=false;cam_irq.reported=0;
@@ -189,12 +193,15 @@ static int cam_native_reopen_locked(uint64_t epoch,struct x9_camera_smmu *previo
     struct cam_native_epoch_receipt *slot_history=NULL;
     unsigned which=cam_sv.status.sensor-1;
     if(!e && (which>=2 || cam_irq.slot!=&cam_irq.slots[which] || cam_irq.slot->last_errno))e=ESTALE;
-    if(!e && cam_irq.slot->state==X9_CAMSV_RETIRED) {
+    if(!e && (cam_irq.slot->state==X9_CAMSV_RETIRED || cam_irq.slot->state==X9_CAMSV_CANCELLED)) {
         for(struct cam_native_epoch_receipt *h=cam_native_epochs;h;h=h->previous) {
             if(h->smmu->map!=cam_irq.slot->dma.backing)continue;
             if(h->smmu->native_unstarted_retired || (h->slot_rebound&(1u<<which)) ||
                cam_native_epoch_recycled_check_locked(h->epoch,h->smmu) ||
-               h->smmu->map->raw_state!=CAM_RAW_IDLE || h->smmu->map->raw_errno ||
+               h->smmu->map->raw_state!=(h->cancel.cancelled?CAM_RAW_CANCELLED:CAM_RAW_IDLE) ||
+               (h->cancel.cancelled && (cam_irq.slot->state!=X9_CAMSV_CANCELLED ||
+                memcmp(&cam_irq.slot->request,&h->cancel.next,sizeof(h->cancel.next)))) ||
+               h->smmu->map->raw_errno ||
                !cam_s1_dma_match(h->smmu->map,cam_irq.slot) ||
                memcmp(cam_irq.slot,&h->irq.slots[which],sizeof(*cam_irq.slot)))e=ESTALE;
             else slot_history=h;
