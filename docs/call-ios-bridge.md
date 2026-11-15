@@ -790,6 +790,45 @@ answer/end调用manager+20/+28，end reason先经原enum→string，不直猜MD 
 因此本轮不加仅loading/空handler，尚须owned factory替换、profile/UUID/epoch/native-ID、内核入口及真实媒体生命周期。
 原表/汇编/导出复读脚本与准确decision在`x9/out/call-typed-actions/`。
 
+#### provider-install：真实 factory 返回面、临时 action handle 与 AP 漏路（静态闭合，未安装）
+
+最窄的真实消费者是`100dcf174`：`100dcf198`取driver+328的强owned factory，
+`100dcf1a8`读其vptr+40、`100dcf1c0` plain `BLR`；正常factory addresspoint
+`101532938`的该槽地址是`101532978`，原实现`10019c234`。
+因此可实现方案应保留真实factory/controller/driver与原+40构造，只在真实返回面接管action；
+不是替换完整MCommandDriversFactory，也不是查找不存在的独立Registry factory item。
+本轮尚未实现对该loaded槽或真实factory实例的可写保护、安装时序、原指针保存/原子切换和撤销，
+不能把一个地址或loader receipt写成已安装。运行时必须校验上述原件image UUID/ABI和dyld已fixup指针，
+不能使用磁盘chained-fixup编码值；当前arm64 plain `BLR`不授权猜测arm64e签名规则。
+
+**Call是临时action handle，不是MD生命周期owner。**正常dial的factory pair在sp+600/+608；
+config helper的copy sp+5d8/+5e0在`100dce798..7cc`释放，model正常路径仅保有local cast pair，
+调用Call+80后释放；driver `100dcec04..c70`又释放剩余sp+5d0与sp+608。
+另一个真实动作`100dd484c→100dd4888`重新调用同一helper创建Call，调用+30后在
+`100dd48e8..491c`释放。这已否定“仅首次dial对象安装，然后靠其析构退役MD”的方案。
+每次factory返回均须关联既有logical client/UUID/native epoch，context寿命独立于这些临时对象。
+
+真Call addresspoint为`1d90b7dc8`，不是导出vtable symbol`1d90b7db8`。
+D1/D2 `1b7c43ac8→1b7c41344`仅销owned UUID/clientId；D0 `1b7c43acc`随后delete，
+**两者均不发hangup、END或deinit**。shared control `10019ed40`将this调整至embedded Call+18，
+调用其vptr+0 **nondeleting** destructor，control D0再释放整个分配，不能对embedded Call执行+8删除。
+若以后使用共享action adapter，应保原RTTI[-2/-1]、原D1/D0及typed布局，表至少与引用它的所有对象同寿；
+native退休只在真实终态/准入失败/逻辑client注销与callback fence闭合后执行，不以Call析构代替。
+
+**只改dial/hangup仍会漏到AP。**CLIR+38 `1b7c42d84`仅写w2→+8、w1→+9，可保原setter；
+text+28 `1b7c432fc`除写+40还派block `1b7c433d4→1b7b3ad4c setTextMediaSessionMode`；
+relay+30 `1b7c43898`除写+44还派block `1b7c43970→1b7b3acac setRelayMode`。
+后两者在config阶段已可调用，MD-owned对象必须保字段mutation但隔离AP发送，不能原函数passthrough。
+其余会发AP的ring/answer/end/DTMF/refresh/hold/resume/pull/branded-image动作同样必须有明确准入，
+未实现不能回落AP；原mute仅ret不证明媒体静音。当前缺native user provider context/admission，
+仅内核内部dial入口、VOICE20仍拒绝，故本轮不写unused installer或空factory，亦无生产编译/上机结论。
+
+精确汇编、原件UUID和facts/design分层见`x9/out/call-provider-install/provider-install-contract.json`；
+`factory40-actual-callsite.asm`、`call-helper-other-action-and-config.asm`、`driver-normal-pair-release.asm`、
+`call-original-d0-d1.asm`及`text-config-ap-leak.asm/relay-config-ap-leak.asm`可原件复读。
+原typed callback最终消费者由`x9/out/calllist-production/`独立追踪；返回真Call不等于state发布，
+不要用TRYING忽略通知、未知状态数值映射或fake ACTIVE冒充通话流程。
+
 ### 通话专用voice音频契约（仅原件静态，不冒充媒体speaker）
 
 同机HAL `ScpSpeechOn2474a0`先registerAdspFeature14，`247544`以scene0、AP↔DSP各65536B region
