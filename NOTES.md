@@ -1696,3 +1696,12 @@ Model now (as Android, one shared AFE, one owner per shared bit):
 
 - main `f2797a9`已含`96d3a79`（ALS）、`a0df27c`（type8）、`6eee23a`（op10）、`e7cc23b`/`05d13f0`（ALS-only候选交接），逐项`git merge-base --is-ancestor`通过；无尚待合入的这两项功能。本地光感/距离功能分支及worktree已在上轮清理，用户本轮要求后再删除远端`feat/als-power-init-ios`（96d3a79）、`feat/proximity-power-init-ios`（8694bfd），`git push origin --delete`成功。ALS/proximity候选与原始构建日志仍保留在gitignored `x9/out/`。
 - 远端配置仅跟踪main，因此不能用`git branch -r`当远端总数；本轮用`git ls-remote --heads origin`读取实际GitHub分支。只清理用户指定的两条传感器分支，不动audio、GPU、Bluetooth及call活动分支/worktree。本次仅git/交接维护，没有构建、CI、设备操作或上机新结果。
+
+#### 321 实机核对（2026-11-15）— region-info 已过，共享链停在 LIST，两个传感器仍未可用
+
+- **原始证据/基线**：只读分析 `~/321.txt`（17730行，日志覆盖启动至81.650s），传感器摘录保存在主仓库 gitignored `x9/out/sensors-log321.txt`，原始日志/摘录不入git。`:406–407`明确 proximity mode3、ALS native SCP；`:986`明确 `active plugin=X9GeneralMetal280 from verified allowlist`。这与联合 proximity4 的启动基线一致，但日志没有唯一镜像ID，不能仅凭这些marker断言确切boot文件。分析时main基线`af62d8b`，共享worker及stage定义与候选`b4aa2ef`逐文件无差异。
+- **已修复/已观察**：`:618–625`（2.087–2.106s）GET_REGION_INFO op10的8字段全部读完，包括 `ffffffffea000000` / `ffffffffea002000` / `ffffffffea700000` / `ffffffffeae49800`；`:626–628`进入stage3，26M/INFRA资源请求与DRAM_REQ均返回0。`:700` RESET_RELEASE返回0，`:723–725`（2.426–2.431s）出现真实 `READY channel22 image=400000`、firmware DRAM reserve与DT一致并进入stage6。`:731/736`分别是SHARE_MEMORY（type0 cmd11 seq1）及TIMESYNC（type0 cmd10 seq2）的匹配ACK，均 `-> 0 ret=0`。因此320的u32符号扩展阻塞已实跑消失，SCP启动和前两条控制命令已经走通；不是只注册了HID。
+- **当前阻塞/结论**：`:737`（2.464s）进入stage9；`:823`（2.793s）`exit stage=9 errno=60 firmware=1 sensor=1 packets=2 records=0`；`:846` proximity收到 `transport errno=60; no synthetic screen state`。stage9按`X9ALS.h`是LIST，`errno60=ETIMEDOUT`；`als_list()`只有发送notify成功但100ms期限内没有设置`als_reply_received`时走该超时分支。**没有被接受的LIST回复，没有进入ENABLE/STREAM，记录数为0；光感/距离及自动亮度/遮挡熄屏仍未修好。** 日志不含原始notify包和reject原因，不能区分固件未回、回包晚到、CRC/头字段/seq匹配被拒，不能据此宣布硬件或固件故障。
+- **iOS桥边界**：`:3340`（12.365s）backboardd打开X9AmbientLight返回0；`:3350–3351`（12.406–12.408s）打开X9Proximity返回0且UserClient open=1；`:11906/11908` SpringBoard的`IONameMatch=als`匹配成功。这些发生在共享worker退出之后，仅证明服务匹配/打开，不证明有lux、近远DATA或系统自动效果；全日志未见LIGHT/proximity LIST、ENABLE ACK或真实传感器dispatch。
+- **下一步**：只针对最早未通过的LIST入口，对照Android sensor/2.0 的共享TX/RX结构、CRC32覆盖、notify command9的字段与sequence语义和实际回复时序；下一次最小观测记录发包header/CRC、IN32原始28B及拒绝原因、相关IRQ/TX/RX状态和超时时间。不先改增益/极性、放宽CRC或伪造样本，也不重跑已确认通过的op10修复作为新结论。LIST真实通过后才继续LIGHT/type8 ENABLE与遮挡DATA验收。
+- **本轮范围/交接**：分支`feat/sensors-log321-status`仅更新NOTES；没有驱动修改、编译、新boot.img、CI run、测试套件、mailbox/ADB或其他设备操作。本轮文档提交合main/push后清理本地交接分支，既有候选镜像保持原样。
