@@ -157,6 +157,12 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-16 完整通话/短信目标：连续三轮无进展后的阻断交接
+
+- 三代理加速收束的上一轮产生新证据；其后**三个连续goal turns均无功能/输入进展**，每轮核实main/origin仍为`6e7b46fb`、tracked clean、已抓两个JAR路径均missing。本轮再核三个代理全部completed，gh main为`[]`，没有可认定为verified wait的活动代理/构建句柄。未重启相同任务、未重扫已排除类、未重编旧kernel，也未操作设备。
+- **同一真实阻断未改变**：缺matching Android17 `CP2A.260605.016/B.46c413f-20895a6-20bdbdd`的`telephony-common.jar`与`framework-telephony.jar`实际code bytes，无法闭真实意图/profile producer；同版audio_dsp/实际scene0 task-info、通话硬件选择和独立媒体owner亦缺。已有源码仍没有完整typed caller→owned context/profile→kernel admission→terminal delegate连接，不能通过空loader、默认profile/UUID或单开09绕过这些输入。当前image/source对应的短信保存/重开/ACK和MO对端证据也缺；旧运行记录不替代。
+- 已达到blocked审计阈值，目标状态由本轮goal工具更新为**blocked，而不是complete或paused**。完整要求仍为handover、CallList、生产拨号策略、通话专用双向音频、短信端到端验收及最终修复镜像；无最终镜像，无新生产修复/编译/上机。下一需要用户给已导出同版原件本地路径或相应外部输入变化，再按原完整目标续接；不要求再打10086/补来电/试刷探针。证据仍在上一条四组`x9/out/`，本轮仅此必要交接，不将状态记录提交计为功能进展。
+
 #### 2026-11-16 三代理加速后的生产缺口收束（无新增生产修复，不能交付最终镜像）
 
 - **基线/本轮分工**：main/origin `a2b9036c`，用户再次明确多开代理。复用三个代理及 `call-production-connect`、`dial-intent-input`、`sms-production-audit` 三树，root为 `voice-hostless-route`；仅核已抓文件与当前源码，不操作手机、不要求10086/呼入、不出探针，不运行测试/人工向量，不碰其它audio/BT/camera/HEVC树或共享`.local`。四组结论均仅追加现有call docs，**无production delta、编译、CI、boot pack或上机**；gh main查询`[]`。前一有效生产kernel仍为`e8103c88`/`x9/out/x9-call-nas-bind-owned-20261116/`，本轮不重编旧产物，不称最终镜像。
