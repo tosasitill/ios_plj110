@@ -316,6 +316,8 @@ static int startup_identity(uint8_t *response,unsigned *n)
  return identify(response,n);
 }
 
+extern int sweet_x9_perf(unsigned bit);   /* x9g mask, pexpert/arm/pe_serial.c */
+extern void sweet_x9_ui_touch(void);      /* UI boost activity, sweet_x9_gpu_dependencies.c */
 static void release_all(void){for(int i=0;i<10;i++)if(downmask&(1u<<i))sweet_hid_touch(i,0,lastx[i],lasty[i]);downmask=0;}
 static void touch_run(void)
 {
@@ -404,7 +406,13 @@ static void touch_run(void)
    printf("X9 TOUCH: alive reports=%u contacts=%03x irq=%u\n",reports,downmask,(mmrd(touch_gpio,0x200)>>4)&1);
    clock_interval_to_deadline(10,NSEC_PER_SEC,&heartbeat);
   }
-  uint64_t deadline;clock_interval_to_deadline(8,NSEC_PER_MSEC,&deadline);
+  /* gpu-wait (x9g bit 8), from hackios-xnu-kernel 66b8e63: the window
+   * server draws a scroll/swipe frame when a touch sample arrives; 8 ms
+   * polls (plus the ~1 ms SPI read) gave ~110 samples/s for 120 refreshes.
+   * 4 ms while a finger is down, 8 ms idle. */
+  if(downmask)sweet_x9_ui_touch();
+  const unsigned period_ms=(downmask&&sweet_x9_perf(8))?4:8;
+  uint64_t deadline;clock_interval_to_deadline(period_ms,NSEC_PER_MSEC,&deadline);
   (void)assert_wait_deadline(&downmask,THREAD_UNINT,deadline);thread_block(THREAD_CONTINUE_NULL);
  }
 }

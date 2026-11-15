@@ -8,12 +8,15 @@
  * A verified single-call mapping is required before x9cw_action can be
  * submitted. A real native state producer and asynchronous DIAL join now
  * exist; initialization/profile/audio admission remains unconnected. No
- * MIPC call request/registration/approval is started automatically. Other
+ * MIPC call request/registration/approval is started at boot. Other
  * VOICE requests get unsupported, never a success bootstrap/readiness stub.
  * Explicit VOICE44 routing and guarded VOICE21 end-current-call now have
- * production dispatch. This does not publish VOICE, register the MD, admit
- * a DIAL profile, or report call/audio readiness. */
+ * production dispatch. Bound VOICE03 explicit disables now cause actual
+ * Android-derived CMD/IND registration and an owned initial snapshot;
+ * handover/event enable remains unsupported. This does not publish VOICE,
+ * admit a DIAL profile, or report network/call/audio readiness. */
 #include "../../../bsd/dev/x9_call_state.h"
+#include "../../../bsd/dev/x9_call_init.h"
 struct x9c_dial_job {
  bool used,answered,cnf,held;unsigned slot,sim,len;
  uint64_t generation,deadline,token;struct x9cw_dial_join join;
@@ -25,7 +28,7 @@ static struct x9cw_inbound_state x9c_inbound;
 static bool x9c_observed;
 static bool x9c_incoming_observed;
 /* VOICE binding is independent of NAS/WMS clients and has NO SIM default. */
-struct x9c_client {bool bound;unsigned sim;uint64_t generation;};
+struct x9c_client {bool bound,registered;unsigned sim;uint64_t generation;};
 static x9c_client x9c_clients[CBQ_MAX_CLIENTS];
 struct x9c_end_job {
  bool used,answered;unsigned slot,sim,stage,id;
@@ -45,6 +48,113 @@ static void x9c_end_answer(struct x9c_end_job &j,uint16_t err){
 static uint64_t x9c_current_submit(unsigned sim){
  uint8_t query[16];x9cw_header(query,sizeof(query),0x909,1u<<sim,0);
  uint64_t token=x9_md_mipc_submit(query,sizeof(query));bzero(query,sizeof(query));return token;
+}
+/* VOICE03 is a real trigger; Bind44 alone never sends a registration.
+ * MD subscriptions survive QRTR deletion; host waiters do not. Every SIM
+ * owns its stage/token. The Android CMD registry itself is global (ff). */
+struct x9c_reg_wait {
+ bool used,answered;unsigned sim,len;uint16_t transaction,result;
+ uint64_t generation,deadline;uint8_t req[15];
+};
+static struct x9c_reg_wait x9c_reg_wait[CBQ_MAX_CLIENTS];
+static struct x9cw_call_init x9c_init[2];
+static struct {uint64_t token,deadline;bool confirmed,held;} x9c_cmd_init;
+static bool x9c_reg_live(unsigned slot,const struct x9c_reg_wait &w){
+ return slot<CBQ_MAX_CLIENTS&&x9q_clients[slot].generation==w.generation&&
+  x9c_clients[slot].bound&&x9c_clients[slot].generation==w.generation&&x9c_clients[slot].sim==w.sim;
+}
+static void x9c_reg_answer(unsigned slot,uint16_t error){
+ struct x9c_reg_wait &w=x9c_reg_wait[slot];
+ if(!w.answered&&x9c_reg_live(slot,w)){
+  x9q_packet p(w.req,error);p.send(CBQ_PORT_BASE+slot,X9BB_PORT_BASE+9);
+  x9c_clients[slot].registered=!error;
+ }
+ w.result=error;w.answered=true;bzero(w.req,sizeof(w.req));
+}
+static uint64_t x9c_register_submit(unsigned id,unsigned sim){
+ uint8_t frame[24];unsigned n=x9cw_call_register(frame,sizeof(frame),id,sim,x9_md_sim_count());
+ uint64_t token=n?x9_md_mipc_submit(frame,n):0;bzero(frame,sizeof(frame));return token;
+}
+static void x9c_init_poll(uint8_t *frame){
+ bool wanted[2]={false,false};uint64_t now=x9q_ms();
+ for(unsigned i=0;i<CBQ_MAX_CLIENTS;i++){
+  struct x9c_reg_wait &w=x9c_reg_wait[i];if(!w.used||w.answered)continue;
+  if(!x9c_reg_live(i,w)||now>=w.deadline)x9c_reg_answer(i,X9Q_NOT_READY);
+  else wanted[w.sim]=true;
+ }
+ bool online=x9w_control_ready&&x9_md_mipc_online();
+ if(!online){
+  for(unsigned i=0;i<CBQ_MAX_CLIENTS;i++)x9c_clients[i].registered=false;
+  if(x9c_cmd_init.token||x9c_cmd_init.confirmed)x9c_cmd_init.held=true;
+  for(unsigned sim=0;sim<2;sim++)if(x9c_init[sim].stage||x9c_init[sim].token)x9c_init[sim].held=1;
+ }
+ if(x9c_cmd_init.token){
+  if(now>=x9c_cmd_init.deadline)x9c_cmd_init.held=true;
+  uint32_t n=0;int rc=x9_md_mipc_take(x9c_cmd_init.token,frame,X9_MIPC_FRAME_MAX,&n);
+  if(rc==1){
+   uint32_t result=1;bool good=x9cw_call_register_cnf(frame,n,0x30b,x9c_cmd_init.token,&result);
+   x9c_cmd_init.token=0;bzero(frame,X9_MIPC_FRAME_MAX);
+   if(!good||result)x9c_cmd_init.held=true;
+   if(!x9c_cmd_init.held){x9c_cmd_init.confirmed=true;
+    printf("X9 CALL: Android CMD8901 registration confirmed; no automatic approval\n");}
+  }else if(rc<0)x9c_cmd_init.held=true; /* keep uncertain physical token */
+ }
+ if(online&&!x9c_cmd_init.held&&!x9c_cmd_init.confirmed&&!x9c_cmd_init.token&&(wanted[0]||wanted[1])){
+  x9c_cmd_init.token=x9c_register_submit(0x8901,wanted[0]?0:1);
+  if(x9c_cmd_init.token)x9c_cmd_init.deadline=now+25000;
+ }
+ for(unsigned sim=0;sim<x9_md_sim_count();sim++){
+  struct x9cw_call_init &s=x9c_init[sim];
+  if(s.token){
+   if(now>=s.deadline)s.held=1;
+   uint32_t n=0;int rc=x9_md_mipc_take(s.token,frame,X9_MIPC_FRAME_MAX,&n);
+   if(rc==1){
+    if(s.stage==X9_CI_BASELINE){
+     struct x9cw_current current;struct x9cw_outbound_state state;
+     bool good=n>=16&&x9cw_u16(frame+12)==s.token&&x9cw_current(frame,n,&current)&&!current.result;
+     s.token=0;
+     if(s.held||!good)s.held=1;
+     else{
+      /* Nonempty is not idle. Only SIM2 has the reconciled reducer; its
+       * query must also have survived the MD owner's revision guard. */
+      s.baseline_known=!current.count&&(sim==0||
+       (x9_md_mipc_call_snapshot(&state)==1&&!state.blocked&&state.count_known&&!state.native_count));
+      s.stage=X9_CI_DONE;
+      printf("X9 CALL: SIM%u registrations confirmed, initial count %u idle-baseline %u; audio/profile not ready\n",
+       sim+1,current.count,s.baseline_known);
+     }
+    }else if(x9cw_call_init_cnf(&s,frame,n,now)==1)
+     printf("X9 CALL: SIM%u registration confirmed, next stage %u\n",sim+1,s.stage);
+    bzero(frame,X9_MIPC_FRAME_MAX);
+   }else if(rc<0)s.held=1;
+  }
+  if(!online||!wanted[sim]||s.held||x9c_cmd_init.held||!x9c_cmd_init.confirmed||s.token||s.stage==X9_CI_DONE)continue;
+  if(s.stage==X9_CI_NEW)s.stage=X9_CI_STATUS;
+  s.token=s.stage==X9_CI_BASELINE?x9c_current_submit(sim):
+   x9c_register_submit(s.stage==X9_CI_STATUS?0x4901:0x4902,sim);
+  if(s.token)s.deadline=now+25000;
+ }
+ for(unsigned i=0;i<CBQ_MAX_CLIENTS;i++){
+  struct x9c_reg_wait &w=x9c_reg_wait[i];if(!w.used||w.answered)continue;
+  const struct x9cw_call_init &s=x9c_init[w.sim];
+  if(x9c_cmd_init.held||s.held)x9c_reg_answer(i,X9Q_NOT_READY);
+  else if(s.stage==X9_CI_DONE&&s.registered)x9c_reg_answer(i,0);
+ }
+}
+static uint16_t x9c_reg_begin(unsigned slot,const uint8_t *req,unsigned len){
+ struct x9cw_voice_register r;
+ if(!x9cw_qmi_register(req,len,&r))return X9Q_ARG;
+ /* 13=0 is the actual Apple request. Handover14=1 is a different
+  * request and needs an MD handover -> Apple consumer, not a success stub.
+  * Accept explicit disables only; AllCallStatus46 remains independent. */
+ if(r.call_events||r.handover)return X9Q_UNSUPPORTED;
+ const struct x9c_client &c=x9c_clients[slot];
+ if(!c.bound||c.generation!=x9q_clients[slot].generation)return X9Q_NOT_READY;
+ struct x9c_reg_wait &w=x9c_reg_wait[slot];
+ if(w.used&&!w.answered)return X9Q_BUSY;
+ bzero(&w,sizeof(w));w.used=true;w.sim=c.sim;w.len=len;
+ w.generation=c.generation;w.transaction=(uint16_t)x9cw_u16(req+1);
+ w.deadline=x9q_ms()+25000;memcpy(w.req,req,len);return 0;
 }
 /* This read-only query is caused ONLY by an explicit, bound VOICE21.
  * No implicit ID/route adoption from a CNF, log prefix or another client. */
@@ -146,6 +256,7 @@ static bool x9c_dial_submit(unsigned slot,const uint8_t *req,unsigned len,
  return true;
 }
 static void x9c_del(unsigned slot){
+ if(slot<CBQ_MAX_CLIENTS)bzero(&x9c_reg_wait[slot],sizeof(x9c_reg_wait[slot]));
  if(x9c_end_job.used&&x9c_end_job.slot==slot){
   if(x9c_end_job.stage==2)x9_md_mipc_call_end_abandon(x9c_end_job.token);
   x9c_end_job.answered=true;bzero(x9c_end_job.req,sizeof(x9c_end_job.req));
@@ -166,6 +277,7 @@ static void x9c_poll(){
  }
  x9c_observed=x9_md_mipc_call_snapshot(&x9c_outbound)==1;
  x9c_incoming_observed=x9_md_mipc_call_incoming_snapshot(&x9c_inbound)==1;
+ x9c_init_poll(frame);
  x9c_end_poll(frame);
  struct x9c_dial_job &j=x9c_dial_job;if(!j.used)return;
  if(j.answered&&j.cnf&&!j.token&&!j.join.failed&&x9c_observed&&!x9c_outbound.blocked&&
@@ -213,10 +325,20 @@ static bool x9c_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
    if(!x9cw_qmi_bind(req,len,&sim)||sim>=x9_md_sim_count())err=X9Q_ARG;
    else if(x9c_end_job.used&&x9c_end_job.slot==slot&&
            x9c_end_job.generation==x9q_clients[slot].generation&&x9c_end_job.sim!=sim)err=X9Q_BUSY;
+   else if(x9c_reg_wait[slot].used&&!x9c_reg_wait[slot].answered&&
+           x9c_reg_wait[slot].generation==x9q_clients[slot].generation&&x9c_reg_wait[slot].sim!=sim)err=X9Q_BUSY;
    else{
+    if(!x9c_clients[slot].bound||x9c_clients[slot].sim!=sim||
+       x9c_clients[slot].generation!=x9q_clients[slot].generation){
+     x9c_clients[slot].registered=false;bzero(&x9c_reg_wait[slot],sizeof(x9c_reg_wait[slot]));
+    }
     x9c_clients[slot].bound=true;x9c_clients[slot].sim=sim;
     x9c_clients[slot].generation=x9q_clients[slot].generation;err=0;
    }
+  }else if(x9cw_u16(req+3)==3){
+   const struct x9c_reg_wait &w=x9c_reg_wait[slot];
+   if(w.used&&w.generation==x9q_clients[slot].generation&&w.transaction==x9cw_u16(req+1))return true;
+   err=x9c_reg_begin(slot,req,len);if(!err)return true;
   }else if(x9cw_u16(req+3)==0x21){
    unsigned op,id;
    /* Same validated host transaction while its epoch is still owned is

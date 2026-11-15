@@ -27,6 +27,7 @@ struct RenderKernelGroup {
 struct RenderDirtyEntry { uint32_t handle; uint64_t offset,bytes; };
 #define X9_RENDER_DIRTY_SLOTS 2u
 static bool render_dirty_enabled();
+extern "C" int sweet_x9_perf(unsigned bit);   /* x9g mask, pe_serial.c */
 struct RenderKernelContext {
  RenderCachePlan cache_plan;
  bool cache_plan_valid;
@@ -719,6 +720,26 @@ static void render_gpu_ts_account(RenderJobState *st) {
  n=bad=pickup=exec=notice=exec_max=pickup_max=notice_max=0;win_abs=now_abs;win_gts=now_gts;
 }
 static IOReturn render_submit_uncertain(RenderJobState *st);
+/* gpu-wait (x9g bit 1). 306: wait_us 2.7 ms/job (76% of the kernel time),
+ * run ~2.9 ms. poll_pause() spins 64x16us (~1 ms), then sleeps 100 us for 20
+ * polls, then 1 ms; and the fence page was re-acquired only every 1 ms once
+ * the spin ended, so a job finishing at 1-3 ms was noticed up to 1 ms late.
+ * Now: same spin, then 100 us sleeps up to ~20 ms with the fence page
+ * re-acquired on every poll (one 4 KiB PA-range GPU cache op, same as the
+ * spin phase already does), then the old 1 ms cadence. Completion checks,
+ * error/guard checks, deadlines and every cache/AS step are unchanged. */
+static constexpr unsigned render_fast_poll_limit=poll_spin_limit+200;
+static bool render_fence_poll_fast() {
+ static int mode=-1;
+ if(mode<0){mode=sweet_x9_perf(1)?1:0;IOLog("X9 RENDER WAIT: fence page acquire every poll, 100us quanta to ~20ms %s (x9g bit 1)\n",mode?"ON":"off");}
+ return mode==1;
+}
+static void render_fence_pause(unsigned *polls) {
+ if(!render_fence_poll_fast()||*polls<poll_spin_limit||*polls>=render_fast_poll_limit){poll_pause(polls);return;}
+ (*polls)++;
+ uint64_t until;clock_interval_to_deadline(100,NSEC_PER_USEC,&until);
+ (void)assert_wait_deadline(&sleep_cookie,THREAD_UNINT,until);thread_block(THREAD_CONTINUE_NULL);
+}
 /* One snapshot buffer serves the whole engine: the worker is the only caller
  * and its phases run sequentially (publish1, publish2, reap1, reap2). */
 static X9RenderScopeView render_scope_view[X9_RENDER_SCOPE_VIEW];
@@ -1075,7 +1096,8 @@ static IOReturn render_submit_reap(RenderJobState *st,const RenderOwner &owner) 
    // Keep the same private-page sync and all fence/extract/guard checks.
    // While poll_pause() is still spinning, acquire on every poll so a short
    // job is seen within ~16us; after that, acquire at1ms as before.
-   st->next_sync=st->polls<poll_spin_limit?0:deadline_ms(1);st->phase="completion-wait";
+   st->next_sync=(st->polls<poll_spin_limit||(render_fence_poll_fast()&&st->polls<render_fast_poll_limit))?0:deadline_ms(1);
+   st->phase="completion-wait";
   }
   st->done=true;
   for(unsigned i=0;i<3;i++)if((st->active)&(1u<<i)) {
@@ -1100,7 +1122,7 @@ static IOReturn render_submit_reap(RenderJobState *st,const RenderOwner &owner) 
       (st->pipeline?insert<st->expected[i]:insert!=st->expected[i]))st->done=false;
   }
   if(st->done){if(st->gts_ring)st->gts_seen=gr64(st->gpu,0x98);break;}
-  poll_pause(&st->polls);
+  render_fence_pause(&st->polls);
  }while(mach_absolute_time()<st->end);
  if(!st->done)return render_submit_uncertain(st);
  st->times[5]=mach_absolute_time();
@@ -1397,6 +1419,9 @@ static uint64_t render_async_enqueued,render_async_completed;
 static bool render_async_running;
 static uint64_t render_async_stats[4];   /* jobs, failures, queue-full waits, drains that waited */
 static bool render_async_enabled() {return render_async_running;}
+/* gpu-wait (x9g bit 4): SweetFramebuffer sets this to wake its present timer
+ * when the frame it deferred has completed. Called with no lock held. */
+extern "C" { void (*sweet_x9_render_done_hook)(uint64_t completed); }
 static void render_async_complete(RenderKernelContext *p,const RenderAsyncJob &job,IOReturn kr,const X9RenderCompletion &reply) {
  IOLockLock(render_async_lock);
  auto &d=p->async_done[p->async_next++%render_history];
@@ -1406,6 +1431,7 @@ static void render_async_complete(RenderKernelContext *p,const RenderAsyncJob &j
  __atomic_store_n(&render_async_completed,job.seq,__ATOMIC_RELEASE);
  IOLockWakeup(render_async_lock,&render_async_completed,false);
  IOLockUnlock(render_async_lock);
+ if(auto hook=__atomic_load_n(&sweet_x9_render_done_hook,__ATOMIC_ACQUIRE))hook(job.seq);
 }
 static void render_async_metrics(const RenderAsyncJob &job,IOReturn kr) {
  /* rev252bo metrics: single worker thread, so these need no lock beyond the

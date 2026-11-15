@@ -748,8 +748,60 @@ sweet_x9_arg(const char *name, int def)
 	return sweet_early_is_x9() ? def : 0;
 }
 
+/*
+ * gpu-wait feature mask, one boot token x9g=<mask> (default performance bits on, x9g=0
+ * restores the 306 behaviour; each bit can be cleared on its own):
+ *   1  render fence poll: re-acquire the fence page on every poll, 100 us
+ *      quanta for 20 ms (was: acquire every 1 ms after the first ~1 ms)
+ *   2  reserved (diagnostic timestamps remain explicit opt-in via x9gt=1)
+ *   4  present a GPU-deferred frame as soon as its fence passes
+ *   8  touch: sample every 4 ms while a finger is down (was 8 ms)
+ *  16  GUI double buffer in LK framebuffer slot 2 (no copy waits for DSI)
+ *  32  UI boost (log 307): while a finger is down or frames arrive at
+ *      >= 24/s, GPU governor holds its ceiling and the three CPU
+ *      performance domains (MCUPM cpufreq-hw) run their top OPP
+ *  64  UI core steering: during the same UI boost window cpu1-3 (C1-Pro,
+ *      domain 0) are not recommended, so the window server, SpringBoard
+ *      and app render threads run on cpu4-7 (C1-Premium x3, C1-Ultra) and
+ *      cpu0 (boot processor, interrupts, bound threads). The ADT flattens
+ *      all cores into one cluster, so XNU has no P/E placement of its own;
+ *      this is the CLPC core recommendation, the iOS counterpart of
+ *      OPPO's animation-thread-to-big-core binding.
+ * 128  bind backboardd's CoreAnimation render-server thread (the thread
+ *      ending framebuffer swaps) to the prime core cpu7 during the UI
+ *      boost window; Dimensity 9500 map 1+3+4 in sweet_x9_gpu_dependencies.c
+ * Default 61 at optimization-only integration: timestamps are not enabled;
+ * 64 and 128 remain opt-in since log 309 (x9g=253). 309 lost the
+ * backboardd GPU context (PanVK private bind EINVAL at 73.77 s) 11 s into
+ * the first steered window and steering showed no measurable gain; the
+ * correlation is unproven, so they stay available but off.
+ */
+#define X9_PERF_DEFAULT 61
+int sweet_x9_perf(unsigned bit);
+int
+sweet_x9_perf(unsigned bit)
+{
+	static int mask = -1;
+	if (mask < 0) {
+		mask = sweet_x9_arg("x9g", X9_PERF_DEFAULT);
+		printf("X9 PERF: x9g=%d (1 fence poll, 4 present on GPU done, 8 touch 4ms, 16 double buffer, 32 UI boost, 64 big-core steering, 128 prime-core render thread)\n", mask);
+	}
+	return (mask & (int)bit) != 0;
+}
+
 /* Used only after X9 GUI composition has published the boot framebuffer. */
 int x9_lk_gui_present(void) { return x9_lk_gui_step(); }
+/* GUI double buffer: which slot the next GUI start shows (0 canonical, 2 the
+ * second buffer). Returns the slot's physical address, 0 when the second slot
+ * cannot be used (more than one accepted buffer/engine: nothing would mirror
+ * it). Set on the framebuffer workloop before x9_lk_gui_present(). */
+uint64_t x9_lk_gui_target(unsigned slot) {
+ if (slot == 2 && !x9_lk_double_ok()) return 0;
+ x9_lk_next_pa = slot == 2 ? X9_LK_SLOT2 : X9_LK_FB;
+ return x9_lk_next_pa;
+}
+/* Slot the panel engine fetches now (after the last start). */
+unsigned x9_lk_gui_shown(void) { return x9_lk_scan_pa == X9_LK_SLOT2 ? 2u : 0u; }
 int x9_lk_gui_cancel(void) { return x9_lk_gui_disarm(); }
 /* Panel DCS long write between frames (AppleCLCD brightness). See x9_lk_dcs_long. */
 int x9_lk_panel_dcs(const uint8_t *data, unsigned len, int readback, uint32_t rd[4]) {
