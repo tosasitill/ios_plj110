@@ -532,6 +532,16 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 - **运行DIAL策略新结论**：key48已证为AP `ECC_PREFERRED_RAT`而不是MD/IMSA能力；RIL空current-call响应`26c1d8..26c218`重置该policy0；key48=0时getEccPreferredDomain所有RAT分支返回0。Apple普通Call_Type0、紧急9：Base PhoneNumberType1=Normal/2=Emergency/3=Emergency_Test。仍未接生产IMS准入，不能把普通voice0叫IMS bool或拿IMSA registered当voice capability。
 - **编译/交付边界**：本元数据修复host C++17 -c / header C11严格syntax均exit0（`call-current-metadata-compile/host.exit` / `c-header.exit`）；真实recipe两对象均True/exit0（`recipe-results.json` / `recipe.exit`），新增1项人工向量、修改原target向量只编译未执行。准备提交/合入后与SMS新修复统一编译固定源码kernel-only；无本项单独kernel/boot/设备结果。SMS子代理已完成deadline修复`b0055a4/e71a2c8`，继续补独立SMS inbox poison的锁内admission与writer fence，不宣称当前集成已完成。VOICE09仍关闭，CallList/DIAL/voice音频和短信端到端验收未完成，无最终boot.img。
 
+#### 2026-11-15 CALL 号码owner / RAT证据续接（仅编译，完整通话未完成）
+
+- **已合入的纠错**：CALL metadata提交`ea1407f`已ff合main并push；handover代码`add7cf9`及交接`3b6717a`也已push。不是仍未提交的实验，旧段落“准备合入”按此更正；它们没有VOICE09/boot或设备验收结果。
+- **本项工作树**：`.worktrees/call-number-owner` / `feat/call-number-owner`起点`ea1407f`，只改shared call metadata及人工源码向量/现有docs；SMS独占其初始化/准入，audio/GPU/BT窗口不动。主树由sensor窗口推进，合入以实际main为准。
+- **号码owner已接原解析链**：progress8104/current8111的128B含NUL字符串与8106/8114 detail[0]原presentation有界复制，不持RX指针，整帧验证失败不改out；owned current快照按已有revision guard保存。新增valid位仅在成功解析时设置，zero-init不是Available。RIL388380已证native0/1/2..4→Apple0Available/1Restricted/2Unavailable，未知fail-closed不改输出；不把TYPE105/VIDEO_CAP107当presentation。仍无号码格式转换、progress identity merge或CallList发布，Restricted/Unavailable原号码不得由未来publisher外送。
+- **offset6失败类已明确排除，不重复**：接收vector默认初始化会被`1929be0/be4`实际wire+6覆盖；相邻`1929bfc`是变长CallConfigItem，wire+6为其string长度，不是7B CallList字段。当前host CallList符号只有parse/resize/copy，无writer；QMIParserDynamic无vs/ALS metadata。ALS仍未证，不按标准/默认0填字段。
+- **RAT决定性反例**：MD`913a0756`仅按mode范围生成CALL_RAT2（20..39），current112经session+39f/record+99取值。同一10086日志81634/81635行18:42:37.767与92175..92178行18:42:41.304/305明确voiceRAT20/NR_SA与VoNR supported；不能无条件2→AppleLTE4。RIL真实voiceRAT源为042f response8100/10B中networkType(+1/u16LE)，非PS/IMSA；本项未扩大query。窄asm在`calllist-remaining-analysis`/`dial-profile-remaining-analysis`，构建原件未二次检查。
+- **编译结果**：host C++17 -c/header C11严格syntax均exit0，真实recipe`X9Baseband.cpp.o`/`sweet_x9_gpu_dependencies.o`均True/exit0；日志`x9/out/call-number-owner-compile/`。新增两个人工源码向量仅编译未执行。待SMS新源码集成后统一固定基线kernel-only，无本项boot/CI/设备结果。
+- **严格边界**：VOICE09仍关闭；CallList offset6/真实technology/profile、iOS IMS准入、MT动作/handover身份迁移、通话专用audio和短信MT显示/持久化/物理ACK/MO对端验收未闭合，最终通话短信镜像仍未完成。不要求用户重复场景、不操作手机、不出探针镜像。
+
 ### 5.7 2026-11-13 音频：ADSP 自动 dsp-boot 镜像（分支 feat/audio-dsp-boot，worktree `.worktrees/audio-dsp-boot`）
 
 - feat/audio-bounded-fdt 已 ff 合入 main（`b25f4ca`），worktree/分支已删；`android-callsms-20261113`、`shimtest`、fdt2/3/4 的 usb-log 移到本 worktree 的 `x9/out/`。

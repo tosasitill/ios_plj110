@@ -7,9 +7,23 @@
 #define X9_CALL_STATE_H
 #include "x9_call_wire.h"
 
+/* MD8104/progress and8111/current are independent NUL-terminated numbers,
+ * each at most128B including NUL. Their presentation is detail_info[0]
+ * (8106/8114), NOT TYPE or VIDEO_CAP. Own the bytes: RX storage is reused.
+ * Retaining native metadata is not permission to publish caller identity. */
+struct x9cw_number {uint8_t value[128];unsigned length;uint8_t presentation,valid;};
+/* RIL388380: native0 -> Available0,1 -> Restricted1,2..4 -> Unavailable2.
+ * Unlike the RIL's unknown fallback, do not make an unknown value public.
+ * The caller must omit/reject identity when this returns0, and must not
+ * publish value[] for Restricted/Unavailable. No inferred defaults. */
+static inline int x9cw_number_presentation(const struct x9cw_number *number,unsigned *out){
+ if(!number||!out||!number->valid||number->presentation>4)return 0;
+ *out=number->presentation<2?number->presentation:2;return 1;
+}
 struct x9cw_progress {
  uint32_t id,direction,mode,toa,flags,aux,event,cause;
  unsigned has_cause;uint8_t mask;
+ struct x9cw_number number;
 };
 static inline int x9cw_cstring(const uint8_t *v,unsigned k,unsigned bound){
  if(!v||!k||k>bound||v[k-1])return 0;
@@ -22,6 +36,7 @@ static inline int x9cw_cstring(const uint8_t *v,unsigned k,unsigned bound){
  * Validate the WHOLE frame before committing any ID or state. */
 static inline int x9cw_progress(const uint8_t *p,unsigned n,struct x9cw_progress *out){
  struct x9cw_progress c;const uint8_t *v;unsigned k;
+ x9cw_zero((uint8_t *)&c,sizeof(c));
  if(!out||!x9cw_frame(p,n,0x4901)||!p[8]||(p[8]&(p[8]-1)))return 0;
  if(!x9cw_word(p,n,0x100,&c.id)||!c.id||
     !x9cw_word(p,n,0x101,&c.direction)||c.direction>255||
@@ -41,6 +56,11 @@ static inline int x9cw_progress(const uint8_t *p,unsigned n,struct x9cw_progress
      tag!=0x105&&tag!=0x8106&&tag!=0x107&&tag!=0x109&&tag!=0x10a&&tag!=0x810b)return 0;
   at+=(x9cw_u16(p+at+2)+11)&~7u;
  }
+ /* Commit only after the complete frame, every TLV and optional cause
+  * have passed validation. Never retain a pointer into a reusable inbox. */
+ if(!x9cw_tlv(p,n,0x8104,&v,&k))return 0;
+ c.number.length=k-1;for(unsigned i=0;i<k;i++)c.number.value[i]=v[i];
+ if(!x9cw_tlv(p,n,0x8106,&v,&k))return 0;c.number.presentation=v[0];c.number.valid=1;
  *out=c;return 1;
 }
 
@@ -170,6 +190,7 @@ static inline int x9cw_array(const uint8_t *p,unsigned n,unsigned tag,unsigned c
 }
 struct x9cw_current_call {
  uint32_t id,direction,mode,state,number_type,toa,rat,flags,aux;
+ struct x9cw_number number;
 };
 #define X9_CW_CURRENT_MAX 7u
 struct x9cw_current {uint32_t result,count;struct x9cw_current_call calls[X9_CW_CURRENT_MAX];};
@@ -189,8 +210,9 @@ static inline int x9cw_current(const uint8_t *p,unsigned n,struct x9cw_current *
   uint32_t words[11]={0};
   for(unsigned j=0;j<11;j++){
    if(!x9cw_tlv(p,n,a[j].base+i,&v,&k)||!v)return 0;
-   if(j==6){if(!x9cw_cstring(v,k,128))return 0;}
-   else if(j==9){if(k!=408)return 0;}
+   if(j==6){if(!x9cw_cstring(v,k,128))return 0;
+    c.calls[i].number.length=k-1;for(unsigned byte=0;byte<k;byte++)c.calls[i].number.value[byte]=v[byte];}
+   else if(j==9){if(k!=408)return 0;c.calls[i].number.presentation=v[0];c.calls[i].number.valid=1;}
    else{if(k!=4)return 0;words[j]=x9cw_u32(v);}
   }
   struct x9cw_current_call *r=&c.calls[i];

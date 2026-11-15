@@ -404,6 +404,41 @@ static void current_arrays(){
  n=current_frame(p,0);assert(n==32&&x9cw_current(p,n,&c)&&!c.count&&!c.result);
  n=current_frame(p,0,42);assert(x9cw_current(p,n,&c)&&c.result==42);
 }
+static void current_number_owner(){
+ uint8_t p[704],out[704];struct x9cw_current c;unsigned n=current_frame(p,1);
+ struct x9cw_number missing={};unsigned untouched=99;
+ assert(!x9cw_number_presentation(&missing,&untouched)&&untouched==99);
+ const uint8_t *descriptor,*number,*detail;unsigned k;
+ assert(x9cw_tlv(p,n,0x8111,&descriptor,&k)&&descriptor&&!k);
+ assert(x9cw_tlv(p,n,x9cw_u16(descriptor+8),&number,&k)&&number&&k==1);
+ unsigned at=(unsigned)(number-p);x9cw_put16(p+at-2,4);memcpy(p+at,"123",4);
+ assert(x9cw_tlv(p,n,0x8114,&descriptor,&k)&&descriptor&&!k);
+ assert(x9cw_tlv(p,n,x9cw_u16(descriptor+8),&detail,&k)&&detail&&k==408);
+ p[detail-p]=1;assert(x9cw_current(p,n,&c));
+ assert(c.calls[0].number.length==3&&!memcmp(c.calls[0].number.value,"123",4));
+ unsigned presentation=99;assert(x9cw_number_presentation(&c.calls[0].number,&presentation)&&presentation==1);
+ bzero(p,sizeof(p));assert(!memcmp(c.calls[0].number.value,"123",4)); // no borrowed RX bytes
+ for(unsigned raw=0;raw<256;raw++){
+  c.calls[0].number.presentation=(uint8_t)raw;presentation=99;
+  int known=x9cw_number_presentation(&c.calls[0].number,&presentation);
+  assert(known==(raw<=4));assert(presentation==(raw<=4?(raw<2?raw:2):99));
+ }
+ // The production owned-current path, not an unsolicited or stale query.
+ x9cw_header(p,16,0x909,2,0);uint64_t token=x9_md_mipc_submit(p,16);assert(token);x9mi_tick();
+ n=current_frame(p,1);x9cw_put16(p+12,(unsigned)token);x9mi_rx(p,n);
+ uint32_t got;assert(x9_md_mipc_take(token,out,sizeof(out),&got)==1);
+ assert(x9_mc_current.count==1&&x9_mc_current.calls[0].number.presentation==255);
+ assert(!x9cw_number_presentation(&x9_mc_current.calls[0].number,&presentation));
+}
+static void progress_number_owner(){
+ uint8_t p[512];struct x9cw_progress c;progress_frame(p,130,7,0);
+ x9cw_put16(p+50,4);memcpy(p+52,"456",4);p[68]=2; //8106/detail_info[0], not TYPE105
+ assert(x9cw_progress(p,sizeof(p),&c)&&c.number.length==3&&!memcmp(c.number.value,"456",4));
+ unsigned presentation;assert(x9cw_number_presentation(&c.number,&presentation)&&presentation==2);
+ bzero(p,sizeof(p));assert(!memcmp(c.number.value,"456",4));
+ progress_frame(p,130,7,0);p[50]=5; // would consume next TLV: malformed whole frame
+ assert(!x9cw_progress(p,sizeof(p),&c));assert(!memcmp(c.number.value,"456",4));
+}
 static void empty_baseline(){
  uint8_t p[704],out[704];x9cw_header(p,16,0x909,2,0);
  uint64_t t=x9_md_mipc_submit(p,16);assert(t);x9mi_tick();
@@ -801,6 +836,7 @@ int main(int argc,char **argv){
   {"ios_timeout",ios_timeout},{"ios_deleted",ios_deleted},{"dial_presend_fence",dial_presend_fence},
   {"voice_bind_codec",voice_bind_codec},{"end_target_codec",end_target_codec},{"ios_end_roundtrip",ios_end_roundtrip},
   {"current_metadata",current_metadata},
+  {"current_number_owner",current_number_owner},{"progress_number_owner",progress_number_owner},
   {"ios_end_stale_query",ios_end_stale_query},{"ios_end_presend",ios_end_presend},
   {"ios_end_abandon",ios_end_abandon},{"ios_end_late_cnf",ios_end_late_cnf},
   {"ios_end_duplicate",ios_end_duplicate},
