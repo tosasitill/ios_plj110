@@ -5,6 +5,7 @@
 #import <Foundation/Foundation.h>
 #include <objc/runtime.h>
 #include <objc/message.h>
+#include <dlfcn.h>
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
 #include <CoreFoundation/CoreFoundation.h>
@@ -17,6 +18,7 @@
 extern int x9_camera_device_create(CFAllocatorRef, CFDictionaryRef, void **);
 extern const void *_dyld_get_shared_cache_range(size_t *length);
 static IMP originalVendor;
+static id (*torchVendorWithCaller)(id,SEL,uintptr_t);
 static uintptr_t slide;
 static bool hooked;
 static id ours;
@@ -30,9 +32,12 @@ static bool backendReady(void)
     return !e && s.version==1 && s.mode==2 && (s.flags&X9_CAMERA_READY) &&
         !(s.flags&X9_CAMERA_FAULT) && s.supported_mask==((1u<<1)|(1u<<2));
 }
-static id sharedVendor(id self,SEL selector)
+__attribute__((noinline)) id x9_camera_media_shared_vendor(id self,SEL selector)
 {
-    id real=((id(*)(id,SEL))originalVendor)(self,selector);
+    /* Preserve the exact FigFlashlight caller when torch was installed first.
+     * Calling its IMP normally would substitute this library's return address. */
+    id real=torchVendorWithCaller ? torchVendorWithCaller(self,selector,
+        (uintptr_t)__builtin_return_address(0)) : ((id(*)(id,SEL))originalVendor)(self,selector);
     if(real)return real;
     /* Once made, the vendor's workers own the device. Reopening the exclusive
      * char device here would return EBUSY and revoke an active vendor. */
@@ -64,12 +69,23 @@ static void imageAdded(const struct mach_header *mh,__unused intptr_t imageSlide
     Class cls=objc_getClass("BWFigCaptureDeviceVendor");
     Method m=class_getClassMethod(cls,sel_registerName("sharedCaptureDeviceVendor"));
     Method init=class_getInstanceMethod(cls,sel_registerName("initWithDeviceCreateFunction:"));
+    IMP current=m ? method_getImplementation(m) : NULL;
+    IMP torchHook=(IMP)dlsym(RTLD_DEFAULT,"x9_torch_media_shared_vendor");
+    id (*forward)(id,SEL,uintptr_t)=dlsym(RTLD_DEFAULT,"x9_torch_media_vendor_with_caller");
+    Dl_info hookImage={0},forwardImage={0};
+    /* Both symbols must come from the actual object owning the current IMP,
+     * not a different/stale dylib that happens to export the helper name. */
+    bool torchChain=current && torchHook && current==torchHook && forward &&
+        dladdr((const void*)torchHook,&hookImage) && dladdr((const void*)forward,&forwardImage) &&
+        hookImage.dli_fbase && hookImage.dli_fbase==forwardImage.dli_fbase;
     if(!m || !init || method_getNumberOfArguments(m)!=2 || method_getNumberOfArguments(init)!=3 ||
-       (uintptr_t)method_getImplementation(m)!=0x1a1f40c84+slide) {
+       ((uintptr_t)current!=0x1a1f40c84+slide && !torchChain)) {
         dprintf(2,"X9 CAMERA MEDIA: unsupported vendor ABI/IMP; not hooking\n");return;
     }
-    originalVendor=method_setImplementation(m,(IMP)sharedVendor);hooked=true;
-    dprintf(2,"X9 CAMERA MEDIA: exact 20H392 vendor hook; no vendor until physical backend ready\n");
+    torchVendorWithCaller=torchChain ? forward : NULL;
+    originalVendor=method_setImplementation(m,(IMP)x9_camera_media_shared_vendor);hooked=true;
+    dprintf(2,"X9 CAMERA MEDIA: exact 20H392 vendor hook%s; no vendor until physical backend ready\n",
+        torchChain ? " (retaining torch caller gate)" : "");
 }
 __attribute__((constructor)) static void initCamera(void)
 {
