@@ -199,9 +199,17 @@ static int vcontrol_recheck(struct x9_vdec_control *c, uint64_t end)
     struct x9_vcp_common_snapshot common;
     struct x9_vcp_ring_snapshot rings[3];
     int e = vcontrol_snapshot(c,end,&common);
-    for (unsigned kind = 0; kind < 3 && !e; kind++)
+    for (unsigned kind = 0; kind < 3 && !e; kind++) {
         e = x9_vcp_parse_ring_snapshot(X9_VCP_RING_ABI_MT6993_CAPTURE1,kind,
             c->scratch,X9_VCP_INSTANCE_SLOT_BYTES,&rings[kind]);
+        /* These ABI/kind/size/input arguments are fixed and valid, so the
+         * parser's remaining EINVAL branch is precisely count != distance.
+         * The captured publisher stores write-index and count separately;
+         * identical samples taken between those stores are still transient.
+         * Retain pending and the notification, without repairing metadata or
+         * claiming a completion. Out-of-range/full metadata still fails. */
+        if (e == EINVAL) e = EAGAIN;
+    }
     if (!e) {
         memcpy(c->status.rings,rings,sizeof(rings));
         c->status.recheck_pending = 0;
