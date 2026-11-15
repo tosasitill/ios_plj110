@@ -28,6 +28,18 @@ static unsigned x9_lk_gui_armed;
 /* Every scanned EXDMA engine, kept for the read-only layer dump. */
 static volatile uint32_t *x9_lk_engines[13];
 static uint64_t x9_lk_engine_pa[13];
+/* GUI double buffer (gpu-wait): the one accepted engine that fetches the
+ * canonical slot, the slot it fetches now and the slot the next GUI start
+ * programs. MT6993 EXDMA runs with BYPASS_SHADOW (mediatek_v2
+ * mtk_disp_ovl_exdma.c mt6993 data: support_shadow=false,
+ * need_bypass_shadow=true), so L0_ADDR takes effect at once: it is written
+ * only right before a start, with DSI idle, i.e. between two frame fetches.
+ * The shim programs the same register (shim/display.c L0_ADDR). Slot 1 is
+ * LK's banner layer (engine 3), so the second GUI buffer is slot 2. */
+#define X9_LK_SLOT2 (X9_LK_FB + 2ULL * X9_LK_SLOT)
+static volatile uint32_t *x9_lk_scan_engine;
+static unsigned x9_lk_scan_engines;
+static uint64_t x9_lk_scan_pa = X9_LK_FB, x9_lk_next_pa = X9_LK_FB;
 
 static int
 x9_lk_layer(volatile uint32_t *p, uint64_t *address, unsigned *swap)
@@ -59,6 +71,8 @@ x9_lk_prepare(volatile uint32_t *canonical)
  static const uint64_t bank[] = {0x3e320000,0x3e720000,0x32920000,0x32c20000};
  unsigned found = 0, format_seen = 0, first_swap = 0, matches = 0;
  x9_lk_active = x9_lk_count = 0;
+ x9_lk_scan_engine = 0; x9_lk_scan_engines = 0;
+ x9_lk_scan_pa = x9_lk_next_pa = X9_LK_FB;
  x9_lk_canonical = canonical;
  if (!canonical) return 0;
  x9_lk_dsi = X9_LK_MAP_IO(0x3e730000);
@@ -94,6 +108,7 @@ x9_lk_prepare(volatile uint32_t *canonical)
   if (format_seen && first_swap != swap) return 0;
   format_seen = 1; first_swap = swap;
   found |= address == X9_LK_FB;
+  if (address == X9_LK_FB) { x9_lk_scan_engine = p; x9_lk_scan_engines++; }
   unsigned duplicate = 0;
   for (unsigned j = 0; j < x9_lk_count; j++) duplicate |= x9_lk_addresses[j] == address;
   if (duplicate) continue;
@@ -121,6 +136,21 @@ static void x9_lk_mirror(void) {
  }
  X9_LK_FENCE();
 }
+/* Only slot 0 and slot 2, only with exactly one engine on slot 0 and one
+ * accepted buffer (nothing to mirror), only while DSI is idle (every caller
+ * checked DSI_INTSTA busy right before x9_lk_start). */
+static int x9_lk_double_ok(void) {
+ return x9_lk_active && x9_lk_scan_engine && x9_lk_scan_engines == 1 && x9_lk_count == 1;
+}
+static void x9_lk_retarget(uint64_t pa) {
+ if (pa != X9_LK_FB && pa != X9_LK_SLOT2) pa = X9_LK_FB;
+ if (pa == x9_lk_scan_pa || !x9_lk_scan_engine) return;
+ if (pa != X9_LK_FB && !x9_lk_double_ok()) return;
+ X9_LK_WRITE(x9_lk_scan_engine, 0xf40, (uint32_t)pa);
+ X9_LK_WRITE(x9_lk_scan_engine, 0xf4c, (X9_LK_READ(x9_lk_scan_engine, 0xf4c) & ~15u) | (uint32_t)((pa >> 32) & 15u));
+ X9_LK_FENCE();
+ x9_lk_scan_pa = pa;
+}
 static void x9_lk_start(void) {
  for (unsigned b = 0; b < 4; b++)
   if (x9_lk_mask & (1u << b)) X9_LK_WRITE(x9_lk_mutex[b], 0x20 + x9_lk_id * 0x20, 1);
@@ -137,6 +167,7 @@ x9_lk_present(void)
  if (x9_lk_gui_armed || (X9_LK_READ(x9_lk_dsi, 0x0c) & 0x80000000u)) goto out;
  x9_lk_mirror();
  if (X9_LK_READ(x9_lk_dsi, 0x0c) & 0x80000000u) goto out;
+ x9_lk_retarget(X9_LK_FB);   /* the console draws into the canonical slot */
  x9_lk_start();
  result = 1;
 out:
@@ -165,6 +196,7 @@ static int x9_lk_gui_step(void) {
   goto out;
  }
  if(!(status&(1u<<2)))goto out;
+ x9_lk_retarget(x9_lk_next_pa);
  x9_lk_start();
  x9_lk_gui_armed=0;
  result=1;

@@ -11,6 +11,8 @@ extern void sweet_x9_render_bootstrap(void);
 #include <kern/thread.h>
 #include <kern/sched_prim.h>
 #include <kern/locks.h>
+#include <kern/cpu_number.h>
+#include <machine/machine_routines.h>
 #include <mach/mach_types.h>
 #include <pexpert/pexpert.h>
 #include <pexpert/device_tree.h>
@@ -178,8 +180,13 @@ static int power_command(unsigned command,unsigned state,int32_t *count) {
  * behaviour, 858 MHz with the old 900 MHz cap); a kernel thread then raises the
  * OPP up to x9_gpu_khz (default 1300 MHz) from GPU busy time, measured by the
  * synchronous render submit path (doorbell -> fence) in sweet_x9_gpu_busy_ns.
- * Thermal: GPUEB shared temperature >= 80 limits to the floor, >= 90 to the
- * slowest OPP; an implausible reading never allows more than the floor.
+ * Thermal (log 312): MTK ATM holds Tj at 85 C and throttles gradually, GPUEB
+ * keeps its own thermal limiter and soc_max is critical at 118.5 C. The old
+ * hard 80 C cliff dropped GPU to 858 MHz and CPU to ~800 MHz at 79-81 C (UI
+ * 30 fps, flapping every tick). Now: GPU ceiling steps from the fastest OPP
+ * at 85 C to the floor at 95 C, slowest at >= 100 C; the UI boost (CPU + core
+ * steer + GPU fastest) turns off at >= 90 C and back on below 85 C. An
+ * implausible reading never allows more than the floor.
  * x9_gpu_gov=0 keeps the single fixed commit at the floor. */
 #define X9_GOV_FLOOR_KHZ 900000u
 volatile uint64_t sweet_x9_gpu_busy_ns;
@@ -324,34 +331,296 @@ static void dvfsrc_setup(void) {
  dvfsrc_ready=basic!=0xffffffffu&&(basic&1)&&((basic>>20)&0x7f)>0;
  lck_mtx_unlock(&x9_dvfsrc_lock);
 }
+/*
+ * UI boost (x9g bit 32). Log 307: frames were CPU bound (backboardd ~14 ms
+ * of encoding per heavy frame, GPU 5-10 ms), so GPU util sat at 6-26% and
+ * the util governor dropped to 858 MHz mid-scroll; CPU frequency was never
+ * touched at all (whatever LK left). Activity = finger down in the last
+ * 250 ms, or >= 6 swaps in the last 250 ms (an idle desktop still commits
+ * ~10/s). Boost holds 500 ms after the last activity.
+ */
+extern int sweet_x9_perf(unsigned bit);
+volatile uint64_t sweet_x9_ui_swaps;        /* SweetFramebuffer swap count */
+volatile uint64_t sweet_x9_ui_touch_abs;    /* last touch sample with a finger down */
+void sweet_x9_ui_touch(void){__atomic_store_n(&sweet_x9_ui_touch_abs,mach_absolute_time(),__ATOMIC_RELAXED);}
+/*
+ * Display dark (log 319, phone hot with the screen off). SweetFramebuffer
+ * sets this on iOS's display-off request (power key / auto-lock), also when
+ * sweetfb_stayon keeps the panel lit, and clears it on display-on. The touch
+ * panel keeps reporting while the screen is off: a hand holding the phone
+ * (319: four contacts at 84.2 s, 0.9 s after the power key) armed the UI
+ * boost, i.e. CPU 2.7/3.5/4.2 GHz and GPU 1.7 GHz with nothing on screen; in
+ * 318 touches at 115 s and 124 s did it again after the lock. While dark the
+ * boost ignores touches and swaps, the GPU governor runs at its slowest OPP
+ * and the CPU requests drop below LK's boot clocks (see cpu_dark_req).
+ */
+volatile int sweet_x9_display_dark;
+void sweet_x9_set_display_dark(int dark);
+void sweet_x9_set_display_dark(int dark){__atomic_store_n(&sweet_x9_display_dark,dark?1:0,__ATOMIC_RELAXED);}
+static uint64_t ui_ring[5];static unsigned ui_pos;static uint64_t ui_until;
+static int ui_tick(void) {   /* called every 50 ms by the governor */
+ const uint64_t now=mach_absolute_time(),swaps=__atomic_load_n(&sweet_x9_ui_swaps,__ATOMIC_RELAXED);
+ const uint64_t recent=swaps-ui_ring[ui_pos];ui_ring[ui_pos]=swaps;ui_pos=(ui_pos+1)%5;
+ const uint64_t t=__atomic_load_n(&sweet_x9_ui_touch_abs,__ATOMIC_RELAXED);
+ uint64_t ns=0;if(t&&now>t)absolutetime_to_nanoseconds(now-t,&ns);
+ const int touch=t&&(now<=t||ns<250000000ull);
+ if(__atomic_load_n(&sweet_x9_display_dark,__ATOMIC_RELAXED)){ui_until=0;return 0;}
+ if(touch||recent>=6){uint64_t hold;nanoseconds_to_absolutetime(500000000ull,&hold);ui_until=now+hold;}
+ return now<ui_until;
+}
+/*
+ * Dimensity 9500 (MT6993) CPU topology, 1+3+4, from the OPPO mt6993.dts cpu
+ * nodes (performance-domains <&performance 0/1/2>) and the captured MPIDRs
+ * (one DSU cluster, Aff1 = core): cpu0-3 C1-Pro (domain 0), cpu4-6
+ * C1-Premium (domain 1), cpu7 C1-Ultra (domain 2). cpufreq-hw domain d is
+ * cluster d. The scheduler still sees one SMP cluster: this XNU is built
+ * with MAX_CPU_CLUSTERS=1 and no __AMP__ (a second ADT cluster overruns its
+ * cluster arrays), so the split is applied here: cpufreq domains, core
+ * recommendation (x9g 64) and window-server binding to the prime core
+ * (x9g 128). mkadt.py publishes the same map as x9-cluster per cpu node.
+ */
+enum {X9_LITTLE=0,X9_BIG=1,X9_PRIME=2,X9_NCLUSTER=3};
+#define X9_NCPU 8
+#define X9_PRIME_CPU 7
+static const uint8_t x9_topo_cluster[X9_NCPU]={X9_LITTLE,X9_LITTLE,X9_LITTLE,X9_LITTLE,X9_BIG,X9_BIG,X9_BIG,X9_PRIME};
+static const char *const x9_cluster_name[X9_NCLUSTER]={"little","big","prime"};
+static const char *const x9_cluster_core[X9_NCLUSTER]={"C1-Pro","C1-Premium","C1-Ultra"};
+static const int x9_cluster_probe_cpu[X9_NCLUSTER]={0,4,7};   /* measured per cluster */
+static uint32_t x9_topo_mask(unsigned cl){uint32_t m=0;for(unsigned i=0;i<X9_NCPU;i++)if(x9_topo_cluster[i]==cl)m|=1u<<i;return m;}
+static void x9_topo_check(void) {
+ unsigned adt=0,bad=0,mpidr_bad=0;int first_bad=-1;
+ for(unsigned i=0;i<X9_NCPU;i++) {
+  char path[16]="/cpus/cpu0";path[9]=(char)('0'+i);
+  DTEntry e;const void *p=NULL;unsigned size=0;
+  if(SecureDTLookupEntry(NULL,path,&e)!=kSuccess)continue;
+  if(SecureDTGetProperty(e,"reg",&p,&size)==kSuccess&&size>=4){uint32_t v;memcpy(&v,p,4);if(v!=(i<<8))mpidr_bad++;}
+  if(SecureDTGetProperty(e,"x9-cluster",&p,&size)==kSuccess&&size==4) {
+   uint32_t v;memcpy(&v,p,4);adt++;
+   if(v!=x9_topo_cluster[i]){bad++;if(first_bad<0)first_bad=(int)i;}
+  }
+ }
+ printf("X9 TOPO: 1+3+4 little=cpu0-3(%s,dom0) big=cpu4-6(%s,dom1) prime=cpu7(%s,dom2) mpidr=%s adt=%s",
+  x9_cluster_core[0],x9_cluster_core[1],x9_cluster_core[2],mpidr_bad?"MISMATCH":"ok",
+  !adt?"absent":bad?"MISMATCH":"match");
+ if(bad)printf(" first_bad=cpu%d",first_bad);
+ printf(";scheduler one SMP cluster (MAX_CPU_CLUSTERS=1)\n");
+}
+extern processor_t thread_bind(processor_t processor);
+extern processor_t cpu_to_processor(int cpu);
+static unsigned cpu_measure_mhz(int *cpu);
+/* Governor thread only (not realtime): run the probe on one core of the cluster. */
+static unsigned cpu_measure_cluster(unsigned cl) {
+ const int want=x9_cluster_probe_cpu[cl];
+ processor_t p=cpu_to_processor(want);
+ if(p==PROCESSOR_NULL)return 0;
+ thread_bind(p);thread_block(THREAD_CONTINUE_NULL);
+ int cpu=-1;unsigned mhz=0;
+ if(cpu_number()==want){mhz=cpu_measure_mhz(&cpu);if(cpu!=want)mhz=0;}
+ thread_bind(PROCESSOR_NULL);
+ return mhz;
+}
+/*
+ * MT6993 CPU DVFS, as the vendor driver does it
+ * (kernel_device_modules-6.12 drivers/cpufreq/mediatek-cpufreq-hw_main.c +
+ * mediatek-cpufreq-hw_fdvfs.c, mt6993.dts cpuhvfs / performance-controller /
+ * fdvfs nodes). Log 309 used the upstream-only path (PERF_STATE index) and
+ * the clocks never moved:
+ *  - csram_sys @0x11bc00 must read 0x55AA55AA and csram_sys+0x10+0x8c != 0
+ *    (cpufreq hardware enabled by MCUPM);
+ *  - USRAM @0x51c1400 + 0xbfc = pwr_tbl_ver; 2 => LUT MHz in bits 13:0
+ *    (309's prime "114" is 4210 MHz cut to 12 bits);
+ *  - fdvfs support word @0x51c1124 == 0xABCD0001 => frequency requests go to
+ *    the per-CPU FDVFS registers @0x5150400 + 4*cpu as ceil(kHz / 26000),
+ *    PERF_STATE is not used at all;
+ *  - otherwise CSRAM+0x4cc != 0 => PERF_STATE takes kHz, else an index.
+ * Domains (cpufreq-hw @0x51c0010, 0x120 apart): 0 = cpu0-3, 1 = cpu4-6,
+ * 2 = cpu7. MCUPM owns voltage; the kernel only requests frequencies.
+ * Boot values of every request register are restored when the UI is idle.
+ */
+#define CPUHW_PA 0x051c0000ULL     /* cpuhvfs CSRAM (reg[1]); USRAM follows at +0x1400 */
+#define CSRAM_SYS_PA 0x00118000ULL /* page holding csram_sys @0x11bc00 */
+#define FDVFS_PA 0x05150000ULL     /* page holding fdvfs regs @0x5150400 / cci @0x5150430 */
+#define FDVFS_MAGIC 0xABCD0001u
+#define FDVFS_UNIT_KHZ 26000u
+static vm_offset_t cpuhw,csram_sys,fdvfs;
+static struct {unsigned n,top,boot,cur;uint16_t mhz[32];} cpud[3];
+static int cpu_boost_ready,cpu_boosted,cpu_mode;   /* mode 1 = FDVFS, 2 = PERF_STATE kHz, 3 = PERF_STATE index */
+static uint32_t fdvfs_boot[X9_NCPU],perf_boot[3];
+/* Display-dark FDVFS request per CPU: the lowest LUT OPP of its domain at or
+ * above 500 MHz, never above the boot request. Idle (screen on) still
+ * restores LK's boot requests (~1.0/0.8/1.1 GHz, 309), which kept 318's
+ * screen-off GPUEB temperature at 54-56 C. */
+static uint32_t fdvfs_dark[X9_NCPU];static int cpu_dark;
+static vm_offset_t cpud_base(unsigned d){return cpuhw+0x10u+d*0x120u;}
+static const char *cpu_mode_name(int m){return m==1?"fdvfs":m==2?"perf_state kHz":m==3?"perf_state index":"none";}
+static unsigned cpu_measure_mhz(int *cpu) {
+ /* 8 dependent adds per iteration: >= 8 cycles each on any core. Log 308:
+  * 800k cycles with interrupts off took 1.007 ms on cpu4 (~795 MHz) and hit
+  * the 852 us interrupts-disabled panic. Interrupts stay on now: five short
+  * runs of 100k cycles, keep the fastest one that stayed on one CPU. */
+ unsigned best=0;*cpu=-1;
+ for(unsigned r=0;r<5;r++) {
+  uint64_t x=0,n=12500;
+  const int c0=cpu_number();
+  const uint64_t t0=mach_absolute_time();
+  __asm__ volatile("1:\n add %0,%0,#1\n add %0,%0,#1\n add %0,%0,#1\n add %0,%0,#1\n"
+   " add %0,%0,#1\n add %0,%0,#1\n add %0,%0,#1\n add %0,%0,#1\n subs %1,%1,#1\n b.ne 1b\n"
+   :"+r"(x),"+r"(n)::"cc");
+  const uint64_t t1=mach_absolute_time();
+  if(cpu_number()!=c0)continue;
+  uint64_t ns=0;absolutetime_to_nanoseconds(t1-t0,&ns);
+  const unsigned mhz=ns?(unsigned)(100000ull*1000ull/ns):0;
+  if(mhz>best){best=mhz;*cpu=c0;}
+ }
+ return best;
+}
+static void cpu_boost_setup(void) {
+ cpuhw=ml_io_map(CPUHW_PA,0x4000);
+ csram_sys=ml_io_map(CSRAM_SYS_PA,0x4000);
+ fdvfs=ml_io_map(FDVFS_PA,0x4000);
+ if(!cpuhw||!csram_sys||!fdvfs){printf("X9 CPUFREQ: map failed csram=%lx sys=%lx fdvfs=%lx\n",(unsigned long)cpuhw,(unsigned long)csram_sys,(unsigned long)fdvfs);return;}
+ const uint32_t sys_magic=rd(csram_sys,0x3c00),sys_hw=rd(csram_sys,0x3c00+0x10+0x8c);
+ const uint32_t tbl_ver=rd(cpuhw,0x1400+0xbfc),scaling=rd(cpuhw,0x4cc),fd_magic=rd(cpuhw,0x1124);
+ const uint32_t lut_mask=tbl_ver==2?0x3fffu:0xfffu;
+ printf("X9 CPUFREQ: csram_sys=%08x hw=%x pwr_tbl_ver=%u freq_scaling=%x fdvfs_magic=%08x cci_req=%x\n",
+  sys_magic,sys_hw,tbl_ver,scaling,fd_magic,rd(fdvfs,0x430));
+ int sane=1;
+ for(unsigned d=0;d<3;d++) {
+  const vm_offset_t b=cpud_base(d);unsigned prev=0;cpud[d].n=0;cpud[d].top=0;
+  for(unsigned i=0;i<32;i++){const unsigned f=rd(b,i*4)&lut_mask;if(!f||f==prev)break;cpud[d].mhz[i]=(uint16_t)f;prev=f;cpud[d].n++;
+   if(f>cpud[d].mhz[cpud[d].top])cpud[d].top=i;}
+  perf_boot[d]=rd(b,0x88);cpud[d].boot=cpud[d].cur=0;
+  printf("X9 CPUFREQ: domain%u(%s %s) opps=%u lut[0]=%u lut[last]=%u MHz top=%u(%u MHz) perf_state=%x enable=%x hw_state=%x latency=%u\n",
+   d,x9_cluster_name[d],x9_cluster_core[d],cpud[d].n,cpud[d].n?cpud[d].mhz[0]:0,cpud[d].n?cpud[d].mhz[cpud[d].n-1]:0,
+   cpud[d].top,cpud[d].n?cpud[d].mhz[cpud[d].top]:0,perf_boot[d],rd(b,0x84),rd(b,0x8c),rd(b,0x114)&0xffffu);
+  if(cpud[d].n<2||cpud[d].mhz[cpud[d].top]<500||cpud[d].mhz[cpud[d].top]>5000)sane=0;
+ }
+ /* Idle request = what LK left; a zero (no request) becomes ~1200 MHz, close
+  * to the clocks measured in 309, rather than the lowest OPP. */
+ for(unsigned c=0;c<X9_NCPU;c++){fdvfs_boot[c]=rd(fdvfs,0x400+4*c);if(!fdvfs_boot[c])fdvfs_boot[c]=(1200000u+FDVFS_UNIT_KHZ-1u)/FDVFS_UNIT_KHZ;}
+ printf("X9 CPUFREQ: fdvfs idle requests cpu0-7 = %u %u %u %u %u %u %u %u (x26 MHz; 0 at boot -> 47)\n",
+  fdvfs_boot[0],fdvfs_boot[1],fdvfs_boot[2],fdvfs_boot[3],fdvfs_boot[4],fdvfs_boot[5],fdvfs_boot[6],fdvfs_boot[7]);
+ x9_topo_check();
+ printf("X9 CPUFREQ: boot clocks little/big/prime ~%u/%u/%u MHz (cpu0/4/7, dependent-add loop)\n",
+  cpu_measure_cluster(X9_LITTLE),cpu_measure_cluster(X9_BIG),cpu_measure_cluster(X9_PRIME));
+ cpu_mode=fd_magic==FDVFS_MAGIC?1:scaling?2:3;
+ if(!sweet_x9_perf(32)){printf("X9 CPUFREQ: UI boost off (x9g bit 32); read-only, mode would be %s\n",cpu_mode_name(cpu_mode));return;}
+ if(sys_magic!=0x55AA55AAu||!sys_hw){printf("X9 CPUFREQ: cpufreq hardware not enabled by MCUPM; read-only\n");return;}
+ if(!sane){printf("X9 CPUFREQ: LUT not sane; read-only\n");return;}
+ for(unsigned d=0;d<3;d++)if((rd(cpud_base(d),0x8c)&3u)!=3u){printf("X9 CPUFREQ: domain%u hw_state=%x (needs cpufreq+SVS); read-only\n",d,rd(cpud_base(d),0x8c));return;}
+ for(unsigned c=0;c<X9_NCPU;c++) {
+  const unsigned d=x9_topo_cluster[c];unsigned mhz=0;
+  for(unsigned i=0;i<cpud[d].n;i++)if(cpud[d].mhz[i]>=500&&(!mhz||cpud[d].mhz[i]<mhz))mhz=cpud[d].mhz[i];
+  uint32_t req=mhz?(mhz*1000u+FDVFS_UNIT_KHZ-1u)/FDVFS_UNIT_KHZ:fdvfs_boot[c];
+  fdvfs_dark[c]=req<fdvfs_boot[c]?req:fdvfs_boot[c];
+ }
+ cpu_boost_ready=1;
+ printf("X9 CPUFREQ: UI boost armed via %s (top %u/%u/%u MHz; idle restores boot requests; display dark requests cpu0/4/7=%u/%u/%u x26 MHz)\n",cpu_mode_name(cpu_mode),
+  cpud[0].mhz[cpud[0].top],cpud[1].mhz[cpud[1].top],cpud[2].mhz[cpud[2].top],fdvfs_dark[0],fdvfs_dark[4],fdvfs_dark[7]);
+}
+static void cpu_boost_set(int boost) {
+ const int dark=!boost&&cpu_mode==1&&__atomic_load_n(&sweet_x9_display_dark,__ATOMIC_RELAXED);
+ if(!cpu_boost_ready||(boost==cpu_boosted&&dark==cpu_dark))return;
+ if(dark!=cpu_dark)printf("X9 CPUFREQ: display %s: idle requests cpu0/4/7=%u/%u/%u x26 MHz\n",dark?"dark":"lit",
+  dark?fdvfs_dark[0]:fdvfs_boot[0],dark?fdvfs_dark[4]:fdvfs_boot[4],dark?fdvfs_dark[7]:fdvfs_boot[7]);
+ cpu_dark=dark;
+ if(cpu_mode==1) {
+  for(unsigned c=0;c<X9_NCPU;c++) {
+   const unsigned d=x9_topo_cluster[c];
+   const uint32_t req=boost?(cpud[d].mhz[cpud[d].top]*1000u+FDVFS_UNIT_KHZ-1u)/FDVFS_UNIT_KHZ:dark?fdvfs_dark[c]:fdvfs_boot[c];
+   wr(fdvfs,0x400+4*c,req);
+  }
+ } else {
+  for(unsigned d=0;d<3;d++) {
+   const uint32_t req=!boost?perf_boot[d]:cpu_mode==2?cpud[d].mhz[cpud[d].top]*1000u:cpud[d].top;
+   wr(cpud_base(d),0x88,req);
+  }
+ }
+ for(unsigned d=0;d<3;d++)cpud[d].cur=boost?cpud[d].top:0;
+ cpu_boosted=boost;
+}
+/* x9g bit 64: steer to cpu0 (boot processor) + big + prime while the UI is active. Preemption and
+ * interrupts enabled here (governor thread), as the scheduler requires; the
+ * scheduler's own failsafe re-recommends all cores if a realtime thread
+ * starves. */
+extern void sched_perfcontrol_update_recommended_cores(uint32_t recommended_cores);
+static int cores_steered;
+static void core_steer_set(int steer) {
+ if(steer==cores_steered)return;
+ sched_perfcontrol_update_recommended_cores(steer?(1u|x9_topo_mask(X9_BIG)|x9_topo_mask(X9_PRIME)):0xffu);
+ cores_steered=steer;
+}
+/* x9g bit 128: the thread that ends a framebuffer swap is backboardd's
+ * CoreAnimation render-server thread (kSweetFBSwapEnd runs in the caller).
+ * During the UI boost window it is bound to the prime core, like OPPO's
+ * animation-thread placement; the next swap after the window unbinds it.
+ * thread_bind takes effect at its next block (GPU/vsync wait). Realtime
+ * threads are skipped: thread_bind_internal asserts sched_pri < RT. */
+#include <mach/thread_policy.h>
+extern kern_return_t thread_policy_get(thread_t thread,thread_policy_flavor_t flavor,thread_policy_t policy_info,
+ mach_msg_type_number_t *count,boolean_t *get_default);
+extern task_t current_task(void);
+extern task_t kernel_task;
+static volatile int ui_boost_now;
+static thread_t ui_bound_thread;
+static uint64_t ui_binds,ui_bind_rt;
+void sweet_x9_ui_swap(void);
+void sweet_x9_ui_swap(void) {
+ __atomic_fetch_add(&sweet_x9_ui_swaps,1,__ATOMIC_RELAXED);
+ if(!sweet_x9_perf(128)||current_task()==kernel_task)return;
+ thread_t self=current_thread();
+ const int want=__atomic_load_n(&ui_boost_now,__ATOMIC_RELAXED);
+ thread_t cur=__atomic_load_n(&ui_bound_thread,__ATOMIC_ACQUIRE);
+ if(want&&cur==NULL) {
+  struct thread_time_constraint_policy tc;mach_msg_type_number_t n=THREAD_TIME_CONSTRAINT_POLICY_COUNT;boolean_t def=FALSE;
+  if(thread_policy_get(self,THREAD_TIME_CONSTRAINT_POLICY,(thread_policy_t)&tc,&n,&def)!=KERN_SUCCESS||!def){ui_bind_rt++;return;}
+  processor_t prime=cpu_to_processor(X9_PRIME_CPU);
+  if(prime==PROCESSOR_NULL||!__atomic_compare_exchange_n(&ui_bound_thread,&cur,self,false,__ATOMIC_ACQ_REL,__ATOMIC_RELAXED))return;
+  thread_bind(prime);ui_binds++;
+ } else if(!want&&cur==self) {
+  thread_bind(PROCESSOR_NULL);
+  __atomic_store_n(&ui_bound_thread,(thread_t)NULL,__ATOMIC_RELEASE);
+ }
+}
 static void gov_thread(void *arg,wait_result_t result) {
  (void)arg;(void)result;
  const uint64_t period_ns=50ull*1000*1000;
  uint64_t last_busy=sweet_x9_gpu_busy_ns,last_log=mach_absolute_time(),commits=0,busy_acc=0,ticks=0,restores=0;
- int last_temp=0;
+ int last_temp=0;bool boost_cool=false;
  printf("X9 GPU GOV: start floor=%d(%u kHz) ceiling=%d(%u kHz) slowest=%d period=50ms up>=20%% down<5%%\n",
   gov_floor,opp_khz[gov_floor],gov_ceiling,opp_khz[gov_ceiling],gov_slowest);
  dvfsrc_setup();
  sweet_x9_ufs_late_high(); /* no DVFSRC lock held across the UFS mutex */
+ cpu_boost_setup();
+ uint64_t ui_ticks=0,boost_ticks=0;int ui=0;
  for(;;) {
   gov_sleep_ms(50);
+  ui=sweet_x9_perf(32)&&ui_tick();ui_ticks++;if(ui)boost_ticks++;
   if(channel_uncertain){printf("X9 GPU GOV: mailbox uncertain; governor stops\n");break;}
   const uint64_t busy=sweet_x9_gpu_busy_ns,delta=busy-last_busy;last_busy=busy;
   if(render_active_refs<0)continue;      // no resident session: GPU may be off
   const unsigned util=delta>=period_ns?100:(unsigned)(delta*100/period_ns);
   struct gpu_shared_prefix st;status(&st);
   const int temp=st.temperature;last_temp=temp;
+  const bool known=temp>=1&&temp<=150;
+  if(!known||temp>=90)boost_cool=false;else if(temp<85)boost_cool=true;   /* hysteresis */
   int fastest=gov_ceiling;               // smaller index is faster
-  if(temp<1||temp>150||temp>=80)fastest=gov_floor;
-  if(temp>=90&&temp<=150)fastest=gov_slowest;
+  if(!known)fastest=gov_floor;
+  else if(temp>=85&&gov_floor>gov_ceiling)fastest=gov_ceiling+(gov_floor-gov_ceiling)*(temp>=95?10:temp-85)/10;
+  cpu_boost_set(ui&&boost_cool);         /* hot or unknown: CPU back to its boot index */
+  core_steer_set(sweet_x9_perf(64)&&ui&&boost_cool);
+  __atomic_store_n(&ui_boost_now,ui&&boost_cool,__ATOMIC_RELAXED);
+  if(known&&temp>=100)fastest=gov_slowest;
   int target=gov_index<0?gov_floor:gov_index;
   /* Submissions are synchronous and serialized: frame time is the sum of
    * per-job GPU latency, so any sustained load benefits from a higher clock
    * (rev244: 23% util, 10 ms wait per job, 9 frames/s). */
   if(util>=20)target-=4;else if(util<5)target+=2;
+  if(ui)target=fastest;   /* UI boost: frame time is latency bound, util understates it */
   if(target<fastest)target=fastest;
   const int slowest_allowed=fastest>gov_floor?fastest:gov_floor;
   if(target>slowest_allowed)target=slowest_allowed;
+  if(__atomic_load_n(&sweet_x9_display_dark,__ATOMIC_RELAXED)&&gov_slowest>=0)target=gov_slowest;   /* screen off: nothing to draw */
   if(target!=gov_index){if(gov_commit(target)){printf("X9 GPU GOV: commit %d failed; governor stops\n",target);break;}commits++;}
   /* 105/106.txt: with the floor pinned at the ceiling (x9_gpu_floor_khz=1716000)
    * the boot commit read back gpu=stack=1716 MHz, but every later status showed
@@ -371,6 +640,15 @@ static void gov_thread(void *arg,wait_result_t result) {
    printf("X9 GPU GOV: util_avg=%llu%% temp=%d idx=%d gpu=%u kHz stack=%u kHz commits=%llu limiter=%u/%u ceiling=%u floor=%u actual=%u/%u kHz oppidx=%d/%d restores=%llu ddr_gear=%u vcore=%u\n",
     ticks?busy_acc/ticks:0,last_temp,gov_index,gov_index>=0?opp_khz[gov_index]:0,st.cur_fstack,commits,st.cur_c_limiter,st.cur_f_limiter,st.cur_ceiling,st.cur_floor,
     st.cur_fgpu,st.cur_fstack,st.cur_oppidx_gpu,st.cur_oppidx_stack,restores,gear&0xf,(gear>>8)&7);
+   if(cpu_boost_ready||sweet_x9_perf(32)){
+    const unsigned lm=cpu_measure_cluster(X9_LITTLE),bm=cpu_measure_cluster(X9_BIG),pm=cpu_measure_cluster(X9_PRIME);
+    printf("X9 CPUFREQ: ui_boost=%llu/%llu ticks steered=%d cpu_boosted=%d mode=%s fdvfs_req cpu0/4/7=%u/%u/%u perf=%x/%x/%x hw_state=%x/%x/%x measured little/big/prime ~%u/%u/%u MHz prime_bind=%d binds=%llu rt_skips=%llu\n",
+     boost_ticks,ui_ticks,cores_steered,cpu_boosted,cpu_mode_name(cpu_mode),
+     fdvfs?rd(fdvfs,0x400):0,fdvfs?rd(fdvfs,0x410):0,fdvfs?rd(fdvfs,0x41c):0,
+     cpuhw?rd(cpud_base(0),0x88):0,cpuhw?rd(cpud_base(1),0x88):0,cpuhw?rd(cpud_base(2),0x88):0,
+     cpuhw?rd(cpud_base(0),0x8c):0,cpuhw?rd(cpud_base(1),0x8c):0,cpuhw?rd(cpud_base(2),0x8c):0,lm,bm,pm,
+     __atomic_load_n(&ui_bound_thread,__ATOMIC_RELAXED)!=NULL,ui_binds,ui_bind_rt);
+    boost_ticks=ui_ticks=0;}
    last_log=now;busy_acc=ticks=0;
   }
  }

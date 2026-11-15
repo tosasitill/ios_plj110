@@ -68,7 +68,15 @@ x9_diag_logging(void)
 }
 
 extern "C" int x9_lk_gui_present(void);
+extern "C" uint64_t x9_lk_gui_target(unsigned slot);   /* gpu-wait double buffer, pe_serial.c */
+extern "C" unsigned x9_lk_gui_shown(void);
+extern "C" int sweet_x9_perf(unsigned bit);             /* x9g feature mask, pe_serial.c */
+extern "C" void sweet_x9_ui_swap(void);                 /* UI boost activity, sweet_x9_gpu_dependencies.c */
+extern "C" void sweet_x9_set_display_dark(int dark);    /* governor: screen-off clocks, sweet_x9_gpu_dependencies.c */
+extern "C" void (*sweet_x9_render_done_hook)(uint64_t completed);   /* SweetX9RenderEngine.inc */
 extern "C" int x9_lk_gui_busy(void);
+static uint32_t get32(const uint8_t *p, uint32_t off);
+static bool x9_blend_enabled(void);
 extern "C" int x9_lk_gui_cancel(void);
 extern "C" void x9_lk_gui_probe(void);
 extern "C" int x9_lk_overlay(unsigned index, uint64_t *address, uint64_t *bytes,
@@ -269,10 +277,33 @@ class AppleCLCD : public IOMobileFramebuffer {
 
 	static void vsyncFired(OSObject *owner, IOTimerEventSource *sender);
 	static void x9PresentFired(OSObject *owner, IOTimerEventSource *sender);
-	void x9QueuePresent(void);
+	void x9QueuePresent(unsigned slot = 0);
 	void scheduleVsync(IOTimerEventSource *sender);
+	/* gpu-wait (x9g bit 4): a tick that found the pending frame still rendering
+	 * arms fX9GpuWait; the render worker's completion hook then fires
+	 * fX9GpuTimer on this workloop, which presents at once instead of on the
+	 * next 120 Hz tick. Presents are still TE-gated by x9QueuePresent. */
+	IOTimerEventSource *fX9GpuTimer;
+	static void x9GpuDoneFired(OSObject *owner, IOTimerEventSource *sender);
+	void x9TryPresentLocked(bool tick, uint64_t count);
+	bool x9RecDoubleOK(const uint8_t *rec);
+	void x9GpuWaitSetup(void);
+public:
+	void x9GpuTimerArm(void) { if (fX9GpuTimer != NULL) fX9GpuTimer->setTimeoutUS(1); }
+private:
 
 public:
+	volatile bool fX9GpuWait;
+	volatile uint64_t fX9WaitSeq;
+	uint64_t      fCadenceGpuDone, fCadenceGpuDoneLate, fCadenceDouble, fCadenceDoubleRefresh;
+	/* gpu-wait double buffer (x9g bit 16): LK slot 2 as the second GUI buffer.
+	 * Frames compose in the cached shadow and copy into the slot the panel is
+	 * NOT fetching, so a copy no longer waits for the 7.8 ms DSI push. */
+	IOMemoryDescriptor *fX9Slot2Mem;
+	IOMemoryMap  *fX9Slot2Map;
+	uint8_t      *fX9Slot2;
+	bool          fX9Double, fX9DoubleFrame;
+	unsigned      fX9PendSlot;
 	uint64_t      fPhys;
 	uint32_t      fWidth, fHeight, fRowBytes;
 	uint32_t      fLogicalW, fLogicalH;     /* size reported to userland */
@@ -654,6 +685,7 @@ AppleCLCD::start(IOService *provider)
 		if(!fX9PresentTimer || fWorkLoop->addEventSource(fX9PresentTimer)!=kIOReturnSuccess) {
 			IOLog("X9 DISPLAY: no asynchronous TE timer;setup refused\n");return false;
 		}
+		x9GpuWaitSetup();
 	}
 	/*
 	 * Qualcomm MDP/DSI0 (SM6225). x676c: MediaTek DSI0 and DISP_MUTEX0.
@@ -1094,6 +1126,10 @@ AppleCLCD::scheduleVsync(IOTimerEventSource *sender)
 		IOLog("X9 DISPLAY TE: frames=%llu timeouts=%llu wait_avg_us=%llu poll_gap_max_us=%llu;fresh TE observed,not scanout completion\n",
 		 fCadenceTEFrames,fCadenceTETimeouts,fCadenceTEFrames?fCadenceTEWaitNs/fCadenceTEFrames/1000:0,fCadenceTEGapNs/1000);
 		fCadenceTEFrames=fCadenceTETimeouts=fCadenceTEWaitNs=fCadenceTEGapNs=0;
+		if (fX9GpuTimer != NULL || fX9Double || fCadenceDouble)
+			IOLog("X9 DISPLAY gpu-wait: gpu_done_presents=%llu gpu_done_stale=%llu double_frames=%llu canonical_refresh=%llu double=%u shown_slot=%u;x9g\n",
+			 fCadenceGpuDone,fCadenceGpuDoneLate,fCadenceDouble,fCadenceDoubleRefresh,fX9Double?1:0,x9_lk_gui_shown());
+		fCadenceGpuDone=fCadenceGpuDoneLate=fCadenceDouble=fCadenceDoubleRefresh=0;
 		fCadenceStart=now; fCadenceTicks=fCadenceCopies=fCadenceSubmits=fCadenceMissed=0;
 		fCadenceGpuBusy=fCadenceDisplayBusy=fCadenceCopyNs=fCadenceMaxCopyNs=fCadenceMaxLateNs=0;
 	}
@@ -1104,9 +1140,11 @@ AppleCLCD::scheduleVsync(IOTimerEventSource *sender)
 
 // Same serialized workloop as vsync, but not quantized to the16.7ms
 // notification tick. No GPU owner is held while waiting for panel TE.
-void AppleCLCD::x9QueuePresent(void) {
-	if(fX9SubmitPending)return;
+void AppleCLCD::x9QueuePresent(unsigned slot) {
+	if(fX9SubmitPending)return;   /* a queued, unstarted submit shows the newest pixels of its slot */
 	fX9PresentBegan=fX9LastPoll=mach_absolute_time();
+	if(!x9_lk_gui_target(slot==2&&fX9Double?2:0))(void)x9_lk_gui_target(0);
+	fX9PendSlot=slot==2&&fX9Double?2:0;
 	int result=x9_lk_gui_present();
 	fX9SubmitPending=result==0;
 	if(result==0)fX9PresentTimer->setTimeoutUS(100);
@@ -1253,6 +1291,220 @@ sweet_x9_clear_lk_overlays(void)
 	IOLog("X9 LK overlay: %u rejected layer buffer(s) queued (x9lo=%d)\n", queued, level);
 }
 
+/* Present part of the vsync tick, also run by the GPU-completion timer
+ * (gpu-wait). Entered with fLock held; returns with it released. Both callers
+ * run on fWorkLoop, so they never interleave with each other or with
+ * x9PresentFired (the only place a queued GUI submit starts). */
+void
+AppleCLCD::x9TryPresentLocked(bool tick, uint64_t count)
+{
+	AppleCLCD *fb = this;
+	fb->fX9DoubleFrame = false;
+	bool flush = fb->fDirty && (!tick || (count % fb->fFlushTicks) == 0);
+	int displayOwner=0;
+	bool fenced=false,useReady=false;
+	SweetSurface *staleReady[4] = {};
+	if(flush && sweet_board_x9()) {
+		// fLock -> GPU owner is TRY-only; never wait in the inverse order.
+		// Hold native GPU ownership from before taking the pending frame through
+		// its CPU copy. Keep dirty+IOSurface holds intact when either engine is busy.
+		/* A/B (boot-arg token x9qd, with the frontend's threaded submit): the
+		 * steady-state present is a CPU copy of a held IOSurface (GPU staging
+		 * only runs for the first frames), so do not compete with GPU submits
+		 * for metal_service_lock. rev245 x9q1: gpu_defer rose 2.9 -> 10.1/s. */
+		static int lockFree=-1;
+		if(lockFree<0){int v=0;lockFree=PE_parse_boot_argn("x9qd",&v,sizeof(v))||sweet_x9_render_async_on()?1:0;
+			IOLog("X9 DISPLAY: present %s the GPU owner lock (x9qd / async submission %s)\n",lockFree?"without":"with",
+			 sweet_x9_render_async_on()?"on: present fence = GPU enqueue sequence at swap":"off");}
+		/* Async submission: the owner lock no longer tells whether the frame is
+		 * rendered; the present fence does (rev246 x9qd lacked it and showed
+		 * incomplete surfaces). Not-yet-complete frames stay pending. */
+		fenced=sweet_x9_render_async_on()&&fb->fPendSeq>sweet_x9_render_async_completed();
+		useReady=fenced&&fb->fReadyValid;
+		displayOwner=(lockFree||fenced)?0:sweet_x9_render_display_try_enter();
+		if((fenced&&!useReady)||displayOwner<0) {
+			if(tick)fb->fCadenceGpuBusy++;
+			flush=false;useReady=false;
+			/* gpu-wait: present as soon as this frame's fence passes. Re-check
+			 * after arming so a completion between the two reads is not lost. */
+			if(fenced&&displayOwner>=0&&fb->fX9GpuTimer) {
+				fb->fX9WaitSeq=fb->fPendSeq;
+				__atomic_store_n(&fb->fX9GpuWait,true,__ATOMIC_RELEASE);
+				if(fb->fPendSeq<=sweet_x9_render_async_completed()&&__atomic_exchange_n(&fb->fX9GpuWait,false,__ATOMIC_ACQ_REL))
+					fb->fX9GpuTimer->setTimeoutUS(1);
+			}
+		}else {
+			/* gpu-wait double buffer: compose into the slot the panel is not
+			 * fetching; DSI busy no longer defers. A queued, not yet started
+			 * submit (same workloop, cannot start under us) is overwritten with
+			 * the newer pixels, unless it targets the slot being fetched. */
+			const uint8_t *cand=useReady?fb->fReady:fb->fPending;
+			bool dbl=fb->fX9Double&&!fb->fConsShown&&fb->x9RecDoubleOK(cand)&&
+			 !(fb->fX9SubmitPending&&fb->fX9PendSlot==x9_lk_gui_shown());
+			if(dbl)fb->fX9DoubleFrame=true;
+			else if(fb->fX9SubmitPending || x9_lk_gui_busy()==1) {if(tick)fb->fCadenceDisplayBusy++;flush=false;}
+		}
+	}
+	uint8_t *rec = NULL;
+	uint64_t shownT = 0, shownSeq = 0;   /* metrics: arrival time and GPU seq of the shown frame */
+	SweetSurface *taken[4] = {};
+	if (flush) {
+		rec = (uint8_t *)IOMallocData(SWEET_FB_SWAP_REC_SIZE);
+		if (rec != NULL && useReady) {
+			/* Newest swap still rendering: show the newest complete one. The
+			 * pending frame stays dirty and is shown once its fence passes. */
+			memcpy(rec, fb->fReady, SWEET_FB_SWAP_REC_SIZE);
+			shownT = fb->fReadyT; shownSeq = fb->fReadySeq;
+			memcpy(taken, fb->fReadyHold, sizeof(taken));
+			bzero(fb->fReadyHold, sizeof(fb->fReadyHold));
+			fb->fReadyValid = false;fb->fCadenceReady++;
+		} else if (rec != NULL) {
+			memcpy(rec, fb->fPending, SWEET_FB_SWAP_REC_SIZE);
+			shownT = fb->fPendT; shownSeq = fb->fPendSeq;
+			fb->fDirty = false;
+			memcpy(taken, fb->fPendHold, sizeof(taken));
+			bzero(fb->fPendHold, sizeof(fb->fPendHold));
+			if (fb->fReadyValid) {   /* older than what we show now */
+				memcpy(staleReady, fb->fReadyHold, sizeof(staleReady));
+				bzero(fb->fReadyHold, sizeof(fb->fReadyHold));
+				fb->fReadyValid = false;
+			}
+		}
+	}
+	if(displayOwner>0 && rec==NULL) {sweet_x9_render_owner_leave();displayOwner=0;}
+	/* frames replaced at the previous vsync have been latched by now */
+	SweetSurface *retire[4];
+	memcpy(retire, fb->fRetireHold, sizeof(retire));
+	bzero(fb->fRetireHold, sizeof(fb->fRetireHold));
+	IOLockUnlock(fb->fLock);
+	sweet_hold_set(retire, false);
+	sweet_hold_set(staleReady, false);
+	if (fb->fConsShown && sweet_console_copy_dirty(fb->backBuffer())) {
+		fb->flipBack();
+	}
+	if (rec != NULL) {
+		uint64_t began=mach_absolute_time();
+		fb->fX9OwnerHeld=displayOwner>0||!sweet_board_x9();
+		fb->present(rec);
+		if(fb->fX9DoubleFrame)fb->fCadenceDouble++;
+		if(!tick)fb->fCadenceGpuDone++;
+		if (shownT != 0) {
+			/* rev252bo: swap arrival -> present done, per shown frame (includes the GPU
+			 * wait and the CPU copy). Idle time without swaps is not counted. */
+			uint64_t lat = 0;
+			absolutetime_to_nanoseconds(mach_absolute_time() - shownT, &lat);
+			uint64_t ms = lat / 1000000ULL;
+			unsigned bin = ms < 8 ? 0 : ms < 17 ? 1 : ms < 34 ? 2 : ms < 50 ? 3 : ms < 100 ? 4 : 5;
+			fb->fMetPresents++;
+			fb->fMetLatSum += lat;
+			if (lat > fb->fMetLatMax) fb->fMetLatMax = lat;
+			fb->fMetLatHist[bin]++;
+			fb->fMetLastShownSeq = shownSeq;
+		}
+		fb->fX9OwnerHeld=false;
+		if(displayOwner>0) {sweet_x9_render_owner_leave();displayOwner=0;}
+		if(sweet_board_x9()) {
+			uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time()-began,&ns);
+			fb->fCadenceCopies++;fb->fCadenceCopyNs+=ns;
+			if(ns>fb->fCadenceMaxCopyNs)fb->fCadenceMaxCopyNs=ns;
+		}
+		IOFreeData(rec, SWEET_FB_SWAP_REC_SIZE);
+		IOLockLock(fb->fLock);
+		memcpy(fb->fRetireHold, fb->fShowHold, sizeof(taken));
+		memcpy(fb->fShowHold, taken, sizeof(taken));
+		IOLockUnlock(fb->fLock);
+	} else {
+		IOLockLock(fb->fLock);
+		memcpy(fb->fRetireHold, fb->fShowHold, sizeof(fb->fRetireHold));
+		bzero(fb->fShowHold, sizeof(fb->fShowHold));
+		IOLockUnlock(fb->fLock);
+	}
+	fb->fX9DoubleFrame = false;
+}
+
+/* The completion hook only arms this timer; the present runs here, on the
+ * workloop, exactly as a tick would run it. */
+void
+AppleCLCD::x9GpuDoneFired(OSObject *owner, IOTimerEventSource *sender)
+{
+	AppleCLCD *fb = (AppleCLCD *)owner;
+	(void)sender;
+	IOLockLock(fb->fLock);
+	if (fb->fPowerOff || fb->fConsShown || !fb->fDirty || fb->fPendSeq > sweet_x9_render_async_completed()) {
+		if (fb->fDirty && !fb->fPowerOff) fb->fCadenceGpuDoneLate++;
+		IOLockUnlock(fb->fLock);
+		return;
+	}
+	fb->x9TryPresentLocked(false, 0);
+}
+
+static AppleCLCD *sX9GpuWaitFb;
+/* Render worker context, render_async_lock already dropped. Arm once per
+ * deferred frame; never touches fLock. */
+static void
+x9_fb_render_done(uint64_t completed)
+{
+	AppleCLCD *fb = sX9GpuWaitFb;
+	if (fb == NULL || !__atomic_load_n(&fb->fX9GpuWait, __ATOMIC_ACQUIRE) || completed < fb->fX9WaitSeq) return;
+	if (__atomic_exchange_n(&fb->fX9GpuWait, false, __ATOMIC_ACQ_REL)) fb->x9GpuTimerArm();
+}
+
+bool
+AppleCLCD::x9RecDoubleOK(const uint8_t *rec)
+{
+	/* Only frames present() composes entirely in the cached shadow: at least
+	 * one layer, none of them the panel's own default surface (userspace
+	 * drawing in place), blending on (the shadow path exists only then). */
+	if (!x9_blend_enabled() || fX9Slot2 == NULL || fPowerOff || !fConsolePaused) return false;
+	unsigned layers = 0;
+	for (uint32_t layer = 0; layer < SWEET_FB_LAYERS; layer++) {
+		uint32_t id = get32(rec, 0x54 + 4 * layer);
+		if (id == 0) continue;
+		if (fSurface != NULL && id == fSurface->id) return false;
+		layers++;
+	}
+	return layers != 0;
+}
+
+void
+AppleCLCD::x9GpuWaitSetup(void)
+{
+	if (sweet_x9_perf(4)) {
+		fX9GpuTimer = IOTimerEventSource::timerEventSource(this, &AppleCLCD::x9GpuDoneFired);
+		if (fX9GpuTimer != NULL && fWorkLoop->addEventSource(fX9GpuTimer) == kIOReturnSuccess) {
+			sX9GpuWaitFb = this;
+			sweet_x9_render_done_hook = x9_fb_render_done;
+		} else {
+			OSSafeReleaseNULL(fX9GpuTimer);
+		}
+	}
+	IOLog("X9 DISPLAY gpu-wait: present on GPU completion %s (x9g bit 4)\n", fX9GpuTimer ? "ON" : "off");
+	/* Second GUI buffer: LK slot 2 of the reserved framebuffer block (whole
+	 * 0x3660000 block is outside XNU RAM, x9/tools/mkadt.py FB_SIZE). Mapped
+	 * like the LK overlay (IOMemoryDescriptor, not ml_io_map: io_submap). */
+	if (sweet_x9_perf(16) && x9_lk_gui_target(2) != 0) {
+		const uint64_t pa = x9_lk_gui_target(2);
+		(void)x9_lk_gui_target(0);
+		fX9Slot2Mem = IOMemoryDescriptor::withPhysicalAddress(pa, (IOByteCount)fRowBytes * fHeight, kIODirectionInOut);
+		if (fX9Slot2Mem != NULL && fX9Slot2Mem->prepare(kIODirectionInOut) == kIOReturnSuccess) {
+			fX9Slot2Map = fX9Slot2Mem->map(kIOMapWriteCombineCache);
+			if (fX9Slot2Map != NULL) fX9Slot2 = (uint8_t *)(uintptr_t)fX9Slot2Map->getVirtualAddress();
+		}
+		if (fX9Slot2 != NULL && fRowBytes == 5120 && fWidth == 1256 && fHeight == 2760) {
+			/* Start identical to the canonical slot so a stray fetch shows the boot picture. */
+			memcpy(fX9Slot2, (const void *)fPixels, (size_t)fRowBytes * fHeight);
+			__asm__ volatile("dsb sy" ::: "memory");
+			fX9Double = true;
+		} else {
+			OSSafeReleaseNULL(fX9Slot2Map);
+			fX9Slot2 = NULL;
+		}
+		IOLog("X9 DISPLAY gpu-wait: double buffer slot2 pa=%llx %s\n", pa, fX9Double ? "ON" : "mapping failed;single buffer");
+	} else {
+		IOLog("X9 DISPLAY gpu-wait: double buffer off (x9g bit 16 or LK layout)\n");
+	}
+}
+
 void
 AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 {
@@ -1343,103 +1595,7 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 		fb->scheduleVsync(sender);
 		return;
 	}
-	bool flush = fb->fDirty && (count % fb->fFlushTicks) == 0;
-	int displayOwner=0;
-	bool fenced=false,useReady=false;
-	SweetSurface *staleReady[4] = {};
-	if(flush && sweet_board_x9()) {
-		// fLock -> GPU owner is TRY-only; never wait in the inverse order.
-		// Hold native GPU ownership from before taking the pending frame through
-		// its CPU copy. Keep dirty+IOSurface holds intact when either engine is busy.
-		/* A/B (boot-arg token x9qd, with the frontend's threaded submit): the
-		 * steady-state present is a CPU copy of a held IOSurface (GPU staging
-		 * only runs for the first frames), so do not compete with GPU submits
-		 * for metal_service_lock. rev245 x9q1: gpu_defer rose 2.9 -> 10.1/s. */
-		static int lockFree=-1;
-		if(lockFree<0){int v=0;lockFree=PE_parse_boot_argn("x9qd",&v,sizeof(v))||sweet_x9_render_async_on()?1:0;
-			IOLog("X9 DISPLAY: present %s the GPU owner lock (x9qd / async submission %s)\n",lockFree?"without":"with",
-			 sweet_x9_render_async_on()?"on: present fence = GPU enqueue sequence at swap":"off");}
-		/* Async submission: the owner lock no longer tells whether the frame is
-		 * rendered; the present fence does (rev246 x9qd lacked it and showed
-		 * incomplete surfaces). Not-yet-complete frames stay pending. */
-		fenced=sweet_x9_render_async_on()&&fb->fPendSeq>sweet_x9_render_async_completed();
-		useReady=fenced&&fb->fReadyValid;
-		displayOwner=(lockFree||fenced)?0:sweet_x9_render_display_try_enter();
-		if((fenced&&!useReady)||displayOwner<0) {fb->fCadenceGpuBusy++;flush=false;useReady=false;}
-		else if(fb->fX9SubmitPending || x9_lk_gui_busy()==1) {fb->fCadenceDisplayBusy++;flush=false;}
-	}
-	uint8_t *rec = NULL;
-	uint64_t shownT = 0, shownSeq = 0;   /* metrics: arrival time and GPU seq of the shown frame */
-	SweetSurface *taken[4] = {};
-	if (flush) {
-		rec = (uint8_t *)IOMallocData(SWEET_FB_SWAP_REC_SIZE);
-		if (rec != NULL && useReady) {
-			/* Newest swap still rendering: show the newest complete one. The
-			 * pending frame stays dirty and is shown once its fence passes. */
-			memcpy(rec, fb->fReady, SWEET_FB_SWAP_REC_SIZE);
-			shownT = fb->fReadyT; shownSeq = fb->fReadySeq;
-			memcpy(taken, fb->fReadyHold, sizeof(taken));
-			bzero(fb->fReadyHold, sizeof(fb->fReadyHold));
-			fb->fReadyValid = false;fb->fCadenceReady++;
-		} else if (rec != NULL) {
-			memcpy(rec, fb->fPending, SWEET_FB_SWAP_REC_SIZE);
-			shownT = fb->fPendT; shownSeq = fb->fPendSeq;
-			fb->fDirty = false;
-			memcpy(taken, fb->fPendHold, sizeof(taken));
-			bzero(fb->fPendHold, sizeof(fb->fPendHold));
-			if (fb->fReadyValid) {   /* older than what we show now */
-				memcpy(staleReady, fb->fReadyHold, sizeof(staleReady));
-				bzero(fb->fReadyHold, sizeof(fb->fReadyHold));
-				fb->fReadyValid = false;
-			}
-		}
-	}
-	if(displayOwner>0 && rec==NULL) {sweet_x9_render_owner_leave();displayOwner=0;}
-	/* frames replaced at the previous vsync have been latched by now */
-	SweetSurface *retire[4];
-	memcpy(retire, fb->fRetireHold, sizeof(retire));
-	bzero(fb->fRetireHold, sizeof(fb->fRetireHold));
-	IOLockUnlock(fb->fLock);
-	sweet_hold_set(retire, false);
-	sweet_hold_set(staleReady, false);
-	if (fb->fConsShown && sweet_console_copy_dirty(fb->backBuffer())) {
-		fb->flipBack();
-	}
-	if (rec != NULL) {
-		uint64_t began=mach_absolute_time();
-		fb->fX9OwnerHeld=displayOwner>0||!sweet_board_x9();
-		fb->present(rec);
-		if (shownT != 0) {
-			/* rev252bo: swap arrival -> present done, per shown frame (includes the GPU
-			 * wait and the CPU copy). Idle time without swaps is not counted. */
-			uint64_t lat = 0;
-			absolutetime_to_nanoseconds(mach_absolute_time() - shownT, &lat);
-			uint64_t ms = lat / 1000000ULL;
-			unsigned bin = ms < 8 ? 0 : ms < 17 ? 1 : ms < 34 ? 2 : ms < 50 ? 3 : ms < 100 ? 4 : 5;
-			fb->fMetPresents++;
-			fb->fMetLatSum += lat;
-			if (lat > fb->fMetLatMax) fb->fMetLatMax = lat;
-			fb->fMetLatHist[bin]++;
-			fb->fMetLastShownSeq = shownSeq;
-		}
-		fb->fX9OwnerHeld=false;
-		if(displayOwner>0) {sweet_x9_render_owner_leave();displayOwner=0;}
-		if(sweet_board_x9()) {
-			uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time()-began,&ns);
-			fb->fCadenceCopies++;fb->fCadenceCopyNs+=ns;
-			if(ns>fb->fCadenceMaxCopyNs)fb->fCadenceMaxCopyNs=ns;
-		}
-		IOFreeData(rec, SWEET_FB_SWAP_REC_SIZE);
-		IOLockLock(fb->fLock);
-		memcpy(fb->fRetireHold, fb->fShowHold, sizeof(taken));
-		memcpy(fb->fShowHold, taken, sizeof(taken));
-		IOLockUnlock(fb->fLock);
-	} else {
-		IOLockLock(fb->fLock);
-		memcpy(fb->fRetireHold, fb->fShowHold, sizeof(fb->fRetireHold));
-		bzero(fb->fShowHold, sizeof(fb->fShowHold));
-		IOLockUnlock(fb->fLock);
-	}
+	fb->x9TryPresentLocked(true, count);   /* releases fLock */
 	/* Retry a busy GUI submission on the same serialized timer workloop.
 	 * No timeout/reset or clock/PHY changes. Latest composed pixels win. */
 	if (sweet_board_x9()) {
@@ -1571,6 +1727,7 @@ AppleCLCD::swap(const uint8_t *rec)
 	fDirty = true;
 	fPendT = mach_absolute_time();
 	fMetSwaps++;
+	if (sweet_board_x9()) sweet_x9_ui_swap();
 	/* Async submission: everything this frame's producers queued is already in
 	 * the global FIFO (they enqueue before committing to CoreAnimation). */
 	fPendSeq = sweet_x9_render_async_on() ? sweet_x9_render_async_enqueued() : 0;
@@ -2185,6 +2342,19 @@ AppleCLCD::present(const uint8_t *rec)
 	uint8_t *x9_panel = NULL;
 	unsigned x9_layers = 0;
 	bool x9_inplace = false;
+	/* gpu-wait double buffer: the slot this frame goes to (0 canonical, 2 the
+	 * second buffer). A queued, unstarted submit keeps its slot; otherwise the
+	 * slot the panel is not fetching. */
+	const bool x9_double = sweet_board_x9() && fX9DoubleFrame && fX9Double && dst == (uint8_t *)fPixels;
+	const unsigned x9_shown = sweet_board_x9() ? x9_lk_gui_shown() : 0;
+	const unsigned x9_slot = !x9_double ? 0 : fX9SubmitPending ? fX9PendSlot : (x9_shown == 2 ? 0 : 2);
+	if (sweet_board_x9() && !x9_double && x9_shown == 2 && dst == (uint8_t *)fPixels &&
+	    fX9Compose != NULL && fX9ComposeValid) {
+		/* Leaving the double path: the canonical slot is two frames old and not
+		 * fetched (slot 2 is shown, and this path only runs with DSI idle). */
+		memcpy((void *)fPixels, fX9Compose->getBytesNoCopy(), (size_t)fRowBytes * fHeight);
+		fCadenceDoubleRefresh++;
+	}
 	if (sweet_board_x9() && dst != NULL && x9_blend_enabled()) {
 		for (uint32_t layer = 0; layer < SWEET_FB_LAYERS; layer++) {
 			uint32_t id = get32(rec, 0x54 + 4 * layer);
@@ -2199,7 +2369,7 @@ AppleCLCD::present(const uint8_t *rec)
 			}
 			s->release();
 		}
-		if (x9_layers > 1 && !x9_inplace && dst == (uint8_t *)fPixels) {
+		if ((x9_layers > 1 || (x9_double && x9_layers)) && !x9_inplace && dst == (uint8_t *)fPixels) {
 			if (fX9Compose == NULL) {
 				fX9Compose = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
 				    kIODirectionInOut, (vm_size_t)fRowBytes * fHeight, page_size);
@@ -2209,13 +2379,23 @@ AppleCLCD::present(const uint8_t *rec)
 			if (fX9Compose != NULL) {
 				uint8_t *shadow = (uint8_t *)fX9Compose->getBytesNoCopy();
 				if (!fX9ComposeValid) {
-					/* One read of the panel to keep retained pixels. */
-					memcpy(shadow, (const void *)fPixels, (size_t)fRowBytes * fHeight);
+					/* One read of the panel to keep retained pixels (the slot shown now). */
+					memcpy(shadow, x9_shown == 2 && fX9Slot2 != NULL ? (const void *)fX9Slot2 : (const void *)fPixels,
+					    (size_t)fRowBytes * fHeight);
 				}
-				x9_panel = dst;
+				x9_panel = x9_slot == 2 ? fX9Slot2 : dst;
 				dst = shadow;
 			}
 		}
+	}
+	if (x9_double && x9_panel == NULL) {
+		/* No shadow for this frame: writing the panel directly could hit the
+		 * slot being fetched. Drop the frame and leave the double path. */
+		if (fX9Compose == NULL) fX9Double = false;   /* no shadow at all: single buffer from now on */
+		static unsigned told;
+		if (told++ < 8) IOLog("X9 DISPLAY gpu-wait: double frame dropped (layers=%u inplace=%u shadow=%p double=%u)\n",
+		    x9_layers, x9_inplace, fX9Compose, fX9Double ? 1 : 0);
+		return;
 	}
 	bool x9_first_drawn = true;
 
@@ -2488,8 +2668,8 @@ AppleCLCD::present(const uint8_t *rec)
 		flipBack();
 	} else if (sweet_board_x676c()) {
 		mtkDsiPush();
-	} else if (sweet_board_x9() && dst != NULL && dst == (uint8_t *)fPixels) {
-		x9QueuePresent();
+	} else if (sweet_board_x9() && dst != NULL && (dst == (uint8_t *)fPixels || (x9_double && dst == fX9Slot2))) {
+		x9QueuePresent(dst == fX9Slot2 ? 2 : 0);
 		if (x9_probe) IOLog("X9 FRAME submit seq=%llu pending_fresh_TE=%u\n", x9_fb_present_seq, fX9SubmitPending);
 		static unsigned logged;
 		if (logged < 4) {
@@ -2633,6 +2813,9 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 	case kSweetFBRequestPowerChange:
 		if (args->scalarInputCount >= 1) {
 			bool off = args->scalarInput[0] == 0;
+			if (sweet_board_x9()) {
+				sweet_x9_set_display_dark(off);   /* also when stayon keeps the panel lit below */
+			}
 			/*
 			 * topaz: sweetfb_stayon=1 ignores display-off requests (auto-lock)
 			 * while there are no buttons or touch to wake the panel again.
