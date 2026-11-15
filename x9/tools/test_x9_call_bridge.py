@@ -20,6 +20,8 @@ CASES = (
     'duplicate_pending', 'changed_duplicate', 'duplicate_replied',
     'overflow_isolated', 'bounded_tombstones', 'fifo', 'fragmented',
     'late_cnf', 'sms_priority', 'staged_ios',
+    'dial_golden', 'dial_invalid', 'dial_whitelist',
+    'dial_roundtrip', 'dial_tx_failure', 'dial_cnf_invalid',
 )
 
 

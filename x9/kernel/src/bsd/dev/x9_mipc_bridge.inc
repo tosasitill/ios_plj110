@@ -112,9 +112,10 @@ uint64_t x9_md_mipc_submit(const uint8_t *p,uint32_t n){
  }
  else if(id==0x30b||id==0x601||id==0x605||id==0x607||id==0xa04){if(!x9mm_request(p,n,id))return 0;}
  /* Staged, evidence-bounded call actions. No caller is enabled/published
-  * yet; codec mirrors archived Android ANSWER{} and HANGUP{MODE0,ID}.
+  * yet; DIAL mirrors the measured PLJ110 SIM2 profile (2026-11-15),
+  * ANSWER{} and HANGUP{MODE0,ID} mirror Android captures.
   * RSP8902 can ONLY use the original CMD owner, never this txid allocator. */
- else if(id==0x905||id==0x907){if(!x9cw_request(p,n,id,x9_md_sim_count()))return 0;}
+ else if(id==0x901||id==0x905||id==0x907){if(!x9cw_request(p,n,id,x9_md_sim_count()))return 0;}
  else if(id==0x101){if(!x9mi_attach_request(p,n))return 0;}
  /* Read-only per-SIM provider-name query. MD 91345dbc/91345e9e:
   * 0429 -> 042a; exact PLMN ASCII + NUL, LAC0 (MD current area), OPTION1.

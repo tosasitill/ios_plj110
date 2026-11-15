@@ -3,8 +3,11 @@
  * state is invented here. Do not add service9 to X9Baseband's announcement
  * until Android initialization, dial/status/SIM routing and voice audio are
  * reconciled. There is deliberately NO bootarg to override this boundary.
+ * x9cw_dial now translates ordinary VOICE20 digits to the captured SIM2
+ * profile only when a caller explicitly supplies that verified context;
+ * 0902 does not supply a CallIdentifier, so no QMI success is fabricated.
  * A verified single-call mapping is required before x9cw_action can be
- * submitted. Current code has no producer for that mapping and sends no
+ * submitted. Current code has no profile/state producer and sends no
  * MIPC call request/registration/approval. Unexpected direct VOICE requests
  * get a real unsupported result, never a success bootstrap stub. */
 #include "../../../bsd/dev/x9_call_wire.h"

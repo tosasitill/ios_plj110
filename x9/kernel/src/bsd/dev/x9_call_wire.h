@@ -88,10 +88,93 @@ static inline unsigned x9cw_approve(const uint8_t *cmd,unsigned n,uint8_t *out,u
  x9cw_scalar(out+at,0x102,c.call_id,4);x9cw_scalar(out+at+8,0x103,c.sequence,4);
  return size;
 }
+/* iOS20H392 sendDialReq 1f1ac1f8c: VOICE20, tag1 CallingNumber is
+ * raw bytes (writer 1f192a104), NOT a NUL string. Ordinary CallType tag10
+ * is u8=0 (1f1ac2188..2198). Restrict this stage to decimal digits and
+ * the RIL's <=40-byte limit (3814f4..4fc). Reject, do not silently discard,
+ * CLIR, emergency/IP/video, pause/USSD, duplicate and unknown variants. */
+struct x9cw_dial_number {const uint8_t *digits;unsigned length;};
+static inline int x9cw_qmi_dial(const uint8_t *p,unsigned n,struct x9cw_dial_number *out){
+ if(!p||!out||n<8||n>64||p[0]||x9cw_u16(p+3)!=0x20||x9cw_u16(p+5)!=n-7)return 0;
+ struct x9cw_dial_number d={NULL,0};unsigned seen=0;
+ for(unsigned at=7;at<n;){
+  if(n-at<3)return 0;
+  unsigned tag=p[at],k=x9cw_u16(p+at+1);at+=3;
+  if(k>n-at)return 0;
+  if(tag==1){
+   if((seen&1)||!k||k>40)return 0;
+   for(unsigned i=0;i<k;i++)if(p[at+i]<'0'||p[at+i]>'9')return 0;
+   seen|=1;d.digits=p+at;d.length=k;
+  }else if(tag==0x10){
+   if((seen&2)||k!=1||p[at])return 0;
+   seen|=2;
+  }else return 0;
+  at+=k;
+ }
+ if(!(seen&1))return 0;
+ *out=d;return 1;
+}
+/* A captured route/profile is supplied EXPLICITLY by the caller, not chosen
+ * from QMI CallType or a modem default. Only PLJ110 SIM2's measured profile
+ * is implemented. RIL getDomain/getEccPreferredDomain depend on runtime state;
+ * no production provider yet establishes that context in iOS. */
+struct x9cw_dial_profile {
+ unsigned sim;uint32_t address_type,call_type,domain,ecc_domain;unsigned clir;
+};
+static inline int x9cw_dial_profile_valid(const struct x9cw_dial_profile *p){
+ return p&&p->sim==1&&p->address_type==2&&p->call_type==1&&p->domain==0&&
+        p->ecc_domain==0&&p->clir==0;
+}
+/* Pure encoder, never submits/announces/approves. Reject a second dial while
+ * any native call is known. Copy digits before output writes, permitting
+ * input/output overlap without corrupting the private number. */
+static inline unsigned x9cw_dial(const uint8_t *qmi,unsigned n,uint8_t *out,unsigned room,
+                                const struct x9cw_dial_profile *profile,unsigned native_count){
+ struct x9cw_dial_number d;uint8_t number[40];
+ if(!out||native_count||!x9cw_dial_profile_valid(profile)||!x9cw_qmi_dial(qmi,n,&d))return 0;
+ unsigned string_size=(d.length+12)&~7u,size=16+string_size+40;
+ if(room<size)return 0;
+ for(unsigned i=0;i<d.length;i++)number[i]=d.digits[i];
+ x9cw_header(out,size,0x901,2,0);
+ x9cw_put16(out+16,0x8100);x9cw_put16(out+18,d.length+1);
+ for(unsigned i=0;i<d.length;i++)out[20+i]=number[i];
+ x9cw_zero(number,sizeof(number));
+ unsigned at=16+string_size;
+ /* Exactly the observed serialized order, including CLIR108/u8. */
+ x9cw_scalar(out+at,0x108,0,1);x9cw_scalar(out+at+8,0x101,2,4);
+ x9cw_scalar(out+at+16,0x102,1,4);x9cw_scalar(out+at+24,0x103,0,4);
+ x9cw_scalar(out+at+32,0x104,0,4);return size;
+}
+static inline int x9cw_native_dial(const uint8_t *p,unsigned n,unsigned sim_count){
+ if(!x9cw_frame(p,n,0x901)||sim_count!=2||p[8]!=2||n<64||
+    x9cw_u16(p+16)!=0x8100)return 0;
+ unsigned k=x9cw_u16(p+18);
+ if(k<2||k>41)return 0;
+ unsigned size=(k+11)&~7u,at=16+size;
+ if(n!=at+40||p[20+k-1])return 0;
+ for(unsigned i=0;i<k-1;i++)if(p[20+i]<'0'||p[20+i]>'9')return 0;
+ for(unsigned i=4+k;i<size;i++)if(p[16+i])return 0;
+ const unsigned tags[]={0x108,0x101,0x102,0x103,0x104},values[]={0,2,1,0,0};
+ for(unsigned i=0;i<5;i++,at+=8){
+  unsigned bytes=i?4:1;
+  if(x9cw_u16(p+at)!=tags[i]||x9cw_u16(p+at+2)!=bytes||
+     (bytes==4?x9cw_u32(p+at+4):p[at+4])!=values[i])return 0;
+  for(unsigned j=4+bytes;j<8;j++)if(p[at+j])return 0;
+ }
+ return 1;
+}
+/* This observed DIAL_CNF has result0/u32 ONLY. It contains no call id.
+ * Do not generate a QMI20 success/CallIdentifier from this confirmation. */
+static inline int x9cw_dial_cnf(const uint8_t *p,unsigned n,uint32_t *result){
+ if(!result||!x9cw_frame(p,n,0x902)||n!=24||x9cw_u16(p+16)||x9cw_u16(p+18)!=4)return 0;
+ *result=x9cw_u32(p+20);return 1;
+}
 /* AP request whitelist, zero padding, no wildcard hangup/cause/fanout.
- * No CALL_DIAL, status subscription or guessed call/voice configuration. */
+ * DIAL is restricted to the explicit measured SIM2 profile above.
+ * No status subscription or guessed call/voice configuration. */
 static inline int x9cw_request(const uint8_t *p,unsigned n,unsigned id,unsigned sim_count){
  if(!x9cw_frame(p,n,id)||(p[8]!=1&&(p[8]!=2||sim_count!=2)))return 0;
+ if(id==0x901)return x9cw_native_dial(p,n,sim_count);
  if(id==0x907)return n==16; /* archived Android ANSWER: no TLVs */
  if(id!=0x905||n!=32||x9cw_u16(p+16)!=0x100||x9cw_u16(p+18)!=4||
     x9cw_u32(p+20)||x9cw_u16(p+24)!=0x101||x9cw_u16(p+26)!=4||!x9cw_u32(p+28))return 0;

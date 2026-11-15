@@ -98,6 +98,107 @@ static void action_codec(){
  req[8]=4;assert(!x9cw_qmi_action(req,sizeof(req),&id,&call));
  req[8]=1;req[3]=0x20;assert(!x9cw_action(req,sizeof(req),out,sizeof(out),7,1,0,1));
 }
+static const struct x9cw_dial_profile measured_route={1,2,1,0,0,0};
+static unsigned dial_qmi(uint8_t *p,unsigned digits=5,bool call_type=true){
+ unsigned n=10+digits+(call_type?4:0);bzero(p,n);
+ p[1]=0x34;p[2]=0x12;p[3]=0x20;x9cw_put16(p+5,n-7);
+ p[7]=1;x9cw_put16(p+8,digits);
+ for(unsigned i=0;i<digits;i++)p[10+i]=(uint8_t)('1'+i%9);
+ if(call_type){p[10+digits]=0x10;p[11+digits]=1;}
+ return n;
+}
+static void dial_golden(){
+ uint8_t q[64],p[104];unsigned n=dial_qmi(q);
+ struct x9cw_dial_number d;assert(x9cw_qmi_dial(q,n,&d)&&d.length==5);
+ assert(x9cw_dial(q,n,p,sizeof(p),&measured_route,0)==72);
+ const uint8_t golden[]={
+  0x84,0x19,0x54,0x24,0,0,0,0,2,0,1,9,0,0,0x38,0,
+  0,0x81,6,0,'1','2','3','4','5',0,0,0,0,0,0,0,
+  8,1,1,0,0,0,0,0,1,1,4,0,2,0,0,0,
+  2,1,4,0,1,0,0,0,3,1,4,0,0,0,0,0,4,1,4,0,0,0,0,0};
+ assert(sizeof(golden)==72&&!memcmp(p,golden,72));
+ assert(x9cw_native_dial(p,72,2)&&x9cw_request(p,72,0x901,2));
+ assert(!x9cw_request(p,72,0x901,1));
+ assert(!x9cw_dial(q,n,p,71,&measured_route,0));
+ assert(!x9cw_dial(q,n,p,sizeof(p),&measured_route,1));
+ assert(!x9cw_dial(q,n,p,sizeof(p),NULL,0));
+ struct x9cw_dial_profile wrong=measured_route;wrong.domain=5;
+ assert(!x9cw_dial(q,n,p,sizeof(p),&wrong,0));
+ wrong=measured_route;wrong.sim=0;assert(!x9cw_dial(q,n,p,sizeof(p),&wrong,0));
+ /* QMI's string has no NUL; MIPC adds one. Optional type can be omitted. */
+ n=dial_qmi(q,5,false);assert(x9cw_dial(q,n,p,sizeof(p),&measured_route,0)==72);
+ n=dial_qmi(q,40);assert(x9cw_dial(q,n,p,sizeof(p),&measured_route,0)==104);
+ assert(x9cw_request(p,104,0x901,2)&&p[60]==0);
+ n=dial_qmi(q,1);assert(x9cw_dial(q,n,p,sizeof(p),&measured_route,0)==64);
+ /* Same-buffer translation reads all private digits before writing header. */
+ uint8_t alias[104];n=dial_qmi(alias);assert(x9cw_dial(alias,n,alias,104,&measured_route,0)==72);
+ assert(!memcmp(alias,golden,72));
+}
+static void dial_invalid(){
+ uint8_t q[80],p[104];struct x9cw_dial_number d;
+ for(unsigned k=0;k<19;k++){dial_qmi(q);assert(!x9cw_qmi_dial(q,k,&d));}
+ unsigned n=dial_qmi(q,0);assert(!x9cw_qmi_dial(q,n,&d));
+ n=dial_qmi(q,41);assert(!x9cw_qmi_dial(q,n,&d));
+ const uint8_t invalid[]={0,'+',',',';','*','#',0xff};
+ for(uint8_t c:invalid){n=dial_qmi(q);q[12]=c;assert(!x9cw_qmi_dial(q,n,&d));}
+ n=dial_qmi(q);q[0]=2;assert(!x9cw_qmi_dial(q,n,&d));
+ n=dial_qmi(q);q[3]=0x22;assert(!x9cw_qmi_dial(q,n,&d));
+ n=dial_qmi(q);q[18]=9;assert(!x9cw_qmi_dial(q,n,&d)); // emergency
+ n=dial_qmi(q);q[15]=0x11;assert(!x9cw_qmi_dial(q,n,&d)); // CLIR not silently ignored
+ n=dial_qmi(q);q[15]=1;assert(!x9cw_qmi_dial(q,n,&d)); // duplicate number
+ n=dial_qmi(q);q[16]=4;assert(!x9cw_qmi_dial(q,n,&d)); // truncated TLV
+ n=dial_qmi(q);q[n]=0xff;x9cw_put16(q+5,n+1-7);assert(!x9cw_qmi_dial(q,n+1,&d));
+ assert(!x9cw_dial(q,n+1,p,sizeof(p),&measured_route,0));
+}
+static void dial_whitelist(){
+ uint8_t q[64],p[112];unsigned n=dial_qmi(q);assert(x9cw_dial(q,n,p,112,&measured_route,0)==72);
+ assert(x9_md_mipc_submit(p,72));
+ /* Reject each changed byte in header route, tag, value, string or padding. */
+ const unsigned offsets[]={8,16,18,20,25,26,31,32,34,36,37,40,42,44,48,50,52,56,58,60,64,66,68};
+ for(unsigned at:offsets){p[at]^=0x80;assert(!x9_md_mipc_submit(p,72));p[at]^=0x80;}
+ for(unsigned k=0;k<72;k++)assert(!x9cw_native_dial(p,k,2));
+ x9cw_scalar(p+72,0x105,1,2);x9cw_put16(p+14,64);assert(!x9_md_mipc_submit(p,80));
+ assert(writes==0&&x9_mi_next==1); // invalid attempts did not enqueue
+}
+static void dial_roundtrip(){
+ uint8_t q[64],p[104],cnf[24],out[104];unsigned n=dial_qmi(q);
+ assert(x9cw_dial(q,n,p,104,&measured_route,0)==72);
+ uint64_t token=x9_md_mipc_submit(p,72);assert(token);
+ x9mi_tick();assert(writes==1&&last_length==72&&last_frame[8]==2&&x9cw_u16(last_frame+10)==0x901);
+ assert(x9cw_u16(last_frame+12)==token);
+ /* Host timeout/cancel cannot release or repeat a sent dial. */
+ x9_md_sim_at_cancel(token);uint32_t len,result;
+ for(unsigned i=0;i<100;i++){assert(x9_md_mipc_take(token,out,104,&len)==0);x9mi_tick();}
+ assert(writes==1&&x9_mi_slots[0].state==2);
+ x9cw_header(cnf,24,0x902,2,(unsigned)token);cnf[9]=2;x9cw_scalar(cnf+16,0,0,4);
+ x9mi_rx(cnf,9);assert(x9_md_mipc_take(token,out,104,&len)==0);
+ x9mi_rx(cnf+9,15);assert(x9_md_mipc_take(token,out,104,&len)==1&&len==24);
+ assert(x9cw_dial_cnf(out,len,&result)&&result==0);
+ assert(!x9cw_qmi_action(out,len,&n,&result)); // native CNF is not a QMI success/id
+ assert(x9_md_mipc_take(token,out,104,&len)==-1);
+ x9mi_rx(cnf,24);for(unsigned i=0;i<10;i++)x9mi_tick();assert(writes==1);
+}
+static void dial_tx_failure(){
+ uint8_t q[64],p[104],out[104];unsigned n=dial_qmi(q);uint32_t len;
+ assert(x9cw_dial(q,n,p,104,&measured_route,0)==72);
+ uint64_t token=x9_md_mipc_submit(p,72);assert(token);tx_result=-1;x9mi_tick();
+ assert(writes==1&&x9_mi_slots[0].state==2&&x9_mi_poisoned);
+ x9_md_sim_at_cancel(token);x9mi_online(1);
+ assert(x9_md_mipc_take(token,out,104,&len)==0);
+ for(unsigned i=0;i<100;i++)x9mi_tick();assert(writes==1);
+ assert(!x9_md_mipc_submit(p,72));
+}
+static void dial_cnf_invalid(){
+ uint8_t p[40];uint32_t result=0x12345678;
+ x9cw_header(p,24,0x902,2,77);x9cw_scalar(p+16,0,0,4);
+ for(unsigned n=0;n<24;n++)assert(!x9cw_dial_cnf(p,n,&result));
+ assert(result==0x12345678&&x9cw_dial_cnf(p,24,&result)&&result==0);
+ x9cw_put32(p+20,42);assert(x9cw_dial_cnf(p,24,&result)&&result==42); // native error remains native
+ p[16]=1;assert(!x9cw_dial_cnf(p,24,&result));p[16]=0;
+ p[18]=1;assert(!x9cw_dial_cnf(p,24,&result));p[18]=4;
+ x9cw_scalar(p+24,0x100,1,1);x9cw_put16(p+14,16);assert(!x9cw_dial_cnf(p,32,&result));
+ assert(!x9cw_dial_cnf(p,32,NULL));
+}
 static void request_whitelist(){
  uint8_t req[]={0,1,0,0x21,0,4,0,1,1,0,7},p[48];
  assert(x9cw_action(req,sizeof(req),p,sizeof(p),7,0x12345678,1,1)==32);
@@ -197,12 +298,16 @@ static void staged_ios(){
  uint8_t qmi[]={0,1,0,0x22,0,4,0,1,1,0,7};
  assert(!x9c_request(1,X9BB_PORT_BASE+5,qmi,sizeof(qmi))&&!qmi_replies);
  assert(x9c_request(1,X9BB_PORT_BASE+9,qmi,sizeof(qmi))&&qmi_replies==1&&qmi_error==94);
+ uint8_t dial[64];unsigned n=dial_qmi(dial);
+ assert(x9c_request(1,X9BB_PORT_BASE+9,dial,n)&&qmi_replies==2&&qmi_error==94);
  x9mi_tick();assert(!writes&&!x9_mi_next&&!x9_mc_next);
 }
 int main(int argc,char **argv){
  assert(argc==2);x9mi_online(1);
  struct {const char *name;void (*run)();} cases[]={
   {"codec_golden",codec_golden},{"codec_invalid",codec_invalid},{"action_codec",action_codec},
+  {"dial_golden",dial_golden},{"dial_invalid",dial_invalid},{"dial_whitelist",dial_whitelist},
+  {"dial_roundtrip",dial_roundtrip},{"dial_tx_failure",dial_tx_failure},{"dial_cnf_invalid",dial_cnf_invalid},
   {"request_whitelist",request_whitelist},{"no_auto_policy",no_auto_policy},{"command_roundtrip",command_roundtrip},
   {"failure_retained",failure_retained},{"duplicate_pending",duplicate_pending},{"changed_duplicate",changed_duplicate},
   {"duplicate_replied",duplicate_replied},{"overflow_isolated",overflow_isolated},{"bounded_tombstones",bounded_tombstones},
