@@ -2099,3 +2099,8 @@ Model now (as Android, one shared AFE, one owner per shared bit):
 - **权威候选/记录**：`/Users/tosasitill/ios_plj110/.worktrees/camera-integration/x9/out/x9-camera-native-preview-r1-20261115/boot.img`；同目录 `boot-input.json`、`source-head.txt`、`full-build.log`、`build.log` 是当次输入/源码/原始构建记录。没有构建后二次解包/hash/反汇编/复建对比、测试套件、设备/reboot/flash/分区操作。没有新plugin-package或camera mailbox；GPU仍280，设备若仍保持321资产则无需mailbox。没有CI run ID，最后gh run list为空。
 - **下一次最小权威验证**：由用户在主checkout执行 `fastboot boot .worktrees/camera-integration/x9/out/x9-camera-native-preview-r1-20261115/boot.img`。进入SpringBoard后打开原生相机，移动镜头看连续真实后置预览；若成功再切前置、关闭重开一次（不要连续耗尽8个exportedepoch）。保存新完整 `~/N.txt` 和屏幕/现象；首先核当次 `X9 CAMERA FDT/IRQ/CAL` metadata、mode2 native注册/两真实chipID/physicalclose，再到实际MM/CSI/CAM/MMPC/SMMU、SOF/DONE/RAW、CMCapture graph Start、PixelBufferHandler，最终以屏幕连续真实图像验收。前级成功不能代替屏幕，失败返回最早实际失败分支，不先猜iOS后级。
 - **当前结果仍未验收**：没有这份镜像的boot/真实RAW/handler/屏幕证据；最新已有设备证据仍321的mode1/platform0。目标“iOS相机真实连续预览”保持未完成，工作树与分支保留，不合main宣布完成/不删树。代码/构建已可复现，但缺用户临时boot和新日志，不能继续用静态推断代替运行证据。仍有8 exportedepoch上限及uncertainstartup保守retain限制。
+
+#### 相机上机证据等待审计（2026-11-15）
+
+- 镜像交付及随后两次goal续轮的同一阻塞未变化：没有用户启动mode2候选后的新日志/屏幕证据。最新数字日志仍 `321.txt`（1781932 B，mtime 2026-11-15 20:02:30），其相机行仍mode1/platform0；精确USB日志/pull工具进程查询无正在采集的匹配进程，不能将等待会话当成live运行。未执行设备命令，不复建/复检候选，不修改驱动以替代运行验证。
+- 功能树干净、最终正常候选与源码记录保留；完整预览goal因上述外部证据缺口置blocked，**不是complete**。解除条件：用户手动boot上节候选并给新完整日志和实际Camera预览现象；收到后从当次最早失败/成功分支继续，不能以旧mode1日志或编译绿色验收。该审计仅更新交接并push，不合main/删相机树或动其他会话。
