@@ -57,4 +57,26 @@ __attribute__((visibility("default"))) OSStatus X9HEIFCopyHardwareImageWithOptio
     CFDataRef file, uint32_t item_id, CFDataRef working_rgb_icc,
     enum x9_heif_source_color_policy, enum x9_heif_clap_policy, uint64_t raster_budget,
     CVPixelBufferRef *image, CFDictionaryRef *info);
+/* Explicit resampling intermediate, WITHOUT changing the final working ICC.
+ * NULL intermediate_rgb_icc is exactly the WithOptions behavior. A non-NULL
+ * profile requires LINEAR_CEIL and must be a matrix-based RGB ICC from which
+ * CoreGraphics can derive an output-capable extended-linear RGB ICC. It is
+ * NOT assumed linear: only the actually derived ICC interprets float pixels.
+ * The caller selects primaries/gamut; there is no default sRGB substitution.
+ * This permits a LUT/non-matrix final working ICC, provided it supports output
+ * and the actual VT transfers support both selected profiles. Each coded item
+ * transfers directly to the derived linear ICC, then composition runs there,
+ * and one final transfer converts to working_rgb_icc/RGBA-half.
+ * An explicit intermediate is qualified before decode even for an integral
+ * LINEAR_CEIL plan; it is unused in that case (exact working-ICC copies remain).
+ * Info distinguishes the owned requested intermediate, whether it was used,
+ * the actual linearization base and the derived linear ICC. All input bytes
+ * must remain unchanged during the call; no borrowed ICC bytes escape. Other
+ * unsupported cases/hardware gates and heap-budget semantics are unchanged.
+ * This does not certify arbitrary LUT support, gamut/HDR effects or hardware
+ * completion without runtime evidence. Existing entrypoints retain their ABI. */
+__attribute__((visibility("default"))) OSStatus X9HEIFCopyHardwareImageWithIntermediateICC(
+    CFDataRef file, uint32_t item_id, CFDataRef working_rgb_icc, CFDataRef intermediate_rgb_icc,
+    enum x9_heif_source_color_policy, enum x9_heif_clap_policy, uint64_t raster_budget,
+    CVPixelBufferRef *image, CFDictionaryRef *info);
 #endif

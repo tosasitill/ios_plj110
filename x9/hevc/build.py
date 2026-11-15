@@ -56,7 +56,10 @@ def main():
         'heif_mixed_derived_color_contexts': False,
         'heif_fractional_clap_linear_resampler': True,
         'heif_fractional_clap_default_policy': 'exact_samples',
-        'heif_fractional_clap_matrix_working_icc_required': True,
+        'heif_fractional_clap_matrix_working_icc_required': False,
+        'heif_fractional_clap_explicit_matrix_intermediate_icc': True,
+        'heif_fractional_clap_linearization': 'explicit matrix intermediate ICC or matrix working ICC; no default gamut',
+        'heif_fractional_clap_lut_working_icc_runtime_verified': False,
         'heif_explicit_raster_heap_budget': True,
         'library': str(library), 'client': str(ctl),
     }, indent=2) + '\n')

@@ -13,8 +13,8 @@ struct native_item { uint32_t id, type; CFDictionaryRef color, declared, source;
 struct native_context {
     struct x9_heif_document *document;
     struct x9_heif_plan *plan;
-    CFDataRef file, working, transfer_profile;
-    CGColorSpaceRef working_space, transfer_space;
+    CFDataRef file, working, intermediate, transfer_profile;
+    CGColorSpaceRef working_space, intermediate_space, transfer_space;
     int resampling;
     size_t raster_budget;
     enum x9_heif_source_color_policy policy;
@@ -45,6 +45,24 @@ static int rgb_profile(CFDataRef data)
         CGColorSpaceGetNumberOfComponents(space) == 3;
     if (space) CGColorSpaceRelease(space);
     return valid;
+}
+static int linearize_rgb(CGColorSpaceRef base, CGColorSpaceRef *space, CFDataRef *profile)
+{
+    *space = NULL; *profile = NULL;
+    /* CoreGraphics explicitly returns NULL for non-matrix spaces here. Do
+     * not classify an arbitrary RGB ICC as linear from its label or tags. */
+    CGColorSpaceRef linear = CGColorSpaceCreateExtendedLinearized(base);
+    if (!linear) return ENOTSUP;
+    int e = CGColorSpaceGetModel(linear) != kCGColorSpaceModelRGB ||
+        CGColorSpaceGetNumberOfComponents(linear) != 3 ||
+        !CGColorSpaceUsesExtendedRange(linear) || !CGColorSpaceSupportsOutput(linear) ? ENOTSUP : 0;
+    CFDataRef icc = !e ? CGColorSpaceCopyICCData(linear) : NULL;
+    if (!e && !rgb_profile(icc)) e = ENOTSUP;
+    if (e) {
+        if (icc) CFRelease(icc);
+        CGColorSpaceRelease(linear);
+    } else { *space = linear; *profile = icc; }
+    return e;
 }
 static int source_color(CFDictionaryRef container, const struct x9_hevc_vui *vui,
     enum x9_heif_source_color_policy policy, CFDictionaryRef *out)
@@ -322,7 +340,8 @@ static OSStatus export_raster(struct native_context *c, struct x9_heif_raster *r
     if (target) CVPixelBufferRelease(target);
     return e;
 }
-OSStatus X9HEIFCopyHardwareImageWithOptions(CFDataRef file, uint32_t id, CFDataRef working,
+OSStatus X9HEIFCopyHardwareImageWithIntermediateICC(CFDataRef file, uint32_t id,
+    CFDataRef working, CFDataRef intermediate,
     enum x9_heif_source_color_policy policy, enum x9_heif_clap_policy clap_policy,
     uint64_t raster_budget, CVPixelBufferRef *out, CFDictionaryRef *info_out)
 {
@@ -330,26 +349,31 @@ OSStatus X9HEIFCopyHardwareImageWithOptions(CFDataRef file, uint32_t id, CFDataR
     *out = NULL; *info_out = NULL;
     if (!file || CFGetTypeID(file) != CFDataGetTypeID() || CFDataGetLength(file) <= 0 ||
         CFDataGetLength(file) > X9_HEIF_MAX_FILE || !rgb_profile(working) ||
+        (intermediate && (!rgb_profile(intermediate) || clap_policy != X9_HEIF_CLAP_LINEAR_CEIL)) ||
         (policy != X9_HEIF_USE_ICC_IF_PRESENT && policy != X9_HEIF_USE_NCLX) ||
         (clap_policy != X9_HEIF_CLAP_EXACT_SAMPLES && clap_policy != X9_HEIF_CLAP_LINEAR_CEIL) ||
         !raster_budget || raster_budget > SIZE_MAX || raster_budget > INT64_MAX) return kVTParameterErr;
     struct native_context *c = calloc(1,sizeof(*c));
     if (!c) return kVTAllocationFailedErr;
     /* CreateCopy may retain an immutable NoCopy CFData whose bytes still
-     * belong to the caller. Working ICC escapes in output attachments/info;
+     * belong to the caller. ICCs escape in output attachments/info;
      * use real owned byte copies, not an assumed immutable-copy allocation. */
     c->file = CFDataCreate(NULL,CFDataGetBytePtr(file),CFDataGetLength(file));
     c->working = CFDataCreate(NULL,CFDataGetBytePtr(working),CFDataGetLength(working)); c->policy = policy;
+    if (intermediate) c->intermediate = CFDataCreate(NULL,CFDataGetBytePtr(intermediate),CFDataGetLength(intermediate));
     c->raster_budget = (size_t)raster_budget;
     c->working_space = c->working ? CGColorSpaceCreateWithICCData(c->working) : NULL;
+    c->intermediate_space = c->intermediate ? CGColorSpaceCreateWithICCData(c->intermediate) : NULL;
     c->items = CFArrayCreateMutable(NULL,0,&kCFTypeArrayCallBacks);
     CFMutableDictionaryRef info = CFDictionaryCreateMutable(NULL,0,
         &kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
     CVPixelBufferRef pixel = NULL;
     struct x9_heif_raster raster = {0};
     struct x9_heif_geometry geometry;
-    int e = !c->file || !c->working || !c->items || !info || !c->working_space ? ENOMEM :
-        x9_heif_open(CFDataGetBytePtr(c->file),(size_t)CFDataGetLength(c->file),&c->document);
+    int e = !c->file || !c->working || !c->items || !info || !c->working_space ||
+        (intermediate && (!c->intermediate || !c->intermediate_space)) ? ENOMEM : 0;
+    if (!e && !CGColorSpaceSupportsOutput(c->working_space)) e = ENOTSUP;
+    if (!e) e = x9_heif_open(CFDataGetBytePtr(c->file),(size_t)CFDataGetLength(c->file),&c->document);
     if (!e) e = x9_heif_plan_create_with_policy(c->document,id,clap_policy,&c->plan);
     if (!e) e = x9_heif_plan_geometry(c->plan,id,&geometry);
     if (!e) {
@@ -361,13 +385,17 @@ OSStatus X9HEIFCopyHardwareImageWithOptions(CFDataRef file, uint32_t id, CFDataR
              * The compositor separately accounts ALL caches/intermediates;
              * VT's internal transfer/decoder storage is not this heap budget. */
             if ((uint64_t)geometry.width*geometry.height*24 > c->raster_budget) e = EMSGSIZE;
-            if (!e) c->transfer_space = CGColorSpaceCreateExtendedLinearized(c->working_space);
-            if (!e && (!c->transfer_space || CGColorSpaceGetModel(c->transfer_space) != kCGColorSpaceModelRGB ||
-                CGColorSpaceGetNumberOfComponents(c->transfer_space) != 3 ||
-                !CGColorSpaceUsesExtendedRange(c->transfer_space) || !CGColorSpaceSupportsOutput(c->transfer_space))) e = ENOTSUP;
-            if (!e) c->transfer_profile = CGColorSpaceCopyICCData(c->transfer_space);
-            if (!e && !rgb_profile(c->transfer_profile)) e = ENOTSUP;
-        } else c->transfer_profile = CFRetain(c->working);
+        }
+        if (!e && (c->resampling || c->intermediate))
+            e = linearize_rgb(c->intermediate ? c->intermediate_space : c->working_space,
+                &c->transfer_space,&c->transfer_profile);
+        if (!e && !c->resampling) {
+            /* A supplied intermediate was qualified, but an integral plan
+             * must not gain extra conversions just because it was supplied. */
+            if (c->transfer_space) { CGColorSpaceRelease(c->transfer_space); c->transfer_space = NULL; }
+            if (c->transfer_profile) CFRelease(c->transfer_profile);
+            c->transfer_profile = CFRetain(c->working);
+        }
     }
     if (!e) e = prepare(c,geometry.id,NULL); /* every source checked before hardware */
     if (!e) e = c->resampling ? x9_heif_compose_linear_float(c->plan,native_raster,c,c->raster_budget,&raster) :
@@ -393,7 +421,14 @@ OSStatus X9HEIFCopyHardwareImageWithOptions(CFDataRef file, uint32_t id, CFDataR
             CFDictionarySetValue(info,CFSTR("Items"),c->items);
             CFDictionarySetValue(info,CFSTR("WorkingRGBICCProfile"),c->working);
             CFDictionarySetValue(info,CFSTR("LinearLightResampling"),c->resampling ? kCFBooleanTrue : kCFBooleanFalse);
+            CFDictionarySetValue(info,CFSTR("ExplicitResamplingIntermediateUsed"),
+                c->resampling && c->intermediate ? kCFBooleanTrue : kCFBooleanFalse);
+            if (c->intermediate)
+                CFDictionarySetValue(info,CFSTR("RequestedResamplingIntermediateRGBICCProfile"),c->intermediate);
             if (c->resampling) {
+                CFDictionarySetValue(info,CFSTR("LinearizationBaseSelection"),
+                    c->intermediate ? CFSTR("explicit-intermediate") : CFSTR("working-icc"));
+                CFDictionarySetValue(info,CFSTR("LinearizationBaseRGBICCProfile"),c->intermediate ? c->intermediate : c->working);
                 CFDictionarySetValue(info,CFSTR("LinearRGBICCProfile"),c->transfer_profile);
                 CFDictionarySetValue(info,CFSTR("CleanApertureSampling"),CFSTR("ceil extent; pixel centers; bilinear linear-light; edge extension"));
             }
@@ -413,13 +448,19 @@ OSStatus X9HEIFCopyHardwareImageWithOptions(CFDataRef file, uint32_t id, CFDataR
     }
     if (c->items) CFRelease(c->items);
     if (c->working_space) CGColorSpaceRelease(c->working_space);
+    if (c->intermediate_space) CGColorSpaceRelease(c->intermediate_space);
     if (c->transfer_space) CGColorSpaceRelease(c->transfer_space);
     if (c->transfer_profile) CFRelease(c->transfer_profile);
     x9_heif_plan_close(&c->plan); x9_heif_close(&c->document);
     if (c->file) CFRelease(c->file);
     if (c->working) CFRelease(c->working);
+    if (c->intermediate) CFRelease(c->intermediate);
     free(c); return result;
 }
+OSStatus X9HEIFCopyHardwareImageWithOptions(CFDataRef file, uint32_t id, CFDataRef working,
+    enum x9_heif_source_color_policy policy, enum x9_heif_clap_policy clap_policy,
+    uint64_t raster_budget, CVPixelBufferRef *out, CFDictionaryRef *info_out)
+{ return X9HEIFCopyHardwareImageWithIntermediateICC(file,id,working,NULL,policy,clap_policy,raster_budget,out,info_out); }
 OSStatus X9HEIFCopyHardwareImage(CFDataRef file, uint32_t id, CFDataRef working,
     enum x9_heif_source_color_policy policy, CVPixelBufferRef *out, CFDictionaryRef *info_out)
 { return X9HEIFCopyHardwareImageWithOptions(file,id,working,policy,X9_HEIF_CLAP_EXACT_SAMPLES,X9_HEIF_MAX_RASTER_BYTES,out,info_out); }
