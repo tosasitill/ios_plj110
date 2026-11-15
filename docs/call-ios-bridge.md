@@ -12,6 +12,7 @@
 | 空快照与异步确认 | 完整 owned `090a` 数组解析、号码与原始presentation有界owner；`0902 + 新 MO epoch` 汇合生成 VOICE20/tag10/u8；DIAL 仍无生产 profile/admission 调用者 |
 | 单通话挂断 / SIM 绑定 | VOICE44/tag01/u8 独立绑定；显式 VOICE21 → owned current query → 同 MO epoch/真实 ID/完整单通话 snapshot → guarded0905 → 同token0906 → 原iOS txn 的 result；已接请求分发，未设备验收 |
 | 初始化 / 事件注册 | 明确绑定后的 VOICE03：13=0 与14=0/1 可独立并发 → 全局 CMD8901 → 逐 SIM IND4901/4902 → owned0909/090a；逐token确认，13=1仍拒绝；仅编译、未运行 |
+| NAS 本地订阅注册 | NAS03保存原txn/localgen/QMUXgen，真实host queue receipt后才原子提交tag13/18/19订阅patch；FIFO、重复结果缓存及旧background IND gate；不是网络注册/IMS-ready |
 | handover 通知 | 严格 MD4902/EVENT3 → Android SRVCC → Apple54/tag1/u8；订阅cursor/generation/SIM隔离、注册与live事件均整批queue receipt后释放，queue/OOM保序等待；未设备验收，未迁移handover后的ID/RAT/profile |
 | 来电 CMD / 状态 | `8901` 的字段、长度和唯一 tag 验证；独立 pending ID → 完整 ECPI0/132/6/133 的 MT reducer / iOS observer；未发布 CallList |
 | END 原因 metadata | 成功完整解析、被当前 MO/MT 身份接受的 `133/mode20/10a=16` → 内部 Apple reason145；无cause/其它cause未知，不从无ID0910补归属；只编译，未发布 END |
@@ -27,6 +28,40 @@
 原 transport 已允许这一严格 DIAL 子集；上一版宿主测试闭合发送/CNF。新增异步 join / 空快照 / 发送前 guard 目前只有编译结果，没有执行验证，也没有 iOS 自动拨号调用者。
 
 ## 原件证据（2026-11-15）
+
+### NAS03本地初始化订阅：真实host queue receipt
+
+本项与VOICE03/IMSA的网络注册不同。Apple `registerEvents_sync1f1ab620c` 以
+tag19/u8请求SigInfoEvents，ConfigSigInfo2/message6c是独立threshold配置。生产NAS03
+仍保留既有tag13/18/19宽度1、bool0/1校验；unknown tag按原accepted-but-unserved
+语义处理，不合成对应indication。以前直接改flags后用void-send，队列满/OOM时可能
+没有注册响应却已开始后台查询；新有界owner将这两者以实际queue receipt连接。
+
+每个原请求保存slot、local generation、真实QMUX generation、SIM、txn、validated bytes
+和首结果；最多32个pending，同client按单调order FIFO。只有实际BB队列接受原response
+才将mask/values应用到CURRENT flags、重启采样cycle；未触及字段不被入队时旧snapshot覆盖。
+last-completed cache独立于pending池，exact重复只回复原结果，不再apply/next；changed或
+malformed同txn由原owner保留首结果，不给第二BAD/ARG或发MD。合法新txn成功admission
+才清cache；ARG/BUSY和order达到UINT64_MAX不抹cache。OOM/full只保留host回复重试，
+没有物理命令、额外网络ready赋值或猜测timeout。
+
+DEL/localgen或真实QMUXgen变化退休旧host owner；pending时不同SIM绑定BUSY，同SIM不阻，
+成功换SIM清cache。关闭订阅的receipt以后，已在途background NAS24/4d/4f自己的IND
+以当前localgen/SIM/对应flag再gate，物理查询仍drain；foreground和其它合法subscriber的
+共享signal样本fanout不受这条self gate影响。原pool-full BUSY/ARG仍是普通非receipt
+错误边界，不将此次修复泛称所有QMI回复可靠。独立peer发现的相邻6c旧隐式signal-enable
+已删除；6c保留原ACK，但不写signal/next，不改变NAS03订阅、也不重启采样周期。
+实际Apple `setThresholds_sync1f1ab589c` 在 `58d0` 构造6c，`58dc/58e8` 调
+prepareThresholds/populateThresholds，`58f4` 另设tag a0 LinkQualityIndicator；
+NAS03 `6200/620c/6210` 构造03并写独立tag19，`6238` 是IndicationRegister SendProxy。
+因此6c是threshold/delta/LQI配置而不是订阅。本桥仍ACK但未应用这些配置，日志明确该限制；
+不会把删除隐式enable说成完整阈值实现。具体生产提交/固定构建结果见NOTES。
+
+`coachz_baseband_poll`在原唯一线程中运行send/del后再进入`x9q_poll→x9r_poll`；
+BB通知只完成host read/Mach通知，host后续write和release只排队到下一owner poll，
+不会在receipt与flags commit之间直接重入同owner。这是实际callsite串行证据，非
+设备时序测试。严格host及真实recipe对象只编译，人工向量未执行；不代表iOS已经
+学到真实网络注册，更不代表typed IMS、VOICE09、CallList或声音已可用。
 
 ### VOICE03 与 Android 注册 owner
 
@@ -396,6 +431,85 @@ MediaSession→+280 interface→virtual+98非零，才发布真实UUID事件。�
 ACTIVE会绕过真实owner/media门，不是已实现通话。最早provider缺口仍是完整client/personality
 初始化及网络注册语义/lifecycle，随后才是UUID↔MD ID、状态/END和双向媒体。
 
+#### typed事件 → FSM → 权威CallState（静态闭合，未hook）
+
+三层model command wrapper真实地址点为 `101532fc0→1015fb090→101532ab0`，
+最后进入 `CallCommandDriverDelegate10158aa28`。factory `10019b654` 建wrapper并传入
+`100dc8b1c`，ctor将真实owner move到driver+88/+90；UUID lookup经
+`+e0→+110→+1a0→100693d28` weak-lock CallController+78 vector、CFEqual后owned-copy
+CallInfo。不是裸指针或把native整数ID当UUID。
+
+ACTIVE实际 `+40→10068f0ec→1010488f0→Call+338→10104eccc→10104f4b8`，
+END经真实 `+50→10068f610→1010494a8→Call+338→10105837c→101058b38`。
+`4Call` ctor `10104730c` 分配0x68 FSM、保存强shared_ptr status delegate至FSM+8/+10，
+Call+338拥有FSM。事件名来自原日志 `10104f530 CallActive` / `101058bb0 CallEnded`；
+transition table由原ctor `10105e0c4` / `10105e568` 填BSS，磁盘零指针不等于无handler。
+
+这里有两套不同状态，不能互抄：FSM+18的表 `10162f248` 为
+Idle0/Ringing1/WaitingToDial2/InitializingMedia3/Dialing4/DialingCallEnded5/
+Alerting6/Active7/Waiting8/UserAnswered9/Held10/WaitingToDisconnect11/Disconnected12。
+CallActive从合法Ringing/Dialing/Alerting/UserAnswered/Held分支写FSM state7；CallEnded保留
+Disconnected12和DialingCallEnded5的不同分支，不直接删Call。此前 `100696b2c` 写
+Call+a4的是SRVCC状态，不是ACTIVE CallState。
+
+最终status delegate `10158af20+28/1006984b8→10158b148+28/100699dd0→101018528`
+先weak-lock nested delegate+20/+28 owner，按真实UUID `101005398` 取Call shared_ptr，
+再于 `101018718` 写 **Call+a0**。ACTIVE传入0，不是FSM的7。匹配
+`libCommCenterBase callStateToString1f03908e0` 原表 `20dad4e78` 是
+Active0/Held1/WaitingToDial2/InitializingMedia3/Dialing4/Ringing5/Disconnected6/
+Alerting7/Waiting8/Idle9。END走status+50 `100698710→10069a00c→101018e18`，
+`101018f54` 直接写Call+a0=6，后于 `101019424` 再调用原state维护入口(...,6)。
+正常state mutation保留 `101018ad8` 等维护，再经 `100ff81c4→owner+170 notify virtual+10`
+传owned CallInfo；Call+2d4非零可在权威写入后提前分支，不能假设每次通知必到。
+notification sender具体type/后续UI publish仍未闭合。
+
+本项闭合的是已有typed事件到真实模型mutation，不提供MTK producer、UUID↔native
+epoch映射或运行dial admission，也不绕过Bambi owner/MediaSession门直接调用ACTIVE。
+它不解决CallList46 producer/offset6，不能将FSM/CallState/ECPI或wire CallEventStatus
+编号混用。原件/枚举/窄asm与复读脚本在 `x9/out/calllist-handler-closure-analysis/typed-model/`；
+无生产hook、设备操作、测试或新镜像。复查可在该typed-model目录运行
+`python3 root-query.py f:0x100693d28 f:0x101018528 f:0x101018e18`，仅读原件；
+旧文件 underlying-active-end-lookup.asm / underlying-real-uuid-lookup.asm 曾误将
+100694eac/100696fcc称UUID consumer，不再采用。旧10068f434不是最终END consumer，
+旧END CTState8已撤销；准确值为Call+a0=6，而非FSM12/5或SRVCC+a4。
+
+#### typed初始化 / 注册 / 注销的原件契约
+
+`createIMSClient_sync1f2e6803c→factory+38/100315998→CreateNewClient1b7c43a00`
+创建真实Client并保存controller+d8；StackDelegate绑定controller+40 alias、真实shared_ptr及
+controller+18 queue。正常`initializeImsClient_sync1f2e6e6d0`从model+268取得真实704B
+StackConfig、model+38取得personality string，调用Client+f0/`initialize1b7c3d768`；
+其四个MainQueue block进入两个真实`initializeFromSIM` overload，保留真实CFDictionary/
+clientId/personality。controller+f8=1及initialized回调置2只是初始化阶段；后续真实
+NetworkServices来自model→Client+130/`updateNetworkServices1b7c3f368`，不能绕过配置。
+
+网络枚举单独来自`handleRegistrationStateChanged1b7abc4a4→wrapper1b7c83344→queue/
+weaklock→controller1f2e6b420→model+60`：0 Deregistered、1 Registering、2 Registered、
+3 Deregistering。真实64B RegistrationActiveInfo由`1b7abc5a4`填service mask、注册URI、
+stackId、expiry差值；URI尚未最终实名为IMPU，expiry截u32未见clamp，不用号码/固定秒代替。
+consumer `1f2e6b660`按真实DataMode/LastAttempted策略归一服务mask；optimized cache stub
+`1f2fb1828→1f038d49c`为`(ipMask&1)|((ipMask>>1)&2)`，不是registered bool→全能力。
+随后`saveImsRegistrationState1f2e6da78→updateCurrentImsState1f2e78df4`在model锁内保存
+DataMode/registered/u64 mask，再经真实service+78/`1007ab37c`写root per-personality节点
+`+38 bool/+40 mask/+48 flag/+50 DataMode`，observer+30通知真实map。静态model mutation
+已闭合，但observer后续CT/UI发布与实际MD-backed输入未闭合，不称设备已注册。
+
+真实20B RegistrationInfo含i32 retrySeconds、SIPcode、termination callerBool、willRetry、
+reserved0与RegFailureReason；error producer仅匹配ImsResult domain取SIPcode，否则0，
+termination默认200来自原件常量。retrySeconds对-1/0保留，其他max(absolute-time(NULL),0)。
+失败consumer `1f2e6bbdc`先提交false/mask0再处理真实retry/PDN/policy，不能只删map。
+原enum6 DisabledCountry、7 Authentication Failed即使SD日志显示Unknown也不能抹除。
+
+正常deinitialize `1f2e6f40c→Client+100/1b7c3e578→MainQueue→IPManager1b7cbe71c`
+进入真实Bambi/SipStack注销；只有uninitialized回调`1f2e6b264`才将阶段置0。
+factory shared_ptr deleter`100315b00`仅ret，release不等于delete；cleanup里的Client+c0
+是removeDefaultCallDelegate，不是全销毁。显式Client析构→removeClient→record/maps销毁
+有据，但普通controller的removeStackDelegate/析构完整路线未闭合。`callOnMainQueue`
+实际导入dispatch_async，原removeClient block捕获clientId裸指针；不模仿此未闭合时序，
+不声称原件UAF。最窄替换边界是per-personality真实typed Client+StackDelegate owner/queue，
+仍需真实MD服务mask、URI、expiry/retry、PDN/DataMode、failure/注销确认及call/media生命周期。
+精确原件与复读脚本保存在`x9/out/ims-call-provider-contract/`，本项没有production hook。
+
 ### 通话专用voice音频契约（仅原件静态，不冒充媒体speaker）
 
 同机HAL `ScpSpeechOn2474a0`先registerAdspFeature14，`247544`以scene0、UL/DL各65536B
@@ -421,6 +535,17 @@ CTAudioSampleRateSwitchDidComplete；CT callback328944的type0..2经table524698�
 `3196333F-5A48-373B-B427-0146DC1177FB`，原件build metadata为20H392/16.7.16。
 不能仅广告设备UID或复用Speaker/Hawking媒体设备就称voice接通。
 全部窄切片/私有原件在主checkout`x9/out/call-audio-analysis/`；没有生产改动/编译/设备验收。
+
+新增stream入口静态证据：Baseband Voice factory调用base ctor `20c078`，`20c110`把真实
+输入AudioObjectID保存于device+b8；slot88/`327b18`分别调用`20a4c4(dir0/dir1)`。
+该函数用实际ID查询`stm#`的`inpt/outp` scope，经AudioObjectGetPropertyDataSize/
+GetPropertyData取得真实stream ID，再由virtual+188/`20a29c→231740`构造owned wrapper。
+不是写UID就凭空生成双向stream。voice+240另是`dispatch_once→216d50`创建的CT singleton
+shared owner（`217124`调用CTServerConnectionCreateOnTargetQueue），**不是MD DMA/media指针**。
+模块内CreateIOProcID helper `322d3c`检查错误及非NULL IOProc，但它从voice入口的完整caller/
+真实硬件provider仍未闭合，不把模块级API引用当voice streaming成功。窄切片/复读
+`x9/out/voice-provider-analysis/{voice-provider-boundary.json,macho_functions.py}`；原件静态，
+没有audio生产改动、构建或设备动作。
 
 ### SMS集成：未发布MT的原子host queue准入
 

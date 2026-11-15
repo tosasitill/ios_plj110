@@ -47,6 +47,7 @@ struct x9q_packet {
 };
 struct x9q_client {uint64_t generation,next;uint32_t uim_mask;uint8_t sim_slot;bool serving,system,signal,dsd_system;};
 static x9q_client x9q_clients[CBQ_MAX_CLIENTS];
+#include "X9NASRegistration.inc"
 static void x9ds_apps(bool ready);
 static void x9ds_cards(const uint8_t *first,const uint8_t *second,bool ready);
 static bool x9ds_data_ready(unsigned slot);
@@ -153,7 +154,13 @@ static void x9q_error(x9q_job &j,uint16_t err){
  x9q_cancel(j);bzero(&j,sizeof(j));x9q_active=-1;
 }
 static void x9q_finish(x9q_job &j,x9q_packet &p,uint16_t ind=0){
- if(!j.probe&&(!j.background||!x9q_u16(p.p+10)))p.send(j.local,j.port,j.background,ind);
+ bool subscribed=true;
+ if(j.background&&!j.probe&&j.port==X9BB_PORT_BASE+3&&(j.id==0x24||j.id==0x4d||j.id==0x4f)){
+  subscribed=x9r_indication_allowed(j.local,j.sim_slot,j.generation,j.id);
+  // A successful NAS03 disable retires publication, not the original MD
+  // token. The real sample is drained; foreground replies/fanout are unchanged.
+ }
+ if(subscribed&&!j.probe&&(!j.background||!x9q_u16(p.p+10)))p.send(j.local,j.port,j.background,ind);
  if(j.probe)printf("X9 DUALSIM: read-only probe service %u msg 0x%04x completed; SIM%u, no synthetic identities\n",j.port-X9BB_PORT_BASE,j.id,j.sim_slot+1);
  if(!j.background)printf("X9 QMI AT: response service 0x%x msg 0x%04x txn %u result %u error %u (real AT)\n",
    j.port-X9BB_PORT_BASE,j.id,x9q_u16(j.req+1),x9q_u16(p.p+10),x9q_u16(p.p+12));
@@ -754,9 +761,10 @@ static void x9q_reject(uint32_t local,uint32_t port,const uint8_t *req,unsigned 
  x9bb_reply_error(local,port,req,len,err);
 }
 static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *req,unsigned len){
- // Only an existing WMS37 transaction owner may consume a repeat before
- // generic TLV validation. All new ACKs and every other request still validate.
+ // Only existing scoped WMS37/NAS03 owners may consume repeats before generic
+ // TLV validation. New transactions and every other route still validate.
  if(x9m_ack_repeated(local,node,port,req,len))return;
+ if(x9r_repeated(local,node,port,req,len))return;
  if(len<7)return;
  unsigned service=port-X9BB_PORT_BASE,slot=local-CBQ_PORT_BASE,id=x9q_u16(req+3);
  if(node!=X9BB_NODE||local<CBQ_PORT_BASE||slot>=CBQ_MAX_CLIENTS||len>X9Q_REQ||!x9q_valid(req,len)){
@@ -777,7 +785,7 @@ static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *r
   unsigned route=nas?value:value-1;
   if(!sub.p||sub.n!=(nas?1u:4u)||len!=(nas?11u:14u)||route>=x9_md_sim_count()){
    x9q_reject(local,port,req,len,X9Q_ARG);return;}
-  if(c.sim_slot!=route&&x9n_binding_busy(slot)){x9q_reject(local,port,req,len,X9Q_BUSY);return;}
+  if(c.sim_slot!=route&&(x9n_binding_busy(slot)||(nas&&x9r_binding_busy(slot)))){x9q_reject(local,port,req,len,X9Q_BUSY);return;}
   /* 239-242: CommCenter's SIM2 NAS signal client sent Bind right after three
    * GetSigInfo requests; the old "pending jobs -> BUSY" rule rejected it every
    * boot, so both signal clients stayed on SIM1. Jobs already snapshot
@@ -785,6 +793,7 @@ static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *r
    * SIM they were asked on; only later requests follow the new binding. */
   unsigned pending=0;
   if(c.sim_slot!=route)for(const x9q_job &j:x9q_jobs)if(j.used&&!j.probe&&j.local==local)pending++;
+  if(nas&&c.sim_slot!=route)x9r_rebound(slot);
   c.sim_slot=(uint8_t)route;c.next=0;x9q_packet p(req);p.send(local,port);
   printf("X9 DUALSIM: service %u client 0x%x bound to SIM%u (queries route, not DDS; %u queued for previous SIM)\n",service,local,c.sim_slot+1,pending);return;
  }
@@ -802,34 +811,25 @@ static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *r
   * 0x13/0x18/0x19 are served from real AT snapshots; the rest are accepted, and logged
   * once, but no indication is ever sent for them. */
  if(service==3&&id==3){
-  bool serving=c.serving,system=c.system,signal=c.signal;char unserved[96];unsigned w=0;unserved[0]=0;
-  for(unsigned i=7;i<len;i+=3+x9q_u16(req+i+1)){
-   unsigned k=x9q_u16(req+i+1);uint8_t tag=req[i];
-   if(tag==0x13||tag==0x18||tag==0x19){
-    if(k!=1||req[i+3]>1){x9q_reject(local,port,req,len,X9Q_ARG);return;}
-    if(tag==0x13)serving=req[i+3]!=0;else if(tag==0x18)system=req[i+3]!=0;else signal=req[i+3]!=0;
-   }else if(w+8<sizeof(unserved))w+=(unsigned)snprintf(unserved+w,sizeof(unserved)-w," %02x",tag);
-  }
-  static unsigned logged;
-  if(w&&logged<8){logged++;printf("X9 QMI AT: NAS 0x0003 accepted; serving %d system %d signal %d; never indicated:%s\n",serving,system,signal,unserved);}
   // Mav20 registerEvents_sync (20H392 1f1ab620c) uses SigInfoEvents
   // tag19/u8, separately from ConfigSigInfo2 thresholds (6c). Subscribe at
-  // bootstrap, including SA before any LTE threshold request. Unsubscribe0
-  // stops this client's background samples; foreground delivery checks signal.
-  if(signal!=c.signal)printf("X9 DUALSIM: NAS client 0x%x SIM%u signal events %u (tag19, real ECSQ)\n",local,c.sim_slot+1,signal);
-  c.serving=serving;c.system=system;c.signal=signal;c.next=0;x9q_packet p(req);p.send(local,port);return;
+  // bootstrap only after the original Result03 is actually queued for host.
+  const uint16_t error=x9r_begin(slot,req,len);
+  if(error)x9q_reject(local,port,req,len,error);return;
  }
  /* WDS Set Event Report (0x01) / Indication Register (0x03) and DMS Set Event
   * Report (0x01): acknowledged, no indication is generated (no event source). */
  /* WDS 00c8 (including empty APN) is handled by the typed MIPC owner above. */
  /* UIM Refresh Register (0x2a): acknowledged; this bridge never sends refresh events. */
- /* NAS 0x6c Config Signal Info v2 (167.txt, right after LTE SysInfo): thresholds
-  * are not applied; the client gets a 0x51 Sig Info indication from real
-  * AT+ECSQ every subscription cycle instead. */
- if(service==3&&id==0x6c){c.signal=true;c.next=0;}
+ /* NAS 0x6c Config Signal Info v2 (20H392 setThresholds_sync 1f1ab589c):
+  * threshold/delta and LQI configuration, NOT NAS03 SigInfoEvents registration.
+  * Configuration is acknowledged but not applied. Never override tag19's
+  * committed subscription or restart its AT+ECSQ sampling cycle here. */
  if((service==1&&(id==1||id==3))||(service==2&&id==1)||(service==0x0b&&id==0x2a)||(service==3&&id==0x6c)){
   static unsigned logged;
-  if(logged<8){logged++;printf("X9 QMI AT: service 0x%x msg 0x%04x registration acknowledged, %s\n",service,id,service==3&&id==0x6c?"0x51 from AT+ECSQ every 10 s":"no indications generated");}
+  if(logged<8){logged++;printf("X9 QMI AT: service 0x%x msg 0x%04x %s acknowledged, %s\n",service,id,
+   service==3&&id==0x6c?"threshold/LQI configuration":"registration",
+   service==3&&id==0x6c?"configuration not applied; NAS03 subscription unchanged":"no indications generated");}
   x9q_packet p(req);p.send(local,port);return;
  }
  /* WDA/DPM must not open a fabricated IPA endpoint. Unsupported WDS operations
@@ -851,6 +851,7 @@ static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *r
 }
 static void x9q_del(uint32_t local){
  unsigned slot=local-CBQ_PORT_BASE;if(local<CBQ_PORT_BASE||slot>=CBQ_MAX_CLIENTS)return;
+ x9r_del(slot);
  x9g_del(slot);
  x9n_del(slot);
  x9w_del(slot);
@@ -864,6 +865,7 @@ static void x9q_del(uint32_t local){
  }
 }
 static void x9q_poll(){
+ x9r_poll();
  x9g_poll();
  x9w_poll();
  x9n_poll();
