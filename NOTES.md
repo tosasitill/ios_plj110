@@ -392,6 +392,16 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
   - 短信：SMS_CFG 0601 → SMS_SEND 0605/0606；接收 SMS_EXT_INFO_IND 4609 + SMS_NEW_SMS_CMD 8601 → RSP 8602（与 X9Messages.inc 一致）。未抓到拨出（CALL_DIAL）。
 - **iOS 现状**：WMS→MIPC 短信已有（243 SIM2 发送拿到 modem CNF）。QMI VOICE(0x09) 未在 X9Baseband 服务表中，通话空白；声明后每个 VOICE 请求都必须应答，否则 CommCenter ATCS_TIMEOUT 重置基带。
 
+#### 2026-11-15 通话 / 短信进度复核（只读检查，无新构建 / 上机）
+
+- **核对基线**：main `d62cd4f`；`X9Messages.inc` 最后代码提交为 `874695c`（2026-11-11）。检查源码、历史交接及 Mac 现存 313–319 日志；不操作设备、不发短信、不改 NV / 分区。319 的具体 boot.img / 源码提交未对齐，以下是该捕获日志的观察，不是本次 main 镜像验收。
+- **短信已实现**：未修改的 iOS QMISMS/WMS → MTK MIPC：按 SIM 独立 modem-ready / host-ready、WMS 订阅与路由、原始 PDU 发送、GSM 来信 / 状态报告投递、原 command txid 的 ACK/NACK；另有 WMS31/22 的 SIM/ME 存储列表 / 读取，以及 WMS23 仅 MT 标记已读并读回验证。实现位于 `x9/kernel/src/iokit/Kernel/arm/X9Messages.inc`、`x9/kernel/src/bsd/dev/x9_mipc_messages.inc`。存储列表仍受 4096 B 单帧限制（最多 15 条），无分页。
+- **最新短信运行观察**：`/Users/tosasitill/319.txt:7689,9972`，SIM1 / SIM2 分别在 30.831 / 33.425 s 获得真实 host-ready CNF；`:7846,7849` 两 SIM 的 MT/MWI 订阅启用。`:67556` 64.205 s SIM2 提交 token703、QMI txn27；`:69306` 68.420 s modem 接受发送。314 / 316 / 318 也有 SIM2 发送 CNF。**CNF 不是送达回执，未据此证明对端收到**；这些日志未找到来信、host ACK 或存储读回成功 marker，不能把“没有本轮 marker”解释为完全没有接收能力。
+- **历史接收证据与验收缺口**：`git show 965e111 -- NOTES.md` 记录 220 在 76.559 s 收到真实 GSM 来信并准入 host 事件队列，token1 等 host ACK。尚缺同一样本的 Messages 显示 / 重开持久化、对应 token 的 ACK 物理 TX result0、对端实际收到 MO 的完整证据。WMS24 删除、内存满恢复、IMS-only 发送 / SIP、non-CS type4/8105 仍未实现；不能称完整短信可用或已验收。
+- **通话仍未接入**：`X9Baseband.cpp` 的实际服务表没有 QMI VOICE `0x09`；319 在 15.776 s 也仅宣布 9 个服务（`:3807`）。目前只有 §5.5 的 Android 来电 / 接听 / 挂断信令参考，未捕获 CALL_DIAL；没有 iOS 拨号、来电状态机、接听 / 挂断到 MIPC 的实现及端到端运行证据。IMSA 只提供已核实的注册快照，不等于 IMS 语音服务、VoLTE / VoNR 已实现。
+- **音频不是通话完成证明**：main 已有 audio46 的扬声器 / 麦克风共享 AFE、audio47 的采样时间戳修复，历史 304 / 305 已观察到同时启动；但通话专用 MD 语音上 / 下行路由未接入。319 开机 mic 测试仍 min=-6 max=4 rms=2（`:3612`），不能据此称真实录音或双向通话音频正常。也不能再引用旧音频评估的“物理 speaker backend 未实现”作为当前结论。
+- **下一步**：先用准确匹配的当前镜像，逐 SIM 闭合一条 MO（对端确认）和一条 MT（Messages 显示 / 重开后仍在 / 相同 token 物理 ACK 成功）；再测存储导入、长短信和状态报告。通话另开功能分支，先补 Android CALL_DIAL 捕获，明确 iOS VOICE 初始化请求及每请求响应，再实现呼叫状态 / 接听 / 挂断与 MD 双向音频，分别验收信令和声音。本次无 CI run、无新 boot.img。
+
 ### 5.7 2026-11-13 音频：ADSP 自动 dsp-boot 镜像（分支 feat/audio-dsp-boot，worktree `.worktrees/audio-dsp-boot`）
 
 - feat/audio-bounded-fdt 已 ff 合入 main（`b25f4ca`），worktree/分支已删；`android-callsms-20261113`、`shimtest`、fdt2/3/4 的 usb-log 移到本 worktree 的 `x9/out/`。
