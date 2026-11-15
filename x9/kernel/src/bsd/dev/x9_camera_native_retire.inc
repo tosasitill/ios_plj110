@@ -87,6 +87,81 @@ int x9_camera_native_smmu_retire(uint64_t epoch,struct x9_camera_smmu *m)
     lck_mtx_lock(&camera_control_lock);int e=cam_native_retire_locked(epoch,m);
     lck_mtx_unlock(&camera_control_lock);return e;
 }
+/* Minimal never-hardware-exposed failure close. This is NOT streamed
+ * OFF/DONE/retirement: export may have failed in private cache work, but
+ * not a single normal-controller setup store or RAW/credit arm was issued.
+ * Keep every allocation and original error; prove the real prior normal
+ * bank and sensor OFF, rather than inventing a DMA completion receipt.
+ * Partial normal startup, queue timeout, ARMED/RETAINED RAW or any credit
+ * can NEVER enter here. Caller holds control only. */
+static int cam_native_unstarted_retire_locked(uint64_t epoch,struct x9_camera_smmu *m)
+{
+    int e=0;
+    /* Native source prepare creates an exact-epoch dormant IRQ worker
+     * BEFORE SMMU export. Retire that real no-issued preparation through
+     * its original inactive close; never pretend prepared was already false.
+     * A queue/RAW/credit/source lifetime cannot take this branch. */
+    boolean_t prior_old=cam_irq_spin_take();
+    bool dormant=cam_irq.prepared && cam_irq.epoch==epoch && !cam_irq.owns &&
+        !cam_irq.accepting && !cam_irq.busy && !cam_irq.count && !cam_irq.close_attempted &&
+        !cam_irq_fbc.bound && !cam_irq_fbc.source_issued && !cam_irq.error;
+    cam_irq_spin_drop(prior_old);
+    if(dormant && !session.capture && !session.stream && !cam_sv.request_held &&
+       !cam_sv.credit_issued && m && m==cam_smmu_namespace && !m->native_setup_issued) {
+        lck_mtx_lock(&camera_camsv_lock);
+        e=!cam_irq.slot || cam_irq.slot->state!=X9_CAMSV_EMPTY?ESTALE:0;
+        lck_mtx_unlock(&camera_camsv_lock);
+        if(!e)e=cam_irq_close_locked(epoch);
+        if(e)return e;
+    }
+    lck_mtx_lock(&camera_irq_lock);
+    if(!m || m!=cam_smmu_namespace || m->magic!=CAM_SMMU_MAGIC || !m->native ||
+       !m->exported || m->native_setup_issued || m->native_started || m->pending ||
+       m->native_retire_attempted || !epoch || epoch!=cam_sensor_live.epoch ||
+       !cam_mm.active || cam_mm.receive.power_token!=m->native_power ||
+       cam_sensor_live.close_attempted || cam_rx_live.close_attempted ||
+       cam_sv.request_held || cam_sv.credit_issued || cam_sv.receive_issued ||
+       cam_source.captured || cam_sv_gate.pending || !m->map ||
+       m->map->raw_state!=CAM_RAW_PRIVATE)e=ESTALE;
+    boolean_t old=cam_irq_spin_take();
+    if(!e && (cam_irq.prepared || cam_irq.owns || cam_irq.accepting || cam_irq.busy ||
+       cam_irq.count || cam_irq_fbc.bound || cam_irq_fbc.source_issued))e=ESTALE;
+    cam_irq_spin_drop(old);
+    if(!e)e=x9_mm_power_validate(m->native_power,X9_MM_POWER_CAMERA);
+    if(!e) {
+        struct cam_sensor_ap ap={&cam_journal.sensor,
+            cam_sensor_live.probe.sensor==X9_CAMERA_BACK?0x1a:0x10};
+        uint8_t value;
+        const uint16_t regs[]={0x0100,0x0104,0x0005};
+        for(unsigned i=0;i<3 && !e;i++) {
+            e=cam_sensor_ap_read(&ap,regs[i],&value);
+            if(!e && value!=(i==2?0xff:0))e=ESTALE;
+        }
+    }
+    if(!e) {
+        struct cam_native_snapshot prior;
+        memcpy(prior.word,m->native_prior_word,sizeof(prior.word));
+        memcpy(prior.base,m->native_prior_base,sizeof(prior.base));
+        lck_mtx_lock(&camera_smmu_lock);
+        e=cam_native_match(m,&prior);
+        if(!e){delay(1);e=cam_native_match(m,&prior);}
+        if(!e) {
+            m->native_retire_attempted=true;m->native_retire_epoch=epoch;
+            m->native_unstarted_retired=true;m->native_restored=true;
+        }
+        lck_mtx_unlock(&camera_smmu_lock);
+    }
+    printf("X9 CAMERA NATIVE UNSTARTED: epoch=%llu no_setup=%u no_arm=%u retired=%u "
+        "errno=%d (never hardware-exposed; backing/original error retained, no fake DONE)\n",
+        epoch,m?!m->native_setup_issued:0,!cam_sv.request_held,
+        m?m->native_unstarted_retired:0,e);
+    lck_mtx_unlock(&camera_irq_lock);return e;
+}
+int x9_camera_native_smmu_unstarted_retire(uint64_t epoch,struct x9_camera_smmu *m)
+{
+    lck_mtx_lock(&camera_control_lock);int e=cam_native_unstarted_retire_locked(epoch,m);
+    lck_mtx_unlock(&camera_control_lock);return e;
+}
 /* Old-request teardown scope ONLY, not permission for DEVICE/cache/credit
  * arm or a live DMA check. Exported storage remains pinned after restore.
  * Recheck exact prior normal bank while the real MM token is still held;
@@ -95,10 +170,13 @@ int x9_camera_native_smmu_retire(uint64_t epoch,struct x9_camera_smmu *m)
 int x9_camera_native_smmu_retirement_check(uint64_t epoch,struct x9_camera_smmu *m)
 {
     lck_mtx_lock(&camera_smmu_lock);
-    int e=cam_smmu_identity(m);
+    /* A private export/cache error may stay terminal even when independent
+     * never-exposed cleanup is proved; do not erase it to permit cleanup. */
+    int e=!m || m!=cam_smmu_namespace || m->magic!=CAM_SMMU_MAGIC?EINVAL:0;
+    if(!e && !m->native_unstarted_retired)e=cam_smmu_identity(m);
     if(!e && (!m->native || !m->native_retire_attempted || !m->native_restored ||
        m->native_started || m->native_retire_epoch!=epoch || m->native_retire_error || m->pending))e=ESTALE;
-    if(!e)e=cam_smmu_storage(m);
+    if(!e && !m->native_unstarted_retired)e=cam_smmu_storage(m);
     if(!e) {
         struct cam_native_snapshot prior;
         memcpy(prior.word,m->native_prior_word,sizeof(prior.word));
