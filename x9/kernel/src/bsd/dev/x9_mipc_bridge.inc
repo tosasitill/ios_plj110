@@ -25,6 +25,7 @@ static unsigned x9mi_u16(const uint8_t *p){return p[0]|((unsigned)p[1]<<8);}
 static int x9mi_enabled(void){return x9_at_enabled()&&sweet_x9_arg("x9_mipc",1);}
 unsigned x9_md_sim_count(void){return sweet_x9_arg("x9_dual_sim",0)==1?2:1;}
 #include "x9_mipc_messages.inc"
+#include "x9_mipc_calls.inc"
 /* libmtk-ril RfxSender::atSendCommandFullNolockAck, 0x23dcf4..0x23dd58:
  * mipc_msg_init(3, 1<<slot), add_tlv(8100, strlen(command)+1), sync, get 8100.
  * Slot table 0x150d1c = {2,4,8}; Android slot 0 defaults to mask 1.
@@ -110,6 +111,10 @@ uint64_t x9_md_mipc_submit(const uint8_t *p,uint32_t n){
      strnlen((const char *)p+20,k)!=k-1||!x9mi_at_read((const char *)p+20))return 0;
  }
  else if(id==0x30b||id==0x601||id==0x605||id==0x607||id==0xa04){if(!x9mm_request(p,n,id))return 0;}
+ /* Staged, evidence-bounded call actions. No caller is enabled/published
+  * yet; codec mirrors archived Android ANSWER{} and HANGUP{MODE0,ID}.
+  * RSP8902 can ONLY use the original CMD owner, never this txid allocator. */
+ else if(id==0x905||id==0x907){if(!x9cw_request(p,n,id,x9_md_sim_count()))return 0;}
  else if(id==0x101){if(!x9mi_attach_request(p,n))return 0;}
  /* Read-only per-SIM provider-name query. MD 91345dbc/91345e9e:
   * 0429 -> 042a; exact PLMN ASCII + NUL, LAC0 (MD current area), OPTION1.
@@ -368,6 +373,7 @@ static void x9mi_rx(const uint8_t *p,unsigned n){
    if(i==X9_MI_SLOTS)printf("X9 MIPC: CNF id 0x%04x txn %u has no owner, dropped\n",id,tx);
   }else if(kind==1){
    x9mm_rx(x9_mi_stream,need,id,tx);
+   x9mc_rx(x9_mi_stream,need,id,tx);
    if(id==0x4409||id==0x4419){ // cell160 diagnostic: RRC connection / physical channel indications, if the MD sends them
     static unsigned shown;if(shown<80){shown++;const uint8_t *q=x9_mi_stream;unsigned m=need<40?need:40;char h[90];unsigned o=0;h[0]=0;
      for(unsigned j=16;j<m;j++)o+=(unsigned)snprintf(h+o,sizeof(h)-o,"%02x",q[j]);
@@ -379,6 +385,7 @@ static void x9mi_rx(const uint8_t *p,unsigned n){
     x9_mi_events[at].len=need;memcpy(x9_mi_events[at].frame,x9_mi_stream,need);
    }
   }else if(kind==2&&x9mm_id(id))x9mm_rx(x9_mi_stream,need,id,tx);
+  else if(kind==2&&x9mc_id(id))x9mc_rx(x9_mi_stream,need,id,tx);
   else printf("X9 MIPC: MD command id 0x%04x txn %u ignored (no AP handler)\n",id,tx);
   bzero(x9_mi_stream,sizeof(x9_mi_stream));x9_mi_bytes=0;
  }
@@ -388,9 +395,10 @@ static void x9mi_tick(void){
  if(!x9_md_at_online())return;
  static uint8_t frame[X9_MIPC_FRAME_MAX];unsigned len=0,id=0,tx=0;
  lck_mtx_lock(&x9_mi_lock);
- uint32_t reply_token=0;
+ uint32_t reply_token=0,call_token=0;
  if(x9_mi_online&&!x9_mi_poisoned)reply_token=x9mm_tx(frame,&len);
- if(x9_mi_online&&!x9_mi_poisoned&&!reply_token){
+ if(x9_mi_online&&!x9_mi_poisoned&&!reply_token)call_token=x9mc_tx(frame,&len);
+ if(x9_mi_online&&!x9_mi_poisoned&&!reply_token&&!call_token){
   // Slots are recycled independently of enqueue order. Scanning by slot
   // index let newer requests overtake older ones (210: txn36 before txn19).
   // Tokens never wrap in this session; preserve FIFO among unsent requests.
@@ -400,11 +408,15 @@ static void x9mi_tick(void){
   if(s){s->state=2;len=s->len;id=s->id;tx=s->txid;memcpy(frame,s->frame,len);}
  }
  lck_mtx_unlock(&x9_mi_lock);if(!len)return;
- if(reply_token){id=x9mi_u16(frame+10);tx=x9mi_u16(frame+12);}
+ if(reply_token||call_token){id=x9mi_u16(frame+10);tx=x9mi_u16(frame+12);}
  int rc=x9md_tx(5,217,0,16+len,0,frame,len);bzero(frame,sizeof(frame));
  if(reply_token){
   printf("X9 SMS: ACK token %u MD msg 0x%04x original txn %u transport %d\n",reply_token,id,tx,rc);
   x9mm_tx_done(reply_token,rc);if(rc<0)x9mi_online(0);return;
+ }
+ if(call_token){
+  printf("X9 CALL: RSP token %u MD msg 0x%04x original txn %u transport %d\n",call_token,id,tx,rc);
+  x9mc_tx_done(call_token,rc);if(rc<0)x9mi_online(0);return;
  }
  printf("X9 MIPC: TX msg 0x%04x txn %u bytes %u transport %d\n",id,tx,len,rc);
  if(rc<0)x9mi_online(0); /* possible partial side effect: retain sent owner */

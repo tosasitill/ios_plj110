@@ -38,6 +38,17 @@ int x9_md_mipc_online(void);
 int x9_md_mipc_message_event(uint8_t *frame, uint32_t capacity, uint32_t *length, uint32_t *token);
 int x9_md_mipc_message_reply(uint32_t token, unsigned success, uint8_t cause);
 int x9_md_mipc_message_reply_take(uint32_t token, int *result);
+/* Staged call transport, separate from SMS/IMS and WDS. No automatic CMD
+ * registration/approval. event returns raw MD masks (NOT AP SIM slots).
+ * CMD8901 token owns its original id/txid/mask through physical RSP8902 TX.
+ * reply requires an explicit, externally verified approval/cause policy;
+ * success is permission to continue incoming handling, NOT ANSWER0907.
+ * event/reply/take return conventions match messaging above. All command
+ * identity tombstones remain until boot, even after success. No retries;
+ * only eight retained commands until Android retirement rules are proven. */
+int x9_md_mipc_call_event(uint8_t *frame, uint32_t capacity, uint32_t *length, uint32_t *token);
+int x9_md_mipc_call_reply(uint32_t token, unsigned approve, unsigned include_cause, uint32_t cause);
+int x9_md_mipc_call_reply_take(uint32_t token, int *result);
 /* x9_dual_sim=1: two fixed physical slots, indexed 0/1. Read-only AT via
  * MIPC 0003/0004 (8100 string); NEVER falls back to ttyC0 for SIM2.
  * Same nonreused wire token space as MIPC. Cancelled sent queries drain CNF. */
