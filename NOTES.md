@@ -402,15 +402,16 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 - **音频不是通话完成证明**：main 已有 audio46 的扬声器 / 麦克风共享 AFE、audio47 的采样时间戳修复，历史 304 / 305 已观察到同时启动；但通话专用 MD 语音上 / 下行路由未接入。319 开机 mic 测试仍 min=-6 max=4 rms=2（`:3612`），不能据此称真实录音或双向通话音频正常。也不能再引用旧音频评估的“物理 speaker backend 未实现”作为当前结论。
 - **下一步**：先用准确匹配的当前镜像，逐 SIM 闭合一条 MO（对端确认）和一条 MT（Messages 显示 / 重开后仍在 / 相同 token 物理 ACK 成功）；再测存储导入、长短信和状态报告。通话另开功能分支，先补 Android CALL_DIAL 捕获，明确 iOS VOICE 初始化请求及每请求响应，再实现呼叫状态 / 接听 / 挂断与 MD 双向音频，分别验收信令和声音。本次无 CI run、无新 boot.img。
 
-#### 2026-11-15 通话 iOS 桥（进行中，feat/call-ios-bridge）
+#### 2026-11-15 通话 iOS 桥（基础阶段已合入，完整通话未完成）
 
-- 用户要求：照 Android 原件实现，不猜测、不盲目出探针镜像。本轮在 `.worktrees/call-ios-bridge`（基线 `583f132`）开发，主 checkout 的 `feat/als-power-init-ios` 由另一窗口使用，不切换、不提交其改动。
+- 用户要求：照 Android 原件实现，不猜测、不盲目出探针镜像。本轮在 `.worktrees/call-ios-bridge`（起始基线 `583f132`）开发，主 checkout 当时的 `feat/als-power-init-ios` 由另一窗口使用，未切换/提交其改动。该窗口将 ALS 自己合回 main 后，本轮 rebase 到 `2fead1c` 再 ff 合入，未覆盖其后续交接。
 - **已核实**：modem_a.img 的 md1rom 是 nanoMIPS（VA `0x90000000` → 文件 `0x200`）；md1_dbginfo LZMA 解压后可恢复函数边界。`mipc_call_approve_incoming_rsp` `0x9131f2bc..0x9131f340` 明确读 0100/u8 approve、0101/u32 cause、0102/u32 call id、0103/u32 sequence。CMD producer `0x9132568a..0x913257b6` 与这些字段相符，号码为 bounded NUL string。MD producer 的原始 mask 是高半字节（如 0x10/0x20）；Android `libmipc.so` CMD dispatch `0x13630..0x136a4` 保持该 mask，不能直接套 SMS/WDS 的低位 SIM 判断。
 - **iOS 原件核实**：20H392 `libCommCenterMCommandDrivers.dylib` 的 `createAnswerIncomingCallReq` `0x1f1a05da8` 构造 VOICE22/tag1，`CallIdentifier` writer `0x1f19483e0` 为 u8；`createEndThisCallReq` `0x1f19a0048` 的单通话分支为 VOICE21/tag1。多通话和状态映射未闭合，不能把 MD defaults 当 Android 策略。
 - **材料缺口**：旧 `android-callsms-20261113` 原始抓取及 `libmtkmipc-ril.so` 已在整理时删除，现存 `libmipc.so` 不能代替 RIL。已请求用户补回 RIL/原始日志；没有普通 CALL_DIAL 发包证据、Android 呼叫状态转换和 MD 语音上下行路由依据。
 - **已写代码子集**：共用 `x9_call_wire.h` 进行严格 incoming CMD / RSP、iOS21/22 单通话动作编解码；`x9_mipc_calls.inc` 独立通话 inbox / 原 txid+mask response owner，接入原有唯一 MD tick writer，SMS ACK 仍优先。没有状态/mapping producer，也没有生产调用者提交通话 mutation；`X9Calls.inc` 对意外直达 VOICE 明确返回 unsupported。tombstone 无论 TX 成功/失败都保留至 boot（最多八条），不猜 call-end 的身份退休规则。详见 `docs/call-ios-bridge.md`。
 - **离线验证**：LLVM22 ASan+UBSan 的 18 项宿主测试通过（编译实际 transport/codec，C11/C++17，人工向量，不用设备/Apple/vendor 输入）；最初 Xcode15 ASan 在当前 macOS 启动时崩溃，换现代 sanitizer runtime 后通过，不是忽略断言。`Builder.compile_one()` 重编 `X9Baseband.cpp.o` 与 `sweet_x9_gpu_dependencies.o` 均成功；后者首轮缺 gitignored `x9_mdota.inc`，复制主仓库现有生成头后重编成功。没有 full build/link/boot pack。`md_call_evidence.py` 只读恢复本版本十个 CALL 函数边界成功。
-- 原件及派生反汇编仅在 `.local` / 本树 `x9/out/call-ios-bridge/`，不入 git。**VOICE 服务不发布，不新增默认开启参数，不自动 approve，不构建 boot.img、不上机、不发通话或短信、不写 NV/分区**。本阶段无 CI run（`gh run list --branch feat/call-ios-bridge` 返回空）。信令/声音均未设备验收，不能称通话接入完成。提交及合入结果停止前补写。
+- **提交 / 保留产物**：代码 `e9f7b7c` 已 ff 合入 main 并 push origin；主 checkout 上再次从新 owner 状态运行 18 项测试通过。分析/编译产物已移动保留在**主 checkout** `x9/out/call-ios-bridge/`：`compile-one-final.log` 两对象均 True / FAILURES[]，`host-tests/unittest-main.log` 为 main 的 18 项通过记录，`md-call-evidence.json` 为本版符号来源信息；原 nanoMIPS decoder / MD 与 Apple 反汇编同目录。原件及派生数据不入 git。基础阶段树/分支合入后清理；补齐材料后从 main 新开功能分支，不复用旧探针路径。
+- **VOICE 服务不发布，不新增默认开启参数，不自动 approve，不构建 boot.img、不上机、不发通话或短信、不写 NV/分区**。本阶段无 CI run（`gh run list --branch feat/call-ios-bridge` 返回空；当前改动不命中 Actions push 路径）。信令/声音均未设备验收，不能称通话接入完成。
 
 ### 5.7 2026-11-13 音频：ADSP 自动 dsp-boot 镜像（分支 feat/audio-dsp-boot，worktree `.worktrees/audio-dsp-boot`）
 
