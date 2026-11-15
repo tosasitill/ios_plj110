@@ -3,7 +3,7 @@
 **已实现控制层、RAW10 帧接口、iOS 双流桥、冷启动 sensor-probe/standby 配置、共享接收电源与 MM 寄存器时钟事务、SENINF/CAMSV 接收计划及带供电前置的寄存器预检；采集后端仍缺失，不能拍摄。**
 没有假帧、测试图案、Android 代理或 Camera.app 成功状态伪造。默认关闭。
 
-**帧接口配套变更**：kernel-private platform/CAMSV 现为 version3；用户 RAW10 header 仍120B，但使用 `RWFRAME2` magic 与同帧 SOF 观察时间。旧 version1/2 provider 或 `RWFRAME1` 图像不能混用，不以 DONE 时间伪造缺失 SOF；ioctl/status/command 尺寸不变。此接口变更已编译，尚无实机采集结果。
+**接口版本**：kernel-private platform 现为 **version4**，mandatory `configure`/`exposure` callback 将真实 sensor-session 配置/曝光交给 provider；completed-frame 与 CAMSV completion 仍为 **version3**。用户 RAW10 header 仍120B，使用 `RWFRAME2` magic 与同帧 SOF 观察时间；ioctl/status/control 尺寸不变。旧 platform version1/2/3 provider 与 `RWFRAME1` 图像不能混用，不以 DONE 时间伪造缺失 SOF。native sensor adapter 尚无 engine 调用注册者，不是 capture READY 或实机预览证明。
 
 ## 实现边界
 
