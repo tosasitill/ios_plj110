@@ -194,6 +194,7 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 - **后续边界仍明确**：上述native START路径没有现实qualify/provider注册者，因此READY仍不能发布。control仍单output/一次START，不是持续session_ops。原厂FB共享transfer更新read与派生count，BS consumer更新read/count；NC解决cacheline覆盖但不证明producer排他，不能用两次相等snapshot直接消费/退役。下一步要补真实ring dequeuer、token/DPB/input/output lifetime和WAITISR/c006，以及cold NS/firmware/clock最高层；普通VT/CMPhoto/HEIF、grid/方向/alpha与线性NV12/P010仍未齐全。无新boot，目标active，不称完成。
 - **VSI里程碑已交付**：提交`316abfb`已push到`origin/feat/hevc-hw`。
 - **Ring观察窄修复**：fixed ABI/kind/slot-size下，immutable ring parser的`EINVAL`仅是count与(read/write) distance不一致。捕获的FW publisher分开写write-index/count，即使两份NC snapshot相等也可能停在中间；`vcontrol_recheck`现在将这一项视为`EAGAIN`，保留真实notification与pending，不修metadata、不消费、不称completion。ERANGE/满环EOVERFLOW仍失败关闭，offline parser契约不变。仅修改native源码再编译，`x9/out/hevc-ring-observation-final-20261115/compile-native.py` exit0/32 warnings，stdout/exit/result同目录；无其他构建、测试或设备动作。
+- **停止时恢复基线**：上述ring修复`41de9e6`已push；本次代码依次为`a219ead`、`316abfb`、`41de9e6`。仍在活动工作树，未merge main；没有运行中的编译/设备任务。下一具体工作是native ring消费与持续session/DPB/completion（不能以观察结果授予退役），并补现实cold NS/firmware/clock注册者。所有前面未完成项仍保留，目标active。
 
 ### 5.1 已在设备上观察到能用（详情见旧 NOTES）
 
