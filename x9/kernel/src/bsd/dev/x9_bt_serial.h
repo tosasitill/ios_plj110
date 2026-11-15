@@ -3,6 +3,11 @@
 #define X9_BT_SERIAL_H
 #include <stdint.h>
 #include <stdbool.h>
+/* Active btmtk_uart_unify.ko uses a 4-byte (non-H4) MTK SCO header and
+ * declares maxlen=255. Keep payload within that declared receive budget;
+ * this is NOT a measured firmware limit (the real controller reports244).
+ * Also excludes the Android uint8_t length+1/+2 wrap at254/255. */
+#define X9_BT_SCO_PAYLOAD_MAX 251u
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -15,6 +20,8 @@ void x9_bt_serial_result(int error, uint32_t hardware_baud);
 uint32_t x9_bt_serial_rx(const uint8_t *, uint32_t);
 /* Claim a COMPLETE native H4 frame, retaining it in the queue until the
  * board's physical drain. A close cannot reopen while a claim is on wire.
+ * The worker translates SCO to MTK wire framing, but finish counts ORIGINAL
+ * native bytes only, after the complete translated packet physically drains.
  * Finish publishes errors atomically with queue progress/waiter wakeup. */
 int x9_bt_serial_tx_claim(uint8_t *, uint32_t capacity, uint32_t *length,
                          uint32_t *generation);

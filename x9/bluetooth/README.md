@@ -141,6 +141,34 @@ python3 -I x9/bluetooth/build.py --kernel-objects --out x9/out/bluetooth-native/
 `x9/bluetooth/package.py --runtime <完整userland输出> --out x9/out/<新名>` 只生成离线 root payload，
 保留原始 jobs 与只改 Program 的候选，**不安装，不写设备，不等于原生运行验收**。
 
+正式完整初始化/启动整合候选（不是功能验收或 root 安装）：
+
+```sh
+python3 -I x9/bluetooth/candidate.py --name <全新简单名字> \
+  --config x9/out/bluetooth-native/xnu-lifecycle-20261115/local.json \
+  --boot-config x9/build/boot-device.json \
+  --boot-arg x9_bt_init=1 --boot-arg x9_bt_fc=1 \
+  --launchd-source x9/out/bluetooth-native/launchd20h392-input --jobs 8
+```
+
+同一次编排完成全 overlay kernel、用户态/jobs、离线 root payload、一次 boot.img；全部 exit0 后才发布
+`manifest.json` 的 `built_complete/candidate_ready=true`。`runtime_verified/stageable/root_installed` 仍为 false。
+失败保留日志、无完成 manifest、如已生成被拒绝镜像则改名 `.failed`，不能交付为完整候选。
+**boot.img 本身不安装 iOS 根盘中的桥或 jobs**；root 修改先确认、核对原件及 live root preflight，用户手动 boot 后才验原生功能。
+
+已确认的音频边界：20H392 type0 VSC support 表全0，`"shci"` source2 的 PCM 路由操作会经
+`BD_VSC_WRITE_PCM_PARAM` admission 返回 unsupported，不更新原路由状态；上层继续，不证明它阻断初始启动。
+Android 已有 FC72 voice-interface 初始化，不是标准 `WriteVoiceSetting`，其常量不证明 HCI/I2S 路由语义。
+不能把 type0 unsupported 当作音频成功，也不能直接发 BCM 私有命令或伪造 route state；SCO/WBS 等价桥仍待真实证据。
+
+当前活动 `btmtk_uart_unify.ko` 已证实：所有 SCO（不只 VTS）在 UART 上使用 MTK 头，
+`03 AA BB LL payload` ↔ `03 AA (LL+2) (LL+1) BB payload`。
+worker 仅在 UART 边界转换；native serial、pending 与背压队列始终标准 H4。
+RX 先核两长度关系与整帧再转换；TX 在额外 wire byte 已真实 drain 后才退原 native claim。
+payload 上限251按原模块声明 maxlen255/四字节wire头的安全预算设置，**不是实测固件拒收界限**；
+真实控制器已报告 SCO244。长度回绕或畸形帧 fail closed，硬件SW转义不再软件二次编码。
+这项修复是传输适配，不证明 HCI voice-route、WBS 配置或 HFP/SCO 音频验收成功。
+
 `python3 -I x9/tools/bluetooth_vendor.py --required` 是纯标准库的原件移植构建入口，生成gitignored
 `x9/kernel/generated/x9_bt_vendor.inc`。`build.py all`也接此生成器；显式`x9_bt_init=1`时要求完整原件，
 不能从零输入生成“成功的空vendor初始化”。私有生成物包含地址/校准，不入git、不打印参数。

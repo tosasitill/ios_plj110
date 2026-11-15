@@ -29,6 +29,7 @@ LIMITATIONS = [
     'sleep/resume is closed-transport-only; no active-link idle sleep, wake-enhance or system-suspend claim',
     'SSPM/profile/ownership, UART PIO/escape throughput and Android vendor completions remain hardware-unverified on XNU',
     '20H392 native injection, initialization, scan, pairing, BLE, A2DP, HFP and SCO require actual iOS validation',
+    'MTK SCO framing is implemented; native voice-route/WBS vendor equivalence still requires real MT6653 evidence',
     'boot image alone does not install the H4 bridge or the two Program-only launch job overrides',
     'keep bootloaders/recovery/modem/persist/partition backups intact; device boot is performed by the user',
 ]
@@ -61,7 +62,7 @@ def readiness(path, ready):
             raise ValueError('required component build metadata is missing')
         return
     value = json.loads(path.read_text())
-    value.update(candidate_ready=ready, runtime_verified=False, stageable=False)
+    value.update(candidate_ready=ready, runtime_verified=False, audio_verified=False, stageable=False)
     write_json(path, value)
 
 
@@ -223,7 +224,8 @@ def build(a):
                 'ios_build': '20H392',
                 'commit': commit, 'xnu_commit': XNU_COMMIT, 'xnu_abi': a.abi, 'xnu_patches': patches,
                 'built_complete': True, 'candidate_ready': True,
-                'runtime_verified': False, 'stageable': False, 'root_installed': False,
+                'runtime_verified': False, 'audio_verified': False,
+                'stageable': False, 'root_installed': False,
                 'root_requires_user_confirmation': True, 'device_operation_performed': False,
                 'power_interface': 'kern.x9_bt_power', 'power_lifecycle': 'closed-transport-only',
                 'paths': {'kernel': 'kernel/kernel.development.sweet', 'runtime': 'runtime',

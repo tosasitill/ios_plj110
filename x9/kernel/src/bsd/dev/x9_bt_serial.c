@@ -101,7 +101,12 @@ int x9_bt_serial_tx_claim(uint8_t *p,uint32_t capacity,uint32_t *length,uint32_t
         switch(header[0]) {
         case 1: if(n>=4) size=4u+header[3]; break;
         case 2: if(n>=5) size=5u+header[3]+((uint32_t)header[4]<<8); break;
-        case 3: if(n>=4) size=4u+header[3]; break;
+        case 3:
+            if(n>=4) {
+                if(header[3]>X9_BT_SCO_PAYLOAD_MAX) error=EMSGSIZE;
+                else size=4u+header[3];
+            }
+            break;
         case 5: if(n>=5) size=5u+header[3]+((uint32_t)(header[4]&0x3f)<<8); break;
         default: error=EPROTO; break; /* Events/raw wake bytes are board-owned. */
         }

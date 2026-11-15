@@ -101,6 +101,7 @@ def main():
         'stageable': False,
         'candidate_ready': False,
         'runtime_verified': False,
+        'audio_verified': False,
         'power_interface': 'kern.x9_bt_power',
         'power_lifecycle': 'closed-transport-only',
         'requires': ['current SSPM request/resources and observed 208MHz dev0/CMM profile readback; XNU handoff hardware-unverified',

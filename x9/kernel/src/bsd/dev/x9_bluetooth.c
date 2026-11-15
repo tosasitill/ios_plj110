@@ -1,6 +1,6 @@
 /* MT6993/MT6653 board worker. Complete session only; no ROM probe, no raw
  * user-client injection competing with native H4. SSPM post-download handoff
- * is still a hard gate in x9_bt_hardware.c, never a fabricated ready result. */
+ * requires current hardware evidence, never a fabricated ready result. */
 #if defined(ARM64_BOARD_CONFIG_SWEET)
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -241,17 +241,47 @@ static int host_uart(void *context,uint32_t baud,uint8_t flow)
     if(!error) error=x9_bt_hardware_config_uart(baud,flow);
     rx_unlock(old); return error;
 }
+/* This parser is UART-WIRE only. Active Android btmtk_uart_unify.ko:
+ * txcommon .text1825c/183e8..18438 and recv_sco3854/rxworkc864..c8ac.
+ * Every SCO packet (not just VTS) translates as follows:
+ * native03 AA BB LL payload <-> wire03 AA (LL+2) (LL+1) BB payload.
+ * LL is payload length; preserve all high handle/status bits in BB.
+ * Command/ACL/Event/ISO remain standard H4, and UART HW owns SW escaping. */
 static int frame_length(const uint8_t *p,uint32_t n)
 {
     if(!n) return 0;
     switch(p[0]) {
     case 1: return n<4?0:4+p[3];
     case 2: return n<5?0:5+p[3]+((unsigned)p[4]<<8);
-    case 3: return n<4?0:4+p[3];
+    case 3:
+        if(n<4) return 0;
+        if(p[2]<2 || p[3]<1 || (unsigned)p[2]!=(unsigned)p[3]+1) return -EPROTO;
+        if((unsigned)p[2]-2>X9_BT_SCO_PAYLOAD_MAX) return -EMSGSIZE;
+        return n<5?0:5+(unsigned)p[2]-2;
     case 4: return n<3?0:3+p[2];
     case 5: return n<5?0:5+p[3]+((unsigned)(p[4]&0x3f)<<8);
-    default: return -1;
+    default: return -EPROTO;
     }
+}
+static void sco_to_native(struct bt_frame *frame)
+{
+    /* Called only after strict wire header and whole-frame admission. */
+    if(frame->data[0]!=3) return;
+    uint8_t high=frame->data[4],length=frame->data[2]-2;
+    memmove(frame->data+4,frame->data+5,length);
+    frame->data[2]=high; frame->data[3]=length; frame->length--;
+}
+static int native_to_wire(uint32_t n,uint32_t *wire_length)
+{
+    if(!n || !wire_length || n>sizeof(native_tx)) return EINVAL;
+    *wire_length=n;
+    if(native_tx[0]!=3) return 0;
+    if(n<4 || n!=4u+native_tx[3]) return EPROTO;
+    if(native_tx[3]>X9_BT_SCO_PAYLOAD_MAX || n==sizeof(native_tx)) return EMSGSIZE;
+    uint8_t high=native_tx[2],length=native_tx[3];
+    memmove(native_tx+5,native_tx+4,length);
+    native_tx[2]=length+2; native_tx[3]=length+1; native_tx[4]=high;
+    *wire_length=n+1; return 0;
 }
 static int next_frame(struct bt_frame *out)
 {
@@ -269,9 +299,10 @@ static int next_frame(struct bt_frame *out)
         if(assembling.length>=sizeof(assembling.data)) return EMSGSIZE;
         assembling.data[assembling.length++]=b;
         int frame_bytes=frame_length(assembling.data,assembling.length);
-        if(frame_bytes<0) return EPROTO;
+        if(frame_bytes<0) return -frame_bytes;
         if(frame_bytes>(int)sizeof(assembling.data)) return EMSGSIZE;
         if(frame_bytes && frame_bytes==(int)assembling.length) {
+            sco_to_native(&assembling);
             *out=assembling; assembling.length=0;
             lck_mtx_lock(&bt_lock); bs.rx_frames++; lck_mtx_unlock(&bt_lock); return 0;
         }
@@ -567,9 +598,15 @@ static void worker(void *unused,wait_result_t result)
         error=x9_bt_serial_tx_claim(native_tx,sizeof(native_tx),&n,&generation);
         if(error) break;
         if(n) {
-            size_t sent=0; error=raw_write(NULL,native_tx,n,&sent);
+            uint32_t wire_length=0;
+            size_t sent=0; error=native_to_wire(n,&wire_length);
+            if(!error) error=raw_write(NULL,native_tx,wire_length,&sent);
+            if(!error && sent!=wire_length) error=EIO;
             if(!error) error=drain(NULL,1000);
-            x9_bt_serial_tx_finish((uint32_t)sent,generation,error);
+            /* A translated SCO wire frame is one byte longer than its
+             * native claim. Never retire the claim by wire byte count,
+             * or acknowledge a partial write / incomplete UART drain. */
+            x9_bt_serial_tx_finish(error?0:n,generation,error);
             if(error) break;
             lck_mtx_lock(&bt_lock); bs.tx_frames++; lck_mtx_unlock(&bt_lock);
         }
@@ -579,7 +616,9 @@ static void worker(void *unused,wait_result_t result)
     if(power.busy && !power.done) { power.done=true; wakeup(&power.done); }
     lck_mtx_unlock(&bt_lock);
     x9_bt_serial_result(error,session.baud); irq_stop();
-    (void)x9_bt_hardware_stop(); state(X9_BT_FAILED,error);
+    int stop_error=x9_bt_hardware_stop(); state(X9_BT_FAILED,error);
+    printf("X9 BT: worker failed errno=%d cleanup=%d; no clean hardware baseline claimed\n",
+        error,stop_error);
 }
 void x9_bluetooth_start(void)
 {
@@ -590,9 +629,8 @@ void x9_bluetooth_start(void)
     lck_mtx_lock(&bt_lock); bs.state=X9_BT_PASSIVE; bs.firmware_bytes=X9_BT_FW_BYTES;
     bs.firmware_sections=X9_BT_FW_SECTIONS; lck_mtx_unlock(&bt_lock);
     printf("X9 BT: complete-session backend; old x9_bt_probe/raw paths removed, firmware-ready=0\n");
-    /* Keep current boot-device passive until the SSPM post-download handoff
-     * and native model capability integration are both implemented. No new
-     * candidate/probe image or launch staging is produced by this change. */
+    /* Stock boot-device stays passive. Only an explicit complete candidate
+     * enables initialization; runtime ACK/profile gates remain mandatory. */
     if(sweet_x9_arg("x9_bt_init",0)!=1) return;
     thread_t thread;
     if(kernel_thread_start(worker,NULL,&thread)==KERN_SUCCESS) thread_deallocate(thread);
