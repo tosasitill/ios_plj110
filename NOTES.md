@@ -552,6 +552,16 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 - **文件与清理**：current-metadata与number-owner两个已合功能树的所有out已迁回主checkout同名`x9/out/`，树及本地分支已清理；编译原日志绝对路径未回写。原call-status树还被只读IMS接收端分析使用，旧SMS树保存review材料，暂不删。audio/GPU/BT等其它活动树未改。
 - **完整目标未完成**：VOICE09仍关闭，没有最终通话短信boot.img；CallList offset6/完整身份生命周期、真实IMS桥/MT动作/handover迁移、通话专用audio、短信显示/重开持久化/物理ACK/对端收到均不能拿静态代码和kernel编译冒充验收。本文档子项无新增CI run/build/设备结果。
 
+#### 2026-11-15 CALL END 原因空间闭合 / 内部metadata（仅编译，不发布END）
+
+- **独立工作树**：`.worktrees/call-end-reason` / `feat/call-end-reason`从`a6f63b5`起步；仅shared call header、人工向量及现有docs/NOTES。父会话统一集成，不自行push或合main；audio/GPU/BT/SMS及registration/MT动作/profile不改，没有手机操作、探针镜像或新query。
+- **原件语义证据**：MD IMS disconnect`910d30e6`与progress133分支`910d3366`均调用`imc_map_last_cause_to_ext_report911006ec`，CEER request`910f6678`也调用同mapper；CEER字符串table`929950d8[16]→9244a76c=CM_NORMAL_CALL_CLR`。真实完整0910在`x9/out/android-incoming-20261115-192820/retained-radio-logcat.txt:2977..2979`（19:27:31.399）含code16和同字符串；matching RIL`385848..5894`原样保留。0910无ID，只佐证原因空间，不倒填4901归属。
+- **133/10a生产链闭合**：mapper输出→ECPI info+57/presence,+58/u16cause（`910d7f58..80`）→VDM ctx+f/+212（`921ecd2a`）→fill`921ecb6c`原值返回→END route`921e9758/9604`→encoder`9143dc36`的133→presence控制的common`9143da74`→L5 parser`91392d86..92db6`→session+4/+6到IND+231/+232（`91392ae0..aea`）→serializer`9132587e..894`仅presence1 LHU零扩展写10a/u32。无cause路径presence0；不拿内部备用31发布。完整细节见现有`docs/call-ios-bridge.md`。
+- **Apple空间不可直接copy**：END14消费`1f1ac50a4`读u16，`1f19fd3c8`将native数值16解释为Unknown，`1f19fd830`对应CSI1；Apple145/0x91明确NORMAL_CALL_CLEARING，CSI table entry34→`1f19fd8e4`返回0。Apple0为OFFLINE，无cause不能默认0。
+- **已接源码**：progress完整校验成功才`valid=1`；不门控旧手工对象的reducer，仅END原因转换依赖完整解析provenance。内部`end_reason{known,apple}`在MO/MT原identity/route/direction/state/revision准入成功tail保存，仅`133/mode20/has_cause/cause16`known145，其它/无cause未知。foreign/rejected/late133/revision overflow不能写原因；unknownEND不能late16补known；NEW130/新MT CMD begin清旧epoch。无CallList/END发布，无VOICE09能力声明。
+- **编译事实**：host C++17 `clang++ -c` exit0，C11 header `-Wall -Wextra -Werror -fsyntax-only` exit0；真实recipe `Builder.compile_one()` 的`X9Baseband.cpp.o`及`sweet_x9_gpu_dependencies.o`均True，exit0。新增provenance/MO/MT三项人工向量只编译**未执行**。原日志/命令helper在树`x9/out/call-end-reason-compile/`：`host.log/.exit`、`c-header.log/.exit`、`recipe-console.log`、`recipe-results.json`、`recipe.exit`、`compile_recipe.py`；首次helper误取parent导致路径FileNotFound/exit1，保留`recipe-path-error.log/.exit`，修正为worktree ROOT后编译成功，不是源码错误。只复制主树现有gitignored local config和缺失MDOTA generated include，没有生成stub或读仓库外项目。
+- **原件与限制**：旧call-status分析原件保留供另代理只读；本项所需22份窄asm/枚举已复制到新树`x9/out/call-end-reason-analysis/`，后续不依赖旧工作树构建。真实4901仍只486B logger前缀而declared512/520/528/536，**没有完整设备END frame/真机重放**，不能补零。无本项kernel link/CI run/boot/上机结果；最终通话短信镜像仍未完成，CallList offset6/technology、IMS准入、voice音频和短信端到端边界保持。
+
 ### 5.7 2026-11-13 音频：ADSP 自动 dsp-boot 镜像（分支 feat/audio-dsp-boot，worktree `.worktrees/audio-dsp-boot`）
 
 - feat/audio-bounded-fdt 已 ff 合入 main（`b25f4ca`），worktree/分支已删；`android-callsms-20261113`、`shimtest`、fdt2/3/4 的 usb-log 移到本 worktree 的 `x9/out/`。
