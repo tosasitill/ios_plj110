@@ -675,6 +675,56 @@ Apple readStored callback`1975920..38`实际用index/readtag/mode，`197596c`是
 未拿旧319中unsupported的存储启动日志当修复验收。9项新TAG人工源码向量、总42只编译未执行，
 SMS/CALL host、header与真实recipe两对象均exit0；统一kernel构建见NOTES。
 
+### Apple短信消费者 → Messages保存分支（原件静态，非当前消息验收）
+
+本轮核对Apple WMS01的TransferRoute parser **`1f192cfb8`**：
+ack_indicator/u8、transaction/u32 LE、format/u8、length/u16 LE及SMSC/TPDU bytes与
+当前桥匹配。WMS31 List parser **`1f192d720`**同样是count/u32与每项index/u32、tag/u8。
+没有找到新具体codec mismatch，不为“补全iOS”另造PDU parser或绕过原Messages存储。
+真实libCommCenterBase `asString1f0386df8` / 表20dad23d0明确
+MsgPduProcessStatus：1 MemoryFull、2 ParsingFailed、4 SmsSuccess、9 CMASSuccess；
+这个processing状态既不是QMI Result error，也不是Messages数据库提交结果。
+
+原SMSServiceSession的完整接收入口已静态闭合：
+`smsMessageReceived1f3cc4ebc→_processSMSorMMSMessageReceivedWithContext1f3cc4818`
+→CTMessageCenter `incomingMessageWithId`（49dc）→转dictionary（4be4）→
+`writeMessagePayloadToDisk:fileName`（4c44）→`_receivedSMSDictionary`（4c58）→
+`_processReceivedSMSMessage1f3cd41e0`→`didReceiveMessage:forChat:style:fromIDSID`（1f3cdc934）
+→IMDServiceSession `didReceiveMessages1c6518118→_storeMessage1c6518e88`
+→`_IMDStoreMessage1c650556c→IMDMessageStore.storeMessage1c64799e4`。
+payload文件写盘在前，不等于message record已提交，也不证明当前token走过此链。
+
+IMDPersistence `_IMDCreateIMDMessageRecordRefFromIMMessageItem1a8b33ad8`调用
+`_IMDMessageRecordCreate1a8ae2834`，按实际`_IMDIsRunningInDatabaseServerProcess`
+决定数据库server内建记录或sync-XPC路径；不是收到WMS就必然直接写SQL。
+数据库server create分支在 **`1a8ae3380`** 调AddMessageRecord1a8b5467c，
+locked callback1a8b54720于54740调用CoreSDB AddRecord1e75fbc78，
+再于 **54748** 调SaveStore1e75f7668。SaveStore于1e75f7698传transactionType=1到
+SaveWithPreAndPostCallbacksAndTransactionType1e75faa88，正常事务分支
+1e75facb0调用Commit1e75ff1f8。只有`sqlite3_get_autocommit=0`才在1e75ff228调用
+PerformSQL1e75f8890执行 **`COMMIT;`**（原CFString20d0a0360/data1e7606177/7B），
+再经1e75f88b8→Step1e75f5674→sqlite3_step1a987c348。这里已经连接真实调用，
+不是仅搜到COMMIT字符串；已经autocommit、无pending工作及特殊transactionType仍有不同分支。
+
+save于1e75facd4..face4把SQL result0/101（SQLITE_DONE）转bool，AddMessageRecord
+保存并返回它；**create的1a8ae3384**据此决定失败释放record并返回null，或取真实RecordID。
+因此实际保存成功须过这一决定分支，不能用callback出现替代：XPC completion
+**1a8b7b3e8即使Create null也调用**；IMD helper `didStoreBlock1c6505f0c`的w1来自
+storeMessage之前的shouldStoreDecision，不是SQL commit result。post callback（若提供）
+也在commit之前运行；这里SaveStore本身没有提供pre/post callbacks。
+
+原件静态保存控制流/失败分支已闭合，**仍无当前短信token到成功record/SQL分支、
+数据库重开/最终Messages显示、或MO对端收到的运行证据**；WMS37 receipt不改变此边界。
+精确原asm、selector解码与字段/事务JSON在`x9/out/sms-ios-consumer/`，包括
+`apple-storage-boundaries.json`、`apple-imdaemon-store-helper.annotated.asm`、
+`apple-add-message-record.asm`、`apple-coresdb-save-commit.asm`、
+`apple-coresdb-sqlite-commit.asm`、`apple-xpcserver-record-create-tail.asm`。
+新支岛target与COMMIT常量已从当前root Cryptex cache只读核对：12个支岛各12B、
+CFString32B、SQL7B均与先前采样逐字一致；`apple-root-cache-provenance.{json,txt}`
+保存实际subcache/offset/VA/raw bytes。旧sysos mount只作比较来源，不再作为权威原cache。
+从主目录可用`/opt/homebrew/opt/llvm@22/bin/llvm-objdump -d --start-address=0x1e75ff1f8 --stop-address=0x1e75ff240 .local/apple/dsc-20H392/System/Library/PrivateFrameworks/CoreSDB.framework/CoreSDB`
+只读固定原件。不运行人工向量/测试，不读真实短信数据库文件、不改生产、不编译或操作设备。
+
 ### WMS37物理ACK completion：实际host receipt后退休
 
 原物理token ACK结果已take后，legacy void-send仍可在OOM/queue-full时丢WMS37回复并清owner。
