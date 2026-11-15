@@ -15,6 +15,9 @@ static void lck_mtx_lock(int *){assert(!lock_depth);lock_depth=1;}
 static void lck_mtx_unlock(int *){assert(lock_depth);lock_depth=0;}
 static int x9_at_enabled(){return 1;}
 static int sweet_x9_arg(const char *,int){return 1;}
+static uint64_t fake_ms;
+static uint64_t mach_absolute_time(){return fake_ms*1000000;}
+static void absolutetime_to_nanoseconds(uint64_t t,uint64_t *ns){*ns=t;}
 static bool at_online=true;
 int x9_md_at_online(){assert(!lock_depth);return at_online;}
 static unsigned writes;
@@ -26,7 +29,6 @@ static int x9md_tx(unsigned a,unsigned b,unsigned c,unsigned d,unsigned e,const 
 static const unsigned X9BB_PORT_BASE=0x2000,X9BB_NODE=1,CBQ_PORT_BASE=0x4000,CBQ_MAX_CLIENTS=8,X9Q_REQ=1024,CBQ_HDR=6;
 static const uint16_t X9Q_INTERNAL=3,X9Q_NOT_READY=16,X9Q_ARG=48,X9Q_BUSY=2,X9Q_UNSUPPORTED=94;
 static struct {uint64_t generation;uint8_t sim_slot;} x9q_clients[CBQ_MAX_CLIENTS];
-static uint64_t fake_ms;
 static bool x9w_control_ready;
 static uint64_t x9q_ms(){return fake_ms;}
 static uint16_t x9q_u16(const uint8_t *p){return (uint16_t)x9cw_u16(p);}
@@ -306,6 +308,81 @@ static void sms_publish_delivered_poison(){
  assert(queue_calls==1&&in.delivered&&in.generation==9&&in.token==token&&x9_mm_slots[0].state==2&&!writes);
  assert(x9_md_mipc_message_reply(token,1,0)==0&&x9_mm_slots[0].state==2);publication_release();
 }
+/* Full synthetic Apple23 -> native indexed pre-read -> guarded mark-read.
+ * No captured PDU. Native record is a bounded unread MT with index1. */
+static void tag_record_cnf(uint64_t token,unsigned tag){
+ uint8_t p[312];x9cw_header(p,sizeof(p),0x608,1,(unsigned)token);
+ x9cw_scalar(p+16,0,0,4);x9cw_scalar(p+24,0x100,3,1);x9cw_scalar(p+32,0x103,1,2);
+ x9cw_put16(p+40,0x8104);x9cw_put16(p+42,264);p[44]=1;p[46]=2;p[47]=(uint8_t)tag;
+ x9mi_rx(p,sizeof(p));
+}
+static x9m_job &tag_pre_read(){
+ x9m_init_stage=2;x9m_sims[0].ready=x9m_sims[0].md_known=x9m_sims[0].md_ready=true;x9m_sims[0].init=X9M_INIT_DONE;
+ x9q_clients[0].generation=9;
+ const uint8_t req[20]={0,9,0,0x23,0,13,0,1,6,0,0,1,0,0,0,0,0x10,1,0,1};
+ struct x9ms_storage_request decoded={};assert(x9ms_storage_decode(req,sizeof(req),&decoded)==X9MS_OK&&decoded.modify);
+ assert(x9m_request(CBQ_PORT_BASE,X9BB_PORT_BASE+5,req,sizeof(req))&&!replies);
+ auto &j=x9m_jobs[0];assert(j.op==X9M_TAG&&j.follow);x9m_poll();assert(j.token&&j.step==0);
+ x9mi_tick();assert(writes==1);tag_record_cnf(j.token,0);x9m_poll();
+ assert(j.op==X9M_TAG&&j.step==1&&!j.token&&j.follow&&j.stored_len==3&&!j.answered);
+ return j;
+}
+static x9m_job &tag_mutation_queued(){
+ auto &j=tag_pre_read();x9m_poll();assert(j.token&&j.step==1&&!j.follow&&writes==1);
+ const auto &s=x9_mi_slots[0];assert(s.token==j.token&&s.state==1&&s.sms_guard&&s.sms_owner==j.slot&&s.sms_generation==j.generation);
+ assert(s.sms_deadline_ms==j.deadline&&x9mm_one(s.frame,s.len,0x103,0));return j;
+}
+static void sms_tag_guard_admission_deadline(){
+ auto &j=tag_pre_read();fake_ms=j.deadline;unsigned next=x9_mi_next;
+ assert(!x9m_store_submit(j)&&x9_mi_next==next&&writes==1);x9m_poll();assert(!j.op&&last_error==X9Q_NOT_READY);
+}
+static void sms_tag_guard_writer_deadline(){
+ auto &j=tag_mutation_queued();fake_ms=j.deadline;x9mi_tick(); // no adapter poll: native writer is decisive
+ assert(writes==1&&x9_mi_slots[0].state==6);x9m_poll();assert(!j.op&&replies==1&&last_error==X9Q_NOT_READY);
+}
+static void sms_tag_guard_delete_before_select(){
+ auto &j=tag_mutation_queued();x9m_del(0);assert(j.answered&&x9_mi_slots[0].state==6);
+ x9q_clients[0].generation++;x9mi_tick();x9m_poll();assert(writes==1&&!j.op&&!replies);
+}
+static void sms_tag_guard_owner_identity(){
+ auto &j=tag_mutation_queued();
+ x9_md_mipc_message_mark_read_abandon(j.token+1,j.slot,j.generation);
+ x9_md_mipc_message_mark_read_abandon(j.token,j.slot+1,j.generation);
+ x9_md_mipc_message_mark_read_abandon(j.token,j.slot,j.generation+1);
+ assert(x9_mi_slots[0].state==1);x9mi_tick();assert(writes==2&&x9_mi_slots[0].state==2);
+}
+static void sms_tag_guard_control_loss(){
+ auto &j=tag_mutation_queued();x9w_control_ready=false;x9m_poll();x9mi_tick();
+ assert(writes==1&&!j.op&&last_error==X9Q_NOT_READY);
+}
+static void sms_tag_guard_selected_late(){
+ auto &j=tag_mutation_queued();uint64_t token=j.token;x9mi_tick();assert(writes==2&&x9_mi_slots[0].state==2);
+ fake_ms=j.deadline;x9m_del(0);x9q_clients[0].generation++;x9m_poll();
+ assert(j.token==token&&j.op==X9M_TAG&&x9_mi_slots[0].state==2&&!replies);
+ tag_record_cnf(token,0);x9m_poll();assert(j.step==2&&j.follow&&!j.token);
+ x9m_poll();assert(j.op==X9M_TAG&&j.hold&&!j.token&&writes==2); // prior physical mutation remains held
+}
+static x9m_job *tag_during_tx;
+static void tag_delete_during_tx(){assert(tag_during_tx);fake_ms=tag_during_tx->deadline;x9m_del(0);}
+static void sms_tag_guard_partial_late(){
+ auto &j=tag_mutation_queued();uint64_t token=j.token;tag_during_tx=&j;during_write=tag_delete_during_tx;x9mi_tick();during_write=nullptr;
+ assert(writes==2&&x9_mi_slots[0].state==2&&j.token==token&&j.answered);
+ tag_record_cnf(token,0);x9m_poll();x9m_poll();assert(j.op==X9M_TAG&&j.step==2&&j.hold&&writes==2);
+}
+static void sms_tag_guard_followup_irrevocable(){
+ auto &j=tag_mutation_queued();x9mi_tick();tag_record_cnf(j.token,0);x9m_poll();assert(j.step==2&&!j.token);
+ x9m_poll();uint64_t verification=j.token;assert(verification&&x9_mi_slots[0].state==1&&!x9_mi_slots[0].sms_guard);
+ fake_ms=j.deadline;x9m_del(0);x9m_poll();assert(j.token==verification&&j.op==X9M_TAG);
+ x9mi_tick();assert(writes==3&&x9_mi_slots[0].state==2); // original readback still drains
+ tag_record_cnf(verification,1);x9m_poll();assert(!j.op&&!replies&&writes==3);
+}
+static void sms_tag_guard_generic_unaffected(){
+ uint8_t p[56];x9cw_header(p,sizeof(p),0x607,1,0);x9cw_scalar(p+16,0x100,3,1);x9cw_scalar(p+24,0x101,5,1);
+ x9cw_scalar(p+32,0x102,1,2);x9cw_scalar(p+40,0x103,1,1);x9cw_scalar(p+48,0x104,0,1);
+ assert(!x9_md_mipc_message_mark_read_submit(p,sizeof(p),0,9,100)); // guarded API must not accept a read-only frame
+ uint64_t token=x9_md_mipc_submit(p,sizeof(p));assert(token&&!x9_mi_slots[0].sms_guard);
+ x9_md_mipc_message_mark_read_abandon(token,0,9);fake_ms=100;x9mi_tick();assert(writes==1&&x9_mi_slots[0].state==2);
+}
 int main(int argc,char **argv){
  assert(argc==2);x9mi_online(1);x9w_control_ready=true;
  struct {const char *name;void (*run)();} cases[]={
@@ -325,6 +402,11 @@ int main(int argc,char **argv){
   {"sms_publish_control_loss",sms_publish_control_loss},{"sms_publish_transport_loss",sms_publish_transport_loss},
   {"sms_publish_at_loss",sms_publish_at_loss},{"sms_publish_queue_retry",sms_publish_queue_retry},
   {"sms_publish_queue_retry_poison",sms_publish_queue_retry_poison},{"sms_publish_oom",sms_publish_oom},
-  {"sms_publish_high_mask",sms_publish_high_mask},{"sms_publish_delivered_poison",sms_publish_delivered_poison}};
+  {"sms_publish_high_mask",sms_publish_high_mask},{"sms_publish_delivered_poison",sms_publish_delivered_poison},
+  {"sms_tag_guard_admission_deadline",sms_tag_guard_admission_deadline},{"sms_tag_guard_writer_deadline",sms_tag_guard_writer_deadline},
+  {"sms_tag_guard_delete_before_select",sms_tag_guard_delete_before_select},{"sms_tag_guard_owner_identity",sms_tag_guard_owner_identity},
+  {"sms_tag_guard_control_loss",sms_tag_guard_control_loss},{"sms_tag_guard_selected_late",sms_tag_guard_selected_late},
+  {"sms_tag_guard_partial_late",sms_tag_guard_partial_late},{"sms_tag_guard_followup_irrevocable",sms_tag_guard_followup_irrevocable},
+  {"sms_tag_guard_generic_unaffected",sms_tag_guard_generic_unaffected}};
  for(auto &c:cases)if(!strcmp(argv[1],c.name)){c.run();return 0;}return 2;
 }

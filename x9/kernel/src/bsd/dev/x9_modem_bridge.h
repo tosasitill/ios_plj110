@@ -20,6 +20,14 @@ int x9_md_at_online(void);
  * timeout/client deletion and consume late CNF before releasing ownership. */
 #define X9_MIPC_FRAME_MAX 4096u
 uint64_t x9_md_mipc_submit(const uint8_t *frame, uint32_t length);
+/* Only indexed GSM0607 mark-read (103=0), not generic SMS/AT submission.
+ * Snapshot the host owner slot/generation and absolute monotonic ms guard.
+ * Admission AND unique writer selection enforce deadline. Abandon matches
+ * the original token/owner/generation, and rejects only unselected state1
+ * through take=-3; selected/partial/late-CNF owners remain irrevocable. */
+uint64_t x9_md_mipc_message_mark_read_submit(const uint8_t *frame, uint32_t length,
+ unsigned owner, uint64_t generation, uint64_t deadline_ms);
+void x9_md_mipc_message_mark_read_abandon(uint64_t token, unsigned owner, uint64_t generation);
 /* take: 1 complete frame, 0 pending, -1 unavailable/capacity, -2 an owned
  * oversized SMS0608 has been fully drained. -2 consumes that token once;
  * no partial/synthetic CNF is returned and other MIPC services stay online.
@@ -65,6 +73,11 @@ int x9_md_mipc_call_event(uint8_t *frame, uint32_t capacity, uint32_t *length, u
 /* Monotonic RX cursor / ordered drain for generation-scoped subscriptions.
  * CMD reply token remains separate from the sequence for ordinary INDs. */
 int x9_md_mipc_call_cursor(uint32_t *sequence);
+/* Trusted synchronous CALL publication only: the callback must not allocate
+ * or reenter MD. 1=actual queue admission, 0=queue reject, -1=dead/future fence. */
+typedef int (*x9_md_mipc_call_publish_cb)(void *context);
+int x9_md_mipc_call_publish(uint32_t floor,
+ x9_md_mipc_call_publish_cb callback, void *context);
 int x9_md_mipc_call_event_ordered(uint8_t *frame, uint32_t capacity, uint32_t *length,
                                uint32_t *token, uint32_t *sequence);
 /* Native MO observation, copied under the MD lock. No registration, request,
