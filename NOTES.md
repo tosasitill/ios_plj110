@@ -184,6 +184,14 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 - **实质改动**：global SHM完整slice在CPU_PRIVATE、arena未install时，通过XNU的`pmap_set_cache_attributes`转`VM_WIMG_WCOMB`（Normal NC，MAIR0x44），预核对每16K页PA和DEFAULT属性，保存恢复义务再变更；使用受管pmap API同时更新physical aperture/PV mappings，不建WB/NC别名、不改live页/PTE。每次SHM观察检查NC属性/当前CPU MAIR，改用NC loads+外域barrier，不再clean firmware更新的VSI cacheline；仍不承诺multiword snapshot原子性或退役。DEVICE仍不能free；私有失败/真实whole-domain退休后free先验证DEFAULT/WCOMB，再恢复DEFAULT，异常保留handle。普通BS/FB/页表仍原有WB/cache协议。
 - **确切编译**：首轮`hevc-shared-nc-20261115`因export headers缺两条kernel-private pmap声明失败（6 errors），补与XNU原型一致的extern后，最终`x9/out/hevc-shared-nc-final-20261115/compile-native.py`只编修改的`sweet_x9_vdec.o`，exit0、32 warnings；原日志/exit/result保存在该目录。没有测试套件、成功产物二次hash/反汇编、full kernel link、CI run或boot，也没有设备操作。
 - **下一步仍是代码而不是探针**：用这个真实NC storage owner补AP-owned VSI精确字段写入与native ring消费；main/non-ACP BS地址不能假设相等，原厂non-ACP缺席分支为0也不证明main路径已授权。持续session backend、cold NS/bootstrap、WAITISR/c006、DPB与线性输出、普通VT/CMPhoto/HEIF全链仍未完成，目标active。
+- **NC里程碑已交付**：提交`a219ead`已push到`origin/feat/hevc-hw`。
+
+#### 2026-11-15 Native VSI精确写入（最新交接）
+
+- **代码变化**：新增内部`vshared_live_window`，只返回已保留的DEVICE global slice的真实NC CPU window，重新核对PA/NC/本CPU MAIR/power；不导出通用live写接口或猜测firmware→CPU指针。INIT在slot唯一绑定后只写捕获的AP `ipi_blocked(+0x1228)=0`并保留`slot_initialized`，失败不丢binding。START在真实bus整call reservation内publish BS、记录真实handle/IOVA后，从live NC观察解码模式，再调用新的`hardware.qualify_start`核验实际firmware/ABI、main normal codec route（ACP关闭且无独立non-ACP attach）、layout/clock/IRQ。原来无映射的`hardware.prepare_start`已替换；没有现有调用者需要迁移，也未添加成功空实现。
+- **真实publisher**：资格核验成功后由native代码执行aligned volatile NC scalar stores，仅`bs_iova(+0xe80)`、缺席`bs_non_acp_iova(+0xe90)=0`、`bs_token(+0xf18)`、`timestamp(+0xf48)`和`dynamic_low_latency(+0x1004)`；`dsb oshst`在a001发送前。只支持实际`INPUT_DRIVEN_PUT_FRM=2`，输出来自之前真实a005；其它模式失败关闭，绝不让equal snapshots充当排他授权。FW的FB、error、mode、plane_count等字段不写、不复制整slot、不clean邻居cacheline。新增`vsi_attempted/vsi_staged`仅表示写入，不表示b001/pixels/退役；`decode_start`内核接口增加raw timestamp及0..255 latency参数，以后session backend需实际传入。
+- **本次确切编译**：中间`hevc-vsi-store-20261115`exit0/36 warnings（有4个新增volatile/alignment warnings）；改成显式volatile snapshot loads和明确aligned scalar访问、补slot8B对齐gate后，最终`x9/out/hevc-vsi-store-final-20261115/compile-native.py`只编修改的`sweet_x9_vdec.o`，exit0/32 warnings。原stdout/exit/result在该目录。未重跑未改前端、owner或camera；无测试套件、产物二次检查、full kernel link、CI run、boot或设备操作。
+- **后续边界仍明确**：上述native START路径没有现实qualify/provider注册者，因此READY仍不能发布。control仍单output/一次START，不是持续session_ops。原厂FB共享transfer更新read与派生count，BS consumer更新read/count；NC解决cacheline覆盖但不证明producer排他，不能用两次相等snapshot直接消费/退役。下一步要补真实ring dequeuer、token/DPB/input/output lifetime和WAITISR/c006，以及cold NS/firmware/clock最高层；普通VT/CMPhoto/HEIF、grid/方向/alpha与线性NV12/P010仍未齐全。无新boot，目标active，不称完成。
 
 ### 5.1 已在设备上观察到能用（详情见旧 NOTES）
 

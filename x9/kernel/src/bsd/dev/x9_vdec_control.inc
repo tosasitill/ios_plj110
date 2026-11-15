@@ -51,6 +51,82 @@ static int vcontrol_wait(void *cookie, uint64_t epoch, uint64_t end,
     struct x9_vdec_control *c = cookie;
     return c->hardware.wait(c->hardware.cookie,epoch,end,q,out);
 }
+/* These are native NC accesses, not calls into a platform mock writer. Slot
+ * resolver/unique binding checks precede every use; no generic live write API
+ * is public. All scalar addresses are aligned in captured 0x19e8-byte slots. */
+static uint32_t vcontrol_load32(volatile uint8_t *p, uint32_t offset)
+{ return *(volatile uint32_t *)(volatile void *)(p+offset); }
+static void vcontrol_store32(volatile uint8_t *p, uint32_t offset, uint32_t v)
+{ *(volatile uint32_t *)(volatile void *)(p+offset) = v; }
+static void vcontrol_store64(volatile uint8_t *p, uint32_t offset, uint64_t v)
+{ *(volatile uint64_t *)(volatile void *)(p+offset) = v; }
+/* s->lock held, freshly bound INIT only. Captured decode producer performs
+ * this AP fence initialization after b000; do not reset any FW-owned bytes. */
+static int vcontrol_initialize_slot(struct x9_vdec_control *c)
+{
+    struct x9_vdec_shared *s = c->shared;
+    volatile uint8_t *p = NULL;
+    int e;
+    if (!c->status.bound || c->status.slot_initialized ||
+        !(s->bound_slots & (1u << c->slot.index))) return EBUSY;
+    if (c->slot.offset & 7) return EFAULT;
+    lck_mtx_lock(&s->arena->lock);
+    e = vshared_live_window(s,X9_VCP_GLOBAL_VDEC_OFFSET+c->slot.offset,
+        X9_VCP_INSTANCE_SLOT_BYTES,&p);
+    if (!e) {
+        vcontrol_store32(p,0x1228,0);
+        __asm__ volatile("dsb oshst" ::: "memory");
+        if (vcontrol_load32(p,0x1228)) e = EIO;
+        else c->status.slot_initialized = 1;
+    }
+    lck_mtx_unlock(&s->arena->lock);
+    return e;
+}
+/* Physical bus whole-call reservation and c->lock held. The ONLY published
+ * AP fields are those in decoder_decode_evidence. a005 itself writes the FB
+ * fields in firmware: do not duplicate those or clear fields beside errors.
+ * Normal NC avoids overwriting FW-updated neighbouring bytes with WB lines.
+ * Qualification of the real non-ACP main route still precedes these stores. */
+static int vcontrol_stage_start(struct x9_vdec_control *c, uint64_t end,
+    const struct x9_vcp_decode_snapshot *observed)
+{
+    struct x9_vdec_shared *s = c->shared;
+    const struct x9_vdec_control_start_resources *r = &c->status.resources;
+    volatile uint8_t *p = NULL;
+    int e;
+    lck_mtx_lock(&s->lock);
+    lck_mtx_lock(&s->arena->lock);
+    e = !c->status.bound || !c->status.slot_initialized || c->status.vsi_attempted ||
+        !(s->bound_slots & (1u << c->slot.index)) ? EBUSY : vmem_deadline(end);
+    if (!e && (c->slot.offset & 7)) e = EFAULT;
+    if (!e) e = vshared_live_window(s,X9_VCP_GLOBAL_VDEC_OFFSET+c->slot.offset,
+        X9_VCP_INSTANCE_SLOT_BYTES,&p);
+    if (!e) {
+        __asm__ volatile("dmb oshld" ::: "memory");
+        /* Two equal snapshots do not license a live store. These gates only
+         * reject changed negotiation; AP ownership comes from the matched
+         * ABI's precise producer fields and the real owner qualification. */
+        if (p[0x1000] != 2 || p[0x1000] != observed->input_driven ||
+            p[0x1001] != observed->output_async || p[0x1003] != observed->low_power_mode ||
+            vcontrol_load32(p,0xf80) != observed->bitdepth ||
+            vcontrol_load32(p,0xf28) != observed->plane_count ||
+            vcontrol_load32(p,0x1228)) e = ESTALE;
+    }
+    if (!e) e = vmem_deadline(end);
+    if (!e) {
+        c->status.vsi_attempted = 1; /* retain before first live store */
+        vcontrol_store64(p,0xe80,r->input.iova);
+        vcontrol_store64(p,0xe90,0); /* qualified ABSENT attachment, NOT main alias */
+        vcontrol_store64(p,0xf18,r->input_token);
+        vcontrol_store64(p,0xf48,r->timestamp);
+        p[0x1004] = (uint8_t)r->dynamic_low_latency;
+        __asm__ volatile("dsb oshst" ::: "memory");
+        c->status.vsi_staged = 1;
+    }
+    lck_mtx_unlock(&s->arena->lock);
+    lck_mtx_unlock(&s->lock);
+    return e;
+}
 /* Two fresh PoC copies, not cached Android bytes. Equal copies do NOT prove
  * firmware-wide serialization: this only observes fields while the bus owns
  * the current command/reverse request. Ring results are never consumption or
@@ -159,6 +235,8 @@ static int vcontrol_prepare_start(void *cookie, uint64_t epoch, uint64_t end,
     struct x9_vdec_control *c = cookie;
     struct x9_vdec_control_start_resources *resources = &c->status.resources;
     struct x9_vdec_dma_extent extent;
+    struct x9_vcp_common_snapshot common;
+    struct x9_vcp_decode_snapshot decoded;
     uint32_t input_state;
     int e;
     if (epoch != c->status.epoch || !c->status.start_attempted ||
@@ -172,7 +250,7 @@ static int vcontrol_prepare_start(void *cookie, uint64_t epoch, uint64_t end,
     e = c->status.recheck_pending ? vcontrol_recheck(c,end) : 0;
     /* a005's notification is NOT output acceptance. Revalidate our actual
      * DEVICE storage, and leave VSI/layout/IRQ qualification to the real
-     * prepare_start owner. No fresh addresses are inferred from b005. */
+     * qualify_start owner. No fresh addresses are inferred from b005. */
     if (!e && c->status.output_attempted) {
         if (!c->status.output_prepared) e = EBUSY;
         for (unsigned n = 0; n < c->status.output.plane_count && !e; n++) {
@@ -208,9 +286,17 @@ static int vcontrol_prepare_start(void *cookie, uint64_t epoch, uint64_t end,
         c->status.input_prepared = 1;
     }
     if (!e) e = vmem_deadline(end);
-    /* VSI/layout/ACP and IRQ ownership still require the real hardware owner.
-     * It receives disjoint immutable host copies, not control-lock reentry. */
-    if (!e) e = c->hardware.prepare_start(c->hardware.cookie,epoch,end,init,result,q,resources);
+    if (!e) e = vcontrol_snapshot(c,end,&common);
+    if (!e) e = x9_vcp_parse_decode_snapshot(X9_VCP_DECODE_ABI_MT6993_CAPTURE1,
+        c->scratch,X9_VCP_INSTANCE_SLOT_BYTES,&decoded);
+    if (!e && (decoded.input_driven != 2 || decoded.ipi_blocked ||
+        decoded.plane_count != resources->output.plane_count ||
+        (decoded.bitdepth != 8 && decoded.bitdepth != 10))) e = ENOTSUP;
+    /* Firmware/layout/routing and IRQ ownership require the real hardware
+     * owner; it receives immutable host records, not a live writable VSI. */
+    if (!e) e = c->hardware.qualify_start(c->hardware.cookie,epoch,end,init,result,q,
+        resources,&decoded);
+    if (!e) e = vcontrol_stage_start(c,end,&decoded);
     return e;
 }
 static int vcontrol_prepare_output(void *cookie, uint64_t epoch, uint64_t end,
@@ -285,7 +371,7 @@ int x9_vdec_control_create(struct x9_vcp_bus *bus, struct x9_vdec_shared *s,
         .shm = vcontrol_shm, .alloc = vcontrol_alloc, .clock = vcontrol_clock,
         .wait = vcontrol_wait, .vp = vcontrol_vp, .notification = vcontrol_notification,
         .prepare_output = vcontrol_prepare_output };
-    if (hardware->prepare_start) c->reverse.prepare_start = vcontrol_prepare_start;
+    if (hardware->qualify_start) c->reverse.prepare_start = vcontrol_prepare_start;
     lck_mtx_init(&c->lock,&vdec_group,LCK_ATTR_NULL);
     *out = c;
     return 0;
@@ -322,7 +408,10 @@ int x9_vdec_control_init(struct x9_vdec_control *c, uint32_t ms,
                 lck_mtx_lock(&s->lock);
                 if (s->closing || s->fault_errno) e = EBUSY;
                 else if (s->bound_slots & (1u << c->slot.index)) e = EEXIST;
-                else { s->bound_slots |= 1u << c->slot.index; c->status.bound = 1; }
+                else {
+                    s->bound_slots |= 1u << c->slot.index; c->status.bound = 1;
+                    e = vcontrol_initialize_slot(c);
+                }
                 lck_mtx_unlock(&s->lock);
             }
         }
@@ -390,7 +479,8 @@ int x9_vdec_control_register_output(struct x9_vdec_control *c, uint32_t planes,
     return e;
 }
 int x9_vdec_control_decode_start(struct x9_vdec_control *c, const uint8_t *annexb,
-    uint32_t used, uint32_t capacity, uint32_t flags, uint32_t ms,
+    uint32_t used, uint32_t capacity, uint32_t flags, uint64_t timestamp,
+    uint32_t dynamic_low_latency, uint32_t ms,
     struct x9_vcp_start_result *out, struct x9_vcp_bus_call_log *log)
 {
     struct x9_vcp_start q;
@@ -399,7 +489,8 @@ int x9_vdec_control_decode_start(struct x9_vdec_control *c, const uint8_t *annex
     if (!c || c->magic != VCONTROL_MAGIC || !annexb || !out || !log) return EINVAL;
     memset(out,0,sizeof(*out)); memset(log,0,sizeof(*log));
     if (!ms || ms > 3000 || !used || used > capacity ||
-        capacity > X9_MM_SMMU_MAX_CHECK_BYTES) return EINVAL;
+        capacity > X9_MM_SMMU_MAX_CHECK_BYTES || dynamic_low_latency > UINT8_MAX)
+        return EINVAL;
     lck_mtx_lock(&c->lock);
     e = c->closing || !c->status.bound || c->status.start_attempted ||
         c->status.input_attempted || !c->status.output_prepared ? EBUSY :
@@ -414,6 +505,8 @@ int x9_vdec_control_decode_start(struct x9_vdec_control *c, const uint8_t *annex
         resources->instance_token = c->init.instance_token;
         resources->slot = c->slot;
         resources->bytes_used = used;
+        resources->timestamp = timestamp;
+        resources->dynamic_low_latency = dynamic_low_latency;
         resources->output = c->status.output;
         c->input_source = annexb;
         c->input_capacity = capacity;

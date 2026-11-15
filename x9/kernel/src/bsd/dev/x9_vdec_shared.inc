@@ -233,16 +233,19 @@ int x9_vdec_shared_reply(void *cookie, uint64_t epoch, uint64_t end,
  * No cacheline clean/invalidate against firmware-updated lines is needed.
  * It proves visibility, not atomicity of a multiword update or retirement.
  * Caller holds shared lock and active native bus transaction/lifetime. */
-static int vshared_observe(struct x9_vdec_shared *s, uint32_t offset,
-    uint8_t *out, uint32_t bytes)
+/* shared lock AND arena lock held. Returns only the known NC window in this
+ * retained DEVICE slice; never an exported pointer or firmware address cast.
+ * The control layer, not this helper, restricts stores to AP-owned fields. */
+static int vshared_live_window(struct x9_vdec_shared *s, uint32_t offset,
+    uint32_t bytes, volatile uint8_t **out)
 {
     struct x9_vdec_dma *d = s->arena;
     struct vdma_slice_record *r = NULL;
-    uint32_t first = 0, limit = 0;
+    uint32_t first, limit;
     int e;
-    if (!out || !bytes || offset >= s->slice.bytes || bytes > s->slice.bytes-offset)
+    *out = NULL;
+    if (!bytes || offset >= s->slice.bytes || bytes > s->slice.bytes-offset)
         return ERANGE;
-    lck_mtx_lock(&d->lock);
     e = s->closing || !s->published || !s->offered ? EBUSY : s->fault_errno;
     if (!e) e = vdma_slice_find(d,&s->slice,&r);
     if (!e && (!d->shared_claim || d->state != X9_MM_SMMU_INSTALLED ||
@@ -254,9 +257,24 @@ static int vshared_observe(struct x9_vdec_shared *s, uint32_t offset,
         limit = (r->offset+offset+bytes+VDMA_CPU_BYTES-1) & ~(VDMA_CPU_BYTES-1);
         e = vdma_slice_backing(d,first,limit-first);
     }
+    if (!e) *out = (volatile uint8_t *)(d->raw+r->offset+offset);
+    return e;
+}
+static int vshared_observe(struct x9_vdec_shared *s, uint32_t offset,
+    uint8_t *out, uint32_t bytes)
+{
+    struct x9_vdec_dma *d = s->arena;
+    volatile uint8_t *window = NULL;
+    int e;
+    if (!out || !bytes || offset >= s->slice.bytes || bytes > s->slice.bytes-offset)
+        return ERANGE;
+    lck_mtx_lock(&d->lock);
+    e = vshared_live_window(s,offset,bytes,&window);
     if (!e) {
         __asm__ volatile("dmb oshld" ::: "memory");
-        memcpy(out,(void *)(d->raw+r->offset+offset),bytes);
+        /* Keep volatile NC loads explicit; snapshot consistency is checked
+         * by control, never inferred from an optimized bulk copy. */
+        for (uint32_t n = 0; n < bytes; n++) out[n] = window[n];
         __asm__ volatile("dmb oshld" ::: "memory");
     }
     lck_mtx_unlock(&d->lock);

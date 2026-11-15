@@ -6,7 +6,7 @@
 #include "x9_vcp_bus.h"
 struct x9_vdec_control;
 /* Actual native resources, not arbitrary IOVAs or a readiness bitmap.
- * Both input and output are already DEVICE-owned when passed to prepare_start.
+ * Both input and output are already DEVICE-owned when passed to qualify_start.
  * Capacities include the native arena's owned zero padding; no pixel format,
  * ACP alias, hardware-prefetch requirement or DMA retirement is implied. */
 struct x9_vdec_control_start_resources {
@@ -16,6 +16,8 @@ struct x9_vdec_control_start_resources {
     struct x9_vcp_instance_slot slot;
     struct x9_vdec_dma_extent input;
     uint32_t bytes_used;
+    uint32_t dynamic_low_latency; /* exact AP byte, range0..255 */
+    uint64_t timestamp; /* raw caller timestamp, no clock/POC arithmetic */
     struct x9_vcp_output_record output;
 };
 struct x9_vdec_control_hardware {
@@ -24,14 +26,21 @@ struct x9_vdec_control_hardware {
         const struct x9_vcp_clock_request *);
     int (*wait)(void *, uint64_t epoch, uint64_t deadline_ns,
         const struct x9_vcp_wait_request *, enum x9_vcp_wait_outcome *);
-    /* Mandatory to decode. Actually qualify current layout/IRQ/clock, publish
-     * evidenced VSI fields using these exact owned records, and complete its
-     * cache protocol. Must NOT reenter control/shared/bus APIs, invent ACP
-     * addresses, mark pixels complete, or return a successful empty stub.
-     * Native input PoC handoff is already done under the bus reservation. */
-    int (*prepare_start)(void *, uint64_t epoch, uint64_t deadline_ns,
+    /* Mandatory to decode. Actually qualify current firmware/ABI, layout,
+     * IRQ/clock and MAIN BS route through THIS owned normal codec domain,
+     * with ACP disabled and NO separate non-ACP attachment. Other routes are
+     * not supported by this native publisher; do not invent a second alias.
+     * Actual initialized mode must be INPUT_DRIVEN_PUT_FRM (2), with output
+     * supplied via a005. The immutable decoded observation is NOT ownership
+     * authority; the platform must check its real routing/layout/clock state.
+     * Must NOT reenter control/shared/bus APIs, write VSI, mark pixels complete
+     * or return a successful empty stub. Native code owns precise NC stores
+     * AFTER this qualification, within the physical bus call reservation.
+     * Native input PoC handoff is already done. Not a pixel/completion ACK. */
+    int (*qualify_start)(void *, uint64_t epoch, uint64_t deadline_ns,
         const struct x9_vcp_init *, const struct x9_vcp_init_result *,
-        const struct x9_vcp_start *, const struct x9_vdec_control_start_resources *);
+        const struct x9_vcp_start *, const struct x9_vdec_control_start_resources *,
+        const struct x9_vcp_decode_snapshot *);
 };
 struct x9_vdec_control_status {
     uint64_t epoch, notifications;
@@ -39,6 +48,7 @@ struct x9_vdec_control_status {
     uint32_t start_attempted, start_replied;
     uint32_t output_attempted, output_prepared, output_notified;
     uint32_t input_attempted, input_prepared;
+    uint32_t slot_initialized, vsi_attempted, vsi_staged;
     struct x9_vdec_control_start_resources resources; /* not a completed frame */
     struct x9_vcp_output_record output; /* DEVICE extents, NOT pixel layout */
     struct x9_vcp_init_result init;
@@ -58,7 +68,8 @@ int x9_vdec_control_create(struct x9_vcp_bus *, struct x9_vdec_shared *,
     struct x9_vdec_control **);
 /* Sends physical a000, handles reverse operations, retains b000, resolves the
  * complete live slot using the captured HFRP remap table and uniquely claims
- * it in this global allocation. Once only, including failed/uncertain sends. */
+ * it in this global allocation, then sets ONLY the evidenced AP ipi_blocked
+ * field to0 through its native NC map. Once only, including uncertain sends. */
 int x9_vdec_control_init(struct x9_vdec_control *, uint32_t timeout_ms,
     struct x9_vcp_init_result *, struct x9_vcp_bus_call_log *);
 /* Before START only: no interleaving QUERY with unresolved picture DMA.
@@ -83,16 +94,20 @@ int x9_vdec_control_register_output(struct x9_vdec_control *, uint32_t plane_cou
  * slice, retaining its native handle before copying. buffer_bytes is the
  * hardware layout owner's selected input capacity, >= bytes_used, NOT an
  * IOVA or guessed prefetch contract. Whole rounded capacity is owned/zeroed.
- * Requires this instance's actually published output and hardware.prepare_start.
+ * Requires this instance's published output and hardware.qualify_start.
  * Inside the physical bus's whole-call reservation, PoC handoff records the
- * actual input IOVA/capacity/token BEFORE the hardware owner publishes VSI.
+ * actual input IOVA/capacity/token BEFORE hardware qualification and precise
+ * native stores of AP bs token/main IOVA/non-ACP0/timestamp/latency. Does not
+ * overwrite firmware-owned error/mode/FB fields, copy an entire VSI snapshot,
+ * or clean its shared cachelines. Current publisher supports mode2 only.
  * a001 uses this instance's actual alias and actual slice capacity, never
  * caller-supplied token/alias/IOVA. flags remain wire data, not cache authority.
  * Once attempted, including allocation/copy/publication/send failures: no
  * retry/reuse. b001 does not retire input/output or prove pixels. No EOS path.
  * All buffers/results must be stable, resident, mutually disjoint host memory. */
 int x9_vdec_control_decode_start(struct x9_vdec_control *, const uint8_t *annexb,
-    uint32_t bytes_used, uint32_t buffer_bytes, uint32_t flags, uint32_t timeout_ms,
+    uint32_t bytes_used, uint32_t buffer_bytes, uint32_t flags,
+    uint64_t timestamp, uint32_t dynamic_low_latency, uint32_t timeout_ms,
     struct x9_vcp_start_result *, struct x9_vcp_bus_call_log *);
 int x9_vdec_control_get_status(struct x9_vdec_control *, struct x9_vdec_control_status *);
 /* After any INIT attempt, only physically STOPPED bus + both genuinely RETIRED
