@@ -152,6 +152,8 @@ static int torch_open(__unused dev_t dev, int flags, __unused int type, struct p
                  (kauth_cred_getuid(kauth_cred_get()) != 501 || strcmp(name, "mediaserverd"))) e = EPERM;
         else if (writer) e = EBUSY;
         else writer = true;
+        printf("X9 TORCH: writer open by %s uid=%u errno=%d\n", name,
+               kauth_cred_getuid(kauth_cred_get()), e);
     }
     lck_mtx_unlock(&x9_torch_lock); return e;
 }

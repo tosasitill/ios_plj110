@@ -8610,11 +8610,38 @@ sweet_x9_wipe_gestalt_cache(proc_t p, user_addr_t scratch, user_addr_t end)
 	int32_t rv = 0;
 	int error;
 
-	if (sweet_x9_arg("x9_mgwipe", 0) != 1) {
+	/* x9_mgwipe=2: once per ADT capability epoch. The 11-10 ADT added
+	 * /product/camera "flash" (MobileGestalt camera-flash, which gates the
+	 * Control Center flashlight module) and /product/haptics "closed-loop"
+	 * (DeviceSupportsClosedLoopHaptics, Actuator vs legacy vibrator), both
+	 * after the last cache rebuild (11-08). The marker is written only after
+	 * both unlinks succeed, so a failed boot retries; later boots skip. */
+	static const char epoch_dir[] = "/private/var/x9/mg";
+	static const char epoch_path[] = "/private/var/x9/mg/refresh-flash-haptics-20261110";
+	static const uint8_t epoch_data[] =
+	    "x9 MobileGestalt cache rebuilt for ADT camera flash + closed-loop haptics\n";
+	uint8_t epoch_sha[32];
+	int mode = sweet_x9_arg("x9_mgwipe", 0);
+	if (mode != 1 && mode != 2) {
 		return 0;
 	}
 	if (!sweet_x9_ufs_root_writable()) {
 		return EROFS;
+	}
+	if (mode == 2) {
+		SHA256_CTX epoch_hash;
+		SHA256_Init(&epoch_hash);
+		SHA256_Update(&epoch_hash, epoch_data, sizeof(epoch_data) - 1);
+		SHA256_Final(epoch_sha, &epoch_hash);
+		error = x9_bbfw_equal(epoch_path, epoch_sha, sizeof(epoch_data) - 1);
+		if (!error) {
+			printf("X9 MGWIPE: epoch already rebuilt; cache kept\n");
+			return 0;
+		}
+		if (error != ENOENT) {
+			printf("X9 MGWIPE: epoch marker unusable errno=%d; cache kept\n", error);
+			return error;
+		}
 	}
 	if (!proc_is64bit(p) || scratch > end) {
 		return E2BIG;
@@ -8644,6 +8671,15 @@ sweet_x9_wipe_gestalt_cache(proc_t p, user_addr_t scratch, user_addr_t end)
 	printf("X9 MGWIPE: legacy errno=%d\n", error);
 	if (error != 0 && error != ENOENT) {
 		return error;
+	}
+	if (mode == 2) {
+		int created = 0;
+		error = x9_bbfw_directory(p, scratch, end, epoch_dir);
+		if (!error) {
+			error = x9_bbfw_write(p, scratch, end, epoch_path, epoch_data,
+			    sizeof(epoch_data) - 1, epoch_sha, &created);
+		}
+		printf("X9 MGWIPE: epoch marker created=%d errno=%d\n", created, error);
 	}
 	return 0;
 }

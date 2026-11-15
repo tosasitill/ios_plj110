@@ -77,7 +77,11 @@ static int haptic_open(dev_t d,int f,__unused int t,struct proc *p)
     if(minor(d)==0)return f&FWRITE?EACCES:0;
     if(minor(d)!=1 || !(f&FWRITE) || !allowed(p))return EPERM;
     lck_mtx_lock(&haptic_lock);int e=hs.mode!=2?EPERM:writer?EBUSY:0;
-    if(!e)writer=true;lck_mtx_unlock(&haptic_lock);return e;
+    if(!e)writer=true;
+    static unsigned opens;
+    if(++opens<=8 || e){char name[32]={0};proc_name(proc_pid(p),name,sizeof(name));
+        printf("X9 HAPTIC: writer open #%u by %s errno=%d\n",opens,name,e);}
+    lck_mtx_unlock(&haptic_lock);return e;
 }
 static int haptic_close(dev_t d,__unused int f,__unused int t,__unused struct proc *p)
 {
@@ -144,7 +148,11 @@ static int haptic_ioctl(dev_t d,u_long cmd,caddr_t data,__unused int f,struct pr
     lck_mtx_lock(&haptic_write_lock);lck_mtx_lock(&haptic_lock);int e=0;
     if(cmd==X9_HAPTIC_GET_STATUS){hs.queued_frames=count;memcpy(data,&hs,sizeof(hs));}
     else if(!writer)e=EPERM;
-    else if(cmd==X9_HAPTIC_START)e=start_locked((void *)data);
+    else if(cmd==X9_HAPTIC_START) {
+        e=start_locked((void *)data);
+        static unsigned starts;
+        if(++starts<=8 || e)printf("X9 HAPTIC: START #%u errno=%d flags=%x\n",starts,e,hs.flags);
+    }
     else if(cmd==X9_HAPTIC_STOP)e=stop_locked();
     else if(cmd==X9_HAPTIC_DRAIN) {
         if(!(hs.flags&X9_HAPTIC_RUNNING))e=EPIPE;
