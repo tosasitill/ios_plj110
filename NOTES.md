@@ -125,8 +125,8 @@ python3 -I x9/build/build.py --dry-run                                          
   （脚本在 `x9/build/scripts/`，第三方树 `.local/x9/work/x9-metal-render`，补丁见 `x9/PANVK-PATCHES.md`）。
 - **只有出现新 plugin-package 时**才需要 stage（Android 开机、用户给序列号）：
   `X9_SERIAL=<serial> python3 x9/mailbox/update.py x9/out/<name>`，成功后用户再 `fastboot boot`。纯内核重编直接说“无需 mailbox”。
-- 设备上最后一次 stage 的是 **277**（2026-11-11 19:41）。main 的 allowlist 是 **280**：从 main 构建的镜像上机前必须先 stage
-  `x9/out/x9-gpu280-purge-20261112`（含 280 plugin-package）。
+- 最新已确认的运行日志 **320/321 使用 GPU280**；main 的 allowlist 仍为 **280**，2026-11-15 的 GPU 优化集成未更换插件。
+  若设备仍保持该插件状态，纯内核镜像无需 mailbox；若插件确实不匹配，280 包为 `x9/out/x9-gpu280-purge-20261112`，先确认设备状态再 stage。
 
 ### 3.4 USB 原件 prelink（进行中）
 
@@ -1762,4 +1762,5 @@ Model now (as Android, one shared AFE, one owner per shared bit):
 - **没有合入**：`565cbd1` IOSurface 探针、`379f609`/`48e753a` label readback、`bc50c6c` label-input capture、`673c82e`/`45ef53f`/`86d8fa9` 离线 PanVK/FAU 工具，以及这条分支的 16 个调查交接提交。`x9/metal/`、插件 allowlist、`boot-device.json` 均不改，main 仍是 **GPU280**；保留同期 call/SCP/sensor 功能，未合入 GPU281/282/283 诊断插件，也不更改 `.local` 构建树/链接点。
 - **静态集成核对**：7 次原提交代码 patch 的 `git apply --index --3way` 全部干净应用；裁剪后代码仅 **7 个文件、694 insertions/108 deletions**，`git diff --cached --check` 通过。没有编译、测试套件、CI run、新 boot.img、mailbox、ADB/fastboot 或手机操作；优化组合在最新 main 上仍未重新构建/上机。本轮中断前的 guarded VS 32-case 有条件静态数据流结果留在下面的 ignored 分析目录，不是 GPU 执行或 root cause。
 - **产物已经保留**：GPU worktree 原 `x9/out/` 的所有已有镜像、插件包、构建日志及 `label-static-20261115/` 整体迁回主 checkout 的 gitignored **`x9/out/`**，没有删除镜像/日志或改写旧绝对路径；同名 `dsc-20H392-textmap.json` 放到 `x9/out/gpu-wait-archive-20261115/`，未覆盖 main 原件。原 worktree local build config 和 15 个 ignored generated include 也归档于该目录。Apple 字节/设备输入均不入 git。
-- **可恢复历史**：删除分支前已创建完整本地 `x9/out/gpu-wait-archive-20261115/history.bundle`，包含原 GPU 分支及全部调查提交；同目录保留 7 份来源 patch 与最终 `optimization-only.patch`。如以后确实要恢复，`git fetch x9/out/gpu-wait-archive-20261115/history.bundle refs/heads/feat/gpu-wait:refs/heads/archive/gpu-wait`。正常下一步只做优化提交合 main/push 和指定分支/worktree 清理，不自动继续闪烁调查或启动旧诊断镜像。
+- **可恢复历史**：删除分支前已创建完整本地 `x9/out/gpu-wait-archive-20261115/history.bundle`，包含原 GPU 分支及全部调查提交；同目录保留 7 份来源 patch 与最终 `optimization-only.patch`。如以后确实要恢复，`git fetch x9/out/gpu-wait-archive-20261115/history.bundle refs/heads/feat/gpu-wait:refs/heads/archive/gpu-wait`。不自动继续闪烁调查或启动旧诊断镜像。
+- **实际交付/清理完成**：优化集成提交 **`45d4df7`** 已 fast-forward 到 main；`git push origin main` 成功（`61d87af..45d4df7`）。随后 `git push origin --delete feat/gpu-wait` 成功，本地 GPU worktree、`feat/gpu-wait` 与临时 `feat/gpu-perf-merge` 均已删除。`git ls-remote --heads origin refs/heads/main refs/heads/feat/gpu-wait` 只返回 main `45d4df79a4792e7203221b3a2674b1b7dc891727`，GPU 远端分支已不存在；主工作树干净，其他活动分支/worktree 未动。本条是 NOTES-only 收尾补记，仍没有新增构建或设备结果。
