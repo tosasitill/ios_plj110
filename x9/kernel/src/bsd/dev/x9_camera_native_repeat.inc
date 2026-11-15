@@ -318,6 +318,63 @@ static int cam_repeat_cpu_boundary_locked(uint64_t epoch)
     }
     cam_irq_spin_drop(old);return e;
 }
+/* Source OFF has really ACKed. Drain no-credit SOF/CHANNEL accumulated
+ * while the completed CPU slot was parked/masked, through actual IAR/EOI,
+ * never ICPENDR/ICACTIVER or a blind R-C sweep. Control + IRQ mutex held. */
+static int cam_repeat_stopped_irqs_locked(uint64_t epoch)
+{
+    uint64_t wait_span;nanoseconds_to_absolutetime(500000000,&wait_span);
+    uint64_t wait_end=mach_absolute_time()+wait_span;
+    /* A real already-issued request may finish while core STOP has
+     * invalidated delivery. Leave its SOF/DONE/worker binding untouched,
+     * release IRQ mutex for the worker and wait for actual CPU retirement.
+     * Never turn queue-empty or SOURCE_OFF into a fabricated completion. */
+    for(;;) {
+        boolean_t wait_old=cam_irq_spin_take();
+        if(!cam_repeat.enabled){cam_irq_spin_drop(wait_old);return 0;}
+        int wait_error=cam_repeat.error?cam_repeat.error:cam_irq.error;
+        if(!wait_error && (cam_repeat.epoch!=epoch || cam_repeat.admission ||
+           cam_irq.close_attempted || cam_sv.close_attempted ||
+           cam_irq_fbc.source_phase!=CAM_STREAM_STOPPED ||
+           cam_irq_fbc.source_issued!=(CAM_STREAM_ON|CAM_STREAM_OFF) ||
+           cam_irq_fbc.source_ack!=(CAM_STREAM_ON|CAM_STREAM_OFF)))wait_error=ESTALE;
+        bool ready=cam_repeat.phase==CAM_REPEAT_PARKED && !cam_irq.busy && !cam_irq.count;
+        if(!wait_error && (cam_repeat.phase==CAM_REPEAT_READY || cam_repeat.phase==CAM_REPEAT_PREPARING))
+            wait_error=ENOTSUP; /* never-issued DEVICE slot has a different cancellation proof */
+        if(!wait_error && !ready && mach_absolute_time()>=wait_end)wait_error=ETIMEDOUT;
+        if(wait_error || ready){cam_irq_spin_drop(wait_old);if(wait_error)return wait_error;break;}
+        assert_wait_deadline((event_t)&cam_repeat.completed,THREAD_UNINT,wait_end);
+        cam_irq_spin_drop(wait_old);lck_mtx_unlock(&camera_irq_lock);
+        thread_block(THREAD_CONTINUE_NULL);lck_mtx_lock(&camera_irq_lock);
+    }
+    boolean_t old=cam_irq_spin_take();
+    if(!cam_repeat.enabled){cam_irq_spin_drop(old);return 0;}
+    int e=cam_repeat.error?cam_repeat.error:cam_irq.error;
+    if(!e && (!cam_repeat_stopped_identity() || cam_repeat.epoch!=epoch ||
+       cam_irq.accepting || cam_irq.count || cam_irq.busy || !cam_irq.owns))e=ESTALE;
+    if(!e)for(unsigned role=0;role<3;role++)cam_irq_wr(cam_irq_bank(role,0x100),cam_irq_bit(role));
+    cam_irq_spin_drop(old);if(e)return e;
+    uint64_t span;nanoseconds_to_absolutetime(10000000,&span);
+    uint64_t end=mach_absolute_time()+span;unsigned samples=0;
+    for(unsigned poll=0;poll<5000;poll++) {
+        e=cam_irq_power();if(!e)e=cam_irq_config(false);if(e)break;
+        old=cam_irq_spin_take();
+        e=cam_repeat.error?cam_repeat.error:cam_irq.error;
+        bool pending=false;
+        for(unsigned role=0;role<3 && !e;role++)
+            if((cam_irq_rd(cam_irq.gic,cam_irq_bank(role,0x200))|
+                cam_irq_rd(cam_irq.gic,cam_irq_bank(role,0x300)))&cam_irq_bit(role))pending=true;
+        samples=!e&&!pending?samples+1:0;
+        cam_irq_spin_drop(old);
+        if(e || samples==2)break;
+        if(mach_absolute_time()>=end){e=ETIMEDOUT;break;}
+        delay(2);
+    }
+    if(!e && samples!=2)e=ETIMEDOUT;
+    old=cam_irq_spin_take();cam_irq_mask_all();
+    if(e)cam_repeat_fault_locked(e);cam_irq_spin_drop(old);
+    if(!e)e=cam_irq_wait_rwp();if(!e)e=cam_irq_wait_idle();return e;
+}
 /* Real continuous same-buffer requeue. The native controller creates its
  * next request with actual exposure/gain; sequence/capture_id strictly move
  * forward through x9_camera_camsv_arm and per-page DEVICE synchronization. */
