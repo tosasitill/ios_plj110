@@ -25,6 +25,7 @@ struct x9m_job {
  unsigned op,slot,sim,len; uint64_t generation,token,deadline;
  bool answered,background,hold,follow; uint8_t req[X9Q_REQ];
  unsigned step,stored_len; uint64_t store_order; uint8_t stored_pdu[200];
+ bool ack_done,ack_reply_pending;uint16_t ack_error;uint64_t bridge_generation;
 };
 static x9m_job x9m_jobs[X9M_JOBS];
 static uint64_t x9m_store_order;
@@ -46,6 +47,21 @@ static bool x9m_init_hold;
 static bool x9m_live(unsigned slot,uint64_t generation){
  return slot<CBQ_MAX_CLIENTS&&x9q_clients[slot].generation==generation;
 }
+static bool x9m_ack_repeated(uint32_t local,uint32_t node,uint32_t port,const uint8_t *req,unsigned len){
+ const unsigned slot=local-CBQ_PORT_BASE;
+ if(node!=X9BB_NODE||local<CBQ_PORT_BASE||slot>=CBQ_MAX_CLIENTS||port!=X9BB_PORT_BASE+5||
+  !req||len<7||req[0]!=0||x9q_u16(req+3)!=0x37)return false;
+ // A submitted ACK owns this QMI transaction until its physical result
+ // and actual host response admission retire it. Even a malformed reuse
+ // must not get a second BAD/ARG before the original terminal response.
+ for(const x9m_job &j:x9m_jobs)if(j.op==X9M_ACK&&j.slot==slot&&
+  j.generation==x9q_clients[slot].generation&&x9q_u16(j.req+1)==x9q_u16(req+1)){
+  if(j.len!=len||memcmp(j.req,req,len))
+   printf("X9 SMS: SIM%u WMS37 txn %u changed reuse rejected; original ACK owner/result retained\n",j.sim+1,x9q_u16(req+1));
+  return true; // same-size comparison is bounded by the original validated request
+ }
+ return false;
+}
 static void x9m_number(x9q_packet &p,uint8_t tag,uint32_t value,unsigned bytes=4){
  uint8_t v[4]={(uint8_t)value,(uint8_t)(value>>8),(uint8_t)(value>>16),(uint8_t)(value>>24)};
  p.tlv(tag,v,bytes);
@@ -54,7 +70,29 @@ static void x9m_reply(unsigned slot,unsigned service,const uint8_t *req,uint16_t
  x9q_packet p(req,err);p.send(CBQ_PORT_BASE+slot,X9BB_PORT_BASE+service);
 }
 static unsigned x9m_service(const x9m_job &j){return j.op==X9M_REG?0x21:5;}
+static bool x9m_ack_response(const x9m_job &j){
+ x9q_packet p(j.req,j.ack_error);p.p[5]=(uint8_t)(p.n-7);p.p[6]=(uint8_t)((p.n-7)>>8);
+ const uint32_t room=CBQ_HDR+p.n;
+ uint8_t *owned=p.good?static_cast<uint8_t *>(IOMallocData(room)):nullptr;
+ bool admitted=owned&&bb_x9_sms_ack_result(CBQ_PORT_BASE+j.slot,X9BB_NODE,j.bridge_generation,
+  p.p,p.n,owned,room);
+ if(!admitted&&owned){bzero(owned,room);IOFreeData(owned,room);}
+ bzero(p.p,sizeof(p.p));return admitted;
+}
 static void x9m_error(x9m_job &j,uint16_t err){
+ if(j.op==X9M_ACK){
+  if(j.answered)return;
+  if(!x9m_live(j.slot,j.generation)){j.answered=true;return;}
+  // First terminal result wins, including a timeout while physical TX is
+  // still pending. A queue retry cannot convert it to a late success.
+  if(!j.ack_reply_pending){j.ack_reply_pending=true;j.ack_error=err;}
+  if(x9m_ack_response(j)){
+   j.answered=true;j.ack_reply_pending=false;
+   printf("X9 SMS: SIM%u command token %u WMS37 txn %u result %u host queue receipt; not durable storage proof\n",
+    j.sim+1,(unsigned)j.token,x9q_u16(j.req+1),j.ack_error);
+  }
+  return;
+ }
  if(!j.answered&&!j.background&&x9m_live(j.slot,j.generation))x9m_reply(j.slot,x9m_service(j),j.req,err);
  j.answered=true;
 }
@@ -94,6 +132,7 @@ static x9m_job *x9m_new(unsigned op,unsigned slot,unsigned sim,const uint8_t *re
  for(x9m_job &j:x9m_jobs)if(!j.op){
   bzero(&j,sizeof(j));j.op=op;j.slot=slot;j.sim=sim;j.len=len;j.background=background;
   j.generation=x9q_clients[slot].generation;memcpy(j.req,req,len);j.deadline=x9q_ms()+60000;
+  if(op==X9M_ACK)j.bridge_generation=bb_x9_sms_ack_identity(CBQ_PORT_BASE+slot,X9BB_NODE);
   return &j;
  }
  return nullptr;
@@ -441,6 +480,7 @@ static bool x9m_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
    }
   }
  }else if(service==5&&id==0x37){
+  if(x9m_ack_repeated(local,X9BB_NODE,port,req,len))return true;
   x9q_view info=x9q_tlv(req,len,1),failure=x9q_tlv(req,len,0x11),ims=x9q_tlv(req,len,0x12);
   if(!info.p||info.n!=6||info.p[4]!=1||info.p[5]>1)err=X9Q_ARG;
   if(failure.p&&(failure.n!=2||info.n!=6||info.p[5]))err=X9Q_ARG;
@@ -465,7 +505,7 @@ static bool x9m_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
    x9m_job *j=x9m_new(X9M_ACK,slot,sim,req,len);
    if(!j)err=X9Q_BUSY;
    else{
-    int rc=x9_md_mipc_message_reply(owner->token,info.p[5],cause);
+    int rc=j->bridge_generation?x9_md_mipc_message_reply(owner->token,info.p[5],cause):0;
     if(rc==1){j->token=owner->token;owner->replying=true;
      printf("X9 SMS: SIM%u command token %u host %s queued; waiting for physical ACK TX\n",
       sim+1,owner->token,info.p[5]?"ACK":"NACK");return true;}
@@ -611,15 +651,24 @@ static void x9m_poll(){
   }
   unsigned n=0;
   if(j.op==X9M_ACK){
+   if(j.ack_done){
+    // Pure host completion only: the native result was already consumed.
+    // No MD API, PDU replay or transfer to a replacement client here.
+    x9m_error(j,j.ack_error);if(j.answered)bzero(&j,sizeof(j));continue;
+   }
    int result=0,rc=x9_md_mipc_message_reply_take((uint32_t)j.token,&result);
    if(rc==1){
-    x9m_error(j,result?X9Q_NOT_READY:0);
+    j.ack_done=true;
+    // Native take can wait on the sleepable MD lock. Decide an as-yet
+    // unanswered result after that wait, not solely at poll entry.
+    const uint16_t terminal_error=result||(!j.answered&&!j.ack_reply_pending&&x9q_ms()>=j.deadline)?X9Q_NOT_READY:0;
+    x9m_error(j,terminal_error);
     printf("X9 SMS: SIM%u command token %u ACK physical TX result %d; not durable storage proof\n",
      j.sim+1,(unsigned)j.token,result);
     for(x9m_incoming &in:x9m_incoming_sms)if(in.token==j.token){
      if(result)in.held=true;else bzero(&in,sizeof(in));
     }
-    bzero(&j,sizeof(j));continue;
+    if(j.answered)bzero(&j,sizeof(j));continue;
    }
   }else{
    int taken=x9_md_mipc_take(j.token,p,sizeof(p),&n);
