@@ -1195,6 +1195,139 @@ def rv55_mem_wait_evidence(dram, init):
     return result
 
 
+def rv55_transport_send_evidence(tcm, dram, init):
+    """Captured send layers and optional ACK logging, not reply validation.
+
+    Exact full payload identities precede these cross-segment interpretations.
+    The post-receive getter reads a global log-disable byte, not packet state.
+    The TCM send wrapper selects an installed channel object, takes/gives its
+    queue handle and reaches a slot-copy/trigger path. Vendor arithmetic,
+    branches and epilogues stay opaque; software counters/return literals do
+    not establish remote receipt, current installation or DMA retirement.
+    """
+    result = dict(profile_match=False, runtime_channel_installation_proven=False,
+        runtime_transport_execution_proven=False, runtime_reply_status_proven=False,
+        runtime_cache_handoff_proven=False, runtime_dma_retirement_proven=False)
+    if (not init['profile_match'] or tcm is None or len(tcm) != 184320 or
+            hashlib.sha256(tcm).hexdigest() !=
+            'f59d646ba74fab1c40500139c40d67c97a0e8ab96c1569f738a0c7403cc49508' or
+            dram is None or len(dram) != 2057906 or
+            hashlib.sha256(dram).hexdigest() !=
+            '200294bca18891fe4cc8b8cc93489b586305f1acb80aeea176566f1726392c3f'):
+        return result
+    spans = (
+        ('DRAM', 'post_receive_getter_global_byte_only', 0x243674, 0x24367e),
+        ('DRAM', 'log_disable_property_argument_result_normalization_and_store', 0x243680, 0x243698),
+        ('DRAM', 'separate_profile_property_argument_word_store_and_branch', 0x243698, 0x2436ae),
+        ('DRAM', 'post_receive_global_flag_call_and_branch_to_copyback', 0x3051f6, 0x305206),
+        ('TCM', 'channel_initializer_global_queue_and_send_descriptor_base', 0x4836, 0x4860),
+        ('TCM', 'channel_initializer_send_queue_member_and_table_slot_store', 0x4860, 0x4886),
+        ('TCM', 'channel_initializer_receive_descriptor_base', 0x4886, 0x489e),
+        ('TCM', 'channel_initializer_receive_queue_member_and_table_slot_store', 0x489e, 0x48ca),
+        ('TCM', 'send_selector_limit_table_lookup_and_inner_call', 0x49a6, 0x49c4),
+        ('TCM', 'send_give_saved_inner_result_and_invalid_literal', 0x49c4, 0x49da),
+        ('TCM', 'send_take_handle_saved_arguments_and_opaque_tail', 0x49de, 0x4a14),
+        ('TCM', 'send_slot_capacity_argument_saves_and_range_gate', 0x4abe, 0x4ad0),
+        ('TCM', 'send_slot_predicate_arguments_and_result', 0x4ad4, 0x4af0),
+        ('TCM', 'send_slot_retry_and_visible_busy_literal', 0x4af0, 0x4b1e),
+        ('TCM', 'send_slot_copy_arguments_vendor_arithmetic_call_and_result_gate', 0x4b22, 0x4b46),
+        ('TCM', 'send_slot_trigger_arguments_call_and_opaque_return', 0x4b46, 0x4b7a),
+        ('TCM', 'send_copy_table_stride52_and_range_checks', 0x4b7c, 0x4bb8),
+        ('TCM', 'send_copy_firmware_local_encoded_operations_and_memcpy', 0x4bb8, 0x4be6),
+        ('TCM', 'send_copy_local_counter_increment_and_visible_zero', 0x4be6, 0x4bf2),
+    )
+    result.update(profile_match=True, profile='captured RV55 transport send and ACK-log gate ABI 1',
+        ack_log_gate=dict(getter=0x243674, global_byte=0x32c216,
+            getter_has_no_packet_or_request_reads=True, getter_is_not_reply_validator=True,
+            writer=0x24367e, property_address=0x244dfa,
+            property=cstring(dram, 0x244dfa - 0x200000),
+            property_call=0x24368a, property_helper=0x243060,
+            default_argument=0, normalize_nonzero=0x24368c, byte_store=0x243694,
+            separate_profile_property_address=0x244e1b,
+            separate_profile_property=cstring(dram, 0x244e1b - 0x200000),
+            separate_profile_call=0x2436a2, separate_profile_word=0x32c218,
+            separate_profile_store=0x2436a8,
+            generic_caller=0x305200, nonzero_branch=0x305204,
+            nonzero_branch_target=0x3052b2,
+            branch_skips_ack_log_before_response_copy=True,
+            property_helper_complete_semantics_and_runtime_value_proven=False,
+            complete_reply_status_validation_proven=False),
+        channel_initializer=dict(entry=0x4832,
+            global_queue_create_call=0x4838, global_queue_cell=0x223e8,
+            send_descriptor_base=0x2048c, send_descriptor_stride=24,
+            send_count_global=0x22518, send_count_load=0x4848,
+            send_id_member=12, send_queue_create_call=0x4868,
+            send_queue_create_target=0x6760, send_queue_member=16,
+            send_queue_store=0x4872, send_table_store=0x4878,
+            receive_descriptor_base=0x20550, receive_descriptor_stride=64,
+            receive_count_global=0x22510, receive_count_load=0x488a,
+            receive_id_member=12, receive_queue_create_call=0x48aa,
+            receive_queue_create_target=0x66c2, receive_queue_arguments=[1, 0, 3],
+            receive_queue_member=16, receive_queue_store=0x48b0,
+            receive_table_store=0x48be, table_base=0x223ec, table_stride=8,
+            send_table_member=0, receive_table_member=4,
+            captured_count_words=list(struct.unpack('<2I', span(tcm, 0x22510, 8))),
+            captured_send_count_word=struct.unpack('<I', span(tcm, 0x22518, 4))[0],
+            captured_zero_counts_are_not_runtime_installation_proof=True,
+            startup_count_writers_full_cfg_and_channel_overwrite_exclusion_proven=False,
+            static_send_descriptors=[dict(index=i, link_address=0x2048c+i*24,
+                raw_hex=span(tcm, 0x2048c+i*24, 24).hex(),
+                words=list(struct.unpack('<6I', span(tcm, 0x2048c+i*24, 24))))
+                for i in (0, 3)],
+            send_capacity_shift_proves_wire_word_units_not_hevc_dpb_capacity=True),
+        channel_wrapper=dict(entry=0x49a4, inner_entry=0x49da,
+            selector_max_literal=35, selector_range_gate=0x49aa,
+            table_base=0x223ec, table_stride=8, send_object_member=0,
+            object_load=0x49ba, null_gate=0x49bc, inner_call=0x49c0,
+            queue_handle_member=16, take_call=0x49ea, take_target=0x68e2,
+            take_wait_argument=-1, take_result_vendor_gate=0x49f0,
+            inner_tail_jump=0x4a00, inner_tail_target=0x4aba,
+            give_call=0x49cc, give_target=0x6788, give_arguments=[0, 0, 0],
+            saved_inner_result=0x49c2, visible_return_source=0x49d0,
+            invalid_literal=-3, invalid_literal_assignment=0x49d4,
+            take_failure_literal=-5, take_failure_assignment=0x4a0c,
+            failure_log_address=0x1832f, failure_log=cstring(tcm, 0x1832f),
+            epilogues_preserve_arguments_and_return_values_proven=False,
+            full_cfg_and_installed_channel_owner_proven=False,
+            static_table_entries=[dict(selector=i, link_address=0x223ec+i*8,
+                raw_hex=span(tcm, 0x223ec+i*8, 8).hex(),
+                words=list(struct.unpack('<2I', span(tcm, 0x223ec+i*8, 8))))
+                for i in (1, 17)],
+            captured_zero_table_is_not_runtime_missing_channel_proof=True),
+        slot_send=dict(entry=0x4aba, object_capacity_member=4,
+            saved_arguments=dict(a0='s6', a1='s2', a2='s3', a3='s4'),
+            capacity_gate=0x4acc, predicate_calls=[0x4ade, 0x4b08],
+            predicate_target=0x4cce, object_selector_member=0,
+            selector_low_mask=15, predicate_index_member=8,
+            retry_delay_call=0x4af6, retry_delay_target=0xcaf2,
+            retry_argument=1, retry_time_units_and_complete_policy_proven=False,
+            copy_call=0x4b38, copy_target=0x4b7a,
+            copy_capacity_shift=0x4b2a, copy_capacity_shift_bits=2,
+            copy_argument_vendor_operation=0x4b34,
+            trigger_call=0x4b62, trigger_target=0x4c92,
+            trigger_mask_shift=0x4b5e, trigger_post_call_saved_result=0x4b64,
+            visible_error_assignments=[dict(pc=pc, value=value) for pc, value in
+                ((0x4aca, -5), (0x4b1a, -6), (0x4b40, -99), (0x4b6a, -99))],
+            full_cfg_return_semantics_or_remote_receipt_proven=False),
+        slot_copy=dict(entry=0x4b7a, table_base=0x203f0, table_stride=52,
+            capacity_member=4, destination_base_member=12,
+            source_null_gate=0x4b84, range_check_pcs=[0x4b9c, 0x4ba8, 0x4bb2],
+            encoded_operation_pcs=[0x4bbe, 0x4bc6, 0x4bd8],
+            firmware_local_register_base=0x212f3000, register_command_offset=96,
+            register_literal=99, register_store=0x4bd2,
+            memcpy_call=0x4be2, memcpy_target=0x701c,
+            local_counter_member=40, local_counter_store=0x4bec,
+            visible_zero_assignment=0x4be8,
+            software_copy_counter_is_not_remote_ack_or_dma_retirement=True,
+            encoded_cache_semantics_or_xnu_cache_authority_proven=False),
+        instruction_evidence=[dict(name=name, segment=segment, link_address=start,
+            end_exclusive=end, payload_offset=start-(0x200000 if segment == 'DRAM' else 0),
+            raw_hex=span(dram if segment == 'DRAM' else tcm,
+                start-(0x200000 if segment == 'DRAM' else 0), end-start).hex())
+            for segment, name, start, end in spans])
+    return result
+
+
 def global_boundary_evidence(rv55, rv33):
     """Both cores consume +4c as a protection boundary, not an allocation.
 
@@ -2325,6 +2458,9 @@ def firmware(blob):
                 service_vp_evidence=rv55_vp_evidence(
                     service_payloads.get('tinysys-vcp-RV55_A_dram'), init),
                 service_mem_wait_evidence=rv55_mem_wait_evidence(
+                    service_payloads.get('tinysys-vcp-RV55_A_dram'), init),
+                service_transport_send_evidence=rv55_transport_send_evidence(
+                    service_payloads.get('tinysys-vcp-RV55_A'),
                     service_payloads.get('tinysys-vcp-RV55_A_dram'), init),
                 service_clock_evidence=rv55_clock_evidence(
                     service_payloads.get('tinysys-vcp-RV55_A_dram'), init),
