@@ -357,10 +357,18 @@ static int als_share(void)
 }
 static int als_timesync(void)
 {
- uint8_t p[48] = {0}; uint64_t counter;
- clock_sec_t sec; clock_usec_t usec; clock_get_calendar_microtime(&sec,&usec);
+ uint8_t p[48] = {0}; uint64_t counter, ticks, now;
+ clock_sec_t sec; clock_usec_t usec;
+ /* Android samples boot time, CNTVCT, sched_clock and calendar under
+  * local_irq_save. Pair the XNU calendar with its absolute-time sample
+  * and read CNTVCT before restoring IRQs, so a reschedule cannot split
+  * the host timestamp/counter pair. Convert/encode outside that window. */
+ boolean_t irq_enabled = ml_set_interrupts_enabled(FALSE);
+ clock_get_calendar_absolute_and_microtime(&sec,&usec,&ticks);
  __asm__ volatile("isb; mrs %0,cntvct_el0" : "=r"(counter) :: "memory");
- uint64_t now = als_now_ns(); als_put64(p,now); als_put64(p+8,counter); als_put64(p+16,now);
+ ml_set_interrupts_enabled(irq_enabled);
+ absolutetime_to_nanoseconds(ticks,&now);
+ als_put64(p,now); als_put64(p+8,counter); als_put64(p+16,now);
  als_put32(p+24,usec); als_put32(p+28,(uint64_t)sec%60);
  als_put32(p+32,((uint64_t)sec/60)%60); als_put32(p+36,((uint64_t)sec/3600)%24);
  /* Gregorian UTC. The Android wire field is rtc_time.tm_mon + 1, not
