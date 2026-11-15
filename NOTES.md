@@ -431,6 +431,7 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 - **验证**：最终**24项 LLVM22 ASan+UBSan 宿主测试通过**（实际transport/codec、C11+C++17），包含6项新增dial测试：golden/边界/同缓冲转换/显式profile、拒绝未知TLV、完整白名单、writer→fragmented/late CNF、失败不重发、无ID确认。`Builder.compile_one()` 的 **`X9Baseband.cpp.o` 与 `sweet_x9_gpu_dependencies.o` 均 True**，使用主树已有gitignored `x9_mdota.inc`，没有生成stub。无full compile/link/CI/boot.img/上机。
 - **产物全部已迁移保留至主 checkout**：`x9/out/android-calls-20261115-183941/`（原件与设备日志）；`x9/out/call-dial-analysis/`（RIL/Apple反汇编、symbol、host-tests-final.log、capture-replay.log/json、人工派生fixture与原redacted DUMP分开）；`x9/out/call-dial-compile/compile-one-final.log`及`compile-results-final.json`；`x9/out/call-dial-host-tests/`（24项宿主编译/用例产物）。原件与派生文件均不进git。
 - **明确未完成 / 下一步**：仅普通拨出的codec和受控transport子集，不是已可用通话。还没有iOS实时profile/state/ID producer；VOICE09仍不宣布、所有意外直达请求仍unsupported、无自动dial/approve、短信不变。下一步**只围绕拨出**离线完成完整状态→真实ID/QMI20响应→初始化/订阅，另核实`SpeechDriverOpenDSP`→SCP/Aurisys实际语音路由；不再要求用户来电测试，不拿10086当双向声音验收，不出盲测镜像。
+- **合入 / 最终验证**：代码`9483481`、交接`7d20fa3`保留，合并当前主树后 **`757507a` 已ff合入main并push origin/main**（两个功能远端分支也已push）。主checkout再次从干净owner运行**24项测试通过**，日志`x9/out/call-dial-analysis/host-tests-main.log`；全部私有产物已迁移，采集worker已停止。功能worktree/本地分支随后清理。没有调度CI，改动不命中现有Actions的`xnu/patches/**`路径；无新镜像/上机结果。
 
 ### 5.7 2026-11-13 音频：ADSP 自动 dsp-boot 镜像（分支 feat/audio-dsp-boot，worktree `.worktrees/audio-dsp-boot`）
 
