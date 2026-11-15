@@ -85,7 +85,7 @@ struct x9c_reg_publication {unsigned slot,count;const struct x9c_reg_wait *wait;
 static int x9c_reg_publish_callback(void *context){
  struct x9c_reg_publication &p=*static_cast<x9c_reg_publication *>(context);
  if(!x9w_control_ready||!x9c_reg_live(p.slot,*p.wait)||x9q_ms()>=p.wait->deadline)return 0;
- return bb_x9_call_registration(CBQ_PORT_BASE+p.slot,X9BB_NODE,p.frames,p.count)?1:0;
+ return bb_x9_call_registration(CBQ_PORT_BASE+p.slot,X9BB_NODE,p.frames,p.count,p.wait->deadline)?1:0;
 }
 /* Retry only local publication on queue/OOM loss. No MD request is repeated.
  * Result and retained events are an all-or-none, allocation-free MD->bb batch. */

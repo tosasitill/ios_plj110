@@ -1430,10 +1430,10 @@ extern "C" int coachz_baseband_qrtr(uint32_t dst_port, uint32_t src_node, uint32
 // transfers none of them and cannot grant a subscription or emit half a batch.
 struct bb_x9_call_frame { const uint8_t *sdu; uint32_t size; uint8_t *owned; };
 static bool bb_x9_call_registration(uint32_t dst_port,uint32_t src_node,
-                                    bb_x9_call_frame *frames,uint32_t count)
+                                    bb_x9_call_frame *frames,uint32_t count,uint64_t deadline_ms)
 {
   const uint32_t slot=dst_port-CBQ_PORT_BASE;
-  if(!bb_lock||!frames||!count||count>9||dst_port<CBQ_PORT_BASE||slot>=CBQ_MAX_CLIENTS)return false;
+  if(!bb_lock||!frames||!count||count>9||!deadline_ms||dst_port<CBQ_PORT_BASE||slot>=CBQ_MAX_CLIENTS)return false;
   for(uint32_t i=0;i<count;i++){
     const bb_x9_call_frame &f=frames[i];
     if(!f.sdu||!f.owned||f.size!=(i?11u:14u)||cbq_rd16(f.sdu+5)!=f.size-7)return false;
@@ -1445,8 +1445,12 @@ static bool bb_x9_call_registration(uint32_t dst_port,uint32_t src_node,
               f.sdu[10]<1||f.sdu[10]>4)return false;
   }
   IOLockLock(bb_lock);
+  // The sleepable bridge lock itself can cross the host deadline. Compare
+  // the full 64-bit monotonic clock at the actual queue mutation boundary,
+  // not bb_now_ms's diagnostic 32-bit clock or an earlier getter.
+  uint64_t ticks,ns;clock_get_uptime(&ticks);absolutetime_to_nanoseconds(ticks,&ns);
   const cbq_client &c=bb_qmux.client[slot];bool admitted=false;
-  if(c.used&&!c.release_pending&&!c.private_service&&c.service==9&&c.channel<2){
+  if(ns/1000000<deadline_ms&&c.used&&!c.release_pending&&!c.private_service&&c.service==9&&c.channel<2){
     bb_channel *ch=&bb_ch[c.channel==0?CBH_QMUX1:CBH_QMUX2];
     if(count<=BB_QUEUE-ch->count){
       const cbq_server *srv=cbq_server_find(&bb_qmux,c.service);

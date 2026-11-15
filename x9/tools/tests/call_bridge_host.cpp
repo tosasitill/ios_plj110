@@ -51,6 +51,7 @@ struct x9q_packet {
 static const unsigned CBQ_HDR=6;
 struct bb_x9_call_frame {const uint8_t *sdu;uint32_t size;uint8_t *owned;};
 static bool call_batch_accept=true,call_alloc_fail,call_alloc_poison,call_alloc_expire;
+static bool call_bb_expire;
 static unsigned call_allocs,call_frees,call_batches,call_batch_count;
 static void *IOMallocData(unsigned n){
  assert(!lock_depth);call_allocs++;
@@ -59,9 +60,10 @@ static void *IOMallocData(unsigned n){
  return call_alloc_fail?nullptr:malloc(n);
 }
 static void IOFreeData(void *p,unsigned){assert(!lock_depth);call_frees++;free(p);}
-static bool bb_x9_call_registration(uint32_t local,uint32_t node,bb_x9_call_frame *f,uint32_t count){
+static bool bb_x9_call_registration(uint32_t local,uint32_t node,bb_x9_call_frame *f,uint32_t count,uint64_t deadline){
  assert(lock_depth==1&&count&&count<=9);call_batches++;call_batch_count=count;
- if(!call_batch_accept)return false;
+ if(call_bb_expire)fake_ms=deadline;
+ if(!call_batch_accept||fake_ms>=deadline)return false;
  for(unsigned i=0;i<count;i++){
   assert(f[i].owned&&f[i].size==(i?11u:14u));
   if(!i){assert(f[i].sdu[0]==2&&x9cw_u16(f[i].sdu+3)==3&&!x9cw_u32(f[i].sdu+10));qmi_error=0;}
@@ -972,6 +974,15 @@ static void registration_alloc_deadline(){
  x9c_poll();assert(qmi_replies==1&&qmi_error==X9Q_NOT_READY&&!x9c_clients[0].handover);
 }
 static int call_publish_count(void *ctx){assert(lock_depth);(*static_cast<unsigned *>(ctx))++;return 1;}
+static void registration_queue_lock_deadline(){
+ bind_voice();x9w_control_ready=true;
+ x9c_init[1].stage=X9_CI_DONE;x9c_init[1].registered=1;handover_begin();
+ uint8_t p[32];handover_frame(p,0);x9mi_rx(p,32);
+ call_bb_expire=true;x9c_poll();
+ assert(call_batches==1&&call_batch_count==2&&!qmi_replies&&!qmi_indications);
+ assert(!x9c_clients[0].registered&&call_allocs==call_frees);
+ x9c_poll();assert(qmi_replies==1&&qmi_error==X9Q_NOT_READY&&!x9c_clients[0].handover);
+}
 static void registration_native_fence(){
  unsigned calls=0;assert(x9_md_mipc_call_publish(1,call_publish_count,&calls)==-1&&!calls);
  assert(x9_md_mipc_call_publish(0,nullptr,&calls)==-1&&!calls);
@@ -1005,6 +1016,7 @@ int main(int argc,char **argv){
   {"registration_queue_wait",registration_queue_wait},{"registration_queue_timeout",registration_queue_timeout},
   {"registration_alloc_oom",registration_alloc_oom},{"registration_alloc_poison",registration_alloc_poison},
   {"registration_alloc_deadline",registration_alloc_deadline},{"registration_native_fence",registration_native_fence},
+  {"registration_queue_lock_deadline",registration_queue_lock_deadline},
   {"request_whitelist",request_whitelist},{"no_auto_policy",no_auto_policy},{"command_roundtrip",command_roundtrip},
   {"failure_retained",failure_retained},{"duplicate_pending",duplicate_pending},{"changed_duplicate",changed_duplicate},
   {"duplicate_replied",duplicate_replied},{"overflow_isolated",overflow_isolated},{"bounded_tombstones",bounded_tombstones},
