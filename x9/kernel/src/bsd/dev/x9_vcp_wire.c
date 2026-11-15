@@ -275,11 +275,17 @@ int x9_vcp_parse_ring_snapshot(uint32_t abi, uint32_t kind,
         memset(out, 0, sizeof(*out));
         return ERANGE;
     }
-    if (r.count == X9_VCP_RING_CAPACITY) {
+    if (r.count == X9_VCP_RING_CAPACITY && kind != X9_VCP_RING_FREE_BS) {
         memset(out, 0, sizeof(*out));
         return EOVERFLOW;
     }
     distance = (r.write_index - r.read_index) & (X9_VCP_RING_CAPACITY - 1u);
+    /* The captured FB publisher leaves one slot empty. FREE_BS instead uses
+     * count==64 as its full guard and increments count after the token/index
+     * stores: a full BS ring has equal indices but still owns all 64 entries.
+     * Neither case confers live consumer exclusion or DMA retirement. */
+    if (r.count == X9_VCP_RING_CAPACITY && kind == X9_VCP_RING_FREE_BS && !distance)
+        distance = X9_VCP_RING_CAPACITY;
     if (r.count != distance) {
         memset(out, 0, sizeof(*out));
         return EINVAL;

@@ -196,6 +196,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 - **Ring观察窄修复**：fixed ABI/kind/slot-size下，immutable ring parser的`EINVAL`仅是count与(read/write) distance不一致。捕获的FW publisher分开写write-index/count，即使两份NC snapshot相等也可能停在中间；`vcontrol_recheck`现在将这一项视为`EAGAIN`，保留真实notification与pending，不修metadata、不消费、不称completion。ERANGE/满环EOVERFLOW仍失败关闭，offline parser契约不变。仅修改native源码再编译，`x9/out/hevc-ring-observation-final-20261115/compile-native.py` exit0/32 warnings，stdout/exit/result同目录；无其他构建、测试或设备动作。
 - **停止时恢复基线**：上述ring修复`41de9e6`已push；本次代码依次为`a219ead`、`316abfb`、`41de9e6`。仍在活动工作树，未merge main；没有运行中的编译/设备任务。下一具体工作是native ring消费与持续session/DPB/completion（不能以观察结果授予退役），并补现实cold NS/firmware/clock注册者。所有前面未完成项仍保留，目标active。
 
+#### 2026-11-15 FREE_BS 满环 ABI 修正（当前交接）
+
+- **新静态证据**：只读既有备份 `firmware-originals/vcp-real-android-active-b/vcp_b.img`，提取其 RV55 DRAM payload（2057906 B，link base `0x200000`）。FB publisher `0x30a074..0x30a13c` 的 full gate 是 `((write+1)&63)==read`、最大63项、count由distance派生；新定位 FREE_BS publisher `0x30b264..0x30b30e` 则在 `0x30b2ae/0x30b2b6` 以 shared count==64判满，stride8，token写入后先更新write-index、再写shared count+1。因此 **BS read==write/count64是FULL，不是empty**。原厂 `vdec_vcp_if.c:vdec_get_bs` 按count0判空，read-index++及count--，与FB不是同一个消费协议。此前“所有shared ring count64都是EOVERFLOW”描述只适用于FB，已由此证据纠正。
+- **实际代码**：wire immutable parser允许BS full并读head，FB count64仍EOVERFLOW，其他count/distance不一致仍EINVAL；不增加live写入/消费。`vcp_artifacts.py`在原完整payload身份门内记录BS发布指令spans、独立满环/count语义，并把旧泛称键限定为 `shared_fb_count64_not_host_full_ring`。**BS count是FW++/AP--跨端RMW**，NC映射、两次相等snapshot、b001或AP bus reservation都尚不能证明producer exclusion；不得借此开始持续消费或退休。
+- **可复查产物**：当前工作树 `x9/out/hevc-ring-producer-20261115/{rv55-dram.bin,source.json,fb-publisher-mapped-r2.asm,bs-publisher-r2.asm,output-profile-bs.json}`。raw文件要用 `r2 -a riscv -b 32 -m 0x200000 -e scr.color=0 -qc 'pd 105 @ 0x30b23a' <rv55-dram.bin>`；首轮仅设bin.baddr得到ffff的输出无效，未作固件证据。custom opcodes保留unknown，不推断完整wrap/控制流。本轮重跑定向静态 `rv55_output_evidence(dram,rv55_init_evidence(dram))`，profile_match=true、27 spans，输出新文件，未覆盖旧source.json。
+- **确切编译/下一步**：仅修改wire对象按正常Builder交叉编译，`x9/out/hevc-bs-ring-abi-20261115/{compile-wire.py,stdout.log,compile.exit,result.json}`，exit0/2 warnings；diff check通过。没有测试套件、CI run、full kernel link、新boot或设备操作，也未二次检查成功构建产物。下一动作是追 `0x30b264` 调用者与返回/异步时序，确认真实producer排他边界，再分别实现BS/FB durable host journal和live消费；持续session backend、cold NS/firmware/clock注册者、DPB/completion、线性输出和普通VT/CMPhoto/HEIF仍未完成，目标active。
+
 ### 5.1 已在设备上观察到能用（详情见旧 NOTES）
 
 - 启动到 SpringBoard，UFS 原生根盘读写，UFS HS-G5/FAST/RateB/2 lane（180）。

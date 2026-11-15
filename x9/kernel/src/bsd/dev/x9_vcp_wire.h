@@ -196,9 +196,12 @@ struct x9_vcp_ring_snapshot {
 /* ONE complete immutable/coherent host VSI slot, explicit captured ABI only.
  * Peek shared FREE_BS(+0, stride8, metadata+0x200), FREE_FB(+0x210) or
  * DISPLAY_FB(+0x820); FB stride24, metadata+0x600 relative to each ring.
- * Both indices must be <64; count must equal (write-read)&63. count64 returns
- * EOVERFLOW: stock's shared transfer tests read!=write, so full-ring semantics
- * cannot be inferred from the host count-based queue. No automatic repair,
+ * Both indices must be <64. FB count must equal (write-read)&63; count64
+ * returns EOVERFLOW. FREE_BS has a separately captured count==64 full guard,
+ * so equal indices+count64 is FULL, not empty; otherwise count equals the
+ * same distance. Shared BS count is a cross-endpoint RMW (FW++/AP--), unlike
+ * FB's derived count: a live consumer needs producer exclusion, not merely
+ * matching indices or equal snapshots. No automatic repair,
  * wrap of invalid index64, consumption, live write or full-slot stack copy.
  * Empty returns metadata with entry_present=0, no stale entry bytes. FB entry
  * token/timestamp/u16 field/u16 frame_type/u32 flags are raw observations;
