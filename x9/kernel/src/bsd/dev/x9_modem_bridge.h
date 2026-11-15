@@ -61,11 +61,21 @@ struct x9cw_inbound_state;
 int x9_md_mipc_call_incoming_snapshot(struct x9cw_inbound_state *state);
 /* Atomic outbound admission against a previously copied native baseline.
  * Same unique writer/token allocator, but checks the epoch/revision/count
- * again under the MD lock and at writer selection. One guarded staging
- * attempt per boot; lease survives CNF/client loss and blocks other CALL
- * mutations. No production release/action policy is enabled by this API. */
+ * again under the MD lock and at writer selection. A guarded staging lease
+ * survives CNF/client loss and blocks other CALL mutations except the
+ * guarded end path. Retirement requires END + owned empty + drained slots;
+ * this still does not supply a production DIAL profile or admission caller. */
 uint64_t x9_md_mipc_call_dial_submit(const uint8_t *frame, uint32_t length,
                                    const struct x9cw_outbound_state *baseline);
+/* Owned complete current snapshot + matching real MO epoch/ID. Only SIM2
+ * mode20 single ordinary call. Returns1 only with a valid target; no query,
+ * approval or mutation is started by the getter. End submit rechecks under
+ * MD lock and before TX. Uncertain sent owners persist across host timeout. */
+struct x9cw_end_target;
+int x9_md_mipc_call_end_snapshot(struct x9cw_end_target *target);
+uint64_t x9_md_mipc_call_end_submit(const uint8_t *frame, uint32_t length,
+                                  const struct x9cw_end_target *target);
+void x9_md_mipc_call_end_abandon(uint64_t token);
 int x9_md_mipc_call_reply(uint32_t token, unsigned approve, unsigned include_cause, uint32_t cause);
 int x9_md_mipc_call_reply_take(uint32_t token, int *result);
 /* x9_dual_sim=1: two fixed physical slots, indexed 0/1. Read-only AT via

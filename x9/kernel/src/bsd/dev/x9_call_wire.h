@@ -200,6 +200,23 @@ static inline int x9cw_qmi_action(const uint8_t *p,unsigned n,unsigned *id,unsig
     x9cw_u16(p+8)!=1||(x9cw_u16(p+3)!=0x21&&x9cw_u16(p+3)!=0x22))return 0;
  *id=x9cw_u16(p+3);*call_id=p[10];return 1;
 }
+/* Apple registerForQMIIndications::$_11, 1f1ad1b30..1b4c:
+ * VOICE44/tag01/u8, internal subscription2 -> wire1 (SIM2), else0.
+ * writer192ad04 writes ONE byte; size192acfc=4 includes the TLV header.
+ * Binding is local routing only, not MD registration/voice readiness. */
+static inline int x9cw_qmi_bind(const uint8_t *p,unsigned n,unsigned *sim){
+ if(!p||!sim||n!=11||p[0]||x9cw_u16(p+3)!=0x44||
+    x9cw_u16(p+5)!=4||p[7]!=1||x9cw_u16(p+8)!=1||p[10]>1)return 0;
+ *sim=p[10];return 1;
+}
+/* Original MD hangup_cnf9131d374..398 emits exactly tag0/result u32.
+ * Match the owned token, not a result from another action or an IND.
+ * CNF success means the command completed, NOT END or an empty call set. */
+static inline int x9cw_end_cnf(const uint8_t *p,unsigned n,uint64_t token,uint32_t *result){
+ if(!result||!token||token>65534||!x9cw_frame(p,n,0x906)||n!=24||
+    x9cw_u16(p+12)!=token||x9cw_u16(p+16)||x9cw_u16(p+18)!=4)return 0;
+ *result=x9cw_u32(p+20);return 1;
+}
 /* Staged adapter only: the caller MUST supply a verified single-call mapping.
  * Native id is opaque u32, not a cast of Apple's u8. Empty Android ANSWER
  * cannot target one member of a multi-call set; do not send in that case.

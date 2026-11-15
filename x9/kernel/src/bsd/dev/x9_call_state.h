@@ -212,6 +212,30 @@ static inline int x9cw_current(const uint8_t *p,unsigned n,struct x9cw_current *
  }
  *out=c;return 1;
 }
+/* A hangup targets a real observed MO epoch AND a complete owned current
+ * snapshot. RIL386180 accepts current state0..5: ACTIVE0/ALERTING3
+ * match our observed ordinary SIM2 mode20 call; initial ECPI130 is mode0
+ * and is deliberately not admitted as a mode20 end target.
+ * are admitted. No wildcard, inferred single count, default id or MT here.
+ * The snapshot revision is copied again and checked at writer selection. */
+struct x9cw_end_target {uint64_t epoch,revision;uint32_t native_id;unsigned sim;};
+static inline int x9cw_end_target(const struct x9cw_outbound_state *s,
+                                  const struct x9cw_current *c,
+                                  struct x9cw_end_target *out){
+ unsigned id;
+ if(!out||!s||!c||!x9cw_outbound_id(s,&id)||!s->epoch||
+    !s->count_known||s->native_count!=1||c->result||c->count!=1||s->mode!=20)return 0;
+ const struct x9cw_current_call *r=&c->calls[0];
+ if(r->id!=id||r->direction||r->mode!=20||r->multiparty||
+    !((s->ios_state==5&&r->state==3)||
+      (s->ios_state==3&&r->state==0)))return 0;
+ out->epoch=s->epoch;out->revision=s->revision;out->native_id=id;out->sim=1;return 1;
+}
+static inline int x9cw_end_matches(const struct x9cw_end_target *a,
+                                   const struct x9cw_end_target *b){
+ return a&&b&&a->epoch==b->epoch&&a->revision==b->revision&&
+        a->native_id==b->native_id&&a->sim==b->sim;
+}
 /* Join a single explicitly admitted DIAL with BOTH its owned0902 and the
  * next observed MO epoch. Capture's0902 has no ID. Caller retains its real
  * transport token independently through timeout/client loss/late CNF.

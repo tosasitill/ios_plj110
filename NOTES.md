@@ -476,6 +476,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 - **固定提交/最终kernel-only构建**：源码`0e2777d`；`build.py kernel --name x9-sms-stored-final-20261115` **exit0，98/98 overlay、link/strip成功**；仅kernel（文件名中的final指此窄修复固定提交构建，不是通话短信最终镜像）。产物`x9/out/x9-sms-stored-final-20261115/kernel.development.sweet`，console/exit在`sms-stored-compile/`。最新header C11 syntax及host严格C++ compile均exit0，人工用例未执行。收尾提交随功能分支合main并push；本树两个kernel目录、分析及编译日志全部迁回主checkout相同`x9/out/`路径后清树。下一步仍为CALL生产初始化/动作/状态发布与voice音频，不要求用户补来电或刷这个kernel-only产物。
 - **原件/限制**：私有分析/编译在功能树`x9/out/sms-delete-analysis/`（目录名称为最初离线删除研究，最终未开放删除）与`sms-stored-compile/`；Apple/RIL/MD asm只放out。WMS31修复不等于Messages真实来信/重开持久化/同token物理ACK或MO对端收到已验；VOICE09、生产通话生命周期和voice音频仍未闭合，**尚无通话短信最终修复镜像**。功能分支`fix/sms-stored-tlvs`，完成合main/push并保留out后清树，不覆盖audio/GPU/BT活动树。
 
+#### 2026-11-15 单普通 MO 挂断生产 owner / VOICE44 独立绑定
+
+- **范围/基线**：用户继续要求完成通话短信，不新增设备场景。新`feat/call-end-owner` / `.worktrees/call-end-owner`起点main`af62d8b`；只沿用已有Android拨出/呼入原件，短信WMS31修复保留不重复。未拨号、接听、清日志、改property、重启RIL、reboot/flash、写NV/分区；audio/GPU/BT树未改。
+- **新增原件依据**：Apple `registerForQMIIndications::$_11::operator()` `1f1ad1b30..1b4c`明确VOICE44/tag01/u8：internal subscription2→wire1；`192ad04..14`只写1B，`size=4`含3B TLV头，不是u32。普通`createEndThisCallReq::$_2::operator()` `19a1bf4..1cd8`只消费ResponseBase error，成功直接返回，不要求造response ID；其请求guard来自`19a00d4`的25000ms。MD `mipc_call_hangup_cnf9131d374..398`只写tag0/result u32。
+- **已接生产分发**：`x9c_request`接明确VOICE44本地绑定和VOICE21/tag1非零真实u8 ID，不是新增unused staging。VOICE独立bound/sim/generation、无默认SIM。只有实测SIM2/mode20/同MO epoch先发owned0909{}，完整090a成功count1、同native ID、direction0/mode20/multiparty0及ACTIVE0/ALERTING3匹配ECPI state，才构造原Android0905{mode0,id}。MD admission与唯一writer各复核target epoch/revision/id/sim，原DIAL lease只能在mutation CNF已消费后走该guarded挂断；不允许空ANSWER/多通话/MT/初始mode0或猜profile。
+- **确认/退休**：同token完整906才回原iOS transaction，MD失败/未知reply返回host error；CNF不造END/空CallList。删client/换generation/25s guard取消尚未writer-selected的905，selected/partial-TX原token继续等待迟到CNF、不回新client/不重发。实际END133 + mutation槽已消费之后仅一次readonly清理query；完整owned empty090a且epoch/revision仍有效、无mutation槽，才退休end/DIAL lease。stale/error清理query保持bounded hold，不循环探测；信令/声音未设备验收。
+- **编译**：真实recipe `Builder.compile_one()`两轮`X9Baseband.cpp.o`、`sweet_x9_gpu_dependencies.o`均True/exit0；最新host`clang++ -std=c++17 -c`和共享header C11严格syntax均exit0。新增7项人工源代码，只编译未执行，包含完整挂断/过期query/发送前guard/删除及迟到CNF向量。私有原件派生asm在树`x9/out/call-end-analysis/`；原编译日志/exit在`x9/out/call-end-compile/`，不入git。固定提交完整kernel构建另记下方。
+- **剩余/合入边界**：VOICE09仍不宣布；bootstrap/IND注册、生产DIAL策略、七字段CallList、MT动作及scene0/MD3D00语音DMA/AFE/iOS音频未闭合，**没有最终通话短信boot.img**。主checkout在本轮编译时已推进`f948f57`且另一个窗口正解决NOTES合并冲突（UU），不切换、不代解或覆盖其修改；本功能先独立提交/push，待main干净再rebase/合入。无CI run或设备结果，不要求用户补来电/刷kernel-only。
+
 ### 5.7 2026-11-13 音频：ADSP 自动 dsp-boot 镜像（分支 feat/audio-dsp-boot，worktree `.worktrees/audio-dsp-boot`）
 
 - feat/audio-bounded-fdt 已 ff 合入 main（`b25f4ca`），worktree/分支已删；`android-callsms-20261113`、`shimtest`、fdt2/3/4 的 usb-log 移到本 worktree 的 `x9/out/`。
