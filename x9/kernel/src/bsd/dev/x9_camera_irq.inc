@@ -247,6 +247,7 @@ static void cam_irq_sample(unsigned role,struct cam_irq_event *ev)
         if(cam_irq.sof_seen||ev->sof!=4||ev->channel&~4u||f->first_tag!=1||f->last_tag!=1||
            f->inner_sequence!=cam_irq.request.inner_sequence||f->group_tags[0]!=1||
            f->group_tags[1]||f->group_tags[2]||f->group_tags[3])ev->error=EIO;
+        if(!ev->error)ev->error=cam_repeat_channel_seen_locked(ev->channel);
         f->time=mach_absolute_time();f->sof_time=f->time;
         if(!ev->error){cam_irq.sof_frame=*f;cam_irq.sof_seen=true;}
     } else if(role==X9_CAM_IRQ_HYBRID) {
