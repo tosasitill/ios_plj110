@@ -32,6 +32,147 @@ static callback_fn original_advertising;
 typedef void (*read_size_fn)(uint32_t, uint32_t);
 static x9_cap16_features_fn original_states;
 static read_size_fn original_filter, original_pa_list;
+typedef uint32_t (*hci_init_fn)(const void *);
+typedef void (*acl_rx_fn)(uint32_t, uint32_t, const void *, uint32_t, const void *);
+typedef void (*hci_error_fn)(uint32_t, const void *);
+typedef void (*packet_rx_fn)(uint32_t, const void *, uint32_t, const void *);
+static hci_init_fn original_hci_init;
+static callback_fn original_host_buffer;
+static acl_rx_fn original_acl_rx;
+static hci_error_fn original_hci_error;
+static packet_rx_fn original_packet_rx;
+/* Native HCI config ABI is twelve bytes. Its registry owns a POINTER, not
+ * a copy, so this complete clone must outlive initialization and Reset. */
+static uint8_t host_config[12];
+static int host_flow_active;
+static void failed_read(uint32_t, uint64_t);
+struct host_credit { uint16_t handle, count; uint8_t blocked, reserved; };
+_Static_assert(sizeof(struct host_credit) == 6, "20H392 host RX credit ABI");
+
+static void credit_fatal(uint32_t status)
+{
+    /* 0902c0 preserves this status in its native fault payload; 090560 calls
+     * _abort_with_payload (NOT _os_fault_with_payload). Unlike the dedicated
+     * timeout callback, it does not relabel enqueue/transport errors 0x26d.
+     * Never resend a credit whose UART delivery might already have begun. */
+    fprintf(stderr, "X9 H4: host ACL credit failed status=0x%x; native fatal\n", status);
+    ((reset_fn)addr(0x1000902c0))(status);
+}
+
+static uint32_t hci_init(const void *configuration)
+{
+    if (*(uint32_t *)addr(0x100863b20)) return original_hci_init(configuration);
+    typedef const void *(*get_fn)(uint32_t);
+    const void *source = configuration ? configuration :
+        ((get_fn)addr(0x1001c2344))(0x2e);
+    if (!source) return original_hci_init(NULL); /* native invalid config */
+    if (source != host_config) memcpy(host_config, source, sizeof(host_config));
+    host_config[7] = 1; /* BR/EDR ACL completed-packet path */
+    host_config[8] = 0; /* SCO flow OFF: leave native HCI audio policy alone */
+    host_config[9] = 1; /* LE ACL has its own tally and return-credit gate */
+    host_flow_active = 0;
+    /* The original non-NULL path registers config 2e BEFORE module init.
+     * 1c2388 refuses an already initialized module: do not register here
+     * from HostBufferSize, nor change only the 0c31 command's wire byte. */
+    return original_hci_init(host_config);
+}
+
+static void host_buffer(void *context)
+{
+    /* Every native Reset chain reads SupportedCommands again before 0c33.
+     * 0c31/33/35 are bitmap byte10 masks20/40/80, independently checked via
+     * native descriptors. Unsupported means a REAL native init failure. */
+    if (!x9_cap16_supports(0x0c31) || !x9_cap16_supports(0x0c33) ||
+        !x9_cap16_supports(0x0c35)) {
+        failed_read(0x274, 0x1006edfed);
+        return;
+    }
+    original_host_buffer(context);
+}
+
+static void completed_packets(void *storage)
+{
+    struct host_credit *credit = storage;
+    if (!credit->count || credit->blocked) return; /* original defer gate */
+    if (!host_flow_active) { credit_fatal(0x67); return; }
+    typedef uint32_t (*submit_fn)(uint32_t, reset_fn, ...);
+    /* ID5f's ORIGINAL special marshaller emits one handle and two LE16
+     * fields; the original queue bypasses normal command credits for 0c35.
+     * Its response parser is 109290/no-op. Do not invent a completion or
+     * consume an extra command credit. Successful ENQUEUE alone clears the
+     * tally; asynchronous transport failures go through hci_error below. */
+    uint32_t status = ((submit_fn)addr(0x10010ca98))(0x5f, NULL,
+        (uint64_t)credit->handle, (uint64_t)credit->count);
+    if (status) { credit_fatal(status); return; }
+    credit->count = 0;
+}
+
+static void acl_rx(uint32_t handle_flags, uint32_t length, const void *payload,
+                   uint32_t type, const void *timestamp)
+{
+    original_acl_rx(handle_flags, length, payload, type, timestamp);
+    /* The stock function drops zero-length packets before its tally. They
+     * still use a controller->host packet credit when the handle is live.
+     * Nonzero packets retain the entire native callback and credit path. */
+    if (length || !host_flow_active || !*(uint32_t *)addr(0x100863b20) ||
+        *(uint32_t *)addr(0x100863918) != 2) return;
+    typedef const uint8_t *(*lookup_fn)(uint32_t);
+    uint32_t handle = handle_flags & 0xfff;
+    const uint8_t *connection = ((lookup_fn)addr(0x1001163a4))(handle);
+    /* Lookup excludes disconnected BR tombstones (state7). Core54 HCI4.3
+     * frees the disconnected handle's host buffers without an extra 0c35.
+     * Preserve native unknown-handle drops; never manufacture an ACK for
+     * an unestablished/removed handle. Unsupported conn types stay native. */
+    if (!connection || (connection[2] != 0 && connection[2] != 4)) return;
+    struct host_credit *credit = (void *)addr(connection[2] == 0 ?
+        0x10084f958 : 0x10084f95e);
+    credit->handle = (uint16_t)handle;
+    credit->count++;
+    completed_packets(credit);
+}
+
+static void hci_error(uint32_t status, const void *metadata)
+{
+    /* 115eb4 passes queue+0x10, with opcode LE16 at metadata+4. This same
+     * ABI is used by every original 11a220 caller. A successful callback or
+     * any other opcode MUST preserve the full original error dispatch. */
+    uint16_t opcode = 0;
+    if (metadata) memcpy(&opcode, (const uint8_t *)metadata + 4, sizeof(opcode));
+    if (status && opcode == 0x0c35 && host_flow_active) {
+        credit_fatal(status);
+        return;
+    }
+    original_hci_error(status, metadata);
+}
+
+static void packet_rx(uint32_t h4_type, const void *packet, uint32_t total,
+                      const void *timestamp)
+{
+    /* 690ec..690fc passes type separately and data at H4-object+0xa.
+     * Complete/Status here each have a 2-byte event header plus 4 bytes.
+     * ID5f's original no-op/orphan path can discard genuine 0c35 errors:
+     * catch ONLY the exact standard failure, before native dispatch.
+     * Successful 0c35 normally emits no event; never await/invent one. */
+    if (host_flow_active && h4_type == 4 && packet && total == 6) {
+        const uint8_t *p = packet;
+        uint16_t opcode = 0; uint8_t status = 0;
+        if (p[1] == 4 && p[0] == 0x0e) {
+            opcode = (uint16_t)(p[3] | ((uint16_t)p[4] << 8));
+            status = p[5]; /* native 1198a8/1198cc */
+        } else if (p[1] == 4 && p[0] == 0x0f) {
+            status = p[2]; /* native 119110..119120 */
+            opcode = (uint16_t)(p[4] | ((uint16_t)p[5] << 8));
+        }
+        if (opcode == 0x0c35 && status) {
+            typedef uint32_t (*status_fn)(uint32_t);
+            credit_fatal(((status_fn)addr(0x10014a4cc))(status));
+            return;
+        }
+    }
+    /* Includes malformed, unrelated and successful events, ACL/SCO/ISO:
+     * preserve their exact original parser, callbacks and timestamp. */
+    original_packet_rx(h4_type, packet, total, timestamp);
+}
 
 static void failed_read(uint32_t status, uint64_t label)
 {
@@ -91,6 +232,13 @@ static void host_flow_complete(uint32_t status)
      * Its log-enabled path explicitly MOVs w0,0, and log-disabled paths
      * leak the logger's return value. Pass the incoming status instead;
      * the sequencer's own error logger retains the exact status and label. */
+    host_flow_active = 0;
+    if (!status) {
+        const uint8_t *configuration = *(const uint8_t **)addr(0x100863910);
+        if (configuration != host_config || configuration[7] != 1 ||
+            configuration[8] != 0 || configuration[9] != 1) status = 0x67;
+        else host_flow_active = 1; /* real 0c31 completion, not config intent */
+    }
     init_complete(status, 0x1006ee068);
 }
 
@@ -99,6 +247,7 @@ static void reset_complete(uint32_t status)
     /* Native HCI Reset starts a new capability epoch even on failure. Keep
      * its log/special-0x26d handling and propagate status through the patched
      * native tail. Never retain a previous controller's cached capabilities. */
+    host_flow_active = 0;
     x9_cap16_reset();
     original_reset(status);
 }
@@ -117,6 +266,7 @@ static void vendor_init(uint32_t chip, void *context)
     memset((void *)addr(0x100850790), 0, 0x28); /* vendor callback bridge */
     *(uintptr_t *)addr(0x10084f930) = 0; /* vendor init parser */
     *(uintptr_t *)addr(0x10084f950) = 0; /* vendor sleep parser */
+    host_flow_active = 0;
     x9_cap16_reset();
     /* Keep registered context 0x100850788 and generic callback 0x1008507b8.
      * Do not install no-op vendor functions returning false success. */
@@ -166,6 +316,81 @@ static uintptr_t success_trampoline(vm_address_t base, const struct edit *e)
     return trampoline(base, &success);
 }
 
+static int host_flow_contract(void)
+{
+    /* Read-only original contracts, beyond the six entry prologues. These
+     * guard the config lifetime, unchanged packet capacities/queue bypass,
+     * error metadata and real status->fatal route before ANY text write. */
+    static const struct {
+        uint64_t va; uint32_t words[8]; unsigned count;
+    } guards[] = {
+        {0x1000f35f0, {0xd2800000,0x9400584c}, 2}, /* Init(NULL) caller */
+        {0x10010975c, {0xb4000220}, 1}, /* non-NULL config registration */
+        {0x100109794, {0xaa1303e0,0x528005c1,0x9402e2fb,0x528005c0}, 4},
+        {0x10010987c, {0xb900baa8}, 1}, /* mark module initialized */
+        {0x1001c23bc, {0xaa1303e0,0x94000510,0x34000240}, 3}, /* setter rejects live module */
+        {0x10010b99c, {0x94004c90,0x90003ad4,0x52800028,0x39247288}, 4},
+        {0x10010b9b0, {0xa90123e8,0xa9004fe9,0x100063c1,0xd503201f,
+                       0x52800bc0,0x94000435}, 6}, /* host packet counts1/1 */
+        {0x10011d084, {0xb94b2108,0xd0003a29,0xd503201f,0xb9491929,
+                       0x7100011f,0x7a421920,0x54000220}, 7},
+        {0x10011d0e0, {0xaa0103f5,0x34001cc1}, 2}, /* zero-length native drop */
+        {0x10011d1c4, {0x7100211f,0x540005e0,0x7100111f,0x54000820}, 4},
+        {0x10011d3c4, {0xf9448908,0x39401d08,0x34000588}, 3}, /* BR config+7 */
+        {0x10011d464, {0xf9448908,0x39402508,0x34000088}, 3}, /* LE config+9 */
+        {0x10011d4b4, {0x39401008,0x340000a8}, 2}, /* original blocked gate */
+        {0x10011d4d8, {0x79400269,0xa90023e9,0x52800be0,0xd2800001,0x97ffbd6c}, 5},
+        {0x10011fa80, {0x90003988,0x91256108,0x7900091f,0xb900011f}, 4}, /* BR tally +4=0 */
+        {0x10011faa0, {0x90003988,0x91257908,0x394043bb,0xb900011f,0x7900091f}, 5}, /* LE +4=0 */
+        {0x10011fad0, {0x51001008,0x12003d09,0x6b28235f,0x1a893348,0x79001b88}, 5}, /* payload cap */
+        {0x10011ebdc, {0xb0003a28,0x79533900,0xd65f03c0}, 3}, /* capped payload getter */
+        {0x100115d10, {0x7130d73f,0x540000a0}, 2}, /* 0c35 cmd-credit bypass */
+        {0x100115e74, {0x79402a88,0x7130d51f,0x540000e0}, 3},
+        {0x100115eb0, {0x91004101,0xaa1303e0,0x940010da}, 3}, /* error metadata */
+        {0x1001123c4, {0x71017c1f,0x54000460}, 2},
+        {0x100112454, {0x10fb71e0,0xd503201f,0x17ffffc6}, 3}, /* ID5f no-op */
+        {0x1001163b4, {0x3940d809,0x71001d3f,0x54000080,0x79400009,
+                       0x6b08013f,0x540006a0}, 6}, /* excludes disconnected */
+        {0x1000690ec, {0x395fe900,0x91002901,0x79401102,0x910003e3,0x9402bd20}, 5},
+        {0x100119110, {0xf94013e9,0x1100050a,0x79005bea,0x38686920,0x9400c4eb}, 5},
+        {0x1001198a8, {0x786b6954,0x11000d0b,0x79005beb}, 3},
+        {0x1001198c8, {0x92403d68,0x38686940,0x9400c2ff}, 3},
+        {0x10009038c, {0x29004ec9}, 1}, /* realstatus faultpayload */
+        {0x100090504, {0x29004c08}, 1},
+        {0x10009055c, {0xd2800005,0x94173e48}, 2}, /* _abort_with_payload */
+        {0x10014a4cc, {0x7101081f,0x540000c8,0x93401c08,0x90002969}, 4},
+    };
+    static const uint8_t default_config[12] = {
+        0x00,0x04,0x10,0x0a,0x0a,0x2d,0x10,0x00,0x00,0x00,0x00,0x00
+    };
+    /* Descriptor pointer fields have dyld chained fixups. Compare only
+     * pointer-free opcode/SupportedCommands/format prefixes, not raw ptrs. */
+    static const uint8_t descriptors[3][8] = {
+        {0x06,0x00,0x31,0x0c,0x20,0x0a,0x01,0x00},
+        {0x06,0x00,0x33,0x0c,0x40,0x0a,0x07,0x00},
+        {0x0e,0x00,0x35,0x0c,0x80,0x0a,0x05,0x00},
+    };
+    for (size_t k = 0; k < sizeof(guards)/sizeof(guards[0]); k++) {
+        if (memcmp((void *)addr(guards[k].va), guards[k].words, guards[k].count*4)) {
+            fprintf(stderr, "X9 vendor: unexpected host-flow contract at %llx; no text changed\n",
+                    (unsigned long long)guards[k].va);
+            return -1;
+        }
+    }
+    if (*(uint32_t *)addr(0x100863b20) ||
+        memcmp((void *)addr(0x10067684e), default_config, sizeof(default_config))) {
+        fprintf(stderr, "X9 vendor: unexpected host-flow config/lifetime; no text changed\n");
+        return -1;
+    }
+    for (size_t k = 0; k < 3; k++) {
+        if (memcmp((void *)addr(0x100845198 + k*24), descriptors[k], 8)) {
+            fprintf(stderr, "X9 vendor: unexpected host-flow descriptor; no text changed\n");
+            return -1;
+        }
+    }
+    return 0;
+}
+
 int x9_vendor16_install(intptr_t slide)
 {
     /* Opt-in only; build manifest remains non-stageable until board handoff,
@@ -178,7 +403,8 @@ int x9_vendor16_install(intptr_t slide)
         return -1;
     }
     image_slide = slide;
-    struct edit edits[40] = {
+    if (host_flow_contract()) return -1;
+    struct edit edits[44] = {
         /* Base and derived constructors: use THIRD_PARTY_DONGLE enum0.
          * Derived constructor's type-dependent BCM capability defaults must
          * not survive a base-only change to object+0x260. */
@@ -234,11 +460,19 @@ int x9_vendor16_install(intptr_t slide)
          * verbatim as Host_ACL_Data_Packet_Length, which EXCLUDES the
          * header. Do not add those four bytes back into the advertised
          * payload limit. Keep the real controller capability and credits,
-         * RX layout, native completion status and flow-control policy.
+         * RX layout and native completion status. Standard ACL host flow
+         * below makes the controller segment to this real payload limit.
          * ADD w9,w0,#4 -> MOV w9,w0; original opcode must match preflight. */
         {0x10010b9ac, {0x11001009}, {0x2a0003e9}, 1},
+        /* Keep all previous indices. New complete native entry hooks. */
+        {0x100109724, {0xa9bd57f6,0xa9014ff4,0xa9027bfd,0x910083fd}, {0}, 4},
+        {0x10010b92c, {0xd10143ff,0xa90257f6,0xa9034ff4,0xa9047bfd}, {0}, 4},
+        {0x10011d4a4, {0xd100c3ff,0xa9014ff4,0xa9027bfd,0x910083fd}, {0}, 4},
+        {0x10011d060, {0xd10183ff,0xa90167fa,0xa9025ff8,0xa90357f6}, {0}, 4},
+        {0x10011a220, {0xd102c3ff,0xa90857f6,0xa9094ff4,0xa90a7bfd}, {0}, 4},
+        {0x10011857c, {0xd10343ff,0xa9095ff8,0xa90a57f6,0xa90b4ff4}, {0}, 4},
     };
-    unsigned count = 25;
+    unsigned count = 31;
     if (x9_cap16_hook_count > sizeof(edits)/sizeof(edits[0]) - count) return -1;
     for (size_t k = 0; k < x9_cap16_hook_count; k++) {
         const struct x9_cap16_hook *h = &x9_cap16_hooks[k];
@@ -268,6 +502,11 @@ int x9_vendor16_install(intptr_t slide)
     original_states = (x9_cap16_features_fn)success_trampoline(tramp+256, &edits[17]);
     original_filter = (read_size_fn)success_trampoline(tramp+288, &edits[18]);
     original_pa_list = (read_size_fn)success_trampoline(tramp+320, &edits[19]);
+    original_hci_init = (hci_init_fn)trampoline(tramp+352, &edits[25]);
+    original_host_buffer = (callback_fn)trampoline(tramp+384, &edits[26]);
+    original_acl_rx = (acl_rx_fn)trampoline(tramp+416, &edits[28]);
+    original_hci_error = (hci_error_fn)trampoline(tramp+448, &edits[29]);
+    original_packet_rx = (packet_rx_fn)trampoline(tramp+480, &edits[30]);
     uint32_t bridge[10] = {
         0xaa1403e0, /* MOV x0,x20: actual status preserved across native logs */
         0x580000b0, /* LDR x16, literal +24 */
@@ -279,7 +518,7 @@ int x9_vendor16_install(intptr_t slide)
     uintptr_t publish = (uintptr_t)x9_cap16_publish, epilogue = addr(0x10010c124);
     memcpy(bridge+6, &publish, 8); memcpy(bridge+8, &epilogue, 8);
     memcpy((void *)(uintptr_t)(tramp+192), bridge, sizeof(bridge));
-    sys_icache_invalidate((void *)(uintptr_t)tramp, 352);
+    sys_icache_invalidate((void *)(uintptr_t)tramp, 512);
     kr = vm_protect(mach_task_self(), tramp, page, FALSE, VM_PROT_READ|VM_PROT_EXECUTE);
     if (kr) { vm_deallocate(mach_task_self(), tramp, page); return -1; }
     jump_words(edits[3].after, (uintptr_t)vendor_init);
@@ -297,6 +536,12 @@ int x9_vendor16_install(intptr_t slide)
     jump_words(edits[21].after, (uintptr_t)subrating_complete);
     jump_words(edits[22].after, (uintptr_t)default_subrating_complete);
     jump_words(edits[23].after, (uintptr_t)host_flow_complete);
+    jump_words(edits[25].after, (uintptr_t)hci_init);
+    jump_words(edits[26].after, (uintptr_t)host_buffer);
+    jump_words(edits[27].after, (uintptr_t)completed_packets);
+    jump_words(edits[28].after, (uintptr_t)acl_rx);
+    jump_words(edits[29].after, (uintptr_t)hci_error);
+    jump_words(edits[30].after, (uintptr_t)packet_rx);
 
     /* Preflight ALL pages before modifying ANY instruction. COW mappings
      * preserve the original Apple executable on disk. Constructor installs

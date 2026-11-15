@@ -59,6 +59,9 @@ static bool all(const uint16_t *opcodes, unsigned count)
     for (unsigned i = 0; i < count; i++) if (!supports(opcodes[i])) return false;
     return true;
 }
+/* Read-only native command discovery; false before/after a failed read or
+ * reset. Do not let a transport policy substitute an Android bitmap. */
+int x9_cap16_supports(uint16_t opcode) { return supports(opcode); }
 static void advance(uint32_t status)
 {
     ((advance_fn)at(0x1001094ac))(status, at(0x1006edbc0));

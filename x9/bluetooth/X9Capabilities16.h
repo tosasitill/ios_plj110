@@ -14,6 +14,7 @@ extern const size_t x9_cap16_hook_count;
 void x9_cap16_configure(intptr_t, x9_cap16_features_fn, x9_cap16_features_fn);
 void x9_cap16_reset(void);
 void x9_cap16_supported(uint32_t);
+int x9_cap16_supports(uint16_t);
 void x9_cap16_le_entry(uint32_t, const void *);
 void x9_cap16_local_entry(uint32_t, const void *);
 void x9_cap16_publish(uint32_t);
