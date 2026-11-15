@@ -610,6 +610,40 @@ epoch映射或运行dial admission，也不绕过Bambi owner/MediaSession门直�
 100694eac/100696fcc称UUID consumer，不再采用。旧10068f434不是最终END consumer，
 旧END CTState8已撤销；准确值为Call+a0=6，而非FSM12/5或SRVCC+a4。
 
+#### 2026-11-16 typed拨出状态发布：TRYING不发布，RINGING实际是CallAlerting
+
+原 `IMSCallModel` 的 CallEventDelegate address point `10159c718` 中，
+`+30→1007c55f0` 是 TRYING，`+38→1007c57d0` 是 RINGING。
+TRYING 按真实 UUID 经 `1007c4490` 查找后仅记日志；原 literal `1013ff6c3`
+明确为 `IMS Incoming Indication: TRYING ... Ignoring.`，没有模型 state sync 或通知。
+不能把 MD ECPI130 送 TRYING 后便称拨号状态已发布。
+
+RINGING 的真实执行链是 `1007c57d0→UUID lookup→command+30/10019f148`
+`→100dda270→10019ce40→10068e548→10068d734→10104879c`，
+最后取真实 `Call+338` 的 FSM，进入 `10104e2c8→10104e890→10104eab4`。
+该事件的原日志 literal `10127ac81` 是 **CallAlerting**，不是凭 callback 名称
+解释为呼入 Ringing。`10104e348` 的临时 payload byte5 不当作最终 CallState。
+
+dispatcher 读取 `FSM+18`，以 `(state+1)*8` 索引 BSS 表 `101673178`；
+原初始化函数 `10105e078` 为表 `101673180` 的13个 state entries 填入 handler。
+只有 Dialing4 的 entry（`1016731a0`）是 `10104ec28`，其他 entries 是
+返回0的 `10104ec20`。合法 handler 先复核前态4，再经 `FSM+8` 的强 status
+delegate virtual+28 发送 **CallState Alerting7**，随后提交 FSM Alerting6。
+因此前态、FSM状态、CT CallState、QMI wire event 编号是不同契约，不能互抄。
+
+status delegate `1006984b8→100699dd0→101018528` 保留原 owned 参数、
+weak owner 与真实 UUID lookup `101005398`，在 `101018718` 写入 `Call+a0=7`；
+其后的维护与 `100ff81c4` 通知仍须保留，`Call+2d4` 可在写入后提前分支。
+InProgress 的 command+38 另经 `10068e834→10068e6ec`，不是上述 RINGING 链。
+
+这是原件静态闭合，不是已经安装 MD producer 或用户态 provider。仍须真实
+`(clientId, UUID, epoch, native ID)` 映射、可达 admission、完整生命周期和媒体准入；
+不直接广播 ACTIVE，不构造未知的七byte CallList46，不把 void callback 当最终UI验收。
+新原件切片/派生契约在 gitignored `x9/out/calllist-production/`，
+`typed-publication-contract.json` 保存精确地址/字节；表来源复用
+`x9/out/calllist-handler-closure-analysis/typed-model/stateengine-tables-init-range.asm`。
+无测试、设备操作或新镜像。
+
 #### typed初始化 / 注册 / 注销的原件契约
 
 `createIMSClient_sync1f2e6803c→factory+38/100315998→CreateNewClient1b7c43a00`
