@@ -6987,6 +6987,7 @@ sweet_x9_prepare_wallpaper_collections(proc_t p,user_addr_t scratch,user_addr_t 
 #include "x9_microphone_install.inc"
 #include "x9_haptic_install.inc"
 #include "x9_speaker_install.inc"
+#include "x9_bluetooth_root.inc"
 /* Explicit opt-in: seed migration preferences before original launchd starts.
  * Preserve any previous preference through a same-directory hard-link backup. */
 static int
@@ -8877,6 +8878,8 @@ load_init_program_at_path(proc_t p, user_addr_t scratch_addr, const char* path)
 	 if(haptic_error)printf("X9 HAPTIC HAL: unavailable errno=%d; continuing boot without synthetic actuator\n",haptic_error);
 	 int speaker_error=x9_speaker_install(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
 	 if(speaker_error)printf("X9 SPEAKER HAL: unavailable errno=%d; continuing boot without output publication\n",speaker_error);
+	 int bt_root_error=x9_bluetooth_root(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);
+	 if(bt_root_error)printf("X9 BT ROOT: not applied errno=%d; continuing boot\n",bt_root_error);
 	}
 	sweet_x9_init_stage="objc-trampolines";
 	error=sweet_x9_prepare_objc_trampolines(p,scratch_addr+3*sizeof(user64_addr_t),scratch_end);

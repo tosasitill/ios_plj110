@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Build one complete native-Bluetooth candidate; never install, boot or probe.
 
-Full overlay kernel -> native userland/jobs -> offline root payload -> ONE
-boot.img. Completion is published only after every normal build command exits
+Native userland/jobs -> offline root payload -> (optional) kernel-embedded
+root payload -> full overlay kernel -> ONE boot.img. With boot-arg
+x9_bt_root=1 the kernel's PID1 installs the seven root files itself before
+launchd starts (x9_bluetooth_root.inc); a second boot-rollback/boot.img with
+x9_bt_root=2 restores the Apple originals. Completion is published only after every normal build command exits
 zero. There is no new-artifact hash, unpack, disassembly or test-suite pass.
 """
 import argparse
@@ -153,6 +156,13 @@ def build(a):
                        for token in opts['boot_args'])
             or not all(isinstance(token, str) and '\0' not in token for token in opts['options'])):
         raise ValueError('invalid complete boot configuration')
+    root_args = [t for t in opts['boot_args'] if t.partition('=')[0] == 'x9_bt_root']
+    if root_args not in ([], ['x9_bt_root=1']):
+        raise ValueError('only x9_bt_root=1 selects the kernel root installer (=2 is the generated rollback image)')
+    embed_root = bool(root_args)
+    if embed_root != bool(a.apple_originals):
+        raise ValueError('x9_bt_root=1 and --apple-originals must be given together')
+    apple = repository_path(a.apple_originals) if embed_root else None
     if not builder.bluetooth_init_enabled(opts['boot_args']):
         raise ValueError('complete candidate requires explicit x9_bt=1 x9_bt_init=1 x9_bt_fc=1')
     builder.require_bluetooth_inputs(cfg, opts['boot_args'])
@@ -207,18 +217,33 @@ def build(a):
             run([sys.executable, '-I', X9 / 'build/prepare-local.py', '--check'], log)
             patches = verify_isolated_source(dxb, a.abi, out, log)
             common = ['--config', config_snapshot, '--boot-config', boot_snapshot]
-            stage = 'full-overlay-kernel'
-            run([sys.executable, '-I', X9 / 'build/build.py', 'kernel', *common,
-                 '--name', a.name + '/kernel', '--jobs', str(a.jobs)], log)
             stage = 'native-userland-and-launch-jobs'
             run([sys.executable, '-I', X9 / 'bluetooth/build.py', '--developer-dir', cfg['developer_dir'],
                  '--launchd-source', job_snapshot, '--launchd-cache-source', job_snapshot / CACHE_NAME,
                  '--out', runtime], log)
             stage = 'offline-root-payload'
             run([sys.executable, '-I', X9 / 'bluetooth/package.py', '--runtime', runtime, '--out', payload], log)
+            stage = 'kernel-root-payload'
+            if embed_root:
+                run([sys.executable, '-I', X9 / 'bluetooth/root_header.py', '--payload', payload,
+                     '--apple-originals', apple], log)
+            else:
+                run([sys.executable, '-I', X9 / 'bluetooth/root_header.py', '--stub'], log)
+            stage = 'full-overlay-kernel'
+            run([sys.executable, '-I', X9 / 'build/build.py', 'kernel', *common,
+                 '--name', a.name + '/kernel', '--jobs', str(a.jobs)], log)
             stage = 'single-boot-image'
             run([sys.executable, '-I', X9 / 'build/build.py', 'boot', *common,
                  '--kernel', out / 'kernel/kernel.development.sweet', '--name', a.name + '/boot'], log)
+            if embed_root:
+                stage = 'rollback-boot-image'
+                rollback = dict(opts, boot_args=['x9_bt_root=2' if t == 'x9_bt_root=1' else t
+                                                 for t in opts['boot_args']])
+                rollback_snapshot = inputs / 'boot-rollback.json'
+                write_json(rollback_snapshot, rollback)
+                run([sys.executable, '-I', X9 / 'build/build.py', 'boot', '--config', config_snapshot,
+                     '--boot-config', rollback_snapshot, '--kernel', out / 'kernel/kernel.development.sweet',
+                     '--name', a.name + '/boot-rollback'], log)
             if subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip() != commit:
                 raise ValueError('source commit changed during the build; candidate is not published')
             if subprocess.run(['git', '-C', str(ROOT), 'diff', '--quiet', 'HEAD', '--', 'x9']).returncode:
@@ -235,17 +260,23 @@ def build(a):
                 'built_complete': True, 'candidate_ready': True,
                 'runtime_verified': False, 'audio_verified': False,
                 'stageable': False, 'root_installed': False,
+                'root_install': 'kernel-pid1' if embed_root else 'none',
+                'root_install_boot_arg': 'x9_bt_root=1' if embed_root else None,
                 'root_requires_user_confirmation': True, 'device_operation_performed': False,
                 'power_interface': 'kern.x9_bt_power', 'power_lifecycle': 'closed-transport-only',
                 'launchd_cache': cache_contract,
                 'paths': {'kernel': 'kernel/kernel.development.sweet', 'runtime': 'runtime',
                           'root_payload': 'root-payload/root-payload.json', 'boot_image': 'boot/boot.img',
+                          'rollback_boot_image': 'boot-rollback/boot.img' if embed_root else None,
                           'config': 'inputs/local.json', 'boot_config': 'inputs/boot.json',
                           'launchd_cache_original': 'inputs/launchd/' + CACHE_NAME,
                           'build_log': 'candidate-build.log'},
                 'component_exit_status': {'full_overlay_kernel': 0, 'native_userland_jobs': 0,
                                           'root_payload': 0, 'boot_image': 0},
-                'limitations': LIMITATIONS,
+                'limitations': LIMITATIONS + ([
+                    'x9_bt_root=1: PID1 installs the root files on first boot; the log line X9 BT ROOT is the only receipt',
+                    'boot-rollback/boot.img (x9_bt_root=2) restores the .x9-orig Apple files and removes the four own files',
+                ] if embed_root else []),
             })
             complete = True
     finally:
@@ -264,12 +295,15 @@ def build(a):
             (out / 'manifest.json').unlink(missing_ok=True)
             # Preserve a failed packer's output without presenting it as the
             # final boot candidate, including a rejected oversized image.
-            if (boot / 'boot.img').is_file():
-                (boot / 'boot.img').rename(boot / 'boot.img.failed')
+            for image in (boot / 'boot.img', out / 'boot-rollback/boot.img'):
+                if image.is_file():
+                    image.rename(image.with_name('boot.img.failed'))
             write_json(out / 'failure.json', {'schema': 1, 'built_complete': False,
                        'candidate_ready': False, 'runtime_verified': False, 'stageable': False,
                        'failed_stage': stage, 'commit': commit, 'log': 'candidate-build.log'})
-    print(f'Complete Bluetooth candidate built: {out / "boot/boot.img"}; root NOT installed; iOS NOT validated', flush=True)
+    print(f'Complete Bluetooth candidate built: {out / "boot/boot.img"}; '
+          + ('root installs on first boot via x9_bt_root=1; rollback image boot-rollback/boot.img'
+             if embed_root else 'root NOT installed') + '; iOS NOT validated', flush=True)
 
 
 def interrupted(number, frame):
@@ -286,6 +320,8 @@ if __name__ == '__main__':
     ap.add_argument('--launchd-source', type=Path, required=True, help='original 20H392 launch job directory')
     ap.add_argument('--launchd-cache-source', type=Path, required=True,
                     help='explicit repo-local original 20H392 version-7 launchd service cache')
+    ap.add_argument('--apple-originals', type=Path,
+                    help='private 20H392 bluetoothd/BlueTool originals; required with --boot-arg x9_bt_root=1')
     ap.add_argument('--abi', choices=('macos', 'ios'), default='macos')
     ap.add_argument('--jobs', type=int, default=min(8, os.cpu_count() or 4))
     a = ap.parse_args()

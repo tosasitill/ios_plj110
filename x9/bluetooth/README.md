@@ -170,6 +170,24 @@ python3 -I x9/bluetooth/candidate.py --name <全新简单名字> \
 失败保留日志、无完成 manifest、如已生成被拒绝镜像则改名 `.failed`，不能交付为完整候选。
 **boot.img 本身不安装 iOS 根盘中的桥或 jobs**；root 修改先确认、核对原件及 live root preflight，用户手动 boot 后才验原生功能。
 
+### 首次启动由内核安装（推荐，替代 Android 侧定点写）
+
+`--boot-arg x9_bt_root=1 --apple-originals x9/out/bluetooth-native/apple-originals20h392-stage`
+让 candidate 先建用户态/root payload，再由 `root_header.py` 把七个文件（约1.03 MB）嵌入内核
+（gitignored `x9/kernel/generated/x9_bt_root.inc`），然后编译内核和 boot.img，并额外生成
+`boot-rollback/boot.img`（同一内核，`x9_bt_root=2`）。PID1 在原 launchd 读 cache 之前
+（`x9_bluetooth_root.inc`，与 torch/camera/HAL 安装器同一位置）：
+
+1. 核对 `/usr/sbin/bluetoothd`、`/usr/sbin/BlueTool` 与构建原件一致，嵌入数据 SHA 正确；
+2. 先把七个目标全部分类（已安装 / 待装 / 未知），任何未知内容即整体不写；
+3. 四个新文件：temp→fsync→校验→`link` 发布（不覆盖已存在目标）；
+4. 两 jobs 与 launchd cache：当前必须是 Apple 原件，先硬链接保留 `<path>.x9-orig`，
+   新文件校验后 `rename` 原子替换；cache 最后替换，中断后 launchd 总拿到完整新或旧 cache；
+5. 日志 `X9 BT ROOT:` 是唯一 receipt。已装好的再次启动只校验不写。
+
+`boot-rollback/boot.img` 反序恢复：cache 先回 `.x9-orig`，再删四个自有文件；不需要 Android。
+不读整个根盘、不 macFUSE/COW、不需要 Android 侧 owner 修正（内核以 0:0 创建）。
+
 `stage_targeted.py` 是当前许可下的定点 root 安装器。用户禁止全盘读/备份：不运行旧
 `stage.py --apply` 的 whole-root snapshot/clone/fullhash。私有 macFUSE RPC 只读取真实必要块，
 原生 HFS 的所有修改先入本机 COW；detach 后定点修七文件 owner、冻结并重验全部读依赖，

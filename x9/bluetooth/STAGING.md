@@ -1,5 +1,8 @@
 # Native Bluetooth 定点根盘安装
 
+> 推荐改用内核首次启动安装（README「首次启动由内核安装」，`x9_bt_root=1`）。
+> 下述 Android 侧 `stage_targeted.py` 流程保留为备用，尚未实际执行过。
+
 当前用户许可只覆盖四个自有 binary、两份 Program-only jobs、权威
 `/System/Library/xpc/launchd.plist` 及必要 HFS 元数据；**禁止全盘读取、
 整个根盘 snapshot/clone/备份或 fullhash**。使用 `stage_targeted.py`，
