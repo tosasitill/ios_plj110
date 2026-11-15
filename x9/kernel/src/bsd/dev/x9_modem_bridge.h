@@ -23,7 +23,8 @@ uint64_t x9_md_mipc_submit(const uint8_t *frame, uint32_t length);
 /* take: 1 complete frame, 0 pending, -1 unavailable/capacity, -2 an owned
  * oversized SMS0608 has been fully drained. -2 consumes that token once;
  * no partial/synthetic CNF is returned and other MIPC services stay online.
- * -3 consumes a guarded dial rejected locally before physical TX, not a CNF. */
+ * -3 consumes a guarded CALL/SMS request rejected locally before physical TX,
+ * not a CNF. Other negative results do not prove the request was unsent. */
 int x9_md_mipc_take(uint64_t token, uint8_t *frame, uint32_t capacity, uint32_t *length);
 int x9_md_mipc_event(uint8_t *frame, uint32_t capacity, uint32_t *length);
 int x9_md_mipc_online(void);
@@ -36,6 +37,10 @@ int x9_md_mipc_online(void);
  * A failed TX result is returned once; the MD command remains quarantined
  * until boot, without ACK retry or recycling its original wire identity.
  * An ACK only confirms the command response transport, NOT SMS delivery. */
+/* Read-only transport AND separate SMS inbox readiness, copied under MD lock.
+ * Generic MIPC online does not imply this inbox is usable. No token, command,
+ * retry or tombstone is altered. SMS admission/TX recheck poison under lock. */
+int x9_md_mipc_message_online(void);
 int x9_md_mipc_message_event(uint8_t *frame, uint32_t capacity, uint32_t *length, uint32_t *token);
 int x9_md_mipc_message_reply(uint32_t token, unsigned success, uint8_t cause);
 int x9_md_mipc_message_reply_take(uint32_t token, int *result);

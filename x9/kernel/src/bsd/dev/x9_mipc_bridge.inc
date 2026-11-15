@@ -220,6 +220,11 @@ static uint64_t x9mi_submit(const uint8_t *p,uint32_t n,const struct x9cw_outbou
  else if((p[8]!=1&&(p[8]!=2||x9_md_sim_count()!=2))||
     (id!=0x201&&id!=0x203&&id!=0x205&&id!=0x219&&id!=0x307))return 0;
  uint64_t token=0;lck_mtx_lock(&x9_mi_lock);
+ /* A live generic mailbox is not a usable SMS inbox. Recheck under the
+  * allocator lock: poison may follow the adapter's readiness snapshot. */
+ if(x9_mm_poisoned&&x9mm_inbox_request(p,n,id)){
+  lck_mtx_unlock(&x9_mi_lock);return 0;
+ }
  if(x9mi_call_mutation(id)&&((x9_mc_dial_token&&!end)||x9_mc_end_token)){
   lck_mtx_unlock(&x9_mi_lock);return 0;
  }
@@ -479,6 +484,9 @@ static void x9mi_tick(void){
    struct x9cw_end_target current,target={s->call_epoch,s->call_revision,s->call_id,1};
    int rejected=s->call_guard==1&&(x9_mc_poisoned||x9_mc_outbound.blocked||!x9_mc_outbound.count_known||
       x9_mc_outbound.native_count||x9_mc_outbound.revision!=s->call_revision);
+   /* Only state1 is still pre-TX. Retire it through local -3, never a fake
+    * MD CNF; selected/partial SMS and physical ACK results retain owners. */
+   if(x9_mm_poisoned&&x9mm_inbox_request(s->frame,s->len,s->id))rejected=1;
    if(s->call_guard==2&&(x9_mc_poisoned||
       !x9cw_end_target(&x9_mc_outbound,&x9_mc_current,&current)||!x9cw_end_matches(&target,&current)))rejected=1;
    if(rejected){
