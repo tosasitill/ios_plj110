@@ -117,7 +117,13 @@ offset5的consumer `1f1ac4df0..4dfc`写tree node+0x7d，而`1f1ac4d28`证明Call
 `Is in Multi-Pary call: `，`1f039178c`读取+0x55；`getLegacyFlags1f0390bec`也读+0x55并映射bit30。
 Call_Type跳表与offset6语义、RemoteNumberListItem presentation尚未闭合，**不填默认0**。
 `1929bfc`是CallConfigItem writer，不能拿其string长度解释CallList第七byte。
-此项仍无CallList46生产编码/发布，END原因与号码隐私策略还需继续追真实consumer。
+CallList tag1的`192a74c→1929b2c`为count/u8后7B逐字节条目；END tag14 `192aa10`为
+count/u8后每项`{id/u8,reason/u16LE}`，wire步长3（内存padding不是wire）。
+RemoteNumberListItem byte1经`1f1ac5c60..5c70`映射1→internal1、2→internal2、其它→0；
+Base `remoteNumberAvailabilityToString1f03906c0`直接0基表`20dad4d50`为Available/Restricted/Unavailable，
+因此wire0/1/2对应这三项，未知拒绝不猜。MD号码presentation真实来源为8114/detail_info[0]，
+RIL `3854ac..bc→3855e8→388380`，不是105/107的整word。当前parser只验证号码/408B detail后丢弃，
+有界号码owner与真实presentation转换仍未生产接入。此项仍无CallList46生产编码/发布，不能仅empty encoder冒充完成。
 
 ### modem 与 Android serializer
 
@@ -256,8 +262,13 @@ MD `0x913257b6..0x913258e4` 的完整4901：100/101/102/103/105/107/109各u32，
 
 RIL `requestGetCurrentCalls` `0x381354..0x381398` 发送 `0909 {}`，无selector/default TLV。
 MD `0x9131d574..0x9131d86c` 的090a **无条件写 result0/u32 + count100/u32**（失败不当空列表），再写11数组：
-10b ID、10c direction、10d mode、10e state、10f multiparty、110 toa、8111 number/NUL≤128、
-112 priority、113 flags、8114 binary408、115 aux；非string/binary项均u32。
+10b ID、10c direction、10d mode、10e state、10f NUMBER_TYPE、110 toa、8111 number/NUL≤128、
+112 CALL_RAT、113 TYPE完整u32、8114 binary408、115 aux；非string/binary项均u32。
+**更正旧交接**：10f不是multiparty、112不是priority。RIL `385494..4a4`读113保存w23，
+`3855a0/5bc`以bit0写RIL_Call.isMpty；MD `l5ucc_get_call_status_cb9138fbb4..fdf2`中`9138fd0a..4c`对IMS/CS共用TYPE构造：
+低位来自session190c（call_session156c+3a0），upper flags只在bit4/8/12/16/20合并。
+CLCCS parser `913a29dc..e0`和CLCC parser `913a2a80..84`均填同一session+3a0，
+未过滤mode20..39。因此只在既有mode20子集上以TYPE bit0保守拒绝多方，不扩展为conference控制。
 libmipc `add_array` `0x12310` / `add_idx` `0x12420` 和MD `0x9141b68a/0x9141b77c` 证明数组是
 **16B len0 descriptor + 独立元素TLV**，不是packed count*u32：reserved8B=0、base/u16、count/u16，
 元素tag=base+i并继承parent高bit；count0不产生descriptor。
@@ -308,8 +319,11 @@ MD新snapshot API和iOS observer接入，仅观察，不自动approve/answer/que
   不能按 DMS/DSD 的 u32 来解释。VOICE 单独保存 bound/sim/generation，无默认 SIM，不借用 NAS/WMS 的 binding。
 - 挂断请求仅已核实 VOICE21/tag01/u8 非零真实ID。要求该 client 已绑定 SIM2、完整 ECPI 已有
   同 native ID 的 MO epoch/mode20，随后才发 Android 原件 `0909 {}` 只读查询。
-  owned `090a` 完整数组的 result0/count1、同真实ID、direction0/mode20/multiparty0 和 current
+  owned `090a` 完整数组的 result0/count1、同真实ID、direction0/mode20、TYPE bit0无多方标志和 current
   ACTIVE0/ALERTING3 必须匹配 ECPI → Apple CONVERSATION3/ALERTING5。
+  单通话判断改用113/TYPE bit0，不再错误地将10f/NUMBER_TYPE当isMpty；后者NONE0/SIP_URI1/NUMBER2，
+  数字NUMBER2不意味着存在多方通话。IMS TYPE低位与CS共用session+3a0及CLCCS/CLCC parser填充，补充链见current节；
+  不把CS RIL过滤策略照搬为MD缺少IMS列表，不宣称已验证所有多通话模式。
   初始 ECPI130/mode0、MT、未知 ID/空 count、过期快照或其它模式不准入。
 - target={epoch,revision,native_id,sim} 在 MD admission 与唯一 writer 选择时各复核一次。
   允许原 DIAL lease **在其 CNF 已被消费、没有在途 CALL mutation 后** 挂断自己的真实单通话；

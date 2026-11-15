@@ -26,6 +26,7 @@ CASES = (
     'dial_join_order', 'ios_join', 'ios_timeout', 'ios_deleted', 'dial_presend_fence',
     'incoming_states', 'incoming_state_invalid', 'incoming_observer',
     'voice_bind_codec', 'end_target_codec', 'ios_end_roundtrip',
+    'current_metadata',
     'ios_end_stale_query', 'ios_end_presend', 'ios_end_abandon',
     'ios_end_late_cnf', 'ios_end_duplicate',
     'register_codec', 'register_transition', 'register_sequence',

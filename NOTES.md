@@ -510,6 +510,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 - **固定源码构建**：生产代码及上述编译交接提交`d397605`。`python3 -I x9/build/build.py kernel --name x9-call-handover-init-20261115` **exit0，98/98 overlay（3 prebuilt）、link/strip成功**；仅有现存Wi-Fi cast-align等warning。产物`x9/out/x9-call-handover-init-20261115/kernel.development.sweet`，原console/exit在`call-handover-compile/kernel-console.log` / `kernel.exit`。构建后未做额外解包/hash/反汇编/重建比较。`gh run list --branch feat/call-handover-init`返回`[]`，本改动不触发现有workflow；无CI run ID、无boot pack/设备验收。接下来保留实际最新main、rebase后编译新源码基线再合入，不拿这个kernel-only作为最终通话短信镜像。
 - **新main基线编译 / 并行授权**：用户明确要求多开子代理后并行复核CallList字段、DIAL运行profile和初始化/短信超时，不操作手机或运行套件。handover分支已从实际main`55c3508`rebase，源码`add7cf9`、构建开始HEAD`db24014`；新基线`python3 -I x9/build/build.py kernel --name x9-call-handover-rebased-20261115` **exit0、98/98/link/strip成功**（`kernel-rebased-console.log` / `kernel-rebased.exit`）。这是集成新main源码的编译，不是旧产物二次检查。子代理发现短信init/普通job迟到CNF可能先成功再判断deadline，独立`fix/sms-init-deadlines`树正在修复，尚未合入本内核。
 
+#### 2026-11-15 CALL current 元数据纠错（并行分析发现，修复进行中）
+
+- **工作树**：`fix/call-current-metadata` / `.worktrees/call-current-metadata` 从main`3b6717a`；SMS子项独立`fix/sms-init-deadlines`，不动audio/GPU/BT。用户要求只编译，所有人工向量未执行，未操作设备。
+- **新原件证据**：MD `mipc_call_get_call_status_cnf`给10f的source record+17/u8→u32（NUMBER_TYPE），112为+99/u8→u32（CALL_RAT），113为+9c/u32（TYPE完整bitmap）。匹配RIL `385494..4a4`读113→w23，`3855a0/5bc`取bit0→RIL_Call.isMpty；10b/id、10c/direction、10d/mode、10e/state、110/toa既有映射未错。MD含IMS行，RIL过滤20..39只是CS consumer策略，不能据此说MD无IMS。
+- **实际待修bug**：旧`x9cw_current_call.multiparty`错读10f，`priority`错读112，挂断target因此拿NUMBER_TYPE判断singlecall。现改名number_type/rat，保留113全u32，target看TYPE bit0；新增人工元数据向量使用distinct number_type2/rat6/TYPE0x100001，禁止NUMTYPE0放行多方或NUMTYPE2误拒普通数字。并行补证MD `9138fd0a..4c`取同session+3a0的TYPE低位，upper flags只合并bit4/8/12/16/20；CLCCS `913a29dc..e0`及CLCC `913a2a80..84`填同字段，mode20共用，支持在原子集上保守拒绝，不声称全部conference已实跑。
+- **CallList证据追加**：tag1=count/u8+7B条目；END14=count/u8+{id/u8,reason/u16LE}3B条目（不复制memory padding）；号码presentation byte1→Base0基Available0/Restricted1/Unavailable2已核对。MIPC presentation来源为8114/detail_info[0]，不是105/107 word；当前parser验证后丢号码/detail，仍缺有界号码owner/转换，不新增空CallList假完成。
+- **运行DIAL策略新结论**：key48已证为AP `ECC_PREFERRED_RAT`而不是MD/IMSA能力；RIL空current-call响应`26c1d8..26c218`重置该policy0；key48=0时getEccPreferredDomain所有RAT分支返回0。Apple普通Call_Type0、紧急9：Base PhoneNumberType1=Normal/2=Emergency/3=Emergency_Test。仍未接生产IMS准入，不能把普通voice0叫IMS bool或拿IMSA registered当voice capability。
+- **编译/交付边界**：本元数据修复host C++17 -c / header C11严格syntax均exit0（`call-current-metadata-compile/host.exit` / `c-header.exit`）；真实recipe两对象均True/exit0（`recipe-results.json` / `recipe.exit`），新增1项人工向量、修改原target向量只编译未执行。准备提交/合入后与SMS新修复统一编译固定源码kernel-only；无本项单独kernel/boot/设备结果。SMS子代理已完成deadline修复`b0055a4/e71a2c8`，继续补独立SMS inbox poison的锁内admission与writer fence，不宣称当前集成已完成。VOICE09仍关闭，CallList/DIAL/voice音频和短信端到端验收未完成，无最终boot.img。
+
 ### 5.7 2026-11-13 音频：ADSP 自动 dsp-boot 镜像（分支 feat/audio-dsp-boot，worktree `.worktrees/audio-dsp-boot`）
 
 - feat/audio-bounded-fdt 已 ff 合入 main（`b25f4ca`），worktree/分支已删；`android-callsms-20261113`、`shimtest`、fdt2/3/4 的 usb-log 移到本 worktree 的 `x9/out/`。

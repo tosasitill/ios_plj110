@@ -491,7 +491,8 @@ static void end_target_codec(){
  assert(!x9cw_end_target(&s,&c,&a));s.count_known=1;s.native_count=1;
  assert(x9cw_end_target(&s,&c,&a)&&a.native_id==7&&a.sim==1&&a.epoch==1);
  b=a;b.revision++;assert(!x9cw_end_matches(&a,&b));
- c.calls[0].multiparty=1;assert(!x9cw_end_target(&s,&c,&b));c.calls[0].multiparty=0;
+ c.calls[0].flags|=1;assert(!x9cw_end_target(&s,&c,&b));c.calls[0].flags&=~1u;
+ c.calls[0].number_type=2;assert(x9cw_end_target(&s,&c,&b)); // NUMBER is not a multiparty flag
  c.calls[0].id=8;assert(!x9cw_end_target(&s,&c,&b));c.calls[0].id=7;
  c.calls[0].direction=1;assert(!x9cw_end_target(&s,&c,&b));c.calls[0].direction=0;
  c.calls[0].state=3;assert(!x9cw_end_target(&s,&c,&b));c.calls[0].state=0;
@@ -499,6 +500,25 @@ static void end_target_codec(){
  uint8_t r[24];uint32_t result=99;x9cw_header(r,24,0x906,2,41);x9cw_scalar(r+16,0,0,4);
  assert(x9cw_end_cnf(r,24,41,&result)&&!result);
  assert(!x9cw_end_cnf(r,24,40,&result));r[10]=8;assert(!x9cw_end_cnf(r,24,41,&result));
+}
+static void current_metadata(){
+ uint8_t p[704];struct x9cw_current c;unsigned n=current_frame(p,1);
+ /* Change the three actual array element values, keeping descriptors,
+  * ID and state unchanged. Each remains a u32 in the MIPC wire. */
+ for(unsigned at=16;at<n;){
+  unsigned tag=x9cw_u16(p+at),len=x9cw_u16(p+at+2);
+  if(tag==0x6fe0)x9cw_put32(p+at+4,2);       //10f NUMBER_TYPE
+  if(tag==0x6fc8)x9cw_put32(p+at+4,6);       //112 CALL_RAT
+  if(tag==0x6fc0)x9cw_put32(p+at+4,0x100001);//113 TYPE: high bits retained and multiparty
+  at+=len?((len+11)&~7u):16;
+ }
+ assert(x9cw_current(p,n,&c)&&c.calls[0].number_type==2&&c.calls[0].rat==6&&c.calls[0].flags==0x100001);
+ struct x9cw_outbound_state s={};struct x9cw_progress e={};struct x9cw_end_target target;
+ e.mask=2;e.id=7;e.event=130;assert(x9cw_outbound_apply(&s,&e)==1);
+ e.event=132;e.mode=20;assert(x9cw_outbound_apply(&s,&e)==1);s.count_known=1;s.native_count=1;
+ assert(!x9cw_end_target(&s,&c,&target));c.calls[0].number_type=0;
+ assert(!x9cw_end_target(&s,&c,&target)); // NONE cannot authorize a multiparty end
+ c.calls[0].flags&=~1u;c.calls[0].number_type=2;assert(x9cw_end_target(&s,&c,&target));
 }
 static void ios_end_roundtrip(){
  bind_voice();rx_progress(130,7,0);rx_progress(132);end_request();x9mi_tick();
@@ -780,6 +800,7 @@ int main(int argc,char **argv){
   {"status_fence",status_fence},{"dial_join_order",dial_join_order},{"ios_join",ios_join},
   {"ios_timeout",ios_timeout},{"ios_deleted",ios_deleted},{"dial_presend_fence",dial_presend_fence},
   {"voice_bind_codec",voice_bind_codec},{"end_target_codec",end_target_codec},{"ios_end_roundtrip",ios_end_roundtrip},
+  {"current_metadata",current_metadata},
   {"ios_end_stale_query",ios_end_stale_query},{"ios_end_presend",ios_end_presend},
   {"ios_end_abandon",ios_end_abandon},{"ios_end_late_cnf",ios_end_late_cnf},
   {"ios_end_duplicate",ios_end_duplicate},
