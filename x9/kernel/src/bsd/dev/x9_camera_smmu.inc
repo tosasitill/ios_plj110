@@ -37,6 +37,9 @@ struct x9_camera_smmu {
     bool native, native_bypass, native_started;
     uint32_t ste_shift, ste_bytes, native_cr0, native_gbpa;
     uint64_t native_power;
+    bool native_retire_attempted,native_restored;
+    uint32_t native_ste_phase,native_retire_error,native_prior_word[17];
+    uint64_t native_retire_epoch,native_prior_base[3];
 };
 static struct x9_camera_smmu *cam_smmu_namespace;
 static int cam_smmu_shared_check_locked(struct x9_camera_smmu *);
@@ -145,6 +148,15 @@ static int cam_smmu_storage(struct x9_camera_smmu *m)
                (!m->native && sid==CAM_SMMU_DISPLAY)) {
                 if(w==0)expected=1ull|(4ull<<1);
                 if(w==1 && (m->idr1&(1u<<27)))expected=1ull<<44;
+            } else if(sid==CAM_SMMU_SID && m->native && m->native_ste_phase) {
+                if(w==0)expected=m->native_ste_phase==3?
+                    (m->native_bypass?1ull|(4ull<<1):1ull):0;
+                if(w==1) {
+                    if(m->native_ste_phase==1) {
+                        expected=2ull|(2ull<<6);
+                        if(((m->idr0>>24)&3u)==0)expected|=1ull<<27;
+                    } else if(m->native_bypass && (m->idr1&(1u<<27)))expected=1ull<<44;
+                }
             } else if(sid==CAM_SMMU_SID && m->exported) {
                 if(w==0)expected=1ull|(5ull<<1)|m->view.map.cd_pa;
                 if(w==1) {

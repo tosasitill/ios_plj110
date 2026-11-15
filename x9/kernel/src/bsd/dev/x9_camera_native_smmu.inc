@@ -16,6 +16,8 @@ struct cam_native_snapshot {
     uint32_t word[CAM_N_WORDS];
     uint64_t base[3];
 };
+_Static_assert(CAM_N_WORDS==17,"native prior normal snapshot size");
+static int cam_native_producer_guard_locked(uint64_t,struct x9_camera_smmu *);
 static const unsigned cam_native_base_off[3]={0x80,0x90,0xa0};
 static vm_offset_t cam_native_mmio;
 static void cam_native_read(struct x9_camera_smmu *m,struct cam_native_snapshot *s)
@@ -133,6 +135,8 @@ int x9_camera_native_smmu_start(uint64_t token,uint64_t iova,uint32_t bytes,
         entry.word[CAM_N_IDR5],iova,bytes,&m);if(e)return e;
     lck_mtx_lock(&camera_smmu_lock);
     m->native_power=token;m->native_gbpa=entry.word[CAM_N_GBPA];
+    memcpy(m->native_prior_word,entry.word,sizeof(entry.word));
+    memcpy(m->native_prior_base,entry.base,sizeof(entry.base));
     e=cam_native_full_table(m,sidbits,!(m->native_gbpa&(1u<<20)));
     if(!e)e=cam_native_match(m,&entry);
     lck_mtx_unlock(&camera_smmu_lock);
@@ -179,6 +183,96 @@ int x9_camera_native_smmu_start(uint64_t token,uint64_t iova,uint32_t bytes,
 }
 int x9_camera_native_smmu_check(struct x9_camera_smmu *m)
 {
-    if(!m || !m->native || !m->native_started)return ENXIO;
+    if(!m || !m->native || !m->native_started || m->native_retire_attempted)return ENXIO;
     return x9_camera_smmu_check(m);
+}
+/* Called only from native_retire.inc after its real, independently checked
+ * source/CPU/worker/GIC/FBC/A0-bus admission. Control + IRQ mutex held.
+ * The private guard performs NO DMA-owner callback or SMMU reentry. */
+static int cam_native_smmu_retire_locked(uint64_t epoch,struct x9_camera_smmu *m)
+{
+    struct cam_native_snapshot prior,now;
+    int e;
+    lck_mtx_lock(&camera_smmu_lock);
+    e=cam_smmu_identity(m);
+    if(!e && (!m->native || !m->native_started || m->native_retire_attempted ||
+       m->native_restored || m->pending || m->shared_attempted || m->native_cr0!=13))e=ESTALE;
+    if(!e)e=cam_smmu_storage(m);if(!e)e=cam_smmu_live(m);
+    if(!e)e=cam_native_producer_guard_locked(epoch,m);
+    if(e)goto out;
+    m->native_retire_attempted=true;m->native_retire_epoch=epoch;
+    memcpy(prior.word,m->native_prior_word,sizeof(prior.word));
+    memcpy(prior.base,m->native_prior_base,sizeof(prior.base));
+    volatile uint64_t *ste=(volatile uint64_t *)m->ste.va+CAM_SMMU_SID*8;
+    /* Actual BBM first breaks ONLY SID80. Non-camera STE policy is intact.
+     * Record the intended phase before any uncertain cache publication. */
+    m->native_ste_phase=1;ste[0]=0;__asm__ volatile("dsb sy":::"memory");
+    e=cam_cache_range(m->ste.va+CAM_SMMU_SID*64,64,CAM_CACHE_CLEAN);
+    if(!e)e=cam_native_producer_guard_locked(epoch,m);
+    if(!e) {
+        const struct cam_smmu_cmd cfg[2]={
+            {{CAM_SMMU_CFGI_STE|((uint64_t)CAM_SMMU_SID<<32),1}},
+            {{CAM_SMMU_CFGI_CD|((uint64_t)CAM_SMMU_SID<<32),1}}};
+        e=cam_smmu_submit(m,cfg,2); /* actual CFGI80/CD80 plus trailing SYNC */
+    }
+    if(!e)e=cam_native_producer_guard_locked(epoch,m);
+    if(!e) {
+        const struct cam_smmu_cmd tlbi={{CAM_SMMU_TLBI_NH_ASID|((uint64_t)CAM_SMMU_ASID<<48),0}};
+        e=cam_smmu_submit(m,&tlbi,1); /* actual ASID1 invalidation + SYNC */
+    }
+    if(!e)e=cam_native_producer_guard_locked(epoch,m);
+    if(!e) {
+        m->native_ste_phase=2;
+        for(unsigned w=1;w<8;w++)ste[w]=w==1 && m->native_bypass && (m->idr1&(1u<<27))?1ull<<44:0;
+        __asm__ volatile("dsb sy":::"memory");
+        e=cam_cache_range(m->ste.va+CAM_SMMU_SID*64,64,CAM_CACHE_CLEAN);
+    }
+    if(!e)e=cam_native_producer_guard_locked(epoch,m);
+    if(!e) {
+        m->native_ste_phase=3;ste[0]=m->native_bypass?1ull|(4ull<<1):1ull;
+        __asm__ volatile("dsb sy":::"memory");
+        e=cam_cache_range(m->ste.va+CAM_SMMU_SID*64,64,CAM_CACHE_CLEAN);
+    }
+    if(!e) {
+        const struct cam_smmu_cmd cfg={{CAM_SMMU_CFGI_STE|((uint64_t)CAM_SMMU_SID<<32),1}};
+        e=cam_smmu_submit(m,&cfg,1);
+    }
+    if(!e)e=cam_native_producer_guard_locked(epoch,m);
+    if(!e)e=cam_smmu_storage(m);if(!e)e=cam_smmu_live(m);
+    if(!e) {
+        cam_native_read(m,&now);
+        /* No untranslated source is left: exact OFF/gates and bus idle
+         * precede SMMU/queue disable. GBPA is NEVER changed to hide traffic. */
+        e=cam_native_enable(m,&now,0);
+    }
+    for(unsigned i=0;i<3 && !e;i++) {
+        e=cam_native_producer_guard_locked(epoch,m);
+        if(!e)e=cam_native_write64(m,&now,i,prior.base[i]);
+    }
+    const unsigned fields[]={CAM_N_CFG,CAM_N_CR1,CAM_N_CR2,CAM_N_CP,CAM_N_CC};
+    for(unsigned i=0;i<sizeof(fields)/sizeof(fields[0]) && !e;i++) {
+        e=cam_native_producer_guard_locked(epoch,m);
+        /* CMDQ cursors are restored ONLY AFTER full-target real SYNC
+         * consumption AND CR0/ACK CMDQEN=0. OPPO device_reset writes both
+         * PROD/CONS. This is own disabled-queue restoration, not a fake
+         * consumer advance or cancellation of a still pending command. */
+        if(!e)e=cam_native_write32(m,&now,fields[i],prior.word[fields[i]]);
+    }
+    if(!e)e=cam_native_producer_guard_locked(epoch,m);
+    if(!e)e=cam_native_match(m,&prior);
+    if(!e) {
+        delay(1);e=cam_native_producer_guard_locked(epoch,m);
+        if(!e)e=cam_native_match(m,&prior);
+    }
+    if(!e){m->native_restored=true;m->native_started=false;}
+out:
+    if(e && m==cam_smmu_namespace && m && m->exported) {
+        if(!m->native_retire_error)m->native_retire_error=e;
+        cam_smmu_latch(m,e);if(e==ETIMEDOUT)cam_smmu_retire_timeout(m);
+    }
+    printf("X9 CAMERA NATIVE SMMU RETIRE: epoch=%llu attempt=%u ste_phase=%u "
+        "cr0=%x restored=%u errno=%d (SID80+normal priors; all backing retained)\n",
+        epoch,m?m->native_retire_attempted:0,m?m->native_ste_phase:0,
+        m?m->native_cr0:0,m?m->native_restored:0,e);
+    lck_mtx_unlock(&camera_smmu_lock);return e;
 }

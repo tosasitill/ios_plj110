@@ -654,7 +654,8 @@ static int cam_irq_close_locked(uint64_t epoch)
     /* Stop only an inactive arm or the privately qualified streamed request.
      * OFF/DONE/CPU/worker/GIC is necessary for the latter, not AXI drain.
      * No credit revocation/map release or repair of uncertain/foreign input. */
-    if(session.stream)e=cam_stream_close_begin_locked(epoch);
+    if(session.stream)e=cam_repeat_stopped_irqs_locked(epoch);
+    if(!e && session.stream)e=cam_stream_close_begin_locked(epoch);
     if(!e)e=cam_source_quiesce_locked(epoch);
     if(!e)e=cam_sv_gate_quiesce_locked(epoch);
     if(!e)e=cam_sv_receive_quiesce_locked(epoch);
@@ -748,3 +749,4 @@ int x9_camera_camsv_irq_stop(uint64_t epoch)
     lck_mtx_lock(&camera_control_lock);e=cam_irq_stop_locked(epoch);
     lck_mtx_unlock(&camera_control_lock);return e;
 }
+#include "x9_camera_native_retire.inc"

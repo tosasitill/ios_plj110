@@ -17,5 +17,15 @@
 int x9_camera_native_smmu_start(uint64_t power_token,uint64_t iova,
     uint32_t bytes,struct x9_camera_smmu **out,struct x9_camera_smmu_export *view);
 int x9_camera_native_smmu_check(struct x9_camera_smmu *);
+/* AFTER the real IRQ stop has completed source OFF, spent credit and CPU/
+ * worker/GIC receipts. Re-proves actual A0 producer/downstream bus idle,
+ * SID80 BBM/CFGI/CD/TLBI/SYNC and complete cold normal-bank restoration.
+ * All exported allocations stay pinned. No partial-source-start shortcut.
+ * Public wrapper takes control; native internal caller already holds it.
+ */
+int x9_camera_native_smmu_retire(uint64_t epoch,struct x9_camera_smmu *);
+/* Independently checked old-request teardown scope after complete restore,
+ * NEVER a live DMA/arm permission. Actual MM power stays held across it. */
+int x9_camera_native_smmu_retirement_check(uint64_t epoch,struct x9_camera_smmu *);
 #endif
 #endif
