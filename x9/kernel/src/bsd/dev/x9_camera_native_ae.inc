@@ -186,9 +186,10 @@ static int cam_native_ae_next_locked(uint64_t epoch,struct x9_camera_completed_f
         e=cam_sensor_ap_read(&ap,0x0005,&byte);if(e)break;
         if(byte==0xff){e=ESTALE;break;} /* OFF sentinel, not a frame. */
         if(byte!=previous) {
-            /* Count real observed forward transitions, not a guessed rate.
-             * Permit FF-skipping wrap; reject backwards/ambiguous half-wrap. */
-            unsigned delta=byte>previous?byte-previous:255u+byte-previous;
+            /* Count observed forward transitions, not a guessed rate. Use
+             * the full byte counter: FF remains forbidden as OFF evidence,
+             * and skipping it does not invent a modulo255 timer contract. */
+            unsigned delta=(uint8_t)(byte-previous);
             if(!delta || delta>=128){e=ESTALE;break;}
             cam_native_ae.advances++;previous=byte;cam_native_ae.counter=byte;
         }
