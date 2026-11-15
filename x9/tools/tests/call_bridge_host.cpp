@@ -41,18 +41,18 @@ struct x9q_packet {
 };
 #include "../../kernel/src/iokit/Kernel/arm/X9Calls.inc"
 
-static unsigned incoming(uint8_t *p,unsigned mask=0x20,unsigned tx=0x2345){
+static unsigned incoming(uint8_t *p,unsigned mask=0x22,unsigned tx=0x2345){
  x9cw_header(p,64,0x8901,mask,tx);
  x9cw_scalar(p+16,0x100,0x12345678,4);
  x9cw_put16(p+24,0x8101);x9cw_put16(p+26,2);p[28]='X';
  x9cw_scalar(p+32,0x102,129,4);x9cw_scalar(p+40,0x103,0x90abcdef,4);
  x9cw_scalar(p+48,0x104,20,4);x9cw_scalar(p+56,0x105,0,1);return 64;
 }
-static void rx_incoming(unsigned tx=0x2345){uint8_t p[64];incoming(p,0x20,tx);x9mi_rx(p,sizeof(p));}
+static void rx_incoming(unsigned tx=0x2345){uint8_t p[64];incoming(p,0x22,tx);x9mi_rx(p,sizeof(p));}
 static uint32_t event(){
  uint8_t out[X9_MIPC_FRAME_MAX];uint32_t n,token;
  assert(x9_md_mipc_call_event(out,sizeof(out),&n,&token)==1&&n==64&&token);
- assert(out[8]==0x20);return token;
+ assert(out[8]==0x22);return token;
 }
 static void scalar_ind(unsigned id){uint8_t p[24];x9cw_header(p,sizeof(p),id,1,0);x9cw_scalar(p+16,0x100,1,1);x9mi_rx(p,sizeof(p));}
 static void unchanged_other_inboxes(){
@@ -65,10 +65,10 @@ static void unchanged_other_inboxes(){
 static void codec_golden(){
  uint8_t cmd[64],rsp[48];incoming(cmd);
  struct x9cw_incoming c;assert(x9cw_incoming(cmd,sizeof(cmd),&c));
- assert(c.call_id==0x12345678&&c.sequence==0x90abcdef&&c.mask==0x20&&c.txid==0x2345&&c.number_length==2);
+ assert(c.call_id==0x12345678&&c.sequence==0x90abcdef&&c.mask==0x22&&c.response_mask==2&&c.sim==1&&c.txid==0x2345&&c.number_length==2);
  assert(x9cw_approve(cmd,sizeof(cmd),rsp,sizeof(rsp),1,0,0)==40);
  const uint8_t golden[]={
-  0x84,0x19,0x54,0x24,0,0,0,0,0x20,0,0x02,0x89,0x45,0x23,0x18,0,
+  0x84,0x19,0x54,0x24,0,0,0,0,2,0,0x02,0x89,0x45,0x23,0x18,0,
   0x00,0x01,0x01,0,1,0,0,0,
   0x02,0x01,0x04,0,0x78,0x56,0x34,0x12,
   0x03,0x01,0x04,0,0xef,0xcd,0xab,0x90};
@@ -92,6 +92,23 @@ static void codec_invalid(){
  assert(!x9cw_approve(p,72,rsp,sizeof(rsp),1,0,0));
  /* libmipc ignores these received fields. They are not SIM selectors. */
  incoming(p);p[0]=0;p[4]=1;p[9]=7;p[23]=0x5a;assert(x9cw_incoming(p,64,&c));
+}
+static void incoming_routes(){
+ uint8_t p[64],rsp[48];struct x9cw_incoming c;
+ /* Artificial numbers; live evidence proves route22 -> slot1 -> response02.
+  * Change only the header mask, keeping the transaction/identity unchanged. */
+ for(unsigned high=0;high<=0xf0;high+=0x10){
+  for(unsigned low=1;low<=2;low++){
+   incoming(p,high|low);
+   assert(x9cw_incoming(p,64,&c)&&c.mask==(high|low)&&c.sim==low-1&&c.response_mask==low);
+   assert(x9cw_approve(p,64,rsp,48,1,0,0)==40&&rsp[8]==low&&x9cw_u16(rsp+12)==0x2345);
+  }
+ }
+ const unsigned rejected[]={0,0x10,0x20,0x30,3,0x23,4,8,0xff};
+ for(unsigned mask:rejected){incoming(p,mask);assert(!x9cw_incoming(p,64,&c));assert(!x9cw_approve(p,64,rsp,48,1,0,0));}
+ incoming(p,0x22);x9mi_rx(p,64);uint32_t token=event();
+ assert(x9_mc_slots[0].mask==0x22&&x9_md_mipc_call_reply(token,1,0,0)==1);
+ x9mi_tick();assert(writes==1&&last_frame[8]==2&&x9cw_u16(last_frame+12)==0x2345);
 }
 static void action_codec(){
  uint8_t req[]={0,0x12,0x34,0x21,0,4,0,1,1,0,7},out[48];unsigned id,call;
@@ -230,7 +247,7 @@ static void command_roundtrip(){
  assert(x9_md_mipc_call_reply(token,1,0,0)==1);
  assert(x9_md_mipc_call_reply_take(token,&result)==0);
  assert(x9_md_mipc_call_reply(token,1,0,0)==-1);
- x9mi_tick();assert(writes==1&&last_length==40&&last_frame[8]==0x20);
+ x9mi_tick();assert(writes==1&&last_length==40&&last_frame[8]==2);
  assert(x9cw_u16(last_frame+10)==0x8902&&x9cw_u16(last_frame+12)==0x2345);
  assert(last_frame[20]==1&&x9cw_u32(last_frame+28)==0x12345678&&x9cw_u32(last_frame+36)==0x90abcdef);
  assert(x9_md_mipc_call_reply_take(token,&result)==1&&result==X9_AT_OK);
@@ -434,7 +451,7 @@ static void dial_presend_fence(){
 int main(int argc,char **argv){
  assert(argc==2);x9mi_online(1);
  struct {const char *name;void (*run)();} cases[]={
-  {"codec_golden",codec_golden},{"codec_invalid",codec_invalid},{"action_codec",action_codec},
+  {"codec_golden",codec_golden},{"codec_invalid",codec_invalid},{"incoming_routes",incoming_routes},{"action_codec",action_codec},
   {"dial_golden",dial_golden},{"dial_invalid",dial_invalid},{"dial_whitelist",dial_whitelist},
   {"dial_roundtrip",dial_roundtrip},{"dial_tx_failure",dial_tx_failure},{"dial_cnf_invalid",dial_cnf_invalid},
   {"progress_framing",progress_framing},{"outbound_states",outbound_states},{"current_arrays",current_arrays},

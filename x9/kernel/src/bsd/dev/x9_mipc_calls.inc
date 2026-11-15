@@ -1,6 +1,7 @@
 /* Independent call inbox / command owner. RX/tick helpers hold x9_mi_lock.
  * No registrations, call actions or approval policy are started here.
- * Raw MD masks are preserved, not interpreted as WDS's AP SIM-mask enum.
+ * Raw CMD masks are preserved for ownership; RSP uses the proved RIL slot
+ * conversion, not the raw CMD mask. No route is selected from high bits.
  * Successful and failed CMD identities are retained until boot: retirement
  * across call-end / sequence reuse is not yet proven in Android's RIL.
  * Overflow quarantines ONLY calls. No payload/number/sequence diagnostics. */
@@ -52,7 +53,8 @@ static void x9mc_rx(const uint8_t *p,unsigned n,unsigned id,unsigned tx){
  }
  if(id==0x8901){
   /* Outside this MO-only policy. Never preserve a usable empty baseline
-   * across an incoming approval command or guess its SIM normalization. */
+   * across an incoming approval command. Parsing the proved route is NOT
+   * permission to approve, answer or publish this call. */
   x9_mc_outbound.count_known=0;x9_mc_outbound.blocked=1;
   struct x9cw_incoming c;
   if(!x9cw_incoming(p,n,&c)){x9_mc_poisoned=1;return;}

@@ -1,5 +1,6 @@
 /* Evidence-bounded call wire codec, shared by the iOS adapter and MD owner.
- * No call policy, SIM-mask normalization, dial defaults or state mapping here.
+ * No call policy, dial defaults or state mapping here. Incoming routing uses
+ * the original RIL's proved CMD -> slot -> response serializer chain.
  * See docs/call-ios-bridge.md for original consumer/producer addresses.
  * Freestanding C/C++; host tests compile this exact implementation. */
 #ifndef X9_CALL_WIRE_H
@@ -45,12 +46,21 @@ static inline int x9cw_word(const uint8_t *p,unsigned n,unsigned tag,uint32_t *o
 }
 struct x9cw_incoming {
  uint32_t call_id,toa,sequence,mode;
- uint16_t txid;uint8_t mask,evoltesi_flow;
+ uint16_t txid;uint8_t mask,response_mask,sim,evoltesi_flow;
  const uint8_t *number;unsigned number_length; /* includes NUL; never log */
 };
 static inline int x9cw_incoming(const uint8_t *p,unsigned n,struct x9cw_incoming *out){
  const uint8_t *v;unsigned k;struct x9cw_incoming c;
- if(!out||!x9cw_frame(p,n,0x8901)||!p[8]||(p[8]&(p[8]-1)))return 0;
+ if(!out||!x9cw_frame(p,n,0x8901))return 0;
+ /* RfxMclMessage::obtainMipcCmd 19f978..980 calls RfxMipcUtils
+  * 1ada10: mask & 0xf, then table129c50. RSP382464..47c supplies the
+  * handler's slot to obtainMipcData; 1c0814..824 converts it back via
+  * 1ad9e0/table129c44 and preserves ONLY the original txid. Confirmed
+  * live SIM2: CMD22 -> slot1 -> RSP02. Do not route high-only masks
+  * using Android's fallback slot0; reject absent/ambiguous low selectors.
+  * This device's two slots use low1/2; no SIM3/4 or fanout admission. */
+ unsigned route=p[8]&0x0f;
+ if(route!=1&&route!=2)return 0;
  if(!x9cw_word(p,n,0x100,&c.call_id)||!c.call_id||
     !x9cw_word(p,n,0x102,&c.toa)||!x9cw_word(p,n,0x103,&c.sequence)||
     !x9cw_word(p,n,0x104,&c.mode)||
@@ -58,7 +68,8 @@ static inline int x9cw_incoming(const uint8_t *p,unsigned n,struct x9cw_incoming
  for(unsigned i=0;i+1<k;i++)if(!v[i])return 0;
  c.number=v;c.number_length=k;
  if(!x9cw_tlv(p,n,0x105,&v,&k)||!v||k!=1)return 0;
- c.evoltesi_flow=v[0];c.mask=p[8];c.txid=(uint16_t)x9cw_u16(p+12);
+ c.evoltesi_flow=v[0];c.mask=p[8];c.response_mask=(uint8_t)route;
+ c.sim=(uint8_t)(route==2);c.txid=(uint16_t)x9cw_u16(p+12);
  /* Only this producer's six fields. Unknown variants require new evidence. */
  for(unsigned at=16;at<n;){
   unsigned tag=x9cw_u16(p+at);
@@ -83,7 +94,7 @@ static inline unsigned x9cw_approve(const uint8_t *cmd,unsigned n,uint8_t *out,u
                                    unsigned approve,unsigned include_cause,uint32_t cause){
  struct x9cw_incoming c;unsigned size=include_cause?48:40;
  if(!out||room<size||approve>1||include_cause>1||!x9cw_incoming(cmd,n,&c))return 0;
- x9cw_header(out,size,0x8902,c.mask,c.txid);x9cw_scalar(out+16,0x100,approve,1);
+ x9cw_header(out,size,0x8902,c.response_mask,c.txid);x9cw_scalar(out+16,0x100,approve,1);
  unsigned at=24;if(include_cause){x9cw_scalar(out+at,0x101,cause,4);at+=8;}
  x9cw_scalar(out+at,0x102,c.call_id,4);x9cw_scalar(out+at+8,0x103,c.sequence,4);
  return size;

@@ -11,7 +11,7 @@
 | 拨出状态生产者 | 完整 `4901` 的真实 ID / ECPI reducer；已实现、单对象可编译；未有完整真机 wire 重放或 iOS 运行验收 |
 | 空快照与异步确认 | 完整 owned `090a` 数组解析；`0902 + 新 MO epoch` 汇合生成 VOICE20/tag10/u8；只接 staging API，没有生产 admission 调用者 |
 | 来电 CMD | `8901` 的字段、长度和唯一 tag 验证；号码只留在有界内存，不打印 |
-| 来电许可 RSP | `8902` 的正确 approve/call-id 字段；显式调用才构造，保留原 txid / 原 mask |
+| 来电许可 RSP | `8902` 的正确 approve/call-id 字段；显式调用才构造，保留原 txid；按已核实 RIL slot 转换生成 RSP mask |
 | 物理 transport | 独立 call inbox / CMD owner，复用原有唯一 MD tick writer；SMS ACK 保持优先 |
 | 超时 / 重复 / 失败 | 无自动重发；重复 outstanding CMD 去重；内容变化及未知退休规则隔离 calls；不清空 mutation owner |
 | 默认启动 | **不发布 QMI VOICE09、不注册 CALL CMD/IND、不发通话请求、不自动 approve，无强制开启 bootarg** |
@@ -43,7 +43,36 @@ OPPO `mipc_msg_tlv_const.h` 仅用于解释，以下字段已对照实际 MD pro
 MD CMD producer 使用高半字节 mask（例如 0x10/0x20）。Android `libmipc.so` 的 CMD dispatch
 `0x13630..0x136a4` 原样传递 header；`mipc_msg_rsp` `0x145d0` 经 `0x13d60` serialize/write。
 **不能套用 WDS/SMS 的低位 AP SIM mask，也没有据此猜 iOS subscription 映射**。
-新通道保存单 bit 原 mask，不把它归一化成 SIM index；多 bit 命令不自动选择一个目标。
+此处此前仅凭 libmipc 得出的“整字节单 bit / RSP 沿用原 mask”结论已被下方真实来电与完整 RIL 路径推翻。CMD owner 保存原 mask 作为身份，RSP 独立按 RIL 的 slot 转换，不从高位选择 SIM。
+
+### 2026-11-15 真实呼入：CMD 路由纠正
+
+只读采集已保存于 `x9/out/android-incoming-20261115-192820/`；`retained-all-logcat.txt`
+保留呼入开头，`retained-radio-logcat.txt` 开头已部分滚出，不能据后者否定前者。
+完整 `8901` 为 mask22/tx2a9a/72B，Android 实际 `8902` 为 mask02/同 tx/40B，
+approve100/u8=1、id102/u32=1、seq103/u32=100。
+号码 value 被日志脱敏（连 NUL 位置也遮盖），这不是未脱敏 wire 重放。
+
+已追同版 RIL 原件完整路由，而非仅据一条样本猜 `mask & 0xf`：
+
+1. `RfxMclMessage::obtainMipcCmd` `19f978..19f984` 读取 CMD mask，调用
+   `RfxMipcUtils::mipcSlotIdChangeToSlotId` `1ada10..1ada34`：取低四位，表 `129c50`
+   对低值2..8为 `{1,0,2,0,0,0,3}`。低1走 slot0；高位不参与 slot。
+2. `handleIncomingCallIndication` `37c688..37c694` 独立读取原 txid；`37c77c..37c7b0`
+   将 handler 的 slot 与 id/number/toa/mode/seq/tx 交 TelCore，未把原 mask 作为 RSP 参数。
+3. `requestSetCallIndication` `382458..38247c` 用原 txid + handler slot 新建 `8902`；
+   `RfxMipcData::obtainMipcData(id,slot,tx)` `1c0814..1c0824` 经
+   `slotIdChangeToMipcSlotId` `1ad9e0..1ada00` 转换，slot1..3表 `129c44={2,4,8}`，slot0为1。
+4. `382480..3824ac` 填 approve/id/seq，`382540..382548` 提交 RSP。
+
+codec 现保留 `mask`、单独输出 `sim` / `response_mask`；只准入本机低1/2，拒绝无低位、
+多低位、SIM3/4。不仿照 Android fallback 把高位-only 或非法低位误选卡1。
+显式 approval 的 owner 保留原 CMD 身份，而 serializer 使用转换后 mask；自动 approval 仍未启用。
+新增人工路由向量源代码，仅编译、不运行套件；旧版原 mask golden 已修正。
+
+真实顺序：ECPI0/mode20/direction1 → ANSWER0907{} → ECPI132→6→6 + 0908/result0 →
+HANGUP0905{mode0,id1} → ECPI133 + 0906 → 090f{} / 0910/cause16。
+4901 DUMP 仍截断（486B，声明528/536B），不能补零；信令日志不是双向声音验收。
 
 ### iOS 实跑版本原件
 
@@ -175,7 +204,7 @@ CMD owner 状态：收到 → 已交付 → 显式许可排队 → 物理发送 
 按`x9/AGENTS.md`本轮只编译，**不额外运行测试脚本/套件**。下面24项结果属于上一版9483481，不能套用到新增代码。
 
 24 项宿主测试编译**实际生产 transport / codec**，使用人工测试向量，不需要 `.local`、设备或网络。
-每个用例用新进程，从干净 owner 状态开始。覆盖独立 inbox、fragmented RX、审批字段 golden bytes、原 txid/mask、
+每个用例用新进程，从干净 owner 状态开始。覆盖独立 inbox、fragmented RX、审批字段 golden bytes、原 txid/mask（旧版本假设，本次已修正）、
 SMS ACK 优先、未决 mutation / late CNF、重复/变更 CMD、容量隔离、物理失败、FIFO、多通话拒绝、默认零通话 TX 与 VOICE 未发布守卫。
 共享 header 同时用 C11 / C++17 编译。ASan + UBSan 的通过不等于设备通话验收。
 新增6项覆盖普通拨号 golden / 40位上界 / 同缓冲转换 / 显式profile、非法/重复TLV、
@@ -201,6 +230,6 @@ host `clang++ -c` 和header C11 `-fsyntax-only -Wall -Wextra -Werror`通过，�
 1. 状态/ID/GET_STATUS子集已实现，但完整真实wire及parser执行未验；继续核实CallList其他六字节与生产profile，不用截断DUMP填补。
 2. 核实普通VOICE初始化/订阅与每请求响应；0902不能替代带真实CallIdentifier的QMI20成功。
 3. 从刚抓回的实际音频实现核实 MD/SCP voice 上下行路由，再分别验收信令和双向声音。
-4. 用户本轮不方便来电测试，来电/多通话暂不扩展，不再以补来电为当前拨出工作的前提。
+4. 已保存一次真实来电，不再要求补来电；来电 admission / MT 状态 / 双向音频仍需接入，多通话不依据单通话样本扩展。
 
 在这些输入闭合前不发布 VOICE，不以猜测默认值或探针 boot.img 代替依据。
