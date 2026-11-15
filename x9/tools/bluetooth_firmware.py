@@ -69,10 +69,14 @@ def main():
     ap.add_argument('--src', type=Path, default=ROOT / '.local/x9/wifi-fw')
     ap.add_argument('--out', type=Path, default=ROOT / 'x9/kernel/generated/x9_bt_firmware.inc')
     ap.add_argument('--payload-out', type=Path, default=ROOT / 'x9/kernel/generated/x9_bt_payload.inc')
+    ap.add_argument('--required', action='store_true',
+                    help='reject missing/empty real firmware instead of generating a passive stub')
     a = ap.parse_args()
     try:
         path = a.src / NAME
         blob = path.read_bytes() if path.is_file() else b''
+        if a.required and not blob:
+            raise ValueError('captured production firmware is required for complete initialization')
         text, rows = render(a.src, blob)
         old = a.out.read_text() if a.out.is_file() else None
         a.out.parent.mkdir(parents=True, exist_ok=True)
