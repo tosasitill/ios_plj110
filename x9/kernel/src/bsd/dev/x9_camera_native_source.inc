@@ -3,8 +3,11 @@
  * Include after receiver.inc and before native sensor callbacks.
  */
 #include "x9_camera_native_source.h"
+#include "x9_ufs/ufs_platform.h"
 static struct {
     bool attempted;
+    bool rate_valid;
+    vm_offset_t pll;
     struct x9_camera_native_source_status status;
 } cam_native_source;
 
@@ -47,18 +50,64 @@ static void cam_native_source_snapshot_locked(void)
  * profiles fall below step0 data-rate limits. Accept only the corresponding
  * actual MM parent selector and BOTH freshly measured counts. Two counter
  * ticks are the original meter agreement bound, not a measured ppm claim.
- * Never change a PLL, shared AL mux, VCP DVFS or voltage request here.
- * required_vcore_uv is a REQUIREMENT, not voltage observed or applied.
+ * The last clock is UNIVPLL2/5 =499.2MHz at its normal2496MHz rate;
+ * DT represents the integralMHz only. Use actual PLL PCW, not499MHz as
+ * the meter target. Never change a PLL, shared AL mux, VCP DVFS or voltage
+ * request here. The native UFS supplier already holds a monotonic floor
+ * >=650mV for this boot; require its real controller check, not a transient
+ * high voltage gear. required_vcore_uv is not a PMIC measurement.
  */
+static int cam_native_source_voltage_locked(void)
+{
+    struct x9_camera_native_source_status *s=&cam_native_source.status;
+    uint32_t *v=s->vcore;
+    if(!sweet_x9_vcore_ufs_check(v))return ENXIO;
+    /* The step index equals the regulator selector only for these four
+     * supported CDPHY steps. UFS may retain a stronger monotonic floor. */
+    if(((v[1]>>4)&7)<s->inherited_step ||
+       ((v[2]>>8)&7)<s->inherited_step)return ERANGE;
+    return 0;
+}
+static uint64_t cam_native_source_pll_hz(uint32_t con1)
+{
+    uint64_t vco=(26000000ull*(con1&0x3fffffu)+0x3fffu)>>14;
+    unsigned div=1u<<((con1>>24)&7);
+    return (vco+div-1)/div;
+}
+/* No MM/SV recursion. Called only while the original receiver/PLL region
+ * mappings are held, in thread context outside IRQ/slot/S1 spin locks.
+ * Checks the actual inherited rate/floor; never changes them to repair drift.
+ */
+static int cam_native_source_rate_guard_locked(uint64_t epoch)
+{
+    struct x9_camera_native_source_status *s=&cam_native_source.status;
+    const struct cam_mm_desc *d=&cam_mm.desc[X9_CAM_MM_SENINF_MUX];
+    int e;
+    if(s->last_errno)return s->last_errno;
+    if(!cam_native_source.rate_valid || s->sensor_epoch!=epoch || !cam_native_source.pll ||
+       !cam_rx_sensor_held_locked(epoch) || !cam_mm.active)return ESTALE;
+    if(((cam_rr(cam_mm.top,d->cfg)>>d->shift)&0xff)!=s->csi_parent ||
+       (cam_rr(cam_mm.top,0x330)&d->effect_mask) ||
+       !(cam_rr(cam_mm.top,0x270)&(1u<<(14-cam_phy.status.csi_port))) ||
+       (cam_rr(cam_native_source.pll,0x34)&0x10)!=s->pll_fenc ||
+       (cam_rr(cam_native_source.pll,0xc)&0x073fffff)!=s->pll_rate)return ESTALE;
+    e=cam_native_source_voltage_locked();
+    return e;
+}
 static int cam_native_source_rate_locked(uint64_t epoch)
 {
-    static const struct { uint32_t parent,mhz,uv; } steps[]={
-        {9,312,575000},{12,364,600000},{14,416,650000},{15,499,725000}
+    static const struct { uint32_t parent,div,uv; uint64_t pll_base,hz; } steps[]={
+        {9,8,575000,0x10043100,312000000},
+        {12,6,600000,0x10043000,364000000},
+        {14,6,650000,0x10043100,416000000},
+        {15,5,725000,0x10043100,499200000}
     };
     struct x9_camera_native_source_status *s=&cam_native_source.status;
     const struct cam_mm_desc *d=&cam_mm.desc[X9_CAM_MM_SENINF_MUX];
+    static vm_offset_t pll_maps[2];
     uint32_t parent;
-    unsigned step;
+    uint64_t clock,diff;
+    unsigned step,pll_slot;
     int e=cam_phy_dependencies();if(e)return e;
     if(!cam_phy.held || cam_phy.epoch!=epoch || cam_phy.error ||
        !(cam_phy.status.flags&X9_CAM_PHY_TIMING_CONFIGURED) ||
@@ -68,11 +117,24 @@ static int cam_native_source_rate_locked(uint64_t epoch)
     for(step=0;step<sizeof(steps)/sizeof(steps[0]);step++)if(parent==steps[step].parent)break;
     if(step==sizeof(steps)/sizeof(steps[0]))return ERANGE;
     s->inherited_step=step;s->required_vcore_uv=steps[step].uv;
+    e=cam_native_source_voltage_locked();if(e)return e;
+    pll_slot=steps[step].pll_base==0x10043000?0:1;
+    if(!pll_maps[pll_slot])pll_maps[pll_slot]=ml_io_map(steps[step].pll_base,0x100);
+    cam_native_source.pll=pll_maps[pll_slot];
+    if(!cam_native_source.pll)return ENOMEM;
+    s->pll_rate=cam_rr(cam_native_source.pll,0xc)&0x073fffff;
+    s->pll_fenc=cam_rr(cam_native_source.pll,0x34)&0x10;
+    if(s->pll_fenc!=0x10)return ENXIO;
+    /* Borrow the existing normal PLL only. A valid unrelated rate cannot
+     * be converted into the named CDPHY operating point by rounding. */
+    clock=cam_native_source_pll_hz(s->pll_rate)/steps[step].div;
+    diff=clock>steps[step].hz?clock-steps[step].hz:steps[step].hz-clock;
+    if(diff>steps[step].hz/1000)return ERANGE;
     for(unsigned n=0;n<2;n++) {
         uint64_t actual=(uint64_t)cam_phy.status.clock_count[n]*26000000*2;
-        uint64_t target=(uint64_t)steps[step].mhz*1000000*1024;
-        uint64_t diff=actual>target?actual-target:target-actual;
-        if(!cam_phy.status.clock_count[n] || diff>2ull*26000000*2)return ERANGE;
+        uint64_t target=clock*1024;
+        uint64_t delta=actual>target?actual-target:target-actual;
+        if(!cam_phy.status.clock_count[n] || delta>2ull*26000000*2)return ERANGE;
     }
     if((cam_phy.status.cphy && cam_phy.status.nominal_data_rate>=5400000000ull) ||
        (!cam_phy.status.cphy && cam_phy.status.nominal_data_rate>=9000000000ull))return ERANGE;
@@ -80,6 +142,10 @@ static int cam_native_source_rate_locked(uint64_t epoch)
      * rate still does not permit the capture authority to assert RATE/SMI. */
     e=cam_phy_dependencies();
     if(!e && ((cam_rr(cam_mm.top,d->cfg)>>d->shift)&0xff)!=parent)e=ESTALE;
+    if(!e) {
+        cam_native_source.rate_valid=true;e=cam_native_source_rate_guard_locked(epoch);
+        if(e)cam_native_source.rate_valid=false;
+    }
     return e;
 }
 
@@ -104,7 +170,8 @@ static int cam_native_source_prepare_locked(uint64_t epoch,
     if(cam_rx_live.epoch || cam_smi.held || cam_mac.held || cam_phy.held || cam_out.held) {
         result->last_errno=EBUSY;return EBUSY;
     }
-    memset(s,0,sizeof(*s));s->sensor_epoch=epoch;s->sensor=cam_sensor_live.probe.sensor;
+    memset(s,0,sizeof(*s));cam_native_source.rate_valid=false;
+    s->sensor_epoch=epoch;s->sensor=cam_sensor_live.probe.sensor;
     s->inherited_step=UINT32_MAX;cam_native_source.attempted=true;
     s->stage=X9_CAM_NATIVE_SOURCE_RECEIVER;
     e=cam_rx_sensor_prepare_locked(epoch,&receiver);
@@ -132,8 +199,10 @@ static int cam_native_source_prepare_locked(uint64_t epoch,
     if(!e)e=cam_native_source_standby_locked(epoch);
     if(!e)e=cam_rx_sensor_guard_locked(epoch);
     if(!e)e=cam_smi_clock_guard();
+    if(!e)e=cam_native_source_rate_guard_locked(epoch);
     if(!e){s->completed|=1u<<s->stage;s->stage=X9_CAM_NATIVE_SOURCE_CONFIGURED;}
     else {
+        cam_native_source.rate_valid=false;
         /* Preserve the original journals for the sole native power-off.
          * No local unwind can retire a posted meter/calibration/DB request. */
         if(cam_out.held)cam_out_fault(e);
