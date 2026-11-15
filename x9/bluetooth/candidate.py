@@ -241,8 +241,11 @@ def build(a):
                  '--kernel', out / 'kernel/kernel.development.sweet', '--name', a.name + '/boot'], log)
             if embed_root:
                 stage = 'rollback-boot-image'
+                # Restore only: Bluetooth stays passive (no native init), like the
+                # boots before any root payload existed.
                 rollback = dict(opts, boot_args=['x9_bt_root=2' if t == 'x9_bt_root=1' else t
-                                                 for t in opts['boot_args']])
+                                                 for t in opts['boot_args']
+                                                 if t not in ('x9_bt_init=1', 'x9_bt_fc=1')])
                 rollback_snapshot = inputs / 'boot-rollback.json'
                 write_json(rollback_snapshot, rollback)
                 run([sys.executable, '-I', X9 / 'build/build.py', 'boot', '--config', config_snapshot,
