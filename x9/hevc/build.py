@@ -25,7 +25,8 @@ def main():
                   '-framework', 'CoreVideo', '-framework', 'VideoToolbox']
     library = a.out / 'libx9-hevc.dylib'
     subprocess.run(common + ['-dynamiclib', str(HERE / 'vt_decoder.c'),
-                            str(HERE / 'hevc_bitstream.c'), *frameworks,
+                            str(HERE / 'hevc_bitstream.c'),
+                            str(HERE / 'vt_image_metadata.c'), *frameworks,
                             '-install_name', '@rpath/libx9-hevc.dylib', '-o', str(library)], check=True)
     ctl = a.out / 'vdecctl'
     subprocess.run(common + [str(HERE / 'vdecctl.c'), str(HERE / 'hevc_bitstream.c'),

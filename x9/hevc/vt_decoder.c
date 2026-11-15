@@ -17,6 +17,7 @@
 #include <sys/ioctl.h>
 #include "hevc_bitstream.h"
 #include "vt_decoder.h"
+#include "vt_image_metadata.h"
 #include "../kernel/src/bsd/dev/x9_vdec.h"
 
 typedef struct OpaqueCMBaseObject *Base;
@@ -214,7 +215,8 @@ static OSStatus finish(Base object)
     pthread_mutex_unlock(&s->lock);
     return e; /* no deferred frames or retained DPB */
 }
-static OSStatus pixel_buffer(const struct x9_vdec_picture *r, const uint8_t *raw, CVPixelBufferRef *out)
+static OSStatus pixel_buffer(const struct x9_vdec_picture *r, const uint8_t *raw,
+                            CMVideoFormatDescriptionRef description, CVPixelBufferRef *out)
 {
     OSType format = r->format == X9_VDEC_P010 ?
         (r->flags & X9_VDEC_FULL_RANGE ? kCVPixelFormatType_420YpCbCr10BiPlanarFullRange :
@@ -249,6 +251,7 @@ static OSStatus pixel_buffer(const struct x9_vdec_picture *r, const uint8_t *raw
     }
     OSStatus unlock = CVPixelBufferUnlockBaseAddress(*out, 0);
     if (!e) e = unlock;
+    if (!e) e = x9_hevc_attach_image_metadata(description, *out);
     if (e) { CVPixelBufferRelease(*out); *out = NULL; }
     return e;
 }
@@ -293,7 +296,7 @@ static OSStatus decode_frame(Base object, void *frame, CMSampleBufferRef sample,
     if (!r.completion || r.output_bytes != output_bytes || r.width != s->config.width ||
         r.height != s->config.height || r.format != (s->config.bit_depth == 10 ? X9_VDEC_P010 : X9_VDEC_NV12) ||
         (r.flags & ~X9_VDEC_FULL_RANGE)) { e = kVTVideoDecoderBadDataErr; goto done; }
-    e = pixel_buffer(&r, raw, &pixel);
+    e = pixel_buffer(&r, raw, CMSampleBufferGetFormatDescription(sample), &pixel);
     if (!e) session = s->session;
 done:
     free(input); free(raw);
