@@ -6512,6 +6512,11 @@
    "template": "bsd-c-11"
   },
   {
+   "name": "x9_bt_session.o",
+   "source": "bsd/dev/x9_bt_session.c",
+   "template": "bsd-c-11"
+  },
+  {
    "name": "x9_bt_serial.o",
    "source": "bsd/dev/x9_bt_serial.c",
    "template": "bsd-c-11"

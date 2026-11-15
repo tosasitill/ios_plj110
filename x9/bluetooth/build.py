@@ -15,7 +15,7 @@ def main():
     ap.add_argument('--developer-dir', type=Path)
     ap.add_argument('--out', type=Path, required=True)
     ap.add_argument('--kernel-objects', action='store_true',
-                    help='also compile only the three Bluetooth BSD overlay objects, no link/boot/tests')
+                    help='also compile only Bluetooth BSD overlay objects, no link/boot/tests')
     a = ap.parse_args()
     dev = a.developer_dir
     if dev is None:
@@ -54,12 +54,14 @@ def main():
             cfg['developer_dir'] = str(a.developer_dir)
         subprocess.run([sys.executable, '-I', str(HERE.parent / 'tools/bluetooth_firmware.py'),
                         '--src', cfg.get('bluetooth_firmware') or cfg['wifi_firmware']], check=True)
+        subprocess.run([sys.executable, '-I', str(HERE.parent / 'tools/bluetooth_board.py'),
+                        '--required'], check=True)
         directory = (a.out / 'kernel').resolve()
         directory.mkdir(parents=True, exist_ok=True)
         builder = module.Builder(cfg, directory, False, 1)
         builder.objdir.mkdir(parents=True, exist_ok=True)
         try:
-            for name in ('x9_bt_download.o', 'x9_bt_serial.o', 'x9_bluetooth.o'):
+            for name in ('x9_bt_download.o', 'x9_bt_session.o', 'x9_bt_serial.o', 'x9_bluetooth.o'):
                 entry = next(e for e in builder.recipe['objects'] if e['name'] == name)
                 result = builder.compile_one(entry)
                 if isinstance(result, str):

@@ -249,11 +249,14 @@ class Builder:
         self.run_or_exit([sys.executable, '-I', str(X9 / 'tools/wifi_firmware.py'), '--src', str(fw)] +
                          (['--required'] if real_wifi or self.cfg.get('wifi_firmware') else []), ROOT,
                          label='wifi_firmware.py')
-        # MT6653 BT uses a separate little-endian container. Metadata only in
-        # this bring-up stage; never reuse the Wi-Fi patch parser/download path.
+        # MT6653 BT has its own LE firmware container and WMT connfem format;
+        # never reuse the Wi-Fi patch parser or swapped/padded PHY tag.
         bt = Path(self.cfg.get('bluetooth_firmware') or fw).expanduser()
         self.run_or_exit([sys.executable, '-I', str(X9 / 'tools/bluetooth_firmware.py'), '--src', str(bt)], ROOT,
                          label='bluetooth_firmware.py')
+        self.run_or_exit([sys.executable, '-I', str(X9 / 'tools/bluetooth_board.py'),
+                          '--connfem', str(ROOT / '.local/x9/wifi-nvram/connfem.dts')], ROOT,
+                         label='bluetooth_board.py')
         # Match sweet_x9_gps.c: explicit x9_gps overrides compact x9s bit4.
         # This is a firmware identity, not an automatic download/boot lease.
         real_gps = gps_enabled(boot_args)
