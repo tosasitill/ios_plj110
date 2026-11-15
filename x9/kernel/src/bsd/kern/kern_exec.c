@@ -7428,8 +7428,14 @@ out:
  * 22269; 33.txt X9 XPC needle offsets match). Every edit is guarded by the
  * exact bplist string object, so a different image is left alone. The
  * detached .sig is already bypassed on this port (launchd_unsecure_cache=1).
- * x9_siri_off=0 writes the original bytes back; no other state is needed. */
+ * x9_siri_off=0 writes the original bytes back; no other state is needed.
+ * The Bluetooth cache adapter appends six objects without moving ANY original
+ * object or offset: two Program strings, two job dictionaries, LaunchDaemons
+ * and the new root. Accept only its independently derived exact size/trailer
+ * as a second layout, still classifying ALL original string guards before
+ * any write. Do not accept arbitrary resized/re-serialized caches. */
 #define X9_SIRI_PLIST_SIZE 796447
+#define X9_SIRI_BT_PLIST_SIZE 798777
 struct x9_siri_edit {
 	uint32_t stroff;   /* bplist string object used as the guard */
 	uint32_t edito;    /* byte inside that string to rewrite */
@@ -7484,9 +7490,54 @@ x9_siri_read(vnode_t vp, off_t off, void *buf, size_t len, vfs_context_t ctx)
 	error = uio_addiov(auio, CAST_USER_ADDR_T((char *)buf), len);
 	if (error == 0) {
 		error = VNOP_READ(vp, auio, 0, ctx);
+		if (error == 0 && uio_resid(auio) != 0) {
+			error = EIO;
+		}
 	}
 	uio_free(auio);
 	return error;
+}
+
+static uint64_t
+x9_siri_bplist_u64(const uint8_t *p)
+{
+	uint64_t value = 0;
+	for (unsigned i = 0; i < 8; i++) {
+		value = (value << 8) | p[i];
+	}
+	return value;
+}
+
+static int
+x9_siri_cache_layout(vnode_t vp, off_t size, vfs_context_t ctx)
+{
+	uint8_t trailer[32];
+	uint64_t objects, top, table;
+	if (size == (off_t)X9_SIRI_PLIST_SIZE) {
+		objects = 22269; top = 0; table = 707339;
+	} else if (size == (off_t)X9_SIRI_BT_PLIST_SIZE) {
+		objects = 22275; top = 22269; table = 709645;
+	} else {
+		return EINVAL;
+	}
+	int error = x9_siri_read(vp, size - (off_t)sizeof(trailer),
+	    trailer, sizeof(trailer), ctx);
+	if (error) return error;
+	for (unsigned i = 0; i < 6; i++) {
+		if (trailer[i]) return EINVAL;
+	}
+	/* Both locked layouts retain four-byte offsets and two-byte references.
+	 * The append-only writer independently verifies the unchanged object
+	 * region and every original offset; the string guards below additionally
+	 * establish that each byte this kernel may change is still that object. */
+	if (trailer[6] != 4 || trailer[7] != 2 ||
+	    x9_siri_bplist_u64(trailer + 8) != objects ||
+	    x9_siri_bplist_u64(trailer + 16) != top ||
+	    x9_siri_bplist_u64(trailer + 24) != table ||
+	    table + objects * 4 + sizeof(trailer) != (uint64_t)size) {
+		return EINVAL;
+	}
+	return 0;
 }
 
 static int
@@ -7988,11 +8039,12 @@ sweet_x9_siri_off(proc_t p, user_addr_t scratch, user_addr_t end)
 		vnode_put(vp);
 		return error;
 	}
-	if (va.va_data_size != (off_t)X9_SIRI_PLIST_SIZE) {
-		printf("X9 SIRI: %s size=%lld expected=%d; not touched\n",
-		    target, (long long)va.va_data_size, X9_SIRI_PLIST_SIZE);
+	error = x9_siri_cache_layout(vp, va.va_data_size, ctx);
+	if (error) {
+		printf("X9 SIRI: %s size=%lld cache layout errno=%d; not touched\n",
+		    target, (long long)va.va_data_size, error);
 		vnode_put(vp);
-		return EINVAL;
+		return error;
 	}
 	error = x9_siri_read(vp, 0, buf, 8, ctx);
 	if (error || memcmp(buf, "bplist00", 8) != 0) {
@@ -8027,7 +8079,8 @@ sweet_x9_siri_off(proc_t p, user_addr_t scratch, user_addr_t end)
 	/* Record the on-device original bytes before the first write. */
 	if (enabled && total < count && proc_is64bit(p) && scratch <= end) {
 		char rec[768];
-		int n = snprintf(rec, sizeof(rec), "size=%d magic=bplist00\n", X9_SIRI_PLIST_SIZE);
+		int n = snprintf(rec, sizeof(rec), "size=%lld magic=bplist00\n",
+		    (long long)va.va_data_size);
 		if (n > 0 && n < (int)sizeof(rec)) {
 			for (i = 0; i < count && n < (int)sizeof(rec); i++) {
 				n += snprintf(rec + n, sizeof(rec) - (size_t)n, "%u %02x\n",
@@ -8081,8 +8134,8 @@ sweet_x9_siri_off(proc_t p, user_addr_t scratch, user_addr_t end)
 	if (!error) {
 		error = VNOP_FSYNC(vp, MNT_WAIT, ctx);
 	}
-	printf("X9 SIRI: %s size=%d magic=bplist00 entries=%d already=%d changed=%d errno=%d\n",
-	    enabled ? "disable" : "restore", X9_SIRI_PLIST_SIZE, count, total, done, error);
+	printf("X9 SIRI: %s size=%lld magic=bplist00 entries=%d already=%d changed=%d errno=%d\n",
+	    enabled ? "disable" : "restore", (long long)va.va_data_size, count, total, done, error);
 	if (!error) {
 		int bad = 0;
 		for (i = 0; i < count; i++) {
