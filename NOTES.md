@@ -1565,6 +1565,7 @@ Model now (as Android, one shared AFE, one owner per shared bit):
 ### 5.12 2026-11-15 蓝牙 native 实现交接（进行中）
 
 - 用户要求完整 iOS 桥，所有硬件初始化依据 Android，不出探针镜像。工作树 `.worktrees/bluetooth-native` / `feat/bluetooth-native`；主树正在另一会话做 ALS，不切换主树分支、不修改共用 XNU 源树。当前没有新 boot/CI/设备操作。
+- **已提交并push**：取证交接 `9628afc`；下载执行器/串口/iOS H4桥实现 `489e13a`。分支已在origin，功能未闭环所以保留worktree，不合入main、不发布候选镜像。
 - 已恢复参考 UniXNU `e893717` 的 pinned `drivers/QcaBluetooth` submodule `986d6319d1d2819b27ed2c9786776f10bf63cc76`。可复用的是传输前端与 native 路由方法，不是 Qualcomm 硬件初始化或 iPadOS27 offsets。
 - Android 权威源：`oppo-modules-dt-mt6993/vendor/mediatek/kernel_modules/connectivity/bt/linux_v2/uart/btmtktty.c` 的 `btmtk_sp_pre_open`，及 `btmtk_main.c` 的 `btmtk_load_rom_patch_connac3`。已确认 115200 → query UART/chip → 24M → raw ff wake → CONNXO → 按 `{0,2,3,0x80,0x90,0x10000}` 的首个匹配 bin type 下载、type3 后 connfem、MT6653 最后 bin index3。DMA 在 UART 上是原始固件流（1988 B 单元），不是 H4；WMT fallback 为 ACL phase1/2/3。section spec 必须保留完整52 B，announce header10 B；status0需要下载/1其他下载者/2已就绪。
 - MT6993 UARTHUB 的 `SSPM_DRIVER_EN=1`，Android 不执行非SSPM分支的手工 PLL/mux 初始化。必须继续追 SSPM/default-config/host-request/awake 的真实前置，不能把共享 Wi-Fi 供电或 bypass 写入等同完整 BT 初始化。
