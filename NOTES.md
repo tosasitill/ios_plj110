@@ -1582,3 +1582,10 @@ Model now (as Android, one shared AFE, one owner per shared bit):
 - **下一步**：针对GET_REGION_INFO窄修复32位字段的零扩展/合法符号扩展解析，保留错误码、结构大小及reserve范围检查；不要把其他SMC一律截断。下一候选应先读完全部8个字段，再验证POWER/READY/LIST/ENABLE/DATA和遮挡下lux变化；继续注意GPU280/283启动基线，不能仅此修复就宣称上电成功。
 - **本轮范围**：只读320和安卓源码，交接分支`feat/als-log320-status`（基线`4793856`）；仅更新NOTES并提交合入main/push。没有驱动修复、编译、新boot、测试套件、CI run或设备操作；320的确切镜像/GPU基线本轮未核定。复核命令沿用上方，将`~/N.txt`换成`~/320.txt`。
 - **用户确认/修复归属（2026-11-15）**：用户要求“一切按安卓的数据来”。已向距离会话`01a1deb1-fb7e-7b23-8cb4-56b4b2c63fda`发消息，由它在独立worktree统一处理op10的32位zero/sign extension窄修复，并保留SMCCC错误、reserve/结构范围检查；本会话不重复修改共享worker。距离会话报告type8 LIST/ENABLE/DISABLE ACK/36B DATA已接完且整包通过，**本会话尚未核验对应收尾提交、产物路径及GPU基线，仍待其回传**。优先依据安卓实测/流量、live DT及对应源码；缺少实测的校准、增益、时序不补猜测值，ACK不代替真实光照/近远DATA验收。本次仅协作交接，无新增编译、CI或设备操作。
+
+#### 320 光感单变量修复 — Android u32 region-info
+
+- **实现/基线**：距离会话的独立修复`6eee23a`仅改op10专用getter，已在`fix/als-region-info-320`（worktree `.worktrees/als-region-info-320`）cherry-pick；NOTES冲突只保留本会话光感交接，不引入未合入的type8功能说明。候选固定在`2fead1c`（与已构建ALS2相同驱动/GPU基线），不带距离功能，不包含其他会话同期合入main的通话更新`e9f7b7c`，便于与320差分。
+- **Android依据/改动边界**：`scp/rv/scp_helper.c:2262–2276`逐项存入`uint32_t`，`scp_helper.h:180`结构字段同宽；`mtk_sip_svc.h:9–13`定义-1/-2/-3/-4。仅GET_REGION_INFO接受u32零扩展/合法符号扩展，拒绝其它形状并保留四个错误码，原始64位SMC日志不变。完整8字段读取后的结构大小/对齐、loader/firmware/DRAM在DT reserve内检查不变；不改其它SMC、时钟/复位/READY、增益或协议，不伪造样本。
+- **启动基线纠正**：320 `:1065`明确`active plugin=X9GeneralMetal280 from verified allowlist`，`:3692` backboardd加载`X9GeneralMetal280`/`X9PanVK280`。**320实跑GPU280，319实跑283；不能把319的限制套用到320。** 本ALS-only候选继续280，无新插件包；若设备仍为320插件状态则无需mailbox，否则不能假定当前插件未变化。
+- **准备/待办**：共享`.local`软链仍指向主checkout；worktree运行`prepare-local.py --check`因`MaliMetal/X9/General`指向main而拒绝，未重指共享软链以免干扰其他会话。随后在主checkout核验固定输入；kernel/boot构建从本worktree直接取维护源码，不构建插件。下一步完整编译，结果另记；尚无修复后的实机READY/ENABLE/DATA证据。
