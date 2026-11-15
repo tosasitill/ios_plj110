@@ -88,13 +88,16 @@ static int cam_smi_a0_idle(void)
 }
 static int cam_smi_a0_write(unsigned word,uint32_t mask,uint32_t value)
 {
-    uint32_t old,next;int e;
+    uint32_t old,next;int e;bool native;
     if(!cam_smi_a0.held || cam_smi_a0.pending)return EBUSY;
     /* Fixed allowlist. Even a future internal caller cannot smuggle a
      * legacy MMU/bank/path, another port or a shared misc write through. */
-    if(!((word==CAM_SMI_A0_ULTRA && mask==1 && value==1) ||
-        (word==CAM_SMI_A0_NONSEC && mask==8 && value==8) ||
-        (word==CAM_SMI_A0_OSTD && mask==UINT32_MAX && value==1)))return EINVAL;
+    native=cam_native_clock_request.epoch==cam_smi.epoch &&
+        cam_native_clock_request.epoch!=0;
+    if(!((word==CAM_SMI_A0_ULTRA && mask==1 && (value==1 || (native && value==0))) ||
+        (word==CAM_SMI_A0_NONSEC && mask==8 && (value==8 || (native && value==0))) ||
+        (word==CAM_SMI_A0_OSTD && mask==UINT32_MAX &&
+         (value==1 || (native && value>0 && value<=64)))))return EINVAL;
     e=cam_rx_session_guard();if(e)return e;
     e=cam_smi_a0_idle();if(e)return e;
     e=cam_smi_a0_guard();if(e)return e;
