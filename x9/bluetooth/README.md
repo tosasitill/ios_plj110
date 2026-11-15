@@ -109,12 +109,19 @@
   当前Android原始HCI捕获返回16；这只用于理解适配边界，iOS仍必须自己读取，不能把16硬编码进桥。
   HCI Reset保留真实失败状态，并清理各层能力；旧epoch的未完成203b不能推进新初始化。
   broadcaster启动时刷新构造阶段的legacy选择（本版本实例+0x88），不套iOS27布局。
+  标准extended scan门为 `19a7e8→85a646`，取真实ext_scan；独立Apple VSC scan门
+  `19a83c→85a645` 必须为0。原provider后续初始化与此一致，否则会进入空vendor ops返回0xe11。
+  2041临时serializer的头不会原样发出：native queue按真实cursor提取payload，H4发送端重建正确
+  `3+5*PHY_count` plen；无需修改该serializer。标准200d/2043及LE01/0a/0d事件保留原生路径。
 - LE-support/LE-buffer/SupportedStates/FilterAcceptListSize/PAListSize初始化回调保留真实错误。
   后两种size是scalar，0不是NULL；SupportedStates才是8 B指针。成功继续原件cache setter，不伪造payload。
 - CIS host-feature、subrating host-feature、default-subrating三个完成回调不再无条件返回成功；
   保留原件按真实LE feature/descriptor在**提交前**跳过不支持项的路径，已提交命令的真实失败则清能力并传给init sequencer。
   HostFlowControl完成回调也保留入口status，不让0x2cd日志分支吞错或泄漏logger返回值。
-  四个回调原件均无payload/cache setter，桥不虚构参数或缓存；本轮patch容量40、实际35项。
+  四个回调原件均无payload/cache setter，桥不虚构参数或缓存；全部text改动先核原指令及容量。
+  HostBufferSize 0c33声明的是不含4B ACL header的payload容量。原H4 RX固定包预算2032，
+  ACL payload实际2028；现去掉原builder再加4的指令，不把serial_open的4096 TX staging误当RX容量。
+  默认原HCI config的host flow为0；声明边界修复本身不保证controller不会回大ACL，流控闭环仍在整合。
 - `X9Bootstrap16`同时核对只读ABI1状态（READY/error0/FW-ready1/chip6653/baud24M）和 `kern.x9_bt_boot=0`。
   只在service尚未注册或真实INITIALIZING时等待；PASSIVE/FAILED立即保留失败。内核在serial boot结果后才发布READY。
 - `X9BluetoothLaunch`保留mobile501身份，等完整board就绪后设置 `BT_HCI_TRANSPORT=H4:POSIX`、
@@ -148,10 +155,11 @@ python3 -I x9/bluetooth/candidate.py --name <全新简单名字> \
   --config x9/out/bluetooth-native/xnu-lifecycle-20261115/local.json \
   --boot-config x9/build/boot-device.json \
   --boot-arg x9_bt_init=1 --boot-arg x9_bt_fc=1 \
-  --launchd-source x9/out/bluetooth-native/launchd20h392-input --jobs 8
+  --launchd-source x9/out/bluetooth-native/launchd20h392-input \
+  --launchd-cache-source x9/out/bluetooth-native/launchd20h392-input/launchd.plist --jobs 8
 ```
 
-同一次编排完成全 overlay kernel、用户态/jobs、离线 root payload、一次 boot.img；全部 exit0 后才发布
+同一次编排完成全 overlay kernel、用户态/jobs及权威launchd cache、离线 root payload、一次 boot.img；全部 exit0 后才发布
 `manifest.json` 的 `built_complete/candidate_ready=true`。`runtime_verified/stageable/root_installed` 仍为 false。
 失败保留日志、无完成 manifest、如已生成被拒绝镜像则改名 `.failed`，不能交付为完整候选。
 **boot.img 本身不安装 iOS 根盘中的桥或 jobs**；root 修改先确认、核对原件及 live root preflight，用户手动 boot 后才验原生功能。
@@ -181,10 +189,16 @@ payload 上限251按原模块声明 maxlen255/四字节wire头的安全预算设
 不能从零输入生成“成功的空vendor初始化”。私有生成物包含地址/校准，不入git、不打印参数。
 
 可选 `--launchd-source <仓库内原始20H392 plist目录>` 仅生成启动候选配置：
+须同时提供 `--launchd-cache-source <仓库内原始20H392 cache>`。
 先校验两个原job的Label/mobile身份/ProgramArguments/MachServices，再仅override `Program` 为
 `/usr/libexec/X9BluetoothLaunch` 和 `/usr/libexec/X9BlueTool`，保留原arguments、MachServices、KeepAlive、events及其它字段。
 输入原件副本在输出 `launchd-originals/`，派生件在 `launchd-candidates/`；两者不入git、均未安装，
 不是自动可stage或已验收包；完整候选只可在明确 root 许可后由上述安装器安装。
+这版launchd正常启动会优先使用 `/System/Library/xpc/launchd.plist` 的cached job，独立plist不能覆盖它。
+`launch_cache.py` 仅append六个对象（两Program值、两job及两父dict），保留所有其它records、原707339B
+object region、22269个IDs/offsets及2B ref width，不全量重排。原cache796447B，派生cache798777B；
+内核Siri仅接受两种精确size/trailer并继续核全部32个原string guards。package/stage同时备份、比较并安装
+第七文件cache，拒绝旧六文件payload；原cache必须与live snapshot逐字节相等，不删cache或.sig。
 
 未来工具正常交付后仅有只读metadata入口：
 
