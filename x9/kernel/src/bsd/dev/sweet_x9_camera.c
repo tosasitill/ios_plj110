@@ -96,6 +96,7 @@ static const struct x9_camera_sensor sensors[] = {
 #include "x9_camera_sensor_session.inc"
 #include "x9_camera_standby.inc"
 #include "x9_camera_receiver.inc"
+#include "x9_camera_native_source.inc"
 _Static_assert(sizeof(struct x9_camera_status)==88,"camera status ABI");
 _Static_assert(sizeof(struct x9_camera_stop)==64,"camera stop ABI");
 static const struct x9_camera_sensor *sensor(void) { return &sensors[st.sensor-1]; }
@@ -116,14 +117,6 @@ static int write8(const struct x9_camera_sensor *s, uint16_t reg, uint8_t v)
     e=hw.write8(s,reg,v);
     if(!e)e=hw.read8(s,reg,&back); return e?e:back==v?0:EIO;
 }
-static int write16(const struct x9_camera_sensor *s, uint16_t reg, uint32_t v)
-{
-    int e=write8(s,reg,(uint8_t)(v>>8)); return e?e:write8(s,reg+1,(uint8_t)v);
-}
-static int cam_sensor_hw_read(void *s, uint16_t reg, uint8_t *v)
-{ return hw.read8(s,reg,v); }
-static int cam_sensor_hw_write(void *s, uint16_t reg, uint8_t v)
-{ return hw.write8(s,reg,v); }
 static int cam_drain_readers(void)
 {
     uint64_t span;nanoseconds_to_absolutetime(1000000000,&span);
@@ -258,8 +251,7 @@ static int start(uint32_t which, uint32_t mode)
     e=hw.power(s,1);
     if(!e)e=read16(s,0x0016,&id);
     if(!e && id!=s->chip_id)e=ENODEV;
-    struct cam_sensor_io io={.context=(void *)s,.read=cam_sensor_hw_read,.write=cam_sensor_hw_write};
-    if(!e)e=cam_sensor_configure(&io,which,&config);
+    if(!e)e=hw.configure(s,&config);
     if(!e){session.capture=true;e=hw.capture(s,1,session.generation);}
     if(!e){session.stream=true;e=write8(s,0x0100,1);}
     lck_mtx_lock(&camera_lock);
@@ -277,7 +269,8 @@ static int start(uint32_t which, uint32_t mode)
 }
 int x9_camera_register_platform(const struct x9_camera_platform *p)
 {
-    if(!p || p->version!=X9_CAMERA_PLATFORM_VERSION || !p->power || !p->read8 || !p->write8 || !p->capture)return EINVAL;
+    if(!p || p->version!=X9_CAMERA_PLATFORM_VERSION || !p->power || !p->read8 ||
+       !p->write8 || !p->configure || !p->exposure || !p->capture)return EINVAL;
     struct x9_camera_config config={0};
     int tables=cam_sensor_config_preflight(1,&config);
     if(!tables)tables=cam_sensor_config_preflight(2,&config);
@@ -313,7 +306,7 @@ int x9_camera_register_platform(const struct x9_camera_platform *p)
 static int cam_completed_layout(const struct x9_camera_sensor *s,
     const struct x9_camera_completed_frame *f)
 {
-    return f->version!=X9_CAMERA_PLATFORM_VERSION || f->reserved || !f->raw ||
+    return f->version!=X9_CAMERA_COMPLETED_VERSION || f->reserved || !f->raw ||
         f->stride!=((s->width/4*5+63)&~63u) ||
         (uint64_t)f->stride*s->height!=f->bytes || f->bytes>X9_CAMERA_MAX_BYTES ? EINVAL:0;
 }
@@ -361,8 +354,13 @@ int x9_camera_deliver(const struct x9_camera_completed_frame *completed)
 }
 #include "x9_camera_camsv.inc"
 #include "x9_camera_irq.inc"
-static int cam_open(__unused dev_t d,int f,__unused int t,struct proc *p)
+static int cam_open(dev_t d,int f,__unused int t,struct proc *p)
 {
+    /* Independent vnode/minor for non-mutating capability observers. A
+     * mediaserver vendor lookup may run while the RAW/control fd is owned;
+     * it must not acquire that open or close/STOP its active generation. */
+    if(minor(d)==1)return (f&FWRITE)?EPERM:0;
+    if(minor(d)!=0)return ENXIO;
     if(f&FWRITE) {
         char name[32];proc_name(proc_pid(p),name,sizeof(name));
         uid_t uid=kauth_cred_getuid(kauth_cred_get());
@@ -376,8 +374,10 @@ static int cam_open(__unused dev_t d,int f,__unused int t,struct proc *p)
     if(!e){opened=true;control_stop_issued=false;}
     lck_mtx_unlock(&camera_lock);lck_mtx_unlock(&camera_control_lock);return e;
 }
-static int cam_close(__unused dev_t d,__unused int f,__unused int t,__unused struct proc *p)
+static int cam_close(dev_t d,__unused int f,__unused int t,__unused struct proc *p)
 {
+    if(minor(d)==1)return 0;
+    if(minor(d)!=0)return ENXIO;
     lck_mtx_lock(&camera_control_lock);lck_mtx_lock(&camera_lock);
     int e=control_stop_issued?cam_stop_cached_close():stop();opened=false;
     if(frame && !session.latched && !cam_stop_owned() && !frame_readers &&
@@ -386,8 +386,10 @@ static int cam_close(__unused dev_t d,__unused int f,__unused int t,__unused str
     }
     lck_mtx_unlock(&camera_lock);lck_mtx_unlock(&camera_control_lock);return e;
 }
-static int cam_ioctl(__unused dev_t d,u_long cmd,caddr_t data,int f,__unused struct proc *p)
+static int cam_ioctl(dev_t d,u_long cmd,caddr_t data,int f,__unused struct proc *p)
 {
+    if(minor(d)>1)return ENXIO;
+    if(minor(d)==1 && cmd!=X9_CAMERA_GET_STATUS && cmd!=X9_CAMERA_GET_STOP)return EPERM;
     if(cmd==X9_CAMERA_GET_STATUS) {
         lck_mtx_lock(&camera_lock);memcpy(data,&st,sizeof(st));lck_mtx_unlock(&camera_lock);return 0;
     }
@@ -529,8 +531,9 @@ static int cam_ioctl(__unused dev_t d,u_long cmd,caddr_t data,int f,__unused str
     lck_mtx_unlock(&camera_lock);lck_mtx_unlock(&camera_control_lock);
     return 0; /* operation/restore errors are in the copied-out result */
 }
-static int cam_write(__unused dev_t d,struct uio *uio,__unused int flags)
+static int cam_write(dev_t d,struct uio *uio,__unused int flags)
 {
+    if(minor(d)!=0)return EPERM;
     if(st.mode!=2)return EPERM; /* mode3 has only fixed standby table ioctl, no raw writer */
     struct hakios_camera_command c;if(uio_resid(uio)!=sizeof(c))return EINVAL;
     int e=uiomove((char*)&c,sizeof(c),uio);if(e)return e;if(c.bytes)return ENOTSUP;
@@ -549,18 +552,20 @@ static int cam_write(__unused dev_t d,struct uio *uio,__unused int flags)
         if(lines>s->frame_max || lines<s->frame_lines || c.a<s->exposure_min ||
            c.a>lines-48 || c.a%s->exposure_step || lines%s->exposure_step || c.b<1024 || c.b>65536)e=EINVAL;
         else {
-            e=write8(s,0x0104,1);
-            if(!e)e=write16(s,0x0340,lines);
-            if(!e)e=write16(s,0x0202,c.a);
-            if(!e)e=write16(s,0x0204,s->gain_unity-(s->gain_unity*1024/c.b));
-            int release=write8(s,0x0104,0);if(!e)e=release;
+            /* Worker SOF/DONE completion must not wait for the frame mutex
+             * across AP I2C/engine scheduling. Control serialization still
+             * pins this sensor/generation through the whole AE request. */
+            lck_mtx_unlock(&camera_lock);
+            e=hw.exposure(s,c.a,c.b,lines);
+            lck_mtx_lock(&camera_lock);
             if(e){st.flags|=X9_CAMERA_FAULT;st.last_errno=e;(void)stop();}
         }
     } else e=ENOTSUP; /* no fake focus, KEEP host export or arbitrary writes */
     lck_mtx_unlock(&camera_lock);lck_mtx_unlock(&camera_control_lock);return e;
 }
-static int cam_read(__unused dev_t d,struct uio *uio,__unused int flags)
+static int cam_read(dev_t d,struct uio *uio,__unused int flags)
 {
+    if(minor(d)!=0)return ENOTSUP;
     if(uio_resid(uio)<sizeof(head))return EMSGSIZE;
     lck_mtx_lock(&camera_lock);int e=0;
     bool peek=uio_resid(uio)==sizeof(head),pinned=false;
@@ -604,6 +609,7 @@ static int cam_read(__unused dev_t d,struct uio *uio,__unused int flags)
 static const struct cdevsw cam_cdev={.d_open=cam_open,.d_close=cam_close,.d_read=cam_read,
     .d_write=cam_write,.d_ioctl=cam_ioctl,.d_stop=eno_stop,.d_reset=eno_reset,
     .d_select=eno_select,.d_mmap=eno_mmap,.d_strategy=eno_strat};
+#include "x9_camera_native_sensor.inc"
 void sweet_x9_camera_init(void)
 {
     if(!sweet_early_is_x9())return;
@@ -613,7 +619,9 @@ void sweet_x9_camera_init(void)
     /* Captured 20H392 launchd plist runs mediaserverd as mobile (501:501),
      * not macOS _mediaserverd (32). The status device is
      * NOT evidence of capture capability. No MMIO or rail changes at init. */
-    if(!devfs_make_node(makedev(major,0),DEVFS_CHAR,mode==3?0:501,mode==3?0:501,0600,"x9-camera"))st.last_errno=ENOMEM;
+    if(!devfs_make_node(makedev(major,0),DEVFS_CHAR,mode==3?0:501,mode==3?0:501,0600,"x9-camera") ||
+       !devfs_make_node(makedev(major,1),DEVFS_CHAR,mode==3?0:501,mode==3?0:501,0400,"x9-camera-status"))
+        st.last_errno=ENOMEM;
     printf("X9 CAMERA: mode=%d hhmain(i2c4/1a) hhfront(i2c2/10); platform=%u, no fake frames\n",mode,hw.version);
     if(mode==3)printf("X9 CAMERA PROBE: root probe/standby ioctl only, no boot-time MMIO/power, no iOS install; shared providers required\n");
 }

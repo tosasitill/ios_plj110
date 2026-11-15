@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <sys/ioccom.h>
 #define X9_CAMERA_DEVICE "/dev/x9-camera"
+#define X9_CAMERA_STATUS_DEVICE "/dev/x9-camera-status"
 #define X9_CAMERA_BACK 1u
 #define X9_CAMERA_FRONT 2u
 #define X9_CAMERA_READY 1u
@@ -294,23 +295,34 @@ struct x9_camera_sensor {
     uint32_t power_count;
 };
 struct x9_camera_platform {
-    /* Version3 also requires this request's actual SOF observation time.
-     * Version2's DONE-only timestamp cannot identify pre-shutter SOF;
-     * version1's late sensor sampling cannot identify frame state. */
+    /* Version4 delegates configuration to the real powered sensor service.
+     * Core must not bypass its CONFIGURED journal with independent table
+     * writes. Completion records retain their independent version3 ABI. */
     uint32_t version;
     /* power(true) follows sensor->power, power(false) restores ownership in
      * reverse order, including failures halfway through power(true). */
     int (*power)(const struct x9_camera_sensor *, int on);
     int (*read8)(const struct x9_camera_sensor *, uint16_t reg, uint8_t *);
     int (*write8)(const struct x9_camera_sensor *, uint16_t reg, uint8_t);
-    /* on: set up CSI VC0/DT0x2b, RAW10 DMA and SMMU before sensor stream-on.
+    /* Called after power/ID, before the capture attempt. Must load and
+     * verify this sensor's actual mode, and prepare its inactive receiver
+     * lifetime. Callback owns the same cold journal as power/read/write. */
+    int (*configure)(const struct x9_camera_sensor *, struct x9_camera_config *);
+    /* Accept one validated AE request as a unit, not independent live
+     * register writes that bypass the controller's frame/control journal.
+     * A queued request is not applied metadata: each completion must bind
+     * its actual applied exposure/gain/frame length. gain_q10 is linear. */
+    int (*exposure)(const struct x9_camera_sensor *, uint32_t exposure_lines,
+        uint32_t gain_q10, uint32_t frame_lines);
+    /* on: set up the actual image VC (back1/front0)/DT0x2b, RAW10 DMA and SMMU before sensor stream-on.
      * off: stop/drain DMA before returning, even after partial init failure.
      * generation tags every completion; old completions are rejected.
      * Nonzero off retains DMA mappings/clocks/rails: caller must NOT call
      * power(false), retry cleanup, or start another sensor in this boot. */
     int (*capture)(const struct x9_camera_sensor *, int on, uint64_t generation);
 };
-#define X9_CAMERA_PLATFORM_VERSION 3u
+#define X9_CAMERA_PLATFORM_VERSION 4u
+#define X9_CAMERA_COMPLETED_VERSION 3u
 /* Kernel-only record, not an ioctl or the userland RAW10 header. Provider
  * binds this to one owned DMA slot/request AFTER PASS1_DONE/group/tag/inner
  * sequence, error checks and CPU cache sync. capture_id is a nonzero, strictly

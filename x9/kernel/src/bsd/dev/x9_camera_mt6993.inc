@@ -513,6 +513,31 @@ static int cam_restore(struct cam_probe_journal *j)
     if(cam_cold_retained(j))return cam_restore_failed(j,EIO);
     j->restore_step=X9_CAM_COLD_RESTORE_DONE;return 0;
 }
+/* IO mappings have boot lifetime; resetting a cold transaction journal does
+ * not release ml_io_map allocations. Reuse the exact board apertures across
+ * native probe/open/front-back transitions, including a partially failed map
+ * admission. All callers already hold camera_control_lock. Never cache rail,
+ * pin, FIFO or ownership observations with these virtual addresses. */
+static struct {
+    vm_offset_t pa, va;
+    vm_size_t size;
+} cam_board_maps[24];
+static vm_offset_t cam_board_map(vm_offset_t pa, vm_size_t size)
+{
+    unsigned empty=24;
+    for(unsigned i=0;i<24;i++) {
+        if(cam_board_maps[i].pa==pa && cam_board_maps[i].size==size)
+            return cam_board_maps[i].va;
+        if(!cam_board_maps[i].va && empty==24)empty=i;
+    }
+    if(empty==24)return 0;
+    vm_offset_t va=ml_io_map(pa,size);
+    if(va) {
+        cam_board_maps[empty].pa=pa;cam_board_maps[empty].size=size;
+        cam_board_maps[empty].va=va;
+    }
+    return va;
+}
 static int cam_board_prepare(struct cam_probe_journal *j, uint32_t which,
                               struct x9_camera_probe *r)
 {
@@ -530,24 +555,24 @@ static int cam_board_prepare(struct cam_probe_journal *j, uint32_t which,
         .clk_status_bit=back?4:10, .clk_update_bit=back?27:21,
         .clk_group=back?6:5
     };
-    j->gpio=ml_io_map(0x1002d000,0x1000);
-    j->vlp=ml_io_map(0x1c200000,0x1000);
-    j->top=ml_io_map(0x1c210000,0x1000);
-    j->hwv=ml_io_map(0x1c040000,0x75000);
-    j->pll=ml_io_map(0x1c213100,0x100);
-    j->mainpll=ml_io_map(0x1c213000,0x100);
-    j->pmif_p=ml_io_map(0x1c018000,0x2000);
-    j->pmif_m=back?ml_io_map(0x1c01a000,0x2000):0;
-    j->board.drive_base=ml_io_map(back?0x13800000:0x13040000,0x1000);
+    j->gpio=cam_board_map(0x1002d000,0x1000);
+    j->vlp=cam_board_map(0x1c200000,0x1000);
+    j->top=cam_board_map(0x1c210000,0x1000);
+    j->hwv=cam_board_map(0x1c040000,0x75000);
+    j->pll=cam_board_map(0x1c213100,0x100);
+    j->mainpll=cam_board_map(0x1c213000,0x100);
+    j->pmif_p=cam_board_map(0x1c018000,0x2000);
+    j->pmif_m=back?cam_board_map(0x1c01a000,0x2000):0;
+    j->board.drive_base=cam_board_map(back?0x13800000:0x13040000,0x1000);
     j->sensor=(struct cam_probe_bus){
-        .base=ml_io_map(back?0x12450000:0x123d0000,0x80000),
-        .dma=ml_io_map(back?0x163d0000:0x16390000,0x30000),.banks=8,.dma_banks=3,
-        .gate=ml_io_map(0x12650000,0x1000),.gate_bit=back?4:2,
+        .base=cam_board_map(back?0x12450000:0x123d0000,0x80000),
+        .dma=cam_board_map(back?0x163d0000:0x16390000,0x30000),.banks=8,.dma_banks=3,
+        .gate=cam_board_map(0x12650000,0x1000),.gate_bit=back?4:2,
         .top=j->top,.univpll=j->pll,.mainpll=j->mainpll,.clock_shift=16,.clock_bit=29,
         .group_gate_mask=0x3f};
-    j->ldo=(struct cam_probe_bus){.base=ml_io_map(0x16200000,0x40000),
-        .dma=ml_io_map(0x164f0000,0x10000),.banks=4,.dma_banks=1,
-        .gate=ml_io_map(0x16300000,0x1000),.gate_bit=1,
+    j->ldo=(struct cam_probe_bus){.base=cam_board_map(0x16200000,0x40000),
+        .dma=cam_board_map(0x164f0000,0x10000),.banks=4,.dma_banks=1,
+        .gate=cam_board_map(0x16300000,0x1000),.gate_bit=1,
         .top=j->top,.univpll=j->pll,.mainpll=j->mainpll,.clock_shift=0,.clock_bit=31,
         .group_gate_mask=0x0d};
     if(!j->gpio || !j->vlp || !j->top || !j->hwv || !j->pll || !j->mainpll || !j->pmif_p || (back && !j->pmif_m) ||
