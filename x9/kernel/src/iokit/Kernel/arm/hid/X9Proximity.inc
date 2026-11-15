@@ -21,8 +21,10 @@ public:
  IOHIDEvent *copyEvent(IOHIDEventType,IOHIDEvent *,IOOptionBits) APPLE_KEXT_OVERRIDE;
  IOHIDEvent *copyMatchingEvent(OSDictionary *) APPLE_KEXT_OVERRIDE;
  IOReturn setProperties(OSObject *) APPLE_KEXT_OVERRIDE;
+ bool open(IOService *,IOOptionBits,void *,Action) APPLE_KEXT_OVERRIDE;
 private:
  static void poll(OSObject *,IOTimerEventSource *);
+ static IOReturn rearmOpen(OSObject *,void *,void *,void *,void *);
  static IOReturn configure(OSObject *,void *,void *,void *,void *);
  void removeTimer();
  IOHIDEvent *makeEvent(const x9_prox_sample &,IOOptionBits);
@@ -179,4 +181,22 @@ IOReturn X9Proximity::setProperties(OSObject *properties)
  OSDictionary *p=OSDynamicCast(OSDictionary,properties);
  if (!p) return kIOReturnBadArgument;
  return _hidGate?_hidGate->runAction(&X9Proximity::configure,p):kIOReturnNotReady;
+}
+IOReturn X9Proximity::rearmOpen(OSObject *owner,void *,void *,void *,void *)
+{
+ X9Proximity *self=(X9Proximity *)owner;
+ if (self->fDetectionMode) self->fReplay=true;
+ return kIOReturnSuccess;
+}
+bool X9Proximity::open(IOService *client,IOOptionBits options,void *context,Action action)
+{
+ bool opened=IOHIDEventService::open(client,options,context,action);
+ /* Close removes the subscriber, not the enabled on-change stream. A late
+  * subscriber/reopen must see a still-valid level even if no new edge occurs.
+  * Base open has released IOService arbitration before we acquire the gate.
+  * Only latch here: the userclient sets state Open after this method returns,
+  * so a synchronous callback would be discarded. The next gated poll uses
+  * the real snapshot without changing its timestamp or DATA sequence. */
+ if (opened && _hidGate) (void)_hidGate->runAction(&X9Proximity::rearmOpen);
+ return opened;
 }
