@@ -576,7 +576,39 @@ def rv55_mem_wait_evidence(dram, init):
         ('codec_deinit_flag_context_and_indirect_call', 0x2707f8, 0x270804),
         ('codec_deinit_clear_software_flag', 0x27080e, 0x270812),
         ('codec_release_object_copy_and_free_call', 0x27088a, 0x2708a4),
+        ('native_codec_create_request_and_call', 0x307f88, 0x307fb2),
+        ('codec_create_callback_destination_and_selector', 0x270006, 0x270028),
+        ('codec_ops_h265_table_materialization', 0x223468, 0x223476),
+        ('codec_ops_copy64_destination_and_tcm_call', 0x223490, 0x22349a),
+        ('codec_deinit_prefix_helper_is_ret_only', 0x222b70, 0x222b72),
+        ('h265_table_deinit_magic_gate_and_destructor_call', 0x2cd5ea, 0x2cd606),
+        ('h265_destructor_initial_cleanup_call', 0x2d2688, 0x2d2696),
+        ('h265_initial_cleanup_first_free_loop', 0x2f7d6a, 0x2f7dc0),
+        ('h265_destructor_sps_free_loop', 0x2d26b6, 0x2d26ea),
+        ('h265_destructor_pps_free_loop', 0x2d270a, 0x2d273e),
+        ('h265_destructor_three_mem_objects_free_loop', 0x2d273e, 0x2d2786),
+        ('h265_destructor_final_helper_and_handle_clear', 0x2d27ee, 0x2d2804),
     )
+    # The table is DATA, not decoded instructions. Its deinit slot is established
+    # by the object+16 installation and object+44 indirect call. Reaching the
+    # table-selection block still depends on unresolved vendor branches.
+    ops_table_address = 0x3356b0
+    ops_table_raw = span(dram, ops_table_address - 0x200000, 64)
+    branch_candidates = []
+    for address in (0x223400, 0x223410, 0x306170):
+        raw = span(dram, address - 0x200000, 4)
+        word = int.from_bytes(raw, 'little')
+        displacement = (((word >> 31) & 1) << 12) | (((word >> 7) & 1) << 11)
+        displacement |= (((word >> 25) & 63) << 5) | (((word >> 8) & 15) << 1)
+        if displacement & 0x1000:
+            displacement -= 0x2000
+        branch_candidates.append(dict(address=address, raw_hex=raw.hex(),
+            opcode=word & 127, funct3=(word >> 12) & 7, rs1=(word >> 15) & 31,
+            literal_field=(word >> 20) & 31,
+            candidate_standard_B_displacement=displacement,
+            candidate_target=address + displacement,
+            interpretation='hypothesis using standard B immediate bit layout, NOT decoded JALR',
+            vendor_semantics_or_taken_edge_proven=False))
     result.update(profile_match=True, profile='captured RV55 instance mem/wait senders',
         allocation=dict(message=0xc005, service=1, bytes=64, initial_status=0,
             type_offset=24, requested_length_offset=28, address_fields_initially_zero=True,
@@ -612,6 +644,36 @@ def rv55_mem_wait_evidence(dram, init):
                 codec_deinit_target_and_dma_drain_proven=False,
                 release_copy_source_offset=640, release_copy_bytes=88,
                 release_free_call=0x2708a0),
+            codec_ops_and_destructor=dict(native_create_call=0x307faa,
+                create_wrapper=0x26ff2c, ops_selector=0x2233ec,
+                object_ops_offset=16, copied_ops_bytes=64, tcm_copy_target=0x701c,
+                table=dict(address=ops_table_address, bytes=64,
+                    words=list(struct.unpack('<16I', ops_table_raw)),
+                    raw_hex=ops_table_raw.hex(), deinit_offset=28,
+                    deinit_target=struct.unpack_from('<I', ops_table_raw, 28)[0],
+                    selected_table_runtime_proven=False,
+                    codec_candidate_selection_control_flow_complete=False),
+                deinit_wrapper=0x2cd5e6, required_context_magic=0xabba4321,
+                destructor_call=0x2cd5fe, destructor=0x2d2648,
+                destructor_name_address=0x2d6532,
+                destructor_name=cstring(dram, 0x2d6532 - 0x200000),
+                wrapper_reports_one_without_checking_destructor_result=True,
+                initial_cleanup=0x2f7d46, initial_cleanup_call=0x2d2692,
+                initial_cleanup_first_free_call=0x2f7dac,
+                initial_cleanup_first_loop=dict(object_base_offset=0x1b38,
+                    object_stride=88, objects=7, presence_u64_offset=56,
+                    skip_if_object_field72_nonzero=True,
+                    object_roles_and_dma_retirement_proven=False),
+                destructor_mem_free_call=0x2d2772,
+                destructor_mem_loop=dict(object_base_offset=0x1840,
+                    object_stride=88, objects=3, presence_u64_offset=56,
+                    object_roles_and_dma_retirement_proven=False),
+                sps_cleanup=dict(entries=32, call=0x2d26da, callee=0x282d16),
+                pps_cleanup=dict(entries=256, call=0x2d272e, callee=0x284d72),
+                software_counts_are_not_hardware_capacity=True,
+                deinit_prefix_helper=0x222b70, prefix_helper_is_ret_only=True,
+                destructor_complete_control_flow_and_dma_drain_proven=False),
+            unresolved_branch_layout_candidates=branch_candidates,
             raw_request_or_software_deinit_is_retirement_authority=False,
             transport_return_is_hardware_drain_proof=False,
             unsafe_false_call=dict(address=0x246a46, real_encoding_address=0x246a44,
