@@ -706,58 +706,217 @@ int x9_hevc_sample_vui(const struct x9_hevc_config *c, const uint8_t *hvcc,
     }
     return EINVAL;
 }
-static int sei_hdr(const uint8_t *p, size_t n, unsigned temporal, unsigned after_vcl,
-    const struct x9_hevc_hdr *before, struct x9_hevc_hdr *hdr, unsigned counts[2])
+/* SEI payloadSize counts RBSP bytes, not EBSP bytes. One shared escape reader
+ * plus a logical bit cursor bounds each child independently of its parent.
+ * No RBSP heap, recursive nesting, or changes to the SPS bit reader. */
+struct sei_reader { struct bits b; uint64_t used; unsigned messages; };
+struct sei_context {
+    const struct x9_hevc_config *config;
+    const uint8_t *hvcc;
+    const struct x9_hevc_hdr *before;
+    struct x9_hevc_hdr *hdr;
+    unsigned *counts;
+    unsigned pps_id, temporal, nal_temporal, prefix, after_vcl;
+};
+static uint32_t sei_get(struct sei_reader *r, unsigned n, uint64_t end)
 {
-    struct bits b = { .p = p + 2, .n = n - 2 };
-    unsigned messages = 0;
-    /* SEI headers and payloads are byte aligned. Only the final 0x80 at a
-     * HEADER boundary is rbsp_trailing_bits; an 0x80 within a sized payload
-     * remains ordinary data. The existing bit reader validates canonical
-     * EBSP escapes even for unknown payloads, with no temporary RBSP heap. */
-    while (!b.error && b.pos < b.n) {
-        if (b.n-b.pos == 1 && b.p[b.pos] == 0x80)
-            return messages ? trailing_bits(&b) : EINVAL;
-        if (++messages > 1024) return E2BIG;
-        uint32_t type = 0, bytes = 0, value;
+    if (r->used > end || n > end-r->used) { r->b.error = 1; return 0; }
+    r->used += n;
+    return get(&r->b,n);
+}
+static uint32_t sei_ue(struct sei_reader *r, uint32_t maximum, uint64_t end)
+{
+    unsigned zeroes = 0;
+    while (!r->b.error && !sei_get(r,1,end))
+        if (++zeroes > 31) { r->b.error = 1; return 0; }
+    uint32_t value = r->b.error ? 0 : ((1u << zeroes)-1) + sei_get(r,zeroes,end);
+    if (value > maximum) r->b.error = 1;
+    return r->b.error ? 0 : value;
+}
+static int sei_header(struct sei_reader *r, uint64_t end, uint32_t *type, uint32_t *bytes)
+{
+    if (++r->messages > 1024) return E2BIG;
+    uint32_t *fields[] = {type,bytes};
+    for (unsigned i = 0; i < 2; i++) {
+        uint32_t value; *fields[i] = 0;
         do {
-            value = get(&b,8);
-            if (b.error || value > UINT32_MAX-type) return EINVAL;
-            type += value;
+            value = sei_get(r,8,end);
+            if (r->b.error || value > UINT32_MAX-*fields[i]) return EINVAL;
+            *fields[i] += value;
         } while (value == 255);
-        do {
-            value = get(&b,8);
-            if (b.error || value > UINT32_MAX-bytes) return EINVAL;
-            bytes += value;
-        } while (value == 255);
-        if (bytes > b.n-b.pos) return EINVAL;
-        unsigned prefix = ((p[0] >> 1) & 63) == 39;
-        if (prefix && type == 133) return ENOTSUP; /* nesting scope not guessed */
-        /* D.2.1: 137/144 in a suffix NAL use reserved_sei_message(), not
-         * mastering_display/content_light syntax. Never promote to HDR. */
-        unsigned mastering = prefix && type == 137, light = prefix && type == 144;
-        uint8_t raw[24];
-        if ((mastering && bytes != 24) || (light && bytes != 4)) return EINVAL;
-        /* D.3.1 PicUnitRepConSeiList: at most eight identical structures
-         * for each HDR type in this base-layer one-picture AU. */
-        if ((mastering && ++counts[0] > 8) || (light && ++counts[1] > 8)) return EINVAL;
-        if ((mastering || light) && ((p[1] & 7) - 1u != temporal ||
-            (after_vcl && ((mastering && !before->mastering_present) ||
-                          (light && !before->light_present))))) return EINVAL;
-        for (uint32_t i = 0; i < bytes && !b.error; i++) {
-            value = get(&b,8);
-            if (mastering || light) raw[i] = (uint8_t)value;
+    }
+    return r->used > end || (uint64_t)*bytes*8 > end-r->used ? EINVAL : 0;
+}
+static unsigned sei_vcl_associated(uint32_t type)
+{
+    if ((type >= 134 && type <= 152) || (type >= 154 && type <= 159) ||
+        (type >= 200 && type <= 202) || type == 205) return 1;
+    switch (type) {
+    case 2: case 3: case 6: case 9: case 15: case 16: case 17: case 19:
+    case 22: case 23: case 45: case 47: case 56: case 128: case 131: case 132: return 1;
+    default: return 0;
+    }
+}
+/* Query OpLayerIdList base membership in the ACTUAL selected VPS. Only its
+ * prefix through layer sets is needed here; this is not a complete VPS/HRD/
+ * extension conformance checker or a multilayer decoder capability claim. */
+static int sei_vps_base_scope(const struct sei_context *s, const uint32_t selected[32],
+    unsigned largest, unsigned *base)
+{
+    const struct x9_hevc_parameter_set *pps = find_set(s->config,34,s->pps_id);
+    const struct x9_hevc_parameter_set *sp = pps ? find_set(s->config,33,pps->reference_id) : NULL;
+    const struct x9_hevc_parameter_set *vp = sp ? find_set(s->config,32,sp->reference_id) : NULL;
+    if (!vp) return EINVAL;
+    struct bits b = { .p = s->hvcc+vp->offset+2, .n = vp->bytes-2 };
+    if (get(&b,4) != vp->id) return EINVAL;
+    skip(&b,2+6); /* internal/available/max layers do not change set membership */
+    unsigned sub = get(&b,3), nesting = bit(&b);
+    if (sub > 6 || (!sub && !nesting)) return EINVAL;
+    skip(&b,16); /* reserved_0xffff: decoders shall ignore its value */
+    skip(&b,96); /* general profile_tier_level(1): profile88 + level8 */
+    unsigned pp[7] = {0}, lp[7] = {0};
+    for (unsigned i = 0; i < sub; i++) { pp[i] = bit(&b); lp[i] = bit(&b); }
+    if (sub) for (unsigned i = sub; i < 8; i++) (void)get(&b,2);
+    for (unsigned i = 0; i < sub; i++) {
+        if (pp[i]) skip(&b,88);
+        if (lp[i]) skip(&b,8);
+    }
+    unsigned all = bit(&b);
+    for (unsigned i = all ? 0 : sub; i <= sub && !b.error; i++) {
+        (void)ue(&b); (void)ue(&b); (void)ue(&b);
+    }
+    unsigned max_layer = get(&b,6), sets = bounded_ue(&b,1023);
+    if (b.error || largest > sets) return EINVAL; /* this SEI NAL has layer0 */
+    *base = selected[0] & 1u; /* normative LayerSetLayerIdList[0]={0} */
+    for (unsigned i = 1; i <= sets && !b.error; i++)
+        for (unsigned j = 0; j <= max_layer && !b.error; j++) {
+            unsigned included = bit(&b);
+            if (!j && included && (selected[i/32] & (1u << (i%32)))) *base = 1;
         }
-        if (b.error) return EINVAL;
-        if (mastering) {
-            if (hdr->mastering_present && memcmp(hdr->mastering,raw,24)) return EINVAL;
-            memcpy(hdr->mastering,raw,24); hdr->mastering_present = 1;
-        } else if (light) {
-            if (hdr->light_present && memcmp(hdr->light,raw,4)) return EINVAL;
-            memcpy(hdr->light,raw,4); hdr->light_present = 1;
+    return b.error ? EINVAL : 0;
+}
+static int sei_payload(struct sei_reader *r, uint32_t type, uint32_t bytes, uint64_t end,
+    const struct sei_context *s, unsigned nested, unsigned apply, unsigned source)
+{
+    if (nested && (type == 129 || type == 132 || type == 133)) return EINVAL;
+    /* D.2.1 suffix137/144 are reserved payloads, not HDR. */
+    unsigned mastering = s->prefix && type == 137, light = s->prefix && type == 144;
+    if ((mastering && bytes != 24) || (light && bytes != 4)) return EINVAL;
+    if (apply && (mastering || light)) {
+        if ((mastering && ++s->counts[0] > 8) || (light && ++s->counts[1] > 8)) return EINVAL;
+        if ((!nested && s->nal_temporal != s->temporal) ||
+            (s->after_vcl && ((mastering && !s->before->mastering_present) ||
+                             (light && !s->before->light_present)))) return EINVAL;
+    }
+    uint8_t raw[24];
+    for (uint32_t i = 0; i < bytes && !r->b.error; i++) {
+        uint32_t value = sei_get(r,8,end);
+        if (mastering || light) raw[i] = (uint8_t)value;
+    }
+    if (r->b.error || r->used != end) return EINVAL;
+    if (!apply) return 0;
+    if (mastering) {
+        if (s->hdr->mastering_present && memcmp(s->hdr->mastering,raw,24)) return EINVAL;
+        memcpy(s->hdr->mastering,raw,24); s->hdr->mastering_present = 1;
+        s->hdr->mastering_sources |= source;
+    } else if (light) {
+        if (s->hdr->light_present && memcmp(s->hdr->light,raw,4)) return EINVAL;
+        memcpy(s->hdr->light,raw,4); s->hdr->light_present = 1;
+        s->hdr->light_sources |= source;
+    }
+    return 0;
+}
+static int sei_scalable(struct sei_reader *r, uint64_t end, const struct sei_context *s,
+    unsigned *timing)
+{
+    unsigned subset = sei_get(r,1,end), ops = sei_get(r,1,end), base = 0, full_temporal = 1;
+    if (ops) {
+        uint32_t selected[32] = {0}; /* 1024 normative operation indices */
+        unsigned def = sei_get(r,1,end), num = sei_ue(r,1023,end), largest = 0, explicit_ops = 0;
+        if (def) { base = 1; full_temporal = s->nal_temporal == 6; }
+        for (unsigned i = def; i <= num && !r->b.error; i++) {
+            unsigned cap = sei_get(r,3,end), index = sei_ue(r,1023,end);
+            if (cap < s->nal_temporal+1) return EINVAL;
+            if (cap != 7) full_temporal = 0;
+            selected[index/32] |= 1u << (index%32); explicit_ops = 1;
+            if (index > largest) largest = index;
+        }
+        if (r->b.error) return EINVAL;
+        if (explicit_ops) {
+            unsigned selected_base = 0;
+            int e = sei_vps_base_scope(s,selected,largest,&selected_base);
+            if (e) return e;
+            base |= selected_base;
+        }
+    } else {
+        unsigned all = sei_get(r,1,end);
+        if (all) base = 1; /* current AU contains only layer0 */
+        else {
+            unsigned cap = sei_get(r,3,end), num = sei_ue(r,63,end), previous = 0;
+            if (!cap) return EINVAL;
+            full_temporal = cap == 7;
+            for (unsigned i = 0; i <= num && !r->b.error; i++) {
+                unsigned id = sei_get(r,6,end);
+                if (i && id <= previous) return EINVAL;
+                if (!id) base = 1;
+                previous = id;
+            }
         }
     }
-    return EINVAL; /* the final rbsp_trailing_bits byte is required */
+    while ((r->used & 7) && !r->b.error) if (sei_get(r,1,end)) return EINVAL;
+    if (r->b.error || r->used == end) return EINVAL; /* one or more children */
+    unsigned other = 0; *timing = 0;
+    while (r->used < end && !r->b.error) {
+        uint32_t type, bytes;
+        int e = sei_header(r,end,&type,&bytes);
+        if (e) return e;
+        unsigned is_timing = type == 0 || type == 1 || type == 130;
+        if (is_timing) *timing = 1; else other = 1;
+        if ((*timing && other) || (is_timing && !subset) ||
+            ((sei_vcl_associated(type) || type == 129) && subset) ||
+            (sei_vcl_associated(type) && (s->nal_temporal || !full_temporal))) return EINVAL;
+        uint64_t payload_end = r->used+(uint64_t)bytes*8;
+        e = sei_payload(r,type,bytes,payload_end,s,1,base,
+            ops ? X9_HEVC_HDR_SCALABLE_OPERATIONS : X9_HEVC_HDR_SCALABLE_LAYERS);
+        if (e) return e;
+    }
+    return r->b.error || r->used != end ? EINVAL : 0;
+}
+static int sei_hdr(const uint8_t *p, size_t n, const struct x9_hevc_config *config,
+    const uint8_t *hvcc, unsigned pps_id, unsigned temporal, unsigned after_vcl,
+    const struct x9_hevc_hdr *before, struct x9_hevc_hdr *hdr, unsigned counts[2])
+{
+    struct sei_reader r = { .b = { .p = p+2, .n = n-2 } };
+    const struct sei_context s = { .config = config, .hvcc = hvcc, .pps_id = pps_id,
+        .before = before, .hdr = hdr, .counts = counts, .temporal = temporal,
+        .nal_temporal = (p[1]&7)-1u, .prefix = ((p[0]>>1)&63) == 39, .after_vcl = after_vcl };
+    uint64_t limit = (uint64_t)(n-2)*8; /* EBSP upper bound, not a payload bound */
+    unsigned last = 0, direct_timing = 0, nested_timing = 0, other = 0, active = 0;
+    while (!r.b.error && r.b.pos < r.b.n) {
+        /* Only an 0x80 at the final HEADER boundary is rbsp_trailing_bits;
+         * within a sized parent/child payload it remains ordinary data. */
+        if (r.b.n-r.b.pos == 1 && r.b.p[r.b.pos] == 0x80)
+            return r.messages ? trailing_bits(&r.b) : EINVAL;
+        if (last) return EINVAL; /* D.2.24 nesting consumes the last SEI payload */
+        uint32_t type, bytes;
+        int e = sei_header(&r,limit,&type,&bytes);
+        if (e) return e;
+        uint64_t end = r.used+(uint64_t)bytes*8;
+        if (s.prefix && type == 133) {
+            unsigned timing = 0;
+            e = sei_scalable(&r,end,&s,&timing); last = 1;
+            if (timing) nested_timing = 1;
+        } else {
+            if (s.prefix && (type == 0 || type == 1 || type == 130)) direct_timing = 1;
+            else other = 1;
+            if (s.prefix && type == 129) active = 1;
+            e = sei_payload(&r,type,bytes,end,&s,0,1,X9_HEVC_HDR_DIRECT);
+        }
+        if (e) return e;
+        if (s.prefix && ((active && r.messages != 1) ||
+            (direct_timing && (other || last)) || (nested_timing && other))) return EINVAL;
+    }
+    return EINVAL;
 }
 int x9_hevc_sample_metadata(const struct x9_hevc_config *c, const uint8_t *hvcc,
     size_t hvcc_bytes, const uint8_t *sample, size_t sample_bytes,
@@ -781,7 +940,8 @@ int x9_hevc_sample_metadata(const struct x9_hevc_config *c, const uint8_t *hvcc,
         unsigned type = (sample[at] >> 1) & 63;
         if (type < 32) vcl_seen = 1;
         if (type == 39 || type == 40) {
-            e = sei_hdr(sample+at,bytes,metadata.temporal_id,vcl_seen,&before,&hdr,counts);
+            e = sei_hdr(sample+at,bytes,c,hvcc,metadata.pps_id,
+                metadata.temporal_id,vcl_seen,&before,&hdr,counts);
             if (e) return e;
             if (!vcl_seen) before = hdr;
         }
@@ -813,6 +973,12 @@ int x9_hevc_hdr_sequence_next(const struct x9_hevc_hdr_sequence *current,
         previous.hdr.mastering_present > 1 ||
         previous.hdr.light_present > 1 || picture->hdr.mastering_present > 1 ||
         picture->hdr.light_present > 1 || picture->eos_present > 1 || picture->eob_present > 1 ||
+        ((previous.hdr.mastering_sources | previous.hdr.light_sources |
+          picture->hdr.mastering_sources | picture->hdr.light_sources) & ~X9_HEVC_HDR_SOURCES) ||
+        (!previous.hdr.mastering_present && previous.hdr.mastering_sources) ||
+        (!previous.hdr.light_present && previous.hdr.light_sources) ||
+        (!picture->hdr.mastering_present && picture->hdr.mastering_sources) ||
+        (!picture->hdr.light_present && picture->hdr.light_sources) ||
         picture->nal_type > 21 || (picture->nal_type > 9 && picture->nal_type < 16) ||
         picture->temporal_id > 6 || (picture->nal_type >= 16 && picture->temporal_id) ||
         picture->no_output_of_prior_pics_flag > 1 || previous.eob_present) return EINVAL;
@@ -830,10 +996,12 @@ int x9_hevc_hdr_sequence_next(const struct x9_hevc_hdr_sequence *current,
         if ((!new_clvs && !next.hdr.mastering_present) || (next.hdr.mastering_present &&
             memcmp(next.hdr.mastering,picture->hdr.mastering,24))) return EINVAL;
         memcpy(next.hdr.mastering,picture->hdr.mastering,24); next.hdr.mastering_present = 1;
+        next.hdr.mastering_sources |= picture->hdr.mastering_sources;
     }
     if (picture->hdr.light_present) {
         if (next.hdr.light_present && memcmp(next.hdr.light,picture->hdr.light,4)) return EINVAL;
         memcpy(next.hdr.light,picture->hdr.light,4); next.hdr.light_present = 1;
+        next.hdr.light_sources |= picture->hdr.light_sources;
     }
     next.clvs = previous.clvs + new_clvs;
     next.started = 1; next.eos_present = picture->eos_present; next.eob_present = picture->eob_present;

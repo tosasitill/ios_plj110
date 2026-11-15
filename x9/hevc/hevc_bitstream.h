@@ -99,18 +99,28 @@ int x9_hevc_parameter_sets_annexb(const struct x9_hevc_config *, const uint8_t *
  * synthesized CM extensions or SEI override; output is cleared on failure. */
 int x9_hevc_sample_vui(const struct x9_hevc_config *, const uint8_t *hvcc,
     size_t hvcc_bytes, const uint8_t *sample, size_t sample_bytes, struct x9_hevc_vui *);
-/* Explicit, non-nested base-layer prefix SEI in THIS complete AU, not
- * persistent video state or a transfer/tone-map policy. TemporalId must match
- * the picture. Bytes are the original big-endian
+/* Resolved base-layer prefix SEI in THIS complete AU, not
+ * persistent video state or a transfer/tone-map policy. Direct TemporalId
+ * must match the picture. Bytes are the original big-endian
  * payloads, after canonical emulation-prevention removal. No numeric scaling
  * or RGB-primary reorder. Equal repeated messages are legal; conflicting
  * values, malformed SEI lengths/trailing bits fail with cleared output.
  * Mid-picture prefix repeats require the same type before the first VCL.
  * D.2.1 defines suffix137/144 as reserved payloads, NOT HDR; they are skipped.
- * Scalable nesting requires scope resolution and currently returns ENOTSUP;
- * unknown non-nesting messages are bounded/validated, not interpreted. */
+ * Scalable nesting resolves layers/operation layer sets using the actual
+ * picture PPS->SPS->VPS; VCL-associated nested HDR requires NAL TemporalId0
+ * and every MaxTemporalId6 (D.3.24), not the direct SEI's Tid equality rule.
+ * Non-base scoped messages are not promoted. Unknown payload syntax and
+ * other nesting families remain uninterpreted, not complete SEI validation. */
+#define X9_HEVC_HDR_DIRECT 1u
+#define X9_HEVC_HDR_SCALABLE_LAYERS 2u
+#define X9_HEVC_HDR_SCALABLE_OPERATIONS 4u
+#define X9_HEVC_HDR_SOURCES 7u
 struct x9_hevc_hdr {
     uint32_t mastering_present, light_present;
+    /* Bitstream provenance only, ORed for agreeing repetitions. CM/container
+     * readers leave these zero; presence/zero numeric payload are distinct. */
+    uint32_t mastering_sources, light_sources;
     uint8_t mastering[24], light[4];
 };
 int x9_hevc_sample_hdr(const struct x9_hevc_config *, const uint8_t *hvcc,
@@ -127,7 +137,7 @@ struct x9_hevc_au_metadata {
 int x9_hevc_sample_metadata(const struct x9_hevc_config *, const uint8_t *hvcc,
     size_t hvcc_bytes, const uint8_t *sample, size_t sample_bytes,
     struct x9_hevc_au_metadata *);
-/* Prospective, direct-SEI-only state; zero initializes a fresh bitstream.
+/* Prospective, resolved base-SEI-only state; zero initializes a fresh bitstream.
  * Commit ONLY after the native provider accepts SUBMIT. Container/CM values
  * are deliberately not stored here. No external HandleCraAsBlaFlag is used.
  * Mastering persists from the CLVS first picture; late CLLI is accepted and
