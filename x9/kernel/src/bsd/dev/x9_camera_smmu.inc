@@ -37,7 +37,7 @@ struct x9_camera_smmu {
     bool native, native_bypass, native_started;
     uint32_t ste_shift, ste_bytes, native_cr0, native_gbpa;
     uint64_t native_power;
-    bool native_retire_attempted,native_restored;
+    bool native_retire_attempted,native_restored,native_setup_issued,native_unstarted_retired;
     uint32_t native_ste_phase,native_retire_error,native_prior_word[17];
     uint64_t native_retire_epoch,native_prior_base[3];
 };

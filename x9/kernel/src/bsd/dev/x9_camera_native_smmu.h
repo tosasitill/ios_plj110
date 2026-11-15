@@ -27,5 +27,10 @@ int x9_camera_native_smmu_retire(uint64_t epoch,struct x9_camera_smmu *);
 /* Independently checked old-request teardown scope after complete restore,
  * NEVER a live DMA/arm permission. Actual MM power stays held across it. */
 int x9_camera_native_smmu_retirement_check(uint64_t epoch,struct x9_camera_smmu *);
+/* Only an export/cache failure BEFORE even the first normal setup store
+ * and before every RAW/credit/source arm. Independently proves prior bank
+ * and actual sensor OFF. Original fault/backing retained, no fake DONE.
+ * Partial normal startup or a queue timeout cannot use this cleanup. */
+int x9_camera_native_smmu_unstarted_retire(uint64_t epoch,struct x9_camera_smmu *);
 #endif
 #endif
