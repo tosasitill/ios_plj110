@@ -77,6 +77,9 @@ int fdt_collect_schema(const struct fdt_collect *,unsigned,const char (*)[32],un
 /* All pre-XNU audio handoffs (ADSP layout/IRQ/I2S4/PA, microphone DMA) from
  * one collection. -1 ADT placeholders invalid, 0 nothing qualified, 1 some. */
 int fdt_audio_patch_adt(uintptr_t,void *,size_t);
+/* Camera IRQ+CSI calibration from one bounded collection/two passes.
+ * -1 invalid ADT slots, 0 none qualified, 1 some metadata. No hardware grant. */
+int fdt_camera_patch_adt(uintptr_t,void *,size_t);
 
 /* Bounded metadata from the last RAM check, for USB/pstore failure logs. */
 const char *fdt_ram_failure(uint64_t *,uint64_t *,uint64_t *,uint64_t *);
