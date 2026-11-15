@@ -217,8 +217,52 @@ CommCenter包装100177b88导入的`IMSStartCall`，ordinal58实际provider为
 `IMSStartCall1b7d69208`构造XPC的`request=kCallStart`、`kCallDialedNumber`、`kCallOptions`，
 经1b7d6933c→`XpcConnectionClient::sendXpcMessage1b7ccff18`发送；实际client/connection链为空则返回0。
 **selected IMS driver、subtype4/8、live IMS transport及caller options才是已证的上游维度**；
-当前普通VOICE20内核入口没有这些来源，最终XPC接收端/SIP/MD桥及语音能力options仍待闭合。
+当前普通VOICE20内核入口没有这些来源；以下闭合原件XPC接收端至AP socket，
+但Apple IMS provider到MTK modem IMS的桥及语音能力options仍未实现。
 此处是架构边界纠错，不注入host代码、不新建QMI默认字段、不开放VOICE09。
+
+`IMSClientCreate1b7d67e4c..e68`与server instance block`1b7b816b4..81730`使用同一
+`com.apple.ipTelephony` endpoint。根盘实际`com.apple.CommCenter.plist`的MachServices注册该名，
+ProgramArguments指向CommCenter；不是仅凭字符串猜服务。
+`XpcDaemonClient::setHandlers1b7b62314..354`实际注册`kCallStart`到block`1b7b635ec`，
+读取`kCallDialedNumber`及`kCallOptions`。普通分支`1b7b63bd8..bf4`的virtual+80
+进入`ims::Call::dial1b7c41468`，async block`1b7c41878/418cc`再调用
+`IMSCallManager::initializeNonEmergencyCall1b7b32708`；不是先前同名startCall wrapper。
+
+实际普通呼叫链为`initializeNonEmergencyCall1b7b33110 → IMSCallInfo::startCall/continueCall
+1b7b28438/1b7b28de4 → BambiClient::initializeCallToRemoteUri/createNewCall1b7da99e0
+→ BambiCall::initializeMobileOriginated1b7daa180`。`SipStack+af8` handler virtual+60
+进入`internalStart1b7d7948c → initializeMediaForMOSession1b7bc3ed0`；真实异步media创建回调
+`BambiClient::handleMediaSessionCreatedStatus1b7dad73c → setMediaSessionCreated1b7bc629c`
+才调用`SipSession::sendInvite`。
+
+INVITE继续经`sendRequest1b7b94ecc/1b7b91a48 → SipDialog::sendRequest/sendRequestInFork
+1b7d0b438 → internalSendRequest1b7d0dea4 → SipTransactionLayer::sendRequest1b7ce3ed0
+→ SipTransportLayer`。原件rebases已定名IPSec address point`1d90a4d20`：
+slot+38/sendMessage、+78/sendMessageViaBestTransport、+80/SipIPSecTransportGroup::sendData。
+`1b7d77aac`实际virtual+80到`1b7ac52a4`；`1b7ac5700`的socket virtual+28
+经UDP secondary`1d90b7388`的slot+28 thunk`1b7c3c2d8(this-=48)`到
+`sendOverSocket1b7c3c2c0 → ImsUdpSocket::send1b7c3be68 → 1b7c3bf18`。
+最后stub`1b7e0f0b8`由该dylib的indirect-symbols表证明为`_sendto`，不是nearest-symbol注释。
+
+因此该原件的`IMSStartCall`主信令是一套**AP SIP流程**，不是普通Eureka VOICE20的上游。
+上述静态链不证明本机iOS已选择IPSec、成功IMS注册/拨号或建立media；IMSA registered、NAS/UAC
+辅助请求不能替代真实client、SIP registration及call-state readiness。
+私有可复读材料在主checkout`x9/out/dial-profile-remaining-analysis/`，包括
+`ios-ims-callstart-handler.asm`、`ios-ims-sip-invite.asm`、`ios-ims-transport-vtables.txt`、
+`ios-ims-udp-socket-send.asm`与`ios-iptelephony-indirect.txt`；未修改原件或操作设备。
+
+### SMS集成：未发布MT的原子host queue准入
+
+短信仍用独立WMS/SMS注册，不能作为VOICE readiness。生产修复`f1aa29f`在原
+`message_event`已交state2后、重复changed CMD poison/control loss与host入队之间增加原子fence：
+`x9_md_mipc_message_publish(token,sim,callback,context)`在同一MD锁内检查真实state2 owner、
+原mask低SIM位、online/SMS poison及既有CS envelope，持锁覆盖真正host队列入队。
+受信callback仅`bb_x9_sms_event`，frame锁外预分配，失败锁外擦除释放，原PDU/token保留。
+锁序为MD mutex→bb_lock；callback无malloc或MD重入，两个mutex仍可能等待，不称完全nonblocking。
+原整CMD mask/txid、已delivered/replying/selected/partial和物理ACK drain、普通bb_push/CALL/data不改。
+新增13项人工源码向量、总33项**只编译未执行**；统一kernel-only结果见NOTES。
+host queue receipt不等于Messages显示/持久化、物理ACK成功或MO对端收到，仍无最终通话短信镜像。
 
 ### modem 与 Android serializer
 
