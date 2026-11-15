@@ -358,7 +358,8 @@ def rv55_service_dispatch_evidence(tcm, dram, init):
                   runtime_queue_critical_cross_hart_exclusion_proven=False,
                   runtime_worker_queue_dequeue_and_copy_proven=False,
                   runtime_scheduler_timeout_and_wake_proven=False,
-                  runtime_waiter_task_lifecycle_and_queue_set_proven=False)
+                  runtime_waiter_task_lifecycle_and_queue_set_proven=False,
+                  runtime_codec_reverse_reply_routing_proven=False)
     if (not init['profile_match'] or tcm is None or len(tcm) != 184320 or
             hashlib.sha256(tcm).hexdigest() !=
             'f59d646ba74fab1c40500139c40d67c97a0e8ab96c1569f738a0c7403cc49508'):
@@ -410,7 +411,7 @@ def rv55_service_dispatch_evidence(tcm, dram, init):
             word3_is_task_callback=True, exit_member_offset=20,
             captured_exit_member=words[5], other_words_not_runtime_state=True,
             runtime_pointer_and_descriptor_overwrite_exclusion_proven=False))
-    result.update(profile_match=True, profile='captured RV55 queued service dispatch ABI 6',
+    result.update(profile_match=True, profile='captured RV55 queued service dispatch ABI 7',
         payload_hashes_gate_both_segments=True, service_registrar=0x30502c,
         callback_table_base=0x1f7c4, callback_table_stride=8,
         common_dispatcher=0x305c4c,
@@ -957,6 +958,65 @@ def rv55_service_dispatch_evidence(tcm, dram, init):
     result['instruction_evidence'].extend(dict(name=name, segment='TCM',
         link_address=start, end_exclusive=end, payload_offset=start,
         raw_hex=span(tcm, start, end-start).hex()) for name, start, end in waiter_spans)
+    # The generic sender's SECOND receive cell is not service2. Service3's
+    # captured venc descriptor/initializer installs its own two 72-byte queues.
+    # Compare exact literals, not service-number order or physical channel IDs:
+    # the descriptor pointer cells on disk are ordered service1, service3, service2.
+    # These static software routes do not prove runtime registration, complete
+    # copy/admission, packet checks, or any HEVC/HEIF hardware capability.
+    venc_descriptor_address = 0x20bb8
+    venc_descriptor_raw = span(tcm, venc_descriptor_address, 24)
+    venc_words = list(struct.unpack('<6I', venc_descriptor_raw))
+    result.update(codec_reverse_reply_routes=dict(
+        firmware_global_base=0x1f864,
+        vdec=dict(service=1, callback=0x116f2, message_type_mask=0xff000,
+            reverse_reply_type=0xd000, reverse_reply_branch=0x11734,
+            reverse_queue_cell=0x1f878, record_stack_offset=8,
+            payload_stack_offset=16, isr_send_call=0x11746,
+            generic_receive_queue_load=0x3051ea, generic_receive_call=0x3051f2),
+        venc=dict(service=3, initializer=0x1192c, callback=0x11a68,
+            registration_call=0x11964, registrar=0x30502c,
+            dispatcher=0x30eeb4, dispatcher_global=0x29b60,
+            descriptor=dict(link_address=venc_descriptor_address,
+                raw_hex=venc_descriptor_raw.hex(), words=venc_words,
+                name_address=venc_words[1], name=cstring(tcm, venc_words[1]),
+                startup_pointer_cell=0x3389ec,
+                startup_pointer_raw_hex=span(dram, 0x3389ec-0x200000, 4).hex(),
+                task_callback=venc_words[3], exit_member=venc_words[5],
+                runtime_pointer_and_overwrite_exclusion_proven=False),
+            queue_entries=2, queue_record_bytes=72,
+            request_queue_cell=0x1f884, reverse_reply_queue_cell=0x1f888,
+            first_queue_create_call=0x119a0, first_queue_handle_store=0x119ac,
+            second_queue_create_call=0x119be, second_queue_handle_store=0x119c6,
+            queue_create_target=0x660a, semaphore_cell=0x1f88c,
+            message_type_mask=0xff000, request_type=0x1000,
+            reverse_reply_type=0x4000, request_type_branch=0x11a9c,
+            reverse_reply_type_branch=0x11aa2,
+            stack_frame_bytes=80, record_stack_offset=0,
+            length_stack_offset=4, payload_stack_offset=8, wake_stack_offset=76,
+            payload_copy_call=0x11a86, payload_copy_target=0x701c,
+            copy_length_vendor_pc=0x11a80, visible_copy_limit_literal=64,
+            queue_load=0x11ab0, isr_send_call=0x11ab8,
+            isr_send_target=0x6c4e, isr_result_vendor_gate=0x11abc,
+            wake_vendor_gate=0x11ade, yield_call=0x11ae2, yield_target=0x57da,
+            generic_receive_queue_load=0x305232, generic_receive_call=0x30523a),
+        generic_receive_target=0x6e08,
+        second_generic_receive_is_not_service2=True,
+        queue_handles_are_not_ap_instance_tokens_or_host_cpu_pointers=True,
+        descriptor_order_is_not_service_id_or_channel_order=True,
+        complete_copy_admission_packet_validation_and_runtime_proven=False))
+    reply_route_spans = (
+        ('venc_service3_register_callback_and_dispatcher', 0x11952, 0x11978),
+        ('venc_first_queue_create72_and_request_handle_store', 0x11978, 0x119ae),
+        ('venc_second_queue_create72_and_reverse_handle_store', 0x119ae, 0x119cc),
+        ('venc_task_descriptor_and_create_arguments', 0x119e8, 0x11a2c),
+        ('venc_incoming_record_stack0_payload8_and_opaque_copy_length', 0x11a68, 0x11a8a),
+        ('venc_message_type1000_4000_and_queue_selection', 0x11a8a, 0x11ac2),
+        ('venc_callback_opaque_wake_gate_and_yield', 0x11adc, 0x11aec),
+    )
+    result['instruction_evidence'].extend(dict(name=name, segment='TCM',
+        link_address=start, end_exclusive=end, payload_offset=start,
+        raw_hex=span(tcm, start, end-start).hex()) for name, start, end in reply_route_spans)
     return result
 
 
@@ -1558,6 +1618,19 @@ def rv55_mem_wait_evidence(dram, init):
                     receive_calls=[0x3051f2, 0x30523a], receive_target=0x6e08,
                     received_packet_id_loads=[0x3051f8, 0x305240],
                     received_context_loads=[0x3051fa, 0x305242],
+                    receive_packet_layout=dict(record_stack_offset=8,
+                        length_stack_offset=12, payload_stack_offset=16,
+                        payload_word0_stack_offset=16, payload_word1_stack_offset=20,
+                        queue_cells=[0x1f878, 0x1f888],
+                        queue_loads=[0x3051ea, 0x305232], timeout_argument=-1,
+                        queue_identity_requires_service_dispatch_profile=True,
+                        second_queue_is_not_vdec_resource_service2=True,
+                        known_vdec_header=dict(message_offset=0, context_offset=4,
+                            ap_token_offset=8, status_offset=16),
+                        word1_is_not_vdec_status_or_ap_token=True,
+                        context_loads_name_does_not_prove_venc_header_abi=True,
+                        received_context_is_not_a_status_validator=True,
+                        packet_status_token_validation_and_full_cfg_proven=False),
                     response_copy_arguments_start=0x3052b2,
                     response_copy_call=0x3052bc, response_copy_target=0x701c,
                     response_copy_arguments=['original payload s3', 'stack payload s2', 'original bytes s6'],
@@ -1569,6 +1642,7 @@ def rv55_mem_wait_evidence(dram, init):
                     vdec_ack_log=cstring(dram, 0x3054d3 - 0x200000),
                     packet_checks_vendor_edges_and_full_cfg_proven=False,
                     reply_status_validation_proven=False,
+                    response_copy_bounded_by_received_length_proven=False,
                     response_copy_is_not_allocation_or_dma_success=True),
                 runtime_send_receive_and_ack_proven=False),
             complete_reply_status_validation_proven=False),
