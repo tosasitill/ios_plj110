@@ -91,14 +91,19 @@ static void publish_flags(void)
     cache(provider, 0x1002e1524, 0x10085cd08, caps.enhanced_connection);
     /* initCoreStack 1003c7110..7198: distinct standard vs vendor gates.
      * 17763c is the BT-spec selector, 177630 extended advertising,
-     * 19a7e8 starts Apple's VSC scan path (MUST remain false), while
-     * 19a83c selects standard 2041/2042 instead of legacy 200b/200c.
+     * 19a7e8 writes 85a646: standard 2041/2042 vs legacy 200b/200c.
+     * 19a83c writes 85a645: Apple's new VSC scan path (MUST be false).
+     * Original 199fac / 19abc4 submit d7/d8 only with 645=0,646=1;
+     * 645=1 instead uses 169024 / 168f88 and the absent vendor ops at
+     * 850130 / 850128, returning 0xe11 even with real HCI scan support.
+     * Provider slot1b8 (2ddd70, published above) also sets 646 during
+     * initCoreStack; its distinct slot1c8 (2e0d18) is the VSC predicate.
      */
     set(0x10017763c, caps.spec_adv);
     set(0x100177630, caps.ext_adv);
     set(0x100177658, caps.adv_sets);
-    set(0x10019a7e8, 0);
-    set(0x10019a83c, caps.ext_scan);
+    set(0x10019a7e8, caps.ext_scan);
+    set(0x10019a83c, 0);
     set(0x100188390, caps.enhanced_connection);
     set(0x100192aec, caps.coded_phy);
     set(0x100178bbc, caps.periodic_adv);
