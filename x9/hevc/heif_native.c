@@ -618,7 +618,11 @@ OSStatus X9HEIFCopyHardwareImageWithColorOptions(CFDataRef file, uint32_t id,
                 CFDictionarySetValue(info,CFSTR("LinearRGBICCProfile"),c->transfer_profile);
                 if (c->resampling) CFDictionarySetValue(info,CFSTR("CleanApertureSampling"),CFSTR("ceil extent; pixel centers; bilinear linear-light; edge extension"));
             }
-            CFDictionarySetValue(info,CFSTR("DecoderID"),CFSTR(X9_HEVC_DECODER_ID));
+            CFDictionarySetValue(info,CFSTR("HardwareDecodePerformed"),c->frames ? kCFBooleanTrue : kCFBooleanFalse);
+            /* An iovl canvas may have no visible coded placement. Its real
+             * fill pixels do not prove any decoder was selected or ran. */
+            CFDictionarySetValue(info,c->frames ? CFSTR("DecoderID") : CFSTR("AllowedDecoderID"),
+                CFSTR(X9_HEVC_DECODER_ID));
             CVBufferSetAttachment(pixel,kCVImageBufferICCProfileKey,c->working,kCVAttachmentMode_ShouldPropagate);
             CVBufferSetAttachment(pixel,kCVImageBufferCGColorSpaceKey,c->working_space,kCVAttachmentMode_ShouldPropagate);
             *out = pixel; pixel = NULL; *info_out = info; info = NULL;
