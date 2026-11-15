@@ -16,7 +16,7 @@ enum { CAM_REPEAT_NONE, CAM_REPEAT_PARKED, CAM_REPEAT_PREPARING,
 static struct {
     uint64_t epoch,completed,submitted,drops;
     unsigned phase;
-    bool enabled,admission;
+    bool enabled,admission,prior_done,dma_done_seen;
     uint32_t empty[2],after[2],accepted[2],ack,seen,samples;
     int error;
 } cam_repeat;
@@ -24,6 +24,15 @@ static int cam_repeat_fault_locked(int e)
 {
     if(!cam_repeat.error)cam_repeat.error=e;
     cam_repeat.phase=CAM_REPEAT_FAULT;return cam_repeat.error;
+}
+/* Record only an actually read CHANNEL DMA_DONE, not PASS1_DONE or a frame.
+ * Completion/CPU retirement below supplies the separate prior-credit proof.
+ * The non-opted-in one-credit filter is unchanged. */
+static int cam_repeat_channel_seen_locked(uint32_t channel)
+{
+    if(!cam_repeat.enabled || !(channel&4u))return 0;
+    if(cam_repeat.dma_done_seen)return cam_repeat_fault_locked(EIO);
+    cam_repeat.dma_done_seen=true;return 0;
 }
 static bool cam_repeat_identity(void)
 {
@@ -167,12 +176,14 @@ static void cam_repeat_completed_locked(void)
             cam_repeat_fault_locked(ESTALE);return;
         }
     }
-    cam_repeat.completed++;cam_repeat.phase=CAM_REPEAT_PARKED;
+    cam_repeat.completed++;cam_repeat.prior_done=true;cam_repeat.phase=CAM_REPEAT_PARKED;
 }
 /* Only the actual IAR-owned parked source. No arbitrary R-C sweep or pending
  * clear is performed. Consume genuine no-credit SOF/CHANNEL, as the vendor
  * fbc_empty/drop path does, never publish it as a RAW frame. Hybrid errors
- * and late/repeated DONE are terminal; debug remains terminal. */
+ * PASS1_DONE/errors are terminal. One actual late CHANNEL DMA_DONE may
+ * belong to the independently completed prior credit; never a new frame.
+ * Repeated/unknown DMA_DONE and debug remain terminal. */
 static bool cam_repeat_idle_irq_locked(unsigned role,int *error)
 {
     *error=0;
@@ -194,12 +205,21 @@ static bool cam_repeat_idle_irq_locked(unsigned role,int *error)
          * path only when both banks have actually advanced our RCNT. */
         if(!e && !precredit)return false;
     }
+    bool actual_sof=false;
     if(!e && role==X9_CAM_IRQ_SOF) {
         uint32_t sof=cam_irq_rd(cam_irq.view[0],0x360);
         uint32_t channel=cam_irq_rd(cam_irq.view[0],0x370);
-        /* tag0 SOF bit2, SW_ENQ_ERR bit0 is a no-credit frame drop.
-         * DMA_DONE bit2 without a credited request is not a harmless drop. */
-        if(sof!=4 || (channel&~1u))e=EIO;
+        /* tag0 SOF bit2, SW_ENQ_ERR bit0. CHANNEL-only IAR is a genuine
+         * vendor event but cannot publish a new RCNT. No status is replayed.
+         * DMA_DONE is NOT a drop: only one receipt for our prior completed
+         * credit while no next credit has been issued may be consumed. */
+        if((sof && sof!=4) || (channel&~5u) || (!sof&&!channel))e=EIO;
+        if(!e && (channel&4u)) {
+            if(!cam_repeat.prior_done || !cam_repeat.completed ||
+               cam_repeat.phase==CAM_REPEAT_POSTED)e=EIO;
+            else e=cam_repeat_channel_seen_locked(channel);
+        }
+        actual_sof=sof==4;
     } else if(!e && role==X9_CAM_IRQ_HYBRID) {
         uint32_t err=cam_irq_rd(cam_irq.view[1],0x350);
         uint32_t done=cam_irq_rd(cam_irq.view[0],0x348);
@@ -212,12 +232,13 @@ static bool cam_repeat_idle_irq_locked(unsigned role,int *error)
         bool handled=false;e=cam_repeat_note_locked(bank,ctl,count,&handled);
         if(!e && !handled)e=ESTALE;
     }
-    if(!e && role==X9_CAM_IRQ_SOF && cam_repeat.phase==CAM_REPEAT_READY && cam_repeat.admission) {
+    if(!e && actual_sof && cam_repeat.phase==CAM_REPEAT_READY && cam_repeat.admission) {
         /* A genuine empty SOF history was just consumed. Publish exactly
          * one credit here, not from a thread racing a stale pending SOF.
          * Source ON history is unchanged; only the next request changes. */
         cam_repeat.empty[0]=cam_repeat.after[0];cam_repeat.empty[1]=cam_repeat.after[1];
         cam_repeat.phase=CAM_REPEAT_POSTED;cam_repeat.ack=cam_repeat.seen=0;
+        cam_repeat.prior_done=false;cam_repeat.dma_done_seen=false;
         cam_irq.accepting=true;cam_irq.sof_seen=false;
         bzero(&cam_irq.sof_frame,sizeof(cam_irq.sof_frame));
         cam_rw(cam_sv.view[0],0x540,cam_sv.target[CAM_SV_FBC]|CAM_SV_FBC_RCNT);
@@ -300,12 +321,19 @@ static int cam_repeat_cpu_boundary_locked(uint64_t epoch)
 /* Real continuous same-buffer requeue. The native controller creates its
  * next request with actual exposure/gain; sequence/capture_id strictly move
  * forward through x9_camera_camsv_arm and per-page DEVICE synchronization. */
-int x9_camera_native_repeat(uint64_t epoch,const struct x9_camera_camsv_request *r,
-    const struct x9_camera_camsv_dma *d)
+/* Control + IRQ mutex held. The optional native-controller publication
+ * callback runs AFTER every old-request boundary check, BEFORE arm first
+ * calls the new immutable DMA check. It runs outside IRQ spin and slot/S1
+ * locks; it may publish the next request, never grant mapping authority.
+ * A failed publication/arm is terminal retained; there is no rollback to
+ * pretend the old request remains the only device owner. */
+static int cam_irq_repeat_publish_locked(uint64_t epoch,const struct x9_camera_camsv_request *r,
+    const struct x9_camera_camsv_dma *d,
+    int (*publish)(void *,const struct x9_camera_camsv_request *,const struct x9_camera_camsv_dma *),
+    void *context)
 {
     int e;
     if(!r || !d)return EINVAL;
-    lck_mtx_lock(&camera_control_lock);lck_mtx_lock(&camera_irq_lock);
     boolean_t old;
     e=cam_repeat_cpu_boundary_locked(epoch);
     lck_mtx_lock(&camera_lock);
@@ -318,7 +346,8 @@ int x9_camera_native_repeat(uint64_t epoch,const struct x9_camera_camsv_request 
         d->backing!=cam_sv.request_dma.backing))e=ESTALE;
     if(!e) {
         old=cam_irq_spin_take();cam_repeat.phase=CAM_REPEAT_PREPARING;cam_irq_spin_drop(old);
-        e=x9_camera_camsv_arm(cam_irq.slot,r,d);
+        if(publish)e=publish(context,r,d);
+        if(!e)e=x9_camera_camsv_arm(cam_irq.slot,r,d);
     }
     if(!e) {
         /* Keep original credit_issued/ACCEPTED and all source/receive/GIC
@@ -360,5 +389,16 @@ int x9_camera_native_repeat(uint64_t epoch,const struct x9_camera_camsv_request 
     printf("X9 CAMERA REPEAT: epoch=%llu completed=%llu submitted=%llu capture_id=%llu "
         "phase=%u drops=%llu errno=%d (live source/domain; preparation not frame success)\n",
         epoch,cam_repeat.completed,cam_repeat.submitted,r->frame.capture_id,cam_repeat.phase,cam_repeat.drops,e);
+    return e;
+}
+static int cam_irq_repeat_locked(uint64_t epoch,const struct x9_camera_camsv_request *r,
+    const struct x9_camera_camsv_dma *d)
+{return cam_irq_repeat_publish_locked(epoch,r,d,NULL,NULL);}
+int x9_camera_native_repeat(uint64_t epoch,const struct x9_camera_camsv_request *r,
+    const struct x9_camera_camsv_dma *d)
+{
+    if(!r || !d)return EINVAL;
+    lck_mtx_lock(&camera_control_lock);lck_mtx_lock(&camera_irq_lock);
+    int e=cam_irq_repeat_locked(epoch,r,d);
     lck_mtx_unlock(&camera_irq_lock);lck_mtx_unlock(&camera_control_lock);return e;
 }
