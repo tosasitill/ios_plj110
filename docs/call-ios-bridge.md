@@ -49,8 +49,13 @@ DEL/localgen或真实QMUXgen变化退休旧host owner；pending时不同SIM绑�
 成功换SIM清cache。关闭订阅的receipt以后，已在途background NAS24/4d/4f自己的IND
 以当前localgen/SIM/对应flag再gate，物理查询仍drain；foreground和其它合法subscriber的
 共享signal样本fanout不受这条self gate影响。原pool-full BUSY/ARG仍是普通非receipt
-错误边界，不将此次修复泛称所有QMI回复可靠。相邻6c旧隐式signal-enable在独立peer中
-发现，具体生产修复/固定构建结果见NOTES。
+错误边界，不将此次修复泛称所有QMI回复可靠。独立peer发现的相邻6c旧隐式signal-enable
+已删除；6c保留原ACK，但不写signal/next，不改变NAS03订阅、也不重启采样周期。
+实际Apple `setThresholds_sync1f1ab589c` 在 `58d0` 构造6c，`58dc/58e8` 调
+prepareThresholds/populateThresholds，`58f4` 另设tag a0 LinkQualityIndicator；
+NAS03 `6200/620c/6210` 构造03并写独立tag19，`6238` 是IndicationRegister SendProxy。
+因此6c是threshold/delta/LQI配置而不是订阅。本桥仍ACK但未应用这些配置，日志明确该限制；
+不会把删除隐式enable说成完整阈值实现。具体生产提交/固定构建结果见NOTES。
 
 `coachz_baseband_poll`在原唯一线程中运行send/del后再进入`x9q_poll→x9r_poll`；
 BB通知只完成host read/Mach通知，host后续write和release只排队到下一owner poll，
@@ -431,7 +436,7 @@ ACTIVE会绕过真实owner/media门，不是已实现通话。最早provider缺�
 三层model command wrapper真实地址点为 `101532fc0→1015fb090→101532ab0`，
 最后进入 `CallCommandDriverDelegate10158aa28`。factory `10019b654` 建wrapper并传入
 `100dc8b1c`，ctor将真实owner move到driver+88/+90；UUID lookup经
-`+e0→+110→+1a0→100693d28` weak-lock CallModel+78 vector、CFEqual后owned-copy
+`+e0→+110→+1a0→100693d28` weak-lock CallController+78 vector、CFEqual后owned-copy
 CallInfo。不是裸指针或把native整数ID当UUID。
 
 ACTIVE实际 `+40→10068f0ec→1010488f0→Call+338→10104eccc→10104f4b8`，
@@ -443,7 +448,7 @@ transition table由原ctor `10105e0c4` / `10105e568` 填BSS，磁盘零指针不
 这里有两套不同状态，不能互抄：FSM+18的表 `10162f248` 为
 Idle0/Ringing1/WaitingToDial2/InitializingMedia3/Dialing4/DialingCallEnded5/
 Alerting6/Active7/Waiting8/UserAnswered9/Held10/WaitingToDisconnect11/Disconnected12。
-CallActive从合法Ringing/Dialing/Alerting/UserAnswered分支写FSM state7；CallEnded保留
+CallActive从合法Ringing/Dialing/Alerting/UserAnswered/Held分支写FSM state7；CallEnded保留
 Disconnected12和DialingCallEnded5的不同分支，不直接删Call。此前 `100696b2c` 写
 Call+a4的是SRVCC状态，不是ACTIVE CallState。
 
@@ -454,14 +459,19 @@ Call+a4的是SRVCC状态，不是ACTIVE CallState。
 Active0/Held1/WaitingToDial2/InitializingMedia3/Dialing4/Ringing5/Disconnected6/
 Alerting7/Waiting8/Idle9。END走status+50 `100698710→10069a00c→101018e18`，
 `101018f54` 直接写Call+a0=6，后于 `101019424` 再调用原state维护入口(...,6)。
-正常state mutation经 `101018ad8→100ff81c4→owner+170 notify virtual+10` 传owned
-CallInfo；notification sender具体type/后续UI publish仍未闭合。
+正常state mutation保留 `101018ad8` 等维护，再经 `100ff81c4→owner+170 notify virtual+10`
+传owned CallInfo；Call+2d4非零可在权威写入后提前分支，不能假设每次通知必到。
+notification sender具体type/后续UI publish仍未闭合。
 
 本项闭合的是已有typed事件到真实模型mutation，不提供MTK producer、UUID↔native
 epoch映射或运行dial admission，也不绕过Bambi owner/MediaSession门直接调用ACTIVE。
 它不解决CallList46 producer/offset6，不能将FSM/CallState/ECPI或wire CallEventStatus
 编号混用。原件/枚举/窄asm与复读脚本在 `x9/out/calllist-handler-closure-analysis/typed-model/`；
-无生产hook、设备操作、测试或新镜像。
+无生产hook、设备操作、测试或新镜像。复查可在该typed-model目录运行
+`python3 root-query.py f:0x100693d28 f:0x101018528 f:0x101018e18`，仅读原件；
+旧文件 underlying-active-end-lookup.asm / underlying-real-uuid-lookup.asm 曾误将
+100694eac/100696fcc称UUID consumer，不再采用。旧10068f434不是最终END consumer，
+旧END CTState8已撤销；准确值为Call+a0=6，而非FSM12/5或SRVCC+a4。
 
 #### typed初始化 / 注册 / 注销的原件契约
 
