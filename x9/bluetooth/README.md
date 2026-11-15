@@ -47,7 +47,7 @@
 python3 -I x9/bluetooth/build.py --out x9/out/bluetooth-native/client --kernel-objects
 ```
 
-上式编译、adhoc 签名 iOS16 arm64 `btctl` / `X9H4Transport.dylib`，并单独编译三个 BSD overlay 对象。
+上式编译、adhoc 签名 iOS16 arm64 `btctl` / `X9H4Transport.dylib`，并单独编译四个 BSD overlay 对象。
 不链接完整内核、不打包 boot、不运行测试、不安装或操作设备。
 省略 `--kernel-objects` 则只编用户态。`build.json` 明确 `stageable=false`，尚不改 launch plist。
 工具经正常开发交付途径可用后，在 iOS 上：
@@ -68,6 +68,11 @@ H4 支持分片/连续帧、ACL/SCO/event/ISO 长度解析、超长包按声明�
 
 ## 已落地的协议和前端
 
+- `bluetooth_board.py`：从实机 production `sku/hw-0` 编码171 B BT connfem WMT ACL，
+  原顺序3 B pinmap、七个必需flags、FEM/ctrl-pin/truth/layout顺序与Android一致；私有生成头不入git。
+- `x9_bt_session.c`：115200/query/CTSRTS/chip → 24M/raw wake → 实机25 B XO/平台word →
+  builtin下载器/connfem → 实际FW配置查询 → post-download hub配置 → ownership验证。
+  所有步骤严格校验WMT完整长度/opcode/status；硬件board ops仍待实现，不能用空回调解锁串口。
 - `x9_bt_download.c`：完整52B section spec 的announce、status0/1/2判定、其他下载者最多20次100ms等待、
   type `{0,2,3,0x80,0x90,0x10000}` 首个匹配、type3后强制board connfem回调、最后bin index3。
   UART DMA为不带H4的1988B原始流，正确处理partial/zero write、有界超时、drain后1ms间隔与phase3事件；
@@ -79,6 +84,10 @@ H4 支持分片/连续帧、ACL/SCO/event/ISO 长度解析、超长包按声明�
   源原件 SHA256 `8b7c0a0bea51544db82269d7f2775ab7996b8740927283428c4753e032df3a8f`。
   未来安装配置用 `BT_HCI_TRANSPORT=H4:POSIX` / dylib注入；当前**不提供可stage配置**。
   open先检查完整board结果，失败不启动RxLoop；原始H4接收buffer先初始化再创建原始RX线程。
+- `X9Vendor16.c`：显式 `X9_BT_VENDOR=MT6653` 且完整board结果为0才安装type0路由。
+  核对本版原始指令后，COW修改进程内constructor/registration/vendor-init/callback路径；
+  Apple原件文件不改。VSC ops保持null，返回原生NOT_IMPLEMENTED而非假成功；保留通用HCI回调、
+  supported-commands真实错误状态与非type0回退路径。**仍未做native model能力getter适配，未实跑**。
 
 ## 仍须完成（不能以编译成功代替）
 

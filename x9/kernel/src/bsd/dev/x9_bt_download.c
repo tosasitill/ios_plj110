@@ -143,3 +143,9 @@ int x9_bt_download_builtin(const struct x9_bt_download_ops *ops,struct x9_bt_dow
     if(!X9_BT_PAYLOAD_BYTES) return ENOENT;
     return x9_bt_download_mt6653(ops,x9_bt_payload,X9_BT_PAYLOAD_BYTES,result);
 }
+int x9_bt_download_preflight_builtin(void)
+{
+    uint32_t count;
+    if(!X9_BT_PAYLOAD_BYTES) return ENOENT;
+    return validate(x9_bt_payload,X9_BT_PAYLOAD_BYTES,&count);
+}

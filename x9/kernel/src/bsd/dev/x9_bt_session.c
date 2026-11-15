@@ -78,9 +78,11 @@ int x9_bt_session_run(const struct x9_bt_session_ops *o,
         !o->pre_on || !o->power_on || !o->rx_and_32k || !o->host_uart ||
         !o->hub_features || !o->post_download || !o->verify_ownership) return EINVAL;
     if (!b->calibration_present) return ENOENT;
+    if (!X9_BT_CONNFEM_BYTES) return ENOENT;
     if (b->flow_control != 0 && b->flow_control != 0x40 && b->flow_control != 0x80) return EINVAL;
+    int error = x9_bt_download_preflight_builtin();
+    if (error) return error;
     void *ctx = o->io.context;
-    int error;
     bool hw_sleep = false, inband = false;
     uint8_t rx[260]; size_t n;
 #define STEP(stage_value, operation) do { r->stage = (stage_value); \

@@ -23,4 +23,6 @@ struct x9_bt_download_result {
 int x9_bt_download_mt6653(const struct x9_bt_download_ops *, const uint8_t *,
                           size_t, struct x9_bt_download_result *);
 int x9_bt_download_builtin(const struct x9_bt_download_ops *, struct x9_bt_download_result *);
+/* Board initializer calls this before pin/power/clock mutations. */
+int x9_bt_download_preflight_builtin(void);
 #endif

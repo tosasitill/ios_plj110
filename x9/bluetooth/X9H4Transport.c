@@ -1,8 +1,9 @@
 /* 20H392 arm64 native H4 -> X9 BSD serial adapter.
  * Keep Apple H4 parser, RX loop, stack locking, TX and close. Replace only
  * POSIX.open: in this build that slot otherwise opens UART.SK/Skywalk.
+ * Optional X9Vendor16 routing is a separately gated, version-locked adapter.
  * No firmware, vendor capability constants, BlueTool success fabrication,
- * chipset substitution, or device writes occur in the constructor. */
+ * or device writes occur in the constructor. */
 #include <errno.h>
 #include <fcntl.h>
 #include <mach-o/dyld.h>
@@ -21,6 +22,7 @@
 #define NATIVE_CLOSE UINT64_C(0x1000674d0)
 #define NATIVE_WRITE UINT64_C(0x100067610)
 static intptr_t slide;
+extern int x9_vendor16_install(intptr_t);
 static uintptr_t address(uint64_t va) { return (uintptr_t)(va+slide); }
 static uint32_t *u32(uint64_t va) { return (uint32_t *)address(va); }
 static uintptr_t *uptr(uint64_t va) { return (uintptr_t *)address(va); }
@@ -97,5 +99,6 @@ __attribute__((constructor)) static void install(void)
     }
     /* __DATA is writable in this version. Neither text nor chained fixups
      * are edited; the unchanged original image remains the replay input. */
+    if(x9_vendor16_install(slide)<0) return;
     *uptr(OPEN_SLOT)=(uintptr_t)serial_open;
 }

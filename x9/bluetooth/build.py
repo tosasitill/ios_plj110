@@ -32,7 +32,8 @@ def main():
     subprocess.run([str(clang), '-target', 'arm64-apple-ios16.0', '-isysroot', str(sdk),
                     '-Os', '-Wall', '-Wextra', '-Werror', '-dynamiclib',
                     '-install_name', '/usr/lib/X9H4Transport.dylib',
-                    str(HERE / 'X9H4Transport.c'), '-o', str(bridge)], check=True)
+                    str(HERE / 'X9H4Transport.c'), str(HERE / 'X9Vendor16.c'),
+                    '-o', str(bridge)], check=True)
     subprocess.run(['/usr/bin/codesign', '--force', '--sign', '-', '--timestamp=none', str(bridge)], check=True)
     # Deliberately not a stageable runtime: vendor routing and complete board
     # initialization are separate required gates. No launch plist is changed.
@@ -42,8 +43,10 @@ def main():
         'bluetoothd_uuid': 'AA9424E8-0648-34E2-B3CF-E6C793B9D471',
         'bluetoothd_sha256': '8b7c0a0bea51544db82269d7f2775ab7996b8740927283428c4753e032df3a8f',
         'stageable': False,
-        'requires': ['MT6653 full initialization', 'native chipset/vendor routing'],
-        'transport_environment': {'BT_HCI_TRANSPORT': 'H4:POSIX'},
+        'requires': ['MT6653 SSPM/shared-power board backend',
+                     'native model capability adaptation', 'boot/BlueTool orchestration',
+                     'on-device scan/pair/BLE/audio validation'],
+        'transport_environment': {'BT_HCI_TRANSPORT': 'H4:POSIX', 'X9_BT_VENDOR': 'MT6653'},
     }, indent=2) + '\n')
     if a.kernel_objects:
         spec = importlib.util.spec_from_file_location('x9_builder', HERE.parent / 'build/build.py')
