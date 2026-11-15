@@ -22,6 +22,8 @@ struct x9_camera_native_source_status {
     uint32_t mac_flags, phy_flags, outmux_flags;
     uint32_t csi_parent, clock_count[2], inherited_step, required_vcore_uv;
     uint32_t pll_rate, pll_fenc, vcore[3];
+    uint32_t cam_clock_count[2], cam_parent, cam_rc_level;
+    uint64_t cam_clock_hz;
 };
 /* Included after x9_camera_receiver.inc. The native platform's config
  * callback already holds camera_control_lock and must call the _locked

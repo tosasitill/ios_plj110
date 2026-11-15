@@ -1,5 +1,7 @@
 /* MT6993 clk-fmeter CKGEN_CK2, not the VLP audio meter or a PLL test route.
  * DT: CKSYS_MM10040000, CKMTR_MM10041000/0x20. SENINF0/3 IDs18/21, FENC14/11.
+ * The same exclusive receipt also measures native CAM processing ID14,
+ * FENC18 after the real VMMRC vote, without duplicating meter ownership.
  * Software mode0, divider1 (/2), load1023, source1/reference0 (26MHz).
  * No HW-mode takeover, timeout result, reset, cancel or unbounded retry.
  * All writes use their own immediate old/new journal, no RO count replay.
@@ -9,7 +11,7 @@ struct cam_phy_meter_field { vm_offset_t base; unsigned offset; uint32_t mask,be
 static struct {
     vm_offset_t meter;
     struct cam_phy_meter_field field[CAM_CLOCK_FIELDS];
-    unsigned pending;
+    unsigned pending, source_slot;
     uint32_t next,fenc,source_cfg;
     bool active,triggered,done;
 } cam_phy_meter;
@@ -22,7 +24,7 @@ static void cam_phy_meter_status(void)
 }
 static int cam_phy_clock_guard(void)
 {
-    const struct cam_mm_desc *d=&cam_mm.desc[X9_CAM_MM_SENINF_MUX];
+    const struct cam_mm_desc *d=&cam_mm.desc[cam_phy_meter.source_slot];
     int e;
     if(!cam_phy_meter.active)return 0;
     e=cam_mm_guard(&cam_mm,true);if(e)return e;
@@ -42,7 +44,7 @@ static int cam_phy_clock_guard(void)
  * the full dependency guard runs immediately before issue and after done. */
 static int cam_phy_meter_poll_guard(void)
 {
-    unsigned slot=X9_CAM_MM_SENINF_MUX;
+    unsigned slot=cam_phy_meter.source_slot;
     const struct cam_mm_desc *d=&cam_mm.desc[slot];
     if(((cam_rr(cam_mm.top,d->cfg)>>d->shift)&0xff)!=cam_phy_meter.source_cfg ||
        (cam_rr(cam_mm.top,0x330)&d->effect_mask) ||
@@ -108,18 +110,20 @@ static int cam_phy_meter_restore(void)
     if((cam_rr(cam_phy_meter.meter,0x18)&1) || (cam_rr(cam_phy_meter.meter,0)&16))return EBUSY;
     cam_phy_meter.active=false;return 0;
 }
-static int cam_phy_meter_capture(void)
+static int cam_phy_meter_capture(unsigned slot)
 {
     static const unsigned offsets[]={0x340,0,4,8};
     static const uint32_t masks[]={0x7f00,0xffff9110,0x03ff0000,0xff00001f};
     uint32_t again[CAM_CLOCK_FIELDS];
-    const struct cam_mm_desc *d=&cam_mm.desc[X9_CAM_MM_SENINF_MUX];
+    const struct cam_mm_desc *d;
     int e;
+    if(slot!=X9_CAM_MM_SENINF_MUX && slot!=X9_CAM_MM_CAM_MUX)return EINVAL;
+    d=&cam_mm.desc[slot];
     if(cam_phy_meter.active)return EBUSY;
     e=cam_phy_dependencies();if(e)return e;
     if(!cam_phy_meter.meter)cam_phy_meter.meter=ml_io_map(0x10041000,0x20);
     if(!cam_phy_meter.meter)return ENOMEM;
-    cam_phy_meter.fenc=1u<<(14-cam_phy.status.csi_port);
+    cam_phy_meter.source_slot=slot;cam_phy_meter.fenc=d->effect_mask;
     cam_phy_meter.source_cfg=(cam_rr(cam_mm.top,d->cfg)>>d->shift)&0xff;
     for(unsigned n=0;n<CAM_CLOCK_FIELDS;n++) {
         struct cam_phy_meter_field *r=&cam_phy_meter.field[n];
@@ -140,14 +144,15 @@ static int cam_phy_meter_capture(void)
     cam_phy_meter.active=true;cam_phy_meter.triggered=cam_phy_meter.done=false;
     cam_phy_meter.pending=CAM_CLOCK_NO_FIELD;return cam_phy_clock_guard();
 }
-static int cam_phy_meter_sample(unsigned sample)
+static int cam_phy_meter_measure(unsigned slot,unsigned id,uint32_t *result)
 {
     uint64_t span,deadline;
     uint32_t count;
     bool busy_seen=false;
     int e;
-    e=cam_phy_meter_capture();if(e)return e;
-    e=cam_phy_meter_change(0,0x7f00,(18+cam_phy.status.csi_port)<<8);
+    if(!result || id>127)return EINVAL;
+    e=cam_phy_meter_capture(slot);if(e)return e;
+    e=cam_phy_meter_change(0,0x7f00,id<<8);
     if(!e)e=cam_phy_meter_change(1,0xffff9110,0x04109000);
     if(!e)e=cam_phy_meter_change(2,0x03ff0000,0x03ff0000);
     if(!e)e=cam_phy_meter_change(3,0xff00001f,0x01000001); /* /2, CKGEN_CK2, ref0 */
@@ -165,12 +170,18 @@ static int cam_phy_meter_sample(unsigned sample)
             count=cam_rr(cam_phy_meter.meter,4)&0xffff;
             if(!count || count==0xffff || (cam_rr(cam_phy_meter.meter,4)&0xffff)!=count)return EIO;
             if(cam_rr(cam_phy_meter.meter,0x18)&1)return EBUSY;
-            cam_phy.status.clock_count[sample]=count;
+            *result=count;
             return cam_phy_meter_restore();
         } else if(i>=20)return ETIMEDOUT;
         delay(1);
     }
     return ETIMEDOUT;
+}
+static int cam_phy_meter_sample(unsigned sample)
+{
+    if(sample>1)return EINVAL;
+    return cam_phy_meter_measure(X9_CAM_MM_SENINF_MUX,18+cam_phy.status.csi_port,
+        &cam_phy.status.clock_count[sample]);
 }
 static int cam_phy_meter_retirement_guard(void)
 {
