@@ -87,9 +87,9 @@ static int decode_vt(const char *config_path, const char *sample_path, const cha
     if (!cfg || !au) { perror("input"); goto done; }
     size_t needed = 0;
     if (x9_hevc_config_parse(cfg, cfg_bytes, &c) ||
-        x9_hevc_idr_annexb(&c, cfg, au, au_bytes, NULL, 0, &needed)) {
+        x9_hevc_irap_annexb(&c, cfg, au, au_bytes, NULL, 0, &needed, NULL)) {
         e = kVTVideoDecoderBadDataErr;
-        fprintf(stderr, "unsupported/malformed independent HEVC input (Rext alpha is not Main)\n"); goto done;
+        fprintf(stderr, "unsupported/malformed standalone HEVC IRAP (Rext alpha is not Main; Main Still Picture requires IDR)\n"); goto done;
     }
     const uint8_t *ps[X9_HEVC_MAX_PARAMETER_SETS];
     size_t sizes[X9_HEVC_MAX_PARAMETER_SETS];

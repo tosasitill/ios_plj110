@@ -63,7 +63,7 @@ OSStatus X9HEVCCopyHardwarePicture(CMSampleBufferRef sample, CVPixelBufferRef *o
     uint8_t *au = malloc(bytes);
     if (!au) return kVTAllocationFailedErr;
     OSStatus e = CMBlockBufferCopyDataBytes(block,0,bytes,au);
-    if (!e && x9_hevc_idr_annexb(&config,CFDataGetBytePtr(hvcc),au,bytes,NULL,0,&needed))
+    if (!e && x9_hevc_irap_annexb(&config,CFDataGetBytePtr(hvcc),au,bytes,NULL,0,&needed,NULL))
         e = kVTVideoDecoderUnsupportedDataFormatErr;
     free(au);
     if (e) return e;
@@ -86,9 +86,11 @@ OSStatus X9HEVCCopyHardwarePicture(CMSampleBufferRef sample, CVPixelBufferRef *o
     e = VTDecompressionSessionCreate(NULL,format,spec,NULL,&callback,&session);
     if (!e) e = using_hardware(session,hardware);
     if (!e) {
-        /* Both flags clear: SDK contract completes the callback before this
-         * returns. Still fence/teardown on all paths, never retain stack refs
-         * past the session. source identity and callback errors are sticky. */
+        /* FRESH native session, not the legacy independent-IDR ioctl. With
+         * temporal processing clear, our decoder submits and DRAINs/RECEIVEs
+         * through ENODATA before returning, including a standalone BLA/CRA
+         * that requires output bumping. Still wait/teardown on all paths;
+         * source identity and exactly-one callback errors remain sticky. */
         VTDecodeInfoFlags flags = 0;
         e = VTDecompressionSessionDecodeFrame(session,sample,0,&r,&flags);
         OSStatus wait = VTDecompressionSessionWaitForAsynchronousFrames(session);

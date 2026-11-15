@@ -8,7 +8,10 @@
 #define X9_HEVC_IMPLEMENTATION "org.ios-sweet.x9.vcp"
 #define X9_HEVC_DECODER_ID X9_HEVC_IMPLEMENTATION ".hvc1"
 __attribute__((visibility("default"))) OSStatus X9HEVCRegisterDecoder(void);
-/* One independent IDR sample through this exact DecoderID + RequireHardware.
+/* One standalone BLA/IDR/CRA sample, TemporalId=0, through this exact DecoderID
+ * + RequireHardware; Main-compatible Main Still Picture remains IDR-only.
+ * Creates a fresh persistent native codec with the full parameter-set catalog,
+ * submits once and drains (no leading/inter pictures or legacy IDR ioctl).
  * No software fallback. Checks real capabilities at registration and session
  * UsingHardware before/after decode, exactly one callback and linear NV12/P010
  * visible geometry. Caller owns the returned pixel; no transforms applied. */

@@ -1,6 +1,7 @@
 /* Bounded HEVC configuration/independent-picture parser, shared with XNU.
  * This is a syntax gate, NOT a decoder. Only base-layer Main/Main10 4:2:0
- * are accepted; independent-IDR and stateful AU gates are separate.
+ * are accepted; legacy independent-IDR, standalone IRAP and stateful AU gates
+ * are separate.
  * Main-compatible 8-bit Main Still Picture
  * uses the Main decode path; monochrome Rext alpha returns ENOTSUP (no fallback).
  */
@@ -64,6 +65,23 @@ int x9_hevc_config_parse(const uint8_t *, size_t, struct x9_hevc_config *);
 int x9_hevc_idr_annexb(const struct x9_hevc_config *, const uint8_t *hvcc,
     const uint8_t *sample, size_t sample_bytes, uint8_t *dst, size_t capacity,
     size_t *written);
+/* Raw syntax facts, not inferred NoRaslOutputFlag or hardware completion. */
+struct x9_hevc_irap_picture {
+    uint32_t nal_type, pps_id, no_output_of_prior_pics_flag;
+};
+/* Standalone base-layer BLA(16..18)/IDR(19..20)/CRA(21), TemporalId=0,
+ * exactly one picture, matching slice type/PPS/no_output_of_prior_pics_flag.
+ * Main-compatible Main Still Picture remains IDR-only. Checks bounded AU
+ * framing/catalog plus AUD/prefix/VCL/suffix/EOS/EOB ordering; no leading or
+ * inter pictures are accepted. Optional picture and required written are
+ * cleared on failure. NULL dst validates and reports the AU's Annex B size.
+ * Unlike legacy IDR, this does NOT prepend parameter sets: use a FRESH native
+ * session initialized with the full catalog and DRAIN for this one picture.
+ * Firmware must implement random-access/POC/DPB semantics; syntax cannot
+ * establish those capabilities or make a pending CRA into a decoded frame. */
+int x9_hevc_irap_annexb(const struct x9_hevc_config *, const uint8_t *hvcc,
+    const uint8_t *sample, size_t sample_bytes, uint8_t *dst, size_t capacity,
+    size_t *written, struct x9_hevc_irap_picture *picture);
 /* Stateful video AU gate. Firmware owns reference picture sets and POC/DPB,
  * not this parser. Allows base-layer TRAIL/TSA/STSA/RADL/RASL/BLA/IDR/CRA;
  * excludes reserved types and multilayer profiles. One complete picture per

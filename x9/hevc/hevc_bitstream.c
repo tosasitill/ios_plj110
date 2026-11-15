@@ -565,14 +565,18 @@ int x9_hevc_parameter_sets_annexb(const struct x9_hevc_config *c, const uint8_t 
     }
     return 0;
 }
-int x9_hevc_au_annexb(const struct x9_hevc_config *c, const uint8_t *hvcc,
-    const uint8_t *p, size_t n, uint8_t *dst, size_t cap, size_t *written)
+static int au_annexb(const struct x9_hevc_config *c, const uint8_t *hvcc,
+    const uint8_t *p, size_t n, uint8_t *dst, size_t cap, size_t *written,
+    int independent, struct x9_hevc_irap_picture *picture)
 {
     if (!c || !hvcc || !p || !written || !n || n > X9_HEVC_MAX_INPUT || catalog_valid(c) ||
         (c->length_size != 1 && c->length_size != 2 && c->length_size != 4)) return EINVAL;
     *written = 0;
     size_t at = 0, size = 0;
     unsigned pictures = 0, slices = 0, vcl = 0, temporal = 0, nals = 0, picture_pps = 0;
+    /* Only the standalone gate uses phase/flag equality. Do not silently
+     * tighten the existing stateful AU API or alter the legacy IDR ioctl. */
+    unsigned phase = 0, no_output = 0; /* prefix0, VCL1, suffix2, EOS3, EOB4 */
     while (at < n) {
         if (++nals > 1024 || n - at < c->length_size) return EINVAL;
         uint32_t bytes = 0;
@@ -582,16 +586,20 @@ int x9_hevc_au_annexb(const struct x9_hevc_config *c, const uint8_t *hvcc,
         if (nal(p + at, bytes, type)) return EINVAL;
         if (type < 32) {
             if (type > 21 || (type > 9 && type < 16)) return ENOTSUP;
+            if (independent && type < 16) return ENOTSUP;
+            if (independent && phase > 1) return EINVAL;
             if (tid >= c->max_sub_layers || (type >= 16 && tid)) return EINVAL;
             if (c->profile == X9_HEVC_PROFILE_MAIN_STILL && type != 19 && type != 20) return ENOTSUP;
             struct bits b = { .p = p + at + 2, .n = bytes - 2 };
             unsigned first = bit(&b);
-            if (type >= 16) (void)bit(&b);
+            unsigned prior = type >= 16 ? bit(&b) : 0;
             unsigned pid = ue(&b);
             if (b.error || !find_set(c, 34, pid) || (!slices && !first) ||
-                (slices && (type != vcl || tid != temporal || pid != picture_pps))) return EINVAL;
+                (slices && (type != vcl || tid != temporal || pid != picture_pps ||
+                 (independent && prior != no_output)))) return EINVAL;
             picture_pps = pid;
             pictures += first; slices++; vcl = type; temporal = tid;
+            no_output = prior; phase = 1;
         } else if (type >= 32 && type <= 34) {
             unsigned i = 0;
             while (i < c->parameter_set_count && (c->parameter_sets[i].type != type ||
@@ -600,13 +608,28 @@ int x9_hevc_au_annexb(const struct x9_hevc_config *c, const uint8_t *hvcc,
             if (i == c->parameter_set_count) return ENOTSUP;
             if (slices) return EINVAL; /* next-picture sets cannot follow VCL */
         } else if (type == 35) {
-            if (slices) return EINVAL;
-        } else if (type != 36 && type != 37 && type != 38 && type != 39 && type != 40) return ENOTSUP;
+            if (slices || (independent && nals != 1)) return EINVAL;
+        } else if (type == 39) {
+            if (independent && phase) return EINVAL;
+        } else if (type == 40 || type == 38) {
+            if (independent) {
+                if (!phase || phase >= 3) return EINVAL;
+                phase = 2;
+            }
+        } else if (type == 36 || type == 37) {
+            if (independent) {
+                unsigned next = type == 36 ? 3u : 4u;
+                if (!phase || phase >= next) return EINVAL;
+                phase = next;
+            }
+        } else return ENOTSUP;
         if (size > X9_HEVC_MAX_INPUT - 4 || bytes > X9_HEVC_MAX_INPUT - size - 4) return E2BIG;
         size += bytes + 4; at += bytes;
     }
     if (pictures != 1) return ENOTSUP;
     *written = size;
+    if (picture) *picture = (struct x9_hevc_irap_picture){ .nal_type = vcl,
+        .pps_id = picture_pps, .no_output_of_prior_pics_flag = no_output };
     if (!dst) return 0;
     if (cap < size) return EMSGSIZE;
     at = 0; size = 0;
@@ -617,6 +640,25 @@ int x9_hevc_au_annexb(const struct x9_hevc_config *c, const uint8_t *hvcc,
         memcpy(dst + size, p + at, bytes); size += bytes; at += bytes;
     }
     return 0;
+}
+int x9_hevc_au_annexb(const struct x9_hevc_config *c, const uint8_t *hvcc,
+    const uint8_t *p, size_t n, uint8_t *dst, size_t cap, size_t *written)
+{ return au_annexb(c,hvcc,p,n,dst,cap,written,0,NULL); }
+int x9_hevc_irap_annexb(const struct x9_hevc_config *c, const uint8_t *hvcc,
+    const uint8_t *p, size_t n, uint8_t *dst, size_t cap, size_t *written,
+    struct x9_hevc_irap_picture *picture)
+{
+    if (picture) memset(picture,0,sizeof(*picture));
+    if (!written) return EINVAL;
+    *written = 0;
+    size_t bytes = 0;
+    struct x9_hevc_irap_picture parsed = {0};
+    int e = au_annexb(c,hvcc,p,n,dst,cap,&bytes,1,&parsed);
+    if (!e) {
+        *written = bytes;
+        if (picture) *picture = parsed;
+    }
+    return e;
 }
 int x9_hevc_sample_vui(const struct x9_hevc_config *c, const uint8_t *hvcc,
     size_t hvcc_bytes, const uint8_t *sample, size_t sample_bytes, struct x9_hevc_vui *out)

@@ -204,6 +204,9 @@ static int prepare(struct native_context *c, uint32_t id, CFDictionaryRef inheri
         else {
             e = source_color(color,&vui,c->policy,&node->source);
             if (!e) e = x9_heif_copy_vui_info(&vui,&bitstream_info);
+            /* Preserve coded-picture syntax facts from the same immutable
+             * sample. Effective inherited color is still resolved below. */
+            CFRelease(info); info = temporary_info; temporary_info = NULL;
         }
         if (sample) CFRelease(sample);
         if (temporary_info) CFRelease(temporary_info);

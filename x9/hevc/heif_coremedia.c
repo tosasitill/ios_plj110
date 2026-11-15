@@ -60,6 +60,7 @@ OSStatus x9_heif_copy_item_sample(CFDataRef file, uint32_t id,
     uint8_t *au = NULL;
     struct x9_hevc_config config;
     struct x9_hevc_vui vui;
+    struct x9_hevc_irap_picture picture;
     size_t bytes = 0, needed = 0;
     int e = !image || !extensions ? ENOMEM : x9_heif_open(data,(size_t)CFDataGetLength(file),&document);
     if (!e && !id) e = x9_heif_primary(document,&id);
@@ -75,7 +76,7 @@ OSStatus x9_heif_copy_item_sample(CFDataRef file, uint32_t id,
     if (!e) e = x9_heif_read_item(document,id,NULL,0,&bytes);
     if (!e) { au = malloc(bytes); if (!au) e = ENOMEM; }
     if (!e) e = x9_heif_read_item(document,id,au,bytes,&bytes);
-    if (!e) e = x9_hevc_idr_annexb(&config,data+image->hvcc.offset,au,bytes,NULL,0,&needed);
+    if (!e) e = x9_hevc_irap_annexb(&config,data+image->hvcc.offset,au,bytes,NULL,0,&needed,&picture);
     if (!e) e = x9_hevc_sample_vui(&config,data+image->hvcc.offset,(size_t)image->hvcc.bytes,au,bytes,&vui);
     if (!e) e = x9_heif_copy_item_info(document,image,&info,extensions);
     CFDictionaryRef resolved = NULL, vui_info = NULL;
@@ -84,16 +85,22 @@ OSStatus x9_heif_copy_item_sample(CFDataRef file, uint32_t id,
     if (!e) {
         CFMutableDictionaryRef record = CFDictionaryCreateMutableCopy(NULL,0,info);
         CFMutableDictionaryRef new_extensions = CFDictionaryCreateMutableCopy(NULL,0,resolved);
-        if (!record || !new_extensions) {
+        int32_t nal_type = (int32_t)picture.nal_type;
+        CFNumberRef type = CFNumberCreate(NULL,kCFNumberSInt32Type,&nal_type);
+        if (!record || !new_extensions || !type) {
             if (record) CFRelease(record);
             if (new_extensions) CFRelease(new_extensions);
             e = ENOMEM;
         } else {
             CFDictionarySetValue(record,CFSTR("BitstreamVUI"),vui_info);
             CFDictionarySetValue(record,CFSTR("ResolvedColr"),resolved);
+            CFDictionarySetValue(record,CFSTR("IRAPNALUnitType"),type);
+            CFDictionarySetValue(record,CFSTR("NoOutputOfPriorPicsFlag"),
+                picture.no_output_of_prior_pics_flag ? kCFBooleanTrue : kCFBooleanFalse);
             CFRelease(info); info = record;
             CFRelease(extensions); extensions = new_extensions;
         }
+        if (type) CFRelease(type);
     }
     if (resolved) CFRelease(resolved);
     if (vui_info) CFRelease(vui_info);
