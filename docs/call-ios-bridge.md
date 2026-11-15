@@ -1869,3 +1869,29 @@ Telecom metadata 中虽有 `com.android.phone`/`com.android.contacts`，但没�
 证据与 source SHA/head 在 gitignored `x9/out/dial-intent-input/dial-intent-input-proof.json`，
 文件名快照在 `bounded-artifact-inventory.json`；重读现存 metadata 使用
 `python3 x9/out/dial-intent-input/inspect-retained-intent-input.py`，不重新扫描或接触设备。
+
+## 2026-11-16 SMS 当前生产链复核：版本与最终验收边界
+
+复核 source **`a2b9036cc5b8e19d3b99cb4115a559abdd5f7090`** 的现有生产入口：
+WMS 初始化→真实 per-SIM host-ready；WMS20→605 token→唯一 writer→匹配606/result/MR；
+8601/8603→原 token/mask/txid→MT host queue receipt→WMS37→原物理 ACK→terminal host receipt。
+这些路径已有生产调用者，不是 staging API；本轮未发现新的、有独立原件依据的 codec/dispatch
+矛盾，未重跑已修 queue/malformed/lifecycle 类，不为“补全”制造成功 ACK、ready 或重发行为。
+
+物理 writer 的精确定义仍须保留：`x9_modem_s3.inc:34..75` 的 result0 在 AP CCCI ring 完整
+写入、barriers 与 producer-index commit 之后返回，pending doorbell BUSY不再重复通知。
+它经 `x9_mipc_bridge.inc:531..534` 推进 ACK result；**不是新增的 modem 侧确认、数据库提交或
+对端送达证明**，本轮也没有捕获新的物理 result0。
+
+旧319的 SIM2 token703/txn27→modem CNF是历史运行观察；其 boot.img/source 未对齐，
+不能套用当前 HEAD 或最新 NAS45 kernel。旧220的来信 token1、Android 的601/602/605/606/
+8601/8602形状也不能拼成当前 iOS 同一样本成功。主 `x9/out` 限定目录/文件名盘点仍未找到
+可认定为当前同 token 的 Messages 成功 record/COMMIT→重开显示、相关物理 ACK与WMS37完成，
+或 MO 对端收到证据；空 grep/带 `stored` 的无关进程日志不证明短信成功或失败。
+
+**首缺权威输入**是当前 image/source 对齐的一条完整短信运行链，其后才是同 token 的 MT
+保存成功、重开持久化和 ACK，以及 MO 对端确认；既有 Apple 静态 SQL success 分支不替代它。
+本轮不要求新抓手机，不读取个人短信数据库；无生产 delta便不重编旧产物，不出探针或最终镜像。
+当前源码精确行号、旧证据资格与限定盘点在 gitignored
+`x9/out/sms-production-audit/current-sms-final-evidence-boundary.json` 及同目录；仅新增此短小节，
+无源码修改、编译、测试/人工向量或设备操作，完整短信验收仍未完成。
