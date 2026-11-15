@@ -144,6 +144,46 @@ static int wake(const struct x9_bt_download_ops *o)
     return exact(o, tx, sizeof(tx), ack, sizeof(ack));
 }
 
+int x9_bt_session_fw_own(const struct x9_bt_session_ops *o,
+                         struct x9_bt_session_result *r)
+{
+    if (!o || !o->io.exchange || !r) return EINVAL;
+    if (r->stage!=X9_BT_SESSION_DONE || !r->function_powered || !r->driver_owned)
+        return ENXIO;
+    if (!r->hardware_sleep) return ENOTSUP;
+    /* Hardware-mechanism path keeps byte9=1. The other-host wake bitmap is
+     * only part of Android's SOFTWARE-mechanism path; do not insert it here.
+     * Firmware may reply with its no-sleep status or a driver-own event. */
+    static const uint8_t tx[]={1,0x6f,0xfc,6,1,3,2,0,1,1};
+    static const uint8_t prefix[]={4,0xe4,7,2,3,3,0};
+    uint8_t rx[260]; size_t n=sizeof(rx);
+    r->driver_owned=false; /* TX/timeout/parser failure is unknown, not READY. */
+    int error=o->io.exchange(o->io.context,tx,sizeof(tx),rx,&n,1000);
+    if (error) return error;
+    if (n!=10 || memcmp(rx,prefix,sizeof(prefix)) || rx[9]!=1 ||
+        (rx[8]!=1 && rx[8]!=3)) return EPROTO;
+    if (rx[7] || rx[8]==3) {
+        r->driver_owned=true;
+        return EBUSY;
+    }
+    return 0;
+}
+
+int x9_bt_session_driver_own(const struct x9_bt_session_ops *o,
+                             struct x9_bt_session_result *r)
+{
+    if (!o || !o->io.exchange || !r) return EINVAL;
+    if (r->stage!=X9_BT_SESSION_DONE || !r->function_powered) return ENXIO;
+    if (!r->hardware_sleep) return ENOTSUP;
+    if (r->driver_owned) return EALREADY;
+    static const uint8_t tx[]={1,0x6f,0xfc,6,1,3,2,0,3,1};
+    static const uint8_t ack[]={4,0xe4,7,2,3,3,0,0,3,1};
+    int error=exact(&o->io,tx,sizeof(tx),ack,sizeof(ack));
+    if (!error) r->driver_owned=true;
+    /* No Android failure path that sets DRV_OWN for an assert/debug SOP. */
+    return error;
+}
+
 static int function_on(const struct x9_bt_download_ops *o)
 {
     /* chip/btmtk_chip_common.c WMT_POWER_ON_CMD/EVT. Generic command()
@@ -200,6 +240,7 @@ int x9_bt_session_run(const struct x9_bt_session_ops *o,
     STEP(X9_BT_SESSION_ROM, o->host_uart(ctx, 115200, 0));
     r->baud = 115200;
     STEP(X9_BT_SESSION_ROM, o->hub_features(ctx, &hw_sleep, &inband));
+    r->hardware_sleep=hw_sleep;
     n = sizeof(rx);
     STEP(X9_BT_SESSION_ROM, query(&o->io, 2, rx, &n));
     if (b->flow_control == 0x40) {
