@@ -12,6 +12,7 @@
 | 空快照与异步确认 | 完整 owned `090a` 数组解析、号码与原始presentation有界owner；`0902 + 新 MO epoch` 汇合生成 VOICE20/tag10/u8；DIAL 仍无生产 profile/admission 调用者 |
 | 单通话挂断 / SIM 绑定 | VOICE44/tag01/u8 独立绑定；显式 VOICE21 → owned current query → 同 MO epoch/真实 ID/完整单通话 snapshot → guarded0905 → 同token0906 → 原iOS txn 的 result；已接请求分发，未设备验收 |
 | 初始化 / 事件注册 | 明确绑定后的 VOICE03：13=0 与14=0/1 可独立并发 → 全局 CMD8901 → 逐 SIM IND4901/4902 → owned0909/090a；逐token确认，13=1仍拒绝；仅编译、未运行 |
+| NAS 本地订阅注册 | NAS03保存原txn/localgen/QMUXgen，真实host queue receipt后才原子提交tag13/18/19订阅patch；FIFO、重复结果缓存及旧background IND gate；不是网络注册/IMS-ready |
 | handover 通知 | 严格 MD4902/EVENT3 → Android SRVCC → Apple54/tag1/u8；订阅cursor/generation/SIM隔离、注册与live事件均整批queue receipt后释放，queue/OOM保序等待；未设备验收，未迁移handover后的ID/RAT/profile |
 | 来电 CMD / 状态 | `8901` 的字段、长度和唯一 tag 验证；独立 pending ID → 完整 ECPI0/132/6/133 的 MT reducer / iOS observer；未发布 CallList |
 | END 原因 metadata | 成功完整解析、被当前 MO/MT 身份接受的 `133/mode20/10a=16` → 内部 Apple reason145；无cause/其它cause未知，不从无ID0910补归属；只编译，未发布 END |
@@ -27,6 +28,35 @@
 原 transport 已允许这一严格 DIAL 子集；上一版宿主测试闭合发送/CNF。新增异步 join / 空快照 / 发送前 guard 目前只有编译结果，没有执行验证，也没有 iOS 自动拨号调用者。
 
 ## 原件证据（2026-11-15）
+
+### NAS03本地初始化订阅：真实host queue receipt
+
+本项与VOICE03/IMSA的网络注册不同。Apple `registerEvents_sync1f1ab620c` 以
+tag19/u8请求SigInfoEvents，ConfigSigInfo2/message6c是独立threshold配置。生产NAS03
+仍保留既有tag13/18/19宽度1、bool0/1校验；unknown tag按原accepted-but-unserved
+语义处理，不合成对应indication。以前直接改flags后用void-send，队列满/OOM时可能
+没有注册响应却已开始后台查询；新有界owner将这两者以实际queue receipt连接。
+
+每个原请求保存slot、local generation、真实QMUX generation、SIM、txn、validated bytes
+和首结果；最多32个pending，同client按单调order FIFO。只有实际BB队列接受原response
+才将mask/values应用到CURRENT flags、重启采样cycle；未触及字段不被入队时旧snapshot覆盖。
+last-completed cache独立于pending池，exact重复只回复原结果，不再apply/next；changed或
+malformed同txn由原owner保留首结果，不给第二BAD/ARG或发MD。合法新txn成功admission
+才清cache；ARG/BUSY和order达到UINT64_MAX不抹cache。OOM/full只保留host回复重试，
+没有物理命令、额外网络ready赋值或猜测timeout。
+
+DEL/localgen或真实QMUXgen变化退休旧host owner；pending时不同SIM绑定BUSY，同SIM不阻，
+成功换SIM清cache。关闭订阅的receipt以后，已在途background NAS24/4d/4f自己的IND
+以当前localgen/SIM/对应flag再gate，物理查询仍drain；foreground和其它合法subscriber的
+共享signal样本fanout不受这条self gate影响。原pool-full BUSY/ARG仍是普通非receipt
+错误边界，不将此次修复泛称所有QMI回复可靠。相邻6c旧隐式signal-enable在独立peer中
+发现，具体生产修复/固定构建结果见NOTES。
+
+`coachz_baseband_poll`在原唯一线程中运行send/del后再进入`x9q_poll→x9r_poll`；
+BB通知只完成host read/Mach通知，host后续write和release只排队到下一owner poll，
+不会在receipt与flags commit之间直接重入同owner。这是实际callsite串行证据，非
+设备时序测试。严格host及真实recipe对象只编译，人工向量未执行；不代表iOS已经
+学到真实网络注册，更不代表typed IMS、VOICE09、CallList或声音已可用。
 
 ### VOICE03 与 Android 注册 owner
 
