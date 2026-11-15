@@ -461,7 +461,8 @@ int x9_vendor16_install(intptr_t slide)
          * header. Do not add those four bytes back into the advertised
          * payload limit. Keep the real controller capability and credits,
          * RX layout and native completion status. Standard ACL host flow
-         * below makes the controller segment to this real payload limit.
+         * below negotiates this controller-to-host payload limit; actual
+         * controller compliance remains an on-device validation step.
          * ADD w9,w0,#4 -> MOV w9,w0; original opcode must match preflight. */
         {0x10010b9ac, {0x11001009}, {0x2a0003e9}, 1},
         /* Keep all previous indices. New complete native entry hooks. */

@@ -121,7 +121,13 @@
   四个回调原件均无payload/cache setter，桥不虚构参数或缓存；全部text改动先核原指令及容量。
   HostBufferSize 0c33声明的是不含4B ACL header的payload容量。原H4 RX固定包预算2032，
   ACL payload实际2028；现去掉原builder再加4的指令，不把serial_open的4096 TX staging误当RX容量。
-  默认原HCI config的host flow为0；声明边界修复本身不保证controller不会回大ACL，流控闭环仍在整合。
+  默认原HCI config的host flow为0；现于原HCI Init注册前clone完整12B配置，仅开启BR/LE ACL信用归还，
+  SCO保持关闭。0c33声明2028B payload/1 ACL packet；先按iOS实际SupportedCommands逐项检查0c31/33/35，
+  只有0c31真实status0且原模块保有该配置时才启用桥侧active标志，不拿配置意图当运行成功。
+  信用归还复用原ID5f特殊marshaller和command-credit bypass，保留原blocked/count门禁，入队成功才清count；
+  活连接零长ACL补同一归还路径。0c35入队、异步transport及标准0e/0f真实错误均进入原native fatal，
+  不重发可能已上线的credit，不伪造Complete、pending或timer。Reset/vendorinit清active；六entry hook及
+  config/queue/RX/error原指令contract在任何text修改前核对。协商与信用路径已接通源码，仍须iOS实机验证。
 - `X9Bootstrap16`同时核对只读ABI1状态（READY/error0/FW-ready1/chip6653/baud24M）和 `kern.x9_bt_boot=0`。
   只在service尚未注册或真实INITIALIZING时等待；PASSIVE/FAILED立即保留失败。内核在serial boot结果后才发布READY。
 - `X9BluetoothLaunch`保留mobile501身份，等完整board就绪后设置 `BT_HCI_TRANSPORT=H4:POSIX`、
