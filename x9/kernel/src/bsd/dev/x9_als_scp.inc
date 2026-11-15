@@ -263,10 +263,10 @@ static int als_control(unsigned type, unsigned command, const uint8_t *data, uns
      type, command, p[0], error, als_ack_received?(int8_t)als_ack[3]:-128);
  return error;
 }
-static int als_notify(unsigned command, const uint8_t *data, unsigned bytes)
+static int als_notify(unsigned command, const uint8_t *data, unsigned bytes, uint8_t sequence)
 {
  if (bytes > 20 || bytes%4) return EINVAL;
- uint8_t n[28] = {0}; n[0] = als_sequence++; n[2] = (uint8_t)command; n[3] = (uint8_t)bytes;
+ uint8_t n[28] = {0}; n[0] = sequence; n[2] = (uint8_t)command; n[3] = (uint8_t)bytes;
  n[4] = als_crc8(n,4); if (bytes) memcpy(n+8, data, bytes);
  als_expected_sequence = n[0];
  if (als_list_trace.active && command == 9) memcpy(als_list_trace.tx,n,sizeof(n));
@@ -356,7 +356,7 @@ static int als_prepare(void)
  if (base != als_layout.reserve_base || size != als_layout.reserve_size) return ESTALE;
  error = als_wake(); if (error) return error;
  als_stage(X9_ALS_HOST_READY);
- error = als_notify(4,NULL,0); if (error) return error;
+ error = als_notify(4,NULL,0,als_sequence++); if (error) return error;
  until = als_now_ns()+5000000000ULL;
  do {
   error = als_poll(); if (error) return error;
@@ -458,8 +458,16 @@ static void als_list_evidence(int error)
 static int als_list(void)
 {
  als_stage(X9_ALS_LIST);
+ /* Reserve once, before building either header/CRC. The RV55 share-buffer
+  * reply path (raw SCP 0x88824 -> 0x87788) copies the request VALUE header's
+  * sequence into the outer reply; it does not recover it from the outer
+  * request. Keep TX memory, notify.value and outer notify coherent instead
+  * of accepting unrelated replies via Android's seq/type/cmd && predicate.
+  * Only this worker allocates sequences; HID requests merely enqueue. */
+ uint8_t sequence = als_sequence++;
  bzero(als_snapshot,sizeof(als_snapshot));
  als_put32(als_snapshot,0xdeadbeef); als_put32(als_snapshot+8192-4,0xdeadbeef);
+ als_snapshot[8] = sequence;
  als_put32(als_snapshot+16,4096); als_put32(als_snapshot+20,4096);
  als_put32(als_snapshot+4,als_crc32(als_snapshot+8,16));
  als_to_io(als_tx,0,als_snapshot,sizeof(als_snapshot));
@@ -469,7 +477,7 @@ static int als_list(void)
  als_list_trace.irq_before = als_rr(als_mb1,0x10c);
  als_list_trace.out_before = als_rr(als_mb1,0x100);
  als_list_trace.start_ns = als_now_ns(); als_list_trace.active = 1;
- int error = als_notify(9,header,sizeof(header));
+ int error = als_notify(9,header,sizeof(header),sequence);
  uint64_t until = als_now_ns()+100000000;
  while (!error && !als_reply_received && als_now_ns() < until) {
   error = als_poll(); if (!error && !als_reply_received) als_sleep(1);
