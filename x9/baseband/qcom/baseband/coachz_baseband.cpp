@@ -1424,7 +1424,7 @@ extern "C" int coachz_baseband_qrtr(uint32_t dst_port, uint32_t src_node, uint32
 }
 
 #ifdef COACHZ_NATIVE_DPMAIF
-// NAS03's original actual QMUX allocation, not x9q's differently based epoch.
+// NAS03/45's original actual QMUX allocation, not x9q's differently based epoch.
 static uint64_t bb_x9_nas_registration_identity(uint32_t dst_port,uint32_t src_node)
 {
   const uint32_t slot=dst_port-CBQ_PORT_BASE;
@@ -1435,14 +1435,16 @@ static uint64_t bb_x9_nas_registration_identity(uint32_t dst_port,uint32_t src_n
     generation=c.generation;
   IOLockUnlock(bb_lock);return generation;
 }
-// Only the retained terminal NAS03 reply. Allocate outside this mutex;
+// Only retained terminal NAS03/45 replies. Allocate outside this mutex;
 // success transfers owned and is a queue receipt, NOT network registration.
 static bool bb_x9_nas_registration_result(uint32_t dst_port,uint32_t src_node,uint64_t generation,
-                                         const uint8_t *sdu,uint32_t size,uint8_t *owned,uint32_t room)
+                                         const uint8_t *sdu,uint32_t size,uint8_t *owned,uint32_t room,
+                                         uint64_t deadline_ms=0)
 {
   const uint32_t slot=dst_port-CBQ_PORT_BASE;
   if(!bb_lock||!generation||!sdu||!owned||dst_port<CBQ_PORT_BASE||slot>=CBQ_MAX_CLIENTS||
-     size!=14||room!=CBQ_HDR+size||sdu[0]!=CBQ_QMI_RESPONSE||cbq_rd16(sdu+3)!=3||
+     size!=14||room!=CBQ_HDR+size||sdu[0]!=CBQ_QMI_RESPONSE||
+     (cbq_rd16(sdu+3)!=3&&cbq_rd16(sdu+3)!=0x45)||
      cbq_rd16(sdu+5)!=7||sdu[7]!=2||cbq_rd16(sdu+8)!=4||cbq_rd16(sdu+10)>1||
      (!!cbq_rd16(sdu+10))!=(!!cbq_rd16(sdu+12)))return false;
   bool admitted=false;IOLockLock(bb_lock);
@@ -1452,6 +1454,13 @@ static bool bb_x9_nas_registration_result(uint32_t dst_port,uint32_t src_node,ui
     if(r.kind==CBQ_TO_HOST&&r.service==3&&r.len==room){
       bb_channel *ch=&bb_ch[r.channel==0?CBH_QMUX1:CBH_QMUX2];
       if(ch->count<BB_QUEUE){
+        // A pre-lock clock check cannot authorize a late Bind45 success.
+        // Check at transfer, under this mutex. Terminal errors/replays have
+        // no new guard and retain their first result until actual receipt.
+        if(deadline_ms){
+          uint64_t ticks,ns;clock_get_uptime(&ticks);absolutetime_to_nanoseconds(ticks,&ns);
+          if(cbq_rd16(sdu+3)!=0x45||cbq_rd16(sdu+12)||ns/1000000>=deadline_ms){IOLockUnlock(bb_lock);return false;}
+        }
         ch->frames[(ch->head+ch->count++)%BB_QUEUE]={r.len,owned};ch->frames_out++;ch->bytes_out+=r.len;
         IOLockWakeup(bb_lock,ch,false);
         if(ch->reads_waiting&&bb_complete_call)thread_call_enter(bb_complete_call);

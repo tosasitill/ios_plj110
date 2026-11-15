@@ -761,7 +761,7 @@ static void x9q_reject(uint32_t local,uint32_t port,const uint8_t *req,unsigned 
  x9bb_reply_error(local,port,req,len,err);
 }
 static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *req,unsigned len){
- // Only existing scoped WMS37/NAS03 owners may consume repeats before generic
+ // Only existing scoped WMS37/NAS03/NAS45 owners consume repeats before generic
  // TLV validation. New transactions and every other route still validate.
  if(x9m_ack_repeated(local,node,port,req,len))return;
  if(x9r_repeated(local,node,port,req,len))return;
@@ -771,6 +771,9 @@ static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *r
   x9q_reject(local,port,req,len,X9Q_BAD);return;
  }
  x9q_client &c=x9q_clients[slot];
+ // NetworkName owns its admission route through CNF. Do not accept a new
+ // old-route owner while NAS45 awaits its actual host receipt and rebind.
+ if(service==3&&id==0x44&&x9r_route_pending(slot)){x9q_reject(local,port,req,len,X9Q_BUSY);return;}
  if(x9n_request(local,port,req,len))return;
  if(x9g_send(local,port,req,len))return;
  if(x9m_request(local,port,req,len))return;
@@ -793,7 +796,16 @@ static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *r
    * SIM they were asked on; only later requests follow the new binding. */
   unsigned pending=0;
   if(c.sim_slot!=route)for(const x9q_job &j:x9q_jobs)if(j.used&&!j.probe&&j.local==local)pending++;
-  if(nas&&c.sim_slot!=route)x9r_rebound(slot);
+  if(nas){
+   // Original QMINasClient event2 constructs Bind45, then advances its owned
+   // deferred initialization only from Result45 success. Retain the reply and
+   // the old route on queue/OOM loss; only actual receipt permits rebind.
+   const uint16_t error=x9r_bind(slot,req,len,route);
+   if(error)x9q_reject(local,port,req,len,error);
+   else printf("X9 NAS: bind45 client 0x%x txn %u SIM%u -> SIM%u admitted; route awaits host receipt (%u old-route queries)\n",
+    local,x9q_u16(req+1),c.sim_slot+1,route+1,pending);
+   return;
+  }
   c.sim_slot=(uint8_t)route;c.next=0;x9q_packet p(req);p.send(local,port);
   printf("X9 DUALSIM: service %u client 0x%x bound to SIM%u (queries route, not DDS; %u queued for previous SIM)\n",service,local,c.sim_slot+1,pending);return;
  }

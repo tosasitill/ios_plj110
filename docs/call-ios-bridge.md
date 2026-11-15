@@ -1363,3 +1363,61 @@ host `clang++ -c` 和header C11 `-fsyntax-only -Wall -Wextra -Werror`通过，�
 4. 已保存一次真实来电，不再要求补来电；来电 admission / MT 状态 / 双向音频仍需接入，多通话不依据单通话样本扩展。
 
 在这些输入闭合前不发布 VOICE，不以猜测默认值或探针 boot.img 代替依据。
+
+## 2026-11-16 初始化前置 NAS45：真实 owner 与本地 receipt 修复
+
+本轮沿正常 typed Client 初始化追踪，不改 loader/factory，不借 IMSA registered bool 或
+VOICE03 完成初始化。以下代码与三个决定性 vtable 指针的原始字节，分别与当前挂载根盘
+Cryptex 中的 dyld cache 做了窄范围比较（12 个代码 slice + 7 个 owner/code/table slice
+均相符）；这证明原件来源一致，**不是设备已经执行、注册或拨号成功的日志**。
+
+- `Client::initialize1b7c3d768` 的 MainQueue 调用
+  `IPTelephonyManager::initializeFromSIM1b7cc1a90`。`1b7cc1e44` 先将真实
+  clientId/personality/StackConfig 保存到 `DeferredInit`；`1b7cc1e48` 从
+  StackConfig+2b4 取实例，`1b7cc1e68` 进入 `initializeNasClient1b7cbee3c`。
+  后者使用真实 NasDeviceClient+108、IMSClientManager queue 和 IPManager+68 的
+  IMSNasClientDelegate alias，不凭空创建 SipStack 或向空 delegate 回调。
+- QMI backend `QMINasClient::initialize1b7d6021c` 将 owned client name 和 subscription
+  存入自己的 +c8 map。**event2** 的 capture address point 为 `1d90c99b8`，
+  +30 指向 `1b7d64b60`；**event1** 为 `1d90c9b30` / `1b7d65554`，后者是 stopped
+  路径，不能因文件名或注册事件混为 ready producer。
+- event2 构造 **NAS45 BindSubscription**：`1b7d64c30` 的 message 为45；
+  `1b7d64d58..60` 将内部 SubscriptionType2 转为 tag01/**u8 wire1**，另一个为0，
+  不是直接发送内部枚举，也不是 DMS/DSD 的 u32。`1b7d64d9c` 设置原 SendProxy
+  guard 25000ms。
+- Bind consumer `1b7d65084` 只有 Response error0 才继续；失败只记录错误，不完成初始化。
+  成功 `1b7d65258` 调 `startListening`，`1b7d65284..2ac` 仅对 +c8 map 中 subscription
+  匹配的 owned name 调真实 delegate+10，再擦已处理的条目。IPManager ctor 安装的 NAS
+  alias address point 为 `1d90c08b0`，+10 指向 thunk `1b7cc0ef0`，调整 -68 后进入
+  `nasSystemInitialized1b7cbeffc`。
+- `nasSystemInitialized` 先查同 clientId 的 +138 DeferredInit；没有 pending 仅日志，
+  不造栈。普通分支 `1b7cbf1d4..1e0` 将 node+68 的 **owned StackConfig** 送进
+  `_initializeFromSIM1b7cbf240`，再擦 deferred 项。该函数设置真实 delegates 并进入
+  `BambiClient::initializeStack1b7da81e0`；Bambi 必须先找到真实 SipStack，才调用
+  `SipStack::initialize1b7d00710` 和 SDP template 初始化。注册仍使用真实 pending
+  SipRegistrationConfig → `BambiClient::startRegistration1b7da884c` → AP
+  `SipStack::startRegistration1b7d025e0`，不是 MD 代发或常量 Registered。
+
+可达生产修复仅限原 `x9q_send` NAS45 分支：旧代码先改 `c.sim_slot/next` 并清 registration
+cache，再使用不能证明 host queue receipt 的普通 `p.send`。现在 NAS03/45 共用现有 bounded
+32-entry FIFO 和 per-client completed cache，45 保留原请求、txn、旧 SIM、目标 SIM、本地和真实
+QMUX generation；只有固定 Result45 **实际入 host queue** 后才换路由并重启后续 sample。
+OOM/full 只保留并重试本地回复，不向 MD 重发任何命令，也不取消/重定向已有 query token。
+新换路由 bind 遇到已有未终态 NAS03/NetworkName owner 为 BUSY；换路由 receipt 等待期间
+不准入新 NAS44/03/45 旧路由 owner，避免其被随后的 rebind 提前置为失活。
+
+03/45 在通用 TLV 校验前仅接管同实际 client generation/txn 的既有 owner：先匹配 txn 再比较
+完整原请求，改变 message/body/length 的同 txn 重用仍保留首个 owner/result，不额外回复或绑定。
+completed 的精确重复只 replay 首结果，不 rebind、不重置 flags。45 的本地25s guard在 admission
+开始计时，并在 single-owner → bb mutex、实际 frame transfer 前复核；过期后仅保留同 txn 的
+NOT_READY 错误等待 receipt，迟到 success 不再改路由。已 receipt 的 success replay 不另计 guard。
+NAS03 未新增超时；DEL/真实 QMUX allocation 更换仍清理旧 owner，DMS54/DSD27 原路径未改。
+
+这是 **NAS bind 初始化前置的本地路由/回复修复**，不是 NAS 全部 bootstrap、MD IMS 注册、完整
+用户态 provider、Call admission 或 media-ready。普通 `Call::dial` 仍是前述 AP manager 的直接调用，
+`x9c_dial_submit` 仍无生产 caller，VOICE09 仍不公告；不能把这次45成功当成“最终修好通话”。
+没有新增 SMS ready/ACK、设备操作、测试套件、人工向量或探针镜像。
+
+本轮实际生产 recipe `Builder.compile_one(X9Baseband.cpp.o)` exit0（34 条已有警告）；没有 link、
+boot pack 或上机验收。原件窄切片、cache 对比 JSON、`compile-bootstrap.py`、recipe result 和编译日志
+在 worktree 的 gitignored `x9/out/call-client-bootstrap/`，不提交 Apple/设备原件。
