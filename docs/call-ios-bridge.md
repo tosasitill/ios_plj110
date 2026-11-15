@@ -29,6 +29,47 @@
 
 ## 原件证据（2026-11-15）
 
+### 用户态传输、加载及 Android profile：生产接入边界
+
+现有用户态→内核传输已经存在，不能把“没有自定义call API/生产caller”写成“没有传输”。
+`libATCommandStudioDynamic.dylib` 原export trie明确导出
+`qmi::Client::createWithQueue19ecd6b20/19ece432c`、`Client::send19ecd2294`及
+`ClientRouter::addClient19ecea700/get19ecd5340`。前者使用原
+`com.apple.commcenter.atcs.xpc` broker，真实State强owner及队列，而非额外raw QMUX reader。
+`Client::send→State::send19ecd2c7c`序列化真实QMIServiceMsg，以原`send_qmi_message`/
+`send_timeout_ms`字段进入现有异步路径；共享QMux校验service/cid后保存owned SerializedMessage。
+Router的实际属性名为`sim`，same-key分支**替换**强pair并释放旧owner，缺key的get抛
+`out_of_range`，不能隐式取默认SIM。VOICE SendProxy借Client对象地址，须保证借用期间地址稳定；
+内部另有State/capture所有权，不把该要求扩大成所有callback都继续借Client对象。
+
+原ABP type0 selectors2/write、3/read是已有内核入口：复制输入→`bb_host_write`（bb锁内）→
+`cbq_from_host`→`bb_to_modem/bb_queue_tx`→现有bridge poll→`x9bb_modem_send`→
+`x9q_send`→`x9c_request`。channel open对第二owner返回`kIOReturnExclusiveAccess`，
+新provider应复用原broker/逻辑client，不能与原读者竞争。319已有qmux1/2打开、异步selector2及
+WMS4c两个client的运行证据，但镜像SHA未对齐，**不是新typed通话flow已执行**；本轮未逐条闭合
+ATCS至libIOABP的所有virtual边，也没有新增用户态callable API。09仍未公告，20无生产准入。
+12处当前root原cache小切片及窄export读取在`x9/out/call-native-ingress/`；独立peer确认21条
+所选export及5处owner/key原字节，不代表整个库只有21个export。
+
+当前CommCenter launchd cache/plist没有call注入环境。原dyld真实链是AMFI op5a→Security flags→
+`DYLD_INSERT_LIBRARIES` owner→getLoader→initializer list→imageBase+offset→constructor BLR。
+现`sweet_amfi`已按真实5a ABI返回ff，无依据再放宽`CS_RESTRICT`；16处当前root原字节相符。
+原CommandDriversFactory仅按vendor选固定M/K库并初始化真实command-driver owner，
+不是通用插件发现、也不是单独IMS CallFactory插入口。**完整功能provider具备后**才接正常
+builder、签名后manifest、PID1原子发布与精确CommCenter exec注入；不先添加空loader。
+原loading及独立ATCS review在`x9/out/call-runtime-loading/`，实际已在主checkout，无需重搬。
+
+Android原`RFX_MSG_REQUEST_IMS_DIAL/cf33`→`requestDial381410`明确
+emergency=false/video=false/IMS=true，六TLV为`8100/string、108/u8、101/102/103/104/u32`。
+number producer可证明101=2、ordinary voice branch证明102=1、normal IMS证明103=0；
+**108和104不能由“普通Apple Call”默认归零**。108来自原owned Dial+8，Rtm非ECC且CLIR0时
+可用slot key124策略改写；Rmm key125精确对比字符串`true`，不是运营商标识。Rtm构造的临时
+copied request并非实际send对象，requestToMcl仍接原引用，其owned CLIR已被策略改写。
+104每次依赖MCL72 preferredRat/31 voice RAT，ordinary cf33不执行已发现的ECC reset caller。
+完整配置/两privacy byte/RTT/relay语义尚未映射，不能静默丢弃、造ready或借实包充当生产profile。
+当前encoder在该窄链无已证错误；字段来源、原日志及精确owned copy在
+`x9/out/call-md-profile-owner/`。本节没有生产行为修改、编译、测试、设备操作或最终镜像。
+
 ### NAS03本地初始化订阅：真实host queue receipt
 
 本项与VOICE03/IMSA的网络注册不同。Apple `registerEvents_sync1f1ab620c` 以
@@ -516,7 +557,7 @@ owned UUID string、reason和DisconnectInfo；需要上述真实client record、
 本轮尚无证据支持完整生产provider替换：最早缺口是按原Personality初始化且具真实有效SipStack/注册状态的
 owned client，随后才是完整配置语义→Android请求及UUID↔epoch/native-ID适配，不能以空factory或直接ACTIVE绕过。
 只读切片、登记key解码、完整dial/owner JSON及原cache export读取脚本在
-`x9/out/call-typed-dial-context/`（功能worktree；原件及转储不入git）。
+`x9/out/call-typed-dial-context/`（收尾归档主checkout；原件及转储不入git）。
 
 typed hangup沿`CallHandle+20→1b7c434b4→MainQueue→endCall(uuid,reason)1b7b39be0`
 找真实IMSCallInfo，再经Info+80的BambiCall调用`endWithReason1b7bc4500`；最终模型mutation
