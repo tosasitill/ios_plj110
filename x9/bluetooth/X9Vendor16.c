@@ -227,8 +227,18 @@ int x9_vendor16_install(intptr_t slide)
         {0x10010c610, {0xb0002f01,0x913d1021,0x52800000,0x17fff3a4}, {0}, 4},
         {0x10010c620, {0xb0002f01,0x913e2c21,0x52800000,0x17fff3a0}, {0}, 4},
         {0x10010c6ac, {0xa9be4ff4,0xa9017bfd,0x910043fd,0x710b341f}, {0}, 4},
+        /* H4 RX 100068b28..3c budgets 0x7f0 bytes INCLUDING the 4-byte
+         * ACL header. 11fa44 caps controller ACL payload at 0x7f0-4;
+         * 11ebdc returns that payload capacity. HostBufferSize's native
+         * descriptor 0x5e (0x0c33, format "2122") writes its first value
+         * verbatim as Host_ACL_Data_Packet_Length, which EXCLUDES the
+         * header. Do not add those four bytes back into the advertised
+         * payload limit. Keep the real controller capability and credits,
+         * RX layout, native completion status and flow-control policy.
+         * ADD w9,w0,#4 -> MOV w9,w0; original opcode must match preflight. */
+        {0x10010b9ac, {0x11001009}, {0x2a0003e9}, 1},
     };
-    unsigned count = 24;
+    unsigned count = 25;
     if (x9_cap16_hook_count > sizeof(edits)/sizeof(edits[0]) - count) return -1;
     for (size_t k = 0; k < x9_cap16_hook_count; k++) {
         const struct x9_cap16_hook *h = &x9_cap16_hooks[k];
