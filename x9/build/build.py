@@ -47,6 +47,8 @@ HERE = Path(__file__).resolve().parent
 X9 = HERE.parent
 ROOT = X9.parent
 KERNEL = X9 / 'kernel'
+sys.path.insert(0, str(X9 / 'tools'))
+import x9_boot_defaults  # noqa: E402
 REQUIRED = ['developer_dir', 'dxb']
 
 
@@ -87,18 +89,9 @@ def boot_options(path, extra_args=()):
 
 
 def radio_arg(args, name):
-    # These three kernel entrypoints default to zero. PE_parse_boot_argn
-    # selects the first exact name; do not use substring matching here.
-    for arg in args:
-        key, sep, value = arg.partition('=')
-        if key == name:
-            if not sep:
-                sys.exit(f'{name} needs an integer value for radio input selection')
-            try:
-                return int(value, 0)
-            except ValueError:
-                sys.exit(f'invalid radio boot arg: {arg!r}')
-    return 0
+    # Explicit token, else the kernel board default (sweet_x9_arg table in
+    # pe_serial.c), so firmware embedding matches what the kernel enables.
+    return x9_boot_defaults.value(args, name)
 
 
 def bluetooth_init_enabled(args):

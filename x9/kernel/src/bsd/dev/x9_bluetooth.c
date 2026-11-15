@@ -125,8 +125,34 @@ static int irq_bind(void)
     if((rd(gic,0)&0x11)!=0x11 || (rd(gic,0)&(1u<<31)) ||
        (((rd(gic,4)&31)+1)*32)<=UART_INTID || !(rd(gic,G_GROUP)&IRQ_BIT) ||
        (rd(gic,G_CONFIG)&(3u<<((UART_INTID%16)*2))) ||
-       ((rd(gic,G_ENABLE)|rd(gic,G_ACTIVE)|rd(gic,G_PENDING))&IRQ_BIT)) return EBUSY;
-    if(rd(uart,4) || rd(uart,0x4c) || !(rd(uart,0x14)&0x40) || (rd(uart,0x14)&1)) return EBUSY;
+       ((rd(gic,G_ENABLE)|rd(gic,G_ACTIVE)|rd(gic,G_PENDING))&IRQ_BIT)) {
+        printf("X9 BT: irq_bind GIC refused ctlr=%x typer=%x group=%x config=%x enable=%x active=%x pending=%x bit=%x\n",
+               rd(gic,0),rd(gic,4),rd(gic,G_GROUP),rd(gic,G_CONFIG),rd(gic,G_ENABLE),
+               rd(gic,G_ACTIVE),rd(gic,G_PENDING),IRQ_BIT);
+        return EBUSY;
+    }
+    uint32_t ier=rd(uart,4), dma=rd(uart,0x4c), lsr=rd(uart,0x14);
+    if(ier || dma) {
+        printf("X9 BT: irq_bind AP UART3 in use ier=%x dma_en=%x lsr=%x\n",ier,dma,lsr);
+        return EBUSY;
+    }
+    /* First bind runs before this session's first TX, so nothing in the RX
+     * FIFO can be a reply. Power-on/pinmux (RX pulled down until the chip
+     * drives it) can latch a break or junk byte; Android's tty path also
+     * tolerates pre-command dirty data. Discard a bounded amount, report it,
+     * and still refuse a line that keeps producing data or never idles. */
+    uint32_t lsr_seen=lsr; unsigned dropped=0; uint8_t first[8]={0};
+    while((lsr&1) && dropped<64) {
+        uint8_t b=(uint8_t)rd(uart,0); if(dropped<8) first[dropped]=b;
+        dropped++; lsr=rd(uart,0x14); lsr_seen|=lsr;
+    }
+    if(dropped || (lsr_seen&0x1e))
+        printf("X9 BT: irq_bind discarded %u pre-command RX bytes lsr_seen=%x first=%02x %02x %02x %02x %02x %02x %02x %02x\n",
+               dropped,lsr_seen,first[0],first[1],first[2],first[3],first[4],first[5],first[6],first[7]);
+    if((lsr&1) || !(lsr&0x40)) {
+        printf("X9 BT: irq_bind AP UART3 not idle lsr=%x dropped=%u\n",lsr,dropped);
+        return EBUSY;
+    }
     route_saved=*(volatile uint64_t *)((uintptr_t)gic+G_ROUTE);
     priority_saved=*(volatile uint8_t *)((uintptr_t)gic+G_PRIORITY); irq_captured=true;
     uint64_t mpidr=__builtin_arm_rsr64("MPIDR_EL1")&0xff00ffffffULL;
@@ -137,7 +163,7 @@ static int irq_bind(void)
     if(*(volatile uint64_t *)((uintptr_t)gic+G_ROUTE)!=mpidr ||
        *(volatile uint8_t *)((uintptr_t)gic+G_PRIORITY)!=0xa0) return EIO;
     /* 8250 UART64 RX trigger16, RDI + line-status. Not Linux APDMA. The
-     * hardware FIFO is empty, proved above; no flush after a command. */
+     * hardware FIFO is empty, drained above; no flush after a command. */
     wr(uart,8,0x41);
     boolean_t old=rx_lock(); rx.owned=true; wr(uart,4,5); wr(gic,G_ENABLE,IRQ_BIT);
     rx_unlock(old);
