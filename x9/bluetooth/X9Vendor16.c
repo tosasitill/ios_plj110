@@ -61,6 +61,39 @@ static void pa_list_complete(uint32_t status, uint32_t size)
     else failed_read(status, 0x1006edee4);
 }
 
+static void init_complete(uint32_t status, uint64_t label)
+{
+    if (status) failed_read(status, label);
+    else ((void (*)(uint32_t, const char *))addr(0x1001094ac))(0, (const char *)addr(label));
+}
+static void cis_complete(uint32_t status)
+{
+    /* Native submit 10010b654 checks real LE CIS bits and skips unsupported
+     * descriptors (0x274) BEFORE submitting. Its completion at 10010c600
+     * has no cache side effect: it must not turn a issued command's failure
+     * into success. A missing feature is not an HCI completion failure. */
+    init_complete(status, 0x1006edf25);
+}
+static void subrating_complete(uint32_t status)
+{
+    /* Same native feature/descriptor skip at 10010b750; no payload/cache. */
+    init_complete(status, 0x1006edf44);
+}
+static void default_subrating_complete(uint32_t status)
+{
+    /* Native 10010b84c skips absent features/unsupported descriptor 0xfa.
+     * Preserve failures of commands it DID actually issue. */
+    init_complete(status, 0x1006edf8b);
+}
+static void host_flow_complete(uint32_t status)
+{
+    /* Original 10010c6ac only logs 0x2cd then advances, without cache work.
+     * Its log-enabled path explicitly MOVs w0,0, and log-disabled paths
+     * leak the logger's return value. Pass the incoming status instead;
+     * the sequencer's own error logger retains the exact status and label. */
+    init_complete(status, 0x1006ee068);
+}
+
 static void reset_complete(uint32_t status)
 {
     /* Native HCI Reset starts a new capability epoch even on failure. Keep
@@ -145,7 +178,7 @@ int x9_vendor16_install(intptr_t slide)
         return -1;
     }
     image_slide = slide;
-    struct edit edits[32] = {
+    struct edit edits[40] = {
         /* Base and derived constructors: use THIRD_PARTY_DONGLE enum0.
          * Derived constructor's type-dependent BCM capability defaults must
          * not survive a base-only change to object+0x260. */
@@ -187,8 +220,15 @@ int x9_vendor16_install(intptr_t slide)
         {0x10010c458, {0x350000c0,0xa9bf7bfd,0x910003fd,0xaa0103e0}, {0}, 4},
         {0x10010c480, {0x350000c0,0xa9bf7bfd,0x910003fd,0xaa0103e0}, {0}, 4},
         {0x10010c5d8, {0x350000c0,0xa9bf7bfd,0x910003fd,0xaa0103e0}, {0}, 4},
+        /* These three entire callbacks just set their label, force status0
+         * and tail-call advance. All their side effects are reproduced by
+         * the wrappers, including a genuine successful completion. */
+        {0x10010c600, {0xb0002f01,0x913c9421,0x52800000,0x17fff3a8}, {0}, 4},
+        {0x10010c610, {0xb0002f01,0x913d1021,0x52800000,0x17fff3a4}, {0}, 4},
+        {0x10010c620, {0xb0002f01,0x913e2c21,0x52800000,0x17fff3a0}, {0}, 4},
+        {0x10010c6ac, {0xa9be4ff4,0xa9017bfd,0x910043fd,0x710b341f}, {0}, 4},
     };
-    unsigned count = 20;
+    unsigned count = 24;
     if (x9_cap16_hook_count > sizeof(edits)/sizeof(edits[0]) - count) return -1;
     for (size_t k = 0; k < x9_cap16_hook_count; k++) {
         const struct x9_cap16_hook *h = &x9_cap16_hooks[k];
@@ -243,6 +283,10 @@ int x9_vendor16_install(intptr_t slide)
     jump_words(edits[17].after, (uintptr_t)states_complete);
     jump_words(edits[18].after, (uintptr_t)filter_complete);
     jump_words(edits[19].after, (uintptr_t)pa_list_complete);
+    jump_words(edits[20].after, (uintptr_t)cis_complete);
+    jump_words(edits[21].after, (uintptr_t)subrating_complete);
+    jump_words(edits[22].after, (uintptr_t)default_subrating_complete);
+    jump_words(edits[23].after, (uintptr_t)host_flow_complete);
 
     /* Preflight ALL pages before modifying ANY instruction. COW mappings
      * preserve the original Apple executable on disk. Constructor installs

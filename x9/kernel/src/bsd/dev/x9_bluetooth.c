@@ -246,6 +246,18 @@ static int calibration(struct x9_bt_session_board *board)
 {
     static const char *const names[]={"x9_wifi_xo0","x9_wifi_xo1","x9_wifi_xo2",
         "x9_wifi_xo3","x9_wifi_xo4","x9_wifi_xo5","x9_wifi_xo6"};
+    uint32_t flow;
+    /* uart_launcher -f and HCIUARTSETBAUD supply the production selection;
+     * its CLI default is not proof of this device's effective config. This
+     * value is the Android UART_FC enum, not the WMT flow-control byte.
+     * Never silently choose NONE, or start power/download for an AP flow
+     * mode whose IRQ/escape implementation is not available yet. */
+    if(!PE_parse_boot_argn("x9_bt_fc",&flow,sizeof(flow))) {
+        printf("X9 BT: effective Android UART flow-control selection required\n");
+        return ENOENT;
+    }
+    if(flow>3) return EINVAL;
+    if(flow!=0) return ENOTSUP; /* Linux=2, MTK SW=1, HW=3 are not NONE. */
     uint8_t record[28];
     for(unsigned k=0;k<7;k++) {
         uint32_t v;
@@ -255,7 +267,7 @@ static int calibration(struct x9_bt_session_board *board)
     if(record[0]!=25 || record[1]) return EINVAL;
     memcpy(board->xo,record+2,25); board->calibration_present=true;
     board->platform_config=0x00158000; /* MT6653 dx5_2g2a co-clock0, real board config */
-    board->flow_control=0; /* uart_launcher defaults to UART_DISABLE_FC */
+    board->flow_control=0; /* explicit Android UART_DISABLE_FC, not defaulted */
     board->wakeup_callback=false; return 0;
 }
 static void worker(void *unused,wait_result_t result)

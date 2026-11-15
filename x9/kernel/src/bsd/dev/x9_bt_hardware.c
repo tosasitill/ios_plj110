@@ -150,8 +150,9 @@ static int rx_and_32k(void *context)
 static int host_uart(void *context, uint32_t baud, uint8_t flow)
 {
     (void)context;
-    /* Production BT config's SW FC uses hardware XON/XOFF; implementing it
-     * in an interrupt/polling backend is separate from Linux APDMA. */
+    /* Android MTK SW FC uses EFR XON/XOFF/escape, unlike Linux IXON/IXOFF.
+     * The active production mode is still an explicit input; no default
+     * is inferred here. Its IRQ/escape backend is separate from APDMA. */
     if (flow!=0 || (baud!=115200 && baud!=24000000)) return ENOTSUP;
     int error=x9_bt_hardware_check(); if (error) return error;
     uint32_t mux=rd(top,0x100);
@@ -220,9 +221,10 @@ static int controller_config(void *context)
 {
     (void)context;
     /* btmtk_fops_open -> btmtk_send_init_cmds -> phase1 WMT/vendor config.
-     * No captured production selected bt_mt6653_*.cfg / bt.cfg exists in
-     * the current inputs. A checked-in example is not the active board's
-     * config; absence of that input does not prove empty command arrays. */
+     * The source's cfg loader is USE_DEVICE_NODE==0 only. The production
+     * node==1 route also has an Android userspace vendor initialization;
+     * its effective inputs are not present. Do not infer that node==1 loads
+     * bt.cfg, or that absent cfg files prove all initialization is empty. */
     printf("X9 BT: selected production phase1/vendor configuration required\n");
     return ENOENT;
 }
