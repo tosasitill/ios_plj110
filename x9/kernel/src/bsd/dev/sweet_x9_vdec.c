@@ -18,6 +18,7 @@ LCK_GRP_DECLARE(vdec_group, "x9-vdec");
 LCK_MTX_DECLARE(vdec_lock, &vdec_group);
 static struct x9_vdec_status status = { .version = X9_VDEC_VERSION };
 static struct x9_vdec_platform platform;
+static struct x9_vdec_session_ops session_ops;
 #include "x9_vdec_dma.inc"
 #include "x9_vdec_memory.inc"
 #include "x9_vdec_shared.inc"
@@ -31,10 +32,15 @@ int x9_vdec_register_platform(const struct x9_vdec_platform *p)
         (p->profiles & ~(X9_VDEC_MAIN | X9_VDEC_MAIN10)) ||
         !p->max_width || !p->max_height || p->max_width > X9_HEVC_MAX_DIM ||
         p->max_height > X9_HEVC_MAX_DIM) return EINVAL;
+    if (p->sessions && (p->sessions->capabilities != X9_VDEC_SESSION_REQUIRED ||
+        !p->sessions->max_pending || p->sessions->max_pending > X9_VDEC_MAX_PENDING ||
+        !p->sessions->create || !p->sessions->submit || !p->sessions->receive ||
+        !p->sessions->drain || !p->sessions->destroy)) return EINVAL;
     lck_mtx_lock(&vdec_lock);
     int e = status.mode != 2 ? EPERM : platform.version ? EBUSY : 0;
     if (!e) {
         platform = *p;
+        if (p->sessions) { session_ops = *p->sessions; platform.sessions = &session_ops; }
         status.prerequisites = p->prerequisites; status.profiles = p->profiles;
         status.max_width = p->max_width; status.max_height = p->max_height;
         status.generation++; status.ready = 1; status.last_errno = 0;
@@ -144,32 +150,52 @@ done:
     if (e) status.rejected++;
     return e;
 }
-static int vdec_open(__unused dev_t d, int flags, __unused int t, __unused struct proc *p)
+#include "../../../../hevc/vdec_sessions.inc"
+static int vdec_open(dev_t d, int flags, __unused int t, __unused struct proc *p)
 {
-    if (!(flags & FWRITE)) return 0;
     uid_t uid = kauth_cred_getuid(kauth_cred_get());
-    return status.mode == 2 && (!uid || uid == 501) ? 0 : EPERM;
+    if ((flags & FWRITE) && (status.mode != 2 || (uid && uid != 501))) return EPERM;
+    lck_mtx_lock(&vdec_lock);
+    int e = session_open(d);
+    lck_mtx_unlock(&vdec_lock);
+    return e;
 }
-static int vdec_close(__unused dev_t d, __unused int f, __unused int t, __unused struct proc *p)
-{ return 0; } /* Stateless requests; no DMA lifetime belongs to an open fd. */
-static int vdec_ioctl(__unused dev_t d, u_long cmd, caddr_t data, int flags, __unused struct proc *p)
+static int vdec_close(dev_t d, __unused int f, __unused int t, __unused struct proc *p)
 {
-    if (cmd != X9_VDEC_GET_STATUS && cmd != X9_VDEC_DECODE_IDR) return ENOTTY;
-    if (cmd == X9_VDEC_DECODE_IDR) {
+    lck_mtx_lock(&vdec_lock);
+    struct host_session *s = session_find(d);
+    if (s) { session_clear(s); memset(s, 0, sizeof(*s)); }
+    lck_mtx_unlock(&vdec_lock);
+    return 0;
+}
+static int vdec_ioctl(dev_t d, u_long cmd, caddr_t data, int flags, __unused struct proc *p)
+{
+    if (cmd != X9_VDEC_GET_STATUS && cmd != X9_VDEC_GET_CAPABILITIES &&
+        cmd != X9_VDEC_DECODE_IDR && cmd != X9_VDEC_SESSION_CREATE &&
+        cmd != X9_VDEC_SESSION_SUBMIT && cmd != X9_VDEC_SESSION_RECEIVE &&
+        cmd != X9_VDEC_SESSION_DRAIN && cmd != X9_VDEC_SESSION_DESTROY) return ENOTTY;
+    if (cmd != X9_VDEC_GET_STATUS && cmd != X9_VDEC_GET_CAPABILITIES) {
         uid_t uid = kauth_cred_getuid(kauth_cred_get());
         if (status.mode != 2 || !(flags & FWRITE) || (uid && uid != 501)) return EPERM;
     }
-    /* No per-fd cdev state: each independent-picture operation is atomic.
-     * The platform must honor its bounded deadline without this host lock. */
+    /* Native operations are bounded. Clone-minor ownership follows the vnode,
+     * not PID/uid: fork/dup keep one shared codec lifetime, last close drains. */
     lck_mtx_lock(&vdec_lock);
     int e = 0;
     if (cmd == X9_VDEC_GET_STATUS) memcpy(data, &status, sizeof(status));
-    else {
+    else if (cmd == X9_VDEC_GET_CAPABILITIES) {
+        struct x9_vdec_capabilities c = { .version = X9_VDEC_VERSION,
+            .generation = status.generation };
+        if (status.ready && platform.sessions) {
+            c.capabilities = session_ops.capabilities; c.max_pending = session_ops.max_pending;
+        }
+        memcpy(data, &c, sizeof(c));
+    } else if (cmd == X9_VDEC_DECODE_IDR) {
         struct x9_vdec_picture picture;
         memcpy(&picture, data, sizeof(picture));
         e = decode(&picture);
         if (!e) memcpy(data, &picture, sizeof(picture));
-    }
+    } else e = session_ioctl(d, cmd, data);
     lck_mtx_unlock(&vdec_lock);
     return e;
 }
@@ -188,7 +214,8 @@ void sweet_x9_vdec_init(void)
     status.mode = (uint32_t)mode;
     int major = cdevsw_add(-1, &vdec_cdev);
     if (major < 0) { status.last_errno = ENXIO; return; }
-    if (!devfs_make_node(makedev(major, 0), DEVFS_CHAR, 501, 501, 0600, "x9-vdec")) {
+    if (!devfs_make_node_clone(makedev(major, 0), DEVFS_CHAR, 501, 501, 0600,
+                              vdec_clone, "x9-vdec")) {
         (void)cdevsw_remove(major, &vdec_cdev); status.last_errno = ENOMEM;
     }
     printf("X9 VDEC: mode=%d ready=0; VCP rv_v2/IPI/MM-SMMU provider absent, no hardware writes\n", mode);

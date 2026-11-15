@@ -17,6 +17,13 @@
 #define X9_VDEC_HW_COMPLETION (1u << 4)
 #define X9_VDEC_REQUIRED 31u
 #define X9_VDEC_FULL_RANGE 1u
+#define X9_VDEC_STREAM (1u << 0)
+#define X9_VDEC_REORDER (1u << 1)
+#define X9_VDEC_DRAIN (1u << 2)
+#define X9_VDEC_FRAME_TOKENS (1u << 3)
+#define X9_VDEC_SESSION_REQUIRED 15u
+#define X9_VDEC_MAX_PENDING 32u
+#define X9_VDEC_MAX_SESSIONS 16u
 struct x9_vdec_status {
     uint32_t version, mode, ready, prerequisites;
     uint32_t profiles, max_width, max_height, last_errno;
@@ -38,6 +45,47 @@ struct x9_vdec_picture {
 #define X9_VDEC_DECODE_IDR _IOWR('V', 0x71, struct x9_vdec_picture)
 _Static_assert(sizeof(struct x9_vdec_status) == 64, "vdec status ABI");
 _Static_assert(sizeof(struct x9_vdec_picture) == 80, "vdec picture ABI");
+/* Session extension does not change the independent-picture v1 ioctls.
+ * One session belongs to one clone fd. Duplicated fds share that session;
+ * its last close destroys it even if the process dies. No DMA address crosses
+ * this interface. Provider capabilities are not inferred from boot flags. */
+struct x9_vdec_capabilities {
+    uint32_t version, capabilities, max_pending, reserved;
+    uint64_t generation;
+};
+struct x9_vdec_session {
+    uint32_t version, config_bytes;
+    uint64_t generation, session, config_address;
+};
+struct x9_vdec_submit {
+    uint32_t version, input_bytes;
+    uint64_t generation, session, input_address, token;
+};
+/* RECEIVE is nonblocking unless deadline_ms is nonzero (at most 5000ms).
+ * EAGAIN means no display output yet, ENODATA means a completed drain.
+ * Every submitted token returns exactly once, including non-output pictures
+ * via X9_VDEC_OUTPUT_DROPPED. The token is the input identity, NEVER PTS/POC.
+ * On pixel payload copyout failure the output remains retained for the next
+ * receive. The caller must keep the ioctl STRUCTURE writable too: generic
+ * BSD ioctl's final structure copyout is outside this driver's transaction. */
+#define X9_VDEC_OUTPUT_DROPPED 1u
+struct x9_vdec_output {
+    uint32_t version, deadline_ms;
+    uint64_t generation, session, output_address, token;
+    uint32_t output_capacity, output_bytes, width, height;
+    uint32_t format, flags, result_flags, reserved;
+    uint64_t completion;
+};
+#define X9_VDEC_GET_CAPABILITIES _IOR('V', 0x72, struct x9_vdec_capabilities)
+#define X9_VDEC_SESSION_CREATE _IOWR('V', 0x73, struct x9_vdec_session)
+#define X9_VDEC_SESSION_SUBMIT _IOW('V', 0x74, struct x9_vdec_submit)
+#define X9_VDEC_SESSION_RECEIVE _IOWR('V', 0x75, struct x9_vdec_output)
+#define X9_VDEC_SESSION_DRAIN _IOW('V', 0x76, struct x9_vdec_session)
+#define X9_VDEC_SESSION_DESTROY _IOW('V', 0x77, struct x9_vdec_session)
+_Static_assert(sizeof(struct x9_vdec_capabilities) == 24, "vdec capabilities ABI");
+_Static_assert(sizeof(struct x9_vdec_session) == 32, "vdec session ABI");
+_Static_assert(sizeof(struct x9_vdec_submit) == 40, "vdec submit ABI");
+_Static_assert(sizeof(struct x9_vdec_output) == 80, "vdec output ABI");
 #ifdef KERNEL
 #include "../../../../hevc/hevc_bitstream.h"
 struct x9_vdec_plane {
@@ -51,6 +99,26 @@ struct x9_vdec_frame {
     uint32_t format, flags;
     uint64_t completion;
     void *cookie;
+};
+/* A real codec instance retains its DPB and physical buffers across submit.
+ * submit must consume/copy the host Annex B before returning; zero means the
+ * token was accepted, errors mean NOT accepted. receive returns display-order
+ * output and its original token; result_flags=DROPPED is a no-pixels retirement
+ * but still requires a genuine completion/cookie. drain is bounded and must
+ * make every accepted token available before receive returns ENODATA. After
+ * ENODATA the same session may submit again; reference state/parameter sets
+ * remain valid. destroy drains/quarantines before freeing DMA, even on fault.
+ * These operations do not establish firmware/SMMU readiness by themselves. */
+struct x9_vdec_session_ops {
+    uint32_t capabilities, max_pending;
+    int (*create)(const struct x9_hevc_config *, const uint8_t *parameter_sets,
+                  uint32_t bytes, uint32_t deadline_ms, void **session);
+    int (*submit)(void *session, const struct x9_hevc_config *, const uint8_t *annexb,
+                  uint32_t bytes, uint64_t token, uint32_t deadline_ms);
+    int (*receive)(void *session, uint32_t deadline_ms, struct x9_vdec_frame *,
+                   uint64_t *token, uint32_t *result_flags);
+    int (*drain)(void *session, uint32_t deadline_ms);
+    void (*destroy)(void *session);
 };
 /* Resident platform provider, one serialized, bounded request at a time.
  * ready flags require actual VCP READY/QUERY_CAP, exact firmware ABI,
@@ -68,6 +136,7 @@ struct x9_vdec_platform {
     int (*decode)(const struct x9_hevc_config *, const uint8_t *annexb,
                   uint32_t bytes, uint32_t deadline_ms, struct x9_vdec_frame *);
     void (*release)(struct x9_vdec_frame *);
+    const struct x9_vdec_session_ops *sessions;
 };
 int x9_vdec_register_platform(const struct x9_vdec_platform *);
 void sweet_x9_vdec_init(void);

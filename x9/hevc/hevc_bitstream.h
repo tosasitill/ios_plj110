@@ -1,6 +1,7 @@
 /* Bounded HEVC configuration/independent-picture parser, shared with XNU.
  * This is a syntax gate, NOT a decoder. Only base-layer Main/Main10 4:2:0
- * and IDR pictures are accepted. Main-compatible 8-bit Main Still Picture
+ * are accepted; independent-IDR and stateful AU gates are separate.
+ * Main-compatible 8-bit Main Still Picture
  * uses the Main decode path; monochrome Rext alpha stays on Apple SW.
  */
 #ifndef X9_HEVC_BITSTREAM_H
@@ -22,6 +23,7 @@ struct x9_hevc_config {
      * is bit30, not bit1. This struct is private, not the vdec ioctl ABI. */
     uint32_t decoder_profile, profile_compatibility;
     uint32_t ps_offset[3], ps_bytes[3], annexb_bytes;
+    uint32_t max_sub_layers, max_dpb, max_reorder;
 };
 /* Returns 0 or a BSD errno. Rejects unsupported formats rather than inventing
  * capabilities. The VPS/SPS/PPS spans refer to the unchanged hvcC snapshot. */
@@ -30,4 +32,15 @@ int x9_hevc_config_parse(const uint8_t *, size_t, struct x9_hevc_config *);
 int x9_hevc_idr_annexb(const struct x9_hevc_config *, const uint8_t *hvcc,
     const uint8_t *sample, size_t sample_bytes, uint8_t *dst, size_t capacity,
     size_t *written);
+/* Stateful video AU gate. Firmware owns reference picture sets and POC/DPB,
+ * not this parser. Allows base-layer TRAIL/TSA/STSA/RADL/RASL/BLA/IDR/CRA;
+ * excludes reserved types and multilayer profiles. One complete picture per
+ * sample, one configured PPS, in-band parameter sets must match unchanged
+ * hvcC bytes. New parameter sets require a format-description/session change.
+ * config Annex B is supplied once to session create, not before every frame. */
+int x9_hevc_au_annexb(const struct x9_hevc_config *, const uint8_t *hvcc,
+    const uint8_t *sample, size_t sample_bytes, uint8_t *dst, size_t capacity,
+    size_t *written);
+int x9_hevc_parameter_sets_annexb(const struct x9_hevc_config *, const uint8_t *hvcc,
+    uint8_t *dst, size_t capacity, size_t *written);
 #endif

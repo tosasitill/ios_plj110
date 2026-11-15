@@ -99,6 +99,17 @@ static int sps(const uint8_t *p, size_t n, struct x9_hevc_config *c)
     c->crop_x = l * 2; c->crop_y = t * 2;
     c->width = c->coded_width - (l + r) * 2;
     c->height = c->coded_height - (t + bot) * 2;
+    unsigned poc = ue(&b);
+    if (b.error || poc > 12) return EINVAL;
+    c->max_sub_layers = sub + 1;
+    unsigned first = bit(&b) ? 0 : sub;
+    for (unsigned i = first; i <= sub; i++) {
+        unsigned dpb = ue(&b), reorder = ue(&b);
+        (void)ue(&b); /* sps_max_latency_increase_plus1 */
+        if (b.error || dpb > 15 || reorder > dpb) return EINVAL;
+        if (dpb + 1 > c->max_dpb) c->max_dpb = dpb + 1;
+        if (reorder > c->max_reorder) c->max_reorder = reorder;
+    }
     return 0;
 }
 int x9_hevc_config_parse(const uint8_t *p, size_t n, struct x9_hevc_config *c)
@@ -198,6 +209,69 @@ int x9_hevc_idr_annexb(const struct x9_hevc_config *c, const uint8_t *hvcc,
         memcpy(dst + size, hvcc + c->ps_offset[i], c->ps_bytes[i]); size += c->ps_bytes[i];
     }
     at = 0;
+    while (at < n) {
+        uint32_t bytes = 0;
+        for (unsigned j = 0; j < c->length_size; j++) bytes = (bytes << 8) | p[at++];
+        memcpy(dst + size, "\0\0\0\1", 4); size += 4;
+        memcpy(dst + size, p + at, bytes); size += bytes; at += bytes;
+    }
+    return 0;
+}
+int x9_hevc_parameter_sets_annexb(const struct x9_hevc_config *c, const uint8_t *hvcc,
+    uint8_t *dst, size_t cap, size_t *written)
+{
+    if (!c || !hvcc || !written || !c->annexb_bytes) return EINVAL;
+    *written = c->annexb_bytes;
+    if (!dst) return 0;
+    if (cap < c->annexb_bytes) return EMSGSIZE;
+    size_t at = 0;
+    for (unsigned i = 0; i < 3; i++) {
+        memcpy(dst + at, "\0\0\0\1", 4); at += 4;
+        memcpy(dst + at, hvcc + c->ps_offset[i], c->ps_bytes[i]); at += c->ps_bytes[i];
+    }
+    return 0;
+}
+int x9_hevc_au_annexb(const struct x9_hevc_config *c, const uint8_t *hvcc,
+    const uint8_t *p, size_t n, uint8_t *dst, size_t cap, size_t *written)
+{
+    if (!c || !hvcc || !p || !written || !n || n > X9_HEVC_MAX_INPUT ||
+        (c->length_size != 1 && c->length_size != 2 && c->length_size != 4)) return EINVAL;
+    *written = 0;
+    size_t at = 0, size = 0;
+    unsigned pictures = 0, slices = 0, vcl = 0, temporal = 0, nals = 0;
+    while (at < n) {
+        if (++nals > 1024 || n - at < c->length_size) return EINVAL;
+        uint32_t bytes = 0;
+        for (unsigned j = 0; j < c->length_size; j++) bytes = (bytes << 8) | p[at++];
+        if (bytes > n - at || bytes < 3) return EINVAL;
+        unsigned type = (p[at] >> 1) & 63, tid = (p[at + 1] & 7) - 1;
+        if (nal(p + at, bytes, type)) return EINVAL;
+        if (type < 32) {
+            if (type > 21 || (type > 9 && type < 16)) return ENOTSUP;
+            if (tid >= c->max_sub_layers || (type >= 16 && tid)) return EINVAL;
+            if (c->profile == X9_HEVC_PROFILE_MAIN_STILL && type != 19 && type != 20) return ENOTSUP;
+            struct bits b = { .p = p + at + 2, .n = bytes - 2 };
+            unsigned first = bit(&b);
+            if (type >= 16) (void)bit(&b);
+            unsigned pid = ue(&b);
+            if (b.error || pid != c->pps_id || (!slices && !first) ||
+                (slices && (type != vcl || tid != temporal))) return EINVAL;
+            pictures += first; slices++; vcl = type; temporal = tid;
+        } else if (type >= 32 && type <= 34) {
+            unsigned k = type - 32;
+            if (bytes != c->ps_bytes[k] || memcmp(p + at, hvcc + c->ps_offset[k], bytes)) return ENOTSUP;
+            if (slices) return EINVAL; /* next-picture sets cannot follow VCL */
+        } else if (type == 35) {
+            if (slices) return EINVAL;
+        } else if (type != 36 && type != 37 && type != 38 && type != 39 && type != 40) return ENOTSUP;
+        if (size > X9_HEVC_MAX_INPUT - 4 || bytes > X9_HEVC_MAX_INPUT - size - 4) return E2BIG;
+        size += bytes + 4; at += bytes;
+    }
+    if (pictures != 1) return ENOTSUP;
+    *written = size;
+    if (!dst) return 0;
+    if (cap < size) return EMSGSIZE;
+    at = 0; size = 0;
     while (at < n) {
         uint32_t bytes = 0;
         for (unsigned j = 0; j < c->length_size; j++) bytes = (bytes << 8) | p[at++];
