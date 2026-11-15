@@ -663,6 +663,61 @@ static int reverse_reply(const struct x9_vcp_init *q,
         return ENOTSUP;
     }
 }
+/* Already initialized service only. A control ACK found BEFORE a new request
+ * belongs to an older operation, even if its alias/token matches. Dispatch
+ * legitimate queued async/reverse work, but never carry an old ACK across the
+ * next send. This is an RX baseline, NOT firmware/DMA producer exclusion. */
+static int dispatch_pending(struct x9_vcp_bus *b, const struct x9_vcp_init *init,
+    const struct x9_vcp_bus_reverse_ops *ops, uint64_t end,
+    struct x9_vcp_bus_call_log *log)
+{
+    uint8_t reply[X9_VCP_WIRE_BYTES];
+    uint32_t message = get32(log->last_rx+8);
+    int e;
+    if (message == X9_VCP_INIT_DONE || message == X9_VCP_START_DONE ||
+        message == X9_VCP_QUERY_CAP_DONE) return EPROTO;
+    if (message == X9_VCP_FRAME_BUFFER_DONE || message == X9_VCP_OUTPUT_ASYNC) {
+        struct x9_vcp_output_notification n;
+        e = x9_vcp_parse_output_notification(init,log->last_rx,X9_VCP_WIRE_BYTES,&n);
+        if (!e && !ops->notification) e = ENOTSUP;
+        if (!e) e = ops->notification(ops->cookie,log->epoch,end,&n);
+        if (!e && n.firmware_status) e = EIO;
+        if (!e) e = call_check(b,log,end);
+        if (!e) log->notifications++;
+    } else {
+        e = reverse_reply(init,ops,log->epoch,end,log->last_rx,reply,false);
+        if (!e) e = call_check(b,log,end);
+        if (!e) e = send_until(b,reply,end,log);
+        if (!e) log->reverse_replies++;
+    }
+    return e;
+}
+static int control_rx_baseline(struct x9_vcp_bus *b, const struct x9_vcp_init *init,
+    const struct x9_vcp_bus_reverse_ops *ops, uint64_t end,
+    struct x9_vcp_bus_call_log *log)
+{
+    int e = 0;
+    for (unsigned n = 0; n < 64 && !e; n++) {
+        e = call_check(b,log,end);
+        if (!e) e = receive_for(b,log->last_rx,log);
+        if (e == EAGAIN) {
+            e = poll_for(b,log);
+            if (e == ENOSPC) e = 0;
+            if (!e) e = receive_for(b,log->last_rx,log);
+            if (e == EAGAIN) {
+                log->queue_empty_observed = 1;
+                return 0;
+            }
+        }
+        if (!e) {
+            log->received++;
+            e = call_check(b,log,end);
+        }
+        if (!e) e = dispatch_pending(b,init,ops,end,log);
+    }
+    if (!e) { log->batch_limit_reached = 1; e = EOVERFLOW; }
+    return e;
+}
 static int control_call(struct x9_vcp_bus *b, const struct x9_vcp_init *init,
     const struct x9_vcp_query *query, const struct x9_vcp_bus_reverse_ops *ops,
     uint64_t end, const uint8_t request[X9_VCP_WIRE_BYTES],
@@ -683,13 +738,16 @@ static int control_call(struct x9_vcp_bus *b, const struct x9_vcp_init *init,
         /* A live service/instance must already exist. Do not make START the
          * first AP command and bootstrap SHM behind the preparation callback. */
         if (!service_ready) e = ENXIO;
-        else {
+        else e = control_rx_baseline(b,init,ops,end,log);
+        if (!e) {
             log->prepare_attempted = 1;
             e = ops->prepare_start(ops->cookie,log->epoch,end,init,initialized,start);
             if (!e) e = call_check(b,log,end);
             if (!e) log->prepared = 1;
         }
     }
+    if (!e && query && service_ready)
+        e = control_rx_baseline(b,init,ops,end,log);
     if (!e) {
         log->request_attempted = 1; /* conservative: even an uncertain send */
         e = send_until(b,request,end,log);
@@ -846,6 +904,7 @@ int x9_vcp_bus_register_output(struct x9_vcp_bus *b, const struct x9_vcp_init *i
     if (e) { log->last_errno = (uint32_t)e; return e; }
     e = call_check(b,log,end);
     if (!e && !service_ready) e = ENXIO;
+    if (!e) e = control_rx_baseline(b,&i,&handlers,end,log);
     if (!e) {
         log->prepare_attempted = 1;
         e = handlers.prepare_output(handlers.cookie,log->epoch,end,&i,&ready,&q,&record);
@@ -906,7 +965,7 @@ int x9_vcp_bus_service(struct x9_vcp_bus *b, const struct x9_vcp_init *init,
     struct x9_vcp_init i;
     struct x9_vcp_init_result ready;
     struct x9_vcp_bus_reverse_ops handlers;
-    uint8_t reply[X9_VCP_WIRE_BYTES];
+    uint8_t identity_request[X9_VCP_WIRE_BYTES];
     uint64_t end = 0;
     bool service_ready = false;
     int e;
@@ -920,7 +979,7 @@ int x9_vcp_bus_service(struct x9_vcp_bus *b, const struct x9_vcp_init *init,
         !ready.firmware_vsi_address)) e = EINVAL;
     /* Validate the retained identity using the normal encoder, WITHOUT
      * sending INIT again or manufacturing a new outstanding control ACK. */
-    if (!e) e = x9_vcp_encode_init(&i,reply);
+    if (!e) e = x9_vcp_encode_init(&i,identity_request);
     if (e) { log->last_errno = (uint32_t)e; return e; }
     e = call_begin(b,log,&service_ready);
     if (e) { log->last_errno = (uint32_t)e; return e; }
@@ -944,21 +1003,7 @@ int x9_vcp_bus_service(struct x9_vcp_bus *b, const struct x9_vcp_init *init,
         log->received++;
         e = call_check(b,log,end);
         if (e) break;
-        if (get32(log->last_rx+8) == X9_VCP_FRAME_BUFFER_DONE ||
-            get32(log->last_rx+8) == X9_VCP_OUTPUT_ASYNC) {
-            struct x9_vcp_output_notification n;
-            e = x9_vcp_parse_output_notification(&i,log->last_rx,X9_VCP_WIRE_BYTES,&n);
-            if (!e) e = handlers.notification(handlers.cookie,log->epoch,end,&n);
-            if (!e && n.firmware_status) e = EIO;
-            if (!e) e = call_check(b,log,end);
-            if (!e) log->notifications++;
-            /* Both are one-way. In particular b005 has no buffer token. */
-        } else {
-            e = reverse_reply(&i,&handlers,log->epoch,end,log->last_rx,reply,false);
-            if (!e) e = call_check(b,log,end);
-            if (!e) e = send_until(b,reply,end,log);
-            if (!e) log->reverse_replies++;
-        }
+        e = dispatch_pending(b,&i,&handlers,end,log);
     }
     if (!e && log->received == max_packets) log->batch_limit_reached = 1;
     if (!e && handlers.recheck) {

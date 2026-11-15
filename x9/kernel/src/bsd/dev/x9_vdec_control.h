@@ -18,7 +18,10 @@ struct x9_vdec_control_start_resources {
     uint32_t bytes_used;
     uint32_t dynamic_low_latency; /* exact AP byte, range0..255 */
     uint64_t timestamp; /* raw caller timestamp, no clock/POC arithmetic */
+    /* Latest OFFERED output, not proof of this input's selected/display FB.
+     * Firmware may use an older registered buffer for its DPB/output. */
     struct x9_vcp_output_record output;
+    uint32_t submission_index, registered_outputs; /* native journal identities */
 };
 struct x9_vdec_control_hardware {
     void *cookie;
@@ -50,12 +53,34 @@ struct x9_vdec_control_status {
     uint32_t input_attempted, input_prepared;
     uint32_t slot_initialized, vsi_attempted, vsi_staged;
     uint64_t service_batches, service_packets;
-    struct x9_vdec_control_start_resources resources; /* not a completed frame */
-    struct x9_vcp_output_record output; /* DEVICE extents, NOT pixel layout */
+    uint32_t input_records, output_records; /* includes partial/error attempts */
+    uint32_t ring_valid_bitmap; /* independently parsed rings in latest recheck */
+    struct x9_vdec_control_start_resources resources; /* latest attempt, NOT a completed frame */
+    struct x9_vcp_output_record output; /* latest offered extents, NOT pixel layout */
     struct x9_vcp_init_result init;
     struct x9_vcp_start_result start;
     struct x9_vcp_output_notification last_notification;
-    struct x9_vcp_ring_snapshot rings[3]; /* observations ONLY, never dequeue */
+    struct x9_vcp_ring_snapshot rings[3]; /* last raw observations, check bitmap; never dequeue */
+};
+/* Bounded durable native records, NOT hardware/DPB/ring capacity. All older
+ * slices remain owned even after the latest status fields change. This stage
+ * never reuses published backing: only whole-domain retirement frees it. */
+#define X9_VDEC_CONTROL_MAX_RECORDS 64u
+struct x9_vdec_control_input_journal {
+    struct x9_vdec_control_start_resources resources;
+    struct x9_vcp_start_result result;
+    struct x9_vcp_bus_call_log call;
+    uint32_t input_prepared, vsi_attempted, vsi_staged, control_replied, last_errno;
+    uint32_t free_bs_observed; /* token-matched head ONLY, no read/count write */
+    struct x9_vcp_ring_snapshot free_bs;
+};
+struct x9_vdec_control_output_journal {
+    struct x9_vcp_output_record resources;
+    struct x9_vcp_output_notification notification;
+    struct x9_vcp_bus_call_log call;
+    uint32_t prepared, notified, last_errno;
+    uint32_t free_fb_observed, display_fb_observed; /* no read/count write or pixels */
+    struct x9_vcp_ring_snapshot free_fb, display_fb;
 };
 /* Bus must ALREADY be genuinely RUNNING with exactly this published global
  * allocation. Memory must own these same two arenas/epoch/parent. Retains both
@@ -78,15 +103,19 @@ int x9_vdec_control_init(struct x9_vdec_control *, uint32_t timeout_ms,
  * No fabricated profiles, decode completion, output or START callback. */
 int x9_vdec_control_query(struct x9_vdec_control *, const struct x9_vcp_query *,
     uint32_t timeout_ms, struct x9_vcp_query_result *, struct x9_vcp_bus_call_log *);
-/* One output registration BEFORE START. Allocate real codec arena slices,
- * assign a fresh native buffer token/index0, retain all handles, hand off to
+/* Register ONE fresh output per call. Allocate real codec arena slices,
+ * assign a fresh native buffer token/record index, retain all handles, hand off to
  * PoC under the bus call reservation and send physical a005/service2. Size
  * arguments are capacities selected by the native layout owner, not caller
  * IOVAs or a declaration of NV12/P010. 1/2 planes; unused plane size must0.
  * Whole-domain retirement alone currently permits slice reuse/free. b005 is
  * an instance resource notification ONLY; no acceptance/pixel/retirement ACK.
- * Once attempted (even allocation/preparation/send failure), no second output
- * operation this instance. Does not register the missing highest-level owner.
+ * Successful control calls permit subsequent fresh registrations, before or
+ * between STARTs. Earlier published buffers are never overwritten/reused.
+ * All registrations currently require identical plane counts/capacities;
+ * format changes need the separate native negotiation path. Failed/uncertain
+ * calls poison further admission and preserve their partial journal. Does
+ * not register the missing highest-level owner or identify a b005's buffer.
  * Result/log and input capacities must be disjoint, resident host storage. */
 int x9_vdec_control_register_output(struct x9_vdec_control *, uint32_t plane_count,
     const uint32_t plane_bytes[X9_VCP_OUTPUT_PLANES], uint32_t timeout_ms,
@@ -103,8 +132,13 @@ int x9_vdec_control_register_output(struct x9_vdec_control *, uint32_t plane_cou
  * or clean its shared cachelines. Current publisher supports mode2 only.
  * a001 uses this instance's actual alias and actual slice capacity, never
  * caller-supplied token/alias/IOVA. flags remain wire data, not cache authority.
- * Once attempted, including allocation/copy/publication/send failures: no
- * retry/reuse. b001 does not retire input/output or prove pixels. No EOS path.
+ * Each call retains a fresh input record. Only a successfully finished prior
+ * control transaction permits another call; old input and every registered
+ * output remain DEVICE-owned, not implicitly retired by b001. No retry of a
+ * failed/uncertain submission, no allocation reuse, no EOS path. The bus
+ * rejects queued old ACKs before new preparation/send. The protocol has no
+ * picture sequence: delayed duplicate ACKs after that RX baseline cannot be
+ * disambiguated, so the actual FW must obey one reply per serialized command.
  * All buffers/results must be stable, resident, mutually disjoint host memory. */
 int x9_vdec_control_decode_start(struct x9_vdec_control *, const uint8_t *annexb,
     uint32_t bytes_used, uint32_t buffer_bytes, uint32_t flags,
@@ -122,6 +156,13 @@ int x9_vdec_control_decode_start(struct x9_vdec_control *, const uint8_t *annexb
 int x9_vdec_control_service(struct x9_vdec_control *, uint32_t timeout_ms,
     struct x9_vcp_bus_call_log *);
 int x9_vdec_control_get_status(struct x9_vdec_control *, struct x9_vdec_control_status *);
+/* Resident disjoint host snapshots of prior records, including partial/error
+ * attempts. Indices 0..record_count-1 are never wrapped/rebased. No live DMA
+ * CPU access, token retirement, pointer lookup or hardware completion grant. */
+int x9_vdec_control_get_input(struct x9_vdec_control *, uint32_t index,
+    struct x9_vdec_control_input_journal *);
+int x9_vdec_control_get_output(struct x9_vdec_control *, uint32_t index,
+    struct x9_vdec_control_output_journal *);
 /* After any INIT attempt, only physically STOPPED bus + both genuinely RETIRED
  * domains may drop this binding. DEINIT/c006/b001 are not retirement proofs.
  * Partial/uncertain paths retain handles; no bus reentry from callbacks. */

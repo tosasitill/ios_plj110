@@ -2,6 +2,16 @@
 #include "x9_vdec_control.h"
 #define VCONTROL_MAGIC UINT64_C(0x5839435452303031)
 #define VCONTROL_SCRATCH (2u * X9_VCP_INSTANCE_SLOT_BYTES)
+struct vcontrol_input_record {
+    struct x9_vdec_control_input_journal journal;
+    struct x9_vdec_dma_slice slice;
+};
+struct vcontrol_output_record {
+    struct x9_vdec_control_output_journal journal;
+    struct x9_vdec_dma_slice slice[X9_VCP_OUTPUT_PLANES];
+    uint32_t bytes[X9_VCP_OUTPUT_PLANES];
+    struct x9_vcp_output_request request;
+};
 struct x9_vdec_control {
     uint64_t magic;
     lck_mtx_t lock;
@@ -13,15 +23,26 @@ struct x9_vdec_control {
     struct x9_vdec_control_hardware hardware;
     struct x9_vcp_bus_reverse_ops reverse;
     struct x9_vdec_control_status status;
-    struct x9_vdec_dma_slice output_slice[X9_VCP_OUTPUT_PLANES];
-    uint32_t output_bytes[X9_VCP_OUTPUT_PLANES];
-    struct x9_vcp_output_request output_request;
-    struct x9_vdec_dma_slice input_slice;
+    struct vcontrol_input_record *inputs, *active_input;
+    struct vcontrol_output_record *outputs, *active_output;
     const uint8_t *input_source; /* borrowed ONLY for the reserved synchronous call */
     uint32_t input_capacity;
     uint8_t *scratch;
     bool closing;
 };
+static void vcontrol_journal_input(struct x9_vdec_control *c)
+{
+    struct x9_vdec_control_input_journal *j = &c->active_input->journal;
+    j->resources = c->status.resources;
+    j->input_prepared = c->status.input_prepared;
+    j->vsi_attempted = c->status.vsi_attempted;
+    j->vsi_staged = c->status.vsi_staged;
+}
+static void vcontrol_journal_output(struct x9_vdec_control *c)
+{
+    c->active_output->journal.resources = c->status.output;
+    c->active_output->journal.prepared = c->status.output_prepared;
+}
 static int vcontrol_fault(struct x9_vdec_control *c, int e)
 {
     if (e && !c->status.last_errno) c->status.last_errno = (uint32_t)e;
@@ -115,6 +136,7 @@ static int vcontrol_stage_start(struct x9_vdec_control *c, uint64_t end,
     if (!e) e = vmem_deadline(end);
     if (!e) {
         c->status.vsi_attempted = 1; /* retain before first live store */
+        vcontrol_journal_input(c);
         vcontrol_store64(p,0xe80,r->input.iova);
         vcontrol_store64(p,0xe90,0); /* qualified ABSENT attachment, NOT main alias */
         vcontrol_store64(p,0xf18,r->input_token);
@@ -122,17 +144,21 @@ static int vcontrol_stage_start(struct x9_vdec_control *c, uint64_t end,
         p[0x1004] = (uint8_t)r->dynamic_low_latency;
         __asm__ volatile("dsb oshst" ::: "memory");
         c->status.vsi_staged = 1;
+        vcontrol_journal_input(c);
     }
     lck_mtx_unlock(&s->arena->lock);
     lck_mtx_unlock(&s->lock);
     return e;
 }
-/* Two fresh PoC copies, not cached Android bytes. Equal copies do NOT prove
+enum vcontrol_snapshot_kind {
+    VCONTROL_COMMON_ONLY, VCONTROL_DECODE_FIELDS, VCONTROL_WHOLE_SLOT
+};
+/* Two fresh NC copies, not cached Android bytes. Equal copies do NOT prove
  * firmware-wide serialization: this only observes fields while the bus owns
  * the current command/reverse request. Ring results are never consumption or
  * completion authority. No CPU writer, flag reset or shared index store. */
 static int vcontrol_snapshot(struct x9_vdec_control *c, uint64_t end,
-    struct x9_vcp_common_snapshot *out)
+    enum vcontrol_snapshot_kind kind, struct x9_vcp_common_snapshot *out)
 {
     struct x9_vdec_shared *s = c->shared;
     uint8_t common[2][X9_VCP_COMMON_PREFIX_BYTES];
@@ -142,12 +168,26 @@ static int vcontrol_snapshot(struct x9_vdec_control *c, uint64_t end,
     e = vmem_deadline(end);
     for (unsigned n = 0; n < 2 && !e; n++) {
         e = vshared_observe(s,X9_VCP_GLOBAL_VDEC_OFFSET,common[n],sizeof(common[n]));
-        if (!e) e = vshared_observe(s,X9_VCP_GLOBAL_VDEC_OFFSET+c->slot.offset,
+        if (!e && kind != VCONTROL_COMMON_ONLY)
+            e = vshared_observe(s,X9_VCP_GLOBAL_VDEC_OFFSET+c->slot.offset,
             c->scratch+n*X9_VCP_INSTANCE_SLOT_BYTES,X9_VCP_INSTANCE_SLOT_BYTES);
     }
-    if (!e && (memcmp(common[0],common[1],sizeof(common[0])) ||
+    if (!e && memcmp(common[0],common[1],sizeof(common[0]))) e = EAGAIN;
+    if (!e && kind == VCONTROL_WHOLE_SLOT &&
         memcmp(c->scratch,c->scratch+X9_VCP_INSTANCE_SLOT_BYTES,
-            X9_VCP_INSTANCE_SLOT_BYTES))) e = EAGAIN;
+            X9_VCP_INSTANCE_SLOT_BYTES)) e = EAGAIN;
+    if (!e && kind == VCONTROL_DECODE_FIELDS) {
+        /* Negotiation/VP qualification does not consume a ring. Compare
+         * ONLY the evidenced decode fields; unrelated asynchronous FB/BS
+         * updates must not turn a fresh control preparation into a fault.
+         * The whole copies are immutable host data, not an atomic live VSI. */
+        struct x9_vcp_decode_snapshot decoded[2];
+        for (unsigned n = 0; n < 2 && !e; n++)
+            e = x9_vcp_parse_decode_snapshot(X9_VCP_DECODE_ABI_MT6993_CAPTURE1,
+                c->scratch+n*X9_VCP_INSTANCE_SLOT_BYTES,X9_VCP_INSTANCE_SLOT_BYTES,
+                &decoded[n]);
+        if (!e && memcmp(&decoded[0],&decoded[1],sizeof(decoded[0]))) e = EAGAIN;
+    }
     if (!e) e = x9_vcp_parse_common_snapshot(X9_VCP_COMMON_ABI_MT6993_CAPTURE1,
         common[1],sizeof(common[1]),out);
     if (!e && (out->has_fault || out->enable_smmu != 1)) e = EIO;
@@ -169,7 +209,7 @@ static int vcontrol_vp(void *cookie, uint64_t epoch, uint64_t end,
     memset(out,0,sizeof(*out)); *bitdepth = 0;
     if (epoch != c->status.epoch || q->instance_token != c->init.instance_token ||
         q->service_id != c->init.service_id) return ESTALE;
-    e = vcontrol_snapshot(c,end,&common);
+    e = vcontrol_snapshot(c,end,VCONTROL_DECODE_FIELDS,&common);
     if (!e) e = x9_vcp_parse_decode_snapshot(X9_VCP_DECODE_ABI_MT6993_CAPTURE1,
         c->scratch,X9_VCP_INSTANCE_SLOT_BYTES,&decoded);
     if (!e && decoded.bitdepth != 8 && decoded.bitdepth != 10) e = ENOTSUP;
@@ -194,14 +234,45 @@ static int vcontrol_vp(void *cookie, uint64_t epoch, uint64_t end,
     if (!e) { *out = common; *bitdepth = decoded.bitdepth; }
     return e;
 }
+static int vcontrol_match_ring(struct x9_vdec_control *c,
+    const struct x9_vcp_ring_snapshot *ring)
+{
+    if (!ring->entry_present) return 0;
+    /* Exact native identity lookup, never a cast of an FW token to a pointer.
+     * A matched observation is durable bookkeeping ONLY. It cannot return a
+     * DEVICE slice to CPU ownership, release references or produce pixels. */
+    if (ring->kind == X9_VCP_RING_FREE_BS) {
+        for (unsigned i = 0; i < c->status.input_records; i++) {
+            struct x9_vdec_control_input_journal *j = &c->inputs[i].journal;
+            if (j->input_prepared && j->resources.input_token == ring->buffer_token) {
+                j->free_bs = *ring; j->free_bs_observed = 1; return 0;
+            }
+        }
+    } else {
+        for (unsigned i = 0; i < c->status.output_records; i++) {
+            struct x9_vdec_control_output_journal *j = &c->outputs[i].journal;
+            if (j->prepared && j->resources.buffer_token == ring->buffer_token) {
+                if (ring->kind == X9_VCP_RING_FREE_FB) {
+                    j->free_fb = *ring; j->free_fb_observed = 1;
+                } else {
+                    j->display_fb = *ring; j->display_fb_observed = 1;
+                }
+                return 0;
+            }
+        }
+    }
+    return ESTALE;
+}
 static int vcontrol_recheck(struct x9_vdec_control *c, uint64_t end)
 {
     struct x9_vcp_common_snapshot common;
-    struct x9_vcp_ring_snapshot rings[3];
-    int e = vcontrol_snapshot(c,end,&common);
+    bool pending = false;
+    int e = vcontrol_snapshot(c,end,VCONTROL_WHOLE_SLOT,&common);
+    c->status.ring_valid_bitmap = 0;
     for (unsigned kind = 0; kind < 3 && !e; kind++) {
+        struct x9_vcp_ring_snapshot ring;
         e = x9_vcp_parse_ring_snapshot(X9_VCP_RING_ABI_MT6993_CAPTURE1,kind,
-            c->scratch,X9_VCP_INSTANCE_SLOT_BYTES,&rings[kind]);
+            c->scratch,X9_VCP_INSTANCE_SLOT_BYTES,&ring);
         /* These ABI/kind/size/input arguments are fixed and valid, so the
          * parser's remaining EINVAL branch is precisely count != distance.
          * The captured publisher stores write-index and count separately;
@@ -209,11 +280,15 @@ static int vcontrol_recheck(struct x9_vdec_control *c, uint64_t end)
          * Retain pending and the notification, without repairing metadata or
          * claiming a completion. Out-of-range/invalid FB full still fails;
          * the separately counted BS ring may legitimately contain64. */
-        if (e == EINVAL) e = EAGAIN;
+        if (e == EINVAL) { pending = true; e = 0; continue; }
+        if (!e) {
+            c->status.rings[kind] = ring;
+            c->status.ring_valid_bitmap |= 1u << kind;
+            e = vcontrol_match_ring(c,&ring);
+        }
     }
     if (!e) {
-        memcpy(c->status.rings,rings,sizeof(rings));
-        c->status.recheck_pending = 0;
+        c->status.recheck_pending = pending;
     }
     /* A concurrent firmware update is retained as a pending observation,
      * not a completed frame or a dropped/replied notification. */
@@ -231,6 +306,7 @@ static int vcontrol_notification(void *cookie, uint64_t epoch, uint64_t end,
     if (c->status.notifications == UINT64_MAX) return EOVERFLOW;
     c->status.last_notification = *q; c->status.notifications++;
     c->status.recheck_pending = 1;
+    c->status.ring_valid_bitmap = 0;
     memset(c->status.rings,0,sizeof(c->status.rings));
     if (q->firmware_status) return EIO;
     /* During INIT there is no bound VSI yet: retain the actual event until
@@ -260,7 +336,8 @@ static int vcontrol_prepare_start(void *cookie, uint64_t epoch, uint64_t end,
     int e;
     if (epoch != c->status.epoch || !c->status.start_attempted ||
         !c->status.input_attempted || c->status.input_prepared ||
-        !c->input_source || c->input_slice.token || !c->status.output_prepared ||
+        !c->active_input || !c->input_source || c->active_input->slice.token ||
+        !c->status.output_prepared ||
         init->instance_token != c->init.instance_token ||
         result->firmware_vsi_address != c->status.init.firmware_vsi_address ||
         q->bytes_used != resources->bytes_used ||
@@ -272,40 +349,51 @@ static int vcontrol_prepare_start(void *cookie, uint64_t epoch, uint64_t end,
      * qualify_start owner. No fresh addresses are inferred from b005. */
     if (!e && c->status.output_attempted) {
         if (!c->status.output_prepared) e = EBUSY;
-        for (unsigned n = 0; n < c->status.output.plane_count && !e; n++) {
-            uint32_t state;
-            e = x9_vdec_dma_slice_state(c->shared->codec,&c->output_slice[n],&state);
-            if (!e && state != X9_VDEC_DMA_DEVICE) e = EBUSY;
-        }
+        for (unsigned i = 0; i < c->status.output_records && !e; i++)
+            for (unsigned n = 0; n < c->outputs[i].journal.resources.plane_count && !e; n++) {
+                uint32_t state;
+                e = x9_vdec_dma_slice_state(c->shared->codec,&c->outputs[i].slice[n],&state);
+                if (!e && state != X9_VDEC_DMA_DEVICE) e = EBUSY;
+            }
+    }
+    /* Previous b001 permits another CONTROL request, not storage reuse.
+     * Revalidate every earlier input's retained DEVICE handle as well. */
+    for (unsigned i = 0; i+1 < c->status.input_records && !e; i++) {
+        uint32_t state;
+        e = x9_vdec_dma_slice_state(c->shared->codec,&c->inputs[i].slice,&state);
+        if (!e && state != X9_VDEC_DMA_DEVICE) e = EBUSY;
     }
     if (!e) e = vmem_deadline(end);
     if (!e) {
         resources->input_token = vdma_take_token();
         if (!resources->input_token) e = EOVERFLOW;
+        else vcontrol_journal_input(c);
     }
     if (!e) e = x9_vdec_dma_slice_alloc(c->shared->codec,epoch,
-        c->input_capacity,128,&c->input_slice);
+        c->input_capacity,128,&c->active_input->slice);
     if (!e) {
-        resources->input_slice_token = c->input_slice.token;
+        resources->input_slice_token = c->active_input->slice.token;
+        vcontrol_journal_input(c);
         /* Initial wire capacity used the native allocator's exact rounding.
          * Verify the actual handle before either copying or exposing input. */
-        if (q->buffer_bytes != c->input_slice.capacity) e = ESTALE;
+        if (q->buffer_bytes != c->active_input->slice.capacity) e = ESTALE;
     }
     if (!e) e = vmem_deadline(end);
-    if (!e) e = x9_vdec_dma_slice_write(c->shared->codec,&c->input_slice,
+    if (!e) e = x9_vdec_dma_slice_write(c->shared->codec,&c->active_input->slice,
         0,c->input_source,resources->bytes_used);
     if (!e) e = vmem_deadline(end);
-    if (!e) e = x9_vdec_dma_slice_state(c->shared->codec,&c->input_slice,&input_state);
+    if (!e) e = x9_vdec_dma_slice_state(c->shared->codec,&c->active_input->slice,&input_state);
     if (!e && input_state != X9_VDEC_DMA_CPU_PRIVATE) e = EBUSY;
-    if (!e) e = x9_vdec_dma_slice_publish(c->shared->codec,&c->input_slice,&extent);
+    if (!e) e = x9_vdec_dma_slice_publish(c->shared->codec,&c->active_input->slice,&extent);
     if (!e) {
         /* Record the real exposure BEFORE any subsequent deadline/owner error.
          * A failed VSI preparation must not lose or recycle DEVICE backing. */
         resources->input = extent;
         c->status.input_prepared = 1;
+        vcontrol_journal_input(c);
     }
     if (!e) e = vmem_deadline(end);
-    if (!e) e = vcontrol_snapshot(c,end,&common);
+    if (!e) e = vcontrol_snapshot(c,end,VCONTROL_DECODE_FIELDS,&common);
     if (!e) e = x9_vcp_parse_decode_snapshot(X9_VCP_DECODE_ABI_MT6993_CAPTURE1,
         c->scratch,X9_VCP_INSTANCE_SLOT_BYTES,&decoded);
     if (!e && (decoded.input_driven != 2 || decoded.ipi_blocked ||
@@ -325,36 +413,39 @@ static int vcontrol_prepare_output(void *cookie, uint64_t epoch, uint64_t end,
     struct x9_vdec_control *c = cookie;
     struct x9_vcp_common_snapshot common;
     struct x9_vcp_output_record *r = &c->status.output;
+    struct vcontrol_output_record *o = c->active_output;
     int e;
     if (epoch != c->status.epoch || !c->status.output_attempted ||
-        c->status.output_prepared || c->status.start_attempted ||
+        !o || c->status.output_prepared ||
         init->instance_token != c->init.instance_token ||
         ready->firmware_vsi_address != c->status.init.firmware_vsi_address)
         return ESTALE;
-    e = vcontrol_snapshot(c,end,&common);
+    e = vcontrol_snapshot(c,end,VCONTROL_COMMON_ONLY,&common);
     for (unsigned n = 0; n < r->plane_count && !e; n++) {
         e = vmem_deadline(end);
         if (!e) e = x9_vdec_dma_slice_alloc(c->shared->codec,epoch,
-            c->output_bytes[n],128,&c->output_slice[n]);
+            o->bytes[n],128,&o->slice[n]);
     }
     /* Obtain/journal ALL backing before exposing Y: C capacity failure
      * must not unnecessarily turn a still-private Y slice into DEVICE. */
     for (unsigned n = 0; n < r->plane_count && !e; n++) {
         struct x9_vdec_dma_extent extent;
         if (!e) e = vmem_deadline(end);
-        if (!e) e = x9_vdec_dma_slice_publish(c->shared->codec,&c->output_slice[n],&extent);
+        if (!e) e = x9_vdec_dma_slice_publish(c->shared->codec,&o->slice[n],&extent);
         if (!e) {
             /* Journal EACH real handoff immediately, including padding.
              * Partial Y success/C failure never loses Y's DEVICE handle. */
             r->plane[n] = (struct x9_vcp_output_extent){extent.iova,extent.capacity};
-            if (n) c->output_request.c_iova = extent.iova;
-            else c->output_request.y_iova = extent.iova;
+            if (n) o->request.c_iova = extent.iova;
+            else o->request.y_iova = extent.iova;
+            vcontrol_journal_output(c);
         }
     }
     if (!e) e = vmem_deadline(end);
     if (!e) {
         c->status.output_prepared = 1;
-        *record = *r; *q = c->output_request;
+        vcontrol_journal_output(c);
+        *record = *r; *q = o->request;
     }
     return e;
 }
@@ -371,7 +462,16 @@ int x9_vdec_control_create(struct x9_vcp_bus *bus, struct x9_vdec_shared *s,
     c = kalloc_type(struct x9_vdec_control,Z_WAITOK | Z_ZERO);
     if (!c) return ENOMEM;
     c->scratch = kalloc_data(VCONTROL_SCRATCH,Z_WAITOK | Z_ZERO);
-    if (!c->scratch) { kfree_type(struct x9_vdec_control,c); return ENOMEM; }
+    c->inputs = kalloc_type(struct vcontrol_input_record,X9_VDEC_CONTROL_MAX_RECORDS,
+        Z_WAITOK | Z_ZERO);
+    c->outputs = kalloc_type(struct vcontrol_output_record,X9_VDEC_CONTROL_MAX_RECORDS,
+        Z_WAITOK | Z_ZERO);
+    if (!c->scratch || !c->inputs || !c->outputs) {
+        if (c->scratch) kfree_data(c->scratch,VCONTROL_SCRATCH);
+        if (c->inputs) kfree_type(struct vcontrol_input_record,X9_VDEC_CONTROL_MAX_RECORDS,c->inputs);
+        if (c->outputs) kfree_type(struct vcontrol_output_record,X9_VDEC_CONTROL_MAX_RECORDS,c->outputs);
+        kfree_type(struct x9_vdec_control,c); return ENOMEM;
+    }
     lck_mtx_lock(&s->lock); lck_mtx_lock(&m->lock);
     e = s->closing || !s->published || m->closing || m->control_refs ? EBUSY :
         s->fault_errno ? s->fault_errno : m->fault_errno;
@@ -381,6 +481,8 @@ int x9_vdec_control_create(struct x9_vcp_bus *bus, struct x9_vdec_shared *s,
     if (!e) { s->control_refs++; m->control_refs++; c->init = m->init; }
     lck_mtx_unlock(&m->lock); lck_mtx_unlock(&s->lock);
     if (e) {
+        kfree_type(struct vcontrol_input_record,X9_VDEC_CONTROL_MAX_RECORDS,c->inputs);
+        kfree_type(struct vcontrol_output_record,X9_VDEC_CONTROL_MAX_RECORDS,c->outputs);
         kfree_data(c->scratch,VCONTROL_SCRATCH); kfree_type(struct x9_vdec_control,c);
         return e;
     }
@@ -462,6 +564,30 @@ int x9_vdec_control_get_status(struct x9_vdec_control *c, struct x9_vdec_control
     lck_mtx_lock(&c->lock); *out = c->status; lck_mtx_unlock(&c->lock);
     return 0;
 }
+int x9_vdec_control_get_input(struct x9_vdec_control *c, uint32_t index,
+    struct x9_vdec_control_input_journal *out)
+{
+    int e;
+    if (!c || c->magic != VCONTROL_MAGIC || !out) return EINVAL;
+    memset(out,0,sizeof(*out));
+    lck_mtx_lock(&c->lock);
+    e = index >= c->status.input_records ? ENOENT : 0;
+    if (!e) *out = c->inputs[index].journal;
+    lck_mtx_unlock(&c->lock);
+    return e;
+}
+int x9_vdec_control_get_output(struct x9_vdec_control *c, uint32_t index,
+    struct x9_vdec_control_output_journal *out)
+{
+    int e;
+    if (!c || c->magic != VCONTROL_MAGIC || !out) return EINVAL;
+    memset(out,0,sizeof(*out));
+    lck_mtx_lock(&c->lock);
+    e = index >= c->status.output_records ? ENOENT : 0;
+    if (!e) *out = c->outputs[index].journal;
+    lck_mtx_unlock(&c->lock);
+    return e;
+}
 int x9_vdec_control_register_output(struct x9_vdec_control *c, uint32_t planes,
     const uint32_t bytes[X9_VCP_OUTPUT_PLANES], uint32_t ms,
     struct x9_vcp_output_notification *out, struct x9_vcp_bus_call_log *log)
@@ -475,24 +601,42 @@ int x9_vdec_control_register_output(struct x9_vdec_control *c, uint32_t planes,
         if (bytes[n] > X9_MM_SMMU_MAX_CHECK_BYTES) return EMSGSIZE;
     memset(out,0,sizeof(*out)); memset(log,0,sizeof(*log));
     lck_mtx_lock(&c->lock);
-    e = c->closing || !c->status.bound || c->status.output_attempted ||
-        c->status.start_attempted ? EBUSY : (int)c->status.last_errno;
+    e = c->closing || !c->status.bound ? EBUSY : (int)c->status.last_errno;
+    if (!e && c->status.start_attempted && !c->status.start_replied) e = EBUSY;
+    if (!e && c->status.output_records == X9_VDEC_CONTROL_MAX_RECORDS) e = ENOSPC;
+    if (!e && c->status.output_records) {
+        const struct vcontrol_output_record *first = &c->outputs[0];
+        if (planes != first->journal.resources.plane_count ||
+            memcmp(bytes,first->bytes,sizeof(first->bytes))) e = ENOTSUP;
+    }
     if (!e) e = x9_vcp_bus_check_shared(c->bus,c->status.epoch,&c->shared->global);
     if (!e) {
         c->status.output_attempted = 1;
+        c->status.output_prepared = 0; c->status.output_notified = 0;
+        c->active_output = &c->outputs[c->status.output_records++];
         r = &c->status.output;
+        memset(r,0,sizeof(*r));
         r->buffer_token = vdma_take_token();
         if (!r->buffer_token) e = EOVERFLOW;
         r->instance_token = c->init.instance_token; r->context_id = c->init.context_id;
         r->generation = c->status.epoch; r->plane_count = planes;
+        r->buffer_index = c->status.output_records-1;
         r->firmware_vsi_address = c->status.init.firmware_vsi_address;
-        c->output_request = (struct x9_vcp_output_request){
+        c->active_output->request = (struct x9_vcp_output_request){
             .firmware_vsi_address = r->firmware_vsi_address, .generation = r->generation,
-            .buffer_token = r->buffer_token, .general_iova = UINT64_MAX };
-        for (unsigned n = 0; n < planes; n++) c->output_bytes[n] = bytes[n];
+            .buffer_token = r->buffer_token, .buffer_index = r->buffer_index,
+            .general_iova = UINT64_MAX };
+        for (unsigned n = 0; n < planes; n++) c->active_output->bytes[n] = bytes[n];
+        vcontrol_journal_output(c);
         if (!e) e = x9_vcp_bus_register_output(c->bus,&c->init,&c->status.init,
             &c->reverse,ms,out,log);
         c->status.output_notified = out->message_id == X9_VCP_FRAME_BUFFER_DONE;
+        vcontrol_journal_output(c);
+        c->active_output->journal.notification = *out;
+        c->active_output->journal.notified = c->status.output_notified;
+        c->active_output->journal.call = *log;
+        c->active_output->journal.last_errno = (uint32_t)e;
+        c->active_output = NULL;
         vcontrol_fault(c,e);
     }
     lck_mtx_unlock(&c->lock);
@@ -512,15 +656,20 @@ int x9_vdec_control_decode_start(struct x9_vdec_control *c, const uint8_t *annex
         capacity > X9_MM_SMMU_MAX_CHECK_BYTES || dynamic_low_latency > UINT8_MAX)
         return EINVAL;
     lck_mtx_lock(&c->lock);
-    e = c->closing || !c->status.bound || c->status.start_attempted ||
-        c->status.input_attempted || !c->status.output_prepared ? EBUSY :
-        (int)c->status.last_errno;
+    e = c->closing || !c->status.bound ? EBUSY : (int)c->status.last_errno;
+    if (!e && ((c->status.start_attempted && !c->status.start_replied) ||
+        !c->status.output_prepared)) e = EBUSY;
+    if (!e && c->status.input_records == X9_VDEC_CONTROL_MAX_RECORDS) e = ENOSPC;
     if (!e && !c->reverse.prepare_start) e = ENOTSUP;
     if (!e) e = x9_vcp_bus_check_shared(c->bus,c->status.epoch,&c->shared->global);
     if (!e) {
         c->status.start_attempted = 1;
         c->status.input_attempted = 1;
+        c->status.start_replied = 0; c->status.input_prepared = 0;
+        c->status.vsi_attempted = 0; c->status.vsi_staged = 0;
+        c->active_input = &c->inputs[c->status.input_records++];
         resources = &c->status.resources;
+        memset(resources,0,sizeof(*resources));
         resources->epoch = c->status.epoch;
         resources->instance_token = c->init.instance_token;
         resources->slot = c->slot;
@@ -528,6 +677,9 @@ int x9_vdec_control_decode_start(struct x9_vdec_control *c, const uint8_t *annex
         resources->timestamp = timestamp;
         resources->dynamic_low_latency = dynamic_low_latency;
         resources->output = c->status.output;
+        resources->submission_index = c->status.input_records-1;
+        resources->registered_outputs = c->status.output_records;
+        vcontrol_journal_input(c);
         c->input_source = annexb;
         c->input_capacity = capacity;
         q = (struct x9_vcp_start){ .service_id = c->init.service_id,
@@ -540,6 +692,12 @@ int x9_vdec_control_decode_start(struct x9_vdec_control *c, const uint8_t *annex
             ms,out,log);
         c->input_source = NULL; /* never retained after return, including error */
         c->status.start = *out; c->status.start_replied = log->ack_matched;
+        vcontrol_journal_input(c);
+        c->active_input->journal.result = *out;
+        c->active_input->journal.control_replied = log->ack_matched;
+        c->active_input->journal.call = *log;
+        c->active_input->journal.last_errno = (uint32_t)e;
+        c->active_input = NULL;
         vcontrol_fault(c,e);
     }
     lck_mtx_unlock(&c->lock);
@@ -587,11 +745,13 @@ int x9_vdec_control_discard(struct x9_vdec_control **slot)
             lck_mtx_unlock(&d->lock);
         }
     }
-    for (unsigned n = 0; n < X9_VCP_OUTPUT_PLANES && !e; n++)
-        if (c->output_slice[n].token)
-            e = x9_vdec_dma_slice_free(c->shared->codec,&c->output_slice[n]);
-    if (!e && c->input_slice.token)
-        e = x9_vdec_dma_slice_free(c->shared->codec,&c->input_slice);
+    for (unsigned i = 0; i < c->status.output_records && !e; i++)
+        for (unsigned n = 0; n < X9_VCP_OUTPUT_PLANES && !e; n++)
+            if (c->outputs[i].slice[n].token)
+                e = x9_vdec_dma_slice_free(c->shared->codec,&c->outputs[i].slice[n]);
+    for (unsigned i = 0; i < c->status.input_records && !e; i++)
+        if (c->inputs[i].slice.token)
+            e = x9_vdec_dma_slice_free(c->shared->codec,&c->inputs[i].slice);
     if (!e) {
         lck_mtx_lock(&c->shared->lock); lck_mtx_lock(&c->memory->lock);
         if (!c->shared->control_refs || !c->memory->control_refs)
@@ -604,6 +764,8 @@ int x9_vdec_control_discard(struct x9_vdec_control **slot)
     lck_mtx_unlock(&c->lock);
     if (!e) {
         lck_mtx_destroy(&c->lock,&vdec_group);
+        kfree_type(struct vcontrol_input_record,X9_VDEC_CONTROL_MAX_RECORDS,c->inputs);
+        kfree_type(struct vcontrol_output_record,X9_VDEC_CONTROL_MAX_RECORDS,c->outputs);
         kfree_data(c->scratch,VCONTROL_SCRATCH); kfree_type(struct x9_vdec_control,c);
     }
     return e;
