@@ -28,6 +28,7 @@ static int x9mi_enabled(void){return x9_at_enabled()&&sweet_x9_arg("x9_mipc",1);
 unsigned x9_md_sim_count(void){return sweet_x9_arg("x9_dual_sim",0)==1?2:1;}
 #include "x9_mipc_messages.inc"
 #include "x9_mipc_calls.inc"
+#include "x9_call_init.h"
 static int x9mi_call_mutation(unsigned id){return id==0x901||id==0x905||id==0x907;}
 static int x9mi_call_busy(void){
  for(unsigned i=0;i<X9_MI_SLOTS;i++)if(x9_mi_slots[i].state&&x9mi_call_mutation(x9_mi_slots[i].id))return 1;
@@ -118,13 +119,19 @@ static uint64_t x9mi_submit(const uint8_t *p,uint32_t n,const struct x9cw_outbou
      k<3||k>X9_AT_COMMAND_MAX||n!=16+((k+11)&~7u)||p[20+k-1]||
      strnlen((const char *)p+20,k)!=k-1||!x9mi_at_read((const char *)p+20))return 0;
  }
- else if(id==0x30b||id==0x601||id==0x605||id==0x607||id==0xa04){if(!x9mm_request(p,n,id))return 0;}
+ else if(id==0x30b){if(!x9mm_request(p,n,id)&&!x9cw_call_register_request(p,n,x9_md_sim_count()))return 0;}
+ else if(id==0x601||id==0x605||id==0x607||id==0xa04){if(!x9mm_request(p,n,id))return 0;}
  /* Staged, evidence-bounded call actions. No caller is enabled/published
   * yet; DIAL mirrors the measured PLJ110 SIM2 profile (2026-11-15),
   * ANSWER{} and HANGUP{MODE0,ID} mirror Android captures.
   * RSP8902 can ONLY use the original CMD owner, never this txid allocator. */
  else if(id==0x901||id==0x905||id==0x907||id==0x909){if(!x9cw_request(p,n,id,x9_md_sim_count()))return 0;}
  else if(id==0x101){if(!x9mi_attach_request(p,n))return 0;}
+ /* Existing data/SMS registrations keep their contract. CALL registrations
+  * have a narrow, original-RIL-derived shape at the physical boundary. */
+ else if(id==0x307&&n>=22&&(x9mi_u16(p+20)==0x4901||x9mi_u16(p+20)==0x4902)){
+  if(!x9cw_call_register_request(p,n,x9_md_sim_count()))return 0;
+ }
  /* Read-only per-SIM provider-name query. MD 91345dbc/91345e9e:
   * 0429 -> 042a; exact PLMN ASCII + NUL, LAC0 (MD current area), OPTION1.
   * This is not permission for other NW controls or an arbitrary AT query. */
