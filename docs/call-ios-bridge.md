@@ -12,7 +12,7 @@
 | 空快照与异步确认 | 完整 owned `090a` 数组解析、号码与原始presentation有界owner；`0902 + 新 MO epoch` 汇合生成 VOICE20/tag10/u8；DIAL 仍无生产 profile/admission 调用者 |
 | 单通话挂断 / SIM 绑定 | VOICE44/tag01/u8 独立绑定；显式 VOICE21 → owned current query → 同 MO epoch/真实 ID/完整单通话 snapshot → guarded0905 → 同token0906 → 原iOS txn 的 result；已接请求分发，未设备验收 |
 | 初始化 / 事件注册 | 明确绑定后的 VOICE03：13=0 与14=0/1 可独立并发 → 全局 CMD8901 → 逐 SIM IND4901/4902 → owned0909/090a；逐token确认，13=1仍拒绝；仅编译、未运行 |
-| handover 通知 | 严格 MD4902/EVENT3 → Android SRVCC → Apple54/tag1/u8；订阅cursor/generation/SIM隔离、先Result后有序发布；未设备验收，未迁移handover后的ID/RAT/profile |
+| handover 通知 | 严格 MD4902/EVENT3 → Android SRVCC → Apple54/tag1/u8；订阅cursor/generation/SIM隔离、注册与live事件均整批queue receipt后释放，queue/OOM保序等待；未设备验收，未迁移handover后的ID/RAT/profile |
 | 来电 CMD / 状态 | `8901` 的字段、长度和唯一 tag 验证；独立 pending ID → 完整 ECPI0/132/6/133 的 MT reducer / iOS observer；未发布 CallList |
 | END 原因 metadata | 成功完整解析、被当前 MO/MT 身份接受的 `133/mode20/10a=16` → 内部 Apple reason145；无cause/其它cause未知，不从无ID0910补归属；只编译，未发布 END |
 | 来电许可 RSP | `8902` 的正确 approve/call-id 字段；显式调用才构造，保留原 txid；按已核实 RIL slot 转换生成 RSP mask |
@@ -77,7 +77,7 @@ handover后的ID/RAT/profile迁移、运行DIAL profile/admission和voice音频�
 Result与各事件分开入队也可能只有前半批成功。此前getter与host入队之间另有CALL poison窗口。
 这些是可达源码缺口，不是新增设备复现。
 
-生产`c220b79`（原`4b2619b`）仅修注册publication：原Result03和启用期间保留的最多8条54在锁外预分配，
+生产`4e30917`（原`4b2619b`）仅修注册publication：原Result03和启用期间保留的最多8条54在锁外预分配，
 `x9_md_mipc_call_publish(floor,callback,context)`持同一MD锁检查online/CALL poison/RX floor，
 受信callback再检查原client/generation、control-ready及原25s deadline，
 以MD→bb mutex顺序覆盖**整批真实host queue准入**。bb锁内验证非release_pending的真实VOICE
@@ -91,9 +91,31 @@ peer-review再发现callback检查后可能等待bb锁跨deadline，`051bc35`将
 不用32-bit诊断时钟，也不是在callback锁前/后补一次getter。
 新增共7项人工源码向量只编译未执行；初版host/header及真实recipe两对象均exit0，
 锁内deadline修复严格host编译exit0，最新统一kernel结果见NOTES。
-此项不改已经启用后的普通54发送路径，**尚未闭合该路径的queue-full持久保留/重试**，
+此项当时不改已经启用后的普通54发送路径；该路径的queue-full保留已在下节单独补入，
 不发CallList/VOICE09，不改变SMS/CALL mutation、真实ID/profile、注册CNF或MD物理writer。
 统一kernel结果见NOTES；仍无设备注册/通话/最终镜像验收。
+
+#### 已注册后的live54保序publication
+
+旧live路径同样只调用`coachz_baseband_qrtr`，消费CALL inbox后没有保留队列失败的事件。
+现在每个已绑定client独立保留最多8条真实54状态及最后RX sequence，按原SIM/generation/floor
+接收，**不合并重复START/COMPLETE**。poll锁外预分配全部QMUX buffer，再复用native
+`x9_md_mipc_call_publish`持MD锁复核online/CALL poison/floor，受信callback复核当前control、
+subscription/generation/SIM，以MD→bb锁顺序调用与注册共用的整批publication helper。
+真实VOICE service/node/route、non-release_pending及完整queue容量都在bb锁内检查。
+成功才清本地events；queue-full或任一分配失败不转半批ownership，擦除释放临时buffer，
+保留原序等待下一poll，只重试本地入队，**没有新MD请求或网络重发**。
+
+live事件不是host请求，因此不虚构25s deadline；注册Result03仍在获得bb锁后复核原64-bit
+deadline。收到第9条/非单调sequence使该subscription的publication sticky-blocked，停止继续
+发部分状态，不影响其它client/SMS；已接受的enable waiter也不能擦掉此owner。只有成功发布的
+显式14=0、delete或不同SIM/generation的rebind可退休本地batch；新的14=1取新cursor，
+不重放丢失区间。transport loss/poison撤订阅，allocator之后的poison由锁内fence拒绝。
+
+新增8项人工源码向量仅严格C++17 `-c`；shared header C11 strict syntax和真实recipe的
+两对象编译均exit0，**没有执行向量/套件**。这仅修host queue receipt/有序保留，不能替代
+iOS实际消费、handover后身份迁移或声音验收；VOICE09仍关闭，未生成最终boot.img。
+编译原日志在`x9/out/handover-live-compile/`，固定kernel结果见NOTES。
 
 ### SRVCC / Apple handover54（2026-11-15，源码接入，未设备验收）
 

@@ -1424,20 +1424,23 @@ extern "C" int coachz_baseband_qrtr(uint32_t dst_port, uint32_t src_node, uint32
 }
 
 #ifdef COACHZ_NATIVE_DPMAIF
-// CALL bootstrap publishes Result03 followed by up to eight retained54
-// events as one batch. Port recognition is NOT a queue receipt. Buffers are
+// CALL bootstrap publishes Result03 followed by up to eight retained54;
+// a live subscription publishes up to eight ordered54. Both are one batch.
+// Port recognition is NOT a queue receipt. Buffers are
 // allocated by the single QMI owner before acquiring MD->bb mutexes; failure
 // transfers none of them and cannot grant a subscription or emit half a batch.
 struct bb_x9_call_frame { const uint8_t *sdu; uint32_t size; uint8_t *owned; };
-static bool bb_x9_call_registration(uint32_t dst_port,uint32_t src_node,
-                                    bb_x9_call_frame *frames,uint32_t count,uint64_t deadline_ms)
+static bool bb_x9_call_publication(uint32_t dst_port,uint32_t src_node,
+                                   bb_x9_call_frame *frames,uint32_t count,bool registration,uint64_t deadline_ms)
 {
   const uint32_t slot=dst_port-CBQ_PORT_BASE;
-  if(!bb_lock||!frames||!count||count>9||!deadline_ms||dst_port<CBQ_PORT_BASE||slot>=CBQ_MAX_CLIENTS)return false;
+  if(!bb_lock||!frames||!count||count>(registration?9u:8u)||(registration&&!deadline_ms)||
+     dst_port<CBQ_PORT_BASE||slot>=CBQ_MAX_CLIENTS)return false;
   for(uint32_t i=0;i<count;i++){
     const bb_x9_call_frame &f=frames[i];
-    if(!f.sdu||!f.owned||f.size!=(i?11u:14u)||cbq_rd16(f.sdu+5)!=f.size-7)return false;
-    if(!i){
+    const bool result=registration&&!i;
+    if(!f.sdu||!f.owned||f.size!=(result?14u:11u)||cbq_rd16(f.sdu+5)!=f.size-7)return false;
+    if(result){
       if(f.size!=14||f.sdu[0]!=CBQ_QMI_RESPONSE||cbq_rd16(f.sdu+3)!=3||
          f.sdu[7]!=2||cbq_rd16(f.sdu+8)!=4||cbd_rd32(f.sdu+10))return false;
     }else if(f.size!=11||f.sdu[0]!=CBQ_QMI_INDICATION||cbq_rd16(f.sdu+1)||
@@ -1450,7 +1453,7 @@ static bool bb_x9_call_registration(uint32_t dst_port,uint32_t src_node,
   // not bb_now_ms's diagnostic 32-bit clock or an earlier getter.
   uint64_t ticks,ns;clock_get_uptime(&ticks);absolutetime_to_nanoseconds(ticks,&ns);
   const cbq_client &c=bb_qmux.client[slot];bool admitted=false;
-  if(ns/1000000<deadline_ms&&c.used&&!c.release_pending&&!c.private_service&&c.service==9&&c.channel<2){
+  if((!registration||ns/1000000<deadline_ms)&&c.used&&!c.release_pending&&!c.private_service&&c.service==9&&c.channel<2){
     bb_channel *ch=&bb_ch[c.channel==0?CBH_QMUX1:CBH_QMUX2];
     if(count<=BB_QUEUE-ch->count){
       const cbq_server *srv=cbq_server_find(&bb_qmux,c.service);
@@ -1470,6 +1473,15 @@ static bool bb_x9_call_registration(uint32_t dst_port,uint32_t src_node,
     }
   }
   IOLockUnlock(bb_lock);return admitted;
+}
+static bool bb_x9_call_registration(uint32_t dst_port,uint32_t src_node,
+                                    bb_x9_call_frame *frames,uint32_t count,uint64_t deadline_ms){
+  return bb_x9_call_publication(dst_port,src_node,frames,count,true,deadline_ms);
+}
+static bool bb_x9_call_handover(uint32_t dst_port,uint32_t src_node,bb_x9_call_frame *frames,uint32_t count){
+  // An event has no invented host request timeout. Readiness, generation,
+  // subscription and native poison are fenced by the trusted MD callback.
+  return bb_x9_call_publication(dst_port,src_node,frames,count,false,0);
 }
 // Unlike coachz_baseband_qrtr's "port recognized" result, this is an actual
 // host-queue admission receipt. An X9 SMS must keep its PDU on queue/OOM loss;
