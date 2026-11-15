@@ -3,6 +3,28 @@
 #include <math.h>
 #include <string.h>
 
+OSStatus x9_hevc_read_hdr_description(CMVideoFormatDescriptionRef source, struct x9_hevc_hdr *out)
+{
+    if (!out) return kVTParameterErr;
+    memset(out,0,sizeof(*out));
+    if (!source || CMFormatDescriptionGetMediaType(source) != kCMMediaType_Video)
+        return kVTParameterErr;
+    struct x9_hevc_hdr parsed = {0};
+    CFStringRef keys[] = { kCMFormatDescriptionExtension_MasteringDisplayColorVolume,
+        kCMFormatDescriptionExtension_ContentLightLevelInfo };
+    uint8_t *bytes[] = { parsed.mastering, parsed.light };
+    uint32_t *present[] = { &parsed.mastering_present, &parsed.light_present };
+    const CFIndex lengths[] = {24,4};
+    for (unsigned i = 0; i < 2; i++) {
+        CFTypeRef value = CMFormatDescriptionGetExtension(source,keys[i]);
+        if (!value) continue;
+        if (CFGetTypeID(value) != CFDataGetTypeID() || CFDataGetLength(value) != lengths[i])
+            return kVTVideoDecoderBadDataErr;
+        memcpy(bytes[i],CFDataGetBytePtr(value),(size_t)lengths[i]); *present[i] = 1;
+    }
+    *out = parsed; return noErr;
+}
+
 OSStatus x9_hevc_copy_hdr_description(CMVideoFormatDescriptionRef source,
     const struct x9_hevc_hdr *hdr, CMVideoFormatDescriptionRef *out)
 {
@@ -10,23 +32,26 @@ OSStatus x9_hevc_copy_hdr_description(CMVideoFormatDescriptionRef source,
     *out = NULL;
     if (!source || !hdr || CMFormatDescriptionGetMediaType(source) != kCMMediaType_Video ||
         hdr->mastering_present > 1 || hdr->light_present > 1) return kVTParameterErr;
+    struct x9_hevc_hdr original_hdr;
+    OSStatus e = x9_hevc_read_hdr_description(source,&original_hdr);
+    if (e) return e;
     CFStringRef keys[] = { kCMFormatDescriptionExtension_MasteringDisplayColorVolume,
         kCMFormatDescriptionExtension_ContentLightLevelInfo };
     const uint8_t *bytes[] = { hdr->mastering, hdr->light };
     const CFIndex lengths[] = {24,4};
     const unsigned present[] = { hdr->mastering_present, hdr->light_present };
+    const unsigned original_present[] = { original_hdr.mastering_present, original_hdr.light_present };
+    const uint8_t *original_bytes[] = { original_hdr.mastering, original_hdr.light };
     for (unsigned i = 0; i < 2; i++) {
-        CFTypeRef value = CMFormatDescriptionGetExtension(source,keys[i]);
-        if (value && (CFGetTypeID(value) != CFDataGetTypeID() ||
-            CFDataGetLength(value) != lengths[i] ||
-            (present[i] && memcmp(CFDataGetBytePtr(value),bytes[i],(size_t)lengths[i]))))
+        if (original_present[i] && present[i] &&
+            memcmp(original_bytes[i],bytes[i],(size_t)lengths[i]))
             return kVTVideoDecoderBadDataErr;
     }
     CFDictionaryRef original = CMFormatDescriptionGetExtensions(source);
     CFMutableDictionaryRef extensions = original ? CFDictionaryCreateMutableCopy(NULL,0,original) :
         CFDictionaryCreateMutable(NULL,0,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
     if (!extensions) return kVTAllocationFailedErr;
-    OSStatus e = noErr;
+    e = noErr;
     for (unsigned i = 0; i < 2; i++) {
         if (!present[i]) continue;
         CFDataRef value = CFDataCreate(NULL,bytes[i],lengths[i]);

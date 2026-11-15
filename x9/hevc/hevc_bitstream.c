@@ -809,7 +809,8 @@ int x9_hevc_hdr_sequence_next(const struct x9_hevc_hdr_sequence *current,
     if (current) previous = *current;
     memset(out,0,sizeof(*out));
     if (!current || !picture || previous.started > 1 || previous.eos_present > 1 ||
-        previous.eob_present > 1 || previous.hdr.mastering_present > 1 ||
+        previous.eob_present > 1 || previous.started != !!previous.clvs ||
+        previous.hdr.mastering_present > 1 ||
         previous.hdr.light_present > 1 || picture->hdr.mastering_present > 1 ||
         picture->hdr.light_present > 1 || picture->eos_present > 1 || picture->eob_present > 1 ||
         picture->nal_type > 21 || (picture->nal_type > 9 && picture->nal_type < 16) ||
@@ -822,6 +823,7 @@ int x9_hevc_hdr_sequence_next(const struct x9_hevc_hdr_sequence *current,
      * DRAIN is absent from this API and cannot manufacture a CVS boundary. */
     unsigned new_clvs = !previous.started || previous.eos_present ||
         (picture->nal_type >= 16 && picture->nal_type <= 20);
+    if (new_clvs && previous.clvs == UINT64_MAX) return E2BIG;
     struct x9_hevc_hdr_sequence next = new_clvs ?
         (struct x9_hevc_hdr_sequence){0} : previous;
     if (picture->hdr.mastering_present) {
@@ -833,6 +835,7 @@ int x9_hevc_hdr_sequence_next(const struct x9_hevc_hdr_sequence *current,
         if (next.hdr.light_present && memcmp(next.hdr.light,picture->hdr.light,4)) return EINVAL;
         memcpy(next.hdr.light,picture->hdr.light,4); next.hdr.light_present = 1;
     }
+    next.clvs = previous.clvs + new_clvs;
     next.started = 1; next.eos_present = picture->eos_present; next.eob_present = picture->eob_present;
     *out = next; return 0;
 }

@@ -59,10 +59,18 @@ static CFStringRef hardware_key, required_key, using_hardware_key;
 static pthread_mutex_t registration_lock = PTHREAD_MUTEX_INITIALIZER;
 static Boolean registered;
 struct pending_frame {
-    uint64_t token;
+    uint64_t token, hdr_clvs;
     void *frame;
     CMVideoFormatDescriptionRef description;
     Boolean suppress, deferred;
+};
+/* Accepted original CM/container CLLI constraints in the current CLVS,
+ * including frames already emitted. At most one representative + a mixed
+ * flag is needed: a later single CLVS-wide SEI cannot equal two distinct
+ * four-byte payloads. No unbounded history or invented first-picture gate. */
+struct hdr_source_history {
+    Boolean light_seen, light_mixed;
+    uint8_t light[4];
 };
 struct state {
     pthread_mutex_t lock;
@@ -75,6 +83,7 @@ struct state {
     CFDataRef hvcc;
     struct x9_hevc_config config;
     struct x9_hevc_hdr_sequence hdr_sequence;
+    struct hdr_source_history hdr_sources;
 };
 static CFStringRef symbol_key(const char *name)
 {
@@ -119,6 +128,7 @@ static void video_cancel(struct state *s)
     if (s->fd >= 0) { close(s->fd); s->fd = -1; }
     s->native_session = 0;
     memset(&s->hdr_sequence,0,sizeof(s->hdr_sequence));
+    memset(&s->hdr_sources,0,sizeof(s->hdr_sources));
     for (unsigned i = 0; i < s->pending_count; i++) CFRelease(s->pending[i].description);
     s->pending_count = 0;
     if (s->hvcc) { CFRelease(s->hvcc); s->hvcc = NULL; }
@@ -232,6 +242,7 @@ static OSStatus start(Base object, void *session, CMVideoFormatDescriptionRef fo
         s->generation = status.generation; s->native_session = native.session;
         s->max_pending = caps.max_pending;
         memset(&s->hdr_sequence,0,sizeof(s->hdr_sequence));
+        memset(&s->hdr_sources,0,sizeof(s->hdr_sources));
     }
 done:
     if (fd >= 0) close(fd);

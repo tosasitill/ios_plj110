@@ -5,6 +5,11 @@
 #include <CoreVideo/CoreVideo.h>
 #include "hevc_bitstream.h"
 
+/* Exact original CM/container bytes, before any SEI enrichment. Optional HDR
+ * absent remains absent; both fields are type/length checked before success.
+ * Owned raw value snapshot, cleared on failure; no inferred SEI provenance. */
+OSStatus x9_hevc_read_hdr_description(CMVideoFormatDescriptionRef, struct x9_hevc_hdr *);
+
 /* Owned immutable format snapshot: preserve every original extension and
  * merge only present direct/persistent SEI137/144. CM/container and SEI must
  * agree byte-for-byte when both exist; absent SEI does not erase CM metadata.

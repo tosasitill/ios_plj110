@@ -131,10 +131,13 @@ int x9_hevc_sample_metadata(const struct x9_hevc_config *, const uint8_t *hvcc,
  * Commit ONLY after the native provider accepts SUBMIT. Container/CM values
  * are deliberately not stored here. No external HandleCraAsBlaFlag is used.
  * Mastering persists from the CLVS first picture; late CLLI is accepted and
- * retained for current/future inputs. This does NOT retroactively relabel
- * earlier token snapshots or already-emitted pictures with late CLLI. */
+ * retained for current/future inputs. clvs is a local nonzero identity derived
+ * ONLY at the genuine boundaries below, not a provider token or POC. The VT
+ * owner may use it to prepare same-CLVS pending metadata replacements; this
+ * helper alone does not relabel pending or already-emitted pictures. */
 struct x9_hevc_hdr_sequence {
     struct x9_hevc_hdr hdr;
+    uint64_t clvs;
     uint32_t started, eos_present, eob_present;
 };
 int x9_hevc_hdr_sequence_next(const struct x9_hevc_hdr_sequence *,

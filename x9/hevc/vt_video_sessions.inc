@@ -24,6 +24,43 @@ static unsigned pending_index(struct state *s, uint64_t token)
     while (i < s->pending_count && s->pending[i].token != token) i++;
     return i;
 }
+static OSStatus video_hdr_sources_next(struct state *s,
+    const struct x9_hevc_hdr_sequence *prospective, const struct x9_hevc_hdr *original,
+    struct hdr_source_history *out)
+{
+    struct hdr_source_history next = prospective->clvs == s->hdr_sequence.clvs ?
+        s->hdr_sources : (struct hdr_source_history){0};
+    if (original->light_present) {
+        if (next.light_seen) {
+            if (memcmp(next.light,original->light,4)) next.light_mixed = true;
+        } else { memcpy(next.light,original->light,4); next.light_seen = true; }
+    }
+    /* The exact CM/SEI policy applies to accepted original sources of THIS
+     * CLVS, not only frames still pending. Differing CM-only values remain
+     * legal until a CLVS-wide SEI actually arrives and conflicts with them. */
+    if (prospective->hdr.light_present && (next.light_mixed ||
+        (next.light_seen && memcmp(next.light,prospective->hdr.light,4))))
+        return kVTVideoDecoderBadDataErr;
+    *out = next; return noErr;
+}
+static OSStatus video_hdr_prepare_pending(struct state *s,
+    const struct x9_hevc_hdr_sequence *prospective, CMVideoFormatDescriptionRef *replacements)
+{
+    /* Late CLLI is CLVS-wide (D.3.35), unlike arbitrary later picture metadata.
+     * Allocate immutable replacements for ORIGINAL tokens in the same CLVS.
+     * Preserve each token's non-HDR extensions and agreeing container HDR;
+     * never touch another CLVS or any borrowed/emitted pixel. Neither state
+     * nor pending changes before SUBMIT. */
+    if (prospective->clvs != s->hdr_sequence.clvs || s->hdr_sequence.hdr.light_present ||
+        !prospective->hdr.light_present) return noErr;
+    for (unsigned i = 0; i < s->pending_count; i++) {
+        if (s->pending[i].hdr_clvs != prospective->clvs) continue;
+        OSStatus e = x9_hevc_copy_hdr_description(s->pending[i].description,
+            &prospective->hdr,&replacements[i]);
+        if (e) return e; /* caller frees the whole unpublished plan */
+    }
+    return noErr;
+}
 static struct pending_frame pending_take(struct state *s, unsigned i)
 {
     struct pending_frame f = s->pending[i];
@@ -49,6 +86,7 @@ static void video_fault(struct state *s, OSStatus error)
     if (s->fd >= 0) { close(s->fd); s->fd = -1; }
     s->native_session = 0;
     memset(&s->hdr_sequence,0,sizeof(s->hdr_sequence));
+    memset(&s->hdr_sources,0,sizeof(s->hdr_sources));
     while (s->pending_count && !s->invalid) {
         struct pending_frame f = pending_take(s, 0);
         OSStatus e = video_emit(s, &f, error, 0, NULL);
@@ -134,6 +172,7 @@ static OSStatus decode_frame(Base object, void *frame, CMSampleBufferRef sample,
     pthread_mutex_lock(&s->lock);
     uint8_t *input = NULL;
     CMVideoFormatDescriptionRef snapshot = NULL;
+    CMVideoFormatDescriptionRef replacements[X9_VDEC_MAX_PENDING] = {0};
     uint64_t token = 0;
     Boolean accepted = false;
     OSStatus e = kVTVideoDecoderBadDataErr;
@@ -166,10 +205,16 @@ static OSStatus decode_frame(Base object, void *frame, CMSampleBufferRef sample,
         (size_t)CFDataGetLength(s->hvcc),input,bytes,&metadata);
     if (!gate) gate = x9_hevc_hdr_sequence_next(&s->hdr_sequence,&metadata,&prospective);
     if (gate) { e = codec_error(gate); goto done; }
+    struct x9_hevc_hdr original_hdr;
+    struct hdr_source_history prospective_sources;
+    e = x9_hevc_read_hdr_description(description,&original_hdr);
+    if (!e) e = video_hdr_sources_next(s,&prospective,&original_hdr,&prospective_sources);
+    if (e) goto done;
     /* Allocation and cross-source conflicts are resolved BEFORE SUBMIT. No
      * accepted token can be lost due to a later metadata allocation failure.
      * Container values stay picture-local; they never become SEI state. */
     e = x9_hevc_copy_hdr_description(description,&prospective.hdr,&snapshot);
+    if (!e) e = video_hdr_prepare_pending(s,&prospective,replacements);
     if (e) goto done;
     if (s->next_token == UINT64_MAX) { e = kVTVideoDecoderNotAvailableNowErr; goto done; }
     token = ++s->next_token;
@@ -184,7 +229,14 @@ static OSStatus decode_frame(Base object, void *frame, CMSampleBufferRef sample,
         goto done; /* kernel/provider did NOT accept this current input */
     }
     s->hdr_sequence = prospective; /* provider accepted; not an ACK-as-frame */
-    s->pending[s->pending_count++] = (struct pending_frame){ .token = token, .frame = frame,
+    s->hdr_sources = prospective_sources;
+    for (unsigned i = 0; i < s->pending_count; i++) {
+        if (!replacements[i]) continue;
+        CFRelease(s->pending[i].description); s->pending[i].description = replacements[i];
+        replacements[i] = NULL;
+    }
+    s->pending[s->pending_count++] = (struct pending_frame){ .token = token,
+        .hdr_clvs = prospective.clvs, .frame = frame,
         .description = snapshot,
         .suppress = !!(flags & kVTDecodeFrame_DoNotOutputFrame) };
     snapshot = NULL; /* ownership transferred to this ORIGINAL token */
@@ -200,6 +252,8 @@ static OSStatus decode_frame(Base object, void *frame, CMSampleBufferRef sample,
     }
 done:
     if (snapshot) CFRelease(snapshot);
+    for (unsigned i = 0; i < X9_VDEC_MAX_PENDING; i++)
+        if (replacements[i]) CFRelease(replacements[i]);
     free(input);
     pthread_mutex_unlock(&s->lock);
     CFRelease(object);
