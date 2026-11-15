@@ -140,7 +140,10 @@ int x9_camera_native_smmu_start(uint64_t token,uint64_t iova,uint32_t bytes,
     e=x9_camera_smmu_export(m,view);
     /* Addresses permanently escaped even when export's cache work fails. */
     if(m->exported)*out=m;
-    if(e)return e;
+    if(e) {
+        if(!m->exported)(void)x9_camera_smmu_discard(&m);
+        return e;
+    }
     lck_mtx_lock(&camera_smmu_lock);
     e=cam_native_match(m,&entry);
     if(!e)e=cam_native_write32(m,&entry,CAM_N_CR1,m->view.cr1);
