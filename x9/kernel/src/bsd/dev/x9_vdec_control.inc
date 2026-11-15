@@ -207,7 +207,8 @@ static int vcontrol_recheck(struct x9_vdec_control *c, uint64_t end)
          * The captured publisher stores write-index and count separately;
          * identical samples taken between those stores are still transient.
          * Retain pending and the notification, without repairing metadata or
-         * claiming a completion. Out-of-range/full metadata still fails. */
+         * claiming a completion. Out-of-range/invalid FB full still fails;
+         * the separately counted BS ring may legitimately contain64. */
         if (e == EINVAL) e = EAGAIN;
     }
     if (!e) {
@@ -235,6 +236,16 @@ static int vcontrol_notification(void *cookie, uint64_t epoch, uint64_t end,
     /* During INIT there is no bound VSI yet: retain the actual event until
      * a subsequent reverse notification or reserved START preparation. */
     return c->status.bound ? vcontrol_recheck(c,end) : 0;
+}
+/* Native observer, not a synthetic notification or a completion callback.
+ * c->lock and the physical bus reservation remain held by service(). */
+static int vcontrol_service_recheck(void *cookie, uint64_t epoch, uint64_t end)
+{
+    struct x9_vdec_control *c = cookie;
+    int e = epoch == c->status.epoch && c->status.bound ? 0 : ESTALE;
+    if (!e) e = vmem_deadline(end);
+    if (!e && c->status.recheck_pending) e = vcontrol_recheck(c,end);
+    return e;
 }
 static int vcontrol_prepare_start(void *cookie, uint64_t epoch, uint64_t end,
     const struct x9_vcp_init *init, const struct x9_vcp_init_result *result,
@@ -378,6 +389,7 @@ int x9_vdec_control_create(struct x9_vcp_bus *bus, struct x9_vdec_shared *s,
     c->reverse = (struct x9_vcp_bus_reverse_ops){ .cookie = c,
         .shm = vcontrol_shm, .alloc = vcontrol_alloc, .clock = vcontrol_clock,
         .wait = vcontrol_wait, .vp = vcontrol_vp, .notification = vcontrol_notification,
+        .recheck = vcontrol_service_recheck,
         .prepare_output = vcontrol_prepare_output };
     if (hardware->qualify_start) c->reverse.prepare_start = vcontrol_prepare_start;
     lck_mtx_init(&c->lock,&vdec_group,LCK_ATTR_NULL);
@@ -529,6 +541,31 @@ int x9_vdec_control_decode_start(struct x9_vdec_control *c, const uint8_t *annex
         c->input_source = NULL; /* never retained after return, including error */
         c->status.start = *out; c->status.start_replied = log->ack_matched;
         vcontrol_fault(c,e);
+    }
+    lck_mtx_unlock(&c->lock);
+    return e;
+}
+int x9_vdec_control_service(struct x9_vdec_control *c, uint32_t ms,
+    struct x9_vcp_bus_call_log *log)
+{
+    int e;
+    if (!c || c->magic != VCONTROL_MAGIC || !log) return EINVAL;
+    memset(log,0,sizeof(*log));
+    if (!ms || ms > 3000) return EINVAL;
+    lck_mtx_lock(&c->lock);
+    e = c->closing || !c->status.bound || !c->status.slot_initialized ? EBUSY :
+        (int)c->status.last_errno;
+    if (!e && (c->status.service_batches == UINT64_MAX ||
+        c->status.service_packets > UINT64_MAX-64)) e = EOVERFLOW;
+    if (!e) {
+        e = x9_vcp_bus_service(c->bus,&c->init,&c->status.init,&c->reverse,64,ms,log);
+        /* epoch is set only after actual bus reservation. Pre-reservation
+         * contention does not latch a fault or claim a serviced batch. */
+        if (log->epoch) {
+            c->status.service_batches++;
+            c->status.service_packets += log->received;
+            vcontrol_fault(c,e);
+        } else if (e != EBUSY) vcontrol_fault(c,e);
     }
     lck_mtx_unlock(&c->lock);
     return e;

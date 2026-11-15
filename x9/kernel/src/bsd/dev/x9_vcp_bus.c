@@ -898,3 +898,73 @@ int x9_vcp_bus_register_output(struct x9_vcp_bus *b, const struct x9_vcp_init *i
     }
     return call_end(b,log,end,e,false);
 }
+int x9_vcp_bus_service(struct x9_vcp_bus *b, const struct x9_vcp_init *init,
+    const struct x9_vcp_init_result *initialized,
+    const struct x9_vcp_bus_reverse_ops *ops, uint32_t max_packets, uint32_t ms,
+    struct x9_vcp_bus_call_log *log)
+{
+    struct x9_vcp_init i;
+    struct x9_vcp_init_result ready;
+    struct x9_vcp_bus_reverse_ops handlers;
+    uint8_t reply[X9_VCP_WIRE_BYTES];
+    uint64_t end = 0;
+    bool service_ready = false;
+    int e;
+    if (!init || !initialized || !ops || !log) return EINVAL;
+    i = *init; ready = *initialized; handlers = *ops;
+    memset(log,0,sizeof(*log));
+    e = deadline(ms,&end);
+    if (!e && (!max_packets || max_packets > 64 || !handlers.notification ||
+        i.service_id != X9_VCP_VDEC_SERVICE || !i.instance_token ||
+        i.instance_token == UINT64_MAX || ready.firmware_status ||
+        !ready.firmware_vsi_address)) e = EINVAL;
+    /* Validate the retained identity using the normal encoder, WITHOUT
+     * sending INIT again or manufacturing a new outstanding control ACK. */
+    if (!e) e = x9_vcp_encode_init(&i,reply);
+    if (e) { log->last_errno = (uint32_t)e; return e; }
+    e = call_begin(b,log,&service_ready);
+    if (e) { log->last_errno = (uint32_t)e; return e; }
+    e = call_check(b,log,end);
+    if (!e && !service_ready) e = ENXIO;
+    while (!e && log->received < max_packets) {
+        e = call_check(b,log,end);
+        if (e) break;
+        /* Backpressure must not starve an already-owned reverse packet.
+         * Poll only when software RX is empty; there is no idle spin loop. */
+        e = receive_for(b,log->last_rx,log);
+        if (e == EAGAIN) {
+            e = poll_for(b,log);
+            if (e == ENOSPC) e = 0;
+            if (!e) e = receive_for(b,log->last_rx,log);
+            if (e == EAGAIN) {
+                log->queue_empty_observed = 1; e = 0; break;
+            }
+        }
+        if (e) break;
+        log->received++;
+        e = call_check(b,log,end);
+        if (e) break;
+        if (get32(log->last_rx+8) == X9_VCP_FRAME_BUFFER_DONE ||
+            get32(log->last_rx+8) == X9_VCP_OUTPUT_ASYNC) {
+            struct x9_vcp_output_notification n;
+            e = x9_vcp_parse_output_notification(&i,log->last_rx,X9_VCP_WIRE_BYTES,&n);
+            if (!e) e = handlers.notification(handlers.cookie,log->epoch,end,&n);
+            if (!e && n.firmware_status) e = EIO;
+            if (!e) e = call_check(b,log,end);
+            if (!e) log->notifications++;
+            /* Both are one-way. In particular b005 has no buffer token. */
+        } else {
+            e = reverse_reply(&i,&handlers,log->epoch,end,log->last_rx,reply,false);
+            if (!e) e = call_check(b,log,end);
+            if (!e) e = send_until(b,reply,end,log);
+            if (!e) log->reverse_replies++;
+        }
+    }
+    if (!e && log->received == max_packets) log->batch_limit_reached = 1;
+    if (!e && handlers.recheck) {
+        e = call_check(b,log,end);
+        if (!e) e = handlers.recheck(handlers.cookie,log->epoch,end);
+        if (!e) e = call_check(b,log,end);
+    }
+    return call_end(b,log,end,e,false);
+}

@@ -162,6 +162,13 @@ struct x9_vcp_bus_reverse_ops {
      */
     int (*notification)(void *, uint64_t epoch, uint64_t deadline_ns,
         const struct x9_vcp_output_notification *);
+    /* Optional thread-context observation at the END of an async service
+     * batch, still under its whole-call reservation. Retry retained transient
+     * ring observations even when no further notification arrives. Must not
+     * fabricate an event, reenter the bus, consume rings without independently
+     * proven producer exclusion, or equate quiet transport with DMA retirement.
+     * A pending observation may remain pending on return0. */
+    int (*recheck)(void *, uint64_t epoch, uint64_t deadline_ns);
     int (*shm)(void *, uint64_t epoch, uint64_t deadline_ns,
         const struct x9_vcp_shm_request *, struct x9_vcp_shm_mapping *);
     int (*alloc)(void *, uint64_t epoch, uint64_t deadline_ns,
@@ -178,6 +185,7 @@ struct x9_vcp_bus_call_log {
     uint32_t request_attempted, received, reverse_replies, ack_matched;
     uint32_t last_errno;
     uint32_t prepare_attempted, prepared, notifications;
+    uint32_t queue_empty_observed, batch_limit_reached; /* async batch ONLY */
     uint8_t last_rx[X9_VCP_WIRE_BYTES]; /* owned copy, including a rejected packet */
 };
 /* Results/log are disjoint writable host storage, retained by caller on error.
@@ -222,5 +230,24 @@ int x9_vcp_bus_register_output(struct x9_vcp_bus *, const struct x9_vcp_init *,
     const struct x9_vcp_init_result *, const struct x9_vcp_bus_reverse_ops *,
     uint32_t timeout_ms, struct x9_vcp_output_notification *,
     struct x9_vcp_bus_call_log *);
+/* Bounded thread-context async pump for an ALREADY initialized live instance.
+ * Reserve OUT0/IN1/lifetime exactly as a control call; drain owned RX before
+ * one physical poll and service b005/e000 or actual reverse requests with the
+ * SAME parsers/callbacks/replies. No new a001/a005, unsolicited SHM bootstrap,
+ * retransmission or control-ACK acceptance. Stale ACK/unknown instance/message
+ * fails closed, retaining last_rx and quarantining rather than dropping it.
+ * max_packets is1..64; timeout_ms is1..3000 and bounds the WHOLE batch including
+ * real WAITISR/clock/allocator callbacks and replies. No waiting for new input
+ * when both software queue and one physical poll are empty: this is successful
+ * idle, not a transport timeout. At the packet limit, unprocessed software or
+ * latched physical RX stays owned for the next batch; no blind clear.
+ * Optional recheck executes under the reservation even on an empty batch.
+ * A return0/log is NOT codec completion, buffer acceptance, producer exclusion,
+ * pixels or release; repeated scheduling belongs to the native session owner,
+ * not an automatic worker or missing platform/provider success stub.
+ * Results/log are stable resident disjoint host storage, retained on error. */
+int x9_vcp_bus_service(struct x9_vcp_bus *, const struct x9_vcp_init *,
+    const struct x9_vcp_init_result *, const struct x9_vcp_bus_reverse_ops *,
+    uint32_t max_packets, uint32_t timeout_ms, struct x9_vcp_bus_call_log *);
 #endif
 #endif

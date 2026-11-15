@@ -49,6 +49,7 @@ struct x9_vdec_control_status {
     uint32_t output_attempted, output_prepared, output_notified;
     uint32_t input_attempted, input_prepared;
     uint32_t slot_initialized, vsi_attempted, vsi_staged;
+    uint64_t service_batches, service_packets;
     struct x9_vdec_control_start_resources resources; /* not a completed frame */
     struct x9_vcp_output_record output; /* DEVICE extents, NOT pixel layout */
     struct x9_vcp_init_result init;
@@ -109,6 +110,17 @@ int x9_vdec_control_decode_start(struct x9_vdec_control *, const uint8_t *annexb
     uint32_t bytes_used, uint32_t buffer_bytes, uint32_t flags,
     uint64_t timestamp, uint32_t dynamic_low_latency, uint32_t timeout_ms,
     struct x9_vcp_start_result *, struct x9_vcp_bus_call_log *);
+/* Thread-context service for this bound live instance, including after b001.
+ * Uses native SHM/alloc/VP/notification handlers and the actual hardware
+ * clock/wait callbacks, under control_lock and the bus whole-call reservation.
+ * One batch drains up to64 packets; caller schedules subsequent batches.
+ * Empty RX succeeds immediately. A retained transient ring observation is
+ * rechecked even with no new event, not discarded/synthesized as completion.
+ * Timeout/protocol/callback failures retain journals/resources and poison this
+ * instance. EBUSY before bus reservation does NOT poison a pending decode.
+ * No new START, shared ring consumption, per-buffer retirement or READY. */
+int x9_vdec_control_service(struct x9_vdec_control *, uint32_t timeout_ms,
+    struct x9_vcp_bus_call_log *);
 int x9_vdec_control_get_status(struct x9_vdec_control *, struct x9_vdec_control_status *);
 /* After any INIT attempt, only physically STOPPED bus + both genuinely RETIRED
  * domains may drop this binding. DEINIT/c006/b001 are not retirement proofs.
