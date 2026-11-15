@@ -15,7 +15,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / 'x9/out/call-ios-bridge/host-tests'
 CASES = (
-    'codec_golden', 'codec_invalid', 'action_codec', 'request_whitelist',
+    'codec_golden', 'codec_invalid', 'incoming_routes', 'action_codec', 'request_whitelist',
     'no_auto_policy', 'command_roundtrip', 'failure_retained',
     'duplicate_pending', 'changed_duplicate', 'duplicate_replied',
     'overflow_isolated', 'bounded_tombstones', 'fifo', 'fragmented',
@@ -24,6 +24,7 @@ CASES = (
     'dial_roundtrip', 'dial_tx_failure', 'dial_cnf_invalid',
     'progress_framing', 'outbound_states', 'current_arrays', 'status_fence',
     'dial_join_order', 'ios_join', 'ios_timeout', 'ios_deleted', 'dial_presend_fence',
+    'incoming_states', 'incoming_state_invalid', 'incoming_observer',
 )
 
 

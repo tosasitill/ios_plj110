@@ -450,13 +450,22 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 #### 2026-11-15 真实来电立即保全 / 路由修复（本轮进行中）
 
-- **用户最新目标**：补齐内核与 iOS 通话/短信，最后交付修复镜像；仍按 Android 实测，不盲测、不猜字段，不要求再补来电。功能树 `.worktrees/call-incoming-routing` / `fix/call-incoming-routing`，起点 main `e974321`；其他 audio/GPU/BT worktree 独立，未覆盖其改动。
+- **用户最新目标**：补齐内核与 iOS 通话/短信，最后交付修复镜像；仍按 Android 实测，不盲测、不猜字段，不要求再补来电。功能树（已清理） `.worktrees/call-incoming-routing` / `fix/call-incoming-routing`，起点 main `e974321`；其他 audio/GPU/BT worktree 独立，未覆盖其改动。
 - **采集观察**：刚发生真实呼入已立即只读抓 retained-all，再有界 live，19:29:52 停止本地 recorder；所有读操作exit0，不清日志/改property/重启RIL/设备reboot/flash/写分区。完整私有材料 **主checkout `x9/out/android-incoming-20261115-192820/`**：all 4312351B、radio 1142226B、live 1074421B，另有telephony/telecom/audio/audio_flinger/audio_policy/dmesg/maps、45条CALL frame metadata和201行语音窗口。all保住开头，radio开头已滚出，不以radio缺失否定all。
 - **关键冲突已解释**：完整8901 mask22/tx2a9a/72B → Android8902 mask02/同tx/40B，approve1/id1/seq100。此前“整字节单bit / 原mask响应”会拒绝此真实CMD。已追RIL `obtainMipcCmd19f978..980` → `mipcSlotIdChangeToSlotId1ada10`（低4位、表129c50）→ incoming handler传slot/tx → `requestSetCallIndication382458..47c` → `obtainMipcData1c0814..824` → `slotIdChangeToMipcSlotId1ad9e0`（slot1映射2，表129c44）。**因此mask低位转换有原件完整依据，不是仅据实包猜mask&0xf。**
 - **实测来电信令**：卡2，native id1，mt1：19:27:15.391 incoming8901；15.478 approve8902；15.483 ECPI0/mode20；23.258 ANSWER0907{}；23.263 ECPI132；23.269 6→6与0908/result0；31.338 HANGUP0905{mode0,id1}；31.357 ECPI133+0906；31.390 090f{} →31.399 0910/cause16。**4901仍只有486B、声明528/536B，号码也遮盖，不能补零/造完整wire；未证明双向音频。**
-- **已改、编译通过**：incoming codec保留原mask，新增sim/response_mask；按同版RIL低1/2选本机slot，RSP用低1/2保留txid，拒绝高-only/非法低位/fanout/SIM3/4，不使用Android fallback误选卡1。owner原CMD身份和SMS ACK优先不变，尚不自动approve、不发布VOICE09。人工回归源码更新golden并新增route项，按规则只编译、不运行套件。反汇编/table解码保存在功能树 `x9/out/call-routing-analysis/`（不入git）。
-- **本轮编译**：真实recipe `Builder.compile_one()` 的 `sweet_x9_gpu_dependencies.o` 和 `X9Baseband.cpp.o` 均True/exit0；host `clang++ -c` exit0；C11 header `-fsyntax-only -Wall -Wextra -Werror` exit0。日志在功能树 `x9/out/call-routing-compile/`。人工项源码合计34项含服务表守卫，未执行；没有full link/boot pack/CI/设备操作。
+- **已改、编译通过**：incoming codec保留原mask，新增sim/response_mask；按同版RIL低1/2选本机slot，RSP用低1/2保留txid，拒绝高-only/非法低位/fanout/SIM3/4，不使用Android fallback误选卡1。owner原CMD身份和SMS ACK优先不变，尚不自动approve、不发布VOICE09。人工回归源码更新golden并新增route项，按规则只编译、不运行套件。反汇编/table解码已移至主checkout `x9/out/call-routing-analysis/`（不入git）。
+- **本轮编译**：真实recipe `Builder.compile_one()` 的 `sweet_x9_gpu_dependencies.o` 和 `X9Baseband.cpp.o` 均True/exit0；host `clang++ -c` exit0；C11 header `-fsyntax-only -Wall -Wextra -Werror` exit0。日志已移至主checkout `x9/out/call-routing-compile/`。人工项源码合计34项含服务表守卫，未执行；没有full link/boot pack/CI/设备操作。
 - **剩余/镜像边界**：初始化、完整运行profile、生产DIAL/ACTION、七字节CallList其余字段与MT状态、MD/SCP语音路由和短信完整验收未闭合；VOICE仍关闭，尚无本轮最终镜像/CI/run ID/上机结果，不能把编译子集称修好通话短信。
+
+#### 2026-11-15 来电 native state / iOS observer 补齐（本轮，未发布服务）
+
+- 路由修复 **`c570c4d` 已push功能分支、ff合main并push origin/main**；routing树/本地分支已删；上轮已合入的outbound树/本地分支也已清理，原件/分析/编译产物均在主checkout保留。新 `feat/call-mt-state` / `.worktrees/call-mt-state` 基于 `c570c4d`，未改audio/GPU/BT树。
+- **新增依据**：同版RIL `2686ec..268784` 用完整8901 native ID加入IMS对象；`269884..269898` ECPI0根据其它active记录设incoming5或waiting6；实测本次incoming5（无多通话推广），后续 `269474..26947c` / `269910..269918` 设active3，`2695e0..2695f8` 设end8/remove。Apple事件表已解出INCOMING2/CONVERSATION3/END9，仍不直接混用RIL枚举。
+- **实现**：独立 `x9cw_inbound_state` / begin/apply/id + MD锁内snapshot API + iOS observer。完整8901只建立pending ID/seq/tx/route，不能当接听/许可/显示；完整ECPI0才进入incoming2，132/6为conversation3，133为end9。只支持实测卡2/mode20/evoltesi0/direction1；重复outstanding CMD先去重，迟到0/132/6/133不复活END，未知ID/状态、多MT/同seq重用fail-closed；u32 ID越界不截断，不推断全局count。**MT独立epoch，不会完成MO DIAL join；MO仍blocked，尚无生产action/profile/CallList发布。**
+- **编译**：真实recipe两对象 `sweet_x9_gpu_dependencies.o`、`X9Baseband.cpp.o` 均True/exit0；host第一次因漏include initializer_list失败，补头后 `clang++ -c` exit0；C11共享state header `-fsyntax-only -Wall -Wextra -Werror` exit0。日志在功能树 `x9/out/call-mt-compile/`，失败原日志保留。新增3项MT人工源码、补Python runner注册route项，合计37项含未发布服务守卫，**未运行任何套件**。
+- **语音下一最早缺口（静态观察，不是完成）**：实测Android audio HAL原件为采集目录 `files/vendor/lib64/hw/audio.primary.mediatek.so`，不是不存在的audio.primary.mt6993.so。`SpeechDriverOpenDSP::ScpSpeechOn2474a0` 的 `247530..568` 先注册ADSP feature14、scene0 DMA回调/UL-DL各65536B，然后Aurisys构建；`247688..2476bc` 调 `AudioMessengerIPI` vtable+10发scene0/type0/ack1/idAD20、时间+on的param1与实际modem index的param2。同版 `AudioMessengerIPI::sendIpiMsg1dce80` 已定位；OPPO audio_speech_msg_id.h解释AD20/SPH_ON和MD→DSP3D00/CALL_DATA_READY。**现有媒体播放/录音通路不是这条voice任务/DMA/MD握手，不能照抄48kHz就宣称双向声音。** 原件派生asm保存在功能树 `x9/out/call-mt-analysis/`，不入git；本次呼入buffer没有额外完整SpeechDriver verbose，不以其缺失否定旧拨出audio证据。
+- **尚未交付最终镜像**：VOICE09未宣布，bootstrap/Bind44/IND注册、完整CallList/生产DIAL-ACTION生命周期、voice DMA/MD握手、短信MT显示/持久化/物理ACK/对端MO验收未完成；短信源码本轮未改。本轮没有新boot.img/CI run/设备拨号或刷写。下一步应从voice任务0的配置/DMA/3D00握手和Apple bootstrap消费者继续，不再要求重复来电，不给“通话已修好”镜像标签。
 
 ### 5.7 2026-11-13 音频：ADSP 自动 dsp-boot 镜像（分支 feat/audio-dsp-boot，worktree `.worktrees/audio-dsp-boot`）
 

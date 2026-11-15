@@ -54,6 +54,11 @@ int x9_md_mipc_call_event(uint8_t *frame, uint32_t capacity, uint32_t *length, u
  * Returns1 copied, -1 unavailable; zero-initialized state means UNKNOWN. */
 struct x9cw_outbound_state;
 int x9_md_mipc_call_snapshot(struct x9cw_outbound_state *state);
+/* Independent MT observation: complete incoming CMD identity plus complete
+ * ECPI0/132/6/133. Never used to complete DIAL or to infer single-call count.
+ * This API observes only; no approval/answer/registration is started. */
+struct x9cw_inbound_state;
+int x9_md_mipc_call_incoming_snapshot(struct x9cw_inbound_state *state);
 /* Atomic outbound admission against a previously copied native baseline.
  * Same unique writer/token allocator, but checks the epoch/revision/count
  * again under the MD lock and at writer selection. One guarded staging

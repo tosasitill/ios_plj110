@@ -20,7 +20,9 @@ struct x9c_dial_job {
 };
 static x9c_dial_job x9c_dial_job;
 static struct x9cw_outbound_state x9c_outbound;
+static struct x9cw_inbound_state x9c_inbound;
 static bool x9c_observed;
+static bool x9c_incoming_observed;
 static bool x9c_live(const struct x9c_dial_job &j){
  return j.slot<CBQ_MAX_CLIENTS&&x9q_clients[j.slot].generation==j.generation&&x9q_clients[j.slot].sim_slot==j.sim;
 }
@@ -67,6 +69,7 @@ static void x9c_poll(){
   bzero(frame,sizeof(frame));
  }
  x9c_observed=x9_md_mipc_call_snapshot(&x9c_outbound)==1;
+ x9c_incoming_observed=x9_md_mipc_call_incoming_snapshot(&x9c_inbound)==1;
  struct x9c_dial_job &j=x9c_dial_job;if(!j.used)return;
  if(!x9c_live(j)){j.answered=true;bzero(j.req,sizeof(j.req));}
  if(j.token){

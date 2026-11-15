@@ -1,6 +1,6 @@
 /* PLJ110 outbound state provider. Full MD frames only, never logger prefixes.
  * RIL 37ca80 -> 268db0: 109 is ECPI, NOT RIL_CallState. Apple 1939f8c
- * names the corresponding CallEventStatus values. No incoming/audio policy.
+ * names the corresponding CallEventStatus values. No approval/audio policy.
  * State is scoped to the observed low-bit SIM2 IND route, not CMD masks.
  * Kept freestanding so the transport and iOS owner share one implementation. */
 #ifndef X9_CALL_STATE_H
@@ -91,6 +91,66 @@ static inline int x9cw_outbound_apply(struct x9cw_outbound_state *s,
 }
 static inline int x9cw_outbound_id(const struct x9cw_outbound_state *s,unsigned *id){
  if(!s||!id||s->blocked||!s->seen||s->ended||!s->native_id||s->native_id>255)return 0;
+ *id=(unsigned)s->native_id;return 1;
+}
+
+/* Incoming identity is provided by the complete CMD, not by ANSWER_CNF.
+ * Actual SIM2 capture: CMD22/id1/seq100/mode20 -> ECPI0/direction1 ->
+ * 132/6 ->133. RIL2686ec..268784 adopts the CMD's real id for IMS;
+ * 269910..269918 sets ACTIVE3, 2695e0..2695f8 sets END8/removes.
+ * Apple1939f8c names INCOMING2/CONVERSATION3/END9. CMD alone is a
+ * pending identity, NOT an iOS incoming state, an approval, or an answer.
+ * Keep this independent of the MO join so an MT can never complete DIAL.
+ * No global call count or permission to target empty ANSWER is inferred. */
+struct x9cw_inbound_state {
+ uint64_t epoch,revision;
+ uint32_t native_id,sequence,event,flags,mode,cause;
+ unsigned pending,seen,ended,blocked,ios_state,has_cause;
+ uint16_t txid;uint8_t mask,response_mask,sim;
+};
+static inline int x9cw_inbound_begin(struct x9cw_inbound_state *s,
+                                    const struct x9cw_incoming *c){
+ if(!s||!c||s->blocked||!c->call_id)return -1;
+ /* Only the observed ordinary SIM2 IMS mode20 subset; route codec can
+  * decode SIM1 without asserting its state/voice profile here. */
+ if(c->sim!=1)return 0;
+ if(c->mode!=20||c->evoltesi_flow||s->pending||(s->seen&&!s->ended)||
+    (s->seen&&s->sequence==c->sequence)||s->revision==UINT64_MAX){s->blocked=1;return -1;}
+ s->native_id=c->call_id;s->sequence=c->sequence;s->txid=c->txid;
+ s->mask=c->mask;s->response_mask=c->response_mask;s->sim=c->sim;
+ s->pending=1;s->seen=s->ended=s->ios_state=s->has_cause=0;
+ s->event=s->flags=s->cause=0;s->mode=c->mode;s->revision++;return 1;
+}
+static inline int x9cw_inbound_apply(struct x9cw_inbound_state *s,
+                                    const struct x9cw_progress *c){
+ if(!s||!c||s->blocked||!c->id)return -1;
+ if(c->mask!=2||c->direction!=1)return 0;
+ if(c->mode!=20||s->native_id!=c->id||(!s->pending&&!s->seen)){s->blocked=1;return -1;}
+ if(s->ended){
+  /* Late progress never creates a new epoch or resurrects an ended id. */
+  if(c->event==0||c->event==132||c->event==6||c->event==133)return 0;
+  s->blocked=1;return -1;
+ }
+ if(c->event==0){
+  if(s->seen){
+   if(s->ios_state==2)return 0;
+   s->blocked=1;return -1; /* do not regress ACTIVE to INCOMING */
+  }
+  if(!s->pending||s->epoch==UINT64_MAX){s->blocked=1;return -1;}
+  s->epoch++;s->pending=0;s->seen=1;s->ios_state=2;
+ }else if(c->event==133){
+  if(!s->seen){s->blocked=1;return -1;} /* unobserved pre-ECPI0 cancellation */
+  s->pending=0;s->seen=1;s->ended=1;s->ios_state=9;
+ }else if(c->event==132||c->event==6){
+  if(!s->seen){s->blocked=1;return -1;}
+  s->ios_state=3;
+ }else{s->blocked=1;return -1;}
+ if(s->revision==UINT64_MAX){s->blocked=1;return -1;}
+ s->revision++;s->event=c->event;s->flags=c->flags;
+ s->has_cause=c->has_cause;s->cause=c->cause;return 1;
+}
+static inline int x9cw_inbound_id(const struct x9cw_inbound_state *s,unsigned *id){
+ if(!s||!id||s->blocked||s->pending||!s->seen||s->ended||!s->native_id||s->native_id>255)return 0;
  *id=(unsigned)s->native_id;return 1;
 }
 

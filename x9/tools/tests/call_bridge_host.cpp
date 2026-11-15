@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <initializer_list>
 #include <strings.h>
 #include "../../kernel/src/bsd/dev/x9_modem_bridge.h"
 static int lock_depth;
@@ -448,6 +449,56 @@ static void dial_presend_fence(){
  assert(x9_md_mipc_take(t,out,sizeof(out),&k)==-3&&!k);
  assert(x9_md_mipc_take(t,out,sizeof(out),&k)==-1&&x9_mc_dial_token==t);
 }
+static void incoming_states(){
+ uint8_t p[64];incoming(p);struct x9cw_incoming c;
+ assert(x9cw_incoming(p,64,&c));struct x9cw_inbound_state s={};unsigned id;
+ assert(x9cw_inbound_begin(&s,&c)==1&&s.pending&&!s.seen&&!s.ios_state&&!s.epoch);
+ assert(!x9cw_inbound_id(&s,&id));
+ struct x9cw_progress e={};e.id=c.call_id;e.direction=1;e.mode=20;e.mask=2;e.event=0;
+ assert(x9cw_inbound_apply(&s,&e)==1&&s.seen&&!s.pending&&s.ios_state==2&&s.epoch==1);
+ assert(!x9cw_inbound_id(&s,&id)); // real u32 id cannot be truncated to Apple u8
+ s.native_id=e.id=7;assert(x9cw_inbound_id(&s,&id)&&id==7);
+ uint64_t rev=s.revision;assert(x9cw_inbound_apply(&s,&e)==0&&s.revision==rev);
+ e.event=132;assert(x9cw_inbound_apply(&s,&e)==1&&s.ios_state==3);
+ e.event=6;assert(x9cw_inbound_apply(&s,&e)==1&&s.ios_state==3);
+ assert(x9cw_inbound_apply(&s,&e)==1&&s.ios_state==3);
+ e.event=133;e.has_cause=1;e.cause=16;
+ assert(x9cw_inbound_apply(&s,&e)==1&&s.ended&&s.ios_state==9&&s.cause==16);
+ assert(!x9cw_inbound_id(&s,&id));rev=s.revision;
+ for(unsigned evt:{0u,132u,6u,133u}){e.event=evt;assert(x9cw_inbound_apply(&s,&e)==0&&s.revision==rev&&s.ended);}
+ c.sequence++;c.call_id=8;
+ assert(x9cw_inbound_begin(&s,&c)==1&&s.pending&&!s.seen&&s.epoch==1);
+ e.id=8;e.event=0;assert(x9cw_inbound_apply(&s,&e)==1&&s.epoch==2&&s.ios_state==2);
+}
+static void incoming_state_invalid(){
+ uint8_t p[64];incoming(p);struct x9cw_incoming c;assert(x9cw_incoming(p,64,&c));
+ struct x9cw_inbound_state s={};struct x9cw_progress e={};
+ e.id=c.call_id;e.direction=1;e.mode=20;e.mask=2;e.event=0;
+ assert(x9cw_inbound_apply(&s,&e)<0&&s.blocked); // no complete CMD identity
+ s={};assert(x9cw_inbound_begin(&s,&c)==1);e.event=132;
+ assert(x9cw_inbound_apply(&s,&e)<0&&s.blocked); // no observed INCOMING transition
+ s={};assert(x9cw_inbound_begin(&s,&c)==1);e.event=0;e.id++;
+ assert(x9cw_inbound_apply(&s,&e)<0&&s.blocked);e.id--;
+ s={};assert(x9cw_inbound_begin(&s,&c)==1);assert(x9cw_inbound_begin(&s,&c)<0&&s.blocked);
+ s={};c.mode=22;assert(x9cw_inbound_begin(&s,&c)<0&&s.blocked);c.mode=20;
+ s={};c.sim=0;assert(x9cw_inbound_begin(&s,&c)==0&&!s.pending&&!s.blocked);c.sim=1;
+ s={};assert(x9cw_inbound_begin(&s,&c)==1);assert(x9cw_inbound_apply(&s,&e)==1);
+ e.event=132;assert(x9cw_inbound_apply(&s,&e)==1);e.event=0;
+ assert(x9cw_inbound_apply(&s,&e)<0&&s.blocked); // no active -> incoming regression
+ s={};s.revision=UINT64_MAX;assert(x9cw_inbound_begin(&s,&c)<0&&s.blocked);
+}
+static void incoming_observer(){
+ uint8_t p[512];incoming(p);x9cw_scalar(p+16,0x100,7,4);x9mi_rx(p,64);x9mi_rx(p,64);
+ assert(x9_mc_inbound.pending&&x9_mc_next==1&&!x9_mc_inbound.blocked&&!writes);
+ struct x9cw_inbound_state s;assert(x9_md_mipc_call_incoming_snapshot(&s)==1&&s.pending);
+ for(unsigned evt:{0u,132u,6u,6u,133u}){
+  unsigned n=progress_frame(p,evt,7,20);x9cw_scalar(p+24,0x101,1,4);x9mi_rx(p,n);x9c_poll();
+  assert(x9c_incoming_observed&&x9c_inbound.native_id==7&&!x9c_inbound.blocked);
+ }
+ assert(x9c_inbound.ended&&x9c_inbound.ios_state==9&&x9c_inbound.epoch==1);
+ assert(!x9_mc_outbound.seen&&x9_mc_outbound.blocked&&!x9_mc_outbound.count_known);
+ x9mi_tick();assert(!writes&&!qmi_replies); // no auto-approval, answer or publication
+}
 int main(int argc,char **argv){
  assert(argc==2);x9mi_online(1);
  struct {const char *name;void (*run)();} cases[]={
@@ -457,6 +508,7 @@ int main(int argc,char **argv){
   {"progress_framing",progress_framing},{"outbound_states",outbound_states},{"current_arrays",current_arrays},
   {"status_fence",status_fence},{"dial_join_order",dial_join_order},{"ios_join",ios_join},
   {"ios_timeout",ios_timeout},{"ios_deleted",ios_deleted},{"dial_presend_fence",dial_presend_fence},
+  {"incoming_states",incoming_states},{"incoming_state_invalid",incoming_state_invalid},{"incoming_observer",incoming_observer},
   {"request_whitelist",request_whitelist},{"no_auto_policy",no_auto_policy},{"command_roundtrip",command_roundtrip},
   {"failure_retained",failure_retained},{"duplicate_pending",duplicate_pending},{"changed_duplicate",changed_duplicate},
   {"duplicate_replied",duplicate_replied},{"overflow_isolated",overflow_isolated},{"bounded_tombstones",bounded_tombstones},

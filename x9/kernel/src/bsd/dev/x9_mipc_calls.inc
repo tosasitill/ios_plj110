@@ -16,6 +16,7 @@ static struct x9_mc_slot x9_mc_slots[X9_MC_SLOTS];
 static uint32_t x9_mc_next;
 static unsigned x9_mc_poisoned;
 static struct x9cw_outbound_state x9_mc_outbound;
+static struct x9cw_inbound_state x9_mc_inbound;
 /* A guarded staging attempt is retained for this boot, even after CNF.
  * No production release/second-call lifecycle has been admitted yet. */
 static uint64_t x9_mc_dial_token;
@@ -42,6 +43,12 @@ int x9_md_mipc_call_snapshot(struct x9cw_outbound_state *out){
  if(!x9_mc_poisoned&&!x9_mi_poisoned&&x9_mi_online){*out=x9_mc_outbound;rc=1;}
  lck_mtx_unlock(&x9_mi_lock);return rc;
 }
+int x9_md_mipc_call_incoming_snapshot(struct x9cw_inbound_state *out){
+ if(!out)return -1;
+ bzero(out,sizeof(*out));int rc=-1;lck_mtx_lock(&x9_mi_lock);
+ if(!x9_mc_poisoned&&!x9_mi_poisoned&&x9_mi_online){*out=x9_mc_inbound;rc=1;}
+ lck_mtx_unlock(&x9_mi_lock);return rc;
+}
 static int x9mc_id(unsigned id){return id==0x8901||id==0x4901||id==0x4902||id==0x4904;}
 static void x9mc_rx(const uint8_t *p,unsigned n,unsigned id,unsigned tx){
  if(!x9mc_id(id)||x9_mc_poisoned)return;
@@ -49,7 +56,12 @@ static void x9mc_rx(const uint8_t *p,unsigned n,unsigned id,unsigned tx){
  if(id==0x4901){
   struct x9cw_progress c;
   if(!x9cw_progress(p,n,&c)){x9_mc_outbound.blocked=1;x9_mc_poisoned=1;return;}
-  (void)x9cw_outbound_apply(&x9_mc_outbound,&c);
+  if(c.mask==2&&c.direction==1){
+   /* MT is not the next MO epoch; it must never complete an owned DIAL.
+    * Its real identity must already exist from the complete incoming CMD. */
+   x9_mc_outbound.count_known=0;x9_mc_outbound.blocked=1;
+   (void)x9cw_inbound_apply(&x9_mc_inbound,&c);
+  }else (void)x9cw_outbound_apply(&x9_mc_outbound,&c);
  }
  if(id==0x8901){
   /* Outside this MO-only policy. Never preserve a usable empty baseline
@@ -65,6 +77,9 @@ static void x9mc_rx(const uint8_t *p,unsigned n,unsigned id,unsigned tx){
     return; /* same outstanding CMD is not a second incoming call */
    }
   }
+  /* Capture the independent native MT lifecycle only after duplicate
+   * ownership checks. No approval or telephony publication occurs here. */
+  (void)x9cw_inbound_begin(&x9_mc_inbound,&c);
  }
  for(unsigned i=0;i<X9_MC_SLOTS;i++)if(!x9_mc_slots[i].state){
   if(x9_mc_next==0xffffffffu){x9_mc_poisoned=1;return;}

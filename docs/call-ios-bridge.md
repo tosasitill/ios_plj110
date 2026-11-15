@@ -10,7 +10,7 @@
 | Android 请求形状 | 新增本机卡2实测 `0901` 的六个 TLV；接听 `0907 {}`；挂断 `0905 {MODE100/u32=0, ID101/u32}` |
 | 拨出状态生产者 | 完整 `4901` 的真实 ID / ECPI reducer；已实现、单对象可编译；未有完整真机 wire 重放或 iOS 运行验收 |
 | 空快照与异步确认 | 完整 owned `090a` 数组解析；`0902 + 新 MO epoch` 汇合生成 VOICE20/tag10/u8；只接 staging API，没有生产 admission 调用者 |
-| 来电 CMD | `8901` 的字段、长度和唯一 tag 验证；号码只留在有界内存，不打印 |
+| 来电 CMD / 状态 | `8901` 的字段、长度和唯一 tag 验证；独立 pending ID → 完整 ECPI0/132/6/133 的 MT reducer / iOS observer；未发布 CallList |
 | 来电许可 RSP | `8902` 的正确 approve/call-id 字段；显式调用才构造，保留原 txid；按已核实 RIL slot 转换生成 RSP mask |
 | 物理 transport | 独立 call inbox / CMD owner，复用原有唯一 MD tick writer；SMS ACK 保持优先 |
 | 超时 / 重复 / 失败 | 无自动重发；重复 outstanding CMD 去重；内容变化及未知退休规则隔离 calls；不清空 mutation owner |
@@ -183,13 +183,31 @@ writer和RX均在现有MD worker，唯一物理writer不变、SMS ACK优先不�
 因此不发CallList IND、不注册CALL、不启动GET_STATUS、不发布VOICE09；新增`x9c_dial_submit`没有生产调用者。
 原SMS/IMSA流不作本轮修改，也不把短信注册当语音可用。
 
+### 2026-11-15 独立 MT state（编译完成，执行未验）
+
+新增 `x9cw_inbound_state`，不复用或推进 MO epoch：完整 `8901` 提供真实 native ID / sequence /
+原 txid、已核实 SIM 路由，只记 pending，不把“收到 CMD”当作已许可或接听。
+同 native ID 的完整 `4901` / ECPI0、direction1、mode20 才进入 Apple INCOMING2；
+132/6 → CONVERSATION3；133 → END9，迟到0/132/6/133不复活。
+只实现实测卡2、普通IMS mode20、evoltesi0；不推广 waiting、多通话、其它卡或模式。
+Apple u8 ID 必须1..255；原ID保持u32，不推断单通话count，不用MT ID完成DIAL。
+
+RIL `2686ec..268784` 从CMD建立IMS对象，`269884..269898` 为ECPI0设置incoming5/waiting6
+（取决于已存在的active记录），本次真实日志为incoming5。132/6为active3，133为end8/remove；
+对应Apple事件名来自原件`1939f8c`，不是直接复制RIL内部state编号。
+
+MD新snapshot API和iOS observer接入，仅观察，不自动approve/answer/query/注册或发布。
+单个MT中未知ID、缺ECPI0、异常回退、第二MT、同sequence重用隔离该state；未证明退休规则前不清CMD tombstone。
+本次新增3项人工MT回归源码并登记route项，只编译、不运行套件；37项包含原未发布服务守卫。
+当前仍没有生产action admission、每请求CNF与CallList发布，VOICE09保持关闭。
+
 ## 代码与生命周期
 
 - `x9/kernel/src/bsd/dev/x9_call_wire.h`：共用、freestanding C/C++ codec。
-- `x9/kernel/src/bsd/dev/x9_call_state.h`：完整progress/current parser、MO reducer与dial join。
+- `x9/kernel/src/bsd/dev/x9_call_state.h`：完整progress/current parser、独立MO/MT reducer与dial join。
 - `x9/kernel/src/bsd/dev/x9_mipc_calls.inc`：独立 call inbox、CMD response owner。
 - `x9/kernel/src/bsd/dev/x9_mipc_bridge.inc`：严格动作白名单 / RX 分发 / 单 writer 接线。
-- `x9/kernel/src/iokit/Kernel/arm/X9Calls.inc`：bounded observer + 未启用的异步staging；直接VOICE仍unsupported。
+- `x9/kernel/src/iokit/Kernel/arm/X9Calls.inc`：独立MO/MT bounded observer + 未启用的异步staging；直接VOICE仍unsupported。
 
 CMD owner 状态：收到 → 已交付 → 显式许可排队 → 物理发送 → 结果可取 → 身份 tombstone。
 成功/失败都保留 tombstone 到 boot，不为同一个原始 txid 再发响应；payload 在物理 TX 完成后清零。
