@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <initializer_list>
 #include <strings.h>
 #include "../../kernel/src/bsd/dev/x9_modem_bridge.h"
 static int lock_depth;
@@ -16,8 +17,9 @@ static int x9_at_enabled(){return 1;}
 static int sweet_x9_arg(const char *,int){return 1;}
 int x9_md_at_online(){return 1;}
 static unsigned writes;
+static void (*during_write)();
 static int x9md_tx(unsigned a,unsigned b,unsigned c,unsigned d,unsigned e,const uint8_t *,unsigned n){
- assert(!lock_depth&&a==5&&b==217&&c==0&&d==16+n&&e==0);writes++;return 0;
+ assert(!lock_depth&&a==5&&b==217&&c==0&&d==16+n&&e==0);writes++;if(during_write)during_write();return 0;
 }
 #include "../../kernel/src/bsd/dev/x9_mipc_bridge.inc"
 static const unsigned X9BB_PORT_BASE=0x2000,X9BB_NODE=1,CBQ_PORT_BASE=0x4000,CBQ_MAX_CLIENTS=8,X9Q_REQ=1024;
@@ -34,11 +36,12 @@ static x9q_view x9q_tlv(const uint8_t *p,unsigned n,unsigned tag){
   if(p[at]==tag)return {p+at+3,k};at+=3+k;}return {nullptr,0};
 }
 static unsigned replies,last_error;
+static uint8_t last_packet[1536];static unsigned last_packet_len;
 struct x9q_packet {
  uint8_t p[1536];unsigned n;bool good;uint16_t error;
  x9q_packet(const uint8_t *req,uint16_t e=0):n(14),good(true),error(e){bzero(p,sizeof(p));memcpy(p+1,req+1,4);}
  void tlv(unsigned tag,const void *v,unsigned k){assert(k<=sizeof(p)-n-3);p[n]=(uint8_t)tag;x9cw_put16(p+n+1,k);memcpy(p+n+3,v,k);n+=3+k;}
- void send(uint32_t,uint32_t,bool=false,uint16_t=0){replies++;last_error=error;}
+ void send(uint32_t,uint32_t,bool=false,uint16_t=0){replies++;last_error=error;memcpy(last_packet,p,n);last_packet_len=n;}
 };
 struct x9w_frame {
  uint8_t p[1024];unsigned n;bool good;
@@ -114,12 +117,105 @@ static void queued_control_loss(){
  stored->follow=true;stored->store_order=1;x9w_control_ready=false;x9m_poll();
  assert(!writes&&!smsc->token&&!stored->token&&x9m_init_hold&&x9m_sims[0].init_hold&&!x9m_sims[0].ready);
 }
+/* Native owner itself raises poison: same outstanding CMD identity, changed
+ * payload. No hand-set poison flag, real device bytes or test execution. */
+static void poison_sms_inbox(){
+ uint8_t p[24];x9cw_header(p,24,0x8601,1,55);x9cw_scalar(p+16,0x100,3,1);x9mi_rx(p,24);
+ p[20]=4;x9mi_rx(p,24);
+ assert(x9_mm_poisoned&&x9_md_mipc_online()&&!x9_md_mipc_message_online());
+ bool retained=false;for(auto &s:x9_mm_slots)if(s.state&&s.txid==55)retained=true;assert(retained);
+}
+static uint64_t sms_send_pending(x9m_job *j){
+ x9w_frame f(0x605);const uint8_t raw[]={0,1};f.byte(0x100,0);f.tlv(0x8101,raw,2);f.byte(0x102,1);
+ uint64_t token=f.submit();assert(token);if(j)j->token=token;return token;
+}
+static void sms_poison_admission_scope(){
+ poison_sms_inbox();unsigned next=x9_mi_next;
+ for(unsigned id:{0x8601u,0x8603u}){x9w_frame f(0x30b,0xff);uint8_t v[2]={(uint8_t)id,(uint8_t)(id>>8)};f.tlv(0x100,v,2);assert(!f.submit());}
+ for(unsigned id:{0x4601u,0x4a01u}){x9w_frame f(0x307);uint8_t v[2]={(uint8_t)id,(uint8_t)(id>>8)};f.tlv(0x100,v,2);assert(!f.submit());}
+ {x9w_frame f(0x601);f.byte(0x100,0);f.byte(0x105,1);f.byte(0x106,2);assert(!f.submit());}
+ {x9w_frame f(0x601);f.byte(0x102,1);assert(!f.submit());}
+ {x9w_frame f(0x605);const uint8_t raw[]={0,1};f.byte(0x100,0);f.tlv(0x8101,raw,2);f.byte(0x102,1);assert(!f.submit());}
+ {x9w_frame f(0x607);f.byte(0x100,3);f.byte(0x101,0);f.byte(0x103,1);f.byte(0x104,0);assert(!f.submit());}
+ assert(x9_mi_next==next&&!writes);
+ {x9w_frame f(0xa04);f.byte(0x100,0);assert(f.submit());}
+ {x9w_frame f(0x30b,0xff);uint8_t v[2]={1,0x89};f.tlv(0x100,v,2);assert(f.submit());}
+ {x9w_frame f(0x307);uint8_t v[2]={1,0x49};f.tlv(0x100,v,2);assert(f.submit());}
+ {x9w_frame f(0x201);assert(f.submit());}
+ for(unsigned i=0;i<4;i++)x9mi_tick();assert(writes==4&&!x9_mi_poisoned&&!x9_mc_poisoned);
+}
+static void sms_poison_global_drain(){
+ uint64_t token=begin_global();cnf(token,0x30c,0xff);poison_sms_inbox();x9m_poll();
+ assert(x9m_init_hold&&!x9m_init_token&&x9m_init_stage==1&&writes==1);
+}
+static void sms_poison_host_ready_drain(){
+ uint64_t token=host_ready_pending(0,100);cnf(token,0x602,1,true);poison_sms_inbox();x9m_poll();
+ assert(x9m_sims[0].init_hold&&!x9m_sims[0].init_token&&!x9m_sims[0].ready&&x9m_sims[0].md_ready);
+}
+static void sms_poison_global_pre_tx(){
+ uint8_t p[X9_MIPC_FRAME_MAX];x9m_sims[0].wanted=true;x9m_init_poll(p,sizeof(p));assert(x9m_init_token);
+ poison_sms_inbox();x9mi_tick();assert(!writes);x9m_poll();
+ assert(x9m_init_hold&&!x9m_init_token&&x9m_init_stage==1&&x9_mm_poisoned);
+}
+static void sms_poison_sim_pre_tx(){
+ uint8_t p[X9_MIPC_FRAME_MAX];x9m_init_stage=2;x9m_sims[0].wanted=true;x9m_init_poll(p,sizeof(p));assert(x9m_sims[0].init_token);
+ poison_sms_inbox();x9mi_tick();assert(!writes);x9m_poll();
+ assert(x9m_sims[0].init_hold&&!x9m_sims[0].init_token&&!x9m_sims[0].ready);
+}
+static void sms_poison_queued_and_ready(){
+ x9m_init_stage=2;x9m_sims[0].ready=x9m_sims[0].md_known=x9m_sims[0].md_ready=true;x9m_sims[0].init=X9M_INIT_DONE;
+ uint8_t query[7]={0,9,0,0x34};auto *smsc=x9m_new(X9M_SMSC,0,0,query,7);assert(smsc);
+ uint8_t list[11]={0,10,0,0x31,0,4,0,1,1,0,0};auto *stored=x9m_new(X9M_LIST,0,0,list,11);assert(stored);
+ stored->follow=true;stored->store_order=1;poison_sms_inbox();
+ uint8_t status[7]={0,11,0,0x5c};assert(x9m_request(CBQ_PORT_BASE,X9BB_PORT_BASE+5,status,7));
+ assert(last_packet_len==18&&last_packet[14]==0x11&&!last_packet[17]);
+ status[3]=0x30;assert(x9m_request(CBQ_PORT_BASE,X9BB_PORT_BASE+5,status,7)&&last_error==X9Q_NOT_READY);
+ query[1]=12;assert(x9m_request(CBQ_PORT_BASE,X9BB_PORT_BASE+5,query,7)&&last_error==X9Q_NOT_READY);
+ x9m_poll();assert(!writes&&!smsc->token&&!stored->token&&!x9m_sims[0].ready&&x9m_sims[0].md_ready);
+}
+static void sms_poison_send_pre_tx(){
+ uint8_t req[7]={0,9,0,0x20};auto *j=x9m_new(X9M_SEND,0,0,req,7);assert(j);sms_send_pending(j);
+ poison_sms_inbox();x9mi_tick();assert(!writes);x9m_poll();assert(replies==1&&last_error==X9Q_NOT_READY&&!j->op);
+}
+static void sms_poison_tag_pre_tx(unsigned step){
+ uint8_t req[15]={0,9,0,0x23,0,8,0,1,5,0,0,1,0,0,0};auto *j=x9m_new(X9M_TAG,0,0,req,15);assert(j);
+ j->step=step;j->token=x9m_store_submit(*j);assert(j->token);poison_sms_inbox();x9mi_tick();assert(!writes);x9m_poll();
+ assert(replies==1&&last_error==X9Q_NOT_READY&&!j->token);
+ if(step==2)assert(j->op==X9M_TAG&&j->hold);else assert(!j->op);
+}
+static void sms_poison_tag_before_mutation(){sms_poison_tag_pre_tx(1);}
+static void sms_poison_tag_after_mutation(){sms_poison_tag_pre_tx(2);}
+static void sms_poison_sent_mo_drain(){
+ uint8_t req[7]={0,9,0,0x20};auto *j=x9m_new(X9M_SEND,0,0,req,7);assert(j);uint64_t token=sms_send_pending(j);x9mi_tick();
+ poison_sms_inbox();uint8_t p[32];x9cw_header(p,32,0x606,1,(unsigned)token);x9cw_scalar(p+16,0,0,4);x9cw_scalar(p+24,0x103,1,1);
+ x9mi_rx(p,32);x9m_poll();assert(writes==1&&replies==1&&!last_error&&!j->op&&x9_mm_poisoned);
+}
+static void sms_poison_selected_ack_drain(){
+ uint8_t p[24];x9cw_header(p,24,0x8601,1,44);x9cw_scalar(p+16,0x100,3,1);x9mi_rx(p,24);
+ uint32_t n,token;assert(x9_md_mipc_message_event(p,24,&n,&token)==1&&token);
+ assert(x9_md_mipc_message_reply(token,1,0)==1);
+ uint8_t req[7]={0,9,0,0x37};auto *j=x9m_new(X9M_ACK,0,0,req,7);assert(j);j->token=token;
+ x9m_incoming_sms[0].token=token;x9m_incoming_sms[0].delivered=x9m_incoming_sms[0].replying=true;
+ sms_send_pending(nullptr);during_write=poison_sms_inbox;x9mi_tick();during_write=nullptr;
+ assert(writes==1&&x9_mm_poisoned);x9m_poll();assert(replies==1&&!last_error&&!j->op&&!x9m_incoming_sms[0].token);
+ x9mi_tick();assert(writes==1); // remaining unsent MO is locally rejected, not transmitted
+}
+static void sms_poison_unknown_token_retained(){
+ x9m_init_stage=1;x9m_init_token=55;x9m_init_deadline=100;poison_sms_inbox();x9m_poll();
+ assert(x9m_init_hold&&x9m_init_token==55&&!writes);
+}
 int main(int argc,char **argv){
  assert(argc==2);x9mi_online(1);x9w_control_ready=true;
  struct {const char *name;void (*run)();} cases[]={
   {"global_exact_deadline",global_exact_deadline},{"global_late_cnf",global_late_cnf},
   {"sim_exact_deadline",sim_exact_deadline},{"sim_independent_deadlines",sim_independent_deadlines},
   {"init_offline_drain",init_offline_drain},{"job_send_deadline",job_send_deadline},{"job_ack_deadline",job_ack_deadline},
-  {"queued_control_loss",queued_control_loss}};
+  {"queued_control_loss",queued_control_loss},{"sms_poison_admission_scope",sms_poison_admission_scope},
+  {"sms_poison_global_drain",sms_poison_global_drain},{"sms_poison_host_ready_drain",sms_poison_host_ready_drain},
+  {"sms_poison_global_pre_tx",sms_poison_global_pre_tx},{"sms_poison_sim_pre_tx",sms_poison_sim_pre_tx},
+  {"sms_poison_queued_and_ready",sms_poison_queued_and_ready},{"sms_poison_send_pre_tx",sms_poison_send_pre_tx},
+  {"sms_poison_tag_before_mutation",sms_poison_tag_before_mutation},{"sms_poison_tag_after_mutation",sms_poison_tag_after_mutation},
+  {"sms_poison_sent_mo_drain",sms_poison_sent_mo_drain},{"sms_poison_selected_ack_drain",sms_poison_selected_ack_drain},
+  {"sms_poison_unknown_token_retained",sms_poison_unknown_token_retained}};
  for(auto &c:cases)if(!strcmp(argv[1],c.name)){c.run();return 0;}return 2;
 }
