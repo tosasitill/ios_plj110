@@ -1841,3 +1841,31 @@ admission 和匹配 terminal event 返回路径；不能用默认 profile、派�
 源码位置/引用及挂载 job 摘录保留在 gitignored
 `x9/out/call-production-connect/{production-connect-source.json,production-entry-refs.txt,commcenter-launch-entry.json}`；
 NOTES 与归档由 root 统一记录。
+
+## Android 拨号意图 producer 的首个缺失原件（2026-11-16）
+
+本轮仅核对已抓 input 的 manifest/文件名，不重复 native CLIR、prefix、CARD_TYPE 或 AP72。
+`android-calls-20261115-183941/capture-manifest.json` 有124条抓取记录，但 **APK/JAR/DEX
+code artifact 为0**；实际 files 树225项、incoming树33项、modem vendor/source/parts/mdota
+分别8/2/8/784项，文件名 inventory 亦无 Java code 候选。没有 matching DEX，不启动 ASC。
+
+同一抓取 `build.txt` 记录 Android17 的
+`OPPO/PLJ110/OP5E17L1:17/CP2A.260605.016/B.46c413f-20895a6-20bdbdd:user/release-keys`。
+已保存 `mapped-paths.json` 明确出现下列**实际设备路径，但未保留文件字节**：
+
+- 首缺 producer 输入：`/system/framework/telephony-common.jar`、
+  `/apex/com.android.telephonycore/javalib/framework-telephony.jar`。
+- 同 build 链接/厂商扩展输入：`/system/framework/framework.jar`、
+  `/system/framework/oplus-framework.jar`、`/system_ext/framework/mediatek-framework.jar`。
+- 已观察 IMS APK：`/system_ext/priv-app/ImsService/ImsService.apk`；
+  抓取的 `3302-cmdline.txt` 实为 `com.mediatek.ims`，不是 Phone/Dialer 进程。
+
+Telecom metadata 中虽有 `com.android.phone`/`com.android.contacts`，但没有其确切 APK
+位置或 code artifact；不编造 TeleService/Dialer 固定路径。上述 JAR 若无 DEX，仍需同 build
+真实 code companion，不能拿 AOSP、另一版本或猜测的 sidecar 代替。本轮无设备操作、
+通话要求、探针、测试、编译或生产代码改动；**matching intention→raw CLIR 缺边保持阻断**，
+不开放默认0或新增 unused profile 准入。父代理统一安排后续输入，不要求用户此刻操作。
+
+证据与 source SHA/head 在 gitignored `x9/out/dial-intent-input/dial-intent-input-proof.json`，
+文件名快照在 `bounded-artifact-inventory.json`；重读现存 metadata 使用
+`python3 x9/out/dial-intent-input/inspect-retained-intent-input.py`，不重新扫描或接触设备。
