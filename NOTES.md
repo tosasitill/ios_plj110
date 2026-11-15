@@ -476,6 +476,14 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 - **固定提交/最终kernel-only构建**：源码`0e2777d`；`build.py kernel --name x9-sms-stored-final-20261115` **exit0，98/98 overlay、link/strip成功**；仅kernel（文件名中的final指此窄修复固定提交构建，不是通话短信最终镜像）。产物`x9/out/x9-sms-stored-final-20261115/kernel.development.sweet`，console/exit在`sms-stored-compile/`。最新header C11 syntax及host严格C++ compile均exit0，人工用例未执行。收尾提交随功能分支合main并push；本树两个kernel目录、分析及编译日志全部迁回主checkout相同`x9/out/`路径后清树。下一步仍为CALL生产初始化/动作/状态发布与voice音频，不要求用户补来电或刷这个kernel-only产物。
 - **原件/限制**：私有分析/编译在功能树`x9/out/sms-delete-analysis/`（目录名称为最初离线删除研究，最终未开放删除）与`sms-stored-compile/`；Apple/RIL/MD asm只放out。WMS31修复不等于Messages真实来信/重开持久化/同token物理ACK或MO对端收到已验；VOICE09、生产通话生命周期和voice音频仍未闭合，**尚无通话短信最终修复镜像**。功能分支`fix/sms-stored-tlvs`，完成合main/push并保留out后清树，不覆盖audio/GPU/BT活动树。
 
+#### 2026-11-15 短信初始化 / host deadline 修复（并行静态子项）
+
+- **范围 / 原因**：用户要求多子代理加速后独立树 `.worktrees/sms-init-deadlines` / `fix/sms-init-deadlines`，起点main`55c3508`。只读源码确认`X9Messages.inc`全局CMD注册超时后迟到成功会清`init_hold`，逐SIM timeout仅记日志而迟到HOST_READY可置ready；普通jobs先take再判deadline也可能向首次超时poll回success。不是新设备观察，不扩展泛用短信/IMS策略。
+- **生产修复**：全局及逐SIM在take前判`now>=deadline`并terminal hold；迟到原CNF仍drain，不重新推进注册/host-ready、不清hold。control或MIPC失联在job admission之前撤host-ready并hold已启动初始化，但保留原token，可消费已到完整结果；全局hold不会阻挡原逐SIMtoken drain，单SIM超时不hold另一SIM。后续CFG IND只更新真实modem readiness，不能解除host init hold。queued存储/SMSC额外要求control-ready。
+- **普通job边界**：host deadline先返回一次NOT_READY；**不撤销modem副作用、不等于MO未发送/不等于送达失败**。已提交MO/CNF、ACK原token仍take，物理ACK成功仍正常退休对应CMD/incoming，超时txn不再回第二个success、不重发。存储TAG超时/失client不开始延迟mutation；已有明确写入后的hold规则保持。
+- **编译 / 证据**：新增`sms_init_host.cpp`编译实际SMS owner与MD transport，8项人工源码边界（now==deadline、迟到CNF、单SIM隔离、offline drain、MO/ACK、queued control loss），**只编译未运行**。私有compile日志在树`x9/out/sms-init-deadlines-compile/`；最终host C++17严格`clang++ -c` **exit0**（`host-final.log/.exit`），真实recipe`X9Baseband.cpp.o` **true / exit0**（`recipe-final.log/.exit`、`recipe-results-final.json`），`git diff --check`无错误。无测试套件/设备操作/CI/boot pack，未修改audio/GPU/BT。
+- **剩余**：独立SMS inbox poison与generic transport readiness的差异仍应后续核实；WMS24/内存满恢复/IMS-only或non-CS短信尚未实现，Messages显示/重开持久化/同token物理ACK及MO对端收到仍缺设备验收，不能称通话短信最终镜像。
+
 #### 2026-11-15 单普通 MO 挂断生产 owner / VOICE44 独立绑定
 
 - **范围/基线**：用户继续要求完成通话短信，不新增设备场景。新`feat/call-end-owner` / `.worktrees/call-end-owner`起点main`af62d8b`；只沿用已有Android拨出/呼入原件，短信WMS31修复保留不重复。未拨号、接听、清日志、改property、重启RIL、reboot/flash、写NV/分区；audio/GPU/BT树未改。

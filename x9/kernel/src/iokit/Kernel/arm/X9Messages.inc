@@ -149,25 +149,34 @@ static uint64_t x9m_store_submit(const x9m_job &j){
   * never mark an entire CMGL enumeration read. CPMS is always explicit. */
  f.byte(0x103,j.op==X9M_TAG&&j.step==1?0:1);f.byte(0x104,storage.p[0]);return f.submit();
 }
+static void x9m_init_transport_loss(){
+  /* Loss is not registration/config retirement. Stop advancing this boot,
+   * but still drain any complete results belonging to the original token. */
+  if(x9m_init_stage||x9m_init_token)x9m_init_hold=true;
+  for(unsigned sim=0;sim<x9_md_sim_count();sim++){
+   x9m_sim &s=x9m_sims[sim];if(s.init||s.init_token)s.init_hold=true;
+   if(s.ready){s.ready=false;x9m_ready_ind(sim);}
+  }
+}
 static void x9m_init_poll(uint8_t *response,unsigned room){
  bool wanted=false;for(unsigned sim=0;sim<x9_md_sim_count();sim++)wanted|=x9m_sims[sim].wanted;
- if(!wanted||!x9w_control_ready||!x9_md_mipc_online())return;
+ const bool online=x9w_control_ready&&x9_md_mipc_online();const uint64_t now=x9q_ms();
+ if(!online)x9m_init_transport_loss();
  if(x9m_init_token){
+  /* Check BEFORE take: a CNF first polled at/after the guard is still late.
+   * A previous timeout is terminal, never cleared by a successful CNF. */
+  if(!x9m_init_hold&&now>=x9m_init_deadline){x9m_init_hold=true;
+   printf("X9 SMS: init stage %u timeout; token retained, no retry\n",x9m_init_stage);}
   unsigned n=0;int rc=x9_md_mipc_take(x9m_init_token,response,room,&n);
-  if(rc!=1){
-   if(!x9m_init_hold&&x9q_ms()>=x9m_init_deadline){x9m_init_hold=true;
-    printf("X9 SMS: init stage %u timeout; token retained, no retry\n",x9m_init_stage);}
-   return;
-  }
-  x9m_init_token=0;unsigned result=1;
-  bool known=x9w_wire(response,n)&&x9q_u16(response+10)==0x30c&&x9w_word(response,n,0,result);
-  bzero(response,room);
-  if(!known||result){x9m_init_hold=true;
-   printf("X9 SMS: CMD registration stage %u rejected known %u result %u\n",x9m_init_stage,known?1:0,result);return;}
-  x9m_init_hold=false;
+  if(rc==1){
+   x9m_init_token=0;unsigned result=1;
+   bool known=x9w_wire(response,n)&&x9q_u16(response+10)==0x30c&&x9w_word(response,n,0,result);
+   bzero(response,room);
+   if(!known||result){x9m_init_hold=true;
+    printf("X9 SMS: CMD registration stage %u rejected known %u result %u\n",x9m_init_stage,known?1:0,result);}
+  }else if(rc<0)x9m_init_hold=true; /* uncertain physical token remains */
  }
- if(x9m_init_hold)return;
- if(x9m_init_stage<2){
+ if(online&&wanted&&!x9m_init_hold&&!x9m_init_token&&x9m_init_stage<2){
   unsigned stage=x9m_init_stage+1,id=stage==1?0x8601:0x8603;
   x9w_frame f(0x30b,0xff);
   uint8_t v[2]={(uint8_t)id,(uint8_t)(id>>8)};f.tlv(0x100,v,2);
@@ -180,15 +189,16 @@ static void x9m_init_poll(uint8_t *response,unsigned room){
   * Each SIM owns its progress: a locked/absent SIM cannot block the other.
   * No retry of a timed-out config and no timer-generated ready state. */
  for(unsigned sim=0;sim<x9_md_sim_count();sim++){
-  x9m_sim &s=x9m_sims[sim];if(!s.wanted)continue;
+  x9m_sim &s=x9m_sims[sim];
+  if(x9m_init_hold&&(s.init||s.init_token))s.init_hold=true;
   if(s.init_token){
+   if(!s.init_timed_out&&now>=s.init_deadline){s.init_timed_out=true;s.init_hold=true;
+    printf("X9 SMS: SIM%u init %u timeout; token retained, no retry\n",sim+1,s.init);}
    unsigned n=0;int rc=x9_md_mipc_take(s.init_token,response,room,&n);
-   if(rc!=1){
-    if(!s.init_timed_out&&x9q_ms()>=s.init_deadline){s.init_timed_out=true;
-     printf("X9 SMS: SIM%u init %u timeout; token retained, no retry\n",sim+1,s.init);}
-    continue;
-   }
-   s.init_token=0;s.init_timed_out=false;unsigned result=1,ready=0;
+   if(rc!=1){if(rc<0)s.init_hold=true;continue;}
+   s.init_token=0;
+   if(s.init_hold){bzero(response,room);continue;} /* drain, never grant/advance */
+   unsigned result=1,ready=0;
    unsigned id=s.init<=X9M_IMS_IND?0x308:0x602;
    bool known=x9w_wire(response,n)&&x9q_u16(response+10)==id&&
     response[8]==(1u<<sim)&&x9w_word(response,n,0,result);
@@ -211,7 +221,7 @@ static void x9m_init_poll(uint8_t *response,unsigned room){
    }else s.init++;
    bzero(response,room);
   }
-  if(s.init_hold||s.init==X9M_INIT_DONE)continue;
+  if(!online||!s.wanted||x9m_init_hold||x9m_init_token||x9m_init_stage<2||s.init_hold||s.init==X9M_INIT_DONE)continue;
   unsigned step=s.init;
   if(step==X9M_WAIT_READY){if(!s.md_known||!s.md_ready)continue;step=X9M_HOST_READY;}
   x9w_frame f(step<=X9M_IMS_IND?0x307:0x601,1u<<sim);
@@ -532,12 +542,18 @@ static void x9m_del(unsigned slot){
 }
 static void x9m_poll(){
  static uint8_t p[X9_MIPC_FRAME_MAX];uint64_t now=x9q_ms();
+ if(!x9w_control_ready||!x9_md_mipc_online())x9m_init_transport_loss();
  if(!x9_md_mipc_online())for(unsigned sim=0;sim<x9_md_sim_count();sim++){
   if(x9m_sims[sim].md_known)x9m_md_ready(sim,false);
   x9m_sims[sim].reg_valid=false;
  }
  for(x9m_job &j:x9m_jobs)if(j.op){
   if(j.hold)continue;
+  /* Host guard is not a delivery timeout or cancellation of MD side
+   * effects. Reply once before taking a late result, then keep/drain every
+   * sent MO/ACK token; no resend or second success for the timed-out txn. */
+  if(!j.answered&&now>=j.deadline){x9m_error(j,X9Q_NOT_READY);
+   printf("X9 SMS/IMS: operation %u SIM%u timed out; sent token retained, no resend\n",j.op,j.sim+1);}
   if(x9m_storage(j.op)&&!j.token){
    if(!j.follow||now>=j.deadline||j.answered||!x9m_live(j.slot,j.generation)){
     x9m_error(j,X9Q_NOT_READY);
@@ -545,7 +561,7 @@ static void x9m_poll(){
     else bzero(&j,sizeof(j));
     continue; // A lost/expired client may not start a delayed mutation.
    }
-   if(x9m_store_blocked(j)||!x9m_sims[j.sim].ready||!x9_md_mipc_online())continue;
+   if(x9m_store_blocked(j)||!x9m_sims[j.sim].ready||!x9w_control_ready||!x9_md_mipc_online())continue;
    j.token=x9m_store_submit(j);
    if(!j.token)continue;
    j.follow=false;
@@ -553,7 +569,7 @@ static void x9m_poll(){
   }
   if(j.op==X9M_SMSC&&!j.token){
    if(j.answered||now>=j.deadline){x9m_error(j,X9Q_NOT_READY);bzero(&j,sizeof(j));continue;}
-   if(x9m_sims[j.sim].ready&&x9_md_mipc_online()){
+   if(x9m_sims[j.sim].ready&&x9w_control_ready&&x9_md_mipc_online()){
     x9w_frame f(0x601,1u<<j.sim);f.byte(0x102,1);j.token=f.submit();
    }
    if(!j.token)continue;
@@ -587,8 +603,6 @@ static void x9m_poll(){
     else bzero(&j,sizeof(j));continue;
    }
   }
-  if(!j.answered&&now>=j.deadline){x9m_error(j,X9Q_NOT_READY);
-   printf("X9 SMS/IMS: operation %u SIM%u timed out; sent token retained, no resend\n",j.op,j.sim+1);}
  }
  for(unsigned i=0;i<X9M_INCOMING;i++){
   unsigned n=0;uint32_t token=0;int rc=x9_md_mipc_message_event(p,sizeof(p),&n,&token);
