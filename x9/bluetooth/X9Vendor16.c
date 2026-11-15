@@ -98,6 +98,14 @@ int x9_vendor16_install(intptr_t slide)
         /* This callback tail has not called logging/functions: x0 still
          * holds actual HCI status. Preserve it instead of MOV w0,#0. */
         {0x10010bd3c, {0x52800000}, {0xd503201f}, 1},
+        /* LE features callback logs on BOTH paths, and repurposes x19.
+         * Its saved x20 is otherwise unused. Save incoming status before
+         * CBZ, log that status via x20, restore it for init sequencing.
+         * A NOP at the tail would leak a logging return value, not status.
+         * Keep the original 8-byte feature storage at 0x1008638c0+0x24. */
+        {0x10010c03c, {0x34000260,0xaa0003f3}, {0xaa0003f4,0x34000240}, 2},
+        {0x10010c054, {0xf90003f3}, {0xf90003f4}, 1},
+        {0x10010c11c, {0x52800000}, {0xaa1403e0}, 1},
     };
     const unsigned count = sizeof(edits)/sizeof(edits[0]);
     for (unsigned k = 0; k < count; k++) {
@@ -122,7 +130,7 @@ int x9_vendor16_install(intptr_t slide)
     /* Preflight ALL pages before modifying ANY instruction. COW mappings
      * preserve the original Apple executable on disk. Constructor installs
      * before native controller/RX threads start. */
-    vm_address_t pages[6]; unsigned page_count = 0;
+    vm_address_t pages[sizeof(edits)/sizeof(edits[0])]; unsigned page_count = 0;
     for (unsigned k = 0; k < count; k++) {
         vm_address_t p = addr(edits[k].va) & ~(page-1);
         unsigned j;

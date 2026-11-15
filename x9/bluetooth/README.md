@@ -45,7 +45,8 @@
   H4 buffer先初始化再创建RX线程，完整board结果为0前拒绝open。
 - `X9Vendor16.c`仅在显式 `X9_BT_VENDOR=MT6653`、正确UUID/指令与完整board结果为0时安装type0路由；
   null vendor ops返回原生NOT_IMPLEMENTED，不伪造BCM私有能力或成功；保留generic callback及supported-commands真实status。
-- **未完成**：native model capability getters、其它feature-query的真实error传播、launch/BlueTool编排、实机COW路径。
+  LE features回调的日志分支也保留入口status（x20保存，不把日志返回值当作成功），原生8 B mask存储不改。
+- **未完成**：native model capability getters、其它初始化status路径核对、launch/BlueTool编排、实机COW路径。
   未来环境 `BT_HCI_TRANSPORT=H4:POSIX` / `X9_BT_VENDOR=MT6653`，当前不改launch plist。
 
 ## 编译与只读核对
