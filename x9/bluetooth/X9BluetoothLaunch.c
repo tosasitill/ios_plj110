@@ -13,6 +13,7 @@ int main(void)
         return 1;
     }
     int error = x9_bootstrap16_wait(60);
+    if (!error || error == EHOSTDOWN) error = x9_bootstrap16_resume();
     if (error) {
         fprintf(stderr, "X9 Bluetooth launch: board session unavailable errno=%d; daemon not executed\n", error);
         return 1;
@@ -30,6 +31,7 @@ int main(void)
         return 1;
     }
     char *const args[] = {"/usr/sbin/bluetoothd", NULL};
+    fprintf(stderr, "X9 Bluetooth launch: board awake; executing stock bluetoothd with H4/vendor bridge\n");
     execv(args[0], args);
     fprintf(stderr, "X9 Bluetooth launch: exec errno=%d\n", errno);
     return 1;
