@@ -23,8 +23,25 @@ python3 -I x9/bluetooth/stage.py \
   --root-manifest "$ROOT_MANIFEST" --apple-originals "$APPLE_ORIGINALS"
 ```
 
-plan 检查包内四个二进制、两个 jobs、两个精确原始 jobs 的 byte hashes、
-权限、安装顺序、Program-only 差异及完整候选绑定；不依据 mtime 做身份判断。
+plan 检查包内四个二进制、两个 jobs、权威 launchd cache，以及两个精确原始
+jobs/完整原 cache 的 byte hashes、权限、安装顺序、Program-only 差异及完整
+候选绑定；不依据 mtime 做身份判断。旧的六文件 payload 不再允许安装。
+
+`candidate.py` / `build.py` 必须同时显式给 `--launchd-source` 和
+`--launchd-cache-source`。后者是仓库内私有原件，不从挂载目录自动挑选或
+把历史根盘克隆当成 live baseline；候选构建冻结完整原 cache，安装前必须
+与 live snapshot 内 `/System/Library/xpc/launchd.plist` 逐字节相等。
+
+20H392 stock launchd 的正常 `rd=ufsroot0` 环境要求系统 jobs 在 cache 中。
+其 definition 使用缓存字典，独立 plist 的新 `Program` 不会覆盖它。
+`launch_cache.py` 复用 Python `plistlib` binary parser/writer，仅追加两
+Program 值、两个 job 字典及两个父容器；其它所有字段/records 保持相同。
+原 707339 B object region、22269 个 object IDs/offsets 均逐字节保留，
+ref width 仍为2。原 cache 固定796447 B，trailer `4/2/22269/0/707339`；
+候选固定798777 B，trailer `4/2/22275/22269/709645`（依次为 offset width、
+ref width、object count、top object、offset-table offset）。拒绝未知原几何、
+shape、更多新对象或全量重排；内核 Siri gate 必须接受这个精确 alternate
+geometry，并继续执行全部原 string-object guards，不能宽放 size 范围。
 
 ## 显式授权后执行
 
@@ -57,10 +74,14 @@ python3 -I x9/bluetooth/stage.py \
    attach/detach 路径，交给 HFS 处理 dirty journal 和 catalog。所有 iOS
    绝对 symlink 都映射回该私有图像，绝不走到 Mac 的 `/usr` 或 `/private`。
 5. live root `SystemVersion.plist` 必须为 **20H392**，`bluetoothd` 必须同时
-   匹配确切原始 SHA-256 与 Mach-O UUID。**所有**原 Apple 原件和两个 jobs
+   匹配确切原始 SHA-256 与 Mach-O UUID。**所有**原 Apple 原件、两个 jobs
+   和完整 launchd cache
    验证成功、四个新路径全部 absent 后，
    备份原件。离线 VFS 先 fsync/rename 四个自有二进制，最后两个仅变更
-   `Program` 的 jobs；校验 uid0/gid0/mode 和内容。Apple 原件保持逐字节不变。
+   `Program` 的独立 jobs，再发布第七文件 append-only cache；校验
+   uid0/gid0/mode 和内容。精确原 cache 与原 jobs 的备份文件及目录项在
+   write-intent 前持久化。Apple 可执行原件保持逐字节不变，不删 cache/.sig，
+   不变更其它 daemon/service。
 6. detach 后生成最多128 MiB 的 blockdiff（包含原生 journal/metadata
    变化）。保留每范围 `.old`、`.new` 与 write-intent ledger；先 fsync
    snapshot、detached updated image 和所有块副本，再 fsync `blocks/`、

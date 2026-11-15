@@ -10,6 +10,10 @@ import hashlib
 import json
 from pathlib import Path
 import plistlib
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from launch_cache import CACHE_PATH, CACHE_NAME, CACHE_LIMIT, validate_pair
 
 ROOT = Path(__file__).resolve().parents[2]
 UUID = 'AA9424E8-0648-34E2-B3CF-E6C793B9D471'
@@ -80,6 +84,15 @@ def package(runtime, out):
         digest = hashlib.sha256(original).hexdigest()
         files.append((destination, candidate, 0o644, digest))
         originals.append((filename, original, destination, digest))
+    cache_original = bounded(runtime / 'launchd-originals' / CACHE_NAME, CACHE_LIMIT)
+    cache_candidate = bounded(runtime / 'launchd-candidates' / CACHE_NAME, CACHE_LIMIT)
+    cache_contract = validate_pair(cache_original, cache_candidate, JOBS)
+    if launchd.get('cache') != dict(cache_contract,
+            original='launchd-originals/' + CACHE_NAME, candidate='launchd-candidates/' + CACHE_NAME):
+        raise ValueError('requires the bound append-only authoritative launchd cache update')
+    cache_digest = hashlib.sha256(cache_original).hexdigest()
+    files.append((CACHE_PATH, cache_candidate, 0o644, cache_digest))
+    originals.append((CACHE_NAME, cache_original, CACHE_PATH, cache_digest))
     out.mkdir(parents=True, exist_ok=False)
     entries = []
     for destination, data, mode, previous in files:
@@ -107,15 +120,16 @@ def package(runtime, out):
         'runtime_verified': False, 'audio_verified': False,
         'installed': False, 'stageable': False,
         'power_interface': 'kern.x9_bt_power', 'power_lifecycle': 'closed-transport-only',
-        'files': entries, 'original_jobs': backups,
+        'files': entries, 'original_jobs': backups[:2],
+        'original_launchd_cache': backups[2], 'launchd_cache': cache_contract,
         'install_order': [entry['path'] for entry in entries],
         'requirements': [
             'explicit user approval before any device root modification',
             'live check_plaintext_root.py preflight against the active private root manifest',
             'matching full native kernel candidate with x9_bt=1 x9_bt_init=1 and observed x9_bt_fc=1',
-            'compare current Apple bluetoothd identity and BOTH job byte hashes before any mutation',
+            'compare current Apple bluetoothd identity, BOTH jobs and exact original cache byte hashes before any mutation',
             'new binary targets must be absent; never overwrite an unknown earlier runtime',
-            'preserve original jobs, publish executables first and Program-only job overrides last',
+            'preserve exact original jobs/cache; publish executables, independent jobs, then append-only cached Program overrides',
             'fsync and readback through the same verified root route; keep a private install receipt',
             'no active-transport sleep, wake-enhance or system-suspend claim; no wake callback is installed',
             'native injection/initialization, scan, pairing, BLE, A2DP, HFP and SCO require device validation',

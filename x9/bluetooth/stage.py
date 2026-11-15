@@ -42,6 +42,7 @@ from ufs_root_manifest import validate, device as root_device
 from ufs_manifest import extents
 from userdata_device import resolve_userdata
 from package import BINARIES, JOBS, STOCK_SHA, UUID
+from launch_cache import CACHE_PATH, CACHE_LIMIT, validate_pair
 
 BLOCK = 4096
 WRITE = 64 * BLOCK                         # pinfile's existing hard limit
@@ -160,16 +161,18 @@ def inputs(a):
             payload.get('power_interface') != 'kern.x9_bt_power' or
             payload.get('power_lifecycle') != 'closed-transport-only'):
         raise ValueError('requires the complete version-locked offline root payload')
-    expected = list(BINARIES.values()) + [
-        '/System/Library/LaunchDaemons/' + job[0] + '.plist' for job in JOBS]
+    job_paths = ['/System/Library/LaunchDaemons/' + job[0] + '.plist' for job in JOBS]
+    expected = list(BINARIES.values()) + job_paths + [CACHE_PATH]
     entries = payload.get('files')
     originals = payload.get('original_jobs')
-    if (not isinstance(entries, list) or len(entries) != 6 or
+    cache_backup = payload.get('original_launchd_cache')
+    if (not isinstance(entries, list) or len(entries) != 7 or
             [entry.get('path') for entry in entries] != expected or
             payload.get('install_order') != expected or
             not isinstance(originals, list) or len(originals) != 2 or
-            [entry.get('path') for entry in originals] != expected[-2:]):
-        raise ValueError('only the exact four executables and two Program-only jobs are permitted')
+            [entry.get('path') for entry in originals] != job_paths or
+            not isinstance(cache_backup, dict) or cache_backup.get('path') != CACHE_PATH):
+        raise ValueError('only four executables, two Program-only jobs and their append-only service cache are permitted')
     files, stock_jobs = {}, {}
     for index, entry in enumerate(entries):
         data = bounded(member(package, entry['source']), 64 * 1024 * 1024)
@@ -195,6 +198,15 @@ def inputs(a):
                 candidate.get('precondition') != {'sha256': sha(data)}):
             raise ValueError('stock identity or Program-only replacement mismatch')
         stock_jobs[entry['path']] = data
+    cache_original = bounded(member(package, cache_backup['source']), CACHE_LIMIT)
+    if (cache_backup.get('size') != len(cache_original) or
+            cache_backup.get('sha256') != sha(cache_original) or
+            entries[-1].get('precondition') != {'sha256': sha(cache_original)}):
+        raise ValueError('original launchd cache differs from the exact backup/precondition')
+    cache_contract = validate_pair(cache_original, files[CACHE_PATH], JOBS)
+    if payload.get('launchd_cache') != cache_contract:
+        raise ValueError('launchd cache geometry/append contract differs from the payload')
+    stock_jobs[CACHE_PATH] = cache_original
     root_manifest = repo_path(a.root_manifest)
     manifest_bytes = bounded(root_manifest, 8 * 1024 * 1024)
     root = validate(json.loads(manifest_bytes), native=True)
@@ -220,6 +232,7 @@ def inputs(a):
             (candidate_path / paths['root_payload']).resolve() != package / 'root-payload.json' or
             candidate.get('power_interface') != 'kern.x9_bt_power' or
             candidate.get('power_lifecycle') != 'closed-transport-only' or
+            candidate.get('launchd_cache') != cache_contract or
             candidate.get('component_exit_status') != {'full_overlay_kernel': 0, 'native_userland_jobs': 0,
                                                        'root_payload': 0, 'boot_image': 0}):
         raise ValueError('root payload is not the one bound to this complete candidate')
@@ -519,6 +532,12 @@ def prepare_image(session, directory, files, jobs, apple):
         for logical, original in {**apple, **jobs, SYSTEM_VERSION: version_bytes}.items():
             target = backups / logical.lstrip('/')
             target.parent.mkdir(parents=True, exist_ok=True); target.write_bytes(original)
+            sync_file(target)
+        for parent in sorted((path for path in backups.rglob('*') if path.is_dir()),
+                             key=lambda path: len(path.parts), reverse=True):
+            sync_directory(parent)
+        sync_directory(backups)
+        sync_directory(directory)
         session.record({'operation': 'all-originals-and-absent-targets-verified',
                         'ios_build': '20H392', 'bluetoothd_uuid': UUID,
                         'sha256': {path: sha(data) for path, data in
