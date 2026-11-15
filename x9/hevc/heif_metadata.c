@@ -1,4 +1,5 @@
 #include "heif_metadata.h"
+#include "vt_image_metadata.h"
 #include <CoreVideo/CoreVideo.h>
 #include <errno.h>
 #include <string.h>
@@ -240,6 +241,7 @@ int x9_heif_resolve_hdr_extensions(CFMutableDictionaryRef extensions,
             else if (!value) { add[n] = CFDataCreate(NULL,bytes[n],lengths[n]); if (!add[n]) e = ENOMEM; }
         }
     }
+    if (!e) e = x9_hevc_merge_preferred_transfer(extensions,hdr);
     if (!e) for (unsigned n = 0; n < 3; n++) if (add[n]) CFDictionarySetValue(extensions,keys[n],add[n]);
     for (unsigned n = 0; n < 3; n++) if (add[n]) CFRelease(add[n]);
     return e;
@@ -260,15 +262,19 @@ int x9_heif_copy_color_extensions(const struct x9_heif_document *document,
     return e;
 }
 int x9_heif_resolve_color_extensions(CFDictionaryRef container,
-    const struct x9_hevc_vui *v, CFDictionaryRef *out)
+    const struct x9_hevc_vui *v, const struct x9_hevc_hdr *hdr, CFDictionaryRef *out)
 {
     if (!out) return EINVAL;
     *out = NULL;
     if (!container || CFGetTypeID(container) != CFDictionaryGetTypeID() || !v ||
-        v->full_range > 1 || v->chroma_top > 5 || v->chroma_bottom > 5) return EINVAL;
+        v->full_range > 1 || v->chroma_top > 5 || v->chroma_bottom > 5 ||
+        (hdr && x9_hevc_hdr_validate(hdr))) return EINVAL;
     CFMutableDictionaryRef d = CFDictionaryCreateMutableCopy(NULL,0,container);
     if (!d) return ENOMEM;
-    uint32_t codes[] = { v->colour_primaries,v->transfer,v->matrix };
+    /* D.3.38 replaces the SPS fallback, not this API's explicit container
+     * non-2 policy. Keep the caller's original VUI unchanged for provenance. */
+    uint32_t codes[] = { v->colour_primaries,
+        hdr && hdr->preferred_present ? hdr->preferred_transfer : v->transfer,v->matrix };
     CFStringRef raw_keys[] = { CFSTR("X9ColorPrimariesCodePoint"),CFSTR("X9TransferCodePoint"),CFSTR("X9MatrixCodePoint") };
     int e = 0;
     for (unsigned n = 0; n < 3 && !e; n++) {
@@ -280,6 +286,7 @@ int x9_heif_resolve_color_extensions(CFDictionaryRef container,
         else if (code != 2) codes[n] = (uint32_t)code;
     }
     if (!e) e = put_cicp(d,codes);
+    if (!e && hdr) e = x9_hevc_merge_preferred_transfer(d,hdr);
     CFTypeRef full = CFDictionaryGetValue(container,kCMFormatDescriptionExtension_FullRangeVideo);
     if (!e && full && CFGetTypeID(full) != CFBooleanGetTypeID()) e = EBADMSG;
     if (!e) {

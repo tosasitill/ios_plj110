@@ -14,16 +14,17 @@ int x9_heif_copy_item_info(const struct x9_heif_document *,
  * Known CICP mapping only; unknown code points remain in raw item info. */
 int x9_heif_copy_color_extensions(const struct x9_heif_document *,
     const struct x9_heif_image *, CFDictionaryRef *extensions);
-/* Merge this AU's resolved base-layer direct/scalable prefix137/144/148 with
+/* Merge this AU's resolved base-layer direct/scalable prefix137/144/147/148 with
  * the item's mdcv/clli and any supplied ambient extension.
  * A duplicate must agree exactly; errors leave extensions unchanged. This
  * is not persistent-video SEI state, derived-output metadata or tone mapping. */
 int x9_heif_resolve_hdr_extensions(CFMutableDictionaryRef, const struct x9_hevc_hdr *);
 /* Container non-unspecified CICP wins per field. Only missing/CICP2 uses
- * the selected SPS. Unknown non-2 codes stay raw/unmapped, never fall back.
+ * the selected SPS; resolved SEI147 supersedes that SPS transfer fallback.
+ * Original VUI is never rewritten. Unknown non-2 codes stay raw/unmapped, never fall back.
  * Range is container nclx if present, otherwise normative SPS inference.
  * The returned dictionary also has the real/default SPS chroma locations. */
 int x9_heif_resolve_color_extensions(CFDictionaryRef container,
-    const struct x9_hevc_vui *, CFDictionaryRef *extensions);
+    const struct x9_hevc_vui *, const struct x9_hevc_hdr *, CFDictionaryRef *extensions);
 int x9_heif_copy_vui_info(const struct x9_hevc_vui *, CFDictionaryRef *info);
 #endif

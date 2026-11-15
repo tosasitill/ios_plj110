@@ -56,14 +56,24 @@ static int format_hdr(CMVideoFormatDescriptionRef format, CFDictionaryRef reques
             CFDataGetLength(actual) != lengths[n] ||
             !CFEqual(expected,actual)) return EBADMSG;
     }
+    CFStringRef preferred_keys[] = { kCMFormatDescriptionExtension_AlternativeTransferCharacteristics,
+        CFSTR("X9PreferredTransferCodePoint") };
+    for (unsigned n = 0; n < 2; n++) {
+        CFTypeRef expected = CFDictionaryGetValue(requested,preferred_keys[n]);
+        CFTypeRef actual = CMFormatDescriptionGetExtension(format,preferred_keys[n]);
+        if ((expected || actual) && (!expected || !actual || !CFEqual(expected,actual))) return EBADMSG;
+        if (actual && (CFGetTypeID(actual) != (n ? CFNumberGetTypeID() : CFStringGetTypeID()) ||
+            (n && CFNumberIsFloatType(actual)))) return EBADMSG;
+    }
     return 0;
 }
 OSStatus x9_heif_copy_item_sample(CFDataRef file, uint32_t id,
-    CMSampleBufferRef *out, CFDictionaryRef *info_out, struct x9_hevc_vui *vui_out)
+    CMSampleBufferRef *out, CFDictionaryRef *info_out, struct x9_hevc_vui *vui_out, struct x9_hevc_hdr *hdr_out)
 {
     if (!out || !info_out || (void *)out == (void *)info_out) return kVTParameterErr;
     *out = NULL; *info_out = NULL;
     if (vui_out) memset(vui_out,0,sizeof(*vui_out));
+    if (hdr_out) memset(hdr_out,0,sizeof(*hdr_out));
     if (!file || CFGetTypeID(file) != CFDataGetTypeID() || CFDataGetLength(file) <= 0) return kVTParameterErr;
     const uint8_t *data = CFDataGetBytePtr(file);
     struct x9_heif_document *document = NULL;
@@ -100,7 +110,7 @@ OSStatus x9_heif_copy_item_sample(CFDataRef file, uint32_t id,
     if (!e) e = x9_heif_copy_item_info(document,image,&info,extensions);
     if (!e) e = x9_heif_resolve_hdr_extensions(extensions,&hdr);
     CFDictionaryRef resolved = NULL, vui_info = NULL;
-    if (!e) e = x9_heif_resolve_color_extensions(extensions,&vui,&resolved);
+    if (!e) e = x9_heif_resolve_color_extensions(extensions,&vui,&hdr,&resolved);
     if (!e) e = x9_heif_copy_vui_info(&vui,&vui_info);
     if (!e) {
         CFMutableDictionaryRef record = CFDictionaryCreateMutableCopy(NULL,0,info);
@@ -109,13 +119,16 @@ OSStatus x9_heif_copy_item_sample(CFDataRef file, uint32_t id,
             &kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
         int32_t nal_type = (int32_t)picture.nal_type;
         CFNumberRef type = CFNumberCreate(NULL,kCFNumberSInt32Type,&nal_type);
-        int32_t sources[3] = { (int32_t)hdr.mastering_sources, (int32_t)hdr.light_sources,
-            (int32_t)hdr.ambient_sources };
-        CFNumberRef source_values[3] = { CFNumberCreate(NULL,kCFNumberSInt32Type,&sources[0]),
+        int32_t sources[4] = { (int32_t)hdr.mastering_sources, (int32_t)hdr.light_sources,
+            (int32_t)hdr.ambient_sources, (int32_t)hdr.preferred_sources };
+        CFNumberRef source_values[4] = { CFNumberCreate(NULL,kCFNumberSInt32Type,&sources[0]),
             CFNumberCreate(NULL,kCFNumberSInt32Type,&sources[1]),
-            CFNumberCreate(NULL,kCFNumberSInt32Type,&sources[2]) };
+            CFNumberCreate(NULL,kCFNumberSInt32Type,&sources[2]),
+            CFNumberCreate(NULL,kCFNumberSInt32Type,&sources[3]) };
+        int32_t preferred_code = (int32_t)hdr.preferred_transfer;
+        CFNumberRef preferred_value = hdr.preferred_present ? CFNumberCreate(NULL,kCFNumberSInt32Type,&preferred_code) : NULL;
         if (!record || !new_extensions || !type || !hdr_info || !source_values[0] ||
-            !source_values[1] || !source_values[2]) {
+            !source_values[1] || !source_values[2] || !source_values[3] || (hdr.preferred_present && !preferred_value)) {
             if (record) CFRelease(record);
             if (new_extensions) CFRelease(new_extensions);
             e = ENOMEM;
@@ -133,9 +146,12 @@ OSStatus x9_heif_copy_item_sample(CFDataRef file, uint32_t id,
             CFDictionarySetValue(record,CFSTR("SEIMasteringDisplayPresent"),hdr.mastering_present ? kCFBooleanTrue : kCFBooleanFalse);
             CFDictionarySetValue(record,CFSTR("SEIContentLightPresent"),hdr.light_present ? kCFBooleanTrue : kCFBooleanFalse);
             CFDictionarySetValue(record,CFSTR("SEIAmbientViewingEnvironmentPresent"),hdr.ambient_present ? kCFBooleanTrue : kCFBooleanFalse);
+            CFDictionarySetValue(record,CFSTR("SEIPreferredTransferPresent"),hdr.preferred_present ? kCFBooleanTrue : kCFBooleanFalse);
+            if (preferred_value) CFDictionarySetValue(record,CFSTR("SEIPreferredTransferCodePoint"),preferred_value);
             CFDictionarySetValue(record,CFSTR("SEIMasteringDisplaySources"),source_values[0]);
             CFDictionarySetValue(record,CFSTR("SEIContentLightSources"),source_values[1]);
             CFDictionarySetValue(record,CFSTR("SEIAmbientViewingEnvironmentSources"),source_values[2]);
+            CFDictionarySetValue(record,CFSTR("SEIPreferredTransferSources"),source_values[3]);
             CFDictionarySetValue(record,CFSTR("IRAPNALUnitType"),type);
             CFDictionarySetValue(record,CFSTR("NoOutputOfPriorPicsFlag"),
                 picture.no_output_of_prior_pics_flag ? kCFBooleanTrue : kCFBooleanFalse);
@@ -144,7 +160,8 @@ OSStatus x9_heif_copy_item_sample(CFDataRef file, uint32_t id,
         }
         if (hdr_info) CFRelease(hdr_info);
         if (type) CFRelease(type);
-        for (unsigned n = 0; n < 3; n++) if (source_values[n]) CFRelease(source_values[n]);
+        for (unsigned n = 0; n < 4; n++) if (source_values[n]) CFRelease(source_values[n]);
+        if (preferred_value) CFRelease(preferred_value);
     }
     if (resolved) CFRelease(resolved);
     if (vui_info) CFRelease(vui_info);
@@ -175,6 +192,7 @@ OSStatus x9_heif_copy_item_sample(CFDataRef file, uint32_t id,
     if (!result) {
         *out = sample; sample = NULL; *info_out = info; info = NULL;
         if (vui_out) *vui_out = vui;
+        if (hdr_out) *hdr_out = hdr;
     }
 done:
     if (sample) CFRelease(sample);
@@ -187,4 +205,4 @@ done:
 }
 OSStatus X9HEIFCopyItemSample(CFDataRef file, uint32_t id,
     CMSampleBufferRef *out, CFDictionaryRef *info_out)
-{ return x9_heif_copy_item_sample(file,id,out,info_out,NULL); }
+{ return x9_heif_copy_item_sample(file,id,out,info_out,NULL,NULL); }

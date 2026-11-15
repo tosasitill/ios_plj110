@@ -1,7 +1,90 @@
 #include "vt_image_metadata.h"
 #include <VideoToolbox/VideoToolbox.h>
+#include <errno.h>
 #include <math.h>
 #include <string.h>
+
+static CFStringRef preferred_string(unsigned code)
+{
+    if (code == 2) return NULL;
+    if (code == 4 || code == 5) return kCVImageBufferTransferFunction_UseGamma;
+    return CVTransferFunctionGetStringForIntegerCodePoint((int)code);
+}
+static int preferred_read(CFDictionaryRef d, struct x9_hevc_hdr *hdr)
+{
+    CFTypeRef raw = d ? CFDictionaryGetValue(d,CFSTR("X9PreferredTransferCodePoint")) : NULL;
+    CFTypeRef label = d ? CFDictionaryGetValue(d,kCMFormatDescriptionExtension_AlternativeTransferCharacteristics) : NULL;
+    if (label && CFGetTypeID(label) != CFStringGetTypeID()) return EBADMSG;
+    if (!raw) return 0; /* Never invert an alias string into bitstream provenance. */
+    int64_t code = 0;
+    if (CFGetTypeID(raw) != CFNumberGetTypeID() || CFNumberIsFloatType(raw) ||
+        !CFNumberGetValue(raw,kCFNumberSInt64Type,&code) || code < 0 || code > 255) return EBADMSG;
+    CFStringRef mapped = preferred_string((unsigned)code);
+    if (label && (!mapped || !CFEqual(label,mapped))) return EBADMSG;
+    hdr->preferred_transfer = (uint32_t)code; hdr->preferred_present = 1;
+    return 0;
+}
+int x9_hevc_merge_preferred_transfer(CFMutableDictionaryRef d, const struct x9_hevc_hdr *hdr)
+{
+    if (!d || CFGetTypeID(d) != CFDictionaryGetTypeID() || x9_hevc_hdr_validate(hdr)) return EINVAL;
+    struct x9_hevc_hdr original = {0};
+    int e = preferred_read(d,&original);
+    if (e) return e;
+    if (hdr->preferred_present && original.preferred_present &&
+        hdr->preferred_transfer != original.preferred_transfer) return EBADMSG;
+    if (!hdr->preferred_present && !original.preferred_present) return 0;
+    unsigned code = hdr->preferred_present ? hdr->preferred_transfer : original.preferred_transfer;
+    CFStringRef mapped = preferred_string(code);
+    CFTypeRef label = CFDictionaryGetValue(d,kCMFormatDescriptionExtension_AlternativeTransferCharacteristics);
+    if (label && (!mapped || !CFEqual(label,mapped))) return EBADMSG;
+    int32_t value = (int32_t)code;
+    CFNumberRef number = CFNumberCreate(NULL,kCFNumberSInt32Type,&value);
+    if (!number) return ENOMEM;
+    /* No mutation until conflicts and the one required allocation succeed. */
+    CFDictionarySetValue(d,CFSTR("X9PreferredTransferCodePoint"),number);
+    if (mapped) CFDictionarySetValue(d,kCMFormatDescriptionExtension_AlternativeTransferCharacteristics,mapped);
+    CFRelease(number); return 0;
+}
+int x9_hevc_copy_transfer_extensions(CFDictionaryRef source, CFDictionaryRef *out)
+{
+    if (!out) return EINVAL;
+    *out = NULL;
+    if (source && CFGetTypeID(source) != CFDictionaryGetTypeID()) return EINVAL;
+    struct x9_hevc_hdr hdr = {0};
+    int e = preferred_read(source,&hdr);
+    if (e) return e;
+    CFTypeRef alternative = source ? CFDictionaryGetValue(source,kCMFormatDescriptionExtension_AlternativeTransferCharacteristics) : NULL;
+    CFTypeRef transfer = hdr.preferred_present ? preferred_string(hdr.preferred_transfer) : alternative;
+    if (!hdr.preferred_present && !alternative && source)
+        transfer = CFDictionaryGetValue(source,kCMFormatDescriptionExtension_TransferFunction);
+    if (transfer && CFGetTypeID(transfer) != CFStringGetTypeID()) return EBADMSG;
+    CFTypeRef gamma = source ? CFDictionaryGetValue(source,kCMFormatDescriptionExtension_GammaLevel) : NULL;
+    CFNumberRef new_gamma = NULL;
+    if (hdr.preferred_present && (hdr.preferred_transfer == 4 || hdr.preferred_transfer == 5)) {
+        double value = hdr.preferred_transfer == 4 ? 2.2 : 2.8;
+        new_gamma = CFNumberCreate(NULL,kCFNumberDoubleType,&value);
+        if (!new_gamma) return ENOMEM;
+        gamma = new_gamma;
+    } else if (hdr.preferred_present || alternative) {
+        if (!transfer || !CFEqual(transfer,kCVImageBufferTransferFunction_UseGamma)) gamma = NULL;
+    }
+    if (gamma) {
+        double value = 0;
+        if (CFGetTypeID(gamma) != CFNumberGetTypeID() ||
+            !CFNumberGetValue(gamma,kCFNumberDoubleType,&value) || !isfinite(value) || value <= 0) e = EBADMSG;
+    }
+    if (!e && transfer && CFEqual(transfer,kCVImageBufferTransferFunction_UseGamma) && !gamma) e = EBADMSG;
+    CFMutableDictionaryRef d = !e ? CFDictionaryCreateMutable(NULL,0,
+        &kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks) : NULL;
+    if (!e && !d) e = ENOMEM;
+    if (!e) {
+        if (transfer) CFDictionarySetValue(d,kCMFormatDescriptionExtension_TransferFunction,transfer);
+        if (gamma) CFDictionarySetValue(d,kCMFormatDescriptionExtension_GammaLevel,gamma);
+        *out = d;
+    }
+    if (new_gamma) CFRelease(new_gamma);
+    return e;
+}
 
 OSStatus x9_hevc_read_hdr_description(CMVideoFormatDescriptionRef source, struct x9_hevc_hdr *out)
 {
@@ -23,6 +106,7 @@ OSStatus x9_hevc_read_hdr_description(CMVideoFormatDescriptionRef source, struct
             return kVTVideoDecoderBadDataErr;
         memcpy(bytes[i],CFDataGetBytePtr(value),(size_t)lengths[i]); *present[i] = 1;
     }
+    if (preferred_read(CMFormatDescriptionGetExtensions(source),&parsed)) return kVTVideoDecoderBadDataErr;
     if (x9_hevc_hdr_validate(&parsed)) return kVTVideoDecoderBadDataErr;
     *out = parsed; return noErr;
 }
@@ -61,6 +145,10 @@ OSStatus x9_hevc_copy_hdr_description(CMVideoFormatDescriptionRef source,
         CFDataRef value = CFDataCreate(NULL,bytes[i],lengths[i]);
         if (!value) { e = kVTAllocationFailedErr; break; }
         CFDictionarySetValue(extensions,keys[i],value); CFRelease(value);
+    }
+    if (!e) {
+        int result = x9_hevc_merge_preferred_transfer(extensions,hdr);
+        if (result) e = result == ENOMEM ? kVTAllocationFailedErr : kVTVideoDecoderBadDataErr;
     }
     if (!e) {
         CMVideoDimensions size = CMVideoFormatDescriptionGetDimensions(source);
@@ -155,14 +243,24 @@ OSStatus x9_hevc_attach_image_metadata(CMVideoFormatDescriptionRef format,
                 return kVTVideoDecoderBadDataErr;
         }
     }
+    CFDictionaryRef transfer = NULL;
+    int result = x9_hevc_copy_transfer_extensions(CMFormatDescriptionGetExtensions(format),&transfer);
+    if (result) return result == ENOMEM ? kVTAllocationFailedErr : kVTVideoDecoderBadDataErr;
+    unsigned preferred = hdr.preferred_present ||
+        CMFormatDescriptionGetExtension(format,kCMFormatDescriptionExtension_AlternativeTransferCharacteristics) != NULL;
     for (size_t i = 0; i < count; i++) {
+        unsigned is_transfer = CFEqual(entries[i].source,kCMFormatDescriptionExtension_TransferFunction) ||
+            CFEqual(entries[i].source,kCMFormatDescriptionExtension_GammaLevel);
+        if (is_transfer) values[i] = CFDictionaryGetValue(transfer,entries[i].source);
         if (values[i]) CVBufferSetAttachment(pixel, entries[i].destination,
             values[i], kCVAttachmentMode_ShouldPropagate);
         else if (CFEqual(entries[i].source,kCMFormatDescriptionExtension_MasteringDisplayColorVolume) ||
             CFEqual(entries[i].source,kCMFormatDescriptionExtension_ContentLightLevelInfo) ||
-            CFEqual(entries[i].source,kCMFormatDescriptionExtension_AmbientViewingEnvironment))
+            CFEqual(entries[i].source,kCMFormatDescriptionExtension_AmbientViewingEnvironment) ||
+            (preferred && is_transfer))
             CVBufferRemoveAttachment(pixel,entries[i].destination);
     }
+    CFRelease(transfer);
     return noErr;
 }
 OSStatus x9_hevc_validate_hdr_metadata(CMVideoFormatDescriptionRef format, CVPixelBufferRef pixel)
@@ -190,6 +288,24 @@ OSStatus x9_hevc_validate_hdr_metadata(CMVideoFormatDescriptionRef format, CVPix
                 e = kVTVideoDecoderBadDataErr;
         }
         if (actual) CFRelease(actual);
+        if (e) return e;
+    }
+    if (hdr.preferred_present ||
+        CMFormatDescriptionGetExtension(format,kCMFormatDescriptionExtension_AlternativeTransferCharacteristics)) {
+        CFDictionaryRef transfer = NULL;
+        int result = x9_hevc_copy_transfer_extensions(CMFormatDescriptionGetExtensions(format),&transfer);
+        if (result) return result == ENOMEM ? kVTAllocationFailedErr : kVTVideoDecoderBadDataErr;
+        CFStringRef keys[] = { kCMFormatDescriptionExtension_TransferFunction,kCMFormatDescriptionExtension_GammaLevel };
+        CFStringRef destinations[] = { kCVImageBufferTransferFunctionKey,kCVImageBufferGammaLevelKey };
+        OSStatus e = noErr;
+        for (unsigned i = 0; i < 2 && !e; i++) {
+            CFTypeRef expected = CFDictionaryGetValue(transfer,keys[i]);
+            CFTypeRef actual = CVBufferCopyAttachment(pixel,destinations[i],NULL);
+            if ((expected || actual) && (!expected || !actual || !CFEqual(expected,actual)))
+                e = kVTVideoDecoderBadDataErr;
+            if (actual) CFRelease(actual);
+        }
+        CFRelease(transfer);
         if (e) return e;
     }
     return noErr;

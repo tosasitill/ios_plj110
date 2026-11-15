@@ -21,8 +21,8 @@
  * monochrome Rext remains an explicit unsupported coded-item path for now. */
 __attribute__((visibility("default"))) OSStatus X9HEIFCopyItemSample(CFDataRef file,
     uint32_t item_id, CMSampleBufferRef *sample, CFDictionaryRef *info);
-/* Internal adapter also receives the parsed VUI without reconstructing it
+/* Internal adapter also receives the parsed VUI and AU SEI without reconstructing them
  * from possibly synthesized CM extensions. Same owned outputs/gates. */
 OSStatus x9_heif_copy_item_sample(CFDataRef file, uint32_t item_id,
-    CMSampleBufferRef *sample, CFDictionaryRef *info, struct x9_hevc_vui *vui);
+    CMSampleBufferRef *sample, CFDictionaryRef *info, struct x9_hevc_vui *vui, struct x9_hevc_hdr *hdr);
 #endif

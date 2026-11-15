@@ -68,14 +68,14 @@ static int linearize_rgb(CGColorSpaceRef base, CGColorSpaceRef *space, CFDataRef
     return e;
 }
 static int source_color(CFDictionaryRef container, const struct x9_hevc_vui *vui,
-    enum x9_heif_source_color_policy policy, CFDictionaryRef *out)
+    const struct x9_hevc_hdr *hdr, enum x9_heif_source_color_policy policy, CFDictionaryRef *out)
 {
     *out = NULL;
     /* Progressive raster transfer only; never treat two fields as one
      * progressive image, or synthesize a field reconstruction. */
     if (vui->field_seq || vui->chroma_top != vui->chroma_bottom) return ENOTSUP;
     CFDictionaryRef colr = NULL;
-    int e = x9_heif_resolve_color_extensions(container,vui,&colr);
+    int e = x9_heif_resolve_color_extensions(container,vui,hdr,&colr);
     if (e) return e;
     CFMutableDictionaryRef d = CFDictionaryCreateMutable(NULL,0,
         &kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
@@ -86,7 +86,7 @@ static int source_color(CFDictionaryRef container, const struct x9_hevc_vui *vui
         kCMFormatDescriptionExtension_ChromaLocationTopField,kCMFormatDescriptionExtension_ChromaLocationBottomField };
     for (unsigned n = 0; n < 8 && !e; n++) {
         CFTypeRef value = CFDictionaryGetValue(colr,keys[n]);
-        /* Only the shared container/selected-SPS resolver is evidence.
+        /* Only the shared container/selected-SPS/actual-AU147 resolver is evidence.
          * CM's possibly synthesized extensions are never read here. */
         if (!value) continue;
         CFTypeID type = n == 0 ? CFDataGetTypeID() : n < 4 ? CFStringGetTypeID() :
@@ -198,11 +198,12 @@ static int prepare(struct native_context *c, uint32_t id, CFDictionaryRef inheri
     if (!e && image->type == X9_HEIF_HVC1) {
         CMSampleBufferRef sample = NULL; CFDictionaryRef temporary_info = NULL;
         struct x9_hevc_vui vui;
-        c->failure = x9_heif_copy_item_sample(c->file,id,&sample,&temporary_info,&vui);
+        struct x9_hevc_hdr hdr;
+        c->failure = x9_heif_copy_item_sample(c->file,id,&sample,&temporary_info,&vui,&hdr);
         if (!c->failure && (!sample || !temporary_info)) c->failure = kVTVideoDecoderBadDataErr;
         if (c->failure) e = EIO;
         else {
-            e = source_color(color,&vui,c->policy,&node->source);
+            e = source_color(color,&vui,&hdr,c->policy,&node->source);
             if (!e) e = x9_heif_copy_vui_info(&vui,&bitstream_info);
             /* Preserve coded-picture syntax facts from the same immutable
              * sample. Effective inherited color is still resolved below. */
@@ -238,6 +239,8 @@ static int prepare(struct native_context *c, uint32_t id, CFDictionaryRef inheri
                             CFSTR("declared-derived-colr-retained-not-applied")) :
                         CFSTR("identical-colr-inheritance-and-selected-sps"));
                 if (node->source) CFDictionarySetValue(record,CFSTR("ResolvedSourceColor"),node->source);
+                if (image->type == X9_HEIF_HVC1) CFDictionarySetValue(record,CFSTR("PreferredTransferDisposition"),
+                    CFSTR("actual AU147 supersedes SPS fallback; explicit non-2 container and caller ICC policy retained; source view uses selected transfer/gamma"));
                 if (bitstream_info) CFDictionarySetValue(record,CFSTR("BitstreamVUI"),bitstream_info);
                 CFArrayAppendValue(c->items,record);
             }
