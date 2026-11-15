@@ -39,7 +39,7 @@ struct x9_mm_smmu_owner {
     uint64_t reg64[sizeof(owner_reg64)/sizeof(owner_reg64[0])];
     uint32_t fault,staged_count,batch_start;
     uint64_t staged[4][2];
-    bool pending,active,authority_held;
+    bool pending,active,authority_held,camera_queue_live;
     struct owner_lease leases[2];
     struct owner_lease *current;
     const struct x9_camera_smmu_export *camera;
@@ -187,7 +187,7 @@ static int owner_live(struct x9_mm_smmu_owner *o)
     }
     uint32_t prod=owner_rr(o,0x98),cons=owner_rr(o,0x9c),mask=(2u<<o->qshift)-1u;
     if((prod|cons)&~mask)return EIO;
-    if(!o->camera) {
+    if(!o->camera_queue_live) {
         if(prod!=o->prod)return ESTALE;
         if(o->pending) {
             if(((cons-o->cons)&mask)>((o->prod-o->cons)&mask))return ESTALE;
@@ -227,6 +227,9 @@ static int owner_begin(struct x9_mm_smmu_owner *o)
     if(!e && owner_rr(o,0x98)!=owner_rr(o,0x9c))e=EBUSY;
     if(e) {owner_auth_leave(o,X9_MM_SMMU_UNEXPOSED);o->active=false;return e;}
     o->prod=o->cons=owner_rr(o,0x98);o->pending=false;o->staged_count=0;
+    /* Only now may camera's private command engine mutate the shared queue.
+     * The completed preceding codec record was checked before clearing it. */
+    o->camera_queue_live=o->camera!=NULL;
     return 0;
 }
 static uint64_t owner_token(void)
@@ -522,7 +525,7 @@ static void owner_camera_leave(void *cookie,uint64_t token,unsigned op)
     else if(!o->fault)o->fault=(uint32_t)e;
     o->prod=o->cons=owner_rr(o,0x98);
     owner_auth_leave(o,e?X9_MM_SMMU_QUARANTINED:X9_MM_SMMU_INSTALLED);
-    o->camera=NULL;o->active=false;o->active_sid=0;
+    o->camera=NULL;o->active=false;o->active_sid=0;o->camera_queue_live=false;
     lck_mtx_unlock(&mm_owner_lock);
 }
 static void owner_camera_complete(void *cookie,uint64_t token,unsigned op,int result)
