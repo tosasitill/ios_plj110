@@ -28,7 +28,7 @@ static int cam_native_producer_guard_locked(uint64_t epoch,struct x9_camera_smmu
     e=cam_irq.error?cam_irq.error:cam_irq_fbc.error?cam_irq_fbc.error:cam_irq_fbc.source_error;
     if(!e && (cam_irq.prepared || !cam_irq.close_attempted || cam_irq.owns ||
        cam_irq.accepting || cam_irq.busy || cam_irq.count || !cam_irq_fbc.bound ||
-       !cam_irq_fbc.done_seen || !cam_irq_fbc.count_accepted || cam_irq_fbc.epoch!=epoch ||
+       !cam_repeat_retirement_receipt_locked() || cam_irq_fbc.epoch!=epoch ||
        cam_irq_fbc.source_phase!=CAM_STREAM_STOPPED ||
        cam_irq_fbc.source_issued!=(CAM_STREAM_ON|CAM_STREAM_OFF) ||
        cam_irq_fbc.source_ack!=(CAM_STREAM_ON|CAM_STREAM_OFF) ||

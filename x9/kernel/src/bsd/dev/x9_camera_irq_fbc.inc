@@ -106,7 +106,7 @@ static int cam_irq_fbc_note_locked(unsigned bank,uint32_t control,uint32_t count
         uint32_t original=cam_sv.before[bank][cam_sv.field[CAM_SV_FBC]];
         if(cam_sv.epoch!=cam_irq_fbc.epoch || !cam_irq.close_attempted ||
            cam_irq.owns || cam_irq.accepting || cam_irq.busy || cam_irq.count ||
-           !cam_irq_fbc.count_accepted || counter!=cam_sv.credit_spent_count[bank])
+           !cam_repeat_retirement_receipt_locked() || counter!=cam_sv.credit_spent_count[bank])
             return cam_irq_fbc_fault_locked(ESTALE);
         /* Preserve RCNT/WCNT/DROP/CNT exactly. Only OUR issued close may
          * return FBC EN to original; a sampled target cannot regress. */
