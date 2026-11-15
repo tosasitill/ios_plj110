@@ -86,6 +86,9 @@ static const struct x9_camera_sensor sensors[] = {
     {2,2,0x10,0x0615,3264,2448,0,4361,7642,65530,1,16,1024,1008,0,4,
      front_power, sizeof(front_power)/sizeof(front_power[0])}
 };
+/* All cold/MM teardown paths consult the actual native controller's export
+ * journal even when configure failed before core attempted capture(on). */
+static int cam_native_sensor_retirement_guard_locked(uint64_t epoch);
 #include "x9_camera_pipeline.inc"
 #include "x9_camera_s1.inc"
 #include "x9_camera_smmu.inc"

@@ -29,6 +29,11 @@ struct x9_camera_native_engine {
      * Called with control mutex, without the worker's frame mutex. */
     int (*exposure)(void *, uint64_t epoch, const struct x9_camera_sensor *,
         uint32_t exposure_lines, uint32_t gain_q10, uint32_t frame_lines);
+    /* Also called after a failed prepare, before core attempted capture.
+     * Any exported/installed normal map or pending DMA retains the complete
+     * sensor/MM/receiver journal until the actual engine proves retirement.
+     * No caller-supplied "drained" bit or cleanup-success assumption. */
+    int (*retirement_guard)(void *, uint64_t epoch, const struct x9_camera_sensor *);
 };
 #define X9_CAMERA_NATIVE_ENGINE_VERSION 1u
 /* Standalone thread entry, serializes admission and publishes the adapter

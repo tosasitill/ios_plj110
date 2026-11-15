@@ -11,6 +11,14 @@ static struct {
     int error;
     struct x9_camera_native_source_status source;
 } cam_native_sensor;
+static int cam_native_sensor_retirement_guard_locked(uint64_t epoch)
+{
+    if(!epoch)epoch=cam_native_sensor.epoch; /* MM-only close checks current native owner */
+    if(!epoch || epoch!=cam_native_sensor.epoch || !cam_native_sensor.engine.version)return 0;
+    if(cam_native_sensor.sensor<X9_CAMERA_BACK || cam_native_sensor.sensor>X9_CAMERA_FRONT)return ESTALE;
+    return cam_native_sensor.engine.retirement_guard(cam_native_sensor.engine.context,
+        epoch,&sensors[cam_native_sensor.sensor-1]);
+}
 
 static int cam_native_sensor_match(const struct x9_camera_sensor *s)
 {
@@ -120,7 +128,8 @@ int x9_camera_native_sensor_register(const struct x9_camera_native_engine *engin
         .capture=cam_native_sensor_capture};
     int e;
     if(!engine || engine->version!=X9_CAMERA_NATIVE_ENGINE_VERSION || !engine->context ||
-       !engine->admit || !engine->prepare || !engine->capture || !engine->exposure)return EINVAL;
+       !engine->admit || !engine->prepare || !engine->capture || !engine->exposure ||
+       !engine->retirement_guard)return EINVAL;
     lck_mtx_lock(&camera_native_registration_lock);
     /* Check before admit: no second hardware admission after an earlier
      * successful registration or partially failed physical probe. */

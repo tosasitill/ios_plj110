@@ -424,6 +424,8 @@ static int cam_mm_session_close(uint64_t epoch,struct x9_camera_mm_status *r)
     int off,prior;
     if(!epoch || epoch!=cam_mm_live.epoch || cam_mm_live.close_attempted)return ESTALE;
     if(session.capture)return EBUSY;
+    off=cam_native_sensor_retirement_guard_locked(0);
+    if(off)return off;
     if(cam_smi_clocks_held())return EBUSY;
     cam_mm_live.close_attempted=true;
     prior=cam_mm_live.error;
