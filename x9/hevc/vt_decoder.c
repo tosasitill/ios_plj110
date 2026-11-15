@@ -74,6 +74,7 @@ struct state {
     struct pending_frame pending[X9_VDEC_MAX_PENDING];
     CFDataRef hvcc;
     struct x9_hevc_config config;
+    struct x9_hevc_hdr_sequence hdr_sequence;
 };
 static CFStringRef symbol_key(const char *name)
 {
@@ -117,6 +118,7 @@ static void video_cancel(struct state *s)
     s->invalid = true; s->session = NULL;
     if (s->fd >= 0) { close(s->fd); s->fd = -1; }
     s->native_session = 0;
+    memset(&s->hdr_sequence,0,sizeof(s->hdr_sequence));
     for (unsigned i = 0; i < s->pending_count; i++) CFRelease(s->pending[i].description);
     s->pending_count = 0;
     if (s->hvcc) { CFRelease(s->hvcc); s->hvcc = NULL; }
@@ -229,6 +231,7 @@ static OSStatus start(Base object, void *session, CMVideoFormatDescriptionRef fo
         s->fd = fd; fd = -1; s->session = session; s->config = c;
         s->generation = status.generation; s->native_session = native.session;
         s->max_pending = caps.max_pending;
+        memset(&s->hdr_sequence,0,sizeof(s->hdr_sequence));
     }
 done:
     if (fd >= 0) close(fd);

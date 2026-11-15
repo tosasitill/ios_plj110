@@ -48,6 +48,7 @@ static void video_fault(struct state *s, OSStatus error)
      * would cause VT's duct to emit the same accepted current frame again. */
     if (s->fd >= 0) { close(s->fd); s->fd = -1; }
     s->native_session = 0;
+    memset(&s->hdr_sequence,0,sizeof(s->hdr_sequence));
     while (s->pending_count && !s->invalid) {
         struct pending_frame f = pending_take(s, 0);
         OSStatus e = video_emit(s, &f, error, 0, NULL);
@@ -132,6 +133,7 @@ static OSStatus decode_frame(Base object, void *frame, CMSampleBufferRef sample,
     struct state *s = storage(object);
     pthread_mutex_lock(&s->lock);
     uint8_t *input = NULL;
+    CMVideoFormatDescriptionRef snapshot = NULL;
     uint64_t token = 0;
     Boolean accepted = false;
     OSStatus e = kVTVideoDecoderBadDataErr;
@@ -158,9 +160,17 @@ static OSStatus decode_frame(Base object, void *frame, CMSampleBufferRef sample,
     if (!input) { e = kVTAllocationFailedErr; goto done; }
     e = CMBlockBufferCopyDataBytes(block, 0, bytes, input);
     if (e) goto done;
-    size_t needed = 0;
-    int gate = x9_hevc_au_annexb(&s->config, CFDataGetBytePtr(s->hvcc), input, bytes, NULL, 0, &needed);
+    struct x9_hevc_au_metadata metadata;
+    struct x9_hevc_hdr_sequence prospective;
+    int gate = x9_hevc_sample_metadata(&s->config,CFDataGetBytePtr(s->hvcc),
+        (size_t)CFDataGetLength(s->hvcc),input,bytes,&metadata);
+    if (!gate) gate = x9_hevc_hdr_sequence_next(&s->hdr_sequence,&metadata,&prospective);
     if (gate) { e = codec_error(gate); goto done; }
+    /* Allocation and cross-source conflicts are resolved BEFORE SUBMIT. No
+     * accepted token can be lost due to a later metadata allocation failure.
+     * Container values stay picture-local; they never become SEI state. */
+    e = x9_hevc_copy_hdr_description(description,&prospective.hdr,&snapshot);
+    if (e) goto done;
     if (s->next_token == UINT64_MAX) { e = kVTVideoDecoderNotAvailableNowErr; goto done; }
     token = ++s->next_token;
     struct x9_vdec_submit r = { .version = X9_VDEC_VERSION, .generation = s->generation,
@@ -173,9 +183,11 @@ static OSStatus decode_frame(Base object, void *frame, CMSampleBufferRef sample,
             video_fault(s, e);
         goto done; /* kernel/provider did NOT accept this current input */
     }
+    s->hdr_sequence = prospective; /* provider accepted; not an ACK-as-frame */
     s->pending[s->pending_count++] = (struct pending_frame){ .token = token, .frame = frame,
-        .description = (CMVideoFormatDescriptionRef)CFRetain(description),
+        .description = snapshot,
         .suppress = !!(flags & kVTDecodeFrame_DoNotOutputFrame) };
+    snapshot = NULL; /* ownership transferred to this ORIGINAL token */
     accepted = true;
     /* EnableAsync permits, but never requires, background decompression.
      * Only EnableTemporal permits indefinite display-order deferral. */
@@ -187,6 +199,7 @@ static OSStatus decode_frame(Base object, void *frame, CMSampleBufferRef sample,
         if (info) *info |= kVTDecodeInfo_Asynchronous;
     }
 done:
+    if (snapshot) CFRelease(snapshot);
     free(input);
     pthread_mutex_unlock(&s->lock);
     CFRelease(object);

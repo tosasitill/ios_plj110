@@ -3,6 +3,14 @@
 #define X9_VT_IMAGE_METADATA_H
 #include <CoreMedia/CoreMedia.h>
 #include <CoreVideo/CoreVideo.h>
+#include "hevc_bitstream.h"
+
+/* Owned immutable format snapshot: preserve every original extension and
+ * merge only present direct/persistent SEI137/144. CM/container and SEI must
+ * agree byte-for-byte when both exist; absent SEI does not erase CM metadata.
+ * Source format is never mutated. Cleared output on failure. */
+OSStatus x9_hevc_copy_hdr_description(CMVideoFormatDescriptionRef,
+                                    const struct x9_hevc_hdr *, CMVideoFormatDescriptionRef *);
 
 /* The pixel buffer contains the already-cropped visible picture. Do not copy
  * the compressed description's coded-size clean aperture onto it a second

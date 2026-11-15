@@ -1,6 +1,48 @@
 #include "vt_image_metadata.h"
 #include <VideoToolbox/VideoToolbox.h>
 #include <math.h>
+#include <string.h>
+
+OSStatus x9_hevc_copy_hdr_description(CMVideoFormatDescriptionRef source,
+    const struct x9_hevc_hdr *hdr, CMVideoFormatDescriptionRef *out)
+{
+    if (!out) return kVTParameterErr;
+    *out = NULL;
+    if (!source || !hdr || CMFormatDescriptionGetMediaType(source) != kCMMediaType_Video ||
+        hdr->mastering_present > 1 || hdr->light_present > 1) return kVTParameterErr;
+    CFStringRef keys[] = { kCMFormatDescriptionExtension_MasteringDisplayColorVolume,
+        kCMFormatDescriptionExtension_ContentLightLevelInfo };
+    const uint8_t *bytes[] = { hdr->mastering, hdr->light };
+    const CFIndex lengths[] = {24,4};
+    const unsigned present[] = { hdr->mastering_present, hdr->light_present };
+    for (unsigned i = 0; i < 2; i++) {
+        CFTypeRef value = CMFormatDescriptionGetExtension(source,keys[i]);
+        if (value && (CFGetTypeID(value) != CFDataGetTypeID() ||
+            CFDataGetLength(value) != lengths[i] ||
+            (present[i] && memcmp(CFDataGetBytePtr(value),bytes[i],(size_t)lengths[i]))))
+            return kVTVideoDecoderBadDataErr;
+    }
+    CFDictionaryRef original = CMFormatDescriptionGetExtensions(source);
+    CFMutableDictionaryRef extensions = original ? CFDictionaryCreateMutableCopy(NULL,0,original) :
+        CFDictionaryCreateMutable(NULL,0,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
+    if (!extensions) return kVTAllocationFailedErr;
+    OSStatus e = noErr;
+    for (unsigned i = 0; i < 2; i++) {
+        if (!present[i]) continue;
+        CFDataRef value = CFDataCreate(NULL,bytes[i],lengths[i]);
+        if (!value) { e = kVTAllocationFailedErr; break; }
+        CFDictionarySetValue(extensions,keys[i],value); CFRelease(value);
+    }
+    if (!e) {
+        CMVideoDimensions size = CMVideoFormatDescriptionGetDimensions(source);
+        e = CMVideoFormatDescriptionCreate(NULL,CMFormatDescriptionGetMediaSubType(source),
+            size.width,size.height,extensions,out);
+        if (!e && !*out) e = kVTAllocationFailedErr;
+    }
+    CFRelease(extensions);
+    if (e && *out) { CFRelease(*out); *out = NULL; }
+    return e;
+}
 
 struct image_attachment {
     CFStringRef source, destination;

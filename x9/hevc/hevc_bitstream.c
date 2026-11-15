@@ -222,7 +222,8 @@ static uint32_t be32(const uint8_t *p)
 #define MAIN_COMPATIBILITY (UINT32_C(1) << (31 - X9_HEVC_PROFILE_MAIN))
 static int nal(const uint8_t *p, size_t n, unsigned type)
 {
-    if (n < 3 || (p[0] & 0x80) || ((p[0] >> 1) & 63) != type ||
+    if (n < 2 || (n < 3 && type != 36 && type != 37) ||
+        (p[0] & 0x80) || ((p[0] >> 1) & 63) != type ||
         (p[0] & 1) || (p[1] >> 3) || !(p[1] & 7)) return EINVAL;
     return 0;
 }
@@ -567,23 +568,27 @@ int x9_hevc_parameter_sets_annexb(const struct x9_hevc_config *c, const uint8_t 
 }
 static int au_annexb(const struct x9_hevc_config *c, const uint8_t *hvcc,
     const uint8_t *p, size_t n, uint8_t *dst, size_t cap, size_t *written,
-    int independent, struct x9_hevc_irap_picture *picture)
+    int independent, struct x9_hevc_irap_picture *picture,
+    struct x9_hevc_au_metadata *metadata)
 {
     if (!c || !hvcc || !p || !written || !n || n > X9_HEVC_MAX_INPUT || catalog_valid(c) ||
         (c->length_size != 1 && c->length_size != 2 && c->length_size != 4)) return EINVAL;
     *written = 0;
     size_t at = 0, size = 0;
     unsigned pictures = 0, slices = 0, vcl = 0, temporal = 0, nals = 0, picture_pps = 0;
-    /* Only the standalone gate uses phase/flag equality. Do not silently
-     * tighten the existing stateful AU API or alter the legacy IDR ioctl. */
+    /* Stateful AU ordering follows 7.4.2.4.4, including legal mid-picture
+     * prefix/suffix NALs. The standalone gate retains its narrower ordering.
+     * A prefix after a VCL must be followed by another VCL in THIS AU. */
     unsigned phase = 0, no_output = 0; /* prefix0, VCL1, suffix2, EOS3, EOB4 */
+    unsigned prefix_pending = 0, eos = 0, eob = 0;
     while (at < n) {
         if (++nals > 1024 || n - at < c->length_size) return EINVAL;
         uint32_t bytes = 0;
         for (unsigned j = 0; j < c->length_size; j++) bytes = (bytes << 8) | p[at++];
-        if (bytes > n - at || bytes < 3) return EINVAL;
+        if (bytes > n - at || bytes < 2) return EINVAL;
         unsigned type = (p[at] >> 1) & 63, tid = (p[at + 1] & 7) - 1;
         if (nal(p + at, bytes, type)) return EINVAL;
+        if (phase == 4 || (phase == 3 && type != 37)) return EINVAL;
         if (type < 32) {
             if (type > 21 || (type > 9 && type < 16)) return ENOTSUP;
             if (independent && type < 16) return ENOTSUP;
@@ -596,10 +601,10 @@ static int au_annexb(const struct x9_hevc_config *c, const uint8_t *hvcc,
             unsigned pid = ue(&b);
             if (b.error || !find_set(c, 34, pid) || (!slices && !first) ||
                 (slices && (type != vcl || tid != temporal || pid != picture_pps ||
-                 (independent && prior != no_output)))) return EINVAL;
+                 prior != no_output))) return EINVAL;
             picture_pps = pid;
             pictures += first; slices++; vcl = type; temporal = tid;
-            no_output = prior; phase = 1;
+            no_output = prior; phase = 1; prefix_pending = 0;
         } else if (type >= 32 && type <= 34) {
             unsigned i = 0;
             while (i < c->parameter_set_count && (c->parameter_sets[i].type != type ||
@@ -608,28 +613,33 @@ static int au_annexb(const struct x9_hevc_config *c, const uint8_t *hvcc,
             if (i == c->parameter_set_count) return ENOTSUP;
             if (slices) return EINVAL; /* next-picture sets cannot follow VCL */
         } else if (type == 35) {
-            if (slices || (independent && nals != 1)) return EINVAL;
+            if (slices || nals != 1) return EINVAL;
         } else if (type == 39) {
             if (independent && phase) return EINVAL;
+            if (slices) prefix_pending = 1;
         } else if (type == 40 || type == 38) {
-            if (independent) {
-                if (!phase || phase >= 3) return EINVAL;
-                phase = 2;
-            }
+            if (!slices) return EINVAL;
+            phase = 2;
         } else if (type == 36 || type == 37) {
-            if (independent) {
-                unsigned next = type == 36 ? 3u : 4u;
-                if (!phase || phase >= next) return EINVAL;
-                phase = next;
-            }
+            unsigned next = type == 36 ? 3u : 4u;
+            if (!slices || phase >= next) return EINVAL;
+            /* 7.3.2.6/.7: empty RBSP, NOT rbsp_trailing_bits(). Only the
+             * two-byte NAL header is present; 7.4.2.2 requires TemporalId0. */
+            if (tid || bytes != 2) return EINVAL;
+            phase = next;
+            if (type == 36) eos = 1; else eob = 1;
         } else return ENOTSUP;
         if (size > X9_HEVC_MAX_INPUT - 4 || bytes > X9_HEVC_MAX_INPUT - size - 4) return E2BIG;
         size += bytes + 4; at += bytes;
     }
     if (pictures != 1) return ENOTSUP;
+    if (prefix_pending) return EINVAL;
     *written = size;
     if (picture) *picture = (struct x9_hevc_irap_picture){ .nal_type = vcl,
         .pps_id = picture_pps, .no_output_of_prior_pics_flag = no_output };
+    if (metadata) *metadata = (struct x9_hevc_au_metadata){ .nal_type = vcl,
+        .temporal_id = temporal, .pps_id = picture_pps,
+        .no_output_of_prior_pics_flag = no_output, .eos_present = eos, .eob_present = eob };
     if (!dst) return 0;
     if (cap < size) return EMSGSIZE;
     at = 0; size = 0;
@@ -643,7 +653,7 @@ static int au_annexb(const struct x9_hevc_config *c, const uint8_t *hvcc,
 }
 int x9_hevc_au_annexb(const struct x9_hevc_config *c, const uint8_t *hvcc,
     const uint8_t *p, size_t n, uint8_t *dst, size_t cap, size_t *written)
-{ return au_annexb(c,hvcc,p,n,dst,cap,written,0,NULL); }
+{ return au_annexb(c,hvcc,p,n,dst,cap,written,0,NULL,NULL); }
 int x9_hevc_irap_annexb(const struct x9_hevc_config *c, const uint8_t *hvcc,
     const uint8_t *p, size_t n, uint8_t *dst, size_t cap, size_t *written,
     struct x9_hevc_irap_picture *picture)
@@ -653,7 +663,7 @@ int x9_hevc_irap_annexb(const struct x9_hevc_config *c, const uint8_t *hvcc,
     *written = 0;
     size_t bytes = 0;
     struct x9_hevc_irap_picture parsed = {0};
-    int e = au_annexb(c,hvcc,p,n,dst,cap,&bytes,1,&parsed);
+    int e = au_annexb(c,hvcc,p,n,dst,cap,&bytes,1,&parsed,NULL);
     if (!e) {
         *written = bytes;
         if (picture) *picture = parsed;
@@ -696,7 +706,8 @@ int x9_hevc_sample_vui(const struct x9_hevc_config *c, const uint8_t *hvcc,
     }
     return EINVAL;
 }
-static int sei_hdr(const uint8_t *p, size_t n, struct x9_hevc_hdr *hdr)
+static int sei_hdr(const uint8_t *p, size_t n, unsigned temporal, unsigned after_vcl,
+    const struct x9_hevc_hdr *before, struct x9_hevc_hdr *hdr, unsigned counts[2])
 {
     struct bits b = { .p = p + 2, .n = n - 2 };
     unsigned messages = 0;
@@ -720,49 +731,108 @@ static int sei_hdr(const uint8_t *p, size_t n, struct x9_hevc_hdr *hdr)
             bytes += value;
         } while (value == 255);
         if (bytes > b.n-b.pos) return EINVAL;
-        if (type == 133) return ENOTSUP; /* scalable_nesting scope not guessed */
+        unsigned prefix = ((p[0] >> 1) & 63) == 39;
+        if (prefix && type == 133) return ENOTSUP; /* nesting scope not guessed */
+        /* D.2.1: 137/144 in a suffix NAL use reserved_sei_message(), not
+         * mastering_display/content_light syntax. Never promote to HDR. */
+        unsigned mastering = prefix && type == 137, light = prefix && type == 144;
         uint8_t raw[24];
-        if ((type == 137 && bytes != 24) || (type == 144 && bytes != 4)) return EINVAL;
-        /* This still-image resolver only interprets direct prefix/Tid0
-         * HDR. Other placement/temporal scope is unsupported, not claimed
-         * malformed without resolving the applicable SEI semantics. */
-        if ((type == 137 || type == 144) &&
-            (((p[0] >> 1) & 63) != 39 || (p[1] & 7) != 1)) return ENOTSUP;
+        if ((mastering && bytes != 24) || (light && bytes != 4)) return EINVAL;
+        /* D.3.1 PicUnitRepConSeiList: at most eight identical structures
+         * for each HDR type in this base-layer one-picture AU. */
+        if ((mastering && ++counts[0] > 8) || (light && ++counts[1] > 8)) return EINVAL;
+        if ((mastering || light) && ((p[1] & 7) - 1u != temporal ||
+            (after_vcl && ((mastering && !before->mastering_present) ||
+                          (light && !before->light_present))))) return EINVAL;
         for (uint32_t i = 0; i < bytes && !b.error; i++) {
             value = get(&b,8);
-            if (type == 137 || type == 144) raw[i] = (uint8_t)value;
+            if (mastering || light) raw[i] = (uint8_t)value;
         }
         if (b.error) return EINVAL;
-        if (type == 137) {
+        if (mastering) {
             if (hdr->mastering_present && memcmp(hdr->mastering,raw,24)) return EINVAL;
             memcpy(hdr->mastering,raw,24); hdr->mastering_present = 1;
-        } else if (type == 144) {
+        } else if (light) {
             if (hdr->light_present && memcmp(hdr->light,raw,4)) return EINVAL;
             memcpy(hdr->light,raw,4); hdr->light_present = 1;
         }
     }
     return EINVAL; /* the final rbsp_trailing_bits byte is required */
 }
-int x9_hevc_sample_hdr(const struct x9_hevc_config *c, const uint8_t *hvcc,
-    size_t hvcc_bytes, const uint8_t *sample, size_t sample_bytes, struct x9_hevc_hdr *out)
+int x9_hevc_sample_metadata(const struct x9_hevc_config *c, const uint8_t *hvcc,
+    size_t hvcc_bytes, const uint8_t *sample, size_t sample_bytes,
+    struct x9_hevc_au_metadata *out)
 {
     if (!out) return EINVAL;
     memset(out,0,sizeof(*out));
     if (!c || hvcc_bytes != c->config_bytes) return EINVAL;
     size_t needed = 0;
-    int e = x9_hevc_au_annexb(c,hvcc,sample,sample_bytes,NULL,0,&needed);
+    struct x9_hevc_au_metadata metadata = {0};
+    int e = au_annexb(c,hvcc,sample,sample_bytes,NULL,0,&needed,0,NULL,&metadata);
     if (e) return e;
     struct x9_hevc_hdr hdr = {0};
+    struct x9_hevc_hdr before = {0};
+    unsigned vcl_seen = 0;
+    unsigned counts[2] = {0};
     size_t at = 0;
     while (at < sample_bytes) {
         uint32_t bytes = 0;
         for (unsigned j = 0; j < c->length_size; j++) bytes = (bytes << 8) | sample[at++];
         unsigned type = (sample[at] >> 1) & 63;
+        if (type < 32) vcl_seen = 1;
         if (type == 39 || type == 40) {
-            e = sei_hdr(sample+at,bytes,&hdr);
+            e = sei_hdr(sample+at,bytes,metadata.temporal_id,vcl_seen,&before,&hdr,counts);
             if (e) return e;
+            if (!vcl_seen) before = hdr;
         }
         at += bytes;
     }
-    *out = hdr; return 0;
+    metadata.hdr = hdr;
+    *out = metadata; return 0;
+}
+int x9_hevc_sample_hdr(const struct x9_hevc_config *c, const uint8_t *hvcc,
+    size_t hvcc_bytes, const uint8_t *sample, size_t sample_bytes, struct x9_hevc_hdr *out)
+{
+    if (!out) return EINVAL;
+    memset(out,0,sizeof(*out));
+    struct x9_hevc_au_metadata metadata;
+    int e = x9_hevc_sample_metadata(c,hvcc,hvcc_bytes,sample,sample_bytes,&metadata);
+    if (!e) *out = metadata.hdr;
+    return e;
+}
+int x9_hevc_hdr_sequence_next(const struct x9_hevc_hdr_sequence *current,
+    const struct x9_hevc_au_metadata *picture, struct x9_hevc_hdr_sequence *out)
+{
+    if (!out) return EINVAL;
+    /* Permit current == out, but still clear output on every failure. */
+    struct x9_hevc_hdr_sequence previous = {0};
+    if (current) previous = *current;
+    memset(out,0,sizeof(*out));
+    if (!current || !picture || previous.started > 1 || previous.eos_present > 1 ||
+        previous.eob_present > 1 || previous.hdr.mastering_present > 1 ||
+        previous.hdr.light_present > 1 || picture->hdr.mastering_present > 1 ||
+        picture->hdr.light_present > 1 || picture->eos_present > 1 || picture->eob_present > 1 ||
+        picture->nal_type > 21 || (picture->nal_type > 9 && picture->nal_type < 16) ||
+        picture->temporal_id > 6 || (picture->nal_type >= 16 && picture->temporal_id) ||
+        picture->no_output_of_prior_pics_flag > 1 || previous.eob_present) return EINVAL;
+    unsigned irap = picture->nal_type >= 16;
+    if ((!previous.started || previous.eos_present) && !irap) return ENOTSUP;
+    /* 3.31 / 8.1, base layer, no external HandleCraAsBlaFlag. A CRA in the
+     * middle of a CVS does NOT clear state, regardless of its slice no_output.
+     * DRAIN is absent from this API and cannot manufacture a CVS boundary. */
+    unsigned new_clvs = !previous.started || previous.eos_present ||
+        (picture->nal_type >= 16 && picture->nal_type <= 20);
+    struct x9_hevc_hdr_sequence next = new_clvs ?
+        (struct x9_hevc_hdr_sequence){0} : previous;
+    if (picture->hdr.mastering_present) {
+        if ((!new_clvs && !next.hdr.mastering_present) || (next.hdr.mastering_present &&
+            memcmp(next.hdr.mastering,picture->hdr.mastering,24))) return EINVAL;
+        memcpy(next.hdr.mastering,picture->hdr.mastering,24); next.hdr.mastering_present = 1;
+    }
+    if (picture->hdr.light_present) {
+        if (next.hdr.light_present && memcmp(next.hdr.light,picture->hdr.light,4)) return EINVAL;
+        memcpy(next.hdr.light,picture->hdr.light,4); next.hdr.light_present = 1;
+    }
+    next.started = 1; next.eos_present = picture->eos_present; next.eob_present = picture->eob_present;
+    *out = next; return 0;
 }

@@ -64,8 +64,11 @@ OSStatus X9HEVCCopyHardwarePicture(CMSampleBufferRef sample, CVPixelBufferRef *o
     uint8_t *au = malloc(bytes);
     if (!au) return kVTAllocationFailedErr;
     OSStatus e = CMBlockBufferCopyDataBytes(block,0,bytes,au);
+    struct x9_hevc_hdr hdr = {0};
     if (!e && x9_hevc_irap_annexb(&config,CFDataGetBytePtr(hvcc),au,bytes,NULL,0,&needed,NULL))
         e = kVTVideoDecoderUnsupportedDataFormatErr;
+    if (!e && x9_hevc_sample_hdr(&config,CFDataGetBytePtr(hvcc),
+        (size_t)CFDataGetLength(hvcc),au,bytes,&hdr)) e = kVTVideoDecoderBadDataErr;
     free(au);
     if (e) return e;
     e = X9HEVCRegisterDecoder();
@@ -80,8 +83,13 @@ OSStatus X9HEVCCopyHardwarePicture(CMSampleBufferRef sample, CVPixelBufferRef *o
     CFDictionaryRef spec = CFDictionaryCreate(NULL,keys,values,4,
         &kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
     if (!spec) return kVTAllocationFailedErr;
+    CMVideoFormatDescriptionRef expected = NULL;
+    e = x9_hevc_copy_hdr_description(format,&hdr,&expected);
+    if (e) { CFRelease(spec); return e; }
     struct picture_result r = {0};
-    if (pthread_mutex_init(&r.lock,NULL)) { CFRelease(spec); return kVTAllocationFailedErr; }
+    if (pthread_mutex_init(&r.lock,NULL)) {
+        CFRelease(expected); CFRelease(spec); return kVTAllocationFailedErr;
+    }
     VTDecompressionSessionRef session = NULL;
     VTDecompressionOutputCallbackRecord callback = { picture_output,&r };
     e = VTDecompressionSessionCreate(NULL,format,spec,NULL,&callback,&session);
@@ -118,7 +126,10 @@ OSStatus X9HEVCCopyHardwarePicture(CMSampleBufferRef sample, CVPixelBufferRef *o
                 CVPixelBufferGetBytesPerRowOfPlane(r.pixel,p) < (size_t)config.width*(depth == 10 ? 2u : 1u))
                 e = kVTVideoDecoderBadDataErr;
     }
-    if (!e) e = x9_hevc_validate_hdr_metadata(format,r.pixel);
+    /* Independently derive expected enrichment from the original input AU;
+     * never repair a borrowed callback pixel to force the identity check. */
+    if (!e) e = x9_hevc_validate_hdr_metadata(expected,r.pixel);
+    CFRelease(expected);
     if (!e) { *out = r.pixel; r.pixel = NULL; }
     if (r.pixel) CVPixelBufferRelease(r.pixel);
     pthread_mutex_destroy(&r.lock);

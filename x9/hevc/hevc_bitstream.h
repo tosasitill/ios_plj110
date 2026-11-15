@@ -99,14 +99,15 @@ int x9_hevc_parameter_sets_annexb(const struct x9_hevc_config *, const uint8_t *
  * synthesized CM extensions or SEI override; output is cleared on failure. */
 int x9_hevc_sample_vui(const struct x9_hevc_config *, const uint8_t *hvcc,
     size_t hvcc_bytes, const uint8_t *sample, size_t sample_bytes, struct x9_hevc_vui *);
-/* Explicit, unscoped base-layer prefix TemporalId0 SEI in THIS complete AU,
- * not persistent video
- * state or a transfer/tone-map policy. Bytes are the original big-endian
+/* Explicit, non-nested base-layer prefix SEI in THIS complete AU, not
+ * persistent video state or a transfer/tone-map policy. TemporalId must match
+ * the picture. Bytes are the original big-endian
  * payloads, after canonical emulation-prevention removal. No numeric scaling
  * or RGB-primary reorder. Equal repeated messages are legal; conflicting
  * values, malformed SEI lengths/trailing bits fail with cleared output.
- * HDR in suffix/nonzero TemporalId and scalable nesting require further
- * placement/scope resolution and currently return ENOTSUP;
+ * Mid-picture prefix repeats require the same type before the first VCL.
+ * D.2.1 defines suffix137/144 as reserved payloads, NOT HDR; they are skipped.
+ * Scalable nesting requires scope resolution and currently returns ENOTSUP;
  * unknown non-nesting messages are bounded/validated, not interpreted. */
 struct x9_hevc_hdr {
     uint32_t mastering_present, light_present;
@@ -114,4 +115,28 @@ struct x9_hevc_hdr {
 };
 int x9_hevc_sample_hdr(const struct x9_hevc_config *, const uint8_t *hvcc,
     size_t hvcc_bytes, const uint8_t *sample, size_t sample_bytes, struct x9_hevc_hdr *);
+/* Complete AU/catalog/SEI validation before publishing any facts. EOS/EOB are
+ * observed NAL units, not inferred from DRAIN or no_output_of_prior_pics_flag.
+ * The metadata gate is bounded, not a complete validator of unknown SEI
+ * semantics or reserved payloads. Output is cleared on failure. */
+struct x9_hevc_au_metadata {
+    uint32_t nal_type, temporal_id, pps_id, no_output_of_prior_pics_flag;
+    uint32_t eos_present, eob_present;
+    struct x9_hevc_hdr hdr;
+};
+int x9_hevc_sample_metadata(const struct x9_hevc_config *, const uint8_t *hvcc,
+    size_t hvcc_bytes, const uint8_t *sample, size_t sample_bytes,
+    struct x9_hevc_au_metadata *);
+/* Prospective, direct-SEI-only state; zero initializes a fresh bitstream.
+ * Commit ONLY after the native provider accepts SUBMIT. Container/CM values
+ * are deliberately not stored here. No external HandleCraAsBlaFlag is used.
+ * Mastering persists from the CLVS first picture; late CLLI is accepted and
+ * retained for current/future inputs. This does NOT retroactively relabel
+ * earlier token snapshots or already-emitted pictures with late CLLI. */
+struct x9_hevc_hdr_sequence {
+    struct x9_hevc_hdr hdr;
+    uint32_t started, eos_present, eob_present;
+};
+int x9_hevc_hdr_sequence_next(const struct x9_hevc_hdr_sequence *,
+    const struct x9_hevc_au_metadata *, struct x9_hevc_hdr_sequence *);
 #endif
