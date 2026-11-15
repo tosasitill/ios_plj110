@@ -156,6 +156,13 @@ python3 -I x9/bluetooth/candidate.py --name <全新简单名字> \
 失败保留日志、无完成 manifest、如已生成被拒绝镜像则改名 `.failed`，不能交付为完整候选。
 **boot.img 本身不安装 iOS 根盘中的桥或 jobs**；root 修改先确认、核对原件及 live root preflight，用户手动 boot 后才验原生功能。
 
+`stage.py` 已实现专用 root 安装路径，默认只做离线 plan；实际安装/恢复必须先得到此次 root 修改的明确确认。
+它使用当前 live `base||extension` 全量快照、私有 APFS clone、原生 HFS VFS 和现有 `pinfile` compare-write，
+不猜 catalog/物理 extent、不改 Android pin/immutable、不重启设备。
+完整原件比对、备份和 write-intent ledger 先于写入；最终验证每 part 的全量 hash，失败尝试 compare 回滚。
+断电/torn block 不是原子可恢复保证；未知块拒绝盲目覆盖。命令和约束见 [STAGING.md](STAGING.md)。
+安装器目前只通过源码编译，**未执行 plan/安装或设备验证**；安装许可不提升 audio/runtime 验收状态。
+
 已确认的音频边界：20H392 type0 VSC support 表全0，`"shci"` source2 的 PCM 路由操作会经
 `BD_VSC_WRITE_PCM_PARAM` admission 返回 unsupported，不更新原路由状态；上层继续，不证明它阻断初始启动。
 Android 已有 FC72 voice-interface 初始化，不是标准 `WriteVoiceSetting`，其常量不证明 HCI/I2S 路由语义。
@@ -176,7 +183,8 @@ payload 上限251按原模块声明 maxlen255/四字节wire头的安全预算设
 可选 `--launchd-source <仓库内原始20H392 plist目录>` 仅生成启动候选配置：
 先校验两个原job的Label/mobile身份/ProgramArguments/MachServices，再仅override `Program` 为
 `/usr/libexec/X9BluetoothLaunch` 和 `/usr/libexec/X9BlueTool`，保留原arguments、MachServices、KeepAlive、events及其它字段。
-输入原件副本在输出 `launchd-originals/`，派生件在 `launchd-candidates/`；两者不入git、均未安装、**不是可stage包**。
+输入原件副本在输出 `launchd-originals/`，派生件在 `launchd-candidates/`；两者不入git、均未安装，
+不是自动可stage或已验收包；完整候选只可在明确 root 许可后由上述安装器安装。
 
 未来工具正常交付后仅有只读metadata入口：
 
