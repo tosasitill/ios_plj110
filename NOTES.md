@@ -541,6 +541,7 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 - **RAT决定性反例**：MD`913a0756`仅按mode范围生成CALL_RAT2（20..39），current112经session+39f/record+99取值。同一10086日志81634/81635行18:42:37.767与92175..92178行18:42:41.304/305明确voiceRAT20/NR_SA与VoNR supported；不能无条件2→AppleLTE4。RIL真实voiceRAT源为042f response8100/10B中networkType(+1/u16LE)，非PS/IMSA；本项未扩大query。窄asm在`calllist-remaining-analysis`/`dial-profile-remaining-analysis`，构建原件未二次检查。
 - **编译结果**：host C++17 -c/header C11严格syntax均exit0，真实recipe`X9Baseband.cpp.o`/`sweet_x9_gpu_dependencies.o`均True/exit0；日志`x9/out/call-number-owner-compile/`。新增两个人工源码向量仅编译未执行。待SMS新源码集成后统一固定基线kernel-only，无本项boot/CI/设备结果。
 - **严格边界**：VOICE09仍关闭；CallList offset6/真实technology/profile、iOS IMS准入、MT动作/handover身份迁移、通话专用audio和短信MT显示/持久化/物理ACK/MO对端验收未闭合，最终通话短信镜像仍未完成。不要求用户重复场景、不操作手机、不出探针镜像。
+- **集成固定源码构建**：SMS deadline/inbox代码已集成，构建开始HEAD`4e7b84a`，`python3 -I x9/build/build.py kernel --name x9-call-sms-init-20261115` **exit0、98/98 overlay（3 prebuilt）、link/strip成功**；host新集成基线严格-c也exit0。产物`x9/out/x9-call-sms-init-20261115/kernel.development.sweet`，console/exit及确切HEAD在`call-number-owner-compile/{kernel-console.log,kernel.exit,kernel-source-head.txt}`；没有boot pack/上机/构建后二次检查，人工向量未执行。构建期间sensor窗口只新增NOTES一行`057e121`，SMS无冲突rebase为deadline`fc20e86`/inbox`38b3e9e`/交接`de1402c`并已ff main/push；本项随后rebase成`b3c4bec`，x9源码未因此变化，不为docs重复构建。`gh run list`的SMS与本功能均`[]`，无CI run ID。本kernel-only仍不是最终通话短信镜像。
 
 ### 5.7 2026-11-13 音频：ADSP 自动 dsp-boot 镜像（分支 feat/audio-dsp-boot，worktree `.worktrees/audio-dsp-boot`）
 
