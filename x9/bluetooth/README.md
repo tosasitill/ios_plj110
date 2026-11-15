@@ -15,7 +15,11 @@
   **2026-11-15实际运行证据为 `uart_launcher -f 1 -p /dev/ttyS3`**：现已实现MTK SW的AP硬件backend，
   enum1→WMT byte0x80，不能选0绕过。仍不向boot-device添加init/fc参数或生成部分初始化镜像。
 - `kern.x9_bt_boot` 默认 `ENXIO`，仅完整 session 到 DONE 且 driver_owned 才可为0。
+  明确睡眠后为 `EHOSTDOWN`，转换中为 `EBUSY`，不能把保留固件当作 awake。
   `kern.x9_bt_stage` 是最后返回的 session stage，**不是 ready 指标**。
+- `kern.x9_bt_power` 是同步的明确 ownership 请求：0=awake/resume、1=asleep、2=初始化/转换/不可用。
+  只有 root/mobile 可写，sole UART worker 执行；重复目标幂等、并发转换拒绝，不重启或重下载。
+  sleep 只允许关闭且 RX/TX 空、无 wire claim 的 transport，活动 daemon 返回 `EBUSY`。
 
 ## 内核实现
 
@@ -79,6 +83,12 @@
   worker独立8192 B上限覆盖实测4096 B ACL payload+5 B H4头（旧bootstrap4096上限不够），不修改metadata ABI/控制器MTU；
   incoming/TX缓冲放静态sole-worker存储，不在kernel stack分配8KiB frame。保留pending帧依序交给native通道。
   无新字节的半帧也会超时；仅帧边界按Android node==1 raw_filter处理0xff/0x00，不在payload中过滤、不套node==0的0xf0规则。
+- 明确 sleep/resume 已接入 sole worker 和 serial admission。sleep 的完整 WMT ACK 拒绝为 `EBUSY`，保留 driver-own；
+  成功后实际 drain、mask 自有 UART IER/GIC，再按 Android 释放 host-awake/TX/RX requests，不释放固件供电 lease。
+  resume 先 TX request/SSPM resources/host-awake，保留 SPI route、pending 与 FIFO，再仅在 DEV0_BT_AWAKE=0 时发送一次 raw FF，
+  有界轮询 CMM/DEV0 awake，核对 own-clear ACK 后恢复 RX request；任何不确定阶段均不发布 READY。
+  MT6653 raw FF 与 own-clear 的 ACK 完全相同：在提交 own-clear **之前**独立消费 FF 完整 ACK，
+  缺 ACK/重复/畸形均失败，不用固定延迟或 BT_AWAKE 代替回复归属。不启用自动 idle sleep、wake-enhance 或活动连接系统 suspend。
 
 ## iOS桥
 
@@ -106,9 +116,10 @@
 - `X9BluetoothLaunch`保留mobile501身份，等完整board就绪后设置 `BT_HCI_TRANSPORT=H4:POSIX`、
   `X9_BT_VENDOR=MT6653`、`DYLD_INSERT_LIBRARIES=/usr/lib/X9H4Transport.dylib`，exec原件bluetoothd。
   不能由exec成功推断dyld注入/COW安装成功，必须实机验证。
-- `X9BlueTool -R`实现原件 `com.apple.BlueTool` XPC契约，`RunBuiltinScript boot/init`只读核对真正ready；
-  失败result1、原始BSD errno另存x9_errno；不合成manufacturer/firmware。deepsleep明确ENOTSUP，未知命令拒绝。
-- **未完成**：XNU上完整vendor序列回包与SSPM/CMM移交验证、MTK SW PIO实机验证、Linux/HW backend、真实sleep/firmware-own/resume、
+- `X9BlueTool -R`实现原件 `com.apple.BlueTool` XPC契约，`RunBuiltinScript boot/init`明确调用 resume，deepsleep 明确调用 sleep；
+  成功前验证实际 power/boot 与 resume 后完整 IO READY。失败result1、原始BSD errno另存x9_errno；不吞 EPERM、不合成manufacturer/firmware，未知命令拒绝。
+  launcher 与无旧 FD/RX 线程的 H4 reopen 同样调用 resume，不用 boot-status 冒充睡眠。
+- **未完成**：XNU上完整vendor序列回包与SSPM/CMM移交验证、MTK SW PIO实机验证、Linux/HW backend、sleep/firmware-own/resume 实机验证、
   实机COW与能力/缓存路由、启动及场景验收。
   当前不安装或修改root上的launch plist。
 
@@ -121,6 +132,10 @@ python3 -I x9/bluetooth/build.py --kernel-objects --out x9/out/bluetooth-native/
 编译/adhoc签名 `btctl`、`X9H4Transport.dylib`、`X9BluetoothLaunch`、`X9BlueTool`；单独编译6个BSD对象、UART IRQ hook及2个IOKit owner对象。
 使用常规BT/Wi-Fi私有生成器；不链接完整kernel、不打包boot、不测试、不安装、不操作设备。
 输出 `build.json` 保持 `stageable=false`。
+完整显式 init 构建拒绝重复 selector，要求已实测的 `x9_bt=1 x9_bt_init=1 x9_bt_fc=1` 和全部原始 firmware/connfem/vendor 输入。
+并行构建可用 `x9/xnu/build-xnu.sh macos --isolated x9/out/<唯一名>/dxb`，不修改共享 `.local/dxb*/xnu`。
+`x9/bluetooth/package.py --runtime <完整userland输出> --out x9/out/<新名>` 只生成离线 root payload，
+保留原始 jobs 与只改 Program 的候选，**不安装，不写设备，不等于原生运行验收**。
 
 `python3 -I x9/tools/bluetooth_vendor.py --required` 是纯标准库的原件移植构建入口，生成gitignored
 `x9/kernel/generated/x9_bt_vendor.inc`。`build.py all`也接此生成器；显式`x9_bt_init=1`时要求完整原件，

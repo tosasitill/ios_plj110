@@ -34,7 +34,7 @@ static LCK_MTX_DECLARE(serial_write_lock,&serial_group);
 static struct {
     int major,boot;
     void *node;
-    bool opened,node_worker,tx_claimed;
+    bool opened,node_worker,tx_claimed,transition,read_stopping;
     uint32_t baud,generation,rhead,rlen,thead,tlen;
     uint32_t claim_generation,claim_length;
     struct selinfo readers,writers;
@@ -43,6 +43,8 @@ static struct {
 } serial={.major=-1,.boot=ENXIO};
 static int io_status(void)
 { return !serial.opened?ENXIO:serial.boot; }
+static int read_status(void)
+{ int error=io_status(); return error?error:serial.read_stopping?ECANCELED:0; }
 static void wake_io(void)
 {
     wakeup(&serial.rlen); wakeup(&serial.tlen);
@@ -59,6 +61,19 @@ bool x9_bt_serial_active(void)
 {
     lck_mtx_lock(&serial_lock); bool active=serial.opened && !serial.boot;
     lck_mtx_unlock(&serial_lock); return active;
+}
+int x9_bt_serial_power_begin(bool sleep)
+{
+    lck_mtx_lock(&serial_lock);
+    int error=0;
+    if(serial.transition || serial.opened || serial.tx_claimed || serial.tlen || serial.rlen)
+        error=EBUSY;
+    else if(serial.boot!=(sleep?0:EHOSTDOWN)) error=serial.boot?serial.boot:EINVAL;
+    if(!error) {
+        serial.transition=true; serial.boot=EBUSY; serial.generation++;
+        wake_io();
+    }
+    lck_mtx_unlock(&serial_lock); return error;
 }
 uint32_t x9_bt_serial_rx(const uint8_t *p,uint32_t n)
 {
@@ -118,6 +133,7 @@ void x9_bt_serial_tx_finish(uint32_t sent,uint32_t generation,int error)
 void x9_bt_serial_result(int error,uint32_t baud)
 {
     lck_mtx_lock(&serial_lock);
+    serial.transition=false;
     serial.boot=error?error:baud?0:EINVAL;
     if(!serial.boot) serial.baud=baud;
     else { serial.generation++; serial.rhead=serial.rlen=serial.thead=serial.tlen=0; }
@@ -126,9 +142,10 @@ void x9_bt_serial_result(int error,uint32_t baud)
 static int serial_open(dev_t d __unused,int flags __unused,int type __unused,struct proc *p)
 {
     lck_mtx_lock(&serial_lock);
-    int error=(serial.opened || serial.tx_claimed)?EBUSY:serial.boot;
+    int error=(serial.opened || serial.tx_claimed || serial.transition)?EBUSY:serial.boot;
     if(!error) {
         serial.opened=true; serial.generation++;
+        serial.read_stopping=false;
         serial.rhead=serial.rlen=serial.thead=serial.tlen=0;
         memset(&serial.line,0,sizeof(serial.line));
         serial.line.cflag=0x300|0x800|0x8000|0x10000|0x20000;
@@ -152,19 +169,20 @@ static int serial_read(dev_t d __unused,struct uio *uio,int flags)
     uint8_t data[512]; int error=0;
     lck_mtx_lock(&serial_lock);
     uint32_t generation=serial.generation;
-    while(!serial.rlen && !(error=io_status())) {
+    while(!serial.rlen && !(error=read_status())) {
         if(flags&IO_NDELAY) { error=EAGAIN; break; }
         error=msleep(&serial.rlen,&serial_lock,PZERO|PCATCH,"x9btread",NULL);
         if(error) break;
         if(generation!=serial.generation) { error=ENXIO; break; }
     }
-    if(!error) error=io_status();
+    if(!error) error=read_status();
     while(!error && serial.rlen && uio_resid(uio)>0) {
         uint32_t n=(uint32_t)MIN(uio_resid(uio),(user_ssize_t)MIN(serial.rlen,sizeof(data)));
         peek(data,serial.rx,serial.rhead,n);
         serial.rhead=(serial.rhead+n)%BT_SERIAL_FIFO; serial.rlen-=n;
         lck_mtx_unlock(&serial_lock); error=uiomove((char *)data,(int)n,uio); lck_mtx_lock(&serial_lock);
         if(generation!=serial.generation) break; /* Never consume a reopened session. */
+        if(!error) error=read_status();
     }
     lck_mtx_unlock(&serial_lock); return error;
 }
@@ -205,6 +223,11 @@ static int serial_ioctl(dev_t d __unused,u_long cmd,caddr_t data,int flags __unu
     int error=0;
     lck_mtx_lock(&serial_lock);
     switch((uint32_t)cmd) {
+    case 0x20005801: /* _IO('X',1): bridge cancels read BEFORE BSD close drain. */
+        /* close waits on fp_iocount before d_close; a blocked read must be
+         * released first. This does not clear TX, close hardware or sleep.
+         * The version-locked native close bridge sets its RX stop flag first. */
+        serial.read_stopping=true; wake_io(); break;
     case 0x40487413: memcpy(data,&serial.line,sizeof(serial.line)); break; /* GETA */
     case 0x80487414: case 0x80487415: case 0x80487416: /* SETA/W/F */
         memcpy(&serial.line,data,sizeof(serial.line)); break;

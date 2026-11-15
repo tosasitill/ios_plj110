@@ -5,6 +5,7 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/errno.h>
+#include <sys/kauth.h>
 #include <sys/sysctl.h>
 #include <kern/locks.h>
 #include <kern/thread.h>
@@ -27,6 +28,13 @@ static struct x9_bt_status bs={.version=X9_BT_ABI_VERSION};
 static struct x9_bt_session_ops ops;
 static struct x9_bt_session_result session;
 static int started, session_stage=X9_BT_SESSION_INPUT;
+/* One synchronous control request; only the UART worker ever executes it.
+ * 0 awake, 1 asleep, 2 initializing/transition/unavailable. Not system suspend:
+ * there is no FW wake callback, so only a CLOSED native transport may sleep. */
+static struct {
+    bool live,busy,pending,done;
+    int state,target,error;
+} power={.state=2,.error=ENXIO};
 SYSCTL_INT(_kern, OID_AUTO, x9_bt_stage, CTLFLAG_RD|CTLFLAG_LOCKED,
            &session_stage, 0, "Last MT6653 initialization stage (not ready status)");
 static volatile uint32_t *uart, *gic;
@@ -40,6 +48,7 @@ static struct {
     uint64_t received,errors,interrupts;
 } rx;
 static uint64_t route_saved;
+static uint64_t route_owned;
 static uint8_t priority_saved;
 static bool irq_captured;
 /* production DT UART3 SPI0x148, level-high. Wake SPI0x246 is NOT enabled:
@@ -86,7 +95,11 @@ bool x9_bluetooth_irq_filter(uint32_t intid)
 {
     if(intid!=UART_INTID) return false;
     boolean_t old=rx_lock();
-    if(!rx.owned) { rx_unlock(old); return false; }
+    if(!rx.owned) {
+        /* A captured SPI can have an in-flight IAR after masking. Consume
+         * our interrupt, but never touch the gated UART while asleep. */
+        bool captured=irq_captured; rx_unlock(old); return captured;
+    }
     rx.interrupts++;
     for(unsigned n=0;n<512;n++) {
         uint32_t lsr=rd(uart,0x14);
@@ -117,6 +130,7 @@ static int irq_bind(void)
     route_saved=*(volatile uint64_t *)((uintptr_t)gic+G_ROUTE);
     priority_saved=*(volatile uint8_t *)((uintptr_t)gic+G_PRIORITY); irq_captured=true;
     uint64_t mpidr=__builtin_arm_rsr64("MPIDR_EL1")&0xff00ffffffULL;
+    route_owned=mpidr;
     *(volatile uint64_t *)((uintptr_t)gic+G_ROUTE)=mpidr;
     *(volatile uint8_t *)((uintptr_t)gic+G_PRIORITY)=0xa0;
     __asm__ volatile("dsb sy" ::: "memory");
@@ -142,8 +156,44 @@ static void irq_stop(void)
          * still uses the route; never clear another SPI's active/pending. */
         *(volatile uint64_t *)((uintptr_t)gic+G_ROUTE)=route_saved;
         *(volatile uint8_t *)((uintptr_t)gic+G_PRIORITY)=priority_saved;
-        __asm__ volatile("dsb sy" ::: "memory"); irq_captured=false;
+        __asm__ volatile("dsb sy" ::: "memory");
+        old=rx_lock(); irq_captured=false; rx_unlock(old);
     }
+}
+/* Preserve our SPI route and ALL received bytes across sleep. No FIFO flush,
+ * pending-bit clear, first-bind admission, or writes to SSPM UART banks. */
+static int irq_pause(void)
+{
+    boolean_t old=rx_lock();
+    int error=(!irq_captured || !rx.owned)?ENXIO:rx.error;
+    if(!error) {
+        wr(uart,4,0); wr(gic,G_DISABLE,IRQ_BIT); rx.owned=false;
+        if(rx.len || (rd(uart,0x14)&1)) error=EPROTO;
+    }
+    rx_unlock(old);
+    for(unsigned i=0;i<500 && (rd(gic,0)&(1u<<31));i++) delay(2);
+    if(!error && ((rd(gic,0)&(1u<<31)) || (rd(gic,G_ENABLE)&IRQ_BIT))) error=EIO;
+    return error;
+}
+static int irq_resume(void)
+{
+    int error=x9_bt_hardware_check(); if(error) return error;
+    boolean_t old=rx_lock();
+    if(!irq_captured || rx.owned || (rd(gic,G_ENABLE)&IRQ_BIT) ||
+       !(rd(gic,G_GROUP)&IRQ_BIT) ||
+       (rd(gic,G_CONFIG)&(3u<<((UART_INTID%16)*2))) ||
+       *(volatile uint64_t *)((uintptr_t)gic+G_ROUTE)!=route_owned ||
+       *(volatile uint8_t *)((uintptr_t)gic+G_PRIORITY)!=0xa0) error=EBUSY;
+    else if(rx.error || (rd(uart,0x14)&0x1e)) error=rx.error?rx.error:EIO;
+    else {
+        /* A wake pending bit and a nonempty FIFO belong to us. Restore RX
+         * before any raw wake/own command, without dropping wake data. */
+        rx.owned=true; wr(uart,4,5); wr(gic,G_ENABLE,IRQ_BIT);
+    }
+    rx_unlock(old);
+    for(unsigned i=0;i<500 && (rd(gic,0)&(1u<<31));i++) delay(2);
+    if(!error && ((rd(gic,0)&(1u<<31)) || !(rd(gic,G_ENABLE)&IRQ_BIT))) error=EIO;
+    return error;
 }
 static int rx_take(uint8_t *out,uint32_t capacity,uint32_t *n)
 {
@@ -155,7 +205,10 @@ static int rx_take(uint8_t *out,uint32_t capacity,uint32_t *n)
 static int raw_write(void *context,const uint8_t *p,size_t n,size_t *sent)
 {
     (void)context; if(!p || !sent) return EINVAL; *sent=0;
-    if(!rx.owned) { int e=irq_bind(); if(e) return e; }
+    if(!rx.owned) {
+        if(irq_captured) return EHOSTDOWN; /* Resume must restore owned IRQ. */
+        int e=irq_bind(); if(e) return e;
+    }
     int error=x9_bt_hardware_check(); if(error) return error;
     uint64_t end=now_ms(NULL)+1000;
     while(*sent<n) {
@@ -169,6 +222,7 @@ static int raw_write(void *context,const uint8_t *p,size_t n,size_t *sent)
 static int drain(void *context,uint32_t timeout)
 {
     (void)context;
+    if(!rx.owned) return EHOSTDOWN;
     int error=x9_bt_hardware_check(); if(error) return error;
     uint64_t end=now_ms(NULL)+timeout;
     while(!(rd(uart,0x14)&0x40)) {
@@ -209,8 +263,7 @@ static int next_frame(struct bt_frame *out)
         /* btmtktty raw_filter, production node==1: only boundary0xff
          * (FW wake) and0x00 (UART noise). Never trim either byte from a
          * payload, or use the node==0-only0xf0 filter on this controller.
-         * This worker still holds driver-own; future asleep handling must
-         * perform the real own transition before resuming native traffic. */
+         * The power queue never calls this parser while UART is gated. */
         if(!assembling.length && (b==0xff || b==0)) continue;
         if(!assembling.length) frame_start=now_ms(NULL);
         if(assembling.length>=sizeof(assembling.data)) return EMSGSIZE;
@@ -313,6 +366,126 @@ static int calibration(struct x9_bt_session_board *board)
     board->flow_control=flow==1?0x80:0; /* explicit enum -> WMT byte mapping */
     board->wakeup_callback=false; return 0;
 }
+static void power_publish(bool asleep)
+{
+    x9_bt_serial_result(asleep?EHOSTDOWN:0,session.baud);
+    lck_mtx_lock(&bt_lock);
+    bs.state=asleep?X9_BT_ASLEEP:X9_BT_READY;
+    bs.error=asleep?EHOSTDOWN:0; bs.firmware_ready=1;
+    lck_mtx_unlock(&bt_lock);
+}
+static int ownership_rx_barrier(bool wake_ack)
+{
+    /* MT6653 raw FF and WMT own-clear produce the SAME ten-byte ACK.
+     * Android's no-event FF send does not suppress its reply. Consume the
+     * one FF reply BEFORE sending own-clear, not after it as a false proof
+     * of the new transaction. No FF was sent => no old own ACK is allowed.
+     * Missing/ambiguous wake replies fail closed; never send another FF. */
+    static const uint8_t ack[]={4,0xe4,7,2,3,3,0,0,3,1};
+    bool seen=false; uint64_t end=now_ms(NULL)+1000;
+    for(;;) {
+        int error=next_frame(&incoming);
+        if(error && error!=EAGAIN) return error;
+        if(!error) {
+            bool own=incoming.length>=5 && incoming.data[0]==4 &&
+                incoming.data[1]==0xe4 && incoming.data[4]==3;
+            if(own) {
+                if(!wake_ack || seen || incoming.length!=sizeof(ack) ||
+                   memcmp(incoming.data,ack,sizeof(ack))) return EPROTO;
+                seen=true;
+            } else {
+                if(pending_count==8) return ENOBUFS;
+                pending[pending_count++]=incoming;
+            }
+        } else if(!assembling.length && (!wake_ack || seen)) return 0;
+        if(now_ms(NULL)>=end) return ETIMEDOUT;
+        if(error==EAGAIN) sleep_ms(NULL,1);
+    }
+}
+static int power_execute(int target,bool have_rx,bool *fatal)
+{
+    *fatal=false;
+    if(target==1 && (have_rx || assembling.length || pending_count)) return EBUSY;
+    int error=x9_bt_serial_power_begin(target==1);
+    if(error) { *fatal=error!=EBUSY; return error; }
+    lck_mtx_lock(&bt_lock); bs.state=X9_BT_TRANSITION; bs.error=EBUSY; lck_mtx_unlock(&bt_lock);
+    if(target==1) {
+        error=x9_bt_session_fw_own(&ops,&session);
+        if(error==EBUSY && session.driver_owned) {
+            /* Valid FW refusal: no resources/IRQ were released. */
+            power_publish(false); return EBUSY;
+        }
+        if(!error) error=drain(NULL,1000);
+        /* exchange uses sole-worker incoming. Never overwrite a retained
+         * native frame, or release the bus with new undecoded HCI traffic. */
+        if(!error && (pending_count || assembling.length)) error=EPROTO;
+        if(!error) error=irq_pause();
+        if(!error) error=x9_bt_hardware_sleep();
+    } else {
+        error=x9_bt_hardware_wake();
+        if(!error) error=irq_resume();
+        if(!error) error=ownership_rx_barrier(false);
+        bool awake=false,need_ff=false;
+        if(!error) error=x9_bt_hardware_awake(&awake,&need_ff);
+        bool sent_ff=false;
+        if(!error && need_ff) {
+            const uint8_t ff=0xff; size_t sent=0;
+            error=raw_write(NULL,&ff,1,&sent);
+            if(!error && sent!=1) error=EIO;
+            if(!error) error=drain(NULL,1000);
+            sent_ff=!error;
+        }
+        uint64_t end=now_ms(NULL)+1000;
+        while(!error && !awake) {
+            error=x9_bt_hardware_awake(&awake,&need_ff);
+            if(!error && !awake) {
+                if(now_ms(NULL)>=end) { error=ETIMEDOUT; break; }
+                sleep_ms(NULL,1);
+            }
+        }
+        if(!error) error=ownership_rx_barrier(sent_ff);
+        if(!error) error=x9_bt_session_driver_own(&ops,&session);
+        if(!error) error=x9_bt_hardware_ownership_finish();
+    }
+    if(error) { *fatal=true; return error; }
+    power_publish(target==1);
+    printf("X9 BT: explicit transport %s; actual ownership and SSPM requests verified\n",
+        target==1?"sleep":"resume");
+    return 0;
+}
+static int power_sysctl SYSCTL_HANDLER_ARGS
+{
+#pragma unused(oidp,arg1,arg2)
+    lck_mtx_lock(&bt_lock); int value=power.state; lck_mtx_unlock(&bt_lock);
+    int error=SYSCTL_OUT(req,&value,sizeof(value));
+    if(error || !req->newptr) return error;
+    /* launchd's actual bluetoothd/BlueTool identity is mobile. ANYBODY only
+     * bypasses generic root-only sysctl admission; keep this interface owned
+     * by root/mobile, just like the tty, and expose no arbitrary HCI. */
+    uid_t uid=kauth_getuid(); if(uid!=0 && uid!=501) return EPERM;
+    error=SYSCTL_IN(req,&value,sizeof(value)); if(error) return error;
+    if(value!=0 && value!=1) return EINVAL;
+    lck_mtx_lock(&bt_lock);
+    if(!power.live) error=power.error?power.error:ENXIO;
+    else if(power.busy || power.state==2) error=EBUSY;
+    else if(value==power.state) error=0; /* Idempotent; never reboot/download. */
+    else {
+        int previous=power.state;
+        power.busy=true; power.pending=true; power.done=false;
+        power.target=value; power.state=2; power.error=0;
+        wakeup(&power.pending);
+        /* Accepted work cannot be abandoned by a signal/timeout and later
+         * mutate hardware behind a caller that thought it was cancelled.
+         * Every physical operation on worker is itself finitely bounded. */
+        while(!power.done) (void)msleep(&power.done,&bt_lock,PZERO,"x9btpower",NULL);
+        error=power.error;
+        if(error && power.live) power.state=previous;
+        power.busy=false;
+    }
+    lck_mtx_unlock(&bt_lock); return error;
+}
+SYSCTL_PROC(_kern,OID_AUTO,x9_bt_power,CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY|CTLFLAG_LOCKED,
+    NULL,0,power_sysctl,"I","Explicit closed-transport ownership: 0 awake, 1 asleep, 2 unavailable/transition");
 static void worker(void *unused,wait_result_t result)
 {
     (void)unused; (void)result;
@@ -333,7 +506,8 @@ static void worker(void *unused,wait_result_t result)
         irq_stop(); int stop_error=x9_bt_hardware_stop();
         state(X9_BT_FAILED,error); x9_bt_serial_result(error,session.baud);
         printf("X9 BT: initializer failed stage=%d errno=%d cleanup=%d; native remains unavailable\n",
-            session_stage,error,stop_error); return;
+            session_stage,error,stop_error);
+        lck_mtx_lock(&bt_lock); power.error=error; lck_mtx_unlock(&bt_lock); return;
     }
     /* Every preceding gate must pass on THIS boot, including current SSPM
      * readbacks and all real vendor completions. Compilation is not proof. */
@@ -341,10 +515,34 @@ static void worker(void *unused,wait_result_t result)
     /* Publish READY last. The launch/BlueTool gate also reads serial.boot;
      * exposing READY before clearing its initial ENXIO would reject a real
      * completed session during this otherwise harmless publication window. */
-    lck_mtx_lock(&bt_lock); bs.firmware_ready=1; bs.state=X9_BT_READY; lck_mtx_unlock(&bt_lock);
+    lck_mtx_lock(&bt_lock); bs.firmware_ready=1; bs.state=X9_BT_READY;
+    power.live=true; power.state=0; power.error=0; lck_mtx_unlock(&bt_lock);
     printf("X9 BT: complete firmware session chip=%04x baud=%u driver-own verified\n",session.chip_id,session.baud);
     bool have_rx=false;
     for(;;) {
+        lck_mtx_lock(&bt_lock);
+        bool requested=power.pending; int target=power.target;
+        if(requested) power.pending=false;
+        lck_mtx_unlock(&bt_lock);
+        if(requested) {
+            bool fatal=false;
+            error=power_execute(target,have_rx,&fatal);
+            lck_mtx_lock(&bt_lock);
+            power.error=error; power.done=true;
+            if(fatal) { power.live=false; power.state=2; }
+            else if(!error) power.state=target;
+            /* On refusal restore current awake/asleep before waking caller,
+             * not a transient READY publication paired with state2. */
+            else power.state=target==1?0:1;
+            wakeup(&power.done); lck_mtx_unlock(&bt_lock);
+            if(fatal) break;
+        }
+        lck_mtx_lock(&bt_lock);
+        while(power.state==1 && !power.pending)
+            (void)msleep(&power.pending,&bt_lock,PZERO,"x9btsleep",NULL);
+        bool asleep=power.state==1 || (power.busy && power.target==0);
+        lck_mtx_unlock(&bt_lock);
+        if(asleep) continue; /* Absolutely no UART MMIO/parser while gated. */
         /* A full serial FIFO must not hide an IRQ overflow/error forever. */
         boolean_t old=rx_lock(); error=rx.error; rx_unlock(old);
         if(error) break;
@@ -377,6 +575,9 @@ static void worker(void *unused,wait_result_t result)
         }
         sleep_ms(NULL,1);
     }
+    lck_mtx_lock(&bt_lock); power.live=false; power.state=2; power.error=error;
+    if(power.busy && !power.done) { power.done=true; wakeup(&power.done); }
+    lck_mtx_unlock(&bt_lock);
     x9_bt_serial_result(error,session.baud); irq_stop();
     (void)x9_bt_hardware_stop(); state(X9_BT_FAILED,error);
 }

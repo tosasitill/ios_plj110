@@ -20,6 +20,10 @@ int x9_bt_serial_tx_claim(uint8_t *, uint32_t capacity, uint32_t *length,
                          uint32_t *generation);
 void x9_bt_serial_tx_finish(uint32_t sent, uint32_t generation, int error);
 bool x9_bt_serial_active(void);
+/* Reserve a CLOSED, empty transport for an explicit power transition.
+ * Admission/open/claim share one lock; active daemon sleep is unsupported.
+ * Worker calls serial_result only after the authoritative own transition. */
+int x9_bt_serial_power_begin(bool sleep);
 #ifdef __cplusplus
 }
 #endif
