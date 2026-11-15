@@ -151,7 +151,7 @@ static int vcontrol_stage_start(struct x9_vdec_control *c, uint64_t end,
     return e;
 }
 enum vcontrol_snapshot_kind {
-    VCONTROL_COMMON_ONLY, VCONTROL_DECODE_FIELDS, VCONTROL_WHOLE_SLOT
+    VCONTROL_COMMON_ONLY, VCONTROL_DECODE_FIELDS, VCONTROL_RING_FIELDS
 };
 /* Two fresh NC copies, not cached Android bytes. Equal copies do NOT prove
  * firmware-wide serialization: this only observes fields while the bus owns
@@ -173,9 +173,6 @@ static int vcontrol_snapshot(struct x9_vdec_control *c, uint64_t end,
             c->scratch+n*X9_VCP_INSTANCE_SLOT_BYTES,X9_VCP_INSTANCE_SLOT_BYTES);
     }
     if (!e && memcmp(common[0],common[1],sizeof(common[0]))) e = EAGAIN;
-    if (!e && kind == VCONTROL_WHOLE_SLOT &&
-        memcmp(c->scratch,c->scratch+X9_VCP_INSTANCE_SLOT_BYTES,
-            X9_VCP_INSTANCE_SLOT_BYTES)) e = EAGAIN;
     if (!e && kind == VCONTROL_DECODE_FIELDS) {
         /* Negotiation/VP qualification does not consume a ring. Compare
          * ONLY the evidenced decode fields; unrelated asynchronous FB/BS
@@ -263,30 +260,48 @@ static int vcontrol_match_ring(struct x9_vdec_control *c,
     }
     return ESTALE;
 }
+/* Each ring is sampled twice from immutable NC host copies. Only THAT ring's
+ * parsed metadata/head need agree: a BS publication or unrelated VSI field
+ * must not suppress an otherwise stable FB observation. The ring parser
+ * zeroes structure padding, so comparison is deterministic. This is still
+ * just a peek; neither equality nor known tokens license read/count stores,
+ * DMA reclamation or pixels. No attempt to repair a transient count. */
+static int vcontrol_ring_snapshot(struct x9_vdec_control *c, unsigned kind,
+    struct x9_vcp_ring_snapshot *out)
+{
+    struct x9_vcp_ring_snapshot rings[2];
+    bool pending = false;
+    int e = 0;
+    for (unsigned n = 0; n < 2 && !e; n++) {
+        e = x9_vcp_parse_ring_snapshot(X9_VCP_RING_ABI_MT6993_CAPTURE1,kind,
+            c->scratch+n*X9_VCP_INSTANCE_SLOT_BYTES,X9_VCP_INSTANCE_SLOT_BYTES,
+            &rings[n]);
+        /* All arguments above are fixed and valid: EINVAL is precisely the
+         * captured index/count publication transient. Structural corruption
+         * (ERANGE/invalid FB full) still fails closed, even in one sample. */
+        if (e == EINVAL) { pending = true; e = 0; }
+    }
+    if (!e && (pending || memcmp(&rings[0],&rings[1],sizeof(rings[0])))) e = EAGAIN;
+    if (!e) *out = rings[1];
+    return e;
+}
 static int vcontrol_recheck(struct x9_vdec_control *c, uint64_t end)
 {
     struct x9_vcp_common_snapshot common;
     bool pending = false;
-    int e = vcontrol_snapshot(c,end,VCONTROL_WHOLE_SLOT,&common);
+    int e = vcontrol_snapshot(c,end,VCONTROL_RING_FIELDS,&common);
     c->status.ring_valid_bitmap = 0;
     for (unsigned kind = 0; kind < 3 && !e; kind++) {
         struct x9_vcp_ring_snapshot ring;
-        e = x9_vcp_parse_ring_snapshot(X9_VCP_RING_ABI_MT6993_CAPTURE1,kind,
-            c->scratch,X9_VCP_INSTANCE_SLOT_BYTES,&ring);
-        /* These ABI/kind/size/input arguments are fixed and valid, so the
-         * parser's remaining EINVAL branch is precisely count != distance.
-         * The captured publisher stores write-index and count separately;
-         * identical samples taken between those stores are still transient.
-         * Retain pending and the notification, without repairing metadata or
-         * claiming a completion. Out-of-range/invalid FB full still fails;
-         * the separately counted BS ring may legitimately contain64. */
-        if (e == EINVAL) { pending = true; e = 0; continue; }
+        e = vcontrol_ring_snapshot(c,kind,&ring);
+        if (e == EAGAIN) { pending = true; e = 0; continue; }
         if (!e) {
             c->status.rings[kind] = ring;
             c->status.ring_valid_bitmap |= 1u << kind;
             e = vcontrol_match_ring(c,&ring);
         }
     }
+    if (!e) e = vmem_deadline(end);
     if (!e) {
         c->status.recheck_pending = pending;
     }
