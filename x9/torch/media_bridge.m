@@ -6,6 +6,7 @@
  */
 #import <Foundation/Foundation.h>
 #include <objc/runtime.h>
+#include <dlfcn.h>
 #include <mach-o/dyld.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -90,8 +91,11 @@ static int setLevel(uint32_t level) {
 }
 @end
 
-static id sharedVendor(id self, SEL selector) {
-    uintptr_t caller = (uintptr_t)__builtin_return_address(0) - cacheSlide;
+/* Camera may be installed after this hook. Its wrapper must forward the
+ * ORIGINAL CMCapture caller: a nested IMP call otherwise destroys the narrow
+ * FigFlashlight return-address gate. Export both entrypoints from this object. */
+id x9_torch_media_vendor_with_caller(id self, SEL selector, uintptr_t returnAddress) {
+    uintptr_t caller = returnAddress - cacheSlide;
     id real = ((id (*)(id, SEL))originalVendor)(self, selector);
     if (real) return real; /* Never replace a genuine device vendor. */
     for (unsigned i = 0; i < sizeof(flashlightCallers)/sizeof(flashlightCallers[0]); i++) {
@@ -103,6 +107,10 @@ static id sharedVendor(id self, SEL selector) {
         }
     }
     return nil;
+}
+__attribute__((noinline)) id x9_torch_media_shared_vendor(id self, SEL selector) {
+    return x9_torch_media_vendor_with_caller(self, selector,
+        (uintptr_t)__builtin_return_address(0));
 }
 static void skipPortraitPrewarm(id self, SEL selector, int version, BOOL styles) {}
 static bool matchingCMCapture(const struct mach_header *mh) {
@@ -121,9 +129,16 @@ static bool matchingCMCapture(const struct mach_header *mh) {
 static void imageAdded(const struct mach_header *mh, intptr_t imageSlide) {
     if (torchFD < 0 || !matchingCMCapture(mh)) return;
     Method vendor = class_getClassMethod(objc_getClass("BWFigCaptureDeviceVendor"), sel_registerName("sharedCaptureDeviceVendor"));
-    if (!vendorHooked && vendor && (uintptr_t)method_getImplementation(vendor) == 0x1a1f40c84 + cacheSlide) {
-        originalVendor = method_setImplementation(vendor, (IMP)sharedVendor); vendorHooked = true;
-        dprintf(2, "X9 TORCH MEDIA: 20H392 sharedCaptureDeviceVendor hook installed\n");
+    IMP current = vendor ? method_getImplementation(vendor) : NULL;
+    IMP cameraHook = (IMP)dlsym(RTLD_DEFAULT, "x9_camera_media_shared_vendor");
+    Dl_info cameraImage = {0};
+    bool cameraChain = current && cameraHook && current == cameraHook &&
+        dladdr((const void *)cameraHook, &cameraImage) && cameraImage.dli_fbase;
+    if (!vendorHooked && vendor && method_getNumberOfArguments(vendor) == 2 &&
+        ((uintptr_t)current == 0x1a1f40c84 + cacheSlide || cameraChain)) {
+        originalVendor = method_setImplementation(vendor, (IMP)x9_torch_media_shared_vendor); vendorHooked = true;
+        dprintf(2, "X9 TORCH MEDIA: 20H392 sharedCaptureDeviceVendor hook installed%s\n",
+            cameraChain ? " (retaining camera hook)" : "");
     }
     /* hackios's narrow no-ISP portrait prewarm fix; not audio/video hooks. */
     Method prewarm = class_getClassMethod(objc_getClass("BWCoreImageFilterRenderer"),
