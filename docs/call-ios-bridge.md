@@ -426,6 +426,43 @@ MediaSession→+280 interface→virtual+98非零，才发布真实UUID事件。�
 ACTIVE会绕过真实owner/media门，不是已实现通话。最早provider缺口仍是完整client/personality
 初始化及网络注册语义/lifecycle，随后才是UUID↔MD ID、状态/END和双向媒体。
 
+#### typed事件 → FSM → 权威CallState（静态闭合，未hook）
+
+三层model command wrapper真实地址点为 `101532fc0→1015fb090→101532ab0`，
+最后进入 `CallCommandDriverDelegate10158aa28`。factory `10019b654` 建wrapper并传入
+`100dc8b1c`，ctor将真实owner move到driver+88/+90；UUID lookup经
+`+e0→+110→+1a0→100693d28` weak-lock CallModel+78 vector、CFEqual后owned-copy
+CallInfo。不是裸指针或把native整数ID当UUID。
+
+ACTIVE实际 `+40→10068f0ec→1010488f0→Call+338→10104eccc→10104f4b8`，
+END经真实 `+50→10068f610→1010494a8→Call+338→10105837c→101058b38`。
+`4Call` ctor `10104730c` 分配0x68 FSM、保存强shared_ptr status delegate至FSM+8/+10，
+Call+338拥有FSM。事件名来自原日志 `10104f530 CallActive` / `101058bb0 CallEnded`；
+transition table由原ctor `10105e0c4` / `10105e568` 填BSS，磁盘零指针不等于无handler。
+
+这里有两套不同状态，不能互抄：FSM+18的表 `10162f248` 为
+Idle0/Ringing1/WaitingToDial2/InitializingMedia3/Dialing4/DialingCallEnded5/
+Alerting6/Active7/Waiting8/UserAnswered9/Held10/WaitingToDisconnect11/Disconnected12。
+CallActive从合法Ringing/Dialing/Alerting/UserAnswered分支写FSM state7；CallEnded保留
+Disconnected12和DialingCallEnded5的不同分支，不直接删Call。此前 `100696b2c` 写
+Call+a4的是SRVCC状态，不是ACTIVE CallState。
+
+最终status delegate `10158af20+28/1006984b8→10158b148+28/100699dd0→101018528`
+先weak-lock nested delegate+20/+28 owner，按真实UUID `101005398` 取Call shared_ptr，
+再于 `101018718` 写 **Call+a0**。ACTIVE传入0，不是FSM的7。匹配
+`libCommCenterBase callStateToString1f03908e0` 原表 `20dad4e78` 是
+Active0/Held1/WaitingToDial2/InitializingMedia3/Dialing4/Ringing5/Disconnected6/
+Alerting7/Waiting8/Idle9。END走status+50 `100698710→10069a00c→101018e18`，
+`101018f54` 直接写Call+a0=6，后于 `101019424` 再调用原state维护入口(...,6)。
+正常state mutation经 `101018ad8→100ff81c4→owner+170 notify virtual+10` 传owned
+CallInfo；notification sender具体type/后续UI publish仍未闭合。
+
+本项闭合的是已有typed事件到真实模型mutation，不提供MTK producer、UUID↔native
+epoch映射或运行dial admission，也不绕过Bambi owner/MediaSession门直接调用ACTIVE。
+它不解决CallList46 producer/offset6，不能将FSM/CallState/ECPI或wire CallEventStatus
+编号混用。原件/枚举/窄asm与复读脚本在 `x9/out/calllist-handler-closure-analysis/typed-model/`；
+无生产hook、设备操作、测试或新镜像。
+
 #### typed初始化 / 注册 / 注销的原件契约
 
 `createIMSClient_sync1f2e6803c→factory+38/100315998→CreateNewClient1b7c43a00`
