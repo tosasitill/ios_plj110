@@ -396,6 +396,43 @@ MediaSession→+280 interface→virtual+98非零，才发布真实UUID事件。�
 ACTIVE会绕过真实owner/media门，不是已实现通话。最早provider缺口仍是完整client/personality
 初始化及网络注册语义/lifecycle，随后才是UUID↔MD ID、状态/END和双向媒体。
 
+#### typed初始化 / 注册 / 注销的原件契约
+
+`createIMSClient_sync1f2e6803c→factory+38/100315998→CreateNewClient1b7c43a00`
+创建真实Client并保存controller+d8；StackDelegate绑定controller+40 alias、真实shared_ptr及
+controller+18 queue。正常`initializeImsClient_sync1f2e6e6d0`从model+268取得真实704B
+StackConfig、model+38取得personality string，调用Client+f0/`initialize1b7c3d768`；
+其四个MainQueue block进入两个真实`initializeFromSIM` overload，保留真实CFDictionary/
+clientId/personality。controller+f8=1及initialized回调置2只是初始化阶段；后续真实
+NetworkServices来自model→Client+130/`updateNetworkServices1b7c3f368`，不能绕过配置。
+
+网络枚举单独来自`handleRegistrationStateChanged1b7abc4a4→wrapper1b7c83344→queue/
+weaklock→controller1f2e6b420→model+60`：0 Deregistered、1 Registering、2 Registered、
+3 Deregistering。真实64B RegistrationActiveInfo由`1b7abc5a4`填service mask、注册URI、
+stackId、expiry差值；URI尚未最终实名为IMPU，expiry截u32未见clamp，不用号码/固定秒代替。
+consumer `1f2e6b660`按真实DataMode/LastAttempted策略归一服务mask；optimized cache stub
+`1f2fb1828→1f038d49c`为`(ipMask&1)|((ipMask>>1)&2)`，不是registered bool→全能力。
+随后`saveImsRegistrationState1f2e6da78→updateCurrentImsState1f2e78df4`在model锁内保存
+DataMode/registered/u64 mask，再经真实service+78/`1007ab37c`写root per-personality节点
+`+38 bool/+40 mask/+48 flag/+50 DataMode`，observer+30通知真实map。静态model mutation
+已闭合，但observer后续CT/UI发布与实际MD-backed输入未闭合，不称设备已注册。
+
+真实20B RegistrationInfo含i32 retrySeconds、SIPcode、termination callerBool、willRetry、
+reserved0与RegFailureReason；error producer仅匹配ImsResult domain取SIPcode，否则0，
+termination默认200来自原件常量。retrySeconds对-1/0保留，其他max(absolute-time(NULL),0)。
+失败consumer `1f2e6bbdc`先提交false/mask0再处理真实retry/PDN/policy，不能只删map。
+原enum6 DisabledCountry、7 Authentication Failed即使SD日志显示Unknown也不能抹除。
+
+正常deinitialize `1f2e6f40c→Client+100/1b7c3e578→MainQueue→IPManager1b7cbe71c`
+进入真实Bambi/SipStack注销；只有uninitialized回调`1f2e6b264`才将阶段置0。
+factory shared_ptr deleter`100315b00`仅ret，release不等于delete；cleanup里的Client+c0
+是removeDefaultCallDelegate，不是全销毁。显式Client析构→removeClient→record/maps销毁
+有据，但普通controller的removeStackDelegate/析构完整路线未闭合。`callOnMainQueue`
+实际导入dispatch_async，原removeClient block捕获clientId裸指针；不模仿此未闭合时序，
+不声称原件UAF。最窄替换边界是per-personality真实typed Client+StackDelegate owner/queue，
+仍需真实MD服务mask、URI、expiry/retry、PDN/DataMode、failure/注销确认及call/media生命周期。
+精确原件与复读脚本保存在`x9/out/ims-call-provider-contract/`，本项没有production hook。
+
 ### 通话专用voice音频契约（仅原件静态，不冒充媒体speaker）
 
 同机HAL `ScpSpeechOn2474a0`先registerAdspFeature14，`247544`以scene0、UL/DL各65536B
@@ -421,6 +458,17 @@ CTAudioSampleRateSwitchDidComplete；CT callback328944的type0..2经table524698�
 `3196333F-5A48-373B-B427-0146DC1177FB`，原件build metadata为20H392/16.7.16。
 不能仅广告设备UID或复用Speaker/Hawking媒体设备就称voice接通。
 全部窄切片/私有原件在主checkout`x9/out/call-audio-analysis/`；没有生产改动/编译/设备验收。
+
+新增stream入口静态证据：Baseband Voice factory调用base ctor `20c078`，`20c110`把真实
+输入AudioObjectID保存于device+b8；slot88/`327b18`分别调用`20a4c4(dir0/dir1)`。
+该函数用实际ID查询`stm#`的`inpt/outp` scope，经AudioObjectGetPropertyDataSize/
+GetPropertyData取得真实stream ID，再由virtual+188/`20a29c→231740`构造owned wrapper。
+不是写UID就凭空生成双向stream。voice+240另是`dispatch_once→216d50`创建的CT singleton
+shared owner（`217124`调用CTServerConnectionCreateOnTargetQueue），**不是MD DMA/media指针**。
+模块内CreateIOProcID helper `322d3c`检查错误及非NULL IOProc，但它从voice入口的完整caller/
+真实硬件provider仍未闭合，不把模块级API引用当voice streaming成功。窄切片/复读
+`x9/out/voice-provider-analysis/{voice-provider-boundary.json,macho_functions.py}`；原件静态，
+没有audio生产改动、构建或设备动作。
 
 ### SMS集成：未发布MT的原子host queue准入
 
