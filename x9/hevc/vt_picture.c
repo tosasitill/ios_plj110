@@ -2,6 +2,7 @@
  * This is shared by the raw-picture client and the HEIF raster backend. */
 #include "vt_decoder.h"
 #include "hevc_bitstream.h"
+#include "vt_image_metadata.h"
 #include <VideoToolbox/VideoToolbox.h>
 #include <dlfcn.h>
 #include <pthread.h>
@@ -117,6 +118,7 @@ OSStatus X9HEVCCopyHardwarePicture(CMSampleBufferRef sample, CVPixelBufferRef *o
                 CVPixelBufferGetBytesPerRowOfPlane(r.pixel,p) < (size_t)config.width*(depth == 10 ? 2u : 1u))
                 e = kVTVideoDecoderBadDataErr;
     }
+    if (!e) e = x9_hevc_validate_hdr_metadata(format,r.pixel);
     if (!e) { *out = r.pixel; r.pixel = NULL; }
     if (r.pixel) CVPixelBufferRelease(r.pixel);
     pthread_mutex_destroy(&r.lock);

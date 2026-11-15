@@ -49,6 +49,11 @@ OSStatus x9_hevc_attach_image_metadata(CMVideoFormatDescriptionRef format,
         if (entries[i].type == CFDataGetTypeID() &&
             CFDataGetLength(values[i]) <= 0)
             return kVTVideoDecoderBadDataErr;
+        if ((CFEqual(entries[i].source,kCMFormatDescriptionExtension_MasteringDisplayColorVolume) &&
+                CFDataGetLength(values[i]) != 24) ||
+            (CFEqual(entries[i].source,kCMFormatDescriptionExtension_ContentLightLevelInfo) &&
+                CFDataGetLength(values[i]) != 4))
+            return kVTVideoDecoderBadDataErr;
         if (CFEqual(entries[i].source,
                     kCMFormatDescriptionExtension_PixelAspectRatio)) {
             CFDictionaryRef aspect = values[i];
@@ -75,6 +80,33 @@ OSStatus x9_hevc_attach_image_metadata(CMVideoFormatDescriptionRef format,
     for (size_t i = 0; i < count; i++) {
         if (values[i]) CVBufferSetAttachment(pixel, entries[i].destination,
             values[i], kCVAttachmentMode_ShouldPropagate);
+        else if (CFEqual(entries[i].source,kCMFormatDescriptionExtension_MasteringDisplayColorVolume) ||
+            CFEqual(entries[i].source,kCMFormatDescriptionExtension_ContentLightLevelInfo))
+            CVBufferRemoveAttachment(pixel,entries[i].destination);
+    }
+    return noErr;
+}
+OSStatus x9_hevc_validate_hdr_metadata(CMVideoFormatDescriptionRef format, CVPixelBufferRef pixel)
+{
+    if (!format || !pixel || CMFormatDescriptionGetMediaType(format) != kCMMediaType_Video)
+        return kVTParameterErr;
+    CFStringRef cm[] = { kCMFormatDescriptionExtension_MasteringDisplayColorVolume,
+        kCMFormatDescriptionExtension_ContentLightLevelInfo };
+    CFStringRef cv[] = { kCVImageBufferMasteringDisplayColorVolumeKey,
+        kCVImageBufferContentLightLevelInfoKey };
+    const CFIndex lengths[] = {24,4};
+    for (unsigned n = 0; n < 2; n++) {
+        CFTypeRef expected = CMFormatDescriptionGetExtension(format,cm[n]);
+        CFTypeRef actual = CVBufferCopyAttachment(pixel,cv[n],NULL);
+        OSStatus e = noErr;
+        if (expected || actual) {
+            if (!expected || !actual || CFGetTypeID(expected) != CFDataGetTypeID() ||
+                CFGetTypeID(actual) != CFDataGetTypeID() || CFDataGetLength(expected) != lengths[n] ||
+                CFDataGetLength(actual) != lengths[n] || !CFEqual(expected,actual))
+                e = kVTVideoDecoderBadDataErr;
+        }
+        if (actual) CFRelease(actual);
+        if (e) return e;
     }
     return noErr;
 }

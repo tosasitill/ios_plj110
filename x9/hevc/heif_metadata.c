@@ -1,6 +1,7 @@
 #include "heif_metadata.h"
 #include <CoreVideo/CoreVideo.h>
 #include <errno.h>
+#include <string.h>
 static CFNumberRef number(uint32_t n)
 { int64_t value = n; return CFNumberCreate(NULL,kCFNumberSInt64Type,&value); }
 static int put_number(CFMutableDictionaryRef d, CFStringRef key, uint32_t n)
@@ -69,6 +70,31 @@ static int color_extension(const struct x9_heif_document *document, const struct
     }
     return 0;
 }
+/* ISO BMFF mdcv/clli are ordinary boxes, not FullBoxes. Their unchanged
+ * 24/4-byte big-endian payloads use the same layout as CM/CV's HEVC SEI data.
+ * Keep these item-local: they are not colr, an inherited graph color policy,
+ * a claim about output mastering, or a request for a guessed tone mapper. */
+static int hdr_extension(const struct x9_heif_document *document, const struct x9_heif_property *p,
+    CFMutableDictionaryRef info, CFMutableDictionaryRef extensions, uint32_t *seen)
+{
+    CFStringRef key;
+    uint32_t flag, length;
+    if (p->type == X9_HEIF_TYPE('m','d','c','v')) {
+        key = kCMFormatDescriptionExtension_MasteringDisplayColorVolume; flag = 1; length = 24;
+    } else if (p->type == X9_HEIF_TYPE('c','l','l','i')) {
+        key = kCMFormatDescriptionExtension_ContentLightLevelInfo; flag = 2; length = 4;
+    } else return 0;
+    if (*seen & flag) return EEXIST;
+    if (p->payload.bytes != length) return EBADMSG;
+    const uint8_t *raw = NULL;
+    int e = x9_heif_span_data(document,p->payload,&raw);
+    if (e) return e;
+    CFDataRef value = CFDataCreate(NULL,raw,length);
+    if (!value) return ENOMEM;
+    CFDictionarySetValue(info,key,value);
+    if (extensions) CFDictionarySetValue(extensions,key,value);
+    CFRelease(value); *seen |= flag; return 0;
+}
 int x9_heif_copy_item_info(const struct x9_heif_document *document,
     const struct x9_heif_image *image, CFDictionaryRef *out, CFMutableDictionaryRef extensions)
 {
@@ -81,7 +107,7 @@ int x9_heif_copy_item_info(const struct x9_heif_document *document,
     CFMutableArrayRef derived = CFArrayCreateMutable(NULL,0,&kCFTypeArrayCallBacks);
     CFMutableArrayRef item_offsets = CFArrayCreateMutable(NULL,0,&kCFTypeArrayCallBacks);
     CFMutableArrayRef prem = CFArrayCreateMutable(NULL,0,&kCFTypeArrayCallBacks);
-    uint32_t color_seen = 0;
+    uint32_t color_seen = 0, hdr_seen = 0;
     int e = !info || !properties || !aux || !derived || !item_offsets || !prem ? ENOMEM : 0;
     if (!e) e = put_number(info,CFSTR("ItemID"),image->id);
     if (!e) e = put_number(info,CFSTR("Width"),image->width);
@@ -130,6 +156,7 @@ int x9_heif_copy_item_info(const struct x9_heif_document *document,
             if (!record) e = ENOMEM;
         }
         if (!e) { CFArrayAppendValue(properties,record); if (extensions) e = color_extension(document,p,extensions,&color_seen); }
+        if (!e) e = hdr_extension(document,p,info,extensions,&hdr_seen);
         if (record) CFRelease(record);
         if (type) CFRelease(type);
         if (raw) CFRelease(raw);
@@ -181,6 +208,34 @@ int x9_heif_copy_item_info(const struct x9_heif_document *document,
     if (derived) CFRelease(derived);
     if (item_offsets) CFRelease(item_offsets);
     if (prem) CFRelease(prem);
+    return e;
+}
+int x9_heif_resolve_hdr_extensions(CFMutableDictionaryRef extensions,
+    const struct x9_hevc_hdr *hdr)
+{
+    if (!extensions || CFGetTypeID(extensions) != CFDictionaryGetTypeID() || !hdr ||
+        hdr->mastering_present > 1 || hdr->light_present > 1) return EINVAL;
+    CFStringRef keys[] = { kCMFormatDescriptionExtension_MasteringDisplayColorVolume,
+        kCMFormatDescriptionExtension_ContentLightLevelInfo };
+    const uint8_t *bytes[] = {hdr->mastering,hdr->light};
+    uint32_t present[] = {hdr->mastering_present,hdr->light_present};
+    const CFIndex lengths[] = {24,4};
+    CFDataRef add[2] = {NULL,NULL};
+    int e = 0;
+    /* Validate conflicts and allocate BOTH values before changing the caller's
+     * extension dictionary. Container/SEI duplication must agree byte-for-byte;
+     * neither source silently wins. No defaults for an absent message. */
+    for (unsigned n = 0; n < 2 && !e; n++) {
+        CFTypeRef value = CFDictionaryGetValue(extensions,keys[n]);
+        if (value && (CFGetTypeID(value) != CFDataGetTypeID() ||
+            CFDataGetLength(value) != lengths[n])) e = EBADMSG;
+        else if (present[n]) {
+            if (value && memcmp(CFDataGetBytePtr(value),bytes[n],(size_t)lengths[n])) e = EBADMSG;
+            else if (!value) { add[n] = CFDataCreate(NULL,bytes[n],lengths[n]); if (!add[n]) e = ENOMEM; }
+        }
+    }
+    if (!e) for (unsigned n = 0; n < 2; n++) if (add[n]) CFDictionarySetValue(extensions,keys[n],add[n]);
+    for (unsigned n = 0; n < 2; n++) if (add[n]) CFRelease(add[n]);
     return e;
 }
 int x9_heif_copy_color_extensions(const struct x9_heif_document *document,

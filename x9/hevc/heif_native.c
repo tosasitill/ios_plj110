@@ -285,6 +285,14 @@ static OSStatus transfer_image(CVPixelBufferRef source, CVPixelBufferRef target,
         if (actual) CFRelease(actual);
     }
     if (transfer) { VTPixelTransferSessionInvalidate(transfer); CFRelease(transfer); }
+    if (!e) {
+        /* These RGB pixels may use a new ICC, be resampled or subsequently
+         * overlaid. Original mastering/MaxCLL describe the source item, not
+         * this derived raster. Retain source bytes in Items, never propagate
+         * them as an unmeasured mastering/luminance claim about converted RGB. */
+        CVBufferRemoveAttachment(target,kCVImageBufferMasteringDisplayColorVolumeKey);
+        CVBufferRemoveAttachment(target,kCVImageBufferContentLightLevelInfoKey);
+    }
     return e;
 }
 static OSStatus check_pixels(CVPixelBufferRef pixel, size_t budget)
@@ -610,6 +618,8 @@ OSStatus X9HEIFCopyHardwareImageWithColorOptions(CFDataRef file, uint32_t id,
             CFDictionarySetValue(info,CFSTR("LinearLightResampling"),c->resampling ? kCFBooleanTrue : kCFBooleanFalse);
             CFDictionarySetValue(info,CFSTR("LinearLightComposition"),c->linear ? kCFBooleanTrue : kCFBooleanFalse);
             CFDictionarySetValue(info,CFSTR("AlphaChannelMode"),kCVImageBufferAlphaChannelMode_StraightAlpha);
+            CFDictionarySetValue(info,CFSTR("HDRMetadataDisposition"),
+                CFSTR("original item/SEI bytes retained in Items; converted RGB has no relabelled source mastering/MaxCLL"));
             CFDictionarySetValue(info,CFSTR("ExplicitResamplingIntermediateUsed"),
                 c->linear && c->intermediate ? kCFBooleanTrue : kCFBooleanFalse);
             if (c->intermediate)

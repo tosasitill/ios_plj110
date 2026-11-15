@@ -41,6 +41,22 @@ static int format_catalog(CMVideoFormatDescriptionRef format, const uint8_t *hvc
     }
     return 0;
 }
+static int format_hdr(CMVideoFormatDescriptionRef format, CFDictionaryRef requested)
+{
+    CFStringRef keys[] = { kCMFormatDescriptionExtension_MasteringDisplayColorVolume,
+        kCMFormatDescriptionExtension_ContentLightLevelInfo };
+    const CFIndex lengths[] = {24,4};
+    for (unsigned n = 0; n < 2; n++) {
+        CFTypeRef expected = CFDictionaryGetValue(requested,keys[n]);
+        CFTypeRef actual = CMFormatDescriptionGetExtension(format,keys[n]);
+        if (!expected && !actual) continue;
+        if (!expected || !actual || CFGetTypeID(expected) != CFDataGetTypeID() ||
+            CFGetTypeID(actual) != CFDataGetTypeID() || CFDataGetLength(expected) != lengths[n] ||
+            CFDataGetLength(actual) != lengths[n] ||
+            !CFEqual(expected,actual)) return EBADMSG;
+    }
+    return 0;
+}
 OSStatus x9_heif_copy_item_sample(CFDataRef file, uint32_t id,
     CMSampleBufferRef *out, CFDictionaryRef *info_out, struct x9_hevc_vui *vui_out)
 {
@@ -60,6 +76,7 @@ OSStatus x9_heif_copy_item_sample(CFDataRef file, uint32_t id,
     uint8_t *au = NULL;
     struct x9_hevc_config config;
     struct x9_hevc_vui vui;
+    struct x9_hevc_hdr hdr;
     struct x9_hevc_irap_picture picture;
     size_t bytes = 0, needed = 0;
     int e = !image || !extensions ? ENOMEM : x9_heif_open(data,(size_t)CFDataGetLength(file),&document);
@@ -78,28 +95,42 @@ OSStatus x9_heif_copy_item_sample(CFDataRef file, uint32_t id,
     if (!e) e = x9_heif_read_item(document,id,au,bytes,&bytes);
     if (!e) e = x9_hevc_irap_annexb(&config,data+image->hvcc.offset,au,bytes,NULL,0,&needed,&picture);
     if (!e) e = x9_hevc_sample_vui(&config,data+image->hvcc.offset,(size_t)image->hvcc.bytes,au,bytes,&vui);
+    if (!e) e = x9_hevc_sample_hdr(&config,data+image->hvcc.offset,(size_t)image->hvcc.bytes,au,bytes,&hdr);
     if (!e) e = x9_heif_copy_item_info(document,image,&info,extensions);
+    if (!e) e = x9_heif_resolve_hdr_extensions(extensions,&hdr);
     CFDictionaryRef resolved = NULL, vui_info = NULL;
     if (!e) e = x9_heif_resolve_color_extensions(extensions,&vui,&resolved);
     if (!e) e = x9_heif_copy_vui_info(&vui,&vui_info);
     if (!e) {
         CFMutableDictionaryRef record = CFDictionaryCreateMutableCopy(NULL,0,info);
         CFMutableDictionaryRef new_extensions = CFDictionaryCreateMutableCopy(NULL,0,resolved);
+        CFMutableDictionaryRef hdr_info = CFDictionaryCreateMutable(NULL,0,
+            &kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
         int32_t nal_type = (int32_t)picture.nal_type;
         CFNumberRef type = CFNumberCreate(NULL,kCFNumberSInt32Type,&nal_type);
-        if (!record || !new_extensions || !type) {
+        if (!record || !new_extensions || !type || !hdr_info) {
             if (record) CFRelease(record);
             if (new_extensions) CFRelease(new_extensions);
             e = ENOMEM;
         } else {
+            CFStringRef hdr_keys[] = { kCMFormatDescriptionExtension_MasteringDisplayColorVolume,
+                kCMFormatDescriptionExtension_ContentLightLevelInfo };
+            for (unsigned n = 0; n < 2; n++) {
+                CFTypeRef value = CFDictionaryGetValue(resolved,hdr_keys[n]);
+                if (value) CFDictionarySetValue(hdr_info,hdr_keys[n],value);
+            }
             CFDictionarySetValue(record,CFSTR("BitstreamVUI"),vui_info);
             CFDictionarySetValue(record,CFSTR("ResolvedColr"),resolved);
+            CFDictionarySetValue(record,CFSTR("ResolvedHDRMetadata"),hdr_info);
+            CFDictionarySetValue(record,CFSTR("SEIMasteringDisplayPresent"),hdr.mastering_present ? kCFBooleanTrue : kCFBooleanFalse);
+            CFDictionarySetValue(record,CFSTR("SEIContentLightPresent"),hdr.light_present ? kCFBooleanTrue : kCFBooleanFalse);
             CFDictionarySetValue(record,CFSTR("IRAPNALUnitType"),type);
             CFDictionarySetValue(record,CFSTR("NoOutputOfPriorPicsFlag"),
                 picture.no_output_of_prior_pics_flag ? kCFBooleanTrue : kCFBooleanFalse);
             CFRelease(info); info = record;
             CFRelease(extensions); extensions = new_extensions;
         }
+        if (hdr_info) CFRelease(hdr_info);
         if (type) CFRelease(type);
     }
     if (resolved) CFRelease(resolved);
@@ -120,6 +151,7 @@ OSStatus x9_heif_copy_item_sample(CFDataRef file, uint32_t id,
         result = kVTVideoDecoderBadDataErr; goto done;
     }
     result = parse_error(format_catalog(format,data+image->hvcc.offset,&config));
+    if (!result) result = parse_error(format_hdr(format,extensions));
     if (result) goto done;
     result = CMBlockBufferCreateWithMemoryBlock(NULL,NULL,bytes,NULL,NULL,0,bytes,0,&block);
     if (!result) result = CMBlockBufferReplaceDataBytes(au,block,0,bytes);

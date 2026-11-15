@@ -99,4 +99,19 @@ int x9_hevc_parameter_sets_annexb(const struct x9_hevc_config *, const uint8_t *
  * synthesized CM extensions or SEI override; output is cleared on failure. */
 int x9_hevc_sample_vui(const struct x9_hevc_config *, const uint8_t *hvcc,
     size_t hvcc_bytes, const uint8_t *sample, size_t sample_bytes, struct x9_hevc_vui *);
+/* Explicit, unscoped base-layer prefix TemporalId0 SEI in THIS complete AU,
+ * not persistent video
+ * state or a transfer/tone-map policy. Bytes are the original big-endian
+ * payloads, after canonical emulation-prevention removal. No numeric scaling
+ * or RGB-primary reorder. Equal repeated messages are legal; conflicting
+ * values, malformed SEI lengths/trailing bits fail with cleared output.
+ * HDR in suffix/nonzero TemporalId and scalable nesting require further
+ * placement/scope resolution and currently return ENOTSUP;
+ * unknown non-nesting messages are bounded/validated, not interpreted. */
+struct x9_hevc_hdr {
+    uint32_t mastering_present, light_present;
+    uint8_t mastering[24], light[4];
+};
+int x9_hevc_sample_hdr(const struct x9_hevc_config *, const uint8_t *hvcc,
+    size_t hvcc_bytes, const uint8_t *sample, size_t sample_bytes, struct x9_hevc_hdr *);
 #endif

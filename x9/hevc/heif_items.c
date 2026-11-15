@@ -577,6 +577,12 @@ static int property_parse(const struct x9_heif_document *d,
         if (!e && (c.at == c.end || !d->data[c.at] ||
             !memchr(d->data+c.at,0,(size_t)(c.end-c.at)))) e = EBADMSG;
         break;
+    case T('m','d','c','v'):
+        bit = 16; if (p->payload.bytes != 24) e = EBADMSG;
+        break;
+    case T('c','l','l','i'):
+        bit = 32; if (p->payload.bytes != 4) e = EBADMSG;
+        break;
     default: if (p->essential) e = ENOTSUP; break;
     }
     if (!e && bit && (*seen & bit)) e = EEXIST;

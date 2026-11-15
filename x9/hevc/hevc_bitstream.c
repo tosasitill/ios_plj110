@@ -696,3 +696,73 @@ int x9_hevc_sample_vui(const struct x9_hevc_config *c, const uint8_t *hvcc,
     }
     return EINVAL;
 }
+static int sei_hdr(const uint8_t *p, size_t n, struct x9_hevc_hdr *hdr)
+{
+    struct bits b = { .p = p + 2, .n = n - 2 };
+    unsigned messages = 0;
+    /* SEI headers and payloads are byte aligned. Only the final 0x80 at a
+     * HEADER boundary is rbsp_trailing_bits; an 0x80 within a sized payload
+     * remains ordinary data. The existing bit reader validates canonical
+     * EBSP escapes even for unknown payloads, with no temporary RBSP heap. */
+    while (!b.error && b.pos < b.n) {
+        if (b.n-b.pos == 1 && b.p[b.pos] == 0x80)
+            return messages ? trailing_bits(&b) : EINVAL;
+        if (++messages > 1024) return E2BIG;
+        uint32_t type = 0, bytes = 0, value;
+        do {
+            value = get(&b,8);
+            if (b.error || value > UINT32_MAX-type) return EINVAL;
+            type += value;
+        } while (value == 255);
+        do {
+            value = get(&b,8);
+            if (b.error || value > UINT32_MAX-bytes) return EINVAL;
+            bytes += value;
+        } while (value == 255);
+        if (bytes > b.n-b.pos) return EINVAL;
+        if (type == 133) return ENOTSUP; /* scalable_nesting scope not guessed */
+        uint8_t raw[24];
+        if ((type == 137 && bytes != 24) || (type == 144 && bytes != 4)) return EINVAL;
+        /* This still-image resolver only interprets direct prefix/Tid0
+         * HDR. Other placement/temporal scope is unsupported, not claimed
+         * malformed without resolving the applicable SEI semantics. */
+        if ((type == 137 || type == 144) &&
+            (((p[0] >> 1) & 63) != 39 || (p[1] & 7) != 1)) return ENOTSUP;
+        for (uint32_t i = 0; i < bytes && !b.error; i++) {
+            value = get(&b,8);
+            if (type == 137 || type == 144) raw[i] = (uint8_t)value;
+        }
+        if (b.error) return EINVAL;
+        if (type == 137) {
+            if (hdr->mastering_present && memcmp(hdr->mastering,raw,24)) return EINVAL;
+            memcpy(hdr->mastering,raw,24); hdr->mastering_present = 1;
+        } else if (type == 144) {
+            if (hdr->light_present && memcmp(hdr->light,raw,4)) return EINVAL;
+            memcpy(hdr->light,raw,4); hdr->light_present = 1;
+        }
+    }
+    return EINVAL; /* the final rbsp_trailing_bits byte is required */
+}
+int x9_hevc_sample_hdr(const struct x9_hevc_config *c, const uint8_t *hvcc,
+    size_t hvcc_bytes, const uint8_t *sample, size_t sample_bytes, struct x9_hevc_hdr *out)
+{
+    if (!out) return EINVAL;
+    memset(out,0,sizeof(*out));
+    if (!c || hvcc_bytes != c->config_bytes) return EINVAL;
+    size_t needed = 0;
+    int e = x9_hevc_au_annexb(c,hvcc,sample,sample_bytes,NULL,0,&needed);
+    if (e) return e;
+    struct x9_hevc_hdr hdr = {0};
+    size_t at = 0;
+    while (at < sample_bytes) {
+        uint32_t bytes = 0;
+        for (unsigned j = 0; j < c->length_size; j++) bytes = (bytes << 8) | sample[at++];
+        unsigned type = (sample[at] >> 1) & 63;
+        if (type == 39 || type == 40) {
+            e = sei_hdr(sample+at,bytes,&hdr);
+            if (e) return e;
+        }
+        at += bytes;
+    }
+    *out = hdr; return 0;
+}
