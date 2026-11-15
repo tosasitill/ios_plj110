@@ -18,6 +18,7 @@ static struct x9_prox_status state;
 static struct x9_prox_transport transport;
 static int active, valid;
 static uint64_t last_scp_time, request_time;
+static uint32_t pending_enabled, pending_interval;
 #define PROX_CONTROL_TIMEOUT_NS 1000000000ULL
 static uint32_t prox_le32(const uint8_t *p)
 { return p[0]|(uint32_t)p[1]<<8|(uint32_t)p[2]<<16|(uint32_t)p[3]<<24; }
@@ -63,11 +64,11 @@ int x9_prox_init(int mode)
 {
  if (mode<1 || mode>3) return EINVAL;
  lck_mtx_lock(&prox_lock);
- int error=active?EBUSY:0;
+ int error=active || state.pending?EBUSY:0;
  if (!error) {
   active=1; valid=0; last_scp_time=0;
   /* Keep uncertain native control across software restarts. */
-  int prior=state.error; bzero(&state,sizeof(state)); state.error=prior;
+  int prior=mode==3?state.error:0; bzero(&state,sizeof(state)); state.error=prior;
   state.mode=mode; state.interval_us=200000;
  }
  lck_mtx_unlock(&prox_lock); return error;
@@ -77,7 +78,7 @@ void x9_prox_shutdown(void)
  /* Request sensor DISABLE only, never shut off another SCP user's power. */
  (void)x9_prox_set_enabled(0,200000);
  lck_mtx_lock(&prox_lock);
- active=valid=0; state.configured=0; last_scp_time=0;
+ active=valid=0; last_scp_time=0;
  lck_mtx_unlock(&prox_lock);
 }
 int x9_prox_copy_sample(struct x9_prox_sample *out)
@@ -102,10 +103,14 @@ int x9_prox_set_enabled(uint32_t enabled, uint32_t us)
  if (enabled>1 || us<20000 || us>1000000) return EINVAL;
  int (*request)(uint32_t,uint32_t)=NULL;
  lck_mtx_lock(&prox_lock); expire_locked();
- int error=!active?ENXIO:state.error?state.error:state.pending?EBUSY:0;
+ int error=!active?ENXIO:state.error?state.error:0;
  if (!error && state.mode==3 && (!transport.request || !state.ready || !state.configured)) {
   /* Keep iOS's desired mode until LIST/READY, without faking an ACK. */
   state.desired=enabled; state.interval_us=us; error=EAGAIN;
+ } else if (!error && state.pending) {
+  /* Coalesce iOS mode changes while the real ACK is in flight. The
+   * callback compares with pending_enabled, then submits the latest mode. */
+  state.desired=enabled; state.interval_us=us; valid=0;
  } else if (!error) {
   if (state.enabled==enabled && state.interval_us==us) {
    state.desired=enabled;
@@ -113,6 +118,7 @@ int x9_prox_set_enabled(uint32_t enabled, uint32_t us)
    state.desired=enabled; state.interval_us=us;
    if (state.mode==3) {
     request=transport.request; state.pending=1; request_time=mach_absolute_time();
+    pending_enabled=enabled; pending_interval=us;
     valid=0;
    } else { state.enabled=enabled; if (!enabled) valid=0; }
   }
@@ -149,14 +155,30 @@ int x9_prox_native_configure(const void *info, unsigned length)
 }
 void x9_prox_native_control(uint32_t enabled, int error)
 {
+ int (*request)(uint32_t,uint32_t)=NULL;
+ uint32_t next=0,us=0;
  lck_mtx_lock(&prox_lock);
- if (active && state.mode==3 && state.pending) {
-  if (!error && enabled!=state.desired) error=EPROTO;
+ /* A service stop still needs to complete its already-issued DISABLE. */
+ if (state.mode==3 && state.pending) {
+  if (!error && enabled!=pending_enabled) error=EPROTO;
   state.pending=0; state.error=error; state.enabled=error?0:enabled;
   if (error || !enabled) valid=0;
+  if (!error && (state.desired!=enabled ||
+      (enabled && state.interval_us!=pending_interval))) {
+   next=state.desired; us=state.interval_us; request=transport.request;
+   pending_enabled=next; pending_interval=us;
+   state.pending=1; request_time=mach_absolute_time(); valid=0;
+  }
  }
  lck_mtx_unlock(&prox_lock);
  printf("X9 PROX: native %s ACK errno=%d (not a DATA event)\n",enabled?"ENABLE":"DISABLE",error);
+ if (request) {
+  error=request(next,us);
+  if (error) {
+   lck_mtx_lock(&prox_lock); state.pending=0; state.error=error; valid=0;
+   lck_mtx_unlock(&prox_lock);
+  }
+ }
 }
 void x9_prox_native_disconnect(int error)
 {
