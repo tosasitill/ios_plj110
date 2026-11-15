@@ -5,6 +5,10 @@
 #include "x9_vdec_shared.h"
 #include "x9_vcp_bus.h"
 struct x9_vdec_control;
+/* Thread-context opaque host owner. Callers must serialize handle lifetime
+ * against discard, including status/manual service/quiesce. The private lock
+ * serializes operations, not a reference acquired before entering an API.
+ * Native discard joins its own worker; that does not join external callers. */
 /* Actual native resources, not arbitrary IOVAs or a readiness bitmap.
  * Both input and output are already DEVICE-owned when passed to qualify_start.
  * Capacities include the native arena's owned zero padding; no pixel format,
@@ -53,6 +57,10 @@ struct x9_vdec_control_status {
     uint32_t input_attempted, input_prepared;
     uint32_t slot_initialized, vsi_attempted, vsi_staged;
     uint64_t service_batches, service_packets;
+    uint64_t worker_wakeups, worker_contentions;
+    uint32_t worker_enabled, worker_joined, worker_last_errno, worker_bus_phase;
+    uint32_t closing; /* host admission only, NOT DMA/firmware stopped */
+    struct x9_vcp_bus_call_log service_call; /* last reserved/failed batch, incl packet */
     uint32_t input_records, output_records; /* includes partial/error attempts */
     uint32_t ring_valid_bitmap; /* independently parsed rings in latest recheck */
     struct x9_vdec_control_start_resources resources; /* latest attempt, NOT a completed frame */
@@ -84,7 +92,7 @@ struct x9_vdec_control_output_journal {
 };
 /* Bus must ALREADY be genuinely RUNNING with exactly this published global
  * allocation. Memory must own these same two arenas/epoch/parent. Retains both
- * memory/shared handles; caller serializes the bus lifetime through discard.
+ * memory/shared handles and a native bus lifetime hold through discard.
  * hardware.clock/wait are the real owner's mandatory operations, NOT success
  * stubs. Native code supplies actual SHM/alloc/VP and notification handlers.
  * This does not create a controller, load firmware, start a bus or set READY.
@@ -95,7 +103,10 @@ int x9_vdec_control_create(struct x9_vcp_bus *, struct x9_vdec_shared *,
 /* Sends physical a000, handles reverse operations, retains b000, resolves the
  * complete live slot using the captured HFRP remap table and uniquely claims
  * it in this global allocation, then sets ONLY the evidenced AP ipi_blocked
- * field to0 through its native NC map. Once only, including uncertain sends. */
+ * field to0 through its native NC map. Once only, including uncertain sends.
+ * ONLY full success arms the control-owned, non-overlapping kernel thread-call
+ * pump. It services real reverse/async packets even after b001 and rechecks
+ * pending observations on empty RX. This is not a DMA/ring completion grant. */
 int x9_vdec_control_init(struct x9_vdec_control *, uint32_t timeout_ms,
     struct x9_vcp_init_result *, struct x9_vcp_bus_call_log *);
 /* Before START only: no interleaving QUERY with unresolved picture DMA.
@@ -147,7 +158,8 @@ int x9_vdec_control_decode_start(struct x9_vdec_control *, const uint8_t *annexb
 /* Thread-context service for this bound live instance, including after b001.
  * Uses native SHM/alloc/VP/notification handlers and the actual hardware
  * clock/wait callbacks, under control_lock and the bus whole-call reservation.
- * One batch drains up to64 packets; caller schedules subsequent batches.
+ * One batch drains up to64 packets; a successful INIT also automatically
+ * schedules subsequent batches through the same native implementation.
  * Empty RX succeeds immediately. A retained transient ring observation is
  * rechecked even with no new event, not discarded/synthesized as completion.
  * Timeout/protocol/callback failures retain journals/resources and poison this
@@ -155,6 +167,15 @@ int x9_vdec_control_decode_start(struct x9_vdec_control *, const uint8_t *annexb
  * No new START, shared ring consumption, per-buffer retirement or READY. */
 int x9_vdec_control_service(struct x9_vdec_control *, uint32_t timeout_ms,
     struct x9_vcp_bus_call_log *);
+/* Irreversibly close THIS control's admission and cancel/join its CPU service
+ * pump, including a self-rearmed pending invocation. Thread context, without
+ * owner/shared/bus locks needed by a callback; never call from a hardware/bus
+ * callback or the pump itself. Repeated calls on a retained object succeed.
+ * Call before bus stop / DMA domain retirement. No new control transaction,
+ * firmware halt, IRQ/AXI drain, ring consumption, cache ownership or free.
+ * discard also performs this join, but still requires physical STOPPED and
+ * both RETIRED domains after an INIT attempt. Failed discard remains closed. */
+int x9_vdec_control_quiesce(struct x9_vdec_control *);
 int x9_vdec_control_get_status(struct x9_vdec_control *, struct x9_vdec_control_status *);
 /* Resident disjoint host snapshots of prior records, including partial/error
  * attempts. Indices 0..record_count-1 are never wrapped/rebased. No live DMA

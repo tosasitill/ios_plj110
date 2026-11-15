@@ -63,6 +63,7 @@ struct x9_vcp_bus_status {
      * physical samples and the retained owner guard; not a recovery grant. */
     uint32_t halt_status[2][2], halt_checked_bitmap, halt_samples;
     uint32_t service_shm_replied; /* physical d005 consumption, NOT codec READY */
+    uint32_t retained_clients; /* host lifetime holds, NOT physical users/drain */
 };
 /* Phase 1: reads CURRENT ADT topology and pins the native MM parent. Reserves
  * a singleton and boot-unique epoch, available through get_status BEFORE the
@@ -103,6 +104,16 @@ int x9_vcp_bus_get_status(struct x9_vcp_bus *, struct x9_vcp_bus_status *);
  * Matching extents confer no controller or firmware authority. */
 int x9_vcp_bus_check_shared(struct x9_vcp_bus *, uint64_t epoch,
     const struct x9_vcp_shm_region *);
+/* Native async-client lifetime. Retain uses the SAME live RUNNING/shared/guard
+ * check, then returns a boot-unique opaque host hold. Discard refuses while
+ * any hold exists, including between bus transactions or after STOPPED.
+ * Release only drops THIS exact hold; it does not stop, drain, release power,
+ * retire mappings or grant DMA ownership. The client must close admission
+ * and join all its callbacks before releasing. Token initially0 on retain;
+ * resident outputs are disjoint from inputs. No reentry from bus callbacks. */
+int x9_vcp_bus_retain_shared(struct x9_vcp_bus *, uint64_t epoch,
+    const struct x9_vcp_shm_region *, uint64_t *token);
+int x9_vcp_bus_release_shared(struct x9_vcp_bus *, uint64_t epoch, uint64_t *token);
 /* Stop is once-only, even on failure; uncertain dependencies remain pinned.
  * After real owner halt/drain, independently polls physical cfg+70 for at
  * most 500ms, using each core's CURRENT FDT hart count. Does not write SHUT,

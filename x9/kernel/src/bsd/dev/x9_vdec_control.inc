@@ -1,7 +1,13 @@
 /* Included after native shared/memory owners. No borrowed Linux pointers. */
 #include "x9_vdec_control.h"
+#include <kern/thread_call.h>
 #define VCONTROL_MAGIC UINT64_C(0x5839435452303031)
 #define VCONTROL_SCRATCH (2u * X9_VCP_INSTANCE_SLOT_BYTES)
+/* Scheduling policy only; not a producer fence, deadline extension or DMA
+ * completion inference. Each batch retains the normal <=3s bus deadline. */
+#define VCONTROL_SERVICE_IDLE_MS 10u
+#define VCONTROL_SERVICE_BUSY_MS 1u
+#define VCONTROL_SERVICE_TIMEOUT_MS 3000u
 struct vcontrol_input_record {
     struct x9_vdec_control_input_journal journal;
     struct x9_vdec_dma_slice slice;
@@ -16,6 +22,8 @@ struct x9_vdec_control {
     uint64_t magic;
     lck_mtx_t lock;
     struct x9_vcp_bus *bus;
+    uint64_t bus_token;
+    thread_call_t service_worker;
     struct x9_vdec_shared *shared;
     struct x9_vdec_memory *memory;
     struct x9_vcp_init init;
@@ -47,6 +55,19 @@ static int vcontrol_fault(struct x9_vdec_control *c, int e)
 {
     if (e && !c->status.last_errno) c->status.last_errno = (uint32_t)e;
     return e;
+}
+static void vcontrol_worker(thread_call_param_t, thread_call_param_t);
+/* c->lock held. ONCE defers self-resubmission until the callback returns;
+ * closing/error stops future submission before cancel_wait can join it. */
+static void vcontrol_arm_worker(struct x9_vdec_control *c, uint32_t ms)
+{
+    uint64_t at;
+    if (c->closing || c->status.last_errno || !c->status.bound ||
+        !c->status.slot_initialized || !c->status.worker_enabled) return;
+    if (ms) {
+        clock_interval_to_deadline(ms,UINT32_C(1000000),&at);
+        (void)thread_call_enter_delayed(c->service_worker,at);
+    } else (void)thread_call_enter(c->service_worker);
 }
 static int vcontrol_shm(void *cookie, uint64_t epoch, uint64_t end,
     const struct x9_vcp_shm_request *q, struct x9_vcp_shm_mapping *out)
@@ -481,12 +502,20 @@ int x9_vdec_control_create(struct x9_vcp_bus *bus, struct x9_vdec_shared *s,
         Z_WAITOK | Z_ZERO);
     c->outputs = kalloc_type(struct vcontrol_output_record,X9_VDEC_CONTROL_MAX_RECORDS,
         Z_WAITOK | Z_ZERO);
-    if (!c->scratch || !c->inputs || !c->outputs) {
+    /* Not HIGH/default or SIGNAL/interrupt context: hardware callbacks may
+     * block within their existing absolute deadline. Never parallel callbacks. */
+    c->service_worker = thread_call_allocate_with_options(vcontrol_worker,c,
+        THREAD_CALL_PRIORITY_KERNEL,THREAD_CALL_OPTIONS_ONCE);
+    if (!c->scratch || !c->inputs || !c->outputs || !c->service_worker) {
         if (c->scratch) kfree_data(c->scratch,VCONTROL_SCRATCH);
         if (c->inputs) kfree_type(struct vcontrol_input_record,X9_VDEC_CONTROL_MAX_RECORDS,c->inputs);
         if (c->outputs) kfree_type(struct vcontrol_output_record,X9_VDEC_CONTROL_MAX_RECORDS,c->outputs);
+        if (c->service_worker && !thread_call_free(c->service_worker))
+            panic("X9 VDEC: pending unpublished service worker");
         kfree_type(struct x9_vdec_control,c); return ENOMEM;
     }
+    e = x9_vcp_bus_retain_shared(bus,s->epoch,&s->global,&c->bus_token);
+    if (e) goto fail;
     lck_mtx_lock(&s->lock); lck_mtx_lock(&m->lock);
     e = s->closing || !s->published || m->closing || m->control_refs ? EBUSY :
         s->fault_errno ? s->fault_errno : m->fault_errno;
@@ -495,12 +524,7 @@ int x9_vdec_control_create(struct x9_vcp_bus *bus, struct x9_vdec_shared *s,
     if (!e && s->control_refs == UINT32_MAX) e = EOVERFLOW;
     if (!e) { s->control_refs++; m->control_refs++; c->init = m->init; }
     lck_mtx_unlock(&m->lock); lck_mtx_unlock(&s->lock);
-    if (e) {
-        kfree_type(struct vcontrol_input_record,X9_VDEC_CONTROL_MAX_RECORDS,c->inputs);
-        kfree_type(struct vcontrol_output_record,X9_VDEC_CONTROL_MAX_RECORDS,c->outputs);
-        kfree_data(c->scratch,VCONTROL_SCRATCH); kfree_type(struct x9_vdec_control,c);
-        return e;
-    }
+    if (e) goto fail;
     c->magic = VCONTROL_MAGIC; c->bus = bus; c->shared = s; c->memory = m;
     c->hardware = *hardware; c->status.epoch = s->epoch;
     c->reverse = (struct x9_vcp_bus_reverse_ops){ .cookie = c,
@@ -512,6 +536,15 @@ int x9_vdec_control_create(struct x9_vcp_bus *bus, struct x9_vdec_shared *s,
     lck_mtx_init(&c->lock,&vdec_group,LCK_ATTR_NULL);
     *out = c;
     return 0;
+fail:
+    if (c->bus_token && x9_vcp_bus_release_shared(bus,s->epoch,&c->bus_token))
+        panic("X9 VDEC: lost unpublished bus lifetime hold");
+    if (!thread_call_free(c->service_worker))
+        panic("X9 VDEC: pending unpublished service worker");
+    kfree_type(struct vcontrol_input_record,X9_VDEC_CONTROL_MAX_RECORDS,c->inputs);
+    kfree_type(struct vcontrol_output_record,X9_VDEC_CONTROL_MAX_RECORDS,c->outputs);
+    kfree_data(c->scratch,VCONTROL_SCRATCH); kfree_type(struct x9_vdec_control,c);
+    return e;
 }
 int x9_vdec_control_init(struct x9_vdec_control *c, uint32_t ms,
     struct x9_vcp_init_result *out, struct x9_vcp_bus_call_log *log)
@@ -553,6 +586,10 @@ int x9_vdec_control_init(struct x9_vdec_control *c, uint32_t ms,
             }
         }
         vcontrol_fault(c,e);
+        if (!e) {
+            c->status.worker_enabled = 1;
+            vcontrol_arm_worker(c,0);
+        }
     }
     lck_mtx_unlock(&c->lock);
     return e;
@@ -718,6 +755,33 @@ int x9_vdec_control_decode_start(struct x9_vdec_control *c, const uint8_t *annex
     lck_mtx_unlock(&c->lock);
     return e;
 }
+/* Manual service and automatic pump use exactly the same physical batch,
+ * under c->lock, not two competing OUT0/IN1 consumers. */
+static int vcontrol_service_locked(struct x9_vdec_control *c, uint32_t ms,
+    struct x9_vcp_bus_call_log *log)
+{
+    int e;
+    memset(log,0,sizeof(*log));
+    e = c->closing || !c->status.bound || !c->status.slot_initialized ? EBUSY :
+        (int)c->status.last_errno;
+    if (!e && (c->status.service_batches == UINT64_MAX ||
+        c->status.service_packets > UINT64_MAX-64)) e = vcontrol_fault(c,EOVERFLOW);
+    if (!e) {
+        e = x9_vcp_bus_service(c->bus,&c->init,&c->status.init,&c->reverse,64,ms,log);
+        /* epoch is set only after actual bus reservation. Pre-reservation
+         * contention does not latch a fault or claim a serviced batch. */
+        if (log->epoch) {
+            c->status.service_batches++;
+            c->status.service_packets += log->received;
+            c->status.service_call = *log;
+            vcontrol_fault(c,e);
+        } else if (e != EBUSY) {
+            c->status.service_call = *log;
+            vcontrol_fault(c,e);
+        }
+    }
+    return e;
+}
 int x9_vdec_control_service(struct x9_vdec_control *c, uint32_t ms,
     struct x9_vcp_bus_call_log *log)
 {
@@ -726,22 +790,69 @@ int x9_vdec_control_service(struct x9_vdec_control *c, uint32_t ms,
     memset(log,0,sizeof(*log));
     if (!ms || ms > 3000) return EINVAL;
     lck_mtx_lock(&c->lock);
-    e = c->closing || !c->status.bound || !c->status.slot_initialized ? EBUSY :
-        (int)c->status.last_errno;
-    if (!e && (c->status.service_batches == UINT64_MAX ||
-        c->status.service_packets > UINT64_MAX-64)) e = EOVERFLOW;
-    if (!e) {
-        e = x9_vcp_bus_service(c->bus,&c->init,&c->status.init,&c->reverse,64,ms,log);
-        /* epoch is set only after actual bus reservation. Pre-reservation
-         * contention does not latch a fault or claim a serviced batch. */
-        if (log->epoch) {
-            c->status.service_batches++;
-            c->status.service_packets += log->received;
-            vcontrol_fault(c,e);
-        } else if (e != EBUSY) vcontrol_fault(c,e);
-    }
+    e = vcontrol_service_locked(c,ms,log);
     lck_mtx_unlock(&c->lock);
     return e;
+}
+static void vcontrol_worker(thread_call_param_t param, __unused thread_call_param_t unused)
+{
+    struct x9_vdec_control *c = param;
+    struct x9_vcp_bus_status bus;
+    struct x9_vcp_bus_call_log log;
+    uint32_t delay = VCONTROL_SERVICE_IDLE_MS;
+    int e;
+    /* The native bus hold and control/shared/memory handles remain retained
+     * until closing + ONCE cancel_wait has joined this exact callback. */
+    lck_mtx_lock(&c->lock);
+    if (c->closing || !c->status.worker_enabled || c->status.last_errno) {
+        c->status.worker_enabled = 0;
+        lck_mtx_unlock(&c->lock); return;
+    }
+    if (c->status.worker_wakeups == UINT64_MAX) {
+        c->status.worker_enabled = 0;
+        c->status.worker_last_errno = (uint32_t)vcontrol_fault(c,EOVERFLOW);
+        lck_mtx_unlock(&c->lock); return;
+    }
+    c->status.worker_wakeups++;
+    e = x9_vcp_bus_get_status(c->bus,&bus);
+    if (!e && bus.epoch != c->status.epoch) e = ESTALE;
+    if (!e) c->status.worker_bus_phase = bus.phase;
+    if (!e && bus.phase != X9_VCP_BUS_RUNNING)
+        e = bus.last_errno ? (int)bus.last_errno : ECANCELED;
+    if (e) {
+        /* A STOPPING/STOPPED bus is not transient transaction contention.
+         * Stop scheduling; neither its phase nor this CPU stop retires DMA. */
+        c->status.worker_enabled = 0; c->status.worker_last_errno = (uint32_t)e;
+        if (e != ECANCELED) vcontrol_fault(c,e);
+        lck_mtx_unlock(&c->lock); return;
+    }
+    e = vcontrol_service_locked(c,VCONTROL_SERVICE_TIMEOUT_MS,&log);
+    c->status.worker_last_errno = (uint32_t)e;
+    if (e == EBUSY && !log.epoch && !c->status.last_errno) {
+        /* Actual pre-reservation contention only. A reserved/failed reverse
+         * call is never retried, and its packet log remains owned in status. */
+        if (c->status.worker_contentions == UINT64_MAX) vcontrol_fault(c,EOVERFLOW);
+        else c->status.worker_contentions++;
+        delay = VCONTROL_SERVICE_BUSY_MS;
+    } else if (e) c->status.worker_enabled = 0;
+    else if (log.batch_limit_reached || c->status.recheck_pending)
+        delay = VCONTROL_SERVICE_BUSY_MS;
+    if (c->status.last_errno) c->status.worker_enabled = 0;
+    vcontrol_arm_worker(c,delay);
+    lck_mtx_unlock(&c->lock);
+}
+int x9_vdec_control_quiesce(struct x9_vdec_control *c)
+{
+    if (!c || c->magic != VCONTROL_MAGIC) return EINVAL;
+    lck_mtx_lock(&c->lock);
+    c->closing = true; c->status.closing = 1; c->status.worker_enabled = 0;
+    lck_mtx_unlock(&c->lock);
+    /* Never join holding the control lock needed by a queued callback. The
+     * actual XNU ONCE implementation cancels reschedule AND waits in-flight;
+     * closing prevents any later entry from this object or manual INIT. */
+    (void)thread_call_cancel_wait(c->service_worker);
+    lck_mtx_lock(&c->lock); c->status.worker_joined = 1; lck_mtx_unlock(&c->lock);
+    return 0;
 }
 int x9_vdec_control_discard(struct x9_vdec_control **slot)
 {
@@ -749,7 +860,9 @@ int x9_vdec_control_discard(struct x9_vdec_control **slot)
     struct x9_vcp_bus_status bus;
     int e = 0;
     if (!slot || !(c = *slot) || c->magic != VCONTROL_MAGIC) return EINVAL;
-    lck_mtx_lock(&c->lock); c->closing = true;
+    e = x9_vdec_control_quiesce(c);
+    if (e) return e;
+    lck_mtx_lock(&c->lock);
     if (c->status.init_attempted) {
         e = x9_vcp_bus_get_status(c->bus,&bus);
         if (!e && (bus.epoch != c->status.epoch || bus.phase != X9_VCP_BUS_STOPPED)) e = EBUSY;
@@ -767,6 +880,7 @@ int x9_vdec_control_discard(struct x9_vdec_control **slot)
     for (unsigned i = 0; i < c->status.input_records && !e; i++)
         if (c->inputs[i].slice.token)
             e = x9_vdec_dma_slice_free(c->shared->codec,&c->inputs[i].slice);
+    if (!e) e = x9_vcp_bus_release_shared(c->bus,c->status.epoch,&c->bus_token);
     if (!e) {
         lck_mtx_lock(&c->shared->lock); lck_mtx_lock(&c->memory->lock);
         if (!c->shared->control_refs || !c->memory->control_refs)
@@ -778,6 +892,8 @@ int x9_vdec_control_discard(struct x9_vdec_control **slot)
     }
     lck_mtx_unlock(&c->lock);
     if (!e) {
+        if (!thread_call_free(c->service_worker))
+            panic("X9 VDEC: joined service worker still pending");
         lck_mtx_destroy(&c->lock,&vdec_group);
         kfree_type(struct vcontrol_input_record,X9_VDEC_CONTROL_MAX_RECORDS,c->inputs);
         kfree_type(struct vcontrol_output_record,X9_VDEC_CONTROL_MAX_RECORDS,c->outputs);

@@ -38,10 +38,12 @@ struct x9_vcp_bus {
     uint8_t ring[VCP_BUS_RING][X9_VCP_WIRE_BYTES];
     uint8_t tx[X9_VCP_WIRE_BYTES];
     const struct x9_vcp_bus_call_log *call; /* lifetime/IO exclusion, not a wire token */
+    uint64_t clients[X9_VCP_INSTANCE_SLOT_COUNT]; /* host lifetime tokens */
     bool exposed, tx_pending, stop_attempted;
 };
 static struct x9_vcp_bus *singleton;
 static uint64_t next_epoch = 1;
+static uint64_t next_client_token = 1;
 static uint32_t get32(const uint8_t *p)
 { return p[0] | (uint32_t)p[1]<<8 | (uint32_t)p[2]<<16 | (uint32_t)p[3]<<24; }
 static void put32(uint8_t *p, uint32_t v)
@@ -424,18 +426,67 @@ int x9_vcp_bus_get_status(struct x9_vcp_bus *b, struct x9_vcp_bus_status *out)
     lck_mtx_unlock(&vcp_bus_lock);
     return e;
 }
+/* bus lock held; shared input is resident immutable host storage. */
+static int check_shared_locked(struct x9_vcp_bus *b, uint64_t epoch,
+    const struct x9_vcp_shm_region *shared)
+{
+    int e = identity(b);
+    if (!e && (epoch != b->status.epoch || shared->iova != b->shared.iova ||
+        shared->bytes != b->shared.bytes)) e = ESTALE;
+    if (!e && (b->call || b->status.phase != X9_VCP_BUS_RUNNING ||
+        b->status.ready_bitmap != 3)) e = EBUSY;
+    if (!e) e = guard(b);
+    return e;
+}
 int x9_vcp_bus_check_shared(struct x9_vcp_bus *b, uint64_t epoch,
     const struct x9_vcp_shm_region *shared)
 {
     int e;
     if (!shared) return EINVAL;
     lck_mtx_lock(&vcp_bus_lock);
+    e = check_shared_locked(b,epoch,shared);
+    lck_mtx_unlock(&vcp_bus_lock);
+    return e;
+}
+int x9_vcp_bus_retain_shared(struct x9_vcp_bus *b, uint64_t epoch,
+    const struct x9_vcp_shm_region *shared, uint64_t *token)
+{
+    unsigned index;
+    int e;
+    if (!shared || !token || *token) return EINVAL;
+    lck_mtx_lock(&vcp_bus_lock);
+    e = check_shared_locked(b,epoch,shared);
+    if (!e && (!next_client_token || next_client_token == UINT64_MAX)) e = EOVERFLOW;
+    if (!e) {
+        for (index = 0; index < X9_VCP_INSTANCE_SLOT_COUNT; index++)
+            if (!b->clients[index]) break;
+        if (index == X9_VCP_INSTANCE_SLOT_COUNT) e = ENOSPC;
+        else {
+            b->clients[index] = next_client_token++;
+            b->status.retained_clients++;
+            *token = b->clients[index];
+        }
+    }
+    lck_mtx_unlock(&vcp_bus_lock);
+    return e;
+}
+int x9_vcp_bus_release_shared(struct x9_vcp_bus *b, uint64_t epoch, uint64_t *token)
+{
+    unsigned index;
+    int e;
+    if (!token || !*token || *token == UINT64_MAX) return EINVAL;
+    lck_mtx_lock(&vcp_bus_lock);
     e = identity(b);
-    if (!e && (epoch != b->status.epoch || shared->iova != b->shared.iova ||
-        shared->bytes != b->shared.bytes)) e = ESTALE;
-    if (!e && (b->call || b->status.phase != X9_VCP_BUS_RUNNING ||
-        b->status.ready_bitmap != 3)) e = EBUSY;
-    if (!e) e = guard(b);
+    if (!e && epoch != b->status.epoch) e = ESTALE;
+    if (!e) {
+        for (index = 0; index < X9_VCP_INSTANCE_SLOT_COUNT; index++)
+            if (b->clients[index] == *token) break;
+        if (index == X9_VCP_INSTANCE_SLOT_COUNT) e = ESTALE;
+        else if (!b->status.retained_clients) e = EFAULT;
+        else {
+            b->clients[index] = 0; b->status.retained_clients--; *token = 0;
+        }
+    }
     lck_mtx_unlock(&vcp_bus_lock);
     return e;
 }
@@ -516,7 +567,7 @@ int x9_vcp_bus_discard(struct x9_vcp_bus **slot)
     if (!slot) return EINVAL;
     lck_mtx_lock(&vcp_bus_lock);
     b = *slot; e = identity(b);
-    if (!e && (b->call || b->status.queued ||
+    if (!e && (b->call || b->status.queued || b->status.retained_clients ||
         (b->exposed && b->status.phase != X9_VCP_BUS_STOPPED))) e = EBUSY;
     /* STOPPED is not permission to use an old snapshot forever. Retained
      * ownership plus fresh physical idle must still hold before unpin/free.
