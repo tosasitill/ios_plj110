@@ -50,6 +50,8 @@ static void cam_native_source_snapshot_locked(void)
  * profiles fall below step0 data-rate limits. Accept only the corresponding
  * actual MM parent selector and BOTH freshly measured counts. Two counter
  * ticks are the original meter agreement bound, not a measured ppm claim.
+ * Native receiver open now cold-takes parent9 before any MM HWV vote;
+ * the remaining table entries are only inherited-rate validation data.
  * The last clock is UNIVPLL2/5 =499.2MHz at its normal2496MHz rate;
  * DT represents the integralMHz only. Use actual PLL PCW, not499MHz as
  * the meter target. Never change a PLL, shared AL mux, VCP DVFS or voltage
@@ -174,7 +176,9 @@ static int cam_native_source_prepare_locked(uint64_t epoch,
     s->sensor_epoch=epoch;s->sensor=cam_sensor_live.probe.sensor;
     s->inherited_step=UINT32_MAX;cam_native_source.attempted=true;
     s->stage=X9_CAM_NATIVE_SOURCE_RECEIVER;
-    e=cam_rx_sensor_prepare_locked(epoch,&receiver);
+    e=cam_native_clock_request_locked(epoch,s->sensor);
+    if(!e)e=cam_rx_sensor_prepare_locked(epoch,&receiver);
+    cam_native_clock_cancel_unused_locked();
     if(!e)e=cam_native_source_standby_locked(epoch);
     if(!e){s->completed|=1u<<s->stage;s->stage=X9_CAM_NATIVE_SOURCE_SMI;
         e=cam_smi_clocks_open_locked(epoch,s->sensor);}

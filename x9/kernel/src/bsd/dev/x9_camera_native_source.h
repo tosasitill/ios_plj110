@@ -31,10 +31,11 @@ struct x9_camera_native_source_status {
  * There is one attempt per cold sensor epoch. No automatic unwind or retry;
  * native power(false) owns the original sensor-close journal.
  * CONFIGURED means inactive register consumption only. The two real CSI
- * counts, retained mux, unchanged PLL PCW/FENC and the already-held UFS
- * monotonic voltage floor qualify an inherited supported rate. VCORE is
+ * counts, native-only cold parent9, unchanged PLL PCW/FENC and the held
+ * UFS monotonic voltage floor qualify the real CSI step0 rate. VCORE is
  * the real controller's request/gear, not a PMIC measurement. No new PLL,
- * voltage or bandwidth request is issued. Capture still needs its real host
+ * voltage or bandwidth request is issued. The one SENINF parent restores
+ * after unvote through the original MM close. Capture needs its real host
  * lease and CAMSV/SMI bandwidth/rate supplier.
  */
 #endif
