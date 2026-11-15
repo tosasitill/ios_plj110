@@ -29,6 +29,7 @@ struct x9c_client {bool bound;unsigned sim;uint64_t generation;};
 static x9c_client x9c_clients[CBQ_MAX_CLIENTS];
 struct x9c_end_job {
  bool used,answered;unsigned slot,sim,stage,id;
+ uint16_t transaction;
  uint64_t generation,deadline,token,epoch;
  uint8_t req[11];
 };
@@ -61,7 +62,8 @@ static uint16_t x9c_end_begin(unsigned slot,const uint8_t *req,unsigned len){
  struct x9c_end_job &j=x9c_end_job;bzero(&j,sizeof(j));j.used=true;j.slot=slot;j.sim=c.sim;
  j.generation=c.generation;j.epoch=state.epoch;j.id=id;j.stage=1;j.token=token;
  /* Apple createEndThisCallReq19a00d4: explicit25000ms request guard. */
- j.deadline=x9q_ms()+25000;memcpy(j.req,req,sizeof(j.req));return 0;
+ j.deadline=x9q_ms()+25000;j.transaction=(uint16_t)x9cw_u16(req+1);
+ memcpy(j.req,req,sizeof(j.req));return 0;
 }
 static void x9c_end_poll(uint8_t *frame){
  struct x9c_end_job &j=x9c_end_job;if(!j.used)return;
@@ -216,6 +218,13 @@ static bool x9c_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
     x9c_clients[slot].generation=x9q_clients[slot].generation;err=0;
    }
   }else if(x9cw_u16(req+3)==0x21){
+   unsigned op,id;
+   /* Same validated host transaction while its epoch is still owned is
+    * not a second request or a reason to send BUSY and later success for
+    * the same transaction. Keep scalar identity after req is erased. */
+   if(x9cw_qmi_action(req,len,&op,&id)&&x9c_end_job.used&&
+      x9c_end_job.slot==slot&&x9c_end_job.generation==x9q_clients[slot].generation&&
+      x9c_end_job.transaction==x9cw_u16(req+1)&&x9c_end_job.id==id)return true;
    err=x9c_end_begin(slot,req,len);if(!err)return true; /* asynchronous owned reply */
   }
  }

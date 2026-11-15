@@ -513,6 +513,18 @@ static void ios_end_presend(){
  rx_progress(6);x9mi_tick();x9c_poll();assert(writes==1&&!x9c_end_job.used&&!x9_mc_end_token&&
   qmi_replies==1&&qmi_error==X9Q_NOT_READY);
 }
+static void ios_end_duplicate(){
+ bind_voice();rx_progress(130,7,0);rx_progress(132);end_request();uint64_t query=x9c_end_job.token;
+ end_request();assert(x9c_end_job.token==query&&!qmi_replies&&!writes);
+ x9mi_tick();end_query_cnf();uint64_t token=x9c_end_job.token;
+ uint8_t q[]={0,78,0,0x21,0,4,0,1,1,0,7};
+ x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,sizeof(q));
+ assert(x9c_end_job.token==token&&!qmi_replies);x9mi_tick();
+ uint8_t p[24];x9cw_header(p,24,0x906,2,(unsigned)token);x9cw_scalar(p+16,0,0,4);
+ x9mi_rx(p,24);x9c_poll();assert(qmi_replies==1&&!qmi_error&&x9c_end_job.used&&!x9c_end_job.token);
+ x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,q,sizeof(q));
+ assert(qmi_replies==1&&writes==2); // no BUSY + late-success pair or second mutation
+}
 static void ios_end_abandon(){
  bind_voice();rx_progress(130,7,0);rx_progress(132);end_request();x9mi_tick();end_query_cnf();
  x9c_del(0);x9q_clients[0].generation++;x9mi_tick();x9c_poll();
@@ -588,6 +600,7 @@ int main(int argc,char **argv){
   {"voice_bind_codec",voice_bind_codec},{"end_target_codec",end_target_codec},{"ios_end_roundtrip",ios_end_roundtrip},
   {"ios_end_stale_query",ios_end_stale_query},{"ios_end_presend",ios_end_presend},
   {"ios_end_abandon",ios_end_abandon},{"ios_end_late_cnf",ios_end_late_cnf},
+  {"ios_end_duplicate",ios_end_duplicate},
   {"incoming_states",incoming_states},{"incoming_state_invalid",incoming_state_invalid},{"incoming_observer",incoming_observer},
   {"request_whitelist",request_whitelist},{"no_auto_policy",no_auto_policy},{"command_roundtrip",command_roundtrip},
   {"failure_retained",failure_retained},{"duplicate_pending",duplicate_pending},{"changed_duplicate",changed_duplicate},

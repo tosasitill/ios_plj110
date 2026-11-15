@@ -226,6 +226,8 @@ MD新snapshot API和iOS observer接入，仅观察，不自动approve/answer/que
 - 本地25s host guard 来自 Apple `createEndThisCallReq19a00d4` 的25000，不假装 MD/network timer。
   删除/换 generation/超时会在锁内撤掉尚未 writer-selected 的 guarded905；已经 selected/partial TX
   的原 token 必须继续消费迟到 CNF，不向新 client 回答，不自动重发。
+  同client generation/transaction/真实ID的重复VOICE21在当前epoch owner内去重；request清零后仍保留
+  标量身份，不先给同一transaction回复BUSY又在迟到CNF时回复success，不提交第二个query/mutation。
 - 实际 END133 + action CNF 已消费后只做一次只读清理查询；完整 owned empty090a 必须仍属
   同epoch/revision，且所有 CALL mutation slot 已消费，才退休 end/DIAL lease。END 单独、挂断CNF单独、
   超时、stale/error query 均不能退休。cleanup admission 暂无空slot时只等待，不重发 mutation；
