@@ -352,7 +352,9 @@ def rv55_service_dispatch_evidence(tcm, dram, init):
                   runtime_registration_success_proven=False,
                   runtime_ready_proven=False, module_firmware_pairing_proven=False,
                   runtime_task_exit_producer_exclusion_proven=False,
-                  runtime_task_exit_dma_retirement_proven=False)
+                  runtime_task_exit_dma_retirement_proven=False,
+                  runtime_incoming_record_snapshot_proven=False,
+                  runtime_isr_queue_admission_and_copy_proven=False)
     if (not init['profile_match'] or tcm is None or len(tcm) != 184320 or
             hashlib.sha256(tcm).hexdigest() !=
             'f59d646ba74fab1c40500139c40d67c97a0e8ab96c1569f738a0c7403cc49508'):
@@ -404,7 +406,7 @@ def rv55_service_dispatch_evidence(tcm, dram, init):
             word3_is_task_callback=True, exit_member_offset=20,
             captured_exit_member=words[5], other_words_not_runtime_state=True,
             runtime_pointer_and_descriptor_overwrite_exclusion_proven=False))
-    result.update(profile_match=True, profile='captured RV55 queued service dispatch ABI 1',
+    result.update(profile_match=True, profile='captured RV55 queued service dispatch ABI 2',
         payload_hashes_gate_both_segments=True, service_registrar=0x30502c,
         callback_table_base=0x1f7c4, callback_table_stride=8,
         common_dispatcher=0x305c4c,
@@ -442,6 +444,86 @@ def rv55_service_dispatch_evidence(tcm, dram, init):
             task_delete_list_changes_are_not_codec_buffer_retirement=True,
             service_exit_is_not_per_buffer_free_ack=True),
         runtime_queue_ownership_allocation_and_completion_proven=False)
+    # The physical channel callback invokes these service callbacks immediately;
+    # the later per-channel deferred signal is a different queue operation.
+    # Preserve the opaque copy-length selection and admission gates. A visible
+    # copy/count store is not proof that this ISR ran, admitted a complete record,
+    # or excluded a codec ring publisher on either hart.
+    result.update(
+        incoming_service_records=dict(stack_frame_bytes=88,
+            record_stack_offset=8, service_stack_offset=8, length_stack_offset=12,
+            payload_stack_offset=16, wake_flag_stack_offset=84,
+            visible_copy_limit_literal=64, length_comparison_is_unsigned=True,
+            copy_length_vendor_operation_raw_hex='33f69620',
+            payload_word0_and_word1_read_before_payload_copy=True,
+            minimum_payload_length_checked_by_complete_cfg_proven=False,
+            complete_copy_length_and_header_payload_consistency_proven=False,
+            service1=dict(entry=0x116f2, end_exclusive=0x11782,
+                length_comparison=0x11704, first_payload_word_load=0x11708,
+                second_payload_word_load=0x1170a, copy_length_vendor_pc=0x11712,
+                payload_copy_call=0x11718, payload_copy_target=0x701c,
+                message_type_mask=0xff000, request_type=0xa000, reverse_reply_type=0xd000,
+                request_type_branch=0x1172e, reverse_reply_type_branch=0x11734,
+                request_queue_cell=0x1f870, reverse_reply_queue_cell=0x1f878,
+                queue_load=0x1173e, isr_send_call=0x11746,
+                isr_send_result_vendor_gate=0x1174a, wake_flag_vendor_gate=0x11770,
+                yield_call=0x11774, yield_target=0x57da),
+            service2=dict(entry=0x118ac, end_exclusive=0x1192c,
+                length_comparison=0x118be, first_payload_word_load=0x118c2,
+                second_payload_word_load=0x118c4, copy_length_vendor_pc=0x118cc,
+                payload_copy_call=0x118d2, payload_copy_target=0x701c,
+                message_type_mask=0xff000, request_type=0xa000,
+                request_type_branch=0x118de, request_queue_cell=0x1f874,
+                queue_load=0x118ec, isr_send_call=0x118f0,
+                isr_send_result_vendor_gate=0x118f4, wake_flag_vendor_gate=0x1191a,
+                yield_call=0x1191e, yield_target=0x57da),
+            isr_send_helper=0x6c4e, isr_send_source_stack_offset=8,
+            isr_send_wake_pointer_stack_offset=84, isr_send_position_literal=0,
+            physical_channel_deferred_notification_is_not_service_payload_queue_copy=True),
+        isr_queue_send=dict(entry=0x6c4e, end_exclusive=0x6d36,
+            saved_queue_register='s1', saved_source_register='s4',
+            saved_wake_pointer_register='s2', saved_position_register='s5',
+            enter_critical_call=0x6cb2, enter_critical_target=0x5664,
+            exit_critical_call=0x6d0e, exit_critical_target=0x56cc,
+            queue_count_member=56, queue_capacity_member=60,
+            visible_capacity_branch=0x6cc2, visible_full_target=0x6d0c,
+            full_arm_visible_result_literal=0,
+            record_copy_call=0x6cd0, record_copy_target=0x6a8c,
+            waiter_call=0x6d24, waiter_target=0x8378,
+            wake_value_vendor_operations=[0x6d28, 0x6d2c],
+            wake_value_store=0x6d30,
+            opaque_entry_admission_gates_and_critical_hart_scope_proven=False,
+            full_arm_callback_result_does_not_prove_mailbox_replay_or_backpressure=True),
+        queue_record_copy=dict(entry=0x6a8c, end_exclusive=0x6b02,
+            queue_count_member=56, record_bytes_member=64,
+            storage_begin_member=0, storage_end_member=4,
+            forward_write_member=8, alternate_write_member=12,
+            zero_record_bytes_branch=0x6a98, zero_position_branch=0x6a9a,
+            zero_position_target=0x6ae0,
+            forward_storage_load=0x6ae0, forward_copy_call=0x6ae2,
+            forward_copy_target=0x701c,
+            forward_write_store=0x6aee, forward_wrap_branch=0x6af0,
+            forward_wrap_store=0x6af6, count_increment=0x6af8, count_store=0x6afc,
+            alternate_copy_call=0x6a9e, alternate_copy_target=0x701c,
+            visible_forward_copy_precedes_write_cursor_and_count_stores=True,
+            captured_service_queue_record_bytes=72,
+            memcpy_body_entry_preservation_barriers_and_runtime_copy_proven=False,
+            queue_copy_is_not_input_dpb_output_dma_completion_or_retirement=True))
+    extra_spans = (
+        ('service1_callback_record_header_and_opaque_copy_length', 0x116fa, 0x1171c),
+        ('service1_callback_request_reverse_reply_queue_selection', 0x1171c, 0x11750),
+        ('service1_callback_diagnostics_wake_gate_and_return', 0x11750, 0x11782),
+        ('isr_queue_send_saved_arguments_and_assertion_gates', 0x6c52, 0x6cac),
+        ('isr_queue_send_critical_capacity_and_record_copy', 0x6cac, 0x6cd2),
+        ('isr_queue_send_waiter_selection_and_critical_return', 0x6cd2, 0x6d1a),
+        ('isr_queue_send_waiter_wake_value_opaque_operations', 0x6d1a, 0x6d36),
+        ('queue_record_copy_count_size_position_and_alternate_arm', 0x6a8e, 0x6ab8),
+        ('queue_record_copy_alternate_count_and_zero_size_arm', 0x6ab8, 0x6ae0),
+        ('queue_record_forward_copy_cursor_wrap_and_count_publication', 0x6ae0, 0x6b02),
+    )
+    result['instruction_evidence'].extend(dict(name=name, segment='TCM',
+        link_address=start, end_exclusive=end, payload_offset=start,
+        raw_hex=span(tcm, start, end-start).hex()) for name, start, end in extra_spans)
     return result
 
 
