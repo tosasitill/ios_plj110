@@ -56,12 +56,20 @@ static int read_status(io_connect_t connection, bool *retry)
         return error ? error : (boot == EHOSTDOWN ? EHOSTDOWN : EPROTO);
     }
     if (power == POWER_TRANSITION) {
-        if (status.error == EBUSY) {
+        int boot = ENXIO;
+        error = read_boot(&boot);
+        if (error) return error;
+        /* The worker first reserves serial admission, then publishes its
+         * IOKit state. A READY snapshot may precede a power2/bootEBUSY read;
+         * queued ownership may also precede reservation (power2/boot0 or
+         * power2/bootEHOSTDOWN for a queued resume).
+         * Neither is a terminal initializer error. */
+        if (boot == EBUSY || boot == EHOSTDOWN || !boot) {
             if (retry) *retry = true;
             return EINPROGRESS;
         }
         /* A PASSIVE/unavailable board is terminal, not an ownership wait. */
-        return status.error ? (int)status.error : ENXIO;
+        return boot;
     }
     if (status.state != X9_BT_READY) return ENXIO;
     if (status.error || status.firmware_ready != 1 || status.chip_id != 0x6653 ||
