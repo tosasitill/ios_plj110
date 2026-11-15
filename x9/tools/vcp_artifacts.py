@@ -638,7 +638,7 @@ def rv55_fb_transfer_evidence(dram, init):
         ('constructor_three_stack_arguments_and_create_calls', 0x308026, 0x308038),
         ('constructor_codec_create_result_gate_and_error_exit', 0x307faa, 0x307fe6),
         ('constructor_visible_codec_success_followup_and_first_argument_load', 0x307fe6, 0x308028),
-        ('constructor_preceding_memory_map_call_and_unresolved_branch', 0x3072d2, 0x3072f2),
+        ('constructor_preceding_memory_alloc_call_and_unresolved_branch', 0x3072d2, 0x3072f2),
     )
     result.update(profile_match=True,
         profile='captured RV55 FB transfer and firmware cache boundary ABI 1',
@@ -746,7 +746,7 @@ def rv55_fb_transfer_evidence(dram, init):
             constructor_codec_create_error_exit=0x307fe2,
             constructor_codec_success_followup_call=0x308022,
             constructor_zero1688_call=0x3071ee,
-            constructor_preceding_mem_map_call=0x3072de,
+            constructor_preceding_mem_alloc_call=0x3072de,
             constructor_unresolved_branch=0x3072e2,
             candidate_stack_bindings_are_not_full_constructor_reaching_definitions=True,
             constructor_callers_and_full_owner_lifetime_proven=False,
@@ -849,7 +849,12 @@ def rv55_mem_wait_evidence(dram, init):
     encoded-length framing was checked independently of r2's invalid-op
     fallback: a bogus call at 0x246a46 is inside an unresolved FOUR-byte
     instruction at 0x246a44. Custom branches, callback-table lifetime, codec
-    destruction and transport execution remain unproved. Pre-free list/vote
+    destruction and transport execution remain unproved. The allocation map
+    wrapper's 88-byte descriptor is NOT the 32-byte mailbox memory object:
+    its callback receives a separate type/length/three-u64 result block, and
+    the wrapper converts returned addresses into FIRMWARE-local aliases.
+    Those aliases never authorize XNU pointer lookup or DMA retirement.
+    Pre-free list/vote
     mutations and asynchronous task submission do not establish exclusion.
     The conditional hardware-disable helper has a real local register path,
     but its descriptor selector, full dispatcher and physical drain are not
@@ -927,6 +932,18 @@ def rv55_mem_wait_evidence(dram, init):
         ('disable_dispatch_candidate_release_call', 0x248e7e, 0x248e90),
         ('disable_candidate_counted_release_call', 0x224b3a, 0x224b4a),
         ('counted_release_tcm_call_and_success_decrement', 0x22435c, 0x224374),
+        ('allocation_callback_registration_member24', 0x305844, 0x30585e),
+        ('allocation_callback_saved_token_and_result_block_arguments', 0x308aaa, 0x308ab0),
+        ('allocation_callback_saved_send_result_gate_and_return', 0x308bdc, 0x308c1a),
+        ('memory_map_descriptor_size88_token_pair_and_service_load', 0x2466d6, 0x246708),
+        ('memory_map_service_table_stride96_and_member24_lookup', 0x24670e, 0x246724),
+        ('memory_map_request_result_block_and_second_callback_lookup', 0x2467bc, 0x2467e8),
+        ('memory_map_returned_allocator_token_pair_store', 0x2467ee, 0x246810),
+        ('memory_map_selected_address_pair_store', 0x246810, 0x24681e),
+        ('memory_map_firmware_address_converter_call_and_alias_store', 0x246854, 0x246862),
+        ('memory_map_visible_literal_zero_result', 0x2468ee, 0x246908),
+        ('memory_map_firmware_address_converter_input_and_tcm_call', 0x24690c, 0x24691a),
+        ('constructor_memory_map_same_descriptor_as_cleanup', 0x3072b2, 0x3072f2),
     )
     # The table is DATA, not decoded instructions. Its deinit slot is established
     # by the object+16 installation and object+44 indirect call. Reaching the
@@ -952,6 +969,53 @@ def rv55_mem_wait_evidence(dram, init):
         allocation=dict(message=0xc005, service=1, bytes=64, initial_status=0,
             type_offset=24, requested_length_offset=28, address_fields_initially_zero=True,
             post_reply_copies_offsets=[32, 40, 48],
+            sender=0x308aa4, callback_input_save=[0x308aaa, 0x308aac, 0x308aae],
+            callback_registration=dict(service=1, install_call=0x3058a2,
+                installer=0x242f00, block_stack_offset=24,
+                allocation_block_stack_offset=48, allocation_callback_offset=24,
+                allocation_slot_store=0x30585c,
+                table_base=0x32c0f0, table_stride=96,
+                service1_allocation_callback_cell=0x32c168,
+                registered_target=0x308aa4,
+                runtime_registration_and_table_overwrite_exclusion_proven=False),
+            mapping_wrapper=dict(entry=0x2466d0, descriptor_bytes=88,
+                log_function_name_address=0x247621,
+                log_function_name=cstring(dram, 0x247621 - 0x200000),
+                descriptor_size_gate=0x2466ec,
+                descriptor_ap_token_offsets=[80, 84], descriptor_service_offset=64,
+                first_callback_load=0x246720, second_callback_load=0x2467e2,
+                callback_offset=24, indirect_call=0x2467e6,
+                callback_arguments=['AP token low', 'AP token high', 'request/result block pointer'],
+                request_result_block_stack_offset=16, request_result_block_bytes=32,
+                request_type_stack_store=0x2467de, request_length_stack_store=0x2467dc,
+                callback_output_pair_offsets=[8, 16, 24],
+                returned_allocator_token_stack_offsets=[40, 44],
+                descriptor_allocator_token_offsets=[32, 36],
+                allocator_token_stores=[0x246802, 0x246804],
+                selected_address_pair_stores=[0x246816, 0x24681a],
+                descriptor_selected_address_offsets=[24, 28],
+                address_pair_selection_vendor_edges_proven=False,
+                firmware_alias_converter=0x246908, firmware_alias_call=0x24685a,
+                firmware_alias_log_address=0x247941,
+                firmware_alias_log=cstring(dram, 0x247941 - 0x200000),
+                firmware_alias_tcm_call=0x246916, firmware_alias_tcm_target=0x10fdc,
+                firmware_alias_store=0x24685e, descriptor_firmware_alias_offset=16,
+                visible_zero_assignment=0x246904, visible_return_join=0x246774,
+                constructor_call=0x3072de, constructor_owner_register='s10',
+                constructor_descriptor_member_offset=0x1990,
+                same_descriptor_offset_as_instance_cleanup=True,
+                constructor_result_branch=0x3072e2,
+                full_cfg_and_runtime_dispatch_proven=False,
+                firmware_alias_is_not_an_xnu_cpu_pointer=True,
+                mapping_success_is_not_buffer_or_dma_retirement=True),
+            callback_result=dict(send_call=0x308b22, saved_send_result=0x308b26,
+                output_copy_starts=0x308b28, send_result_gate=0x308bdc,
+                visible_success_zero_assignment=0x308c0e,
+                visible_failure_minus_one_assignment=0x308be2,
+                return_join=0x308c10,
+                returned_address_fields_are_copied_before_send_result_gate=True,
+                complete_vendor_return_edges_proven=False,
+                nonzero_return_fields_are_not_transport_or_dma_success=True),
             complete_reply_status_validation_proven=False),
         free=dict(message=0xc006, service=1, bytes=64, copied_mem_bytes=32,
             sender=0x308c1a, wrapper=0x24695a, wrapper_object_bytes=88,
