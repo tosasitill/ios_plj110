@@ -821,13 +821,15 @@ static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *r
   * Report (0x01): acknowledged, no indication is generated (no event source). */
  /* WDS 00c8 (including empty APN) is handled by the typed MIPC owner above. */
  /* UIM Refresh Register (0x2a): acknowledged; this bridge never sends refresh events. */
- /* NAS 0x6c Config Signal Info v2 (167.txt, right after LTE SysInfo): thresholds
-  * are not applied; the client gets a 0x51 Sig Info indication from real
-  * AT+ECSQ every subscription cycle instead. */
- if(service==3&&id==0x6c){c.signal=true;c.next=0;}
+ /* NAS 0x6c Config Signal Info v2 (20H392 setThresholds_sync 1f1ab589c):
+  * threshold/delta and LQI configuration, NOT NAS03 SigInfoEvents registration.
+  * Configuration is acknowledged but not applied. Never override tag19's
+  * committed subscription or restart its AT+ECSQ sampling cycle here. */
  if((service==1&&(id==1||id==3))||(service==2&&id==1)||(service==0x0b&&id==0x2a)||(service==3&&id==0x6c)){
   static unsigned logged;
-  if(logged<8){logged++;printf("X9 QMI AT: service 0x%x msg 0x%04x registration acknowledged, %s\n",service,id,service==3&&id==0x6c?"0x51 from AT+ECSQ every 10 s":"no indications generated");}
+  if(logged<8){logged++;printf("X9 QMI AT: service 0x%x msg 0x%04x %s acknowledged, %s\n",service,id,
+   service==3&&id==0x6c?"threshold/LQI configuration":"registration",
+   service==3&&id==0x6c?"configuration not applied; NAS03 subscription unchanged":"no indications generated");}
   x9q_packet p(req);p.send(local,port);return;
  }
  /* WDA/DPM must not open a fabricated IPA endpoint. Unsupported WDS operations

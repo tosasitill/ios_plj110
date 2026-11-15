@@ -212,6 +212,17 @@ static void last_order_is_valid_never_wraps_fifo(){
  assert(x9r_begin(0,b.p,b.n)==X9Q_BUSY&&pending()==1&&x9r_order==UINT64_MAX);
  x9r_poll();assert(receipts==1&&x9q_clients[0].signal&&!pending());
 }
+static void disabled_subscription_survives_completed_reply_replay(){
+ baseline();x9q_clients[0].signal=true;request r(1);r.tag(0x19,0);assert(!x9r_begin(0,r.p,r.n));x9r_poll();
+ x9q_clients[0].next=234;assert(!x9q_clients[0].signal&&repeat(0,r));x9r_poll();
+ assert(!x9q_clients[0].signal&&x9q_clients[0].next==234&&!x9r_indication_allowed(CBQ_PORT_BASE,0,0,0x4f));
+}
+static void pending_enable_keeps_committed_disable_until_receipt(){
+ baseline();request off(1),on(2);off.tag(0x19,0);on.tag(0x19,1);assert(!x9r_begin(0,off.p,off.n));x9r_poll();
+ x9q_clients[0].next=345;queue_accept=false;assert(!x9r_begin(0,on.p,on.n));x9r_poll();
+ assert(!x9q_clients[0].signal&&x9q_clients[0].next==345&&!x9r_indication_allowed(CBQ_PORT_BASE,0,0,0x4f));
+ queue_accept=true;x9r_poll();assert(x9q_clients[0].signal&&!x9q_clients[0].next);
+}
 // Addresses keep compile-only vectors in the object; there is no main/runner.
 void (*nas_registration_compile_only_vectors[])()={
  atomic_multi_tag_receipt,invalid_tail_is_atomic,widths_zero_two_reject,unknown_accepted_unserved,empty_patch_receipt,
@@ -221,5 +232,6 @@ void (*nas_registration_compile_only_vectors[])()={
  busy_and_bad_new_txn_preserve_cache,admitted_new_txn_retires_cache,delete_pending_and_completed,generation_counters_have_different_origins,
  real_generation_change_retires,local_generation_change_retires,release_pending_retires,release_between_identity_and_receipt,
  local_generation_between_identity_and_receipt,bind_pending_busy_completed_retired,disable_controls_old_indication_only_after_receipt,
- indication_fences_generation_sim_and_flag,exhausted_order_preserves_completed_cache,last_order_is_valid_never_wraps_fifo
+ indication_fences_generation_sim_and_flag,exhausted_order_preserves_completed_cache,last_order_is_valid_never_wraps_fifo,
+ disabled_subscription_survives_completed_reply_replay,pending_enable_keeps_committed_disable_until_receipt
 };
