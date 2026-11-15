@@ -15,6 +15,8 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 static volatile uint32_t *peri, *top, *hub, *sram, *pll, *spm, *ack, *ap;
 static volatile uint32_t *ep[4]; /* dev0, MD, ADSP, CMM; not AP UART3 */
 static bool requested, powered, isolated, pins_prepared, config_dirty, ap_saved;
+enum { OWN_UNKNOWN, OWN_DRIVER, OWN_SLEEPING, OWN_WAKING };
+static unsigned ownership=OWN_UNKNOWN;
 static uint8_t host_flow=0xff;
 static uint32_t con2_saved, feedback_saved, fifo_saved[4], default_saved;
 static const unsigned ap_offsets[]={0x0c,0x10,0x24,0x28,0x2c,0x40,0x44,0x54,0x58};
@@ -65,7 +67,7 @@ int x9_bt_hardware_check(void)
 {
     int error=apb(); if (error) return error;
     if (!requested || !(rd(hub,DEV0)&(1u<<9)) ||
-        (rd(hub,DEV0)&3)!=3 || (rd(peri,0x18)&(7u<<18)) ||
+        (rd(hub,DEV0)&3)!=(ownership==OWN_WAKING?2u:3u) || (rd(peri,0x18)&(7u<<18)) ||
         !(rd(pll,0x34)&16) || (rd(spm,0x8a4)&(0x1fu<<20))!=(0x1fu<<20) ||
         (rd(ack,0xa4c)&0x1f)!=0x1f) return ENXIO;
     /* AP UART3 (CG0 b3/reset22), unlike the dev0 hub endpoint. */
@@ -255,12 +257,117 @@ static int verify_ownership(void *context)
             uint32_t dev=rd(hub,DEV0), sta=rd(hub,STA0);
             if ((dev&(1u<<11)) && (sta&(1u<<7)) && (sta&8) &&
                 (dev&(1u<<12)) && (rd(hub,IRQ_STA)&8))
-                return x9_conn_power_done(X9_CONN_BT);
+                {
+                    error=x9_conn_power_done(X9_CONN_BT);
+                    if (!error) ownership=OWN_DRIVER;
+                    return error;
+                }
             delay(50);
         }
         return ETIMEDOUT;
     }
-    return x9_conn_power_done(X9_CONN_BT);
+    error=x9_conn_power_done(X9_CONN_BT);
+    if (!error) ownership=OWN_DRIVER;
+    return error;
+}
+
+/* mt6993.c:uarthub_host_awake_sta_ctrl. Only our DEV0 command and shared
+ * feedback IRQ bit3 are touched. When CMM was awake and the host state
+ * changes, wait for the transmitted host-awake state; if it was already the
+ * desired sent state, require a fresh feedback completion as Android does.
+ * A sleeping CMM cannot send feedback: the later BT_AWAKE poll owns that
+ * proof on resume. Never require feedback from a gated UART. */
+static int host_awake(bool set)
+{
+    int error=x9_bt_hardware_check(); if (error) return error;
+    uint32_t before_dev=rd(hub,DEV0), before_sta=rd(hub,STA0);
+    bool wanted=set;
+    bool changed=((before_dev&(1u<<11))!=0)!=wanted;
+    bool check_irq=(((before_sta&(1u<<7))!=0)==wanted);
+    wr(hub,IRQ_CLR,8);
+    wr(hub,set?DEV0_SET:DEV0_CLR,set?4:16);
+    if (((rd(hub,DEV0)&(1u<<11))!=0)!=wanted) return EIO;
+    if (!(before_sta&8) || !changed) return 0;
+    delay(11);
+    for (unsigned n=0;n<20;n++) {
+        bool sent=(rd(hub,STA0)&(1u<<7))!=0;
+        if (sent==wanted && (!check_irq || (rd(hub,IRQ_STA)&8))) return 0;
+        delay(50);
+    }
+    return ETIMEDOUT;
+}
+
+int x9_bt_hardware_sleep(void)
+{
+    if (ownership!=OWN_DRIVER) return ENXIO;
+    int error=x9_bt_hardware_check(); if (error) return error;
+    if (!(rd(hub,STA0)&4) || (rd(hub,CON2)&4) || !powered) return ENOTSUP;
+    /* The sole worker already drained its last FW-own command and masked
+     * its UART IRQ. Do not touch AP registers once requests are released. */
+    ownership=OWN_UNKNOWN;
+    error=host_awake(false); if (error) return error;
+    /* btmtk_release_uarthub(true): HOST_AWAKE -> SW_TX -> RX/hwRX/RX_DATA.
+     * Clear-TX is a separate write; setting USB_RX_SEL precedes the last
+     * RX clear because TX is now zero. No MD/ADSP requests are changed. */
+    wr(hub,DEV0_CLR,2);
+    field(ep[0],0xb0,1,1);
+    wr(hub,DEV0_CLR,1|4|8);
+    /* Only APB remains safe now. BT_AWAKE may stay high if another host
+     * still needs the controller; that is not failure to release our lease. */
+    error=apb(); if (error) return error;
+    if (rd(hub,DEV0)&(3u|(1u<<11))) return EIO;
+    ownership=OWN_SLEEPING;
+    return 0;
+}
+
+int x9_bt_hardware_wake(void)
+{
+    if (ownership!=OWN_SLEEPING || !powered || !requested) return ENXIO;
+    int error=apb(); if (error) return error;
+    if (!(rd(hub,STA0)&4) || (rd(hub,CON2)&4)) return ENOTSUP;
+    /* Android's mtk8250...set_tx_request calls the platform SW_TX setter.
+     * It acquires APDMA RX resources but NOT hub SW_RX until own-clear ACK.
+     * Our PIO backend has no APDMA to enable. Allow TX-only hardware_check
+     * only in this explicit worker transition; keep native admission shut. */
+    ownership=OWN_WAKING;
+    wr(hub,DEV0_SET,2);
+    for (unsigned ms=0;ms<50;ms++) {
+        error=x9_bt_hardware_check();
+        if (!error) break;
+        sleep_ms(1);
+    }
+    if (error) return error;
+    /* is_ready resets the DEV0 USB RX pin only AFTER endpoint clocks exist. */
+    field(ep[0],0xb0,1,0);
+    return host_awake(true);
+}
+
+int x9_bt_hardware_awake(bool *awake, bool *need_ff)
+{
+    if (!awake || !need_ff) return EINVAL;
+    *awake=false; *need_ff=false;
+    if (ownership!=OWN_WAKING) return ENXIO;
+    int error=x9_bt_hardware_check(); if (error) return error;
+    uint32_t dev=rd(hub,DEV0), sta=rd(hub,STA0);
+    *need_ff=(dev&(1u<<12))==0;
+    *awake=(sta&8)!=0 || !*need_ff;
+    return 0;
+}
+
+int x9_bt_hardware_ownership_finish(void)
+{
+    if (ownership!=OWN_WAKING) return ENXIO;
+    bool awake,need_ff;
+    int error=x9_bt_hardware_awake(&awake,&need_ff); if (error) return error;
+    if (!awake) return ETIMEDOUT;
+    /* Caller obtained the full successful driver-own WMT ACK. Unlike the
+     * Android debug failure path, a failed ACK never reaches this setter. */
+    wr(hub,DEV0_SET,1);
+    ownership=OWN_UNKNOWN; /* hardware_check now requires both SW requests. */
+    error=x9_bt_hardware_check(); if (error) return error;
+    if (!(rd(hub,DEV0)&(1u<<11))) return EIO;
+    ownership=OWN_DRIVER;
+    return 0;
 }
 int x9_bt_hardware_stop(void)
 {
@@ -291,6 +398,7 @@ int x9_bt_hardware_stop(void)
     }
     if (config_dirty) { wr(sram,SSPM_DEFAULT,default_saved); config_dirty=false; }
     if (powered) { int e=x9_conn_power_release(X9_CONN_BT); if (!error) error=e; powered=false; }
+    ownership=OWN_UNKNOWN;
     return error;
 }
 void x9_bt_hardware_ops(struct x9_bt_session_ops *o)

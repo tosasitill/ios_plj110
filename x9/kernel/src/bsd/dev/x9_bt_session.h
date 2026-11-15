@@ -38,7 +38,7 @@ struct x9_bt_session_result {
     enum x9_bt_session_stage stage;
     uint32_t chip_id, baud, max_baud;
     uint8_t firmware_flags, ap_flags;
-    bool driver_owned, function_powered;
+    bool driver_owned, function_powered, hardware_sleep;
     uint32_t vendor_completed, vendor_constructor;
     uint16_t vendor_opcode;
     uint8_t vendor_status; /* 0xff until a valid controller status exists. */
@@ -47,6 +47,14 @@ struct x9_bt_session_result {
 int x9_bt_session_run(const struct x9_bt_session_ops *,
                      const struct x9_bt_session_board *, struct x9_bt_session_result *);
 int x9_bt_session_connfem(const struct x9_bt_download_ops *);
+/* Sole-worker lifecycle commands, not board power/reset operations. The
+ * caller quiesces the native transport before fw-own, then drains/masks its
+ * UART IRQ before releasing hub requests. EBUSY is a complete sleep refusal
+ * and preserves driver_owned. Any other failure leaves ownership unknown
+ * (driver_owned=false); do not retry or publish READY. Resume requires the
+ * caller to request resources/restore IRQ/wake/poll BT_AWAKE before this ACK. */
+int x9_bt_session_fw_own(const struct x9_bt_session_ops *, struct x9_bt_session_result *);
+int x9_bt_session_driver_own(const struct x9_bt_session_ops *, struct x9_bt_session_result *);
 /* One actual selected Android vendor command, with its original H4 bytes.
  * Does not select/default a configuration, retry TX, or fabricate replies.
  * status=0xff means no valid status was received. Success requires Complete,
