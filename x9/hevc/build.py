@@ -34,10 +34,10 @@ def main():
     for p in (library, ctl):
         subprocess.run(['/usr/bin/codesign', '--force', '--sign', '-', '--timestamp=none', str(p)], check=True)
     (a.out / 'hevc-bridge.json').write_text(json.dumps({
-        'profile': '20H392 VT base v1/decoder v2; independent hvc1 IDR only',
+        'profile': '20H392 VT base v1/decoder v2; native base-layer hvc1 sessions',
         'physical_provider': False, 'hardware_tested': False,
-        'automatic_injection': False, 'required_specification': {'X9IndependentHEVC': True},
-        'decoder_id': 'org.ios-sweet.x9.vcp-idr.hvc1',
+        'automatic_injection': False, 'required_specification': {'X9NativeHEVC': True},
+        'decoder_id': 'org.ios-sweet.x9.vcp.hvc1',
         'library': str(library), 'client': str(ctl),
     }, indent=2) + '\n')
     print('X9 HEVC: iOS decoder/client compiled; physical VCP provider absent, no auto-injection', flush=True)

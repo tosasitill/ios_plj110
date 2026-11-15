@@ -85,7 +85,7 @@ static int decode_vt(const char *config_path, const char *sample_path, const cha
     }
     CFStringRef *id_key = dlsym(RTLD_DEFAULT, "kVTVideoDecoderSpecification_DecoderID");
     if (!id_key || !*id_key) { e = kVTPropertyNotSupportedErr; goto done; }
-    const void *keys[] = { CFSTR("X9IndependentHEVC"), *enable_key, *require_key, *id_key };
+    const void *keys[] = { CFSTR("X9NativeHEVC"), *enable_key, *require_key, *id_key };
     const void *values[] = { kCFBooleanTrue, kCFBooleanTrue, kCFBooleanTrue, CFSTR(X9_HEVC_DECODER_ID) };
     spec = CFDictionaryCreate(NULL, keys, values, 4,
         &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);

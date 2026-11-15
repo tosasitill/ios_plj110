@@ -1,4 +1,4 @@
-/* Own-code VideoToolbox decoder for independent HEVC IDR pictures.
+/* Own-code VideoToolbox decoder for native HEVC codec sessions.
  * 20H392 ABI: VCPHEVC base v1, decoder v2 (no native tile slots).
  * No constructor/interposition: registration is explicit and hardware-gated.
  * Apple VCPHEVC, CMPhoto/ImageIO container handling and alpha are untouched.
@@ -15,6 +15,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
+#include <errno.h>
+#include <time.h>
 #include "hevc_bitstream.h"
 #include "vt_decoder.h"
 #include "vt_image_metadata.h"
@@ -56,12 +58,20 @@ static OSStatus (*register_decoder)(CMVideoCodecType, CFDictionaryRef, void *);
 static CFStringRef hardware_key, required_key, using_hardware_key;
 static pthread_mutex_t registration_lock = PTHREAD_MUTEX_INITIALIZER;
 static Boolean registered;
+struct pending_frame {
+    uint64_t token;
+    void *frame;
+    CMVideoFormatDescriptionRef description;
+    Boolean suppress, deferred;
+};
 struct state {
     pthread_mutex_t lock;
-    Boolean lock_initialized, invalid;
+    Boolean lock_initialized, invalid, emitting;
     int fd;
     void *session;
-    uint64_t generation;
+    uint64_t generation, native_session, next_token;
+    uint32_t max_pending, pending_count;
+    struct pending_frame pending[X9_VDEC_MAX_PENDING];
     CFDataRef hvcc;
     struct x9_hevc_config config;
 };
@@ -79,6 +89,15 @@ static int hardware_status(int fd, struct x9_vdec_status *s)
         !(s->profiles & ~(X9_VDEC_MAIN | X9_VDEC_MAIN10)) && s->max_width && s->max_height &&
         s->max_width <= X9_HEVC_MAX_DIM && s->max_height <= X9_HEVC_MAX_DIM;
 }
+static int hardware_sessions(int fd, const struct x9_vdec_status *s,
+                             struct x9_vdec_capabilities *c)
+{
+    memset(c, 0, sizeof(*c));
+    return ioctl(fd, X9_VDEC_GET_CAPABILITIES, c) == 0 &&
+        c->version == X9_VDEC_VERSION && !c->reserved && c->generation == s->generation &&
+        c->capabilities == X9_VDEC_SESSION_REQUIRED &&
+        c->max_pending && c->max_pending <= X9_VDEC_MAX_PENDING;
+}
 static CFDataRef configuration(CMVideoFormatDescriptionRef format, struct x9_hevc_config *c)
 {
     if (!format || CMFormatDescriptionGetMediaType(format) != kCMMediaType_Video ||
@@ -93,14 +112,21 @@ static CFDataRef configuration(CMVideoFormatDescriptionRef format, struct x9_hev
     if (d.width != (int32_t)c->width || d.height != (int32_t)c->height) return NULL;
     return data;
 }
+static void video_cancel(struct state *s)
+{
+    s->invalid = true; s->session = NULL;
+    if (s->fd >= 0) { close(s->fd); s->fd = -1; }
+    s->native_session = 0;
+    for (unsigned i = 0; i < s->pending_count; i++) CFRelease(s->pending[i].description);
+    s->pending_count = 0;
+    if (s->hvcc) { CFRelease(s->hvcc); s->hvcc = NULL; }
+}
 static OSStatus invalidate(Base object)
 {
     struct state *s = storage(object);
     if (!s->lock_initialized) return noErr;
     pthread_mutex_lock(&s->lock);
-    s->invalid = true; s->session = NULL;
-    if (s->fd >= 0) { close(s->fd); s->fd = -1; }
-    if (s->hvcc) { CFRelease(s->hvcc); s->hvcc = NULL; }
+    video_cancel(s);
     pthread_mutex_unlock(&s->lock);
     return noErr;
 }
@@ -113,7 +139,7 @@ static void finalize(Base object)
 static CFStringRef debug_description(Base object)
 {
     (void)object;
-    return CFRetain(CFSTR("X9 VCP HEVC independent-picture decoder (hardware gated)"));
+    return CFRetain(CFSTR("X9 VCP HEVC native-session decoder (hardware gated)"));
 }
 static OSStatus copy_property(Base object, CFStringRef key, CFAllocatorRef allocator, void *out)
 {
@@ -124,9 +150,10 @@ static OSStatus copy_property(Base object, CFStringRef key, CFAllocatorRef alloc
         return kVTPropertyNotSupportedErr;
     struct state *s = storage(object);
     struct x9_vdec_status status;
+    struct x9_vdec_capabilities caps;
     pthread_mutex_lock(&s->lock);
     Boolean ready = !s->invalid && s->fd >= 0 && hardware_status(s->fd, &status) &&
-                    status.generation == s->generation;
+                    status.generation == s->generation && hardware_sessions(s->fd, &status, &caps);
     *(CFTypeRef *)out = CFRetain(ready ? kCFBooleanTrue : kCFBooleanFalse);
     pthread_mutex_unlock(&s->lock);
     return noErr;
@@ -158,12 +185,15 @@ static OSStatus start(Base object, void *session, CMVideoFormatDescriptionRef fo
     pthread_mutex_lock(&s->lock);
     OSStatus e = kVTVideoDecoderNotAvailableNowErr;
     struct x9_vdec_status status;
+    struct x9_vdec_capabilities caps;
     int fd = -1;
     if (s->invalid || s->session) { e = kVTInvalidSessionErr; goto done; }
     fd = open(X9_VDEC_DEVICE, O_RDWR | O_CLOEXEC);
-    if (fd < 0 || !hardware_status(fd, &status)) goto done;
+    if (fd < 0 || !hardware_status(fd, &status) || !hardware_sessions(fd, &status, &caps)) goto done;
     if (!(status.profiles & (1u << c.decoder_profile)) || c.coded_width > status.max_width ||
-        c.coded_height > status.max_height) { e = kVTVideoDecoderUnsupportedDataFormatErr; goto done; }
+        c.coded_height > status.max_height || c.max_dpb > caps.max_pending) {
+        e = kVTVideoDecoderUnsupportedDataFormatErr; goto done;
+    }
     /* NV12/P010, full/video range: actual range is reported with each frame.
      * VT may convert to the consumer's preferred layout. No native tiles. */
     int32_t formats[] = { kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
@@ -189,8 +219,16 @@ static OSStatus start(Base object, void *session, CMVideoFormatDescriptionRef fo
     if (!e) {
         s->hvcc = CFDataCreateCopy(NULL, data);
         if (!s->hvcc) { e = kVTAllocationFailedErr; goto done; }
+        struct x9_vdec_session native = { .version = X9_VDEC_VERSION,
+            .generation = status.generation, .config_bytes = (uint32_t)CFDataGetLength(s->hvcc),
+            .config_address = (uint64_t)(uintptr_t)CFDataGetBytePtr(s->hvcc) };
+        if (ioctl(fd, X9_VDEC_SESSION_CREATE, &native) || !native.session) {
+            CFRelease(s->hvcc); s->hvcc = NULL;
+            e = kVTVideoDecoderNotAvailableNowErr; goto done;
+        }
         s->fd = fd; fd = -1; s->session = session; s->config = c;
-        s->generation = status.generation;
+        s->generation = status.generation; s->native_session = native.session;
+        s->max_pending = caps.max_pending;
     }
 done:
     if (fd >= 0) close(fd);
@@ -203,18 +241,12 @@ static Boolean accept(Base object, CMVideoFormatDescriptionRef format)
     struct x9_hevc_config c;
     CFDataRef data = configuration(format, &c);
     pthread_mutex_lock(&s->lock);
-    Boolean yes = !s->invalid && s->hvcc && data && CFEqual(data, s->hvcc);
+    Boolean yes = !s->invalid && s->fd >= 0 && s->native_session &&
+                  s->hvcc && data && CFEqual(data, s->hvcc);
     pthread_mutex_unlock(&s->lock);
-    return yes; /* parameter-set changes create a fresh independent session */
+    return yes; /* changed sets require a new native codec/DPB, not a host reset */
 }
-static OSStatus finish(Base object)
-{
-    struct state *s = storage(object);
-    pthread_mutex_lock(&s->lock);
-    OSStatus e = s->invalid ? kVTInvalidSessionErr : noErr;
-    pthread_mutex_unlock(&s->lock);
-    return e; /* no deferred frames or retained DPB */
-}
+static OSStatus finish(Base object);
 static OSStatus pixel_buffer(const struct x9_vdec_picture *r, const uint8_t *raw,
                             CMVideoFormatDescriptionRef description, CVPixelBufferRef *out)
 {
@@ -255,59 +287,7 @@ static OSStatus pixel_buffer(const struct x9_vdec_picture *r, const uint8_t *raw
     if (e) { CVPixelBufferRelease(*out); *out = NULL; }
     return e;
 }
-static OSStatus decode_frame(Base object, void *frame, CMSampleBufferRef sample,
-                            VTDecodeFrameFlags flags, VTDecodeInfoFlags *info)
-{
-    if (info) *info = 0; /* fully synchronous; never claim async completion */
-    if (!sample || !frame || CMSampleBufferGetNumSamples(sample) != 1 ||
-        !CMSampleBufferDataIsReady(sample) || (flags & kVTDecodeFrame_EnableTemporalProcessing))
-        return kVTVideoDecoderUnsupportedDataFormatErr;
-    struct state *s = storage(object);
-    CVPixelBufferRef pixel = NULL;
-    uint8_t *input = NULL, *raw = NULL;
-    void *session = NULL;
-    OSStatus e = kVTVideoDecoderBadDataErr;
-    pthread_mutex_lock(&s->lock);
-    if (s->invalid || s->fd < 0 || !s->hvcc) { e = kVTInvalidSessionErr; goto done; }
-    struct x9_hevc_config config;
-    CFDataRef data = configuration(CMSampleBufferGetFormatDescription(sample), &config);
-    if (!data || !CFEqual(data, s->hvcc)) { e = kVTVideoDecoderUnsupportedDataFormatErr; goto done; }
-    CMBlockBufferRef block = CMSampleBufferGetDataBuffer(sample);
-    size_t bytes = block ? CMBlockBufferGetDataLength(block) : 0;
-    if (!bytes || bytes > X9_HEVC_MAX_INPUT) goto done;
-    size_t output_bytes = (size_t)s->config.width * s->config.height * 3 /
-                          (s->config.bit_depth == 10 ? 1u : 2u);
-    input = malloc(bytes); raw = malloc(output_bytes);
-    if (!input || !raw) { e = kVTAllocationFailedErr; goto done; }
-    e = CMBlockBufferCopyDataBytes(block, 0, bytes, input);
-    if (e) goto done;
-    size_t needed = 0;
-    if (x9_hevc_idr_annexb(&s->config, CFDataGetBytePtr(s->hvcc), input, bytes, NULL, 0, &needed)) {
-        e = kVTVideoDecoderUnsupportedDataFormatErr; goto done;
-    }
-    struct x9_vdec_picture r = {
-        .version = X9_VDEC_VERSION, .generation = s->generation,
-        .config_address = (uint64_t)(uintptr_t)CFDataGetBytePtr(s->hvcc),
-        .input_address = (uint64_t)(uintptr_t)input, .output_address = (uint64_t)(uintptr_t)raw,
-        .config_bytes = (uint32_t)CFDataGetLength(s->hvcc),
-        .input_bytes = (uint32_t)bytes, .output_capacity = (uint32_t)output_bytes
-    };
-    if (ioctl(s->fd, X9_VDEC_DECODE_IDR, &r)) { e = kVTVideoDecoderNotAvailableNowErr; goto done; }
-    if (!r.completion || r.output_bytes != output_bytes || r.width != s->config.width ||
-        r.height != s->config.height || r.format != (s->config.bit_depth == 10 ? X9_VDEC_P010 : X9_VDEC_NV12) ||
-        (r.flags & ~X9_VDEC_FULL_RANGE)) { e = kVTVideoDecoderBadDataErr; goto done; }
-    e = pixel_buffer(&r, raw, CMSampleBufferGetFormatDescription(sample), &pixel);
-    if (!e) session = s->session;
-done:
-    free(input); free(raw);
-    pthread_mutex_unlock(&s->lock);
-    /* On errors return directly: VT's duct performs the error/drop emission.
-     * On success emit exactly once using VT's frame token (not sample/PTS).
-     * Emit outside our lock so synchronous client callbacks may invalidate. */
-    if (!e) e = emit(session, frame, noErr, 0, pixel);
-    if (pixel) CVPixelBufferRelease(pixel);
-    return e;
-}
+#include "vt_video_sessions.inc"
 static const struct base_class base = {
     .version = 1, .storage_size = sizeof(struct state), .invalidate = invalidate,
     .finalize = finalize, .debug = debug_description,
@@ -326,8 +306,19 @@ static OSStatus factory(void *identifier, CFAllocatorRef allocator, Base *out)
     OSStatus e = create_object(allocator, &table, class_id(), out);
     if (e) return e;
     struct state *s = storage(*out);
+    memset(s, 0, sizeof(*s));
     s->fd = -1;
-    if (pthread_mutex_init(&s->lock, NULL)) {
+    /* Emit may synchronously call invalidate on this same thread. Recursive
+     * serialization permits that, while preventing another thread from
+     * canceling a VT frame between its ledger retirement and emission. */
+    pthread_mutexattr_t attr;
+    int err = pthread_mutexattr_init(&attr);
+    if (!err) {
+        err = pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+        if (!err) err = pthread_mutex_init(&s->lock, &attr);
+        pthread_mutexattr_destroy(&attr);
+    }
+    if (err) {
         CFRelease(*out); *out = NULL; return kVTAllocationFailedErr;
     }
     s->lock_initialized = true;
@@ -342,7 +333,8 @@ __attribute__((visibility("default"))) OSStatus X9HEVCRegisterDecoder(void)
     OSStatus e = kVTVideoDecoderNotAvailableNowErr;
     int fd = open(X9_VDEC_DEVICE, O_RDONLY | O_CLOEXEC);
     struct x9_vdec_status status;
-    if (fd < 0 || !hardware_status(fd, &status)) goto done;
+    struct x9_vdec_capabilities caps;
+    if (fd < 0 || !hardware_status(fd, &status) || !hardware_sessions(fd, &status, &caps)) goto done;
     if (registered) { e = noErr; goto done; }
     create_object = dlsym(RTLD_DEFAULT, "CMDerivedObjectCreate");
     storage = dlsym(RTLD_DEFAULT, "CMBaseObjectGetDerivedStorage");
@@ -359,7 +351,7 @@ __attribute__((visibility("default"))) OSStatus X9HEVCRegisterDecoder(void)
         !register_decoder || !hardware_key || !required_key || !using_hardware_key) {
         e = kVTVideoDecoderUnsupportedDataFormatErr; goto done;
     }
-    const void *key = CFSTR("X9IndependentHEVC"), *value = kCFBooleanTrue;
+    const void *key = CFSTR("X9NativeHEVC"), *value = kCFBooleanTrue;
     CFDictionaryRef requirement = CFDictionaryCreate(NULL, &key, &value, 1,
         &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
     if (!requirement) { e = kVTAllocationFailedErr; goto done; }
