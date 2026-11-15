@@ -48,6 +48,12 @@ static int cam_native_sensor_power(const struct x9_camera_sensor *s,int on)
     if(!cam_native_sensor.epoch)return 0;
     e=cam_native_sensor_match(s);if(e)return e;
     e=cam_sensor_session_close_locked(cam_native_sensor.epoch,&r);
+    /* Recycle only AFTER the original sensor/RX/SV/SMI/MM chain has
+     * physically closed. The capture wrapper preserves the old receipt
+     * and backing; a stopped IRQ or restored translation is not enough.
+     * ID-only registration probes have no prepared capture and are no-op.
+     * An unsuccessful recycle retains this epoch and its original fault. */
+    if(!e)e=cam_native_capture_recycle_locked(cam_native_sensor.epoch);
     if(e) {if(!cam_native_sensor.error)cam_native_sensor.error=e;}
     else {
         cam_native_sensor.epoch=0;cam_native_sensor.sensor=0;

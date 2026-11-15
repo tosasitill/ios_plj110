@@ -7,9 +7,10 @@
 struct x9_camera_native_engine {
     uint32_t version;
     void *context;
-    /* Required real controller admission, before any sensor power mutation.
-     * Checks availability of normal mapping/route/rate/retirement machinery;
-     * not a callback-address, register-idle or sensor-ID capability test. */
+    /* Required runtime boot/engine admission, before sensor power mutation.
+     * No unpowered CAM register sampling or callback-address-only READY.
+     * Actual mapping/route/rate suppliers are qualified later by prepare
+     * under the new MM power token; registration is only cold ID admission. */
     int (*admit)(void *);
     /* Receives the actually configured, still non-streaming cold epoch,
      * after real inactive MM/PHY/SMI/source preparation. Installs/pins the
@@ -38,7 +39,8 @@ struct x9_camera_native_engine {
 #define X9_CAMERA_NATIVE_ENGINE_VERSION 1u
 /* Standalone thread entry, serializes admission and publishes the adapter
  * only after the real engine admits and both physical IDs match/retire.
- * No provider calls this yet. Registration alone is not a physical frame. */
+ * Mode2 init calls it once from an ordinary kernel thread. Registration
+ * alone is not a physical frame, DMA grant or iOS preview. */
 int x9_camera_native_sensor_register(const struct x9_camera_native_engine *);
 #endif
 #endif

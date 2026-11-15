@@ -17,12 +17,14 @@
 #include <kern/clock.h>
 #include <kern/locks.h>
 #include <kern/sched_prim.h>
+#include <kern/thread.h>
 #include "x9_camera.h"
 #include "../../../../camera/hakios.camera.h"
 #include "../../../generated/x9_camera_sensor_tables.inc"
 
 extern int sweet_early_is_x9(void);
 extern int sweet_x9_arg(const char *, int);
+extern kern_return_t thread_terminate(thread_t);
 LCK_GRP_DECLARE(camera_group, "x9-camera");
 LCK_MTX_DECLARE(camera_lock, &camera_group);
 /* Controls serialize separately so capture(off) may drain a completion worker
@@ -629,6 +631,25 @@ static const struct cdevsw cam_cdev={.d_open=cam_open,.d_close=cam_close,.d_read
     .d_write=cam_write,.d_ioctl=cam_ioctl,.d_stop=eno_stop,.d_reset=eno_reset,
     .d_select=eno_select,.d_mmap=eno_mmap,.d_strategy=eno_strat};
 #include "x9_camera_native_sensor.inc"
+static void cam_native_register_worker(void *arg,wait_result_t result)
+{
+    (void)arg;(void)result;
+    /* A getter is not admission. This single ordinary thread performs the
+     * real engine admission and both physical power/ID/close probes. No
+     * retry after a partial probe, no boot-time stream or artificial READY.
+     * Configure later checks the live UFS floor and actual MM suppliers. */
+    int e=x9_camera_native_sensor_register(x9_camera_native_capture_engine());
+    lck_mtx_lock(&camera_lock);
+    if(e) {
+        st.flags|=X9_CAMERA_FAULT;
+        if(!st.last_errno)st.last_errno=e;
+    }
+    printf("X9 CAMERA NATIVE REGISTER: errno=%d platform=%u flags=%x IDs=%04x/%04x "
+        "(physical ID admission only; no RAW/preview claim)\n",
+        e,hw.version,st.flags,st.chip_id[0],st.chip_id[1]);
+    lck_mtx_unlock(&camera_lock);
+    (void)thread_terminate(current_thread());
+}
 void sweet_x9_camera_init(void)
 {
     if(!sweet_early_is_x9())return;
@@ -637,10 +658,21 @@ void sweet_x9_camera_init(void)
     int major=cdevsw_add(-1,&cam_cdev);if(major<0){st.last_errno=ENXIO;return;}
     /* Captured 20H392 launchd plist runs mediaserverd as mobile (501:501),
      * not macOS _mediaserverd (32). The status device is
-     * NOT evidence of capture capability. No MMIO or rail changes at init. */
+     * NOT evidence of capture capability. Mode2 power/ID admission runs
+     * only in the separate one-shot registration thread below. */
     if(!devfs_make_node(makedev(major,0),DEVFS_CHAR,mode==3?0:501,mode==3?0:501,0600,"x9-camera") ||
        !devfs_make_node(makedev(major,1),DEVFS_CHAR,mode==3?0:501,mode==3?0:501,0400,"x9-camera-status"))
         st.last_errno=ENOMEM;
     printf("X9 CAMERA: mode=%d hhmain(i2c4/1a) hhfront(i2c2/10); platform=%u, no fake frames\n",mode,hw.version);
     if(mode==3)printf("X9 CAMERA PROBE: root probe/standby ioctl only, no boot-time MMIO/power, no iOS install; shared providers required\n");
+    if(mode==2 && !st.last_errno) {
+        thread_t thread;
+        if(kernel_thread_start(cam_native_register_worker,NULL,&thread)==KERN_SUCCESS)
+            thread_deallocate(thread);
+        else {
+            lck_mtx_lock(&camera_lock);
+            st.last_errno=ENOMEM;st.flags|=X9_CAMERA_FAULT;
+            lck_mtx_unlock(&camera_lock);
+        }
+    }
 }
