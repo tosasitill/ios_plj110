@@ -44,8 +44,10 @@ python3 -I x9/bluetooth/stage.py \
 执行条件与路径：
 
 1. 本机 macOS，`adb`、`hdiutil` 可用；本机 root 或已授权的 `sudo -n`
-   用于**离线挂载图像内**的 uid/gid 设置。须至少保留总 root 大小 +128 MiB
-   可用本机空间；APFS `cp -c` 克隆失败则停止，不改走未知文件系统方案。
+   用于**离线挂载图像内**的 uid/gid 设置。须至少保留总 root 大小
+   **+3×128 MiB +16 MiB** 可用本机空间：分别预留 APFS clone delta、
+   `.old` 块备份、`.new` 块副本，以及少量 receipt/输入/目录元数据余量。
+   APFS `cp -c` 克隆失败则停止，不改走未知文件系统方案。
 2. 必须运行 `check_plaintext_root.py`，再动态 `resolve_userdata` 绑定
    live GPT/geometry/dm route；不使用历史 `/dev/block/sdc100`。
 3. 从当前 root 文件和 extension 文件 raw 读取完整 **base||extension**，
@@ -60,7 +62,10 @@ python3 -I x9/bluetooth/stage.py \
    备份原件。离线 VFS 先 fsync/rename 四个自有二进制，最后两个仅变更
    `Program` 的 jobs；校验 uid0/gid0/mode 和内容。Apple 原件保持逐字节不变。
 6. detach 后生成最多128 MiB 的 blockdiff（包含原生 journal/metadata
-   变化）。保留每范围 `.old`、`.new` 与 write-intent ledger。**原生离线
+   变化）。保留每范围 `.old`、`.new` 与 write-intent ledger；先 fsync
+   snapshot、detached updated image 和所有块副本，再 fsync `blocks/`、
+   state directory 及其父目录，确保 ledger 发布前恢复依赖的文件和目录项
+   已持久化。**原生离线
    文件发布顺序不等同物理 blockdiff 顺序**；Android 期间没有 iOS HFS
    挂载，用户不得在部分写入时启动 iOS。
 7. 写前重新完整 preflight，比较每 part 的**全部 live bytes hash**与
