@@ -581,6 +581,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 - **材料与清理**：原call-status树所有out无覆盖整体迁主checkout同名`x9/out/{dial-profile-remaining-analysis,calllist-remaining-analysis,call-status-analysis,call-handover-compile,x9-call-handover-init-20261115,x9-call-handover-rebased-20261115}`；原日志绝对路径不改写，旧树及本地feat/call-handover-init已清。原件不入git，其它audio/GPU/BT/camera/sensor窗口不动。
 - **继续并行/完整边界**：三代理分别窄追CallList offset6实际consumer、Apple IMS provider/registration可替换边界、SMS剩余启动注册准入；不重复已排除猜测、不操作设备、不要求补场景、只编译不运行套件。VOICE09仍关闭；CallList完整身份生命周期、真正IMS→MTK桥、MT动作/handover身份迁移、通话专用audio、Messages显示/重开持久化/同token物理ACK/MO对端收到仍未闭合，**最终通话短信boot.img尚未完成**。
 
+#### 2026-11-15 注册响应真实queue receipt / 下一集成基线
+
+- **上一集成已收尾**：SMS MT生产`f1aa29f`、交接`009c947`及AP SIP文档`e1c0af1`已ff main并push成功（`8bc5670..e1c0af1`）；`gh run list --branch fix/sms-mt-admission`为`[]`，无CI run ID。SMS compile目录及`x9-call-sms-owner-integrated-20261115/`已无覆盖迁主checkout同名out，原日志绝对路径保留，本地SMS MT树/分支已清。没有为docs重编、测试执行、boot pack/上机或二次检查产物。
+- **父会话新窄修复**：`fix/call-registration-admission` / `.worktrees/call-registration-admission`从实际main`e1c0af1`开始，生产**`4b2619b`**。旧`x9c_reg_answer→x9q_packet::send→coachz_baseband_qrtr`只确认port recognized，忽略bb_push的queue/OOM失败，随后仍grant registered/handover并丢弃retained54；分开入队还可能仅前半批成功，getter与队列写之间CALL poison未原子覆盖。这是源码确定缺口，不是本轮真机复现。
+- **实现/边界**：Result03+最多8条retained54锁外预分配，新native publication API持MD锁检查online/独立CALL poison/floor并覆盖受信callback；callback复核single-owner control/generation/SIM与原25s deadline，再以MD→bb锁验证真实非release_pending VOICE client/service/node和整批queue容量。无分配/MD重入，整批all-or-none；失败锁外zero/free，queue/OOM只保留waiter/events重试local入队，不重发MD，成功才grant/clear。原未发布VOICE09、CallList/ID/profile、注册CNF、CALL/SMS mutation/物理writer均不改；已启用后的普通54路径仍未补queue-full持久重试，不能泛称所有handover发布race已闭合。
+- **编译**：新增6项人工源码向量**只编译未执行**；host严格C++17 `-c` exit0，bridge.h C11严格syntax exit0；真实recipe两对象`X9Baseband.cpp.o`/`sweet_x9_gpu_dependencies.o`均True、正式exit0（现存warnings保留）。命令与日志在本树`x9/out/call-registration-admission-compile/{host.log,host.exit,header.log,header.exit,compile-recipe.py,recipe.log,recipe.exit,recipe-results.json}`。无本项单独kernel/CI/boot/设备，待SMS TAG pre-TX guard统一固定源码编译与合main/push。
+
 ### 5.7 2026-11-13 音频：ADSP 自动 dsp-boot 镜像（分支 feat/audio-dsp-boot，worktree `.worktrees/audio-dsp-boot`）
 
 - feat/audio-bounded-fdt 已 ff 合入 main（`b25f4ca`），worktree/分支已删；`android-callsms-20261113`、`shimtest`、fdt2/3/4 的 usb-log 移到本 worktree 的 `x9/out/`。

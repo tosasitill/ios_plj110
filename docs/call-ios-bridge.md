@@ -69,6 +69,28 @@ SMS ACK 优先与唯一物理 writer 不变；8901 仅保留原 incoming owner�
 这闭合了已核实注册子集及handover通知的生产调用与响应，不是完整 Apple bootstrap：CallList46发布、
 handover后的ID/RAT/profile迁移、运行DIAL profile/admission和voice音频仍缺，VOICE09仍关闭。人工源码向量只编译，未执行。
 
+#### 注册Result / retained54的原子host queue准入
+
+源码review确认旧`x9c_reg_answer`使用`x9q_packet::send`，底层
+`coachz_baseband_qrtr`只返回“port recognized”，不返回`bb_push`的实际queue/OOM结果。
+因此队列满时仍会设置registered/handover并擦除尚未入队的START/COMPLETE；
+Result与各事件分开入队也可能只有前半批成功。此前getter与host入队之间另有CALL poison窗口。
+这些是可达源码缺口，不是新增设备复现。
+
+生产`4b2619b`仅修注册publication：原Result03和启用期间保留的最多8条54在锁外预分配，
+`x9_md_mipc_call_publish(floor,callback,context)`持同一MD锁检查online/CALL poison/RX floor，
+受信callback再检查原client/generation、control-ready及原25s deadline，
+以MD→bb mutex顺序覆盖**整批真实host queue准入**。bb锁内验证非release_pending的真实VOICE
+client、service/node/route及整批容量，只header/copy/入队，不malloc、不MD重入；两mutex仍可等待。
+失败不转任何buffer所有权，锁外擦除释放；queue/OOM只保留本地waiter/events重试到原deadline，
+不重发MD请求。只有整批成功才grant并清buffer，Result先于START/COMPLETE。
+成功后MD再次offline由原poll撤host订阅，不把这笔历史成功当永久voice-ready。
+
+新增6项人工源码向量只编译未执行；host/header及真实recipe两对象均exit0。
+此项不改已经启用后的普通54发送路径，**尚未闭合该路径的queue-full持久保留/重试**，
+不发CallList/VOICE09，不改变SMS/CALL mutation、真实ID/profile、注册CNF或MD物理writer。
+统一kernel结果见NOTES；仍无设备注册/通话/最终镜像验收。
+
 ### SRVCC / Apple handover54（2026-11-15，源码接入，未设备验收）
 
 完整证据链来自本机匹配原件，不借标准QMI枚举猜消息：
