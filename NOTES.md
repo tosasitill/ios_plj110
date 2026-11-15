@@ -1865,3 +1865,9 @@ Model now (as Android, one shared AFE, one owner per shared bit):
 - 所选旧RETslot必须按其实际 backing找到较早完整 retired/recycled receipt（支持 back→front→back）；核完整slot snapshot/RAW_IDLE/rawmatch后归档 tombstone并真正重建软件 EMPTY，未变old RAW ownership也未释放旧页，不把 old RET 单独当权限。不是每次 STOP清slot；只有全physicalclose+freshcold reopen才允许。新启动 export/cache失败仍保留新旧 pin backing与原 errno。
 - **有限约束**：最多 **8 exported epoch lifetimes** 留存 pin；第9次 reopen在 namespace/slot mutation、allocation/export或controller store之前 ENOSPC，供新epoch noexport普通物理powerunwind。不是无限稳定循环/内存回收实现；partial startup、CMDQ timeout、READY DEVICE未RCNT仍terminal retained，不宣称它们可clean关闭。
 - 普通 Builder camera.o 最终 **exit0/139warnings**，日志 `x9/out/native-smmu-compile/epoch-reopen-apoff-compile.log`。首版完整receipt超过kalloc_type 16KiB产生2错误，已改 kernel_map wired整页receipt（失败日志 `epoch-reopen-compile.log`保留；中间正常 `epoch-reopen-fixed-compile.log`）；没有测试脚本/套件、完整link/boot、CI run、二次产物检查或设备操作。当前仅代码/普通编译证明；没有真实SOF/DONE/RAW帧、fullclose/reopen运行结果或iOS真实预览验收。
+
+#### 相机 unstarted gate sentinel 可达性补修（2026-11-15）
+
+- 窄源码审阅发现 `cam_sv_gate_init()` 的 `pending=X9_CAM_SV_GATE_STEPS`（8）才表示没有 pending，上一 unstarted guard误用 `cam_sv_gate.pending` 布尔值将合法 dormant失败close全部拒绝。现只要求 `pending==STEPS` 且 `issued==0`；不允许任何 gate-issued/RAWDEVICE/credit/source/setup 放宽。
+- 普通 Builder camera.o **exit0/139warnings**，`x9/out/native-smmu-compile/unstarted-gate-sentinel-compile.log`；未运行测试套件、二次产物检查、完整link/boot、CI或设备操作。补修仅依据实际初始化与守卫数据流，不是已观察到设备 unstartedclose 成功。
+- 重复 close/phase 审阅未新增递归：BBM前一次 oldDMA admission，BBM后 producer guard无DMAcallback；oldretirementcheck只在实际 MM票尚持时供 supplier teardown，epochrecycle 在物理close后不读gatedCSR。**READY DEVICE未RCNT的STOP仍ENOTSUP/retain**，continuous控制器可能经常处于此窗口，所以本轮fullclose/reopen接口不能当任意时刻可靠相机关闭/前后切换验收；独立never-issued取消receipt尚未实现，不得以READY→PARKED或假DONE代替。

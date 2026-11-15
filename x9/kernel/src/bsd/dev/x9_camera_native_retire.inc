@@ -121,7 +121,8 @@ static int cam_native_unstarted_retire_locked(uint64_t epoch,struct x9_camera_sm
        !cam_mm.active || cam_mm.receive.power_token!=m->native_power ||
        cam_sensor_live.close_attempted || cam_rx_live.close_attempted ||
        cam_sv.request_held || cam_sv.credit_issued || cam_sv.receive_issued ||
-       cam_source.captured || cam_sv_gate.pending || !m->map ||
+       cam_source.captured || cam_sv_gate.pending!=X9_CAM_SV_GATE_STEPS ||
+       cam_sv_gate.issued || !m->map ||
        m->map->raw_state!=CAM_RAW_PRIVATE)e=ESTALE;
     boolean_t old=cam_irq_spin_take();
     if(!e && (cam_irq.prepared || cam_irq.owns || cam_irq.accepting || cam_irq.busy ||
