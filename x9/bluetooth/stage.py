@@ -47,6 +47,7 @@ BLOCK = 4096
 WRITE = 64 * BLOCK                         # pinfile's existing hard limit
 CONFIRM = 'install-native-bluetooth-root'
 MAX_DIFF = 128 * 1024 * 1024              # includes native HFS journal/metadata
+SPACE_MARGIN = 16 * 1024 * 1024           # receipts, input copies and directory metadata
 SYSTEM_VERSION = '/System/Library/CoreServices/SystemVersion.plist'
 
 
@@ -58,6 +59,19 @@ def now():
     return datetime.datetime.now().astimezone().isoformat()
 
 
+def sync_directory(path):
+    directory = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def sync_file(path):
+    with path.open('rb') as stream:
+        os.fsync(stream.fileno())
+
+
 def save(path, value):
     fd, name = tempfile.mkstemp(prefix=path.name + '.', suffix='.tmp', dir=path.parent)
     temporary = Path(name)
@@ -66,11 +80,7 @@ def save(path, value):
             json.dump(value, stream, indent=2)
             stream.write('\n'); stream.flush(); os.fsync(stream.fileno())
         os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        sync_directory(path.parent)
     finally:
         if temporary.exists():
             temporary.unlink()
@@ -410,6 +420,7 @@ class Session:
                             process.kill(); process.wait()
                         process.stdout.close()
             stream.truncate(self.total); stream.flush(); os.fsync(stream.fileno())
+        sync_directory(output.parent)
         self.verify_hashes(hashes)
         return hashes
 
@@ -471,6 +482,8 @@ finally:
 def prepare_image(session, directory, files, jobs, apple):
     snapshot, updated = directory / 'snapshot.hfs', directory / 'updated.hfs'
     subprocess.run(['/bin/cp', '-c', str(snapshot), str(updated)], check=True)
+    sync_file(updated)
+    sync_directory(directory)
     mount = directory / 'mount'; mount.mkdir()
     mounted_device = None
     try:
@@ -529,6 +542,8 @@ def prepare_image(session, directory, files, jobs, apple):
     finally:
         if mounted_device is not None:
             subprocess.run(['hdiutil', 'detach', mounted_device], check=True, capture_output=True)
+    sync_file(updated)
+    sync_directory(directory)
     # All changes, including journal replay, are bounded; no catalog mutation by us.
     changes, hashes, changed = [], [], 0
     blocks = directory / 'blocks'; blocks.mkdir()
@@ -555,8 +570,13 @@ def prepare_image(session, directory, files, jobs, apple):
     if not changes:
         raise ValueError('unexpected empty native root installation delta')
     for path in blocks.iterdir():
-        with path.open('rb') as stream:
-            os.fsync(stream.fileno())
+        sync_file(path)
+    # File fsync alone does not make newly created .old/.new directory entries
+    # durable. Persist this entire dependency chain BEFORE publishing a ledger
+    # which can authorize a live write and later reference these backups.
+    sync_directory(blocks)
+    sync_directory(directory)
+    sync_directory(directory.parent)
     session.record({'operation': 'offline-native-hfs-ready', 'changed_bytes': changed,
                     'changed_ranges': len(changes)})
     return changes, hashes
@@ -668,6 +688,7 @@ def main():
                           'install_order': payload['install_order'], 'binding': binding,
                           'method': 'private live snapshot / native HFS / pinfile compare-write',
                           'maximum_delta_bytes': MAX_DIFF,
+                          'minimum_local_free_bytes': root_device(manifest)[0] + 3 * MAX_DIFF + SPACE_MARGIN,
                           'required_confirmation': CONFIRM,
                           'constraints': ['explicit user approval is required before --apply',
                                           'keep Android running until success or verified rollback',
@@ -696,8 +717,9 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         if a.apply:
             directory.mkdir(parents=True, exist_ok=False)
-            if shutil.disk_usage(directory).free < root_device(manifest)[0] + MAX_DIFF:
-                raise ValueError('insufficient local space for retained root backup and bounded APFS delta')
+            sync_directory(directory.parent)
+            if shutil.disk_usage(directory).free < root_device(manifest)[0] + 3 * MAX_DIFF + SPACE_MARGIN:
+                raise ValueError('insufficient local space for root backup, APFS delta, both block copies and margin')
             state = {'schema': 1, 'kind': 'x9-bluetooth-root-install-state', 'binding': binding,
                      'adb_serial': a.serial, 'started': now(), 'phase': 'preflight',
                      'attempted': [], 'root_installed': False, 'runtime_verified': False, 'audio_verified': False}
@@ -707,6 +729,7 @@ def main():
                 raise ValueError('root manifest changed before creating the private frozen preflight input')
             with (directory / 'root-manifest.json').open('xb') as stream:
                 stream.write(frozen); stream.flush(); os.fsync(stream.fileno())
+            sync_directory(directory)
         else:
             state = json.loads(bounded(directory / 'state.json', 16 * 1024 * 1024))
             if (state.get('binding') != binding or state.get('adb_serial') != a.serial or
