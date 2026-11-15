@@ -2,9 +2,14 @@
  * Ordinary 4K SMMU pages are NOT XNU's 16K CPU allocation granule. */
 #include <vm/pmap.h>
 #include <vm/vm_kern.h>
+#include <vm/memory_types.h>
 #include <arm/caches_internal.h>
+#include <arm64/proc_reg.h>
 #include "x9_vdec_dma.h"
 extern ppnum_t pmap_find_phys(pmap_t, addr64_t);
+/* Kernel-private signatures from osfmk/vm/pmap.h (not exported to kexts). */
+extern unsigned int pmap_cache_attributes(ppnum_t);
+extern void pmap_set_cache_attributes(ppnum_t, unsigned int);
 #define VDMA_MAGIC UINT64_C(0x583956444d413031)
 #define VDMA_CPU_BYTES 16384u
 #define VDMA_POOL_BYTES (X9_MM_SMMU_BUILD_MAX_TABLES * X9_MM_SMMU_TABLE_BYTES)
@@ -12,6 +17,9 @@ extern ppnum_t pmap_find_phys(pmap_t, addr64_t);
 struct vdma_slice_record {
     struct x9_vdec_dma_slice handle;
     uint32_t offset, state;
+    /* Only native global SHM uses Normal NC. Records the transition before
+     * the first pmap change, including a partially failed preparation. */
+    bool uncached;
 };
 struct x9_vdec_dma {
     uint64_t magic;
@@ -552,6 +560,81 @@ static int vdma_slice_cpu_domain(struct x9_vdec_dma *d)
     if (d->state != X9_MM_SMMU_INSTALLED) return EBUSY;
     return x9_mm_power_validate_pin(d->request.power_token,d->power_child,X9_MM_POWER_VCP);
 }
+static int vdma_nc_mair(void)
+{
+    uint64_t mair;
+    __asm__ volatile("mrs %0, mair_el1" : "=r"(mair));
+    /* XNU start.s installs 0x44 in this slot on every CPU. Check the live
+     * local encoding too; VM_WIMG_WCOMB must not silently mean Device/WB. */
+    return ((mair >> MAIR_ATTR_SHIFT(CACHE_ATTRINDX_WRITECOMB)) & 0xff) ==
+        MAIR_WRITECOMB ? 0 : ENOTSUP;
+}
+static int vdma_slice_nc_check(struct x9_vdec_dma *d, struct vdma_slice_record *r)
+{
+    int e = r->uncached ? vdma_nc_mair() : ENOTSUP;
+    unsigned first = r->offset / VDMA_CPU_BYTES;
+    unsigned count = r->handle.capacity / VDMA_CPU_BYTES;
+    for (unsigned p = first; p < first + count && !e; p++)
+        if ((pmap_cache_attributes((ppnum_t)atop_64(d->raw_pa[p])) & VM_WIMG_MASK) !=
+            VM_WIMG_WCOMB) e = ESTALE;
+    return e;
+}
+/* Internal only: the one global SHM claim owns all these complete 16K pages.
+ * vcp_helper's normal allocation uses mtk_mm-uncached; system_heap_do_vmap
+ * uses pgprot_writecombine for it. AP/FW fields share lines INSIDE a VSI.
+ * Page isolation alone therefore does not permit WB live stores. Use XNU's
+ * managed-page cache API: it updates the physical aperture and tracked PV
+ * mappings and performs its TLB/cache synchronization. No second alias,
+ * direct PTE edit, remap of live memory or device-pointer cast is created.
+ * Caller holds d->lock; conversion happens before any address publication. */
+static int vdma_slice_make_nc(struct x9_vdec_dma *d, struct vdma_slice_record *r)
+{
+    unsigned first = r->offset / VDMA_CPU_BYTES;
+    unsigned count = r->handle.capacity / VDMA_CPU_BYTES;
+    int e = vdma_nc_mair();
+    if (!e && (d->state != X9_MM_SMMU_UNEXPOSED || !d->shared_claim ||
+        r->state != X9_VDEC_DMA_CPU_PRIVATE || r->uncached)) e = EBUSY;
+    if (!e) e = vdma_slice_backing(d,r->offset,r->handle.capacity);
+    /* kmem_alloc supplies fresh default managed pages. Do not commandeer a
+     * page with a preexisting nondefault mode; the inverse is exactly DEFAULT. */
+    for (unsigned p = first; p < first + count && !e; p++)
+        if ((pmap_cache_attributes((ppnum_t)atop_64(d->raw_pa[p])) & VM_WIMG_MASK) !=
+            VM_WIMG_DEFAULT) e = ESTALE;
+    if (e) return e;
+    r->uncached = true; /* retain the restoration obligation before mutation */
+    for (unsigned p = first; p < first + count; p++) {
+        flush_dcache64(d->raw_pa[p],VDMA_CPU_BYTES,TRUE);
+        __asm__ volatile("dsb sy" ::: "memory");
+        pmap_set_cache_attributes((ppnum_t)atop_64(d->raw_pa[p]),VM_WIMG_WCOMB);
+    }
+    __asm__ volatile("dsb sy" ::: "memory");
+    return vdma_slice_nc_check(d,r);
+}
+static int vdma_slice_restore_cache(struct x9_vdec_dma *d, struct vdma_slice_record *r)
+{
+    unsigned first = r->offset / VDMA_CPU_BYTES;
+    unsigned count = r->handle.capacity / VDMA_CPU_BYTES;
+    int e;
+    if (!r->uncached) return 0;
+    /* Free is allowed only while private or after physical whole-domain
+     * retirement. A failed conversion may leave a DEFAULT/WCOMB mixture;
+     * these are the only owned modes we may undo. Foreign changes retain it. */
+    e = vdma_slice_backing(d,r->offset,r->handle.capacity);
+    for (unsigned p = first; p < first + count && !e; p++) {
+        unsigned attr = pmap_cache_attributes((ppnum_t)atop_64(d->raw_pa[p])) & VM_WIMG_MASK;
+        if (attr != VM_WIMG_DEFAULT && attr != VM_WIMG_WCOMB) e = ESTALE;
+    }
+    if (e) return e;
+    __asm__ volatile("dsb sy" ::: "memory");
+    for (unsigned p = first; p < first + count; p++)
+        pmap_set_cache_attributes((ppnum_t)atop_64(d->raw_pa[p]),VM_WIMG_DEFAULT);
+    __asm__ volatile("dsb sy" ::: "memory");
+    for (unsigned p = first; p < first + count; p++)
+        if ((pmap_cache_attributes((ppnum_t)atop_64(d->raw_pa[p])) & VM_WIMG_MASK) !=
+            VM_WIMG_DEFAULT) return ESTALE;
+    r->uncached = false;
+    return 0;
+}
 int x9_vdec_dma_slice_alloc(struct x9_vdec_dma *d, uint64_t epoch,
     uint32_t bytes, uint32_t align, struct x9_vdec_dma_slice *out)
 {
@@ -616,6 +699,7 @@ static int vdma_slice_copy(struct x9_vdec_dma *d, const struct x9_vdec_dma_slice
     if (!e && (offset > h.bytes || bytes > h.bytes - offset)) e = ERANGE;
     if (!e) e = vdma_slice_cpu_domain(d);
     if (!e) e = vdma_slice_backing(d,r->offset,h.capacity);
+    if (!e && r->uncached) e = vdma_slice_nc_check(d,r);
     if (!e) {
         void *address = (void *)(d->raw + r->offset + offset);
         if (write) memcpy(address,data,bytes);
@@ -651,6 +735,7 @@ int x9_vdec_dma_slice_publish(struct x9_vdec_dma *d, const struct x9_vdec_dma_sl
     if (!e && (d->state != X9_MM_SMMU_INSTALLED || r->state != X9_VDEC_DMA_CPU_PRIVATE)) e = EBUSY;
     if (!e) e = vdma_slice_cpu_domain(d);
     if (!e) e = vdma_slice_backing(d,r->offset,h.capacity);
+    if (!e && r->uncached) e = vdma_slice_nc_check(d,r);
     if (!e) {
         vdma_slice_flush(d,r);
         r->state = X9_VDEC_DMA_DEVICE; /* journal before any IOVA escapes */
@@ -698,6 +783,7 @@ int x9_vdec_dma_slice_free(struct x9_vdec_dma *d, struct x9_vdec_dma_slice *slic
     e = vdma_slice_find(d,slice,&r);
     if (!e && r->state == X9_VDEC_DMA_DEVICE) e = EBUSY;
     if (!e) e = vdma_slice_cpu_domain(d);
+    if (!e) e = vdma_slice_restore_cache(d,r);
     if (!e) {
         vdma_mark_pages(d,r->offset,r->handle.capacity,false);
         memset(r,0,sizeof(*r)); d->slice_count--;

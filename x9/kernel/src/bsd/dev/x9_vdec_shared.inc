@@ -1,5 +1,5 @@
-/* Included after DMA+instance memory. Live access is read-only observation;
- * it cannot grant DMA retirement, field publication or pixel completion. */
+/* Included after DMA+instance memory. Global SHM has a native Normal-NC CPU
+ * mapping. Observation does not grant retirement or pixel completion. */
 #include <pexpert/device_tree.h>
 #include "x9_vcp_handoff.h"
 #include "x9_vdec_shared.h"
@@ -126,6 +126,13 @@ int x9_vdec_shared_create(struct x9_vdec_dma *d, struct x9_vdec_dma *codec,
     /* 4MiB alignment keeps this 0x20e000-byte global block wholly within one
      * low27 firmware alias window, regardless of arena's starting offset. */
     e = x9_vdec_dma_slice_alloc(d,s->epoch,X9_VCP_GLOBAL_BYTES,0x400000,&s->slice);
+    if (!e) {
+        struct vdma_slice_record *r = NULL;
+        lck_mtx_lock(&d->lock);
+        e = vdma_slice_find(d,&s->slice,&r);
+        if (!e) e = vdma_slice_make_nc(d,r);
+        lck_mtx_unlock(&d->lock);
+    }
     if (!e) e = x9_vdec_dma_slice_write(d,&s->slice,
         X9_VCP_GLOBAL_VDEC_OFFSET,common,sizeof(common));
     /* Paired KO vcp_logger_init aad4..ab10: magic, size24, enable0,
@@ -221,11 +228,10 @@ int x9_vdec_shared_reply(void *cookie, uint64_t epoch, uint64_t end,
     return e;
 }
 /* Internal, read-only and restricted to THIS published global allocation.
- * No generic DEVICE slice read API is exported. All CPU dirty bytes were
- * flushed/invalidate-before-publish; DEVICE rejects every CPU writer. The
- * following clean+invalidate therefore cannot write stale dirty shared data
- * over a firmware update. Adjacent slots are also CPU read-only. It proves
- * PoC visibility, not atomicity of a multiword firmware update or retirement.
+ * No generic DEVICE slice read API is exported. The complete global slice
+ * was made Normal NC before publication, including all tracked CPU aliases.
+ * No cacheline clean/invalidate against firmware-updated lines is needed.
+ * It proves visibility, not atomicity of a multiword update or retirement.
  * Caller holds shared lock and active native bus transaction/lifetime. */
 static int vshared_observe(struct x9_vdec_shared *s, uint32_t offset,
     uint8_t *out, uint32_t bytes)
@@ -242,15 +248,14 @@ static int vshared_observe(struct x9_vdec_shared *s, uint32_t offset,
     if (!e && (!d->shared_claim || d->state != X9_MM_SMMU_INSTALLED ||
         r->state != X9_VDEC_DMA_DEVICE)) e = EBUSY;
     if (!e) e = vdma_slice_cpu_domain(d);
+    if (!e) e = vdma_slice_nc_check(d,r);
     if (!e) {
         first = (r->offset+offset) & ~(VDMA_CPU_BYTES-1);
         limit = (r->offset+offset+bytes+VDMA_CPU_BYTES-1) & ~(VDMA_CPU_BYTES-1);
         e = vdma_slice_backing(d,first,limit-first);
     }
     if (!e) {
-        for (uint32_t p = first/VDMA_CPU_BYTES; p < limit/VDMA_CPU_BYTES; p++)
-            flush_dcache64(d->raw_pa[p],VDMA_CPU_BYTES,TRUE);
-        __asm__ volatile("dsb sy" ::: "memory");
+        __asm__ volatile("dmb oshld" ::: "memory");
         memcpy(out,(void *)(d->raw+r->offset+offset),bytes);
         __asm__ volatile("dmb oshld" ::: "memory");
     }

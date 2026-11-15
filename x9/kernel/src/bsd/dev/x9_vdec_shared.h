@@ -6,7 +6,10 @@
 struct x9_vdec_shared;
 /* Must precede arena install. Reads the CURRENT ADT handoff, allocates one
  * zeroed slice in the same HFRP arena used by instance SW memory, initializes
- * paired cold common+logger headers. Retains an arena ref; once per arena.
+ * paired cold common+logger headers. The entire slice's managed CPU pages
+ * become Normal NC via pmap before install/publication; all tracked aliases
+ * change together, and original DEFAULT mode is restored before slice free.
+ * Retains an arena ref; once per arena.
  * Other global blocks stay reserved/zeroed, not lent to another subsystem.
  * Caller must establish actual firmware pairing and cold ownership before
  * publish/start. Layout profile alone is NOT that proof or an owner callback.

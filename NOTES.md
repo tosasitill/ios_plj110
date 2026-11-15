@@ -177,6 +177,14 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 - **本次确切编译**：`sweet_x9_vdec.o`在`hevc-sessions-compile-20261115`通过；该首轮camera因本树缺ignored sensor include失败，未进入camera源码编译。用正式`x9/camera/build.py:sensor_tables`及固定`.local/vendor`生成include后，`hevc-owner-compile-20261115`的owner/camera两对象均exit0（20/107 warnings）。最终修改的owner按`df48be6`再编译exit0/20 warnings，日志/helper/result在 **`x9/out/hevc-owner-boundary-final-20261115/`**。最终VT dylib/client全编译、链接、ad-hoc签名exit0，`-Wall -Wextra -Werror`，在 **`x9/out/hevc-session-final-20261115/frontend/`**，原console/exit为同目录上级`frontend.log/frontend.exit`（源码`8fda515`）。未重跑未改动的成功对象；没有测试套件、full kernel link、boot pack、CI run（`gh run list --limit 3`为空）、构建后二次解包/hash/反汇编，或手机/MMIO/SMC/ADB/mailbox/分区操作。编译成功不证明VT/runtime或物理DMA行为。
 - **下一具体缺口/完整目标active**：真实NS/controller/firmware/clock owner与最高层create→install→shared→bind→start尚缺，不能把callback契约/adapter当注册者。当前`x9_vdec_control`仍是一份output/一次START的独立实例，尚未实现持续session_ops；需要在真实decoder/VSI/BS路由证据下补连续submit、WAITISR/c006、coherent completion/ring dequeue、input/DPB/output cache生命周期、线性NV12/P010和退休。P01H/HYFBC不能改标签当P010。之后接普通VT/CMPhoto/ImageIO进程路由及HEIF grid/方向/ICC/alpha全链；单sets/4K gate也仍需按真实capability扩展。此轮无新boot.img，唯一最终功能镜像仍须等**完整代码齐全**，不出探针、不称HEVC/HEIF已可用。
 
+#### 2026-11-15 Native SHM cache续接（当前里程碑）
+
+- **活动树不变**：`.worktrees/hevc-hw` / `feat/hevc-hw`，接`e71e552`；没有修改main或共享`.local`布局。
+- **新观察**：原厂`vcp_helper.c:vcp_alloc_iova`明确取`mtk_mm-uncached`，`mtk_system_heap.c:system_heap_do_vmap`对uncached使用`pgprot_writecombine(PAGE_KERNEL)`，不是前面secure dump的`ioremap_wc`分支。恢复的原件`vcp_v2.ko`有`mtk_mm-uncached` / `vcp_uncache`，实际`vcp_reserve_memory_ioremap`内有heap分配→`dma_buf_vmap_unlocked`→attach/map调用；定向原件反汇编保存`x9/out/hevc-vendor-source-20261115/vcp-normal-shm.asm`。这不证明当前loaded pairing、冷启动或DMA authority。
+- **实质改动**：global SHM完整slice在CPU_PRIVATE、arena未install时，通过XNU的`pmap_set_cache_attributes`转`VM_WIMG_WCOMB`（Normal NC，MAIR0x44），预核对每16K页PA和DEFAULT属性，保存恢复义务再变更；使用受管pmap API同时更新physical aperture/PV mappings，不建WB/NC别名、不改live页/PTE。每次SHM观察检查NC属性/当前CPU MAIR，改用NC loads+外域barrier，不再clean firmware更新的VSI cacheline；仍不承诺multiword snapshot原子性或退役。DEVICE仍不能free；私有失败/真实whole-domain退休后free先验证DEFAULT/WCOMB，再恢复DEFAULT，异常保留handle。普通BS/FB/页表仍原有WB/cache协议。
+- **确切编译**：首轮`hevc-shared-nc-20261115`因export headers缺两条kernel-private pmap声明失败（6 errors），补与XNU原型一致的extern后，最终`x9/out/hevc-shared-nc-final-20261115/compile-native.py`只编修改的`sweet_x9_vdec.o`，exit0、32 warnings；原日志/exit/result保存在该目录。没有测试套件、成功产物二次hash/反汇编、full kernel link、CI run或boot，也没有设备操作。
+- **下一步仍是代码而不是探针**：用这个真实NC storage owner补AP-owned VSI精确字段写入与native ring消费；main/non-ACP BS地址不能假设相等，原厂non-ACP缺席分支为0也不证明main路径已授权。持续session backend、cold NS/bootstrap、WAITISR/c006、DPB与线性输出、普通VT/CMPhoto/HEIF全链仍未完成，目标active。
+
 ### 5.1 已在设备上观察到能用（详情见旧 NOTES）
 
 - 启动到 SpringBoard，UFS 原生根盘读写，UFS HS-G5/FAST/RateB/2 lane（180）。
