@@ -14,8 +14,12 @@ enum x9_heif_source_color_policy {
  * containing every item's ordered raw metadata plus working ICC and policy.
  * Container colr on derived images can supply missing tile colr; conflicting
  * inherited/explicit colr or reused-item contexts fail rather than relabeling
- * already-converted pixels. Missing/unspecified source color fields currently
- * fail: a proven SPS VUI resolver is still needed before bitstream fallback.
+ * already-converted pixels. Missing/container CICP2 fields use that sample's
+ * actual PPS->SPS VUI; still-unspecified fields fail, never CM defaults.
+ * Container range overrides SPS range only when the actual decoded pixel
+ * format agrees; a conflict fails rather than relabeling decoder storage.
+ * Progressive chroma siting is explicitly attached to the transfer view;
+ * field sequences/different top-bottom locations reject during preflight.
  * Unsupported CICP values never become guessed BT709/sRGB defaults.
  * Aux/alpha, fractional crop, Rext and ordinary ImageIO/CMPhoto routing are
  * still unsupported: any aux rejects before the first hardware decode. This

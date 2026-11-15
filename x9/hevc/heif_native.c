@@ -44,46 +44,30 @@ static int rgb_profile(CFDataRef data)
     if (space) CGColorSpaceRelease(space);
     return valid;
 }
-/* Don't conflate unspecified CICP2 (bitstream fallback) with an arbitrary
- * unknown code point that the native SDK mapper cannot represent. */
-static int check_nclx(const struct x9_heif_document *d, const struct x9_heif_image *image, int require_rgb)
-{
-    for (unsigned n = 0; n < image->property_count; n++) {
-        const struct x9_heif_property *p = &image->properties[n];
-        if (p->type != X9_HEIF_TYPE('c','o','l','r')) continue;
-        const uint8_t *raw = NULL;
-        int e = x9_heif_span_data(d,p->payload,&raw);
-        if (e) return e;
-        if (p->payload.bytes < 4) return EBADMSG;
-        if (raw[0]!='n' || raw[1]!='c' || raw[2]!='l' || raw[3]!='x') continue;
-        if (p->payload.bytes != 11) return EBADMSG;
-        int codes[] = { (int)raw[4]*256+raw[5],(int)raw[6]*256+raw[7],(int)raw[8]*256+raw[9] };
-        CFStringRef strings[] = { CVColorPrimariesGetStringForIntegerCodePoint(codes[0]),
-            CVTransferFunctionGetStringForIntegerCodePoint(codes[1]),CVYCbCrMatrixGetStringForIntegerCodePoint(codes[2]) };
-        for (unsigned k = 0; k < 3; k++)
-            if ((k == 2 || require_rgb) && codes[k] != 2 && !strings[k] &&
-                !(k == 1 && (codes[k] == 4 || codes[k] == 5))) return ENOTSUP;
-    }
-    return 0;
-}
-static int source_color(CFDictionaryRef colr,
+static int source_color(CFDictionaryRef container, const struct x9_hevc_vui *vui,
     enum x9_heif_source_color_policy policy, CFDictionaryRef *out)
 {
+    *out = NULL;
+    /* Progressive raster transfer only; never treat two fields as one
+     * progressive image, or synthesize a field reconstruction. */
+    if (vui->field_seq || vui->chroma_top != vui->chroma_bottom) return ENOTSUP;
+    CFDictionaryRef colr = NULL;
+    int e = x9_heif_resolve_color_extensions(container,vui,&colr);
+    if (e) return e;
     CFMutableDictionaryRef d = CFDictionaryCreateMutable(NULL,0,
         &kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
-    if (!d) return ENOMEM;
+    if (!d) { CFRelease(colr); return ENOMEM; }
     CFStringRef keys[] = { kCMFormatDescriptionExtension_ICCProfile,kCMFormatDescriptionExtension_ColorPrimaries,
         kCMFormatDescriptionExtension_TransferFunction,kCMFormatDescriptionExtension_YCbCrMatrix,
-        kCMFormatDescriptionExtension_GammaLevel,kCMFormatDescriptionExtension_FullRangeVideo };
-    int e = 0;
-    for (unsigned n = 0; n < 6 && !e; n++) {
+        kCMFormatDescriptionExtension_GammaLevel,kCMFormatDescriptionExtension_FullRangeVideo,
+        kCMFormatDescriptionExtension_ChromaLocationTopField,kCMFormatDescriptionExtension_ChromaLocationBottomField };
+    for (unsigned n = 0; n < 8 && !e; n++) {
         CFTypeRef value = CFDictionaryGetValue(colr,keys[n]);
-        /* CM may synthesize defaults while rebuilding hvcC. Until the real
-         * SPS VUI fields are parsed, absent container color is NOT evidence
-         * for a bitstream fallback or an invented BT709 interpretation. */
+        /* Only the shared container/selected-SPS resolver is evidence.
+         * CM's possibly synthesized extensions are never read here. */
         if (!value) continue;
         CFTypeID type = n == 0 ? CFDataGetTypeID() : n < 4 ? CFStringGetTypeID() :
-            n == 4 ? CFNumberGetTypeID() : CFBooleanGetTypeID();
+            n == 4 ? CFNumberGetTypeID() : n == 5 ? CFBooleanGetTypeID() : CFStringGetTypeID();
         if (CFGetTypeID(value) != type) e = EBADMSG;
         else CFDictionarySetValue(d,keys[n],value);
     }
@@ -103,6 +87,7 @@ static int source_color(CFDictionaryRef colr,
         } else CFDictionaryRemoveValue(d,keys[4]);
     }
     if (!e && !CFDictionaryGetValue(d,keys[3])) e = ENOTSUP; /* no guessed YUV matrix */
+    CFRelease(colr);
     if (e) CFRelease(d); else *out = d;
     return e;
 }
@@ -138,8 +123,6 @@ static int prepare(struct native_context *c, uint32_t id, CFDictionaryRef inheri
         if (CFDictionaryGetCount(explicit_color) && !CFEqual(explicit_color,inherited)) e = ENOTSUP;
         else color = inherited;
     }
-    if (!e) e = check_nclx(c->document,image,c->policy != X9_HEIF_USE_ICC_IF_PRESENT ||
-        !CFDictionaryGetValue(color,kCMFormatDescriptionExtension_ICCProfile));
     struct native_item *node = NULL;
     if (!e) {
         node = &c->nodes[c->count++];
@@ -147,25 +130,36 @@ static int prepare(struct native_context *c, uint32_t id, CFDictionaryRef inheri
         node->declared = CFRetain(explicit_color);
         e = x9_heif_copy_item_info(c->document,image,&info,NULL);
     }
+    CFDictionaryRef bitstream_info = NULL;
+    if (!e && image->type == X9_HEIF_HVC1) {
+        CMSampleBufferRef sample = NULL; CFDictionaryRef temporary_info = NULL;
+        struct x9_hevc_vui vui;
+        c->failure = x9_heif_copy_item_sample(c->file,id,&sample,&temporary_info,&vui);
+        if (!c->failure && (!sample || !temporary_info)) c->failure = kVTVideoDecoderBadDataErr;
+        if (c->failure) e = EIO;
+        else {
+            e = source_color(color,&vui,c->policy,&node->source);
+            if (!e) e = x9_heif_copy_vui_info(&vui,&bitstream_info);
+        }
+        if (sample) CFRelease(sample);
+        if (temporary_info) CFRelease(temporary_info);
+    }
     if (!e) {
         CFMutableDictionaryRef record = CFDictionaryCreateMutableCopy(NULL,0,info);
         if (!record) e = ENOMEM;
         else {
             e = put_number(record,CFSTR("TransformedWidth"),geometry.width);
             if (!e) e = put_number(record,CFSTR("TransformedHeight"),geometry.height);
-            if (!e) { CFDictionarySetValue(record,CFSTR("EffectiveColr"),color); CFArrayAppendValue(c->items,record); }
+            if (!e) {
+                CFDictionarySetValue(record,CFSTR("EffectiveColr"),color);
+                if (node->source) CFDictionarySetValue(record,CFSTR("ResolvedSourceColor"),node->source);
+                if (bitstream_info) CFDictionarySetValue(record,CFSTR("BitstreamVUI"),bitstream_info);
+                CFArrayAppendValue(c->items,record);
+            }
             CFRelease(record);
         }
     }
-    if (!e && image->type == X9_HEIF_HVC1) {
-        CMSampleBufferRef sample = NULL; CFDictionaryRef temporary_info = NULL;
-        c->failure = X9HEIFCopyItemSample(c->file,id,&sample,&temporary_info);
-        if (!c->failure && (!sample || !temporary_info)) c->failure = kVTVideoDecoderBadDataErr;
-        if (c->failure) e = EIO;
-        else e = source_color(color,c->policy,&node->source);
-        if (sample) CFRelease(sample);
-        if (temporary_info) CFRelease(temporary_info);
-    }
+    if (bitstream_info) CFRelease(bitstream_info);
     for (unsigned n = 0; n < image->derived_count && !e; n++) e = prepare(c,image->derived[n],color);
     if (explicit_color) CFRelease(explicit_color);
     if (info) CFRelease(info);
@@ -175,10 +169,12 @@ static void attach_source(CVPixelBufferRef view, CFDictionaryRef color)
 {
     CFStringRef cm[] = { kCMFormatDescriptionExtension_ICCProfile,kCMFormatDescriptionExtension_ColorPrimaries,
         kCMFormatDescriptionExtension_TransferFunction,kCMFormatDescriptionExtension_YCbCrMatrix,
-        kCMFormatDescriptionExtension_GammaLevel };
+        kCMFormatDescriptionExtension_GammaLevel,kCMFormatDescriptionExtension_ChromaLocationTopField,
+        kCMFormatDescriptionExtension_ChromaLocationBottomField };
     CFStringRef cv[] = { kCVImageBufferICCProfileKey,kCVImageBufferColorPrimariesKey,
-        kCVImageBufferTransferFunctionKey,kCVImageBufferYCbCrMatrixKey,kCVImageBufferGammaLevelKey };
-    for (unsigned n = 0; n < 5; n++) {
+        kCVImageBufferTransferFunctionKey,kCVImageBufferYCbCrMatrixKey,kCVImageBufferGammaLevelKey,
+        kCVImageBufferChromaLocationTopFieldKey,kCVImageBufferChromaLocationBottomFieldKey };
+    for (unsigned n = 0; n < 7; n++) {
         CFTypeRef value = CFDictionaryGetValue(color,cm[n]);
         CVBufferRemoveAttachment(view,cv[n]);
         if (value) CVBufferSetAttachment(view,cv[n],value,kCVAttachmentMode_ShouldPropagate);

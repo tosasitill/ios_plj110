@@ -41,11 +41,12 @@ static int format_catalog(CMVideoFormatDescriptionRef format, const uint8_t *hvc
     }
     return 0;
 }
-OSStatus X9HEIFCopyItemSample(CFDataRef file, uint32_t id,
-    CMSampleBufferRef *out, CFDictionaryRef *info_out)
+OSStatus x9_heif_copy_item_sample(CFDataRef file, uint32_t id,
+    CMSampleBufferRef *out, CFDictionaryRef *info_out, struct x9_hevc_vui *vui_out)
 {
     if (!out || !info_out || (void *)out == (void *)info_out) return kVTParameterErr;
     *out = NULL; *info_out = NULL;
+    if (vui_out) memset(vui_out,0,sizeof(*vui_out));
     if (!file || CFGetTypeID(file) != CFDataGetTypeID() || CFDataGetLength(file) <= 0) return kVTParameterErr;
     const uint8_t *data = CFDataGetBytePtr(file);
     struct x9_heif_document *document = NULL;
@@ -58,6 +59,7 @@ OSStatus X9HEIFCopyItemSample(CFDataRef file, uint32_t id,
     CMSampleBufferRef sample = NULL;
     uint8_t *au = NULL;
     struct x9_hevc_config config;
+    struct x9_hevc_vui vui;
     size_t bytes = 0, needed = 0;
     int e = !image || !extensions ? ENOMEM : x9_heif_open(data,(size_t)CFDataGetLength(file),&document);
     if (!e && !id) e = x9_heif_primary(document,&id);
@@ -74,7 +76,27 @@ OSStatus X9HEIFCopyItemSample(CFDataRef file, uint32_t id,
     if (!e) { au = malloc(bytes); if (!au) e = ENOMEM; }
     if (!e) e = x9_heif_read_item(document,id,au,bytes,&bytes);
     if (!e) e = x9_hevc_idr_annexb(&config,data+image->hvcc.offset,au,bytes,NULL,0,&needed);
+    if (!e) e = x9_hevc_sample_vui(&config,data+image->hvcc.offset,(size_t)image->hvcc.bytes,au,bytes,&vui);
     if (!e) e = x9_heif_copy_item_info(document,image,&info,extensions);
+    CFDictionaryRef resolved = NULL, vui_info = NULL;
+    if (!e) e = x9_heif_resolve_color_extensions(extensions,&vui,&resolved);
+    if (!e) e = x9_heif_copy_vui_info(&vui,&vui_info);
+    if (!e) {
+        CFMutableDictionaryRef record = CFDictionaryCreateMutableCopy(NULL,0,info);
+        CFMutableDictionaryRef new_extensions = CFDictionaryCreateMutableCopy(NULL,0,resolved);
+        if (!record || !new_extensions) {
+            if (record) CFRelease(record);
+            if (new_extensions) CFRelease(new_extensions);
+            e = ENOMEM;
+        } else {
+            CFDictionarySetValue(record,CFSTR("BitstreamVUI"),vui_info);
+            CFDictionarySetValue(record,CFSTR("ResolvedColr"),resolved);
+            CFRelease(info); info = record;
+            CFRelease(extensions); extensions = new_extensions;
+        }
+    }
+    if (resolved) CFRelease(resolved);
+    if (vui_info) CFRelease(vui_info);
     OSStatus result = parse_error(e);
     if (e) goto done;
     const uint8_t *ps[X9_HEVC_MAX_PARAMETER_SETS];
@@ -98,7 +120,10 @@ OSStatus X9HEIFCopyItemSample(CFDataRef file, uint32_t id,
     CMSampleTimingInfo timing = { .duration = kCMTimeInvalid, .presentationTimeStamp = kCMTimeZero,
         .decodeTimeStamp = kCMTimeInvalid };
     result = CMSampleBufferCreateReady(NULL,block,format,1,1,&timing,1,&bytes,&sample);
-    if (!result) { *out = sample; sample = NULL; *info_out = info; info = NULL; }
+    if (!result) {
+        *out = sample; sample = NULL; *info_out = info; info = NULL;
+        if (vui_out) *vui_out = vui;
+    }
 done:
     if (sample) CFRelease(sample);
     if (block) CFRelease(block);
@@ -108,3 +133,6 @@ done:
     x9_heif_close(&document); free(au); free(image);
     return result;
 }
+OSStatus X9HEIFCopyItemSample(CFDataRef file, uint32_t id,
+    CMSampleBufferRef *out, CFDictionaryRef *info_out)
+{ return x9_heif_copy_item_sample(file,id,out,info_out,NULL); }

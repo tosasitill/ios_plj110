@@ -39,9 +39,182 @@ static uint32_t ue(struct bits *b)
 {
     unsigned n = 0;
     while (!b->error && !bit(b)) {
-        if (++n > 30) { b->error = 1; return 0; }
+        /* All supported UE syntax is <= UINT32_MAX-1. 31 leading zeroes
+         * cover that complete domain without ever shifting by 32. */
+        if (++n > 31) { b->error = 1; return 0; }
     }
     return b->error ? 0 : ((1u << n) - 1) + get(b, n);
+}
+static uint32_t bounded_ue(struct bits *b, uint32_t maximum)
+{
+    uint32_t v = ue(b);
+    if (v > maximum) b->error = 1;
+    return b->error ? 0 : v;
+}
+static void bounded_se(struct bits *b, int minimum, int maximum)
+{
+    uint32_t code = ue(b);
+    int64_t value = code & 1u ? ((int64_t)code + 1) / 2 : -(int64_t)(code / 2);
+    if (value < minimum || value > maximum) b->error = 1;
+}
+static void scaling_lists(struct bits *b)
+{
+    for (unsigned size = 0; size < 4 && !b->error; size++)
+        for (unsigned matrix = 0; matrix < 6 && !b->error; matrix += size == 3 ? 3 : 1) {
+            if (!bit(b)) (void)bounded_ue(b,size == 3 ? matrix / 3 : matrix);
+            else {
+                if (size > 1) bounded_se(b,-7,247);
+                unsigned count = size ? 64 : 16;
+                for (unsigned i = 0; i < count && !b->error; i++) bounded_se(b,-128,127);
+            }
+        }
+}
+/* Only the preceding SPS RPS can be referenced by SPS prediction. Keep two
+ * small ordered sets, not 64 large tables on the shared kernel stack. */
+struct short_rps { int32_t negative[15], positive[15]; unsigned negatives, positives; };
+static void rps_insert(struct bits *b, struct short_rps *r, int64_t value)
+{
+    if (!value || b->error) return; /* shifted zero is not a derived ref pic */
+    if (value < INT32_MIN || value > INT32_MAX || r->negatives + r->positives == 15) {
+        b->error = 1; return;
+    }
+    int32_t *list = value < 0 ? r->negative : r->positive;
+    unsigned *count = value < 0 ? &r->negatives : &r->positives, i = *count;
+    /* Negative POCs nearest zero first; positive POCs increasing. */
+    while (i && (value < 0 ? list[i-1] < value : list[i-1] > value)) {
+        list[i] = list[i-1]; i--;
+    }
+    if ((i && list[i-1] == value) || (i < *count && list[i] == value)) {
+        b->error = 1; return;
+    }
+    list[i] = (int32_t)value; (*count)++;
+}
+static void short_term_sets(struct bits *b, unsigned count)
+{
+    struct short_rps previous = {0};
+    for (unsigned index = 0; index < count && !b->error; index++) {
+        struct short_rps next = {0};
+        if (index && bit(b)) {
+            unsigned sign = bit(b), refs = previous.negatives + previous.positives;
+            uint32_t absolute = bounded_ue(b,INT16_MAX);
+            int64_t shift = sign ? -(int64_t)(absolute + 1u) : (int64_t)(absolute + 1u);
+            unsigned selected = 0;
+            for (unsigned j = 0; j <= refs && !b->error; j++) {
+                unsigned used = bit(b), use_delta = used ? 1 : bit(b);
+                if (!use_delta) continue;
+                /* Count includes a selected shift-to-zero entry (syntax
+                 * limit); derived NumDeltaPocs excludes that zero entry. */
+                if (++selected > 15) { b->error = 1; break; }
+                int64_t delta = j < previous.negatives ? previous.negative[j] :
+                    j < refs ? previous.positive[j-previous.negatives] : 0;
+                rps_insert(b,&next,delta + shift);
+            }
+        } else {
+            unsigned negatives = bounded_ue(b,15);
+            unsigned positives = bounded_ue(b,15-negatives);
+            int64_t delta = 0;
+            for (unsigned j = 0; j < negatives && !b->error; j++) {
+                delta -= (int64_t)bounded_ue(b,INT16_MAX) + 1;
+                (void)bit(b); rps_insert(b,&next,delta);
+            }
+            delta = 0;
+            for (unsigned j = 0; j < positives && !b->error; j++) {
+                delta += (int64_t)bounded_ue(b,INT16_MAX) + 1;
+                (void)bit(b); rps_insert(b,&next,delta);
+            }
+        }
+        previous = next;
+    }
+}
+static void hrd_parameters(struct bits *b, unsigned sub)
+{
+    unsigned nal_hrd = bit(b), vcl_hrd = bit(b), sub_pic = 0;
+    if (nal_hrd || vcl_hrd) {
+        sub_pic = bit(b);
+        if (sub_pic) skip(b,8+5+1+5);
+        skip(b,4+4);
+        if (sub_pic) skip(b,4);
+        skip(b,5+5+5);
+    }
+    for (unsigned i = 0; i <= sub && !b->error; i++) {
+        unsigned general = bit(b), within = general ? 1 : bit(b), low = 0, cpb = 0;
+        if (within) (void)bounded_ue(b,2047);
+        else low = bit(b);
+        if (!low) cpb = bounded_ue(b,31);
+        for (unsigned kind = 0; kind < 2 && !b->error; kind++) {
+            if (!(kind ? vcl_hrd : nal_hrd)) continue;
+            for (unsigned j = 0; j <= cpb && !b->error; j++) {
+                (void)ue(b); (void)ue(b); /* rate/size <= UINT32_MAX-1 */
+                if (sub_pic) { (void)ue(b); (void)ue(b); }
+                (void)bit(b);
+            }
+        }
+    }
+}
+static void vui_defaults(struct x9_hevc_vui *v)
+{
+    memset(v,0,sizeof(*v));
+    v->video_format = 5;
+    v->colour_primaries = v->transfer = v->matrix = 2;
+    v->motion_over_boundaries = 1;
+    v->max_bytes_per_pic_denom = 2; v->max_bits_per_min_cu_denom = 1;
+    v->log2_max_mv_horizontal = v->log2_max_mv_vertical = 15;
+}
+static void vui_parameters(struct bits *b, unsigned sub, struct x9_hevc_vui *v)
+{
+    static const uint16_t sar[][2] = { {0,0},{1,1},{12,11},{10,11},{16,11},
+        {40,33},{24,11},{20,11},{32,11},{80,33},{18,11},{15,11},{64,33},
+        {160,99},{4,3},{3,2},{2,1} };
+    v->aspect_ratio_present = (uint8_t)bit(b);
+    if (v->aspect_ratio_present) {
+        v->aspect_ratio_idc = (uint8_t)get(b,8);
+        if (v->aspect_ratio_idc == 255) {
+            v->sar_width = get(b,16); v->sar_height = get(b,16);
+        } else if (v->aspect_ratio_idc < sizeof(sar)/sizeof(sar[0])) {
+            v->sar_width = sar[v->aspect_ratio_idc][0];
+            v->sar_height = sar[v->aspect_ratio_idc][1];
+        } /* unspecified/reserved idc stays raw, no invented ratio */
+    }
+    v->overscan_present = (uint8_t)bit(b);
+    if (v->overscan_present) v->overscan_appropriate = (uint8_t)bit(b);
+    v->video_signal_present = (uint8_t)bit(b);
+    if (v->video_signal_present) {
+        v->video_format = (uint8_t)get(b,3); v->full_range = (uint8_t)bit(b);
+        v->colour_description_present = (uint8_t)bit(b);
+        if (v->colour_description_present) {
+            v->colour_primaries = (uint8_t)get(b,8); v->transfer = (uint8_t)get(b,8); v->matrix = (uint8_t)get(b,8);
+        }
+    }
+    v->chroma_location_present = (uint8_t)bit(b);
+    if (v->chroma_location_present) {
+        v->chroma_top = (uint8_t)bounded_ue(b,5); v->chroma_bottom = (uint8_t)bounded_ue(b,5);
+    }
+    v->neutral_chroma = (uint8_t)bit(b); v->field_seq = (uint8_t)bit(b); v->frame_field_info_present = (uint8_t)bit(b);
+    v->display_window_present = (uint8_t)bit(b);
+    if (v->display_window_present)
+        for (unsigned i = 0; i < 4; i++) v->display_window[i] = bounded_ue(b,16384);
+    v->timing_present = (uint8_t)bit(b);
+    if (v->timing_present) {
+        v->num_units_in_tick = get(b,32); v->time_scale = get(b,32);
+        if (!v->num_units_in_tick || !v->time_scale) b->error = 1;
+        v->poc_proportional = (uint8_t)bit(b);
+        if (v->poc_proportional) v->ticks_poc_diff_one_minus1 = ue(b);
+        v->hrd_present = (uint8_t)bit(b);
+        if (v->hrd_present) hrd_parameters(b,sub);
+    }
+    v->restriction_present = (uint8_t)bit(b);
+    if (v->restriction_present) {
+        v->tiles_fixed = (uint8_t)bit(b); v->motion_over_boundaries = (uint8_t)bit(b); v->restricted_ref_lists = (uint8_t)bit(b);
+        v->min_spatial_segmentation = bounded_ue(b,4095);
+        v->max_bytes_per_pic_denom = bounded_ue(b,16); v->max_bits_per_min_cu_denom = bounded_ue(b,16);
+        v->log2_max_mv_horizontal = bounded_ue(b,16); v->log2_max_mv_vertical = bounded_ue(b,16);
+    }
+}
+static int trailing_bits(struct bits *b)
+{
+    if (!bit(b)) return EINVAL;
+    while (b->left && !b->error) if (bit(b)) return EINVAL;
+    return b->error || b->pos != b->n ? EINVAL : 0;
 }
 static unsigned be16(const uint8_t *p) { return ((unsigned)p[0] << 8) | p[1]; }
 static uint32_t be32(const uint8_t *p)
@@ -61,13 +234,15 @@ struct sps_info {
     uint32_t decoder_profile, profile_compatibility;
     uint32_t max_sub_layers, max_dpb, max_reorder;
 };
-static int sps(const uint8_t *p, size_t n, struct sps_info *c)
+static int sps(const uint8_t *p, size_t n, struct sps_info *c, struct x9_hevc_vui *out)
 {
+    if (nal(p,n,33) || (p[1] & 7) != 1) return EINVAL;
     struct bits b = { .p = p + 2, .n = n - 2 };
     c->vps_id = get(&b, 4);
     unsigned sub = get(&b, 3);
     if (sub > 6) return EINVAL;
-    (void)get(&b, 1);
+    unsigned nesting = bit(&b);
+    if (!sub && !nesting) return EINVAL;
     unsigned space = get(&b, 2); (void)get(&b, 1);
     c->profile = get(&b, 5);
     c->profile_compatibility = get(&b, 32);
@@ -118,7 +293,46 @@ static int sps(const uint8_t *p, size_t n, struct sps_info *c)
         if (dpb + 1 > c->max_dpb) c->max_dpb = dpb + 1;
         if (reorder > c->max_reorder) c->max_reorder = reorder;
     }
-    return 0;
+    unsigned min_cb = bounded_ue(&b,3) + 3;
+    unsigned ctb = min_cb + bounded_ue(&b,3);
+    if (b.error || ctb > 6 || ctb < 4 || c->coded_width % (1u << min_cb) ||
+        c->coded_height % (1u << min_cb)) return EINVAL;
+    unsigned min_tb = bounded_ue(&b,min_cb-3) + 2;
+    unsigned max_tb = ctb < 5 ? ctb : 5;
+    if (b.error || min_tb > max_tb) return EINVAL;
+    (void)bounded_ue(&b,max_tb-min_tb);
+    (void)bounded_ue(&b,ctb-min_tb); (void)bounded_ue(&b,ctb-min_tb);
+    if (bit(&b) && bit(&b)) scaling_lists(&b);
+    (void)bit(&b); (void)bit(&b); /* AMP, SAO */
+    if (bit(&b)) {
+        unsigned ypcm = get(&b,4) + 1, cpcm = get(&b,4) + 1;
+        unsigned pcm = bounded_ue(&b,max_tb-3) + 3;
+        if (b.error || ypcm > c->bit_depth || cpcm > c->bit_depth ||
+            pcm < (min_cb < 5 ? min_cb : 5)) return EINVAL;
+        (void)bounded_ue(&b,max_tb-pcm); (void)bit(&b);
+    }
+    unsigned rps_count = bounded_ue(&b,64);
+    if (b.error) return EINVAL;
+    short_term_sets(&b,rps_count);
+    if (bit(&b)) {
+        unsigned count = bounded_ue(&b,32);
+        for (unsigned i = 0; i < count && !b.error; i++) skip(&b,poc+4+1);
+    }
+    (void)bit(&b); (void)bit(&b); /* temporal MVP, strong intra smoothing */
+    struct x9_hevc_vui v;
+    vui_defaults(&v); v.present = (uint8_t)bit(&b);
+    if (v.present) vui_parameters(&b,sub,&v);
+    if (b.error) return EINVAL;
+    if (bit(&b)) {
+        unsigned extensions = get(&b,8);
+        if (b.error) return EINVAL;
+        /* No multilayer/3D/SCC/Rext/unknown extension decoder support. Do
+         * not skip guessed extension lengths and claim a valid Main SPS. */
+        if (extensions) return ENOTSUP;
+    }
+    int e = trailing_bits(&b);
+    if (!e && out) { v.sps_id = c->sps_id; v.vps_id = c->vps_id; *out = v; }
+    return e;
 }
 static void apply_sps(struct x9_hevc_config *c, const struct sps_info *s)
 {
@@ -166,7 +380,7 @@ int x9_hevc_config_parse(const uint8_t *p, size_t n, struct x9_hevc_config *c)
             if (type == 32) id = get(&b, 4);
             else if (type == 33) {
                 struct sps_info one = {0};
-                int e = sps(p + at, bytes, &one);
+                int e = sps(p + at, bytes, &one,NULL);
                 if (e) return e;
                 id = one.sps_id; reference = one.vps_id;
             } else {
@@ -217,7 +431,7 @@ int x9_hevc_config_parse(const uint8_t *p, size_t n, struct x9_hevc_config *c)
     const struct x9_hevc_parameter_set *selected_vps = find_set(c, 32, selected_sps->reference_id);
     if (!selected_vps) return EINVAL;
     struct sps_info representative = {0};
-    int e = sps(p + selected_sps->offset, selected_sps->bytes, &representative);
+    int e = sps(p + selected_sps->offset, selected_sps->bytes, &representative,NULL);
     if (e) return e;
     apply_sps(c, &representative);
     if ((p[1] >> 6) || (p[1] & 31) != c->profile || p[12] != c->level ||
@@ -227,7 +441,7 @@ int x9_hevc_config_parse(const uint8_t *p, size_t n, struct x9_hevc_config *c)
         const struct x9_hevc_parameter_set *set = &c->parameter_sets[i];
         if (set->type == 33) {
             struct sps_info one = {0};
-            e = sps(p + set->offset, set->bytes, &one);
+            e = sps(p + set->offset, set->bytes, &one,NULL);
             if (e) return e;
             if (one.coded_width != c->coded_width || one.coded_height != c->coded_height ||
                 one.width != c->width || one.height != c->height ||
@@ -403,4 +617,40 @@ int x9_hevc_au_annexb(const struct x9_hevc_config *c, const uint8_t *hvcc,
         memcpy(dst + size, p + at, bytes); size += bytes; at += bytes;
     }
     return 0;
+}
+int x9_hevc_sample_vui(const struct x9_hevc_config *c, const uint8_t *hvcc,
+    size_t hvcc_bytes, const uint8_t *sample, size_t sample_bytes, struct x9_hevc_vui *out)
+{
+    if (!out) return EINVAL;
+    memset(out,0,sizeof(*out));
+    if (!c || hvcc_bytes != c->config_bytes) return EINVAL;
+    size_t needed = 0;
+    int e = x9_hevc_au_annexb(c,hvcc,sample,sample_bytes,NULL,0,&needed);
+    if (e) return e;
+    /* The full AU gate above already proved lengths, one picture and a
+     * single retained PPS for every slice. No partial header-only success. */
+    size_t at = 0;
+    while (at < sample_bytes) {
+        uint32_t bytes = 0;
+        for (unsigned j = 0; j < c->length_size; j++) bytes = (bytes << 8) | sample[at++];
+        unsigned type = (sample[at] >> 1) & 63;
+        if (type < 32) {
+            struct bits b = { .p = sample + at + 2, .n = bytes - 2 };
+            (void)bit(&b);
+            if (type >= 16) (void)bit(&b);
+            unsigned id = ue(&b);
+            const struct x9_hevc_parameter_set *pps = find_set(c,34,id);
+            const struct x9_hevc_parameter_set *selected = pps ? find_set(c,33,pps->reference_id) : NULL;
+            if (b.error || !selected) return EINVAL;
+            struct sps_info info = {0};
+            struct x9_hevc_vui v;
+            e = sps(hvcc+selected->offset,selected->bytes,&info,&v);
+            if (e) return e;
+            if (info.sps_id != selected->id || info.vps_id != selected->reference_id) return EINVAL;
+            v.pps_id = id; *out = v;
+            return 0;
+        }
+        at += bytes;
+    }
+    return EINVAL;
 }

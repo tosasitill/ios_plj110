@@ -10,6 +10,32 @@ static int put_number(CFMutableDictionaryRef d, CFStringRef key, uint32_t n)
     CFDictionarySetValue(d,key,v); CFRelease(v); return 0;
 }
 static uint32_t code16(const uint8_t *p) { return (uint32_t)p[0] << 8 | p[1]; }
+static int put_cicp(CFMutableDictionaryRef d, const uint32_t codes[3])
+{
+    CFStringRef raw_keys[] = { CFSTR("X9ColorPrimariesCodePoint"),CFSTR("X9TransferCodePoint"),CFSTR("X9MatrixCodePoint") };
+    CFStringRef keys[] = { kCMFormatDescriptionExtension_ColorPrimaries,
+        kCMFormatDescriptionExtension_TransferFunction,kCMFormatDescriptionExtension_YCbCrMatrix };
+    CFStringRef values[] = { codes[0] == 2 ? NULL : CVColorPrimariesGetStringForIntegerCodePoint((int)codes[0]),
+        codes[1] == 2 ? NULL : CVTransferFunctionGetStringForIntegerCodePoint((int)codes[1]),
+        codes[2] == 2 ? NULL : CVYCbCrMatrixGetStringForIntegerCodePoint((int)codes[2]) };
+    int e = 0;
+    for (unsigned n = 0; n < 3 && !e; n++) {
+        e = put_number(d,raw_keys[n],codes[n]);
+        CFDictionaryRemoveValue(d,keys[n]);
+        if (values[n]) CFDictionarySetValue(d,keys[n],values[n]);
+    }
+    CFDictionaryRemoveValue(d,kCMFormatDescriptionExtension_GammaLevel);
+    if (!e && (codes[1] == 4 || codes[1] == 5)) {
+        /* CICP4/5 need the actual gamma, not just UseGamma. */
+        double gamma = codes[1] == 4 ? 2.2 : 2.8;
+        CFNumberRef level = CFNumberCreate(NULL,kCFNumberDoubleType,&gamma);
+        if (!level) return ENOMEM;
+        CFDictionarySetValue(d,keys[1],kCVImageBufferTransferFunction_UseGamma);
+        CFDictionarySetValue(d,kCMFormatDescriptionExtension_GammaLevel,level);
+        CFRelease(level);
+    }
+    return e;
+}
 /* Keep all raw colr properties in ordered item info. Standard CICP strings
  * use the SDK's exact code-point mapping, not a guessed BT.709 default. ICC
  * and nclx can coexist; this bridge does not choose their ColorSync precedence.
@@ -34,23 +60,9 @@ static int color_extension(const struct x9_heif_document *document, const struct
     } else if (type == X9_HEIF_TYPE('n','c','l','x')) {
         if (p->payload.bytes != 11 || (raw[10] & 0x7fu)) return EBADMSG;
         if (*seen & 2u) return EEXIST;
-        CFStringRef keys[] = { kCMFormatDescriptionExtension_ColorPrimaries,
-            kCMFormatDescriptionExtension_TransferFunction, kCMFormatDescriptionExtension_YCbCrMatrix };
-        CFStringRef values[] = { CVColorPrimariesGetStringForIntegerCodePoint((int)code16(raw+4)),
-            CVTransferFunctionGetStringForIntegerCodePoint((int)code16(raw+6)),
-            CVYCbCrMatrixGetStringForIntegerCodePoint((int)code16(raw+8)) };
-        uint32_t transfer = code16(raw+6);
-        if (transfer == 4 || transfer == 5) {
-            /* CICP4/5 specify gamma2.2/2.8. UseGamma alone is ambiguous. */
-            double gamma = transfer == 4 ? 2.2 : 2.8;
-            CFNumberRef level = CFNumberCreate(NULL,kCFNumberDoubleType,&gamma);
-            if (!level) return ENOMEM;
-            values[1] = kCVImageBufferTransferFunction_UseGamma;
-            CFDictionarySetValue(extensions,kCMFormatDescriptionExtension_GammaLevel,level);
-            CFRelease(level);
-        }
-        for (unsigned n = 0; n < 3; n++)
-            if (values[n]) CFDictionarySetValue(extensions,keys[n],values[n]);
+        const uint32_t codes[] = { code16(raw+4),code16(raw+6),code16(raw+8) };
+        e = put_cicp(extensions,codes);
+        if (e) return e;
         CFDictionarySetValue(extensions,kCMFormatDescriptionExtension_FullRangeVideo,
             raw[10] & 0x80 ? kCFBooleanTrue : kCFBooleanFalse);
         *seen |= 2u;
@@ -132,6 +144,73 @@ int x9_heif_copy_color_extensions(const struct x9_heif_document *document,
     int e = 0;
     for (unsigned n = 0; n < image->property_count && !e; n++)
         e = color_extension(document,&image->properties[n],d,&seen);
+    if (e) CFRelease(d); else *out = d;
+    return e;
+}
+int x9_heif_resolve_color_extensions(CFDictionaryRef container,
+    const struct x9_hevc_vui *v, CFDictionaryRef *out)
+{
+    if (!out) return EINVAL;
+    *out = NULL;
+    if (!container || CFGetTypeID(container) != CFDictionaryGetTypeID() || !v ||
+        v->full_range > 1 || v->chroma_top > 5 || v->chroma_bottom > 5) return EINVAL;
+    CFMutableDictionaryRef d = CFDictionaryCreateMutableCopy(NULL,0,container);
+    if (!d) return ENOMEM;
+    uint32_t codes[] = { v->colour_primaries,v->transfer,v->matrix };
+    CFStringRef raw_keys[] = { CFSTR("X9ColorPrimariesCodePoint"),CFSTR("X9TransferCodePoint"),CFSTR("X9MatrixCodePoint") };
+    int e = 0;
+    for (unsigned n = 0; n < 3 && !e; n++) {
+        CFTypeRef value = CFDictionaryGetValue(container,raw_keys[n]);
+        if (!value) continue;
+        int64_t code = 0;
+        if (CFGetTypeID(value) != CFNumberGetTypeID() || CFNumberIsFloatType(value) ||
+            !CFNumberGetValue(value,kCFNumberSInt64Type,&code) || code < 0 || code > UINT16_MAX) e = EBADMSG;
+        else if (code != 2) codes[n] = (uint32_t)code;
+    }
+    if (!e) e = put_cicp(d,codes);
+    CFTypeRef full = CFDictionaryGetValue(container,kCMFormatDescriptionExtension_FullRangeVideo);
+    if (!e && full && CFGetTypeID(full) != CFBooleanGetTypeID()) e = EBADMSG;
+    if (!e) {
+        if (!full) full = v->full_range ? kCFBooleanTrue : kCFBooleanFalse;
+        CFDictionarySetValue(d,kCMFormatDescriptionExtension_FullRangeVideo,full);
+        CFStringRef locations[] = { kCVImageBufferChromaLocation_Left,kCVImageBufferChromaLocation_Center,
+            kCVImageBufferChromaLocation_TopLeft,kCVImageBufferChromaLocation_Top,
+            kCVImageBufferChromaLocation_BottomLeft,kCVImageBufferChromaLocation_Bottom };
+        CFDictionarySetValue(d,kCMFormatDescriptionExtension_ChromaLocationTopField,locations[v->chroma_top]);
+        CFDictionarySetValue(d,kCMFormatDescriptionExtension_ChromaLocationBottomField,locations[v->chroma_bottom]);
+    }
+    if (e) CFRelease(d); else *out = d;
+    return e;
+}
+int x9_heif_copy_vui_info(const struct x9_hevc_vui *v, CFDictionaryRef *out)
+{
+    if (!v || !out) return EINVAL;
+    *out = NULL;
+    CFMutableDictionaryRef d = CFDictionaryCreateMutable(NULL,0,
+        &kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
+    if (!d) return ENOMEM;
+    int e = 0;
+#define FIELD(key, member) do { if (!e) e = put_number(d,CFSTR(key),v->member); } while (0)
+    FIELD("Present",present); FIELD("PPSID",pps_id); FIELD("SPSID",sps_id); FIELD("VPSID",vps_id);
+    FIELD("AspectRatioPresent",aspect_ratio_present); FIELD("AspectRatioIDC",aspect_ratio_idc);
+    FIELD("SARWidth",sar_width); FIELD("SARHeight",sar_height);
+    FIELD("OverscanPresent",overscan_present); FIELD("OverscanAppropriate",overscan_appropriate);
+    FIELD("VideoSignalPresent",video_signal_present); FIELD("VideoFormat",video_format);
+    FIELD("FullRange",full_range); FIELD("ColourDescriptionPresent",colour_description_present);
+    FIELD("ColorPrimariesCodePoint",colour_primaries); FIELD("TransferCodePoint",transfer); FIELD("MatrixCodePoint",matrix);
+    FIELD("ChromaLocationPresent",chroma_location_present); FIELD("ChromaTop",chroma_top); FIELD("ChromaBottom",chroma_bottom);
+    FIELD("NeutralChroma",neutral_chroma); FIELD("FieldSequence",field_seq); FIELD("FrameFieldInfoPresent",frame_field_info_present);
+    FIELD("DisplayWindowPresent",display_window_present);
+    FIELD("DisplayWindowLeft",display_window[0]); FIELD("DisplayWindowRight",display_window[1]);
+    FIELD("DisplayWindowTop",display_window[2]); FIELD("DisplayWindowBottom",display_window[3]);
+    FIELD("TimingPresent",timing_present); FIELD("NumUnitsInTick",num_units_in_tick); FIELD("TimeScale",time_scale);
+    FIELD("POCProportional",poc_proportional); FIELD("TicksPOCDiffOneMinus1",ticks_poc_diff_one_minus1); FIELD("HRDPresent",hrd_present);
+    FIELD("RestrictionPresent",restriction_present); FIELD("TilesFixed",tiles_fixed);
+    FIELD("MotionOverBoundaries",motion_over_boundaries); FIELD("RestrictedRefLists",restricted_ref_lists);
+    FIELD("MinSpatialSegmentation",min_spatial_segmentation); FIELD("MaxBytesPerPicDenom",max_bytes_per_pic_denom);
+    FIELD("MaxBitsPerMinCUDenom",max_bits_per_min_cu_denom);
+    FIELD("Log2MaxMVHorizontal",log2_max_mv_horizontal); FIELD("Log2MaxMVVertical",log2_max_mv_vertical);
+#undef FIELD
     if (e) CFRelease(d); else *out = d;
     return e;
 }

@@ -39,6 +39,24 @@ struct x9_hevc_config {
     uint32_t config_bytes, parameter_set_count;
     struct x9_hevc_parameter_set parameter_sets[X9_HEVC_MAX_PARAMETER_SETS];
 };
+/* One selected SPS, never a VUI table in the kernel's full catalog. Presence
+ * and inferred values are separate: absent colour description means CICP2,
+ * not BT709; absent signal/range and chroma location infer limited/type0.
+ * Display-window offsets are in chroma units, NOT another conformance crop. */
+struct x9_hevc_vui {
+    uint8_t present, aspect_ratio_present, aspect_ratio_idc, overscan_present;
+    uint8_t overscan_appropriate, video_signal_present, video_format, full_range;
+    uint8_t colour_description_present, colour_primaries, transfer, matrix;
+    uint8_t chroma_location_present, chroma_top, chroma_bottom, neutral_chroma;
+    uint8_t field_seq, frame_field_info_present, display_window_present, timing_present;
+    uint8_t poc_proportional, hrd_present, restriction_present, tiles_fixed;
+    uint8_t motion_over_boundaries, restricted_ref_lists, reserved[2];
+    uint32_t sar_width, sar_height, display_window[4];
+    uint32_t num_units_in_tick, time_scale, ticks_poc_diff_one_minus1;
+    uint32_t min_spatial_segmentation, max_bytes_per_pic_denom, max_bits_per_min_cu_denom;
+    uint32_t log2_max_mv_horizontal, log2_max_mv_vertical;
+    uint32_t pps_id, sps_id, vps_id;
+};
 /* Returns 0 or a BSD errno. Rejects unsupported formats rather than inventing
  * capabilities. The VPS/SPS/PPS spans refer to the unchanged hvcC snapshot. */
 int x9_hevc_config_parse(const uint8_t *, size_t, struct x9_hevc_config *);
@@ -58,4 +76,9 @@ int x9_hevc_au_annexb(const struct x9_hevc_config *, const uint8_t *hvcc,
     size_t *written);
 int x9_hevc_parameter_sets_annexb(const struct x9_hevc_config *, const uint8_t *hvcc,
     uint8_t *dst, size_t capacity, size_t *written);
+/* Validate the whole one-picture AU gate, then follow that picture's actual
+ * PPS->SPS. hvcC length must equal config_bytes. No representative-SPS guess,
+ * synthesized CM extensions or SEI override; output is cleared on failure. */
+int x9_hevc_sample_vui(const struct x9_hevc_config *, const uint8_t *hvcc,
+    size_t hvcc_bytes, const uint8_t *sample, size_t sample_bytes, struct x9_hevc_vui *);
 #endif
