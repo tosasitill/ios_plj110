@@ -195,16 +195,21 @@ offset6追加原件排除：`192a770→192b150/192b194`只是接收vector resize
 identity/route/state/epoch/revision准入成功的commit处复制number/presentation/TOA/detail/PAU。
 MT新CMD清旧owner，foreign/late/rejected/revision失败不改；legacy valid0不授parsed provenance，
 current仍是独立owned-query快照，**不倒填MO/MT**。这是最后accepted整帧的raw身份，不是显示号码。
-来源commit`c7008018`，集成`3143ca5b`；3项新增人工向量、C11 header、host C++17 `-c`、
+来源commit`c7008018`，原集成`3143ca5b`，保留main后为`bf96e0dc`；3项新增人工向量、C11 header、host C++17 `-c`、
 两真实recipe对象均编译exit0，未执行。精确切片/编译日志原在identity树
 `x9/out/call-identity-owner-analysis/`，收尾迁回主checkout同名out。
 
 RIL `26931c/269c44→26e000→270120`显示合并还有真实slot状态输入：178控制既有号码/ECPI
 更新，179影响MO是否解析PAU，180影响sip/tel选择；不是固定PAU>ECPI。PAU parser的真实
 delimiter字符串`[;@,]+`是strtok_r的**字符集合而非regex**，anonymous.invalid还有例外，
-compareLoosely匹配时保留旧号码。这三个slot键的live来源正在追，不能给true/false默认值，
+compareLoosely匹配时保留旧号码。真实writer已闭合为`loadConfiguration21f020`通过
+`libcarrierconfig.so`的`getKeyCount/getValuesByMccMnc`按slot写setValue，有效缓存优先、
+default仅fallback；保存的同机1761 maps证明库实际映射，但仓内缺库实体及三键live值。
+不能给true/false默认值，
 不能把raw number/PAU直接公开；Restricted/Unavailable/未知presentation仍禁止泄露原号码。
-此项不发CallList/VOICE09，不增加query或移植未核实的PAU归一化。
+IMS最终producer的TOA为合并号码是否含`+`的0/1、presentation为空1/非空0；current/CS
+才消费native TOA与8114/detail[0]。两套producer不能混用。此项不发CallList/VOICE09，
+不增加query或移植未核实的PAU归一化。
 
 ### END cause16 → Apple reason145（内部metadata，未发布）
 
@@ -372,8 +377,24 @@ virtual+a0/addCallManagerDelegate和+a8/addDefaultCallDelegate绑定IMSCallModel
 ACTIVE callback`1007c4d3c`按uuid string→CFUUIDCreateFromString，经model command delegate
 +e0找到原CallInfo，再同步状态/通知。生产provider必须同时保有typed client/call、UUID↔
 native epoch/真实ID映射以及delegate生命周期；**单独替换CC factory返回对象不足以修好拨号、
-state/END或handover**。仍在核CallConfig及command delegate，不新增hook/ready常量。
+state/END或handover**。不新增hook/ready常量。
 私有精确切片在IMS树`x9/out/ims-call-provider-contract/`；这是静态契约，不是设备已选此路径。
+
+CallInfo原`toString`证明`+40=PhoneNumberType`、`+44=PhoneCallSubType`、
+`+57=Is Listed As Emergency`，最后bool不是video；`100dd7560`是CallConfig copy ctor，
+不是配置生成入口。桥需保留上游真实opaque配置，未知`+d8` string不猜用途。
+typed delegate按clientId/name保持强shared_ptr，再保存queue/weak_ptr；ACTIVE派送先weak-lock，
+在driver原queue调用真实delegate+20(uuid)。删除按同client/name退休，不能异步缓存裸指针
+或用跨subscriber全局UUID表。
+
+typed hangup沿`CallHandle+20→1b7c434b4→MainQueue→endCall(uuid,reason)1b7b39be0`
+找真实IMSCallInfo，再经Info+80的BambiCall调用`endWithReason1b7bc4500`；最终模型mutation
+与MD disconnect cause映射仍未闭合，不能直接删模型或用固定reason替代。
+`BambiClient::createNewCall`真实输入是SipStack/SipUri/delegate/options，不是简单UUID工厂。
+ACTIVE决定门`1b7b30944`同时要求event+10等于Info+80实际BambiCall，以及其+140
+MediaSession→+280 interface→virtual+98非零，才发布真实UUID事件。只替工厂或直接调用
+ACTIVE会绕过真实owner/media门，不是已实现通话。最早provider缺口仍是完整client/personality
+初始化及网络注册语义/lifecycle，随后才是UUID↔MD ID、状态/END和双向媒体。
 
 ### 通话专用voice音频契约（仅原件静态，不冒充媒体speaker）
 
@@ -420,6 +441,24 @@ selected/partial/late-CNF及已mark-read的step2验证/hold不变；其他generi
 Apple readStored callback`1975920..38`实际用index/readtag/mode，`197596c`是25s host guard；
 未拿旧319中unsupported的存储启动日志当修复验收。9项新TAG人工源码向量、总42只编译未执行，
 SMS/CALL host、header与真实recipe两对象均exit0；统一kernel构建见NOTES。
+
+### WMS37物理ACK completion：实际host receipt后退休
+
+原物理token ACK结果已take后，legacy void-send仍可在OOM/queue-full时丢WMS37回复并清owner。
+来源`ec56e429`，集成`8c6a00a9`把原local generation与真实BB/QMUX generation分开保存；
+BB helper只接受14B WMS37 terminal结果，持bb锁校验原route/service5/node/used/
+non-release_pending/generation及容量，实际入队才answered。失败擦除临时buffer，保留原
+req/slot/txn/result，只重试local queue，不重发MD ACK、不复投PDU。`ack_done`确保物理
+reply_take仅一次；物理owner退休后纯host reply不再触MD，generation丢失仍drain旧token，
+不回新client。尚未决定的结果在取得MD锁后再判原64-bit deadline；首次terminal保持，
+先timeout后late-success不覆写，及时物理success也不被后续queue延期改成timeout。
+
+仅same-slot/local-generation/txn的现存WMS37 job消费重送：原bytes相同等待原结果，
+changed/malformed reuse保原owner/result，不再产生第二BAD/ARG或MD ACK。scoped判定在
+generic validator前，但仍要求合法node/route/type0/msg37/至少7B header；无owner与其他
+service/request不绕通用校验。成功receipt只打印token/SIM/txn/result一次，不含号码/PDU，
+明确`not durable storage proof`。58项人工源码向量仅编译未执行；现存313–321日志及Apple
+MsgPduProcessStatus→sendAck callback均没有同token Messages持久化/重开或MO对端收到证明。
 
 ### modem 与 Android serializer
 
