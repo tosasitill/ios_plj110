@@ -457,10 +457,66 @@ state/END或handover**。不新增hook/ready常量。
 
 CallInfo原`toString`证明`+40=PhoneNumberType`、`+44=PhoneCallSubType`、
 `+57=Is Listed As Emergency`，最后bool不是video；`100dd7560`是CallConfig copy ctor，
-不是配置生成入口。桥需保留上游真实opaque配置，未知`+d8` string不猜用途。
-typed delegate按clientId/name保持强shared_ptr，再保存queue/weak_ptr；ACTIVE派送先weak-lock，
-在driver原queue调用真实delegate+20(uuid)。删除按同client/name退休，不能异步缓存裸指针
-或用跨subscriber全局UUID表。
+不是配置生成入口。桥需保留上游真实opaque配置，未知`+d8` optional string不猜用途。
+typed delegate按clientId/name保持强shared_ptr，再保存queue/weak_ptr；这里的name是**登记key，
+不是call UUID**。`100dcbf14`以C++ string `operator+`生成`ims.call.`+输入clientName，
+manager登记为`ims.manager.`+name；emergency另用`ims.call.e911`/`ims.manager.e911`。
+`IMSWrapperDelegate::handleActiveEvent1b7c7b640`与disconnect `1b7c7aacc`均迭代该client
+record的全部call delegate records，**不是在wrapper map里按event UUID查找**。各record保存queue
+及weak_ptr，异步block另深拷贝event UUID，dequeue先weak-lock，再在登记queue（空时MainQueue）
+调用真实delegate+20(uuid)。删除按同client/name退休，不能异步缓存裸指针或用跨subscriber全局UUID表。
+
+UUID过滤发生在CommCenter：ACTIVE `1007c4d3c`先调`1007c4490`，将UUID string转为CFUUID，
+调用model+80 command delegate的+e0查原CallInfo；lookup失败走`1007c4f28→1007c51a4`，
+不执行`1007c503c`的+100同步及`1007c5054`的+40 ACTIVE通知。model+80/+88是强owned
+`IMSCallModelCommandDriverDelegate<IMSCallModelCommandDriverDelegateBase>`，不是typed `ims::Call`；
+其RTTI `101533100`/名称`1010c3f9b`及`10019ef10/ef68`的shared allocation有原件证据。
+真实CallHandle是model::dial的x1 shared pair，由driver同一factory结果传入。
+
+#### typed dial实际输入与异步所有权（2026-11-15，原件静态）
+
+`ims::Call::dial1b7c41468`实参为`(this, calledAddress string const&, CallConfig const&,
+additional string const&, bool)`。driver `100dceb44`向model传递原CallInfo、同factory CallHandle、
+deep-copied CallConfig及calledAddress；normal model在`1007cb970`保留前两项，additional传空string，
+bool传原CallInfo+57。`Call`对象只保存owned UUID/clientId、两CLIR byte、text mode和relay；
+**不保存calledAddress/CallConfig，也不包含callback owner**。
+
+`IMSCallOptions`大小`0x13a0`，ordinary typed dial的明确拷贝如下，偏移均为十六进制；
+未知字段不据数值猜成video、voice或默认profile：
+
+| 输入 | IMSCallOptions | 拷贝形式 |
+| --- | --- | --- |
+| CallConfig+0/+20 | +1/+b0 | 各1 byte |
+| CallConfig+8 | +148 | owned string |
+| CallConfig+40..6f | +b8..e7 | 48 bytes |
+| CallConfig+70/+88/+a0/+b8 | +e8/+100/+118/+130 | 各owned string |
+| CallConfig+d8 | +168 | optional owned string |
+| additional string | +30 | owned string |
+| Call+9/+8 | +28/+29 | 两个真实CLIR byte |
+| Call+40==2 / Call+44 | +79/+7a | text-mode条件 / relay byte |
+| bool实参 | +160 | 原CallInfo+57，不是video |
+| Call+10 UUID / Call+28 clientId | +10/+1388 | ImsUuid representation / owned string |
+
+`100dd7560`深拷贝CallConfig时还保留+28 string和+d0 u32；即便本普通dial未读取它们，
+桥也不能截断配置或对含string的结构裸`memcpy`。`setCallIdBlocking1b7c42d84`将w2/w1写Call+8/+9，
+driver `100dca8bc..940`从真实上游设置选择`(1,1)`、`(0,0)`或`(1,0)`，不能固定CLIR0。
+
+MainQueue block `1b7c41878` capture+20是owned calledAddress，capture+38为独立options copy；
+调用后再次stack-copy options，经真实IPTelephonyManager+90直入
+`initializeNonEmergencyCall1b7b32708`，**不capture Call/shared delegate，亦不重新走Client虚拟dial**。
+该函数以options+1388查`BambiClient::sipStack(clientId)1b7db11e0`；null stack只日志后返回，
+stack+98!=2才发disconnect，不能由void dial返回或无callback证明已成功准入。normal分支还需
+`makeOutgoingUri1b7cc6ec0`成功、无existing unconfirmed calls，才分配0x280 IMSCallInfo并startCall。
+这里的IMSCallInfo+18/+20/+80分别是manager/BambiClient/BambiCall，不是CommCenter CallInfo或typed Call。
+
+当前root原cache export trie确认Call C1/dial、ClientHandle addDefaultCallDelegate/addCallManagerDelegate、
+IMSClientManager updateCallDelegate/delegateForStack为真实导出；导出存在不代表MTK transport可直接实现。
+`sendCallDisconnectionNotification1b7b33400`经clientId→delegateForStack，向wrapper virtual+10传
+owned UUID string、reason和DisconnectInfo；需要上述真实client record、登记owner及原UUID lookup链。
+本轮尚无证据支持完整生产provider替换：最早缺口是按原Personality初始化且具真实有效SipStack/注册状态的
+owned client，随后才是完整配置语义→Android请求及UUID↔epoch/native-ID适配，不能以空factory或直接ACTIVE绕过。
+只读切片、登记key解码、完整dial/owner JSON及原cache export读取脚本在
+`x9/out/call-typed-dial-context/`（功能worktree；原件及转储不入git）。
 
 typed hangup沿`CallHandle+20→1b7c434b4→MainQueue→endCall(uuid,reason)1b7b39be0`
 找真实IMSCallInfo，再经Info+80的BambiCall调用`endWithReason1b7bc4500`；最终模型mutation
