@@ -83,6 +83,8 @@
   worker独立8192 B上限覆盖实测4096 B ACL payload+5 B H4头（旧bootstrap4096上限不够），不修改metadata ABI/控制器MTU；
   incoming/TX缓冲放静态sole-worker存储，不在kernel stack分配8KiB frame。保留pending帧依序交给native通道。
   无新字节的半帧也会超时；仅帧边界按Android node==1 raw_filter处理0xff/0x00，不在payload中过滤、不套node==0的0xf0规则。
+  私有 `_IO('X',1)` 只取消阻塞 READ，供原生 close 在 BSD fileproc_drain 之前唤醒 reader；
+  不取消 TX、不发送 HCI、不改硬件，reopen 清除 cancel。select 同样报告取消，drain 在队列为空时仍检查真实 worker 错误。
 - 明确 sleep/resume 已接入 sole worker 和 serial admission。sleep 的完整 WMT ACK 拒绝为 `EBUSY`，保留 driver-own；
   成功后实际 drain、mask 自有 UART IER/GIC，再按 Android 释放 host-awake/TX/RX requests，不释放固件供电 lease。
   resume 先 TX request/SSPM resources/host-awake，保留 SPI route、pending 与 FIFO，再仅在 DEV0_BT_AWAKE=0 时发送一次 raw FF，
@@ -96,6 +98,8 @@
   原件SHA256 `8b7c0a0bea51544db82269d7f2775ab7996b8740927283428c4753e032df3a8f`。
   原POSIX open实际是UART.SK/Skywalk；仅替换open为cu.bluetooth，复用原RxLoop/TX/close。
   H4 buffer先初始化再创建RX线程，完整board结果为0前拒绝open。
+  close slot 在原件已确认的 RX stop 标志后调用 READ-only cancel ioctl，再执行未修改的原生 close，
+  避免 socket→character vnode 转换后 `fo_no_drain` 导致 blocked read/close 死锁；四组 stop/exit 指令先校验。
 - `X9Vendor16.c`仅在显式 `X9_BT_VENDOR=MT6653`、正确UUID/指令与完整board结果为0时安装type0路由；
   null vendor ops返回原生NOT_IMPLEMENTED，不伪造BCM私有能力或成功；保留generic callback及supported-commands真实status。
   LE features回调的日志分支也保留入口status（x20保存，不把日志返回值当作成功），原生8 B mask存储不改。

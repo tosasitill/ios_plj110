@@ -214,7 +214,8 @@ static int serial_select(dev_t d __unused,int which,void *wql,struct proc *p)
 {
     if(which!=FREAD && which!=FWRITE) return 0;
     lck_mtx_lock(&serial_lock);
-    int ready=io_status()!=0 || (which==FREAD?serial.rlen!=0:serial.tlen<BT_SERIAL_FIFO);
+    int ready=(which==FREAD?read_status():io_status())!=0 ||
+        (which==FREAD?serial.rlen!=0:serial.tlen<BT_SERIAL_FIFO);
     if(!ready) selrecord(p,which==FREAD?&serial.readers:&serial.writers,wql);
     lck_mtx_unlock(&serial_lock); return ready;
 }
@@ -248,10 +249,14 @@ static int serial_ioctl(dev_t d __unused,u_long cmd,caddr_t data,int flags __unu
     }
     case 0x2000745e: { /* Never report drain success after a timeout. */
         struct timespec timeout={2,0};
+        error=io_status();
         while(serial.tlen && !(error=io_status())) {
             error=msleep(&serial.tlen,&serial_lock,PZERO|PCATCH,"x9btdrain",&timeout);
             if(error) break;
         }
+        /* A worker fault clears tlen while waking this waiter; an empty
+         * queue by itself is NOT successful physical drain. */
+        if(!error) error=io_status();
         break;
     }
     case 0x2000740d: case 0x2000740e: /* Single-open ownership enforced above. */
