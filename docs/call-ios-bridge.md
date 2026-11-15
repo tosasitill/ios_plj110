@@ -107,12 +107,15 @@ ril-srvcc-notify,ril-srvcc-controller,ril-urc-route,ios-handover,ios-ho-dispatch
 ### CallList 七byte原件核对（进行中，不生成默认字段）
 
 `CallListItem parseV1929b2c`逐byte读七字段，consumer`1f1ac4330..`确认offset0真实ID、
-1 CallEventStatus、2 Call_Type、3 CallDirection、4 CallTechnology；5非零写`CallInfo+0x7d`，
-具体语义仍未确认，6在当前大consumer未直接消费。匹配`libCommCenterBase`的
+1 CallEventStatus、2 Call_Type、3 CallDirection、4 CallTechnology；5已证明为multiparty，
+6在当前大consumer未直接消费。匹配`libCommCenterBase`的
 `callDirectionToString1f03908b4`为MO1/MT2；`callTechnologyToString1f0392238`表
 NoService0/CDMA1/GSM2/UMTS3/LTE4/TDSCDMA5/Unknown6/UnknownTech2 7。
 `EurekaGSMCallFormatter::isTechnology1f199fad8`只接2/3/5，不接LTE4；不能为“LTE通话”随便挑formatter。
-Call_Type跳表与offset5/6语义、RemoteNumberListItem presentation尚未闭合，**不填默认0**。
+offset5的consumer `1f1ac4df0..4dfc`写tree node+0x7d，而`1f1ac4d28`证明CallInfo为node+0x28，
+所以实际是CallInfo+0x55（不是CallInfo+0x7d）。Base `CallInfo::toString1f039177c`字符串
+`Is in Multi-Pary call: `，`1f039178c`读取+0x55；`getLegacyFlags1f0390bec`也读+0x55并映射bit30。
+Call_Type跳表与offset6语义、RemoteNumberListItem presentation尚未闭合，**不填默认0**。
 `1929bfc`是CallConfigItem writer，不能拿其string长度解释CallList第七byte。
 此项仍无CallList46生产编码/发布，END原因与号码隐私策略还需继续追真实consumer。
 
