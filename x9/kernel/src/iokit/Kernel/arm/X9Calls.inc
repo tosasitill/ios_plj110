@@ -13,10 +13,12 @@
  * Explicit VOICE44 routing and guarded VOICE21 end-current-call now have
  * production dispatch. Bound VOICE03 explicit disables now cause actual
  * Android-derived CMD/IND registration and an owned initial snapshot;
- * handover/event enable remains unsupported. This does not publish VOICE,
+ * handover14 now enables actual, ordered Android SRVCC -> Apple54 events;
+ * extra CallEventsNotify13=1 remains unsupported. This does not publish VOICE,
  * admit a DIAL profile, or report network/call/audio readiness. */
 #include "../../../bsd/dev/x9_call_state.h"
 #include "../../../bsd/dev/x9_call_init.h"
+#include "../../../bsd/dev/x9_call_handover.h"
 struct x9c_dial_job {
  bool used,answered,cnf,held;unsigned slot,sim,len;
  uint64_t generation,deadline,token;struct x9cw_dial_join join;
@@ -28,7 +30,7 @@ static struct x9cw_inbound_state x9c_inbound;
 static bool x9c_observed;
 static bool x9c_incoming_observed;
 /* VOICE binding is independent of NAS/WMS clients and has NO SIM default. */
-struct x9c_client {bool bound,registered;unsigned sim;uint64_t generation;};
+struct x9c_client {bool bound,registered,handover;unsigned sim;uint32_t handover_floor;uint64_t generation;};
 static x9c_client x9c_clients[CBQ_MAX_CLIENTS];
 struct x9c_end_job {
  bool used,answered;unsigned slot,sim,stage,id;
@@ -55,21 +57,67 @@ static uint64_t x9c_current_submit(unsigned sim){
 struct x9c_reg_wait {
  bool used,answered;unsigned sim,len;uint16_t transaction,result;
  uint64_t generation,deadline;uint8_t req[15];
+ struct x9cw_voice_register options;uint32_t floor;
+ unsigned event_count;uint8_t events[8];
 };
-static struct x9c_reg_wait x9c_reg_wait[CBQ_MAX_CLIENTS];
+/* Apple sends13=0 and14=1 as independent transactions. Do not turn a
+ * valid concurrent bootstrap into BUSY; overlapping options are BUSY. */
+#define X9_C_REG_WAITS 2u
+static struct x9c_reg_wait x9c_reg_wait[CBQ_MAX_CLIENTS][X9_C_REG_WAITS];
 static struct x9cw_call_init x9c_init[2];
 static struct {uint64_t token,deadline;bool confirmed,held;} x9c_cmd_init;
 static bool x9c_reg_live(unsigned slot,const struct x9c_reg_wait &w){
  return slot<CBQ_MAX_CLIENTS&&x9q_clients[slot].generation==w.generation&&
   x9c_clients[slot].bound&&x9c_clients[slot].generation==w.generation&&x9c_clients[slot].sim==w.sim;
 }
-static void x9c_reg_answer(unsigned slot,uint16_t error){
- struct x9c_reg_wait &w=x9c_reg_wait[slot];
+static bool x9c_event_transport_ready(){
+ uint32_t cursor;
+ /* A live generic MIPC transport is insufficient when the independent
+  * CALL inbox is quarantined. Do not grant/flush a dead subscription. */
+ return x9w_control_ready&&x9_md_mipc_online()&&x9_md_mipc_call_cursor(&cursor)==1;
+}
+static void x9c_handover_send(unsigned slot,unsigned state){
+ uint8_t indication[11];unsigned n=x9cw_handover_indication(indication,sizeof(indication),state);
+ if(n)coachz_baseband_qrtr(CBQ_PORT_BASE+slot,X9BB_NODE,X9BB_PORT_BASE+9,indication,n);
+ bzero(indication,sizeof(indication));
+}
+static void x9c_reg_answer(unsigned slot,unsigned index,uint16_t error){
+ struct x9c_reg_wait &w=x9c_reg_wait[slot][index];
+ if(!error&&!x9c_event_transport_ready())error=X9Q_NOT_READY;
  if(!w.answered&&x9c_reg_live(slot,w)){
   x9q_packet p(w.req,error);p.send(CBQ_PORT_BASE+slot,X9BB_PORT_BASE+9);
-  x9c_clients[slot].registered=!error;
+  struct x9c_client &c=x9c_clients[slot];
+  if(!error){
+   c.registered=true;
+   if(w.options.present&2){
+    bool enabled=c.handover;c.handover=w.options.handover!=0;
+    if(c.handover&&!enabled){
+     c.handover_floor=w.floor;
+     /* Preserve START/COMPLETE order even when both arrived during the
+      * owned baseline query. Registration result precedes publication. */
+     for(unsigned i=0;i<w.event_count;i++)x9c_handover_send(slot,w.events[i]);
+    }
+   }
+  }
  }
  w.result=error;w.answered=true;bzero(w.req,sizeof(w.req));
+ bzero(w.events,sizeof(w.events));w.event_count=0;
+}
+static void x9c_handover_event(const uint8_t *frame,unsigned n,uint32_t sequence){
+ if(!x9c_event_transport_ready())return;
+ struct x9cw_handover e;if(x9cw_handover(frame,n,&e)!=1)return;
+ for(unsigned slot=0;slot<CBQ_MAX_CLIENTS;slot++){
+  struct x9c_client &c=x9c_clients[slot];
+  if(!c.bound||c.generation!=x9q_clients[slot].generation||c.sim!=e.sim)continue;
+  if(c.registered&&c.handover&&sequence>c.handover_floor)x9c_handover_send(slot,e.ios_state);
+  else for(unsigned index=0;index<X9_C_REG_WAITS;index++){
+   struct x9c_reg_wait &w=x9c_reg_wait[slot][index];
+   if(!w.used||w.answered||!x9c_reg_live(slot,w)||!(w.options.present&2)||
+      !w.options.handover||sequence<=w.floor)continue;
+   if(x9q_ms()>=w.deadline||w.event_count==sizeof(w.events))x9c_reg_answer(slot,index,X9Q_NOT_READY);
+   else w.events[w.event_count++]=(uint8_t)e.ios_state;
+  }
+ }
 }
 static uint64_t x9c_register_submit(unsigned id,unsigned sim){
  uint8_t frame[24];unsigned n=x9cw_call_register(frame,sizeof(frame),id,sim,x9_md_sim_count());
@@ -77,14 +125,18 @@ static uint64_t x9c_register_submit(unsigned id,unsigned sim){
 }
 static void x9c_init_poll(uint8_t *frame){
  bool wanted[2]={false,false};uint64_t now=x9q_ms();
- for(unsigned i=0;i<CBQ_MAX_CLIENTS;i++){
-  struct x9c_reg_wait &w=x9c_reg_wait[i];if(!w.used||w.answered)continue;
-  if(!x9c_reg_live(i,w)||now>=w.deadline)x9c_reg_answer(i,X9Q_NOT_READY);
+ for(unsigned i=0;i<CBQ_MAX_CLIENTS;i++)for(unsigned index=0;index<X9_C_REG_WAITS;index++){
+  struct x9c_reg_wait &w=x9c_reg_wait[i][index];if(!w.used||w.answered)continue;
+  if(!x9c_reg_live(i,w)||now>=w.deadline)x9c_reg_answer(i,index,X9Q_NOT_READY);
   else wanted[w.sim]=true;
  }
- bool online=x9w_control_ready&&x9_md_mipc_online();
+ bool online=x9c_event_transport_ready();
  if(!online){
-  for(unsigned i=0;i<CBQ_MAX_CLIENTS;i++)x9c_clients[i].registered=false;
+  for(unsigned i=0;i<CBQ_MAX_CLIENTS;i++){x9c_clients[i].registered=false;x9c_clients[i].handover=false;}
+  for(unsigned i=0;i<CBQ_MAX_CLIENTS;i++)for(unsigned index=0;index<X9_C_REG_WAITS;index++){
+   struct x9c_reg_wait &w=x9c_reg_wait[i][index];
+   if(w.used&&!w.answered)x9c_reg_answer(i,index,X9Q_NOT_READY);
+  }
   if(x9c_cmd_init.token||x9c_cmd_init.confirmed)x9c_cmd_init.held=true;
   for(unsigned sim=0;sim<2;sim++)if(x9c_init[sim].stage||x9c_init[sim].token)x9c_init[sim].held=1;
  }
@@ -134,26 +186,35 @@ static void x9c_init_poll(uint8_t *frame){
    x9c_register_submit(s.stage==X9_CI_STATUS?0x4901:0x4902,sim);
   if(s.token)s.deadline=now+25000;
  }
- for(unsigned i=0;i<CBQ_MAX_CLIENTS;i++){
-  struct x9c_reg_wait &w=x9c_reg_wait[i];if(!w.used||w.answered)continue;
+ for(unsigned i=0;i<CBQ_MAX_CLIENTS;i++)for(unsigned index=0;index<X9_C_REG_WAITS;index++){
+  struct x9c_reg_wait &w=x9c_reg_wait[i][index];if(!w.used||w.answered)continue;
   const struct x9cw_call_init &s=x9c_init[w.sim];
-  if(x9c_cmd_init.held||s.held)x9c_reg_answer(i,X9Q_NOT_READY);
-  else if(s.stage==X9_CI_DONE&&s.registered)x9c_reg_answer(i,0);
+  if(x9c_cmd_init.held||s.held)x9c_reg_answer(i,index,X9Q_NOT_READY);
+  else if(s.stage==X9_CI_DONE&&s.registered)x9c_reg_answer(i,index,0);
  }
 }
 static uint16_t x9c_reg_begin(unsigned slot,const uint8_t *req,unsigned len){
  struct x9cw_voice_register r;
  if(!x9cw_qmi_register(req,len,&r))return X9Q_ARG;
- /* 13=0 is the actual Apple request. Handover14=1 is a different
-  * request and needs an MD handover -> Apple consumer, not a success stub.
-  * Accept explicit disables only; AllCallStatus46 remains independent. */
- if(r.call_events||r.handover)return X9Q_UNSUPPORTED;
+ /* 13=0 and14=1 are the actual independent Apple requests. The latter
+  * now has a real4902/SRVCC ->54 consumer, not a readiness success stub.
+  * CallEventsNotify13=1 has a different payload contract, still unsupported. */
+ if(r.call_events)return X9Q_UNSUPPORTED;
  const struct x9c_client &c=x9c_clients[slot];
  if(!c.bound||c.generation!=x9q_clients[slot].generation)return X9Q_NOT_READY;
- struct x9c_reg_wait &w=x9c_reg_wait[slot];
- if(w.used&&!w.answered)return X9Q_BUSY;
+ unsigned index=X9_C_REG_WAITS;
+ for(unsigned i=0;i<X9_C_REG_WAITS;i++){
+  const struct x9c_reg_wait &w=x9c_reg_wait[slot][i];
+  if(w.used&&!w.answered){if(w.options.present&r.present)return X9Q_BUSY;}
+  else if(index==X9_C_REG_WAITS)index=i;
+ }
+ if(index==X9_C_REG_WAITS)return X9Q_BUSY;
+ uint32_t floor;
+ if(x9_md_mipc_call_cursor(&floor)!=1)return X9Q_NOT_READY;
+ struct x9c_reg_wait &w=x9c_reg_wait[slot][index];
  bzero(&w,sizeof(w));w.used=true;w.sim=c.sim;w.len=len;
  w.generation=c.generation;w.transaction=(uint16_t)x9cw_u16(req+1);
+ w.options=r;w.floor=floor;
  w.deadline=x9q_ms()+25000;memcpy(w.req,req,len);return 0;
 }
 /* This read-only query is caused ONLY by an explicit, bound VOICE21.
@@ -256,7 +317,7 @@ static bool x9c_dial_submit(unsigned slot,const uint8_t *req,unsigned len,
  return true;
 }
 static void x9c_del(unsigned slot){
- if(slot<CBQ_MAX_CLIENTS)bzero(&x9c_reg_wait[slot],sizeof(x9c_reg_wait[slot]));
+ if(slot<CBQ_MAX_CLIENTS)bzero(x9c_reg_wait[slot],sizeof(x9c_reg_wait[slot]));
  if(x9c_end_job.used&&x9c_end_job.slot==slot){
   if(x9c_end_job.stage==2)x9_md_mipc_call_end_abandon(x9c_end_job.token);
   x9c_end_job.answered=true;bzero(x9c_end_job.req,sizeof(x9c_end_job.req));
@@ -269,10 +330,11 @@ static void x9c_poll(){
  /* Drain raw CALL events, but do not approve or answer CMD8901. The MD
   * owner has already reduced every complete4901 under its lock. Number
   * buffers are erased immediately; CMD identity tokens remain in MD owner. */
- uint8_t frame[X9_MIPC_FRAME_MAX];uint32_t n,token;
+ uint8_t frame[X9_MIPC_FRAME_MAX];uint32_t n,token,sequence;
  for(unsigned i=0;i<8;i++){
-  int rc=x9_md_mipc_call_event(frame,sizeof(frame),&n,&token);
+  int rc=x9_md_mipc_call_event_ordered(frame,sizeof(frame),&n,&token,&sequence);
   if(rc!=1)break;
+  if(x9cw_u16(frame+10)==0x4902)x9c_handover_event(frame,n,sequence);
   bzero(frame,sizeof(frame));
  }
  x9c_observed=x9_md_mipc_call_snapshot(&x9c_outbound)==1;
@@ -325,19 +387,35 @@ static bool x9c_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
    if(!x9cw_qmi_bind(req,len,&sim)||sim>=x9_md_sim_count())err=X9Q_ARG;
    else if(x9c_end_job.used&&x9c_end_job.slot==slot&&
            x9c_end_job.generation==x9q_clients[slot].generation&&x9c_end_job.sim!=sim)err=X9Q_BUSY;
-   else if(x9c_reg_wait[slot].used&&!x9c_reg_wait[slot].answered&&
-           x9c_reg_wait[slot].generation==x9q_clients[slot].generation&&x9c_reg_wait[slot].sim!=sim)err=X9Q_BUSY;
    else{
+    bool busy=false;
+    for(unsigned index=0;index<X9_C_REG_WAITS;index++){
+     const struct x9c_reg_wait &w=x9c_reg_wait[slot][index];
+     if(w.used&&!w.answered&&w.generation==x9q_clients[slot].generation&&w.sim!=sim)busy=true;
+    }
+    if(busy){x9q_packet p(req,X9Q_BUSY);p.send(local,port);return true;}
     if(!x9c_clients[slot].bound||x9c_clients[slot].sim!=sim||
        x9c_clients[slot].generation!=x9q_clients[slot].generation){
-     x9c_clients[slot].registered=false;bzero(&x9c_reg_wait[slot],sizeof(x9c_reg_wait[slot]));
+     bzero(&x9c_clients[slot],sizeof(x9c_clients[slot]));
+     bzero(x9c_reg_wait[slot],sizeof(x9c_reg_wait[slot]));
     }
     x9c_clients[slot].bound=true;x9c_clients[slot].sim=sim;
     x9c_clients[slot].generation=x9q_clients[slot].generation;err=0;
    }
   }else if(x9cw_u16(req+3)==3){
-   const struct x9c_reg_wait &w=x9c_reg_wait[slot];
-   if(w.used&&w.generation==x9q_clients[slot].generation&&w.transaction==x9cw_u16(req+1))return true;
+   struct x9cw_voice_register options;
+   if(!x9cw_qmi_register(req,len,&options)){x9q_packet p(req,X9Q_ARG);p.send(local,port);return true;}
+   for(unsigned index=0;index<X9_C_REG_WAITS;index++){
+    const struct x9c_reg_wait &w=x9c_reg_wait[slot][index];
+    if(w.used&&w.generation==x9q_clients[slot].generation&&w.transaction==x9cw_u16(req+1)){
+     if(w.options.present==options.present&&w.options.call_events==options.call_events&&
+        w.options.handover==options.handover)return true;
+     /* Never advance/grant a changed request under an old transaction. */
+     if(!w.answered)x9c_reg_answer(slot,index,X9Q_ARG);
+     else {x9q_packet p(req,X9Q_ARG);p.send(local,port);}
+     return true;
+    }
+   }
    err=x9c_reg_begin(slot,req,len);if(!err)return true;
   }else if(x9cw_u16(req+3)==0x21){
    unsigned op,id;

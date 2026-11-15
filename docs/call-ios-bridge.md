@@ -11,14 +11,15 @@
 | 拨出状态生产者 | 完整 `4901` 的真实 ID / ECPI reducer；已实现、单对象可编译；未有完整真机 wire 重放或 iOS 运行验收 |
 | 空快照与异步确认 | 完整 owned `090a` 数组解析；`0902 + 新 MO epoch` 汇合生成 VOICE20/tag10/u8；DIAL 仍无生产 profile/admission 调用者 |
 | 单通话挂断 / SIM 绑定 | VOICE44/tag01/u8 独立绑定；显式 VOICE21 → owned current query → 同 MO epoch/真实 ID/完整单通话 snapshot → guarded0905 → 同token0906 → 原iOS txn 的 result；已接请求分发，未设备验收 |
-| 初始化 / 事件注册 | 明确绑定后的 VOICE03 显式 disable → 全局 CMD8901 注册 → 逐 SIM IND4901/4902 注册 → owned0909/090a 初始快照；所有步骤等待原 token 确认，编译完成、未运行 |
+| 初始化 / 事件注册 | 明确绑定后的 VOICE03：13=0 与14=0/1 可独立并发 → 全局 CMD8901 → 逐 SIM IND4901/4902 → owned0909/090a；逐token确认，13=1仍拒绝；仅编译、未运行 |
+| handover 通知 | 严格 MD4902/EVENT3 → Android SRVCC → Apple54/tag1/u8；订阅cursor/generation/SIM隔离、先Result后有序发布；未设备验收，未迁移handover后的ID/RAT/profile |
 | 来电 CMD / 状态 | `8901` 的字段、长度和唯一 tag 验证；独立 pending ID → 完整 ECPI0/132/6/133 的 MT reducer / iOS observer；未发布 CallList |
 | 来电许可 RSP | `8902` 的正确 approve/call-id 字段；显式调用才构造，保留原 txid；按已核实 RIL slot 转换生成 RSP mask |
 | 物理 transport | 独立 call inbox / CMD owner，复用原有唯一 MD tick writer；SMS ACK 保持优先 |
 | 超时 / 重复 / 失败 | 无自动重发；重复 outstanding CMD 去重；内容变化及未知退休规则隔离 calls；不清空 mutation owner |
 | 默认启动 | **不发布 QMI VOICE09、不主动注册 CALL CMD/IND、不发通话请求、不自动 approve，无强制开启 bootarg**；注册只由绑定后的有效 VOICE03 触发 |
 
-`X9Calls.inc` 当前接明确的 VOICE44 路由绑定、VOICE03 已核实 disable 注册子集和 VOICE21 单普通 MO 挂断，其它 VOICE 请求仍拒绝。
+`X9Calls.inc` 当前接明确的 VOICE44 路由绑定、VOICE03 已核实13=0/14=0或1注册与handover订阅，以及 VOICE21 单普通 MO 挂断；其它 VOICE 请求仍拒绝。
 绑定成功只代表本地路由保存，不代表 MD 注册、bootstrap 或音频已可用；VOICE09 仍不发布。
 `x9cw_action()` 仅生成报文，生产 VOICE21 调用它后还必须过 MD 锁内 / writer 的 target guard；VOICE22 接听尚未准入，CallList 尚未发布。
 `x9cw_dial()` 同样仅编码：必须显式提供已验证的卡2 profile、无现存通话；当前没有 profile provider。
@@ -49,13 +50,14 @@ MD `91335654..913358ea` / `913358ea..91335a34` 写 `0308/030c`：
 生产流程（没有开机探针或设备操作）：
 
 1. 独立 VOICE44 显式选卡；44 本身不发 MD 注册。
-2. 有效 VOICE03 显式 disable 请求入有界 client waiter。`13=1/14=1` 明确 unsupported，
-   尤其 handover 不能成功占位。允许 tag13/tag14 的显式0，拒绝未知、重复、错误长度。
+2. 有效 VOICE03 请求入每client两个有界waiter；13=0与14=0/1独立transaction可并发，
+   重叠options返回BUSY。13=1仍unsupported，拒绝未知、重复、错误长度；不把14的订阅当CallList开关。
 3. 全局一次 `030b{100/u16=8901}`，原 token 完整成功才进入逐卡链。
 4. 各卡独立 `0307{100/u16=4901}` → 同 token0308 → `0307{100/u16=4902}` → 同 token0308。
 5. 一次 owned `0909{}` / 完整成功090a 初始快照。非空不是 idle；SIM2 的空基线还必须通过
    MD revision/count guard。`registered`、`baseline_known` 是不同状态，均不等于 IMS/profile/audio-ready。
-6. 所有步骤完成后只回原 VOICE03 Result。**不从注册 CNF 造 CallList46、通话状态、ID 或音频能力。**
+6. 所有步骤完成后回各原 VOICE03 Result，只应用该请求present的options。14=1的待确认真实
+   handover事件在Result之后按序发布54；不coalesce START/COMPLETE。**不从注册 CNF 造 CallList46、ID 或音频能力。**
 
 多个 client 共享物理逐卡注册但不共享 host generation；换卡遇未答 waiter 返回 BUSY，删 client 清请求，
 原 MD token 继续消费，不回答复用槽。无 waiter 时不自动启动下一步骤。host 总计25s和每物理步骤25s均有界；
@@ -63,8 +65,56 @@ MD `91335654..913358ea` / `913358ea..91335a34` 写 `0308/030c`：
 SMS ACK 优先与唯一物理 writer 不变；8901 仅保留原 incoming owner，**不自动 approve/answer**。
 已有泛用 MIPC 白名单未整体封闭，只对新增 CALL 注册形状施加严格检查。
 
-这闭合了注册子集的生产调用与响应，不是完整 Apple bootstrap：handover、CallList46 发布、
-运行 DIAL profile/admission 和 voice音频仍缺，VOICE09 仍关闭。新增人工源码向量只编译，未执行。
+这闭合了已核实注册子集及handover通知的生产调用与响应，不是完整 Apple bootstrap：CallList46发布、
+handover后的ID/RAT/profile迁移、运行DIAL profile/admission和voice音频仍缺，VOICE09仍关闭。人工源码向量只编译，未执行。
+
+### SRVCC / Apple handover54（2026-11-15，源码接入，未设备验收）
+
+完整证据链来自本机匹配原件，不借标准QMI枚举猜消息：
+
+- MD `mipc_call_event_ind913258e6..91325a22` EVENT3分支`91325956..62`：
+  `4902 {100/u32=3, 115/u32=state}`，state源为u8，完整32B。
+- RIL `handleCallEventIndicationMessage37cfd4..37d020` 读115/u32，仅0..3交
+  `notifySrvccState380840`，数值不变。Android16 radio HAL `SrvccState`定义
+  STARTED0/COMPLETED1/FAILED2/CANCELED3，是对应接口契约，**不是本机真实SRVCC捕获**。
+- RIL `obtainMipcUrc19f898..19f8a4` 调用与CMD相同的`mipcSlotIdChangeToSlotId`；
+  codec只接本机低route1/2，保留高位但不从高位选SIM，不复用IMS/NAS绑定。
+- Apple20H392 handler lambda19 `1f1ad3864/38a0`明确message54，`38ec..38f0`指向
+  consumer`1f1ac317c`；`1f1ac325c`读取tag1，`HandoverState parseV192ad18`读取u8。
+  `asString193a040`为START1/FAIL2/COMPLETE3/CANCEL4，10是LIKELY但本原件SRVCC0..3
+  没有对应来源，不合成LIKELY。映射 `{0,1,2,3}→{1,3,2,4}`。
+
+`x9_call_handover.h`只接受完整4902、唯一100/115、两个u32、32B及合法state；
+非EVENT3不生成handover通知。iOS完整11B indication为
+`04 00 00 54 00 04 00 01 01 00 <state>`，不写Result、默认ID/RAT/profile。
+
+接受enable时从MD锁内取RX cursor；ordered drain另返回RX sequence，不混MD transaction/
+CMD reply token。只发布同client generation、同独立VOICE SIM、订阅成功且sequence在floor之后的事件；
+初始化期间最多保存8个真实状态，先Result再有序flush。已成功enable的重复注册不重放；13-only不能清空14，
+14=0成功后停止本地发布。timeout/delete/换卡/overflow不flush，未注册/旧generation/订阅前queued事件不发布。
+通话inbox隔离或transport失联立即终止host等待并清订阅；物理token仍继续drain，不把generic MIPC在线当CALL可用。
+
+MD收到有效SIM2 SRVCC时在锁内、writer选择之前invalidate旧空基线并block MO/MT，
+防止queued旧DIAL/END跨交接发送；SIM1有效事件不借来block SIM2。畸形事件隔离calls，不影响SMS。
+RIL `RtmCallController::handleSrvcc26a2a0..`完成时清IMS列表，证明不能继续用交接前ID/profile。
+**当前没有实现交接后的身份重建/CS动作策略，不能宣称handover后仍可控制通话。**
+
+私有派生材料：`x9/out/call-status-analysis/{md-call-event,ril-event-dispatch,ril-handover,
+ril-srvcc-notify,ril-srvcc-controller,ril-urc-route,ios-handover,ios-ho-dispatch}.asm`和
+`android16-radio-types.hal`；真实10086材料没有SRVCC完成，不能算handover验收。
+新增8项人工向量只编译，未运行；旧overflow向量改用合法MD RING事件6，以免畸形4901在首帧就隔离而掩盖FIFO容量。
+
+### CallList 七byte原件核对（进行中，不生成默认字段）
+
+`CallListItem parseV1929b2c`逐byte读七字段，consumer`1f1ac4330..`确认offset0真实ID、
+1 CallEventStatus、2 Call_Type、3 CallDirection、4 CallTechnology；5非零写`CallInfo+0x7d`，
+具体语义仍未确认，6在当前大consumer未直接消费。匹配`libCommCenterBase`的
+`callDirectionToString1f03908b4`为MO1/MT2；`callTechnologyToString1f0392238`表
+NoService0/CDMA1/GSM2/UMTS3/LTE4/TDSCDMA5/Unknown6/UnknownTech2 7。
+`EurekaGSMCallFormatter::isTechnology1f199fad8`只接2/3/5，不接LTE4；不能为“LTE通话”随便挑formatter。
+Call_Type跳表与offset5/6语义、RemoteNumberListItem presentation尚未闭合，**不填默认0**。
+`1929bfc`是CallConfigItem writer，不能拿其string长度解释CallList第七byte。
+此项仍无CallList46生产编码/发布，END原因与号码隐私策略还需继续追真实consumer。
 
 ### modem 与 Android serializer
 
@@ -223,7 +273,8 @@ writer和RX均在现有MD worker，唯一物理writer不变、SMS ACK优先不�
 这些是代码边界，**未证明MD ring在途状态与所有时序race已经闭合**。
 
 七字节CallList的其他字段、普通VOICE bootstrap/BindSubscription44/IND注册与运行profile/audio尚未完整核实。
-因此不发CallList IND、不注册CALL、不启动GET_STATUS、不发布VOICE09；新增`x9c_dial_submit`没有生产调用者。
+这是拨出state阶段的历史边界；当前明确VOICE03已触发注册/初始GET_STATUS（见上文），
+但仍不发CallList、不发布VOICE09，`x9c_dial_submit`仍没有生产admission调用者。
 原SMS/IMSA流不作本轮修改，也不把短信注册当语音可用。
 
 ### 2026-11-15 独立 MT state（编译完成，执行未验）
@@ -274,7 +325,7 @@ MD新snapshot API和iOS observer接入，仅观察，不自动approve/answer/que
   超时、stale/error query 均不能退休。cleanup admission 暂无空slot时只等待，不重发 mutation；
   已发送 cleanup query 失效后 bounded hold，不做循环探针。
 - 这是已经接入 `x9c_request` 的具体挂断分发路径，不是新增 unused staging；但 **VOICE未发布、
-  完整bootstrap/IND注册/DIAL策略/CallList/语音音频仍缺，不能叫可用通话或最终镜像**。
+  完整bootstrap/运行DIAL策略/CallList/语音音频仍缺，注册子集见上文，不能叫可用通话或最终镜像**。
   新增人工回归源代码只编译，不执行。原件/派生asm只在 `x9/out/call-end-analysis/`。
 
 - `x9/kernel/src/bsd/dev/x9_call_wire.h`：共用、freestanding C/C++ codec。

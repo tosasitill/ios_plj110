@@ -6,6 +6,7 @@
  * across call-end / sequence reuse is not yet proven in Android's RIL.
  * Overflow quarantines ONLY calls. No payload/number/sequence diagnostics. */
 #include "x9_call_state.h"
+#include "x9_call_handover.h"
 #define X9_MC_SLOTS 8u
 struct x9_mc_slot {
  uint32_t token;unsigned state,len;int result;
@@ -84,6 +85,20 @@ static void x9mc_rx(const uint8_t *p,unsigned n,unsigned id,unsigned tx){
    (void)x9cw_inbound_apply(&x9_mc_inbound,&c);
   }else (void)x9cw_outbound_apply(&x9_mc_outbound,&c);
  }
+ if(id==0x4902){
+  struct x9cw_handover c;int rc=x9cw_handover(p,n,&c);
+  if(rc){
+   /* A handover crosses the single IMS-only mutation policy. Invalidate
+    * at RX, BEFORE a queued DIAL/END can be writer-selected. Forwarding
+    * its real event is not permission to reuse pre-handover call IDs. */
+   unsigned low=p[8]&15;
+   if(low==2||rc<0){
+    x9cw_outbound_invalidate(&x9_mc_outbound);x9_mc_outbound.blocked=1;
+    x9_mc_inbound.blocked=1;
+   }
+   if(rc<0){x9_mc_poisoned=1;return;}
+  }
+ }
  if(id==0x8901){
   /* Outside this MO-only policy. Never preserve a usable empty baseline
    * across an incoming approval command. Parsing the proved route is NOT
@@ -110,9 +125,18 @@ static void x9mc_rx(const uint8_t *p,unsigned n,unsigned id,unsigned tx){
  }
  x9_mc_poisoned=1;printf("X9 CALL: inbox bounded; calls quarantined, SMS/WDS unchanged\n");
 }
-int x9_md_mipc_call_event(uint8_t *out,uint32_t room,uint32_t *len,uint32_t *token){
- if(!out||!len||!token)return -1;
- *len=*token=0;int rc=0;lck_mtx_lock(&x9_mi_lock);
+/* Subscription fences use the RX sequence, not the MD transaction or an
+ * observer's latest-state snapshot. A reused QRTR slot cannot see events
+ * that were already queued when it requested enable. */
+int x9_md_mipc_call_cursor(uint32_t *sequence){
+ if(!sequence)return -1;
+ *sequence=0;int rc=-1;lck_mtx_lock(&x9_mi_lock);
+ if(!x9_mc_poisoned&&!x9_mi_poisoned&&x9_mi_online){*sequence=x9_mc_next;rc=1;}
+ lck_mtx_unlock(&x9_mi_lock);return rc;
+}
+int x9_md_mipc_call_event_ordered(uint8_t *out,uint32_t room,uint32_t *len,uint32_t *token,uint32_t *sequence){
+ if(!out||!len||!token||!sequence)return -1;
+ *len=*token=*sequence=0;int rc=0;lck_mtx_lock(&x9_mi_lock);
  if(x9_mc_poisoned||x9_mi_poisoned||!x9_mi_online)rc=-1;
  else{
   struct x9_mc_slot *first=NULL;
@@ -121,13 +145,16 @@ int x9_md_mipc_call_event(uint8_t *out,uint32_t room,uint32_t *len,uint32_t *tok
   if(first){
    if(first->len>room)rc=-1;
    else{
-    *len=first->len;memcpy(out,first->frame,*len);rc=1;
+    *len=first->len;*sequence=first->token;memcpy(out,first->frame,*len);rc=1;
     if(first->id==0x8901){*token=first->token;first->state=2;}
     else bzero(first,sizeof(*first));
    }
   }
  }
  lck_mtx_unlock(&x9_mi_lock);return rc;
+}
+int x9_md_mipc_call_event(uint8_t *out,uint32_t room,uint32_t *len,uint32_t *token){
+ uint32_t sequence;return x9_md_mipc_call_event_ordered(out,room,len,token,&sequence);
 }
 int x9_md_mipc_call_reply(uint32_t token,unsigned approve,unsigned include_cause,uint32_t cause){
  if(!token||approve>1||include_cause>1)return -1;

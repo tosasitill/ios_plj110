@@ -499,6 +499,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 - **并行基线合入**：构建期间SCP窗口自行将静态LIST共享sequence修复合入main`aa0f151`；本分支原`4648b1c/dd7bfaf`已push后rebase main为`892a84c/ee28aad`，无冲突、未覆盖其它窗口。新源码基线单独构建`x9-call-bootstrap-scp321-20261115` **exit0，98/98 overlay（3 prebuilt）、link/strip成功**；这是新增SCP源码基线的编译，不是旧产物二次检查/比较。最新产物`x9/out/x9-call-bootstrap-scp321-20261115/kernel.development.sweet`，console/exit在`x9/out/call-bootstrap-rebased-compile/`；仍无boot.img/套件/上机。旧基线三个out目录已迁回main，最新两个目录合入后同样保留；功能分支推送使用自己已推dd7bfaf的expected lease，随后ff合main/push并清树。
 - **收尾实际完成**：代码`892a84c`与交接`d0a2455`已ff合main，`origin/main` push成功（`aa0f151..d0a2455`）。两基线kernel目录及`call-bootstrap-analysis`、`call-bootstrap-compile`、`call-bootstrap-rebased-compile`均已迁回**主checkout**同名`x9/out/`，原日志绝对路径不改写；本地功能树/分支已清理，其它活动树不动。push后`gh run list --branch feat/call-bootstrap`仍`[]`。未在main重跑套件/重编/pack/上机；最新kernel只是注册子项，完整通话短信最终镜像仍未完成。
 
+#### 2026-11-15 CALL handover 初始化续接（进行中，未交付最终镜像）
+
+- **工作树 / 基线**：沿用 `.worktrees/call-status-publish`，分支重命名为 `feat/call-handover-init`，起点 `61d87af`；主树由其它窗口推进，合入前以实际 HEAD 为准。只读现有 Android/RIL/MD/Apple 原件；不操作设备、不运行测试套件、不碰 audio/GPU/BT 活动树。
+- **原件观察**：MD `913258e6..91325a22` EVENT3 写4902/tag100=u32=3、tag115=u32 state；匹配RIL `37cfd4..37d020` 将0..3原值交 `notifySrvccState`，Android16 radio HAL 定义 STARTED0/COMPLETED1/FAILED2/CANCELED3。Apple20H392 lambda19 `1f1ad3864/38a0` 明确 indication54，consumer `1f1ac325c` 读tag1，`192ad18`为u8；`193a040`为START1/FAIL2/COMPLETE3/CANCEL4。因此映射 `{0,1,2,3}→{1,3,2,4}`，不是标准QMI编号猜测。真实10086材料没有SRVCC完成，不能称handover场景验收。
+- **已接入源码，准备固定提交**：新freestanding `x9_call_handover.h`严格32B完整帧/唯一tag/u32/低SIM1或2/state0..3；iOS03/tag14=1真实订阅并发布54，不再unsupported占位。13=0与14=1两个独立transaction可并发，共享原CMD→IND→owned初始query链；不同options独立应用。接受enable时保存锁内RX cursor，待注册确认的状态最多8个，先Result后按顺序flush，generation/SIM/timeout/delete隔离，不回放订阅前queued事件。MD收到SIM2 handover时在writer选择前使旧DIAL/END基线失效、保持hold；**未实现交接后的真实call-ID/RAT/profile迁移**。
+- **CallList原件分析**：七byte parser `1929b2c` 与consumer确认id/event/direction/technology位置，方向MO1/MT2、technology表NoService0/CDMA1/GSM2/UMTS3/LTE4/TDSCDMA5/Unknown6/UnknownTech2 7；call_type细分、offset5语义和offset6仍未闭合，不默认填0。`1929bfc`是CallConfigItem writer，不能借作CallList依据。未新增CallList发布。
+- **编译边界**：host C++17 `clang++ -c` 与新header C11严格syntax最终均exit0（`host-final.exit` / `c-header-final.exit`）；真实recipe `Builder.compile_one()`的`X9Baseband.cpp.o` / `sweet_x9_gpu_dependencies.o`均True、exit0（`recipe-results.json` / `recipe-compile.exit`）。新增8项人工源码向量，**没有执行**；旧overflow向量改用完整RING6/u32，避免首个畸形progress就隔离而掩盖FIFO容量。静态复核另补CALL inbox poison时不能grant/flush注册，立即终止host等待、保持物理token drain。日志在树`x9/out/call-handover-compile/`，原件/派生asm在`x9/out/call-status-analysis/`。接下来固定源码kernel-only；尚无full kernel/CI/boot或设备结果。
+- **仍未完成**：VOICE09仍不宣布；CallList46七字段/号码/END原因、生产DIAL运行profile与admission、MT动作、handover后ID迁移、通话专用audio及短信端到端验收未闭合，**无最终通话短信boot.img**。不要求用户再拨号/补来电，不把注册Result0当voice-ready。
+
 ### 5.7 2026-11-13 音频：ADSP 自动 dsp-boot 镜像（分支 feat/audio-dsp-boot，worktree `.worktrees/audio-dsp-boot`）
 
 - feat/audio-bounded-fdt 已 ff 合入 main（`b25f4ca`），worktree/分支已删；`android-callsms-20261113`、`shimtest`、fdt2/3/4 的 usb-log 移到本 worktree 的 `x9/out/`。
