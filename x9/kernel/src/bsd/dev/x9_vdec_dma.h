@@ -44,11 +44,12 @@ int x9_vdec_dma_retire(struct x9_vdec_dma *, const struct x9_mm_smmu_install_io 
 int x9_vdec_dma_write_private(struct x9_vdec_dma *, uint32_t offset,
                                const uint8_t *, uint32_t bytes);
 /* Native arena suballocation, with per-buffer CPU/cache ownership. Existing
- * <=16MiB arena/256-scatter bounds remain implementation limits, NOT device
- * capabilities. Up to 256 live slices, no physical-contiguity assumption.
+ * <=512MiB arena/4096-scatter bounds remain implementation limits, NOT device
+ * capabilities. Page/table ledgers follow actual arena geometry, not the
+ * maximum. Up to 256 live slices, no physical-contiguity assumption.
  * Every slice owns complete 16K CPU pages (including zeroed padding), so PoC
  * maintenance cannot discard a neighbour's dirty bytes or a shared cacheline.
- * align must be a power of two, 16..16MiB; actual alignment is at least 16K.
+ * align must be a power of two, 16..512MiB; actual alignment is at least 16K.
  * Firmware SW padding (round_up(requested,128)+128) must be included in bytes
  * by its allocator BEFORE this call; protocol requested len stays separate.
  * Tokens are native boot-unique, never pointers or inferred device aliases.

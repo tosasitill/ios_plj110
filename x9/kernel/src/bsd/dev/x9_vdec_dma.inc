@@ -12,8 +12,11 @@ extern unsigned int pmap_cache_attributes(ppnum_t);
 extern void pmap_set_cache_attributes(ppnum_t, unsigned int);
 #define VDMA_MAGIC UINT64_C(0x583956444d413031)
 #define VDMA_CPU_BYTES 16384u
-#define VDMA_POOL_BYTES (X9_MM_SMMU_BUILD_MAX_TABLES * X9_MM_SMMU_TABLE_BYTES)
 #define VDMA_RAW_PAGES (X9_MM_SMMU_MAX_CHECK_BYTES / VDMA_CPU_BYTES)
+struct vdma_physical_page {
+    uint64_t pa;
+    uint32_t page, reserved;
+};
 struct vdma_slice_record {
     struct x9_vdec_dma_slice handle;
     uint32_t offset, state;
@@ -26,14 +29,16 @@ struct x9_vdec_dma {
     lck_mtx_t lock;
     struct x9_vdec_dma_request request;
     struct x9_mm_smmu_private_mapping map;
-    struct x9_mm_smmu_dma_span spans[X9_MM_SMMU_MAX_DMA_SPANS];
-    struct x9_mm_smmu_table_page pages[X9_MM_SMMU_BUILD_MAX_TABLES];
-    uint64_t raw_pa[VDMA_RAW_PAGES], pool_pa[VDMA_POOL_BYTES / VDMA_CPU_BYTES], cd_pa;
+    struct x9_mm_smmu_dma_span *spans;
+    struct x9_mm_smmu_table_page *pages;
+    struct vdma_physical_page *raw_index; /* sorted PA -> retained CPU page */
+    uint64_t *raw_pa, *pool_pa, cd_pa;
     vm_offset_t raw, pool, cd;
     uint64_t power_child;
     uint32_t raw_bytes, raw_pages, state, last_errno;
+    uint32_t span_capacity, table_capacity, pool_bytes, pool_pages, bitmap_words;
     struct vdma_slice_record *slices;
-    uint64_t occupied[VDMA_RAW_PAGES / 64];
+    uint64_t *occupied;
     uint32_t slice_count, client_refs;
     bool sliced, legacy_staged, shared_claim;
 };
@@ -80,6 +85,42 @@ static int vdma_alloc(vm_offset_t *va, uint32_t bytes)
                         VM_KERN_MEMORY_IOKIT) == KERN_SUCCESS ? 0 : ENOMEM;
 }
 
+/* In-place heap sort of a PRIVATE native index only. No sorting/rewriting
+ * ordered DMA spans, recursive kernel stack use or external sort dependency. */
+static void vdma_index_sift(struct vdma_physical_page *a, uint32_t count, uint32_t root)
+{
+    while (root < count / 2) {
+        uint32_t child = 2 * root + 1;
+        struct vdma_physical_page tmp;
+        if (child + 1 < count && a[child].pa < a[child + 1].pa) child++;
+        if (a[root].pa >= a[child].pa) break;
+        tmp = a[root]; a[root] = a[child]; a[child] = tmp;
+        root = child;
+    }
+}
+static void vdma_index_sort(struct x9_vdec_dma *d)
+{
+    uint32_t count = d->raw_pages;
+    for (uint32_t i = count / 2; i; i--) vdma_index_sift(d->raw_index,count,i-1);
+    for (uint32_t i = count; i > 1; i--) {
+        struct vdma_physical_page tmp = d->raw_index[0];
+        d->raw_index[0] = d->raw_index[i-1]; d->raw_index[i-1] = tmp;
+        vdma_index_sift(d->raw_index,i-1,0);
+    }
+}
+static const struct vdma_physical_page *vdma_index_find(const struct x9_vdec_dma *d,
+    uint64_t pa)
+{
+    uint32_t lo = 0, hi = d->raw_pages;
+    while (lo < hi) {
+        uint32_t mid = lo + (hi-lo) / 2;
+        if (d->raw_index[mid].pa <= pa) lo = mid+1;
+        else hi = mid;
+    }
+    if (!lo || pa-d->raw_index[lo-1].pa >= VDMA_CPU_BYTES) return NULL;
+    return &d->raw_index[lo-1];
+}
+
 static void vdma_free(struct x9_vdec_dma *d)
 {
     unsigned domain = vdma_domain_index(d->request.sid);
@@ -89,9 +130,15 @@ static void vdma_free(struct x9_vdec_dma *d)
     if (d->state != X9_MM_SMMU_UNEXPOSED && d->state != X9_MM_SMMU_RETIRED)
         panic("X9 VDEC: attempted to free exposed DMA storage");
     if (d->raw) kmem_free(kernel_map, d->raw, d->raw_bytes);
-    if (d->pool) kmem_free(kernel_map, d->pool, VDMA_POOL_BYTES);
+    if (d->pool) kmem_free(kernel_map, d->pool, d->pool_bytes);
     if (d->cd) kmem_free(kernel_map, d->cd, VDMA_CPU_BYTES);
     if (d->slices) kfree_type(struct vdma_slice_record, X9_VDEC_DMA_MAX_SLICES, d->slices);
+    if (d->spans) kfree_type(struct x9_mm_smmu_dma_span,d->span_capacity,d->spans);
+    if (d->pages) kfree_type(struct x9_mm_smmu_table_page,d->table_capacity,d->pages);
+    if (d->raw_index) kfree_type(struct vdma_physical_page,d->raw_pages,d->raw_index);
+    if (d->raw_pa) kfree_type(uint64_t,d->raw_pages,d->raw_pa);
+    if (d->pool_pa) kfree_type(uint64_t,d->pool_pages,d->pool_pa);
+    if (d->occupied) kfree_type(uint64_t,d->bitmap_words,d->occupied);
     lck_mtx_lock(&vdma_namespace_lock);
     if (vdma_domains[domain] == d) vdma_domains[domain] = NULL;
     lck_mtx_unlock(&vdma_namespace_lock);
@@ -104,34 +151,50 @@ static int vdma_backing(struct x9_vdec_dma *d)
 {
     uint64_t pa = 0;
     uint32_t bytes = 0;
+    uint32_t tables = 0;
     unsigned bits = d->map.context.table.output_bits;
     int e;
     if (d->magic != VDMA_MAGIC || !d->raw || !d->pool || !d->cd || !d->slices ||
+        !d->spans || !d->pages || !d->raw_pa || !d->pool_pa || !d->occupied ||
+        !d->raw_index ||
         !d->raw_pages || d->raw_pages > VDMA_RAW_PAGES ||
         d->raw_bytes != d->raw_pages * VDMA_CPU_BYTES ||
         d->raw_bytes != d->map.total_bytes || d->map.spans != d->spans ||
         d->map.pages != d->pages || !d->map.span_count ||
-        d->map.span_count > X9_MM_SMMU_MAX_DMA_SPANS ||
+        d->span_capacity != (d->raw_pages < X9_MM_SMMU_MAX_DMA_SPANS ?
+            d->raw_pages : X9_MM_SMMU_MAX_DMA_SPANS) ||
+        d->map.span_count > d->span_capacity ||
         !d->map.page_count || d->map.page_count > X9_MM_SMMU_BUILD_MAX_TABLES ||
         d->map.context.request.cd_pa != d->cd_pa) return EFAULT;
+    e = x9_mm_smmu_stage1_geometry(&d->map.query,d->raw_bytes,&tables);
+    if (e || d->table_capacity != tables || d->map.page_count != tables ||
+        d->pool_bytes != ((tables*4096+VDMA_CPU_BYTES-1) & ~(VDMA_CPU_BYTES-1)) ||
+        d->pool_pages != d->pool_bytes / VDMA_CPU_BYTES ||
+        d->bitmap_words != (d->raw_pages+63) / 64) return EFAULT;
     e = vdma_phys(d->cd, bits, &pa);
     if (!e && pa != d->cd_pa) e = ESTALE;
-    for (unsigned i = 0; i < VDMA_POOL_BYTES / VDMA_CPU_BYTES && !e; i++) {
+    for (unsigned i = 0; i < d->pool_pages && !e; i++) {
         e = vdma_phys(d->pool + (vm_offset_t)i * VDMA_CPU_BYTES, bits, &pa);
         if (!e && pa != d->pool_pa[i]) e = ESTALE;
         if (!e && pa == d->cd_pa) e = EFAULT;
         for (unsigned j = 0; j < i && !e; j++) if (pa == d->pool_pa[j]) e = EFAULT;
     }
-    for (unsigned i = 0; i < X9_MM_SMMU_BUILD_MAX_TABLES && !e; i++)
+    for (unsigned i = 0; i < d->table_capacity && !e; i++)
         if (d->pages[i].pa != d->pool_pa[i / 4] + (uint64_t)(i & 3) * 4096 ||
             d->pages[i].host != (uint8_t *)(d->pool + (vm_offset_t)i * 4096)) e = EFAULT;
+    /* A strictly sorted, complete index proves uniqueness in linear time.
+     * Validate its native page identities before using it for PA lookup. */
+    for (unsigned i = 0; i < d->raw_pages && !e; i++) {
+        const struct vdma_physical_page *p = &d->raw_index[i];
+        if (p->reserved || p->page >= d->raw_pages || p->pa != d->raw_pa[p->page] ||
+            (i && p->pa <= d->raw_index[i-1].pa)) e = EFAULT;
+    }
     for (unsigned i = 0; i < d->raw_pages && !e; i++) {
         e = vdma_phys(d->raw + (vm_offset_t)i * VDMA_CPU_BYTES, bits, &pa);
         if (!e && pa != d->raw_pa[i]) e = ESTALE;
         if (!e && pa == d->cd_pa) e = EFAULT;
-        for (unsigned j = 0; j < VDMA_POOL_BYTES / VDMA_CPU_BYTES && !e; j++)
+        for (unsigned j = 0; j < d->pool_pages && !e; j++)
             if (pa == d->pool_pa[j]) e = EFAULT;
-        for (unsigned j = 0; j < i && !e; j++) if (pa == d->raw_pa[j]) e = EFAULT;
     }
     /* Match each actual CPU page to the retained coalesced scatter list, not
      * merely to the first physical address of a virtual allocation. */
@@ -190,16 +253,34 @@ int x9_vdec_dma_create(const struct x9_vdec_dma_request *r, struct x9_vdec_dma *
     d->raw_bytes = (r->bytes + VDMA_CPU_BYTES - 1) & ~(VDMA_CPU_BYTES - 1);
     d->raw_pages = d->raw_bytes / VDMA_CPU_BYTES;
     d->map.query = (struct x9_mm_smmu_query){ .sid = r->sid, .iova = r->iova };
+    e = x9_mm_smmu_stage1_geometry(&d->map.query,d->raw_bytes,&d->table_capacity);
+    if (e) { vdma_free(d); return e; }
+    d->span_capacity = d->raw_pages < X9_MM_SMMU_MAX_DMA_SPANS ?
+        d->raw_pages : X9_MM_SMMU_MAX_DMA_SPANS;
+    d->pool_bytes = (d->table_capacity*4096+VDMA_CPU_BYTES-1) & ~(VDMA_CPU_BYTES-1);
+    d->pool_pages = d->pool_bytes / VDMA_CPU_BYTES;
+    d->bitmap_words = (d->raw_pages+63) / 64;
+    /* All lengths are recorded before allocation for partial-error cleanup.
+     * Even a large codec arena keeps the fixed owner small; no maximum-sized
+     * typed object or table/page array lives on the native kernel stack. */
+    d->spans = kalloc_type(struct x9_mm_smmu_dma_span,d->span_capacity,Z_WAITOK | Z_ZERO);
+    d->pages = kalloc_type(struct x9_mm_smmu_table_page,d->table_capacity,Z_WAITOK | Z_ZERO);
+    d->raw_pa = kalloc_type(uint64_t,d->raw_pages,Z_WAITOK | Z_ZERO);
+    d->raw_index = kalloc_type(struct vdma_physical_page,d->raw_pages,Z_WAITOK | Z_ZERO);
+    d->pool_pa = kalloc_type(uint64_t,d->pool_pages,Z_WAITOK | Z_ZERO);
+    d->occupied = kalloc_type(uint64_t,d->bitmap_words,Z_WAITOK | Z_ZERO);
+    if (!d->spans || !d->pages || !d->raw_pa || !d->raw_index ||
+        !d->pool_pa || !d->occupied) { vdma_free(d); return ENOMEM; }
     d->map.spans = d->spans; d->map.pages = d->pages;
     d->map.total_bytes = d->raw_bytes; d->map.access = r->access;
     e = vdma_alloc(&d->raw, d->raw_bytes);
-    if (!e) e = vdma_alloc(&d->pool, VDMA_POOL_BYTES);
+    if (!e) e = vdma_alloc(&d->pool, d->pool_bytes);
     if (!e) e = vdma_alloc(&d->cd, VDMA_CPU_BYTES);
     if (!e) e = vdma_phys(d->cd, oas[encoding], &d->cd_pa);
-    for (unsigned i = 0; i < VDMA_POOL_BYTES / VDMA_CPU_BYTES && !e; i++)
+    for (unsigned i = 0; i < d->pool_pages && !e; i++)
         e = vdma_phys(d->pool + (vm_offset_t)i * VDMA_CPU_BYTES,
                         oas[encoding], &d->pool_pa[i]);
-    for (unsigned i = 0; i < X9_MM_SMMU_BUILD_MAX_TABLES && !e; i++) {
+    for (unsigned i = 0; i < d->table_capacity && !e; i++) {
         d->pages[i].pa = d->pool_pa[i / 4] + (uint64_t)(i & 3) * 4096;
         d->pages[i].host = (uint8_t *)(d->pool + (vm_offset_t)i * 4096);
     }
@@ -208,16 +289,18 @@ int x9_vdec_dma_create(const struct x9_vdec_dma_request *r, struct x9_vdec_dma *
         e = vdma_phys(d->raw + (vm_offset_t)i * VDMA_CPU_BYTES,
                         oas[encoding], &d->raw_pa[i]);
         if (e) break;
+        d->raw_index[i] = (struct vdma_physical_page){d->raw_pa[i],i,0};
         if (n && d->spans[n - 1].expected_pa + d->spans[n - 1].bytes == d->raw_pa[i])
             d->spans[n - 1].bytes += VDMA_CPU_BYTES;
-        else if (n < X9_MM_SMMU_MAX_DMA_SPANS) {
+        else if (n < d->span_capacity) {
             d->spans[n] = (struct x9_mm_smmu_dma_span){ d->raw_pa[i], VDMA_CPU_BYTES, 0 };
             d->map.span_count++;
         } else e = ENOSPC; /* bounded scatter fragmentation, not an IOVA alias */
     }
+    if (!e) vdma_index_sort(d);
     if (!e) e = x9_mm_smmu_build_stage1(X9_MM_SMMU_STAGE1_4K36_ABI, &d->map.query,
         d->spans, d->map.span_count, d->raw_bytes, r->access, oas[encoding], d->pages,
-        X9_MM_SMMU_BUILD_MAX_TABLES, &tree);
+        d->table_capacity, &tree);
     context = (struct x9_mm_smmu_context_request){ r->epoch, d->cd_pa, r->sid, r->asid };
     if (!e) e = x9_mm_smmu_build_context(X9_MM_SMMU_CONTEXT_ABI, &r->regs,
                                            &context, &tree, &d->map.context);
@@ -237,18 +320,17 @@ static int vdma_resolve(struct x9_vdec_dma *d, uint64_t pa, uint32_t bytes,
         bytes <= VDMA_CPU_BYTES - (pa - d->cd_pa)) {
         *va = d->cd + (vm_offset_t)(pa - d->cd_pa); *kind = 1; return 0;
     }
-    for (unsigned i = 0; i < VDMA_POOL_BYTES / VDMA_CPU_BYTES; i++)
+    for (unsigned i = 0; i < d->pool_pages; i++)
         if (pa >= d->pool_pa[i] && pa - d->pool_pa[i] < VDMA_CPU_BYTES &&
             bytes <= VDMA_CPU_BYTES - (pa - d->pool_pa[i])) {
             *va = d->pool + (vm_offset_t)i * VDMA_CPU_BYTES +
                 (vm_offset_t)(pa - d->pool_pa[i]); *kind = 2; return 0;
         }
-    for (unsigned i = 0; i < d->raw_pages; i++)
-        if (pa >= d->raw_pa[i] && pa - d->raw_pa[i] < VDMA_CPU_BYTES &&
-            bytes <= VDMA_CPU_BYTES - (pa - d->raw_pa[i])) {
-            *va = d->raw + (vm_offset_t)i * VDMA_CPU_BYTES +
-                (vm_offset_t)(pa - d->raw_pa[i]); *kind = 3; return 0;
-        }
+    const struct vdma_physical_page *p = vdma_index_find(d,pa);
+    if (p && bytes <= VDMA_CPU_BYTES - (pa-p->pa)) {
+        *va = d->raw + (vm_offset_t)p->page * VDMA_CPU_BYTES +
+            (vm_offset_t)(pa-p->pa); *kind = 3; return 0;
+    }
     return ENOENT;
 }
 
@@ -261,7 +343,7 @@ static int vdma_exclude_private(struct x9_vdec_dma *d, uint64_t start, uint64_t 
     if (!bytes || start >= (UINT64_C(1) << 48) ||
         bytes > (UINT64_C(1) << 48) - start) return ERANGE;
     if (vdma_overlap(start, bytes, d->cd_pa)) return EACCES;
-    for (unsigned i = 0; i < VDMA_POOL_BYTES / VDMA_CPU_BYTES; i++)
+    for (unsigned i = 0; i < d->pool_pages; i++)
         if (vdma_overlap(start, bytes, d->pool_pa[i])) return EACCES;
     for (unsigned i = 0; i < d->raw_pages; i++)
         if (vdma_overlap(start, bytes, d->raw_pa[i])) return EACCES;

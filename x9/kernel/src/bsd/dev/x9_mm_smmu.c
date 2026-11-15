@@ -54,6 +54,27 @@ static int aperture(uint32_t sid, uint64_t iova, uint64_t bytes)
     return ENOTSUP;
 }
 
+int x9_mm_smmu_stage1_geometry(const struct x9_mm_smmu_query *q, uint32_t bytes,
+                               uint32_t *tables)
+{
+    uint64_t end;
+    int e;
+    if (!tables || (q && host_intersects(tables, sizeof(*tables), q, sizeof(*q))))
+        return EINVAL;
+    *tables = 0;
+    if (!q || !bytes || bytes > X9_MM_SMMU_MAX_CHECK_BYTES ||
+        (bytes & 4095) || (q->iova & 4095) || q->ssid_valid > 1 ||
+        (!q->ssid_valid && q->ssid)) return EINVAL;
+    e = aperture(q->sid, q->iova, bytes);
+    if (e) return e;
+    end = q->iova + bytes;
+    if (end > BIT(36)) return ERANGE;
+    *tables = 1 + (uint32_t)(((end - 1) >> 30) - (q->iova >> 30) + 1) +
+        (uint32_t)(((end - 1) >> 21) - (q->iova >> 21) + 1);
+    if (*tables > X9_MM_SMMU_BUILD_MAX_TABLES) { *tables = 0; return E2BIG; }
+    return 0;
+}
+
 int x9_mm_smmu_build_stage1(uint32_t abi, const struct x9_mm_smmu_query *query,
                             const struct x9_mm_smmu_dma_span *spans, uint32_t span_count,
                             uint32_t total_bytes, uint32_t access,
@@ -93,7 +114,7 @@ int x9_mm_smmu_build_stage1(uint32_t abi, const struct x9_mm_smmu_query *query,
         query->ssid_valid > 1 || (!query->ssid_valid && query->ssid)) return EINVAL;
     if (output_bits != 32 && output_bits != 36 && output_bits != 40 &&
         output_bits != 42 && output_bits != 44 && output_bits != 48) return ENOTSUP;
-    e = aperture(query->sid, query->iova, total_bytes);
+    e = x9_mm_smmu_stage1_geometry(query, total_bytes, &needed);
     if (e) return e;
     end = query->iova + total_bytes; /* no wrap after aperture */
     if (end > BIT(36)) return ERANGE;
@@ -102,7 +123,6 @@ int x9_mm_smmu_build_stage1(uint32_t abi, const struct x9_mm_smmu_query *query,
     base3 = query->iova >> 21;
     n2 = (uint32_t)(((end - 1) >> 30) - base2 + 1);
     n3 = (uint32_t)(((end - 1) >> 21) - base3 + 1);
-    needed = 1 + n2 + n3;
     if (page_count < needed) return ENOSPC;
     desc_bytes = (uint64_t)span_count * sizeof(*spans);
     page_desc_bytes = (uint64_t)page_count * sizeof(*pages);
@@ -446,8 +466,9 @@ int x9_mm_smmu_check_mapping(const struct x9_mm_smmu_regs *r,
     e = aperture(q->sid, q->iova, bytes);
     if (e) return failed(out, e);
     query = *q;
-    /* Unaligned first/last page can require 4097 visits for 16MiB at 4K. */
-    for (unsigned n = 0; *checked < bytes && n < 4097; n++) {
+    /* Include both partial ends without retaining the old 16MiB walk ceiling. */
+    uint32_t visits = bytes / 4096 + 2;
+    for (unsigned n = 0; *checked < bytes && n < visits; n++) {
         uint64_t remaining;
         query.iova = q->iova + *checked;
         e = x9_mm_smmu_translate(r, reader, &query, out);
@@ -630,7 +651,7 @@ static int check_private(struct install_view *view,
     reader.ranges[1].start = view->map->context.request.cd_pa;
     reader.ranges[1].bytes = 64;
     reader.range_count = 2;
-    /* 16 used tree pages plus STE/CD may exceed the inspector range bound;
+    /* Used tree pages plus STE/CD may exceed the inspector range bound;
      * the callback enforces exact addresses, so one encompassing read range
      * is used for the pages, without permitting reads outside those pages. */
     for (uint32_t i = 0; i < view->map->page_count; i++) {
@@ -659,6 +680,8 @@ static int tree_valid(const struct x9_mm_smmu_private_mapping *m)
     uint32_t n3 = (uint32_t)(((end - 1) >> 21) - base3 + 1);
     uint64_t attr = 3 | BIT(10) | (UINT64_C(3) << 8) | BIT(53) | BIT(54);
     uint64_t limit;
+    uint32_t span = 0;
+    uint64_t span_offset = 0;
     if (1 + n2 + n3 != m->page_count || m->context.table.output_bits > 48 ||
         m->context.table.output_bits < 32) return EINVAL;
     limit = BIT(m->context.table.output_bits);
@@ -678,15 +701,17 @@ static int tree_valid(const struct x9_mm_smmu_private_mapping *m)
             } else {
                 uint64_t va = ((base3 + p - 1 - n2) << 21) + (uint64_t)index * 4096;
                 if (va >= first && va < end) {
-                    uint64_t off = va - first;
-                    for (uint32_t s = 0; s < m->span_count; s++) {
-                        if (off < m->spans[s].bytes) {
-                            uint64_t pa = m->spans[s].expected_pa + off;
-                            if (pa >= limit || 4096 > limit - pa) return ERANGE;
-                            expected = pa | attr;
-                            break;
-                        }
-                        off -= m->spans[s].bytes;
+                    /* L3 pages and entries are visited in increasing IOVA
+                     * order. Retain one scatter cursor: do not rescan all
+                     * earlier spans for each of up to131072 leaf entries. */
+                    if (span >= m->span_count ||
+                        span_offset >= m->spans[span].bytes) return EINVAL;
+                    uint64_t pa = m->spans[span].expected_pa + span_offset;
+                    if (pa >= limit || 4096 > limit - pa) return ERANGE;
+                    expected = pa | attr;
+                    span_offset += 4096;
+                    if (span_offset == m->spans[span].bytes) {
+                        span++; span_offset = 0;
                     }
                 }
             }
@@ -695,7 +720,7 @@ static int tree_valid(const struct x9_mm_smmu_private_mapping *m)
             if (le64(m->pages[p].host + (uint64_t)index * 8) != expected) return EINVAL;
         }
     }
-    return 0;
+    return span == m->span_count && !span_offset ? 0 : EINVAL;
 }
 
 static int mapping_valid(const struct x9_mm_smmu_private_mapping *m,

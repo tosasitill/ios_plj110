@@ -332,13 +332,14 @@ static int owner_private(struct owner_lease *l,const struct x9_mm_smmu_private_m
         const struct owner_lease *other=&o->leases[n];
         if(other==l || !other->mapping)continue;
         const struct x9_mm_smmu_private_mapping *b=other->mapping;
-        struct x9_mm_smmu_range ar[1+X9_MM_SMMU_BUILD_MAX_TABLES];
-        ar[0]=(struct x9_mm_smmu_range){m->context.request.cd_pa,64};
-        for(unsigned j=0;j<m->page_count;j++)ar[j+1]=(struct x9_mm_smmu_range){m->pages[j].pa,4096};
+        /* Visit CD/tree scalars directly: table capacity must not create a
+         * multi-KiB stack array in a native controller operation. */
         for(unsigned j=0;j<=m->page_count;j++) {
-            if(owner_overlap(ar[j].start,ar[j].bytes,b->context.request.cd_pa,64))return EACCES;
-            for(unsigned k=0;k<b->page_count;k++)if(owner_overlap(ar[j].start,ar[j].bytes,b->pages[k].pa,4096))return EACCES;
-            for(unsigned k=0;k<b->span_count;k++)if(owner_overlap(ar[j].start,ar[j].bytes,b->spans[k].expected_pa,b->spans[k].bytes))return EACCES;
+            uint64_t start=j?m->pages[j-1].pa:m->context.request.cd_pa;
+            uint64_t bytes=j?4096:64;
+            if(owner_overlap(start,bytes,b->context.request.cd_pa,64))return EACCES;
+            for(unsigned k=0;k<b->page_count;k++)if(owner_overlap(start,bytes,b->pages[k].pa,4096))return EACCES;
+            for(unsigned k=0;k<b->span_count;k++)if(owner_overlap(start,bytes,b->spans[k].expected_pa,b->spans[k].bytes))return EACCES;
         }
         for(unsigned j=0;j<m->span_count;j++) {
             const struct x9_mm_smmu_dma_span *s=&m->spans[j];

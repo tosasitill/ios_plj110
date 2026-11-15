@@ -10,8 +10,8 @@
 #define X9_MM_SMMU_HFRP_SID 0xa0u
 #define X9_MM_SMMU_CODEC_SID 0xb0u
 #define X9_MM_SMMU_MAX_RANGES 16u
-#define X9_MM_SMMU_MAX_CHECK_BYTES (16u * 1024u * 1024u)
-#define X9_MM_SMMU_MAX_DMA_SPANS 256u /* inspector bound, NOT a hardware limit */
+#define X9_MM_SMMU_MAX_CHECK_BYTES (512u * 1024u * 1024u)
+#define X9_MM_SMMU_MAX_DMA_SPANS 4096u /* implementation bound, NOT a hardware limit */
 #define X9_MM_SMMU_READ 1u
 #define X9_MM_SMMU_WRITE 2u
 #define X9_MM_SMMU_UNPRIV 4u
@@ -72,7 +72,8 @@ int x9_mm_smmu_translate(const struct x9_mm_smmu_regs *,
 
 /* Verify an existing contiguous mapping against expected provider-owned PA
  * and required READ/WRITE/UNPRIV bits; never installs or repairs a mapping.
- * Max16MiB/4097 leaf visits. Provider splits scattered DMA pages into spans.
+ * Max512MiB, at most bytes/4096+2 leaf visits. Provider splits scattered DMA
+ * pages into spans; the walk budget follows the actual requested length.
  * Reports first failing offset (bytes on success), and that translation's
  * trace. Permissions are conservative (no HA/HD permission promotion). MAIR
  * is the raw CD attribute, not an assertion about MTK STE attribute overrides.
@@ -91,8 +92,8 @@ struct x9_mm_smmu_dma_span {
 /* Check ONE complete existing IOVA extent against an ordered scatter list.
  * Derived IOVA addresses are query.iova + cumulative bytes, so descriptions
  * cannot leave gaps, duplicate an IOVA slice or extend past total_bytes. All
- * descriptions (1..256) are validated BEFORE the first table read: nonempty,
- * reserved0, <=48-bit PA without wrap, sum exactly total_bytes<=16MiB, and
+ * descriptions (1..4096) are validated BEFORE the first table read: nonempty,
+ * reserved0, <=48-bit PA without wrap, sum exactly total_bytes<=512MiB, and
  * no physically overlapping backing. This narrow subset rejects aliases;
  * no page-alignment/PA-contiguity is inferred from a first SG DMA address.
  * Visits <=4096+span_count leaf translations for a 4K minimum granule.
@@ -121,7 +122,8 @@ int x9_mm_smmu_check_scatter(const struct x9_mm_smmu_regs *,
 
 #define X9_MM_SMMU_STAGE1_4K36_ABI 1u
 #define X9_MM_SMMU_TABLE_BYTES 4096u
-#define X9_MM_SMMU_BUILD_MAX_TABLES 16u
+/* 512MiB at an unaligned 2MiB/1GiB start: L1 + up to2 L2 + up to257 L3. */
+#define X9_MM_SMMU_BUILD_MAX_TABLES 260u
 struct x9_mm_smmu_table_page {
     uint64_t pa; /* real provider-owned PA, NOT IOVA; no PA-to-pointer cast */
     uint8_t *host; /* private, writable, UNINSTALLED host storage, exactly 4KiB */
@@ -130,12 +132,16 @@ struct x9_mm_smmu_table_build {
     uint64_t ttbr;
     uint32_t table_count, mapped_bytes, input_bits, output_bits;
 };
+/* Exact private table capacity for the complete same-SID aperture. No table
+ * reads, allocation, hardware authority or modification of the query. */
+int x9_mm_smmu_stage1_geometry(const struct x9_mm_smmu_query *, uint32_t bytes,
+                               uint32_t *table_count);
 /* Construct a private three-level stage1 tree (4K, input36, start level1),
  * never modify installed tables or publish a CD/STE. A 16KiB CPU allocation
  * may supply separately described 4KiB subpages; PA is independently supplied
  * and must fit the explicit hardware/context output_bits (32/36/40/42/44/48).
  * ONE contiguous IOVA extent, full scatter backing, 4KiB address/length
- * alignment, same captured SID aperture and <=16MiB bound. No aliases/gaps or
+ * alignment, same captured SID aperture and <=512MiB bound. No aliases/gaps or
  * intersecting backing/table PAs; source descriptors, result and ALL host
  * table buffers must be stable and mutually disjoint. All validation including
  * table capacity occurs BEFORE any table byte is changed. Error clears result
