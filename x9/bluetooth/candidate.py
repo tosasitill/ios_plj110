@@ -19,18 +19,21 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 X9 = ROOT / 'x9'
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from launch_cache import CACHE_NAME, CACHE_LIMIT, derive, validate_pair
+from package import JOBS
 XNU_TAG = 'xnu-8796.141.3'
 XNU_COMMIT = '1b191cb58250d0705d8a51287127505aa4bc0789'
 JOB_NAMES = ('com.apple.bluetoothd.plist', 'com.apple.BlueTool.plist')
 LIMITATIONS = [
     'built_complete/candidate_ready describe compilation and packaging only, NOT controller readiness',
     'root payload is NOT installed; obtain explicit user confirmation before root modification',
-    'root staging requires the live root preflight, exact original-job comparison and preserved backups',
+    'root staging requires live root preflight, exact original jobs/cache comparison and preserved backups',
     'sleep/resume is closed-transport-only; no active-link idle sleep, wake-enhance or system-suspend claim',
     'SSPM/profile/ownership, UART PIO/escape throughput and Android vendor completions remain hardware-unverified on XNU',
     '20H392 native injection, initialization, scan, pairing, BLE, A2DP, HFP and SCO require actual iOS validation',
     'MTK SCO framing is implemented; native voice-route/WBS vendor equivalence still requires real MT6653 evidence',
-    'boot image alone does not install the H4 bridge or the two Program-only launch job overrides',
+    'boot image alone does not install the H4 bridge or independent/cached Program-only launch job overrides',
     'keep bootloaders/recovery/modem/persist/partition backups intact; device boot is performed by the user',
 ]
 
@@ -135,6 +138,7 @@ def build(a):
     config = repository_path(a.config)
     boot_config = repository_path(a.boot_config)
     launchd = repository_path(a.launchd_source)
+    launchd_cache = repository_path(a.launchd_cache_source)
     spec = importlib.util.spec_from_file_location('x9_candidate_builder', X9 / 'build/build.py')
     builder = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(builder)
@@ -175,6 +179,9 @@ def build(a):
         if child.is_symlink() or not child.is_dir() or not child.resolve().is_relative_to(dxb):
             raise ValueError('isolated compiler tree must be self-contained')
     jobs = {name: original_bytes(launchd / name) for name in JOB_NAMES}
+    cache_bytes = original_bytes(launchd_cache, CACHE_LIMIT)
+    cache_candidate, _, _ = derive(cache_bytes, JOBS)
+    cache_contract = validate_pair(cache_bytes, cache_candidate, JOBS)
     commit = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
     if subprocess.run(['git', '-C', str(ROOT), 'diff', '--quiet', 'HEAD', '--', 'x9']).returncode:
         raise ValueError('commit completed x9 source changes before building the final candidate')
@@ -195,6 +202,7 @@ def build(a):
         job_snapshot.mkdir()
         for name, data in jobs.items():
             (job_snapshot / name).write_bytes(data)
+        (job_snapshot / CACHE_NAME).write_bytes(cache_bytes)
         with (out / 'candidate-build.log').open('w') as log:
             run([sys.executable, '-I', X9 / 'build/prepare-local.py', '--check'], log)
             patches = verify_isolated_source(dxb, a.abi, out, log)
@@ -204,7 +212,8 @@ def build(a):
                  '--name', a.name + '/kernel', '--jobs', str(a.jobs)], log)
             stage = 'native-userland-and-launch-jobs'
             run([sys.executable, '-I', X9 / 'bluetooth/build.py', '--developer-dir', cfg['developer_dir'],
-                 '--launchd-source', job_snapshot, '--out', runtime], log)
+                 '--launchd-source', job_snapshot, '--launchd-cache-source', job_snapshot / CACHE_NAME,
+                 '--out', runtime], log)
             stage = 'offline-root-payload'
             run([sys.executable, '-I', X9 / 'bluetooth/package.py', '--runtime', runtime, '--out', payload], log)
             stage = 'single-boot-image'
@@ -228,9 +237,11 @@ def build(a):
                 'stageable': False, 'root_installed': False,
                 'root_requires_user_confirmation': True, 'device_operation_performed': False,
                 'power_interface': 'kern.x9_bt_power', 'power_lifecycle': 'closed-transport-only',
+                'launchd_cache': cache_contract,
                 'paths': {'kernel': 'kernel/kernel.development.sweet', 'runtime': 'runtime',
                           'root_payload': 'root-payload/root-payload.json', 'boot_image': 'boot/boot.img',
                           'config': 'inputs/local.json', 'boot_config': 'inputs/boot.json',
+                          'launchd_cache_original': 'inputs/launchd/' + CACHE_NAME,
                           'build_log': 'candidate-build.log'},
                 'component_exit_status': {'full_overlay_kernel': 0, 'native_userland_jobs': 0,
                                           'root_payload': 0, 'boot_image': 0},
@@ -273,6 +284,8 @@ if __name__ == '__main__':
     ap.add_argument('--boot-config', type=Path, required=True, help='complete production device boot arguments')
     ap.add_argument('--boot-arg', action='append', default=[], help='explicit additional token; repeatable')
     ap.add_argument('--launchd-source', type=Path, required=True, help='original 20H392 launch job directory')
+    ap.add_argument('--launchd-cache-source', type=Path, required=True,
+                    help='explicit repo-local original 20H392 version-7 launchd service cache')
     ap.add_argument('--abi', choices=('macos', 'ios'), default='macos')
     ap.add_argument('--jobs', type=int, default=min(8, os.cpu_count() or 4))
     a = ap.parse_args()

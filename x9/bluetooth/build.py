@@ -9,14 +9,25 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+from launch_cache import CACHE_NAME, CACHE_LIMIT, derive, validate_pair
 
 
-def launch_jobs(source, out):
+def launch_jobs(source, cache_source, out):
     """Derive candidate Program overrides; never install or edit stock jobs."""
     # Private original plists are explicit repo-local inputs, not implicit
     # dependencies on a mounted root or on another checkout's experiment.
     source = source.resolve()
     source.relative_to(HERE.parent.parent)
+    if cache_source.is_symlink():
+        raise ValueError('original launchd cache leaf must not be a symlink')
+    cache_source = cache_source.resolve()
+    if not (cache_source.is_relative_to(HERE.parent.parent) or
+            cache_source.is_relative_to((HERE.parent.parent / '.local').resolve())):
+        raise ValueError('launchd cache must be an explicit repo-local private original')
+    if (not cache_source.is_file() or cache_source.is_symlink() or
+            not 0 < cache_source.stat().st_size <= CACHE_LIMIT):
+        raise ValueError('expected bounded regular original launchd cache')
     jobs = (('com.apple.bluetoothd', '/usr/sbin/bluetoothd', [],
              'com.apple.server.bluetooth', '/usr/libexec/X9BluetoothLaunch'),
             ('com.apple.BlueTool', '/usr/sbin/BlueTool', ['-R'],
@@ -36,6 +47,9 @@ def launch_jobs(source, out):
                 service not in job['MachServices']):
             raise ValueError(f'Unexpected original 20H392 launch job: {label}')
         validated.append((label, data, job, replacement))
+    cache_original = cache_source.read_bytes()
+    cache_candidate, _, _ = derive(cache_original, jobs)
+    cache_contract = validate_pair(cache_original, cache_candidate, jobs)
     originals.mkdir(parents=True, exist_ok=True)
     candidates.mkdir(parents=True, exist_ok=True)
     for label, data, job, replacement in validated:
@@ -45,8 +59,12 @@ def launch_jobs(source, out):
         job['Program'] = replacement
         (candidates / (label + '.plist')).write_bytes(
             plistlib.dumps(job, fmt=plistlib.FMT_BINARY, sort_keys=False))
+    (originals / CACHE_NAME).write_bytes(cache_original)
+    (candidates / CACHE_NAME).write_bytes(cache_candidate)
     return {'source': str(source.relative_to(HERE.parent.parent)),
             'originals': originals.name, 'candidates': candidates.name,
+            'cache': dict(cache_contract, original=originals.name + '/' + CACHE_NAME,
+                          candidate=candidates.name + '/' + CACHE_NAME),
             'installed': False}
 
 
@@ -56,9 +74,13 @@ def main():
     ap.add_argument('--out', type=Path, required=True)
     ap.add_argument('--launchd-source', type=Path,
                     help='explicit repo-local original 20H392 launch plist directory; emit candidates only')
+    ap.add_argument('--launchd-cache-source', type=Path,
+                    help='explicit private original version-7 /System/Library/xpc/launchd.plist')
     ap.add_argument('--kernel-objects', action='store_true',
                     help='also compile only Bluetooth/shared-power overlay objects, no link/boot/tests')
     a = ap.parse_args()
+    if bool(a.launchd_source) != bool(a.launchd_cache_source):
+        raise ValueError('both original launch jobs AND their authoritative launchd cache are required')
     dev = a.developer_dir
     if dev is None:
         dev = Path(json.loads((HERE.parent / 'build/local.json').read_text())['developer_dir'])
@@ -88,7 +110,7 @@ def main():
                         str(HERE / (name + '.c')), str(HERE / 'X9Bootstrap16.c'),
                         '-o', str(target)], check=True)
         subprocess.run(['/usr/bin/codesign', '--force', '--sign', '-', '--timestamp=none', str(target)], check=True)
-    launchd = launch_jobs(a.launchd_source, a.out) if a.launchd_source else None
+    launchd = launch_jobs(a.launchd_source, a.launchd_cache_source, a.out) if a.launchd_source else None
     # Deliberately not a stageable runtime: vendor routing and complete board
     # initialization are separate required gates. No installed plist changes.
     (a.out / 'build.json').write_text(json.dumps({
