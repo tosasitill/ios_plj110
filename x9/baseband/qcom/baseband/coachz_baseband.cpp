@@ -1424,6 +1424,43 @@ extern "C" int coachz_baseband_qrtr(uint32_t dst_port, uint32_t src_node, uint32
 }
 
 #ifdef COACHZ_NATIVE_DPMAIF
+// NAS03's original actual QMUX allocation, not x9q's differently based epoch.
+static uint64_t bb_x9_nas_registration_identity(uint32_t dst_port,uint32_t src_node)
+{
+  const uint32_t slot=dst_port-CBQ_PORT_BASE;
+  if(!bb_lock||dst_port<CBQ_PORT_BASE||slot>=CBQ_MAX_CLIENTS)return 0;
+  uint64_t generation=0;IOLockLock(bb_lock);
+  const cbq_client &c=bb_qmux.client[slot];const cbq_server *srv=cbq_server_find(&bb_qmux,3);
+  if(c.used&&!c.release_pending&&!c.private_service&&c.service==3&&c.channel<2&&srv&&srv->node==src_node)
+    generation=c.generation;
+  IOLockUnlock(bb_lock);return generation;
+}
+// Only the retained terminal NAS03 reply. Allocate outside this mutex;
+// success transfers owned and is a queue receipt, NOT network registration.
+static bool bb_x9_nas_registration_result(uint32_t dst_port,uint32_t src_node,uint64_t generation,
+                                         const uint8_t *sdu,uint32_t size,uint8_t *owned,uint32_t room)
+{
+  const uint32_t slot=dst_port-CBQ_PORT_BASE;
+  if(!bb_lock||!generation||!sdu||!owned||dst_port<CBQ_PORT_BASE||slot>=CBQ_MAX_CLIENTS||
+     size!=14||room!=CBQ_HDR+size||sdu[0]!=CBQ_QMI_RESPONSE||cbq_rd16(sdu+3)!=3||
+     cbq_rd16(sdu+5)!=7||sdu[7]!=2||cbq_rd16(sdu+8)!=4||cbq_rd16(sdu+10)>1||
+     (!!cbq_rd16(sdu+10))!=(!!cbq_rd16(sdu+12)))return false;
+  bool admitted=false;IOLockLock(bb_lock);
+  const cbq_client &c=bb_qmux.client[slot];
+  if(c.used&&!c.release_pending&&!c.private_service&&c.service==3&&c.channel<2&&c.generation==generation){
+    const cbq_result r=cbq_from_modem(&bb_qmux,dst_port,src_node,sdu,size,owned,room);
+    if(r.kind==CBQ_TO_HOST&&r.service==3&&r.len==room){
+      bb_channel *ch=&bb_ch[r.channel==0?CBH_QMUX1:CBH_QMUX2];
+      if(ch->count<BB_QUEUE){
+        ch->frames[(ch->head+ch->count++)%BB_QUEUE]={r.len,owned};ch->frames_out++;ch->bytes_out+=r.len;
+        IOLockWakeup(bb_lock,ch,false);
+        if(ch->reads_waiting&&bb_complete_call)thread_call_enter(bb_complete_call);
+        admitted=true;
+      }else ch->frames_dropped++;
+    }
+  }
+  IOLockUnlock(bb_lock);return admitted;
+}
 // Capture the actual QMUX allocation separately from the QMI owner's local
 // generation (the two counters do not have the same origin). A WMS37 result
 // may outlive its physical ACK token, but never its original client.
