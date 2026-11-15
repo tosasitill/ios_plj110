@@ -852,6 +852,7 @@ static void x9q_del(uint32_t local){
  x9n_del(slot);
  x9w_del(slot);
  x9m_del(slot);
+ x9c_del(slot);
  x9ds_del(slot);
  uint64_t generation=x9q_clients[slot].generation+1;bzero(&x9q_clients[slot],sizeof(x9q_clients[slot]));x9q_clients[slot].generation=generation;
  for(unsigned i=0;i<X9Q_JOBS;i++)if(x9q_jobs[i].used&&!x9q_jobs[i].probe&&x9q_jobs[i].local==local){
@@ -864,6 +865,7 @@ static void x9q_poll(){
  x9w_poll();
  x9n_poll();
  x9m_poll();
+ x9c_poll();
  x9ds_poll();
  /* One bounded read-only pass even when D22 never creates a SIM2 client.
   * It does not send QMI responses, change radio policy or manufacture a SIM. */

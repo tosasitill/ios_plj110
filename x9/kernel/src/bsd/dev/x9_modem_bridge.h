@@ -22,7 +22,8 @@ int x9_md_at_online(void);
 uint64_t x9_md_mipc_submit(const uint8_t *frame, uint32_t length);
 /* take: 1 complete frame, 0 pending, -1 unavailable/capacity, -2 an owned
  * oversized SMS0608 has been fully drained. -2 consumes that token once;
- * no partial/synthetic CNF is returned and other MIPC services stay online. */
+ * no partial/synthetic CNF is returned and other MIPC services stay online.
+ * -3 consumes a guarded dial rejected locally before physical TX, not a CNF. */
 int x9_md_mipc_take(uint64_t token, uint8_t *frame, uint32_t capacity, uint32_t *length);
 int x9_md_mipc_event(uint8_t *frame, uint32_t capacity, uint32_t *length);
 int x9_md_mipc_online(void);
@@ -47,6 +48,19 @@ int x9_md_mipc_message_reply_take(uint32_t token, int *result);
  * identity tombstones remain until boot, even after success. No retries;
  * only eight retained commands until Android retirement rules are proven. */
 int x9_md_mipc_call_event(uint8_t *frame, uint32_t capacity, uint32_t *length, uint32_t *token);
+/* Native MO observation, copied under the MD lock. No registration, request,
+ * number disclosure or fabricated idle baseline. GET_STATUS count is valid
+ * only after a complete owned090a; ECPI state requires full4901 frames.
+ * Returns1 copied, -1 unavailable; zero-initialized state means UNKNOWN. */
+struct x9cw_outbound_state;
+int x9_md_mipc_call_snapshot(struct x9cw_outbound_state *state);
+/* Atomic outbound admission against a previously copied native baseline.
+ * Same unique writer/token allocator, but checks the epoch/revision/count
+ * again under the MD lock and at writer selection. One guarded staging
+ * attempt per boot; lease survives CNF/client loss and blocks other CALL
+ * mutations. No production release/action policy is enabled by this API. */
+uint64_t x9_md_mipc_call_dial_submit(const uint8_t *frame, uint32_t length,
+                                   const struct x9cw_outbound_state *baseline);
 int x9_md_mipc_call_reply(uint32_t token, unsigned approve, unsigned include_cause, uint32_t cause);
 int x9_md_mipc_call_reply_take(uint32_t token, int *result);
 /* x9_dual_sim=1: two fixed physical slots, indexed 0/1. Read-only AT via

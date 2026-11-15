@@ -12,6 +12,7 @@ static LCK_GRP_DECLARE(x9_mi_grp,"x9_mipc_bridge");
 static LCK_MTX_DECLARE(x9_mi_lock,&x9_mi_grp);
 struct x9_mi_slot {
  uint64_t token; unsigned state,len; uint16_t id,txid; uint8_t mask,cancelled;
+ uint8_t call_guard;uint64_t call_revision;
  uint8_t frame[X9_MIPC_FRAME_MAX];
 };
 static struct x9_mi_slot x9_mi_slots[X9_MI_SLOTS];
@@ -26,6 +27,11 @@ static int x9mi_enabled(void){return x9_at_enabled()&&sweet_x9_arg("x9_mipc",1);
 unsigned x9_md_sim_count(void){return sweet_x9_arg("x9_dual_sim",0)==1?2:1;}
 #include "x9_mipc_messages.inc"
 #include "x9_mipc_calls.inc"
+static int x9mi_call_mutation(unsigned id){return id==0x901||id==0x905||id==0x907;}
+static int x9mi_call_busy(void){
+ for(unsigned i=0;i<X9_MI_SLOTS;i++)if(x9_mi_slots[i].state&&x9mi_call_mutation(x9_mi_slots[i].id))return 1;
+ return 0;
+}
 /* libmtk-ril RfxSender::atSendCommandFullNolockAck, 0x23dcf4..0x23dd58:
  * mipc_msg_init(3, 1<<slot), add_tlv(8100, strlen(command)+1), sync, get 8100.
  * Slot table 0x150d1c = {2,4,8}; Android slot 0 defaults to mask 1.
@@ -96,7 +102,7 @@ int x9_md_mipc_online(void){
  lck_mtx_lock(&x9_mi_lock);int on=x9_mi_online&&!x9_mi_poisoned;
  lck_mtx_unlock(&x9_mi_lock);return on&&x9_md_at_online();
 }
-uint64_t x9_md_mipc_submit(const uint8_t *p,uint32_t n){
+static uint64_t x9mi_submit(const uint8_t *p,uint32_t n,const struct x9cw_outbound_state *baseline){
  if(!p||n<16||n>X9_MIPC_FRAME_MAX||x9mi_u16(p+14)!=n-16||
    p[0]!=0x84||p[1]!=0x19||p[2]!=0x54||p[3]!=0x24||
    p[4]||p[5]||p[6]||p[7]||p[9])return 0;
@@ -115,7 +121,7 @@ uint64_t x9_md_mipc_submit(const uint8_t *p,uint32_t n){
   * yet; DIAL mirrors the measured PLJ110 SIM2 profile (2026-11-15),
   * ANSWER{} and HANGUP{MODE0,ID} mirror Android captures.
   * RSP8902 can ONLY use the original CMD owner, never this txid allocator. */
- else if(id==0x901||id==0x905||id==0x907){if(!x9cw_request(p,n,id,x9_md_sim_count()))return 0;}
+ else if(id==0x901||id==0x905||id==0x907||id==0x909){if(!x9cw_request(p,n,id,x9_md_sim_count()))return 0;}
  else if(id==0x101){if(!x9mi_attach_request(p,n))return 0;}
  /* Read-only per-SIM provider-name query. MD 91345dbc/91345e9e:
   * 0429 -> 042a; exact PLMN ASCII + NUL, LAC0 (MD current area), OPTION1.
@@ -205,12 +211,29 @@ uint64_t x9_md_mipc_submit(const uint8_t *p,uint32_t n){
  else if((p[8]!=1&&(p[8]!=2||x9_md_sim_count()!=2))||
     (id!=0x201&&id!=0x203&&id!=0x205&&id!=0x219&&id!=0x307))return 0;
  uint64_t token=0;lck_mtx_lock(&x9_mi_lock);
+ if(x9mi_call_mutation(id)&&x9_mc_dial_token){lck_mtx_unlock(&x9_mi_lock);return 0;}
+ if(baseline){
+  const struct x9cw_outbound_state *s=&x9_mc_outbound;
+  if(id!=0x901||x9_mc_poisoned||s->blocked||!s->count_known||s->native_count||
+     (s->seen&&!s->ended)||s->epoch!=baseline->epoch||s->revision!=baseline->revision||x9mi_call_busy()){
+   lck_mtx_unlock(&x9_mi_lock);return 0;
+  }
+ }
  if(x9_mi_online&&!x9_mi_poisoned&&x9_mi_next<65534)for(unsigned i=0;i<X9_MI_SLOTS;i++)if(!x9_mi_slots[i].state){
   struct x9_mi_slot *s=&x9_mi_slots[i];bzero(s,sizeof(*s));
   token=++x9_mi_next;s->token=token;s->txid=(uint16_t)token;s->id=(uint16_t)id;s->mask=p[8];s->len=n;
+  if(baseline){s->call_guard=1;s->call_revision=baseline->revision;x9_mc_dial_token=token;}
+  else if(x9mi_call_mutation(id)||(id==0x909&&p[8]==2))x9cw_outbound_invalidate(&x9_mc_outbound);
   memcpy(s->frame,p,n);s->frame[12]=(uint8_t)token;s->frame[13]=(uint8_t)(token>>8);s->state=1;break;
  }
  lck_mtx_unlock(&x9_mi_lock);return token;
+}
+uint64_t x9_md_mipc_submit(const uint8_t *p,uint32_t n){return x9mi_submit(p,n,NULL);}
+uint64_t x9_md_mipc_call_dial_submit(const uint8_t *p,uint32_t n,
+                                   const struct x9cw_outbound_state *baseline){
+ if(!baseline||!baseline->count_known||baseline->native_count||baseline->blocked||
+    !p||n<16||x9mi_u16(p+10)!=0x901)return 0;
+ return x9mi_submit(p,n,baseline);
 }
 uint64_t x9_md_sim_at_submit(unsigned sim,const char *cmd){
  if(!cmd||sim>=x9_md_sim_count()||x9_md_sim_count()!=2)return 0;
@@ -242,6 +265,9 @@ int x9_md_mipc_take(uint64_t token,uint8_t *out,uint32_t room,uint32_t *len){
   }else if(s->state==5){
    /* A complete oversized SMS CNF was drained, not synthesized/truncated. */
    *len=0;found=-2;bzero(s,sizeof(*s));
+  }else if(s->state==6){
+   /* Guard rejected BEFORE the unique writer. Not a fabricated MD CNF. */
+   found=-3;bzero(s,sizeof(*s));
   }break;
  }
  lck_mtx_unlock(&x9_mi_lock);return found;
@@ -367,6 +393,8 @@ static void x9mi_rx(const uint8_t *p,unsigned n){
    for(;i<X9_MI_SLOTS;i++){
     struct x9_mi_slot *s=&x9_mi_slots[i];
     if(s->state==2&&s->txid==tx&&id==(unsigned)s->id+1){
+     if(!s->cancelled&&s->id==0x909&&s->mask==2&&!x9mi_call_busy())
+      x9mc_current(x9_mi_stream,need,s->call_revision);
      if(s->cancelled)bzero(s,sizeof(*s));
      else{s->len=need;memcpy(s->frame,x9_mi_stream,need);s->state=3;}break;
     }
@@ -406,7 +434,16 @@ static void x9mi_tick(void){
   struct x9_mi_slot *s=NULL;
   for(unsigned i=0;i<X9_MI_SLOTS;i++)if(x9_mi_slots[i].state==1&&
      (!s||x9_mi_slots[i].token<s->token))s=&x9_mi_slots[i];
-  if(s){s->state=2;len=s->len;id=s->id;tx=s->txid;memcpy(frame,s->frame,len);}
+  if(s){
+   if(s->call_guard&&(x9_mc_poisoned||x9_mc_outbound.blocked||!x9_mc_outbound.count_known||
+      x9_mc_outbound.native_count||x9_mc_outbound.revision!=s->call_revision)){
+    s->state=6;s->len=0;bzero(s->frame,sizeof(s->frame));
+   }else{
+    if(s->id==0x909&&s->mask==2)s->call_revision=x9_mc_outbound.revision;
+    if(x9mi_call_mutation(s->id))x9cw_outbound_invalidate(&x9_mc_outbound);
+    s->state=2;len=s->len;id=s->id;tx=s->txid;memcpy(frame,s->frame,len);
+   }
+  }
  }
  lck_mtx_unlock(&x9_mi_lock);if(!len)return;
  if(reply_token||call_token){id=x9mi_u16(frame+10);tx=x9mi_u16(frame+12);}

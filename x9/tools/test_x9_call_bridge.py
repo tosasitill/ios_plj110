@@ -22,6 +22,8 @@ CASES = (
     'late_cnf', 'sms_priority', 'staged_ios',
     'dial_golden', 'dial_invalid', 'dial_whitelist',
     'dial_roundtrip', 'dial_tx_failure', 'dial_cnf_invalid',
+    'progress_framing', 'outbound_states', 'current_arrays', 'status_fence',
+    'dial_join_order', 'ios_join', 'ios_timeout', 'ios_deleted', 'dial_presend_fence',
 )
 
 
@@ -42,7 +44,7 @@ class CallBridgeTests(unittest.TestCase):
             raise RuntimeError(p.stderr)
         # Compile the shared header in C as well as C++ (kernel transport is C).
         c = OUT / 'codec_c.c'
-        c.write_text('#include "' + str(ROOT / 'x9/kernel/src/bsd/dev/x9_call_wire.h') +
+        c.write_text('#include "' + str(ROOT / 'x9/kernel/src/bsd/dev/x9_call_state.h') +
                      '"\nint main(void){return !x9cw_frame(0,0,0);}\n')
         subprocess.run(compiler + ['-x', 'c', '-std=c11', '-Wall', '-Wextra', '-Werror',
                                    '-fsyntax-only', str(c)], check=True, capture_output=True)

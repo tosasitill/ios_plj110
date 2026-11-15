@@ -8,6 +8,8 @@
 | --- | --- |
 | iOS 请求 codec | VOICE20 普通拨号有界解码，21 挂断、22 接听严格 tag1/u8；动作要求显式已验证的 route / 单通话映射 |
 | Android 请求形状 | 新增本机卡2实测 `0901` 的六个 TLV；接听 `0907 {}`；挂断 `0905 {MODE100/u32=0, ID101/u32}` |
+| 拨出状态生产者 | 完整 `4901` 的真实 ID / ECPI reducer；已实现、单对象可编译；未有完整真机 wire 重放或 iOS 运行验收 |
+| 空快照与异步确认 | 完整 owned `090a` 数组解析；`0902 + 新 MO epoch` 汇合生成 VOICE20/tag10/u8；只接 staging API，没有生产 admission 调用者 |
 | 来电 CMD | `8901` 的字段、长度和唯一 tag 验证；号码只留在有界内存，不打印 |
 | 来电许可 RSP | `8902` 的正确 approve/call-id 字段；显式调用才构造，保留原 txid / 原 mask |
 | 物理 transport | 独立 call inbox / CMD owner，复用原有唯一 MD tick writer；SMS ACK 保持优先 |
@@ -15,9 +17,9 @@
 | 默认启动 | **不发布 QMI VOICE09、不注册 CALL CMD/IND、不发通话请求、不自动 approve，无强制开启 bootarg** |
 
 `X9Calls.inc` 当前只明确拒绝意外直达 VOICE 请求。它不会成功应答初始化并伪装服务已可用。
-`x9cw_action()` 只生成报文；没有呼叫状态来源与映射生产者，因此生产路径不会调用它提交动作。
+`x9cw_action()` 仍只生成报文；拨出 ID/state producer 已补，但动作 admission / CNF / CallList 发布未接，所以生产路径不会调用它提交动作。
 `x9cw_dial()` 同样仅编码：必须显式提供已验证的卡2 profile、无现存通话；当前没有 profile provider。
-原 transport 已允许这一严格 DIAL 子集并由宿主测试闭合发送/CNF，但没有 iOS 自动提交通话的调用者。
+原 transport 已允许这一严格 DIAL 子集；上一版宿主测试闭合发送/CNF。新增异步 join / 空快照 / 发送前 guard 目前只有编译结果，没有执行验证，也没有 iOS 自动拨号调用者。
 
 ## 原件证据（2026-11-15）
 
@@ -82,8 +84,10 @@ RIL `RmmCallControlCommonRequestHandler::requestDial` `0x381410..0x3817a0`：
 - `0x3815f8..608` 103来自 `getDomain(bool,bool)`；104来自 `getEccPreferredDomain()`。
 - `0x3816e4..6ec` 108是 CLIR/u8，不能遗漏，不能沿用MD省略字段默认值。
 
-`getDomain` `0x387690`、`getEccPreferredDomain` `0x387a30` 依赖实时状态；测得0
-**不代表所有卡/网络/拨号类型默认0**。本阶段 `x9cw_dial_profile` 由调用者显式提供，
+`getDomain` `0x387690` 的初值为 IMS-request bool ? 0 : 5；第二个 bool 为非紧急时直接返回该初值。
+`onHandleRequest` `0x380ebc..0x380ed8` 传入的第三个 `requestDial` bool/w4决定 IMS 请求分支；
+这不是“所有 domain0 都依赖网络状态”。`getEccPreferredDomain` `0x387a30` 仍查询运行状态；测得0
+**不代表所有卡/网络/拨号类型默认0，也不证明 iOS 已有 IMS 请求上下文**。本阶段 `x9cw_dial_profile` 由调用者显式提供，
 只接受 `{sim=1,address_type=2,call_type=1,domain=0,ecc_domain=0,clir=0}`；还没有生产策略选择器。
 不把 QMI CallType 数值直接当 MIPC type，也不把 CNF result当通话状态或ID。
 
@@ -96,18 +100,67 @@ RIL `mipcCallStateToRilType` `0x386180..0x38619c` 只将0..5原值写入 `RIL_Ca
 其余失败；**该函数不能用来解释4901/tag109的ECPI event**。
 `handleCallProgressIndicationMessage` `0x37ca80..0x37cef0` 分别取100、101、102、103、105、109、10a、
 8104、810b，另经 `handleECPI` 转换；CALL_STATUS_IND 与 GET_STATUS array / iOS CallList 并非相同类型。
-完整状态/ID producer仍是后续拨出桥的必要工作，不要求用户再测来电。
+这些内部类型不能混用。完整状态/ID producer 已按下节补充，不要求用户再测来电。
 
 音频日志已证明该场景实际走 `SpeechDriverOpenDSP::SpeechOn/ScpSpeechOn`，48 kHz、Aurisys
 scenario7 / UL3 / DL1 / ref2；拨出后新加载 `lib_aurisys_opve.so`、`libaurisysdemo.so`、
 `libspeechparser_vendor.so` 已按新 maps补抓。**这些不是可直接照抄的iOS音频配置，也不是双向声音验收。**
 
+### 2026-11-15 拨出状态 / ID 与异步汇合（新增，编译完成，执行未验）
+
+原始六条4901 DUMP尾部仍截断，不补零、不从日志造完整包；但同次 **RIL解析日志**保存了事件。
+卡2观察顺序为 `130 → 2 → 132 → 6 → 6 → 133`：初始130的mode0/direction0，后续接通段mode20。
+实测IND header的mask为低位2；仅适用于此IND，**不能推广到8901 CMD的高位mask20**。
+
+实际 `RtmCallController::handleImsCallInfoUpdate` `0x268db0..0x269dd0`：
+130经`assignImsCallId` `0x26ecc0..0x26ee58`绑定MD真实ID（`setCallId`），内部state1；
+2设state2，132/6设state3，133设state8并remove。
+`RfxImsCallInfo::getRilCallState` `0x199ee0` 使用 `0x125e20` 的七项表 `{2,2,3,0,1,4,5}`；
+内部state1/2/3分别得到RIL DIALING2/ALERTING3/ACTIVE0，state8不在此映射表内。
+所以4901/tag109不是RIL状态，也不能从0902/result0创建ID。
+
+Apple `vs::callList::asString(CallEventStatus)` `0x1f1939f8c` 的跳表/字符串证明
+ORIGINATION1、ALERTING5、CONVERSATION3、END9。
+新增 reducer采用 `130→1、2→5、132/6→3、133→9`；ID保持原u32，只有1..255才能作Apple u8，超范围不截断。
+仅接受已观察的MO子集；未知/外来ID/多通话隔离，END保留身份，迟到6不复活。
+**完整4901 parser尚未执行重放，这个映射是实测事件+静态consumer依据，不是iOS实跑结果。**
+
+MD `0x913257b6..0x913258e4` 的完整4901：100/101/102/103/105/107/109各u32，
+8104/NUL≤128、810b/NUL≤512、可选10a/u32（源u16）；**8106虽带高bit却是固定408B binary**。
+整体长度、全部字段、重复/未知tag校验后才更新状态，日志号码不作为解析输入。
+
+RIL `requestGetCurrentCalls` `0x381354..0x381398` 发送 `0909 {}`，无selector/default TLV。
+MD `0x9131d574..0x9131d86c` 的090a **无条件写 result0/u32 + count100/u32**（失败不当空列表），再写11数组：
+10b ID、10c direction、10d mode、10e state、10f multiparty、110 toa、8111 number/NUL≤128、
+112 priority、113 flags、8114 binary408、115 aux；非string/binary项均u32。
+libmipc `add_array` `0x12310` / `add_idx` `0x12420` 和MD `0x9141b68a/0x9141b77c` 证明数组是
+**16B len0 descriptor + 独立元素TLV**，不是packed count*u32：reserved8B=0、base/u16、count/u16，
+元素tag=base+i并继承parent高bit；count0不产生descriptor。
+MD快照包含IMS模式；RIL后续过滤20..39是CS消费策略。新增parser限7条，拒绝重复ID、孤儿/重叠tag、截断；**没有真实090a完整样本，未执行验证**。
+
+空闲不凭END或零初始化猜测：仅完整owned卡2 GET_STATUS证明`count_known`；
+查询TX时记录revision，事件/调用mutation穿越查询则旧CNF不更新快照，失败清空已知count。
+异步staging保留原iOS txn/msg、client generation/SIM、真实MD token及epoch。
+只有同token0902成功且出现下一MO epoch的真实ID才构造18B响应；Apple
+`handleNormalVoiceDialResp` `0x1f1ac2a34` 读成功响应 **tag10/u8 CallIdentifier**，不是请求tag1。
+若先CNF或先状态均等待汇合；本地60s guard不是猜MD定时器。超时、删client、换generation/SIM都不能让迟到结果复活host请求；私有号码buffer清零。
+
+MD锁内检查空快照/revision/epoch及未退休CALL mutation，writer选择时再检查；过期排队dial返回本地`take=-3`，不发物理请求、不伪造CNF。
+guarded lease跨CNF/超时保留到boot，阻止其它CALL mutation，当前**只容许一次staging尝试，无后续挂断/release admission**；不是最终通话容量。
+writer和RX均在现有MD worker，唯一物理writer不变、SMS ACK优先不变。
+这些是代码边界，**未证明MD ring在途状态与所有时序race已经闭合**。
+
+七字节CallList的其他字段、普通VOICE bootstrap/BindSubscription44/IND注册与运行profile/audio尚未完整核实。
+因此不发CallList IND、不注册CALL、不启动GET_STATUS、不发布VOICE09；新增`x9c_dial_submit`没有生产调用者。
+原SMS/IMSA流不作本轮修改，也不把短信注册当语音可用。
+
 ## 代码与生命周期
 
 - `x9/kernel/src/bsd/dev/x9_call_wire.h`：共用、freestanding C/C++ codec。
+- `x9/kernel/src/bsd/dev/x9_call_state.h`：完整progress/current parser、MO reducer与dial join。
 - `x9/kernel/src/bsd/dev/x9_mipc_calls.inc`：独立 call inbox、CMD response owner。
 - `x9/kernel/src/bsd/dev/x9_mipc_bridge.inc`：严格动作白名单 / RX 分发 / 单 writer 接线。
-- `x9/kernel/src/iokit/Kernel/arm/X9Calls.inc`：iOS 未启用边界，直接 VOICE 返回 unsupported。
+- `x9/kernel/src/iokit/Kernel/arm/X9Calls.inc`：bounded observer + 未启用的异步staging；直接VOICE仍unsupported。
 
 CMD owner 状态：收到 → 已交付 → 显式许可排队 → 物理发送 → 结果可取 → 身份 tombstone。
 成功/失败都保留 tombstone 到 boot，不为同一个原始 txid 再发响应；payload 在物理 TX 完成后清零。
@@ -119,14 +172,7 @@ CMD owner 状态：收到 → 已交付 → 显式许可排队 → 物理发送 
 
 ## 离线重放与验证
 
-```bash
-# 使用现代 sanitizer runtime；本机 Xcode15 的 ASan 在当前 macOS 启动时会崩溃。
-export CXX='/opt/homebrew/opt/llvm@22/bin/clang++ -isysroot /Users/tosasitill/Downloads/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX14.0.sdk'
-python3 -m unittest x9/tools/test_x9_call_bridge.py -v
-
-# 只读恢复本版本 MD 函数边界；符号存在本身不是状态/策略证据。
-python3 x9/tools/md_call_evidence.py
-```
+按`x9/AGENTS.md`本轮只编译，**不额外运行测试脚本/套件**。下面24项结果属于上一版9483481，不能套用到新增代码。
 
 24 项宿主测试编译**实际生产 transport / codec**，使用人工测试向量，不需要 `.local`、设备或网络。
 每个用例用新进程，从干净 owner 状态开始。覆盖独立 inbox、fragmented RX、审批字段 golden bytes、原 txid/mask、
@@ -143,9 +189,16 @@ SMS ACK 优先、未决 mutation / late CNF、重复/变更 CMD、容量隔离�
 第一次后者缺 gitignored `x9_mdota.inc`；从主 checkout 复制**现有**生成头后重编，两对象成功。
 没有运行 `Builder.compile()` / kernel link / boot pack / CI；没有修改 modem/NV/设备。
 
+本轮新增9项人工回归源码（合计33项含VOICE服务表守卫）及host QMI/client/clock stub；仅编译，没有执行。
+覆盖完整progress、ECPI序列、真实ID范围、数组/错误形状、查询revision fence、join、client删除/超时与pre-TX拒绝。
+`Builder.compile_one()` 第二次开始真正源码编译：C对象通过，C++对象因namespace类型不一致失败；
+将共享state header移到`X9Baseband.cpp`全局scope后两对象通过。最终收尾编译结果见NOTES。
+host `clang++ -c` 和header C11 `-fsyntax-only -Wall -Wextra -Werror`通过，不代表人工用例执行通过。
+日志/原始分析在gitignored `x9/out/call-outbound-compile/`、`x9/out/call-outbound-analysis/`，不入git。
+
 ## 下一步的必要输入
 
-1. RIL与卡2拨出材料已补齐；先离线闭合完整 CALL_STATUS / GET_STATUS framing、ID producer和iOS单通话状态映射，再产生真实profile。
+1. 状态/ID/GET_STATUS子集已实现，但完整真实wire及parser执行未验；继续核实CallList其他六字节与生产profile，不用截断DUMP填补。
 2. 核实普通VOICE初始化/订阅与每请求响应；0902不能替代带真实CallIdentifier的QMI20成功。
 3. 从刚抓回的实际音频实现核实 MD/SCP voice 上下行路由，再分别验收信令和双向声音。
 4. 用户本轮不方便来电测试，来电/多通话暂不扩展，不再以补来电为当前拨出工作的前提。

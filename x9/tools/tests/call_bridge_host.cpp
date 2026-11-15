@@ -24,8 +24,17 @@ static int x9md_tx(unsigned a,unsigned b,unsigned c,unsigned d,unsigned e,const 
 }
 #include "../../kernel/src/bsd/dev/x9_mipc_bridge.inc"
 static const unsigned X9BB_PORT_BASE=0x2000;
-static const uint16_t X9Q_UNSUPPORTED=94;
+static const unsigned X9BB_NODE=1,CBQ_PORT_BASE=0x4000,CBQ_MAX_CLIENTS=8;
+static const uint16_t X9Q_UNSUPPORTED=94,X9Q_INTERNAL=3,X9Q_NOT_READY=52;
+static struct {uint64_t generation;uint8_t sim_slot;} x9q_clients[CBQ_MAX_CLIENTS];
+static uint64_t fake_ms;
+static uint64_t x9q_ms(){return fake_ms;}
 static unsigned qmi_replies,qmi_error;
+static uint8_t qmi_response[64];static unsigned qmi_response_len;
+static void coachz_baseband_qrtr(uint32_t local,uint32_t node,uint32_t port,const void *p,unsigned n){
+ assert(local>=CBQ_PORT_BASE&&node==X9BB_NODE&&port==X9BB_PORT_BASE+9&&n<=sizeof(qmi_response));
+ memcpy(qmi_response,p,n);qmi_response_len=n;qmi_replies++;
+}
 struct x9q_packet {
  x9q_packet(const uint8_t *,uint16_t error){qmi_error=error;}
  void send(uint32_t,uint32_t){qmi_replies++;}
@@ -302,12 +311,135 @@ static void staged_ios(){
  assert(x9c_request(1,X9BB_PORT_BASE+9,dial,n)&&qmi_replies==2&&qmi_error==94);
  x9mi_tick();assert(!writes&&!x9_mi_next&&!x9_mc_next);
 }
+/* Full synthetic MD frames, never padded/reconstructed Android DUMP tails.
+ * These cases have been added for future authorized execution; compilation
+ * alone does NOT validate the new parser or lifecycle. */
+static unsigned progress_frame(uint8_t *p,unsigned event,unsigned id=7,unsigned mode=20,unsigned mask=2){
+ x9cw_header(p,512,0x4901,mask,0);unsigned at=16;
+ const unsigned tags[]={0x100,0x101,0x102,0x103},values[]={id,0,mode,129};
+ for(unsigned i=0;i<4;i++,at+=8)x9cw_scalar(p+at,tags[i],values[i],4);
+ x9cw_put16(p+at,0x8104);x9cw_put16(p+at+2,1);at+=8;
+ x9cw_scalar(p+at,0x105,0x100000,4);at+=8;
+ x9cw_put16(p+at,0x8106);x9cw_put16(p+at+2,408);p[at+4]=0xff;at+=416;
+ x9cw_scalar(p+at,0x107,0,4);at+=8;x9cw_scalar(p+at,0x109,event,4);at+=8;
+ x9cw_scalar(p+at,0x10a,16,4);at+=8;
+ x9cw_put16(p+at,0x810b);x9cw_put16(p+at+2,1);at+=8;
+ assert(at==512);return at;
+}
+static void rx_progress(unsigned event,unsigned id=7,unsigned mode=20){
+ uint8_t p[512];progress_frame(p,event,id,mode);x9mi_rx(p,sizeof(p));
+}
+static void progress_framing(){
+ uint8_t p[520];struct x9cw_progress c;progress_frame(p,130,7,0);
+ assert(x9cw_progress(p,512,&c)&&c.id==7&&c.event==130&&c.mask==2&&c.has_cause&&c.cause==16);
+ for(unsigned n=0;n<512;n++)assert(!x9cw_progress(p,n,&c));
+ p[50]=2;assert(!x9cw_progress(p,512,&c));progress_frame(p,130,7,0);
+ x9cw_scalar(p+512,0x8100,1,4);x9cw_put16(p+14,504);assert(!x9cw_progress(p,520,&c));
+}
+static void outbound_states(){
+ struct x9cw_outbound_state s={};struct x9cw_progress c={};unsigned id;
+ assert(!x9cw_outbound_id(&s,&id)&&!s.count_known);
+ c.id=7;c.mask=2;c.event=130;assert(x9cw_outbound_apply(&s,&c)==1&&s.ios_state==1&&s.epoch==1);
+ c.mode=20;c.event=2;assert(x9cw_outbound_apply(&s,&c)==1&&s.ios_state==5);
+ c.event=132;assert(x9cw_outbound_apply(&s,&c)==1&&s.ios_state==3);
+ c.event=6;assert(x9cw_outbound_apply(&s,&c)==1&&x9cw_outbound_apply(&s,&c)==1);
+ assert(x9cw_outbound_id(&s,&id)&&id==7);
+ c.event=133;assert(x9cw_outbound_apply(&s,&c)==1&&s.ended&&s.ios_state==9&&!s.count_known);
+ c.event=6;assert(x9cw_outbound_apply(&s,&c)==0&&s.ended&&!x9cw_outbound_id(&s,&id));
+ c.event=130;c.mode=0;assert(x9cw_outbound_apply(&s,&c)==1&&s.epoch==2);
+ c.id=8;assert(x9cw_outbound_apply(&s,&c)==-1&&s.blocked);
+ s={};c.id=256;assert(x9cw_outbound_apply(&s,&c)==1&&!x9cw_outbound_id(&s,&id));
+ s={};c.mask=0x20;assert(x9cw_outbound_apply(&s,&c)==0&&!s.seen); // no CMD mask normalization
+}
+static unsigned current_frame(uint8_t *p,unsigned count,unsigned result=0){
+ assert(count<=1);x9cw_header(p,704,0x90a,2,0);unsigned at=32;
+ x9cw_scalar(p+16,0,result,4);x9cw_scalar(p+24,0x100,count,4);
+ const unsigned tags[]={0x10b,0x10c,0x10d,0x10e,0x10f,0x110,0x8111,0x112,0x113,0x8114,0x115};
+ const uint32_t words[]={7,0,20,0,0,129,0,0,0x100000,0,0};
+ if(count)for(unsigned j=0;j<11;j++){
+  unsigned base=(0x7000-j*8)|(tags[j]&0x8000);
+  x9cw_put16(p+at,tags[j]);x9cw_put16(p+at+12,base);x9cw_put16(p+at+14,count);at+=16;
+  if(j==6){x9cw_put16(p+at,base);x9cw_put16(p+at+2,1);at+=8;}
+  else if(j==9){x9cw_put16(p+at,base);x9cw_put16(p+at+2,408);p[at+4]=0xff;at+=416;}
+  else{x9cw_scalar(p+at,base,words[j],4);at+=8;}
+ }
+ x9cw_put16(p+14,at-16);return at;
+}
+static void current_arrays(){
+ uint8_t p[712];struct x9cw_current c;unsigned n=current_frame(p,1);
+ assert(n==704&&x9cw_current(p,n,&c)&&c.count==1&&c.calls[0].id==7&&c.calls[0].mode==20);
+ for(unsigned k=0;k<n;k++)assert(!x9cw_current(p,k,&c));
+ p[44]^=0x80;assert(!x9cw_current(p,n,&c));n=current_frame(p,1);
+ p[46]=2;assert(!x9cw_current(p,n,&c));n=current_frame(p,1);
+ p[36]=1;assert(!x9cw_current(p,n,&c));n=current_frame(p,1);
+ x9cw_scalar(p+n,0x7001,1,4);x9cw_put16(p+14,n-8);assert(!x9cw_current(p,n+8,&c));
+ n=current_frame(p,0);assert(n==32&&x9cw_current(p,n,&c)&&!c.count&&!c.result);
+ n=current_frame(p,0,42);assert(x9cw_current(p,n,&c)&&c.result==42);
+}
+static void empty_baseline(){
+ uint8_t p[704],out[704];x9cw_header(p,16,0x909,2,0);
+ uint64_t t=x9_md_mipc_submit(p,16);assert(t);x9mi_tick();
+ unsigned n=current_frame(p,0);x9cw_put16(p+12,(unsigned)t);x9mi_rx(p,n);
+ uint32_t k;assert(x9_md_mipc_take(t,out,sizeof(out),&k)==1&&k==32);
+ struct x9cw_outbound_state s;assert(x9_md_mipc_call_snapshot(&s)==1&&s.count_known&&!s.native_count);
+}
+static void status_fence(){
+ uint8_t p[704],out[704];x9cw_header(p,16,0x909,2,0);
+ uint64_t t=x9_md_mipc_submit(p,16);assert(t);x9mi_tick();rx_progress(130,7,0);
+ unsigned n=current_frame(p,0);x9cw_put16(p+12,(unsigned)t);x9mi_rx(p,n);
+ uint32_t k;assert(x9_md_mipc_take(t,out,sizeof(out),&k)==1);
+ assert(!x9_mc_outbound.count_known&&!x9_mc_outbound.blocked&&x9_mc_outbound.seen);
+}
+static void dial_join_order(){
+ uint8_t q[64],p[24],r[18];unsigned n=dial_qmi(q);struct x9cw_outbound_state s={};
+ struct x9cw_dial_join j={};assert(!x9cw_dial_join_begin(&j,&s,&measured_route));
+ s.count_known=1;assert(x9cw_dial_join_begin(&j,&s,&measured_route)&&x9cw_dial_join_sent(&j,77));
+ x9cw_header(p,24,0x902,2,76);x9cw_scalar(p+16,0,0,4);
+ assert(!x9cw_dial_join_cnf(&j,p,24)&&!j.confirmed);
+ x9cw_put16(p+12,77);assert(x9cw_dial_join_cnf(&j,p,24));
+ assert(!x9cw_dial_join_response(&j,&s,q,n,r,18)); // CNF alone is not success
+ struct x9cw_progress c={};c.id=7;c.mask=2;c.event=130;assert(x9cw_outbound_apply(&s,&c)==1);
+ assert(x9cw_dial_join_response(&j,&s,q,n,r,18)==18&&r[0]==2&&r[14]==0x10&&r[17]==7);
+ assert(x9cw_u16(r+1)==x9cw_u16(q+1)&&x9cw_u16(r+3)==0x20&&x9cw_u16(r+5)==11);
+}
+static void ios_join(){
+ empty_baseline();uint8_t q[64],p[24];unsigned n=dial_qmi(q);x9q_clients[0].sim_slot=1;
+ assert(x9c_dial_submit(0,q,n,measured_route));uint64_t t=x9c_dial_job.token;x9mi_tick();
+ assert(!x9_md_mipc_submit(last_frame,last_length)); // staging lease blocks a second mutation
+ x9cw_header(p,24,0x902,2,(unsigned)t);x9cw_scalar(p+16,0,0,4);x9mi_rx(p,24);x9c_poll();
+ assert(!qmi_replies&&x9c_dial_job.used);rx_progress(130,7,0);x9c_poll();
+ assert(qmi_replies==1&&qmi_response_len==18&&qmi_response[17]==7&&x9c_dial_job.used);
+ x9c_poll();assert(qmi_replies==1&&!x9c_dial_submit(0,q,n,measured_route));
+}
+static void ios_timeout(){
+ empty_baseline();uint8_t q[64],p[24];unsigned n=dial_qmi(q);x9q_clients[0].sim_slot=1;
+ assert(x9c_dial_submit(0,q,n,measured_route));uint64_t t=x9c_dial_job.token;x9mi_tick();
+ fake_ms=60001;x9c_poll();assert(qmi_replies==1&&qmi_error==X9Q_NOT_READY&&x9c_dial_job.token==t);
+ x9cw_header(p,24,0x902,2,(unsigned)t);x9cw_scalar(p+16,0,0,4);x9mi_rx(p,24);
+ rx_progress(130,7,0);x9c_poll();assert(qmi_replies==1&&!x9c_dial_job.token&&x9c_dial_job.held);
+}
+static void ios_deleted(){
+ empty_baseline();uint8_t q[64],p[24];unsigned n=dial_qmi(q);x9q_clients[0].sim_slot=1;
+ assert(x9c_dial_submit(0,q,n,measured_route));uint64_t t=x9c_dial_job.token;x9mi_tick();
+ x9c_del(0);x9q_clients[0].generation++;x9cw_header(p,24,0x902,2,(unsigned)t);x9cw_scalar(p+16,0,0,4);
+ x9mi_rx(p,24);rx_progress(130,7,0);x9c_poll();assert(!qmi_replies&&!x9c_dial_job.token&&x9c_dial_job.used);
+}
+static void dial_presend_fence(){
+ empty_baseline();uint8_t q[64],out[24];unsigned n=dial_qmi(q);x9q_clients[0].sim_slot=1;
+ assert(x9c_dial_submit(0,q,n,measured_route));uint64_t t=x9c_dial_job.token;unsigned before=writes;
+ rx_progress(130,7,0);x9mi_tick();assert(writes==before);uint32_t k;
+ assert(x9_md_mipc_take(t,out,sizeof(out),&k)==-3&&!k);
+ assert(x9_md_mipc_take(t,out,sizeof(out),&k)==-1&&x9_mc_dial_token==t);
+}
 int main(int argc,char **argv){
  assert(argc==2);x9mi_online(1);
  struct {const char *name;void (*run)();} cases[]={
   {"codec_golden",codec_golden},{"codec_invalid",codec_invalid},{"action_codec",action_codec},
   {"dial_golden",dial_golden},{"dial_invalid",dial_invalid},{"dial_whitelist",dial_whitelist},
   {"dial_roundtrip",dial_roundtrip},{"dial_tx_failure",dial_tx_failure},{"dial_cnf_invalid",dial_cnf_invalid},
+  {"progress_framing",progress_framing},{"outbound_states",outbound_states},{"current_arrays",current_arrays},
+  {"status_fence",status_fence},{"dial_join_order",dial_join_order},{"ios_join",ios_join},
+  {"ios_timeout",ios_timeout},{"ios_deleted",ios_deleted},{"dial_presend_fence",dial_presend_fence},
   {"request_whitelist",request_whitelist},{"no_auto_policy",no_auto_policy},{"command_roundtrip",command_roundtrip},
   {"failure_retained",failure_retained},{"duplicate_pending",duplicate_pending},{"changed_duplicate",changed_duplicate},
   {"duplicate_replied",duplicate_replied},{"overflow_isolated",overflow_isolated},{"bounded_tombstones",bounded_tombstones},

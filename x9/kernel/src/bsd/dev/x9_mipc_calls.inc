@@ -4,7 +4,7 @@
  * Successful and failed CMD identities are retained until boot: retirement
  * across call-end / sequence reuse is not yet proven in Android's RIL.
  * Overflow quarantines ONLY calls. No payload/number/sequence diagnostics. */
-#include "x9_call_wire.h"
+#include "x9_call_state.h"
 #define X9_MC_SLOTS 8u
 struct x9_mc_slot {
  uint32_t token;unsigned state,len;int result;
@@ -14,11 +14,46 @@ struct x9_mc_slot {
 static struct x9_mc_slot x9_mc_slots[X9_MC_SLOTS];
 static uint32_t x9_mc_next;
 static unsigned x9_mc_poisoned;
+static struct x9cw_outbound_state x9_mc_outbound;
+/* A guarded staging attempt is retained for this boot, even after CNF.
+ * No production release/second-call lifecycle has been admitted yet. */
+static uint64_t x9_mc_dial_token;
+/* This callback receives only an OWNED GET_STATUS confirmation, never an
+ * unsolicited090a or a logger-derived reconstruction. No state/ID adoption
+ * from CS RIL states: the MO epoch still comes from full ECPI130. */
+static void x9mc_current(const uint8_t *p,unsigned n,uint64_t revision){
+ if(revision!=x9_mc_outbound.revision)return; /* in-flight status crossed an event/mutation */
+ struct x9cw_current c;
+ if(!x9cw_current(p,n,&c)){x9_mc_outbound.blocked=1;return;}
+ x9cw_outbound_invalidate(&x9_mc_outbound);
+ if(c.result)return;
+ x9_mc_outbound.count_known=1;x9_mc_outbound.native_count=c.count;
+ /* A complete snapshot conflicting with an active observed call is not a
+  * licence to erase it or reuse an ID. Preserve the identity and fail closed. */
+ if(x9_mc_outbound.seen&&!x9_mc_outbound.ended){
+  unsigned found=0;for(unsigned i=0;i<c.count;i++)if(c.calls[i].id==x9_mc_outbound.native_id)found++;
+  if(!found)x9_mc_outbound.blocked=1;
+ }
+}
+int x9_md_mipc_call_snapshot(struct x9cw_outbound_state *out){
+ if(!out)return -1;
+ bzero(out,sizeof(*out));int rc=-1;lck_mtx_lock(&x9_mi_lock);
+ if(!x9_mc_poisoned&&!x9_mi_poisoned&&x9_mi_online){*out=x9_mc_outbound;rc=1;}
+ lck_mtx_unlock(&x9_mi_lock);return rc;
+}
 static int x9mc_id(unsigned id){return id==0x8901||id==0x4901||id==0x4902||id==0x4904;}
 static void x9mc_rx(const uint8_t *p,unsigned n,unsigned id,unsigned tx){
  if(!x9mc_id(id)||x9_mc_poisoned)return;
  if(!x9cw_frame(p,n,id)){x9_mc_poisoned=1;return;}
+ if(id==0x4901){
+  struct x9cw_progress c;
+  if(!x9cw_progress(p,n,&c)){x9_mc_outbound.blocked=1;x9_mc_poisoned=1;return;}
+  (void)x9cw_outbound_apply(&x9_mc_outbound,&c);
+ }
  if(id==0x8901){
+  /* Outside this MO-only policy. Never preserve a usable empty baseline
+   * across an incoming approval command or guess its SIM normalization. */
+  x9_mc_outbound.count_known=0;x9_mc_outbound.blocked=1;
   struct x9cw_incoming c;
   if(!x9cw_incoming(p,n,&c)){x9_mc_poisoned=1;return;}
   for(unsigned i=0;i<X9_MC_SLOTS;i++){

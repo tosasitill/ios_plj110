@@ -10,6 +10,7 @@
 #include <kern/clock.h>
 #include <mach/mach_time.h>
 #include "../../../bsd/dev/x9_modem_bridge.h"
+#include "../../../bsd/dev/x9_call_state.h" // C ABI state must live outside the owner namespace
 #include <kern/sched_prim.h>
 #include <mach/mach_types.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>

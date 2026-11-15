@@ -116,8 +116,9 @@ static inline int x9cw_qmi_dial(const uint8_t *p,unsigned n,struct x9cw_dial_num
 }
 /* A captured route/profile is supplied EXPLICITLY by the caller, not chosen
  * from QMI CallType or a modem default. Only PLJ110 SIM2's measured profile
- * is implemented. RIL getDomain/getEccPreferredDomain depend on runtime state;
- * no production provider yet establishes that context in iOS. */
+ * is implemented. Non-emergency getDomain returns0 on the IMS request branch;
+ * getEccPreferredDomain still reads runtime state. No production provider yet
+ * establishes the complete IMS/profile context in iOS. */
 struct x9cw_dial_profile {
  unsigned sim;uint32_t address_type,call_type,domain,ecc_domain;unsigned clir;
 };
@@ -175,6 +176,7 @@ static inline int x9cw_dial_cnf(const uint8_t *p,unsigned n,uint32_t *result){
 static inline int x9cw_request(const uint8_t *p,unsigned n,unsigned id,unsigned sim_count){
  if(!x9cw_frame(p,n,id)||(p[8]!=1&&(p[8]!=2||sim_count!=2)))return 0;
  if(id==0x901)return x9cw_native_dial(p,n,sim_count);
+ if(id==0x909)return n==16; /* RIL381354..398: read-only GET_STATUS{} */
  if(id==0x907)return n==16; /* archived Android ANSWER: no TLVs */
  if(id!=0x905||n!=32||x9cw_u16(p+16)!=0x100||x9cw_u16(p+18)!=4||
     x9cw_u32(p+20)||x9cw_u16(p+24)!=0x101||x9cw_u16(p+26)!=4||!x9cw_u32(p+28))return 0;
