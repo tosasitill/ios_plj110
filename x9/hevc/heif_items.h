@@ -15,6 +15,11 @@
 #define X9_HEIF_MAX_REFERENCES 1024u
 #define X9_HEIF_MAX_ITEM_DATA (8u * 1024u * 1024u)
 #define X9_HEIF_MAX_ITEM_METADATA (4u * 1024u * 1024u)
+/* Independent item-data dependency/expansion implementation limits, not
+ * hardware dimensions or the dimg/aux compositor's separate graph budget. */
+#define X9_HEIF_MAX_ITEM_DATA_DEPTH 32u
+#define X9_HEIF_MAX_READ_SPANS 65536u
+#define X9_HEIF_MAX_READ_VISITS (X9_HEIF_MAX_READ_SPANS * X9_HEIF_MAX_ITEM_DATA_DEPTH)
 #define X9_HEIF_TYPE(a,b,c,d) (((uint32_t)(a)<<24)|((uint32_t)(b)<<16)|((uint32_t)(c)<<8)|(uint32_t)(d))
 #define X9_HEIF_HVC1 X9_HEIF_TYPE('h','v','c','1')
 #define X9_HEIF_GRID X9_HEIF_TYPE('g','r','i','d')
@@ -27,6 +32,7 @@ struct x9_heif_property {
 };
 struct x9_heif_image {
     uint32_t id, type, width, height, hidden;
+    uint32_t location_present, construction_method;
     uint32_t channels, bit_depth[4]; /* raw pixi; absent remains0 */
     uint32_t rows, columns, derived_count;
     uint32_t derived[X9_HEIF_MAX_ITEMS]; /* ordered dimg, no dedup/sorting */
@@ -38,8 +44,8 @@ struct x9_heif_image {
 /* Data must remain resident and immutable until close, across every read and
  * image lookup. This parser owns its tables, never the input. A successful
  * open proves structure only; get_image/read_item check the selected item.
- * Protected/external/method2 items are retained, then explicitly ENOTSUP on
- * selection rather than incorrectly treated as file/idat offsets. */
+ * Protected/external/unknown-method items are retained, then ENOTSUP on
+ * selection. Method2 follows item-data references, never file/idat offsets. */
 int x9_heif_open(const uint8_t *data, size_t bytes, struct x9_heif_document **);
 void x9_heif_close(struct x9_heif_document **);
 int x9_heif_primary(const struct x9_heif_document *, uint32_t *id);
@@ -52,11 +58,27 @@ int x9_heif_span_data(const struct x9_heif_document *, struct x9_heif_span,
  * properties are retained, NOT applied. Compositors must process them before
  * claiming an image. Missing/duplicate required properties fail closed. */
 int x9_heif_get_image(const struct x9_heif_document *, uint32_t id, struct x9_heif_image *);
-/* Concatenate bounded method0 file extents or method1 idat extents in their
- * recorded order, including base offsets. NULL destination queries exact size
- * after the SAME bounds checks. No hidden read of external data references. */
+/* Concatenate method0 file, method1 idat or method2 item-offset extents in
+ * recorded order, including base offsets. Method2 extent_index is a 1-based
+ * index into ONE ordered iref/iloc group; omitted index_size implies1, while
+ * encoded index0 is invalid. Length0 for method2 names the entire referenced
+ * item only with base/offset0; nonzero offset plus implicit length is ENOTSUP,
+ * not a guessed source-to-end slice. All explicit-length ranges must fit.
+ * Sources are recursively logical byte sequences, not their first extent.
+ * A two-phase read resolves all dependencies/bounds/cycles/depth, then builds
+ * bounded intersected file spans before any copy. DAG reuse is legal and its
+ * full height is counted. Large source sequences need not be materialized;
+ * selected output is limited to MAX_ITEM_DATA, spans/visits to the above caps.
+ * NULL destination has the SAME validation/fragmentation limits as a copy.
+ * No external reads, partial output, or mutation of document/input bytes.
+ * Method0/1 implicit lengths and ambiguous duplicate iref/iloc groups remain
+ * explicit ENOTSUP; invalid indices/ranges/overflow fail, never clamp. */
 int x9_heif_read_item(const struct x9_heif_document *, uint32_t id,
     uint8_t *destination, size_t capacity, size_t *written);
+/* Enumerate raw ordered iref/iloc destinations (including repetitions), not
+ * dimg children or decoded auxiliary images. ENOENT ends enumeration. */
+int x9_heif_item_offset_reference(const struct x9_heif_document *, uint32_t item,
+    uint32_t index, uint32_t *id);
 /* Enumerate auxl source items referencing master, including non-alpha aux.
  * No auxiliary is silently merged/discarded; caller resolves auxC from its
  * own ordered properties. ENOENT is end-of-enumeration. */

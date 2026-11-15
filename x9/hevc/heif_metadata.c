@@ -79,11 +79,14 @@ int x9_heif_copy_item_info(const struct x9_heif_document *document,
     CFMutableArrayRef properties = CFArrayCreateMutable(NULL,0,&kCFTypeArrayCallBacks);
     CFMutableArrayRef aux = CFArrayCreateMutable(NULL,0,&kCFTypeArrayCallBacks);
     CFMutableArrayRef derived = CFArrayCreateMutable(NULL,0,&kCFTypeArrayCallBacks);
+    CFMutableArrayRef item_offsets = CFArrayCreateMutable(NULL,0,&kCFTypeArrayCallBacks);
     uint32_t color_seen = 0;
-    int e = !info || !properties || !aux || !derived ? ENOMEM : 0;
+    int e = !info || !properties || !aux || !derived || !item_offsets ? ENOMEM : 0;
     if (!e) e = put_number(info,CFSTR("ItemID"),image->id);
     if (!e) e = put_number(info,CFSTR("Width"),image->width);
     if (!e) e = put_number(info,CFSTR("Height"),image->height);
+    if (!e) e = put_number(info,CFSTR("ConstructionMethod"),image->construction_method);
+    if (!e) CFDictionarySetValue(info,CFSTR("LocationPresent"),image->location_present ? kCFBooleanTrue : kCFBooleanFalse);
     for (unsigned n = 0; n < image->property_count && !e; n++) {
         const struct x9_heif_property *p = &image->properties[n];
         CFNumberRef type = number(p->type);
@@ -120,16 +123,28 @@ int x9_heif_copy_item_info(const struct x9_heif_document *document,
         if (!id) e = ENOMEM;
         else { CFArrayAppendValue(derived,id); CFRelease(id); }
     }
+    for (unsigned n = 0; n < X9_HEIF_MAX_REFERENCES && !e; n++) {
+        uint32_t id = 0;
+        e = x9_heif_item_offset_reference(document,image->id,n,&id);
+        if (e == ENOENT) { e = 0; break; }
+        if (!e) {
+            CFNumberRef value = number(id);
+            if (!value) e = ENOMEM;
+            else { CFArrayAppendValue(item_offsets,value); CFRelease(value); }
+        }
+    }
     if (!e) {
         CFDictionarySetValue(info,CFSTR("DerivedIDs"),derived);
         CFDictionarySetValue(info,CFSTR("Properties"),properties);
         CFDictionarySetValue(info,CFSTR("AuxiliaryIDs"),aux);
+        CFDictionarySetValue(info,CFSTR("ItemOffsetIDs"),item_offsets);
         *out = info; info = NULL;
     }
     if (info) CFRelease(info);
     if (properties) CFRelease(properties);
     if (aux) CFRelease(aux);
     if (derived) CFRelease(derived);
+    if (item_offsets) CFRelease(item_offsets);
     return e;
 }
 int x9_heif_copy_color_extensions(const struct x9_heif_document *document,

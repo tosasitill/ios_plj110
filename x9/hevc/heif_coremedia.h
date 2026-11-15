@@ -7,7 +7,8 @@
  * selects primary; grid/iden are resolved by the compositor, not mislabelled
  * as coded HEVC. Item data and parameter sets are copied into CM ownership.
  * info is required, returns ItemID/Width/Height, ordered raw Properties and
- * AuxiliaryIDs, selected BitstreamVUI and ResolvedColr. Container CICP2 or
+ * AuxiliaryIDs, ConstructionMethod/LocationPresent, ordered ItemOffsetIDs,
+ * selected BitstreamVUI and ResolvedColr. Container CICP2 or
  * missing fields use the picture's actual PPS->SPS, never CM defaults.
  * Transform/clap/auxiliary properties are NOT applied by VT;
  * the caller must process them to deliver a complete image. Metadata is not

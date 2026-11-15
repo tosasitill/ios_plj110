@@ -48,6 +48,7 @@ def main():
         'automatic_injection': False, 'required_specification': {'X9NativeHEVC': True},
         'decoder_id': 'org.ios-sweet.x9.vcp.hvc1',
         'heif_coded_item_input': True, 'heif_complete_image_compositor': False,
+        'heif_item_offset_input': True,
         'heif_derived_geometry': True, 'heif_packed_raster_compositor': True,
         'heif_native_raster_adapter': True, 'heif_auxiliary_merge': False,
         'heif_explicit_working_rgb_icc': True, 'heif_bitstream_color_resolver': True,

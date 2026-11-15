@@ -4,7 +4,7 @@
 #include "hevc_bitstream.h"
 #include <CoreMedia/CoreMedia.h>
 /* Internal owned metadata shared by the CM sample and raster adapters.
- * Raw ordered properties, dimg and auxiliary IDs always survive. Optional
+ * Raw ordered properties, dimg, auxiliary and item-offset IDs survive. Optional
  * extensions receives both ICC and nclx without inventing their precedence. */
 int x9_heif_copy_item_info(const struct x9_heif_document *,
     const struct x9_heif_image *, CFDictionaryRef *info, CFMutableDictionaryRef extensions);

@@ -174,11 +174,19 @@ static int print_heif_item(const struct x9_heif_document *d, uint32_t id,
         image->rows,image->columns,image->derived_count);
     printf("  ordered geometry=%ux%u; pixels/color/auxiliary merge not executed\n",
         geometry.width,geometry.height);
+    printf("  location=%u construction_method=%u (item data, not decoded image references)\n",
+        image->location_present,image->construction_method);
     for (unsigned n = 0; n < image->property_count; n++) {
         const struct x9_heif_property *p = &image->properties[n];
         printf("  property[%u]=%c%c%c%c essential=%u offset=%llu bytes=%llu (not applied)\n",
             n,(char)(p->type>>24),(char)(p->type>>16),(char)(p->type>>8),(char)p->type,p->essential,
             (unsigned long long)p->payload.offset,(unsigned long long)p->payload.bytes);
+    }
+    for (unsigned n = 0; n < X9_HEIF_MAX_REFERENCES && !e; n++) {
+        uint32_t source = 0;
+        e = x9_heif_item_offset_reference(d,id,n,&source);
+        if (e == ENOENT) { e = 0; break; }
+        if (!e) printf("  iloc-reference[%u]=%u (ordered byte source; not a dimg child)\n",n+1,source);
     }
     for (unsigned n = 0; n < image->derived_count && !e; n++) {
         printf("  dimg[%u]=%u\n",n,image->derived[n]);

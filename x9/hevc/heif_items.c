@@ -9,6 +9,7 @@ struct extent { uint64_t offset, bytes, index; };
 struct item {
     uint32_t id, type, hidden, protection, data_reference, method;
     uint32_t info_seen, location_seen, extent_count, association_count;
+    uint32_t index_size, iloc_groups, iloc_first, iloc_count;
     uint64_t base;
     struct extent extents[X9_HEIF_MAX_EXTENTS];
     uint16_t associations[X9_HEIF_MAX_ASSOCIATIONS]; /* bit15 essential */
@@ -141,6 +142,7 @@ static int parse_iloc(struct x9_heif_document *d, const struct box *b)
         if (!i) { e = ENOSPC; break; }
         if (i->location_seen) { e = EEXIST; break; }
         i->location_seen = 1; i->method = method; i->data_reference = ref;
+        i->index_size = index_size;
         i->base = base; i->extent_count = extents;
         for (unsigned k = 0; k < extents && !e; k++) {
             struct extent *ex = &i->extents[k];
@@ -154,10 +156,13 @@ static int parse_iloc(struct x9_heif_document *d, const struct box *b)
 static int parse_iref(struct x9_heif_document *d, const struct box *b)
 {
     struct cursor c = payload(d,b);
-    uint32_t version = 0, flags = 0;
+    uint32_t version = 0, flags = 0, groups = 0;
     int e = full(&c,&version,&flags);
     if (!e && (version > 1 || flags)) e = ENOTSUP;
     while (c.at < c.end && !e) {
+        /* Empty reference groups still consume parser work and can make an
+         * iloc ordinal ambiguous. Bound groups as well as stored edges. */
+        if (++groups > X9_HEIF_MAX_REFERENCES) return ENOSPC;
         struct box child;
         uint32_t from = 0, count = 0;
         e = next_box(&c,&child);
@@ -166,6 +171,18 @@ static int parse_iref(struct x9_heif_document *d, const struct box *b)
         e = u32(&r,version ? 4u : 2u,&from);
         if (!e) e = u32(&r,2,&count);
         if (!e && (!from || count > X9_HEIF_MAX_REFERENCES-d->reference_count)) e = EBADMSG;
+        if (!e && child.type == T('i','l','o','c')) {
+            struct item *source = item_add(d,from);
+            if (!source) e = ENOSPC;
+            else {
+                /* Keep group boundaries: ordinal1 is not the first edge
+                 * after blindly merging two potentially different groups. */
+                if (++source->iloc_groups == 1) {
+                    source->iloc_first = d->reference_count;
+                    source->iloc_count = count;
+                }
+            }
+        }
         for (unsigned k = 0; k < count && !e; k++) {
             uint32_t to = 0;
             e = u32(&r,version ? 4u : 2u,&to);
@@ -335,18 +352,120 @@ int x9_heif_span_data(const struct x9_heif_document *d, struct x9_heif_span span
     if (span.offset > d->bytes || span.bytes > d->bytes-span.offset) return EBADMSG;
     *data = d->data+span.offset; return 0;
 }
-static int item_extent(const struct x9_heif_document *d, const struct item *i,
-    unsigned n, struct x9_heif_span *out)
+/* Resolve the logical DAG once per read. The document and its borrowed
+ * source remain const and can be read concurrently. No cached whole-item
+ * buffers or exponential assembly of a large source to take a small slice. */
+#define FILE_SOURCE UINT32_MAX
+struct read_extent { uint64_t offset, bytes; uint32_t source; };
+struct read_node {
+    uint32_t state, height, extent_count;
+    uint64_t bytes;
+    struct read_extent extents[X9_HEIF_MAX_EXTENTS];
+};
+struct item_read {
+    const struct x9_heif_document *document;
+    struct read_node nodes[X9_HEIF_MAX_ITEMS];
+    struct x9_heif_span *spans;
+    uint32_t count, capacity, visits;
+    uint64_t bytes;
+};
+static int item_index(const struct x9_heif_document *d, uint32_t id, uint32_t *out)
 {
-    const struct extent *x = &i->extents[n];
-    struct x9_heif_span source = i->method ? d->idat : (struct x9_heif_span){0,d->bytes};
-    if (i->method > 1 || i->data_reference || i->protection || (i->method && !d->idat_seen)) return ENOTSUP;
-    if (x->index) return ENOTSUP; /* method0/1 never indexes another item */
-    if (!x->bytes) return ENOTSUP; /* implicit source-to-end length not implemented */
-    if (i->base > source.bytes || x->offset > source.bytes-i->base ||
-        x->bytes > source.bytes-i->base-x->offset) return EBADMSG;
-    *out = (struct x9_heif_span){source.offset+i->base+x->offset,x->bytes};
+    for (uint32_t n = 0; n < d->item_count; n++) if (d->items[n].id == id) {
+        *out = n; return 0;
+    }
+    return ENOENT;
+}
+static int resolve_data(struct item_read *r, uint32_t index, uint32_t depth)
+{
+    const struct x9_heif_document *d = r->document;
+    const struct item *i = &d->items[index];
+    struct read_node *node = &r->nodes[index];
+    if (node->state == 1) return ELOOP;
+    if (depth >= X9_HEIF_MAX_ITEM_DATA_DEPTH) return E2BIG;
+    if (node->state == 2)
+        return node->height > X9_HEIF_MAX_ITEM_DATA_DEPTH-depth ? E2BIG : 0;
+    if (i->method > 2 || i->data_reference || i->protection ||
+        (i->method == 1 && !d->idat_seen)) return ENOTSUP;
+    if (!i->location_seen || !i->extent_count) return ENODATA;
+    if (i->method == 2) {
+        if (!i->iloc_groups || !i->iloc_count) return EBADMSG;
+        if (i->iloc_groups != 1) return ENOTSUP;
+    }
+    node->state = 1; node->height = 1; node->extent_count = i->extent_count;
+    for (unsigned n = 0; n < i->extent_count; n++) {
+        const struct extent *x = &i->extents[n];
+        struct read_extent *out = &node->extents[n];
+        uint64_t source_bytes = 0, source_offset = 0;
+        out->source = FILE_SOURCE;
+        if (i->method == 2) {
+            uint64_t ordinal = i->index_size ? x->index : 1;
+            if (!ordinal || ordinal > i->iloc_count) return EBADMSG;
+            const struct reference *ref = &d->references[i->iloc_first+(uint32_t)ordinal-1];
+            if (ref->type != T('i','l','o','c') || ref->from != i->id) return EBADMSG;
+            int e = item_index(d,ref->to,&out->source);
+            if (!e) e = resolve_data(r,out->source,depth+1);
+            if (e) return e;
+            const struct read_node *source = &r->nodes[out->source];
+            source_bytes = source->bytes;
+            if (source->height+1 > node->height) node->height = source->height+1;
+        } else {
+            if (x->index || !x->bytes) return ENOTSUP;
+            struct x9_heif_span source = i->method == 1 ? d->idat : (struct x9_heif_span){0,d->bytes};
+            source_bytes = source.bytes; source_offset = source.offset;
+        }
+        /* Method2's length0 denotes the entire source item. Do not silently
+         * ignore base/offset, or change that into source_size-offset. */
+        if (i->method == 2 && !x->bytes && (i->base || x->offset)) return ENOTSUP;
+        out->bytes = x->bytes ? x->bytes : source_bytes;
+        if (i->base > source_bytes || x->offset > source_bytes-i->base ||
+            out->bytes > source_bytes-i->base-x->offset) return EBADMSG;
+        out->offset = source_offset+i->base+x->offset;
+        if (out->bytes > UINT64_MAX-node->bytes) return EBADMSG;
+        node->bytes += out->bytes;
+    }
+    node->state = 2;
     return 0;
+}
+static int append_span(struct item_read *r, uint64_t offset, uint64_t bytes)
+{
+    if (!bytes) return 0;
+    if (offset > r->document->bytes || bytes > r->document->bytes-offset) return EBADMSG;
+    if (bytes > X9_HEIF_MAX_ITEM_DATA-r->bytes) return EMSGSIZE;
+    if (r->count && r->spans[r->count-1].offset+r->spans[r->count-1].bytes == offset) {
+        r->spans[r->count-1].bytes += bytes;
+    } else {
+        if (r->count == X9_HEIF_MAX_READ_SPANS) return E2BIG;
+        if (r->count == r->capacity) {
+            uint32_t capacity = r->capacity ? r->capacity*2 : X9_HEIF_MAX_EXTENTS;
+            if (capacity > X9_HEIF_MAX_READ_SPANS) capacity = X9_HEIF_MAX_READ_SPANS;
+            struct x9_heif_span *spans = realloc(r->spans,(size_t)capacity*sizeof(*spans));
+            if (!spans) return ENOMEM;
+            r->spans = spans; r->capacity = capacity;
+        }
+        r->spans[r->count++] = (struct x9_heif_span){offset,bytes};
+    }
+    r->bytes += bytes;
+    return 0;
+}
+static int intersect_data(struct item_read *r, uint32_t index, uint64_t offset,
+    uint64_t bytes, uint32_t depth)
+{
+    const struct read_node *node = &r->nodes[index];
+    if (depth >= X9_HEIF_MAX_ITEM_DATA_DEPTH || ++r->visits > X9_HEIF_MAX_READ_VISITS) return E2BIG;
+    if (node->state != 2 || offset > node->bytes || bytes > node->bytes-offset) return EBADMSG;
+    if (!bytes) return 0;
+    for (unsigned n = 0; n < node->extent_count && bytes; n++) {
+        const struct read_extent *x = &node->extents[n];
+        if (offset >= x->bytes) { offset -= x->bytes; continue; }
+        uint64_t take = x->bytes-offset;
+        if (take > bytes) take = bytes;
+        int e = x->source == FILE_SOURCE ? append_span(r,x->offset+offset,take) :
+            intersect_data(r,x->source,x->offset+offset,take,depth+1);
+        if (e) return e;
+        offset = 0; bytes -= take;
+    }
+    return bytes ? EBADMSG : 0;
 }
 int x9_heif_read_item(const struct x9_heif_document *d, uint32_t id,
     uint8_t *destination, size_t capacity, size_t *written)
@@ -354,32 +473,50 @@ int x9_heif_read_item(const struct x9_heif_document *d, uint32_t id,
     if (!written) return EINVAL;
     *written = 0;
     if (!d) return EINVAL;
-    const struct item *i = item_find(d,id);
-    if (!i) return ENOENT;
-    if (!i->location_seen || !i->extent_count) return ENODATA;
-    struct x9_heif_span extents[X9_HEIF_MAX_EXTENTS];
-    uint64_t total = 0;
-    int e = 0;
-    for (unsigned n = 0; n < i->extent_count && !e; n++) {
-        e = item_extent(d,i,n,&extents[n]);
-        if (!e && extents[n].bytes > X9_HEIF_MAX_ITEM_DATA-total) e = EMSGSIZE;
-        if (!e) total += extents[n].bytes;
-    }
+    uint32_t index = 0;
+    int e = item_index(d,id,&index);
     if (e) return e;
+    struct item_read *r = calloc(1,sizeof(*r));
+    if (!r) return ENOMEM;
+    r->document = d;
+    e = resolve_data(r,index,0);
+    uint64_t total = r->nodes[index].bytes;
+    if (!e && total > X9_HEIF_MAX_ITEM_DATA) e = EMSGSIZE;
+    if (!e) e = intersect_data(r,index,0,total,0);
+    if (!e && r->bytes != total) e = EBADMSG;
+    if (e) goto done;
     *written = (size_t)total;
-    if (!destination) return 0;
-    if (capacity < total) return ENOSPC;
+    if (!destination) goto done;
+    if (capacity < total) { e = ENOSPC; goto done; }
     /* Reject overlap with borrowed input BEFORE any copy; a read must not
      * corrupt later extents, metadata or another image's immutable bytes. */
     uintptr_t start = (uintptr_t)destination, source = (uintptr_t)d->data;
-    if (total > UINTPTR_MAX-start || d->bytes > UINTPTR_MAX-source) return EINVAL;
-    if (start < source+d->bytes && source < start+total) return EINVAL;
+    uintptr_t table = (uintptr_t)d;
+    if (total > UINTPTR_MAX-start || d->bytes > UINTPTR_MAX-source || sizeof(*d) > UINTPTR_MAX-table ||
+        (start < source+d->bytes && source < start+total) ||
+        (start < table+sizeof(*d) && table < start+total)) { e = EINVAL; goto done; }
     size_t at = 0;
-    for (unsigned n = 0; n < i->extent_count; n++) {
-        memcpy(destination+at,d->data+extents[n].offset,(size_t)extents[n].bytes);
-        at += (size_t)extents[n].bytes;
+    for (unsigned n = 0; n < r->count; n++) {
+        memcpy(destination+at,d->data+r->spans[n].offset,(size_t)r->spans[n].bytes);
+        at += (size_t)r->spans[n].bytes;
     }
-    return 0;
+done:
+    free(r->spans); free(r); return e;
+}
+int x9_heif_item_offset_reference(const struct x9_heif_document *d, uint32_t item,
+    uint32_t index, uint32_t *id)
+{
+    if (!id) return EINVAL;
+    *id = 0;
+    if (!d || !item_find(d,item)) return EINVAL;
+    uint32_t at = 0;
+    for (unsigned n = 0; n < d->reference_count; n++) {
+        const struct reference *r = &d->references[n];
+        if (r->type == T('i','l','o','c') && r->from == item && at++ == index) {
+            *id = r->to; return 0;
+        }
+    }
+    return ENOENT;
 }
 static int property_parse(const struct x9_heif_document *d,
     const struct x9_heif_property *p, struct x9_heif_image *out, uint32_t *seen)
@@ -455,6 +592,7 @@ int x9_heif_get_image(const struct x9_heif_document *d, uint32_t id, struct x9_h
     if (i->protection || i->data_reference ||
         (i->type != X9_HEIF_HVC1 && i->type != X9_HEIF_GRID && i->type != X9_HEIF_IDEN)) return ENOTSUP;
     out->id = id; out->type = i->type; out->hidden = i->hidden;
+    out->location_present = i->location_seen; out->construction_method = i->method;
     uint32_t seen = 0;
     uint64_t metadata_bytes = 0;
     int e = 0;
