@@ -179,7 +179,7 @@ length（不含NUL）及8106/8114的原始presentation byte。先验证全帧再
 不能把zero-init对象的0当Available。`x9cw_number_presentation()`明确native0→Available0、
 1→Restricted1、2/3/4→Unavailable2；未知返回失败且不改输出，**不沿用RIL的未知→Available fallback**。
 未来publisher仍须只在有效owner/正确epoch下使用，Restricted/Unavailable不得发布原value[]；
-尚未实现号码格式/TOA转换、progress到通话身份的号码合并生命周期或CallList46生产编码/发布。
+尚未实现号码格式/TOA转换、最终显示号码合并或CallList46生产编码/发布；progress原身份owner见下。
 没有新增查询/服务公告/默认字段，不能仅empty encoder冒充完成。新增两个人工owner向量仅编译，未执行。
 
 offset6追加原件排除：`192a770→192b150/192b194`只是接收vector resize/append；
@@ -187,6 +187,29 @@ offset6追加原件排除：`192a770→192b150/192b194`只是接收vector resize
 相邻`1929bfc`为CallConfigItem，`1929c3c..54`把C++ string长度写wire+6后复制wire+7，
 是变长结构而非7B CallList serializer。当前匹配host原件仅有CallList parse/resize/copy，
 未发现其writer；QMIParserDynamic已有metadata也无vs/ALS定义。ALS只是未证假设，不按标准字段名填0。
+
+#### 已接受progress的epoch raw identity owner
+
+完整4901 parser现在同时有界保存408B detail和最多512B含NUL的PAU，仍先校验全帧再改out。
+原MO/MT reducer此前仅保存ID/state/cause，排空raw inbox后号码来源会消失；现在仅在原
+identity/route/state/epoch/revision准入成功的commit处复制number/presentation/TOA/detail/PAU。
+MT新CMD清旧owner，foreign/late/rejected/revision失败不改；legacy valid0不授parsed provenance，
+current仍是独立owned-query快照，**不倒填MO/MT**。这是最后accepted整帧的raw身份，不是显示号码。
+来源commit`c7008018`，原集成`3143ca5b`，保留main后为`bf96e0dc`；3项新增人工向量、C11 header、host C++17 `-c`、
+两真实recipe对象均编译exit0，未执行。精确切片/编译日志原在identity树
+`x9/out/call-identity-owner-analysis/`，收尾迁回主checkout同名out。
+
+RIL `26931c/269c44→26e000→270120`显示合并还有真实slot状态输入：178控制既有号码/ECPI
+更新，179影响MO是否解析PAU，180影响sip/tel选择；不是固定PAU>ECPI。PAU parser的真实
+delimiter字符串`[;@,]+`是strtok_r的**字符集合而非regex**，anonymous.invalid还有例外，
+compareLoosely匹配时保留旧号码。真实writer已闭合为`loadConfiguration21f020`通过
+`libcarrierconfig.so`的`getKeyCount/getValuesByMccMnc`按slot写setValue，有效缓存优先、
+default仅fallback；保存的同机1761 maps证明库实际映射，但仓内缺库实体及三键live值。
+不能给true/false默认值，
+不能把raw number/PAU直接公开；Restricted/Unavailable/未知presentation仍禁止泄露原号码。
+IMS最终producer的TOA为合并号码是否含`+`的0/1、presentation为空1/非空0；current/CS
+才消费native TOA与8114/detail[0]。两套producer不能混用。此项不发CallList/VOICE09，
+不增加query或移植未核实的PAU归一化。
 
 ### END cause16 → Apple reason145（内部metadata，未发布）
 
@@ -322,13 +345,82 @@ bootstrap`1f2e67398..3a0`注入controller+90的IMSSubscriberEventInterface，rea
 `IMSCallCommandDriver::bootstrap100dd55f4/100dd5734..5784`observe同属性，真实callback
 `handleIMSClientStateChanged_sync100dcc390`；ready true的`100dcc51c`分支在`100dcc570..588`
 调用driver+98 factory的+10，也就是同一CCIMSClientFactory::createCallClient，随后才走上述AP SIP。
-已证可替换抽象点是CC factory的call/SMS创建槽，或更早的subscriber factory+38；
+已定位CC factory的call/SMS创建槽和更早的subscriber factory+38，但前者仅是legacy接口，
+**不是覆盖正常typed dial及全部state callback的完整替换点**，见下节；
 **尚缺返回并持续驱动MTK IMS provider的实际接口实现**，包括Personality、capability、delegate、
 初始化和网络状态，不能补ready常量/普通VOICE20 TLV代替。本窄段未找到可直接启用的modem-managed
 provider，不据此宣称全系统不存在；没有production hook。
 私有复读材料主checkout`x9/out/ims-provider-boundary/`的
 `ims-controller-createclient.asm`、`ims-controller-ready.asm`、`ims-root-vtables.txt`、
 `ims-call-driver-ready-handler.asm`及`root-query.py`。
+
+#### 普通拨出实际typed CallHandle / UUID契约（仅原件静态）
+
+CC factory返回`IMSCallClientInterface`，其legacy +28/dial`100177b88`把
+`IMSStartCall`结果转为bool，**不返回native call ID**。正常IMSCallCommandDriver还有另一条：
+`100dce268→100dcf174`取driver+328的CallFactoryInterface、virtual+40，实际
+CallFactory address point`101532938`+40→`10019c234`。CallInfo里的CFUUID经
+`100fb3980`调用CFUUIDCreateString并assign到C++ string，构造
+`ims::Call(uuid,真实ims::ClientHandle*)`。普通client由`100dd3498`按CallInfo+0xd8 SimSlot
+调用PersonalityIdFromSlotIdEx，再经SystemDeterminationManager取得该Personality的IMS client。
+这不是把MD整数ID/token编码成UUID，也不能借NAS/WMS的默认SIM。
+
+model virtual+118→`1007cb578`接收真实shared_ptr<ims::CallHandle>；normal分支dynamic_cast
+到ims::Call后在`1007cb970`调用virtual+80/dial，number、CallConfig及CallInfo+57的bool
+另有实际上游，不由普通VOICE20/tag10=0推导。更正早报：`1007cbdcc`的+68是
+EmergencyCall分支，不是normal Call::dial/refresh错版。root与OS20H392 CommCenter原件相同，
+root cryptex/sysos MAIN cache UUID都为`8f970452-c9e3-3e88-b114-feb1864bc9e0`；
+同一cache ctor/vtable原字节支持上述消歧，未用不同版本拼ABI。
+
+delegate也不只经legacy Event5：`setDelegatesOnIMSClientHandle100dcb8f0`另取原ims::Client，
+virtual+a0/addCallManagerDelegate和+a8/addDefaultCallDelegate绑定IMSCallModel。
+ACTIVE callback`1007c4d3c`按uuid string→CFUUIDCreateFromString，经model command delegate
++e0找到原CallInfo，再同步状态/通知。生产provider必须同时保有typed client/call、UUID↔
+native epoch/真实ID映射以及delegate生命周期；**单独替换CC factory返回对象不足以修好拨号、
+state/END或handover**。不新增hook/ready常量。
+私有精确切片在IMS树`x9/out/ims-call-provider-contract/`；这是静态契约，不是设备已选此路径。
+
+CallInfo原`toString`证明`+40=PhoneNumberType`、`+44=PhoneCallSubType`、
+`+57=Is Listed As Emergency`，最后bool不是video；`100dd7560`是CallConfig copy ctor，
+不是配置生成入口。桥需保留上游真实opaque配置，未知`+d8` string不猜用途。
+typed delegate按clientId/name保持强shared_ptr，再保存queue/weak_ptr；ACTIVE派送先weak-lock，
+在driver原queue调用真实delegate+20(uuid)。删除按同client/name退休，不能异步缓存裸指针
+或用跨subscriber全局UUID表。
+
+typed hangup沿`CallHandle+20→1b7c434b4→MainQueue→endCall(uuid,reason)1b7b39be0`
+找真实IMSCallInfo，再经Info+80的BambiCall调用`endWithReason1b7bc4500`；最终模型mutation
+与MD disconnect cause映射仍未闭合，不能直接删模型或用固定reason替代。
+`BambiClient::createNewCall`真实输入是SipStack/SipUri/delegate/options，不是简单UUID工厂。
+ACTIVE决定门`1b7b30944`同时要求event+10等于Info+80实际BambiCall，以及其+140
+MediaSession→+280 interface→virtual+98非零，才发布真实UUID事件。只替工厂或直接调用
+ACTIVE会绕过真实owner/media门，不是已实现通话。最早provider缺口仍是完整client/personality
+初始化及网络注册语义/lifecycle，随后才是UUID↔MD ID、状态/END和双向媒体。
+
+### 通话专用voice音频契约（仅原件静态，不冒充媒体speaker）
+
+同机HAL `ScpSpeechOn2474a0`先registerAdspFeature14，`247544`以scene0、UL/DL各65536B
+和真实`processDmaMsg246660`/this注册callback；GOT44d3b8由原库relocation确认。
+`AudioMessengerIPI1dceb0→audio_ipi_dma_cbk_register42f790`保存callback/this，
+`42fa5c..6c`发ioctl40046915，20B payload含magic/~magic、scene/reg、UL/DL尺寸。
+Android参考REG_DMA→alloc_region(scene0)按实际task/dsp/controller发双向region的
+offset/size/read_idx/write_idx，再以ADD1 NEED_ACK UPDATE_REGION发布，不能沿用SmartPA布局。
+`247688..6bc`实际scene0/layer2/type0/ack1/AD20，param1是实际时间/on打包值，param2是modem index，
+`42efc0→42f548..55c`落ioctl40046900。没有把本机抓到的单次值当运行默认值。
+
+**更正**：OpenDSP this+158是SpeechDriverNormal；`sendIpcCmd24c720→1b2ac0`最终只有返回0，
+不是MD↔DSP3D00 transport。scene0 callback只分DA00/DA10/DA11/DA12；3D00是另一MD→DSP方向，
+其完整producer/consumer、MD voice DMA、voice AFE与Aurisys参数生命周期仍缺。
+当前native IPI_DMA只拥有coreA/task14或32，板级transport实际只注册core0；Android双核scene0
+路由HiFi3_B，但实际physical routing来自task-info，不把Aurisys core_type1猜为物理core1。
+
+iOS原件VirtualAudio factory21ebc8比较CFString62e790的UID`Baseband Voice`，匹配后21ee7c
+创建592B/vtable621c30的独立设备，包含`Baseband Downlink`/`Baseband Uplink`。
+virtual+30→326560消费`ttye`/4B→异步CTSetTTYMode、`ctsr`/8B double→真实callback
+CTAudioSampleRateSwitchDidComplete；CT callback328944的type0..2经table524698映射
+`vcdt`/`vcdr`/`thsr`并通知。root/os20H392的VirtualAudio LC_UUID同
+`3196333F-5A48-373B-B427-0146DC1177FB`，原件build metadata为20H392/16.7.16。
+不能仅广告设备UID或复用Speaker/Hawking媒体设备就称voice接通。
+全部窄切片/私有原件在主checkout`x9/out/call-audio-analysis/`；没有生产改动/编译/设备验收。
 
 ### SMS集成：未发布MT的原子host queue准入
 
@@ -349,6 +441,24 @@ selected/partial/late-CNF及已mark-read的step2验证/hold不变；其他generi
 Apple readStored callback`1975920..38`实际用index/readtag/mode，`197596c`是25s host guard；
 未拿旧319中unsupported的存储启动日志当修复验收。9项新TAG人工源码向量、总42只编译未执行，
 SMS/CALL host、header与真实recipe两对象均exit0；统一kernel构建见NOTES。
+
+### WMS37物理ACK completion：实际host receipt后退休
+
+原物理token ACK结果已take后，legacy void-send仍可在OOM/queue-full时丢WMS37回复并清owner。
+来源`ec56e429`，集成`8c6a00a9`把原local generation与真实BB/QMUX generation分开保存；
+BB helper只接受14B WMS37 terminal结果，持bb锁校验原route/service5/node/used/
+non-release_pending/generation及容量，实际入队才answered。失败擦除临时buffer，保留原
+req/slot/txn/result，只重试local queue，不重发MD ACK、不复投PDU。`ack_done`确保物理
+reply_take仅一次；物理owner退休后纯host reply不再触MD，generation丢失仍drain旧token，
+不回新client。尚未决定的结果在取得MD锁后再判原64-bit deadline；首次terminal保持，
+先timeout后late-success不覆写，及时物理success也不被后续queue延期改成timeout。
+
+仅same-slot/local-generation/txn的现存WMS37 job消费重送：原bytes相同等待原结果，
+changed/malformed reuse保原owner/result，不再产生第二BAD/ARG或MD ACK。scoped判定在
+generic validator前，但仍要求合法node/route/type0/msg37/至少7B header；无owner与其他
+service/request不绕通用校验。成功receipt只打印token/SIM/txn/result一次，不含号码/PDU，
+明确`not durable storage proof`。58项人工源码向量仅编译未执行；现存313–321日志及Apple
+MsgPduProcessStatus→sendAck callback均没有同token Messages持久化/重开或MO对端收到证明。
 
 ### modem 与 Android serializer
 

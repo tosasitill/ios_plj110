@@ -1,6 +1,10 @@
 /* OPPO sensor/2.0: front PROXIMITY=8, share_mem_info=40, data=36.
  * transceiver.c preserves value[0..2], unlike LIGHT's calibrated lux.
- * Android binary PS convention: oneshot 0=near, 1=far; keep steps separate.
+ * Current host mapping assumes oneshot 0=near, 1=far; this is not a verified
+ * PLJ110 wire contract. Original PS6 preserves its byte through float->wire
+ * conversion, and a forced-zero branch is labelled "keep far status".
+ * Resolve raw near/far with device DATA before changing this mapping; keep
+ * steps separate and do not infer distance from the analog sample alone.
  * Do not apply the public 24081 TCS3760 register recipe: PLJ110 live DT
  * names tcs3720 and uses different calibration/power configuration.
  * No AP I2C, MMIO or SCP reset here: one shared SCP transport owns power. */
@@ -228,7 +232,8 @@ int x9_prox_receive_mtk(const void *record, unsigned length)
  lck_mtx_unlock(&prox_lock); return error;
 }
 /* Explicit test mode only, root-write sysctl. 1=near, 0=far, -1=invalid.
- * Never conflated with Android oneshot (which has opposite polarity). */
+ * The synthetic record follows the current host mapping above, not a
+ * physical wire-polarity proof; diagnostic output cannot validate it. */
 static int sysctl_prox_test SYSCTL_HANDLER_ARGS
 {
 #pragma unused(arg1,arg2)
