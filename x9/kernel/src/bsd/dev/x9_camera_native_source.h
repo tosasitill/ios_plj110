@@ -21,6 +21,7 @@ struct x9_camera_native_source_status {
     uint32_t receiver_flags, smi_flags, smi_a0_flags, smi_shared_flags;
     uint32_t mac_flags, phy_flags, outmux_flags;
     uint32_t csi_parent, clock_count[2], inherited_step, required_vcore_uv;
+    uint32_t pll_rate, pll_fenc, vcore[3];
 };
 /* Included after x9_camera_receiver.inc. The native platform's config
  * callback already holds camera_control_lock and must call the _locked
@@ -30,8 +31,11 @@ struct x9_camera_native_source_status {
  * There is one attempt per cold sensor epoch. No automatic unwind or retry;
  * native power(false) owns the original sensor-close journal.
  * CONFIGURED means inactive register consumption only. The two real CSI
- * counts and retained mux describe an inherited supported rate, not voltage,
- * PLL/DVFS ownership or bandwidth. Capture still needs its real host lease.
+ * counts, retained mux, unchanged PLL PCW/FENC and the already-held UFS
+ * monotonic voltage floor qualify an inherited supported rate. VCORE is
+ * the real controller's request/gear, not a PMIC measurement. No new PLL,
+ * voltage or bandwidth request is issued. Capture still needs its real host
+ * lease and CAMSV/SMI bandwidth/rate supplier.
  */
 #endif
 #endif
