@@ -31,7 +31,10 @@
   不宣称这是Linux APDMA，也不启用没有resume callback的wake-enhance。失败先关自己的IRQ、复位BT、按lease清理。
   UART IRQ hook同步存于overlay与 `x9/xnu/0006-x9-bt-uart-irq.patch`；没有修改共用XNU源树。
 - `bluetooth_board.py`：171 B production `sku/hw-0` BT connfem命令，3 B原顺序pinmap，七个必需flags；
-  私有 `x9_bt_board.inc` 不入git。`x9_bt_session.c`严格执行 ROM→24M→XO→下载/connfem→真实FW flags→routing→ownership。
+  私有 `x9_bt_board.inc` 不入git。`x9_bt_session.c`严格执行 ROM→24M→XO→下载/connfem→真实FW flags→routing→ownership→WMT function-on→有效controller配置。
+  function-on只接受完整opcode6 ACK；仅明确busy=2才50ms退避，超时/解析/TX失败不重发，busy耗尽不假报成功。
+  UART额外calibration callback在Android中实际为no-op，不能将ownership替代function-on。
+  **有效phase1/vendor配置（或实际为空的证据）仍缺失**，controller_config返回ENOENT；源码示例 `bt.cfg` 不是生产配置。
 - `x9_bt_download.c`：完整52 B section spec、首个匹配type `{0,2,3,0x80,0x90,0x10000}`、type3后connfem、最后bin index3；
   raw firmware1988 B单元或WMT ACL phase1/2/3，所有写入与drain有界，无模糊TX失败后重发。
 - `x9_bt_serial.c`：mobile501/0600、独占open、阻塞read/write/select、64-bit termios、16KiB RX/TX FIFO与generation。
@@ -50,8 +53,17 @@
   广播数量通过真实203b查询（软件容量上限5），回包前不发布部分能力；原provider once初始化后才同步缓存和标准HCI selector。
   HCI Reset保留真实失败状态，并清理各层能力；旧epoch的未完成203b不能推进新初始化。
   broadcaster启动时刷新构造阶段的legacy选择（本版本实例+0x88），不套iOS27布局。
-- **未完成**：其它初始化status路径核对、launch/BlueTool编排、实机COW与能力发布/缓存路由验证。
-  未来环境 `BT_HCI_TRANSPORT=H4:POSIX` / `X9_BT_VENDOR=MT6653`，当前不改launch plist。
+- LE-support/LE-buffer/SupportedStates/FilterAcceptListSize/PAListSize初始化回调保留真实错误。
+  后两种size是scalar，0不是NULL；SupportedStates才是8 B指针。成功继续原件cache setter，不伪造payload。
+- `X9Bootstrap16`同时核对只读ABI1状态（READY/error0/FW-ready1/chip6653/baud24M）和 `kern.x9_bt_boot=0`。
+  只在service尚未注册或真实INITIALIZING时等待；PASSIVE/FAILED立即保留失败。内核在serial boot结果后才发布READY。
+- `X9BluetoothLaunch`保留mobile501身份，等完整board就绪后设置 `BT_HCI_TRANSPORT=H4:POSIX`、
+  `X9_BT_VENDOR=MT6653`、`DYLD_INSERT_LIBRARIES=/usr/lib/X9H4Transport.dylib`，exec原件bluetoothd。
+  不能由exec成功推断dyld注入/COW安装成功，必须实机验证。
+- `X9BlueTool -R`实现原件 `com.apple.BlueTool` XPC契约，`RunBuiltinScript boot/init`只读核对真正ready；
+  失败result1、原始BSD errno另存x9_errno；不合成manufacturer/firmware。deepsleep明确ENOTSUP，未知命令拒绝。
+- **未完成**：生产有效controller配置、真实sleep/firmware-own/resume、其余native可选初始化回调、实机COW与能力/缓存路由、启动及场景验收。
+  当前不安装或修改root上的launch plist。
 
 ## 编译与只读核对
 
@@ -59,9 +71,14 @@
 python3 -I x9/bluetooth/build.py --kernel-objects --out x9/out/bluetooth-native/<唯一名>
 ```
 
-编译/adhoc签名 `btctl`、`X9H4Transport.dylib`；单独编译6个BSD对象、UART IRQ hook及2个IOKit owner对象。
+编译/adhoc签名 `btctl`、`X9H4Transport.dylib`、`X9BluetoothLaunch`、`X9BlueTool`；单独编译6个BSD对象、UART IRQ hook及2个IOKit owner对象。
 使用常规BT/Wi-Fi私有生成器；不链接完整kernel、不打包boot、不测试、不安装、不操作设备。
 输出 `build.json` 保持 `stageable=false`。
+
+可选 `--launchd-source <仓库内原始20H392 plist目录>` 仅生成启动候选配置：
+先校验两个原job的Label/mobile身份/ProgramArguments/MachServices，再仅override `Program` 为
+`/usr/libexec/X9BluetoothLaunch` 和 `/usr/libexec/X9BlueTool`，保留原arguments、MachServices、KeepAlive、events及其它字段。
+输入原件副本在输出 `launchd-originals/`，派生件在 `launchd-candidates/`；两者不入git、均未安装、**不是可stage包**。
 
 未来工具正常交付后仅有只读metadata入口：
 

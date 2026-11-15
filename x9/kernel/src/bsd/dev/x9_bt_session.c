@@ -68,6 +68,31 @@ static int wake(const struct x9_bt_download_ops *o)
     return exact(o, tx, sizeof(tx), ack, sizeof(ack));
 }
 
+static int function_on(const struct x9_bt_download_ops *o)
+{
+    /* chip/btmtk_chip_common.c WMT_POWER_ON_CMD/EVT. Generic command()
+     * treats byte7 as failure, but THIS opcode explicitly defines 2=busy.
+     * Retry ONLY that complete reply, never a timeout/partial TX/parse error.
+     * btmtk_send_wmt_power_on_cmd uses 50ms busy backoff. Unlike its loop,
+     * exhaustion is an error, not success with power_state still unset. */
+    static const uint8_t tx[] = {1,0x6f,0xfc,6,1,6,2,0,0,1};
+    static const uint8_t prefix[] = {4,0xe4,5,2,6,1,0};
+    uint64_t deadline = o->now_ms(o->context) + 1000;
+    for (unsigned attempt = 0; attempt < 20; attempt++) {
+        uint8_t rx[260]; size_t n = sizeof(rx);
+        uint64_t now = o->now_ms(o->context);
+        if (now >= deadline) return EBUSY;
+        int error = o->exchange(o->context, tx, sizeof(tx), rx, &n,
+                               (uint32_t)(deadline - now));
+        if (error) return error;
+        if (n != 8 || memcmp(rx, prefix, sizeof(prefix))) return EPROTO;
+        if (!rx[7]) return 0;
+        if (rx[7] != 2) return EIO;
+        o->sleep_ms(o->context, 50);
+    }
+    return EBUSY;
+}
+
 int x9_bt_session_run(const struct x9_bt_session_ops *o,
                      const struct x9_bt_session_board *b, struct x9_bt_session_result *r)
 {
@@ -76,7 +101,8 @@ int x9_bt_session_run(const struct x9_bt_session_ops *o,
     if (!o || !b || !o->io.exchange || !o->io.raw_write || !o->io.drain ||
         !o->io.sleep_ms || !o->io.now_ms || !o->io.connfem ||
         !o->pre_on || !o->power_on || !o->rx_and_32k || !o->host_uart ||
-        !o->hub_features || !o->post_download || !o->verify_ownership) return EINVAL;
+        !o->hub_features || !o->post_download || !o->verify_ownership ||
+        !o->controller_config) return EINVAL;
     if (!b->calibration_present) return ENOENT;
     if (!X9_BT_CONNFEM_BYTES) return ENOENT;
     if (b->flow_control != 0 && b->flow_control != 0x40 && b->flow_control != 0x80) return EINVAL;
@@ -138,6 +164,13 @@ int x9_bt_session_run(const struct x9_bt_session_ops *o,
     STEP(X9_BT_SESSION_OWN, wake(&o->io));
     STEP(X9_BT_SESSION_OWN, o->verify_ownership(ctx));
     r->driver_owned = true;
+    /* Both UART tty/serdev calibration callbacks are real Android no-ops;
+     * XO/connfem have already been sent. Ownership is NOT function power-on.
+     * Normal btmtk_fops_open calls btmtk_send_init_cmds before OPENED, except
+     * DVT builds. Never apply that DVT skip to this production session. */
+    STEP(X9_BT_SESSION_FUNCTION, function_on(&o->io));
+    r->function_powered = true;
+    STEP(X9_BT_SESSION_CONTROLLER_CONFIG, o->controller_config(ctx));
     r->stage = X9_BT_SESSION_DONE;
 #undef STEP
     return 0;

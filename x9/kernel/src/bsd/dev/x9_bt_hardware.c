@@ -216,6 +216,16 @@ static int verify_ownership(void *context)
     }
     return x9_conn_power_done(X9_CONN_BT);
 }
+static int controller_config(void *context)
+{
+    (void)context;
+    /* btmtk_fops_open -> btmtk_send_init_cmds -> phase1 WMT/vendor config.
+     * No captured production selected bt_mt6653_*.cfg / bt.cfg exists in
+     * the current inputs. A checked-in example is not the active board's
+     * config; absence of that input does not prove empty command arrays. */
+    printf("X9 BT: selected production phase1/vendor configuration required\n");
+    return ENOENT;
+}
 int x9_bt_hardware_stop(void)
 {
     /* Worker disables its UART IRQ/TX first. Never restore full shared
@@ -250,5 +260,6 @@ void x9_bt_hardware_ops(struct x9_bt_session_ops *o)
     o->pre_on=pre_on; o->power_on=power_on; o->rx_and_32k=rx_and_32k;
     o->host_uart=host_uart; o->hub_features=hub_features;
     o->post_download=post_download; o->verify_ownership=verify_ownership;
+    o->controller_config=controller_config;
 }
 #endif

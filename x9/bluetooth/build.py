@@ -3,6 +3,7 @@
 import argparse
 import importlib.util
 import json
+import plistlib
 import subprocess
 import sys
 from pathlib import Path
@@ -10,10 +11,51 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 
 
+def launch_jobs(source, out):
+    """Derive candidate Program overrides; never install or edit stock jobs."""
+    # Private original plists are explicit repo-local inputs, not implicit
+    # dependencies on a mounted root or on another checkout's experiment.
+    source = source.resolve()
+    source.relative_to(HERE.parent.parent)
+    jobs = (('com.apple.bluetoothd', '/usr/sbin/bluetoothd', [],
+             'com.apple.server.bluetooth', '/usr/libexec/X9BluetoothLaunch'),
+            ('com.apple.BlueTool', '/usr/sbin/BlueTool', ['-R'],
+             'com.apple.BlueTool', '/usr/libexec/X9BlueTool'))
+    originals = out / 'launchd-originals'
+    candidates = out / 'launchd-candidates'
+    validated = []
+    # Check BOTH jobs before emitting ANY derived configuration.
+    for label, program, args, service, replacement in jobs:
+        data = (source / (label + '.plist')).read_bytes()
+        job = plistlib.loads(data)
+        if (not isinstance(job, dict) or job.get('Label') != label or
+                job.get('UserName') != 'mobile' or
+                job.get('ProgramArguments') != [program, *args] or
+                job.get('Program', program) != program or
+                not isinstance(job.get('MachServices'), dict) or
+                service not in job['MachServices']):
+            raise ValueError(f'Unexpected original 20H392 launch job: {label}')
+        validated.append((label, data, job, replacement))
+    originals.mkdir(parents=True, exist_ok=True)
+    candidates.mkdir(parents=True, exist_ok=True)
+    for label, data, job, replacement in validated:
+        (originals / (label + '.plist')).write_bytes(data)
+        # Program selects our exec gate/listener; the original arguments,
+        # MachServices, KeepAlive, events, identity and all other keys remain.
+        job['Program'] = replacement
+        (candidates / (label + '.plist')).write_bytes(
+            plistlib.dumps(job, fmt=plistlib.FMT_BINARY, sort_keys=False))
+    return {'source': str(source.relative_to(HERE.parent.parent)),
+            'originals': originals.name, 'candidates': candidates.name,
+            'installed': False}
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--developer-dir', type=Path)
     ap.add_argument('--out', type=Path, required=True)
+    ap.add_argument('--launchd-source', type=Path,
+                    help='explicit repo-local original 20H392 launch plist directory; emit candidates only')
     ap.add_argument('--kernel-objects', action='store_true',
                     help='also compile only Bluetooth/shared-power overlay objects, no link/boot/tests')
     a = ap.parse_args()
@@ -36,17 +78,30 @@ def main():
                     str(HERE / 'X9Capabilities16.c'),
                     '-o', str(bridge)], check=True)
     subprocess.run(['/usr/bin/codesign', '--force', '--sign', '-', '--timestamp=none', str(bridge)], check=True)
+    for name in ('X9BluetoothLaunch', 'X9BlueTool'):
+        target = a.out / name
+        subprocess.run([str(clang), '-target', 'arm64-apple-ios16.0', '-isysroot', str(sdk),
+                        '-Os', '-Wall', '-Wextra', '-Werror', '-fblocks',
+                        '-fstack-protector-strong', '-framework', 'CoreFoundation', '-framework', 'IOKit',
+                        str(HERE / (name + '.c')), str(HERE / 'X9Bootstrap16.c'),
+                        '-o', str(target)], check=True)
+        subprocess.run(['/usr/bin/codesign', '--force', '--sign', '-', '--timestamp=none', str(target)], check=True)
+    launchd = launch_jobs(a.launchd_source, a.out) if a.launchd_source else None
     # Deliberately not a stageable runtime: vendor routing and complete board
-    # initialization are separate required gates. No launch plist is changed.
+    # initialization are separate required gates. No installed plist changes.
     (a.out / 'build.json').write_text(json.dumps({
         'schema': 1, 'client': 'btctl', 'bridge': 'X9H4Transport.dylib',
+        'launch_gate': 'X9BluetoothLaunch', 'bluetool_adapter': 'X9BlueTool',
+        'launchd': launchd,
         'ios_build': '20H392',
         'bluetoothd_uuid': 'AA9424E8-0648-34E2-B3CF-E6C793B9D471',
         'bluetoothd_sha256': '8b7c0a0bea51544db82269d7f2775ab7996b8740927283428c4753e032df3a8f',
         'stageable': False,
         'requires': ['SSPM CMM24M configuration and proven firmware handoff',
+                     'captured selected Android phase1/vendor configuration and real function power-on',
                      'on-device validation of 20H392 capability publication and native cache routing',
-                     'boot/BlueTool orchestration',
+                     'real deepsleep/firmware-own/resume lifecycle',
+                     'launchd/BlueTool integration and on-device injection validation',
                      'on-device scan/pair/BLE/audio validation'],
         'transport_environment': {'BT_HCI_TRANSPORT': 'H4:POSIX', 'X9_BT_VENDOR': 'MT6653'},
     }, indent=2) + '\n')
@@ -81,7 +136,7 @@ def main():
                     raise SystemExit(f'Bluetooth object compile failed: {result}')
         finally:
             builder.logfile.close()
-    print(f'BT client and 20H392 H4 adapter built: {a.out}; not installed or hardware-tested')
+    print(f'BT client, 20H392 H4/vendor adapter, launch gate and BlueTool built: {a.out}; not installed or hardware-tested')
 
 
 if __name__ == '__main__':

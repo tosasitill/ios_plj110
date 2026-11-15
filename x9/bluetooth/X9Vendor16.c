@@ -29,6 +29,37 @@ static init_fn original_init;
 static callback_fn original_callbacks;
 static reset_fn original_reset;
 static callback_fn original_advertising;
+typedef void (*read_size_fn)(uint32_t, uint32_t);
+static x9_cap16_features_fn original_states;
+static read_size_fn original_filter, original_pa_list;
+
+static void failed_read(uint32_t status, uint64_t label)
+{
+    /* These native callbacks otherwise skip their real cache setter on an
+     * error, then force success at the init sequencer. Do not call the setter
+     * with a failed/null payload, or discard the controller's error. */
+    x9_cap16_reset();
+    ((void (*)(uint32_t, const char *))addr(0x1001094ac))(status, (const char *)addr(label));
+}
+static void states_complete(uint32_t status, const void *states)
+{
+    /* 10018f0b4 loads eight bytes from x0: states really is a pointer. */
+    if (!status && !states) status = 0x67;
+    if (!status) original_states(0, states);
+    else failed_read(status, 0x1006eddd5);
+}
+static void filter_complete(uint32_t status, uint32_t size)
+{
+    /* 1001a9cb0 stores w0; zero is a valid reported scalar, NOT NULL. */
+    if (!status) original_filter(0, size);
+    else failed_read(status, 0x1006ede1a);
+}
+static void pa_list_complete(uint32_t status, uint32_t size)
+{
+    /* 10008fbe4 retains x0 as the list-size scalar for its allocation. */
+    if (!status) original_pa_list(0, size);
+    else failed_read(status, 0x1006edee4);
+}
 
 static void reset_complete(uint32_t status)
 {
@@ -91,6 +122,17 @@ static uintptr_t trampoline(vm_address_t base, const struct edit *e)
     return (uintptr_t)base;
 }
 
+static uintptr_t success_trampoline(vm_address_t base, const struct edit *e)
+{
+    /* ONLY called with status0. Original first instruction is CBNZ w0 to
+     * its failed-read tail; replacing that now-unreachable branch by NOP
+     * avoids copying a PC-relative target into the trampoline. The remaining
+     * STP / MOV fp / MOV x0,x1 are independently verified PC-independent. */
+    struct edit success = *e;
+    success.before[0] = 0xd503201f;
+    return trampoline(base, &success);
+}
+
 int x9_vendor16_install(intptr_t slide)
 {
     /* Opt-in only; build manifest remains non-stageable until board handoff,
@@ -134,8 +176,19 @@ int x9_vendor16_install(intptr_t slide)
         {0x10010bbe8, {0x340002c0,0xaa0003f3}, {0xaa0003f3,0x340002a0}, 2},
         {0x10010bc48, {0x52800000}, {0x2a1303e0}, 1},
         {0x10050a18c, {0xd10183ff,0xa9025ff8,0xa90357f6,0xa9044ff4}, {0}, 4},
+        /* These two callbacks preserve x0 on every valid success path and
+         * on the immediate error path. Removing only MOV w0,0 retains the
+         * original LE-support / LE-buffer cache logic and actual status. */
+        {0x10010c328, {0x52800000}, {0xd503201f}, 1},
+        {0x10010c450, {0x52800000}, {0xd503201f}, 1},
+        /* Success-only cache setters clobber x0. Keep native successful
+         * work in explicit success trampolines; forward failed reads using
+         * their own original init-step labels. */
+        {0x10010c458, {0x350000c0,0xa9bf7bfd,0x910003fd,0xaa0103e0}, {0}, 4},
+        {0x10010c480, {0x350000c0,0xa9bf7bfd,0x910003fd,0xaa0103e0}, {0}, 4},
+        {0x10010c5d8, {0x350000c0,0xa9bf7bfd,0x910003fd,0xaa0103e0}, {0}, 4},
     };
-    unsigned count = 15;
+    unsigned count = 20;
     if (x9_cap16_hook_count > sizeof(edits)/sizeof(edits[0]) - count) return -1;
     for (size_t k = 0; k < x9_cap16_hook_count; k++) {
         const struct x9_cap16_hook *h = &x9_cap16_hooks[k];
@@ -162,6 +215,9 @@ int x9_vendor16_install(intptr_t slide)
         (x9_cap16_features_fn)trampoline(tramp+96, &edits[10]));
     original_reset = (reset_fn)trampoline(tramp+128, &edits[11]);
     original_advertising = (callback_fn)trampoline(tramp+160, &edits[14]);
+    original_states = (x9_cap16_features_fn)success_trampoline(tramp+256, &edits[17]);
+    original_filter = (read_size_fn)success_trampoline(tramp+288, &edits[18]);
+    original_pa_list = (read_size_fn)success_trampoline(tramp+320, &edits[19]);
     uint32_t bridge[10] = {
         0xaa1403e0, /* MOV x0,x20: actual status preserved across native logs */
         0x580000b0, /* LDR x16, literal +24 */
@@ -173,7 +229,7 @@ int x9_vendor16_install(intptr_t slide)
     uintptr_t publish = (uintptr_t)x9_cap16_publish, epilogue = addr(0x10010c124);
     memcpy(bridge+6, &publish, 8); memcpy(bridge+8, &epilogue, 8);
     memcpy((void *)(uintptr_t)(tramp+192), bridge, sizeof(bridge));
-    sys_icache_invalidate((void *)(uintptr_t)tramp, 192+sizeof(bridge));
+    sys_icache_invalidate((void *)(uintptr_t)tramp, 352);
     kr = vm_protect(mach_task_self(), tramp, page, FALSE, VM_PROT_READ|VM_PROT_EXECUTE);
     if (kr) { vm_deallocate(mach_task_self(), tramp, page); return -1; }
     jump_words(edits[3].after, (uintptr_t)vendor_init);
@@ -184,6 +240,9 @@ int x9_vendor16_install(intptr_t slide)
     jump_words(edits[10].after, (uintptr_t)x9_cap16_local_entry);
     jump_words(edits[11].after, (uintptr_t)reset_complete);
     jump_words(edits[14].after, (uintptr_t)start_advertising);
+    jump_words(edits[17].after, (uintptr_t)states_complete);
+    jump_words(edits[18].after, (uintptr_t)filter_complete);
+    jump_words(edits[19].after, (uintptr_t)pa_list_complete);
 
     /* Preflight ALL pages before modifying ANY instruction. COW mappings
      * preserve the original Apple executable on disk. Constructor installs

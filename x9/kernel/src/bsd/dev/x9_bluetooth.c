@@ -270,7 +270,8 @@ static void worker(void *unused,wait_result_t result)
     if(!error) error=x9_bt_session_run(&ops,&board,&session);
     session_stage=(int)session.stage;
     lck_mtx_lock(&bt_lock); bs.chip_id=session.chip_id; bs.baud=session.baud; lck_mtx_unlock(&bt_lock);
-    if(!error && (!session.driver_owned || session.stage!=X9_BT_SESSION_DONE)) error=ENXIO;
+    if(!error && (!session.driver_owned || !session.function_powered ||
+                  session.stage!=X9_BT_SESSION_DONE)) error=ENXIO;
     if(error) {
         irq_stop(); int stop_error=x9_bt_hardware_stop();
         state(X9_BT_FAILED,error); x9_bt_serial_result(error,session.baud);
@@ -279,8 +280,11 @@ static void worker(void *unused,wait_result_t result)
     }
     /* This branch is currently unreachable while the SSPM CMM gate returns
      * ENOTSUP. Compile/link success must not be reported as reaching it. */
-    lck_mtx_lock(&bt_lock); bs.firmware_ready=1; bs.state=X9_BT_READY; lck_mtx_unlock(&bt_lock);
     x9_bt_serial_result(0,session.baud);
+    /* Publish READY last. The launch/BlueTool gate also reads serial.boot;
+     * exposing READY before clearing its initial ENXIO would reject a real
+     * completed session during this otherwise harmless publication window. */
+    lck_mtx_lock(&bt_lock); bs.firmware_ready=1; bs.state=X9_BT_READY; lck_mtx_unlock(&bt_lock);
     printf("X9 BT: complete firmware session chip=%04x baud=%u driver-own verified\n",session.chip_id,session.baud);
     uint8_t bytes[1024];
     for(;;) {
