@@ -39,9 +39,10 @@ int x9_als_set_report_interval_us(uint32_t us)
 {
  if (us < 20000 || us > 1000000) return EINVAL;
  lck_mtx_lock(&x9_als_lock);
- int e = !active ? ENXIO : status.error ? status.error :
-     physical_mode && (!status.control_enabled || requested_interval_us != status.report_interval_us) ? EBUSY : 0;
+ int e = !active ? ENXIO : status.error;
  if (!e) {
+  /* Retain the newest HID request during startup or a batch ACK. Only the
+   * worker sends controls; applied cadence changes at a matching ACK. */
   requested_interval_us = us;
   if (!physical_mode) status.report_interval_us = us; /* host cadence only */
  }

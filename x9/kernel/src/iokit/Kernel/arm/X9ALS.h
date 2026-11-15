@@ -50,6 +50,8 @@ int x9_als_start_transport(void);
 int x9_als_start_shared_transport(void);
 void x9_als_copy_status(struct x9_als_status *status);
 uint32_t x9_als_get_report_interval_us(void);
+/* Queue/coalesce desired cadence in native mode. Success is not an ACK;
+ * get_report_interval_us returns the cadence applied by the real ACK. */
 int x9_als_set_report_interval_us(uint32_t interval);
 
 /* Called by a SCP transport worker, never from hard IRQ context.

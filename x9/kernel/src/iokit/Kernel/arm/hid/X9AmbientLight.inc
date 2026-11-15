@@ -38,6 +38,8 @@ OSDefineMetaClassAndStructors(X9AmbientLight, IOHIDEventService);
 bool
 X9AmbientLight::start(IOService *provider)
 {
+	fTimer = NULL;
+	fIngressActive = false;
 	/* Compact sensor mask: bit0 ALS, bit1 pressure, bit2 GPS. Explicit
 	 * per-device arguments override it (including diagnostic mode). */
 	int sensors = 0; PE_parse_boot_argn("x9s", &sensors, sizeof(sensors));
