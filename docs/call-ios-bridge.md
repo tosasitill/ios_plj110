@@ -9,11 +9,12 @@
 | iOS 请求 codec | VOICE20 普通拨号有界解码，21 挂断、22 接听严格 tag1/u8；动作要求显式已验证的 route / 单通话映射 |
 | Android 请求形状 | 新增本机卡2实测 `0901` 的六个 TLV；接听 `0907 {}`；挂断 `0905 {MODE100/u32=0, ID101/u32}` |
 | 拨出状态生产者 | 完整 `4901` 的真实 ID / ECPI reducer；已实现、单对象可编译；未有完整真机 wire 重放或 iOS 运行验收 |
-| 空快照与异步确认 | 完整 owned `090a` 数组解析；`0902 + 新 MO epoch` 汇合生成 VOICE20/tag10/u8；DIAL 仍无生产 profile/admission 调用者 |
+| 空快照与异步确认 | 完整 owned `090a` 数组解析、号码与原始presentation有界owner；`0902 + 新 MO epoch` 汇合生成 VOICE20/tag10/u8；DIAL 仍无生产 profile/admission 调用者 |
 | 单通话挂断 / SIM 绑定 | VOICE44/tag01/u8 独立绑定；显式 VOICE21 → owned current query → 同 MO epoch/真实 ID/完整单通话 snapshot → guarded0905 → 同token0906 → 原iOS txn 的 result；已接请求分发，未设备验收 |
 | 初始化 / 事件注册 | 明确绑定后的 VOICE03：13=0 与14=0/1 可独立并发 → 全局 CMD8901 → 逐 SIM IND4901/4902 → owned0909/090a；逐token确认，13=1仍拒绝；仅编译、未运行 |
 | handover 通知 | 严格 MD4902/EVENT3 → Android SRVCC → Apple54/tag1/u8；订阅cursor/generation/SIM隔离、先Result后有序发布；未设备验收，未迁移handover后的ID/RAT/profile |
 | 来电 CMD / 状态 | `8901` 的字段、长度和唯一 tag 验证；独立 pending ID → 完整 ECPI0/132/6/133 的 MT reducer / iOS observer；未发布 CallList |
+| END 原因 metadata | 成功完整解析、被当前 MO/MT 身份接受的 `133/mode20/10a=16` → 内部 Apple reason145；无cause/其它cause未知，不从无ID0910补归属；只编译，未发布 END |
 | 来电许可 RSP | `8902` 的正确 approve/call-id 字段；显式调用才构造，保留原 txid；按已核实 RIL slot 转换生成 RSP mask |
 | 物理 transport | 独立 call inbox / CMD owner，复用原有唯一 MD tick writer；SMS ACK 保持优先 |
 | 超时 / 重复 / 失败 | 无自动重发；重复 outstanding CMD 去重；内容变化及未知退休规则隔离 calls；不清空 mutation owner |
@@ -115,9 +116,109 @@ NoService0/CDMA1/GSM2/UMTS3/LTE4/TDSCDMA5/Unknown6/UnknownTech2 7。
 offset5的consumer `1f1ac4df0..4dfc`写tree node+0x7d，而`1f1ac4d28`证明CallInfo为node+0x28，
 所以实际是CallInfo+0x55（不是CallInfo+0x7d）。Base `CallInfo::toString1f039177c`字符串
 `Is in Multi-Pary call: `，`1f039178c`读取+0x55；`getLegacyFlags1f0390bec`也读+0x55并映射bit30。
-Call_Type跳表与offset6语义、RemoteNumberListItem presentation尚未闭合，**不填默认0**。
+Call_Type细分与offset6语义仍有未闭合项，**不填默认0**；RemoteNumberListItem presentation的已证映射见下。
 `1929bfc`是CallConfigItem writer，不能拿其string长度解释CallList第七byte。
-此项仍无CallList46生产编码/发布，END原因与号码隐私策略还需继续追真实consumer。
+CallList tag1的`192a74c→1929b2c`为count/u8后7B逐字节条目；END tag14 `192aa10`为
+count/u8后每项`{id/u8,reason/u16LE}`，wire步长3（内存padding不是wire）。
+RemoteNumberListItem byte1经`1f1ac5c60..5c70`映射1→internal1、2→internal2、其它→0；
+Base `remoteNumberAvailabilityToString1f03906c0`直接0基表`20dad4d50`为Available/Restricted/Unavailable，
+因此wire0/1/2对应这三项，未知拒绝不猜。MD号码presentation真实来源为8114/detail_info[0]，
+RIL `3854ac..bc→3855e8→388380`，不是105/107的整word。
+
+`x9cw_number`现有128B含NUL的有界owner：progress8104与current8111分别保存原号码、
+length（不含NUL）及8106/8114的原始presentation byte。先验证全帧再提交out，不持有会被重用的RX指针；
+生产owned-current路径随原快照复制，stale/error快照不替换。只标记实际成功解析的metadata为valid，
+不能把zero-init对象的0当Available。`x9cw_number_presentation()`明确native0→Available0、
+1→Restricted1、2/3/4→Unavailable2；未知返回失败且不改输出，**不沿用RIL的未知→Available fallback**。
+未来publisher仍须只在有效owner/正确epoch下使用，Restricted/Unavailable不得发布原value[]；
+尚未实现号码格式/TOA转换、progress到通话身份的号码合并生命周期或CallList46生产编码/发布。
+没有新增查询/服务公告/默认字段，不能仅empty encoder冒充完成。新增两个人工owner向量仅编译，未执行。
+
+offset6追加原件排除：`192a770→192b150/192b194`只是接收vector resize/append；
+`192a794→1929b2c`必将wire+6覆盖到item+6（`1929be0/be4`），默认构造不能作为来源。
+相邻`1929bfc`为CallConfigItem，`1929c3c..54`把C++ string长度写wire+6后复制wire+7，
+是变长结构而非7B CallList serializer。当前匹配host原件仅有CallList parse/resize/copy，
+未发现其writer；QMIParserDynamic已有metadata也无vs/ALS定义。ALS只是未证假设，不按标准字段名填0。
+
+### END cause16 → Apple reason145（内部metadata，未发布）
+
+Apple END tag14 consumer `1f1ac50a4`读u16，`1f1ac50bc`交
+`convertCallEndReasonToString1f19fd3c8`，`1f1ac5170`交
+`convertCallEndBBCodeToCSIError1f19fd830`。**原始数值16在Apple空间是Unknown / CSI1**，
+不能把MD10a直接copy为Apple reason。Apple145/0x91明确名为
+`QMI_FAILURE_CAUSE_NORMAL_CALL_CLEARING`；CSI跳表entry34的目标`1f19fd8e4`返回0。
+Apple0是OFFLINE，不能作为无cause默认发布。
+
+matching MD原因空间及完整源到10a链已闭合：
+
+1. IMS disconnect producer `910d30e6` 的`910d3104..3110`与progress producer
+   `910d3366` 的133分支`910d3398..33a4`均调用`imc_map_last_cause_to_ext_report911006ec`。
+   CEER request `910f6678`的`910f6696..66a4`调用**同一mapper**；formatter
+   `9143ec76..92`使用table`929950d8`，其中`[16]→9244a76c="CM_NORMAL_CALL_CLR"`。
+2. `910d7f58..7f80`把映射输出放ECPI info+57/presence1、+58/u16cause；
+   VDM update`921ecd2a`保存ctx+f/presence、+212/cause，fill`921ecb6c`原值拷回。
+   无cause路径presence0；内部备用值31**不能冒作真实cause发布**。
+3. END route`921e9758→921e9604`经encoder`9143dc36`设置msgtype133；
+   common`9143da74`由presence决定是否写末尾cause字段。L5 ECPI parser
+   `91392d86..92db6`保留presence/u16cause，send`91392ae0..92aea`把session+4/+6
+   拷至IND+231/+232，serializer`9132587e..25894`仅presence==1才LHU零扩展写10a/u32。
+
+真实 retained radio日志`x9/out/android-incoming-20261115-192820/retained-radio-logcat.txt`
+2977..2979行，19:27:31.399的完整0910同时含code16和`CM_NORMAL_CALL_CLR`；
+matching RIL`385848..5894`保留code和字符串。0910没有通话ID，**只佐证原因语义，不倒填4901的ID、
+不把前一通话的cause补给后一通话**。已有真实4901日志只保留486B，声明512/520/528/536B；
+仍无完整设备END frame，不补零或截断解析。
+
+共享progress仅在完整frame及所有TLV校验通过后置`valid=1`。手工/zero-init对象保持既有reducer准入语义，
+但不能授予END原因provenance。MO/MT reducer仅在原身份/路由/方向/状态/revision检查全部成功后保存
+`end_reason{known,apple}`：仅完整`133/mode20/has_cause/cause16`known145；其它或缺cause未知。
+拒绝事件、late133、revision overflow不会更新原因；首次unknown END也不能被late16补成known。
+NEW130与新的MT CMD begin清前一epoch的metadata。没有改注册、MT approval/answer、运行profile、
+CallList/END编码或VOICE09；本节不是END发布完成。
+
+私有窄反汇编现复制到`x9/out/call-end-reason-analysis/`（含`ios-end-reason-*`、
+`md-ims-*-cause-source.asm`、`md-vdm-*`、`md-end-*`、`md-ceer-*`、`ril-last-cause-*`）；
+人工provenance/MO/MT三项向量、C11 header及真实recipe两对象仅编译，未运行套件或设备验收。
+
+### CALL_RAT 不等于真实 voice access RAT
+
+MD `913a29ae/b2→l5ucc_get_rat_from_call_mode913a0756`将mode20..39分类为2，
+0..19和40..50分类为1，其余0，写session+39f；current112来自record+99。
+这是CLCC/CLCCS默认分类，不是实时LTE/NR/WFC证明。
+同一次真实10086日志`android-calls-20261115-183941/live-logcat.txt`的81634/81635行
+（18:42:37.767）与92175..92178行（18:42:41.304/305）明确slot1 voice RAT20/NR_SA、
+`NW_VoNR_Supported_2=1`。所以不能把current112=2无条件编码为AppleTechnology LTE4。
+AppleTechnology原件枚举没有NR，不以Unknown占位绕过真实来源。
+RIL真实voice注册查询是`requestVoiceRegistrationState30f8f0→042f→8100/10B`，
+networkType来自value+1/u16LE，再经convertCSNetworkType进入ServiceState.voiceRat；
+独立于PS/data RAT和IMSA注册快照。此处只记录原件路径，未新增query或准入默认值。
+
+### Apple 普通号码类型不证明 IMS command context（原件架构纠错）
+
+匹配Base `CallInfo::toString1f03911dc..11f4`输出`Call Sub Type:`并读CallInfo+44/u8，
+`asString(PhoneCallSubType)1f0390818`明确Telephony1/Wifi2/VoLTE4/VoNR8/SOSCall16；
+`isCallSubTypeCellularIMS1f039230c`只接4/8。这是独立于CallInfo+40/PhoneNumberType的维度。
+所以Apple普通Call_Type0可以是普通号码，但本身不能选择Android`IMS_DIAL/cf33`。
+
+完整`EurekaCallCommandDriver::sendDialReq1f1ac1f8c`仅按号码、普通/紧急类型、CLIR、TTY、
+slot(+d8)构造VOICE20的tag1/10/11（紧急另14）、60；未直接读取+44或透传明确IMS context。
+不能把该wire中的tag10=0或IMSA registered反推出subtype4/8、选中IMS driver或真实IMS client链。
+
+根盘matching CommCenter的`CallStatusDelegate::dial101017a94..101018318`保留该subtype，
+`101018060/8078..88`取selected driver并经vtable+18 dispatch；
+`CallCommandDriverType`实际Baseband0/IMS1。真实chained pointers解码表明
+typeinfo1015fa830的字符串为`20IMSCallCommandDriver`（1011e0d8b），
+secondary address point1015fa390的slot+18指向100dcdbc8的this-=8 thunk，再进100dcd7b0。
+其subscriber/SIM call-control分支在100dcdcdc读取+44并交call-control，
+后续100dcd114/async100dcf6e8不是Eureka sendDialReq。
+
+CommCenter包装100177b88导入的`IMSStartCall`，ordinal58实际provider为
+`/System/Library/PrivateFrameworks/IPTelephony.framework/Support/libIPTelephony.dylib`。
+`IMSStartCall1b7d69208`构造XPC的`request=kCallStart`、`kCallDialedNumber`、`kCallOptions`，
+经1b7d6933c→`XpcConnectionClient::sendXpcMessage1b7ccff18`发送；实际client/connection链为空则返回0。
+**selected IMS driver、subtype4/8、live IMS transport及caller options才是已证的上游维度**；
+当前普通VOICE20内核入口没有这些来源，最终XPC接收端/SIP/MD桥及语音能力options仍待闭合。
+此处是架构边界纠错，不注入host代码、不新建QMI默认字段、不开放VOICE09。
 
 ### modem 与 Android serializer
 
@@ -256,8 +357,13 @@ MD `0x913257b6..0x913258e4` 的完整4901：100/101/102/103/105/107/109各u32，
 
 RIL `requestGetCurrentCalls` `0x381354..0x381398` 发送 `0909 {}`，无selector/default TLV。
 MD `0x9131d574..0x9131d86c` 的090a **无条件写 result0/u32 + count100/u32**（失败不当空列表），再写11数组：
-10b ID、10c direction、10d mode、10e state、10f multiparty、110 toa、8111 number/NUL≤128、
-112 priority、113 flags、8114 binary408、115 aux；非string/binary项均u32。
+10b ID、10c direction、10d mode、10e state、10f NUMBER_TYPE、110 toa、8111 number/NUL≤128、
+112 CALL_RAT、113 TYPE完整u32、8114 binary408、115 aux；非string/binary项均u32。
+**更正旧交接**：10f不是multiparty、112不是priority。RIL `385494..4a4`读113保存w23，
+`3855a0/5bc`以bit0写RIL_Call.isMpty；MD `l5ucc_get_call_status_cb9138fbb4..fdf2`中`9138fd0a..4c`对IMS/CS共用TYPE构造：
+低位来自session190c（call_session156c+3a0），upper flags只在bit4/8/12/16/20合并。
+CLCCS parser `913a29dc..e0`和CLCC parser `913a2a80..84`均填同一session+3a0，
+未过滤mode20..39。因此只在既有mode20子集上以TYPE bit0保守拒绝多方，不扩展为conference控制。
 libmipc `add_array` `0x12310` / `add_idx` `0x12420` 和MD `0x9141b68a/0x9141b77c` 证明数组是
 **16B len0 descriptor + 独立元素TLV**，不是packed count*u32：reserved8B=0、base/u16、count/u16，
 元素tag=base+i并继承parent高bit；count0不产生descriptor。
@@ -308,8 +414,11 @@ MD新snapshot API和iOS observer接入，仅观察，不自动approve/answer/que
   不能按 DMS/DSD 的 u32 来解释。VOICE 单独保存 bound/sim/generation，无默认 SIM，不借用 NAS/WMS 的 binding。
 - 挂断请求仅已核实 VOICE21/tag01/u8 非零真实ID。要求该 client 已绑定 SIM2、完整 ECPI 已有
   同 native ID 的 MO epoch/mode20，随后才发 Android 原件 `0909 {}` 只读查询。
-  owned `090a` 完整数组的 result0/count1、同真实ID、direction0/mode20/multiparty0 和 current
+  owned `090a` 完整数组的 result0/count1、同真实ID、direction0/mode20、TYPE bit0无多方标志和 current
   ACTIVE0/ALERTING3 必须匹配 ECPI → Apple CONVERSATION3/ALERTING5。
+  单通话判断改用113/TYPE bit0，不再错误地将10f/NUMBER_TYPE当isMpty；后者NONE0/SIP_URI1/NUMBER2，
+  数字NUMBER2不意味着存在多方通话。IMS TYPE低位与CS共用session+3a0及CLCCS/CLCC parser填充，补充链见current节；
+  不把CS RIL过滤策略照搬为MD缺少IMS列表，不宣称已验证所有多通话模式。
   初始 ECPI130/mode0、MT、未知 ID/空 count、过期快照或其它模式不准入。
 - target={epoch,revision,native_id,sim} 在 MD admission 与唯一 writer 选择时各复核一次。
   允许原 DIAL lease **在其 CNF 已被消费、没有在途 CALL mutation 后** 挂断自己的真实单通话；

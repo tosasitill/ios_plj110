@@ -587,11 +587,15 @@ static int als_start_worker(int shared)
  if (test_mode || (!active && !shared)) {
   lck_mtx_unlock(&x9_als_lock); return EBUSY;
  }
- if (shared) shared_transport_requested = 1;
  if (transport_started) {
-  int error = status.error ? status.error : !status.worker_running ? ENXIO : 0;
+  /* A stopped ALS may still have a worker completing DISABLE. Do not pin
+   * that exiting owner or claim a usable shared transport; never restart it. */
+  int error = status.error ? status.error :
+      (!status.worker_running || !active) ? ENXIO : 0;
+  if (!error && shared) shared_transport_requested = 1;
   lck_mtx_unlock(&x9_als_lock); return error;
  }
+ if (shared) shared_transport_requested = 1;
  active = 1; valid = 0; mtk_gain = 0; last_scp_time = 0;
  transport_started = physical_mode = 1; status.worker_running = 1;
  lck_mtx_unlock(&x9_als_lock);

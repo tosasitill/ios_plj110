@@ -359,7 +359,7 @@ static void rx_progress(unsigned event,unsigned id=7,unsigned mode=20){
 }
 static void progress_framing(){
  uint8_t p[520];struct x9cw_progress c;progress_frame(p,130,7,0);
- assert(x9cw_progress(p,512,&c)&&c.id==7&&c.event==130&&c.mask==2&&c.has_cause&&c.cause==16);
+ assert(x9cw_progress(p,512,&c)&&c.valid&&c.id==7&&c.event==130&&c.mask==2&&c.has_cause&&c.cause==16);
  for(unsigned n=0;n<512;n++)assert(!x9cw_progress(p,n,&c));
  p[50]=2;assert(!x9cw_progress(p,512,&c));progress_frame(p,130,7,0);
  x9cw_scalar(p+512,0x8100,1,4);x9cw_put16(p+14,504);assert(!x9cw_progress(p,520,&c));
@@ -378,6 +378,87 @@ static void outbound_states(){
  c.id=8;assert(x9cw_outbound_apply(&s,&c)==-1&&s.blocked);
  s={};c.id=256;assert(x9cw_outbound_apply(&s,&c)==1&&!x9cw_outbound_id(&s,&id));
  s={};c.mask=0x20;assert(x9cw_outbound_apply(&s,&c)==0&&!s.seen); // no CMD mask normalization
+}
+/* Complete artificial producer frames, not reconstructed logger prefixes.
+ * Removing optional10a changes the declared body and moves the final TLV. */
+static unsigned reason_frame(uint8_t *p,unsigned event,unsigned direction=0,
+                             unsigned cause=16,bool has_cause=true,unsigned id=7,unsigned mode=20){
+ unsigned n=progress_frame(p,event,id,mode);x9cw_scalar(p+24,0x101,direction,4);
+ x9cw_scalar(p+496,0x10a,cause,4);
+ if(!has_cause){memmove(p+496,p+504,8);n-=8;x9cw_put16(p+14,n-16);}
+ return n;
+}
+static void end_reason_provenance(){
+ uint8_t p[512];struct x9cw_progress c={};
+ unsigned n=reason_frame(p,133);assert(!x9cw_progress(p,n-1,&c)&&!c.valid);
+ assert(!x9cw_end_reason_metadata(&c).known&&!x9cw_end_reason_metadata(nullptr).known);
+ assert(x9cw_progress(p,n,&c)&&c.valid);
+ auto r=x9cw_end_reason_metadata(&c);assert(r.known&&r.apple==145);
+ struct x9cw_progress retained=c;
+ assert(!x9cw_progress(p,n-1,&c)&&!memcmp(&c,&retained,sizeof(c))); // failed parse does not grant new provenance
+ for(unsigned event:{0u,2u,6u,130u,132u}){
+  n=reason_frame(p,event);assert(x9cw_progress(p,n,&c)&&c.valid&&!x9cw_end_reason_metadata(&c).known);
+ }
+ n=reason_frame(p,133,0,17);assert(x9cw_progress(p,n,&c)&&!x9cw_end_reason_metadata(&c).known);
+ n=reason_frame(p,133,0,0,false);assert(x9cw_progress(p,n,&c)&&!c.has_cause&&!x9cw_end_reason_metadata(&c).known);
+ n=reason_frame(p,133,0,16,true,7,0);assert(x9cw_progress(p,n,&c)&&!x9cw_end_reason_metadata(&c).known);
+ c={};c.event=133;c.mode=20;c.has_cause=1;c.cause=16;
+ assert(!x9cw_end_reason_metadata(&c).known); // a manually constructed object is not a parsed frame
+}
+static void outbound_end_reason(){
+ uint8_t p[512];struct x9cw_progress c;struct x9cw_outbound_state s;
+ auto begin=[&](){s={};unsigned n=reason_frame(p,130,0,16,true,7,0);
+  assert(x9cw_progress(p,n,&c)&&x9cw_outbound_apply(&s,&c)==1&&!s.end_reason.known);};
+ for(unsigned which=0;which<4;which++){
+  begin();unsigned n=reason_frame(p,133,0,which==1?17:16,which!=2);
+  assert(x9cw_progress(p,n,&c));if(which==3)c.valid=0;
+  assert(x9cw_outbound_apply(&s,&c)==1&&s.ended&&s.ios_state==9);
+  assert(s.end_reason.known==(which==0)&&s.end_reason.apple==(which==0?145:0));
+  auto reason=s.end_reason;uint64_t rev=s.revision;
+  for(unsigned cause:{17u,16u}){
+   n=reason_frame(p,133,0,cause);assert(x9cw_progress(p,n,&c));
+   assert(x9cw_outbound_apply(&s,&c)==0&&s.revision==rev&&s.end_reason.known==reason.known&&s.end_reason.apple==reason.apple);
+  }
+  n=reason_frame(p,130,0,16,true,8,0);assert(x9cw_progress(p,n,&c));
+  assert(x9cw_outbound_apply(&s,&c)==1&&s.epoch==2&&!s.end_reason.known&&!s.end_reason.apple);
+ }
+ for(unsigned which=0;which<5;which++){
+  begin();unsigned n=reason_frame(p,133);assert(x9cw_progress(p,n,&c));
+  if(which==0)c.id=8;else if(which==1)c.direction=1;else if(which==2)c.mode=0;
+  else if(which==3)c.mask=1;else s.revision=UINT64_MAX;
+  int result=x9cw_outbound_apply(&s,&c);
+  assert(result==(which==3?0:-1)&&!s.end_reason.known&&!s.end_reason.apple);
+ }
+}
+static void incoming_end_reason(){
+ uint8_t p[512];struct x9cw_progress c;struct x9cw_incoming cmd;
+ incoming(p);assert(x9cw_incoming(p,64,&cmd));cmd.call_id=7;
+ struct x9cw_inbound_state s;
+ auto begin=[&](){s={};assert(x9cw_inbound_begin(&s,&cmd)==1);
+  unsigned n=reason_frame(p,0,1);assert(x9cw_progress(p,n,&c));
+  assert(x9cw_inbound_apply(&s,&c)==1&&!s.end_reason.known);};
+ for(unsigned which=0;which<4;which++){
+  begin();unsigned n=reason_frame(p,133,1,which==1?17:16,which!=2);
+  assert(x9cw_progress(p,n,&c));if(which==3)c.valid=0;
+  assert(x9cw_inbound_apply(&s,&c)==1&&s.ended&&s.ios_state==9);
+  assert(s.end_reason.known==(which==0)&&s.end_reason.apple==(which==0?145:0));
+  auto reason=s.end_reason;uint64_t rev=s.revision;
+  for(unsigned cause:{17u,16u}){
+   n=reason_frame(p,133,1,cause);assert(x9cw_progress(p,n,&c));
+   assert(x9cw_inbound_apply(&s,&c)==0&&s.revision==rev&&s.end_reason.known==reason.known&&s.end_reason.apple==reason.apple);
+  }
+  cmd.sequence++;assert(x9cw_inbound_begin(&s,&cmd)==1&&s.pending&&!s.end_reason.known&&!s.end_reason.apple);
+ }
+ for(unsigned which=0;which<5;which++){
+  begin();unsigned n=reason_frame(p,133,1);assert(x9cw_progress(p,n,&c));
+  if(which==0)c.id=8;else if(which==1)c.direction=0;else if(which==2)c.mode=0;
+  else if(which==3)c.mask=1;else s.revision=UINT64_MAX;
+  int result=x9cw_inbound_apply(&s,&c);
+  assert(result==((which==1||which==3)?0:-1)&&!s.end_reason.known&&!s.end_reason.apple);
+ }
+ // Complete END cannot attach a cause to an MT that has not observed ECPI0.
+ s={};assert(x9cw_inbound_begin(&s,&cmd)==1);unsigned n=reason_frame(p,133,1);
+ assert(x9cw_progress(p,n,&c)&&x9cw_inbound_apply(&s,&c)==-1&&!s.end_reason.known);
 }
 static unsigned current_frame(uint8_t *p,unsigned count,unsigned result=0){
  assert(count<=1);x9cw_header(p,704,0x90a,2,0);unsigned at=32;
@@ -403,6 +484,41 @@ static void current_arrays(){
  x9cw_scalar(p+n,0x7001,1,4);x9cw_put16(p+14,n-8);assert(!x9cw_current(p,n+8,&c));
  n=current_frame(p,0);assert(n==32&&x9cw_current(p,n,&c)&&!c.count&&!c.result);
  n=current_frame(p,0,42);assert(x9cw_current(p,n,&c)&&c.result==42);
+}
+static void current_number_owner(){
+ uint8_t p[704],out[704];struct x9cw_current c;unsigned n=current_frame(p,1);
+ struct x9cw_number missing={};unsigned untouched=99;
+ assert(!x9cw_number_presentation(&missing,&untouched)&&untouched==99);
+ const uint8_t *descriptor,*number,*detail;unsigned k;
+ assert(x9cw_tlv(p,n,0x8111,&descriptor,&k)&&descriptor&&!k);
+ assert(x9cw_tlv(p,n,x9cw_u16(descriptor+8),&number,&k)&&number&&k==1);
+ unsigned at=(unsigned)(number-p);x9cw_put16(p+at-2,4);memcpy(p+at,"123",4);
+ assert(x9cw_tlv(p,n,0x8114,&descriptor,&k)&&descriptor&&!k);
+ assert(x9cw_tlv(p,n,x9cw_u16(descriptor+8),&detail,&k)&&detail&&k==408);
+ p[detail-p]=1;assert(x9cw_current(p,n,&c));
+ assert(c.calls[0].number.length==3&&!memcmp(c.calls[0].number.value,"123",4));
+ unsigned presentation=99;assert(x9cw_number_presentation(&c.calls[0].number,&presentation)&&presentation==1);
+ bzero(p,sizeof(p));assert(!memcmp(c.calls[0].number.value,"123",4)); // no borrowed RX bytes
+ for(unsigned raw=0;raw<256;raw++){
+  c.calls[0].number.presentation=(uint8_t)raw;presentation=99;
+  int known=x9cw_number_presentation(&c.calls[0].number,&presentation);
+  assert(known==(raw<=4));assert(presentation==(raw<=4?(raw<2?raw:2):99));
+ }
+ // The production owned-current path, not an unsolicited or stale query.
+ x9cw_header(p,16,0x909,2,0);uint64_t token=x9_md_mipc_submit(p,16);assert(token);x9mi_tick();
+ n=current_frame(p,1);x9cw_put16(p+12,(unsigned)token);x9mi_rx(p,n);
+ uint32_t got;assert(x9_md_mipc_take(token,out,sizeof(out),&got)==1);
+ assert(x9_mc_current.count==1&&x9_mc_current.calls[0].number.presentation==255);
+ assert(!x9cw_number_presentation(&x9_mc_current.calls[0].number,&presentation));
+}
+static void progress_number_owner(){
+ uint8_t p[512];struct x9cw_progress c;progress_frame(p,130,7,0);
+ x9cw_put16(p+50,4);memcpy(p+52,"456",4);p[68]=2; //8106/detail_info[0], not TYPE105
+ assert(x9cw_progress(p,sizeof(p),&c)&&c.number.length==3&&!memcmp(c.number.value,"456",4));
+ unsigned presentation;assert(x9cw_number_presentation(&c.number,&presentation)&&presentation==2);
+ bzero(p,sizeof(p));assert(!memcmp(c.number.value,"456",4));
+ progress_frame(p,130,7,0);p[50]=5; // would consume next TLV: malformed whole frame
+ assert(!x9cw_progress(p,sizeof(p),&c));assert(!memcmp(c.number.value,"456",4));
 }
 static void empty_baseline(){
  uint8_t p[704],out[704];x9cw_header(p,16,0x909,2,0);
@@ -491,7 +607,8 @@ static void end_target_codec(){
  assert(!x9cw_end_target(&s,&c,&a));s.count_known=1;s.native_count=1;
  assert(x9cw_end_target(&s,&c,&a)&&a.native_id==7&&a.sim==1&&a.epoch==1);
  b=a;b.revision++;assert(!x9cw_end_matches(&a,&b));
- c.calls[0].multiparty=1;assert(!x9cw_end_target(&s,&c,&b));c.calls[0].multiparty=0;
+ c.calls[0].flags|=1;assert(!x9cw_end_target(&s,&c,&b));c.calls[0].flags&=~1u;
+ c.calls[0].number_type=2;assert(x9cw_end_target(&s,&c,&b)); // NUMBER is not a multiparty flag
  c.calls[0].id=8;assert(!x9cw_end_target(&s,&c,&b));c.calls[0].id=7;
  c.calls[0].direction=1;assert(!x9cw_end_target(&s,&c,&b));c.calls[0].direction=0;
  c.calls[0].state=3;assert(!x9cw_end_target(&s,&c,&b));c.calls[0].state=0;
@@ -499,6 +616,25 @@ static void end_target_codec(){
  uint8_t r[24];uint32_t result=99;x9cw_header(r,24,0x906,2,41);x9cw_scalar(r+16,0,0,4);
  assert(x9cw_end_cnf(r,24,41,&result)&&!result);
  assert(!x9cw_end_cnf(r,24,40,&result));r[10]=8;assert(!x9cw_end_cnf(r,24,41,&result));
+}
+static void current_metadata(){
+ uint8_t p[704];struct x9cw_current c;unsigned n=current_frame(p,1);
+ /* Change the three actual array element values, keeping descriptors,
+  * ID and state unchanged. Each remains a u32 in the MIPC wire. */
+ for(unsigned at=16;at<n;){
+  unsigned tag=x9cw_u16(p+at),len=x9cw_u16(p+at+2);
+  if(tag==0x6fe0)x9cw_put32(p+at+4,2);       //10f NUMBER_TYPE
+  if(tag==0x6fc8)x9cw_put32(p+at+4,6);       //112 CALL_RAT
+  if(tag==0x6fc0)x9cw_put32(p+at+4,0x100001);//113 TYPE: high bits retained and multiparty
+  at+=len?((len+11)&~7u):16;
+ }
+ assert(x9cw_current(p,n,&c)&&c.calls[0].number_type==2&&c.calls[0].rat==6&&c.calls[0].flags==0x100001);
+ struct x9cw_outbound_state s={};struct x9cw_progress e={};struct x9cw_end_target target;
+ e.mask=2;e.id=7;e.event=130;assert(x9cw_outbound_apply(&s,&e)==1);
+ e.event=132;e.mode=20;assert(x9cw_outbound_apply(&s,&e)==1);s.count_known=1;s.native_count=1;
+ assert(!x9cw_end_target(&s,&c,&target));c.calls[0].number_type=0;
+ assert(!x9cw_end_target(&s,&c,&target)); // NONE cannot authorize a multiparty end
+ c.calls[0].flags&=~1u;c.calls[0].number_type=2;assert(x9cw_end_target(&s,&c,&target));
 }
 static void ios_end_roundtrip(){
  bind_voice();rx_progress(130,7,0);rx_progress(132);end_request();x9mi_tick();
@@ -780,6 +916,9 @@ int main(int argc,char **argv){
   {"status_fence",status_fence},{"dial_join_order",dial_join_order},{"ios_join",ios_join},
   {"ios_timeout",ios_timeout},{"ios_deleted",ios_deleted},{"dial_presend_fence",dial_presend_fence},
   {"voice_bind_codec",voice_bind_codec},{"end_target_codec",end_target_codec},{"ios_end_roundtrip",ios_end_roundtrip},
+  {"current_metadata",current_metadata},
+  {"current_number_owner",current_number_owner},{"progress_number_owner",progress_number_owner},
+  {"end_reason_provenance",end_reason_provenance},{"outbound_end_reason",outbound_end_reason},{"incoming_end_reason",incoming_end_reason},
   {"ios_end_stale_query",ios_end_stale_query},{"ios_end_presend",ios_end_presend},
   {"ios_end_abandon",ios_end_abandon},{"ios_end_late_cnf",ios_end_late_cnf},
   {"ios_end_duplicate",ios_end_duplicate},
