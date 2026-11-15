@@ -14,6 +14,8 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include "../kernel/src/bsd/dev/x9_camera.h"
+#include "camera_status.h"
+#include "../torch/media_callers.h"
 
 extern int x9_camera_device_create(CFAllocatorRef, CFDictionaryRef, void **);
 extern const void *_dyld_get_shared_cache_range(size_t *length);
@@ -25,30 +27,37 @@ static id ours;
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static const uint8_t uuid[16]={0x45,0xd3,0x74,0x88,0x2c,0xc7,0x30,0x28,0x8a,0x4d,0x93,0x6b,0xce,0x7a,0x22,0x0b};
 
-static bool backendReady(void)
+id x9_camera_media_vendor_with_caller(id self,SEL selector,uintptr_t returnAddress)
 {
-    int fd=open(X9_CAMERA_DEVICE,O_RDONLY|O_CLOEXEC);if(fd<0)return false;
-    struct x9_camera_status s={0};int e=ioctl(fd,X9_CAMERA_GET_STATUS,&s);close(fd);
-    return !e && s.version==1 && s.mode==2 && (s.flags&X9_CAMERA_READY) &&
-        !(s.flags&X9_CAMERA_FAULT) && s.supported_mask==((1u<<1)|(1u<<2));
+    /* Native capture is the selected provider only while its current status
+     * independently proves both physical sensors ready. An Apple object can
+     * exist without a useful camera; it must not mask a ready X9 provider.
+     * Flashlight remains on its separately scoped bridge (native TorchLevel
+     * is explicitly unsupported). Neither hook order changes that scope. */
+    if(!x9_media_flashlight_caller(returnAddress,slide)) {
+        pthread_mutex_lock(&lock);
+        id result=nil;
+        if(x9_camera_backend_ready()) {
+            if(!ours) {
+                id made=((id(*)(id,SEL))objc_msgSend)(self,sel_registerName("alloc"));
+                ours=((id(*)(id,SEL,void*))objc_msgSend)(made,sel_registerName("initWithDeviceCreateFunction:"),
+                                                       (void*)x9_camera_device_create);
+                dprintf(2,"X9 CAMERA MEDIA: physical backend ready; dual-stream vendor %s\n",ours?"created":"failed");
+            }
+            /* Recheck after init too: construction is not a hardware lease. */
+            if(ours && x9_camera_backend_ready())result=ours;
+        }
+        pthread_mutex_unlock(&lock);
+        if(result)return result;
+    }
+    /* Preserve both the original provider and the exact FigFlashlight caller
+     * when no native provider can currently be returned. */
+    return torchVendorWithCaller ? torchVendorWithCaller(self,selector,returnAddress) :
+        ((id(*)(id,SEL))originalVendor)(self,selector);
 }
 __attribute__((noinline)) id x9_camera_media_shared_vendor(id self,SEL selector)
 {
-    /* Preserve the exact FigFlashlight caller when torch was installed first.
-     * Calling its IMP normally would substitute this library's return address. */
-    id real=torchVendorWithCaller ? torchVendorWithCaller(self,selector,
-        (uintptr_t)__builtin_return_address(0)) : ((id(*)(id,SEL))originalVendor)(self,selector);
-    if(real)return real;
-    /* Once made, the vendor's workers own the device. Reopening the exclusive
-     * char device here would return EBUSY and revoke an active vendor. */
-    pthread_mutex_lock(&lock);
-    if(!ours && backendReady()) {
-        id made=((id(*)(id,SEL))objc_msgSend)(self,sel_registerName("alloc"));
-        ours=((id(*)(id,SEL,void*))objc_msgSend)(made,sel_registerName("initWithDeviceCreateFunction:"),
-                                               (void*)x9_camera_device_create);
-        dprintf(2,"X9 CAMERA MEDIA: physical backend ready; dual-stream vendor %s\n",ours?"created":"failed");
-    }
-    id result=ours;pthread_mutex_unlock(&lock);return result;
+    return x9_camera_media_vendor_with_caller(self,selector,(uintptr_t)__builtin_return_address(0));
 }
 static bool matches(const struct mach_header *mh)
 {

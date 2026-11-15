@@ -15,20 +15,16 @@
 #include <errno.h>
 #include <sys/ioctl.h>
 #include "../kernel/src/bsd/dev/x9_torch.h"
+#include "media_callers.h"
 
 static int torchFD = -1;
 static uintptr_t cacheSlide;
 static IMP originalVendor;
+static id (*cameraVendorWithCaller)(id, SEL, uintptr_t);
 static pthread_mutex_t torchLock = PTHREAD_MUTEX_INITIALIZER;
 static bool vendorHooked, prewarmHooked;
 /* Live-device 20H392 cache extraction, not hackios's 20F66 addresses. */
 static const uint8_t cmUUID[16] = {0x45,0xd3,0x74,0x88,0x2c,0xc7,0x30,0x28,0x8a,0x4d,0x93,0x6b,0xce,0x7a,0x22,0x0b};
-static const uintptr_t flashlightCallers[] = {
-    0x1a20007d0, /* IsAvailable */
-    0x1a20009bc, /* NotifyForCurrentState */
-    0x1a2000abc, 0x1a2000ae8, 0x1a2000b04, 0x1a2000b2c, /* setupDevice */
-    0x1a1f3e5a8, /* teardownDevice */
-};
 extern const void *_dyld_get_shared_cache_range(size_t *length);
 
 static bool available(void) {
@@ -95,16 +91,14 @@ static int setLevel(uint32_t level) {
  * ORIGINAL CMCapture caller: a nested IMP call otherwise destroys the narrow
  * FigFlashlight return-address gate. Export both entrypoints from this object. */
 id x9_torch_media_vendor_with_caller(id self, SEL selector, uintptr_t returnAddress) {
-    uintptr_t caller = returnAddress - cacheSlide;
-    id real = ((id (*)(id, SEL))originalVendor)(self, selector);
+    id real = cameraVendorWithCaller ? cameraVendorWithCaller(self, selector, returnAddress) :
+        ((id (*)(id, SEL))originalVendor)(self, selector);
     if (real) return real; /* Never replace a genuine device vendor. */
-    for (unsigned i = 0; i < sizeof(flashlightCallers)/sizeof(flashlightCallers[0]); i++) {
-        if (caller == flashlightCallers[i]) {
-            static X9TorchVendor *ours; static dispatch_once_t once;
-            dispatch_once(&once, ^{ ours = [X9TorchVendor new];
-                dprintf(2, "X9 TORCH MEDIA: FigFlashlight-only vendor created\n"); });
-            return ours;
-        }
+    if (x9_media_flashlight_caller(returnAddress, cacheSlide)) {
+        static X9TorchVendor *ours; static dispatch_once_t once;
+        dispatch_once(&once, ^{ ours = [X9TorchVendor new];
+            dprintf(2, "X9 TORCH MEDIA: FigFlashlight-only vendor created\n"); });
+        return ours;
     }
     return nil;
 }
@@ -131,11 +125,14 @@ static void imageAdded(const struct mach_header *mh, intptr_t imageSlide) {
     Method vendor = class_getClassMethod(objc_getClass("BWFigCaptureDeviceVendor"), sel_registerName("sharedCaptureDeviceVendor"));
     IMP current = vendor ? method_getImplementation(vendor) : NULL;
     IMP cameraHook = (IMP)dlsym(RTLD_DEFAULT, "x9_camera_media_shared_vendor");
-    Dl_info cameraImage = {0};
-    bool cameraChain = current && cameraHook && current == cameraHook &&
-        dladdr((const void *)cameraHook, &cameraImage) && cameraImage.dli_fbase;
+    id (*forward)(id, SEL, uintptr_t) = dlsym(RTLD_DEFAULT, "x9_camera_media_vendor_with_caller");
+    Dl_info cameraImage = {0}, forwardImage = {0};
+    bool cameraChain = current && cameraHook && current == cameraHook && forward &&
+        dladdr((const void *)cameraHook, &cameraImage) && dladdr((const void *)forward, &forwardImage) &&
+        cameraImage.dli_fbase && cameraImage.dli_fbase == forwardImage.dli_fbase;
     if (!vendorHooked && vendor && method_getNumberOfArguments(vendor) == 2 &&
         ((uintptr_t)current == 0x1a1f40c84 + cacheSlide || cameraChain)) {
+        cameraVendorWithCaller = cameraChain ? forward : NULL;
         originalVendor = method_setImplementation(vendor, (IMP)x9_torch_media_shared_vendor); vendorHooked = true;
         dprintf(2, "X9 TORCH MEDIA: 20H392 sharedCaptureDeviceVendor hook installed%s\n",
             cameraChain ? " (retaining camera hook)" : "");

@@ -58,6 +58,7 @@
 #include <sys/ioctl.h>
 #include "../kernel/src/bsd/dev/x9_camera.h"
 #include "camera_stop.h"
+#include "camera_status.h"
 _Static_assert(sizeof(struct hakios_camera_frame)==120,"RAW10 v2 wire layout");
 _Static_assert(__builtin_offsetof(struct hakios_camera_frame,sof_time_lo)==100,"RAW10 timing offset");
 
@@ -2450,18 +2451,7 @@ x9_camera_device_create(CFAllocatorRef allocator, CFDictionaryRef options, CMBas
 	(void)options;
     if (out) *out = NULL;
     if (atomic_load(&capture_retire_errno)) return ERR_NOT_AVAILABLE;
-    int fd = open(X9_CAMERA_DEVICE, O_RDONLY | O_CLOEXEC);
-    struct x9_camera_status status = {0};
-    bool ready = fd >= 0 && ioctl(fd, X9_CAMERA_GET_STATUS, &status) == 0 &&
-        status.version == 1 && status.mode == 2 && (status.flags & X9_CAMERA_READY) &&
-        !(status.flags & X9_CAMERA_FAULT) && status.supported_mask == 6;
-    if (fd >= 0 && close(fd) != 0) {
-        int zero=0,error=errno;
-        atomic_compare_exchange_strong(&capture_retire_errno,&zero,error);
-        say("device status close failed errno=%d; no device published",error);
-        ready=false;
-    }
-    if (!ready) return ERR_NOT_AVAILABLE;
+    if (!x9_camera_backend_ready()) return ERR_NOT_AVAILABLE;
 	pthread_once(&media_functions_once, media_functions_init);
 	if (!media_functions_usable || out == NULL) {
 		return ERR_UNSUPPORTED;
@@ -2491,6 +2481,10 @@ x9_camera_device_create(CFAllocatorRef allocator, CFDictionaryRef options, CMBas
 	d->supported = supported(device_props, sizeof(device_props) / sizeof(device_props[0]));
 	CFRelease(stream[0]);
 	CFRelease(stream[1]);
+	if (atomic_load(&capture_retire_errno) || !x9_camera_backend_ready()) {
+		CFRelease(device);
+		return ERR_NOT_AVAILABLE;
+	}
 	*out = device;
 	say("the device made: two streams, the back camera and the front one");
 	return 0;
