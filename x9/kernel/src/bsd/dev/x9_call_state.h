@@ -86,8 +86,8 @@ static inline struct x9cw_end_reason x9cw_end_reason_metadata(const struct x9cw_
 /* Raw identity from the last accepted WHOLE progress, scoped by the
  * enclosing MO/MT epoch and revision. Keep all sources before the MD inbox
  * and observer erase RX bytes; neither a borrowed pointer nor an unrelated
- * current snapshot may fill this owner. RIL26931c/269c44 ->26e000 prefers
- * PAU, may retain an existing number, and otherwise uses nonempty ECPI.
+ * current snapshot may fill this owner. RIL26931c/269c44 ->26e000 merges
+ * PAU/ECPI/existing number conditionally using additional slot status.
  * Therefore this is NOT its normalized display number: an empty8104 must
  * not silently reuse old availability/TOA, and PAU parsing is unimplemented.
  * Opaque detail is retained, not interpreted beyond its known byte0.

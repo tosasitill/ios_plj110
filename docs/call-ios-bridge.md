@@ -179,7 +179,7 @@ length（不含NUL）及8106/8114的原始presentation byte。先验证全帧再
 不能把zero-init对象的0当Available。`x9cw_number_presentation()`明确native0→Available0、
 1→Restricted1、2/3/4→Unavailable2；未知返回失败且不改输出，**不沿用RIL的未知→Available fallback**。
 未来publisher仍须只在有效owner/正确epoch下使用，Restricted/Unavailable不得发布原value[]；
-尚未实现号码格式/TOA转换、progress到通话身份的号码合并生命周期或CallList46生产编码/发布。
+尚未实现号码格式/TOA转换、最终显示号码合并或CallList46生产编码/发布；progress原身份owner见下。
 没有新增查询/服务公告/默认字段，不能仅empty encoder冒充完成。新增两个人工owner向量仅编译，未执行。
 
 offset6追加原件排除：`192a770→192b150/192b194`只是接收vector resize/append；
@@ -187,6 +187,24 @@ offset6追加原件排除：`192a770→192b150/192b194`只是接收vector resize
 相邻`1929bfc`为CallConfigItem，`1929c3c..54`把C++ string长度写wire+6后复制wire+7，
 是变长结构而非7B CallList serializer。当前匹配host原件仅有CallList parse/resize/copy，
 未发现其writer；QMIParserDynamic已有metadata也无vs/ALS定义。ALS只是未证假设，不按标准字段名填0。
+
+#### 已接受progress的epoch raw identity owner
+
+完整4901 parser现在同时有界保存408B detail和最多512B含NUL的PAU，仍先校验全帧再改out。
+原MO/MT reducer此前仅保存ID/state/cause，排空raw inbox后号码来源会消失；现在仅在原
+identity/route/state/epoch/revision准入成功的commit处复制number/presentation/TOA/detail/PAU。
+MT新CMD清旧owner，foreign/late/rejected/revision失败不改；legacy valid0不授parsed provenance，
+current仍是独立owned-query快照，**不倒填MO/MT**。这是最后accepted整帧的raw身份，不是显示号码。
+来源commit`c7008018`，集成`3143ca5b`；3项新增人工向量、C11 header、host C++17 `-c`、
+两真实recipe对象均编译exit0，未执行。精确切片/编译日志原在identity树
+`x9/out/call-identity-owner-analysis/`，收尾迁回主checkout同名out。
+
+RIL `26931c/269c44→26e000→270120`显示合并还有真实slot状态输入：178控制既有号码/ECPI
+更新，179影响MO是否解析PAU，180影响sip/tel选择；不是固定PAU>ECPI。PAU parser的真实
+delimiter字符串`[;@,]+`是strtok_r的**字符集合而非regex**，anonymous.invalid还有例外，
+compareLoosely匹配时保留旧号码。这三个slot键的live来源正在追，不能给true/false默认值，
+不能把raw number/PAU直接公开；Restricted/Unavailable/未知presentation仍禁止泄露原号码。
+此项不发CallList/VOICE09，不增加query或移植未核实的PAU归一化。
 
 ### END cause16 → Apple reason145（内部metadata，未发布）
 
