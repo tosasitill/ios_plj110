@@ -17,6 +17,10 @@ static volatile uint32_t *ep[4]; /* dev0, MD, ADSP, CMM; not AP UART3 */
 static bool requested, powered, isolated, pins_prepared, config_dirty, ap_saved;
 enum { OWN_UNKNOWN, OWN_DRIVER, OWN_SLEEPING, OWN_WAKING };
 static unsigned ownership=OWN_UNKNOWN;
+/* Once downloaded firmware has acknowledged ownership, a later init/vendor
+ * or resume failure does not authorize reset/power-off. Keep its shared
+ * supply lease until an explicit, acknowledged function-off exists. */
+static bool firmware_live;
 static uint8_t host_flow=0xff;
 static uint32_t con2_saved, feedback_saved, fifo_saved[4], default_saved;
 static const unsigned ap_offsets[]={0x0c,0x10,0x24,0x28,0x2c,0x40,0x44,0x54,0x58};
@@ -207,11 +211,10 @@ static int hub_features(void *context, bool *hardware_sleep, bool *inband)
     /* Actual MT6993 platform callback returns 0, not register INB_EN. */
     *inband=false; return 0;
 }
-static int post_download(void *context, bool inband)
+static int observed_profile(void)
 {
-    (void)context;
-    if (inband || host_flow!=0x80) return ENOTSUP;
-    int error=endpoints_idle(); if (error) return error;
+    if (host_flow!=0x80) return ENOTSUP;
+    int error=x9_bt_hardware_check(); if (error) return error;
     /* Captured Android boot, 2026-11-15, HUB_DBG at 11.067400..469 and
      * 15.504009..124: measured hub clock208M/mux2, dev0 + CMM have THIS
      * profile. Generic 24M config does nothing; SSPM already configures
@@ -219,7 +222,8 @@ static int post_download(void *context, bool inband)
      * branch, so sample alone is insufficient. Never copy AP point3 or
      * reprogram CMM. Require the current running SSPM/request resources,
      * current 208M mux AND every relevant endpoint register on this boot. */
-    if (((rd(top,0x100)>>16)&3)!=2 || !(rd(hub,CON2)&2)) return ENOTSUP;
+    uint32_t mux=rd(top,0x100);
+    if (((mux>>16)&3)!=2 || ((mux>>24)&3)!=3 || !(rd(hub,CON2)&2)) return ENOTSUP;
     static const unsigned offsets[]={0x9c,0x24,0x28,0x2c,0x90,0x94,
                                      0x54,0x58,0x98,0xa0,0xa4,0xa8,0xac,0x40,0x44,0x4c};
     static const uint32_t profile[]={1,3,7,4,1,0,0xdb,1,0xa,0x11,0x11,0x13,0x13,0xdb,1,3};
@@ -234,6 +238,32 @@ static int post_download(void *context, bool inband)
             }
         }
     }
+    /* AP UART3's running FEATURE_SEL=0 view is safe to read without bank
+     * switches or losing wake data. AP sample point is3, not SSPM's4; AP
+     * DMA remains off for our PIO/IRQ path. Preserve both IER0 (paused) and
+     * IER5 (owned). Nothing here changes UART/FIFO/routing/SSPM state.
+     * DLL/DLH/EFR/XON/INB retention is NOT proven by these reads: Android's
+     * dump switches FEATURE_SEL=1 before accessing them. We deliberately
+     * do not make that write in wake, or read the hidden bank as a guess. */
+    static const unsigned ap_normal_offsets[]={0x9c,0x0c,0x24,0x28,0x2c,0x54,0x58,0x40,0x44,0x4c};
+    static const uint32_t ap_normal_profile[]={0,3,3,7,3,0xdb,1,0xdb,1,0};
+    for (unsigned k=0;k<sizeof(ap_normal_offsets)/sizeof(ap_normal_offsets[0]);k++) {
+        uint32_t value=rd(ap,ap_normal_offsets[k]);
+        if (value!=ap_normal_profile[k]) {
+            printf("X9 BT: AP retained profile mismatch off=%x got=%x expected=%x\n",
+                   ap_normal_offsets[k],value,ap_normal_profile[k]);
+            return ENOTSUP;
+        }
+    }
+    if (rd(ap,4)&~5u) return EBUSY;
+    return 0;
+}
+static int post_download(void *context, bool inband)
+{
+    (void)context;
+    if (inband) return ENOTSUP;
+    int error=endpoints_idle(); if (error) return error;
+    error=observed_profile(); if (error) return error;
     /* Android post-fwdl bypass(0), then UART's md_adsp_fifo_ctrl(0).
      * Both hosts are still proven idle. Preserve unrelated hub IRQ masks;
      * our driver polls host-awake bit3 and does not own MD's IRQ callback. */
@@ -258,6 +288,7 @@ static int verify_ownership(void *context)
             if ((dev&(1u<<11)) && (sta&(1u<<7)) && (sta&8) &&
                 (dev&(1u<<12)) && (rd(hub,IRQ_STA)&8))
                 {
+                    firmware_live=true; /* A later supply-accounting error is not function-off. */
                     error=x9_conn_power_done(X9_CONN_BT);
                     if (!error) ownership=OWN_DRIVER;
                     return error;
@@ -266,6 +297,7 @@ static int verify_ownership(void *context)
         }
         return ETIMEDOUT;
     }
+    firmware_live=true;
     error=x9_conn_power_done(X9_CONN_BT);
     if (!error) ownership=OWN_DRIVER;
     return error;
@@ -337,6 +369,11 @@ int x9_bt_hardware_wake(void)
         sleep_ms(1);
     }
     if (error) return error;
+    /* A first-boot profile readback does not establish SSPM retention over
+     * this sleep cycle. Refuse changed clocks/baud/escape instead of blindly
+     * programming CMM or re-running post_download's shared FIFO writes. */
+    error=observed_profile(); if (error) return error;
+    if (!(rd(hub,STA0)&(1u<<12))) return ENOTSUP;
     /* is_ready resets the DEV0 USB RX pin only AFTER endpoint clocks exist. */
     field(ep[0],0xb0,1,0);
     return host_awake(true);
@@ -373,6 +410,22 @@ int x9_bt_hardware_stop(void)
 {
     /* Worker disables its UART IRQ/TX first. Never restore full shared
      * snapshots, clear MD requests, or power down another lease holder. */
+    if (firmware_live) {
+        printf("X9 BT: cleanup retained live firmware lease ownership=%u; no acknowledged function-off\n",
+               ownership);
+        return EBUSY;
+    }
+    /* Even before firmware ownership, failed SSPM readiness does not make
+     * AP/endpoint register restoration safe. Preserve requests, SRAM config,
+     * pins and supply accounting; do not guess a reset sequence to recover. */
+    if (requested) {
+        int ready_error=x9_bt_hardware_check();
+        if (ready_error) {
+            printf("X9 BT: cleanup retained resource-unsafe state errno=%d; no UART/reset/supply writes\n",
+                   ready_error);
+            return ready_error;
+        }
+    }
     int error=pins_prepared?x9_conn_bt_pins(X9_CONN_BT_RESET_OFF):0;
     if (requested && !apb()) {
         field(hub,STA0,1u<<10,1u<<10);
