@@ -366,6 +366,7 @@ x9:sweet_x9_vdec.o
 x9:x9_vcp_wire.o
 x9:x9_vcp_bus.o
 x9:x9_mm_smmu.o
+x9:x9_mm_smmu_owner.o
 x9:x9_mm_power.o
 x9:sweet_x9_microphone.o
 x9:x9_mic_mt6993.o
