@@ -64,6 +64,7 @@ static struct {
 
 #include "x9_camera_sv_siblings.inc"
 #include "x9_camera_native_clock.inc"
+#include "x9_camera_native_rate.inc"
 
 static vm_offset_t cam_mm_effect_base(struct cam_mm_journal *j,unsigned n)
 {
@@ -129,6 +130,7 @@ static int cam_mm_guard(struct cam_mm_journal *j,bool complete)
     int e;
     e=cam_sv_sibling_guard(j);if(e)return e;
     e=cam_native_clock_guard(j,!complete);if(e)return e;
+    e=cam_native_rate_guard(j,!complete);if(e)return e;
     if(complete && (!j->active || j->completed!=((1u<<X9_CAM_MM_SLOTS)-1)))return ENXIO;
     if(!j->receive.smmu_owned)return j->seen?ENXIO:0;
     if((cam_rr(j->receive.hwv,0x12900)&CAM_RES_MM_INFRA)!=CAM_RES_MM_INFRA ||
@@ -301,6 +303,7 @@ static int cam_mm_restore(struct cam_mm_journal *j,struct x9_camera_mm_status *r
         unsigned n=i-1;int e=cam_mm_slot_restore(j,n,r);
         /* Includes partial clock take BEFORE slot8 was ever seen. */
         if(!e && n==X9_CAM_MM_SENINF_MUX)e=cam_native_clock_restore(j);
+        if(!e && n==X9_CAM_MM_CAM_MUX)e=cam_native_rate_restore(j);
         if(e) {
             /* A dependency/sibling guard may have failed before safe CSR
              * access, including after retiring MRAW. Preserve the last
@@ -357,6 +360,8 @@ static int cam_mm_take(struct cam_mm_journal *j,unsigned sensor,struct x9_camera
         }
         if(n==X9_CAM_MM_MRAW) {
             r->flags|=X9_CAM_MM_POWER;r->blockers&=~X9_CAM_MM_NEED_POWER;
+            /* Real RC supplier BEFORE CAM AL is consumed; no fake AP SET. */
+            e=cam_native_rate_take(j);if(e)return e;r->cfg[0]=j->cfg[0];
         }
     }
     /* Recheck the whole dependency chain while it is still held. A valid
@@ -385,6 +390,7 @@ static void cam_mm_status_retained(struct x9_camera_mm_status *r)
     r->retained=cam_mm.seen;
     /* The native parent can be owned before its HWV slot was seen. */
     if(cam_mm.native_clock.seen)r->retained|=1u<<X9_CAM_MM_SENINF_MUX;
+    if(cam_native_rate.seen)r->retained|=1u<<X9_CAM_MM_CAM_MUX;
     if(cam_mm.receive.csi_owned || cam_mm.receive.csi_borrowed)r->retained|=X9_CAM_MM_RETAIN_CSI;
     if(cam_mm.receive.smmu_owned)r->retained|=X9_CAM_MM_RETAIN_SECURE;
 }

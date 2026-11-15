@@ -93,8 +93,35 @@ static int cam_native_source_rate_guard_locked(uint64_t epoch)
        !(cam_rr(cam_mm.top,0x270)&(1u<<(14-cam_phy.status.csi_port))) ||
        (cam_rr(cam_native_source.pll,0x34)&0x10)!=s->pll_fenc ||
        (cam_rr(cam_native_source.pll,0xc)&0x073fffff)!=s->pll_rate)return ESTALE;
+    e=cam_native_rate_guard(&cam_mm,false);if(e)return e;
+    if(!cam_native_rate.seen || !cam_native_rate.applied || cam_native_rate.level!=2 ||
+       !s->cam_clock_hz || !(cam_rr(cam_mm.top,0x270)&(1u<<18)))return ESTALE;
     e=cam_native_source_voltage_locked();
     return e;
+}
+static int cam_native_source_processing_locked(void)
+{
+    struct x9_camera_native_source_status *s=&cam_native_source.status;
+    uint64_t hz;
+    int e=cam_native_rate_guard(&cam_mm,false);if(e)return e;
+    if(!cam_native_rate.seen || !cam_native_rate.applied || cam_native_rate.level!=2)
+        return ENXIO;
+    s->cam_parent=cam_native_rate.expected_cfg;s->cam_rc_level=cam_native_rate.rc_level;
+    if((s->cam_parent&15)!=10)return ERANGE;
+    hz=cam_native_source_pll_hz(cam_native_rate.pcw)/6;
+    for(unsigned n=0;n<2;n++) {
+        uint64_t actual,target,delta;
+        e=cam_phy_meter_measure(X9_CAM_MM_CAM_MUX,14,&s->cam_clock_count[n]);if(e)return e;
+        actual=(uint64_t)s->cam_clock_count[n]*26000000*2;target=hz*1024;
+        delta=actual>target?actual-target:target-actual;
+        if(delta>2ull*26000000*2)return ERANGE;
+    }
+    e=cam_native_rate_guard(&cam_mm,false);if(e)return e;
+    s->cam_clock_hz=hz;
+    printf("X9 CAMERA CAM PROCESSING CLOCK: parent=%x RC=%x counts=%u/%u Hz=%llu "
+        "(two fresh ID14 observations; bandwidth separately required)\n",
+        s->cam_parent,s->cam_rc_level,s->cam_clock_count[0],s->cam_clock_count[1],hz);
+    return 0;
 }
 static int cam_native_source_rate_locked(uint64_t epoch)
 {
@@ -142,7 +169,8 @@ static int cam_native_source_rate_locked(uint64_t epoch)
        (!cam_phy.status.cphy && cam_phy.status.nominal_data_rate>=9000000000ull))return ERANGE;
     /* Recheck the real retained source after both observations; an observed
      * rate still does not permit the capture authority to assert RATE/SMI. */
-    e=cam_phy_dependencies();
+    e=cam_native_source_processing_locked();
+    if(!e)e=cam_phy_dependencies();
     if(!e && ((cam_rr(cam_mm.top,d->cfg)>>d->shift)&0xff)!=parent)e=ESTALE;
     if(!e) {
         cam_native_source.rate_valid=true;e=cam_native_source_rate_guard_locked(epoch);
