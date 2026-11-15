@@ -41,6 +41,37 @@ int x9_bt_session_connfem(const struct x9_bt_download_ops *o)
     return exact(o, x9_bt_connfem_command, X9_BT_CONNFEM_BYTES, ack, sizeof(ack));
 }
 
+int x9_bt_session_vendor_command(const struct x9_bt_session_ops *o,
+                                 const uint8_t *tx, size_t txlen, uint8_t *status)
+{
+    if (!status) return EINVAL;
+    *status = 0xff;
+    if (!o || !o->hci_exchange || !tx || txlen < 4 || tx[0] != 1 ||
+        txlen != (size_t)tx[3]+4) return EINVAL;
+    uint16_t opcode = tx[1] | ((uint16_t)tx[2]<<8);
+    /* The production GORM sequence/cfg appends are vendor commands. WMT
+     * FC6F belongs to command()/exchange() and must not steal HCI credits. */
+    if ((opcode & 0xfc00) != 0xfc00 || opcode == 0xfc6f) return EINVAL;
+    uint8_t rx[260]; size_t n = sizeof(rx);
+    int error = o->hci_exchange(o->io.context, tx, txlen, rx, &n, 5000);
+    if (error) return error;
+    if (n < 3 || rx[0] != 4 || (size_t)rx[2]+3 != n) return EPROTO;
+    if (rx[1] == 0x0e) {
+        if (n < 7 || rx[4] != tx[1] || rx[5] != tx[2]) return EPROTO;
+        *status = rx[6];
+        return *status ? EIO : 0;
+    }
+    if (rx[1] == 0x0f) {
+        if (n != 7 || rx[5] != tx[1] || rx[6] != tx[2]) return EPROTO;
+        *status = rx[3];
+        /* Original GORMevt_HCE_Common_Complete (28a90..28b18) accepts a
+         * matching Command Status without testing its status byte. Do not
+         * reproduce that false-success path; accepted is not completed. */
+        return *status ? EIO : EPROTO;
+    }
+    return EPROTO;
+}
+
 static int query(const struct x9_bt_download_ops *o, uint8_t id,
                  uint8_t *rx, size_t *n)
 {

@@ -12,6 +12,9 @@ enum x9_bt_session_stage {
 };
 struct x9_bt_session_ops {
     struct x9_bt_download_ops io;
+    /* Ordinary HCI completions use a 16-bit HCI opcode, NOT the one-byte
+     * WMT opcode in event E4. This transport has the same sole worker owner. */
+    int (*hci_exchange)(void *, const uint8_t *, size_t, uint8_t *, size_t *, uint32_t);
     /* pre_on: real SSPM default-config + RX/TX request + hub-ready + BT
      * pinctrl; power_on: serialized connv3 first/second-radio operation.
      * No callback may return success merely because a PMIC GPIO is high. */
@@ -44,4 +47,10 @@ struct x9_bt_session_result {
 int x9_bt_session_run(const struct x9_bt_session_ops *,
                      const struct x9_bt_session_board *, struct x9_bt_session_result *);
 int x9_bt_session_connfem(const struct x9_bt_download_ops *);
+/* One actual selected Android vendor command, with its original H4 bytes.
+ * Does not select/default a configuration, retry TX, or fabricate replies.
+ * status=0xff means no valid status was received. Success requires Complete,
+ * never merely Command Status (accepted). No payload is logged. */
+int x9_bt_session_vendor_command(const struct x9_bt_session_ops *,
+                                 const uint8_t *, size_t, uint8_t *status);
 #endif

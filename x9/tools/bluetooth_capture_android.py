@@ -156,12 +156,20 @@ def main():
                         "ps -A -o PID,ARGS | grep -E 'bluetooth-service-mediatek|uart_launcher'")
     if processes is None:
         raise RuntimeError('running Bluetooth HAL/launcher unavailable')
-    hal = re.search(rb'^\s*(\d+)\s+/vendor/bin/hw/android\.hardware\.bluetooth-service-mediatek(?:\s|$)',
+    hal = re.search(rb'^\s*(\d+)\s+(?:/vendor/bin/hw/)?android\.hardware\.bluetooth-service-mediatek(?:\s|$)',
                     processes, re.M)
-    launcher = re.search(rb'^\s*(\d+)\s+/vendor/bin/uart_launcher(?:\s|$)', processes, re.M)
+    launcher = re.search(rb'^\s*(\d+)\s+(?:/vendor/bin/)?uart_launcher(?:\s|$)', processes, re.M)
     if not hal or not launcher:
         raise RuntimeError('expected live HAL and uart_launcher not found')
     pid, uart_pid = int(hal[1]), int(launcher[1])
+    # Toybox ps ARGS may use argv[0] without a path. Verify executable
+    # identity through the current proc symlink, not a basename assumption.
+    executable = capture('hal-executable-original.txt', f'readlink /proc/{pid}/exe')
+    uart_executable = capture('launcher-executable-original.txt', f'readlink /proc/{uart_pid}/exe')
+    if (executable is None or executable.strip() !=
+            b'/vendor/bin/hw/android.hardware.bluetooth-service-mediatek' or
+            uart_executable is None or uart_executable.strip() != b'/vendor/bin/uart_launcher'):
+        raise RuntimeError('live executable identity does not match the selected vendor processes')
     capture('launcher-command-original.bin', f'cat /proc/{uart_pid}/cmdline', binary=True)
     maps = capture('hal-library-maps-original.txt',
                    f'cat /proc/{pid}/maps')
@@ -206,7 +214,7 @@ def main():
         # 6136-byte NVRAM member. The tail includes parsed cfg inputs.
         live_address = live_object_address(library, maps, address, size)
         capture('btinit-active-private.bin',
-                f'dd if=/proc/{pid}/mem bs=1 skip={live_address} count={size}',
+                f'dd if=/proc/{pid}/mem bs=1 skip={live_address} count={size} 2>/dev/null',
                 binary=True, exact_size=size)
     if args.hci:
         path = Path(args.hci)
@@ -214,7 +222,9 @@ def main():
             parser.error('HCI original must be under the Bluetooth logs directory')
         capture('android-hci-original.cfa', 'cat ' + shlex.quote(str(path)),
                 binary=True, magic=b'btsnoop\0')
-    print('Read-only capture finished; no controller commands or device writes performed.')
+    failures = sum(not item['valid'] for item in results)
+    print(f'Read-only capture finished ({failures} failed inputs); '
+          'no controller commands or device writes performed.')
 
 
 if __name__ == '__main__':

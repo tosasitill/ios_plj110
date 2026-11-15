@@ -2,7 +2,7 @@
 
 目标是未修改的 iOS **16.7.16 / 20H392** `bluetoothd`，不是 AppleBT kernel user-client 的仿制品。
 本目录的 H4/vendor 适配仅修改经过 UUID 与指令校验的进程内映射，不改 Apple 原件文件。
-**当前不可 stage：硬件 session 尚在 SSPM post-download handoff 处 fail-closed，不能验收蓝牙。**
+**当前不可 stage：SSPM移交需要当前启动的真实寄存器匹配，完整vendor序列尚未嵌入，不能验收蓝牙。**
 
 ## 当前入口
 
@@ -32,13 +32,16 @@
   8250参考原件的SW分支与源码一致；escape与XON/XOFF由UART硬件处理，不二次软件转义H4或下载原始流。
   只启用PIO的RDI/RLSI，屏蔽无handler的XOFF/RTS/CTS IRQ；baud/bank/IER修改与真实RX IRQ共用锁。
   失败回滚还恢复XON/XOFF/INB_WORD bank，不只恢复DLL/DLH/EFR。**实现已编译不代表24M PIO已上机验证。**
-- **保留的硬件缺口**：Android generic CMM24M config 是 TODO，SSPM所用配置和当前 LK 移交还没有闭环证据。
+- **SSPM移交实现，未在XNU实跑**：Android generic CMM24M config 是 TODO，不能据此给CMM写AP参数。
   本次已只读取到活跃slot的2MiB SSPM原件，ID0/1/99与BL2 loader结构匹配；ID1为RV32/RVC代码。
-  该原件含CMM映射及endpoint写入，但具体分支/时钟移交尚未闭环，不能按sample值猜有效波特率。
+  原件含CMM映射及endpoint写入，静态厂商分支仍不能单靠sample值推波特率。
   已有备份和当前加载的原始 `uarthub_drv.ko` 的 `uarthub_config_baud_rate_mt6993`
-  也在24M分支直接返回0、无配置写入；这不等于SSPM已经配置好，更不证明当前LK移交。
-  `post_download` 明确 `ENOTSUP`，不把 default SRAM / AP24M 当作 CMM24M 成功。
-  host-awake state bit11、SET bit2、CLR bit4已区分；真实反馈验证代码尚未可达。
+  也在24M分支直接返回0、无配置写入。本次补采的Android启动日志在11.067400..469、15.504009..124记录
+  实测hub208MHz/mux2以及dev0/CMM的sample7/point4/DLL1/fracdb,1/EFRa/XON11/XOFF13/escape1/db/DMA3。
+  新post_download只在当前SSPM request-ready/resources、208MHz mux、CRC enabled及两端完整配置匹配后恢复multi-host，
+  按Android启用MD/ADSP FIFO及host-awake反馈。DLH必须为0以证明完整divisor=1；不重写CMM或非SSPM PLL路径。
+  非生产SW流控、inband或任何配置不符仍ENOTSUP，不以静态原件/共享SRAM当作当前移交成功。
+  host-awake state bit11、SET bit2、CLR bit4已区分；XNU移交与真实反馈验证仍须实机证明。
 - `x9_bluetooth.c`：将 session/下载器接入 worker；XO必须读取已有7个boot args且record长度25，不使用默认校准。
   UART3真实SPI0x148+32的IRQ收包、32KiB原始ring、worker WMT完整帧与opcode选择、保留无关包、实际partial TX。
   不宣称这是Linux APDMA，也不启用没有resume callback的wake-enhance。失败先关自己的IRQ、复位BT、按lease清理。
@@ -49,10 +52,16 @@
   UART额外calibration callback在Android中实际为no-op，不能将ownership替代function-on。
   **已取得当前加载的HAL/vendor库及有效校准对象的NVRAM成员**，确定MT6993选择MT6653的24项preload表；
   原件优先读取 `/vendor/odm/etc/bt/BT_FW.cfg`，才fallback到 `/vendor/firmware/BT_FW.cfg`。
-  后者已取得，前者及完整btinit尾部/property取证前ADB断开，故完整有效初始化序列尚未证明，controller_config仍ENOENT；
+  ADB恢复后已补得优先配置、实际properties及完整6448 B btinit。优先配置末行**实际启用FC37的A2DP dynamic min power**，
+  不是注释或空配置。countrycode/country-NV/SSPdebug/PIP四项实测为空，RAT为N/Lf/Lt/W/G。
+  原件构造器离线分析已遍历24项，17条构造命令、2个property skip、5个内部无命令路径；这不是实机回包或生产输入。
+  完整vendor序列仍需review并编码/嵌入，controller_config继续ENOENT；
   不将注释中的VENDOR_CMD或源码示例 `bt.cfg` 当作生产配置。
   `uart_launcher` 的 `HCIUARTSETBAUD` 保存用户所选配置；node==1的LOADPATCH是no-op，下载在pre_open。
   `bt.cfg` loader只编入node==0路径，不能把node==1的生产HAL/vendor流程错误归成“等待bt.cfg”。
+- 普通HCI vendor命令现在有独立16-bit opcode的Command Complete/Status匹配路径，与WMT E4的一字节opcode分开，
+  只由完整初始化worker独占；不开放btctl注入。`x9_bt_session_vendor_command`严格检查完整H4长度/opcode和实际status；
+  Command Status不能冒充完成，失败/partial TX/timeout不重发，不复制Android原common回调忽略Status错误的缺陷。
 - `x9_bt_download.c`：完整52 B section spec、首个匹配type `{0,2,3,0x80,0x90,0x10000}`、type3后connfem、最后bin index3；
   raw firmware1988 B单元或WMT ACL phase1/2/3，所有写入与drain有界，无模糊TX失败后重发。
 - `x9_bt_serial.c`：mobile501/0600、独占open、阻塞read/write/select、64-bit termios、16KiB RX/TX FIFO与generation。
@@ -86,7 +95,7 @@
   不能由exec成功推断dyld注入/COW安装成功，必须实机验证。
 - `X9BlueTool -R`实现原件 `com.apple.BlueTool` XPC契约，`RunBuiltinScript boot/init`只读核对真正ready；
   失败result1、原始BSD errno另存x9_errno；不合成manufacturer/firmware。deepsleep明确ENOTSUP，未知命令拒绝。
-- **未完成**：完整生产controller配置、SSPM/CMM移交、MTK SW PIO实机验证、Linux/HW backend、真实sleep/firmware-own/resume、
+- **未完成**：完整生产controller配置编码/嵌入、XNU上SSPM/CMM移交验证、MTK SW PIO实机验证、Linux/HW backend、真实sleep/firmware-own/resume、
   实机COW与能力/缓存路由、启动及场景验收。
   当前不安装或修改root上的launch plist。
 
@@ -128,6 +137,8 @@ python3 -I x9/tools/bluetooth_sspm.py <原始sspm分区.bin> --extract x9/out/bl
 
 采集器解析实际加载的ELF导出符号大小与当前maps，只读取btinit这一已知对象（当前6448 B，含6136 B NVRAM及cfg尾部），
 不转储整个进程。失败/连接断开不会覆盖先前原件，exec-out的exit0但内容为cat错误也不冒充有效ELF/firmware。
+Toybox ps可能只显示basename，采集器另核对当前 `/proc/PID/exe`；完整对象跨入匿名`.bss`，按PT_LOAD+完整maps约束读取。
+远端dd统计可能混入exec-out的stdout，因此在设备端仅抑制dd stderr并严格要求符号size，含统计的先前输入保留为.failed。
 它不关闭蓝牙、不发HCI、不写debug寄存器、不启动其它程序、不重启、不写分区。
 HCI解码器只发布同reset epoch内、匹配请求且成功的控制器能力/缓冲区回复，不输出地址、名字、连接内容或配对密钥；
 SSPM索引/提取仅验证原容器，不把静态分段匹配当成当前LK移交成功。

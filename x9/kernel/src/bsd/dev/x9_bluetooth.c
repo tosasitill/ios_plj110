@@ -209,13 +209,17 @@ static int next_frame(struct bt_frame *out)
         if(now_ms(NULL)-frame_start>1000) return ETIMEDOUT;
     }
 }
-static int exchange(void *context,const uint8_t *tx,size_t txlen,
-                    uint8_t *reply,size_t *replylen,uint32_t timeout)
+static int exchange_frame(void *context,const uint8_t *tx,size_t txlen,
+                         uint8_t *reply,size_t *replylen,uint32_t timeout,bool hci)
 {
     (void)context;
-    uint8_t opcode;
+    uint16_t opcode;
     if(!tx || !reply || !replylen) return EINVAL;
-    if(txlen==1 && tx[0]==0xff) opcode=3;
+    if(hci) {
+        if(txlen<4 || tx[0]!=1 || txlen!=(size_t)tx[3]+4) return EINVAL;
+        opcode=tx[1]|((uint16_t)tx[2]<<8);
+    }
+    else if(txlen==1 && tx[0]==0xff) opcode=3;
     else if(txlen>=6 && tx[0]==1) opcode=tx[5];
     else if(txlen>=7 && tx[0]==2) opcode=tx[6];
     else return EINVAL;
@@ -227,7 +231,15 @@ static int exchange(void *context,const uint8_t *tx,size_t txlen,
         error=next_frame(&f);
         if(error && error!=EAGAIN) return error;
         if(!error) {
-            if(f.length>=5 && f.data[0]==4 && f.data[1]==0xe4 && f.data[4]==opcode) {
+            bool matches=false;
+            if(f.data[0]==4) {
+                if(!hci) matches=f.length>=5 && f.data[1]==0xe4 && f.data[4]==opcode;
+                else if(f.length>=7 && f.data[1]==0x0e)
+                    matches=(f.data[4]|((uint16_t)f.data[5]<<8))==opcode;
+                else if(f.length==7 && f.data[1]==0x0f)
+                    matches=(f.data[5]|((uint16_t)f.data[6]<<8))==opcode;
+            }
+            if(matches) {
                 if(*replylen<f.length) { *replylen=f.length; return EMSGSIZE; }
                 memcpy(reply,f.data,f.length); *replylen=f.length; return 0;
             }
@@ -240,6 +252,12 @@ static int exchange(void *context,const uint8_t *tx,size_t txlen,
         if(error==EAGAIN) sleep_ms(NULL,1);
     }
 }
+static int exchange(void *context,const uint8_t *tx,size_t txlen,
+                    uint8_t *reply,size_t *replylen,uint32_t timeout)
+{ return exchange_frame(context,tx,txlen,reply,replylen,timeout,false); }
+static int hci_exchange(void *context,const uint8_t *tx,size_t txlen,
+                        uint8_t *reply,size_t *replylen,uint32_t timeout)
+{ return exchange_frame(context,tx,txlen,reply,replylen,timeout,true); }
 static int connfem(void *context) { (void)context; return x9_bt_session_connfem(&ops.io); }
 void x9_bluetooth_status(struct x9_bt_status *out)
 {
@@ -288,6 +306,7 @@ static void worker(void *unused,wait_result_t result)
     ops.io=(struct x9_bt_download_ops){.exchange=exchange,.raw_write=raw_write,
         .drain=drain,.sleep_ms=sleep_ms,.now_ms=now_ms,.connfem=connfem};
     ops.host_uart=host_uart;
+    ops.hci_exchange=hci_exchange;
     x9_bt_hardware_ops(&ops);
     state(X9_BT_INITIALIZING,0);
     if(!error) error=x9_bt_session_run(&ops,&board,&session);

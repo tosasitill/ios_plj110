@@ -15,6 +15,7 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 static volatile uint32_t *peri, *top, *hub, *sram, *pll, *spm, *ack, *ap;
 static volatile uint32_t *ep[4]; /* dev0, MD, ADSP, CMM; not AP UART3 */
 static bool requested, powered, isolated, pins_prepared, config_dirty, ap_saved;
+static uint8_t host_flow=0xff;
 static uint32_t con2_saved, feedback_saved, fifo_saved[4], default_saved;
 static const unsigned ap_offsets[]={0x0c,0x10,0x24,0x28,0x2c,0x40,0x44,0x54,0x58};
 static uint32_t ap_registers[sizeof(ap_offsets)/sizeof(ap_offsets[0])];
@@ -193,6 +194,7 @@ int x9_bt_hardware_config_uart(uint32_t baud, uint8_t flow)
      * of IER_XOFFI; the Android APDMA path also masks those interrupts. Keep
      * our existing RX bits intact across the baud/flow transition. */
     field(ap,4,0xe0,0);
+    host_flow=flow;
     return 0;
 }
 static int hub_features(void *context, bool *hardware_sleep, bool *inband)
@@ -206,13 +208,40 @@ static int hub_features(void *context, bool *hardware_sleep, bool *inband)
 static int post_download(void *context, bool inband)
 {
     (void)context;
-    if (inband) return ENOTSUP;
+    if (inband || host_flow!=0x80) return ENOTSUP;
     int error=endpoints_idle(); if (error) return error;
-    /* generic 24M config is TODO under SSPM. Do not copy AP's termios into
-     * CMM. No proven SSPM CMM24M handoff exists yet, so refuse multi-host
-     * instead of treating default=1 or AP baud as proof of CMM baud. */
-    printf("X9 BT: post-download SSPM endpoint handoff required (CMM untouched)\n");
-    return ENOTSUP;
+    /* Captured Android boot, 2026-11-15, HUB_DBG at 11.067400..469 and
+     * 15.504009..124: measured hub clock208M/mux2, dev0 + CMM have THIS
+     * profile. Generic 24M config does nothing; SSPM already configures
+     * the endpoints. The same sample7 is labelled 12M in the 104M source
+     * branch, so sample alone is insufficient. Never copy AP point3 or
+     * reprogram CMM. Require the current running SSPM/request resources,
+     * current 208M mux AND every relevant endpoint register on this boot. */
+    if (((rd(top,0x100)>>16)&3)!=2 || !(rd(hub,CON2)&2)) return ENOTSUP;
+    static const unsigned offsets[]={0x9c,0x24,0x28,0x2c,0x90,0x94,
+                                     0x54,0x58,0x98,0xa0,0xa4,0xa8,0xac,0x40,0x44,0x4c};
+    static const uint32_t profile[]={1,3,7,4,1,0,0xdb,1,0xa,0x11,0x11,0x13,0x13,0xdb,1,3};
+    for (unsigned index=0;index<2;index++) {
+        volatile uint32_t *endpoint=ep[index?3:0];
+        for (unsigned k=0;k<sizeof(offsets)/sizeof(offsets[0]);k++) {
+            uint32_t value=rd(endpoint,offsets[k]);
+            if (value!=profile[k]) {
+                printf("X9 BT: SSPM %s profile mismatch off=%x got=%x expected=%x\n",
+                       index?"CMM":"dev0",offsets[k],value,profile[k]);
+                return ENOTSUP;
+            }
+        }
+    }
+    /* Android post-fwdl bypass(0), then UART's md_adsp_fifo_ctrl(0).
+     * Both hosts are still proven idle. Preserve unrelated hub IRQ masks;
+     * our driver polls host-awake bit3 and does not own MD's IRQ callback. */
+    error=endpoints_idle(); if (error) return error;
+    field(hub,CON2,4,0);
+    wr(ep[1],8,0xc1); wr(ep[2],8,0xc1);
+    field(hub,STA0,1u<<12,1u<<12);
+    if ((rd(hub,CON2)&4) || !(rd(hub,STA0)&(1u<<12)) ||
+        !(rd(ep[1],0x5c)&1) || !(rd(ep[2],0x5c)&1)) return EIO;
+    return x9_bt_hardware_check();
 }
 static int verify_ownership(void *context)
 {
@@ -239,9 +268,11 @@ static int controller_config(void *context)
     /* btmtk_fops_open -> btmtk_send_init_cmds -> phase1 WMT/vendor config.
      * The source's cfg loader is USE_DEVICE_NODE==0 only. The production
      * node==1 route also has an Android userspace vendor initialization;
-     * its effective inputs are not present. Do not infer that node==1 loads
-     * bt.cfg, or that absent cfg files prove all initialization is empty. */
-    printf("X9 BT: selected production phase1/vendor configuration required\n");
+     * its captured inputs now exist, but the complete selected constructor
+     * sequence has not been encoded/embedded. Preferred BT_FW.cfg has an
+     * actual FC37 A2DP append. Do not infer that node==1 loads bt.cfg, or
+     * substitute an empty config / emulator transcript for a reviewed port. */
+    printf("X9 BT: reviewed production vendor sequence embedding required\n");
     return ENOENT;
 }
 int x9_bt_hardware_stop(void)
