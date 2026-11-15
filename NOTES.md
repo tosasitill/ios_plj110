@@ -1628,3 +1628,8 @@ Model now (as Android, one shared AFE, one owner per shared bit):
 - **最终交接/产物**：功能已合main/push；距离worktree的候选、原始分析与编译日志整体移回主仓库gitignored `x9/out/`后清理该worktree/本地功能分支。最终候选`x9/out/x9-proximity4-20261115/boot.img`，源码基线`b4aa2ef`（a0df27c+6eee23a+main e9f7b7c），输入/日志为该目录`boot-input.json`、`full-build.log`、`build.log`。`x9/out/proximity-analysis/`、`x9/out/proximity-compile/`、proximity1/2/3保留原始文件，旧日志中的worktree绝对路径是构建当时路径，不回写原件。
 - **iOS工具复建/人工验证**：`python3 -I x9/proximity/build.py --out x9/out/proximity-client-<新名字>`；既有签名client位于主仓库`x9/out/proximity-compile/client/proxctl`，未安装。由用户自行部署后`proxctl --status`/`--watch 20`看状态，必要时root `--mode 1`提交开、`--mode 0`提交关；不要与backboardd的自动模式切换并发干预，更不能用提交成功/diagnostic当物理DATA。覆盖/移开验证SCP oneshot0/1极性与HID mask0x40/0，之后才验原生熄屏/恢复。
 - **协作差分候选**：ALS会话独立worktree`als-region-info-320`取`2fead1c`+cherry-pick6eee23a，不带本轮type8和call，做ALS-only/GPU280/原ALS3输入，名称`x9-als-region320-20261115`；其确切编译/上机结果由该会话另记，不能混成距离候选已实跑。
+
+#### 2026-11-15 用户要求合入main并删除光感/距离分支
+
+- main `f2797a9`已含`96d3a79`（ALS）、`a0df27c`（type8）、`6eee23a`（op10）、`e7cc23b`/`05d13f0`（ALS-only候选交接），逐项`git merge-base --is-ancestor`通过；无尚待合入的这两项功能。本地光感/距离功能分支及worktree已在上轮清理，用户本轮要求后再删除远端`feat/als-power-init-ios`（96d3a79）、`feat/proximity-power-init-ios`（8694bfd），`git push origin --delete`成功。ALS/proximity候选与原始构建日志仍保留在gitignored `x9/out/`。
+- 远端配置仅跟踪main，因此不能用`git branch -r`当远端总数；本轮用`git ls-remote --heads origin`读取实际GitHub分支。只清理用户指定的两条传感器分支，不动audio、GPU、Bluetooth及call活动分支/worktree。本次仅git/交接维护，没有构建、CI、设备操作或上机新结果。
