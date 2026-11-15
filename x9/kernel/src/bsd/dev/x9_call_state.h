@@ -169,7 +169,7 @@ static inline int x9cw_array(const uint8_t *p,unsigned n,unsigned tag,unsigned c
  out->tag=tag;out->base=base;out->count=count;return 1;
 }
 struct x9cw_current_call {
- uint32_t id,direction,mode,state,multiparty,toa,priority,flags,aux;
+ uint32_t id,direction,mode,state,number_type,toa,rat,flags,aux;
 };
 #define X9_CW_CURRENT_MAX 7u
 struct x9cw_current {uint32_t result,count;struct x9cw_current_call calls[X9_CW_CURRENT_MAX];};
@@ -195,8 +195,11 @@ static inline int x9cw_current(const uint8_t *p,unsigned n,struct x9cw_current *
   }
   struct x9cw_current_call *r=&c.calls[i];
   r->id=words[0];r->direction=words[1];r->mode=words[2];r->state=words[3];
-  r->multiparty=words[4];r->toa=words[5];r->priority=words[7];r->flags=words[8];r->aux=words[10];
-  if(!r->id||r->direction>255||r->mode>255||r->state>5||r->multiparty>255||r->toa>255||r->priority>255)return 0;
+  /* MD records:10f is NUMBER_TYPE (record+17/u8),112 is CALL_RAT
+   * (record+99/u8). Multiparty is113/TYPE bit0, NOT NUMBER_TYPE.
+   * RIL385494..4a4 ->3855a0/5bc retains the full TYPE word first. */
+  r->number_type=words[4];r->toa=words[5];r->rat=words[7];r->flags=words[8];r->aux=words[10];
+  if(!r->id||r->direction>255||r->mode>255||r->state>5||r->number_type>255||r->toa>255||r->rat>255)return 0;
   for(unsigned prev=0;prev<i;prev++)if(c.calls[prev].id==r->id)return 0;
  }
  /* Every tag is a scalar, known descriptor or a referenced element.
@@ -226,7 +229,7 @@ static inline int x9cw_end_target(const struct x9cw_outbound_state *s,
  if(!out||!s||!c||!x9cw_outbound_id(s,&id)||!s->epoch||
     !s->count_known||s->native_count!=1||c->result||c->count!=1||s->mode!=20)return 0;
  const struct x9cw_current_call *r=&c->calls[0];
- if(r->id!=id||r->direction||r->mode!=20||r->multiparty||
+ if(r->id!=id||r->direction||r->mode!=20||(r->flags&1u)||
     !((s->ios_state==5&&r->state==3)||
       (s->ios_state==3&&r->state==0)))return 0;
  out->epoch=s->epoch;out->revision=s->revision;out->native_id=id;out->sim=1;return 1;

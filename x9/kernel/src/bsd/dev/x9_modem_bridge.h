@@ -48,6 +48,11 @@ int x9_md_mipc_message_reply_take(uint32_t token, int *result);
  * identity tombstones remain until boot, even after success. No retries;
  * only eight retained commands until Android retirement rules are proven. */
 int x9_md_mipc_call_event(uint8_t *frame, uint32_t capacity, uint32_t *length, uint32_t *token);
+/* Monotonic RX cursor / ordered drain for generation-scoped subscriptions.
+ * CMD reply token remains separate from the sequence for ordinary INDs. */
+int x9_md_mipc_call_cursor(uint32_t *sequence);
+int x9_md_mipc_call_event_ordered(uint8_t *frame, uint32_t capacity, uint32_t *length,
+                               uint32_t *token, uint32_t *sequence);
 /* Native MO observation, copied under the MD lock. No registration, request,
  * number disclosure or fabricated idle baseline. GET_STATUS count is valid
  * only after a complete owned090a; ECPI state requires full4901 frames.

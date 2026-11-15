@@ -25,6 +25,15 @@ CASES = (
     'progress_framing', 'outbound_states', 'current_arrays', 'status_fence',
     'dial_join_order', 'ios_join', 'ios_timeout', 'ios_deleted', 'dial_presend_fence',
     'incoming_states', 'incoming_state_invalid', 'incoming_observer',
+    'voice_bind_codec', 'end_target_codec', 'ios_end_roundtrip',
+    'current_metadata',
+    'ios_end_stale_query', 'ios_end_presend', 'ios_end_abandon',
+    'ios_end_late_cnf', 'ios_end_duplicate',
+    'register_codec', 'register_transition', 'register_sequence',
+    'register_timeout', 'register_deleted', 'register_unsupported',
+    'handover_codec', 'handover_concurrent_bootstrap',
+    'handover_subscription_fence', 'handover_pending_timeout', 'handover_rx_fence',
+    'handover_pending_overflow', 'handover_transport_loss', 'handover_request_identity',
 )
 
 
