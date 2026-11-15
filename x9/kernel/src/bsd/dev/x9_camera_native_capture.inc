@@ -3,7 +3,8 @@
  * under camera_control_lock; the CAMSV worker's lease check does NOT acquire
  * that mutex, camera_irq_lock or camera_camsv_lock. All exported storage and
  * its real MM token stay pinned, including prepare failures before the core
- * has recorded capture=true. No local IRQ stop is treated as full retirement.
+ * has recorded capture=true. Source/IRQ stop and complete translation restore
+ * are distinct stages; only the latter admits the old supplier teardown.
  */
 #include "x9_camera_native_capture.h"
 #include "x9_camera_native_smmu.h"
@@ -17,9 +18,13 @@ LCK_MTX_DECLARE(camera_native_capture_lock,&camera_group);
  * The native host refuses every configured normal bank and preserves the
  * complete prior abort/bypass policy for EVERY unrelated SID. */
 #define CAM_NATIVE_IOVA 0x40000000ull
+enum cam_native_capture_phase {
+    CAM_CAPTURE_EMPTY, CAM_CAPTURE_PREPARING, CAM_CAPTURE_LIVE,
+    CAM_CAPTURE_LOCAL_STOPPED, CAM_CAPTURE_TRANSLATION_RETIRED
+};
 struct cam_native_capture_context {
     uint64_t epoch,power_token,generation,capture_serial,lease;
-    uint32_t sensor,inner_serial,reservation_bytes;
+    uint32_t sensor,inner_serial,reservation_bytes,phase;
     bool prepare_attempted,prepared,reserved,request_held,on_attempted,off_attempted;
     bool controller_started,controller_busy,repeat_admission;
     uint64_t observed_completed;
@@ -31,6 +36,7 @@ struct cam_native_capture_context {
 };
 static struct cam_native_capture_context cam_native_capture;
 static int cam_native_capture_next_locked(uint64_t);
+static int cam_native_capture_dma_check(void *,uint64_t,const struct x9_camera_camsv_request *);
 static void cam_native_capture_controller(void *,wait_result_t);
 
 static int cam_native_capture_fault(struct cam_native_capture_context *c,int e)
@@ -96,6 +102,43 @@ static int cam_native_capture_route_guard(uint64_t epoch)
     return 0;
 }
 
+/* This is authority for the exact completed OLD request during supplier
+ * restore, not permission for DEVICE/cache/credit operations. Callers can
+ * already own the CAMSV mutex, so do not acquire it here. Control owns the
+ * teardown and the real filter/worker receipts make the immutable slot stable.
+ * Require RAW_IDLE and the exact old identity: arm changes slot->request
+ * before invoking its callback, and even a replay of that identity is rejected
+ * by CAMSV's monotonic generation/capture/cookie rules before this callback.
+ * No RAW read, MMIO mutation, controller reset or software drained assertion.
+ */
+static int cam_native_capture_old_teardown(uint64_t epoch,uint64_t token,
+    struct x9_camera_smmu *m,const struct x9_camera_camsv_request *r,uint64_t lease)
+{
+    struct x9_camera_camsv_slot *slot;
+    int e;
+    boolean_t old=cam_irq_spin_take();
+    slot=cam_irq.slot;
+    e=cam_irq.error?cam_irq.error:cam_irq.epoch!=epoch || cam_irq.prepared ||
+        !cam_irq.close_attempted || cam_irq.owns || cam_irq.accepting ||
+        cam_irq.busy || cam_irq.count || !slot || slot!=cam_sv.request_slot ||
+        slot->state!=X9_CAMSV_RETIRED || memcmp(&slot->request,r,sizeof(*r)) ||
+        memcmp(&cam_sv.request,r,sizeof(*r)) || !cam_sv.credit_retired ||
+        !cam_sv.request_held || cam_sv.epoch!=epoch || cam_sv.terminal || cam_sv.error ||
+        slot->dma.backing!=m->map || slot->dma.context!=&cam_native_capture ||
+        slot->dma.lease!=lease || slot->dma.check!=cam_native_capture_dma_check?ESTALE:0;
+    cam_irq_spin_drop(old);if(e)return e;
+    lck_mtx_lock(&camera_s1_lock);
+    e=cam_s1_check_private(m->map);
+    if(!e && (m->map->raw_errno || !m->map->published ||
+        m->map->raw_state!=CAM_RAW_IDLE || !cam_s1_dma_match(m->map,slot)))
+        e=m->map->raw_errno?m->map->raw_errno:ESTALE;
+    lck_mtx_unlock(&camera_s1_lock);if(e)return e;
+    if(!cam_mm.active || cam_mm.receive.power_token!=token ||
+       m->native_power!=token || cam_native_capture.controller_busy ||
+       cam_native_capture.repeat_admission)return ESTALE;
+    return x9_camera_native_smmu_retirement_check(epoch,m);
+}
+
 static int cam_native_capture_dma_check(void *context,uint64_t lease,
     const struct x9_camera_camsv_request *r)
 {
@@ -103,6 +146,7 @@ static int cam_native_capture_dma_check(void *context,uint64_t lease,
     struct x9_camera_smmu *smmu;
     struct x9_camera_smmu_export view;
     uint64_t epoch,token;
+    uint32_t phase;
     int e;
     if(c!=&cam_native_capture || !r || !lease)return EINVAL;
     /* Never keep this mutex while invoking another component. A completion
@@ -111,7 +155,7 @@ static int cam_native_capture_dma_check(void *context,uint64_t lease,
     e=c->error;
     if(!e && (!c->prepared || !c->reserved || !c->request_held ||
        !c->smmu || c->lease!=lease || memcmp(r,&c->request,sizeof(*r))))e=ESTALE;
-    epoch=c->epoch;token=c->power_token;smmu=c->smmu;view=c->view;
+    epoch=c->epoch;token=c->power_token;smmu=c->smmu;view=c->view;phase=c->phase;
     if(!e && (!epoch || !token || r->frame.sensor!=c->sensor ||
        r->frame.generation!=c->generation || r->iova!=CAM_NATIVE_IOVA ||
        r->iova!=view.map.iova || r->frame.raw!=view.map.raw ||
@@ -119,6 +163,9 @@ static int cam_native_capture_dma_check(void *context,uint64_t lease,
        view.asid!=CAM_SMMU_ASID || !view.map.backing))e=ESTALE;
     lck_mtx_unlock(&camera_native_capture_lock);
     if(e)return e;
+    if(phase==CAM_CAPTURE_TRANSLATION_RETIRED)
+        return cam_native_capture_old_teardown(epoch,token,smmu,r,lease);
+    if(phase!=CAM_CAPTURE_LIVE && phase!=CAM_CAPTURE_LOCAL_STOPPED)return ESTALE;
     /* These are live consumed dependencies, not a cached MM_GET/idle grant.
      * The normal host re-walks the whole owned S1/CD/STE/queue storage and
      * verifies exact own controller configuration/producers and real power. */
@@ -210,6 +257,15 @@ static void __attribute__((noreturn)) cam_native_capture_controller(void *arg,wa
             e=cam_native_capture_next_locked(epoch);
             lck_mtx_unlock(&camera_irq_lock);
         }
+        /* next work has really returned and its IRQ mutex is released.
+         * Mark only that thread work complete BEFORE invoking STOP; otherwise
+         * capture(off) would wait on the controller which is calling it.
+         * This is not a worker/GIC/RAW/AXI retirement receipt. */
+        lck_mtx_lock(&camera_native_capture_lock);
+        cam_native_capture.controller_busy=false;
+        if(e)cam_native_capture.repeat_admission=false;
+        lck_mtx_unlock(&camera_native_capture_lock);
+        thread_wakeup((event_t)&cam_native_capture.controller_busy);
         if(e && e!=ECANCELED) {
             e=cam_native_capture_fault(&cam_native_capture,e);
             cam_native_capture_stop_locked(epoch);
@@ -226,18 +282,13 @@ static void __attribute__((noreturn)) cam_native_capture_controller(void *arg,wa
             }
             lck_mtx_unlock(&camera_lock);
         }
-        lck_mtx_lock(&camera_native_capture_lock);
-        cam_native_capture.controller_busy=false;
-        if(e)cam_native_capture.repeat_admission=false;
-        lck_mtx_unlock(&camera_native_capture_lock);
         lck_mtx_unlock(&camera_control_lock);
-        thread_wakeup((event_t)&cam_native_capture.controller_busy);
     }
 }
 
-/* Closed honestly: continuous requeue is not complete provider retirement.
- * Full retirement must cover source/credit/worker/AXI/SMI/SMMU and supplier
- * dependencies, and continuous rearm must own each AE-bound next request.
+/* Streamed source/credit/worker/AXI/SMI/SMMU retirement is composed below.
+ * Admission still needs genuine never-issued startup-error retirement and
+ * retired namespace/slot reuse across clean close/reopen/front-switch.
  * No registration caller may turn callback presence into READY. */
 static int cam_native_capture_admit(void *context)
 {
@@ -246,7 +297,7 @@ static int cam_native_capture_admit(void *context)
     if(!sweet_early_is_x9() || st.mode!=2)return EPERM;
     __asm__ volatile("mrs %0, CurrentEL":"=r"(el));
     if(el!=4 || PAGE_SIZE!=0x4000)return ENOTSUP;
-    return ENOTSUP; /* full producer/translation/supplier retirement missing */
+    return ENOTSUP; /* unstarted retirement and genuine retired reuse missing */
 }
 
 static int cam_native_capture_prepare(void *context,uint64_t epoch,
@@ -273,6 +324,7 @@ static int cam_native_capture_prepare(void *context,uint64_t epoch,
     e=c->error?c->error:c->prepare_attempted?EALREADY:0;
     if(!e) {
         c->prepare_attempted=true;c->epoch=epoch;c->sensor=s->sensor;
+        c->phase=CAM_CAPTURE_PREPARING;
         c->power_token=token;c->plan=plan;c->lease=epoch;
         c->reservation_bytes=(plan.bytes+CAM_S1_PAGE-1)&~(CAM_S1_PAGE-1);
         c->reserved=true; /* once-only private namespace allocation before attach */
@@ -290,7 +342,7 @@ static int cam_native_capture_prepare(void *context,uint64_t epoch,
        view.map.iova!=CAM_NATIVE_IOVA || view.map.bytes!=plan.bytes ||
        view.map.mapped_bytes!=c->reservation_bytes || view.asid!=CAM_SMMU_ASID))e=EFAULT;
     if(e && !c->error)c->error=e;
-    if(!e)c->prepared=true;
+    if(!e){c->prepared=true;c->phase=CAM_CAPTURE_LIVE;}
     lck_mtx_unlock(&camera_native_capture_lock);
     printf("X9 CAMERA NATIVE PREPARE: sensor=%u epoch=%llu MM=%llu iova=%llx bytes=%u "
         "exported=%u errno=%d (retain namespace; not READY)\n",s->sensor,epoch,token,
@@ -300,14 +352,24 @@ static int cam_native_capture_prepare(void *context,uint64_t epoch,
 
 static int cam_native_capture_power_guard_locked(uint64_t epoch)
 {
+    struct x9_camera_smmu *m;
+    uint64_t token;
+    uint32_t phase;
     int e;
     lck_mtx_lock(&camera_native_capture_lock);
     /* No exported host means we installed no translation/fetch dependency.
      * A bare reservation never prevents ordinary cold sensor unwind. */
-    e=!cam_native_capture.smmu?0:cam_native_capture.epoch!=epoch?ESTALE:
-        cam_native_capture.error?cam_native_capture.error:EBUSY;
+    m=cam_native_capture.smmu;token=cam_native_capture.power_token;
+    phase=cam_native_capture.phase;
+    e=!m?0:cam_native_capture.epoch!=epoch?ESTALE:
+        cam_native_capture.controller_busy || cam_native_capture.repeat_admission?EBUSY:
+        phase!=CAM_CAPTURE_TRANSLATION_RETIRED?EBUSY:0;
     lck_mtx_unlock(&camera_native_capture_lock);
-    return e;
+    if(e || !m)return e;
+    if(!cam_mm.active || cam_mm.receive.power_token!=token || m->native_power!=token)return ESTALE;
+    /* Keep the handle/history forever; the real restored register/storage
+     * check, not c.smmu=NULL or error clearing, grants supplier teardown. */
+    return x9_camera_native_smmu_retirement_check(epoch,m);
 }
 static int cam_native_capture_retirement_guard(void *context,uint64_t epoch,
     const struct x9_camera_sensor *s)
@@ -315,6 +377,41 @@ static int cam_native_capture_retirement_guard(void *context,uint64_t epoch,
     if(context!=&cam_native_capture || !s || s->sensor<X9_CAMERA_BACK ||
        s->sensor>X9_CAMERA_FRONT || s!=&sensors[s->sensor-1])return EINVAL;
     return cam_native_capture_power_guard_locked(epoch);
+}
+
+static int cam_native_capture_off_locked(struct cam_native_capture_context *c,uint64_t epoch,
+    const struct x9_camera_sensor *s)
+{
+    struct x9_camera_smmu *m;
+    int e;
+    cam_native_capture_stop_locked(epoch);
+    lck_mtx_lock(&camera_native_capture_lock);
+    e=c->epoch!=epoch || c->sensor!=s->sensor?ESTALE:c->off_attempted?
+        c->off_error?c->off_error:ESTALE:c->controller_busy?EBUSY:0;
+    if(!e){c->off_attempted=true;m=c->smmu;}
+    else m=NULL;
+    lck_mtx_unlock(&camera_native_capture_lock);if(e)return e;
+    /* Streamed lifecycle: this first operation includes genuine source OFF,
+     * spent credit, CPU/worker/GIC and local halt/ACK restoration. It is NOT
+     * yet complete DMA/translation retirement. Unstarted startup failures
+     * need a distinct never-issued proof; do not route them through streamed
+     * receipts or simply return success because prepared/stream is false. */
+    e=!m?ESTALE:!session.stream?ENOTSUP:cam_irq_stop_locked(epoch);
+    if(!e) {
+        lck_mtx_lock(&camera_native_capture_lock);
+        c->phase=CAM_CAPTURE_LOCAL_STOPPED;
+        lck_mtx_unlock(&camera_native_capture_lock);
+        e=cam_native_retire_locked(epoch,m); /* does NOT repeat IRQ stop */
+    }
+    if(!e)e=x9_camera_native_smmu_retirement_check(epoch,m);
+    lck_mtx_lock(&camera_native_capture_lock);
+    c->off_error=e;
+    if(!e)c->phase=CAM_CAPTURE_TRANSLATION_RETIRED;
+    else if(!c->error)c->error=e;
+    lck_mtx_unlock(&camera_native_capture_lock);
+    printf("X9 CAMERA NATIVE OFF: epoch=%llu phase=%u errno=%d (pinned map/history retained)\n",
+        epoch,c->phase,e);
+    return e;
 }
 
 static int cam_native_capture_capture(void *context,uint64_t epoch,
@@ -328,20 +425,14 @@ static int cam_native_capture_capture(void *context,uint64_t epoch,
     if(c!=&cam_native_capture || !s || s->sensor<X9_CAMERA_BACK ||
        s->sensor>X9_CAMERA_FRONT || s!=&sensors[s->sensor-1] ||
        (on!=0 && on!=1) || !generation)return EINVAL;
-    if(!on)cam_native_capture_stop_locked(epoch);
+    if(!on)return cam_native_capture_off_locked(c,epoch,s);
     lck_mtx_lock(&camera_native_capture_lock);
     e=c->epoch!=epoch || c->sensor!=s->sensor?ESTALE:0;
-    if(!e && !on) {
-        if(c->off_attempted)e=c->off_error?c->off_error:ESTALE;
-        else {c->off_attempted=true;c->off_error=c->error?c->error:ENOTSUP;e=c->off_error;}
-    }
     if(!e && (c->error || !c->prepared || c->on_attempted || c->request_held))
         e=c->error?c->error:EBUSY;
     if(!e) {c->on_attempted=true;c->generation=generation;}
     lck_mtx_unlock(&camera_native_capture_lock);
     if(e)return e;
-    /* OFF intentionally never reports local consumer/GIC stop as complete
-     * AXI/translation retirement, and never retries a partial startup. */
     e=cam_native_capture_sensor(epoch,s);
     if(!e && (!session.capture || session.stream || session.generation!=generation))e=ESTALE;
     if(!e)e=cam_native_ae_seed_locked(epoch,config);
