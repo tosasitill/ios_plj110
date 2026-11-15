@@ -200,8 +200,15 @@ void x9_prox_native_disconnect(int error)
 int x9_prox_native_data(const void *record, unsigned length)
 {
  lck_mtx_lock(&prox_lock); expire_locked();
+ /* A cadence-only ENABLE does not turn off an already ACKed PS. Accept
+  * its real on-change edges while that ENABLE (or a coalesced one) waits:
+  * the shared worker consumes FIFO slots even when we reject the record,
+  * so discarding an edge here can leave the old near/far level indefinitely.
+  * First ENABLE, requested OFF and pending DISABLE remain inadmissible;
+  * only DATA updates the level, never a control ACK. */
  int error=!active?ENXIO:state.mode!=3?EBUSY:state.error?state.error:
-     !state.ready || !state.configured || !state.enabled || state.pending?EAGAIN:
+     !state.ready || !state.configured || !state.enabled || !state.desired ||
+     (state.pending && !pending_enabled)?EAGAIN:
      receive_locked(record,length,0);
  if (error) state.rejected++;
  lck_mtx_unlock(&prox_lock); return error;
