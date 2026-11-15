@@ -848,7 +848,8 @@ def rv55_clock_install_evidence(tcm, dram, init):
                   scalar_value_helper_vendor_semantics_proven=False,
                   vote_register_address_and_mask_semantics_proven=False,
                   vote_delay_time_unit_proven=False,
-                  vote_assert_trap_disposition_proven=False)
+                  vote_assert_trap_disposition_proven=False,
+                  startup_hart_ordering_and_vdec_owner_proven=False)
     if (not init['profile_match'] or tcm is None or len(tcm) != 184320 or
             hashlib.sha256(tcm).hexdigest() !=
             'f59d646ba74fab1c40500139c40d67c97a0e8ab96c1569f738a0c7403cc49508'):
@@ -896,6 +897,11 @@ def rv55_clock_install_evidence(tcm, dram, init):
         ('TCM', 'assert_task_file_line_log', 0x102ee, 0x10304),
         ('TCM', 'assert_module_log_and_ecall50_tail', 0x1035a, 0x10378),
         ('TCM', 'ecall_argument_moves_trap_and_return', 0x114d0, 0x114e0),
+        ('TCM', 'startup_hartid_zero_and_opaque_nonzero_selector', 0xfdc6, 0xfde0),
+        ('TCM', 'startup_nonzero_hart_vdec_init_candidate_call', 0xfdec, 0xfdfe),
+        ('TCM', 'startup_zero_hart_platform_init_call', 0xfe3c, 0xfe4a),
+        ('TCM', 'platform_init_domain_registration_call', 0x11072, 0x11092),
+        ('DRAM', 'vdec_init_preceding_callbacks_and_clock_lookup_init', 0x31694c, 0x316974),
     )
     objects = []
     for index in range(14):
@@ -914,6 +920,7 @@ def rv55_clock_install_evidence(tcm, dram, init):
         profile='captured RV55 clock domain0 registration and packed objects',
         domain_registration=dict(initializer=0x9154,
             initializer_runtime_called_proven=False,
+            initializer_static_caller=0x1107a, caller_helper=0x11030,
             vector_create_call=0x917e, vector_create=0x22d4,
             entries=14, vector_storage=0x24688,
             object_base=0x20018, object_stride=59,
@@ -936,6 +943,7 @@ def rv55_clock_install_evidence(tcm, dram, init):
             scalar_value_helper=0x1449c,
             scalar_combine_vendor_encodings_unresolved=True),
         vdec_initialization=dict(helper=0x223a34,
+            helper_static_caller=0x31696a, caller_helper=0x316948,
             lookup_ids=[2, 0, 1], result_cells=[0x3296a0, 0x3296a4, 0x3296a8],
             release_candidate=0x2244ba,
             named_release_calls=[0x224570, 0x22459e],
@@ -1007,6 +1015,25 @@ def rv55_clock_install_evidence(tcm, dram, init):
             trap_handler_and_return_disposition_proven=False,
             error_is_not_proven_normal_recoverable_return=True,
             post_assert_vendor_epilogue_semantics_unresolved=True),
+        startup_hart_split=dict(helper_candidate=0xfdc6,
+            hartid_read=0xfdca, hartid_stack_store=0xfdce,
+            initial_hart_helper_call=0xfdd2, initial_hart_helper=0x16344,
+            zero_hart_branch=0xfdd8, zero_hart_target=0xfdfe,
+            nonzero_hart_selector=0xfddc,
+            nonzero_selector_vendor_semantics_unresolved=True,
+            zero_hart_platform_init_call=0xfe3e,
+            platform_init_helper=0x11030, domain_init_call=0x1107a,
+            domain_init_helper=0x9154,
+            nonzero_hart_vdec_init_candidate_call=0xfdf8,
+            candidate_call_auipc=0xfdf4, vdec_init_helper=0x316948,
+            vdec_clock_init_call=0x31696a, vdec_clock_init_helper=0x223a34,
+            vdec_pre_init_callback_cells=[0x3389e8, 0x3389f0],
+            vdec_pre_init_callback_calls=[0x316962, 0x316968],
+            vdec_pre_init_callback_offset=8,
+            pre_init_callback_identity_and_runtime_target_proven=False,
+            startup_entry_execution_proven=False,
+            cross_hart_registry_visibility_and_ordering_proven=False,
+            separate_hart_paths_are_not_sequential_boot_proof=True),
         instruction_evidence=[dict(segment=segment, name=name,
             link_address=start, end_exclusive=end,
             payload_offset=start - (0x200000 if segment == 'DRAM' else 0),
