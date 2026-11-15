@@ -7,6 +7,14 @@
 #define X9_HEIF_MAX_DIMENSION 16384u
 #define X9_HEIF_MAX_RASTER_BYTES (256u * 1024u * 1024u)
 struct x9_heif_plan;
+enum x9_heif_clap_policy {
+    X9_HEIF_CLAP_EXACT_SAMPLES = 0,
+    /* Explicit rasterization policy, NOT a claim that HEIF mandates ceil.
+     * Each rational aperture becomes ceil(width) x ceil(height) samples;
+     * pixel centers span the EXACT aperture. Interpolation is linear-light,
+     * premultiplied RGBA float; all later ordered transforms use that raster. */
+    X9_HEIF_CLAP_LINEAR_CEIL = 1
+};
 struct x9_heif_geometry {
     uint32_t id, width, height; /* after this item's ordered transforms */
     uint32_t coded_width, coded_height; /* ispe, before item transforms */
@@ -16,10 +24,17 @@ struct x9_heif_geometry {
  * plan validates ALL reachable dimg/auxl nodes, active-stack cycles, tile
  * coverage and ordered geometry before a raster callback can run. item_id0
  * selects primary. Dimensions/memory/depth limits are implementation bounds.
- * Fractional clean-aperture sizes/origins return ENOTSUP: no rounding or
- * unannounced resampling. Arbitrary aux types remain in the graph. */
+ * This original entrypoint uses EXACT_SAMPLES: fractional clean-aperture
+ * sizes/origins return ENOTSUP, never unannounced rounding/resampling. The
+ * with_policy entrypoint can explicitly plan LINEAR_CEIL rasterization.
+ * Arbitrary aux types remain in the graph. */
 int x9_heif_plan_create(
     const struct x9_heif_document *, uint32_t item_id, struct x9_heif_plan **);
+int x9_heif_plan_create_with_policy(const struct x9_heif_document *, uint32_t item_id,
+    enum x9_heif_clap_policy, struct x9_heif_plan **);
+/* Includes ALL reachable nodes, not just root transforms. Negative errno on
+ * invalid plan; 0 means exact copies suffice, 1 means linear resampling. */
+int x9_heif_plan_requires_resampling(const struct x9_heif_plan *);
 void x9_heif_plan_close(struct x9_heif_plan **);
 int x9_heif_plan_geometry(
     const struct x9_heif_plan *, uint32_t item_id, struct x9_heif_geometry *);
@@ -36,8 +51,9 @@ struct x9_heif_raster {
  * destination. All callbacks in one composition MUST supply the SAME working
  * color interpretation/component encoding and alpha convention selected by
  * the caller. YUV/ICC/CICP conversion and native decode belong to that backend;
- * this core only copies/reorders exact packed samples. It does not certify
- * that supplied pixels originated in hardware. A nonzero errno discards the
+ * packed composition only copies/reorders exact samples; the explicit linear
+ * entrypoint below additionally resamples. Neither certifies that supplied
+ * pixels originated in hardware. A nonzero errno discards the
  * whole composition; callback must not recursively use/close this plan.
  * Destination is tightly packed, with format's canonical component encoding.
  */
@@ -56,5 +72,21 @@ typedef int (*x9_heif_raster_source)(void *context, uint32_t coded_item_id,
 int x9_heif_compose_packed(
     const struct x9_heif_plan *, enum x9_heif_raster_format,
     x9_heif_raster_source, void *context, struct x9_heif_raster *out);
+/* Same exact-copy contract with an explicit nonzero <=SIZE_MAX heap budget. */
+int x9_heif_compose_packed_with_budget(const struct x9_heif_plan *, enum x9_heif_raster_format,
+    x9_heif_raster_source, void *context, uint64_t raster_budget, struct x9_heif_raster *out);
+/* Same graph/cache/aux/memory gates as packed, but the caller explicitly
+ * supplies a single LINEAR-LIGHT RGB space with premultiplied alpha. RGBA is
+ * IEEE binary32 little-endian, finite RGB (negative/extended values allowed),
+ * alpha in[0,1]. No gamma defaults, clipping, color conversion or tone-map.
+ * Fractional apertures use bilinear pixel-center sampling with edge extension
+ * only within a previously EXACT-bounds-validated source aperture. Ordinary
+ * compose_packed refuses any plan needing interpolation, even float format.
+ * raster_budget is an explicit nonzero CPU heap budget for ALL cached and
+ * intermediate rasters, <=SIZE_MAX. It is not a device/decoder capacity or a
+ * memory reservation; real allocation failure still propagates. The legacy
+ * packed entrypoint retains its original 256MiB implementation budget. */
+int x9_heif_compose_linear_float(const struct x9_heif_plan *,
+    x9_heif_raster_source, void *context, uint64_t raster_budget, struct x9_heif_raster *out);
 void x9_heif_raster_close(struct x9_heif_raster *);
 #endif

@@ -54,6 +54,10 @@ def main():
         'heif_explicit_working_rgb_icc': True, 'heif_bitstream_color_resolver': True,
         'hevc_complete_supported_sps_syntax': True,
         'heif_mixed_derived_color_contexts': False,
+        'heif_fractional_clap_linear_resampler': True,
+        'heif_fractional_clap_default_policy': 'exact_samples',
+        'heif_fractional_clap_matrix_working_icc_required': True,
+        'heif_explicit_raster_heap_budget': True,
         'library': str(library), 'client': str(ctl),
     }, indent=2) + '\n')
     print('X9 HEVC: iOS decoder/client compiled; physical VCP provider absent, no auto-injection', flush=True)

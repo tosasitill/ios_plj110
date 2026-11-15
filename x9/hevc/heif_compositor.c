@@ -1,10 +1,15 @@
 #include "heif_compositor.h"
 #include <errno.h>
+#include <float.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #define T(a,b,c,d) X9_HEIF_TYPE(a,b,c,d)
 enum operation { CROP = 1, ROTATE, MIRROR };
-struct transform { uint32_t kind, argument, x, y, width, height; };
+struct transform {
+    uint32_t kind, argument, x, y, width, height, resample;
+    double left, top, aperture_width, aperture_height;
+};
 struct node {
     struct x9_heif_geometry geometry;
     uint32_t type, rows, columns, state, subtree_height, transform_count;
@@ -13,29 +18,37 @@ struct node {
 };
 struct x9_heif_plan {
     const struct x9_heif_document *document;
-    uint32_t count, root;
+    uint32_t count, root, resampling;
+    enum x9_heif_clap_policy clap_policy;
     struct node nodes[X9_HEIF_MAX_ITEMS];
 };
 static uint32_t be32(const uint8_t *p)
 { return (uint32_t)p[0]<<24 | (uint32_t)p[1]<<16 | (uint32_t)p[2]<<8 | p[3]; }
 static int64_t signed32(uint32_t n)
 { return n & 0x80000000u ? (int64_t)n-4294967296LL : (int64_t)n; }
-/* Aperture origin = (image - aperture)/2 + signed rational offset. With
- * dimensions gated at16384, these products fit int64 even for uint32
- * denominators. Require exact integer samples rather than truncating. */
+/* All bounds are exact before converting coordinates to double. Full uint32
+ * denominators can make the common origin denominator 65 bits and numerator
+ * 79 bits; int64 is NOT sufficient for rational aperture sizes. __int128 is
+ * bounded here by fixed uint32 inputs and the <=16384 image extent. */
 static int aperture_axis(uint32_t image, uint32_t size_n, uint32_t size_d,
-    uint32_t offset_n, uint32_t offset_d, uint32_t *origin, uint32_t *size)
+    uint32_t offset_n, uint32_t offset_d, enum x9_heif_clap_policy policy,
+    uint32_t *origin, uint32_t *size, double *start_out, double *extent_out,
+    uint32_t *resample)
 {
     if (!size_n || !size_d || !offset_d) return EBADMSG;
-    if (size_n % size_d) return ENOTSUP;
-    uint32_t extent = size_n/size_d;
-    if (!extent || extent > image) return EBADMSG;
-    int64_t denominator = 2*(int64_t)offset_d;
-    int64_t numerator = (int64_t)(image-extent)*offset_d + 2*signed32(offset_n);
-    if (numerator % denominator) return ENOTSUP;
-    int64_t start = numerator/denominator;
-    if (start < 0 || start > (int64_t)(image-extent)) return EBADMSG;
-    *origin = (uint32_t)start; *size = extent; return 0;
+    __int128 remaining = (__int128)image*size_d-size_n;
+    if (remaining < 0) return EBADMSG;
+    __int128 denominator = (__int128)2*size_d*offset_d;
+    __int128 numerator = remaining*offset_d + (__int128)2*signed32(offset_n)*size_d;
+    if (numerator < 0 || numerator > (__int128)2*remaining*offset_d) return EBADMSG;
+    uint32_t fractional = size_n % size_d != 0 || numerator % denominator != 0;
+    if (fractional && policy != X9_HEIF_CLAP_LINEAR_CEIL) return ENOTSUP;
+    *origin = (uint32_t)(numerator/denominator);
+    *size = (uint32_t)(((uint64_t)size_n+size_d-1)/size_d);
+    *start_out = (double)numerator/(double)denominator;
+    *extent_out = (double)size_n/size_d;
+    *resample |= fractional;
+    return 0;
 }
 static int transforms(struct x9_heif_plan *plan, const struct x9_heif_image *image,
     struct node *node)
@@ -49,8 +62,10 @@ static int transforms(struct x9_heif_plan *plan, const struct x9_heif_image *ima
         if (e) return e;
         if (p->type == T('c','l','a','p')) {
             op.kind = CROP;
-            e = aperture_axis(width,be32(raw),be32(raw+4),be32(raw+16),be32(raw+20),&op.x,&op.width);
-            if (!e) e = aperture_axis(height,be32(raw+8),be32(raw+12),be32(raw+24),be32(raw+28),&op.y,&op.height);
+            e = aperture_axis(width,be32(raw),be32(raw+4),be32(raw+16),be32(raw+20),plan->clap_policy,
+                &op.x,&op.width,&op.left,&op.aperture_width,&op.resample);
+            if (!e) e = aperture_axis(height,be32(raw+8),be32(raw+12),be32(raw+24),be32(raw+28),plan->clap_policy,
+                &op.y,&op.height,&op.top,&op.aperture_height,&op.resample);
         } else if (p->type == T('i','r','o','t')) {
             op.kind = ROTATE; op.argument = raw[0];
             op.width = op.argument & 1u ? height : width;
@@ -61,6 +76,7 @@ static int transforms(struct x9_heif_plan *plan, const struct x9_heif_image *ima
         if (e) return e;
         if (op.kind) {
             node->transforms[node->transform_count++] = op;
+            plan->resampling |= op.resample;
             width = op.width; height = op.height;
         }
     }
@@ -126,18 +142,24 @@ static int visit(struct x9_heif_plan *p, uint32_t id, unsigned depth, uint32_t *
     if (!e) { node->state = 2; *index = at; }
     return e;
 }
-int x9_heif_plan_create(const struct x9_heif_document *document, uint32_t id,
-    struct x9_heif_plan **out)
+int x9_heif_plan_create_with_policy(const struct x9_heif_document *document, uint32_t id,
+    enum x9_heif_clap_policy policy, struct x9_heif_plan **out)
 {
-    if (!document || !out || *out) return EINVAL;
+    if (!document || !out || *out || (policy != X9_HEIF_CLAP_EXACT_SAMPLES &&
+        policy != X9_HEIF_CLAP_LINEAR_CEIL)) return EINVAL;
     struct x9_heif_plan *p = calloc(1,sizeof(*p));
     if (!p) return ENOMEM;
-    p->document = document;
+    p->document = document; p->clap_policy = policy;
     int e = id ? 0 : x9_heif_primary(document,&id);
     if (!e) e = visit(p,id,0,&p->root);
     if (e) free(p); else *out = p;
     return e;
 }
+int x9_heif_plan_create(const struct x9_heif_document *document, uint32_t id,
+    struct x9_heif_plan **out)
+{ return x9_heif_plan_create_with_policy(document,id,X9_HEIF_CLAP_EXACT_SAMPLES,out); }
+int x9_heif_plan_requires_resampling(const struct x9_heif_plan *p)
+{ return p ? (int)p->resampling : -EINVAL; }
 void x9_heif_plan_close(struct x9_heif_plan **p)
 { if (p && *p) { free(*p); *p = NULL; } }
 int x9_heif_plan_geometry(const struct x9_heif_plan *p, uint32_t id,
@@ -166,7 +188,8 @@ struct composition {
     const struct x9_heif_plan *plan;
     enum x9_heif_raster_format format;
     unsigned pixel_bytes;
-    size_t live_bytes;
+    int linear;
+    size_t live_bytes, budget;
     x9_heif_raster_source source;
     void *context;
     struct x9_heif_raster cache[X9_HEIF_MAX_ITEMS];
@@ -177,7 +200,7 @@ static int allocate(struct composition *c, uint32_t w, uint32_t h, struct x9_hei
 {
     uint64_t stride = (uint64_t)w*c->pixel_bytes, bytes = stride*h;
     if (!w || !h || w > X9_HEIF_MAX_DIMENSION || h > X9_HEIF_MAX_DIMENSION ||
-        c->live_bytes > X9_HEIF_MAX_RASTER_BYTES || bytes > X9_HEIF_MAX_RASTER_BYTES-c->live_bytes) return EMSGSIZE;
+        c->live_bytes > c->budget || bytes > c->budget-c->live_bytes) return EMSGSIZE;
     uint8_t *data = calloc(1,(size_t)bytes);
     if (!data) return ENOMEM;
     *r = (struct x9_heif_raster){w,h,(uint32_t)c->format,(size_t)stride,(size_t)bytes,data};
@@ -185,14 +208,77 @@ static int allocate(struct composition *c, uint32_t w, uint32_t h, struct x9_hei
 }
 static void release(struct composition *c, struct x9_heif_raster *r)
 { c->live_bytes -= r->bytes; x9_heif_raster_close(r); }
+_Static_assert(sizeof(float) == 4 && FLT_RADIX == 2 && FLT_MANT_DIG == 24 &&
+    FLT_MAX_EXP == 128, "linear raster requires IEEE binary32");
+/* Use owned byte loads, not alignment/aliasing/endian assumptions about a
+ * callback buffer. RGBA_FLOAT's wire component encoding is little-endian. */
+static float component(const uint8_t *p)
+{
+    uint32_t bits = (uint32_t)p[0] | (uint32_t)p[1]<<8 | (uint32_t)p[2]<<16 | (uint32_t)p[3]<<24;
+    float value; memcpy(&value,&bits,sizeof(value)); return value;
+}
+static void put_component(uint8_t *p, float value)
+{
+    uint32_t bits; memcpy(&bits,&value,sizeof(bits));
+    for (unsigned n = 0; n < 4; n++) p[n] = (uint8_t)(bits>>(8*n));
+}
+static int validate_linear(const struct x9_heif_raster *r)
+{
+    for (uint32_t y = 0; y < r->height; y++)
+        for (uint32_t x = 0; x < r->width; x++)
+            for (unsigned k = 0; k < 4; k++) {
+                float v = component(r->data+y*r->stride+(size_t)x*16+4*k);
+                if (!isfinite(v) || (k == 3 && (v < 0 || v > 1))) return EBADMSG;
+            }
+    return 0;
+}
+static void sample_axis(double position, uint32_t extent, uint32_t *low,
+    uint32_t *high, double *weight)
+{
+    /* Source centers are at i+0.5. The validated aperture is inside the
+     * source's [0,extent] support; extend edge samples, never read outside. */
+    double index = position-0.5;
+    if (index <= 0) { *low = *high = 0; *weight = 0; }
+    else if (index >= extent-1) { *low = *high = extent-1; *weight = 0; }
+    else { *low = (uint32_t)index; *high = *low+1; *weight = index-*low; }
+}
+static int resample(const struct transform *op, const struct x9_heif_raster *src,
+    struct x9_heif_raster *dst)
+{
+    for (uint32_t y = 0; y < dst->height; y++) {
+        uint32_t y0, y1; double ty;
+        sample_axis(op->top+(y+0.5)*op->aperture_height/dst->height,src->height,&y0,&y1,&ty);
+        for (uint32_t x = 0; x < dst->width; x++) {
+            uint32_t x0, x1; double tx;
+            sample_axis(op->left+(x+0.5)*op->aperture_width/dst->width,src->width,&x0,&x1,&tx);
+            for (unsigned k = 0; k < 4; k++) {
+                double a = component(src->data+y0*src->stride+(size_t)x0*16+4*k);
+                double b = component(src->data+y0*src->stride+(size_t)x1*16+4*k);
+                double d = component(src->data+y1*src->stride+(size_t)x0*16+4*k);
+                double f = component(src->data+y1*src->stride+(size_t)x1*16+4*k);
+                double top = a+(b-a)*tx, bottom = d+(f-d)*tx;
+                double value = top+(bottom-top)*ty;
+                if (!isfinite(value) || value < -FLT_MAX || value > FLT_MAX ||
+                    (k == 3 && (value < 0 || value > 1))) return EBADMSG;
+                put_component(dst->data+y*dst->stride+(size_t)x*16+4*k,(float)value);
+            }
+        }
+    }
+    return 0;
+}
 static int apply(struct composition *c, const struct transform *op, struct x9_heif_raster *r)
 {
     /* Do not allocate/rewrite for identity operations. */
     if ((op->kind == ROTATE && !op->argument) ||
-        (op->kind == CROP && !op->x && !op->y && op->width == r->width && op->height == r->height)) return 0;
+        (op->kind == CROP && !op->resample && !op->x && !op->y && op->width == r->width && op->height == r->height)) return 0;
     struct x9_heif_raster dst = {0};
     int e = allocate(c,op->width,op->height,&dst);
     if (e) return e;
+    if (op->resample) {
+        e = c->linear ? resample(op,r,&dst) : ENOTSUP;
+        if (e) { release(c,&dst); return e; }
+        release(c,r); *r = dst; return 0;
+    }
     for (uint32_t y = 0; y < dst.height; y++) {
         if (op->kind == CROP) {
             memcpy(dst.data+y*dst.stride,r->data+(y+op->y)*r->stride+(size_t)op->x*c->pixel_bytes,dst.stride);
@@ -229,6 +315,7 @@ static int render(struct composition *c, uint32_t at)
     if (e) return e;
     if (n->type == X9_HEIF_HVC1) {
         e = c->source(c->context,n->geometry.id,c->format,r->width,r->height,r->data,r->stride);
+        if (!e && c->linear) e = validate_linear(r);
     } else {
         for (unsigned k = 0; k < n->geometry.derived_count && !e; k++) {
             e = render(c,n->derived[k]);
@@ -247,20 +334,21 @@ static int render(struct composition *c, uint32_t at)
     for (unsigned k = 0; k < n->transform_count && !e; k++) e = apply(c,&n->transforms[k],r);
     return e;
 }
-int x9_heif_compose_packed(const struct x9_heif_plan *plan, enum x9_heif_raster_format format,
-    x9_heif_raster_source source, void *context, struct x9_heif_raster *out)
+static int compose(const struct x9_heif_plan *plan, enum x9_heif_raster_format format,
+    int linear, x9_heif_raster_source source, void *context, uint64_t budget, struct x9_heif_raster *out)
 {
     if (!out) return EINVAL;
     /* Don't discard a caller's existing owned raster. */
     if (out->data) return EINVAL;
     memset(out,0,sizeof(*out));
-    if (!plan || !source || !pixel_bytes(format)) return EINVAL;
+    if (!plan || !source || !pixel_bytes(format) || !budget || budget > SIZE_MAX) return EINVAL;
+    if (plan->resampling && !linear) return ENOTSUP;
     for (unsigned n = 0; n < plan->count; n++)
         if (plan->nodes[n].geometry.auxiliary_count) return ENOTSUP;
     struct composition *c = calloc(1,sizeof(*c));
     if (!c) return ENOMEM;
-    c->plan = plan; c->format = format; c->pixel_bytes = pixel_bytes(format);
-    c->source = source; c->context = context;
+    c->plan = plan; c->format = format; c->pixel_bytes = pixel_bytes(format); c->linear = linear;
+    c->source = source; c->context = context; c->budget = (size_t)budget;
     int e = render(c,plan->root);
     if (!e) {
         *out = c->cache[plan->root];
@@ -269,3 +357,12 @@ int x9_heif_compose_packed(const struct x9_heif_plan *plan, enum x9_heif_raster_
     for (unsigned n = 0; n < plan->count; n++) x9_heif_raster_close(&c->cache[n]);
     free(c); return e;
 }
+int x9_heif_compose_packed(const struct x9_heif_plan *plan, enum x9_heif_raster_format format,
+    x9_heif_raster_source source, void *context, struct x9_heif_raster *out)
+{ return compose(plan,format,0,source,context,X9_HEIF_MAX_RASTER_BYTES,out); }
+int x9_heif_compose_packed_with_budget(const struct x9_heif_plan *plan, enum x9_heif_raster_format format,
+    x9_heif_raster_source source, void *context, uint64_t budget, struct x9_heif_raster *out)
+{ return compose(plan,format,0,source,context,budget,out); }
+int x9_heif_compose_linear_float(const struct x9_heif_plan *plan,
+    x9_heif_raster_source source, void *context, uint64_t budget, struct x9_heif_raster *out)
+{ return compose(plan,X9_HEIF_RGBA_FLOAT,1,source,context,budget,out); }

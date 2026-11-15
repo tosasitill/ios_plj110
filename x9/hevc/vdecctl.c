@@ -200,7 +200,7 @@ static int print_heif_item(const struct x9_heif_document *d, uint32_t id,
     }
     free(image); return e;
 }
-static int heif_info(const char *path)
+static int heif_info(const char *path, enum x9_heif_clap_policy policy)
 {
     size_t bytes = 0;
     uint8_t *data = read_file(path,X9_HEIF_MAX_FILE,&bytes);
@@ -211,14 +211,18 @@ static int heif_info(const char *path)
     struct item_walk walk = {0};
     int e = x9_heif_open(data,bytes,&d);
     if (!e) e = x9_heif_primary(d,&primary);
-    if (!e) e = x9_heif_plan_create(d,primary,&plan);
+    if (!e) e = x9_heif_plan_create_with_policy(d,primary,policy,&plan);
     if (!e) e = print_heif_item(d,primary,plan,0,&walk);
     if (e) fprintf(stderr,"HEIF item input rejected: errno=%d\n",e);
-    else puts("HEIF input graph only; no decode, transform, alpha merge or hardware success claimed");
+    else {
+        printf("clean-aperture raster policy=%s\n",policy == X9_HEIF_CLAP_LINEAR_CEIL ? "linear-ceil" : "exact");
+        puts("HEIF input graph only; no decode, transform, alpha merge or hardware success claimed");
+    }
     x9_heif_plan_close(&plan); x9_heif_close(&d); free(data); return e ? 1 : 0;
 }
 static int decode_heif(const char *path, uint32_t id, const char *icc_path,
-    enum x9_heif_source_color_policy policy, const char *output_path, const char *info_path)
+    enum x9_heif_source_color_policy policy, enum x9_heif_clap_policy clap_policy,
+    uint64_t raster_budget, const char *output_path, const char *info_path)
 {
     size_t bytes = 0, icc_bytes = 0;
     uint8_t *raw = read_file(path,X9_HEIF_MAX_FILE,&bytes);
@@ -235,7 +239,7 @@ static int decode_heif(const char *path, uint32_t id, const char *icc_path,
     file = CFDataCreateWithBytesNoCopy(NULL,raw,(CFIndex)bytes,kCFAllocatorNull);
     working = CFDataCreateWithBytesNoCopy(NULL,icc,(CFIndex)icc_bytes,kCFAllocatorNull);
     if (!file || !working) { e = kVTAllocationFailedErr; goto done; }
-    e = X9HEIFCopyHardwareImage(file,id,working,policy,&pixel,&info);
+    e = X9HEIFCopyHardwareImageWithOptions(file,id,working,policy,clap_policy,raster_budget,&pixel,&info);
     if (!e && (!pixel || !info)) e = kVTVideoDecoderBadDataErr;
     if (e) goto done;
     plist = CFPropertyListCreateData(NULL,info,kCFPropertyListBinaryFormat_v1_0,0,&error);
@@ -244,10 +248,13 @@ static int decode_heif(const char *path, uint32_t id, const char *icc_path,
     if (e) goto done;
     locked = 1;
     width = CVPixelBufferGetWidth(pixel); height = CVPixelBufferGetHeight(pixel);
+    if (!width || !height || width > X9_HEIF_MAX_DIMENSION || height > X9_HEIF_MAX_DIMENSION) {
+        e = kVTVideoDecoderBadDataErr; goto done;
+    }
     size_t stride = CVPixelBufferGetBytesPerRow(pixel), row = width*8;
     const uint8_t *base = CVPixelBufferGetBaseAddress(pixel);
     if (CVPixelBufferGetPixelFormatType(pixel) != kCVPixelFormatType_64RGBAHalf ||
-        CVPixelBufferIsPlanar(pixel) || !width || !height || !base || stride < row ||
+        CVPixelBufferIsPlanar(pixel) || !base || stride < row || stride > raster_budget/height ||
         (uint64_t)stride*(height-1)+row > UINTPTR_MAX-(uintptr_t)base) {
         e = kVTVideoDecoderBadDataErr; goto done;
     }
@@ -287,14 +294,21 @@ done:
 int main(int argc, char **argv)
 {
     if (argc == 5 && !strcmp(argv[1], "decode-vt")) return decode_vt(argv[2], argv[3], argv[4],NULL,0);
-    if (argc == 3 && !strcmp(argv[1],"heif-info")) return heif_info(argv[2]);
+    if ((argc == 3 || argc == 4) && !strcmp(argv[1],"heif-info")) {
+        enum x9_heif_clap_policy policy = X9_HEIF_CLAP_EXACT_SAMPLES;
+        if (argc == 4) {
+            if (!strcmp(argv[3],"linear-ceil")) policy = X9_HEIF_CLAP_LINEAR_CEIL;
+            else if (strcmp(argv[3],"exact")) return 2;
+        }
+        return heif_info(argv[2],policy);
+    }
     if (argc == 5 && !strcmp(argv[1],"decode-heif-item")) {
         char *end = NULL;
         errno = 0; unsigned long id = strtoul(argv[3],&end,0);
         if (errno || !argv[3][0] || !end || *end || id > UINT32_MAX) return 2;
         return decode_vt(NULL,NULL,argv[4],argv[2],(uint32_t)id);
     }
-    if (argc == 8 && !strcmp(argv[1],"decode-heif")) {
+    if ((argc == 8 || argc == 9 || argc == 10) && !strcmp(argv[1],"decode-heif")) {
         char *end = NULL;
         errno = 0; unsigned long id = strtoul(argv[3],&end,0);
         if (errno || !argv[3][0] || !end || *end || id > UINT32_MAX) return 2;
@@ -302,12 +316,26 @@ int main(int argc, char **argv)
         if (!strcmp(argv[5],"icc")) policy = X9_HEIF_USE_ICC_IF_PRESENT;
         else if (!strcmp(argv[5],"nclx")) policy = X9_HEIF_USE_NCLX;
         else return 2;
-        return decode_heif(argv[2],(uint32_t)id,argv[4],policy,argv[6],argv[7]);
+        enum x9_heif_clap_policy clap = X9_HEIF_CLAP_EXACT_SAMPLES;
+        if (argc >= 9) {
+            if (!strcmp(argv[6],"linear-ceil")) clap = X9_HEIF_CLAP_LINEAR_CEIL;
+            else if (strcmp(argv[6],"exact")) return 2;
+        }
+        uint64_t budget = clap == X9_HEIF_CLAP_LINEAR_CEIL ? UINT64_C(1024)*1024*1024 : X9_HEIF_MAX_RASTER_BYTES;
+        if (argc == 10) {
+            errno = 0; end = NULL;
+            unsigned long long mib = strtoull(argv[7],&end,10);
+            if (errno || argv[7][0] < '0' || argv[7][0] > '9' || !end || *end || !mib ||
+                mib > (uint64_t)INT64_MAX/(1024*1024) || mib > (uint64_t)SIZE_MAX/(1024*1024)) return 2;
+            budget = (uint64_t)mib*1024*1024;
+        }
+        return decode_heif(argv[2],(uint32_t)id,argv[4],policy,clap,budget,argv[argc-2],argv[argc-1]);
     }
     if (argc != 2 || strcmp(argv[1], "status")) {
         fprintf(stderr, "usage: %s status | decode-vt hvcC.bin access-unit.bin NEW.yuv | "
-            "heif-info file.heic | decode-heif-item file.heic item-id-or-0 NEW.yuv | "
-            "decode-heif file.heic item-id-or-0 working-rgb.icc icc|nclx NEW.rgba16f NEW.info.plist\n", argv[0]); return 2;
+            "heif-info file.heic [exact|linear-ceil] | decode-heif-item file.heic item-id-or-0 NEW.yuv | "
+            "decode-heif file.heic item-id-or-0 working-rgb.icc icc|nclx [exact|linear-ceil [raster-MiB]] NEW.rgba16f NEW.info.plist\n"
+            "heap budget default: exact=256MiB, linear-ceil=1024MiB; not hardware capacity\n", argv[0]); return 2;
     }
     int fd = open(X9_VDEC_DEVICE, O_RDONLY | O_CLOEXEC);
     if (fd < 0) { perror(X9_VDEC_DEVICE); return 1; }
