@@ -5,9 +5,10 @@
 #ifndef X9_SCP_HANDOFF_H
 #define X9_SCP_HANDOFF_H
 #include <stdint.h>
-#define X9_SCP_HANDOFF_BYTES 384u
+#define X9_SCP_HANDOFF_BYTES 512u
 #define X9_SCP_MEM_COUNT 30u
 #define X9_SCP_LAYOUT_VERIFIED 1u
+#define X9_SCP_BOOT_VERIFIED 2u
 struct x9_scp_mem_region { uint32_t offset, size; };
 struct x9_scp_pin { uint32_t channel, offset_bytes, message_bytes, pin_index; };
 struct x9_scp_handoff {
@@ -19,5 +20,12 @@ struct x9_scp_handoff {
  uint32_t mbox_base, mbox_set, mbox_clear, mbox_init;
  uint32_t sram_base, sram_size, region_info_op;
  uint32_t reserved[7];
+ /* v2: separately qualified startup prerequisites. READY_0 (channel 9)
+  * is absent on PLJ110; READY_1 (22) is present. Never assume a CM4 pin. */
+ struct x9_scp_pin ready_pin;
+ uint32_t mbox0_base, mbox0_set, mbox0_clear, mbox0_init;
+ uint32_t core0_base, core1_base, scpsys_base, vlp_base;
+ uint32_t firmware_base, firmware_size;
+ uint32_t boot_reserved[18];
 };
 #endif

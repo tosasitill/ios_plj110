@@ -5,6 +5,7 @@
  * MT6993 physical transport remains separate: publishing a HID service is
  * not evidence that SCP or automatic panel brightness works. */
 #include "../X9ALS.h"
+#include <sys/errno.h>
 #include "IOHIDEventServiceKeys_Private.h"
 
 class X9AmbientLight : public IOHIDEventService {
@@ -16,7 +17,7 @@ public:
 	UInt32 getPrimaryUsagePage() APPLE_KEXT_OVERRIDE { return kHIDPage_Sensor; }
 	UInt32 getPrimaryUsage() APPLE_KEXT_OVERRIDE { return kHIDUsage_Snsr_Light_AmbientLight; }
 	UInt32 getProductID() APPLE_KEXT_OVERRIDE { return 0x6993; }
-	UInt32 getReportInterval() APPLE_KEXT_OVERRIDE { return 200000; }
+	UInt32 getReportInterval() APPLE_KEXT_OVERRIDE { return x9_als_get_report_interval_us(); }
 	IOHIDEvent *copyEvent(IOHIDEventType type, IOHIDEvent *matching,
 	    IOOptionBits options) APPLE_KEXT_OVERRIDE;
 	IOHIDEvent *copyMatchingEvent(OSDictionary *matching) APPLE_KEXT_OVERRIDE;
@@ -30,6 +31,7 @@ private:
 	uint64_t fSequence;
 	bool fIngressActive;
 	bool fDataValid;
+	struct x9_als_status fStatus;
 };
 OSDefineMetaClassAndStructors(X9AmbientLight, IOHIDEventService);
 
@@ -41,9 +43,12 @@ X9AmbientLight::start(IOService *provider)
 	int sensors = 0; PE_parse_boot_argn("x9s", &sensors, sizeof(sensors));
 	int enabled = (sensors&1) ? 1 : 0;
 	PE_parse_boot_argn("x9_als", &enabled, sizeof(enabled));
-	if (!sweet_early_is_x9() || (enabled != 1 && enabled != 2)) return false;
-	/* One token fits the existing 607-byte boot line: 1=MTK, 2=diagnostic. */
+	if (!sweet_early_is_x9() || (enabled != 1 && enabled != 2 && enabled != 3)) return false;
+	/* One token: 1=external ingress, 2=diagnostic, 3=native secure SCP. */
 	int diagnostic = enabled == 2;
+	bzero(&fStatus, sizeof(fStatus));
+	fDataValid = false;
+	fSequence = 0;
 	fIntervalUs = getReportInterval();
 	if (!IOHIDEventService::start(provider)) return false;
 	if (x9_als_init(diagnostic == 1)) return false;
@@ -55,14 +60,21 @@ X9AmbientLight::start(IOService *provider)
 		fIngressActive = false;
 		return false;
 	}
-	setProperty("X9ALSBackend", diagnostic == 1 ? "diagnostic" : "mtk-scp-pending");
+	/* 319: SpringBoard also matches IONameMatch=als. This is still the
+	 * Sensor/AmbientLight HID service, not a fake AppleALS user client. */
+	setName("als");
+	setProperty("X9ALSBackend", diagnostic ? "diagnostic" : enabled == 3 ? "mtk-scp-native" : "mtk-scp-pending");
 	setProperty("X9ALSDataValid", kOSBooleanFalse);
 	setProperty("X9ALSDiagnostic", diagnostic == 1 ? kOSBooleanTrue : kOSBooleanFalse);
 	setProperty("X9ALSPhysicalTransportReady", kOSBooleanFalse);
+	if (enabled == 3 && x9_als_start_transport()) {
+		removeTimer();
+		return false;
+	}
 	registerService();
 	fTimer->setTimeoutUS(fIntervalUs);
-	IOLog("X9 ALS: HID registered usage=0x20/0x41 interval=%u us mode=%s; physical SCP transport NOT enabled\n",
-	    fIntervalUs, diagnostic == 1 ? "diagnostic" : "MTK ingress waiting");
+	IOLog("X9 ALS: HID registered name=als usage=0x20/0x41 interval=%u us mode=%s; real READY/ENABLE/DATA required\n",
+	    fIntervalUs, diagnostic ? "diagnostic" : enabled == 3 ? "native SCP startup" : "MTK ingress waiting");
 	return true;
 }
 
@@ -121,6 +133,28 @@ void
 X9AmbientLight::poll(OSObject *owner, IOTimerEventSource *sender)
 {
 	X9AmbientLight *self = (X9AmbientLight *)owner;
+	struct x9_als_status status;
+	x9_als_copy_status(&status);
+	if (status.stage != self->fStatus.stage || status.error != self->fStatus.error ||
+	    status.control_enabled != self->fStatus.control_enabled || status.gain != self->fStatus.gain ||
+	    status.firmware_ready != self->fStatus.firmware_ready || status.sensor_ready != self->fStatus.sensor_ready ||
+	    status.power_requested != self->fStatus.power_requested || status.layout_valid != self->fStatus.layout_valid) {
+		self->setProperty("X9ALSStage", status.stage, 32);
+		self->setProperty("X9ALSLastErrno", (UInt32)status.error, 32);
+		self->setProperty("X9ALSGain", status.gain, 32);
+		self->setProperty("X9ALSLayoutValid", status.layout_valid ? kOSBooleanTrue : kOSBooleanFalse);
+		self->setProperty("X9ALSPowerRequested", status.power_requested ? kOSBooleanTrue : kOSBooleanFalse);
+		self->setProperty("X9ALSFirmwareReady", status.firmware_ready ? kOSBooleanTrue : kOSBooleanFalse);
+		self->setProperty("X9ALSSensorReady", status.sensor_ready ? kOSBooleanTrue : kOSBooleanFalse);
+		self->setProperty("X9ALSPhysicalTransportReady",
+		    status.firmware_ready && status.sensor_ready && status.control_enabled && !status.error ? kOSBooleanTrue : kOSBooleanFalse);
+	}
+	self->fStatus = status;
+	UInt32 appliedUs = self->getReportInterval();
+	if (appliedUs != self->fIntervalUs) {
+		self->fIntervalUs = appliedUs;
+		self->setProperty(kIOHIDReportIntervalKey, appliedUs, 32);
+	}
 	struct x9_als_sample sample;
 	bool fresh = x9_als_copy_sample(&sample) == 0;
 	if (fresh != self->fDataValid) {
@@ -158,9 +192,14 @@ X9AmbientLight::configure(OSObject *owner, void *arg0, void *, void *, void *)
 		OSNumber *number = OSDynamicCast(OSNumber, interval);
 		if (!number) return kIOReturnBadArgument;
 		uint64_t us = number->unsigned64BitValue();
-		/* Limit HID delivery polling, not the as-yet-unimplemented SCP batch. */
 		if (us < 20000 || us > 1000000) return kIOReturnBadArgument;
-		self->fIntervalUs = (UInt32)us;
+		int error = x9_als_set_report_interval_us((UInt32)us);
+		if (error == EBUSY) return kIOReturnBusy;
+		if (error == ENXIO) return kIOReturnNotReady;
+		if (error) return kIOReturnIOError;
+		/* Native batch is committed only after the actual matching ACK.
+		 * poll() adopts the applied cadence, not the queued request. */
+		self->fIntervalUs = self->getReportInterval();
 		self->setProperty(kIOHIDReportIntervalKey, self->fIntervalUs, 32);
 		if (self->fTimer) self->fTimer->setTimeoutUS(self->fIntervalUs);
 	}

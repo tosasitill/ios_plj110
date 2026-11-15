@@ -89,7 +89,7 @@ def build(seed=None, timebase=TIMEBASE, console_base=0, console_size=0, ram_wind
         ('dram-base', u64(phys_base)), ('dram-size', u64(mem_size)),
         ('x9-ram-map', bytes(2064)),
         ('x9-gpu-handoff', bytes(64)),  # populated only after live LK FDT verification
-        ('x9-scp-handoff', bytes(384)),  # layout only; never a firmware READY declaration
+        ('x9-scp-handoff', bytes(512)),  # v2 layout only; never firmware READY
         ('x9-gps-handoff', bytes(64)),  # consys/HIF layout only, not MCU ownership/READY
         ('x9-mic-dma-handoff', bytes(64)),  # ABI retained, zero: audio loader removed
         ('x9-camera-calibration', bytes(32)),  # only this boot's CSI0/3 LK devinfo words
