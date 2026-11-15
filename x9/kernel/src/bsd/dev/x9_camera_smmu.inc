@@ -5,6 +5,7 @@
  * the actual cold bootstrap. Own-base equality is NOT a firmware grant.
  */
 #include "x9_camera_smmu.h"
+#include "x9_mm_power.h"
 LCK_MTX_DECLARE(camera_smmu_lock,&camera_group);
 extern vm_offset_t ml_io_map(vm_offset_t,vm_size_t);
 #define CAM_SMMU_MAGIC 0x583943414d4d5531ull
@@ -32,6 +33,10 @@ struct x9_camera_smmu {
     struct cam_smmu_cmd batch[3];
     uint32_t batch_start,batch_count,close_samples,close_errno;
     bool exported,pending,close_attempted,timedout_retired,shared_attempted;
+    /* Cold native host owns all normal controller stores in this TU. */
+    bool native, native_bypass, native_started;
+    uint32_t ste_shift, ste_bytes, native_cr0, native_gbpa;
+    uint64_t native_power;
 };
 static struct x9_camera_smmu *cam_smmu_namespace;
 static int cam_smmu_shared_check_locked(struct x9_camera_smmu *);
@@ -83,7 +88,8 @@ static void cam_smmu_unpublished_free(struct x9_camera_smmu *m)
     if(m->exported)panic("X9 CAMERA: free of exported SMMU backing");
     if(m->map && x9_camera_s1_discard(&m->map))
         panic("X9 CAMERA: unpublished SMMU has published Stage-1");
-    cam_s1_free_page(&m->evt);cam_s1_free_page(&m->cmd);cam_s1_free_page(&m->ste);
+    cam_s1_free_page(&m->evt);cam_s1_free_page(&m->cmd);
+    if(m->ste.va)kmem_free(kernel_map,m->ste.va,m->ste_bytes);
     if(cam_smmu_namespace==m)cam_smmu_namespace=NULL;
     m->magic=0;kfree_type(struct x9_camera_smmu,m);
 }
@@ -117,11 +123,26 @@ static int cam_smmu_storage(struct x9_camera_smmu *m)
         for(unsigned j=0;j<m->map->pages;j++)
             if(pa==m->map->raw_pa[j])return EFAULT;
     }
+    if(m->ste_shift<8 || m->ste_shift>16 ||
+       m->ste_bytes!=(64u<<m->ste_shift) ||
+       (!m->native && m->ste_shift!=8))return EFAULT;
+    for(unsigned off=0;off<m->ste_bytes;off+=CAM_S1_PAGE) {
+        uint64_t pa=0;e=cam_s1_phys(m->ste.va+off,oas,&pa);
+        if(e)return e;
+        if(pa!=m->ste.pa+off)return ESTALE;
+        for(unsigned j=1;j<3;j++)if(pa==pages[j]->pa)return EFAULT;
+        if(pa==m->map->root.pa || pa==m->map->cd.pa)return EFAULT;
+        for(unsigned j=0;j<m->map->leaves;j++)
+            if(pa==m->map->leaf[j].pa)return EFAULT;
+        for(unsigned j=0;j<m->map->pages;j++)
+            if(pa==m->map->raw_pa[j])return EFAULT;
+    }
     ste=(const volatile uint64_t *)m->ste.va;
-    for(unsigned sid=0;sid<CAM_SMMU_STES;sid++) {
+    for(unsigned sid=0;sid<(1u<<m->ste_shift);sid++) {
         for(unsigned w=0;w<CAM_SMMU_STE_WORDS;w++) {
             uint64_t expected=w==0?1ull:0;
-            if(sid==CAM_SMMU_DISPLAY) {
+            if((m->native && m->native_bypass && sid!=CAM_SMMU_SID) ||
+               (!m->native && sid==CAM_SMMU_DISPLAY)) {
                 if(w==0)expected=1ull|(4ull<<1);
                 if(w==1 && (m->idr1&(1u<<27)))expected=1ull<<44;
             } else if(sid==CAM_SMMU_SID && m->exported) {
@@ -153,6 +174,7 @@ int x9_camera_smmu_prepare(uint32_t idr0,uint32_t idr1,uint32_t idr5,
     m=kalloc_type(struct x9_camera_smmu,Z_WAITOK|Z_ZERO);
     if(!m){lck_mtx_unlock(&camera_smmu_lock);return ENOMEM;}
     m->magic=CAM_SMMU_MAGIC;m->idr0=idr0;m->idr1=idr1;m->idr5=idr5;
+    m->ste_shift=8;m->ste_bytes=CAM_S1_PAGE;
     m->cmd_shift=cmd>8?8:cmd;m->evt_shift=evt>7?7:evt;
     cam_smmu_namespace=m;
     e=x9_camera_s1_create(idr5,iova,bytes,&m->map);
@@ -191,7 +213,7 @@ int x9_camera_smmu_export(struct x9_camera_smmu *m,struct x9_camera_smmu_export 
                 ((((m->idr0>>24)&3u)==0)?1ull<<27:0);
             __asm__ volatile("dsb sy":::"memory");
             ste[CAM_SMMU_SID*CAM_SMMU_STE_WORDS]=1ull|(5ull<<1)|m->view.map.cd_pa;
-            m->view.strtab_base=m->ste.pa;m->view.strtab_cfg=8;
+            m->view.strtab_base=m->ste.pa;m->view.strtab_cfg=m->ste_shift;
             m->view.cmdq_base=m->cmd.pa|m->cmd_shift;
             m->view.evtq_base=m->evt.pa|m->evt_shift;
             m->view.cr1=CAM_SMMU_CR1;m->view.cr2=CAM_SMMU_CR2;
@@ -200,7 +222,7 @@ int x9_camera_smmu_export(struct x9_camera_smmu *m,struct x9_camera_smmu_export 
             e=cam_smmu_storage(m);
         }
         if(!e) {
-            e=cam_cache_range(m->ste.va,CAM_S1_PAGE,CAM_CACHE_CLEAN);
+            e=cam_cache_range(m->ste.va,m->ste_bytes,CAM_CACHE_CLEAN);
             if(!e)e=cam_cache_range(m->cmd.va,CAM_S1_PAGE,CAM_CACHE_DEVICE);
             if(!e)e=cam_cache_range(m->evt.va,CAM_S1_PAGE,CAM_CACHE_DEVICE);
             if(!e)e=cam_smmu_storage(m);
@@ -233,14 +255,20 @@ static int cam_smmu_live(struct x9_camera_smmu *m)
     uint32_t mask=(1u<<(m->cmd_shift+1))-1u;
     uint32_t evt_mask=(1u<<(m->evt_shift+1))-1u;
     if(!m->exported)return ENXIO;
+    if(m->native) {
+        int e=x9_mm_power_validate(m->native_power,X9_MM_POWER_CAMERA);
+        if(e)return e;
+    }
     if(cam_smmu_rr(m,0)!=m->idr0 || cam_smmu_rr(m,4)!=m->idr1 ||
         cam_smmu_rr(m,0x14)!=m->idr5 ||
-        cam_smmu_rr64(m,0x80)!=m->view.strtab_base || cam_smmu_rr(m,0x88)!=8 ||
+        cam_smmu_rr64(m,0x80)!=m->view.strtab_base || cam_smmu_rr(m,0x88)!=m->view.strtab_cfg ||
         cam_smmu_rr64(m,0x90)!=m->view.cmdq_base ||
         cam_smmu_rr64(m,0xa0)!=m->view.evtq_base ||
-        cam_smmu_rr(m,0x20)!=CAM_SMMU_CR0 || cam_smmu_rr(m,0x24)!=CAM_SMMU_CR0 ||
+        cam_smmu_rr(m,0x20)!=(m->native?m->native_cr0:CAM_SMMU_CR0) ||
+        cam_smmu_rr(m,0x24)!=(m->native?m->native_cr0:CAM_SMMU_CR0) ||
         cam_smmu_rr(m,0x28)!=CAM_SMMU_CR1 || cam_smmu_rr(m,0x2c)!=CAM_SMMU_CR2 ||
-        (cam_smmu_rr(m,0x44)&((1u<<31)|(1u<<20)))!=(1u<<20) ||
+        (m->native?cam_smmu_rr(m,0x44)!=m->native_gbpa:
+          (cam_smmu_rr(m,0x44)&((1u<<31)|(1u<<20)))!=(1u<<20)) ||
         cam_smmu_rr(m,0x50) || cam_smmu_rr(m,0x54))return ESTALE;
     m->last_prod=cam_smmu_rr(m,0x98);m->last_cons=cam_smmu_rr(m,0x9c);
     m->gerror=cam_smmu_rr(m,0x60);m->gerrorn=cam_smmu_rr(m,0x64);
@@ -415,3 +443,5 @@ int x9_camera_smmu_cfgi(struct x9_camera_smmu *m){return cam_smmu_commands(m,1);
 int x9_camera_smmu_tlbi(struct x9_camera_smmu *m){return cam_smmu_commands(m,2);}
 int x9_camera_smmu_sync(struct x9_camera_smmu *m){return cam_smmu_commands(m,0);}
 #include "x9_camera_smmu_attach.inc"
+
+#include "x9_camera_native_smmu.inc"
