@@ -326,6 +326,15 @@ int x9_heif_primary(const struct x9_heif_document *d, uint32_t *id)
     if (!d || !id) return EINVAL;
     *id = d->primary; return 0;
 }
+int x9_heif_span_data(const struct x9_heif_document *d, struct x9_heif_span span,
+    const uint8_t **data)
+{
+    if (!data) return EINVAL;
+    *data = NULL;
+    if (!d) return EINVAL;
+    if (span.offset > d->bytes || span.bytes > d->bytes-span.offset) return EBADMSG;
+    *data = d->data+span.offset; return 0;
+}
 static int item_extent(const struct x9_heif_document *d, const struct item *i,
     unsigned n, struct x9_heif_span *out)
 {

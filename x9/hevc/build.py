@@ -27,12 +27,14 @@ def main():
     subprocess.run(common + ['-dynamiclib', str(HERE / 'vt_decoder.c'),
                             str(HERE / 'hevc_bitstream.c'),
                             str(HERE / 'heif_items.c'),
+                            str(HERE / 'heif_compositor.c'),
                             str(HERE / 'heif_coremedia.c'),
                             str(HERE / 'vt_image_metadata.c'), *frameworks,
                             '-install_name', '@rpath/libx9-hevc.dylib', '-o', str(library)], check=True)
     ctl = a.out / 'vdecctl'
     subprocess.run(common + [str(HERE / 'vdecctl.c'), str(HERE / 'hevc_bitstream.c'),
                             str(HERE / 'heif_items.c'),
+                            str(HERE / 'heif_compositor.c'),
                             str(library), *frameworks, '-Wl,-rpath,@executable_path', '-o', str(ctl)], check=True)
     for p in (library, ctl):
         subprocess.run(['/usr/bin/codesign', '--force', '--sign', '-', '--timestamp=none', str(p)], check=True)
@@ -42,6 +44,8 @@ def main():
         'automatic_injection': False, 'required_specification': {'X9NativeHEVC': True},
         'decoder_id': 'org.ios-sweet.x9.vcp.hvc1',
         'heif_coded_item_input': True, 'heif_complete_image_compositor': False,
+        'heif_derived_geometry': True, 'heif_packed_raster_compositor': True,
+        'heif_native_raster_adapter': False, 'heif_auxiliary_merge': False,
         'library': str(library), 'client': str(ctl),
     }, indent=2) + '\n')
     print('X9 HEVC: iOS decoder/client compiled; physical VCP provider absent, no auto-injection', flush=True)

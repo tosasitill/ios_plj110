@@ -43,6 +43,10 @@ struct x9_heif_image {
 int x9_heif_open(const uint8_t *data, size_t bytes, struct x9_heif_document **);
 void x9_heif_close(struct x9_heif_document **);
 int x9_heif_primary(const struct x9_heif_document *, uint32_t *id);
+/* Borrow a bounded metadata span from THIS document. Returned bytes retain
+ * the document's immutable input lifetime; no second unverified file pointer. */
+int x9_heif_span_data(const struct x9_heif_document *, struct x9_heif_span,
+    const uint8_t **data);
 /* Resolve hvc1/grid/iden geometry, ordered dimg and all associated properties.
  * Unknown essential properties fail ENOTSUP; known transform/color/auxiliary
  * properties are retained, NOT applied. Compositors must process them before

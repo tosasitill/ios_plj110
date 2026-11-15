@@ -16,6 +16,7 @@
 #include "hevc_bitstream.h"
 #include "heif_items.h"
 #include "heif_coremedia.h"
+#include "heif_compositor.h"
 #include "vt_decoder.h"
 #include "../kernel/src/bsd/dev/x9_vdec.h"
 static uint8_t *read_file(const char *path, size_t limit, size_t *bytes)
@@ -195,7 +196,7 @@ done:
 }
 struct item_walk { uint32_t stack[32], seen[X9_HEIF_MAX_ITEMS], seen_count; };
 static int print_heif_item(const struct x9_heif_document *d, uint32_t id,
-                          unsigned depth, struct item_walk *walk)
+                          const struct x9_heif_plan *plan, unsigned depth, struct item_walk *walk)
 {
     if (depth == 32) return E2BIG;
     for (unsigned n = 0; n < depth; n++) if (walk->stack[n] == id) return ELOOP;
@@ -204,12 +205,16 @@ static int print_heif_item(const struct x9_heif_document *d, uint32_t id,
     struct x9_heif_image *image = calloc(1,sizeof(*image));
     if (!image) return ENOMEM;
     int e = x9_heif_get_image(d,id,image);
+    struct x9_heif_geometry geometry;
+    if (!e) e = x9_heif_plan_geometry(plan,id,&geometry);
     if (e) { free(image); return e; }
     walk->stack[depth] = id; walk->seen[walk->seen_count++] = id;
     printf("item=%u type=%c%c%c%c size=%ux%u channels=%u hidden=%u bytes=%llu grid=%ux%u children=%u\n",
         id,(char)(image->type>>24),(char)(image->type>>16),(char)(image->type>>8),(char)image->type,
         image->width,image->height,image->channels,image->hidden,(unsigned long long)image->item_bytes,
         image->rows,image->columns,image->derived_count);
+    printf("  ordered geometry=%ux%u; pixels/color/auxiliary merge not executed\n",
+        geometry.width,geometry.height);
     for (unsigned n = 0; n < image->property_count; n++) {
         const struct x9_heif_property *p = &image->properties[n];
         printf("  property[%u]=%c%c%c%c essential=%u offset=%llu bytes=%llu (not applied)\n",
@@ -218,13 +223,13 @@ static int print_heif_item(const struct x9_heif_document *d, uint32_t id,
     }
     for (unsigned n = 0; n < image->derived_count && !e; n++) {
         printf("  dimg[%u]=%u\n",n,image->derived[n]);
-        e = print_heif_item(d,image->derived[n],depth+1,walk);
+        e = print_heif_item(d,image->derived[n],plan,depth+1,walk);
     }
     for (unsigned n = 0; n < X9_HEIF_MAX_ITEMS && !e; n++) {
         uint32_t auxiliary = 0;
         e = x9_heif_auxiliary(d,id,n,&auxiliary);
         if (e == ENOENT) { e = 0; break; }
-        if (!e) { printf("  auxiliary[%u]=%u\n",n,auxiliary); e = print_heif_item(d,auxiliary,depth+1,walk); }
+        if (!e) { printf("  auxiliary[%u]=%u\n",n,auxiliary); e = print_heif_item(d,auxiliary,plan,depth+1,walk); }
     }
     free(image); return e;
 }
@@ -234,14 +239,16 @@ static int heif_info(const char *path)
     uint8_t *data = read_file(path,X9_HEIF_MAX_FILE,&bytes);
     if (!data) { perror("HEIF input"); return 1; }
     struct x9_heif_document *d = NULL;
+    struct x9_heif_plan *plan = NULL;
     uint32_t primary = 0;
     struct item_walk walk = {0};
     int e = x9_heif_open(data,bytes,&d);
     if (!e) e = x9_heif_primary(d,&primary);
-    if (!e) e = print_heif_item(d,primary,0,&walk);
+    if (!e) e = x9_heif_plan_create(d,primary,&plan);
+    if (!e) e = print_heif_item(d,primary,plan,0,&walk);
     if (e) fprintf(stderr,"HEIF item input rejected: errno=%d\n",e);
     else puts("HEIF input graph only; no decode, transform, alpha merge or hardware success claimed");
-    x9_heif_close(&d); free(data); return e ? 1 : 0;
+    x9_heif_plan_close(&plan); x9_heif_close(&d); free(data); return e ? 1 : 0;
 }
 int main(int argc, char **argv)
 {
