@@ -2147,3 +2147,12 @@ Model now (as Android, one shared AFE, one owner per shared bit):
   - cleanup 在共享忙时跳过 CON2 和 endpoint FIFO 恢复。如果失败点在 isolation（全部 FCR 写 0xC0，只重开 AP/CMM）之后，MD/ADSP FIFO 会保持关闭整个 boot；Android ap_only=0 路径按原 FIFOE 无条件恢复。
   - 已排除：蜂窝（321/322 两次 call 的 CNF 序列相同，321 第二次后仍正常）、IOMAP（7.8/64 MiB）、UFS lock 统计（同类累计值）、boot 打包尺寸（load 0x80000000 到 dtb 0x87c80000，Image 31.3 MiB）。
   - **39 s 挂死的直接机制仍未静态证明。** 可修的确定缺陷：pre_on 增加了非 Android 检查且检查在写入之后；cleanup 不恢复 MD/ADSP FIFOE；拒绝不打印寄存器；launcher 失败不回退 stock bluetoothd；内核安装器不能升级自有文件。
+
+#### 2026-11-15 按 Android 重写 BT pre_on/post_download/cleanup，launcher 回退，安装器支持升级
+
+- **pre_on**（`x9_bt_hardware.c`）按 `btmtk_pre_power_on_handler` 顺序：PRE_ON pins → bypass(0)+清 dev0 IRQ → dev0 RX request → TX request 轮询 ready 50×1ms → reset_flow_ctrl（仅 XOFF 时；恢复流程未实现则带寄存器拒绝）→ 保存 AP UART3 → `mtk8250_clear_fifo` 等价清 AP FIFO（不再因 RX 残字节失败）→ fifo_ctrl(1)=feedback(0)+reset_to_ap_enable_only(1)（含 Android 的三 host 同为 0x300/0 拒绝）→ bypass(1)（mask+clear dev0 IRQ）→ bt_on_count_inc → TX pins。删除 Android 没有的 `shared_idle`/`endpoints_idle`（DEV1/DEV2 0x1d0f 全零）要求。pre_on 不再置 bt_on_sta。
+- **post_download**：去掉两次 endpoints_idle；bypass(0) → fifo_ctrl(0)（MD/ADSP FIFO 0xC1、feedback=1，无条件）。verify_ownership 成功后 `assert_bit_ctrl(0)`。dev0 IRQ mask 恢复为启动值（XNU 无 hub IRQ handler，不照 Android 解除屏蔽）。
+- **cleanup**：不再以“共享忙”为条件。只要 APB 可读就恢复启动时的 CON2 bypass、STA0 feedback/bt_on_sta、dev0 IRQ mask；资源仍 ready 时按原 FIFOE 恢复 MD/ADSP FIFO 及 AP UART3 寄存器；再按 release_uarthub 顺序清 DEV0 请求。每次拒绝/cleanup 打印 dev0/dev1/dev2/CON2/STA0（ready 时含 FCR_RD/DEBUG_8/AP IER/LSR）。
+- **launcher**：板级会话不可用、runtime 缺失、环境设置或 bridge exec 失败时，清掉注入变量后 exec stock bluetoothd，MachServices 始终有人服务。
+- **安装器升级**：`root_header.py/candidate.py --previous-payload`；内核按每文件的旧自有版本 SHA 原子升级，restore 也认旧版本。
+- 只做了 kern_exec.c、x9_bt_hardware.c 单文件编译（测试头含伪造旧版本以覆盖代码生成）。**修复不保证解决 322 的 39 s 挂死，其机制仍未证明。**

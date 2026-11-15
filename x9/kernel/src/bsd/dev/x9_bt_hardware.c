@@ -14,7 +14,7 @@
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 static volatile uint32_t *peri, *top, *hub, *sram, *pll, *spm, *ack, *ap;
 static volatile uint32_t *ep[4]; /* dev0, MD, ADSP, CMM; not AP UART3 */
-static bool requested, powered, isolated, pins_prepared, config_dirty, ap_saved;
+static bool requested, powered, isolated, pins_prepared, config_dirty, ap_saved, bypass_set, hub_saved;
 enum { OWN_UNKNOWN, OWN_DRIVER, OWN_SLEEPING, OWN_WAKING };
 static unsigned ownership=OWN_UNKNOWN;
 /* Once downloaded firmware has acknowledged ownership, a later init/vendor
@@ -22,7 +22,7 @@ static unsigned ownership=OWN_UNKNOWN;
  * supply lease until an explicit, acknowledged function-off exists. */
 static bool firmware_live;
 static uint8_t host_flow=0xff;
-static uint32_t con2_saved, feedback_saved, fifo_saved[4], default_saved;
+static uint32_t con2_saved, sta0_saved, irq_mask_saved, fifo_saved[4], default_saved;
 static const unsigned ap_offsets[]={0x0c,0x10,0x24,0x28,0x2c,0x40,0x44,0x54,0x58};
 static uint32_t ap_registers[sizeof(ap_offsets)/sizeof(ap_offsets[0])];
 static uint32_t ap_feature, ap_fifo;
@@ -30,7 +30,8 @@ static uint32_t ap_feature, ap_fifo;
  * too: restoring only DLL/DLH/EFR leaks the new XON/XOFF configuration. */
 static const unsigned ap_bank_offsets[]={0x90,0x94,0x98,0xa0,0xa4,0xa8,0xac,0xc0};
 static uint32_t ap_bank[sizeof(ap_bank_offsets)/sizeof(ap_bank_offsets[0])];
-enum { DEV0=0, DEV0_SET=4, DEV0_CLR=8, CON1=0xc4, CON2=0xc8,
+enum { DEV0=0, DEV0_SET=4, DEV0_CLR=8, DEV0_RESERVE=0x24, DEV0_IRQ_CLR=0x34,
+       DEV0_IRQ_MASK=0x38, DEV1=0x40, DEV2=0x80, CON1=0xc4, CON2=0xc8,
        IRQ_STA=0xd0, IRQ_CLR=0xd4, STA0=0xe0, CON4=0xf0,
        /* 60+4 +400+4 +4 +8 +4 = 484 (0x1e4). */
        SSPM_DEFAULT=(12*5+4)+(20*20+4)+4+8+4 };
@@ -46,13 +47,6 @@ static int apb(void)
     if (!peri || !hub || (rd(peri, 0x18)&(3u<<19))) return ENXIO;
     /* No INTFHUB read before PCLK/HCLK are available. */
     return (rd(hub, CON1)&0xffff0000u)==0x85810000u ? 0 : ENXIO;
-}
-static int shared_idle(void)
-{
-    int error=apb(); if (error) return error;
-    /* Ready alone isn't busy; SW request/RX-data/busy/BT/host-awake are. */
-    if ((rd(hub, 0x40)|rd(hub, 0x80))&0x1d0f) return EBUSY;
-    return 0;
 }
 int x9_bt_hardware_map(void)
 {
@@ -85,48 +79,59 @@ int x9_bt_hardware_uart(volatile uint32_t **out)
     int error=x9_bt_hardware_check(); if (!error) *out=ap;
     return error;
 }
-static int endpoints_idle(void)
+/* INTFHUB registers are APB-only and readable once apb() passes; endpoint
+ * registers need ready + resources (x9_bt_hardware_check) first. */
+static void hub_dump(const char *why)
 {
-    int error=x9_bt_hardware_check(); if (error) return error;
-    error=shared_idle(); if (error) return error;
-    for (unsigned i=0; i<4; i++) {
-        if (!(rd(ep[i],0x14)&0x40) || (rd(ep[i],0x14)&1) ||
-            (rd(ep[i],0x64)&0x1f)) return EBUSY;
-        /* Android reset_flow_control is a no-op when no endpoint detected
-         * XOFF. Do not forcibly loopback/reset live MD/ADSP to clear XOFF. */
-        if (rd(ep[i],0x80)&8) return EBUSY;
+    if (!peri || !hub || apb()) {
+        printf("X9 BT: %s; hub APB unavailable cg2=%08x\n", why, peri?rd(peri,0x18):0);
+        return;
     }
-    return 0;
+    printf("X9 BT: %s dev0=%08x dev1=%08x dev2=%08x con2=%08x sta0=%08x cg2=%08x\n",
+        why, rd(hub,DEV0), rd(hub,DEV1), rd(hub,DEV2), rd(hub,CON2), rd(hub,STA0), rd(peri,0x18));
+    if (x9_bt_hardware_check()) return;
+    printf("X9 BT: %s fcr_rd=%08x/%08x/%08x/%08x dbg8=%08x/%08x/%08x/%08x ap ier=%08x lsr=%08x\n",
+        why, rd(ep[0],0x5c), rd(ep[1],0x5c), rd(ep[2],0x5c), rd(ep[3],0x5c),
+        rd(ep[0],0x80), rd(ep[1],0x80), rd(ep[2],0x80), rd(ep[3],0x80), rd(ap,4), rd(ap,0x14));
 }
+/* btmtk_pre_power_on_handler (btmtk_proj_sp.c) on mt6993.c, in Android order:
+ * PRE_ON pins -> bypass(0) -> dev0 RX request -> wakeup (TX request, poll
+ * ready) -> reset_flow_ctrl -> fifo_ctrl(1) = feedback(0) +
+ * reset_to_ap_enable_only(1) -> bypass(1) -> bt_on_count_inc -> TX pins.
+ * Android does NOT require MD/ADSP to be idle (MD_CHANNEL_EN=1): fifo_ctrl(1)
+ * is what stops them during download. Every refusal logs the hub state. */
 static int pre_on(void *context)
 {
     (void)context;
-    int error=x9_bt_hardware_map(); if (error) return error;
-    error=shared_idle(); if (error) return error;
-    if (rd(hub,DEV0)&0x1d0f) return EBUSY;
-    con2_saved=rd(hub,CON2); feedback_saved=rd(hub,STA0)&(1u<<12);
-    default_saved=rd(sram,SSPM_DEFAULT);
+    int error=x9_bt_hardware_map();
+    if (error) { hub_dump("pre_on map/APB failed"); return error; }
+    /* Boot state: a failed session restores exactly this (the state every
+     * passive boot ran with), independent of what other hosts are doing. */
+    con2_saved=rd(hub,CON2); sta0_saved=rd(hub,STA0); irq_mask_saved=rd(hub,DEV0_IRQ_MASK);
+    default_saved=rd(sram,SSPM_DEFAULT); hub_saved=true;
     /* SSPM owns its reset/power/clock lifecycle. This is Android's shared
      * SRAM config, not evidence that the coprocessor has been booted. */
     wr(sram,SSPM_DEFAULT,0x10001); config_dirty=true;
     error=x9_conn_bt_pins(X9_CONN_BT_PRE); if (error) return error;
     pins_prepared=true;
-    field(hub,STA0,1u<<10,1u<<10); /* BT off during preparation, not assert */
-    field(hub,CON2,4,0); /* multi-host so dev0 request reaches SSPM */
+    /* bypass(0): multi-host, clear dev0 IRQs. Android also unmasks them for
+     * its hub IRQ handler; XNU has none, so the boot mask is kept here. */
+    field(hub,CON2,4,0); wr(hub,DEV0_IRQ_CLR,0xffffffffu);
+    /* dev0_set_rx_request, then btmtk_wakeup_uarthub: TX request, 50 x 1 ms. */
     wr(hub,DEV0_SET,1); requested=true; wr(hub,DEV0_SET,2);
     for (unsigned ms=0; ms<50; ms++) {
         if (rd(hub,DEV0)&(1u<<9)) break;
         sleep_ms(1);
     }
     error=x9_bt_hardware_check();
-    if (error) {
-        printf("X9 BT: SSPM request-ready failed dev0=%08x cg2=%08x default=%08x\n",
-            rd(hub,DEV0),rd(peri,0x18),rd(sram,SSPM_DEFAULT));
-        return error;
-    }
+    if (error) { hub_dump("pre_on SSPM request-ready failed"); return error; }
     field(ep[0],0xb0,1,0); /* is_ready's USB_RX_SEL, NOT AP UART3 */
-    if (rd(ap,4) || rd(ap,0x4c) || !(rd(ap,0x14)&0x40) || (rd(ap,0x14)&1)) return EBUSY;
-    error=endpoints_idle(); if (error) return error;
+    /* reset_flow_control is a no-op unless an endpoint detected XOFF. Its
+     * loopback recovery is not implemented: refuse instead of guessing. */
+    for (unsigned i=0;i<4;i++)
+        if (rd(ep[i],0x80)&8) { hub_dump("pre_on XOFF detected, flow reset not implemented"); return EBUSY; }
+    /* AP UART3 is our own endpoint. An enabled IER means another user. */
+    if (rd(ap,4)) { hub_dump("pre_on AP UART3 interrupts already enabled"); return EBUSY; }
     for (unsigned i=0;i<sizeof(ap_offsets)/sizeof(ap_offsets[0]);i++)
         ap_registers[i]=rd(ap,ap_offsets[i]);
     ap_feature=rd(ap,0x9c); ap_fifo=rd(ap,0x5c);
@@ -134,16 +139,26 @@ static int pre_on(void *context)
     for (unsigned i=0;i<sizeof(ap_bank_offsets)/sizeof(ap_bank_offsets[0]);i++)
         ap_bank[i]=rd(ap,ap_bank_offsets[i]);
     wr(ap,0x9c,ap_feature); ap_saved=true;
+    /* mtk8250_uart_hub_set_request -> mtk8250_clear_fifo: a byte latched
+     * while the hub woke (frame error during CKOFF) is discarded, not fatal. */
+    wr(ap,8,(ap_fifo&~6u)|6u);
     for (unsigned i=0;i<4;i++) fifo_saved[i]=rd(ep[i],0x5c);
-    /* Android reset_to_ap_enable_only(1), after proving ALL hosts idle. */
-    isolated=true; field(hub,STA0,1u<<12,0);
+    /* fifo_ctrl(1): feedback_tx_host_awake_sta_en(0), reset_to_ap_enable_only(1). */
+    field(hub,STA0,1u<<12,0);
+    uint32_t d0=rd(hub,DEV0), d1=rd(hub,DEV1), d2=rd(hub,DEV2);
+    if (d0==d1 && d1==d2 && (d0==0x300 || d0==0)) { hub_dump("pre_on all host status equal"); return EIO; }
+    uint32_t trx=d0&3;
+    wr(hub,DEV0_SET,3);
+    isolated=true;
     for (unsigned i=0;i<4;i++) wr(ep[i],8,0xc0);
-    field(hub,CON4,16,16);
-    wr(ep[3],8,0xc1); wr(ep[0],8,0xc1);
-    error=shared_idle(); if (error) return error;
-    field(hub,CON2,4,4);
-    uint32_t count=rd(hub,0x24)&0xff;
-    field(hub,0x24,0xff,(count+1)&0xff);
+    field(hub,CON4,16,16); /* sw4_rst */
+    wr(ep[3],8,0xc1); wr(ep[0],8,0xc1); /* ap_only=1: CMM + dev0 only */
+    wr(hub,DEV0_SET,trx);
+    /* bypass(1): mask + clear dev0 IRQs, then bypass. */
+    wr(hub,DEV0_IRQ_MASK,0xffffffffu); wr(hub,DEV0_IRQ_CLR,0xffffffffu);
+    field(hub,CON2,4,4); bypass_set=true;
+    uint32_t count=rd(hub,DEV0_RESERVE)&0xff; /* bt_on_count_inc: 0xff wraps to 0 */
+    field(hub,DEV0_RESERVE,0xff,count==0xff?0:count+1);
     return x9_conn_bt_pins(X9_CONN_BT_TX);
 }
 static int power_on(void *context)
@@ -262,14 +277,15 @@ static int post_download(void *context, bool inband)
 {
     (void)context;
     if (inband) return ENOTSUP;
-    int error=endpoints_idle(); if (error) return error;
+    int error=x9_bt_hardware_check();
+    if (error) { hub_dump("post_download hub not ready"); return error; }
     error=observed_profile(); if (error) return error;
-    /* Android post-fwdl bypass(0), then UART's md_adsp_fifo_ctrl(0).
-     * Both hosts are still proven idle. Preserve unrelated hub IRQ masks;
-     * our driver polls host-awake bit3 and does not own MD's IRQ callback. */
-    error=endpoints_idle(); if (error) return error;
-    field(hub,CON2,4,0);
-    wr(ep[1],8,0xc1); wr(ep[2],8,0xc1);
+    /* Android post-fwdl bypass(0), then power-on-done fifo_ctrl(0): MD and
+     * ADSP FIFOs re-enabled unconditionally, feedback on. No idle check:
+     * Android has none. Our driver polls; the boot dev0 IRQ mask returns. */
+    field(hub,CON2,4,0); bypass_set=false;
+    wr(hub,DEV0_IRQ_CLR,0xffffffffu); wr(hub,DEV0_IRQ_MASK,irq_mask_saved);
+    wr(ep[1],8,0xc1); wr(ep[2],8,0xc1); isolated=false;
     field(hub,STA0,1u<<12,1u<<12);
     if ((rd(hub,CON2)&4) || !(rd(hub,STA0)&(1u<<12)) ||
         !(rd(ep[1],0x5c)&1) || !(rd(ep[2],0x5c)&1)) return EIO;
@@ -290,7 +306,7 @@ static int verify_ownership(void *context)
                 {
                     firmware_live=true; /* A later supply-accounting error is not function-off. */
                     error=x9_conn_power_done(X9_CONN_BT);
-                    if (!error) ownership=OWN_DRIVER;
+                    if (!error) { ownership=OWN_DRIVER; field(hub,STA0,1u<<10,0); }
                     return error;
                 }
             delay(50);
@@ -299,7 +315,8 @@ static int verify_ownership(void *context)
     }
     firmware_live=true;
     error=x9_conn_power_done(X9_CONN_BT);
-    if (!error) ownership=OWN_DRIVER;
+    /* btmtktty power-on done: mtk8250_uart_hub_assert_bit_ctrl(0). */
+    if (!error) { ownership=OWN_DRIVER; field(hub,STA0,1u<<10,0); }
     return error;
 }
 
@@ -408,46 +425,63 @@ int x9_bt_hardware_ownership_finish(void)
 }
 int x9_bt_hardware_stop(void)
 {
-    /* Worker disables its UART IRQ/TX first. Never restore full shared
-     * snapshots, clear MD requests, or power down another lease holder. */
+    /* Worker disables its UART IRQ/TX first. Never clear MD/ADSP requests
+     * or power down another lease holder. */
     if (firmware_live) {
         printf("X9 BT: cleanup retained live firmware lease ownership=%u; no acknowledged function-off\n",
                ownership);
         return EBUSY;
     }
-    /* Even before firmware ownership, failed SSPM readiness does not make
-     * AP/endpoint register restoration safe. Preserve requests, SRAM config,
-     * pins and supply accounting; do not guess a reset sequence to recover. */
-    if (requested) {
-        int ready_error=x9_bt_hardware_check();
-        if (ready_error) {
-            printf("X9 BT: cleanup retained resource-unsafe state errno=%d; no UART/reset/supply writes\n",
-                   ready_error);
-            return ready_error;
-        }
-    }
+    /* A failed session puts the hub back to its boot state (what every
+     * passive boot ran with), whether or not MD/ADSP are busy: Android's
+     * fifo_ctrl/bypass/assert calls never wait for other hosts either.
+     * INTFHUB registers need APB only; endpoint and AP UART registers are
+     * written only while ready + resources still hold. */
     int error=pins_prepared?x9_conn_bt_pins(X9_CONN_BT_RESET_OFF):0;
-    if (requested && !apb()) {
-        field(hub,STA0,1u<<10,1u<<10);
-        if (ap_saved && !x9_bt_hardware_check()) {
-            wr(ap,4,0);
-            for (unsigned i=0;i<sizeof(ap_offsets)/sizeof(ap_offsets[0]);i++)
-                wr(ap,ap_offsets[i],ap_registers[i]);
-            wr(ap,0x9c,1);
-            for (unsigned i=0;i<sizeof(ap_bank_offsets)/sizeof(ap_bank_offsets[0]);i++)
-                wr(ap,ap_bank_offsets[i],ap_bank[i]);
-            wr(ap,0x9c,ap_feature);
-            wr(ap,8,ap_fifo&~6u); ap_saved=false;
+    pins_prepared=false;
+    if (requested || hub_saved) {
+        if (apb()) {
+            hub_dump("cleanup hub APB unavailable; boot state not restored");
+            if (!error) error=ENXIO;
+        } else {
+            bool ready=requested && !x9_bt_hardware_check();
+            if (isolated) {
+                if (ready) {
+                    /* reset_to_ap_enable_only(0) semantics: FIFOE as found. */
+                    for (unsigned i=1;i<3;i++) wr(ep[i],8,0xc0|(fifo_saved[i]&1));
+                } else {
+                    hub_dump("cleanup cannot reopen MD/ADSP FIFO without resources");
+                    if (!error) error=ENXIO;
+                }
+                isolated=false;
+            }
+            if (ap_saved && ready) {
+                wr(ap,4,0);
+                for (unsigned i=0;i<sizeof(ap_offsets)/sizeof(ap_offsets[0]);i++)
+                    wr(ap,ap_offsets[i],ap_registers[i]);
+                wr(ap,0x9c,1);
+                for (unsigned i=0;i<sizeof(ap_bank_offsets)/sizeof(ap_bank_offsets[0]);i++)
+                    wr(ap,ap_bank_offsets[i],ap_bank[i]);
+                wr(ap,0x9c,ap_feature);
+                wr(ap,8,ap_fifo&~6u);
+            }
+            ap_saved=false;
+            if (hub_saved) {
+                field(hub,CON2,4,con2_saved);
+                field(hub,STA0,(1u<<12)|(1u<<10),sta0_saved);
+                wr(hub,DEV0_IRQ_CLR,0xffffffffu); wr(hub,DEV0_IRQ_MASK,irq_mask_saved);
+            }
+            bypass_set=false;
+            if (requested) {
+                /* btmtk_release_uarthub(true): HOST_AWAKE -> SW_TX -> USB_RX_SEL -> RX. */
+                wr(hub,DEV0_CLR,16); wr(hub,DEV0_CLR,2);
+                if (ready) field(ep[0],0xb0,1,1);
+                wr(hub,DEV0_CLR,1|4|8);
+            }
+            printf("X9 BT: cleanup restored hub boot state con2=%08x sta0=%08x dev1=%08x dev2=%08x error=%d\n",
+                   rd(hub,CON2),rd(hub,STA0),rd(hub,DEV1),rd(hub,DEV2),error);
         }
-        if (!shared_idle() && isolated && !x9_bt_hardware_check()) {
-            for (unsigned i=0;i<4;i++) wr(ep[i],8,fifo_saved[i]&~6u);
-            field(hub,STA0,1u<<12,feedback_saved);
-        }
-        /* Never replay a shared routing snapshot over a newly busy host. */
-        if (!shared_idle()) field(hub,CON2,4,con2_saved);
-        else if (!error) error=EBUSY;
-        wr(hub,DEV0_CLR,0x1f); /* only DEV0: host-awake/RX-data/hwRX/SWTX/SWRX */
-        requested=false;
+        requested=false; hub_saved=false;
     }
     if (config_dirty) { wr(sram,SSPM_DEFAULT,default_saved); config_dirty=false; }
     if (powered) { int e=x9_conn_power_release(X9_CONN_BT); if (!error) error=e; powered=false; }

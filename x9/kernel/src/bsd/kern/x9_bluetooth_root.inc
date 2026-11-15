@@ -15,11 +15,14 @@
  * it atomically. The cache is last on install and first on restore, so an
  * interrupted boot always leaves launchd with a complete original or new
  * cache. Every state is classified before the first mutation; an unknown file
- * anywhere stops the whole operation.
+ * anywhere stops the whole operation. A file holding an earlier build of
+ * our own payload (listed per file at build time) is upgraded in place.
  */
+struct x9_btr_prev {uint32_t bytes;uint8_t sha[32];};
 struct x9_btr_file {
  const char *path;const uint8_t *data;uint32_t bytes;uint16_t mode;uint8_t sha[32];
  uint32_t orig_bytes;uint8_t orig_sha[32]; /* orig_bytes==0: new file, target must be absent */
+ const struct x9_btr_prev *prev;uint32_t prev_count; /* earlier builds of our own file */
 };
 struct x9_btr_require {const char *path;uint32_t bytes;uint8_t sha[32];};
 #if __has_include("../../../generated/x9_bt_root.inc")
@@ -77,6 +80,17 @@ static int x9_btr_check(const char *path,uint32_t bytes,const uint8_t sha[32],in
  return 0;
 }
 
+/* 0 = current content is one of our earlier builds of this file. */
+static int x9_btr_previous(const struct x9_btr_file *f)
+{
+ int e=EEXIST;
+ for(uint32_t i=0;i<f->prev_count;i++){
+  e=x9_btr_check(f->path,f->prev[i].bytes,f->prev[i].sha,f->mode);
+  if(e!=EEXIST)return e;
+ }
+ return e;
+}
+
 static int x9_btr_unlink(proc_t p,struct x9_btr_user u,const char *path)
 {
  user_addr_t a;int e=x9_btr_str(&u,path,&a);if(e)return e;
@@ -130,12 +144,19 @@ static int x9_btr_write(proc_t p,struct x9_btr_user u,const char *tmp,const stru
  return e;
 }
 
-enum {X9_BTR_INSTALLED=1,X9_BTR_TODO=2};
+enum {X9_BTR_INSTALLED=1,X9_BTR_TODO=2,X9_BTR_UPGRADE=3};
 /* Classify one target without changing anything. */
 static int x9_btr_state(const struct x9_btr_file *f,int *state)
 {
  int e=x9_btr_check(f->path,f->bytes,f->sha,f->mode);
  if(!e){*state=X9_BTR_INSTALLED;return 0;}
+ if(e==EEXIST&&!x9_btr_previous(f)){
+  if(f->orig_bytes){ /* an upgrade needs the verified Apple original kept earlier */
+   char kept[320];e=x9_btr_name(kept,sizeof(kept),f->path,".x9-orig");if(e)return e;
+   e=x9_btr_check(kept,f->orig_bytes,f->orig_sha,-1);if(e)return e==ENOENT?ESTALE:e;
+  }
+  *state=X9_BTR_UPGRADE;return 0;
+ }
  if(!f->orig_bytes){if(e==ENOENT){*state=X9_BTR_TODO;return 0;}return e;}
  if(e!=EEXIST)return e; /* an Apple original is missing */
  e=x9_btr_check(f->path,f->orig_bytes,f->orig_sha,-1);if(e)return e==EEXIST?ESTALE:e;
@@ -145,10 +166,17 @@ static int x9_btr_state(const struct x9_btr_file *f,int *state)
  *state=X9_BTR_TODO;return 0;
 }
 
-static int x9_btr_apply(proc_t p,struct x9_btr_user u,const struct x9_btr_file *f)
+static int x9_btr_apply(proc_t p,struct x9_btr_user u,const struct x9_btr_file *f,bool upgrade)
 {
  char tmp[320],bak[320];
  int e=x9_btr_name(tmp,sizeof(tmp),f->path,".x9-bt-temp");if(e)return e;
+ if(upgrade){ /* our own earlier build: replace it atomically, no backup */
+  e=x9_btr_write(p,u,tmp,f);if(e)return e;
+  e=x9_btr_rename(p,u,tmp,f->path);
+  if(e)(void)x9_btr_unlink(p,u,tmp);
+  else e=x9_btr_check(f->path,f->bytes,f->sha,f->mode);
+  return e;
+ }
  if(f->orig_bytes){
   e=x9_btr_name(bak,sizeof(bak),f->path,".x9-orig");if(e)return e;
   e=x9_btr_check(bak,f->orig_bytes,f->orig_sha,-1);
@@ -182,13 +210,13 @@ static int x9_btr_install(proc_t p,struct x9_btr_user u)
  for(unsigned i=0;i<count;i++){
   e=x9_btr_state(&x9_btr_files[i],&state[i]);
   if(e){printf("X9 BT ROOT: %s unexpected content errno=%d; nothing written\n",x9_btr_files[i].path,e);return e;}
-  todo+=state[i]==X9_BTR_TODO;
+  todo+=state[i]!=X9_BTR_INSTALLED;
  }
  if(!todo){printf("X9 BT ROOT: all %u files already installed\n",count);return 0;}
  for(unsigned i=0;i<count;i++){
-  if(state[i]!=X9_BTR_TODO)continue;
-  e=x9_btr_apply(p,u,&x9_btr_files[i]);
-  printf("X9 BT ROOT: install %s errno=%d\n",x9_btr_files[i].path,e);
+  if(state[i]==X9_BTR_INSTALLED)continue;
+  e=x9_btr_apply(p,u,&x9_btr_files[i],state[i]==X9_BTR_UPGRADE);
+  printf("X9 BT ROOT: %s %s errno=%d\n",state[i]==X9_BTR_UPGRADE?"upgrade":"install",x9_btr_files[i].path,e);
   if(e){printf("X9 BT ROOT: stopped at file=%u; launchd cache %s\n",i,
                i+1<count?"still original":"not replaced");return e;}
  }
@@ -210,10 +238,11 @@ static int x9_btr_restore(proc_t p,struct x9_btr_user u)
    int cur=x9_btr_check(f->path,f->orig_bytes,f->orig_sha,-1);
    if(!cur){if(!b){e=x9_btr_unlink(p,u,bak);changed++;}else if(b!=ENOENT)e=b;}
    else if(b)e=b==ENOENT?ESTALE:b; /* no verified original to restore */
-   else if(cur!=ENOENT&&x9_btr_check(f->path,f->bytes,f->sha,f->mode))e=ESTALE; /* unknown content */
+   else if(cur!=ENOENT&&x9_btr_check(f->path,f->bytes,f->sha,f->mode)&&x9_btr_previous(f))e=ESTALE; /* unknown content */
    else{e=x9_btr_rename(p,u,bak,f->path);if(!e)e=x9_btr_check(f->path,f->orig_bytes,f->orig_sha,-1);changed++;}
   }else if(!e){
    int cur=x9_btr_check(f->path,f->bytes,f->sha,f->mode);
+   if(cur==EEXIST&&!x9_btr_previous(f))cur=0; /* an earlier build of ours */
    if(!cur){e=x9_btr_unlink(p,u,f->path);changed++;}
    else if(cur!=ENOENT)e=cur; /* not ours: keep it */
   }

@@ -163,6 +163,9 @@ def build(a):
     if embed_root != bool(a.apple_originals):
         raise ValueError('x9_bt_root=1 and --apple-originals must be given together')
     apple = repository_path(a.apple_originals) if embed_root else None
+    if a.previous_payload and not embed_root:
+        raise ValueError('--previous-payload only applies with x9_bt_root=1')
+    previous = [repository_path(path) for path in a.previous_payload]
     if not builder.bluetooth_init_enabled(opts['boot_args']):
         raise ValueError('complete candidate requires explicit x9_bt=1 x9_bt_init=1 x9_bt_fc=1')
     builder.require_bluetooth_inputs(cfg, opts['boot_args'])
@@ -226,7 +229,8 @@ def build(a):
             stage = 'kernel-root-payload'
             if embed_root:
                 run([sys.executable, '-I', X9 / 'bluetooth/root_header.py', '--payload', payload,
-                     '--apple-originals', apple], log)
+                     '--apple-originals', apple,
+                     *[arg for path in previous for arg in ('--previous-payload', path)]], log)
             else:
                 run([sys.executable, '-I', X9 / 'bluetooth/root_header.py', '--stub'], log)
             stage = 'full-overlay-kernel'
@@ -322,6 +326,8 @@ if __name__ == '__main__':
                     help='explicit repo-local original 20H392 version-7 launchd service cache')
     ap.add_argument('--apple-originals', type=Path,
                     help='private 20H392 bluetoothd/BlueTool originals; required with --boot-arg x9_bt_root=1')
+    ap.add_argument('--previous-payload', type=Path, action='append', default=[],
+                    help='earlier candidate root-payload already installed on the device; repeatable')
     ap.add_argument('--abi', choices=('macos', 'ios'), default='macos')
     ap.add_argument('--jobs', type=int, default=min(8, os.cpu_count() or 4))
     a = ap.parse_args()

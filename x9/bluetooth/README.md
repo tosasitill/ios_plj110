@@ -185,6 +185,9 @@ python3 -I x9/bluetooth/candidate.py --name <全新简单名字> \
    新文件校验后 `rename` 原子替换；cache 最后替换，中断后 launchd 总拿到完整新或旧 cache；
 5. 日志 `X9 BT ROOT:` 是唯一 receipt。已装好的再次启动只校验不写。
 
+升级：`--previous-payload <已装到设备的旧 candidate>/root-payload`（可重复）让内核把内容等于旧自有版本的文件
+原子 rename 升级（被替换的 Apple 文件要求 `.x9-orig` 已核对存在）；其它未知内容仍整体拒绝。
+
 `boot-rollback/boot.img` 反序恢复：cache 先回 `.x9-orig`，再删四个自有文件；不需要 Android。
 不读整个根盘、不 macFUSE/COW、不需要 Android 侧 owner 修正（内核以 0:0 创建）。
 
