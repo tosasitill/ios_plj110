@@ -56,10 +56,14 @@ IOHIDEventService::start(IOService *provider)
 	_clientLock = IOLockAlloc();
 	_clients = OSArray::withCapacity(2);
 	_hidWorkLoop = getWorkLoop();
+	/* free() owns this reference even when another allocation fails. Do not
+	 * publish a borrowed workloop to the cleanup path before retaining it. */
+	if (_hidWorkLoop) {
+		_hidWorkLoop->retain();
+	}
 	if (!_clientLock || !_clients || !_hidWorkLoop) {
 		return false;
 	}
-	_hidWorkLoop->retain();
 	_hidGate = IOCommandGate::commandGate(this);
 	if (!_hidGate || _hidWorkLoop->addEventSource(_hidGate) != kIOReturnSuccess) {
 		return false;
@@ -152,8 +156,17 @@ IOHIDEventService::handleOpen(IOService *client, IOOptionBits options __unused, 
 	IOLockLock(_clientLock);
 	if (!handleIsOpenLocked(client)) {
 		/* Copy on write: dispatchEvent iterates a snapshot without the lock. */
-		OSArray *next = OSArray::withArray(_clients, _clients->getCount() + 1);
-		if (next && next->setObject(data)) {
+		OSArray *next = OSArray::withCapacity(_clients->getCount() + 1);
+		bool copied = next != NULL;
+		for (unsigned int i = 0; copied && i < _clients->getCount(); i++) {
+			IOHIDEventServiceClient *old = (IOHIDEventServiceClient *)_clients->getObject(i);
+			/* A close must succeed even if its compacting allocation fails.
+			 * Drop those inactive slots on the next successful open/close. */
+			if (old->client && !next->setObject(old)) {
+				copied = false;
+			}
+		}
+		if (copied && next->setObject(data)) {
 			_clients->release();
 			_clients = next;
 			ok = true;
@@ -169,11 +182,23 @@ void
 IOHIDEventService::handleClose(IOService *client, IOOptionBits options __unused)
 {
 	IOLockLock(_clientLock);
+	/* Cancel registration without allocating. A retained dispatch snapshot
+	 * may still contain this slot, so it must be marked inactive as well.
+	 * Failure to allocate the compact array must not leave a phantom open
+	 * after IOHIDEventServiceUserClient has already committed state Close. */
+	for (unsigned int i = 0; i < _clients->getCount(); i++) {
+		IOHIDEventServiceClient *data = (IOHIDEventServiceClient *)_clients->getObject(i);
+		if (data->client == client) {
+			data->client = NULL;
+			data->context = NULL;
+			data->action = NULL;
+		}
+	}
 	OSArray *next = OSArray::withCapacity(_clients->getCount());
 	if (next) {
 		for (unsigned int i = 0; i < _clients->getCount(); i++) {
 			IOHIDEventServiceClient *data = (IOHIDEventServiceClient *)_clients->getObject(i);
-			if (data->client != client) {
+			if (data->client) {
 				next->setObject(data);
 			}
 		}
@@ -188,7 +213,7 @@ IOHIDEventService::handleIsOpenLocked(const IOService *client) const
 {
 	for (unsigned int i = 0; i < _clients->getCount(); i++) {
 		IOHIDEventServiceClient *data = (IOHIDEventServiceClient *)_clients->getObject(i);
-		if (client == NULL || data->client == client) {
+		if (data->client && (client == NULL || data->client == client)) {
 			return true;
 		}
 	}
@@ -217,9 +242,21 @@ IOHIDEventService::dispatchEvent(IOHIDEvent *event, IOOptionBits options)
 
 	for (unsigned int i = 0; i < clients->getCount(); i++) {
 		IOHIDEventServiceClient *data = (IOHIDEventServiceClient *)clients->getObject(i);
-		if (data->action) {
-			(*data->action)(data->client, this, data->context, event, options);
+		/* Registration fields can be cancelled by close while this array
+		 * snapshot remains alive. Capture them under the same lock, retain
+		 * the callback target locally, then invoke without holding the lock. */
+		IOLockLock(_clientLock);
+		IOService *client = data->client;
+		Action action = data->action;
+		void *context = data->context;
+		if (client) {
+			client->retain();
 		}
+		IOLockUnlock(_clientLock);
+		if (client && action) {
+			(*action)(client, this, context, event, options);
+		}
+		OSSafeReleaseNULL(client);
 	}
 	clients->release();
 }
