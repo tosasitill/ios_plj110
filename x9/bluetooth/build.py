@@ -99,7 +99,7 @@ def main():
         'stageable': False,
         'requires': ['SSPM CMM24M configuration and proven firmware handoff',
                      'effective Android node/HAL initialization inputs and real function power-on',
-                     'explicit effective Android UART_FC selection (x9_bt_fc); non-NONE backend incomplete',
+                     'explicit effective Android UART_FC selection (x9_bt_fc); MTK SW PIO/escape implemented, hardware-unverified; Linux/HW unsupported',
                      'on-device validation of 20H392 capability publication and native cache routing',
                      'real deepsleep/firmware-own/resume lifecycle',
                      'launchd/BlueTool integration and on-device injection validation',

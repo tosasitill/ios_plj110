@@ -169,6 +169,16 @@ static int drain(void *context,uint32_t timeout)
     }
     return 0;
 }
+static int host_uart(void *context,uint32_t baud,uint8_t flow)
+{
+    (void)context;
+    /* IRQ can mask IER on RX failure. Never race that failure by replaying
+     * an earlier IER snapshot during a baud/FEATURE_SEL bank transition. */
+    boolean_t old=rx_lock();
+    int error=rx.error;
+    if(!error) error=x9_bt_hardware_config_uart(baud,flow);
+    rx_unlock(old); return error;
+}
 static int frame_length(const uint8_t *p,uint32_t n)
 {
     if(!n) return 0;
@@ -257,7 +267,7 @@ static int calibration(struct x9_bt_session_board *board)
         return ENOENT;
     }
     if(flow>3) return EINVAL;
-    if(flow!=0) return ENOTSUP; /* Linux=2, MTK SW=1, HW=3 are not NONE. */
+    if(flow!=0 && flow!=1) return ENOTSUP; /* Linux=2/HW=3 still lack backend. */
     uint8_t record[28];
     for(unsigned k=0;k<7;k++) {
         uint32_t v;
@@ -267,7 +277,7 @@ static int calibration(struct x9_bt_session_board *board)
     if(record[0]!=25 || record[1]) return EINVAL;
     memcpy(board->xo,record+2,25); board->calibration_present=true;
     board->platform_config=0x00158000; /* MT6653 dx5_2g2a co-clock0, real board config */
-    board->flow_control=0; /* explicit Android UART_DISABLE_FC, not defaulted */
+    board->flow_control=flow==1?0x80:0; /* explicit enum -> WMT byte mapping */
     board->wakeup_callback=false; return 0;
 }
 static void worker(void *unused,wait_result_t result)
@@ -277,6 +287,7 @@ static void worker(void *unused,wait_result_t result)
     int error=calibration(&board);
     ops.io=(struct x9_bt_download_ops){.exchange=exchange,.raw_write=raw_write,
         .drain=drain,.sleep_ms=sleep_ms,.now_ms=now_ms,.connfem=connfem};
+    ops.host_uart=host_uart;
     x9_bt_hardware_ops(&ops);
     state(X9_BT_INITIALIZING,0);
     if(!error) error=x9_bt_session_run(&ops,&board,&session);

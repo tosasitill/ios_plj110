@@ -24,6 +24,7 @@ static struct {
     uint64_t local_features, le_features;
     uint32_t ext_adv, periodic_adv, periodic_sync, past_sender, past_recipient;
     uint32_t ext_scan, enhanced_connection, spec_adv, coded_phy, phy_2m, adv_sets;
+    uint32_t controller_adv_sets;
 } caps;
 /* Native callback ABI has no user context. Do not reuse a pending 203b slot
  * after reset: quarantine its old generation until the queue completes it.
@@ -109,8 +110,8 @@ static void publish_flags(void)
         ((uint64_t)caps.coded_phy<<8) | ((uint64_t)caps.phy_2m<<9) |
         ((uint64_t)caps.adv_sets<<16);
     atomic_store_explicit(&published, snapshot, memory_order_release);
-    fprintf(stderr, "X9 capabilities: HCI ext scan=%u adv=%u sets=%u periodic=%u/%u PAST=%u/%u coded=%u 2M=%u\n",
-            caps.ext_scan, caps.ext_adv, caps.adv_sets, caps.periodic_adv,
+    fprintf(stderr, "X9 capabilities: HCI ext scan=%u adv=%u controller sets=%u native slots=%u periodic=%u/%u PAST=%u/%u coded=%u 2M=%u\n",
+            caps.ext_scan, caps.ext_adv, caps.controller_adv_sets, caps.adv_sets, caps.periodic_adv,
             caps.periodic_sync, caps.past_sender, caps.past_recipient, caps.coded_phy, caps.phy_2m);
 }
 static void clear_flags(void)
@@ -165,7 +166,12 @@ static void advertising_complete(uint32_t status, uint32_t sets)
     query_pending = false;
     if (query_generation != generation) return; /* discarded reset epoch */
     caps.complete = true;
+    /* 203b's Num_Supported_Advertising_Sets is 0..0xf0. Reject malformed
+     * success payloads before applying the native allocation limit; MIN(5,
+     * invalid) would otherwise publish a fabricated usable count. */
+    if (!status && sets > 0xf0) status = 0x67;
     if (status) { clear_flags(); publish_flags(); advance(status); return; }
+    caps.controller_adv_sets = sets;
     /* Native 1001770d0..e8 computes 7*count with __memset_chk bound 35:
      * FIVE is the software allocation capacity, NOT a controller claim. */
     caps.adv_sets = sets < 5 ? sets : 5;

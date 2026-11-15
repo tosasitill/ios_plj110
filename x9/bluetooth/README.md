@@ -11,8 +11,9 @@
 - `x9_bt_init=1` 是完整 session 的 worker 入口，**当前不加入 boot-device，也不交付部分初始化镜像**。
   它不是绕过前置的开关，无法跳过 SSPM handoff / ownership；失败仍保留确切 errno。
 - 完整初始化还要求显式 `x9_bt_fc`（Android `UART_FC` enum：0=NONE、1=MTK SW、2=Linux、3=HW）。
-  缺失 `ENOENT`、范围外 `EINVAL`、当前未实现的非NONE模式 `ENOTSUP`，全部在供电前返回。
-  **现在不向 boot-device 添加任何该参数**；`uart_launcher` 源码默认0不是实机生产参数的证据，不能据此选0。
+  缺失 `ENOENT`、范围外 `EINVAL`、尚未实现的Linux/HW模式 `ENOTSUP`，全部在供电前返回。
+  **2026-11-15实际运行证据为 `uart_launcher -f 1 -p /dev/ttyS3`**：现已实现MTK SW的AP硬件backend，
+  enum1→WMT byte0x80，不能选0绕过。仍不向boot-device添加init/fc参数或生成部分初始化镜像。
 - `kern.x9_bt_boot` 默认 `ENXIO`，仅完整 session 到 DONE 且 driver_owned 才可为0。
   `kern.x9_bt_stage` 是最后返回的 session stage，**不是 ready 指标**。
 
@@ -26,8 +27,15 @@
   multi-host RX/TX request → 最多50ms真实ready → PLL/SPM resources → idle-host 检查 → AP-only FIFO隔离/bypass/pins。
   忙 MD/ADSP、残留 XOFF、未停止的 AP IRQ/DMA 均拒绝，不强行复位运行中的 radio。
   AP UART 的115200分数计算、24M sample7/point3/fracdb,1来自8250；CMM不复制这些参数。
+  MTK SW配置AP的EFR=0x1a、XON1/2=0x11、XOFF1/2/INB_WORD=0x13、ESCAPE_DAT=0xdb、ESCAPE_EN=1；
+  START/STOP字符已从当前Android tty只读取得，launcher原件亦确认enum1设置c_iflag的MTK专用位。
+  8250参考原件的SW分支与源码一致；escape与XON/XOFF由UART硬件处理，不二次软件转义H4或下载原始流。
+  只启用PIO的RDI/RLSI，屏蔽无handler的XOFF/RTS/CTS IRQ；baud/bank/IER修改与真实RX IRQ共用锁。
+  失败回滚还恢复XON/XOFF/INB_WORD bank，不只恢复DLL/DLH/EFR。**实现已编译不代表24M PIO已上机验证。**
 - **保留的硬件缺口**：Android generic CMM24M config 是 TODO，SSPM所用配置和当前 LK 移交还没有闭环证据。
-  已有备份 `vendor_boot_b` 原始 `uarthub_drv.ko` 的 `uarthub_config_baud_rate_mt6993`
+  本次已只读取到活跃slot的2MiB SSPM原件，ID0/1/99与BL2 loader结构匹配；ID1为RV32/RVC代码。
+  该原件含CMM映射及endpoint写入，但具体分支/时钟移交尚未闭环，不能按sample值猜有效波特率。
+  已有备份和当前加载的原始 `uarthub_drv.ko` 的 `uarthub_config_baud_rate_mt6993`
   也在24M分支直接返回0、无配置写入；这不等于SSPM已经配置好，更不证明当前LK移交。
   `post_download` 明确 `ENOTSUP`，不把 default SRAM / AP24M 当作 CMM24M 成功。
   host-awake state bit11、SET bit2、CLR bit4已区分；真实反馈验证代码尚未可达。
@@ -39,7 +47,10 @@
   私有 `x9_bt_board.inc` 不入git。`x9_bt_session.c`严格执行 ROM→24M→XO→下载/connfem→真实FW flags→routing→ownership→WMT function-on→有效controller配置。
   function-on只接受完整opcode6 ACK；仅明确busy=2才50ms退避，超时/解析/TX失败不重发，busy耗尽不假报成功。
   UART额外calibration callback在Android中实际为no-op，不能将ownership替代function-on。
-  **有效Android初始化配置（或实际为空的证据）仍缺失**，controller_config返回ENOENT；源码示例 `bt.cfg` 不是生产配置。
+  **已取得当前加载的HAL/vendor库及有效校准对象的NVRAM成员**，确定MT6993选择MT6653的24项preload表；
+  原件优先读取 `/vendor/odm/etc/bt/BT_FW.cfg`，才fallback到 `/vendor/firmware/BT_FW.cfg`。
+  后者已取得，前者及完整btinit尾部/property取证前ADB断开，故完整有效初始化序列尚未证明，controller_config仍ENOENT；
+  不将注释中的VENDOR_CMD或源码示例 `bt.cfg` 当作生产配置。
   `uart_launcher` 的 `HCIUARTSETBAUD` 保存用户所选配置；node==1的LOADPATCH是no-op，下载在pre_open。
   `bt.cfg` loader只编入node==0路径，不能把node==1的生产HAL/vendor流程错误归成“等待bt.cfg”。
 - `x9_bt_download.c`：完整52 B section spec、首个匹配type `{0,2,3,0x80,0x90,0x10000}`、type3后connfem、最后bin index3；
@@ -58,6 +69,8 @@
   LE features回调的日志分支也保留入口status（x20保存，不把日志返回值当作成功），原生8 B mask存储不改。
 - `X9Capabilities16.c`绑定真实supported commands/local/LE features，发布扩展扫描/广播、periodic、PAST、coded/2M PHY及广播数量。
   广播数量通过真实203b查询（软件容量上限5），回包前不发布部分能力；原provider once初始化后才同步缓存和标准HCI selector。
+  日志分开报告controller实际数量和native分配slots，拒绝203b成功回复中超出0..0xf0的数量，避免MIN把畸形回复变成5。
+  当前Android原始HCI捕获返回16；这只用于理解适配边界，iOS仍必须自己读取，不能把16硬编码进桥。
   HCI Reset保留真实失败状态，并清理各层能力；旧epoch的未完成203b不能推进新初始化。
   broadcaster启动时刷新构造阶段的legacy选择（本版本实例+0x88），不套iOS27布局。
 - LE-support/LE-buffer/SupportedStates/FilterAcceptListSize/PAListSize初始化回调保留真实错误。
@@ -73,7 +86,8 @@
   不能由exec成功推断dyld注入/COW安装成功，必须实机验证。
 - `X9BlueTool -R`实现原件 `com.apple.BlueTool` XPC契约，`RunBuiltinScript boot/init`只读核对真正ready；
   失败result1、原始BSD errno另存x9_errno；不合成manufacturer/firmware。deepsleep明确ENOTSUP，未知命令拒绝。
-- **未完成**：生产有效controller/FC配置、非NONE流控backend、真实sleep/firmware-own/resume、实机COW与能力/缓存路由、启动及场景验收。
+- **未完成**：完整生产controller配置、SSPM/CMM移交、MTK SW PIO实机验证、Linux/HW backend、真实sleep/firmware-own/resume、
+  实机COW与能力/缓存路由、启动及场景验收。
   当前不安装或修改root上的launch plist。
 
 ## 编译与只读核对
@@ -100,3 +114,20 @@ sysctl kern.x9_bt_boot kern.x9_bt_stage
 ```
 
 必须后续验证完整HCI Reset/真实capabilities、扫描/配对/BLE，A2DP/HFP/SCO单独验收；当前没有这些成功证据。
+
+## Android在线原件取证与离线解码
+
+设备由用户打开蓝牙并接好ADB后，只读采集到**全新**gitignored目录（默认要求只有一台online设备，不打印序列号）：
+
+```sh
+python3 -I x9/tools/bluetooth_capture_android.py --out x9/out/bluetooth-native/<新采集名>
+# 可追加 --hci /data/misc/bluetooth/logs/<已确认的原始HCI文件路径>
+python3 -I x9/tools/bluetooth_hci_facts.py <原始.cfa>
+python3 -I x9/tools/bluetooth_sspm.py <原始sspm分区.bin> --extract x9/out/bluetooth-native/<新提取名>
+```
+
+采集器解析实际加载的ELF导出符号大小与当前maps，只读取btinit这一已知对象（当前6448 B，含6136 B NVRAM及cfg尾部），
+不转储整个进程。失败/连接断开不会覆盖先前原件，exec-out的exit0但内容为cat错误也不冒充有效ELF/firmware。
+它不关闭蓝牙、不发HCI、不写debug寄存器、不启动其它程序、不重启、不写分区。
+HCI解码器只发布同reset epoch内、匹配请求且成功的控制器能力/缓冲区回复，不输出地址、名字、连接内容或配对密钥；
+SSPM索引/提取仅验证原容器，不把静态分段匹配当成当前LK移交成功。

@@ -18,7 +18,11 @@ static bool requested, powered, isolated, pins_prepared, config_dirty, ap_saved;
 static uint32_t con2_saved, feedback_saved, fifo_saved[4], default_saved;
 static const unsigned ap_offsets[]={0x0c,0x10,0x24,0x28,0x2c,0x40,0x44,0x54,0x58};
 static uint32_t ap_registers[sizeof(ap_offsets)/sizeof(ap_offsets[0])];
-static uint32_t ap_feature, ap_divisor[3], ap_fifo;
+static uint32_t ap_feature, ap_fifo;
+/* FEATURE_SEL=1 bank, including the software FC characters. Preserve these
+ * too: restoring only DLL/DLH/EFR leaks the new XON/XOFF configuration. */
+static const unsigned ap_bank_offsets[]={0x90,0x94,0x98,0xa0,0xa4,0xa8,0xac,0xc0};
+static uint32_t ap_bank[sizeof(ap_bank_offsets)/sizeof(ap_bank_offsets[0])];
 enum { DEV0=0, DEV0_SET=4, DEV0_CLR=8, CON1=0xc4, CON2=0xc8,
        IRQ_STA=0xd0, IRQ_CLR=0xd4, STA0=0xe0, CON4=0xf0,
        /* 60+4 +400+4 +4 +8 +4 = 484 (0x1e4). */
@@ -120,7 +124,8 @@ static int pre_on(void *context)
         ap_registers[i]=rd(ap,ap_offsets[i]);
     ap_feature=rd(ap,0x9c); ap_fifo=rd(ap,0x5c);
     wr(ap,0x9c,1);
-    ap_divisor[0]=rd(ap,0x90); ap_divisor[1]=rd(ap,0x94); ap_divisor[2]=rd(ap,0x98);
+    for (unsigned i=0;i<sizeof(ap_bank_offsets)/sizeof(ap_bank_offsets[0]);i++)
+        ap_bank[i]=rd(ap,ap_bank_offsets[i]);
     wr(ap,0x9c,ap_feature); ap_saved=true;
     for (unsigned i=0;i<4;i++) fifo_saved[i]=rd(ep[i],0x5c);
     /* Android reset_to_ap_enable_only(1), after proving ALL hosts idle. */
@@ -147,13 +152,13 @@ static int rx_and_32k(void *context)
     /* mt6993's ext_32k callback is absent: the manager's actual no-op. */
     return powered ? x9_conn_bt_pins(X9_CONN_BT_RX) : ENXIO;
 }
-static int host_uart(void *context, uint32_t baud, uint8_t flow)
+int x9_bt_hardware_config_uart(uint32_t baud, uint8_t flow)
 {
-    (void)context;
-    /* Android MTK SW FC uses EFR XON/XOFF/escape, unlike Linux IXON/IXOFF.
-     * The active production mode is still an explicit input; no default
-     * is inferred here. Its IRQ/escape backend is separate from APDMA. */
-    if (flow!=0 || (baud!=115200 && baud!=24000000)) return ENOTSUP;
+    /* Caller holds the transport RX/IRQ lock. Android UART_FC=1 is the
+     * active uart_launcher -f 1 selection, WMT byte 0x80, not IXON/IXOFF.
+     * Hardware inserts/removes escape sequences and consumes XON/XOFF;
+     * encoding them again in the H4 path would corrupt literal HCI bytes. */
+    if ((flow!=0 && flow!=0x80) || (baud!=115200 && baud!=24000000)) return ENOTSUP;
     int error=x9_bt_hardware_check(); if (error) return error;
     uint32_t mux=rd(top,0x100);
     static const unsigned rates[]={26000000,52000000,104000000,208000000};
@@ -173,10 +178,21 @@ static int host_uart(void *context, uint32_t baud, uint8_t flow)
     wr(ap,0x54,baud==24000000?0xdb:fl[fraction]);
     wr(ap,0x58,baud==24000000?1:fm[fraction]);
     wr(ap,0x9c,1); wr(ap,0x90,divisor&0xff); wr(ap,0x94,divisor>>8);
-    wr(ap,0x98,0x10); wr(ap,0x9c,0);
-    /* 8250_mtk mtk8250_set_flow_ctrl(NONE), offsets are register index*4.
-     * Escape character is still programmed even with escape disabled. */
-    wr(ap,0x40,0xdb); wr(ap,0x44,0);
+    /* Actual 8250_mtk mtk8250_set_flow_ctrl: ECB, then SW low bits 0xa.
+     * START/STOP=0x11/0x13 read from this active Android tty (2026-11-15),
+     * independently also present in the SSPM endpoint setup. */
+    wr(ap,0x98,flow==0x80?0x1a:0x10);
+    if (flow==0x80) {
+        wr(ap,0xa0,0x11); wr(ap,0xa4,0x11);
+        wr(ap,0xa8,0x13); wr(ap,0xac,0x13); wr(ap,0xc0,0x13);
+    }
+    wr(ap,0x9c,0);
+    wr(ap,0x40,0xdb); wr(ap,0x44,flow==0x80?1:0);
+    /* PIO transport owns RDI/RLSI only. No RTS/CTS or XOFF interrupt has a
+     * handler. SW gating/escape is automatic in UART hardware, independent
+     * of IER_XOFFI; the Android APDMA path also masks those interrupts. Keep
+     * our existing RX bits intact across the baud/flow transition. */
+    field(ap,4,0xe0,0);
     return 0;
 }
 static int hub_features(void *context, bool *hardware_sleep, bool *inband)
@@ -239,8 +255,10 @@ int x9_bt_hardware_stop(void)
             wr(ap,4,0);
             for (unsigned i=0;i<sizeof(ap_offsets)/sizeof(ap_offsets[0]);i++)
                 wr(ap,ap_offsets[i],ap_registers[i]);
-            wr(ap,0x9c,1); wr(ap,0x90,ap_divisor[0]); wr(ap,0x94,ap_divisor[1]);
-            wr(ap,0x98,ap_divisor[2]); wr(ap,0x9c,ap_feature);
+            wr(ap,0x9c,1);
+            for (unsigned i=0;i<sizeof(ap_bank_offsets)/sizeof(ap_bank_offsets[0]);i++)
+                wr(ap,ap_bank_offsets[i],ap_bank[i]);
+            wr(ap,0x9c,ap_feature);
             wr(ap,8,ap_fifo&~6u); ap_saved=false;
         }
         if (!shared_idle() && isolated && !x9_bt_hardware_check()) {
@@ -260,7 +278,9 @@ int x9_bt_hardware_stop(void)
 void x9_bt_hardware_ops(struct x9_bt_session_ops *o)
 {
     o->pre_on=pre_on; o->power_on=power_on; o->rx_and_32k=rx_and_32k;
-    o->host_uart=host_uart; o->hub_features=hub_features;
+    /* host_uart is transport-owned: its wrapper serializes FEATURE_SEL and
+     * IER changes with the actual IRQ filter. Do not replace it here. */
+    o->hub_features=hub_features;
     o->post_download=post_download; o->verify_ownership=verify_ownership;
     o->controller_config=controller_config;
 }
