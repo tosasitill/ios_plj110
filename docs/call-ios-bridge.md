@@ -1759,3 +1759,34 @@ consumer 与 Apple 两套枚举已闭不代表该缺边已闭。本轮不开放�
 只读固定 VA，写同目录的 `profile-input-original-proof.json`、`*.original-code.bin` 与
 `*.numbered.asm`。结论/边界在 `call-profile-input-contract.json`；实际 source head 与
 branch 记录在 proof JSON 中。原始与衍生设备字节均不提交 git。
+
+## 2026-11-16 实跑 Hostless owner：动态 PCM 选择，不补固定硬件路由
+
+本轮只读原 HAL 新范围与已保存 MO 日志，不重跑旧 probe。原 controller ctor
+`27f940` 的 GOT `44d900` 由 `R_AARCH64_GLOB_DAT` 明确指向
+`android::keypcmHostlessSpeech45d4e0`；相同 String8 传给 **this+3f8/+420**
+两个独立 AudioPcmControl。`modemPcmOpen282630..282684` 对它们分别传
+flags=`10000000`/`0`、owned mMdConfig、prepare=false；不是先前 frame-base
+`adspPcmOpen` 的 descriptor 路线。
+
+真实 MO `mo-call-audio.txt:625..633` 只有两次 `Hostless_Speech` open；
+`:2145..2166/2256..2275` 的 stop/close 同样有两个 Speech owner，而 HW_SRC_1/3
+的所有 controls 明确 **mPcm==NULL**。结合 ctor/open 分支，这次 basic Hostless
+owner 已收束；不凭缺 start 日志断言未启动，也不把 open 当 DSP receipt。
+原 `AudioPcmControl2632c4..263310` 是用实际名称经
+`GetCardIndexByString315000/GetPcmIndexByString314f40` 查动态 descriptor，
+读取 card+18/pcm+1c，未找到为-1；不是硬编码 card0/PCM编号。
+`263488..263518` 调 `pcm_open` 并要求 non-null/`pcm_is_ready`，false prepare
+参数不调用 `pcm_prepare`，本地成功不产生 iOS stream 或 firmware ACK。
+
+还缺实际 ALSA descriptor/card/PCM 与通话时 DAPM/mixer 选择。同次 kernel 日志
+只证明模块名 `snd_soc_mt6993_afe.ko`、`mt6993_mt6681.ko`，不证明已有对应 payload
+或具体文件路径。reference 的 PCM_0/1→ADDA/I2S候选图不能直接变成生产寄存器值；
+同版 audio_dsp、scene0 task-info8B、独立 USIP_PHONECALL 与 iOS BasebandVoice I/O
+仍未闭合。不借媒体录放或 SmartPA owner 填通话声音。本轮没有独立可确认的生产
+mutation，因此未改码、未编译/pack/上机，不把该静态收束称作最终音频修复。
+
+原件窄范围、relocations、原日志行号与边界保留在 gitignored
+`x9/out/voice-hostless-route/hostless-production-boundary.json`；只读复提命令
+`python3 x9/out/voice-hostless-route/read-hostless-owner.py`。下一仅从真实缺失输入
+或可达生产连接继续，不重复已闭范围、旧镜像、人工向量或未变更内核构建。
