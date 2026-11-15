@@ -15,6 +15,9 @@ static void lck_mtx_lock(int *){assert(!lock_depth);lock_depth=1;}
 static void lck_mtx_unlock(int *){assert(lock_depth);lock_depth=0;}
 static int x9_at_enabled(){return 1;}
 static int sweet_x9_arg(const char *,int){return 1;}
+static uint64_t fake_ms;
+static uint64_t mach_absolute_time(){return fake_ms*1000000;}
+static void absolutetime_to_nanoseconds(uint64_t t,uint64_t *ns){*ns=t;}
 int x9_md_at_online(){return 1;}
 static unsigned writes,last_length;
 static int tx_result;
@@ -28,7 +31,6 @@ static const unsigned X9BB_PORT_BASE=0x2000;
 static const unsigned X9BB_NODE=1,CBQ_PORT_BASE=0x4000,CBQ_MAX_CLIENTS=8;
 static const uint16_t X9Q_UNSUPPORTED=94,X9Q_INTERNAL=3,X9Q_NOT_READY=16,X9Q_ARG=48,X9Q_BUSY=2;
 static struct {uint64_t generation;uint8_t sim_slot;} x9q_clients[CBQ_MAX_CLIENTS];
-static uint64_t fake_ms;
 static bool x9w_control_ready;
 static uint64_t x9q_ms(){return fake_ms;}
 static unsigned qmi_replies,qmi_error;

@@ -147,7 +147,14 @@ static uint64_t x9m_store_submit(const x9m_job &j){
  if(j.op!=X9M_LIST)f.tlv(0x102,storage.p+1,2);
  /* 103=0 is permitted ONLY for a single indexed CMGR in ModifyTag step1;
   * never mark an entire CMGL enumeration read. CPMS is always explicit. */
- f.byte(0x103,j.op==X9M_TAG&&j.step==1?0:1);f.byte(0x104,storage.p[0]);return f.submit();
+ f.byte(0x103,j.op==X9M_TAG&&j.step==1?0:1);f.byte(0x104,storage.p[0]);
+ if(j.op==X9M_TAG&&j.step==1){
+  /* Serialize exactly the same frame, but carry this mutation's original
+   * owner and absolute host guard to the native allocator/unique writer. */
+  f.p[14]=(uint8_t)(f.n-16);f.p[15]=(uint8_t)((f.n-16)>>8);
+  return f.good?x9_md_mipc_message_mark_read_submit(f.p,f.n,j.slot,j.generation,j.deadline):0;
+ }
+ return f.submit();
 }
 static void x9m_init_transport_loss(){
   /* Loss is not registration/config retirement. Stop advancing this boot,
@@ -557,7 +564,11 @@ static void x9m_job_done(x9m_job &j,const uint8_t *p,unsigned n){
 static void x9m_del(unsigned slot){
  bzero(&x9m_clients[slot],sizeof(x9m_clients[slot]));
  /* Sent SMS/ACK owners survive deletion and drain their late result. */
- for(x9m_job &j:x9m_jobs)if(j.op&&j.slot==slot)j.answered=true;
+ for(x9m_job &j:x9m_jobs)if(j.op&&j.slot==slot){
+  if(j.op==X9M_TAG&&j.step==1&&j.token)
+   x9_md_mipc_message_mark_read_abandon(j.token,j.slot,j.generation);
+  j.answered=true;
+ }
  /* No successful auto-ACK on client loss. Commands remain bound to the old
   * generation, so a reused port/SIM cannot acknowledge someone else's SMS. */
 }
@@ -575,6 +586,9 @@ static void x9m_poll(){
    * sent MO/ACK token; no resend or second success for the timed-out txn. */
   if(!j.answered&&now>=j.deadline){x9m_error(j,X9Q_NOT_READY);
    printf("X9 SMS/IMS: operation %u SIM%u timed out; sent token retained, no resend\n",j.op,j.sim+1);}
+  if(j.op==X9M_TAG&&j.step==1&&j.token&&
+    (j.answered||now>=j.deadline||!x9m_live(j.slot,j.generation)||!x9w_control_ready||!x9m_sims[j.sim].ready))
+   x9_md_mipc_message_mark_read_abandon(j.token,j.slot,j.generation);
   if(x9m_storage(j.op)&&!j.token){
    if(!j.follow||now>=j.deadline||j.answered||!x9m_live(j.slot,j.generation)){
     x9m_error(j,X9Q_NOT_READY);
