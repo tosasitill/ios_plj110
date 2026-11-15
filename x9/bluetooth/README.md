@@ -170,12 +170,12 @@ python3 -I x9/bluetooth/candidate.py --name <全新简单名字> \
 失败保留日志、无完成 manifest、如已生成被拒绝镜像则改名 `.failed`，不能交付为完整候选。
 **boot.img 本身不安装 iOS 根盘中的桥或 jobs**；root 修改先确认、核对原件及 live root preflight，用户手动 boot 后才验原生功能。
 
-`stage.py` 已实现专用 root 安装路径，默认只做离线 plan；实际安装/恢复必须先得到此次 root 修改的明确确认。
-它使用当前 live `base||extension` 全量快照、私有 APFS clone、原生 HFS VFS 和现有 `pinfile` compare-write，
-不猜 catalog/物理 extent、不改 Android pin/immutable、不重启设备。
-完整原件比对、备份和 write-intent ledger 先于写入；最终验证每 part 的全量 hash，失败尝试 compare 回滚。
-断电/torn block 不是原子可恢复保证；未知块拒绝盲目覆盖。命令和约束见 [STAGING.md](STAGING.md)。
-安装器目前只通过源码编译，**未执行 plan/安装或设备验证**；安装许可不提升 audio/runtime 验收状态。
+`stage_targeted.py` 是当前许可下的定点 root 安装器。用户禁止全盘读/备份：不运行旧
+`stage.py --apply` 的 whole-root snapshot/clone/fullhash。私有 macFUSE RPC 只读取真实必要块，
+原生 HFS 的所有修改先入本机 COW；detach 后定点修七文件 owner、冻结并重验全部读依赖，
+再按现有 pinfile OLD-SHA compare-write。只保留必要块缓存和变化块回滚前像。
+最终验证真实七路径/bytes/mode/owner、Apple 原件与 clean journal；未知/torn block 拒绝覆盖。
+具体命令、预算、资源保留与恢复约束见 [STAGING.md](STAGING.md)。安装许可不提升 audio/runtime 验收状态。
 
 已确认的音频边界：20H392 type0 VSC support 表全0，`"shci"` source2 的 PCM 路由操作会经
 `BD_VSC_WRITE_PCM_PARAM` admission 返回 unsupported，不更新原路由状态；上层继续，不证明它阻断初始启动。
@@ -204,7 +204,7 @@ payload 上限251按原模块声明 maxlen255/四字节wire头的安全预算设
 `launch_cache.py` 仅append六个对象（两Program值、两job及两父dict），保留所有其它records、原707339B
 object region、22269个IDs/offsets及2B ref width，不全量重排。原cache796447B，派生cache798777B；
 内核Siri仅接受两种精确size/trailer并继续核全部32个原string guards。package/stage同时备份、比较并安装
-第七文件cache，拒绝旧六文件payload；原cache必须与live snapshot逐字节相等，不删cache或.sig。
+第七文件cache，拒绝旧六文件payload；原cache必须与live root逐字节相等，不删cache或.sig。
 
 未来工具正常交付后仅有只读metadata入口：
 
