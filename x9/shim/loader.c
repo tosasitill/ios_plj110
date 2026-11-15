@@ -158,9 +158,11 @@ static const char *boot_impl(uintptr_t dtb, const void *embedded, size_t embedde
   * stalled BOOT130. Never fatal; refusals leave the placeholders zero. */
  if(fdt_audio_patch_adt(dtb,(void *)(uintptr_t)adt_pa,p->adt_size)<0)
   plog_str("X9 AUDIO FDT: missing/invalid ADT placeholders; no DMA/shared DRAM grant\n");
- /* Camera/GNSS walkers are also excluded during boot bring-up. Preserve
-  * their zero ADT placeholders: no topology, calibration or hardware grant. */
- plog_str("X9 CAMERA/GPS FDT: loader handoffs removed; no hardware grant\n");
+ /* One bounded camera collection fills only the two existing metadata
+  * slots. No per-field walkers or GNSS path, and no IRQ/PHY/DMA grant. */
+ if(fdt_camera_patch_adt(dtb,(void *)(uintptr_t)adt_pa,p->adt_size)<0)
+  plog_str("X9 CAMERA FDT: missing/invalid ADT placeholders; metadata absent\n");
+ plog_str("X9 GPS FDT: loader handoff remains removed; no hardware grant\n");
  { int wd=fdt_wifi_dump_adt(dtb,(void *)(uintptr_t)adt_pa,p->adt_size);   /* never fatal */
    plog_str(wd==0?"X9 LK DT: Wi-Fi facts copied to ADT\n":wd>0?"X9 LK DT: no ADT placeholder\n":"X9 LK DT: FDT walk refused\n"); }
  if(p->phys_base==X9_RAM_LO && p->mem_size==X9_RAM_SPAN &&
