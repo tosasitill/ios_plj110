@@ -6507,6 +6507,16 @@
    "template": "bsd-c-11"
   },
   {
+   "name": "x9_bt_download.o",
+   "source": "bsd/dev/x9_bt_download.c",
+   "template": "bsd-c-11"
+  },
+  {
+   "name": "x9_bt_serial.o",
+   "source": "bsd/dev/x9_bt_serial.c",
+   "template": "bsd-c-11"
+  },
+  {
    "name": "SweetX9Bluetooth.o",
    "source": "iokit/Kernel/arm/SweetX9Bluetooth.cpp",
    "template": "iokit-cxx-3"

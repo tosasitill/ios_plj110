@@ -19,6 +19,7 @@
 #include <machine/machine_routines.h>
 #include <arm64/sweet_early.h>
 #include "x9_bluetooth.h"
+#include "x9_bt_serial.h"
 #include "../../../generated/x9_bt_firmware.inc"
 
 extern int sweet_x9_arg(const char *, int);
@@ -316,6 +317,11 @@ void x9_bluetooth_start(void)
 {
     if (!sweet_early_is_x9() || sweet_x9_arg("x9_bt", 0) != 1 || started) return;
     started = 1; raw_enabled = sweet_x9_arg("x9_bt_raw", 0) == 1;
+    /* Serial bridge registers independently, but remains ENXIO until the
+     * complete MTK initializer calls x9_bt_serial_result(0, real_baud).
+     * Never promote the existing ROM-only probe to native readiness. */
+    int serial_error = x9_bt_serial_init();
+    if (serial_error) printf("X9 BT: serial frontend registration errno=%d\n", serial_error);
     lck_mtx_lock(&bt_lock);
     bs.state = X9_BT_PASSIVE; bs.firmware_bytes = X9_BT_FW_BYTES; bs.firmware_sections = X9_BT_FW_SECTIONS;
     lck_mtx_unlock(&bt_lock);
