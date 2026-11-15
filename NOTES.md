@@ -157,6 +157,14 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+### HEIF/HEVC 硬解续接（2026-11-15，活动分支 `feat/hevc-hw`）
+
+- **完整目标不变**：完成 HEIF/HEVC 原生硬解全部代码；不能把旧的独立 IDR 前端、接口齐全或单对象编译通过当成完成。只在代码齐全后出唯一最终 boot 镜像；本轮没有手机、ADB、fastboot、mailbox、MMIO/SMC 或分区操作。
+- **实际活动树/恢复基线**：`.worktrees/hevc-hw`，`.local -> ../../.local`，从 main `55c3508` 继续。旧 HEIF 工作树已不存在，但 `0ea7546` 的源码对象仍可读；恢复其中视频独立新增文件，手工将 recipe/link-order、UFS 初始化、构建器、shim 和 ADT 的视频 hunks 接入当前 main。旧三方 merge 对这五个集成文件均产生冲突，已恢复本轮操作前的 HEAD 版本，再逐处锚定插入；没有将旧整树或旧 NOTES 覆盖回来。main 的 `x9_mm_power.c/.h` 原样保留且只链接一次，现有 camera/audio/SCP/call/GPU 改动保留。
+- **恢复后编译（本次新证据）**：真实 Builder、关闭 ccache，仅编 `sweet_x9_vdec.o`、`x9_vcp_bus.o`、`x9_vcp_wire.o`、`x9_mm_smmu.o`，总 exit0；日志/结果在 `x9/out/hevc-restored-compile-20261115/`，实际 helper/外层 stdout/exit 在 `x9/out/hevc-resume-20261115/`。iOS VT dylib 和 vdecctl 经 `x9/hevc/build.py` 的 `-Wall -Wextra -Werror` 编译/链接/签名 exit0，保存 `x9/out/hevc-restored-frontend-20261115/`。改动 shim 的 `vcp_handoff.c`/`loader.c` 按正式 toolchain CFLAGS 单对象编译及内置 ABS64 gate exit0，保存 `x9/out/hevc-restored-shim-20261115/`。没有额外测试套件、全内核链接、CI run、boot 镜像或成功产物二次验证。
+- **旧实现边界仍成立**：默认 `x9_vdec=0`；没有真实平台注册者，READY/profiles 仍0。VT 注册仍显式要求 `X9IndependentHEVC`，仅 Main/Main10/Main-compatible profile3 独立 IDR。原生 bus/DMA/control/SHM 代码恢复不等于物理硬解通路；普通 VT/CMPhoto 选择、视频跨帧/DPB、HEIF alpha、线性输出和退休均尚未完成。
+- **下一实际缺口**：共享 normal MM/SMMUv3 controller/storage/ASID/CMDQ owner（保留 camera SID80/ASID1 和 display SID90）；cold firmware/clock bootstrap 与真实最高层 create/install/shared/bind/start；BS 路由/VSI 写入、WAITISR/c006、硬件 completion/ring/CPU cache 生命周期、线性 NV12/P010（P01H/HYFBC 不是 P010）；VT→CMPhoto/ImageIO、grid/方向/ICC/alpha 与完整 HEVC 视频。旧 helper 的 `.local/x9/work/...` 路径不可直接复用；临时产物只放本工作树的 gitignored `x9/out/`。目标保持 active，未称完成。
+
 ### 5.1 已在设备上观察到能用（详情见旧 NOTES）
 
 - 启动到 SpringBoard，UFS 原生根盘读写，UFS HS-G5/FAST/RateB/2 lane（180）。
