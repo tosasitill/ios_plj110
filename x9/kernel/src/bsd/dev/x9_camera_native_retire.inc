@@ -185,3 +185,5 @@ int x9_camera_native_smmu_retirement_check(uint64_t epoch,struct x9_camera_smmu 
     }
     lck_mtx_unlock(&camera_smmu_lock);return e;
 }
+
+#include "x9_camera_native_epoch.inc"
