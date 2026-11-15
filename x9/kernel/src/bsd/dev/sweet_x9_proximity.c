@@ -112,7 +112,8 @@ int x9_prox_set_enabled(uint32_t enabled, uint32_t us)
  } else if (!error && state.pending) {
   /* Coalesce iOS mode changes while the real ACK is in flight. The
    * callback compares with pending_enabled, then submits the latest mode. */
-  state.desired=enabled; state.interval_us=us; valid=0;
+  state.desired=enabled; state.interval_us=us;
+  if (!enabled) valid=0;
  } else if (!error) {
   if (state.enabled==enabled && state.interval_us==us) {
    state.desired=enabled;
@@ -121,7 +122,9 @@ int x9_prox_set_enabled(uint32_t enabled, uint32_t us)
    if (state.mode==3) {
     request=transport.request; state.pending=1; request_time=mach_absolute_time();
     pending_enabled=enabled; pending_interval=us;
-    valid=0;
+    /* An enabled PS is on-change: cadence-only controls must not discard
+     * its last real level while awaiting ACK. OFF/ON never revives it. */
+    if (!enabled || !state.enabled) valid=0;
    } else { state.enabled=enabled; if (!enabled) valid=0; }
   }
  }
@@ -171,7 +174,8 @@ void x9_prox_native_control(uint32_t enabled, int error)
       (enabled && state.interval_us!=pending_interval))) {
    next=state.desired; us=state.interval_us; request=transport.request;
    pending_enabled=next; pending_interval=us;
-   state.pending=1; request_time=mach_absolute_time(); valid=0;
+   state.pending=1; request_time=mach_absolute_time();
+   if (!next) valid=0;
   }
  }
  lck_mtx_unlock(&prox_lock);
