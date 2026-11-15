@@ -357,6 +357,8 @@ int x9_camera_deliver(const struct x9_camera_completed_frame *completed)
 }
 #include "x9_camera_camsv.inc"
 #include "x9_camera_irq.inc"
+#include "x9_camera_native_ae.inc"
+#include "x9_camera_native_capture.inc"
 static int cam_open(dev_t d,int f,__unused int t,struct proc *p)
 {
     /* Independent vnode/minor for non-mutating capability observers. A
