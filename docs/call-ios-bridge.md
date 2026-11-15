@@ -503,29 +503,137 @@ termination默认200来自原件常量。retrySeconds对-1/0保留，其他max(a
 正常deinitialize `1f2e6f40c→Client+100/1b7c3e578→MainQueue→IPManager1b7cbe71c`
 进入真实Bambi/SipStack注销；只有uninitialized回调`1f2e6b264`才将阶段置0。
 factory shared_ptr deleter`100315b00`仅ret，release不等于delete；cleanup里的Client+c0
-是removeDefaultCallDelegate，不是全销毁。显式Client析构→removeClient→record/maps销毁
-有据，但普通controller的removeStackDelegate/析构完整路线未闭合。`callOnMainQueue`
+是removeStackDelegate，不是removeDefaultCallDelegate或全销毁（更正此前槽标签）。
+显式Client析构→removeClient→record/maps销毁有据，但普通controller的cleanup并不
+等于同步注销完成、队列排空或Client析构。`callOnMainQueue`
 实际导入dispatch_async，原removeClient block捕获clientId裸指针；不模仿此未闭合时序，
 不声称原件UAF。最窄替换边界是per-personality真实typed Client+StackDelegate owner/queue，
 仍需真实MD服务mask、URI、expiry/retry、PDN/DataMode、failure/注销确认及call/media生命周期。
 精确原件与复读脚本保存在`x9/out/ims-call-provider-contract/`，本项没有production hook。
 
+#### 实际typed Client接口与拨号的非virtual边界
+
+同版原件的`ims::Client` address point是 **`1d90b86d8`**，不是legacy
+`IMSCallClientInterface`的`101531058/20dada348`。实际Client有44个槽（`+0..158`）：
+`+30 setCapability`、`+90 addMessageDelegate`、`+98 addStackDelegate`、`+a0 addCallManagerDelegate`、
+`+a8 addDefaultCallDelegate`、`+b0 addXcapDelegate`、`+c0 removeStackDelegate`、`+d0 removeDefaultCallDelegate`、
+`+f0 initialize(personality,StackConfig)`、`+100 deinitialize`、`+108 sendSMS`、
+`+130 updateNetworkServices`。**这张表没有dial槽**；不能把legacy `+28`解释成typed拨号。
+构造函数`1b7c3eb68`先设置ClientHandle address point`1d90b8860`，再写上述Client
+address point，ClientHandle+10是原clientId string，不是独立可替换transport指针。
+
+关键直接依赖在正常Call工厂之外：`ims::Call` ctor **`1b7c412a8`**在
+`412e8..41314`直接复制ClientHandle+10的string到Call+28；它没有在该构造链中保存
+ClientHandle指针或shared_ptr。因此为factory+38返回自造vtable对象，既会遇到这个
+非virtual布局读取，也不会使已有Call的dial改走新Client vtable。不能凭这个局部事实
+宣称全系统没有client owner；manager/record与SD controller另有真实owner。
+
+`Call::dial1b7c41468`复制真实UUID/clientId与CallConfig到IMSCallOptions，
+`41790`派送MainQueue block **`1b7c41878`**。block于`418a8..418ac`从
+IPTelephonyManager+90取真实IMSCallManager，在`418cc` **直接BL**
+`initializeNonEmergencyCall1b7b32708`，不是Client virtual调用。它继续使用既有
+AP SIP/Bambi owner链，不会因Client初始化回调换成MD-backed就自动转成MTK DIAL。
+
+据此修正上一节的“最窄替换边界”：per-personality Client/StackDelegate只是
+**初始化与注册子边界**。完整生产桥至少还要同时闭合正常CallFactory+40所创建的
+真实typed Call/UUID、dial/action实际入口、client/epoch/native-ID owner以及真实state/media
+消费者；不以只替Client或CC legacy factory、复制常量registered、直接ACTIVE回调代替。
+当前`X9Calls.inc::x9c_dial_submit`仍无生产admission caller，service09亦未公告。
+现有AppSync exec注入不覆盖CommCenter，日常构建没有call用户态provider，未添加空注入stub。
+这是实际调用链与当前构建源码的静态结论，不是设备已经选中或执行该路径。
+
+原件切片与44槽注释保存在`x9/out/call-provider-integration/`：
+`typed-call-dial-direct-manager.asm`、`typed-client-slot-map.txt`；ctor及dial上游原件在
+`x9/out/ims-call-provider-contract/`。复读只反汇编固定原件：
+`/opt/homebrew/opt/llvm@22/bin/llvm-objdump -d --demangle --start-address=0x1b7c41878 --stop-address=0x1b7c41904 .local/apple/dsc-20H392/System/Library/PrivateFrameworks/IPTelephony.framework/Support/libIPTelephony.dylib`。
+本项没有生产改码、编译、设备操作、测试或镜像。
+
+#### 普通cleanup、异步注销与late callback的真实边界
+
+本轮直接读取真实Cryptex cache：Client ctor76B、vtable352B、SD cleanup槽调用44B，
+与固定提取原件一致；上一轮`+b0 removeStack / +c0 removeDefault`为手工减基址错误，
+**不是版本/提取ABI差异**。正确槽为`+98 addStack / +c0 removeStack / +d0 removeDefault`。
+实际`cleanup_sync1f2e4233c`的`42420..42430`调用Client+c0，因此**普通cleanup已接
+removeStackDelegate**，此前“cleanup仅removeDefault、未连接removeStack”的结论撤回。
+真实cache完整Call block140B同时确认`418cc`的直接BL，不依赖提取文件的单独槽猜测。
+
+但这不等于Client退休：普通deinit写controller+f8=3，uninitialized置0并保留
+controller+d8/e0；controller dtor释放shared control block时，root factory custom deleter
+100315b00仍仅ret。CreateNewClient实际返回独立64B Client，manager的48B record是另一对象。
+已审普通deinit/cleanup/release没有证明Client真析构已发生，不能据此free或重用旧identity。
+
+`removeStackDelegate1b7aaaa40→updateStackDelegate1b7aab668`只发MainQueue
+dispatch_async，不是完成fence。block1b7c34e30的nullptr分支在34ff0调用
+IMSWrapperDelegate::removeStackDelegate1b7aaba1c，擦wrapper+40的weak/queue登记，
+然后直接跳35160，**绕过SharedHolder+0的stack强owner map**。
+nonnull分支是emplace：3500c的现存非空entry保留首strong owner，35014..35068才插空位；
+不能机械复制它来实现任意same-key owner替换。
+
+uninitialized producer1b7c84274已经复制出去的weak pointer与reason不会被擦登记撤回。
+dequeue consumer1b7c844c0仅weak.lock成功后以临时strong调用delegate+40，失败drop；
+该consumer未检查source-client-ID、init epoch或当前phase。真实cache支岛
+1bc65ff8c→194712078为libc++ weak.lock，1bc65ff80→194712048为release_weak，
+不是uniform-delta猜测。因此“remove已返回→late callback已取消”不成立，不将局部时序
+形状称为原件实测UAF。
+
+真Client dtor1b7c3ec00才同步removeClient1b7c33900，销毁record的wrapper weak maps、
+SharedHolder strong maps、strings/queue并擦manager record，随后异步339e0→
+BambiClient::invalidateStack1b7da7e0c。末步仍不是completion fence，且block捕获borrowed
+client-ID pointer；新provider须own-copy身份并建立真实终态/队列退休条件，而不是仿照
+异步裸指针或把uninitialized当全对象销毁。
+
+精确原cache切片、修订后的自动槽表与复读脚本在`x9/out/ims-client-lifecycle/`：
+`actual-cache-client-vtable.txt`、`actual-cache-sd-cleanup-slot.txt`、
+`actual-cache-typed-call-dial-block140.txt`、`lifecycle-decoded.json`、`static.py`。
+可从主目录用`python3 x9/out/ims-client-lifecycle/static.py ip dis 0x1b7c34e30 reread-update-stack.asm`
+只读原件。固定UniXNU/hackios-xnu-kernel/QcomBaseband及其tracked patches的窄typed-provider
+名称查询未找到直接可复用实现；QcomBaseband已核入口是QRTR/QMI wire/board transport，
+不把限定零命中升级成全系统不存在。无生产改码、构建、测试或设备动作。
+
 ### 通话专用voice音频契约（仅原件静态，不冒充媒体speaker）
 
-同机HAL `ScpSpeechOn2474a0`先registerAdspFeature14，`247544`以scene0、UL/DL各65536B
+同机HAL `ScpSpeechOn2474a0`先registerAdspFeature14，`247544`以scene0、AP↔DSP各65536B region
 和真实`processDmaMsg246660`/this注册callback；GOT44d3b8由原库relocation确认。
 `AudioMessengerIPI1dceb0→audio_ipi_dma_cbk_register42f790`保存callback/this，
-`42fa5c..6c`发ioctl40046915，20B payload含magic/~magic、scene/reg、UL/DL尺寸。
+`42fa5c..6c`发ioctl40046915，20B payload含magic/~magic、scene/reg、a2d/d2a尺寸。
 Android参考REG_DMA→alloc_region(scene0)按实际task/dsp/controller发双向region的
-offset/size/read_idx/write_idx，再以ADD1 NEED_ACK UPDATE_REGION发布，不能沿用SmartPA布局。
+offset/size/read_idx/write_idx，再以ADD1 NEED_ACK UPDATE_REGION发布；公共descriptor ABI可共用，
+但不能复用SmartPA的coreA/scene/单环尺寸与owner。
 `247688..6bc`实际scene0/layer2/type0/ack1/AD20，param1是实际时间/on打包值，param2是modem index，
 `42efc0→42f548..55c`落ioctl40046900。没有把本机抓到的单次值当运行默认值。
 
 **更正**：OpenDSP this+158是SpeechDriverNormal；`sendIpcCmd24c720→1b2ac0`最终只有返回0，
 不是MD↔DSP3D00 transport。scene0 callback只分DA00/DA10/DA11/DA12；3D00是另一MD→DSP方向，
 其完整producer/consumer、MD voice DMA、voice AFE与Aurisys参数生命周期仍缺。
-当前native IPI_DMA只拥有coreA/task14或32，板级transport实际只注册core0；Android双核scene0
+当前native IPI_DMA只拥有coreA/task14或32，板级transport实际只注册core0；固定参考中双核scene0
 路由HiFi3_B，但实际physical routing来自task-info，不把Aurisys core_type1猜为物理core1。
+
+实际HAL `audio_messenger_ipi_init42e2d0`在`42e5f8..42e60c`以
+**ioctl40046914**取kernel task-info到BSS4675d4；每项8B，`audio_get_dsp_id4302a0`
+读取首u32，`get_audio_controller_task430310`读该项+7。Android固定参考按
+`core_total>1`选择scene0→HIFI3_B(enum3)，`ipi_dsp_id_to_adsp_cid`减2→physical core1，
+再走`adsp_send_message`。已抓DT明确core-num2、core1 mailbox2/3与独立IPI_DMA_B
+0x100000；这仍不是本次runtime task-info[0]的8B回读，更不是DSP consumer证据。
+HAL静态`get_audio_controller_task_by_id430370`常量002f2b2a2e2e明确id2→42/id3→43，
+也不能拿它替代动态scene→dsp-id选择。
+
+REG_DMA参考布局现在已闭合：header128B，scene0的AP_TO_DSP / DSP_TO_AP两个entry
+分别在+128/+512，每entry384B；offset+0、size+4、read_idx+128、write_idx+256。
+ADD0 DIRECT发`{u64 base_phy,u64 pool_size}`，只有发送成功才置inited；ADD1 NEED_ACK
+以param1=scene0发布region。**这两条65536B region没有被证明是MD voice PCM的UL/DL环**，
+不能用AP↔DSP控制/数据region的已知布局补造MD3D00的payload、PCM地址或节拍。
+窄MD speech/SPC原件区间90636ce8..90659400与907ff500..90808600未见3D00/D300
+immediate，仅限定这两个范围；`spcIO_sendMsgViaCCCI90652c34`直接走CCCI4/ccci_write9065281a；
+另一SPC stream producer907ff728在907ff8e0调用AFxx mapper907ff500、907ff972调用
+ccci_write。两条legacy链均不是已证MD→DSP3D00，不把不同caller混成同一wrapper调用链。
+
+当前`X9Calls.inc`没有native audio/DSP/REG_DMA生产调用，原core0/IPIA/scene14或32
+owner也未拥有scene0通话。生产接入仍需独立call epoch/SIM/modem-index生命周期，
+以实际task-info确认core/pool选择（若core1则B）的双region及同generation强pin、真实AD20与完整DSP reply，
+然后闭合MD3D00 producer/payload、同版DSP consumer/ACK、MD PCM地址/权限/codec节拍。
+不能借用SmartPA owner或新增stub宣称通话音频修好。本轮只读材料归档
+`x9/out/call-voice-md-handshake/`（原asm、源码切片、task-route-and-dma-decoded.json）；
+没有生产改码、编译、测试、设备操作或镜像。
 
 iOS原件VirtualAudio factory21ebc8比较CFString62e790的UID`Baseband Voice`，匹配后21ee7c
 创建592B/vtable621c30的独立设备，包含`Baseband Downlink`/`Baseband Uplink`。
