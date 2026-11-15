@@ -553,6 +553,142 @@ def rv55_output_evidence(dram, init):
     return result
 
 
+def rv55_fb_transfer_evidence(dram, init):
+    """Captured FB transfer/descriptor cleanup and firmware-local cache leaf.
+
+    Full DRAM identity is inherited from INIT. A software publisher is not a
+    capacity receipt: its caller can proceed to descriptor cleanup without
+    inspecting a return. The named MemUnMAP wrapper discards its cache call's
+    result. Vendor cache opcodes, loop/selector branches and runtime ownership
+    remain unproved; firmware-local range operations do not authorize an XNU
+    DEVICE-to-CPU handoff, a physical free or a d006 reply.
+    """
+    result = dict(profile_match=False, runtime_transfer_route_proven=False,
+                  runtime_publisher_capacity_receipt_proven=False,
+                  runtime_descriptor_retirement_proven=False,
+                  runtime_firmware_cache_operation_proven=False,
+                  runtime_mapping_proven=False,
+                  runtime_cache_handoff_proven=False,
+                  runtime_producer_exclusion_proven=False,
+                  runtime_dma_retirement_proven=False)
+    if not init['profile_match']:
+        return result
+    spans = (
+        ('fb_transfer_input_arguments_and_stack_setup', 0x3096ca, 0x3096d4),
+        ('fb_publisher_one_empty_slot_guard', 0x30a074, 0x30a09a),
+        ('fb_publisher_full_log_and_return_join', 0x30a09a, 0x30a0c6),
+        ('fb_publisher_token_pair_stores', 0x30a0f4, 0x30a108),
+        ('fb_publisher_metadata_stores_and_return_epilogue', 0x30a11e, 0x30a142),
+        ('token_converter_literal_minus_one_pair_and_return_join', 0x309e40, 0x309e60),
+        ('display_converted_token_pair_zero_only_gate', 0x309812, 0x30981a),
+        ('free_converted_token_pair_zero_only_gate', 0x3099a2, 0x3099aa),
+        ('display_publication_then_conditional_unmap_without_result_check', 0x309870, 0x309894),
+        ('free_publication_then_conditional_unmap_without_result_check', 0x3099d8, 0x309a06),
+        ('descriptor_search_initial_offsets_and_candidate_loop', 0x309a0e, 0x309a30),
+        ('descriptor_two_subranges_pointer_size_gates', 0x309a9c, 0x309ab4),
+        ('descriptor_subrange_unmap_call_and_second_iteration', 0x309ae2, 0x309af2),
+        ('descriptor_zero464_and_ap_token_pair_clear', 0x309af2, 0x309b1a),
+        ('descriptor_followup_vendor_branches_and_owner_helpers', 0x309b1e, 0x309b46),
+        ('mem_unmap_saved_range_and_direct_flush_call', 0x246b2e, 0x246b44),
+        ('mem_unmap_flush_result_discard_log_and_literal_zero_return', 0x246b44, 0x246b6e),
+        ('flush_range_wrapper_saved_input_arguments', 0x24655c, 0x246564),
+        ('flush_range_wrapper_stack_fields_and_direct_cache_leaf_call', 0x2465c2, 0x2465e2),
+        ('flush_range_wrapper_saved_or_literal_result_return', 0x2466c2, 0x2466d0),
+        ('cache_leaf_range128_rounding_and_zero_range_gate', 0x246440, 0x246454),
+        ('cache_leaf_aligned_address_and_candidate_lock_call', 0x246454, 0x24646a),
+        ('cache_leaf_first_encoded_operation_loop128_and_followup', 0x24646a, 0x24648c),
+        ('cache_leaf_first_register_triplet_and_encoded_operation', 0x24648c, 0x2464a4),
+        ('cache_leaf_second_encoded_operation_loop128', 0x2464a4, 0x2464b8),
+        ('cache_leaf_second_register_triplet_and_encoded_operation', 0x2464b8, 0x2464cc),
+        ('cache_leaf_alternate_global_operation_register_writes', 0x2464e2, 0x24651c),
+        ('cache_leaf_candidate_unlock_and_literal_zero_return_join', 0x24651c, 0x246528),
+        ('cache_leaf_zero_range_log_literal2_and_return_epilogue', 0x246528, 0x246554),
+    )
+    result.update(profile_match=True,
+        profile='captured RV55 FB transfer and firmware cache boundary ABI 1',
+        transfer=dict(entry=0x3096c4, visible_window_end=0x309c18,
+            input_argument_saved_registers=dict(a0='s8', a1='s4', a2='s11'),
+            full_cfg_all_publishers_and_runtime_route_proven=False,
+            token_converter=0x309dd4,
+            converter_failure_pair=[-1, -1],
+            converter_failure_pair_assignments=[0x309e40, 0x309e42],
+            converter_return_join=0x309e5a,
+            display_zero_only_gate=0x309818, free_zero_only_gate=0x3099a8,
+            zero_only_gate_does_not_reject_minus_one_pair=True,
+            all_failure_pair_rejection_paths_proven=False),
+        publisher=dict(entry=0x30a06e, shared_read_offset=1536,
+            shared_write_offset=1540, shared_count_offset=1544,
+            one_empty_slot_guard=0x30a096,
+            full_log_address=0x30c73b,
+            full_log=cstring(dram, 0x30c73b - 0x200000),
+            full_log_return_join=0x30a0c4, return_epilogue=0x30a13c,
+            full_arm_vendor_branch=0x30a09a,
+            full_arm_complete_control_flow_proven=False,
+            display_caller=0x309876, display_first_post_call_load=0x309878,
+            display_optional_unmap_call=0x309886,
+            free_caller=0x3099ec, first_post_call_load=0x3099ee,
+            caller_does_not_inspect_publisher_return_before_unmap_and_clear=True,
+            wrapper_return_is_not_capacity_or_durable_dequeue_receipt=True),
+        descriptor_cleanup=dict(optional_pointer_offset=408,
+            optional_bytes_offset=424, optional_unmap_call=0x3099fa,
+            optional_bytes_clear=0x3099fe, optional_pointer_clear=0x309a02,
+            candidate_descriptor_offset_literal=1152,
+            candidate_descriptor_stride_literal=464,
+            candidate_ap_token_table_offset_literal=512,
+            candidate_ap_token_table_stride_literal=8,
+            search_unresolved_loop_instruction=0x309a20,
+            matched_descriptor_branch=0x309a24,
+            subrange_iteration_offsets=[0, 32],
+            subrange_pointer_member_offset=64, subrange_size_member_offset=80,
+            subrange_unmap_call=0x309ae6,
+            zero_descriptor_call=0x309afe, zero_descriptor_bytes_literal=464,
+            token_pair_clears=[0x309b0c, 0x309b10],
+            followup_helpers=[0x26fd60, 0x23c078],
+            followup_calls=[0x309b38, 0x309b40],
+            selected_index_and_all_vendor_search_edges_proven=False,
+            bookkeeping_clears_are_not_buffer_or_dma_retirement=True),
+        memory_unmap=dict(entry=0x246b2c, log_address=0x24799a,
+            log=cstring(dram, 0x24799a - 0x200000),
+            firmware_to_ap_address_converter_calls=[0x246b36, 0x246b4a],
+            flush_range_call=0x246b42, flush_range_wrapper=0x246554,
+            flush_result_overwritten_at=0x246b44,
+            literal_zero_assignment=0x246b68, return_at=0x246b6c,
+            flush_result_is_discarded_in_visible_body=True,
+            wrapper_zero_is_not_cache_success_or_physical_free_ack=True),
+        cache_range=dict(wrapper=0x246554, wrapper_name_address=0x24750e,
+            wrapper_name=cstring(dram, 0x24750e - 0x200000),
+            wrapper_input_pair_registers=['s3', 's2'],
+            wrapper_range_address_register='s6', wrapper_size_register='s5',
+            cache_leaf_call=0x2465de, cache_leaf=0x246438,
+            saved_leaf_result_assignment=0x2465e0,
+            alternate_literal2_result_assignment=0x2466c2,
+            wrapper_result_return_move=0x2466c4,
+            all_wrapper_vendor_entry_paths_proven=False,
+            leaf_name_address=0x2474d2,
+            leaf_name=cstring(dram, 0x2474d2 - 0x200000),
+            leaf_range_address_struct_offset=16, leaf_bytes_struct_offset=8,
+            range_rounding_literal_bytes=128,
+            rounding_literal_is_not_proven_ap_cache_line_size=True,
+            candidate_lock_object=0x331af4,
+            candidate_lock_call=0x246466, candidate_unlock_call=0x246520,
+            candidate_lock_scope_is_not_dma_producer_exclusion=True,
+            firmware_local_register_base=0x212f3000,
+            visible_register_offsets=[96, 100, 104],
+            first_command_literal=115, second_command_literal=51,
+            alternate_command_literals=[99, 35],
+            command_literals_do_not_prove_cache_opcode_semantics=True,
+            encoded_operation_pcs=[0x246478, 0x246488, 0x2464a0,
+                0x2464ac, 0x2464c8, 0x2464e6, 0x2464ee, 0x246500,
+                0x246508, 0x246516],
+            encoded_operation_semantics_complete=False,
+            firmware_leaf_is_not_xnu_mapping_cache_handoff_or_dma_authority=True),
+        instruction_evidence=[dict(name=name, segment='DRAM', link_address=start,
+            end_exclusive=end, payload_offset=start - 0x200000,
+            raw_hex=span(dram, start - 0x200000, end - start).hex())
+            for name, start, end in spans])
+    return result
+
+
 def rv55_clock_evidence(dram, init):
     """Valid RV32 framing spans only; custom opcode routing remains opaque."""
     result = dict(profile_match=False, runtime_clock_ownership_proven=False,
@@ -1970,6 +2106,8 @@ def firmware(blob):
                     service_payloads.get('tinysys-vcp-RV55_A'),
                     service_payloads.get('tinysys-vcp-RV55_A_dram'), init),
                 service_output_evidence=rv55_output_evidence(
+                    service_payloads.get('tinysys-vcp-RV55_A_dram'), init),
+                service_fb_transfer_evidence=rv55_fb_transfer_evidence(
                     service_payloads.get('tinysys-vcp-RV55_A_dram'), init),
                 signature_verified=False, executable_or_loadable_proven=False)
 
