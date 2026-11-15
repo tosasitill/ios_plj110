@@ -8,12 +8,14 @@
  * clk-gate.c: raw vote, FSM check, physical CG_CLR, actual CG readback.
  *
  * This is a persistent register-access clock lifetime, not capture initialization.
- * No VMM CVFS/AVS/eFuse rewrite, rate/PLL/AL-map change, CG47 pulse, SMI
+ * No VMM CVFS/AVS/eFuse rewrite, PLL/AL-map change, CG47 pulse, SMI
  * larb enable, PHY/route/DMA write or NS SMMU ownership claim. The secure
  * receive reference is kept through every dummy read and dependent unvote.
  * CAMSV B..F EN banks are screened before MM writes, and their physical
  * gates after MRAW power take; keep these siblings inactive throughout the
  * shared CAMTG/TOP/A and optional SMI lifetime, without enabling/probing them.
+ * Native-only CSI step0 may cold-switch the single SENINF parent before
+ * its HWV vote and restore after unvote; diagnostics never reparent.
  */
 _Static_assert(sizeof(struct x9_camera_mm_status)==576,"camera MM ABI");
 enum cam_mm_kind { CAM_MM_BACKUP, CAM_MM_DOMAIN, CAM_MM_AL, CAM_MM_MUX, CAM_MM_GATE };
@@ -37,6 +39,7 @@ static const struct cam_mm_desc cam_mm_descs[X9_CAM_MM_SLOTS]={
     /* Only register-access CAMSV clocks. DMA/SMI larbs remain gated/unowned. */
     {CAM_MM_GATE,0x20198,0x12288,0x11888,0,7u<<12,7u<<12,0,0,0,0}
 };
+#include "x9_camera_native_clock.h"
 struct cam_mm_journal {
     struct cam_receive_power receive;
     vm_offset_t top, cam_cg, sv_cg;
@@ -44,6 +47,7 @@ struct cam_mm_journal {
     uint32_t owned[X9_CAM_MM_SLOTS], borrowed[X9_CAM_MM_SLOTS];
     uint32_t gate_changed[X9_CAM_MM_SLOTS], gate_before[X9_CAM_MM_SLOTS];
     uint32_t seen, completed, cfg[3];
+    struct cam_native_clock_receipt native_clock;
     bool active;
 };
 static struct cam_mm_journal cam_mm;
@@ -59,6 +63,7 @@ static struct {
 } cam_mm_live;
 
 #include "x9_camera_sv_siblings.inc"
+#include "x9_camera_native_clock.inc"
 
 static vm_offset_t cam_mm_effect_base(struct cam_mm_journal *j,unsigned n)
 {
@@ -102,7 +107,8 @@ static int cam_mm_cfg_check(struct cam_mm_journal *j,unsigned n)
     if(d->kind!=CAM_MM_MUX && d->kind!=CAM_MM_AL)return 0;
     unsigned k=n-X9_CAM_MM_CAM_MUX;
     uint32_t cfg=(cam_rr(j->top,d->cfg)>>d->shift)&0x7f;
-    /* The provider never changes a parent, PDN, PLL or shared AL table.
+    /* Native cold SENINF updates cfg[2] only after actual confirmation.
+     * No PDN, PLL or shared AL table changes.
      * Configuration must remain stable, valid, with CKSTA idle. FENC is
      * checked after vote (and CAM only after its parent-domain AL vote). */
     if(cfg!=j->cfg[k] || (cfg&((1u<<d->width)-1))>=d->parents)return ESTALE;
@@ -122,6 +128,7 @@ static int cam_mm_guard(struct cam_mm_journal *j,bool complete)
 {
     int e;
     e=cam_sv_sibling_guard(j);if(e)return e;
+    e=cam_native_clock_guard(j,!complete);if(e)return e;
     if(complete && (!j->active || j->completed!=((1u<<X9_CAM_MM_SLOTS)-1)))return ENXIO;
     if(!j->receive.smmu_owned)return j->seen?ENXIO:0;
     if((cam_rr(j->receive.hwv,0x12900)&CAM_RES_MM_INFRA)!=CAM_RES_MM_INFRA ||
@@ -292,6 +299,8 @@ static int cam_mm_restore(struct cam_mm_journal *j,struct x9_camera_mm_status *r
     }
     for(unsigned i=X9_CAM_MM_SLOTS;i;i--) {
         unsigned n=i-1;int e=cam_mm_slot_restore(j,n,r);
+        /* Includes partial clock take BEFORE slot8 was ever seen. */
+        if(!e && n==X9_CAM_MM_SENINF_MUX)e=cam_native_clock_restore(j);
         if(e) {
             /* A dependency/sibling guard may have failed before safe CSR
              * access, including after retiring MRAW. Preserve the last
@@ -306,12 +315,13 @@ static int cam_mm_restore(struct cam_mm_journal *j,struct x9_camera_mm_status *r
     }
     int e=cam_sv_sibling_guard(j);
     if(!e)e=cam_receive_power_restore(&j->receive,receive);
-    if(!e){j->active=false;j->completed=0;cam_sv_sibling_retire();}return e;
+    if(!e){j->active=false;j->completed=0;cam_sv_sibling_retire();
+        memset(&cam_native_clock_request,0,sizeof(cam_native_clock_request));}return e;
 }
 static int cam_mm_take(struct cam_mm_journal *j,unsigned sensor,struct x9_camera_mm_status *r,
                         struct x9_camera_resources *receive)
 {
-    if(j->active || j->seen || j->receive.active || j->receive.smmu_owned ||
+    if(j->active || j->seen || j->native_clock.seen || j->receive.active || j->receive.smmu_owned ||
        j->receive.csi_owned || j->receive.csi_borrowed)return EBUSY;
     j->completed=0;
     r->stage=X9_CAM_MM_STAGE_RECEIVE;
@@ -335,6 +345,8 @@ static int cam_mm_take(struct cam_mm_journal *j,unsigned sensor,struct x9_camera
      * or register-clock vote: foreign
      * CAMSV B..F must be unvoted. Their CG is read only after MRAW take. */
     e=cam_sv_sibling_begin(j);if(e)return e;
+    e=cam_native_clock_take(j,sensor);if(e)return e;
+    r->cfg[2]=j->cfg[2];
     r->stage=X9_CAM_MM_STAGE_TAKE;
     for(unsigned n=0;n<X9_CAM_MM_SLOTS;n++) {
         r->slot=n;e=cam_mm_slot_take(j,n,r);
@@ -371,6 +383,8 @@ static void cam_mm_status_init(unsigned sensor,struct x9_camera_mm_status *r)
 static void cam_mm_status_retained(struct x9_camera_mm_status *r)
 {
     r->retained=cam_mm.seen;
+    /* The native parent can be owned before its HWV slot was seen. */
+    if(cam_mm.native_clock.seen)r->retained|=1u<<X9_CAM_MM_SENINF_MUX;
     if(cam_mm.receive.csi_owned || cam_mm.receive.csi_borrowed)r->retained|=X9_CAM_MM_RETAIN_CSI;
     if(cam_mm.receive.smmu_owned)r->retained|=X9_CAM_MM_RETAIN_SECURE;
 }
