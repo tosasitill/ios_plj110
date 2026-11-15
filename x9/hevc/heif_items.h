@@ -24,6 +24,7 @@
 #define X9_HEIF_HVC1 X9_HEIF_TYPE('h','v','c','1')
 #define X9_HEIF_GRID X9_HEIF_TYPE('g','r','i','d')
 #define X9_HEIF_IDEN X9_HEIF_TYPE('i','d','e','n')
+#define X9_HEIF_IOVL X9_HEIF_TYPE('i','o','v','l')
 struct x9_heif_document;
 struct x9_heif_span { uint64_t offset, bytes; };
 struct x9_heif_property {
@@ -36,6 +37,9 @@ struct x9_heif_image {
     uint32_t channels, bit_depth[4]; /* raw pixi; absent remains0 */
     uint32_t rows, columns, derived_count;
     uint32_t derived[X9_HEIF_MAX_ITEMS]; /* ordered dimg, no dedup/sorting */
+    uint16_t canvas_fill_rgba[4]; /* iovl: unmodified unsigned16 RGB+alpha */
+    int32_t overlay_x[X9_HEIF_MAX_ITEMS], overlay_y[X9_HEIF_MAX_ITEMS];
+    uint32_t premultiplied_reference_count; /* prem is never silently ignored */
     uint32_t property_count;
     struct x9_heif_property properties[X9_HEIF_MAX_ASSOCIATIONS];
     struct x9_heif_span hvcc; /* coded image only; unchanged hvcC payload */
@@ -53,7 +57,8 @@ int x9_heif_primary(const struct x9_heif_document *, uint32_t *id);
  * the document's immutable input lifetime; no second unverified file pointer. */
 int x9_heif_span_data(const struct x9_heif_document *, struct x9_heif_span,
     const uint8_t **data);
-/* Resolve hvc1/grid/iden geometry, ordered dimg and all associated properties.
+/* Resolve hvc1/grid/iden/iovl geometry, ordered dimg and all associated properties.
+ * iovl v0 retains exact unsigned16 RGBA fill and signed16/32 placement offsets.
  * Unknown essential properties fail ENOTSUP; known transform/color/auxiliary
  * properties are retained, NOT applied. Compositors must process them before
  * claiming an image. Missing/duplicate required properties fail closed. */
@@ -78,6 +83,10 @@ int x9_heif_read_item(const struct x9_heif_document *, uint32_t id,
 /* Enumerate raw ordered iref/iloc destinations (including repetitions), not
  * dimg children or decoded auxiliary images. ENOENT ends enumeration. */
 int x9_heif_item_offset_reference(const struct x9_heif_document *, uint32_t item,
+    uint32_t index, uint32_t *id);
+/* Raw ordered prem targets, including repetitions. This records a source
+ * association; no color unpremultiplication or auxiliary decode is implied. */
+int x9_heif_premultiplied_reference(const struct x9_heif_document *, uint32_t item,
     uint32_t index, uint32_t *id);
 /* Enumerate auxl source items referencing master, including non-alpha aux.
  * No auxiliary is silently merged/discarded; caller resolves auxC from its

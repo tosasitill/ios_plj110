@@ -13,12 +13,14 @@ struct transform {
 struct node {
     struct x9_heif_geometry geometry;
     uint32_t type, rows, columns, state, subtree_height, transform_count;
+    uint32_t premultiplied;
     uint32_t derived[X9_HEIF_MAX_ITEMS], auxiliary[X9_HEIF_MAX_ITEMS];
+    int32_t overlay_x[X9_HEIF_MAX_ITEMS], overlay_y[X9_HEIF_MAX_ITEMS];
     struct transform transforms[X9_HEIF_MAX_ASSOCIATIONS];
 };
 struct x9_heif_plan {
     const struct x9_heif_document *document;
-    uint32_t count, root, resampling;
+    uint32_t count, root, resampling, overlays;
     enum x9_heif_clap_policy clap_policy;
     struct node nodes[X9_HEIF_MAX_ITEMS];
 };
@@ -103,6 +105,12 @@ static int visit(struct x9_heif_plan *p, uint32_t id, unsigned depth, uint32_t *
     if (!e && (image->width > X9_HEIF_MAX_DIMENSION || image->height > X9_HEIF_MAX_DIMENSION)) e = EMSGSIZE;
     if (!e) {
         node->type = image->type; node->rows = image->rows; node->columns = image->columns;
+        node->premultiplied = image->premultiplied_reference_count;
+        if (node->type == X9_HEIF_IOVL) {
+            p->overlays = 1;
+            memcpy(node->overlay_x,image->overlay_x,sizeof(node->overlay_x));
+            memcpy(node->overlay_y,image->overlay_y,sizeof(node->overlay_y));
+        }
         node->geometry.coded_width = image->width; node->geometry.coded_height = image->height;
         node->geometry.derived_count = image->derived_count;
         e = transforms(p,image,node);
@@ -160,6 +168,8 @@ int x9_heif_plan_create(const struct x9_heif_document *document, uint32_t id,
 { return x9_heif_plan_create_with_policy(document,id,X9_HEIF_CLAP_EXACT_SAMPLES,out); }
 int x9_heif_plan_requires_resampling(const struct x9_heif_plan *p)
 { return p ? (int)p->resampling : -EINVAL; }
+int x9_heif_plan_requires_linear_composition(const struct x9_heif_plan *p)
+{ return p ? !!(p->resampling || p->overlays) : -EINVAL; }
 void x9_heif_plan_close(struct x9_heif_plan **p)
 { if (p && *p) { free(*p); *p = NULL; } }
 int x9_heif_plan_geometry(const struct x9_heif_plan *p, uint32_t id,
@@ -229,6 +239,8 @@ static int validate_linear(const struct x9_heif_raster *r)
             for (unsigned k = 0; k < 4; k++) {
                 float v = component(r->data+y*r->stride+(size_t)x*16+4*k);
                 if (!isfinite(v) || (k == 3 && (v < 0 || v > 1))) return EBADMSG;
+                if (k < 3 && component(r->data+y*r->stride+(size_t)x*16+12) == 0 && v != 0)
+                    return EBADMSG;
             }
     return 0;
 }
@@ -313,11 +325,42 @@ static int render(struct composition *c, uint32_t at)
     struct x9_heif_raster *r = &c->cache[at];
     int e = allocate(c,n->geometry.coded_width,n->geometry.coded_height,r);
     if (e) return e;
-    if (n->type == X9_HEIF_HVC1) {
+    if (n->type == X9_HEIF_HVC1 || n->type == X9_HEIF_IOVL) {
+        /* iovl supplies the declared fill converted to the SAME explicit
+         * linear working space as every child, not raw integer canvas RGB. */
         e = c->source(c->context,n->geometry.id,c->format,r->width,r->height,r->data,r->stride);
         if (!e && c->linear) e = validate_linear(r);
-    } else {
+    }
+    if (n->type != X9_HEIF_HVC1) {
         for (unsigned k = 0; k < n->geometry.derived_count && !e; k++) {
+            if (n->type == X9_HEIF_IOVL) {
+                const struct x9_heif_geometry *g = &c->plan->nodes[n->derived[k]].geometry;
+                int64_t ox = n->overlay_x[k], oy = n->overlay_y[k];
+                int64_t left = ox > 0 ? ox : 0, top = oy > 0 ? oy : 0;
+                int64_t right = ox+g->width, bottom = oy+g->height;
+                if (right > r->width) right = r->width;
+                if (bottom > r->height) bottom = r->height;
+                /* Signed64 intersection keeps negative16/32 offsets and
+                 * additions from becoming huge unsigned placements. Fully
+                 * invisible placements are legal and never read OOB. */
+                if (left >= right || top >= bottom) continue;
+                e = render(c,n->derived[k]);
+                if (e) break;
+                const struct x9_heif_raster *tile = &c->cache[n->derived[k]];
+                for (int64_t y = top; y < bottom && !e; y++)
+                    for (int64_t x = left; x < right && !e; x++) {
+                        const uint8_t *src = tile->data+(size_t)(y-oy)*tile->stride+(size_t)(x-ox)*16;
+                        uint8_t *dst = r->data+(size_t)y*r->stride+(size_t)x*16;
+                        double a = component(src+12);
+                        for (unsigned q = 0; q < 4; q++) {
+                            double value = component(src+4*q)+component(dst+4*q)*(1-a);
+                            if (!isfinite(value) || value < -FLT_MAX || value > FLT_MAX ||
+                                (q == 3 && (value < 0 || value > 1))) { e = EBADMSG; break; }
+                            put_component(dst+4*q,(float)value);
+                        }
+                    }
+                continue;
+            }
             e = render(c,n->derived[k]);
             if (e) break;
             const struct x9_heif_raster *tile = &c->cache[n->derived[k]];
@@ -332,6 +375,7 @@ static int render(struct composition *c, uint32_t at)
         }
     }
     for (unsigned k = 0; k < n->transform_count && !e; k++) e = apply(c,&n->transforms[k],r);
+    if (!e && c->linear) e = validate_linear(r);
     return e;
 }
 static int compose(const struct x9_heif_plan *plan, enum x9_heif_raster_format format,
@@ -342,9 +386,9 @@ static int compose(const struct x9_heif_plan *plan, enum x9_heif_raster_format f
     if (out->data) return EINVAL;
     memset(out,0,sizeof(*out));
     if (!plan || !source || !pixel_bytes(format) || !budget || budget > SIZE_MAX) return EINVAL;
-    if (plan->resampling && !linear) return ENOTSUP;
+    if ((plan->resampling || plan->overlays) && !linear) return ENOTSUP;
     for (unsigned n = 0; n < plan->count; n++)
-        if (plan->nodes[n].geometry.auxiliary_count) return ENOTSUP;
+        if (plan->nodes[n].geometry.auxiliary_count || plan->nodes[n].premultiplied) return ENOTSUP;
     struct composition *c = calloc(1,sizeof(*c));
     if (!c) return ENOMEM;
     c->plan = plan; c->format = format; c->pixel_bytes = pixel_bytes(format); c->linear = linear;

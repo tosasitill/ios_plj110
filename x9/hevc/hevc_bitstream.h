@@ -2,7 +2,7 @@
  * This is a syntax gate, NOT a decoder. Only base-layer Main/Main10 4:2:0
  * are accepted; independent-IDR and stateful AU gates are separate.
  * Main-compatible 8-bit Main Still Picture
- * uses the Main decode path; monochrome Rext alpha stays on Apple SW.
+ * uses the Main decode path; monochrome Rext alpha returns ENOTSUP (no fallback).
  */
 #ifndef X9_HEVC_BITSTREAM_H
 #define X9_HEVC_BITSTREAM_H

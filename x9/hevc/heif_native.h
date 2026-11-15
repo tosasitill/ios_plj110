@@ -15,7 +15,7 @@ enum x9_heif_graph_color_policy {
  * derived packed composition. No default working color space: working_rgb_icc
  * must be a valid RGB ICC profile. Source policy is explicit when ICC/nclx
  * coexist; nclx matrix and actual pixel range still interpret YUV.
- * Returns owned RGBA IEEE-half little-endian CVPixelBuffer and mandatory info
+ * Returns owned straight-alpha RGBA IEEE-half little-endian CVPixelBuffer and mandatory info
  * containing every item's ordered raw metadata plus working ICC and policy.
  * Container colr on derived images can supply missing tile colr; conflicting
  * inherited/explicit colr or reused-item contexts fail rather than relabeling
@@ -31,6 +31,18 @@ enum x9_heif_graph_color_policy {
  * the first hardware decode. Fractional sampling has the explicit options
  * entrypoint below. This
  * does not certify pixel-transfer HDR/tone-map behavior without runtime data.
+ * iovl v0 supports signed16/32 placements and recorded-order source-over in
+ * the explicitly selected extended-linear RGB space. Integral overlays also
+ * use that pipeline: a matrix working ICC (or options' matrix intermediate)
+ * is required. Nonzero-alpha canvas fill's unsigned16 RGB needs recognized
+ * selected own/explicitly inherited colr, never an SPS/default RGB profile.
+ * It converts once as opaque1x1 RGB, then uses raw alpha/65535. Alpha0 fill
+ * needs no guessed RGB interpretation. Final float RGB is unassociated and
+ * transferred as opaque; preserved CPU alpha is rounded ties-even to half
+ * and restored into OWNED output, with truthful straight/opaque attachments.
+ * This is the explicit renderer's linear-light policy, not a normative
+ * ImageIO/CMPhoto blending or full auxiliary-alpha interpretation. Any
+ * reachable prem source still rejects BEFORE decode, not silently ignored.
  * No software/unrelated-codec decode fallback; per-tile exact DecoderID and
  * real UsingHardware checks remain mandatory. file/working ICC must not mutate
  * during the call. Returned metadata/profile/pixels have owned bytes, not
@@ -42,18 +54,19 @@ __attribute__((visibility("default"))) OSStatus X9HEIFCopyHardwareImage(
 /* Explicit fractional-clap rasterization, with the same mandatory hardware
  * source checks and output ABI as above. EXACT_SAMPLES preserves the original
  * no-resampling behavior. When a plan actually needs LINEAR_CEIL resampling,
- * it requires a matrix-based working ICC:
+ * it (or an integral iovl overlay) requires a matrix-based working ICC:
  * derive its extended linear RGB space through CoreGraphics, transfer every
  * coded item into that space as binary32, apply ordered rational crops using
  * the selected ceil/pixel-center policy, then transfer ONCE to the requested
- * working ICC and RGBA-half. No interpolation of non-linear/ICC-coded RGB.
+ * working ICC and RGBA-half. No interpolation/source-over in non-linear RGB.
  * Non-matrix/LUT ICCs reject BEFORE decode, not substituted with sRGB. Policy
  * and actual linear ICC are retained in info; ceil is an explicit render
  * choice, not a normative HEIF size inference. Aux/mixed colr/ordinary routes
  * remain unsupported. Pixel-transfer/HDR effect is not proven by this code. */
 /* raster_budget is a caller-selected CPU heap limit, 1..min(SIZE_MAX,INT64_MAX),
- * not hardware RAM/DPB capacity. Float root + final half coexist; that known
- * peak rejects before decode. ALL compositor caches/intermediates also share
+ * not hardware RAM/DPB capacity. Float root + final half + float alpha plane
+ * coexist (28bytes per root pixel); that peak rejects before decode.
+ * ALL compositor caches/intermediates also share
  * this limit. VT/decoder/driver storage is separate, and allocation can fail
  * below the budget. Applies to exact-copy plans too; the original entrypoint
  * explicitly passes its unchanged256MiB budget. */
@@ -72,7 +85,8 @@ __attribute__((visibility("default"))) OSStatus X9HEIFCopyHardwareImageWithOptio
  * transfers directly to the derived linear ICC, then composition runs there,
  * and one final transfer converts to working_rgb_icc/RGBA-half.
  * An explicit intermediate is qualified before decode even for an integral
- * LINEAR_CEIL plan; it is unused in that case (exact working-ICC copies remain).
+ * LINEAR_CEIL plan; it is unused when there is no overlay/fractional sampling
+ * (exact working-ICC copies remain). Overlays always use the linear pipeline.
  * Info distinguishes the owned requested intermediate, whether it was used,
  * the actual linearization base and the derived linear ICC. All input bytes
  * must remain unchanged during the call; no borrowed ICC bytes escape. Other
@@ -94,6 +108,7 @@ __attribute__((visibility("default"))) OSStatus X9HEIFCopyHardwareImageWithInter
  * profiles and reuse under differently tagged ancestors are allowed without
  * caching a source under multiple interpretations. Derived colr is retained
  * as declared metadata, NOT applied to already-normalized composed samples;
+ * iovl's declared colr interprets ONLY its RGB canvas fill before placement.
  * the final profile remains the caller's working_rgb_icc.
  * Missing/unspecified own+SPS source fields still reject before hardware
  * decode, even if an ancestor has a complete colr. No guessed default gamut,

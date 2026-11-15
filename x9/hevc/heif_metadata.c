@@ -80,12 +80,38 @@ int x9_heif_copy_item_info(const struct x9_heif_document *document,
     CFMutableArrayRef aux = CFArrayCreateMutable(NULL,0,&kCFTypeArrayCallBacks);
     CFMutableArrayRef derived = CFArrayCreateMutable(NULL,0,&kCFTypeArrayCallBacks);
     CFMutableArrayRef item_offsets = CFArrayCreateMutable(NULL,0,&kCFTypeArrayCallBacks);
+    CFMutableArrayRef prem = CFArrayCreateMutable(NULL,0,&kCFTypeArrayCallBacks);
     uint32_t color_seen = 0;
-    int e = !info || !properties || !aux || !derived || !item_offsets ? ENOMEM : 0;
+    int e = !info || !properties || !aux || !derived || !item_offsets || !prem ? ENOMEM : 0;
     if (!e) e = put_number(info,CFSTR("ItemID"),image->id);
     if (!e) e = put_number(info,CFSTR("Width"),image->width);
     if (!e) e = put_number(info,CFSTR("Height"),image->height);
     if (!e) e = put_number(info,CFSTR("ConstructionMethod"),image->construction_method);
+    if (!e) e = put_number(info,CFSTR("PremultipliedReferenceCount"),image->premultiplied_reference_count);
+    if (!e && image->type == X9_HEIF_IOVL) {
+        CFMutableArrayRef fill = CFArrayCreateMutable(NULL,0,&kCFTypeArrayCallBacks);
+        CFMutableArrayRef offsets = CFArrayCreateMutable(NULL,0,&kCFTypeArrayCallBacks);
+        if (!fill || !offsets) e = ENOMEM;
+        for (unsigned n = 0; n < 4 && !e; n++) {
+            CFNumberRef v = number(image->canvas_fill_rgba[n]);
+            if (!v) e = ENOMEM; else { CFArrayAppendValue(fill,v); CFRelease(v); }
+        }
+        for (unsigned n = 0; n < image->derived_count && !e; n++) {
+            int64_t x = image->overlay_x[n], y = image->overlay_y[n];
+            CFNumberRef nx = CFNumberCreate(NULL,kCFNumberSInt64Type,&x);
+            CFNumberRef ny = CFNumberCreate(NULL,kCFNumberSInt64Type,&y);
+            if (!nx || !ny) e = ENOMEM;
+            else {
+                const void *values[] = {nx,ny};
+                CFArrayRef pair = CFArrayCreate(NULL,values,2,&kCFTypeArrayCallBacks);
+                if (!pair) e = ENOMEM; else { CFArrayAppendValue(offsets,pair); CFRelease(pair); }
+            }
+            if (nx) CFRelease(nx); if (ny) CFRelease(ny);
+        }
+        if (!e) { CFDictionarySetValue(info,CFSTR("CanvasFillRGBA16"),fill);
+            CFDictionarySetValue(info,CFSTR("OverlayOffsets"),offsets); }
+        if (fill) CFRelease(fill); if (offsets) CFRelease(offsets);
+    }
     if (!e) CFDictionarySetValue(info,CFSTR("LocationPresent"),image->location_present ? kCFBooleanTrue : kCFBooleanFalse);
     for (unsigned n = 0; n < image->property_count && !e; n++) {
         const struct x9_heif_property *p = &image->properties[n];
@@ -133,11 +159,20 @@ int x9_heif_copy_item_info(const struct x9_heif_document *document,
             else { CFArrayAppendValue(item_offsets,value); CFRelease(value); }
         }
     }
+    for (unsigned n = 0; n < image->premultiplied_reference_count && !e; n++) {
+        uint32_t id = 0;
+        e = x9_heif_premultiplied_reference(document,image->id,n,&id);
+        if (!e) {
+            CFNumberRef value = number(id);
+            if (!value) e = ENOMEM; else { CFArrayAppendValue(prem,value); CFRelease(value); }
+        }
+    }
     if (!e) {
         CFDictionarySetValue(info,CFSTR("DerivedIDs"),derived);
         CFDictionarySetValue(info,CFSTR("Properties"),properties);
         CFDictionarySetValue(info,CFSTR("AuxiliaryIDs"),aux);
         CFDictionarySetValue(info,CFSTR("ItemOffsetIDs"),item_offsets);
+        CFDictionarySetValue(info,CFSTR("PremultipliedReferenceIDs"),prem);
         *out = info; info = NULL;
     }
     if (info) CFRelease(info);
@@ -145,6 +180,7 @@ int x9_heif_copy_item_info(const struct x9_heif_document *document,
     if (aux) CFRelease(aux);
     if (derived) CFRelease(derived);
     if (item_offsets) CFRelease(item_offsets);
+    if (prem) CFRelease(prem);
     return e;
 }
 int x9_heif_copy_color_extensions(const struct x9_heif_document *document,

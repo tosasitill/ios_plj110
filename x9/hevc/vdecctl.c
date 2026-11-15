@@ -176,6 +176,13 @@ static int print_heif_item(const struct x9_heif_document *d, uint32_t id,
         geometry.width,geometry.height);
     printf("  location=%u construction_method=%u (item data, not decoded image references)\n",
         image->location_present,image->construction_method);
+    printf("  prem references=%u (source unpremultiplication not executed)\n",image->premultiplied_reference_count);
+    if (image->type == X9_HEIF_IOVL) {
+        printf("  canvas fill RGBA16=%u,%u,%u,%u; requires linear source-over\n",
+            image->canvas_fill_rgba[0],image->canvas_fill_rgba[1],image->canvas_fill_rgba[2],image->canvas_fill_rgba[3]);
+        for (unsigned n = 0; n < image->derived_count; n++)
+            printf("  placement[%u] item=%u x=%d y=%d\n",n,image->derived[n],image->overlay_x[n],image->overlay_y[n]);
+    }
     for (unsigned n = 0; n < image->property_count; n++) {
         const struct x9_heif_property *p = &image->properties[n];
         printf("  property[%u]=%c%c%c%c essential=%u offset=%llu bytes=%llu (not applied)\n",

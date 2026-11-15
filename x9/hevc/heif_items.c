@@ -89,7 +89,8 @@ static int parse_infe(struct x9_heif_document *d, const struct box *b)
     const uint8_t *zero = memchr(d->data+c.at,0,(size_t)(c.end-c.at));
     if (!zero) return EBADMSG;
     c.at = (uint64_t)(zero-d->data)+1;
-    if ((type == X9_HEIF_HVC1 || type == X9_HEIF_GRID || type == X9_HEIF_IDEN) && finish(&c))
+    if ((type == X9_HEIF_HVC1 || type == X9_HEIF_GRID || type == X9_HEIF_IDEN ||
+        type == X9_HEIF_IOVL) && finish(&c))
         return EBADMSG;
     struct item *i = item_add(d,id);
     if (!i) return ENOSPC;
@@ -582,6 +583,21 @@ static int property_parse(const struct x9_heif_document *d,
     if (!e) *seen |= bit;
     return e;
 }
+int x9_heif_premultiplied_reference(const struct x9_heif_document *d, uint32_t item,
+    uint32_t index, uint32_t *id)
+{
+    if (!id) return EINVAL;
+    *id = 0;
+    if (!d || !item_find(d,item)) return EINVAL;
+    uint32_t at = 0;
+    for (unsigned n = 0; n < d->reference_count; n++) {
+        const struct reference *r = &d->references[n];
+        if (r->type == T('p','r','e','m') && r->from == item && at++ == index) {
+            *id = r->to; return 0;
+        }
+    }
+    return ENOENT;
+}
 int x9_heif_get_image(const struct x9_heif_document *d, uint32_t id, struct x9_heif_image *out)
 {
     if (!out) return EINVAL;
@@ -590,7 +606,8 @@ int x9_heif_get_image(const struct x9_heif_document *d, uint32_t id, struct x9_h
     const struct item *i = item_find(d,id);
     if (!i) return ENOENT;
     if (i->protection || i->data_reference ||
-        (i->type != X9_HEIF_HVC1 && i->type != X9_HEIF_GRID && i->type != X9_HEIF_IDEN)) return ENOTSUP;
+        (i->type != X9_HEIF_HVC1 && i->type != X9_HEIF_GRID &&
+         i->type != X9_HEIF_IDEN && i->type != X9_HEIF_IOVL)) return ENOTSUP;
     out->id = id; out->type = i->type; out->hidden = i->hidden;
     out->location_present = i->location_seen; out->construction_method = i->method;
     uint32_t seen = 0;
@@ -610,7 +627,9 @@ int x9_heif_get_image(const struct x9_heif_document *d, uint32_t id, struct x9_h
     if (!e && i->type != X9_HEIF_HVC1 && (seen & 2u)) e = EBADMSG;
     for (unsigned n = 0; n < d->reference_count && !e; n++) {
         const struct reference *r = &d->references[n];
-        if (r->from != id || r->type != T('d','i','m','g')) continue;
+        if (r->from != id) continue;
+        if (r->type == T('p','r','e','m')) out->premultiplied_reference_count++;
+        if (r->type != T('d','i','m','g')) continue;
         if (out->derived_count == X9_HEIF_MAX_ITEMS) e = ENOSPC;
         else out->derived[out->derived_count++] = r->to;
     }
@@ -633,6 +652,30 @@ int x9_heif_get_image(const struct x9_heif_document *d, uint32_t id, struct x9_h
             if (!e) e = finish(&c);
             if (!e && (width != out->width || height != out->height ||
                 out->rows*out->columns != out->derived_count)) e = EBADMSG;
+        }
+    }
+    if (!e && i->type == X9_HEIF_IOVL) {
+        uint8_t raw[18 + 8*X9_HEIF_MAX_ITEMS]; size_t bytes = 0;
+        e = x9_heif_read_item(d,id,raw,sizeof(raw),&bytes);
+        if (!e && (bytes < 14 || raw[0] || (raw[1] & ~1u) || !out->derived_count)) e = EBADMSG;
+        if (!e) {
+            unsigned size = raw[1] & 1u ? 4u : 2u;
+            struct cursor c = {raw,2,bytes}; uint32_t v = 0, width = 0, height = 0;
+            for (unsigned n = 0; n < 4 && !e; n++) {
+                e = u32(&c,2,&v); out->canvas_fill_rgba[n] = (uint16_t)v;
+            }
+            if (!e) e = u32(&c,size,&width);
+            if (!e) e = u32(&c,size,&height);
+            if (!e && (width != out->width || height != out->height)) e = EBADMSG;
+            for (unsigned n = 0; n < out->derived_count && !e; n++) {
+                e = u32(&c,size,&v);
+                if (!e) out->overlay_x[n] = (int32_t)((int64_t)v-
+                    ((v & (1u << (size*8-1))) ? (1LL << (size*8)) : 0));
+                if (!e) e = u32(&c,size,&v);
+                if (!e) out->overlay_y[n] = (int32_t)((int64_t)v-
+                    ((v & (1u << (size*8-1))) ? (1LL << (size*8)) : 0));
+            }
+            if (!e) e = finish(&c);
         }
     }
     if (e) memset(out,0,sizeof(*out));

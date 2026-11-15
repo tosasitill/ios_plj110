@@ -35,6 +35,9 @@ int x9_heif_plan_create_with_policy(const struct x9_heif_document *, uint32_t it
 /* Includes ALL reachable nodes, not just root transforms. Negative errno on
  * invalid plan; 0 means exact copies suffice, 1 means linear resampling. */
 int x9_heif_plan_requires_resampling(const struct x9_heif_plan *);
+/* iovl source-over always needs premultiplied linear-light RGB, even if all
+ * geometry is integral. Composition and resampling are separate requirements. */
+int x9_heif_plan_requires_linear_composition(const struct x9_heif_plan *);
 void x9_heif_plan_close(struct x9_heif_plan **);
 int x9_heif_plan_geometry(
     const struct x9_heif_plan *, uint32_t item_id, struct x9_heif_geometry *);
@@ -47,7 +50,8 @@ struct x9_heif_raster {
     size_t stride, bytes;
     uint8_t *data; /* compositor-owned malloc; release with raster_close */
 };
-/* Callback fills ONE untransformed coded item's visible raster, never retains
+/* Callback fills ONE untransformed coded item's visible raster, or an iovl
+ * canvas's declared RGBA16 fill CONVERTED to the selected working space; never retains
  * destination. All callbacks in one composition MUST supply the SAME working
  * color interpretation/component encoding and alpha convention selected by
  * the caller. YUV/ICC/CICP conversion and native decode belong to that backend;
@@ -62,7 +66,7 @@ typedef int (*x9_heif_raster_source)(void *context, uint32_t coded_item_id,
     uint8_t *destination, size_t stride);
 /* Actual row-major grid/identity/crop/mirror/rotation execution; reusable
  * dimg nodes are decoded once per call, never confused with placement order.
- * Any reachable auxiliary causes ENOTSUP BEFORE the first source callback:
+ * Any reachable auxiliary/prem reference causes ENOTSUP BEFORE the first source callback:
  * alpha/gain/depth merge has not been implemented and is never dropped. All
  * intermediate/cached rasters share a bounded memory budget. On error out is
  * zeroed and no partial image is returned. out must be zero-initialized;
@@ -78,10 +82,12 @@ int x9_heif_compose_packed_with_budget(const struct x9_heif_plan *, enum x9_heif
 /* Same graph/cache/aux/memory gates as packed, but the caller explicitly
  * supplies a single LINEAR-LIGHT RGB space with premultiplied alpha. RGBA is
  * IEEE binary32 little-endian, finite RGB (negative/extended values allowed),
- * alpha in[0,1]. No gamma defaults, clipping, color conversion or tone-map.
+ * alpha in[0,1], with zero RGB when alpha0. No gamma defaults, clipping,
+ * color conversion or tone-map. iovl source-over blends each clipped signed
+ * placement in recorded dimg order; canvas fill MUST be converted by source.
  * Fractional apertures use bilinear pixel-center sampling with edge extension
  * only within a previously EXACT-bounds-validated source aperture. Ordinary
- * compose_packed refuses any plan needing interpolation, even float format.
+ * compose_packed refuses interpolation or overlays, even float format.
  * raster_budget is an explicit nonzero CPU heap budget for ALL cached and
  * intermediate rasters, <=SIZE_MAX. It is not a device/decoder capacity or a
  * memory reservation; real allocation failure still propagates. The legacy

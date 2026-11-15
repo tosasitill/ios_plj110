@@ -6,16 +6,18 @@
 #include <CoreGraphics/CoreGraphics.h>
 #include <VideoToolbox/VideoToolbox.h>
 #include <errno.h>
+#include <float.h>
 #include <math.h>
 #include <stdlib.h>
+#include <string.h>
 #define GRAPH_METADATA_LIMIT (16u * 1024u * 1024u)
-struct native_item { uint32_t id, type; CFDictionaryRef color, declared, source; };
+struct native_item { uint32_t id, type; uint16_t canvas[4]; CFDictionaryRef color, declared, source; };
 struct native_context {
     struct x9_heif_document *document;
     struct x9_heif_plan *plan;
     CFDataRef file, working, intermediate, transfer_profile;
     CGColorSpaceRef working_space, intermediate_space, transfer_space;
-    int resampling;
+    int resampling, linear;
     size_t raster_budget;
     enum x9_heif_source_color_policy policy;
     enum x9_heif_graph_color_policy graph_color;
@@ -112,6 +114,42 @@ static int source_color(CFDictionaryRef container, const struct x9_hevc_vui *vui
     if (e) CFRelease(d); else *out = d;
     return e;
 }
+static int canvas_color(CFDictionaryRef color, enum x9_heif_source_color_policy policy,
+    CFDictionaryRef *out)
+{
+    *out = NULL;
+    CFMutableDictionaryRef d = CFDictionaryCreateMutableCopy(NULL,0,color);
+    if (!d) return ENOMEM;
+    CFTypeRef icc = CFDictionaryGetValue(d,kCMFormatDescriptionExtension_ICCProfile);
+    int e = 0;
+    if (policy == X9_HEIF_USE_ICC_IF_PRESENT && icc) {
+        if (!rgb_profile(icc)) e = ENOTSUP;
+        CFDictionaryRemoveValue(d,kCMFormatDescriptionExtension_ColorPrimaries);
+        CFDictionaryRemoveValue(d,kCMFormatDescriptionExtension_TransferFunction);
+        CFDictionaryRemoveValue(d,kCMFormatDescriptionExtension_GammaLevel);
+    } else {
+        CFDictionaryRemoveValue(d,kCMFormatDescriptionExtension_ICCProfile);
+        CFTypeRef primaries = CFDictionaryGetValue(d,kCMFormatDescriptionExtension_ColorPrimaries);
+        CFTypeRef transfer = CFDictionaryGetValue(d,kCMFormatDescriptionExtension_TransferFunction);
+        if (!primaries || !transfer) e = ENOTSUP;
+        else if (CFGetTypeID(primaries) != CFStringGetTypeID() ||
+            CFGetTypeID(transfer) != CFStringGetTypeID()) e = EBADMSG;
+        else if (CFEqual(transfer,kCVImageBufferTransferFunction_UseGamma)) {
+            CFTypeRef gamma = CFDictionaryGetValue(d,kCMFormatDescriptionExtension_GammaLevel);
+            double level = 0;
+            if (!gamma || CFGetTypeID(gamma) != CFNumberGetTypeID() ||
+                !CFNumberGetValue(gamma,kCFNumberDoubleType,&level) || !isfinite(level) || level <= 0) e = ENOTSUP;
+        } else CFDictionaryRemoveValue(d,kCMFormatDescriptionExtension_GammaLevel);
+    }
+    /* iovl fill is unsigned16 RGB, not YCbCr/video-range samples. No SPS
+     * default or ancestor's YUV matrix may reinterpret those RGB words. */
+    CFDictionaryRemoveValue(d,kCMFormatDescriptionExtension_YCbCrMatrix);
+    CFDictionaryRemoveValue(d,kCMFormatDescriptionExtension_FullRangeVideo);
+    CFDictionaryRemoveValue(d,kCMFormatDescriptionExtension_ChromaLocationTopField);
+    CFDictionaryRemoveValue(d,kCMFormatDescriptionExtension_ChromaLocationBottomField);
+    if (e) CFRelease(d); else *out = d;
+    return e;
+}
 static int prepare(struct native_context *c, uint32_t id, CFDictionaryRef inherited)
 {
     /* Geometry/cycle/depth was already checked by the immutable plan. A
@@ -135,7 +173,7 @@ static int prepare(struct native_context *c, uint32_t id, CFDictionaryRef inheri
     struct x9_heif_geometry geometry;
     int e = x9_heif_get_image(c->document,id,image);
     if (!e) e = x9_heif_plan_geometry(c->plan,id,&geometry);
-    if (!e && geometry.auxiliary_count) e = ENOTSUP;
+    if (!e && (geometry.auxiliary_count || image->premultiplied_reference_count)) e = ENOTSUP;
     for (unsigned n = 0; n < image->property_count && !e; n++) {
         uint64_t bytes = image->properties[n].payload.bytes;
         if (bytes > GRAPH_METADATA_LIMIT-c->metadata_bytes) e = EMSGSIZE;
@@ -152,6 +190,7 @@ static int prepare(struct native_context *c, uint32_t id, CFDictionaryRef inheri
     if (!e) {
         node = &c->nodes[c->count++];
         node->id = id; node->type = image->type; node->color = CFRetain(color);
+        memcpy(node->canvas,image->canvas_fill_rgba,sizeof(node->canvas));
         node->declared = CFRetain(explicit_color);
         e = x9_heif_copy_item_info(c->document,image,&info,NULL);
     }
@@ -169,6 +208,16 @@ static int prepare(struct native_context *c, uint32_t id, CFDictionaryRef inheri
         if (sample) CFRelease(sample);
         if (temporary_info) CFRelease(temporary_info);
     }
+    if (!e && image->type == X9_HEIF_IOVL) {
+        if (node->canvas[3]) e = canvas_color(color,c->policy,&node->source);
+        else {
+            /* Transparent fill has no observable RGB interpretation. Keep
+             * declared colr without inventing a profile for invisible RGB. */
+            node->source = CFDictionaryCreate(NULL,NULL,NULL,0,
+                &kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
+            if (!node->source) e = ENOMEM;
+        }
+    }
     if (!e) {
         CFMutableDictionaryRef record = CFDictionaryCreateMutableCopy(NULL,0,info);
         if (!record) e = ENOMEM;
@@ -178,6 +227,9 @@ static int prepare(struct native_context *c, uint32_t id, CFDictionaryRef inheri
             if (!e) {
                 CFDictionarySetValue(record,CFSTR("EffectiveColr"),color);
                 CFDictionarySetValue(record,CFSTR("ColorInterpretation"),
+                    image->type == X9_HEIF_IOVL ? (node->canvas[3] ?
+                        CFSTR("declared-or-explicitly-inherited-rgb-fill-to-linear-icc") :
+                        CFSTR("transparent-fill-no-rgb-interpretation-required")) :
                     c->graph_color == X9_HEIF_GRAPH_COLOR_PER_ITEM ?
                         (node->source ? CFSTR("own-colr-and-selected-sps-to-common-icc") :
                             CFSTR("declared-derived-colr-retained-not-applied")) :
@@ -261,13 +313,64 @@ static OSStatus check_pixels(CVPixelBufferRef pixel, size_t budget)
     OSStatus unlock = CVPixelBufferUnlockBaseAddress(pixel,kCVPixelBufferLock_ReadOnly);
     return e ? e : unlock;
 }
+static float load_float(const uint8_t *p)
+{
+    uint32_t bits = p[0] | (uint32_t)p[1]<<8 | (uint32_t)p[2]<<16 | (uint32_t)p[3]<<24;
+    float value; memcpy(&value,&bits,sizeof(value)); return value;
+}
+static void store_float(uint8_t *p, float value)
+{
+    uint32_t bits; memcpy(&bits,&value,sizeof(bits));
+    for (unsigned n = 0; n < 4; n++) p[n] = (uint8_t)(bits>>(8*n));
+}
+static OSStatus native_canvas(struct native_context *c, const struct native_item *node,
+    uint32_t width, uint32_t height, uint8_t *destination, size_t stride)
+{
+    if (!node->canvas[3]) {
+        for (uint32_t y = 0; y < height; y++) memset(destination+y*stride,0,(size_t)width*16);
+        return noErr;
+    }
+    uint8_t raw[8], converted[16] = {0};
+    for (unsigned n = 0; n < 4; n++) {
+        uint16_t v = n == 3 ? UINT16_MAX : node->canvas[n];
+        raw[2*n] = (uint8_t)v; raw[2*n+1] = (uint8_t)(v>>8);
+    }
+    CVPixelBufferRef source = NULL, target = NULL;
+    /* Convert RGB as opaque. Apply the raw normalized alpha ourselves AFTER
+     * ICC conversion; never ask VT to guess a premultiplied RGB convention. */
+    OSStatus e = CVPixelBufferCreateWithBytes(NULL,1,1,kCVPixelFormatType_64RGBALE,
+        raw,8,NULL,NULL,NULL,&source);
+    if (!e) {
+        attach_source(source,node->source);
+        CVBufferSetAttachment(source,kCVImageBufferAlphaChannelIsOpaque,kCFBooleanTrue,kCVAttachmentMode_ShouldPropagate);
+        e = CVPixelBufferCreateWithBytes(NULL,1,1,kCVPixelFormatType_128RGBAFloat,
+            converted,16,NULL,NULL,NULL,&target);
+    }
+    if (!e) e = transfer_image(source,target,c->transfer_profile);
+    if (!e) e = check_pixels(target,c->raster_budget);
+    if (!e) {
+        float alpha = (float)node->canvas[3]/65535.0f;
+        for (unsigned n = 0; n < 3; n++) store_float(converted+4*n,load_float(converted+4*n)*alpha);
+        store_float(converted+12,alpha);
+        for (uint32_t y = 0; y < height; y++) for (uint32_t x = 0; x < width; x++)
+            memcpy(destination+y*stride+(size_t)x*16,converted,sizeof(converted));
+    }
+    if (source) CVPixelBufferRelease(source); if (target) CVPixelBufferRelease(target);
+    return e;
+}
 static int native_raster(void *context, uint32_t id, enum x9_heif_raster_format format,
     uint32_t width, uint32_t height, uint8_t *destination, size_t stride)
 {
     struct native_context *c = context;
     struct native_item *node = NULL;
     for (unsigned n = 0; n < c->count; n++) if (c->nodes[n].id == id) node = &c->nodes[n];
-    if (!node || !node->source || format != (c->resampling ? X9_HEIF_RGBA_FLOAT : X9_HEIF_RGBA_HALF)) return EINVAL;
+    if (!node || !node->source || format != (c->linear ? X9_HEIF_RGBA_FLOAT : X9_HEIF_RGBA_HALF)) return EINVAL;
+    if (node->type == X9_HEIF_IOVL) {
+        if (!c->linear) return ENOTSUP;
+        OSStatus error = native_canvas(c,node,width,height,destination,stride);
+        if (error) { if (!c->failure) c->failure = error; return EIO; }
+        return 0; /* fill conversion is NOT a hardware-decoded frame */
+    }
     CMSampleBufferRef sample = NULL;
     CFDictionaryRef info = NULL;
     CVPixelBufferRef decoded = NULL, view = NULL, target = NULL;
@@ -306,7 +409,7 @@ static int native_raster(void *context, uint32_t id, enum x9_heif_raster_format 
         if (!e) { CVBufferPropagateAttachments(decoded,view); attach_source(view,node->source); }
     }
     if (!e) e = CVPixelBufferCreateWithBytes(NULL,width,height,
-        c->resampling ? kCVPixelFormatType_128RGBAFloat : kCVPixelFormatType_64RGBAHalf,
+        c->linear ? kCVPixelFormatType_128RGBAFloat : kCVPixelFormatType_64RGBAHalf,
         destination,stride,NULL,NULL,NULL,&target);
     if (!e) e = transfer_image(view,target,c->transfer_profile);
     if (!e) e = check_pixels(target,c->raster_budget);
@@ -321,17 +424,55 @@ static int native_raster(void *context, uint32_t id, enum x9_heif_raster_format 
 }
 static void release_pixels(void *context, const void *bytes)
 { (void)context; free((void *)bytes); }
+/* Positive normalized binary32 alpha -> binary16, round to nearest/ties-even.
+ * RGB conversion stays in VT; only alpha's exact component encoding is here. */
+static uint16_t alpha_half(float alpha)
+{
+    uint32_t bits; memcpy(&bits,&alpha,sizeof(bits));
+    unsigned exponent = (bits>>23)&255u; uint32_t fraction = bits & 0x7fffffu;
+    if (exponent < 102) return 0;
+    unsigned shift = exponent < 113 ? 126-exponent : 13;
+    uint32_t mantissa = exponent < 113 ? fraction | 0x800000u : fraction;
+    uint32_t value = exponent < 113 ? mantissa>>shift : ((exponent-112)<<10) | (mantissa>>shift);
+    uint32_t remainder = mantissa & ((1u<<shift)-1), halfway = 1u<<(shift-1);
+    if (remainder > halfway || (remainder == halfway && (value & 1))) value++;
+    return (uint16_t)value;
+}
 static OSStatus export_raster(struct native_context *c, struct x9_heif_raster *r, CVPixelBufferRef *out)
 {
     CVPixelBufferRef source = NULL, target = NULL;
     uint8_t *bytes = NULL;
-    OSStatus e = CVPixelBufferCreateWithBytes(NULL,r->width,r->height,
-        c->resampling ? kCVPixelFormatType_128RGBAFloat : kCVPixelFormatType_64RGBAHalf,
+    float *alpha = NULL; int opaque = 1;
+    size_t count = (size_t)r->width*r->height, alpha_bytes = count*sizeof(float);
+    OSStatus e = noErr;
+    if (c->linear) {
+        /* Root float + half export + alpha preservation coexist. All three
+         * allocations count toward the explicit CPU heap budget. */
+        if (r->bytes > c->raster_budget || alpha_bytes > c->raster_budget-r->bytes ||
+            count*8 > c->raster_budget-r->bytes-alpha_bytes) e = kVTAllocationFailedErr;
+        if (!e) { alpha = malloc(alpha_bytes); if (!alpha) e = kVTAllocationFailedErr; }
+        for (uint32_t y = 0; y < r->height && !e; y++) for (uint32_t x = 0; x < r->width && !e; x++) {
+            uint8_t *p = r->data+y*r->stride+(size_t)x*16;
+            float a = load_float(p+12);
+            if (!isfinite(a) || a < 0 || a > 1) { e = kVTVideoDecoderBadDataErr; break; }
+            alpha[(size_t)y*r->width+x] = a; if (a != 1) opaque = 0;
+            /* Transfer unassociated RGB as OPAQUE, then restore alpha into
+             * our OWN half buffer. No dependency on VT alpha propagation or
+             * profile conversion of premultiplied/non-linear RGB. */
+            for (unsigned q = 0; q < 3; q++) {
+                double v = a ? (double)load_float(p+4*q)/a : 0;
+                if (!isfinite(v) || v < -FLT_MAX || v > FLT_MAX) { e = kVTVideoDecoderBadDataErr; break; }
+                store_float(p+4*q,(float)v);
+            }
+            store_float(p+12,1);
+        }
+    }
+    if (!e) e = CVPixelBufferCreateWithBytes(NULL,r->width,r->height,
+        c->linear ? kCVPixelFormatType_128RGBAFloat : kCVPixelFormatType_64RGBAHalf,
         r->data,r->stride,release_pixels,NULL,NULL,&source);
     if (!e) r->data = NULL; /* ONLY successful CV owner adoption transfers bytes */
-    if (!e && c->resampling) {
+    if (!e && c->linear) {
         size_t stride = (size_t)r->width*8, size = stride*r->height;
-        if (r->bytes > c->raster_budget || size > c->raster_budget-r->bytes) e = kVTAllocationFailedErr;
         if (!e) { bytes = calloc(1,size); if (!bytes) e = kVTAllocationFailedErr; }
         if (!e) e = CVPixelBufferCreateWithBytes(NULL,r->width,r->height,kCVPixelFormatType_64RGBAHalf,
             bytes,stride,release_pixels,NULL,NULL,&target);
@@ -341,11 +482,34 @@ static OSStatus export_raster(struct native_context *c, struct x9_heif_raster *r
              * derived linear space, so these are truthful source attachments. */
             CVBufferSetAttachment(source,kCVImageBufferICCProfileKey,c->transfer_profile,kCVAttachmentMode_ShouldPropagate);
             CVBufferSetAttachment(source,kCVImageBufferCGColorSpaceKey,c->transfer_space,kCVAttachmentMode_ShouldPropagate);
+            CVBufferSetAttachment(source,kCVImageBufferAlphaChannelIsOpaque,kCFBooleanTrue,kCVAttachmentMode_ShouldPropagate);
             e = transfer_image(source,target,c->working);
         }
         if (!e) e = check_pixels(target,c->raster_budget);
+        if (!e) {
+            e = CVPixelBufferLockBaseAddress(target,0);
+            if (!e) {
+                uint8_t *base = CVPixelBufferGetBaseAddress(target);
+                size_t target_stride = CVPixelBufferGetBytesPerRow(target);
+                for (uint32_t y = 0; y < r->height; y++) for (uint32_t x = 0; x < r->width; x++) {
+                    float a = alpha[(size_t)y*r->width+x];
+                    uint8_t *p = base+y*target_stride+(size_t)x*8;
+                    uint16_t half = alpha_half(a);
+                    p[6] = (uint8_t)half; p[7] = (uint8_t)(half>>8);
+                    if (!half) memset(p,0,6); /* transparent RGB has no defined unassociated color */
+                }
+                e = CVPixelBufferUnlockBaseAddress(target,0);
+            }
+        }
         if (!e) { *out = target; target = NULL; }
     } else if (!e) { *out = source; source = NULL; }
+    if (!e) {
+        CVBufferSetAttachment(*out,kCVImageBufferAlphaChannelIsOpaque,opaque ? kCFBooleanTrue : kCFBooleanFalse,
+            kCVAttachmentMode_ShouldPropagate);
+        CVBufferSetAttachment(*out,kCVImageBufferAlphaChannelModeKey,kCVImageBufferAlphaChannelMode_StraightAlpha,
+            kCVAttachmentMode_ShouldPropagate);
+    }
+    free(alpha);
     free(bytes);
     if (source) CVPixelBufferRelease(source);
     if (target) CVPixelBufferRelease(target);
@@ -392,18 +556,19 @@ OSStatus X9HEIFCopyHardwareImageWithColorOptions(CFDataRef file, uint32_t id,
     if (!e) e = x9_heif_plan_geometry(c->plan,id,&geometry);
     if (!e) {
         c->resampling = x9_heif_plan_requires_resampling(c->plan);
-        if (c->resampling < 0) e = EINVAL;
-        else if (c->resampling) {
-            /* Root float storage + final half export coexist. Reject this
+        c->linear = x9_heif_plan_requires_linear_composition(c->plan);
+        if (c->resampling < 0 || c->linear < 0) e = EINVAL;
+        else if (c->linear) {
+            /* Root float storage + final half + alpha plane coexist. Reject this
              * known budget failure before the first native hardware frame.
              * The compositor separately accounts ALL caches/intermediates;
              * VT's internal transfer/decoder storage is not this heap budget. */
-            if ((uint64_t)geometry.width*geometry.height*24 > c->raster_budget) e = EMSGSIZE;
+            if ((uint64_t)geometry.width*geometry.height*28 > c->raster_budget) e = EMSGSIZE;
         }
-        if (!e && (c->resampling || c->intermediate))
+        if (!e && (c->linear || c->intermediate))
             e = linearize_rgb(c->intermediate ? c->intermediate_space : c->working_space,
                 &c->transfer_space,&c->transfer_profile);
-        if (!e && !c->resampling) {
+        if (!e && !c->linear) {
             /* A supplied intermediate was qualified, but an integral plan
              * must not gain extra conversions just because it was supplied. */
             if (c->transfer_space) { CGColorSpaceRelease(c->transfer_space); c->transfer_space = NULL; }
@@ -412,7 +577,7 @@ OSStatus X9HEIFCopyHardwareImageWithColorOptions(CFDataRef file, uint32_t id,
         }
     }
     if (!e) e = prepare(c,geometry.id,NULL); /* every source checked before hardware */
-    if (!e) e = c->resampling ? x9_heif_compose_linear_float(c->plan,native_raster,c,c->raster_budget,&raster) :
+    if (!e) e = c->linear ? x9_heif_compose_linear_float(c->plan,native_raster,c,c->raster_budget,&raster) :
         x9_heif_compose_packed_with_budget(c->plan,X9_HEIF_RGBA_HALF,native_raster,c,c->raster_budget,&raster);
     OSStatus result = c->failure ? c->failure : parser_error(e);
     if (!result) result = export_raster(c,&raster,&pixel);
@@ -437,19 +602,21 @@ OSStatus X9HEIFCopyHardwareImageWithColorOptions(CFDataRef file, uint32_t id,
             CFDictionarySetValue(info,CFSTR("WorkingRGBICCProfile"),c->working);
             CFDictionarySetValue(info,CFSTR("GraphColorInterpretation"),
                 graph_color == X9_HEIF_GRAPH_COLOR_PER_ITEM ?
-                    CFSTR("explicit per-item sources; common ICC composition; derived colr retained only") :
+                    CFSTR("explicit per-item sources; common ICC composition; iovl colr interprets fill only") :
                     CFSTR("identical inherited colr; conflicting contexts reject"));
             CFDictionarySetValue(info,CFSTR("LinearLightResampling"),c->resampling ? kCFBooleanTrue : kCFBooleanFalse);
+            CFDictionarySetValue(info,CFSTR("LinearLightComposition"),c->linear ? kCFBooleanTrue : kCFBooleanFalse);
+            CFDictionarySetValue(info,CFSTR("AlphaChannelMode"),kCVImageBufferAlphaChannelMode_StraightAlpha);
             CFDictionarySetValue(info,CFSTR("ExplicitResamplingIntermediateUsed"),
-                c->resampling && c->intermediate ? kCFBooleanTrue : kCFBooleanFalse);
+                c->linear && c->intermediate ? kCFBooleanTrue : kCFBooleanFalse);
             if (c->intermediate)
                 CFDictionarySetValue(info,CFSTR("RequestedResamplingIntermediateRGBICCProfile"),c->intermediate);
-            if (c->resampling) {
+            if (c->linear) {
                 CFDictionarySetValue(info,CFSTR("LinearizationBaseSelection"),
                     c->intermediate ? CFSTR("explicit-intermediate") : CFSTR("working-icc"));
                 CFDictionarySetValue(info,CFSTR("LinearizationBaseRGBICCProfile"),c->intermediate ? c->intermediate : c->working);
                 CFDictionarySetValue(info,CFSTR("LinearRGBICCProfile"),c->transfer_profile);
-                CFDictionarySetValue(info,CFSTR("CleanApertureSampling"),CFSTR("ceil extent; pixel centers; bilinear linear-light; edge extension"));
+                if (c->resampling) CFDictionarySetValue(info,CFSTR("CleanApertureSampling"),CFSTR("ceil extent; pixel centers; bilinear linear-light; edge extension"));
             }
             CFDictionarySetValue(info,CFSTR("DecoderID"),CFSTR(X9_HEVC_DECODER_ID));
             CVBufferSetAttachment(pixel,kCVImageBufferICCProfileKey,c->working,kCVAttachmentMode_ShouldPropagate);
