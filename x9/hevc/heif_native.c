@@ -292,6 +292,9 @@ static OSStatus transfer_image(CVPixelBufferRef source, CVPixelBufferRef target,
          * them as an unmeasured mastering/luminance claim about converted RGB. */
         CVBufferRemoveAttachment(target,kCVImageBufferMasteringDisplayColorVolumeKey);
         CVBufferRemoveAttachment(target,kCVImageBufferContentLightLevelInfoKey);
+        /* The source's intended viewing environment is not a measured
+         * destination environment or an implicit adaptation policy. */
+        CVBufferRemoveAttachment(target,kCVImageBufferAmbientViewingEnvironmentKey);
     }
     return e;
 }
@@ -619,7 +622,7 @@ OSStatus X9HEIFCopyHardwareImageWithColorOptions(CFDataRef file, uint32_t id,
             CFDictionarySetValue(info,CFSTR("LinearLightComposition"),c->linear ? kCFBooleanTrue : kCFBooleanFalse);
             CFDictionarySetValue(info,CFSTR("AlphaChannelMode"),kCVImageBufferAlphaChannelMode_StraightAlpha);
             CFDictionarySetValue(info,CFSTR("HDRMetadataDisposition"),
-                CFSTR("original item/SEI bytes retained in Items; converted RGB has no relabelled source mastering/MaxCLL"));
+                CFSTR("original item/SEI bytes retained in Items; converted RGB has no relabelled source mastering/MaxCLL/ambient environment"));
             CFDictionarySetValue(info,CFSTR("ExplicitResamplingIntermediateUsed"),
                 c->linear && c->intermediate ? kCFBooleanTrue : kCFBooleanFalse);
             if (c->intermediate)

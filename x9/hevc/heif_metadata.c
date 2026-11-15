@@ -214,28 +214,34 @@ int x9_heif_resolve_hdr_extensions(CFMutableDictionaryRef extensions,
     const struct x9_hevc_hdr *hdr)
 {
     if (!extensions || CFGetTypeID(extensions) != CFDictionaryGetTypeID() || !hdr ||
-        hdr->mastering_present > 1 || hdr->light_present > 1) return EINVAL;
+        x9_hevc_hdr_validate(hdr)) return EINVAL;
     CFStringRef keys[] = { kCMFormatDescriptionExtension_MasteringDisplayColorVolume,
-        kCMFormatDescriptionExtension_ContentLightLevelInfo };
-    const uint8_t *bytes[] = {hdr->mastering,hdr->light};
-    uint32_t present[] = {hdr->mastering_present,hdr->light_present};
-    const CFIndex lengths[] = {24,4};
-    CFDataRef add[2] = {NULL,NULL};
+        kCMFormatDescriptionExtension_ContentLightLevelInfo,
+        kCMFormatDescriptionExtension_AmbientViewingEnvironment };
+    const uint8_t *bytes[] = {hdr->mastering,hdr->light,hdr->ambient};
+    uint32_t present[] = {hdr->mastering_present,hdr->light_present,hdr->ambient_present};
+    const CFIndex lengths[] = {24,4,8};
+    CFDataRef add[3] = {NULL,NULL,NULL};
     int e = 0;
-    /* Validate conflicts and allocate BOTH values before changing the caller's
+    /* Validate conflicts and allocate all values before changing the caller's
      * extension dictionary. Container/SEI duplication must agree byte-for-byte;
      * neither source silently wins. No defaults for an absent message. */
-    for (unsigned n = 0; n < 2 && !e; n++) {
+    for (unsigned n = 0; n < 3 && !e; n++) {
         CFTypeRef value = CFDictionaryGetValue(extensions,keys[n]);
         if (value && (CFGetTypeID(value) != CFDataGetTypeID() ||
             CFDataGetLength(value) != lengths[n])) e = EBADMSG;
-        else if (present[n]) {
+        if (!e && value && n == 2) {
+            struct x9_hevc_hdr check = { .ambient_present = 1 };
+            memcpy(check.ambient,CFDataGetBytePtr(value),8);
+            if (x9_hevc_hdr_validate(&check)) e = EBADMSG;
+        }
+        if (!e && present[n]) {
             if (value && memcmp(CFDataGetBytePtr(value),bytes[n],(size_t)lengths[n])) e = EBADMSG;
             else if (!value) { add[n] = CFDataCreate(NULL,bytes[n],lengths[n]); if (!add[n]) e = ENOMEM; }
         }
     }
-    if (!e) for (unsigned n = 0; n < 2; n++) if (add[n]) CFDictionarySetValue(extensions,keys[n],add[n]);
-    for (unsigned n = 0; n < 2; n++) if (add[n]) CFRelease(add[n]);
+    if (!e) for (unsigned n = 0; n < 3; n++) if (add[n]) CFDictionarySetValue(extensions,keys[n],add[n]);
+    for (unsigned n = 0; n < 3; n++) if (add[n]) CFRelease(add[n]);
     return e;
 }
 int x9_heif_copy_color_extensions(const struct x9_heif_document *document,

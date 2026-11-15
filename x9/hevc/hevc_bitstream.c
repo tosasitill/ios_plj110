@@ -799,21 +799,31 @@ static int sei_payload(struct sei_reader *r, uint32_t type, uint32_t bytes, uint
     const struct sei_context *s, unsigned nested, unsigned apply, unsigned source)
 {
     if (nested && (type == 129 || type == 132 || type == 133)) return EINVAL;
-    /* D.2.1 suffix137/144 are reserved payloads, not HDR. */
+    /* D.2.1 suffix137/144/148 are reserved payloads, not these messages. */
     unsigned mastering = s->prefix && type == 137, light = s->prefix && type == 144;
-    if ((mastering && bytes != 24) || (light && bytes != 4)) return EINVAL;
-    if (apply && (mastering || light)) {
-        if ((mastering && ++s->counts[0] > 8) || (light && ++s->counts[1] > 8)) return EINVAL;
+    unsigned ambient = s->prefix && type == 148;
+    if ((mastering && bytes != 24) || (light && bytes != 4) || (ambient && bytes != 8)) return EINVAL;
+    if (apply && (mastering || light || ambient)) {
+        if ((mastering && ++s->counts[0] > 8) || (light && ++s->counts[1] > 8) ||
+            (ambient && ++s->counts[2] > 8)) return EINVAL;
         if ((!nested && s->nal_temporal != s->temporal) ||
             (s->after_vcl && ((mastering && !s->before->mastering_present) ||
-                             (light && !s->before->light_present)))) return EINVAL;
+                             (light && !s->before->light_present) ||
+                             (ambient && !s->before->ambient_present)))) return EINVAL;
     }
     uint8_t raw[24];
     for (uint32_t i = 0; i < bytes && !r->b.error; i++) {
         uint32_t value = sei_get(r,8,end);
-        if (mastering || light) raw[i] = (uint8_t)value;
+        if (mastering || light || ambient) raw[i] = (uint8_t)value;
     }
     if (r->b.error || r->used != end) return EINVAL;
+    /* D.3.39: original big-endian units stay unchanged. Even a non-base
+     * scoped payload must have conforming values, not only a valid length. */
+    if (ambient) {
+        struct x9_hevc_hdr check = { .ambient_present = 1 };
+        memcpy(check.ambient,raw,8);
+        if (x9_hevc_hdr_validate(&check)) return EINVAL;
+    }
     if (!apply) return 0;
     if (mastering) {
         if (s->hdr->mastering_present && memcmp(s->hdr->mastering,raw,24)) return EINVAL;
@@ -823,6 +833,10 @@ static int sei_payload(struct sei_reader *r, uint32_t type, uint32_t bytes, uint
         if (s->hdr->light_present && memcmp(s->hdr->light,raw,4)) return EINVAL;
         memcpy(s->hdr->light,raw,4); s->hdr->light_present = 1;
         s->hdr->light_sources |= source;
+    } else if (ambient) {
+        if (s->hdr->ambient_present && memcmp(s->hdr->ambient,raw,8)) return EINVAL;
+        memcpy(s->hdr->ambient,raw,8); s->hdr->ambient_present = 1;
+        s->hdr->ambient_sources |= source;
     }
     return 0;
 }
@@ -884,7 +898,7 @@ static int sei_scalable(struct sei_reader *r, uint64_t end, const struct sei_con
 }
 static int sei_hdr(const uint8_t *p, size_t n, const struct x9_hevc_config *config,
     const uint8_t *hvcc, unsigned pps_id, unsigned temporal, unsigned after_vcl,
-    const struct x9_hevc_hdr *before, struct x9_hevc_hdr *hdr, unsigned counts[2])
+    const struct x9_hevc_hdr *before, struct x9_hevc_hdr *hdr, unsigned counts[3])
 {
     struct sei_reader r = { .b = { .p = p+2, .n = n-2 } };
     const struct sei_context s = { .config = config, .hvcc = hvcc, .pps_id = pps_id,
@@ -932,7 +946,7 @@ int x9_hevc_sample_metadata(const struct x9_hevc_config *c, const uint8_t *hvcc,
     struct x9_hevc_hdr hdr = {0};
     struct x9_hevc_hdr before = {0};
     unsigned vcl_seen = 0;
-    unsigned counts[2] = {0};
+    unsigned counts[3] = {0};
     size_t at = 0;
     while (at < sample_bytes) {
         uint32_t bytes = 0;
@@ -960,6 +974,18 @@ int x9_hevc_sample_hdr(const struct x9_hevc_config *c, const uint8_t *hvcc,
     if (!e) *out = metadata.hdr;
     return e;
 }
+int x9_hevc_hdr_validate(const struct x9_hevc_hdr *hdr)
+{
+    if (!hdr || hdr->mastering_present > 1 || hdr->light_present > 1 || hdr->ambient_present > 1 ||
+        ((hdr->mastering_sources | hdr->light_sources | hdr->ambient_sources) & ~X9_HEVC_HDR_SOURCES) ||
+        (!hdr->mastering_present && hdr->mastering_sources) ||
+        (!hdr->light_present && hdr->light_sources) || (!hdr->ambient_present && hdr->ambient_sources))
+        return EINVAL;
+    if (hdr->ambient_present && (!(hdr->ambient[0] | hdr->ambient[1] | hdr->ambient[2] | hdr->ambient[3]) ||
+        (((unsigned)hdr->ambient[4] << 8) | hdr->ambient[5]) > 50000 ||
+        (((unsigned)hdr->ambient[6] << 8) | hdr->ambient[7]) > 50000)) return EINVAL;
+    return 0;
+}
 int x9_hevc_hdr_sequence_next(const struct x9_hevc_hdr_sequence *current,
     const struct x9_hevc_au_metadata *picture, struct x9_hevc_hdr_sequence *out)
 {
@@ -970,15 +996,8 @@ int x9_hevc_hdr_sequence_next(const struct x9_hevc_hdr_sequence *current,
     memset(out,0,sizeof(*out));
     if (!current || !picture || previous.started > 1 || previous.eos_present > 1 ||
         previous.eob_present > 1 || previous.started != !!previous.clvs ||
-        previous.hdr.mastering_present > 1 ||
-        previous.hdr.light_present > 1 || picture->hdr.mastering_present > 1 ||
-        picture->hdr.light_present > 1 || picture->eos_present > 1 || picture->eob_present > 1 ||
-        ((previous.hdr.mastering_sources | previous.hdr.light_sources |
-          picture->hdr.mastering_sources | picture->hdr.light_sources) & ~X9_HEVC_HDR_SOURCES) ||
-        (!previous.hdr.mastering_present && previous.hdr.mastering_sources) ||
-        (!previous.hdr.light_present && previous.hdr.light_sources) ||
-        (!picture->hdr.mastering_present && picture->hdr.mastering_sources) ||
-        (!picture->hdr.light_present && picture->hdr.light_sources) ||
+        x9_hevc_hdr_validate(&previous.hdr) || x9_hevc_hdr_validate(&picture->hdr) ||
+        picture->eos_present > 1 || picture->eob_present > 1 ||
         picture->nal_type > 21 || (picture->nal_type > 9 && picture->nal_type < 16) ||
         picture->temporal_id > 6 || (picture->nal_type >= 16 && picture->temporal_id) ||
         picture->no_output_of_prior_pics_flag > 1 || previous.eob_present) return EINVAL;
@@ -1002,6 +1021,14 @@ int x9_hevc_hdr_sequence_next(const struct x9_hevc_hdr_sequence *current,
         if (next.hdr.light_present && memcmp(next.hdr.light,picture->hdr.light,4)) return EINVAL;
         memcpy(next.hdr.light,picture->hdr.light,4); next.hdr.light_present = 1;
         next.hdr.light_sources |= picture->hdr.light_sources;
+    }
+    if (picture->hdr.ambient_present) {
+        /* D.3.39 shares mastering's first-IRAP/persistent/exact rules, not
+         * CLLI's unrestricted late arrival. No retroactive ambient plan. */
+        if ((!new_clvs && !next.hdr.ambient_present) || (next.hdr.ambient_present &&
+            memcmp(next.hdr.ambient,picture->hdr.ambient,8))) return EINVAL;
+        memcpy(next.hdr.ambient,picture->hdr.ambient,8); next.hdr.ambient_present = 1;
+        next.hdr.ambient_sources |= picture->hdr.ambient_sources;
     }
     next.clvs = previous.clvs + new_clvs;
     next.started = 1; next.eos_present = picture->eos_present; next.eob_present = picture->eob_present;

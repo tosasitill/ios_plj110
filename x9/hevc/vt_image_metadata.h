@@ -6,12 +6,13 @@
 #include "hevc_bitstream.h"
 
 /* Exact original CM/container bytes, before any SEI enrichment. Optional HDR
- * absent remains absent; both fields are type/length checked before success.
- * Owned raw value snapshot, cleared on failure; no inferred SEI provenance. */
+ * absent remains absent; all three fields are type/length checked before success.
+ * Ambient illuminance/xy obey D.3.39's numeric constraints. Owned raw value
+ * snapshot, cleared on failure; no inferred SEI provenance. */
 OSStatus x9_hevc_read_hdr_description(CMVideoFormatDescriptionRef, struct x9_hevc_hdr *);
 
 /* Owned immutable format snapshot: preserve every original extension and
- * merge only present direct/persistent SEI137/144. CM/container and SEI must
+ * merge only present resolved/persistent SEI137/144/148. CM/container and SEI must
  * agree byte-for-byte when both exist; absent SEI does not erase CM metadata.
  * Source format is never mutated. Cleared output on failure. */
 OSStatus x9_hevc_copy_hdr_description(CMVideoFormatDescriptionRef,
@@ -20,7 +21,7 @@ OSStatus x9_hevc_copy_hdr_description(CMVideoFormatDescriptionRef,
 /* The pixel buffer contains the already-cropped visible picture. Do not copy
  * the compressed description's coded-size clean aperture onto it a second
  * time. Color/ICC/HDR and sample-aspect metadata keep their original values;
- * no guessed BT.709 defaults or software tone mapping. Exact 24/4-byte HDR
+ * no guessed BT.709 defaults or software tone mapping. Exact 24/4/8-byte HDR
  * payloads only; missing HDR clears stale HDR on this owned output buffer. */
 OSStatus x9_hevc_attach_image_metadata(CMVideoFormatDescriptionRef,
                                      CVPixelBufferRef);

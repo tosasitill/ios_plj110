@@ -11,17 +11,19 @@ OSStatus x9_hevc_read_hdr_description(CMVideoFormatDescriptionRef source, struct
         return kVTParameterErr;
     struct x9_hevc_hdr parsed = {0};
     CFStringRef keys[] = { kCMFormatDescriptionExtension_MasteringDisplayColorVolume,
-        kCMFormatDescriptionExtension_ContentLightLevelInfo };
-    uint8_t *bytes[] = { parsed.mastering, parsed.light };
-    uint32_t *present[] = { &parsed.mastering_present, &parsed.light_present };
-    const CFIndex lengths[] = {24,4};
-    for (unsigned i = 0; i < 2; i++) {
+        kCMFormatDescriptionExtension_ContentLightLevelInfo,
+        kCMFormatDescriptionExtension_AmbientViewingEnvironment };
+    uint8_t *bytes[] = { parsed.mastering, parsed.light, parsed.ambient };
+    uint32_t *present[] = { &parsed.mastering_present, &parsed.light_present, &parsed.ambient_present };
+    const CFIndex lengths[] = {24,4,8};
+    for (unsigned i = 0; i < 3; i++) {
         CFTypeRef value = CMFormatDescriptionGetExtension(source,keys[i]);
         if (!value) continue;
         if (CFGetTypeID(value) != CFDataGetTypeID() || CFDataGetLength(value) != lengths[i])
             return kVTVideoDecoderBadDataErr;
         memcpy(bytes[i],CFDataGetBytePtr(value),(size_t)lengths[i]); *present[i] = 1;
     }
+    if (x9_hevc_hdr_validate(&parsed)) return kVTVideoDecoderBadDataErr;
     *out = parsed; return noErr;
 }
 
@@ -31,18 +33,20 @@ OSStatus x9_hevc_copy_hdr_description(CMVideoFormatDescriptionRef source,
     if (!out) return kVTParameterErr;
     *out = NULL;
     if (!source || !hdr || CMFormatDescriptionGetMediaType(source) != kCMMediaType_Video ||
-        hdr->mastering_present > 1 || hdr->light_present > 1) return kVTParameterErr;
+        x9_hevc_hdr_validate(hdr)) return kVTParameterErr;
     struct x9_hevc_hdr original_hdr;
     OSStatus e = x9_hevc_read_hdr_description(source,&original_hdr);
     if (e) return e;
     CFStringRef keys[] = { kCMFormatDescriptionExtension_MasteringDisplayColorVolume,
-        kCMFormatDescriptionExtension_ContentLightLevelInfo };
-    const uint8_t *bytes[] = { hdr->mastering, hdr->light };
-    const CFIndex lengths[] = {24,4};
-    const unsigned present[] = { hdr->mastering_present, hdr->light_present };
-    const unsigned original_present[] = { original_hdr.mastering_present, original_hdr.light_present };
-    const uint8_t *original_bytes[] = { original_hdr.mastering, original_hdr.light };
-    for (unsigned i = 0; i < 2; i++) {
+        kCMFormatDescriptionExtension_ContentLightLevelInfo,
+        kCMFormatDescriptionExtension_AmbientViewingEnvironment };
+    const uint8_t *bytes[] = { hdr->mastering, hdr->light, hdr->ambient };
+    const CFIndex lengths[] = {24,4,8};
+    const unsigned present[] = { hdr->mastering_present, hdr->light_present, hdr->ambient_present };
+    const unsigned original_present[] = { original_hdr.mastering_present, original_hdr.light_present,
+        original_hdr.ambient_present };
+    const uint8_t *original_bytes[] = { original_hdr.mastering, original_hdr.light, original_hdr.ambient };
+    for (unsigned i = 0; i < 3; i++) {
         if (original_present[i] && present[i] &&
             memcmp(original_bytes[i],bytes[i],(size_t)lengths[i]))
             return kVTVideoDecoderBadDataErr;
@@ -52,7 +56,7 @@ OSStatus x9_hevc_copy_hdr_description(CMVideoFormatDescriptionRef source,
         CFDictionaryCreateMutable(NULL,0,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
     if (!extensions) return kVTAllocationFailedErr;
     e = noErr;
-    for (unsigned i = 0; i < 2; i++) {
+    for (unsigned i = 0; i < 3; i++) {
         if (!present[i]) continue;
         CFDataRef value = CFDataCreate(NULL,bytes[i],lengths[i]);
         if (!value) { e = kVTAllocationFailedErr; break; }
@@ -84,6 +88,9 @@ OSStatus x9_hevc_attach_image_metadata(CMVideoFormatDescriptionRef format,
     if (!format || !pixel ||
         CMFormatDescriptionGetMediaType(format) != kCMMediaType_Video)
         return kVTParameterErr;
+    struct x9_hevc_hdr hdr;
+    OSStatus hdr_error = x9_hevc_read_hdr_description(format,&hdr);
+    if (hdr_error) return hdr_error;
     const struct image_attachment entries[] = {
         { kCMFormatDescriptionExtension_ICCProfile,
           kCVImageBufferICCProfileKey, CFDataGetTypeID() },
@@ -105,6 +112,8 @@ OSStatus x9_hevc_attach_image_metadata(CMVideoFormatDescriptionRef format,
           kCVImageBufferMasteringDisplayColorVolumeKey, CFDataGetTypeID() },
         { kCMFormatDescriptionExtension_ContentLightLevelInfo,
           kCVImageBufferContentLightLevelInfoKey, CFDataGetTypeID() },
+        { kCMFormatDescriptionExtension_AmbientViewingEnvironment,
+          kCVImageBufferAmbientViewingEnvironmentKey, CFDataGetTypeID() },
     };
     const size_t count = sizeof(entries) / sizeof(entries[0]);
     CFTypeRef values[sizeof(entries) / sizeof(entries[0])] = {0};
@@ -119,7 +128,9 @@ OSStatus x9_hevc_attach_image_metadata(CMVideoFormatDescriptionRef format,
         if ((CFEqual(entries[i].source,kCMFormatDescriptionExtension_MasteringDisplayColorVolume) &&
                 CFDataGetLength(values[i]) != 24) ||
             (CFEqual(entries[i].source,kCMFormatDescriptionExtension_ContentLightLevelInfo) &&
-                CFDataGetLength(values[i]) != 4))
+                CFDataGetLength(values[i]) != 4) ||
+            (CFEqual(entries[i].source,kCMFormatDescriptionExtension_AmbientViewingEnvironment) &&
+                CFDataGetLength(values[i]) != 8))
             return kVTVideoDecoderBadDataErr;
         if (CFEqual(entries[i].source,
                     kCMFormatDescriptionExtension_PixelAspectRatio)) {
@@ -148,7 +159,8 @@ OSStatus x9_hevc_attach_image_metadata(CMVideoFormatDescriptionRef format,
         if (values[i]) CVBufferSetAttachment(pixel, entries[i].destination,
             values[i], kCVAttachmentMode_ShouldPropagate);
         else if (CFEqual(entries[i].source,kCMFormatDescriptionExtension_MasteringDisplayColorVolume) ||
-            CFEqual(entries[i].source,kCMFormatDescriptionExtension_ContentLightLevelInfo))
+            CFEqual(entries[i].source,kCMFormatDescriptionExtension_ContentLightLevelInfo) ||
+            CFEqual(entries[i].source,kCMFormatDescriptionExtension_AmbientViewingEnvironment))
             CVBufferRemoveAttachment(pixel,entries[i].destination);
     }
     return noErr;
@@ -157,12 +169,17 @@ OSStatus x9_hevc_validate_hdr_metadata(CMVideoFormatDescriptionRef format, CVPix
 {
     if (!format || !pixel || CMFormatDescriptionGetMediaType(format) != kCMMediaType_Video)
         return kVTParameterErr;
+    struct x9_hevc_hdr hdr;
+    OSStatus hdr_error = x9_hevc_read_hdr_description(format,&hdr);
+    if (hdr_error) return hdr_error;
     CFStringRef cm[] = { kCMFormatDescriptionExtension_MasteringDisplayColorVolume,
-        kCMFormatDescriptionExtension_ContentLightLevelInfo };
+        kCMFormatDescriptionExtension_ContentLightLevelInfo,
+        kCMFormatDescriptionExtension_AmbientViewingEnvironment };
     CFStringRef cv[] = { kCVImageBufferMasteringDisplayColorVolumeKey,
-        kCVImageBufferContentLightLevelInfoKey };
-    const CFIndex lengths[] = {24,4};
-    for (unsigned n = 0; n < 2; n++) {
+        kCVImageBufferContentLightLevelInfoKey,
+        kCVImageBufferAmbientViewingEnvironmentKey };
+    const CFIndex lengths[] = {24,4,8};
+    for (unsigned n = 0; n < 3; n++) {
         CFTypeRef expected = CMFormatDescriptionGetExtension(format,cm[n]);
         CFTypeRef actual = CVBufferCopyAttachment(pixel,cv[n],NULL);
         OSStatus e = noErr;

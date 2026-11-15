@@ -14,7 +14,8 @@ int x9_heif_copy_item_info(const struct x9_heif_document *,
  * Known CICP mapping only; unknown code points remain in raw item info. */
 int x9_heif_copy_color_extensions(const struct x9_heif_document *,
     const struct x9_heif_image *, CFDictionaryRef *extensions);
-/* Merge this AU's resolved base-layer direct/scalable prefix HDR SEI with the item's mdcv/clli.
+/* Merge this AU's resolved base-layer direct/scalable prefix137/144/148 with
+ * the item's mdcv/clli and any supplied ambient extension.
  * A duplicate must agree exactly; errors leave extensions unchanged. This
  * is not persistent-video SEI state, derived-output metadata or tone mapping. */
 int x9_heif_resolve_hdr_extensions(CFMutableDictionaryRef, const struct x9_hevc_hdr *);

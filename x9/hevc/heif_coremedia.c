@@ -44,9 +44,10 @@ static int format_catalog(CMVideoFormatDescriptionRef format, const uint8_t *hvc
 static int format_hdr(CMVideoFormatDescriptionRef format, CFDictionaryRef requested)
 {
     CFStringRef keys[] = { kCMFormatDescriptionExtension_MasteringDisplayColorVolume,
-        kCMFormatDescriptionExtension_ContentLightLevelInfo };
-    const CFIndex lengths[] = {24,4};
-    for (unsigned n = 0; n < 2; n++) {
+        kCMFormatDescriptionExtension_ContentLightLevelInfo,
+        kCMFormatDescriptionExtension_AmbientViewingEnvironment };
+    const CFIndex lengths[] = {24,4,8};
+    for (unsigned n = 0; n < 3; n++) {
         CFTypeRef expected = CFDictionaryGetValue(requested,keys[n]);
         CFTypeRef actual = CMFormatDescriptionGetExtension(format,keys[n]);
         if (!expected && !actual) continue;
@@ -108,17 +109,21 @@ OSStatus x9_heif_copy_item_sample(CFDataRef file, uint32_t id,
             &kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
         int32_t nal_type = (int32_t)picture.nal_type;
         CFNumberRef type = CFNumberCreate(NULL,kCFNumberSInt32Type,&nal_type);
-        int32_t sources[2] = { (int32_t)hdr.mastering_sources, (int32_t)hdr.light_sources };
-        CFNumberRef source_values[2] = { CFNumberCreate(NULL,kCFNumberSInt32Type,&sources[0]),
-            CFNumberCreate(NULL,kCFNumberSInt32Type,&sources[1]) };
-        if (!record || !new_extensions || !type || !hdr_info || !source_values[0] || !source_values[1]) {
+        int32_t sources[3] = { (int32_t)hdr.mastering_sources, (int32_t)hdr.light_sources,
+            (int32_t)hdr.ambient_sources };
+        CFNumberRef source_values[3] = { CFNumberCreate(NULL,kCFNumberSInt32Type,&sources[0]),
+            CFNumberCreate(NULL,kCFNumberSInt32Type,&sources[1]),
+            CFNumberCreate(NULL,kCFNumberSInt32Type,&sources[2]) };
+        if (!record || !new_extensions || !type || !hdr_info || !source_values[0] ||
+            !source_values[1] || !source_values[2]) {
             if (record) CFRelease(record);
             if (new_extensions) CFRelease(new_extensions);
             e = ENOMEM;
         } else {
             CFStringRef hdr_keys[] = { kCMFormatDescriptionExtension_MasteringDisplayColorVolume,
-                kCMFormatDescriptionExtension_ContentLightLevelInfo };
-            for (unsigned n = 0; n < 2; n++) {
+                kCMFormatDescriptionExtension_ContentLightLevelInfo,
+                kCMFormatDescriptionExtension_AmbientViewingEnvironment };
+            for (unsigned n = 0; n < 3; n++) {
                 CFTypeRef value = CFDictionaryGetValue(resolved,hdr_keys[n]);
                 if (value) CFDictionarySetValue(hdr_info,hdr_keys[n],value);
             }
@@ -127,8 +132,10 @@ OSStatus x9_heif_copy_item_sample(CFDataRef file, uint32_t id,
             CFDictionarySetValue(record,CFSTR("ResolvedHDRMetadata"),hdr_info);
             CFDictionarySetValue(record,CFSTR("SEIMasteringDisplayPresent"),hdr.mastering_present ? kCFBooleanTrue : kCFBooleanFalse);
             CFDictionarySetValue(record,CFSTR("SEIContentLightPresent"),hdr.light_present ? kCFBooleanTrue : kCFBooleanFalse);
+            CFDictionarySetValue(record,CFSTR("SEIAmbientViewingEnvironmentPresent"),hdr.ambient_present ? kCFBooleanTrue : kCFBooleanFalse);
             CFDictionarySetValue(record,CFSTR("SEIMasteringDisplaySources"),source_values[0]);
             CFDictionarySetValue(record,CFSTR("SEIContentLightSources"),source_values[1]);
+            CFDictionarySetValue(record,CFSTR("SEIAmbientViewingEnvironmentSources"),source_values[2]);
             CFDictionarySetValue(record,CFSTR("IRAPNALUnitType"),type);
             CFDictionarySetValue(record,CFSTR("NoOutputOfPriorPicsFlag"),
                 picture.no_output_of_prior_pics_flag ? kCFBooleanTrue : kCFBooleanFalse);
@@ -137,7 +144,7 @@ OSStatus x9_heif_copy_item_sample(CFDataRef file, uint32_t id,
         }
         if (hdr_info) CFRelease(hdr_info);
         if (type) CFRelease(type);
-        for (unsigned n = 0; n < 2; n++) if (source_values[n]) CFRelease(source_values[n]);
+        for (unsigned n = 0; n < 3; n++) if (source_values[n]) CFRelease(source_values[n]);
     }
     if (resolved) CFRelease(resolved);
     if (vui_info) CFRelease(vui_info);
