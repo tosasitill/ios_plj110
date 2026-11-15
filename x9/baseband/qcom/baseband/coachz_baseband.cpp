@@ -1427,18 +1427,32 @@ extern "C" int coachz_baseband_qrtr(uint32_t dst_port, uint32_t src_node, uint32
 // Unlike coachz_baseband_qrtr's "port recognized" result, this is an actual
 // host-queue admission receipt. An X9 SMS must keep its PDU on queue/OOM loss;
 // admission is still NOT the host's WMS ACK or durable Messages storage.
-static bool bb_x9_sms_event(uint32_t dst_port, uint32_t src_node, const uint8_t *sdu, uint32_t size)
+// The trusted SMS callback holds the MD mutex before this bridge mutex.
+// Allocate owned outside both; success transfers it, failure keeps it with
+// the caller. Unlike ordinary bb_push this path never allocates under MD.
+static bool bb_x9_sms_event(uint32_t dst_port, uint32_t src_node, const uint8_t *sdu, uint32_t size,
+                           uint8_t *owned, uint32_t room)
 {
   const uint32_t slot = dst_port - CBQ_PORT_BASE;
-  if (!bb_lock || dst_port < CBQ_PORT_BASE || slot >= CBQ_MAX_CLIENTS || size < 7 ||
+  if (!bb_lock || !owned || room != CBQ_HDR + size || room > BB_FRAME_MAX ||
+      dst_port < CBQ_PORT_BASE || slot >= CBQ_MAX_CLIENTS || size < 7 ||
       sdu[0] != CBQ_QMI_INDICATION || cbq_rd16(sdu + 3) != 1 || cbq_rd16(sdu + 5) != size - 7) return false;
   IOLockLock(bb_lock);
   const cbq_client &c = bb_qmux.client[slot];
   bool admitted = false;
   if (c.used && !c.release_pending && c.service == 5 && c.channel < 2) {
-    const cbq_result r = cbq_from_modem(&bb_qmux, dst_port, src_node, sdu, size, bb_out, sizeof bb_out);
-    if (r.kind == CBQ_TO_HOST && r.service == 5)
-      admitted = bb_push(r.channel == 0 ? CBH_QMUX1 : CBH_QMUX2, bb_out, r.len);
+    const cbq_result r = cbq_from_modem(&bb_qmux, dst_port, src_node, sdu, size, owned, room);
+    if (r.kind == CBQ_TO_HOST && r.service == 5 && r.len == room) {
+      bb_channel *ch = &bb_ch[r.channel == 0 ? CBH_QMUX1 : CBH_QMUX2];
+      if (ch->count < BB_QUEUE) {
+        ch->frames[(ch->head + ch->count++) % BB_QUEUE] = { r.len, owned };
+        ch->frames_out++;
+        ch->bytes_out += r.len;
+        IOLockWakeup(bb_lock, ch, false);
+        if (ch->reads_waiting && bb_complete_call) thread_call_enter(bb_complete_call);
+        admitted = true;
+      } else ch->frames_dropped++;
+    }
   }
   IOLockUnlock(bb_lock);
   return admitted;

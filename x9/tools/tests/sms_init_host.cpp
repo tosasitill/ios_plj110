@@ -15,14 +15,15 @@ static void lck_mtx_lock(int *){assert(!lock_depth);lock_depth=1;}
 static void lck_mtx_unlock(int *){assert(lock_depth);lock_depth=0;}
 static int x9_at_enabled(){return 1;}
 static int sweet_x9_arg(const char *,int){return 1;}
-int x9_md_at_online(){return 1;}
+static bool at_online=true;
+int x9_md_at_online(){assert(!lock_depth);return at_online;}
 static unsigned writes;
 static void (*during_write)();
 static int x9md_tx(unsigned a,unsigned b,unsigned c,unsigned d,unsigned e,const uint8_t *,unsigned n){
  assert(!lock_depth&&a==5&&b==217&&c==0&&d==16+n&&e==0);writes++;if(during_write)during_write();return 0;
 }
 #include "../../kernel/src/bsd/dev/x9_mipc_bridge.inc"
-static const unsigned X9BB_PORT_BASE=0x2000,X9BB_NODE=1,CBQ_PORT_BASE=0x4000,CBQ_MAX_CLIENTS=8,X9Q_REQ=1024;
+static const unsigned X9BB_PORT_BASE=0x2000,X9BB_NODE=1,CBQ_PORT_BASE=0x4000,CBQ_MAX_CLIENTS=8,X9Q_REQ=1024,CBQ_HDR=6;
 static const uint16_t X9Q_INTERNAL=3,X9Q_NOT_READY=16,X9Q_ARG=48,X9Q_BUSY=2,X9Q_UNSUPPORTED=94;
 static struct {uint64_t generation;uint8_t sim_slot;} x9q_clients[CBQ_MAX_CLIENTS];
 static uint64_t fake_ms;
@@ -58,7 +59,19 @@ static x9q_view x9w_tlv(const uint8_t *p,unsigned n,unsigned tag){const uint8_t 
  return x9cw_tlv(p,n,tag,&v,&k)?x9q_view{v,k}:x9q_view{nullptr,0};}
 static bool x9w_byte(const uint8_t *p,unsigned n,unsigned tag,unsigned &v){auto t=x9w_tlv(p,n,tag);if(!t.p||t.n!=1)return false;v=t.p[0];return true;}
 static bool x9w_word(const uint8_t *p,unsigned n,unsigned tag,unsigned &v){auto t=x9w_tlv(p,n,tag);if(!t.p||t.n!=4)return false;v=x9cw_u32(t.p);return true;}
-static bool bb_x9_sms_event(uint32_t,uint32_t,const void *,unsigned){return true;}
+static unsigned allocations,frees,queue_calls;
+static bool queue_accept=true,allocation_accept=true;
+static uint8_t *queued_frame;
+static void (*during_allocation)();
+static void *IOMallocData(unsigned n){
+ assert(!lock_depth);if(during_allocation)during_allocation();
+ if(!allocation_accept)return nullptr;allocations++;return malloc(n);
+}
+static void IOFreeData(void *p,unsigned){assert(!lock_depth);frees++;free(p);}
+static bool bb_x9_sms_event(uint32_t,uint32_t,const uint8_t *,unsigned n,uint8_t *owned,unsigned room){
+ assert(lock_depth&&owned&&room==n+CBQ_HDR);queue_calls++;
+ if(!queue_accept)return false;assert(!queued_frame);queued_frame=owned;return true;
+}
 #include "../../kernel/src/iokit/Kernel/arm/X9Messages.inc"
 static void cnf(uint64_t token,unsigned id,unsigned mask=1,bool host=false){
  uint8_t p[32];unsigned n=host?32:24;x9cw_header(p,n,id,mask,(unsigned)token);x9cw_scalar(p+16,0,0,4);
@@ -204,6 +217,95 @@ static void sms_poison_unknown_token_retained(){
  x9m_init_stage=1;x9m_init_token=55;x9m_init_deadline=100;poison_sms_inbox();x9m_poll();
  assert(x9m_init_hold&&x9m_init_token==55&&!writes);
 }
+/* Synthetic CMD8603: these vectors compile the real RX/event/publish gate.
+ * Host queue stub records ownership only; allocation/free stay outside MD. */
+static uint32_t publication_cmd(unsigned mask=1){
+ uint8_t p[24],out[24];x9cw_header(p,24,0x8603,mask,77);
+ const uint8_t pdu[]={0,2,0};x9cw_put16(p+16,0x8100);x9cw_put16(p+18,3);memcpy(p+20,pdu,3);
+ x9mi_rx(p,24);uint32_t n=0,token=0;assert(x9_md_mipc_message_event(out,24,&n,&token)==1&&token&&n==24);
+ return token;
+}
+static void publication_route(unsigned sim=0){
+ x9q_clients[0].generation=9;x9q_clients[0].sim_slot=(uint8_t)sim;
+ auto &c=x9m_clients[0];c.events=c.routes=c.status_reports=true;c.route_mask=1u<<4;c.route[4]=1;
+}
+static x9m_incoming &publication_pending(uint32_t token,unsigned sim=0){
+ auto &in=x9m_incoming_sms[0];in.token=token;in.sim=sim;in.len=3;in.pdu[0]=0;in.pdu[1]=2;in.pdu[2]=0;return in;
+}
+static void publication_release(){assert(queued_frame);free(queued_frame);queued_frame=nullptr;}
+static int publication_receipt(void *context){assert(lock_depth);++*static_cast<unsigned *>(context);return 1;}
+static void sms_publish_native_receipt(){
+ uint32_t token=publication_cmd();auto original=x9_mm_slots[0];unsigned called=0;
+ assert(x9_md_mipc_message_publish(token,0,publication_receipt,&called)==1&&called==1&&!writes);
+ assert(!memcmp(&original,&x9_mm_slots[0],sizeof(original))); // no CMD mutation/ACK/retirement
+}
+static void sms_publish_native_invalid(){
+ uint32_t token=publication_cmd();unsigned called=0;
+ assert(!x9_md_mipc_message_publish(token+1,0,publication_receipt,&called));
+ assert(!x9_md_mipc_message_publish(token,1,publication_receipt,&called));
+ assert(!x9_md_mipc_message_publish(token,2,publication_receipt,&called));
+ assert(!x9_md_mipc_message_publish(token,0,nullptr,&called));
+ for(unsigned state:{1u,3u,4u,5u,6u}){
+  x9_mm_slots[0].state=state;assert(!x9_md_mipc_message_publish(token,0,publication_receipt,&called));
+ }
+ assert(!called&&!writes);
+}
+static void sms_publish_native_non_cs(){
+ uint8_t p[24],out[24];x9cw_header(p,24,0x8601,1,78);x9cw_scalar(p+16,0x100,4,1);x9mi_rx(p,24);
+ uint32_t n=0,token=0;assert(x9_md_mipc_message_event(out,24,&n,&token)==1&&token);unsigned called=0;
+ assert(!x9_md_mipc_message_publish(token,0,publication_receipt,&called)&&!called&&x9_mm_slots[0].state==2&&!writes);
+}
+static void publication_changed_cmd(){
+ uint8_t p[24];x9cw_header(p,24,0x8603,1,77);x9cw_put16(p+16,0x8100);x9cw_put16(p+18,3);
+ p[20]=0;p[21]=2;p[22]=1;x9mi_rx(p,24);assert(x9_mm_poisoned);
+}
+static void sms_publish_event_poison(){
+ uint32_t token=publication_cmd();publication_route();auto &in=publication_pending(token);publication_changed_cmd();
+ x9m_deliver(in,2);assert(!queue_calls&&!in.delivered&&in.token==token&&in.pdu[1]==2&&allocations==frees&&x9_mm_slots[0].state==2);
+}
+static void sms_publish_allocation_poison(){
+ uint32_t token=publication_cmd();publication_route();auto &in=publication_pending(token);during_allocation=publication_changed_cmd;
+ x9m_deliver(in,2);during_allocation=nullptr;
+ assert(!queue_calls&&!in.delivered&&in.token==token&&in.pdu[1]==2&&allocations==frees&&x9_mm_slots[0].state==2);
+}
+static void sms_publish_control_loss(){
+ uint32_t token=publication_cmd();publication_route();auto &in=publication_pending(token);x9w_control_ready=false;
+ x9m_poll();assert(!queue_calls&&!allocations&&!in.delivered&&in.token==token&&in.pdu[1]==2&&x9_mm_slots[0].state==2&&!writes);
+}
+static void sms_publish_transport_loss(){
+ uint32_t token=publication_cmd();publication_route();auto &in=publication_pending(token);x9mi_online(0);
+ x9m_deliver(in,2);assert(!queue_calls&&!in.delivered&&in.token==token&&in.pdu[1]==2&&allocations==frees);
+}
+static void sms_publish_at_loss(){
+ uint32_t token=publication_cmd();publication_route();auto &in=publication_pending(token);at_online=false;
+ x9m_deliver(in,2);assert(!queue_calls&&!in.delivered&&in.token==token&&in.pdu[1]==2&&allocations==frees);
+}
+static void sms_publish_queue_retry(){
+ uint32_t token=publication_cmd();publication_route();auto &in=publication_pending(token);queue_accept=false;x9m_deliver(in,2);
+ assert(queue_calls==1&&!in.delivered&&in.token==token&&in.pdu[1]==2&&allocations==frees);
+ fake_ms=in.next_delivery;queue_accept=true;x9m_deliver(in,2);
+ assert(queue_calls==2&&in.delivered&&in.token==token&&in.generation==9&&!in.pdu[1]&&allocations==frees+1&&x9_mm_slots[0].state==2&&!writes);
+ publication_release();
+}
+static void sms_publish_queue_retry_poison(){
+ uint32_t token=publication_cmd();publication_route();auto &in=publication_pending(token);queue_accept=false;x9m_deliver(in,2);
+ fake_ms=in.next_delivery;queue_accept=true;publication_changed_cmd();x9m_poll();
+ assert(queue_calls==1&&!in.delivered&&in.token==token&&in.pdu[1]==2&&allocations==frees&&x9_mm_slots[0].state==2&&!writes);
+}
+static void sms_publish_oom(){
+ uint32_t token=publication_cmd();publication_route();auto &in=publication_pending(token);allocation_accept=false;x9m_deliver(in,2);
+ assert(!queue_calls&&!allocations&&!frees&&!in.delivered&&in.token==token&&in.pdu[1]==2&&!writes);
+}
+static void sms_publish_high_mask(){
+ uint32_t token=publication_cmd(0x22);publication_route(1);auto &in=publication_pending(token,1);x9m_deliver(in,2);
+ assert(queue_calls==1&&in.delivered&&x9_mm_slots[0].state==2&&x9_mm_slots[0].mask==0x22&&!writes);publication_release();
+}
+static void sms_publish_delivered_poison(){
+ uint32_t token=publication_cmd();publication_route();auto &in=publication_pending(token);x9m_deliver(in,2);assert(in.delivered);
+ publication_changed_cmd();x9m_del(0);publication_route();x9q_clients[0].generation++;x9m_poll();
+ assert(queue_calls==1&&in.delivered&&in.generation==9&&in.token==token&&x9_mm_slots[0].state==2&&!writes);
+ assert(x9_md_mipc_message_reply(token,1,0)==0&&x9_mm_slots[0].state==2);publication_release();
+}
 int main(int argc,char **argv){
  assert(argc==2);x9mi_online(1);x9w_control_ready=true;
  struct {const char *name;void (*run)();} cases[]={
@@ -216,6 +318,13 @@ int main(int argc,char **argv){
   {"sms_poison_queued_and_ready",sms_poison_queued_and_ready},{"sms_poison_send_pre_tx",sms_poison_send_pre_tx},
   {"sms_poison_tag_before_mutation",sms_poison_tag_before_mutation},{"sms_poison_tag_after_mutation",sms_poison_tag_after_mutation},
   {"sms_poison_sent_mo_drain",sms_poison_sent_mo_drain},{"sms_poison_selected_ack_drain",sms_poison_selected_ack_drain},
-  {"sms_poison_unknown_token_retained",sms_poison_unknown_token_retained}};
+  {"sms_poison_unknown_token_retained",sms_poison_unknown_token_retained},
+  {"sms_publish_native_receipt",sms_publish_native_receipt},{"sms_publish_native_invalid",sms_publish_native_invalid},
+  {"sms_publish_native_non_cs",sms_publish_native_non_cs},
+  {"sms_publish_event_poison",sms_publish_event_poison},{"sms_publish_allocation_poison",sms_publish_allocation_poison},
+  {"sms_publish_control_loss",sms_publish_control_loss},{"sms_publish_transport_loss",sms_publish_transport_loss},
+  {"sms_publish_at_loss",sms_publish_at_loss},{"sms_publish_queue_retry",sms_publish_queue_retry},
+  {"sms_publish_queue_retry_poison",sms_publish_queue_retry_poison},{"sms_publish_oom",sms_publish_oom},
+  {"sms_publish_high_mask",sms_publish_high_mask},{"sms_publish_delivered_poison",sms_publish_delivered_poison}};
  for(auto &c:cases)if(!strcmp(argv[1],c.name)){c.run();return 0;}return 2;
 }

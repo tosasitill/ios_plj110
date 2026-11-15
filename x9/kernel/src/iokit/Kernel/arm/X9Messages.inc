@@ -240,8 +240,19 @@ static void x9m_init_poll(uint8_t *response,unsigned room){
   if(token){s.init=step;s.init_token=token;s.init_epoch=s.ready_epoch;s.init_deadline=x9q_ms()+300000;}
  }
 }
+struct x9m_publication {
+ uint32_t port,node;const uint8_t *sdu;uint32_t size;
+ uint8_t *owned;uint32_t room;
+};
+static int x9m_publish(void *context){
+ /* Trusted closure: host queue only, no allocation or MD API reentry. */
+ x9m_publication &p=*static_cast<x9m_publication *>(context);
+ return bb_x9_sms_event(p.port,p.node,p.sdu,p.size,p.owned,p.room)?1:0;
+}
 static void x9m_deliver(x9m_incoming &in,unsigned mti){
- if(x9q_ms()<in.next_delivery)return;
+ /* The QMI owner alone changes control-ready. Native publish below holds
+  * the MD mutex through queue admission, closing event->poison->retry. */
+ if(!x9w_control_ready||x9q_ms()<in.next_delivery||!x9_md_mipc_message_online())return;
  unsigned cls=mti==2?4:x9m_class(in.pdu,in.len);
  if(cls>5)return;
  for(unsigned i=0;i<CBQ_MAX_CLIENTS;i++){
@@ -266,7 +277,11 @@ static void x9m_deliver(x9m_incoming &in,unsigned mti){
    * and retry only admission (never MD ACK) if the actual host queue is full. */
   memmove(p.p+7,p.p+14,p.n-14);p.n-=7;p.p[0]=4;p.p[3]=1;
   p.p[5]=(uint8_t)(p.n-7);p.p[6]=(uint8_t)((p.n-7)>>8);
-  bool admitted=p.good&&bb_x9_sms_event(CBQ_PORT_BASE+i,X9BB_NODE,p.p,p.n);
+  uint32_t room=CBQ_HDR+p.n;
+  uint8_t *owned=p.good?static_cast<uint8_t *>(IOMallocData(room)):nullptr;
+  x9m_publication publication={CBQ_PORT_BASE+i,X9BB_NODE,p.p,p.n,owned,room};
+  bool admitted=owned&&x9_md_mipc_message_publish(in.token,in.sim,x9m_publish,&publication)==1;
+  if(!admitted&&owned){bzero(owned,room);IOFreeData(owned,room);}
   bzero(v,sizeof(v));bzero(p.p,sizeof(p.p));
   if(!admitted){in.next_delivery=x9q_ms()+100;return;}
   in.delivered=true;in.slot=i;in.generation=x9q_clients[i].generation;in.ack_wait=x9q_ms()+30000;
