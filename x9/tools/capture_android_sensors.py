@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only PLJ110 GNSS/SCP baseline; private output under .local only.
+"""Read-only PLJ110 sensors/GNSS/SCP baseline; private output in x9/out.
 
 Usage: X9_SERIAL=<serial> python3 x9/tools/capture_android_sensors.py
 Does not enable GPS/sensors, change properties, use /dev/mem, reboot, write a
@@ -16,16 +16,16 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[2]
-PRIVATE = ROOT / ".local"
+PRIVATE = ROOT / "x9" / "out"
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    out = (args.out or PRIVATE / "x9" / "sensor-baseline" / stamp).resolve()
+    out = (args.out or PRIVATE / ("sensor-baseline-" + stamp)).resolve()
     if not out.is_relative_to(PRIVATE.resolve()):
-        parser.error("Output must be inside this checkout's private .local directory")
+        parser.error("Output must be inside this checkout's gitignored x9/out directory")
     if out.exists():
         parser.error("Refusing to overwrite an existing capture")
     adb = shutil.which("adb")
@@ -67,7 +67,8 @@ def main():
     sensors_code, sensors = capture("sensorservice.txt", "dumpsys sensorservice", timeout=45)
     capture("device-tree.dtb", "cat /sys/firmware/fdt", root=True)
     capture("gnss-scp-kernel.txt", "dmesg | grep -i -E 'gps_mcudl|GDLX|GDL-|gpsmdl|"
-            "sensorhub|sensor_ready|sensor_list|ipi_comm|share_buf|\\[SCP\\]'", root=True)
+            "sensorhub|sensor_ready|sensor_list|ipi_comm|share_buf|\\[SCP\\]|"
+            "transceiver|share_mem|tcs3720|tcs3449|alsps|ambient|proximity'", root=True)
     capture("gnss-firmware-files.txt", "for d in /vendor/firmware /odm/firmware "
             "/odm/firmware/oplus_direct_load_kernel /vendor/firmware_mnt; do "
             "[ ! -d \"$d\" ] || find \"$d\" -maxdepth 2 -type f; done | "
