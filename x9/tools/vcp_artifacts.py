@@ -533,9 +533,18 @@ def rv55_clock_evidence(dram, init):
 
 
 def rv55_mem_wait_evidence(dram, init):
-    """Bounded reverse senders; custom branches/transport runtime stay opaque."""
+    """Senders and registered free edges, not a DMA-retirement contract.
+
+    Full-payload INIT identity gates these PC/byte interpretations. RV32
+    encoded-length framing was checked independently of r2's invalid-op
+    fallback: a bogus call at 0x246a46 is inside an unresolved FOUR-byte
+    instruction at 0x246a44. Custom branches, callback-table lifetime, codec
+    destruction and transport execution remain unproved.
+    """
     result = dict(profile_match=False, runtime_allocation_proven=False,
-                  runtime_irq_completion_proven=False, runtime_mapping_proven=False)
+                  runtime_irq_completion_proven=False, runtime_mapping_proven=False,
+                  runtime_free_proven=False, runtime_dma_retirement_proven=False,
+                  runtime_cache_handoff_proven=False)
     if not init['profile_match']:
         return result
     spans = (
@@ -549,13 +558,64 @@ def rv55_mem_wait_evidence(dram, init):
         ('free_zero64', 0x308c28, 0x308c3a),
         ('free_c006_token_copy32_mem_object', 0x308c3a, 0x308c56),
         ('free_service1_send64', 0x308cae, 0x308cbc),
+        ('free_callback_address_and_block_slot', 0x30584a, 0x305868),
+        ('reverse_callback_block_service1_install', 0x305898, 0x3058a6),
+        ('reverse_table_stride96_destination_and_copy', 0x242f02, 0x242f3e),
+        ('free_wrapper_size_service_and_ap_token_loads', 0x246962, 0x246978),
+        ('free_wrapper_first_callback_lookup', 0x2469bc, 0x2469d0),
+        ('free_wrapper_rejected_false_call_encoding', 0x246a44, 0x246a48),
+        ('free_wrapper_stack_mem_object32', 0x246ab8, 0x246acc),
+        ('free_wrapper_second_lookup_token_and_indirect_call', 0x246ae4, 0x246af6),
+        ('a002_discriminator_and_dispatch_edge', 0x305d68, 0x305d70),
+        ('a002_instance_source_and_unresolved_branch', 0x306146, 0x306174),
+        ('instance_cleanup_codec_deinit_call', 0x306cfa, 0x306d02),
+        ('instance_cleanup_codec_release_call', 0x306d28, 0x306d2e),
+        ('instance_cleanup_free_wrapper_call', 0x306db6, 0x306dd2),
+        ('instance_cleanup_host_fields_and_ack_join', 0x306dd2, 0x306df4),
+        ('a002_reply_id_after_cleanup_join', 0x3061aa, 0x3061b6),
+        ('codec_deinit_flag_context_and_indirect_call', 0x2707f8, 0x270804),
+        ('codec_deinit_clear_software_flag', 0x27080e, 0x270812),
+        ('codec_release_object_copy_and_free_call', 0x27088a, 0x2708a4),
     )
     result.update(profile_match=True, profile='captured RV55 instance mem/wait senders',
         allocation=dict(message=0xc005, service=1, bytes=64, initial_status=0,
             type_offset=24, requested_length_offset=28, address_fields_initially_zero=True,
             post_reply_copies_offsets=[32, 40, 48],
             complete_reply_status_validation_proven=False),
-        free=dict(message=0xc006, service=1, bytes=64, copied_mem_bytes=32),
+        free=dict(message=0xc006, service=1, bytes=64, copied_mem_bytes=32,
+            sender=0x308c1a, wrapper=0x24695a, wrapper_object_bytes=88,
+            callback_registration=dict(service=1, install_call=0x3058a2,
+                installer=0x242f00, block_stack_offset=24,
+                free_block_stack_offset=56, free_callback_offset=32,
+                table_base=0x32c0f0, table_stride=96,
+                service1_free_callback_cell=0x32c170,
+                registered_target=0x308c1a,
+                runtime_registration_and_table_overwrite_exclusion_proven=False),
+            indirect_call=dict(address=0x246af4, callback_register='a3',
+                callback_offset=32, object_service_offset=64,
+                object_ap_token_offsets=[80, 84], request_object_stack_offset=24,
+                callback_arguments=['AP token low', 'AP token high', 'mem object pointer'],
+                table_select='0x32c0f0 + object.service * 96',
+                registered_target_edge_is_conditional_on_table_contents=True,
+                wrapper_control_flow_complete=False, runtime_call_proven=False),
+            instance_cleanup=dict(free_call=0x306dce,
+                object_offset=0x1990, presence_field_offset=0x198c,
+                codec_deinit_call=0x306cfc, codec_release_call=0x306d2a,
+                deinit_wrapper=0x2707d2, release_wrapper=0x270874,
+                a002_dispatch_edge=0x305d6c, a002_entry=0x306106,
+                cleanup_reply_join=0x3061aa, reply_id=0xb002,
+                a002_to_cleanup_control_flow_proven=False,
+                free_result_checked_before_cleanup_join=False,
+                codec_deinit_indirect_call=0x270802,
+                codec_deinit_callback_offset=44, codec_context_offset=80,
+                codec_software_flag_offset=84,
+                codec_deinit_target_and_dma_drain_proven=False,
+                release_copy_source_offset=640, release_copy_bytes=88,
+                release_free_call=0x2708a0),
+            raw_request_or_software_deinit_is_retirement_authority=False,
+            transport_return_is_hardware_drain_proof=False,
+            unsafe_false_call=dict(address=0x246a46, real_encoding_address=0x246a44,
+                real_encoding_bytes=4, rejected_as_instruction_interior=True)),
         wait=dict(message=0xc007, service=1, bytes=40, hardware_selector_offset=16,
             id_offset=24, id_formula='hardware_selector == 1 ? 1 : 0',
             timeout_in_request=False, irq_or_pixels_proven=False),
