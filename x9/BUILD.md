@@ -94,6 +94,21 @@ copy of `local.json` in the same output directory with `dxb` set to that
 repo-relative scratch path, then pass `build.py --config <private-copy>`.
 An isolated XNU build is still not a native-Bluetooth hardware validation.
 
+To resume that same isolated tree after a build-tool fix, without touching the
+shared inputs or copying the tree again:
+
+```bash
+x9/xnu/build-xnu.sh macos --isolated-existing x9/out/<unique-name>/dxb
+```
+
+The existing tree must remain entirely below this worktree's `x9/out/` and its
+source must still equal the pinned tag plus this branch's patches. Previous
+kernel link outputs are kept under `build/x9-previous-link.*`; only the normal
+final link dependency chain is forced. A private `cc/python` wrapper points at
+the actual `python3` compile tool for XNU's built-in dSYM macro installer. The
+build requires zero exit status from both `make` and `tee`, no compile error,
+and a fresh kernel link recorded in the log. It does not ignore dSYM failures.
+
 ## Native Bluetooth root payload
 
 The H4 bridge and launch adapters are root filesystem files, **not** boot-image

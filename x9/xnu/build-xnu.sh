@@ -1,7 +1,8 @@
 #!/bin/bash
 # Build the X9 SWEET XNU object tree (xnu-8796.141.3 + x9/xnu patches).
 #
-#   x9/xnu/build-xnu.sh [macos|ios] [--setup | --isolated x9/out/<name>]
+#   x9/xnu/build-xnu.sh [macos|ios] [--setup | --isolated x9/out/<name> |
+#                                  --isolated-existing x9/out/<name>]
 #
 # --isolated clones only the fixed local compiler/bootstrap inputs into a new
 # scratch tree, restores XNU from the pinned tag, applies this worktree's patches,
@@ -26,13 +27,15 @@
 # Only compile tools live outside the repository: Xcode 15 (DEVELOPER_DIR),
 # KDK_13.5_22G74, Homebrew python3.
 set -euo pipefail
-ABI=${1:-macos}; SETUP=0; ISOLATED=
+ABI=${1:-macos}; SETUP=0; ISOLATED=; EXISTING=0
 if [ $# -gt 0 ]; then shift; fi
 while [ $# -gt 0 ]; do
   case $1 in
     --setup) SETUP=1; shift ;;
     --isolated) [ $# -ge 2 ] || { echo 'error: --isolated needs a new x9/out path' >&2; exit 2; }
       ISOLATED=$2; shift 2 ;;
+    --isolated-existing) [ $# -ge 2 ] || { echo 'error: --isolated-existing needs an existing x9/out path' >&2; exit 2; }
+      ISOLATED=$2; EXISTING=1; shift 2 ;;
     *) echo "error: unknown option $1" >&2; exit 2 ;;
   esac
 done
@@ -45,6 +48,7 @@ DXB_REPO=https://github.com/blacktop/darwin-xnu-build
 DXB_COMMIT=663906528d1cd5ea8fde7de6f16de73db9511549
 XNU_REPO=https://github.com/apple-oss-distributions/xnu.git
 XNU_TAG=xnu-8796.141.3
+PYTHON3=$(command -v python3)
 case $ABI in
   macos) D=$ROOT/.local/dxb; PATCHES="$P/0001-x9-sweet-xnu-8796.141.3.patch $P/0006-x9-bt-uart-irq.patch" ;;
   ios)   D=$ROOT/.local/dxb-iosabi; PATCHES="$P/0001-x9-sweet-xnu-8796.141.3.patch $P/0002-x9-ios-kext-cxx-abi.patch $P/0003-x9-sparse-prelink-kext-memory.patch $P/0004-x9-diag-unaligned-static-mfree.patch $P/0005-x9-diag-prelinked-kext-load.patch $P/0006-x9-bt-uart-irq.patch" ;;
@@ -54,18 +58,29 @@ esac
 if [ -n "$ISOLATED" ]; then
   BASE=$D
   # Path normalization also rejects an output symlink escaping this worktree.
-  D=$(python3 - "$ROOT" "$ISOLATED" <<'PY'
+  D=$("$PYTHON3" - "$ROOT" "$ISOLATED" "$EXISTING" <<'PY'
 import sys
 from pathlib import Path
 root = Path(sys.argv[1]).resolve()
 p = Path(sys.argv[2]).expanduser()
 p = (p if p.is_absolute() else root / p).resolve()
 out = (root / 'x9/out').resolve()
-if not p.is_relative_to(out) or p == out or p.exists():
-    raise SystemExit('error: isolated tree must be a NEW directory below this worktree x9/out/')
+if not p.is_relative_to(out) or p == out:
+    raise SystemExit('error: isolated tree must be below this worktree x9/out/')
+existing = sys.argv[3] == '1'
+if not existing and p.exists():
+    raise SystemExit('error: --isolated requires a NEW directory')
+if existing:
+    for name in ('xnu', 'xnu/.git', 'build', 'build/xnu.obj', 'fakeroot'):
+        child = p / name
+        if child.is_symlink() or not child.is_dir() or not child.resolve().is_relative_to(p):
+            raise SystemExit('error: --isolated-existing requires a self-contained existing scratch tree')
+    if (p / 'cc').is_symlink():
+        raise SystemExit('error: isolated compiler wrappers must not be a symlink')
 print(p)
 PY
   )
+  if [ $EXISTING = 0 ]; then
   [ -d "$BASE/xnu/.git" ] && [ -d "$BASE/build/xnu.obj" ] && [ -d "$BASE/fakeroot" ] || {
     echo "error: fixed $BASE bootstrap/object inputs missing" >&2; exit 1;
   }
@@ -107,6 +122,7 @@ for directory in ('build', 'fakeroot'):
             if changed != data:
                 p.write_bytes(changed)
 PY
+  fi
 fi
 
 wrappers() {
@@ -114,6 +130,10 @@ wrappers() {
   for c in clang clang++; do
     printf '#!/bin/sh\nexec "%s/Toolchains/XcodeDefault.xctoolchain/usr/bin/%s" "$@"\n' "$DEV" "$c" > "$D/cc/$c"
   done
+  # XNU's built-in dSYM macro installer uses /usr/bin/env python. Its source
+  # checker is Python-3-compatible; provide ONLY this exact tool alias rather
+  # than adding arbitrary user bins or ignoring an install failure.
+  printf '#!/bin/sh\nexec "%s" "$@"\n' "$PYTHON3" > "$D/cc/python"
   chmod +x "$D/cc/"*
 }
 
@@ -166,28 +186,40 @@ fi
 verify_source
 wrappers
 export DEVELOPER_DIR=$DEV
-export PATH="$DEV/Toolchains/XcodeDefault.xctoolchain/usr/bin:$DEV/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
+export PATH="$D/cc:$DEV/Toolchains/XcodeDefault.xctoolchain/usr/bin:$DEV/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
 export CC="$D/cc/clang" CXX="$D/cc/clang++"
 export LD="$(xcrun -find ld)" AR="$(xcrun -find ar)" RANLIB="$(xcrun -find ranlib)" STRIP="$(xcrun -find strip)" LIBTOOL="$(xcrun -find libtool)"
 # Reproduce the banner of the 20H392-era kernel the userspace expects.
 export KERNEL_BUILD_DATE="Mon Aug 14 05:06:07 UTC 2023" KERNEL_BUILD_OBJROOT="xnu-8796.141.3"
 cd "$D/xnu"
-# make exits non-zero for the lldbmacros dSYM install even on success, so the
-# result is judged by the kernel being relinked by this run and no compile/link
-# "No rule"/error lines. A moved tree has stale absolute paths in its .d files:
+# Require real make/tee success AND a fresh kernel link; no dSYM or other
+# nonzero status is swallowed. A moved tree has stale paths in its .d files:
 # rewrite them first (perl -pi -e 's#<old>/#<new>/#g' on build/ text files).
+K=$D/build/xnu.obj/DEVELOPMENT_ARM64_SWEET/kernel.development.sweet
+if [ $EXISTING = 1 ]; then
+  # Preserve the previous completed link outputs, then force just the normal
+  # final link/strip/install dependency chain, not another entire tree copy.
+  PREVIOUS=$(mktemp -d "$D/build/x9-previous-link.XXXX")
+  for f in "$K" "$K.unstripped"; do
+    [ ! -f "$f" ] || mv "$f" "$PREVIOUS/$(basename "$f")"
+  done
+fi
 STAMP=$(mktemp /tmp/x9xnu-stamp.XXXX)
 LOG=$(mktemp /tmp/x9xnu-make.XXXX)
+set +e
 make install -j8 VERBOSE=YES \
   CTFCONVERT=$D/fakeroot/usr/local/bin/ctfconvert CTFMERGE=$D/fakeroot/usr/local/bin/ctfmerge CTFDUMP=$D/fakeroot/usr/local/bin/ctfdump \
   SDKROOT=macosx TARGET_CONFIGS="DEVELOPMENT ARM64 SWEET" CONCISE=0 LOGCOLORS=n BUILD_WERROR=0 BUILD_LTO=0 \
   SRCROOT="$D/xnu" OBJROOT="$D/build/xnu.obj" SYMROOT="$D/build/xnu.sym" DSTROOT="$D/fakeroot" FAKEROOT_DIR="$D/fakeroot" \
   KDKROOT="$KDK" TIGHTBEAMC=tightbeamc-not-supported RC_DARWIN_KERNEL_VERSION=22.6.0 \
   MEMORY_SIZE=$(sysctl -n hw.memsize) SYSCTL_HW_PHYSICALCPU=$(sysctl -n hw.physicalcpu) \
-  SYSCTL_HW_LOGICALCPU=$(sysctl -n hw.logicalcpu) KERNEL_BUILDS_IN_PARALLEL=1 2>&1 | tee "$LOG" || true
-K=$D/build/xnu.obj/DEVELOPMENT_ARM64_SWEET/kernel.development.sweet
-if grep -q -E "No rule to make target|error:|\*\*\* \[build_all" "$LOG" || [ ! "$K" -nt "$STAMP" ]; then
-  echo "error: XNU build failed (kernel not relinked or compile errors); see $LOG" >&2
+  SYSCTL_HW_LOGICALCPU=$(sysctl -n hw.logicalcpu) KERNEL_BUILDS_IN_PARALLEL=1 2>&1 | tee "$LOG"
+RESULT=("${PIPESTATUS[@]}")
+set -e
+if [ "${RESULT[0]}" != 0 ] || [ "${RESULT[1]}" != 0 ] ||
+   grep -q -E "No rule to make target|error:" "$LOG" || [ ! "$K" -nt "$STAMP" ] ||
+   ! grep -q -E '^[[:space:]]*LD kernel\.development\.sweet\.unstripped$' "$LOG"; then
+  echo "error: XNU build failed (make=${RESULT[0]} tee=${RESULT[1]}, fresh kernel link required); see $LOG" >&2
   rm -f "$STAMP"; exit 1
 fi
 rm -f "$STAMP" "$LOG"
