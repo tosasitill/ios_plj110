@@ -1,6 +1,7 @@
 /* 20H392 arm64 native H4 -> X9 BSD serial adapter.
- * Keep Apple H4 parser, RX loop, stack locking, TX and close. Replace only
- * POSIX.open: in this build that slot otherwise opens UART.SK/Skywalk.
+ * Keep Apple H4 parser, RX loop, stack locking, TX and close. Replace
+ * POSIX.open (otherwise UART.SK/Skywalk) and prepend character-vnode read
+ * cancellation to POSIX.close before calling the unchanged native close.
  * Optional X9Vendor16 routing is a separately gated, version-locked adapter.
  * No firmware, vendor capability constants, BlueTool success fabrication,
  * or device writes occur in the constructor. */
@@ -19,6 +20,7 @@
 
 #define BASE UINT64_C(0x100000000)
 #define OPEN_SLOT UINT64_C(0x100844168)
+#define CLOSE_SLOT UINT64_C(0x100844178)
 #define NATIVE_OPEN UINT64_C(0x100066bdc)
 #define NATIVE_CLOSE UINT64_C(0x1000674d0)
 #define NATIVE_WRITE UINT64_C(0x100067610)
@@ -30,6 +32,33 @@ static uintptr_t *uptr(uint64_t va) { return (uintptr_t *)address(va); }
 static const uint8_t original_uuid[16]={
     0xaa,0x94,0x24,0xe8,0x06,0x48,0x34,0xe2,0xb3,0xcf,0xe6,0xc7,0x93,0xb9,0xd4,0x71
 };
+/* BSD vnode close drains in-flight read references BEFORE d_close. The
+ * stock POSIX transport is a socket, whose drain wakes the RX thread;
+ * cu.bluetooth is a character vnode with fo_no_drain. Cancel only its read
+ * admission before entering native close; never discard queued/on-wire TX. */
+#define X9_SERIAL_CANCEL_READ _IO('X', 1)
+_Static_assert((uint32_t)X9_SERIAL_CANCEL_READ == 0x20005801u,
+               "native cancel-read ioctl ABI");
+static uint32_t serial_close(void)
+{
+    typedef uint32_t (*close_fn)(void);
+    int fd=(int32_t)*u32(0x1008441c8);
+    if(fd!=-1) {
+        /* Exact native close at 1000674f8..500 sets this flag BEFORE
+         * closing its socket. RX 100067af0..b18 then marks exited/signals
+         * the native condition, rather than taking unexpected-exit logging.
+         * Preserve that ordering when the cancel ioctl wakes a vnode read. */
+        uint32_t stopped=*u32(0x1008494e8);
+        *u32(0x1008494e8)=1;
+        if(ioctl(fd,X9_SERIAL_CANCEL_READ)<0) {
+            int error=errno;
+            *u32(0x1008494e8)=stopped;
+            fprintf(stderr,"X9 H4: native RX cancellation failed errno=%d; close not entered\n",error);
+            return 0x4b5;
+        }
+    }
+    return ((close_fn)address(NATIVE_CLOSE))();
+}
 static int serial_open(uint32_t mode,const char *configuration)
 {
     (void)configuration;
@@ -97,12 +126,31 @@ __attribute__((constructor)) static void install(void)
     if(!locked) { fprintf(stderr,"X9 H4: unsupported bluetoothd UUID; no table changed\n"); return; }
     slide=_dyld_get_image_vmaddr_slide(0);
     if(*uptr(OPEN_SLOT)!=address(NATIVE_OPEN) ||
-       *uptr(0x100844178)!=address(NATIVE_CLOSE) ||
+       *uptr(CLOSE_SLOT)!=address(NATIVE_CLOSE) ||
        *uptr(0x100844180)!=address(NATIVE_WRITE)) {
         fprintf(stderr,"X9 H4: unexpected resolved transport slots; no table changed\n"); return;
+    }
+    /* Close cancellation depends on the original stop/exit handshake, not
+     * merely the symbol name. Check every instruction used by that contract
+     * before any transport slot or vendor text is changed. */
+    static const struct {
+        uint64_t va; uint32_t words[4]; uint32_t count;
+    } close_contract[] = {
+        {0x1000674d0,{0xd10183ff,0xa9025ff8,0xa90357f6,0xa9044ff4},4},
+        {0x1000674f8,{0xd0003f08,0x52800029,0xb904e909},3},
+        {0x100067af0,{0xb944eae8,0x34000148,0x940084ea,0xd0003f08},4},
+        {0x100067b00,{0x52800029,0xb904ed09,0xd0003f00,0x9113c000},4},
+    };
+    for(size_t k=0;k<sizeof(close_contract)/sizeof(close_contract[0]);k++) {
+        if(memcmp((void *)address(close_contract[k].va),close_contract[k].words,
+                  close_contract[k].count*sizeof(uint32_t))) {
+            fprintf(stderr,"X9 H4: unexpected native close/RX handshake; no table changed\n");
+            return;
+        }
     }
     /* __DATA is writable in this version. Neither text nor chained fixups
      * are edited; the unchanged original image remains the replay input. */
     if(x9_vendor16_install(slide)<0) return;
     *uptr(OPEN_SLOT)=(uintptr_t)serial_open;
+    *uptr(CLOSE_SLOT)=(uintptr_t)serial_close;
 }

@@ -120,7 +120,8 @@ def main():
         if a.developer_dir:
             cfg['developer_dir'] = str(a.developer_dir)
         subprocess.run([sys.executable, '-I', str(HERE.parent / 'tools/bluetooth_firmware.py'),
-                        '--src', cfg.get('bluetooth_firmware') or cfg['wifi_firmware']], check=True)
+                        '--src', cfg.get('bluetooth_firmware') or cfg['wifi_firmware'],
+                        '--required'], check=True)
         subprocess.run([sys.executable, '-I', str(HERE.parent / 'tools/bluetooth_board.py'),
                         '--required'], check=True)
         subprocess.run([sys.executable, '-I', str(HERE.parent / 'tools/bluetooth_vendor.py'),
