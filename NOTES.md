@@ -468,6 +468,13 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 - **完整内核编译/提交收尾**：源码`2096225`已push `origin/feat/call-mt-state`；`python3 -I x9/build/build.py kernel --name x9-call-mt-state-2096225-20261115` **exit0，98/98 overlay对象（3 prebuilt），link/strip成功**。kernel-only产物`x9/out/x9-call-mt-state-2096225-20261115/kernel.development.sweet`；console/exit原日志在`x9/out/call-mt-compile/`，构建日志在产物目录。未运行套件、打boot.img或构建后二次检查；没有CI run ID/设备结果。此阶段合main/push后，分析、编译和kernel目录迁到主checkout相同`x9/out/`位置，清理MT树/本地分支，下一功能从main另开树。
 - **尚未交付最终镜像**：VOICE09未宣布，bootstrap/Bind44/IND注册、完整CallList/生产DIAL-ACTION生命周期、voice DMA/MD握手、短信MT显示/持久化/物理ACK/对端MO验收未完成；短信源码本轮未改。本轮没有新boot.img/CI run/设备拨号或刷写。下一步应从voice任务0的配置/DMA/3D00握手和Apple bootstrap消费者继续，不再要求重复来电，不给“通话已修好”镜像标签。
 
+#### 2026-11-15 短信存储启动请求实质修复（WMS31 TLV / readiness 队列）
+
+- **真实阻断/范围**：读取已有`~/319.txt:8400–8401`、`:8661–8663`，iOS实际发WMS31/len19，被返回unsupported0x5e。不能把尚未对齐源码提交的319当本次镜像验收，但当前main同样错把list的tag11当filter、tag12当mode。原20H392 `QMISMSCommandDriver::readStoredMessages` `1f196c298`构造31，`1f196c410..41c`明确tag11/Message_Mode=3GPP1，`1f196c4d0..594`明确tag10/RequestedTag=unread1；storage01/u8。RawRead22与ModifyTag23的mode仍在tag10（`1f197577c..784`、`1f1975930..938`），RawRead的tag11/IMS可选零不是筛选标签。未猜测WMS24格式，没有新增删除请求或设备存储写入。
+- **已改生产路径**：共享freestanding `x9_sms_storage.h`从完整QMI请求解码31/22/23，验证唯一字段/大小/制式/storage/index及MT-read-only修改；list改用filter10/mode11，native607的flag转换和608过滤核对都读filter10。旧错误tag12与未知制式/重复/超范围继续拒绝，不造空列表。Apple启动list发生在卡2真实host-ready33.425s之前，故验证后可进入原有bounded per-SIM队列；仅poll看到该SIM真实ready CNF后才发607，control/offline仍拒绝；失client/超时不启动延迟mutation。短信ACK与唯一MDwriter不变。
+- **编译/未验**：新增人工回归源码`sms_storage_host.cpp`，host第一次严格编译因aggregate漏完整initializer失败，修正后二次`clang++ -c -Wall -Wextra -Werror` exit0；共享header C11严格syntax exit0。完整`build.py kernel --name x9-sms-stored-tlvs-20261115` exit0，98/98 overlay、link/strip成功。遵守x9规则，未执行新/旧测试套件、没有boot.img或构建后二次检查，无CI run/设备操作。最终源码提交与固定提交构建另记下方。
+- **原件/限制**：私有分析/编译在功能树`x9/out/sms-delete-analysis/`（目录名称为最初离线删除研究，最终未开放删除）与`sms-stored-compile/`；Apple/RIL/MD asm只放out。WMS31修复不等于Messages真实来信/重开持久化/同token物理ACK或MO对端收到已验；VOICE09、生产通话生命周期和voice音频仍未闭合，**尚无通话短信最终修复镜像**。功能分支`fix/sms-stored-tlvs`，完成合main/push并保留out后清树，不覆盖audio/GPU/BT活动树。
+
 ### 5.7 2026-11-13 音频：ADSP 自动 dsp-boot 镜像（分支 feat/audio-dsp-boot，worktree `.worktrees/audio-dsp-boot`）
 
 - feat/audio-bounded-fdt 已 ff 合入 main（`b25f4ca`），worktree/分支已删；`android-callsms-20261113`、`shimtest`、fdt2/3/4 的 usb-log 移到本 worktree 的 `x9/out/`。
