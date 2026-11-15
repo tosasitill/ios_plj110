@@ -1475,3 +1475,157 @@ NAS03 未新增超时；DEL/真实 QMUX allocation 更换仍清理旧 owner，DM
 本轮实际生产 recipe `Builder.compile_one(X9Baseband.cpp.o)` exit0（34 条已有警告）；没有 link、
 boot pack 或上机验收。原件窄切片、cache 对比 JSON、`compile-bootstrap.py`、recipe result 和编译日志
 在 worktree 的 gitignored `x9/out/call-client-bootstrap/`，不提交 Apple/设备原件。
+
+## 2026-11-16 通话 action 参数、深所有权与原 AP 漏路隔离
+
+2026-11-16；源码基线 `9db480c4`。本文是当前 20H392 原件的静态 ABI 契约，
+**不是已安装的 provider，也不证明拨号、音频或注册成功**。未操作设备、出探针、
+构建产物或执行测试。本轮没有新增空 loader / unused API。
+
+### 1. 来源资格与纠正
+
+- 当前挂载 `CommCenter` UUID：`20b0ce28-18a1-3eea-aa2d-ef53e33c039a`。
+- 当前 `IPTelephony` UUID：`8b3ce7d6-41f4-3eed-bbcc-7bf1dff85575`。
+- 原 Cryptex dyld cache 的 exports trie 与八处新切片均实际读取；八处切片与
+  当前 extracted dylib 相符。这只是原件来源资格，不是运行成功。
+- 真 `Call` vtable address point 是 `0x1d90b7dc8`，不是导出 vtable 符号起点。
+  **AP `+0x10` 是 `ring() const`；拨号在 `+0x80`。** 旧表未回写覆盖。
+- 以下地址都是 unslid 静态 VA。执行必须绑定实际加载的同 UUID/ABI/代码，
+  并使用 dyld fixup 后的运行时地址；磁盘 encoded pointer 不能直接调用。
+- C++ mangled method 名不编码返回类型；原 caller 没有消费同步 status。
+  不能据此添加 `errno`/成功返回，也不能把 action 返回当 modem acceptance、
+  registered 或 connected。
+
+### 2. 完整 action 参数表
+
+表中的 `string`/`vector` 是原 userland `std::__1` libc++ ABI，不是 C 指针。
+所有槽相对**真 address point**，`x0` 均为本次实际 `Call*`。
+
+| 槽 | 真方法 / 实现 | 其余物理输入 | 原异步 owned 参数 / AP 路径 |
+| --- | --- | --- | --- |
+| `+10` | `ring` `1b7c42d90` | 无 | UUID；block `1b7c42e5c` → `ringCall` |
+| `+18` | `answer` `1b7c436c0` | `x1 string const&` | UUID、参数 string 深拷贝；block `1b7c43800` → manager virtual `+20` |
+| `+20` | `hangup` `1b7c434b4` | `x1 CallEndReason const&` | 仅读首 u32 后转换 reason string，UUID/string 深拷贝；block `1b7c43628` → manager virtual `+28` |
+| `+28` | `setTextMediaSessionMode` `1b7c432fc` | `w1 u32 enum` | 写 `Call+40`，另 owned UUID/u32 → block `1b7c433d4` → AP setter |
+| `+30` | `setRelayCall` `1b7c43898` | `w1 bool` | 写 `Call+44`，另 owned UUID/bool → block `1b7c43970` → `setRelayMode` |
+| `+38` | `setCallIdBlocking` `1b7c42d84` | `w1 bool,w2 bool` | 只写 `Call+09=w1,Call+08=w2`，没有 AP work |
+| `+40` | `playDtmf` `1b7c40bec` | `w1 unsigned char` | UUID/u8；block `1b7c40cc0` → byte overload |
+| `+48` | `playDtmf` `1b7c40d50` | `x1 vector<unsigned char> const&` | UUID 与 vector **内容**深拷贝；block `1b7c40e90` → vector overload |
+| `+50` | `stopDtmf` `1b7c40ff8` | 无 | UUID；block `1b7c410c4` → `stopDtmf` |
+| `+58` | `reportBrandedCallingImageFetchingFailure` `1b7c41150` | 无 | UUID；block `1b7c4121c` → 同名 manager 方法 |
+| `+60` | `mute` `1b7c43ac4` | `w1 bool` | 原件只有 `ret`，不能声称已改变媒体 |
+| `+68` | `refresh` `1b7c42ee8` | `w1 bool` | UUID/bool；block `1b7c42fbc` → `refreshCall` |
+| `+70` | `hold` `1b7c4304c` | 无 | UUID；block `1b7c43118` → `deactivateCall` |
+| `+78` | `resume` `1b7c431a4` | 无 | UUID；block `1b7c43270` → `activateCall` |
+| `+80` | `dial` `1b7c41468` | `x1 calledAddress string const&`; `x2 CallConfig const&`; `x3 additional string const&`; `w4 bool` | calledAddress + owning options；block `1b7c41878` → `initializeNonEmergencyCall` |
+| `+88` | `pull` `1b7c429c8` | `x1 string const&`; `x2 CallConfig const&` | owning options；block `1b7c42cec` → `initializePullCall` |
+
+普通 model 的 `+80` 调用处 `1007cb970` 中，`x3` 是空 string，`w4` 来自原
+`CallInfo+57` 的 `Is Listed As Emergency`；不能把它猜成 Android 域值。
+仍必须保留完整五参数 ABI，不用普通 caller 当前空值删参数。
+
+DTMF vector 原 ctor `1b7ad04ec` 分别深拷贝到 local、block `+38`，以及执行
+block 后的 manager 按值参数。只复制 vector 的 24B 指针头会产生悬空/双释放。
+
+`hangup` 原 `1d90b8990` 表是两级 pointer：1 → `DoNotDisturb`，
+2 → `CallWaitingDisabled`，3 → `SRVCC`，4 → `DeferToSecondary`，
+5 → `Blocked`；其余 → `UserTriggered`。这是 **Apple 原 reason string**，
+尚不是 Android/MD cause 的可互换值。
+
+### 3. `CallConfig` 完整 copy / destructor 已闭合
+
+| 项目 | 原 ABI |
+| --- | --- |
+| 存储 extent / 对齐 | `0xf8` / 8B；真实 caller 的 `sp+3c8` 与相邻 `sp+4c0`，最大 optional engaged 字节 `+f0` |
+| 完整 copy | CommCenter 私有 `100dd7560(dst,src)` |
+| 完整 destructor | CommCenter 私有 `1007cd508(this)`，完整函数至 `1007cd5a0` |
+| optional string copy helper | `10001f234`；storage string 24B，`+18` engaged |
+
+完整字段：`+00 u8`、`+08 owned string`、`+20 u8`、`+28 owned string`、
+`+40..6f` 48B 原 direct-copy 区、`+70/+88/+a0/+b8` 四个 owned strings、
+`+d0 u32`、`+d8 optional<owned string>`（engaged 在 `+f0`）。
+
+**不能 raw memcpy 全结构，不能丢普通 dial 暂未读取的 `+28/+d0`。**
+正常 cleanup 按 optional、`+b8/+a0/+88/+70/+28/+08` 逆序释放 owning strings；
+不对 48B header 单独执行析构。
+
+决定证据：`100dcfbbc` 将 `sp+4e0` 深拷贝到 `sp+3c8`；
+`100dcfbdc..100dcfc50` 在正常 action 返回后逐字段 cleanup；
+异常路径 `100dcff0c..100dcff10` 对**同一 destination**调用 `1007cd508`。
+这比根据附近函数名猜析构更直接。
+
+排除候选：`100dd77d8` 是大 CallInfo/package 析构；`100dd7718` 是大 nested
+package；`100dd76b8` 仅 subregion；`100dd73f8` 是更大 string package。
+scratch 旧文件名不构成类型证据，以上均不能作为 whole-config destructor。
+
+owner 必须在完整 copy 成功后发布。原 copy 的异常路径已经清理构造成功的
+子域，不得对失败的 partial construction 再运行 whole destructor。
+
+### 4. `IMSCallOptions` 不是 `0x13a0` POD
+
+- 完整 owning copy：IPTelephony 私有 local `1b7c41904(dst,src)`。
+- 完整 destructor：私有 local `1b7b432d8(this)`。
+- `+08` 是 `ImsUuid` vptr、`+10` 是 owning UUID string；
+  `+28` 是 `0x160` BambiCallOptions（copy `1b7b42aa4`、dtor `1b7b42cc4`）；
+  `+188` 是 `0x1200` BambiEmergencyCallOptions（copy `1b7b41970`），
+  含 owning strings、SipRegistrationConfig、SipStackConfig、SipUri；
+  `+1388` 是 owning clientId string。
+- 普通 dial 从 local 深拷贝到 block `+38`；block `1b7c418bc` 再深拷贝
+  给按值 manager 参数。pull 同样深拷贝到 block `+20`，执行时再 copy。
+  不能把 block payload 当 `memcpy(0x13a0)`。
+- **LocationInfo 的 48B 仅是 header**：Bambi `+90..bf` direct copy，
+  后面 `+c0/+d8/+f0/+108` 是四个深拷贝 string。完整 LocationInfo extent
+  是 `0x90`，dtor `1b7ab56e4` 读取其 ownbase `+30/+48/+60/+78`。
+  异常路径调完整 LocationInfo dtor，正常 Bambi dtor逐 string inline。
+  原行为没有把这四个 owner 浅拷贝。
+
+原 cache exports trie 的 `IMSCallOptions`、`BambiCallOptions`、
+`BambiEmergencyCallOptions`、`ims::CallConfig` ctor/dtor 限定前缀没有导出；
+extracted dylib `nm` 的 options ctor/dtor 是 local `t`，两证据一致。
+**不能伪造 external declaration 并以为可链接**。如生产 userland 要使用这些
+私有 helper，必须有实际 loaded-image 资格与 function-pointer 接入路径。
+
+已可复用的导出包括完整 `Call::dial/pull`、Call 构造/析构、text/relay/CLIR、
+answer/hangup/DTMF/stop/branded、ring/refresh/hold/resume；可导入不代表应该
+调用原 AP action。`mute` 在本次限定 exports 中没有可导入项且原槽 no-op。
+
+### 5. 最窄生产接入边界与剩余依赖
+
+可以复用的输入边界是 **typed `Call` action 本身**，无需先构造 AP options。
+每次先深 own 完整 typed 参数，以及临时 Call 的 `+10 UUID`、`+28 clientId`、
+`+08/+09 CLIR`、`+40 text`、`+44 relay`。不要捕获裸 `Call*`、借用 string/
+config/vector pointer，也不要将 userland C++ ownership 当 kernel request 头。
+原临时 action handle 的析构不是 MD terminal event；已有生命周期证据不重扫。
+
+text/relay 要保留原字段 mutation，同时隔离其 MainQueue AP 发送；CLIR 是
+唯一原 field-only setter。所有其它 AP actions（含 pull、DTMF、hold/resume）
+都要隔离，不能 MD admission 后又 fallback 到 original，产生双发。
+**不能调用原 dial/pull “仅生成 options”——它们会排入 AP queue。**
+
+目前仍缺下列真实生产边，故本轮没有可诚实落地的完整 action/provider：
+
+1. 当前 typed factory/action 到实际 userland adapter、私有 ABI lifecycle 的加载/安装路径。
+2. logical VOICE09 client/context、broker admission，以及 UUID/clientId 对 MD epoch/subscription 的真实关联。
+3. Android 证据限定的每 action 策略、cause、CS/IMS/handover producer；Apple reason string 不能替代 MD enum。
+4. 请求 owned 生命周期经现有 broker，到权威 MD terminal receipt，再到匹配的 typed delegate/当前 Call owner。
+5. 通话专用物理音频、最终 UI/对端端到端验收。本契约不证明这两者。
+
+### 6. 本地取证与重放
+
+本轮 `x9/out/call-action-adapter/`（gitignored，原件 bytes 不入 git）：
+
+- `typed-action-owned-contract.json`：全槽参数/owned/AP 隔离及缺边；
+- `callconfig-real-dtor.asm`、`config-copy-callers.asm`、`callconfig-dtor-xrefs.asm`；
+- `options-deep-copy-dtors.asm`、`locationinfo-dtor.asm`、`end-reason-table.json`；
+- `read-original-options.py`、`options-original-qualified.json`、`options-original-exports.txt`、
+  `options-local-symbols.txt`、`original-*.bin`：原 cache exports 与八处相符切片；
+- `write-owned-contract.py`、`root-query.py`、`macho-read.py`。
+
+原件仍存在时，在本功能树执行 `python3 x9/out/call-action-adapter/read-original-options.py`
+可重放限定 export/bytes 读取；`python3 x9/out/call-action-adapter/root-query.py
+f:0x1007cd508 f:0x100dcfbbc` 可重放 config 析构与同 destination cleanup。
+这都是离线文件读取，不触手机。
+
+复用既有 `x9/out/call-typed-actions/`、`call-typed-dial-context/` 与
+`call-provider-install/` 的已归档证据，不覆盖旧结论。本轮正式编译、CI、启动结果：
+均无；没有通话短信最终修复镜像。NOTES、合入和取证归档由 root 统一记录。
