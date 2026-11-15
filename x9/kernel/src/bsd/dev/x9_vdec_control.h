@@ -28,6 +28,13 @@ struct x9_vdec_control_start_resources {
     uint32_t submission_index, registered_outputs; /* native journal identities */
 };
 struct x9_vdec_control_hardware {
+    /* All hardware callbacks run within a bus reservation and control state
+     * lock(s). They must NOT reenter ANY control/shared/memory/bus API or wait
+     * for a control/pump while holding owner/DMA/IRQ locks. Likewise bus-owner
+     * guard and lower DMA callbacks must not acquire a control lock. External
+     * callers must not hold such lower locks across a control operation.
+     * Foreign routing uses bounded try-lock entry; it never recursively locks
+     * the current caller or executes parallel hardware callbacks. */
     void *cookie;
     int (*clock)(void *, uint64_t epoch, uint64_t deadline_ns,
         const struct x9_vcp_clock_request *);
@@ -57,6 +64,8 @@ struct x9_vdec_control_status {
     uint32_t input_attempted, input_prepared;
     uint32_t slot_initialized, vsi_attempted, vsi_staged;
     uint64_t service_batches, service_packets;
+    uint64_t foreign_packets;
+    struct x9_vcp_bus_route_journal foreign_call; /* final foreign packet/reply/error */
     uint64_t worker_wakeups, worker_contentions;
     uint32_t worker_enabled, worker_joined, worker_last_errno, worker_bus_phase;
     uint32_t closing; /* host admission only, NOT DMA/firmware stopped */
@@ -92,7 +101,9 @@ struct x9_vdec_control_output_journal {
 };
 /* Bus must ALREADY be genuinely RUNNING with exactly this published global
  * allocation. Memory must own these same two arenas/epoch/parent. Retains both
- * memory/shared handles and a native bus lifetime hold through discard.
+ * memory/shared handles and a native bus lifetime hold through discard, then
+ * registers its fully initialized frozen identity/ops for bus-wide routing.
+ * Registration failure rolls back refs, worker, lock and the bus hold.
  * hardware.clock/wait are the real owner's mandatory operations, NOT success
  * stubs. Native code supplies actual SHM/alloc/VP and notification handlers.
  * This does not create a controller, load firmware, start a bus or set READY.
@@ -104,7 +115,8 @@ int x9_vdec_control_create(struct x9_vcp_bus *, struct x9_vdec_shared *,
  * complete live slot using the captured HFRP remap table and uniquely claims
  * it in this global allocation, then sets ONLY the evidenced AP ipi_blocked
  * field to0 through its native NC map. Once only, including uncertain sends.
- * ONLY full success arms the control-owned, non-overlapping kernel thread-call
+ * EBUSY before reservation exposes nothing and leaves INIT fresh. ONLY full
+ * success arms the control-owned, non-overlapping kernel thread-call
  * pump. It services real reverse/async packets even after b001 and rechecks
  * pending observations on empty RX. This is not a DMA/ring completion grant. */
 int x9_vdec_control_init(struct x9_vdec_control *, uint32_t timeout_ms,
@@ -125,7 +137,9 @@ int x9_vdec_control_query(struct x9_vdec_control *, const struct x9_vcp_query *,
  * between STARTs. Earlier published buffers are never overwritten/reused.
  * All registrations currently require identical plane counts/capacities;
  * format changes need the separate native negotiation path. Failed/uncertain
- * calls poison further admission and preserve their partial journal. Does
+ * calls poison further admission and preserve their partial journal, except
+ * EBUSY before reservation: no callbacks/allocations/send happened; native
+ * host-only attempt state is restored and unique burned tokens are not reused. Does
  * not register the missing highest-level owner or identify a b005's buffer.
  * Result/log and input capacities must be disjoint, resident host storage. */
 int x9_vdec_control_register_output(struct x9_vdec_control *, uint32_t plane_count,
@@ -146,7 +160,9 @@ int x9_vdec_control_register_output(struct x9_vdec_control *, uint32_t plane_cou
  * Each call retains a fresh input record. Only a successfully finished prior
  * control transaction permits another call; old input and every registered
  * output remain DEVICE-owned, not implicitly retired by b001. No retry of a
- * failed/uncertain submission, no allocation reuse, no EOS path. The bus
+ * failed/uncertain submission, no allocation reuse, no EOS path. EBUSY before
+ * reservation restores the host-only attempt (no callback/exposure occurred).
+ * The bus
  * rejects queued old ACKs before new preparation/send. The protocol has no
  * picture sequence: delayed duplicate ACKs after that RX baseline cannot be
  * disambiguated, so the actual FW must obey one reply per serialized command.
@@ -173,10 +189,17 @@ int x9_vdec_control_service(struct x9_vdec_control *, uint32_t timeout_ms,
  * callback or the pump itself. Repeated calls on a retained object succeed.
  * Call before bus stop / DMA domain retirement. No new control transaction,
  * firmware halt, IRQ/AXI drain, ring consumption, cache ownership or free.
- * discard also performs this join, but still requires physical STOPPED and
+ * Foreign reverse/async handlers may still run through the retained bus route
+ * after this CPU-pump join: firmware is not stopped by host closing. Owner
+ * must stop/drain the bus before retiring domains; route removal separately
+ * excludes all reserved callbacks. discard also performs this join, but still requires physical STOPPED and
  * both RETIRED domains after an INIT attempt. Failed discard remains closed. */
 int x9_vdec_control_quiesce(struct x9_vdec_control *);
 int x9_vdec_control_get_status(struct x9_vdec_control *, struct x9_vdec_control_status *);
+/* Exact bus registry evidence for this retained control, including failed
+ * enter, current-caller ACKs and foreign packet/reply/error records. Read-only
+ * host snapshot, not proof of DMA retirement or hardware completion. */
+int x9_vdec_control_get_route(struct x9_vdec_control *, struct x9_vcp_bus_instance_status *);
 /* Resident disjoint host snapshots of prior records, including partial/error
  * attempts. Indices 0..record_count-1 are never wrapped/rebased. No live DMA
  * CPU access, token retirement, pointer lookup or hardware completion grant. */

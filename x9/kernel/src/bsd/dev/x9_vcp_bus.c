@@ -25,6 +25,11 @@ LCK_MTX_DECLARE(vcp_bus_lock, &vcp_bus_group);
 #define VCP_BUS_RING 32u
 #define VCP_BUS_PAGE 16384u
 #define VCP_BUS_MAPS 5u
+struct vcp_bus_instance {
+    struct x9_vcp_init init;
+    struct x9_vcp_bus_reverse_ops ops;
+    struct x9_vcp_bus_instance_status status;
+};
 struct x9_vcp_bus {
     struct x9_vcp_bus_owner owner;
     struct x9_vcp_shm_region shared, logger;
@@ -39,6 +44,8 @@ struct x9_vcp_bus {
     uint8_t tx[X9_VCP_WIRE_BYTES];
     const struct x9_vcp_bus_call_log *call; /* lifetime/IO exclusion, not a wire token */
     uint64_t clients[X9_VCP_INSTANCE_SLOT_COUNT]; /* host lifetime tokens */
+    struct vcp_bus_instance instances[X9_VCP_INSTANCE_SLOT_COUNT];
+    struct vcp_bus_instance *caller; /* frozen under the whole-call reservation */
     bool exposed, tx_pending, stop_attempted;
 };
 static struct x9_vcp_bus *singleton;
@@ -46,6 +53,8 @@ static uint64_t next_epoch = 1;
 static uint64_t next_client_token = 1;
 static uint32_t get32(const uint8_t *p)
 { return p[0] | (uint32_t)p[1]<<8 | (uint32_t)p[2]<<16 | (uint32_t)p[3]<<24; }
+static uint64_t get64(const uint8_t *p)
+{ return get32(p) | (uint64_t)get32(p+4)<<32; }
 static void put32(uint8_t *p, uint32_t v)
 { for (unsigned i = 0; i < 4; i++) p[i] = (uint8_t)(v >> (8*i)); }
 static uint64_t now_ns(void)
@@ -479,6 +488,11 @@ int x9_vcp_bus_release_shared(struct x9_vcp_bus *b, uint64_t epoch, uint64_t *to
     e = identity(b);
     if (!e && epoch != b->status.epoch) e = ESTALE;
     if (!e) {
+        for (unsigned n = 0; n < X9_VCP_INSTANCE_SLOT_COUNT; n++)
+            if (b->instances[n].status.host_token == *token &&
+                !b->instances[n].status.retired) { e = EBUSY; break; }
+    }
+    if (!e) {
         for (index = 0; index < X9_VCP_INSTANCE_SLOT_COUNT; index++)
             if (b->clients[index] == *token) break;
         if (index == X9_VCP_INSTANCE_SLOT_COUNT) e = ESTALE;
@@ -487,6 +501,104 @@ int x9_vcp_bus_release_shared(struct x9_vcp_bus *b, uint64_t epoch, uint64_t *to
             b->clients[index] = 0; b->status.retained_clients--; *token = 0;
         }
     }
+    lck_mtx_unlock(&vcp_bus_lock);
+    return e;
+}
+static bool same_init(const struct x9_vcp_init *a, const struct x9_vcp_init *z)
+{
+    return a->service_id == z->service_id && a->context_id == z->context_id &&
+        a->instance_token == z->instance_token;
+}
+static bool same_ops(const struct x9_vcp_bus_reverse_ops *a,
+    const struct x9_vcp_bus_reverse_ops *z)
+{
+    /* Compare defined fields, not uninitialized structure padding. */
+    return a->cookie == z->cookie && a->route_enter == z->route_enter &&
+        a->route_leave == z->route_leave && a->prepare_output == z->prepare_output &&
+        a->prepare_start == z->prepare_start && a->notification == z->notification &&
+        a->recheck == z->recheck && a->shm == z->shm && a->alloc == z->alloc &&
+        a->clock == z->clock && a->wait == z->wait && a->vp == z->vp;
+}
+int x9_vcp_bus_register_instance(struct x9_vcp_bus *b, uint64_t epoch,
+    uint64_t token, const struct x9_vcp_init *init, const struct x9_vcp_bus_reverse_ops *ops)
+{
+    struct x9_vcp_init q;
+    struct x9_vcp_bus_reverse_ops handlers;
+    uint8_t encoded[X9_VCP_WIRE_BYTES];
+    unsigned hold, slot;
+    int e;
+    if (!init || !ops || !token || token == UINT64_MAX) return EINVAL;
+    q = *init; handlers = *ops;
+    if (!handlers.cookie || !handlers.route_enter || !handlers.route_leave) return EINVAL;
+    e = x9_vcp_encode_init(&q,encoded);
+    if (e) return e;
+    lck_mtx_lock(&vcp_bus_lock);
+    e = identity(b);
+    if (!e) e = check_shared_locked(b,epoch,&b->shared);
+    if (!e) {
+        for (hold = 0; hold < X9_VCP_INSTANCE_SLOT_COUNT; hold++)
+            if (b->clients[hold] == token) break;
+        if (hold == X9_VCP_INSTANCE_SLOT_COUNT) e = ESTALE;
+    }
+    if (!e) {
+        for (slot = 0; slot < X9_VCP_INSTANCE_SLOT_COUNT; slot++) {
+            const struct x9_vcp_bus_instance_status *s = &b->instances[slot].status;
+            if (s->instance_token == q.instance_token || s->host_token == token) {
+                e = EEXIST; break;
+            }
+        }
+    }
+    if (!e) {
+        for (slot = 0; slot < X9_VCP_INSTANCE_SLOT_COUNT; slot++)
+            if (!b->instances[slot].status.instance_token) break;
+        if (slot == X9_VCP_INSTANCE_SLOT_COUNT) e = ENOSPC;
+        else {
+            struct vcp_bus_instance *r = &b->instances[slot];
+            r->init = q; r->ops = handlers;
+            r->status.epoch = epoch; r->status.host_token = token;
+            r->status.instance_token = q.instance_token;
+            b->status.registered_instances++; b->status.retained_routes++;
+        }
+    }
+    lck_mtx_unlock(&vcp_bus_lock);
+    return e;
+}
+static struct vcp_bus_instance *find_host(struct x9_vcp_bus *b, uint64_t token)
+{
+    for (unsigned n = 0; n < X9_VCP_INSTANCE_SLOT_COUNT; n++)
+        if (b->instances[n].status.host_token == token) return &b->instances[n];
+    return NULL;
+}
+int x9_vcp_bus_unregister_instance(struct x9_vcp_bus *b, uint64_t epoch, uint64_t token)
+{
+    struct vcp_bus_instance *r = NULL;
+    int e;
+    if (!token || token == UINT64_MAX) return EINVAL;
+    lck_mtx_lock(&vcp_bus_lock);
+    e = identity(b);
+    if (!e && epoch != b->status.epoch) e = ESTALE;
+    if (!e) { r = find_host(b,token); if (!r) e = ESTALE; }
+    if (!e && r->status.retired) e = EALREADY;
+    if (!e && (b->call || (r->status.exposed && b->status.phase != X9_VCP_BUS_STOPPED))) e = EBUSY;
+    if (!e && !b->status.retained_routes) e = EFAULT;
+    if (!e) {
+        r->status.retired = 1; memset(&r->ops,0,sizeof(r->ops));
+        b->status.retained_routes--; /* keep identity and final journal */
+    }
+    lck_mtx_unlock(&vcp_bus_lock);
+    return e;
+}
+int x9_vcp_bus_get_instance_status(struct x9_vcp_bus *b, uint64_t epoch,
+    uint64_t token, struct x9_vcp_bus_instance_status *out)
+{
+    struct vcp_bus_instance *r = NULL;
+    int e;
+    if (!out || !token || token == UINT64_MAX) return EINVAL;
+    lck_mtx_lock(&vcp_bus_lock);
+    e = identity(b);
+    if (!e && epoch != b->status.epoch) e = ESTALE;
+    if (!e) { r = find_host(b,token); if (!r) e = ESTALE; }
+    if (!e) *out = r->status;
     lck_mtx_unlock(&vcp_bus_lock);
     return e;
 }
@@ -567,7 +679,7 @@ int x9_vcp_bus_discard(struct x9_vcp_bus **slot)
     if (!slot) return EINVAL;
     lck_mtx_lock(&vcp_bus_lock);
     b = *slot; e = identity(b);
-    if (!e && (b->call || b->status.queued || b->status.retained_clients ||
+    if (!e && (b->call || b->status.queued || b->status.retained_clients || b->status.retained_routes ||
         (b->exposed && b->status.phase != X9_VCP_BUS_STOPPED))) e = EBUSY;
     /* STOPPED is not permission to use an old snapshot forever. Retained
      * ownership plus fresh physical idle must still hold before unpin/free.
@@ -586,17 +698,27 @@ int x9_vcp_bus_discard(struct x9_vcp_bus **slot)
 
 /* Reserve IO for the entire control transaction, not just a single send.
  * Keep bus lifetime pinned while reverse callbacks execute outside the lock. */
-static int call_begin(struct x9_vcp_bus *b, struct x9_vcp_bus_call_log *log,
+static int call_begin(struct x9_vcp_bus *b, const struct x9_vcp_init *init,
+    const struct x9_vcp_bus_reverse_ops *ops, struct x9_vcp_bus_call_log *log,
     bool *service_ready)
 {
+    struct vcp_bus_instance *r = NULL;
     int e;
     lck_mtx_lock(&vcp_bus_lock);
     e = identity(b);
     if (!e && (b->call || b->status.phase != X9_VCP_BUS_RUNNING ||
         b->status.ready_bitmap != 3 || b->tx_pending)) e = EBUSY;
+    if (!e) {
+        for (unsigned n = 0; n < X9_VCP_INSTANCE_SLOT_COUNT; n++)
+            if (b->instances[n].status.instance_token == init->instance_token) {
+                r = &b->instances[n]; break;
+            }
+        if (!r || r->status.retired || r->status.epoch != b->status.epoch ||
+            !same_init(&r->init,init) || !same_ops(&r->ops,ops)) e = ESTALE;
+    }
     if (!e) { e = guard(b); if (e) e = fault(b,e); }
     if (!e) {
-        b->call = log; log->epoch = b->status.epoch;
+        b->caller = r; b->call = log; log->epoch = b->status.epoch;
         *service_ready = b->status.service_shm_replied != 0;
     }
     lck_mtx_unlock(&vcp_bus_lock);
@@ -632,7 +754,7 @@ static int call_end(struct x9_vcp_bus *b, struct x9_vcp_bus_call_log *log,
          * STOPPING/STOPPED phase. No retry, inferred rollback or DMA free. */
         if (error && b->status.phase == X9_VCP_BUS_RUNNING) error = fault(b,error);
         if (!error && prepared_service) b->status.service_shm_replied = 1;
-        b->call = NULL;
+        b->caller = NULL; b->call = NULL;
         e = error;
     }
     log->last_errno = (uint32_t)e;
@@ -714,37 +836,128 @@ static int reverse_reply(const struct x9_vcp_init *q,
         return ENOTSUP;
     }
 }
+/* The reservation freezes registry/cookies even while stop changes the bus
+ * phase. Queries of route evidence take bus_lock; never mutate journal bytes
+ * without it. Packet identity is NOT a firmware pointer or context lookup. */
+static int route_packet_begin(struct x9_vcp_bus *b, struct x9_vcp_bus_call_log *log,
+    struct vcp_bus_instance **recipient, struct x9_vcp_bus_route_journal *journal)
+{
+    uint64_t token = get64(log->last_rx+16);
+    struct vcp_bus_instance *r = NULL;
+    bool shm = get32(log->last_rx+8) == X9_VCP_MEM_ALLOC &&
+        get32(log->last_rx+32) == X9_VCP_MEM_SHM;
+    int e = 0;
+    memset(journal,0,sizeof(*journal)); *recipient = NULL;
+    lck_mtx_lock(&vcp_bus_lock);
+    if (b->call != log || !b->caller || log->epoch != b->status.epoch) e = ESTALE;
+    if (!e) {
+        if (shm) r = b->caller; /* sentinel/type8 is bus-global, typed parser below */
+        else for (unsigned n = 0; n < X9_VCP_INSTANCE_SLOT_COUNT; n++)
+            if (b->instances[n].status.instance_token == token) {
+                r = &b->instances[n]; break;
+            }
+        if (!r || r->status.retired || !r->status.exposed ||
+            r->status.epoch != log->epoch) e = ESTALE;
+    }
+    if (!e && (r->status.packets == UINT64_MAX ||
+        (r != b->caller && r->status.foreign_packets == UINT64_MAX))) e = EOVERFLOW;
+    if (!e) {
+        journal->epoch = log->epoch; journal->instance_token = r->init.instance_token;
+        journal->sequence = ++r->status.packets;
+        journal->foreign = r != b->caller;
+        memcpy(journal->rx,log->last_rx,sizeof(journal->rx));
+        if (journal->foreign) { r->status.foreign_packets++; log->foreign_packets++; }
+        log->routed_packets++; log->last_recipient_token = r->init.instance_token;
+        r->status.last = *journal; *recipient = r;
+    }
+    lck_mtx_unlock(&vcp_bus_lock);
+    return e;
+}
+static void route_packet_end(struct x9_vcp_bus *b, struct vcp_bus_instance *r,
+    struct x9_vcp_bus_route_journal *journal, int error)
+{
+    journal->last_errno = (uint32_t)error;
+    lck_mtx_lock(&vcp_bus_lock);
+    if (!b->call || !b->caller || r->status.retired ||
+        journal->epoch != b->status.epoch)
+        panic("X9 VCP: lost routed packet reservation");
+    r->status.last = *journal;
+    lck_mtx_unlock(&vcp_bus_lock);
+    /* Preserve recipient error state and unlock AFTER the physical reply or
+     * its failure. No owner-state lock is acquired while bus_lock is held. */
+    if (journal->foreign && journal->entered) r->ops.route_leave(r->ops.cookie,journal);
+}
+static int call_expose(struct x9_vcp_bus *b, struct x9_vcp_bus_call_log *log)
+{
+    int e = 0;
+    lck_mtx_lock(&vcp_bus_lock);
+    if (b->call != log || !b->caller || log->epoch != b->status.epoch) e = ESTALE;
+    else b->caller->status.exposed = 1; /* before ANY uncertain wire attempt */
+    lck_mtx_unlock(&vcp_bus_lock);
+    return e;
+}
+/* Shared by every RX path. Only THIS caller's parsed b005 may fill output
+ * and terminate its a005 wait; foreign b005/e000 are routed but never ACKs.
+ * SHM is the existing one-time bus service negotiation, not an instance. */
+static int dispatch_packet(struct x9_vcp_bus *b, uint64_t end,
+    struct x9_vcp_bus_call_log *log, bool *service_ready, bool *prepared_service,
+    struct x9_vcp_output_notification *output)
+{
+    struct x9_vcp_bus_route_journal journal;
+    struct vcp_bus_instance *r = NULL;
+    uint32_t message = get32(log->last_rx+8);
+    int e = route_packet_begin(b,log,&r,&journal);
+    if (e) return e;
+    if (message == X9_VCP_INIT_DONE || message == X9_VCP_START_DONE ||
+        message == X9_VCP_QUERY_CAP_DONE) e = EPROTO;
+    if (!e && journal.foreign) {
+        journal.enter_attempted = 1;
+        e = r->ops.route_enter(r->ops.cookie,log->epoch,end);
+        if (!e) journal.entered = 1;
+    }
+    if (!e) e = call_check(b,log,end);
+    if (!e && (message == X9_VCP_FRAME_BUFFER_DONE || message == X9_VCP_OUTPUT_ASYNC)) {
+        struct x9_vcp_output_notification n;
+        journal.notification = 1;
+        e = x9_vcp_parse_output_notification(&r->init,log->last_rx,X9_VCP_WIRE_BYTES,&n);
+        /* Retain signed firmware error too, but never a foreign notification. */
+        if (!e && output && !journal.foreign && n.message_id == X9_VCP_FRAME_BUFFER_DONE)
+            *output = n;
+        if (!e && !r->ops.notification) e = ENOTSUP;
+        if (!e) e = r->ops.notification(r->ops.cookie,log->epoch,end,&n);
+        if (!e && n.firmware_status) e = EIO;
+        if (!e) e = call_check(b,log,end);
+        if (!e) log->notifications++;
+    } else if (!e) {
+        e = reverse_reply(&r->init,&r->ops,log->epoch,end,log->last_rx,
+            journal.reply,!*service_ready);
+        if (!e) journal.reply_encoded = 1;
+        if (!e) e = call_check(b,log,end);
+        if (!e) {
+            journal.reply_attempted = 1;
+            e = send_until(b,journal.reply,end,log);
+        }
+        if (!e) {
+            journal.reply_consumed = 1; log->reverse_replies++;
+            if (message == X9_VCP_MEM_ALLOC && get32(log->last_rx+32) == X9_VCP_MEM_SHM) {
+                *service_ready = true; *prepared_service = true;
+            }
+        }
+    }
+    route_packet_end(b,r,&journal,e);
+    return e;
+}
 /* Already initialized service only. A control ACK found BEFORE a new request
  * belongs to an older operation, even if its alias/token matches. Dispatch
  * legitimate queued async/reverse work, but never carry an old ACK across the
  * next send. This is an RX baseline, NOT firmware/DMA producer exclusion. */
-static int dispatch_pending(struct x9_vcp_bus *b, const struct x9_vcp_init *init,
-    const struct x9_vcp_bus_reverse_ops *ops, uint64_t end,
+static int dispatch_pending(struct x9_vcp_bus *b, uint64_t end,
     struct x9_vcp_bus_call_log *log)
 {
-    uint8_t reply[X9_VCP_WIRE_BYTES];
-    uint32_t message = get32(log->last_rx+8);
-    int e;
-    if (message == X9_VCP_INIT_DONE || message == X9_VCP_START_DONE ||
-        message == X9_VCP_QUERY_CAP_DONE) return EPROTO;
-    if (message == X9_VCP_FRAME_BUFFER_DONE || message == X9_VCP_OUTPUT_ASYNC) {
-        struct x9_vcp_output_notification n;
-        e = x9_vcp_parse_output_notification(init,log->last_rx,X9_VCP_WIRE_BYTES,&n);
-        if (!e && !ops->notification) e = ENOTSUP;
-        if (!e) e = ops->notification(ops->cookie,log->epoch,end,&n);
-        if (!e && n.firmware_status) e = EIO;
-        if (!e) e = call_check(b,log,end);
-        if (!e) log->notifications++;
-    } else {
-        e = reverse_reply(init,ops,log->epoch,end,log->last_rx,reply,false);
-        if (!e) e = call_check(b,log,end);
-        if (!e) e = send_until(b,reply,end,log);
-        if (!e) log->reverse_replies++;
-    }
-    return e;
+    bool service_ready = true, prepared_service = false;
+    return dispatch_packet(b,end,log,&service_ready,&prepared_service,NULL);
 }
-static int control_rx_baseline(struct x9_vcp_bus *b, const struct x9_vcp_init *init,
-    const struct x9_vcp_bus_reverse_ops *ops, uint64_t end,
+static int control_rx_baseline(struct x9_vcp_bus *b, uint64_t end,
     struct x9_vcp_bus_call_log *log)
 {
     int e = 0;
@@ -764,7 +977,7 @@ static int control_rx_baseline(struct x9_vcp_bus *b, const struct x9_vcp_init *i
             log->received++;
             e = call_check(b,log,end);
         }
-        if (!e) e = dispatch_pending(b,init,ops,end,log);
+        if (!e) e = dispatch_pending(b,end,log);
     }
     if (!e) { log->batch_limit_reached = 1; e = EOVERFLOW; }
     return e;
@@ -777,19 +990,18 @@ static int control_call(struct x9_vcp_bus *b, const struct x9_vcp_init *init,
     struct x9_vcp_start_result *sr,
     struct x9_vcp_bus_call_log *log)
 {
-    uint8_t reply[X9_VCP_WIRE_BYTES];
     uint32_t expected = start ? X9_VCP_START_DONE :
         query ? X9_VCP_QUERY_CAP_DONE : X9_VCP_INIT_DONE;
     unsigned loops = 0;
     bool service_ready = false, prepared_service = false;
-    int e = call_begin(b,log,&service_ready);
+    int e = call_begin(b,init,ops,log,&service_ready);
     if (e) { log->last_errno = (uint32_t)e; return e; }
     e = call_check(b,log,end);
     if (!e && start) {
         /* A live service/instance must already exist. Do not make START the
          * first AP command and bootstrap SHM behind the preparation callback. */
-        if (!service_ready) e = ENXIO;
-        else e = control_rx_baseline(b,init,ops,end,log);
+        if (!service_ready || !b->caller->status.exposed) e = ENXIO;
+        else e = control_rx_baseline(b,end,log);
         if (!e) {
             log->prepare_attempted = 1;
             e = ops->prepare_start(ops->cookie,log->epoch,end,init,initialized,start);
@@ -797,8 +1009,9 @@ static int control_call(struct x9_vcp_bus *b, const struct x9_vcp_init *init,
             if (!e) log->prepared = 1;
         }
     }
-    if (!e && query && service_ready)
-        e = control_rx_baseline(b,init,ops,end,log);
+    if (!e && !start && service_ready)
+        e = control_rx_baseline(b,end,log);
+    if (!e) e = call_expose(b,log);
     if (!e) {
         log->request_attempted = 1; /* conservative: even an uncertain send */
         e = send_until(b,request,end,log);
@@ -821,7 +1034,14 @@ static int control_call(struct x9_vcp_bus *b, const struct x9_vcp_init *init,
         e = call_check(b,log,end); /* do not dispatch after concurrent stop */
         if (e) break;
         if (get32(log->last_rx+8) == expected) {
-            if (start) {
+            struct vcp_bus_instance *r = NULL;
+            struct x9_vcp_bus_route_journal journal;
+            e = route_packet_begin(b,log,&r,&journal);
+            if (e) break;
+            /* Whole-call serialization leaves no legitimate foreign control
+             * ACK outstanding. Never enter foreign state for a stale ACK. */
+            if (journal.foreign) e = EPROTO;
+            else if (start) {
                 e = x9_vcp_parse_start_reply(init,log->last_rx,X9_VCP_WIRE_BYTES,sr);
                 log->ack_matched = !e || (e == EIO && sr->firmware_status != 0);
             } else if (query) {
@@ -831,30 +1051,10 @@ static int control_call(struct x9_vcp_bus *b, const struct x9_vcp_init *init,
                 e = x9_vcp_parse_init_reply(init,log->last_rx,X9_VCP_WIRE_BYTES,ir);
                 log->ack_matched = !e || (e == EIO && ir->firmware_status != 0);
             }
+            route_packet_end(b,r,&journal,e);
             break;
         }
-        if (get32(log->last_rx+8) == X9_VCP_FRAME_BUFFER_DONE ||
-            get32(log->last_rx+8) == X9_VCP_OUTPUT_ASYNC) {
-            struct x9_vcp_output_notification n;
-            e = x9_vcp_parse_output_notification(init,log->last_rx,X9_VCP_WIRE_BYTES,&n);
-            if (!e && !ops->notification) e = ENOTSUP;
-            if (!e) e = ops->notification(ops->cookie,log->epoch,end,&n);
-            if (!e) e = call_check(b,log,end);
-            if (!e) log->notifications++;
-            /* These packets are one-way, so NEVER send a synthetic reply or
-             * consume them as this command's ACK. Callback owns its journal. */
-            continue;
-        }
-        e = reverse_reply(init,ops,log->epoch,end,log->last_rx,reply,!service_ready);
-        if (!e) e = call_check(b,log,end); /* deadline includes callback time */
-        if (!e) e = send_until(b,reply,end,log);
-        if (!e) {
-            log->reverse_replies++;
-            if (get32(log->last_rx+8) == X9_VCP_MEM_ALLOC &&
-                get32(log->last_rx+32) == X9_VCP_MEM_SHM) {
-                service_ready = true; prepared_service = true;
-            }
-        }
+        e = dispatch_packet(b,end,log,&service_ready,&prepared_service,NULL);
     }
     return call_end(b,log,end,e,prepared_service);
 }
@@ -937,10 +1137,10 @@ int x9_vcp_bus_register_output(struct x9_vcp_bus *b, const struct x9_vcp_init *i
     struct x9_vcp_bus_reverse_ops handlers;
     struct x9_vcp_output_request q = {0};
     struct x9_vcp_output_record record = {0};
-    uint8_t request[X9_VCP_WIRE_BYTES], reply[X9_VCP_WIRE_BYTES];
+    uint8_t request[X9_VCP_WIRE_BYTES];
     uint64_t end = 0;
     unsigned loops = 0;
-    bool service_ready = false;
+    bool service_ready = false, prepared_service = false;
     int e;
     if (!init || !initialized || !ops || !out || !log) return EINVAL;
     i = *init; ready = *initialized; handlers = *ops;
@@ -951,11 +1151,11 @@ int x9_vcp_bus_register_output(struct x9_vcp_bus *b, const struct x9_vcp_init *i
         i.service_id != X9_VCP_VDEC_SERVICE || ready.firmware_status ||
         !ready.firmware_vsi_address)) e = EINVAL;
     if (e) { log->last_errno = (uint32_t)e; return e; }
-    e = call_begin(b,log,&service_ready);
+    e = call_begin(b,&i,&handlers,log,&service_ready);
     if (e) { log->last_errno = (uint32_t)e; return e; }
     e = call_check(b,log,end);
-    if (!e && !service_ready) e = ENXIO;
-    if (!e) e = control_rx_baseline(b,&i,&handlers,end,log);
+    if (!e && (!service_ready || !b->caller->status.exposed)) e = ENXIO;
+    if (!e) e = control_rx_baseline(b,end,log);
     if (!e) {
         log->prepare_attempted = 1;
         e = handlers.prepare_output(handlers.cookie,log->epoch,end,&i,&ready,&q,&record);
@@ -985,26 +1185,8 @@ int x9_vcp_bus_register_output(struct x9_vcp_bus *b, const struct x9_vcp_init *i
         log->received++;
         e = call_check(b,log,end);
         if (e) break;
-        if (get32(log->last_rx+8) == X9_VCP_FRAME_BUFFER_DONE ||
-            get32(log->last_rx+8) == X9_VCP_OUTPUT_ASYNC) {
-            struct x9_vcp_output_notification n;
-            e = x9_vcp_parse_output_notification(&i,log->last_rx,X9_VCP_WIRE_BYTES,&n);
-            if (!e) {
-                /* Retain even a firmware error rejected by the callback.
-                 * No buffer-specific ACK/completion identity is invented. */
-                if (n.message_id == X9_VCP_FRAME_BUFFER_DONE) *out = n;
-                e = handlers.notification(handlers.cookie,log->epoch,end,&n);
-                if (!e && n.firmware_status) e = EIO;
-                if (!e) e = call_check(b,log,end);
-                if (!e) log->notifications++;
-                if (n.message_id == X9_VCP_FRAME_BUFFER_DONE) break;
-            }
-            continue;
-        }
-        e = reverse_reply(&i,&handlers,log->epoch,end,log->last_rx,reply,false);
-        if (!e) e = call_check(b,log,end);
-        if (!e) e = send_until(b,reply,end,log);
-        if (!e) log->reverse_replies++;
+        e = dispatch_packet(b,end,log,&service_ready,&prepared_service,out);
+        if (out->message_id == X9_VCP_FRAME_BUFFER_DONE) break;
     }
     return call_end(b,log,end,e,false);
 }
@@ -1032,10 +1214,10 @@ int x9_vcp_bus_service(struct x9_vcp_bus *b, const struct x9_vcp_init *init,
      * sending INIT again or manufacturing a new outstanding control ACK. */
     if (!e) e = x9_vcp_encode_init(&i,identity_request);
     if (e) { log->last_errno = (uint32_t)e; return e; }
-    e = call_begin(b,log,&service_ready);
+    e = call_begin(b,&i,&handlers,log,&service_ready);
     if (e) { log->last_errno = (uint32_t)e; return e; }
     e = call_check(b,log,end);
-    if (!e && !service_ready) e = ENXIO;
+    if (!e && (!service_ready || !b->caller->status.exposed)) e = ENXIO;
     while (!e && log->received < max_packets) {
         e = call_check(b,log,end);
         if (e) break;
@@ -1054,7 +1236,7 @@ int x9_vcp_bus_service(struct x9_vcp_bus *b, const struct x9_vcp_init *init,
         log->received++;
         e = call_check(b,log,end);
         if (e) break;
-        e = dispatch_pending(b,&i,&handlers,end,log);
+        e = dispatch_pending(b,end,log);
     }
     if (!e && log->received == max_packets) log->batch_limit_reached = 1;
     if (!e && handlers.recheck) {

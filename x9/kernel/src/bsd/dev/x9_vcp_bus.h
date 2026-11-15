@@ -64,6 +64,7 @@ struct x9_vcp_bus_status {
     uint32_t halt_status[2][2], halt_checked_bitmap, halt_samples;
     uint32_t service_shm_replied; /* physical d005 consumption, NOT codec READY */
     uint32_t retained_clients; /* host lifetime holds, NOT physical users/drain */
+    uint32_t registered_instances, retained_routes; /* includes boot tombstones / live cookies */
 };
 /* Phase 1: reads CURRENT ADT topology and pins the native MM parent. Reserves
  * a singleton and boot-unique epoch, available through get_status BEFORE the
@@ -107,7 +108,8 @@ int x9_vcp_bus_check_shared(struct x9_vcp_bus *, uint64_t epoch,
 /* Native async-client lifetime. Retain uses the SAME live RUNNING/shared/guard
  * check, then returns a boot-unique opaque host hold. Discard refuses while
  * any hold exists, including between bus transactions or after STOPPED.
- * Release only drops THIS exact hold; it does not stop, drain, release power,
+ * Release refuses a still-registered instance using THIS hold. After route
+ * removal, it only drops this exact hold; it does not stop, drain, release power,
  * retire mappings or grant DMA ownership. The client must close admission
  * and join all its callbacks before releasing. Token initially0 on retain;
  * resident outputs are disjoint from inputs. No reentry from bus callbacks. */
@@ -129,8 +131,13 @@ int x9_vcp_bus_discard(struct x9_vcp_bus **);
  * and competing calls return EBUSY. callbacks run outside bus_lock and must
  * not reenter the bus or wait past the absolute uptime-ns deadline. stop can
  * cancel a call, and discard cannot free it while a callback is executing.
- * The provider must serialize its live instance/epoch records and register
- * fresh, unique tokens BEFORE calling; no speculative/resubmitted INIT.
+ * The provider must register its frozen identity/ops against a retained host
+ * hold BEFORE calling. Calls reject unregistered or substituted handlers.
+ * One bus-wide registry routes foreign reverse/async packets by exact AP
+ * instance token, followed by the existing typed parser (including service2
+ * b005 and captured context exceptions). No token-to-pointer cast or routing
+ * by context alone. Control ACKs are ONLY for the currently outstanding call;
+ * a foreign/stale ACK is rejected, never used to finish another operation.
  * Each callback returns errno; success means the ACTUAL requested operation
  * and durable ownership bookkeeping completed, not a promise to do it later.
  * Missing handlers/unknown messages fail closed, retain the packet journal
@@ -142,8 +149,28 @@ int x9_vcp_bus_discard(struct x9_vcp_bus **);
  * type8 request is rejected, not treated as a restart/instance allocation.
  * No automatic READY/profiles.
  */
+/* Owned latest packet/reply evidence. A successful reply_consumed is ONLY
+ * physical transport consumption. sequence/counters are host observations,
+ * not FW buffer identities, producer fences or per-buffer retirement. */
+struct x9_vcp_bus_route_journal {
+    uint64_t epoch, instance_token, sequence;
+    uint32_t foreign, enter_attempted, entered, notification;
+    uint32_t reply_encoded, reply_attempted, reply_consumed, last_errno;
+    uint8_t rx[X9_VCP_WIRE_BYTES], reply[X9_VCP_WIRE_BYTES];
+};
 struct x9_vcp_bus_reverse_ops {
     void *cookie;
+    /* Mandatory registry hooks for FOREIGN dispatch only. Current caller
+     * already owns its state lock and is NEVER entered recursively. Runs
+     * outside bus_lock with the whole call/lifetime retained. enter must
+     * acquire the exact recipient's state with a bounded, deadline-aware
+     * protocol, never an unbounded cross-control mutex wait. Return0 owns it;
+     * failed enter owns nothing. leave records the FINAL packet/reply/error
+     * journal (including transport errors), then releases it; called exactly
+     * once after every successful enter. No bus/control reentry. Closing a
+     * CPU pump must NOT remove this still-live FW routing obligation. */
+    int (*route_enter)(void *, uint64_t epoch, uint64_t deadline_ns);
+    void (*route_leave)(void *, const struct x9_vcp_bus_route_journal *);
     /* Required for a005. Under the whole-call reservation, actually publish
      * native output slices and retain their full records BEFORE exporting
      * addresses. Fill disjoint host copies only after real PoC handoff and
@@ -196,12 +223,38 @@ struct x9_vcp_bus_reverse_ops {
 };
 struct x9_vcp_bus_call_log {
     uint64_t epoch;
+    uint64_t last_recipient_token;
     uint32_t request_attempted, received, reverse_replies, ack_matched;
     uint32_t last_errno;
     uint32_t prepare_attempted, prepared, notifications;
     uint32_t queue_empty_observed, batch_limit_reached; /* async/RX baseline */
+    uint32_t routed_packets, foreign_packets;
     uint8_t last_rx[X9_VCP_WIRE_BYTES]; /* owned copy, including a rejected packet */
 };
+struct x9_vcp_bus_instance_status {
+    uint64_t epoch, host_token, instance_token, packets, foreign_packets;
+    uint32_t exposed, retired; /* request attempt / cookie removed; NOT DMA ownership */
+    struct x9_vcp_bus_route_journal last;
+};
+/* Frozen identity/cookie/ops tied to THIS exact host lifetime hold. Only on a
+ * live RUNNING/shared/guard epoch, outside any call. No callback before the
+ * first INIT/QUERY request attempt; uncertainty after an attempt retains the
+ * cookie until STOPPED. At most32 registrations over one bus lifetime; removed
+ * entries keep identity/journal tombstones and cannot reuse a wire token.
+ * All cookies must be fully initialized before registration; callers serialize
+ * their external handles. No firmware request, SHM bootstrap or READY here. */
+int x9_vcp_bus_register_instance(struct x9_vcp_bus *, uint64_t epoch,
+    uint64_t host_token, const struct x9_vcp_init *, const struct x9_vcp_bus_reverse_ops *);
+/* Rejects ANY active whole call (including a foreign callback). Exposed routes
+ * require physically STOPPED bus, not host quiesce. Unexposed create rollback
+ * may unregister without stopping. Native control separately verifies both
+ * RETIRED domains before dropping exposed resources/refs. Release_shared
+ * refuses a hold with a live route; unregister never releases the hold. */
+int x9_vcp_bus_unregister_instance(struct x9_vcp_bus *, uint64_t epoch, uint64_t host_token);
+/* Read-only owned status, including errors/tombstones, even after stop/fault.
+ * Does not revalidate DMA/physical producer authority or resume dispatch. */
+int x9_vcp_bus_get_instance_status(struct x9_vcp_bus *, uint64_t epoch,
+    uint64_t host_token, struct x9_vcp_bus_instance_status *);
 /* Results/log are disjoint writable host storage, retained by caller on error.
  * return0 means ONLY a matching firmware control ACK: aliases still require
  * owned-pool resolution/cache sync. It does not mean decode or pixel success.

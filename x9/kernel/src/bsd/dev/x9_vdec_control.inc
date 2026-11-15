@@ -36,7 +36,7 @@ struct x9_vdec_control {
     const uint8_t *input_source; /* borrowed ONLY for the reserved synchronous call */
     uint32_t input_capacity;
     uint8_t *scratch;
-    bool closing;
+    bool closing, route_registered;
 };
 static void vcontrol_journal_input(struct x9_vdec_control *c)
 {
@@ -55,6 +55,42 @@ static int vcontrol_fault(struct x9_vdec_control *c, int e)
 {
     if (e && !c->status.last_errno) c->status.last_errno = (uint32_t)e;
     return e;
+}
+/* The caller holds another control lock AND the one bus reservation. Every
+ * competing control operation checks that reservation and returns before
+ * running hardware callbacks. Never acquire a foreign mutex with an unbounded
+ * blocking wait: short status/teardown/pre-reservation work may finish, but
+ * no ABBA dependency can wait past this call's absolute deadline. Hardware,
+ * bus-owner and DMA callbacks cannot reenter ANY control or wait for it while
+ * holding lower locks. Current-caller callbacks do not use these hooks. */
+static int vcontrol_route_enter(void *cookie, uint64_t epoch, uint64_t end)
+{
+    struct x9_vdec_control *c = cookie;
+    int e;
+    if (!c || c->magic != VCONTROL_MAGIC) return EINVAL;
+    for (unsigned n = 0; n < 300000; n++) {
+        e = vmem_deadline(end);
+        if (e) return e;
+        if (lck_mtx_try_lock(&c->lock)) {
+            e = epoch != c->status.epoch || !c->route_registered ||
+                !c->status.init_attempted ? ESTALE : (int)c->status.last_errno;
+            if (!e) e = vmem_deadline(end);
+            /* closing is host admission, NOT FW stop. Its route continues
+             * to service actual reverse work until the bus is stopped. */
+            if (e) lck_mtx_unlock(&c->lock);
+            return e;
+        }
+        delay(10);
+    }
+    return ETIMEDOUT;
+}
+static void vcontrol_route_leave(void *cookie, const struct x9_vcp_bus_route_journal *journal)
+{
+    struct x9_vdec_control *c = cookie;
+    /* Bus counter was checked before entering; this subset cannot overflow. */
+    c->status.foreign_packets++; c->status.foreign_call = *journal;
+    vcontrol_fault(c,(int)journal->last_errno);
+    lck_mtx_unlock(&c->lock);
 }
 static void vcontrol_worker(thread_call_param_t, thread_call_param_t);
 /* c->lock held. ONCE defers self-resubmission until the callback returns;
@@ -528,13 +564,28 @@ int x9_vdec_control_create(struct x9_vcp_bus *bus, struct x9_vdec_shared *s,
     c->magic = VCONTROL_MAGIC; c->bus = bus; c->shared = s; c->memory = m;
     c->hardware = *hardware; c->status.epoch = s->epoch;
     c->reverse = (struct x9_vcp_bus_reverse_ops){ .cookie = c,
+        .route_enter = vcontrol_route_enter, .route_leave = vcontrol_route_leave,
         .shm = vcontrol_shm, .alloc = vcontrol_alloc, .clock = vcontrol_clock,
         .wait = vcontrol_wait, .vp = vcontrol_vp, .notification = vcontrol_notification,
         .recheck = vcontrol_service_recheck,
         .prepare_output = vcontrol_prepare_output };
     if (hardware->qualify_start) c->reverse.prepare_start = vcontrol_prepare_start;
     lck_mtx_init(&c->lock,&vdec_group,LCK_ATTR_NULL);
-    *out = c;
+    /* Everything reachable from a registry cookie is now initialized. No
+     * worker is armed, and the unexposed route cannot receive foreign work. */
+    lck_mtx_lock(&c->lock);
+    e = x9_vcp_bus_register_instance(bus,c->status.epoch,c->bus_token,&c->init,&c->reverse);
+    if (!e) { c->route_registered = true; *out = c; }
+    lck_mtx_unlock(&c->lock);
+    if (e) {
+        lck_mtx_lock(&s->lock); lck_mtx_lock(&m->lock);
+        if (!s->control_refs || !m->control_refs)
+            panic("X9 VDEC: lost unpublished control references");
+        s->control_refs--; m->control_refs--;
+        lck_mtx_unlock(&m->lock); lck_mtx_unlock(&s->lock);
+        c->magic = 0; lck_mtx_destroy(&c->lock,&vdec_group);
+        goto fail;
+    }
     return 0;
 fail:
     if (c->bus_token && x9_vcp_bus_release_shared(bus,s->epoch,&c->bus_token))
@@ -562,6 +613,12 @@ int x9_vdec_control_init(struct x9_vdec_control *c, uint32_t ms,
     if (!e) {
         c->status.init_attempted = 1;
         e = x9_vcp_bus_init(c->bus,&c->init,&c->reverse,ms,out,log);
+        if (e == EBUSY && !log->epoch) {
+            /* A competing instance may reserve between check_shared and
+             * call_begin. No request/callback ran, so INIT remains fresh. */
+            c->status.init_attempted = 0;
+            lck_mtx_unlock(&c->lock); return e;
+        }
         c->status.init = *out; /* retain even a firmware/transport error */
         if (!e) {
             iova = s->service.vdec.iova;
@@ -606,7 +663,7 @@ int x9_vdec_control_query(struct x9_vdec_control *c, const struct x9_vcp_query *
         (int)c->status.last_errno;
     if (!e) e = x9_vcp_bus_check_shared(c->bus,c->status.epoch,&c->shared->global);
     if (!e) e = x9_vcp_bus_query(c->bus,&c->init,q,&c->reverse,ms,out,log);
-    if (log->request_attempted) vcontrol_fault(c,e);
+    if (log->epoch) vcontrol_fault(c,e); /* includes a failed routed RX baseline */
     lck_mtx_unlock(&c->lock);
     return e;
 }
@@ -615,6 +672,15 @@ int x9_vdec_control_get_status(struct x9_vdec_control *c, struct x9_vdec_control
     if (!c || c->magic != VCONTROL_MAGIC || !out) return EINVAL;
     lck_mtx_lock(&c->lock); *out = c->status; lck_mtx_unlock(&c->lock);
     return 0;
+}
+int x9_vdec_control_get_route(struct x9_vdec_control *c, struct x9_vcp_bus_instance_status *out)
+{
+    int e;
+    if (!c || c->magic != VCONTROL_MAGIC || !out) return EINVAL;
+    lck_mtx_lock(&c->lock);
+    e = x9_vcp_bus_get_instance_status(c->bus,c->status.epoch,c->bus_token,out);
+    lck_mtx_unlock(&c->lock);
+    return e;
 }
 int x9_vdec_control_get_input(struct x9_vdec_control *c, uint32_t index,
     struct x9_vdec_control_input_journal *out)
@@ -645,6 +711,8 @@ int x9_vdec_control_register_output(struct x9_vdec_control *c, uint32_t planes,
     struct x9_vcp_output_notification *out, struct x9_vcp_bus_call_log *log)
 {
     struct x9_vcp_output_record *r;
+    struct x9_vcp_output_record previous_output;
+    uint32_t previous_attempted, previous_prepared, previous_notified;
     int e;
     if (!c || c->magic != VCONTROL_MAGIC || !bytes || !out || !log) return EINVAL;
     if (!ms || ms > 3000 || !planes || planes > X9_VCP_OUTPUT_PLANES ||
@@ -663,6 +731,10 @@ int x9_vdec_control_register_output(struct x9_vdec_control *c, uint32_t planes,
     }
     if (!e) e = x9_vcp_bus_check_shared(c->bus,c->status.epoch,&c->shared->global);
     if (!e) {
+        previous_output = c->status.output;
+        previous_attempted = c->status.output_attempted;
+        previous_prepared = c->status.output_prepared;
+        previous_notified = c->status.output_notified;
         c->status.output_attempted = 1;
         c->status.output_prepared = 0; c->status.output_notified = 0;
         c->active_output = &c->outputs[c->status.output_records++];
@@ -682,6 +754,21 @@ int x9_vdec_control_register_output(struct x9_vdec_control *c, uint32_t planes,
         vcontrol_journal_output(c);
         if (!e) e = x9_vcp_bus_register_output(c->bus,&c->init,&c->status.init,
             &c->reverse,ms,out,log);
+        if (e == EBUSY && !log->epoch) {
+            /* Only an unreserved host attempt: no prepare_output callback,
+             * allocation, NC store or physical send is possible here. The
+             * burned unique token is never reused; no buffer was exposed. */
+            for (unsigned n = 0; n < X9_VCP_OUTPUT_PLANES; n++)
+                if (c->active_output->slice[n].token)
+                    panic("X9 VDEC: exposed output without bus reservation");
+            memset(c->active_output,0,sizeof(*c->active_output));
+            c->active_output = NULL; c->status.output_records--;
+            c->status.output = previous_output;
+            c->status.output_attempted = previous_attempted;
+            c->status.output_prepared = previous_prepared;
+            c->status.output_notified = previous_notified;
+            lck_mtx_unlock(&c->lock); return e;
+        }
         c->status.output_notified = out->message_id == X9_VCP_FRAME_BUFFER_DONE;
         vcontrol_journal_output(c);
         c->active_output->journal.notification = *out;
@@ -701,6 +788,11 @@ int x9_vdec_control_decode_start(struct x9_vdec_control *c, const uint8_t *annex
 {
     struct x9_vcp_start q;
     struct x9_vdec_control_start_resources *resources;
+    struct x9_vdec_control_start_resources previous_resources;
+    struct x9_vcp_start_result previous_start;
+    uint32_t previous_start_attempted, previous_start_replied;
+    uint32_t previous_input_attempted, previous_input_prepared;
+    uint32_t previous_vsi_attempted, previous_vsi_staged;
     int e;
     if (!c || c->magic != VCONTROL_MAGIC || !annexb || !out || !log) return EINVAL;
     memset(out,0,sizeof(*out)); memset(log,0,sizeof(*log));
@@ -715,6 +807,13 @@ int x9_vdec_control_decode_start(struct x9_vdec_control *c, const uint8_t *annex
     if (!e && !c->reverse.prepare_start) e = ENOTSUP;
     if (!e) e = x9_vcp_bus_check_shared(c->bus,c->status.epoch,&c->shared->global);
     if (!e) {
+        previous_resources = c->status.resources; previous_start = c->status.start;
+        previous_start_attempted = c->status.start_attempted;
+        previous_start_replied = c->status.start_replied;
+        previous_input_attempted = c->status.input_attempted;
+        previous_input_prepared = c->status.input_prepared;
+        previous_vsi_attempted = c->status.vsi_attempted;
+        previous_vsi_staged = c->status.vsi_staged;
         c->status.start_attempted = 1;
         c->status.input_attempted = 1;
         c->status.start_replied = 0; c->status.input_prepared = 0;
@@ -743,6 +842,20 @@ int x9_vdec_control_decode_start(struct x9_vdec_control *c, const uint8_t *annex
         e = x9_vcp_bus_decode_start(c->bus,&c->init,&c->status.init,&q,&c->reverse,
             ms,out,log);
         c->input_source = NULL; /* never retained after return, including error */
+        if (e == EBUSY && !log->epoch) {
+            if (c->active_input->slice.token)
+                panic("X9 VDEC: exposed input without bus reservation");
+            memset(c->active_input,0,sizeof(*c->active_input));
+            c->active_input = NULL; c->status.input_records--;
+            c->status.resources = previous_resources; c->status.start = previous_start;
+            c->status.start_attempted = previous_start_attempted;
+            c->status.start_replied = previous_start_replied;
+            c->status.input_attempted = previous_input_attempted;
+            c->status.input_prepared = previous_input_prepared;
+            c->status.vsi_attempted = previous_vsi_attempted;
+            c->status.vsi_staged = previous_vsi_staged;
+            lck_mtx_unlock(&c->lock); return e;
+        }
         c->status.start = *out; c->status.start_replied = log->ack_matched;
         vcontrol_journal_input(c);
         c->active_input->journal.result = *out;
@@ -872,6 +985,13 @@ int x9_vdec_control_discard(struct x9_vdec_control **slot)
             if (d->state != X9_MM_SMMU_RETIRED) e = EBUSY;
             lck_mtx_unlock(&d->lock);
         }
+    }
+    /* Before touching any callback-visible slice/ref, prove that no bus call
+     * still uses this cookie. Host quiesce alone never removes a live route.
+     * A failed later cleanup retains this closed object and its tombstone. */
+    if (!e && c->route_registered) {
+        e = x9_vcp_bus_unregister_instance(c->bus,c->status.epoch,c->bus_token);
+        if (!e) c->route_registered = false;
     }
     for (unsigned i = 0; i < c->status.output_records && !e; i++)
         for (unsigned n = 0; n < X9_VCP_OUTPUT_PLANES && !e; n++)
