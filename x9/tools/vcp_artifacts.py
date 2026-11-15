@@ -853,7 +853,10 @@ def rv55_mem_wait_evidence(dram, init):
     wrapper's 88-byte descriptor is NOT the 32-byte mailbox memory object:
     its callback receives a separate type/length/three-u64 result block, and
     the wrapper converts returned addresses into FIRMWARE-local aliases.
-    Those aliases never authorize XNU pointer lookup or DMA retirement.
+    Those aliases never authorize XNU pointer lookup or DMA retirement. The
+    service send wrapper also assigns literal zero AFTER the generic send;
+    its opaque epilogue is not assumed to preserve that assignment. A caller's
+    saved wrapper result is not evidence of the generic transport/ACK status.
     Pre-free list/vote
     mutations and asynchronous task submission do not establish exclusion.
     The conditional hardware-disable helper has a real local register path,
@@ -944,6 +947,12 @@ def rv55_mem_wait_evidence(dram, init):
         ('memory_map_visible_literal_zero_result', 0x2468ee, 0x246908),
         ('memory_map_firmware_address_converter_input_and_tcm_call', 0x24690c, 0x24691a),
         ('constructor_memory_map_same_descriptor_as_cleanup', 0x3072b2, 0x3072f2),
+        ('generic_send_saved_request_and_stack_packet_copy', 0x305082, 0x3050b4),
+        ('generic_send_mailbox_call_and_saved_transport_result', 0x305156, 0x30516c),
+        ('generic_send_first_receive_queue_and_packet_id_loads', 0x3051e2, 0x3051fc),
+        ('generic_send_second_receive_queue_and_packet_id_loads', 0x30522a, 0x305244),
+        ('generic_send_response_copy_to_original_request', 0x3052b2, 0x3052c0),
+        ('generic_send_result_return_and_service_wrapper_literal_zero', 0x3052e6, 0x3052fc),
     )
     # The table is DATA, not decoded instructions. Its deinit slot is established
     # by the object+16 installation and object+44 indirect call. Reaching the
@@ -1008,14 +1017,45 @@ def rv55_mem_wait_evidence(dram, init):
                 full_cfg_and_runtime_dispatch_proven=False,
                 firmware_alias_is_not_an_xnu_cpu_pointer=True,
                 mapping_success_is_not_buffer_or_dma_retirement=True),
-            callback_result=dict(send_call=0x308b22, saved_send_result=0x308b26,
-                output_copy_starts=0x308b28, send_result_gate=0x308bdc,
+            callback_result=dict(send_call=0x308b22, saved_wrapper_result=0x308b26,
+                output_copy_starts=0x308b28, wrapper_result_gate=0x308bdc,
                 visible_success_zero_assignment=0x308c0e,
                 visible_failure_minus_one_assignment=0x308be2,
                 return_join=0x308c10,
-                returned_address_fields_are_copied_before_send_result_gate=True,
+                returned_address_fields_are_copied_before_wrapper_result_gate=True,
+                wrapper_result_is_not_proven_generic_transport_or_reply_status=True,
                 complete_vendor_return_edges_proven=False,
                 nonzero_return_fields_are_not_transport_or_dma_success=True),
+            service_send_wrapper=dict(entry=0x3052f2, generic_call=0x3052f4,
+                generic_target=0x30507a, literal_zero_assignment=0x3052f6,
+                unresolved_epilogue=0x3052f8, return_instruction=0x3052fa,
+                generic_result_is_not_forwarded_by_visible_standard_instructions=True,
+                epilogue_preserves_a0_proven=False,
+                complete_return_semantics_proven=False,
+                generic_transport=dict(entry=0x30507a,
+                    saved_payload_pointer=0x305084, payload_register='s3',
+                    saved_payload_bytes=0x305082, payload_bytes_register='s6',
+                    stack_envelope_offset=8, stack_payload_offset=16,
+                    stack_service_store=0x305098, stack_length_store=0x3050a2,
+                    request_copy_call=0x3050a8, request_copy_target=0x701c,
+                    send_call=0x305166, send_target=0x49a4,
+                    saved_send_result=0x30516a, saved_send_result_register='s4',
+                    receive_calls=[0x3051f2, 0x30523a], receive_target=0x6e08,
+                    received_packet_id_loads=[0x3051f8, 0x305240],
+                    received_context_loads=[0x3051fa, 0x305242],
+                    response_copy_arguments_start=0x3052b2,
+                    response_copy_call=0x3052bc, response_copy_target=0x701c,
+                    response_copy_arguments=['original payload s3', 'stack payload s2', 'original bytes s6'],
+                    visible_return_register_copy=0x3052e6,
+                    visible_return_source_register='s4',
+                    source_path_address=0x30549a,
+                    source_path=cstring(dram, 0x30549a - 0x200000),
+                    vdec_ack_log_address=0x3054d3,
+                    vdec_ack_log=cstring(dram, 0x3054d3 - 0x200000),
+                    packet_checks_vendor_edges_and_full_cfg_proven=False,
+                    reply_status_validation_proven=False,
+                    response_copy_is_not_allocation_or_dma_success=True),
+                runtime_send_receive_and_ack_proven=False),
             complete_reply_status_validation_proven=False),
         free=dict(message=0xc006, service=1, bytes=64, copied_mem_bytes=32,
             sender=0x308c1a, wrapper=0x24695a, wrapper_object_bytes=88,
