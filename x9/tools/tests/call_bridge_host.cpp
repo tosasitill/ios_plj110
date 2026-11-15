@@ -359,7 +359,7 @@ static void rx_progress(unsigned event,unsigned id=7,unsigned mode=20){
 }
 static void progress_framing(){
  uint8_t p[520];struct x9cw_progress c;progress_frame(p,130,7,0);
- assert(x9cw_progress(p,512,&c)&&c.id==7&&c.event==130&&c.mask==2&&c.has_cause&&c.cause==16);
+ assert(x9cw_progress(p,512,&c)&&c.valid&&c.id==7&&c.event==130&&c.mask==2&&c.has_cause&&c.cause==16);
  for(unsigned n=0;n<512;n++)assert(!x9cw_progress(p,n,&c));
  p[50]=2;assert(!x9cw_progress(p,512,&c));progress_frame(p,130,7,0);
  x9cw_scalar(p+512,0x8100,1,4);x9cw_put16(p+14,504);assert(!x9cw_progress(p,520,&c));
@@ -378,6 +378,87 @@ static void outbound_states(){
  c.id=8;assert(x9cw_outbound_apply(&s,&c)==-1&&s.blocked);
  s={};c.id=256;assert(x9cw_outbound_apply(&s,&c)==1&&!x9cw_outbound_id(&s,&id));
  s={};c.mask=0x20;assert(x9cw_outbound_apply(&s,&c)==0&&!s.seen); // no CMD mask normalization
+}
+/* Complete artificial producer frames, not reconstructed logger prefixes.
+ * Removing optional10a changes the declared body and moves the final TLV. */
+static unsigned reason_frame(uint8_t *p,unsigned event,unsigned direction=0,
+                             unsigned cause=16,bool has_cause=true,unsigned id=7,unsigned mode=20){
+ unsigned n=progress_frame(p,event,id,mode);x9cw_scalar(p+24,0x101,direction,4);
+ x9cw_scalar(p+496,0x10a,cause,4);
+ if(!has_cause){memmove(p+496,p+504,8);n-=8;x9cw_put16(p+14,n-16);}
+ return n;
+}
+static void end_reason_provenance(){
+ uint8_t p[512];struct x9cw_progress c={};
+ unsigned n=reason_frame(p,133);assert(!x9cw_progress(p,n-1,&c)&&!c.valid);
+ assert(!x9cw_end_reason_metadata(&c).known&&!x9cw_end_reason_metadata(nullptr).known);
+ assert(x9cw_progress(p,n,&c)&&c.valid);
+ auto r=x9cw_end_reason_metadata(&c);assert(r.known&&r.apple==145);
+ struct x9cw_progress retained=c;
+ assert(!x9cw_progress(p,n-1,&c)&&!memcmp(&c,&retained,sizeof(c))); // failed parse does not grant new provenance
+ for(unsigned event:{0u,2u,6u,130u,132u}){
+  n=reason_frame(p,event);assert(x9cw_progress(p,n,&c)&&c.valid&&!x9cw_end_reason_metadata(&c).known);
+ }
+ n=reason_frame(p,133,0,17);assert(x9cw_progress(p,n,&c)&&!x9cw_end_reason_metadata(&c).known);
+ n=reason_frame(p,133,0,0,false);assert(x9cw_progress(p,n,&c)&&!c.has_cause&&!x9cw_end_reason_metadata(&c).known);
+ n=reason_frame(p,133,0,16,true,7,0);assert(x9cw_progress(p,n,&c)&&!x9cw_end_reason_metadata(&c).known);
+ c={};c.event=133;c.mode=20;c.has_cause=1;c.cause=16;
+ assert(!x9cw_end_reason_metadata(&c).known); // a manually constructed object is not a parsed frame
+}
+static void outbound_end_reason(){
+ uint8_t p[512];struct x9cw_progress c;struct x9cw_outbound_state s;
+ auto begin=[&](){s={};unsigned n=reason_frame(p,130,0,16,true,7,0);
+  assert(x9cw_progress(p,n,&c)&&x9cw_outbound_apply(&s,&c)==1&&!s.end_reason.known);};
+ for(unsigned which=0;which<4;which++){
+  begin();unsigned n=reason_frame(p,133,0,which==1?17:16,which!=2);
+  assert(x9cw_progress(p,n,&c));if(which==3)c.valid=0;
+  assert(x9cw_outbound_apply(&s,&c)==1&&s.ended&&s.ios_state==9);
+  assert(s.end_reason.known==(which==0)&&s.end_reason.apple==(which==0?145:0));
+  auto reason=s.end_reason;uint64_t rev=s.revision;
+  for(unsigned cause:{17u,16u}){
+   n=reason_frame(p,133,0,cause);assert(x9cw_progress(p,n,&c));
+   assert(x9cw_outbound_apply(&s,&c)==0&&s.revision==rev&&s.end_reason.known==reason.known&&s.end_reason.apple==reason.apple);
+  }
+  n=reason_frame(p,130,0,16,true,8,0);assert(x9cw_progress(p,n,&c));
+  assert(x9cw_outbound_apply(&s,&c)==1&&s.epoch==2&&!s.end_reason.known&&!s.end_reason.apple);
+ }
+ for(unsigned which=0;which<5;which++){
+  begin();unsigned n=reason_frame(p,133);assert(x9cw_progress(p,n,&c));
+  if(which==0)c.id=8;else if(which==1)c.direction=1;else if(which==2)c.mode=0;
+  else if(which==3)c.mask=1;else s.revision=UINT64_MAX;
+  int result=x9cw_outbound_apply(&s,&c);
+  assert(result==(which==3?0:-1)&&!s.end_reason.known&&!s.end_reason.apple);
+ }
+}
+static void incoming_end_reason(){
+ uint8_t p[512];struct x9cw_progress c;struct x9cw_incoming cmd;
+ incoming(p);assert(x9cw_incoming(p,64,&cmd));cmd.call_id=7;
+ struct x9cw_inbound_state s;
+ auto begin=[&](){s={};assert(x9cw_inbound_begin(&s,&cmd)==1);
+  unsigned n=reason_frame(p,0,1);assert(x9cw_progress(p,n,&c));
+  assert(x9cw_inbound_apply(&s,&c)==1&&!s.end_reason.known);};
+ for(unsigned which=0;which<4;which++){
+  begin();unsigned n=reason_frame(p,133,1,which==1?17:16,which!=2);
+  assert(x9cw_progress(p,n,&c));if(which==3)c.valid=0;
+  assert(x9cw_inbound_apply(&s,&c)==1&&s.ended&&s.ios_state==9);
+  assert(s.end_reason.known==(which==0)&&s.end_reason.apple==(which==0?145:0));
+  auto reason=s.end_reason;uint64_t rev=s.revision;
+  for(unsigned cause:{17u,16u}){
+   n=reason_frame(p,133,1,cause);assert(x9cw_progress(p,n,&c));
+   assert(x9cw_inbound_apply(&s,&c)==0&&s.revision==rev&&s.end_reason.known==reason.known&&s.end_reason.apple==reason.apple);
+  }
+  cmd.sequence++;assert(x9cw_inbound_begin(&s,&cmd)==1&&s.pending&&!s.end_reason.known&&!s.end_reason.apple);
+ }
+ for(unsigned which=0;which<5;which++){
+  begin();unsigned n=reason_frame(p,133,1);assert(x9cw_progress(p,n,&c));
+  if(which==0)c.id=8;else if(which==1)c.direction=0;else if(which==2)c.mode=0;
+  else if(which==3)c.mask=1;else s.revision=UINT64_MAX;
+  int result=x9cw_inbound_apply(&s,&c);
+  assert(result==((which==1||which==3)?0:-1)&&!s.end_reason.known&&!s.end_reason.apple);
+ }
+ // Complete END cannot attach a cause to an MT that has not observed ECPI0.
+ s={};assert(x9cw_inbound_begin(&s,&cmd)==1);unsigned n=reason_frame(p,133,1);
+ assert(x9cw_progress(p,n,&c)&&x9cw_inbound_apply(&s,&c)==-1&&!s.end_reason.known);
 }
 static unsigned current_frame(uint8_t *p,unsigned count,unsigned result=0){
  assert(count<=1);x9cw_header(p,704,0x90a,2,0);unsigned at=32;
@@ -837,6 +918,7 @@ int main(int argc,char **argv){
   {"voice_bind_codec",voice_bind_codec},{"end_target_codec",end_target_codec},{"ios_end_roundtrip",ios_end_roundtrip},
   {"current_metadata",current_metadata},
   {"current_number_owner",current_number_owner},{"progress_number_owner",progress_number_owner},
+  {"end_reason_provenance",end_reason_provenance},{"outbound_end_reason",outbound_end_reason},{"incoming_end_reason",incoming_end_reason},
   {"ios_end_stale_query",ios_end_stale_query},{"ios_end_presend",ios_end_presend},
   {"ios_end_abandon",ios_end_abandon},{"ios_end_late_cnf",ios_end_late_cnf},
   {"ios_end_duplicate",ios_end_duplicate},

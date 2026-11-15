@@ -14,6 +14,7 @@
 | 初始化 / 事件注册 | 明确绑定后的 VOICE03：13=0 与14=0/1 可独立并发 → 全局 CMD8901 → 逐 SIM IND4901/4902 → owned0909/090a；逐token确认，13=1仍拒绝；仅编译、未运行 |
 | handover 通知 | 严格 MD4902/EVENT3 → Android SRVCC → Apple54/tag1/u8；订阅cursor/generation/SIM隔离、先Result后有序发布；未设备验收，未迁移handover后的ID/RAT/profile |
 | 来电 CMD / 状态 | `8901` 的字段、长度和唯一 tag 验证；独立 pending ID → 完整 ECPI0/132/6/133 的 MT reducer / iOS observer；未发布 CallList |
+| END 原因 metadata | 成功完整解析、被当前 MO/MT 身份接受的 `133/mode20/10a=16` → 内部 Apple reason145；无cause/其它cause未知，不从无ID0910补归属；只编译，未发布 END |
 | 来电许可 RSP | `8902` 的正确 approve/call-id 字段；显式调用才构造，保留原 txid；按已核实 RIL slot 转换生成 RSP mask |
 | 物理 transport | 独立 call inbox / CMD owner，复用原有唯一 MD tick writer；SMS ACK 保持优先 |
 | 超时 / 重复 / 失败 | 无自动重发；重复 outstanding CMD 去重；内容变化及未知退休规则隔离 calls；不清空 mutation owner |
@@ -139,6 +140,46 @@ offset6追加原件排除：`192a770→192b150/192b194`只是接收vector resize
 是变长结构而非7B CallList serializer。当前匹配host原件仅有CallList parse/resize/copy，
 未发现其writer；QMIParserDynamic已有metadata也无vs/ALS定义。ALS只是未证假设，不按标准字段名填0。
 
+### END cause16 → Apple reason145（内部metadata，未发布）
+
+Apple END tag14 consumer `1f1ac50a4`读u16，`1f1ac50bc`交
+`convertCallEndReasonToString1f19fd3c8`，`1f1ac5170`交
+`convertCallEndBBCodeToCSIError1f19fd830`。**原始数值16在Apple空间是Unknown / CSI1**，
+不能把MD10a直接copy为Apple reason。Apple145/0x91明确名为
+`QMI_FAILURE_CAUSE_NORMAL_CALL_CLEARING`；CSI跳表entry34的目标`1f19fd8e4`返回0。
+Apple0是OFFLINE，不能作为无cause默认发布。
+
+matching MD原因空间及完整源到10a链已闭合：
+
+1. IMS disconnect producer `910d30e6` 的`910d3104..3110`与progress producer
+   `910d3366` 的133分支`910d3398..33a4`均调用`imc_map_last_cause_to_ext_report911006ec`。
+   CEER request `910f6678`的`910f6696..66a4`调用**同一mapper**；formatter
+   `9143ec76..92`使用table`929950d8`，其中`[16]→9244a76c="CM_NORMAL_CALL_CLR"`。
+2. `910d7f58..7f80`把映射输出放ECPI info+57/presence1、+58/u16cause；
+   VDM update`921ecd2a`保存ctx+f/presence、+212/cause，fill`921ecb6c`原值拷回。
+   无cause路径presence0；内部备用值31**不能冒作真实cause发布**。
+3. END route`921e9758→921e9604`经encoder`9143dc36`设置msgtype133；
+   common`9143da74`由presence决定是否写末尾cause字段。L5 ECPI parser
+   `91392d86..92db6`保留presence/u16cause，send`91392ae0..92aea`把session+4/+6
+   拷至IND+231/+232，serializer`9132587e..25894`仅presence==1才LHU零扩展写10a/u32。
+
+真实 retained radio日志`x9/out/android-incoming-20261115-192820/retained-radio-logcat.txt`
+2977..2979行，19:27:31.399的完整0910同时含code16和`CM_NORMAL_CALL_CLR`；
+matching RIL`385848..5894`保留code和字符串。0910没有通话ID，**只佐证原因语义，不倒填4901的ID、
+不把前一通话的cause补给后一通话**。已有真实4901日志只保留486B，声明512/520/528/536B；
+仍无完整设备END frame，不补零或截断解析。
+
+共享progress仅在完整frame及所有TLV校验通过后置`valid=1`。手工/zero-init对象保持既有reducer准入语义，
+但不能授予END原因provenance。MO/MT reducer仅在原身份/路由/方向/状态/revision检查全部成功后保存
+`end_reason{known,apple}`：仅完整`133/mode20/has_cause/cause16`known145；其它或缺cause未知。
+拒绝事件、late133、revision overflow不会更新原因；首次unknown END也不能被late16补成known。
+NEW130与新的MT CMD begin清前一epoch的metadata。没有改注册、MT approval/answer、运行profile、
+CallList/END编码或VOICE09；本节不是END发布完成。
+
+私有窄反汇编现复制到`x9/out/call-end-reason-analysis/`（含`ios-end-reason-*`、
+`md-ims-*-cause-source.asm`、`md-vdm-*`、`md-end-*`、`md-ceer-*`、`ril-last-cause-*`）；
+人工provenance/MO/MT三项向量、C11 header及真实recipe两对象仅编译，未运行套件或设备验收。
+
 ### CALL_RAT 不等于真实 voice access RAT
 
 MD `913a29ae/b2→l5ucc_get_rat_from_call_mode913a0756`将mode20..39分类为2，
@@ -176,8 +217,52 @@ CommCenter包装100177b88导入的`IMSStartCall`，ordinal58实际provider为
 `IMSStartCall1b7d69208`构造XPC的`request=kCallStart`、`kCallDialedNumber`、`kCallOptions`，
 经1b7d6933c→`XpcConnectionClient::sendXpcMessage1b7ccff18`发送；实际client/connection链为空则返回0。
 **selected IMS driver、subtype4/8、live IMS transport及caller options才是已证的上游维度**；
-当前普通VOICE20内核入口没有这些来源，最终XPC接收端/SIP/MD桥及语音能力options仍待闭合。
+当前普通VOICE20内核入口没有这些来源；以下闭合原件XPC接收端至AP socket，
+但Apple IMS provider到MTK modem IMS的桥及语音能力options仍未实现。
 此处是架构边界纠错，不注入host代码、不新建QMI默认字段、不开放VOICE09。
+
+`IMSClientCreate1b7d67e4c..e68`与server instance block`1b7b816b4..81730`使用同一
+`com.apple.ipTelephony` endpoint。根盘实际`com.apple.CommCenter.plist`的MachServices注册该名，
+ProgramArguments指向CommCenter；不是仅凭字符串猜服务。
+`XpcDaemonClient::setHandlers1b7b62314..354`实际注册`kCallStart`到block`1b7b635ec`，
+读取`kCallDialedNumber`及`kCallOptions`。普通分支`1b7b63bd8..bf4`的virtual+80
+进入`ims::Call::dial1b7c41468`，async block`1b7c41878/418cc`再调用
+`IMSCallManager::initializeNonEmergencyCall1b7b32708`；不是先前同名startCall wrapper。
+
+实际普通呼叫链为`initializeNonEmergencyCall1b7b33110 → IMSCallInfo::startCall/continueCall
+1b7b28438/1b7b28de4 → BambiClient::initializeCallToRemoteUri/createNewCall1b7da99e0
+→ BambiCall::initializeMobileOriginated1b7daa180`。`SipStack+af8` handler virtual+60
+进入`internalStart1b7d7948c → initializeMediaForMOSession1b7bc3ed0`；真实异步media创建回调
+`BambiClient::handleMediaSessionCreatedStatus1b7dad73c → setMediaSessionCreated1b7bc629c`
+才调用`SipSession::sendInvite`。
+
+INVITE继续经`sendRequest1b7b94ecc/1b7b91a48 → SipDialog::sendRequest/sendRequestInFork
+1b7d0b438 → internalSendRequest1b7d0dea4 → SipTransactionLayer::sendRequest1b7ce3ed0
+→ SipTransportLayer`。原件rebases已定名IPSec address point`1d90a4d20`：
+slot+38/sendMessage、+78/sendMessageViaBestTransport、+80/SipIPSecTransportGroup::sendData。
+`1b7d77aac`实际virtual+80到`1b7ac52a4`；`1b7ac5700`的socket virtual+28
+经UDP secondary`1d90b7388`的slot+28 thunk`1b7c3c2d8(this-=48)`到
+`sendOverSocket1b7c3c2c0 → ImsUdpSocket::send1b7c3be68 → 1b7c3bf18`。
+最后stub`1b7e0f0b8`由该dylib的indirect-symbols表证明为`_sendto`，不是nearest-symbol注释。
+
+因此该原件的`IMSStartCall`主信令是一套**AP SIP流程**，不是普通Eureka VOICE20的上游。
+上述静态链不证明本机iOS已选择IPSec、成功IMS注册/拨号或建立media；IMSA registered、NAS/UAC
+辅助请求不能替代真实client、SIP registration及call-state readiness。
+私有可复读材料在主checkout`x9/out/dial-profile-remaining-analysis/`，包括
+`ios-ims-callstart-handler.asm`、`ios-ims-sip-invite.asm`、`ios-ims-transport-vtables.txt`、
+`ios-ims-udp-socket-send.asm`与`ios-iptelephony-indirect.txt`；未修改原件或操作设备。
+
+### SMS集成：未发布MT的原子host queue准入
+
+短信仍用独立WMS/SMS注册，不能作为VOICE readiness。生产修复`f1aa29f`在原
+`message_event`已交state2后、重复changed CMD poison/control loss与host入队之间增加原子fence：
+`x9_md_mipc_message_publish(token,sim,callback,context)`在同一MD锁内检查真实state2 owner、
+原mask低SIM位、online/SMS poison及既有CS envelope，持锁覆盖真正host队列入队。
+受信callback仅`bb_x9_sms_event`，frame锁外预分配，失败锁外擦除释放，原PDU/token保留。
+锁序为MD mutex→bb_lock；callback无malloc或MD重入，两个mutex仍可能等待，不称完全nonblocking。
+原整CMD mask/txid、已delivered/replying/selected/partial和物理ACK drain、普通bb_push/CALL/data不改。
+新增13项人工源码向量、总33项**只编译未执行**；统一kernel-only结果见NOTES。
+host queue receipt不等于Messages显示/持久化、物理ACK成功或MO对端收到，仍无最终通话短信镜像。
 
 ### modem 与 Android serializer
 

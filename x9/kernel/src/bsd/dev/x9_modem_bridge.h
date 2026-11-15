@@ -42,6 +42,15 @@ int x9_md_mipc_online(void);
  * retry or tombstone is altered. SMS admission/TX recheck poison under lock. */
 int x9_md_mipc_message_online(void);
 int x9_md_mipc_message_event(uint8_t *frame, uint32_t capacity, uint32_t *length, uint32_t *token);
+/* Trusted synchronous host-queue admission only. Callback runs under the MD
+ * mutex after online/inbox/state2 token and original low-SIM-mask validation;
+ * it must not allocate or call any MD API. Lock order: MD -> bridge mutex.
+ * Build/allocate the owned frame before calling; callback 1 means the queue
+ * owns it, 0 leaves ownership with the caller. This never ACKs/retires a CMD
+ * and never proves host ACK, persistence or delivery. Rejection returns 0. */
+typedef int (*x9_md_mipc_message_publish_cb)(void *context);
+int x9_md_mipc_message_publish(uint32_t token, unsigned sim,
+ x9_md_mipc_message_publish_cb callback, void *context);
 int x9_md_mipc_message_reply(uint32_t token, unsigned success, uint8_t cause);
 int x9_md_mipc_message_reply_take(uint32_t token, int *result);
 /* Staged call transport, separate from SMS/IMS and WDS. No automatic CMD
