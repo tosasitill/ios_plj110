@@ -1042,6 +1042,57 @@ MD body校验并保存配置→Spc_SpeechOn→SP_SpeechOn→af20已由原件及A
 不用另一SPC空sendIpcCmd返回0、参考路由或REG_DMA两个65536B来填空。
 准确分层、原汇编及参考推导（未发送、非抓包）在`x9/out/call-md-voice-owner/usip-ad50-and-md-speech-on-contract.json`。
 
+#### 通话 AFE descriptor / DSP trigger owner：原 HAL 决定门与参考实现
+
+本轮只读原件及已有拨出日志。**固定输入首先缺同版 `audio_dsp` 固件**：已抓 properties 的
+OTA 分区列表含此名，但现有 `.local/x9` 分区备份、modem 原件与已抓 vendor 文件中没有该
+payload，也没有同版 audio DSP 模块。不能拿 `scp_b`、SmartPA A-core 固件或开源默认路由替代。
+真实 task-info[scene0] 的8B、独立 `ADSP_USIP_PHONECALL` owner 与 DSP consumer 仍缺。
+
+原 HAL `AudioDspPhoneCall::setPhoneCallDspShareMem25f380` 将 bool&1 依次写入实际字符串
+`adsp_calldl_sharemem_scenario`（VA100c7c）、`adsp_callul_sharemem_scenario`（VA125bc8）；
+第一项成功才写第二项，两项成功才返回0。下面仅是由这些**同名 controls** 锚定的 MT6993
+reference 实现（HEAD `4d505a4292dab3176a45fec66dc85debc362e24c`），**不是同版驱动或固件执行证明**：
+
+- `mt6993-afe-pcm.c:1428..1550/2134..2141` 按实际 task attrs 将 CALLDL 的 MEMDL、CALLUL 的
+  MEMUL/MEMREF（只有 memif>=0）设为 `use_adsp_share_mem`，没有固定 DL/UL/REF 编号。
+  substream 未关便从1解除为0会标记 `err_close_order` 并触发 AEE；setter 返回0也不能证明
+  实际 attrs 选到 memif，更不是 DSP ready。不能只释放通用 audio ticket 便退休此 owner。
+- `mtk-afe-fe-dai.c:418..440` 的共享内存分支调用 `mtk_adsp_allocate_mem`；后者
+  `mtk-dsp-mem-control.c:1077..1137/1434..1468` 从 `AUDIO_DSP_AFE_SHARE_MEM_ID` gen_pool
+  分配真实 `snd_dma_buffer`，pool 源于 `ADSP_AUDIO_COMMON_MEM_ID` reserve memory，
+  **不是 USIP_ID24 或 ADD0/ADD1 注册的 AP↔DSP 两个65536B region**。
+- AFE `:475..546` 设置真实 dma_addr/bytes/channel/rate/format 后调用 `afe_pcm_ipi_to_dsp`。
+  `mtk-dsp-mem-control.c:1369..1400` 根据动态 memif 与 default/runtime/ref_runtime 选择 task；
+  `mtk-dsp-common.c:495..578` 再检查 task、runtime/default，将物理 ring bridge、PCM attrs、
+  memif/IRQ 写进该 task 的 `audio_afepcm_buf`，复制至同 owner 的 `msg_atod_share_buf`。
+  HWPARAM201 / PREPARE203 发送 PAYLOAD+NEED_ACK，payload 是 **physical descriptor address**，
+  不是 PCM samples；方向 DL1/UL2/REF4 也须走真实 REF_RUNTIME 判定。scene 由 CALLDL→PHONE_CALL_SUB、
+  CALLUL→PHONE_CALL 映射，不猜实际 core。发送还受 `is_audio_task_dsp_ready`/default 门约束。
+  外层 AFE 忽略发送返回值，内层忽略 attr 构造返回值，不能以 hwparams 成功代替消费或 ACK。
+- **实际 trigger 决定门**：`mtk-afe-fe-dai.c:919..935` 对 `use_adsp_share_mem` 返回 false；
+  `mt6993-afe-pcm.c:216/303` 因而跳过主机 memif/IRQ 启停，其 owner 在 DSP。
+  现有 host-only AFE 播放/录音、SmartPA coreA 或两条 REG_DMA 环不能冒充此通话硬件 provider。
+
+还必须区分真实本次拨出路线：MO 原日志 `:624..640` 实际执行 `modemPcmOpen` 和两次
+`Hostless_Speech` open（2ch/48000/1024×2/format0）。原 `modemPcmOpen28220c/282214`
+检查 ADSP option 与 frame-base scheduling；frame-base 真分支会跳2826f0，绕过 Hostless open。
+所以不能凭 `AudioDspPhoneCall::adspPcmOpen` 符号存在便称本次走了上面的 descriptor 链。
+reference Hostless 图连接 PCM_0/1 与 ADDA/I2SOUT，仅是候选图，未证本次所选端点。
+
+原 `SpeechExtMemUSIP::openShareMemory1bc970` 的另一 ioctl **c00844f0** 读 size，再映射
+AP parameter region。真实 maps 的 `/dev/usip` rw-s 长度30000，不是 PHONECALL8000。
+`formatShareMemory1bcc70` / `writeSphParamToShareMemory1bd050→1bd390` 将参数放在
+APmap+4000 的2bfe0区间，保存/发布 `vendor.audiohal.speech.shm_usip` 与
+`vendor.audiohal.speech.shm_widx`；当前 MO `configSpeechInfo` 的 usip param size/index均0，
+既不证明参数写入，也不证明通话 PCM。`AudioDspCallFinal::processDmaMsg238e80` 仅消费101
+dump与严格64B的103 dump metadata，不是 AD50/MD3D00 或物理 PCM consumer。
+
+完整窄切片、原日志行号、静态复提脚本与分层 JSON 在 gitignored
+`x9/out/call-voice-dsp-owner/owned-call-descriptor-boundary.json` 及同目录；未改生产源码、
+未编译、未运行测试/人工向量、未操作手机。此证据补齐独立 buffer/trigger 决定门，
+**仍不证明同版 DSP receipt、USIP_PHONECALL 消费、iOS Baseband Voice I/O 或双向声音成功**。
+
 #### IMSA 注册分流窄修与短信初始化配置边界
 
 RIL `onHandleUrc290e18..290ecc`先按4a01/tag100/u8分流：type0 CIREGU/tag101、type1 WFC、
