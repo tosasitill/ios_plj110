@@ -157,6 +157,14 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 
 ## 5. 当前状态与交接
 
+#### 2026-11-16 通话生产接入 / NAS45初始化续修（本轮进行中）
+
+- **基线/分工**：从 main/origin `25abe26e` 建 root `feat/calllist-production` / `.worktrees/calllist-production`；用户要求多子代理，复用三个实际代理及 `call-provider-install`、`call-privacy-policy`、`call-client-bootstrap` 三树，分别追原 factory/action、Android拨号策略、Apple初始化/注册。只读既有日志/原件，修改生产源码及必要契约；不操作手机、不要求10086/补来电、不出探针、不执行人工向量/测试套件，不触其它audio/BT/camera/HEVC活动树。
+- **已提交的状态发布证据**：root `f8b6212` 证明 TRYING `1007c55f0` 只按UUID lookup并日志 `Ignoring`，不发布状态。原RINGING `1007c57d0→command+30→10104879c→Call+338` 实际送 **CallAlerting**；BSS表 `101673178` 由原 `10105e078` 初始化，只有前态FSM Dialing4的handler `10104ec28` 准入，经strong status+28、原UUID filter和 `101018718` 写 **Call+a0 Alerting7**，随后FSM置Alerting6。payload byte5、FSM6、CT7、QMI event不能互抄；仍无MD producer/完整UI验收。新静态材料当前在root树 `x9/out/calllist-production/`，收尾无覆盖迁主checkout同路径。
+- **已整合的factory契约**：代理原 `6e6500a` cherry-pick为root **`b2ba58e0`**，仅docs。实际factory表 `101532938+40` 消费已证，不替整个driver；每个action可重建临时Call，D1/D0不hangup/END，不能用对象释放退休MD epoch。text/relay setter另有异步AP发送，不能passthrough；shared embedded Call必须nondeleting destructor。实际生产installer/admission/backend尚无，不造空API。代理仍窄查初始化入口，当前raw在其 `x9/out/call-provider-install/`。
+- **初始化生产修复正在实施，尚未验收**：NAS45/tag1/u8实际由 `QMINasClient` event2发送；只有其真实Result0按owned name/subscription找delegate→`nasSystemInitialized`，才继续owned DeferredInit/StackConfig→`_initializeFromSIM`→Bambi/SipStack。旧 `X9QMIAT` 先改SIM route再legacy发送，queue/OOM丢reply会漏初始化推进。代理正在三份生产源码补owned45 terminal Result/实际queue receipt、receipt后换route、旧jobs原token/SIM、pending-route新NAS44/03/45 admission边界及原25s锁内deadline；不重发MD、不造registered/ready。正式单对象编译进行中，**暂无本轮源码commit、kernel/boot构建或设备结果**。
+- **完整目标仍未完成**：privacy显式CLIR及owned voiceRAT/preferredRat仍在收束，默认0不套实测。VOICE09保持关闭；typed→MD可达provider/生产拨号/UUID与native epoch映射、handover后ID/RAT/CS动作、双向通话专用媒体及短信Messages当前commit/重开/物理ACK/MO对端收到仍未闭合，**没有通话短信最终修复镜像**。下一优先review NAS45并正式固定源码kernel-only；不为docs重建或二次检查旧产物。收尾统一提交/合main/push、无覆盖归档本轮out、只清本轮四树；实际commit/build/push结果继续更新本条。
+
 ### 5.1 已在设备上观察到能用（详情见旧 NOTES）
 
 - 启动到 SpringBoard，UFS 原生根盘读写，UFS HS-G5/FAST/RateB/2 lane（180）。
