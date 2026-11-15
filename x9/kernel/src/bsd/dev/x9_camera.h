@@ -387,7 +387,8 @@ struct x9_camera_camsv_dma {
     int (*check)(void *, uint64_t lease, const struct x9_camera_camsv_request *);
 };
 enum x9_camera_camsv_slot_state {
-    X9_CAMSV_EMPTY, X9_CAMSV_ARMED, X9_CAMSV_RETIRED, X9_CAMSV_RETAINED
+    X9_CAMSV_EMPTY, X9_CAMSV_ARMED, X9_CAMSV_RETIRED, X9_CAMSV_RETAINED,
+    X9_CAMSV_CANCELLED /* exact never-issued request; not DONE/deliverable */
 };
 /* Zero-initialize a kernel-owned slot before its first arm. After that only
  * these APIs mutate it. The owner serializes result consumption/rearm/stop

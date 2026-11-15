@@ -126,3 +126,20 @@ static int cam_s1_dma_retire(struct x9_camera_camsv_slot *slot)
     }
     lck_mtx_unlock(&camera_s1_lock);return e;
 }
+
+/* Private thread-only never-issued cancellation, called solely after the
+ * repeat double-identity journal and real OFF/no-credit/IAR+EOI/DMA-halt/bus
+ * admission. No arbitrary ARMED abort API, no RAW read or delivery/DONE. */
+static int cam_s1_dma_cancel_unissued(struct x9_camera_camsv_slot *slot)
+{
+    struct x9_camera_s1 *m=slot->dma.backing;
+    lck_mtx_lock(&camera_s1_lock);int e=cam_s1_check_private(m);
+    if(!e && (slot->state!=X9_CAMSV_ARMED || m->raw_state!=CAM_RAW_DEVICE ||
+       m->raw_errno || !m->published || !cam_s1_dma_match(m,slot)))e=ESTALE;
+    for(unsigned i=0;!e && i<m->pages;i++)
+        e=cam_cache_range(m->raw+(vm_offset_t)i*CAM_S1_PAGE,CAM_S1_PAGE,CAM_CACHE_CPU);
+    if(!e)e=cam_s1_check_private(m);
+    if(!e)m->raw_state=CAM_RAW_CANCELLED;
+    else if(m && m->magic==CAM_S1_MAGIC)cam_s1_dma_latch(m,e);
+    lck_mtx_unlock(&camera_s1_lock);return e;
+}

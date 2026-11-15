@@ -809,7 +809,9 @@ static int cam_sv_request_guard_locked(uint64_t epoch,const struct x9_camera_cam
     if(!cam_sv.request_held || !cam_sv.request_ready || !cam_sv.fbc_ready || epoch!=cam_sv.epoch ||
        slot!=cam_sv.request_slot)return ESTALE;
     lck_mtx_lock(&camera_camsv_lock);
-    e=(slot->state!=X9_CAMSV_ARMED && slot->state!=X9_CAMSV_RETIRED) ||
+    e=(slot->state!=X9_CAMSV_ARMED && slot->state!=X9_CAMSV_RETIRED &&
+         (slot->state!=X9_CAMSV_CANCELLED ||
+          cam_repeat_cancelled_check_locked(epoch,&slot->request,slot->dma.backing))) ||
         memcmp(&slot->request,&cam_sv.request,sizeof(cam_sv.request)) ||
         slot->dma.version!=cam_sv.request_dma.version || slot->dma.reserved ||
         slot->dma.context!=cam_sv.request_dma.context || slot->dma.lease!=cam_sv.request_dma.lease ||
