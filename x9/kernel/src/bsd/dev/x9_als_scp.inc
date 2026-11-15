@@ -22,6 +22,17 @@ static uint8_t als_prox_info[X9_PROX_INFO_BYTES];
 static int als_prox_present, als_list_complete;
 static uint32_t als_prox_pending, als_prox_enabled, als_prox_interval;
 
+/* LIST-only evidence. Buffer during the 100ms wait: serial printf can itself
+ * delay polling. No extra IPI, IRQ clear, retry or relaxed validation. */
+static struct {
+ int active;
+ uint64_t start_ns, first_poll_us, last_poll_us, max_gap_us;
+ uint32_t polls, notify_count, ack_count, irq_before, out_before;
+ uint8_t tx[28];
+ struct { uint8_t raw[28]; uint32_t reason; uint64_t us; } notify[4];
+ struct { uint8_t raw[8]; uint32_t matched; uint64_t us; } ack[2];
+} als_list_trace;
+
 /* HID requests only enqueue. The one worker owns OUT29 and correlates ACKs;
  * no second mailbox user, clock reparent, coprocessor release or awake vote. */
 static int als_prox_request(uint32_t enabled, uint32_t interval)
@@ -124,6 +135,13 @@ static int als_smc_ok(uint32_t fid, unsigned op, unsigned arg)
  * IRQ. Unknown/late ACKs are discarded, not accepted as another command. */
 static int als_poll(void)
 {
+ if (als_list_trace.active) {
+  uint64_t us = (als_now_ns()-als_list_trace.start_ns)/1000;
+  uint64_t gap = us-als_list_trace.last_poll_us;
+  if (!als_list_trace.polls) als_list_trace.first_poll_us = us;
+  if (gap > als_list_trace.max_gap_us) als_list_trace.max_gap_us = gap;
+  als_list_trace.last_poll_us = us; als_list_trace.polls++;
+ }
  uint32_t bit = 1u<<als_layout.ready_pin.pin_index;
  if (als_rr(als_mb0, 0x10c)&bit) {
   uint32_t image = als_rr(als_mb0, als_layout.ready_pin.offset_bytes);
@@ -141,8 +159,17 @@ static int als_poll(void)
  if (irqs&(1u<<ack->pin_index)) {
   uint8_t p[8]; als_from_io(p, als_mb1, ack->offset_bytes, sizeof(p));
   als_wr(als_mb1, 0x10c, 1u<<ack->pin_index);
-  if (als_ack_pending && !als_ack_received && p[0] == als_expected_sequence &&
-      p[1] == als_expected_type && p[2] == als_expected_command && p[4] == als_crc8(p,4)) {
+  int matched = als_ack_pending && !als_ack_received && p[0] == als_expected_sequence &&
+      p[1] == als_expected_type && p[2] == als_expected_command && p[4] == als_crc8(p,4);
+  if (als_list_trace.active) {
+   uint32_t i = als_list_trace.ack_count++;
+   if (i < 2) {
+    memcpy(als_list_trace.ack[i].raw,p,sizeof(p));
+    als_list_trace.ack[i].matched = matched;
+    als_list_trace.ack[i].us = (als_now_ns()-als_list_trace.start_ns)/1000;
+   }
+  }
+  if (matched) {
    memcpy(als_ack, p, sizeof(p)); als_ack_received = 1;
   } else {
    lck_mtx_lock(&x9_als_lock); status.rejected++; lck_mtx_unlock(&x9_als_lock);
@@ -151,6 +178,19 @@ static int als_poll(void)
  if (irqs&(1u<<notify->pin_index)) {
   uint8_t n[28]; als_from_io(n, als_mb1, notify->offset_bytes, sizeof(n));
   als_wr(als_mb1, 0x10c, 1u<<notify->pin_index);
+  if (als_list_trace.active) {
+   uint32_t i = als_list_trace.notify_count++;
+   if (i < 4) {
+    memcpy(als_list_trace.notify[i].raw,n,sizeof(n));
+    /* 1=CRC, 2=length, 3=READY, 4=LIST accepted, 5=LIST seq,
+     * 6=other. These labels observe the existing branches only. */
+    als_list_trace.notify[i].reason = n[4] != als_crc8(n,4) ? 1 :
+        n[3] > 20 ? 2 : n[1] == 0 && n[2] == 4 && n[3] == 0 ? 3 :
+        n[1] == 0 && n[2] == 9 && n[3] == 12 ?
+        (n[0] == als_expected_sequence ? 4 : 5) : 6;
+    als_list_trace.notify[i].us = (als_now_ns()-als_list_trace.start_ns)/1000;
+   }
+  }
   lck_mtx_lock(&x9_als_lock); status.packets++; lck_mtx_unlock(&x9_als_lock);
   if (n[4] != als_crc8(n,4) || n[3] > 20) {
    lck_mtx_lock(&x9_als_lock); status.rejected++; lck_mtx_unlock(&x9_als_lock);
@@ -229,6 +269,7 @@ static int als_notify(unsigned command, const uint8_t *data, unsigned bytes)
  uint8_t n[28] = {0}; n[0] = als_sequence++; n[2] = (uint8_t)command; n[3] = (uint8_t)bytes;
  n[4] = als_crc8(n,4); if (bytes) memcpy(n+8, data, bytes);
  als_expected_sequence = n[0];
+ if (als_list_trace.active && command == 9) memcpy(als_list_trace.tx,n,sizeof(n));
  return als_send(2, n, sizeof(n));
 }
 static int als_in_firmware(uint32_t address, uint32_t bytes)
@@ -370,6 +411,50 @@ static int als_timesync(void)
  als_put32(p+40,(uint32_t)days+1); als_put32(p+44,month);
  return als_control(0,10,p,sizeof(p));
 }
+static void als_list_evidence(int error)
+{
+ /* Read only the qualified AP-facing mailbox/shared windows. A pending IN32
+  * is left pending, not consumed after the deadline or accepted as success. */
+ uint64_t elapsed_us = (als_now_ns()-als_list_trace.start_ns)/1000;
+ uint32_t irq = als_rr(als_mb1,0x10c), out = als_rr(als_mb1,0x100);
+ uint32_t in_bit = 1u<<als_layout.sensor_pin[3].pin_index;
+ uint8_t pending[28] = {0}, tx[24], rx[24];
+ if (irq&in_bit) als_from_io(pending,als_mb1,als_layout.sensor_pin[3].offset_bytes,sizeof(pending));
+ als_from_io(tx,als_tx,0,sizeof(tx)); als_from_io(rx,als_rx,0,sizeof(rx));
+ printf("X9 ALS LIST: result=%d reply=%u expected-seq=%u elapsed-us=%llu polls=%u first-us=%llu last-us=%llu max-gap-us=%llu tail-gap-us=%llu notify=%u ack=%u\n",
+     error,als_reply_received,als_expected_sequence,elapsed_us,als_list_trace.polls,
+     als_list_trace.first_poll_us,als_list_trace.last_poll_us,als_list_trace.max_gap_us,
+     elapsed_us-als_list_trace.last_poll_us,als_list_trace.notify_count,als_list_trace.ack_count);
+ printf("X9 ALS LIST: pins OUT31=%u/%x IN32=%u/%x before irq=%x out=%x after irq=%x out=%x pending=%u\n",
+     als_layout.sensor_pin[2].pin_index,als_layout.sensor_pin[2].offset_bytes,
+     als_layout.sensor_pin[3].pin_index,als_layout.sensor_pin[3].offset_bytes,
+     als_list_trace.irq_before,als_list_trace.out_before,irq,out,!!(irq&in_bit));
+ const uint8_t *n = als_list_trace.tx;
+ printf("X9 ALS LIST: OUT31 raw=%08x %08x %08x %08x %08x %08x %08x crc=%x/%x\n",
+     le32(n),le32(n+4),le32(n+8),le32(n+12),le32(n+16),le32(n+20),le32(n+24),n[4],als_crc8(n,4));
+ for (unsigned i = 0; i < als_list_trace.notify_count && i < 4; i++) {
+  n = als_list_trace.notify[i].raw;
+  printf("X9 ALS LIST: IN32[%u] us=%llu reason=%u raw=%08x %08x %08x %08x %08x %08x %08x crc=%x/%x\n",
+      i,als_list_trace.notify[i].us,als_list_trace.notify[i].reason,
+      le32(n),le32(n+4),le32(n+8),le32(n+12),le32(n+16),le32(n+20),le32(n+24),n[4],als_crc8(n,4));
+ }
+ for (unsigned i = 0; i < als_list_trace.ack_count && i < 2; i++) {
+  n = als_list_trace.ack[i].raw;
+  printf("X9 ALS LIST: IN30[%u] us=%llu matched=%u raw=%08x %08x\n",
+      i,als_list_trace.ack[i].us,als_list_trace.ack[i].matched,le32(n),le32(n+4));
+ }
+ if (irq&in_bit) {
+  n = pending;
+  printf("X9 ALS LIST: IN32 pending raw=%08x %08x %08x %08x %08x %08x %08x crc=%x/%x (not consumed)\n",
+      le32(n),le32(n+4),le32(n+8),le32(n+12),le32(n+16),le32(n+20),le32(n+24),n[4],als_crc8(n,4));
+ }
+ printf("X9 ALS LIST: TX base=%x size=%x head=%08x crc=%08x header=%08x %08x %08x length=%u tail=%08x\n",
+     als_layout.reserve_base+als_layout.memory[9].offset,als_layout.memory[9].size,
+     le32(tx),le32(tx+4),le32(tx+8),le32(tx+12),le32(tx+16),le32(tx+20),als_rr(als_tx,8192-4));
+ printf("X9 ALS LIST: RX base=%x size=%x head=%08x crc=%08x header=%08x %08x %08x length=%u tail=%08x\n",
+     als_layout.reserve_base+als_layout.memory[10].offset,als_layout.memory[10].size,
+     le32(rx),le32(rx+4),le32(rx+8),le32(rx+12),le32(rx+16),le32(rx+20),als_rr(als_rx,8192-4));
+}
 static int als_list(void)
 {
  als_stage(X9_ALS_LIST);
@@ -380,13 +465,19 @@ static int als_list(void)
  als_to_io(als_tx,0,als_snapshot,sizeof(als_snapshot));
  uint8_t header[12]; memcpy(header,als_snapshot+8,sizeof(header));
  als_reply_received = 0;
+ bzero(&als_list_trace,sizeof(als_list_trace));
+ als_list_trace.irq_before = als_rr(als_mb1,0x10c);
+ als_list_trace.out_before = als_rr(als_mb1,0x100);
+ als_list_trace.start_ns = als_now_ns(); als_list_trace.active = 1;
  int error = als_notify(9,header,sizeof(header));
  uint64_t until = als_now_ns()+100000000;
  while (!error && !als_reply_received && als_now_ns() < until) {
   error = als_poll(); if (!error && !als_reply_received) als_sleep(1);
  }
+ als_list_trace.active = 0;
+ if (!error && !als_reply_received) error = ETIMEDOUT;
+ als_list_evidence(error);
  if (error) return error;
- if (!als_reply_received) return ETIMEDOUT;
  als_from_io(als_snapshot,als_rx,0,sizeof(als_snapshot));
  const uint8_t *p = als_snapshot, *h = p+8, *n = als_reply+8;
  uint32_t length = le32(h+8), capacity = le32(p+20), gain = 0;
