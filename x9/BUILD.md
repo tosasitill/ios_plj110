@@ -76,6 +76,54 @@ The XNU object tree is built from apple-oss `xnu-8796.141.3` plus the patches in
 `xnu/` (`0001` = the complete X9 source delta, `0002` = iOS kext C++ ABI) by
 `xnu/build-xnu.sh macos|ios [--setup]`; see `../NOTES.md` section 3.1.
 
+Parallel work must not edit or rebuild another session's shared `.local/dxb*`
+tree. Build a new scratch snapshot instead:
+
+```bash
+x9/xnu/build-xnu.sh macos --isolated x9/out/<unique-name>/dxb
+# Or ios for the iOS kext ABI. The matching fixed .local tree must exist.
+```
+
+This APFS-clones the fixed bootstrap/object inputs (not hardlinks), restores
+XNU from the pinned tag and applies this worktree's complete patch set, including
+`0006-x9-bt-uart-irq.patch`. Copied text dependencies and symlinks are relocated
+inside the new tree before `make install`. The original source, wrappers and
+objects remain untouched. The destination must be a new directory inside this
+worktree's gitignored `x9/out/`. To link the overlay against it, make a private
+copy of `local.json` in the same output directory with `dxb` set to that
+repo-relative scratch path, then pass `build.py --config <private-copy>`.
+An isolated XNU build is still not a native-Bluetooth hardware validation.
+
+## Native Bluetooth root payload
+
+The H4 bridge and launch adapters are root filesystem files, **not** boot-image
+contents or Metal mailbox plugins. After the full native/power bridge build
+with both original 20H392 launch jobs, assemble their offline root payload:
+
+```bash
+python3 -I x9/bluetooth/package.py \
+  --runtime x9/out/<complete-bt-build> \
+  --out x9/out/<new-bt-root-payload>
+```
+
+It produces `root/`, separate exact `originals/` launch jobs and
+`root-payload.json`. Only `Program` changes in the two derived jobs; stock
+Apple executables, arguments, identity and MachServices remain unchanged.
+Package metadata binds each new file and both previous job byte hashes and
+requires absent new binary destinations. This is build-time packaging, not
+installation or a second image inspection. `candidate_ready` is distinct from
+`runtime_verified`; the latter stays false until the authoritative iOS flow
+has actually been exercised. `stageable` remains false because no installer
+or device-write approval is implied by packaging.
+
+Do not pass this package to `mailbox/update.py`: its kernel consumer only
+accepts the built-in Metal file manifest and cannot replace launch jobs.
+Root installation requires explicit user confirmation, the live root
+preflight, compare-before-write against both original jobs and stock
+`bluetoothd`, preserved originals, binary publication before job publication,
+fsync/readback and a private receipt. Closed-transport deepsleep/resume does
+not establish active-connection suspend, wake-enhance or a hardware wake IRQ.
+
 `build/scripts/collect-build-inputs.py` gathers a candidate directory's real
 build inputs from the build Mac; it produced the current `kernel/` import.
 
