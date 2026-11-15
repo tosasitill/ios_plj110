@@ -24,6 +24,7 @@ struct x9cw_progress {
  uint32_t id,direction,mode,toa,flags,aux,event,cause;
  unsigned has_cause,valid;uint8_t mask;
  struct x9cw_number number;
+ uint8_t detail[408],pau[512];unsigned pau_length;
 };
 static inline int x9cw_cstring(const uint8_t *v,unsigned k,unsigned bound){
  if(!v||!k||k>bound||v[k-1])return 0;
@@ -60,7 +61,11 @@ static inline int x9cw_progress(const uint8_t *p,unsigned n,struct x9cw_progress
   * have passed validation. Never retain a pointer into a reusable inbox. */
  if(!x9cw_tlv(p,n,0x8104,&v,&k))return 0;
  c.number.length=k-1;for(unsigned i=0;i<k;i++)c.number.value[i]=v[i];
- if(!x9cw_tlv(p,n,0x8106,&v,&k))return 0;c.number.presentation=v[0];c.number.valid=1;
+ if(!x9cw_tlv(p,n,0x8106,&v,&k))return 0;
+ for(unsigned i=0;i<k;i++)c.detail[i]=v[i];
+ c.number.presentation=v[0];c.number.valid=1;
+ if(!x9cw_tlv(p,n,0x810b,&v,&k))return 0;
+ c.pau_length=k-1;for(unsigned i=0;i<k;i++)c.pau[i]=v[i];
  c.valid=1;*out=c;return 1;
 }
 
@@ -78,6 +83,32 @@ static inline struct x9cw_end_reason x9cw_end_reason_metadata(const struct x9cw_
  return r;
 }
 
+/* Raw identity from the last accepted WHOLE progress, scoped by the
+ * enclosing MO/MT epoch and revision. Keep all sources before the MD inbox
+ * and observer erase RX bytes; neither a borrowed pointer nor an unrelated
+ * current snapshot may fill this owner. RIL26931c/269c44 ->26e000 prefers
+ * PAU, may retain an existing number, and otherwise uses nonempty ECPI.
+ * Therefore this is NOT its normalized display number: an empty8104 must
+ * not silently reuse old availability/TOA, and PAU parsing is unimplemented.
+ * Opaque detail is retained, not interpreted beyond its known byte0.
+ * Restricted/unavailable/unknown presentation still forbids disclosure. */
+struct x9cw_progress_identity {
+ struct x9cw_number number;
+ uint32_t toa;unsigned known,pau_length;
+ uint8_t detail[408],pau[512];
+};
+static inline void x9cw_progress_identity_commit(struct x9cw_progress_identity *out,
+                                                 const struct x9cw_progress *c){
+ x9cw_zero((uint8_t *)out,sizeof(*out));
+ /* Legacy hand-built reducer objects retain state admission but cannot
+  * carry raw-identity provenance from a previous accepted revision. */
+ if(!c->valid||!c->number.valid)return;
+ out->number=c->number;out->toa=c->toa;out->pau_length=c->pau_length;
+ for(unsigned i=0;i<sizeof(out->detail);i++)out->detail[i]=c->detail[i];
+ for(unsigned i=0;i<sizeof(out->pau);i++)out->pau[i]=c->pau[i];
+ out->known=1;
+}
+
 /* Unknown idle != known empty. A status stream cannot prove there are no
  * other calls. count_known comes ONLY from a complete GET_STATUS snapshot.
  * An ended identity is retained until a NEW130, never revived by late6.
@@ -87,6 +118,7 @@ struct x9cw_outbound_state {
  uint32_t native_id,event,flags,mode,cause;
  unsigned ios_state,has_cause,seen,ended,blocked,count_known,native_count;
  struct x9cw_end_reason end_reason;
+ struct x9cw_progress_identity identity;
 };
 static inline void x9cw_outbound_invalidate(struct x9cw_outbound_state *s){
  s->count_known=0;
@@ -124,6 +156,7 @@ static inline int x9cw_outbound_apply(struct x9cw_outbound_state *s,
  /* Only accepted events reach this commit; late/foreign/rejected END
   * cannot rewrite metadata. Accepted NEW130 clears the prior epoch. */
  s->end_reason=x9cw_end_reason_metadata(c);
+ x9cw_progress_identity_commit(&s->identity,c);
  /* Even END133 does not prove global emptiness. Query again for that. */
  s->count_known=0;return 1;
 }
@@ -145,6 +178,7 @@ struct x9cw_inbound_state {
  uint32_t native_id,sequence,event,flags,mode,cause;
  unsigned pending,seen,ended,blocked,ios_state,has_cause;
  struct x9cw_end_reason end_reason;
+ struct x9cw_progress_identity identity;
  uint16_t txid;uint8_t mask,response_mask,sim;
 };
 static inline int x9cw_inbound_begin(struct x9cw_inbound_state *s,
@@ -159,6 +193,7 @@ static inline int x9cw_inbound_begin(struct x9cw_inbound_state *s,
  s->mask=c->mask;s->response_mask=c->response_mask;s->sim=c->sim;
  s->pending=1;s->seen=s->ended=s->ios_state=s->has_cause=0;
  s->end_reason.known=0;s->end_reason.apple=0;
+ x9cw_zero((uint8_t *)&s->identity,sizeof(s->identity));
  s->event=s->flags=s->cause=0;s->mode=c->mode;s->revision++;return 1;
 }
 static inline int x9cw_inbound_apply(struct x9cw_inbound_state *s,
@@ -190,7 +225,8 @@ static inline int x9cw_inbound_apply(struct x9cw_inbound_state *s,
  s->has_cause=c->has_cause;s->cause=c->cause;
  /* The CMD owns this MT identity; only its accepted complete END can
   * attach the mapped reason. A late133 cannot fill an unknown END. */
- s->end_reason=x9cw_end_reason_metadata(c);return 1;
+ s->end_reason=x9cw_end_reason_metadata(c);
+ x9cw_progress_identity_commit(&s->identity,c);return 1;
 }
 static inline int x9cw_inbound_id(const struct x9cw_inbound_state *s,unsigned *id){
  if(!s||!id||s->blocked||s->pending||!s->seen||s->ended||!s->native_id||s->native_id>255)return 0;

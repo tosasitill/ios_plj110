@@ -559,6 +559,72 @@ static void progress_number_owner(){
  progress_frame(p,130,7,0);p[50]=5; // would consume next TLV: malformed whole frame
  assert(!x9cw_progress(p,sizeof(p),&c));assert(!memcmp(c.number.value,"456",4));
 }
+/* Raw-source owner only. These artificial cases are compiled, not executed;
+ * they neither normalize PAU/TOA nor publish a caller identity. */
+static void identity_progress(uint8_t *p,unsigned event,unsigned id,unsigned mode,
+                              unsigned direction,const char *number,unsigned presentation){
+ progress_frame(p,event,id,mode);x9cw_scalar(p+24,0x101,direction,4);
+ x9cw_put16(p+50,4);memcpy(p+52,number,4);
+ p[68]=(uint8_t)presentation;p[69]=0xa5;p[475]=0x5a;
+ x9cw_put16(p+506,4);memcpy(p+508,"pau",4);
+}
+static void progress_identity_mo(){
+ uint8_t p[512];identity_progress(p,130,7,0,0,"123",0);x9mi_rx(p,sizeof(p));
+ bzero(p,sizeof(p));x9c_poll();
+ const struct x9cw_progress_identity &a=x9c_outbound.identity;
+ assert(x9c_observed&&x9c_outbound.epoch==1&&a.known&&a.toa==129&&a.number.valid);
+ assert(a.number.length==3&&!memcmp(a.number.value,"123",4));
+ assert(a.detail[0]==0&&a.detail[1]==0xa5&&a.detail[407]==0x5a);
+ assert(a.pau_length==3&&!memcmp(a.pau,"pau",4)&&!a.pau[511]);
+ identity_progress(p,132,7,20,0,"456",1);x9mi_rx(p,sizeof(p));x9c_poll();
+ assert(x9c_outbound.epoch==1&&!memcmp(a.number.value,"456",4)&&a.number.presentation==1);
+ // Host deletion retires host publication, not the native call epoch owner.
+ x9c_del(0);x9q_clients[0].generation++;x9c_poll();
+ assert(a.known&&!memcmp(a.number.value,"456",4)&&!qmi_replies&&!writes);
+ identity_progress(p,133,7,20,0,"789",2);x9mi_rx(p,sizeof(p));x9c_poll();
+ uint64_t rev=x9c_outbound.revision;
+ identity_progress(p,6,7,20,0,"999",0);x9mi_rx(p,sizeof(p));x9c_poll();
+ assert(x9c_outbound.ended&&x9c_outbound.revision==rev&&!memcmp(a.number.value,"789",4)&&a.number.presentation==2);
+ identity_progress(p,130,8,0,0,"234",4);x9mi_rx(p,sizeof(p));x9c_poll();
+ assert(x9c_outbound.epoch==2&&x9c_outbound.native_id==8&&!memcmp(a.number.value,"234",4)&&a.number.presentation==4);
+}
+static void progress_identity_mt(){
+ uint8_t p[512];incoming(p);x9cw_scalar(p+16,0x100,7,4);x9mi_rx(p,64);x9c_poll();
+ assert(x9c_inbound.pending&&!x9c_inbound.identity.known);
+ identity_progress(p,0,7,20,1,"456",1);x9mi_rx(p,sizeof(p));bzero(p,sizeof(p));x9c_poll();
+ const struct x9cw_progress_identity &a=x9c_inbound.identity;
+ assert(x9c_inbound.epoch==1&&a.known&&a.number.length==3&&!memcmp(a.number.value,"456",4));
+ assert(a.toa==129&&a.detail[1]==0xa5&&a.pau_length==3&&!memcmp(a.pau,"pau",4));
+ assert(!x9c_outbound.identity.known&&!x9c_outbound.seen&&!writes&&!qmi_replies);
+ identity_progress(p,133,7,20,1,"789",2);x9mi_rx(p,sizeof(p));x9c_poll();
+ uint64_t rev=x9c_inbound.revision;
+ identity_progress(p,0,7,20,1,"999",0);x9mi_rx(p,sizeof(p));x9c_poll();
+ assert(x9c_inbound.ended&&x9c_inbound.revision==rev&&!memcmp(a.number.value,"789",4));
+ incoming(p,0x22,0x2346);x9cw_scalar(p+16,0x100,8,4);x9cw_scalar(p+40,0x103,101,4);
+ x9mi_rx(p,64);x9c_poll();
+ assert(x9c_inbound.pending&&x9c_inbound.native_id==8&&!a.known&&!a.number.valid&&!a.pau_length);
+ for(uint8_t byte:a.number.value)assert(!byte);
+}
+static void progress_identity_provenance(){
+ uint8_t p[512];struct x9cw_progress c;struct x9cw_outbound_state s={};
+ identity_progress(p,130,7,0,0,"123",0);assert(x9cw_progress(p,sizeof(p),&c));
+ assert(x9cw_outbound_apply(&s,&c)==1&&s.identity.known);
+ struct x9cw_progress_identity saved=s.identity;
+ c.mask=1;c.number.value[0]='9';assert(!x9cw_outbound_apply(&s,&c));
+ assert(!memcmp(&saved,&s.identity,sizeof(saved)));
+ c.mask=2;c.id=8;assert(x9cw_outbound_apply(&s,&c)<0);
+ assert(!memcmp(&saved,&s.identity,sizeof(saved)));
+ s={};identity_progress(p,130,7,0,0,"123",0);assert(x9cw_progress(p,sizeof(p),&c));
+ assert(x9cw_outbound_apply(&s,&c)==1);c.event=132;c.mode=20;c.valid=0;
+ assert(x9cw_outbound_apply(&s,&c)==1&&!s.identity.known&&!s.identity.number.valid);
+ // Known empty8104 is a new raw snapshot, never a merged display fallback.
+ identity_progress(p,6,7,20,0,"456",1);x9cw_put16(p+50,1);bzero(p+52,4);
+ assert(x9cw_progress(p,sizeof(p),&c)&&x9cw_outbound_apply(&s,&c)==1);
+ assert(s.identity.known&&!s.identity.number.length&&s.identity.number.presentation==1);
+ unsigned presentation=99;assert(x9cw_number_presentation(&s.identity.number,&presentation)&&presentation==1);
+ c.event=133;s.revision=UINT64_MAX;saved=s.identity;
+ assert(x9cw_outbound_apply(&s,&c)<0&&!memcmp(&saved,&s.identity,sizeof(saved)));
+}
 static void empty_baseline(){
  uint8_t p[704],out[704];x9cw_header(p,16,0x909,2,0);
  uint64_t t=x9_md_mipc_submit(p,16);assert(t);x9mi_tick();
@@ -1101,6 +1167,8 @@ int main(int argc,char **argv){
   {"voice_bind_codec",voice_bind_codec},{"end_target_codec",end_target_codec},{"ios_end_roundtrip",ios_end_roundtrip},
   {"current_metadata",current_metadata},
   {"current_number_owner",current_number_owner},{"progress_number_owner",progress_number_owner},
+  {"progress_identity_mo",progress_identity_mo},{"progress_identity_mt",progress_identity_mt},
+  {"progress_identity_provenance",progress_identity_provenance},
   {"end_reason_provenance",end_reason_provenance},{"outbound_end_reason",outbound_end_reason},{"incoming_end_reason",incoming_end_reason},
   {"ios_end_stale_query",ios_end_stale_query},{"ios_end_presend",ios_end_presend},
   {"ios_end_abandon",ios_end_abandon},{"ios_end_late_cnf",ios_end_late_cnf},
