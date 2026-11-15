@@ -418,8 +418,15 @@ static int als_list(void)
  const uint8_t *p = als_snapshot, *h = p+8, *n = als_reply+8;
  uint32_t length = le32(h+8), capacity = le32(p+20), gain = 0;
  const uint8_t *prox_info = NULL;
+ /* The original share-buffer reply retains TX VALUE.sequence in RX:
+  * raw 0x88740 copies CRC/header, the LIST callback writes only payload,
+  * and 0x887fe/0x88810 replace rx_len/CRC before the RX copy at 0x8881c.
+  * Correlate that buffer too, not just the outer mailbox completion.
+  * notify.value.sequence (n[0]) is NOT the same guarantee: raw 0x88846
+  * initializes value.type but no visible store initializes value.sequence.
+  * Do not reject a genuine reply by imposing an unproved n[0] echo. */
  if (le32(p) != 0xdeadbeef || le32(p+8192-4) != 0xdeadbeef ||
-     h[1] || h[2] || h[3] || le32(h+4) || n[1] || n[2] || n[3] ||
+     h[0] != sequence || h[1] || h[2] || h[3] || le32(h+4) || n[1] || n[2] || n[3] ||
      le32(n+4) || le32(n+8) != length || length > 4096 || length%40 ||
      length > capacity || capacity > 4096 || le32(p+4) != als_crc32(h,16+length)) return EBADMSG;
  for (unsigned i = 0; i < length; i += 40) {
