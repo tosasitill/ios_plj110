@@ -9,9 +9,10 @@
 #include <strings.h>
 #include "../../kernel/src/bsd/dev/x9_modem_bridge.h"
 static int lock_depth;
+static void (*during_md_lock)();
 #define LCK_GRP_DECLARE(n, s) int n
 #define LCK_MTX_DECLARE(n, g) int n
-static void lck_mtx_lock(int *){assert(!lock_depth);lock_depth=1;}
+static void lck_mtx_lock(int *){assert(!lock_depth);lock_depth=1;if(during_md_lock)during_md_lock();}
 static void lck_mtx_unlock(int *){assert(lock_depth);lock_depth=0;}
 static int x9_at_enabled(){return 1;}
 static int sweet_x9_arg(const char *,int){return 1;}
@@ -42,7 +43,8 @@ static unsigned replies,last_error;
 static uint8_t last_packet[1536];static unsigned last_packet_len;
 struct x9q_packet {
  uint8_t p[1536];unsigned n;bool good;uint16_t error;
- x9q_packet(const uint8_t *req,uint16_t e=0):n(14),good(true),error(e){bzero(p,sizeof(p));memcpy(p+1,req+1,4);}
+ x9q_packet(const uint8_t *req,uint16_t e=0):n(14),good(true),error(e){bzero(p,sizeof(p));p[0]=2;memcpy(p+1,req+1,4);
+  p[7]=2;p[8]=4;p[10]=(uint8_t)(e!=0);x9cw_put16(p+12,e);}
  void tlv(unsigned tag,const void *v,unsigned k){assert(k<=sizeof(p)-n-3);p[n]=(uint8_t)tag;x9cw_put16(p+n+1,k);memcpy(p+n+3,v,k);n+=3+k;}
  void send(uint32_t,uint32_t,bool=false,uint16_t=0){replies++;last_error=error;memcpy(last_packet,p,n);last_packet_len=n;}
 };
@@ -73,6 +75,15 @@ static void IOFreeData(void *p,unsigned){assert(!lock_depth);frees++;free(p);}
 static bool bb_x9_sms_event(uint32_t,uint32_t,const uint8_t *,unsigned n,uint8_t *owned,unsigned room){
  assert(lock_depth&&owned&&room==n+CBQ_HDR);queue_calls++;
  if(!queue_accept)return false;assert(!queued_frame);queued_frame=owned;return true;
+}
+static uint64_t bridge_ack_generation=1;
+static bool bridge_ack_live=true;
+static unsigned ack_queue_calls;
+static uint64_t bb_x9_sms_ack_identity(uint32_t,uint32_t){assert(!lock_depth);return bridge_ack_live?bridge_ack_generation:0;}
+static bool bb_x9_sms_ack_result(uint32_t,uint32_t,uint64_t generation,const uint8_t *p,unsigned n,uint8_t *owned,unsigned room){
+ assert(!lock_depth&&owned&&room==n+CBQ_HDR&&n==14&&p[0]==2&&x9q_u16(p+3)==0x37);ack_queue_calls++;
+ if(!bridge_ack_live||generation!=bridge_ack_generation||!queue_accept)return false;
+ assert(!queued_frame);queued_frame=owned;replies++;last_error=x9q_u16(p+12);memcpy(last_packet,p,n);last_packet_len=n;return true;
 }
 #include "../../kernel/src/iokit/Kernel/arm/X9Messages.inc"
 static void cnf(uint64_t token,unsigned id,unsigned mask=1,bool host=false){
@@ -383,6 +394,112 @@ static void sms_tag_guard_generic_unaffected(){
  uint64_t token=x9_md_mipc_submit(p,sizeof(p));assert(token&&!x9_mi_slots[0].sms_guard);
  x9_md_mipc_message_mark_read_abandon(token,0,9);fake_ms=100;x9mi_tick();assert(writes==1&&x9_mi_slots[0].state==2);
 }
+static x9m_job &ack_result_pending(int result=0){
+ auto &s=x9_mm_slots[0];s.token=7;s.state=5;s.result=result;s.id=0x8601;
+ uint8_t req[7]={0,9,0,0x37};auto *j=x9m_new(X9M_ACK,0,0,req,7);assert(j);j->token=7;
+ auto &in=x9m_incoming_sms[0];in.token=7;in.delivered=in.replying=true;return *j;
+}
+static void release_ack_receipt(){assert(queued_frame);IOFreeData(queued_frame,20);queued_frame=nullptr;}
+static void sms_ack_completion_queue_retry(){
+ auto &j=ack_result_pending();queue_accept=false;x9m_poll();
+ assert(j.op==X9M_ACK&&j.ack_done&&j.ack_reply_pending&&!j.answered&&!j.ack_error&&!replies&&!writes);
+ assert(!x9_mm_slots[0].state&&!x9m_incoming_sms[0].token); // native success retired, pure reply retained
+ queue_accept=true;x9m_poll();assert(!j.op&&replies==1&&!last_error&&!writes);release_ack_receipt();
+ x9m_poll();assert(replies==1&&!writes);
+}
+static void sms_ack_completion_oom(){
+ auto &j=ack_result_pending();allocation_accept=false;x9m_poll();
+ assert(j.ack_done&&j.ack_reply_pending&&!j.answered&&!ack_queue_calls&&!replies&&!writes);
+ allocation_accept=true;x9m_poll();assert(!j.op&&replies==1&&!writes);release_ack_receipt();
+}
+static void sms_ack_completion_original_result(){
+ auto &j=ack_result_pending();queue_accept=false;x9m_poll();fake_ms=j.deadline;
+ queue_accept=true;x9m_poll();assert(!j.op&&replies==1&&!last_error&&!writes);release_ack_receipt();
+}
+static void sms_ack_completion_timeout_late(){
+ auto &j=ack_result_pending();x9_mm_slots[0].state=4;fake_ms=j.deadline;queue_accept=false;x9m_poll();
+ assert(!j.ack_done&&j.ack_reply_pending&&j.ack_error==X9Q_NOT_READY&&!replies);
+ x9mm_tx_done(7,0);queue_accept=true;x9m_poll();
+ assert(!j.op&&replies==1&&last_error==X9Q_NOT_READY&&!writes);release_ack_receipt();
+}
+static uint64_t ack_lock_deadline;
+static void ack_cross_deadline(){fake_ms=ack_lock_deadline;during_md_lock=nullptr;}
+static void sms_ack_completion_lock_deadline(){
+ auto &j=ack_result_pending();ack_lock_deadline=j.deadline;during_md_lock=ack_cross_deadline;x9m_poll();
+ assert(!j.op&&replies==1&&last_error==X9Q_NOT_READY&&!writes);release_ack_receipt();
+}
+static void sms_ack_completion_delete(){
+ auto &j=ack_result_pending();queue_accept=false;x9m_poll();x9m_del(0);x9q_clients[0].generation++;
+ queue_accept=true;x9m_poll();assert(!j.op&&!replies&&!writes&&!queued_frame);
+}
+static void sms_ack_completion_bridge_reuse(){
+ auto &j=ack_result_pending();queue_accept=false;x9m_poll();bridge_ack_generation++;
+ queue_accept=true;x9m_poll();assert(j.ack_done&&!j.answered&&!replies&&!writes&&!queued_frame);
+ x9m_del(0);x9m_poll();assert(!j.op&&!replies);
+}
+static void sms_ack_completion_release_pending(){
+ auto &j=ack_result_pending();bridge_ack_live=false;x9m_poll();
+ assert(j.ack_done&&j.ack_reply_pending&&!j.answered&&!replies&&!queued_frame);
+ x9m_del(0);x9m_poll();assert(!j.op&&!writes&&!replies);
+}
+static void sms_ack_completion_physical_failure(){
+ auto &j=ack_result_pending(X9_AT_OFFLINE);queue_accept=false;x9m_poll();
+ assert(j.ack_done&&j.ack_error==X9Q_NOT_READY&&x9_mm_slots[0].state==6&&x9m_incoming_sms[0].held);
+ queue_accept=true;x9m_poll();assert(!j.op&&replies==1&&last_error==X9Q_NOT_READY&&!writes);release_ack_receipt();
+ assert(x9m_incoming_sms[0].token==7&&x9_mm_slots[0].token==7);
+}
+static x9m_job &ack_command_admitted(uint8_t req[16]){
+ uint8_t p[24],out[24];x9cw_header(p,24,0x8601,1,44);x9cw_scalar(p+16,0x100,3,1);x9mi_rx(p,24);
+ uint32_t n=0,token=0;assert(x9_md_mipc_message_event(out,24,&n,&token)==1&&token);
+ auto &in=x9m_incoming_sms[0];in.token=token;in.delivered=true;in.generation=x9q_clients[0].generation;
+ bzero(req,16);req[1]=9;req[3]=0x37;req[5]=9;req[7]=1;req[8]=6;x9cw_put32(req+10,token);req[14]=req[15]=1;
+ assert(x9m_request(CBQ_PORT_BASE,X9BB_PORT_BASE+5,req,16)&&!replies&&!writes);
+ auto &j=x9m_jobs[0];assert(j.op==X9M_ACK&&j.token==token&&x9_mm_slots[0].state==3&&in.replying);return j;
+}
+static void sms_ack_retry_before_physical(bool changed){
+ uint8_t req[16];auto &j=ack_command_admitted(req);auto original=x9_mm_slots[0];
+ if(changed)req[15]=0;assert(x9m_request(CBQ_PORT_BASE,X9BB_PORT_BASE+5,req,16));
+ assert(!replies&&!writes&&j.op==X9M_ACK&&!j.ack_done&&!j.ack_reply_pending&&!j.answered);
+ assert(!memcmp(&original,&x9_mm_slots[0],sizeof(original))&&j.req[15]==1&&!x9m_jobs[1].op);
+}
+static void sms_ack_retry_before_identical(){sms_ack_retry_before_physical(false);}
+static void sms_ack_retry_before_changed(){sms_ack_retry_before_physical(true);}
+static void sms_ack_retry_after_physical(bool changed){
+ uint8_t req[16];auto &j=ack_command_admitted(req);queue_accept=false;x9mi_tick();x9m_poll();
+ assert(writes==1&&j.ack_done&&j.ack_reply_pending&&!j.answered&&!x9m_incoming_sms[0].token&&!x9_mm_slots[0].state);
+ if(changed)req[15]=0;assert(x9m_request(CBQ_PORT_BASE,X9BB_PORT_BASE+5,req,16));
+ assert(!replies&&writes==1&&j.ack_error==0&&j.req[15]==1&&!x9m_jobs[1].op);
+ queue_accept=true;x9m_poll();assert(!j.op&&replies==1&&!last_error&&writes==1&&x9q_u16(last_packet+1)==9);
+ release_ack_receipt();x9mi_tick();assert(writes==1&&replies==1);
+}
+static void sms_ack_retry_after_identical(){sms_ack_retry_after_physical(false);}
+static void sms_ack_retry_after_changed(){sms_ack_retry_after_physical(true);}
+static void sms_ack_retry_malformed_before(){
+ uint8_t req[16];auto &j=ack_command_admitted(req);uint8_t malformed[20];memcpy(malformed,req,16);
+ malformed[5]=13;malformed[16]=1;malformed[17]=1;malformed[18]=0;malformed[19]=0;
+ assert(x9m_ack_repeated(CBQ_PORT_BASE,X9BB_NODE,X9BB_PORT_BASE+5,malformed,sizeof(malformed)));
+ assert(!replies&&!writes&&j.op==X9M_ACK&&!j.ack_reply_pending&&j.len==16&&x9_mm_slots[0].state==3);
+}
+static void sms_ack_retry_malformed_after(){
+ uint8_t req[16];auto &j=ack_command_admitted(req);queue_accept=false;x9mi_tick();x9m_poll();req[5]=8;
+ assert(x9m_ack_repeated(CBQ_PORT_BASE,X9BB_NODE,X9BB_PORT_BASE+5,req,sizeof(req)));
+ assert(!replies&&writes==1&&j.ack_done&&j.ack_error==0);queue_accept=true;x9m_poll();
+ assert(!j.op&&replies==1&&!last_error&&writes==1);release_ack_receipt();
+}
+static void sms_ack_retry_entry_scope(){
+ uint8_t req[16];auto &j=ack_command_admitted(req);
+ assert(!x9m_ack_repeated(CBQ_PORT_BASE,X9BB_NODE+1,X9BB_PORT_BASE+5,req,16));
+ assert(!x9m_ack_repeated(CBQ_PORT_BASE-1,X9BB_NODE,X9BB_PORT_BASE+5,req,16));
+ assert(!x9m_ack_repeated(CBQ_PORT_BASE+CBQ_MAX_CLIENTS,X9BB_NODE,X9BB_PORT_BASE+5,req,16));
+ assert(!x9m_ack_repeated(CBQ_PORT_BASE,X9BB_NODE,X9BB_PORT_BASE+0x21,req,16));
+ assert(!x9m_ack_repeated(CBQ_PORT_BASE,X9BB_NODE,X9BB_PORT_BASE+5,nullptr,16));
+ assert(!x9m_ack_repeated(CBQ_PORT_BASE,X9BB_NODE,X9BB_PORT_BASE+5,req,6));
+ req[0]=2;assert(!x9m_ack_repeated(CBQ_PORT_BASE,X9BB_NODE,X9BB_PORT_BASE+5,req,16));req[0]=0;
+ req[3]=0x20;assert(!x9m_ack_repeated(CBQ_PORT_BASE,X9BB_NODE,X9BB_PORT_BASE+5,req,16));req[3]=0x37;
+ req[1]++;assert(!x9m_ack_repeated(CBQ_PORT_BASE,X9BB_NODE,X9BB_PORT_BASE+5,req,16));req[1]--;
+ x9q_clients[0].generation++;assert(!x9m_ack_repeated(CBQ_PORT_BASE,X9BB_NODE,X9BB_PORT_BASE+5,req,16));
+ assert(j.op==X9M_ACK&&!replies&&!writes&&x9_mm_slots[0].state==3);
+}
 int main(int argc,char **argv){
  assert(argc==2);x9mi_online(1);x9w_control_ready=true;
  struct {const char *name;void (*run)();} cases[]={
@@ -407,6 +524,15 @@ int main(int argc,char **argv){
   {"sms_tag_guard_delete_before_select",sms_tag_guard_delete_before_select},{"sms_tag_guard_owner_identity",sms_tag_guard_owner_identity},
   {"sms_tag_guard_control_loss",sms_tag_guard_control_loss},{"sms_tag_guard_selected_late",sms_tag_guard_selected_late},
   {"sms_tag_guard_partial_late",sms_tag_guard_partial_late},{"sms_tag_guard_followup_irrevocable",sms_tag_guard_followup_irrevocable},
-  {"sms_tag_guard_generic_unaffected",sms_tag_guard_generic_unaffected}};
+  {"sms_tag_guard_generic_unaffected",sms_tag_guard_generic_unaffected},
+  {"sms_ack_completion_queue_retry",sms_ack_completion_queue_retry},{"sms_ack_completion_oom",sms_ack_completion_oom},
+  {"sms_ack_completion_original_result",sms_ack_completion_original_result},{"sms_ack_completion_timeout_late",sms_ack_completion_timeout_late},
+  {"sms_ack_completion_lock_deadline",sms_ack_completion_lock_deadline},
+  {"sms_ack_completion_delete",sms_ack_completion_delete},{"sms_ack_completion_bridge_reuse",sms_ack_completion_bridge_reuse},
+  {"sms_ack_completion_release_pending",sms_ack_completion_release_pending},{"sms_ack_completion_physical_failure",sms_ack_completion_physical_failure},
+  {"sms_ack_retry_before_identical",sms_ack_retry_before_identical},{"sms_ack_retry_before_changed",sms_ack_retry_before_changed},
+  {"sms_ack_retry_after_identical",sms_ack_retry_after_identical},{"sms_ack_retry_after_changed",sms_ack_retry_after_changed},
+  {"sms_ack_retry_malformed_before",sms_ack_retry_malformed_before},{"sms_ack_retry_malformed_after",sms_ack_retry_malformed_after},
+  {"sms_ack_retry_entry_scope",sms_ack_retry_entry_scope}};
  for(auto &c:cases)if(!strcmp(argv[1],c.name)){c.run();return 0;}return 2;
 }
