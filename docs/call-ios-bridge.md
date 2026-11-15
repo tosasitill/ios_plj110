@@ -1680,3 +1680,82 @@ f:0x1007cd508 f:0x100dcfbbc` 可重放 config 析构与同 destination cleanup�
 复用既有 `x9/out/call-typed-actions/`、`call-typed-dial-context/` 与
 `call-provider-install/` 的已归档证据，不覆盖旧结论。本轮正式编译、CI、启动结果：
 均无；没有通话短信最终修复镜像。NOTES、合入和取证归档由 root 统一记录。
+
+## 拨号 profile 的 CARD_TYPE 与 AP72→MCL72 owned 生命周期（2026-11-16）
+
+本节补上匹配设备原 `libmtkmipc-ril.so` 的输入/ownership 证据，不是新生产桥、
+完整初始化或通话修复。原件 SHA256 为
+`19fb2bc0c2b5532d8b4f8460779159277ebfe54930eff0be2198d9e871f5bdba`；
+34 组固定 ELF 切片、原始字节 hash、编号反汇编与 contract JSON 位于 gitignored
+`x9/out/call-profile-input/`。不拿其他 Android 版本的常量代替匹配设备 producer。
+
+**MCL1 是卡类型，不是 NR capability。** 默认表 initializer `1b4384/1b4394/
+1b43cc..1b43e8` 确认 key1 名称 literal `0xf136c="RFX_STATUS_KEY_CARD_TYPE"`、
+variant tag2、初始 int **-1**。`RmmSimCommUrcHandler::onHandleUrc36c458..4c8`
+读取原 owned MIPC data 的 MID，并将 **4512** 分派给 `handleCardType36e1c0`。
+该 handler 从 original message+40 的 data 读 uint8 tags100/101/102：
+
+| 已证输入 | 实际 CARD_TYPE 贡献 | 原件位置 |
+| --- | --- | --- |
+| tag100=0 / 1 | SIM `0x1` / USIM `0x2` | `36e390/36e3b8`，原 literal `USIM` / `SIM` |
+| tag101=0 / 1 | RUIM `0x8` / CSIM `0x4` | `36e40c/36e434`，原 literal `RUIM` / `CSIM` |
+| tag101=3 | 两个 CDMA bits `0xc` | `36e628` |
+| tag102=1 | OR `0x10`，不猜其语义名称 | `36e45c..468` |
+
+组合在 `36e458` OR 后，经 `36e4e8..510` 的 per-slot MCL manager 将 **真实计算值**
+作为 owned int variant 写入 key1。中间 key239/key1 的附带 event 分支仍汇合到该写入。
+原 getter 缺 tag 各 default2，且两类型均2的特例最终 `36e6bc` 写0；这是原件 fallback，
+不能作为桥的有效卡类型来源。前述 `isVoiceGsmRat` 的 `key1&0xc` 因此实际检查卡类型 bits；
+NAS/data RAT、IMSA registered、初始 -1 均不能补出已知 CARD_TYPE 或 network-ready。
+
+**AP72 的 reset 来自真正 current-calls response，而非空对象初始化。** 普通未被 GWSD
+截获的 `requestGetCurrentCalls381354..398` 在 original request 的 slot 上构造0909，
+`callToMipcMsgAsync` 保留 original request reference。`handleCurrentCallsCnf3851b4..1c8`
+先要求原 message+40 data 非空且 MIPC result0；失败发送 error38 的 VoidData response。
+成功时 `385208..218` 读 native count tag100；原 getter default0 **不等于 strict decoder
+已确认 count0**。真实 count0 分支 `3852d8/3852e0` 置 output byte size0 并直接跳 `3856c8`；
+`3856d4..750` 构造 `RfxCallListData(array,0)`，以 original request ID+0c、original MCL
+message reference 构造 error0 owned response，再 `responseToTelCore`。
+
+`RfxMclMessage::obtainResponse19f4c4..530` 保留原 request 的 +18/+1c/+24 字段，
+将 supplied data clone 到 response+10。Dispatch `1d6d4c..db0` 用 response+24 精确匹配
+pending AP request+20 并移除该节点；`1d7404..43c` 以 matched AP fields 和原 response
+error+48/data+10 构造 AP response，`1a51d0..1ec` clone data 到 AP response+48。
+clone manager `1cf310..458` 按 request ID 查 response-kind1 的 copy-by-object 函数；
+缺注册项返回 null，不生成 empty success。`CallListData::copyDataByObj1c31e8..1f4`
+保留原 +8 pointer/+10 size 并建立新 owner；这是静态 ownership 链，不冒称新增 runtime 验证。
+
+AP response loop `1d8404..8430` 送入 MainThread。Rtm 真实 direct current-calls reset route
+是 **AP request ID c938**：`26ba14..1c→26bd2c→26bd34`，不是 cf21/cf34；GWSD/fake-mode
+可提前截获。`handleGetCurrentCallsResponse26c1d8..218` 从实际 response+48 的 data 读取
+size+10，**unsigned size<=7** 才将 slot AP72 写为 owned int0。该 route/handler 在此之前
+**没有 error gate**。生产桥应取更严格的 owned、successful、native-count 明确0子集，
+不能照抄 error-void empty、缺 count default0 或 size1..7 来授予 baseline/profile。
+
+**AP72→MCL72 是软件 status 同步，不是 MD ACK。** 显式 policy setter
+`setEccPreferredRat2794d8/279570..598` 将原 input w1 原值写入 AP72；普通 MO 不因此获得
+默认0。AP `setValue1ca0b0` 的 extra flags 为0；即使值相等且 notify=false，实际调用仍经
+`1ca230..238→1ca89c` 到 forwarding。它同步的是已发生的 setValue 事件，不是从“相等”
+推导出缺省 reset。`1ca8a8..8d0→updateValueMdComm1cabd0` clone 原 variant，生成 type6
+StatusSync 并 `requestToMcl`；AP message 在 `1a5d18..4c` 拥有 +24 slot/+54 key/+58 variant
+和 +88/+89/+8a flags。`1df01c..54` 再 clone，生成 MCL message；`19fcc0..fd04` 明确其
+type6/+1c slot/+68 key/+70 owned variant/+a0..a2 flags，正常路径进入 MCL queue。
+
+MCL Messenger `1e7a0c..58` 用同 slot manager，clone message+70，按 key+68 调用
+`setValueByRfx(...,w5=1)` 禁止回响 AP。`1dd730→1dce80` 的 storage base 是 manager+10；
+缺 entry 在 `1dcf80..90` 分配并赋原 owned variant，existing changed entry 在
+`1dd5d4..dc` 赋原值，同值保留原 owner。只有真实 reset 生命周期最终得到 **MCL72=int0**
+后，才能应用上节已证的“104所有分支返回0”；不把 queue transfer 当网络/IMS/media-ready。
+
+当前 `X9Calls.inc` 的 VOICE03 注册后 baseline query 已有自己的 token/result/native-empty
+严格门，可提供桥自身的 owned successful-empty 事件，但不能声称现有 baseline_known
+本身已包含 Android AP72/MCL72 manager lifecycle。Android matching UI/framework 的
+**拨号意图→raw CLIR1/2 producer 仍缺**：retained AIDL Parcel 只证 int 字段，原 Rtm/Rmm
+consumer 与 Apple 两套枚举已闭不代表该缺边已闭。本轮不开放默认 profile、不加 unused
+接口，不新增设备抓取、探针、测试或镜像，不将静态进度描述为生产修复。
+
+本机精确重读：仓库根执行
+`python3 x9/out/call-profile-input/read-original-profile-input.py`；该脚本先核对上述原件 SHA，
+只读固定 VA，写同目录的 `profile-input-original-proof.json`、`*.original-code.bin` 与
+`*.numbered.asm`。结论/边界在 `call-profile-input-contract.json`；实际 source head 与
+branch 记录在 proof JSON 中。原始与衍生设备字节均不提交 git。
