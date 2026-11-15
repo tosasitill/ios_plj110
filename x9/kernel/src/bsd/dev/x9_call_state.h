@@ -7,9 +7,23 @@
 #define X9_CALL_STATE_H
 #include "x9_call_wire.h"
 
+/* MD8104/progress and8111/current are independent NUL-terminated numbers,
+ * each at most128B including NUL. Their presentation is detail_info[0]
+ * (8106/8114), NOT TYPE or VIDEO_CAP. Own the bytes: RX storage is reused.
+ * Retaining native metadata is not permission to publish caller identity. */
+struct x9cw_number {uint8_t value[128];unsigned length;uint8_t presentation,valid;};
+/* RIL388380: native0 -> Available0,1 -> Restricted1,2..4 -> Unavailable2.
+ * Unlike the RIL's unknown fallback, do not make an unknown value public.
+ * The caller must omit/reject identity when this returns0, and must not
+ * publish value[] for Restricted/Unavailable. No inferred defaults. */
+static inline int x9cw_number_presentation(const struct x9cw_number *number,unsigned *out){
+ if(!number||!out||!number->valid||number->presentation>4)return 0;
+ *out=number->presentation<2?number->presentation:2;return 1;
+}
 struct x9cw_progress {
  uint32_t id,direction,mode,toa,flags,aux,event,cause;
- unsigned has_cause;uint8_t mask;
+ unsigned has_cause,valid;uint8_t mask;
+ struct x9cw_number number;
 };
 static inline int x9cw_cstring(const uint8_t *v,unsigned k,unsigned bound){
  if(!v||!k||k>bound||v[k-1])return 0;
@@ -22,6 +36,7 @@ static inline int x9cw_cstring(const uint8_t *v,unsigned k,unsigned bound){
  * Validate the WHOLE frame before committing any ID or state. */
 static inline int x9cw_progress(const uint8_t *p,unsigned n,struct x9cw_progress *out){
  struct x9cw_progress c;const uint8_t *v;unsigned k;
+ x9cw_zero((uint8_t *)&c,sizeof(c));
  if(!out||!x9cw_frame(p,n,0x4901)||!p[8]||(p[8]&(p[8]-1)))return 0;
  if(!x9cw_word(p,n,0x100,&c.id)||!c.id||
     !x9cw_word(p,n,0x101,&c.direction)||c.direction>255||
@@ -41,7 +56,26 @@ static inline int x9cw_progress(const uint8_t *p,unsigned n,struct x9cw_progress
      tag!=0x105&&tag!=0x8106&&tag!=0x107&&tag!=0x109&&tag!=0x10a&&tag!=0x810b)return 0;
   at+=(x9cw_u16(p+at+2)+11)&~7u;
  }
- *out=c;return 1;
+ /* Commit only after the complete frame, every TLV and optional cause
+  * have passed validation. Never retain a pointer into a reusable inbox. */
+ if(!x9cw_tlv(p,n,0x8104,&v,&k))return 0;
+ c.number.length=k-1;for(unsigned i=0;i<k;i++)c.number.value[i]=v[i];
+ if(!x9cw_tlv(p,n,0x8106,&v,&k))return 0;c.number.presentation=v[0];c.number.valid=1;
+ c.valid=1;*out=c;return 1;
+}
+
+/* Internal END metadata only, NOT a CallList/END publisher. Matching MD
+ * IMS end and CEER both use imc_map_last_cause_to_ext_report911006ec;
+ * CEER table929950d8[16] names CM_NORMAL_CALL_CLR. ECPI cause is retained
+ * as u16 and emitted as10a/u32 by9132587e..94. Apple1f19fd3c8 names145
+ * NORMAL_CALL_CLEARING; native16 is Unknown, not Apple's reason16.
+ * Only a successful whole-progress parse grants provenance. Missing or
+ * other causes stay unknown; never derive a call identity from0910. */
+struct x9cw_end_reason {unsigned known;uint16_t apple;};
+static inline struct x9cw_end_reason x9cw_end_reason_metadata(const struct x9cw_progress *c){
+ struct x9cw_end_reason r={0,0};
+ if(c&&c->valid&&c->event==133&&c->mode==20&&c->has_cause&&c->cause==16){r.known=1;r.apple=145;}
+ return r;
 }
 
 /* Unknown idle != known empty. A status stream cannot prove there are no
@@ -52,6 +86,7 @@ struct x9cw_outbound_state {
  uint64_t epoch,revision;
  uint32_t native_id,event,flags,mode,cause;
  unsigned ios_state,has_cause,seen,ended,blocked,count_known,native_count;
+ struct x9cw_end_reason end_reason;
 };
 static inline void x9cw_outbound_invalidate(struct x9cw_outbound_state *s){
  s->count_known=0;
@@ -86,6 +121,9 @@ static inline int x9cw_outbound_apply(struct x9cw_outbound_state *s,
  if(s->revision==UINT64_MAX){s->blocked=1;return -1;}
  s->revision++;s->event=c->event;s->flags=c->flags;s->mode=c->mode;
  s->has_cause=c->has_cause;s->cause=c->cause;
+ /* Only accepted events reach this commit; late/foreign/rejected END
+  * cannot rewrite metadata. Accepted NEW130 clears the prior epoch. */
+ s->end_reason=x9cw_end_reason_metadata(c);
  /* Even END133 does not prove global emptiness. Query again for that. */
  s->count_known=0;return 1;
 }
@@ -106,6 +144,7 @@ struct x9cw_inbound_state {
  uint64_t epoch,revision;
  uint32_t native_id,sequence,event,flags,mode,cause;
  unsigned pending,seen,ended,blocked,ios_state,has_cause;
+ struct x9cw_end_reason end_reason;
  uint16_t txid;uint8_t mask,response_mask,sim;
 };
 static inline int x9cw_inbound_begin(struct x9cw_inbound_state *s,
@@ -119,6 +158,7 @@ static inline int x9cw_inbound_begin(struct x9cw_inbound_state *s,
  s->native_id=c->call_id;s->sequence=c->sequence;s->txid=c->txid;
  s->mask=c->mask;s->response_mask=c->response_mask;s->sim=c->sim;
  s->pending=1;s->seen=s->ended=s->ios_state=s->has_cause=0;
+ s->end_reason.known=0;s->end_reason.apple=0;
  s->event=s->flags=s->cause=0;s->mode=c->mode;s->revision++;return 1;
 }
 static inline int x9cw_inbound_apply(struct x9cw_inbound_state *s,
@@ -147,7 +187,10 @@ static inline int x9cw_inbound_apply(struct x9cw_inbound_state *s,
  }else{s->blocked=1;return -1;}
  if(s->revision==UINT64_MAX){s->blocked=1;return -1;}
  s->revision++;s->event=c->event;s->flags=c->flags;
- s->has_cause=c->has_cause;s->cause=c->cause;return 1;
+ s->has_cause=c->has_cause;s->cause=c->cause;
+ /* The CMD owns this MT identity; only its accepted complete END can
+  * attach the mapped reason. A late133 cannot fill an unknown END. */
+ s->end_reason=x9cw_end_reason_metadata(c);return 1;
 }
 static inline int x9cw_inbound_id(const struct x9cw_inbound_state *s,unsigned *id){
  if(!s||!id||s->blocked||s->pending||!s->seen||s->ended||!s->native_id||s->native_id>255)return 0;
@@ -169,7 +212,8 @@ static inline int x9cw_array(const uint8_t *p,unsigned n,unsigned tag,unsigned c
  out->tag=tag;out->base=base;out->count=count;return 1;
 }
 struct x9cw_current_call {
- uint32_t id,direction,mode,state,multiparty,toa,priority,flags,aux;
+ uint32_t id,direction,mode,state,number_type,toa,rat,flags,aux;
+ struct x9cw_number number;
 };
 #define X9_CW_CURRENT_MAX 7u
 struct x9cw_current {uint32_t result,count;struct x9cw_current_call calls[X9_CW_CURRENT_MAX];};
@@ -189,14 +233,18 @@ static inline int x9cw_current(const uint8_t *p,unsigned n,struct x9cw_current *
   uint32_t words[11]={0};
   for(unsigned j=0;j<11;j++){
    if(!x9cw_tlv(p,n,a[j].base+i,&v,&k)||!v)return 0;
-   if(j==6){if(!x9cw_cstring(v,k,128))return 0;}
-   else if(j==9){if(k!=408)return 0;}
+   if(j==6){if(!x9cw_cstring(v,k,128))return 0;
+    c.calls[i].number.length=k-1;for(unsigned byte=0;byte<k;byte++)c.calls[i].number.value[byte]=v[byte];}
+   else if(j==9){if(k!=408)return 0;c.calls[i].number.presentation=v[0];c.calls[i].number.valid=1;}
    else{if(k!=4)return 0;words[j]=x9cw_u32(v);}
   }
   struct x9cw_current_call *r=&c.calls[i];
   r->id=words[0];r->direction=words[1];r->mode=words[2];r->state=words[3];
-  r->multiparty=words[4];r->toa=words[5];r->priority=words[7];r->flags=words[8];r->aux=words[10];
-  if(!r->id||r->direction>255||r->mode>255||r->state>5||r->multiparty>255||r->toa>255||r->priority>255)return 0;
+  /* MD records:10f is NUMBER_TYPE (record+17/u8),112 is CALL_RAT
+   * (record+99/u8). Multiparty is113/TYPE bit0, NOT NUMBER_TYPE.
+   * RIL385494..4a4 ->3855a0/5bc retains the full TYPE word first. */
+  r->number_type=words[4];r->toa=words[5];r->rat=words[7];r->flags=words[8];r->aux=words[10];
+  if(!r->id||r->direction>255||r->mode>255||r->state>5||r->number_type>255||r->toa>255||r->rat>255)return 0;
   for(unsigned prev=0;prev<i;prev++)if(c.calls[prev].id==r->id)return 0;
  }
  /* Every tag is a scalar, known descriptor or a referenced element.
@@ -226,7 +274,7 @@ static inline int x9cw_end_target(const struct x9cw_outbound_state *s,
  if(!out||!s||!c||!x9cw_outbound_id(s,&id)||!s->epoch||
     !s->count_known||s->native_count!=1||c->result||c->count!=1||s->mode!=20)return 0;
  const struct x9cw_current_call *r=&c->calls[0];
- if(r->id!=id||r->direction||r->mode!=20||r->multiparty||
+ if(r->id!=id||r->direction||r->mode!=20||(r->flags&1u)||
     !((s->ios_state==5&&r->state==3)||
       (s->ios_state==3&&r->state==0)))return 0;
  out->epoch=s->epoch;out->revision=s->revision;out->native_id=id;out->sim=1;return 1;

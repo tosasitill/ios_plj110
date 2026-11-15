@@ -14,6 +14,7 @@ struct x9_mi_slot {
  uint64_t token; unsigned state,len; uint16_t id,txid; uint8_t mask,cancelled;
  uint8_t call_guard;uint64_t call_revision;
  uint64_t call_epoch;uint32_t call_id;
+ unsigned sms_guard,sms_owner;uint64_t sms_generation,sms_deadline_ms;
  uint8_t frame[X9_MIPC_FRAME_MAX];
 };
 static struct x9_mi_slot x9_mi_slots[X9_MI_SLOTS];
@@ -104,8 +105,10 @@ int x9_md_mipc_online(void){
  lck_mtx_lock(&x9_mi_lock);int on=x9_mi_online&&!x9_mi_poisoned;
  lck_mtx_unlock(&x9_mi_lock);return on&&x9_md_at_online();
 }
+struct x9mi_sms_mutation {unsigned owner;uint64_t generation,deadline_ms;};
+static uint64_t x9mi_now_ms(void){uint64_t ns;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);return ns/1000000;}
 static uint64_t x9mi_submit(const uint8_t *p,uint32_t n,const struct x9cw_outbound_state *baseline,
-                            const struct x9cw_end_target *end){
+                            const struct x9cw_end_target *end,const struct x9mi_sms_mutation *sms){
  if(!p||n<16||n>X9_MIPC_FRAME_MAX||x9mi_u16(p+14)!=n-16||
    p[0]!=0x84||p[1]!=0x19||p[2]!=0x54||p[3]!=0x24||
    p[4]||p[5]||p[6]||p[7]||p[9])return 0;
@@ -220,6 +223,15 @@ static uint64_t x9mi_submit(const uint8_t *p,uint32_t n,const struct x9cw_outbou
  else if((p[8]!=1&&(p[8]!=2||x9_md_sim_count()!=2))||
     (id!=0x201&&id!=0x203&&id!=0x205&&id!=0x219&&id!=0x307))return 0;
  uint64_t token=0;lck_mtx_lock(&x9_mi_lock);
+ /* A live generic mailbox is not a usable SMS inbox. Recheck under the
+  * allocator lock: poison may follow the adapter's readiness snapshot. */
+ if(x9_mm_poisoned&&x9mm_inbox_request(p,n,id)){
+  lck_mtx_unlock(&x9_mi_lock);return 0;
+ }
+ if(sms&&(baseline||end||id!=0x607||n!=56||!x9mm_one(p,n,0x101,5)||
+    !x9mm_one(p,n,0x103,0)||!sms->deadline_ms||x9mi_now_ms()>=sms->deadline_ms)){
+  lck_mtx_unlock(&x9_mi_lock);return 0;
+ }
  if(x9mi_call_mutation(id)&&((x9_mc_dial_token&&!end)||x9_mc_end_token)){
   lck_mtx_unlock(&x9_mi_lock);return 0;
  }
@@ -241,6 +253,7 @@ static uint64_t x9mi_submit(const uint8_t *p,uint32_t n,const struct x9cw_outbou
  if(x9_mi_online&&!x9_mi_poisoned&&x9_mi_next<65534)for(unsigned i=0;i<X9_MI_SLOTS;i++)if(!x9_mi_slots[i].state){
   struct x9_mi_slot *s=&x9_mi_slots[i];bzero(s,sizeof(*s));
   token=++x9_mi_next;s->token=token;s->txid=(uint16_t)token;s->id=(uint16_t)id;s->mask=p[8];s->len=n;
+  if(sms){s->sms_guard=1;s->sms_owner=sms->owner;s->sms_generation=sms->generation;s->sms_deadline_ms=sms->deadline_ms;}
   if(baseline){s->call_guard=1;s->call_revision=baseline->revision;x9_mc_dial_token=token;x9_mc_dial_floor=baseline->epoch;}
   else if(end){s->call_guard=2;s->call_revision=end->revision;s->call_epoch=end->epoch;s->call_id=end->native_id;
    x9_mc_end_token=token;x9_mc_end_epoch=end->epoch;}
@@ -249,17 +262,32 @@ static uint64_t x9mi_submit(const uint8_t *p,uint32_t n,const struct x9cw_outbou
  }
  lck_mtx_unlock(&x9_mi_lock);return token;
 }
-uint64_t x9_md_mipc_submit(const uint8_t *p,uint32_t n){return x9mi_submit(p,n,NULL,NULL);}
+uint64_t x9_md_mipc_submit(const uint8_t *p,uint32_t n){return x9mi_submit(p,n,NULL,NULL,NULL);}
+uint64_t x9_md_mipc_message_mark_read_submit(const uint8_t *p,uint32_t n,
+ unsigned owner,uint64_t generation,uint64_t deadline_ms){
+ const struct x9mi_sms_mutation guard={owner,generation,deadline_ms};
+ return x9mi_submit(p,n,NULL,NULL,&guard);
+}
+void x9_md_mipc_message_mark_read_abandon(uint64_t token,unsigned owner,uint64_t generation){
+ if(!token)return;
+ lck_mtx_lock(&x9_mi_lock);
+ for(unsigned i=0;i<X9_MI_SLOTS;i++){
+  struct x9_mi_slot *s=&x9_mi_slots[i];
+  if(s->token!=token||!s->sms_guard||s->sms_owner!=owner||s->sms_generation!=generation||s->state!=1)continue;
+  s->state=6;s->len=0;bzero(s->frame,sizeof(s->frame));break;
+ }
+ lck_mtx_unlock(&x9_mi_lock);
+}
 uint64_t x9_md_mipc_call_dial_submit(const uint8_t *p,uint32_t n,
                                    const struct x9cw_outbound_state *baseline){
  if(!baseline||!baseline->count_known||baseline->native_count||baseline->blocked||
     !p||n<16||x9mi_u16(p+10)!=0x901)return 0;
- return x9mi_submit(p,n,baseline,NULL);
+ return x9mi_submit(p,n,baseline,NULL,NULL);
 }
 uint64_t x9_md_mipc_call_end_submit(const uint8_t *p,uint32_t n,
                                    const struct x9cw_end_target *target){
  if(!target||!p||n!=32||x9mi_u16(p+10)!=0x905)return 0;
- return x9mi_submit(p,n,NULL,target);
+ return x9mi_submit(p,n,NULL,target,NULL);
 }
 /* Before writer selection, abandon only OUR guarded end slot. A selected
  * or partially written action is irrevocable here; keep its real token and
@@ -479,6 +507,13 @@ static void x9mi_tick(void){
    struct x9cw_end_target current,target={s->call_epoch,s->call_revision,s->call_id,1};
    int rejected=s->call_guard==1&&(x9_mc_poisoned||x9_mc_outbound.blocked||!x9_mc_outbound.count_known||
       x9_mc_outbound.native_count||x9_mc_outbound.revision!=s->call_revision);
+   /* Only state1 is still pre-TX. Retire it through local -3, never a fake
+    * MD CNF; selected/partial SMS and physical ACK results retain owners. */
+   if(x9_mm_poisoned&&x9mm_inbox_request(s->frame,s->len,s->id))rejected=1;
+   /* Indexed mark-read alone carries the host guard. Deadline is rechecked
+    * here, even if the QMI owner has not polled since enqueue. Once state2
+    * is selected no timeout/deletion can cancel or replay the physical TX. */
+   if(s->sms_guard&&x9mi_now_ms()>=s->sms_deadline_ms)rejected=1;
    if(s->call_guard==2&&(x9_mc_poisoned||
       !x9cw_end_target(&x9_mc_outbound,&x9_mc_current,&current)||!x9cw_end_matches(&target,&current)))rejected=1;
    if(rejected){

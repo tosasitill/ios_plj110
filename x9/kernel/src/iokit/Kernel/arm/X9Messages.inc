@@ -147,27 +147,46 @@ static uint64_t x9m_store_submit(const x9m_job &j){
  if(j.op!=X9M_LIST)f.tlv(0x102,storage.p+1,2);
  /* 103=0 is permitted ONLY for a single indexed CMGR in ModifyTag step1;
   * never mark an entire CMGL enumeration read. CPMS is always explicit. */
- f.byte(0x103,j.op==X9M_TAG&&j.step==1?0:1);f.byte(0x104,storage.p[0]);return f.submit();
+ f.byte(0x103,j.op==X9M_TAG&&j.step==1?0:1);f.byte(0x104,storage.p[0]);
+ if(j.op==X9M_TAG&&j.step==1){
+  /* Serialize exactly the same frame, but carry this mutation's original
+   * owner and absolute host guard to the native allocator/unique writer. */
+  f.p[14]=(uint8_t)(f.n-16);f.p[15]=(uint8_t)((f.n-16)>>8);
+  return f.good?x9_md_mipc_message_mark_read_submit(f.p,f.n,j.slot,j.generation,j.deadline):0;
+ }
+ return f.submit();
+}
+static void x9m_init_transport_loss(){
+  /* Loss is not registration/config retirement. Stop advancing this boot,
+   * but still drain any complete results belonging to the original token. */
+  if(x9m_init_stage||x9m_init_token)x9m_init_hold=true;
+  for(unsigned sim=0;sim<x9_md_sim_count();sim++){
+   x9m_sim &s=x9m_sims[sim];if(s.init||s.init_token)s.init_hold=true;
+   if(s.ready){s.ready=false;x9m_ready_ind(sim);}
+  }
 }
 static void x9m_init_poll(uint8_t *response,unsigned room){
  bool wanted=false;for(unsigned sim=0;sim<x9_md_sim_count();sim++)wanted|=x9m_sims[sim].wanted;
- if(!wanted||!x9w_control_ready||!x9_md_mipc_online())return;
+ const bool online=x9w_control_ready&&x9_md_mipc_message_online();const uint64_t now=x9q_ms();
+ if(!online)x9m_init_transport_loss();
  if(x9m_init_token){
+  /* Check BEFORE take: a CNF first polled at/after the guard is still late.
+   * A previous timeout is terminal, never cleared by a successful CNF. */
+  if(!x9m_init_hold&&now>=x9m_init_deadline){x9m_init_hold=true;
+   printf("X9 SMS: init stage %u timeout; token retained, no retry\n",x9m_init_stage);}
   unsigned n=0;int rc=x9_md_mipc_take(x9m_init_token,response,room,&n);
-  if(rc!=1){
-   if(!x9m_init_hold&&x9q_ms()>=x9m_init_deadline){x9m_init_hold=true;
-    printf("X9 SMS: init stage %u timeout; token retained, no retry\n",x9m_init_stage);}
-   return;
-  }
-  x9m_init_token=0;unsigned result=1;
-  bool known=x9w_wire(response,n)&&x9q_u16(response+10)==0x30c&&x9w_word(response,n,0,result);
-  bzero(response,room);
-  if(!known||result){x9m_init_hold=true;
-   printf("X9 SMS: CMD registration stage %u rejected known %u result %u\n",x9m_init_stage,known?1:0,result);return;}
-  x9m_init_hold=false;
+  if(rc==1){
+   x9m_init_token=0;unsigned result=1;
+   if(!x9w_control_ready||!x9_md_mipc_message_online())x9m_init_hold=true;
+   bool known=x9w_wire(response,n)&&x9q_u16(response+10)==0x30c&&x9w_word(response,n,0,result);
+   bzero(response,room);
+   if(!known||result){x9m_init_hold=true;
+    printf("X9 SMS: CMD registration stage %u rejected known %u result %u\n",x9m_init_stage,known?1:0,result);}
+  }else if(rc==-3){x9m_init_token=0;x9m_init_hold=true; /* proven pre-TX rejection */
+   printf("X9 SMS: CMD registration stage %u locally rejected before TX; no retry\n",x9m_init_stage);
+  }else if(rc<0)x9m_init_hold=true; /* uncertain physical token remains */
  }
- if(x9m_init_hold)return;
- if(x9m_init_stage<2){
+ if(online&&wanted&&!x9m_init_hold&&!x9m_init_token&&x9m_init_stage<2){
   unsigned stage=x9m_init_stage+1,id=stage==1?0x8601:0x8603;
   x9w_frame f(0x30b,0xff);
   uint8_t v[2]={(uint8_t)id,(uint8_t)(id>>8)};f.tlv(0x100,v,2);
@@ -180,15 +199,19 @@ static void x9m_init_poll(uint8_t *response,unsigned room){
   * Each SIM owns its progress: a locked/absent SIM cannot block the other.
   * No retry of a timed-out config and no timer-generated ready state. */
  for(unsigned sim=0;sim<x9_md_sim_count();sim++){
-  x9m_sim &s=x9m_sims[sim];if(!s.wanted)continue;
+  x9m_sim &s=x9m_sims[sim];
+  if(x9m_init_hold&&(s.init||s.init_token))s.init_hold=true;
   if(s.init_token){
+   if(!s.init_timed_out&&now>=s.init_deadline){s.init_timed_out=true;s.init_hold=true;
+    printf("X9 SMS: SIM%u init %u timeout; token retained, no retry\n",sim+1,s.init);}
    unsigned n=0;int rc=x9_md_mipc_take(s.init_token,response,room,&n);
-   if(rc!=1){
-    if(!s.init_timed_out&&x9q_ms()>=s.init_deadline){s.init_timed_out=true;
-     printf("X9 SMS: SIM%u init %u timeout; token retained, no retry\n",sim+1,s.init);}
-    continue;
-   }
-   s.init_token=0;s.init_timed_out=false;unsigned result=1,ready=0;
+   if(rc!=1){if(rc<0)s.init_hold=true;
+    if(rc==-3){s.init_token=0;printf("X9 SMS: SIM%u init %u locally rejected before TX; no retry\n",sim+1,s.init);}
+    continue;}
+   s.init_token=0;
+   if(!x9w_control_ready||!x9_md_mipc_message_online())s.init_hold=true;
+   if(s.init_hold){bzero(response,room);continue;} /* drain, never grant/advance */
+   unsigned result=1,ready=0;
    unsigned id=s.init<=X9M_IMS_IND?0x308:0x602;
    bool known=x9w_wire(response,n)&&x9q_u16(response+10)==id&&
     response[8]==(1u<<sim)&&x9w_word(response,n,0,result);
@@ -211,7 +234,7 @@ static void x9m_init_poll(uint8_t *response,unsigned room){
    }else s.init++;
    bzero(response,room);
   }
-  if(s.init_hold||s.init==X9M_INIT_DONE)continue;
+  if(!online||!s.wanted||x9m_init_hold||x9m_init_token||x9m_init_stage<2||s.init_hold||s.init==X9M_INIT_DONE)continue;
   unsigned step=s.init;
   if(step==X9M_WAIT_READY){if(!s.md_known||!s.md_ready)continue;step=X9M_HOST_READY;}
   x9w_frame f(step<=X9M_IMS_IND?0x307:0x601,1u<<sim);
@@ -224,8 +247,19 @@ static void x9m_init_poll(uint8_t *response,unsigned room){
   if(token){s.init=step;s.init_token=token;s.init_epoch=s.ready_epoch;s.init_deadline=x9q_ms()+300000;}
  }
 }
+struct x9m_publication {
+ uint32_t port,node;const uint8_t *sdu;uint32_t size;
+ uint8_t *owned;uint32_t room;
+};
+static int x9m_publish(void *context){
+ /* Trusted closure: host queue only, no allocation or MD API reentry. */
+ x9m_publication &p=*static_cast<x9m_publication *>(context);
+ return bb_x9_sms_event(p.port,p.node,p.sdu,p.size,p.owned,p.room)?1:0;
+}
 static void x9m_deliver(x9m_incoming &in,unsigned mti){
- if(x9q_ms()<in.next_delivery)return;
+ /* The QMI owner alone changes control-ready. Native publish below holds
+  * the MD mutex through queue admission, closing event->poison->retry. */
+ if(!x9w_control_ready||x9q_ms()<in.next_delivery||!x9_md_mipc_message_online())return;
  unsigned cls=mti==2?4:x9m_class(in.pdu,in.len);
  if(cls>5)return;
  for(unsigned i=0;i<CBQ_MAX_CLIENTS;i++){
@@ -250,7 +284,11 @@ static void x9m_deliver(x9m_incoming &in,unsigned mti){
    * and retry only admission (never MD ACK) if the actual host queue is full. */
   memmove(p.p+7,p.p+14,p.n-14);p.n-=7;p.p[0]=4;p.p[3]=1;
   p.p[5]=(uint8_t)(p.n-7);p.p[6]=(uint8_t)((p.n-7)>>8);
-  bool admitted=p.good&&bb_x9_sms_event(CBQ_PORT_BASE+i,X9BB_NODE,p.p,p.n);
+  uint32_t room=CBQ_HDR+p.n;
+  uint8_t *owned=p.good?static_cast<uint8_t *>(IOMallocData(room)):nullptr;
+  x9m_publication publication={CBQ_PORT_BASE+i,X9BB_NODE,p.p,p.n,owned,room};
+  bool admitted=owned&&x9_md_mipc_message_publish(in.token,in.sim,x9m_publish,&publication)==1;
+  if(!admitted&&owned){bzero(owned,room);IOFreeData(owned,room);}
   bzero(v,sizeof(v));bzero(p.p,sizeof(p.p));
   if(!admitted){in.next_delivery=x9q_ms()+100;return;}
   in.delivered=true;in.slot=i;in.generation=x9q_clients[i].generation;in.ack_wait=x9q_ms()+30000;
@@ -357,9 +395,9 @@ static bool x9m_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
    if(c.status_reports)x9m_number(p,0x10,1,1);p.send(local,port);return true;
   }
  }else if(service==5&&id==0x5c&&len==7){
-  x9q_packet p(req);x9m_number(p,0x11,x9m_sims[sim].ready&&x9_md_mipc_online()?1:0,1);p.send(local,port);return true;
+  x9q_packet p(req);x9m_number(p,0x11,x9m_sims[sim].ready&&x9w_control_ready&&x9_md_mipc_message_online()?1:0,1);p.send(local,port);return true;
  }else if(service==5&&id==0x30&&len==7){
-  if(!x9m_sims[sim].ready)err=X9Q_NOT_READY;
+  if(!x9m_sims[sim].ready||!x9w_control_ready||!x9_md_mipc_message_online())err=X9Q_NOT_READY;
   else{x9q_packet p(req);x9m_number(p,1,1,1);p.send(local,port);return true;}
  }else if(service==5&&(id==0x31||id==0x22||id==0x23)){
   struct x9ms_storage_request storage;unsigned decoded=x9ms_storage_decode(req,len,&storage);
@@ -368,7 +406,7 @@ static bool x9m_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
    * Accept validated bounded work into the existing per-SIM queue; poll
    * still requires THIS SIM's actual ready CNF before any native TX.
    * Do not synthesize an empty list or enqueue with an offline transport. */
-  if(!err&&(!x9w_control_ready||!x9_md_mipc_online()))err=X9Q_NOT_READY;
+  if(!err&&(!x9w_control_ready||!x9_md_mipc_message_online()))err=X9Q_NOT_READY;
   if(x9m_store_order==~0ull)err=X9Q_BUSY;
   if(!err){
    x9m_job *j=x9m_new(storage.list?X9M_LIST:storage.modify?X9M_TAG:X9M_READ,slot,sim,req,len);
@@ -389,7 +427,7 @@ static bool x9m_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
     * timeout. Leave MTK's native link lifetime unchanged; never resend. */
    !(req[at]==0x12&&x9q_u16(req+at+1)==1&&req[at+3]<=1))err=X9Q_UNSUPPORTED;
   if(ims.p&&(ims.n!=1||ims.p[0]))err=X9Q_UNSUPPORTED;
-  if(!err&&(!x9m_sims[sim].ready||!x9_md_mipc_online()))err=X9Q_NOT_READY;
+  if(!err&&(!x9m_sims[sim].ready||!x9w_control_ready||!x9_md_mipc_message_online()))err=X9Q_NOT_READY;
   for(const x9m_job &j:x9m_jobs)if(j.op==X9M_SEND&&j.sim==sim)err=X9Q_BUSY;
   if(!err){
    x9m_job *j=x9m_new(X9M_SEND,slot,sim,req,len);
@@ -436,7 +474,7 @@ static bool x9m_request(uint32_t local,uint32_t port,const uint8_t *req,unsigned
   }
  }else if((service==0x21&&id==0x20)||(service==5&&id==0x34)){
   if(len!=7)err=X9Q_ARG;
-  else if(!x9w_control_ready||!x9_md_mipc_online())err=X9Q_NOT_READY;
+  else if(!x9w_control_ready||!(service==5?x9_md_mipc_message_online():x9_md_mipc_online()))err=X9Q_NOT_READY;
   else{
    unsigned op=service==0x21?X9M_REG:X9M_SMSC;
    x9m_job *j=x9m_new(op,slot,sim,req,len);
@@ -526,18 +564,31 @@ static void x9m_job_done(x9m_job &j,const uint8_t *p,unsigned n){
 static void x9m_del(unsigned slot){
  bzero(&x9m_clients[slot],sizeof(x9m_clients[slot]));
  /* Sent SMS/ACK owners survive deletion and drain their late result. */
- for(x9m_job &j:x9m_jobs)if(j.op&&j.slot==slot)j.answered=true;
+ for(x9m_job &j:x9m_jobs)if(j.op&&j.slot==slot){
+  if(j.op==X9M_TAG&&j.step==1&&j.token)
+   x9_md_mipc_message_mark_read_abandon(j.token,j.slot,j.generation);
+  j.answered=true;
+ }
  /* No successful auto-ACK on client loss. Commands remain bound to the old
   * generation, so a reused port/SIM cannot acknowledge someone else's SMS. */
 }
 static void x9m_poll(){
  static uint8_t p[X9_MIPC_FRAME_MAX];uint64_t now=x9q_ms();
+ if(!x9w_control_ready||!x9_md_mipc_message_online())x9m_init_transport_loss();
  if(!x9_md_mipc_online())for(unsigned sim=0;sim<x9_md_sim_count();sim++){
   if(x9m_sims[sim].md_known)x9m_md_ready(sim,false);
   x9m_sims[sim].reg_valid=false;
  }
  for(x9m_job &j:x9m_jobs)if(j.op){
   if(j.hold)continue;
+  /* Host guard is not a delivery timeout or cancellation of MD side
+   * effects. Reply once before taking a late result, then keep/drain every
+   * sent MO/ACK token; no resend or second success for the timed-out txn. */
+  if(!j.answered&&now>=j.deadline){x9m_error(j,X9Q_NOT_READY);
+   printf("X9 SMS/IMS: operation %u SIM%u timed out; sent token retained, no resend\n",j.op,j.sim+1);}
+  if(j.op==X9M_TAG&&j.step==1&&j.token&&
+    (j.answered||now>=j.deadline||!x9m_live(j.slot,j.generation)||!x9w_control_ready||!x9m_sims[j.sim].ready))
+   x9_md_mipc_message_mark_read_abandon(j.token,j.slot,j.generation);
   if(x9m_storage(j.op)&&!j.token){
    if(!j.follow||now>=j.deadline||j.answered||!x9m_live(j.slot,j.generation)){
     x9m_error(j,X9Q_NOT_READY);
@@ -545,7 +596,7 @@ static void x9m_poll(){
     else bzero(&j,sizeof(j));
     continue; // A lost/expired client may not start a delayed mutation.
    }
-   if(x9m_store_blocked(j)||!x9m_sims[j.sim].ready||!x9_md_mipc_online())continue;
+   if(x9m_store_blocked(j)||!x9m_sims[j.sim].ready||!x9w_control_ready||!x9_md_mipc_message_online())continue;
    j.token=x9m_store_submit(j);
    if(!j.token)continue;
    j.follow=false;
@@ -553,7 +604,7 @@ static void x9m_poll(){
   }
   if(j.op==X9M_SMSC&&!j.token){
    if(j.answered||now>=j.deadline){x9m_error(j,X9Q_NOT_READY);bzero(&j,sizeof(j));continue;}
-   if(x9m_sims[j.sim].ready&&x9_md_mipc_online()){
+   if(x9m_sims[j.sim].ready&&x9w_control_ready&&x9_md_mipc_message_online()){
     x9w_frame f(0x601,1u<<j.sim);f.byte(0x102,1);j.token=f.submit();
    }
    if(!j.token)continue;
@@ -572,6 +623,15 @@ static void x9m_poll(){
    }
   }else{
    int taken=x9_md_mipc_take(j.token,p,sizeof(p),&n);
+   if(taken==-3){
+    /* This request never reached writer selection. A TAG step2 still owns
+     * the earlier physical mark-read until verification; do not release it. */
+    x9m_error(j,X9Q_NOT_READY);j.token=0;
+    printf("X9 SMS: SIM%u operation %u step %u locally rejected before TX\n",j.sim+1,j.op,j.step);
+    if(j.op==X9M_TAG&&j.step==2){j.hold=true;bzero(j.stored_pdu,sizeof(j.stored_pdu));}
+    else bzero(&j,sizeof(j));
+    continue;
+   }
    if(taken==-2){
     x9m_error(j,X9Q_INTERNAL);
     printf("X9 SMS: SIM%u operation %u oversized CNF fully drained; no partial list\n",j.sim+1,j.op);
@@ -587,8 +647,6 @@ static void x9m_poll(){
     else bzero(&j,sizeof(j));continue;
    }
   }
-  if(!j.answered&&now>=j.deadline){x9m_error(j,X9Q_NOT_READY);
-   printf("X9 SMS/IMS: operation %u SIM%u timed out; sent token retained, no resend\n",j.op,j.sim+1);}
  }
  for(unsigned i=0;i<X9M_INCOMING;i++){
   unsigned n=0;uint32_t token=0;int rc=x9_md_mipc_message_event(p,sizeof(p),&n,&token);

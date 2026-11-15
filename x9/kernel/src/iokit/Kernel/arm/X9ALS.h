@@ -8,12 +8,13 @@
 #define X9_ALS_MTK_INFO_BYTES 40u
 #define X9_ALS_MTK_DATA_BYTES 36u
 #define X9_ALS_MAX_LUX 200000u
+/* Receipt-age bound. Native measurement age needs a qualified clock mapper. */
 #define X9_ALS_MAX_AGE_NS 5000000000ULL
 
 struct x9_als_sample {
 	uint64_t sequence;
 	uint64_t host_time;       /* mach_absolute_time at receipt, NOT SCP ns */
-	uint64_t scp_time_ns;
+	uint64_t scp_time_ns;     /* legacy name: unconverted wire time; not AP ticks */
 	uint32_t lux;             /* HID ALS level is integer lux, not 16.16 */
 	uint32_t diagnostic;
 };

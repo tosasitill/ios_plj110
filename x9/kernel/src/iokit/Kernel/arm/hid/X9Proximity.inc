@@ -21,15 +21,17 @@ public:
  IOHIDEvent *copyEvent(IOHIDEventType,IOHIDEvent *,IOOptionBits) APPLE_KEXT_OVERRIDE;
  IOHIDEvent *copyMatchingEvent(OSDictionary *) APPLE_KEXT_OVERRIDE;
  IOReturn setProperties(OSObject *) APPLE_KEXT_OVERRIDE;
+ bool open(IOService *,IOOptionBits,void *,Action) APPLE_KEXT_OVERRIDE;
 private:
  static void poll(OSObject *,IOTimerEventSource *);
+ static IOReturn rearmOpen(OSObject *,void *,void *,void *,void *);
  static IOReturn configure(OSObject *,void *,void *,void *,void *);
  void removeTimer();
  IOHIDEvent *makeEvent(const x9_prox_sample &,IOOptionBits);
  IOTimerEventSource *fTimer;
  uint64_t fSequence;
  UInt32 fIntervalUs,fDetectionMode;
- bool fIngressActive,fValid;
+ bool fIngressActive,fValid,fReplay;
  int fError;
 };
 OSDefineMetaClassAndStructors(X9Proximity,IOHIDEventService);
@@ -39,7 +41,7 @@ bool X9Proximity::start(IOService *provider)
  mode=(sensors&8)?3:0; PE_parse_boot_argn("x9_prox",&mode,sizeof(mode));
  if (!sweet_early_is_x9() || mode<1 || mode>3) return false;
  fTimer=NULL; fSequence=0; fIntervalUs=200000; fDetectionMode=0;
- fIngressActive=fValid=false; fError=0;
+ fIngressActive=fValid=fReplay=false; fError=0;
  if (!IOHIDEventService::start(provider)) return false;
  if (x9_prox_init(mode)) return false;
  fIngressActive=true;
@@ -114,9 +116,11 @@ void X9Proximity::poll(OSObject *owner,IOTimerEventSource *sender)
   if (!fresh) self->removeProperty("X9ProxNear");
  }
  self->setProperty("X9ProxPhysicalTransportReady",fresh && status.mode==3?kOSBooleanTrue:kOSBooleanFalse);
- if (fresh && sample.sequence!=self->fSequence) {
+ if (!fresh) self->fReplay=false;
+ if (fresh && (sample.sequence!=self->fSequence || self->fReplay)) {
   IOHIDEvent *event=self->makeEvent(sample,0);
   if (event) {
+   self->fReplay=false;
    self->fSequence=sample.sequence;
    self->setProperty("X9ProxNear",sample.near?kOSBooleanTrue:kOSBooleanFalse);
    self->setProperty("X9ProxOneshot",(UInt32)sample.oneshot,32);
@@ -148,6 +152,15 @@ IOReturn X9Proximity::configure(OSObject *owner,void *arg0,void *,void *,void *)
  if (d || i) {
   int error=x9_prox_set_enabled(mode!=0,us);
   if (error && error!=EAGAIN) return error==EBUSY?kIOReturnBusy:kIOReturnNotReady;
+  /* 20H392 backboardd clears its filtered/object state on passive/monitoring
+   * -> active. All nonzero modes share our physical on-change stream, so
+   * stable near need not produce a new DATA sequence. Re-arm one still-valid
+   * snapshot on the next poll, retaining its original timestamp/provenance.
+   * This is HID state replay, not another measurement or an ENABLE ACK.
+   * Keep the request latched across same-mode/cadence writes and allocation
+   * failure; OFF or unavailable backend DATA cancels it. */
+  if (!mode) self->fReplay=false;
+  else if (self->fDetectionMode && mode!=self->fDetectionMode) self->fReplay=true;
   self->fDetectionMode=mode; self->fIntervalUs=us;
   self->setProperty("DetectionMode",mode,32);
   self->setProperty(kIOHIDReportIntervalKey,us,32);
@@ -168,4 +181,22 @@ IOReturn X9Proximity::setProperties(OSObject *properties)
  OSDictionary *p=OSDynamicCast(OSDictionary,properties);
  if (!p) return kIOReturnBadArgument;
  return _hidGate?_hidGate->runAction(&X9Proximity::configure,p):kIOReturnNotReady;
+}
+IOReturn X9Proximity::rearmOpen(OSObject *owner,void *,void *,void *,void *)
+{
+ X9Proximity *self=(X9Proximity *)owner;
+ if (self->fDetectionMode) self->fReplay=true;
+ return kIOReturnSuccess;
+}
+bool X9Proximity::open(IOService *client,IOOptionBits options,void *context,Action action)
+{
+ bool opened=IOHIDEventService::open(client,options,context,action);
+ /* Close removes the subscriber, not the enabled on-change stream. A late
+  * subscriber/reopen must see a still-valid level even if no new edge occurs.
+  * Base open has released IOService arbitration before we acquire the gate.
+  * Only latch here: the userclient sets state Open after this method returns,
+  * so a synchronous callback would be discarded. The next gated poll uses
+  * the real snapshot without changing its timestamp or DATA sequence. */
+ if (opened && _hidGate) (void)_hidGate->runAction(&X9Proximity::rearmOpen);
+ return opened;
 }

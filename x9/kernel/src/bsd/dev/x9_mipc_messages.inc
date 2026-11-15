@@ -67,6 +67,20 @@ static int x9mm_request(const uint8_t *p,unsigned n,unsigned id){
  /* Only the three audited GSM send TLVs. No transport/IMS guessing. */
  return n==16+8+((full+11)&~7u)+8;
 }
+/* Only requests whose usable session depends on this separate inbox.
+ * IMSA a04 snapshots and other generic/CALL registrations stay independent.
+ * Called after transport framing/validation, including with x9_mi_lock held. */
+static int x9mm_inbox_request(const uint8_t *p,unsigned n,unsigned id){
+ if(id==0x601||id==0x605||id==0x607)return 1;
+ if(id==0x30b)return x9mm_request(p,n,id);
+ return id==0x307&&n==24&&x9mi_u16(p+16)==0x100&&x9mi_u16(p+18)==2&&
+  (x9mi_u16(p+20)==0x4601||x9mi_u16(p+20)==0x4a01);
+}
+int x9_md_mipc_message_online(void){
+ lck_mtx_lock(&x9_mi_lock);
+ int on=x9_mi_online&&!x9_mi_poisoned&&!x9_mm_poisoned;
+ lck_mtx_unlock(&x9_mi_lock);return on&&x9_md_at_online();
+}
 static void x9mm_rx(const uint8_t *p,unsigned n,unsigned id,unsigned tx){
  if(!x9mm_id(id)||x9_mm_poisoned)return;
  unsigned mask=p[8]&((1u<<x9_md_sim_count())-1);
@@ -107,6 +121,33 @@ int x9_md_mipc_message_event(uint8_t *out,uint32_t room,uint32_t *len,uint32_t *
   }
  }
  lck_mtx_unlock(&x9_mi_lock);return rc;
+}
+int x9_md_mipc_message_publish(uint32_t token,unsigned sim,
+ x9_md_mipc_message_publish_cb callback,void *context){
+ /* AT readiness has its own mutex: read before taking MD, never nest it in
+  * the trusted admission callback. Generic/SMS quarantine is checked again
+  * under the same mutex RX uses, through the actual host queue mutation. */
+ if(!token||sim>=x9_md_sim_count()||!callback||!x9_md_at_online())return 0;
+ int admitted=0;lck_mtx_lock(&x9_mi_lock);
+ if(x9_mi_online&&!x9_mi_poisoned&&!x9_mm_poisoned){
+  unsigned route_bits=(1u<<x9_md_sim_count())-1;
+  for(unsigned i=0;i<X9_MM_SLOTS;i++){
+   const struct x9_mm_slot *s=&x9_mm_slots[i];
+   if(s->token==token&&s->state==2&&(s->id==0x8601||s->id==0x8603)&&
+    (s->mask&route_bits)==(1u<<sim)){
+    /* Same proven CS envelope as reply. The trusted callback cannot publish
+     * non-CS type4 or a malformed status PDU merely by owning a token. */
+    if(s->id==0x8601&&!x9mm_one(s->frame,s->len,0x100,3))break;
+    if(s->id==0x8603){
+     const uint8_t *v;unsigned k;
+     if(!x9mm_find(s->frame,s->len,0x8100,&v,&k)||!v||k<3||k>255||v[0]>12||v[0]+2u>=k||
+      (v[v[0]+1]&3)!=2)break;
+    }
+    admitted=callback(context)==1;break;
+   }
+  }
+ }
+ lck_mtx_unlock(&x9_mi_lock);return admitted;
 }
 int x9_md_mipc_message_reply(uint32_t token,unsigned success,uint8_t cause){
  if(!token||success>1)return -1;

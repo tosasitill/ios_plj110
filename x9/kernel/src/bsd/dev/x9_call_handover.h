@@ -6,6 +6,21 @@
 #include "x9_call_wire.h"
 
 struct x9cw_handover {unsigned sim,native_state,ios_state;};
+/* Publication ownership, not network/SRVCC state. Never coalesce repeated
+ * START/COMPLETE: retain receive order until the host queue actually owns it.
+ * Overflow is terminal for this subscription, not permission to lose a
+ * middle event and continue. Explicit disable/new client can retire it. */
+struct x9cw_handover_queue {uint32_t last;unsigned count,blocked;uint8_t events[8];};
+static inline int x9cw_handover_queue_push(struct x9cw_handover_queue *q,
+                                          uint32_t floor,uint32_t sequence,unsigned state){
+ if(!q||q->blocked)return -1;
+ if(sequence<=floor)return 0;
+ if(!sequence||sequence<=q->last||state<1||state>4||q->count>=8){q->blocked=1;return -1;}
+ q->events[q->count++]=(uint8_t)state;q->last=sequence;return 1;
+}
+static inline void x9cw_handover_queue_published(struct x9cw_handover_queue *q){
+ if(q&&!q->blocked){x9cw_zero(q->events,sizeof(q->events));q->count=0;}
+}
 /* MD event jump9298f81c: EVENT3 -> tag115/u32, sourced from u8.
  * RIL37cfd4..37d020 passes values0..3 unchanged to notifySrvccState.
  * Android radio SrvccState: STARTED0/COMPLETED1/FAILED2/CANCELED3.
