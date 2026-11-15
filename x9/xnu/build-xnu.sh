@@ -1,7 +1,11 @@
 #!/bin/bash
 # Build the X9 SWEET XNU object tree (xnu-8796.141.3 + x9/xnu patches).
 #
-#   x9/xnu/build-xnu.sh [macos|ios] [--setup]
+#   x9/xnu/build-xnu.sh [macos|ios] [--setup | --isolated x9/out/<name>]
+#
+# --isolated clones only the fixed local compiler/bootstrap inputs into a new
+# scratch tree, restores XNU from the pinned tag, applies this worktree's patches,
+# and builds there. It never edits the shared .local source or object trees.
 #
 #   macos  -> .local/dxb          macOS kext C++ ABI (vtable padding); the tree
 #                                 every proven boot image so far was linked against
@@ -22,8 +26,17 @@
 # Only compile tools live outside the repository: Xcode 15 (DEVELOPER_DIR),
 # KDK_13.5_22G74, Homebrew python3.
 set -euo pipefail
-ABI=${1:-macos}; SETUP=0
-[ "${2:-}" = --setup ] && SETUP=1
+ABI=${1:-macos}; SETUP=0; ISOLATED=
+if [ $# -gt 0 ]; then shift; fi
+while [ $# -gt 0 ]; do
+  case $1 in
+    --setup) SETUP=1; shift ;;
+    --isolated) [ $# -ge 2 ] || { echo 'error: --isolated needs a new x9/out path' >&2; exit 2; }
+      ISOLATED=$2; shift 2 ;;
+    *) echo "error: unknown option $1" >&2; exit 2 ;;
+  esac
+done
+[ -z "$ISOLATED" ] || [ $SETUP = 0 ] || { echo 'error: --setup and --isolated are exclusive' >&2; exit 2; }
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 P=$ROOT/x9/xnu
 DEV=${DEVELOPER_DIR:-/Users/tosasitill/Downloads/Xcode.app/Contents/Developer}
@@ -35,8 +48,66 @@ XNU_TAG=xnu-8796.141.3
 case $ABI in
   macos) D=$ROOT/.local/dxb; PATCHES="$P/0001-x9-sweet-xnu-8796.141.3.patch $P/0006-x9-bt-uart-irq.patch" ;;
   ios)   D=$ROOT/.local/dxb-iosabi; PATCHES="$P/0001-x9-sweet-xnu-8796.141.3.patch $P/0002-x9-ios-kext-cxx-abi.patch $P/0003-x9-sparse-prelink-kext-memory.patch $P/0004-x9-diag-unaligned-static-mfree.patch $P/0005-x9-diag-prelinked-kext-load.patch $P/0006-x9-bt-uart-irq.patch" ;;
-  *) echo "usage: $0 [macos|ios] [--setup]" >&2; exit 2 ;;
+  *) echo "usage: $0 [macos|ios] [--setup | --isolated x9/out/<name>]" >&2; exit 2 ;;
 esac
+
+if [ -n "$ISOLATED" ]; then
+  BASE=$D
+  # Path normalization also rejects an output symlink escaping this worktree.
+  D=$(python3 - "$ROOT" "$ISOLATED" <<'PY'
+import sys
+from pathlib import Path
+root = Path(sys.argv[1]).resolve()
+p = Path(sys.argv[2]).expanduser()
+p = (p if p.is_absolute() else root / p).resolve()
+out = (root / 'x9/out').resolve()
+if not p.is_relative_to(out) or p == out or p.exists():
+    raise SystemExit('error: isolated tree must be a NEW directory below this worktree x9/out/')
+print(p)
+PY
+  )
+  [ -d "$BASE/xnu/.git" ] && [ -d "$BASE/build/xnu.obj" ] && [ -d "$BASE/fakeroot" ] || {
+    echo "error: fixed $BASE bootstrap/object inputs missing" >&2; exit 1;
+  }
+  mkdir -p "$D"
+  # APFS copy-on-write, not hardlinks: rebuilding cannot touch shared objects.
+  for e in build fakeroot AvailabilityVersions bootstrap_cmds dtrace libdispatch libplatform templates; do
+    [ ! -e "$BASE/$e" ] || cp -c -R "$BASE/$e" "$D/$e"
+  done
+  git clone -q --no-hardlinks --no-checkout "$BASE/xnu" "$D/xnu"
+  git -C "$D/xnu" checkout -q "$XNU_TAG"
+  git -C "$D/xnu" apply --whitespace=nowarn $PATCHES
+  # Copied depfiles and generated build scripts use the old absolute tree.
+  # Only copied text inputs are relocated. Binary objects are left intact;
+  # changed source/header dependencies force normal make recompilation.
+  python3 - "$BASE" "$D" <<'PY'
+import os
+import sys
+from pathlib import Path
+base, target = map(Path, sys.argv[1:])
+old = {os.fsencode(base), os.fsencode(base.resolve())}
+new = os.fsencode(target)
+for directory in ('build', 'fakeroot'):
+    for p in (target / directory).rglob('*'):
+        if p.is_symlink():
+            link = os.fsencode(os.readlink(p))
+            changed = link
+            for source in old:
+                changed = changed.replace(source + b'/', new + b'/')
+            if changed != link:
+                p.unlink()
+                p.symlink_to(os.fsdecode(changed))
+        elif p.is_file():
+            data = p.read_bytes()
+            if b'\0' in data or not any(source + b'/' in data for source in old):
+                continue
+            changed = data
+            for source in old:
+                changed = changed.replace(source + b'/', new + b'/')
+            if changed != data:
+                p.write_bytes(changed)
+PY
+fi
 
 wrappers() {
   mkdir -p "$D/cc"
