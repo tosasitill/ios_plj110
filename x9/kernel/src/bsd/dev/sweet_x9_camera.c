@@ -377,7 +377,17 @@ static int cam_open(dev_t d,int f,__unused int t,struct proc *p)
         else if(st.mode!=2 || (uid && (uid!=501 || strcmp(name,"mediaserverd"))))return EPERM;
     }
     lck_mtx_lock(&camera_control_lock);lck_mtx_lock(&camera_lock);
-    int e=opened?EBUSY:0;
+    /* An asynchronous real platform registration needs opened=false while
+     * it admits/probes/restores. Reject an early mode2 controller open
+     * without taking that ownership; status observers and mode3 are separate.
+     * Callback presence alone is not READY, and fault/retained state cannot
+     * become a usable controller by reopening its cdev. */
+    int e=0;
+    if(st.mode==2 && (hw.version!=X9_CAMERA_PLATFORM_VERSION ||
+        !(st.flags&X9_CAMERA_READY)))e=ENXIO;
+    else if(st.mode==2 && (st.flags&(X9_CAMERA_FAULT|X9_CAMERA_RETAINED)))
+        e=st.last_errno?st.last_errno:EIO;
+    else if(opened)e=EBUSY;
     if(!e && st.mode==2 && (session.latched || cam_stop_owned() || frame_readers ||
         (st.flags&X9_CAMERA_RETAINED)))e=session.last_errno?session.last_errno:EBUSY;
     if(!e){opened=true;control_stop_issued=false;}
