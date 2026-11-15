@@ -753,6 +753,9 @@ def rv55_mem_wait_evidence(dram, init):
                         helper=0x224aa0, counted_call=0x224b46,
                         counted_helper=0x224308, tcm_call=0x22435e,
                         tcm_target=0x20f8, decrement_store=0x224370,
+                        clock_name_address=0x226d3e,
+                        clock_name=cstring(dram, 0x226d3e - 0x200000),
+                        named_venc_candidate_is_not_a_proven_vdec_stop=True,
                         dispatcher_to_candidate_control_flow_proven=False,
                         tcm_target_semantics_and_dma_drain_proven=False)),
                 software_release=dict(helper=0x23bc28,
@@ -824,6 +827,120 @@ def global_boundary_evidence(rv55, rv33):
     return result
 
 
+def rv55_clock_install_evidence(tcm, dram, init):
+    """Captured domain/clock objects and registration, not live DMA authority.
+
+    Both full payload identities gate the packed-object and PC interpretations.
+    The real registration stores do not prove that boot called the initializer,
+    that its vendor-indexed vector was populated correctly, or that a later
+    lookup reaches the captured callbacks. A VENC-named candidate in the shared
+    dispatcher must not be promoted into a VDEC stop edge. The timeout callback
+    contains register reads/logging, not a substitute clock disable or drain.
+    """
+    result = dict(profile_match=False, runtime_registration_proven=False,
+                  runtime_callback_target_proven=False,
+                  runtime_decoder_stop_proven=False,
+                  runtime_producer_exclusion_proven=False,
+                  runtime_dma_retirement_proven=False,
+                  scalar_value_helper_vendor_semantics_proven=False)
+    if (not init['profile_match'] or tcm is None or len(tcm) != 184320 or
+            hashlib.sha256(tcm).hexdigest() !=
+            'f59d646ba74fab1c40500139c40d67c97a0e8ab96c1569f738a0c7403cc49508'):
+        return result
+    spans = (
+        ('DRAM', 'vdec_clock_lookup2_and_store', 0x223ad2, 0x223ae8),
+        ('DRAM', 'vdec_clock_lookup0_1_and_stores', 0x223ae8, 0x223b0a),
+        ('DRAM', 'venc_clock_lookup4_7_and_stores', 0x223c2e, 0x223c52),
+        ('DRAM', 'venc_clock_lookup9_11_13_and_stores', 0x223c52, 0x223c7a),
+        ('DRAM', 'venc_clock_software_index_count_setup', 0x223c7a, 0x223c8a),
+        ('DRAM', 'vdec_named_counted_release_candidate', 0x224556, 0x224572),
+        ('DRAM', 'vdec_soc_named_counted_release_candidate', 0x22458a, 0x2245a4),
+        ('DRAM', 'venc_named_counted_release_candidate', 0x224b3a, 0x224b4a),
+        ('TCM', 'domain_vector_create_arguments', 0x9170, 0x9184),
+        ('TCM', 'domain_object_vector_unresolved_index_and_stride', 0x9184, 0x91ac),
+        ('TCM', 'domain0_registration_call_and_result', 0x91ac, 0x91cc),
+        ('TCM', 'domain_register_bound_stride_and_stores', 0x2324, 0x2350),
+        ('TCM', 'clock_lookup_domain_table_and_unresolved_index', 0x19ba, 0x19ec),
+        ('TCM', 'unprepare_callback_block24', 0x1dbc, 0x1dd4),
+        ('TCM', 'disable_callback_block8', 0x1fba, 0x1fd2),
+        ('TCM', 'unprepare_clock_vote_callback_prefix', 0x38f0, 0x3932),
+        ('TCM', 'unprepare_clock_vote_callback_tail', 0x3960, 0x397a),
+        ('TCM', 'fallback_block64_call_on_minus25', 0x2120, 0x2140),
+        ('TCM', 'fallback_named_register_read_diagnostics', 0x3d06, 0x3da6),
+        ('TCM', 'register_read_helper', 0x921c, 0x9220),
+    )
+    objects = []
+    for index in range(14):
+        address = 0x20018 + index * 59
+        raw = span(tcm, address, 59)
+        name_address = struct.unpack_from('<I', raw, 8)[0]
+        objects.append(dict(index=index, address=address, bytes=59,
+            raw_hex=raw.hex(), id=struct.unpack_from('<I', raw, 0)[0],
+            name_address=name_address, name=cstring(tcm, name_address),
+            flags=struct.unpack_from('<I', raw, 12)[0],
+            ops_address=struct.unpack_from('<I', raw, 24)[0],
+            initial_counter_bytes=list(raw[28:30]),
+            layout_and_initial_bytes_are_not_live_vector_proof=True))
+    ops = span(tcm, 0x18100, 68)
+    result.update(profile_match=True,
+        profile='captured RV55 clock domain0 registration and packed objects',
+        domain_registration=dict(initializer=0x9154,
+            initializer_runtime_called_proven=False,
+            vector_create_call=0x917e, vector_create=0x22d4,
+            entries=14, vector_storage=0x24688,
+            object_base=0x20018, object_stride=59,
+            vendor_index_store=0x91a0, vector_population_semantics_complete=False,
+            registration_call=0x91ba, registration=0x2322,
+            domain_argument=0, name_address=0x18901,
+            name=cstring(tcm, 0x18901), register_base_argument=0x31400000,
+            table_base=0x20c10, table_stride=12,
+            table_name_store=0x234c, table_vector_store=0x234e,
+            domain_registration_is_not_dma_ownership=True),
+        captured_objects=objects,
+        ops_table=dict(address=0x18100, bytes=68, raw_hex=ops.hex(),
+            words=list(struct.unpack('<17I', ops)),
+            unprepare_offset=24, unprepare_target=struct.unpack_from('<I', ops, 24)[0],
+            disable_offset=8, captured_disable_target=struct.unpack_from('<I', ops, 8)[0],
+            fallback_offset=64, fallback_target=struct.unpack_from('<I', ops, 64)[0],
+            runtime_overwrite_exclusion_proven=False),
+        clock_lookup=dict(helper=0x19a4, table_base=0x20c10,
+            table_vector_offset=4, vendor_domain_id_selection_unresolved=True,
+            scalar_value_helper=0x1449c,
+            scalar_combine_vendor_encodings_unresolved=True),
+        vdec_initialization=dict(helper=0x223a34,
+            lookup_ids=[2, 0, 1], result_cells=[0x3296a0, 0x3296a4, 0x3296a8],
+            release_candidate=0x2244ba,
+            named_release_calls=[0x224570, 0x22459e],
+            clock_name_addresses=[0x226c43, 0x226c36],
+            clock_names=[cstring(dram, address - 0x200000)
+                for address in (0x226c43, 0x226c36)],
+            complete_dispatcher_route_and_live_target_proven=False),
+        venc_initialization=dict(helper=0x223b0e,
+            lookup_ids=[4, 7, 9, 11, 13],
+            result_cells=[0x3296ac, 0x3296b0, 0x3296b4, 0x3296b8, 0x3296cc],
+            software_index_table=0x3296d4, release_candidate=0x224aa0,
+            clock_name_address=0x226d3e,
+            clock_name=cstring(dram, 0x226d3e - 0x200000),
+            encoder_named_candidate_is_not_certified_decoder_stop=True),
+        callback_boundary=dict(unprepare_indirect_call=0x1dd2,
+            disable_indirect_call=0x1fd0,
+            counted_gates_can_bypass_callback=True,
+            helper_zero_return_is_not_callback_execution_proof=True,
+            unprepare_vote_tail=0x3976, vote_helper=0x2d64,
+            full_vote_control_flow_and_hardware_exit_proven=False,
+            fallback_name_address=0x17fb0,
+            fallback_name=cstring(tcm, 0x17fb0),
+            fallback_register_read=0x921c, fallback_log_helper=0x1712a,
+            fallback_diagnostic_is_not_recovery_or_drain=True),
+        instruction_evidence=[dict(segment=segment, name=name,
+            link_address=start, end_exclusive=end,
+            payload_offset=start - (0x200000 if segment == 'DRAM' else 0),
+            raw_hex=span(dram if segment == 'DRAM' else tcm,
+                start - (0x200000 if segment == 'DRAM' else 0), end-start).hex())
+            for segment, name, start, end in spans])
+    return result
+
+
 def firmware(blob):
     """MTK extended 512-byte headers; preserve every byte including padding."""
     at, pieces = 0, []
@@ -886,6 +1003,9 @@ def firmware(blob):
                 service_mem_wait_evidence=rv55_mem_wait_evidence(
                     service_payloads.get('tinysys-vcp-RV55_A_dram'), init),
                 service_clock_evidence=rv55_clock_evidence(
+                    service_payloads.get('tinysys-vcp-RV55_A_dram'), init),
+                service_clock_install_evidence=rv55_clock_install_evidence(
+                    service_payloads.get('tinysys-vcp-RV55_A'),
                     service_payloads.get('tinysys-vcp-RV55_A_dram'), init),
                 service_output_evidence=rv55_output_evidence(
                     service_payloads.get('tinysys-vcp-RV55_A_dram'), init),
