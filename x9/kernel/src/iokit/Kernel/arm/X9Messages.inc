@@ -346,8 +346,12 @@ static void x9m_event(uint8_t *p,unsigned n,uint32_t token){
   return; // Modem-ready is prerequisite, never proof of host config success.
  }
  if(id==0x4a01){
-  /* URC101 is CIREGU 0/1, NOT the CIREG query's 0..4 enumeration. */
-  unsigned state;if(!x9w_byte(p,n,0x101,state)||state>1)return;
+  /* RIL onHandleUrc 290e18..290ecc first dispatches tag100: only type0
+   * owns CIREGU101 (0/1, NOT the query's 0..4 enumeration). Type1 is WFC;
+   * type2/3 own account/URI/expiry/response, not this registration state.
+   * The captured type2 expiry106=255 is NOT a service-capability mask. */
+  unsigned type,state;
+  if(!x9w_byte(p,n,0x100,type)||type||!x9w_byte(p,n,0x101,state)||state>1)return;
   for(unsigned sim=0;sim<x9_md_sim_count();sim++)if(mask&(1u<<sim))x9m_reg(sim,state?2:0);
   return;
  }
