@@ -49,8 +49,16 @@ enum { UART_INTID=0x148+32, IRQ_BIT=1u<<(UART_INTID%32), BANK=UART_INTID/32,
     G_PENDING=0x200+4*BANK, G_ACTIVE=0x300+4*BANK,
     G_CONFIG=0xc00+4*(UART_INTID/16), G_PRIORITY=0x400+UART_INTID,
     G_ROUTE=0x6000+8*UART_INTID };
-struct bt_frame { uint32_t length; uint8_t data[X9_BT_FRAME_MAX]; };
+/* Runtime ACL capacity reported by the actual controller is4096 payload
+ * bytes, which needs4101 on H4; the old bootstrap4096 cap cuts off its tail.
+ * Keep the metadata ABI constant but size worker framing independently.
+ * This also covers the actual1504 B ISO payload without fabricating MTUs. */
+#define BT_WIRE_FRAME_MAX 8192u
+struct bt_frame { uint32_t length; uint8_t data[BT_WIRE_FRAME_MAX]; };
 static struct bt_frame assembling, pending[8];
+/* Sole worker owns these; no 8KiB packet is allocated on the kernel stack. */
+static struct bt_frame incoming;
+static uint8_t native_tx[BT_WIRE_FRAME_MAX];
 static unsigned pending_count;
 static uint64_t frame_start;
 static uint32_t rd(volatile uint32_t *p,unsigned off) { return p[off/4]; }
@@ -194,8 +202,16 @@ static int frame_length(const uint8_t *p,uint32_t n)
 static int next_frame(struct bt_frame *out)
 {
     for(;;) {
+        /* Expire a stalled partial frame even when no more bytes arrive. */
+        if(assembling.length && now_ms(NULL)-frame_start>1000) return ETIMEDOUT;
         uint8_t b; uint32_t count; int error=rx_take(&b,1,&count); if(error) return error;
         if(!count) return EAGAIN;
+        /* btmtktty raw_filter, production node==1: only boundary0xff
+         * (FW wake) and0x00 (UART noise). Never trim either byte from a
+         * payload, or use the node==0-only0xf0 filter on this controller.
+         * This worker still holds driver-own; future asleep handling must
+         * perform the real own transition before resuming native traffic. */
+        if(!assembling.length && (b==0xff || b==0)) continue;
         if(!assembling.length) frame_start=now_ms(NULL);
         if(assembling.length>=sizeof(assembling.data)) return EMSGSIZE;
         assembling.data[assembling.length++]=b;
@@ -227,26 +243,25 @@ static int exchange_frame(void *context,const uint8_t *tx,size_t txlen,
     if(sent!=txlen) return EIO;
     uint64_t end=now_ms(NULL)+timeout;
     for(;;) {
-        struct bt_frame f;
-        error=next_frame(&f);
+        error=next_frame(&incoming);
         if(error && error!=EAGAIN) return error;
         if(!error) {
             bool matches=false;
-            if(f.data[0]==4) {
-                if(!hci) matches=f.length>=5 && f.data[1]==0xe4 && f.data[4]==opcode;
-                else if(f.length>=7 && f.data[1]==0x0e)
-                    matches=(f.data[4]|((uint16_t)f.data[5]<<8))==opcode;
-                else if(f.length==7 && f.data[1]==0x0f)
-                    matches=(f.data[5]|((uint16_t)f.data[6]<<8))==opcode;
+            if(incoming.data[0]==4) {
+                if(!hci) matches=incoming.length>=5 && incoming.data[1]==0xe4 && incoming.data[4]==opcode;
+                else if(incoming.length>=7 && incoming.data[1]==0x0e)
+                    matches=(incoming.data[4]|((uint16_t)incoming.data[5]<<8))==opcode;
+                else if(incoming.length==7 && incoming.data[1]==0x0f)
+                    matches=(incoming.data[5]|((uint16_t)incoming.data[6]<<8))==opcode;
             }
             if(matches) {
-                if(*replylen<f.length) { *replylen=f.length; return EMSGSIZE; }
-                memcpy(reply,f.data,f.length); *replylen=f.length; return 0;
+                if(*replylen<incoming.length) { *replylen=incoming.length; return EMSGSIZE; }
+                memcpy(reply,incoming.data,incoming.length); *replylen=incoming.length; return 0;
             }
             /* Preserve unrelated complete packets; don't let a native/raw
              * client steal the decisive initialization ACK. */
             if(pending_count==8) return ENOBUFS;
-            pending[pending_count++]=f;
+            pending[pending_count++]=incoming;
         }
         if(now_ms(NULL)>=end) return ETIMEDOUT;
         if(error==EAGAIN) sleep_ms(NULL,1);
@@ -328,16 +343,37 @@ static void worker(void *unused,wait_result_t result)
      * completed session during this otherwise harmless publication window. */
     lck_mtx_lock(&bt_lock); bs.firmware_ready=1; bs.state=X9_BT_READY; lck_mtx_unlock(&bt_lock);
     printf("X9 BT: complete firmware session chip=%04x baud=%u driver-own verified\n",session.chip_id,session.baud);
-    uint8_t bytes[1024];
+    bool have_rx=false;
     for(;;) {
-        uint32_t n=0, generation;
-        error=rx_take(bytes,sizeof(bytes),&n);
-        if(!error && n && x9_bt_serial_rx(bytes,n)!=n) error=ENOBUFS;
+        /* A full serial FIFO must not hide an IRQ overflow/error forever. */
+        boolean_t old=rx_lock(); error=rx.error; rx_unlock(old);
         if(error) break;
-        n=x9_bt_serial_tx_peek(bytes,sizeof(bytes),&generation);
+        uint32_t n=0,generation;
+        if(!have_rx) {
+            if(pending_count) {
+                incoming=pending[0]; pending_count--;
+                memmove(pending,pending+1,pending_count*sizeof(pending[0]));
+                have_rx=true;
+            } else {
+                error=next_frame(&incoming);
+                if(error && error!=EAGAIN) break;
+                have_rx=error==0;
+            }
+        }
+        /* Retain the WHOLE frame under temporary daemon backpressure.
+         * Closed-daemon packets are discarded by serial_rx, as before.
+         * The bounded IRQ ring still makes a genuinely stalled consumer
+         * fail explicitly, never truncate its H4 stream. */
+        if(have_rx && x9_bt_serial_rx(incoming.data,incoming.length)==incoming.length)
+            have_rx=false;
+        error=x9_bt_serial_tx_claim(native_tx,sizeof(native_tx),&n,&generation);
+        if(error) break;
         if(n) {
-            size_t sent=0; error=raw_write(NULL,bytes,n,&sent);
-            x9_bt_serial_tx_commit((uint32_t)sent,generation); if(error) break;
+            size_t sent=0; error=raw_write(NULL,native_tx,n,&sent);
+            if(!error) error=drain(NULL,1000);
+            x9_bt_serial_tx_finish((uint32_t)sent,generation,error);
+            if(error) break;
+            lck_mtx_lock(&bt_lock); bs.tx_frames++; lck_mtx_unlock(&bt_lock);
         }
         sleep_ms(NULL,1);
     }

@@ -30,11 +30,13 @@ struct bt_termios64 {
 _Static_assert(sizeof(struct bt_termios64)==72,"termios64 ioctl ABI");
 static LCK_GRP_DECLARE(serial_group,"x9.bt.serial");
 static LCK_MTX_DECLARE(serial_lock,&serial_group);
+static LCK_MTX_DECLARE(serial_write_lock,&serial_group);
 static struct {
     int major,boot;
     void *node;
-    bool opened,node_worker;
+    bool opened,node_worker,tx_claimed;
     uint32_t baud,generation,rhead,rlen,thead,tlen;
+    uint32_t claim_generation,claim_length;
     struct selinfo readers,writers;
     struct bt_termios64 line;
     uint8_t rx[BT_SERIAL_FIFO],tx[BT_SERIAL_FIFO];
@@ -64,24 +66,52 @@ uint32_t x9_bt_serial_rx(const uint8_t *p,uint32_t n)
     lck_mtx_lock(&serial_lock);
     /* No daemon: board may discard stale HCI, never queue pre-open events. */
     if(!serial.opened || serial.boot) { lck_mtx_unlock(&serial_lock); return n; }
-    n=MIN(n,BT_SERIAL_FIFO-serial.rlen);
+    /* Atomic frame admission: truncating H4 to the available FIFO room
+     * loses the tail and desynchronizes the daemon's native RxLoop. */
+    if(n>BT_SERIAL_FIFO-serial.rlen) n=0;
     if(n) { put(serial.rx,serial.rhead,&serial.rlen,p,n); wake_io(); }
     lck_mtx_unlock(&serial_lock); return n;
 }
-uint32_t x9_bt_serial_tx_peek(uint8_t *p,uint32_t n,uint32_t *generation)
+int x9_bt_serial_tx_claim(uint8_t *p,uint32_t capacity,uint32_t *length,uint32_t *generation)
 {
-    if(!p || !n || !generation) return 0;
+    if(!p || capacity<5 || !length || !generation) return EINVAL;
+    *length=0;
     lck_mtx_lock(&serial_lock);
-    n=io_status()?0:MIN(n,serial.tlen);
     *generation=serial.generation;
-    peek(p,serial.tx,serial.thead,n);
-    lck_mtx_unlock(&serial_lock); return n;
+    int error=serial.boot;
+    if(!error && serial.tx_claimed) error=EBUSY;
+    if(!error && serial.opened && serial.tlen) {
+        uint8_t header[5]; uint32_t n=MIN(serial.tlen,sizeof(header)),size=0;
+        peek(header,serial.tx,serial.thead,n);
+        switch(header[0]) {
+        case 1: if(n>=4) size=4u+header[3]; break;
+        case 2: if(n>=5) size=5u+header[3]+((uint32_t)header[4]<<8); break;
+        case 3: if(n>=4) size=4u+header[3]; break;
+        case 5: if(n>=5) size=5u+header[3]+((uint32_t)(header[4]&0x3f)<<8); break;
+        default: error=EPROTO; break; /* Events/raw wake bytes are board-owned. */
+        }
+        if(!error && size>capacity) error=EMSGSIZE;
+        if(!error && size && size<=serial.tlen) {
+            peek(p,serial.tx,serial.thead,size); *length=size;
+            serial.tx_claimed=true; serial.claim_length=size;
+            serial.claim_generation=serial.generation;
+        }
+    }
+    lck_mtx_unlock(&serial_lock); return error;
 }
-void x9_bt_serial_tx_commit(uint32_t n,uint32_t generation)
+void x9_bt_serial_tx_finish(uint32_t sent,uint32_t generation,int error)
 {
     lck_mtx_lock(&serial_lock);
-    if(generation==serial.generation && n<=serial.tlen) {
-        serial.thead=(serial.thead+n)%BT_SERIAL_FIFO; serial.tlen-=n; wake_io();
+    if(serial.tx_claimed && generation==serial.claim_generation) {
+        if(!error && sent!=serial.claim_length) error=EIO;
+        serial.tx_claimed=false;
+        if(error) {
+            serial.boot=error; serial.generation++;
+            serial.rhead=serial.rlen=serial.thead=serial.tlen=0;
+        } else if(generation==serial.generation && sent<=serial.tlen) {
+            serial.thead=(serial.thead+sent)%BT_SERIAL_FIFO; serial.tlen-=sent;
+        }
+        wake_io();
     }
     lck_mtx_unlock(&serial_lock);
 }
@@ -96,7 +126,7 @@ void x9_bt_serial_result(int error,uint32_t baud)
 static int serial_open(dev_t d __unused,int flags __unused,int type __unused,struct proc *p)
 {
     lck_mtx_lock(&serial_lock);
-    int error=serial.opened?EBUSY:serial.boot;
+    int error=(serial.opened || serial.tx_claimed)?EBUSY:serial.boot;
     if(!error) {
         serial.opened=true; serial.generation++;
         serial.rhead=serial.rlen=serial.thead=serial.tlen=0;
@@ -141,6 +171,9 @@ static int serial_read(dev_t d __unused,struct uio *uio,int flags)
 static int serial_write(dev_t d __unused,struct uio *uio,int flags)
 {
     uint8_t data[512]; int error=0;
+    /* uiomove drops serial_lock. Serialize whole write calls so two native
+     * writers cannot interleave their H4 headers/payload512-byte chunks. */
+    lck_mtx_lock(&serial_write_lock);
     lck_mtx_lock(&serial_lock); uint32_t generation=serial.generation;
     while(uio_resid(uio)>0 && !error) {
         uint32_t n=(uint32_t)MIN(uio_resid(uio),(user_ssize_t)sizeof(data));
@@ -157,7 +190,7 @@ static int serial_write(dev_t d __unused,struct uio *uio,int flags)
         if(!error && n>BT_SERIAL_FIFO-serial.tlen) error=EBUSY;
         if(!error) put(serial.tx,serial.thead,&serial.tlen,data,n);
     }
-    lck_mtx_unlock(&serial_lock); return error;
+    lck_mtx_unlock(&serial_lock); lck_mtx_unlock(&serial_write_lock); return error;
 }
 static int serial_select(dev_t d __unused,int which,void *wql,struct proc *p)
 {

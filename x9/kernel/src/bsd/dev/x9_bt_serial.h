@@ -10,11 +10,15 @@ int x9_bt_serial_init(void);
 /* Only the complete board initializer may report error=0. ROM_READY is NOT
  * enough. A failure clears both FIFOs and wakes all blocked clients. */
 void x9_bt_serial_result(int error, uint32_t hardware_baud);
+/* Whole-frame admission: zero means retain/retry, never a partial enqueue.
+ * If no daemon is open, returns length to discard pre-open/stale traffic. */
 uint32_t x9_bt_serial_rx(const uint8_t *, uint32_t);
-/* Board must commit only actually transmitted bytes using the peek token;
- * a close/reopen or failed initializer invalidates that token. */
-uint32_t x9_bt_serial_tx_peek(uint8_t *, uint32_t, uint32_t *generation);
-void x9_bt_serial_tx_commit(uint32_t, uint32_t generation);
+/* Claim a COMPLETE native H4 frame, retaining it in the queue until the
+ * board's physical drain. A close cannot reopen while a claim is on wire.
+ * Finish publishes errors atomically with queue progress/waiter wakeup. */
+int x9_bt_serial_tx_claim(uint8_t *, uint32_t capacity, uint32_t *length,
+                         uint32_t *generation);
+void x9_bt_serial_tx_finish(uint32_t sent, uint32_t generation, int error);
 bool x9_bt_serial_active(void);
 #ifdef __cplusplus
 }

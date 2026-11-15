@@ -72,6 +72,13 @@
   raw firmware1988 B单元或WMT ACL phase1/2/3，所有写入与drain有界，无模糊TX失败后重发。
 - `x9_bt_serial.c`：mobile501/0600、独占open、阻塞read/write/select、64-bit termios、16KiB RX/TX FIFO与generation。
   native HCI流只在完整初始化之后接入，不与bootstrap IOUserClient共用命令队列。
+  native TX现在claim完整H4帧（command/ACL/SCO/ISO），不发送只有header的半帧；保留队列计数直到真实UART drain完成，
+  finish在同一锁内发布错误和唤醒，避免TIOCDRAIN把失败误报成功。TX在wire上时close拒绝立即reopen；
+  并发write调用有独立锁，uiomove不会使两个payload的512 B块交错。
+  RX整帧原子入FIFO，暂时满则worker保留整帧；真实IRQ overflow仍明确失败，不切断H4尾部。
+  worker独立8192 B上限覆盖实测4096 B ACL payload+5 B H4头（旧bootstrap4096上限不够），不修改metadata ABI/控制器MTU；
+  incoming/TX缓冲放静态sole-worker存储，不在kernel stack分配8KiB frame。保留pending帧依序交给native通道。
+  无新字节的半帧也会超时；仅帧边界按Android node==1 raw_filter处理0xff/0x00，不在payload中过滤、不套node==0的0xf0规则。
 
 ## iOS桥
 
