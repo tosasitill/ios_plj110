@@ -340,14 +340,19 @@ def rv55_vp_evidence(dram, init):
 
 
 def rv55_service_dispatch_evidence(tcm, dram, init):
-    """Static registration -> queued service2 worker -> common dispatcher.
+    """Captured service init descriptors -> queues -> common dispatcher.
 
     Gate BOTH whole payloads; no task creation or custom branch is executed.
     Descriptor words and globals are firmware link addresses, never host PAs.
+    Startup calls descriptor+8 to initialize software service queues/tasks,
+    not to acquire a clock/DMA owner. Named exit functions call vTaskDelete;
+    the wrapper's zero return does not prove a join or hardware retirement.
     """
     result = dict(profile_match=False, runtime_dispatch_proven=False,
                   runtime_registration_success_proven=False,
-                  runtime_ready_proven=False, module_firmware_pairing_proven=False)
+                  runtime_ready_proven=False, module_firmware_pairing_proven=False,
+                  runtime_task_exit_producer_exclusion_proven=False,
+                  runtime_task_exit_dma_retirement_proven=False)
     if (not init['profile_match'] or tcm is None or len(tcm) != 184320 or
             hashlib.sha256(tcm).hexdigest() !=
             'f59d646ba74fab1c40500139c40d67c97a0e8ab96c1569f738a0c7403cc49508'):
@@ -365,6 +370,19 @@ def rv55_service_dispatch_evidence(tcm, dram, init):
         ('service2_worker_payload_stack', 'DRAM', 0x328058, 0x32805e),
         ('service2_worker_receive_queue', 'DRAM', 0x32805e, 0x328072),
         ('service2_worker_direct_dispatch_and_loop', 'DRAM', 0x3280c4, 0x3280d8),
+        ('startup_calls_service_descriptor8_before_clock_init', 'DRAM', 0x31694c, 0x31696e),
+        ('service1_first_queue_create_and_handle_store', 'TCM', 0x1153c, 0x11562),
+        ('service1_second_queue_create_and_handle_store', 'TCM', 0x11562, 0x1158a),
+        ('service1_task_descriptor_and_create_arguments', 'TCM', 0x115a6, 0x115ec),
+        ('service1_worker_receive_queue_record', 'DRAM', 0x327ef6, 0x327f0e),
+        ('service1_worker_common_dispatch_and_receive_loop', 'DRAM', 0x327fac, 0x327fc8),
+        ('service1_named_exit_calls_task_exit_helpers', 'DRAM', 0x327fc8, 0x327fe4),
+        ('service1_core_exit_helper_handle_and_call', 'DRAM', 0x305a8a, 0x305aa0),
+        ('service1_res_exit_helper_handle_and_call', 'DRAM', 0x305ac2, 0x305aee),
+        ('thread_exit_load_delete_log_and_zero_return', 'DRAM', 0x24710e, 0x247166),
+        ('task_delete_entry_hartid_and_current_task_selection', 'TCM', 0x753c, 0x755a),
+        ('task_delete_list_mutation_candidate', 'TCM', 0x75ce, 0x75f6),
+        ('task_delete_return_or_reschedule_frontier', 'TCM', 0x7606, 0x7656),
     )
     evidence = []
     for name, segment, start, end in spans:
@@ -375,14 +393,30 @@ def rv55_service_dispatch_evidence(tcm, dram, init):
     descriptors = []
     for service, address in ((1, 0x20b88), (2, 0x20ba0)):
         raw = span(tcm, address, 24)
+        words = list(struct.unpack('<6I', raw))
         descriptors.append(dict(service=service, segment='TCM', link_address=address,
-            words=list(struct.unpack('<6I', raw)), raw_hex=raw.hex(),
-            word3_is_task_callback=True, other_words_not_runtime_state=True))
+            words=words, raw_hex=raw.hex(), magic=words[0],
+            name_address=words[1], name=cstring(tcm, words[1]),
+            startup_pointer_cell=0x3389e8 if service == 1 else 0x3389f0,
+            startup_pointer_raw_hex=span(dram,
+                (0x3389e8 if service == 1 else 0x3389f0) - 0x200000, 4).hex(),
+            startup_initializer_offset=8, startup_initializer=words[2],
+            word3_is_task_callback=True, exit_member_offset=20,
+            captured_exit_member=words[5], other_words_not_runtime_state=True,
+            runtime_pointer_and_descriptor_overwrite_exclusion_proven=False))
     result.update(profile_match=True, profile='captured RV55 queued service dispatch ABI 1',
         payload_hashes_gate_both_segments=True, service_registrar=0x30502c,
         callback_table_base=0x1f7c4, callback_table_stride=8,
         common_dispatcher=0x305c4c,
-        service1=dict(callback=0x116f2, dispatcher_global=0x29918),
+        service1=dict(callback=0x116f2, dispatcher_global=0x29918,
+            initializer=0x114e0, task_callback=0x327ea6,
+            queue_handle_global=0x1f870, alternate_queue_handle_global=0x1f878,
+            queue_entries=2, queue_record_bytes=72,
+            outer_service_offset=0, outer_length_offset=4, payload_offset=8,
+            worker_receive_call=0x327f06, worker_receive_helper=0x5e08,
+            worker_receive_timeout_argument=-1,
+            worker_payload_stack_offset=8, direct_dispatch_call=0x327fc2,
+            custom_queue_selection_and_control_flow_opaque=True),
         service2=dict(callback=0x118ac, dispatcher_global=0x2991c,
             queue_handle_global=0x1f874, queue_entries=2, queue_record_bytes=72,
             outer_service_offset=0, outer_length_offset=4, payload_offset=8,
@@ -391,7 +425,22 @@ def rv55_service_dispatch_evidence(tcm, dram, init):
             custom_length_selection_and_control_flow_opaque=True),
         task_entry=0x30501e, task_create_helper=0x2470ba,
         task_descriptors=descriptors, instruction_evidence=evidence,
+        static_service1_dispatch_edge_proven=True,
         static_service2_dispatch_edge_proven=True,
+        named_service_exit=dict(service1=0x327fc8, service2=0x3280d8,
+            service1_name_address=0x1c513, service1_name=cstring(tcm, 0x1c513),
+            service1_core_res_exit_helper=0x305a8a,
+            core_res_task_handle_cells=[0x338a10, 0x338a14],
+            core_res_task_exit_calls=[0x305a96, 0x305ac6],
+            service_task_exit_call=0x327fd6, service_task_handle_cell=0x29750,
+            thread_exit_helper=0x24710e, thread_exit_name_address=0x247f78,
+            thread_exit_name=cstring(dram, 0x247f78 - 0x200000),
+            thread_delete_call=0x247148, thread_delete_helper=0x753c,
+            thread_exit_zero_assignment=0x247160, thread_exit_return=0x247164,
+            thread_wrapper_zero_return_does_not_prove_join=True,
+            task_delete_vendor_selection_and_cleanup_semantics_unresolved=True,
+            task_delete_list_changes_are_not_codec_buffer_retirement=True,
+            service_exit_is_not_per_buffer_free_ack=True),
         runtime_queue_ownership_allocation_and_completion_proven=False)
     return result
 
@@ -902,6 +951,7 @@ def rv55_clock_install_evidence(tcm, dram, init):
         ('TCM', 'startup_zero_hart_platform_init_call', 0xfe3c, 0xfe4a),
         ('TCM', 'platform_init_domain_registration_call', 0x11072, 0x11092),
         ('DRAM', 'vdec_init_preceding_callbacks_and_clock_lookup_init', 0x31694c, 0x316974),
+        ('TCM', 'initial_hart_helper_csr_write_and_return', 0x16344, 0x1634a),
     )
     objects = []
     for index in range(14):
@@ -1018,6 +1068,9 @@ def rv55_clock_install_evidence(tcm, dram, init):
         startup_hart_split=dict(helper_candidate=0xfdc6,
             hartid_read=0xfdca, hartid_stack_store=0xfdce,
             initial_hart_helper_call=0xfdd2, initial_hart_helper=0x16344,
+            initial_hart_helper_csr_write=0x16344, initial_hart_helper_csr=0x9c7,
+            initial_hart_helper_return=0x16348,
+            initial_hart_helper_is_not_proven_registry_ready_barrier=True,
             zero_hart_branch=0xfdd8, zero_hart_target=0xfdfe,
             nonzero_hart_selector=0xfddc,
             nonzero_selector_vendor_semantics_unresolved=True,
@@ -1030,6 +1083,11 @@ def rv55_clock_install_evidence(tcm, dram, init):
             vdec_pre_init_callback_cells=[0x3389e8, 0x3389f0],
             vdec_pre_init_callback_calls=[0x316962, 0x316968],
             vdec_pre_init_callback_offset=8,
+            captured_pre_init_descriptors=[0x20b88, 0x20ba0],
+            captured_pre_init_names=[cstring(tcm, 0x1c3b0), cstring(tcm, 0x1c3bd)],
+            captured_pre_init_callbacks=[0x114e0, 0x11624],
+            captured_callbacks_initialize_software_services=True,
+            service_initializers_are_not_registry_ordering_proof=True,
             pre_init_callback_identity_and_runtime_target_proven=False,
             startup_entry_execution_proven=False,
             cross_hart_registry_visibility_and_ordering_proven=False,
