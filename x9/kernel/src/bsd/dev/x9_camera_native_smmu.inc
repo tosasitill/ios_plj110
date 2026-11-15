@@ -147,6 +147,7 @@ int x9_camera_native_smmu_start(uint64_t token,uint64_t iova,uint32_t bytes,
     if(e)return e;
     lck_mtx_lock(&camera_smmu_lock);
     e=cam_native_match(m,&entry);
+    if(!e)m->native_setup_issued=true; /* BEFORE first normal-register store */
     if(!e)e=cam_native_write32(m,&entry,CAM_N_CR1,m->view.cr1);
     if(!e)e=cam_native_write32(m,&entry,CAM_N_CR2,m->view.cr2);
     if(!e)e=cam_native_write64(m,&entry,0,m->view.strtab_base);
