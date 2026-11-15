@@ -1410,6 +1410,155 @@ def rv55_transport_send_evidence(tcm, dram, init):
     return result
 
 
+def rv55_transport_irq_evidence(tcm, dram, init):
+    """Slot registration, visible receive/ACK order and deferred notification.
+
+    The startup callback 0x1804 dumps registers; it is a different entry from
+    the slot callback literal 0x4d02. A software-installed callback or a queue
+    signal is not a durable message copy, remote ACK or buffer retirement.
+    Pointer publishers, vendor gates, cross-hart exclusion and AP authority
+    stay unproven. All addresses are captured firmware link addresses.
+    """
+    result = dict(profile_match=False, runtime_slot_registration_proven=False,
+        runtime_slot_dispatch_proven=False, runtime_deferred_callback_proven=False,
+        runtime_slot_ack_proven=False, runtime_durable_message_dequeue_proven=False,
+        runtime_ap_register_authority_proven=False, runtime_cache_handoff_proven=False,
+        runtime_dma_retirement_proven=False)
+    if (not init['profile_match'] or tcm is None or len(tcm) != 184320 or
+            hashlib.sha256(tcm).hexdigest() !=
+            'f59d646ba74fab1c40500139c40d67c97a0e8ab96c1569f738a0c7403cc49508' or
+            dram is None or len(dram) != 2057906 or
+            hashlib.sha256(dram).hexdigest() !=
+            '200294bca18891fe4cc8b8cc93489b586305f1acb80aeea176566f1726392c3f'):
+        return result
+    spans = (
+        ('startup_register_dump_callback_argument_and_registration', 0x11046, 0x11076),
+        ('startup_dump_pointer_reads_and_formatted_log_loop', 0x1808, 0x1856),
+        ('startup_dump_register_reads_log_loop_and_late_direct_calls', 0x1856, 0x18d4),
+        ('slot_config_distinct_callback_literal_and_registration_tail', 0x4fc8, 0x4fdc),
+        ('slot_registration_ack_descriptor_stride3_and_context_stride52', 0xced2, 0xcf0c),
+        ('slot_registration_result_log_enable_and_opaque_epilogue', 0xcf0c, 0xcf2c),
+        ('channel_initializer_deferred_callback_literal_and_opaque_tail', 0x48ca, 0x48d6),
+        ('channel_deferred_callback_global_store_complete_leaf', 0x4f76, 0x4f80),
+        ('slot_index_helper_complete_ret_leaf', 0xcb14, 0xcb16),
+        ('receive_pre_post_helpers_complete_ret_leaves', 0xcafa, 0xcafe),
+        ('slot_ack_table_member20_store_and_opaque_entry', 0x4c5c, 0x4c92),
+        ('slot_trigger_table_member16_store_and_software_counter', 0x4c92, 0x4cce),
+        ('slot_predicate_table_member28_or16_read_and_opaque_bit_operations', 0x4cce, 0x4d02),
+        ('slot_receive_context_mask_index_helper_and_opaque_gate', 0x4d0c, 0x4d22),
+        ('slot_receive_table_status_count_and_descriptor_base', 0x4d22, 0x4d74),
+        ('slot_receive_descriptor_selection_size_shift_and_copy_arms', 0x4d74, 0x4de4),
+        ('slot_receive_processed_mask_and_immediate_callback_gates', 0x4de4, 0x4e0c),
+        ('slot_receive_immediate_timestamp_and_callback_argument_arms', 0x4e0c, 0x4e32),
+        ('slot_receive_indirect_client_callback_and_software_accounting', 0x4e32, 0x4e5c),
+        ('slot_receive_descriptor_loop_and_processed_mask_ack_store', 0x4e5c, 0x4e8e),
+        ('slot_receive_post_ack_opaque_gates_and_diagnostic_loop', 0x4e8e, 0x4ec8),
+        ('slot_receive_deferred_global_callback_and_descriptor_id_argument', 0x4ec8, 0x4f1a),
+        ('deferred_notify_selector_table_member4_and_queue_member16', 0x48d8, 0x48fa),
+        ('deferred_notify_isr_queue_signal_and_opaque_reschedule_gate', 0x48fa, 0x491a),
+        ('receive_client_registration_arguments_table_and_global_queue_take', 0x491e, 0x495a),
+        ('receive_client_registration_existing_callback_gate_and_failure_arms', 0x495a, 0x4988),
+        ('receive_client_registration_saved_argument_member_stores_and_queue_give', 0x4988, 0x49a4),
+    )
+    result.update(profile_match=True, profile='captured RV55 slot IRQ and deferred notification ABI 1',
+        startup_dump=dict(registration_call=0x11058, registration_target=0x421c,
+            descriptor=0x20376, descriptor_raw_hex=span(tcm, 0x20376, 3).hex(),
+            callback_literal=0x1804, context_literal=0,
+            register_pointer_table=0x175a8, first_log_call=0x184c,
+            log_helper=0x1712a, formatted_log_addresses=[0x1761c, 0x1764c, 0x17658],
+            formatted_logs=[cstring(tcm, p) for p in (0x1761c, 0x1764c, 0x17658)],
+            register_base_literals=[0x21100000, 0x21110000],
+            late_direct_calls=[dict(pc=pc, target=target) for pc, target in
+                ((0x18c0, 0xf366), (0x18c4, 0xf3b6), (0x18c8, 0xf3c4))],
+            distinct_from_slot_receive_callback=True,
+            complete_downstream_semantics_or_runtime_registration_proven=False),
+        slot_registration=dict(helper=0xced0, caller_tail=0x4fd8,
+            caller_callback_literal=0x4d02, callback_save=0xced4,
+            initial_ack_call=0xceda, initial_ack_target=0x4c5c,
+            initial_ack_literal=-1, descriptor_base=0x2037c, descriptor_stride=3,
+            descriptors=[dict(slot=i, address=0x2037c+3*i,
+                raw_hex=span(tcm, 0x2037c+3*i, 3).hex(),
+                fields=list(span(tcm, 0x2037c+3*i, 3))) for i in range(3)],
+            context_table_base=0x203f0, context_stride=52,
+            registration_call=0xcf08, registration_target=0x421c,
+            zero_result_branch=0xcf0c, zero_result_target=0xcf1e,
+            enable_call=0xcf22, enable_target=0x4056, enable_argument=1,
+            opaque_entry_epilogues_and_register_exclusion_proven=False),
+        slot_register_access=dict(table_base=0x203f0, table_stride=52,
+            ack_helper=0x4c5c, ack_pointer_member=20, ack_store=0x4c86,
+            trigger_helper=0x4c92, trigger_pointer_member=16, trigger_store=0x4cbc,
+            trigger_counter_member=48, trigger_counter_store=0x4cc8,
+            predicate_helper=0x4cce, predicate_override_pointer_member=28,
+            predicate_fallback_pointer_member=16, predicate_read=0x4cee,
+            predicate_counter_member=44, predicate_counter_store=0x4cfe,
+            receive_override_pointer_member=32, receive_fallback_pointer_member=20,
+            ack_and_trigger_save_restore_mstatus=True,
+            register_ack_w1c_semantics_or_current_pointer_target_proven=False,
+            pointer_publishers_register_semantics_or_ap_authority_proven=False,
+            software_counters_are_not_remote_receipt_or_buffer_retirement=True),
+        receive_handler=dict(entry=0x4d02, context_first_word_mask=0x3fffffff,
+            index_helper_call=0x4d18, index_helper=0xcb14,
+            index_helper_is_ret_only=True, index_gate=0x4d1e,
+            table_base=0x203f0, table_stride=52, status_read=0x4d3e,
+            saved_status_register='s2', receive_count_global=0x22510,
+            descriptor_base=0x20550, descriptor_stride=64,
+            descriptor_slot_mask=15, descriptor_slot_gate=0x4d7c,
+            descriptor_pending_vendor_operation=0x4d84,
+            descriptor_bit_index_member=8, descriptor_capacity_member=4,
+            capacity_shift=0x4daa, capacity_shift_bits=2,
+            capacity_is_wire_bytes_not_hevc_dpb=True,
+            copy_calls=[dict(pc=0x4dd4, target=0x701c), dict(pc=0x4de0, target=0x4bf2)],
+            copy_arm_vendor_gate=0x4db4, processed_mask_register='s6',
+            processed_mask_or=0x4dea, immediate_client_callback_member=20,
+            immediate_callback=0x4e4c, immediate_id_member=12,
+            immediate_second_argument_member=28,
+            immediate_copy_buffer_candidate_member=24, immediate_pre_timestamp_call=0x4e0c,
+            immediate_post_timestamp_call=0x4e4e, timestamp_helper=0xcecc,
+            timestamp_semantics_and_units_proven=False,
+            callback_counter_member=44, callback_counter_store=0x4e5a,
+            loop_branch=0x4e66, loop_target=0x4d74,
+            processed_mask_ack_pointer_member=20, processed_mask_ack_store=0x4e82,
+            post_ack_vendor_gates=[0x4e8a, 0x4e8e],
+            diagnostic_helper_call=0x4eae, diagnostic_helper=0x4f1a,
+            deferred_callback_global=0x22514, deferred_callback_load=0x4ee2,
+            deferred_callback=0x4ef6, deferred_id_member=12,
+            deferred_id_argument=0x4ef2, deferred_counter_member=40,
+            deferred_counter_store=0x4efc,
+            visible_ack_store_precedes_deferred_callback=True,
+            order_requires_called_functions_to_return=True,
+            complete_copy_destination_pending_selection_and_full_cfg_proven=False,
+            callback_success_durable_message_copy_or_dma_completion_proven=False),
+        deferred_notification=dict(setter=0x4f76, store=0x4f7a, global_cell=0x22514,
+            initializer_literal_pc=0x48cc, initializer_visible_callback_literal=0x48d6,
+            initializer_tail=0x48d4, initializer_tail_target=0x4f76,
+            initializer_opaque_epilogues_preserve_callback_argument_proven=False,
+            callback=0x48d6, selector_max_literal=35,
+            table_base=0x223ec, table_stride=8, receive_object_member=4,
+            queue_member=16, isr_signal_call=0x48fa, isr_signal_target=0x6d36,
+            woken_state_cell=0x2250c, woken_state_argument=0x48f6,
+            vendor_reschedule_gate=0x4902, visible_reschedule_tail=0x4908,
+            visible_reschedule_target=0x57da,
+            queue_signal_is_not_durable_payload_copy_or_dequeue=True,
+            current_callback_all_writers_lifetime_and_wakeup_semantics_proven=False),
+        receive_client_registration=dict(entry=0x491a, selector_max_literal=35,
+            table_base=0x223ec, table_stride=8, receive_object_member=4,
+            saved_arguments=dict(a1='s0', a2='s2', a3='s1'),
+            object_vendor_gate=0x4942, global_queue_cell=0x223e8,
+            take_call=0x4950, take_target=0x68e2, take_wait_literal=-1,
+            take_result_vendor_gate=0x4956, existing_member_check=24,
+            existing_member_zero_branch=0x4964, install_target=0x4988,
+            a1_store=0x4988, a1_member=20,
+            a3_store=0x498c, a3_member=24,
+            a2_store=0x4990, a2_member=28,
+            give_calls=[0x496a, 0x4998], give_target=0x6788,
+            published_offsets_match_irq_callback_copy_buffer_and_second_argument=True,
+            actual_clients_full_cfg_or_cross_hart_exclusion_proven=False),
+        instruction_evidence=[dict(name=name, segment='TCM', link_address=start,
+            end_exclusive=end, payload_offset=start,
+            raw_hex=span(tcm, start, end-start).hex()) for name, start, end in spans])
+    return result
+
+
 def global_boundary_evidence(rv55, rv33):
     """Both cores consume +4c as a protection boundary, not an allocation.
 
@@ -2542,6 +2691,9 @@ def firmware(blob):
                 service_mem_wait_evidence=rv55_mem_wait_evidence(
                     service_payloads.get('tinysys-vcp-RV55_A_dram'), init),
                 service_transport_send_evidence=rv55_transport_send_evidence(
+                    service_payloads.get('tinysys-vcp-RV55_A'),
+                    service_payloads.get('tinysys-vcp-RV55_A_dram'), init),
+                service_transport_irq_evidence=rv55_transport_irq_evidence(
                     service_payloads.get('tinysys-vcp-RV55_A'),
                     service_payloads.get('tinysys-vcp-RV55_A_dram'), init),
                 service_clock_evidence=rv55_clock_evidence(
