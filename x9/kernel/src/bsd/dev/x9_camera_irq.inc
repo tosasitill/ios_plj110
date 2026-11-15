@@ -218,10 +218,12 @@ static int cam_irq_credit_guard_locked(uint64_t epoch)
 }
 #include "x9_camera_source.inc"
 #include "x9_camera_irq_fbc.inc"
+static void cam_repeat_stop_locked(uint64_t);
 #include "x9_camera_stream.inc"
 #include "x9_camera_stream_stop.inc"
 #include "x9_camera_dma_stop.inc"
 #include "x9_camera_credit_retire.inc"
+#include "x9_camera_native_repeat.inc"
 /* Under spin, after actual IAR and only while accepting. Ordinary FIRST/FH
  * reads select exactly the vendor bank. No multi-tag fallback or status sweep. */
 static void cam_irq_sample(unsigned role,struct cam_irq_event *ev)
@@ -289,7 +291,13 @@ bool x9_camera_irq_filter(uint32_t intid)
      * Never acknowledge sources in a dormant/quiescing/foreign lifetime. */
     qualification=cam_irq.accepting?cam_irq_config(true):0;
     cam_irq_wr(cam_irq_bank(role,0x180),cam_irq_bit(role));
-    if(cam_irq.accepting) {
+    int idle_error=0;
+    bool parked=cam_repeat_idle_irq_locked(role,&idle_error);
+    if(parked && idle_error) {
+        if(!cam_irq.error)cam_irq.error=idle_error;
+        cam_irq.accepting=false;cam_irq_mask_all();
+    }
+    if(cam_irq.accepting && !parked) {
         struct cam_irq_event ev={.role=role,.error=qualification};
         if(cam_irq.deliveries[role]==UINT64_MAX)ev.error=EOVERFLOW;
         else cam_irq.deliveries[role]++;
@@ -374,7 +382,7 @@ static int cam_irq_completed_frame_guard(const struct x9_camera_camsv_slot *slot
         e=cam_irq_power();if(!e)e=cam_irq_config(true);if(e)break;
         control=cam_irq_rd(cam_irq.view[bank],0x540);counter=cam_irq_rd(cam_irq.view[bank],0x544);
         e=cam_irq_fbc_note_locked(bank,control,counter);
-        if(!e && counter!=cam_irq_fbc.target[bank])e=ESTALE;
+        if(!e && !cam_repeat_done_target_locked(bank,counter))e=ESTALE;
     }
     cam_irq_spin_drop(old);return e;
 }
@@ -424,6 +432,7 @@ static void __attribute__((noreturn)) cam_irq_worker(void *arg,wait_result_t res
             if(e==EAGAIN&&cam_irq.slot->state==X9_CAMSV_ARMED)e=cam_irq_unmask(X9_CAM_IRQ_HYBRID);
             else if(cam_irq.slot->state==X9_CAMSV_RETIRED) {
                 old=cam_irq_spin_take();cam_irq.accepting=false;cam_irq_mask_all();
+                cam_repeat_completed_locked();
                 cam_irq_spin_drop(old);
                 if(e==EBUSY||e==ESTALE)e=0; /* qualified drop/stop; never replay or FBC/RCNT */
             }
@@ -448,6 +457,7 @@ static void __attribute__((noreturn)) cam_irq_worker(void *arg,wait_result_t res
         lck_mtx_unlock(&camera_irq_lock);
         old=cam_irq_spin_take();cam_irq.busy=false;cam_irq_spin_drop(old);
         thread_wakeup((event_t)&cam_irq.busy);
+        thread_wakeup((event_t)&cam_repeat.completed);
     }
 }
 static int cam_irq_topology(void)

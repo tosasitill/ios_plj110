@@ -74,7 +74,7 @@ static int cam_irq_credit_retired_guard(uint64_t epoch)
         e=cam_irq_power();if(e)break;
         control=cam_irq_rd(cam_irq.view[bank],0x540);counter=cam_irq_rd(cam_irq.view[bank],0x544);
         e=cam_irq_fbc_note_locked(bank,control,counter);
-        if(!e && (counter!=cam_irq_fbc.target[bank] ||
+        if(!e && (!cam_repeat_done_target_locked(bank,counter) ||
            (cam_sv.credit_retired && counter!=cam_sv.credit_spent_count[bank])))e=ESTALE;
     }
     cam_irq_spin_drop(old);if(e)return e;
@@ -133,7 +133,7 @@ static int cam_sv_credit_retire_locked(uint64_t epoch)
         uint32_t control_word=cam_irq_rd(cam_irq.view[bank],0x540);
         uint32_t counter=cam_irq_rd(cam_irq.view[bank],0x544);
         e=cam_irq_fbc_note_locked(bank,control_word,counter);
-        if(!e && counter!=cam_irq_fbc.target[bank])e=ESTALE;
+        if(!e && !cam_repeat_done_target_locked(bank,counter))e=ESTALE;
     }
     if(!e && mach_absolute_time()>=end)e=ETIMEDOUT;
     if(!e) {

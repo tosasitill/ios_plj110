@@ -99,6 +99,9 @@ static struct {
     int error;
     struct x9_camera_sv_hw_status status;
 } cam_sv;
+static int cam_repeat_fbc_live(unsigned,uint32_t *,bool *);
+static uint32_t cam_repeat_fbc_compare(unsigned,uint32_t);
+static uint32_t cam_repeat_fbc_busy(void);
 static void cam_sv_gate_init(void);
 static void cam_sv_gate_capture(void);
 static void cam_sv_gate_status(void);
@@ -226,7 +229,7 @@ static uint32_t cam_sv_fbc_busy_exemption(void)
         if(cam_sv.credit_issued && cam_sv.credit_phase==X9_CAM_SV_CREDIT_PENDING)
             mask|=CAM_SV_FBC_RCNT;
     }
-    return mask;
+    return mask|cam_repeat_fbc_busy();
 }
 /* Canonical comparison only, NOT a published/accepted register value. This
  * one request may momentarily read its exact EN|RCNT command before hardware
@@ -235,6 +238,7 @@ static uint32_t cam_sv_fbc_busy_exemption(void)
  * issued command and therefore no exception. All other bits remain exact. */
 static uint32_t cam_sv_fbc_compare_word(unsigned bank,uint32_t value)
 {
+    value=cam_repeat_fbc_compare(bank,value);
     if(bank<2 && cam_sv.credit_issued && cam_sv.credit_phase==X9_CAM_SV_CREDIT_PENDING &&
        !(cam_sv.credit_ack&(1u<<bank)) &&
        value==(cam_sv.target[CAM_SV_FBC]|CAM_SV_FBC_RCNT))return value&~CAM_SV_FBC_RCNT;
@@ -326,6 +330,8 @@ static int cam_sv_fbc_counters_guard(void)
     for(unsigned bank=0;bank<2;bank++) {
         bool live=false;
         e=cam_sv_power_guard();if(e)return e;
+        e=cam_repeat_fbc_live(bank,&value,&live);if(e)return e;
+        if(live){cam_sv.status.fbc_after[bank]=value;continue;}
         if(cam_sv.credit_phase==X9_CAM_SV_CREDIT_ACCEPTED) {
             /* Natural single-credit consumption is qualified by the SAME
              * issued sensor command/request ledger as the IAR owner. Read

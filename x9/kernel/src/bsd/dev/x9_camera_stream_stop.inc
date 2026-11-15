@@ -71,7 +71,7 @@ static int cam_stream_close_guard_locked(uint64_t epoch)
         e=cam_irq_fbc_note_locked(bank,cam_stream_close.fbc_control[bank],
             cam_stream_close.fbc_counter[bank]);
         if(!e && (cam_stream_close.fbc_control[bank]!=cam_irq_fbc.control[bank] ||
-           cam_stream_close.fbc_counter[bank]!=cam_irq_fbc.target[bank]))e=ESTALE;
+           !cam_repeat_done_target_locked(bank,cam_stream_close.fbc_counter[bank])))e=ESTALE;
     }
     cam_irq_spin_drop(old);return e;
 }

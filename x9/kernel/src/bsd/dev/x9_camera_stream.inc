@@ -68,6 +68,7 @@ static int cam_stream_set_locked(const struct x9_camera_sensor *s,uint8_t value)
     int e;
     if(!s || value>1)return EINVAL;
     lck_mtx_lock(&camera_irq_lock);
+    if(off)cam_repeat_stop_locked(cam_sensor_live.epoch);
     e=cam_stream_guard_locked(s,!off);if(e)goto out;
     old=cam_irq_spin_take();
     if(cam_irq_fbc.source_issued&bit)e=EBUSY;
