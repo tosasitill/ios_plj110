@@ -9,15 +9,17 @@
 | iOS 请求 codec | VOICE20 普通拨号有界解码，21 挂断、22 接听严格 tag1/u8；动作要求显式已验证的 route / 单通话映射 |
 | Android 请求形状 | 新增本机卡2实测 `0901` 的六个 TLV；接听 `0907 {}`；挂断 `0905 {MODE100/u32=0, ID101/u32}` |
 | 拨出状态生产者 | 完整 `4901` 的真实 ID / ECPI reducer；已实现、单对象可编译；未有完整真机 wire 重放或 iOS 运行验收 |
-| 空快照与异步确认 | 完整 owned `090a` 数组解析；`0902 + 新 MO epoch` 汇合生成 VOICE20/tag10/u8；只接 staging API，没有生产 admission 调用者 |
+| 空快照与异步确认 | 完整 owned `090a` 数组解析；`0902 + 新 MO epoch` 汇合生成 VOICE20/tag10/u8；DIAL 仍无生产 profile/admission 调用者 |
+| 单通话挂断 / SIM 绑定 | VOICE44/tag01/u8 独立绑定；显式 VOICE21 → owned current query → 同 MO epoch/真实 ID/完整单通话 snapshot → guarded0905 → 同token0906 → 原iOS txn 的 result；已接请求分发，未设备验收 |
 | 来电 CMD / 状态 | `8901` 的字段、长度和唯一 tag 验证；独立 pending ID → 完整 ECPI0/132/6/133 的 MT reducer / iOS observer；未发布 CallList |
 | 来电许可 RSP | `8902` 的正确 approve/call-id 字段；显式调用才构造，保留原 txid；按已核实 RIL slot 转换生成 RSP mask |
 | 物理 transport | 独立 call inbox / CMD owner，复用原有唯一 MD tick writer；SMS ACK 保持优先 |
 | 超时 / 重复 / 失败 | 无自动重发；重复 outstanding CMD 去重；内容变化及未知退休规则隔离 calls；不清空 mutation owner |
 | 默认启动 | **不发布 QMI VOICE09、不注册 CALL CMD/IND、不发通话请求、不自动 approve，无强制开启 bootarg** |
 
-`X9Calls.inc` 当前只明确拒绝意外直达 VOICE 请求。它不会成功应答初始化并伪装服务已可用。
-`x9cw_action()` 仍只生成报文；拨出 ID/state producer 已补，但动作 admission / CNF / CallList 发布未接，所以生产路径不会调用它提交动作。
+`X9Calls.inc` 当前只接明确的 VOICE44 路由绑定和 VOICE21 单普通 MO 挂断，其它 VOICE 请求仍拒绝。
+绑定成功只代表本地路由保存，不代表 MD 注册、bootstrap 或音频已可用；VOICE09 仍不发布。
+`x9cw_action()` 仅生成报文，生产 VOICE21 调用它后还必须过 MD 锁内 / writer 的 target guard；VOICE22 接听尚未准入，CallList 尚未发布。
 `x9cw_dial()` 同样仅编码：必须显式提供已验证的卡2 profile、无现存通话；当前没有 profile provider。
 原 transport 已允许这一严格 DIAL 子集；上一版宿主测试闭合发送/CNF。新增异步 join / 空快照 / 发送前 guard 目前只有编译结果，没有执行验证，也没有 iOS 自动拨号调用者。
 
@@ -202,6 +204,37 @@ MD新snapshot API和iOS observer接入，仅观察，不自动approve/answer/que
 当前仍没有生产action admission、每请求CNF与CallList发布，VOICE09保持关闭。
 
 ## 代码与生命周期
+
+### 2026-11-15 单普通 MO 挂断生产路径（编译阶段，未上机）
+
+- 原 Apple `registerForQMIIndications::$_11::operator()` `1f1ad1b30..1b4c` 构造
+  VOICE44/tag01，内部 subscription2 用 `cmp/cset/strb` 转为 wire1；另一个为0。
+  `tlv::writeV<vs::tlv::SubscriptionType>` `192ad04..14` 只写 u8，`size=4` 包含3B TLV头，
+  不能按 DMS/DSD 的 u32 来解释。VOICE 单独保存 bound/sim/generation，无默认 SIM，不借用 NAS/WMS 的 binding。
+- 挂断请求仅已核实 VOICE21/tag01/u8 非零真实ID。要求该 client 已绑定 SIM2、完整 ECPI 已有
+  同 native ID 的 MO epoch/mode20，随后才发 Android 原件 `0909 {}` 只读查询。
+  owned `090a` 完整数组的 result0/count1、同真实ID、direction0/mode20/multiparty0 和 current
+  ACTIVE0/ALERTING3 必须匹配 ECPI → Apple CONVERSATION3/ALERTING5。
+  初始 ECPI130/mode0、MT、未知 ID/空 count、过期快照或其它模式不准入。
+- target={epoch,revision,native_id,sim} 在 MD admission 与唯一 writer 选择时各复核一次。
+  允许原 DIAL lease **在其 CNF 已被消费、没有在途 CALL mutation 后** 挂断自己的真实单通话；
+  不开放任意 action、空 ANSWER、多通话或新的 DIAL profile。
+- MD `mipc_call_hangup_cnf` `9131d374..398` 只写 tag0/result u32。只有同 token/906/完整24B
+  才回答原 VOICE21 transaction。Apple 普通 GSM `createEndThisCallReq::$_2::operator()`
+  `19a1bf4..1cd8` 只检查 ResponseBase error，成功直接返回，不消费 CallIdentifier；因此不编造 response ID。
+  MD 错误/未知 confirmation 返回 host error，**result0 不造 END、不发空 CallList**。
+- 本地25s host guard 来自 Apple `createEndThisCallReq19a00d4` 的25000，不假装 MD/network timer。
+  删除/换 generation/超时会在锁内撤掉尚未 writer-selected 的 guarded905；已经 selected/partial TX
+  的原 token 必须继续消费迟到 CNF，不向新 client 回答，不自动重发。
+  同client generation/transaction/真实ID的重复VOICE21在当前epoch owner内去重；request清零后仍保留
+  标量身份，不先给同一transaction回复BUSY又在迟到CNF时回复success，不提交第二个query/mutation。
+- 实际 END133 + action CNF 已消费后只做一次只读清理查询；完整 owned empty090a 必须仍属
+  同epoch/revision，且所有 CALL mutation slot 已消费，才退休 end/DIAL lease。END 单独、挂断CNF单独、
+  超时、stale/error query 均不能退休。cleanup admission 暂无空slot时只等待，不重发 mutation；
+  已发送 cleanup query 失效后 bounded hold，不做循环探针。
+- 这是已经接入 `x9c_request` 的具体挂断分发路径，不是新增 unused staging；但 **VOICE未发布、
+  完整bootstrap/IND注册/DIAL策略/CallList/语音音频仍缺，不能叫可用通话或最终镜像**。
+  新增人工回归源代码只编译，不执行。原件/派生asm只在 `x9/out/call-end-analysis/`。
 
 - `x9/kernel/src/bsd/dev/x9_call_wire.h`：共用、freestanding C/C++ codec。
 - `x9/kernel/src/bsd/dev/x9_call_state.h`：完整progress/current parser、独立MO/MT reducer与dial join。

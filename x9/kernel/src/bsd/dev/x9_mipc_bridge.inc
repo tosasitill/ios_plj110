@@ -13,6 +13,7 @@ static LCK_MTX_DECLARE(x9_mi_lock,&x9_mi_grp);
 struct x9_mi_slot {
  uint64_t token; unsigned state,len; uint16_t id,txid; uint8_t mask,cancelled;
  uint8_t call_guard;uint64_t call_revision;
+ uint64_t call_epoch;uint32_t call_id;
  uint8_t frame[X9_MIPC_FRAME_MAX];
 };
 static struct x9_mi_slot x9_mi_slots[X9_MI_SLOTS];
@@ -102,7 +103,8 @@ int x9_md_mipc_online(void){
  lck_mtx_lock(&x9_mi_lock);int on=x9_mi_online&&!x9_mi_poisoned;
  lck_mtx_unlock(&x9_mi_lock);return on&&x9_md_at_online();
 }
-static uint64_t x9mi_submit(const uint8_t *p,uint32_t n,const struct x9cw_outbound_state *baseline){
+static uint64_t x9mi_submit(const uint8_t *p,uint32_t n,const struct x9cw_outbound_state *baseline,
+                            const struct x9cw_end_target *end){
  if(!p||n<16||n>X9_MIPC_FRAME_MAX||x9mi_u16(p+14)!=n-16||
    p[0]!=0x84||p[1]!=0x19||p[2]!=0x54||p[3]!=0x24||
    p[4]||p[5]||p[6]||p[7]||p[9])return 0;
@@ -211,7 +213,17 @@ static uint64_t x9mi_submit(const uint8_t *p,uint32_t n,const struct x9cw_outbou
  else if((p[8]!=1&&(p[8]!=2||x9_md_sim_count()!=2))||
     (id!=0x201&&id!=0x203&&id!=0x205&&id!=0x219&&id!=0x307))return 0;
  uint64_t token=0;lck_mtx_lock(&x9_mi_lock);
- if(x9mi_call_mutation(id)&&x9_mc_dial_token){lck_mtx_unlock(&x9_mi_lock);return 0;}
+ if(x9mi_call_mutation(id)&&((x9_mc_dial_token&&!end)||x9_mc_end_token)){
+  lck_mtx_unlock(&x9_mi_lock);return 0;
+ }
+ if(end){
+  struct x9cw_end_target current;
+  if(baseline||id!=0x905||p[8]!=2||x9_mc_poisoned||x9mi_call_busy()||
+     !x9cw_end_target(&x9_mc_outbound,&x9_mc_current,&current)||
+     !x9cw_end_matches(end,&current)||x9cw_u32(p+28)!=end->native_id){
+   lck_mtx_unlock(&x9_mi_lock);return 0;
+  }
+ }
  if(baseline){
   const struct x9cw_outbound_state *s=&x9_mc_outbound;
   if(id!=0x901||x9_mc_poisoned||s->blocked||!s->count_known||s->native_count||
@@ -222,18 +234,40 @@ static uint64_t x9mi_submit(const uint8_t *p,uint32_t n,const struct x9cw_outbou
  if(x9_mi_online&&!x9_mi_poisoned&&x9_mi_next<65534)for(unsigned i=0;i<X9_MI_SLOTS;i++)if(!x9_mi_slots[i].state){
   struct x9_mi_slot *s=&x9_mi_slots[i];bzero(s,sizeof(*s));
   token=++x9_mi_next;s->token=token;s->txid=(uint16_t)token;s->id=(uint16_t)id;s->mask=p[8];s->len=n;
-  if(baseline){s->call_guard=1;s->call_revision=baseline->revision;x9_mc_dial_token=token;}
+  if(baseline){s->call_guard=1;s->call_revision=baseline->revision;x9_mc_dial_token=token;x9_mc_dial_floor=baseline->epoch;}
+  else if(end){s->call_guard=2;s->call_revision=end->revision;s->call_epoch=end->epoch;s->call_id=end->native_id;
+   x9_mc_end_token=token;x9_mc_end_epoch=end->epoch;}
   else if(x9mi_call_mutation(id)||(id==0x909&&p[8]==2))x9cw_outbound_invalidate(&x9_mc_outbound);
   memcpy(s->frame,p,n);s->frame[12]=(uint8_t)token;s->frame[13]=(uint8_t)(token>>8);s->state=1;break;
  }
  lck_mtx_unlock(&x9_mi_lock);return token;
 }
-uint64_t x9_md_mipc_submit(const uint8_t *p,uint32_t n){return x9mi_submit(p,n,NULL);}
+uint64_t x9_md_mipc_submit(const uint8_t *p,uint32_t n){return x9mi_submit(p,n,NULL,NULL);}
 uint64_t x9_md_mipc_call_dial_submit(const uint8_t *p,uint32_t n,
                                    const struct x9cw_outbound_state *baseline){
  if(!baseline||!baseline->count_known||baseline->native_count||baseline->blocked||
     !p||n<16||x9mi_u16(p+10)!=0x901)return 0;
- return x9mi_submit(p,n,baseline);
+ return x9mi_submit(p,n,baseline,NULL);
+}
+uint64_t x9_md_mipc_call_end_submit(const uint8_t *p,uint32_t n,
+                                   const struct x9cw_end_target *target){
+ if(!target||!p||n!=32||x9mi_u16(p+10)!=0x905)return 0;
+ return x9mi_submit(p,n,NULL,target);
+}
+/* Before writer selection, abandon only OUR guarded end slot. A selected
+ * or partially written action is irrevocable here; keep its real token and
+ * consume late CNF without retrying or retargeting it to a new client. */
+void x9_md_mipc_call_end_abandon(uint64_t token){
+ if(!token)return;
+ lck_mtx_lock(&x9_mi_lock);
+ for(unsigned i=0;i<X9_MI_SLOTS;i++){
+  struct x9_mi_slot *s=&x9_mi_slots[i];
+  if(s->token!=token||s->call_guard!=2||s->state!=1)continue;
+  s->state=6;s->len=0;bzero(s->frame,sizeof(s->frame));
+  if(x9_mc_end_token==token)x9_mc_end_token=0;
+  break;
+ }
+ lck_mtx_unlock(&x9_mi_lock);
 }
 uint64_t x9_md_sim_at_submit(unsigned sim,const char *cmd){
  if(!cmd||sim>=x9_md_sim_count()||x9_md_sim_count()!=2)return 0;
@@ -435,8 +469,13 @@ static void x9mi_tick(void){
   for(unsigned i=0;i<X9_MI_SLOTS;i++)if(x9_mi_slots[i].state==1&&
      (!s||x9_mi_slots[i].token<s->token))s=&x9_mi_slots[i];
   if(s){
-   if(s->call_guard&&(x9_mc_poisoned||x9_mc_outbound.blocked||!x9_mc_outbound.count_known||
-      x9_mc_outbound.native_count||x9_mc_outbound.revision!=s->call_revision)){
+   struct x9cw_end_target current,target={s->call_epoch,s->call_revision,s->call_id,1};
+   int rejected=s->call_guard==1&&(x9_mc_poisoned||x9_mc_outbound.blocked||!x9_mc_outbound.count_known||
+      x9_mc_outbound.native_count||x9_mc_outbound.revision!=s->call_revision);
+   if(s->call_guard==2&&(x9_mc_poisoned||
+      !x9cw_end_target(&x9_mc_outbound,&x9_mc_current,&current)||!x9cw_end_matches(&target,&current)))rejected=1;
+   if(rejected){
+    if(s->call_guard==2&&x9_mc_end_token==s->token)x9_mc_end_token=0;
     s->state=6;s->len=0;bzero(s->frame,sizeof(s->frame));
    }else{
     if(s->id==0x909&&s->mask==2)s->call_revision=x9_mc_outbound.revision;

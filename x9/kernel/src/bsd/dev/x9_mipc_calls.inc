@@ -17,9 +17,16 @@ static uint32_t x9_mc_next;
 static unsigned x9_mc_poisoned;
 static struct x9cw_outbound_state x9_mc_outbound;
 static struct x9cw_inbound_state x9_mc_inbound;
-/* A guarded staging attempt is retained for this boot, even after CNF.
- * No production release/second-call lifecycle has been admitted yet. */
+static struct x9cw_current x9_mc_current;
+/* A guarded DIAL stays leased across CNF/client loss. Only real END + an
+ * owned empty current snapshot with no remaining mutation can retire it. */
 static uint64_t x9_mc_dial_token;
+/* One end attempt for an epoch; a missing/failed CNF never releases it.
+ * Retirement requires real END + a fresh owned empty snapshot and all
+ * CALL mutations drained, not a timer or hangup result0. */
+static uint64_t x9_mc_end_token;
+static uint64_t x9_mc_dial_floor,x9_mc_end_epoch;
+static int x9mi_call_busy(void);
 /* This callback receives only an OWNED GET_STATUS confirmation, never an
  * unsolicited090a or a logger-derived reconstruction. No state/ID adoption
  * from CS RIL states: the MO epoch still comes from full ECPI130. */
@@ -30,12 +37,26 @@ static void x9mc_current(const uint8_t *p,unsigned n,uint64_t revision){
  x9cw_outbound_invalidate(&x9_mc_outbound);
  if(c.result)return;
  x9_mc_outbound.count_known=1;x9_mc_outbound.native_count=c.count;
+ x9_mc_current=c;
  /* A complete snapshot conflicting with an active observed call is not a
   * licence to erase it or reuse an ID. Preserve the identity and fail closed. */
  if(x9_mc_outbound.seen&&!x9_mc_outbound.ended){
   unsigned found=0;for(unsigned i=0;i<c.count;i++)if(c.calls[i].id==x9_mc_outbound.native_id)found++;
   if(!found)x9_mc_outbound.blocked=1;
  }
+ if(!x9_mc_outbound.blocked&&!c.count&&x9_mc_outbound.seen&&x9_mc_outbound.ended&&
+    !x9mi_call_busy()){
+  if(x9_mc_dial_token&&x9_mc_dial_floor!=UINT64_MAX&&x9_mc_outbound.epoch==x9_mc_dial_floor+1)
+   x9_mc_dial_token=0;
+  if(x9_mc_end_token&&x9_mc_outbound.epoch==x9_mc_end_epoch)x9_mc_end_token=0;
+ }
+}
+int x9_md_mipc_call_end_snapshot(struct x9cw_end_target *out){
+ if(!out)return -1;
+ bzero(out,sizeof(*out));int rc=0;lck_mtx_lock(&x9_mi_lock);
+ if(x9_mc_poisoned||x9_mi_poisoned||!x9_mi_online)rc=-1;
+ else if(!x9_mc_end_token&&x9cw_end_target(&x9_mc_outbound,&x9_mc_current,out))rc=1;
+ lck_mtx_unlock(&x9_mi_lock);return rc;
 }
 int x9_md_mipc_call_snapshot(struct x9cw_outbound_state *out){
  if(!out)return -1;
