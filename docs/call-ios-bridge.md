@@ -1790,3 +1790,54 @@ mutation，因此未改码、未编译/pack/上机，不把该静态收束称作
 `x9/out/voice-hostless-route/hostless-production-boundary.json`；只读复提命令
 `python3 x9/out/voice-hostless-route/read-hostless-owner.py`。下一仅从真实缺失输入
 或可达生产连接继续，不重复已闭范围、旧镜像、人工向量或未变更内核构建。
+
+## 2026-11-16 生产装载入口收束：能复用的安装链与首缺 caller
+
+基线 `a2b9036c`；本次只核当前仓库生产源和挂载根盘的 launchd 配置，不重复
+typed/action/broker 原件切片。**缺的是连接代码和 owned 输入 producer，不是一个
+待下载的二进制文件。** 没有新增空 loader、unused API 或探针。
+
+可复用的具体 own-code 安装链已经在生产源码中：
+
+1. `x9/build/build.py:304..312` 调用 torch/camera builder；
+   `x9/torch/build.py` 用 Xcode iPhoneOS SDK 编译、ad-hoc 签名 arm64 iOS16 dylib，
+   生成 hash-addressed root 路径和 `generated/x9_torch_bridge.inc` 的 embed 数据。
+2. `kern_exec.c:8817..8820` 在 PID1 启动 launchd 前调用 torch/camera install；
+   `x9_torch_install.inc` 经既有 `x9_bbfw_write/equal` 发布/核对自有库，
+   拒绝未知现存文件或 symlink，要求明确 opt-in 和可写原生 UFS 根盘。
+3. `kern_exec.c:5838..5842` 的 exec 环境插入点调用现有 helpers；
+   torch/camera **只匹配 `/usr/sbin/mediaserverd`**，AppSync 仅匹配其三个
+   verifier/UI executable，已有 DYLD key 不追加。没有匹配 CommCenter 的分支。
+4. `torch/media_bridge.m::initTorch` 是实际 dylib constructor：先要求真实
+   torch backend，再用 UUID/image/原 IMP/caller gate 安装 ObjC hook。
+   这证明有完整 own-code 加载模式，**不是 C++ CallFactory hook 已实现**。
+
+参考 `hackios-xnu-kernel/userland/src/inject.c::replace_virtual` 已有 expected
+pointer 比对、`vm_protect(...VM_PROT_COPY)` 的 process-private vtable 修改方式；
+它的 20F66 地址/目标不能直接迁成 20H392 Call provider。无需为此移植通用 tweak
+loader或替换 Apple launchd/cache。
+
+挂载根盘 `com.apple.CommCenter.plist` 和 `/System/Library/xpc/launchd.plist`
+对应项都启动原 `/System/Library/Frameworks/CoreTelephony.framework/Support/CommCenter`
+（`_wireless`），已有 `com.apple.commcenter.atcs.xpc` / `com.apple.ipTelephony`
+MachServices，但没有 DYLD injection 环境。这是**持久配置观察**，不是实时进程
+加载证明。仓库没有 Call runtime builder/embed/env 集成或 typed factory/action
+替换实现；不能把 mediaserverd/AppSync 模式已存在写成“CommCenter adapter已加载”。
+
+**首缺可达 caller 已落到当前代码：** `X9Calls.inc:372` 的
+`static x9c_dial_submit(slot,req,len,profile)` 只有定义，没有生产调用。
+现有 `X9QMIAT.inc:780 → X9Calls.inc:451 x9c_request` 仍只接44/03/21，
+20落 `UNSUPPORTED`。`x9_call_wire.h` 的 measured SIM2 profile validator 不是
+真实用户意图/卡路由 producer；普通 QMI20 也不携带原 typed UUID/clientId 与
+per-subscription broker context/epoch 的绑定。因此只安装 dylib 并不能补出
+`typed action → owned user context → 现有 broker → admitted kernel dial`。
+
+下一实装需要一个带原 typed Call UUID/clientId、完整 owned 参数、真实
+per-subscription broker context/profile/generation 的 caller，以及相应接收
+admission 和匹配 terminal event 返回路径；不能用默认 profile、派生 UUID、
+单开09或先给20加 switch case代替。此次没有找到能独立修复的已可达生产窄问题，
+故未改 loader/内核，也未编译、运行测试、操作设备或生成 boot.img。
+
+源码位置/引用及挂载 job 摘录保留在 gitignored
+`x9/out/call-production-connect/{production-connect-source.json,production-entry-refs.txt,commcenter-launch-entry.json}`；
+NOTES 与归档由 root 统一记录。
