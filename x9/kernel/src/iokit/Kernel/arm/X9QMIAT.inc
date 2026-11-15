@@ -738,6 +738,7 @@ static bool x9q_enqueue(uint32_t local,uint32_t port,const uint8_t *req,unsigned
 #include "X9WDS.inc"
 #include "X9NetworkName.inc"
 #include "X9Messages.inc"
+#include "X9Calls.inc"
 static void x9q_reject(uint32_t,uint32_t,const uint8_t *,unsigned,uint16_t);
 #include "X9DSDS.inc"
 #include "X9GPSPDS.inc"
@@ -762,6 +763,7 @@ static void x9q_send(uint32_t local,uint32_t node,uint32_t port,const uint8_t *r
  if(x9n_request(local,port,req,len))return;
  if(x9g_send(local,port,req,len))return;
  if(x9m_request(local,port,req,len))return;
+ if(x9c_request(local,port,req,len))return;
  if(service==1&&x9w_request(local,port,req,len))return;
  /* Per-client NAS/DMS/DSD binding, not a default-data mutation.
   * Jobs snapshot their route; changing binding cannot retarget old replies. */
