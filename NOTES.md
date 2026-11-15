@@ -304,6 +304,8 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 - **确切编译/源码分析**：仅编受影响的 `x9_mm_smmu.o/x9_mm_smmu_owner.o/sweet_x9_vdec.o`，正式Builder+固定`local.json`（launcher空），**exit0 / 三个True**，日志分别 **4/20/54 warnings**；前两项均declaration-after-statement，sweet为50 declaration-after-statement+4 cast-align，无error/narrowing。准确脚本/输入命令/日志/result保留 `x9/out/hevc-dma-capacity-20261115/{compile-native.py,compile.log,compile.exit,build.log,result.json,kernel-objects/}`。随后从这三条真实compiler命令只移除object/dependency输出并切 `--analyze`，同kernel headers/macros/source做Clang源码分析，**exit0 / 无analyzer diagnostic**；仅压制上述两类style warnings，不压制analyzer检查，`x9/out/hevc-dma-capacity-static-20261115/{analyze-source.py,analyzer.log,analyzer.exit}`。没有测试脚本/套件、frontend重建、full kernel link、成功产物二次解包/hash/反汇编/重建对比或设备/分区操作；compile/analyzer会话均已terminal。
 - **下一具体动作**：回到真实consumer/owner协议，补**独立可证producer排他＋先durable journal后head/count不可逆store**，未知/重复/epoch失配token与uncertain写失败必须保留/quarantine。BS count跨端RMW仍不能普通decrement；FB出队也不能仅以AP锁与count hint冒充FW排他。然后input/DPB/output cache与逐buffer退休、c006真实free/ACK、持续session_ops provider/service caller；cold NS/controller/firmware/clock最高层初始化/注册与真实layout/DPB预算仍缺。HEIF mixed-derived color、fractional clap working-space resampling、更多properties/implicit lengths、Rext单色alpha/aux、普通VT/CMPhoto/ImageIO自动入口及HDR/chroma-siting真实效果仍保留。完整目标未完成，继续保留功能树，未合main；唯一最终boot仍等全部代码齐全。
 
+- **实际交付收尾**：后端源码 **`9c02d2de`** 与交接 **`a575f777`** 已正常push成功 `6c17ae46..a575f777` 到`origin/feat/hevc-hw`；`gh run list --branch feat/hevc-hw --limit3 --json databaseId,status,conclusion,headSha` 返回 **`[]`**，无CI run ID。这一补记只改NOTES，不重编成功源码/复检产物。当前无后台构建、设备任务或代理；保留活动树继续完整目标，不把本次容量交付当作ring消费/DPB/硬解验收。
+
 ### 5.1 已在设备上观察到能用（详情见旧 NOTES）
 
 - 启动到 SpringBoard，UFS 原生根盘读写，UFS HS-G5/FAST/RateB/2 lane（180）。
