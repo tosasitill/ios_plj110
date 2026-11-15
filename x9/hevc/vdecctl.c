@@ -17,6 +17,7 @@
 #include "heif_items.h"
 #include "heif_coremedia.h"
 #include "heif_compositor.h"
+#include "heif_native.h"
 #include "vt_decoder.h"
 #include "../kernel/src/bsd/dev/x9_vdec.h"
 static uint8_t *read_file(const char *path, size_t limit, size_t *bytes)
@@ -31,15 +32,6 @@ static uint8_t *read_file(const char *path, size_t limit, size_t *bytes)
     if (fread(p, 1, (size_t)n, f) != (size_t)n) { free(p); fclose(f); errno = EIO; return NULL; }
     fclose(f); *bytes = (size_t)n;
     return p;
-}
-struct result { unsigned calls; OSStatus error; CVPixelBufferRef pixel; };
-static void output(void *ref, void *source, OSStatus error, VTDecodeInfoFlags flags,
-                   CVImageBufferRef image, CMTime pts, CMTime duration)
-{
-    (void)source; (void)flags; (void)pts; (void)duration;
-    struct result *r = ref;
-    r->calls++; r->error = error;
-    if (image && r->calls == 1) r->pixel = CVPixelBufferRetain(image);
 }
 static int write_all(int fd, const uint8_t *p, size_t bytes)
 {
@@ -58,14 +50,11 @@ static int decode_vt(const char *config_path, const char *sample_path, const cha
     uint8_t *cfg = heif_path ? NULL : read_file(config_path, X9_HEVC_MAX_CONFIG, &cfg_bytes);
     uint8_t *au = heif_path ? NULL : read_file(sample_path, X9_HEVC_MAX_INPUT, &au_bytes);
     struct x9_hevc_config c;
-    struct result r = {0};
+    CVPixelBufferRef pixel = NULL;
     CMVideoFormatDescriptionRef format = NULL;
     CMBlockBufferRef block = NULL;
     CMSampleBufferRef sample = NULL;
-    VTDecompressionSessionRef session = NULL;
-    CFDictionaryRef spec = NULL;
     CFDictionaryRef item_info = NULL;
-    CFTypeRef hw = NULL;
     int fd = -1, rc = 1, created = 0;
     OSStatus e = kVTParameterErr;
     if (heif_path) {
@@ -102,8 +91,6 @@ static int decode_vt(const char *config_path, const char *sample_path, const cha
         e = kVTVideoDecoderBadDataErr;
         fprintf(stderr, "unsupported/malformed independent HEVC input (Rext alpha is not Main)\n"); goto done;
     }
-    e = X9HEVCRegisterDecoder();
-    if (e) { fprintf(stderr, "real hardware decoder unavailable: OSStatus=%d\n", (int)e); goto done; }
     const uint8_t *ps[X9_HEVC_MAX_PARAMETER_SETS];
     size_t sizes[X9_HEVC_MAX_PARAMETER_SETS];
     for (unsigned i = 0; i < c.parameter_set_count; i++) {
@@ -113,29 +100,6 @@ static int decode_vt(const char *config_path, const char *sample_path, const cha
     if (!format) e = CMVideoFormatDescriptionCreateFromHEVCParameterSets(NULL, c.parameter_set_count, ps, sizes,
                                                            (int)c.length_size, NULL, &format);
     if (e) goto done;
-    CFStringRef *enable_key = dlsym(RTLD_DEFAULT,
-        "kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder");
-    CFStringRef *require_key = dlsym(RTLD_DEFAULT,
-        "kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder");
-    if (!enable_key || !*enable_key || !require_key || !*require_key) {
-        e = kVTPropertyNotSupportedErr; goto done;
-    }
-    CFStringRef *id_key = dlsym(RTLD_DEFAULT, "kVTVideoDecoderSpecification_DecoderID");
-    if (!id_key || !*id_key) { e = kVTPropertyNotSupportedErr; goto done; }
-    const void *keys[] = { CFSTR("X9NativeHEVC"), *enable_key, *require_key, *id_key };
-    const void *values[] = { kCFBooleanTrue, kCFBooleanTrue, kCFBooleanTrue, CFSTR(X9_HEVC_DECODER_ID) };
-    spec = CFDictionaryCreate(NULL, keys, values, 4,
-        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    if (!spec) { e = kVTAllocationFailedErr; goto done; }
-    VTDecompressionOutputCallbackRecord callback = { .decompressionOutputCallback = output,
-                                                   .decompressionOutputRefCon = &r };
-    e = VTDecompressionSessionCreate(NULL, format, spec, NULL, &callback, &session);
-    if (e) goto done;
-    CFStringRef *hardware_key = dlsym(RTLD_DEFAULT,
-        "kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder");
-    if (!hardware_key || !*hardware_key) { e = kVTPropertyNotSupportedErr; goto done; }
-    e = VTSessionCopyProperty(session, *hardware_key, NULL, &hw);
-    if (e || !hw || !CFEqual(hw, kCFBooleanTrue)) { e = kVTVideoDecoderNotAvailableNowErr; goto done; }
     /* Make a CoreMedia-owned copy. No external sample lifetime assumptions. */
     if (!sample) {
         e = CMBlockBufferCreateWithMemoryBlock(NULL, NULL, au_bytes, NULL, NULL, 0, au_bytes, 0, &block);
@@ -146,46 +110,41 @@ static int decode_vt(const char *config_path, const char *sample_path, const cha
         e = CMSampleBufferCreateReady(NULL, block, format, 1, 1, &timing, 1, &au_bytes, &sample);
     }
     if (e) goto done;
-    VTDecodeInfoFlags flags = 0;
-    e = VTDecompressionSessionDecodeFrame(session, sample, 0, NULL, &flags);
-    if (!e) e = VTDecompressionSessionFinishDelayedFrames(session);
-    if (!e) e = VTDecompressionSessionWaitForAsynchronousFrames(session);
-    if (e || r.error || r.calls != 1 || !r.pixel) { if (!e) e = r.error ? r.error : kVTVideoDecoderBadDataErr; goto done; }
-    OSType pixel_format = CVPixelBufferGetPixelFormatType(r.pixel);
+    e = X9HEVCCopyHardwarePicture(sample,&pixel);
+    if (!e && !pixel) e = kVTVideoDecoderBadDataErr;
+    if (e) goto done;
+    OSType pixel_format = CVPixelBufferGetPixelFormatType(pixel);
     int bpp = pixel_format == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange ||
               pixel_format == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange ? 2 :
               pixel_format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange ||
               pixel_format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ? 1 : 0;
-    if (!bpp || CVPixelBufferGetPlaneCount(r.pixel) != 2 ||
-        CVPixelBufferGetWidth(r.pixel) != c.width || CVPixelBufferGetHeight(r.pixel) != c.height) {
+    if (!bpp || CVPixelBufferGetPlaneCount(pixel) != 2 ||
+        CVPixelBufferGetWidth(pixel) != c.width || CVPixelBufferGetHeight(pixel) != c.height) {
         e = kVTVideoDecoderBadDataErr; goto done;
     }
-    e = CVPixelBufferLockBaseAddress(r.pixel, kCVPixelBufferLock_ReadOnly);
+    e = CVPixelBufferLockBaseAddress(pixel, kCVPixelBufferLock_ReadOnly);
     if (e) goto done;
     fd = open(out_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
     created = fd >= 0;
     if (fd < 0) { perror("output (must be new)"); e = kVTParameterErr; }
     for (unsigned plane = 0; plane < 2 && !e; plane++) {
-        const uint8_t *base = CVPixelBufferGetBaseAddressOfPlane(r.pixel, plane);
-        size_t stride = CVPixelBufferGetBytesPerRowOfPlane(r.pixel, plane), row = c.width * (unsigned)bpp;
+        const uint8_t *base = CVPixelBufferGetBaseAddressOfPlane(pixel, plane);
+        size_t stride = CVPixelBufferGetBytesPerRowOfPlane(pixel, plane), row = c.width * (unsigned)bpp;
         if (!base || stride < row) { e = kVTVideoDecoderBadDataErr; break; }
         for (unsigned y = 0; y < (c.height >> plane) && !e; y++)
             if (write_all(fd, base + (size_t)y * stride, row)) e = kVTParameterErr;
     }
-    OSStatus unlock = CVPixelBufferUnlockBaseAddress(r.pixel, kCVPixelBufferLock_ReadOnly);
+    OSStatus unlock = CVPixelBufferUnlockBaseAddress(pixel, kCVPixelBufferLock_ReadOnly);
     if (!e) e = unlock;
     if (!e && fsync(fd)) e = kVTParameterErr;
     if (fd >= 0) { if (close(fd) && !e) e = kVTParameterErr; fd = -1; }
     if (e) { if (created) unlink(out_path); goto done; }
     printf("VT hardware picture: %ux%u depth=%u pixel=0x%08x callbacks=%u output=%s\n",
-           c.width, c.height, c.bit_depth, (unsigned)pixel_format, r.calls, out_path);
+           c.width, c.height, c.bit_depth, (unsigned)pixel_format, 1u, out_path);
     rc = 0;
 done:
     if (rc) fprintf(stderr, "decode failed: OSStatus=%d (no hardware success claimed)\n", (int)e);
-    if (session) { VTDecompressionSessionInvalidate(session); CFRelease(session); }
-    if (r.pixel) CVPixelBufferRelease(r.pixel);
-    if (hw) CFRelease(hw);
-    if (spec) CFRelease(spec);
+    if (pixel) CVPixelBufferRelease(pixel);
     if (item_info) CFRelease(item_info);
     if (sample) CFRelease(sample);
     if (block) CFRelease(block);
@@ -250,6 +209,73 @@ static int heif_info(const char *path)
     else puts("HEIF input graph only; no decode, transform, alpha merge or hardware success claimed");
     x9_heif_plan_close(&plan); x9_heif_close(&d); free(data); return e ? 1 : 0;
 }
+static int decode_heif(const char *path, uint32_t id, const char *icc_path,
+    enum x9_heif_source_color_policy policy, const char *output_path, const char *info_path)
+{
+    size_t bytes = 0, icc_bytes = 0;
+    uint8_t *raw = read_file(path,X9_HEIF_MAX_FILE,&bytes);
+    uint8_t *icc = read_file(icc_path,X9_HEIF_MAX_ITEM_METADATA,&icc_bytes);
+    CFDataRef file = NULL, working = NULL, plist = NULL;
+    CFDictionaryRef info = NULL;
+    CFErrorRef error = NULL;
+    CVPixelBufferRef pixel = NULL;
+    int out_fd = -1, info_fd = -1, out_created = 0, info_created = 0, locked = 0;
+    size_t width = 0, height = 0;
+    OSStatus e = kVTParameterErr;
+    if (!raw || !icc) { perror("HEIF/working ICC input"); goto done; }
+    if (!strcmp(output_path,info_path)) goto done;
+    file = CFDataCreateWithBytesNoCopy(NULL,raw,(CFIndex)bytes,kCFAllocatorNull);
+    working = CFDataCreateWithBytesNoCopy(NULL,icc,(CFIndex)icc_bytes,kCFAllocatorNull);
+    if (!file || !working) { e = kVTAllocationFailedErr; goto done; }
+    e = X9HEIFCopyHardwareImage(file,id,working,policy,&pixel,&info);
+    if (!e && (!pixel || !info)) e = kVTVideoDecoderBadDataErr;
+    if (e) goto done;
+    plist = CFPropertyListCreateData(NULL,info,kCFPropertyListBinaryFormat_v1_0,0,&error);
+    if (!plist) { e = kVTVideoDecoderBadDataErr; goto done; }
+    e = CVPixelBufferLockBaseAddress(pixel,kCVPixelBufferLock_ReadOnly);
+    if (e) goto done;
+    locked = 1;
+    width = CVPixelBufferGetWidth(pixel); height = CVPixelBufferGetHeight(pixel);
+    size_t stride = CVPixelBufferGetBytesPerRow(pixel), row = width*8;
+    const uint8_t *base = CVPixelBufferGetBaseAddress(pixel);
+    if (CVPixelBufferGetPixelFormatType(pixel) != kCVPixelFormatType_64RGBAHalf ||
+        CVPixelBufferIsPlanar(pixel) || !width || !height || !base || stride < row ||
+        (uint64_t)stride*(height-1)+row > UINTPTR_MAX-(uintptr_t)base) {
+        e = kVTVideoDecoderBadDataErr; goto done;
+    }
+    out_fd = open(output_path,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);
+    out_created = out_fd >= 0;
+    if (out_fd < 0) { perror("RGBA output (must be new)"); e = kVTParameterErr; goto done; }
+    info_fd = open(info_path,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);
+    info_created = info_fd >= 0;
+    if (info_fd < 0) { perror("metadata output (must be new)"); e = kVTParameterErr; goto done; }
+    for (size_t y = 0; y < height && !e; y++)
+        if (write_all(out_fd,base+y*stride,row)) e = kVTParameterErr;
+    if (!e && write_all(info_fd,CFDataGetBytePtr(plist),(size_t)CFDataGetLength(plist))) e = kVTParameterErr;
+    if (!e && (fsync(out_fd) || fsync(info_fd))) e = kVTParameterErr;
+    if (close(out_fd) && !e) e = kVTParameterErr;
+    out_fd = -1;
+    if (close(info_fd) && !e) e = kVTParameterErr;
+    info_fd = -1;
+done:
+    if (locked) { OSStatus unlock = CVPixelBufferUnlockBaseAddress(pixel,kCVPixelBufferLock_ReadOnly); if (!e) e = unlock; }
+    if (out_fd >= 0) close(out_fd);
+    if (info_fd >= 0) close(info_fd);
+    if (e) {
+        if (out_created) unlink(output_path);
+        if (info_created) unlink(info_path);
+        fprintf(stderr,"HEIF decode/compose failed: OSStatus=%d; no hardware image success claimed\n",(int)e);
+    } else printf("native HEIF color raster: %zux%zu RGBA IEEE-half little-endian; "
+        "explicit working ICC, ordered transforms applied; pixels=%s metadata=%s\n",
+        width,height,output_path,info_path);
+    if (pixel) CVPixelBufferRelease(pixel);
+    if (plist) CFRelease(plist);
+    if (error) CFRelease(error);
+    if (info) CFRelease(info);
+    if (file) CFRelease(file);
+    if (working) CFRelease(working);
+    free(raw); free(icc); return e ? 1 : 0;
+}
 int main(int argc, char **argv)
 {
     if (argc == 5 && !strcmp(argv[1], "decode-vt")) return decode_vt(argv[2], argv[3], argv[4],NULL,0);
@@ -260,9 +286,20 @@ int main(int argc, char **argv)
         if (errno || !argv[3][0] || !end || *end || id > UINT32_MAX) return 2;
         return decode_vt(NULL,NULL,argv[4],argv[2],(uint32_t)id);
     }
+    if (argc == 8 && !strcmp(argv[1],"decode-heif")) {
+        char *end = NULL;
+        errno = 0; unsigned long id = strtoul(argv[3],&end,0);
+        if (errno || !argv[3][0] || !end || *end || id > UINT32_MAX) return 2;
+        enum x9_heif_source_color_policy policy;
+        if (!strcmp(argv[5],"icc")) policy = X9_HEIF_USE_ICC_IF_PRESENT;
+        else if (!strcmp(argv[5],"nclx")) policy = X9_HEIF_USE_NCLX;
+        else return 2;
+        return decode_heif(argv[2],(uint32_t)id,argv[4],policy,argv[6],argv[7]);
+    }
     if (argc != 2 || strcmp(argv[1], "status")) {
         fprintf(stderr, "usage: %s status | decode-vt hvcC.bin access-unit.bin NEW.yuv | "
-            "heif-info file.heic | decode-heif-item file.heic item-id-or-0 NEW.yuv\n", argv[0]); return 2;
+            "heif-info file.heic | decode-heif-item file.heic item-id-or-0 NEW.yuv | "
+            "decode-heif file.heic item-id-or-0 working-rgb.icc icc|nclx NEW.rgba16f NEW.info.plist\n", argv[0]); return 2;
     }
     int fd = open(X9_VDEC_DEVICE, O_RDONLY | O_CLOEXEC);
     if (fd < 0) { perror(X9_VDEC_DEVICE); return 1; }

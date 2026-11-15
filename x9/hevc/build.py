@@ -22,13 +22,17 @@ def main():
     common = [str(clang), '-target', 'arm64-apple-ios16.0', '-isysroot', str(sdk),
               '-Os', '-Wall', '-Wextra', '-Werror', '-fvisibility=hidden']
     frameworks = ['-framework', 'CoreFoundation', '-framework', 'CoreMedia',
-                  '-framework', 'CoreVideo', '-framework', 'VideoToolbox']
+                  '-framework', 'CoreVideo', '-framework', 'VideoToolbox',
+                  '-framework', 'CoreGraphics']
     library = a.out / 'libx9-hevc.dylib'
     subprocess.run(common + ['-dynamiclib', str(HERE / 'vt_decoder.c'),
+                            str(HERE / 'vt_picture.c'),
                             str(HERE / 'hevc_bitstream.c'),
                             str(HERE / 'heif_items.c'),
                             str(HERE / 'heif_compositor.c'),
                             str(HERE / 'heif_coremedia.c'),
+                            str(HERE / 'heif_metadata.c'),
+                            str(HERE / 'heif_native.c'),
                             str(HERE / 'vt_image_metadata.c'), *frameworks,
                             '-install_name', '@rpath/libx9-hevc.dylib', '-o', str(library)], check=True)
     ctl = a.out / 'vdecctl'
@@ -45,7 +49,8 @@ def main():
         'decoder_id': 'org.ios-sweet.x9.vcp.hvc1',
         'heif_coded_item_input': True, 'heif_complete_image_compositor': False,
         'heif_derived_geometry': True, 'heif_packed_raster_compositor': True,
-        'heif_native_raster_adapter': False, 'heif_auxiliary_merge': False,
+        'heif_native_raster_adapter': True, 'heif_auxiliary_merge': False,
+        'heif_explicit_working_rgb_icc': True, 'heif_bitstream_color_resolver': False,
         'library': str(library), 'client': str(ctl),
     }, indent=2) + '\n')
     print('X9 HEVC: iOS decoder/client compiled; physical VCP provider absent, no auto-injection', flush=True)

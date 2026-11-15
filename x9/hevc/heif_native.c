@@ -1,0 +1,324 @@
+#include "heif_native.h"
+#include "heif_coremedia.h"
+#include "heif_compositor.h"
+#include "heif_metadata.h"
+#include "vt_decoder.h"
+#include <CoreGraphics/CoreGraphics.h>
+#include <VideoToolbox/VideoToolbox.h>
+#include <errno.h>
+#include <math.h>
+#include <stdlib.h>
+#define GRAPH_METADATA_LIMIT (16u * 1024u * 1024u)
+struct native_item { uint32_t id, type; CFDictionaryRef color, declared, source; };
+struct native_context {
+    struct x9_heif_document *document;
+    struct x9_heif_plan *plan;
+    CFDataRef file, working;
+    CGColorSpaceRef working_space;
+    enum x9_heif_source_color_policy policy;
+    CFMutableArrayRef items;
+    unsigned count, frames;
+    uint64_t metadata_bytes;
+    OSStatus failure;
+    struct native_item nodes[X9_HEIF_MAX_ITEMS];
+};
+static OSStatus parser_error(int e)
+{
+    return !e ? noErr : e == ENOMEM ? kVTAllocationFailedErr :
+        e == ENOTSUP ? kVTVideoDecoderUnsupportedDataFormatErr : kVTVideoDecoderBadDataErr;
+}
+static int put_number(CFMutableDictionaryRef d, CFStringRef key, uint32_t n)
+{
+    int64_t value = n;
+    CFNumberRef number = CFNumberCreate(NULL,kCFNumberSInt64Type,&value);
+    if (!number) return ENOMEM;
+    CFDictionarySetValue(d,key,number); CFRelease(number); return 0;
+}
+static int rgb_profile(CFDataRef data)
+{
+    if (!data || CFGetTypeID(data) != CFDataGetTypeID() || CFDataGetLength(data) <= 0 ||
+        CFDataGetLength(data) > X9_HEIF_MAX_ITEM_METADATA) return 0;
+    CGColorSpaceRef space = CGColorSpaceCreateWithICCData(data);
+    int valid = space && CGColorSpaceGetModel(space) == kCGColorSpaceModelRGB &&
+        CGColorSpaceGetNumberOfComponents(space) == 3;
+    if (space) CGColorSpaceRelease(space);
+    return valid;
+}
+/* Don't conflate unspecified CICP2 (bitstream fallback) with an arbitrary
+ * unknown code point that the native SDK mapper cannot represent. */
+static int check_nclx(const struct x9_heif_document *d, const struct x9_heif_image *image, int require_rgb)
+{
+    for (unsigned n = 0; n < image->property_count; n++) {
+        const struct x9_heif_property *p = &image->properties[n];
+        if (p->type != X9_HEIF_TYPE('c','o','l','r')) continue;
+        const uint8_t *raw = NULL;
+        int e = x9_heif_span_data(d,p->payload,&raw);
+        if (e) return e;
+        if (p->payload.bytes < 4) return EBADMSG;
+        if (raw[0]!='n' || raw[1]!='c' || raw[2]!='l' || raw[3]!='x') continue;
+        if (p->payload.bytes != 11) return EBADMSG;
+        int codes[] = { (int)raw[4]*256+raw[5],(int)raw[6]*256+raw[7],(int)raw[8]*256+raw[9] };
+        CFStringRef strings[] = { CVColorPrimariesGetStringForIntegerCodePoint(codes[0]),
+            CVTransferFunctionGetStringForIntegerCodePoint(codes[1]),CVYCbCrMatrixGetStringForIntegerCodePoint(codes[2]) };
+        for (unsigned k = 0; k < 3; k++)
+            if ((k == 2 || require_rgb) && codes[k] != 2 && !strings[k] &&
+                !(k == 1 && (codes[k] == 4 || codes[k] == 5))) return ENOTSUP;
+    }
+    return 0;
+}
+static int source_color(CFDictionaryRef colr,
+    enum x9_heif_source_color_policy policy, CFDictionaryRef *out)
+{
+    CFMutableDictionaryRef d = CFDictionaryCreateMutable(NULL,0,
+        &kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
+    if (!d) return ENOMEM;
+    CFStringRef keys[] = { kCMFormatDescriptionExtension_ICCProfile,kCMFormatDescriptionExtension_ColorPrimaries,
+        kCMFormatDescriptionExtension_TransferFunction,kCMFormatDescriptionExtension_YCbCrMatrix,
+        kCMFormatDescriptionExtension_GammaLevel,kCMFormatDescriptionExtension_FullRangeVideo };
+    int e = 0;
+    for (unsigned n = 0; n < 6 && !e; n++) {
+        CFTypeRef value = CFDictionaryGetValue(colr,keys[n]);
+        /* CM may synthesize defaults while rebuilding hvcC. Until the real
+         * SPS VUI fields are parsed, absent container color is NOT evidence
+         * for a bitstream fallback or an invented BT709 interpretation. */
+        if (!value) continue;
+        CFTypeID type = n == 0 ? CFDataGetTypeID() : n < 4 ? CFStringGetTypeID() :
+            n == 4 ? CFNumberGetTypeID() : CFBooleanGetTypeID();
+        if (CFGetTypeID(value) != type) e = EBADMSG;
+        else CFDictionarySetValue(d,keys[n],value);
+    }
+    CFTypeRef icc = CFDictionaryGetValue(d,keys[0]);
+    if (!e && policy == X9_HEIF_USE_ICC_IF_PRESENT && icc) {
+        if (!rgb_profile(icc)) e = ENOTSUP;
+        /* Explicit ICC RGB interpretation; retain YUV matrix/range, but do
+         * not ask the converter to choose between competing RGB profiles. */
+        CFDictionaryRemoveValue(d,keys[1]); CFDictionaryRemoveValue(d,keys[2]); CFDictionaryRemoveValue(d,keys[4]);
+    } else {
+        CFDictionaryRemoveValue(d,keys[0]);
+        CFTypeRef primaries = CFDictionaryGetValue(d,keys[1]), transfer = CFDictionaryGetValue(d,keys[2]);
+        if (!e && (!primaries || !transfer)) e = ENOTSUP;
+        if (!e && CFEqual(transfer,kCVImageBufferTransferFunction_UseGamma)) {
+            CFTypeRef gamma = CFDictionaryGetValue(d,keys[4]); double level = 0;
+            if (!gamma || !CFNumberGetValue(gamma,kCFNumberDoubleType,&level) || !isfinite(level) || level <= 0) e = ENOTSUP;
+        } else CFDictionaryRemoveValue(d,keys[4]);
+    }
+    if (!e && !CFDictionaryGetValue(d,keys[3])) e = ENOTSUP; /* no guessed YUV matrix */
+    if (e) CFRelease(d); else *out = d;
+    return e;
+}
+static int prepare(struct native_context *c, uint32_t id, CFDictionaryRef inherited)
+{
+    /* Geometry/cycle/depth was already checked by the immutable plan. A
+     * shared coded item cannot be cached under two source interpretations. */
+    for (unsigned n = 0; n < c->count; n++) if (c->nodes[n].id == id) {
+        CFDictionaryRef effective = c->nodes[n].declared;
+        if (inherited && CFDictionaryGetCount(inherited)) {
+            if (CFDictionaryGetCount(effective) && !CFEqual(effective,inherited)) return ENOTSUP;
+            effective = inherited;
+        }
+        if (!CFEqual(c->nodes[n].color,effective)) return ENOTSUP;
+        return 0;
+    }
+    if (c->count == X9_HEIF_MAX_ITEMS) return ENOSPC;
+    struct x9_heif_image *image = calloc(1,sizeof(*image));
+    if (!image) return ENOMEM;
+    CFDictionaryRef explicit_color = NULL, info = NULL;
+    struct x9_heif_geometry geometry;
+    int e = x9_heif_get_image(c->document,id,image);
+    if (!e) e = x9_heif_plan_geometry(c->plan,id,&geometry);
+    if (!e && geometry.auxiliary_count) e = ENOTSUP;
+    for (unsigned n = 0; n < image->property_count && !e; n++) {
+        uint64_t bytes = image->properties[n].payload.bytes;
+        if (bytes > GRAPH_METADATA_LIMIT-c->metadata_bytes) e = EMSGSIZE;
+        else c->metadata_bytes += bytes;
+    }
+    if (!e) e = x9_heif_copy_color_extensions(c->document,image,&explicit_color);
+    CFDictionaryRef color = explicit_color;
+    if (!e && inherited && CFDictionaryGetCount(inherited)) {
+        if (CFDictionaryGetCount(explicit_color) && !CFEqual(explicit_color,inherited)) e = ENOTSUP;
+        else color = inherited;
+    }
+    if (!e) e = check_nclx(c->document,image,c->policy != X9_HEIF_USE_ICC_IF_PRESENT ||
+        !CFDictionaryGetValue(color,kCMFormatDescriptionExtension_ICCProfile));
+    struct native_item *node = NULL;
+    if (!e) {
+        node = &c->nodes[c->count++];
+        node->id = id; node->type = image->type; node->color = CFRetain(color);
+        node->declared = CFRetain(explicit_color);
+        e = x9_heif_copy_item_info(c->document,image,&info,NULL);
+    }
+    if (!e) {
+        CFMutableDictionaryRef record = CFDictionaryCreateMutableCopy(NULL,0,info);
+        if (!record) e = ENOMEM;
+        else {
+            e = put_number(record,CFSTR("TransformedWidth"),geometry.width);
+            if (!e) e = put_number(record,CFSTR("TransformedHeight"),geometry.height);
+            if (!e) { CFDictionarySetValue(record,CFSTR("EffectiveColr"),color); CFArrayAppendValue(c->items,record); }
+            CFRelease(record);
+        }
+    }
+    if (!e && image->type == X9_HEIF_HVC1) {
+        CMSampleBufferRef sample = NULL; CFDictionaryRef temporary_info = NULL;
+        c->failure = X9HEIFCopyItemSample(c->file,id,&sample,&temporary_info);
+        if (!c->failure && (!sample || !temporary_info)) c->failure = kVTVideoDecoderBadDataErr;
+        if (c->failure) e = EIO;
+        else e = source_color(color,c->policy,&node->source);
+        if (sample) CFRelease(sample);
+        if (temporary_info) CFRelease(temporary_info);
+    }
+    for (unsigned n = 0; n < image->derived_count && !e; n++) e = prepare(c,image->derived[n],color);
+    if (explicit_color) CFRelease(explicit_color);
+    if (info) CFRelease(info);
+    free(image); return e;
+}
+static void attach_source(CVPixelBufferRef view, CFDictionaryRef color)
+{
+    CFStringRef cm[] = { kCMFormatDescriptionExtension_ICCProfile,kCMFormatDescriptionExtension_ColorPrimaries,
+        kCMFormatDescriptionExtension_TransferFunction,kCMFormatDescriptionExtension_YCbCrMatrix,
+        kCMFormatDescriptionExtension_GammaLevel };
+    CFStringRef cv[] = { kCVImageBufferICCProfileKey,kCVImageBufferColorPrimariesKey,
+        kCVImageBufferTransferFunctionKey,kCVImageBufferYCbCrMatrixKey,kCVImageBufferGammaLevelKey };
+    for (unsigned n = 0; n < 5; n++) {
+        CFTypeRef value = CFDictionaryGetValue(color,cm[n]);
+        CVBufferRemoveAttachment(view,cv[n]);
+        if (value) CVBufferSetAttachment(view,cv[n],value,kCVAttachmentMode_ShouldPropagate);
+    }
+    /* A stale derived CGColorSpace must not overrule the explicit policy. */
+    CVBufferRemoveAttachment(view,kCVImageBufferCGColorSpaceKey);
+    CVBufferRemoveAttachment(view,kCVImageBufferCleanApertureKey);
+    CVBufferRemoveAttachment(view,kCVImageBufferPreferredCleanApertureKey);
+}
+static int native_raster(void *context, uint32_t id, enum x9_heif_raster_format format,
+    uint32_t width, uint32_t height, uint8_t *destination, size_t stride)
+{
+    struct native_context *c = context;
+    struct native_item *node = NULL;
+    for (unsigned n = 0; n < c->count; n++) if (c->nodes[n].id == id) node = &c->nodes[n];
+    if (!node || !node->source || format != X9_HEIF_RGBA_HALF) return EINVAL;
+    CMSampleBufferRef sample = NULL;
+    CFDictionaryRef info = NULL;
+    CVPixelBufferRef decoded = NULL, view = NULL, target = NULL;
+    VTPixelTransferSessionRef transfer = NULL;
+    int locked = 0;
+    OSStatus e = X9HEIFCopyItemSample(c->file,id,&sample,&info);
+    if (!e && (!sample || !info)) e = kVTVideoDecoderBadDataErr;
+    if (!e) e = X9HEVCCopyHardwarePicture(sample,&decoded);
+    if (!e && !decoded) e = kVTVideoDecoderBadDataErr;
+    if (!e && (CVPixelBufferGetWidth(decoded) != width || CVPixelBufferGetHeight(decoded) != height))
+        e = kVTVideoDecoderBadDataErr;
+    OSType f = decoded ? CVPixelBufferGetPixelFormatType(decoded) : 0;
+    CFTypeRef full = CFDictionaryGetValue(node->source,kCMFormatDescriptionExtension_FullRangeVideo);
+    int actual_full = f == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange || f == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange;
+    if (!e && full && (int)CFBooleanGetValue(full) != actual_full) e = kVTVideoDecoderBadDataErr;
+    if (!e) { e = CVPixelBufferLockBaseAddress(decoded,kCVPixelBufferLock_ReadOnly); locked = !e; }
+    if (!e) {
+        void *planes[2]; size_t widths[2], heights[2], strides[2];
+        for (unsigned n = 0; n < 2; n++) {
+            planes[n] = CVPixelBufferGetBaseAddressOfPlane(decoded,n);
+            widths[n] = CVPixelBufferGetWidthOfPlane(decoded,n);
+            heights[n] = CVPixelBufferGetHeightOfPlane(decoded,n);
+            strides[n] = CVPixelBufferGetBytesPerRowOfPlane(decoded,n);
+            size_t row = (size_t)width*(f == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange ||
+                f == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange ? 2u : 1u);
+            if (!heights[n] || strides[n] > X9_HEIF_MAX_RASTER_BYTES/heights[n]) {
+                e = kVTVideoDecoderBadDataErr; continue;
+            }
+            uint64_t span = (uint64_t)strides[n]*(heights[n]-1)+row;
+            if (!planes[n] || strides[n] < row || span > UINTPTR_MAX-(uintptr_t)planes[n]) e = kVTVideoDecoderBadDataErr;
+        }
+        /* Separate view owns ONLY attachments, not decoded storage. No
+         * modification of a VT callback pixel lacking ImageBufferModifiable.
+         * Retain+read lock the decoded owner through the whole transfer. */
+        if (!e) e = CVPixelBufferCreateWithPlanarBytes(NULL,width,height,f,NULL,0,2,
+            planes,widths,heights,strides,NULL,NULL,NULL,&view);
+        if (!e) { CVBufferPropagateAttachments(decoded,view); attach_source(view,node->source); }
+    }
+    if (!e) e = CVPixelBufferCreateWithBytes(NULL,width,height,kCVPixelFormatType_64RGBAHalf,
+        destination,stride,NULL,NULL,NULL,&target);
+    if (!e) e = VTPixelTransferSessionCreate(NULL,&transfer);
+    if (!e) e = VTSessionSetProperty(transfer,kVTPixelTransferPropertyKey_ScalingMode,kVTScalingMode_Normal);
+    if (!e) e = VTSessionSetProperty(transfer,kVTPixelTransferPropertyKey_DestinationICCProfile,c->working);
+    if (!e) e = VTPixelTransferSessionTransferImage(transfer,view,target);
+    if (!e) {
+        CFTypeRef profile = CVBufferCopyAttachment(target,kCVImageBufferICCProfileKey,NULL);
+        if (!profile || CFGetTypeID(profile) != CFDataGetTypeID() || !CFEqual(profile,c->working)) e = kVTPixelTransferNotSupportedErr;
+        if (profile) CFRelease(profile);
+    }
+    if (transfer) { VTPixelTransferSessionInvalidate(transfer); CFRelease(transfer); }
+    if (target) CVPixelBufferRelease(target);
+    if (view) CVPixelBufferRelease(view);
+    if (locked) { OSStatus unlock = CVPixelBufferUnlockBaseAddress(decoded,kCVPixelBufferLock_ReadOnly); if (!e) e = unlock; }
+    if (decoded) CVPixelBufferRelease(decoded);
+    if (sample) CFRelease(sample);
+    if (info) CFRelease(info);
+    if (e) { if (!c->failure) c->failure = e; return EIO; }
+    c->frames++; return 0;
+}
+static void release_pixels(void *context, const void *bytes)
+{ (void)context; free((void *)bytes); }
+OSStatus X9HEIFCopyHardwareImage(CFDataRef file, uint32_t id, CFDataRef working,
+    enum x9_heif_source_color_policy policy, CVPixelBufferRef *out, CFDictionaryRef *info_out)
+{
+    if (!out || !info_out || (void *)out == (void *)info_out) return kVTParameterErr;
+    *out = NULL; *info_out = NULL;
+    if (!file || CFGetTypeID(file) != CFDataGetTypeID() || CFDataGetLength(file) <= 0 ||
+        CFDataGetLength(file) > X9_HEIF_MAX_FILE || !rgb_profile(working) ||
+        (policy != X9_HEIF_USE_ICC_IF_PRESENT && policy != X9_HEIF_USE_NCLX)) return kVTParameterErr;
+    struct native_context *c = calloc(1,sizeof(*c));
+    if (!c) return kVTAllocationFailedErr;
+    /* CreateCopy may retain an immutable NoCopy CFData whose bytes still
+     * belong to the caller. Working ICC escapes in output attachments/info;
+     * use real owned byte copies, not an assumed immutable-copy allocation. */
+    c->file = CFDataCreate(NULL,CFDataGetBytePtr(file),CFDataGetLength(file));
+    c->working = CFDataCreate(NULL,CFDataGetBytePtr(working),CFDataGetLength(working)); c->policy = policy;
+    c->working_space = c->working ? CGColorSpaceCreateWithICCData(c->working) : NULL;
+    c->items = CFArrayCreateMutable(NULL,0,&kCFTypeArrayCallBacks);
+    CFMutableDictionaryRef info = CFDictionaryCreateMutable(NULL,0,
+        &kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
+    CVPixelBufferRef pixel = NULL;
+    struct x9_heif_raster raster = {0};
+    struct x9_heif_geometry geometry;
+    int e = !c->file || !c->working || !c->items || !info || !c->working_space ? ENOMEM :
+        x9_heif_open(CFDataGetBytePtr(c->file),(size_t)CFDataGetLength(c->file),&c->document);
+    if (!e) e = x9_heif_plan_create(c->document,id,&c->plan);
+    if (!e) e = x9_heif_plan_geometry(c->plan,id,&geometry);
+    if (!e) e = prepare(c,geometry.id,NULL); /* every source checked before hardware */
+    if (!e) e = x9_heif_compose_packed(c->plan,X9_HEIF_RGBA_HALF,native_raster,c,&raster);
+    OSStatus result = c->failure ? c->failure : parser_error(e);
+    if (!result) {
+        result = CVPixelBufferCreateWithBytes(NULL,raster.width,raster.height,kCVPixelFormatType_64RGBAHalf,
+            raster.data,raster.stride,release_pixels,NULL,NULL,&pixel);
+        if (!result) raster.data = NULL; /* pixel release callback now owns allocation */
+    }
+    if (!result) {
+        e = put_number(info,CFSTR("ItemID"),geometry.id);
+        if (!e) e = put_number(info,CFSTR("Width"),geometry.width);
+        if (!e) e = put_number(info,CFSTR("Height"),geometry.height);
+        if (!e) e = put_number(info,CFSTR("PixelFormat"),kCVPixelFormatType_64RGBAHalf);
+        if (!e) e = put_number(info,CFSTR("NativeHardwareFrames"),c->frames);
+        if (!e) e = put_number(info,CFSTR("SourceColorPolicy"),(uint32_t)policy);
+        result = parser_error(e);
+        if (!result) {
+            CFDictionarySetValue(info,CFSTR("Items"),c->items);
+            CFDictionarySetValue(info,CFSTR("WorkingRGBICCProfile"),c->working);
+            CFDictionarySetValue(info,CFSTR("DecoderID"),CFSTR(X9_HEVC_DECODER_ID));
+            CVBufferSetAttachment(pixel,kCVImageBufferICCProfileKey,c->working,kCVAttachmentMode_ShouldPropagate);
+            CVBufferSetAttachment(pixel,kCVImageBufferCGColorSpaceKey,c->working_space,kCVAttachmentMode_ShouldPropagate);
+            *out = pixel; pixel = NULL; *info_out = info; info = NULL;
+        }
+    }
+    if (pixel) CVPixelBufferRelease(pixel);
+    x9_heif_raster_close(&raster);
+    if (info) CFRelease(info);
+    for (unsigned n = 0; n < c->count; n++) {
+        if (c->nodes[n].color) CFRelease(c->nodes[n].color);
+        if (c->nodes[n].declared) CFRelease(c->nodes[n].declared);
+        if (c->nodes[n].source) CFRelease(c->nodes[n].source);
+    }
+    if (c->items) CFRelease(c->items);
+    if (c->working_space) CGColorSpaceRelease(c->working_space);
+    x9_heif_plan_close(&c->plan); x9_heif_close(&c->document);
+    if (c->file) CFRelease(c->file);
+    if (c->working) CFRelease(c->working);
+    free(c); return result;
+}
