@@ -147,7 +147,14 @@ static uint64_t x9m_store_submit(const x9m_job &j){
  if(j.op!=X9M_LIST)f.tlv(0x102,storage.p+1,2);
  /* 103=0 is permitted ONLY for a single indexed CMGR in ModifyTag step1;
   * never mark an entire CMGL enumeration read. CPMS is always explicit. */
- f.byte(0x103,j.op==X9M_TAG&&j.step==1?0:1);f.byte(0x104,storage.p[0]);return f.submit();
+ f.byte(0x103,j.op==X9M_TAG&&j.step==1?0:1);f.byte(0x104,storage.p[0]);
+ if(j.op==X9M_TAG&&j.step==1){
+  /* Serialize exactly the same frame, but carry this mutation's original
+   * owner and absolute host guard to the native allocator/unique writer. */
+  f.p[14]=(uint8_t)(f.n-16);f.p[15]=(uint8_t)((f.n-16)>>8);
+  return f.good?x9_md_mipc_message_mark_read_submit(f.p,f.n,j.slot,j.generation,j.deadline):0;
+ }
+ return f.submit();
 }
 static void x9m_init_transport_loss(){
   /* Loss is not registration/config retirement. Stop advancing this boot,
@@ -240,8 +247,19 @@ static void x9m_init_poll(uint8_t *response,unsigned room){
   if(token){s.init=step;s.init_token=token;s.init_epoch=s.ready_epoch;s.init_deadline=x9q_ms()+300000;}
  }
 }
+struct x9m_publication {
+ uint32_t port,node;const uint8_t *sdu;uint32_t size;
+ uint8_t *owned;uint32_t room;
+};
+static int x9m_publish(void *context){
+ /* Trusted closure: host queue only, no allocation or MD API reentry. */
+ x9m_publication &p=*static_cast<x9m_publication *>(context);
+ return bb_x9_sms_event(p.port,p.node,p.sdu,p.size,p.owned,p.room)?1:0;
+}
 static void x9m_deliver(x9m_incoming &in,unsigned mti){
- if(x9q_ms()<in.next_delivery)return;
+ /* The QMI owner alone changes control-ready. Native publish below holds
+  * the MD mutex through queue admission, closing event->poison->retry. */
+ if(!x9w_control_ready||x9q_ms()<in.next_delivery||!x9_md_mipc_message_online())return;
  unsigned cls=mti==2?4:x9m_class(in.pdu,in.len);
  if(cls>5)return;
  for(unsigned i=0;i<CBQ_MAX_CLIENTS;i++){
@@ -266,7 +284,11 @@ static void x9m_deliver(x9m_incoming &in,unsigned mti){
    * and retry only admission (never MD ACK) if the actual host queue is full. */
   memmove(p.p+7,p.p+14,p.n-14);p.n-=7;p.p[0]=4;p.p[3]=1;
   p.p[5]=(uint8_t)(p.n-7);p.p[6]=(uint8_t)((p.n-7)>>8);
-  bool admitted=p.good&&bb_x9_sms_event(CBQ_PORT_BASE+i,X9BB_NODE,p.p,p.n);
+  uint32_t room=CBQ_HDR+p.n;
+  uint8_t *owned=p.good?static_cast<uint8_t *>(IOMallocData(room)):nullptr;
+  x9m_publication publication={CBQ_PORT_BASE+i,X9BB_NODE,p.p,p.n,owned,room};
+  bool admitted=owned&&x9_md_mipc_message_publish(in.token,in.sim,x9m_publish,&publication)==1;
+  if(!admitted&&owned){bzero(owned,room);IOFreeData(owned,room);}
   bzero(v,sizeof(v));bzero(p.p,sizeof(p.p));
   if(!admitted){in.next_delivery=x9q_ms()+100;return;}
   in.delivered=true;in.slot=i;in.generation=x9q_clients[i].generation;in.ack_wait=x9q_ms()+30000;
@@ -542,7 +564,11 @@ static void x9m_job_done(x9m_job &j,const uint8_t *p,unsigned n){
 static void x9m_del(unsigned slot){
  bzero(&x9m_clients[slot],sizeof(x9m_clients[slot]));
  /* Sent SMS/ACK owners survive deletion and drain their late result. */
- for(x9m_job &j:x9m_jobs)if(j.op&&j.slot==slot)j.answered=true;
+ for(x9m_job &j:x9m_jobs)if(j.op&&j.slot==slot){
+  if(j.op==X9M_TAG&&j.step==1&&j.token)
+   x9_md_mipc_message_mark_read_abandon(j.token,j.slot,j.generation);
+  j.answered=true;
+ }
  /* No successful auto-ACK on client loss. Commands remain bound to the old
   * generation, so a reused port/SIM cannot acknowledge someone else's SMS. */
 }
@@ -560,6 +586,9 @@ static void x9m_poll(){
    * sent MO/ACK token; no resend or second success for the timed-out txn. */
   if(!j.answered&&now>=j.deadline){x9m_error(j,X9Q_NOT_READY);
    printf("X9 SMS/IMS: operation %u SIM%u timed out; sent token retained, no resend\n",j.op,j.sim+1);}
+  if(j.op==X9M_TAG&&j.step==1&&j.token&&
+    (j.answered||now>=j.deadline||!x9m_live(j.slot,j.generation)||!x9w_control_ready||!x9m_sims[j.sim].ready))
+   x9_md_mipc_message_mark_read_abandon(j.token,j.slot,j.generation);
   if(x9m_storage(j.op)&&!j.token){
    if(!j.follow||now>=j.deadline||j.answered||!x9m_live(j.slot,j.generation)){
     x9m_error(j,X9Q_NOT_READY);

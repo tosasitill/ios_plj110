@@ -15,6 +15,9 @@ static void lck_mtx_lock(int *){assert(!lock_depth);lock_depth=1;}
 static void lck_mtx_unlock(int *){assert(lock_depth);lock_depth=0;}
 static int x9_at_enabled(){return 1;}
 static int sweet_x9_arg(const char *,int){return 1;}
+static uint64_t fake_ms;
+static uint64_t mach_absolute_time(){return fake_ms*1000000;}
+static void absolutetime_to_nanoseconds(uint64_t t,uint64_t *ns){*ns=t;}
 int x9_md_at_online(){return 1;}
 static unsigned writes,last_length;
 static int tx_result;
@@ -28,7 +31,6 @@ static const unsigned X9BB_PORT_BASE=0x2000;
 static const unsigned X9BB_NODE=1,CBQ_PORT_BASE=0x4000,CBQ_MAX_CLIENTS=8;
 static const uint16_t X9Q_UNSUPPORTED=94,X9Q_INTERNAL=3,X9Q_NOT_READY=16,X9Q_ARG=48,X9Q_BUSY=2;
 static struct {uint64_t generation;uint8_t sim_slot;} x9q_clients[CBQ_MAX_CLIENTS];
-static uint64_t fake_ms;
 static bool x9w_control_ready;
 static uint64_t x9q_ms(){return fake_ms;}
 static unsigned qmi_replies,qmi_error;
@@ -46,6 +48,43 @@ struct x9q_packet {
  x9q_packet(const uint8_t *,uint16_t error){qmi_error=error;}
  void send(uint32_t,uint32_t){qmi_replies++;}
 };
+static const unsigned CBQ_HDR=6;
+struct bb_x9_call_frame {const uint8_t *sdu;uint32_t size;uint8_t *owned;};
+static bool call_batch_accept=true,call_alloc_fail,call_alloc_poison,call_alloc_expire;
+static bool call_bb_expire;
+static unsigned call_allocs,call_frees,call_batches,call_batch_count;
+static unsigned call_alloc_fail_at;
+static void *IOMallocData(unsigned n){
+ assert(!lock_depth);call_allocs++;
+ if(call_alloc_poison)x9_mc_poisoned=1;
+ if(call_alloc_expire)fake_ms=25000;
+ return call_alloc_fail||(call_alloc_fail_at&&call_allocs==call_alloc_fail_at)?nullptr:malloc(n);
+}
+static void IOFreeData(void *p,unsigned){assert(!lock_depth);call_frees++;free(p);}
+static bool bb_x9_call_registration(uint32_t local,uint32_t node,bb_x9_call_frame *f,uint32_t count,uint64_t deadline){
+ assert(lock_depth==1&&count&&count<=9);call_batches++;call_batch_count=count;
+ if(call_bb_expire)fake_ms=deadline;
+ if(!call_batch_accept||fake_ms>=deadline)return false;
+ for(unsigned i=0;i<count;i++){
+  assert(f[i].owned&&f[i].size==(i?11u:14u));
+  if(!i){assert(f[i].sdu[0]==2&&x9cw_u16(f[i].sdu+3)==3&&!x9cw_u32(f[i].sdu+10));qmi_error=0;}
+  coachz_baseband_qrtr(local,node,X9BB_PORT_BASE+9,f[i].sdu,f[i].size);
+  free(f[i].owned); // stand-in for later host read/free, ownership transferred
+ }
+ return true;
+}
+static bool bb_x9_call_handover(uint32_t local,uint32_t node,bb_x9_call_frame *f,uint32_t count){
+ assert(lock_depth==1&&count&&count<=8);call_batches++;call_batch_count=count;
+ if(!call_batch_accept)return false;
+ for(unsigned i=0;i<count;i++){
+  assert(f[i].owned&&f[i].size==11&&f[i].sdu[0]==4&&x9cw_u16(f[i].sdu+3)==0x54);
+  assert(!x9cw_u16(f[i].sdu+1)&&x9cw_u16(f[i].sdu+5)==4&&f[i].sdu[7]==1&&x9cw_u16(f[i].sdu+8)==1);
+  assert(f[i].sdu[10]>=1&&f[i].sdu[10]<=4);
+  coachz_baseband_qrtr(local,node,X9BB_PORT_BASE+9,f[i].sdu,f[i].size);
+  free(f[i].owned); // successful all-or-none transfer; not a physical/network ACK
+ }
+ return true;
+}
 #include "../../kernel/src/iokit/Kernel/arm/X9Calls.inc"
 
 static unsigned incoming(uint8_t *p,unsigned mask=0x22,unsigned tx=0x2345){
@@ -906,6 +945,150 @@ static void handover_rx_fence(){
  assert(x9_md_mipc_take(token,p,32,&n)==-3); // no queued pre-handover END TX
  assert(x9_mc_outbound.blocked&&!x9_mc_outbound.count_known&&x9_mc_inbound.blocked);
 }
+static void registration_queue_wait(){
+ bind_voice();x9w_control_ready=true;
+ x9c_init[1].stage=X9_CI_DONE;x9c_init[1].registered=1;handover_begin();
+ uint8_t p[32];handover_frame(p,0);x9mi_rx(p,32);handover_frame(p,1);x9mi_rx(p,32);
+ call_batch_accept=false;x9c_poll();
+ assert(!qmi_replies&&!qmi_indications&&!x9c_clients[0].registered&&!x9c_reg_wait[0][0].answered);
+ assert(call_batches==1&&call_batch_count==3&&call_allocs==3&&call_frees==3);
+ assert(x9c_reg_wait[0][0].event_count==2);
+ call_batch_accept=true;x9c_poll();
+ assert(qmi_replies==3&&qmi_indications==2&&qmi_indication_states[0]==1&&qmi_indication_states[1]==3);
+ assert(x9c_clients[0].registered&&x9c_clients[0].handover&&x9c_reg_wait[0][0].answered);
+ assert(!writes&&!x9c_reg_wait[0][0].event_count);
+}
+static void registration_queue_timeout(){
+ bind_voice();x9w_control_ready=true;
+ x9c_init[1].stage=X9_CI_DONE;x9c_init[1].registered=1;handover_begin();
+ call_batch_accept=false;x9c_poll();assert(!qmi_replies&&!x9c_clients[0].registered);
+ fake_ms=25000;x9c_poll();
+ assert(qmi_replies==1&&qmi_error==X9Q_NOT_READY&&!x9c_clients[0].registered&&!x9c_clients[0].handover);
+ assert(call_batches==1&&x9c_reg_wait[0][0].answered);
+}
+static void registration_alloc_oom(){
+ bind_voice();x9w_control_ready=true;
+ x9c_init[1].stage=X9_CI_DONE;x9c_init[1].registered=1;register_begin();
+ call_alloc_fail=true;x9c_poll();assert(!call_batches&&!qmi_replies&&!x9c_clients[0].registered);
+ call_alloc_fail=false;x9c_poll();assert(call_batches==1&&qmi_replies==1&&x9c_clients[0].registered);
+}
+static void registration_alloc_poison(){
+ bind_voice();x9w_control_ready=true;
+ x9c_init[1].stage=X9_CI_DONE;x9c_init[1].registered=1;handover_begin();
+ call_alloc_poison=true;x9c_poll();
+ assert(!call_batches&&qmi_replies==1&&qmi_error==X9Q_NOT_READY&&!x9c_clients[0].registered);
+ assert(!x9c_clients[0].handover&&call_allocs==call_frees);
+}
+static void registration_alloc_deadline(){
+ bind_voice();x9w_control_ready=true;
+ x9c_init[1].stage=X9_CI_DONE;x9c_init[1].registered=1;handover_begin();
+ call_alloc_expire=true;x9c_poll();
+ assert(!call_batches&&!qmi_replies&&!x9c_clients[0].registered&&call_allocs==call_frees);
+ x9c_poll();assert(qmi_replies==1&&qmi_error==X9Q_NOT_READY&&!x9c_clients[0].handover);
+}
+static int call_publish_count(void *ctx){assert(lock_depth);(*static_cast<unsigned *>(ctx))++;return 1;}
+static void registration_queue_lock_deadline(){
+ bind_voice();x9w_control_ready=true;
+ x9c_init[1].stage=X9_CI_DONE;x9c_init[1].registered=1;handover_begin();
+ uint8_t p[32];handover_frame(p,0);x9mi_rx(p,32);
+ call_bb_expire=true;x9c_poll();
+ assert(call_batches==1&&call_batch_count==2&&!qmi_replies&&!qmi_indications);
+ assert(!x9c_clients[0].registered&&call_allocs==call_frees);
+ x9c_poll();assert(qmi_replies==1&&qmi_error==X9Q_NOT_READY&&!x9c_clients[0].handover);
+}
+static void registration_native_fence(){
+ unsigned calls=0;assert(x9_md_mipc_call_publish(1,call_publish_count,&calls)==-1&&!calls);
+ assert(x9_md_mipc_call_publish(0,nullptr,&calls)==-1&&!calls);
+ assert(x9_md_mipc_call_publish(0,call_publish_count,&calls)==1&&calls==1);
+ x9_mc_poisoned=1;assert(x9_md_mipc_call_publish(0,call_publish_count,&calls)==-1&&calls==1);
+}
+static void handover_live_setup(){
+ bind_voice();x9w_control_ready=true;x9c_cmd_init.confirmed=true;
+ x9c_init[1].stage=X9_CI_DONE;x9c_init[1].registered=1;handover_begin();x9c_poll();
+ assert(x9c_clients[0].registered&&x9c_clients[0].handover&&!writes);
+ qmi_replies=0;call_batches=call_batch_count=call_allocs=call_frees=0;
+}
+static void handover_live_queue_wait(){
+ handover_live_setup();uint8_t p[32];call_batch_accept=false;
+ handover_frame(p,0);x9mi_rx(p,32);handover_frame(p,1);x9mi_rx(p,32);x9c_poll();
+ assert(!qmi_indications&&!qmi_replies&&x9c_clients[0].pending.count==2);
+ assert(call_batches==1&&call_batch_count==2&&call_allocs==2&&call_frees==2);
+ call_batch_accept=true;x9c_poll();
+ assert(qmi_indications==2&&qmi_indication_states[0]==1&&qmi_indication_states[1]==3);
+ assert(!x9c_clients[0].pending.count&&x9c_clients[0].pending.last==x9_mc_next&&!writes);
+ x9c_poll();assert(qmi_indications==2&&call_batches==2); // no replay after receipt
+}
+static void handover_live_repeated_state(){
+ handover_live_setup();uint8_t p[32];
+ handover_frame(p,0);x9mi_rx(p,32);x9mi_rx(p,32);x9c_poll();
+ assert(qmi_indications==2&&qmi_indication_states[0]==1&&qmi_indication_states[1]==1);
+ assert(call_batches==1&&call_batch_count==2&&!x9c_clients[0].pending.count);
+}
+static void handover_live_partial_alloc(){
+ handover_live_setup();uint8_t p[32];
+ handover_frame(p,0);x9mi_rx(p,32);handover_frame(p,1);x9mi_rx(p,32);
+ call_alloc_fail_at=2;x9c_poll();
+ assert(!call_batches&&!qmi_indications&&call_allocs==2&&call_frees==1);
+ assert(x9c_clients[0].pending.count==2&&x9c_clients[0].handover);
+ call_alloc_fail_at=0;x9c_poll();
+ assert(call_batches==1&&qmi_indications==2&&qmi_indication_states[0]==1&&qmi_indication_states[1]==3);
+ assert(!x9c_clients[0].pending.count&&!writes);
+}
+static void handover_live_alloc_poison(){
+ handover_live_setup();uint8_t p[32];handover_frame(p,0);x9mi_rx(p,32);
+ call_alloc_poison=true;x9c_poll();
+ assert(!call_batches&&!qmi_indications&&call_allocs==call_frees&&call_allocs==1);
+ assert(!x9c_clients[0].registered&&!x9c_clients[0].handover&&!x9c_clients[0].pending.count);
+ unchanged_other_inboxes();
+}
+static void handover_live_generation_sim(){
+ handover_live_setup();uint8_t p[32];call_batch_accept=false;
+ handover_frame(p,0);x9mi_rx(p,32);x9c_poll();assert(x9c_clients[0].pending.count==1);
+ x9c_del(0);x9q_clients[0].generation++;bind_voice();call_batch_accept=true;
+ handover_begin(0,1,92);x9c_poll();assert(!qmi_indications&&!x9c_clients[0].pending.count);
+ handover_frame(p,1,1);x9mi_rx(p,32);x9c_poll();assert(!qmi_indications); // other SIM
+ handover_frame(p,1);x9mi_rx(p,32);x9c_poll();assert(qmi_indications==1&&qmi_indication_states[0]==3);
+ // Rebinding without QRTR deletion also retires the old SIM's local owner.
+ call_batch_accept=false;handover_frame(p,0);x9mi_rx(p,32);x9c_poll();
+ uint8_t bind[]={0,93,0,0x44,0,4,0,1,1,0,0};
+ x9c_request(CBQ_PORT_BASE,X9BB_PORT_BASE+9,bind,sizeof(bind));
+ assert(x9c_clients[0].sim==0&&!x9c_clients[0].pending.count&&!x9c_clients[0].handover);
+ call_batch_accept=true;x9c_poll();assert(qmi_indications==1&&!writes);
+}
+static void handover_live_overflow_disable(){
+ handover_live_setup();uint8_t p[32];call_batch_accept=false;
+ // This pre-overflow enable waiter must not clear the blocked owner later.
+ handover_begin(0,1,92);
+ for(unsigned i=0;i<9;i++){handover_frame(p,i&1);x9mi_rx(p,32);x9c_poll();}
+ assert(x9c_clients[0].pending.blocked&&x9c_clients[0].pending.count==8);
+ assert(!x9c_clients[0].handover&&!qmi_indications&&!x9_mc_poisoned);
+ assert(qmi_error==X9Q_NOT_READY&&x9c_reg_wait[0][0].answered);
+ handover_begin(0,1,93);assert(qmi_error==X9Q_NOT_READY&&x9c_clients[0].pending.blocked);
+ call_batch_accept=true;handover_begin(0,0,94);x9c_poll();
+ assert(!x9c_clients[0].pending.blocked&&!x9c_clients[0].pending.count&&!x9c_clients[0].handover);
+ handover_begin(0,1,95);x9c_poll();
+ assert(x9c_clients[0].handover&&x9c_clients[0].handover_floor==x9_mc_next&&!qmi_indications);
+ handover_frame(p,1);x9mi_rx(p,32);x9c_poll();assert(qmi_indications==1&&qmi_indication_states[0]==3&&!writes);
+}
+static void handover_live_no_request_deadline(){
+ handover_live_setup();uint8_t p[32];handover_frame(p,0);x9mi_rx(p,32);
+ // The allocator crosses the old registration guard; this live event has none.
+ call_alloc_expire=true;fake_ms=24999;x9c_poll();
+ assert(fake_ms==25000&&qmi_indications==1&&call_batches==1&&x9c_clients[0].handover);
+ call_batch_accept=false;handover_frame(p,1);x9mi_rx(p,32);x9c_poll();
+ call_alloc_expire=false;fake_ms=uint64_t(1)<<40;call_batch_accept=true;x9c_poll();
+ assert(qmi_indications==2&&qmi_indication_states[1]==3&&!x9c_clients[0].pending.count&&!writes);
+}
+static void handover_live_queue_sequence(){
+ struct x9cw_handover_queue q={};
+ assert(x9cw_handover_queue_push(&q,5,5,1)==0&&!q.count);
+ assert(x9cw_handover_queue_push(&q,5,6,1)==1&&q.count==1&&q.last==6);
+ assert(x9cw_handover_queue_push(&q,5,7,1)==1&&q.count==2); // repeated state retained
+ x9cw_handover_queue_published(&q);assert(!q.count&&q.last==7);
+ assert(x9cw_handover_queue_push(&q,5,7,3)<0&&q.blocked);
+ x9cw_handover_queue_published(&q);assert(q.blocked);
+ bzero(&q,sizeof(q));assert(x9cw_handover_queue_push(&q,0,1,0)<0&&q.blocked);
+}
 int main(int argc,char **argv){
  assert(argc==2);x9mi_online(1);
  struct {const char *name;void (*run)();} cases[]={
@@ -930,6 +1113,14 @@ int main(int argc,char **argv){
   {"handover_pending_overflow",handover_pending_overflow},{"handover_transport_loss",handover_transport_loss},
   {"handover_request_identity",handover_request_identity},
   {"handover_rx_fence",handover_rx_fence},
+  {"registration_queue_wait",registration_queue_wait},{"registration_queue_timeout",registration_queue_timeout},
+  {"registration_alloc_oom",registration_alloc_oom},{"registration_alloc_poison",registration_alloc_poison},
+  {"registration_alloc_deadline",registration_alloc_deadline},{"registration_native_fence",registration_native_fence},
+  {"registration_queue_lock_deadline",registration_queue_lock_deadline},
+  {"handover_live_queue_wait",handover_live_queue_wait},{"handover_live_repeated_state",handover_live_repeated_state},
+  {"handover_live_partial_alloc",handover_live_partial_alloc},{"handover_live_alloc_poison",handover_live_alloc_poison},
+  {"handover_live_generation_sim",handover_live_generation_sim},{"handover_live_overflow_disable",handover_live_overflow_disable},
+  {"handover_live_no_request_deadline",handover_live_no_request_deadline},{"handover_live_queue_sequence",handover_live_queue_sequence},
   {"request_whitelist",request_whitelist},{"no_auto_policy",no_auto_policy},{"command_roundtrip",command_roundtrip},
   {"failure_retained",failure_retained},{"duplicate_pending",duplicate_pending},{"changed_duplicate",changed_duplicate},
   {"duplicate_replied",duplicate_replied},{"overflow_isolated",overflow_isolated},{"bounded_tombstones",bounded_tombstones},

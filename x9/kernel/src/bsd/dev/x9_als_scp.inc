@@ -388,10 +388,10 @@ static int als_timesync(void)
 static int als_list(void)
 {
  als_stage(X9_ALS_LIST);
- /* Reserve once, before building either header/CRC. The RV55 share-buffer
-  * reply path (raw SCP 0x88824 -> 0x87788) copies the request VALUE header's
-  * sequence into the outer reply; it does not recover it from the outer
-  * request. Keep TX memory, notify.value and outer notify coherent instead
+ /* Reserve once, before building either header/CRC. The RV55 LIST path
+  * first copies outer.sequence into notify.VALUE (0x8a180/0x8a182), but
+  * its finalizer (0x88c20/0x88c34 -> 0x87788) returns TX memory.sequence
+  * in the outer reply. Keep memory, VALUE and outer notify coherent instead
   * of accepting unrelated replies via Android's seq/type/cmd && predicate.
   * Only this worker allocates sequences; HID requests merely enqueue. */
  uint8_t sequence = als_sequence++;
@@ -418,8 +418,12 @@ static int als_list(void)
  const uint8_t *p = als_snapshot, *h = p+8, *n = als_reply+8;
  uint32_t length = le32(h+8), capacity = le32(p+20), gain = 0;
  const uint8_t *prox_info = NULL;
+ /* The LIST writer 0x87bea -> 0x88ce6 writes only result records after
+  * the copied header; finalizer 0x87c72 -> 0x88bb4 replaces rx_len/CRC,
+  * leaving memory.sequence intact. Correlate this CRC-covered RX header
+  * too, not just the outer mailbox completion, before installing sensors. */
  if (le32(p) != 0xdeadbeef || le32(p+8192-4) != 0xdeadbeef ||
-     h[1] || h[2] || h[3] || le32(h+4) || n[1] || n[2] || n[3] ||
+     h[0] != sequence || h[1] || h[2] || h[3] || le32(h+4) || n[1] || n[2] || n[3] ||
      le32(n+4) || le32(n+8) != length || length > 4096 || length%40 ||
      length > capacity || capacity > 4096 || le32(p+4) != als_crc32(h,16+length)) return EBADMSG;
  for (unsigned i = 0; i < length; i += 40) {

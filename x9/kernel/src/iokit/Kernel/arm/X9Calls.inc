@@ -30,7 +30,8 @@ static struct x9cw_inbound_state x9c_inbound;
 static bool x9c_observed;
 static bool x9c_incoming_observed;
 /* VOICE binding is independent of NAS/WMS clients and has NO SIM default. */
-struct x9c_client {bool bound,registered,handover;unsigned sim;uint32_t handover_floor;uint64_t generation;};
+struct x9c_client {bool bound,registered,handover;unsigned sim;uint32_t handover_floor;uint64_t generation;
+ struct x9cw_handover_queue pending;};
 static x9c_client x9c_clients[CBQ_MAX_CLIENTS];
 struct x9c_end_job {
  bool used,answered;unsigned slot,sim,stage,id;
@@ -76,27 +77,91 @@ static bool x9c_event_transport_ready(){
   * CALL inbox is quarantined. Do not grant/flush a dead subscription. */
  return x9w_control_ready&&x9_md_mipc_online()&&x9_md_mipc_call_cursor(&cursor)==1;
 }
-static void x9c_handover_send(unsigned slot,unsigned state){
- uint8_t indication[11];unsigned n=x9cw_handover_indication(indication,sizeof(indication),state);
- if(n)coachz_baseband_qrtr(CBQ_PORT_BASE+slot,X9BB_NODE,X9BB_PORT_BASE+9,indication,n);
- bzero(indication,sizeof(indication));
+struct x9c_handover_publication {unsigned slot,count,sim;uint64_t generation;bb_x9_call_frame frames[8];};
+static int x9c_handover_publish_callback(void *context){
+ struct x9c_handover_publication &p=*static_cast<x9c_handover_publication *>(context);
+ const struct x9c_client &c=x9c_clients[p.slot];
+ if(!x9w_control_ready||!c.bound||!c.registered||!c.handover||c.pending.blocked||
+    c.generation!=p.generation||x9q_clients[p.slot].generation!=p.generation||c.sim!=p.sim)return 0;
+ return bb_x9_call_handover(CBQ_PORT_BASE+p.slot,X9BB_NODE,p.frames,p.count)?1:0;
+}
+static void x9c_handover_flush(unsigned slot){
+ struct x9c_client &c=x9c_clients[slot];
+ if(!c.bound||!c.registered||!c.handover||!c.pending.count||c.pending.blocked||
+    c.generation!=x9q_clients[slot].generation||!x9c_event_transport_ready())return;
+ uint8_t sdu[8][11]={};x9c_handover_publication p={};p.slot=slot;p.sim=c.sim;p.generation=c.generation;
+ p.count=c.pending.count;bool allocated=true;
+ for(unsigned i=0;i<p.count;i++){
+  bb_x9_call_frame &f=p.frames[i];f.sdu=sdu[i];f.size=11;
+  if(x9cw_handover_indication(sdu[i],11,c.pending.events[i])!=11){allocated=false;break;}
+  f.owned=static_cast<uint8_t *>(IOMallocData(CBQ_HDR+11));
+  if(!f.owned){allocated=false;break;}
+ }
+ int rc=allocated?x9_md_mipc_call_publish(c.handover_floor,x9c_handover_publish_callback,&p):0;
+ for(unsigned i=0;i<p.count;i++)if(p.frames[i].owned&&rc!=1){
+  bzero(p.frames[i].owned,CBQ_HDR+11);IOFreeData(p.frames[i].owned,CBQ_HDR+11);
+ }
+ if(rc==1)x9cw_handover_queue_published(&c.pending);
+ else if(rc<0){c.registered=false;c.handover=false;bzero(&c.pending,sizeof(c.pending));}
+ bzero(sdu,sizeof(sdu));
+}
+struct x9c_reg_publication {unsigned slot,count;const struct x9c_reg_wait *wait;bb_x9_call_frame frames[9];};
+static int x9c_reg_publish_callback(void *context){
+ struct x9c_reg_publication &p=*static_cast<x9c_reg_publication *>(context);
+ if(!x9w_control_ready||!x9c_reg_live(p.slot,*p.wait)||x9q_ms()>=p.wait->deadline)return 0;
+ return bb_x9_call_registration(CBQ_PORT_BASE+p.slot,X9BB_NODE,p.frames,p.count,p.wait->deadline)?1:0;
+}
+/* Retry only local publication on queue/OOM loss. No MD request is repeated.
+ * Result and retained events are an all-or-none, allocation-free MD->bb batch. */
+static int x9c_reg_publish(unsigned slot,const struct x9c_reg_wait &w){
+ if(w.event_count>8)return -1;
+ uint8_t sdu[9][14]={};x9c_reg_publication publication={};publication.slot=slot;publication.wait=&w;
+ uint8_t *result=sdu[0];result[0]=2;memcpy(result+1,w.req+1,4);
+ result[5]=7;result[7]=2;result[8]=4;publication.count=1;
+ const struct x9c_client &c=x9c_clients[slot];
+ if((w.options.present&2)&&w.options.handover&&!c.handover){
+  for(unsigned i=0;i<w.event_count;i++){
+   if(x9cw_handover_indication(sdu[publication.count],14,w.events[i])!=11)return -1;
+   publication.count++;
+  }
+ }
+ bool allocated=true;
+ for(unsigned i=0;i<publication.count;i++){
+  bb_x9_call_frame &f=publication.frames[i];f.sdu=sdu[i];f.size=i?11:14;
+  f.owned=static_cast<uint8_t *>(IOMallocData(CBQ_HDR+f.size));
+  if(!f.owned){allocated=false;break;}
+ }
+ int rc=allocated?x9_md_mipc_call_publish(w.floor,x9c_reg_publish_callback,&publication):0;
+ for(unsigned i=0;i<publication.count;i++){
+  bb_x9_call_frame &f=publication.frames[i];
+  if(f.owned&&rc!=1){bzero(f.owned,CBQ_HDR+f.size);IOFreeData(f.owned,CBQ_HDR+f.size);}
+ }
+ bzero(sdu,sizeof(sdu));return rc;
 }
 static void x9c_reg_answer(unsigned slot,unsigned index,uint16_t error){
  struct x9c_reg_wait &w=x9c_reg_wait[slot][index];
  if(!error&&!x9c_event_transport_ready())error=X9Q_NOT_READY;
+ /* An enable accepted before live queue overflow cannot clear that owner.
+  * Only a successfully published explicit disable retires the blocked batch. */
+ if(!error&&(w.options.present&2)&&w.options.handover&&x9c_clients[slot].pending.blocked)
+  error=X9Q_NOT_READY;
  if(!w.answered&&x9c_reg_live(slot,w)){
-  x9q_packet p(w.req,error);p.send(CBQ_PORT_BASE+slot,X9BB_PORT_BASE+9);
+  if(!error){
+   int rc=x9c_reg_publish(slot,w);
+   if(!rc)return; // retain request/events until admission or original deadline
+   if(rc<0)error=X9Q_NOT_READY;
+  }
+  if(error){x9q_packet p(w.req,error);p.send(CBQ_PORT_BASE+slot,X9BB_PORT_BASE+9);}
   struct x9c_client &c=x9c_clients[slot];
   if(!error){
    c.registered=true;
    if(w.options.present&2){
     bool enabled=c.handover;c.handover=w.options.handover!=0;
     if(c.handover&&!enabled){
+     bzero(&c.pending,sizeof(c.pending));
      c.handover_floor=w.floor;
-     /* Preserve START/COMPLETE order even when both arrived during the
-      * owned baseline query. Registration result precedes publication. */
-     for(unsigned i=0;i<w.event_count;i++)x9c_handover_send(slot,w.events[i]);
-    }
+     /* Result and retained START/COMPLETE are already in one admitted batch. */
+    }else if(!c.handover)bzero(&c.pending,sizeof(c.pending)); // explicit successful disable retires local publication
    }
   }
  }
@@ -109,8 +174,12 @@ static void x9c_handover_event(const uint8_t *frame,unsigned n,uint32_t sequence
  for(unsigned slot=0;slot<CBQ_MAX_CLIENTS;slot++){
   struct x9c_client &c=x9c_clients[slot];
   if(!c.bound||c.generation!=x9q_clients[slot].generation||c.sim!=e.sim)continue;
-  if(c.registered&&c.handover&&sequence>c.handover_floor)x9c_handover_send(slot,e.ios_state);
-  else for(unsigned index=0;index<X9_C_REG_WAITS;index++){
+  if(c.registered&&c.handover){
+   if(x9cw_handover_queue_push(&c.pending,c.handover_floor,sequence,e.ios_state)<0){
+    c.handover=false; // lost sequence cannot authorize continued partial publication
+    printf("X9 CALL: SIM%u handover publication bounded; explicit disable required\n",c.sim+1);
+   }
+  }else for(unsigned index=0;index<X9_C_REG_WAITS;index++){
    struct x9c_reg_wait &w=x9c_reg_wait[slot][index];
    if(!w.used||w.answered||!x9c_reg_live(slot,w)||!(w.options.present&2)||
       !w.options.handover||sequence<=w.floor)continue;
@@ -132,7 +201,8 @@ static void x9c_init_poll(uint8_t *frame){
  }
  bool online=x9c_event_transport_ready();
  if(!online){
-  for(unsigned i=0;i<CBQ_MAX_CLIENTS;i++){x9c_clients[i].registered=false;x9c_clients[i].handover=false;}
+  for(unsigned i=0;i<CBQ_MAX_CLIENTS;i++){x9c_clients[i].registered=false;x9c_clients[i].handover=false;
+   bzero(&x9c_clients[i].pending,sizeof(x9c_clients[i].pending));}
   for(unsigned i=0;i<CBQ_MAX_CLIENTS;i++)for(unsigned index=0;index<X9_C_REG_WAITS;index++){
    struct x9c_reg_wait &w=x9c_reg_wait[i][index];
    if(w.used&&!w.answered)x9c_reg_answer(i,index,X9Q_NOT_READY);
@@ -202,6 +272,7 @@ static uint16_t x9c_reg_begin(unsigned slot,const uint8_t *req,unsigned len){
  if(r.call_events)return X9Q_UNSUPPORTED;
  const struct x9c_client &c=x9c_clients[slot];
  if(!c.bound||c.generation!=x9q_clients[slot].generation)return X9Q_NOT_READY;
+ if((r.present&2)&&r.handover&&c.pending.blocked)return X9Q_NOT_READY;
  unsigned index=X9_C_REG_WAITS;
  for(unsigned i=0;i<X9_C_REG_WAITS;i++){
   const struct x9c_reg_wait &w=x9c_reg_wait[slot][i];
@@ -340,6 +411,7 @@ static void x9c_poll(){
  x9c_observed=x9_md_mipc_call_snapshot(&x9c_outbound)==1;
  x9c_incoming_observed=x9_md_mipc_call_incoming_snapshot(&x9c_inbound)==1;
  x9c_init_poll(frame);
+ for(unsigned slot=0;slot<CBQ_MAX_CLIENTS;slot++)x9c_handover_flush(slot);
  x9c_end_poll(frame);
  struct x9c_dial_job &j=x9c_dial_job;if(!j.used)return;
  if(j.answered&&j.cnf&&!j.token&&!j.join.failed&&x9c_observed&&!x9c_outbound.blocked&&

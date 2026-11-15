@@ -6,6 +6,9 @@
 #define X9_PROX_INFO_BYTES 40u
 #define X9_PROX_DATA_BYTES 36u
 struct x9_prox_sample {
+ /* host_time is mach_absolute_time at receipt. scp_time_ns is the legacy
+  * name for unconverted wire time, not a qualified host measurement time.
+  * A confirmed on-change level does not expire by receipt/measurement age. */
  uint64_t sequence, host_time, scp_time_ns;
  int32_t oneshot, steps, auxiliary;
  uint32_t near, diagnostic;
