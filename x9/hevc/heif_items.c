@@ -583,6 +583,19 @@ static int property_parse(const struct x9_heif_document *d,
     case T('c','l','l','i'):
         bit = 32; if (p->payload.bytes != 4) e = EBADMSG;
         break;
+    case T('a','m','v','e'):
+        /* Ordinary Box, not a FullBox. Preserve the original u32/u16/u16
+         * nominal ambient units; no display adaptation or colour policy. */
+        bit = 64;
+        if (p->payload.bytes != 8) e = EBADMSG;
+        if (!e) e = u32(&c,4,&flags);
+        if (!e && !flags) e = EBADMSG;
+        for (unsigned n = 0; n < 2 && !e; n++) {
+            e = u32(&c,2,&flags);
+            if (!e && flags > 50000) e = EBADMSG;
+        }
+        if (!e) e = finish(&c);
+        break;
     default: if (p->essential) e = ENOTSUP; break;
     }
     if (!e && bit && (*seen & bit)) e = EEXIST;

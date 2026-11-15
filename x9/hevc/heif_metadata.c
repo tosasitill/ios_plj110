@@ -71,8 +71,8 @@ static int color_extension(const struct x9_heif_document *document, const struct
     }
     return 0;
 }
-/* ISO BMFF mdcv/clli are ordinary boxes, not FullBoxes. Their unchanged
- * 24/4-byte big-endian payloads use the same layout as CM/CV's HEVC SEI data.
+/* ISO BMFF mdcv/clli/amve are ordinary boxes, not FullBoxes. Their unchanged
+ * 24/4/8-byte big-endian payloads use the same layout as CM/CV's HEVC SEI data.
  * Keep these item-local: they are not colr, an inherited graph color policy,
  * a claim about output mastering, or a request for a guessed tone mapper. */
 static int hdr_extension(const struct x9_heif_document *document, const struct x9_heif_property *p,
@@ -84,12 +84,21 @@ static int hdr_extension(const struct x9_heif_document *document, const struct x
         key = kCMFormatDescriptionExtension_MasteringDisplayColorVolume; flag = 1; length = 24;
     } else if (p->type == X9_HEIF_TYPE('c','l','l','i')) {
         key = kCMFormatDescriptionExtension_ContentLightLevelInfo; flag = 2; length = 4;
+    } else if (p->type == X9_HEIF_TYPE('a','m','v','e')) {
+        key = kCMFormatDescriptionExtension_AmbientViewingEnvironment; flag = 4; length = 8;
     } else return 0;
     if (*seen & flag) return EEXIST;
     if (p->payload.bytes != length) return EBADMSG;
     const uint8_t *raw = NULL;
     int e = x9_heif_span_data(document,p->payload,&raw);
     if (e) return e;
+    if (flag == 4) {
+        /* Also qualify direct metadata callers before creating any CFData;
+         * a selected item from get_image has already checked these values. */
+        struct x9_hevc_hdr check = { .ambient_present = 1 };
+        memcpy(check.ambient,raw,8);
+        if (x9_hevc_hdr_validate(&check)) return EBADMSG;
+    }
     CFDataRef value = CFDataCreate(NULL,raw,length);
     if (!value) return ENOMEM;
     CFDictionarySetValue(info,key,value);
