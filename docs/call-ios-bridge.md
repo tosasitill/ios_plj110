@@ -70,6 +70,60 @@ copied request并非实际send对象，requestToMcl仍接原引用，其owned CL
 当前encoder在该窄链无已证错误；字段来源、原日志及精确owned copy在
 `x9/out/call-md-profile-owner/`。本节没有生产行为修改、编译、测试、设备操作或最终镜像。
 
+### 原 broker SendProxy、消息与回调的真实所有权（2026-11-16）
+
+本轮修正旧 `call-native-ingress/native-ingress-contract.json` 的
+`callback fields@+18/+20` 描述：VOICE wrapper `1f1a2482c` 持有的
+**0x28-byte inner qmi SendProxy 的 +18 不是 callback**。
+原 `Client::send19ecd2294` 只取真实State并进入 `State::send19ecd2c7c`：
+
+| inner offset | 原 ABI / 生存期 |
+| --- | --- |
+| +0 | 借用稳定地址的 `qmi::Client*`；wrapper同步dispatch期间不能失效 |
+| +8 | owned `QMIServiceMsg*`；不是裸7-byte QMI SDU |
+| +10 | u32 timeout；VOICE wrapper明确初始化25000ms |
+| +18 | 可空的借用 `uint16_t*` transaction输出地址；`19ecd2ed4/2ed8`同步写入u16 |
+| +20 | response block；`19ecd2db8/2dc0`读取并调用真实 `_Block_copy` |
+
+`19ecd2f84..f94` 构造40B async send capture：State、owned XPC dict、retained
+message、copied block，以及**u16 transaction值**。外围SharedSynchronizable wrapper
+保State强owner；消费者 `19ecd3998` 再调用 `send_sync19eccfd8c`，不继续借用原
+Client地址或transaction输出地址。同步txn输出只是本地分配值，不是MD接受或终态。
+不能将+18当block，也不能因原临时wrapper销毁就退休
+本native epoch。传输仍复用既有 `com.apple.commcenter.atcs.xpc` / QMUX / ABP，
+没有新增raw reader或callable backend。
+
+原export trie另证 `QMIServiceMsg::create(const void*,unsigned short)19ecff70c`
+与 `createRequest(const void*,unsigned short)19ecff82c`：两者将借用输入交给
+`QMIServiceMsg19ecce120`，读取**u16 message-id + u16 TLV字节数的4B header**，
+再为每个tag/u8、length/u16、value独立分配/深复制。输入不是带flags/transaction的7B
+QMI SDU，更不是QMUX frame。原constructor断言总长度并在bool=true时另解析Result；
+`createRequest`的bool=false不解析response Result。构造与回调有真实intrusive message
+owner，不能用raw结构memcpy替代它，也不能把callback的 `const QMIServiceMsg&`
+裸引用保留到异步工作以后。
+
+`postResponseToClient_sync19ecd219c` 在State+78 callback queue上安排40B capture：
+retained response、copied block、State+100/+108的weak handle pair和
+**State+81 configured-handle flag快照**。消费者 `19ecd3b58` 中，flag非零时必须
+weak-control `lock()`成功且weak identity非空才invoke；flag为零仍可invoke，不能
+泛称“没有weak handle就无回调”。`setClientHandle19ece28e8` 只更新State中的pair/flag，
+不会改已入队capture；`stop19ece29c8` 是State+10配置队列上的async请求，其实际消费者
+`19ece5514` 清的是State+80 started bit，不是旧capture的flag。+10/+78是不同配置槽，
+不足以证明运行时queue身份必不同，也未证明这里存在顺序barrier。**stop/release或weak-lock
+本身都不是callback queue fence**；晚回调仍需由真实context/generation/UUID/epoch owner拒绝。
+
+`handleResponse_sync19ecd15c0` 按该State pending vector里的transaction匹配并移除owner，
+原raw响应再交constructor、local error走原错误消息，最终发布copied block。这个匹配不
+赋予UUID/native epoch归属，也不替代派生backend的expected message-id/route核对或真实
+typed terminal delegate。这里仅闭合可复用的原传输ABI，不造新的成功回执/ACTIVE。
+
+证据 `x9/out/call-context-backend/`：`broker-owned-contract.json`、六组原件汇编、
+`qualify-broker-original.py` / `broker-current-cache-qualification.json`，22处本轮原件
+范围均匹配当前root Cryptex cache；`read-owner-islands.py` 将四个原cache支岛实际解至
+`_Block_copy/_Block_release/__shared_weak_count::lock/__release_weak`，不凭nearest-symbol
+注释定名。这不是产物复检、provider执行、编译或通话验收；VOICE09仍关闭，生产DIAL
+caller/profile、完整typed backend及双向专用媒体仍缺。
+
 ### NAS03本地初始化订阅：真实host queue receipt
 
 本项与VOICE03/IMSA的网络注册不同。Apple `registerEvents_sync1f1ab620c` 以
