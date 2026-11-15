@@ -274,6 +274,68 @@ class TargetHFS:
             raise ValueError('short/nonbytes targeted-HFS read')
         return data
 
+    def require_clean_journal(self):
+        """Validate only JIB/header and require a clean, internal JNLx journal.
+
+        Explicitly call after native HFS detach and again for final live
+        verification. Construction/read-only lookups intentionally allow a
+        dirty baseline: native HFS, not this parser, performs its replay.
+        No journal transactions are read, replayed, discarded or rewritten.
+        """
+        vh = self._read(1024, 512)
+        if vh != self.vh:
+            raise ValueError('volume header changed since targeted-HFS construction')
+        attributes, = be('I', vh, 4)
+        jib_block, = be('I', vh, 12)
+        if not attributes & 0x2000 or not 0 < jib_block < self.total:
+            raise ValueError('requires a journaled volume with an internal JIB')
+        jib_offset = jib_block * self.block
+        jib = self._read(jib_offset, 512)
+        flags, = be('I', jib)
+        if flags != 1:  # InFS=1; external=2, initialization pending=4.
+            raise ValueError('external/uninitialized/unknown journal-info flags')
+        offset, size = be('QQ', jib, 36)
+        if (not offset or offset % 512 or not 256 << 10 <= size <= 0x80000000 or
+                size % 512 or offset + size > self.size or
+                (offset < jib_offset + 512 and jib_offset < offset + size)):
+            raise ValueError('invalid internal journal extent/size')
+        # The checksum covers 44 bytes, not the whole jhdr_size sector and
+        # not the new sequence field at +44. Reading its first 512 bytes is
+        # sufficient even when native HFS used a 4096-byte journal sector.
+        header = self._read(offset, 512)
+        order = None
+        for candidate in ('<', '>'):
+            if struct.unpack_from(candidate + 'II', header) == (0x4a4e4c78, 0x12345678):
+                order = candidate
+                break
+        if order is None:
+            raise ValueError('unsupported journal magic/byte order (requires JNLx)')
+        magic, endian, start, end, journal_size, block_header, checksum, header_size, sequence = \
+            struct.unpack_from(order + 'IIQQQiIiI', header)
+        # calc_checksum in hfs_journal.c operates on ORIGINAL on-disk bytes
+        # before swap_journal_header, with the checksum field cleared.
+        source = bytearray(header[:44])
+        source[36:40] = bytes(4)
+        calculated = 0
+        for byte in source:
+            calculated = ((calculated << 8) ^ (calculated + byte)) & 0xffffffff
+        calculated = (~calculated) & 0xffffffff
+        if calculated != checksum:
+            raise ValueError('journal header checksum mismatch')
+        if (journal_size != size or header_size < 512 or header_size > self.block or
+                header_size & (header_size - 1) or offset % header_size or size % header_size or
+                size < header_size * (header_size // 16) or
+                block_header < header_size or block_header > size or block_header % header_size or
+                not header_size <= start <= size or not header_size <= end <= size or
+                start % 512 or end % 512):
+            raise ValueError('invalid journal header geometry/start/end')
+        if start != end:
+            raise ValueError('journal remains dirty after native HFS detach')
+        return {'state': 'clean', 'kind': 'internal-JNLx', 'byte_order': order,
+                'offset': offset, 'size': size, 'start': start, 'end': end,
+                'header_size': header_size, 'block_header_size': block_header,
+                'sequence': sequence, 'checksum_verified': True}
+
     def _child(self, parent, name):
         encoded = name.encode('utf-16be', 'strict')
         if len(encoded) > 510:
