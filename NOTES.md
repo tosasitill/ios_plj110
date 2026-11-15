@@ -413,6 +413,15 @@ AppleUSBDeviceMux 链进内核空的 `__PRELINK_*` 段（slide `0xfffffe000a4000
 - **提交 / 保留产物**：代码 `e9f7b7c` 已 ff 合入 main 并 push origin；主 checkout 上再次从新 owner 状态运行 18 项测试通过。分析/编译产物已移动保留在**主 checkout** `x9/out/call-ios-bridge/`：`compile-one-final.log` 两对象均 True / FAILURES[]，`host-tests/unittest-main.log` 为 main 的 18 项通过记录，`md-call-evidence.json` 为本版符号来源信息；原 nanoMIPS decoder / MD 与 Apple 反汇编同目录。原件及派生数据不入 git。基础阶段树/分支合入后清理；补齐材料后从 main 新开功能分支，不复用旧探针路径。
 - **VOICE 服务不发布，不新增默认开启参数，不自动 approve，不构建 boot.img、不上机、不发通话或短信、不写 NV/分区**。本阶段无 CI run（`gh run list --branch feat/call-ios-bridge` 返回空；当前改动不命中 Actions push 路径）。信令/声音均未设备验收，不能称通话接入完成。
 
+#### 2026-11-15 Android 通话材料补抓 / 实测卡2拨出
+
+- 用户切回 Android，要求先抓文件再指导场景。本轮独立 `feat/call-android-capture`，起点 `f2797a9`；只读 adb，唯一 online PLJ110，实测 `su -c id` 为 root。没有清 logcat、改 property、重启 RIL、拨号自动化或设备写入。主树由其他窗口使用。
+- **补齐原件**：实际 `mtkfusionrild` PID1761 的 maps 加载 `/vendor/lib64/libmtkmipc-ril.so`，抓回 **4148424 B / SHA256 `19fb2bc0c2b5532d8b4f8460779159277ebfe54930eff0be2198d9e871f5bdba`**，恢复至既有 `.local/x9/modem/vendor-bin/x9b/libmtkmipc-ril.so`（没有覆盖不同原件）。RIL/audio/IMS/CCCI maps、cmdline、匹配 init rc、音频配置、radio/all logcat、dmesg、telephony/telecom/isub/audio 基线共124项全部 exit0。拨号后 HAL 新加载的 `lib_aurisys_opve.so`、`libaurisysdemo.so`、`libspeechparser_vendor.so` 也从更新 maps 按实际路径补抓。
+- **真实拨出**：用户在卡2拨10086（非紧急号），18:42:37.684 `0901` tx044c mask2 / 72 B：`8100 number/NUL`、`108/u8=0`、`101/u32=2`、`102/u32=1`、`103/u32=0`、`104/u32=0`（这是本场景实包，不是通用默认参数）。37.687 `0902` tag0/u32=0，之后6条 `4901`；51.865 `0905` mode100/u32=0、id101/u32=1；51.878 `0906` result0；51.894 `090f {}` → 51.896 `0910`。后验 telephony 两 SIM 均 callstate0。**0902 本包没有 call id，不能凭 CNF 成功给 iOS 造 id。**
+- **关键限制**：6条 `4901` header 声明512/520 B，但实际 AT 日志 DUMP 都只有486 B，尾部截断，不能作为完整状态向量。新的 RIL 原库可用于离线核对完整 framing / 状态；10086 测试未有双向音频人工确认，不等于通话音频验收。用户已明确**不方便来电测试，后续仅按拨出逻辑推进，不再要求补来电**。
+- **采集工具 / 产物**：`x9/tools/record_android_calls.py` start/status/mark/stop，仅录现有 logcat，显式私有 session 的设备选择、无重启/清日志、单次有界且不覆盖旧样本。实测18:42:02启动，18:45:29按用户需求停止，`live-logcat.txt` **24708239 B**。私有目录暂在 `.worktrees/call-android-capture/x9/out/android-calls-20261115-183941/`，含124项 SHA256 manifest、private session、live状态/事件与补抓 manifest；只提交脚本/脱敏交接，原库/序列号/号码/日志均不入 git。后续删除树前必须迁移有价值产物到主树 `x9/out/`。
+- 无 CI run、无编译/boot.img、无 iOS 上机。下一步新拨号功能分支：将已验证普通 VOICE20 输入与这个 Android profile 对齐；不盲目开启 VOICE，不猜 call id、CLIR、domain 或音频配置。
+
 ### 5.7 2026-11-13 音频：ADSP 自动 dsp-boot 镜像（分支 feat/audio-dsp-boot，worktree `.worktrees/audio-dsp-boot`）
 
 - feat/audio-bounded-fdt 已 ff 合入 main（`b25f4ca`），worktree/分支已删；`android-callsms-20261113`、`shimtest`、fdt2/3/4 的 usb-log 移到本 worktree 的 `x9/out/`。
