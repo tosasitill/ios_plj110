@@ -102,6 +102,7 @@ static struct {
 static int cam_repeat_fbc_live(unsigned,uint32_t *,bool *);
 static uint32_t cam_repeat_fbc_compare(unsigned,uint32_t);
 static uint32_t cam_repeat_fbc_busy(void);
+static int cam_repeat_post_guard(unsigned,uint32_t,bool *);
 static void cam_sv_gate_init(void);
 static void cam_sv_gate_capture(void);
 static void cam_sv_gate_status(void);
@@ -499,10 +500,13 @@ static int cam_sv_post(unsigned slot,uint32_t next)
     /* Credits are NOT ordinary configuration dirty bits. No DB load,
      * field restore or address rearm may cancel/replay an issued credit. */
     if(cam_sv.credit_issued) {
-        if(!cam_sv.credit_retired || !cam_sv.close_attempted)return EBUSY;
-        e=cam_irq_credit_retired_guard(cam_sv.epoch);if(e)return e;
-        if(slot<CAM_SV_FIELDS && next!=cam_sv.before[0][reg])return EINVAL;
-        if(slot==CAM_SV_FIELDS && ((next^cam_sv.before[0][reg])&~CAM_SV_DB_EN))return EINVAL;
+        bool repeat=false;e=cam_repeat_post_guard(slot,next,&repeat);if(e)return e;
+        if(!repeat) {
+            if(!cam_sv.credit_retired || !cam_sv.close_attempted)return EBUSY;
+            e=cam_irq_credit_retired_guard(cam_sv.epoch);if(e)return e;
+            if(slot<CAM_SV_FIELDS && next!=cam_sv.before[0][reg])return EINVAL;
+            if(slot==CAM_SV_FIELDS && ((next^cam_sv.before[0][reg])&~CAM_SV_DB_EN))return EINVAL;
+        }
     }
     if(cam_sv.pending_slot<=CAM_SV_FIELDS)return EBUSY;
     if(next==cam_sv.expected[0][reg])return 0;

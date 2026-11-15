@@ -318,6 +318,56 @@ static int cam_repeat_cpu_boundary_locked(uint64_t epoch)
     }
     cam_irq_spin_drop(old);return e;
 }
+/* Narrow same-buffer post authority during the native PREPARING journal,
+ * AFTER the prior real DONE/FBC/RAW_IDLE/worker boundary and AFTER the new
+ * slot has actually transitioned to DEVICE. Called only by ordinary SVpost
+ * with control + IRQ mutex held, following its independent new DMA check.
+ * Allows only SAME-IOVA address/FH targets and ordinary DB_EN down/up.
+ * Never permits FBC/credit/DMA/VF/CMOS/CQ writes or canceled-credit reuse. */
+static int cam_repeat_post_guard(unsigned slot,uint32_t next,bool *handled)
+{
+    *handled=false;
+    boolean_t old=cam_irq_spin_take();
+    if(!cam_repeat.enabled || cam_repeat.phase!=CAM_REPEAT_PREPARING || cam_sv.credit_retired) {
+        cam_irq_spin_drop(old);return 0;
+    }
+    *handled=true;
+    int e=cam_repeat.error?cam_repeat.error:cam_irq.error?cam_irq.error:cam_irq_fbc.error;
+    if(!e && (!cam_repeat_identity() || !cam_repeat.admission || !cam_repeat.prior_done ||
+       cam_irq.accepting || cam_irq.busy || cam_irq.count || !cam_irq_fbc.done_seen ||
+       !cam_irq_fbc.count_accepted || cam_irq_fbc.source_phase!=CAM_STREAM_RUNNING ||
+       cam_irq_fbc.source_issued!=CAM_STREAM_ON || cam_irq_fbc.source_ack!=CAM_STREAM_ON ||
+       cam_sv.request.iova!=cam_irq.request.iova ||
+       cam_sv.request.frame.generation!=cam_irq.request.frame.generation ||
+       cam_sv.request.frame.sensor!=cam_irq.request.frame.sensor ||
+       cam_sv.request.frame.capture_id<=cam_irq.request.frame.capture_id))e=ESTALE;
+    for(unsigned bank=0;bank<2 && !e;bank++) {
+        e=cam_irq_power();if(e)break;
+        uint32_t ctl=cam_irq_rd(cam_irq.view[bank],0x540),count=cam_irq_rd(cam_irq.view[bank],0x544);
+        e=cam_irq_fbc_note_locked(bank,ctl,count);
+        if(!e && !cam_repeat_done_target_locked(bank,count))e=ESTALE;
+    }
+    cam_irq_spin_drop(old);if(e)return e;
+    uint32_t delta=cam_sv.request.inner_sequence-cam_irq.request.inner_sequence;
+    if(!delta || delta>=0x80000000u)return ESTALE;
+    if(slot==CAM_SV_FIELDS) {
+        if((next^cam_sv.expected[0][cam_sv.db_reg])&~CAM_SV_DB_EN)return EINVAL;
+    } else if(slot>=CAM_SV_ADDR_LO && slot<=CAM_SV_FH) {
+        uint32_t mask=cam_sv_fields[slot].mask;
+        uint32_t want=(cam_sv.expected[0][cam_sv.field[slot]]&~mask)|(cam_sv.target[slot]&mask);
+        if(next!=want)return EINVAL;
+    } else return EACCES;
+    lck_mtx_lock(&camera_camsv_lock);
+    e=!cam_irq.slot || cam_irq.slot!=cam_sv.request_slot || cam_irq.slot->state!=X9_CAMSV_ARMED ||
+        memcmp(&cam_irq.slot->request,&cam_sv.request,sizeof(cam_sv.request))?ESTALE:0;
+    if(!e) {
+        struct x9_camera_s1 *m=cam_irq.slot->dma.backing;
+        lck_mtx_lock(&camera_s1_lock);e=cam_s1_check_private(m);
+        if(!e && (m->raw_errno || m->raw_state!=CAM_RAW_DEVICE || !cam_s1_dma_match(m,cam_irq.slot)))e=ESTALE;
+        lck_mtx_unlock(&camera_s1_lock);
+    }
+    lck_mtx_unlock(&camera_camsv_lock);return e;
+}
 /* Source OFF has really ACKed. Drain no-credit SOF/CHANNEL accumulated
  * while the completed CPU slot was parked/masked, through actual IAR/EOI,
  * never ICPENDR/ICACTIVER or a blind R-C sweep. Control + IRQ mutex held. */
