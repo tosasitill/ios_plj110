@@ -24,6 +24,8 @@ struct x9_camera_native_source_status {
     uint32_t pll_rate, pll_fenc, vcore[3];
     uint32_t cam_clock_count[2], cam_parent, cam_rc_level;
     uint64_t cam_clock_hz;
+    uint64_t average_bytes_sec, peak_bytes_sec;
+    uint32_t bandwidth_units[2], bandwidth_current[2], bandwidth_ostd;
 };
 /* Included after x9_camera_receiver.inc. The native platform's config
  * callback already holds camera_control_lock and must call the _locked
@@ -35,10 +37,14 @@ struct x9_camera_native_source_status {
  * CONFIGURED means inactive register consumption only. The two real CSI
  * counts, native-only cold parent9, unchanged PLL PCW/FENC and the held
  * UFS monotonic voltage floor qualify the real CSI step0 rate. VCORE is
- * the real controller's request/gear, not a PMIC measurement. No new PLL,
- * voltage or bandwidth request is issued. The one SENINF parent restores
- * after unvote through the original MM close. Capture needs its real host
- * lease and CAMSV/SMI bandwidth/rate supplier.
+ * the real controller's request/gear, not a PMIC measurement. No shared PLL
+ * or AP VCORE rewrite is issued. The one SENINF parent restores
+ * after unvote through the original MM close. Native CAM additionally
+ * owns one real VMMRC user-cam vote with two fresh processing counts;
+ * scoped MMPC_V2 AP bandwidth floor uses actual preview stride/LL/PLL
+ * and minimum FL, checks TOTAL_CURRENT and A0 HRT/OSTD readback. These
+ * retire through original MM/SMI close; capture still needs its real host
+ * lease, SMMU/SID attach and complete DMA retirement.
  */
 #endif
 #endif

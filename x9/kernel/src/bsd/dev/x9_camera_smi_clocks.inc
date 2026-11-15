@@ -31,6 +31,8 @@ static int cam_smi_a0_guard(void);
 static int cam_smi_a0_open_locked(void);
 static int cam_smi_a0_close_locked(void);
 static int cam_smi_a0_pending_retire(void);
+static int cam_native_bw_guard(void);
+static int cam_native_bw_close_locked(void);
 static int cam_smi_shared_capture_locked(void);
 static int cam_smi_shared_voter_guard(void);
 static int cam_smi_shared_control_guard(bool);
@@ -113,7 +115,8 @@ static int cam_smi_clock_guard(void)
 {
     int e=cam_smi_clock_only_guard();
     if(!e)e=cam_smi_shared_control_guard(false);
-    return e?e:cam_smi_a0_guard();
+    if(!e)e=cam_smi_a0_guard();
+    return e?e:cam_native_bw_guard();
 }
 static int cam_smi_slot_take(unsigned n)
 {
@@ -199,7 +202,13 @@ static int cam_smi_clocks_close_locked(uint64_t epoch)
     cam_smi.close_attempted=true;
     e=cam_smi_pending_retire();if(!e)e=cam_smi_clock_only_guard();
     /* Port controls retire while BOTH supplier and consumer clocks remain
-     * held. A pending A0 write is qualified by its own sole close below. */
+     * held. A pending A0 write is qualified by its own sole close below.
+     * Native AP budget withdraw precedes A0 restore. Port idle here is only
+     * the SMI-side condition, not a DMA grant/full capture retirement:
+     * upstream mandatory engine authority must qualify its actual retire
+     * scope before it permits this sole supplier close. */
+    if(!e)e=cam_smi_a0_pending_retire();
+    if(!e)e=cam_native_bw_close_locked();
     if(!e)e=cam_smi_a0_close_locked();
     if(!e)e=cam_smi_shared_close_locked();
     if(!e)e=cam_smi_clock_guard();
@@ -273,6 +282,7 @@ static int cam_smi_clocks_open_locked(uint64_t epoch,unsigned sensor)
 }
 #include "x9_camera_smi_shared.inc"
 #include "x9_camera_smi_a0.inc"
+#include "x9_camera_native_bw.inc"
 static int cam_smi_retirement_guard(uint64_t epoch)
 {
     int e;
@@ -283,6 +293,7 @@ static int cam_smi_retirement_guard(uint64_t epoch)
     e=cam_smi_pending_retire();
     if(!e)e=cam_smi_shared_retirement_guard(epoch);
     if(!e)e=cam_smi_a0_pending_retire();
+    if(!e)e=cam_native_bw_pending_retire();
     return e?cam_smi_fault(e):cam_smi_clock_guard();
 }
 int x9_camera_sensor_session_prepare_smi_clocks(uint64_t epoch,struct x9_camera_smi_clock_status *s)

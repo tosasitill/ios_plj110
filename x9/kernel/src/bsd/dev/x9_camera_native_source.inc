@@ -43,6 +43,12 @@ static void cam_native_source_snapshot_locked(void)
         s->clock_count[1]=cam_phy.status.clock_count[1];
     }
     if(cam_out.held && cam_out.epoch==s->sensor_epoch)s->outmux_flags=cam_out.status.flags;
+    if(cam_native_bw.held && cam_native_bw.epoch==s->sensor_epoch) {
+        s->average_bytes_sec=cam_native_bw.average;s->peak_bytes_sec=cam_native_bw.peak;
+        memcpy(s->bandwidth_units,cam_native_bw.units,sizeof(s->bandwidth_units));
+        memcpy(s->bandwidth_current,cam_native_bw.current,sizeof(s->bandwidth_current));
+        s->bandwidth_ostd=cam_native_bw.ostd;
+    }
 }
 
 /* Actual live.dts cdphy-dvfs-step0..3, not the driver's stale 356MHz
@@ -96,6 +102,12 @@ static int cam_native_source_rate_guard_locked(uint64_t epoch)
     e=cam_native_rate_guard(&cam_mm,false);if(e)return e;
     if(!cam_native_rate.seen || !cam_native_rate.applied || cam_native_rate.level!=2 ||
        !s->cam_clock_hz || !(cam_rr(cam_mm.top,0x270)&(1u<<18)))return ESTALE;
+    e=cam_native_bw_guard();if(e)return e;
+    e=cam_smi_a0_guard();if(e)return e;
+    if(!cam_native_bw.held || !cam_native_bw.complete || cam_native_bw.epoch!=epoch ||
+       cam_smi_a0.expected[CAM_SMI_A0_OSTD]!=cam_native_bw.ostd ||
+       (cam_smi_a0.expected[CAM_SMI_A0_ULTRA]&1) ||
+       (cam_smi_a0.expected[CAM_SMI_A0_NONSEC]&8))return ESTALE;
     e=cam_native_source_voltage_locked();
     return e;
 }
@@ -170,6 +182,7 @@ static int cam_native_source_rate_locked(uint64_t epoch)
     /* Recheck the real retained source after both observations; an observed
      * rate still does not permit the capture authority to assert RATE/SMI. */
     e=cam_native_source_processing_locked();
+    if(!e)e=cam_native_bw_take_locked(epoch);
     if(!e)e=cam_phy_dependencies();
     if(!e && ((cam_rr(cam_mm.top,d->cfg)>>d->shift)&0xff)!=parent)e=ESTALE;
     if(!e) {
