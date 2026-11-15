@@ -320,8 +320,8 @@ static void worker(void *unused,wait_result_t result)
         printf("X9 BT: initializer failed stage=%d errno=%d cleanup=%d; native remains unavailable\n",
             session_stage,error,stop_error); return;
     }
-    /* This branch is currently unreachable while the SSPM CMM gate returns
-     * ENOTSUP. Compile/link success must not be reported as reaching it. */
+    /* Every preceding gate must pass on THIS boot, including current SSPM
+     * readbacks and all real vendor completions. Compilation is not proof. */
     x9_bt_serial_result(0,session.baud);
     /* Publish READY last. The launch/BlueTool gate also reads serial.boot;
      * exposing READY before clearing its initial ENXIO would reject a real

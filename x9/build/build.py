@@ -257,6 +257,9 @@ class Builder:
         self.run_or_exit([sys.executable, '-I', str(X9 / 'tools/bluetooth_board.py'),
                           '--connfem', str(ROOT / '.local/x9/wifi-nvram/connfem.dts')], ROOT,
                          label='bluetooth_board.py')
+        self.run_or_exit([sys.executable, '-I', str(X9 / 'tools/bluetooth_vendor.py')] +
+                         (['--required'] if radio_arg(boot_args, 'x9_bt_init') == 1 else []), ROOT,
+                         label='bluetooth_vendor.py')
         # Match sweet_x9_gps.c: explicit x9_gps overrides compact x9s bit4.
         # This is a firmware identity, not an automatic download/boot lease.
         real_gps = gps_enabled(boot_args)

@@ -40,15 +40,20 @@ def main():
                 LOCAL / 'vendor/oppo-camera-imgsensor-common', LOCAL / 'apple/ios16-20H392',
                 WORK / 'mesa-source', WORK / 'mesa-render-source',
                 WORK / 'metal2vulkan-pan205-source', WORK / 'libdrm-2.4.133']
+    required += [LOCAL / 'x9/bluetooth/android-mt6653' / name for name in
+                 ('libbluetooth_mtk.so', 'btinit.bin', 'properties.txt', 'BT_FW.cfg')]
     missing = [str(p.relative_to(ROOT)) for p in required if not p.exists()]
     if missing:
         ap.error('missing local inputs: ' + ', '.join(missing))
-    links = [(LOCAL / 'x9/MaliMetal/X9/General', ROOT / 'x9/metal/General')]
-    links += [(WORK / p.name, p) for p in (ROOT / 'x9/build/scripts').glob('*.py')
+    # A feature worktree shares main's fixed .local; do not retarget shared
+    # plugin links to a temporary worktree, or report main's links as stale.
+    maintained = LOCAL.resolve().parent if LOCAL.is_symlink() else ROOT
+    links = [(LOCAL / 'x9/MaliMetal/X9/General', maintained / 'x9/metal/General')]
+    links += [(WORK / p.name, p) for p in (maintained / 'x9/build/scripts').glob('*.py')
               if "'.local/x9/work/x9-metal-render'" in p.read_text()]
     # Scripts moved out of build/scripts (or deleted) leave dangling links.
     stale = [p for p in WORK.glob('*.py') if p.is_symlink() and not p.exists()
-             and (ROOT / 'x9/build/scripts') in (p.parent / os.readlink(p)).resolve().parents]
+             and (maintained / 'x9/build/scripts') in (p.parent / os.readlink(p)).resolve().parents]
     for p in stale:
         if a.check:
             print('note: dangling link to a moved script: ' + str(p.relative_to(ROOT)))

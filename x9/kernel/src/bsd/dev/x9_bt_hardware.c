@@ -262,19 +262,6 @@ static int verify_ownership(void *context)
     }
     return x9_conn_power_done(X9_CONN_BT);
 }
-static int controller_config(void *context)
-{
-    (void)context;
-    /* btmtk_fops_open -> btmtk_send_init_cmds -> phase1 WMT/vendor config.
-     * The source's cfg loader is USE_DEVICE_NODE==0 only. The production
-     * node==1 route also has an Android userspace vendor initialization;
-     * its captured inputs now exist, but the complete selected constructor
-     * sequence has not been encoded/embedded. Preferred BT_FW.cfg has an
-     * actual FC37 A2DP append. Do not infer that node==1 loads bt.cfg, or
-     * substitute an empty config / emulator transcript for a reviewed port. */
-    printf("X9 BT: reviewed production vendor sequence embedding required\n");
-    return ENOENT;
-}
 int x9_bt_hardware_stop(void)
 {
     /* Worker disables its UART IRQ/TX first. Never restore full shared
@@ -313,6 +300,5 @@ void x9_bt_hardware_ops(struct x9_bt_session_ops *o)
      * IER changes with the actual IRQ filter. Do not replace it here. */
     o->hub_features=hub_features;
     o->post_download=post_download; o->verify_ownership=verify_ownership;
-    o->controller_config=controller_config;
 }
 #endif

@@ -27,9 +27,6 @@ struct x9_bt_session_ops {
     int (*post_download)(void *, bool inband);
     /* Verify driver ownership/host-awake feedback after the FW ACK. */
     int (*verify_ownership)(void *);
-    /* Android btmtk_send_init_cmds follows pre_open/open: actual selected
-     * phase1 WMT / vendor configuration, never an empty example fallback. */
-    int (*controller_config)(void *);
 };
 struct x9_bt_session_board {
     uint8_t xo[25]; /* CONNXO record bytes 2..26, without its LE length. */
@@ -42,6 +39,9 @@ struct x9_bt_session_result {
     uint32_t chip_id, baud, max_baud;
     uint8_t firmware_flags, ap_flags;
     bool driver_owned, function_powered;
+    uint32_t vendor_completed, vendor_constructor;
+    uint16_t vendor_opcode;
+    uint8_t vendor_status; /* 0xff until a valid controller status exists. */
     struct x9_bt_download_result download;
 };
 int x9_bt_session_run(const struct x9_bt_session_ops *,

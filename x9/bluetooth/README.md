@@ -2,7 +2,7 @@
 
 目标是未修改的 iOS **16.7.16 / 20H392** `bluetoothd`，不是 AppleBT kernel user-client 的仿制品。
 本目录的 H4/vendor 适配仅修改经过 UUID 与指令校验的进程内映射，不改 Apple 原件文件。
-**当前不可 stage：SSPM移交需要当前启动的真实寄存器匹配，完整vendor序列尚未嵌入，不能验收蓝牙。**
+**当前不可 stage：SSPM移交需要当前启动的真实寄存器匹配，vendor序列已嵌入但尚无XNU回包证据，sleep/resume与iOS验收未完成。**
 
 ## 当前入口
 
@@ -55,7 +55,13 @@
   ADB恢复后已补得优先配置、实际properties及完整6448 B btinit。优先配置末行**实际启用FC37的A2DP dynamic min power**，
   不是注释或空配置。countrycode/country-NV/SSPdebug/PIP四项实测为空，RAT为N/Lf/Lt/W/G。
   原件构造器离线分析已遍历24项，17条构造命令、2个property skip、5个内部无命令路径；这不是实机回包或生产输入。
-  完整vendor序列仍需review并编码/嵌入，controller_config继续ENOENT；
+  `bluetooth_vendor.py`现按原ELF指令正式移植构造器，当前输入生成17条命令+优先cfg末行FC37，接入session。
+  构建只读固定 `.local/x9/bluetooth/android-mt6653/` 的原ELF、完整btinit、properties与优先cfg，
+  不依赖Unicorn/Capstone/离线emulation JSON。ELF版本、24项表顺序、平台/chip/type、配置字段与已解析TX limits均严格校验。
+  BDADDR反序、radio的signed-byte长/短分支、功率表96+6+96+6交错、sleep literal尾部覆盖均按原load/store实现。
+  尚未移植的可选表/属性分支在构建时报错，不会静默跳过；缺输入的passive stub在runtime供电前ENOENT。
+  session供电前校验**全部**packet，再在function-on后顺序等待每条真实Command Complete/status0，记录失败step/opcode/status，
+  无模糊TX重试，最后确切FC37 append不可缺失。controller_config不再是固定ENOENT；**未在XNU实机执行**。
   不将注释中的VENDOR_CMD或源码示例 `bt.cfg` 当作生产配置。
   `uart_launcher` 的 `HCIUARTSETBAUD` 保存用户所选配置；node==1的LOADPATCH是no-op，下载在pre_open。
   `bt.cfg` loader只编入node==0路径，不能把node==1的生产HAL/vendor流程错误归成“等待bt.cfg”。
@@ -95,7 +101,7 @@
   不能由exec成功推断dyld注入/COW安装成功，必须实机验证。
 - `X9BlueTool -R`实现原件 `com.apple.BlueTool` XPC契约，`RunBuiltinScript boot/init`只读核对真正ready；
   失败result1、原始BSD errno另存x9_errno；不合成manufacturer/firmware。deepsleep明确ENOTSUP，未知命令拒绝。
-- **未完成**：完整生产controller配置编码/嵌入、XNU上SSPM/CMM移交验证、MTK SW PIO实机验证、Linux/HW backend、真实sleep/firmware-own/resume、
+- **未完成**：XNU上完整vendor序列回包与SSPM/CMM移交验证、MTK SW PIO实机验证、Linux/HW backend、真实sleep/firmware-own/resume、
   实机COW与能力/缓存路由、启动及场景验收。
   当前不安装或修改root上的launch plist。
 
@@ -108,6 +114,10 @@ python3 -I x9/bluetooth/build.py --kernel-objects --out x9/out/bluetooth-native/
 编译/adhoc签名 `btctl`、`X9H4Transport.dylib`、`X9BluetoothLaunch`、`X9BlueTool`；单独编译6个BSD对象、UART IRQ hook及2个IOKit owner对象。
 使用常规BT/Wi-Fi私有生成器；不链接完整kernel、不打包boot、不测试、不安装、不操作设备。
 输出 `build.json` 保持 `stageable=false`。
+
+`python3 -I x9/tools/bluetooth_vendor.py --required` 是纯标准库的原件移植构建入口，生成gitignored
+`x9/kernel/generated/x9_bt_vendor.inc`。`build.py all`也接此生成器；显式`x9_bt_init=1`时要求完整原件，
+不能从零输入生成“成功的空vendor初始化”。私有生成物包含地址/校准，不入git、不打印参数。
 
 可选 `--launchd-source <仓库内原始20H392 plist目录>` 仅生成启动候选配置：
 先校验两个原job的Label/mobile身份/ProgramArguments/MachServices，再仅override `Program` 为

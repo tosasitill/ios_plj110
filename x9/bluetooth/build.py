@@ -98,7 +98,7 @@ def main():
         'bluetoothd_sha256': '8b7c0a0bea51544db82269d7f2775ab7996b8740927283428c4753e032df3a8f',
         'stageable': False,
         'requires': ['current SSPM request/resources and observed 208MHz dev0/CMM profile readback; XNU handoff hardware-unverified',
-                     'reviewed complete Android HAL constructor sequence and preferred FC37 A2DP append embedding; real function power-on',
+                     'on-device completion of the embedded Android HAL constructors and preferred FC37 A2DP append; real function power-on',
                      'explicit effective Android UART_FC selection (x9_bt_fc); MTK SW PIO/escape implemented, hardware-unverified; Linux/HW unsupported',
                      'on-device validation of 20H392 capability publication and native cache routing',
                      'real deepsleep/firmware-own/resume lifecycle',
@@ -116,6 +116,8 @@ def main():
         subprocess.run([sys.executable, '-I', str(HERE.parent / 'tools/bluetooth_firmware.py'),
                         '--src', cfg.get('bluetooth_firmware') or cfg['wifi_firmware']], check=True)
         subprocess.run([sys.executable, '-I', str(HERE.parent / 'tools/bluetooth_board.py'),
+                        '--required'], check=True)
+        subprocess.run([sys.executable, '-I', str(HERE.parent / 'tools/bluetooth_vendor.py'),
                         '--required'], check=True)
         # Shared supply changes compile the actual Wi-Fi owner as well; use
         # its normal private generators, never a hand-written firmware stub.

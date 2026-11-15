@@ -7,9 +7,54 @@
 #include <sys/errno.h>
 #include "x9_bt_session.h"
 #include "../../../generated/x9_bt_board.inc"
+#include "../../../generated/x9_bt_vendor.inc"
 
 static uint32_t le32(const uint8_t *p)
 { return p[0] | ((uint32_t)p[1]<<8) | ((uint32_t)p[2]<<16) | ((uint32_t)p[3]<<24); }
+
+/* All inputs/packets must be valid before pre_on acquires SSPM/resources or
+ * changes pins. Empty passive-build stubs cannot become a radio-ready path.
+ * No partial prefix is applied if any later packet is malformed. */
+static int controller_preflight(void)
+{
+    if (!X9_BT_VENDOR_COMMANDS) return ENOENT;
+    if (X9_BT_VENDOR_COMMANDS > 64 || X9_BT_VENDOR_COMMANDS !=
+        sizeof(x9_bt_vendor_packets)/sizeof(x9_bt_vendor_packets[0])) return EINVAL;
+    for (unsigned i=0;i<X9_BT_VENDOR_COMMANDS;i++) {
+        const struct x9_bt_vendor_packet *p=&x9_bt_vendor_packets[i];
+        if (p->length<4 || p->length>sizeof(p->bytes) || p->bytes[0]!=1 ||
+            p->length!=(unsigned)p->bytes[3]+4) return EPROTO;
+        uint16_t opcode=p->bytes[1]|((uint16_t)p->bytes[2]<<8);
+        if ((opcode>>10)!=0x3f || opcode==0xfc6f) return EPROTO;
+    }
+    /* Exact selected generator path must retain preferred A2DP append. */
+    static const uint8_t append[]={1,0x37,0xfc,3,0x0d,0,1};
+    const struct x9_bt_vendor_packet *last=&x9_bt_vendor_packets[
+        sizeof(x9_bt_vendor_packets)/sizeof(x9_bt_vendor_packets[0])-1];
+    if (last->constructor || last->length!=sizeof(append) ||
+        memcmp(last->bytes,append,sizeof(append))) return EPROTO;
+    return 0;
+}
+
+static int controller_config(const struct x9_bt_session_ops *o,
+                             struct x9_bt_session_result *r)
+{
+    for (unsigned i=0;i<X9_BT_VENDOR_COMMANDS;i++) {
+        const struct x9_bt_vendor_packet *p=&x9_bt_vendor_packets[i];
+        r->vendor_constructor=p->constructor;
+        r->vendor_opcode=p->bytes[1]|((uint16_t)p->bytes[2]<<8);
+        r->vendor_status=0xff;
+        int error=x9_bt_session_vendor_command(o,p->bytes,p->length,&r->vendor_status);
+        if (error) {
+            printf("X9 BT: vendor step=%u constructor=%x opcode=%04x status=%02x errno=%d\n",
+                   i,p->constructor,r->vendor_opcode,r->vendor_status,error);
+            return error; /* No ambiguous TX/reply retries or failed-step skips. */
+        }
+        r->vendor_completed++;
+    }
+    printf("X9 BT: Android vendor configuration completed %u commands\n",r->vendor_completed);
+    return 0;
+}
 
 /* Full H4 WMT envelope; the transport must select the matching WMT opcode
  * and preserve unrelated HCI packets. Status/length are NOT prefix matches. */
@@ -129,15 +174,18 @@ int x9_bt_session_run(const struct x9_bt_session_ops *o,
 {
     if (!r) return EINVAL;
     bzero(r, sizeof(*r));
+    r->vendor_status=0xff;
     if (!o || !b || !o->io.exchange || !o->io.raw_write || !o->io.drain ||
         !o->io.sleep_ms || !o->io.now_ms || !o->io.connfem ||
         !o->pre_on || !o->power_on || !o->rx_and_32k || !o->host_uart ||
         !o->hub_features || !o->post_download || !o->verify_ownership ||
-        !o->controller_config) return EINVAL;
+        !o->hci_exchange) return EINVAL;
     if (!b->calibration_present) return ENOENT;
     if (!X9_BT_CONNFEM_BYTES) return ENOENT;
     if (b->flow_control != 0 && b->flow_control != 0x40 && b->flow_control != 0x80) return EINVAL;
     int error = x9_bt_download_preflight_builtin();
+    if (error) return error;
+    error=controller_preflight();
     if (error) return error;
     void *ctx = o->io.context;
     bool hw_sleep = false, inband = false;
@@ -201,7 +249,7 @@ int x9_bt_session_run(const struct x9_bt_session_ops *o,
      * DVT builds. Never apply that DVT skip to this production session. */
     STEP(X9_BT_SESSION_FUNCTION, function_on(&o->io));
     r->function_powered = true;
-    STEP(X9_BT_SESSION_CONTROLLER_CONFIG, o->controller_config(ctx));
+    STEP(X9_BT_SESSION_CONTROLLER_CONFIG, controller_config(o,r));
     r->stage = X9_BT_SESSION_DONE;
 #undef STEP
     return 0;
