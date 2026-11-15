@@ -89,6 +89,7 @@ static const struct x9_camera_sensor sensors[] = {
 /* All cold/MM teardown paths consult the actual native controller's export
  * journal even when configure failed before core attempted capture(on). */
 static int cam_native_sensor_retirement_guard_locked(uint64_t epoch);
+static void cam_native_capture_stop_locked(uint64_t epoch);
 #include "x9_camera_pipeline.inc"
 #include "x9_camera_s1.inc"
 #include "x9_camera_smmu.inc"
@@ -146,6 +147,9 @@ static int stop(void)
     }
     session.stopping=true; /* before invalidating delivery, not a drained claim */
     st.generation++; st.flags&=~X9_CAMERA_STREAMING; frame_bytes=0; consumed=st.frames;
+    /* Close next-request admission even if the following source-off fails
+     * before core can invoke capture(off). This hook never claims drain. */
+    cam_native_capture_stop_locked(cam_sensor_live.epoch);
     thread_wakeup((event_t)&st.generation); /* queued first-frame IRQ worker */
     wakeup(&frame_bytes);
     if(session.power || session.capture || session.stream) {
