@@ -568,6 +568,78 @@ MediaSession→+280 interface→virtual+98非零，才发布真实UUID事件。�
 ACTIVE会绕过真实owner/media门，不是已实现通话。最早provider缺口仍是完整client/personality
 初始化及网络注册语义/lifecycle，随后才是UUID↔MD ID、状态/END和双向媒体。
 
+#### caller privacy 与 TLV104 策略来源（2026-11-16，原件静态）
+
+**两privacy byte已追到真实SIP消费者，但还不是生产dial profile准入。**
+`Call+9/+8→IMSCallOptions+28/+29`是`BambiCallOptions`子对象的`+0/+1`。
+`initializeNonEmergencyCall1b7b327ac..7b8`将options+28交给copy ctor
+`1b7b42aa4`，其`2ac4/2ac8`以u16保留两byte；
+`SipSession::initializeWithOptions1b7b90d24/28`再原值保存到Session+2a0/+2a1。
+以下偏移限定于这条owned **SipSession** 链，不把其它对象的同偏移RTT字段当privacy。
+
+`SipSession::fillCommonRequestHeaders1b7ba85a0`的决定门如下：
+
+| Call+9 / Call+8 | 原件实际效果 |
+| --- | --- |
+| 1 / 1 | Session+2a1真：Privacy header使用当前stack的owned配置string；空string回退`id`，并调用`SipUri::makeAnonymous1b7ba8758`设置anonymous From |
+| 1 / 0 | Session+2a1假、+2a0真：Privacy header明确设置`none`，不走上述anonymous分支 |
+| 0 / 0 | 不做per-call override；当前stack的AlwaysAddPrivacyHeader仍可独立要求`Privacy: none`，不能解释为显式允许显示号码 |
+
+`kPrivacyId1e26ef2d0`/`kPrivacyNone1e26ef2e8`由真实initializer
+`1b7d882a8..88308`从literal`1b7e589e2="id"`/`1b7e785d3="none"`构造；
+不能把磁盘上的零初始化C++ string误当运行时空值。stack owner也已闭合：
+Session+c8→SipDialog（`90e24`）、Dialog+a8→SipDialogManager（`d07f14`）、
+Manager+60→SipUserAgent（`b49968`）、Agent+8→SipStack（`b4f590`）。
+SipStack ctor`cff9ac/b4`把SipStackConfig建于+a0；initialize`d014e0/e8`
+真实copy入该配置，其首部是SipUserAgentConfig。后者assignment`ae6e9c..ebc`
+保留+248..273及owned+278 string。因此consumer的Stack+2fd/+318严格对应
+UAConfig+25d/+278；`initializeFromPrefs b4de70..dea4`写AlwaysAddPrivacyHeader，
+`b4e44c..e480`写PrivacyHeaderValue。**它们不是Android key124的已证替代来源。**
+
+真实上游`CallCommandDriver::computeClirValue_sync1f40dfba8..dfc9c`读取CallInfo+4c的
+CLIRRequestState：3直接返回CT值2；4查询driver+60的per-SIM `rest::ClirInfo` map，
+key来自CallInfo+d8，缺记录返回2；其它state仅2返回1，其余返回0。
+state4有记录时：record+4==3→2；record+0==3或+8==0→record+4；
++8==2→2；其余→record+0。真实字符串表确认这是**两套不同枚举**：
+CLIRRequestState的1/2/3/4为Suppression/Invocation/Default/Invalid；
+CTCallingLineIdRestrictionValue的0/1/2/3为Disabled/Enabled/NetworkControlled/Unknown。
+CommCenter`100dca8a4..940`将CT1→setter(1,1)、CT0→(1,0)、CT2/3→(0,0)，
+与上表SIP效果一致；不能把Default3直接当Android raw CLIR0或2。
+
+Android已证的可用窄子集是：**non-ECC、普通十进制号码、原owned CLIR明确为1或2**，
+Rtm`265500`不会读取key124来改写它；Rmm`387fb0`虽读取key125并精确比较`"true"`，
+但只有CLIR1且号码以`*82`开头，或ECC且key171为`"1"`才改写0，所以该子集1/2均原值下送108。
+`getClirPrefix387450`的实际literal为1→`#31#`、2→`*31#`、其它→空string。
+本小节不以常识替代尚未闭合的Android输入意图producer；记录这两个原值的策略稳定性及
+Apple已证显式blocking/non-blocking效果，**不据此开放默认profile或增补生产白名单**。
+
+104不是“当前NAS/IMSA显示有网”的派生默认值。`getEccPreferredDomain387a30`先读MCL72，
+再两次独立读`isVoiceGsmRat`：首次真且pref==3→1；否则第二次真→0；否则再读owned MCL31
+的voiceRadioTech，以`C={4,5,6,7,8,12,13}`分类，pref==3→!C，C真→0，其余pref==4→2、否则0。
+不把多次status读取冒作一个原子snapshot。**pref72确为0时，所有分支均返回104=0**，
+但仅凭本地空vector、普通拨号或10086实包不能授予真实pref72来源：
+`setEccPreferredRat2794c0`写AP key72，经StatusManager同步到MCL；普通cf33不走pre-local-ECC。
+`handleGetCurrentCallsResponse26c1d8..c218`确在原owned response data.size unsigned<=7时
+reset AP72=0；需保留这条真实response/同步生命周期，不能用零初始化对象模拟reset。
+
+`isVoiceGsmRat387810`还读取MCL1：`(key1&0xc)!=0 && voiceRegState!=5 && voiceRadioTech==20`
+时强制false，否则调用`isGsmRat387c50`；后者`387cf0..d10`的CCMP决定实际bool，接受
+RIL RAT集合`{1,2,3,9,10,11,14,15,16,17,19,20}`，前段mask只选择日志路径。
+key31不是任意radio整数：`requestVoiceRegistrationState30f8f0`的042f response
+要求8100/10B，value+1/u16LE进入slot CS cache+10；`updateServiceStateValue30e370`
+经`convertCSNetworkType2fd710`构造RfxNwServiceState的voice RAT并set MCL31。
+其中0x8000→RIL20；CS不in-service且isAlwaysReportRatAndCellIdentityInfo假时voice RAT为0。
+当前kernel `X9QMIAT.inc`的CREG/CEREG/C5GREG及COPS AcT生成serving/data NAS快照；
+`X9Messages.inc`的0a05/100(type)/101(state)只生成IMS-registration快照。
+**NAS radio12、COPS AcT11、IMSA registered均不是上述owned MCL31.voiceRadioTech20，
+也不提供MCL1/MCL72生命周期。** 本轮不新增query、探针、provider假ready或encoder字段。
+
+私有证据为`x9/out/call-privacy-policy/`的`privacy-policy-original-proof.json`、
+`read-original-privacy-policy.py`、`privacy-*.numbered.asm`及`ril-voice-gsm-rat.asm`/
+`ril-is-gsm-rat.asm`；30个固定code切片直接读取当前root原cache、root CommCenter及匹配RIL，
+cache text与提取镜像对应切片全部一致。只是原件静态qualification；未运行设备、测试或编译，
+未改生产准入；完整caller-default/runtime profile仍未闭合。
+
 #### typed事件 → FSM → 权威CallState（静态闭合，未hook）
 
 三层model command wrapper真实地址点为 `101532fc0→1015fb090→101532ab0`，
