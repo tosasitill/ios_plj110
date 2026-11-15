@@ -14,6 +14,11 @@
 #define X9_HEVC_PROFILE_MAIN 1u
 #define X9_HEVC_PROFILE_MAIN10 2u
 #define X9_HEVC_PROFILE_MAIN_STILL 3u
+#define X9_HEVC_MAX_PARAMETER_SETS (16u + 16u + 64u)
+struct x9_hevc_parameter_set {
+    uint32_t offset, bytes;
+    uint8_t type, id, reference_id, reserved;
+};
 struct x9_hevc_config {
     uint32_t coded_width, coded_height, width, height, crop_x, crop_y;
     uint32_t profile, bit_depth, level, length_size, vps_id, sps_id, pps_id;
@@ -24,6 +29,15 @@ struct x9_hevc_config {
     uint32_t decoder_profile, profile_compatibility;
     uint32_t ps_offset[3], ps_bytes[3], annexb_bytes;
     uint32_t max_sub_layers, max_dpb, max_reorder;
+    /* All distinct VPS/SPS/PPS from the immutable hvcC, grouped in decoder
+     * dependency order. IDs, not array order, establish PPS->SPS->VPS links.
+     * ps_offset/ps_bytes and *_id above retain ONE representative linked
+     * chain for legacy callers, not a claim that the catalog has one set.
+     * All SPS must currently share output geometry/depth/profile/layer count;
+     * dimension-changing parameter sets need the native format-change path.
+     * DPB/reorder above are maxima across every retained SPS. */
+    uint32_t config_bytes, parameter_set_count;
+    struct x9_hevc_parameter_set parameter_sets[X9_HEVC_MAX_PARAMETER_SETS];
 };
 /* Returns 0 or a BSD errno. Rejects unsupported formats rather than inventing
  * capabilities. The VPS/SPS/PPS spans refer to the unchanged hvcC snapshot. */
@@ -35,8 +49,9 @@ int x9_hevc_idr_annexb(const struct x9_hevc_config *, const uint8_t *hvcc,
 /* Stateful video AU gate. Firmware owns reference picture sets and POC/DPB,
  * not this parser. Allows base-layer TRAIL/TSA/STSA/RADL/RASL/BLA/IDR/CRA;
  * excludes reserved types and multilayer profiles. One complete picture per
- * sample, one configured PPS, in-band parameter sets must match unchanged
- * hvcC bytes. New parameter sets require a format-description/session change.
+ * sample, any retained PPS, all slices in one picture use the SAME PPS;
+ * in-band parameter sets must match one unchanged retained hvcC set.
+ * New parameter sets require a format-description/session change.
  * config Annex B is supplied once to session create, not before every frame. */
 int x9_hevc_au_annexb(const struct x9_hevc_config *, const uint8_t *hvcc,
     const uint8_t *sample, size_t sample_bytes, uint8_t *dst, size_t capacity,

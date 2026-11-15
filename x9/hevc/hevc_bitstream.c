@@ -53,7 +53,15 @@ static int nal(const uint8_t *p, size_t n, unsigned type)
         (p[0] & 1) || (p[1] >> 3) || !(p[1] & 7)) return EINVAL;
     return 0;
 }
-static int sps(const uint8_t *p, size_t n, struct x9_hevc_config *c)
+/* Keep temporary SPS syntax separate from the full catalog. A per-SPS
+ * x9_hevc_config would needlessly grow the shared parser's kernel stack. */
+struct sps_info {
+    uint32_t coded_width, coded_height, width, height, crop_x, crop_y;
+    uint32_t profile, bit_depth, level, vps_id, sps_id;
+    uint32_t decoder_profile, profile_compatibility;
+    uint32_t max_sub_layers, max_dpb, max_reorder;
+};
+static int sps(const uint8_t *p, size_t n, struct sps_info *c)
 {
     struct bits b = { .p = p + 2, .n = n - 2 };
     c->vps_id = get(&b, 4);
@@ -112,6 +120,26 @@ static int sps(const uint8_t *p, size_t n, struct x9_hevc_config *c)
     }
     return 0;
 }
+static void apply_sps(struct x9_hevc_config *c, const struct sps_info *s)
+{
+    c->coded_width = s->coded_width; c->coded_height = s->coded_height;
+    c->width = s->width; c->height = s->height;
+    c->crop_x = s->crop_x; c->crop_y = s->crop_y;
+    c->profile = s->profile; c->bit_depth = s->bit_depth; c->level = s->level;
+    c->vps_id = s->vps_id; c->sps_id = s->sps_id;
+    c->decoder_profile = s->decoder_profile;
+    c->profile_compatibility = s->profile_compatibility;
+    c->max_sub_layers = s->max_sub_layers;
+    c->max_dpb = s->max_dpb; c->max_reorder = s->max_reorder;
+}
+static const struct x9_hevc_parameter_set *find_set(const struct x9_hevc_config *c,
+                                                   unsigned type, unsigned id)
+{
+    for (unsigned i = 0; i < c->parameter_set_count; i++)
+        if (c->parameter_sets[i].type == type && c->parameter_sets[i].id == id)
+            return &c->parameter_sets[i];
+    return NULL;
+}
 int x9_hevc_config_parse(const uint8_t *p, size_t n, struct x9_hevc_config *c)
 {
     if (!p || !c || n < 23 || n > X9_HEVC_MAX_CONFIG || p[0] != 1) return EINVAL;
@@ -121,37 +149,103 @@ int x9_hevc_config_parse(const uint8_t *p, size_t n, struct x9_hevc_config *c)
         (p[18] & 0xf8) != 0xf8) return EINVAL;
     c->length_size = (p[21] & 3) + 1;
     if (c->length_size == 3) return ENOTSUP;
+    c->config_bytes = (uint32_t)n;
     unsigned seen = 0;
     size_t at = 23;
     for (unsigned i = 0; i < p[22]; i++) {
         if (n - at < 3 || (p[at] & 0x40)) return EINVAL;
         unsigned type = p[at++] & 63, count = be16(p + at); at += 2;
         if (type != 32 && type != 33 && type != 34) return ENOTSUP;
-        unsigned k = type - 32;
-        if (count != 1 || (seen & (1u << k))) return ENOTSUP;
-        seen |= 1u << k;
-        if (n - at < 2) return EINVAL;
-        unsigned bytes = be16(p + at); at += 2;
-        if (bytes > n - at || nal(p + at, bytes, type)) return EINVAL;
-        c->ps_offset[k] = (uint32_t)at; c->ps_bytes[k] = bytes;
-        c->annexb_bytes += bytes + 4;
-        at += bytes;
+        if (!count) return EINVAL;
+        for (unsigned j = 0; j < count; j++) {
+            if (n - at < 2) return EINVAL;
+            unsigned bytes = be16(p + at); at += 2;
+            if (bytes > n - at || nal(p + at, bytes, type)) return EINVAL;
+            struct bits b = { .p = p + at + 2, .n = bytes - 2 };
+            unsigned id, reference = 0;
+            if (type == 32) id = get(&b, 4);
+            else if (type == 33) {
+                struct sps_info one = {0};
+                int e = sps(p + at, bytes, &one);
+                if (e) return e;
+                id = one.sps_id; reference = one.vps_id;
+            } else {
+                id = ue(&b); reference = ue(&b);
+            }
+            if (b.error || id > (type == 34 ? 63u : 15u) || reference > 15) return EINVAL;
+            unsigned k = 0;
+            while (k < c->parameter_set_count &&
+                (c->parameter_sets[k].type != type || c->parameter_sets[k].id != id)) k++;
+            if (k < c->parameter_set_count) {
+                /* Exact repeats are harmless. Conflicting definitions of one
+                 * ID in the same immutable description are NOT silently
+                 * selected by an arbitrary array/last-seen ordering. */
+                const struct x9_hevc_parameter_set *old = &c->parameter_sets[k];
+                if (old->bytes != bytes || memcmp(p + old->offset, p + at, bytes)) return EINVAL;
+            } else {
+                if (c->parameter_set_count == X9_HEVC_MAX_PARAMETER_SETS) return E2BIG;
+                c->parameter_sets[c->parameter_set_count++] = (struct x9_hevc_parameter_set){
+                    .offset = (uint32_t)at, .bytes = bytes, .type = (uint8_t)type,
+                    .id = (uint8_t)id, .reference_id = (uint8_t)reference };
+                c->annexb_bytes += bytes + 4;
+            }
+            seen |= 1u << (type - 32); at += bytes;
+        }
     }
     if (at != n || seen != 7) return EINVAL;
-    int e = sps(p + c->ps_offset[1], c->ps_bytes[1], c);
+    /* Stable dependency-order catalog; preserve bytes and order within each
+     * NAL type, even if the source hvcC arrays put PPS before SPS/VPS. */
+    for (unsigned i = 1; i < c->parameter_set_count; i++) {
+        struct x9_hevc_parameter_set set = c->parameter_sets[i];
+        unsigned j = i;
+        while (j && c->parameter_sets[j - 1].type > set.type) {
+            c->parameter_sets[j] = c->parameter_sets[j - 1]; j--;
+        }
+        c->parameter_sets[j] = set;
+    }
+    const struct x9_hevc_parameter_set *selected_pps = NULL;
+    for (unsigned i = 0; i < c->parameter_set_count; i++) {
+        const struct x9_hevc_parameter_set *set = &c->parameter_sets[i];
+        if (set->type != 32 && !find_set(c, set->type - 1, set->reference_id)) return EINVAL;
+        if (set->type == 34 && !selected_pps) selected_pps = set;
+    }
+    /* Select the representative SPS from the representative PPS's actual
+     * reference, never from which array happens to be first in the hvcC. */
+    if (!selected_pps) return EINVAL;
+    const struct x9_hevc_parameter_set *selected_sps = find_set(c, 33, selected_pps->reference_id);
+    if (!selected_sps) return EINVAL;
+    const struct x9_hevc_parameter_set *selected_vps = find_set(c, 32, selected_sps->reference_id);
+    if (!selected_vps) return EINVAL;
+    struct sps_info representative = {0};
+    int e = sps(p + selected_sps->offset, selected_sps->bytes, &representative);
     if (e) return e;
+    apply_sps(c, &representative);
     if ((p[1] >> 6) || (p[1] & 31) != c->profile || p[12] != c->level ||
         (p[16] & 3) != 1 || (p[17] & 7) + 8 != c->bit_depth ||
         (p[18] & 7) + 8 != c->bit_depth) return EINVAL;
-    const uint8_t *vp = p + c->ps_offset[0];
-    if ((vp[2] >> 4) != c->vps_id) return EINVAL;
-    if (c->profile == X9_HEVC_PROFILE_MAIN_STILL) {
+    for (unsigned i = 0; i < c->parameter_set_count; i++) {
+        const struct x9_hevc_parameter_set *set = &c->parameter_sets[i];
+        if (set->type == 33) {
+            struct sps_info one = {0};
+            e = sps(p + set->offset, set->bytes, &one);
+            if (e) return e;
+            if (one.coded_width != c->coded_width || one.coded_height != c->coded_height ||
+                one.width != c->width || one.height != c->height ||
+                one.crop_x != c->crop_x || one.crop_y != c->crop_y ||
+                one.profile != c->profile || one.bit_depth != c->bit_depth ||
+                one.level != c->level || one.max_sub_layers != c->max_sub_layers ||
+                one.decoder_profile != c->decoder_profile) return ENOTSUP;
+            if (one.max_dpb > c->max_dpb) c->max_dpb = one.max_dpb;
+            if (one.max_reorder > c->max_reorder) c->max_reorder = one.max_reorder;
+        }
+        if (set->type != 32) continue;
+        if (c->profile != X9_HEVC_PROFILE_MAIN_STILL) continue;
         /* Do not infer Main support from profile_idc alone, or from an hvcC
          * label that disagrees with the actual parameter sets. VPS PTL starts
          * after its 32-bit RBSP prefix; read through the emulation-prevention
          * reader rather than indexing escaped bytes. This is still a syntax
          * gate, not validation of the entire VPS or proof of HW support. */
-        struct bits v = { .p = vp + 2, .n = c->ps_bytes[0] - 2 };
+        struct bits v = { .p = p + set->offset + 2, .n = set->bytes - 2 };
         unsigned space, profile, level;
         uint32_t compatibility;
         skip(&v, 32);
@@ -163,19 +257,42 @@ int x9_hevc_config_parse(const uint8_t *p, size_t n, struct x9_hevc_config *c)
         if (!(compatibility & MAIN_COMPATIBILITY) ||
             !(be32(p + 2) & MAIN_COMPATIBILITY)) return ENOTSUP;
     }
-    struct bits b = { .p = p + c->ps_offset[2] + 2, .n = c->ps_bytes[2] - 2 };
-    c->pps_id = ue(&b); unsigned sid = ue(&b);
-    if (b.error || c->pps_id > 63 || sid != c->sps_id) return EINVAL;
+    c->pps_id = selected_pps->id;
+    const struct x9_hevc_parameter_set *selected[3] = {selected_vps, selected_sps, selected_pps};
+    for (unsigned i = 0; i < 3; i++) {
+        c->ps_offset[i] = selected[i]->offset;
+        c->ps_bytes[i] = selected[i]->bytes;
+    }
     return 0;
+}
+static int catalog_valid(const struct x9_hevc_config *c)
+{
+    if (!c || c->config_bytes < 23 || c->config_bytes > X9_HEVC_MAX_CONFIG ||
+        !c->parameter_set_count || c->parameter_set_count > X9_HEVC_MAX_PARAMETER_SETS) return EINVAL;
+    uint32_t bytes = 0;
+    unsigned seen = 0;
+    for (unsigned i = 0; i < c->parameter_set_count; i++) {
+        const struct x9_hevc_parameter_set *set = &c->parameter_sets[i];
+        if (set->type < 32 || set->type > 34 || set->id > (set->type == 34 ? 63u : 15u) ||
+            set->reserved || set->reference_id > 15 || (set->type == 32 && set->reference_id) ||
+            set->offset < 23 || set->bytes < 3 || set->bytes > UINT16_MAX ||
+            set->offset > c->config_bytes || set->bytes > c->config_bytes - set->offset ||
+            (i && c->parameter_sets[i - 1].type > set->type)) return EINVAL;
+        if (set->type != 32 && !find_set(c, set->type - 1, set->reference_id)) return EINVAL;
+        for (unsigned j = 0; j < i; j++)
+            if (c->parameter_sets[j].type == set->type && c->parameter_sets[j].id == set->id) return EINVAL;
+        bytes += set->bytes + 4; seen |= 1u << (set->type - 32);
+    }
+    return seen == 7 && bytes == c->annexb_bytes ? 0 : EINVAL;
 }
 int x9_hevc_idr_annexb(const struct x9_hevc_config *c, const uint8_t *hvcc,
     const uint8_t *p, size_t n, uint8_t *dst, size_t cap, size_t *written)
 {
-    if (!c || !hvcc || !p || !written || !n || n > X9_HEVC_MAX_INPUT ||
+    if (!c || !hvcc || !p || !written || !n || n > X9_HEVC_MAX_INPUT || catalog_valid(c) ||
         (c->length_size != 1 && c->length_size != 2 && c->length_size != 4)) return EINVAL;
     *written = 0;
     size_t at = 0, size = c->annexb_bytes;
-    unsigned pictures = 0, vcl = 0, slices = 0, nals = 0;
+    unsigned pictures = 0, vcl = 0, slices = 0, nals = 0, picture_pps = 0;
     /* Validation pass before writing anything, including length overflow. */
     while (at < n) {
         if (++nals > 1024 || n - at < c->length_size) return EINVAL;
@@ -192,8 +309,9 @@ int x9_hevc_idr_annexb(const struct x9_hevc_config *c, const uint8_t *hvcc,
             struct bits b = { .p = p + at + 2, .n = bytes - 2 };
             unsigned first = bit(&b); (void)bit(&b);
             unsigned pid = ue(&b);
-            if (b.error || pid != c->pps_id || (!slices && !first) ||
-                (slices && type != vcl)) return EINVAL;
+            if (b.error || !find_set(c, 34, pid) || (!slices && !first) ||
+                (slices && (type != vcl || pid != picture_pps))) return EINVAL;
+            picture_pps = pid;
             pictures += first; slices++; vcl = type;
         } else if (type != 35 && type != 39 && type != 40) return ENOTSUP;
         if (size > X9_HEVC_MAX_INPUT - 4 || bytes > X9_HEVC_MAX_INPUT - size - 4) return E2BIG;
@@ -204,9 +322,10 @@ int x9_hevc_idr_annexb(const struct x9_hevc_config *c, const uint8_t *hvcc,
     if (!dst) return 0;
     if (cap < size) return EMSGSIZE;
     size = 0;
-    for (unsigned i = 0; i < 3; i++) {
+    for (unsigned i = 0; i < c->parameter_set_count; i++) {
+        const struct x9_hevc_parameter_set *set = &c->parameter_sets[i];
         memcpy(dst + size, "\0\0\0\1", 4); size += 4;
-        memcpy(dst + size, hvcc + c->ps_offset[i], c->ps_bytes[i]); size += c->ps_bytes[i];
+        memcpy(dst + size, hvcc + set->offset, set->bytes); size += set->bytes;
     }
     at = 0;
     while (at < n) {
@@ -220,25 +339,26 @@ int x9_hevc_idr_annexb(const struct x9_hevc_config *c, const uint8_t *hvcc,
 int x9_hevc_parameter_sets_annexb(const struct x9_hevc_config *c, const uint8_t *hvcc,
     uint8_t *dst, size_t cap, size_t *written)
 {
-    if (!c || !hvcc || !written || !c->annexb_bytes) return EINVAL;
+    if (!c || !hvcc || !written || catalog_valid(c)) return EINVAL;
     *written = c->annexb_bytes;
     if (!dst) return 0;
     if (cap < c->annexb_bytes) return EMSGSIZE;
     size_t at = 0;
-    for (unsigned i = 0; i < 3; i++) {
+    for (unsigned i = 0; i < c->parameter_set_count; i++) {
+        const struct x9_hevc_parameter_set *set = &c->parameter_sets[i];
         memcpy(dst + at, "\0\0\0\1", 4); at += 4;
-        memcpy(dst + at, hvcc + c->ps_offset[i], c->ps_bytes[i]); at += c->ps_bytes[i];
+        memcpy(dst + at, hvcc + set->offset, set->bytes); at += set->bytes;
     }
     return 0;
 }
 int x9_hevc_au_annexb(const struct x9_hevc_config *c, const uint8_t *hvcc,
     const uint8_t *p, size_t n, uint8_t *dst, size_t cap, size_t *written)
 {
-    if (!c || !hvcc || !p || !written || !n || n > X9_HEVC_MAX_INPUT ||
+    if (!c || !hvcc || !p || !written || !n || n > X9_HEVC_MAX_INPUT || catalog_valid(c) ||
         (c->length_size != 1 && c->length_size != 2 && c->length_size != 4)) return EINVAL;
     *written = 0;
     size_t at = 0, size = 0;
-    unsigned pictures = 0, slices = 0, vcl = 0, temporal = 0, nals = 0;
+    unsigned pictures = 0, slices = 0, vcl = 0, temporal = 0, nals = 0, picture_pps = 0;
     while (at < n) {
         if (++nals > 1024 || n - at < c->length_size) return EINVAL;
         uint32_t bytes = 0;
@@ -254,12 +374,16 @@ int x9_hevc_au_annexb(const struct x9_hevc_config *c, const uint8_t *hvcc,
             unsigned first = bit(&b);
             if (type >= 16) (void)bit(&b);
             unsigned pid = ue(&b);
-            if (b.error || pid != c->pps_id || (!slices && !first) ||
-                (slices && (type != vcl || tid != temporal))) return EINVAL;
+            if (b.error || !find_set(c, 34, pid) || (!slices && !first) ||
+                (slices && (type != vcl || tid != temporal || pid != picture_pps))) return EINVAL;
+            picture_pps = pid;
             pictures += first; slices++; vcl = type; temporal = tid;
         } else if (type >= 32 && type <= 34) {
-            unsigned k = type - 32;
-            if (bytes != c->ps_bytes[k] || memcmp(p + at, hvcc + c->ps_offset[k], bytes)) return ENOTSUP;
+            unsigned i = 0;
+            while (i < c->parameter_set_count && (c->parameter_sets[i].type != type ||
+                c->parameter_sets[i].bytes != bytes ||
+                memcmp(p + at, hvcc + c->parameter_sets[i].offset, bytes))) i++;
+            if (i == c->parameter_set_count) return ENOTSUP;
             if (slices) return EINVAL; /* next-picture sets cannot follow VCL */
         } else if (type == 35) {
             if (slices) return EINVAL;

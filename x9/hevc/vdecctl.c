@@ -71,9 +71,13 @@ static int decode_vt(const char *config_path, const char *sample_path, const cha
     }
     e = X9HEVCRegisterDecoder();
     if (e) { fprintf(stderr, "real hardware decoder unavailable: OSStatus=%d\n", (int)e); goto done; }
-    const uint8_t *ps[3]; size_t sizes[3];
-    for (unsigned i = 0; i < 3; i++) { ps[i] = cfg + c.ps_offset[i]; sizes[i] = c.ps_bytes[i]; }
-    e = CMVideoFormatDescriptionCreateFromHEVCParameterSets(NULL, 3, ps, sizes,
+    const uint8_t *ps[X9_HEVC_MAX_PARAMETER_SETS];
+    size_t sizes[X9_HEVC_MAX_PARAMETER_SETS];
+    for (unsigned i = 0; i < c.parameter_set_count; i++) {
+        ps[i] = cfg + c.parameter_sets[i].offset;
+        sizes[i] = c.parameter_sets[i].bytes;
+    }
+    e = CMVideoFormatDescriptionCreateFromHEVCParameterSets(NULL, c.parameter_set_count, ps, sizes,
                                                            (int)c.length_size, NULL, &format);
     if (e) goto done;
     CFStringRef *enable_key = dlsym(RTLD_DEFAULT,
